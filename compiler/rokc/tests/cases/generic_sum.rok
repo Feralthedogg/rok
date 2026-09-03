@@ -1,0 +1,21 @@
+// expect-exit: 19
+
+fn or_default<T>(x: T | none, def: T) -> T {
+    return match x {
+        v: T => v,
+        none => def,
+    };
+}
+
+fn pick(b: bool) -> i32 | none {
+    if b {
+        return 7;
+    }
+    return none;
+}
+
+fn main() -> i32 {
+    let a = or_default(pick(true), 100);
+    let b = or_default(pick(false), 12);
+    return a + b;
+}

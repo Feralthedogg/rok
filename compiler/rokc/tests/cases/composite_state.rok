@@ -1,0 +1,30 @@
+// expect-exit: 16
+
+enum State {
+    Init,
+    Running(i32),
+    Done,
+}
+
+struct Machine {
+    state: i32;
+    counter: i32;
+}
+
+impl Machine {
+    fn step(self, s: State) -> Machine {
+        return match s {
+            State::Init => Machine { state: 0, counter: self.counter },
+            State::Running(n) => Machine { state: 1, counter: self.counter + n },
+            State::Done => Machine { state: 2, counter: self.counter },
+        };
+    }
+}
+
+fn main() -> i32 {
+    let m = Machine { state: 0, counter: 1 };
+    let m2 = m.step(State::Running(3));
+    let m3 = m2.step(State::Running(5));
+    let m4 = m3.step(State::Done);
+    return m4.counter + m4.state + 5;
+}

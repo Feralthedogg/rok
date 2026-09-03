@@ -1,0 +1,22 @@
+// Marker traits used by #[derive(...)] (spec 6.2/6.4) and other
+// compiler-driven semantics.
+
+#[lang("clone_trait")]
+trait Clone {
+    fn clone(self) -> Self;
+}
+
+#[lang("eq_trait")]
+trait Eq {
+    fn eq(self, other: Self) -> bool;
+}
+
+#[lang("ord_trait")]
+trait Ord {
+    fn cmp(self, other: Self) -> i32;
+}
+
+#[lang("hash_trait")]
+trait Hash {
+    fn hash(self) -> u64;
+}

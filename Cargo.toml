@@ -1,0 +1,99 @@
+[workspace]
+resolver = "3"
+members = [
+    "compiler/rokc",
+    "compiler/rokc_ast",
+    "compiler/rokc_check",
+    "compiler/rokc_codegen_mlir",
+    "compiler/rokc_core",
+    "compiler/rokc_diagnostic",
+    "compiler/rokc_driver",
+    "compiler/rokc_hir",
+    "compiler/rokc_interface",
+    "compiler/rokc_ir_common",
+    "compiler/rokc_lexer",
+    "compiler/rokc_mir",
+    "compiler/rokc_parser",
+    "compiler/rokc_resolve",
+    "compiler/rokc_scanner",
+    "runtime/rokr",
+    "runtime/rokr_common",
+    "runtime/rokr_coroutine",
+    "runtime/rokr_gc",
+    "runtime/rokr_scheduler",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "CC-BY-4.0"
+authors = ["Han Damin <miniex@daminstudio.net>"]
+
+[workspace.dependencies]
+rokc_ast = { path = "compiler/rokc_ast" }
+rokc_check = { path = "compiler/rokc_check" }
+rokc_codegen_mlir = { path = "compiler/rokc_codegen_mlir" }
+rokc_core = { path = "compiler/rokc_core" }
+rokc_diagnostic = { path = "compiler/rokc_diagnostic" }
+rokc_driver = { path = "compiler/rokc_driver" }
+rokc_hir = { path = "compiler/rokc_hir" }
+rokc_interface = { path = "compiler/rokc_interface" }
+rokc_ir_common = { path = "compiler/rokc_ir_common" }
+rokc_lexer = { path = "compiler/rokc_lexer" }
+rokc_mir = { path = "compiler/rokc_mir" }
+rokc_parser = { path = "compiler/rokc_parser" }
+rokc_resolve = { path = "compiler/rokc_resolve" }
+rokc_scanner = { path = "compiler/rokc_scanner" }
+
+rokr_common = { path = "runtime/rokr_common" }
+rokr_coroutine = { path = "runtime/rokr_coroutine" }
+rokr_gc = { path = "runtime/rokr_gc" }
+rokr_scheduler = { path = "runtime/rokr_scheduler" }
+
+# Platform sys crates and the CLI parser only.
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+rust_2024_compatibility = { level = "warn", priority = -1 }
+unused_must_use = "warn"
+elided_lifetimes_in_paths = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+needless_pass_by_value = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+unreadable_literal = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_lossless = "allow"
+cast_possible_wrap = "allow"
+struct_field_names = "allow"
+multiple_crate_versions = "allow"
+option_if_let_else = "allow"
+uninlined_format_args = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+debug = false
+strip = "debuginfo"
+# rokr is no_std + staticlib; abort panics avoid eh_personality.
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = true
+panic = "abort"

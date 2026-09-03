@@ -1,0 +1,15 @@
+// spec: 004.12-async-basic
+// probe: positive
+// expect-exit: 7
+// expect-stdout:
+
+// spec 4.12: async fn + await.
+// 실측 의도: 파서/runtime 어디까지 도달하는지.
+async fn produce() -> i32 {
+    return 7;
+}
+
+fn main() -> i32 {
+    let v = await produce();
+    return v;
+}

@@ -1,0 +1,9 @@
+// spec: 003.15.2-tuple-length-mismatch
+// probe: negative-must-fail
+// expect-exit: 0  (build must fail)
+
+// spec 3.15.2: 튜플 분해 시 길이가 맞지 않으면 컴파일 에러.
+fn main() -> i32 {
+    let (a, b) = (1, 2, 3);
+    return a + b;
+}

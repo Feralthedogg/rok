@@ -1,0 +1,10 @@
+// expect-exit: 0
+
+// `rok_assert` is auto-injected. Passes through silently when the
+// condition holds; aborts with exit 101 on failure (covered separately
+// because the integration runner only validates passing programs).
+fn main() -> i32 {
+    rok_assert((2 + 2 == 4) as i32);
+    rok_assert((1 < 2) as i32);
+    return 0;
+}

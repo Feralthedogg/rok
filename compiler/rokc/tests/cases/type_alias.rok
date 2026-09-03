@@ -1,0 +1,18 @@
+// expect-exit: 9
+
+type Maybe = i32 | none;
+
+fn pick(b: bool) -> Maybe {
+    if b {
+        return 5;
+    }
+    return none;
+}
+
+fn main() -> i32 {
+    let a: Maybe = pick(true);
+    let b: Maybe = pick(false);
+    let x = a ?? -1;
+    let y = b ?? 4;
+    return x + y;
+}

@@ -1,0 +1,19 @@
+// expect-exit: 17
+
+enum Box<T> {
+    Some(T),
+    Nothing,
+}
+
+fn unbox(b: Box<i32>, def: i32) -> i32 {
+    return match b {
+        Box::Some(v) => v,
+        Box::Nothing => def,
+    };
+}
+
+fn main() -> i32 {
+    let a: Box<i32> = Box::Some(7);
+    let b: Box<i32> = Box::Nothing;
+    return unbox(a, 0) + unbox(b, 10);
+}

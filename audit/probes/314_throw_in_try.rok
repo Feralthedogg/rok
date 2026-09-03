@@ -1,0 +1,18 @@
+// spec: 003.14.1-throw-divergent
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// after
+
+// spec 3.14.1: `throw` 는 divergent. else 분기에서 throw 해도 if 의 then 식
+// 자리 type 이 else 의 영향을 안 받음.
+fn pick(b: i32) -> i32 {
+    let v = if b == 1 { 7 } else { throw 99; };
+    return v;
+}
+
+fn main() -> i32 {
+    let v = pick(1);
+    if v == 7 { rok_print_str("after"); }
+    return 0;
+}

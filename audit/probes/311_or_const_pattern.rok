@@ -1,0 +1,22 @@
+// spec: 003.11-or-pattern-multi-const
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// digit
+// punct
+
+// spec 311.4: or-pattern 으로 여러 상수 묶기 (no binding — 이미 작동).
+fn classify(n: i32) -> i32 {
+    let r = match n {
+        48 | 49 | 50 | 51 | 52 => 1,    // '0'..='4'
+        33 | 64 | 35 => 2,              // '!', '@', '#'
+        _ => 3,
+    };
+    return r;
+}
+
+fn main() -> i32 {
+    if classify(50) == 1 { rok_print_str("digit"); }
+    if classify(33) == 2 { rok_print_str("punct"); }
+    return 0;
+}

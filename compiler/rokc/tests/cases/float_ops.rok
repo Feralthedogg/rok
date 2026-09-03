@@ -1,0 +1,20 @@
+// expect-exit: 0
+// expect-stdout:
+// 1
+// 0.5
+// less
+// equal
+// greater
+
+// Float modulo (`arith.remf`) and ordered comparisons (`arith.cmpf`).
+fn main() -> i32 {
+    rok_print_f64(7.0f64 % 3.0f64);    // 1
+    rok_print_f64(5.5f64 % 2.5f64);    // 0.5
+
+    let a = 1.0f64;
+    let b = 2.0f64;
+    if a < b      { rok_print_str("less"); }
+    if a == 1.0f64 { rok_print_str("equal"); }
+    if b > a      { rok_print_str("greater"); }
+    return 0;
+}

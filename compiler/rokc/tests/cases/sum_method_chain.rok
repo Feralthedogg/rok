@@ -1,0 +1,27 @@
+// expect-exit: 38
+
+struct Vec2 {
+    x: i32;
+    y: i32;
+}
+
+impl Vec2 {
+    fn sum(self) -> i32 {
+        self.x + self.y
+    }
+}
+
+fn maybe_vec(b: bool) -> Vec2 | none {
+    if b {
+        return Vec2 { x: 8, y: 15 };
+    }
+    return none;
+}
+
+fn main() -> i32 {
+    let r1 = maybe_vec(true)?.sum();
+    let r2 = maybe_vec(false)?.sum();
+    let v1 = r1 ?? 0;
+    let v2 = r2 ?? 15;
+    return v1 + v2;
+}

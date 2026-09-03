@@ -1,0 +1,17 @@
+// spec: 003.15-struct-destructure
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 5
+// 7
+
+// spec 3.15: struct 분해 `let Point { x, y } = origin;`.
+struct Pt { x: i32; y: i32; }
+
+fn main() -> i32 {
+    let p = Pt { x: 5, y: 7 };
+    let Pt { x, y } = p;
+    rok_print_i32(x);
+    rok_print_i32(y);
+    return 0;
+}

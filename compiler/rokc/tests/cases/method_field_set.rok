@@ -1,0 +1,23 @@
+// expect-exit: 12
+
+struct Counter {
+    n: i32;
+}
+
+impl Counter {
+    fn inc(self) -> Counter {
+        Counter { n: self.n + 1 }
+    }
+
+    fn double(self) -> Counter {
+        let copy = self;
+        copy.n = copy.n * 2;
+        copy
+    }
+}
+
+fn main() -> i32 {
+    let c = Counter { n: 1 };
+    let c2 = c.inc().inc().double().inc();
+    return c2.n + 5;
+}

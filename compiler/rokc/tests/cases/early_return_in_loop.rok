@@ -1,0 +1,16 @@
+// expect-exit: 21
+
+fn search_first(xs: [i32; 5], threshold: i32) -> i32 {
+    for v in xs {
+        if v > threshold {
+            return v;
+        }
+    }
+    return -1;
+}
+
+fn main() -> i32 {
+    let xs: [i32; 5] = [3, 7, 12, 15, 20];
+    let r = search_first(xs, 10);
+    return r + 9;
+}

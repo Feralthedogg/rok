@@ -1,0 +1,14 @@
+// expect-exit: 7
+
+fn main() -> i32 {
+    let total = 0;
+    let arr_check = false || (5 > 3);
+    if arr_check {
+        total += 4;
+    }
+    let combo = (3 > 5) && false;
+    if !combo {
+        total += 3;
+    }
+    return total;
+}

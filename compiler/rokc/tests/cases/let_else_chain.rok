@@ -1,0 +1,30 @@
+// expect-exit: 36
+
+fn pick(present: bool, val: i32) -> i32 | none {
+    if present {
+        return val;
+    }
+    return none;
+}
+
+fn sum_three(a: bool, b: bool, c: bool) -> i32 {
+    let x: i32 = pick(a, 5) else {
+        return -1;
+    };
+    let y: i32 = pick(b, 12) else {
+        return -1;
+    };
+    let z: i32 = pick(c, 19) else {
+        return -1;
+    };
+    return x + y + z;
+}
+
+fn main() -> i32 {
+    let total = 0;
+    total += sum_three(true, true, true);   // 36
+    total += sum_three(true, false, true);  // -1
+    total += sum_three(false, true, true);  // -1
+    total += sum_three(true, true, false);  // -1
+    return total + 3;  // 36 + (-3) + 3 = 36
+}

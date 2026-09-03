@@ -1,0 +1,13 @@
+// spec: 003.12.6-unreachable-arm
+// probe: negative-must-fail
+// expect-exit: 0  (build must fail)
+
+// spec 3.12.6: catch-all 뒤의 가지는 도달 불가능 → 컴파일 에러/강경고.
+fn main() -> i32 {
+    let n = 1;
+    let r = match n {
+        _ => 0,
+        1 => 1,    // ERROR: 위의 _ 가 항상 매칭
+    };
+    return r;
+}

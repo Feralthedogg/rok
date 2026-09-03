@@ -1,0 +1,11 @@
+// spec: 002.x-missing-field
+// probe: negative-must-fail
+// expect-exit: 0  (default 가 없는 필드를 빠뜨리면 명시 거부; 직전엔
+//                  silent unit fall-through.)
+
+struct S { x: i32; y: i32; }
+
+fn main() -> i32 {
+    let s = S { x: 1 };
+    return s.y;
+}

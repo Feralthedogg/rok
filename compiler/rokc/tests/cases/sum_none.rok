@@ -1,0 +1,14 @@
+// expect-exit: 49
+
+fn unwrap_or(x: i32 | none, fallback: i32) -> i32 {
+    return match x {
+        v: i32 => v,
+        none => fallback,
+    };
+}
+
+fn main() -> i32 {
+    let a: i32 | none = 42i32;
+    let b: i32 | none = none;
+    return unwrap_or(a, 0i32) + unwrap_or(b, 7i32);
+}

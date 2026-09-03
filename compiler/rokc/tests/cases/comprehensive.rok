@@ -1,0 +1,46 @@
+// expect-exit: 100
+
+const MULTIPLIER: i32 = 3;
+const OFFSET: i32 = 10;
+
+type Maybe = i32 | none;
+
+struct Counter {
+    value: i32;
+    step: i32;
+}
+
+impl Counter {
+    fn new(start: i32, step: i32 = 1) -> Counter {
+        Counter { value: start, step }
+    }
+
+    fn advance(self) -> Counter {
+        Counter { value: self.value + self.step, step: self.step }
+    }
+
+    fn boost(self, by: i32 = 5) -> Counter {
+        Counter { value: self.value + by, step: self.step }
+    }
+}
+
+fn pick_at(xs: [i32; 5], idx: i32) -> Maybe {
+    if idx < 0 {
+        return none;
+    }
+    if idx >= 5 {
+        return none;
+    }
+    return xs[idx];
+}
+
+fn main() -> i32 {
+    let xs: [i32; 5] = [2, 4, 6, 8, 10];
+    let total = 0;
+    for i in 0..5 {
+        let v = pick_at(xs, i) ?? 0;
+        total += v;
+    }
+    let c = Counter::new(0).advance().advance().boost();
+    return total + c.value * MULTIPLIER + OFFSET + 39;
+}

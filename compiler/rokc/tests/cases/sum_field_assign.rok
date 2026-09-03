@@ -1,0 +1,12 @@
+// expect-exit: 30
+
+struct Cell {
+    last: i32 | none;
+}
+
+fn main() -> i32 {
+    let c = Cell { last: none };
+    let total = c.last ?? 0;
+    let c2 = Cell { last: 30 };
+    return total + (c2.last ?? 100);
+}

@@ -1,0 +1,13 @@
+// expect-exit: 55
+
+mod inner {
+    pub fn helper() -> i32 { 42i32 }
+}
+
+pub mod outer {
+    pub fn extra() -> i32 { 13i32 }
+}
+
+fn main() -> i32 {
+    return inner::helper() + outer::extra();
+}

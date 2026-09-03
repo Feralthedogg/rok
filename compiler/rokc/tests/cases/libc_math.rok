@@ -1,0 +1,19 @@
+// expect-exit: 0
+// expect-stdout:
+// 5
+// 1.41421
+// 2.71828
+
+// User-declared `extern "C"` calls into libc math. Demonstrates the
+// FFI path beyond the auto-injected runtime hooks.
+extern "C" {
+    fn sqrt(x: f64) -> f64;
+    fn exp(x: f64) -> f64;
+}
+
+fn main() -> i32 {
+    rok_print_f64(sqrt(25.0f64));    // 5
+    rok_print_f64(sqrt(2.0f64));     // 1.41421
+    rok_print_f64(exp(1.0f64));      // 2.71828
+    return 0;
+}

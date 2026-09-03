@@ -1,0 +1,20 @@
+// spec: 002.09.2-ref-self
+// probe: negative-must-fail
+// expect-exit: 0  (build must fail until ref-self semantics land —
+//                  현 단계에선 silent miscompile 차단 위해 명시 거부)
+
+// spec 2.9.2: `ref self` — caller 의 변수 binding 재할당 가능.
+struct Cell { v: i32; }
+
+impl Cell {
+    fn replace_with(ref self, n: i32) {
+        self.v = n;
+    }
+}
+
+fn main() -> i32 {
+    let c = Cell { v: 0 };
+    c.replace_with(99);
+    rok_print_i32(c.v);
+    return 0;
+}

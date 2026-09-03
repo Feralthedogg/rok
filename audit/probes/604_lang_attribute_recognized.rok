@@ -1,0 +1,21 @@
+// spec: 006.04-lang-attribute-recognized
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+
+// spec 6.4: `#[lang("slot_name")]`이 trait/struct/enum/fn/const/static에
+// 부착 가능. 컴파일러는 attr 인식 + 잘못된 형태에 진단.
+// 정상 attr는 통과해야 함.
+#[lang("test_slot_a")]
+trait T {
+    fn foo(self) -> i32;
+}
+
+#[lang("test_slot_b")]
+struct S {
+    n: i32;
+}
+
+fn main() -> i32 {
+    return 0;
+}

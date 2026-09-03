@@ -1,0 +1,450 @@
+//! HIR pretty-printer for `--emit hir`.
+
+use std::fmt::Write;
+
+use rokc_ir_common::{ConstVal, PrimTy};
+
+use crate::{
+    HirBlock, HirExpr, HirExprKind, HirFunction, HirMatchArm, HirModule, HirPattern, HirStmt,
+    HirTy,
+};
+
+#[must_use]
+pub fn print_hir(module: &HirModule) -> String {
+    let mut out = String::new();
+    for f in &module.functions {
+        print_function(&mut out, f);
+        out.push('\n');
+    }
+    out
+}
+
+fn print_function(out: &mut String, f: &HirFunction) {
+    let _ = write!(out, "fn {}(", f.name);
+    for (i, p) in f.params.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{}: {}", p.name, ty_str(&p.ty));
+    }
+    let _ = write!(out, ") -> {}", ty_str(&f.ret_ty));
+    if let Some(body) = &f.body {
+        out.push_str(" {\n");
+        print_block(out, body, 1);
+        out.push_str("}\n");
+    } else {
+        out.push_str(";\n");
+    }
+}
+
+fn print_block(out: &mut String, b: &HirBlock, indent: usize) {
+    for s in &b.stmts {
+        pad(out, indent);
+        print_stmt(out, s);
+        out.push('\n');
+    }
+    if let Some(t) = &b.trailing {
+        pad(out, indent);
+        out.push_str("trailing ");
+        print_expr(out, t);
+        out.push('\n');
+    }
+}
+
+fn print_stmt(out: &mut String, s: &HirStmt) {
+    match s {
+        HirStmt::Let { local, init } => {
+            let _ = write!(out, "let _{}: {} = ", local.0, ty_str(&init.ty));
+            print_expr(out, init);
+            out.push(';');
+        }
+        HirStmt::Assign { local, value } => {
+            let _ = write!(out, "_{} = ", local.0);
+            print_expr(out, value);
+            out.push(';');
+        }
+        HirStmt::ArrayAssign { array_local, index, value, .. } => {
+            let _ = write!(out, "_{}[", array_local.0);
+            print_expr(out, index);
+            out.push_str("] = ");
+            print_expr(out, value);
+            out.push(';');
+        }
+        HirStmt::Expr(e) => {
+            print_expr(out, e);
+            out.push(';');
+        }
+        HirStmt::Return(v) => {
+            out.push_str("return");
+            if let Some(e) = v {
+                out.push(' ');
+                print_expr(out, e);
+            }
+            out.push(';');
+        }
+        HirStmt::Break { label, value } => {
+            out.push_str("break");
+            if let Some(l) = label {
+                let _ = write!(out, " {l}");
+            }
+            if let Some(e) = value {
+                out.push(' ');
+                print_expr(out, e);
+            }
+            out.push(';');
+        }
+        HirStmt::Continue { label } => {
+            out.push_str("continue");
+            if let Some(l) = label {
+                let _ = write!(out, " {l}");
+            }
+            out.push(';');
+        }
+        HirStmt::StaticAssign { name, value } => {
+            let _ = write!(out, "static {name} = ");
+            print_expr(out, value);
+            out.push(';');
+        }
+        HirStmt::Throw(call) => {
+            out.push_str("throw ");
+            print_expr(out, call);
+            out.push(';');
+        }
+    }
+}
+
+fn print_expr(out: &mut String, e: &HirExpr) {
+    match &e.kind {
+        HirExprKind::Const(c) => print_const(out, c),
+        HirExprKind::Local(id) => {
+            let _ = write!(out, "_{}", id.0);
+        }
+        HirExprKind::StaticRef(name) => {
+            let _ = write!(out, "static {name}");
+        }
+        HirExprKind::Block(b) => {
+            out.push_str("{\n");
+            print_block(out, b, 2);
+            out.push('}');
+        }
+        HirExprKind::UnresolvedPath(parts) => {
+            out.push_str(&parts.join("::"));
+        }
+        HirExprKind::PrimBinOp { op, lhs, rhs } => {
+            let _ = write!(out, "{op:?}(");
+            print_expr(out, lhs);
+            out.push_str(", ");
+            print_expr(out, rhs);
+            out.push(')');
+        }
+        HirExprKind::PrimUnaryOp { op, operand } => {
+            let _ = write!(out, "{op:?}(");
+            print_expr(out, operand);
+            out.push(')');
+        }
+        HirExprKind::Call { callee, args } => {
+            let _ = write!(out, "fn#{}(", callee.0);
+            for (i, a) in args.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                print_expr(out, a);
+            }
+            out.push(')');
+        }
+        HirExprKind::FnRef(id) => {
+            let _ = write!(out, "&fn#{}", id.0);
+        }
+        HirExprKind::CallIndirect { callee, args, .. } => {
+            print_expr(out, callee);
+            out.push('(');
+            for (i, a) in args.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                print_expr(out, a);
+            }
+            out.push(')');
+        }
+        HirExprKind::Cast { operand, to_ty, .. } => {
+            print_expr(out, operand);
+            let _ = write!(out, " as {}", ty_str(to_ty));
+        }
+        HirExprKind::ClosureValue { fn_id, env, .. } => {
+            let _ = write!(out, "closure(&fn#{}, ", fn_id.0);
+            print_expr(out, env);
+            out.push(')');
+        }
+        HirExprKind::CallClosure { closure, args, .. } => {
+            print_expr(out, closure);
+            out.push_str(".call(");
+            for (i, a) in args.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                print_expr(out, a);
+            }
+            out.push(')');
+        }
+        HirExprKind::If { cond, then_block, else_branch } => {
+            out.push_str("if ");
+            print_expr(out, cond);
+            out.push_str(" {\n");
+            print_block(out, then_block, 2);
+            out.push('}');
+            if let Some(e) = else_branch {
+                out.push_str(" else ");
+                print_expr(out, e);
+            }
+        }
+        HirExprKind::While { label, cond, body } => {
+            if let Some(l) = label {
+                let _ = write!(out, "{l}: ");
+            }
+            out.push_str("while ");
+            print_expr(out, cond);
+            out.push_str(" {\n");
+            print_block(out, body, 2);
+            out.push('}');
+        }
+        HirExprKind::Loop { label, body, .. } => {
+            if let Some(l) = label {
+                let _ = write!(out, "{l}: ");
+            }
+            out.push_str("loop {\n");
+            print_block(out, body, 2);
+            out.push('}');
+        }
+        HirExprKind::StructInit { struct_id, fields } => {
+            let _ = write!(out, "Struct#{}{{", struct_id.0);
+            for (i, f) in fields.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                print_expr(out, f);
+            }
+            out.push('}');
+        }
+        HirExprKind::FieldRead { target, struct_id, field_index, .. } => {
+            print_expr(out, target);
+            let _ = write!(out, ".#{}.{}", struct_id.0, field_index);
+        }
+        HirExprKind::WithField { target, struct_id, field_index, value } => {
+            print_expr(out, target);
+            let _ = write!(out, " with #{}.{} = ", struct_id.0, field_index);
+            print_expr(out, value);
+        }
+        HirExprKind::Tuple { fields } => {
+            out.push('(');
+            for (i, f) in fields.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                print_expr(out, f);
+            }
+            out.push(')');
+        }
+        HirExprKind::TupleField { target, index, .. } => {
+            print_expr(out, target);
+            let _ = write!(out, ".{index}");
+        }
+        HirExprKind::ArrayInit { elements, .. } => {
+            out.push('[');
+            for (i, e) in elements.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                print_expr(out, e);
+            }
+            out.push(']');
+        }
+        HirExprKind::ArrayIndex { array, index, .. } => {
+            print_expr(out, array);
+            out.push('[');
+            print_expr(out, index);
+            out.push(']');
+        }
+        HirExprKind::SumWrap { variant_index, value, .. } => {
+            let _ = write!(out, "Sum::v{}", variant_index);
+            if let Some(v) = value {
+                out.push('(');
+                print_expr(out, v);
+                out.push(')');
+            }
+        }
+        HirExprKind::EnumVariantInit { enum_id, variant_index, args } => {
+            let _ = write!(out, "Enum#{}::v{}", enum_id.0, variant_index);
+            if !args.is_empty() {
+                out.push('(');
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    print_expr(out, a);
+                }
+                out.push(')');
+            }
+        }
+        HirExprKind::UnionWrite { struct_id, value, storage_ty, .. } => {
+            let _ = write!(out, "Union#{}::write_as<{}>(", struct_id.0, ty_str(storage_ty));
+            print_expr(out, value);
+            out.push(')');
+        }
+        HirExprKind::UnionRead { target, field_name, field_ty, .. } => {
+            print_expr(out, target);
+            let _ = write!(out, ".{field_name}<as {}>", ty_str(field_ty));
+        }
+        HirExprKind::Match { scrutinee, arms } => {
+            out.push_str("match ");
+            print_expr(out, scrutinee);
+            out.push_str(" {\n");
+            for arm in arms {
+                out.push_str("    ");
+                print_pattern(out, &arm.pat);
+                if let Some(g) = &arm.guard {
+                    out.push_str(" if ");
+                    print_expr(out, g);
+                }
+                out.push_str(" => ");
+                print_expr(out, &arm.body);
+                out.push_str(",\n");
+            }
+            out.push('}');
+        }
+    }
+}
+
+fn print_pattern(out: &mut String, p: &HirPattern) {
+    match p {
+        HirPattern::Wildcard => out.push('_'),
+        HirPattern::Binding { local, ty } => {
+            let _ = write!(out, "_{}: {}", local.0, ty_str(ty));
+        }
+        HirPattern::Literal { value, prim } => {
+            let _ = write!(out, "({})", prim.name());
+            print_const(out, value);
+        }
+        HirPattern::Or(alts) => {
+            for (i, a) in alts.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(" | ");
+                }
+                print_pattern(out, a);
+            }
+        }
+        HirPattern::Tuple(sub) => {
+            out.push('(');
+            for (i, s) in sub.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                print_pattern(out, s);
+            }
+            out.push(')');
+        }
+        HirPattern::Range { start, end, inclusive, prim } => {
+            if let Some(s) = start {
+                let _ = write!(out, "({})", prim.name());
+                print_const(out, s);
+            }
+            out.push_str(if *inclusive { "..=" } else { ".." });
+            if let Some(e) = end {
+                let _ = write!(out, "({})", prim.name());
+                print_const(out, e);
+            }
+        }
+        HirPattern::Struct { struct_id, fields } => {
+            let _ = write!(out, "Struct#{} {{ ", struct_id.0);
+            for (i, (idx, sub)) in fields.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                let _ = write!(out, ".{idx}: ");
+                print_pattern(out, sub);
+            }
+            out.push_str(" }");
+        }
+        HirPattern::EnumVariant { enum_id, variant_index, args } => {
+            let _ = write!(out, "Enum#{}::v{}", enum_id.0, variant_index);
+            if !args.is_empty() {
+                out.push('(');
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    print_pattern(out, a);
+                }
+                out.push(')');
+            }
+        }
+        HirPattern::SumVariant { variant_index, binder, .. } => {
+            if let Some(b) = binder {
+                let _ = write!(out, "_{}: ", b.0);
+            }
+            let _ = write!(out, "Sum::v{}", variant_index);
+        }
+    }
+}
+
+#[allow(unused)]
+fn _silence(_: &HirMatchArm) {}
+
+fn print_const(out: &mut String, c: &ConstVal) {
+    match c {
+        ConstVal::Unit => out.push_str("()"),
+        ConstVal::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        ConstVal::Int { value, ty } => {
+            let _ = write!(out, "{value}{}", ty.name());
+        }
+        ConstVal::UInt { value, ty } => {
+            let _ = write!(out, "{value}{}", ty.name());
+        }
+        ConstVal::Float { bits, ty } => match ty {
+            PrimTy::F32 => {
+                let _ = write!(out, "{}f32", f32::from_bits(*bits as u32));
+            }
+            _ => {
+                let _ = write!(out, "{}f64", f64::from_bits(*bits));
+            }
+        },
+        ConstVal::Char(c) => {
+            let _ = write!(out, "'{}'", char::from_u32(*c).unwrap_or('?'));
+        }
+        ConstVal::Str(s) => {
+            let _ = write!(out, "{s:?}");
+        }
+        ConstVal::None => out.push_str("none"),
+    }
+}
+
+fn pad(out: &mut String, indent: usize) {
+    for _ in 0..indent {
+        out.push_str("    ");
+    }
+}
+
+fn ty_str(t: &HirTy) -> String {
+    match t {
+        HirTy::Unknown => "?".to_owned(),
+        HirTy::Unit => "()".to_owned(),
+        HirTy::Prim(p) => p.name().to_owned(),
+        HirTy::Any => "any".to_owned(),
+        HirTy::Path(parts) => parts.join("::"),
+        HirTy::Sum(parts) => parts.iter().map(ty_str).collect::<Vec<_>>().join(" | "),
+        HirTy::Tuple(parts) => {
+            let inner = parts.iter().map(ty_str).collect::<Vec<_>>().join(", ");
+            format!("({inner})")
+        }
+        HirTy::Struct(id) => format!("Struct#{}", id.0),
+        HirTy::Enum(id) => format!("Enum#{}", id.0),
+        HirTy::Array(t, n) => format!("[{}; {n}]", ty_str(t)),
+        HirTy::Fn(args, ret) => {
+            let inner = args.iter().map(ty_str).collect::<Vec<_>>().join(", ");
+            format!("fn({inner}) -> {}", ty_str(ret))
+        }
+        HirTy::Closure { args, ret, .. } => {
+            let inner = args.iter().map(ty_str).collect::<Vec<_>>().join(", ");
+            format!("closure({inner}) -> {}", ty_str(ret))
+        }
+    }
+}

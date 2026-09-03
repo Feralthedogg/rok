@@ -1,0 +1,23 @@
+// Iterator + IntoIterator traits.
+//
+// Spec 4.10 / 6.4: `for pat in xs` desugars to
+//   let it = <typeof(xs) as IntoIterator>::into_iter(xs);
+//   loop { match it.next() { v: T => body, none => break } }
+//
+// The compiler currently hardcodes the desugar for ranges and arrays;
+// once a future pass routes `for` through the LangTable's
+// `iterator_trait` / `into_iterator_trait` slots, user types implementing
+// these traits will become iterable too.
+
+#[lang("iterator_trait")]
+trait Iterator {
+    type Item;
+    fn next(self) -> Item | none;
+}
+
+#[lang("into_iterator_trait")]
+trait IntoIterator {
+    type IntoIter;
+    type Item;
+    fn into_iter(self) -> IntoIter;
+}

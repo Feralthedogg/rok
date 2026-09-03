@@ -1,0 +1,18 @@
+// spec: 002.10.5-generic-default
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 5
+
+// spec 210.5: 제네릭 매개변수 기본값. `<T = i32>` 형식.
+// 직전 감사: 파서가 `=` 토큰만 먹고 값을 버림 → 동작 안 함 추정.
+// 실증: T 명시 없이 호출 시 i32로 inferring 되는가?
+fn id<T = i32>(x: T) -> T {
+    return x;
+}
+
+fn main() -> i32 {
+    let n = id(5);
+    rok_print_i32(n);
+    return 0;
+}

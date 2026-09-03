@@ -1,0 +1,24 @@
+// expect-exit: 25
+
+struct Cell {
+    v: i32;
+    on: bool;
+}
+
+fn main() -> i32 {
+    let cells: [Cell; 6] = [
+        Cell { v: 3, on: true },
+        Cell { v: 7, on: false },
+        Cell { v: 2, on: true },
+        Cell { v: 11, on: true },
+        Cell { v: 5, on: false },
+        Cell { v: 4, on: false },
+    ];
+    let total = 0;
+    for c in cells {
+        if c.on {
+            total += c.v;
+        }
+    }
+    return total + 9;
+}

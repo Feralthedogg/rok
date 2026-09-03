@@ -1,0 +1,14 @@
+// expect-exit: 13
+
+fn classify(n: i32) -> i32 {
+    return match n {
+        x if x < 0 => 1,
+        0 => 2,
+        x if x < 10 => 3,
+        _ => 4,
+    };
+}
+
+fn main() -> i32 {
+    return classify(-5) + classify(0) + classify(7) + classify(100) + 3;
+}

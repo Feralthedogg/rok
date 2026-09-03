@@ -1,0 +1,15 @@
+// spec: 006.04.6-stdlib-lang-slot-collision
+// probe: negative-must-fail
+// expect-exit: 0  (build must fail)
+
+// spec 6.4.6: 한 슬롯에 두 항목. stdlib(ops.rok)이 이미 add_trait
+// 슬롯에 Add 트레잇을 등록했으므로, 사용자가 다시 등록하면 충돌해야.
+// LangTable이 bootstrap + user 코드를 모두 스캔하는지 검증.
+#[lang("add_trait")]
+trait MyAdd {
+    fn add(self) -> i32;
+}
+
+fn main() -> i32 {
+    return 0;
+}

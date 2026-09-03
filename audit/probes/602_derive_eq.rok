@@ -1,0 +1,15 @@
+// spec: 006.02-derive-eq
+// probe: negative-must-fail
+// expect-exit: 0  (`#[derive(...)]` expander 미구현 → silent miscompile
+//                  차단 위해 명시 거부; 실제 expander 는 별도 마일스톤)
+
+// spec 6.2: `#[derive(Eq)]` — Eq trait 자동 구현.
+#[derive(Eq)]
+struct Pt { x: i32; y: i32; }
+
+fn main() -> i32 {
+    let a = Pt { x: 1, y: 2 };
+    let b = Pt { x: 1, y: 2 };
+    if a == b { rok_print_str("equal"); }
+    return 0;
+}

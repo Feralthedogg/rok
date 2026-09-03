@@ -1,0 +1,9 @@
+// expect-exit: 23
+
+fn add(a: i32, b: i32 = 10, c: i32 = 5) -> i32 {
+    return a + b + c;
+}
+
+fn main() -> i32 {
+    return add(1) + add(1, 1);
+}

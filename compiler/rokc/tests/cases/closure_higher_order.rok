@@ -1,0 +1,15 @@
+// expect-exit: 30
+
+fn map_sum(xs: [i32; 4], f: fn(i32) -> i32) -> i32 {
+    let total = 0;
+    for v in xs {
+        total += f(v);
+    }
+    return total;
+}
+
+fn main() -> i32 {
+    let xs: [i32; 4] = [1, 2, 3, 4];
+    let total = map_sum(xs, |x: i32| -> i32 { x * 3 });
+    return total;
+}

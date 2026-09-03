@@ -1,0 +1,15 @@
+// expect-exit: 17
+
+fn max<T>(a: T, b: T) -> T {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+fn main() -> i32 {
+    let m1 = max(5, 8);
+    let m2 = max(2, 1);
+    let m3 = max(7, 6);
+    return m1 + m2 + m3;
+}

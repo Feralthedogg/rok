@@ -1,0 +1,21 @@
+// expect-exit: 14
+
+fn pick(present: bool) -> i32 | none {
+    if present {
+        return 7;
+    }
+    return none;
+}
+
+fn main() -> i32 {
+    let total = 0;
+    if let n: i32 = pick(true) {
+        total += n;
+    }
+    if let n: i32 = pick(false) {
+        total += 100;
+    } else {
+        total += 7;
+    }
+    return total;
+}

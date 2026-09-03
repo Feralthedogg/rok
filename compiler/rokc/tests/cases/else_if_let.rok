@@ -1,0 +1,25 @@
+// expect-exit: 17
+
+fn pick(b: i32) -> i32 | none {
+    if b == 1 {
+        return 5;
+    }
+    if b == 2 {
+        return 8;
+    }
+    return none;
+}
+
+fn classify(b: i32) -> i32 {
+    if let v: i32 = pick(b) {
+        return v + 1;
+    } else if b > 10 {
+        return 100;
+    } else {
+        return -1;
+    }
+}
+
+fn main() -> i32 {
+    return classify(1) + classify(2) + classify(99) - 98;
+}

@@ -1,0 +1,23 @@
+// expect-exit: 125
+
+struct Point {
+    x: i32;
+    y: i32;
+}
+
+fn classify(p: Point) -> i32 {
+    return match p {
+        Point { x: 0i32, y: 0i32 } => 1i32,
+        Point { x: 0i32, y } => 10i32 + y,
+        Point { x, y: 0i32 } => 100i32 + x,
+        Point { x, y } => x + y,
+    };
+}
+
+fn main() -> i32 {
+    let a = classify(Point { x: 0i32, y: 0i32 });
+    let b = classify(Point { x: 0i32, y: 7i32 });
+    let c = classify(Point { x: 5i32, y: 0i32 });
+    let d = classify(Point { x: 4i32, y: -2i32 });
+    return a + b + c + d;
+}

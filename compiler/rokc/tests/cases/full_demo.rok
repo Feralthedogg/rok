@@ -1,0 +1,55 @@
+// expect-exit: 200
+
+const SIZE: i32 = 5;
+
+type Maybe = i32 | none;
+
+struct Pair<T> {
+    a: T;
+    b: T;
+}
+
+impl Pair<i32> {
+    fn dot(self, other: Pair<i32>) -> i32 {
+        return self.a * other.a + self.b * other.b;
+    }
+
+    fn swap(self) -> Pair<i32> {
+        Pair { a: self.b, b: self.a }
+    }
+}
+
+fn lookup(idx: i32, fallback: i32 = 99) -> Maybe {
+    if idx < 0 {
+        return none;
+    }
+    if idx > 4 {
+        return fallback;
+    }
+    return idx * 10;
+}
+
+fn fold<T>(xs: [T; 5], init: T, f: fn(T, T) -> T) -> T {
+    let acc = init;
+    for v in xs {
+        acc = f(acc, v);
+    }
+    return acc;
+}
+
+fn main() -> i32 {
+    let xs: [i32; 5] = [
+        lookup(0) ?? -1,
+        lookup(1) ?? -1,
+        lookup(2) ?? -1,
+        lookup(3) ?? -1,
+        lookup(4) ?? -1,
+    ];
+    let sum = fold(xs, 0, |a: i32, b: i32| -> i32 { a + b });
+    let p1 = Pair { a: 3, b: 4 };
+    let p2 = Pair { a: 5, b: 6 };
+    let dp = p1.dot(p2);
+    let p1s = p1.swap();
+    let r = sum + dp + (p1s.a + p1s.b) * SIZE;
+    return r + 26;
+}

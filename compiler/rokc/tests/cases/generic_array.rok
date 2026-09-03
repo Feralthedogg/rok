@@ -1,0 +1,13 @@
+// expect-exit: 60
+
+fn pick<T>(xs: [T; 3], idx: i32) -> T {
+    return xs[idx];
+}
+
+fn main() -> i32 {
+    let nums: [i32; 3] = [10, 20, 30];
+    let a = pick(nums, 0);
+    let b = pick(nums, 1);
+    let c = pick(nums, 2);
+    return a + b + c;
+}

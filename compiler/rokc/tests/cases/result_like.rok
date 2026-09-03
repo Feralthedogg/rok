@@ -1,0 +1,28 @@
+// expect-exit: 13
+
+enum Out {
+    Ok(i32),
+    Err(i32),
+}
+
+impl Out {
+    fn unwrap_or(self, def: i32) -> i32 {
+        return match self {
+            Out::Ok(v) => v,
+            Out::Err(e) => def + e,
+        };
+    }
+}
+
+fn divide(a: i32, b: i32) -> Out {
+    if b == 0 {
+        return Out::Err(6);
+    }
+    return Out::Ok(a / b);
+}
+
+fn main() -> i32 {
+    let r = divide(20, 4).unwrap_or(0);
+    let s = divide(7, 0).unwrap_or(0);
+    return r + s + 2;
+}

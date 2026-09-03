@@ -1,0 +1,19 @@
+// expect-exit: 26
+
+enum Op {
+    Add(i32, i32),
+    Mul(i32, i32),
+}
+
+fn run(op: Op) -> i32 {
+    return match op {
+        Op::Add(a, b) => a + b,
+        Op::Mul(a, b) => a * b,
+    };
+}
+
+fn main() -> i32 {
+    let s = run(Op::Add(3, 7));
+    let p = run(Op::Mul(4, 4));
+    return s + p;
+}

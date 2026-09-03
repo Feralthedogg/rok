@@ -1,0 +1,18 @@
+// expect-exit: 60
+
+fn main() -> i32 {
+    let xs: [i32; 5] = [1, 2, 3, 4, 5];
+    let prefix: [i32; 5] = [0, 0, 0, 0, 0];
+    let acc = 0;
+    let i = 0;
+    while i < 5 {
+        acc += xs[i];
+        prefix[i] = acc;
+        i += 1;
+    }
+    let total = 0;
+    for v in prefix {
+        total += v;
+    }
+    return total + 25;
+}

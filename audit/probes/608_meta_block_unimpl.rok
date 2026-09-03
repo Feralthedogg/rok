@@ -1,0 +1,18 @@
+// spec: 006.08-meta-block-unimpl
+// probe: negative-must-fail
+// expect-exit: 0  (build must fail with explicit "not yet implemented")
+
+// spec 6.8: 사용자 정의 derive 메타 블록. expand_templates 패스 미구현.
+// stage-1: 명시 거부 (silent miscompile 방지).
+#[impl_derive(MyHash)]
+@derive {
+    impl MyHash for @Self {
+        fn my_hash(self) -> u64 {
+            return 0u64;
+        }
+    }
+}
+
+fn main() -> i32 {
+    return 0;
+}

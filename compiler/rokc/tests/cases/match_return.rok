@@ -1,0 +1,14 @@
+// expect-exit: 17
+
+fn classify(x: i32) -> i32 {
+    return match x {
+        0 => 100,
+        1 | 2 => 50,
+        n => n + 10,
+    };
+}
+
+fn main() -> i32 {
+    let c = classify(5);
+    return c + 2;
+}

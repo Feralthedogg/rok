@@ -1,0 +1,15 @@
+// expect-exit: 55
+
+fn sum_to(n: i32) -> i32 {
+    let total: i32 = 0i32;
+    let i: i32 = 1i32;
+    while i <= n {
+        total = total + i;
+        i = i + 1i32;
+    }
+    return total;
+}
+
+fn main() -> i32 {
+    return sum_to(10i32);
+}

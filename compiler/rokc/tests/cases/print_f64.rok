@@ -1,0 +1,14 @@
+// expect-exit: 0
+// expect-stdout:
+// 3.14159
+// 0.001
+// 100
+
+// `rok_print_f64` is auto-injected. printf("%g") trims trailing zeros
+// and switches to scientific notation past about 1e6.
+fn main() -> i32 {
+    rok_print_f64(3.14159f64);
+    rok_print_f64(0.001f64);
+    rok_print_f64(100.0f64);
+    return 0;
+}

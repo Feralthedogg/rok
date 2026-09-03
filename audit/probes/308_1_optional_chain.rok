@@ -1,0 +1,35 @@
+// spec: 003.08.1-optional-chain
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 7
+// none
+
+// spec 3.8.1: `x?.field`로 `T | none`의 점 접근.
+// none이면 전체가 none. 그렇지 않으면 필드값.
+struct P {
+    n: i32;
+}
+
+fn maybe(b: i32) -> P | none {
+    if b == 1 {
+        return P { n: 7 };
+    }
+    return none;
+}
+
+fn main() -> i32 {
+    let a = maybe(1);
+    let b = maybe(0);
+    let r1 = a?.n;
+    let r2 = b?.n;
+    match r1 {
+        v: i32 => rok_print_i32(v),
+        none => rok_print_str("(none)"),
+    }
+    match r2 {
+        v: i32 => rok_print_i32(v),
+        none => rok_print_str("none"),
+    }
+    return 0;
+}

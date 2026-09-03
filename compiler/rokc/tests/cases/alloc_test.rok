@@ -1,0 +1,22 @@
+// expect-exit: 0
+// expect-stdout:
+// alloc ok
+
+// Stage-1 heap: `rok_alloc` is a libc-malloc-backed runtime hook.
+// `rok_free` returns the memory. No GC, no tracing — short-running
+// programs only. Pointers cross the FFI boundary as `usize`.
+extern "C" {
+    fn rok_alloc(size: usize, align: usize) -> usize;
+    fn rok_free(ptr: usize);
+}
+
+fn main() -> i32 {
+    let p = rok_alloc(64usize, 8usize);
+    if p != 0usize {
+        rok_print_str("alloc ok");
+    } else {
+        rok_print_str("alloc fail");
+    }
+    rok_free(p);
+    return 0;
+}

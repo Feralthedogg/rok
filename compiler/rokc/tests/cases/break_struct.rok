@@ -1,0 +1,17 @@
+// expect-exit: 28
+
+struct Pair {
+    a: i32;
+    b: i32;
+}
+
+fn main() -> i32 {
+    let i = 0;
+    let result: Pair = loop {
+        if i == 5 {
+            break Pair { a: i * 2, b: i + 13 };
+        }
+        i += 1;
+    };
+    return result.a + result.b;
+}

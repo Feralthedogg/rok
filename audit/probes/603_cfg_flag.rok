@@ -1,0 +1,19 @@
+// spec: 006.03-cfg-flag
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// inactive
+
+// spec 6.3: `#[cfg(feature = "x")]` — 조건부 컴파일. 명령행에 `--cfg
+// feature=test` 가 없으므로 `not(feature="test")` 분기만 살아남아야
+// (두 분기가 동시에 살아남으면 fn redefinition 으로 빌드 실패).
+#[cfg(feature = "test")]
+fn enabled() -> i32 { return 1; }
+
+#[cfg(not(feature = "test"))]
+fn enabled() -> i32 { return 0; }
+
+fn main() -> i32 {
+    if enabled() == 0 { rok_print_str("inactive"); }
+    return 0;
+}

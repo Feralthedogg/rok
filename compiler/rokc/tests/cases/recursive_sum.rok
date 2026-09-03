@@ -1,0 +1,19 @@
+// expect-exit: 15
+
+fn fib(n: i32) -> i32 | none {
+    if n < 0 {
+        return none;
+    }
+    if n < 2 {
+        return n;
+    }
+    let a = fib(n - 1)?;
+    let b = fib(n - 2)?;
+    return a + b;
+}
+
+fn main() -> i32 {
+    let r = fib(10) ?? -1;
+    let z = fib(-3) ?? 5;
+    return r - 45 + z;
+}

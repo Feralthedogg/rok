@@ -1,0 +1,36 @@
+// expect-exit: 50
+
+enum Res<T> {
+    Ok(T),
+    Err(i32),
+}
+
+impl Res<i32> {
+    fn unwrap_or(self, def: i32) -> i32 {
+        return match self {
+            Res::Ok(v) => v,
+            Res::Err(_) => def,
+        };
+    }
+
+    fn map(self, f: fn(i32) -> i32) -> Res<i32> {
+        return match self {
+            Res::Ok(v) => Res::Ok(f(v)),
+            Res::Err(e) => Res::Err(e),
+        };
+    }
+}
+
+fn parse(s: i32) -> Res<i32> {
+    if s < 0 {
+        return Res::Err(99);
+    }
+    return Res::Ok(s);
+}
+
+fn main() -> i32 {
+    let a = parse(7).map(|x: i32| -> i32 { x * 3 }).unwrap_or(0);
+    let b = parse(-1).map(|x: i32| -> i32 { x * 3 }).unwrap_or(20);
+    let c = parse(3).map(|x: i32| -> i32 { x * 3 }).unwrap_or(0);
+    return a + b + c;
+}

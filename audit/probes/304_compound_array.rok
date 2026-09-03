@@ -1,0 +1,13 @@
+// spec: 003.04-compound-assign-array-elem
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 25
+
+// spec 3.4: `arr[i] += v` — array element 복합 대입.
+fn main() -> i32 {
+    let arr: [i32; 3] = [10, 20, 30];
+    arr[1] += 5;
+    rok_print_i32(arr[1]);
+    return 0;
+}

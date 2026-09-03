@@ -1,0 +1,22 @@
+// expect-exit: 7
+
+enum Op {
+    Add,
+    Sub,
+    Mul,
+}
+
+fn apply(a: i32, b: i32, op: Op) -> i32 {
+    return match op {
+        Op::Add => a + b,
+        Op::Sub => a - b,
+        Op::Mul => a * b,
+    };
+}
+
+fn main() -> i32 {
+    let r1 = apply(3, 4, Op::Add);
+    let r2 = apply(10, 4, Op::Sub);
+    let r3 = apply(2, 3, Op::Mul);
+    return r1 + r3 - r2;
+}

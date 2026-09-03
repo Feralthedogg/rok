@@ -1,0 +1,38 @@
+// expect-exit: 24
+
+// Trait method with a body acts as a default — `impl Trait for Type`
+// blocks that don't override it pick up the default body specialized
+// for `Self = Type`.
+trait Greeter {
+    fn greet(self) -> i32;            // required (no body)
+    fn greet_loudly(self) -> i32 {    // default body
+        return self.greet() * 2;
+    }
+}
+
+struct A {
+    n: i32;
+}
+struct B {
+    n: i32;
+}
+
+impl Greeter for A {
+    fn greet(self) -> i32 { self.n + 1 }
+    // No greet_loudly — picks up the default body.
+}
+
+impl Greeter for B {
+    fn greet(self) -> i32 { self.n + 2 }
+    // Override the default.
+    fn greet_loudly(self) -> i32 { self.n * 5 }
+}
+
+fn main() -> i32 {
+    let a = A { n: 4 };
+    let b = B { n: 2 };
+    // a.greet() = 5, a.greet_loudly() = 5 * 2 = 10 (default body)
+    // b.greet() = 4, b.greet_loudly() = 2 * 5 = 10 (override)
+    return a.greet() + a.greet_loudly() + b.greet() + b.greet_loudly() - 5;
+    // 5 + 10 + 4 + 10 - 5 = 24
+}

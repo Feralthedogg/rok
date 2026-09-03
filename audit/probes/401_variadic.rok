@@ -1,0 +1,18 @@
+// spec: 004.01-variadic
+// probe: negative-must-fail
+// expect-exit: 0  (call-site Slice<T> wrap 미구현 → silent miscompile
+//                  차단 위해 명시 거부; 실제 구현은 별도 마일스톤)
+
+// spec 4.1 / 변경점 833-834: `fn f(xs: ...T)` variadic — Slice<T> 로 받음.
+fn sum(xs: ...i32) -> i32 {
+    let total = 0;
+    for x in xs {
+        total = total + x;
+    }
+    return total;
+}
+
+fn main() -> i32 {
+    rok_print_i32(sum(1, 2, 3));
+    return 0;
+}

@@ -1,0 +1,13 @@
+// spec: 005.07.2-pkg-path
+// probe: positive
+// expect-exit: 7
+
+// spec 5.7.2: `pkg::` prefix 는 패키지 루트부터 시작하는 절대 경로.
+// 자식 모듈 함수에 root 에서 동일한 형태로 접근 가능해야.
+mod inner {
+    pub fn hello() -> i32 { return 7; }
+}
+
+fn main() -> i32 {
+    return pkg::inner::hello();
+}

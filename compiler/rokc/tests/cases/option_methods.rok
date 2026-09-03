@@ -1,0 +1,30 @@
+// expect-exit: 27
+
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+impl Option<i32> {
+    fn or(self, def: i32) -> i32 {
+        return match self {
+            Option::Some(v) => v,
+            Option::None => def,
+        };
+    }
+
+    fn map(self, f: fn(i32) -> i32) -> Option<i32> {
+        return match self {
+            Option::Some(v) => Option::Some(f(v)),
+            Option::None => Option::None,
+        };
+    }
+}
+
+fn main() -> i32 {
+    let a: Option<i32> = Option::Some(5);
+    let b: Option<i32> = Option::None;
+    let s = a.map(|x: i32| -> i32 { x * 4 }).or(0);
+    let t = b.map(|x: i32| -> i32 { x * 4 }).or(7);
+    return s + t;
+}

@@ -1,0 +1,13 @@
+// expect-exit: 7
+
+// `union` parses as an item. Layout (fields share storage) is future
+// work — for now the declaration is accepted and the rest of the
+// compiler ignores it. Calling code uses an unrelated path.
+union Repr {
+    bits: i64;
+    parts: i32;
+}
+
+fn main() -> i32 {
+    return 7;
+}

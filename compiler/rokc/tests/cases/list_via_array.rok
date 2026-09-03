@@ -1,0 +1,44 @@
+// expect-exit: 30
+
+struct List {
+    data: [i32; 8];
+    len: i32;
+}
+
+impl List {
+    fn empty() -> List {
+        List { data: [0, 0, 0, 0, 0, 0, 0, 0], len: 0 }
+    }
+
+    fn append(self, v: i32) -> List {
+        let new_data: [i32; 8] = [
+            self.data[0], self.data[1], self.data[2], self.data[3],
+            self.data[4], self.data[5], self.data[6], self.data[7],
+        ];
+        new_data[self.len] = v;
+        List { data: new_data, len: self.len + 1 }
+    }
+
+    fn fold(self, init: i32, f: fn(i32, i32) -> i32) -> i32 {
+        let acc = init;
+        let i = 0;
+        while i < self.len {
+            acc = f(acc, self.data[i]);
+            i += 1;
+        }
+        return acc;
+    }
+}
+
+fn main() -> i32 {
+    let lst = List::empty()
+        .append(3)
+        .append(7)
+        .append(11)
+        .append(2);
+    let sum = lst.fold(0, |a: i32, b: i32| -> i32 { a + b });
+    let max = lst.fold(0, |a: i32, b: i32| -> i32 {
+        if a > b { a } else { b }
+    });
+    return sum + max - 4;
+}

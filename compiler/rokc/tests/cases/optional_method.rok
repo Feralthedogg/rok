@@ -1,0 +1,26 @@
+// expect-exit: 28
+
+struct Counter {
+    n: i32;
+}
+
+impl Counter {
+    fn double(self) -> i32 {
+        self.n * 2
+    }
+}
+
+fn pick(b: bool) -> Counter | none {
+    if b {
+        return Counter { n: 7 };
+    }
+    return none;
+}
+
+fn main() -> i32 {
+    let c1: Counter | none = pick(true);
+    let c2: Counter | none = pick(false);
+    let r1 = c1?.double();
+    let r2 = c2?.double();
+    return (r1 ?? 0) + (r2 ?? 14) + 0;
+}

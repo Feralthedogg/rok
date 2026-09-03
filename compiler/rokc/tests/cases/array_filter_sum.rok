@@ -1,0 +1,18 @@
+// expect-exit: 30
+
+fn filter_sum<T>(xs: [T; 6], pred: fn(T) -> bool) -> T {
+    let acc = 0;
+    for v in xs {
+        if pred(v) {
+            acc += v;
+        }
+    }
+    return acc;
+}
+
+fn main() -> i32 {
+    let xs: [i32; 6] = [1, 2, 3, 4, 5, 6];
+    let evens = filter_sum(xs, |n: i32| -> bool { n % 2 == 0 });
+    let odds = filter_sum(xs, |n: i32| -> bool { n % 2 == 1 });
+    return evens + odds + 9;
+}

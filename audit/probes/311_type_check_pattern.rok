@@ -1,0 +1,21 @@
+// spec: 003.11-type-check-pattern
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// got_int
+// got_float
+
+// spec 311: `v: T` 타입 검사 패턴 — 합 타입 분기.
+fn classify(x: i32 | f64) -> i32 {
+    let r = match x {
+        v: i32 => 1,
+        v: f64 => 2,
+    };
+    return r;
+}
+
+fn main() -> i32 {
+    if classify(7) == 1 { rok_print_str("got_int"); }
+    if classify(3.14) == 2 { rok_print_str("got_float"); }
+    return 0;
+}

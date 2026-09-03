@@ -1,0 +1,22 @@
+// expect-exit: 11
+
+enum Shape {
+    Circle(i32),
+    Square(i32),
+}
+
+impl Shape {
+    fn perimeter(self) -> i32 {
+        return match self {
+            Shape::Circle(r) => r * 6,
+            Shape::Square(s) => s * 4,
+        };
+    }
+}
+
+fn main() -> i32 {
+    let c = Shape::Circle(1);
+    let s = Shape::Square(1);
+    let total = c.perimeter() + s.perimeter();
+    return total + 1;
+}

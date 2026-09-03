@@ -1,0 +1,26 @@
+// expect-exit: 90
+
+enum Direction { North, East, South, West }
+
+fn turn_right(d: Direction) -> Direction {
+    return match d {
+        Direction::North => Direction::East,
+        Direction::East  => Direction::South,
+        Direction::South => Direction::West,
+        Direction::West  => Direction::North,
+    };
+}
+
+fn code(d: Direction) -> i32 {
+    return match d {
+        Direction::North => 0i32,
+        Direction::East  => 90i32,
+        Direction::South => 180i32,
+        Direction::West  => 270i32,
+    };
+}
+
+fn main() -> i32 {
+    let d: Direction = turn_right(Direction::North);
+    return code(d);
+}

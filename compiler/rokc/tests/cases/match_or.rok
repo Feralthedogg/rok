@@ -1,0 +1,13 @@
+// expect-exit: 20
+
+fn classify(x: i32) -> i32 {
+    return match x {
+        0 => 0i32,
+        1 | 2 | 3 => 10i32,
+        n => n + 1000i32,
+    };
+}
+
+fn main() -> i32 {
+    return classify(2i32) + classify(0i32) + classify(1i32);
+}

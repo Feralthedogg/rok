@@ -1,0 +1,12 @@
+// expect-exit: 15
+
+fn sum_down<T>(n: T) -> T {
+    if n <= 1 {
+        return n;
+    }
+    return n + sum_down(n - 1);
+}
+
+fn main() -> i32 {
+    return sum_down(5);
+}

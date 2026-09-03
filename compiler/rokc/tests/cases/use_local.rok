@@ -1,0 +1,12 @@
+// expect-exit: 14
+
+mod a {
+    pub fn val() -> i32 { 7i32 }
+}
+
+fn main() -> i32 {
+    use a::val;
+    let x = val();
+    let y = val();
+    return x + y;   // 7 + 7 = 14
+}

@@ -1,0 +1,13 @@
+// expect-exit: 30
+
+fn main() -> i32 {
+    let base = 5;
+    let multiplier = 3;
+    let xs: [i32; 4] = [1, 2, 3, 4];
+    let total = 0;
+    let scale = |x: i32| -> i32 { (x + base) * multiplier };
+    for v in xs {
+        total += scale(v);
+    }
+    return total - 60;
+}

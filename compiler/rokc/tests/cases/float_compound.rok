@@ -1,0 +1,25 @@
+// expect-exit: 0
+// expect-stdout:
+// 7.5
+// 2.5
+// 12.5
+// 5
+
+// Compound assignment (+=, -=, *=, /=) works on f64 — desugars through
+// the same binary-op + Assign path as integers.
+fn main() -> i32 {
+    let x = 5.0f64;
+    x += 2.5f64;
+    rok_print_f64(x);    // 7.5
+
+    x -= 5.0f64;
+    rok_print_f64(x);    // 2.5
+
+    x *= 5.0f64;
+    rok_print_f64(x);    // 12.5
+
+    x /= 2.5f64;
+    rok_print_f64(x);    // 5
+
+    return 0;
+}

@@ -1,0 +1,13 @@
+// expect-exit: 54
+
+fn main() -> i32 {
+    let total = 0i32;
+    let i = 1i32;
+    while i <= 10i32 {
+        total += i;
+        i += 1i32;
+    }
+    total -= 1i32;
+    total *= 1i32;
+    return total;
+}

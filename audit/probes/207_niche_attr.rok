@@ -1,0 +1,15 @@
+// spec: 002.07.4-niche-attr
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 5
+
+// spec 2.7.4: `#[niche(0)]` 사용자 newtype.
+#[niche(0)]
+struct NonZero(i32);
+
+fn main() -> i32 {
+    let n = NonZero(5);
+    rok_print_i32(n.0);
+    return 0;
+}

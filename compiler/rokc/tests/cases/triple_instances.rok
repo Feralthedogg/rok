@@ -1,0 +1,25 @@
+// expect-exit: 33
+
+struct Box<T> {
+    v: T;
+}
+
+impl Box<i32> {
+    fn doubled(self) -> i32 {
+        self.v * 2
+    }
+}
+
+impl Box<bool> {
+    fn flag_value(self) -> i32 {
+        if self.v { 10 } else { 1 }
+    }
+}
+
+fn main() -> i32 {
+    let a: Box<i32> = Box { v: 5 };
+    let b: Box<i32> = Box { v: 6 };
+    let c: Box<bool> = Box { v: true };
+    let d: Box<bool> = Box { v: false };
+    return a.doubled() + b.doubled() + c.flag_value() + d.flag_value();
+}

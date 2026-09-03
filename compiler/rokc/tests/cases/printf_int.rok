@@ -1,0 +1,15 @@
+// expect-exit: 0
+
+extern "C" {
+    fn printf(fmt: str, value: i32) -> i32;
+}
+
+fn main() {
+    let total = 0;
+    let i = 1;
+    while i <= 3 {
+        total += i * i;
+        i += 1;
+    }
+    let _ = printf("sum=%d\n", total);
+}

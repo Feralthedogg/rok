@@ -1,0 +1,11 @@
+// expect-exit: 13
+
+fn pair_sum<T>(a: T, b: T) -> T {
+    return a + b;
+}
+
+fn main() -> i32 {
+    let s = pair_sum(3, 7);
+    let t = pair_sum(1, 2);
+    return s + t;
+}

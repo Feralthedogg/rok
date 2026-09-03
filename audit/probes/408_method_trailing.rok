@@ -1,0 +1,21 @@
+// spec: 004.08-method-trailing-closure
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 12
+
+// spec 4.8: 메서드 호출 후 trailing closure (`xs.map |x| { x*2 }`).
+struct V { n: i32; }
+
+impl V {
+    fn apply(self, f: fn(i32) -> i32) -> i32 {
+        return f(self.n);
+    }
+}
+
+fn main() -> i32 {
+    let v = V { n: 6 };
+    let r = v.apply() |x| { x * 2 };
+    rok_print_i32(r);
+    return 0;
+}

@@ -1,0 +1,13 @@
+// spec: 004.05.1-closure-block-body
+// probe: positive
+// expect-exit: 7
+// expect-stdout:
+
+// spec 4.5.1: 블록 본체 클로저 + `->` 반환 타입 명시.
+fn main() -> i32 {
+    let f = |x: i32| -> i32 {
+        let y = x * 2;
+        y + 1
+    };
+    return f(3);
+}

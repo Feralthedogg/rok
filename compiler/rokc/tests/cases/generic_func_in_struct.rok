@@ -1,0 +1,22 @@
+// expect-exit: 75
+
+struct Pair<T> {
+    a: T;
+    b: T;
+}
+
+impl Pair<i32> {
+    fn map(self, f: fn(i32) -> i32) -> Pair<i32> {
+        Pair { a: f(self.a), b: f(self.b) }
+    }
+
+    fn sum(self) -> i32 {
+        self.a + self.b
+    }
+}
+
+fn main() -> i32 {
+    let p: Pair<i32> = Pair { a: 10, b: 20 };
+    let q = p.map(|x: i32| -> i32 { x * 2 + 5 });
+    return q.sum() + 5;
+}

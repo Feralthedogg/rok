@@ -1,0 +1,16 @@
+// spec: 004.06.5-closure-vs-fn-pointer
+// probe: negative-must-fail
+// expect-exit: 0  (capturing closure 가 `fn(...)` pointer return type 자리에
+//                  들어가면 codegen 단계 type mismatch — silent 차단을 위해
+//                  HIR 에서 명시 거부)
+
+// spec 4.6: 캡처가 있는 closure 는 `fn(...)` 포인터가 아닌 `Closure { fn_ptr, env }`
+// 페어. 직전엔 build 가 mlir-opt 단계까지 가서 opaque 한 codegen 에러로 떨어짐.
+fn make_adder(n: i32) -> fn(i32) -> i32 {
+    return |x| { x + n };
+}
+
+fn main() -> i32 {
+    let add5 = make_adder(5);
+    return add5(3);
+}

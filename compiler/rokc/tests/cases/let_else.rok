@@ -1,0 +1,24 @@
+// expect-exit: 30
+
+fn pick(present: bool) -> i32 | none {
+    if present {
+        return 10i32;
+    }
+    return none;
+}
+
+fn unwrap_or_zero(present: bool) -> i32 {
+    let v: i32 = pick(present) else {
+        return 0;
+    };
+    return v;
+}
+
+fn main() -> i32 {
+    let total = 0;
+    total += unwrap_or_zero(true);   // 10
+    total += unwrap_or_zero(false);  // 0
+    total += unwrap_or_zero(true);   // 10
+    total += unwrap_or_zero(true);   // 10
+    return total;
+}

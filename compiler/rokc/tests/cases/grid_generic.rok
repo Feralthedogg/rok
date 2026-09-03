@@ -1,0 +1,25 @@
+// expect-exit: 38
+
+struct Cell<T> {
+    v: T;
+    flag: bool;
+}
+
+fn main() -> i32 {
+    let grid: [[Cell<i32>; 2]; 3] = [
+        [Cell { v: 1, flag: true }, Cell { v: 2, flag: false }],
+        [Cell { v: 3, flag: true }, Cell { v: 4, flag: true }],
+        [Cell { v: 5, flag: false }, Cell { v: 6, flag: true }],
+    ];
+    let total = 0;
+    for row in grid {
+        let i = 0;
+        while i < 2 {
+            if row[i].flag {
+                total += row[i].v * 2;
+            }
+            i += 1;
+        }
+    }
+    return total + 10;
+}

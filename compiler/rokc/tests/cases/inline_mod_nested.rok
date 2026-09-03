@@ -1,0 +1,18 @@
+// expect-exit: 60
+
+// Nested inline modules with pub(sub): the shared helper is visible to
+// every descendant of `outer`, but not to the package root.
+pub mod outer {
+    pub(sub) fn shared() -> i32 { 20i32 }
+
+    pub mod child {
+        pub fn ask() -> i32 { local_helper() }
+        fn local_helper() -> i32 { outer::shared() + outer::shared() }
+    }
+
+    pub fn forward() -> i32 { shared() }
+}
+
+fn main() -> i32 {
+    return outer::child::ask() + outer::forward();  // 40 + 20
+}

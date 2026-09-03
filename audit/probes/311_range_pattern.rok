@@ -1,0 +1,24 @@
+// spec: 003.11-range-pattern
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// digit
+// upper
+// other
+
+// spec 311: 범위 패턴 `1..=9` 형태를 매치 가지에서.
+fn classify(n: i32) -> i32 {
+    let r = match n {
+        0..=9 => 1,
+        65..=90 => 2,
+        _ => 3,
+    };
+    return r;
+}
+
+fn main() -> i32 {
+    if classify(5) == 1 { rok_print_str("digit"); }
+    if classify(77) == 2 { rok_print_str("upper"); }
+    if classify(200) == 3 { rok_print_str("other"); }
+    return 0;
+}

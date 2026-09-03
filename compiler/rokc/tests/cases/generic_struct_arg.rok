@@ -1,0 +1,14 @@
+// expect-exit: 30
+
+struct Box<T> {
+    value: T;
+}
+
+fn double(b: Box<i32>) -> i32 {
+    return b.value * 2;
+}
+
+fn main() -> i32 {
+    let b: Box<i32> = Box { value: 12 };
+    return double(b) + 6;
+}

@@ -1,0 +1,34 @@
+// spec: 002.08-supertrait
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 7
+
+// spec 2.8: supertrait `trait Ord: Eq` — Ord 구현은 Eq 도 필요.
+trait Eq2 {
+    fn eq2(self, other: i32) -> bool;
+}
+
+trait Ord2: Eq2 {
+    fn cmp2(self, other: i32) -> i32;
+}
+
+struct V { n: i32; }
+
+impl Eq2 for V {
+    fn eq2(self, other: i32) -> bool {
+        return self.n == other;
+    }
+}
+
+impl Ord2 for V {
+    fn cmp2(self, other: i32) -> i32 {
+        return self.n - other;
+    }
+}
+
+fn main() -> i32 {
+    let v = V { n: 7 };
+    rok_print_i32(v.cmp2(0));
+    return 0;
+}

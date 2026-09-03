@@ -1,0 +1,11 @@
+// spec: 005.03-static-mut-extern-only
+// probe: negative-must-fail
+// expect-exit: 0  (build must fail)
+
+// 변경점 라인 656: static mut 는 extern "C" 블록 내부 (FFI) 만 허용.
+// 일반 코드 금지.
+static mut COUNTER: i32 = 0;     // ERROR: static mut outside extern "C"
+
+fn main() -> i32 {
+    return 0;
+}

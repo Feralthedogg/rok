@@ -1,0 +1,16 @@
+// spec: 003.14.3-finally-after-throw
+// probe: measure
+// expect-exit: 0
+// expect-stdout:
+// finally_ran
+
+// spec 314.3: throw 발생 시에도 finally는 실행되어야.
+// stage-1 impl은 throw가 rok_panic→exit이라 finally가 안 돈다 (예상).
+fn main() -> i32 {
+    try {
+        throw 1;
+    } finally {
+        rok_print_str("finally_ran");
+    };
+    return 0;
+}

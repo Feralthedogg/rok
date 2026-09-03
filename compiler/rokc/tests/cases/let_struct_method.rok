@@ -1,0 +1,22 @@
+// expect-exit: 40
+
+struct Vec2 {
+    x: i32;
+    y: i32;
+}
+
+impl Vec2 {
+    fn norm_sq(self) -> i32 {
+        self.x * self.x + self.y * self.y
+    }
+}
+
+fn make() -> Vec2 {
+    return Vec2 { x: 3, y: 5 };
+}
+
+fn main() -> i32 {
+    let Vec2 { x, y } = make();
+    let v = Vec2 { x: x + 1, y: y - 1 };
+    return v.norm_sq() + (x + y);  // (4*4 + 4*4) + (3+5) = 32 + 8 = 40
+}

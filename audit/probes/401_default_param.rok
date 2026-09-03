@@ -1,0 +1,17 @@
+// spec: 004.01-default-parameter
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 5
+// 12
+
+// spec 4.1 / 변경점 832: `fn f(x: i32 = 0)` default parameter.
+fn add(a: i32, b: i32 = 5) -> i32 {
+    return a + b;
+}
+
+fn main() -> i32 {
+    rok_print_i32(add(0));      // 0 + 5 = 5
+    rok_print_i32(add(7, 5));   // 12
+    return 0;
+}

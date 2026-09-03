@@ -1,0 +1,17 @@
+// spec: 002.05-union-kind
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// done
+
+// spec 2.5 / 변경점 322-340: `union` (untagged, struct-kind 비트 재해석).
+union BitsAndFloat {
+    bits: u32;
+    f: f32;
+}
+
+fn main() -> i32 {
+    let u = BitsAndFloat { bits: 0u32 };
+    rok_print_str("done");
+    return 0;
+}

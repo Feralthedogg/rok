@@ -1,0 +1,7 @@
+// expect-exit: 30
+
+mod helper;
+
+fn main() -> i32 {
+    return helper::triple(10i32);
+}

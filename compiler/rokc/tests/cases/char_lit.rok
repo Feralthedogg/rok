@@ -1,0 +1,7 @@
+// expect-exit: 5
+
+fn main() -> i32 {
+    let a = 'A';
+    let b = 'F';
+    return b as i32 - a as i32;
+}

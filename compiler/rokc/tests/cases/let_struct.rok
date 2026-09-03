@@ -1,0 +1,16 @@
+// expect-exit: 28
+
+struct Point {
+    x: i32;
+    y: i32;
+}
+
+fn make() -> Point {
+    return Point { x: 8, y: 12 };
+}
+
+fn main() -> i32 {
+    let Point { x, y } = make();
+    let Point { x: px, y: py } = Point { x: 3, y: 5 };
+    return x + y + px + py;  // 8+12+3+5 = 28
+}

@@ -1,0 +1,13 @@
+// expect-exit: 14
+
+fn double(x: i32) -> i32 {
+    x * 2
+}
+
+fn add(x: i32, y: i32) -> i32 {
+    x + y
+}
+
+fn main() -> i32 {
+    add(double(5), 4)
+}

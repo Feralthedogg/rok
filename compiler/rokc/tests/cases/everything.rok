@@ -1,0 +1,65 @@
+// expect-exit: 100
+
+const SCALE: i32 = 10;
+
+type Maybe = i32 | none;
+
+struct Point<T> {
+    x: T;
+    y: T;
+}
+
+impl Point<i32> {
+    fn norm_sq(self) -> i32 {
+        self.x * self.x + self.y * self.y
+    }
+}
+
+enum Shape<T> {
+    Square(Point<T>),
+    Empty,
+}
+
+fn area(s: Shape<i32>) -> i32 {
+    return match s {
+        Shape::Square(p) => p.norm_sq(),
+        Shape::Empty => 0,
+    };
+}
+
+fn lookup(idx: i32, fallback: i32 = 100) -> Maybe {
+    if idx < 0 {
+        return none;
+    }
+    if idx > 4 {
+        return fallback;
+    }
+    return idx * 5;
+}
+
+fn map_array<T>(xs: [T; 4], f: fn(T) -> T) -> [T; 4] {
+    let result: [T; 4] = [xs[0], xs[1], xs[2], xs[3]];
+    let i = 0;
+    while i < 4 {
+        result[i] = f(xs[i]);
+        i += 1;
+    }
+    return result;
+}
+
+fn main() -> i32 {
+    let s1: Shape<i32> = Shape::Square(Point { x: 3, y: 4 });
+    let s2: Shape<i32> = Shape::Empty;
+    let total_area = area(s1) + area(s2);
+
+    let v = lookup(2) ?? -1;
+
+    let nums: [i32; 4] = [1, 2, 3, 4];
+    let doubled = map_array(nums, |n: i32| -> i32 { n * 2 });
+    let sum = doubled[0] + doubled[1] + doubled[2] + doubled[3];
+
+    let p: Point<i32> = Point { x: 1, y: 2 };
+    let n = p.norm_sq();
+
+    return total_area + v * SCALE + sum + n - 50;
+}

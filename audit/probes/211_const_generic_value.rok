@@ -1,0 +1,16 @@
+// spec: 002.11-const-generic-value
+// probe: negative-must-fail-parse
+// expect-exit: 0  (`<const N: usize>` 통합 — array length 위치에서 const
+//                  param 받기 + monomorphization 단계 N 치환 — 별도
+//                  마일스톤. 현재는 parse 단계에서 거부.)
+
+// spec 2.11 / 변경점 891-893: `<const N: usize>` const-generic 값.
+fn first<const N: usize>(arr: [i32; N]) -> i32 {
+    return arr[0];
+}
+
+fn main() -> i32 {
+    let a: [i32; 3] = [3, 7, 9];
+    rok_print_i32(first::<3>(a));
+    return 0;
+}

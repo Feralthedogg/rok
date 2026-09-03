@@ -1,0 +1,19 @@
+// spec: 003.02-short-circuit-or
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// no_call
+
+// spec: `||`는 short-circuit. 좌변이 true면 우변 평가 안 함.
+fn loud() -> i32 {
+    rok_print_str("called");
+    return 1;
+}
+
+fn main() -> i32 {
+    let cond = true;
+    if cond || (loud() == 1) {
+        rok_print_str("no_call");
+    }
+    return 0;
+}

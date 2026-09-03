@@ -1,0 +1,15 @@
+// spec: 004.06.2-capture-ref
+// probe: negative-must-fail
+// expect-exit: 0  (ref capture 의미론 미구현 — silent miscompile 차단
+//                  위해 명시 거부; 실제 구현은 별도 마일스톤)
+
+// spec 4.6.2: [ref x] 캡처 리스트로 참조 캡처.
+// 클로저 본체의 재할당이 외부 변수에 반영되어야.
+fn main() -> i32 {
+    let count = 0;
+    let inc = [ref count] || { count = count + 1 };
+    inc();
+    inc();
+    rok_print_i32(count);
+    return 0;
+}

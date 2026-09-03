@@ -1,0 +1,40 @@
+// expect-exit: 30
+
+// `impl Trait for Type` registers the methods in the same method-table
+// the inherent-impl path uses, so `value.method()` dispatches by the
+// receiver's type without any trait-specific machinery in lower.
+
+trait Tally {
+    fn tally(self) -> i32;
+}
+
+trait Bonus {
+    fn bonus(self) -> i32;
+}
+
+struct Counter {
+    n: i32;
+}
+
+impl Tally for Counter {
+    fn tally(self) -> i32 {
+        return self.n * 2;
+    }
+}
+
+impl Bonus for Counter {
+    fn bonus(self) -> i32 {
+        return self.n + 5;
+    }
+}
+
+// Inherent impl mixes with trait impls without namespace conflict.
+impl Counter {
+    fn raw(self) -> i32 { self.n }
+}
+
+fn main() -> i32 {
+    let c = Counter { n: 5 };
+    // tally=10, bonus=10, raw=5 → 25; +5 = 30.
+    return c.tally() + c.bonus() + c.raw() + 5;
+}

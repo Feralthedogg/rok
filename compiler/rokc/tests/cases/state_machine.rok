@@ -1,0 +1,63 @@
+// expect-exit: 12
+
+enum Tok {
+    Num(i32),
+    Plus,
+    Times,
+    End,
+}
+
+fn classify(c: c_char) -> Tok {
+    return match c {
+        '0' => Tok::Num(0),
+        '1' => Tok::Num(1),
+        '2' => Tok::Num(2),
+        '3' => Tok::Num(3),
+        '4' => Tok::Num(4),
+        '5' => Tok::Num(5),
+        '+' => Tok::Plus,
+        '*' => Tok::Times,
+        _ => Tok::End,
+    };
+}
+
+fn evaluate(toks: [Tok; 5]) -> i32 {
+    let acc = 0;
+    let pending: i32 | none = none;
+    let op_mul = false;
+    for t in toks {
+        let n = match t {
+            Tok::Num(v) => v,
+            Tok::Plus => -1,
+            Tok::Times => -2,
+            Tok::End => -3,
+        };
+        if n >= 0 {
+            if op_mul {
+                let p = pending ?? 0;
+                pending = p * n;
+                op_mul = false;
+            } else {
+                let p = pending ?? 0;
+                acc += p;
+                pending = n;
+            }
+        }
+        if n == -2 {
+            op_mul = true;
+        }
+    }
+    let final_p = pending ?? 0;
+    return acc + final_p;
+}
+
+fn main() -> i32 {
+    let toks: [Tok; 5] = [
+        classify('2'),
+        classify('+'),
+        classify('3'),
+        classify('*'),
+        classify('4'),
+    ];
+    return evaluate(toks) + 0 - 2;
+}

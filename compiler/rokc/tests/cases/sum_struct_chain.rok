@@ -1,0 +1,31 @@
+// expect-exit: 32
+
+struct Pos {
+    x: i32;
+    y: i32;
+}
+
+fn shift(p: Pos, dx: i32, dy: i32) -> Pos {
+    Pos { x: p.x + dx, y: p.y + dy }
+}
+
+fn safe_origin(b: bool) -> Pos | none {
+    if b {
+        return Pos { x: 5, y: 7 };
+    }
+    return none;
+}
+
+fn main() -> i32 {
+    let r1 = safe_origin(true);
+    let r2 = safe_origin(false);
+    let s1 = match r1 {
+        v: Pos => shift(v, 2, 3),
+        none => Pos { x: 0, y: 0 },
+    };
+    let s2 = match r2 {
+        v: Pos => v,
+        none => Pos { x: 10, y: 5 },
+    };
+    return s1.x + s1.y + s2.x + s2.y;
+}

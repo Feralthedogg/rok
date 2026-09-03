@@ -1,0 +1,17 @@
+// spec: 002.x-union-reinterpret
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 5
+
+// spec 2.x / i-want 322-340: `let x = ED { fd: 5 }; let v = x.val;` —
+// 다른 이름으로 비트 재해석. i32 → u64 (zero/sign-extend), 같은 비트
+// 패턴이라 5 가 그대로 read 됨.
+union ED { fd: i32; val: u64; }
+
+fn main() -> i32 {
+    let x = ED { fd: 5 };
+    let v: u64 = x.val;
+    rok_print_i64(v as i64);
+    return 0;
+}

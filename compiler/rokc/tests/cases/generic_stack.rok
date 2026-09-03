@@ -1,0 +1,44 @@
+// expect-exit: 25
+
+struct Stack<T> {
+    data: [T; 8];
+    top: i32;
+}
+
+impl Stack<i32> {
+    fn new() -> Stack<i32> {
+        Stack { data: [0, 0, 0, 0, 0, 0, 0, 0], top: 0 }
+    }
+
+    fn push(self, v: i32) -> Stack<i32> {
+        let new_data: [i32; 8] = [
+            self.data[0], self.data[1], self.data[2], self.data[3],
+            self.data[4], self.data[5], self.data[6], self.data[7],
+        ];
+        new_data[self.top] = v;
+        Stack { data: new_data, top: self.top + 1 }
+    }
+
+    fn peek(self) -> i32 | none {
+        if self.top == 0 {
+            return none;
+        }
+        return self.data[self.top - 1];
+    }
+
+    fn sum(self) -> i32 {
+        let total = 0;
+        let i = 0;
+        while i < self.top {
+            total += self.data[i];
+            i += 1;
+        }
+        return total;
+    }
+}
+
+fn main() -> i32 {
+    let s = Stack::new().push(3).push(7).push(15);
+    let p = s.peek() ?? -1;
+    return s.sum() + p - 15;
+}

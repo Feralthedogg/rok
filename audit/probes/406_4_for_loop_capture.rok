@@ -1,0 +1,15 @@
+// spec: 004.06.4-for-loop-per-iteration-capture
+// probe: positive
+// expect-exit: 10
+
+// i-want 1471-1478: for-loop 안에서 매 iteration 마다 value capture 가
+// 자동으로 per-iteration 스냅샷을 만든다 (Go 1.22 식 특수 규칙 불필요).
+// 0 + 1 + 2 + 3 + 4 = 10.
+fn main() -> i32 {
+    let total = 0;
+    for j in 0..5 {
+        let f = || { j };
+        total = total + f();
+    }
+    return total;
+}

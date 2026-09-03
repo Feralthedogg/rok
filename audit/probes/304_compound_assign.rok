@@ -1,0 +1,18 @@
+// spec: 003.04-compound-assign
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 15
+// 9
+
+// spec 3.4: `a += b`는 `a = a + b`로 desugar.
+// 좌변은 한 번만 평가 (단순 식별자라면 동일).
+fn main() -> i32 {
+    let x = 10;
+    x += 5;
+    rok_print_i32(x);
+
+    x -= 6;
+    rok_print_i32(x);
+    return 0;
+}

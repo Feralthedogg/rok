@@ -1,0 +1,15 @@
+// spec: 003.06.1-multi-dimensional-index
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 6
+
+// spec 3.6.1: `m[i, j]` 다차원 인덱싱 — Index<(I, J)> trait 호출.
+// stdlib Matrix 가 없어서 array of arrays 로 대체 시도.
+fn main() -> i32 {
+    let row1: [i32; 2] = [1, 2];
+    let row2: [i32; 2] = [3, 4];
+    let m: [[i32; 2]; 2] = [row1, row2];
+    rok_print_i32(m[1, 1] + m[0, 1]);   // 4 + 2 = 6
+    return 0;
+}

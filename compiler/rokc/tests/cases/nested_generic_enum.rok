@@ -1,0 +1,31 @@
+// expect-exit: 17
+
+enum Box<T> {
+    Some(T),
+    None,
+}
+
+impl Box<i32> {
+    fn or_default(self, def: i32) -> i32 {
+        return match self {
+            Box::Some(v) => v,
+            Box::None => def,
+        };
+    }
+}
+
+impl Box<Box<i32>> {
+    fn flatten(self) -> i32 {
+        return match self {
+            Box::Some(b) => b.or_default(0),
+            Box::None => -1,
+        };
+    }
+}
+
+fn main() -> i32 {
+    let inner: Box<i32> = Box::Some(8);
+    let outer: Box<Box<i32>> = Box::Some(inner);
+    let none_outer: Box<Box<i32>> = Box::None;
+    return outer.flatten() + none_outer.flatten() + 10;
+}

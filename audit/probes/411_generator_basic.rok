@@ -1,0 +1,19 @@
+// spec: 004.11-generator-basic
+// probe: negative-must-fail
+// expect-exit: 0  (build must fail until coroutine runtime lands —
+//                  현 단계에선 silent miscompile 차단 위해 명시 거부)
+
+// spec 4.11: 명명된 제너레이터 — yield 문장.
+// 실측 의도: 제너레이터가 실제로 동작하는지 (파서만 통과하는지)
+fn counter() -> Iterator<i32> {
+    yield 1;
+    yield 2;
+    yield 3;
+}
+
+fn main() -> i32 {
+    for x in counter() {
+        rok_print_i32(x);
+    }
+    return 0;
+}

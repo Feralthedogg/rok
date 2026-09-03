@@ -1,0 +1,54 @@
+fn rok_panic(_0: i32) -> () {
+
+}
+
+fn rok_assert(_0: i32) -> i32 {
+
+}
+
+fn rok_print_str(_0: str) -> i32 {
+
+}
+
+fn rok_print_i32(_0: i32) -> i32 {
+
+}
+
+fn rok_print_i64(_0: i64) -> i32 {
+
+}
+
+fn rok_print_bool(_0: i32) -> i32 {
+
+}
+
+fn rok_print_f64(_0: f64) -> i32 {
+
+}
+
+fn apply(_0: i32, _1: fn(i32) -> i32) -> i32 {
+    let _2: i32;
+
+    bb0:
+        _2 = call_indirect _1<i32>(_0);
+        return _2
+}
+
+fn main() -> i32 {
+    let _0: i32;
+    let _1: fn(any) -> i32;
+
+    bb0:
+        _1 = &fn#9<fn(any) -> i32>;
+        _0 = call fn#7<i32>(3i32, _1);
+        return _0
+}
+
+fn __closure_9(_0: i32) -> i32 {
+    let _1: i32;
+
+    bb0:
+        _1 = Mul<i32>(_0, 4i32);
+        return _1
+}
+

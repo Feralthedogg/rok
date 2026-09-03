@@ -1,0 +1,20 @@
+// expect-exit: 22
+
+struct A {
+    x: i32;
+}
+
+struct B {
+    a: A;
+    label: i32;
+}
+
+fn promote(x: A) -> B {
+    return B { a: x, label: x.x * 2 };
+}
+
+fn main() -> i32 {
+    let a = A { x: 5 };
+    let b = promote(a);
+    return b.a.x + b.label + 7;
+}

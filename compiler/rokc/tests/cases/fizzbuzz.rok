@@ -1,0 +1,38 @@
+// expect-exit: 41
+
+enum Cell {
+    Number(i32),
+    Fizz,
+    Buzz,
+    FizzBuzz,
+}
+
+fn classify(n: i32) -> Cell {
+    if n % 15 == 0 {
+        return Cell::FizzBuzz;
+    }
+    if n % 3 == 0 {
+        return Cell::Fizz;
+    }
+    if n % 5 == 0 {
+        return Cell::Buzz;
+    }
+    return Cell::Number(n);
+}
+
+fn weight(c: Cell) -> i32 {
+    return match c {
+        Cell::Number(v) => v,
+        Cell::Fizz => 3,
+        Cell::Buzz => 5,
+        Cell::FizzBuzz => 15,
+    };
+}
+
+fn main() -> i32 {
+    let total = 0;
+    for i in 1..=10 {
+        total += weight(classify(i));
+    }
+    return total;
+}

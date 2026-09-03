@@ -1,0 +1,18 @@
+// expect-exit: 100
+
+fn fold<T>(xs: [T; 5], init: T, f: fn(T, T) -> T) -> T {
+    let acc = init;
+    for v in xs {
+        acc = f(acc, v);
+    }
+    return acc;
+}
+
+fn main() -> i32 {
+    let xs: [i32; 5] = [10, 20, 30, 40, 50];
+    let total = fold(xs, 0, |a: i32, b: i32| -> i32 { a + b });
+    let max = fold(xs, 0, |a: i32, b: i32| -> i32 {
+        if a > b { a } else { b }
+    });
+    return total - max;
+}

@@ -1,0 +1,25 @@
+fn rok_panic(code: i32) -> ();
+
+fn rok_assert(cond: i32) -> i32;
+
+fn rok_print_str(s: str) -> i32;
+
+fn rok_print_i32(n: i32) -> i32;
+
+fn rok_print_i64(n: i64) -> i32;
+
+fn rok_print_bool(b: i32) -> i32;
+
+fn rok_print_f64(d: f64) -> i32;
+
+fn main() -> i32 {
+    let _0: i32 = 0i32;
+    let _1: Struct#0 = loop {
+        if Eq(_0, 5i32) {
+        break Struct#0{Mul(_0, 2i32), Add(_0, 13i32)};
+};
+        _0 = Add(_0, 1i32);
+};
+    return Add(_1.#0.0, _1.#0.1);
+}
+

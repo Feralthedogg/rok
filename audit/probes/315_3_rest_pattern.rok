@@ -1,0 +1,15 @@
+// spec: 003.15.3-rest-pattern
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 1
+// 4
+
+// spec 3.15.3: `..rest`로 튜플 일부를 묶어 받기.
+fn main() -> i32 {
+    let (first, ..rest) = (1, 2, 3, 4);
+    let (..init, last) = (1, 2, 3, 4);
+    rok_print_i32(first);
+    rok_print_i32(last);
+    return 0;
+}

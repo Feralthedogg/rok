@@ -1,0 +1,14 @@
+// expect-exit: 9
+
+pub mod top {
+    pub fn val() -> i32 { 9i32 }
+}
+
+mod nested {
+    use pkg::top::val;            // package-rooted absolute path
+    pub fn caller() -> i32 { val() }
+}
+
+fn main() -> i32 {
+    return nested::caller();
+}

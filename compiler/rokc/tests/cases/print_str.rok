@@ -1,0 +1,12 @@
+// expect-exit: 0
+// expect-stdout:
+// hello, rok!
+// goodbye
+
+// `rok_print_str` is auto-declared by the driver alongside `rok_panic`,
+// so user code can print without writing extern blocks.
+fn main() -> i32 {
+    rok_print_str("hello, rok!");
+    rok_print_str("goodbye");
+    return 0;
+}

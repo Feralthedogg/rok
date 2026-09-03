@@ -1,0 +1,23 @@
+// expect-exit: 0
+// expect-stdout:
+// 3.5
+// 7
+// -2
+
+// Primitive casts between int and float lower to `arith.sitofp` /
+// `arith.fptosi` (signed) or `arith.uitofp` / `arith.fptoui` per the
+// source/target signedness.
+fn main() -> i32 {
+    let a: i32 = 7;
+    let f = (a as f64) / 2.0f64;     // 3.5
+    rok_print_f64(f);
+
+    let b: f64 = 7.9f64;
+    let i = b as i32;                 // 7 — truncation
+    rok_print_i32(i);
+
+    let c: f64 = -2.3f64;
+    let j = c as i32;                 // -2 — truncation toward zero
+    rok_print_i32(j);
+    return 0;
+}

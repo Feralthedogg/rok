@@ -1,0 +1,17 @@
+// expect-exit: 17
+
+struct Tagged<T> {
+    tag: i32;
+    value: T;
+}
+
+impl Tagged<i32> {
+    fn doubled(self) -> i32 {
+        return self.value * 2 + self.tag;
+    }
+}
+
+fn main() -> i32 {
+    let t: Tagged<i32> = Tagged { tag: 5, value: 6 };
+    return t.doubled();
+}

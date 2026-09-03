@@ -1,0 +1,17 @@
+// spec: 004.14-throws-typed
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// got_value
+
+// spec 4.14 / 변경점 1186-1191: `fn foo() throws (E) -> T` typed throws.
+fn parse(s: i32) throws (i32) -> i32 {
+    if s < 0 { throw -1; }
+    return s * 2;
+}
+
+fn main() -> i32 {
+    let v = parse(5);
+    if v == 10 { rok_print_str("got_value"); }
+    return 0;
+}

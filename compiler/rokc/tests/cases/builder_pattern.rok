@@ -1,0 +1,33 @@
+// expect-exit: 26
+
+struct Builder {
+    base: i32;
+    add: i32;
+    mul: i32;
+}
+
+impl Builder {
+    fn new() -> Builder {
+        Builder { base: 0, add: 0, mul: 1 }
+    }
+
+    fn with_base(self, n: i32) -> Builder {
+        Builder { base: n, add: self.add, mul: self.mul }
+    }
+
+    fn with_add(self, n: i32) -> Builder {
+        Builder { base: self.base, add: n, mul: self.mul }
+    }
+
+    fn with_mul(self, n: i32) -> Builder {
+        Builder { base: self.base, add: self.add, mul: n }
+    }
+
+    fn build(self) -> i32 {
+        (self.base + self.add) * self.mul
+    }
+}
+
+fn main() -> i32 {
+    Builder::new().with_base(10).with_add(3).with_mul(2).build()
+}

@@ -1,0 +1,26 @@
+// expect-exit: 7
+
+struct Point {
+    x: i32;
+    y: i32;
+}
+
+enum Maybe {
+    Some(Point),
+    Nothing,
+}
+
+fn make(present: bool) -> Maybe {
+    if present {
+        return Maybe::Some(Point { x: 3, y: 4 });
+    }
+    return Maybe::Nothing;
+}
+
+fn main() -> i32 {
+    let m = make(true);
+    return match m {
+        Maybe::Some(p) => p.x + p.y,
+        Maybe::Nothing => 0,
+    };
+}

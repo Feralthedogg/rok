@@ -1,0 +1,21 @@
+// expect-exit: 15
+
+// `let-else` whose else branch breaks out of a loop. The loop accumulates
+// values until a `none` arrives, then exits via the let-else.
+fn step(i: i32) -> i32 | none {
+    if i >= 6 { return none; }
+    return i;
+}
+
+fn main() -> i32 {
+    let total = 0;
+    let i = 1;
+    loop {
+        let v: i32 = step(i) else {
+            break;
+        };
+        total += v;
+        i += 1;
+    }
+    return total;  // 1+2+3+4+5 = 15
+}

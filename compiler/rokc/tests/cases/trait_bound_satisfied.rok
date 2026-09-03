@@ -1,0 +1,24 @@
+// expect-exit: 14
+
+// `T: Tally` bound: monomorphization checks that `Counter` has an
+// `impl Tally for Counter` block. It does → call lowers normally.
+trait Tally {
+    fn tally(self) -> i32;
+}
+
+struct Counter {
+    n: i32;
+}
+
+impl Tally for Counter {
+    fn tally(self) -> i32 { self.n * 2 }
+}
+
+fn double<T: Tally>(x: T) -> i32 {
+    return x.tally();
+}
+
+fn main() -> i32 {
+    let c = Counter { n: 7 };
+    return double(c);
+}

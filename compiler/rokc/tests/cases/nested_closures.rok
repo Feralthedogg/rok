@@ -1,0 +1,12 @@
+// expect-exit: 28
+
+fn main() -> i32 {
+    let base = 5;
+    let outer = |x: i32| -> i32 {
+        let bonus = base + 1;
+        let inner = |y: i32| -> i32 { y + bonus };
+        inner(x)
+    };
+    let r = outer(3) + outer(7);
+    return r + 6;
+}

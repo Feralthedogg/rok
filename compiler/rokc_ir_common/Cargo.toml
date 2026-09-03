@@ -1,0 +1,13 @@
+[package]
+name = "rokc_ir_common"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+rokc_core = { workspace = true }
+
+[lints]
+workspace = true

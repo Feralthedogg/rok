@@ -1,0 +1,18 @@
+// expect-exit: 21
+
+// `pub(pkg)` items are visible package-wide. Same package = always
+// reachable today.
+mod a {
+    pub(pkg) fn shared() -> i32 { 12i32 }
+}
+
+mod b {
+    pub fn use_shared() -> i32 { super_shared() + 1 }
+    pub(pkg) fn other() -> i32 { 8i32 }
+
+    fn super_shared() -> i32 { a::shared() }
+}
+
+fn main() -> i32 {
+    return b::use_shared() + b::other();  // (12+1) + 8 = 21
+}

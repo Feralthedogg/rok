@@ -1,0 +1,14 @@
+// expect-exit: 18
+
+fn main() -> i32 {
+    let xs: [i32; 5] = [1, 2, 3, 4, 5];
+    let total = 0;
+    for v in xs {
+        let scaled = match v {
+            1 | 5 => 10,
+            n => n - 1,
+        };
+        total += scaled;
+    }
+    return total - 8;
+}

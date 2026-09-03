@@ -1,0 +1,17 @@
+[package]
+name = "rokc_hir"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+rokc_ast = { workspace = true }
+rokc_core = { workspace = true }
+rokc_diagnostic = { workspace = true }
+rokc_ir_common = { workspace = true }
+rokc_parser = { workspace = true }
+
+[lints]
+workspace = true

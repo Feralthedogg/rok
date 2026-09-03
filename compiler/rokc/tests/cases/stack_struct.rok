@@ -1,0 +1,36 @@
+// expect-exit: 25
+
+struct Stack {
+    data: [i32; 8];
+    top: i32;
+}
+
+impl Stack {
+    fn new() -> Stack {
+        Stack { data: [0, 0, 0, 0, 0, 0, 0, 0], top: 0 }
+    }
+
+    fn push(self, v: i32) -> Stack {
+        let mut_data: [i32; 8] = [
+            self.data[0], self.data[1], self.data[2], self.data[3],
+            self.data[4], self.data[5], self.data[6], self.data[7],
+        ];
+        mut_data[self.top] = v;
+        Stack { data: mut_data, top: self.top + 1 }
+    }
+
+    fn sum(self) -> i32 {
+        let total = 0;
+        let i = 0;
+        while i < self.top {
+            total += self.data[i];
+            i += 1;
+        }
+        total
+    }
+}
+
+fn main() -> i32 {
+    let s = Stack::new().push(3).push(7).push(15);
+    s.sum()
+}

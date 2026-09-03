@@ -1,0 +1,19 @@
+// expect-exit: 27
+
+fn bucket(n: i32) -> i32 {
+    return match n {
+        0i32..=9i32 => 1i32,
+        10i32..=99i32 => 5i32,
+        100i32..=999i32 => 9i32,
+        _ => 0i32,
+    };
+}
+
+fn main() -> i32 {
+    let a = bucket(5i32);
+    let b = bucket(42i32);
+    let c = bucket(8i32);
+    let d = bucket(250i32);
+    let e = bucket(8000i32);
+    return a + a + b + b + b + c + d + e;
+}

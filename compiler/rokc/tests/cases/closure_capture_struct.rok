@@ -1,0 +1,12 @@
+// expect-exit: 40
+
+struct Adder {
+    base: i32;
+}
+
+fn main() -> i32 {
+    let a = Adder { base: 10 };
+    let inc = |x: i32| -> i32 { x + a.base };
+    let total = inc(2) + inc(3) + inc(5);
+    return total;
+}

@@ -1,0 +1,15 @@
+// expect-exit: 22
+
+mod inner {
+    pub fn deep() -> i32 { 5i32 }
+    pub fn other() -> i32 { 10i32 }
+}
+
+pub mod facade {
+    pub use pkg::inner::deep;
+    pub use pkg::inner::other as renamed;
+}
+
+fn main() -> i32 {
+    return facade::deep() + facade::renamed() + 7i32;  // 5 + 10 + 7 = 22
+}

@@ -1,0 +1,12 @@
+// spec: 002.14-into-method
+// probe: negative-must-fail
+// expect-exit: 0  (stdlib From/Into impl 본문 미작성 → 명시 거부;
+//                  실제 dispatch 는 별도 마일스톤)
+
+// spec 2.14 / 변경점 800: `.into()` saturate 변환.
+fn main() -> i32 {
+    let big: i64 = 100i64;
+    let n: i32 = big.into();
+    rok_print_i32(n);
+    return 0;
+}

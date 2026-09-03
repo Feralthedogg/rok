@@ -1,0 +1,13 @@
+// spec: 003.12.5-exhaustiveness-bool
+// probe: negative-must-fail
+// expect-exit: 0  (build must fail)
+
+// spec 3.12.5: bool에 true/false 모두 덮지 않으면 컴파일 에러.
+fn main() -> i32 {
+    let x = true;
+    let r = match x {
+        true => 1,
+        // false 누락 — spec 위반
+    };
+    return r;
+}

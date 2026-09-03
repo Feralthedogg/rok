@@ -1,0 +1,218 @@
+// Operator traits — the bootstrap source for every operator token.
+//
+// `rokc` reads the `#[infix]` / `#[prefix]` / `#[postfix]` attributes on
+// these methods and builds the precedence table the parser uses. The
+// `#[lang(...)]` attributes (spec 6.4) bind each trait to a compiler
+// slot so future passes can swap hardcoded primitive lowering for
+// trait dispatch.
+
+#[lang("add_trait")]
+trait Add<Rhs> {
+    type Output;
+    #[infix("+", prec = 7, left)]
+    fn add(self, rhs: Rhs) -> Output;
+}
+
+#[lang("sub_trait")]
+trait Sub<Rhs> {
+    type Output;
+    #[infix("-", prec = 7, left)]
+    fn sub(self, rhs: Rhs) -> Output;
+}
+
+#[lang("mul_trait")]
+trait Mul<Rhs> {
+    type Output;
+    #[infix("*", prec = 8, left)]
+    fn mul(self, rhs: Rhs) -> Output;
+}
+
+#[lang("div_trait")]
+trait Div<Rhs> {
+    type Output;
+    #[infix("/", prec = 8, left)]
+    fn div(self, rhs: Rhs) -> Output;
+}
+
+#[lang("rem_trait")]
+trait Rem<Rhs> {
+    type Output;
+    #[infix("%", prec = 8, left)]
+    fn rem(self, rhs: Rhs) -> Output;
+}
+
+#[lang("neg_trait")]
+trait Neg {
+    type Output;
+    #[prefix("-", prec = 11)]
+    fn neg(self) -> Output;
+}
+
+#[lang("not_trait")]
+trait Not {
+    type Output;
+    #[prefix("!", prec = 11)]
+    fn not(self) -> Output;
+}
+
+#[lang("bitnot_trait")]
+trait BitNot {
+    type Output;
+    #[prefix("~", prec = 11)]
+    fn bitnot(self) -> Output;
+}
+
+#[lang("bitand_trait")]
+trait BitAnd<Rhs> {
+    type Output;
+    #[infix("&", prec = 6, left)]
+    fn bitand(self, rhs: Rhs) -> Output;
+}
+
+#[lang("bitor_trait")]
+trait BitOr<Rhs> {
+    type Output;
+    #[infix("|", prec = 5, left)]
+    fn bitor(self, rhs: Rhs) -> Output;
+}
+
+#[lang("bitxor_trait")]
+trait BitXor<Rhs> {
+    type Output;
+    #[infix("^", prec = 6, left)]
+    fn bitxor(self, rhs: Rhs) -> Output;
+}
+
+#[lang("shl_trait")]
+trait Shl<Rhs> {
+    type Output;
+    #[infix("<<", prec = 9, left)]
+    fn shl(self, rhs: Rhs) -> Output;
+}
+
+#[lang("shr_trait")]
+trait Shr<Rhs> {
+    type Output;
+    #[infix(">>", prec = 9, left)]
+    fn shr(self, rhs: Rhs) -> Output;
+}
+
+#[lang("cmp_trait")]
+trait Cmp<Rhs> {
+    #[infix("==", prec = 4, none)]
+    #[infix("≡", prec = 4, none)]
+    fn eq(self, rhs: Rhs) -> bool;
+
+    #[infix("!=", prec = 4, none)]
+    #[infix("≠", prec = 4, none)]
+    fn ne(self, rhs: Rhs) -> bool;
+
+    #[infix("<", prec = 4, none)]
+    fn lt(self, rhs: Rhs) -> bool;
+
+    #[infix(">", prec = 4, none)]
+    fn gt(self, rhs: Rhs) -> bool;
+
+    #[infix("<=", prec = 4, none)]
+    #[infix("≤", prec = 4, none)]
+    fn le(self, rhs: Rhs) -> bool;
+
+    #[infix(">=", prec = 4, none)]
+    #[infix("≥", prec = 4, none)]
+    fn ge(self, rhs: Rhs) -> bool;
+}
+
+#[lang("logical_and_trait")]
+trait LogicalAnd<Rhs> {
+    #[infix("&&", prec = 3, left)]
+    fn logical_and(self, rhs: Rhs) -> bool;
+}
+
+#[lang("logical_or_trait")]
+trait LogicalOr<Rhs> {
+    #[infix("||", prec = 2, left)]
+    fn logical_or(self, rhs: Rhs) -> bool;
+}
+
+// Element-wise ("broadcast") counterparts. Same precedence as their
+// scalar siblings; the only difference is the trait method they target.
+
+trait DotAdd<Rhs> {
+    type Output;
+    #[infix(".+", prec = 7, left)]
+    fn dot_add(self, rhs: Rhs) -> Output;
+}
+
+trait DotSub<Rhs> {
+    type Output;
+    #[infix(".-", prec = 7, left)]
+    fn dot_sub(self, rhs: Rhs) -> Output;
+}
+
+trait DotMul<Rhs> {
+    type Output;
+    #[infix(".*", prec = 8, left)]
+    fn dot_mul(self, rhs: Rhs) -> Output;
+}
+
+trait DotDiv<Rhs> {
+    type Output;
+    #[infix("./", prec = 8, left)]
+    fn dot_div(self, rhs: Rhs) -> Output;
+}
+
+trait DotRem<Rhs> {
+    type Output;
+    #[infix(".%", prec = 8, left)]
+    fn dot_rem(self, rhs: Rhs) -> Output;
+}
+
+trait DotCmp<Rhs> {
+    #[infix(".==", prec = 4, none)]
+    fn dot_eq(self, rhs: Rhs) -> bool;
+
+    #[infix(".!=", prec = 4, none)]
+    fn dot_ne(self, rhs: Rhs) -> bool;
+
+    #[infix(".<", prec = 4, none)]
+    fn dot_lt(self, rhs: Rhs) -> bool;
+
+    #[infix(".>", prec = 4, none)]
+    fn dot_gt(self, rhs: Rhs) -> bool;
+
+    #[infix(".<=", prec = 4, none)]
+    fn dot_le(self, rhs: Rhs) -> bool;
+
+    #[infix(".>=", prec = 4, none)]
+    fn dot_ge(self, rhs: Rhs) -> bool;
+}
+
+trait DotBitAnd<Rhs> {
+    type Output;
+    #[infix(".&", prec = 6, left)]
+    fn dot_bitand(self, rhs: Rhs) -> Output;
+}
+
+trait DotBitOr<Rhs> {
+    type Output;
+    #[infix(".|", prec = 5, left)]
+    fn dot_bitor(self, rhs: Rhs) -> Output;
+}
+
+trait DotBitXor<Rhs> {
+    type Output;
+    #[infix(".^", prec = 6, left)]
+    fn dot_bitxor(self, rhs: Rhs) -> Output;
+}
+
+trait DotShl<Rhs> {
+    type Output;
+    #[infix(".<<", prec = 9, left)]
+    fn dot_shl(self, rhs: Rhs) -> Output;
+}
+
+trait DotShr<Rhs> {
+    type Output;
+    #[infix(".>>", prec = 9, left)]
+    fn dot_shr(self, rhs: Rhs) -> Output;
+}

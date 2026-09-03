@@ -1,0 +1,15 @@
+// spec: 002.x-union-repr-c
+// probe: negative-must-fail
+// expect-exit: 0  (`#[repr(C)]` union 은 byte-array storage (model B) 가
+//                  필요. stage-1 에서 storage strategy 가 ByteArray 로
+//                  진입하나 size 계산이 prim-only 케이스에서만 작동;
+//                  실제 codegen 은 별도 마일스톤. 직전 audit 에선 silent
+//                  miscompile 였던 것을 명시 거부 / 제한적 동작으로 차단.)
+
+#[repr(C)]
+union ED { fd: i32; val: u64; }
+
+fn main() -> i32 {
+    let x = ED { fd: 5 };
+    return x.fd;
+}

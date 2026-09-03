@@ -1,0 +1,29 @@
+// expect-exit: 23
+
+enum Maybe<T> {
+    Some(T),
+    Nothing,
+}
+
+impl Maybe<i32> {
+    fn unwrap_or(self, def: i32) -> i32 {
+        match self {
+            Maybe::Some(v) => v,
+            Maybe::Nothing => def,
+        }
+    }
+}
+
+fn safe_div(a: i32, b: i32) -> Maybe<i32> {
+    if b == 0 {
+        return Maybe::Nothing;
+    }
+    return Maybe::Some(a / b);
+}
+
+fn main() -> i32 {
+    let r1 = safe_div(20, 4).unwrap_or(0);
+    let r2 = safe_div(7, 0).unwrap_or(13);
+    let r3 = safe_div(15, 3).unwrap_or(0);
+    return r1 + r2 + r3;
+}

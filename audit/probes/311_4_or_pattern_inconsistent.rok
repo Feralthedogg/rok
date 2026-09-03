@@ -1,0 +1,13 @@
+// spec: 003.11.4-or-pattern-binding-inconsistent
+// probe: negative-must-fail
+// expect-exit: 0  (build must fail — exit/stdout ignored)
+
+// spec 311.4: `v: i32 | _: i32` 처럼 한쪽은 바인딩, 한쪽은 무시면
+// 컴파일 에러. 통과되면 spec 위반.
+fn main() -> i32 {
+    let n = 5;
+    let r = match n {
+        v | _ => 0,
+    };
+    return r;
+}

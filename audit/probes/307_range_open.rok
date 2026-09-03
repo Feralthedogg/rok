@@ -1,0 +1,15 @@
+// spec: 003.07-range-open
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 0
+// 1
+// 2
+
+// spec 3.7 / 변경점 1091: `0..3` 같은 일반 range. 단순 검증.
+fn main() -> i32 {
+    for i in 0..3 {
+        rok_print_i32(i);
+    }
+    return 0;
+}

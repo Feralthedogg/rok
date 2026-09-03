@@ -1,0 +1,5 @@
+// expect-exit: 7
+
+fn main() -> i32 {
+    return 1i32 + 2i32 * 3i32;
+}

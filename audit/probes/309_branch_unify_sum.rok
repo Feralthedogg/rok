@@ -1,0 +1,20 @@
+// spec: 003.09-branch-unify-sum
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// from_int
+
+// spec / 변경점 1019: 분기 타입이 다르면 결과는 자동 합 타입.
+fn pick(b: i32) -> i32 | f64 {
+    let v = if b == 1 { 7 } else { 3.14 };
+    return v;
+}
+
+fn main() -> i32 {
+    let r = pick(1);
+    match r {
+        n: i32 => rok_print_str("from_int"),
+        d: f64 => rok_print_str("from_float"),
+    };
+    return 0;
+}

@@ -1,0 +1,14 @@
+// expect-exit: 25
+
+struct Op {
+    base: i32;
+    op: fn(i32) -> i32;
+}
+
+fn main() -> i32 {
+    let inc: fn(i32) -> i32 = |x: i32| -> i32 { x + 1 };
+    let o = Op { base: 10, op: inc };
+    let v: fn(i32) -> i32 = o.op;
+    let r = v(o.base) + v(13);
+    return r;
+}

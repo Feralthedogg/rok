@@ -1,0 +1,10 @@
+// expect-exit: 50
+
+fn main() -> i32 {
+    let base = 10i32;
+    let bonus = 5i32;
+    let scale = |x: i32| -> i32 { (x + bonus) * base };
+    let a = scale(3i32);
+    let b = scale(0i32);
+    return a + b - 80i32;
+}

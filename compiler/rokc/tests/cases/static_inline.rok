@@ -1,0 +1,11 @@
+// expect-exit: 50
+
+// Stage 1: `static` items inline like `const`. Stable storage and
+// `static mut` come later — for now an immutable `static` is just a
+// readable name for a constant value.
+static GREET: i32 = 30i32;
+static EXTRA: i32 = 20i32;
+
+fn main() -> i32 {
+    return GREET + EXTRA;
+}

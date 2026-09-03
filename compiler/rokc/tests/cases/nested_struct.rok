@@ -1,0 +1,19 @@
+// expect-exit: 14
+
+struct Pos {
+    x: i32;
+    y: i32;
+}
+
+struct Sprite {
+    pos: Pos;
+    z: i32;
+}
+
+fn main() -> i32 {
+    let s = Sprite {
+        pos: Pos { x: 3, y: 4 },
+        z: 7,
+    };
+    return s.pos.x + s.pos.y + s.z;
+}

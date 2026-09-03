@@ -1,0 +1,17 @@
+// spec: 005.07.3-sup-path
+// probe: positive
+// expect-exit: 11
+
+// spec 5.7.3: `sup::` prefix 는 부모 모듈부터 시작. 모듈 안에서
+// 형제/조상 모듈의 항목을 참조한다.
+pub fn helper() -> i32 { return 11; }
+
+mod inner {
+    pub fn use_helper() -> i32 {
+        return sup::helper();
+    }
+}
+
+fn main() -> i32 {
+    return inner::use_helper();
+}

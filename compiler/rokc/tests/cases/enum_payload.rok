@@ -1,0 +1,19 @@
+// expect-exit: 49
+
+enum Result {
+    Ok(i32),
+    Err(i32),
+}
+
+fn unwrap_or(r: Result, fallback: i32) -> i32 {
+    return match r {
+        Result::Ok(v) => v,
+        Result::Err(_) => fallback,
+    };
+}
+
+fn main() -> i32 {
+    let a: Result = Result::Ok(42i32);
+    let b: Result = Result::Err(99i32);
+    return unwrap_or(a, 0i32) + unwrap_or(b, 7i32);
+}

@@ -1,0 +1,14 @@
+// spec: 004.08.1-trailing-closure-paren-zero-arg
+// probe: positive
+// expect-exit: 99
+// expect-stdout:
+
+// spec 4.8.1 + 4.8 일반: `f() { body }` 형태 — 0-arg trailing closure.
+// LParen-RParen 직후 `{`이 trailing closure 로 attach.
+fn run(f: fn() -> i32) -> i32 {
+    return f();
+}
+
+fn main() -> i32 {
+    return run() { 99 };
+}

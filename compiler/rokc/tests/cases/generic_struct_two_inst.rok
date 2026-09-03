@@ -1,0 +1,14 @@
+// expect-exit: 7
+
+struct Wrap<T> {
+    inner: T;
+}
+
+fn main() -> i32 {
+    let a: Wrap<i32> = Wrap { inner: 42 };
+    let b: Wrap<bool> = Wrap { inner: true };
+    if b.inner {
+        return a.inner / 6;
+    }
+    return 0;
+}

@@ -1,0 +1,12 @@
+// spec: 005.06-visibility-module
+// probe: negative-must-fail
+// expect-exit: 0  (build must fail)
+
+// spec 5.6: `pub` 없는 모듈 항목은 외부에서 보이지 않음.
+mod inner {
+    fn private_helper() -> i32 { return 1; }
+}
+
+fn main() -> i32 {
+    return inner::private_helper();    // ERROR: private
+}

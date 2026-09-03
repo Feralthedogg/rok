@@ -1,0 +1,13 @@
+// expect-exit: 42
+
+// Calling a user-declared `extern "C"` function whose name doesn't
+// collide with the auto-injected runtime hooks. `puts` from libc takes
+// a null-terminated string and returns an int.
+extern "C" {
+    fn puts(s: str) -> i32;
+}
+
+fn main() -> i32 {
+    puts("forty-two");
+    return 42;
+}

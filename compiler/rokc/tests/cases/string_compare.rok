@@ -1,0 +1,23 @@
+// expect-exit: 12
+
+extern "C" {
+    fn strcmp(a: str, b: str) -> i32;
+}
+
+fn equal(a: str, b: str) -> bool {
+    return strcmp(a, b) == 0;
+}
+
+fn main() -> i32 {
+    let total = 0;
+    if equal("hello", "hello") {
+        total += 5;
+    }
+    if equal("foo", "bar") {
+        total += 100;
+    }
+    if equal("rok", "rok") {
+        total += 7;
+    }
+    return total;
+}

@@ -1,0 +1,17 @@
+// expect-exit: 0
+
+extern "C" {
+    fn puts(s: str) -> i32;
+}
+
+fn say(msg: str, times: i32 = 1) {
+    let i = 0;
+    while i < times {
+        let _ = puts(msg);
+        i += 1;
+    }
+}
+
+fn main() {
+    say("hello", 3);
+}

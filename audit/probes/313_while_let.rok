@@ -1,0 +1,26 @@
+// spec: 003.13.2-while-let
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 7
+// 14
+// 21
+// done
+
+// spec 3.13.2: `while let v: T = compute()` — 매 반복 식을 매칭, 실패 시 종료.
+fn next(state: i32) -> i32 | none {
+    if state >= 20 {
+        return none;
+    }
+    return state + 7;
+}
+
+fn main() -> i32 {
+    let s = 0;
+    while let v: i32 = next(s) {
+        rok_print_i32(v);
+        s = v;
+    }
+    rok_print_str("done");
+    return 0;
+}

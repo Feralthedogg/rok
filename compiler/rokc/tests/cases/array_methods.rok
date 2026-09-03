@@ -1,0 +1,14 @@
+// expect-exit: 65
+
+fn main() -> i32 {
+    let xs: [i32; 5] = [10, 5, 20, 15, 25];
+    let max = xs[0];
+    let sum = 0;
+    for v in xs {
+        if v > max {
+            max = v;
+        }
+        sum += v;
+    }
+    return max + sum - 35;
+}

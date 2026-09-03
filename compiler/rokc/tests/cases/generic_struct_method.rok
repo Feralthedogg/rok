@@ -1,0 +1,17 @@
+// expect-exit: 21
+
+struct Pair<T> {
+    a: T;
+    b: T;
+}
+
+impl Pair<i32> {
+    fn sum(self) -> i32 {
+        return self.a + self.b;
+    }
+}
+
+fn main() -> i32 {
+    let p: Pair<i32> = Pair { a: 7, b: 5 };
+    return p.sum() + 9;
+}

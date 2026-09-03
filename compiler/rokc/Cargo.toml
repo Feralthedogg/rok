@@ -1,0 +1,22 @@
+[package]
+name = "rokc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "rokc"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+rokc_codegen_mlir = { workspace = true }
+rokc_diagnostic = { workspace = true }
+rokc_hir = { workspace = true }
+rokc_interface = { workspace = true }
+rokc_mir = { workspace = true }
+
+[lints]
+workspace = true

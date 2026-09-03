@@ -1,0 +1,27 @@
+// expect-exit: 64
+
+// Sum-type payload bigger than 8 bytes (struct with two i64 fields).
+// `lower_ty_in` expands `Pair | none` to `(i32 tag, struct{i64, i64} payload)`,
+// so the sum's payload field carries the full struct without truncation.
+struct Pair {
+    a: i64;
+    b: i64;
+}
+
+fn make_pair() -> Pair | none {
+    return Pair { a: 100i64, b: 200i64 };
+}
+
+fn unwrap(x: Pair | none) -> i64 {
+    return match x {
+        v: Pair => v.a + v.b,
+        none => -1i64,
+    };
+}
+
+fn main() -> i32 {
+    let p = make_pair();
+    let total = unwrap(p);
+    if total == 300i64 { return 64; }
+    return 0;
+}

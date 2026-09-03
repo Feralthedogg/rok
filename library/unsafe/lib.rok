@@ -1,0 +1,9 @@
+// rok unsafe tier — base layer.
+// Owns: Ptr<T>, ConstPtr<T>, transmute, raw allocation, pin, volatile.
+// Depends only on rokr extern "C" symbols.
+//
+// Importing this crate is a danger signal; user code must `use unsafe::...`
+// explicitly.
+
+// Submodule declarations land here as the unsafe surface fills in.
+// Until then, the package root is empty.

@@ -1,0 +1,11 @@
+// expect-exit: 0
+// expect-stdout: hello, rok!
+
+extern "C" {
+    fn puts(s: str) -> i32;
+}
+
+fn main() -> i32 {
+    puts("hello, rok!");
+    return 0i32;
+}

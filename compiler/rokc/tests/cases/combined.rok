@@ -1,0 +1,37 @@
+// expect-exit: 42
+
+struct Point {
+    x: i32;
+    y: i32;
+}
+
+impl Point {
+    fn area(self) -> i32 {
+        return self.x * self.y;
+    }
+}
+
+fn lookup(key: i32) -> i32 | none {
+    if key > 0 {
+        return key * 4;
+    }
+    return none;
+}
+
+fn main() -> i32 {
+    let points: [Point; 3] = [
+        Point { x: 2, y: 3 },
+        Point { x: 1, y: 5 },
+        Point { x: 1, y: 1 },
+    ];
+    let total = 0;
+    for p in points {
+        total += p.area();
+    }
+    let bonus = if let n: i32 = lookup(7) {
+        n + 1
+    } else {
+        0
+    };
+    return total + bonus + 1;
+}

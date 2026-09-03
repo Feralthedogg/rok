@@ -1,0 +1,27 @@
+// spec: 003.16-let-else
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 7
+// fallback
+
+// spec 3.16: `let pat = expr else { ... };` — 패턴 매칭 실패 시 else 실행
+// (else는 divergent — return/break/continue/throw 중 하나).
+fn maybe(b: i32) -> i32 | none {
+    if b == 1 { return 7; }
+    return none;
+}
+
+fn unwrap_or_print(b: i32) {
+    let v: i32 = maybe(b) else {
+        rok_print_str("fallback");
+        return;
+    };
+    rok_print_i32(v);
+}
+
+fn main() -> i32 {
+    unwrap_or_print(1);
+    unwrap_or_print(0);
+    return 0;
+}

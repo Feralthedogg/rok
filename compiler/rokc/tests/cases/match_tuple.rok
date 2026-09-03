@@ -1,0 +1,18 @@
+// expect-exit: 7
+
+fn classify(p: (i32, i32)) -> i32 {
+    return match p {
+        (0i32, 0i32) => 1i32,
+        (0i32, _) => 2i32,
+        (_, 0i32) => 3i32,
+        (a, b) => a + b,
+    };
+}
+
+fn main() -> i32 {
+    let s = classify((0i32, 0i32))
+        + classify((0i32, 9i32))
+        + classify((9i32, 0i32));
+    let extra = classify((4i32, -3i32));
+    return s + extra;
+}

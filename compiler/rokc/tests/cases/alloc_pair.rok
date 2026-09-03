@@ -1,0 +1,25 @@
+// expect-exit: 0
+// expect-stdout:
+// 100
+// 200
+
+// Two i64 slots in a single heap allocation, addressed by offset.
+// This is what the runtime needs to express any record-of-primitives
+// layout — Box / heap structs will reuse this same idiom once codegen
+// supports struct-pointer types directly.
+extern "C" {
+    fn rok_alloc(size: usize, align: usize) -> usize;
+    fn rok_free(ptr: usize);
+    fn rok_store_i64(ptr: usize, val: i64);
+    fn rok_load_i64(ptr: usize) -> i64;
+}
+
+fn main() -> i32 {
+    let p = rok_alloc(16usize, 8usize);
+    rok_store_i64(p, 100i64);
+    rok_store_i64(p + 8usize, 200i64);
+    rok_print_i64(rok_load_i64(p));
+    rok_print_i64(rok_load_i64(p + 8usize));
+    rok_free(p);
+    return 0;
+}

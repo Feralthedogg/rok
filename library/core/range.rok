@@ -1,0 +1,27 @@
+// Range / RangeInclusive / RangeFrom / RangeTo / RangeFull (spec 3.7).
+//
+// `0..5` → `Range::new(0, 5)`, etc. once the `#[literal(...)]` consumer
+// for ranges lands. Stage-1 keeps range expressions as a built-in AST
+// node (`ExprKind::Range`) and the for-loop lowering hardcodes
+// `start..end`. These trait/struct declarations exist so a future
+// pass can swap that for trait dispatch.
+
+struct Range<T> {
+    start: T;
+    end: T;
+}
+
+struct RangeInclusive<T> {
+    start: T;
+    end: T;
+}
+
+struct RangeFrom<T> {
+    start: T;
+}
+
+struct RangeTo<T> {
+    end: T;
+}
+
+struct RangeFull;

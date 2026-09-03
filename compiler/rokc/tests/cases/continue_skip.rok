@@ -1,0 +1,16 @@
+// expect-exit: 12
+
+fn main() -> i32 {
+    let xs: [i32; 6] = [1, 2, 3, 4, 5, 6];
+    let total = 0;
+    for v in xs {
+        if v == 3 {
+            continue;
+        }
+        if v > 4 {
+            continue;
+        }
+        total += v;
+    }
+    return total + 5;
+}

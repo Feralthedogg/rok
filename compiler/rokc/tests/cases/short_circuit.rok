@@ -1,0 +1,19 @@
+// expect-exit: 10
+
+fn check(n: i32, divisor: i32) -> bool {
+    return divisor != 0 && n % divisor == 0;
+}
+
+fn main() -> i32 {
+    let total = 0;
+    if check(10, 2) {
+        total += 5;
+    }
+    if check(10, 0) {
+        total += 100;
+    }
+    if check(10, 5) {
+        total += 5;
+    }
+    return total;
+}

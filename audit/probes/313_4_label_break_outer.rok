@@ -1,0 +1,20 @@
+// spec: 003.13.4-label-break-outer
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// done
+
+// spec 3.13.4: 라벨로 중첩 루프 제어. `break 'outer`로 바깥 루프 종료.
+fn main() -> i32 {
+    'outer: for i in 0..5 {
+        for j in 0..5 {
+            if i == 2 {
+                if j == 1 {
+                    break 'outer;
+                }
+            }
+        }
+    }
+    rok_print_str("done");
+    return 0;
+}

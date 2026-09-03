@@ -1,0 +1,19 @@
+// expect-exit: 22
+
+fn classify(n: i32) -> i32 {
+    return match n {
+        -1 | -2 | -3 => 100,
+        0 => 5,
+        1..=10 => 10,
+        _ => 50,
+    };
+}
+
+fn main() -> i32 {
+    let total = 0;
+    total += classify(-2);
+    total += classify(0);
+    total += classify(7);
+    total += classify(99);
+    return total - 143;
+}

@@ -1,0 +1,25 @@
+// expect-exit: 11
+
+fn is_even(n: i32) -> bool {
+    if n == 0 {
+        return true;
+    }
+    return is_odd(n - 1);
+}
+
+fn is_odd(n: i32) -> bool {
+    if n == 0 {
+        return false;
+    }
+    return is_even(n - 1);
+}
+
+fn main() -> i32 {
+    let total = 0;
+    for i in 0..6 {
+        if is_even(i) {
+            total += 1;
+        }
+    }
+    return total + 8;
+}

@@ -1,0 +1,11 @@
+// expect-exit: 0
+// expect-stdout: line1	tab line2
+
+extern "C" {
+    fn puts(s: str) -> i32;
+}
+
+fn main() -> i32 {
+    puts("line1\ttab line2");
+    return 0i32;
+}

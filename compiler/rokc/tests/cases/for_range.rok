@@ -1,0 +1,9 @@
+// expect-exit: 55
+
+fn main() -> i32 {
+    let total = 0i32;
+    for i in 1i32..=10i32 {
+        total += i;
+    }
+    return total;
+}

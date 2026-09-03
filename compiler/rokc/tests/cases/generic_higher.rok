@@ -1,0 +1,10 @@
+// expect-exit: 30
+
+fn apply<T>(x: T, f: fn(T) -> T) -> T {
+    return f(x);
+}
+
+fn main() -> i32 {
+    let r = apply(5, |x: i32| -> i32 { x * 6 });
+    return r;
+}

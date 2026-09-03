@@ -1,0 +1,15 @@
+// spec: 005.02-const-arith
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 12
+
+// spec 5.2: const 표현식이 산술을 받는다.
+const A: i32 = 3;
+const B: i32 = 4;
+const C: i32 = A + B + 5;
+
+fn main() -> i32 {
+    rok_print_i32(C);
+    return 0;
+}

@@ -1,0 +1,19 @@
+// expect-exit: 50
+
+struct Vec2f {
+    x: f64;
+    y: f64;
+}
+
+impl Vec2f {
+    fn norm_sq(self) -> f64 {
+        return self.x * self.x + self.y * self.y;
+    }
+}
+
+fn main() -> i32 {
+    let p = Vec2f { x: 3.0f64, y: 4.0f64 };
+    let q = Vec2f { x: -3.0f64, y: -4.0f64 };
+    let total = p.norm_sq() + q.norm_sq();
+    return total as i32;
+}

@@ -1,0 +1,14 @@
+// expect-exit: 36
+
+fn main() -> i32 {
+    let total = 0;
+    for i in 0..4 {
+        for j in 0..4 {
+            if j == i {
+                continue;
+            }
+            total += i + j;
+        }
+    }
+    return total + 0;
+}

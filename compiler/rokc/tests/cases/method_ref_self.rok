@@ -1,0 +1,27 @@
+// expect-exit: 30
+
+struct Counter {
+    n: i32;
+}
+
+impl Counter {
+    fn new() -> Counter {
+        Counter { n: 0 }
+    }
+
+    fn add(self, k: i32) -> Counter {
+        Counter { n: self.n + k }
+    }
+
+    fn value(self) -> i32 {
+        self.n
+    }
+}
+
+fn main() -> i32 {
+    let c = Counter::new()
+        .add(5)
+        .add(10)
+        .add(15);
+    return c.value();
+}

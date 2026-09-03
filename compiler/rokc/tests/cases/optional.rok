@@ -1,0 +1,16 @@
+// expect-exit: 9
+
+fn pick(present: bool) -> i32 | none {
+    if present {
+        return 7i32;
+    }
+    return none;
+}
+
+fn main() -> i32 {
+    let a: i32 | none = pick(true);
+    let b: i32 | none = pick(false);
+    let x = a ?? -1i32;
+    let y = b ?? 2i32;
+    return x + y;
+}

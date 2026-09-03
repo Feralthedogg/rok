@@ -1,0 +1,17 @@
+// spec: 002.10.5-generic-default-strict
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 5
+
+// 더 엄격한 probe: T 명시 없이도 i32 기본이 적용되는지를 본다.
+// 기본 디폴트 메커니즘 = 인자 추론과 독립이어야.
+fn make_one<T = i32>() -> T {
+    return 1 as T;
+}
+
+fn main() -> i32 {
+    let n = make_one();
+    rok_print_i32(n + 4);
+    return 0;
+}

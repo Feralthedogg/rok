@@ -1,0 +1,9 @@
+// expect-exit: 42
+
+fn main() -> i32 {
+    let big: i64 = 200i64;
+    let narrow = big as i32;
+    let unsigned = narrow as u8;
+    let widened = unsigned as i32;
+    return widened - 158i32;
+}

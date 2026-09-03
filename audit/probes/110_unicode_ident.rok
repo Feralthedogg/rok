@@ -1,0 +1,14 @@
+// spec: 001.04-unicode-identifier
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 25
+
+// spec 1.4 / 변경점 754-756: Unicode 식별자 (UAX #31 표준).
+fn main() -> i32 {
+    let α: i32 = 5;
+    let β: i32 = 5;
+    let σ: i32 = α * β;
+    rok_print_i32(σ);
+    return 0;
+}

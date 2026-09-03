@@ -1,0 +1,12 @@
+// expect-exit: 6
+
+fn main() -> i32 {
+    let a: f64 = 3.5f64;
+    let b: f64 = 1.25f64;
+    let c = a + b;
+    let n = c as i32;
+    if c > 4.5f64 {
+        return n + 2;
+    }
+    return n;
+}

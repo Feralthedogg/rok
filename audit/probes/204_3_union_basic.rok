@@ -1,0 +1,15 @@
+// spec: 002.x-union-basic
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 5
+
+// spec 2.x / i-want 322: `union { ... }` 의 single-storage 이니셜라이저
+// + 필드 read.
+union ED { ptr: usize; fd: i32; val: u64; }
+
+fn main() -> i32 {
+    let x = ED { fd: 5 };
+    rok_print_i32(x.fd);
+    return 0;
+}

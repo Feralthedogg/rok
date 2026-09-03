@@ -1,0 +1,14 @@
+// Display + Debug traits used by f-string interpolation.
+//
+// Spec 6.4 binds these to compiler slots so future f-string lowering
+// (`f"{x}"` for Display, `f"{x:?}"` for Debug) can route through them.
+
+#[lang("display_trait")]
+trait Display {
+    fn display(self) -> str;
+}
+
+#[lang("debug_trait")]
+trait Debug {
+    fn debug(self) -> str;
+}

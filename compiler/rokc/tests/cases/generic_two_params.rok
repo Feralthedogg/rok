@@ -1,0 +1,21 @@
+// expect-exit: 18
+
+struct KV<K, V> {
+    key: K;
+    value: V;
+}
+
+impl KV<i32, i32> {
+    fn sum(self) -> i32 {
+        self.key + self.value
+    }
+}
+
+fn make_kv<K, V>(k: K, v: V) -> KV<K, V> {
+    KV { key: k, value: v }
+}
+
+fn main() -> i32 {
+    let p: KV<i32, i32> = make_kv(7, 8);
+    return p.sum() + 3;
+}

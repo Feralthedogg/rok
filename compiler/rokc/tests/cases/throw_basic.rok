@@ -1,0 +1,8 @@
+// expect-exit: 101
+
+// `throw` aborts the process via the runtime panic hook (stage 1 — no
+// real catch yet). The hook always exits with code 101.
+fn main() -> i32 {
+    throw 7;
+    return 0;   // unreachable
+}

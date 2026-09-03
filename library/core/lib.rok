@@ -1,0 +1,15 @@
+// rok core tier — safe, target-independent.
+// Owns: List, Dict, Set, Tuple, Int, Float, ops, iter, sync (Atomic/Mutex),
+//       task, par, fmt, reflect, future.
+// Bootstraps operator dispatch (`#[infix]`, `#[prefix]`, `#[postfix]`) and
+// literal handlers (`#[literal]`).
+// `core::prelude` is auto-imported by user code.
+
+pub mod fmt;
+pub mod future;
+pub mod index;
+pub mod iter;
+pub mod marker;
+pub mod ops;
+pub mod prelude;
+pub mod range;

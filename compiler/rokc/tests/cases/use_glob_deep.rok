@@ -1,0 +1,20 @@
+// expect-exit: 21
+
+pub mod outer {
+    pub fn a() -> i32 { 1i32 }
+
+    pub mod mid {
+        pub fn b() -> i32 { 2i32 }
+
+        pub mod inner {
+            pub fn c() -> i32 { 4i32 }
+        }
+    }
+}
+
+use outer::**;
+
+fn main() -> i32 {
+    // a, b, c all reachable through deep glob
+    return a() + b() + c() + 14i32;  // 1+2+4+14 = 21
+}

@@ -1,0 +1,29 @@
+// expect-exit: 36
+
+struct Op {
+    f: fn(i32, i32) -> i32;
+    init: i32;
+}
+
+fn add_op() -> Op {
+    Op { f: |a: i32, b: i32| -> i32 { a + b }, init: 0 }
+}
+
+fn mul_op() -> Op {
+    Op { f: |a: i32, b: i32| -> i32 { a * b }, init: 1 }
+}
+
+fn fold_array(xs: [i32; 4], op: Op) -> i32 {
+    let acc = op.init;
+    for v in xs {
+        acc = (op.f)(acc, v);
+    }
+    return acc;
+}
+
+fn main() -> i32 {
+    let xs: [i32; 4] = [1, 2, 3, 4];
+    let s = fold_array(xs, add_op());
+    let p = fold_array(xs, mul_op());
+    return s + p + 2;
+}

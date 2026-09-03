@@ -1,0 +1,21 @@
+// spec: 001.06-numeric-literal-radix
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 31
+// 5
+// 15
+// 1000000
+
+// spec 1.6 / 변경점 724-725: 진법 prefix `0x`, `0b`, `0o` + separator `_`.
+fn main() -> i32 {
+    let h = 0x1F;
+    let b = 0b101;
+    let o = 0o17;
+    let big = 1_000_000;
+    rok_print_i32(h);
+    rok_print_i32(b);
+    rok_print_i32(o);
+    rok_print_i32(big);
+    return 0;
+}

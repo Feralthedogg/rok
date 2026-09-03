@@ -1,0 +1,22 @@
+// expect-exit: 27
+
+struct Tagged<T> {
+    label: i32;
+    value: T;
+}
+
+fn make_tagged<T>(label: i32, value: T) -> Tagged<T> {
+    Tagged { label, value }
+}
+
+fn label_of<T>(t: Tagged<T>) -> i32 {
+    return t.label;
+}
+
+fn main() -> i32 {
+    let a = make_tagged(5, 100);
+    let b = make_tagged(7, 200);
+    let c = make_tagged(15, true);
+    let total = label_of(a) + label_of(b) + label_of(c);
+    return total;
+}

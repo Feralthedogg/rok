@@ -1,0 +1,12 @@
+// expect-exit: 50
+
+const ANSWER: i32 = 42;
+const STEP: i32 = 4;
+
+fn double_step() -> i32 {
+    return STEP + STEP;
+}
+
+fn main() -> i32 {
+    return ANSWER + double_step();
+}

@@ -1,0 +1,20 @@
+// expect-exit: 18
+
+fn parse(s: i32) -> i32 | none {
+    if s < 0 {
+        return none;
+    }
+    return s * 2;
+}
+
+fn process(x: i32, y: i32) -> i32 | none {
+    let a = parse(x)?;
+    let b = parse(y)?;
+    return a + b;
+}
+
+fn main() -> i32 {
+    let r1 = process(3, 5) ?? 99;
+    let r2 = process(-1, 5) ?? 2;
+    return r1 + r2 + 0;
+}

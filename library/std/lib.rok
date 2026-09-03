@@ -1,0 +1,6 @@
+// rok std tier — target-dependent.
+// Owns: fs, net, time, thread (OS), io (stdin/out/err), env, process, path.
+// Modules are pub(shy) so glob imports do not pull them in implicitly.
+
+// Submodule declarations land here as the std surface fills in.
+// Until then, the package root is empty.

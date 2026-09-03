@@ -1,0 +1,23 @@
+// expect-exit: 30
+
+// Items gated by `#[cfg(...)]` are filtered before HIR. Without the
+// matching flag the body item never enters the program — calls to it
+// would be unresolved. The host already provides a target_os match,
+// so we use a `target_family = "unix"` predicate that's true on macOS
+// and Linux build hosts.
+#[cfg(target_family = "unix")]
+fn unix_only() -> i32 { 30i32 }
+
+#[cfg(not(target_family = "unix"))]
+fn unix_only() -> i32 { 0i32 }
+
+// Compound predicates: `all`, `any`, `not`.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn arch_check() -> i32 { 0i32 }
+
+#[cfg(all(target_family = "unix", not(target_os = "windows")))]
+fn portable_unix() -> i32 { 0i32 }
+
+fn main() -> i32 {
+    return unix_only() + arch_check() + portable_unix();
+}

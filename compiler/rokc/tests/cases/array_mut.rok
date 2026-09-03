@@ -1,0 +1,8 @@
+// expect-exit: 46
+
+fn main() -> i32 {
+    let xs: [i32; 4] = [1i32, 2i32, 3i32, 4i32];
+    xs[0] = 10i32;
+    xs[2] = 30i32;
+    return xs[0] + xs[1] + xs[2] + xs[3];
+}

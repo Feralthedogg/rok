@@ -1,0 +1,13 @@
+// expect-exit: 30
+
+struct Point {
+    x: i32;
+    y: i32;
+}
+
+fn main() -> i32 {
+    let p: Point = Point { x: 1i32, y: 2i32 };
+    p.x = 10i32;
+    p.y = 20i32;
+    return p.x + p.y;
+}

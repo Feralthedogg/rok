@@ -1,0 +1,23 @@
+[package]
+name = "rokr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "rokr"
+# staticlib only: a parallel rlib would inject a duplicate
+# `#[panic_handler]` into other binaries that already pull in std.
+crate-type = ["staticlib"]
+
+[dependencies]
+libc = { workspace = true }
+rokr_common = { workspace = true }
+rokr_coroutine = { workspace = true }
+rokr_gc = { workspace = true }
+rokr_scheduler = { workspace = true }
+
+[lints]
+workspace = true

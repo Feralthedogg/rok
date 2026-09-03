@@ -1,0 +1,11 @@
+// spec: 006.05-set-literal
+// probe: negative-must-fail-parse
+// expect-exit: 0  (`#[literal]` 핸들러 시스템 + stdlib Set 미구현 →
+//                  지금은 parse 단계에서 거부)
+
+// spec 6.5: `{1, 2, 3}` set literal — `#[literal]` 핸들러로 stdlib Set 생성.
+fn main() -> i32 {
+    let s = {1, 2, 3};
+    rok_print_str("got_set");
+    return 0;
+}

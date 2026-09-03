@@ -1,0 +1,18 @@
+// expect-exit: 8
+
+fn next(n: i32) -> i32 | none {
+    if n > 1 {
+        return n - 1;
+    }
+    return none;
+}
+
+fn main() -> i32 {
+    let cur: i32 | none = next(8);
+    let last = 0;
+    while let v: i32 = cur {
+        last = v;
+        cur = next(v);
+    }
+    return last + 7;
+}

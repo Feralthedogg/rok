@@ -1,0 +1,67 @@
+// expect-exit: 42
+
+const SIZE: i32 = 4;
+
+type Maybe = i32 | none;
+
+struct Pair<T> {
+    a: T;
+    b: T;
+}
+
+impl Pair<i32> {
+    fn sum(self) -> i32 {
+        self.a + self.b
+    }
+
+    fn scale(self, f: fn(i32) -> i32) -> Pair<i32> {
+        Pair { a: f(self.a), b: f(self.b) }
+    }
+}
+
+enum Result<T> {
+    Ok(T),
+    Fail,
+}
+
+impl Result<i32> {
+    fn or_default(self, def: i32) -> i32 {
+        return match self {
+            Result::Ok(v) => v,
+            Result::Fail => def,
+        };
+    }
+}
+
+fn safe_op(x: i32, y: i32) -> Result<i32> {
+    if y == 0 {
+        return Result::Fail;
+    }
+    return Result::Ok(x * y);
+}
+
+fn compute(p: Pair<i32>) -> Maybe {
+    let s = p.sum();
+    if s > 100 {
+        return none;
+    }
+    return s * 2;
+}
+
+fn main() -> i32 {
+    let xs: [Pair<i32>; 4] = [
+        Pair { a: 3, b: 4 },
+        Pair { a: 5, b: 1 },
+        Pair { a: 7, b: 8 },
+        Pair { a: 90, b: 90 },
+    ];
+    let total = 0;
+    for p in xs {
+        let scaled = p.scale(|n: i32| -> i32 { n + 1 });
+        let r = compute(scaled) ?? 0;
+        total += r;
+    }
+    let mul = safe_op(total, 1).or_default(0);
+    let div = safe_op(total, 0).or_default(2);
+    return mul + div + SIZE - 32;
+}

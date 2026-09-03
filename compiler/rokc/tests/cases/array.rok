@@ -1,0 +1,12 @@
+// expect-exit: 60
+
+fn main() -> i32 {
+    let xs: [i32; 4] = [10i32, 20i32, 30i32, 40i32];
+    let total = 0i32;
+    let i = 0i32;
+    while i < 4i32 {
+        total += xs[i];
+        i += 1i32;
+    }
+    return total - 40i32;
+}

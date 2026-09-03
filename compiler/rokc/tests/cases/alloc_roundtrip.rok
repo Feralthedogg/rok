@@ -1,0 +1,31 @@
+// expect-exit: 0
+// expect-stdout:
+// 42
+// 7777777777
+
+// Heap roundtrip: alloc -> typed store -> typed load -> free.
+// Pointers cross the FFI boundary as `usize` since rok doesn't
+// surface raw pointers; the runtime helpers re-narrow them to
+// the right C pointer type.
+extern "C" {
+    fn rok_alloc(size: usize, align: usize) -> usize;
+    fn rok_free(ptr: usize);
+    fn rok_store_i32(ptr: usize, val: i32);
+    fn rok_load_i32(ptr: usize) -> i32;
+    fn rok_store_i64(ptr: usize, val: i64);
+    fn rok_load_i64(ptr: usize) -> i64;
+}
+
+fn main() -> i32 {
+    let p32 = rok_alloc(4usize, 4usize);
+    rok_store_i32(p32, 42);
+    rok_print_i32(rok_load_i32(p32));
+    rok_free(p32);
+
+    let p64 = rok_alloc(8usize, 8usize);
+    rok_store_i64(p64, 7777777777i64);
+    rok_print_i64(rok_load_i64(p64));
+    rok_free(p64);
+
+    return 0;
+}

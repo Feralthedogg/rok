@@ -1,0 +1,21 @@
+// expect-exit: 0
+// expect-stdout:
+// 8
+// 14
+// 6
+// 64
+// 1
+
+// Bitwise ops on i32 — and, or, xor, shift-left, shift-right.
+// Each routes through `infix_for_prim` to the matching `arith` op.
+fn main() -> i32 {
+    let a = 12i32;       // 0b1100
+    let b = 10i32;       // 0b1010
+
+    rok_print_i32(a & b);          // 0b1000 = 8
+    rok_print_i32(a | b);          // 0b1110 = 14
+    rok_print_i32(a ^ b);          // 0b0110 = 6
+    rok_print_i32(1i32 << 6i32);   // 64
+    rok_print_i32(64i32 >> 6i32);  // 1
+    return 0;
+}
