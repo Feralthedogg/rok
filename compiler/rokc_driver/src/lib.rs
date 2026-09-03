@@ -1,12 +1,11 @@
-//! Compiler driver. Threads source through scanner, lexer, parser,
-//! resolver, checker, HIR lowering, and MIR lowering.
+//! Compiler driver. Threads source through lexer, parser,
+//! HIR lowering (name resolution + type checks), and MIR lowering.
 
 mod cfg;
 mod toolchain;
 
 use std::path::{Path, PathBuf};
 
-use rokc_check::Checker;
 use rokc_diagnostic::RokDiagnostic;
 use rokc_hir::HirModule;
 use rokc_lexer::Lexer;
@@ -14,7 +13,6 @@ use rokc_mir::MirModule;
 use rokc_parser::{
     LangTable, PrecTable, collect_lang_table, collect_prec_table, parse_program,
 };
-use rokc_resolve::Resolver;
 
 pub use cfg::CfgEnv;
 pub use toolchain::{BuildOptions, EmitKind, TempDir, emit, link_executable, mlir_text};
@@ -137,14 +135,8 @@ pub fn compile_source(
         }
     }
 
-    let mut resolver = Resolver::new();
-    resolver.resolve(&program);
-    diags.append(&mut resolver.diagnostics);
-
-    let mut checker = Checker::new();
-    checker.check(&program);
-    diags.append(&mut checker.diagnostics);
-
+    // Name resolution and type / exhaustiveness checking happen during
+    // HIR lowering (`rokc_hir::lower_full`), where every type is known.
     let errors: Vec<RokDiagnostic> = diags.iter().filter(|d| d.is_error()).cloned().collect();
     if !errors.is_empty() {
         return Err(errors);
@@ -543,12 +535,18 @@ fn rename_with_prefix(item: rokc_ast::Item, module_path: &[String]) -> rokc_ast:
             u.name = format!("{prefix}::{}", u.name);
             rokc_ast::Item::Union(u)
         }
-        // Impl blocks reference their target via `self_ty` and live in
-        // the same module as the type they extend. The target type's
-        // path will be resolved with module-aware lookup later, so the
-        // impl item itself doesn't need a name rewrite.
-        rokc_ast::Item::Impl(_)
-        | rokc_ast::Item::Use(_) // already extracted into `uses`
+        // Impl blocks have no name; their methods carry the module path
+        // (`a::get`) so HIR resolves the impl target and the method
+        // bodies in the right module (HIR strips it back to the leaf).
+        rokc_ast::Item::Impl(mut i) => {
+            for it in &mut i.items {
+                if let rokc_ast::ImplItem::Method(m) = it {
+                    m.name = format!("{prefix}::{}", m.name);
+                }
+            }
+            rokc_ast::Item::Impl(i)
+        }
+        rokc_ast::Item::Use(_) // already extracted into `uses`
         | rokc_ast::Item::Extern(_)
         | rokc_ast::Item::Mod(_) => item,
     }

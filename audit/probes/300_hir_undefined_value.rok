@@ -1,0 +1,8 @@
+// spec: 003.00-name-resolution
+// probe: negative-must-fail
+// expect-exit: 0  (미정의 이름은 컴파일 에러 (이전: 0 으로 컴파일, H-C1).)
+// expect-error: cannot find value `yy`
+
+fn main() -> i32 {
+    return yy + 1;
+}

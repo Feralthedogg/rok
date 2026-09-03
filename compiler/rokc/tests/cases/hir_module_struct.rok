@@ -1,0 +1,26 @@
+// expect-exit: 54
+
+// Module-qualified struct resolution: `a::P` vs `b::P` (same leaf
+// name), `use a::P`, a struct named inside its own module, and a
+// method body resolving its module's private helper.
+mod a {
+    pub struct P { pub x: i32; }
+    pub fn mk() -> P { return P { x: helper() }; }
+    fn helper() -> i32 { return 6; }
+    impl P {
+        pub fn twice(self) -> i32 { return self.x * helper(); }
+    }
+}
+mod b {
+    pub struct P { pub y: i64; pub x: i32; }
+}
+use a::P;
+
+fn main() -> i32 {
+    let p = a::P { x: 7 };          // 7
+    let q = b::P { y: 1i64, x: 9 }; // 9
+    let r = P { x: 2 };             // via `use a::P`
+    let s = a::mk();                // 6
+    // 7 + 9 + 2 + 6 + (2 * 6) + (6 * 6 / 2) = 54
+    return p.x + q.x + r.x + s.x + r.twice() + s.twice() / 2;
+}

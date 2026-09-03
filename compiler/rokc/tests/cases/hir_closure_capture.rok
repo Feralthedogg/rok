@@ -1,0 +1,19 @@
+// expect-exit: 46
+
+// Closure capture analysis walks every expression form (for / ?? / ?.),
+// and `return` inside a closure returns from the closure.
+struct In { n: i32; }
+
+fn g(x: i32) -> i32 | none { if x > 0 { return x; } return none; }
+fn h(x: i32) -> In | none { if x > 0 { return In { n: x }; } return none; }
+
+fn main() -> i32 {
+    let n = 4;
+    let f = |x: i32| { let t = 0; for i in 0..n { t = t + x; } t };   // 8
+    let d = 30;
+    let k = |x: i32| g(x) ?? d;                                       // 30
+    let m = 5;
+    let q = |x: i32| h(x)?.n ?? m;                                    // 5
+    let early = |x: i32| -> i32 { if x > 0 { return 3; } return 0; }; // 3
+    return f(2) + k(0) + q(0) + early(1);
+}

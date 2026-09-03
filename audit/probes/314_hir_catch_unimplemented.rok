@@ -1,0 +1,9 @@
+// spec: 003.14.2-try-catch
+// probe: negative-must-fail
+// expect-exit: 0  (unwind 미구현 동안 catch 는 명시 거부 (throw 가 abort 하므로 handler 가 실행될 수 없음).)
+// expect-error: `catch` is not implemented yet
+
+fn main() -> i32 {
+    let r = try { 1 } catch e { 2 };
+    return r;
+}

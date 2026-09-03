@@ -1,0 +1,13 @@
+// spec: 003.15-let-else
+// probe: negative-must-fail
+// expect-exit: 0  (let-else 의 else 는 발산해야 (이전: mlir-opt 에러).)
+// expect-error: the `else` block of `let ... else` must diverge
+
+fn g(x: i32) -> i32 | none { if x > 0 { return x; } return none; }
+
+fn main() -> i32 {
+    let n: i32 = g(0) else {
+        let z = 1;
+    };
+    return n;
+}

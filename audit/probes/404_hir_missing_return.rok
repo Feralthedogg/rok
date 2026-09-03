@@ -1,0 +1,10 @@
+// spec: 004.04-return
+// probe: negative-must-fail
+// expect-exit: 0  (비-unit 함수의 return 누락 → 에러.)
+// expect-error: can finish without returning a value
+
+fn f(a: i32) -> i32 {
+    if a > 0 { return 1; }
+}
+
+fn main() -> i32 { return f(0); }

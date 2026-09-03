@@ -8,7 +8,6 @@ authors.workspace = true
 
 [dependencies]
 rokc_ast = { workspace = true }
-rokc_check = { workspace = true }
 rokc_codegen_mlir = { workspace = true }
 rokc_core = { workspace = true }
 rokc_diagnostic = { workspace = true }
@@ -16,7 +15,6 @@ rokc_hir = { workspace = true }
 rokc_lexer = { workspace = true }
 rokc_mir = { workspace = true }
 rokc_parser = { workspace = true }
-rokc_resolve = { workspace = true }
 
 [lints]
 workspace = true

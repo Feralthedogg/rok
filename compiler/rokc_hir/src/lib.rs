@@ -11,6 +11,7 @@ mod lower;
 mod print;
 mod ty;
 mod uses;
+mod walk;
 
 pub use lower::{lower, lower_full, lower_with_uses};
 pub use print::print_hir;
@@ -70,6 +71,10 @@ pub struct HirEnumVariant {
     /// position, so this list maps field name → tuple index. Empty
     /// for unit and tuple-form variants.
     pub named_fields: Vec<String>,
+    /// Number of constructor arguments (0 = unit variant). Needed because
+    /// `V(T)` and `V(A, B)` both store one `payload_ty` (a tuple for the
+    /// latter), so a tuple-typed single payload is otherwise ambiguous.
+    pub arity: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

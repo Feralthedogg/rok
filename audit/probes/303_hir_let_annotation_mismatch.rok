@@ -1,0 +1,9 @@
+// spec: 003.03-let
+// probe: negative-must-fail
+// expect-exit: 0  (let 타입 표기와 초기값 불일치 → 에러.)
+// expect-error: `let x` expects `i32`, found `bool`
+
+fn main() -> i32 {
+    let x: i32 = true;
+    return x;
+}

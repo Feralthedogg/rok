@@ -1,0 +1,11 @@
+// spec: 002.07-struct-field
+// probe: negative-must-fail
+// expect-exit: 0  (struct 리터럴의 여분 필드 → 에러 (이전: 무시).)
+// expect-error: struct `P` has no field `zz`
+
+struct P { x: i32; }
+
+fn main() -> i32 {
+    let p = P { x: 5, zz: 9 };
+    return p.x;
+}

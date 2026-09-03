@@ -1,6 +1,6 @@
 //! Definition identifiers and the global def table.
 //!
-//! `DefId` is assigned by `rokc_resolve` and carried through HIR / MIR / codegen.
+//! `DefId` is assigned by name resolution (HIR lowering) and carried through HIR / MIR / codegen.
 
 use std::collections::HashMap;
 

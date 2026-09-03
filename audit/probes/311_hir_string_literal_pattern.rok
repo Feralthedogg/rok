@@ -1,0 +1,9 @@
+// spec: 003.11-literal-pattern
+// probe: negative-must-fail
+// expect-exit: 0  (문자열 리터럴 패턴은 아직 미지원 → 명시 거부 (이전: wildcard 로 조용히 처리).)
+// expect-error: this literal pattern can't match
+
+fn main() -> i32 {
+    let s = "abc";
+    return match s { "x" => 1, _ => 2 };
+}

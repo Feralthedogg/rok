@@ -1,0 +1,25 @@
+// expect-exit: 0
+
+// Unsuffixed literals take the expected type: let annotation, parameter
+// type, the other operand, the `??` payload, struct field types.
+struct S { big: i64; small: u8; }
+
+fn f(x: i64) -> i64 { return x * 2; }
+
+fn main() -> i32 {
+    let a: i64 = 40i64;
+    let b = a + 2;
+    if b != 42i64 { return 1; }
+    let big: i64 = 3000000000;
+    if big / 1000 != 3000000i64 { return 2; }
+    if f(21) != 42i64 { return 3; }
+    let lo: i8 = -128;
+    if lo != -128i8 { return 4; }
+    let s = S { big: 5000000000, small: 255 };
+    if s.big != 5000000000i64 { return 5; }
+    if s.small != 255u8 { return 6; }
+    let o: i64 | none = 7;
+    let v = o ?? 9;
+    if v != 7i64 { return 7; }
+    return 0;
+}

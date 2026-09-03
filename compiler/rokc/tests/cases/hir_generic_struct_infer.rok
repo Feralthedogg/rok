@@ -1,0 +1,23 @@
+// expect-exit: 46
+
+// Generic struct literals infer their type arguments from the field
+// values (`Box { v: 5 }` → `Box<i32>`), or take them from the expected
+// type; generic fns returning `Tagged<T>` instantiate on demand.
+struct Box<T> { v: T; }
+struct Tagged<T> { label: i32; value: T; }
+
+fn make_tagged<T>(label: i32, value: T) -> Tagged<T> {
+    Tagged { label, value }
+}
+
+fn main() -> i32 {
+    let a = Box { v: 5 };              // Box<i32>
+    let b = Box { v: 6i64 };           // Box<i64>
+    let c: Box<i64> = Box { v: 30 };   // expected type: literal is i64
+    let t = make_tagged(3, true);
+    let u = make_tagged(2, 7);
+    if t.value {
+        return a.v + (b.v as i32) + (c.v as i32) + t.label + u.label;
+    }
+    return 0;
+}

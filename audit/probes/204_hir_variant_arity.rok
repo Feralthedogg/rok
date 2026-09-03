@@ -1,0 +1,11 @@
+// spec: 002.04-enum-variant
+// probe: negative-must-fail
+// expect-exit: 0  (enum variant 인자 개수 → 에러 (이전: mlir-opt 에러).)
+// expect-error: `E::A` takes 1 argument(s) but 3 were supplied
+
+enum E { A(i32) }
+
+fn main() -> i32 {
+    let e = E::A(1, 2, 3);
+    return match e { E::A(a) => a };
+}

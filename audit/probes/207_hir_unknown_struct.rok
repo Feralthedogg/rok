@@ -1,0 +1,9 @@
+// spec: 002.07-struct-literal
+// probe: negative-must-fail
+// expect-exit: 0  (미정의 struct 리터럴 → 에러 (이전: unit).)
+// expect-error: cannot find struct `Q`
+
+fn main() -> i32 {
+    let x = Q { a: 1 };
+    return 9;
+}

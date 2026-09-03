@@ -1,0 +1,9 @@
+// spec: 004.05-closure
+// probe: negative-must-fail
+// expect-exit: 0  (타입을 알 수 없는 클로저 파라미터 → 에러 (이전: unit).)
+// expect-error: cannot infer the type of closure parameter `x`
+
+fn main() -> i32 {
+    let f = |x| x + 1;
+    return f(2);
+}

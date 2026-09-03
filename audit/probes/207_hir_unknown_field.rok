@@ -1,0 +1,11 @@
+// spec: 002.07-struct-field
+// probe: negative-must-fail
+// expect-exit: 0  (없는 필드 읽기 → 에러 (이전: 0).)
+// expect-error: struct `P` has no field `y`
+
+struct P { x: i32; }
+
+fn main() -> i32 {
+    let p = P { x: 5 };
+    return p.y;
+}

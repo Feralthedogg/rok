@@ -298,40 +298,7 @@ impl<'a> FnBuilder<'a> {
                 // Stage-1: the payload is a call to `rok_panic` (-> !).
                 // Emit the call, then an `unreachable` terminator so the
                 // surrounding block won't fall through into a merge.
-                // ponytail: bridge for HIR still emitting the legacy
-                // `rok_panic(code)`; the runtime contract is now
-                // `rok_panic(msg, len)`. Drop once HIR passes (msg, len).
-                let legacy = match &call.kind {
-                    HirExprKind::Call { callee, args } if args.len() == 1 => Some(*callee),
-                    _ => None,
-                };
-                if let Some(callee) = legacy {
-                    let msg = "uncaught throw";
-                    let fixed = HirExpr {
-                        kind: HirExprKind::Call {
-                            callee,
-                            args: vec![
-                                HirExpr {
-                                    kind: HirExprKind::Const(ConstVal::Str(msg.to_owned())),
-                                    ty: HirTy::Prim(PrimTy::Str),
-                                    span: call.span,
-                                },
-                                HirExpr {
-                                    kind: HirExprKind::Const(ConstVal::UInt {
-                                        value: msg.len() as u128,
-                                        ty: PrimTy::Usize,
-                                    }),
-                                    ty: HirTy::Prim(PrimTy::Usize),
-                                    span: call.span,
-                                },
-                            ],
-                        },
-                        ..call.clone()
-                    };
-                    let _ = self.lower_expr_to_operand(&fixed);
-                } else {
-                    let _ = self.lower_expr_to_operand(call);
-                }
+                let _ = self.lower_expr_to_operand(call);
                 self.terminate(Terminator::Unreachable);
                 true
             }
@@ -542,7 +509,10 @@ impl<'a> FnBuilder<'a> {
                     }
                 }
             }
-            HirExprKind::UnresolvedPath(_) => Operand::Const(ConstVal::Unit),
+            // HIR reports every unresolved name; reaching MIR is a bug.
+            HirExprKind::UnresolvedPath(p) => {
+                panic!("internal compiler error: unresolved path `{}` reached MIR", p.join("::"))
+            }
             HirExprKind::Call { callee, .. } => {
                 let result_ty = self
                     .fn_ret_tys

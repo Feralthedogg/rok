@@ -1,0 +1,10 @@
+// spec: 002.02-item-uniqueness
+// probe: negative-must-fail
+// expect-exit: 0  (중복 struct 정의 → 에러 (이전: StructId 어긋남).)
+// expect-error: type `P` is defined more than once
+
+struct P { a: i32; }
+struct P { b: i64; c: i64; }
+struct Q { q: i32; }
+
+fn main() -> i32 { let q = Q { q: 5 }; return q.q; }

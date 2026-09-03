@@ -3,7 +3,6 @@ resolver = "3"
 members = [
     "compiler/rokc",
     "compiler/rokc_ast",
-    "compiler/rokc_check",
     "compiler/rokc_codegen_mlir",
     "compiler/rokc_core",
     "compiler/rokc_diagnostic",
@@ -14,7 +13,6 @@ members = [
     "compiler/rokc_lexer",
     "compiler/rokc_mir",
     "compiler/rokc_parser",
-    "compiler/rokc_resolve",
     "runtime/rokr",
     "runtime/rokr_common",
     "runtime/rokr_coroutine",
@@ -31,7 +29,6 @@ authors = ["Han Damin <miniex@daminstudio.net>"]
 
 [workspace.dependencies]
 rokc_ast = { path = "compiler/rokc_ast" }
-rokc_check = { path = "compiler/rokc_check" }
 rokc_codegen_mlir = { path = "compiler/rokc_codegen_mlir" }
 rokc_core = { path = "compiler/rokc_core" }
 rokc_diagnostic = { path = "compiler/rokc_diagnostic" }
@@ -42,7 +39,6 @@ rokc_ir_common = { path = "compiler/rokc_ir_common" }
 rokc_lexer = { path = "compiler/rokc_lexer" }
 rokc_mir = { path = "compiler/rokc_mir" }
 rokc_parser = { path = "compiler/rokc_parser" }
-rokc_resolve = { path = "compiler/rokc_resolve" }
 
 rokr_common = { path = "runtime/rokr_common" }
 rokr_coroutine = { path = "runtime/rokr_coroutine" }

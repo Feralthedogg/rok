@@ -24,15 +24,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rokc_check"
-version = "0.1.0"
-dependencies = [
- "rokc_ast",
- "rokc_core",
- "rokc_diagnostic",
-]
-
-[[package]]
 name = "rokc_codegen_mlir"
 version = "0.1.0"
 dependencies = [
@@ -54,7 +45,6 @@ name = "rokc_driver"
 version = "0.1.0"
 dependencies = [
  "rokc_ast",
- "rokc_check",
  "rokc_codegen_mlir",
  "rokc_core",
  "rokc_diagnostic",
@@ -62,7 +52,6 @@ dependencies = [
  "rokc_lexer",
  "rokc_mir",
  "rokc_parser",
- "rokc_resolve",
 ]
 
 [[package]]
@@ -117,15 +106,6 @@ dependencies = [
  "rokc_core",
  "rokc_diagnostic",
  "rokc_lexer",
-]
-
-[[package]]
-name = "rokc_resolve"
-version = "0.1.0"
-dependencies = [
- "rokc_ast",
- "rokc_core",
- "rokc_diagnostic",
 ]
 
 [[package]]

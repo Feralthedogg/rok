@@ -1,0 +1,10 @@
+// spec: 002.09-trait-impl
+// probe: negative-must-fail
+// expect-exit: 0  (trait impl 의 필수 메서드 누락 → 에러.)
+// expect-error: is missing method `two`
+
+trait Sh { fn sh(self) -> i32; fn two(self) -> i32; }
+struct A { v: i32; }
+impl Sh for A { fn sh(self) -> i32 { return self.v; } }
+
+fn main() -> i32 { let a = A { v: 4 }; return a.sh(); }

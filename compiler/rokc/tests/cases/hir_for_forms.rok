@@ -1,0 +1,41 @@
+// expect-exit: 0
+// expect-stdout:
+// 4
+// 6
+// 7
+// 256
+// 3
+
+// `for` forms: `_` binder, array returned by a call, tuple patterns over
+// an array of tuples, `a..=MAX` terminating, and range bounds evaluated
+// exactly once.
+fn mk() -> [i32; 3] { return [1, 2, 3]; }
+
+fn bound(n: i32) -> i32 {
+    rok_print_i32(n);
+    return n;
+}
+
+fn main() -> i32 {
+    let t = 0;
+    for _ in 0..4 { t = t + 1; }
+    rok_print_i32(t);
+
+    let s = 0;
+    for v in mk() { s = s + v; }
+    rok_print_i32(s);
+
+    let pairs = [(1, 2), (3, 1)];
+    let w = 0;
+    for (a, b) in pairs { w = w + a + b; }
+    rok_print_i32(w);
+
+    let n = 0;
+    for i in 0u8..=255u8 { n = n + 1; }
+    rok_print_i32(n);
+
+    let k = 0;
+    for i in 0..bound(3) { k = k + 1; }
+    if k != 3 { return 1; }
+    return 0;
+}

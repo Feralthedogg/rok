@@ -1,0 +1,12 @@
+// spec: 003.12.5-exhaustiveness
+// probe: negative-must-fail
+// expect-exit: 0  (enum match 의 누락 variant → 에러 (이전: 런타임 SIGTRAP).)
+// expect-error: non-exhaustive match on `C`: `C::B` not covered
+
+enum C { R, G, B }
+
+fn f(c: C) -> i32 {
+    return match c { C::R => 1, C::G => 2 };
+}
+
+fn main() -> i32 { return f(C::B); }
