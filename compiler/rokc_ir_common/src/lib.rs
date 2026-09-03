@@ -28,6 +28,8 @@ pub enum PrimTy {
     Bool,
     /// C `char` (FFI; `c'A'`).
     CChar,
+    /// Unicode scalar value (`'가'`); 32-bit code point (spec 808).
+    Char,
     /// stdlib `str` (UTF-8 view, primitive).
     Str,
 }
@@ -50,6 +52,7 @@ impl PrimTy {
             Self::F64 => "f64",
             Self::Bool => "bool",
             Self::CChar => "c_char",
+            Self::Char => "char",
             Self::Str => "str",
         }
     }
@@ -66,7 +69,7 @@ impl PrimTy {
 
     #[must_use]
     pub const fn is_int(self) -> bool {
-        self.is_signed_int() || self.is_unsigned_int() || matches!(self, Self::CChar)
+        self.is_signed_int() || self.is_unsigned_int() || matches!(self, Self::CChar | Self::Char)
     }
 
     #[must_use]
@@ -81,7 +84,7 @@ impl PrimTy {
         match self {
             Self::I8 | Self::U8 | Self::Bool | Self::CChar => 8,
             Self::I16 | Self::U16 => 16,
-            Self::I32 | Self::U32 | Self::F32 => 32,
+            Self::I32 | Self::U32 | Self::F32 | Self::Char => 32,
             Self::I64 | Self::U64 | Self::F64 => 64,
             Self::Isize | Self::Usize => pointer_width,
             Self::Str => 0,

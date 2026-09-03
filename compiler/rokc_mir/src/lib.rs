@@ -7,7 +7,7 @@ mod ty;
 
 pub use lower::lower;
 pub use print::print_mir;
-pub use ty::lower_ty;
+pub use ty::{enums_without_layout, lower_ty, sum_layout};
 
 use rokc_core::DefId;
 use rokc_diagnostic::Span;
@@ -116,6 +116,14 @@ pub enum RValue {
     // Integer cast: zext / extsi when widening, trunci when narrowing.
     // Codegen picks the right arith op from `from_ty` and `to_ty`.
     Cast {
+        source: Operand,
+        from_ty: MirTy,
+        to_ty: MirTy,
+    },
+    // Bit-preserving move between a variant's payload type and the
+    // shared payload slot of its enum / sum (zero-extend / truncate,
+    // float bits reinterpreted). Not a value conversion like `Cast`.
+    Bitcast {
         source: Operand,
         from_ty: MirTy,
         to_ty: MirTy,

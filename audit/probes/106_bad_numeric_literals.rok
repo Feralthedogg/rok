@@ -1,0 +1,12 @@
+// spec: 001.06-numeric-literals
+// probe: negative-must-fail
+
+// spec 1.6.4 rejected forms, plus an out-of-range suffixed literal.
+fn main() -> i32 {
+    let a = 1__0;
+    let b = 0x_FF;
+    let c = 1e;
+    let d = 0b102;
+    let e = 300i8;
+    return 0;
+}

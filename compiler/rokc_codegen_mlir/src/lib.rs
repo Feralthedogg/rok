@@ -5,8 +5,9 @@
 //! (`mlir-opt` + `mlir-translate` + `clang/lld`) does the rest.
 
 pub mod emit;
+mod mangle;
 
-use rokc_diagnostic::RokDiagnostic;
+use rokc_diagnostic::{ErrorKind, RokDiagnostic};
 use rokc_mir::MirModule;
 
 #[derive(Clone, Debug, Default)]
@@ -27,6 +28,13 @@ pub fn codegen_with_target(
     let pointer_width = pointer_width_for_target(target);
     let mut e = emit::Emitter::new(pointer_width);
     e.emit_module(module);
+    if let Some(first) = e.errors.first() {
+        let mut d = RokDiagnostic::error(ErrorKind::Unsupported, first.clone());
+        for more in e.errors.iter().skip(1) {
+            d = d.with_note(more.clone());
+        }
+        return Err(d);
+    }
     Ok(MlirOutput {
         text: e.finish(),
         runtime_libraries: vec!["rokr".to_owned()],
@@ -34,8 +42,14 @@ pub fn codegen_with_target(
 }
 
 fn pointer_width_for_target(target: Option<&str>) -> u32 {
+    // 32-bit architectures by triple prefix; everything else (x86_64,
+    // aarch64, arm64, riscv64, wasm64, …) is 64-bit.
+    const BITS32: &[&str] = &[
+        "i386", "i486", "i586", "i686", "arm-", "armv", "armeb", "thumb", "riscv32", "wasm32",
+        "mips-", "mipsel-", "powerpc-", "sparc-",
+    ];
     match target {
-        Some(t) if t.contains("wasm32") || t.contains("i686") || t.contains("armv7") => 32,
+        Some(t) if BITS32.iter().any(|p| t.starts_with(p)) => 32,
         _ => 64,
     }
 }

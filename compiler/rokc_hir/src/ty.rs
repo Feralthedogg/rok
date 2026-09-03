@@ -65,6 +65,7 @@ fn resolve_path_ty(path: &Path) -> HirTy {
             "f64" => Some(PrimTy::F64),
             "bool" => Some(PrimTy::Bool),
             "c_char" => Some(PrimTy::CChar),
+            "char" => Some(PrimTy::Char),
             "str" => Some(PrimTy::Str),
             _ => None,
         } {

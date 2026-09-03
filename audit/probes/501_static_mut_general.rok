@@ -1,6 +1,6 @@
 // spec: 005.03-static-mut-extern-only
 // probe: negative-must-fail
-// expect-exit: 0  (build must fail)
+// expect-error: `static mut` is only allowed inside `extern "C"
 
 // 변경점 라인 656: static mut 는 extern "C" 블록 내부 (FFI) 만 허용.
 // 일반 코드 금지.

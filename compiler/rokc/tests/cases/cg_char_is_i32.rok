@@ -1,0 +1,9 @@
+// expect-exit: 0
+// expect-stdout: 44032
+// `char` is a 32-bit code point (spec 808), not a C byte.
+
+fn main() -> i32 {
+    let c = '가';
+    rok_print_i32(c as i32);
+    return 0;
+}

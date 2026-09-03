@@ -1,4 +1,4 @@
-// rok std tier — target-dependent.
+// rok::std tier — target-dependent.
 // Owns: fs, net, time, thread (OS), io (stdin/out/err), env, process, path.
 // Modules are pub(shy) so glob imports do not pull them in implicitly.
 

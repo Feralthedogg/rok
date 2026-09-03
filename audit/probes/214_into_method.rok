@@ -1,5 +1,6 @@
 // spec: 002.14-into-method
 // probe: negative-must-fail
+// expect-error: no method `into` found
 // expect-exit: 0  (stdlib From/Into impl 본문 미작성 → 명시 거부;
 //                  실제 dispatch 는 별도 마일스톤)
 

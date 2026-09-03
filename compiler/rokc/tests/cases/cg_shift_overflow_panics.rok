@@ -1,0 +1,5 @@
+// expect-exit: 101
+
+fn s(a: i32, n: i32) -> i32 { return a << n; }
+
+fn main() -> i32 { return s(1, 40); }

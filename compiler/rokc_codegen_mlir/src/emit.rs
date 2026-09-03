@@ -15,10 +15,23 @@ use rokc_mir::{
 pub struct Emitter {
     out: String,
     pointer_width: u32,
-    // Interned string-literal globals: content → symbol name. Emitted at
-    // module top so all functions can reference them by `addressof`.
+    // Interned string-literal globals: content → symbol name. Shared by
+    // every function of the module and emitted once at module top.
     str_globals: std::collections::BTreeMap<String, String>,
-    next_str_id: u32,
+    /// Unsupported constructs found while emitting. Non-empty → the
+    /// module is rejected instead of shipping placeholder IR.
+    pub errors: Vec<String>,
+    /// Some codegen-inserted runtime check called `rok_panic`.
+    uses_panic: bool,
+    /// Package hash for mangled symbols (spec 905).
+    pkg: String,
+}
+
+/// Symbol + signature of a module function, for call-site typing.
+pub(crate) struct FnSig {
+    name: String,
+    params: Vec<MirTy>,
+    ret: MirTy,
 }
 
 impl Emitter {
@@ -28,58 +41,94 @@ impl Emitter {
             out: String::new(),
             pointer_width,
             str_globals: std::collections::BTreeMap::new(),
-            next_str_id: 0,
+            errors: Vec::new(),
+            uses_panic: false,
+            pkg: String::new(),
         }
     }
 
     pub fn emit_module(&mut self, module: &MirModule) {
-        // The user's `fn main` is renamed to `rok_user_main`; the real
+        // The user's `fn main` is renamed to its mangled symbol; the real
         // C entry point is a synthetic wrapper that brackets the user
         // body with runtime init / shutdown calls.
-        let user_main_ret_ty = module
-            .functions
-            .iter()
-            .find(|f| f.name == "main")
-            .map(|f| f.ret_ty.clone());
+        let user_main = module.functions.iter().find(|f| f.name == "main");
+        // Content-based package hash: the printed MIR of the whole unit.
+        self.pkg = crate::mangle::pkg_hash(&rokc_mir::print_mir(module));
 
-        let mut fn_names: HashMap<FunctionId, String> = HashMap::new();
+        let mut fns: HashMap<FunctionId, FnSig> = HashMap::new();
         for f in &module.functions {
-            let mlir_name = if f.name == "main" {
-                "rok_user_main".to_owned()
-            } else {
-                // MLIR / LLVM symbols can't carry `::`; module path
-                // separators get rewritten to `__`. Same convention as
-                // impl-method mangling, so the namespaces compose without
-                // collision risk in the small.
-                f.name.replace("::", "__")
-            };
-            fn_names.insert(f.id, mlir_name);
+            fns.insert(
+                f.id,
+                FnSig {
+                    name: crate::mangle::symbol_for(f, &self.pkg),
+                    params: f.param_tys.clone(),
+                    ret: f.ret_ty.clone(),
+                },
+            );
         }
 
         self.out.push_str("module {\n");
         for f in &module.functions {
-            let symbol = fn_names.get(&f.id).cloned().unwrap_or_else(|| f.name.clone());
-            self.emit_function(f, &symbol, &fn_names);
+            let symbol = fns[&f.id].name.clone();
+            self.emit_function(f, &symbol, &fns);
         }
-        if let Some(ret_ty) = user_main_ret_ty {
-            self.emit_main_wrapper(&ret_ty);
+        if let Some(m) = user_main {
+            let symbol = fns[&m.id].name.clone();
+            self.emit_main_wrapper(&symbol, &m.ret_ty);
         }
-        self.emit_string_globals();
+        let panic_declared = module
+            .functions
+            .iter()
+            .any(|f| f.name == "rok_panic" && f.blocks.is_empty());
+        if self.uses_panic && !panic_declared {
+            let _ = writeln!(
+                self.out,
+                "  func.func private @rok_panic(!llvm.ptr, i{})",
+                self.pointer_width
+            );
+        }
         self.emit_static_globals(module);
+        self.emit_string_globals();
         self.out.push_str("}\n");
     }
 
     fn emit_static_globals(&mut self, module: &MirModule) {
+        let pw = self.pointer_width;
         for s in &module.statics {
-            let ty_str = mlir_type(&s.ty, self.pointer_width);
+            let ty_str = mlir_type(&s.ty, pw);
             let constness = if s.is_mut { "" } else { "constant " };
-            let init = format_const_attr(&s.init, &s.ty);
-            let _ = writeln!(
-                self.out,
-                "  llvm.mlir.global internal {constness}@{name}({init}) {{addr_space = 0 : i32}} : {ty_str}",
-                name = s.name
-            );
+            let sym = crate::mangle::item(&self.pkg, &s.name, "");
+            if let ConstVal::Str(text) = &s.init {
+                // A pointer-valued global needs an initializer region
+                // that takes the literal's address.
+                let lit = self.intern_global_string(text);
+                let _ = writeln!(
+                    self.out,
+                    "  llvm.mlir.global internal {constness}@{sym}() {{addr_space = 0 : i32}} : !llvm.ptr {{\n    %0 = llvm.mlir.addressof @{lit} : !llvm.ptr\n    llvm.return %0 : !llvm.ptr\n  }}"
+                );
+                continue;
+            }
+            match format_const_attr(&s.init, &s.ty, pw) {
+                Some(init) => {
+                    let _ = writeln!(
+                        self.out,
+                        "  llvm.mlir.global internal {constness}@{sym}({init}) {{addr_space = 0 : i32}} : {ty_str}"
+                    );
+                }
+                None => self.errors.push(format!(
+                    "unsupported in codegen: initializer of static `{}` : `{ty_str}`",
+                    s.name
+                )),
+            }
         }
+    }
+
+    fn intern_global_string(&mut self, text: &str) -> String {
+        let n = self.str_globals.len();
+        self.str_globals
+            .entry(text.to_owned())
+            .or_insert_with(|| format!("rok.str{n}"))
+            .clone()
     }
 
     // Emit one `llvm.mlir.global` per interned string literal. The
@@ -117,7 +166,7 @@ impl Emitter {
         &mut self,
         f: &MirFunction,
         symbol: &str,
-        fn_names: &HashMap<FunctionId, String>,
+        fns: &HashMap<FunctionId, FnSig>,
     ) {
         // Empty-body functions become external declarations — no body
         // braces, just a signature with `private` linkage.
@@ -150,55 +199,65 @@ impl Emitter {
         }
         self.out.push_str(" {\n");
 
-        let mut emit = FnEmit::new(f, self.pointer_width, fn_names, self.next_str_id);
+        let str_globals = std::mem::take(&mut self.str_globals);
+        let mut emit = FnEmit::new(f, self.pointer_width, fns, str_globals, &self.pkg);
         emit.emit_prelude();
         for b in &f.blocks {
             emit.emit_block(b);
         }
-        // Hoist any string globals that this function discovered.
-        for (content, sym) in std::mem::take(&mut emit.str_globals) {
-            self.str_globals.insert(content, sym);
+        self.str_globals = std::mem::take(&mut emit.str_globals);
+        self.uses_panic |= emit.uses_panic;
+        for e in std::mem::take(&mut emit.errors) {
+            self.errors.push(format!("in `{}`: {e}", f.name));
         }
-        self.next_str_id += emit.next_str_id;
         self.out.push_str(&emit.finish());
 
         self.out.push_str("  }\n");
     }
 
-    // Synthetic `main` wrapping the user's body with runtime calls.
-    // Both runtime functions are forward-declared as private extern.
-    fn emit_main_wrapper(&mut self, user_ret_ty: &MirTy) {
+    // Synthetic C `main` (spec 905.9) wrapping the user's body with
+    // runtime calls. Both runtime functions are forward-declared as
+    // private extern.
+    fn emit_main_wrapper(&mut self, user_main: &str, user_ret_ty: &MirTy) {
         let pw = self.pointer_width;
         self.out.push_str(
             "  func.func private @rok_runtime_init() -> ()\n  func.func private @rok_runtime_shutdown() -> ()\n",
         );
         self.out.push_str("  func.func @main() -> i32 {\n");
         self.out.push_str("    func.call @rok_runtime_init() : () -> ()\n");
-        match user_ret_ty {
-            MirTy::Unit => {
-                self.out.push_str("    func.call @rok_user_main() : () -> ()\n");
-                self.out.push_str("    func.call @rok_runtime_shutdown() : () -> ()\n");
-                self.out.push_str("    %0 = arith.constant 0 : i32\n");
-                self.out.push_str("    func.return %0 : i32\n");
+        if matches!(user_ret_ty, MirTy::Unit) {
+            let _ = writeln!(self.out, "    func.call @{user_main}() : () -> ()");
+            self.out.push_str("    func.call @rok_runtime_shutdown() : () -> ()\n");
+            self.out.push_str("    %0 = arith.constant 0 : i32\n");
+            self.out.push_str("    func.return %0 : i32\n");
+            self.out.push_str("  }\n");
+            return;
+        }
+        let ret = mlir_type(user_ret_ty, pw);
+        let _ = writeln!(self.out, "    %0 = func.call @{user_main}() : () -> {ret}");
+        self.out.push_str("    func.call @rok_runtime_shutdown() : () -> ()\n");
+        // The OS wants an `i32` exit code.
+        let conv = match user_ret_ty {
+            MirTy::Prim(p) if p.is_int() || *p == PrimTy::Bool => {
+                let w = if *p == PrimTy::Bool { 1 } else { p.bit_width(pw) };
+                match w.cmp(&32) {
+                    std::cmp::Ordering::Equal => None,
+                    std::cmp::Ordering::Greater => Some("arith.trunci"),
+                    std::cmp::Ordering::Less if p.is_signed_int() => Some("arith.extsi"),
+                    std::cmp::Ordering::Less => Some("arith.extui"),
+                }
             }
-            other => {
-                let ret = mlir_type(other, pw);
-                let _ = writeln!(
-                    self.out,
-                    "    %0 = func.call @rok_user_main() : () -> {ret}"
-                );
-                self.out.push_str("    func.call @rok_runtime_shutdown() : () -> ()\n");
-                // OS expects an i32 exit code; widen / narrow as needed.
-                let _ = if matches!(other, MirTy::Prim(PrimTy::I32)) {
-                    writeln!(self.out, "    func.return %0 : i32")
-                } else {
-                    let _ = writeln!(
-                        self.out,
-                        "    %1 = arith.trunci %0 : {ret} to i32"
-                    );
-                    writeln!(self.out, "    func.return %1 : i32")
-                };
+            _ => {
+                self.errors
+                    .push(format!("unsupported in codegen: `main` returning `{ret}`"));
+                None
             }
+        };
+        if let Some(op) = conv {
+            let _ = writeln!(self.out, "    %1 = {op} %0 : {ret} to i32");
+            self.out.push_str("    func.return %1 : i32\n");
+        } else {
+            self.out.push_str("    func.return %0 : i32\n");
         }
         self.out.push_str("  }\n");
     }
@@ -232,21 +291,24 @@ struct FnEmit<'a> {
     /// rather than stack-slotted).
     block_param_set: HashSet<u32>,
     next_ssa: u32,
-    fn_names: &'a HashMap<FunctionId, String>,
-    /// String literals discovered in this function (content → symbol).
-    /// Merged into the parent emitter so module-level globals are
-    /// emitted once for the whole TU.
+    fns: &'a HashMap<FunctionId, FnSig>,
+    /// The module-wide string table, lent to this function while it is
+    /// emitted so identical literals share one global across functions.
     str_globals: std::collections::BTreeMap<String, String>,
-    next_str_id: u32,
-    str_id_base: u32,
+    errors: Vec<String>,
+    uses_panic: bool,
+    /// Counter for the extra blocks runtime checks split off.
+    next_check: u32,
+    pkg: &'a str,
 }
 
 impl<'a> FnEmit<'a> {
     fn new(
         f: &'a MirFunction,
         pointer_width: u32,
-        fn_names: &'a HashMap<FunctionId, String>,
-        str_id_base: u32,
+        fns: &'a HashMap<FunctionId, FnSig>,
+        str_globals: std::collections::BTreeMap<String, String>,
+        pkg: &'a str,
     ) -> Self {
         // Block params are SSA values; everything else gets a stack slot.
         let mut block_param_set: HashSet<u32> = HashSet::new();
@@ -268,10 +330,12 @@ impl<'a> FnEmit<'a> {
             llvm_slot: HashSet::new(),
             block_param_set,
             next_ssa: 0,
-            fn_names,
-            str_globals: std::collections::BTreeMap::new(),
-            next_str_id: 0,
-            str_id_base,
+            fns,
+            str_globals,
+            errors: Vec::new(),
+            uses_panic: false,
+            next_check: 0,
+            pkg,
         }
     }
 
@@ -279,8 +343,7 @@ impl<'a> FnEmit<'a> {
         if let Some(name) = self.str_globals.get(s) {
             return name.clone();
         }
-        let name = format!("rok.str{}", self.str_id_base + self.next_str_id);
-        self.next_str_id += 1;
+        let name = format!("rok.str{}", self.str_globals.len());
         self.str_globals.insert(s.to_owned(), name.clone());
         name
     }
@@ -478,9 +541,10 @@ impl<'a> FnEmit<'a> {
                 let val = self.materialize_operand(value, ty);
                 let ty_str = mlir_type(ty, self.pointer_width);
                 let addr = self.fresh_value();
+                let sym = crate::mangle::item(self.pkg, name, "");
                 let _ = writeln!(
                     self.body,
-                    "    {addr} = llvm.mlir.addressof @{name} : !llvm.ptr"
+                    "    {addr} = llvm.mlir.addressof @{sym} : !llvm.ptr"
                 );
                 let _ = writeln!(
                     self.body,
@@ -503,13 +567,13 @@ impl<'a> FnEmit<'a> {
         };
         let val = self.materialize_operand(value, elem_ty);
         let elem_str = mlir_type(elem_ty, self.pointer_width);
+        let (idx_int, from_str) = self.checked_index(index, len);
         if self.llvm_slot.contains(&array.0) {
             // GEP into the LLVM array slot for aggregate elements.
-            let idx_i32 = self.materialize_index_as_i32(index);
             let ptr = self.fresh_value();
             let _ = writeln!(
                 self.body,
-                "    {ptr} = llvm.getelementptr {slot}[0, {idx_i32}] : (!llvm.ptr, i32) -> !llvm.ptr, !llvm.array<{len} x {elem_str}>"
+                "    {ptr} = llvm.getelementptr {slot}[0, {idx_int}] : (!llvm.ptr, {from_str}) -> !llvm.ptr, !llvm.array<{len} x {elem_str}>"
             );
             let _ = writeln!(
                 self.body,
@@ -517,17 +581,6 @@ impl<'a> FnEmit<'a> {
             );
             return;
         }
-        let (idx_int, idx_int_ty) = match index {
-            Operand::Copy(id) => {
-                let ty = self.local_ty(*id);
-                (self.materialize_operand(index, &ty), ty)
-            }
-            Operand::Const(c) => {
-                let ty = const_ty(c).unwrap_or(MirTy::Prim(PrimTy::I32));
-                (self.materialize_operand(index, &ty), ty)
-            }
-        };
-        let from_str = mlir_type(&idx_int_ty, self.pointer_width);
         let idx_index = self.fresh_value();
         let _ = writeln!(
             self.body,
@@ -569,64 +622,22 @@ impl<'a> FnEmit<'a> {
         }
     }
 
-    // Coerce an operand to an `i32` SSA name suitable as the index in
-    // `llvm.getelementptr`. Constants are emitted directly as i32; copies
-    // are loaded at their declared type and then sign-extended/truncated
-    // to i32 if necessary.
-    fn materialize_index_as_i32(&mut self, index: &Operand) -> String {
-        match index {
-            Operand::Const(c) => match c {
-                ConstVal::Int { value, .. } => {
-                    let v = self.fresh_value();
-                    let _ = writeln!(
-                        self.body,
-                        "    {v} = llvm.mlir.constant({} : i32) : i32",
-                        *value
-                    );
-                    v
-                }
-                ConstVal::UInt { value, .. } => {
-                    let v = self.fresh_value();
-                    let _ = writeln!(
-                        self.body,
-                        "    {v} = llvm.mlir.constant({} : i32) : i32",
-                        *value
-                    );
-                    v
-                }
-                _ => self.materialize_operand(index, &MirTy::Prim(PrimTy::I32)),
-            },
-            Operand::Copy(id) => {
-                let ty = self.local_ty(*id);
-                let val = self.materialize_operand(index, &ty);
-                let from_str = mlir_type(&ty, self.pointer_width);
-                if from_str == "i32" {
-                    val
-                } else if let MirTy::Prim(p) = &ty {
-                    let dst = self.fresh_value();
-                    let from_w = p.bit_width(self.pointer_width);
-                    if from_w > 32 {
-                        let _ = writeln!(
-                            self.body,
-                            "    {dst} = arith.trunci {val} : {from_str} to i32"
-                        );
-                    } else {
-                        let mn = if p.is_signed_int() {
-                            "arith.extsi"
-                        } else {
-                            "arith.extui"
-                        };
-                        let _ = writeln!(
-                            self.body,
-                            "    {dst} = {mn} {val} : {from_str} to i32"
-                        );
-                    }
-                    dst
-                } else {
-                    val
-                }
-            }
+    /// Materialize an array index at its own integer type and panic
+    /// unless `0 <= index < len` (one unsigned compare). Statically
+    /// in-range constants skip the check.
+    fn checked_index(&mut self, index: &Operand, len: u32) -> (String, String) {
+        let ty = match index {
+            Operand::Copy(id) => self.local_ty(*id),
+            Operand::Const(c) => const_ty(c).unwrap_or(MirTy::Prim(PrimTy::I32)),
+        };
+        let v = self.materialize_operand(index, &ty);
+        let ty_str = mlir_type(&ty, self.pointer_width);
+        let in_range = const_int(index).is_some_and(|c| (0..i128::from(len)).contains(&c));
+        if !in_range {
+            let fail = self.cmp_const("uge", &v, i128::from(len), &ty_str);
+            self.emit_check(&fail, "index out of bounds");
         }
+        (v, ty_str)
     }
 
     // Materialise an rvalue into a single SSA name and return it.
@@ -643,9 +654,9 @@ impl<'a> FnEmit<'a> {
                 self.emit_unary_op(&dst, dst_ty, *op, op_ty, operand);
                 dst
             }
-            RValue::Call { callee, args, ret_ty } => {
+            RValue::Call { callee, args, .. } => {
                 let dst = self.fresh_value();
-                self.emit_call(&dst, *callee, args, ret_ty);
+                self.emit_call(&dst, *callee, args);
                 dst
             }
             RValue::StructInit { ty, fields } => self.emit_struct_init(ty, fields),
@@ -654,6 +665,10 @@ impl<'a> FnEmit<'a> {
             }
             RValue::Cast { source, from_ty, to_ty } => {
                 self.emit_cast(source, from_ty, to_ty)
+            }
+            RValue::Bitcast { source, from_ty, to_ty } => {
+                let v = self.materialize_operand(source, from_ty);
+                self.bitcast_value(v, from_ty, to_ty)
             }
             RValue::WithField { source, struct_ty, index, value } => {
                 self.emit_with_field(source, struct_ty, *index, value)
@@ -673,9 +688,10 @@ impl<'a> FnEmit<'a> {
             RValue::StaticLoad { name, ty } => {
                 let ty_str = mlir_type(ty, self.pointer_width);
                 let addr = self.fresh_value();
+                let sym = crate::mangle::item(self.pkg, name, "");
                 let _ = writeln!(
                     self.body,
-                    "    {addr} = llvm.mlir.addressof @{name} : !llvm.ptr"
+                    "    {addr} = llvm.mlir.addressof @{sym} : !llvm.ptr"
                 );
                 let dst = self.fresh_value();
                 let _ = writeln!(
@@ -688,16 +704,9 @@ impl<'a> FnEmit<'a> {
     }
 
     fn emit_fn_addr(&mut self, callee: FunctionId, fn_ty: &MirTy) -> String {
-        let name = self
-            .fn_names
-            .get(&callee)
-            .cloned()
-            .unwrap_or_else(|| format!("fn{}", callee.0));
+        let name = self.fns[&callee].name.clone();
         let MirTy::Fn(args, ret) = fn_ty else {
-            // Fall back: just emit unrealized cast.
-            let dst = self.fresh_value();
-            let _ = writeln!(self.body, "    {dst} = arith.constant 0 : i64");
-            return dst;
+            return self.unsupported("address of a function with a non-function type");
         };
         // `func.constant` accepts a `func.func` symbol; bridge to
         // `!llvm.ptr` so it can flow through closure structs and
@@ -773,12 +782,12 @@ impl<'a> FnEmit<'a> {
             .cloned()
             .unwrap_or_default();
         let elem_str = mlir_type(elem_ty, self.pointer_width);
+        let (idx_int, from_str) = self.checked_index(index, len);
         if self.llvm_slot.contains(&array.0) {
-            let idx_i32 = self.materialize_index_as_i32(index);
             let ptr = self.fresh_value();
             let _ = writeln!(
                 self.body,
-                "    {ptr} = llvm.getelementptr {slot}[0, {idx_i32}] : (!llvm.ptr, i32) -> !llvm.ptr, !llvm.array<{len} x {elem_str}>"
+                "    {ptr} = llvm.getelementptr {slot}[0, {idx_int}] : (!llvm.ptr, {from_str}) -> !llvm.ptr, !llvm.array<{len} x {elem_str}>"
             );
             let dst = self.fresh_value();
             let _ = writeln!(
@@ -787,17 +796,6 @@ impl<'a> FnEmit<'a> {
             );
             return dst;
         }
-        let (idx_int, idx_int_ty) = match index {
-            Operand::Copy(id) => {
-                let ty = self.local_ty(*id);
-                (self.materialize_operand(index, &ty), ty)
-            }
-            Operand::Const(c) => {
-                let ty = const_ty(c).unwrap_or(MirTy::Prim(PrimTy::I32));
-                (self.materialize_operand(index, &ty), ty)
-            }
-        };
-        let from_str = mlir_type(&idx_int_ty, self.pointer_width);
         let idx_index = self.fresh_value();
         let _ = writeln!(
             self.body,
@@ -840,20 +838,21 @@ impl<'a> FnEmit<'a> {
     // via truncate. Same-size acts as a no-op alias.
     fn emit_cast(&mut self, source: &Operand, from_ty: &MirTy, to_ty: &MirTy) -> String {
         let v = self.materialize_operand(source, from_ty);
+        self.cast_value(v, from_ty, to_ty)
+    }
+
+    fn cast_value(&mut self, v: String, from_ty: &MirTy, to_ty: &MirTy) -> String {
         let from = mlir_type(from_ty, self.pointer_width);
         let to = mlir_type(to_ty, self.pointer_width);
         if from == to {
             return v;
         }
         let (MirTy::Prim(fp), MirTy::Prim(tp)) = (from_ty, to_ty) else {
-            // Non-int casts aren't part of this slice; emit a placeholder.
-            let dst = self.fresh_value();
-            let _ = writeln!(
-                self.body,
-                "    {dst} = builtin.unrealized_conversion_cast {v} : {from} to {to}"
-            );
-            return dst;
+            return self.unsupported(&format!("cast from `{from}` to `{to}`"));
         };
+        if matches!(fp, PrimTy::Str) || matches!(tp, PrimTy::Str) {
+            return self.unsupported(&format!("cast from `{from}` to `{to}`"));
+        }
         let dst = self.fresh_value();
         // Bool participates in cast logic as a 1-bit unsigned int. The
         // is_int helpers don't include it (operator dispatch wants Bool
@@ -898,10 +897,7 @@ impl<'a> FnEmit<'a> {
                             writeln!(self.body, "    {dst} = arith.trunci {v} : {from} to {to}");
                     }
                 } else {
-                    let _ = writeln!(
-                        self.body,
-                        "    {dst} = builtin.unrealized_conversion_cast {v} : {from} to {to}"
-                    );
+                    return self.unsupported(&format!("cast from `{from}` to `{to}`"));
                 }
             }
             (false, true, true, false) => {
@@ -931,20 +927,43 @@ impl<'a> FnEmit<'a> {
                 } else if to_w < from_w {
                     let _ = writeln!(self.body, "    {dst} = arith.truncf {v} : {from} to {to}");
                 } else {
-                    let _ = writeln!(
-                        self.body,
-                        "    {dst} = builtin.unrealized_conversion_cast {v} : {from} to {to}"
-                    );
+                    return self.unsupported(&format!("cast from `{from}` to `{to}`"));
                 }
             }
-            _ => {
-                let _ = writeln!(
-                    self.body,
-                    "    {dst} = builtin.unrealized_conversion_cast {v} : {from} to {to}"
-                );
-            }
+            _ => return self.unsupported(&format!("cast from `{from}` to `{to}`")),
         }
         dst
+    }
+
+    /// Bit-preserving scalar move (payload slot ↔ variant type): floats
+    /// are reinterpreted as same-width ints, ints zero-extend into a
+    /// wider slot and truncate back out.
+    fn bitcast_value(&mut self, v: String, from_ty: &MirTy, to_ty: &MirTy) -> String {
+        let pw = self.pointer_width;
+        let (MirTy::Prim(fp), MirTy::Prim(tp)) = (from_ty, to_ty) else {
+            let (from, to) = (mlir_type(from_ty, pw), mlir_type(to_ty, pw));
+            return self.unsupported(&format!("payload of `{from}` stored as `{to}`"));
+        };
+        let width = |p: &PrimTy| if *p == PrimTy::Bool { 1 } else { p.bit_width(pw) };
+        let (fw, tw) = (width(fp), width(tp));
+        let mut v = v;
+        if fp.is_float() {
+            let n = self.fresh_value();
+            let _ = writeln!(self.body, "    {n} = arith.bitcast {v} : {} to i{fw}", mlir_prim(*fp, pw));
+            v = n;
+        }
+        if fw != tw {
+            let n = self.fresh_value();
+            let op = if tw > fw { "arith.extui" } else { "arith.trunci" };
+            let _ = writeln!(self.body, "    {n} = {op} {v} : i{fw} to i{tw}");
+            v = n;
+        }
+        if tp.is_float() {
+            let n = self.fresh_value();
+            let _ = writeln!(self.body, "    {n} = arith.bitcast {v} : i{tw} to {}", mlir_prim(*tp, pw));
+            v = n;
+        }
+        v
     }
 
     // Build a struct value by chaining `llvm.insertvalue` from `undef`.
@@ -995,14 +1014,20 @@ impl<'a> FnEmit<'a> {
         dst
     }
 
-    fn emit_call(&mut self, dst: &str, callee: FunctionId, args: &[Operand], ret_ty: &MirTy) {
-        // Materialize each argument with its declared type so the
-        // `func.call` operand list is well-typed.
+    fn emit_call(&mut self, dst: &str, callee: FunctionId, args: &[Operand]) {
+        // Materialize each argument at the callee's parameter type so the
+        // `func.call` operand list matches the declaration; literals take
+        // that type directly and mismatched locals get a cast.
+        let fns = self.fns;
+        let sig = &fns[&callee];
+        let ret_ty = &sig.ret;
         let arg_tys: Vec<MirTy> = args
             .iter()
-            .map(|op| match op {
-                Operand::Copy(id) => self.local_ty(*id),
-                Operand::Const(c) => const_ty(c).unwrap_or(MirTy::Any),
+            .enumerate()
+            .map(|(i, op)| match (sig.params.get(i), op) {
+                (Some(t), _) => t.clone(),
+                (None, Operand::Copy(id)) => self.local_ty(*id),
+                (None, Operand::Const(c)) => const_ty(c).unwrap_or(MirTy::Any),
             })
             .collect();
         let arg_vals: Vec<String> = args
@@ -1011,11 +1036,7 @@ impl<'a> FnEmit<'a> {
             .map(|(op, ty)| self.materialize_operand(op, ty))
             .collect();
 
-        let name = self
-            .fn_names
-            .get(&callee)
-            .cloned()
-            .unwrap_or_else(|| format!("fn{}", callee.0));
+        let name = sig.name.clone();
         let arg_list = arg_vals.join(", ");
         let arg_ty_list = arg_tys
             .iter()
@@ -1041,6 +1062,102 @@ impl<'a> FnEmit<'a> {
         }
     }
 
+    /// Record an unsupported construct; returns a dummy SSA name so
+    /// emission can continue and collect further errors.
+    fn unsupported(&mut self, what: &str) -> String {
+        self.errors.push(format!("unsupported in codegen: {what}"));
+        self.fresh_value()
+    }
+
+    fn unsupported_at(&mut self, _dst: &str, what: &str) {
+        self.errors.push(format!("unsupported in codegen: {what}"));
+    }
+
+    /// Branch to a `rok_panic(msg, len)` block when `fail` (an `i1`) is
+    /// set; emission continues in a fresh fall-through block.
+    fn emit_check(&mut self, fail: &str, msg: &str) {
+        let n = self.next_check;
+        self.next_check += 1;
+        let sym = self.intern_string(msg);
+        let pw = self.pointer_width;
+        let _ = writeln!(self.body, "    cf.cond_br {fail}, ^rok_panic{n}, ^rok_ok{n}");
+        let _ = writeln!(self.body, "  ^rok_panic{n}:");
+        let p = self.fresh_value();
+        let l = self.fresh_value();
+        let _ = writeln!(self.body, "    {p} = llvm.mlir.addressof @{sym} : !llvm.ptr");
+        let _ = writeln!(self.body, "    {l} = arith.constant {} : i{pw}", msg.len());
+        let _ = writeln!(self.body, "    func.call @rok_panic({p}, {l}) : (!llvm.ptr, i{pw}) -> ()");
+        self.body.push_str("    llvm.unreachable\n");
+        let _ = writeln!(self.body, "  ^rok_ok{n}:");
+        self.uses_panic = true;
+    }
+
+    /// `fail = (v <pred> c)` for an integer constant `c`.
+    fn cmp_const(&mut self, pred: &str, v: &str, c: i128, ty: &str) -> String {
+        let k = self.fresh_value();
+        let r = self.fresh_value();
+        let _ = writeln!(self.body, "    {k} = arith.constant {c} : {ty}");
+        let _ = writeln!(self.body, "    {r} = arith.cmpi {pred}, {v}, {k} : {ty}");
+        r
+    }
+
+    /// Runtime checks that must panic rather than hit LLVM poison / UB:
+    /// integer division by zero, signed `MIN / -1`, and shift amounts
+    /// at or beyond the bit width. Constant divisors / shift amounts
+    /// that are statically fine skip the check.
+    fn emit_arith_checks(
+        &mut self,
+        op: PrimOp,
+        prim: PrimTy,
+        rhs: &Operand,
+        lhs_v: &str,
+        rhs_v: &str,
+        ty: &str,
+    ) {
+        if !prim.is_int() {
+            return;
+        }
+        let rhs_const = const_int(rhs);
+        let bits = prim.bit_width(self.pointer_width);
+        match op {
+            PrimOp::Div | PrimOp::Rem => {
+                let (zero_msg, ovf_msg) = if op == PrimOp::Div {
+                    ("attempt to divide by zero", "attempt to divide with overflow")
+                } else {
+                    (
+                        "attempt to calculate the remainder with a divisor of zero",
+                        "attempt to calculate the remainder with overflow",
+                    )
+                };
+                if rhs_const.is_none_or(|c| c == 0) {
+                    let fail = self.cmp_const("eq", rhs_v, 0, ty);
+                    self.emit_check(&fail, zero_msg);
+                }
+                if prim.is_signed_int() && rhs_const.is_none_or(|c| c == -1) {
+                    let is_min = self.cmp_const("eq", lhs_v, -(1i128 << (bits - 1)), ty);
+                    let is_neg1 = self.cmp_const("eq", rhs_v, -1, ty);
+                    let fail = self.fresh_value();
+                    let _ = writeln!(self.body, "    {fail} = arith.andi {is_min}, {is_neg1} : i1");
+                    self.emit_check(&fail, ovf_msg);
+                }
+            }
+            PrimOp::Shl | PrimOp::Shr => {
+                if rhs_const.is_some_and(|c| (0..i128::from(bits)).contains(&c)) {
+                    return;
+                }
+                // Unsigned compare also rejects negative amounts.
+                let fail = self.cmp_const("uge", rhs_v, i128::from(bits), ty);
+                let msg = if op == PrimOp::Shl {
+                    "attempt to shift left with overflow"
+                } else {
+                    "attempt to shift right with overflow"
+                };
+                self.emit_check(&fail, msg);
+            }
+            _ => {}
+        }
+    }
+
     fn emit_bin_op(
         &mut self,
         dst: &str,
@@ -1054,20 +1171,15 @@ impl<'a> FnEmit<'a> {
         let rhs_v = self.materialize_operand(rhs, op_ty);
         let ty = mlir_type(op_ty, self.pointer_width);
         let MirTy::Prim(prim) = op_ty else {
-            let _ = writeln!(
-                self.body,
-                "    {dst} = builtin.unrealized_conversion_cast : () to {ty}"
-            );
+            self.unsupported_at(dst, &format!("binary `{op:?}` on `{ty}`"));
             return;
         };
+        self.emit_arith_checks(op, *prim, rhs, &lhs_v, &rhs_v, &ty);
         if let Some(line) = arith_binop(op, *prim, dst, &lhs_v, &rhs_v, &ty) {
             self.body.push_str(&line);
             return;
         }
-        let _ = writeln!(
-            self.body,
-            "    {dst} = builtin.unrealized_conversion_cast : () to {ty}"
-        );
+        self.unsupported_at(dst, &format!("binary `{op:?}` on `{ty}`"));
     }
 
     fn emit_unary_op(
@@ -1081,11 +1193,8 @@ impl<'a> FnEmit<'a> {
         let v = self.materialize_operand(operand, op_ty);
         let ty = mlir_type(op_ty, self.pointer_width);
         let MirTy::Prim(prim) = op_ty else {
-            let _ = writeln!(
-                self.body,
-                "    {dst} = builtin.unrealized_conversion_cast : () to {}",
-                mlir_type(dst_ty, self.pointer_width)
-            );
+            let _ = dst_ty;
+            self.unsupported_at(dst, &format!("unary `{op:?}` on `{ty}`"));
             return;
         };
         match (op, prim) {
@@ -1109,31 +1218,33 @@ impl<'a> FnEmit<'a> {
                 let _ = writeln!(self.body, "    {one} = arith.constant 1 : i1");
                 let _ = writeln!(self.body, "    {dst} = arith.xori {v}, {one} : i1");
             }
-            _ => {
-                let _ = writeln!(
-                    self.body,
-                    "    {dst} = builtin.unrealized_conversion_cast : () to {ty}"
-                );
-            }
+            _ => self.unsupported_at(dst, &format!("unary `{op:?}` on `{ty}`")),
         }
     }
 
     fn emit_const_assign(&mut self, dst: &str, dst_ty: &MirTy, c: &ConstVal) {
         let ty = mlir_type(dst_ty, self.pointer_width);
         match c {
-            ConstVal::Int { value, ty: prim } => {
-                let _ = writeln!(
-                    self.body,
-                    "    {dst} = arith.constant {value} : {}",
-                    mlir_prim(*prim, self.pointer_width)
-                );
-            }
-            ConstVal::UInt { value, ty: prim } => {
-                let _ = writeln!(
-                    self.body,
-                    "    {dst} = arith.constant {value} : {}",
-                    mlir_prim(*prim, self.pointer_width)
-                );
+            // Numeric literals take the destination's type when it is
+            // numeric (`g(3)` with an `i64` param, `let x: i64 = 3`);
+            // otherwise they keep their own literal type.
+            ConstVal::Int { ty: prim, .. } | ConstVal::UInt { ty: prim, .. } => {
+                let (value, as_f64) = match c {
+                    ConstVal::Int { value, .. } => (value.to_string(), *value as f64),
+                    ConstVal::UInt { value, .. } => (value.to_string(), *value as f64),
+                    _ => unreachable!(),
+                };
+                let lit = match dst_ty {
+                    MirTy::Any => ty.clone(),
+                    MirTy::Prim(p) if p.is_int() => ty.clone(),
+                    MirTy::Prim(p) if p.is_float() => {
+                        let f = format_float_decimal(as_f64);
+                        let _ = writeln!(self.body, "    {dst} = arith.constant {f} : {ty}");
+                        return;
+                    }
+                    _ => mlir_prim(*prim, self.pointer_width),
+                };
+                let _ = writeln!(self.body, "    {dst} = arith.constant {value} : {lit}");
             }
             ConstVal::Bool(b) => {
                 let _ = writeln!(
@@ -1143,11 +1254,28 @@ impl<'a> FnEmit<'a> {
                 );
             }
             ConstVal::Float { bits, ty: prim } => {
-                let lit = format_float(*bits, *prim);
+                // `f32` / `f64` destination wins over the literal's width.
+                let (prim, val) = match dst_ty {
+                    MirTy::Prim(p) if p.is_float() && p != prim => {
+                        let v = if *prim == PrimTy::F32 {
+                            f64::from(f32::from_bits(*bits as u32))
+                        } else {
+                            f64::from_bits(*bits)
+                        };
+                        let b = if *p == PrimTy::F32 {
+                            u64::from((v as f32).to_bits())
+                        } else {
+                            v.to_bits()
+                        };
+                        (*p, b)
+                    }
+                    _ => (*prim, *bits),
+                };
+                let lit = format_float(val, prim);
                 let _ = writeln!(
                     self.body,
                     "    {dst} = arith.constant {lit} : {}",
-                    mlir_prim(*prim, self.pointer_width)
+                    mlir_prim(prim, self.pointer_width)
                 );
             }
             ConstVal::Unit | ConstVal::None => {
@@ -1253,7 +1381,20 @@ impl<'a> FnEmit<'a> {
 
     fn materialize_operand(&mut self, op: &Operand, ty: &MirTy) -> String {
         match op {
-            Operand::Copy(id) => self.read_local(*id),
+            Operand::Copy(id) => {
+                let v = self.read_local(*id);
+                // A primitive local requested at another primitive type
+                // (e.g. an `i32` local passed to an `i64` parameter) gets
+                // an explicit conversion rather than ill-typed IR.
+                let from = self.local_ty(*id);
+                let pw = self.pointer_width;
+                if matches!((&from, ty), (MirTy::Prim(_), MirTy::Prim(_)))
+                    && mlir_type(&from, pw) != mlir_type(ty, pw)
+                {
+                    return self.cast_value(v, &from, ty);
+                }
+                v
+            }
             Operand::Const(c) => {
                 let v = self.fresh_value();
                 self.emit_const_assign(&v, ty, c);
@@ -1275,10 +1416,7 @@ fn mlir_type(ty: &MirTy, pointer_width: u32) -> String {
         MirTy::Unit => "()".to_owned(),
         MirTy::Prim(p) => mlir_prim(*p, pointer_width),
         MirTy::Any => format!("i{pointer_width}"),
-        MirTy::Sum(parts) => {
-            let _ = parts;
-            "!llvm.struct<(i32, i64)>".to_owned()
-        }
+        MirTy::Sum(parts) => mlir_type(&rokc_mir::sum_layout(parts), pointer_width),
         MirTy::Tuple(parts) | MirTy::Struct(_, parts) => {
             let inner: Vec<String> =
                 parts.iter().map(|t| mlir_type(t, pointer_width)).collect();
@@ -1313,7 +1451,7 @@ fn mlir_prim(p: PrimTy, pointer_width: u32) -> String {
     match p {
         PrimTy::I8 | PrimTy::U8 | PrimTy::CChar => "i8".to_owned(),
         PrimTy::I16 | PrimTy::U16 => "i16".to_owned(),
-        PrimTy::I32 | PrimTy::U32 => "i32".to_owned(),
+        PrimTy::I32 | PrimTy::U32 | PrimTy::Char => "i32".to_owned(),
         PrimTy::I64 | PrimTy::U64 => "i64".to_owned(),
         PrimTy::Isize | PrimTy::Usize => format!("i{pointer_width}"),
         PrimTy::F32 => "f32".to_owned(),
@@ -1381,7 +1519,8 @@ fn arith_binop(
         (PrimOp::Gt, p) if p.is_int() => Some(("arith.cmpi", "ugt")),
         (PrimOp::Ge, p) if p.is_int() => Some(("arith.cmpi", "uge")),
         (PrimOp::Eq, p) if p.is_float() => Some(("arith.cmpf", "oeq")),
-        (PrimOp::Ne, p) if p.is_float() => Some(("arith.cmpf", "one")),
+        // `!=` is true when either side is NaN → unordered-or-not-equal.
+        (PrimOp::Ne, p) if p.is_float() => Some(("arith.cmpf", "une")),
         (PrimOp::Lt, p) if p.is_float() => Some(("arith.cmpf", "olt")),
         (PrimOp::Le, p) if p.is_float() => Some(("arith.cmpf", "ole")),
         (PrimOp::Gt, p) if p.is_float() => Some(("arith.cmpf", "ogt")),
@@ -1425,6 +1564,15 @@ fn struct_field_tys(ty: &MirTy) -> Vec<MirTy> {
     }
 }
 
+/// Integer value of a constant operand (`Int` / in-range `UInt`).
+fn const_int(op: &Operand) -> Option<i128> {
+    match op {
+        Operand::Const(ConstVal::Int { value, .. }) => Some(*value),
+        Operand::Const(ConstVal::UInt { value, .. }) => i128::try_from(*value).ok(),
+        _ => None,
+    }
+}
+
 /// Best-effort type for a `ConstVal`. Used at call sites where we have a
 /// raw const operand and need to pick an MLIR type for it.
 fn const_ty(c: &ConstVal) -> Option<MirTy> {
@@ -1434,7 +1582,7 @@ fn const_ty(c: &ConstVal) -> Option<MirTy> {
         }
         ConstVal::Bool(_) => Some(MirTy::Prim(PrimTy::Bool)),
         ConstVal::Str(_) => Some(MirTy::Prim(PrimTy::Str)),
-        ConstVal::Char(_) => Some(MirTy::Prim(PrimTy::CChar)),
+        ConstVal::Char(_) => Some(MirTy::Prim(PrimTy::Char)),
         ConstVal::Unit | ConstVal::None => Some(MirTy::Unit),
     }
 }
@@ -1474,21 +1622,29 @@ fn format_float_decimal(v: f64) -> String {
     }
 }
 
-/// Render a `ConstVal` as the attribute body of an `llvm.mlir.global`.
-/// Only literal-shaped values are valid here — anything else degrades
-/// to a zero-init.
-fn format_const_attr(v: &ConstVal, ty: &MirTy) -> String {
-    let ty_str = mlir_type(ty, 64);
-    match v {
-        ConstVal::Int { value, .. } => format!("{value} : {ty_str}"),
-        ConstVal::Bool(b) => format!("{} : i1", if *b { 1 } else { 0 }),
-        ConstVal::Unit | ConstVal::None => "0 : i32".to_owned(),
-        ConstVal::Char(c) => format!("{c} : i32"),
-        ConstVal::Str(_) | ConstVal::UInt { .. } | ConstVal::Float { .. } => {
-            // String / float / unsigned static initialisers aren't part
-            // of this slice — emit a zero-init placeholder.
-            format!("0 : {ty_str}")
+/// Render a scalar `ConstVal` as the attribute body of an
+/// `llvm.mlir.global`, typed at the static's declared type. `None` for
+/// shapes with no attribute form.
+fn format_const_attr(v: &ConstVal, ty: &MirTy, pointer_width: u32) -> Option<String> {
+    let ty_str = mlir_type(ty, pointer_width);
+    let MirTy::Prim(p) = ty else { return None };
+    Some(match v {
+        ConstVal::Int { value, .. } if p.is_int() => format!("{value} : {ty_str}"),
+        ConstVal::UInt { value, .. } if p.is_int() => format!("{value} : {ty_str}"),
+        ConstVal::Char(c) if p.is_int() => format!("{c} : {ty_str}"),
+        ConstVal::Bool(b) if *p == PrimTy::Bool => format!("{} : i1", u8::from(*b)),
+        ConstVal::Float { bits, ty: fp } if p.is_float() => {
+            let v = if *fp == PrimTy::F32 {
+                f64::from(f32::from_bits(*bits as u32))
+            } else {
+                f64::from_bits(*bits)
+            };
+            let b = if *p == PrimTy::F32 { u64::from((v as f32).to_bits()) } else { v.to_bits() };
+            format!("{} : {ty_str}", format_float(b, *p))
         }
-    }
+        ConstVal::Int { value, .. } if p.is_float() => {
+            format!("{} : {ty_str}", format_float_decimal(*value as f64))
+        }
+        _ => return None,
+    })
 }
-

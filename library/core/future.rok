@@ -11,7 +11,7 @@ trait Future {
     fn poll(self) -> Output | none;
 }
 
-#[lang("stream_trait")]
+// No `stream_trait` slot in stdlib spec 0.4 — unregistered for now.
 trait Stream {
     type Item;
     fn next(self) -> Item | none;

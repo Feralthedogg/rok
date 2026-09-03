@@ -147,8 +147,8 @@ fn print_rvalue(out: &mut String, r: &RValue) {
             print_operand(out, target);
             let _ = write!(out, ".{index}<{}>", ty_str(field_ty));
         }
-        RValue::Cast { source, from_ty, to_ty } => {
-            out.push_str("cast<");
+        RValue::Cast { source, from_ty, to_ty } | RValue::Bitcast { source, from_ty, to_ty } => {
+            out.push_str(if matches!(r, RValue::Cast { .. }) { "cast<" } else { "bitcast<" });
             out.push_str(&ty_str(from_ty));
             out.push_str(" → ");
             out.push_str(&ty_str(to_ty));

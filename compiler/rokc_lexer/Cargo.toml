@@ -7,8 +7,8 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+rokc_ast = { workspace = true }
 rokc_diagnostic = { workspace = true }
-rokc_scanner = { workspace = true }
 
 [lints]
 workspace = true

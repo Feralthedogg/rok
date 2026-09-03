@@ -1,5 +1,6 @@
 // spec: 003.02-unicode-operator
 // probe: negative-must-fail
+// expect-error: unexpected character(s) `≡`
 // expect-exit: 0  (UserOp 토큰 emit 메커니즘이 별도 마일스톤 — 지금은
 //                  silent miscompile 차단 위해 명시 lexical error 거부)
 

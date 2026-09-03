@@ -1,0 +1,5 @@
+// expect-exit: 101
+
+fn d(a: i32, b: i32) -> i32 { return a / b; }
+
+fn main() -> i32 { return d(-2147483647 - 1, -1); }

@@ -1,6 +1,6 @@
 // spec: 002.09.2-ref-self
 // probe: negative-must-fail
-// expect-exit: 0  (build must fail until ref-self semantics land —
+// expect-error: ref-self semantics aren't implemented
 //                  현 단계에선 silent miscompile 차단 위해 명시 거부)
 
 // spec 2.9.2: `ref self` — caller 의 변수 binding 재할당 가능.

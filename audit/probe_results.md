@@ -1,3 +1,5 @@
+> **STALE — superseded by [AUDIT_2026-10-12.md](AUDIT_2026-10-12.md).** 숫자·줄 번호·경로(현재 `library/{bare,core,std}`, 삭제된 `run_probes.sh`)는 당시 기준이며 현재와 다름. 역사 기록으로만 보존.
+
 # Probe 실증 결과
 
 직전 감사가 "추정", "미확인"으로 남긴 항목들을 작은 .rok 프로그램으로

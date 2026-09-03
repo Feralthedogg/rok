@@ -1,5 +1,6 @@
 // spec: 004.06.2-capture-ref
 // probe: negative-must-fail
+// expect-error: capture is not yet implemented
 // expect-exit: 0  (ref capture 의미론 미구현 — silent miscompile 차단
 //                  위해 명시 거부; 실제 구현은 별도 마일스톤)
 

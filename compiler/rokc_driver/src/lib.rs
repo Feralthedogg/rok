@@ -2,6 +2,7 @@
 //! resolver, checker, HIR lowering, and MIR lowering.
 
 mod cfg;
+mod toolchain;
 
 use std::path::{Path, PathBuf};
 
@@ -14,13 +15,12 @@ use rokc_parser::{
     LangTable, PrecTable, collect_lang_table, collect_prec_table, parse_program,
 };
 use rokc_resolve::Resolver;
-use rokc_scanner::scan_source;
 
 pub use cfg::CfgEnv;
+pub use toolchain::{BuildOptions, EmitKind, TempDir, emit, link_executable, mlir_text};
 
 #[derive(Clone, Debug, Default)]
 pub struct CompilerConfig {
-    pub libs: Vec<(PathBuf, LibGlob)>,
     /// Files containing operator declarations to pre-load before parsing
     /// the user input. Populates the `PrecTable`.
     pub bootstrap_files: Vec<PathBuf>,
@@ -28,14 +28,6 @@ pub struct CompilerConfig {
     /// `key=value` pair (`"target_os=macos"`). Consulted by `#[cfg(...)]`
     /// during the pre-HIR filter pass.
     pub cfg_flags: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum LibGlob {
-    #[default]
-    None,
-    Glob,
-    GlobRecursive,
 }
 
 #[derive(Clone, Debug)]
@@ -73,7 +65,6 @@ pub fn compile_source(
     path: &Path,
     config: &CompilerConfig,
 ) -> Result<CompiledProject, Vec<RokDiagnostic>> {
-    let _ = source;
     let mut diags: Vec<RokDiagnostic> = Vec::new();
 
     // Bootstrap PrecTable from operator-declaration sources, if any.
@@ -105,6 +96,7 @@ pub fn compile_source(
     let mut all_uses: Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)> = Vec::new();
     collect_module_tree(
         path,
+        Some(source),
         Some(&root_dir),
         &[],
         &prec,
@@ -113,7 +105,7 @@ pub fn compile_source(
         &mut all_items,
         &mut all_uses,
     );
-    // Auto-inject the `rok_panic(code: i32) -> !` runtime hook so
+    // Auto-inject the `rok_panic(msg, len) -> !` runtime hook so
     // `throw` lowering has a target without each user file declaring
     // the extern themselves.
     all_items.insert(0, builtin_panic_extern());
@@ -169,6 +161,21 @@ pub fn compile_source(
     let errors: Vec<RokDiagnostic> = diags.iter().filter(|d| d.is_error()).cloned().collect();
     if !errors.is_empty() {
         return Err(errors);
+    }
+    let unsupported: Vec<RokDiagnostic> = rokc_mir::enums_without_layout(&hir)
+        .into_iter()
+        .map(|(name, payloads)| {
+            RokDiagnostic::error(
+                rokc_diagnostic::ErrorKind::Unsupported,
+                format!(
+                    "enum `{name}` mixes payload shapes {payloads:?}; only identical or \
+                     all-scalar variant payloads have a layout yet"
+                ),
+            )
+        })
+        .collect();
+    if !unsupported.is_empty() {
+        return Err(unsupported);
     }
     let mir = rokc_mir::lower(&hir);
 
@@ -301,8 +308,7 @@ fn parse_and_descend(
         }
     };
     let file = body_path.display().to_string();
-    let tables = scan_source(&source);
-    let lexer = Lexer::new(&source, &tables, file.clone());
+    let lexer = Lexer::new(&source, file.clone());
     let (tokens, mut lex_diags) = lexer.lex_all();
     diags.append(&mut lex_diags);
 
@@ -370,6 +376,7 @@ fn resolve_file_mod(
 /// `parent::child::leaf`. Leaf names are unchanged in the root module.
 fn collect_module_tree(
     body_path: &Path,
+    preloaded: Option<&str>,
     submodule_dir: Option<&Path>,
     module_path: &[String],
     prec: &PrecTable,
@@ -378,19 +385,21 @@ fn collect_module_tree(
     out: &mut Vec<rokc_ast::Item>,
     uses: &mut Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)>,
 ) {
-    let source = match std::fs::read_to_string(body_path) {
-        Ok(s) => s,
-        Err(e) => {
-            diags.push(RokDiagnostic::error(
-                rokc_diagnostic::ErrorKind::Module,
-                format!("cannot read module file {}: {e}", body_path.display()),
-            ));
-            return;
-        }
+    let source = match preloaded {
+        Some(s) => s.to_owned(),
+        None => match std::fs::read_to_string(body_path) {
+            Ok(s) => s,
+            Err(e) => {
+                diags.push(RokDiagnostic::error(
+                    rokc_diagnostic::ErrorKind::Module,
+                    format!("cannot read module file {}: {e}", body_path.display()),
+                ));
+                return;
+            }
+        },
     };
     let file = body_path.display().to_string();
-    let tables = scan_source(&source);
-    let lexer = Lexer::new(&source, &tables, file.clone());
+    let lexer = Lexer::new(&source, file.clone());
     let (tokens, mut lex_diags) = lexer.lex_all();
     diags.append(&mut lex_diags);
 
@@ -475,6 +484,7 @@ fn flatten_module_items(
                         let next_dir = if folder.is_dir() { Some(folder) } else { None };
                         collect_module_tree(
                             &body,
+                            None,
                             next_dir.as_deref(),
                             &child_path,
                             prec,
@@ -587,7 +597,13 @@ fn builtin_panic_extern() -> rokc_ast::Item {
         where_clause: Vec::new(),
         span,
     };
-    let panic_fn = make_fn("rok_panic", vec![("code", path_ty("i32"))], None);
+    // Spec 805: `rok_panic(msg, len) -> !` — message bytes to stderr,
+    // exit 101. Codegen-inserted runtime checks call it too.
+    let panic_fn = make_fn(
+        "rok_panic",
+        vec![("msg", path_ty("str")), ("len", path_ty("usize"))],
+        None,
+    );
     let assert_fn = make_fn(
         "rok_assert",
         vec![("cond", path_ty("i32"))],

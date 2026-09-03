@@ -1,5 +1,6 @@
 // spec: 002.x-union-repr-c
 // probe: negative-must-fail
+// expect-error: byte-storage union is not yet implemented
 // expect-exit: 0  (`#[repr(C)]` union 은 byte-array storage (model B) 가
 //                  필요. stage-1 에서 storage strategy 가 ByteArray 로
 //                  진입하나 size 계산이 prim-only 케이스에서만 작동;

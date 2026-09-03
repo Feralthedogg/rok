@@ -23,69 +23,49 @@
 //! fix makes the probe start passing. This keeps the corpus green for
 //! known stage-1 gaps while still signalling progress.
 //!
-//! Skips silently if the LLVM toolchain isn't on PATH (same as
-//! integration.rs). The probe corpus is meant to grow alongside the spec.
-//! When a probe's outcome shifts, either spec or impl must be updated to
-//! restore alignment.
+//! Negative probes may carry `// expect-error: <substring>`; the build's
+//! stderr must then contain it, so a probe can't pass by failing for an
+//! unrelated reason. Shared directives / LLVM gating: `common/mod.rs`.
 
-use std::env;
+mod common;
+
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
-const ROKC: &str = env!("CARGO_BIN_EXE_rokc");
-const MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
+use common::*;
 
 #[test]
 fn spec_probes() {
-    let manifest = PathBuf::from(MANIFEST_DIR);
-    let workspace = manifest.parent().and_then(Path::parent).unwrap();
-    let bootstrap = workspace.join("library/core/lib.rok");
-    let rokr = workspace.join("target/debug/librokr.a");
-    let probes_dir = workspace.join("audit/probes");
-
-    if !probes_dir.exists() {
-        eprintln!("skip: audit/probes/ not found");
-        return;
-    }
-    assert!(bootstrap.exists(), "missing {bootstrap:?}");
-    assert!(rokr.exists(), "{rokr:?} not built");
-
-    if locate("mlir-opt").is_none()
-        || locate("mlir-translate").is_none()
-        || locate("clang").is_none()
-    {
-        eprintln!("skip: mlir-opt / mlir-translate / clang not on PATH");
-        return;
-    }
-
-    let scratch = workspace.join("target/probe_tmp");
+    let Some(env) = setup() else { return };
+    let probes_dir = env.workspace.join("audit/probes");
+    let scratch = env.workspace.join("target/probe_tmp");
     let _ = fs::create_dir_all(&scratch);
+
+    let mut paths: Vec<_> = fs::read_dir(&probes_dir)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "rok"))
+        .collect();
+    paths.sort();
+
+    let results = par_map(&paths, |path| {
+        let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+        let source = fs::read_to_string(path).unwrap();
+        let kind = parse_probe_kind(&source).unwrap_or(ProbeKind::Positive);
+        let outcome = run_probe(&env, &name, path, &source, kind, &scratch);
+        (name, parse_xfail(&source), outcome)
+    });
 
     let mut failures = Vec::new();
     let mut measurements = Vec::new();
-    let mut entries: Vec<_> = fs::read_dir(&probes_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("rok"))
-        .collect();
-    entries.sort_by_key(|e| e.path());
-
-    for entry in entries {
-        let path = entry.path();
-        let name = path.file_stem().unwrap().to_string_lossy().into_owned();
-        let source = fs::read_to_string(&path).unwrap();
-        let kind = parse_probe_kind(&source).unwrap_or(ProbeKind::Positive);
-        let xfail = parse_xfail(&source);
-
-        let outcome = run_probe(&name, &path, &source, kind, &bootstrap, &rokr, &scratch);
+    for (name, xfail, outcome) in results {
         match (xfail.as_deref(), outcome) {
             (Some(_), ProbeOutcome::Fail(reason)) => {
                 println!("xfail {name}: {reason}");
             }
             (Some(reason), ProbeOutcome::Pass) => failures.push(format!(
-                "{name}: probe now PASSES — remove `// xfail: {reason}` and \
-                 update probe_results.md"
+                "{name}: probe now PASSES — remove `// xfail: {reason}`"
             )),
             (Some(_), ProbeOutcome::Measure(detail)) => {
                 println!("meas  {name}: {detail}");
@@ -108,13 +88,13 @@ fn spec_probes() {
             eprintln!("  {m}");
         }
     }
-    if !failures.is_empty() {
-        panic!(
-            "{} spec probe failures:\n  {}",
-            failures.len(),
-            failures.join("\n  ")
-        );
-    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} spec probes failed:\n  {}",
+        failures.len(),
+        paths.len(),
+        failures.join("\n  ")
+    );
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -133,28 +113,17 @@ enum ProbeOutcome {
 }
 
 fn run_probe(
+    env: &Env,
     name: &str,
     path: &Path,
     source: &str,
     kind: ProbeKind,
-    bootstrap: &Path,
-    rokr: &Path,
     scratch: &Path,
 ) -> ProbeOutcome {
     let exe = scratch.join(name);
     let _ = fs::remove_file(&exe);
 
-    let build = Command::new(ROKC)
-        .arg("build")
-        .arg(path)
-        .arg("--bootstrap")
-        .arg(bootstrap)
-        .arg("--rokr")
-        .arg(rokr)
-        .arg("-o")
-        .arg(&exe)
-        .output();
-    let Ok(build) = build else {
+    let Ok(build) = rokc_build(env, path, &exe) else {
         return ProbeOutcome::Fail("rokc invocation failed".into());
     };
 
@@ -166,7 +135,13 @@ fn run_probe(
         } else {
             BuildFail::Codegen
         };
-        return classify_build_fail(kind, stage, &stderr);
+        return match classify_build_fail(kind, stage, &stderr) {
+            ProbeOutcome::Pass => match check_expect_error(source, &stderr) {
+                Ok(()) => ProbeOutcome::Pass,
+                Err(e) => ProbeOutcome::Fail(e),
+            },
+            other => other,
+        };
     }
 
     // Build succeeded — judge against kind.
@@ -197,9 +172,7 @@ fn run_probe(
             let actual_stdout = String::from_utf8_lossy(&run.stdout).into_owned();
             if let Some(want_exit) = parse_expect_exit(source) {
                 if actual_exit != want_exit {
-                    return ProbeOutcome::Fail(format!(
-                        "exit={actual_exit} (want {want_exit})"
-                    ));
+                    return ProbeOutcome::Fail(format!("exit={actual_exit} (want {want_exit})"));
                 }
             }
             if let Some(want) = parse_expect_stdout(source) {
@@ -241,9 +214,9 @@ fn classify_build_fail(kind: ProbeKind, stage: BuildFail, stderr: &str) -> Probe
         ProbeKind::NegativeMustFail => ProbeOutcome::Pass,
         ProbeKind::NegativeMustFailParse => match stage {
             BuildFail::Parse => ProbeOutcome::Pass,
-            BuildFail::Codegen => ProbeOutcome::Fail(format!(
-                "rejected but not at parse stage: {first_err}"
-            )),
+            BuildFail::Codegen => {
+                ProbeOutcome::Fail(format!("rejected but not at parse stage: {first_err}"))
+            }
         },
         ProbeKind::Measure => ProbeOutcome::Measure(format!(
             "build failed at {} stage",
@@ -256,78 +229,16 @@ fn classify_build_fail(kind: ProbeKind, stage: BuildFail, stderr: &str) -> Probe
 }
 
 fn parse_xfail(source: &str) -> Option<String> {
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("// xfail:") {
-            return Some(rest.trim().to_owned());
-        }
-    }
-    None
+    directive(source, "xfail:").map(str::to_owned)
 }
 
 fn parse_probe_kind(source: &str) -> Option<ProbeKind> {
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("// probe:") {
-            return Some(match rest.trim() {
-                "positive" => ProbeKind::Positive,
-                "positive-parse-only" => ProbeKind::PositiveParseOnly,
-                "negative-must-fail" => ProbeKind::NegativeMustFail,
-                "negative-must-fail-parse" => ProbeKind::NegativeMustFailParse,
-                "measure" => ProbeKind::Measure,
-                other => panic!("unknown probe kind: {other}"),
-            });
-        }
-    }
-    None
-}
-
-fn parse_expect_exit(source: &str) -> Option<i32> {
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("// expect-exit:") {
-            return rest.trim().parse::<i32>().ok();
-        }
-    }
-    None
-}
-
-fn parse_expect_stdout(source: &str) -> Option<String> {
-    let mut lines = source.lines().peekable();
-    while let Some(line) = lines.next() {
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("// expect-stdout:") {
-            let rest = rest.trim();
-            if !rest.is_empty() {
-                return Some(rest.to_owned());
-            }
-            let mut out = String::new();
-            while let Some(&peek) = lines.peek() {
-                let pt = peek.trim_start();
-                if let Some(content) = pt.strip_prefix("// ") {
-                    out.push_str(content);
-                    out.push('\n');
-                    lines.next();
-                } else if pt == "//" {
-                    out.push('\n');
-                    lines.next();
-                } else {
-                    break;
-                }
-            }
-            return Some(out);
-        }
-    }
-    None
-}
-
-fn locate(name: &str) -> Option<PathBuf> {
-    let path = env::var_os("PATH")?;
-    for dir in env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    Some(match directive(source, "probe:")? {
+        "positive" => ProbeKind::Positive,
+        "positive-parse-only" => ProbeKind::PositiveParseOnly,
+        "negative-must-fail" => ProbeKind::NegativeMustFail,
+        "negative-must-fail-parse" => ProbeKind::NegativeMustFailParse,
+        "measure" => ProbeKind::Measure,
+        other => panic!("unknown probe kind: {other}"),
+    })
 }

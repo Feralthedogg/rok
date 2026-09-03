@@ -1,5 +1,6 @@
 // spec: 006.02-derive-eq
 // probe: negative-must-fail
+// expect-error: expansion is not yet implemented
 // expect-exit: 0  (`#[derive(...)]` expander 미구현 → silent miscompile
 //                  차단 위해 명시 거부; 실제 expander 는 별도 마일스톤)
 

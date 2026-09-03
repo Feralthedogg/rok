@@ -1,9 +1,10 @@
-// rok core tier — safe, target-independent.
+// rok::core tier (foundation) — safe, target-independent.
 // Owns: List, Dict, Set, Tuple, Int, Float, ops, iter, sync (Atomic/Mutex),
 //       task, par, fmt, reflect, future.
 // Bootstraps operator dispatch (`#[infix]`, `#[prefix]`, `#[postfix]`) and
 // literal handlers (`#[literal]`).
-// `core::prelude` is auto-imported by user code.
+// User code gets an implicit `use rok::core::**;` (stdlib spec 0.1, 0.2) —
+// there is no separate prelude module.
 
 pub mod fmt;
 pub mod future;
@@ -11,5 +12,4 @@ pub mod index;
 pub mod iter;
 pub mod marker;
 pub mod ops;
-pub mod prelude;
 pub mod range;

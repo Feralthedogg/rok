@@ -1083,7 +1083,8 @@ fn union_storage_strategy(
                     | PrimTy::I32
                     | PrimTy::I64
                     | PrimTy::Isize
-                    | PrimTy::CChar => 2,
+                    | PrimTy::CChar
+                    | PrimTy::Char => 2,
                     PrimTy::F32 | PrimTy::F64 => 1,
                     PrimTy::Bool | PrimTy::Str => 0,
                 };
@@ -5211,44 +5212,16 @@ fn literal_to_const(lit: &AstLit, scrut_ty: &HirTy) -> Option<(ConstVal, PrimTy)
         }
         AstLit::Bool(b) => Some((ConstVal::Bool(*b), PrimTy::Bool)),
         AstLit::None => Some((ConstVal::None, PrimTy::Bool)),
-        AstLit::Char(s) | AstLit::CChar(s) => parse_char_literal(s)
-            .map(|c| (ConstVal::Char(c), PrimTy::CChar)),
+        AstLit::Char(s) => parse_char_literal(s).map(|c| (ConstVal::Char(c), PrimTy::Char)),
+        AstLit::CChar(s) => parse_char_literal(s).map(|c| (ConstVal::Char(c), PrimTy::CChar)),
         AstLit::Float(_) | AstLit::Str(_) | AstLit::RawStr(_) | AstLit::FStr(_) => None,
     }
 }
 
-// Decode common escape sequences inside a `"..."` literal body. Unknown
-// escapes are passed through verbatim so unfamiliar sequences surface
-// to the user rather than getting silently dropped.
+// Decode a `"..."` literal body (spec 1.7.1). The lexer already
+// rejected malformed escapes, so the fallback is never taken.
 fn decode_str_escapes(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\\' && i + 1 < bytes.len() {
-            let c = bytes[i + 1];
-            match c {
-                b'n' => { out.push('\n'); i += 2; continue; }
-                b't' => { out.push('\t'); i += 2; continue; }
-                b'r' => { out.push('\r'); i += 2; continue; }
-                b'0' => { out.push('\0'); i += 2; continue; }
-                b'\\' => { out.push('\\'); i += 2; continue; }
-                b'"' => { out.push('"'); i += 2; continue; }
-                b'\'' => { out.push('\''); i += 2; continue; }
-                b'x' if i + 3 < bytes.len() => {
-                    if let Ok(byte) = u8::from_str_radix(&s[i + 2..i + 4], 16) {
-                        out.push(byte as char);
-                        i += 4;
-                        continue;
-                    }
-                }
-                _ => {}
-            }
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
+    rokc_ast::escape::unescape(s, rokc_ast::escape::EscapeMode::Str).unwrap_or_else(|_| s.to_owned())
 }
 
 fn has_int_suffix(text: &str) -> bool {
@@ -6310,7 +6283,7 @@ fn lower_literal(lit: &AstLit, span: rokc_diagnostic::Span) -> HirExpr {
         AstLit::Char(s) => match parse_char_literal(s) {
             Some(c) => HirExpr {
                 kind: HirExprKind::Const(ConstVal::Char(c)),
-                ty: HirTy::Prim(PrimTy::CChar),
+                ty: HirTy::Prim(PrimTy::Char),
                 span,
             },
             None => HirExpr {
@@ -6339,27 +6312,13 @@ fn lower_literal(lit: &AstLit, span: rokc_diagnostic::Span) -> HirExpr {
     }
 }
 
-// `'A'` lexer payload is the character text (without quotes). Decode the
-// first escape sequence or return the char's codepoint.
+// `'A'` / `c'A'` payload is the body as written (without quotes);
+// decode it with the shared escape table (spec 1.8).
 fn parse_char_literal(text: &str) -> Option<u32> {
-    let mut chars = text.chars();
-    let first = chars.next()?;
-    if first != '\\' {
-        if chars.next().is_some() {
-            return None;
-        }
-        return Some(first as u32);
-    }
-    match chars.next()? {
-        'n' => Some(0x0A),
-        't' => Some(0x09),
-        'r' => Some(0x0D),
-        '\\' => Some(0x5C),
-        '\'' => Some(0x27),
-        '"' => Some(0x22),
-        '0' => Some(0x00),
-        _ => None,
-    }
+    let decoded = rokc_ast::escape::unescape(text, rokc_ast::escape::EscapeMode::CChar).ok()?;
+    let mut chars = decoded.chars();
+    let c = chars.next()?;
+    chars.next().is_none().then_some(c as u32)
 }
 
 /// Parse an integer literal. Bare (unsuffixed) integer literals fall

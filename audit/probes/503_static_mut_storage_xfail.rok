@@ -1,6 +1,6 @@
 // spec: 005.03-static-mut-storage-pattern
 // probe: negative-must-fail
-// expect-exit: 0  (build must fail per spec 5.3)
+// expect-error: `static mut` is only allowed inside `extern "C"
 
 // 직전 통합 테스트 `static_mut.rok` 가 검증하던 storage 패턴.
 // spec 5.3 (i-want-this.txt 라인 656) 은 `static mut` 을 일반 코드에 금지.

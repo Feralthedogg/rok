@@ -1,3 +1,5 @@
+> **STALE — superseded by [AUDIT_2026-10-12.md](AUDIT_2026-10-12.md).** 숫자·줄 번호·경로(현재 `library/{bare,core,std}`, 삭제된 `run_probes.sh`)는 당시 기준이며 현재와 다름. 역사 기록으로만 보존.
+
 # Drift 감사 — spec ↔ impl 양방향
 
 직전 감사가 놓친 차원: "spec엔 있는데 impl엔 없는" 만 봤지, "impl엔 있는데 spec엔 없는"

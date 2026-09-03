@@ -1,3 +1,5 @@
+> **STALE — superseded by [AUDIT_2026-10-12.md](AUDIT_2026-10-12.md).** 숫자·줄 번호·경로(현재 `library/{bare,core,std}`, 삭제된 `run_probes.sh`)는 당시 기준이며 현재와 다름. 역사 기록으로만 보존.
+
 # i-want-this.txt vs spec/impl — 차이점 전수조사
 
 `i-want-this.txt` (사용자 의도) 1776줄 전체를 spec/ + impl/ 과 대조. 스펙·구현 양쪽이 사용자 의도와 맞는지, 어떻게 다른지 정리.

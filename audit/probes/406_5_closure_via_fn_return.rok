@@ -1,5 +1,6 @@
 // spec: 004.06.5-closure-vs-fn-pointer
 // probe: negative-must-fail
+// expect-error: cannot return a closure through a `fn(...)` pointer
 // expect-exit: 0  (capturing closure 가 `fn(...)` pointer return type 자리에
 //                  들어가면 codegen 단계 type mismatch — silent 차단을 위해
 //                  HIR 에서 명시 거부)

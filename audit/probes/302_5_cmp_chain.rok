@@ -1,5 +1,6 @@
 // spec: 003.02.5-cmp-chain-banned
 // probe: negative-must-fail-parse
+// expect-error: cannot be chained
 // expect-exit: 0  (negative probe: build must FAIL — no exit recorded)
 
 // spec 302.5: 비교 연산자 체이닝은 컴파일 에러여야 한다.

@@ -11,12 +11,7 @@ name = "rokc"
 path = "src/main.rs"
 
 [dependencies]
-clap = { workspace = true }
-rokc_codegen_mlir = { workspace = true }
-rokc_diagnostic = { workspace = true }
-rokc_hir = { workspace = true }
 rokc_interface = { workspace = true }
-rokc_mir = { workspace = true }
 
 [lints]
 workspace = true

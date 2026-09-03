@@ -1,0 +1,18 @@
+// spec: 002.14-cast / 002.01-type-expressions
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 1
+// 7
+
+// `x as T < y` is a comparison, not `T<y ...>` generic args; `as T | y`
+// is a bit-or, not a sum type (the cast target takes no bare `|`).
+fn main() -> i32 {
+    let a: i32 = 3;
+    if a as i64 < 5i64 {
+        rok_print_i32(1);
+    }
+    let b: i32 = a as i32 | 4;
+    rok_print_i32(b);
+    return 0;
+}

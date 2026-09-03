@@ -1,15 +1,14 @@
 // Marker traits used by #[derive(...)] (spec 6.2/6.4) and other
-// compiler-driven semantics.
+// compiler-driven semantics. Slots follow stdlib spec 0.4 (6.4.8).
+// `Eq` is a pure marker with no methods, so it has no slot; `==` / `!=`
+// live on `PartialEq` (`eq_trait`, ops.rok).
 
 #[lang("clone_trait")]
 trait Clone {
     fn clone(self) -> Self;
 }
 
-#[lang("eq_trait")]
-trait Eq {
-    fn eq(self, other: Self) -> bool;
-}
+trait Eq {}
 
 #[lang("ord_trait")]
 trait Ord {

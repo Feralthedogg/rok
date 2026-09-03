@@ -37,10 +37,6 @@ pub enum TokenKind {
 
     // Identifiers and contextual promotions.
     Ident(String),
-    /// Identifier promoted by `rokc_scanner` to a type name.
-    TypeIdent(String),
-    /// Identifier registered via `#[keyword(name)]`.
-    UserKeyword(String),
     /// `'name` — loop / block label. Distinguished from char literals
     /// at lex time: `'X'` is a char, `'name` (without closing quote) is
     /// a label.
@@ -65,6 +61,7 @@ pub enum TokenKind {
     Extern,
     As,
     Ref,
+    Unsafe,
 
     // Control flow keywords.
     If,
@@ -78,6 +75,7 @@ pub enum TokenKind {
     Continue,
     Return,
     Is,
+    Using,
     Try,
     Catch,
     Throw,
@@ -109,6 +107,8 @@ pub enum TokenKind {
     Star,
     Slash,
     Percent,
+    /// `%%` Euclidean modulo (spec 1.10.3).
+    PercentPercent,
     EqEq,
     NotEq,
     Lt,
@@ -131,6 +131,7 @@ pub enum TokenKind {
     DotStar,
     DotSlash,
     DotPercent,
+    DotPercentPercent,
     DotEqEq,
     DotNotEq,
     DotLt,
@@ -139,6 +140,8 @@ pub enum TokenKind {
     DotGtEq,
     DotAmp,
     DotPipe,
+    DotAmpAmp,
+    DotPipePipe,
     DotCaret,
     DotShl,
     DotShr,
@@ -150,6 +153,7 @@ pub enum TokenKind {
     StarEq,
     SlashEq,
     PercentEq,
+    PercentPercentEq,
     AmpEq,
     PipeEq,
     CaretEq,
@@ -187,9 +191,6 @@ pub enum TokenKind {
     HashLBracket,
     HashBangLBracket,
 
-    // Operator string registered by stdlib (`#[infix]` etc.).
-    UserOp(String),
-
     Eof,
 }
 
@@ -223,6 +224,7 @@ pub fn keyword_kind(ident: &str) -> Option<TokenKind> {
         "extern" => TokenKind::Extern,
         "as" => TokenKind::As,
         "ref" => TokenKind::Ref,
+        "unsafe" => TokenKind::Unsafe,
         "if" => TokenKind::If,
         "else" => TokenKind::Else,
         "match" => TokenKind::Match,
@@ -234,6 +236,7 @@ pub fn keyword_kind(ident: &str) -> Option<TokenKind> {
         "continue" => TokenKind::Continue,
         "return" => TokenKind::Return,
         "is" => TokenKind::Is,
+        "using" => TokenKind::Using,
         "try" => TokenKind::Try,
         "catch" => TokenKind::Catch,
         "throw" => TokenKind::Throw,

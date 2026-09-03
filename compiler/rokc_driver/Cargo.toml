@@ -17,7 +17,6 @@ rokc_lexer = { workspace = true }
 rokc_mir = { workspace = true }
 rokc_parser = { workspace = true }
 rokc_resolve = { workspace = true }
-rokc_scanner = { workspace = true }
 
 [lints]
 workspace = true

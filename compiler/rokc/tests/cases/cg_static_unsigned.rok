@@ -1,0 +1,5 @@
+// expect-exit: 5
+
+static X: u32 = 5u32;
+
+fn main() -> i32 { return X as i32; }

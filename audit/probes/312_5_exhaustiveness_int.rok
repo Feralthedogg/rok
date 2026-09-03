@@ -1,6 +1,6 @@
 // spec: 003.12.5-exhaustiveness-int
 // probe: negative-must-fail
-// expect-exit: 0  (build must fail)
+// expect-error: non-exhaustive match on `i32`
 
 // spec 3.12.5: 원시 정수는 가능값 무한이므로 catch-all (`_` 또는 binding) 필수.
 fn main() -> i32 {

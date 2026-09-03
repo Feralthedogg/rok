@@ -12,8 +12,5 @@ rokc_core = { workspace = true }
 rokc_diagnostic = { workspace = true }
 rokc_lexer = { workspace = true }
 
-[dev-dependencies]
-rokc_scanner = { workspace = true }
-
 [lints]
 workspace = true

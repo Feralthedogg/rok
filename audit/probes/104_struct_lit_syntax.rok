@@ -1,0 +1,28 @@
+// spec: 001.04-identifiers / 002.03-struct
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 3
+// 7
+// 4
+
+// Struct literal / destructuring is decided by syntax, not by a
+// pre-scan of the source. The old scanner registered words after
+// `struct` — even inside this comment: compute the struct size — as
+// type names, which turned `Box { size: 3 }` into a trailing closure.
+// Non-ASCII and lower-case type names must work too.
+struct Box { size: i32; }
+struct 점 { x: i32; y: i32; }
+struct pt { a: i32; }
+
+fn main() -> i32 {
+    let b = Box { size: 3 };
+    rok_print_i32(b.size);
+    let p = 점 { x: 3, y: 4 };
+    let 점 { x, y } = p;
+    rok_print_i32(x + y);
+    let q = pt { a: 4 };
+    let pt { a } = q;
+    rok_print_i32(a);
+    return 0;
+}

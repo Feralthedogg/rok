@@ -1,6 +1,6 @@
 // spec: 004.11-generator-basic
 // probe: negative-must-fail
-// expect-exit: 0  (build must fail until coroutine runtime lands —
+// expect-error: `yield` is not yet implemented
 //                  현 단계에선 silent miscompile 차단 위해 명시 거부)
 
 // spec 4.11: 명명된 제너레이터 — yield 문장.

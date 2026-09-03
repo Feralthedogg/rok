@@ -11,7 +11,7 @@ pub fn lower_ty(ty: &HirTy) -> MirTy {
         HirTy::Unknown | HirTy::Path(_) | HirTy::Any => MirTy::Any,
         HirTy::Unit => MirTy::Unit,
         HirTy::Prim(p) => MirTy::Prim(*p),
-        HirTy::Sum(parts) => MirTy::Sum(parts.iter().map(lower_ty).collect()),
+        HirTy::Sum(parts) => sum_layout(&non_none(parts).map(lower_ty).collect::<Vec<_>>()),
         HirTy::Tuple(parts) => MirTy::Tuple(parts.iter().map(lower_ty).collect()),
         // Struct types need the field shape; this stub only allocates
         // the marker — see `lower_ty_in` for the concrete shape.
@@ -47,25 +47,14 @@ pub fn lower_ty_in(ty: &HirTy, module: &HirModule) -> MirTy {
             let def = &module.structs[id.0 as usize];
             MirTy::Struct(*id, def.fields.iter().map(|f| lower_ty_in(&f.ty, module)).collect())
         }
-        // Sum types share enum's `(i32 tag, payload)` layout. Payload =
-        // first non-`none` variant's primitive type, or i32 if all
-        // variants are `none`.
-        HirTy::Sum(parts) => match sum_payload_hir_ty(parts) {
-            Some(p) => MirTy::Tuple(vec![
-                MirTy::Prim(PrimTy::I32),
-                lower_ty_in(p, module),
-            ]),
-            None => MirTy::Prim(PrimTy::I32),
-        },
+        HirTy::Sum(parts) => {
+            sum_layout(&non_none(parts).map(|p| lower_ty_in(p, module)).collect::<Vec<_>>())
+        }
         HirTy::Tuple(parts) => {
             MirTy::Tuple(parts.iter().map(|t| lower_ty_in(t, module)).collect())
         }
         HirTy::Enum(id) => {
-            let def = &module.enums[id.0 as usize];
-            match largest_int_payload(&def.variants, module) {
-                Some(p) => MirTy::Tuple(vec![MirTy::Prim(PrimTy::I32), p]),
-                None => MirTy::Prim(PrimTy::I32),
-            }
+            sum_layout(&enum_payloads(&module.enums[id.0 as usize].variants, module))
         }
         HirTy::Array(elem, n) => MirTy::Array(Box::new(lower_ty_in(elem, module)), *n),
         HirTy::Fn(args, ret) => MirTy::Fn(
@@ -85,39 +74,78 @@ pub fn lower_ty_in(ty: &HirTy, module: &HirModule) -> MirTy {
     }
 }
 
-// Pick the unified payload type for a sum. Strategy: skip `none`
-// sentinels, then prefer the widest primitive (so heterogeneous sums
-// like `i32 | f64` reserve enough storage for every variant). When
-// multiple variants share the same width, the first wins. Falls back
-// to the first non-`none` variant when nothing is primitive.
-fn sum_payload_hir_ty(variants: &[HirTy]) -> Option<&HirTy> {
-    let non_none: Vec<&HirTy> = variants
-        .iter()
-        .filter(|v| !matches!(v, HirTy::Path(p) if p.as_slice() == ["none"]))
-        .collect();
-    let widest = non_none.iter().copied().max_by_key(|v| match v {
-        HirTy::Prim(p) => p.bit_width(64),
-        _ => 0,
-    });
-    widest.or_else(|| non_none.first().copied())
-}
-
-// Pick a unified payload type for an enum. Strategy: first variant
-// with a payload wins. Heterogeneous payload types across variants
-// aren't supported — every variant must share one payload type.
-fn largest_int_payload(
-    variants: &[rokc_hir::HirEnumVariant],
-    module: &HirModule,
-) -> Option<MirTy> {
+fn non_none(variants: &[HirTy]) -> impl Iterator<Item = &HirTy> {
     variants
         .iter()
-        .find_map(|v| v.payload_ty.as_ref().map(|p| lower_ty_in(p, module)))
+        .filter(|v| !matches!(v, HirTy::Path(p) if p.as_slice() == ["none"]))
+}
+
+/// The single tagged-union layout shared by enums and sums:
+/// `(i32 tag, payload)`, or a bare `i32` tag when nothing carries data.
+/// `payloads` excludes `none` / unit variants.
+#[must_use]
+pub fn sum_layout(payloads: &[MirTy]) -> MirTy {
+    match unify_payload(payloads).or_else(|| payloads.first().cloned()) {
+        Some(p) => MirTy::Tuple(vec![MirTy::Prim(PrimTy::I32), p]),
+        None => MirTy::Prim(PrimTy::I32),
+    }
+}
+
+/// Payload slot able to hold every variant. Identical payloads share
+/// their type; differing scalar payloads share an unsigned integer as
+/// wide as the widest one, written / read through `RValue::Bitcast`.
+/// Other mixes (aggregate vs scalar, two different aggregates) have no
+/// layout yet → `None`.
+// ponytail: scalar-only union; aggregate unions need byte-array storage
+// with max size/align once MIR grows memory-backed values.
+#[must_use]
+pub fn unify_payload(payloads: &[MirTy]) -> Option<MirTy> {
+    let first = payloads.first()?;
+    if payloads.iter().all(|p| p == first) {
+        return Some(first.clone());
+    }
+    let mut bits = 0;
+    for p in payloads {
+        match p {
+            MirTy::Prim(q) if !matches!(q, PrimTy::Str) => bits = bits.max(q.bit_width(64)),
+            _ => return None,
+        }
+    }
+    Some(MirTy::Prim(match bits {
+        8 => PrimTy::U8,
+        16 => PrimTy::U16,
+        32 => PrimTy::U32,
+        _ => PrimTy::U64,
+    }))
+}
+
+fn enum_payloads(variants: &[rokc_hir::HirEnumVariant], module: &HirModule) -> Vec<MirTy> {
+    variants
+        .iter()
+        .filter_map(|v| v.payload_ty.as_ref().map(|p| lower_ty_in(p, module)))
+        .collect()
 }
 
 // Returns the unified payload `MirTy` for an enum, or `None` if the
 // enum has no payload-bearing variants.
 #[must_use]
 pub fn enum_payload_ty(id: rokc_hir::EnumId, module: &HirModule) -> Option<MirTy> {
-    let def = &module.enums[id.0 as usize];
-    largest_int_payload(&def.variants, module)
+    match sum_layout(&enum_payloads(&module.enums[id.0 as usize].variants, module)) {
+        MirTy::Tuple(mut parts) => parts.pop(),
+        _ => None,
+    }
+}
+
+/// Enums whose variant payloads have no shared layout (see
+/// `unify_payload`), as `(name, payload types)`.
+#[must_use]
+pub fn enums_without_layout(module: &HirModule) -> Vec<(String, Vec<MirTy>)> {
+    module
+        .enums
+        .iter()
+        .filter_map(|e| {
+            let ps = enum_payloads(&e.variants, module);
+            (!ps.is_empty() && unify_payload(&ps).is_none()).then(|| (e.name.clone(), ps))
+        })
+        .collect()
 }

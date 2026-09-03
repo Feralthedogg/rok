@@ -1,0 +1,10 @@
+// expect-exit: 12
+// User items are mangled: no clash with C/runtime symbols or between
+// `a::b` and a root `a__b`.
+
+mod a { pub fn b() -> i32 { return 1; } }
+fn a__b() -> i32 { return 2; }
+fn malloc(n: i64) -> i64 { return n; }
+fn rok_runtime_init() -> i32 { return 9; }
+
+fn main() -> i32 { return a::b() + a__b() + rok_runtime_init() + malloc(0) as i32; }

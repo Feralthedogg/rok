@@ -5,13 +5,13 @@
 
 // spec 6.4: `#[lang("slot_name")]`이 trait/struct/enum/fn/const/static에
 // 부착 가능. 컴파일러는 attr 인식 + 잘못된 형태에 진단.
-// 정상 attr는 통과해야 함.
-#[lang("test_slot_a")]
-trait T {
-    fn foo(self) -> i32;
+// 정상 attr는 통과해야 함. (slot 이름은 stdlib spec 0.4 표에 있어야 함 — 6.4.8)
+#[lang("unreachable_fn")]
+fn never() -> i32 {
+    return 0;
 }
 
-#[lang("test_slot_b")]
+#[lang("none_type")]
 struct S {
     n: i32;
 }

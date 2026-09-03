@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  LLVM_VERSION: "21"
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Toolchain comes from rust-toolchain.toml (rustup installs it on first use).
+
+      - name: Install LLVM/MLIR (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- "$LLVM_VERSION"
+          sudo apt-get install -y "mlir-$LLVM_VERSION-tools"
+          echo "/usr/lib/llvm-$LLVM_VERSION/bin" >> "$GITHUB_PATH"
+
+      - name: Install LLVM/MLIR (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install "llvm@$LLVM_VERSION"
+          echo "$(brew --prefix "llvm@$LLVM_VERSION")/bin" >> "$GITHUB_PATH"
+
+      - run: mlir-opt --version && mlir-translate --version && clang --version
+
+      - name: fmt
+        run: cargo fmt --all --check
+
+      # ponytail: other crates still carry clippy warnings; this step stays red until they're fixed.
+      - name: clippy
+        if: ${{ !cancelled() }}  # run even when fmt/clippy are red
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test
+        if: ${{ !cancelled() }}  # run even when fmt/clippy are red
+        run: cargo test --workspace
+        env:
+          ROK_REQUIRE_LLVM: "1"
+
+      - name: compiler/runtime isolation (targets.md)
+        if: ${{ !cancelled() }}  # run even when fmt/clippy are red
+        run: |
+          if cargo tree -p rokc -e normal | grep -E '\brokr(_[a-z]+)?\b'; then
+            echo "rokc depends on runtime crates"; exit 1
+          fi
+          if cargo tree -p rokr -e normal | grep -E '\brokc(_[a-z]+)?\b'; then
+            echo "rokr depends on compiler crates"; exit 1
+          fi

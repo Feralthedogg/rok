@@ -3,10 +3,10 @@
 
 use std::path::{Path, PathBuf};
 
-use rokc_diagnostic::{RokDiagnostic, report};
 use rokc_driver::{CompilerConfig, CompiledModule, compile_file};
 
-pub use rokc_driver::LibGlob;
+pub use rokc_diagnostic::{ErrorKind, RokDiagnostic, report};
+pub use rokc_driver::{BuildOptions, EmitKind, TempDir};
 
 #[derive(Default)]
 pub struct Session {
@@ -17,10 +17,6 @@ impl Session {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn add_lib(&mut self, path: PathBuf, glob: LibGlob) {
-        self.config.libs.push((path, glob));
     }
 
     /// Add a `.rok` file to the bootstrap pre-pass that populates the
@@ -72,5 +68,21 @@ impl CompileResult {
         for d in &self.errors {
             report(d);
         }
+    }
+
+    fn module(&self) -> Result<&CompiledModule, RokDiagnostic> {
+        self.modules
+            .first()
+            .ok_or_else(|| RokDiagnostic::error(ErrorKind::Internal, "no module produced"))
+    }
+
+    /// One intermediate artifact (`--emit=<kind>`).
+    pub fn emit(&self, kind: EmitKind, opts: &BuildOptions) -> Result<Vec<u8>, RokDiagnostic> {
+        rokc_driver::emit(self.module()?, kind, opts)
+    }
+
+    /// Build an executable at `out` through mlir-opt / mlir-translate / clang.
+    pub fn link(&self, opts: &BuildOptions, out: &Path) -> Result<(), RokDiagnostic> {
+        rokc_driver::link_executable(self.module()?, &self.link_libraries, opts, out)
     }
 }

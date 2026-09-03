@@ -97,8 +97,8 @@ trait Shr<Rhs> {
     fn shr(self, rhs: Rhs) -> Output;
 }
 
-#[lang("cmp_trait")]
-trait Cmp<Rhs> {
+#[lang("eq_trait")]
+trait PartialEq<Rhs> {
     #[infix("==", prec = 4, none)]
     #[infix("≡", prec = 4, none)]
     fn eq(self, rhs: Rhs) -> bool;
@@ -106,7 +106,10 @@ trait Cmp<Rhs> {
     #[infix("!=", prec = 4, none)]
     #[infix("≠", prec = 4, none)]
     fn ne(self, rhs: Rhs) -> bool;
+}
 
+#[lang("cmp_trait")]
+trait PartialOrd<Rhs> {
     #[infix("<", prec = 4, none)]
     fn lt(self, rhs: Rhs) -> bool;
 

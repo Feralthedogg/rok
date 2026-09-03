@@ -5,6 +5,7 @@
 //! `#[postfix]` on stdlib trait methods) happens later.
 
 pub mod defs;
+pub mod escape;
 
 pub use defs::*;
 

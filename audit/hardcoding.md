@@ -1,3 +1,5 @@
+> **STALE — superseded by [AUDIT_2026-10-12.md](AUDIT_2026-10-12.md).** 숫자·줄 번호·경로(현재 `library/{bare,core,std}`, 삭제된 `run_probes.sh`)는 당시 기준이며 현재와 다름. 역사 기록으로만 보존.
+
 # 컴파일러 하드코딩 / 명세 위반 매직 — 전수조사
 
 기준 시점: 2026-04-29 (silent miscompile 차단 회차 후)

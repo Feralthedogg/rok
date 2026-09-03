@@ -298,7 +298,40 @@ impl<'a> FnBuilder<'a> {
                 // Stage-1: the payload is a call to `rok_panic` (-> !).
                 // Emit the call, then an `unreachable` terminator so the
                 // surrounding block won't fall through into a merge.
-                let _ = self.lower_expr_to_operand(call);
+                // ponytail: bridge for HIR still emitting the legacy
+                // `rok_panic(code)`; the runtime contract is now
+                // `rok_panic(msg, len)`. Drop once HIR passes (msg, len).
+                let legacy = match &call.kind {
+                    HirExprKind::Call { callee, args } if args.len() == 1 => Some(*callee),
+                    _ => None,
+                };
+                if let Some(callee) = legacy {
+                    let msg = "uncaught throw";
+                    let fixed = HirExpr {
+                        kind: HirExprKind::Call {
+                            callee,
+                            args: vec![
+                                HirExpr {
+                                    kind: HirExprKind::Const(ConstVal::Str(msg.to_owned())),
+                                    ty: HirTy::Prim(PrimTy::Str),
+                                    span: call.span,
+                                },
+                                HirExpr {
+                                    kind: HirExprKind::Const(ConstVal::UInt {
+                                        value: msg.len() as u128,
+                                        ty: PrimTy::Usize,
+                                    }),
+                                    ty: HirTy::Prim(PrimTy::Usize),
+                                    span: call.span,
+                                },
+                            ],
+                        },
+                        ..call.clone()
+                    };
+                    let _ = self.lower_expr_to_operand(&fixed);
+                } else {
+                    let _ = self.lower_expr_to_operand(call);
+                }
                 self.terminate(Terminator::Unreachable);
                 true
             }
@@ -601,7 +634,7 @@ impl<'a> FnBuilder<'a> {
                     Some(v) => {
                         let raw = self.lower_expr_to_operand(v);
                         let value_ty = lower_ty_in(&v.ty, self.module);
-                        self.cast_to(raw, &value_ty, &payload_ty)
+                        self.payload_cast(raw, &value_ty, &payload_ty)
                     }
                     None => Operand::Const(zero_const(&payload_ty)),
                 };
@@ -625,7 +658,7 @@ impl<'a> FnBuilder<'a> {
                 } else if args.len() == 1 {
                     let arg = &args[0];
                     let raw = self.lower_expr_to_operand(arg);
-                    self.cast_to(raw, &lower_ty_in(&arg.ty, self.module), &payload_ty)
+                    self.payload_cast(raw, &lower_ty_in(&arg.ty, self.module), &payload_ty)
                 } else {
                     // Multi-arg variant: pack the args into a tuple
                     // matching the variant's wrapped payload type.
@@ -1138,6 +1171,23 @@ impl<'a> FnBuilder<'a> {
         Operand::Copy(dst)
     }
 
+    /// Move a value into / out of a shared payload slot, keeping bits.
+    fn payload_cast(&mut self, source: Operand, from_ty: &MirTy, to_ty: &MirTy) -> Operand {
+        if from_ty == to_ty {
+            return source;
+        }
+        let dst = self.fresh_local(to_ty.clone());
+        self.push_stmt(Statement::Assign {
+            target: dst,
+            rvalue: RValue::Bitcast {
+                source,
+                from_ty: from_ty.clone(),
+                to_ty: to_ty.clone(),
+            },
+        });
+        Operand::Copy(dst)
+    }
+
     fn build_eq_op(&mut self, lhs: Operand, value: &ConstVal, prim: IrPrimTy) -> Operand {
         let result = self.fresh_local(MirTy::Prim(IrPrimTy::Bool));
         self.push_stmt(Statement::Assign {
@@ -1225,7 +1275,7 @@ impl<'a> FnBuilder<'a> {
                 if args.len() == 1 {
                     if let HirPattern::Binding { local, .. } = &args[0] {
                         let bind_ty = self.locals[local.0 as usize].ty.clone();
-                        let v = self.cast_to(Operand::Copy(payload), &unified_ty, &bind_ty);
+                        let v = self.payload_cast(Operand::Copy(payload), &unified_ty, &bind_ty);
                         self.push_stmt(Statement::Assign {
                             target: *local,
                             rvalue: RValue::Use(v),
@@ -1281,7 +1331,7 @@ impl<'a> FnBuilder<'a> {
                 // declared type is narrower (e.g. `v: i32` against an
                 // `i32 | f64` sum), narrow the extracted payload back.
                 let bind_ty = self.locals[local.0 as usize].ty.clone();
-                let v = self.cast_to(Operand::Copy(payload), &payload_ty, &bind_ty);
+                let v = self.payload_cast(Operand::Copy(payload), &payload_ty, &bind_ty);
                 self.push_stmt(Statement::Assign {
                     target: *local,
                     rvalue: RValue::Use(v),

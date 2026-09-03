@@ -1,5 +1,6 @@
 // spec: 004.01-variadic
 // probe: negative-must-fail
+// expect-error: call-site slicing isn't implemented
 // expect-exit: 0  (call-site Slice<T> wrap 미구현 → silent miscompile
 //                  차단 위해 명시 거부; 실제 구현은 별도 마일스톤)
 

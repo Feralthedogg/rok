@@ -1,6 +1,7 @@
 // spec: 003.04-assign-type-mismatch
 // probe: negative-must-fail
-// expect-exit: 0  (build must fail)
+// expect-error: [type]
+// xfail: rejected only by an mlir-opt/mlir-translate crash — no frontend diagnostic yet
 
 // 변경점 라인 230: typed slot 에 다른 타입 대입 → 에러.
 fn main() -> i32 {

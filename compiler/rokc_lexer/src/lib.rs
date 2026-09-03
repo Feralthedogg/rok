@@ -1,6 +1,6 @@
 //! Lexer.
 //!
-//! Input:  source string + optional `ScannerTables`.
+//! Input:  source string.
 //! Output: a `Vec<Token>`.
 
 pub mod lexer;

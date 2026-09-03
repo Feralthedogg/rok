@@ -6,14 +6,72 @@
 //! built-in literals (`none` → `none_type`), and so on.
 //!
 //! This module just collects the registrations. Consumers (HIR, codegen)
-//! look up slots through `LangTable`. Slot names are an open set —
-//! consumers decide which slot names they recognize. Unknown slot names
-//! are kept in the table but never queried; they don't error here.
+//! look up slots through `LangTable`. Slot names are a closed set
+//! (`KNOWN_SLOTS`, stdlib spec 0.4); an unknown name is a compile error
+//! (spec 6.4.8).
 
 use std::collections::HashMap;
 
 use rokc_ast::{AttrArg, AttrBody, Attribute, Item, Literal, Program};
 use rokc_diagnostic::{ErrorKind, RokDiagnostic};
+
+/// Every slot name the compiler accepts (spec 6.4.8). Source of truth:
+/// stdlib spec `000-meta/004-lang-slot-table.md`; change that table first.
+pub const KNOWN_SLOTS: &[&str] = &[
+    // 0.4.2 type slots
+    "i32_type",
+    "i64_type",
+    "f32_type",
+    "f64_type",
+    "usize_type",
+    "isize_type",
+    "bool_type",
+    "cchar_type",
+    "str_type",
+    "none_type",
+    "int_type",
+    "float_type",
+    "char_type",
+    "range_type",
+    // 0.4.3 trait slots
+    "iterator_trait",
+    "into_iterator_trait",
+    "index_trait",
+    "index_set_trait",
+    "slice_trait",
+    "display_trait",
+    "debug_trait",
+    "future_trait",
+    // operator / comparison trait slots (0.4.3; `library/core/ops.rok`, `marker.rok`)
+    "add_trait",
+    "sub_trait",
+    "mul_trait",
+    "div_trait",
+    "rem_trait",
+    "neg_trait",
+    "not_trait",
+    "bitnot_trait",
+    "bitand_trait",
+    "bitor_trait",
+    "bitxor_trait",
+    "shl_trait",
+    "shr_trait",
+    "eq_trait",
+    "cmp_trait",
+    "ord_trait",
+    "hash_trait",
+    "clone_trait",
+    "logical_and_trait",
+    "logical_or_trait",
+    // 0.4.4 fn slots
+    "panic_fn",
+    "oom_fn",
+    "unreachable_fn",
+    // 0.4.5 method slots
+    "drop_method",
+    "try_branch",
+    "from_residual",
+];
 
 /// What kind of item the `#[lang]` attribute is attached to. Consumers
 /// can use this to validate slots that demand a specific shape (e.g.
@@ -84,6 +142,24 @@ pub fn collect_lang_table(program: &Program) -> (LangTable, Vec<RokDiagnostic>) 
         for attr in attrs {
             collect_attr(attr, name, kind, span, &mut table, &mut diags);
         }
+        // Method slots (`drop_method`, `try_branch`, ...) sit on trait methods.
+        if let Item::Trait(t) = item {
+            for ti in &t.items {
+                if let rokc_ast::TraitItem::Method(f) = ti {
+                    let qualified = format!("{}::{}", t.name, f.name);
+                    for attr in &f.attrs {
+                        collect_attr(
+                            attr,
+                            &qualified,
+                            LangItemKind::Fn,
+                            f.span,
+                            &mut table,
+                            &mut diags,
+                        );
+                    }
+                }
+            }
+        }
     }
     (table, diags)
 }
@@ -103,8 +179,7 @@ fn collect_attr(
         diags.push(
             RokDiagnostic::error(
                 ErrorKind::Meta,
-                "`#[lang(...)]` requires a single string-literal slot name (spec 6.4.2)"
-                    .to_owned(),
+                "`#[lang(...)]` requires a single string-literal slot name (spec 6.4.2)".to_owned(),
             )
             .with_span(attr.span, ""),
         );
@@ -121,13 +196,23 @@ fn collect_attr(
         diags.push(
             RokDiagnostic::error(
                 ErrorKind::Meta,
-                "`#[lang(...)]` requires a single string-literal slot name (spec 6.4.2)"
-                    .to_owned(),
+                "`#[lang(...)]` requires a single string-literal slot name (spec 6.4.2)".to_owned(),
             )
             .with_span(attr.span, ""),
         );
         return;
     };
+    // Spec 6.4.8: unknown slot name → error.
+    if !KNOWN_SLOTS.contains(&slot.as_str()) {
+        diags.push(
+            RokDiagnostic::error(
+                ErrorKind::Meta,
+                format!("unknown lang slot `{slot}` on `{item_name}` (spec 6.4.8)"),
+            )
+            .with_span(attr.span, ""),
+        );
+        return;
+    }
     // Spec 6.4.6: same slot on two items → error.
     if let Some(prev) = table.by_slot.get(&slot) {
         diags.push(
@@ -145,6 +230,10 @@ fn collect_attr(
     }
     table.by_slot.insert(
         slot.clone(),
-        LangEntry { slot, item_name: item_name.to_owned(), kind },
+        LangEntry {
+            slot,
+            item_name: item_name.to_owned(),
+            kind,
+        },
     );
 }

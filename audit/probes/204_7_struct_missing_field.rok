@@ -1,5 +1,6 @@
 // spec: 002.x-missing-field
 // probe: negative-must-fail
+// expect-error: is missing field `y`
 // expect-exit: 0  (default 가 없는 필드를 빠뜨리면 명시 거부; 직전엔
 //                  silent unit fall-through.)
 

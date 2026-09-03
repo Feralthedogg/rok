@@ -1,5 +1,6 @@
 // spec: 002.04-trait-as-type
 // probe: negative-must-fail
+// expect-error: cannot be used as a type directly
 // expect-exit: 0  (i-want 538: trait 이름은 타입 자리에 직접 쓸 수 없음 —
 //                  closed sum 또는 generic param 사용; 이전엔 silent miscompile)
 

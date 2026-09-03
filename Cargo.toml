@@ -15,7 +15,6 @@ members = [
     "compiler/rokc_mir",
     "compiler/rokc_parser",
     "compiler/rokc_resolve",
-    "compiler/rokc_scanner",
     "runtime/rokr",
     "runtime/rokr_common",
     "runtime/rokr_coroutine",
@@ -44,15 +43,13 @@ rokc_lexer = { path = "compiler/rokc_lexer" }
 rokc_mir = { path = "compiler/rokc_mir" }
 rokc_parser = { path = "compiler/rokc_parser" }
 rokc_resolve = { path = "compiler/rokc_resolve" }
-rokc_scanner = { path = "compiler/rokc_scanner" }
 
 rokr_common = { path = "runtime/rokr_common" }
 rokr_coroutine = { path = "runtime/rokr_coroutine" }
 rokr_gc = { path = "runtime/rokr_gc" }
 rokr_scheduler = { path = "runtime/rokr_scheduler" }
 
-# Platform sys crates and the CLI parser only.
-clap = { version = "4", features = ["derive"] }
+# Platform sys crates only (targets.md: zero external dependencies).
 libc = "0.2"
 
 [workspace.lints.rust]
