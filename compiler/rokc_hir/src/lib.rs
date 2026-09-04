@@ -267,7 +267,7 @@ pub enum HirExprKind {
         from_ty: HirTy,
         to_ty: HirTy,
     },
-    /// Build a closure value: a struct of (fn_addr, env). The lifted
+    /// Build a closure value: a struct of (`fn_addr`, env). The lifted
     /// function takes `env` as its first parameter; the user-visible
     /// signature is `(arg_tys) -> ret_ty`.
     ClosureValue {
@@ -277,7 +277,7 @@ pub enum HirExprKind {
         arg_tys: Vec<HirTy>,
         ret_ty: HirTy,
     },
-    /// Call a closure value: extract fn_addr and env, then call the
+    /// Call a closure value: extract `fn_addr` and env, then call the
     /// underlying function with `(env, args...)`.
     CallClosure {
         closure: Box<HirExpr>,

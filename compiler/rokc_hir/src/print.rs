@@ -441,7 +441,7 @@ fn print_pattern(out: &mut String, p: &HirPattern) {
 }
 
 #[allow(unused)]
-fn _silence(_: &HirMatchArm) {}
+const fn _silence(_: &HirMatchArm) {}
 
 fn print_const(out: &mut String, c: &ConstVal) {
     match c {

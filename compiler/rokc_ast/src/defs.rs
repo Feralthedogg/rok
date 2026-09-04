@@ -97,13 +97,13 @@ pub enum StmtKind {
     },
     /// `let (a, b, ...) [: ty] = init;` — tuple destructure.
     /// `_` in `names` is the discard placeholder.
-    /// `rest`: `Some((index_into_names`, `optional_name`)) records a `..` or
+    /// `rest`: `Some((index_into_names, optional_name))` records a `..` or
     /// `..name` rest-pattern (spec 3.15.3). The index is the position
     /// among `names` *before* which the rest splice slots in, e.g.
-    ///   `(first, ..rest)`              → names=["first"], rest=(1, Some("rest"))
-    ///   `(..init, last)`               → names=["last"],  rest=(0, Some("init"))
-    ///   `(head, ..mid, tail)`          → names=["head","tail"], rest=(1, Some("mid"))
-    ///   `(..)`                         → names=[],       rest=(0, None)
+    ///   `(first, ..rest)`              → `names=["first"], rest=(1, Some("rest"))`
+    ///   `(..init, last)`               → `names=["last"], rest=(0, Some("init"))`
+    ///   `(head, ..mid, tail)`          → `names=["head","tail"], rest=(1, Some("mid"))`
+    ///   `(..)`                         → `names=[], rest=(0, None)`
     LetTuple {
         names: Vec<String>,
         rest: Option<(usize, Option<String>)>,

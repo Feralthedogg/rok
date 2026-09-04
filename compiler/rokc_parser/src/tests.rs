@@ -36,6 +36,7 @@ fn arith_prec_table() -> PrecTable {
             prec,
             assoc: Assoc::Left,
             method_name: m.into(),
+            trait_name: String::new(),
         });
     }
     for (sym, m) in [
@@ -52,6 +53,7 @@ fn arith_prec_table() -> PrecTable {
             prec: 6,
             assoc: Assoc::None,
             method_name: m.into(),
+            trait_name: String::new(),
         });
     }
     t.insert(OpEntry {
@@ -60,6 +62,7 @@ fn arith_prec_table() -> PrecTable {
         prec: 5,
         assoc: Assoc::Left,
         method_name: "logical_and".into(),
+        trait_name: String::new(),
     });
     t.insert(OpEntry {
         symbol: "||".into(),
@@ -67,6 +70,7 @@ fn arith_prec_table() -> PrecTable {
         prec: 4,
         assoc: Assoc::Left,
         method_name: "logical_or".into(),
+        trait_name: String::new(),
     });
     t.insert(OpEntry {
         symbol: "-".into(),
@@ -74,6 +78,7 @@ fn arith_prec_table() -> PrecTable {
         prec: 11,
         assoc: Assoc::Right,
         method_name: "neg".into(),
+        trait_name: String::new(),
     });
     t.insert(OpEntry {
         symbol: "!".into(),
@@ -81,6 +86,7 @@ fn arith_prec_table() -> PrecTable {
         prec: 11,
         assoc: Assoc::Right,
         method_name: "not".into(),
+        trait_name: String::new(),
     });
     t
 }
@@ -466,21 +472,25 @@ fn impl_trait_alias_generics_and_where_are_kept() {
          type Map<K, V = Vec<K>> = Tree<K, V>; \
          fn g<T>(x: T) -> T where T: Clone + Copy { x }",
     );
-    let Item::Impl(i) = &p.items[0] else { panic!() };
-    assert_eq!(i.generics.params.len(), 1);
-    assert_eq!(i.where_clause.len(), 2);
-    let Item::Trait(t) = &p.items[1] else {
+    let Item::Impl(imp) = &p.items[0] else {
         panic!()
     };
-    assert_eq!(t.generics.params.len(), 1);
-    assert_eq!(t.supertraits.len(), 2);
-    assert_eq!(t.where_clause.len(), 1);
-    let Item::TypeAlias(a) = &p.items[2] else {
+    assert_eq!(imp.generics.params.len(), 1);
+    assert_eq!(imp.where_clause.len(), 2);
+    let Item::Trait(tr) = &p.items[1] else {
         panic!()
     };
-    assert_eq!(a.generics.params.len(), 2);
-    let Item::Fn(f) = &p.items[3] else { panic!() };
-    assert_eq!(f.where_clause[0].bounds.len(), 2);
+    assert_eq!(tr.generics.params.len(), 1);
+    assert_eq!(tr.supertraits.len(), 2);
+    assert_eq!(tr.where_clause.len(), 1);
+    let Item::TypeAlias(alias) = &p.items[2] else {
+        panic!()
+    };
+    assert_eq!(alias.generics.params.len(), 2);
+    let Item::Fn(func) = &p.items[3] else {
+        panic!()
+    };
+    assert_eq!(func.where_clause[0].bounds.len(), 2);
 }
 
 #[test]

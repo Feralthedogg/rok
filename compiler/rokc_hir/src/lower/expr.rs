@@ -509,6 +509,11 @@ pub(super) fn lower_assign(
         // local, then thread `WithField` updates back out so the rebuilt
         // aggregate gets assigned to that local.
         ExprKind::Field(_, _) => {
+            struct Step {
+                ty: HirTy,
+                struct_id: StructId,
+                field_index: u32,
+            }
             let mut chain: Vec<&str> = Vec::new();
             let mut cur: &Expr = target;
             while let ExprKind::Field(inner, name) = &cur.kind {
@@ -530,11 +535,6 @@ pub(super) fn lower_assign(
                 return None;
             };
             // Walk the chain to get each level's struct id and field index.
-            struct Step {
-                ty: HirTy,
-                struct_id: StructId,
-                field_index: u32,
-            }
             let mut steps: Vec<Step> = Vec::new();
             let mut step_ty = root_h.ty.clone();
             for name in &chain {
@@ -578,7 +578,7 @@ pub(super) fn lower_assign(
             // Materialize parent values via field reads so each
             // WithField has a concrete target.
             let mut targets: Vec<HirExpr> = Vec::new();
-            let mut walk = root_h.clone();
+            let mut walk = root_h;
             for step in &steps[..steps.len() - 1] {
                 let next_ty = ctx.struct_def(step.struct_id).fields[step.field_index as usize]
                     .ty
@@ -764,7 +764,7 @@ pub(super) fn lower_expr(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             pat,
             iter,
             body,
-        } => lower_for(ctx, label, pat, iter, body, span),
+        } => lower_for(ctx, label.as_ref(), pat, iter, body, span),
         ExprKind::Match { scrutinee, arms } => lower_match(ctx, scrutinee, arms, span),
         ExprKind::Try {
             body,
@@ -916,16 +916,15 @@ pub(super) fn lower_expr(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
                 Some(HirTy::Array(e, _)) => Some((**e).clone()),
                 _ => None,
             };
-            let mut elem_ty = expected_elem.clone();
+            let mut elem_ty = expected_elem;
             let mut lowered: Vec<HirExpr> = Vec::with_capacity(items.len());
             for (i, e) in items.iter().enumerate() {
                 let v = lower_expected(ctx, e, elem_ty.clone().unwrap_or(HirTy::Unknown));
-                let v = match &elem_ty {
-                    Some(t) => coerce(ctx, t, v, &|| format!("array element {i}")),
-                    None => {
-                        elem_ty = Some(v.ty.clone());
-                        v
-                    }
+                let v = if let Some(t) = &elem_ty {
+                    coerce(ctx, t, v, &|| format!("array element {i}"))
+                } else {
+                    elem_ty = Some(v.ty.clone());
+                    v
                 };
                 lowered.push(v);
             }
@@ -1154,14 +1153,8 @@ pub(super) fn first_break_value_ty(b: &HirBlock, label: Option<&str>) -> Option<
             // loop that shadows the label.
             HirExprKind::While {
                 label: inner, body, ..
-            } => {
-                if label.is_some() && inner.as_deref() != label {
-                    walk_block(body, label)
-                } else {
-                    None
-                }
             }
-            HirExprKind::Loop {
+            | HirExprKind::Loop {
                 label: inner, body, ..
             } => {
                 if label.is_some() && inner.as_deref() != label {
@@ -1252,15 +1245,14 @@ pub(super) fn resolve_enum_variant(
             }
         }
     };
-    match variant_of(eid) {
-        Some(i) => EnumRes::Found(eid, i),
-        None => {
-            ctx.emit_error(
-                rokc_diagnostic::ErrorKind::Type,
-                format!("enum `{full}` has no variant `{vname}`"),
-            );
-            EnumRes::Error
-        }
+    if let Some(i) = variant_of(eid) {
+        EnumRes::Found(eid, i)
+    } else {
+        ctx.emit_error(
+            rokc_diagnostic::ErrorKind::Type,
+            format!("enum `{full}` has no variant `{vname}`"),
+        );
+        EnumRes::Error
     }
 }
 
@@ -1332,19 +1324,18 @@ pub(super) fn lower_struct_init(
             }
             let mut args = Vec::with_capacity(payload_args.len());
             for (i, a) in payload_args.into_iter().enumerate() {
-                match a {
-                    Some(a) => args.push(a),
-                    None => {
-                        ctx.emit_error(
-                            rokc_diagnostic::ErrorKind::Type,
-                            format!(
-                                "enum variant `{}` is missing field `{}` (spec 2.4)",
-                                segs.join("::"),
-                                variant.named_fields[i]
-                            ),
-                        );
-                        args.push(poison(span));
-                    }
+                if let Some(a) = a {
+                    args.push(a);
+                } else {
+                    ctx.emit_error(
+                        rokc_diagnostic::ErrorKind::Type,
+                        format!(
+                            "enum variant `{}` is missing field `{}` (spec 2.4)",
+                            segs.join("::"),
+                            variant.named_fields[i]
+                        ),
+                    );
+                    args.push(poison(span));
                 }
             }
             return HirExpr {
@@ -1577,7 +1568,7 @@ pub(super) fn lower_field(
 
 /// Read field `name` of an already-lowered struct / union value.
 pub(super) fn field_access(
-    ctx: &mut LowerCtx<'_>,
+    ctx: &LowerCtx<'_>,
     target_h: HirExpr,
     name: &str,
     span: rokc_diagnostic::Span,
@@ -1684,7 +1675,7 @@ pub(super) fn hir_local(local: LocalId, ty: &HirTy, span: rokc_diagnostic::Span)
     }
 }
 
-pub(super) fn hir_int(value: i128, prim: PrimTy, span: rokc_diagnostic::Span) -> HirExpr {
+pub(super) const fn hir_int(value: i128, prim: PrimTy, span: rokc_diagnostic::Span) -> HirExpr {
     HirExpr {
         kind: HirExprKind::Const(ConstVal::Int { value, ty: prim }),
         ty: HirTy::Prim(prim),
@@ -1921,16 +1912,17 @@ pub(super) fn lower_args_for(
         let v = match slot {
             Some(ArgSrc::Ast(e)) => lower_expected(ctx, e, pty.clone()),
             Some(ArgSrc::Lowered(h)) => h,
-            None => match sig.param_defaults.get(i).cloned().flatten() {
-                Some(d) => lower_expected(ctx, &d, pty.clone()),
-                None => {
+            None => {
+                if let Some(d) = sig.param_defaults.get(i).cloned().flatten() {
+                    lower_expected(ctx, &d, pty.clone())
+                } else {
                     ctx.emit_error(
                         rokc_diagnostic::ErrorKind::Type,
                         format!("missing argument `{pname}` in call to `{callee}`"),
                     );
                     poison(span)
                 }
-            },
+            }
         };
         out.push(coerce(ctx, &pty, v, &|| {
             format!("argument `{pname}` of `{callee}`")
@@ -2277,38 +2269,35 @@ pub(super) fn lower_call(
                 );
             }
             let mut lets = Vec::new();
-            let args_h = match pre_args {
-                Some(pre) => {
-                    if pre.len() != slots.len() {
-                        return ctx.error_expr(
-                            span,
-                            format!(
-                                "`{display}` takes {} argument(s) but {} were supplied",
-                                slots.len(),
-                                pre.len()
-                            ),
-                        );
-                    }
-                    pre.into_iter()
-                        .zip(&slots)
-                        .enumerate()
-                        .map(|(i, (a, t))| {
-                            coerce(ctx, t, a, &|| format!("argument {} of `{display}`", i + 1))
-                        })
-                        .collect()
+            let args_h = if let Some(pre) = pre_args {
+                if pre.len() != slots.len() {
+                    return ctx.error_expr(
+                        span,
+                        format!(
+                            "`{display}` takes {} argument(s) but {} were supplied",
+                            slots.len(),
+                            pre.len()
+                        ),
+                    );
                 }
-                None => {
-                    let sig = FnSig {
-                        id: FunctionId(u32::MAX),
-                        ret_ty: HirTy::Enum(enum_id),
-                        param_defaults: vec![None; slots.len()],
-                        param_tys: slots.clone(),
-                        param_names: (0..slots.len()).map(|i| format!("#{}", i + 1)).collect(),
-                    };
-                    let (a, l) = lower_args_for(ctx, &sig, &display, None, args, span);
-                    lets = l;
-                    a
-                }
+                pre.into_iter()
+                    .zip(&slots)
+                    .enumerate()
+                    .map(|(i, (a, t))| {
+                        coerce(ctx, t, a, &|| format!("argument {} of `{display}`", i + 1))
+                    })
+                    .collect()
+            } else {
+                let sig = FnSig {
+                    id: FunctionId(u32::MAX),
+                    ret_ty: HirTy::Enum(enum_id),
+                    param_defaults: vec![None; slots.len()],
+                    param_tys: slots.clone(),
+                    param_names: (0..slots.len()).map(|i| format!("#{}", i + 1)).collect(),
+                };
+                let (a, l) = lower_args_for(ctx, &sig, &display, None, args, span);
+                lets = l;
+                a
             };
             return with_lets(
                 lets,
@@ -2541,7 +2530,7 @@ pub(super) fn lower_prefix(
 /// trait impl (`impl Add for T`) — an inherent method that merely has
 /// the right name doesn't make the type support the operator.
 pub(super) fn dispatch_user_op(
-    ctx: &mut LowerCtx<'_>,
+    ctx: &LowerCtx<'_>,
     sym: &str,
     fixity: Fixity,
     lhs: HirExpr,
@@ -2556,20 +2545,26 @@ pub(super) fn dispatch_user_op(
         );
     };
     let method = entry.method_name.clone();
+    let op_trait = &entry.trait_name;
+    // The impl must be of the bootstrap trait that registered the operator.
+    // A user trait of the same name lives in `names.traits` and doesn't count.
+    let is_op_trait = |t: &str| t == op_trait && !ctx.env.names.traits.contains(t);
     let fn_id = method_target_for(&lhs.ty)
         .and_then(|t| ctx.env.method_table.get(&(t, method.clone())).copied())
         .filter(|id| {
             ctx.env
                 .method_info
                 .get(id)
-                .is_some_and(|i| i.trait_name.is_some())
+                .and_then(|i| i.trait_name.as_deref())
+                .is_some_and(is_op_trait)
         });
     let Some(fn_id) = fn_id else {
         return ctx.error_expr(
             span,
             format!(
-                "operator `{sym}` cannot be applied to `{ty_name}`: no operator trait impl \
-                 provides `{method}` for it (an inherent `fn {method}` is not enough)"
+                "operator `{sym}` cannot be applied to `{ty_name}`: it needs \
+                 `impl {op_trait} for {ty_name}` (`{method}` from any other trait or an \
+                 inherent `fn {method}` is not enough)"
             ),
         );
     };

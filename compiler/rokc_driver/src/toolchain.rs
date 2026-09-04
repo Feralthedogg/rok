@@ -128,7 +128,14 @@ pub fn mlir_text(
     module: &CompiledModule,
     opts: &BuildOptions,
 ) -> Result<rokc_codegen_mlir::MlirOutput, RokDiagnostic> {
-    let mut out = rokc_codegen_mlir::codegen_with_target(&module.mir, opts.target.as_deref())?;
+    // ponytail: overflow checks follow -O0 (debug); add `-C overflow-checks` if
+    // someone needs checked release builds.
+    let overflow_checks = opts.opt_level == "0";
+    let mut out = rokc_codegen_mlir::codegen_with_target(
+        &module.mir,
+        opts.target.as_deref(),
+        overflow_checks,
+    )?;
     if let Some(t) = &opts.target {
         out.text = out.text.replacen(
             "module {",

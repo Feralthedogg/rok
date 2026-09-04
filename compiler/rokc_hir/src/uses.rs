@@ -44,7 +44,9 @@ pub struct ReExport {
 }
 
 /// Build the per-module use table plus the re-export list from
-/// `(module_path, vis, UseTree)` triples. Group trees (`use foo::{a, b}`)
+/// `(module_path, vis, UseTree)` triples.
+///
+/// Group trees (`use foo::{a, b}`)
 /// expand into multiple entries with the prefix prepended. Each `pub use`
 /// (or `pub(...) use`) Single contributes both a use-table entry (so the
 /// declaring module can use the short name itself) and a re-export the

@@ -26,13 +26,25 @@ mod mono;
 mod pattern;
 mod resolve;
 
+use collect::collect_unknown_paths;
 pub use collect::lower_full;
-use collect::*;
-use desugar::*;
-use expr::*;
-use mono::*;
-use pattern::*;
-use resolve::*;
+use desugar::{
+    desugar_nullish_coalesce, desugar_question_dot, desugar_try_q, lower_closure_expr, lower_for,
+};
+use expr::{
+    enum_base_name, field_access, has_int_suffix, hir_binop, hir_int, hir_local, lower_block,
+    lower_cond, lower_expr, lower_loop_body, lower_sibling_pair, method_call_on,
+    parse_char_literal, parse_int_literal, resolve_enum_variant, variant_arg_tys,
+};
+use mono::{
+    generic_struct_fields, instantiate_generic_enums, instantiate_generic_structs, lower_fn,
+    monomorphize, unify_param_ty_with,
+};
+use pattern::{int_fits, lower_match};
+use resolve::{
+    impl_module, item_module, leaf_name, mangle_inst, method_target_for, module_display, module_of,
+    resolve_name, resolve_ty_with_structs, substitute_aliases, ty_mangle, visible_from,
+};
 
 /// Outcome of glob resolution for one bare name. Single imports always
 /// trump glob imports (per Rust 2018+ rules), so a Single hit returns
@@ -187,7 +199,7 @@ struct Env<'a> {
     /// Module-level type aliases. Walked over every `HirTy` produced
     /// from AST resolution so downstream code never sees `Path([alias])`.
     type_aliases: HashMap<String, HirTy>,
-    /// Generic function templates keyed by name. lower_call queries
+    /// Generic function templates keyed by name. `lower_call` queries
     /// this when the callee path matches a generic function.
     generic_fns: HashMap<String, &'a FnDef>,
     /// Generic struct templates, for instantiation inferred from a
@@ -215,8 +227,8 @@ struct Env<'a> {
 enum MethodTarget {
     Struct(StructId),
     Enum(EnumId),
-    /// Mangled HirTy for impl targets that aren't a single struct or
-    /// enum (Tuple/Array/Sum/Fn/Prim per spec 2.9.1 — type_expr is any
+    /// Mangled `HirTy` for impl targets that aren't a single struct or
+    /// enum (Tuple/Array/Sum/Fn/Prim per spec 2.9.1 — `type_expr` is any
     /// type). Keyed by `ty_mangle` so two impls on the same shape land
     /// on the same target.
     Mangled(String),
@@ -742,7 +754,7 @@ impl<'a> LowerCtx<'a> {
     fn check_field_visible(&self, sid: StructId, field: &str) {
         let def = self.struct_def(sid);
         let base = if def.generic_args.is_empty() {
-            def.name.clone()
+            def.name
         } else {
             def.name.split("__").next().unwrap_or(&def.name).to_owned()
         };
@@ -803,11 +815,7 @@ impl<'a> LowerCtx<'a> {
                         }
                     }
                 }
-                let generics = p
-                    .segments
-                    .last()
-                    .map(|s| s.generics.as_slice())
-                    .unwrap_or(&[]);
+                let generics = p.segments.last().map_or(&[][..], |s| s.generics.as_slice());
                 if !generics.is_empty() {
                     let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
                     if let Some(full) = self.canon_type(&segs) {
@@ -914,7 +922,7 @@ impl<'a> LowerCtx<'a> {
 /// Placeholder for an expression whose lowering failed (an error has
 /// been reported). Never reaches MIR: the driver stops on errors and
 /// `check_unresolved_types` refuses `Unknown` otherwise.
-fn poison(span: rokc_diagnostic::Span) -> HirExpr {
+const fn poison(span: rokc_diagnostic::Span) -> HirExpr {
     HirExpr {
         kind: HirExprKind::Const(ConstVal::Unit),
         ty: HirTy::Unknown,

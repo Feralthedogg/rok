@@ -1,7 +1,7 @@
 // spec: 000.04-operator-dispatch
 // probe: negative-must-fail
 // expect-exit: 0  (연산자는 trait impl 로만 dispatch — 같은 이름의 inherent 메서드로는 불충분.)
-// expect-error: no operator trait impl provides `add`
+// expect-error: an inherent `fn add` is not enough
 
 struct V { x: i32; }
 impl V { fn add(self, o: V) -> i32 { return self.x * 100 + o.x; } }

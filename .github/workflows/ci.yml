@@ -38,19 +38,18 @@ jobs:
       - name: fmt
         run: cargo fmt --all --check
 
-      # ponytail: other crates still carry clippy warnings; this step stays red until they're fixed.
       - name: clippy
-        if: ${{ !cancelled() }}  # run even when fmt/clippy are red
+        if: ${{ !cancelled() }}  # run even when fmt is red
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: test
-        if: ${{ !cancelled() }}  # run even when fmt/clippy are red
+        if: ${{ !cancelled() }}  # run even when fmt is red
         run: cargo test --workspace
         env:
           ROK_REQUIRE_LLVM: "1"
 
       - name: compiler/runtime isolation (targets.md)
-        if: ${{ !cancelled() }}  # run even when fmt/clippy are red
+        if: ${{ !cancelled() }}  # run even when fmt is red
         run: |
           if cargo tree -p rokc -e normal | grep -E '\brokr(_[a-z]+)?\b'; then
             echo "rokc depends on runtime crates"; exit 1

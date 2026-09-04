@@ -88,7 +88,7 @@ pub(super) fn ty_size(ty: &HirTy) -> usize {
 /// substitution is inferred by zipping the call's lowered argument types
 /// with the AST parameter type ascriptions.
 pub(super) fn monomorphize(
-    ctx: &mut LowerCtx<'_>,
+    ctx: &LowerCtx<'_>,
     fn_def: &FnDef,
     args: &[HirExpr],
     _span: rokc_diagnostic::Span,
@@ -140,20 +140,21 @@ pub(super) fn monomorphize(
     let mut subst_tys: Vec<HirTy> = Vec::new();
     for gp in &fn_def.generics.params {
         match gp {
-            rokc_ast::GenericParam::Type { name, .. } => match subst.get(name) {
-                Some(t) => subst_tys.push(t.clone()),
-                None => {
+            rokc_ast::GenericParam::Type { name, .. } => {
+                if let Some(t) = subst.get(name) {
+                    subst_tys.push(t.clone());
+                } else {
                     ctx.emit_error(
                         rokc_diagnostic::ErrorKind::Type,
                         format!(
                             "cannot infer type parameter `{name}` of `{}` from the call \
-                             arguments",
+                         arguments",
                             fn_def.name
                         ),
                     );
                     return None;
                 }
-            },
+            }
             rokc_ast::GenericParam::Const { name, .. } => {
                 ctx.emit_error(
                     rokc_diagnostic::ErrorKind::Type,
@@ -254,7 +255,7 @@ pub(super) fn monomorphize(
     let preview_ret_ty = match &fn_def.ret_ty {
         Some(t) => {
             let mut rcx = LowerCtx::new(ctx.env, &subst, None);
-            rcx.current_module = fn_module.clone();
+            rcx.current_module.clone_from(&fn_module);
             rcx.resolve_ast_ty(t)
         }
         None => HirTy::Unit,
@@ -383,11 +384,7 @@ pub(super) fn resolve_ast_with_subst(
             }
             // Generic-struct/enum path: resolve generic args under subst,
             // then look up the mangled instantiation.
-            let generics = p
-                .segments
-                .last()
-                .map(|s| s.generics.as_slice())
-                .unwrap_or(&[]);
+            let generics = p.segments.last().map_or(&[][..], |s| s.generics.as_slice());
             if !generics.is_empty() {
                 let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
                 if let Some(full) = sc.names.canon(&segs, sc.module, &[]) {
@@ -475,7 +472,7 @@ pub(super) fn generic_struct_fields(
 pub(super) fn instantiate_generic_enums(
     program: &Program,
     generic_enums: &HashMap<String, &AstEnumDef>,
-    struct_table: &mut HashMap<String, StructId>,
+    struct_table: &HashMap<String, StructId>,
     enum_table: &mut HashMap<String, EnumId>,
     enum_defs: &mut Vec<HirEnumDef>,
     names: &TypeNames<'_>,
@@ -538,7 +535,7 @@ pub(super) fn generic_use<'t, V>(
 pub(super) fn visit_ty_for_enum_mono(
     ty: &rokc_ast::Ty,
     generic_enums: &HashMap<String, &AstEnumDef>,
-    struct_table: &mut HashMap<String, StructId>,
+    struct_table: &HashMap<String, StructId>,
     enum_table: &mut HashMap<String, EnumId>,
     enum_defs: &mut Vec<HirEnumDef>,
     sc: Scope<'_>,

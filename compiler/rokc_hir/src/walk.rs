@@ -12,7 +12,7 @@ use rokc_ast::{
 /// `pop_scope`) follow the language's lexical rules: a `let` binds after
 /// its initializer, match / for / closure binders are scoped to their
 /// body.
-pub(crate) trait AstVisitor {
+pub trait AstVisitor {
     fn expr(&mut self, _e: &Expr) {}
     fn ty(&mut self, _t: &Ty) {}
     fn bind(&mut self, _name: &str) {}
@@ -20,7 +20,7 @@ pub(crate) trait AstVisitor {
     fn pop_scope(&mut self) {}
 }
 
-pub(crate) fn walk_item(v: &mut impl AstVisitor, item: &Item) {
+pub fn walk_item(v: &mut impl AstVisitor, item: &Item) {
     match item {
         Item::Fn(f) => walk_fn(v, f),
         Item::Struct(s) => match &s.kind {
@@ -109,7 +109,7 @@ pub(crate) fn walk_item(v: &mut impl AstVisitor, item: &Item) {
     }
 }
 
-pub(crate) fn walk_fn(v: &mut impl AstVisitor, f: &FnDef) {
+pub fn walk_fn(v: &mut impl AstVisitor, f: &FnDef) {
     v.push_scope();
     for p in &f.params {
         if let Some(t) = &p.ty {
@@ -129,7 +129,7 @@ pub(crate) fn walk_fn(v: &mut impl AstVisitor, f: &FnDef) {
     v.pop_scope();
 }
 
-pub(crate) fn walk_block(v: &mut impl AstVisitor, b: &Block) {
+pub fn walk_block(v: &mut impl AstVisitor, b: &Block) {
     v.push_scope();
     for s in &b.stmts {
         walk_stmt(v, s);
@@ -140,7 +140,7 @@ pub(crate) fn walk_block(v: &mut impl AstVisitor, b: &Block) {
     v.pop_scope();
 }
 
-pub(crate) fn walk_stmt(v: &mut impl AstVisitor, s: &Stmt) {
+pub fn walk_stmt(v: &mut impl AstVisitor, s: &Stmt) {
     match &s.kind {
         StmtKind::Let { name, ty, init } => {
             walk_expr(v, init);
@@ -192,14 +192,13 @@ pub(crate) fn walk_stmt(v: &mut impl AstVisitor, s: &Stmt) {
         }
         // Nested items have their own scopes; their bodies can't see the
         // enclosing function's locals.
-        StmtKind::Item(_) => {}
+        StmtKind::Item(_) | StmtKind::Continue { .. } => {}
         StmtKind::Expr(e) | StmtKind::Trailing(e) | StmtKind::Throw(e) => walk_expr(v, e),
         StmtKind::Return(e) | StmtKind::Break { value: e, .. } => {
             if let Some(e) = e {
                 walk_expr(v, e);
             }
         }
-        StmtKind::Continue { .. } => {}
     }
 }
 
@@ -221,7 +220,7 @@ fn walk_path_generics(v: &mut impl AstVisitor, p: &rokc_ast::Path) {
     }
 }
 
-pub(crate) fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
+pub fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
     v.expr(e);
     match &e.kind {
         ExprKind::Literal(_) | ExprKind::SelfLower | ExprKind::SelfUpper => {}
@@ -307,11 +306,9 @@ pub(crate) fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
             walk_block(v, else_body);
             walk_pat(v, pat);
         }
-        ExprKind::OpInfix { lhs, rhs, .. } | ExprKind::NullishCoalesce(lhs, rhs) => {
-            walk_expr(v, lhs);
-            walk_expr(v, rhs);
-        }
-        ExprKind::Index(lhs, rhs) => {
+        ExprKind::OpInfix { lhs, rhs, .. }
+        | ExprKind::NullishCoalesce(lhs, rhs)
+        | ExprKind::Index(lhs, rhs) => {
             walk_expr(v, lhs);
             walk_expr(v, rhs);
         }
@@ -430,7 +427,7 @@ pub(crate) fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
 }
 
 /// Visits a pattern's types and binds its names into the current scope.
-pub(crate) fn walk_pat(v: &mut impl AstVisitor, p: &Pattern) {
+pub fn walk_pat(v: &mut impl AstVisitor, p: &Pattern) {
     match &p.kind {
         PatternKind::Wildcard | PatternKind::Literal(_) | PatternKind::Range { .. } => {}
         PatternKind::Binding { name, sub } => {
@@ -481,7 +478,7 @@ pub(crate) fn walk_pat(v: &mut impl AstVisitor, p: &Pattern) {
     }
 }
 
-pub(crate) fn walk_ty(v: &mut impl AstVisitor, t: &Ty) {
+pub fn walk_ty(v: &mut impl AstVisitor, t: &Ty) {
     v.ty(t);
     match &t.kind {
         TyKind::Path(p) => walk_path_generics(v, p),
@@ -503,7 +500,7 @@ pub(crate) fn walk_ty(v: &mut impl AstVisitor, t: &Ty) {
 
 /// Names a closure body references but doesn't bind, in first-use
 /// order. Includes globals (the caller keeps only outer locals).
-pub(crate) fn free_names(params: &[rokc_ast::Param], body: &Expr) -> Vec<String> {
+pub fn free_names(params: &[rokc_ast::Param], body: &Expr) -> Vec<String> {
     struct Free {
         scopes: Vec<Vec<String>>,
         out: Vec<String>,
@@ -545,7 +542,7 @@ pub(crate) fn free_names(params: &[rokc_ast::Param], body: &Expr) -> Vec<String>
 }
 
 /// Calls `f` on every AST type in `item` (signatures, fields, bodies).
-pub(crate) fn for_each_ty(item: &Item, f: &mut dyn FnMut(&Ty)) {
+pub fn for_each_ty(item: &Item, f: &mut dyn FnMut(&Ty)) {
     struct Tys<'f>(&'f mut dyn FnMut(&Ty));
     impl AstVisitor for Tys<'_> {
         fn ty(&mut self, t: &Ty) {
@@ -553,9 +550,8 @@ pub(crate) fn for_each_ty(item: &Item, f: &mut dyn FnMut(&Ty)) {
         }
         fn expr(&mut self, e: &Expr) {
             // `Pair<i32> { ... }` / `Box::<T>` carry type uses on paths.
-            let path = match &e.kind {
-                ExprKind::StructInit { path, .. } | ExprKind::Path(path) => path,
-                _ => return,
+            let (ExprKind::StructInit { path, .. } | ExprKind::Path(path)) = &e.kind else {
+                return;
             };
             if path.segments.last().is_some_and(|s| !s.generics.is_empty()) {
                 (self.0)(&Ty {

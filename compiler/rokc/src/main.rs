@@ -55,8 +55,10 @@ fn usage_error(msg: &str) -> ! {
 
 fn parse_args(raw: Vec<String>) -> Args {
     let mut it = raw.into_iter();
-    let mut a = Args::default();
-    a.cmd = it.next().unwrap_or_else(|| usage_error("missing command"));
+    let mut a = Args {
+        cmd: it.next().unwrap_or_else(|| usage_error("missing command")),
+        ..Args::default()
+    };
     // Value of `--name=value` or the next argument for `--name value`.
     let value = |name: &str, inline: Option<String>, it: &mut std::vec::IntoIter<String>| {
         inline
@@ -85,8 +87,8 @@ fn parse_args(raw: Vec<String>) -> Args {
                         .unwrap_or_else(|| usage_error(&format!("unknown emit kind `{k}`"))),
                 );
             }
-            "--release" => a.opts.opt_level = "2".to_owned(),
-            "-O0" | "-O1" | "-O2" | "-O3" | "-Os" => a.opts.opt_level = name[2..].to_owned(),
+            "--release" => "2".clone_into(&mut a.opts.opt_level),
+            "-O0" | "-O1" | "-O2" | "-O3" | "-Os" => name[2..].clone_into(&mut a.opts.opt_level),
             "--keep" => a.opts.keep_temps = true,
             "-h" | "--help" => {
                 print!("{USAGE}");
@@ -105,7 +107,7 @@ fn main() {
     match a.cmd.as_str() {
         "build" => {
             if let Some(kind) = a.emit {
-                cmd_emit(&a, kind)
+                cmd_emit(&a, kind);
             } else {
                 let (result, input) = compile(&a);
                 let out = a
@@ -147,7 +149,12 @@ fn stem(input: &Path) -> String {
 /// `ROKC_TARGET_DIR`, spec 901.7).
 fn target_dir(input: &Path) -> PathBuf {
     let dir = std::env::var_os("ROKC_TARGET_DIR").map_or_else(
-        || input.parent().unwrap_or(Path::new(".")).join("target"),
+        || {
+            input
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("target")
+        },
         PathBuf::from,
     );
     if let Err(e) = std::fs::create_dir_all(&dir) {

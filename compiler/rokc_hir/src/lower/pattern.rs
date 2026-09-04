@@ -125,7 +125,6 @@ pub(super) fn check_match_exhaustiveness(
     }
     let missing: Vec<String> = match scrut_ty {
         HirTy::Prim(PrimTy::Bool) => {
-            let mut seen = [false, false];
             fn bools(p: &HirPattern, seen: &mut [bool; 2]) {
                 match p {
                     HirPattern::Literal {
@@ -136,6 +135,7 @@ pub(super) fn check_match_exhaustiveness(
                     _ => {}
                 }
             }
+            let mut seen = [false, false];
             for p in &unguarded {
                 bools(p, &mut seen);
             }
@@ -206,6 +206,7 @@ pub(super) fn lower_pattern(
     p
 }
 
+#[allow(clippy::cognitive_complexity)] // one arm per pattern kind
 pub(super) fn lower_pattern_inner(
     ctx: &mut LowerCtx<'_>,
     pat: &AstPattern,
@@ -453,12 +454,11 @@ pub(super) fn lower_pattern_inner(
                             continue;
                         };
                         let ty = field_tys[i].clone();
-                        args[i] = match &fp.pat {
-                            Some(p) => lower_pattern(ctx, p, &ty),
-                            None => {
-                                let local = ctx.declare(Some(fp.name.clone()), ty.clone());
-                                HirPattern::Binding { local, ty }
-                            }
+                        args[i] = if let Some(p) = &fp.pat {
+                            lower_pattern(ctx, p, &ty)
+                        } else {
+                            let local = ctx.declare(Some(fp.name.clone()), ty.clone());
+                            HirPattern::Binding { local, ty }
                         };
                     }
                     return HirPattern::EnumVariant {

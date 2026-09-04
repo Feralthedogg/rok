@@ -18,15 +18,17 @@ pub struct MlirOutput {
 }
 
 pub fn codegen(module: &MirModule) -> Result<MlirOutput, RokDiagnostic> {
-    codegen_with_target(module, None)
+    codegen_with_target(module, None, true)
 }
 
 pub fn codegen_with_target(
     module: &MirModule,
     target: Option<&str>,
+    overflow_checks: bool,
 ) -> Result<MlirOutput, RokDiagnostic> {
     let pointer_width = pointer_width_for_target(target);
     let mut e = emit::Emitter::new(pointer_width);
+    e.overflow_checks = overflow_checks;
     e.emit_module(module);
     if let Some(first) = e.errors.first() {
         let mut d = RokDiagnostic::error(ErrorKind::Unsupported, first.clone());

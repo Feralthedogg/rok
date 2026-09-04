@@ -30,6 +30,9 @@ pub struct OpEntry {
     pub assoc: Assoc,
     // Trait method name this operator dispatches to (e.g. "add" for "+").
     pub method_name: String,
+    // Trait declaring that method (e.g. "Add"). Only an impl of this trait
+    // makes a user type support the operator (spec 0.4 / 6.4).
+    pub trait_name: String,
 }
 
 /// Operator lookup: `(symbol, fixity) -> entry`.
@@ -72,7 +75,7 @@ pub fn collect_prec_table(program: &Program) -> (PrecTable, Vec<RokDiagnostic>) 
             for ti in &t.items {
                 if let TraitItem::Method(m) = ti {
                     for attr in &m.attrs {
-                        collect_attr(attr, &m.name, &mut table, &mut diags);
+                        collect_attr(attr, &t.name, &m.name, &mut table, &mut diags);
                     }
                 }
             }
@@ -83,6 +86,7 @@ pub fn collect_prec_table(program: &Program) -> (PrecTable, Vec<RokDiagnostic>) 
 
 fn collect_attr(
     attr: &Attribute,
+    trait_name: &str,
     method_name: &str,
     table: &mut PrecTable,
     diags: &mut Vec<RokDiagnostic>,
@@ -163,6 +167,7 @@ fn collect_attr(
         prec,
         assoc,
         method_name: method_name.to_owned(),
+        trait_name: trait_name.to_owned(),
     });
 }
 

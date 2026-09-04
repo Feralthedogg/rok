@@ -18,6 +18,10 @@ use rokc_lexer::{Token, TokenKind};
 
 use crate::prec::{Assoc, Fixity, PrecTable};
 
+/// `rest` of a `let (..)` tuple pattern: splice index + optional name.
+type LetTupleRest = (usize, Option<String>);
+
+#[allow(clippy::struct_excessive_bools)] // independent context flags, not a state machine
 pub struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
@@ -372,7 +376,7 @@ impl<'a> Parser<'a> {
                 self.peek_next(),
                 Some(TokenKind::Fn | TokenKind::Unsafe | TokenKind::Async | TokenKind::Yield)
             ),
-            k => starts_item(&k),
+            k => starts_item(k),
         }
     }
 
@@ -706,16 +710,13 @@ impl<'a> Parser<'a> {
     ) -> Option<rokc_ast::TypeAliasDef> {
         let start = self.peek_span();
         self.expect(&TokenKind::Type, "`type`")?;
-        let name = match self.peek().clone() {
-            TokenKind::Ident(n) => {
-                self.bump();
-                n
-            }
-            _ => {
-                let s = self.peek_span();
-                self.error(s, "type alias name expected");
-                return None;
-            }
+        let name = if let TokenKind::Ident(n) = self.peek().clone() {
+            self.bump();
+            n
+        } else {
+            let s = self.peek_span();
+            self.error(s, "type alias name expected");
+            return None;
         };
         let generics = self.parse_generic_params();
         self.expect(&TokenKind::Eq, "`=`")?;
@@ -739,16 +740,13 @@ impl<'a> Parser<'a> {
     ) -> Option<rokc_ast::ConstDef> {
         let start = self.peek_span();
         self.expect(&TokenKind::Const, "`const`")?;
-        let name = match self.peek().clone() {
-            TokenKind::Ident(n) => {
-                self.bump();
-                n
-            }
-            _ => {
-                let s = self.peek_span();
-                self.error(s, "const name expected");
-                return None;
-            }
+        let name = if let TokenKind::Ident(n) = self.peek().clone() {
+            self.bump();
+            n
+        } else {
+            let s = self.peek_span();
+            self.error(s, "const name expected");
+            return None;
         };
         self.expect(&TokenKind::Colon, "`:`")?;
         let ty = self.parse_type()?;
@@ -788,16 +786,13 @@ impl<'a> Parser<'a> {
                  General code should use `Atomic`/`Mutex`/`Cell` (spec 5.3)",
             );
         }
-        let name = match self.peek().clone() {
-            TokenKind::Ident(n) => {
-                self.bump();
-                n
-            }
-            _ => {
-                let s = self.peek_span();
-                self.error(s, "static name expected");
-                return None;
-            }
+        let name = if let TokenKind::Ident(n) = self.peek().clone() {
+            self.bump();
+            n
+        } else {
+            let s = self.peek_span();
+            self.error(s, "static name expected");
+            return None;
         };
         self.expect(&TokenKind::Colon, "`:`")?;
         let ty = self.parse_type()?;
@@ -821,16 +816,13 @@ impl<'a> Parser<'a> {
     fn parse_struct(&mut self, vis: Visibility, attrs: Vec<Attribute>) -> Option<StructDef> {
         let start = self.peek_span();
         self.expect(&TokenKind::Struct, "`struct`")?;
-        let name = match self.peek().clone() {
-            TokenKind::Ident(n) => {
-                self.bump();
-                n
-            }
-            _ => {
-                let s = self.peek_span();
-                self.error(s, "struct name expected");
-                return None;
-            }
+        let name = if let TokenKind::Ident(n) = self.peek().clone() {
+            self.bump();
+            n
+        } else {
+            let s = self.peek_span();
+            self.error(s, "struct name expected");
+            return None;
         };
         let generics = if matches!(self.peek(), TokenKind::Lt) {
             self.parse_generic_params()
@@ -888,16 +880,13 @@ impl<'a> Parser<'a> {
     fn parse_union(&mut self, vis: Visibility, attrs: Vec<Attribute>) -> Option<UnionDef> {
         let start = self.peek_span();
         self.expect(&TokenKind::Union, "`union`")?;
-        let name = match self.peek().clone() {
-            TokenKind::Ident(n) => {
-                self.bump();
-                n
-            }
-            _ => {
-                let s = self.peek_span();
-                self.error(s, "union name expected");
-                return None;
-            }
+        let name = if let TokenKind::Ident(n) = self.peek().clone() {
+            self.bump();
+            n
+        } else {
+            let s = self.peek_span();
+            self.error(s, "union name expected");
+            return None;
         };
         let generics = if matches!(self.peek(), TokenKind::Lt) {
             self.parse_generic_params()
@@ -997,16 +986,13 @@ impl<'a> Parser<'a> {
                 TokenKind::Type => {
                     let _ = (item_vis, item_attrs);
                     self.bump();
-                    let assoc_name = match self.peek().clone() {
-                        TokenKind::Ident(n) => {
-                            self.bump();
-                            n
-                        }
-                        _ => {
-                            let s = self.peek_span();
-                            self.error(s, "associated-type name expected");
-                            String::new()
-                        }
+                    let assoc_name = if let TokenKind::Ident(n) = self.peek().clone() {
+                        self.bump();
+                        n
+                    } else {
+                        let s = self.peek_span();
+                        self.error(s, "associated-type name expected");
+                        String::new()
                     };
                     self.expect(&TokenKind::Eq, "`=`")?;
                     let aty = self.parse_type()?;
@@ -1051,16 +1037,13 @@ impl<'a> Parser<'a> {
     fn parse_enum(&mut self, vis: Visibility, attrs: Vec<Attribute>) -> Option<EnumDef> {
         let start = self.peek_span();
         self.expect(&TokenKind::Enum, "`enum`")?;
-        let name = match self.peek().clone() {
-            TokenKind::Ident(n) => {
-                self.bump();
-                n
-            }
-            _ => {
-                let s = self.peek_span();
-                self.error(s, "enum name expected");
-                return None;
-            }
+        let name = if let TokenKind::Ident(n) = self.peek().clone() {
+            self.bump();
+            n
+        } else {
+            let s = self.peek_span();
+            self.error(s, "enum name expected");
+            return None;
         };
         let generics = if matches!(self.peek(), TokenKind::Lt) {
             self.parse_generic_params()
@@ -1073,16 +1056,13 @@ impl<'a> Parser<'a> {
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
             let v_attrs = self.parse_outer_attrs();
             let v_span = self.peek_span();
-            let v_name = match self.peek().clone() {
-                TokenKind::Ident(n) => {
-                    self.bump();
-                    n
-                }
-                _ => {
-                    let s = self.peek_span();
-                    self.error(s, "variant name expected");
-                    return None;
-                }
+            let v_name = if let TokenKind::Ident(n) = self.peek().clone() {
+                self.bump();
+                n
+            } else {
+                let s = self.peek_span();
+                self.error(s, "variant name expected");
+                return None;
             };
             let kind = match self.peek() {
                 TokenKind::LParen => {
@@ -1186,16 +1166,13 @@ impl<'a> Parser<'a> {
     fn parse_mod(&mut self, vis: Visibility, attrs: Vec<Attribute>) -> Option<ModDef> {
         let start = self.peek_span();
         self.expect(&TokenKind::Mod, "`mod`")?;
-        let name = match self.peek().clone() {
-            TokenKind::Ident(n) => {
-                self.bump();
-                n
-            }
-            _ => {
-                let s = self.peek_span();
-                self.error(s, "module name expected");
-                return None;
-            }
+        let name = if let TokenKind::Ident(n) = self.peek().clone() {
+            self.bump();
+            n
+        } else {
+            let s = self.peek_span();
+            self.error(s, "module name expected");
+            return None;
         };
         let items = if matches!(self.peek(), TokenKind::LBrace) {
             self.bump();
@@ -1247,16 +1224,13 @@ impl<'a> Parser<'a> {
             // (parent module). `self::` is intentionally not a `use`
             // root — same-module children resolve via the lookup-time
             // ancestors walk without an explicit prefix.
-            let seg_name = match self.peek().clone() {
-                TokenKind::Ident(n) => {
-                    self.bump();
-                    n
-                }
-                _ => {
-                    let s = self.peek_span();
-                    self.error(s, "expected an import path");
-                    return None;
-                }
+            let seg_name = if let TokenKind::Ident(n) = self.peek().clone() {
+                self.bump();
+                n
+            } else {
+                let s = self.peek_span();
+                self.error(s, "expected an import path");
+                return None;
             };
             segments.push(PathSegment {
                 name: seg_name,
@@ -1270,7 +1244,7 @@ impl<'a> Parser<'a> {
             // calling context.
             let after_colons = self.peek_next();
             match after_colons {
-                Some(TokenKind::Star) | Some(TokenKind::LBrace) | Some(TokenKind::Ident(_)) => {
+                Some(TokenKind::Star | TokenKind::LBrace | TokenKind::Ident(_)) => {
                     self.bump(); // consume `::`
                     if matches!(self.peek(), TokenKind::Star | TokenKind::LBrace) {
                         break;
@@ -1311,16 +1285,13 @@ impl<'a> Parser<'a> {
             }
             TokenKind::As => {
                 self.bump();
-                let alias = match self.peek().clone() {
-                    TokenKind::Ident(n) => {
-                        self.bump();
-                        n
-                    }
-                    _ => {
-                        let s = self.peek_span();
-                        self.error(s, "alias name expected after `as`");
-                        return None;
-                    }
+                let alias = if let TokenKind::Ident(n) = self.peek().clone() {
+                    self.bump();
+                    n
+                } else {
+                    let s = self.peek_span();
+                    self.error(s, "alias name expected after `as`");
+                    return None;
                 };
                 rokc_ast::UseTreeKind::Simple(Some(alias))
             }
@@ -1332,16 +1303,13 @@ impl<'a> Parser<'a> {
     fn parse_trait(&mut self, vis: Visibility, attrs: Vec<Attribute>) -> Option<TraitDef> {
         let start = self.peek_span();
         self.expect(&TokenKind::Trait, "`trait`")?;
-        let name = match self.peek().clone() {
-            TokenKind::Ident(n) => {
-                self.bump();
-                n
-            }
-            _ => {
-                let s = self.peek_span();
-                self.error(s, "trait name expected");
-                return None;
-            }
+        let name = if let TokenKind::Ident(n) = self.peek().clone() {
+            self.bump();
+            n
+        } else {
+            let s = self.peek_span();
+            self.error(s, "trait name expected");
+            return None;
         };
         let generics = self.parse_generic_params();
         let supertraits = if self.eat(&TokenKind::Colon) {
@@ -1383,16 +1351,13 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Type => {
                 self.bump();
-                let name = match self.peek().clone() {
-                    TokenKind::Ident(n) => {
-                        self.bump();
-                        n
-                    }
-                    _ => {
-                        let s = self.peek_span();
-                        self.error(s, "associated type name expected");
-                        return None;
-                    }
+                let name = if let TokenKind::Ident(n) = self.peek().clone() {
+                    self.bump();
+                    n
+                } else {
+                    let s = self.peek_span();
+                    self.error(s, "associated type name expected");
+                    return None;
                 };
                 // Optional bounds (`: A + B`) and default (`= T`) — skip
                 // until the terminating `;`.
@@ -1423,10 +1388,10 @@ impl<'a> Parser<'a> {
     fn parse_let_tuple_pattern(
         &mut self,
         outer_span: Span,
-    ) -> Option<(Vec<String>, Option<(usize, Option<String>)>)> {
+    ) -> Option<(Vec<String>, Option<LetTupleRest>)> {
         self.expect(&TokenKind::LParen, "`(`")?;
         let mut names: Vec<String> = Vec::new();
-        let mut rest: Option<(usize, Option<String>)> = None;
+        let mut rest: Option<LetTupleRest> = None;
         while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
             if matches!(self.peek(), TokenKind::DotDot) {
                 self.bump();
@@ -1480,16 +1445,13 @@ impl<'a> Parser<'a> {
                     span: outer_span,
                 });
             } else {
-                let n = match self.peek().clone() {
-                    TokenKind::Ident(n) => {
-                        self.bump();
-                        n
-                    }
-                    _ => {
-                        let s = self.peek_span();
-                        self.error(s, "binding name expected");
-                        return None;
-                    }
+                let n = if let TokenKind::Ident(n) = self.peek().clone() {
+                    self.bump();
+                    n
+                } else {
+                    let s = self.peek_span();
+                    self.error(s, "binding name expected");
+                    return None;
                 };
                 names.push(n);
             }
@@ -1509,8 +1471,8 @@ impl<'a> Parser<'a> {
             return Visibility::Pub;
         }
         // `pub(reach)`. Contextual identifier; only valid inside `pub(...)`.
-        let v = match self.peek().clone() {
-            TokenKind::Ident(name) => match name.as_str() {
+        let v = if let TokenKind::Ident(name) = self.peek().clone() {
+            match name.as_str() {
                 "pkg" => Visibility::Pkg,
                 "sub" => Visibility::Sub,
                 _ => {
@@ -1518,12 +1480,11 @@ impl<'a> Parser<'a> {
                     self.error(s, "expected `pkg` or `sub`");
                     Visibility::Pub
                 }
-            },
-            _ => {
-                let s = self.peek_span();
-                self.error(s, "expected `pkg` or `sub`");
-                Visibility::Pub
             }
+        } else {
+            let s = self.peek_span();
+            self.error(s, "expected `pkg` or `sub`");
+            Visibility::Pub
         };
         self.bump();
         self.expect(&TokenKind::RParen, "`)`");
@@ -1547,13 +1508,12 @@ impl<'a> Parser<'a> {
             self.bump();
         }
         self.expect(&TokenKind::Fn, "`fn`")?;
-        let name = match self.peek() {
-            TokenKind::Ident(n) => n.clone(),
-            _ => {
-                let s = self.peek_span();
-                self.error(s, "function name expected");
-                return None;
-            }
+        let name = if let TokenKind::Ident(n) = self.peek() {
+            n.clone()
+        } else {
+            let s = self.peek_span();
+            self.error(s, "function name expected");
+            return None;
         };
         self.bump();
         // Optional generic parameters.
@@ -1736,16 +1696,13 @@ impl<'a> Parser<'a> {
             });
         }
 
-        let name = match self.peek().clone() {
-            TokenKind::Ident(n) => {
-                self.bump();
-                n
-            }
-            _ => {
-                let s = self.peek_span();
-                self.error(s, "parameter name expected");
-                return None;
-            }
+        let name = if let TokenKind::Ident(n) = self.peek().clone() {
+            self.bump();
+            n
+        } else {
+            let s = self.peek_span();
+            self.error(s, "parameter name expected");
+            return None;
         };
         // Spec 4.1 / variant 833: `xs: ...T` variadic — `...` precedes the
         // element type. Stage-1 stores the element type plain and marks
@@ -1874,16 +1831,13 @@ impl<'a> Parser<'a> {
                 let elem = self.with_type_sum(true, Self::parse_type)?;
                 self.expect(&TokenKind::Semi, "`;`")?;
                 // For now: only literal integer length.
-                let len = match self.peek().clone() {
-                    TokenKind::IntLit(s) => {
-                        self.bump();
-                        ConstExpr::Literal(Literal::Int(s))
-                    }
-                    _ => {
-                        let s = self.peek_span();
-                        self.error(s, "array length literal expected");
-                        ConstExpr::Literal(Literal::Int("0".into()))
-                    }
+                let len = if let TokenKind::IntLit(s) = self.peek().clone() {
+                    self.bump();
+                    ConstExpr::Literal(Literal::Int(s))
+                } else {
+                    let s = self.peek_span();
+                    self.error(s, "array length literal expected");
+                    ConstExpr::Literal(Literal::Int("0".into()))
                 };
                 self.expect(&TokenKind::RBracket, "`]`")?;
                 TyKind::Array(Box::new(elem), len)
@@ -1981,13 +1935,10 @@ impl<'a> Parser<'a> {
         let start = self.peek_span();
         let mut segments = Vec::new();
         loop {
-            let name = match self.peek().clone() {
-                TokenKind::Ident(n) => n,
-                _ => {
-                    let s = self.peek_span();
-                    self.error(s, "path segment expected");
-                    return None;
-                }
+            let TokenKind::Ident(name) = self.peek().clone() else {
+                let s = self.peek_span();
+                self.error(s, "path segment expected");
+                return None;
             };
             self.bump();
             // `Name<T1, T2>` — generic arguments accepted only when the
@@ -2061,6 +2012,7 @@ impl<'a> Parser<'a> {
     /// Returns `(stmt, is_trailing_eligible)`. The block-builder decides
     /// whether a trailing expression is actually a trailing value or a
     /// statement.
+    #[allow(clippy::cognitive_complexity)] // one arm per statement form
     fn parse_stmt(&mut self) -> Option<(Stmt, bool)> {
         let start = self.peek_span();
         match self.peek() {
@@ -2068,13 +2020,13 @@ impl<'a> Parser<'a> {
                 let vis = Visibility::Private;
                 let attrs = Vec::new();
                 let use_def = self.parse_use(vis, attrs)?;
-                return Some((
+                Some((
                     Stmt {
                         kind: StmtKind::Item(Item::Use(use_def)),
                         span: start,
                     },
                     false,
-                ));
+                ))
             }
             TokenKind::Let => {
                 self.bump();
@@ -2094,28 +2046,22 @@ impl<'a> Parser<'a> {
                             rest = true;
                             break;
                         }
-                        let field_name = match self.peek().clone() {
-                            TokenKind::Ident(n) => {
-                                self.bump();
-                                n
-                            }
-                            _ => {
-                                let s = self.peek_span();
-                                self.error(s, "field name expected");
-                                return None;
-                            }
+                        let field_name = if let TokenKind::Ident(n) = self.peek().clone() {
+                            self.bump();
+                            n
+                        } else {
+                            let s = self.peek_span();
+                            self.error(s, "field name expected");
+                            return None;
                         };
                         let bind_name = if self.eat(&TokenKind::Colon) {
-                            match self.peek().clone() {
-                                TokenKind::Ident(n) => {
-                                    self.bump();
-                                    n
-                                }
-                                _ => {
-                                    let s = self.peek_span();
-                                    self.error(s, "rebind name expected");
-                                    return None;
-                                }
+                            if let TokenKind::Ident(n) = self.peek().clone() {
+                                self.bump();
+                                n
+                            } else {
+                                let s = self.peek_span();
+                                self.error(s, "rebind name expected");
+                                return None;
                             }
                         } else {
                             field_name.clone()
@@ -2175,13 +2121,12 @@ impl<'a> Parser<'a> {
                         false,
                     ));
                 }
-                let name = match self.peek() {
-                    TokenKind::Ident(n) => n.clone(),
-                    _ => {
-                        let s = self.peek_span();
-                        self.error(s, "binding name expected");
-                        return None;
-                    }
+                let name = if let TokenKind::Ident(n) = self.peek() {
+                    n.clone()
+                } else {
+                    let s = self.peek_span();
+                    self.error(s, "binding name expected");
+                    return None;
                 };
                 self.bump();
                 let ty = if self.eat(&TokenKind::Colon) {
@@ -2221,7 +2166,7 @@ impl<'a> Parser<'a> {
                     let success_body = Expr {
                         kind: ExprKind::Path(Path {
                             segments: vec![PathSegment {
-                                name: binder.clone(),
+                                name: binder,
                                 generics: vec![],
                             }],
                             span: init_span,
@@ -2354,10 +2299,10 @@ impl<'a> Parser<'a> {
                     // it sits in trailing position (`}` follows) so the spec
                     // example parses while still requiring `;` between
                     // statements in the middle of a block.
-                    if !matches!(self.peek(), TokenKind::RBrace) {
-                        self.expect(&TokenKind::Semi, "`;`")?;
-                    } else {
+                    if matches!(self.peek(), TokenKind::RBrace) {
                         let _ = self.eat(&TokenKind::Semi);
+                    } else {
+                        self.expect(&TokenKind::Semi, "`;`")?;
                     }
                     return Some((
                         Stmt {
@@ -2558,9 +2503,8 @@ impl<'a> Parser<'a> {
                 break;
             };
             let (left_bp, right_bp) = match entry.assoc {
-                Assoc::Left => (entry.prec, entry.prec + 1),
+                Assoc::Left | Assoc::None => (entry.prec, entry.prec + 1),
                 Assoc::Right => (entry.prec + 1, entry.prec),
-                Assoc::None => (entry.prec, entry.prec + 1),
             };
             if left_bp < min_bp {
                 break;
@@ -2610,7 +2554,7 @@ impl<'a> Parser<'a> {
         let sym = match (&tok.kind, fixity) {
             // Infix-only tokens.
             (TokenKind::Plus, Fixity::Infix) => "+".into(),
-            (TokenKind::Minus, Fixity::Infix) => "-".into(),
+            (TokenKind::Minus, Fixity::Infix | Fixity::Prefix) => "-".into(),
             (TokenKind::Star, Fixity::Infix) => "*".into(),
             (TokenKind::Slash, Fixity::Infix) => "/".into(),
             (TokenKind::Percent, Fixity::Infix) => "%".into(),
@@ -2650,13 +2594,13 @@ impl<'a> Parser<'a> {
             (TokenKind::DotShr, Fixity::Infix) => ".>>".into(),
             // Prefix-only tokens.
             (TokenKind::Bang, Fixity::Prefix) => "!".into(),
-            (TokenKind::Minus, Fixity::Prefix) => "-".into(),
             (TokenKind::Tilde, Fixity::Prefix) => "~".into(),
             _ => return None,
         };
         Some((sym, tok.span))
     }
 
+    #[allow(clippy::cognitive_complexity)] // one arm per primary-expression token
     fn parse_primary(&mut self) -> Option<Expr> {
         let start = self.peek_span();
         let kind = match self.peek().clone() {
@@ -2675,16 +2619,13 @@ impl<'a> Parser<'a> {
                     return None;
                 }
                 self.expect(&TokenKind::ColonColon, "`::`")?;
-                let method_name = match self.peek().clone() {
-                    TokenKind::Ident(n) => {
-                        self.bump();
-                        n
-                    }
-                    _ => {
-                        let s = self.peek_span();
-                        self.error(s, "method name expected after `<T as Trait>::`");
-                        return None;
-                    }
+                let method_name = if let TokenKind::Ident(n) = self.peek().clone() {
+                    self.bump();
+                    n
+                } else {
+                    let s = self.peek_span();
+                    self.error(s, "method name expected after `<T as Trait>::`");
+                    return None;
                 };
                 let mut segments = ty_path.segments;
                 segments.push(PathSegment {
@@ -2781,7 +2722,7 @@ impl<'a> Parser<'a> {
                 // `'label: loop`, `'label: while`, `'label: for`,
                 // `'label: { ... }`. Parse the labelled construct and
                 // attach the label.
-                let label_name = name.clone();
+                let label_name = name;
                 self.bump();
                 self.expect(&TokenKind::Colon, "`:` after label")?;
                 match self.peek().clone() {
@@ -3138,16 +3079,13 @@ impl<'a> Parser<'a> {
                 let mut captures: Vec<rokc_ast::CaptureSpec> = Vec::new();
                 while !matches!(self.peek(), TokenKind::RBracket | TokenKind::Eof) {
                     if self.eat(&TokenKind::Ref) {
-                        let name = match self.peek().clone() {
-                            TokenKind::Ident(n) => {
-                                self.bump();
-                                n
-                            }
-                            _ => {
-                                let s = self.peek_span();
-                                self.error(s, "capture name expected after `ref`");
-                                return None;
-                            }
+                        let name = if let TokenKind::Ident(n) = self.peek().clone() {
+                            self.bump();
+                            n
+                        } else {
+                            let s = self.peek_span();
+                            self.error(s, "capture name expected after `ref`");
+                            return None;
                         };
                         captures.push(rokc_ast::CaptureSpec::Ref(name));
                     } else if let TokenKind::Ident(n) = self.peek().clone() {
@@ -3415,6 +3353,7 @@ impl<'a> Parser<'a> {
     /// brace is reserved for the construct body, not a 0-arg closure.
     /// The flag is reused (not duplicated) because both situations share
     /// the same disambiguation question.
+    #[allow(clippy::option_option)] // outer None = parse error (for `?`), inner None = no closure
     fn try_parse_trailing_closure(&mut self) -> Option<Option<Box<Expr>>> {
         match self.peek() {
             TokenKind::LBrace if self.struct_expr_allowed => {
@@ -3569,8 +3508,7 @@ impl<'a> Parser<'a> {
         // Caller has just confirmed `peek() == LBrace`.
         let after_brace = self.tokens.get(self.pos + 1).map(|t| &t.kind);
         match after_brace {
-            Some(TokenKind::RBrace) => true,
-            Some(TokenKind::DotDot) => true,
+            Some(TokenKind::RBrace | TokenKind::DotDot) => true,
             Some(TokenKind::Ident(_)) => {
                 let third = self.tokens.get(self.pos + 2).map(|t| &t.kind);
                 matches!(
@@ -3592,16 +3530,13 @@ impl<'a> Parser<'a> {
                 spread = Some(Box::new(base));
                 break;
             }
-            let name = match self.peek().clone() {
-                TokenKind::Ident(n) => {
-                    self.bump();
-                    n
-                }
-                _ => {
-                    let s = self.peek_span();
-                    self.error(s, "field name expected");
-                    return None;
-                }
+            let name = if let TokenKind::Ident(n) = self.peek().clone() {
+                self.bump();
+                n
+            } else {
+                let s = self.peek_span();
+                self.error(s, "field name expected");
+                return None;
             };
             // Shorthand `Foo { x }` (using a local named `x`) is allowed
             // when the next token is not `:`.
@@ -3690,16 +3625,13 @@ impl<'a> Parser<'a> {
                 rest = true;
                 break;
             }
-            let name = match self.peek().clone() {
-                TokenKind::Ident(n) => {
-                    self.bump();
-                    n
-                }
-                _ => {
-                    let s = self.peek_span();
-                    self.error(s, "field name expected");
-                    return None;
-                }
+            let name = if let TokenKind::Ident(n) = self.peek().clone() {
+                self.bump();
+                n
+            } else {
+                let s = self.peek_span();
+                self.error(s, "field name expected");
+                return None;
             };
             // `Foo { x: pat }` or shorthand `Foo { x }` (binds `x`).
             let pat = if self.eat(&TokenKind::Colon) {
@@ -3847,9 +3779,8 @@ impl<'a> Parser<'a> {
                     self.parse_struct_pattern_body(path)?
                 } else if matches!(self.peek_next(), Some(TokenKind::Colon)) {
                     // `name: T` — type-narrow pattern (sum-type slot).
-                    let name = match self.peek().clone() {
-                        TokenKind::Ident(n) => n,
-                        _ => unreachable!(),
+                    let TokenKind::Ident(name) = self.peek().clone() else {
+                        unreachable!()
                     };
                     self.bump(); // ident
                     self.bump(); // ':'
@@ -3859,9 +3790,8 @@ impl<'a> Parser<'a> {
                         ty,
                     }
                 } else {
-                    let name = match self.peek().clone() {
-                        TokenKind::Ident(n) => n,
-                        _ => unreachable!(),
+                    let TokenKind::Ident(name) = self.peek().clone() else {
+                        unreachable!()
                     };
                     self.bump();
                     PatternKind::Binding { name, sub: None }
@@ -3921,7 +3851,7 @@ enum Recover {
     Stmt,
 }
 
-fn starts_item(k: &TokenKind) -> bool {
+const fn starts_item(k: &TokenKind) -> bool {
     use TokenKind as T;
     matches!(
         k,
@@ -3944,7 +3874,7 @@ fn starts_item(k: &TokenKind) -> bool {
     )
 }
 
-fn is_block_like(e: &Expr) -> bool {
+const fn is_block_like(e: &Expr) -> bool {
     matches!(
         e.kind,
         ExprKind::Block(_)
@@ -3957,7 +3887,7 @@ fn is_block_like(e: &Expr) -> bool {
     )
 }
 
-fn starts_stmt(k: &TokenKind) -> bool {
+const fn starts_stmt(k: &TokenKind) -> bool {
     use TokenKind as T;
     matches!(
         k,
@@ -3966,7 +3896,7 @@ fn starts_stmt(k: &TokenKind) -> bool {
 }
 
 // Map a compound-assign token to its base operator symbol.
-fn compound_assign_op(tok: &rokc_lexer::TokenKind) -> Option<&'static str> {
+const fn compound_assign_op(tok: &rokc_lexer::TokenKind) -> Option<&'static str> {
     use rokc_lexer::TokenKind as T;
     Some(match tok {
         T::PlusEq => "+",

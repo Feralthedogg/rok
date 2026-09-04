@@ -144,7 +144,7 @@ impl<'src> Lexer<'src> {
             },
         };
 
-        let span = self.make_span(start, self.pos, line, col);
+        let span = Self::make_span(start, self.pos, line, col);
         Some(Token::new(kind, span))
     }
 
@@ -821,7 +821,7 @@ impl<'src> Lexer<'src> {
         Span::new(start, start, self.line, self.col)
     }
 
-    fn make_span(&self, start: usize, end: usize, line: u32, col: u32) -> Span {
+    fn make_span(start: usize, end: usize, line: u32, col: u32) -> Span {
         Span::new(
             u32::try_from(start).unwrap_or(u32::MAX),
             u32::try_from(end).unwrap_or(u32::MAX),
@@ -833,7 +833,7 @@ impl<'src> Lexer<'src> {
     /// Error spanning `start..pos`, positioned at `start`'s line/column.
     fn error_from(&mut self, start: usize, msg: impl Into<String>) {
         let (line, col) = self.line_col(start);
-        let span = self.make_span(start, self.pos, line, col);
+        let span = Self::make_span(start, self.pos, line, col);
         self.error(span, msg);
     }
 

@@ -1,0 +1,7 @@
+// expect-exit: 101
+// expect-stdout:
+// -2147395600
+
+fn mul(a: i32, b: i32) -> i32 { return a * b; }
+rok_print_i32(mul(-46340, 46340));
+rok_print_i32(mul(65536, 65536));

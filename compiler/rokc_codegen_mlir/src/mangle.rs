@@ -9,6 +9,8 @@
 //! separator `_` is never followed by `0`/`1`. Thus `mod a { fn b }` →
 //! `…_a_b_` while a root `fn a__b` → `…__a_0_0b_`.
 
+use std::fmt::Write as _;
+
 use rokc_mir::MirFunction;
 
 /// Monomorphized names carry their type arguments after this marker
@@ -52,10 +54,14 @@ fn escape(ident: &str) -> String {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes.iter().fold(String::new(), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
+    })
 }
 
 /// FIPS 180-4 SHA-256 (no external crates allowed).
+#[allow(clippy::many_single_char_names)] // a..h, w, k follow the FIPS 180-4 names
 fn sha256(msg: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,

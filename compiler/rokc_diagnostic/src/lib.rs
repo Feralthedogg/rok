@@ -111,7 +111,8 @@ pub struct RokDiagnostic {
     pub kind: ErrorKind,
     pub message: String,
     pub file: Option<String>,
-    pub primary: Option<Label>,
+    /// Boxed to keep `RokDiagnostic` small as a `Result` error type.
+    pub primary: Option<Box<Label>>,
     pub secondary: Vec<Label>,
     pub notes: Vec<String>,
 }
@@ -154,10 +155,10 @@ impl RokDiagnostic {
 
     #[must_use]
     pub fn with_span(mut self, span: Span, message: impl Into<String>) -> Self {
-        self.primary = Some(Label {
+        self.primary = Some(Box::new(Label {
             span,
             message: message.into(),
-        });
+        }));
         self
     }
 

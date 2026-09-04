@@ -63,14 +63,14 @@ pub fn compile_source(
     let mut diags: Vec<RokDiagnostic> = Vec::new();
 
     // Bootstrap PrecTable from operator-declaration sources, if any.
-    let prec = build_prec_table(&config.bootstrap_files, &mut diags)?;
+    let prec = build_prec_table(&config.bootstrap_files, &mut diags);
     // Bootstrap LangTable from `#[lang(...)]` attributes (spec 6.4).
     // Spec 6.4.6 enforces "one item per slot" — duplicate declarations
     // surface as diagnostics here. The table itself is not yet wired
     // into HIR/codegen; this pass exists so registrations can be checked
     // for malformed shape and slot collisions before stdlib wires
     // consumers (none_type / iterator_trait / index_trait / ...).
-    let mut _lang = build_lang_table(&config.bootstrap_files, &mut diags)?;
+    let mut lang = build_lang_table(&config.bootstrap_files, &mut diags);
 
     // Walk the user package's module tree (`mod foo;` follows files
     // alongside the entry `main.rok` / `lib.rok`) and merge every
@@ -123,7 +123,7 @@ pub fn compile_source(
         let (sub_table, mut sub_diags) = collect_lang_table(&program);
         diags.append(&mut sub_diags);
         for entry in sub_table.entries().cloned() {
-            if let Some(prev) = _lang.lookup(&entry.slot) {
+            if let Some(prev) = lang.lookup(&entry.slot) {
                 diags.push(RokDiagnostic::error(
                     rokc_diagnostic::ErrorKind::Meta,
                     format!(
@@ -134,7 +134,7 @@ pub fn compile_source(
                 ));
                 continue;
             }
-            _lang = merge_lang_entry(_lang, entry);
+            lang = merge_lang_entry(lang, entry);
         }
     }
 
@@ -190,10 +190,7 @@ pub fn compile_source(
     })
 }
 
-fn build_lang_table(
-    roots: &[PathBuf],
-    diags: &mut Vec<RokDiagnostic>,
-) -> Result<LangTable, Vec<RokDiagnostic>> {
+fn build_lang_table(roots: &[PathBuf], diags: &mut Vec<RokDiagnostic>) -> LangTable {
     let mut table = LangTable::new();
     let empty = PrecTable::new();
     for root in roots {
@@ -219,7 +216,7 @@ fn build_lang_table(
             }
         }
     }
-    Ok(table)
+    table
 }
 
 fn merge_lang_entry(mut table: LangTable, entry: rokc_parser::LangEntry) -> LangTable {
@@ -227,10 +224,7 @@ fn merge_lang_entry(mut table: LangTable, entry: rokc_parser::LangEntry) -> Lang
     table
 }
 
-fn build_prec_table(
-    roots: &[PathBuf],
-    diags: &mut Vec<RokDiagnostic>,
-) -> Result<PrecTable, Vec<RokDiagnostic>> {
+fn build_prec_table(roots: &[PathBuf], diags: &mut Vec<RokDiagnostic>) -> PrecTable {
     let mut table = PrecTable::new();
     let empty = PrecTable::new();
     for root in roots {
@@ -259,7 +253,7 @@ fn build_prec_table(
             }
         }
     }
-    Ok(table)
+    table
 }
 
 /// Walk a package's module tree from `root_path` (the package root file —
@@ -373,6 +367,7 @@ fn resolve_file_mod(
 ///
 /// Items are flattened into a single list with `name` rewritten as
 /// `parent::child::leaf`. Leaf names are unchanged in the root module.
+#[allow(clippy::too_many_arguments)] // recursive walker threading accumulators; a context struct buys nothing
 fn collect_module_tree(
     body_path: &Path,
     preloaded: Option<&str>,
@@ -422,6 +417,7 @@ fn collect_module_tree(
     program.stmts
 }
 
+#[allow(clippy::too_many_arguments)] // mutually recursive with `collect_module_tree`, same accumulators
 fn flatten_module_items(
     items: Vec<rokc_ast::Item>,
     module_path: &[String],

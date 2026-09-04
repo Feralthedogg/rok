@@ -8,7 +8,7 @@ use super::*;
 /// creation time). Non-capturing closures stay as plain function
 /// pointers so existing `fn(...)` types keep working.
 pub(super) fn lower_closure_expr(
-    ctx: &mut LowerCtx<'_>,
+    ctx: &LowerCtx<'_>,
     params: &[Param],
     ret_ty: Option<&Ty>,
     body: &Expr,
@@ -40,8 +40,8 @@ pub(super) fn lower_closure_expr(
     let declared_ret = ret_ty.map(|t| ctx.resolve_ast_ty(t));
 
     let mut cl_ctx = LowerCtx::new(ctx.env, ctx.ty_subst, ctx.self_ty.clone());
-    cl_ctx.current_module = ctx.current_module.clone();
-    cl_ctx.local_uses = ctx.local_uses.clone();
+    cl_ctx.current_module.clone_from(&ctx.current_module);
+    cl_ctx.local_uses.clone_from(&ctx.local_uses);
 
     // Closures with captures take an extra `env` parameter (a tuple of
     // captured values). The env param is declared first so its LocalId
@@ -112,17 +112,16 @@ pub(super) fn lower_closure_expr(
 
     // `return` inside the closure targets the closure: its declared (or
     // expected) return type, else the first `return` value's type.
-    let fixed_ret = declared_ret.or(expected_ret.filter(|t| *t != HirTy::Unknown));
+    let fixed_ret = declared_ret.or_else(|| expected_ret.filter(|t| *t != HirTy::Unknown));
     cl_ctx.fn_ret_ty = fixed_ret.clone().unwrap_or(HirTy::Unknown);
     cl_ctx.infer_ret = fixed_ret.is_none();
     let ret_hint = cl_ctx.fn_ret_ty.clone();
     let body_h = lower_expected(&mut cl_ctx, body, ret_hint);
     let diverges = hir_expr_diverges(&body_h);
     let final_ret_ty = match (fixed_ret, cl_ctx.fn_ret_ty.clone()) {
-        (Some(t), _) => t,
         // A `return` fixed the type; a value-producing body must agree.
         (None, HirTy::Unknown) => body_h.ty.clone(),
-        (None, t) => t,
+        (Some(t), _) | (None, t) => t,
     };
     let body_h = if diverges || (body_h.ty == HirTy::Unit && final_ret_ty == HirTy::Unit) {
         body_h
@@ -217,6 +216,7 @@ pub(super) fn without_none(some: &[(usize, HirTy)]) -> HirTy {
 
 /// `match scrut { v: T_k => wrap(v), ..., none => none_body }` with one
 /// arm per non-none variant; each payload is re-wrapped into `result_ty`.
+#[allow(clippy::too_many_arguments)] // match pieces are independent inputs; a bundle struct only adds noise
 pub(super) fn optional_match(
     ctx: &mut LowerCtx<'_>,
     scrut: HirExpr,
@@ -344,7 +344,7 @@ pub(super) fn desugar_question_dot(
                 },
                 HirMatchArm {
                     pat: HirPattern::SumVariant {
-                        sum_ty: recv.ty.clone(),
+                        sum_ty: recv.ty,
                         variant_index: u32::try_from(none_idx).expect("variant overflow"),
                         binder: None,
                         payload_ty: None,
@@ -502,7 +502,6 @@ pub(super) fn bind_irrefutable(
 ) {
     let span = value.span;
     match (&pat.kind, value.ty.clone()) {
-        (AstPatternKind::Wildcard, _) => {}
         (AstPatternKind::Binding { name, sub: None }, ty) => {
             if name == "_" {
                 return;
@@ -530,7 +529,7 @@ pub(super) fn bind_irrefutable(
                 bind_irrefutable(ctx, p, read, stmts);
             }
         }
-        (_, HirTy::Unknown) => {}
+        (AstPatternKind::Wildcard, _) | (_, HirTy::Unknown) => {}
         (_, ty) => {
             ctx.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
@@ -554,7 +553,7 @@ pub(super) fn bind_irrefutable(
 /// `continue 'outer` inside the body resolve correctly.
 pub(super) fn lower_for(
     ctx: &mut LowerCtx<'_>,
-    label: &Option<String>,
+    label: Option<&String>,
     pat: &AstPattern,
     iter: &Expr,
     body: &Block,
@@ -562,7 +561,7 @@ pub(super) fn lower_for(
 ) -> HirExpr {
     let mut out: Vec<HirStmt> = Vec::new();
     ctx.push_scope();
-    ctx.breakables.push((label.clone(), true));
+    ctx.breakables.push((label.cloned(), true));
     let while_expr = match &iter.kind {
         ExprKind::Range {
             start: Some(start_e),
@@ -578,7 +577,7 @@ pub(super) fn lower_for(
         _ => {
             let iter_h = lower_expected(ctx, iter, HirTy::Unknown);
             match iter_h.ty.clone() {
-                HirTy::Array(elem, len) => lower_for_array(
+                HirTy::Array(elem, len) => Some(lower_for_array(
                     ctx,
                     label,
                     pat,
@@ -588,7 +587,7 @@ pub(super) fn lower_for(
                     body,
                     span,
                     &mut out,
-                ),
+                )),
                 HirTy::Unknown => None,
                 other => Some(ctx.error_expr(
                     span,
@@ -623,7 +622,7 @@ pub(super) fn lower_for(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn lower_for_range(
     ctx: &mut LowerCtx<'_>,
-    label: &Option<String>,
+    label: Option<&String>,
     pat: &AstPattern,
     start_e: &Expr,
     end_e: &Expr,
@@ -725,7 +724,7 @@ pub(super) fn lower_for_range(
         ty: HirTy::Unit,
         span,
         kind: HirExprKind::While {
-            label: label.clone(),
+            label: label.cloned(),
             cond: Box::new(cond),
             body: Box::new(HirBlock {
                 stmts: body_stmts,
@@ -741,7 +740,7 @@ pub(super) fn lower_for_range(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn lower_for_array(
     ctx: &mut LowerCtx<'_>,
-    label: &Option<String>,
+    label: Option<&String>,
     pat: &AstPattern,
     iter_h: HirExpr,
     elem_ty: HirTy,
@@ -749,18 +748,17 @@ pub(super) fn lower_for_array(
     body: &Block,
     span: rokc_diagnostic::Span,
     out: &mut Vec<HirStmt>,
-) -> Option<HirExpr> {
+) -> HirExpr {
     let arr_ty = iter_h.ty.clone();
-    let arr_local = match iter_h.kind {
-        HirExprKind::Local(l) => l,
-        _ => {
-            let l = ctx.declare(None, arr_ty.clone());
-            out.push(HirStmt::Let {
-                local: l,
-                init: iter_h,
-            });
-            l
-        }
+    let arr_local = if let HirExprKind::Local(l) = iter_h.kind {
+        l
+    } else {
+        let l = ctx.declare(None, arr_ty.clone());
+        out.push(HirStmt::Let {
+            local: l,
+            init: iter_h,
+        });
+        l
     };
     let idx_prim = PrimTy::I32;
     let idx_ty = HirTy::Prim(idx_prim);
@@ -808,11 +806,11 @@ pub(super) fn lower_for_array(
         ty: HirTy::Unit,
         span,
     }));
-    Some(HirExpr {
+    HirExpr {
         ty: HirTy::Unit,
         span,
         kind: HirExprKind::While {
-            label: label.clone(),
+            label: label.cloned(),
             cond: Box::new(cond),
             body: Box::new(HirBlock {
                 stmts: body_stmts,
@@ -820,5 +818,5 @@ pub(super) fn lower_for_array(
                 label: None,
             }),
         },
-    })
+    }
 }

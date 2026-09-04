@@ -42,8 +42,7 @@ pub(super) fn literal_to_const_val(expr: &Expr, ty: &HirTy) -> Option<ConstVal> 
             Some(ConstVal::Int { value, ty: prim })
         }
         L::Bool(b) => Some(ConstVal::Bool(*b)),
-        L::Str(s) => Some(ConstVal::Str(s.clone())),
-        L::RawStr(s) => Some(ConstVal::Str(s.clone())),
+        L::Str(s) | L::RawStr(s) => Some(ConstVal::Str(s.clone())),
         L::None => Some(ConstVal::None),
         _ => None,
     }
@@ -62,6 +61,7 @@ pub(super) fn strip_int_suffix(s: &str) -> &str {
 }
 
 #[must_use]
+#[allow(clippy::cognitive_complexity)] // linear sequence of lowering passes; splitting adds plumbing, not clarity
 pub fn lower_full(
     program: &Program,
     prec: &PrecTable,
@@ -261,7 +261,7 @@ pub fn lower_full(
     instantiate_generic_enums(
         program,
         &generic_enums,
-        &mut struct_table,
+        &struct_table,
         &mut enum_table,
         &mut enum_defs,
         &names,
@@ -1019,7 +1019,7 @@ pub(super) fn hir_expr_has_unknown(e: &HirExpr) -> bool {
         K::Block(b) => hir_block_has_unknown(b),
         K::PrimBinOp { lhs, rhs, .. } => hir_expr_has_unknown(lhs) || hir_expr_has_unknown(rhs),
         K::PrimUnaryOp { operand, .. } | K::Cast { operand, .. } => hir_expr_has_unknown(operand),
-        K::Call { args, .. } => any(args),
+        K::Call { args, .. } | K::EnumVariantInit { args, .. } => any(args),
         K::CallIndirect { callee, args, .. } => hir_expr_has_unknown(callee) || any(args),
         K::ClosureValue { env, .. } => hir_expr_has_unknown(env),
         K::CallClosure { closure, args, .. } => hir_expr_has_unknown(closure) || any(args),
@@ -1048,7 +1048,6 @@ pub(super) fn hir_expr_has_unknown(e: &HirExpr) -> bool {
         K::WithField { target, value, .. } => {
             hir_expr_has_unknown(target) || hir_expr_has_unknown(value)
         }
-        K::EnumVariantInit { args, .. } => any(args),
         K::SumWrap { value, .. } => value.as_deref().is_some_and(hir_expr_has_unknown),
         K::ArrayInit { elements, .. } => any(elements),
         K::ArrayIndex { array, index, .. } => {
@@ -1070,26 +1069,26 @@ pub(super) fn lower_enum_def(
         .variants
         .iter()
         .enumerate()
-        .filter_map(|(i, v)| {
+        .map(|(i, v)| {
             let tag = u32::try_from(i).expect("variant index overflow");
             match &v.kind {
-                AstEnumVariantKind::Unit => Some(HirEnumVariant {
+                AstEnumVariantKind::Unit => HirEnumVariant {
                     name: v.name.clone(),
                     tag,
                     payload_ty: None,
                     named_fields: Vec::new(),
                     arity: 0,
-                }),
+                },
                 // Single-element tuple — store the payload type directly.
-                AstEnumVariantKind::Tuple(tys) if tys.len() == 1 => Some(HirEnumVariant {
+                AstEnumVariantKind::Tuple(tys) if tys.len() == 1 => HirEnumVariant {
                     name: v.name.clone(),
                     tag,
                     payload_ty: Some(resolve_ty_with_structs(&tys[0], structs, enums, sc)),
                     named_fields: Vec::new(),
                     arity: 1,
-                }),
+                },
                 // Multi-element tuple — pack into a tuple payload type.
-                AstEnumVariantKind::Tuple(tys) => Some(HirEnumVariant {
+                AstEnumVariantKind::Tuple(tys) => HirEnumVariant {
                     name: v.name.clone(),
                     tag,
                     payload_ty: Some(HirTy::Tuple(
@@ -1099,12 +1098,12 @@ pub(super) fn lower_enum_def(
                     )),
                     named_fields: Vec::new(),
                     arity: tys.len(),
-                }),
+                },
                 // Named-form variant `Move { x: i32; y: i32; }` — pack
                 // into a tuple payload by declaration order, recording
                 // the field names so initialiser/pattern lowering can
                 // map name → tuple index. Spec 2.4.
-                AstEnumVariantKind::Named(fields) => Some(HirEnumVariant {
+                AstEnumVariantKind::Named(fields) => HirEnumVariant {
                     name: v.name.clone(),
                     tag,
                     payload_ty: Some(HirTy::Tuple(
@@ -1115,7 +1114,7 @@ pub(super) fn lower_enum_def(
                     )),
                     named_fields: fields.iter().map(|f| f.name.clone()).collect(),
                     arity: fields.len(),
-                }),
+                },
                 // Dropping the variant would shift every later tag.
                 AstEnumVariantKind::Value(_) => {
                     pre_diags.push(rokc_diagnostic::RokDiagnostic::error(
@@ -1126,13 +1125,13 @@ pub(super) fn lower_enum_def(
                             e.name, v.name
                         ),
                     ));
-                    Some(HirEnumVariant {
+                    HirEnumVariant {
                         name: v.name.clone(),
                         tag,
                         payload_ty: None,
                         named_fields: Vec::new(),
                         arity: 0,
-                    })
+                    }
                 }
             }
         })
@@ -1320,7 +1319,7 @@ pub(super) fn union_storage_strategy(
         size = 1;
     }
     // Round size up to align (C ABI: padding to alignment boundary).
-    let padded = ((size + align - 1) / align) * align;
+    let padded = size.div_ceil(align) * align;
     // Stage-1: byte-array storage path is reserved in HIR (model B) but
     // codegen for value-level bitcast between primitive ↔ `[u8; N]` is
     // not yet wired through (mlir-translate rejects
@@ -1365,10 +1364,10 @@ pub(super) fn ty_size_align_bytes(ty: &HirTy) -> Option<(u32, u32)> {
                 if al > align {
                     align = al;
                 }
-                let pad = ((total + al - 1) / al) * al;
+                let pad = total.div_ceil(al) * al;
                 total = pad + sz;
             }
-            let padded = ((total + align - 1) / align) * align;
+            let padded = total.div_ceil(align) * align;
             Some((padded, align))
         }
         HirTy::Array(elem, n) => {
@@ -1379,8 +1378,13 @@ pub(super) fn ty_size_align_bytes(ty: &HirTy) -> Option<(u32, u32)> {
         // unknown so the caller falls back to the byte-array
         // diagnostic. Adding accurate sizing requires plumbing the
         // module reference here — separate milestone.
-        HirTy::Struct(_) | HirTy::Enum(_) => None,
-        HirTy::Path(_) | HirTy::Unknown | HirTy::Any | HirTy::Unit => None,
-        HirTy::Fn(_, _) | HirTy::Closure { .. } => None,
+        HirTy::Struct(_)
+        | HirTy::Enum(_)
+        | HirTy::Path(_)
+        | HirTy::Unknown
+        | HirTy::Any
+        | HirTy::Unit
+        | HirTy::Fn(_, _)
+        | HirTy::Closure { .. } => None,
     }
 }

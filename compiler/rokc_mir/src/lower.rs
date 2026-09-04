@@ -585,16 +585,6 @@ impl<'a> FnBuilder<'a> {
                 });
                 Operand::Copy(dst)
             }
-            HirExprKind::FnRef(_) => {
-                let result_ty = lower_ty_in(&e.ty, self.module);
-                let dst = self.fresh_local(result_ty);
-                let rvalue = self.lower_expr_to_rvalue(e);
-                self.push_stmt(Statement::Assign {
-                    target: dst,
-                    rvalue,
-                });
-                Operand::Copy(dst)
-            }
             HirExprKind::CallIndirect { ret_ty, .. } => {
                 let result_ty = lower_ty_in(ret_ty, self.module);
                 let dst = self.fresh_local(result_ty);
@@ -615,17 +605,11 @@ impl<'a> FnBuilder<'a> {
                 });
                 Operand::Copy(dst)
             }
-            HirExprKind::ClosureValue { .. } | HirExprKind::CallClosure { .. } => {
-                let result_ty = lower_ty_in(&e.ty, self.module);
-                let dst = self.fresh_local(result_ty);
-                let rvalue = self.lower_expr_to_rvalue(e);
-                self.push_stmt(Statement::Assign {
-                    target: dst,
-                    rvalue,
-                });
-                Operand::Copy(dst)
-            }
-            HirExprKind::PrimBinOp { .. } | HirExprKind::PrimUnaryOp { .. } => {
+            HirExprKind::PrimBinOp { .. }
+            | HirExprKind::PrimUnaryOp { .. }
+            | HirExprKind::FnRef(_)
+            | HirExprKind::ClosureValue { .. }
+            | HirExprKind::CallClosure { .. } => {
                 let result_ty = lower_ty_in(&e.ty, self.module);
                 let dst = self.fresh_local(result_ty);
                 let rvalue = self.lower_expr_to_rvalue(e);
@@ -928,7 +912,7 @@ impl<'a> FnBuilder<'a> {
         let scrut_ty = lower_ty_in(&scrutinee.ty, self.module);
         let scrut_local = match scrut_op {
             Operand::Copy(id) => id,
-            other => {
+            other @ Operand::Const(_) => {
                 let id = self.fresh_local(scrut_ty.clone());
                 self.push_stmt(Statement::Assign {
                     target: id,

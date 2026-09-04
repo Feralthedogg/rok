@@ -23,6 +23,9 @@ pub struct Emitter {
     uses_panic: bool,
     /// Package hash for mangled symbols (spec 905).
     pkg: String,
+    /// Panic on integer `+ - *` / negation overflow (debug builds); wrap
+    /// otherwise (stdlib spec 0.5: debug=panic, release=wrap).
+    pub overflow_checks: bool,
 }
 
 /// Symbol + signature of a module function, for call-site typing.
@@ -42,6 +45,7 @@ impl Emitter {
             errors: Vec::new(),
             uses_panic: false,
             pkg: String::new(),
+            overflow_checks: true,
         }
     }
 
@@ -190,6 +194,7 @@ impl Emitter {
 
         let str_globals = std::mem::take(&mut self.str_globals);
         let mut emit = FnEmit::new(f, self.pointer_width, fns, str_globals, &self.pkg);
+        emit.overflow_checks = self.overflow_checks;
         emit.emit_prelude();
         for b in &f.blocks {
             emit.emit_block(b);
@@ -296,6 +301,7 @@ struct FnEmit<'a> {
     /// Counter for the extra blocks runtime checks split off.
     next_check: u32,
     pkg: &'a str,
+    overflow_checks: bool,
 }
 
 impl<'a> FnEmit<'a> {
@@ -332,6 +338,7 @@ impl<'a> FnEmit<'a> {
             uses_panic: false,
             next_check: 0,
             pkg,
+            overflow_checks: true,
         }
     }
 
@@ -635,7 +642,7 @@ impl<'a> FnEmit<'a> {
     fn checked_index(&mut self, index: &Operand, len: u32) -> (String, String) {
         let ty = match index {
             Operand::Copy(id) => self.local_ty(*id),
-            Operand::Const(c) => const_ty(c).unwrap_or(MirTy::Prim(PrimTy::I32)),
+            Operand::Const(c) => const_ty(c),
         };
         let v = self.materialize_operand(index, &ty);
         let ty_str = mlir_type(&ty, self.pointer_width);
@@ -897,29 +904,37 @@ impl<'a> FnEmit<'a> {
                 };
                 let from_w = bool_aware(*fp);
                 let to_w = bool_aware(*tp);
-                if to_w > from_w {
-                    // i1 / u-types zero-extend; signed-int sign-extend.
-                    let mn = if matches!(fp, PrimTy::Bool) || !fp.is_signed_int() {
-                        "arith.extui"
-                    } else {
-                        "arith.extsi"
-                    };
-                    let _ = writeln!(self.body, "    {dst} = {mn} {v} : {from} to {to}");
-                } else if to_w < from_w {
-                    if matches!(tp, PrimTy::Bool) {
-                        // Truncating to i1 — use a comparison with 0
-                        // since `arith.trunci ... to i1` is supported
-                        // but `cmpi ne` is more explicit about intent.
-                        let zero = self.fresh_value();
-                        let _ = writeln!(self.body, "    {zero} = arith.constant 0 : {from}");
-                        let _ =
-                            writeln!(self.body, "    {dst} = arith.cmpi ne, {v}, {zero} : {from}");
-                    } else {
-                        let _ =
-                            writeln!(self.body, "    {dst} = arith.trunci {v} : {from} to {to}");
+                match to_w.cmp(&from_w) {
+                    std::cmp::Ordering::Greater => {
+                        // i1 / u-types zero-extend; signed-int sign-extend.
+                        let mn = if matches!(fp, PrimTy::Bool) || !fp.is_signed_int() {
+                            "arith.extui"
+                        } else {
+                            "arith.extsi"
+                        };
+                        let _ = writeln!(self.body, "    {dst} = {mn} {v} : {from} to {to}");
                     }
-                } else {
-                    return self.unsupported(&format!("cast from `{from}` to `{to}`"));
+                    std::cmp::Ordering::Less => {
+                        if matches!(tp, PrimTy::Bool) {
+                            // Truncating to i1 — use a comparison with 0
+                            // since `arith.trunci ... to i1` is supported
+                            // but `cmpi ne` is more explicit about intent.
+                            let zero = self.fresh_value();
+                            let _ = writeln!(self.body, "    {zero} = arith.constant 0 : {from}");
+                            let _ = writeln!(
+                                self.body,
+                                "    {dst} = arith.cmpi ne, {v}, {zero} : {from}"
+                            );
+                        } else {
+                            let _ = writeln!(
+                                self.body,
+                                "    {dst} = arith.trunci {v} : {from} to {to}"
+                            );
+                        }
+                    }
+                    std::cmp::Ordering::Equal => {
+                        return self.unsupported(&format!("cast from `{from}` to `{to}`"));
+                    }
                 }
             }
             (false, true, true, false) => {
@@ -944,12 +959,17 @@ impl<'a> FnEmit<'a> {
                 // float → float.
                 let from_w = fp.bit_width(self.pointer_width);
                 let to_w = tp.bit_width(self.pointer_width);
-                if to_w > from_w {
-                    let _ = writeln!(self.body, "    {dst} = arith.extf {v} : {from} to {to}");
-                } else if to_w < from_w {
-                    let _ = writeln!(self.body, "    {dst} = arith.truncf {v} : {from} to {to}");
-                } else {
-                    return self.unsupported(&format!("cast from `{from}` to `{to}`"));
+                match to_w.cmp(&from_w) {
+                    std::cmp::Ordering::Greater => {
+                        let _ = writeln!(self.body, "    {dst} = arith.extf {v} : {from} to {to}");
+                    }
+                    std::cmp::Ordering::Less => {
+                        let _ =
+                            writeln!(self.body, "    {dst} = arith.truncf {v} : {from} to {to}");
+                    }
+                    std::cmp::Ordering::Equal => {
+                        return self.unsupported(&format!("cast from `{from}` to `{to}`"));
+                    }
                 }
             }
             _ => return self.unsupported(&format!("cast from `{from}` to `{to}`")),
@@ -1016,7 +1036,7 @@ impl<'a> FnEmit<'a> {
         for (i, f) in fields.iter().enumerate() {
             let f_ty = field_tys.get(i).cloned().unwrap_or_else(|| match f {
                 Operand::Copy(id) => self.local_ty(*id),
-                Operand::Const(c) => const_ty(c).unwrap_or(MirTy::Any),
+                Operand::Const(c) => const_ty(c),
             });
             let v = self.materialize_operand(f, &f_ty);
             let next = self.fresh_value();
@@ -1038,7 +1058,7 @@ impl<'a> FnEmit<'a> {
     ) -> String {
         let target_ty = match target {
             Operand::Copy(id) => self.local_ty(*id),
-            Operand::Const(c) => const_ty(c).unwrap_or(MirTy::Any),
+            Operand::Const(c) => const_ty(c),
         };
         let target_v = self.materialize_operand(target, &target_ty);
         let target_ty_str = mlir_type(&target_ty, self.pointer_width);
@@ -1064,7 +1084,7 @@ impl<'a> FnEmit<'a> {
             .map(|(i, op)| match (sig.params.get(i), op) {
                 (Some(t), _) => t.clone(),
                 (None, Operand::Copy(id)) => self.local_ty(*id),
-                (None, Operand::Const(c)) => const_ty(c).unwrap_or(MirTy::Any),
+                (None, Operand::Const(c)) => const_ty(c),
             })
             .collect();
         let arg_vals: Vec<String> = args
@@ -1210,6 +1230,83 @@ impl<'a> FnEmit<'a> {
         }
     }
 
+    /// Overflow check on an integer `+ - *` result `dst`, without
+    /// widening: sign-bit tricks for add/sub, the high half of the
+    /// extended product for mul.
+    fn emit_overflow_check(
+        &mut self,
+        op: PrimOp,
+        prim: PrimTy,
+        dst: &str,
+        lhs: &str,
+        rhs: &str,
+        ty: &str,
+    ) {
+        let signed = prim.is_signed_int();
+        if !self.overflow_checks || !(signed || prim.is_unsigned_int()) {
+            return;
+        }
+        let fail = match op {
+            PrimOp::Add | PrimOp::Sub if signed => {
+                // add: lhs and rhs share a sign that dst lacks.
+                // sub: lhs and rhs differ in sign and dst's differs from lhs.
+                let pairs = if op == PrimOp::Add {
+                    [(lhs, dst), (rhs, dst)]
+                } else {
+                    [(lhs, rhs), (lhs, dst)]
+                };
+                let [x0, x1] = pairs.map(|(p, q)| {
+                    let v = self.fresh_value();
+                    let _ = writeln!(self.body, "    {v} = arith.xori {p}, {q} : {ty}");
+                    v
+                });
+                let both = self.fresh_value();
+                let _ = writeln!(self.body, "    {both} = arith.andi {x0}, {x1} : {ty}");
+                self.cmp_const("slt", &both, 0, ty)
+            }
+            PrimOp::Add => self.cmp2("ult", dst, lhs, ty),
+            PrimOp::Sub => self.cmp2("ult", lhs, rhs, ty),
+            PrimOp::Mul => {
+                let lo = self.fresh_value();
+                let hi = self.fresh_value();
+                let ext = if signed {
+                    "mulsi_extended"
+                } else {
+                    "mului_extended"
+                };
+                let _ = writeln!(
+                    self.body,
+                    "    {lo}, {hi} = arith.{ext} {lhs}, {rhs} : {ty}"
+                );
+                if signed {
+                    // No overflow iff the high half is the sign extension of lo.
+                    let bits = prim.bit_width(self.pointer_width);
+                    let k = self.fresh_value();
+                    let sign = self.fresh_value();
+                    let _ = writeln!(self.body, "    {k} = arith.constant {} : {ty}", bits - 1);
+                    let _ = writeln!(self.body, "    {sign} = arith.shrsi {lo}, {k} : {ty}");
+                    self.cmp2("ne", &hi, &sign, ty)
+                } else {
+                    self.cmp_const("ne", &hi, 0, ty)
+                }
+            }
+            _ => return,
+        };
+        let msg = match op {
+            PrimOp::Add => "attempt to add with overflow",
+            PrimOp::Sub => "attempt to subtract with overflow",
+            _ => "attempt to multiply with overflow",
+        };
+        self.emit_check(&fail, msg);
+    }
+
+    /// `fail = (a <pred> b)`.
+    fn cmp2(&mut self, pred: &str, a: &str, b: &str, ty: &str) -> String {
+        let r = self.fresh_value();
+        let _ = writeln!(self.body, "    {r} = arith.cmpi {pred}, {a}, {b} : {ty}");
+        r
+    }
+
     fn emit_bin_op(
         &mut self,
         dst: &str,
@@ -1229,6 +1326,7 @@ impl<'a> FnEmit<'a> {
         self.emit_arith_checks(op, *prim, rhs, &lhs_v, &rhs_v, &ty);
         if let Some(line) = arith_binop(op, *prim, dst, &lhs_v, &rhs_v, &ty) {
             self.body.push_str(&line);
+            self.emit_overflow_check(op, *prim, dst, &lhs_v, &rhs_v, &ty);
             return;
         }
         self.unsupported_at(dst, &format!("binary `{op:?}` on `{ty}`"));
@@ -1255,6 +1353,11 @@ impl<'a> FnEmit<'a> {
                 let zero = self.fresh_value();
                 let _ = writeln!(self.body, "    {zero} = arith.constant 0 : {ty}");
                 let _ = writeln!(self.body, "    {dst} = arith.subi {zero}, {v} : {ty}");
+                if self.overflow_checks {
+                    let bits = p.bit_width(self.pointer_width);
+                    let fail = self.cmp_const("eq", &v, -(1i128 << (bits - 1)), &ty);
+                    self.emit_check(&fail, "attempt to negate with overflow");
+                }
             }
             (PrimOp::Neg, p) if p.is_float() => {
                 let _ = writeln!(self.body, "    {dst} = arith.negf {v} : {ty}");
@@ -1401,7 +1504,7 @@ impl<'a> FnEmit<'a> {
             .map(|a| {
                 let ty = match a {
                     Operand::Copy(id) => self.local_ty(*id),
-                    Operand::Const(c) => const_ty(c).unwrap_or(MirTy::Any),
+                    Operand::Const(c) => const_ty(c),
                 };
                 let v = self.materialize_operand(a, &ty);
                 (v, mlir_type(&ty, self.pointer_width))
@@ -1426,7 +1529,7 @@ impl<'a> FnEmit<'a> {
             .map(|a| {
                 let ty = match a {
                     Operand::Copy(id) => self.local_ty(*id),
-                    Operand::Const(c) => const_ty(c).unwrap_or(MirTy::Any),
+                    Operand::Const(c) => const_ty(c),
                 };
                 let v = self.materialize_operand(a, &ty);
                 (v, mlir_type(&ty, self.pointer_width))
@@ -1523,6 +1626,7 @@ fn mlir_prim(p: PrimTy, pointer_width: u32) -> String {
 
 /// Build a single MLIR line for a primitive binary op. Returns `None` if
 /// the (op, prim) combo is not handled.
+#[allow(clippy::cognitive_complexity)] // flat (op, prim) dispatch table; splitting it hurts readability
 fn arith_binop(
     op: PrimOp,
     prim: PrimTy,
@@ -1632,15 +1736,15 @@ fn const_int(op: &Operand) -> Option<i128> {
 
 /// Best-effort type for a `ConstVal`. Used at call sites where we have a
 /// raw const operand and need to pick an MLIR type for it.
-const fn const_ty(c: &ConstVal) -> Option<MirTy> {
+const fn const_ty(c: &ConstVal) -> MirTy {
     match c {
         ConstVal::Int { ty, .. } | ConstVal::UInt { ty, .. } | ConstVal::Float { ty, .. } => {
-            Some(MirTy::Prim(*ty))
+            MirTy::Prim(*ty)
         }
-        ConstVal::Bool(_) => Some(MirTy::Prim(PrimTy::Bool)),
-        ConstVal::Str(_) => Some(MirTy::Prim(PrimTy::Str)),
-        ConstVal::Char(_) => Some(MirTy::Prim(PrimTy::Char)),
-        ConstVal::Unit | ConstVal::None => Some(MirTy::Unit),
+        ConstVal::Bool(_) => MirTy::Prim(PrimTy::Bool),
+        ConstVal::Str(_) => MirTy::Prim(PrimTy::Str),
+        ConstVal::Char(_) => MirTy::Prim(PrimTy::Char),
+        ConstVal::Unit | ConstVal::None => MirTy::Unit,
     }
 }
 

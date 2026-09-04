@@ -169,7 +169,7 @@ pub(super) fn visible_from(cur_module: &str, def_module: &str, vis: Visibility) 
     }
 }
 
-pub(super) fn module_display(m: &str) -> &str {
+pub(super) const fn module_display(m: &str) -> &str {
     if m.is_empty() { "<root>" } else { m }
 }
 
@@ -263,11 +263,7 @@ pub(super) fn resolve_ty_with_structs(
                 return prim;
             }
             let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
-            let generics = p
-                .segments
-                .last()
-                .map(|s| s.generics.as_slice())
-                .unwrap_or(&[]);
+            let generics = p.segments.last().map_or(&[][..], |s| s.generics.as_slice());
             let Some(full) = sc.names.canon(&segs, sc.module, &[]) else {
                 return HirTy::Path(segs.iter().map(|s| (*s).to_owned()).collect());
             };
