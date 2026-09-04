@@ -1,0 +1,9 @@
+// expect-exit: 0
+// expect-stdout:
+// 5
+
+// `impl<T> Box<T>`: the method is monomorphized per receiver type.
+struct Box<T> { v: T; }
+impl<T> Box<T> { fn get(self) -> T { return self.v; } }
+let b: Box<i32> = Box { v: 5 };
+rok_print_i32(b.get());

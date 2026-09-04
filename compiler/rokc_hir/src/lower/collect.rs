@@ -428,6 +428,7 @@ pub fn lower_full(
         std::collections::HashSet::new();
     let mut decls: Vec<MethodOrFn<'_>> = Vec::new();
     let mut generic_fns: HashMap<String, &FnDef> = HashMap::new();
+    let mut generic_methods: HashMap<(String, String), GenericMethod> = HashMap::new();
     let sig_of = |fn_def: &FnDef, id: FunctionId, self_ty: Option<&HirTy>, sc: Scope<'_>| {
         let resolve = |t: &Ty| {
             let mut r = resolve_ty_with_structs(t, &struct_table, &enum_table, sc);
@@ -528,6 +529,42 @@ pub fn lower_full(
             names: &names,
             module: &module,
         };
+        let impl_generic = !impl_def.generics.params.is_empty();
+        if let (true, Some(tp)) = (impl_generic, &impl_def.trait_path) {
+            // ponytail: generic trait impls need per-instantiation
+            // `impl_traits` entries and trait-method dispatch through
+            // `generic_methods`; add when the stdlib needs one.
+            let tr: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
+            err(
+                &mut pre_diags,
+                format!(
+                    "generic trait impl `impl<..> {} for {}` is not implemented yet \
+                     (stage-1 limitation — only inherent generic impls are supported)",
+                    tr.join("::"),
+                    impl_def_display(&impl_def.self_ty)
+                ),
+            );
+            continue;
+        }
+        // Inherent methods of a generic impl (and generic methods of a
+        // plain one) are templates keyed by the target's generic base.
+        let generic_base = match &impl_def.self_ty.kind {
+            AstTyKind::Path(p) if impl_def.trait_path.is_none() => {
+                let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
+                names.canon(&segs, &module, &[])
+            }
+            _ => None,
+        };
+        if impl_generic && generic_base.is_none() {
+            err(
+                &mut pre_diags,
+                format!(
+                    "generic impl target `{}` must be a struct or enum (stage-1 limitation)",
+                    impl_def_display(&impl_def.self_ty)
+                ),
+            );
+            continue;
+        }
         let target_ty = resolve_ty_with_structs(&impl_def.self_ty, &struct_table, &enum_table, sc);
         let target = method_target_for(&target_ty);
         // Resolve the trait (a user trait resolves to its qualified name;
@@ -586,6 +623,52 @@ pub fn lower_full(
                 err(
                     &mut pre_diags,
                     format!("method `{leaf}` is defined more than once for `{target_display}`"),
+                );
+                continue;
+            }
+            if let (Some(base), true) =
+                (&generic_base, impl_generic || !m.generics.params.is_empty())
+            {
+                // Impl generics first, then the method's own; `self` and
+                // `Self` take the impl target type at instantiation.
+                let mut def = m.clone();
+                let base_leaf = leaf_name(base);
+                // ponytail: `Box__get` doubles as the mono cache key and
+                // the name in diagnostics ("cannot infer `U` of
+                // `Box__get`"); carry a display name if that reads badly.
+                def.name = if module.is_empty() {
+                    format!("{base_leaf}__{leaf}")
+                } else {
+                    format!("{module}::{base_leaf}__{leaf}")
+                };
+                def.generics.params = [&impl_def.generics.params, &m.generics.params]
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+                    .collect();
+                def.where_clause = [&impl_def.where_clause, &m.where_clause]
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+                    .collect();
+                if generic_methods.contains_key(&(base.clone(), leaf.clone())) {
+                    err(
+                        &mut pre_diags,
+                        format!("method `{leaf}` is defined more than once for `{target_display}`"),
+                    );
+                    continue;
+                }
+                generic_methods.insert(
+                    (base.clone(), leaf),
+                    GenericMethod {
+                        def,
+                        self_ty: impl_def.self_ty.clone(),
+                        info: MethodInfo {
+                            module: module.clone(),
+                            vis: m.vis,
+                            trait_name: None,
+                        },
+                    },
                 );
                 continue;
             }
@@ -752,6 +835,8 @@ pub fn lower_full(
         mono_depth: std::cell::Cell::new(0),
         extra_structs: std::cell::RefCell::new(Vec::new()),
         extra_struct_table: std::cell::RefCell::new(HashMap::new()),
+        extra_enums: std::cell::RefCell::new(Vec::new()),
+        extra_enum_table: std::cell::RefCell::new(HashMap::new()),
         diagnostics: std::cell::RefCell::new(Vec::new()),
     };
     let env = Env {
@@ -766,6 +851,8 @@ pub fn lower_full(
         type_aliases,
         generic_fns,
         generic_structs,
+        generic_enums,
+        generic_methods,
         prec,
         sink,
         item_visibility,
@@ -801,6 +888,8 @@ pub fn lower_full(
     functions.extend(sink.extras.into_inner());
     let mut structs = structs;
     structs.extend(sink.extra_structs.into_inner());
+    let mut enums = enums;
+    enums.extend(sink.extra_enums.into_inner());
     let mut module = HirModule {
         functions,
         structs,
@@ -1142,6 +1231,7 @@ pub(super) fn lower_enum_def(
         name: e.name.clone(),
         variants,
         span: e.span,
+        generic_args: Vec::new(),
     }
 }
 

@@ -1,0 +1,21 @@
+// expect-exit: 0
+// expect-stdout:
+// 5
+// -1
+// 1
+// 2
+
+// `impl<T, E> Res<T, E>`: T / E bind from the receiver's enum
+// instantiation; `-1` is typed by the bound `T`.
+enum Res<T, E> { Ok(T), Err(E) }
+impl<T, E> Res<T, E> {
+    fn is_ok(self) -> bool { match self { Res::Ok(_) => { return true; } Res::Err(_) => { return false; } } }
+    fn unwrap_or(self, d: T) -> T { match self { Res::Ok(v) => { return v; } Res::Err(_) => { return d; } } }
+    fn map_ok_twice(self) -> Res<T, E> { return self; }
+}
+fn half(x: i32) -> Res<i32, i32> { if x % 2 == 0 { return Res::Ok(x / 2); } return Res::Err(x); }
+rok_print_i32(half(10).unwrap_or(0));
+rok_print_i32(half(3).unwrap_or(-1));
+if half(4).is_ok() { rok_print_i32(1); }
+// Path form, and a method returning the receiver's own instantiation.
+if Res::is_ok(half(8).map_ok_twice()) { rok_print_i32(2); }

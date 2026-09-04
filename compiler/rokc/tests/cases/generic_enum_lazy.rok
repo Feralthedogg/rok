@@ -1,0 +1,46 @@
+// expect-exit: 0
+// expect-stdout:
+// 3
+// 9
+// 4
+// 6
+
+// `Res<i32, bool>` never appears in the source: it only exists once
+// `U` is bound inside the monomorphized bodies (lazy instantiation).
+enum Res<T, E> { Ok(T), Err(E) }
+
+fn wrap<U>(x: U) -> Res<U, bool> { return Res::Ok(x); }
+
+fn fail<U>(x: U) -> Res<U, bool> {
+    let r: Res<U, bool> = Res::Err(true);
+    return r;
+}
+
+// Binds `V` from the enum argument's recorded generic args.
+fn or_else<V>(r: Res<V, bool>, d: V) -> V {
+    match r {
+        Res::Ok(v) => { return v; }
+        Res::Err(_) => { return d; }
+    }
+}
+
+let x: i32 = 3;
+match wrap(x) {
+    Res::Ok(v) => { rok_print_i32(v); }
+    Res::Err(_) => { rok_print_i32(0); }
+}
+match fail(x) {
+    Res::Ok(v) => { rok_print_i32(v); }
+    Res::Err(_) => { rok_print_i32(9); }
+}
+let four: i32 = 4;
+rok_print_i32(or_else(fail(x), four));
+
+// A lazily instantiated struct whose field is a generic enum.
+struct W<A> { r: Res<A, bool>; }
+fn mk<U>(x: U) -> W<U> {
+    let r: Res<U, bool> = Res::Ok(x);
+    return W { r: r };
+}
+let six: i32 = 6;
+rok_print_i32(or_else(mk(six).r, four));

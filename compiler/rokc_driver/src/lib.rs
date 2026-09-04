@@ -11,7 +11,7 @@ use rokc_diagnostic::RokDiagnostic;
 use rokc_hir::HirModule;
 use rokc_lexer::Lexer;
 use rokc_mir::MirModule;
-use rokc_parser::{LangTable, PrecTable, collect_lang_table, collect_prec_table, parse_program};
+use rokc_parser::{PrecTable, collect_lang_table, collect_prec_table, parse_program};
 
 pub use cfg::CfgEnv;
 pub use toolchain::{BuildOptions, EmitKind, TempDir, emit, link_executable, mlir_text};
@@ -64,14 +64,6 @@ pub fn compile_source(
 
     // Bootstrap PrecTable from operator-declaration sources, if any.
     let prec = build_prec_table(&config.bootstrap_files, &mut diags);
-    // Bootstrap LangTable from `#[lang(...)]` attributes (spec 6.4).
-    // Spec 6.4.6 enforces "one item per slot" — duplicate declarations
-    // surface as diagnostics here. The table itself is not yet wired
-    // into HIR/codegen; this pass exists so registrations can be checked
-    // for malformed shape and slot collisions before stdlib wires
-    // consumers (none_type / iterator_trait / index_trait / ...).
-    let mut lang = build_lang_table(&config.bootstrap_files, &mut diags);
-
     // Walk the user package's module tree (`mod foo;` follows files
     // alongside the entry `main.rok` / `lib.rok`) and merge every
     // visited file's items into one `Program` so HIR sees a single
@@ -105,6 +97,31 @@ pub fn compile_source(
     } else if !top_stmts.is_empty() {
         diags.push(entry::stmts_outside_entry(path));
     }
+    // Mount each library root as `rok::<tier>` (`library/core/lib.rok` →
+    // `rok::core`) and compile its items with the user's; HIR gives every
+    // module an implicit `use rok::core::**;` (stdlib spec 0.1).
+    for root in &config.bootstrap_files {
+        let tier = root
+            .parent()
+            .and_then(|d| d.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("core")
+            .to_owned();
+        let stray = collect_module_tree(
+            root,
+            None,
+            root.parent(),
+            &["rok".to_owned(), tier],
+            &prec,
+            &cfg_env,
+            &mut diags,
+            &mut all_items,
+            &mut all_uses,
+        );
+        if !stray.is_empty() {
+            diags.push(entry::stmts_outside_entry(root));
+        }
+    }
     // Auto-inject the `rok_panic(msg, len) -> !` runtime hook so
     // `throw` lowering has a target without each user file declaring
     // the extern themselves.
@@ -115,28 +132,11 @@ pub fn compile_source(
         stmts: Vec::new(),
     };
 
-    // Spec 6.4: collect `#[lang(...)]` slots from the merged user program
-    // (bootstrap files were scanned earlier in `build_lang_table`). Spec
-    // 6.4.6: "한 슬롯에 한 항목" — a slot already bound by bootstrap or
-    // by an earlier user item collides here.
-    {
-        let (sub_table, mut sub_diags) = collect_lang_table(&program);
-        diags.append(&mut sub_diags);
-        for entry in sub_table.entries().cloned() {
-            if let Some(prev) = lang.lookup(&entry.slot) {
-                diags.push(RokDiagnostic::error(
-                    rokc_diagnostic::ErrorKind::Meta,
-                    format!(
-                        "lang slot `{}` already bound to `{}` — cannot also bind to \
-                         `{}` (spec 6.4.6)",
-                        entry.slot, prev.item_name, entry.item_name
-                    ),
-                ));
-                continue;
-            }
-            lang = merge_lang_entry(lang, entry);
-        }
-    }
+    // Spec 6.4: `#[lang(...)]` slots over library + user items; a slot
+    // bound twice is an error (6.4.6).
+    // ponytail: the table is only validated; HIR doesn't consume it yet.
+    let (_lang, mut lang_diags) = collect_lang_table(&program);
+    diags.append(&mut lang_diags);
 
     // Name resolution and type / exhaustiveness checking happen during
     // HIR lowering (`rokc_hir::lower_full`), where every type is known.
@@ -188,40 +188,6 @@ pub fn compile_source(
         warnings: diags.into_iter().filter(|d| !d.is_error()).collect(),
         link_libraries: Vec::new(),
     })
-}
-
-fn build_lang_table(roots: &[PathBuf], diags: &mut Vec<RokDiagnostic>) -> LangTable {
-    let mut table = LangTable::new();
-    let empty = PrecTable::new();
-    for root in roots {
-        let modules = resolve_module_tree(root, &empty, diags);
-        for prog in modules {
-            let (sub_table, mut sub_diags) = collect_lang_table(&prog);
-            diags.append(&mut sub_diags);
-            for entry in sub_table.entries().cloned() {
-                if let Some(prev) = table.lookup(&entry.slot) {
-                    diags.push(RokDiagnostic::error(
-                        rokc_diagnostic::ErrorKind::Meta,
-                        format!(
-                            "lang slot `{}` already bound to `{}` — cannot also bind to \
-                             `{}` (spec 6.4.6)",
-                            entry.slot, prev.item_name, entry.item_name
-                        ),
-                    ));
-                    continue;
-                }
-                // Manual insert via re-collect; LangTable has no public
-                // insert method, so we assemble through a temp HashMap.
-                table = merge_lang_entry(table, entry);
-            }
-        }
-    }
-    table
-}
-
-fn merge_lang_entry(mut table: LangTable, entry: rokc_parser::LangEntry) -> LangTable {
-    table.insert_entry(entry);
-    table
 }
 
 fn build_prec_table(roots: &[PathBuf], diags: &mut Vec<RokDiagnostic>) -> PrecTable {

@@ -28,14 +28,18 @@ pub(super) fn unify_param_ty_with(
                 .entry(p.segments[0].name.clone())
                 .or_insert_with(|| arg_ty.clone());
         }
-        // Generic struct param `Pair<T>` against arg `Pair__i32`:
-        // recover T by reading the struct's recorded generic args.
-        (rokc_ast::TyKind::Path(p), HirTy::Struct(sid)) => {
+        // Generic struct / enum param `Pair<T>` against arg `Pair__i32`:
+        // recover T by reading the instantiation's recorded generic args.
+        (rokc_ast::TyKind::Path(p), HirTy::Struct(_) | HirTy::Enum(_)) => {
             let Some(last) = p.segments.last() else {
                 return;
             };
-            let def = ctx.struct_def(*sid);
-            for (param_arg, concrete) in last.generics.iter().zip(def.generic_args.iter()) {
+            let generic_args = match arg_ty {
+                HirTy::Struct(sid) => ctx.struct_def(*sid).generic_args,
+                HirTy::Enum(eid) => ctx.enum_def(*eid).generic_args,
+                _ => Vec::new(),
+            };
+            for (param_arg, concrete) in last.generics.iter().zip(generic_args.iter()) {
                 rec(param_arg, concrete);
             }
         }
@@ -65,6 +69,49 @@ pub(super) fn unify_param_ty_with(
     }
 }
 
+/// Bind `fn_def`'s type params from the type of argument `i`. A generic
+/// method's `self` is typed by its impl target `self_ty`.
+pub(super) fn bind_from_arg(
+    ctx: &LowerCtx<'_>,
+    fn_def: &FnDef,
+    self_ty: Option<&Ty>,
+    i: usize,
+    arg_ty: &HirTy,
+    subst: &mut HashMap<String, HirTy>,
+) {
+    let Some(param) = fn_def.params.get(i) else {
+        return;
+    };
+    let self_param = self_ty.filter(|_| param.name == "self");
+    let Some(t) = param.ty.as_ref().or(self_param) else {
+        return;
+    };
+    let generic_names: std::collections::HashSet<String> = fn_def
+        .generics
+        .params
+        .iter()
+        .filter_map(|gp| match gp {
+            rokc_ast::GenericParam::Type { name, .. } => Some(name.clone()),
+            rokc_ast::GenericParam::Const { .. } => None,
+        })
+        .collect();
+    unify_param_ty_with(t, arg_ty, &generic_names, subst, ctx);
+}
+
+/// Resolve `ty` under the substitution of a monomorphization in
+/// progress, from `fn_def`'s module. `self_ty` (resolved) fills `Self`.
+pub(super) fn resolve_in_mono(
+    ctx: &LowerCtx<'_>,
+    fn_def: &FnDef,
+    subst: &HashMap<String, HirTy>,
+    self_ty: Option<HirTy>,
+    ty: &Ty,
+) -> HirTy {
+    let mut rcx = LowerCtx::new(ctx.env, subst, self_ty);
+    rcx.current_module = module_of(&fn_def.name);
+    rcx.resolve_ast_ty(ty)
+}
+
 /// Instantiation limits: deeper nesting means the generic recursion
 /// never reaches a fixed point (`fn r<T>(x: T) { r((x, x)) }`).
 pub(super) const MONO_DEPTH_LIMIT: u32 = 64;
@@ -90,6 +137,7 @@ pub(super) fn ty_size(ty: &HirTy) -> usize {
 pub(super) fn monomorphize(
     ctx: &LowerCtx<'_>,
     fn_def: &FnDef,
+    self_ty: Option<&Ty>,
     args: &[HirExpr],
     _span: rokc_diagnostic::Span,
 ) -> Option<(FunctionId, HirTy)> {
@@ -99,19 +147,9 @@ pub(super) fn monomorphize(
     // arrays, tuples, sums, function types, and closures. The first
     // binding wins; a conflicting later argument is reported by the
     // argument type check at the call site.
-    let generic_names: std::collections::HashSet<String> = fn_def
-        .generics
-        .params
-        .iter()
-        .filter_map(|gp| match gp {
-            rokc_ast::GenericParam::Type { name, .. } => Some(name.clone()),
-            rokc_ast::GenericParam::Const { .. } => None,
-        })
-        .collect();
     let mut subst: HashMap<String, HirTy> = HashMap::new();
-    for (param, arg) in fn_def.params.iter().zip(args.iter()) {
-        let Some(t) = &param.ty else { continue };
-        unify_param_ty_with(t, &arg.ty, &generic_names, &mut subst, ctx);
+    for (i, arg) in args.iter().enumerate() {
+        bind_from_arg(ctx, fn_def, self_ty, i, &arg.ty, &mut subst);
     }
 
     // Spec 2.10.5: if a generic param has a default and no concrete type
@@ -252,12 +290,9 @@ pub(super) fn monomorphize(
     ctx.env.sink.mono_cache.borrow_mut().insert(key, new_id);
     // Pre-resolve the return type from AST + subst so a recursive
     // `sum_down(n - 1)` inside the body sees the correct result type.
+    let self_hir = self_ty.map(|t| resolve_in_mono(ctx, fn_def, &subst, None, t));
     let preview_ret_ty = match &fn_def.ret_ty {
-        Some(t) => {
-            let mut rcx = LowerCtx::new(ctx.env, &subst, None);
-            rcx.current_module.clone_from(&fn_module);
-            rcx.resolve_ast_ty(t)
-        }
+        Some(t) => resolve_in_mono(ctx, fn_def, &subst, self_hir.clone(), t),
         None => HirTy::Unit,
     };
     ctx.env.sink.mono_sigs.borrow_mut().insert(
@@ -290,7 +325,7 @@ pub(super) fn monomorphize(
         fn_def,
         new_id,
         mangled_name,
-        None,
+        self_hir,
         fn_module,
         &subst,
     );
@@ -441,17 +476,14 @@ pub(super) fn generic_subst(
 }
 
 /// Field list of a generic struct instantiated with `args`.
+/// `res` resolves a field type under the instantiation's substitution.
 pub(super) fn generic_struct_fields(
     def: &AstStructDef,
-    args: &[HirTy],
-    struct_table: &HashMap<String, StructId>,
-    enum_table: &HashMap<String, EnumId>,
-    sc: Scope<'_>,
+    res: &dyn Fn(&Ty) -> HirTy,
 ) -> Vec<HirField> {
-    let subst = generic_subst(&def.generics, args);
     let field = |name: String, ty: &Ty, default: Option<Expr>| HirField {
         name,
-        ty: resolve_ast_with_subst(ty, struct_table, enum_table, &subst, sc),
+        ty: res(ty),
         default,
     };
     match &def.kind {
@@ -551,9 +583,26 @@ pub(super) fn visit_ty_for_enum_mono(
     let id = EnumId(u32::try_from(enum_defs.len()).expect("EnumId overflow"));
     enum_table.insert(mangled.clone(), id);
     let subst = generic_subst(&def.generics, &arg_tys);
-    let res = |t: &Ty| resolve_ast_with_subst(t, struct_table, enum_table, &subst, sc);
-    let variants: Vec<HirEnumVariant> = def
-        .variants
+    let variants = generic_enum_variants(def, &|t| {
+        resolve_ast_with_subst(t, struct_table, enum_table, &subst, sc)
+    });
+    enum_defs.push(HirEnumDef {
+        id,
+        def_id: None,
+        name: mangled,
+        variants,
+        span: def.span,
+        generic_args: arg_tys,
+    });
+}
+
+/// Variants of a generic enum instantiation; `res` resolves a payload
+/// type under the instantiation's substitution.
+pub(super) fn generic_enum_variants(
+    def: &AstEnumDef,
+    res: &dyn Fn(&Ty) -> HirTy,
+) -> Vec<HirEnumVariant> {
+    def.variants
         .iter()
         .enumerate()
         .map(|(i, v)| {
@@ -584,14 +633,7 @@ pub(super) fn visit_ty_for_enum_mono(
                 arity,
             }
         })
-        .collect();
-    enum_defs.push(HirEnumDef {
-        id,
-        def_id: None,
-        name: mangled,
-        variants,
-        span: def.span,
-    });
+        .collect()
 }
 
 /// Eager pre-pass over the program AST that finds every generic-struct
@@ -634,7 +676,10 @@ pub(super) fn instantiate_generic_structs(
                 // fields resolves to itself rather than recursing.
                 let id = StructId(u32::try_from(struct_defs.len()).expect("StructId overflow"));
                 struct_table.insert(mangled.clone(), id);
-                let fields = generic_struct_fields(def, &args, struct_table, enum_table, sc);
+                let subst = generic_subst(&def.generics, &args);
+                let fields = generic_struct_fields(def, &|t| {
+                    resolve_ast_with_subst(t, struct_table, enum_table, &subst, sc)
+                });
                 struct_defs.push(HirStructDef {
                     id,
                     def_id: None,

@@ -58,6 +58,9 @@ pub struct HirEnumDef {
     pub name: String,
     pub variants: Vec<HirEnumVariant>,
     pub span: Span,
+    /// Concrete type args if this enum is an instantiation of a generic
+    /// enum (`Res<i32, bool>`); empty otherwise. Mirrors `HirStructDef`.
+    pub generic_args: Vec<HirTy>,
 }
 
 // Unit + single-primitive tuple variants in this slice.

@@ -10,13 +10,13 @@
 // these traits will become iterable too.
 
 #[lang("iterator_trait")]
-trait Iterator {
+pub trait Iterator {
     type Item;
     fn next(self) -> Item | none;
 }
 
 #[lang("into_iterator_trait")]
-trait IntoIterator {
+pub trait IntoIterator {
     type IntoIter;
     type Item;
     fn into_iter(self) -> IntoIter;

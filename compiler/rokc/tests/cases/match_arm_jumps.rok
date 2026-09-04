@@ -1,0 +1,33 @@
+// expect-exit: 0
+// expect-stdout:
+// 40
+// -1
+// 3
+// 4
+
+// spec 3.12: `return` / `break` / `continue` as match arm bodies.
+fn f(x: i32 | none) -> i32 {
+    let v = match x {
+        n: i32 => n,
+        none => return -1,
+    };
+    return v * 10;
+}
+rok_print_i32(f(4));
+rok_print_i32(f(none));
+let i = 0;
+loop {
+    match i {
+        3 => break,
+        _ => { i = i + 1; }
+    }
+}
+rok_print_i32(i);
+let s = 0;
+for k in 0..5 {
+    match k % 2 {
+        0 => continue,
+        _ => { s = s + k; }
+    }
+}
+rok_print_i32(s);

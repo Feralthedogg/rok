@@ -150,7 +150,7 @@ pub(super) fn check_match_exhaustiveness(
             for p in &unguarded {
                 covered_variants(p, &mut covered);
             }
-            let def = &ctx.env.enums[eid.0 as usize];
+            let def = ctx.enum_def(*eid);
             let base = enum_base_name(&def.name);
             def.variants
                 .iter()
@@ -368,7 +368,7 @@ pub(super) fn lower_pattern_inner(
             if *scrut_ty != HirTy::Enum(enum_id) {
                 return mismatch(ctx, format!("pattern `{}`", segs.join("::")));
             }
-            let variant = ctx.env.enums[enum_id.0 as usize].variants[idx].clone();
+            let variant = ctx.enum_def(enum_id).variants[idx].clone();
             let slots = variant_arg_tys(&variant);
             if args.len() != slots.len() {
                 ctx.emit_error(
@@ -437,7 +437,7 @@ pub(super) fn lower_pattern_inner(
                     if *scrut_ty != HirTy::Enum(enum_id) {
                         return mismatch(ctx, format!("pattern `{}`", segs.join("::")));
                     }
-                    let variant = ctx.env.enums[enum_id.0 as usize].variants[idx].clone();
+                    let variant = ctx.enum_def(enum_id).variants[idx].clone();
                     let field_tys = variant_arg_tys(&variant);
                     let mut args = vec![HirPattern::Wildcard; variant.named_fields.len()];
                     for fp in fields {

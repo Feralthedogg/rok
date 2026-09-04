@@ -1968,6 +1968,59 @@ impl<'a> Parser<'a> {
 
     /// `{ stmts }`. Inside braces a struct literal is always allowed
     /// again, even when the block itself sits in an `if`/`while` head.
+    /// Match arm body. `return` / `break` / `continue` / `throw` are
+    /// statements, so `none => return 0,` (spec 3.12) wraps one in a block.
+    fn parse_arm_body(&mut self) -> Option<Expr> {
+        let span = self.peek_span();
+        let label = |p: &mut Self| {
+            if let TokenKind::Label(name) = p.peek().clone() {
+                p.bump();
+                Some(name)
+            } else {
+                None
+            }
+        };
+        let value = |p: &mut Self| {
+            if matches!(p.peek(), TokenKind::Comma | TokenKind::RBrace) {
+                Some(None)
+            } else {
+                p.parse_expr().map(Some)
+            }
+        };
+        let kind = match self.peek() {
+            TokenKind::Return => {
+                self.bump();
+                StmtKind::Return(value(self)?)
+            }
+            TokenKind::Break => {
+                self.bump();
+                let label = label(self);
+                StmtKind::Break {
+                    label,
+                    value: value(self)?,
+                }
+            }
+            TokenKind::Continue => {
+                self.bump();
+                StmtKind::Continue { label: label(self) }
+            }
+            TokenKind::Throw => {
+                self.bump();
+                StmtKind::Throw(self.parse_expr()?)
+            }
+            _ => return self.parse_expr(),
+        };
+        Some(Expr {
+            kind: ExprKind::Block(Block {
+                stmts: vec![Stmt { kind, span }],
+                trailing: None,
+                span,
+                label: None,
+            }),
+            span,
+        })
+    }
+
     fn parse_block(&mut self) -> Option<Block> {
         self.nested(|p| p.with_struct_expr(true, Self::parse_block_inner))
     }
@@ -2801,7 +2854,7 @@ impl<'a> Parser<'a> {
                             None
                         };
                         p.expect(&TokenKind::FatArrow, "`=>`")?;
-                        let body = p.parse_expr()?;
+                        let body = p.parse_arm_body()?;
                         p.eat(&TokenKind::Comma);
                         arms.push(MatchArm { pat, guard, body });
                     }

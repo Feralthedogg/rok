@@ -5,3 +5,4 @@ Cargo.lock.bak
 /*.hir.rok
 /*.mir.rok
 /*.mlir
+.claude/

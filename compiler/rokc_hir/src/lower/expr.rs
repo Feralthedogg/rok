@@ -1187,27 +1187,29 @@ pub(super) fn resolve_enum_variant(
         return EnumRes::NotEnum;
     };
     let variant_of = |eid: EnumId| {
-        ctx.env.enums[eid.0 as usize]
+        ctx.enum_def(eid)
             .variants
             .iter()
             .position(|v| v.name == vname)
     };
-    let eid = if let Some(HirTy::Enum(h)) =
-        hint.filter(|h| matches!(h, HirTy::Enum(e) if enum_base_name(&ctx.env.enums[e.0 as usize].name) == full))
+    let eid = if let Some(HirTy::Enum(h)) = hint
+        .filter(|h| matches!(h, HirTy::Enum(e) if enum_base_name(&ctx.enum_def(*e).name) == full))
     {
         *h
-    } else if let Some(&eid) = ctx.env.enum_table.get(&full) {
+    } else if let Some(eid) = ctx.lookup_enum(&full) {
         eid
     } else {
-        let insts = LowerCtx::instantiations(&ctx.env.enum_table, &full);
+        let insts = ctx.enum_instantiations(&full);
         if insts.is_empty() {
             return EnumRes::NotEnum;
         }
         let fits: Vec<EnumId> = insts
             .into_iter()
             .filter(|&eid| {
-                let Some(vi) = variant_of(eid) else { return false };
-                let v = &ctx.env.enums[eid.0 as usize].variants[vi];
+                let Some(vi) = variant_of(eid) else {
+                    return false;
+                };
+                let v = &ctx.enum_def(eid).variants[vi];
                 match (arg_tys, &v.payload_ty) {
                     (None, None) => true,
                     (Some(args), Some(p)) => {
@@ -1217,7 +1219,10 @@ pub(super) fn resolve_enum_variant(
                             (_, t) => vec![t.clone()],
                         };
                         parts.len() == args.len()
-                            && parts.iter().zip(args).all(|(p, a)| ty_compatible(p, a) && *a != HirTy::Unknown)
+                            && parts
+                                .iter()
+                                .zip(args)
+                                .all(|(p, a)| ty_compatible(p, a) && *a != HirTy::Unknown)
                     }
                     _ => false,
                 }
@@ -1228,7 +1233,10 @@ pub(super) fn resolve_enum_variant(
             [] => {
                 ctx.emit_error(
                     rokc_diagnostic::ErrorKind::Type,
-                    format!("no instantiation of generic enum `{full}` matches `{}`", segs.join("::")),
+                    format!(
+                        "no instantiation of generic enum `{full}` matches `{}`",
+                        segs.join("::")
+                    ),
                 );
                 return EnumRes::Error;
             }
@@ -1295,7 +1303,7 @@ pub(super) fn lower_struct_init(
     match resolve_enum_variant(ctx, &segs, hint.as_ref(), None) {
         EnumRes::Error => return poison(span),
         EnumRes::Found(enum_id, idx) => {
-            let variant = ctx.env.enums[enum_id.0 as usize].variants[idx].clone();
+            let variant = ctx.enum_def(enum_id).variants[idx].clone();
             if variant.named_fields.is_empty() {
                 return ctx.error_expr(
                     span,
@@ -2000,6 +2008,29 @@ pub(super) fn method_call_on(
     let found = method_target_for(&recv_h.ty)
         .and_then(|t| ctx.env.method_table.get(&(t, method.to_owned())).copied());
     let Some(fn_id) = found else {
+        if let Some(gm) = generic_method_for(ctx, &recv_h.ty, method) {
+            check_method_info_visible(ctx, &gm.info, method);
+            if gm.def.params.first().map(|p| p.name.as_str()) != Some("self") {
+                lower_args_only(ctx);
+                return ctx.error_expr(
+                    span,
+                    format!(
+                        "`{method}` is an associated function, not a method — call it as \
+                         `{}::{method}(...)`",
+                        ctx.ty_name(&recv_h.ty)
+                    ),
+                );
+            }
+            return call_generic(
+                ctx,
+                &gm.def,
+                Some(&gm.self_ty),
+                Some(recv_h),
+                args,
+                method,
+                span,
+            );
+        }
         lower_args_only(ctx);
         // Spec 3.5.2: a missing method is a hard error, not a silent
         // unit return.
@@ -2032,9 +2063,38 @@ pub(super) fn method_call_on(
 /// Spec 5.6 for methods: an inherent method without `pub` is private to
 /// the module of its impl block.
 pub(super) fn check_method_visible(ctx: &LowerCtx<'_>, fn_id: FunctionId, method: &str) {
-    let Some(info) = ctx.env.method_info.get(&fn_id) else {
-        return;
+    if let Some(info) = ctx.env.method_info.get(&fn_id) {
+        check_method_info_visible(ctx, info, method);
+    }
+}
+
+/// Generic-impl method `method` for a receiver of type `ty`, looked up
+/// by the receiver's generic base (`Box__i32` → `Box`).
+pub(super) fn generic_method_for<'e>(
+    ctx: &LowerCtx<'e>,
+    ty: &HirTy,
+    method: &str,
+) -> Option<&'e GenericMethod> {
+    let (name, generic_args) = match ty {
+        HirTy::Struct(id) => {
+            let d = ctx.struct_def(*id);
+            (d.name, d.generic_args)
+        }
+        HirTy::Enum(id) => {
+            let d = ctx.enum_def(*id);
+            (d.name, d.generic_args)
+        }
+        _ => return None,
     };
+    let base = if generic_args.is_empty() {
+        name
+    } else {
+        enum_base_name(&name).to_owned()
+    };
+    ctx.env.generic_methods.get(&(base, method.to_owned()))
+}
+
+pub(super) fn check_method_info_visible(ctx: &LowerCtx<'_>, info: &MethodInfo, method: &str) {
     if !ctx.is_visible(&info.module, info.vis) {
         ctx.emit_error(
             rokc_diagnostic::ErrorKind::Module,
@@ -2107,6 +2167,91 @@ pub(super) fn call_value(
     )
 }
 
+/// Call a generic function (or generic-impl method, with its impl
+/// target `self_ty`) by monomorphizing on the argument types. Each
+/// argument is lowered against its parameter type under the bindings
+/// inferred so far, so `r.unwrap_or(-1)` types `-1` from `r`.
+/// `receiver` fills slot 0 (method calls).
+pub(super) fn call_generic(
+    ctx: &mut LowerCtx<'_>,
+    def: &FnDef,
+    self_ty: Option<&Ty>,
+    receiver: Option<HirExpr>,
+    args: &[CallArg],
+    callee: &str,
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let mut subst: HashMap<String, HirTy> = HashMap::new();
+    let mut lowered: Vec<HirExpr> = Vec::with_capacity(args.len() + 1);
+    if let Some(r) = receiver {
+        bind_from_arg(ctx, def, self_ty, 0, &r.ty, &mut subst);
+        lowered.push(r);
+    }
+    for a in args {
+        let CallArg::Positional(e) = a else {
+            return ctx.error_expr(
+                span,
+                format!("named / spread arguments to generic `{callee}` are not supported yet"),
+            );
+        };
+        let i = lowered.len();
+        let hint = def
+            .params
+            .get(i)
+            .and_then(|p| p.ty.as_ref())
+            .map_or(HirTy::Unknown, |t| {
+                let ty = resolve_in_mono(ctx, def, &subst, None, t);
+                let mut leftover = Vec::new();
+                collect_unknown_paths(&ty, &mut leftover);
+                if leftover.is_empty() {
+                    ty
+                } else {
+                    HirTy::Unknown
+                }
+            });
+        let h = lower_expected(ctx, e, hint);
+        bind_from_arg(ctx, def, self_ty, i, &h.ty, &mut subst);
+        lowered.push(h);
+    }
+    if lowered.len() != def.params.len() {
+        return ctx.error_expr(
+            span,
+            format!(
+                "`{callee}` takes {} argument(s) but {} were supplied",
+                def.params.len(),
+                lowered.len()
+            ),
+        );
+    }
+    let Some((mono_id, ret_ty)) = monomorphize(ctx, def, self_ty, &lowered, span) else {
+        return poison(span);
+    };
+    let param_tys = ctx
+        .env
+        .sink
+        .mono_sigs
+        .borrow()
+        .get(&mono_id)
+        .map(|s| s.param_tys.clone())
+        .unwrap_or_default();
+    let lowered: Vec<HirExpr> = lowered
+        .into_iter()
+        .enumerate()
+        .map(|(i, a)| match param_tys.get(i) {
+            Some(t) => coerce(ctx, t, a, &|| format!("argument {} of `{callee}`", i + 1)),
+            None => a,
+        })
+        .collect();
+    HirExpr {
+        kind: HirExprKind::Call {
+            callee: mono_id,
+            args: lowered,
+        },
+        ty: ret_ty,
+        span,
+    }
+}
+
 pub(super) fn lower_call(
     ctx: &mut LowerCtx<'_>,
     callee: &Expr,
@@ -2140,57 +2285,20 @@ pub(super) fn lower_call(
     if let Some(full) = ctx.resolve_in(&segs, &ctx.env.generic_fns) {
         ctx.check_item_visible(&full, "function");
         let generic_def = ctx.env.generic_fns[&full];
-        let mut lowered: Vec<HirExpr> = Vec::with_capacity(args.len());
-        for a in args {
-            match a {
-                CallArg::Positional(e) => lowered.push(lower_expected(ctx, e, HirTy::Unknown)),
-                _ => {
-                    return ctx.error_expr(
-                        span,
-                        format!(
-                            "named / spread arguments to generic `{full}` are not supported yet"
-                        ),
-                    );
-                }
-            }
+        return call_generic(ctx, generic_def, None, None, args, &full, span);
+    }
+
+    // `Box::get(b)` / `Box::new(v)` — generic-impl method by path.
+    if let Some((method, ty_segs)) = segs.split_last() {
+        let env = ctx.env;
+        let gm = ctx
+            .canon_type(ty_segs)
+            .filter(|_| !ty_segs.is_empty())
+            .and_then(|full| env.generic_methods.get(&(full, (*method).to_owned())));
+        if let Some(gm) = gm {
+            check_method_info_visible(ctx, &gm.info, method);
+            return call_generic(ctx, &gm.def, Some(&gm.self_ty), None, args, &display, span);
         }
-        if lowered.len() != generic_def.params.len() {
-            return ctx.error_expr(
-                span,
-                format!(
-                    "`{full}` takes {} argument(s) but {} were supplied",
-                    generic_def.params.len(),
-                    lowered.len()
-                ),
-            );
-        }
-        let Some((mono_id, ret_ty)) = monomorphize(ctx, generic_def, &lowered, span) else {
-            return poison(span);
-        };
-        let param_tys = ctx
-            .env
-            .sink
-            .mono_sigs
-            .borrow()
-            .get(&mono_id)
-            .map(|s| s.param_tys.clone())
-            .unwrap_or_default();
-        let lowered: Vec<HirExpr> = lowered
-            .into_iter()
-            .enumerate()
-            .map(|(i, a)| match param_tys.get(i) {
-                Some(t) => coerce(ctx, t, a, &|| format!("argument {} of `{full}`", i + 1)),
-                None => a,
-            })
-            .collect();
-        return HirExpr {
-            kind: HirExprKind::Call {
-                callee: mono_id,
-                args: lowered,
-            },
-            ty: ret_ty,
-            span,
-        };
     }
 
     // `Foo(arg, ...)` — tuple-struct constructor (spec 2.7.4).
@@ -2238,7 +2346,7 @@ pub(super) fn lower_call(
     let hint = ctx.current_expected().cloned();
     let is_generic_enum_base = ctx
         .enum_path(&segs)
-        .is_some_and(|(full, _)| !ctx.env.enum_table.contains_key(&full));
+        .is_some_and(|(full, _)| ctx.lookup_enum(&full).is_none());
     let pre_args: Option<Vec<HirExpr>> = if is_generic_enum_base
         && !matches!(&hint, Some(HirTy::Enum(_)))
         && args.iter().all(|a| matches!(a, CallArg::Positional(_)))
@@ -2260,7 +2368,7 @@ pub(super) fn lower_call(
     match resolve_enum_variant(ctx, &segs, hint.as_ref(), arg_tys.as_deref()) {
         EnumRes::Error => return poison(span),
         EnumRes::Found(enum_id, idx) => {
-            let variant = ctx.env.enums[enum_id.0 as usize].variants[idx].clone();
+            let variant = ctx.enum_def(enum_id).variants[idx].clone();
             let slots = variant_arg_tys(&variant);
             if !variant.named_fields.is_empty() {
                 return ctx.error_expr(
@@ -2325,7 +2433,7 @@ pub(super) fn lower_call(
                 let mut targets: Vec<MethodTarget> = Vec::new();
                 if let Some(sid) = ctx.lookup_struct(&full) {
                     targets.push(MethodTarget::Struct(sid));
-                } else if let Some(&eid) = ctx.env.enum_table.get(&full) {
+                } else if let Some(eid) = ctx.lookup_enum(&full) {
                     targets.push(MethodTarget::Enum(eid));
                 } else {
                     targets.extend(
@@ -2334,7 +2442,7 @@ pub(super) fn lower_call(
                             .map(MethodTarget::Struct),
                     );
                     targets.extend(
-                        LowerCtx::instantiations(&ctx.env.enum_table, &full)
+                        ctx.enum_instantiations(&full)
                             .into_iter()
                             .map(MethodTarget::Enum),
                     );
@@ -2546,9 +2654,12 @@ pub(super) fn dispatch_user_op(
     };
     let method = entry.method_name.clone();
     let op_trait = &entry.trait_name;
-    // The impl must be of the bootstrap trait that registered the operator.
-    // A user trait of the same name lives in `names.traits` and doesn't count.
-    let is_op_trait = |t: &str| t == op_trait && !ctx.env.names.traits.contains(t);
+    // The impl must be of the library trait that registered the operator,
+    // not a user trait that happens to share its name.
+    // ponytail: matches `rok::<tier>::…::<trait>`; record the defining
+    // module in OpEntry once user code can declare operators.
+    let is_op_trait =
+        |t: &str| t.starts_with("rok::") && t.rsplit("::").next() == Some(op_trait.as_str());
     let fn_id = method_target_for(&lhs.ty)
         .and_then(|t| ctx.env.method_table.get(&(t, method.clone())).copied())
         .filter(|id| {
@@ -2696,7 +2807,7 @@ pub(super) fn lower_path(
     let hint = ctx.current_expected().cloned();
     match resolve_enum_variant(ctx, &segs, hint.as_ref(), None) {
         EnumRes::Found(enum_id, idx) => {
-            let variant = &ctx.env.enums[enum_id.0 as usize].variants[idx];
+            let variant = &ctx.enum_def(enum_id).variants[idx];
             if variant.payload_ty.is_some() {
                 return ctx.error_expr(
                     span,

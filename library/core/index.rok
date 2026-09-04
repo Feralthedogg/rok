@@ -7,19 +7,19 @@
 // implementing these will participate in `[...]` syntax.
 
 #[lang("index_trait")]
-trait Index<I> {
+pub trait Index<I> {
     type Output;
     fn index(self, idx: I) -> Output;
 }
 
 #[lang("index_set_trait")]
-trait IndexSet<I> {
+pub trait IndexSet<I> {
     type Value;
     fn index_set(ref self, idx: I, value: Value);
 }
 
 #[lang("slice_trait")]
-trait Slice<R> {
+pub trait Slice<R> {
     type Output;
     fn slice(self, range: R) -> Output;
 }

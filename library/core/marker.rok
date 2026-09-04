@@ -4,18 +4,18 @@
 // live on `PartialEq` (`eq_trait`, ops.rok).
 
 #[lang("clone_trait")]
-trait Clone {
+pub trait Clone {
     fn clone(self) -> Self;
 }
 
-trait Eq {}
+pub trait Eq {}
 
 #[lang("ord_trait")]
-trait Ord {
+pub trait Ord {
     fn cmp(self, other: Self) -> i32;
 }
 
 #[lang("hash_trait")]
-trait Hash {
+pub trait Hash {
     fn hash(self) -> u64;
 }

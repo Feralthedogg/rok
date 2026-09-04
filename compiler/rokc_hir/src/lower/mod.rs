@@ -37,8 +37,9 @@ use expr::{
     parse_char_literal, parse_int_literal, resolve_enum_variant, variant_arg_tys,
 };
 use mono::{
-    generic_struct_fields, instantiate_generic_enums, instantiate_generic_structs, lower_fn,
-    monomorphize, unify_param_ty_with,
+    bind_from_arg, generic_enum_variants, generic_struct_fields, generic_subst,
+    instantiate_generic_enums, instantiate_generic_structs, lower_fn, monomorphize,
+    resolve_in_mono, unify_param_ty_with,
 };
 use pattern::{int_fits, lower_match};
 use resolve::{
@@ -183,6 +184,16 @@ struct MethodInfo {
     trait_name: Option<String>,
 }
 
+/// A method template monomorphized per call like a generic fn: `def`
+/// carries the impl's generics followed by the method's own, and is
+/// named `Base__method` in the impl's module.
+struct GenericMethod {
+    def: FnDef,
+    /// The impl target (`Box<T>`): the type of `self` and of `Self`.
+    self_ty: Ty,
+    info: MethodInfo,
+}
+
 /// Module-wide, read-only lowering environment shared by every function
 /// body (plus the interior-mutable `sink`).
 struct Env<'a> {
@@ -205,6 +216,13 @@ struct Env<'a> {
     /// Generic struct templates, for instantiation inferred from a
     /// struct literal (`Box { v: 5 }` → `Box<i32>`).
     generic_structs: HashMap<String, &'a AstStructDef>,
+    /// Generic enum templates, for instantiations that only surface
+    /// under a monomorphization substitution (`Res<U, E>` with `U` bound).
+    generic_enums: HashMap<String, &'a AstEnumDef>,
+    /// Methods of generic impls (and generic methods), keyed by
+    /// `(generic base of the impl target, method name)`. Called through
+    /// `monomorphize` when `method_table` has no concrete entry.
+    generic_methods: HashMap<(String, String), GenericMethod>,
     prec: &'a PrecTable,
     sink: ClosureSink,
     /// Visibility of every value-namespace item, keyed by full name.
@@ -457,6 +475,9 @@ struct ClosureSink {
     /// (ids continue after `Env::structs`).
     extra_structs: std::cell::RefCell<Vec<HirStructDef>>,
     extra_struct_table: std::cell::RefCell<HashMap<String, StructId>>,
+    /// Same for generic enums (ids continue after `Env::enums`).
+    extra_enums: std::cell::RefCell<Vec<HirEnumDef>>,
+    extra_enum_table: std::cell::RefCell<HashMap<String, EnumId>>,
     /// Diagnostics emitted during lowering — surfaced through
     /// `HirModule.diagnostics` so the driver can fail the build.
     diagnostics: std::cell::RefCell<Vec<rokc_diagnostic::RokDiagnostic>>,
@@ -545,20 +566,25 @@ impl<'a> LowerCtx<'a> {
     /// User-facing type name (no internal `Struct0` / mangled names).
     fn ty_name(&self, ty: &HirTy) -> String {
         match ty {
-            HirTy::Struct(id) => {
-                let def = self.struct_def(*id);
-                if def.generic_args.is_empty() {
-                    def.name
+            HirTy::Struct(_) | HirTy::Enum(_) => {
+                let (name, generic_args) = match ty {
+                    HirTy::Struct(id) => {
+                        let d = self.struct_def(*id);
+                        (d.name, d.generic_args)
+                    }
+                    HirTy::Enum(id) => {
+                        let d = self.enum_def(*id);
+                        (d.name, d.generic_args)
+                    }
+                    _ => unreachable!("matched struct / enum"),
+                };
+                if generic_args.is_empty() {
+                    name
                 } else {
-                    let base = def.name.split("__").next().unwrap_or(&def.name).to_owned();
-                    let args: Vec<String> =
-                        def.generic_args.iter().map(|a| self.ty_name(a)).collect();
+                    let base = name.split("__").next().unwrap_or(&name).to_owned();
+                    let args: Vec<String> = generic_args.iter().map(|a| self.ty_name(a)).collect();
                     format!("{base}<{}>", args.join(", "))
                 }
-            }
-            HirTy::Enum(id) => {
-                let name = &self.env.enums[id.0 as usize].name;
-                name.split("__").next().unwrap_or(name).to_owned()
             }
             HirTy::Prim(p) => p.name().to_owned(),
             HirTy::Unit => "()".to_owned(),
@@ -611,31 +637,90 @@ impl<'a> LowerCtx<'a> {
             return Some(id);
         }
         let def = *self.env.generic_structs.get(base)?;
-        let id = StructId(
-            u32::try_from(self.env.structs.len() + self.env.sink.extra_structs.borrow().len())
-                .expect("StructId overflow"),
-        );
+        let idx = self.env.sink.extra_structs.borrow().len();
+        let id = StructId(u32::try_from(self.env.structs.len() + idx).expect("StructId overflow"));
         self.env
             .sink
             .extra_struct_table
             .borrow_mut()
             .insert(key.clone(), id);
-        let module = module_of(base);
-        let sc = Scope {
-            names: &self.env.names,
-            module: &module,
-        };
-        let fields =
-            generic_struct_fields(def, &args, &self.env.struct_table, &self.env.enum_table, sc);
+        // Reserve the slot before resolving fields: a field type can
+        // instantiate further structs, which must not take this id.
         self.env.sink.extra_structs.borrow_mut().push(HirStructDef {
             id,
             def_id: None,
             name: key,
-            fields,
+            fields: Vec::new(),
             span: def.span,
-            generic_args: args,
+            generic_args: args.clone(),
             union_kind: None,
         });
+        let subst = generic_subst(&def.generics, &args);
+        let mut rcx = LowerCtx::new(self.env, &subst, None);
+        rcx.current_module = module_of(base);
+        let fields = generic_struct_fields(def, &|t| rcx.resolve_ast_ty(t));
+        self.env.sink.extra_structs.borrow_mut()[idx].fields = fields;
+        Some(id)
+    }
+
+    fn enum_def(&self, id: EnumId) -> HirEnumDef {
+        let i = id.0 as usize;
+        match self.env.enums.get(i) {
+            Some(d) => d.clone(),
+            None => self.env.sink.extra_enums.borrow()[i - self.env.enums.len()].clone(),
+        }
+    }
+
+    /// Enum id by table key, including lazily instantiated ones.
+    fn lookup_enum(&self, key: &str) -> Option<EnumId> {
+        self.env
+            .enum_table
+            .get(key)
+            .copied()
+            .or_else(|| self.env.sink.extra_enum_table.borrow().get(key).copied())
+    }
+
+    /// Instantiations of generic enum `base`, eager and lazy.
+    fn enum_instantiations(&self, base: &str) -> Vec<EnumId> {
+        let mut v = Self::instantiations(&self.env.enum_table, base);
+        v.extend(Self::instantiations(
+            &self.env.sink.extra_enum_table.borrow(),
+            base,
+        ));
+        v
+    }
+
+    /// Instantiate generic enum `base` with `args` on demand — for
+    /// enum types that only appear under a monomorphization
+    /// substitution, which the eager AST scan cannot see.
+    fn instantiate_enum(&self, base: &str, args: Vec<HirTy>) -> Option<EnumId> {
+        let key = mangle_inst(base, &args);
+        if let Some(id) = self.lookup_enum(&key) {
+            return Some(id);
+        }
+        let def = *self.env.generic_enums.get(base)?;
+        let idx = self.env.sink.extra_enums.borrow().len();
+        let id = EnumId(u32::try_from(self.env.enums.len() + idx).expect("EnumId overflow"));
+        self.env
+            .sink
+            .extra_enum_table
+            .borrow_mut()
+            .insert(key.clone(), id);
+        // Reserve the slot before resolving payloads: a payload type can
+        // instantiate further enums, which must not take this id.
+        self.env.sink.extra_enums.borrow_mut().push(HirEnumDef {
+            id,
+            def_id: None,
+            name: key,
+            variants: Vec::new(),
+            span: def.span,
+            generic_args: args.clone(),
+        });
+        let subst = generic_subst(&def.generics, &args);
+        let mut rcx = LowerCtx::new(self.env, &subst, None);
+        rcx.current_module = module_of(base);
+        let variants = generic_enum_variants(def, &|t| rcx.resolve_ast_ty(t));
+        self.env.sink.extra_enums.borrow_mut()[idx].variants = variants;
         Some(id)
     }
 
@@ -826,6 +911,10 @@ impl<'a> LowerCtx<'a> {
                         if leftover.is_empty() && self.env.generic_structs.contains_key(&full) {
                             if let Some(id) = self.instantiate_struct(&full, args) {
                                 return HirTy::Struct(id);
+                            }
+                        } else if leftover.is_empty() {
+                            if let Some(id) = self.instantiate_enum(&full, args) {
+                                return HirTy::Enum(id);
                             }
                         }
                     }

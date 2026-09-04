@@ -6,13 +6,13 @@
 // is here for spec parity and to be ready for the eventual scheduler.
 
 #[lang("future_trait")]
-trait Future {
+pub trait Future {
     type Output;
     fn poll(self) -> Output | none;
 }
 
 // No `stream_trait` slot in stdlib spec 0.4 — unregistered for now.
-trait Stream {
+pub trait Stream {
     type Item;
     fn next(self) -> Item | none;
 }

@@ -4,11 +4,11 @@
 // (`f"{x}"` for Display, `f"{x:?}"` for Debug) can route through them.
 
 #[lang("display_trait")]
-trait Display {
+pub trait Display {
     fn display(self) -> str;
 }
 
 #[lang("debug_trait")]
-trait Debug {
+pub trait Debug {
     fn debug(self) -> str;
 }

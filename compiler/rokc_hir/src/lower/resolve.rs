@@ -149,8 +149,20 @@ pub(super) fn resolve_name(
             LookupOutcome::None => {}
         }
     }
-    Ok(None)
+    // Every module has an implicit `use rok::core::**;` (stdlib spec 0.1),
+    // consulted last so the module's own names and imports shadow it.
+    let core = [crate::uses::UseEntry::GlobDeep {
+        prefix: CORE_PREFIX.to_owned(),
+    }];
+    match lookup_in_use_entries_full(&core, segments, &suffix, set) {
+        LookupOutcome::Resolved(s) => Ok(Some(s)),
+        LookupOutcome::Ambiguous(hits) => Err(hits),
+        LookupOutcome::None => Ok(None),
+    }
 }
+
+/// Module path the driver mounts `library/core` under.
+pub const CORE_PREFIX: &str = "rok::core";
 
 /// Can code in `cur_module` see an item declared in `def_module` with
 /// visibility `vis`? (spec 5.6)
