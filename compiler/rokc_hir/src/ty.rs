@@ -43,7 +43,10 @@ fn const_expr_to_u32(c: &rokc_ast::ConstExpr) -> Option<u32> {
     let rokc_ast::ConstExpr::Literal(rokc_ast::Literal::Int(s)) = c else {
         return None;
     };
-    let cleaned: String = s.chars().take_while(|c| c.is_ascii_digit() || *c == '_').collect();
+    let cleaned: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '_')
+        .collect();
     let cleaned: String = cleaned.chars().filter(|c| *c != '_').collect();
     cleaned.parse::<u32>().ok()
 }

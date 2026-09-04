@@ -7,16 +7,15 @@
 use std::collections::HashMap;
 
 use rokc_hir::{
-    HirBlock, HirExpr, HirExprKind, HirFunction, HirMatchArm, HirModule, HirPattern, HirStmt,
-    HirTy,
+    HirBlock, HirExpr, HirExprKind, HirFunction, HirMatchArm, HirModule, HirPattern, HirStmt, HirTy,
 };
 use rokc_ir_common::PrimTy as IrPrimTy;
 use rokc_ir_common::{BlockId, ConstVal, FunctionId, LocalId, PrimOp, PrimTy};
 
 use crate::ty::{enum_payload_ty, lower_ty, lower_ty_in};
 use crate::{
-    BasicBlock, LocalDecl, MirFunction, MirModule, MirStaticDef, MirTy, Operand, RValue,
-    Statement, Terminator,
+    BasicBlock, LocalDecl, MirFunction, MirModule, MirStaticDef, MirTy, Operand, RValue, Statement,
+    Terminator,
 };
 
 #[must_use]
@@ -61,7 +60,11 @@ fn lower_fn(
         });
     }
 
-    let param_tys: Vec<MirTy> = f.params.iter().map(|p| lower_ty_in(&p.ty, module)).collect();
+    let param_tys: Vec<MirTy> = f
+        .params
+        .iter()
+        .map(|p| lower_ty_in(&p.ty, module))
+        .collect();
     let params: Vec<LocalId> = f.params.iter().map(|p| p.local).collect();
 
     if f.body.is_some() {
@@ -229,20 +232,34 @@ impl<'a> FnBuilder<'a> {
                         .collect();
                     self.push_stmt(Statement::Assign {
                         target: *local,
-                        rvalue: RValue::ArrayInit { elem_ty: mir_elem_ty, elements: elem_ops },
+                        rvalue: RValue::ArrayInit {
+                            elem_ty: mir_elem_ty,
+                            elements: elem_ops,
+                        },
                     });
                     return false;
                 }
                 let rvalue = self.lower_expr_to_rvalue(init);
-                self.push_stmt(Statement::Assign { target: *local, rvalue });
+                self.push_stmt(Statement::Assign {
+                    target: *local,
+                    rvalue,
+                });
                 false
             }
             HirStmt::Assign { local, value } => {
                 let rvalue = self.lower_expr_to_rvalue(value);
-                self.push_stmt(Statement::Assign { target: *local, rvalue });
+                self.push_stmt(Statement::Assign {
+                    target: *local,
+                    rvalue,
+                });
                 false
             }
-            HirStmt::ArrayAssign { array_local, index, value, elem_ty } => {
+            HirStmt::ArrayAssign {
+                array_local,
+                index,
+                value,
+                elem_ty,
+            } => {
                 let idx = self.lower_expr_to_operand(index);
                 let val = self.lower_expr_to_operand(value);
                 let mir_elem_ty = lower_ty_in(elem_ty, self.module);
@@ -282,7 +299,10 @@ impl<'a> FnBuilder<'a> {
                     (Some(_), None) => vec![Operand::Const(ConstVal::Unit)],
                     _ => Vec::new(),
                 };
-                self.terminate(Terminator::Goto { target: break_bb, args });
+                self.terminate(Terminator::Goto {
+                    target: break_bb,
+                    args,
+                });
                 true
             }
             HirStmt::Continue { label } => {
@@ -291,7 +311,10 @@ impl<'a> FnBuilder<'a> {
                     return true;
                 };
                 let target = frame.continue_bb;
-                self.terminate(Terminator::Goto { target, args: Vec::new() });
+                self.terminate(Terminator::Goto {
+                    target,
+                    args: Vec::new(),
+                });
                 true
             }
             HirStmt::Throw(call) => {
@@ -332,32 +355,47 @@ impl<'a> FnBuilder<'a> {
                 let op_ty = lower_ty(&lhs.ty);
                 let lhs_op = self.lower_expr_to_operand(lhs);
                 let rhs_op = self.lower_expr_to_operand(rhs);
-                RValue::BinOp { op: *op, op_ty, lhs: lhs_op, rhs: rhs_op }
+                RValue::BinOp {
+                    op: *op,
+                    op_ty,
+                    lhs: lhs_op,
+                    rhs: rhs_op,
+                }
             }
             HirExprKind::PrimUnaryOp { op, operand } => {
                 let op_ty = lower_ty(&operand.ty);
                 let v = self.lower_expr_to_operand(operand);
-                RValue::UnaryOp { op: *op, op_ty, operand: v }
+                RValue::UnaryOp {
+                    op: *op,
+                    op_ty,
+                    operand: v,
+                }
             }
             HirExprKind::Call { callee, args } => {
                 let mut arg_ops = Vec::with_capacity(args.len());
                 for a in args {
                     arg_ops.push(self.lower_expr_to_operand(a));
                 }
-                let ret_ty = self
-                    .fn_ret_tys
-                    .get(callee)
-                    .cloned()
-                    .unwrap_or(MirTy::Unit);
-                RValue::Call { callee: *callee, args: arg_ops, ret_ty }
+                let ret_ty = self.fn_ret_tys.get(callee).cloned().unwrap_or(MirTy::Unit);
+                RValue::Call {
+                    callee: *callee,
+                    args: arg_ops,
+                    ret_ty,
+                }
             }
             HirExprKind::FnRef(id) => {
                 let fn_ty = lower_ty_in(&e.ty, self.module);
                 RValue::FnAddr { callee: *id, fn_ty }
             }
-            HirExprKind::CallIndirect { callee, args, ret_ty } => {
-                let arg_tys: Vec<MirTy> =
-                    args.iter().map(|a| lower_ty_in(&a.ty, self.module)).collect();
+            HirExprKind::CallIndirect {
+                callee,
+                args,
+                ret_ty,
+            } => {
+                let arg_tys: Vec<MirTy> = args
+                    .iter()
+                    .map(|a| lower_ty_in(&a.ty, self.module))
+                    .collect();
                 let arg_ops: Vec<Operand> =
                     args.iter().map(|a| self.lower_expr_to_operand(a)).collect();
                 let callee_op = self.lower_expr_to_operand(callee);
@@ -368,7 +406,11 @@ impl<'a> FnBuilder<'a> {
                     ret_ty: lower_ty_in(ret_ty, self.module),
                 }
             }
-            HirExprKind::Cast { operand, from_ty, to_ty } => {
+            HirExprKind::Cast {
+                operand,
+                from_ty,
+                to_ty,
+            } => {
                 let source = self.lower_expr_to_operand(operand);
                 RValue::Cast {
                     source,
@@ -376,17 +418,24 @@ impl<'a> FnBuilder<'a> {
                     to_ty: lower_ty_in(to_ty, self.module),
                 }
             }
-            HirExprKind::ClosureValue { fn_id, env, env_ty, arg_tys, ret_ty } => {
+            HirExprKind::ClosureValue {
+                fn_id,
+                env,
+                env_ty,
+                arg_tys,
+                ret_ty,
+            } => {
                 // Build closure as 2-tuple `(fn_ptr, env)`. The fn_ptr's
                 // type prepends the env to the user-visible args.
                 let env_mir = lower_ty_in(env_ty, self.module);
-                let arg_mir: Vec<MirTy> =
-                    arg_tys.iter().map(|t| lower_ty_in(t, self.module)).collect();
+                let arg_mir: Vec<MirTy> = arg_tys
+                    .iter()
+                    .map(|t| lower_ty_in(t, self.module))
+                    .collect();
                 let mut fn_arg_tys = vec![env_mir.clone()];
                 fn_arg_tys.extend(arg_mir.iter().cloned());
-                let fn_ptr_ty =
-                    MirTy::Fn(fn_arg_tys, Box::new(lower_ty_in(ret_ty, self.module)));
-                let closure_ty = MirTy::Tuple(vec![fn_ptr_ty.clone(), env_mir.clone()]);
+                let fn_ptr_ty = MirTy::Fn(fn_arg_tys, Box::new(lower_ty_in(ret_ty, self.module)));
+                let closure_ty = MirTy::Tuple(vec![fn_ptr_ty.clone(), env_mir]);
                 let env_op = self.lower_expr_to_operand(env);
                 let fn_addr_local = self.fresh_local(fn_ptr_ty.clone());
                 self.push_stmt(Statement::Assign {
@@ -401,16 +450,23 @@ impl<'a> FnBuilder<'a> {
                     fields: vec![Operand::Copy(fn_addr_local), env_op],
                 }
             }
-            HirExprKind::CallClosure { closure, args, arg_tys, ret_ty, env_ty } => {
+            HirExprKind::CallClosure {
+                closure,
+                args,
+                arg_tys,
+                ret_ty,
+                env_ty,
+            } => {
                 let closure_op = self.lower_expr_to_operand(closure);
                 let env_mir = lower_ty_in(env_ty, self.module);
-                let arg_mir: Vec<MirTy> =
-                    arg_tys.iter().map(|t| lower_ty_in(t, self.module)).collect();
+                let arg_mir: Vec<MirTy> = arg_tys
+                    .iter()
+                    .map(|t| lower_ty_in(t, self.module))
+                    .collect();
                 let ret_mir = lower_ty_in(ret_ty, self.module);
                 let mut fn_arg_tys = vec![env_mir.clone()];
                 fn_arg_tys.extend(arg_mir.iter().cloned());
-                let fn_ptr_ty =
-                    MirTy::Fn(fn_arg_tys.clone(), Box::new(ret_mir.clone()));
+                let fn_ptr_ty = MirTy::Fn(fn_arg_tys.clone(), Box::new(ret_mir.clone()));
 
                 // Extract fn_ptr (field 0) and env (field 1).
                 let fn_ptr_local = self.fresh_local(fn_ptr_ty.clone());
@@ -419,7 +475,7 @@ impl<'a> FnBuilder<'a> {
                     rvalue: RValue::FieldRead {
                         target: closure_op.clone(),
                         index: 0,
-                        field_ty: fn_ptr_ty.clone(),
+                        field_ty: fn_ptr_ty,
                     },
                 });
                 let env_local = self.fresh_local(env_mir.clone());
@@ -428,7 +484,7 @@ impl<'a> FnBuilder<'a> {
                     rvalue: RValue::FieldRead {
                         target: closure_op,
                         index: 1,
-                        field_ty: env_mir.clone(),
+                        field_ty: env_mir,
                     },
                 });
 
@@ -473,7 +529,7 @@ impl<'a> FnBuilder<'a> {
                     let break_param = if matches!(result_ty, MirTy::Unit) {
                         None
                     } else {
-                        Some(self.add_block_param(exit_bb, result_ty.clone()))
+                        Some(self.add_block_param(exit_bb, result_ty))
                     };
                     self.loop_stack.push(LoopFrame {
                         // `continue` inside a labeled block isn't
@@ -491,7 +547,10 @@ impl<'a> FnBuilder<'a> {
                             Some(_) => vec![value],
                             None => Vec::new(),
                         };
-                        self.terminate(Terminator::Goto { target: exit_bb, args });
+                        self.terminate(Terminator::Goto {
+                            target: exit_bb,
+                            args,
+                        });
                     }
                     self.current = exit_bb;
                     match break_param {
@@ -511,66 +570,83 @@ impl<'a> FnBuilder<'a> {
             }
             // HIR reports every unresolved name; reaching MIR is a bug.
             HirExprKind::UnresolvedPath(p) => {
-                panic!("internal compiler error: unresolved path `{}` reached MIR", p.join("::"))
+                panic!(
+                    "internal compiler error: unresolved path `{}` reached MIR",
+                    p.join("::")
+                )
             }
             HirExprKind::Call { callee, .. } => {
-                let result_ty = self
-                    .fn_ret_tys
-                    .get(callee)
-                    .cloned()
-                    .unwrap_or(MirTy::Unit);
+                let result_ty = self.fn_ret_tys.get(callee).cloned().unwrap_or(MirTy::Unit);
                 let dst = self.fresh_local(result_ty);
                 let rvalue = self.lower_expr_to_rvalue(e);
-                self.push_stmt(Statement::Assign { target: dst, rvalue });
+                self.push_stmt(Statement::Assign {
+                    target: dst,
+                    rvalue,
+                });
                 Operand::Copy(dst)
             }
             HirExprKind::FnRef(_) => {
                 let result_ty = lower_ty_in(&e.ty, self.module);
                 let dst = self.fresh_local(result_ty);
                 let rvalue = self.lower_expr_to_rvalue(e);
-                self.push_stmt(Statement::Assign { target: dst, rvalue });
+                self.push_stmt(Statement::Assign {
+                    target: dst,
+                    rvalue,
+                });
                 Operand::Copy(dst)
             }
             HirExprKind::CallIndirect { ret_ty, .. } => {
                 let result_ty = lower_ty_in(ret_ty, self.module);
                 let dst = self.fresh_local(result_ty);
                 let rvalue = self.lower_expr_to_rvalue(e);
-                self.push_stmt(Statement::Assign { target: dst, rvalue });
+                self.push_stmt(Statement::Assign {
+                    target: dst,
+                    rvalue,
+                });
                 Operand::Copy(dst)
             }
             HirExprKind::Cast { to_ty, .. } => {
                 let result_ty = lower_ty_in(to_ty, self.module);
                 let dst = self.fresh_local(result_ty);
                 let rvalue = self.lower_expr_to_rvalue(e);
-                self.push_stmt(Statement::Assign { target: dst, rvalue });
+                self.push_stmt(Statement::Assign {
+                    target: dst,
+                    rvalue,
+                });
                 Operand::Copy(dst)
             }
             HirExprKind::ClosureValue { .. } | HirExprKind::CallClosure { .. } => {
                 let result_ty = lower_ty_in(&e.ty, self.module);
                 let dst = self.fresh_local(result_ty);
                 let rvalue = self.lower_expr_to_rvalue(e);
-                self.push_stmt(Statement::Assign { target: dst, rvalue });
+                self.push_stmt(Statement::Assign {
+                    target: dst,
+                    rvalue,
+                });
                 Operand::Copy(dst)
             }
             HirExprKind::PrimBinOp { .. } | HirExprKind::PrimUnaryOp { .. } => {
                 let result_ty = lower_ty_in(&e.ty, self.module);
                 let dst = self.fresh_local(result_ty);
                 let rvalue = self.lower_expr_to_rvalue(e);
-                self.push_stmt(Statement::Assign { target: dst, rvalue });
+                self.push_stmt(Statement::Assign {
+                    target: dst,
+                    rvalue,
+                });
                 Operand::Copy(dst)
             }
-            HirExprKind::If { cond, then_block, else_branch } => {
-                self.lower_if(cond, then_block, else_branch.as_deref(), &e.ty)
-            }
-            HirExprKind::While { label, cond, body } => {
-                self.lower_while(label.clone(), cond, body)
-            }
-            HirExprKind::Loop { label, body, result_ty } => {
-                self.lower_loop(label.clone(), body, result_ty)
-            }
-            HirExprKind::Match { scrutinee, arms } => {
-                self.lower_match(scrutinee, arms, &e.ty)
-            }
+            HirExprKind::If {
+                cond,
+                then_block,
+                else_branch,
+            } => self.lower_if(cond, then_block, else_branch.as_deref(), &e.ty),
+            HirExprKind::While { label, cond, body } => self.lower_while(label.clone(), cond, body),
+            HirExprKind::Loop {
+                label,
+                body,
+                result_ty,
+            } => self.lower_loop(label.clone(), body, result_ty),
+            HirExprKind::Match { scrutinee, arms } => self.lower_match(scrutinee, arms, &e.ty),
             HirExprKind::StructInit { struct_id, fields } => {
                 let result_ty = lower_ty_in(&e.ty, self.module);
                 let field_ops: Vec<Operand> = fields
@@ -580,12 +656,19 @@ impl<'a> FnBuilder<'a> {
                 let dst = self.fresh_local(result_ty.clone());
                 self.push_stmt(Statement::Assign {
                     target: dst,
-                    rvalue: RValue::StructInit { ty: result_ty, fields: field_ops },
+                    rvalue: RValue::StructInit {
+                        ty: result_ty,
+                        fields: field_ops,
+                    },
                 });
                 let _ = struct_id;
                 Operand::Copy(dst)
             }
-            HirExprKind::SumWrap { sum_ty, variant_index, value } => {
+            HirExprKind::SumWrap {
+                sum_ty,
+                variant_index,
+                value,
+            } => {
                 let mir_ty = lower_ty_in(sum_ty, self.module);
                 let tag_op = Operand::Const(ConstVal::Int {
                     value: i128::from(*variant_index),
@@ -611,11 +694,18 @@ impl<'a> FnBuilder<'a> {
                 let dst = self.fresh_local(mir_ty.clone());
                 self.push_stmt(Statement::Assign {
                     target: dst,
-                    rvalue: RValue::StructInit { ty: mir_ty, fields: vec![tag_op, payload_op] },
+                    rvalue: RValue::StructInit {
+                        ty: mir_ty,
+                        fields: vec![tag_op, payload_op],
+                    },
                 });
                 Operand::Copy(dst)
             }
-            HirExprKind::EnumVariantInit { enum_id, variant_index, args } => {
+            HirExprKind::EnumVariantInit {
+                enum_id,
+                variant_index,
+                args,
+            } => {
                 let tag_op = Operand::Const(ConstVal::Int {
                     value: i128::from(*variant_index),
                     ty: IrPrimTy::I32,
@@ -657,7 +747,10 @@ impl<'a> FnBuilder<'a> {
                 let dst = self.fresh_local(enum_ty.clone());
                 self.push_stmt(Statement::Assign {
                     target: dst,
-                    rvalue: RValue::StructInit { ty: enum_ty, fields: vec![tag_op, payload_op] },
+                    rvalue: RValue::StructInit {
+                        ty: enum_ty,
+                        fields: vec![tag_op, payload_op],
+                    },
                 });
                 Operand::Copy(dst)
             }
@@ -669,14 +762,21 @@ impl<'a> FnBuilder<'a> {
                     .iter()
                     .map(|e| self.lower_expr_to_operand(e))
                     .collect();
-                let dst = self.fresh_local(array_ty.clone());
+                let dst = self.fresh_local(array_ty);
                 self.push_stmt(Statement::Assign {
                     target: dst,
-                    rvalue: RValue::ArrayInit { elem_ty: mir_elem_ty, elements: elem_ops },
+                    rvalue: RValue::ArrayInit {
+                        elem_ty: mir_elem_ty,
+                        elements: elem_ops,
+                    },
                 });
                 Operand::Copy(dst)
             }
-            HirExprKind::ArrayIndex { array, index, elem_ty } => {
+            HirExprKind::ArrayIndex {
+                array,
+                index,
+                elem_ty,
+            } => {
                 let arr_op = self.lower_expr_to_operand(array);
                 let idx_op = self.lower_expr_to_operand(index);
                 let Operand::Copy(arr_local) = arr_op else {
@@ -708,7 +808,10 @@ impl<'a> FnBuilder<'a> {
                 let dst = self.fresh_local(result_ty.clone());
                 self.push_stmt(Statement::Assign {
                     target: dst,
-                    rvalue: RValue::StructInit { ty: result_ty, fields: field_ops },
+                    rvalue: RValue::StructInit {
+                        ty: result_ty,
+                        fields: field_ops,
+                    },
                 });
                 Operand::Copy(dst)
             }
@@ -752,7 +855,11 @@ impl<'a> FnBuilder<'a> {
                 let dst_ty = lower_ty_in(field_ty, self.module);
                 self.cast_to(Operand::Copy(storage_local), &storage_mir_ty, &dst_ty)
             }
-            HirExprKind::TupleField { target, index, field_ty } => {
+            HirExprKind::TupleField {
+                target,
+                index,
+                field_ty,
+            } => {
                 let target_op = self.lower_expr_to_operand(target);
                 let mir_field_ty = lower_ty_in(field_ty, self.module);
                 let dst = self.fresh_local(mir_field_ty.clone());
@@ -766,7 +873,12 @@ impl<'a> FnBuilder<'a> {
                 });
                 Operand::Copy(dst)
             }
-            HirExprKind::WithField { target, field_index, value, .. } => {
+            HirExprKind::WithField {
+                target,
+                field_index,
+                value,
+                ..
+            } => {
                 let struct_ty = lower_ty_in(&target.ty, self.module);
                 let source = self.lower_expr_to_operand(target);
                 let new_value = self.lower_expr_to_operand(value);
@@ -782,7 +894,12 @@ impl<'a> FnBuilder<'a> {
                 });
                 Operand::Copy(dst)
             }
-            HirExprKind::FieldRead { target, field_index, field_ty, .. } => {
+            HirExprKind::FieldRead {
+                target,
+                field_index,
+                field_ty,
+                ..
+            } => {
                 let target_op = self.lower_expr_to_operand(target);
                 let mir_field_ty = lower_ty_in(field_ty, self.module);
                 let dst = self.fresh_local(mir_field_ty.clone());
@@ -825,7 +942,7 @@ impl<'a> FnBuilder<'a> {
         let mir_result_ty = lower_ty_in(result_hir_ty, self.module);
         let value_producing = !matches!(mir_result_ty, MirTy::Unit);
         let merge_param = if value_producing {
-            Some(self.add_block_param(merge_bb, mir_result_ty.clone()))
+            Some(self.add_block_param(merge_bb, mir_result_ty))
         } else {
             None
         };
@@ -857,8 +974,15 @@ impl<'a> FnBuilder<'a> {
             // Skip the goto-merge if the body fully diverged (e.g. all
             // its sub-branches `return`-ed out).
             if !self.terminated.contains(&self.current.0) {
-                let args = if value_producing { vec![body_val] } else { Vec::new() };
-                self.terminate(Terminator::Goto { target: merge_bb, args });
+                let args = if value_producing {
+                    vec![body_val]
+                } else {
+                    Vec::new()
+                };
+                self.terminate(Terminator::Goto {
+                    target: merge_bb,
+                    args,
+                });
                 any_arm_to_merge = true;
             }
 
@@ -897,7 +1021,10 @@ impl<'a> FnBuilder<'a> {
     ) {
         match pat {
             HirPattern::Wildcard | HirPattern::Binding { .. } => {
-                self.terminate(Terminator::Goto { target: arm_body_bb, args: Vec::new() });
+                self.terminate(Terminator::Goto {
+                    target: arm_body_bb,
+                    args: Vec::new(),
+                });
             }
             HirPattern::Literal { value, prim } => {
                 let cond = self.build_eq(scrut_local, value, *prim);
@@ -909,7 +1036,12 @@ impl<'a> FnBuilder<'a> {
                     else_args: Vec::new(),
                 });
             }
-            HirPattern::Range { start, end, inclusive, prim } => {
+            HirPattern::Range {
+                start,
+                end,
+                inclusive,
+                prim,
+            } => {
                 // Check `lo <= x` and (`x < hi` | `x <= hi`); each open
                 // bound is omitted. Empty range matches everything.
                 if start.is_none() && end.is_none() {
@@ -965,13 +1097,7 @@ impl<'a> FnBuilder<'a> {
                         next_bb
                     };
                     let alt_success_bb = self.new_block();
-                    self.lower_pattern_test(
-                        alt,
-                        scrut_local,
-                        scrut_ty,
-                        alt_success_bb,
-                        local_next,
-                    );
+                    self.lower_pattern_test(alt, scrut_local, scrut_ty, alt_success_bb, local_next);
                     self.current = alt_success_bb;
                     self.bind_pattern(alt, scrut_local);
                     self.terminate(Terminator::Goto {
@@ -1228,7 +1354,9 @@ impl<'a> FnBuilder<'a> {
                     return;
                 }
                 let scrut_ty = self.locals[scrut.0 as usize].ty.clone();
-                let MirTy::Tuple(parts) = &scrut_ty else { return };
+                let MirTy::Tuple(parts) = &scrut_ty else {
+                    return;
+                };
                 if parts.len() != 2 {
                     return;
                 }
@@ -1255,12 +1383,16 @@ impl<'a> FnBuilder<'a> {
                 }
                 // Multi-arg variant: payload is a tuple. Bind each tuple
                 // field to the corresponding pattern arg.
-                let MirTy::Tuple(field_tys) = unified_ty else { return };
+                let MirTy::Tuple(field_tys) = unified_ty else {
+                    return;
+                };
                 if args.len() != field_tys.len() {
                     return;
                 }
                 for (i, sub_pat) in args.iter().enumerate() {
-                    let HirPattern::Binding { local, .. } = sub_pat else { continue };
+                    let HirPattern::Binding { local, .. } = sub_pat else {
+                        continue;
+                    };
                     let field_ty = field_tys[i].clone();
                     let elem = self.fresh_local(field_ty.clone());
                     self.push_stmt(Statement::Assign {
@@ -1282,7 +1414,9 @@ impl<'a> FnBuilder<'a> {
             HirPattern::SumVariant { binder, .. } => {
                 let Some(local) = binder else { return };
                 let scrut_ty = self.locals[scrut.0 as usize].ty.clone();
-                let MirTy::Tuple(parts) = &scrut_ty else { return };
+                let MirTy::Tuple(parts) = &scrut_ty else {
+                    return;
+                };
                 if parts.len() != 2 {
                     return;
                 }
@@ -1309,7 +1443,9 @@ impl<'a> FnBuilder<'a> {
             }
             HirPattern::Tuple(sub_pats) => {
                 let scrut_ty = self.locals[scrut.0 as usize].ty.clone();
-                let MirTy::Tuple(elem_tys) = scrut_ty else { return };
+                let MirTy::Tuple(elem_tys) = scrut_ty else {
+                    return;
+                };
                 if sub_pats.len() != elem_tys.len() {
                     return;
                 }
@@ -1336,7 +1472,9 @@ impl<'a> FnBuilder<'a> {
             }
             HirPattern::Struct { fields, .. } => {
                 let scrut_ty = self.locals[scrut.0 as usize].ty.clone();
-                let MirTy::Struct(_, elem_tys) = scrut_ty else { return };
+                let MirTy::Struct(_, elem_tys) = scrut_ty else {
+                    return;
+                };
                 for (idx, sub_pat) in fields {
                     if matches!(
                         sub_pat,
@@ -1365,18 +1503,16 @@ impl<'a> FnBuilder<'a> {
         }
     }
 
-    fn lower_while(
-        &mut self,
-        label: Option<String>,
-        cond: &HirExpr,
-        body: &HirBlock,
-    ) -> Operand {
+    fn lower_while(&mut self, label: Option<String>, cond: &HirExpr, body: &HirBlock) -> Operand {
         let header_bb = self.new_block();
         let body_bb = self.new_block();
         let exit_bb = self.new_block();
 
         // Jump from the current block into the header.
-        self.terminate(Terminator::Goto { target: header_bb, args: Vec::new() });
+        self.terminate(Terminator::Goto {
+            target: header_bb,
+            args: Vec::new(),
+        });
 
         // Header: evaluate the condition, branch to body or exit.
         self.current = header_bb;
@@ -1401,19 +1537,17 @@ impl<'a> FnBuilder<'a> {
         let (_value, diverged) = self.lower_block_value(body);
         self.loop_stack.pop();
         if !diverged {
-            self.terminate(Terminator::Goto { target: header_bb, args: Vec::new() });
+            self.terminate(Terminator::Goto {
+                target: header_bb,
+                args: Vec::new(),
+            });
         }
 
         self.current = exit_bb;
         Operand::Const(ConstVal::Unit)
     }
 
-    fn lower_loop(
-        &mut self,
-        label: Option<String>,
-        body: &HirBlock,
-        result_ty: &HirTy,
-    ) -> Operand {
+    fn lower_loop(&mut self, label: Option<String>, body: &HirBlock, result_ty: &HirTy) -> Operand {
         let body_bb = self.new_block();
         let exit_bb = self.new_block();
 
@@ -1421,10 +1555,13 @@ impl<'a> FnBuilder<'a> {
         let break_param = if matches!(mir_ty, MirTy::Unit) {
             None
         } else {
-            Some(self.add_block_param(exit_bb, mir_ty.clone()))
+            Some(self.add_block_param(exit_bb, mir_ty))
         };
 
-        self.terminate(Terminator::Goto { target: body_bb, args: Vec::new() });
+        self.terminate(Terminator::Goto {
+            target: body_bb,
+            args: Vec::new(),
+        });
 
         self.current = body_bb;
         self.loop_stack.push(LoopFrame {
@@ -1436,7 +1573,10 @@ impl<'a> FnBuilder<'a> {
         let (_value, diverged) = self.lower_block_value(body);
         self.loop_stack.pop();
         if !diverged {
-            self.terminate(Terminator::Goto { target: body_bb, args: Vec::new() });
+            self.terminate(Terminator::Goto {
+                target: body_bb,
+                args: Vec::new(),
+            });
         }
 
         self.current = exit_bb;
@@ -1464,7 +1604,7 @@ impl<'a> FnBuilder<'a> {
         // Merge block param holds the unified result when both branches
         // produce a value.
         let merge_param = if value_producing {
-            Some(self.add_block_param(merge_bb, result_ty.clone()))
+            Some(self.add_block_param(merge_bb, result_ty))
         } else {
             None
         };
@@ -1483,8 +1623,15 @@ impl<'a> FnBuilder<'a> {
         self.current = then_bb;
         let (then_value, then_diverged) = self.lower_block_value(then_block);
         if !then_diverged {
-            let then_args = if value_producing { vec![then_value] } else { Vec::new() };
-            self.terminate(Terminator::Goto { target: merge_bb, args: then_args });
+            let then_args = if value_producing {
+                vec![then_value]
+            } else {
+                Vec::new()
+            };
+            self.terminate(Terminator::Goto {
+                target: merge_bb,
+                args: then_args,
+            });
         }
         let then_to_merge = !then_diverged;
 
@@ -1497,8 +1644,15 @@ impl<'a> FnBuilder<'a> {
             // or break inside; check whether the current block is still
             // live before adding a goto-merge edge.
             if !self.terminated.contains(&self.current.0) {
-                let else_args = if value_producing { vec![else_value] } else { Vec::new() };
-                self.terminate(Terminator::Goto { target: merge_bb, args: else_args });
+                let else_args = if value_producing {
+                    vec![else_value]
+                } else {
+                    Vec::new()
+                };
+                self.terminate(Terminator::Goto {
+                    target: merge_bb,
+                    args: else_args,
+                });
                 else_to_merge = true;
             }
         }
@@ -1526,13 +1680,13 @@ trait HirTyExt {
 
 impl HirTyExt for HirTy {
     fn is_unit(&self) -> bool {
-        matches!(self, HirTy::Unit)
+        matches!(self, Self::Unit)
     }
 }
 
 // A zero ConstVal of the given primitive shape; used as a dummy
 // payload for unit variants of payload-bearing enums.
-fn zero_const(ty: &MirTy) -> ConstVal {
+const fn zero_const(ty: &MirTy) -> ConstVal {
     match ty {
         MirTy::Prim(p) if p.is_int() => ConstVal::Int { value: 0, ty: *p },
         MirTy::Prim(IrPrimTy::Bool) => ConstVal::Bool(false),

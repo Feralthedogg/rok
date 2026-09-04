@@ -1,4 +1,4 @@
-//! Shared definitions: DefId, Visibility, DefKind, DefTable.
+//! Shared definitions: `DefId`, Visibility, `DefKind`, `DefTable`.
 
 pub mod def;
 

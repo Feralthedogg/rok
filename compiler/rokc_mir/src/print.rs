@@ -4,9 +4,7 @@ use std::fmt::Write;
 
 use rokc_ir_common::{ConstVal, PrimTy};
 
-use crate::{
-    BasicBlock, MirFunction, MirModule, MirTy, Operand, RValue, Statement, Terminator,
-};
+use crate::{BasicBlock, MirFunction, MirModule, MirTy, Operand, RValue, Statement, Terminator};
 
 fn print_arg_list(out: &mut String, args: &[Operand]) {
     if args.is_empty() {
@@ -41,16 +39,11 @@ fn print_function(out: &mut String, f: &MirFunction) {
         let ty = f.param_tys.get(i).cloned().unwrap_or(MirTy::Any);
         let _ = write!(out, "_{}: {}", p.0, ty_str(&ty));
     }
-    let _ = write!(out, ") -> {} {{\n", ty_str(&f.ret_ty));
+    let _ = writeln!(out, ") -> {} {{", ty_str(&f.ret_ty));
 
     for l in &f.locals {
         if !f.params.iter().any(|p| *p == l.id) {
-            let _ = writeln!(
-                out,
-                "    let _{}: {};",
-                l.id.0,
-                ty_str(&l.ty),
-            );
+            let _ = writeln!(out, "    let _{}: {};", l.id.0, ty_str(&l.ty),);
         }
     }
     if !f.locals.is_empty() {
@@ -93,7 +86,12 @@ fn print_stmt(out: &mut String, s: &Statement) {
             print_rvalue(out, rvalue);
             out.push(';');
         }
-        Statement::ArrayWrite { array, index, value, .. } => {
+        Statement::ArrayWrite {
+            array,
+            index,
+            value,
+            ..
+        } => {
             let _ = write!(out, "_{}[", array.0);
             print_operand(out, index);
             out.push_str("] = ");
@@ -111,7 +109,12 @@ fn print_stmt(out: &mut String, s: &Statement) {
 fn print_rvalue(out: &mut String, r: &RValue) {
     match r {
         RValue::Use(op) => print_operand(out, op),
-        RValue::BinOp { op, op_ty, lhs, rhs } => {
+        RValue::BinOp {
+            op,
+            op_ty,
+            lhs,
+            rhs,
+        } => {
             let _ = write!(out, "{op:?}<{}>(", ty_str(op_ty));
             print_operand(out, lhs);
             out.push_str(", ");
@@ -123,7 +126,11 @@ fn print_rvalue(out: &mut String, r: &RValue) {
             print_operand(out, operand);
             out.push(')');
         }
-        RValue::Call { callee, args, ret_ty } => {
+        RValue::Call {
+            callee,
+            args,
+            ret_ty,
+        } => {
             let _ = write!(out, "call fn#{}<{}>(", callee.0, ty_str(ret_ty));
             for (i, a) in args.iter().enumerate() {
                 if i > 0 {
@@ -143,12 +150,29 @@ fn print_rvalue(out: &mut String, r: &RValue) {
             }
             out.push('}');
         }
-        RValue::FieldRead { target, index, field_ty } => {
+        RValue::FieldRead {
+            target,
+            index,
+            field_ty,
+        } => {
             print_operand(out, target);
             let _ = write!(out, ".{index}<{}>", ty_str(field_ty));
         }
-        RValue::Cast { source, from_ty, to_ty } | RValue::Bitcast { source, from_ty, to_ty } => {
-            out.push_str(if matches!(r, RValue::Cast { .. }) { "cast<" } else { "bitcast<" });
+        RValue::Cast {
+            source,
+            from_ty,
+            to_ty,
+        }
+        | RValue::Bitcast {
+            source,
+            from_ty,
+            to_ty,
+        } => {
+            out.push_str(if matches!(r, RValue::Cast { .. }) {
+                "cast<"
+            } else {
+                "bitcast<"
+            });
             out.push_str(&ty_str(from_ty));
             out.push_str(" → ");
             out.push_str(&ty_str(to_ty));
@@ -156,7 +180,12 @@ fn print_rvalue(out: &mut String, r: &RValue) {
             print_operand(out, source);
             out.push(')');
         }
-        RValue::WithField { source, index, value, .. } => {
+        RValue::WithField {
+            source,
+            index,
+            value,
+            ..
+        } => {
             print_operand(out, source);
             let _ = write!(out, " with .{index} = ");
             print_operand(out, value);
@@ -179,7 +208,12 @@ fn print_rvalue(out: &mut String, r: &RValue) {
         RValue::FnAddr { callee, fn_ty } => {
             let _ = write!(out, "&fn#{}<{}>", callee.0, ty_str(fn_ty));
         }
-        RValue::CallIndirect { callee, args, ret_ty, .. } => {
+        RValue::CallIndirect {
+            callee,
+            args,
+            ret_ty,
+            ..
+        } => {
             out.push_str("call_indirect ");
             print_operand(out, callee);
             let _ = write!(out, "<{}>(", ty_str(ret_ty));
@@ -240,7 +274,13 @@ fn print_terminator(out: &mut String, t: &Terminator) {
             let _ = write!(out, "goto bb{}", target.0);
             print_arg_list(out, args);
         }
-        Terminator::If { cond, then_bb, then_args, else_bb, else_args } => {
+        Terminator::If {
+            cond,
+            then_bb,
+            then_args,
+            else_bb,
+            else_args,
+        } => {
             out.push_str("if ");
             print_operand(out, cond);
             let _ = write!(out, " then bb{}", then_bb.0);

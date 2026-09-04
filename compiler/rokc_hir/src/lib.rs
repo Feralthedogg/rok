@@ -19,8 +19,8 @@ pub use ty::resolve_ty;
 pub use uses::{ReExport, UseEntry, UseTable, build_use_table};
 
 use rokc_core::DefId;
-use rokc_diagnostic::Span;
 use rokc_diagnostic::RokDiagnostic;
+use rokc_diagnostic::Span;
 use rokc_ir_common::{ConstVal, FunctionId, LocalId, PrimOp, PrimTy};
 
 #[derive(Clone, Debug, Default)]
@@ -403,16 +403,10 @@ pub enum HirPattern {
     /// `_` — matches anything, no binding.
     Wildcard,
     /// `name` — matches anything and binds the value to a fresh local.
-    Binding {
-        local: LocalId,
-        ty: HirTy,
-    },
+    Binding { local: LocalId, ty: HirTy },
     /// `42i32`, `"foo"`, `true` — matches when the scrutinee equals
     /// the constant value.
-    Literal {
-        value: ConstVal,
-        prim: PrimTy,
-    },
+    Literal { value: ConstVal, prim: PrimTy },
     /// `a | b | c` — matches if any sub-pattern matches.
     Or(Vec<HirPattern>),
     /// `(p0, p1, ...)` — matches a tuple, sub-patterns aligned to elements.

@@ -95,8 +95,11 @@ fn collect_attr(
     };
     let AttrBody::Args(args) = &attr.body else {
         diags.push(
-            RokDiagnostic::error(ErrorKind::Meta, format!("{} requires arguments", attr.name()))
-                .with_span(attr.span, ""),
+            RokDiagnostic::error(
+                ErrorKind::Meta,
+                format!("{} requires arguments", attr.name()),
+            )
+            .with_span(attr.span, ""),
         );
         return;
     };

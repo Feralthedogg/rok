@@ -47,7 +47,10 @@ pub enum GenericParam {
         bounds: Vec<Ty>,
         default: Option<Ty>,
     },
-    Const { name: String, ty: Ty },
+    Const {
+        name: String,
+        ty: Ty,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -94,7 +97,7 @@ pub enum StmtKind {
     },
     /// `let (a, b, ...) [: ty] = init;` — tuple destructure.
     /// `_` in `names` is the discard placeholder.
-    /// `rest`: Some((index_into_names, optional_name)) records a `..` or
+    /// `rest`: `Some((index_into_names`, `optional_name`)) records a `..` or
     /// `..name` rest-pattern (spec 3.15.3). The index is the position
     /// among `names` *before* which the rest splice slots in, e.g.
     ///   `(first, ..rest)`              → names=["first"], rest=(1, Some("rest"))

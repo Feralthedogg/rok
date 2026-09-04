@@ -31,7 +31,8 @@ impl CfgEnv {
     pub fn add(&mut self, raw: &str) {
         match raw.split_once('=') {
             Some((key, value)) => {
-                self.pairs.insert((key.trim().to_owned(), value.trim().to_owned()));
+                self.pairs
+                    .insert((key.trim().to_owned(), value.trim().to_owned()));
             }
             None => {
                 self.flags.insert(raw.trim().to_owned());
@@ -51,8 +52,7 @@ impl CfgEnv {
         } else {
             "unknown"
         };
-        self.pairs
-            .insert(("target_os".into(), os.into()));
+        self.pairs.insert(("target_os".into(), os.into()));
 
         let arch = if cfg!(target_arch = "x86_64") {
             "x86_64"
@@ -61,8 +61,7 @@ impl CfgEnv {
         } else {
             "unknown"
         };
-        self.pairs
-            .insert(("target_arch".into(), arch.into()));
+        self.pairs.insert(("target_arch".into(), arch.into()));
 
         let pw = if cfg!(target_pointer_width = "64") {
             "64"
@@ -79,13 +78,17 @@ impl CfgEnv {
         } else {
             "unix"
         };
-        self.pairs
-            .insert(("target_family".into(), family.into()));
+        self.pairs.insert(("target_family".into(), family.into()));
 
         // Endianness — most modern targets are little-endian.
         self.pairs.insert((
             "target_endian".into(),
-            if cfg!(target_endian = "big") { "big" } else { "little" }.into(),
+            if cfg!(target_endian = "big") {
+                "big"
+            } else {
+                "little"
+            }
+            .into(),
         ));
     }
 }
@@ -154,7 +157,9 @@ fn eval_arg(arg: &AttrArg, env: &CfgEnv) -> bool {
     match arg {
         AttrArg::Word(name) => env.flags.contains(name),
         AttrArg::KeyValue(key, lit) => {
-            let Some(value) = lit_to_string(lit) else { return false };
+            let Some(value) = lit_to_string(lit) else {
+                return false;
+            };
             env.pairs.contains(&(key.clone(), value))
         }
         AttrArg::Nested { path, body } => {
@@ -164,9 +169,7 @@ fn eval_arg(arg: &AttrArg, env: &CfgEnv) -> bool {
             match (path[0].as_str(), body.as_ref()) {
                 ("all", AttrBody::Args(inner)) => inner.iter().all(|a| eval_arg(a, env)),
                 ("any", AttrBody::Args(inner)) => inner.iter().any(|a| eval_arg(a, env)),
-                ("not", AttrBody::Args(inner)) if inner.len() == 1 => {
-                    !eval_arg(&inner[0], env)
-                }
+                ("not", AttrBody::Args(inner)) if inner.len() == 1 => !eval_arg(&inner[0], env),
                 _ => true,
             }
         }

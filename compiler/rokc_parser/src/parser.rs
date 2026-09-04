@@ -7,7 +7,7 @@
 
 use rokc_ast::{
     AccessTail, AttrArg, AttrBody, Attribute, Block, CallArg, CatchArm, ConstExpr, EnumDef,
-    EnumVariant, EnumVariantKind, ExternBlock, ExternItem, Expr, ExprKind, FieldPattern, FnDef,
+    EnumVariant, EnumVariantKind, Expr, ExprKind, ExternBlock, ExternItem, FieldPattern, FnDef,
     Generics, ImplDef, ImplItem, Item, Literal, MatchArm, ModDef, NamedField, Param, Path,
     PathSegment, Pattern, PatternKind, Program, Stmt, StmtKind, StructDef, StructKind, ThrowsKind,
     TraitDef, TraitItem, Ty, TyKind, UnionDef,
@@ -127,10 +127,13 @@ impl<'a> Parser<'a> {
     fn hoist_place(&mut self, e: Expr, temps: &mut Vec<Stmt>) -> Expr {
         let span = e.span;
         let kind = match e.kind {
-            ExprKind::Path(_) | ExprKind::SelfLower | ExprKind::SelfUpper | ExprKind::Literal(_) => {
-                e.kind
+            ExprKind::Path(_)
+            | ExprKind::SelfLower
+            | ExprKind::SelfUpper
+            | ExprKind::Literal(_) => e.kind,
+            ExprKind::Field(base, name) => {
+                ExprKind::Field(Box::new(self.hoist_place(*base, temps)), name)
             }
-            ExprKind::Field(base, name) => ExprKind::Field(Box::new(self.hoist_place(*base, temps)), name),
             ExprKind::TupleField(base, i) => {
                 ExprKind::TupleField(Box::new(self.hoist_place(*base, temps)), i)
             }
@@ -142,10 +145,20 @@ impl<'a> Parser<'a> {
             other => {
                 let name = self.fresh_destructure_temp();
                 temps.push(Stmt {
-                    kind: StmtKind::Let { name: name.clone(), ty: None, init: Expr { kind: other, span } },
+                    kind: StmtKind::Let {
+                        name: name.clone(),
+                        ty: None,
+                        init: Expr { kind: other, span },
+                    },
                     span,
                 });
-                ExprKind::Path(Path { segments: vec![PathSegment { name, generics: Vec::new() }], span })
+                ExprKind::Path(Path {
+                    segments: vec![PathSegment {
+                        name,
+                        generics: Vec::new(),
+                    }],
+                    span,
+                })
             }
         };
         Expr { kind, span }
@@ -255,7 +268,9 @@ impl<'a> Parser<'a> {
         if let Some(k) = &self.pending {
             return k;
         }
-        self.tokens.get(self.pos).map_or(&TokenKind::Eof, |t| &t.kind)
+        self.tokens
+            .get(self.pos)
+            .map_or(&TokenKind::Eof, |t| &t.kind)
     }
 
     fn peek_span(&self) -> Span {
@@ -265,7 +280,10 @@ impl<'a> Parser<'a> {
     fn bump(&mut self) -> Token {
         if let Some(kind) = self.pending.take() {
             // Remainder of a split token; span of the token it came from.
-            let span = self.tokens.get(self.pos.saturating_sub(1)).map_or(Span::DUMMY, |t| t.span);
+            let span = self
+                .tokens
+                .get(self.pos.saturating_sub(1))
+                .map_or(Span::DUMMY, |t| t.span);
             return Token { kind, span };
         }
         // Past EOF: hand back a synthetic Eof token instead of panicking.
@@ -318,16 +336,72 @@ impl<'a> Parser<'a> {
 
     pub fn parse_program(&mut self) -> Program {
         let mut items = Vec::new();
+        let mut stmts = Vec::new();
         let attrs = self.parse_inner_attrs();
         while !matches!(self.peek(), TokenKind::Eof) {
             let from = self.pos;
-            if let Some(item) = self.parse_item() {
-                items.push(item);
+            if self.at_item_start() {
+                if let Some(item) = self.parse_item() {
+                    items.push(item);
+                } else {
+                    self.recover(from, Recover::TopItem);
+                }
+            } else if let Some(stmt) = self.parse_top_stmt() {
+                stmts.push(stmt);
+                while let Some(extra) = self.pending_stmts.pop() {
+                    stmts.push(extra);
+                }
             } else {
-                self.recover(from, Recover::TopItem);
+                self.pending_stmts.clear();
+                self.recover(from, Recover::Stmt);
             }
         }
-        Program { attrs, items }
+        Program {
+            attrs,
+            items,
+            stmts,
+        }
+    }
+
+    /// Whether the next tokens begin an item rather than a top-level
+    /// statement. `unsafe` / `async` start an item only when `fn` follows
+    /// (`unsafe { .. }` / `async { .. }` are expressions).
+    fn at_item_start(&self) -> bool {
+        match self.peek() {
+            TokenKind::Unsafe | TokenKind::Async | TokenKind::Yield => matches!(
+                self.peek_next(),
+                Some(TokenKind::Fn | TokenKind::Unsafe | TokenKind::Async | TokenKind::Yield)
+            ),
+            k => starts_item(&k),
+        }
+    }
+
+    /// Top-level statement of the entry file (spec 4.16.1:
+    /// `top_stmt ::= let_stmt | let_else_stmt | expr ";"`). Block-like
+    /// expressions (`if`, `for`, ...) need no `;`; there is no tail
+    /// expression and no top-level `return` (4.16.4).
+    fn parse_top_stmt(&mut self) -> Option<Stmt> {
+        let span = self.peek_span();
+        let (stmt, _) = self.parse_stmt()?;
+        match stmt.kind {
+            StmtKind::Return(_) => {
+                self.error(
+                    span,
+                    "top-level `return` is not allowed (spec 4.16.4); use `env::exit(code)` \
+                     or an explicit `fn main() -> i32`",
+                );
+                None
+            }
+            StmtKind::Trailing(expr) if !is_block_like(&expr) => {
+                self.error(span, "expected `;` after top-level expression");
+                None
+            }
+            StmtKind::Trailing(expr) => Some(Stmt {
+                kind: StmtKind::Expr(expr),
+                span: stmt.span,
+            }),
+            _ => Some(stmt),
+        }
     }
 
     fn parse_inner_attrs(&mut self) -> Vec<Attribute> {
@@ -356,7 +430,12 @@ impl<'a> Parser<'a> {
         let path = self.parse_attr_path()?;
         let body = self.parse_attr_body();
         self.expect(&TokenKind::RBracket, "`]`");
-        Some(Attribute { path, body, inner, span: start })
+        Some(Attribute {
+            path,
+            body,
+            inner,
+            span: start,
+        })
     }
 
     /// Path inside an attribute body: `name` or `a::b::c`.
@@ -409,7 +488,8 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Eq => {
                 self.bump();
-                self.parse_attr_literal().map_or(AttrBody::Empty, AttrBody::Value)
+                self.parse_attr_literal()
+                    .map_or(AttrBody::Empty, AttrBody::Value)
             }
             _ => AttrBody::Empty,
         }
@@ -431,7 +511,10 @@ impl<'a> Parser<'a> {
                 let lit = self.parse_attr_literal()?;
                 return Some(AttrArg::KeyValue(name, lit));
             }
-            if matches!(self.peek_next(), Some(TokenKind::LParen | TokenKind::ColonColon)) {
+            if matches!(
+                self.peek_next(),
+                Some(TokenKind::LParen | TokenKind::ColonColon)
+            ) {
                 let path = self.parse_attr_path()?;
                 let body = self.parse_attr_body();
                 return Some(AttrArg::Nested {
@@ -447,7 +530,10 @@ impl<'a> Parser<'a> {
             return Some(AttrArg::Lit(lit));
         }
         let s = self.peek_span();
-        self.error(s, format!("unexpected token in attribute args: {:?}", self.peek()));
+        self.error(
+            s,
+            format!("unexpected token in attribute args: {:?}", self.peek()),
+        );
         None
     }
 
@@ -545,7 +631,10 @@ impl<'a> Parser<'a> {
             // a compile-time-evaluable function. Distinguish from a
             // `const NAME: T = ...;` item by peeking past `const`.
             TokenKind::Const => {
-                if matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Fn)) {
+                if matches!(
+                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                    Some(TokenKind::Fn)
+                ) {
                     self.bump(); // `const`
                     // Stage-1: accept `const fn` as a regular fn. CTE
                     // (compile-time evaluation) lowering is a separate
@@ -763,7 +852,12 @@ impl<'a> Parser<'a> {
                     let f_vis = self.parse_visibility();
                     let span = self.peek_span();
                     let ty = self.parse_type()?;
-                    fields.push(rokc_ast::TupleField { vis: f_vis, attrs: f_attrs, ty, span });
+                    fields.push(rokc_ast::TupleField {
+                        vis: f_vis,
+                        attrs: f_attrs,
+                        ty,
+                        span,
+                    });
                     if !self.eat(&TokenKind::Comma) {
                         break;
                     }
@@ -831,7 +925,10 @@ impl<'a> Parser<'a> {
             let vis = self.parse_visibility();
             let span = self.peek_span();
             let TokenKind::Ident(name) = self.peek().clone() else {
-                self.error(span, format!("field name expected, found {:?}", self.peek()));
+                self.error(
+                    span,
+                    format!("field name expected, found {:?}", self.peek()),
+                );
                 return None;
             };
             self.bump();
@@ -842,7 +939,14 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            fields.push(NamedField { vis, attrs, name, ty, default, span });
+            fields.push(NamedField {
+                vis,
+                attrs,
+                name,
+                ty,
+                default,
+                span,
+            });
             if !self.eat(&TokenKind::Semi) {
                 break;
             }
@@ -907,13 +1011,19 @@ impl<'a> Parser<'a> {
                     self.expect(&TokenKind::Eq, "`=`")?;
                     let aty = self.parse_type()?;
                     self.expect(&TokenKind::Semi, "`;`")?;
-                    items.push(ImplItem::AssocType { name: assoc_name, ty: aty });
+                    items.push(ImplItem::AssocType {
+                        name: assoc_name,
+                        ty: aty,
+                    });
                 }
                 // ponytail: parsed-but-ignored would be worse than a
                 // clear refusal — HIR has no lowering for these yet.
                 TokenKind::Const => {
                     let s = self.peek_span();
-                    self.unsupported(s, "associated `const` in `impl` (spec 2.9.1) is not yet supported");
+                    self.unsupported(
+                        s,
+                        "associated `const` in `impl` (spec 2.9.1) is not yet supported",
+                    );
                     let from = self.pos;
                     self.recover(from, Recover::NestedItem);
                 }
@@ -1049,7 +1159,10 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::Static => {
                     let s = self.peek_span();
-                    self.unsupported(s, "`static` in `extern` blocks (spec 5.3) is not yet supported");
+                    self.unsupported(
+                        s,
+                        "`static` in `extern` blocks (spec 5.3) is not yet supported",
+                    );
                     let from = self.pos;
                     self.recover(from, Recover::NestedItem);
                 }
@@ -1062,7 +1175,12 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(&TokenKind::RBrace, "`}`")?;
-        Some(ExternBlock { attrs, abi, items, span: start })
+        Some(ExternBlock {
+            attrs,
+            abi,
+            items,
+            span: start,
+        })
     }
 
     fn parse_mod(&mut self, vis: Visibility, attrs: Vec<Attribute>) -> Option<ModDef> {
@@ -1096,20 +1214,27 @@ impl<'a> Parser<'a> {
             self.expect(&TokenKind::Semi, "`;` or `{` after module name")?;
             None
         };
-        Some(ModDef { vis, attrs, name, items, span: start })
+        Some(ModDef {
+            vis,
+            attrs,
+            name,
+            items,
+            span: start,
+        })
     }
 
     /// `use path[::name | ::* | ::** | ::{ ... } | as alias];`
-    fn parse_use(
-        &mut self,
-        vis: Visibility,
-        attrs: Vec<Attribute>,
-    ) -> Option<rokc_ast::UseDef> {
+    fn parse_use(&mut self, vis: Visibility, attrs: Vec<Attribute>) -> Option<rokc_ast::UseDef> {
         let start = self.peek_span();
         self.expect(&TokenKind::Use, "`use`")?;
         let tree = self.parse_use_tree()?;
         self.expect(&TokenKind::Semi, "`;`")?;
-        Some(rokc_ast::UseDef { vis, attrs, tree, span: start })
+        Some(rokc_ast::UseDef {
+            vis,
+            attrs,
+            tree,
+            span: start,
+        })
     }
 
     fn parse_use_tree(&mut self) -> Option<rokc_ast::UseTree> {
@@ -1145,9 +1270,7 @@ impl<'a> Parser<'a> {
             // calling context.
             let after_colons = self.peek_next();
             match after_colons {
-                Some(TokenKind::Star)
-                | Some(TokenKind::LBrace)
-                | Some(TokenKind::Ident(_)) => {
+                Some(TokenKind::Star) | Some(TokenKind::LBrace) | Some(TokenKind::Ident(_)) => {
                     self.bump(); // consume `::`
                     if matches!(self.peek(), TokenKind::Star | TokenKind::LBrace) {
                         break;
@@ -1334,8 +1457,7 @@ impl<'a> Parser<'a> {
             // in the surrounding scope (spec 3.15.4).
             if matches!(self.peek(), TokenKind::LParen) {
                 let inner_span = self.peek_span();
-                let (inner_names, inner_rest) =
-                    self.parse_let_tuple_pattern(inner_span)?;
+                let (inner_names, inner_rest) = self.parse_let_tuple_pattern(inner_span)?;
                 let temp_name = self.fresh_destructure_temp();
                 names.push(temp_name.clone());
                 let init = Expr {
@@ -1522,7 +1644,11 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
-                params.push(rokc_ast::GenericParam::Type { name, bounds, default });
+                params.push(rokc_ast::GenericParam::Type {
+                    name,
+                    bounds,
+                    default,
+                });
             }
             if !self.eat(&TokenKind::Comma) {
                 break;
@@ -1551,9 +1677,15 @@ impl<'a> Parser<'a> {
         if !self.eat(&TokenKind::Where) {
             return preds;
         }
-        while !matches!(self.peek(), TokenKind::LBrace | TokenKind::Semi | TokenKind::Eof) {
+        while !matches!(
+            self.peek(),
+            TokenKind::LBrace | TokenKind::Semi | TokenKind::Eof
+        ) {
             let Some(ty) = self.parse_type() else { break };
-            if self.expect(&TokenKind::Colon, "`:` in where clause").is_none() {
+            if self
+                .expect(&TokenKind::Colon, "`:` in where clause")
+                .is_none()
+            {
                 break;
             }
             let bounds = self.parse_bounds();
@@ -1659,7 +1791,10 @@ impl<'a> Parser<'a> {
         while self.eat(&TokenKind::Pipe) {
             variants.push(self.parse_type_atom()?);
         }
-        Some(Ty { kind: TyKind::Sum(variants), span: start })
+        Some(Ty {
+            kind: TyKind::Sum(variants),
+            span: start,
+        })
     }
 
     /// Everything but `|`: paths, `fn(..) -> R`, tuples / grouping,
@@ -1694,7 +1829,10 @@ impl<'a> Parser<'a> {
                 let ret = if self.eat(&TokenKind::Arrow) {
                     self.parse_type_atom()?
                 } else {
-                    Ty { kind: TyKind::Tuple(Vec::new()), span: start }
+                    Ty {
+                        kind: TyKind::Tuple(Vec::new()),
+                        span: start,
+                    }
                 };
                 TyKind::Fn(args, Box::new(ret))
             }
@@ -1766,7 +1904,10 @@ impl<'a> Parser<'a> {
             let mut tys = Vec::new();
             let mut ok = true;
             while std::mem::discriminant(p.peek()) != std::mem::discriminant(&close)
-                && !matches!(p.peek(), TokenKind::Eof | TokenKind::Shr | TokenKind::GtEq | TokenKind::ShrEq)
+                && !matches!(
+                    p.peek(),
+                    TokenKind::Eof | TokenKind::Shr | TokenKind::GtEq | TokenKind::ShrEq
+                )
             {
                 let Some(t) = p.parse_type() else {
                     ok = false;
@@ -1868,7 +2009,10 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        Some(Path { segments, span: start })
+        Some(Path {
+            segments,
+            span: start,
+        })
     }
 
     /// `{ stmts }`. Inside braces a struct literal is always allowed
@@ -2020,7 +2164,12 @@ impl<'a> Parser<'a> {
                     self.expect(&TokenKind::Semi, "`;`")?;
                     return Some((
                         Stmt {
-                            kind: StmtKind::LetTuple { names, rest, ty, init },
+                            kind: StmtKind::LetTuple {
+                                names,
+                                rest,
+                                ty,
+                                init,
+                            },
                             span: start,
                         },
                         false,
@@ -2239,15 +2388,26 @@ impl<'a> Parser<'a> {
                             rhs: Box::new(value),
                         },
                     };
-                    let assign = Stmt { kind: StmtKind::Assign(target, combined), span: start };
+                    let assign = Stmt {
+                        kind: StmtKind::Assign(target, combined),
+                        span: start,
+                    };
                     if stmts.is_empty() {
                         return Some((assign, false));
                     }
                     stmts.push(assign);
-                    let block = Block { stmts, trailing: None, span: start, label: None };
+                    let block = Block {
+                        stmts,
+                        trailing: None,
+                        span: start,
+                        label: None,
+                    };
                     return Some((
                         Stmt {
-                            kind: StmtKind::Expr(Expr { kind: ExprKind::Block(block), span: start }),
+                            kind: StmtKind::Expr(Expr {
+                                kind: ExprKind::Block(block),
+                                span: start,
+                            }),
                             span: start,
                         },
                         false,
@@ -2298,7 +2458,14 @@ impl<'a> Parser<'a> {
             let s = self.peek_span();
             self.error(s, "range operators cannot be chained (spec 3.7.3)");
         }
-        Some(Expr { span, kind: ExprKind::Range { start, end, inclusive } })
+        Some(Expr {
+            span,
+            kind: ExprKind::Range {
+                start,
+                end,
+                inclusive,
+            },
+        })
     }
 
     /// After `..`: does an end operand follow (vs. `a..` / `..`)?
@@ -2326,7 +2493,10 @@ impl<'a> Parser<'a> {
     fn parse_expr_bp_inner(&mut self, min_bp: u32) -> Option<Expr> {
         let mut lhs = if let Some((sym, span)) = self.peek_op_symbol(Fixity::Prefix) {
             let Some(entry) = self.prec.lookup(&sym, Fixity::Prefix).cloned() else {
-                self.error(span, format!("prefix operator `{sym}` is not defined (no `#[prefix]` registration)"));
+                self.error(
+                    span,
+                    format!("prefix operator `{sym}` is not defined (no `#[prefix]` registration)"),
+                );
                 return None;
             };
             self.bump();
@@ -2517,8 +2687,14 @@ impl<'a> Parser<'a> {
                     }
                 };
                 let mut segments = ty_path.segments;
-                segments.push(PathSegment { name: method_name, generics: Vec::new() });
-                ExprKind::Path(Path { segments, span: start })
+                segments.push(PathSegment {
+                    name: method_name,
+                    generics: Vec::new(),
+                });
+                ExprKind::Path(Path {
+                    segments,
+                    span: start,
+                })
             }
             TokenKind::IntLit(s) => {
                 self.bump();
@@ -2539,7 +2715,10 @@ impl<'a> Parser<'a> {
             TokenKind::FStrLit(s) => {
                 // ponytail: f-strings need Display dispatch + string
                 // concatenation, which HIR/runtime don't provide yet.
-                self.unsupported(start, "f-string literals (spec 1.7.3) are not yet supported");
+                self.unsupported(
+                    start,
+                    "f-string literals (spec 1.7.3) are not yet supported",
+                );
                 self.bump();
                 ExprKind::Literal(Literal::FStr(s))
             }
@@ -2555,7 +2734,10 @@ impl<'a> Parser<'a> {
                 ExprKind::Block(self.parse_block()?)
             }
             TokenKind::Using => {
-                self.unsupported(start, "`using` expressions (spec 3.17) are not yet supported");
+                self.unsupported(
+                    start,
+                    "`using` expressions (spec 3.17) are not yet supported",
+                );
                 return None;
             }
             TokenKind::True => {
@@ -2606,7 +2788,10 @@ impl<'a> Parser<'a> {
                     TokenKind::Loop => {
                         self.bump();
                         let body = self.parse_block()?;
-                        ExprKind::Loop { label: Some(label_name), body }
+                        ExprKind::Loop {
+                            label: Some(label_name),
+                            body,
+                        }
                     }
                     TokenKind::While => {
                         self.bump();
@@ -2696,7 +2881,10 @@ impl<'a> Parser<'a> {
                     self.bump();
                     let pat = self.with_struct_expr(false, Self::parse_pattern)?;
                     let arm_body = self.parse_block()?;
-                    catches.push(CatchArm { pat, body: arm_body });
+                    catches.push(CatchArm {
+                        pat,
+                        body: arm_body,
+                    });
                 }
                 let finally = if matches!(self.peek(), TokenKind::Finally) {
                     self.bump();
@@ -2704,7 +2892,11 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
-                ExprKind::Try { body, catches, finally }
+                ExprKind::Try {
+                    body,
+                    catches,
+                    finally,
+                }
             }
             TokenKind::While => {
                 self.bump();
@@ -2750,7 +2942,11 @@ impl<'a> Parser<'a> {
                         kind: ExprKind::Match {
                             scrutinee: Box::new(scrutinee),
                             arms: vec![
-                                MatchArm { pat, guard: None, body: then_body },
+                                MatchArm {
+                                    pat,
+                                    guard: None,
+                                    body: then_body,
+                                },
                                 MatchArm {
                                     pat: wildcard,
                                     guard: None,
@@ -2802,7 +2998,10 @@ impl<'a> Parser<'a> {
                         } else {
                             let block = self.parse_block()?;
                             let s = block.span;
-                            Expr { span: s, kind: ExprKind::Block(block) }
+                            Expr {
+                                span: s,
+                                kind: ExprKind::Block(block),
+                            }
                         }
                     } else {
                         Expr {
@@ -2817,7 +3016,11 @@ impl<'a> Parser<'a> {
                     ExprKind::Match {
                         scrutinee: Box::new(scrutinee),
                         arms: vec![
-                            MatchArm { pat, guard: None, body: then_body },
+                            MatchArm {
+                                pat,
+                                guard: None,
+                                body: then_body,
+                            },
                             MatchArm {
                                 pat: wildcard,
                                 guard: None,
@@ -2858,8 +3061,7 @@ impl<'a> Parser<'a> {
                 // only accept generics when a balanced `>` is followed
                 // by `{` or `(` (turbofish-style heuristic). The args
                 // attach to the last path segment.
-                if matches!(self.peek(), TokenKind::Lt)
-                    && self.peek_struct_or_call_after_generics()
+                if matches!(self.peek(), TokenKind::Lt) && self.peek_struct_or_call_after_generics()
                 {
                     self.bump(); // `<`
                     let generics = self.nested_type_list(TokenKind::Gt)?;
@@ -2926,7 +3128,12 @@ impl<'a> Parser<'a> {
             // `[ref x, ref y] || ...` (spec 4.6.2). We disambiguate by
             // lookahead: a `ref` keyword inside `[...]` is unambiguous —
             // arrays of variables don't take `ref`, capture lists do.
-            TokenKind::LBracket if matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Ref)) => {
+            TokenKind::LBracket
+                if matches!(
+                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                    Some(TokenKind::Ref)
+                ) =>
+            {
                 self.bump(); // `[`
                 let mut captures: Vec<rokc_ast::CaptureSpec> = Vec::new();
                 while !matches!(self.peek(), TokenKind::RBracket | TokenKind::Eof) {
@@ -2969,7 +3176,8 @@ impl<'a> Parser<'a> {
             }
             TokenKind::LBracket => {
                 self.bump();
-                let (items, _) = self.with_struct_expr(true, |p| p.expr_list(&TokenKind::RBracket))?;
+                let (items, _) =
+                    self.with_struct_expr(true, |p| p.expr_list(&TokenKind::RBracket))?;
                 self.expect(&TokenKind::RBracket, "`]`")?;
                 ExprKind::List(items)
             }
@@ -3212,7 +3420,10 @@ impl<'a> Parser<'a> {
             TokenKind::LBrace if self.struct_expr_allowed => {
                 let span = self.peek_span();
                 let block = self.parse_block()?;
-                let body = Expr { span, kind: ExprKind::Block(block) };
+                let body = Expr {
+                    span,
+                    kind: ExprKind::Block(block),
+                };
                 let closure = Expr {
                     span,
                     kind: ExprKind::Closure {
@@ -3307,20 +3518,14 @@ impl<'a> Parser<'a> {
                     depth -= 1;
                     if depth == 0 {
                         let next = self.tokens.get(i + 1).map(|t| &t.kind);
-                        return matches!(
-                            next,
-                            Some(TokenKind::LBrace | TokenKind::LParen)
-                        );
+                        return matches!(next, Some(TokenKind::LBrace | TokenKind::LParen));
                     }
                 }
                 TokenKind::Shr => {
                     depth -= 2;
                     if depth <= 0 {
                         let next = self.tokens.get(i + 1).map(|t| &t.kind);
-                        return matches!(
-                            next,
-                            Some(TokenKind::LBrace | TokenKind::LParen)
-                        );
+                        return matches!(next, Some(TokenKind::LBrace | TokenKind::LParen));
                     }
                 }
                 // Tokens that may appear inside a generic-arg type list.
@@ -3346,7 +3551,10 @@ impl<'a> Parser<'a> {
     fn peek_path_then_lbrace(&self) -> bool {
         let mut i = self.pos;
         loop {
-            if !matches!(self.tokens.get(i).map(|t| &t.kind), Some(TokenKind::Ident(_))) {
+            if !matches!(
+                self.tokens.get(i).map(|t| &t.kind),
+                Some(TokenKind::Ident(_))
+            ) {
                 return false;
             }
             match self.tokens.get(i + 1).map(|t| &t.kind) {
@@ -3417,7 +3625,11 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(&TokenKind::RBrace, "`}`")?;
-        Some(ExprKind::StructInit { path, fields, spread })
+        Some(ExprKind::StructInit {
+            path,
+            fields,
+            spread,
+        })
     }
 
     /// If a literal pattern is followed by `..` or `..=`, extend it into
@@ -3642,7 +3854,10 @@ impl<'a> Parser<'a> {
                     self.bump(); // ident
                     self.bump(); // ':'
                     let ty = self.parse_type()?;
-                    PatternKind::TypeCheck { binder: Some(name), ty }
+                    PatternKind::TypeCheck {
+                        binder: Some(name),
+                        ty,
+                    }
                 } else {
                     let name = match self.peek().clone() {
                         TokenKind::Ident(n) => n,
@@ -3710,14 +3925,44 @@ fn starts_item(k: &TokenKind) -> bool {
     use TokenKind as T;
     matches!(
         k,
-        T::Fn | T::Struct | T::Enum | T::Union | T::Trait | T::Impl | T::Extern | T::Mod | T::Use
-            | T::Const | T::Static | T::Type | T::Pub | T::HashLBracket | T::Unsafe | T::Async
+        T::Fn
+            | T::Struct
+            | T::Enum
+            | T::Union
+            | T::Trait
+            | T::Impl
+            | T::Extern
+            | T::Mod
+            | T::Use
+            | T::Const
+            | T::Static
+            | T::Type
+            | T::Pub
+            | T::HashLBracket
+            | T::Unsafe
+            | T::Async
+    )
+}
+
+fn is_block_like(e: &Expr) -> bool {
+    matches!(
+        e.kind,
+        ExprKind::Block(_)
+            | ExprKind::If { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Loop { .. }
+            | ExprKind::While { .. }
+            | ExprKind::For { .. }
+            | ExprKind::Try { .. }
     )
 }
 
 fn starts_stmt(k: &TokenKind) -> bool {
     use TokenKind as T;
-    matches!(k, T::Let | T::Return | T::Break | T::Continue | T::Throw | T::Use)
+    matches!(
+        k,
+        T::Let | T::Return | T::Break | T::Continue | T::Throw | T::Use
+    )
 }
 
 // Map a compound-assign token to its base operator symbol.

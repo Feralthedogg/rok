@@ -155,7 +155,9 @@ impl<'src> Lexer<'src> {
         let span = self.span_here();
         while let Some(c) = self.peek_char() {
             let ok_start = c.is_ascii() && b"()[]{},;@~+-*/%^=!<>&|.:?'\"".contains(&(c as u8));
-            if self.pos > start && (ok_start || is_ident_start(c) || is_whitespace(c) || c.is_ascii_digit()) {
+            if self.pos > start
+                && (ok_start || is_ident_start(c) || is_whitespace(c) || c.is_ascii_digit())
+            {
                 break;
             }
             if self.pos > start && c == '#' {
@@ -169,7 +171,10 @@ impl<'src> Lexer<'src> {
         } else {
             format!("unexpected character(s) `{}`", text.escape_debug())
         };
-        self.error(Span::new(span.start, self.pos as u32, span.line, span.col), msg);
+        self.error(
+            Span::new(span.start, self.pos as u32, span.line, span.col),
+            msg,
+        );
     }
 
     fn single(&mut self, kind: TokenKind) -> TokenKind {
@@ -406,7 +411,10 @@ impl<'src> Lexer<'src> {
             self.eat_digit_seq(radix, start);
             let stray = self.bytes.get(self.pos).copied().filter(u8::is_ascii_digit);
             if let Some(d) = stray.filter(|_| radix != 16) {
-                self.error_from(start, format!("invalid digit `{}` in base-{radix} literal", d as char));
+                self.error_from(
+                    start,
+                    format!("invalid digit `{}` in base-{radix} literal", d as char),
+                );
                 while self.bytes.get(self.pos).is_some_and(u8::is_ascii_digit) {
                     self.advance(1);
                 }
@@ -454,11 +462,17 @@ impl<'src> Lexer<'src> {
                 if radix == 10 {
                     is_float = true;
                 } else {
-                    self.error_from(start, format!("float suffix `{suffix}` on a base-{radix} literal"));
+                    self.error_from(
+                        start,
+                        format!("float suffix `{suffix}` on a base-{radix} literal"),
+                    );
                 }
             } else if INT_SUFFIXES.contains(&suffix) {
                 if is_float {
-                    self.error_from(start, format!("integer suffix `{suffix}` on a float literal"));
+                    self.error_from(
+                        start,
+                        format!("integer suffix `{suffix}` on a float literal"),
+                    );
                 }
             } else {
                 // ponytail: user literal suffixes (`2i`, spec 1.6.2 /
@@ -467,14 +481,22 @@ impl<'src> Lexer<'src> {
             }
         }
         self.check_range(start, &self.src[start..body_end], radix, is_float, suffix);
-        if is_float { TokenKind::FloatLit(text) } else { TokenKind::IntLit(text) }
+        if is_float {
+            TokenKind::FloatLit(text)
+        } else {
+            TokenKind::IntLit(text)
+        }
     }
 
     /// Consume `digit ("_"? digit)*` in `radix`; report empty runs and
     /// misplaced `_` (spec 1.6.1, 1.6.4).
     fn eat_digit_seq(&mut self, radix: u32, lit_start: usize) {
         let start = self.pos;
-        while self.bytes.get(self.pos).is_some_and(|&b| b == b'_' || (b as char).is_digit(radix)) {
+        while self
+            .bytes
+            .get(self.pos)
+            .is_some_and(|&b| b == b'_' || (b as char).is_digit(radix))
+        {
             self.advance(1);
         }
         let run = &self.src[start..self.pos];
@@ -501,7 +523,13 @@ impl<'src> Lexer<'src> {
                 _ => clean.parse::<f64>().is_ok_and(f64::is_infinite),
             };
             if inf {
-                self.error_from(start, format!("float literal out of range for `{}`", if suffix.is_empty() { "f64" } else { suffix }));
+                self.error_from(
+                    start,
+                    format!(
+                        "float literal out of range for `{}`",
+                        if suffix.is_empty() { "f64" } else { suffix }
+                    ),
+                );
             }
             return;
         }
@@ -534,7 +562,10 @@ impl<'src> Lexer<'src> {
             (1u128 << bits) - 1
         };
         if value > max {
-            self.error_from(start, format!("literal `{body}` out of range for `{suffix}` (max {max})"));
+            self.error_from(
+                start,
+                format!("literal `{body}` out of range for `{suffix}` (max {max})"),
+            );
         }
     }
 
@@ -566,22 +597,39 @@ impl<'src> Lexer<'src> {
             return TokenKind::CharLit(String::new());
         };
         let body = self.src[start..end].to_owned();
-        let mode = if c_char { EscapeMode::CChar } else { EscapeMode::Char };
+        let mode = if c_char {
+            EscapeMode::CChar
+        } else {
+            EscapeMode::Char
+        };
         match unescape(&body, mode) {
             Err((_, msg)) => self.error_from(lit_start, msg),
             Ok(v) => {
                 let mut chars = v.chars();
                 match (chars.next(), chars.next()) {
                     (Some(c), None) => {
-                        if c_char && (c as u32 > 0xFF || (!c.is_ascii() && !body.starts_with('\\'))) {
-                            self.error_from(lit_start, format!("`c'{body}'` must be one byte; write non-ASCII bytes as `\\xHH`"));
+                        if c_char && (c as u32 > 0xFF || (!c.is_ascii() && !body.starts_with('\\')))
+                        {
+                            self.error_from(
+                                lit_start,
+                                format!(
+                                    "`c'{body}'` must be one byte; write non-ASCII bytes as `\\xHH`"
+                                ),
+                            );
                         }
                     }
-                    _ => self.error_from(lit_start, "char literal must contain exactly one code point"),
+                    _ => self.error_from(
+                        lit_start,
+                        "char literal must contain exactly one code point",
+                    ),
                 }
             }
         }
-        if c_char { TokenKind::CCharLit(body) } else { TokenKind::CharLit(body) }
+        if c_char {
+            TokenKind::CCharLit(body)
+        } else {
+            TokenKind::CharLit(body)
+        }
     }
 
     /// Advance over a quoted body up to the closing `quote` (consumed).
@@ -616,12 +664,11 @@ impl<'src> Lexer<'src> {
         self.advance(usize::from(f_string) + 1); // optional `f`, then `"`
         let start = self.pos;
         if f_string {
-            return match self.scan_fstring() {
-                Some(end) => TokenKind::FStrLit(self.src[start..end].to_owned()),
-                None => {
-                    self.error_from(lit_start, "unterminated f-string literal");
-                    TokenKind::FStrLit(String::new())
-                }
+            return if let Some(end) = self.scan_fstring() {
+                TokenKind::FStrLit(self.src[start..end].to_owned())
+            } else {
+                self.error_from(lit_start, "unterminated f-string literal");
+                TokenKind::FStrLit(String::new())
             };
         }
         let Some(end) = self.scan_quoted(b'"') else {
@@ -650,8 +697,12 @@ impl<'src> Lexer<'src> {
                     self.advance(1);
                     self.scan_quoted(b'"')?;
                 }
-                b'{' if depth == 0 && self.bytes.get(self.pos + 1) == Some(&b'{') => self.advance(2),
-                b'}' if depth == 0 && self.bytes.get(self.pos + 1) == Some(&b'}') => self.advance(2),
+                b'{' if depth == 0 && self.bytes.get(self.pos + 1) == Some(&b'{') => {
+                    self.advance(2);
+                }
+                b'}' if depth == 0 && self.bytes.get(self.pos + 1) == Some(&b'}') => {
+                    self.advance(2);
+                }
                 b'{' => {
                     depth += 1;
                     self.advance(1);
@@ -709,7 +760,9 @@ impl<'src> Lexer<'src> {
             match b {
                 b' ' | b'\t' | b'\n' | b'\r' | 0x0B | 0x0C => self.advance(1),
                 b'/' if self.bytes.get(self.pos + 1) == Some(&b'/') => {
-                    let len = self.src[self.pos..].find(['\n', '\r']).unwrap_or(self.bytes.len() - self.pos);
+                    let len = self.src[self.pos..]
+                        .find(['\n', '\r'])
+                        .unwrap_or(self.bytes.len() - self.pos);
                     self.advance(len);
                 }
                 b'/' if self.bytes.get(self.pos + 1) == Some(&b'*') => self.skip_block_comment(),
@@ -790,7 +843,10 @@ impl<'src> Lexer<'src> {
         let line = 1 + before.matches('\n').count() + before.matches('\r').count()
             - before.matches("\r\n").count();
         let col = 1 + before[line_start..].chars().count();
-        (u32::try_from(line).unwrap_or(u32::MAX), u32::try_from(col).unwrap_or(u32::MAX))
+        (
+            u32::try_from(line).unwrap_or(u32::MAX),
+            u32::try_from(col).unwrap_or(u32::MAX),
+        )
     }
 
     fn error(&mut self, span: Span, msg: impl Into<String>) {
@@ -802,7 +858,7 @@ impl<'src> Lexer<'src> {
     }
 }
 
-fn is_whitespace(c: char) -> bool {
+const fn is_whitespace(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0B' | '\x0C')
 }
 
@@ -839,7 +895,10 @@ mod tests {
 
     fn lex(src: &str) -> (Vec<T>, Vec<String>) {
         let (toks, diags) = Lexer::new(src, "t").lex_all();
-        (toks.into_iter().map(|t| t.kind).collect(), diags.into_iter().map(|d| d.message).collect())
+        (
+            toks.into_iter().map(|t| t.kind).collect(),
+            diags.into_iter().map(|d| d.message).collect(),
+        )
     }
 
     fn ok(src: &str) -> Vec<T> {
@@ -855,28 +914,77 @@ mod tests {
 
     #[test]
     fn numeric_literals() {
-        for good in ["1_000", "0xFF_FF", "0b1010_0101", "3.141_592", "1.", ".5", "2e10", "1.5e-3f32", "0xFFu8", "1f32", "-128i8", "255u8", "0123"] {
+        for good in [
+            "1_000",
+            "0xFF_FF",
+            "0b1010_0101",
+            "3.141_592",
+            "1.",
+            ".5",
+            "2e10",
+            "1.5e-3f32",
+            "0xFFu8",
+            "1f32",
+            "-128i8",
+            "255u8",
+            "0123",
+        ] {
             ok(good);
         }
-        for bad in ["0x", "0b", "0o", "1__0", "1_", "0x_FF", "1e", "0b102", "0o8", "1.5i32", "300i8", "256u8", "128i8", "2i", "1e999f32", "0b1f32"] {
+        for bad in [
+            "0x", "0b", "0o", "1__0", "1_", "0x_FF", "1e", "0b102", "0o8", "1.5i32", "300i8",
+            "256u8", "128i8", "2i", "1e999f32", "0b1f32",
+        ] {
             err(bad);
         }
         assert_eq!(ok("1f32")[0], T::FloatLit("1f32".into()));
-        assert_eq!(ok("1.foo"), vec![T::IntLit("1".into()), T::Dot, T::Ident("foo".into()), T::Eof]);
-        assert_eq!(ok("1..2"), vec![T::IntLit("1".into()), T::DotDot, T::IntLit("2".into()), T::Eof]);
+        assert_eq!(
+            ok("1.foo"),
+            vec![
+                T::IntLit("1".into()),
+                T::Dot,
+                T::Ident("foo".into()),
+                T::Eof
+            ]
+        );
+        assert_eq!(
+            ok("1..2"),
+            vec![
+                T::IntLit("1".into()),
+                T::DotDot,
+                T::IntLit("2".into()),
+                T::Eof
+            ]
+        );
         // `.5` after an expression is `.` + tuple index.
-        assert_eq!(ok("t.5"), vec![T::Ident("t".into()), T::Dot, T::IntLit("5".into()), T::Eof]);
+        assert_eq!(
+            ok("t.5"),
+            vec![T::Ident("t".into()), T::Dot, T::IntLit("5".into()), T::Eof]
+        );
         assert_eq!(ok("x = .5")[2], T::FloatLit(".5".into()));
     }
 
     #[test]
     fn strings_and_chars() {
         ok(r##""a\n\u{AC00}\x41" 'x' '\'' '\u{1F600}' c'\xFF' r"\q" r#"a"b"# '세'"##);
-        for bad in [r#""\q""#, r#""\x80""#, r#""\u{110000}""#, "'ab'", "''", "c'세'", "c'é'", "\"abc", "'\\n"] {
+        for bad in [
+            r#""\q""#,
+            r#""\x80""#,
+            r#""\u{110000}""#,
+            "'ab'",
+            "''",
+            "c'세'",
+            "c'é'",
+            "\"abc",
+            "'\\n",
+        ] {
             err(bad);
         }
         assert_eq!(ok("\"a\\\n   b\"")[0], T::StrLit("a\\\n   b".into()));
-        assert_eq!(ok(r#"f"{a + "}"} {{x}}""#)[0], T::FStrLit(r#"{a + "}"} {{x}}"#.into()));
+        assert_eq!(
+            ok(r#"f"{a + "}"} {{x}}""#)[0],
+            T::FStrLit(r#"{a + "}"} {{x}}"#.into())
+        );
         err(r#"f"a } b""#);
     }
 
@@ -899,7 +1007,10 @@ mod tests {
         // A long run of invalid bytes: one diagnostic, no recursion.
         let (toks, d) = lex(&format!("a {} b", "$".repeat(200_000)));
         assert_eq!(d.len(), 1);
-        assert_eq!(toks, vec![T::Ident("a".into()), T::Ident("b".into()), T::Eof]);
+        assert_eq!(
+            toks,
+            vec![T::Ident("a".into()), T::Ident("b".into()), T::Eof]
+        );
         err("/* unterminated");
         err("a # b");
     }

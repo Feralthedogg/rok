@@ -12,11 +12,21 @@ pub struct Span {
 }
 
 impl Span {
-    pub const DUMMY: Self = Self { start: 0, end: 0, line: 0, col: 0 };
+    pub const DUMMY: Self = Self {
+        start: 0,
+        end: 0,
+        line: 0,
+        col: 0,
+    };
 
     #[must_use]
     pub const fn new(start: u32, end: u32, line: u32, col: u32) -> Self {
-        Self { start, end, line, col }
+        Self {
+            start,
+            end,
+            line,
+            col,
+        }
     }
 
     #[must_use]
@@ -122,12 +132,18 @@ impl RokDiagnostic {
 
     #[must_use]
     pub fn fatal(kind: ErrorKind, message: impl Into<String>) -> Self {
-        Self { severity: Severity::Fatal, ..Self::error(kind, message) }
+        Self {
+            severity: Severity::Fatal,
+            ..Self::error(kind, message)
+        }
     }
 
     #[must_use]
     pub fn warning(kind: ErrorKind, message: impl Into<String>) -> Self {
-        Self { severity: Severity::Warning, ..Self::error(kind, message) }
+        Self {
+            severity: Severity::Warning,
+            ..Self::error(kind, message)
+        }
     }
 
     #[must_use]
@@ -138,13 +154,19 @@ impl RokDiagnostic {
 
     #[must_use]
     pub fn with_span(mut self, span: Span, message: impl Into<String>) -> Self {
-        self.primary = Some(Label { span, message: message.into() });
+        self.primary = Some(Label {
+            span,
+            message: message.into(),
+        });
         self
     }
 
     #[must_use]
     pub fn with_secondary(mut self, span: Span, message: impl Into<String>) -> Self {
-        self.secondary.push(Label { span, message: message.into() });
+        self.secondary.push(Label {
+            span,
+            message: message.into(),
+        });
         self
     }
 
@@ -180,7 +202,10 @@ impl fmt::Display for RokDiagnostic {
 pub fn report(diag: &RokDiagnostic) {
     eprintln!("{diag}");
     for label in &diag.secondary {
-        eprintln!("  note ({}:{}): {}", label.span.line, label.span.col, label.message);
+        eprintln!(
+            "  note ({}:{}): {}",
+            label.span.line, label.span.col, label.message
+        );
     }
     for note in &diag.notes {
         eprintln!("  note: {note}");

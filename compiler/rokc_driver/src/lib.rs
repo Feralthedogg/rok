@@ -2,6 +2,7 @@
 //! HIR lowering (name resolution + type checks), and MIR lowering.
 
 mod cfg;
+mod entry;
 mod toolchain;
 
 use std::path::{Path, PathBuf};
@@ -10,9 +11,7 @@ use rokc_diagnostic::RokDiagnostic;
 use rokc_hir::HirModule;
 use rokc_lexer::Lexer;
 use rokc_mir::MirModule;
-use rokc_parser::{
-    LangTable, PrecTable, collect_lang_table, collect_prec_table, parse_program,
-};
+use rokc_parser::{LangTable, PrecTable, collect_lang_table, collect_prec_table, parse_program};
 
 pub use cfg::CfgEnv;
 pub use toolchain::{BuildOptions, EmitKind, TempDir, emit, link_executable, mlir_text};
@@ -48,12 +47,10 @@ pub fn compile_file(
     config: &CompilerConfig,
 ) -> Result<CompiledProject, Vec<RokDiagnostic>> {
     let source = std::fs::read_to_string(path).map_err(|e| {
-        vec![
-            RokDiagnostic::error(
-                rokc_diagnostic::ErrorKind::Module,
-                format!("cannot read {}: {e}", path.display()),
-            ),
-        ]
+        vec![RokDiagnostic::error(
+            rokc_diagnostic::ErrorKind::Module,
+            format!("cannot read {}: {e}", path.display()),
+        )]
     })?;
     compile_source(&source, path, config)
 }
@@ -81,8 +78,7 @@ pub fn compile_source(
     // flat compilation unit.
     let root_dir = path
         .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     // Build cfg env from CLI flags + automatic target keys.
     let mut cfg_env = CfgEnv::new();
     cfg_env.populate_target_defaults();
@@ -92,7 +88,7 @@ pub fn compile_source(
 
     let mut all_items: Vec<rokc_ast::Item> = Vec::new();
     let mut all_uses: Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)> = Vec::new();
-    collect_module_tree(
+    let top_stmts = collect_module_tree(
         path,
         Some(source),
         Some(&root_dir),
@@ -103,6 +99,12 @@ pub fn compile_source(
         &mut all_items,
         &mut all_uses,
     );
+    let is_lib = path.file_name().is_some_and(|n| n == "lib.rok");
+    if !is_lib {
+        entry::resolve_entry(top_stmts, &mut all_items, &mut diags);
+    } else if !top_stmts.is_empty() {
+        diags.push(entry::stmts_outside_entry(path));
+    }
     // Auto-inject the `rok_panic(msg, len) -> !` runtime hook so
     // `throw` lowering has a target without each user file declaring
     // the extern themselves.
@@ -110,6 +112,7 @@ pub fn compile_source(
     let program = rokc_ast::Program {
         attrs: Vec::new(),
         items: all_items,
+        stmts: Vec::new(),
     };
 
     // Spec 6.4: collect `#[lang(...)]` slots from the merged user program
@@ -119,7 +122,7 @@ pub fn compile_source(
     {
         let (sub_table, mut sub_diags) = collect_lang_table(&program);
         diags.append(&mut sub_diags);
-        for entry in sub_table.entries().cloned().collect::<Vec<_>>() {
+        for entry in sub_table.entries().cloned() {
             if let Some(prev) = _lang.lookup(&entry.slot) {
                 diags.push(RokDiagnostic::error(
                     rokc_diagnostic::ErrorKind::Meta,
@@ -198,7 +201,7 @@ fn build_lang_table(
         for prog in modules {
             let (sub_table, mut sub_diags) = collect_lang_table(&prog);
             diags.append(&mut sub_diags);
-            for entry in sub_table.entries().cloned().collect::<Vec<_>>() {
+            for entry in sub_table.entries().cloned() {
                 if let Some(prev) = table.lookup(&entry.slot) {
                     diags.push(RokDiagnostic::error(
                         rokc_diagnostic::ErrorKind::Meta,
@@ -238,7 +241,7 @@ fn build_prec_table(
         for prog in modules {
             let (sub_table, mut collect_diags) = collect_prec_table(&prog);
             diags.append(&mut collect_diags);
-            for entry in sub_table.entries().cloned().collect::<Vec<_>>() {
+            for entry in sub_table.entries().cloned() {
                 if let Some(existing) = table.lookup(&entry.symbol, entry.fixity) {
                     if existing.prec != entry.prec || existing.assoc != entry.assoc {
                         diags.push(RokDiagnostic::error(
@@ -276,8 +279,7 @@ fn resolve_module_tree(
     // contains `lib.rok` / `main.rok` (per spec §5.4.4).
     let root_dir = root_path
         .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     parse_and_descend(root_path, Some(&root_dir), prec, diags, &mut programs);
     programs
 }
@@ -306,6 +308,9 @@ fn parse_and_descend(
 
     let (program, mut parse_diags) = parse_program(&tokens, prec, file);
     diags.append(&mut parse_diags);
+    if !program.stmts.is_empty() {
+        diags.push(entry::stmts_outside_entry(body_path));
+    }
 
     walk_mod_decls(&program.items, submodule_dir, prec, diags, out);
     out.push(program);
@@ -319,7 +324,9 @@ fn walk_mod_decls(
     out: &mut Vec<rokc_ast::Program>,
 ) {
     for item in items {
-        let rokc_ast::Item::Mod(m) = item else { continue };
+        let rokc_ast::Item::Mod(m) = item else {
+            continue;
+        };
         match &m.items {
             // Inline module: `mod name { ... }` — walk its items directly.
             Some(inline_items) => walk_mod_decls(inline_items, submodule_dir, prec, diags, out),
@@ -376,7 +383,7 @@ fn collect_module_tree(
     diags: &mut Vec<RokDiagnostic>,
     out: &mut Vec<rokc_ast::Item>,
     uses: &mut Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)>,
-) {
+) -> Vec<rokc_ast::Stmt> {
     let source = match preloaded {
         Some(s) => s.to_owned(),
         None => match std::fs::read_to_string(body_path) {
@@ -386,7 +393,7 @@ fn collect_module_tree(
                     rokc_diagnostic::ErrorKind::Module,
                     format!("cannot read module file {}: {e}", body_path.display()),
                 ));
-                return;
+                return Vec::new();
             }
         },
     };
@@ -412,6 +419,7 @@ fn collect_module_tree(
         out,
         uses,
     );
+    program.stmts
 }
 
 fn flatten_module_items(
@@ -433,58 +441,54 @@ fn flatten_module_items(
             rokc_ast::Item::Mod(m) => {
                 let mut child_path = module_path.to_vec();
                 child_path.push(m.name.clone());
-                match m.items {
-                    Some(inner) => {
-                        flatten_module_items(
-                            inner,
-                            &child_path,
-                            submodule_dir,
-                            prec,
-                            cfg_env,
-                            diags,
-                            out,
-                            uses,
-                        );
+                if let Some(inner) = m.items {
+                    flatten_module_items(
+                        inner,
+                        &child_path,
+                        submodule_dir,
+                        prec,
+                        cfg_env,
+                        diags,
+                        out,
+                        uses,
+                    );
+                } else {
+                    // File-mapped `mod foo;`. Resolve to `foo.rok` (and
+                    // optional sibling `foo/` for further submodules).
+                    let Some(dir) = submodule_dir else {
+                        diags.push(RokDiagnostic::error(
+                            rokc_diagnostic::ErrorKind::Module,
+                            format!(
+                                "`mod {}` in a single-file module — declare a sibling `{0}/` folder \
+                                 to host submodules",
+                                m.name
+                            ),
+                        ));
+                        continue;
+                    };
+                    let body = dir.join(format!("{}.rok", m.name));
+                    let folder = dir.join(&m.name);
+                    if !body.exists() {
+                        diags.push(RokDiagnostic::error(
+                            rokc_diagnostic::ErrorKind::Module,
+                            format!("module `{}` body not found at `{}`", m.name, body.display()),
+                        ));
+                        continue;
                     }
-                    None => {
-                        // File-mapped `mod foo;`. Resolve to `foo.rok` (and
-                        // optional sibling `foo/` for further submodules).
-                        let Some(dir) = submodule_dir else {
-                            diags.push(RokDiagnostic::error(
-                                rokc_diagnostic::ErrorKind::Module,
-                                format!(
-                                    "`mod {}` in a single-file module — declare a sibling `{0}/` folder \
-                                     to host submodules",
-                                    m.name
-                                ),
-                            ));
-                            continue;
-                        };
-                        let body = dir.join(format!("{}.rok", m.name));
-                        let folder = dir.join(&m.name);
-                        if !body.exists() {
-                            diags.push(RokDiagnostic::error(
-                                rokc_diagnostic::ErrorKind::Module,
-                                format!(
-                                    "module `{}` body not found at `{}`",
-                                    m.name,
-                                    body.display()
-                                ),
-                            ));
-                            continue;
-                        }
-                        let next_dir = if folder.is_dir() { Some(folder) } else { None };
-                        collect_module_tree(
-                            &body,
-                            None,
-                            next_dir.as_deref(),
-                            &child_path,
-                            prec,
-                            cfg_env,
-                            diags,
-                            out,
-                            uses,
-                        );
+                    let next_dir = if folder.is_dir() { Some(folder) } else { None };
+                    let stray = collect_module_tree(
+                        &body,
+                        None,
+                        next_dir.as_deref(),
+                        &child_path,
+                        prec,
+                        cfg_env,
+                        diags,
+                        out,
+                        uses,
+                    );
+                    if !stray.is_empty() {
+                        diags.push(entry::stmts_outside_entry(&body));
                     }
                 }
             }

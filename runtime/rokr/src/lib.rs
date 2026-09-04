@@ -119,7 +119,11 @@ pub extern "C" fn rok_gc_alloc_slow(size: usize, align: usize, type_id: u32) -> 
     }
     // Raise to the header's 8-byte alignment; a bad `align` (0, 3, ...)
     // is passed through unchanged so `raw_alloc` rejects it.
-    let align = if align.is_power_of_two() { align.max(HEADER_ALIGN) } else { align };
+    let align = if align.is_power_of_two() {
+        align.max(HEADER_ALIGN)
+    } else {
+        align
+    };
     let p = raw_alloc(size, align);
     // SAFETY: `p` is a fresh allocation of >= 16 bytes, >= 8-aligned.
     unsafe { ObjectHeader::init(p, type_id) };
@@ -244,7 +248,9 @@ pub extern "C" fn rok_par_for(
     while (step > 0 && i < end) || (step < 0 && i > end) {
         // SAFETY: the compiler passes a valid `extern "C" fn(i64)`.
         unsafe { cb(i) };
-        let Some(next) = i.checked_add(step) else { break };
+        let Some(next) = i.checked_add(step) else {
+            break;
+        };
         i = next;
     }
 }

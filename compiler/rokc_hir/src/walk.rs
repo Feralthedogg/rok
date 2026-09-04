@@ -149,7 +149,12 @@ pub(crate) fn walk_stmt(v: &mut impl AstVisitor, s: &Stmt) {
             }
             v.bind(name);
         }
-        StmtKind::LetTuple { names, rest, ty, init } => {
+        StmtKind::LetTuple {
+            names,
+            rest,
+            ty,
+            init,
+        } => {
             walk_expr(v, init);
             if let Some(t) = ty {
                 walk_ty(v, t);
@@ -161,7 +166,13 @@ pub(crate) fn walk_stmt(v: &mut impl AstVisitor, s: &Stmt) {
                 v.bind(r);
             }
         }
-        StmtKind::LetStruct { path, fields, ty, init, .. } => {
+        StmtKind::LetStruct {
+            path,
+            fields,
+            ty,
+            init,
+            ..
+        } => {
             walk_expr(v, init);
             if let Some(t) = ty {
                 walk_ty(v, t);
@@ -230,7 +241,11 @@ pub(crate) fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
         | ExprKind::AsyncBlock(b)
         | ExprKind::YieldBlock(b)
         | ExprKind::AsyncYieldBlock(b) => walk_block(v, b),
-        ExprKind::If { cond, then_branch, else_branch } => {
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
             walk_expr(v, cond);
             walk_block(v, then_branch);
             if let Some(eb) = else_branch {
@@ -254,14 +269,20 @@ pub(crate) fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
             walk_expr(v, cond);
             walk_block(v, body);
         }
-        ExprKind::For { pat, iter, body, .. } => {
+        ExprKind::For {
+            pat, iter, body, ..
+        } => {
             walk_expr(v, iter);
             v.push_scope();
             walk_pat(v, pat);
             walk_block(v, body);
             v.pop_scope();
         }
-        ExprKind::Try { body, catches, finally } => {
+        ExprKind::Try {
+            body,
+            catches,
+            finally,
+        } => {
             walk_block(v, body);
             for c in catches {
                 v.push_scope();
@@ -273,7 +294,12 @@ pub(crate) fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
                 walk_block(v, f);
             }
         }
-        ExprKind::LetElse { pat, ty, init, else_body } => {
+        ExprKind::LetElse {
+            pat,
+            ty,
+            init,
+            else_body,
+        } => {
             walk_expr(v, init);
             if let Some(t) = ty {
                 walk_ty(v, t);
@@ -301,7 +327,13 @@ pub(crate) fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
             walk_pat(v, pat);
         }
         ExprKind::Field(t, _) | ExprKind::TupleField(t, _) => walk_expr(v, t),
-        ExprKind::MethodCall { receiver, type_args, args, trailing_closure, .. } => {
+        ExprKind::MethodCall {
+            receiver,
+            type_args,
+            args,
+            trailing_closure,
+            ..
+        } => {
             walk_expr(v, receiver);
             for t in type_args {
                 walk_ty(v, t);
@@ -311,14 +343,23 @@ pub(crate) fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
                 walk_expr(v, tc);
             }
         }
-        ExprKind::Call { callee, args, trailing_closure } => {
+        ExprKind::Call {
+            callee,
+            args,
+            trailing_closure,
+        } => {
             walk_expr(v, callee);
             walk_args(v, args);
             if let Some(tc) = trailing_closure {
                 walk_expr(v, tc);
             }
         }
-        ExprKind::Slice { target, start, end, step } => {
+        ExprKind::Slice {
+            target,
+            start,
+            end,
+            step,
+        } => {
             walk_expr(v, target);
             for x in [start, end, step].into_iter().flatten() {
                 walk_expr(v, x);
@@ -333,7 +374,9 @@ pub(crate) fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
             walk_expr(v, t);
             match tail {
                 AccessTail::Field(_) | AccessTail::TupleField(_) => {}
-                AccessTail::Method { type_args, args, .. } => {
+                AccessTail::Method {
+                    type_args, args, ..
+                } => {
                     for t in type_args {
                         walk_ty(v, t);
                     }
@@ -351,7 +394,12 @@ pub(crate) fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
                 walk_expr(v, i);
             }
         }
-        ExprKind::Closure { params, ret_ty, body, .. } => {
+        ExprKind::Closure {
+            params,
+            ret_ty,
+            body,
+            ..
+        } => {
             v.push_scope();
             for p in params {
                 if let Some(t) = &p.ty {
@@ -365,7 +413,11 @@ pub(crate) fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
             walk_expr(v, body);
             v.pop_scope();
         }
-        ExprKind::StructInit { path, fields, spread } => {
+        ExprKind::StructInit {
+            path,
+            fields,
+            spread,
+        } => {
             walk_path_generics(v, path);
             for (_, f) in fields {
                 walk_expr(v, f);
@@ -484,7 +536,10 @@ pub(crate) fn free_names(params: &[rokc_ast::Param], body: &Expr) -> Vec<String>
             self.scopes.pop();
         }
     }
-    let mut f = Free { scopes: vec![params.iter().map(|p| p.name.clone()).collect()], out: Vec::new() };
+    let mut f = Free {
+        scopes: vec![params.iter().map(|p| p.name.clone()).collect()],
+        out: Vec::new(),
+    };
     walk_expr(&mut f, body);
     f.out
 }
@@ -503,7 +558,10 @@ pub(crate) fn for_each_ty(item: &Item, f: &mut dyn FnMut(&Ty)) {
                 _ => return,
             };
             if path.segments.last().is_some_and(|s| !s.generics.is_empty()) {
-                (self.0)(&Ty { kind: TyKind::Path(path.clone()), span: path.span });
+                (self.0)(&Ty {
+                    kind: TyKind::Path(path.clone()),
+                    span: path.span,
+                });
             }
         }
     }

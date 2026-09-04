@@ -35,8 +35,14 @@ pub fn unescape(body: &str, mode: EscapeMode) -> Result<String, (usize, String)>
             't' => '\t',
             '0' => '\0',
             'x' => {
-                let hex: String = (0..2).filter_map(|_| it.next_if(|(_, h)| h.is_ascii_hexdigit()).map(|(_, h)| h)).collect();
-                let max = if mode == EscapeMode::CChar { 0xFF } else { 0x7F };
+                let hex: String = (0..2)
+                    .filter_map(|_| it.next_if(|(_, h)| h.is_ascii_hexdigit()).map(|(_, h)| h))
+                    .collect();
+                let max = if mode == EscapeMode::CChar {
+                    0xFF
+                } else {
+                    0x7F
+                };
                 match u32::from_str_radix(&hex, 16) {
                     Ok(v) if hex.len() == 2 && v <= max => char::from_u32(v).unwrap_or('\0'),
                     Ok(_) if hex.len() == 2 => {
@@ -75,11 +81,17 @@ pub fn unescape(body: &str, mode: EscapeMode) -> Result<String, (usize, String)>
             '\n' | '\r' if mode == EscapeMode::Str => {
                 // Line continuation: drop `\`, the terminator and the
                 // next line's leading whitespace (spec 1.7.1).
-                while it.next_if(|(_, w)| matches!(w, ' ' | '\t' | '\n' | '\r' | '\x0B' | '\x0C')).is_some() {}
+                while it
+                    .next_if(|(_, w)| matches!(w, ' ' | '\t' | '\n' | '\r' | '\x0B' | '\x0C'))
+                    .is_some()
+                {}
                 continue;
             }
             other => {
-                return Err((at, format!("unknown escape sequence `\\{}`", other.escape_debug())));
+                return Err((
+                    at,
+                    format!("unknown escape sequence `\\{}`", other.escape_debug()),
+                ));
             }
         };
         out.push(decoded);
@@ -93,10 +105,23 @@ mod tests {
 
     #[test]
     fn decodes_and_rejects() {
-        assert_eq!(unescape(r"a\n\t\\\x41\u{1_F600}\u{AC00}", Str).unwrap(), "a\n\t\\A\u{1F600}가");
+        assert_eq!(
+            unescape(r"a\n\t\\\x41\u{1_F600}\u{AC00}", Str).unwrap(),
+            "a\n\t\\A\u{1F600}가"
+        );
         assert_eq!(unescape("one \\\n     two", Str).unwrap(), "one two");
         assert_eq!(unescape(r"\xFF", CChar).unwrap(), "\u{FF}");
-        for bad in [r"\q", r"\x80", r"\x4", r"\u{110000}", r"\u{D800}", r"\u{}", r"\u{_1}", r"\u{1234567}", "\\"] {
+        for bad in [
+            r"\q",
+            r"\x80",
+            r"\x4",
+            r"\u{110000}",
+            r"\u{D800}",
+            r"\u{}",
+            r"\u{_1}",
+            r"\u{1234567}",
+            "\\",
+        ] {
             assert!(unescape(bad, Str).is_err(), "{bad}");
         }
         assert!(unescape("\\\n", Char).is_err());

@@ -46,7 +46,7 @@ pub enum DefKind {
     Const,
     Static,
     Extern,
-    /// User-defined derive / attribute / derive_attribute block.
+    /// User-defined derive / attribute / `derive_attribute` block.
     MetaImpl,
 }
 

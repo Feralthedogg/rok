@@ -252,7 +252,8 @@ fn llvm_ir(
 
 fn clang(opts: &BuildOptions) -> Result<Command, RokDiagnostic> {
     let mut cmd = Command::new(locate_tool("clang")?);
-    cmd.arg("-Wno-override-module").arg(format!("-O{}", opts.opt_level));
+    cmd.arg("-Wno-override-module")
+        .arg(format!("-O{}", opts.opt_level));
     if let Some(t) = &opts.target {
         cmd.arg(format!("--target={t}"));
     }
@@ -260,9 +261,14 @@ fn clang(opts: &BuildOptions) -> Result<Command, RokDiagnostic> {
 }
 
 fn output(cmd: &mut Command, what: &str) -> Result<Vec<u8>, RokDiagnostic> {
-    let out = cmd.output().map_err(|e| err(format!("cannot run {what}: {e}")))?;
+    let out = cmd
+        .output()
+        .map_err(|e| err(format!("cannot run {what}: {e}")))?;
     if !out.status.success() {
-        return Err(err(format!("{what} failed:\n{}", String::from_utf8_lossy(&out.stderr))));
+        return Err(err(format!(
+            "{what} failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        )));
     }
     Ok(out.stdout)
 }

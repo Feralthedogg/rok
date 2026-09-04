@@ -78,7 +78,11 @@ pub fn build_use_table(
                             format!(
                                 "name `{local}` imported twice with different targets: \
                                  `{prev}` and `{full}` in module `{}`",
-                                if module_path.is_empty() { "<root>" } else { module_path },
+                                if module_path.is_empty() {
+                                    "<root>"
+                                } else {
+                                    module_path
+                                },
                             ),
                         ));
                         continue;
@@ -123,7 +127,12 @@ fn flatten_tree(
     out: &mut Vec<UseEntry>,
 ) {
     let mut prefix_segs: Vec<String> = accumulated.to_vec();
-    let raw_segs: Vec<String> = tree.prefix.segments.iter().map(|s| s.name.clone()).collect();
+    let raw_segs: Vec<String> = tree
+        .prefix
+        .segments
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
     // Resolve the root segment if it's `crate` / `super` / `self`.
     let resolved = resolve_root(&raw_segs, module_path);
     prefix_segs.extend(resolved);
@@ -131,7 +140,9 @@ fn flatten_tree(
     match &tree.kind {
         UseTreeKind::Simple(alias) => {
             // `use a::b::c` → local `c` (or alias) → full `a::b::c`.
-            let Some(leaf) = prefix_segs.last().cloned() else { return };
+            let Some(leaf) = prefix_segs.last().cloned() else {
+                return;
+            };
             let full = prefix_segs.join("::");
             let local = alias.clone().unwrap_or(leaf);
             out.push(UseEntry::Single { local, full });

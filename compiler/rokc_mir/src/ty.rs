@@ -20,10 +20,9 @@ pub fn lower_ty(ty: &HirTy) -> MirTy {
         // module context can't see payloads).
         HirTy::Enum(_) => MirTy::Prim(PrimTy::I32),
         HirTy::Array(elem, n) => MirTy::Array(Box::new(lower_ty(elem)), *n),
-        HirTy::Fn(args, ret) => MirTy::Fn(
-            args.iter().map(lower_ty).collect(),
-            Box::new(lower_ty(ret)),
-        ),
+        HirTy::Fn(args, ret) => {
+            MirTy::Fn(args.iter().map(lower_ty).collect(), Box::new(lower_ty(ret)))
+        }
         // Closure layout: `{fn_ptr, env}` 2-tuple. The lifted function
         // takes env as its first parameter, so its full signature is
         // `(env, args...) -> ret`.
@@ -31,10 +30,7 @@ pub fn lower_ty(ty: &HirTy) -> MirTy {
             let env_ty = lower_ty(env);
             let mut fn_args = vec![env_ty.clone()];
             fn_args.extend(args.iter().map(lower_ty));
-            MirTy::Tuple(vec![
-                MirTy::Fn(fn_args, Box::new(lower_ty(ret))),
-                env_ty,
-            ])
+            MirTy::Tuple(vec![MirTy::Fn(fn_args, Box::new(lower_ty(ret))), env_ty])
         }
     }
 }
@@ -45,17 +41,24 @@ pub fn lower_ty_in(ty: &HirTy, module: &HirModule) -> MirTy {
     match ty {
         HirTy::Struct(id) => {
             let def = &module.structs[id.0 as usize];
-            MirTy::Struct(*id, def.fields.iter().map(|f| lower_ty_in(&f.ty, module)).collect())
+            MirTy::Struct(
+                *id,
+                def.fields
+                    .iter()
+                    .map(|f| lower_ty_in(&f.ty, module))
+                    .collect(),
+            )
         }
-        HirTy::Sum(parts) => {
-            sum_layout(&non_none(parts).map(|p| lower_ty_in(p, module)).collect::<Vec<_>>())
-        }
-        HirTy::Tuple(parts) => {
-            MirTy::Tuple(parts.iter().map(|t| lower_ty_in(t, module)).collect())
-        }
-        HirTy::Enum(id) => {
-            sum_layout(&enum_payloads(&module.enums[id.0 as usize].variants, module))
-        }
+        HirTy::Sum(parts) => sum_layout(
+            &non_none(parts)
+                .map(|p| lower_ty_in(p, module))
+                .collect::<Vec<_>>(),
+        ),
+        HirTy::Tuple(parts) => MirTy::Tuple(parts.iter().map(|t| lower_ty_in(t, module)).collect()),
+        HirTy::Enum(id) => sum_layout(&enum_payloads(
+            &module.enums[id.0 as usize].variants,
+            module,
+        )),
         HirTy::Array(elem, n) => MirTy::Array(Box::new(lower_ty_in(elem, module)), *n),
         HirTy::Fn(args, ret) => MirTy::Fn(
             args.iter().map(|a| lower_ty_in(a, module)).collect(),
@@ -130,7 +133,10 @@ fn enum_payloads(variants: &[rokc_hir::HirEnumVariant], module: &HirModule) -> V
 // enum has no payload-bearing variants.
 #[must_use]
 pub fn enum_payload_ty(id: rokc_hir::EnumId, module: &HirModule) -> Option<MirTy> {
-    match sum_layout(&enum_payloads(&module.enums[id.0 as usize].variants, module)) {
+    match sum_layout(&enum_payloads(
+        &module.enums[id.0 as usize].variants,
+        module,
+    )) {
         MirTy::Tuple(mut parts) => parts.pop(),
         _ => None,
     }

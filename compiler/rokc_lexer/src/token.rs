@@ -2,7 +2,7 @@
 
 use rokc_diagnostic::Span;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
@@ -17,7 +17,7 @@ impl Token {
 
 /// Token kinds. Strings carry the lexeme as written; the parser owns
 /// any further interpretation (suffix splitting, escape decoding, ...).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TokenKind {
     // Literals.
     /// Integer literal; value+suffix kept as written, e.g. `42i32`, `0xFFu8`.

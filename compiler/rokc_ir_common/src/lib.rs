@@ -59,12 +59,18 @@ impl PrimTy {
 
     #[must_use]
     pub const fn is_signed_int(self) -> bool {
-        matches!(self, Self::I8 | Self::I16 | Self::I32 | Self::I64 | Self::Isize)
+        matches!(
+            self,
+            Self::I8 | Self::I16 | Self::I32 | Self::I64 | Self::Isize
+        )
     }
 
     #[must_use]
     pub const fn is_unsigned_int(self) -> bool {
-        matches!(self, Self::U8 | Self::U16 | Self::U32 | Self::U64 | Self::Usize)
+        matches!(
+            self,
+            Self::U8 | Self::U16 | Self::U32 | Self::U64 | Self::Usize
+        )
     }
 
     #[must_use]
@@ -118,7 +124,7 @@ pub enum PrimOp {
     LogicalNot,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConstVal {
     Unit,
     Bool(bool),
@@ -131,7 +137,7 @@ pub enum ConstVal {
 }
 
 /// Callee form after name resolution.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResolvedFn {
     /// Statically resolved.
     Free(DefId),

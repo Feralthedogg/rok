@@ -1,0 +1,12 @@
+// spec: 004.16-entry-let-not-global
+// probe: negative-must-fail
+// expect-error: cannot find value `limit`
+
+// spec 4.16.2: a top-level `let` is a local of the implicit `main`, not
+// visible inside item bodies.
+let limit = 3;
+check();
+
+fn check() {
+    rok_print_i32(limit);
+}

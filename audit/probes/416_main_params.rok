@@ -1,0 +1,6 @@
+// spec: 004.16-entry-main-params
+// probe: negative-must-fail
+// expect-error: takes no parameters
+
+// spec 4.16.3: `fn main` has no parameters.
+fn main(argc: i32) -> i32 { return argc; }

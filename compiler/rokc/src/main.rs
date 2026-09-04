@@ -103,15 +103,19 @@ fn parse_args(raw: Vec<String>) -> Args {
 fn main() {
     let a = parse_args(std::env::args().skip(1).collect());
     match a.cmd.as_str() {
-        "build" => match a.emit {
-            Some(kind) => cmd_emit(&a, kind),
-            None => {
+        "build" => {
+            if let Some(kind) = a.emit {
+                cmd_emit(&a, kind)
+            } else {
                 let (result, input) = compile(&a);
-                let out = a.output.clone().unwrap_or_else(|| target_dir(&input).join(stem(&input)));
+                let out = a
+                    .output
+                    .clone()
+                    .unwrap_or_else(|| target_dir(&input).join(stem(&input)));
                 fail_on(result.link(&a.opts, &out));
                 eprintln!("rokc: built {}", out.display());
             }
-        },
+        }
         "emit" => cmd_emit(&a, a.emit.unwrap_or(EmitKind::Mlir)),
         "check" => {
             let (result, _) = compile(&a);
@@ -132,7 +136,11 @@ fn input_path(a: &Args) -> PathBuf {
 }
 
 fn stem(input: &Path) -> String {
-    input.file_stem().and_then(|s| s.to_str()).unwrap_or("out").to_owned()
+    input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("out")
+        .to_owned()
 }
 
 /// Spec 902 `target/` next to the package (overridable with
@@ -191,10 +199,13 @@ fn cmd_run(a: &Args) {
     let tmp = fail_on(TempDir::new(a.opts.keep_temps));
     let exe = tmp.path().join(stem(&input));
     fail_on(result.link(&a.opts, &exe));
-    let status = Command::new(&exe).args(&a.run_args).status().unwrap_or_else(|e| {
-        eprintln!("rokc: cannot run {}: {e}", exe.display());
-        process::exit(1);
-    });
+    let status = Command::new(&exe)
+        .args(&a.run_args)
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("rokc: cannot run {}: {e}", exe.display());
+            process::exit(1);
+        });
     drop(tmp);
     #[cfg(unix)]
     if let Some(sig) = std::os::unix::process::ExitStatusExt::signal(&status) {

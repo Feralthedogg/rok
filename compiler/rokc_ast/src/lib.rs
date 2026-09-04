@@ -15,6 +15,9 @@ use rokc_diagnostic::Span;
 pub struct Program {
     pub attrs: Vec<Attribute>,
     pub items: Vec<Item>,
+    /// Top-level statements in source order (spec 4.16.1). Only the entry
+    /// file `main.rok` may have them; they become the implicit `main`.
+    pub stmts: Vec<Stmt>,
 }
 
 /// Parsed attribute. Spec 6.1 grammar:

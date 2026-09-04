@@ -1,0 +1,6 @@
+// spec: 004.16-entry-missing-semi
+// probe: negative-must-fail
+// expect-error: expected `;` after top-level expression
+
+// spec 4.16.1: no tail expression at top level.
+rok_print_i32(1)

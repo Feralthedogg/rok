@@ -1,4 +1,0 @@
-// expect-exit: 200
-// `main -> u8` zero-extends into the process exit code.
-
-fn main() -> u8 { return 200u8; }

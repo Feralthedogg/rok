@@ -8,9 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use rokc_ir_common::{ConstVal, FunctionId, LocalId, PrimOp, PrimTy};
-use rokc_mir::{
-    BasicBlock, MirFunction, MirModule, MirTy, Operand, RValue, Statement, Terminator,
-};
+use rokc_mir::{BasicBlock, MirFunction, MirModule, MirTy, Operand, RValue, Statement, Terminator};
 
 pub struct Emitter {
     out: String,
@@ -36,7 +34,7 @@ pub(crate) struct FnSig {
 
 impl Emitter {
     #[must_use]
-    pub fn new(pointer_width: u32) -> Self {
+    pub const fn new(pointer_width: u32) -> Self {
         Self {
             out: String::new(),
             pointer_width,
@@ -162,12 +160,7 @@ impl Emitter {
         }
     }
 
-    fn emit_function(
-        &mut self,
-        f: &MirFunction,
-        symbol: &str,
-        fns: &HashMap<FunctionId, FnSig>,
-    ) {
+    fn emit_function(&mut self, f: &MirFunction, symbol: &str, fns: &HashMap<FunctionId, FnSig>) {
         // Empty-body functions become external declarations — no body
         // braces, just a signature with `private` linkage.
         let is_decl = f.blocks.is_empty();
@@ -183,11 +176,7 @@ impl Emitter {
                 self.out.push_str(", ");
             }
             let ty = f.param_tys.get(i).cloned().unwrap_or(MirTy::Any);
-            let _ = write!(
-                self.out,
-                "%arg{i}: {}",
-                mlir_type(&ty, self.pointer_width)
-            );
+            let _ = write!(self.out, "%arg{i}: {}", mlir_type(&ty, self.pointer_width));
         }
         self.out.push(')');
         if !matches!(f.ret_ty, MirTy::Unit) {
@@ -224,10 +213,12 @@ impl Emitter {
             "  func.func private @rok_runtime_init() -> ()\n  func.func private @rok_runtime_shutdown() -> ()\n",
         );
         self.out.push_str("  func.func @main() -> i32 {\n");
-        self.out.push_str("    func.call @rok_runtime_init() : () -> ()\n");
+        self.out
+            .push_str("    func.call @rok_runtime_init() : () -> ()\n");
         if matches!(user_ret_ty, MirTy::Unit) {
             let _ = writeln!(self.out, "    func.call @{user_main}() : () -> ()");
-            self.out.push_str("    func.call @rok_runtime_shutdown() : () -> ()\n");
+            self.out
+                .push_str("    func.call @rok_runtime_shutdown() : () -> ()\n");
             self.out.push_str("    %0 = arith.constant 0 : i32\n");
             self.out.push_str("    func.return %0 : i32\n");
             self.out.push_str("  }\n");
@@ -235,11 +226,16 @@ impl Emitter {
         }
         let ret = mlir_type(user_ret_ty, pw);
         let _ = writeln!(self.out, "    %0 = func.call @{user_main}() : () -> {ret}");
-        self.out.push_str("    func.call @rok_runtime_shutdown() : () -> ()\n");
+        self.out
+            .push_str("    func.call @rok_runtime_shutdown() : () -> ()\n");
         // The OS wants an `i32` exit code.
         let conv = match user_ret_ty {
             MirTy::Prim(p) if p.is_int() || *p == PrimTy::Bool => {
-                let w = if *p == PrimTy::Bool { 1 } else { p.bit_width(pw) };
+                let w = if *p == PrimTy::Bool {
+                    1
+                } else {
+                    p.bit_width(pw)
+                };
                 match w.cmp(&32) {
                     std::cmp::Ordering::Equal => None,
                     std::cmp::Ordering::Greater => Some("arith.trunci"),
@@ -416,7 +412,11 @@ impl<'a> FnEmit<'a> {
         }
         // Seed each function-arg slot with the incoming SSA arg.
         for (i, p) in self.f.params.iter().enumerate() {
-            let Some(slot) = self.slot_names.get(p.0 as usize).and_then(Option::as_ref).cloned()
+            let Some(slot) = self
+                .slot_names
+                .get(p.0 as usize)
+                .and_then(Option::as_ref)
+                .cloned()
             else {
                 continue;
             };
@@ -476,9 +476,15 @@ impl<'a> FnEmit<'a> {
         let slot = self.slot_names[id.0 as usize].clone().unwrap();
         let ty = mlir_type(&self.local_ty(id), self.pointer_width);
         if self.llvm_slot.contains(&id.0) {
-            let _ = writeln!(self.body, "    llvm.store {value}, {slot} : {ty}, !llvm.ptr");
+            let _ = writeln!(
+                self.body,
+                "    llvm.store {value}, {slot} : {ty}, !llvm.ptr"
+            );
         } else {
-            let _ = writeln!(self.body, "    memref.store {value}, {slot}[] : memref<{ty}>");
+            let _ = writeln!(
+                self.body,
+                "    memref.store {value}, {slot}[] : memref<{ty}>"
+            );
         }
     }
 
@@ -507,12 +513,7 @@ impl<'a> FnEmit<'a> {
             if header_args.is_empty() {
                 let _ = writeln!(self.body, "  ^bb{}:", b.id.0);
             } else {
-                let _ = writeln!(
-                    self.body,
-                    "  ^bb{}({}):",
-                    b.id.0,
-                    header_args.join(", ")
-                );
+                let _ = writeln!(self.body, "  ^bb{}({}):", b.id.0, header_args.join(", "));
             }
         }
         for s in &b.stmts {
@@ -534,7 +535,13 @@ impl<'a> FnEmit<'a> {
                 let val = self.compute_rvalue(&ty, rvalue);
                 self.write_local(*target, &val);
             }
-            Statement::ArrayWrite { array, index, value, elem_ty, len } => {
+            Statement::ArrayWrite {
+                array,
+                index,
+                value,
+                elem_ty,
+                len,
+            } => {
                 self.emit_array_write(*array, index, value, elem_ty, *len);
             }
             Statement::StaticStore { name, value, ty } => {
@@ -644,7 +651,12 @@ impl<'a> FnEmit<'a> {
     fn compute_rvalue(&mut self, dst_ty: &MirTy, r: &RValue) -> String {
         match r {
             RValue::Use(op) => self.materialize_operand(op, dst_ty),
-            RValue::BinOp { op, op_ty, lhs, rhs } => {
+            RValue::BinOp {
+                op,
+                op_ty,
+                lhs,
+                rhs,
+            } => {
                 let dst = self.fresh_value();
                 self.emit_bin_op(&dst, dst_ty, *op, op_ty, lhs, rhs);
                 dst
@@ -660,31 +672,48 @@ impl<'a> FnEmit<'a> {
                 dst
             }
             RValue::StructInit { ty, fields } => self.emit_struct_init(ty, fields),
-            RValue::FieldRead { target, index, field_ty } => {
-                self.emit_field_read(target, *index, field_ty, dst_ty)
-            }
-            RValue::Cast { source, from_ty, to_ty } => {
-                self.emit_cast(source, from_ty, to_ty)
-            }
-            RValue::Bitcast { source, from_ty, to_ty } => {
+            RValue::FieldRead {
+                target,
+                index,
+                field_ty,
+            } => self.emit_field_read(target, *index, field_ty, dst_ty),
+            RValue::Cast {
+                source,
+                from_ty,
+                to_ty,
+            } => self.emit_cast(source, from_ty, to_ty),
+            RValue::Bitcast {
+                source,
+                from_ty,
+                to_ty,
+            } => {
                 let v = self.materialize_operand(source, from_ty);
                 self.bitcast_value(v, from_ty, to_ty)
             }
-            RValue::WithField { source, struct_ty, index, value } => {
-                self.emit_with_field(source, struct_ty, *index, value)
-            }
+            RValue::WithField {
+                source,
+                struct_ty,
+                index,
+                value,
+            } => self.emit_with_field(source, struct_ty, *index, value),
             RValue::ArrayInit { .. } => {
                 // Array init doesn't return an SSA value; it stores
                 // into the destination slot. Routed via emit_stmt.
                 self.fresh_value()
             }
-            RValue::ArrayIndex { array, index, elem_ty, len } => {
-                self.emit_array_index(*array, index, elem_ty, *len)
-            }
+            RValue::ArrayIndex {
+                array,
+                index,
+                elem_ty,
+                len,
+            } => self.emit_array_index(*array, index, elem_ty, *len),
             RValue::FnAddr { callee, fn_ty } => self.emit_fn_addr(*callee, fn_ty),
-            RValue::CallIndirect { callee, args, arg_tys, ret_ty } => {
-                self.emit_call_indirect(callee, args, arg_tys, ret_ty)
-            }
+            RValue::CallIndirect {
+                callee,
+                args,
+                arg_tys,
+                ret_ty,
+            } => self.emit_call_indirect(callee, args, arg_tys, ret_ty),
             RValue::StaticLoad { name, ty } => {
                 let ty_str = mlir_type(ty, self.pointer_width);
                 let addr = self.fresh_value();
@@ -713,10 +742,7 @@ impl<'a> FnEmit<'a> {
         // llvm-dialect call sites.
         let typed = self.fresh_value();
         let sig = mlir_fn_signature(args, ret, self.pointer_width);
-        let _ = writeln!(
-            self.body,
-            "    {typed} = func.constant @{name} : {sig}"
-        );
+        let _ = writeln!(self.body, "    {typed} = func.constant @{name} : {sig}");
         let dst = self.fresh_value();
         let _ = writeln!(
             self.body,
@@ -820,10 +846,7 @@ impl<'a> FnEmit<'a> {
     ) -> String {
         let src_v = self.materialize_operand(source, struct_ty);
         let field_tys = struct_field_tys(struct_ty);
-        let val_ty = field_tys
-            .get(index as usize)
-            .cloned()
-            .unwrap_or(MirTy::Any);
+        let val_ty = field_tys.get(index as usize).cloned().unwrap_or(MirTy::Any);
         let v = self.materialize_operand(value, &val_ty);
         let ty_str = mlir_type(struct_ty, self.pointer_width);
         let dst = self.fresh_value();
@@ -866,7 +889,11 @@ impl<'a> FnEmit<'a> {
                 // storage size, but the codegen type is i1. Use 1
                 // explicitly here so the ext/trunc decision is right.
                 let bool_aware = |p: PrimTy| -> u32 {
-                    if matches!(p, PrimTy::Bool) { 1 } else { p.bit_width(self.pointer_width) }
+                    if matches!(p, PrimTy::Bool) {
+                        1
+                    } else {
+                        p.bit_width(self.pointer_width)
+                    }
                 };
                 let from_w = bool_aware(*fp);
                 let to_w = bool_aware(*tp);
@@ -884,14 +911,9 @@ impl<'a> FnEmit<'a> {
                         // since `arith.trunci ... to i1` is supported
                         // but `cmpi ne` is more explicit about intent.
                         let zero = self.fresh_value();
-                        let _ = writeln!(
-                            self.body,
-                            "    {zero} = arith.constant 0 : {from}"
-                        );
-                        let _ = writeln!(
-                            self.body,
-                            "    {dst} = arith.cmpi ne, {v}, {zero} : {from}"
-                        );
+                        let _ = writeln!(self.body, "    {zero} = arith.constant 0 : {from}");
+                        let _ =
+                            writeln!(self.body, "    {dst} = arith.cmpi ne, {v}, {zero} : {from}");
                     } else {
                         let _ =
                             writeln!(self.body, "    {dst} = arith.trunci {v} : {from} to {to}");
@@ -944,23 +966,41 @@ impl<'a> FnEmit<'a> {
             let (from, to) = (mlir_type(from_ty, pw), mlir_type(to_ty, pw));
             return self.unsupported(&format!("payload of `{from}` stored as `{to}`"));
         };
-        let width = |p: &PrimTy| if *p == PrimTy::Bool { 1 } else { p.bit_width(pw) };
+        let width = |p: &PrimTy| {
+            if *p == PrimTy::Bool {
+                1
+            } else {
+                p.bit_width(pw)
+            }
+        };
         let (fw, tw) = (width(fp), width(tp));
         let mut v = v;
         if fp.is_float() {
             let n = self.fresh_value();
-            let _ = writeln!(self.body, "    {n} = arith.bitcast {v} : {} to i{fw}", mlir_prim(*fp, pw));
+            let _ = writeln!(
+                self.body,
+                "    {n} = arith.bitcast {v} : {} to i{fw}",
+                mlir_prim(*fp, pw)
+            );
             v = n;
         }
         if fw != tw {
             let n = self.fresh_value();
-            let op = if tw > fw { "arith.extui" } else { "arith.trunci" };
+            let op = if tw > fw {
+                "arith.extui"
+            } else {
+                "arith.trunci"
+            };
             let _ = writeln!(self.body, "    {n} = {op} {v} : i{fw} to i{tw}");
             v = n;
         }
         if tp.is_float() {
             let n = self.fresh_value();
-            let _ = writeln!(self.body, "    {n} = arith.bitcast {v} : i{tw} to {}", mlir_prim(*tp, pw));
+            let _ = writeln!(
+                self.body,
+                "    {n} = arith.bitcast {v} : i{tw} to {}",
+                mlir_prim(*tp, pw)
+            );
             v = n;
         }
         v
@@ -974,13 +1014,10 @@ impl<'a> FnEmit<'a> {
         let field_tys = struct_field_tys(ty);
         let mut acc = acc0;
         for (i, f) in fields.iter().enumerate() {
-            let f_ty = field_tys
-                .get(i)
-                .cloned()
-                .unwrap_or_else(|| match f {
-                    Operand::Copy(id) => self.local_ty(*id),
-                    Operand::Const(c) => const_ty(c).unwrap_or(MirTy::Any),
-                });
+            let f_ty = field_tys.get(i).cloned().unwrap_or_else(|| match f {
+                Operand::Copy(id) => self.local_ty(*id),
+                Operand::Const(c) => const_ty(c).unwrap_or(MirTy::Any),
+            });
             let v = self.materialize_operand(f, &f_ty);
             let next = self.fresh_value();
             let _ = writeln!(
@@ -1080,13 +1117,22 @@ impl<'a> FnEmit<'a> {
         self.next_check += 1;
         let sym = self.intern_string(msg);
         let pw = self.pointer_width;
-        let _ = writeln!(self.body, "    cf.cond_br {fail}, ^rok_panic{n}, ^rok_ok{n}");
+        let _ = writeln!(
+            self.body,
+            "    cf.cond_br {fail}, ^rok_panic{n}, ^rok_ok{n}"
+        );
         let _ = writeln!(self.body, "  ^rok_panic{n}:");
         let p = self.fresh_value();
         let l = self.fresh_value();
-        let _ = writeln!(self.body, "    {p} = llvm.mlir.addressof @{sym} : !llvm.ptr");
+        let _ = writeln!(
+            self.body,
+            "    {p} = llvm.mlir.addressof @{sym} : !llvm.ptr"
+        );
         let _ = writeln!(self.body, "    {l} = arith.constant {} : i{pw}", msg.len());
-        let _ = writeln!(self.body, "    func.call @rok_panic({p}, {l}) : (!llvm.ptr, i{pw}) -> ()");
+        let _ = writeln!(
+            self.body,
+            "    func.call @rok_panic({p}, {l}) : (!llvm.ptr, i{pw}) -> ()"
+        );
         self.body.push_str("    llvm.unreachable\n");
         let _ = writeln!(self.body, "  ^rok_ok{n}:");
         self.uses_panic = true;
@@ -1122,7 +1168,10 @@ impl<'a> FnEmit<'a> {
         match op {
             PrimOp::Div | PrimOp::Rem => {
                 let (zero_msg, ovf_msg) = if op == PrimOp::Div {
-                    ("attempt to divide by zero", "attempt to divide with overflow")
+                    (
+                        "attempt to divide by zero",
+                        "attempt to divide with overflow",
+                    )
                 } else {
                     (
                         "attempt to calculate the remainder with a divisor of zero",
@@ -1137,7 +1186,10 @@ impl<'a> FnEmit<'a> {
                     let is_min = self.cmp_const("eq", lhs_v, -(1i128 << (bits - 1)), ty);
                     let is_neg1 = self.cmp_const("eq", rhs_v, -1, ty);
                     let fail = self.fresh_value();
-                    let _ = writeln!(self.body, "    {fail} = arith.andi {is_min}, {is_neg1} : i1");
+                    let _ = writeln!(
+                        self.body,
+                        "    {fail} = arith.andi {is_min}, {is_neg1} : i1"
+                    );
                     self.emit_check(&fail, ovf_msg);
                 }
             }
@@ -1300,7 +1352,10 @@ impl<'a> FnEmit<'a> {
             ConstVal::Str(s) => {
                 // Look up (or intern) the string and take its address.
                 let sym = self.intern_string(s);
-                let _ = writeln!(self.body, "    {dst} = llvm.mlir.addressof @{sym} : !llvm.ptr");
+                let _ = writeln!(
+                    self.body,
+                    "    {dst} = llvm.mlir.addressof @{sym} : !llvm.ptr"
+                );
             }
         }
     }
@@ -1318,14 +1373,17 @@ impl<'a> FnEmit<'a> {
             Terminator::Goto { target, args } => {
                 self.emit_branch("    cf.br", target.0, args, None);
             }
-            Terminator::If { cond, then_bb, then_args, else_bb, else_args } => {
+            Terminator::If {
+                cond,
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+            } => {
                 let v = self.materialize_operand(cond, &MirTy::Prim(PrimTy::Bool));
                 let then_part = self.format_block_target(then_bb.0, then_args);
                 let else_part = self.format_block_target(else_bb.0, else_args);
-                let _ = writeln!(
-                    self.body,
-                    "    cf.cond_br {v}, {then_part}, {else_part}"
-                );
+                let _ = writeln!(self.body, "    cf.cond_br {v}, {then_part}, {else_part}");
             }
             Terminator::Unreachable => {
                 self.body.push_str("    llvm.unreachable\n");
@@ -1418,8 +1476,7 @@ fn mlir_type(ty: &MirTy, pointer_width: u32) -> String {
         MirTy::Any => format!("i{pointer_width}"),
         MirTy::Sum(parts) => mlir_type(&rokc_mir::sum_layout(parts), pointer_width),
         MirTy::Tuple(parts) | MirTy::Struct(_, parts) => {
-            let inner: Vec<String> =
-                parts.iter().map(|t| mlir_type(t, pointer_width)).collect();
+            let inner: Vec<String> = parts.iter().map(|t| mlir_type(t, pointer_width)).collect();
             format!("!llvm.struct<({})>", inner.join(", "))
         }
         MirTy::Array(elem, n) => {
@@ -1540,13 +1597,13 @@ fn arith_binop(
 /// Types stored via `memref.alloca`. Limited to plain primitives that
 /// the memref dialect understands. Aggregates and pointer-shaped values
 /// (including nested arrays) take the `llvm.alloca` path instead.
-fn is_memref_storable(ty: &MirTy) -> bool {
+const fn is_memref_storable(ty: &MirTy) -> bool {
     matches!(ty, MirTy::Prim(p) if !matches!(p, PrimTy::Str))
 }
 
 /// Types stored via `llvm.alloca` — aggregates and pointer-shaped
 /// values that flow through the LLVM dialect.
-fn is_llvm_storable(ty: &MirTy) -> bool {
+const fn is_llvm_storable(ty: &MirTy) -> bool {
     matches!(
         ty,
         MirTy::Struct(_, _)
@@ -1575,7 +1632,7 @@ fn const_int(op: &Operand) -> Option<i128> {
 
 /// Best-effort type for a `ConstVal`. Used at call sites where we have a
 /// raw const operand and need to pick an MLIR type for it.
-fn const_ty(c: &ConstVal) -> Option<MirTy> {
+const fn const_ty(c: &ConstVal) -> Option<MirTy> {
     match c {
         ConstVal::Int { ty, .. } | ConstVal::UInt { ty, .. } | ConstVal::Float { ty, .. } => {
             Some(MirTy::Prim(*ty))
@@ -1588,22 +1645,19 @@ fn const_ty(c: &ConstVal) -> Option<MirTy> {
 }
 
 fn format_float(bits: u64, prim: PrimTy) -> String {
-    match prim {
-        PrimTy::F32 => {
-            let v = f32::from_bits(bits as u32);
-            if v.is_nan() {
-                "0x7FC00000".to_owned()
-            } else {
-                format_float_decimal(f64::from(v))
-            }
+    if prim == PrimTy::F32 {
+        let v = f32::from_bits(bits as u32);
+        if v.is_nan() {
+            "0x7FC00000".to_owned()
+        } else {
+            format_float_decimal(f64::from(v))
         }
-        _ => {
-            let v = f64::from_bits(bits);
-            if v.is_nan() {
-                "0x7FF8000000000000".to_owned()
-            } else {
-                format_float_decimal(v)
-            }
+    } else {
+        let v = f64::from_bits(bits);
+        if v.is_nan() {
+            "0x7FF8000000000000".to_owned()
+        } else {
+            format_float_decimal(v)
         }
     }
 }
@@ -1639,7 +1693,11 @@ fn format_const_attr(v: &ConstVal, ty: &MirTy, pointer_width: u32) -> Option<Str
             } else {
                 f64::from_bits(*bits)
             };
-            let b = if *p == PrimTy::F32 { u64::from((v as f32).to_bits()) } else { v.to_bits() };
+            let b = if *p == PrimTy::F32 {
+                u64::from((v as f32).to_bits())
+            } else {
+                v.to_bits()
+            };
             format!("{} : {ty_str}", format_float(b, *p))
         }
         ConstVal::Int { value, .. } if p.is_float() => {

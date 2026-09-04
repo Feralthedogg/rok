@@ -39,7 +39,12 @@ fn arith_prec_table() -> PrecTable {
         });
     }
     for (sym, m) in [
-        ("==", "eq"), ("!=", "ne"), ("<", "lt"), (">", "gt"), ("<=", "le"), (">=", "ge"),
+        ("==", "eq"),
+        ("!=", "ne"),
+        ("<", "lt"),
+        (">", "gt"),
+        ("<=", "le"),
+        (">=", "ge"),
     ] {
         t.insert(OpEntry {
             symbol: sym.into(),
@@ -95,7 +100,9 @@ fn attr_args_mixed() {
     let Item::Fn(f) = &p.items[0] else { panic!() };
     let attr = &f.attrs[0];
     assert_eq!(attr.name(), "infix");
-    let AttrBody::Args(args) = &attr.body else { panic!() };
+    let AttrBody::Args(args) = &attr.body else {
+        panic!()
+    };
     assert_eq!(args.len(), 3);
     assert!(matches!(&args[0], AttrArg::Lit(Literal::Str(s)) if s == "+"));
     assert!(matches!(&args[1], AttrArg::KeyValue(k, Literal::Int(v)) if k == "prec" && v == "9"));
@@ -117,7 +124,9 @@ fn attr_nested() {
     let Item::Fn(f) = &p.items[0] else { panic!() };
     let attr = &f.attrs[0];
     assert_eq!(attr.name(), "cfg");
-    let AttrBody::Args(args) = &attr.body else { panic!() };
+    let AttrBody::Args(args) = &attr.body else {
+        panic!()
+    };
     assert!(matches!(
         &args[0],
         AttrArg::KeyValue(k, Literal::Str(v)) if k == "target_os" && v == "linux"
@@ -128,11 +137,17 @@ fn attr_nested() {
 fn attr_nested_call() {
     let p = parse(r#"#[cfg_attr(unix, link(name = "m"))] fn f() { }"#);
     let Item::Fn(f) = &p.items[0] else { panic!() };
-    let AttrBody::Args(args) = &f.attrs[0].body else { panic!() };
+    let AttrBody::Args(args) = &f.attrs[0].body else {
+        panic!()
+    };
     assert_eq!(args.len(), 2);
-    let AttrArg::Nested { path, body } = &args[1] else { panic!() };
+    let AttrArg::Nested { path, body } = &args[1] else {
+        panic!()
+    };
     assert_eq!(path, &vec!["link".to_owned()]);
-    let AttrBody::Args(inner) = body.as_ref() else { panic!() };
+    let AttrBody::Args(inner) = body.as_ref() else {
+        panic!()
+    };
     assert!(matches!(
         &inner[0],
         AttrArg::KeyValue(k, Literal::Str(v)) if k == "name" && v == "m"
@@ -143,19 +158,20 @@ fn attr_nested_call() {
 fn return_expr(p: &rokc_ast::Program) -> &rokc_ast::Expr {
     let Item::Fn(f) = &p.items[0] else { panic!() };
     let body = f.body.as_ref().unwrap();
-    let StmtKind::Return(Some(e)) = &body.stmts[0].kind else { panic!() };
+    let StmtKind::Return(Some(e)) = &body.stmts[0].kind else {
+        panic!()
+    };
     e
 }
 
 #[test]
 fn pratt_left_assoc() {
     // `a - b - c` parses as `(a - b) - c`.
-    let p = parse_with(
-        "fn t() { return a - b - c; }",
-        &arith_prec_table(),
-    );
+    let p = parse_with("fn t() { return a - b - c; }", &arith_prec_table());
     let e = return_expr(&p);
-    let ExprKind::OpInfix { op, lhs, rhs: _ } = &e.kind else { panic!() };
+    let ExprKind::OpInfix { op, lhs, rhs: _ } = &e.kind else {
+        panic!()
+    };
     assert_eq!(op, "-");
     let ExprKind::OpInfix { op: inner_op, .. } = &lhs.kind else {
         panic!("expected nested infix on lhs")
@@ -168,7 +184,9 @@ fn pratt_precedence_mul_over_add() {
     // `a + b * c` parses as `a + (b * c)`.
     let p = parse_with("fn t() { return a + b * c; }", &arith_prec_table());
     let e = return_expr(&p);
-    let ExprKind::OpInfix { op, rhs, .. } = &e.kind else { panic!() };
+    let ExprKind::OpInfix { op, rhs, .. } = &e.kind else {
+        panic!()
+    };
     assert_eq!(op, "+");
     let ExprKind::OpInfix { op: rop, .. } = &rhs.kind else {
         panic!("expected `*` on rhs")
@@ -181,7 +199,9 @@ fn pratt_prefix_neg() {
     // `-a + b` parses as `(-a) + b`, not `-(a + b)`.
     let p = parse_with("fn t() { return -a + b; }", &arith_prec_table());
     let e = return_expr(&p);
-    let ExprKind::OpInfix { op, lhs, .. } = &e.kind else { panic!() };
+    let ExprKind::OpInfix { op, lhs, .. } = &e.kind else {
+        panic!()
+    };
     assert_eq!(op, "+");
     let ExprKind::OpPrefix { op: pop, .. } = &lhs.kind else {
         panic!("expected unary `-` on lhs")
@@ -198,7 +218,10 @@ fn pratt_unknown_op_stops() {
     let (tokens, _) = lexer.lex_all();
     let prec = PrecTable::new();
     let (_p, diags) = parse_program(&tokens, &prec, "test");
-    assert!(!diags.is_empty(), "expected parse error on `+` without PrecTable entry");
+    assert!(
+        !diags.is_empty(),
+        "expected parse error on `+` without PrecTable entry"
+    );
 }
 
 #[test]
@@ -210,7 +233,9 @@ fn trait_with_self_method() {
             fn add(self, rhs: Rhs) -> Output;
         }"#,
     );
-    let Item::Trait(t) = &p.items[0] else { panic!("expected trait, got {:?}", p.items) };
+    let Item::Trait(t) = &p.items[0] else {
+        panic!("expected trait, got {:?}", p.items)
+    };
     assert_eq!(t.name, "Add");
     assert_eq!(t.items.len(), 2, "trait items: {:?}", t.items);
 }
@@ -288,8 +313,12 @@ fn visibility_qualifiers_are_contextual() {
             pub(sub) fn sub(self, rhs: Rhs) -> Self;
         }"#,
     );
-    let Item::Trait(t) = &p.items[0] else { panic!() };
-    let rokc_ast::TraitItem::Method(m) = &t.items[0] else { panic!() };
+    let Item::Trait(t) = &p.items[0] else {
+        panic!()
+    };
+    let rokc_ast::TraitItem::Method(m) = &t.items[0] else {
+        panic!()
+    };
     assert_eq!(m.name, "sub");
     assert_eq!(m.vis, Visibility::Sub);
 }
@@ -298,7 +327,9 @@ fn visibility_qualifiers_are_contextual() {
 fn attr_derive_words() {
     let p = parse("#[derive(Display, Clone, Eq)] fn f() { }");
     let Item::Fn(f) = &p.items[0] else { panic!() };
-    let AttrBody::Args(args) = &f.attrs[0].body else { panic!() };
+    let AttrBody::Args(args) = &f.attrs[0].body else {
+        panic!()
+    };
     assert_eq!(args.len(), 3);
     for (a, expected) in args.iter().zip(["Display", "Clone", "Eq"]) {
         assert!(matches!(a, AttrArg::Word(w) if w == expected));
@@ -314,8 +345,14 @@ fn struct_literal_decided_by_syntax_not_prescan() {
          fn f() { let v = Foo { size: 1 }; }",
     );
     let Item::Fn(f) = &p.items[1] else { panic!() };
-    let StmtKind::Let { init, .. } = &f.body.as_ref().unwrap().stmts[0].kind else { panic!() };
-    assert!(matches!(init.kind, ExprKind::StructInit { .. }), "{:?}", init.kind);
+    let StmtKind::Let { init, .. } = &f.body.as_ref().unwrap().stmts[0].kind else {
+        panic!()
+    };
+    assert!(
+        matches!(init.kind, ExprKind::StructInit { .. }),
+        "{:?}",
+        init.kind
+    );
 }
 
 #[test]
@@ -327,11 +364,18 @@ fn struct_patterns_without_capitalisation() {
     );
     let Item::Fn(f) = &p.items[0] else { panic!() };
     let stmts = &f.body.as_ref().unwrap().stmts;
-    assert!(matches!(&stmts[0].kind, StmtKind::LetStruct { path, .. } if path.segments[0].name == "점"));
+    assert!(
+        matches!(&stmts[0].kind, StmtKind::LetStruct { path, .. } if path.segments[0].name == "점")
+    );
     assert!(matches!(&stmts[1].kind, StmtKind::LetStruct { path, .. } if path.segments.len() == 2));
     let m = f.body.as_ref().unwrap().trailing.as_ref().unwrap();
-    let ExprKind::Match { arms, .. } = &m.kind else { panic!() };
-    assert!(matches!(arms[0].pat.kind, rokc_ast::PatternKind::Struct { .. }));
+    let ExprKind::Match { arms, .. } = &m.kind else {
+        panic!()
+    };
+    assert!(matches!(
+        arms[0].pat.kind,
+        rokc_ast::PatternKind::Struct { .. }
+    ));
 }
 
 #[test]
@@ -339,8 +383,13 @@ fn catch_binding_followed_by_block() {
     let p = parse("fn f() { try { g(); } catch e { h(e); } }");
     let Item::Fn(f) = &p.items[0] else { panic!() };
     let e = f.body.as_ref().unwrap().trailing.as_ref().unwrap();
-    let ExprKind::Try { catches, .. } = &e.kind else { panic!("{e:?}") };
-    assert!(matches!(catches[0].pat.kind, rokc_ast::PatternKind::Binding { .. }));
+    let ExprKind::Try { catches, .. } = &e.kind else {
+        panic!("{e:?}")
+    };
+    assert!(matches!(
+        catches[0].pat.kind,
+        rokc_ast::PatternKind::Binding { .. }
+    ));
 }
 
 /// All lexer + parser diagnostics for `src` (arith precedence table).
@@ -353,7 +402,10 @@ fn diags_of(src: &str) -> Vec<String> {
 
 fn assert_rejected(src: &str, needle: &str) {
     let d = diags_of(src);
-    assert!(d.iter().any(|m| m.contains(needle)), "{src:?}: expected `{needle}` in {d:#?}");
+    assert!(
+        d.iter().any(|m| m.contains(needle)),
+        "{src:?}: expected `{needle}` in {d:#?}"
+    );
 }
 
 fn fn_param_ty(p: &rokc_ast::Program) -> &rokc_ast::Ty {
@@ -364,22 +416,32 @@ fn fn_param_ty(p: &rokc_ast::Program) -> &rokc_ast::Ty {
 #[test]
 fn cast_target_does_not_swallow_lt_or_pipe() {
     let p = parse_with("fn t() { return a as i64 < b; }", &arith_prec_table());
-    let ExprKind::OpInfix { op, lhs, .. } = &return_expr(&p).kind else { panic!() };
+    let ExprKind::OpInfix { op, lhs, .. } = &return_expr(&p).kind else {
+        panic!()
+    };
     assert_eq!(op, "<");
     assert!(matches!(lhs.kind, ExprKind::Cast(..)));
 
     let p = parse_with("fn t() { return a as i32 | b; }", &arith_prec_table());
-    let ExprKind::OpInfix { op, lhs, .. } = &return_expr(&p).kind else { panic!() };
+    let ExprKind::OpInfix { op, lhs, .. } = &return_expr(&p).kind else {
+        panic!()
+    };
     assert_eq!(op, "|");
     assert!(matches!(lhs.kind, ExprKind::Cast(..)));
 
     // Real generic args and parenthesised sums still work.
     let p = parse_with("fn t() { return a as Foo<Bar<i32>>; }", &arith_prec_table());
-    let ExprKind::Cast(_, ty) = &return_expr(&p).kind else { panic!() };
-    let rokc_ast::TyKind::Path(path) = &ty.kind else { panic!() };
+    let ExprKind::Cast(_, ty) = &return_expr(&p).kind else {
+        panic!()
+    };
+    let rokc_ast::TyKind::Path(path) = &ty.kind else {
+        panic!()
+    };
     assert_eq!(path.segments[0].generics.len(), 1);
     let p = parse_with("fn t() { return a as (i32 | none); }", &arith_prec_table());
-    let ExprKind::Cast(_, ty) = &return_expr(&p).kind else { panic!() };
+    let ExprKind::Cast(_, ty) = &return_expr(&p).kind else {
+        panic!()
+    };
     assert!(matches!(ty.kind, rokc_ast::TyKind::Sum(_)));
 }
 
@@ -407,11 +469,15 @@ fn impl_trait_alias_generics_and_where_are_kept() {
     let Item::Impl(i) = &p.items[0] else { panic!() };
     assert_eq!(i.generics.params.len(), 1);
     assert_eq!(i.where_clause.len(), 2);
-    let Item::Trait(t) = &p.items[1] else { panic!() };
+    let Item::Trait(t) = &p.items[1] else {
+        panic!()
+    };
     assert_eq!(t.generics.params.len(), 1);
     assert_eq!(t.supertraits.len(), 2);
     assert_eq!(t.where_clause.len(), 1);
-    let Item::TypeAlias(a) = &p.items[2] else { panic!() };
+    let Item::TypeAlias(a) = &p.items[2] else {
+        panic!()
+    };
     assert_eq!(a.generics.params.len(), 2);
     let Item::Fn(f) = &p.items[3] else { panic!() };
     assert_eq!(f.where_clause[0].bounds.len(), 2);
@@ -420,23 +486,37 @@ fn impl_trait_alias_generics_and_where_are_kept() {
 #[test]
 fn paren_type_grouping_vs_tuple() {
     use rokc_ast::TyKind;
-    assert!(matches!(fn_param_ty(&parse("fn f(x: (i32)) { }")).kind, TyKind::Path(_)));
-    assert!(matches!(&fn_param_ty(&parse("fn f(x: (i32,)) { }")).kind, TyKind::Tuple(v) if v.len() == 1));
-    assert!(matches!(&fn_param_ty(&parse("fn f(x: ()) { }")).kind, TyKind::Tuple(v) if v.is_empty()));
+    assert!(matches!(
+        fn_param_ty(&parse("fn f(x: (i32)) { }")).kind,
+        TyKind::Path(_)
+    ));
+    assert!(
+        matches!(&fn_param_ty(&parse("fn f(x: (i32,)) { }")).kind, TyKind::Tuple(v) if v.len() == 1)
+    );
+    assert!(
+        matches!(&fn_param_ty(&parse("fn f(x: ()) { }")).kind, TyKind::Tuple(v) if v.is_empty())
+    );
     // `fn() -> A | B` is `(fn() -> A) | B` (spec 2.1.10).
     let p = parse("fn f(x: fn(i32) -> i32 | none) { }");
     let ty = fn_param_ty(&p);
-    let TyKind::Sum(v) = &ty.kind else { panic!("{ty:?}") };
+    let TyKind::Sum(v) = &ty.kind else {
+        panic!("{ty:?}")
+    };
     assert!(matches!(v[0].kind, TyKind::Fn(..)));
 }
 
 #[test]
 fn tuple_field_indices() {
     let p = parse("fn t() { return x.0.1; }");
-    let ExprKind::TupleField(inner, 1) = &return_expr(&p).kind else { panic!() };
+    let ExprKind::TupleField(inner, 1) = &return_expr(&p).kind else {
+        panic!()
+    };
     assert!(matches!(inner.kind, ExprKind::TupleField(_, 0)));
     for bad in ["x.1u8", "x.0x1", "x.1_0", "x.01", "x.1e1", "x?.1u8"] {
-        assert_rejected(&format!("fn t() {{ return {bad}; }}"), "invalid tuple field index");
+        assert_rejected(
+            &format!("fn t() {{ return {bad}; }}"),
+            "invalid tuple field index",
+        );
     }
 }
 
@@ -448,7 +528,11 @@ fn deep_nesting_is_a_diagnostic_not_a_crash() {
         format!("fn f() {{ return {}1{}; }}", "(".repeat(n), ")".repeat(n)),
         format!("fn f() {}{}", "{".repeat(n), "}".repeat(n)),
         format!("fn f(x: {}i32{}) {{ }}", "(".repeat(n), ",)".repeat(n)),
-        format!("fn f() {{ match x {{ {}_{} => 1 }} }}", "(".repeat(n), ")".repeat(n)),
+        format!(
+            "fn f() {{ match x {{ {}_{} => 1 }} }}",
+            "(".repeat(n),
+            ")".repeat(n)
+        ),
         format!("fn f() {{ return {}1; }}", "-".repeat(n)),
     ] {
         assert_rejected(&src, "nesting too deep");
@@ -459,7 +543,14 @@ fn deep_nesting_is_a_diagnostic_not_a_crash() {
 fn open_ranges() {
     let range = |src: &str| {
         let p = parse_with(&format!("fn t() {{ return {src}; }}"), &arith_prec_table());
-        let ExprKind::Range { start, end, inclusive } = return_expr(&p).kind.clone() else { panic!("{src}") };
+        let ExprKind::Range {
+            start,
+            end,
+            inclusive,
+        } = return_expr(&p).kind.clone()
+        else {
+            panic!("{src}")
+        };
         (start.is_some(), end.is_some(), inclusive)
     };
     assert_eq!(range("a..b"), (true, true, false));
@@ -474,14 +565,24 @@ fn open_ranges() {
 
 #[test]
 fn unsafe_raw_strings_and_unsupported_forms() {
-    let p = parse(r##"unsafe fn f() { let s = r#"a"b"#; unsafe { g(); } } extern "C" { unsafe fn h(); }"##);
+    let p = parse(
+        r##"unsafe fn f() { let s = r#"a"b"#; unsafe { g(); } } extern "C" { unsafe fn h(); }"##,
+    );
     assert_eq!(p.items.len(), 2);
     let Item::Fn(f) = &p.items[0] else { panic!() };
-    let StmtKind::Let { init, .. } = &f.body.as_ref().unwrap().stmts[0].kind else { panic!() };
+    let StmtKind::Let { init, .. } = &f.body.as_ref().unwrap().stmts[0].kind else {
+        panic!()
+    };
     assert!(matches!(&init.kind, ExprKind::Literal(Literal::RawStr(s)) if s == "a\"b"));
     assert_rejected("async unsafe fn f() { }", "expected `fn`");
-    assert_rejected(r#"fn f() { let s = f"x = {x}"; }"#, "f-string literals (spec 1.7.3) are not yet supported");
-    assert_rejected("fn f() { using x = g() { x } }", "`using` expressions (spec 3.17) are not yet supported");
+    assert_rejected(
+        r#"fn f() { let s = f"x = {x}"; }"#,
+        "f-string literals (spec 1.7.3) are not yet supported",
+    );
+    assert_rejected(
+        "fn f() { using x = g() { x } }",
+        "`using` expressions (spec 3.17) are not yet supported",
+    );
 }
 
 #[test]
@@ -495,14 +596,19 @@ fn recovery_reports_each_mistake_once() {
     assert_eq!(d.len(), 6, "{d:#?}");
     assert!(d.iter().any(|m| m.contains("field name expected")));
     // `~` has no `#[prefix]` entry in the test table.
-    assert!(d.iter().any(|m| m.contains("prefix operator `~` is not defined")));
+    assert!(
+        d.iter()
+            .any(|m| m.contains("prefix operator `~` is not defined"))
+    );
     // No flag leaked out of the failed `if` head in `c`: the struct
     // literal in `d` still parses (no extra diagnostic for it).
 }
 
 #[test]
 fn unsupported_impl_const_and_extern_static() {
-    let d = diags_of("impl S { const N: i32 = 1; fn f() { } } extern \"C\" { static mut X: i32; fn g(); }");
+    let d = diags_of(
+        "impl S { const N: i32 = 1; fn f() { } } extern \"C\" { static mut X: i32; fn g(); }",
+    );
     assert_eq!(d.len(), 2, "{d:#?}");
     assert!(d[0].contains("not yet supported") && d[1].contains("not yet supported"));
 }

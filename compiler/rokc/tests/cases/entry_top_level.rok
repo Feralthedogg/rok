@@ -1,0 +1,25 @@
+// expect-exit: 0
+// expect-stdout:
+// 0
+// 1
+// 2
+// 30
+
+// spec 4.16.2: top-level statements form the implicit `main`, in
+// source order; items are visible regardless of their position.
+let n = 3;
+for i in 0..n {
+    show(i);
+}
+let total = sum(n);
+if total > 0 {
+    show(total * 10);
+}
+
+fn show(v: i32) {
+    rok_print_i32(v);
+}
+
+fn sum(k: i32) -> i32 {
+    return k;
+}

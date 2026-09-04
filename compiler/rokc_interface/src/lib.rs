@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rokc_driver::{CompilerConfig, CompiledModule, compile_file};
+use rokc_driver::{CompiledModule, CompilerConfig, compile_file};
 
 pub use rokc_diagnostic::{ErrorKind, RokDiagnostic, report};
 pub use rokc_driver::{BuildOptions, EmitKind, TempDir};

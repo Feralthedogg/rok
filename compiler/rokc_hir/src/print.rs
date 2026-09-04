@@ -5,8 +5,7 @@ use std::fmt::Write;
 use rokc_ir_common::{ConstVal, PrimTy};
 
 use crate::{
-    HirBlock, HirExpr, HirExprKind, HirFunction, HirMatchArm, HirModule, HirPattern, HirStmt,
-    HirTy,
+    HirBlock, HirExpr, HirExprKind, HirFunction, HirMatchArm, HirModule, HirPattern, HirStmt, HirTy,
 };
 
 #[must_use]
@@ -63,7 +62,12 @@ fn print_stmt(out: &mut String, s: &HirStmt) {
             print_expr(out, value);
             out.push(';');
         }
-        HirStmt::ArrayAssign { array_local, index, value, .. } => {
+        HirStmt::ArrayAssign {
+            array_local,
+            index,
+            value,
+            ..
+        } => {
             let _ = write!(out, "_{}[", array_local.0);
             print_expr(out, index);
             out.push_str("] = ");
@@ -186,7 +190,11 @@ fn print_expr(out: &mut String, e: &HirExpr) {
             }
             out.push(')');
         }
-        HirExprKind::If { cond, then_block, else_branch } => {
+        HirExprKind::If {
+            cond,
+            then_block,
+            else_branch,
+        } => {
             out.push_str("if ");
             print_expr(out, cond);
             out.push_str(" {\n");
@@ -225,11 +233,21 @@ fn print_expr(out: &mut String, e: &HirExpr) {
             }
             out.push('}');
         }
-        HirExprKind::FieldRead { target, struct_id, field_index, .. } => {
+        HirExprKind::FieldRead {
+            target,
+            struct_id,
+            field_index,
+            ..
+        } => {
             print_expr(out, target);
             let _ = write!(out, ".#{}.{}", struct_id.0, field_index);
         }
-        HirExprKind::WithField { target, struct_id, field_index, value } => {
+        HirExprKind::WithField {
+            target,
+            struct_id,
+            field_index,
+            value,
+        } => {
             print_expr(out, target);
             let _ = write!(out, " with #{}.{} = ", struct_id.0, field_index);
             print_expr(out, value);
@@ -264,7 +282,11 @@ fn print_expr(out: &mut String, e: &HirExpr) {
             print_expr(out, index);
             out.push(']');
         }
-        HirExprKind::SumWrap { variant_index, value, .. } => {
+        HirExprKind::SumWrap {
+            variant_index,
+            value,
+            ..
+        } => {
             let _ = write!(out, "Sum::v{}", variant_index);
             if let Some(v) = value {
                 out.push('(');
@@ -272,7 +294,11 @@ fn print_expr(out: &mut String, e: &HirExpr) {
                 out.push(')');
             }
         }
-        HirExprKind::EnumVariantInit { enum_id, variant_index, args } => {
+        HirExprKind::EnumVariantInit {
+            enum_id,
+            variant_index,
+            args,
+        } => {
             let _ = write!(out, "Enum#{}::v{}", enum_id.0, variant_index);
             if !args.is_empty() {
                 out.push('(');
@@ -285,12 +311,27 @@ fn print_expr(out: &mut String, e: &HirExpr) {
                 out.push(')');
             }
         }
-        HirExprKind::UnionWrite { struct_id, value, storage_ty, .. } => {
-            let _ = write!(out, "Union#{}::write_as<{}>(", struct_id.0, ty_str(storage_ty));
+        HirExprKind::UnionWrite {
+            struct_id,
+            value,
+            storage_ty,
+            ..
+        } => {
+            let _ = write!(
+                out,
+                "Union#{}::write_as<{}>(",
+                struct_id.0,
+                ty_str(storage_ty)
+            );
             print_expr(out, value);
             out.push(')');
         }
-        HirExprKind::UnionRead { target, field_name, field_ty, .. } => {
+        HirExprKind::UnionRead {
+            target,
+            field_name,
+            field_ty,
+            ..
+        } => {
             print_expr(out, target);
             let _ = write!(out, ".{field_name}<as {}>", ty_str(field_ty));
         }
@@ -342,7 +383,12 @@ fn print_pattern(out: &mut String, p: &HirPattern) {
             }
             out.push(')');
         }
-        HirPattern::Range { start, end, inclusive, prim } => {
+        HirPattern::Range {
+            start,
+            end,
+            inclusive,
+            prim,
+        } => {
             if let Some(s) = start {
                 let _ = write!(out, "({})", prim.name());
                 print_const(out, s);
@@ -364,7 +410,11 @@ fn print_pattern(out: &mut String, p: &HirPattern) {
             }
             out.push_str(" }");
         }
-        HirPattern::EnumVariant { enum_id, variant_index, args } => {
+        HirPattern::EnumVariant {
+            enum_id,
+            variant_index,
+            args,
+        } => {
             let _ = write!(out, "Enum#{}::v{}", enum_id.0, variant_index);
             if !args.is_empty() {
                 out.push('(');
@@ -377,7 +427,11 @@ fn print_pattern(out: &mut String, p: &HirPattern) {
                 out.push(')');
             }
         }
-        HirPattern::SumVariant { variant_index, binder, .. } => {
+        HirPattern::SumVariant {
+            variant_index,
+            binder,
+            ..
+        } => {
             if let Some(b) = binder {
                 let _ = write!(out, "_{}: ", b.0);
             }
