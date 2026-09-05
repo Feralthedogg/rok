@@ -1,0 +1,23 @@
+// spec: 003.03-let
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 7
+// 5
+// 2
+// 9
+
+// D1: 타입 생략 `let` 은 초기값의 정적 타입을 갖는 슬롯이다. 재대입은 그
+// 타입으로 검사된다 (`304_assign_type_mismatch`). 합 타입은 적어야 생긴다.
+struct P { x: i32; }
+
+let a = 7;
+let p = P { x: 5 };
+let s: i32 | none = none;
+let t = if a > 3 { a } else { 0 };
+let u = match s { none => 2, n: i32 => n, };
+let w = 'b: { break 'b 9; };
+rok_print_i32(t);
+rok_print_i32(p.x);
+rok_print_i32(u);
+rok_print_i32(w);

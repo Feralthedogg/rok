@@ -330,6 +330,28 @@ pub(super) fn resolve_ty_with_structs(
         AstTyKind::Tuple(parts) if parts.is_empty() => HirTy::Unit,
         AstTyKind::Tuple(parts) => HirTy::Tuple(parts.iter().map(rec).collect()),
         AstTyKind::Fn(args, ret) => HirTy::Fn(args.iter().map(rec).collect(), Box::new(rec(ret))),
+        AstTyKind::AnyTrait(bounds) => {
+            let mut keys: Vec<String> = Vec::with_capacity(bounds.len());
+            for b in bounds {
+                let segs: Vec<&str> = b.segments.iter().map(|s| s.name.as_str()).collect();
+                let key = sc.names.trait_key(&segs, sc.module);
+                let user_trait = sc.names.traits.contains(&key);
+                // Bootstrap traits key by their last segment (see
+                // `trait_key`); anything else must name a declared trait.
+                if !user_trait && !sc.names.traits.iter().any(|t| leaf_name(t) == key) {
+                    sc.names.error(format!(
+                        "`{}` in `any {}` is not a trait — `any` bounds must name traits (D4)",
+                        segs.join("::"),
+                        segs.join("::")
+                    ));
+                    return HirTy::Unknown;
+                }
+                keys.push(key);
+            }
+            keys.sort();
+            keys.dedup();
+            HirTy::AnyTrait(keys)
+        }
         _ => resolve_ty(ty),
     }
 }
@@ -350,6 +372,7 @@ pub(super) fn ty_mangle(ty: &HirTy) -> String {
         HirTy::Prim(p) => p.name().to_owned(),
         HirTy::Unit => "Unit".to_owned(),
         HirTy::Any => "Any".to_owned(),
+        HirTy::AnyTrait(bounds) => format!("AnyOf{}", bounds.join("_").replace("::", "_")),
         HirTy::Unknown => "Unknown".to_owned(),
         HirTy::Tuple(parts) => {
             let inner: Vec<String> = parts.iter().map(ty_mangle).collect();

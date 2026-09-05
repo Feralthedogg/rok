@@ -33,6 +33,7 @@ pub(super) fn lower_match(
 
     // Result type: the expected slot, else the first arm that produces
     // a value; every other value-producing arm must agree.
+    let inferred = expected.is_none();
     let result_ty = expected.unwrap_or_else(|| {
         arm_h
             .iter()
@@ -56,6 +57,23 @@ pub(super) fn lower_match(
                     "the `else` block of `let ... else` must diverge (end in `return`, \
                      `break`, `continue` or `throw`) (spec 3.15)"
                         .to_owned(),
+                );
+            } else if inferred
+                && a.body.ty != HirTy::Unknown
+                && !coercible(ctx, &result_ty, &a.body.ty)
+            {
+                // D1: no sum type is inferred from differing arms.
+                ctx.emit_error(
+                    rokc_diagnostic::ErrorKind::Type,
+                    format!(
+                        "`match` arms have different types `{}` and `{}` (arm {}) — rok does \
+                         not infer a sum type; annotate the slot (`let v: {} | {} = match ...`)",
+                        ctx.ty_name(&result_ty),
+                        ctx.ty_name(&a.body.ty),
+                        i + 1,
+                        ctx.ty_name(&result_ty),
+                        ctx.ty_name(&a.body.ty)
+                    ),
                 );
             } else {
                 a.body = coerce(ctx, &result_ty, a.body, &|| format!("match arm {}", i + 1));
@@ -295,6 +313,19 @@ pub(super) fn lower_pattern_inner(
                     return HirPattern::SumVariant {
                         sum_ty: scrut_ty.clone(),
                         variant_index: u32::try_from(idx).expect("variant overflow"),
+                        binder: bind_local,
+                        payload_ty: Some(target_ty),
+                    };
+                }
+            } else if let (HirTy::AnyTrait(bounds), false) =
+                (scrut_ty, matches!(target_ty, HirTy::AnyTrait(_)))
+            {
+                // D4: narrow `any Tr` to a concrete implementor (tag test).
+                if bounds.iter().all(|b| ctx.implements(&target_ty, b)) {
+                    let bind_local = bind(ctx);
+                    return HirPattern::SumVariant {
+                        sum_ty: scrut_ty.clone(),
+                        variant_index: ctx.any_tag(&target_ty),
                         binder: bind_local,
                         payload_ty: Some(target_ty),
                     };

@@ -658,6 +658,29 @@ impl<'a> FnBuilder<'a> {
                     value: i128::from(*variant_index),
                     ty: IrPrimTy::I32,
                 });
+                // `any Tr` (D4): the payload is a heap copy of the value.
+                // ponytail: always boxed and never freed (no GC yet);
+                // inline values that fit a word once the GC lands.
+                if let (HirTy::AnyTrait(_), Some(v)) = (sum_ty, value) {
+                    let raw = self.lower_expr_to_operand(v);
+                    let ptr = self.fresh_local(MirTy::Prim(IrPrimTy::Usize));
+                    self.push_stmt(Statement::Assign {
+                        target: ptr,
+                        rvalue: RValue::HeapBox {
+                            value: raw,
+                            ty: lower_ty_in(&v.ty, self.module),
+                        },
+                    });
+                    let dst = self.fresh_local(mir_ty.clone());
+                    self.push_stmt(Statement::Assign {
+                        target: dst,
+                        rvalue: RValue::StructInit {
+                            ty: mir_ty,
+                            fields: vec![tag_op, Operand::Copy(ptr)],
+                        },
+                    });
+                    return Operand::Copy(dst);
+                }
                 // Payload-less sum (all-none, exotic) — return tag only.
                 let MirTy::Tuple(parts) = &mir_ty else {
                     return tag_op;
@@ -1395,7 +1418,7 @@ impl<'a> FnBuilder<'a> {
                     });
                 }
             }
-            HirPattern::SumVariant { binder, .. } => {
+            HirPattern::SumVariant { binder, sum_ty, .. } => {
                 let Some(local) = binder else { return };
                 let scrut_ty = self.locals[scrut.0 as usize].ty.clone();
                 let MirTy::Tuple(parts) = &scrut_ty else {
@@ -1419,6 +1442,16 @@ impl<'a> FnBuilder<'a> {
                 // declared type is narrower (e.g. `v: i32` against an
                 // `i32 | f64` sum), narrow the extracted payload back.
                 let bind_ty = self.locals[local.0 as usize].ty.clone();
+                if matches!(sum_ty, HirTy::AnyTrait(_)) {
+                    self.push_stmt(Statement::Assign {
+                        target: *local,
+                        rvalue: RValue::HeapLoad {
+                            ptr: Operand::Copy(payload),
+                            ty: bind_ty,
+                        },
+                    });
+                    return;
+                }
                 let v = self.payload_cast(Operand::Copy(payload), &payload_ty, &bind_ty);
                 self.push_stmt(Statement::Assign {
                     target: *local,

@@ -308,12 +308,12 @@ pub(super) fn lower_stmt(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt>
             // literals and generic-enum leaves (`Box::None`) pick it up.
             let pre_ty = ty.as_ref().map(|t| ctx.resolve_ast_ty(t));
             let init = lower_expected(ctx, init, pre_ty.clone().unwrap_or(HirTy::Unknown));
-            let (declared_ty, init) = match pre_ty {
-                Some(t) => {
-                    let init = coerce(ctx, &t, init, &|| format!("`let {name}`"));
-                    (t, init)
-                }
-                None => (init.ty.clone(), init),
+            let (declared_ty, init) = if let Some(t) = pre_ty {
+                let init = coerce(ctx, &t, init, &|| format!("`let {name}`"));
+                (t, init)
+            } else {
+                check_let_inferable(ctx, name, &init);
+                (init.ty.clone(), init)
             };
             let local = ctx.declare(Some(name.clone()), declared_ty);
             Some(HirStmt::Let { local, init })
@@ -436,6 +436,24 @@ pub(super) fn lower_stmt(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt>
             Some(HirStmt::Throw(panic_call(ctx, &msg, stmt.span)))
         }
     }
+}
+
+/// D1: an un-annotated `let` takes its initializer's static type, so
+/// the initializer must have one. `none` alone and an initializer that
+/// never produces a value don't (empty `[]` and differing `if` / `match`
+/// branches are rejected where they are lowered).
+fn check_let_inferable(ctx: &LowerCtx<'_>, name: &str, init: &HirExpr) {
+    let why = if is_none_ty(&init.ty) {
+        format!("`none` alone has no value type — write `let {name}: T | none = none;`")
+    } else if hir_expr_diverges(init) {
+        "the initializer never produces a value (it always returns / breaks / loops)".to_owned()
+    } else {
+        return;
+    };
+    ctx.emit_error(
+        rokc_diagnostic::ErrorKind::Type,
+        format!("cannot infer the type of `{name}`: {why}"),
+    );
 }
 
 /// `target = value;` for a local / static, a struct-field chain rooted
@@ -1768,19 +1786,43 @@ pub(super) fn lower_if(
     } else if then_ty == HirTy::Unknown || else_ty == HirTy::Unknown {
         HirTy::Unknown
     } else if let Some(t) =
-        expected.filter(|t| ty_compatible(t, &then_ty) && ty_compatible(t, &else_ty))
+        expected.filter(|t| coercible(ctx, t, &then_ty) && coercible(ctx, t, &else_ty))
     {
         t
     } else {
-        // Spec 변경점 1019: 분기 타입이 다르면 결과는 자동 합 타입
-        // (`if c { 7 } else { 3.14 }` → `i32 | f64`).
-        HirTy::Sum(vec![then_ty, else_ty])
+        // D1: branches of different types are an error, not an inferred
+        // sum — the slot's annotation must name the sum.
+        ctx.emit_error(
+            rokc_diagnostic::ErrorKind::Type,
+            format!(
+                "`if` branches have different types `{}` and `{}` — rok does not infer a \
+                 sum type; annotate the slot (`let v: {} | {} = if ...`)",
+                ctx.ty_name(&then_ty),
+                ctx.ty_name(&else_ty),
+                ctx.ty_name(&then_ty),
+                ctx.ty_name(&else_ty)
+            ),
+        );
+        HirTy::Unknown
     };
-    if matches!(result_ty, HirTy::Sum(_)) {
+    if matches!(result_ty, HirTy::Sum(_) | HirTy::AnyTrait(_)) {
+        let what = || "the `if` branch".to_owned();
         if let Some(t) = then_h.trailing.take() {
-            then_h.trailing = Some(wrap_into_sum(&result_ty, t));
+            then_h.trailing = Some(coerce(ctx, &result_ty, t, &what));
         }
-        else_h = wrap_if_block_trailing(else_h, &result_ty);
+        else_h = match else_h.kind {
+            HirExprKind::Block(mut b) => {
+                if let Some(t) = b.trailing.take() {
+                    b.trailing = Some(coerce(ctx, &result_ty, t, &what));
+                }
+                HirExpr {
+                    ty: result_ty.clone(),
+                    kind: HirExprKind::Block(b),
+                    span: else_h.span,
+                }
+            }
+            _ => coerce(ctx, &result_ty, else_h, &what),
+        };
     }
     HirExpr {
         kind: HirExprKind::If {
@@ -1790,25 +1832,6 @@ pub(super) fn lower_if(
         },
         ty: result_ty,
         span,
-    }
-}
-
-// For an else branch — typically a Block expression — wrap the block's
-// trailing expression into the unifying sum. Falls back to wrapping the
-// whole expression when the else isn't a block (e.g. `else if`).
-pub(super) fn wrap_if_block_trailing(expr: HirExpr, sum_ty: &HirTy) -> HirExpr {
-    match expr.kind {
-        HirExprKind::Block(mut b) => {
-            if let Some(t) = b.trailing.take() {
-                b.trailing = Some(wrap_into_sum(sum_ty, t));
-            }
-            HirExpr {
-                ty: sum_ty.clone(),
-                kind: HirExprKind::Block(b),
-                span: expr.span,
-            }
-        }
-        _ => wrap_into_sum(sum_ty, expr),
     }
 }
 
@@ -2005,6 +2028,9 @@ pub(super) fn method_call_on(
         lower_args_only(ctx);
         return recv_h;
     }
+    if let HirTy::AnyTrait(bounds) = recv_h.ty.clone() {
+        return any_method_call(ctx, recv_h, &bounds, method, args, span);
+    }
     let found = method_target_for(&recv_h.ty)
         .and_then(|t| ctx.env.method_table.get(&(t, method.to_owned())).copied());
     let Some(fn_id) = found else {
@@ -2058,6 +2084,128 @@ pub(super) fn method_call_on(
         );
     }
     call_sig(ctx, &sig, method, Some(recv_h), args, span)
+}
+
+/// `v.m(args)` on an `any Tr` value (D4). Only methods of the bound
+/// traits and their supertraits are callable; the call becomes a switch
+/// on the tag over every implementor in the program:
+/// `match v { x: T1 => T1::m(x, args), x: T2 => T2::m(x, args), ... }`.
+fn any_method_call(
+    ctx: &mut LowerCtx<'_>,
+    recv_h: HirExpr,
+    bounds: &[String],
+    method: &str,
+    args: &[CallArg],
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let mut seen: Vec<String> = Vec::new();
+    let mut stack = bounds.to_vec();
+    let mut provides = false;
+    while let Some(t) = stack.pop() {
+        if seen.contains(&t) {
+            continue;
+        }
+        if let Some(info) = ctx.env.trait_info.get(&t) {
+            provides |= info.methods.iter().any(|m| m == method);
+            stack.extend(info.supers.iter().cloned());
+        }
+        seen.push(t);
+    }
+    let recv_ty = recv_h.ty.clone();
+    if !provides {
+        discard_args(ctx, args);
+        return ctx.error_expr(
+            span,
+            format!(
+                "no method `{method}` on `{}` — only methods of its trait bound(s) and their \
+                 supertraits can be called on an `any` value; narrow it with a type pattern \
+                 (`match v {{ x: T => ... }}`) to reach other methods (D4)",
+                ctx.ty_name(&recv_ty)
+            ),
+        );
+    }
+    let mut impls: Vec<HirTy> = Vec::new();
+    for t in ctx.env.trait_impl_tys.get(&bounds[0]).into_iter().flatten() {
+        if !impls.contains(t) && bounds.iter().all(|b| ctx.implements(t, b)) {
+            impls.push(t.clone());
+        }
+    }
+    let Some(first) = impls.first() else {
+        discard_args(ctx, args);
+        return ctx.error_expr(
+            span,
+            format!(
+                "`{}` has no implementing type in this program, so `{method}` can never be \
+                 called on it",
+                ctx.ty_name(&recv_ty)
+            ),
+        );
+    };
+    let Some(sig0) = ctx
+        .env
+        .fn_table
+        .get(&format!("{}__{method}", ty_mangle(first)))
+        .cloned()
+    else {
+        discard_args(ctx, args);
+        return ctx.error_expr(
+            span,
+            format!("internal: no `{method}` for an `any` implementor"),
+        );
+    };
+    // Receiver and arguments are evaluated once, into temporaries.
+    let mut sig = sig0.clone();
+    sig.param_tys[0] = recv_ty.clone();
+    let (lowered, mut lets) = lower_args_for(ctx, &sig, method, Some(recv_h), args, span);
+    let temps: Vec<(LocalId, HirTy)> = lowered
+        .into_iter()
+        .map(|a| {
+            let l = ctx.declare(None, a.ty.clone());
+            let ty = a.ty.clone();
+            lets.push(HirStmt::Let { local: l, init: a });
+            (l, ty)
+        })
+        .collect();
+    let mut arms = Vec::with_capacity(impls.len());
+    for t in impls {
+        let Some(target) = method_target_for(&t) else {
+            continue;
+        };
+        let Some(&fn_id) = ctx.env.method_table.get(&(target, method.to_owned())) else {
+            continue;
+        };
+        let bind = ctx.declare(None, t.clone());
+        let mut call_args = vec![hir_local(bind, &t, span)];
+        call_args.extend(temps[1..].iter().map(|(l, ty)| hir_local(*l, ty, span)));
+        arms.push(HirMatchArm {
+            pat: HirPattern::SumVariant {
+                sum_ty: recv_ty.clone(),
+                variant_index: ctx.any_tag(&t),
+                binder: Some(bind),
+                payload_ty: Some(t),
+            },
+            guard: None,
+            body: HirExpr {
+                kind: HirExprKind::Call {
+                    callee: fn_id,
+                    args: call_args,
+                },
+                ty: sig0.ret_ty.clone(),
+                span,
+            },
+        });
+    }
+    with_lets(
+        lets,
+        HirExpr {
+            kind: HirExprKind::Match {
+                scrutinee: Box::new(hir_local(temps[0].0, &recv_ty, span)),
+                arms,
+            },
+            ty: sig0.ret_ty,
+            span,
+        },
+    )
 }
 
 /// Spec 5.6 for methods: an inherent method without `pub` is private to

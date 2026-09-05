@@ -1,0 +1,8 @@
+// spec: 002.04-trait-as-type
+// probe: negative-must-fail
+// expect-error: trait `Shape` cannot be used as a type directly
+
+// D4: 맨 트레잇 이름은 여전히 타입이 아니다 — `any Shape` 로 적는다.
+trait Shape { fn area(self) -> i32; }
+
+fn total(a: Shape) -> i32 { return a.area(); }

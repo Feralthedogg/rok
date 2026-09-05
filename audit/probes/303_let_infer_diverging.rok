@@ -1,0 +1,11 @@
+// spec: 003.03-let
+// probe: negative-must-fail
+// expect-error: cannot infer the type of `x`: the initializer never produces a value
+
+// D1: 초기값이 diverge 만 하면 (`return` / `loop {}`) 타입이 없다.
+fn f(c: bool) -> i32 {
+    let x = if c { return 1; } else { return 2; };
+    return 0;
+}
+
+rok_print_i32(f(true));

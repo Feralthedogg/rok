@@ -394,6 +394,8 @@ pub enum TyKind {
     Array(Box<Ty>, ConstExpr),
     /// `any` slot.
     Any,
+    /// `any Tr` / `any (A + B)` — a dynamic slot bounded by traits (D4).
+    AnyTrait(Vec<Path>),
     /// `none` (used inside sum types).
     None,
     /// Self type.

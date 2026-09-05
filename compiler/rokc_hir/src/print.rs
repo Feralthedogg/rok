@@ -483,6 +483,7 @@ fn ty_str(t: &HirTy) -> String {
         HirTy::Unit => "()".to_owned(),
         HirTy::Prim(p) => p.name().to_owned(),
         HirTy::Any => "any".to_owned(),
+        HirTy::AnyTrait(b) => format!("any ({})", b.join(" + ")),
         HirTy::Path(parts) => parts.join("::"),
         HirTy::Sum(parts) => parts.iter().map(ty_str).collect::<Vec<_>>().join(" | "),
         HirTy::Tuple(parts) => {

@@ -521,6 +521,35 @@ pub fn lower_full(
             trait_defs.entry(t.name.clone()).or_insert(t);
         }
     }
+    // `any Tr` (D4): each trait's method names and supertrait keys, and
+    // (filled per impl below) its implementing types in source order.
+    let trait_info: HashMap<String, TraitInfo> = trait_defs
+        .iter()
+        .map(|(name, t)| {
+            let module = module_of(name);
+            let supers = t
+                .supertraits
+                .iter()
+                .filter_map(|st| match &st.kind {
+                    AstTyKind::Path(p) => {
+                        let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
+                        Some(names.trait_key(&segs, &module))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let methods = t
+                .items
+                .iter()
+                .filter_map(|i| match i {
+                    rokc_ast::TraitItem::Method(m) => Some(leaf_name(&m.name).to_owned()),
+                    _ => None,
+                })
+                .collect();
+            (name.clone(), TraitInfo { methods, supers })
+        })
+        .collect();
+    let mut trait_impl_tys: HashMap<String, Vec<HirTy>> = HashMap::new();
 
     for item in &program.items {
         let Item::Impl(impl_def) = item else { continue };
@@ -575,6 +604,10 @@ pub fn lower_full(
         });
         if let (Some(tn), Some(target_key)) = (&trait_name, target.clone()) {
             impl_traits.insert((target_key, tn.clone()));
+            trait_impl_tys
+                .entry(tn.clone())
+                .or_default()
+                .push(target_ty.clone());
         }
         let trait_def = trait_name
             .as_ref()
@@ -837,6 +870,7 @@ pub fn lower_full(
         extra_struct_table: std::cell::RefCell::new(HashMap::new()),
         extra_enums: std::cell::RefCell::new(Vec::new()),
         extra_enum_table: std::cell::RefCell::new(HashMap::new()),
+        any_tags: std::cell::RefCell::new(Vec::new()),
         diagnostics: std::cell::RefCell::new(Vec::new()),
     };
     let env = Env {
@@ -859,6 +893,8 @@ pub fn lower_full(
         field_vis,
         uses,
         impl_traits,
+        trait_info,
+        trait_impl_tys,
         statics: static_tys,
         names,
     };
@@ -1473,6 +1509,7 @@ pub(super) fn ty_size_align_bytes(ty: &HirTy) -> Option<(u32, u32)> {
         | HirTy::Path(_)
         | HirTy::Unknown
         | HirTy::Any
+        | HirTy::AnyTrait(_)
         | HirTy::Unit
         | HirTy::Fn(_, _)
         | HirTy::Closure { .. } => None,

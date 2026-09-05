@@ -1,0 +1,19 @@
+// expect-exit: 0
+// expect-stdout:
+// 19
+// 4
+// 0
+
+// D4: `any Shape` stores any implementor (tag + heap payload); a method
+// call switches on the tag over every implementor in the program.
+trait Shape { fn area(self) -> i32; }
+struct Sq { s: i32; }
+struct Rect { w: i32; h: i32; }
+impl Shape for Sq { fn area(self) -> i32 { return self.s * self.s; } }
+impl Shape for Rect { fn area(self) -> i32 { return self.w * self.h; } }
+fn total(a: any Shape, b: any Shape) -> i32 { return a.area() + b.area(); }
+rok_print_i32(total(Sq { s: 3 }, Rect { w: 2, h: 5 }));
+let s: any Shape = Rect { w: 1, h: 4 };
+rok_print_i32(s.area());
+let maybe: any Shape | none = none;
+match maybe { v: any Shape => rok_print_i32(v.area()), none => rok_print_i32(0), }

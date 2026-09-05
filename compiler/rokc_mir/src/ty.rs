@@ -11,6 +11,10 @@ pub fn lower_ty(ty: &HirTy) -> MirTy {
         HirTy::Unknown | HirTy::Path(_) | HirTy::Any => MirTy::Any,
         HirTy::Unit => MirTy::Unit,
         HirTy::Prim(p) => MirTy::Prim(*p),
+        // `any Tr`: `(i32 tag, usize heap pointer)`.
+        HirTy::AnyTrait(_) => {
+            MirTy::Tuple(vec![MirTy::Prim(PrimTy::I32), MirTy::Prim(PrimTy::Usize)])
+        }
         HirTy::Sum(parts) => sum_layout(&non_none(parts).map(lower_ty).collect::<Vec<_>>()),
         HirTy::Tuple(parts) => MirTy::Tuple(parts.iter().map(lower_ty).collect()),
         // Struct types need the field shape; this stub only allocates

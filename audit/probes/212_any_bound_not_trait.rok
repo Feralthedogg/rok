@@ -1,0 +1,8 @@
+// spec: 002.12-any-trait
+// probe: negative-must-fail
+// expect-error: `Sq` in `any Sq` is not a trait
+
+// D4: `any` 의 제약은 트레잇이어야 한다.
+struct Sq { s: i32; }
+
+let s: any Sq = Sq { s: 1 };

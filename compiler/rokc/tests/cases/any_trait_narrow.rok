@@ -1,0 +1,70 @@
+// expect-exit: 0
+// expect-stdout:
+// 25
+// 60
+// 2
+// 7
+// 9
+// 4
+// 4
+// 6
+// 3
+// -1
+// 4
+// 25
+
+// D4 beyond the basics: supertrait and default methods, a primitive
+// implementor, `any` struct fields, `any (A + B)` with upcast to `any A`,
+// `if` branches into an annotated `any` slot, narrowing by type pattern,
+// `any Tr | none`, and reassignment of an `any` local.
+trait Named { fn id(self) -> i32; }
+trait Shape: Named {
+    fn area(self) -> i32;
+    fn scaled(self, k: i32) -> i32 { return self.area() * k; }
+}
+trait Show { fn show(self); }
+struct Sq { s: i32; }
+struct Rect { w: i32; h: i32; }
+impl Named for Sq { fn id(self) -> i32 { return 1; } }
+impl Named for Rect { fn id(self) -> i32 { return 2; } }
+impl Named for i32 { fn id(self) -> i32 { return 3; } }
+impl Shape for Sq { fn area(self) -> i32 { return self.s * self.s; } }
+impl Shape for Rect { fn area(self) -> i32 { return self.w * self.h; } }
+impl Shape for i32 { fn area(self) -> i32 { return self; } }
+impl Show for Rect { fn show(self) { rok_print_i32(self.w); } }
+impl Show for i32 { fn show(self) { rok_print_i32(self); } }
+struct Holder { inner: any Shape; tag: i32; }
+
+fn pick(c: bool) -> any Shape {
+    let r: any Shape = if c { Sq { s: 5 } } else { Rect { w: 2, h: 3 } };
+    return r;
+}
+fn both(x: any (Shape + Show)) -> any Shape {
+    x.show();
+    return x;
+}
+fn kind(v: any Shape) -> i32 {
+    return match v {
+        q: Sq => q.s,
+        r: Rect => r.w + r.h,
+        _ => 0 - 1,
+    };
+}
+
+rok_print_i32(pick(true).area());
+rok_print_i32(pick(false).scaled(10));
+rok_print_i32(pick(false).id());
+let n: any Shape = 7;
+rok_print_i32(n.area());
+let h = Holder { inner: Rect { w: 3, h: 3 }, tag: 0 };
+rok_print_i32(h.inner.area());
+let b = both(Rect { w: 4, h: 1 });
+rok_print_i32(b.area());
+rok_print_i32(kind(Sq { s: 6 }));
+rok_print_i32(kind(Rect { w: 1, h: 2 }));
+rok_print_i32(kind(8));
+let m: any Shape | none = Sq { s: 2 };
+match m { v: any Shape => rok_print_i32(v.area()), none => rok_print_i32(0), }
+let k: any Shape = Sq { s: 1 };
+k = Rect { w: 5, h: 5 };
+rok_print_i32(k.area());

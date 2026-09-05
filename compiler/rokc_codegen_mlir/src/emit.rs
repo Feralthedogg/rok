@@ -21,6 +21,8 @@ pub struct Emitter {
     pub errors: Vec<String>,
     /// Some codegen-inserted runtime check called `rok_panic`.
     uses_panic: bool,
+    /// Some `HeapBox` (an `any Tr` payload) called `rok_alloc`.
+    uses_alloc: bool,
     /// Package hash for mangled symbols (spec 905).
     pkg: String,
     /// Panic on integer `+ - *` / negation overflow (debug builds); wrap
@@ -44,6 +46,7 @@ impl Emitter {
             str_globals: std::collections::BTreeMap::new(),
             errors: Vec::new(),
             uses_panic: false,
+            uses_alloc: false,
             pkg: String::new(),
             overflow_checks: true,
         }
@@ -87,6 +90,17 @@ impl Emitter {
                 self.out,
                 "  func.func private @rok_panic(!llvm.ptr, i{})",
                 self.pointer_width
+            );
+        }
+        let alloc_declared = module
+            .functions
+            .iter()
+            .any(|f| f.name == "rok_alloc" && f.blocks.is_empty());
+        if self.uses_alloc && !alloc_declared {
+            let pw = self.pointer_width;
+            let _ = writeln!(
+                self.out,
+                "  func.func private @rok_alloc(i{pw}, i{pw}) -> i{pw}"
             );
         }
         self.emit_static_globals(module);
@@ -201,6 +215,7 @@ impl Emitter {
         }
         self.str_globals = std::mem::take(&mut emit.str_globals);
         self.uses_panic |= emit.uses_panic;
+        self.uses_alloc |= emit.uses_alloc;
         for e in std::mem::take(&mut emit.errors) {
             self.errors.push(format!("in `{}`: {e}", f.name));
         }
@@ -298,6 +313,7 @@ struct FnEmit<'a> {
     str_globals: std::collections::BTreeMap<String, String>,
     errors: Vec<String>,
     uses_panic: bool,
+    uses_alloc: bool,
     /// Counter for the extra blocks runtime checks split off.
     next_check: u32,
     pkg: &'a str,
@@ -336,6 +352,7 @@ impl<'a> FnEmit<'a> {
             str_globals,
             errors: Vec::new(),
             uses_panic: false,
+            uses_alloc: false,
             next_check: 0,
             pkg,
             overflow_checks: true,
@@ -721,6 +738,23 @@ impl<'a> FnEmit<'a> {
                 arg_tys,
                 ret_ty,
             } => self.emit_call_indirect(callee, args, arg_tys, ret_ty),
+            RValue::HeapBox { value, ty } => self.emit_heap_box(value, ty),
+            RValue::HeapLoad { ptr, ty } => {
+                let pw = self.pointer_width;
+                let p = self.materialize_operand(ptr, &MirTy::Prim(PrimTy::Usize));
+                let addr = self.fresh_value();
+                let _ = writeln!(
+                    self.body,
+                    "    {addr} = llvm.inttoptr {p} : i{pw} to !llvm.ptr"
+                );
+                let dst = self.fresh_value();
+                let ty_str = mlir_type(ty, pw);
+                let _ = writeln!(
+                    self.body,
+                    "    {dst} = llvm.load {addr} : !llvm.ptr -> {ty_str}"
+                );
+                dst
+            }
             RValue::StaticLoad { name, ty } => {
                 let ty_str = mlir_type(ty, self.pointer_width);
                 let addr = self.fresh_value();
@@ -737,6 +771,39 @@ impl<'a> FnEmit<'a> {
                 dst
             }
         }
+    }
+
+    /// `rok_alloc(sizeof ty, 8)` + store; the address as `usize`. Size
+    /// comes from the `gep null[1]` idiom so LLVM's layout decides it.
+    fn emit_heap_box(&mut self, value: &Operand, ty: &MirTy) -> String {
+        let pw = self.pointer_width;
+        let v = self.materialize_operand(value, ty);
+        let ty_str = mlir_type(ty, pw);
+        let [null, end, size, align, cell, addr] = std::array::from_fn(|_| self.fresh_value());
+        self.uses_alloc = true;
+        let _ = writeln!(self.body, "    {null} = llvm.mlir.zero : !llvm.ptr");
+        let _ = writeln!(
+            self.body,
+            "    {end} = llvm.getelementptr {null}[1] : (!llvm.ptr) -> !llvm.ptr, {ty_str}"
+        );
+        let _ = writeln!(
+            self.body,
+            "    {size} = llvm.ptrtoint {end} : !llvm.ptr to i{pw}"
+        );
+        let _ = writeln!(self.body, "    {align} = arith.constant 8 : i{pw}");
+        let _ = writeln!(
+            self.body,
+            "    {cell} = func.call @rok_alloc({size}, {align}) : (i{pw}, i{pw}) -> i{pw}"
+        );
+        let _ = writeln!(
+            self.body,
+            "    {addr} = llvm.inttoptr {cell} : i{pw} to !llvm.ptr"
+        );
+        let _ = writeln!(
+            self.body,
+            "    llvm.store {v}, {addr} : {ty_str}, !llvm.ptr"
+        );
+        cell
     }
 
     fn emit_fn_addr(&mut self, callee: FunctionId, fn_ty: &MirTy) -> String {

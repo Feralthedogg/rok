@@ -1,0 +1,11 @@
+// spec: 002.12-any-trait
+// probe: negative-must-fail
+// expect-error: `Circle` does not implement `Shape`, so it cannot be stored in an `any Shape` slot
+
+// D4: `any Tr` 슬롯에 넣는 값의 정적 타입은 `Tr` 을 구현해야 한다.
+trait Shape { fn area(self) -> i32; }
+struct Sq { s: i32; }
+struct Circle { r: i32; }
+impl Shape for Sq { fn area(self) -> i32 { return self.s * self.s; } }
+
+let s: any Shape = Circle { r: 2 };

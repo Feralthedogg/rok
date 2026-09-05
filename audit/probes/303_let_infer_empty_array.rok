@@ -1,0 +1,6 @@
+// spec: 003.03-let
+// probe: negative-must-fail
+// expect-error: cannot infer the element type of an empty array literal
+
+// D1: 원소 없는 배열 리터럴은 원소 타입을 정할 수 없다 — 타입을 적어야 한다.
+let xs = [];

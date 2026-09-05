@@ -1763,9 +1763,23 @@ impl<'a> Parser<'a> {
     fn parse_type_atom_inner(&mut self) -> Option<Ty> {
         let start = self.peek_span();
         let kind = match self.peek().clone() {
+            // `any` | `any Tr` | `any (A + B)` (D4). The bound binds
+            // tighter than `|`: `any Error | none` is `(any Error) | none`.
             TokenKind::Any => {
                 self.bump();
-                TyKind::Any
+                match self.peek() {
+                    TokenKind::Ident(_) => TyKind::AnyTrait(vec![self.parse_type_path()?]),
+                    TokenKind::LParen => {
+                        self.bump();
+                        let mut bounds = vec![self.parse_type_path()?];
+                        while self.eat(&TokenKind::Plus) {
+                            bounds.push(self.parse_type_path()?);
+                        }
+                        self.expect(&TokenKind::RParen, "`)`")?;
+                        TyKind::AnyTrait(bounds)
+                    }
+                    _ => TyKind::Any,
+                }
             }
             TokenKind::None => {
                 self.bump();

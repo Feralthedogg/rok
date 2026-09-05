@@ -160,6 +160,17 @@ pub enum RValue {
         name: String,
         ty: MirTy,
     },
+    // Copy `value` (of type `ty`) to a fresh heap cell; yields the cell's
+    // address as `usize`. The payload of an `any Tr` value.
+    HeapBox {
+        value: Operand,
+        ty: MirTy,
+    },
+    // Load a `ty` from the `usize` address `ptr` (a `HeapBox` cell).
+    HeapLoad {
+        ptr: Operand,
+        ty: MirTy,
+    },
     // Indirect call through a function-typed operand.
     CallIndirect {
         callee: Operand,

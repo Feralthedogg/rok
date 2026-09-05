@@ -4,9 +4,11 @@
 // expect-stdout:
 // from_int
 
-// spec / 변경점 1019: 분기 타입이 다르면 결과는 자동 합 타입.
+// D1 (2026-10-12): 분기 타입이 달라도 합 타입을 자동 추론하지 않는다.
+// 슬롯에 합 타입을 적으면 각 분기 값이 그 합으로 들어간다.
+// 생략하면 에러 — `309_branch_types_differ` probe.
 fn pick(b: i32) -> i32 | f64 {
-    let v = if b == 1 { 7 } else { 3.14 };
+    let v: i32 | f64 = if b == 1 { 7 } else { 3.14 };
     return v;
 }
 

@@ -454,6 +454,11 @@ pub enum HirTy {
     Prim(PrimTy),
     /// Dynamic `any` slot.
     Any,
+    /// `any Tr` / `any (A + B)`: canonical trait keys, sorted (D4).
+    /// Tag + heap payload; the tag numbers concrete types program-wide.
+    /// Construction reuses `SumWrap` (variant index = tag) and narrowing
+    /// reuses `SumVariant` with this as `sum_ty`.
+    AnyTrait(Vec<String>),
     Path(Vec<String>),
     Sum(Vec<HirTy>),
     Tuple(Vec<HirTy>),

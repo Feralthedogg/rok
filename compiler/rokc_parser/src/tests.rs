@@ -622,3 +622,25 @@ fn unsupported_impl_const_and_extern_static() {
     assert_eq!(d.len(), 2, "{d:#?}");
     assert!(d[0].contains("not yet supported") && d[1].contains("not yet supported"));
 }
+
+#[test]
+fn any_trait_type_forms() {
+    use rokc_ast::TyKind;
+    let p = parse("fn f(a: any, b: any Error | none, c: any (A + B)) {}");
+    let Item::Fn(f) = &p.items[0] else {
+        panic!("expected fn");
+    };
+    let kinds: Vec<&TyKind> = f
+        .params
+        .iter()
+        .map(|p| &p.ty.as_ref().unwrap().kind)
+        .collect();
+    assert!(matches!(kinds[0], TyKind::Any));
+    // `any Error | none` is `(any Error) | none`.
+    let TyKind::Sum(parts) = kinds[1] else {
+        panic!("expected a sum, got {:?}", kinds[1]);
+    };
+    assert!(matches!(&parts[0].kind, TyKind::AnyTrait(b) if b.len() == 1));
+    assert!(matches!(parts[1].kind, TyKind::None));
+    assert!(matches!(kinds[2], TyKind::AnyTrait(b) if b.len() == 2));
+}

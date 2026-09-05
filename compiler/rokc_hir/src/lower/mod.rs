@@ -236,9 +236,19 @@ struct Env<'a> {
     /// blocks. Consulted at monomorphization time to enforce generic
     /// trait bounds.
     impl_traits: std::collections::HashSet<(MethodTarget, String)>,
+    /// Trait key → declared methods + supertraits (`any Tr` calls).
+    trait_info: HashMap<String, TraitInfo>,
+    /// Trait key → implementing types, in impl order (`any Tr` dispatch).
+    trait_impl_tys: HashMap<String, Vec<HirTy>>,
     /// Module-level `static` items by name → declared type.
     statics: HashMap<String, HirTy>,
     names: TypeNames<'a>,
+}
+
+/// What `any Tr` needs from a trait declaration.
+struct TraitInfo {
+    methods: Vec<String>,
+    supers: Vec<String>,
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -331,6 +341,10 @@ fn ty_compatible(expected: &HirTy, actual: &HirTy) -> bool {
         a.len() == b.len() && a.iter().zip(b).all(|(x, y)| ty_compatible(x, y))
     };
     match (expected, actual) {
+        // ponytail: plain `any` is still an untyped integer slot, so it
+        // doesn't mix with the tagged `any Tr` layout either way. Make
+        // `any` = `any ()` (tag + payload, no bounds) to allow it.
+        (HirTy::AnyTrait(_), HirTy::Any) | (HirTy::Any, HirTy::AnyTrait(_)) => false,
         (HirTy::Unknown | HirTy::Any, _) | (_, HirTy::Unknown | HirTy::Any) => true,
         (HirTy::Sum(vs), a) if !matches!(a, HirTy::Sum(_)) => sum_variant_index(vs, a).is_some(),
         (HirTy::Tuple(a), HirTy::Tuple(b)) | (HirTy::Sum(a), HirTy::Sum(b)) => all(a, b),
@@ -343,6 +357,7 @@ fn ty_compatible(expected: &HirTy, actual: &HirTy) -> bool {
 /// Wrap `value` into `slot` (sum injection) and report a type mismatch.
 /// `what` names the slot for the diagnostic ("argument 1 of `f`").
 fn coerce(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr, what: &dyn Fn() -> String) -> HirExpr {
+    let value = box_into_any(ctx, slot, value);
     let v = wrap_into_sum(slot, value);
     if !ty_compatible(slot, &v.ty) {
         let hint = if matches!((slot, &v.ty), (HirTy::Fn(..), HirTy::Closure { .. })) {
@@ -361,6 +376,70 @@ fn coerce(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr, what: &dyn Fn() -> S
         );
     }
     v
+}
+
+/// The `any Tr` slot a value of type `ty` would be stored into: `slot`
+/// itself, or the `any Tr` variant of a sum slot that has no exact
+/// variant for `ty`.
+fn any_slot_for<'s>(slot: &'s HirTy, ty: &HirTy) -> Option<&'s HirTy> {
+    match slot {
+        HirTy::AnyTrait(_) => Some(slot),
+        HirTy::Sum(vs) if !matches!(ty, HirTy::Sum(_)) && sum_variant_index(vs, ty).is_none() => {
+            vs.iter().find(|v| matches!(v, HirTy::AnyTrait(_)))
+        }
+        _ => None,
+    }
+}
+
+/// D4 store check + boxing: a value flowing into an `any Tr` slot must
+/// implement every bound; it becomes `SumWrap { tag, value }` (tag =
+/// program-wide type number, payload = heap copy). `any (A + B)` → `any
+/// A` keeps the value as is (same tag numbering).
+fn box_into_any(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -> HirExpr {
+    let Some(target @ HirTy::AnyTrait(bounds)) = any_slot_for(slot, &value.ty) else {
+        return value;
+    };
+    match &value.ty {
+        HirTy::AnyTrait(have) if bounds.iter().all(|b| have.contains(b)) => HirExpr {
+            ty: target.clone(),
+            ..value
+        },
+        // Mismatches (`any A` into `any B`, plain `any`) are reported by
+        // the caller's compatibility check.
+        HirTy::Unknown | HirTy::Any | HirTy::AnyTrait(_) => value,
+        ty => {
+            let missing: Vec<&String> = bounds.iter().filter(|b| !ctx.implements(ty, b)).collect();
+            if !missing.is_empty() {
+                let names: Vec<String> = missing.iter().map(|b| format!("`{b}`")).collect();
+                return ctx.error_expr(
+                    value.span,
+                    format!(
+                        "`{}` does not implement {}, so it cannot be stored in an `{}` slot (D4)",
+                        ctx.ty_name(ty),
+                        names.join(", "),
+                        ctx.ty_name(target)
+                    ),
+                );
+            }
+            let span = value.span;
+            HirExpr {
+                kind: HirExprKind::SumWrap {
+                    sum_ty: target.clone(),
+                    variant_index: ctx.any_tag(ty),
+                    value: Some(Box::new(value)),
+                },
+                ty: target.clone(),
+                span,
+            }
+        }
+    }
+}
+
+/// `ty_compatible`, or storable through `box_into_any`.
+fn coercible(ctx: &LowerCtx<'_>, slot: &HirTy, ty: &HirTy) -> bool {
+    ty_compatible(slot, ty)
+        || matches!(any_slot_for(slot, ty), Some(HirTy::AnyTrait(bs))
+            if bs.iter().all(|b| ctx.implements(ty, b)))
 }
 
 /// Lower `e` with `ty` as its expected type (`Unknown` = no expectation).
@@ -387,7 +466,11 @@ fn hir_block_diverges(b: &HirBlock) -> bool {
 
 fn hir_expr_diverges(e: &HirExpr) -> bool {
     match &e.kind {
-        HirExprKind::Block(b) => hir_block_diverges(b),
+        // `'l: { break 'l v; }` exits with a value: not divergence.
+        HirExprKind::Block(b) => {
+            hir_block_diverges(b)
+                && !(b.label.is_some() && block_breaks_out(b, b.label.as_deref(), false))
+        }
         HirExprKind::If {
             then_block,
             else_branch: Some(eb),
@@ -478,6 +561,8 @@ struct ClosureSink {
     /// Same for generic enums (ids continue after `Env::enums`).
     extra_enums: std::cell::RefCell<Vec<HirEnumDef>>,
     extra_enum_table: std::cell::RefCell<HashMap<String, EnumId>>,
+    /// `any` type tags: index = tag of that concrete type.
+    any_tags: std::cell::RefCell<Vec<HirTy>>,
     /// Diagnostics emitted during lowering — surfaced through
     /// `HirModule.diagnostics` so the driver can fail the build.
     diagnostics: std::cell::RefCell<Vec<rokc_diagnostic::RokDiagnostic>>,
@@ -589,6 +674,8 @@ impl<'a> LowerCtx<'a> {
             HirTy::Prim(p) => p.name().to_owned(),
             HirTy::Unit => "()".to_owned(),
             HirTy::Any => "any".to_owned(),
+            HirTy::AnyTrait(b) if b.len() == 1 => format!("any {}", b[0]),
+            HirTy::AnyTrait(b) => format!("any ({})", b.join(" + ")),
             HirTy::Unknown => "{unknown}".to_owned(),
             HirTy::Path(p) => p.join("::"),
             HirTy::Tuple(parts) => {
@@ -610,6 +697,23 @@ impl<'a> LowerCtx<'a> {
                 format!("{kw}({}) -> {}", inner.join(", "), self.ty_name(ret))
             }
         }
+    }
+
+    /// Does `ty` have an `impl {trait_key} for ty`?
+    fn implements(&self, ty: &HirTy, trait_key: &str) -> bool {
+        method_target_for(ty)
+            .is_some_and(|t| self.env.impl_traits.contains(&(t, trait_key.to_owned())))
+    }
+
+    /// Program-wide `any` type tag of concrete type `ty`, assigned on
+    /// first use (whole-program compilation: closed world).
+    fn any_tag(&self, ty: &HirTy) -> u32 {
+        let mut tags = self.env.sink.any_tags.borrow_mut();
+        let i = tags.iter().position(|t| t == ty).unwrap_or_else(|| {
+            tags.push(ty.clone());
+            tags.len() - 1
+        });
+        u32::try_from(i).expect("any tag overflow")
     }
 
     fn struct_def(&self, id: StructId) -> HirStructDef {

@@ -494,6 +494,11 @@ pub fn walk_ty(v: &mut impl AstVisitor, t: &Ty) {
             }
             walk_ty(v, ret);
         }
+        TyKind::AnyTrait(bounds) => {
+            for b in bounds {
+                walk_path_generics(v, b);
+            }
+        }
         TyKind::Any | TyKind::None | TyKind::SelfUpper => {}
     }
 }

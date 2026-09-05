@@ -228,6 +228,14 @@ fn print_rvalue(out: &mut String, r: &RValue) {
         RValue::StaticLoad { name, ty } => {
             let _ = write!(out, "static[{}] {name}", ty_str(ty));
         }
+        RValue::HeapBox { value, ty } => {
+            let _ = write!(out, "heap_box<{}> ", ty_str(ty));
+            print_operand(out, value);
+        }
+        RValue::HeapLoad { ptr, ty } => {
+            let _ = write!(out, "heap_load<{}> ", ty_str(ty));
+            print_operand(out, ptr);
+        }
     }
 }
 

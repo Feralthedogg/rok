@@ -25,6 +25,18 @@ pub fn resolve_ty(ty: &Ty) -> HirTy {
             }
         }
         TyKind::Any => HirTy::Any,
+        TyKind::AnyTrait(bounds) => HirTy::AnyTrait(
+            bounds
+                .iter()
+                .map(|b| {
+                    b.segments
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("::")
+                })
+                .collect(),
+        ),
         TyKind::None => HirTy::Path(vec!["none".to_owned()]),
         TyKind::SelfUpper => HirTy::Path(vec!["Self".to_owned()]),
         TyKind::Array(elem, len) => {
