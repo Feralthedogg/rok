@@ -1,0 +1,10 @@
+// spec: 002.02-any-slot
+// probe: negative-must-fail
+// expect-error: cannot store an `any` value in an `any Show` slot without narrowing
+
+// 2.2.10: 맨 `any` → `any Tr` 암묵 변환은 없다 (`is` / 타입 패턴으로 좁힌 뒤에 넣는다).
+trait Show { fn show(self); }
+impl Show for i32 { fn show(self) { rok_print_i32(self); } }
+
+let v: any = 1;
+let s: any Show = v;

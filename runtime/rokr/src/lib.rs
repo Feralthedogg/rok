@@ -282,21 +282,25 @@ pub extern "C" fn rok_timer_register(_deadline_ns: u64, _waker: *mut u8) {
 }
 
 // ---------------------------------------------------------------------
-// 8.5.6 Exceptions
+// 8.5.6 Errors
 // ---------------------------------------------------------------------
+// `throw` / `try` / `catch` are value-based (a throwing function returns
+// an `is_err` flag with its payload) and need no runtime support. Only
+// an error escaping a throwing `main` reaches the runtime.
 
-/// `throw` entry. TODO(806 §8.6.5): longjmp to the nearest catch
-/// `jmp_buf` once the compiler emits setjmp frames; `throw` currently
-/// lowers to `rok_panic` and never reaches here.
+/// Uncaught error out of `fn main() throws (..)` (spec 4.16.4): `msg` +
+/// `\n` to stderr, then exit status 1 (not 101: this is not a panic).
+///
+/// # Safety
+/// `msg` must be valid for reads of `msg_len` bytes.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_throw(_exc: *mut u8) -> ! {
-    fatal(b"uncaught exception (rok_throw: setjmp/longjmp unwinding not implemented)")
-}
-
-/// No catch handler ever runs yet, so there is never a current exception.
-#[unsafe(no_mangle)]
-pub const extern "C" fn rok_exception_current() -> *mut u8 {
-    ptr::null_mut()
+pub unsafe extern "C" fn rok_uncaught_error(msg: *const u8, msg_len: usize) -> ! {
+    // SAFETY: caller contract; `exit` flushes buffered stdout.
+    unsafe {
+        write_stderr(msg, msg_len);
+        write_stderr(b"\n".as_ptr(), 1);
+        libc::exit(1)
+    }
 }
 
 // ---------------------------------------------------------------------

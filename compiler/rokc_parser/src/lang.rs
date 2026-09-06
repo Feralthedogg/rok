@@ -69,8 +69,6 @@ pub const KNOWN_SLOTS: &[&str] = &[
     "unreachable_fn",
     // 0.4.5 method slots
     "drop_method",
-    "try_branch",
-    "from_residual",
 ];
 
 /// What kind of item the `#[lang]` attribute is attached to. Consumers
@@ -142,7 +140,7 @@ pub fn collect_lang_table(program: &Program) -> (LangTable, Vec<RokDiagnostic>) 
         for attr in attrs {
             collect_attr(attr, name, kind, span, &mut table, &mut diags);
         }
-        // Method slots (`drop_method`, `try_branch`, ...) sit on trait methods.
+        // Method slots (`drop_method`) sit on trait methods.
         if let Item::Trait(t) = item {
             for ti in &t.items {
                 if let rokc_ast::TraitItem::Method(f) = ti {

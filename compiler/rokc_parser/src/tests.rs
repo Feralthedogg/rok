@@ -389,13 +389,74 @@ fn catch_binding_followed_by_block() {
     let p = parse("fn f() { try { g(); } catch e { h(e); } }");
     let Item::Fn(f) = &p.items[0] else { panic!() };
     let e = f.body.as_ref().unwrap().trailing.as_ref().unwrap();
-    let ExprKind::Try { catches, .. } = &e.kind else {
+    // `try { .. } catch ..` = `catch` around `try` applied to the block.
+    let ExprKind::Catch { body, catches, .. } = &e.kind else {
         panic!("{e:?}")
     };
+    assert!(matches!(&body.kind, ExprKind::Try { operand, .. }
+        if matches!(operand.kind, ExprKind::Block(_))));
     assert!(matches!(
         catches[0].pat.kind,
         rokc_ast::PatternKind::Binding { .. }
     ));
+}
+
+#[test]
+fn try_covers_rhs_and_catch_binds_loosest() {
+    let p = parse(
+        "fn f() { let x = try a(b()) catch E::V { 0 } catch { 1 }; \
+         let y = try? c(); let z = try! c(); }",
+    );
+    let Item::Fn(f) = &p.items[0] else { panic!() };
+    let stmts = &f.body.as_ref().unwrap().stmts;
+    let StmtKind::Let { init, .. } = &stmts[0].kind else {
+        panic!()
+    };
+    let ExprKind::Catch { body, catches, .. } = &init.kind else {
+        panic!("{init:?}")
+    };
+    // `try` covers `a(b())`, the catches wrap the whole `try`.
+    assert!(
+        matches!(&body.kind, ExprKind::Try { kind: rokc_ast::TryKind::Plain, operand }
+        if matches!(operand.kind, ExprKind::Call { .. }))
+    );
+    assert!(matches!(
+        catches[0].pat.kind,
+        rokc_ast::PatternKind::EnumVariant { .. }
+    ));
+    assert!(matches!(
+        catches[1].pat.kind,
+        rokc_ast::PatternKind::Wildcard
+    ));
+    for (i, kind) in [
+        (1, rokc_ast::TryKind::Optional),
+        (2, rokc_ast::TryKind::Force),
+    ] {
+        let StmtKind::Let { init, .. } = &stmts[i].kind else {
+            panic!()
+        };
+        assert!(matches!(&init.kind, ExprKind::Try { kind: k, .. } if *k == kind));
+    }
+}
+
+#[test]
+fn rethrows_desugars_to_error_generics() {
+    let p = parse("fn ap(f: fn(i32) throws -> i32, x: i32) rethrows -> i32 { try f(x) }");
+    let Item::Fn(f) = &p.items[0] else { panic!() };
+    assert!(matches!(&f.generics.params[..],
+        [rokc_ast::GenericParam::Type { name, .. }] if name == "#E0"));
+    assert!(matches!(&f.throws, rokc_ast::ThrowsKind::Typed(t) if t.len() == 1));
+    let ty = f.params[0].ty.as_ref().unwrap();
+    assert!(matches!(&ty.kind, rokc_ast::TyKind::Fn(_, ret)
+        if matches!(ret.kind, rokc_ast::TyKind::Throws { .. })));
+}
+
+#[test]
+fn untyped_throws_parses() {
+    // `throws` alone = `throws (any Error)`; HIR resolves the marker.
+    assert!(diags_of("fn f() throws -> i32 { 1 }").is_empty());
+    assert!(diags_of("fn g(h: fn() throws -> i32) -> i32 { 1 }").is_empty());
+    assert!(diags_of("fn g(h: fn() throws (E) -> i32) -> i32 { 1 }").is_empty());
 }
 
 /// All lexer + parser diagnostics for `src` (arith precedence table).

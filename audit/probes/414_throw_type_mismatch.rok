@@ -1,0 +1,16 @@
+// spec: 004.14-throws-typed
+// probe: negative-must-fail
+// expect-exit: 0  (D3: `throw e` must fit the enclosing fn's `throws (..)`.)
+// expect-error: error `IoError` is not covered by the enclosing function's `throws (ParseError)`
+
+enum ParseError { Bad }
+enum IoError { Closed }
+
+fn parse(s: i32) throws (ParseError) -> i32 {
+    if s < 0 { throw IoError::Closed; }
+    return s;
+}
+
+fn main() -> i32 {
+    return try parse(1) catch _ { 0 };
+}

@@ -439,7 +439,7 @@ pub fn lower_full(
         };
         FnSig {
             id,
-            ret_ty: fn_def.ret_ty.as_ref().map_or(HirTy::Unit, resolve),
+            ret_ty: resolve(&sig_ret_ast(fn_def)),
             param_defaults: fn_def.params.iter().map(|p| p.default.clone()).collect(),
             param_tys: fn_def
                 .params
@@ -538,15 +538,48 @@ pub fn lower_full(
                     _ => None,
                 })
                 .collect();
-            let methods = t
-                .items
-                .iter()
-                .filter_map(|i| match i {
-                    rokc_ast::TraitItem::Method(m) => Some(leaf_name(&m.name).to_owned()),
+            let fns = || {
+                t.items.iter().filter_map(|i| match i {
+                    rokc_ast::TraitItem::Method(m) => Some(m),
                     _ => None,
                 })
+            };
+            let methods = fns().map(|m| leaf_name(&m.name).to_owned()).collect();
+            let params: Vec<&str> = t
+                .generics
+                .params
+                .iter()
+                .filter_map(|p| match p {
+                    rokc_ast::GenericParam::Type { name, .. } => Some(name.as_str()),
+                    rokc_ast::GenericParam::Const { .. } => None,
+                })
                 .collect();
-            (name.clone(), TraitInfo { methods, supers })
+            let mentioning = |names: &[&str]| -> Vec<String> {
+                fns()
+                    .filter(|m| {
+                        std::iter::once(sig_ret_ast(m))
+                            .chain(
+                                m.params
+                                    .iter()
+                                    .filter(|p| p.name != "self")
+                                    .filter_map(|p| p.ty.clone()),
+                            )
+                            .any(|ty| ast_ty_mentions(&ty, names))
+                    })
+                    .map(|m| leaf_name(&m.name).to_owned())
+                    .collect()
+            };
+            let self_methods = mentioning(&["Self"]);
+            let param_methods = mentioning(&params);
+            (
+                name.clone(),
+                TraitInfo {
+                    methods,
+                    supers,
+                    self_methods,
+                    param_methods,
+                },
+            )
         })
         .collect();
     let mut trait_impl_tys: HashMap<String, Vec<HirTy>> = HashMap::new();
@@ -594,7 +627,14 @@ pub fn lower_full(
             );
             continue;
         }
-        let target_ty = resolve_ty_with_structs(&impl_def.self_ty, &struct_table, &enum_table, sc);
+        // A generic impl's methods are all templates keyed by
+        // `generic_base`; resolving `Base<T, E>` here would look its type
+        // params up as (possibly same-named, visible) types.
+        let target_ty = if impl_generic {
+            HirTy::Path(vec![generic_base.clone().unwrap_or_default()])
+        } else {
+            resolve_ty_with_structs(&impl_def.self_ty, &struct_table, &enum_table, sc)
+        };
         let target = method_target_for(&target_ty);
         // Resolve the trait (a user trait resolves to its qualified name;
         // a bootstrap trait like `core::ops::Add` keeps its last segment).
@@ -603,6 +643,24 @@ pub fn lower_full(
             names.trait_key(&segs, &module)
         });
         if let (Some(tn), Some(target_key)) = (&trait_name, target.clone()) {
+            // `impl Index<i32> for T` also answers `any Index<i32>`.
+            let args: Vec<HirTy> = impl_def
+                .trait_path
+                .as_ref()
+                .and_then(|tp| tp.segments.last())
+                .map(|s| {
+                    s.generics
+                        .iter()
+                        .map(|g| resolve_ty_with_structs(g, &struct_table, &enum_table, sc))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !args.is_empty() {
+                impl_traits.insert((
+                    target_key.clone(),
+                    bound_key(tn.clone(), &args, &struct_table, &enum_table),
+                ));
+            }
             impl_traits.insert((target_key, tn.clone()));
             trait_impl_tys
                 .entry(tn.clone())
@@ -991,6 +1049,7 @@ pub(super) fn ty_mentions_any(ty: &HirTy, aliases: &HashMap<String, HirTy>) -> b
         | HirTy::Closure {
             args: a, ret: r, ..
         } => a.iter().any(|p| ty_mentions_any(p, aliases)) || ty_mentions_any(r, aliases),
+        HirTy::Throws { ok, err } => ty_mentions_any(ok, aliases) || ty_mentions_any(err, aliases),
         _ => false,
     }
 }
@@ -1110,6 +1169,10 @@ pub(super) fn collect_unknown_paths(ty: &HirTy, out: &mut Vec<String>) {
             }
             collect_unknown_paths(r, out);
         }
+        HirTy::Throws { ok, err } => {
+            collect_unknown_paths(ok, out);
+            collect_unknown_paths(err, out);
+        }
         _ => {}
     }
 }
@@ -1120,7 +1183,7 @@ pub(super) fn hir_block_has_unknown(b: &HirBlock) -> bool {
         | HirStmt::Assign { value: e, .. }
         | HirStmt::StaticAssign { value: e, .. }
         | HirStmt::Expr(e)
-        | HirStmt::Throw(e)
+        | HirStmt::Panic(e)
         | HirStmt::Return(Some(e))
         | HirStmt::Break { value: Some(e), .. } => hir_expr_has_unknown(e),
         HirStmt::ArrayAssign { index, value, .. } => {
@@ -1512,6 +1575,28 @@ pub(super) fn ty_size_align_bytes(ty: &HirTy) -> Option<(u32, u32)> {
         | HirTy::AnyTrait(_)
         | HirTy::Unit
         | HirTy::Fn(_, _)
-        | HirTy::Closure { .. } => None,
+        | HirTy::Closure { .. }
+        | HirTy::Throws { .. } => None,
+    }
+}
+
+/// Does `ty` name one of `names` (a type name, path head or `Self`)?
+fn ast_ty_mentions(ty: &rokc_ast::Ty, names: &[&str]) -> bool {
+    let rec = |t: &rokc_ast::Ty| ast_ty_mentions(t, names);
+    let path = |p: &rokc_ast::Path| {
+        p.segments
+            .first()
+            .is_some_and(|s| names.contains(&s.name.as_str()))
+            || p.segments.iter().flat_map(|s| &s.generics).any(rec)
+    };
+    match &ty.kind {
+        AstTyKind::SelfUpper => names.contains(&"Self"),
+        AstTyKind::Path(p) => path(p),
+        AstTyKind::AnyTrait(bounds) => bounds.iter().any(path),
+        AstTyKind::Sum(parts) | AstTyKind::Tuple(parts) => parts.iter().any(rec),
+        AstTyKind::Fn(args, ret) => args.iter().any(rec) || rec(ret),
+        AstTyKind::Throws { ok, err } => rec(ok) || rec(err),
+        AstTyKind::Array(elem, _) => rec(elem),
+        AstTyKind::Any | AstTyKind::None => false,
     }
 }

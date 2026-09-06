@@ -36,7 +36,21 @@ pub fn lower_ty(ty: &HirTy) -> MirTy {
             fn_args.extend(args.iter().map(lower_ty));
             MirTy::Tuple(vec![MirTy::Fn(fn_args, Box::new(lower_ty(ret))), env_ty])
         }
+        HirTy::Throws { ok, err } => carrier(lower_ty(ok), lower_ty(err)),
     }
+}
+
+/// Return value of a throwing function: `(is_err: bool, ok, err)`, with
+/// a unit `ok` left out (HIR reads the fields at the same indices).
+// ponytail: both payloads stored side by side; a union needs the
+// byte-array aggregate storage `unify_payload` also waits for.
+fn carrier(ok: MirTy, err: MirTy) -> MirTy {
+    let mut fields = vec![MirTy::Prim(PrimTy::Bool)];
+    if ok != MirTy::Unit {
+        fields.push(ok);
+    }
+    fields.push(err);
+    MirTy::Tuple(fields)
 }
 
 // Like `lower_ty` but resolves struct/enum ids to their concrete shape.
@@ -77,6 +91,7 @@ pub fn lower_ty_in(ty: &HirTy, module: &HirModule) -> MirTy {
                 env_ty,
             ])
         }
+        HirTy::Throws { ok, err } => carrier(lower_ty_in(ok, module), lower_ty_in(err, module)),
         _ => lower_ty(ty),
     }
 }

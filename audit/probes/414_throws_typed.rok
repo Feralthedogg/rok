@@ -3,15 +3,19 @@
 // expect-exit: 0
 // expect-stdout:
 // got_value
+// caught
 
 // spec 4.14 / 변경점 1186-1191: `fn foo() throws (E) -> T` typed throws.
+// D3: the call site marks the throwing call with `try`.
 fn parse(s: i32) throws (i32) -> i32 {
     if s < 0 { throw -1; }
     return s * 2;
 }
 
 fn main() -> i32 {
-    let v = parse(5);
+    let v = try parse(5) catch _ { 0 };
     if v == 10 { rok_print_str("got_value"); }
+    let w = try parse(-5) catch e: i32 { e };
+    if w == -1 { rok_print_str("caught"); }
     return 0;
 }

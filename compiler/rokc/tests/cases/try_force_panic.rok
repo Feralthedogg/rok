@@ -1,0 +1,12 @@
+// expect-exit: 101
+
+// `try!` on an error panics (exit 101); panics can't be caught.
+fn half(x: i32) throws (i32) -> i32 {
+    if x % 2 == 1 { throw x; }
+    x / 2
+}
+
+fn main() -> i32 {
+    let v = try! half(3);
+    return v;
+}

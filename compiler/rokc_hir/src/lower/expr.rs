@@ -253,41 +253,6 @@ pub(super) fn lower_let_tuple(
     }
 }
 
-/// Build the runtime abort `rok_panic(msg, len)` (spec 805: writes `msg`
-/// to stderr and exits with code 101). The message is a string literal;
-/// `len` is its byte length.
-pub(super) fn panic_call(ctx: &LowerCtx<'_>, msg: &str, span: rokc_diagnostic::Span) -> HirExpr {
-    let Some(sig) = ctx.env.fn_table.get("rok_panic") else {
-        return ctx.error_expr(
-            span,
-            "internal: runtime hook `rok_panic` is not declared".to_owned(),
-        );
-    };
-    let len = i128::try_from(msg.len()).expect("message length fits i128");
-    HirExpr {
-        kind: HirExprKind::Call {
-            callee: sig.id,
-            args: vec![
-                HirExpr {
-                    kind: HirExprKind::Const(ConstVal::Str(msg.to_owned())),
-                    ty: HirTy::Prim(PrimTy::Str),
-                    span,
-                },
-                HirExpr {
-                    kind: HirExprKind::Const(ConstVal::Int {
-                        value: len,
-                        ty: PrimTy::Usize,
-                    }),
-                    ty: HirTy::Prim(PrimTy::Usize),
-                    span,
-                },
-            ],
-        },
-        ty: HirTy::Unit,
-        span,
-    }
-}
-
 pub(super) fn lower_stmt(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
     match &stmt.kind {
         StmtKind::Let { name, ty, init } => {
@@ -329,7 +294,30 @@ pub(super) fn lower_stmt(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt>
         }
         StmtKind::Return(value) => {
             let ret = ctx.fn_ret_ty.clone();
-            let Some(e) = value else {
+            let value = if let Some(e) = value {
+                let lowered = lower_expected(ctx, e, ret.clone());
+                // A closure without a declared return type takes it from
+                // its first `return`.
+                if ret == HirTy::Unknown && ctx.infer_ret {
+                    ctx.fn_ret_ty = lowered.ty.clone();
+                    Some(lowered)
+                } else if matches!((&ret, &lowered.ty), (HirTy::Fn(..), HirTy::Closure { .. })) {
+                    // Spec 4.5/4.6: a capturing closure is a `{fn_ptr, env}`
+                    // pair, not a bare `fn(...)` pointer.
+                    Some(
+                        ctx.error_expr(
+                            lowered.span,
+                            "cannot return a closure through a `fn(...)` pointer return type — \
+                         closures with captures aren't bare function pointers (spec 4.6)"
+                                .to_owned(),
+                        ),
+                    )
+                } else {
+                    Some(coerce(ctx, &ret, lowered, &|| {
+                        "the return value".to_owned()
+                    }))
+                }
+            } else {
                 if !matches!(ret, HirTy::Unit | HirTy::Unknown) {
                     ctx.emit_error(
                         rokc_diagnostic::ErrorKind::Type,
@@ -339,30 +327,9 @@ pub(super) fn lower_stmt(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt>
                         ),
                     );
                 }
-                return Some(HirStmt::Return(None));
+                None
             };
-            let lowered = lower_expected(ctx, e, ret.clone());
-            // A closure without a declared return type takes it from its
-            // first `return`.
-            if ret == HirTy::Unknown && ctx.infer_ret {
-                ctx.fn_ret_ty = lowered.ty.clone();
-                return Some(HirStmt::Return(Some(lowered)));
-            }
-            // Spec 4.5/4.6: a capturing closure is a `{fn_ptr, env}` pair,
-            // not a bare `fn(...)` pointer.
-            if matches!((&ret, &lowered.ty), (HirTy::Fn(..), HirTy::Closure { .. })) {
-                return Some(HirStmt::Return(Some(
-                    ctx.error_expr(
-                        lowered.span,
-                        "cannot return a closure through a `fn(...)` pointer return type — \
-                     closures with captures aren't bare function pointers (spec 4.6)"
-                            .to_owned(),
-                    ),
-                )));
-            }
-            Some(HirStmt::Return(Some(coerce(ctx, &ret, lowered, &|| {
-                "the return value".to_owned()
-            }))))
+            Some(lower_return(ctx, value, stmt.span))
         }
         // Statement position: the value is discarded (expected `()`), so
         // `if` / `match` arms needn't agree on a type.
@@ -408,33 +375,32 @@ pub(super) fn lower_stmt(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt>
         }
         StmtKind::Break { label, value } => {
             check_jump_target(ctx, "break", label.as_deref(), false);
-            Some(HirStmt::Break {
-                label: label.clone(),
-                value: value
-                    .as_ref()
-                    .map(|e| lower_expected(ctx, e, HirTy::Unknown)),
-            })
+            let value = value
+                .as_ref()
+                .map(|e| lower_expected(ctx, e, HirTy::Unknown));
+            let depth = jump_index(ctx, label.as_deref(), false);
+            let label = label.clone();
+            Some(exit_through(
+                ctx,
+                Some(depth),
+                value,
+                |value| HirStmt::Break { label, value },
+                stmt.span,
+            ))
         }
         StmtKind::Continue { label } => {
             check_jump_target(ctx, "continue", label.as_deref(), true);
-            Some(HirStmt::Continue {
-                label: label.clone(),
-            })
+            let depth = jump_index(ctx, label.as_deref(), true);
+            let label = label.clone();
+            Some(exit_through(
+                ctx,
+                Some(depth),
+                None,
+                |_| HirStmt::Continue { label },
+                stmt.span,
+            ))
         }
-        StmtKind::Throw(value) => {
-            // Stage 1: no unwinding. `throw v` aborts through the runtime
-            // panic hook (exit 101) followed by an unreachable terminator
-            // (spec 3.14.1). A string payload becomes the message.
-            let value_h = lower_expected(ctx, value, HirTy::Unknown);
-            let msg = match &value_h.kind {
-                HirExprKind::Const(ConstVal::Str(s)) => format!("uncaught throw: {s}"),
-                HirExprKind::Const(ConstVal::Int { value, .. }) => {
-                    format!("uncaught throw: {value}")
-                }
-                _ => "uncaught throw".to_owned(),
-            };
-            Some(HirStmt::Throw(panic_call(ctx, &msg, stmt.span)))
-        }
+        StmtKind::Throw(value) => Some(lower_throw(ctx, value, stmt.span)),
     }
 }
 
@@ -742,7 +708,8 @@ pub(super) fn lower_expr(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             if let Some(tc) = trailing_closure {
                 all_args.push(rokc_ast::CallArg::Positional((**tc).clone()));
             }
-            lower_call(ctx, callee, &all_args, span)
+            let call = lower_call(ctx, callee, &all_args, span);
+            unpack_call(ctx, call)
         }
         ExprKind::MethodCall {
             receiver,
@@ -755,7 +722,8 @@ pub(super) fn lower_expr(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             if let Some(tc) = trailing_closure {
                 all_args.push(rokc_ast::CallArg::Positional((**tc).clone()));
             }
-            lower_method_call(ctx, receiver, method, &all_args, span)
+            let call = lower_method_call(ctx, receiver, method, &all_args, span);
+            unpack_call(ctx, call)
         }
         ExprKind::If {
             cond,
@@ -784,67 +752,12 @@ pub(super) fn lower_expr(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             body,
         } => lower_for(ctx, label.as_ref(), pat, iter, body, span),
         ExprKind::Match { scrutinee, arms } => lower_match(ctx, scrutinee, arms, span),
-        ExprKind::Try {
+        ExprKind::Try { kind, operand } => lower_try(ctx, *kind, operand, span),
+        ExprKind::Catch {
             body,
             catches,
             finally,
-        } => {
-            // Stage 1: no real unwind — a `throw` aborts the process via
-            // `rok_panic`, so a catch arm could never run. Refuse it
-            // rather than silently ignoring the handler.
-            if !catches.is_empty() {
-                return ctx.error_expr(
-                    span,
-                    "`catch` is not implemented yet: a `throw` aborts the process \
-                     instead of reaching the handler (spec 3.14.2, stage-1 limitation)"
-                        .to_owned(),
-                );
-            }
-            let body_h = lower_block(ctx, body);
-            let body_ty = body_h
-                .trailing
-                .as_ref()
-                .map_or(HirTy::Unit, |e| e.ty.clone());
-            // No finally → forward the body block as-is so its trailing
-            // expression remains the value.
-            let Some(fin) = finally else {
-                return HirExpr {
-                    kind: HirExprKind::Block(Box::new(body_h)),
-                    ty: body_ty,
-                    span,
-                };
-            };
-            // With finally: stash the body's value in a temp, run
-            // finally's stmts, then yield the temp as the trailing
-            // expression.
-            let mut stmts = body_h.stmts;
-            let result_local = body_h.trailing.map(|t| {
-                let local = ctx.declare(None, body_ty.clone());
-                stmts.push(HirStmt::Let { local, init: t });
-                local
-            });
-            ctx.push_expected(HirTy::Unknown);
-            let fin_h = lower_block(ctx, fin);
-            ctx.pop_expected();
-            stmts.extend(fin_h.stmts);
-            if let Some(t) = fin_h.trailing {
-                stmts.push(HirStmt::Expr(t));
-            }
-            let trailing = result_local.map(|l| HirExpr {
-                kind: HirExprKind::Local(l),
-                ty: body_ty.clone(),
-                span,
-            });
-            HirExpr {
-                kind: HirExprKind::Block(Box::new(HirBlock {
-                    stmts,
-                    trailing,
-                    label: None,
-                })),
-                ty: body_ty,
-                span,
-            }
-        }
+        } => lower_catch(ctx, body, catches, finally.as_ref(), span),
         ExprKind::StructInit {
             path,
             fields,
@@ -1092,7 +1005,7 @@ pub(super) fn lower_expr(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
         ),
         ExprKind::Dict(_) => unsupported(ctx, "a dict literal"),
         ExprKind::Set(_) => unsupported(ctx, "a set literal"),
-        ExprKind::Is(..) => unsupported(ctx, "the `is` operator"),
+        ExprKind::Is(operand, pat) => lower_is(ctx, operand, pat, span),
         ExprKind::Slice { .. } => unsupported(ctx, "slicing (`a[i:j]`)"),
         ExprKind::LetElse { .. } => unsupported(ctx, "`let ... else` in expression position"),
         ExprKind::AsyncBlock(_) | ExprKind::YieldBlock(_) | ExprKind::AsyncYieldBlock(_) => {
@@ -1748,23 +1661,95 @@ pub(super) fn lower_if(
     else_branch: Option<&Expr>,
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
-    let cond_h = lower_cond(ctx, cond);
+    // Spec 2.2.6: `if x is T { .. }` narrows the local `x` to `T` inside
+    // the then-block — lowered as `match x { x: T => { .. }, _ => else }`.
+    // ponytail: only a bare local as the whole condition narrows (not
+    // `x is T && ..`); assigning to `x` inside the block writes the
+    // narrowed copy.
+    let narrow = match &cond.kind {
+        ExprKind::Is(operand, pat) => match (&operand.kind, &pat.kind) {
+            (ExprKind::Path(p), AstPatternKind::TypeCheck { binder: None, ty })
+                if p.segments.len() == 1 && ctx.lookup(&p.segments[0].name).is_some() =>
+            {
+                Some((operand, &p.segments[0].name, ty))
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    let mut cond_h = None;
+    let mut narrow_h = None;
+    if let Some((operand, name, ty)) = narrow {
+        let scrut = lower_expected(ctx, operand, HirTy::Unknown);
+        ctx.push_scope();
+        let pat = rokc_ast::Pattern {
+            kind: AstPatternKind::TypeCheck {
+                binder: Some(name.clone()),
+                ty: ty.clone(),
+            },
+            span: cond.span,
+        };
+        let pat_h = lower_pattern(ctx, &pat, &scrut.ty);
+        narrow_h = Some((scrut, pat_h));
+    } else {
+        cond_h = Some(lower_cond(ctx, cond));
+    }
     let expected = ctx
         .current_expected()
         .cloned()
         .filter(|t| *t != HirTy::Unknown);
     let mut then_h = lower_block(ctx, then_block);
+    if narrow_h.is_some() {
+        ctx.pop_scope();
+    }
+    // `if` → `match` for a narrowing condition.
+    let build = |cond_h: Option<HirExpr>,
+                 then_h: HirBlock,
+                 else_h: Option<HirExpr>,
+                 ty: HirTy,
+                 narrow_h: Option<(HirExpr, HirPattern)>| {
+        let kind = match (cond_h, narrow_h) {
+            (_, Some((scrut, pat))) => {
+                let empty = || HirExpr {
+                    kind: HirExprKind::Block(Box::new(HirBlock {
+                        stmts: Vec::new(),
+                        trailing: None,
+                        label: None,
+                    })),
+                    ty: HirTy::Unit,
+                    span,
+                };
+                HirExprKind::Match {
+                    scrutinee: Box::new(scrut),
+                    arms: vec![
+                        HirMatchArm {
+                            pat,
+                            guard: None,
+                            body: HirExpr {
+                                kind: HirExprKind::Block(Box::new(then_h)),
+                                ty: ty.clone(),
+                                span,
+                            },
+                        },
+                        HirMatchArm {
+                            pat: HirPattern::Wildcard,
+                            guard: None,
+                            body: else_h.unwrap_or_else(empty),
+                        },
+                    ],
+                }
+            }
+            (cond_h, None) => HirExprKind::If {
+                cond: Box::new(cond_h.expect("if condition")),
+                then_block: Box::new(then_h),
+                else_branch: else_h.map(Box::new),
+            },
+        };
+        HirExpr { kind, ty, span }
+    };
     let Some(else_e) = else_branch else {
         // No else: the if is a statement; any then-value is discarded.
-        return HirExpr {
-            kind: HirExprKind::If {
-                cond: Box::new(cond_h),
-                then_block: Box::new(then_h),
-                else_branch: None,
-            },
-            ty: HirTy::Unit,
-            span,
-        };
+        return build(cond_h, then_h, None, HirTy::Unit, narrow_h);
     };
     let mut else_h = lower_expr(ctx, else_e);
     // Spec 3.14.1: a diverging branch (`return` / `throw` / ...) takes
@@ -1824,13 +1809,45 @@ pub(super) fn lower_if(
             _ => coerce(ctx, &result_ty, else_h, &what),
         };
     }
+    build(cond_h, then_h, Some(else_h), result_ty, narrow_h)
+}
+
+/// Spec 2.2.5: `v is T` — `match v { _: T => true, _ => false }`.
+fn lower_is(
+    ctx: &mut LowerCtx<'_>,
+    operand: &Expr,
+    pat: &rokc_ast::Pattern,
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let scrut = lower_expected(ctx, operand, HirTy::Unknown);
+    if scrut.ty == HirTy::Unknown {
+        return scrut;
+    }
+    ctx.push_scope();
+    let pat_h = lower_pattern(ctx, pat, &scrut.ty);
+    ctx.pop_scope();
+    let lit = |b: bool| HirExpr {
+        kind: HirExprKind::Const(ConstVal::Bool(b)),
+        ty: HirTy::Prim(PrimTy::Bool),
+        span,
+    };
     HirExpr {
-        kind: HirExprKind::If {
-            cond: Box::new(cond_h),
-            then_block: Box::new(then_h),
-            else_branch: Some(Box::new(else_h)),
+        kind: HirExprKind::Match {
+            scrutinee: Box::new(scrut),
+            arms: vec![
+                HirMatchArm {
+                    pat: pat_h,
+                    guard: None,
+                    body: lit(true),
+                },
+                HirMatchArm {
+                    pat: HirPattern::Wildcard,
+                    guard: None,
+                    body: lit(false),
+                },
+            ],
         },
-        ty: result_ty,
+        ty: HirTy::Prim(PrimTy::Bool),
         span,
     }
 }
@@ -2100,19 +2117,23 @@ fn any_method_call(
 ) -> HirExpr {
     let mut seen: Vec<String> = Vec::new();
     let mut stack = bounds.to_vec();
-    let mut provides = false;
+    // The trait declaring `method`, and whether the bound gave its args.
+    let mut provider: Option<(String, bool)> = None;
     while let Some(t) = stack.pop() {
-        if seen.contains(&t) {
+        let base = bound_base(&t).to_owned();
+        if seen.contains(&base) {
             continue;
         }
-        if let Some(info) = ctx.env.trait_info.get(&t) {
-            provides |= info.methods.iter().any(|m| m == method);
+        if let Some(info) = ctx.env.trait_info.get(&base) {
+            if provider.is_none() && info.methods.iter().any(|m| m == method) {
+                provider = Some((base.clone(), t.contains('<')));
+            }
             stack.extend(info.supers.iter().cloned());
         }
-        seen.push(t);
+        seen.push(base);
     }
     let recv_ty = recv_h.ty.clone();
-    if !provides {
+    let Some((provider, has_args)) = provider else {
         discard_args(ctx, args);
         return ctx.error_expr(
             span,
@@ -2123,9 +2144,42 @@ fn any_method_call(
                 ctx.ty_name(&recv_ty)
             ),
         );
+    };
+    // Every implementor shares one signature only if it doesn't depend
+    // on the implementing type (`Self`) or on unfixed trait arguments.
+    let info = &ctx.env.trait_info[&provider];
+    let why = if info.self_methods.iter().any(|m| m == method) {
+        Some(
+            "its signature mentions `Self`, which is a different type for each implementor"
+                .to_owned(),
+        )
+    } else if !has_args && info.param_methods.iter().any(|m| m == method) {
+        Some(format!(
+            "its signature uses type parameters of `{provider}` that the bound leaves open — \
+             name them (`any {provider}<..>`)"
+        ))
+    } else {
+        None
+    };
+    if let Some(why) = why {
+        discard_args(ctx, args);
+        return ctx.error_expr(
+            span,
+            format!(
+                "cannot call `{method}` on `{}`: {why}; narrow the value with `is` or a type \
+                 pattern first (D4)",
+                ctx.ty_name(&recv_ty)
+            ),
+        );
     }
     let mut impls: Vec<HirTy> = Vec::new();
-    for t in ctx.env.trait_impl_tys.get(&bounds[0]).into_iter().flatten() {
+    for t in ctx
+        .env
+        .trait_impl_tys
+        .get(bound_base(&bounds[0]))
+        .into_iter()
+        .flatten()
+    {
         if !impls.contains(t) && bounds.iter().all(|b| ctx.implements(t, b)) {
             impls.push(t.clone());
         }
@@ -2348,7 +2402,18 @@ pub(super) fn call_generic(
             .get(i)
             .and_then(|p| p.ty.as_ref())
             .map_or(HirTy::Unknown, |t| {
-                let ty = resolve_in_mono(ctx, def, &subst, None, t);
+                // Type params not bound yet stay opaque paths — never
+                // resolved as same-named types visible from `def`.
+                let mut partial = subst.clone();
+                for gp in &def.generics.params {
+                    if let rokc_ast::GenericParam::Type { name, .. } = gp {
+                        partial
+                            .entry(name.clone())
+                            .or_insert_with(|| HirTy::Path(vec![name.clone()]));
+                    }
+                }
+                let mut ty = resolve_in_mono(ctx, def, &partial, None, t);
+                erase_unbound_errors(&mut ty);
                 let mut leftover = Vec::new();
                 collect_unknown_paths(&ty, &mut leftover);
                 if leftover.is_empty() {

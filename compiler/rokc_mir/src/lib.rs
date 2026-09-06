@@ -161,12 +161,15 @@ pub enum RValue {
         ty: MirTy,
     },
     // Copy `value` (of type `ty`) to a fresh heap cell; yields the cell's
-    // address as `usize`. The payload of an `any Tr` value.
+    // address as `usize`. The payload of an `any Tr` value. Codegen keeps
+    // a numeric / bool / char primitive no wider than a pointer inline
+    // (the `usize` is the value's bits, not an address).
     HeapBox {
         value: Operand,
         ty: MirTy,
     },
-    // Load a `ty` from the `usize` address `ptr` (a `HeapBox` cell).
+    // Load a `ty` from the `usize` address `ptr` (a `HeapBox` cell), or
+    // unpack an inline payload.
     HeapLoad {
         ptr: Operand,
         ty: MirTy,

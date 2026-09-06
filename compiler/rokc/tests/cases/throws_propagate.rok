@@ -1,0 +1,51 @@
+// expect-exit: 0
+// expect-stdout:
+// 10
+// parse
+// io
+// 7
+// unit ok
+
+// Typed `throws` + `try` propagation (D3): errors travel up as values
+// through functions whose `throws` covers them; a sum `throws (A | B)`
+// takes either.
+enum ParseError { Empty, Bad }
+enum IoError { Closed }
+
+fn parse(x: i32) throws (ParseError) -> i32 {
+    if x < 0 { throw ParseError::Bad; }
+    if x == 0 { throw ParseError::Empty; }
+    x * 2
+}
+
+fn read(x: i32) throws (IoError) -> i32 {
+    if x > 100 { throw IoError::Closed; }
+    return x;
+}
+
+// Both callees' errors propagate through the sum.
+fn load(x: i32) throws (ParseError | IoError) -> i32 {
+    let p = try parse(x);
+    try read(p)
+}
+
+// One level more: the sum passes through unchanged.
+fn outer(x: i32) throws (ParseError | IoError) -> i32 {
+    let v = try load(x);
+    return v;
+}
+
+fn check(ok: bool) throws (IoError) {
+    if !ok { throw IoError::Closed; }
+}
+
+fn main() -> i32 {
+    rok_print_i32(try outer(5) catch _ { -1 });
+    try outer(-1) catch e: ParseError { rok_print_str("parse"); } catch e: IoError { rok_print_str("io"); };
+    try outer(60) catch e: ParseError { rok_print_str("parse"); } catch e: IoError { rok_print_str("io"); };
+    // `try` covers everything to its right.
+    rok_print_i32(try parse(1) + read(5) catch _ { 0 });
+    try check(true) catch _ { rok_print_str("unit err"); };
+    rok_print_str("unit ok");
+    return 0;
+}

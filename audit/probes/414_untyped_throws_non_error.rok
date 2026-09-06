@@ -1,0 +1,8 @@
+// spec: 004.14-throws
+// probe: negative-must-fail
+// untyped `throws` 는 `throws (any Error)` — Error 를 구현하지 않은 값은 던질 수 없다.
+// expect-error: is not covered by the enclosing function's `throws (any
+
+struct Plain { x: i32; }
+fn f() throws -> i32 { throw Plain { x: 1 }; }
+rok_print_i32(try f() catch _ { 0 });

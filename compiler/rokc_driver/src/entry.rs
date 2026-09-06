@@ -72,9 +72,11 @@ fn implicit_main(stmts: Vec<Stmt>) -> FnDef {
     }
 }
 
-/// Spec 4.16.3: no parameters or generics; returns `()` or `i32`.
-// ponytail: `throws` / `Result<..>` / `async` main forms (4.16.3-5) wait
-// for typed exceptions and the scheduler.
+/// Spec 4.16.3: no parameters or generics; returns `()` or `i32`, and may
+/// `throws (E)` (an escaping error exits 1, see HIR `uncaught_in_main`).
+// ponytail: `Result<..>` / `async` main forms (4.16.3-5) wait for a
+// decision on `Result` mains (D3 keeps `Result` a plain enum) and the
+// scheduler.
 fn check_main_signature(f: &FnDef, diags: &mut Vec<RokDiagnostic>) {
     let mut bad = |msg: &str| {
         diags.push(RokDiagnostic::error(

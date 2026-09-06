@@ -104,6 +104,9 @@ struct LoopFrame {
     /// Block param of `break_bb` carrying the loop's value, if any.
     break_param: Option<LocalId>,
     label: Option<String>,
+    /// `false` for a labelled block: only `break 'label` targets it, an
+    /// unlabelled `break` / `continue` goes to the enclosing loop.
+    is_loop: bool,
 }
 
 struct FnBuilder<'a> {
@@ -317,8 +320,8 @@ impl<'a> FnBuilder<'a> {
                 });
                 true
             }
-            HirStmt::Throw(call) => {
-                // Stage-1: the payload is a call to `rok_panic` (-> !).
+            HirStmt::Panic(call) => {
+                // The payload calls a never-returning runtime hook.
                 // Emit the call, then an `unreachable` terminator so the
                 // surrounding block won't fall through into a merge.
                 let _ = self.lower_expr_to_operand(call);
@@ -340,7 +343,7 @@ impl<'a> FnBuilder<'a> {
 
     fn find_loop_frame(&self, label: Option<&str>) -> Option<&LoopFrame> {
         match label {
-            None => self.loop_stack.last(),
+            None => self.loop_stack.iter().rev().find(|f| f.is_loop),
             Some(name) => self
                 .loop_stack
                 .iter()
@@ -539,6 +542,7 @@ impl<'a> FnBuilder<'a> {
                         break_bb: exit_bb,
                         break_param,
                         label: Some(label),
+                        is_loop: false,
                     });
                     let (value, diverged) = self.lower_block_value(b);
                     self.loop_stack.pop();
@@ -1550,6 +1554,7 @@ impl<'a> FnBuilder<'a> {
             break_bb: exit_bb,
             break_param: None,
             label,
+            is_loop: true,
         });
         let (_value, diverged) = self.lower_block_value(body);
         self.loop_stack.pop();
@@ -1586,6 +1591,7 @@ impl<'a> FnBuilder<'a> {
             break_bb: exit_bb,
             break_param,
             label,
+            is_loop: true,
         });
         let (_value, diverged) = self.lower_block_value(body);
         self.loop_stack.pop();

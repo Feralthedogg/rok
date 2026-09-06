@@ -742,6 +742,9 @@ impl<'a> FnEmit<'a> {
             RValue::HeapLoad { ptr, ty } => {
                 let pw = self.pointer_width;
                 let p = self.materialize_operand(ptr, &MirTy::Prim(PrimTy::Usize));
+                if self.inline_payload(ty) {
+                    return self.bitcast_value(p, &MirTy::Prim(PrimTy::Usize), ty);
+                }
                 let addr = self.fresh_value();
                 let _ = writeln!(
                     self.body,
@@ -773,11 +776,20 @@ impl<'a> FnEmit<'a> {
         }
     }
 
+    /// A `HeapBox` payload that fits the `usize` word itself (spec 2.2.2:
+    /// small primitives are stored directly).
+    fn inline_payload(&self, ty: &MirTy) -> bool {
+        matches!(ty, MirTy::Prim(p) if *p != PrimTy::Str && p.bit_width(self.pointer_width) <= self.pointer_width)
+    }
+
     /// `rok_alloc(sizeof ty, 8)` + store; the address as `usize`. Size
     /// comes from the `gep null[1]` idiom so LLVM's layout decides it.
     fn emit_heap_box(&mut self, value: &Operand, ty: &MirTy) -> String {
         let pw = self.pointer_width;
         let v = self.materialize_operand(value, ty);
+        if self.inline_payload(ty) {
+            return self.bitcast_value(v, ty, &MirTy::Prim(PrimTy::Usize));
+        }
         let ty_str = mlir_type(ty, pw);
         let [null, end, size, align, cell, addr] = std::array::from_fn(|_| self.fresh_value());
         self.uses_alloc = true;
@@ -1502,15 +1514,16 @@ impl<'a> FnEmit<'a> {
             }
             ConstVal::Unit | ConstVal::None => {
                 // For aggregate destinations, materialize an `undef`
-                // value; for primitives, a zero constant. Unit really
-                // shouldn't reach codegen but a placeholder keeps the
-                // pipeline well-typed.
+                // value; for primitives, a zero constant (also the unused
+                // payload of a `throws` carrier). Unit really shouldn't
+                // reach codegen but a placeholder keeps the pipeline
+                // well-typed.
                 if matches!(
                     dst_ty,
                     MirTy::Struct(_, _) | MirTy::Tuple(_) | MirTy::Sum(_) | MirTy::Array(_, _)
                 ) {
                     let _ = writeln!(self.body, "    {dst} = llvm.mlir.undef : {ty}");
-                } else if matches!(dst_ty, MirTy::Fn(_, _)) {
+                } else if matches!(dst_ty, MirTy::Fn(_, _) | MirTy::Prim(PrimTy::Str)) {
                     let _ = writeln!(self.body, "    {dst} = llvm.mlir.zero : !llvm.ptr");
                 } else {
                     let _ = writeln!(self.body, "    {dst} = arith.constant 0 : {ty}");

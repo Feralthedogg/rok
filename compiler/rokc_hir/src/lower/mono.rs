@@ -64,6 +64,16 @@ pub(super) fn unify_param_ty_with(
             }
             rec(ret, arg_ret);
         }
+        (rokc_ast::TyKind::Throws { ok, err }, HirTy::Throws { ok: a, err: e }) => {
+            rec(ok, a);
+            rec(err, e);
+        }
+        // A non-throwing argument for a `rethrows` parameter: its error
+        // parameter binds to "no error".
+        (rokc_ast::TyKind::Throws { ok, err }, a) => {
+            rec(ok, a);
+            rec(err, &crate::ty::nothrow_ty());
+        }
         // Nothing to bind: the argument type check reports mismatches.
         _ => {}
     }
@@ -125,6 +135,7 @@ pub(super) fn ty_size(ty: &HirTy) -> usize {
         HirTy::Closure { args, ret, env } => {
             args.iter().map(ty_size).sum::<usize>() + ty_size(ret) + ty_size(env)
         }
+        HirTy::Throws { ok, err } => ty_size(ok) + ty_size(err),
         _ => 0,
     }
 }
@@ -291,10 +302,8 @@ pub(super) fn monomorphize(
     // Pre-resolve the return type from AST + subst so a recursive
     // `sum_down(n - 1)` inside the body sees the correct result type.
     let self_hir = self_ty.map(|t| resolve_in_mono(ctx, fn_def, &subst, None, t));
-    let preview_ret_ty = match &fn_def.ret_ty {
-        Some(t) => resolve_in_mono(ctx, fn_def, &subst, self_hir.clone(), t),
-        None => HirTy::Unit,
-    };
+    let preview_ret_ty =
+        resolve_in_mono(ctx, fn_def, &subst, self_hir.clone(), &sig_ret_ast(fn_def));
     ctx.env.sink.mono_sigs.borrow_mut().insert(
         new_id,
         FnSig {
@@ -373,11 +382,20 @@ pub(super) fn lower_fn_inner(
         params.push(lower_param(&mut ctx, p));
     }
 
-    let ret_ty = match &fn_def.ret_ty {
-        Some(t) => ctx.resolve_ast_ty(t),
-        None => HirTy::Unit,
-    };
-    ctx.fn_ret_ty = ret_ty.clone();
+    let mut ret_ty = ctx.resolve_ast_ty(&sig_ret_ast(fn_def));
+    if let HirTy::Throws { ok, err } = &ret_ty {
+        ctx.fn_ret_ty = (**ok).clone();
+        // Spec 4.16.3: an error escaping a throwing `main` is reported by
+        // the entry itself (exit 1); `main` keeps a plain C return type.
+        if name == "main" && ctx.self_ty.is_none() && !ctx.implicit_main {
+            ctx.uncaught_in_main = true;
+            ret_ty = ctx.fn_ret_ty.clone();
+        } else {
+            ctx.fn_throws = Some((**err).clone());
+        }
+    } else {
+        ctx.fn_ret_ty = ret_ty.clone();
+    }
 
     let body = fn_def
         .body
@@ -451,6 +469,7 @@ pub(super) fn resolve_ast_with_subst(
         rokc_ast::TyKind::Fn(args, ret) => {
             HirTy::Fn(args.iter().map(rec).collect(), Box::new(rec(ret)))
         }
+        rokc_ast::TyKind::Throws { ok, err } => crate::ty::throws_ty(rec(ok), rec(err)),
         _ => {
             let mut t = resolve_ty_with_structs(ty, struct_table, enum_table, sc);
             substitute_aliases(&mut t, subst);
@@ -500,6 +519,19 @@ pub(super) fn generic_struct_fields(
     }
 }
 
+/// Generic items are left to lazy instantiation: their type uses name
+/// type parameters, which must not resolve as same-named visible types
+/// (a user `enum E` vs `impl<T, E> Result<T, E>`).
+fn declares_type_params(item: &Item) -> bool {
+    match item {
+        Item::Fn(f) => !f.generics.params.is_empty(),
+        Item::Impl(i) => !i.generics.params.is_empty(),
+        Item::Struct(s) => !s.generics.params.is_empty(),
+        Item::Enum(e) => !e.generics.params.is_empty(),
+        _ => false,
+    }
+}
+
 /// Same as `instantiate_generic_structs` but for `enum Maybe<T>` etc.
 pub(super) fn instantiate_generic_enums(
     program: &Program,
@@ -514,7 +546,7 @@ pub(super) fn instantiate_generic_enums(
     }
     for _ in 0..8 {
         let before = enum_table.len();
-        for item in &program.items {
+        for item in program.items.iter().filter(|i| !declares_type_params(i)) {
             let module = item_module(item);
             let sc = Scope {
                 names,
@@ -656,7 +688,7 @@ pub(super) fn instantiate_generic_structs(
     // other generic structs.
     for _ in 0..8 {
         let before = struct_table.len();
-        for item in &program.items {
+        for item in program.items.iter().filter(|i| !declares_type_params(i)) {
             let module = item_module(item);
             let sc = Scope {
                 names,
@@ -741,10 +773,23 @@ pub(super) fn lower_param(ctx: &mut LowerCtx<'_>, p: &Param) -> HirParam {
 /// the trailing expression must match, and a non-unit function without
 /// a trailing value must not fall off the end.
 pub(super) fn lower_fn_body(ctx: &mut LowerCtx<'_>, b: &Block, fn_name: &str) -> HirBlock {
-    let ret = ctx.fn_ret_ty.clone();
-    ctx.push_expected(ret.clone());
-    let mut block = lower_block(ctx, b);
+    ctx.push_expected(ctx.fn_ret_ty.clone());
+    if ctx.uncaught_in_main {
+        catch_all_frame(ctx);
+    }
+    let block = lower_block(ctx, b);
     ctx.pop_expected();
+    let mut block = check_fn_body(ctx, block, fn_name);
+    if ctx.uncaught_in_main {
+        block = uncaught_in_main(ctx, block, b.span);
+    }
+    finish_throwing_body(ctx, &mut block);
+    block
+}
+
+/// The value checks of `lower_fn_body`.
+fn check_fn_body(ctx: &LowerCtx<'_>, mut block: HirBlock, fn_name: &str) -> HirBlock {
+    let ret = ctx.fn_ret_ty.clone();
     match block.trailing.take() {
         // A unit function discards a trailing value (`fn f() { g() }`).
         Some(t) if ret == HirTy::Unit && t.ty != HirTy::Unit => block.stmts.push(HirStmt::Expr(t)),

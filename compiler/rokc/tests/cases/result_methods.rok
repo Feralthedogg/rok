@@ -1,0 +1,88 @@
+// expect-exit: 0
+// expect-stdout:
+// a ok
+// b err
+// 4
+// -7
+// 4
+// 8
+// 10
+// 99
+// 3
+// -1
+// 6
+// none
+// 2
+// 77
+// mapped err
+// 5
+
+// `Result<T, E>` (rok::core::error) keeps an error as a value; `get()`
+// turns it back into the error flow, `Result::catching` the other way.
+enum E { Neg, Zero }
+
+fn check(x: i32) throws (E) -> i32 {
+    if x < 0 { throw E::Neg; }
+    if x == 0 { throw E::Zero; }
+    x
+}
+
+fn keep(x: i32) -> Result<i32, E> {
+    try Result::Ok(check(x)) catch e { Result::Err(e) }
+}
+
+fn double(x: i32) -> i32 { x * 2 }
+
+fn twice_again(x: i32) throws (E) -> i32 {
+    let r = keep(x);
+    let v = try r.get();
+    v * 2
+}
+
+// `?` (for `T | none` only) inside a throwing function.
+fn plus_one(x: i32 | none) throws (E) -> i32 | none {
+    let v = x?;
+    let w = try check(v);
+    return w + 1;
+}
+
+fn main() -> i32 {
+    let a = keep(4);
+    let b = keep(-1);
+    if a.is_ok() { rok_print_str("a ok"); }
+    if b.is_err() { rok_print_str("b err"); }
+    rok_print_i32(a.unwrap_or(0));
+    rok_print_i32(b.unwrap_or(-7));
+    rok_print_i32(a.ok() ?? 0);
+    rok_print_i32(a.map(double).unwrap());
+    rok_print_i32(try twice_again(5) catch _ { 0 });
+    rok_print_i32(try twice_again(0) catch E::Zero { 99 } catch _ { 0 });
+    let c = Result::catching(|| try check(3));
+    rok_print_i32(c.unwrap_or(0));
+    let d: Result<i32, E> = Result::catching(|| try check(-3));
+    rok_print_i32(d.unwrap_or(-1));
+    let five: i32 | none = 5;
+    rok_print_i32(try! plus_one(five) ?? 0);
+    let nothing: i32 | none = none;
+    match try! plus_one(nothing) {
+        v: i32 => rok_print_i32(v),
+        none => rok_print_str("none"),
+    };
+    let eight: Result<i32, E> = Result::Ok(8);
+    let zero: Result<i32, E> = Result::Err(E::Zero);
+    rok_print_i32(eight.and_then(halve).and_then(halve).unwrap_or(0));
+    rok_print_i32(zero.unwrap_or_else(recover));
+    if zero.map_err(to_f).is_err() { rok_print_str("mapped err"); }
+    rok_print_i32(zero.or_else(retry).unwrap_or(0));
+    return 0;
+}
+
+enum F { Wrapped }
+
+fn halve(x: i32) -> Result<i32, E> {
+    if x % 2 == 1 { return Result::Err(E::Neg); }
+    Result::Ok(x / 2)
+}
+fn recover(e: E) -> i32 { 77 }
+fn to_f(e: E) -> F { F::Wrapped }
+fn retry(e: E) -> Result<i32, F> { Result::Ok(5) }

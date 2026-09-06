@@ -1,8 +1,9 @@
-// expect-exit: 101
+// expect-exit: 1
+// expect-stdout: before
 
-// `throw` aborts the process via the runtime panic hook (stage 1 — no
-// real catch yet). The hook always exits with code 101.
-fn main() -> i32 {
+// An error escaping `fn main() throws (E)` is reported by the runtime and
+// ends the process with status 1 (spec 4.16.4) — not a panic (101).
+fn main() throws (i32) -> i32 {
+    rok_print_str("before");
     throw 7;
-    return 0;   // unreachable
 }

@@ -1,0 +1,45 @@
+// expect-exit: 0
+// expect-stdout:
+// 42
+// 16
+// 7
+// 1000
+// 2000
+// 1
+// 2
+// 6
+// 5
+// 0
+
+// Spec 2.2.5-2.2.6: `v is T` tests the runtime type (`any`, `any Tr`,
+// sums); `if v is T { .. }` narrows `v` to `T` inside the then-block.
+trait Shape { fn area(self) -> i32; }
+struct Sq { s: i32; }
+impl Shape for Sq { fn area(self) -> i32 { return self.s * self.s; } }
+
+fn f(v: any) -> i32 {
+    if v is i32 {
+        return v + 1i32;
+    }
+    if v is Sq { return v.area(); } else if v is bool { return 7; }
+    let r = if v is f64 { 1 } else { 2 };
+    return r * 1000;
+}
+
+rok_print_i32(f(41));
+rok_print_i32(f(Sq { s: 4 }));
+rok_print_i32(f(true));
+rok_print_i32(f(1.5));
+rok_print_i32(f(3i8));
+let v: any = 41;
+let b = v is i32 && !(v is f64);
+if b { rok_print_i32(1); }
+let s: any Shape = Sq { s: 2 };
+if s is Sq { rok_print_i32(s.s); }
+let o: i32 | none = 5;
+if o is i32 { rok_print_i32(o + 1); }
+// `is` on a struct field (no narrowing: only a bare local narrows).
+struct Box1 { inner: any; }
+let bx = Box1 { inner: 5 };
+rok_print_i32(if bx.inner is i32 { 5 } else { 0 });
+rok_print_i32(if bx.inner is Sq { 5 } else { 0 });

@@ -14,6 +14,7 @@ use rokc_ast::{
 /// body.
 pub trait AstVisitor {
     fn expr(&mut self, _e: &Expr) {}
+    fn stmt(&mut self, _s: &Stmt) {}
     fn ty(&mut self, _t: &Ty) {}
     fn bind(&mut self, _name: &str) {}
     fn push_scope(&mut self) {}
@@ -123,6 +124,11 @@ pub fn walk_fn(v: &mut impl AstVisitor, f: &FnDef) {
     if let Some(t) = &f.ret_ty {
         walk_ty(v, t);
     }
+    if let rokc_ast::ThrowsKind::Typed(tys) = &f.throws {
+        for t in tys {
+            walk_ty(v, t);
+        }
+    }
     if let Some(body) = &f.body {
         walk_block(v, body);
     }
@@ -141,6 +147,7 @@ pub fn walk_block(v: &mut impl AstVisitor, b: &Block) {
 }
 
 pub fn walk_stmt(v: &mut impl AstVisitor, s: &Stmt) {
+    v.stmt(s);
     match &s.kind {
         StmtKind::Let { name, ty, init } => {
             walk_expr(v, init);
@@ -277,12 +284,13 @@ pub fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
             walk_block(v, body);
             v.pop_scope();
         }
-        ExprKind::Try {
+        ExprKind::Try { operand, .. } => walk_expr(v, operand),
+        ExprKind::Catch {
             body,
             catches,
             finally,
         } => {
-            walk_block(v, body);
+            walk_expr(v, body);
             for c in catches {
                 v.push_scope();
                 walk_pat(v, &c.pat);
@@ -498,6 +506,10 @@ pub fn walk_ty(v: &mut impl AstVisitor, t: &Ty) {
             for b in bounds {
                 walk_path_generics(v, b);
             }
+        }
+        TyKind::Throws { ok, err } => {
+            walk_ty(v, ok);
+            walk_ty(v, err);
         }
         TyKind::Any | TyKind::None | TyKind::SelfUpper => {}
     }

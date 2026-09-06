@@ -25,6 +25,7 @@ mod expr;
 mod mono;
 mod pattern;
 mod resolve;
+mod throws;
 
 use collect::collect_unknown_paths;
 pub use collect::lower_full;
@@ -41,10 +42,15 @@ use mono::{
     instantiate_generic_enums, instantiate_generic_structs, lower_fn, monomorphize,
     resolve_in_mono, unify_param_ty_with,
 };
-use pattern::{int_fits, lower_match};
+use pattern::{int_fits, lower_match, lower_pattern};
 use resolve::{
-    impl_module, item_module, leaf_name, mangle_inst, method_target_for, module_display, module_of,
-    resolve_name, resolve_ty_with_structs, substitute_aliases, ty_mangle, visible_from,
+    bound_key, impl_module, item_module, leaf_name, mangle_inst, method_target_for, module_display,
+    module_of, resolve_name, resolve_ty_with_structs, substitute_aliases, ty_mangle, visible_from,
+};
+use throws::{
+    ErrFrame, catch_all_frame, erase_unbound_errors, exit_through, finish_throwing_body,
+    jump_index, lower_catch, lower_return, lower_throw, lower_try, sig_ret_ast, uncaught_in_main,
+    unpack_call,
 };
 
 /// Outcome of glob resolution for one bare name. Single imports always
@@ -249,6 +255,12 @@ struct Env<'a> {
 struct TraitInfo {
     methods: Vec<String>,
     supers: Vec<String>,
+    /// Methods whose signature (past `self`) mentions `Self`: their
+    /// types differ per implementor, so they can't be dispatched.
+    self_methods: Vec<String>,
+    /// Methods whose signature mentions a trait type parameter: only
+    /// dispatchable when the bound fixes the arguments (`any Tr<i32>`).
+    param_methods: Vec<String>,
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -335,21 +347,20 @@ fn sum_variant_index(variants: &[HirTy], value_ty: &HirTy) -> Option<usize> {
 
 /// Can a value of type `actual` flow into a slot of type `expected`
 /// (after `wrap_into_sum`)? `Unknown` (an error was already reported)
-/// and `Any` (dynamic slot) are compatible with everything.
+/// and `Any` (untyped wildcard) are compatible with everything.
 fn ty_compatible(expected: &HirTy, actual: &HirTy) -> bool {
     let all = |a: &[HirTy], b: &[HirTy]| {
         a.len() == b.len() && a.iter().zip(b).all(|(x, y)| ty_compatible(x, y))
     };
     match (expected, actual) {
-        // ponytail: plain `any` is still an untyped integer slot, so it
-        // doesn't mix with the tagged `any Tr` layout either way. Make
-        // `any` = `any ()` (tag + payload, no bounds) to allow it.
-        (HirTy::AnyTrait(_), HirTy::Any) | (HirTy::Any, HirTy::AnyTrait(_)) => false,
         (HirTy::Unknown | HirTy::Any, _) | (_, HirTy::Unknown | HirTy::Any) => true,
         (HirTy::Sum(vs), a) if !matches!(a, HirTy::Sum(_)) => sum_variant_index(vs, a).is_some(),
         (HirTy::Tuple(a), HirTy::Tuple(b)) | (HirTy::Sum(a), HirTy::Sum(b)) => all(a, b),
         (HirTy::Array(a, n), HirTy::Array(b, m)) => n == m && ty_compatible(a, b),
         (HirTy::Fn(a1, r1), HirTy::Fn(a2, r2)) => all(a1, a2) && ty_compatible(r1, r2),
+        (HirTy::Throws { ok: o1, err: e1 }, HirTy::Throws { ok: o2, err: e2 }) => {
+            ty_compatible(o1, o2) && ty_compatible(e1, e2)
+        }
         _ => expected == actual,
     }
 }
@@ -378,6 +389,17 @@ fn coerce(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr, what: &dyn Fn() -> S
     v
 }
 
+/// `Index<i32>` → `Index`: an `any` bound key without its arguments.
+fn bound_base(b: &str) -> &str {
+    b.split_once('<').map_or(b, |(base, _)| base)
+}
+
+/// Does an `any` value with bound `have` satisfy bound `want`? `any
+/// Tr<i32>` widens to `any Tr` (arguments unconstrained).
+fn bound_covers(have: &str, want: &str) -> bool {
+    have == want || (!want.contains('<') && bound_base(have) == want)
+}
+
 /// The `any Tr` slot a value of type `ty` would be stored into: `slot`
 /// itself, or the `any Tr` variant of a sum slot that has no exact
 /// variant for `ty`.
@@ -400,13 +422,28 @@ fn box_into_any(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -> HirExpr {
         return value;
     };
     match &value.ty {
-        HirTy::AnyTrait(have) if bounds.iter().all(|b| have.contains(b)) => HirExpr {
-            ty: target.clone(),
-            ..value
-        },
-        // Mismatches (`any A` into `any B`, plain `any`) are reported by
-        // the caller's compatibility check.
-        HirTy::Unknown | HirTy::Any | HirTy::AnyTrait(_) => value,
+        HirTy::AnyTrait(have)
+            if bounds
+                .iter()
+                .all(|b| have.iter().any(|h| bound_covers(h, b))) =>
+        {
+            HirExpr {
+                ty: target.clone(),
+                ..value
+            }
+        }
+        // Spec 2.2.10: no implicit `any` → `any Tr` (it would hide a
+        // runtime check); `any Tr` → `any` is the arm above.
+        HirTy::AnyTrait(_) => ctx.error_expr(
+            value.span,
+            format!(
+                "cannot store an `{}` value in an `{}` slot without narrowing — test it with \
+                 `is` or a type pattern (`match v {{ x: T => ... }}`) first (spec 2.2.10)",
+                ctx.ty_name(&value.ty),
+                ctx.ty_name(target)
+            ),
+        ),
+        HirTy::Unknown | HirTy::Any => value,
         ty => {
             let missing: Vec<&String> = bounds.iter().filter(|b| !ctx.implements(ty, b)).collect();
             if !missing.is_empty() {
@@ -439,7 +476,10 @@ fn box_into_any(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -> HirExpr {
 fn coercible(ctx: &LowerCtx<'_>, slot: &HirTy, ty: &HirTy) -> bool {
     ty_compatible(slot, ty)
         || matches!(any_slot_for(slot, ty), Some(HirTy::AnyTrait(bs))
-            if bs.iter().all(|b| ctx.implements(ty, b)))
+        if bs.iter().all(|b| match ty {
+            HirTy::AnyTrait(have) => have.iter().any(|h| bound_covers(h, b)),
+            _ => ctx.implements(ty, b),
+        }))
 }
 
 /// Lower `e` with `ty` as its expected type (`Unknown` = no expectation).
@@ -456,7 +496,7 @@ fn lower_expected(ctx: &mut LowerCtx<'_>, e: &Expr, ty: HirTy) -> HirExpr {
 fn hir_block_diverges(b: &HirBlock) -> bool {
     b.stmts.iter().any(|s| match s {
         HirStmt::Return(_)
-        | HirStmt::Throw(_)
+        | HirStmt::Panic(_)
         | HirStmt::Break { .. }
         | HirStmt::Continue { .. } => true,
         HirStmt::Expr(e) | HirStmt::Let { init: e, .. } => hir_expr_diverges(e),
@@ -609,6 +649,22 @@ struct LowerCtx<'a> {
     /// the same local instead of allocating a fresh one. Spec 3.11.4 —
     /// `E::A(x) | E::B(x)` must bind `x` once, with consistent type.
     or_pattern_binders: Vec<HashMap<String, LocalId>>,
+    /// Error type of the enclosing function's / closure's `throws`
+    /// (`None`: no error may leave it).
+    fn_throws: Option<HirTy>,
+    /// Enclosing prefix `try`s; a throwing call must sit under one.
+    try_depth: u32,
+    /// Enclosing `catch` / `try?` / `try!` / `finally` frames, innermost
+    /// last (see `throws`).
+    err_frames: Vec<ErrFrame>,
+    /// Probe pass over a closure body: collects the error types that
+    /// escape it instead of reporting them.
+    throws_probe: Option<Vec<HirTy>>,
+    /// Lowering the body of `fn main() throws (E)`: an escaping error
+    /// ends the process (spec 4.16.3).
+    uncaught_in_main: bool,
+    /// Counter for synthesized labels and local names.
+    next_synth: u32,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -627,6 +683,12 @@ impl<'a> LowerCtx<'a> {
             current_module: String::new(),
             local_uses: vec![Vec::new()],
             or_pattern_binders: Vec::new(),
+            fn_throws: None,
+            try_depth: 0,
+            err_frames: Vec::new(),
+            throws_probe: None,
+            uncaught_in_main: false,
+            next_synth: 0,
         }
     }
 
@@ -674,6 +736,7 @@ impl<'a> LowerCtx<'a> {
             HirTy::Prim(p) => p.name().to_owned(),
             HirTy::Unit => "()".to_owned(),
             HirTy::Any => "any".to_owned(),
+            HirTy::AnyTrait(b) if b.is_empty() => "any".to_owned(),
             HirTy::AnyTrait(b) if b.len() == 1 => format!("any {}", b[0]),
             HirTy::AnyTrait(b) => format!("any ({})", b.join(" + ")),
             HirTy::Unknown => "{unknown}".to_owned(),
@@ -694,7 +757,14 @@ impl<'a> LowerCtx<'a> {
                 } else {
                     "closure"
                 };
-                format!("{kw}({}) -> {}", inner.join(", "), self.ty_name(ret))
+                let ret = match &**ret {
+                    HirTy::Throws { .. } => self.ty_name(ret),
+                    r => format!("-> {}", self.ty_name(r)),
+                };
+                format!("{kw}({}) {ret}", inner.join(", "))
+            }
+            HirTy::Throws { ok, err } => {
+                format!("throws ({}) -> {}", self.ty_name(err), self.ty_name(ok))
             }
         }
     }
@@ -1020,6 +1090,11 @@ impl<'a> LowerCtx<'a> {
                             if let Some(id) = self.instantiate_enum(&full, args) {
                                 return HirTy::Enum(id);
                             }
+                        } else {
+                            // An argument names an unbound type param:
+                            // re-resolving it by name could hit a
+                            // same-named visible type.
+                            return HirTy::Path(vec![full]);
                         }
                     }
                 }
@@ -1049,6 +1124,7 @@ impl<'a> LowerCtx<'a> {
             AstTyKind::Fn(args, ret) => {
                 HirTy::Fn(args.iter().map(rec).collect(), Box::new(rec(ret)))
             }
+            AstTyKind::Throws { ok, err } => crate::ty::throws_ty(rec(ok), rec(err)),
             _ => resolve_ty_with_structs(
                 ty,
                 &self.env.struct_table,

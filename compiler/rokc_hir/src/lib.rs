@@ -212,11 +212,12 @@ pub enum HirStmt {
     Continue {
         label: Option<String>,
     },
-    /// `throw v` — divergent statement (spec 3.14.1). Stage-1 lowers the
-    /// payload to a `rok_panic(code)` call carried in the inner expr; MIR
-    /// emits the call followed by an `unreachable` terminator so the
-    /// surrounding block is correctly seen as not falling through.
-    Throw(HirExpr),
+    /// A call to a never-returning runtime hook (`rok_panic` for a failed
+    /// `try!`, `rok_uncaught_error` for an error escaping a throwing
+    /// `main`). MIR emits the call followed by an `unreachable`
+    /// terminator so the block is seen as not falling through. `throw`
+    /// itself lowers to plain returns / jumps (see `lower::throws`).
+    Panic(HirExpr),
 }
 
 #[derive(Clone, Debug)]
@@ -452,9 +453,11 @@ pub enum HirTy {
     /// Unit `()`. Empty tuple — the implicit return type when none is given.
     Unit,
     Prim(PrimTy),
-    /// Dynamic `any` slot.
+    /// Untyped wildcard (error recovery, untyped parameters); compatible
+    /// with everything. The user's `any` is `AnyTrait(vec![])`.
     Any,
-    /// `any Tr` / `any (A + B)`: canonical trait keys, sorted (D4).
+    /// `any` / `any Tr` / `any (A + B)`: canonical trait keys, sorted (D4);
+    /// plain `any` has none.
     /// Tag + heap payload; the tag numbers concrete types program-wide.
     /// Construction reuses `SumWrap` (variant index = tag) and narrowing
     /// reuses `SumVariant` with this as `sum_ty`.
@@ -478,5 +481,13 @@ pub enum HirTy {
         args: Vec<HirTy>,
         ret: Box<HirTy>,
         env: Box<HirTy>,
+    },
+    // What a function declared `throws (err) -> ok` returns: the
+    // `{ is_err: bool, ok, err }` carrier (value-based errors, no
+    // unwinding). Appears only as a function's (or `fn` type's) return
+    // type; `try` unpacks it at the call site.
+    Throws {
+        ok: Box<HirTy>,
+        err: Box<HirTy>,
     },
 }

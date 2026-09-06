@@ -1,0 +1,39 @@
+// expect-exit: 0
+// expect-stdout:
+// 6
+// -1
+// 1
+
+// spec 4.14: untyped `throws` = `throws (any Error)`; a cause chain
+// through `Error::source` (stdlib 2.14.3).
+struct NotFound { id: i32; }
+impl Display for NotFound { fn display(self) -> str { return "not found"; } }
+impl Debug for NotFound { fn debug(self) -> str { return "NotFound"; } }
+impl Error for NotFound {}
+
+struct Wrapped { code: i32; cause: any Error | none; }
+impl Display for Wrapped { fn display(self) -> str { return "wrapped"; } }
+impl Debug for Wrapped { fn debug(self) -> str { return "Wrapped"; } }
+impl Error for Wrapped {
+    fn source(self) -> any Error | none { return self.cause; }
+}
+
+fn find(id: i32) throws -> i32 {
+    if id > 10 { throw NotFound { id: id }; }
+    return id * 2;
+}
+
+fn load(id: i32) throws -> i32 {
+    let v = try find(id) catch e { throw Wrapped { code: 7, cause: e }; };
+    return v;
+}
+
+rok_print_i32(try find(3) catch _ { -1 });
+rok_print_i32(try find(30) catch _ { -1 });
+let r = try load(40) catch e: any Error {
+    match e.source() {
+        c: any Error => 1,
+        none => 2,
+    }
+};
+rok_print_i32(r);

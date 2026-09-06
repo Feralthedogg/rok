@@ -122,9 +122,9 @@ pub fn compile_source(
             diags.push(entry::stmts_outside_entry(root));
         }
     }
-    // Auto-inject the `rok_panic(msg, len) -> !` runtime hook so
-    // `throw` lowering has a target without each user file declaring
-    // the extern themselves.
+    // Auto-inject the runtime hooks lowering targets (`rok_panic`,
+    // `rok_uncaught_error`, `rok_print_*`, ...) so user files needn't
+    // declare the externs themselves.
     all_items.insert(0, builtin_panic_extern());
     let program = rokc_ast::Program {
         attrs: Vec::new(),
@@ -519,7 +519,8 @@ fn rename_with_prefix(item: rokc_ast::Item, module_path: &[String]) -> rokc_ast:
 }
 
 /// Synthesize the runtime `extern "C"` block with the small set of
-/// always-available primitives — `rok_panic` (used by `throw`),
+/// always-available primitives — `rok_panic` (`try!`, runtime checks),
+/// `rok_uncaught_error` (an error escaping a throwing `main`),
 /// `rok_print_str`, `rok_print_i32`, and `rok_print_i64`. Every user
 /// source file gets these for free without writing an extern block.
 fn builtin_panic_extern() -> rokc_ast::Item {
@@ -568,6 +569,12 @@ fn builtin_panic_extern() -> rokc_ast::Item {
         vec![("msg", path_ty("str")), ("len", path_ty("usize"))],
         None,
     );
+    // Spec 4.16.4: an error out of a throwing `main` — message, exit 1.
+    let uncaught_fn = make_fn(
+        "rok_uncaught_error",
+        vec![("msg", path_ty("str")), ("len", path_ty("usize"))],
+        None,
+    );
     let assert_fn = make_fn(
         "rok_assert",
         vec![("cond", path_ty("i32"))],
@@ -605,6 +612,7 @@ fn builtin_panic_extern() -> rokc_ast::Item {
         abi: "C".to_owned(),
         items: vec![
             ExternItem::Fn(panic_fn),
+            ExternItem::Fn(uncaught_fn),
             ExternItem::Fn(assert_fn),
             ExternItem::Fn(print_str_fn),
             ExternItem::Fn(print_i32_fn),

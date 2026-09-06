@@ -1,0 +1,12 @@
+// spec: 004.16.4-implicit-main-no-throw
+// probe: negative-must-fail
+// expect-exit: 0  (D3: the implicit `main` (top-level statements) is non-throwing; an uncaught `try` is an error.)
+// expect-error: top-level statements can't throw
+
+fn parse(s: i32) throws (i32) -> i32 {
+    if s < 0 { throw -1; }
+    return s;
+}
+
+let v = try parse(1);
+rok_print_i32(v);

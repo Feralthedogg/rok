@@ -1,0 +1,90 @@
+// expect-exit: 0
+// expect-stdout:
+// body
+// finally 1
+// handler
+// finally 2
+// early
+// finally 3
+// 30
+// loop
+// 0
+// finally 4
+// loop
+// 1
+// finally 4
+// finally 4
+// finally 5
+// inner finally
+// outer finally
+// propagated
+// 9
+// finally 6
+// caught
+// 9
+
+// `finally` runs on every way out (D3): normal completion, after a
+// handled `catch`, on `return` / `break` / `continue` leaving it, and
+// while an error propagates.
+fn fail(x: i32) throws (i32) -> i32 {
+    if x > 0 { throw x; }
+    0
+}
+
+fn early() -> i32 {
+    try {
+        rok_print_str("early");
+        return 30;
+    } finally {
+        rok_print_str("finally 3");
+    };
+    return 0;
+}
+
+fn nested() throws (i32) {
+    try {
+        try {
+            let v = try fail(9);
+            rok_print_i32(v);
+        } finally {
+            rok_print_str("inner finally");
+        };
+    } finally {
+        rok_print_str("outer finally");
+    };
+}
+
+fn main() -> i32 {
+    try {
+        rok_print_str("body");
+    } finally {
+        rok_print_str("finally 1");
+    };
+    try fail(1) catch _ {
+        rok_print_str("handler");
+    } finally {
+        rok_print_str("finally 2");
+    };
+    rok_print_i32(early());
+    for i in 0..5 {
+        try {
+            if i == 2 { break; }
+            rok_print_str("loop");
+            rok_print_i32(i);
+            continue;
+        } finally {
+            rok_print_str("finally 4");
+        };
+    }
+    loop {
+        try { break; } finally { rok_print_str("finally 5"); };
+    };
+    try nested() catch e {
+        rok_print_str("propagated");
+        rok_print_i32(e);
+    };
+    let c = try fail(9) catch e: i32 { e } finally { rok_print_str("finally 6"); };
+    rok_print_str("caught");
+    rok_print_i32(c);
+    return 0;
+}

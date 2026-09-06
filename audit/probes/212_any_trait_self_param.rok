@@ -1,0 +1,10 @@
+// spec: 002.12-any-trait
+// probe: negative-must-fail
+// expect-error: cannot call `same` on `any Same`: its signature mentions `Self`
+
+// D4: 매개변수에 `Self` 가 나오는 메서드도 `any Tr` 에서 부를 수 없다.
+trait Same { fn same(self, o: Self) -> bool; }
+impl Same for i32 { fn same(self, o: i32) -> bool { return self == o; } }
+
+let y: any Same = 1;
+let b = y.same(2);

@@ -1,0 +1,11 @@
+// spec: 002.12-any-trait
+// probe: negative-must-fail
+// expect-error: cannot call `dup` on `any Dup`: its signature mentions `Self`
+
+// D4: 반환 타입에 `Self` 가 나오는 메서드는 구현 타입마다 타입이 달라 `any Tr` 에서 부를 수 없다.
+trait Dup { fn dup(self) -> Self; }
+struct C { v: i32; }
+impl Dup for C { fn dup(self) -> Self { return self; } }
+
+let y: any Dup = C { v: 0 };
+let b = y.dup();

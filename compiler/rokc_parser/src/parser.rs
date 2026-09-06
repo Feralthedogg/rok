@@ -10,7 +10,7 @@ use rokc_ast::{
     EnumVariant, EnumVariantKind, Expr, ExprKind, ExternBlock, ExternItem, FieldPattern, FnDef,
     Generics, ImplDef, ImplItem, Item, Literal, MatchArm, ModDef, NamedField, Param, Path,
     PathSegment, Pattern, PatternKind, Program, Stmt, StmtKind, StructDef, StructKind, ThrowsKind,
-    TraitDef, TraitItem, Ty, TyKind, UnionDef,
+    TraitDef, TraitItem, TryKind, Ty, TyKind, UnionDef,
 };
 use rokc_core::Visibility;
 use rokc_diagnostic::{ErrorKind, RokDiagnostic, Span};
@@ -57,6 +57,9 @@ pub struct Parser<'a> {
     /// Counter for generating unique temp names across nested-tuple
     /// destructures within a single parse session.
     next_destructure_temp: u32,
+    /// Spans of untyped `throws` in fn types not (yet) claimed by a
+    /// `rethrows` signature; reported at the end of the parse.
+    untyped_throws: Vec<Span>,
 }
 
 /// Nesting limit for expressions, types, patterns and blocks.
@@ -103,6 +106,7 @@ impl<'a> Parser<'a> {
             depth_reported: false,
             pending_stmts: Vec::new(),
             next_destructure_temp: 0,
+            untyped_throws: Vec::new(),
         }
     }
 
@@ -360,6 +364,9 @@ impl<'a> Parser<'a> {
                 self.recover(from, Recover::Stmt);
             }
         }
+        // Untyped `throws` in fn types that no `rethrows` claimed keep the
+        // marker; HIR reads it as `any Error` (spec 4.14).
+        self.untyped_throws.clear();
         Program {
             attrs,
             items,
@@ -1523,6 +1530,7 @@ impl<'a> Parser<'a> {
             Generics::default()
         };
         self.expect(&TokenKind::LParen, "`(`")?;
+        let untyped_mark = self.untyped_throws.len();
         let mut params = Vec::new();
         while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
             params.push(self.parse_param()?);
@@ -1532,7 +1540,26 @@ impl<'a> Parser<'a> {
         }
         self.expect(&TokenKind::RParen, "`)`")?;
 
-        let throws = self.parse_throws();
+        let mut generics = generics;
+        let throws = if matches!(self.peek(), TokenKind::Ident(n) if n == "rethrows") {
+            let span = self.peek_span();
+            self.bump();
+            self.untyped_throws.truncate(untyped_mark);
+            let errs = desugar_rethrows(&mut params, &mut generics);
+            if errs.is_empty() {
+                self.error(
+                    span,
+                    "`rethrows` needs a parameter of throwing function type \
+                     (`f: fn(T) throws -> U`) (spec 4.14)",
+                );
+            }
+            ThrowsKind::Typed(errs)
+        } else {
+            match self.parse_throws() {
+                ThrowsKind::Untyped => ThrowsKind::Typed(vec![path_ty(UNTYPED_THROWS_MARK, start)]),
+                t => t,
+            }
+        };
         let ret_ty = if self.eat(&TokenKind::Arrow) {
             Some(self.parse_type()?)
         } else {
@@ -1795,9 +1822,11 @@ impl<'a> Parser<'a> {
                 self.expect(&TokenKind::LParen, "`(`")?;
                 let args = self.nested_type_list(TokenKind::RParen)?;
                 self.expect(&TokenKind::RParen, "`)`")?;
+                let throws_span = self.peek_span();
+                let throws = self.parse_throws();
                 // `fn(..) -> R` binds tighter than `|` (spec 2.1.10):
                 // `fn() -> A | B` is `(fn() -> A) | B`.
-                let ret = if self.eat(&TokenKind::Arrow) {
+                let mut ret = if self.eat(&TokenKind::Arrow) {
                     self.parse_type_atom()?
                 } else {
                     Ty {
@@ -1805,6 +1834,30 @@ impl<'a> Parser<'a> {
                         span: start,
                     }
                 };
+                let err = match throws {
+                    ThrowsKind::None => None,
+                    // Claimed by an enclosing `rethrows` signature, else
+                    // reported at the end of the parse.
+                    ThrowsKind::Untyped => {
+                        self.untyped_throws.push(throws_span);
+                        Some(path_ty(UNTYPED_THROWS_MARK, throws_span))
+                    }
+                    ThrowsKind::Typed(mut tys) if tys.len() == 1 => tys.pop(),
+                    ThrowsKind::Typed(tys) => Some(Ty {
+                        kind: TyKind::Sum(tys),
+                        span: throws_span,
+                    }),
+                };
+                if let Some(err) = err {
+                    let span = ret.span;
+                    ret = Ty {
+                        kind: TyKind::Throws {
+                            ok: Box::new(ret),
+                            err: Box::new(err),
+                        },
+                        span,
+                    };
+                }
                 TyKind::Fn(args, Box::new(ret))
             }
             TokenKind::LParen => {
@@ -2453,7 +2506,8 @@ impl<'a> Parser<'a> {
         let start = if matches!(self.peek(), TokenKind::DotDot | TokenKind::DotDotEq) {
             None
         } else {
-            Some(Box::new(self.parse_expr_bp(0)?))
+            let e = self.parse_expr_bp(0)?;
+            Some(Box::new(self.parse_catch_tail(e)?))
         };
         let inclusive = match self.peek() {
             TokenKind::DotDot => false,
@@ -2476,6 +2530,46 @@ impl<'a> Parser<'a> {
                 start,
                 end,
                 inclusive,
+            },
+        })
+    }
+
+    /// Postfix `catch pat? { .. }` arms and `finally { .. }` around `body`
+    /// (spec 4.14). They bind loosest, so `try a() + b() catch _ { 0 }`
+    /// handles both calls.
+    fn parse_catch_tail(&mut self, body: Expr) -> Option<Expr> {
+        if !matches!(self.peek(), TokenKind::Catch | TokenKind::Finally) {
+            return Some(body);
+        }
+        let mut catches: Vec<CatchArm> = Vec::new();
+        while matches!(self.peek(), TokenKind::Catch) {
+            let span = self.peek_span();
+            self.bump();
+            let pat = if matches!(self.peek(), TokenKind::LBrace) {
+                Pattern {
+                    kind: PatternKind::Wildcard,
+                    span,
+                }
+            } else {
+                self.with_struct_expr(false, Self::parse_pattern)?
+            };
+            let arm_body = self.parse_block()?;
+            catches.push(CatchArm {
+                pat,
+                body: arm_body,
+            });
+        }
+        let finally = if self.eat(&TokenKind::Finally) {
+            Some(self.parse_block()?)
+        } else {
+            None
+        };
+        Some(Expr {
+            span: body.span,
+            kind: ExprKind::Catch {
+                body: Box::new(body),
+                catches,
+                finally,
             },
         })
     }
@@ -2881,29 +2975,21 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenKind::Try => {
-                // `try { body } (catch pat { handler })* (finally { ... })?`
+                // `try e` / `try? e` / `try! e` covers the whole expression
+                // to its right, up to a `catch` / `finally` (attached
+                // around the result by `parse_catch_tail`).
                 self.bump();
-                let body = self.parse_block()?;
-                let mut catches: Vec<CatchArm> = Vec::new();
-                while matches!(self.peek(), TokenKind::Catch) {
-                    self.bump();
-                    let pat = self.with_struct_expr(false, Self::parse_pattern)?;
-                    let arm_body = self.parse_block()?;
-                    catches.push(CatchArm {
-                        pat,
-                        body: arm_body,
-                    });
-                }
-                let finally = if matches!(self.peek(), TokenKind::Finally) {
-                    self.bump();
-                    Some(self.parse_block()?)
+                let kind = if self.eat(&TokenKind::Question) {
+                    TryKind::Optional
+                } else if self.eat(&TokenKind::Bang) {
+                    TryKind::Force
                 } else {
-                    None
+                    TryKind::Plain
                 };
+                let operand = self.parse_expr_bp(0)?;
                 ExprKind::Try {
-                    body,
-                    catches,
-                    finally,
+                    kind,
+                    operand: Box::new(operand),
                 }
             }
             TokenKind::While => {
@@ -3319,6 +3405,23 @@ impl<'a> Parser<'a> {
                     expr = Expr {
                         span: expr.span,
                         kind: ExprKind::Cast(Box::new(expr), ty),
+                    };
+                }
+                // Spec 2.2.5: `v is T` — runtime type test; binds like
+                // `as` (spec 3.2 gives `is` no precedence row).
+                TokenKind::Is => {
+                    self.bump();
+                    let span = self.peek_span();
+                    let ty = self.parse_cast_type()?;
+                    expr = Expr {
+                        span: expr.span,
+                        kind: ExprKind::Is(
+                            Box::new(expr),
+                            rokc_ast::Pattern {
+                                kind: rokc_ast::PatternKind::TypeCheck { binder: None, ty },
+                                span,
+                            },
+                        ),
                     };
                 }
                 TokenKind::Question => {
@@ -3819,7 +3922,8 @@ impl<'a> Parser<'a> {
                 // Multi-segment path → enum variant pattern.
                 if matches!(self.peek_next(), Some(TokenKind::ColonColon)) {
                     let path = self.parse_path()?;
-                    if matches!(self.peek(), TokenKind::LBrace) {
+                    // Not where a block follows (`catch E::V { body }`).
+                    if self.struct_expr_allowed && matches!(self.peek(), TokenKind::LBrace) {
                         self.parse_struct_pattern_body(path)?
                     } else {
                         let args = if self.eat(&TokenKind::LParen) {
@@ -3950,8 +4054,80 @@ const fn is_block_like(e: &Expr) -> bool {
             | ExprKind::Loop { .. }
             | ExprKind::While { .. }
             | ExprKind::For { .. }
-            | ExprKind::Try { .. }
+            | ExprKind::Catch { .. }
     )
+}
+
+/// Placeholder error type of an untyped `throws`: `desugar_rethrows`
+/// replaces it in `rethrows` parameters, HIR reads any other as
+/// `any Error`. `#` cannot start an identifier.
+use rokc_ast::UNTYPED_THROWS_MARK;
+
+fn path_ty(name: &str, span: Span) -> Ty {
+    Ty {
+        kind: TyKind::Path(Path {
+            segments: vec![PathSegment {
+                name: name.to_owned(),
+                generics: Vec::new(),
+            }],
+            span,
+        }),
+        span,
+    }
+}
+
+/// `fn f(g: fn(T) throws -> U) rethrows -> R` → `fn f<#E0>(g: fn(T)
+/// throws (#E0) -> U) throws (#E0) -> R`. Monomorphization binds `#E0`
+/// to the argument's error type, or to "no error" for a non-throwing
+/// argument, whose instance then doesn't throw. Returns the error types.
+fn desugar_rethrows(params: &mut [Param], generics: &mut Generics) -> Vec<Ty> {
+    fn walk(ty: &mut Ty, generics: &mut Generics, errs: &mut Vec<Ty>) {
+        match &mut ty.kind {
+            TyKind::Path(p)
+                if p.segments.len() == 1 && p.segments[0].name == UNTYPED_THROWS_MARK =>
+            {
+                let name = format!("#E{}", errs.len());
+                p.segments[0].name.clone_from(&name);
+                generics.params.push(rokc_ast::GenericParam::Type {
+                    name,
+                    bounds: Vec::new(),
+                    default: None,
+                });
+                errs.push(ty.clone());
+            }
+            TyKind::Path(p) => {
+                for seg in &mut p.segments {
+                    for g in &mut seg.generics {
+                        walk(g, generics, errs);
+                    }
+                }
+            }
+            TyKind::Sum(ts) | TyKind::Tuple(ts) => {
+                for t in ts {
+                    walk(t, generics, errs);
+                }
+            }
+            TyKind::Fn(args, ret) => {
+                for t in args {
+                    walk(t, generics, errs);
+                }
+                walk(ret, generics, errs);
+            }
+            TyKind::Throws { ok, err } => {
+                walk(ok, generics, errs);
+                walk(err, generics, errs);
+            }
+            TyKind::Array(t, _) => walk(t, generics, errs),
+            TyKind::AnyTrait(_) | TyKind::Any | TyKind::None | TyKind::SelfUpper => {}
+        }
+    }
+    let mut errs = Vec::new();
+    for p in params {
+        if let Some(t) = &mut p.ty {
+            walk(t, generics, &mut errs);
+        }
+    }
+    errs
 }
 
 const fn starts_stmt(k: &TokenKind) -> bool {

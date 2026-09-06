@@ -1,0 +1,50 @@
+// expect-exit: 0
+// expect-stdout:
+// 1
+// 2
+// 40
+// rethrown io
+// 5
+// 6
+// 11
+// 7
+
+// `catch` arms (D3): matched top to bottom against the error's type; a
+// catch that covers every error type makes the expression non-throwing,
+// otherwise the rest propagates. The catch expression's value is the
+// body's or the handler's.
+enum ParseError { Empty, Bad }
+enum IoError { Closed, Gone }
+
+fn load(x: i32) throws (ParseError | IoError) -> i32 {
+    if x == 1 { throw ParseError::Bad; }
+    if x == 2 { throw IoError::Closed; }
+    if x == 3 { throw IoError::Gone; }
+    x * 10
+}
+
+fn by_type(x: i32) -> i32 {
+    try load(x) catch e: ParseError { 1 } catch e: IoError { 2 }
+}
+
+// Only `ParseError` is handled here; `IoError` propagates.
+fn partial(x: i32) throws (IoError) -> i32 {
+    try load(x) catch e: ParseError { 5 }
+}
+
+// Enum-variant arms; the last arm takes the rest.
+fn by_variant(x: i32) -> i32 {
+    try load(x) catch IoError::Closed { 6 } catch ParseError::Bad { 7 } catch e { 11 }
+}
+
+fn main() -> i32 {
+    rok_print_i32(by_type(1));
+    rok_print_i32(by_type(2));
+    rok_print_i32(by_type(4));
+    try partial(2) catch IoError::Closed { rok_print_str("rethrown io"); } catch _ {};
+    rok_print_i32(try partial(1) catch _ { 0 });
+    rok_print_i32(by_variant(2));
+    rok_print_i32(by_variant(3));
+    rok_print_i32(by_variant(1));
+    return 0;
+}

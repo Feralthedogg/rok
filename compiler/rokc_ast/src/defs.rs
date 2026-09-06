@@ -24,11 +24,20 @@ pub struct FnDef {
     pub span: Span,
 }
 
+/// Error type written for an untyped `throws` (= `throws (any Error)`).
+pub const UNTYPED_THROWS_MARK: &str = "#throws";
+
+/// `throws` clause of a fn signature (spec 4.14). `rethrows` is
+/// desugared by the parser into `Typed` over synthetic generic error
+/// parameters (`#E0`, ...), one per throwing fn-typed parameter.
 #[derive(Clone, Debug, Default)]
 pub enum ThrowsKind {
     #[default]
     None,
+    /// Bare `throws` = `throws (any Error)`; the parser rewrites it to
+    /// `Typed([UNTYPED_THROWS_MARK])`.
     Untyped,
+    /// `throws (A | B)` — the listed types form the error sum.
     Typed(Vec<Ty>),
 }
 
@@ -188,8 +197,17 @@ pub enum ExprKind {
         iter: Box<Expr>,
         body: Block,
     },
+    /// Prefix `try e` / `try? e` / `try! e`: marks the throwing calls in
+    /// `e` (everything to its right).
     Try {
-        body: Block,
+        kind: TryKind,
+        operand: Box<Expr>,
+    },
+    /// Postfix `e catch pat { .. } ... finally { .. }` (either part may
+    /// be absent, not both). `try { .. } catch ..` is a `Catch` over a
+    /// `Try` of a block.
+    Catch {
+        body: Box<Expr>,
         catches: Vec<CatchArm>,
         finally: Option<Block>,
     },
@@ -311,6 +329,17 @@ pub struct MatchArm {
     pub body: Expr,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TryKind {
+    /// `try e` — errors propagate.
+    Plain,
+    /// `try? e` — errors become `none`.
+    Optional,
+    /// `try! e` — errors panic.
+    Force,
+}
+
+/// `catch pat { body }`; an omitted pattern is `_`.
 #[derive(Clone, Debug)]
 pub struct CatchArm {
     pub pat: Pattern,
@@ -388,8 +417,12 @@ pub enum TyKind {
     Sum(Vec<Ty>),
     /// Tuple `(A, B)`.
     Tuple(Vec<Ty>),
-    /// Function type `fn(A, B) -> R`.
+    /// Function type `fn(A, B) -> R`. A throwing one has a `Throws`
+    /// return type.
     Fn(Vec<Ty>, Box<Ty>),
+    /// Return slot of `fn(..) throws (err) -> ok`; only appears as the
+    /// return type of `Fn`.
+    Throws { ok: Box<Ty>, err: Box<Ty> },
     /// Fixed-size array `[T; N]`.
     Array(Box<Ty>, ConstExpr),
     /// `any` slot.

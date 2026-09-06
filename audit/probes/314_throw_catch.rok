@@ -1,17 +1,18 @@
 // spec: 003.14.2-try-catch
-// probe: measure
-// expect-exit: 0  (real unwind via setjmp/longjmp 미구현 → 현재 throw 가
-//                  rok_panic 으로 abort. measure probe 로 stage-1 동작 기록만.)
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// caught:7
 
-// spec 314.2: try 본체에서 throw → catch 본체 점프 + 예외 값 바인딩.
-// 정상 종료 (exit 0). impl이 rok_panic으로 abort하면 exit 101 — spec 위반.
+// spec 314.2: try 본체에서 throw → catch 본체로 + 예외 값 바인딩.
+// 정상 종료 (exit 0). catch 식의 값은 handler 블록의 값.
 fn main() -> i32 {
     let result = try {
         throw 7;
         0
     } catch e {
-        rok_print_str("caught:7");
+        if e == 7 { rok_print_str("caught:7"); }
         99
     };
-    return 0;
+    return result - 99;
 }

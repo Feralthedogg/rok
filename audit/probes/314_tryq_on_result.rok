@@ -1,0 +1,20 @@
+// spec: 003.14-try-q
+// probe: negative-must-fail
+// expect-exit: 0  (D3: `?` is for `T | none` only; `Result` has no `?` — propagate with `throws` + `try`.)
+// expect-error: `?` only works on `T | none`
+
+enum E { Bad }
+
+fn half(x: i32) -> Result<i32, E> {
+    if x % 2 == 1 { return Result::Err(E::Bad); }
+    return Result::Ok(x / 2);
+}
+
+fn quarter(x: i32) -> Result<i32, E> {
+    let h = half(x)?;
+    return half(h);
+}
+
+fn main() -> i32 {
+    return quarter(8).unwrap_or(0);
+}

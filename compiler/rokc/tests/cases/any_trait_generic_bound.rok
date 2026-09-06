@@ -1,0 +1,50 @@
+// expect-exit: 0
+// expect-stdout:
+// 15
+// 50
+// 3
+// 2
+// 10
+// 9
+// 3
+
+// D4: `any Get<i32>` admits only `impl Get<i32>` types, and its methods
+// that use the trait parameter dispatch with the bound's arguments.
+// `any Get<i32>` widens to `any Get` (arguments open) and to `any`.
+// Methods mentioning `Self` stay callable on the concrete type; the
+// trait's other methods dispatch normally.
+trait Get<I> { fn get(self, i: I) -> I; fn n(self) -> i32; }
+struct A { v: i32; }
+struct B { v: i32; }
+struct C { v: i32; }
+impl Get<i32> for A {
+    fn get(self, i: i32) -> i32 { return self.v + i; }
+    fn n(self) -> i32 { return 1; }
+}
+impl Get<i32> for B {
+    fn get(self, i: i32) -> i32 { return self.v * i; }
+    fn n(self) -> i32 { return 2; }
+}
+impl Get<bool> for C {
+    fn get(self, i: bool) -> bool { return !i; }
+    fn n(self) -> i32 { return 3; }
+}
+trait Dup { fn dup(self) -> Self; fn size(self) -> i32; }
+impl Dup for A {
+    fn dup(self) -> Self { return A { v: self.v * 3 }; }
+    fn size(self) -> i32 { return self.v; }
+}
+
+let x: any Get<i32> = A { v: 10 };
+rok_print_i32(x.get(5));
+x = B { v: 10 };
+rok_print_i32(x.get(5));
+let y: any Get = C { v: 0 };
+rok_print_i32(y.n());
+let z: any Get = x;
+rok_print_i32(z.n());
+let w: any = x;
+if w is B { rok_print_i32(w.v); }
+let d: any Dup = A { v: 3 };
+if d is A { rok_print_i32(d.dup().size()); }
+rok_print_i32(d.size());

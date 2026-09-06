@@ -254,6 +254,13 @@ pub(super) fn substitute_aliases(ty: &mut HirTy, aliases: &HashMap<String, HirTy
             }
             substitute_aliases(ret, aliases);
         }
+        // Re-normalize: a `rethrows` error parameter may have become
+        // "no error".
+        HirTy::Throws { ok, err } => {
+            substitute_aliases(ok, aliases);
+            substitute_aliases(err, aliases);
+            *ty = crate::ty::throws_ty((**ok).clone(), (**err).clone());
+        }
         _ => {}
     }
 }
@@ -269,6 +276,21 @@ pub(super) fn resolve_ty_with_structs(
 ) -> HirTy {
     let rec = |t: &rokc_ast::Ty| resolve_ty_with_structs(t, structs, enums, sc);
     match &ty.kind {
+        // Untyped `throws` (spec 4.14) = `throws (any Error)`.
+        AstTyKind::Path(p)
+            if p.segments.len() == 1 && p.segments[0].name == rokc_ast::UNTYPED_THROWS_MARK =>
+        {
+            rec(&rokc_ast::Ty {
+                kind: AstTyKind::AnyTrait(vec![rokc_ast::Path {
+                    segments: vec![rokc_ast::PathSegment {
+                        name: "Error".to_owned(),
+                        generics: Vec::new(),
+                    }],
+                    span: ty.span,
+                }]),
+                span: ty.span,
+            })
+        }
         AstTyKind::Path(p) => {
             let prim = resolve_ty(ty);
             if matches!(prim, HirTy::Prim(_)) {
@@ -346,14 +368,47 @@ pub(super) fn resolve_ty_with_structs(
                     ));
                     return HirTy::Unknown;
                 }
-                keys.push(key);
+                let args: Vec<HirTy> = b
+                    .segments
+                    .last()
+                    .map(|s| s.generics.iter().map(rec).collect())
+                    .unwrap_or_default();
+                keys.push(bound_key(key, &args, structs, enums));
             }
             keys.sort();
             keys.dedup();
             HirTy::AnyTrait(keys)
         }
+        AstTyKind::Throws { ok, err } => crate::ty::throws_ty(rec(ok), rec(err)),
         _ => resolve_ty(ty),
     }
+}
+
+/// `any` bound / impl key with the trait's generic arguments
+/// (`Index<i32>`); a struct or enum argument prints by its name.
+pub(super) fn bound_key(
+    key: String,
+    args: &[HirTy],
+    structs: &HashMap<String, StructId>,
+    enums: &HashMap<String, EnumId>,
+) -> String {
+    if args.is_empty() {
+        return key;
+    }
+    let name = |t: &HirTy| {
+        match t {
+            HirTy::Struct(id) => structs
+                .iter()
+                .filter(|(_, v)| *v == id)
+                .map(|(k, _)| k)
+                .min(),
+            HirTy::Enum(id) => enums.iter().filter(|(_, v)| *v == id).map(|(k, _)| k).min(),
+            _ => None,
+        }
+        .map_or_else(|| ty_mangle(t), Clone::clone)
+    };
+    let args: Vec<String> = args.iter().map(name).collect();
+    format!("{key}<{}>", args.join(", "))
 }
 
 /// Table key of a generic instantiation: `a::Pair` + `[i32, bool]` →
@@ -403,5 +458,6 @@ pub(super) fn ty_mangle(ty: &HirTy) -> String {
                 ty_mangle(env)
             )
         }
+        HirTy::Throws { ok, err } => format!("Throws{}_or_{}", ty_mangle(ok), ty_mangle(err)),
     }
 }

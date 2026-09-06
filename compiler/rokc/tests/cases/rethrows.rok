@@ -1,0 +1,41 @@
+// expect-exit: 0
+// expect-stdout:
+// 12
+// 6
+// 7
+// bad
+// 4
+// 22
+
+// `rethrows` (D3): the call throws only when the function argument does.
+// A non-throwing argument needs no `try`; a throwing one needs `try` and
+// its error type propagates.
+enum Bad { Odd }
+
+fn apply(f: fn(i32) throws -> i32, x: i32) rethrows -> i32 {
+    try f(x) + 1
+}
+
+fn twice(f: fn(i32) throws -> i32, x: i32) rethrows -> i32 {
+    let a = try apply(f, x);
+    try f(a)
+}
+
+fn inc(x: i32) -> i32 { x + 1 }
+
+fn half(x: i32) throws (Bad) -> i32 {
+    if x % 2 == 1 { throw Bad::Odd; }
+    x / 2
+}
+
+fn main() -> i32 {
+    // Non-throwing fn and closure arguments: plain calls.
+    rok_print_i32(apply(inc, 10));
+    rok_print_i32(apply(|x: i32| x * 2, 2) + 1);
+    // Throwing arguments: `try` and the argument's error type.
+    rok_print_i32(try apply(half, 12) catch _ { 0 });
+    try apply(half, 3) catch Bad::Odd { rok_print_str("bad"); };
+    rok_print_i32(try apply(|x: i32| { if x < 0 { throw Bad::Odd; } x }, 3) catch _ { 0 });
+    rok_print_i32(twice(|x: i32| x * 2, 5));
+    return 0;
+}

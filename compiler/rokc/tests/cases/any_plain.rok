@@ -1,0 +1,67 @@
+// expect-exit: 0
+// expect-stdout:
+// 42
+// 2
+// 1
+// 0
+// 300000
+// 200
+// 65
+// 7
+// 9
+// 5
+// 3
+// 4
+// 11
+// -1
+// 77
+
+// Plain `any` = `any ()` (D4): tag + payload with no bound. Values of any
+// type go in and come back out by type pattern; small primitives stay
+// inline in the payload word, bigger values are boxed. `any Tr` widens
+// to `any` implicitly.
+trait Shape { fn area(self) -> i32; }
+struct Sq { s: i32; }
+struct Big { a: i64; b: i64; c: i32; }
+enum Color { Red, Green, Blue }
+impl Shape for Sq { fn area(self) -> i32 { return self.s * self.s; } }
+
+fn show(v: any) -> i32 {
+    return match v {
+        i: i32 => i,
+        f: f64 => (f * 2.0) as i32,
+        b: bool => if b { 1 } else { 0 },
+        l: i64 => (l / 10i64) as i32,
+        u: u8 => u as i32,
+        c: char => c as i32,
+        q: Sq => q.s,
+        g: Big => (g.a + g.b) as i32 + g.c,
+        t: (i32, i32) => t.0 + t.1,
+        k: Color => match k { Color::Blue => 3, _ => 0 },
+        o: i32 | none => 11,
+        _ => 0 - 1,
+    };
+}
+
+let v: any = 42;
+rok_print_i32(show(v));
+v = 1.0;
+rok_print_i32(show(v));
+rok_print_i32(show(true));
+rok_print_i32(show(false));
+rok_print_i32(show(3000000i64));
+rok_print_i32(show(200u8));
+rok_print_i32(show('A'));
+rok_print_i32(show(Sq { s: 7 }));
+rok_print_i32(show(Big { a: 2i64, b: 3i64, c: 4 }));
+rok_print_i32(show((2, 3)));
+rok_print_i32(show(Color::Blue));
+let s: any Shape = Sq { s: 2 };
+let w: any = s;
+rok_print_i32(match w { q: Sq => q.area(), _ => 0 });
+let o: i32 | none = 1;
+rok_print_i32(show(o));
+rok_print_i32(show(1i16));
+struct Cell { tag: i32; payload: any; }
+let c = Cell { tag: 0, payload: Sq { s: 77 } };
+rok_print_i32(show(c.payload));

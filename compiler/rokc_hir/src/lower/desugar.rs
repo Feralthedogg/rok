@@ -30,15 +30,183 @@ pub(super) fn lower_closure_expr(
     // Spec 4.5/4.8: in a context expecting a function type (e.g. an
     // argument to a `fn(i32) -> i32` parameter), unannotated params and
     // the return type come from the expected signature.
-    let (expected_param_tys, expected_ret): (Option<Vec<HirTy>>, Option<HirTy>) =
+    let (expected_param_tys, mut expected_ret): (Option<Vec<HirTy>>, Option<HirTy>) =
         match ctx.current_expected() {
             Some(HirTy::Fn(args, ret) | HirTy::Closure { args, ret, .. }) => {
                 (Some(args.clone()), Some((**ret).clone()))
             }
             _ => (None, None),
         };
+    // An expected `fn(..) throws (E) -> T`: the body's value is a `T`; an
+    // unknown `E` (a `rethrows` parameter) is inferred like no `E`.
+    let mut expected_err = None;
+    if let Some(HirTy::Throws { ok, err }) = expected_ret.clone() {
+        expected_ret = Some(*ok);
+        expected_err = Some(*err).filter(|e| *e != HirTy::Unknown);
+    }
     let declared_ret = ret_ty.map(|t| ctx.resolve_ast_ty(t));
+    // `return` inside the closure targets the closure: its declared (or
+    // expected) return type, else the first `return` value's type.
+    let mut fixed_ret = declared_ret.or_else(|| expected_ret.filter(|t| *t != HirTy::Unknown));
 
+    // A closure that may throw needs its error type and its value type
+    // before the body is lowered (both shape its error returns): take the
+    // expected ones, else lower the body once as a probe — errors that
+    // escape it, and the type it returns.
+    let mut throws = expected_err;
+    if (throws.is_some() || may_throw(body)) && (throws.is_none() || fixed_ret.is_none()) {
+        let seen = ctx.env.sink.diagnostics.borrow().len();
+        let (mut probe, ..) =
+            closure_ctx(ctx, params, &captures, expected_param_tys.as_ref(), span);
+        probe.fn_ret_ty = fixed_ret.clone().unwrap_or(HirTy::Unknown);
+        probe.infer_ret = fixed_ret.is_none();
+        probe.throws_probe = Some(Vec::new());
+        let hint = probe.fn_ret_ty.clone();
+        let value = lower_expected(&mut probe, body, hint);
+        ctx.env.sink.diagnostics.borrow_mut().truncate(seen);
+        let errs = probe.throws_probe.take().unwrap_or_default();
+        if throws.is_none() {
+            throws = match crate::ty::throws_ty(HirTy::Unit, HirTy::Sum(errs)) {
+                HirTy::Throws { err, .. } => Some(*err),
+                _ => None,
+            };
+        }
+        if throws.is_some() && fixed_ret.is_none() {
+            fixed_ret = Some(match probe.fn_ret_ty {
+                HirTy::Unknown => value.ty,
+                t => t,
+            });
+        }
+    }
+
+    let (mut cl_ctx, hir_params, prelude, user_arg_tys) =
+        closure_ctx(ctx, params, &captures, expected_param_tys.as_ref(), span);
+    cl_ctx.fn_ret_ty = fixed_ret.clone().unwrap_or(HirTy::Unknown);
+    cl_ctx.infer_ret = fixed_ret.is_none();
+    cl_ctx.fn_throws.clone_from(&throws);
+    let ret_hint = cl_ctx.fn_ret_ty.clone();
+    let body_h = lower_expected(&mut cl_ctx, body, ret_hint);
+    let diverges = hir_expr_diverges(&body_h);
+    let final_ret_ty = match (fixed_ret, cl_ctx.fn_ret_ty.clone()) {
+        // A `return` fixed the type; a value-producing body must agree.
+        (None, HirTy::Unknown) => body_h.ty.clone(),
+        (Some(t), _) | (None, t) => t,
+    };
+    let body_h = if diverges || (body_h.ty == HirTy::Unit && final_ret_ty == HirTy::Unit) {
+        body_h
+    } else {
+        coerce(&cl_ctx, &final_ret_ty, body_h, &|| {
+            "the closure body".to_owned()
+        })
+    };
+
+    let mut body_block = HirBlock {
+        stmts: prelude,
+        trailing: Some(body_h),
+        label: None,
+    };
+    cl_ctx.fn_ret_ty = final_ret_ty.clone();
+    finish_throwing_body(&cl_ctx, &mut body_block);
+    let final_ret_ty = match throws {
+        Some(err) => HirTy::Throws {
+            ok: Box::new(final_ret_ty),
+            err: Box::new(err),
+        },
+        None => final_ret_ty,
+    };
+    let cl_fn = HirFunction {
+        id: closure_id,
+        def_id: None,
+        name: format!("__closure_{}", closure_id.0),
+        params: hir_params,
+        locals: cl_ctx.into_locals(),
+        ret_ty: final_ret_ty.clone(),
+        body: Some(body_block),
+        is_async: false,
+        is_generator: false,
+        span,
+    };
+    ctx.env.sink.extras.borrow_mut().push(cl_fn);
+
+    let env_ty = (!captures.is_empty())
+        .then(|| HirTy::Tuple(captures.iter().map(|(_, _, t)| t.clone()).collect()));
+    let Some(env_ty_v) = env_ty else {
+        return HirExpr {
+            kind: HirExprKind::FnRef(closure_id),
+            ty: HirTy::Fn(user_arg_tys, Box::new(final_ret_ty)),
+            span,
+        };
+    };
+    // Materialize the env value at the creation site: a tuple of the
+    // current outer locals' values, snapshotted by-value.
+    let env_value = HirExpr {
+        kind: HirExprKind::Tuple {
+            fields: captures
+                .iter()
+                .map(|(_, outer_local, ty)| HirExpr {
+                    kind: HirExprKind::Local(*outer_local),
+                    ty: ty.clone(),
+                    span,
+                })
+                .collect(),
+        },
+        ty: env_ty_v.clone(),
+        span,
+    };
+    HirExpr {
+        kind: HirExprKind::ClosureValue {
+            fn_id: closure_id,
+            env: Box::new(env_value),
+            arg_tys: user_arg_tys.clone(),
+            ret_ty: final_ret_ty.clone(),
+            env_ty: env_ty_v.clone(),
+        },
+        ty: HirTy::Closure {
+            args: user_arg_tys,
+            ret: Box::new(final_ret_ty),
+            env: Box::new(env_ty_v),
+        },
+        span,
+    }
+}
+
+/// Does a closure body contain a `throw` or a plain `try` (so its error
+/// type must be inferred)? Nested closures count too — a harmless
+/// over-approximation that only costs a probe.
+fn may_throw(body: &Expr) -> bool {
+    struct V(bool);
+    impl crate::walk::AstVisitor for V {
+        fn expr(&mut self, e: &Expr) {
+            if let ExprKind::Try {
+                kind: rokc_ast::TryKind::Plain,
+                ..
+            } = e.kind
+            {
+                self.0 = true;
+            }
+        }
+        fn stmt(&mut self, s: &Stmt) {
+            if matches!(s.kind, StmtKind::Throw(_)) {
+                self.0 = true;
+            }
+        }
+    }
+    let mut v = V(false);
+    crate::walk::walk_expr(&mut v, body);
+    v.0
+}
+
+/// A fresh lowering context for a closure body: the `env` parameter
+/// (a tuple of the captured values) with one local per capture, then
+/// the closure's own parameters. Returns the context, the parameters,
+/// the capture prelude and the user-visible argument types.
+fn closure_ctx<'a>(
+    ctx: &LowerCtx<'a>,
+    params: &[Param],
+    captures: &[(String, LocalId, HirTy)],
+    expected_param_tys: Option<&Vec<HirTy>>,
+    span: rokc_diagnostic::Span,
+) -> (LowerCtx<'a>, Vec<HirParam>, Vec<HirStmt>, Vec<HirTy>) {
     let mut cl_ctx = LowerCtx::new(ctx.env, ctx.ty_subst, ctx.self_ty.clone());
     cl_ctx.current_module.clone_from(&ctx.current_module);
     cl_ctx.local_uses.clone_from(&ctx.local_uses);
@@ -109,85 +277,7 @@ pub(super) fn lower_closure_expr(
         });
         user_arg_tys.push(ty);
     }
-
-    // `return` inside the closure targets the closure: its declared (or
-    // expected) return type, else the first `return` value's type.
-    let fixed_ret = declared_ret.or_else(|| expected_ret.filter(|t| *t != HirTy::Unknown));
-    cl_ctx.fn_ret_ty = fixed_ret.clone().unwrap_or(HirTy::Unknown);
-    cl_ctx.infer_ret = fixed_ret.is_none();
-    let ret_hint = cl_ctx.fn_ret_ty.clone();
-    let body_h = lower_expected(&mut cl_ctx, body, ret_hint);
-    let diverges = hir_expr_diverges(&body_h);
-    let final_ret_ty = match (fixed_ret, cl_ctx.fn_ret_ty.clone()) {
-        // A `return` fixed the type; a value-producing body must agree.
-        (None, HirTy::Unknown) => body_h.ty.clone(),
-        (Some(t), _) | (None, t) => t,
-    };
-    let body_h = if diverges || (body_h.ty == HirTy::Unit && final_ret_ty == HirTy::Unit) {
-        body_h
-    } else {
-        coerce(&cl_ctx, &final_ret_ty, body_h, &|| {
-            "the closure body".to_owned()
-        })
-    };
-
-    let body_block = HirBlock {
-        stmts: prelude,
-        trailing: Some(body_h),
-        label: None,
-    };
-    let cl_fn = HirFunction {
-        id: closure_id,
-        def_id: None,
-        name: format!("__closure_{}", closure_id.0),
-        params: hir_params,
-        locals: cl_ctx.into_locals(),
-        ret_ty: final_ret_ty.clone(),
-        body: Some(body_block),
-        is_async: false,
-        is_generator: false,
-        span,
-    };
-    ctx.env.sink.extras.borrow_mut().push(cl_fn);
-
-    let Some(env_ty_v) = env_ty else {
-        return HirExpr {
-            kind: HirExprKind::FnRef(closure_id),
-            ty: HirTy::Fn(user_arg_tys, Box::new(final_ret_ty)),
-            span,
-        };
-    };
-    // Materialize the env value at the creation site: a tuple of the
-    // current outer locals' values, snapshotted by-value.
-    let env_value = HirExpr {
-        kind: HirExprKind::Tuple {
-            fields: captures
-                .iter()
-                .map(|(_, outer_local, ty)| HirExpr {
-                    kind: HirExprKind::Local(*outer_local),
-                    ty: ty.clone(),
-                    span,
-                })
-                .collect(),
-        },
-        ty: env_ty_v.clone(),
-        span,
-    };
-    HirExpr {
-        kind: HirExprKind::ClosureValue {
-            fn_id: closure_id,
-            env: Box::new(env_value),
-            arg_tys: user_arg_tys.clone(),
-            ret_ty: final_ret_ty.clone(),
-            env_ty: env_ty_v.clone(),
-        },
-        ty: HirTy::Closure {
-            args: user_arg_tys,
-            ret: Box::new(final_ret_ty),
-            env: Box::new(env_ty_v),
-        },
-        span,
-    }
+    (cl_ctx, hir_params, prelude, user_arg_tys)
 }
 
 /// `T | none`-shaped sum: index of `none` plus the non-none variants.
@@ -391,7 +481,8 @@ pub(super) fn apply_access_tail(
             ),
         },
         rokc_ast::AccessTail::Method { method, args, .. } => {
-            method_call_on(ctx, recv, method, args, span)
+            let call = method_call_on(ctx, recv, method, args, span);
+            unpack_call(ctx, call)
         }
         rokc_ast::AccessTail::Index(_) => ctx.error_expr(
             span,
@@ -416,7 +507,8 @@ pub(super) fn desugar_try_q(
         return ctx.error_expr(
             span,
             format!(
-                "`?` needs an optional value (`T | none`), found `{}`",
+                "`?` only works on `T | none`, found `{}` — to propagate errors use `throws` \
+                 and `try` (spec 3.14 / 4.14)",
                 ctx.ty_name(&inner.ty)
             ),
         );
@@ -433,9 +525,10 @@ pub(super) fn desugar_try_q(
         );
     }
     let value_ty = without_none(&some);
+    let ret = lower_return(ctx, Some(sum_none(&ret_ty, span)), span);
     let none_body = HirExpr {
         kind: HirExprKind::Block(Box::new(HirBlock {
-            stmts: vec![HirStmt::Return(Some(sum_none(&ret_ty, span)))],
+            stmts: vec![ret],
             trailing: None,
             label: None,
         })),

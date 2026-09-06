@@ -109,8 +109,8 @@ fn print_stmt(out: &mut String, s: &HirStmt) {
             print_expr(out, value);
             out.push(';');
         }
-        HirStmt::Throw(call) => {
-            out.push_str("throw ");
+        HirStmt::Panic(call) => {
+            out.push_str("panic ");
             print_expr(out, call);
             out.push(';');
         }
@@ -483,6 +483,7 @@ fn ty_str(t: &HirTy) -> String {
         HirTy::Unit => "()".to_owned(),
         HirTy::Prim(p) => p.name().to_owned(),
         HirTy::Any => "any".to_owned(),
+        HirTy::AnyTrait(b) if b.is_empty() => "any".to_owned(),
         HirTy::AnyTrait(b) => format!("any ({})", b.join(" + ")),
         HirTy::Path(parts) => parts.join("::"),
         HirTy::Sum(parts) => parts.iter().map(ty_str).collect::<Vec<_>>().join(" | "),
@@ -501,5 +502,6 @@ fn ty_str(t: &HirTy) -> String {
             let inner = args.iter().map(ty_str).collect::<Vec<_>>().join(", ");
             format!("closure({inner}) -> {}", ty_str(ret))
         }
+        HirTy::Throws { ok, err } => format!("throws ({}) {}", ty_str(err), ty_str(ok)),
     }
 }

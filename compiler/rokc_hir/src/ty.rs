@@ -24,7 +24,8 @@ pub fn resolve_ty(ty: &Ty) -> HirTy {
                 HirTy::Tuple(parts.iter().map(resolve_ty).collect())
             }
         }
-        TyKind::Any => HirTy::Any,
+        // Plain `any` = `any ()`: tag + payload with no bound (D4).
+        TyKind::Any => HirTy::AnyTrait(Vec::new()),
         TyKind::AnyTrait(bounds) => HirTy::AnyTrait(
             bounds
                 .iter()
@@ -47,6 +48,40 @@ pub fn resolve_ty(ty: &Ty) -> HirTy {
             args.iter().map(resolve_ty).collect(),
             Box::new(resolve_ty(ret)),
         ),
+        TyKind::Throws { ok, err } => throws_ty(resolve_ty(ok), resolve_ty(err)),
+    }
+}
+
+/// What a `rethrows` error parameter binds to for a non-throwing
+/// argument (`#` cannot start a user identifier).
+pub const NOTHROW: &str = "#nothrow";
+
+pub fn nothrow_ty() -> HirTy {
+    HirTy::Path(vec![NOTHROW.to_owned()])
+}
+
+/// `throws (err) -> ok`, normalized: nested error sums are flattened and
+/// deduplicated, `NOTHROW` parts dropped — no error left means a plain
+/// `ok` (a `rethrows` instance with non-throwing arguments).
+pub fn throws_ty(ok: HirTy, err: HirTy) -> HirTy {
+    fn flatten(t: HirTy, out: &mut Vec<HirTy>) {
+        match t {
+            HirTy::Sum(parts) => parts.into_iter().for_each(|p| flatten(p, out)),
+            HirTy::Path(p) if p.len() == 1 && p[0] == NOTHROW => {}
+            t if !out.contains(&t) => out.push(t),
+            _ => {}
+        }
+    }
+    let mut parts = Vec::new();
+    flatten(err, &mut parts);
+    let err = match parts.len() {
+        0 => return ok,
+        1 => parts.pop().expect("one part"),
+        _ => HirTy::Sum(parts),
+    };
+    HirTy::Throws {
+        ok: Box::new(ok),
+        err: Box::new(err),
     }
 }
 

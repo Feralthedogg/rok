@@ -1,0 +1,10 @@
+// spec: 002.12-any-trait
+// probe: negative-must-fail
+// expect-error: `C` does not implement `Get<i32>`, so it cannot be stored in an `any Get<i32>` slot
+
+// D4: bound 의 제네릭 인자도 검사한다 — `impl Get<bool>` 은 `any Get<i32>` 가 아니다.
+trait Get<I> { fn get(self, i: I) -> I; }
+struct C { v: i32; }
+impl Get<bool> for C { fn get(self, i: bool) -> bool { return !i; } }
+
+let x: any Get<i32> = C { v: 1 };

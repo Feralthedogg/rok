@@ -6,6 +6,7 @@
 // User code gets an implicit `use rok::core::**;` (stdlib spec 0.1, 0.2) —
 // there is no separate prelude module.
 
+pub mod error;
 pub mod fmt;
 pub mod future;
 pub mod index;
