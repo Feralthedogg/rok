@@ -1,0 +1,43 @@
+// expect-exit: 0
+// expect-stdout:
+// 6000000
+// ok
+
+// GC: two million boxed `any` payloads (48 bytes each, ~96 MB total)
+// are created and dropped; the collector keeps the heap bounded and an
+// explicit collection leaves only what is still reachable.
+extern "C" {
+    fn rok_gc_collect();
+    fn rok_gc_stats_live_bytes() -> usize;
+    fn rok_gc_stats_collections() -> u64;
+}
+
+trait Weigh { fn w(self) -> i64; }
+struct Blob { a: i64; b: i64; c: i64; d: i64; }
+impl Weigh for Blob { fn w(self) -> i64 { return self.a + self.d; } }
+
+fn make(i: i64) -> any Weigh { return Blob { a: 1, b: i, c: i, d: 2 }; }
+
+fn main() -> i32 {
+    let keep: any Weigh = make(0);
+    let total: i64 = 0;
+    let peak: usize = 0usize;
+    let i: i64 = 0;
+    while i < 2000000 {
+        let x = make(i);
+        total += x.w();
+        let live = rok_gc_stats_live_bytes();
+        if live > peak { peak = live; }
+        i += 1;
+    }
+    rok_print_i64(total);
+    rok_gc_collect();
+    // Bounded: well under the ~96 MB a leaking heap would hold.
+    if peak > 16000000usize { return 1; }
+    if rok_gc_stats_collections() < 2u64 { return 2; }
+    // After a full collection only `keep` (48 bytes) survives.
+    if rok_gc_stats_live_bytes() > 1024usize { return 3; }
+    if keep.w() != 3 { return 4; }
+    rok_print_str("ok");
+    return 0;
+}

@@ -79,6 +79,13 @@ fn run_case(
             .unwrap_or("");
         return Err(format!("rokc build failed: {first}"));
     }
+    for want in directives(&source, "expect-warning:") {
+        if !stderr.contains(want) {
+            return Err(format!(
+                "build stderr lacks warning {want:?}\n    stderr: {stderr:?}"
+            ));
+        }
+    }
 
     let run = std::process::Command::new(&exe)
         .output()
@@ -86,6 +93,12 @@ fn run_case(
     let exit = run.status.code().ok_or("no exit code")?;
     if exit != expected {
         return Err(format!("exit={exit} (expected {expected})"));
+    }
+    if let Some(want) = directive(&source, "expect-stderr:") {
+        let got = String::from_utf8_lossy(&run.stderr);
+        if !got.contains(want) {
+            return Err(format!("stderr lacks {want:?}\n    stderr: {got:?}"));
+        }
     }
     if let Some(want) = parse_expect_stdout(&source) {
         let got = String::from_utf8_lossy(&run.stdout);

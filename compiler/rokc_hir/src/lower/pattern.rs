@@ -245,6 +245,28 @@ pub(super) fn lower_pattern_inner(
     match &pat.kind {
         AstPatternKind::Wildcard => HirPattern::Wildcard,
         AstPatternKind::Binding { name, sub: None } if name == "_" => HirPattern::Wildcard,
+        // A bare name that is an imported variant (`use E::*` then
+        // `A =>`) matches the variant rather than binding.
+        AstPatternKind::Binding { name, sub: None }
+            if ctx.enum_path(&[name.as_str()]).is_some() =>
+        {
+            let segments = vec![rokc_ast::PathSegment {
+                name: name.clone(),
+                generics: Vec::new(),
+            }];
+            let path = rokc_ast::Path {
+                segments,
+                span: pat.span,
+            };
+            let variant = AstPattern {
+                kind: AstPatternKind::EnumVariant {
+                    path,
+                    args: Vec::new(),
+                },
+                span: pat.span,
+            };
+            lower_pattern(ctx, &variant, scrut_ty)
+        }
         AstPatternKind::Binding { name, sub: None } => {
             // Spec 3.11.4: when an enclosing or-pattern shares this name
             // across alternatives, reuse the preset local and check that
@@ -321,7 +343,10 @@ pub(super) fn lower_pattern_inner(
                 (scrut_ty, matches!(target_ty, HirTy::AnyTrait(_)))
             {
                 // D4: narrow `any Tr` to a concrete implementor (tag test).
-                if bounds.iter().all(|b| ctx.implements(&target_ty, b)) {
+                if bounds
+                    .iter()
+                    .all(|b| ctx.implements_trait(&target_ty, b, 0))
+                {
                     let bind_local = bind(ctx);
                     return HirPattern::SumVariant {
                         sum_ty: scrut_ty.clone(),

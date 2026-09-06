@@ -1,0 +1,32 @@
+// expect-exit: 0
+// expect-stdout:
+// 3
+// 3
+// -1
+// 6
+// -7
+
+// A `rethrows` function used as a value: the expected `fn` type picks
+// the instance; with none, it is the throwing (`any Error`) instance.
+enum Bad { Odd }
+struct NotFound { id: i32; }
+impl Display for NotFound { fn display(self) -> str { return "not found"; } }
+impl Debug for NotFound { fn debug(self) -> str { return "NotFound"; } }
+impl Error for NotFound {}
+
+fn apply(f: fn(i32) throws -> i32, x: i32) rethrows -> i32 { try f(x) + 1 }
+fn inc(x: i32) -> i32 { x + 1 }
+fn half(x: i32) throws (Bad) -> i32 { if x % 2 == 1 { throw Bad::Odd; } x / 2 }
+fn find(x: i32) throws (NotFound) -> i32 { if x > 10 { throw NotFound { id: x }; } x }
+
+fn main() -> i32 {
+    let a: fn(fn(i32) -> i32, i32) -> i32 = apply;
+    rok_print_i32(a(inc, 1));
+    let b: fn(fn(i32) throws (Bad) -> i32, i32) throws (Bad) -> i32 = apply;
+    rok_print_i32(try b(half, 4) catch _ { -1 });
+    rok_print_i32(try b(half, 3) catch _ { -1 });
+    let c = apply;
+    rok_print_i32(try c(find, 5) catch _ { -1 });
+    rok_print_i32(try c(find, 50) catch e: any Error { -7 });
+    return 0;
+}

@@ -33,9 +33,9 @@ use desugar::{
     desugar_nullish_coalesce, desugar_question_dot, desugar_try_q, lower_closure_expr, lower_for,
 };
 use expr::{
-    enum_base_name, field_access, has_int_suffix, hir_binop, hir_int, hir_local, lower_block,
-    lower_cond, lower_expr, lower_loop_body, lower_sibling_pair, method_call_on,
-    parse_char_literal, parse_int_literal, resolve_enum_variant, variant_arg_tys,
+    build_any_dispatchers, enum_base_name, field_access, has_int_suffix, hir_binop, hir_int,
+    hir_local, lower_block, lower_cond, lower_expr, lower_loop_body, lower_sibling_pair,
+    method_call_on, parse_char_literal, parse_int_literal, resolve_enum_variant, variant_arg_tys,
 };
 use mono::{
     bind_from_arg, generic_enum_variants, generic_struct_fields, generic_subst,
@@ -44,13 +44,14 @@ use mono::{
 };
 use pattern::{int_fits, lower_match, lower_pattern};
 use resolve::{
-    bound_key, impl_module, item_module, leaf_name, mangle_inst, method_target_for, module_display,
-    module_of, resolve_name, resolve_ty_with_structs, substitute_aliases, ty_mangle, visible_from,
+    bound_key, impl_bound_keys, impl_module, item_module, leaf_name, mangle_inst,
+    method_target_for, module_display, module_of, resolve_name, resolve_ty_with_structs,
+    split_trait_args, substitute_aliases, ty_mangle, visible_from,
 };
 use throws::{
-    ErrFrame, catch_all_frame, erase_unbound_errors, exit_through, finish_throwing_body,
-    jump_index, lower_catch, lower_return, lower_throw, lower_try, sig_ret_ast, uncaught_in_main,
-    unpack_call,
+    ErrFrame, adapt_fn_value, erase_unbound_errors, exit_through, finish_throwing_body, jump_index,
+    lower_catch, lower_return, lower_throw, lower_try, main_frame, rethrows_value, sig_ret_ast,
+    uncaught_in_main, unpack_call,
 };
 
 /// Outcome of glob resolution for one bare name. Single imports always
@@ -78,6 +79,9 @@ struct NameSet<'b> {
 struct TypeNames<'a> {
     names: std::collections::HashSet<String>,
     traits: std::collections::HashSet<String>,
+    /// Every enum variant as `a::E::V` (generic bases unmangled). A
+    /// variant is as visible as its enum (spec 5.6.9).
+    variants: std::collections::HashSet<String>,
     /// `pub use` alias key → full path it re-exports.
     reexports: HashMap<String, String>,
     visibility: HashMap<String, Visibility>,
@@ -133,6 +137,45 @@ impl TypeNames<'_> {
             }
         }
         Some(full)
+    }
+
+    /// A bare (imported) variant name → its `a::E::V` key. Use entries
+    /// may name the enum relative to the module (`use Result::{Ok}`).
+    fn canon_variant(
+        &self,
+        segments: &[&str],
+        module: &str,
+        local_uses: &[Vec<crate::uses::UseEntry>],
+    ) -> Option<String> {
+        let full_key = |k: &str| -> Option<String> {
+            if self.variants.contains(k) {
+                return Some(k.to_owned());
+            }
+            let (ty, v) = k.rsplit_once("::")?;
+            let segs: Vec<&str> = ty.split("::").collect();
+            let e = self.canon(&segs, module, local_uses)?;
+            let key = format!("{e}::{v}");
+            self.variants.contains(&key).then_some(key)
+        };
+        let exists = |k: &str| full_key(k).is_some();
+        let keys = || self.variants.iter().cloned().collect::<Vec<_>>();
+        let set = NameSet {
+            exists: &exists,
+            keys: &keys,
+        };
+        match resolve_name(segments, module, local_uses, self.uses, &set) {
+            Ok(r) => full_key(&r?),
+            Err(hits) => {
+                self.error(format!(
+                    "variant name `{}` is ambiguous in module `{}` — multiple glob imports \
+                     resolve it: {}",
+                    segments.join("::"),
+                    module_display(module),
+                    hits.join(", ")
+                ));
+                full_key(hits.first()?)
+            }
+        }
     }
 
     /// Key under which `impl Trait for T` is recorded: a user trait's
@@ -200,6 +243,23 @@ struct GenericMethod {
     info: MethodInfo,
 }
 
+/// `impl<..> Tr for Target` (`Target` = `Box<T>`, or a bare `T` for a
+/// blanket impl): applies to a type that matches `self_ty` and meets
+/// the impl's bounds.
+struct GenericTraitImpl {
+    trait_key: String,
+    /// `impl<T> Get<T> for Box<T> { type Item = T; }`: `[T]` and
+    /// `[(Item, T)]`, resolved per instantiation.
+    trait_args: Vec<Ty>,
+    assoc: Vec<(String, Ty)>,
+    generics: rokc_ast::Generics,
+    where_clause: Vec<rokc_ast::WherePred>,
+    self_ty: Ty,
+    module: String,
+    /// Method name → template (trait default bodies included).
+    methods: HashMap<String, GenericMethod>,
+}
+
 /// Module-wide, read-only lowering environment shared by every function
 /// body (plus the interior-mutable `sink`).
 struct Env<'a> {
@@ -229,6 +289,8 @@ struct Env<'a> {
     /// `(generic base of the impl target, method name)`. Called through
     /// `monomorphize` when `method_table` has no concrete entry.
     generic_methods: HashMap<(String, String), GenericMethod>,
+    /// Generic trait impls, in source order.
+    generic_trait_impls: Vec<GenericTraitImpl>,
     prec: &'a PrecTable,
     sink: ClosureSink,
     /// Visibility of every value-namespace item, keyed by full name.
@@ -255,12 +317,14 @@ struct Env<'a> {
 struct TraitInfo {
     methods: Vec<String>,
     supers: Vec<String>,
-    /// Methods whose signature (past `self`) mentions `Self`: their
-    /// types differ per implementor, so they can't be dispatched.
-    self_methods: Vec<String>,
-    /// Methods whose signature mentions a trait type parameter: only
-    /// dispatchable when the bound fixes the arguments (`any Tr<i32>`).
-    param_methods: Vec<String>,
+    /// Per method: what its signature (past `self`) depends on —
+    /// `Self`, `Self::X` or a trait type parameter name. `any Tr` can
+    /// only dispatch it when the bound fixes each (see `any_method_call`).
+    needs: HashMap<String, Vec<String>>,
+    /// Method declarations (signature when no concrete impl exists).
+    decls: HashMap<String, rokc_ast::FnDef>,
+    /// The trait's module (to resolve `decls`).
+    module: String,
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -358,8 +422,10 @@ fn ty_compatible(expected: &HirTy, actual: &HirTy) -> bool {
         (HirTy::Tuple(a), HirTy::Tuple(b)) | (HirTy::Sum(a), HirTy::Sum(b)) => all(a, b),
         (HirTy::Array(a, n), HirTy::Array(b, m)) => n == m && ty_compatible(a, b),
         (HirTy::Fn(a1, r1), HirTy::Fn(a2, r2)) => all(a1, a2) && ty_compatible(r1, r2),
+        // Error types must match exactly: a wider error slot has another
+        // carrier layout (fn values are adapted by `adapt_fn_value`).
         (HirTy::Throws { ok: o1, err: e1 }, HirTy::Throws { ok: o2, err: e2 }) => {
-            ty_compatible(o1, o2) && ty_compatible(e1, e2)
+            ty_compatible(o1, o2) && (e1 == e2 || **e1 == HirTy::Unknown || **e2 == HirTy::Unknown)
         }
         _ => expected == actual,
     }
@@ -368,11 +434,17 @@ fn ty_compatible(expected: &HirTy, actual: &HirTy) -> bool {
 /// Wrap `value` into `slot` (sum injection) and report a type mismatch.
 /// `what` names the slot for the diagnostic ("argument 1 of `f`").
 fn coerce(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr, what: &dyn Fn() -> String) -> HirExpr {
+    let value = adapt_fn_value(ctx, slot, value);
     let value = box_into_any(ctx, slot, value);
     let v = wrap_into_sum(slot, value);
     if !ty_compatible(slot, &v.ty) {
         let hint = if matches!((slot, &v.ty), (HirTy::Fn(..), HirTy::Closure { .. })) {
             " — a closure that captures variables is not a plain `fn` pointer (spec 4.6)"
+        } else if matches!((slot, &v.ty), (HirTy::Fn(_, r), HirTy::Fn(..))
+            if matches!(**r, HirTy::Throws { .. }))
+        {
+            " — only a named function or a capture-free closure is adapted to a `fn` type \
+             that throws more (spec 4.4.9)"
         } else {
             ""
         };
@@ -394,10 +466,23 @@ fn bound_base(b: &str) -> &str {
     b.split_once('<').map_or(b, |(base, _)| base)
 }
 
-/// Does an `any` value with bound `have` satisfy bound `want`? `any
-/// Tr<i32>` widens to `any Tr` (arguments unconstrained).
-fn bound_covers(have: &str, want: &str) -> bool {
-    have == want || (!want.contains('<') && bound_base(have) == want)
+/// Does an `any` value with bounds `have` satisfy bound `want`? Yes
+/// when some bound or one of its supertraits (transitively) is `want`;
+/// `any Tr<i32>` also satisfies `any Tr` (arguments unconstrained).
+fn bound_covers(ctx: &LowerCtx<'_>, have: &[String], want: &str) -> bool {
+    let mut stack: Vec<String> = have.to_vec();
+    let mut seen: Vec<String> = Vec::new();
+    while let Some(h) = stack.pop() {
+        if h == want || (!want.contains('<') && bound_base(&h) == want) {
+            return true;
+        }
+        let base = bound_base(&h).to_owned();
+        if let (false, Some(info)) = (seen.contains(&base), ctx.env.trait_info.get(&base)) {
+            stack.extend(info.supers.iter().cloned());
+        }
+        seen.push(base);
+    }
+    false
 }
 
 /// The `any Tr` slot a value of type `ty` would be stored into: `slot`
@@ -422,16 +507,10 @@ fn box_into_any(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -> HirExpr {
         return value;
     };
     match &value.ty {
-        HirTy::AnyTrait(have)
-            if bounds
-                .iter()
-                .all(|b| have.iter().any(|h| bound_covers(h, b))) =>
-        {
-            HirExpr {
-                ty: target.clone(),
-                ..value
-            }
-        }
+        HirTy::AnyTrait(have) if bounds.iter().all(|b| bound_covers(ctx, have, b)) => HirExpr {
+            ty: target.clone(),
+            ..value
+        },
         // Spec 2.2.10: no implicit `any` → `any Tr` (it would hide a
         // runtime check); `any Tr` → `any` is the arm above.
         HirTy::AnyTrait(_) => ctx.error_expr(
@@ -445,7 +524,10 @@ fn box_into_any(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -> HirExpr {
         ),
         HirTy::Unknown | HirTy::Any => value,
         ty => {
-            let missing: Vec<&String> = bounds.iter().filter(|b| !ctx.implements(ty, b)).collect();
+            let missing: Vec<&String> = bounds
+                .iter()
+                .filter(|b| !ctx.implements_trait(ty, b, 0))
+                .collect();
             if !missing.is_empty() {
                 let names: Vec<String> = missing.iter().map(|b| format!("`{b}`")).collect();
                 return ctx.error_expr(
@@ -477,8 +559,8 @@ fn coercible(ctx: &LowerCtx<'_>, slot: &HirTy, ty: &HirTy) -> bool {
     ty_compatible(slot, ty)
         || matches!(any_slot_for(slot, ty), Some(HirTy::AnyTrait(bs))
         if bs.iter().all(|b| match ty {
-            HirTy::AnyTrait(have) => have.iter().any(|h| bound_covers(h, b)),
-            _ => ctx.implements(ty, b),
+            HirTy::AnyTrait(have) => bound_covers(ctx, have, b),
+            _ => ctx.implements_trait(ty, b, 0),
         }))
 }
 
@@ -603,6 +685,8 @@ struct ClosureSink {
     extra_enum_table: std::cell::RefCell<HashMap<String, EnumId>>,
     /// `any` type tags: index = tag of that concrete type.
     any_tags: std::cell::RefCell<Vec<HirTy>>,
+    /// `any Tr` method dispatchers (bodies built after all lowering).
+    any_dispatch: std::cell::RefCell<Vec<expr::AnyDispatch>>,
     /// Diagnostics emitted during lowering — surfaced through
     /// `HirModule.diagnostics` so the driver can fail the build.
     diagnostics: std::cell::RefCell<Vec<rokc_diagnostic::RokDiagnostic>>,
@@ -632,6 +716,9 @@ struct LowerCtx<'a> {
     /// Enclosing breakable constructs, innermost last: `(label,
     /// is_loop)` — labelled blocks accept `break 'l` but not `continue`.
     breakables: Vec<(Option<String>, bool)>,
+    /// `breakables` index → the type its `break` values must have:
+    /// the annotated slot (`true` = inferred from the first `break`).
+    break_tys: HashMap<usize, (HirTy, bool)>,
     /// Stack of expected types. Every sub-expression whose type is not
     /// its parent's pushes its own expectation (or `Unknown` for none),
     /// so literals and leaf lowerings (`Box::None`, `5` → `i64`) only
@@ -663,8 +750,14 @@ struct LowerCtx<'a> {
     /// Lowering the body of `fn main() throws (E)`: an escaping error
     /// ends the process (spec 4.16.3).
     uncaught_in_main: bool,
+    /// Throwing calls lowered so far (a `try` covering none is
+    /// pointless).
+    throwing_calls: u32,
     /// Counter for synthesized labels and local names.
     next_synth: u32,
+    /// Narrowed rebinding (spec 2.2.6) → (original local, its type);
+    /// assignments to the rebinding also store into the original.
+    narrowed: HashMap<LocalId, (LocalId, HirTy)>,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -679,6 +772,7 @@ impl<'a> LowerCtx<'a> {
             infer_ret: false,
             implicit_main: false,
             breakables: Vec::new(),
+            break_tys: HashMap::new(),
             expected_ty_stack: Vec::new(),
             current_module: String::new(),
             local_uses: vec![Vec::new()],
@@ -688,7 +782,9 @@ impl<'a> LowerCtx<'a> {
             err_frames: Vec::new(),
             throws_probe: None,
             uncaught_in_main: false,
+            throwing_calls: 0,
             next_synth: 0,
+            narrowed: HashMap::new(),
         }
     }
 
@@ -700,6 +796,21 @@ impl<'a> LowerCtx<'a> {
             .diagnostics
             .borrow_mut()
             .push(rokc_diagnostic::RokDiagnostic::error(kind, msg));
+    }
+
+    /// A warning, except in generic instances: a `rethrows` instance
+    /// with a non-throwing argument would flag every `try` in its body.
+    fn emit_warning(&self, msg: String) {
+        if self.ty_subst.is_empty() {
+            self.env
+                .sink
+                .diagnostics
+                .borrow_mut()
+                .push(rokc_diagnostic::RokDiagnostic::warning(
+                    rokc_diagnostic::ErrorKind::Type,
+                    msg,
+                ));
+        }
     }
 
     /// Report a type error and return a poisoned placeholder (`Unknown`
@@ -773,6 +884,115 @@ impl<'a> LowerCtx<'a> {
     fn implements(&self, ty: &HirTy, trait_key: &str) -> bool {
         method_target_for(ty)
             .is_some_and(|t| self.env.impl_traits.contains(&(t, trait_key.to_owned())))
+    }
+
+    /// `implements`, or a generic impl of the trait covers `ty`.
+    fn implements_trait(&self, ty: &HirTy, trait_key: &str, depth: u32) -> bool {
+        self.implements(ty, trait_key)
+            || self.env.generic_trait_impls.iter().any(|gi| {
+                gi.trait_key == bound_base(trait_key)
+                    && self.generic_impl_subst(gi, ty, depth).is_some_and(|subst| {
+                        trait_key == gi.trait_key
+                            || self
+                                .generic_impl_keys(gi, &subst)
+                                .iter()
+                                .any(|k| k == trait_key)
+                    })
+            })
+    }
+
+    /// The bound keys generic impl `gi` answers under `subst` (its
+    /// trait arguments and associated types instantiated).
+    fn generic_impl_keys(
+        &self,
+        gi: &GenericTraitImpl,
+        subst: &HashMap<String, HirTy>,
+    ) -> Vec<String> {
+        let mut rcx = LowerCtx::new(self.env, subst, None);
+        rcx.current_module.clone_from(&gi.module);
+        let args: Vec<HirTy> = gi
+            .trait_args
+            .iter()
+            .map(|t| rcx.resolve_ast_ty(t))
+            .collect();
+        let assoc: Vec<(String, HirTy)> = gi
+            .assoc
+            .iter()
+            .map(|(n, t)| (n.clone(), rcx.resolve_ast_ty(t)))
+            .collect();
+        impl_bound_keys(
+            &gi.trait_key,
+            &args,
+            &assoc,
+            &self.env.struct_table,
+            &self.env.enum_table,
+        )
+    }
+
+    /// The impl's type-parameter bindings when generic impl `gi` covers
+    /// `ty`: `ty` matches its target and meets its bounds.
+    fn generic_impl_subst(
+        &self,
+        gi: &GenericTraitImpl,
+        ty: &HirTy,
+        depth: u32,
+    ) -> Option<HashMap<String, HirTy>> {
+        // ponytail: depth cap stops `impl<T: Tr> Tr for T` cycles; a
+        // real cycle check would remember the (type, trait) goals.
+        if depth > 8 || matches!(ty, HirTy::Unknown) {
+            return None;
+        }
+        let params: std::collections::HashSet<String> = gi
+            .generics
+            .params
+            .iter()
+            .filter_map(|gp| match gp {
+                rokc_ast::GenericParam::Type { name, .. } => Some(name.clone()),
+                rokc_ast::GenericParam::Const { .. } => None,
+            })
+            .collect();
+        let mut subst = HashMap::new();
+        unify_param_ty_with(&gi.self_ty, ty, &params, &mut subst, self);
+        if params.iter().any(|p| !subst.contains_key(p)) {
+            return None;
+        }
+        let mut rcx = LowerCtx::new(self.env, &subst, None);
+        rcx.current_module.clone_from(&gi.module);
+        if rcx.resolve_ast_ty(&gi.self_ty) != *ty {
+            return None;
+        }
+        let mut goals: Vec<(HirTy, &Vec<Ty>)> = Vec::new();
+        for gp in &gi.generics.params {
+            if let rokc_ast::GenericParam::Type { name, bounds, .. } = gp {
+                goals.push((subst[name].clone(), bounds));
+            }
+        }
+        for w in &gi.where_clause {
+            goals.push((rcx.resolve_ast_ty(&w.ty), &w.bounds));
+        }
+        for (bty, bounds) in goals {
+            for b in bounds {
+                let AstTyKind::Path(p) = &b.kind else {
+                    continue;
+                };
+                let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
+                let (args, binds) = split_trait_args(
+                    p.segments.last().map_or(&[][..], |s| s.generics.as_slice()),
+                    |t| rcx.resolve_ast_ty(t),
+                );
+                let key = bound_key(
+                    self.env.names.trait_key(&segs, &gi.module),
+                    &args,
+                    &binds,
+                    &self.env.struct_table,
+                    &self.env.enum_table,
+                );
+                if !self.implements_trait(&bty, &key, depth + 1) {
+                    return None;
+                }
+            }
+        }
+        Some(subst)
     }
 
     /// Program-wide `any` type tag of concrete type `ty`, assigned on
@@ -916,12 +1136,19 @@ impl<'a> LowerCtx<'a> {
 
     /// Split `a::E::V` into (`a::E` enum, `V`) when the prefix names an
     /// enum (or generic enum base).
-    fn enum_path<'p>(&self, segments: &'p [&'p str]) -> Option<(String, &'p str)> {
+    /// A single segment is an imported variant (`use E::{A}`, `use
+    /// E::*`, or `Ok` / `Err` through the implicit `rok::core::**`).
+    fn enum_path(&self, segments: &[&str]) -> Option<(String, String)> {
         let (variant, ty) = segments.split_last()?;
         if ty.is_empty() {
-            return None;
+            let key =
+                self.env
+                    .names
+                    .canon_variant(segments, &self.current_module, &self.local_uses)?;
+            let (e, v) = key.rsplit_once("::")?;
+            return Some((e.to_owned(), v.to_owned()));
         }
-        Some((self.canon_type(ty)?, variant))
+        Some((self.canon_type(ty)?, (*variant).to_owned()))
     }
 
     /// Instantiations of generic base `base` in `table`, sorted by key

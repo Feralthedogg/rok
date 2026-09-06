@@ -312,6 +312,7 @@ fn ty_str(t: &MirTy) -> String {
         MirTy::Unit => "()".to_owned(),
         MirTy::Prim(p) => p.name().to_owned(),
         MirTy::Any => "any".to_owned(),
+        MirTy::GcRef => "gcref".to_owned(),
         MirTy::Sum(parts) => parts.iter().map(ty_str).collect::<Vec<_>>().join(" | "),
         MirTy::Tuple(parts) => {
             let inner = parts.iter().map(ty_str).collect::<Vec<_>>().join(", ");

@@ -1,0 +1,12 @@
+// spec: 002.02-any-slot
+// probe: negative-must-fail
+// expect-error: cannot call `get` on `any Source`: its signature uses `Self::Item`
+
+// `Item` 을 묶지 않은 `any Source` 에서는 구현마다 `get` 의 반환 타입이 다르다.
+trait Source { type Item; fn get(self) -> Item; fn id(self) -> i32; }
+struct A { v: i32; }
+struct C { v: bool; }
+impl Source for A { type Item = i32; fn get(self) -> i32 { return self.v; } fn id(self) -> i32 { return 1; } }
+impl Source for C { type Item = bool; fn get(self) -> bool { return self.v; } fn id(self) -> i32 { return 3; } }
+let y: any Source = C { v: true };
+let g = y.get();

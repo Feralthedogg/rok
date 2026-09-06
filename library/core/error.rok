@@ -4,8 +4,8 @@
 // `throws`; keep it → `Result`". `?` does not apply to it (`T | none`
 // only).
 //
-// The variants are written `Result::Ok(v)` / `Result::Err(e)`: enum
-// variants can't be imported bare.
+// `Ok` / `Err` are bare names everywhere through the implicit
+// `use rok::core::**` (variants are reachable by globs).
 
 pub enum Result<T, E> {
     Ok(T),

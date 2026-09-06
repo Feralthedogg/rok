@@ -1,0 +1,11 @@
+// spec: 003.14.6-catch-value-type
+// probe: negative-must-fail
+// expect-exit: 0  (a `catch` arm no error reaches is still type-checked.)
+// expect-error: the `catch` handler expects `i32`, found `str`
+
+fn pure(x: i32) -> i32 { x }
+
+fn main() -> i32 {
+    let c = try pure(1) catch _ { "oops" };
+    return c;
+}

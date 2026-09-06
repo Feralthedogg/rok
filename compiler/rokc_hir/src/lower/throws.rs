@@ -204,6 +204,7 @@ pub(super) fn unpack_call(ctx: &mut LowerCtx<'_>, call: HirExpr) -> HirExpr {
     let HirTy::Throws { ok, err } = call.ty.clone() else {
         return call;
     };
+    ctx.throwing_calls += 1;
     let span = call.span;
     let carrier_ty = call.ty.clone();
     let tmp = ctx.declare(None, carrier_ty.clone());
@@ -410,46 +411,191 @@ pub(super) fn raise(
 /// by variant. `None` when `to` can't hold it.
 fn convert_err(ctx: &mut LowerCtx<'_>, value: HirExpr, to: &HirTy) -> Option<HirExpr> {
     let from = value.ty.clone();
+    if !err_fits(ctx, &from, to) {
+        return None;
+    }
     if from == *to {
         return Some(value);
     }
-    match (&from, to) {
-        (HirTy::Sum(vs), HirTy::Sum(ws)) if vs.iter().all(|v| ws.contains(v)) => {
-            let span = value.span;
-            let arms = vs
-                .iter()
-                .enumerate()
-                .map(|(i, v)| {
-                    let b = ctx.declare(None, v.clone());
-                    HirMatchArm {
-                        pat: HirPattern::SumVariant {
-                            sum_ty: from.clone(),
-                            variant_index: u32::try_from(i).expect("variant overflow"),
-                            binder: Some(b),
-                            payload_ty: Some(v.clone()),
-                        },
-                        guard: None,
-                        body: wrap_into_sum(to, hir_local(b, v, span)),
-                    }
-                })
-                .collect();
-            Some(HirExpr {
-                kind: HirExprKind::Match {
-                    scrutinee: Box::new(value),
-                    arms,
+    let HirTy::Sum(vs) = &from else {
+        // Into a sum, or into `any Error` (untyped `throws`) boxed.
+        let boxed = box_into_any(ctx, to, value);
+        return Some(wrap_into_sum(to, boxed));
+    };
+    // A sum: convert variant by variant.
+    let span = value.span;
+    let arms = vs
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let b = ctx.declare(None, v.clone());
+            let body = convert_err(ctx, hir_local(b, v, span), to).expect("checked by err_fits");
+            HirMatchArm {
+                pat: HirPattern::SumVariant {
+                    sum_ty: from.clone(),
+                    variant_index: u32::try_from(i).expect("variant overflow"),
+                    binder: Some(b),
+                    payload_ty: Some(v.clone()),
                 },
-                ty: to.clone(),
-                span,
-            })
+                guard: None,
+                body,
+            }
+        })
+        .collect();
+    Some(HirExpr {
+        kind: HirExprKind::Match {
+            scrutinee: Box::new(value),
+            arms,
+        },
+        ty: to.clone(),
+        span,
+    })
+}
+
+/// Can an error of type `from` leave through `throws (to)`?
+fn err_fits(ctx: &LowerCtx<'_>, from: &HirTy, to: &HirTy) -> bool {
+    from == to
+        || match from {
+            HirTy::Sum(vs) => vs.iter().all(|v| err_fits(ctx, v, to)),
+            _ => matches!(to, HirTy::Sum(ws) if ws.contains(from)) || coercible(ctx, to, from),
         }
-        (_, HirTy::Sum(ws)) if ws.contains(&from) => Some(wrap_into_sum(to, value)),
-        // Into `any Error` (untyped `throws`), boxing a concrete error.
-        _ if coercible(ctx, to, &from) => {
-            let boxed = box_into_any(ctx, to, value);
-            Some(wrap_into_sum(to, boxed))
-        }
-        _ => None,
+}
+
+/// Spec 4.4.9: a function value that throws less than its `fn` slot
+/// (not at all, or a narrower error) goes in through an adapter
+/// `fn #thunk(args) throws (E) -> T { try f(args) }`. Only a statically
+/// known function (a named fn or a capture-free closure) can be adapted:
+/// a plain `fn` value has no room for the callee a thunk would carry.
+pub(super) fn adapt_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -> HirExpr {
+    let (HirTy::Fn(args, sret), HirTy::Fn(vargs, vret), HirExprKind::FnRef(target)) =
+        (slot, &value.ty, &value.kind)
+    else {
+        return value;
+    };
+    let HirTy::Throws { ok, err } = &**sret else {
+        return value;
+    };
+    let fits = args == vargs
+        && match &**vret {
+            HirTy::Throws { ok: vok, err: verr } => {
+                vok == ok && verr != err && err_fits(ctx, verr, err)
+            }
+            t => t == &**ok,
+        };
+    if !fits {
+        return value;
     }
+    let span = value.span;
+    let id = FunctionId(ctx.env.sink.next_id.get());
+    ctx.env.sink.next_id.set(id.0 + 1);
+    let mut a = LowerCtx::new(ctx.env, ctx.ty_subst, None);
+    let params: Vec<HirParam> = args
+        .iter()
+        .enumerate()
+        .map(|(i, t)| HirParam {
+            name: format!("#a{i}"),
+            local: a.declare(None, t.clone()),
+            ty: t.clone(),
+            by_ref: false,
+        })
+        .collect();
+    let call = HirExpr {
+        kind: HirExprKind::Call {
+            callee: *target,
+            args: params
+                .iter()
+                .map(|p| hir_local(p.local, &p.ty, span))
+                .collect(),
+        },
+        ty: (**vret).clone(),
+        span,
+    };
+    a.fn_throws = Some((**err).clone());
+    a.fn_ret_ty = (**ok).clone();
+    a.try_depth = 1;
+    let v = unpack_call(&mut a, call);
+    let mut body = if **ok == HirTy::Unit {
+        HirBlock {
+            stmts: vec![HirStmt::Expr(v)],
+            trailing: None,
+            label: None,
+        }
+    } else {
+        HirBlock {
+            stmts: Vec::new(),
+            trailing: Some(v),
+            label: None,
+        }
+    };
+    finish_throwing_body(&a, &mut body);
+    // ponytail: one thunk per adapted use; cache by (target, slot) if
+    // they pile up.
+    ctx.env.sink.extras.borrow_mut().push(HirFunction {
+        id,
+        def_id: None,
+        name: format!("__thunk_{}", id.0),
+        params,
+        locals: a.into_locals(),
+        ret_ty: (**sret).clone(),
+        body: Some(body),
+        is_async: false,
+        is_generator: false,
+        span,
+    });
+    HirExpr {
+        kind: HirExprKind::FnRef(id),
+        ty: slot.clone(),
+        span,
+    }
+}
+
+/// A `rethrows` function used as a value: the instance the expected
+/// `fn` type asks for (its function-typed parameters bind the error
+/// parameters), else the throwing one — unbound error parameters become
+/// `any Error`. `None` for a function with real type parameters.
+pub(super) fn rethrows_value(
+    ctx: &LowerCtx<'_>,
+    def: &FnDef,
+    span: rokc_diagnostic::Span,
+) -> Option<HirExpr> {
+    let mut def = def.clone();
+    for gp in &mut def.generics.params {
+        match gp {
+            rokc_ast::GenericParam::Type { name, default, .. } if name.starts_with('#') => {
+                *default = Some(Ty {
+                    kind: AstTyKind::Path(AstPath {
+                        segments: vec![rokc_ast::PathSegment {
+                            name: rokc_ast::UNTYPED_THROWS_MARK.to_owned(),
+                            generics: Vec::new(),
+                        }],
+                        span,
+                    }),
+                    span,
+                });
+            }
+            _ => return None,
+        }
+    }
+    let args: Vec<HirExpr> = match ctx.current_expected() {
+        Some(HirTy::Fn(ps, _)) if ps.len() == def.params.len() => {
+            ps.iter().map(|t| undef(t, span)).collect()
+        }
+        _ => Vec::new(),
+    };
+    let (id, ret) = monomorphize(ctx, &def, None, &args, span)?;
+    let params = ctx
+        .env
+        .sink
+        .mono_sigs
+        .borrow()
+        .get(&id)
+        .map(|s| s.param_tys.clone())
+        .unwrap_or_default();
+    Some(HirExpr {
+        kind: HirExprKind::FnRef(id),
+        ty: HirTy::Fn(params, Box::new(ret)),
+        span,
+    })
 }
 
 /// Lower frame `i`'s `finally` block inline, outside that frame and
@@ -674,10 +820,17 @@ pub(super) fn lower_try(
 ) -> HirExpr {
     use rokc_ast::TryKind;
     let expected = ctx.current_expected().cloned().unwrap_or(HirTy::Unknown);
+    let calls = ctx.throwing_calls;
+    let warn_if_idle = |ctx: &LowerCtx<'_>| {
+        if ctx.throwing_calls == calls {
+            ctx.emit_warning("this `try` covers no throwing call (spec 3.14.2)".to_owned());
+        }
+    };
     if kind == TryKind::Plain {
         ctx.try_depth += 1;
         let e = lower_expected(ctx, operand, expected);
         ctx.try_depth -= 1;
+        warn_if_idle(ctx);
         return e;
     }
     // `let x: i32 | none = try? f()` — the operand's slot is the payload.
@@ -690,6 +843,7 @@ pub(super) fn lower_try(
     ctx.try_depth += 1;
     let body = lower_expected(ctx, operand, inner_expected);
     ctx.try_depth -= 1;
+    warn_if_idle(ctx);
     let frame = pop_catch(ctx);
     if kind == TryKind::Force {
         if !frame.hit {
@@ -752,23 +906,64 @@ pub(super) fn uncaught_in_main(
         ty: ty.clone(),
         span,
     };
-    // ponytail: fixed message; printing the error value needs Display
-    // dispatch (and `any Error`, D4).
-    let report = hook_call(
-        ctx,
-        "rok_uncaught_error",
-        "error: `main` returned an uncaught error",
-        span,
-    );
+    // `if #which == 0 { report(describe(#err0)) } ... report(describe(#errN))`
+    let Some(sig) = ctx.env.fn_table.get("rok_uncaught_error").cloned() else {
+        return HirBlock {
+            stmts: vec![HirStmt::Expr(ctx.error_expr(
+                span,
+                "internal: runtime hook `rok_uncaught_error` is not declared".to_owned(),
+            ))],
+            trailing: None,
+            label: None,
+        };
+    };
+    let which = frame
+        .arms
+        .as_ref()
+        .map(|a| a.1)
+        .expect("main frame parks errors");
+    let mut report = Vec::new();
+    for (k, (ety, local)) in frame.errs.iter().enumerate() {
+        let msg = describe_err(ctx, hir_local(*local, ety, span), span);
+        let call = HirStmt::Panic(HirExpr {
+            kind: HirExprKind::Call {
+                callee: sig.id,
+                args: vec![msg],
+            },
+            ty: HirTy::Unit,
+            span,
+        });
+        if k + 1 == frame.errs.len() {
+            report.push(call);
+            break;
+        }
+        let cond = hir_binop(
+            PrimOp::Eq,
+            hir_local(which, &HirTy::Prim(PrimTy::I32), span),
+            hir_int(
+                i128::try_from(k).expect("error index fits"),
+                PrimTy::I32,
+                span,
+            ),
+            HirTy::Prim(PrimTy::Bool),
+            span,
+        );
+        report.push(HirStmt::Expr(HirExpr {
+            kind: HirExprKind::If {
+                cond: Box::new(cond),
+                then_block: Box::new(HirBlock {
+                    stmts: vec![call],
+                    trailing: None,
+                    label: None,
+                }),
+                else_branch: None,
+            },
+            ty: HirTy::Unit,
+            span,
+        }));
+    }
     let valued = ty != HirTy::Unit;
-    let wrapped = shell(
-        ctx,
-        &frame,
-        body,
-        ty,
-        (vec![HirStmt::Panic(report)], None),
-        span,
-    );
+    let wrapped = shell(ctx, &frame, body, ty, (report, None), span);
     // A unit / diverging body stays a statement: falling off the end of
     // an `i32` main is not a unit return.
     let (stmts, trailing) = if valued {
@@ -780,6 +975,38 @@ pub(super) fn uncaught_in_main(
         stmts,
         trailing,
         label: None,
+    }
+}
+
+/// Push the frame of a throwing `main`'s body: it takes every error and
+/// parks it for the report.
+pub(super) fn main_frame(ctx: &mut LowerCtx<'_>) {
+    let which = ctx.declare(None, HirTy::Prim(PrimTy::I32));
+    let label = fresh_label(ctx);
+    ctx.err_frames.push(ErrFrame::Catch(CatchFrame {
+        label,
+        arms: Some((vec![None], which)),
+        errs: Vec::new(),
+        hit: false,
+    }));
+}
+
+/// Spec 4.16.4: an uncaught error prints as its `Display`, else its
+/// `Debug`, else its type name.
+fn describe_err(ctx: &mut LowerCtx<'_>, err: HirExpr, span: rokc_diagnostic::Span) -> HirExpr {
+    for method in ["display", "debug"] {
+        let seen = ctx.env.sink.diagnostics.borrow().len();
+        let m = method_call_on(ctx, err.clone(), method, &[], span);
+        let failed = ctx.env.sink.diagnostics.borrow().len() > seen;
+        ctx.env.sink.diagnostics.borrow_mut().truncate(seen);
+        if !failed && m.ty == HirTy::Prim(PrimTy::Str) {
+            return m;
+        }
+    }
+    HirExpr {
+        kind: HirExprKind::Const(ConstVal::Str(ctx.ty_name(&err.ty))),
+        ty: HirTy::Prim(PrimTy::Str),
+        span,
     }
 }
 
@@ -885,9 +1112,31 @@ fn lower_catch_arms(
     }));
     let body_h = lower_expected(ctx, body, expected.clone());
     let frame = pop_catch(ctx);
+    // Arms no raised error type can take never run, but are still
+    // type-checked (and flagged).
+    let check_hint = if *expected == HirTy::Unknown && !hir_expr_diverges(&body_h) {
+        body_h.ty.clone()
+    } else {
+        expected.clone()
+    };
     if frame.errs.is_empty() {
-        // ponytail: arms that can never run aren't type-checked; a
-        // "no error reaches this catch" warning needs warning plumbing.
+        ctx.emit_warning("no error reaches this `catch`: its body can't throw".to_owned());
+    }
+    for (arm, filter) in arms.iter().zip(&filters) {
+        if frame.errs.iter().any(|(t, _)| may_take(filter.as_ref(), t)) {
+            continue;
+        }
+        if !frame.errs.is_empty() {
+            ctx.emit_warning(format!(
+                "this `catch` arm never runs: no `{}` error reaches it",
+                filter
+                    .as_ref()
+                    .map_or_else(|| "_".to_owned(), |f| ctx.ty_name(f))
+            ));
+        }
+        check_dead_arm(ctx, arm, filter.as_ref(), check_hint.clone(), span);
+    }
+    if frame.errs.is_empty() {
         return body_h;
     }
     // Dispatch on the parked error: `if #which == k { match #err_k {
@@ -963,6 +1212,56 @@ fn lower_catch_arms(
     )
 }
 
+/// Lower a `catch` arm no error reaches for its diagnostics only, as
+/// `match <filter-typed placeholder> { arm }`, with every error it
+/// raises swallowed. The result and its locals are dropped.
+fn check_dead_arm(
+    ctx: &mut LowerCtx<'_>,
+    arm: &rokc_ast::CatchArm,
+    filter: Option<&HirTy>,
+    hint: HirTy,
+    span: rokc_diagnostic::Span,
+) {
+    let ety = filter.cloned().unwrap_or(HirTy::Unknown);
+    let saved_frames = std::mem::take(&mut ctx.err_frames);
+    let saved_calls = ctx.throwing_calls;
+    let saved_locals = ctx.locals.len();
+    catch_all_frame(ctx);
+    ctx.push_scope();
+    ctx.next_synth += 1;
+    let name = format!("#dead{}", ctx.next_synth);
+    let local = ctx.declare(None, ety.clone());
+    bind_name(ctx, &name, local);
+    let m = match &arm.pat.kind {
+        // No type to match against: lower the body with the binding
+        // poisoned (a `match` on an `Unknown` scrutinee checks nothing).
+        AstPatternKind::Wildcard | AstPatternKind::Binding { sub: None, .. }
+            if filter.is_none() =>
+        {
+            if let AstPatternKind::Binding { name, .. } = &arm.pat.kind {
+                ctx.declare(Some(name.clone()), HirTy::Unknown);
+            }
+            Expr {
+                kind: ExprKind::Block(arm.body.clone()),
+                span: arm.body.span,
+            }
+        }
+        _ => {
+            let filters = [filter.cloned()];
+            dispatch_one(ctx, std::slice::from_ref(arm), &filters, &ety, &name, span)
+        }
+    };
+    let h = lower_expected(ctx, &m, hint.clone());
+    if !matches!(hint, HirTy::Unit | HirTy::Unknown) && !hir_expr_diverges(&h) {
+        let _ = coerce(ctx, &hint, h, &|| "the `catch` handler".to_owned());
+    }
+    ctx.pop_scope();
+    ctx.err_frames = saved_frames;
+    ctx.throwing_calls = saved_calls;
+    // Its locals (some typed `Unknown`) belong to the dropped HIR.
+    ctx.locals.truncate(saved_locals);
+}
+
 fn bind_name(ctx: &mut LowerCtx<'_>, name: &str, local: LocalId) {
     if let Some(scope) = ctx.scopes.last_mut() {
         scope.insert(name.to_owned(), local);
@@ -996,13 +1295,39 @@ fn dispatch_one(
         .iter()
         .zip(filters)
         .filter(|(_, f)| may_take(f.as_ref(), ety))
-        .map(|(a, _)| AstMatchArm {
-            pat: a.pat.clone(),
-            guard: None,
-            body: Expr {
-                kind: ExprKind::Block(a.body.clone()),
-                span: a.body.span,
-            },
+        .map(|(a, f)| {
+            let mut pat = a.pat.clone();
+            let mut body = a.body.clone();
+            // `catch e: A | B` sees the error variant by variant: take
+            // the variant whole and rebind it as the arm's sum type.
+            if let (AstPatternKind::TypeCheck { binder, ty }, Some(HirTy::Sum(vs))) =
+                (&a.pat.kind, f)
+            {
+                if vs.contains(ety) {
+                    pat.kind = AstPatternKind::Wildcard;
+                    if let Some(name) = binder {
+                        body.stmts.insert(
+                            0,
+                            Stmt {
+                                kind: StmtKind::Let {
+                                    name: name.clone(),
+                                    ty: Some(ty.clone()),
+                                    init: path_expr(err_name, span),
+                                },
+                                span,
+                            },
+                        );
+                    }
+                }
+            }
+            AstMatchArm {
+                pat,
+                guard: None,
+                body: Expr {
+                    span: body.span,
+                    kind: ExprKind::Block(body),
+                },
+            }
         })
         .collect();
     if !covers(ctx, &m_arms, ety) {
@@ -1052,7 +1377,7 @@ fn covers(ctx: &LowerCtx<'_>, arms: &[AstMatchArm], ety: &HirTy) -> bool {
             _ if irrefutable(&a.pat) => return true,
             AstPatternKind::TypeCheck { ty, .. } => {
                 let t = ctx.resolve_ast_ty(ty);
-                if t == *ety {
+                if t == *ety || matches!(&t, HirTy::Sum(vs) if vs.contains(ety)) {
                     return true;
                 }
                 tys.push(t);

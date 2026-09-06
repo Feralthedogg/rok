@@ -7,7 +7,7 @@ mod ty;
 
 pub use lower::lower;
 pub use print::print_mir;
-pub use ty::{enums_without_layout, lower_ty, sum_layout};
+pub use ty::{lower_ty, sum_layout};
 
 use rokc_core::DefId;
 use rokc_diagnostic::Span;
@@ -160,16 +160,16 @@ pub enum RValue {
         name: String,
         ty: MirTy,
     },
-    // Copy `value` (of type `ty`) to a fresh heap cell; yields the cell's
-    // address as `usize`. The payload of an `any Tr` value. Codegen keeps
-    // a numeric / bool / char primitive no wider than a pointer inline
-    // (the `usize` is the value's bits, not an address).
+    // Copy `value` (of type `ty`) into a fresh GC object; yields its
+    // `GcRef`. The payload of an `any Tr` value. Codegen keeps a numeric /
+    // bool / char primitive no wider than a pointer inline (the word is
+    // the value's bits, not a reference).
     HeapBox {
         value: Operand,
         ty: MirTy,
     },
-    // Load a `ty` from the `usize` address `ptr` (a `HeapBox` cell), or
-    // unpack an inline payload.
+    // Load the `ty` payload of the `GcRef` `ptr` (a `HeapBox` object),
+    // or unpack an inline payload.
     HeapLoad {
         ptr: Operand,
         ty: MirTy,
@@ -220,4 +220,10 @@ pub enum MirTy {
     Array(Box<MirTy>, u32),
     // First-class function pointer.
     Fn(Vec<MirTy>, Box<MirTy>),
+    /// Word that may hold a GC reference (an object's header address,
+    /// 801), lowered as a pointer-width integer: the payload of an `any`
+    /// value, which holds small primitives inline instead. Codegen roots
+    /// and traces exactly these words; the collector ignores a word that
+    /// is not an object address.
+    GcRef,
 }

@@ -1,0 +1,67 @@
+// expect-exit: 0
+// expect-stdout:
+// 5
+// 107
+// 42
+// 9
+// 14
+// 7
+// 20
+// 46
+// 12
+// 1
+
+// Generic trait impls (spec 2.9.4), monomorphized per receiver type:
+// `impl<T> Tr for Box<T>`, a bounded one, a blanket `impl<T: B> Tr for
+// T`, trait default bodies, and generic-impl types meeting bounds.
+
+trait Show { fn show(self) -> i32; }
+trait Twice {
+    fn once(self) -> i32;
+    fn twice(self) -> i32 { return self.once() * 2; }
+}
+trait Num { fn num(self) -> i32; }
+
+struct Box<T> { v: T; }
+struct Pair<A, B> { a: A; b: B; }
+struct Meters { m: i32; }
+
+impl Num for i32 { fn num(self) -> i32 { return self; } }
+impl Num for Meters { fn num(self) -> i32 { return self.m; } }
+
+impl<T> Show for Box<T> { fn show(self) -> i32 { return 5; } }
+impl<A: Num, B: Num> Show for Pair<A, B> {
+    fn show(self) -> i32 { return self.a.num() * 100 + self.b.num(); }
+}
+// Blanket: every `Num` type gets `Twice`.
+impl<T: Num> Twice for T { fn once(self) -> i32 { return self.num(); } }
+
+// Operators dispatch through a generic impl of the operator trait.
+struct V2<T> { x: T; y: T; }
+impl<T: Add> Add for V2<T> {
+    fn add(self, rhs: V2<T>) -> V2<T> { return V2 { x: self.x + rhs.x, y: self.y + rhs.y }; }
+}
+
+// Primitives implement the operator / compare traits (core::num).
+fn sum3<T: Add>(a: T, b: T, c: T) -> T { return a + b + c; }
+fn less<T: PartialOrd>(a: T, b: T) -> bool { return a < b; }
+
+fn show_it<T: Show>(x: T) -> i32 { return x.show(); }
+
+fn main() -> i32 {
+    let b: Box<bool> = Box { v: true };
+    rok_print_i32(b.show());
+    let p: Pair<i32, Meters> = Pair { a: 1, b: Meters { m: 7 } };
+    rok_print_i32(p.show());
+    let q: Box<i32> = Box { v: 0 };
+    rok_print_i32(show_it(q) + 37);
+    rok_print_i32(9.once());
+    rok_print_i32(7.twice());
+    rok_print_i32(Meters { m: 7 }.once());
+    rok_print_i32(Meters { m: 10 }.twice());
+    let v: V2<i32> = V2 { x: 1, y: 2 } + V2 { x: 20, y: 23 };
+    rok_print_i32(v.x + v.y);
+    rok_print_i32(sum3(3, 4, 5));
+    rok_print_i32(if less(1.5f64, 2.0f64) && 2.add(3) == 5 { 1 } else { 0 });
+    return 0;
+}

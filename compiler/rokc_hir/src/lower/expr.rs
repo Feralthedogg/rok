@@ -355,7 +355,10 @@ pub(super) fn lower_stmt(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt>
             );
             None
         }
-        StmtKind::Assign(target, value) => lower_assign(ctx, target, value, stmt.span),
+        StmtKind::Assign(target, value) => {
+            let a = lower_assign(ctx, target, value, stmt.span);
+            write_through(ctx, a, stmt.span)
+        }
         StmtKind::CompoundAssign { target, op, value } => {
             // The parser desugars `a op= b` to `a = a op b`; keep a
             // working path should a front end hand us the raw form.
@@ -368,17 +371,34 @@ pub(super) fn lower_stmt(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt>
                     rhs: Box::new(value.clone()),
                 },
             };
-            lower_assign(ctx, target, &combined, stmt.span)
+            let a = lower_assign(ctx, target, &combined, stmt.span);
+            write_through(ctx, a, stmt.span)
         }
         StmtKind::LetTuple { .. } | StmtKind::LetStruct { .. } => {
             unreachable!("destructuring lets are expanded by lower_block")
         }
         StmtKind::Break { label, value } => {
             check_jump_target(ctx, "break", label.as_deref(), false);
-            let value = value
-                .as_ref()
-                .map(|e| lower_expected(ctx, e, HirTy::Unknown));
             let depth = jump_index(ctx, label.as_deref(), false);
+            let value = if let Some(e) = value {
+                Some(lower_break_value(ctx, depth, e))
+            } else {
+                match ctx.break_tys.get(&depth).cloned() {
+                    None => {
+                        ctx.break_tys.insert(depth, (HirTy::Unit, true));
+                    }
+                    Some((t, _)) if t != HirTy::Unit => ctx.emit_error(
+                        rokc_diagnostic::ErrorKind::Type,
+                        format!(
+                            "`break` without a value, but this loop's `break` values are \
+                             `{}` (spec 3.13.1)",
+                            ctx.ty_name(&t)
+                        ),
+                    ),
+                    Some(_) => {}
+                }
+                None
+            };
             let label = label.clone();
             Some(exit_through(
                 ctx,
@@ -668,20 +688,21 @@ pub(super) fn lower_expr(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
         ExprKind::SelfUpper => ctx.error_expr(span, "`Self` is a type, not a value".to_owned()),
         ExprKind::Block(b) => {
             let labelled = b.label.is_some();
+            let idx = ctx.breakables.len();
             if labelled {
+                open_break_target(ctx, idx);
                 ctx.breakables.push((b.label.clone(), false));
             }
             let block = lower_block(ctx, b);
-            if labelled {
-                ctx.breakables.pop();
-            }
             // Spec 3.9.10: a labelled block's value can come from a
             // `break 'label value` inside its body, not just from a
             // trailing expression.
-            let break_ty = block
-                .label
-                .as_deref()
-                .and_then(|lbl| first_break_value_ty(&block, Some(lbl)));
+            let break_ty = if labelled {
+                ctx.breakables.pop();
+                ctx.break_tys.remove(&idx).map(|(t, _)| t)
+            } else {
+                None
+            };
             let ty = block
                 .trailing
                 .as_ref()
@@ -733,7 +754,9 @@ pub(super) fn lower_expr(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
         ExprKind::While { label, cond, body } => {
             let cond_h = lower_cond(ctx, cond);
             ctx.breakables.push((label.clone(), true));
-            let body_h = lower_loop_body(ctx, body);
+            ctx.push_expected(HirTy::Unit);
+            let body_h = lower_narrowed_block(ctx, cond, body);
+            ctx.pop_expected();
             ctx.breakables.pop();
             HirExpr {
                 kind: HirExprKind::While {
@@ -902,11 +925,12 @@ pub(super) fn lower_expr(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             }
         }
         ExprKind::Loop { label, body } => {
+            let idx = ctx.breakables.len();
+            open_break_target(ctx, idx);
             ctx.breakables.push((label.clone(), true));
             let body_h = lower_loop_body(ctx, body);
             ctx.breakables.pop();
-            // Pick the first `break <value>` we can see in the body.
-            let result_ty = first_break_value_ty(&body_h, label.as_deref()).unwrap_or(HirTy::Unit);
+            let result_ty = ctx.break_tys.remove(&idx).map_or(HirTy::Unit, |(t, _)| t);
             HirExpr {
                 kind: HirExprKind::Loop {
                     label: label.clone(),
@@ -1032,73 +1056,49 @@ pub(super) fn lower_loop_body(ctx: &mut LowerCtx<'_>, body: &Block) -> HirBlock 
     b
 }
 
-/// Walk one loop's body looking for the first `break value;` whose
-/// label targets this loop. Skips nested loops (they own their breaks).
-pub(super) fn first_break_value_ty(b: &HirBlock, label: Option<&str>) -> Option<HirTy> {
-    fn walk_block(b: &HirBlock, label: Option<&str>) -> Option<HirTy> {
-        for s in &b.stmts {
-            if let Some(t) = walk_stmt(s, label) {
-                return Some(t);
-            }
-        }
-        b.trailing.as_ref().and_then(|t| walk_expr(t, label))
+/// A `loop` / labelled block about to be lowered at `breakables`
+/// index `idx`: an annotated slot (`let v: T = loop { .. }`) types its
+/// `break` values.
+pub(super) fn open_break_target(ctx: &mut LowerCtx<'_>, idx: usize) {
+    ctx.break_tys.remove(&idx);
+    if let Some(t) = ctx
+        .current_expected()
+        .filter(|t| !matches!(t, HirTy::Unknown | HirTy::Unit))
+    {
+        ctx.break_tys.insert(idx, (t.clone(), false));
     }
+}
 
-    fn walk_stmt(s: &HirStmt, label: Option<&str>) -> Option<HirTy> {
-        match s {
-            HirStmt::Break { label: bl, value } => {
-                // Exact match: an unlabeled break belongs only to an
-                // unlabeled outer; `break 'L` belongs only to the loop
-                // labeled `'L`.
-                if bl.as_deref() == label {
-                    value.as_ref().map(|v| v.ty.clone())
-                } else {
-                    None
-                }
+/// `break value` to the target at `depth`: the value takes the target's
+/// slot type, or (unannotated) the first `break`'s type, which every
+/// other `break` must match — D1, as for `if` / `match` arms.
+pub(super) fn lower_break_value(ctx: &mut LowerCtx<'_>, depth: usize, e: &Expr) -> HirExpr {
+    let slot = ctx.break_tys.get(&depth).cloned();
+    let v = lower_expected(
+        ctx,
+        e,
+        slot.as_ref().map_or(HirTy::Unknown, |(t, _)| t.clone()),
+    );
+    match slot {
+        None => {
+            if v.ty != HirTy::Unknown && !hir_expr_diverges(&v) {
+                ctx.break_tys.insert(depth, (v.ty.clone(), true));
             }
-            HirStmt::Let { init, .. } => walk_expr(init, label),
-            HirStmt::Assign { value, .. } => walk_expr(value, label),
-            HirStmt::Expr(e) | HirStmt::Return(Some(e)) => walk_expr(e, label),
-            _ => None,
+            v
         }
+        Some((t, true)) if v.ty != HirTy::Unknown && !coercible(ctx, &t, &v.ty) => ctx.error_expr(
+            v.span,
+            format!(
+                "`break` values have different types `{}` and `{}` — rok does not infer \
+                     a sum type; annotate the slot (`let v: {} | {} = loop ...`)",
+                ctx.ty_name(&t),
+                ctx.ty_name(&v.ty),
+                ctx.ty_name(&t),
+                ctx.ty_name(&v.ty)
+            ),
+        ),
+        Some((t, _)) => coerce(ctx, &t, v, &|| "this `break` value".to_owned()),
     }
-
-    fn walk_expr(e: &HirExpr, label: Option<&str>) -> Option<HirTy> {
-        match &e.kind {
-            HirExprKind::Block(b) => walk_block(b, label),
-            HirExprKind::If {
-                cond,
-                then_block,
-                else_branch,
-            } => walk_expr(cond, label)
-                .or_else(|| walk_block(then_block, label))
-                .or_else(|| else_branch.as_deref().and_then(|e| walk_expr(e, label))),
-            HirExprKind::PrimBinOp { lhs, rhs, .. } => {
-                walk_expr(lhs, label).or_else(|| walk_expr(rhs, label))
-            }
-            HirExprKind::PrimUnaryOp { operand, .. } => walk_expr(operand, label),
-            HirExprKind::Call { args, .. } => args.iter().find_map(|a| walk_expr(a, label)),
-            // For an unlabeled outer, nested loops own all their breaks —
-            // skip. For a labeled outer, recurse so a `break 'outer …`
-            // inside a nested loop is reachable, but stop at any inner
-            // loop that shadows the label.
-            HirExprKind::While {
-                label: inner, body, ..
-            }
-            | HirExprKind::Loop {
-                label: inner, body, ..
-            } => {
-                if label.is_some() && inner.as_deref() != label {
-                    walk_block(body, label)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    walk_block(b, label)
 }
 
 pub(super) fn enum_base_name(name: &str) -> &str {
@@ -1661,95 +1661,24 @@ pub(super) fn lower_if(
     else_branch: Option<&Expr>,
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
-    // Spec 2.2.6: `if x is T { .. }` narrows the local `x` to `T` inside
-    // the then-block — lowered as `match x { x: T => { .. }, _ => else }`.
-    // ponytail: only a bare local as the whole condition narrows (not
-    // `x is T && ..`); assigning to `x` inside the block writes the
-    // narrowed copy.
-    let narrow = match &cond.kind {
-        ExprKind::Is(operand, pat) => match (&operand.kind, &pat.kind) {
-            (ExprKind::Path(p), AstPatternKind::TypeCheck { binder: None, ty })
-                if p.segments.len() == 1 && ctx.lookup(&p.segments[0].name).is_some() =>
-            {
-                Some((operand, &p.segments[0].name, ty))
-            }
-            _ => None,
-        },
-        _ => None,
-    };
-    let mut cond_h = None;
-    let mut narrow_h = None;
-    if let Some((operand, name, ty)) = narrow {
-        let scrut = lower_expected(ctx, operand, HirTy::Unknown);
-        ctx.push_scope();
-        let pat = rokc_ast::Pattern {
-            kind: AstPatternKind::TypeCheck {
-                binder: Some(name.clone()),
-                ty: ty.clone(),
-            },
-            span: cond.span,
-        };
-        let pat_h = lower_pattern(ctx, &pat, &scrut.ty);
-        narrow_h = Some((scrut, pat_h));
-    } else {
-        cond_h = Some(lower_cond(ctx, cond));
-    }
+    let cond_h = lower_cond(ctx, cond);
     let expected = ctx
         .current_expected()
         .cloned()
         .filter(|t| *t != HirTy::Unknown);
-    let mut then_h = lower_block(ctx, then_block);
-    if narrow_h.is_some() {
-        ctx.pop_scope();
-    }
-    // `if` → `match` for a narrowing condition.
-    let build = |cond_h: Option<HirExpr>,
-                 then_h: HirBlock,
-                 else_h: Option<HirExpr>,
-                 ty: HirTy,
-                 narrow_h: Option<(HirExpr, HirPattern)>| {
-        let kind = match (cond_h, narrow_h) {
-            (_, Some((scrut, pat))) => {
-                let empty = || HirExpr {
-                    kind: HirExprKind::Block(Box::new(HirBlock {
-                        stmts: Vec::new(),
-                        trailing: None,
-                        label: None,
-                    })),
-                    ty: HirTy::Unit,
-                    span,
-                };
-                HirExprKind::Match {
-                    scrutinee: Box::new(scrut),
-                    arms: vec![
-                        HirMatchArm {
-                            pat,
-                            guard: None,
-                            body: HirExpr {
-                                kind: HirExprKind::Block(Box::new(then_h)),
-                                ty: ty.clone(),
-                                span,
-                            },
-                        },
-                        HirMatchArm {
-                            pat: HirPattern::Wildcard,
-                            guard: None,
-                            body: else_h.unwrap_or_else(empty),
-                        },
-                    ],
-                }
-            }
-            (cond_h, None) => HirExprKind::If {
-                cond: Box::new(cond_h.expect("if condition")),
-                then_block: Box::new(then_h),
-                else_branch: else_h.map(Box::new),
-            },
-        };
-        HirExpr { kind, ty, span }
+    let mut then_h = lower_narrowed_block(ctx, cond, then_block);
+    let build = |cond_h: HirExpr, then_h: HirBlock, else_h: Option<HirExpr>, ty: HirTy| HirExpr {
+        kind: HirExprKind::If {
+            cond: Box::new(cond_h),
+            then_block: Box::new(then_h),
+            else_branch: else_h.map(Box::new),
+        },
+        ty,
+        span,
     };
     let Some(else_e) = else_branch else {
         // No else: the if is a statement; any then-value is discarded.
-        return build(cond_h, then_h, None, HirTy::Unit, narrow_h);
+        return build(cond_h, then_h, None, HirTy::Unit);
     };
     let mut else_h = lower_expr(ctx, else_e);
     // Spec 3.14.1: a diverging branch (`return` / `throw` / ...) takes
@@ -1809,7 +1738,124 @@ pub(super) fn lower_if(
             _ => coerce(ctx, &result_ty, else_h, &what),
         };
     }
-    build(cond_h, then_h, Some(else_h), result_ty, narrow_h)
+    build(cond_h, then_h, Some(else_h), result_ty)
+}
+
+/// Spec 2.2.6 narrowing: every `x is T` conjunct of `cond` (`x` a local,
+/// `cond` = `a && b && ..`) — the locals that are `T` wherever `cond`
+/// is known true.
+fn narrowings(ctx: &LowerCtx<'_>, cond: &Expr) -> Vec<(String, rokc_ast::Ty)> {
+    match &cond.kind {
+        ExprKind::OpInfix { op, lhs, rhs } if op == "&&" => {
+            let mut v = narrowings(ctx, lhs);
+            v.extend(narrowings(ctx, rhs));
+            v
+        }
+        ExprKind::Is(operand, pat) => match (&operand.kind, &pat.kind) {
+            (ExprKind::Path(p), AstPatternKind::TypeCheck { binder: None, ty })
+                if p.segments.len() == 1 && ctx.lookup(&p.segments[0].name).is_some() =>
+            {
+                vec![(p.segments[0].name.clone(), ty.clone())]
+            }
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// In the current (fresh) scope, rebind each narrowed local as `T`:
+/// `let x = match x { x: T => x };` (the test already passed, so the
+/// one-arm match is exhaustive at run time). Assignments to the new
+/// binding write through to the original (`narrowed`).
+fn bind_narrowed(ctx: &mut LowerCtx<'_>, cond: &Expr) -> Vec<HirStmt> {
+    let mut lets = Vec::new();
+    for (name, ty) in narrowings(ctx, cond) {
+        let Some(orig) = ctx.lookup(&name) else {
+            continue;
+        };
+        let orig_ty = ctx.local_ty(orig);
+        let pat = rokc_ast::Pattern {
+            kind: AstPatternKind::TypeCheck {
+                binder: Some(name.clone()),
+                ty,
+            },
+            span: cond.span,
+        };
+        let pat_h = lower_pattern(ctx, &pat, &orig_ty);
+        let Some(new) = ctx.lookup_in_current_scope(&name) else {
+            continue;
+        };
+        let new_ty = ctx.local_ty(new);
+        ctx.narrowed.insert(new, (orig, orig_ty.clone()));
+        lets.push(HirStmt::Let {
+            local: new,
+            init: HirExpr {
+                kind: HirExprKind::Match {
+                    scrutinee: Box::new(hir_local(orig, &orig_ty, cond.span)),
+                    arms: vec![HirMatchArm {
+                        pat: pat_h,
+                        guard: None,
+                        body: hir_local(new, &new_ty, cond.span),
+                    }],
+                },
+                ty: new_ty,
+                span: cond.span,
+            },
+        });
+    }
+    lets
+}
+
+/// A block that runs only when `cond` held, with its narrowings bound.
+pub(super) fn lower_narrowed_block(ctx: &mut LowerCtx<'_>, cond: &Expr, block: &Block) -> HirBlock {
+    ctx.push_scope();
+    let lets = bind_narrowed(ctx, cond);
+    let mut b = lower_block(ctx, block);
+    ctx.pop_scope();
+    if !lets.is_empty() {
+        b.stmts.splice(0..0, lets);
+    }
+    b
+}
+
+/// Write-through for an assignment to a narrowed binding: also store
+/// the new value, converted back, into the original slot.
+fn write_through(
+    ctx: &LowerCtx<'_>,
+    stmt: Option<HirStmt>,
+    span: rokc_diagnostic::Span,
+) -> Option<HirStmt> {
+    let local = match &stmt {
+        Some(HirStmt::Assign { local, .. }) => *local,
+        Some(HirStmt::ArrayAssign { array_local, .. }) => *array_local,
+        _ => return stmt,
+    };
+    if !ctx.narrowed.contains_key(&local) {
+        return stmt;
+    }
+    // A narrowing of a narrowing writes back through every level.
+    let mut stmts = vec![stmt?];
+    let mut cur = local;
+    while let Some((orig, orig_ty)) = ctx.narrowed.get(&cur).cloned() {
+        let ty = ctx.local_ty(cur);
+        let back = coerce(ctx, &orig_ty, hir_local(cur, &ty, span), &|| {
+            "the narrowed slot".to_owned()
+        });
+        stmts.push(HirStmt::Assign {
+            local: orig,
+            value: back,
+        });
+        cur = orig;
+    }
+    Some(HirStmt::Expr(HirExpr {
+        kind: HirExprKind::Block(Box::new(HirBlock {
+            stmts,
+            trailing: None,
+            label: None,
+        })),
+        ty: HirTy::Unit,
+        span,
+    }))
 }
 
 /// Spec 2.2.5: `v is T` — `match v { _: T => true, _ => false }`.
@@ -1823,14 +1869,22 @@ fn lower_is(
     if scrut.ty == HirTy::Unknown {
         return scrut;
     }
-    ctx.push_scope();
-    let pat_h = lower_pattern(ctx, pat, &scrut.ty);
-    ctx.pop_scope();
     let lit = |b: bool| HirExpr {
         kind: HirExprKind::Const(ConstVal::Bool(b)),
         ty: HirTy::Prim(PrimTy::Bool),
         span,
     };
+    // A static (non-`any`, non-sum) operand: the answer is known now.
+    if let (false, AstPatternKind::TypeCheck { ty, .. }) = (
+        matches!(scrut.ty, HirTy::AnyTrait(_) | HirTy::Sum(_)),
+        &pat.kind,
+    ) {
+        let same = ctx.resolve_ast_ty(ty) == scrut.ty;
+        return with_lets(vec![HirStmt::Expr(scrut)], lit(same));
+    }
+    ctx.push_scope();
+    let pat_h = lower_pattern(ctx, pat, &scrut.ty);
+    ctx.pop_scope();
     HirExpr {
         kind: HirExprKind::Match {
             scrutinee: Box::new(scrut),
@@ -2051,7 +2105,17 @@ pub(super) fn method_call_on(
     let found = method_target_for(&recv_h.ty)
         .and_then(|t| ctx.env.method_table.get(&(t, method.to_owned())).copied());
     let Some(fn_id) = found else {
-        if let Some(gm) = generic_method_for(ctx, &recv_h.ty, method) {
+        let gm = match generic_method_for(ctx, &recv_h.ty, method) {
+            Some(gm) => Some(gm),
+            None => match generic_trait_method_for(ctx, &recv_h.ty, method) {
+                Ok(gm) => gm,
+                Err(msg) => {
+                    lower_args_only(ctx);
+                    return ctx.error_expr(span, msg);
+                }
+            },
+        };
+        if let Some(gm) = gm {
             check_method_info_visible(ctx, &gm.info, method);
             if gm.def.params.first().map(|p| p.name.as_str()) != Some("self") {
                 lower_args_only(ctx);
@@ -2117,8 +2181,9 @@ fn any_method_call(
 ) -> HirExpr {
     let mut seen: Vec<String> = Vec::new();
     let mut stack = bounds.to_vec();
-    // The trait declaring `method`, and whether the bound gave its args.
-    let mut provider: Option<(String, bool)> = None;
+    // The trait declaring `method`, and the bound that named it (with
+    // its arguments / bindings; a supertrait reached indirectly has none).
+    let mut provider: Option<(String, String)> = None;
     while let Some(t) = stack.pop() {
         let base = bound_base(&t).to_owned();
         if seen.contains(&base) {
@@ -2126,14 +2191,14 @@ fn any_method_call(
         }
         if let Some(info) = ctx.env.trait_info.get(&base) {
             if provider.is_none() && info.methods.iter().any(|m| m == method) {
-                provider = Some((base.clone(), t.contains('<')));
+                provider = Some((base.clone(), t.clone()));
             }
             stack.extend(info.supers.iter().cloned());
         }
         seen.push(base);
     }
     let recv_ty = recv_h.ty.clone();
-    let Some((provider, has_args)) = provider else {
+    let Some((provider, bound)) = provider else {
         discard_args(ctx, args);
         return ctx.error_expr(
             span,
@@ -2146,21 +2211,37 @@ fn any_method_call(
         );
     };
     // Every implementor shares one signature only if it doesn't depend
-    // on the implementing type (`Self`) or on unfixed trait arguments.
-    let info = &ctx.env.trait_info[&provider];
-    let why = if info.self_methods.iter().any(|m| m == method) {
-        Some(
-            "its signature mentions `Self`, which is a different type for each implementor"
-                .to_owned(),
-        )
-    } else if !has_args && info.param_methods.iter().any(|m| m == method) {
-        Some(format!(
-            "its signature uses type parameters of `{provider}` that the bound leaves open — \
-             name them (`any {provider}<..>`)"
-        ))
-    } else {
-        None
-    };
+    // on the implementing type (`Self`), on trait arguments the bound
+    // leaves open, or on associated types it doesn't bind.
+    let fixed = bound.split_once('<').map_or("", |(_, rest)| rest);
+    let has_args = !fixed.is_empty() && !fixed.split(", ").next().unwrap_or("").contains(" = ");
+    let needs = ctx.env.trait_info[&provider]
+        .needs
+        .get(method)
+        .cloned()
+        .unwrap_or_default();
+    let why = needs.iter().find_map(|n| {
+        if n == "Self" {
+            Some(
+                "its signature mentions `Self`, which is a different type for each implementor"
+                    .to_owned(),
+            )
+        } else if let Some(x) = n.strip_prefix("Self::") {
+            (!fixed.contains(&format!("{x} = "))).then(|| {
+                format!(
+                    "its signature uses `Self::{x}`, which the bound leaves open — bind it \
+                     (`any {provider}<{x} = ..>`)"
+                )
+            })
+        } else {
+            (!has_args).then(|| {
+                format!(
+                    "its signature uses type parameters of `{provider}` that the bound leaves \
+                     open — name them (`any {provider}<..>`)"
+                )
+            })
+        }
+    });
     if let Some(why) = why {
         discard_args(ctx, args);
         return ctx.error_expr(
@@ -2172,94 +2253,225 @@ fn any_method_call(
             ),
         );
     }
-    let mut impls: Vec<HirTy> = Vec::new();
-    for t in ctx
+    // The signature, the same for every implementor (checked above):
+    // a concrete impl's, else the trait declaration's.
+    let concrete = ctx
         .env
         .trait_impl_tys
         .get(bound_base(&bounds[0]))
         .into_iter()
         .flatten()
-    {
-        if !impls.contains(t) && bounds.iter().all(|b| ctx.implements(t, b)) {
-            impls.push(t.clone());
+        .find(|t| bounds.iter().all(|b| ctx.implements(t, b)))
+        .and_then(|t| ctx.env.fn_table.get(&format!("{}__{method}", ty_mangle(t))))
+        .map(|sig| (sig.param_tys[1..].to_vec(), sig.ret_ty.clone()));
+    let (params, ret) = match concrete {
+        Some(s) => s,
+        None if needs.is_empty() => {
+            let info = &ctx.env.trait_info[&provider];
+            let def = &info.decls[method];
+            let empty = HashMap::new();
+            let mut rc = LowerCtx::new(ctx.env, &empty, None);
+            rc.current_module.clone_from(&info.module);
+            let params = def
+                .params
+                .iter()
+                .filter(|p| p.name != "self")
+                .map(|p| {
+                    p.ty.as_ref()
+                        .map_or(HirTy::Unknown, |t| rc.resolve_ast_ty(t))
+                })
+                .collect();
+            (params, rc.resolve_ast_ty(&sig_ret_ast(def)))
         }
-    }
-    let Some(first) = impls.first() else {
-        discard_args(ctx, args);
-        return ctx.error_expr(
-            span,
-            format!(
-                "`{}` has no implementing type in this program, so `{method}` can never be \
-                 called on it",
-                ctx.ty_name(&recv_ty)
-            ),
-        );
-    };
-    let Some(sig0) = ctx
-        .env
-        .fn_table
-        .get(&format!("{}__{method}", ty_mangle(first)))
-        .cloned()
-    else {
-        discard_args(ctx, args);
-        return ctx.error_expr(
-            span,
-            format!("internal: no `{method}` for an `any` implementor"),
-        );
-    };
-    // Receiver and arguments are evaluated once, into temporaries.
-    let mut sig = sig0.clone();
-    sig.param_tys[0] = recv_ty.clone();
-    let (lowered, mut lets) = lower_args_for(ctx, &sig, method, Some(recv_h), args, span);
-    let temps: Vec<(LocalId, HirTy)> = lowered
-        .into_iter()
-        .map(|a| {
-            let l = ctx.declare(None, a.ty.clone());
-            let ty = a.ty.clone();
-            lets.push(HirStmt::Let { local: l, init: a });
-            (l, ty)
-        })
-        .collect();
-    let mut arms = Vec::with_capacity(impls.len());
-    for t in impls {
-        let Some(target) = method_target_for(&t) else {
-            continue;
-        };
-        let Some(&fn_id) = ctx.env.method_table.get(&(target, method.to_owned())) else {
-            continue;
-        };
-        let bind = ctx.declare(None, t.clone());
-        let mut call_args = vec![hir_local(bind, &t, span)];
-        call_args.extend(temps[1..].iter().map(|(l, ty)| hir_local(*l, ty, span)));
-        arms.push(HirMatchArm {
-            pat: HirPattern::SumVariant {
-                sum_ty: recv_ty.clone(),
-                variant_index: ctx.any_tag(&t),
-                binder: Some(bind),
-                payload_ty: Some(t),
-            },
-            guard: None,
-            body: HirExpr {
-                kind: HirExprKind::Call {
-                    callee: fn_id,
-                    args: call_args,
-                },
-                ty: sig0.ret_ty.clone(),
+        None => {
+            discard_args(ctx, args);
+            return ctx.error_expr(
                 span,
-            },
-        });
-    }
+                format!(
+                    "cannot call `{method}` on `{}`: no concrete impl fixes its signature \
+                     (only generic impls implement `{provider}`) (D4)",
+                    ctx.ty_name(&recv_ty)
+                ),
+            );
+        }
+    };
+    let mut param_tys = vec![recv_ty.clone()];
+    param_tys.extend(params);
+    let sig = FnSig {
+        id: FunctionId(u32::MAX),
+        ret_ty: ret.clone(),
+        param_defaults: vec![None; param_tys.len()],
+        param_names: (0..param_tys.len()).map(|i| format!("#{i}")).collect(),
+        param_tys,
+    };
+    let (lowered, lets) = lower_args_for(ctx, &sig, method, Some(recv_h), args, span);
+    let id = any_dispatcher(ctx, &recv_ty, method, &sig, span);
     with_lets(
         lets,
         HirExpr {
-            kind: HirExprKind::Match {
-                scrutinee: Box::new(hir_local(temps[0].0, &recv_ty, span)),
-                arms,
+            kind: HirExprKind::Call {
+                callee: id,
+                args: lowered,
             },
-            ty: sig0.ret_ty,
+            ty: ret,
             span,
         },
     )
+}
+
+/// One dispatcher function per (`any` type, method): its body — a
+/// `match` on the tag over every stored type that implements the
+/// bounds — is built by `build_any_dispatchers` once the program's
+/// stored types are known (closed world).
+#[derive(Clone)]
+pub(super) struct AnyDispatch {
+    id: FunctionId,
+    recv_ty: HirTy,
+    method: String,
+    params: Vec<HirTy>,
+    ret: HirTy,
+    span: rokc_diagnostic::Span,
+}
+
+fn any_dispatcher(
+    ctx: &LowerCtx<'_>,
+    recv_ty: &HirTy,
+    method: &str,
+    sig: &FnSig,
+    span: rokc_diagnostic::Span,
+) -> FunctionId {
+    let mut all = ctx.env.sink.any_dispatch.borrow_mut();
+    if let Some(d) = all
+        .iter()
+        .find(|d| d.recv_ty == *recv_ty && d.method == method)
+    {
+        return d.id;
+    }
+    let id = FunctionId(ctx.env.sink.next_id.get());
+    ctx.env.sink.next_id.set(id.0 + 1);
+    all.push(AnyDispatch {
+        id,
+        recv_ty: recv_ty.clone(),
+        method: method.to_owned(),
+        params: sig.param_tys[1..].to_vec(),
+        ret: sig.ret_ty.clone(),
+        span,
+    });
+    id
+}
+
+/// Build every dispatcher's body (see `AnyDispatch`). A body can
+/// instantiate generic methods that store new types into `any` (or ask
+/// for new dispatchers), so rebuild until nothing new appears.
+pub(super) fn build_any_dispatchers(env: &Env<'_>) {
+    loop {
+        let (n_tags, todo) = (
+            env.sink.any_tags.borrow().len(),
+            env.sink.any_dispatch.borrow().clone(),
+        );
+        let fns: Vec<HirFunction> = todo.iter().map(|d| build_dispatcher(env, d)).collect();
+        if env.sink.any_tags.borrow().len() == n_tags
+            && env.sink.any_dispatch.borrow().len() == todo.len()
+        {
+            env.sink.extras.borrow_mut().extend(fns);
+            return;
+        }
+    }
+}
+
+fn build_dispatcher(env: &Env<'_>, d: &AnyDispatch) -> HirFunction {
+    let span = d.span;
+    let empty = HashMap::new();
+    let mut c = LowerCtx::new(env, &empty, None);
+    let HirTy::AnyTrait(bounds) = &d.recv_ty else {
+        unreachable!("dispatcher on a non-`any` type")
+    };
+    let mut params = vec![HirParam {
+        name: "#recv".to_owned(),
+        local: c.declare(Some("#recv".to_owned()), d.recv_ty.clone()),
+        ty: d.recv_ty.clone(),
+        by_ref: false,
+    }];
+    for (i, t) in d.params.iter().enumerate() {
+        let name = format!("#a{i}");
+        params.push(HirParam {
+            name: name.clone(),
+            local: c.declare(Some(name), t.clone()),
+            ty: t.clone(),
+            by_ref: false,
+        });
+    }
+    let args: Vec<CallArg> = (0..d.params.len())
+        .map(|i| {
+            CallArg::Positional(Expr {
+                kind: ExprKind::Path(AstPath {
+                    segments: vec![rokc_ast::PathSegment {
+                        name: format!("#a{i}"),
+                        generics: Vec::new(),
+                    }],
+                    span,
+                }),
+                span,
+            })
+        })
+        .collect();
+    let stored: Vec<HirTy> = env.sink.any_tags.borrow().clone();
+    let mut arms = Vec::new();
+    for t in stored {
+        if matches!(t, HirTy::AnyTrait(_)) || !bounds.iter().all(|b| c.implements_trait(&t, b, 0)) {
+            continue;
+        }
+        c.push_scope();
+        let x = c.declare(None, t.clone());
+        let call = method_call_on(&mut c, hir_local(x, &t, span), &d.method, &args, span);
+        let body = coerce(&c, &d.ret, call, &|| {
+            format!("`{}` of an `any` value", d.method)
+        });
+        c.pop_scope();
+        arms.push(HirMatchArm {
+            pat: HirPattern::SumVariant {
+                sum_ty: d.recv_ty.clone(),
+                variant_index: c.any_tag(&t),
+                binder: Some(x),
+                payload_ty: Some(t),
+            },
+            guard: None,
+            body,
+        });
+    }
+    let m = HirExpr {
+        kind: HirExprKind::Match {
+            scrutinee: Box::new(hir_local(params[0].local, &d.recv_ty, span)),
+            arms,
+        },
+        ty: d.ret.clone(),
+        span,
+    };
+    let body = if d.ret == HirTy::Unit {
+        HirBlock {
+            stmts: vec![HirStmt::Expr(m)],
+            trailing: None,
+            label: None,
+        }
+    } else {
+        HirBlock {
+            stmts: Vec::new(),
+            trailing: Some(m),
+            label: None,
+        }
+    };
+    HirFunction {
+        id: d.id,
+        def_id: None,
+        name: format!("__any_{}_{}", d.method, d.id.0),
+        params,
+        locals: c.into_locals(),
+        ret_ty: d.ret.clone(),
+        body: Some(body),
+        is_async: false,
+        is_generator: false,
+        span,
+    }
 }
 
 /// Spec 5.6 for methods: an inherent method without `pub` is private to
@@ -2294,6 +2506,35 @@ pub(super) fn generic_method_for<'e>(
         enum_base_name(&name).to_owned()
     };
     ctx.env.generic_methods.get(&(base, method.to_owned()))
+}
+
+/// Method `method` of the generic trait impl covering `ty` (`impl<T>
+/// Tr for Box<T>`, blanket `impl<T: B> Tr for T`). Two covering impls
+/// are an error.
+pub(super) fn generic_trait_method_for<'e>(
+    ctx: &LowerCtx<'e>,
+    ty: &HirTy,
+    method: &str,
+) -> Result<Option<&'e GenericMethod>, String> {
+    let env = ctx.env;
+    let hits: Vec<&'e GenericTraitImpl> = env
+        .generic_trait_impls
+        .iter()
+        .filter(|gi| gi.methods.contains_key(method))
+        .filter(|gi| ctx.generic_impl_subst(gi, ty, 0).is_some())
+        .collect();
+    match hits.as_slice() {
+        [] => Ok(None),
+        [gi] => Ok(gi.methods.get(method)),
+        _ => Err(format!(
+            "method `{method}` on `{}` is ambiguous: generic impls of {} all cover it",
+            ctx.ty_name(ty),
+            hits.iter()
+                .map(|gi| format!("`{}`", gi.trait_key))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
 }
 
 pub(super) fn check_method_info_visible(ctx: &LowerCtx<'_>, info: &MethodInfo, method: &str) {
@@ -2639,6 +2880,16 @@ pub(super) fn lower_call(
     // `Type::method(args)` — static call through the method table. A
     // generic base (`Stack::new()`) resolves when exactly one
     // instantiation provides the method.
+    // `Tr::m(x)`, `T::f()`, `i32::add(a, b)`, `Self::f()` — through the
+    // trait's impls (concrete or generic) for the type.
+    if let Some((method, ty_segs)) = segs.split_last().filter(|(_, t)| !t.is_empty()) {
+        if let Some(r) =
+            path_call_via_impls(ctx, &p.segments, ty_segs, method, args, &display, span)
+        {
+            return r;
+        }
+    }
+
     if let Some((method, ty_segs)) = segs.split_last() {
         if !ty_segs.is_empty() {
             if let Some(full) = ctx.canon_type(ty_segs) {
@@ -2681,6 +2932,33 @@ pub(super) fn lower_call(
                         return call_sig(ctx, &sig, &display, None, args, span);
                     }
                     [] => {
+                        // A generic trait impl's method, typed by `self`.
+                        if let Some((CallArg::Positional(e), rest)) = args.split_first() {
+                            let recv = lower_expected(ctx, e, HirTy::Unknown);
+                            let t = recv.ty.clone();
+                            let base_ok = match &t {
+                                HirTy::Struct(id) => {
+                                    enum_base_name(&ctx.struct_def(*id).name) == full
+                                }
+                                HirTy::Enum(id) => enum_base_name(&ctx.enum_def(*id).name) == full,
+                                _ => false,
+                            };
+                            if base_ok {
+                                if let Some(r) = call_impl_method(
+                                    ctx,
+                                    &t,
+                                    &method,
+                                    None,
+                                    Some(recv),
+                                    rest,
+                                    &display,
+                                    span,
+                                ) {
+                                    return r;
+                                }
+                            }
+                            discard_args(ctx, rest);
+                        }
                         return ctx.error_expr(
                             span,
                             format!("no associated function `{method}` on `{full}`"),
@@ -2705,6 +2983,140 @@ pub(super) fn lower_call(
         span,
         format!("cannot find function `{display}` in this scope"),
     )
+}
+
+/// `Tr::m(..)` (`Self` = the first argument's type, else the expected
+/// type), or `T::f(..)` / `i32::f(..)` / `Self::f(..)` on a type that is
+/// not a named struct / enum. `None`: not such a path.
+#[allow(clippy::too_many_arguments)]
+fn path_call_via_impls(
+    ctx: &mut LowerCtx<'_>,
+    all_segs: &[rokc_ast::PathSegment],
+    ty_segs: &[&str],
+    method: &str,
+    args: &[CallArg],
+    display: &str,
+    span: rokc_diagnostic::Span,
+) -> Option<HirExpr> {
+    let trait_key = ctx
+        .canon_type(ty_segs)
+        .filter(|f| ctx.env.names.traits.contains(f));
+    if let Some(key) = trait_key {
+        let (recv, rest) = match args.split_first() {
+            Some((CallArg::Positional(e), rest)) => {
+                (Some(lower_expected(ctx, e, HirTy::Unknown)), rest)
+            }
+            _ => (None, args),
+        };
+        let self_ty = recv
+            .as_ref()
+            .map(|r| r.ty.clone())
+            .or_else(|| ctx.current_expected().cloned())
+            .filter(|t| *t != HirTy::Unknown);
+        let Some(t) = self_ty else {
+            discard_args(ctx, rest);
+            return Some(ctx.error_expr(
+                span,
+                format!(
+                    "cannot tell which type's `{key}` impl `{display}` calls — annotate the \
+                     expected type"
+                ),
+            ));
+        };
+        let call = call_impl_method(ctx, &t, method, Some(&key), recv, rest, display, span);
+        return Some(call.unwrap_or_else(|| {
+            ctx.error_expr(
+                span,
+                format!(
+                    "`{}` has no `{key}` impl providing `{method}`",
+                    ctx.ty_name(&t)
+                ),
+            )
+        }));
+    }
+    // Only paths the struct / enum lookup below can't take: a type
+    // parameter, a primitive, `Self`.
+    let [name] = ty_segs else {
+        return None;
+    };
+    let is_type_param = ctx.ty_subst.contains_key(*name);
+    let ty_ast = rokc_ast::Ty {
+        kind: rokc_ast::TyKind::Path(rokc_ast::Path {
+            segments: all_segs[..1].to_vec(),
+            span,
+        }),
+        span,
+    };
+    let prim = matches!(crate::ty::resolve_ty(&ty_ast), HirTy::Prim(_));
+    if !(is_type_param || prim || *name == "Self") {
+        return None;
+    }
+    let t = ctx.resolve_ast_ty(&ty_ast);
+    let call = call_impl_method(ctx, &t, method, None, None, args, display, span);
+    Some(call.unwrap_or_else(|| {
+        discard_args(ctx, args);
+        ctx.error_expr(
+            span,
+            format!("no associated function `{method}` on `{}`", ctx.ty_name(&t)),
+        )
+    }))
+}
+
+/// Call `t`'s method `method` — of trait `trait_key` when given —
+/// from a concrete impl, else a generic one. `recv` fills `self`.
+#[allow(clippy::too_many_arguments)]
+fn call_impl_method(
+    ctx: &mut LowerCtx<'_>,
+    t: &HirTy,
+    method: &str,
+    trait_key: Option<&str>,
+    recv: Option<HirExpr>,
+    args: &[CallArg],
+    display: &str,
+    span: rokc_diagnostic::Span,
+) -> Option<HirExpr> {
+    let of_trait =
+        |info: &MethodInfo| trait_key.is_none_or(|k| info.trait_name.as_deref() == Some(k));
+    let concrete = method_target_for(t)
+        .and_then(|tg| ctx.env.method_table.get(&(tg, method.to_owned())).copied())
+        .filter(|id| ctx.env.method_info.get(id).is_some_and(of_trait));
+    if let Some(fid) = concrete {
+        check_method_visible(ctx, fid, method);
+        let sig = ctx.env.fn_table[&format!("{}__{method}", ty_mangle(t))].clone();
+        return Some(call_sig(ctx, &sig, display, recv, args, span));
+    }
+    let env = ctx.env;
+    let gm = generic_method_for(ctx, t, method)
+        .filter(|gm| of_trait(&gm.info))
+        .or_else(|| {
+            env.generic_trait_impls
+                .iter()
+                .filter(|gi| trait_key.is_none_or(|k| gi.trait_key == k))
+                .filter(|gi| ctx.generic_impl_subst(gi, t, 0).is_some())
+                .find_map(|gi| gi.methods.get(method))
+        })?;
+    check_method_info_visible(ctx, &gm.info, method);
+    // ponytail: a generic impl's static method would need `Self`'s
+    // bindings seeded into the instantiation; add when one is needed.
+    if gm.def.params.first().map(|p| p.name.as_str()) != Some("self") {
+        discard_args(ctx, args);
+        return Some(ctx.error_expr(
+            span,
+            format!(
+                "`{display}`: a static method of a generic impl can't be called by path yet \
+                 (stage-1 limitation)"
+            ),
+        ));
+    }
+    Some(call_generic(
+        ctx,
+        &gm.def,
+        Some(&gm.self_ty),
+        recv,
+        args,
+        display,
+        span,
+    ))
 }
 
 /// Lower call arguments only for their diagnostics (the call itself
@@ -2746,6 +3158,9 @@ pub(super) fn lower_infix(
     if lhs_h.ty == HirTy::Unknown || rhs_h.ty == HirTy::Unknown {
         return poison(span);
     }
+    if matches!(lhs_h.ty, HirTy::AnyTrait(_)) || matches!(rhs_h.ty, HirTy::AnyTrait(_)) {
+        return dyn_op(ctx, op, lhs_h, Some(rhs_h), span);
+    }
     // Spec 0.4 / 3.1: `a + b` on a user type desugars to the operator
     // trait's method (`impl Add for T`).
     if matches!(lhs_h.ty, HirTy::Struct(_) | HirTy::Enum(_)) {
@@ -2768,6 +3183,188 @@ pub(super) fn lower_infix(
     )
 }
 
+/// Spec 2.2.3 / 808 §8.8.9: an operator with an `any` operand switches
+/// on the tag over the primitive types that have the operator (both
+/// operands the same type, as for static primitive operators); a
+/// static operand fixes that type. Arithmetic results are boxed back
+/// into `any`; when every candidate yields `bool` (comparisons) the
+/// result is `bool`. A runtime type without the operator panics.
+fn dyn_op(
+    ctx: &mut LowerCtx<'_>,
+    op: &str,
+    lhs: HirExpr,
+    rhs: Option<HirExpr>,
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    use PrimTy as P;
+    const PRIMS: [PrimTy; 15] = [
+        P::I8,
+        P::I16,
+        P::I32,
+        P::I64,
+        P::Isize,
+        P::U8,
+        P::U16,
+        P::U32,
+        P::U64,
+        P::Usize,
+        P::F32,
+        P::F64,
+        P::Bool,
+        P::CChar,
+        P::Char,
+    ];
+    let is_dyn = |t: &HirTy| matches!(t, HirTy::AnyTrait(_));
+    let fixed = [Some(&lhs.ty), rhs.as_ref().map(|r| &r.ty)]
+        .into_iter()
+        .flatten()
+        .find(|t| !is_dyn(t))
+        .cloned();
+    let lookup = |p: PrimTy| {
+        if rhs.is_some() {
+            infix_for_prim(op, p)
+        } else {
+            prefix_for_prim(op, p)
+        }
+    };
+    let cands: Vec<(PrimTy, PrimOp, HirTy)> = PRIMS
+        .into_iter()
+        .filter(|p| fixed.as_ref().is_none_or(|f| *f == HirTy::Prim(*p)))
+        .filter_map(|p| lookup(p).map(|(o, t)| (p, o, t)))
+        .collect();
+    if cands.is_empty() {
+        let tys: Vec<String> = [Some(&lhs.ty), rhs.as_ref().map(|r| &r.ty)]
+            .into_iter()
+            .flatten()
+            .map(|t| format!("`{}`", ctx.ty_name(t)))
+            .collect();
+        return ctx.error_expr(
+            span,
+            format!(
+                "operator `{op}` cannot be applied to {} — on an `any` value it dispatches \
+                 only over primitive types (narrow it with `is` first)",
+                tys.join(" and ")
+            ),
+        );
+    }
+    let bool_ty = HirTy::Prim(PrimTy::Bool);
+    let result_ty = if cands.iter().all(|c| c.2 == bool_ty) {
+        bool_ty
+    } else {
+        HirTy::AnyTrait(Vec::new())
+    };
+    // Operands are evaluated once, left to right.
+    let mut lets = Vec::new();
+    let mut temp = |ctx: &mut LowerCtx<'_>, e: HirExpr| {
+        let ty = e.ty.clone();
+        let l = ctx.declare(None, ty.clone());
+        lets.push(HirStmt::Let { local: l, init: e });
+        hir_local(l, &ty, span)
+    };
+    let l = temp(ctx, lhs);
+    let r = rhs.map(|r| temp(ctx, r));
+    let panic_arm = |ctx: &LowerCtx<'_>| HirMatchArm {
+        pat: HirPattern::Wildcard,
+        guard: None,
+        body: HirExpr {
+            kind: HirExprKind::Block(Box::new(HirBlock {
+                stmts: vec![HirStmt::Panic(super::throws::hook_call(
+                    ctx,
+                    "rok_panic",
+                    &format!(
+                        "operator `{op}` is not defined for the runtime type of an `any` value"
+                    ),
+                    span,
+                ))],
+                trailing: None,
+                label: None,
+            })),
+            ty: result_ty.clone(),
+            span,
+        },
+    };
+    // `match v { x: P => body(x), _ => panic }`, or `v` itself if static.
+    let narrow = |ctx: &mut LowerCtx<'_>,
+                  v: &HirExpr,
+                  p: PrimTy,
+                  body: &dyn Fn(&mut LowerCtx<'_>, HirExpr) -> HirExpr| {
+        let pty = HirTy::Prim(p);
+        if !is_dyn(&v.ty) {
+            return body(ctx, v.clone());
+        }
+        let x = ctx.declare(None, pty.clone());
+        let arm = HirMatchArm {
+            pat: HirPattern::SumVariant {
+                sum_ty: v.ty.clone(),
+                variant_index: ctx.any_tag(&pty),
+                binder: Some(x),
+                payload_ty: Some(pty.clone()),
+            },
+            guard: None,
+            body: body(ctx, hir_local(x, &pty, span)),
+        };
+        HirExpr {
+            kind: HirExprKind::Match {
+                scrutinee: Box::new(v.clone()),
+                arms: vec![arm, panic_arm(ctx)],
+            },
+            ty: result_ty.clone(),
+            span,
+        }
+    };
+    let mut arms = Vec::new();
+    for (p, primop, ty) in cands {
+        let finish = |ctx: &mut LowerCtx<'_>, e: HirExpr| {
+            coerce(ctx, &result_ty, e, &|| format!("the result of `{op}`"))
+        };
+        let pty = HirTy::Prim(p);
+        let x = ctx.declare(None, pty.clone());
+        let xv = hir_local(x, &pty, span);
+        let body = if let Some(r) = &r {
+            narrow(ctx, r, p, &|ctx, y| {
+                finish(ctx, hir_binop(primop, xv.clone(), y, ty.clone(), span))
+            })
+        } else {
+            let e = HirExpr {
+                kind: HirExprKind::PrimUnaryOp {
+                    op: primop,
+                    operand: Box::new(xv.clone()),
+                },
+                ty: ty.clone(),
+                span,
+            };
+            finish(ctx, e)
+        };
+        if !is_dyn(&l.ty) {
+            // Static lhs: exactly one candidate; bind it plainly.
+            lets.push(HirStmt::Let { local: x, init: l });
+            return with_lets(lets, body);
+        }
+        arms.push(HirMatchArm {
+            pat: HirPattern::SumVariant {
+                sum_ty: l.ty.clone(),
+                variant_index: ctx.any_tag(&pty),
+                binder: Some(x),
+                payload_ty: Some(pty),
+            },
+            guard: None,
+            body,
+        });
+    }
+    arms.push(panic_arm(ctx));
+    with_lets(
+        lets,
+        HirExpr {
+            kind: HirExprKind::Match {
+                scrutinee: Box::new(l),
+                arms,
+            },
+            ty: result_ty,
+            span,
+        },
+    )
+}
+
 pub(super) fn lower_short_circuit(
     ctx: &mut LowerCtx<'_>,
     op: &str,
@@ -2777,7 +3374,16 @@ pub(super) fn lower_short_circuit(
 ) -> HirExpr {
     let bool_ty = HirTy::Prim(PrimTy::Bool);
     let lhs_h = lower_cond(ctx, lhs);
-    let rhs_h = lower_cond(ctx, rhs);
+    // `x is T && rhs`: `x` is `T` in `rhs` (spec 2.2.6).
+    let rhs_h = if op == "&&" {
+        ctx.push_scope();
+        let lets = bind_narrowed(ctx, lhs);
+        let r = lower_cond(ctx, rhs);
+        ctx.pop_scope();
+        with_lets(lets, r)
+    } else {
+        lower_cond(ctx, rhs)
+    };
     let mk_const_bool = |b: bool| HirExpr {
         kind: HirExprKind::Const(ConstVal::Bool(b)),
         ty: bool_ty.clone(),
@@ -2824,6 +3430,9 @@ pub(super) fn lower_prefix(
     }
     if matches!(operand_h.ty, HirTy::Struct(_) | HirTy::Enum(_)) {
         return dispatch_user_op(ctx, op, Fixity::Prefix, operand_h, None, span);
+    }
+    if matches!(operand_h.ty, HirTy::AnyTrait(_)) {
+        return dyn_op(ctx, op, operand_h, None, span);
     }
     if let HirTy::Prim(p) = &operand_h.ty {
         if let Some((primop, result_ty)) = prefix_for_prim(op, *p) {
@@ -2883,6 +3492,23 @@ pub(super) fn dispatch_user_op(
                 .is_some_and(is_op_trait)
         });
     let Some(fn_id) = fn_id else {
+        // `impl<T> Add for Pair<T>` (spec 2.9.4): monomorphize on the
+        // operand types.
+        if let Ok(Some(gm)) = generic_trait_method_for(ctx, &lhs.ty, &method) {
+            if gm.info.trait_name.as_deref().is_some_and(is_op_trait) {
+                let mut args = vec![lhs];
+                args.extend(rhs);
+                let Some((callee, ty)) = monomorphize(ctx, &gm.def, Some(&gm.self_ty), &args, span)
+                else {
+                    return poison(span);
+                };
+                return HirExpr {
+                    kind: HirExprKind::Call { callee, args },
+                    ty,
+                    span,
+                };
+            }
+        }
         return ctx.error_expr(
             span,
             format!(
@@ -3006,7 +3632,11 @@ pub(super) fn lower_path(
             span,
         };
     }
-    if ctx.resolve_in(&segs, &ctx.env.generic_fns).is_some() {
+    if let Some(full) = ctx.resolve_in(&segs, &ctx.env.generic_fns) {
+        ctx.check_item_visible(&full, "function");
+        if let Some(v) = rethrows_value(ctx, ctx.env.generic_fns[&full], span) {
+            return v;
+        }
         return ctx.error_expr(
             span,
             format!(

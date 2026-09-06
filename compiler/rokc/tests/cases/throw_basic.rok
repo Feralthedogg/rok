@@ -1,8 +1,10 @@
 // expect-exit: 1
 // expect-stdout: before
+// expect-stderr: error: `main` returned an uncaught error: i32
 
 // An error escaping `fn main() throws (E)` is reported by the runtime and
-// ends the process with status 1 (spec 4.16.4) — not a panic (101).
+// ends the process with status 1 (spec 4.16.4) — not a panic (101). With
+// no `Display` / `Debug`, the type name is printed.
 fn main() throws (i32) -> i32 {
     rok_print_str("before");
     throw 7;

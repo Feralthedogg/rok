@@ -162,6 +162,30 @@ pub(super) fn monomorphize(
     for (i, arg) in args.iter().enumerate() {
         bind_from_arg(ctx, fn_def, self_ty, i, &arg.ty, &mut subst);
     }
+    // A type param the arguments leave open (one that only appears in
+    // the return type) binds from the call's expected type: the `let`
+    // annotation, the parameter slot, the enclosing `return`.
+    if let Some(expected) = ctx.current_expected().filter(|t| **t != HirTy::Unknown) {
+        let names: std::collections::HashSet<String> = fn_def
+            .generics
+            .params
+            .iter()
+            .filter_map(|gp| match gp {
+                rokc_ast::GenericParam::Type { name, .. } if !subst.contains_key(name) => {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        if !names.is_empty() {
+            let ret = sig_ret_ast(fn_def);
+            let ok = match &ret.kind {
+                rokc_ast::TyKind::Throws { ok, .. } => ok.as_ref(),
+                _ => &ret,
+            };
+            unify_param_ty_with(ok, expected, &names, &mut subst, ctx);
+        }
+    }
 
     // Spec 2.10.5: if a generic param has a default and no concrete type
     // got inferred for it, apply the default. Order is one pass — defaults
@@ -197,7 +221,7 @@ pub(super) fn monomorphize(
                         rokc_diagnostic::ErrorKind::Type,
                         format!(
                             "cannot infer type parameter `{name}` of `{}` from the call \
-                         arguments",
+                         arguments or the expected type — annotate the binding",
                             fn_def.name
                         ),
                     );
@@ -251,20 +275,28 @@ pub(super) fn monomorphize(
         let Some(concrete) = subst.get(name) else {
             continue;
         };
-        let Some(target) = method_target_for(concrete) else {
+        if method_target_for(concrete).is_none() {
             continue;
-        };
+        }
         for bound in bounds {
             let rokc_ast::TyKind::Path(p) = &bound.kind else {
                 continue;
             };
             let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
-            let bound_name = ctx.env.names.trait_key(&segs, &fn_module);
-            if !ctx
-                .env
-                .impl_traits
-                .contains(&(target.clone(), bound_name.clone()))
-            {
+            // `T: Iterator<Item = i32>` also checks the impl's arguments
+            // and associated types.
+            let (args, binds) = split_trait_args(
+                p.segments.last().map_or(&[][..], |s| s.generics.as_slice()),
+                |t| resolve_in_mono(ctx, fn_def, &subst, None, t),
+            );
+            let bound_name = bound_key(
+                ctx.env.names.trait_key(&segs, &fn_module),
+                &args,
+                &binds,
+                &ctx.env.struct_table,
+                &ctx.env.enum_table,
+            );
+            if !ctx.implements_trait(concrete, &bound_name, 0) {
                 ctx.emit_error(
                     rokc_diagnostic::ErrorKind::Type,
                     format!(
@@ -775,7 +807,7 @@ pub(super) fn lower_param(ctx: &mut LowerCtx<'_>, p: &Param) -> HirParam {
 pub(super) fn lower_fn_body(ctx: &mut LowerCtx<'_>, b: &Block, fn_name: &str) -> HirBlock {
     ctx.push_expected(ctx.fn_ret_ty.clone());
     if ctx.uncaught_in_main {
-        catch_all_frame(ctx);
+        main_frame(ctx);
     }
     let block = lower_block(ctx, b);
     ctx.pop_expected();

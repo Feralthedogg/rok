@@ -1,0 +1,21 @@
+// expect-exit: 0
+// expect-stdout:
+// 5
+// 3
+// 101
+
+// Associated-type bindings `Name = Ty` in trait arguments: `any
+// Source<Item = i32>` admits only impls with `type Item = i32` and can
+// dispatch methods whose signature uses `Item`; `S: Source<Item = i32>`
+// checks the impl's `type Item` at instantiation.
+trait Source { type Item; fn get(self) -> Item; fn id(self) -> i32; }
+struct A { v: i32; }
+struct C { v: bool; }
+impl Source for A { type Item = i32; fn get(self) -> i32 { return self.v; } fn id(self) -> i32 { return 1; } }
+impl Source for C { type Item = bool; fn get(self) -> bool { return self.v; } fn id(self) -> i32 { return 3; } }
+fn total<S: Source<Item = i32>>(s: S) -> i32 { return s.get() + 100; }
+let x: any Source<Item = i32> = A { v: 5 };
+rok_print_i32(x.get());
+let y: any Source = C { v: true };
+rok_print_i32(y.id());
+rok_print_i32(total(A { v: 1 }));

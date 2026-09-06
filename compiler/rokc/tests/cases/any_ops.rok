@@ -1,0 +1,34 @@
+// expect-exit: 0
+// expect-stdout:
+// 43
+// 30
+// 84
+// -42
+// 7
+// 0
+// 126
+// 9
+
+// Spec 2.2.3: an operator on an `any` operand switches on the tag over
+// the primitive types with that operator. Arithmetic results come back
+// as `any`; comparisons give `bool`.
+fn show(v: any) -> i32 {
+    return match v {
+        i: i32 => i,
+        f: f64 => (f * 10.0) as i32,
+        b: bool => if b { 1 } else { 0 },
+        _ => 0 - 1,
+    };
+}
+let v: any = 42i32;
+let w = v + 1i32;
+rok_print_i32(show(w));
+let f: any = 1.5;
+rok_print_i32(show(f * 2.0));
+rok_print_i32(show(v + v));
+rok_print_i32(show(-v));
+if v == 42i32 { rok_print_i32(7); }
+let b: any = true;
+rok_print_i32(show(!b));
+rok_print_i32(show(3i32 * v));
+if f < 2.0 { rok_print_i32(9); }

@@ -1,0 +1,32 @@
+// expect-exit: 0
+// expect-stdout:
+// 42
+// 404
+// 7
+// 1
+
+// `Result<i32, Struct>` / `Result<i32, str>`: mixed payload shapes in a
+// generic enum instantiation share a byte-array union slot.
+
+struct HttpErr { code: i32; retry: bool; }
+
+fn fetch(ok: bool) -> Result<i32, HttpErr> {
+    if ok { return Result::Ok(42); }
+    return Result::Err(HttpErr { code: 404, retry: false });
+}
+
+fn parse(s: i32) -> Result<i32, str> {
+    if s > 0 { return Result::Ok(s); }
+    return Result::Err("negative");
+}
+
+fn main() -> i32 {
+    rok_print_i32(fetch(true).unwrap());
+    match fetch(false) {
+        Result::Ok(_) => rok_print_i32(0),
+        Result::Err(e) => rok_print_i32(e.code),
+    }
+    rok_print_i32(parse(7).unwrap_or(0));
+    rok_print_i32(if parse(-1).is_err() { 1 } else { 0 });
+    return 0;
+}

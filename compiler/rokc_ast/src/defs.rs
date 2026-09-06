@@ -27,6 +27,36 @@ pub struct FnDef {
 /// Error type written for an untyped `throws` (= `throws (any Error)`).
 pub const UNTYPED_THROWS_MARK: &str = "#throws";
 
+/// An associated-type binding `Name = Ty` among a trait's generic
+/// arguments (`Iterator<Item = i32>`, spec 2.1 `trait_arg`) is carried
+/// as the path type `=Name<Ty>` (`=` cannot start an identifier).
+#[must_use]
+pub fn assoc_binding(name: &str, ty: Ty) -> Ty {
+    let span = ty.span;
+    Ty {
+        kind: TyKind::Path(Path {
+            segments: vec![PathSegment {
+                name: format!("={name}"),
+                generics: vec![ty],
+            }],
+            span,
+        }),
+        span,
+    }
+}
+
+/// `Name = Ty` if `ty` is an [`assoc_binding`].
+#[must_use]
+pub fn as_assoc_binding(ty: &Ty) -> Option<(&str, &Ty)> {
+    match &ty.kind {
+        TyKind::Path(p) => match p.segments.as_slice() {
+            [seg] => Some((seg.name.strip_prefix('=')?, seg.generics.first()?)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// `throws` clause of a fn signature (spec 4.14). `rethrows` is
 /// desugared by the parser into `Typed` over synthetic generic error
 /// parameters (`#E0`, ...), one per throwing fn-typed parameter.

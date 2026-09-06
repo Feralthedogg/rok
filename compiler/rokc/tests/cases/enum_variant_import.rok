@@ -1,0 +1,57 @@
+// expect-exit: 0
+// expect-stdout:
+// 5
+// 404
+// 2
+// 3
+// 9
+// 1
+
+// Bare variants: `Ok` / `Err` come in through the implicit
+// `use rok::core::**` (stdlib 2.14 examples write them bare); user
+// enum variants through `use E::*` / `use E::{A as B}`.
+
+struct HttpErr { code: i32; }
+
+fn fetch(ok: bool) -> Result<i32, HttpErr> {
+    if ok { return Ok(5); }
+    return Err(HttpErr { code: 404 });
+}
+
+enum Color { Red, Green, Blue(i32) }
+
+fn code(c: Color) -> i32 {
+    use Color::*;
+    return match c {
+        Red => 1,
+        Green => 2,
+        Blue(n) => n,
+    };
+}
+
+fn code2(c: Color) -> i32 {
+    use Color::{Green as G, Blue};
+    return match c {
+        G => 3,
+        Blue(n) => n * 3,
+        _ => 0,
+    };
+}
+
+fn main() -> i32 {
+    match fetch(true) {
+        Ok(v) => rok_print_i32(v),
+        Err(_) => rok_print_i32(-1),
+    }
+    if let Err(e) = fetch(false) { rok_print_i32(e.code); }
+    rok_print_i32(code(Color::Green));
+    rok_print_i32(code2(Color::Green));
+    rok_print_i32(code2(Color::Blue(3)));
+    // `none` and type patterns are untouched by the new names.
+    let x: i32 | none = none;
+    match x {
+        none => rok_print_i32(1),
+        n: i32 => rok_print_i32(n),
+    }
+    return 0;
+}

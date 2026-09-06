@@ -1,0 +1,142 @@
+// expect-exit: 0
+// expect-stdout:
+// 199990000
+// 1000
+// 42
+// 7
+// 9
+// -1
+// 5
+// 11
+// ok
+
+// GC: objects reachable only from locals (directly, through heap
+// fields, block params, arrays and throwing calls) survive many
+// collections with their values intact; garbage between them is freed.
+extern "C" {
+    fn rok_gc_collect();
+    fn rok_gc_stats_live_bytes() -> usize;
+    fn rok_gc_stats_collections() -> u64;
+}
+
+trait Link { fn val(self) -> i64; fn next(self) -> any Link | none; }
+struct Cons { v: i64; rest: any Link | none; }
+impl Link for Cons {
+    fn val(self) -> i64 { return self.v; }
+    fn next(self) -> any Link | none { return self.rest; }
+}
+impl Link for i64 {
+    fn val(self) -> i64 { return self; }
+    fn next(self) -> any Link | none { return none; }
+}
+
+// An enum whose payload union mixes a GC reference with plain data.
+enum Slot { Ref(any Link), Pair(i64, i64), Empty, }
+fn slot_val(s: Slot) -> i64 {
+    return match s {
+        Slot::Ref(l) => l.val(),
+        Slot::Pair(a, b) => a + b,
+        Slot::Empty => 0i64,
+    };
+}
+
+fn mk() -> Slot { return Slot::Ref(Cons { v: 8, rest: none }); }
+
+struct Bad { code: i32; }
+impl Display for Bad { fn display(self) -> str { return "bad"; } }
+impl Debug for Bad { fn debug(self) -> str { return "Bad"; } }
+impl Error for Bad {}
+
+// Allocates ~24 MB of garbage: several automatic collections.
+fn churn() -> i64 {
+    let s: i64 = 0;
+    let i: i64 = 0;
+    while i < 500000 {
+        let g: any Link = Cons { v: i, rest: none };
+        s += g.val();
+        i += 1;
+    }
+    return s;
+}
+
+fn build(n: i64) -> any Link | none {
+    let head: any Link | none = none;
+    let i: i64 = 0;
+    while i < n {
+        head = Cons { v: i, rest: head };
+        if i % 5000 == 0 { churn(); }
+        i += 1;
+    }
+    return head;
+}
+
+fn sum(l: any Link | none) -> i64 {
+    let cur = l;
+    let s: i64 = 0;
+    let done = false;
+    while !done {
+        match cur {
+            c: any Link => { s += c.val(); cur = c.next(); },
+            none => { done = true; },
+        }
+    }
+    return s;
+}
+
+fn count(l: any Link | none) -> i64 {
+    return match l { c: any Link => 1 + count(c.next()), none => 0, };
+}
+
+// A frame-holding throwing function: its error return must unlink the
+// frame like any other return.
+fn fails(x: any Link) throws -> any Link {
+    churn();
+    if x.val() > 3 { throw Bad { code: 1 }; }
+    return Cons { v: x.val() * 2, rest: none };
+}
+
+fn main() -> i32 {
+    let list = build(20000);
+    churn();
+    rok_gc_collect();
+    rok_print_i64(sum(list));
+    rok_print_i64(count(build(1000)));
+
+    // Through a block param (`if` value) live across a collecting call.
+    let pick: any Link = if sum(list) > 0 { Cons { v: 42, rest: none } } else { 0i64 };
+    churn();
+    rok_print_i64(pick.val());
+
+    // Array elements are roots too.
+    let arr: [any Link; 2] = [Cons { v: 7, rest: none }, Cons { v: 9, rest: none }];
+    churn();
+    rok_gc_collect();
+    rok_print_i64(arr[0].val());
+    rok_print_i64(arr[1].val());
+
+    let a: any Link = 10i64;
+    let r = try fails(a) catch _ { 0i64 - 1 };
+    churn();
+    rok_print_i64(r.val());
+    let b: any Link = Cons { v: 2, rest: list };
+    let r2 = try fails(b) catch _ { 0i64 - 1 };
+    churn();
+    rok_print_i64(r2.val() + 1);
+
+    // Only the union slot references the 48-byte `Cons` made in `mk`.
+    rok_gc_collect();
+    let before = rok_gc_stats_live_bytes();
+    let s1 = mk();
+    let s2 = Slot::Pair(1, 2);
+    churn();
+    rok_gc_collect();
+    if rok_gc_stats_live_bytes() - before != 48usize { return 3; }
+    rok_print_i64(slot_val(s1) + slot_val(s2) + slot_val(Slot::Empty));
+
+    if rok_gc_stats_collections() < 5u64 { return 1; }
+    // Live: the 20000-node list plus a handful of small objects.
+    rok_gc_collect();
+    if rok_gc_stats_live_bytes() > 1100000usize { return 2; }
+    rok_print_str("ok");
+    return 0;
+}

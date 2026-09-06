@@ -10,6 +10,11 @@ use std::fmt::Write;
 use rokc_ir_common::{ConstVal, FunctionId, LocalId, PrimOp, PrimTy};
 use rokc_mir::{BasicBlock, MirFunction, MirModule, MirTy, Operand, RValue, Statement, Terminator};
 
+/// GC object header size (801 §8.1.1); the payload starts here.
+const HEADER_SIZE: u32 = 16;
+/// First compiler-assigned type id (801 §8.1.2 user range).
+const GC_TYPE_BASE: u32 = 0x10000;
+
 pub struct Emitter {
     out: String,
     pointer_width: u32,
@@ -21,8 +26,11 @@ pub struct Emitter {
     pub errors: Vec<String>,
     /// Some codegen-inserted runtime check called `rok_panic`.
     uses_panic: bool,
-    /// Some `HeapBox` (an `any Tr` payload) called `rok_alloc`.
+    /// Some `HeapBox` (an `any Tr` payload) called `rok_gc_alloc_slow`.
     uses_alloc: bool,
+    /// Payload type of each GC object type; index `i` is type id
+    /// `GC_TYPE_BASE + i` and gets a `ScanTable` (802).
+    gc_types: Vec<MirTy>,
     /// Package hash for mangled symbols (spec 905).
     pkg: String,
     /// Panic on integer `+ - *` / negation overflow (debug builds); wrap
@@ -47,6 +55,7 @@ impl Emitter {
             errors: Vec::new(),
             uses_panic: false,
             uses_alloc: false,
+            gc_types: Vec::new(),
             pkg: String::new(),
             overflow_checks: true,
         }
@@ -81,6 +90,7 @@ impl Emitter {
             let symbol = fns[&m.id].name.clone();
             self.emit_main_wrapper(&symbol, &m.ret_ty);
         }
+        self.emit_gc_support(module);
         let panic_declared = module
             .functions
             .iter()
@@ -92,20 +102,63 @@ impl Emitter {
                 self.pointer_width
             );
         }
-        let alloc_declared = module
-            .functions
-            .iter()
-            .any(|f| f.name == "rok_alloc" && f.blocks.is_empty());
-        if self.uses_alloc && !alloc_declared {
-            let pw = self.pointer_width;
-            let _ = writeln!(
-                self.out,
-                "  func.func private @rok_alloc(i{pw}, i{pw}) -> i{pw}"
-            );
-        }
         self.emit_static_globals(module);
         self.emit_string_globals();
         self.out.push_str("}\n");
+    }
+
+    /// Runtime declarations the GC lowering uses, the `ScanTable`s (802)
+    /// and `rok.register_types`, which the C `main` calls right after
+    /// `rok_runtime_init` (802 §8.2.12).
+    fn emit_gc_support(&mut self, module: &MirModule) {
+        let pw = self.pointer_width;
+        let declared = |name: &str| {
+            module
+                .functions
+                .iter()
+                .any(|f| f.name == name && f.blocks.is_empty())
+        };
+        if self.uses_alloc && !declared("rok_gc_alloc_slow") {
+            let _ = writeln!(
+                self.out,
+                "  func.func private @rok_gc_alloc_slow(i{pw}, i{pw}, i32) -> i{pw}"
+            );
+        }
+        self.out.push_str(
+                "  llvm.mlir.global external thread_local @rok_tls_shadow_stack_top() {addr_space = 0 : i32} : !llvm.ptr\n",
+            );
+        if !declared("rok_gc_register_type") {
+            self.out
+                .push_str("  func.func private @rok_gc_register_type(i32, !llvm.ptr)\n");
+        }
+        let mut calls = String::new();
+        for (i, ty) in self.gc_types.iter().enumerate() {
+            let mut offsets = Vec::new();
+            gc_offsets(ty, pw, HEADER_SIZE, &mut offsets);
+            let total = gc_object_size(ty, pw).0;
+            // Header {total_size u32, version u16 = 1, num_entries u16},
+            // then {field_offset u32, field_kind u32 = STRONG_REF} each.
+            let mut words = vec![total, 1 | ((offsets.len() as u32) << 16)];
+            for o in offsets {
+                words.extend([o, 0]);
+            }
+            let list = words.iter().map(u32::to_string).collect::<Vec<_>>();
+            let n = words.len();
+            let _ = writeln!(
+                self.out,
+                "  llvm.mlir.global internal constant @rok.scan{i}(dense<[{}]> : tensor<{n}xi32>) {{addr_space = 0 : i32}} : !llvm.array<{n} x i32>",
+                list.join(", ")
+            );
+            let id = GC_TYPE_BASE + i as u32;
+            let _ = write!(
+                calls,
+                "    %t{i} = arith.constant {id} : i32\n    %s{i} = llvm.mlir.addressof @rok.scan{i} : !llvm.ptr\n    func.call @rok_gc_register_type(%t{i}, %s{i}) : (i32, !llvm.ptr) -> ()\n"
+            );
+        }
+        let _ = write!(
+            self.out,
+            "  func.func private @rok.register_types() {{\n{calls}    func.return\n  }}\n"
+        );
     }
 
     fn emit_static_globals(&mut self, module: &MirModule) {
@@ -209,6 +262,7 @@ impl Emitter {
         let str_globals = std::mem::take(&mut self.str_globals);
         let mut emit = FnEmit::new(f, self.pointer_width, fns, str_globals, &self.pkg);
         emit.overflow_checks = self.overflow_checks;
+        emit.gc_types = std::mem::take(&mut self.gc_types);
         emit.emit_prelude();
         for b in &f.blocks {
             emit.emit_block(b);
@@ -216,6 +270,7 @@ impl Emitter {
         self.str_globals = std::mem::take(&mut emit.str_globals);
         self.uses_panic |= emit.uses_panic;
         self.uses_alloc |= emit.uses_alloc;
+        self.gc_types = std::mem::take(&mut emit.gc_types);
         for e in std::mem::take(&mut emit.errors) {
             self.errors.push(format!("in `{}`: {e}", f.name));
         }
@@ -233,8 +288,9 @@ impl Emitter {
             "  func.func private @rok_runtime_init() -> ()\n  func.func private @rok_runtime_shutdown() -> ()\n",
         );
         self.out.push_str("  func.func @main() -> i32 {\n");
-        self.out
-            .push_str("    func.call @rok_runtime_init() : () -> ()\n");
+        self.out.push_str(
+            "    func.call @rok_runtime_init() : () -> ()\n    func.call @rok.register_types() : () -> ()\n",
+        );
         if matches!(user_ret_ty, MirTy::Unit) {
             let _ = writeln!(self.out, "    func.call @{user_main}() : () -> ()");
             self.out
@@ -303,6 +359,9 @@ struct FnEmit<'a> {
     /// `memref.alloca` — needed for aggregate types that the memref
     /// dialect can't hold (`!llvm.struct<...>`, `!llvm.ptr`).
     llvm_slot: HashSet<u32>,
+    /// One `llvm.alloca` per byte-array union type (keyed by its MLIR
+    /// type), the scratch memory aggregate payload bitcasts go through.
+    union_scratch: HashMap<String, String>,
     /// Set of locals that are block parameters (consumed as SSA values
     /// rather than stack-slotted).
     block_param_set: HashSet<u32>,
@@ -314,6 +373,13 @@ struct FnEmit<'a> {
     errors: Vec<String>,
     uses_panic: bool,
     uses_alloc: bool,
+    /// Lent `Emitter::gc_types`.
+    gc_types: Vec<MirTy>,
+    /// `(address of rok_tls_shadow_stack_top, caller's frame)` once this
+    /// function linked a shadow-stack frame; every return restores it.
+    gc_frame: Option<(String, String)>,
+    /// Root slot of each GC-holding block param, stored on block entry.
+    gc_param_slots: HashMap<u32, String>,
     /// Counter for the extra blocks runtime checks split off.
     next_check: u32,
     pkg: &'a str,
@@ -346,6 +412,7 @@ impl<'a> FnEmit<'a> {
             local_names,
             slot_names: vec![None; f.locals.len()],
             llvm_slot: HashSet::new(),
+            union_scratch: HashMap::new(),
             block_param_set,
             next_ssa: 0,
             fns,
@@ -353,6 +420,9 @@ impl<'a> FnEmit<'a> {
             errors: Vec::new(),
             uses_panic: false,
             uses_alloc: false,
+            gc_types: Vec::new(),
+            gc_frame: None,
+            gc_param_slots: HashMap::new(),
             next_check: 0,
             pkg,
             overflow_checks: true,
@@ -434,6 +504,45 @@ impl<'a> FnEmit<'a> {
                 );
             }
         }
+        // Scratch slots for aggregate payload bitcasts (allocated here,
+        // in the entry block, so a bitcast in a loop doesn't grow the
+        // stack).
+        for b in &self.f.blocks {
+            for st in &b.stmts {
+                let Statement::Assign {
+                    rvalue: RValue::Bitcast { from_ty, to_ty, .. },
+                    ..
+                } = st
+                else {
+                    continue;
+                };
+                let Some(union_ty) = [from_ty, to_ty]
+                    .into_iter()
+                    .find(|t| matches!(t, MirTy::Array(_, _)))
+                else {
+                    continue;
+                };
+                let ty = mlir_type(union_ty, self.pointer_width);
+                if self.union_scratch.contains_key(&ty) {
+                    continue;
+                }
+                let size = if let Some(s) = &alloca_size {
+                    s.clone()
+                } else {
+                    let s = self.fresh_value();
+                    let _ = writeln!(self.body, "    {s} = llvm.mlir.constant(1 : i32) : i32");
+                    alloca_size = Some(s.clone());
+                    s
+                };
+                let slot = self.fresh_value();
+                let _ = writeln!(
+                    self.body,
+                    "    {slot} = llvm.alloca {size} x {ty} : (i32) -> !llvm.ptr"
+                );
+                self.union_scratch.insert(ty, slot);
+            }
+        }
+        self.emit_gc_frame();
         // Seed each function-arg slot with the incoming SSA arg.
         for (i, p) in self.f.params.iter().enumerate() {
             let Some(slot) = self
@@ -456,6 +565,120 @@ impl<'a> FnEmit<'a> {
                     "    memref.store %arg{i}, {slot}[] : memref<{ty}>"
                 );
             }
+        }
+    }
+
+    /// Shadow-stack frame (704 §7.4.1) for a function that holds GC
+    /// references and calls something (only calls can collect). Layout
+    /// `{prev, count, slots[count]}`; each slot is the address of a word
+    /// that holds a GC reference: a `GcRef` leaf of a local's stack slot,
+    /// or of a block param's spill slot. The slots are zeroed here so the
+    /// collector never reads garbage, then the frame becomes this
+    /// thread's `rok_tls_shadow_stack_top`; every return restores it.
+    // ponytail: a dead local keeps its referent alive until overwritten
+    // or the function returns; liveness-based slot reuse is the upgrade.
+    fn emit_gc_frame(&mut self) {
+        let calls = self.f.blocks.iter().flat_map(|b| &b.stmts).any(|s| {
+            matches!(
+                s,
+                Statement::Assign {
+                    rvalue: RValue::Call { .. }
+                        | RValue::CallIndirect { .. }
+                        | RValue::HeapBox { .. },
+                    ..
+                }
+            )
+        });
+        if !calls {
+            return;
+        }
+        let pw = self.pointer_width;
+        let one = self.fresh_value();
+        let mut header = format!("    {one} = llvm.mlir.constant(1 : i32) : i32\n");
+        let mut roots = Vec::new();
+        for local in &self.f.locals {
+            let mut paths = Vec::new();
+            gc_paths(&local.ty, &mut Vec::new(), &mut paths);
+            if paths.is_empty() {
+                continue;
+            }
+            let id = local.id.0;
+            let ty = mlir_type(&local.ty, pw);
+            let slot = if self.is_block_param(local.id) {
+                let s = format!("%gp{id}");
+                let _ = writeln!(
+                    header,
+                    "    {s} = llvm.alloca {one} x {ty} : (i32) -> !llvm.ptr"
+                );
+                self.gc_param_slots.insert(id, s.clone());
+                s
+            } else if self.llvm_slot.contains(&id) {
+                self.slot_names[id as usize].clone().unwrap()
+            } else {
+                continue; // unslotted: never holds a value across a call
+            };
+            let zero = self.fresh_value();
+            let _ = writeln!(header, "    {zero} = llvm.mlir.zero : {ty}");
+            let _ = writeln!(header, "    llvm.store {zero}, {slot} : {ty}, !llvm.ptr");
+            for path in paths {
+                if path.is_empty() {
+                    roots.push(slot.clone());
+                    continue;
+                }
+                let a = self.fresh_value();
+                let idx = path
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = writeln!(
+                    header,
+                    "    {a} = llvm.getelementptr {slot}[0, {idx}] : (!llvm.ptr) -> !llvm.ptr, {ty}"
+                );
+                roots.push(a);
+            }
+        }
+        if roots.is_empty() {
+            return;
+        }
+        let n = roots.len();
+        let frame_ty = format!("!llvm.struct<(ptr, i{pw}, array<{n} x ptr>)>");
+        let [frame, tls, prev, count, f0, f1] = std::array::from_fn(|_| self.fresh_value());
+        let _ = write!(
+            header,
+            "    {frame} = llvm.alloca {one} x {frame_ty} : (i32) -> !llvm.ptr
+    {tls} = llvm.mlir.addressof @rok_tls_shadow_stack_top : !llvm.ptr
+    {prev} = llvm.load {tls} : !llvm.ptr -> !llvm.ptr
+    {f0} = llvm.getelementptr {frame}[0, 0] : (!llvm.ptr) -> !llvm.ptr, {frame_ty}
+    llvm.store {prev}, {f0} : !llvm.ptr, !llvm.ptr
+    {count} = llvm.mlir.constant({n} : i{pw}) : i{pw}
+    {f1} = llvm.getelementptr {frame}[0, 1] : (!llvm.ptr) -> !llvm.ptr, {frame_ty}
+    llvm.store {count}, {f1} : i{pw}, !llvm.ptr
+"
+        );
+        for (i, r) in roots.iter().enumerate() {
+            let a = self.fresh_value();
+            let _ = writeln!(
+                header,
+                "    {a} = llvm.getelementptr {frame}[0, 2, {i}] : (!llvm.ptr) -> !llvm.ptr, {frame_ty}"
+            );
+            let _ = writeln!(header, "    llvm.store {r}, {a} : !llvm.ptr, !llvm.ptr");
+        }
+        let _ = writeln!(
+            header,
+            "    llvm.store {frame}, {tls} : !llvm.ptr, !llvm.ptr"
+        );
+        self.body.push_str(&header);
+        self.gc_frame = Some((tls, prev));
+    }
+
+    /// Unlink this function's shadow-stack frame (before every return).
+    fn emit_gc_frame_pop(&mut self) {
+        if let Some((tls, prev)) = &self.gc_frame {
+            let _ = writeln!(
+                self.body,
+                "    llvm.store {prev}, {tls} : !llvm.ptr, !llvm.ptr"
+            );
         }
     }
 
@@ -538,6 +761,13 @@ impl<'a> FnEmit<'a> {
                 let _ = writeln!(self.body, "  ^bb{}:", b.id.0);
             } else {
                 let _ = writeln!(self.body, "  ^bb{}({}):", b.id.0, header_args.join(", "));
+            }
+            for p in &b.params {
+                if let Some(slot) = self.gc_param_slots.get(&p.0) {
+                    let v = self.local_names[p.0 as usize].clone().unwrap();
+                    let ty = mlir_type(&self.local_ty(*p), self.pointer_width);
+                    let _ = writeln!(self.body, "    llvm.store {v}, {slot} : {ty}, !llvm.ptr");
+                }
             }
         }
         for s in &b.stmts {
@@ -741,14 +971,14 @@ impl<'a> FnEmit<'a> {
             RValue::HeapBox { value, ty } => self.emit_heap_box(value, ty),
             RValue::HeapLoad { ptr, ty } => {
                 let pw = self.pointer_width;
-                let p = self.materialize_operand(ptr, &MirTy::Prim(PrimTy::Usize));
+                let p = self.materialize_operand(ptr, &MirTy::GcRef);
                 if self.inline_payload(ty) {
                     return self.bitcast_value(p, &MirTy::Prim(PrimTy::Usize), ty);
                 }
-                let addr = self.fresh_value();
+                let [obj, addr] = std::array::from_fn(|_| self.fresh_value());
                 let _ = writeln!(
                     self.body,
-                    "    {addr} = llvm.inttoptr {p} : i{pw} to !llvm.ptr"
+                    "    {obj} = llvm.inttoptr {p} : i{pw} to !llvm.ptr\n    {addr} = llvm.getelementptr {obj}[{HEADER_SIZE}] : (!llvm.ptr) -> !llvm.ptr, i8"
                 );
                 let dst = self.fresh_value();
                 let ty_str = mlir_type(ty, pw);
@@ -782,8 +1012,10 @@ impl<'a> FnEmit<'a> {
         matches!(ty, MirTy::Prim(p) if *p != PrimTy::Str && p.bit_width(self.pointer_width) <= self.pointer_width)
     }
 
-    /// `rok_alloc(sizeof ty, 8)` + store; the address as `usize`. Size
-    /// comes from the `gep null[1]` idiom so LLVM's layout decides it.
+    /// `rok_gc_alloc_slow(total_size, align, type_id)` + store of the
+    /// payload; the object's `GcRef`. The size is computed here, not by
+    /// the `gep null[1]` idiom: MLIR folds that under LLVM's default data
+    /// layout (`i64` 4-aligned), which undersizes objects for the target.
     fn emit_heap_box(&mut self, value: &Operand, ty: &MirTy) -> String {
         let pw = self.pointer_width;
         let v = self.materialize_operand(value, ty);
@@ -791,31 +1023,30 @@ impl<'a> FnEmit<'a> {
             return self.bitcast_value(v, ty, &MirTy::Prim(PrimTy::Usize));
         }
         let ty_str = mlir_type(ty, pw);
-        let [null, end, size, align, cell, addr] = std::array::from_fn(|_| self.fresh_value());
+        let index = self
+            .gc_types
+            .iter()
+            .position(|t| t == ty)
+            .unwrap_or_else(|| {
+                self.gc_types.push(ty.clone());
+                self.gc_types.len() - 1
+            });
+        let type_id = GC_TYPE_BASE + index as u32;
+        let (size, align) = gc_object_size(ty, pw);
+        let [total, align_v, tid, obj, addr, payload] = std::array::from_fn(|_| self.fresh_value());
         self.uses_alloc = true;
-        let _ = writeln!(self.body, "    {null} = llvm.mlir.zero : !llvm.ptr");
-        let _ = writeln!(
+        let _ = write!(
             self.body,
-            "    {end} = llvm.getelementptr {null}[1] : (!llvm.ptr) -> !llvm.ptr, {ty_str}"
+            "    {total} = arith.constant {size} : i{pw}
+    {align_v} = arith.constant {align} : i{pw}
+    {tid} = arith.constant {type_id} : i32
+    {obj} = func.call @rok_gc_alloc_slow({total}, {align_v}, {tid}) : (i{pw}, i{pw}, i32) -> i{pw}
+    {addr} = llvm.inttoptr {obj} : i{pw} to !llvm.ptr
+    {payload} = llvm.getelementptr {addr}[{HEADER_SIZE}] : (!llvm.ptr) -> !llvm.ptr, i8
+    llvm.store {v}, {payload} : {ty_str}, !llvm.ptr
+"
         );
-        let _ = writeln!(
-            self.body,
-            "    {size} = llvm.ptrtoint {end} : !llvm.ptr to i{pw}"
-        );
-        let _ = writeln!(self.body, "    {align} = arith.constant 8 : i{pw}");
-        let _ = writeln!(
-            self.body,
-            "    {cell} = func.call @rok_alloc({size}, {align}) : (i{pw}, i{pw}) -> i{pw}"
-        );
-        let _ = writeln!(
-            self.body,
-            "    {addr} = llvm.inttoptr {cell} : i{pw} to !llvm.ptr"
-        );
-        let _ = writeln!(
-            self.body,
-            "    llvm.store {v}, {addr} : {ty_str}, !llvm.ptr"
-        );
-        cell
+        obj
     }
 
     fn emit_fn_addr(&mut self, callee: FunctionId, fn_ty: &MirTy) -> String {
@@ -1062,8 +1293,20 @@ impl<'a> FnEmit<'a> {
     fn bitcast_value(&mut self, v: String, from_ty: &MirTy, to_ty: &MirTy) -> String {
         let pw = self.pointer_width;
         let (MirTy::Prim(fp), MirTy::Prim(tp)) = (from_ty, to_ty) else {
+            // Byte-array union: store as one type, load as the other.
             let (from, to) = (mlir_type(from_ty, pw), mlir_type(to_ty, pw));
-            return self.unsupported(&format!("payload of `{from}` stored as `{to}`"));
+            let scratch = self
+                .union_scratch
+                .get(&from)
+                .or_else(|| self.union_scratch.get(&to))
+                .cloned();
+            let Some(slot) = scratch else {
+                return self.unsupported(&format!("payload of `{from}` stored as `{to}`"));
+            };
+            let _ = writeln!(self.body, "    llvm.store {v}, {slot} : {from}, !llvm.ptr");
+            let n = self.fresh_value();
+            let _ = writeln!(self.body, "    {n} = llvm.load {slot} : !llvm.ptr -> {to}");
+            return n;
         };
         let width = |p: &PrimTy| {
             if *p == PrimTy::Bool {
@@ -1105,11 +1348,12 @@ impl<'a> FnEmit<'a> {
         v
     }
 
-    // Build a struct value by chaining `llvm.insertvalue` from `undef`.
+    // Build a struct value by chaining `llvm.insertvalue` from zero (not
+    // `undef`: a GC reference in an unset field must read as null).
     fn emit_struct_init(&mut self, ty: &MirTy, fields: &[Operand]) -> String {
         let ty_str = mlir_type(ty, self.pointer_width);
         let acc0 = self.fresh_value();
-        let _ = writeln!(self.body, "    {acc0} = llvm.mlir.undef : {ty_str}");
+        let _ = writeln!(self.body, "    {acc0} = llvm.mlir.zero : {ty_str}");
         let field_tys = struct_field_tys(ty);
         let mut acc = acc0;
         for (i, f) in fields.iter().enumerate() {
@@ -1469,7 +1713,7 @@ impl<'a> FnEmit<'a> {
                     _ => unreachable!(),
                 };
                 let lit = match dst_ty {
-                    MirTy::Any => ty.clone(),
+                    MirTy::Any | MirTy::GcRef => ty.clone(),
                     MirTy::Prim(p) if p.is_int() => ty.clone(),
                     MirTy::Prim(p) if p.is_float() => {
                         let f = format_float_decimal(as_f64);
@@ -1513,8 +1757,8 @@ impl<'a> FnEmit<'a> {
                 );
             }
             ConstVal::Unit | ConstVal::None => {
-                // For aggregate destinations, materialize an `undef`
-                // value; for primitives, a zero constant (also the unused
+                // For aggregate destinations, materialize a zero value
+                // (null GC references); for primitives, a zero constant (also the unused
                 // payload of a `throws` carrier). Unit really shouldn't
                 // reach codegen but a placeholder keeps the pipeline
                 // well-typed.
@@ -1522,7 +1766,7 @@ impl<'a> FnEmit<'a> {
                     dst_ty,
                     MirTy::Struct(_, _) | MirTy::Tuple(_) | MirTy::Sum(_) | MirTy::Array(_, _)
                 ) {
-                    let _ = writeln!(self.body, "    {dst} = llvm.mlir.undef : {ty}");
+                    let _ = writeln!(self.body, "    {dst} = llvm.mlir.zero : {ty}");
                 } else if matches!(dst_ty, MirTy::Fn(_, _) | MirTy::Prim(PrimTy::Str)) {
                     let _ = writeln!(self.body, "    {dst} = llvm.mlir.zero : !llvm.ptr");
                 } else {
@@ -1546,10 +1790,12 @@ impl<'a> FnEmit<'a> {
     fn emit_terminator(&mut self, t: &Terminator) {
         match t {
             Terminator::Return(None) => {
+                self.emit_gc_frame_pop();
                 self.body.push_str("    func.return\n");
             }
             Terminator::Return(Some(op)) => {
                 let val = self.materialize_operand(op, &self.f.ret_ty.clone());
+                self.emit_gc_frame_pop();
                 let ty = mlir_type(&self.f.ret_ty, self.pointer_width);
                 let _ = writeln!(self.body, "    func.return {val} : {ty}");
             }
@@ -1656,7 +1902,7 @@ fn mlir_type(ty: &MirTy, pointer_width: u32) -> String {
     match ty {
         MirTy::Unit => "()".to_owned(),
         MirTy::Prim(p) => mlir_prim(*p, pointer_width),
-        MirTy::Any => format!("i{pointer_width}"),
+        MirTy::Any | MirTy::GcRef => format!("i{pointer_width}"),
         MirTy::Sum(parts) => mlir_type(&rokc_mir::sum_layout(parts), pointer_width),
         MirTy::Tuple(parts) | MirTy::Struct(_, parts) => {
             let inner: Vec<String> = parts.iter().map(|t| mlir_type(t, pointer_width)).collect();
@@ -1795,7 +2041,94 @@ const fn is_llvm_storable(ty: &MirTy) -> bool {
             | MirTy::Sum(_)
             | MirTy::Prim(PrimTy::Str)
             | MirTy::Fn(_, _)
+            | MirTy::GcRef
     )
+}
+
+/// `insertvalue`-style index paths to every `GcRef` inside `ty`.
+fn gc_paths(ty: &MirTy, path: &mut Vec<u32>, out: &mut Vec<Vec<u32>>) {
+    let mut each = |i: u32, t: &MirTy, out: &mut Vec<Vec<u32>>| {
+        path.push(i);
+        gc_paths(t, path, out);
+        path.pop();
+    };
+    match ty {
+        MirTy::GcRef => out.push(path.clone()),
+        MirTy::Tuple(ps) | MirTy::Struct(_, ps) => {
+            for (i, t) in ps.iter().enumerate() {
+                each(i as u32, t, out);
+            }
+        }
+        MirTy::Array(t, n) => {
+            for i in 0..*n {
+                each(i, t, out);
+            }
+        }
+        MirTy::Sum(ps) => gc_paths(&rokc_mir::sum_layout(ps), path, out),
+        _ => {}
+    }
+}
+
+/// `(size, align)` in bytes of `ty` as lowered by `mlir_type`, under the
+/// C struct layout LLVM uses on every supported target.
+fn size_align(ty: &MirTy, pw: u32) -> (u32, u32) {
+    let word = (pw / 8, pw / 8);
+    match ty {
+        MirTy::Unit => (0, 1),
+        MirTy::Prim(p) => match p {
+            PrimTy::I8 | PrimTy::U8 | PrimTy::CChar | PrimTy::Bool => (1, 1),
+            PrimTy::I16 | PrimTy::U16 => (2, 2),
+            PrimTy::I32 | PrimTy::U32 | PrimTy::Char | PrimTy::F32 => (4, 4),
+            PrimTy::I64 | PrimTy::U64 | PrimTy::F64 => (8, 8),
+            PrimTy::Isize | PrimTy::Usize | PrimTy::Str => word,
+        },
+        MirTy::Any | MirTy::GcRef | MirTy::Fn(_, _) => word,
+        MirTy::Sum(ps) => size_align(&rokc_mir::sum_layout(ps), pw),
+        MirTy::Tuple(ps) | MirTy::Struct(_, ps) => {
+            let (mut size, mut align) = (0u32, 1);
+            for t in ps {
+                let (s, a) = size_align(t, pw);
+                size = size.next_multiple_of(a) + s;
+                align = align.max(a);
+            }
+            (size.next_multiple_of(align), align)
+        }
+        MirTy::Array(t, n) => {
+            let (s, a) = size_align(t, pw);
+            (s * n, a)
+        }
+    }
+}
+
+/// `(total_size, align)` of a GC object with a `ty` payload (801 §8.1.7).
+fn gc_object_size(ty: &MirTy, pw: u32) -> (u32, u32) {
+    let (size, align) = size_align(ty, pw);
+    let align = align.max(8);
+    (HEADER_SIZE + size.next_multiple_of(align), align)
+}
+
+/// Byte offsets of every `GcRef` inside a `ty` that starts at `at`.
+fn gc_offsets(ty: &MirTy, pw: u32, at: u32, out: &mut Vec<u32>) {
+    match ty {
+        MirTy::GcRef => out.push(at),
+        MirTy::Tuple(ps) | MirTy::Struct(_, ps) => {
+            let mut off = 0u32;
+            for t in ps {
+                let (s, a) = size_align(t, pw);
+                off = off.next_multiple_of(a);
+                gc_offsets(t, pw, at + off, out);
+                off += s;
+            }
+        }
+        MirTy::Array(t, n) => {
+            let s = size_align(t, pw).0;
+            for i in 0..*n {
+                gc_offsets(t, pw, at + i * s, out);
+            }
+        }
+        MirTy::Sum(ps) => gc_offsets(&rokc_mir::sum_layout(ps), pw, at, out),
+        _ => {}
+    }
 }
 
 fn struct_field_tys(ty: &MirTy) -> Vec<MirTy> {

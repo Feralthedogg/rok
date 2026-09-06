@@ -6,6 +6,8 @@
 //!   - `// expect-stdout: text` — single-line stdout, or an empty value
 //!     followed by `// line` comments for a multi-line block
 //!   - `// expect-error: text`  — build must fail and stderr must contain `text`
+//!   - `// expect-warning: text` — (repeatable) build stderr must contain `text`
+//!   - `// expect-stderr: text` — the run's stderr must contain `text`
 //!
 //! Environment:
 //!   - `ROK_REQUIRE_LLVM=1` — missing mlir-opt / mlir-translate / clang is a
@@ -129,6 +131,14 @@ pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec
     });
     out.sort_by_key(|(i, _)| *i);
     out.into_iter().map(|(_, r)| r).collect()
+}
+
+/// Values after `// <key>` on every matching line.
+pub fn directives<'a>(source: &'a str, key: &'a str) -> impl Iterator<Item = &'a str> {
+    source
+        .lines()
+        .filter_map(move |l| l.trim_start().strip_prefix("// ")?.strip_prefix(key))
+        .map(str::trim)
 }
 
 /// Value after `// <key>` on the first matching line.

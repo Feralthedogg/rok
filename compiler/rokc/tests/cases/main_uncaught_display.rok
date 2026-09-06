@@ -1,0 +1,21 @@
+// expect-exit: 1
+// expect-stdout: before
+// expect-stderr: error: `main` returned an uncaught error: not found
+
+// Spec 4.16.4: an error escaping a throwing `main` is printed through
+// its `Display` (here behind `any Error`), then exit status 1.
+struct NotFound { id: i32; }
+impl Display for NotFound { fn display(self) -> str { return "not found"; } }
+impl Debug for NotFound { fn debug(self) -> str { return "NotFound"; } }
+impl Error for NotFound {}
+
+fn find(x: i32) throws -> i32 {
+    if x > 10 { throw NotFound { id: x }; }
+    x
+}
+
+fn main() throws -> i32 {
+    rok_print_str("before");
+    let v = try find(3) + try find(40);
+    return v;
+}

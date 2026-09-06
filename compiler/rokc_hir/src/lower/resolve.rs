@@ -368,12 +368,11 @@ pub(super) fn resolve_ty_with_structs(
                     ));
                     return HirTy::Unknown;
                 }
-                let args: Vec<HirTy> = b
-                    .segments
-                    .last()
-                    .map(|s| s.generics.iter().map(rec).collect())
-                    .unwrap_or_default();
-                keys.push(bound_key(key, &args, structs, enums));
+                let (args, binds) = split_trait_args(
+                    b.segments.last().map_or(&[][..], |s| s.generics.as_slice()),
+                    rec,
+                );
+                keys.push(bound_key(key, &args, &binds, structs, enums));
             }
             keys.sort();
             keys.dedup();
@@ -389,10 +388,11 @@ pub(super) fn resolve_ty_with_structs(
 pub(super) fn bound_key(
     key: String,
     args: &[HirTy],
+    binds: &[(String, HirTy)],
     structs: &HashMap<String, StructId>,
     enums: &HashMap<String, EnumId>,
 ) -> String {
-    if args.is_empty() {
+    if args.is_empty() && binds.is_empty() {
         return key;
     }
     let name = |t: &HirTy| {
@@ -407,8 +407,58 @@ pub(super) fn bound_key(
         }
         .map_or_else(|| ty_mangle(t), Clone::clone)
     };
-    let args: Vec<String> = args.iter().map(name).collect();
-    format!("{key}<{}>", args.join(", "))
+    let mut binds = binds.to_vec();
+    binds.sort_by(|a, b| a.0.cmp(&b.0));
+    let parts: Vec<String> = args
+        .iter()
+        .map(name)
+        .chain(binds.iter().map(|(n, t)| format!("{n} = {}", name(t))))
+        .collect();
+    format!("{key}<{}>", parts.join(", "))
+}
+
+/// Every bound key an impl of trait `tn` with trait arguments `args`
+/// and associated types `assoc` answers: `Get`, `Get<i32>`,
+/// `Get<Item = u8>`, `Get<i32, Item = u8>`, ...
+pub(super) fn impl_bound_keys(
+    tn: &str,
+    args: &[HirTy],
+    assoc: &[(String, HirTy)],
+    structs: &HashMap<String, StructId>,
+    enums: &HashMap<String, EnumId>,
+) -> Vec<String> {
+    let mut keys = vec![tn.to_owned()];
+    // ponytail: every subset of the bindings — 2^n keys; fine for the
+    // one or two associated types traits have.
+    for mask in 0..1u32 << assoc.len().min(8) {
+        let binds: Vec<(String, HirTy)> = assoc
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| mask & (1 << i) != 0)
+            .map(|(_, b)| b.clone())
+            .collect();
+        for a in [args, &[]] {
+            keys.push(bound_key(tn.to_owned(), a, &binds, structs, enums));
+        }
+    }
+    keys
+}
+
+/// A trait path's generic arguments: positional ones and `Name = Ty`
+/// associated-type bindings, each resolved by `rec`.
+pub(super) fn split_trait_args(
+    generics: &[rokc_ast::Ty],
+    mut rec: impl FnMut(&rokc_ast::Ty) -> HirTy,
+) -> (Vec<HirTy>, Vec<(String, HirTy)>) {
+    let mut args = Vec::new();
+    let mut binds = Vec::new();
+    for g in generics {
+        match rokc_ast::as_assoc_binding(g) {
+            Some((n, t)) => binds.push((n.to_owned(), rec(t))),
+            None => args.push(rec(g)),
+        }
+    }
+    (args, binds)
 }
 
 /// Table key of a generic instantiation: `a::Pair` + `[i32, bool]` →

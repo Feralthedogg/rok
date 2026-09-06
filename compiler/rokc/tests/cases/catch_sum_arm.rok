@@ -1,0 +1,42 @@
+// expect-exit: 0
+// expect-stdout:
+// 10
+// 20
+// 3
+// 4
+// 30
+
+// `catch e: A | B` (spec 3.14.4): an arm whose type pattern names a
+// (sub-)sum of the error takes each of its variants, bound as the sum.
+enum A { X }
+enum B { Y }
+enum C { Z }
+
+fn load(x: i32) throws (A | B | C) -> i32 {
+    if x == 1 { throw A::X; }
+    if x == 2 { throw B::Y; }
+    if x == 3 { throw C::Z; }
+    x
+}
+
+fn which(e: A | B) -> i32 {
+    match e { a: A => 10, b: B => 20 }
+}
+
+fn f(x: i32) -> i32 {
+    try load(x) catch e: A | B { which(e) } catch _ { 3 }
+}
+
+// The whole error sum: the arm covers everything.
+fn g(x: i32) -> i32 {
+    try load(x) catch e: A | B | C { 30 }
+}
+
+fn main() -> i32 {
+    rok_print_i32(f(1));
+    rok_print_i32(f(2));
+    rok_print_i32(f(3));
+    rok_print_i32(f(4));
+    rok_print_i32(g(3));
+    return 0;
+}

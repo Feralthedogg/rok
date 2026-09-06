@@ -1,0 +1,19 @@
+// expect-exit: 6
+// expect-warning: this `try` covers no throwing call
+// expect-warning: no error reaches this `catch`
+// expect-warning: this `catch` arm never runs: no `B` error reaches it
+
+// Arms no error reaches still type-check (and are flagged); so is a
+// `try` that covers no throwing call.
+enum A { X }
+enum B { Y }
+
+fn pure(x: i32) -> i32 { x }
+fn load(x: i32) throws (A) -> i32 { if x == 1 { throw A::X; } x }
+
+fn main() -> i32 {
+    let a = try pure(1) catch e: A { 2 };
+    let b = try load(1) catch e: A { 3 } catch e: B { 4 };
+    let c = try load(2) catch _ { 0 };
+    return a + b + c;
+}

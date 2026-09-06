@@ -88,11 +88,34 @@ fn lower_fn(
         name: f.name.clone(),
         params,
         locals: builder.locals,
-        blocks: builder.blocks,
+        blocks: reachable_blocks(builder.blocks),
         param_tys,
         ret_ty: lower_ty_in(&f.ret_ty, module),
         span: f.span,
     }
+}
+
+/// Drop blocks no path from the entry reaches (e.g. `match` arms after
+/// a catch-all): MLIR's dialect conversion leaves their ops unconverted.
+fn reachable_blocks(blocks: Vec<BasicBlock>) -> Vec<BasicBlock> {
+    let mut seen = vec![false; blocks.len()];
+    let mut work = if blocks.is_empty() { vec![] } else { vec![0] };
+    while let Some(i) = work.pop() {
+        if std::mem::replace(&mut seen[i], true) {
+            continue;
+        }
+        match &blocks[i].terminator {
+            Terminator::Goto { target, .. } => work.push(target.0 as usize),
+            Terminator::If {
+                then_bb, else_bb, ..
+            } => work.extend([then_bb.0 as usize, else_bb.0 as usize]),
+            Terminator::Return(_) | Terminator::Unreachable => {}
+        }
+    }
+    blocks
+        .into_iter()
+        .filter(|b| seen[b.id.0 as usize])
+        .collect()
 }
 
 struct LoopFrame {
@@ -663,11 +686,11 @@ impl<'a> FnBuilder<'a> {
                     ty: IrPrimTy::I32,
                 });
                 // `any Tr` (D4): the payload is a heap copy of the value.
-                // ponytail: always boxed and never freed (no GC yet);
-                // inline values that fit a word once the GC lands.
+                // ponytail: always boxed; inline values that fit a word
+                // once `ANY_SLOT` tracing (802 §8.2.7) exists.
                 if let (HirTy::AnyTrait(_), Some(v)) = (sum_ty, value) {
                     let raw = self.lower_expr_to_operand(v);
-                    let ptr = self.fresh_local(MirTy::Prim(IrPrimTy::Usize));
+                    let ptr = self.fresh_local(MirTy::GcRef);
                     self.push_stmt(Statement::Assign {
                         target: ptr,
                         rvalue: RValue::HeapBox {
@@ -731,9 +754,10 @@ impl<'a> FnBuilder<'a> {
                     let raw = self.lower_expr_to_operand(arg);
                     self.payload_cast(raw, &lower_ty_in(&arg.ty, self.module), &payload_ty)
                 } else {
-                    // Multi-arg variant: pack the args into a tuple
-                    // matching the variant's wrapped payload type.
-                    let MirTy::Tuple(field_tys) = payload_ty.clone() else {
+                    // Multi-arg variant: pack the args into the variant's
+                    // own tuple, then move it into the shared slot.
+                    let variant_ty = self.variant_payload_ty(*enum_id, *variant_index);
+                    let MirTy::Tuple(field_tys) = variant_ty.clone() else {
                         return tag_op;
                     };
                     let field_ops: Vec<Operand> = args
@@ -744,15 +768,15 @@ impl<'a> FnBuilder<'a> {
                             self.cast_to(raw, &lower_ty_in(&a.ty, self.module), ft)
                         })
                         .collect();
-                    let tup = self.fresh_local(payload_ty.clone());
+                    let tup = self.fresh_local(variant_ty.clone());
                     self.push_stmt(Statement::Assign {
                         target: tup,
                         rvalue: RValue::StructInit {
-                            ty: payload_ty.clone(),
+                            ty: variant_ty.clone(),
                             fields: field_ops,
                         },
                     });
-                    Operand::Copy(tup)
+                    self.payload_cast(Operand::Copy(tup), &variant_ty, &payload_ty)
                 };
                 let enum_ty = MirTy::Tuple(vec![MirTy::Prim(IrPrimTy::I32), payload_ty]);
                 let dst = self.fresh_local(enum_ty.clone());
@@ -1278,6 +1302,15 @@ impl<'a> FnBuilder<'a> {
         Operand::Copy(dst)
     }
 
+    /// The MIR type of one enum variant's own payload (before it is
+    /// moved into the enum's shared slot).
+    fn variant_payload_ty(&self, enum_id: rokc_hir::EnumId, variant_index: u32) -> MirTy {
+        self.module.enums[enum_id.0 as usize].variants[variant_index as usize]
+            .payload_ty
+            .as_ref()
+            .map_or(MirTy::Unit, |t| lower_ty_in(t, self.module))
+    }
+
     /// Move a value into / out of a shared payload slot, keeping bits.
     fn payload_cast(&mut self, source: Operand, from_ty: &MirTy, to_ty: &MirTy) -> Operand {
         if from_ty == to_ty {
@@ -1360,7 +1393,11 @@ impl<'a> FnBuilder<'a> {
                 // alternatives — not yet supported.
                 let _ = alts;
             }
-            HirPattern::EnumVariant { args, .. } => {
+            HirPattern::EnumVariant {
+                enum_id,
+                variant_index,
+                args,
+            } => {
                 if args.is_empty() {
                     return;
                 }
@@ -1392,9 +1429,15 @@ impl<'a> FnBuilder<'a> {
                     }
                     return;
                 }
-                // Multi-arg variant: payload is a tuple. Bind each tuple
-                // field to the corresponding pattern arg.
-                let MirTy::Tuple(field_tys) = unified_ty else {
+                // Multi-arg variant: payload is the variant's tuple. Bind
+                // each tuple field to the corresponding pattern arg.
+                let variant_ty = self.variant_payload_ty(*enum_id, *variant_index);
+                let payload =
+                    match self.payload_cast(Operand::Copy(payload), &unified_ty, &variant_ty) {
+                        Operand::Copy(l) => l,
+                        Operand::Const(_) => return,
+                    };
+                let MirTy::Tuple(field_tys) = variant_ty else {
                     return;
                 };
                 if args.len() != field_tys.len() {

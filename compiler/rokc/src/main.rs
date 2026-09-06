@@ -214,6 +214,7 @@ fn compile(a: &Args) -> (CompileResult, PathBuf) {
         session.add_cfg(c.clone());
     }
     let result = session.compile_file(&input);
+    result.warnings.iter().for_each(report);
     if result.has_errors() {
         result.report_errors();
         process::exit(1);

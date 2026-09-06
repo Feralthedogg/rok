@@ -1,0 +1,42 @@
+// expect-exit: 0
+// expect-stdout:
+// 5
+// 107
+// 3
+// 9
+// 7
+// 42
+// 11
+
+// Path calls reach impls, concrete and generic: `Tr::m(x)` (Self from
+// the first argument, or the expected type), `Type::m(x)` through a
+// generic trait impl, `T::f()` on a type parameter, `i32::add(..)`.
+
+trait Show { fn show(self) -> i32; }
+trait Zero { fn zero() -> Self; }
+trait Num { fn num(self) -> i32; }
+
+struct Box<T> { v: T; }
+struct Meters { m: i32; }
+
+impl<T> Show for Box<T> { fn show(self) -> i32 { return 5; } }
+impl Show for Meters { fn show(self) -> i32 { return 100 + self.m; } }
+impl Zero for i32 { fn zero() -> i32 { return 3; } }
+impl Num for i32 { fn num(self) -> i32 { return self; } }
+impl<T: Num> Show for [T; 2] { fn show(self) -> i32 { return self[0].num() + self[1].num(); } }
+
+fn zero_of<T: Zero>() -> T { return T::zero(); }
+fn shown<T: Show>(x: T) -> i32 { return T::show(x); }
+
+fn main() -> i32 {
+    let b: Box<bool> = Box { v: true };
+    rok_print_i32(Show::show(b));
+    rok_print_i32(Show::show(Meters { m: 7 }));
+    let z: i32 = Zero::zero();
+    rok_print_i32(z);
+    rok_print_i32(Show::show([4, 5]));
+    rok_print_i32(Box::show(Box { v: 1 }) + 2);
+    rok_print_i32(zero_of() + 39);
+    rok_print_i32(i32::add(shown([1, 2]), 8));
+    return 0;
+}

@@ -1,0 +1,8 @@
+// spec: 002.02-any-slot
+// probe: negative-must-fail
+// expect-error: on an `any` value it dispatches only over primitive types
+
+// `any` 의 연산자 동적 디스패치는 원시 타입에 대해서만 한다.
+struct S { a: i32; }
+let v: any = 1;
+let w = v + S { a: 1 };

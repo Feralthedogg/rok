@@ -1,0 +1,46 @@
+// expect-exit: 0
+// expect-stdout:
+// 7
+// 3
+// 4
+// 11
+
+// Variants with differently shaped payloads (scalar, tuple, struct,
+// str) share one byte-array union slot (max size, max align).
+
+struct Point { x: i32; y: i32; }
+
+enum Shape {
+    Dot(i32),
+    Line(i32, i64),
+    At(Point),
+    Named(str),
+    Empty,
+}
+
+fn area(s: Shape) -> i64 {
+    return match s {
+        Shape::Dot(v) => v as i64,
+        Shape::Line(a, b) => a as i64 + b,
+        Shape::At(p) => (p.x * p.y) as i64,
+        Shape::Named(_) => 100i64,
+        Shape::Empty => 0i64,
+    };
+}
+
+fn main() -> i32 {
+    let shapes = [Shape::Dot(7), Shape::Line(1, 2i64), Shape::At(Point { x: 2, y: 2 }), Shape::Named("hi"), Shape::Empty];
+    for s in shapes {
+        let a = area(s);
+        if a < 100i64 && a > 0i64 { rok_print_i32(a as i32); }
+    }
+    let total = 0i64;
+    let i = 0;
+    while i < 2 {
+        let s = Shape::Line(i, 5i64);
+        total = total + area(s);
+        i = i + 1;
+    }
+    rok_print_i32(total as i32);
+    return 0;
+}

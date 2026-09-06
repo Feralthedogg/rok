@@ -1,0 +1,7 @@
+// spec: 002.02-any-slot
+// probe: negative-must-fail
+// expect-error: mismatched types: assignment to `v` expects `i32`, found `bool`
+
+// 좁힌 블록 안의 `v` 는 `i32` 이다 — 다른 타입을 대입하려면 좁히기 밖에서 한다.
+let v: any = 1;
+if v is i32 { v = true; }

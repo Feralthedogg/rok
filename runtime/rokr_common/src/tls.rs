@@ -7,10 +7,11 @@
 //! as an exported `thread_local` global (`@rok_tls_yield_flag`, ...).
 //! Stable Rust 1.85 `no_std` cannot define exported TLS symbols
 //! (`#[thread_local]` is unstable), so the block lives behind a pthread
-//! key and is reachable only through [`current`]. Inline safepoint polls
-//! and TLAB fast paths therefore cannot be emitted yet; they must call
-//! into the runtime. Upgrade path: per-target `global_asm!` `.tbss` /
-//! `__thread_vars` definitions, or `#[thread_local]` once stable.
+//! key and is reachable only through [`current`]. The one slot codegen
+//! already uses, `rok_tls_shadow_stack_top`, is a real TLS symbol
+//! defined in per-target assembly below ([`shadow_stack_top`]); its
+//! `TlsBlock` field is unused. Upgrade path for the other slots: the same
+//! `global_asm!`, or `#[thread_local]` once stable.
 
 use core::mem::{offset_of, size_of};
 use core::ptr;
@@ -144,4 +145,93 @@ pub fn thread_shutdown() {
 pub fn clear_yield() {
     // SAFETY: `current` never returns null.
     unsafe { (*current()).yield_flag.store(0, Ordering::Relaxed) };
+}
+
+// `rok_tls_shadow_stack_top` (803 §8.3.8, 704 §7.4.1): head of this
+// thread's shadow-stack frame chain, pushed / popped by compiled code.
+// Zero-initialized TLS, plus a hidden accessor returning its address so
+// the runtime can read it without `#[thread_local]`.
+#[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
+core::arch::global_asm!(
+    ".tbss _rok_tls_shadow_stack_top$tlv$init, 8, 3",
+    ".section __DATA,__thread_vars,thread_local_variables",
+    ".globl _rok_tls_shadow_stack_top",
+    "_rok_tls_shadow_stack_top:",
+    ".quad __tlv_bootstrap",
+    ".quad 0",
+    ".quad _rok_tls_shadow_stack_top$tlv$init",
+    ".text",
+    ".private_extern _rokr_tls_shadow_stack_top_addr",
+    ".globl _rokr_tls_shadow_stack_top_addr",
+    ".p2align 2",
+    "_rokr_tls_shadow_stack_top_addr:",
+    "adrp x0, _rok_tls_shadow_stack_top@TLVPPAGE",
+    "ldr x0, [x0, _rok_tls_shadow_stack_top@TLVPPAGEOFF]",
+    "ldr x16, [x0]",
+    "br x16", // tail-call the TLV thunk: it returns the address in x0
+);
+#[cfg(all(target_vendor = "apple", target_arch = "x86_64"))]
+core::arch::global_asm!(
+    ".tbss _rok_tls_shadow_stack_top$tlv$init, 8, 3",
+    ".section __DATA,__thread_vars,thread_local_variables",
+    ".globl _rok_tls_shadow_stack_top",
+    "_rok_tls_shadow_stack_top:",
+    ".quad __tlv_bootstrap",
+    ".quad 0",
+    ".quad _rok_tls_shadow_stack_top$tlv$init",
+    ".text",
+    ".private_extern _rokr_tls_shadow_stack_top_addr",
+    ".globl _rokr_tls_shadow_stack_top_addr",
+    "_rokr_tls_shadow_stack_top_addr:",
+    "mov rdi, qword ptr [rip + _rok_tls_shadow_stack_top@TLVP]",
+    "jmp qword ptr [rdi]",
+);
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+core::arch::global_asm!(
+    ".pushsection .tbss,\"awT\",@nobits",
+    ".p2align 3",
+    ".globl rok_tls_shadow_stack_top",
+    ".type rok_tls_shadow_stack_top,@object",
+    ".size rok_tls_shadow_stack_top,8",
+    "rok_tls_shadow_stack_top:",
+    ".zero 8",
+    ".popsection",
+    ".globl rokr_tls_shadow_stack_top_addr",
+    ".hidden rokr_tls_shadow_stack_top_addr",
+    ".type rokr_tls_shadow_stack_top_addr,@function",
+    "rokr_tls_shadow_stack_top_addr:",
+    #[cfg(target_arch = "x86_64")]
+    "mov rax, qword ptr fs:[0]",
+    #[cfg(target_arch = "x86_64")]
+    "add rax, qword ptr [rip + rok_tls_shadow_stack_top@GOTTPOFF]",
+    // Local-exec: the runtime is always linked into the executable.
+    #[cfg(target_arch = "aarch64")]
+    "mrs x0, tpidr_el0",
+    #[cfg(target_arch = "aarch64")]
+    "add x0, x0, :tprel_hi12:rok_tls_shadow_stack_top",
+    #[cfg(target_arch = "aarch64")]
+    "add x0, x0, :tprel_lo12_nc:rok_tls_shadow_stack_top",
+    "ret",
+);
+#[cfg(not(any(
+    target_vendor = "apple",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+)))]
+compile_error!("rokr: no `rok_tls_shadow_stack_top` definition for this target");
+
+unsafe extern "C" {
+    fn rokr_tls_shadow_stack_top_addr() -> *mut *mut u8;
+}
+
+/// Address of this thread's `rok_tls_shadow_stack_top`.
+pub fn shadow_stack_top() -> *mut *mut u8 {
+    // SAFETY: the assembly above takes no arguments and only returns the
+    // address of this thread's TLS slot.
+    unsafe { rokr_tls_shadow_stack_top_addr() }
 }

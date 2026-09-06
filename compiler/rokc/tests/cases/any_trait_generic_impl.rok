@@ -1,0 +1,26 @@
+// expect-exit: 0
+// expect-stdout:
+// 7
+// 12
+// 3
+// 40
+
+// D4: a type that implements the trait only through a generic impl
+// (`impl<T> Tr for Box<T>`, blanket `impl<T: Big> Tr for T`) can be
+// stored in `any Tr`; dispatch covers every type actually stored.
+trait Size { fn size(self) -> i32; }
+trait Big { fn big(self) -> i32; }
+struct Box<T> { v: T; }
+struct Sq { s: i32; }
+impl<T> Size for Box<T> { fn size(self) -> i32 { return 7; } }
+impl Big for Sq { fn big(self) -> i32 { return self.s * 10; } }
+impl<T: Big> Size for T { fn size(self) -> i32 { return self.big() + 2; } }
+impl Size for i32 { fn size(self) -> i32 { return self; } }
+
+fn show(x: any Size) -> i32 { return x.size(); }
+
+rok_print_i32(show(Box { v: 1 }));
+let s: any Size = Box { v: true };
+rok_print_i32(show(Sq { s: 1 }));
+rok_print_i32(show(3));
+rok_print_i32(s.size() + 33);

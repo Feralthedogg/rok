@@ -1062,6 +1062,16 @@ impl<'a> Parser<'a> {
         let mut variants = Vec::new();
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
             let v_attrs = self.parse_outer_attrs();
+            // Spec 5.6.9: variants take the enum's visibility.
+            if matches!(self.peek(), TokenKind::Pub) {
+                let s = self.peek_span();
+                self.error(
+                    s,
+                    "enum variants take the enum's visibility; remove the visibility \
+                     keyword (spec 5.6.9)",
+                );
+                self.parse_visibility();
+            }
             let v_span = self.peek_span();
             let v_name = if let TokenKind::Ident(n) = self.peek().clone() {
                 self.bump();
@@ -1930,11 +1940,23 @@ impl<'a> Parser<'a> {
                     TokenKind::Eof | TokenKind::Shr | TokenKind::GtEq | TokenKind::ShrEq
                 )
             {
+                // `Name = Ty`: an associated-type binding (spec 2.1).
+                let binding = match (p.peek().clone(), p.tokens.get(p.pos + 1).map(|t| &t.kind)) {
+                    (TokenKind::Ident(name), Some(TokenKind::Eq)) => {
+                        p.bump();
+                        p.bump();
+                        Some(name)
+                    }
+                    _ => None,
+                };
                 let Some(t) = p.parse_type() else {
                     ok = false;
                     break;
                 };
-                tys.push(t);
+                tys.push(match binding {
+                    Some(name) => rokc_ast::assoc_binding(&name, t),
+                    None => t,
+                });
                 if !p.eat(&TokenKind::Comma) {
                     break;
                 }
@@ -3919,8 +3941,12 @@ impl<'a> Parser<'a> {
                 PatternKind::Tuple(subs)
             }
             TokenKind::Ident(_) => {
-                // Multi-segment path → enum variant pattern.
-                if matches!(self.peek_next(), Some(TokenKind::ColonColon)) {
+                // Multi-segment path, or `Name(..)` (an imported variant
+                // such as `Ok(v)`) → enum variant pattern.
+                if matches!(
+                    self.peek_next(),
+                    Some(TokenKind::ColonColon | TokenKind::LParen)
+                ) {
                     let path = self.parse_path()?;
                     // Not where a block follows (`catch E::V { body }`).
                     if self.struct_expr_allowed && matches!(self.peek(), TokenKind::LBrace) {

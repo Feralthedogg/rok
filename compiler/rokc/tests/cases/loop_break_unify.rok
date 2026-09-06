@@ -1,0 +1,49 @@
+// expect-exit: 0
+// expect-stdout:
+// 3
+// 100
+// 7
+// 2
+
+// Every `break` value of a loop / labelled block has one type: the
+// annotated slot's, else the first `break`'s (D1, like `if` / `match`).
+
+fn find(xs: [i32; 4], want: i32) -> i64 {
+    let i = 0;
+    return loop {
+        if i == 4 { break -1; }          // literal takes the slot type i64
+        if xs[i] == want { break i as i64; }
+        i = i + 1;
+    };
+}
+
+fn main() -> i32 {
+    rok_print_i32(find([4, 5, 6, 7], 7) as i32);
+    // Annotated: both arms coerce into the sum slot.
+    let n = 0;
+    let v: i32 | bool = loop {
+        n = n + 1;
+        if n > 5 { break true; }
+        if n == 3 { break 100; }
+    };
+    match v {
+        x: i32 => rok_print_i32(x),
+        b: bool => rok_print_i32(0),
+    }
+    // Unannotated: the first break fixes the type.
+    let k = 'outer: {
+        if n == 3 { break 'outer 7; }
+        break 'outer 8;
+    };
+    rok_print_i32(k);
+    let m = loop {
+        let j = 0;
+        loop {
+            j = j + 1;
+            if j == 2 { break; }
+        }
+        break j;
+    };
+    rok_print_i32(m);
+    return 0;
+}

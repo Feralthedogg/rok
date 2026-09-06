@@ -1,0 +1,20 @@
+// expect-exit: 0
+// expect-stdout:
+// 2
+// 20
+// 1
+
+// `any Shape` widens to `any Named` when `Shape: Named` (transitively).
+trait Named { fn id(self) -> i32; }
+trait Shape: Named { fn area(self) -> i32; }
+trait Solid: Shape { fn vol(self) -> i32; }
+struct Sq { s: i32; }
+impl Named for Sq { fn id(self) -> i32 { return 1; } }
+impl Shape for Sq { fn area(self) -> i32 { return self.s * self.s; } }
+impl Solid for Sq { fn vol(self) -> i32 { return self.s * 10; } }
+fn name(n: any Named) -> i32 { return n.id(); }
+let s: any Solid = Sq { s: 2 };
+let sh: any Shape = s;
+rok_print_i32(sh.area() / 2);
+rok_print_i32(s.vol() * 2 / 2);
+rok_print_i32(name(s));

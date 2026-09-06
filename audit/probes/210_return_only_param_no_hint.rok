@@ -1,0 +1,13 @@
+// spec: 002.10-generics-inference
+// probe: negative-must-fail
+// expect-error: cannot infer type parameter `E`
+
+// A type parameter that appears only in the return type needs an
+// expected type (annotation / parameter slot / return); with none it
+// cannot be inferred.
+fn wrap<E>(v: i32) -> Result<i32, E> { return Result::Ok(v); }
+
+fn main() -> i32 {
+    let r = wrap(3);
+    return 0;
+}

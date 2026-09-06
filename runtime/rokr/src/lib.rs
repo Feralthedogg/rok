@@ -9,14 +9,17 @@
 //!
 //! Not implemented yet (calls hit [`unimplemented`] → fatal, exit 101):
 //! scheduler (007-runtime/706, 707), coroutines (708), threads (805
-//! §8.5.4). Immix GC (703–705) is replaced by a leaking malloc stand-in.
+//! §8.5.4). Immix GC (703–705) is replaced by a malloc-backed mark-sweep
+//! (`rokr_gc`).
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
 
 use core::ptr;
 
-use rokr_common::object_header::{HEADER_ALIGN, HEADER_SIZE, ObjectHeader};
+use core::sync::atomic::Ordering;
+
+use rokr_common::object_header::{FLAG_PINNED, HEADER_ALIGN, ObjectHeader};
 use rokr_common::{fatal, tls, write_stderr};
 
 /// Rust panic inside the runtime = inconsistent runtime state. Report
@@ -80,10 +83,8 @@ fn unimplemented(what: &[u8]) -> ! {
 // 8.5.1 GC
 // ---------------------------------------------------------------------
 
-/// malloc-backed allocation shared by `rok_gc_alloc_slow` / `rok_alloc`.
+/// malloc-backed allocation for `rok_alloc` (manual, never collected).
 /// Fatal on non-power-of-two `align`, size overflow, or OOM; never null.
-/// ponytail: leaks forever (no GC); replaced by Immix TLAB + LOS
-/// (702, 703) when the collector lands.
 fn raw_alloc(size: usize, align: usize) -> *mut u8 {
     if !align.is_power_of_two() {
         fatal(b"rok runtime: allocation align is not a power of two");
@@ -109,46 +110,77 @@ fn raw_alloc(size: usize, align: usize) -> *mut u8 {
     p.cast()
 }
 
-/// Slow-path GC allocation (702 §7.2.3, 805 §8.5.1). `size` includes the
-/// 16-byte header. Returns a pointer to the initialized header; never
-/// null (OOM is fatal).
+/// GC allocation (702 §7.2.3, 805 §8.5.1).
+///
+/// `size` includes the 16-byte
+/// header. Returns a pointer to the initialized header with a zeroed
+/// payload; never null (OOM is fatal). May run a collection first, so
+/// every live GC reference of the caller must be rooted.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_gc_alloc_slow(size: usize, align: usize, type_id: u32) -> *mut u8 {
-    if size < HEADER_SIZE {
-        fatal(b"rok_gc_alloc_slow: size smaller than the object header");
-    }
-    // Raise to the header's 8-byte alignment; a bad `align` (0, 3, ...)
-    // is passed through unchanged so `raw_alloc` rejects it.
-    let align = if align.is_power_of_two() {
-        align.max(HEADER_ALIGN)
-    } else {
-        align
-    };
-    let p = raw_alloc(size, align);
-    // SAFETY: `p` is a fresh allocation of >= 16 bytes, >= 8-aligned.
-    unsafe { ObjectHeader::init(p, type_id) };
-    p
+    rokr_gc::alloc(size, align, type_id)
 }
 
-// No GC → no remembered set to log into.
+// Mark-sweep is neither generational nor incremental: nothing to log.
+// Kept callable for codegen that already emits barriers (8.9.10).
 #[unsafe(no_mangle)]
 pub const extern "C" fn rok_gc_wb_slow(_obj: *mut u8) {}
 
-// No GC → nothing scans, scan tables are unused (802).
+/// # Safety
+/// `scan_table` must be a valid 802 `ScanTable` that lives for the rest
+/// of the process.
 #[unsafe(no_mangle)]
-pub const extern "C" fn rok_gc_register_type(_type_id: u32, _scan_table: *const u8) {}
+pub unsafe extern "C" fn rok_gc_register_type(type_id: u32, scan_table: *const u8) {
+    rokr_gc::register_type(type_id, scan_table);
+}
 
-// Nothing moves without a collector, so pin is identity.
+/// Non-moving collector: pinning only keeps the object (and what it
+/// references) alive until `rok_gc_unpin`.
+///
+/// # Safety
+/// `obj` must be a live GC object.
 #[unsafe(no_mangle)]
-pub const extern "C" fn rok_gc_pin(obj: *mut u8) -> *mut u8 {
+#[allow(clippy::cast_ptr_alignment)] // GC objects are 8-aligned
+pub unsafe extern "C" fn rok_gc_pin(obj: *mut u8) -> *mut u8 {
+    // SAFETY: caller contract.
+    unsafe {
+        (*obj.cast::<ObjectHeader>())
+            .gc_flags
+            .fetch_or(FLAG_PINNED, Ordering::Relaxed)
+    };
     obj
 }
 
+/// # Safety
+/// `obj` must be a live GC object.
 #[unsafe(no_mangle)]
-pub const extern "C" fn rok_gc_unpin(_obj: *mut u8) {}
+#[allow(clippy::cast_ptr_alignment)] // GC objects are 8-aligned
+pub unsafe extern "C" fn rok_gc_unpin(obj: *mut u8) {
+    // SAFETY: caller contract.
+    unsafe {
+        (*obj.cast::<ObjectHeader>())
+            .gc_flags
+            .fetch_and(!FLAG_PINNED, Ordering::Relaxed)
+    };
+}
 
 #[unsafe(no_mangle)]
-pub const extern "C" fn rok_gc_collect() {}
+pub extern "C" fn rok_gc_collect() {
+    rokr_gc::collect();
+}
+
+/// Bytes held by not-yet-swept GC objects, headers included (tests,
+/// diagnostics; no ABI stability).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_gc_stats_live_bytes() -> usize {
+    rokr_gc::live_bytes()
+}
+
+/// Number of completed collections (tests, diagnostics).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_gc_stats_collections() -> u64 {
+    rokr_gc::collections()
+}
 
 // ---------------------------------------------------------------------
 // 8.5.2 Runtime
@@ -288,16 +320,22 @@ pub extern "C" fn rok_timer_register(_deadline_ns: u64, _waker: *mut u8) {
 // an `is_err` flag with its payload) and need no runtime support. Only
 // an error escaping a throwing `main` reaches the runtime.
 
-/// Uncaught error out of `fn main() throws (..)` (spec 4.16.4): `msg` +
-/// `\n` to stderr, then exit status 1 (not 101: this is not a panic).
+/// Uncaught error out of `fn main() throws (..)` (spec 4.16.4).
+///
+/// Writes `what` (the error's `Display` / `Debug` / type name, as the
+/// compiler chose) to stderr after a fixed prefix, then exits with
+/// status 1 (not 101: this is not a panic).
 ///
 /// # Safety
-/// `msg` must be valid for reads of `msg_len` bytes.
+/// `what` must be null or a NUL-terminated string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rok_uncaught_error(msg: *const u8, msg_len: usize) -> ! {
+pub unsafe extern "C" fn rok_uncaught_error(what: *const u8) -> ! {
+    const PREFIX: &[u8] = b"error: `main` returned an uncaught error: ";
+    let what = or_empty(what);
     // SAFETY: caller contract; `exit` flushes buffered stdout.
     unsafe {
-        write_stderr(msg, msg_len);
+        write_stderr(PREFIX.as_ptr(), PREFIX.len());
+        write_stderr(what.cast(), libc::strlen(what));
         write_stderr(b"\n".as_ptr(), 1);
         libc::exit(1)
     }
@@ -512,7 +550,7 @@ pub unsafe extern "C" fn rok_str_eq(a: *const u8, b: *const u8) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::sync::atomic::{AtomicI64, Ordering};
+    use core::sync::atomic::AtomicI64;
 
     #[test]
     #[allow(clippy::cast_ptr_alignment)] // asserted 64-aligned below

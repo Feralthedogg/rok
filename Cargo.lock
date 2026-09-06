@@ -137,6 +137,7 @@ dependencies = [
 name = "rokr_gc"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "rokr_common",
 ]
 

@@ -11,10 +11,8 @@ pub fn lower_ty(ty: &HirTy) -> MirTy {
         HirTy::Unknown | HirTy::Path(_) | HirTy::Any => MirTy::Any,
         HirTy::Unit => MirTy::Unit,
         HirTy::Prim(p) => MirTy::Prim(*p),
-        // `any Tr`: `(i32 tag, usize heap pointer)`.
-        HirTy::AnyTrait(_) => {
-            MirTy::Tuple(vec![MirTy::Prim(PrimTy::I32), MirTy::Prim(PrimTy::Usize)])
-        }
+        // `any Tr`: `(i32 tag, GC pointer to the boxed value)`.
+        HirTy::AnyTrait(_) => MirTy::Tuple(vec![MirTy::Prim(PrimTy::I32), MirTy::GcRef]),
         HirTy::Sum(parts) => sum_layout(&non_none(parts).map(lower_ty).collect::<Vec<_>>()),
         HirTy::Tuple(parts) => MirTy::Tuple(parts.iter().map(lower_ty).collect()),
         // Struct types need the field shape; this stub only allocates
@@ -115,30 +113,83 @@ pub fn sum_layout(payloads: &[MirTy]) -> MirTy {
 
 /// Payload slot able to hold every variant. Identical payloads share
 /// their type; differing scalar payloads share an unsigned integer as
-/// wide as the widest one, written / read through `RValue::Bitcast`.
-/// Other mixes (aggregate vs scalar, two different aggregates) have no
-/// layout yet → `None`.
-// ponytail: scalar-only union; aggregate unions need byte-array storage
-// with max size/align once MIR grows memory-backed values.
+/// wide as the widest one; any other mix (aggregates, `str`) shares a
+/// byte-array union `[uN; k]` with the max size and max align (N bits
+/// = max align). Both are written / read through `RValue::Bitcast`.
 #[must_use]
 pub fn unify_payload(payloads: &[MirTy]) -> Option<MirTy> {
     let first = payloads.first()?;
     if payloads.iter().all(|p| p == first) {
         return Some(first.clone());
     }
-    let mut bits = 0;
-    for p in payloads {
-        match p {
-            MirTy::Prim(q) if !matches!(q, PrimTy::Str) => bits = bits.max(q.bit_width(64)),
-            _ => return None,
+    let uint = |bytes: u32| {
+        MirTy::Prim(match bytes {
+            1 => PrimTy::U8,
+            2 => PrimTy::U16,
+            4 => PrimTy::U32,
+            _ => PrimTy::U64,
+        })
+    };
+    if payloads
+        .iter()
+        .all(|p| matches!(p, MirTy::Prim(q) if *q != PrimTy::Str))
+    {
+        let bytes = payloads.iter().map(|p| size_align(p).0).max()?;
+        return Some(uint(bytes.max(1)));
+    }
+    let (size, align) = payloads
+        .iter()
+        .map(size_align)
+        .fold((0, 1), |(s, a), (ps, pa)| (s.max(ps), a.max(pa)));
+    // A union that can hold a GC reference is all `GcRef` words (a
+    // `GcRef` is word-aligned, so it always lands on one), so the
+    // collector sees it; non-reference bits there are ignored by it.
+    let elem = if payloads.iter().any(has_gc_ref) {
+        MirTy::GcRef
+    } else {
+        uint(align)
+    };
+    Some(MirTy::Array(Box::new(elem), size.div_ceil(align)))
+}
+
+fn has_gc_ref(ty: &MirTy) -> bool {
+    match ty {
+        MirTy::GcRef => true,
+        MirTy::Tuple(ps) | MirTy::Struct(_, ps) => ps.iter().any(has_gc_ref),
+        MirTy::Array(t, _) => has_gc_ref(t),
+        MirTy::Sum(ps) => has_gc_ref(&sum_layout(ps)),
+        _ => false,
+    }
+}
+
+/// `(size, align)` in bytes under the C / LLVM default layout of a
+/// 64-bit target.
+// ponytail: 64-bit pointers assumed (MIR doesn't know the target);
+// thread the pointer width through once a 32-bit target exists.
+#[must_use]
+pub fn size_align(ty: &MirTy) -> (u32, u32) {
+    match ty {
+        MirTy::Unit => (0, 1),
+        MirTy::Any | MirTy::GcRef | MirTy::Fn(_, _) | MirTy::Prim(PrimTy::Str) => (8, 8),
+        MirTy::Prim(p) => {
+            let b = p.bit_width(64) / 8;
+            (b, b)
+        }
+        MirTy::Sum(parts) => size_align(&sum_layout(parts)),
+        MirTy::Array(elem, n) => {
+            let (s, a) = size_align(elem);
+            (s * n, a)
+        }
+        MirTy::Tuple(fields) | MirTy::Struct(_, fields) => {
+            let (mut size, mut align) = (0u32, 1u32);
+            for f in fields {
+                let (s, a) = size_align(f);
+                size = size.next_multiple_of(a) + s;
+                align = align.max(a);
+            }
+            (size.next_multiple_of(align), align)
         }
     }
-    Some(MirTy::Prim(match bits {
-        8 => PrimTy::U8,
-        16 => PrimTy::U16,
-        32 => PrimTy::U32,
-        _ => PrimTy::U64,
-    }))
 }
 
 fn enum_payloads(variants: &[rokc_hir::HirEnumVariant], module: &HirModule) -> Vec<MirTy> {
@@ -159,18 +210,4 @@ pub fn enum_payload_ty(id: rokc_hir::EnumId, module: &HirModule) -> Option<MirTy
         MirTy::Tuple(mut parts) => parts.pop(),
         _ => None,
     }
-}
-
-/// Enums whose variant payloads have no shared layout (see
-/// `unify_payload`), as `(name, payload types)`.
-#[must_use]
-pub fn enums_without_layout(module: &HirModule) -> Vec<(String, Vec<MirTy>)> {
-    module
-        .enums
-        .iter()
-        .filter_map(|e| {
-            let ps = enum_payloads(&e.variants, module);
-            (!ps.is_empty() && unify_payload(&ps).is_none()).then(|| (e.name.clone(), ps))
-        })
-        .collect()
 }

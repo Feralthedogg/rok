@@ -136,8 +136,20 @@ pub fn lower_full(
             }
         }
     }
+    // `Enum::Variant` keys, so `use E::{A}` / `use E::*` (and the
+    // implicit `rok::core::**`) can bring variants in bare.
+    let variants: std::collections::HashSet<String> = program
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            Item::Enum(e) => Some(e),
+            _ => None,
+        })
+        .flat_map(|e| e.variants.iter().map(|v| format!("{}::{}", e.name, v.name)))
+        .collect();
     let names = TypeNames {
         names: type_set,
+        variants,
         traits,
         reexports: type_reexports,
         visibility: type_vis,
@@ -429,6 +441,7 @@ pub fn lower_full(
     let mut decls: Vec<MethodOrFn<'_>> = Vec::new();
     let mut generic_fns: HashMap<String, &FnDef> = HashMap::new();
     let mut generic_methods: HashMap<(String, String), GenericMethod> = HashMap::new();
+    let mut generic_trait_impls: Vec<GenericTraitImpl> = Vec::new();
     let sig_of = |fn_def: &FnDef, id: FunctionId, self_ty: Option<&HirTy>, sc: Scope<'_>| {
         let resolve = |t: &Ty| {
             let mut r = resolve_ty_with_structs(t, &struct_table, &enum_table, sc);
@@ -554,30 +567,38 @@ pub fn lower_full(
                     rokc_ast::GenericParam::Const { .. } => None,
                 })
                 .collect();
-            let mentioning = |names: &[&str]| -> Vec<String> {
-                fns()
-                    .filter(|m| {
-                        std::iter::once(sig_ret_ast(m))
-                            .chain(
-                                m.params
-                                    .iter()
-                                    .filter(|p| p.name != "self")
-                                    .filter_map(|p| p.ty.clone()),
-                            )
-                            .any(|ty| ast_ty_mentions(&ty, names))
-                    })
-                    .map(|m| leaf_name(&m.name).to_owned())
-                    .collect()
-            };
-            let self_methods = mentioning(&["Self"]);
-            let param_methods = mentioning(&params);
+            let assoc: Vec<&str> = t
+                .items
+                .iter()
+                .filter_map(|i| match i {
+                    rokc_ast::TraitItem::AssocType { name, .. } => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let needs = fns()
+                .map(|m| {
+                    let mut out = Vec::new();
+                    for ty in std::iter::once(sig_ret_ast(m)).chain(
+                        m.params
+                            .iter()
+                            .filter(|p| p.name != "self")
+                            .filter_map(|p| p.ty.clone()),
+                    ) {
+                        ast_ty_needs(&ty, &params, &assoc, &mut out);
+                    }
+                    (leaf_name(&m.name).to_owned(), out)
+                })
+                .collect();
             (
                 name.clone(),
                 TraitInfo {
                     methods,
                     supers,
-                    self_methods,
-                    param_methods,
+                    needs,
+                    decls: fns()
+                        .map(|m| (leaf_name(&m.name).to_owned(), m.clone()))
+                        .collect(),
+                    module,
                 },
             )
         })
@@ -593,19 +614,16 @@ pub fn lower_full(
         };
         let impl_generic = !impl_def.generics.params.is_empty();
         if let (true, Some(tp)) = (impl_generic, &impl_def.trait_path) {
-            // ponytail: generic trait impls need per-instantiation
-            // `impl_traits` entries and trait-method dispatch through
-            // `generic_methods`; add when the stdlib needs one.
-            let tr: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
-            err(
+            let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
+            let trait_key = names.trait_key(&segs, &module);
+            generic_trait_impls.push(generic_trait_impl(
+                impl_def,
+                trait_key.clone(),
+                trait_defs.get(&trait_key).copied(),
+                &module,
+                generic_trait_impls.len(),
                 &mut pre_diags,
-                format!(
-                    "generic trait impl `impl<..> {} for {}` is not implemented yet \
-                     (stage-1 limitation — only inherent generic impls are supported)",
-                    tr.join("::"),
-                    impl_def_display(&impl_def.self_ty)
-                ),
-            );
+            ));
             continue;
         }
         // Inherent methods of a generic impl (and generic methods of a
@@ -643,25 +661,26 @@ pub fn lower_full(
             names.trait_key(&segs, &module)
         });
         if let (Some(tn), Some(target_key)) = (&trait_name, target.clone()) {
-            // `impl Index<i32> for T` also answers `any Index<i32>`.
+            // `impl Get<i32> for T { type Item = u8; }` also answers
+            // `Get<i32>`, `Get<Item = u8>` and `Get<i32, Item = u8>`.
+            let rty = |g: &rokc_ast::Ty| resolve_ty_with_structs(g, &struct_table, &enum_table, sc);
             let args: Vec<HirTy> = impl_def
                 .trait_path
                 .as_ref()
                 .and_then(|tp| tp.segments.last())
-                .map(|s| {
-                    s.generics
-                        .iter()
-                        .map(|g| resolve_ty_with_structs(g, &struct_table, &enum_table, sc))
-                        .collect()
-                })
+                .map(|s| s.generics.iter().map(rty).collect())
                 .unwrap_or_default();
-            if !args.is_empty() {
-                impl_traits.insert((
-                    target_key.clone(),
-                    bound_key(tn.clone(), &args, &struct_table, &enum_table),
-                ));
+            let assoc: Vec<(String, HirTy)> = impl_def
+                .items
+                .iter()
+                .filter_map(|i| match i {
+                    AstImplItem::AssocType { name, ty } => Some((name.clone(), rty(ty))),
+                    _ => None,
+                })
+                .collect();
+            for k in impl_bound_keys(tn, &args, &assoc, &struct_table, &enum_table) {
+                impl_traits.insert((target_key.clone(), k));
             }
-            impl_traits.insert((target_key, tn.clone()));
             trait_impl_tys
                 .entry(tn.clone())
                 .or_default()
@@ -764,15 +783,34 @@ pub fn lower_full(
                 continue;
             }
             if let Some(td) = trait_def {
-                let in_trait = td
-                    .items
-                    .iter()
-                    .any(|ti| matches!(ti, rokc_ast::TraitItem::Method(tm) if tm.name == leaf));
-                if !in_trait {
-                    err(
+                let tm = td.items.iter().find_map(|ti| match ti {
+                    rokc_ast::TraitItem::Method(tm) if tm.name == leaf => Some(tm),
+                    _ => None,
+                });
+                match tm {
+                    None => err(
                         &mut pre_diags,
                         format!("method `{leaf}` is not a member of trait `{}`", td.name),
-                    );
+                    ),
+                    // Spec 4.4.9: a throwing fn can't fill a non-throwing
+                    // slot. The operator traits (stdlib 2.3) never throw.
+                    Some(tm) if is_throwing(&m.throws) && !is_throwing(&tm.throws) => {
+                        err(
+                            &mut pre_diags,
+                            format!(
+                                "`{leaf}` throws but `{}::{leaf}` is declared without \
+                                 `throws`, so an impl can't add one (spec 4.4.9){}",
+                                td.name,
+                                if td.attrs.iter().any(|a| a.path == ["lang"]) {
+                                    " — operators don't throw; return a `Result` or use \
+                                     a named method"
+                                } else {
+                                    ""
+                                }
+                            ),
+                        );
+                    }
+                    Some(_) => {}
                 }
             }
             let key = format!("{}__{leaf}", ty_mangle(&target_ty));
@@ -929,6 +967,7 @@ pub fn lower_full(
         extra_enums: std::cell::RefCell::new(Vec::new()),
         extra_enum_table: std::cell::RefCell::new(HashMap::new()),
         any_tags: std::cell::RefCell::new(Vec::new()),
+        any_dispatch: std::cell::RefCell::new(Vec::new()),
         diagnostics: std::cell::RefCell::new(Vec::new()),
     };
     let env = Env {
@@ -945,6 +984,7 @@ pub fn lower_full(
         generic_structs,
         generic_enums,
         generic_methods,
+        generic_trait_impls,
         prec,
         sink,
         item_visibility,
@@ -956,6 +996,7 @@ pub fn lower_full(
         statics: static_tys,
         names,
     };
+    check_impl_overlap(&env);
     let mut functions: Vec<HirFunction> = Vec::with_capacity(decls.len());
     for (i, decl) in decls.iter().enumerate() {
         let id = FunctionId(u32::try_from(i).expect("FunctionId overflow"));
@@ -968,6 +1009,7 @@ pub fn lower_full(
             } => lower_fn(&env, fn_def, id, Some(self_ty.clone()), module.clone()),
         });
     }
+    build_any_dispatchers(&env);
     let Env {
         structs,
         enums,
@@ -1580,23 +1622,238 @@ pub(super) fn ty_size_align_bytes(ty: &HirTy) -> Option<(u32, u32)> {
     }
 }
 
-/// Does `ty` name one of `names` (a type name, path head or `Self`)?
-fn ast_ty_mentions(ty: &rokc_ast::Ty, names: &[&str]) -> bool {
-    let rec = |t: &rokc_ast::Ty| ast_ty_mentions(t, names);
-    let path = |p: &rokc_ast::Path| {
-        p.segments
-            .first()
-            .is_some_and(|s| names.contains(&s.name.as_str()))
-            || p.segments.iter().flat_map(|s| &s.generics).any(rec)
+/// What a trait method's signature type depends on besides concrete
+/// types: `Self`, an associated type `X` (bare, spec 2.8, or `Self::X`;
+/// pushed as `Self::X`) or a trait type parameter (by name).
+fn ast_ty_needs(ty: &rokc_ast::Ty, params: &[&str], assoc: &[&str], out: &mut Vec<String>) {
+    let kids: Vec<&rokc_ast::Ty> = match &ty.kind {
+        AstTyKind::SelfUpper => {
+            out.push("Self".to_owned());
+            Vec::new()
+        }
+        AstTyKind::Path(p) => {
+            match p.segments.as_slice() {
+                [s, x, ..] if s.name == "Self" => out.push(format!("Self::{}", x.name)),
+                [s] if assoc.contains(&s.name.as_str()) => out.push(format!("Self::{}", s.name)),
+                [s, ..] if s.name == "Self" || params.contains(&s.name.as_str()) => {
+                    out.push(s.name.clone());
+                }
+                _ => {}
+            }
+            p.segments.iter().flat_map(|s| &s.generics).collect()
+        }
+        AstTyKind::AnyTrait(bounds) => bounds
+            .iter()
+            .flat_map(|b| b.segments.iter().flat_map(|s| &s.generics))
+            .collect(),
+        AstTyKind::Sum(parts) | AstTyKind::Tuple(parts) => parts.iter().collect(),
+        AstTyKind::Fn(args, ret) => args.iter().chain(std::iter::once(&**ret)).collect(),
+        AstTyKind::Throws { ok, err } => vec![&**ok, &**err],
+        AstTyKind::Array(elem, _) => vec![&**elem],
+        AstTyKind::Any | AstTyKind::None => Vec::new(),
     };
-    match &ty.kind {
-        AstTyKind::SelfUpper => names.contains(&"Self"),
-        AstTyKind::Path(p) => path(p),
-        AstTyKind::AnyTrait(bounds) => bounds.iter().any(path),
-        AstTyKind::Sum(parts) | AstTyKind::Tuple(parts) => parts.iter().any(rec),
-        AstTyKind::Fn(args, ret) => args.iter().any(rec) || rec(ret),
-        AstTyKind::Throws { ok, err } => rec(ok) || rec(err),
-        AstTyKind::Array(elem, _) => rec(elem),
-        AstTyKind::Any | AstTyKind::None => false,
+    for k in kids {
+        ast_ty_needs(k, params, assoc, out);
+    }
+}
+
+fn is_throwing(t: &rokc_ast::ThrowsKind) -> bool {
+    match t {
+        rokc_ast::ThrowsKind::None => false,
+        rokc_ast::ThrowsKind::Untyped => true,
+        rokc_ast::ThrowsKind::Typed(v) => !v.is_empty(),
+    }
+}
+
+/// `impl<..> Tr for Target` as a set of method templates (the trait's
+/// default bodies included), each monomorphized per receiver like a
+/// generic-impl inherent method.
+fn generic_trait_impl(
+    impl_def: &rokc_ast::ImplDef,
+    trait_key: String,
+    trait_def: Option<&rokc_ast::TraitDef>,
+    module: &str,
+    index: usize,
+    diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
+) -> GenericTraitImpl {
+    let err = |pre: &mut Vec<rokc_diagnostic::RokDiagnostic>, msg: String| {
+        pre.push(rokc_diagnostic::RokDiagnostic::error(
+            rokc_diagnostic::ErrorKind::Type,
+            msg,
+        ));
+    };
+    let target_display = impl_def_display(&impl_def.self_ty);
+    let template = |m: &FnDef, def_module: &str| {
+        let mut def = m.clone();
+        let leaf = leaf_name(&m.name);
+        // ponytail: `__impl3_show` is both the mono cache key and the
+        // name diagnostics print; carry a display name if that reads badly.
+        def.name = if def_module.is_empty() {
+            format!("__impl{index}_{leaf}")
+        } else {
+            format!("{def_module}::__impl{index}_{leaf}")
+        };
+        def.generics.params = [&impl_def.generics.params, &m.generics.params]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
+        def.where_clause = [&impl_def.where_clause, &m.where_clause]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
+        GenericMethod {
+            def,
+            self_ty: impl_def.self_ty.clone(),
+            info: MethodInfo {
+                module: def_module.to_owned(),
+                vis: Visibility::Pub,
+                trait_name: Some(trait_key.clone()),
+            },
+        }
+    };
+    let mut methods: HashMap<String, GenericMethod> = HashMap::new();
+    for ii in &impl_def.items {
+        let AstImplItem::Method(m) = ii else {
+            continue;
+        };
+        let leaf = leaf_name(&m.name).to_owned();
+        if let Some(td) = trait_def {
+            let in_trait = td
+                .items
+                .iter()
+                .any(|ti| matches!(ti, rokc_ast::TraitItem::Method(tm) if tm.name == leaf));
+            if !in_trait {
+                err(
+                    diags,
+                    format!("method `{leaf}` is not a member of trait `{}`", td.name),
+                );
+            }
+        }
+        if methods.insert(leaf.clone(), template(m, module)).is_some() {
+            err(
+                diags,
+                format!("method `{leaf}` is defined more than once for `{target_display}`"),
+            );
+        }
+    }
+    if let Some(td) = trait_def {
+        let trait_module = module_of(&td.name);
+        for ti in &td.items {
+            let rokc_ast::TraitItem::Method(tm) = ti else {
+                continue;
+            };
+            if methods.contains_key(&tm.name) {
+                continue;
+            }
+            if tm.body.is_none() {
+                err(
+                    diags,
+                    format!(
+                        "impl of trait `{}` for `{target_display}` is missing method `{}`",
+                        td.name, tm.name
+                    ),
+                );
+                continue;
+            }
+            methods.insert(tm.name.clone(), template(tm, &trait_module));
+        }
+    }
+    GenericTraitImpl {
+        trait_key,
+        trait_args: impl_def
+            .trait_path
+            .as_ref()
+            .and_then(|tp| tp.segments.last())
+            .map(|s| s.generics.clone())
+            .unwrap_or_default(),
+        assoc: impl_def
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                AstImplItem::AssocType { name, ty } => Some((name.clone(), ty.clone())),
+                _ => None,
+            })
+            .collect(),
+        generics: impl_def.generics.clone(),
+        where_clause: impl_def.where_clause.clone(),
+        self_ty: impl_def.self_ty.clone(),
+        module: module.to_owned(),
+        methods,
+    }
+}
+
+/// A type has at most one impl of a trait (spec 2.9.3): a concrete impl
+/// that a generic impl also covers is a duplicate — there is no
+/// specialization.
+fn check_impl_overlap(env: &Env<'_>) {
+    let no_subst = HashMap::new();
+    let ctx = LowerCtx::new(env, &no_subst, None);
+    for gi in &env.generic_trait_impls {
+        for ty in env.trait_impl_tys.get(&gi.trait_key).into_iter().flatten() {
+            if ctx.generic_impl_subst(gi, ty, 0).is_some() {
+                ctx.emit_error(
+                    rokc_diagnostic::ErrorKind::Type,
+                    format!(
+                        "conflicting implementations of trait `{}` for `{}`: the concrete \
+                         impl overlaps `impl<..> {} for {}` (spec 2.9.3 — one impl per \
+                         trait and type; no specialization)",
+                        gi.trait_key,
+                        ctx.ty_name(ty),
+                        gi.trait_key,
+                        impl_def_display(&gi.self_ty)
+                    ),
+                );
+            }
+        }
+    }
+    // Two generic impls conflict when a type the program names (a
+    // concrete impl target or a generic instantiation in use) meets
+    // both — target and bounds.
+    // ponytail: witnesses come from the program's own types; no
+    // symbolic disjointness proof, so an overlap only a not-yet-named
+    // type would show is caught at the ambiguous call instead.
+    let mut candidates: Vec<HirTy> = Vec::new();
+    let named = env.trait_impl_tys.values().flatten().cloned();
+    let structs = env
+        .structs
+        .iter()
+        .filter(|s| !s.generic_args.is_empty())
+        .map(|s| HirTy::Struct(s.id));
+    let enums = env
+        .enums
+        .iter()
+        .filter(|e| !e.generic_args.is_empty())
+        .map(|e| HirTy::Enum(e.id));
+    for t in named.chain(structs).chain(enums) {
+        if !candidates.contains(&t) {
+            candidates.push(t);
+        }
+    }
+    let gis = &env.generic_trait_impls;
+    for (i, a) in gis.iter().enumerate() {
+        for b in gis[i + 1..].iter().filter(|b| b.trait_key == a.trait_key) {
+            let witness = candidates.iter().find(|t| {
+                ctx.generic_impl_subst(a, t, 0).is_some()
+                    && ctx.generic_impl_subst(b, t, 0).is_some()
+            });
+            if let Some(t) = witness {
+                ctx.emit_error(
+                    rokc_diagnostic::ErrorKind::Type,
+                    format!(
+                        "conflicting implementations of trait `{}`: `impl<..> {} for {}` and \
+                         `impl<..> {} for {}` both cover `{}` (spec 2.9.3 — one impl per trait \
+                         and type)",
+                        a.trait_key,
+                        a.trait_key,
+                        impl_def_display(&a.self_ty),
+                        b.trait_key,
+                        impl_def_display(&b.self_ty),
+                        ctx.ty_name(t)
+                    ),
+                );
+            }
+        }
     }
 }

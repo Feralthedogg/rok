@@ -157,21 +157,6 @@ pub fn compile_source(
     if !errors.is_empty() {
         return Err(errors);
     }
-    let unsupported: Vec<RokDiagnostic> = rokc_mir::enums_without_layout(&hir)
-        .into_iter()
-        .map(|(name, payloads)| {
-            RokDiagnostic::error(
-                rokc_diagnostic::ErrorKind::Unsupported,
-                format!(
-                    "enum `{name}` mixes payload shapes {payloads:?}; only identical or \
-                     all-scalar variant payloads have a layout yet"
-                ),
-            )
-        })
-        .collect();
-    if !unsupported.is_empty() {
-        return Err(unsupported);
-    }
     let mir = rokc_mir::lower(&hir);
 
     Ok(CompiledProject {
@@ -197,7 +182,9 @@ fn build_prec_table(roots: &[PathBuf], diags: &mut Vec<RokDiagnostic>) -> PrecTa
         // Walk the package starting from the given root file (typically
         // `lib.rok` or `main.rok`), following `mod x;` declarations to
         // their files. Collect the parsed AST of every module visited.
-        let modules = resolve_module_tree(root, &empty, diags);
+        // Parsed without operators, a library body using them errors
+        // here; the real parse (with this table) reports what is left.
+        let modules = resolve_module_tree(root, &empty, &mut Vec::new());
         for prog in modules {
             let (sub_table, mut collect_diags) = collect_prec_table(&prog);
             diags.append(&mut collect_diags);
@@ -569,12 +556,9 @@ fn builtin_panic_extern() -> rokc_ast::Item {
         vec![("msg", path_ty("str")), ("len", path_ty("usize"))],
         None,
     );
-    // Spec 4.16.4: an error out of a throwing `main` — message, exit 1.
-    let uncaught_fn = make_fn(
-        "rok_uncaught_error",
-        vec![("msg", path_ty("str")), ("len", path_ty("usize"))],
-        None,
-    );
+    // Spec 4.16.4: an error out of a throwing `main` — the error's
+    // description (NUL-terminated `str`), exit 1.
+    let uncaught_fn = make_fn("rok_uncaught_error", vec![("what", path_ty("str"))], None);
     let assert_fn = make_fn(
         "rok_assert",
         vec![("cond", path_ty("i32"))],
