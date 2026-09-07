@@ -1,0 +1,226 @@
+// rok::core::channel — message passing between threads (stdlib spec
+// 2.17). Multi-producer, single-consumer; `recv` blocks the OS thread
+// (no task runtime yet to suspend instead).
+//
+// ponytail: one `Mutex` + two `Condvar`s around a growable ring buffer
+// (spec: lock-free ring / segmented list). A popped slot keeps its old
+// value until overwritten, so up to one ring's worth of sent values can
+// stay reachable after `recv`.
+
+/// What `send` hands back when this sender was closed.
+pub enum SendError<T> {
+    Closed(T),
+}
+
+pub enum TrySendError<T> {
+    Full(T),
+    Closed(T),
+}
+
+// `meta`: [head, len, open senders, bound (0 = unbounded), ring capacity]
+struct Chan<T> {
+    lock: Mutex<i32>;
+    meta: GcBuf<usize>;
+    ring: GcBuf<GcBuf<T>>;
+    not_empty: Condvar;
+    not_full: Condvar;
+}
+
+impl<T> Chan<T> {
+    fn get(self, i: usize) -> usize { return buf_get(self.meta, i); }
+    fn put(self, i: usize, v: usize) { buf_set(self.meta, i, v); }
+
+    fn full(self) -> bool {
+        return self.get(3) > 0 && self.get(1) >= self.get(3);
+    }
+
+    // The lock is held for the calls below.
+    fn push(self, v: T) {
+        let head = self.get(0);
+        let len = self.get(1);
+        let cap = self.get(4);
+        let ring: GcBuf<T> = buf_get(self.ring, 0);
+        if len == cap {
+            let bigger: GcBuf<T> = buf_new(cap * 2);
+            let i = 0usize;
+            while i < len {
+                buf_set(bigger, i, buf_get(ring, (head + i) % cap));
+                i += 1;
+            }
+            buf_set(self.ring, 0, bigger);
+            ring = bigger;
+            head = 0;
+            cap = cap * 2;
+            self.put(0, 0);
+            self.put(4, cap);
+        }
+        buf_set(ring, (head + len) % cap, v);
+        self.put(1, len + 1);
+    }
+
+    fn pop(self) -> T {
+        let head = self.get(0);
+        let ring: GcBuf<T> = buf_get(self.ring, 0);
+        let v = buf_get(ring, head);
+        self.put(0, (head + 1) % self.get(4));
+        self.put(1, self.get(1) - 1);
+        return v;
+    }
+}
+
+fn make<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
+    let meta: GcBuf<usize> = buf_new(5);
+    buf_set(meta, 2, 1);
+    buf_set(meta, 3, bound);
+    buf_set(meta, 4, 16);
+    let ring: GcBuf<GcBuf<T>> = buf_new(1);
+    let store: GcBuf<T> = buf_new(16);
+    buf_set(ring, 0, store);
+    let ch = Chan {
+        lock: Mutex::new(0),
+        meta: meta,
+        ring: ring,
+        not_empty: Condvar::new(),
+        not_full: Condvar::new(),
+    };
+    let open: GcBuf<bool> = buf_new(1);
+    buf_set(open, 0, true);
+    return (Sender { ch: ch, open: open }, Receiver { ch: ch });
+}
+
+/// An unbounded channel.
+pub fn channel<T: Send>() -> (Sender<T>, Receiver<T>) {
+    return make(0usize);
+}
+
+/// A channel holding at most `cap` queued values (`cap` 0 acts as 1):
+/// `send` blocks while it is full.
+pub fn channel_bounded<T: Send>(cap: usize) -> (Sender<T>, Receiver<T>) {
+    if cap == 0 {
+        return make(1usize);
+    }
+    return make(cap);
+}
+
+/// The sending end. Each clone is its own sender and is closed on its
+/// own; the channel closes when every sender has closed (2.17.3).
+pub struct Sender<T> {
+    ch: Chan<T>;
+    open: GcBuf<bool>;
+}
+
+impl<T> Sender<T> {
+    /// Queue `value` (blocking while a bounded channel is full). Throws
+    /// it back if this sender was closed.
+    pub fn send(self, value: T) throws (SendError<T>) {
+        if !buf_get(self.open, 0) {
+            throw SendError::Closed(value);
+        }
+        using g = self.ch.lock.lock() {
+            while self.ch.full() {
+                g = self.ch.not_full.wait(g);
+            }
+            self.ch.push(value);
+        }
+        self.ch.not_empty.notify_all();
+    }
+
+    pub fn try_send(self, value: T) throws (TrySendError<T>) {
+        if !buf_get(self.open, 0) {
+            throw TrySendError::Closed(value);
+        }
+        let sent = false;
+        using g = self.ch.lock.lock() {
+            if !self.ch.full() {
+                self.ch.push(value);
+                sent = true;
+            }
+        }
+        if !sent {
+            throw TrySendError::Full(value);
+        }
+        self.ch.not_empty.notify_all();
+    }
+
+    /// Close this sender; later `send`s on it throw `Closed`.
+    pub fn close(self) {
+        using g = self.ch.lock.lock() {
+            if buf_get(self.open, 0) {
+                buf_set(self.open, 0, false);
+                self.ch.put(2, self.ch.get(2) - 1);
+            }
+        }
+        self.ch.not_empty.notify_all();
+    }
+}
+
+impl<T> Clone for Sender<T> {
+    /// Another open sender on the same channel.
+    fn clone(self) -> Sender<T> {
+        using g = self.ch.lock.lock() {
+            self.ch.put(2, self.ch.get(2) + 1);
+        }
+        let open: GcBuf<bool> = buf_new(1);
+        buf_set(open, 0, true);
+        return Sender { ch: self.ch, open: open };
+    }
+}
+
+/// The receiving end.
+pub struct Receiver<T> {
+    ch: Chan<T>;
+}
+
+impl<T> Receiver<T> {
+    /// The next value, blocking until one arrives; `none` once the queue
+    /// is empty and every sender has closed.
+    pub fn recv(self) -> T | none {
+        let got = false;
+        let v: T | none = none;
+        using g = self.ch.lock.lock() {
+            while self.ch.get(1) == 0 && self.ch.get(2) > 0 {
+                g = self.ch.not_empty.wait(g);
+            }
+            if self.ch.get(1) > 0 {
+                v = self.ch.pop();
+                got = true;
+            }
+        }
+        if got {
+            self.ch.not_full.notify_all();
+        }
+        return v;
+    }
+
+    /// The next value if one is queued; `none` if empty or closed.
+    pub fn try_recv(self) -> T | none {
+        let got = false;
+        let v: T | none = none;
+        using g = self.ch.lock.lock() {
+            if self.ch.get(1) > 0 {
+                v = self.ch.pop();
+                got = true;
+            }
+        }
+        if got {
+            self.ch.not_full.notify_all();
+        }
+        return v;
+    }
+
+    /// `for x in rx.iter()`: values until the channel closes.
+    pub fn iter(self) -> ChannelIter<T> {
+        return ChannelIter { rx: self };
+    }
+}
+
+pub struct ChannelIter<T> {
+    rx: Receiver<T>;
+}
+
+impl<T> Iterator for ChannelIter<T> {
+    type Item = T;
+    fn next(ref self) -> T | none {
+        return self.rx.recv();
+    }
+}

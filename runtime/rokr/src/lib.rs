@@ -8,8 +8,8 @@
 //! bottom are the 805 §8.5.12 appendix (no ABI stability).
 //!
 //! Not implemented yet (calls hit [`unimplemented`] → fatal, exit 101):
-//! scheduler (007-runtime/706, 707), coroutines (708), threads (805
-//! §8.5.4). Immix GC (703–705) is replaced by a malloc-backed mark-sweep
+//! scheduler (007-runtime/706, 707), coroutines (708). OS threads (805
+//! §8.5.4) are in `thread`. Immix GC (703–705) is replaced by a malloc-backed mark-sweep
 //! (`rokr_gc`).
 
 #![cfg_attr(not(test), no_std)]
@@ -23,6 +23,7 @@ use rokr_common::object_header::{FLAG_PINNED, HEADER_ALIGN, ObjectHeader};
 use rokr_common::{fatal, tls, write_stderr};
 
 mod str;
+mod thread;
 pub use str::RokStr;
 
 /// Rust panic inside the runtime = inconsistent runtime state. Report
@@ -193,24 +194,32 @@ pub extern "C" fn rok_runtime_init() {
     rok_thread_init();
 }
 
+/// The main thread is done with rok code: from here it counts as
+/// stopped, so threads still running can collect without it.
 #[unsafe(no_mangle)]
-pub const extern "C" fn rok_runtime_shutdown() {}
-
-/// Safepoint slow path (804). No GC to cooperate with: just clear the
-/// request.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_runtime_yield() {
-    tls::clear_yield();
+pub extern "C" fn rok_runtime_shutdown() {
+    rokr_gc::world::enter_native();
 }
 
+/// Safepoint slow path (804 §8.4.3): park while another thread stops
+/// the world.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_runtime_yield() {
+    rokr_gc::world::safepoint();
+}
+
+/// Initialize this thread's TLS slots (803 §8.3.6) and register it as a
+/// mutator (its shadow stack becomes a GC root set).
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_thread_init() {
     tls::thread_init();
+    rokr_gc::world::attach_current();
 }
 
+/// Unregister this thread; it must not touch GC objects afterwards.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_thread_shutdown() {
-    tls::thread_shutdown();
+    rokr_gc::world::detach();
 }
 
 // ---------------------------------------------------------------------
@@ -250,16 +259,6 @@ pub extern "C" fn rok_task_await(_handle: *mut u8) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_task_cancel(_handle: *mut u8) {
     unimplemented(b"rok_task_cancel (scheduler, spec 007-runtime/706)")
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_thread_spawn(_closure: *mut u8) -> *mut u8 {
-    unimplemented(b"rok_thread_spawn (spec 007-runtime/706 7.6.6)")
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_thread_join(_handle: *mut u8) -> *mut u8 {
-    unimplemented(b"rok_thread_join (spec 007-runtime/706 7.6.6)")
 }
 
 /// `par::for_each` desugar. `callback` is `Ptr<u8>` in 805, i.e.

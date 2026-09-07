@@ -1,0 +1,121 @@
+// expect-exit: 0
+// expect-stdout:
+// churn ok
+// holders ok
+// ok
+
+// Multi-mutator GC: four threads allocate garbage as fast as they can
+// (lists, strings, boxed `any` values) while two others hold live
+// structures and keep re-checking them. Collections triggered by any
+// thread stop all of them at safepoints and scan every shadow stack:
+// nothing live is freed (the checks pass) and the heap stays bounded.
+use rok::std::thread;
+
+extern "C" {
+    fn rok_gc_stats_live_bytes() -> usize;
+    fn rok_gc_stats_collections() -> u64;
+}
+
+trait Weigh { fn w(self) -> i64; }
+struct Blob { a: i64; b: i64; }
+impl Weigh for Blob { fn w(self) -> i64 { return self.a + self.b; } }
+
+fn note_peak(peak: Atomic<usize>) {
+    let live = unsafe { rok_gc_stats_live_bytes() };
+    let cur = peak.load();
+    while live > cur {
+        match peak.compare_exchange(cur, live, SeqCst, SeqCst) {
+            Result::Ok(_) => return,
+            Result::Err(now) => { cur = now; },
+        }
+    }
+}
+
+// Garbage: every round builds a list of boxed values and a string,
+// checks them, and drops them.
+fn churn(seed: i64, rounds: i64, peak: Atomic<usize>) -> i64 {
+    let bad: i64 = 0;
+    let r: i64 = 0;
+    while r < rounds {
+        let xs: List<any Weigh> = [];
+        let i: i64 = 0;
+        while i < 50 {
+            xs.push(Blob { a: seed, b: i });
+            i += 1;
+        }
+        let s = f"r{r}-{seed}";
+        let total: i64 = 0;
+        for x in xs { total += x.w(); }
+        if total != 50 * seed + 1225 { bad += 1; }
+        if !s.starts_with("r") { bad += 1; }
+        if r % 500 == 0 { note_peak(peak); }
+        r += 1;
+    }
+    return bad;
+}
+
+// Live data held across many collections, re-verified throughout.
+fn hold(seed: i64, rounds: i64, peak: Atomic<usize>) -> i64 {
+    let keep: List<List<i64>> = [];
+    let k: i64 = 0;
+    while k < 200 {
+        let row: List<i64> = [];
+        let j: i64 = 0;
+        while j < 50 { row.push(seed * 1000 + k * 50 + j); j += 1; }
+        keep.push(row);
+        k += 1;
+    }
+    let names: List<str> = [];
+    let n: i64 = 0;
+    while n < 100 { names.push(f"name-{seed}-{n}"); n += 1; }
+    let bad: i64 = 0;
+    let r: i64 = 0;
+    while r < rounds {
+        // A little garbage of our own, so we collect too.
+        let tmp: List<i64> = [r, r + 1, r + 2];
+        if tmp[2] != r + 2 { bad += 1; }
+        if r % 50 == 0 {
+            let sum: i64 = 0;
+            for row in keep { for v in row { sum += v; } }
+            // Sum of seed*1000 + (0..10000).
+            if sum != 10000 * seed * 1000 + 49995000 { bad += 1; }
+            if names[37] != f"name-{seed}-37" { bad += 1; }
+            note_peak(peak);
+        }
+        r += 1;
+    }
+    return bad;
+}
+
+fn main() -> i32 {
+    let peak = Atomic::new(0usize);
+    let before = unsafe { rok_gc_stats_collections() };
+    let churners: List<thread::JoinHandle<i64>> = [];
+    let t: i64 = 1;
+    while t <= 4 {
+        let seed = t;
+        churners.push(thread::spawn(|| churn(seed, 6000, peak)));
+        t += 1;
+    }
+    let holders: List<thread::JoinHandle<i64>> = [];
+    while t <= 6 {
+        let seed = t;
+        holders.push(thread::spawn(|| hold(seed, 20000, peak)));
+        t += 1;
+    }
+    // The main thread holds live data too, across the other threads'
+    // collections.
+    let mine = hold(9, 2000, peak);
+    let bad: i64 = 0;
+    for h in churners { bad += try! h.join(); }
+    if bad == 0 { rok_print_str("churn ok"); }
+    for h in holders { bad += try! h.join(); }
+    bad += mine;
+    if bad == 0 { rok_print_str("holders ok"); }
+    // ~6000 rounds x 4 threads x ~3 KB of garbage = ~70 MB allocated.
+    let collections = unsafe { rok_gc_stats_collections() } - before;
+    if collections < 3u64 { return 2; }
+    if peak.load() > 40000000usize { return 3; }
+    rok_print_str("ok");
+    return 0;
+}

@@ -1,0 +1,98 @@
+// expect-exit: 0
+// expect-stdout:
+// 1
+// 0
+// 24
+// 10
+// 21
+// 3
+// 4
+// 5
+// 3
+// 9
+// 4
+// 6
+// 7
+// 2
+// 5
+
+// Spec 2.11: `[v; N]` repeat literals, const parameters on enums /
+// impls / traits / type aliases, and a const that appears only in the
+// return type, inferred from the expected type.
+fn zeros<const N: usize>() -> [f64; N] { return [0.0; N]; }
+
+fn replicate<T, const N: usize>(value: T) -> [T; N] { return [value; N]; }
+
+fn total<const N: usize>(a: [i32; N]) -> i32 {
+    let s = 0;
+    for i in 0..N { s = s + a[i]; }
+    return s;
+}
+
+enum Cells<const N: usize> {
+    Full([i32; N]),
+    Empty,
+}
+
+fn count<const N: usize>(c: Cells<N>) -> usize {
+    return match c {
+        Cells::Full(_) => N,
+        Cells::Empty => 0,
+    };
+}
+
+struct Vec2<const N: usize> { xs: [i32; N]; }
+
+impl<const N: usize> Vec2<N> {
+    fn len(self) -> usize { return N; }
+    fn first(self) -> i32 { return self.xs[0]; }
+}
+
+trait Dim<const D: usize> {
+    fn dim(self) -> usize { return D; }
+    fn ones(self) -> [i32; D] { return [1; D]; }
+}
+
+struct P { x: i32; }
+impl Dim<3> for P {}
+
+struct Q { x: i32; }
+impl Dim<6> for Q {}
+
+// Trait const arguments may name `const` items or be const expressions.
+const W: usize = 2;
+struct R { x: i32; }
+impl Dim<W> for R {}
+struct S { x: i32; }
+impl Dim<{ W + 3 }> for S {}
+
+type Row<const N: usize> = [i32; N];
+type Grid4 = Vec2<4>;
+
+fn main() -> i32 {
+    let w = [1u8; 16];
+    rok_print_i32(w[15] as i32);
+    let z: [f64; 4] = zeros();
+    rok_print_i32(z[3] as i32);
+    let r: [i32; 8] = replicate(3);
+    rok_print_i32(total(r));
+    rok_print_i32(total([2; 5]));
+    rok_print_i32(total(replicate::<i32, 3>(7)));
+
+    let c: Cells<3> = Cells::Full([1, 2, 3]);
+    rok_print_i32(count(c) as i32);
+    let v = Vec2 { xs: [5; 4] };
+    rok_print_i32(v.len() as i32);
+    rok_print_i32(v.first());
+    rok_print_i32(P { x: 1 }.dim() as i32);
+    let row: Row<2> = [8, 9];
+    rok_print_i32(row[1]);
+    let g: Grid4 = Vec2 { xs: [1, 2, 3, 4] };
+    rok_print_i32(g.len() as i32);
+    rok_print_i32(total(Q { x: 1 }.ones()));
+    let k: Row<3> = replicate(2);
+    rok_print_i32(total(k) + 1);
+    rok_print_i32(R { x: 1 }.dim() as i32);
+    rok_print_i32(total(S { x: 1 }.ones()));
+    return 0;
+}

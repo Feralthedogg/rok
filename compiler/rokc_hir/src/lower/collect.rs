@@ -162,6 +162,17 @@ pub fn lower_full(
         visibility: type_vis,
         uses,
         diags: std::cell::RefCell::new(Vec::new()),
+        generic_aliases: program
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                Item::TypeAlias(a) if !a.generics.params.is_empty() => {
+                    Some((a.name.clone(), a.clone()))
+                }
+                _ => None,
+            })
+            .collect(),
+        alias_uses: std::cell::RefCell::new(Vec::new()),
     };
 
     // Pass 1a: enums. Generic enums get stashed for lazy instantiation.
@@ -306,55 +317,23 @@ pub fn lower_full(
     // storage (`HirStaticDef`) and reads/writes go through addressof
     // + load/store at codegen time.
     let mut consts: HashMap<String, (Ty, Expr)> = HashMap::new();
+    let mut impl_const_sets: Vec<ImplConsts> = Vec::new();
     for item in &program.items {
         rokc_diagnostic::set_current_span(item.span());
         // Spec 2.9.1: an impl's `const` is `Type::NAME` (`Self::NAME`
-        // inside the impl).
-        let impl_consts: Vec<(String, &rokc_ast::ConstDef)> = match item {
-            Item::Const(c) => vec![(c.name.clone(), c)],
+        // inside the impl); a trait impl also gets the trait's defaults
+        // (spec 2.8.3a).
+        let item_consts: Vec<(String, Ty, Expr)> = match item {
+            Item::Const(c) => vec![(c.name.clone(), c.ty.clone(), c.value.clone())],
             Item::Impl(i) => {
-                let cs: Vec<&rokc_ast::ConstDef> = i
-                    .items
-                    .iter()
-                    .filter_map(|it| match it {
-                        AstImplItem::Const(c) => Some(c),
-                        _ => None,
-                    })
-                    .collect();
-                let target = match &i.self_ty.kind {
-                    AstTyKind::Path(p)
-                        if p.segments.iter().all(|s| s.generics.is_empty()) && !cs.is_empty() =>
-                    {
-                        let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
-                        names.canon(&segs, &module_of(&cs[0].name), &[])
-                    }
-                    _ => None,
-                };
-                if let Some(t) = target {
-                    cs.into_iter()
-                        .map(|c| (format!("{t}::{}", leaf_name(&c.name)), c))
-                        .collect()
-                } else {
-                    if let Some(c) = cs.first() {
-                        err(
-                            &mut pre_diags,
-                            format!(
-                                "associated const `{}` needs a non-generic named impl target \
-                                 (stage-1 limitation)",
-                                leaf_name(&c.name)
-                            ),
-                        );
-                    }
-                    Vec::new()
-                }
+                let (keyed, set) = impl_consts(i, program, &names, &mut pre_diags);
+                impl_const_sets.extend(set);
+                keyed
             }
             _ => Vec::new(),
         };
-        for (key, c) in impl_consts {
-            if consts
-                .insert(key.clone(), (c.ty.clone(), c.value.clone()))
-                .is_some()
-            {
+        for (key, ty, value) in item_consts {
+            if consts.insert(key.clone(), (ty, value)).is_some() {
                 err(
                     &mut pre_diags,
                     format!("const `{key}` is defined more than once"),
@@ -444,6 +423,9 @@ pub fn lower_full(
     for item in &program.items {
         rokc_diagnostic::set_current_span(item.span());
         if let Item::TypeAlias(a) = item {
+            if !a.generics.params.is_empty() {
+                continue;
+            }
             let module = module_of(&a.name);
             let sc = Scope {
                 names: &names,
@@ -986,6 +968,7 @@ pub fn lower_full(
                 self_ty: target_ty.clone(),
                 module: module.clone(),
                 key,
+                subst: HashMap::new(),
             });
         }
 
@@ -1072,7 +1055,41 @@ pub fn lower_full(
                 }
                 // `trait Contains<Item>` + `impl Contains<i32> for S`: the
                 // default's signature sees `Item = i32`.
-                let targs = trait_param_args(trait_def, impl_def);
+                let mut targs = trait_param_args(trait_def, impl_def);
+                // Const arguments (`3`, `W`, `{ W + 1 }`) become literals.
+                for gp in &trait_def.generics.params {
+                    if let rokc_ast::GenericParam::Const { name, .. } = gp {
+                        if let Some(t) = targs.get_mut(name) {
+                            if let Some(v) = const_arg_value(t, &consts, sc.module) {
+                                *t = const_literal_ty(v, t.span);
+                            }
+                        }
+                    }
+                }
+                let body_subst: HashMap<String, HirTy> = trait_def
+                    .generics
+                    .params
+                    .iter()
+                    .filter_map(|gp| match gp {
+                        rokc_ast::GenericParam::Type { name, .. } => targs.get(name).map(|t| {
+                            (
+                                name.clone(),
+                                resolve_ty_with_structs(t, &struct_table, &enum_table, sc),
+                            )
+                        }),
+                        rokc_ast::GenericParam::Const { name, ty } => {
+                            let v = match &targs.get(name)?.kind {
+                                AstTyKind::Const(c) => crate::ty::eval_const_with(c, &|_| None)?,
+                                _ => return None,
+                            };
+                            let prim = match resolve_ty(ty) {
+                                HirTy::Prim(p) => Some(p),
+                                _ => None,
+                            };
+                            Some((name.clone(), crate::ty::const_ty(v, prim)))
+                        }
+                    })
+                    .collect();
                 let tm: &FnDef = if targs.is_empty() {
                     tm
                 } else {
@@ -1112,6 +1129,7 @@ pub fn lower_full(
                     self_ty: target_ty.clone(),
                     module: trait_module.clone(),
                     key,
+                    subst: body_subst,
                 });
             }
         }
@@ -1243,6 +1261,7 @@ pub fn lower_full(
         }
     }
     let mut env = Env {
+        impl_consts: impl_const_sets,
         fn_table,
         extern_fns,
         method_table,
@@ -1317,16 +1336,20 @@ pub fn lower_full(
                 self_ty,
                 module,
                 key,
-            } => lower_fn(
+                subst,
+            } => super::mono::lower_fn_inner(
                 &env,
                 fn_def,
                 id,
-                Some((self_ty.clone(), key.clone())),
+                key.clone(),
+                Some(self_ty.clone()),
                 module.clone(),
+                subst,
             ),
         });
     }
     build_any_dispatchers(&env);
+    check_type_bounds(&env);
     let Env {
         structs,
         enums,
@@ -1595,7 +1618,8 @@ pub(super) fn hir_expr_has_unknown(e: &HirExpr) -> bool {
         K::StructInit { fields, .. } | K::Tuple { fields } => any(fields),
         K::FieldRead { target, .. }
         | K::TupleField { target, .. }
-        | K::UnionRead { target, .. } => hir_expr_has_unknown(target),
+        | K::UnionRead { target, .. }
+        | K::ArrayRepeat { value: target, .. } => hir_expr_has_unknown(target),
         K::WithField { target, value, .. } => {
             hir_expr_has_unknown(target) || hir_expr_has_unknown(value)
         }
@@ -1615,6 +1639,9 @@ pub(super) fn hir_expr_has_unknown(e: &HirExpr) -> bool {
         } => {
             hir_expr_has_unknown(buf) || hir_expr_has_unknown(index) || hir_expr_has_unknown(value)
         }
+        K::BufAtomic {
+            buf, index, args, ..
+        } => hir_expr_has_unknown(buf) || hir_expr_has_unknown(index) || any(args),
     }
 }
 
@@ -2125,6 +2152,265 @@ fn generic_trait_impl(
 /// A type has at most one impl of a trait (spec 2.9.3): a concrete impl
 /// that a generic impl also covers is a duplicate — there is no
 /// specialization.
+/// `(Type::NAME, type, value)` for an impl's consts plus, in a trait
+/// impl, the trait's defaults it leaves out. The key uses the generic
+/// base (`Box::N` for `impl<T> Box<T>`) or a primitive's name.
+// ponytail: one key per base type — two impls of a generic base
+// (`Box<i32>`, `Box<f64>`) can't give the same const different values.
+fn impl_consts(
+    i: &rokc_ast::ImplDef,
+    program: &Program,
+    names: &TypeNames<'_>,
+    pre_diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
+) -> (Vec<(String, Ty, Expr)>, Option<ImplConsts>) {
+    let mut out: Vec<(String, Ty, Expr)> = i
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            AstImplItem::Const(c) => {
+                Some((leaf_name(&c.name).to_owned(), c.ty.clone(), c.value.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    let module = impl_module(i);
+    let trait_def = i.trait_path.as_ref().and_then(|tp| {
+        let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
+        let key = names.trait_key(&segs, &module);
+        program.items.iter().find_map(|it| match it {
+            Item::Trait(t)
+                if t.name == key || (!key.contains("::") && leaf_name(&t.name) == key) =>
+            {
+                Some(t)
+            }
+            _ => None,
+        })
+    });
+    if let Some(t) = trait_def.filter(|_| !i.negative) {
+        for ti in &t.items {
+            let rokc_ast::TraitItem::Const { name, ty, default } = ti else {
+                continue;
+            };
+            if out.iter().any(|(n, ..)| n == name) {
+                continue;
+            }
+            match default {
+                Some(v) => out.push((name.clone(), ty.clone(), v.clone())),
+                None => pre_diags.push(rokc_diagnostic::RokDiagnostic::error(
+                    rokc_diagnostic::ErrorKind::Type,
+                    format!(
+                        "impl of `{}` for `{}` is missing associated const `{name}` \
+                         (spec 2.8.3a)",
+                        leaf_name(&t.name),
+                        impl_def_display(&i.self_ty)
+                    ),
+                )),
+            }
+        }
+    }
+    if out.is_empty() {
+        return (out, None);
+    }
+    let params: Vec<&str> = i
+        .generics
+        .params
+        .iter()
+        .filter_map(|gp| match gp {
+            rokc_ast::GenericParam::Type { name, .. } => Some(name.as_str()),
+            rokc_ast::GenericParam::Const { .. } => None,
+        })
+        .collect();
+    // `Type::N` names the const when the impl covers that one type, or
+    // every instance of a generic base (`impl<T> Boxed<T>`, inherent);
+    // the rest (`impl Tr for Box<i32>`, blanket `impl<T: X> Tr for T`)
+    // are found from a concrete type (`T::N`, `Self::N`, `<T as Tr>::N`).
+    let keyed_target = match &i.self_ty.kind {
+        AstTyKind::Path(p) => {
+            let args = p.segments.last().map_or(&[][..], |s| s.generics.as_slice());
+            let all_params = args.len() == params.len()
+                && args.iter().zip(&params).all(|(a, n)| {
+                    matches!(&a.kind, AstTyKind::Path(ap)
+                        if ap.segments.len() == 1 && ap.segments[0].name == *n)
+                });
+            if let HirTy::Prim(prim) = resolve_ty(&i.self_ty) {
+                Some(prim.name().to_owned())
+            } else if (params.is_empty() && args.is_empty())
+                || (i.trait_path.is_none() && !args.is_empty() && all_params)
+            {
+                let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
+                names.canon(&segs, &module, &[])
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    let trait_key = i.trait_path.as_ref().map_or_else(String::new, |tp| {
+        let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
+        names.trait_key(&segs, &module)
+    });
+    let set = ImplConsts {
+        target: GenericTraitImpl {
+            trait_key,
+            trait_args: Vec::new(),
+            assoc: Vec::new(),
+            generics: i.generics.clone(),
+            where_clause: i.where_clause.clone(),
+            self_ty: i.self_ty.clone(),
+            module,
+            methods: HashMap::new(),
+        },
+        consts: out.clone(),
+    };
+    let keyed = keyed_target.map_or_else(Vec::new, |t| {
+        out.into_iter()
+            .map(|(n, ty, v)| (format!("{t}::{n}"), ty, v))
+            .collect()
+    });
+    (keyed, Some(set))
+}
+
+/// Spec 2.10.4: every generic struct / union / enum instantiation must
+/// meet its parameters' bounds, inline (`T: Tr`) and `where` alike.
+fn check_type_bounds(env: &Env<'_>) {
+    // (display name, item's module, arguments, generics, `where`, use site)
+    type Inst<'d> = (
+        String,
+        String,
+        Vec<HirTy>,
+        &'d rokc_ast::Generics,
+        &'d [rokc_ast::WherePred],
+        rokc_diagnostic::Span,
+    );
+    let no_subst = HashMap::new();
+    let ctx = LowerCtx::new(env, &no_subst, None);
+    let n_structs = env.structs.len() + env.sink.extra_structs.borrow().len();
+    let n_enums = env.enums.len() + env.sink.extra_enums.borrow().len();
+    let mut insts: Vec<Inst<'_>> = Vec::new();
+    for i in 0..n_structs {
+        let id = StructId(u32::try_from(i).expect("StructId overflow"));
+        let d = ctx.struct_def(id);
+        let base = d.name.split("__").next().unwrap_or_default().to_owned();
+        if let Some(def) = env
+            .generic_structs
+            .get(&base)
+            .filter(|_| !d.generic_args.is_empty())
+        {
+            insts.push((
+                ctx.ty_name(&HirTy::Struct(id)),
+                module_of(&base),
+                d.generic_args,
+                &def.generics,
+                &def.where_clause,
+                d.span,
+            ));
+        }
+    }
+    for i in 0..n_enums {
+        let id = EnumId(u32::try_from(i).expect("EnumId overflow"));
+        let d = ctx.enum_def(id);
+        let base = enum_base_name(&d.name).to_owned();
+        if let Some(def) = env
+            .generic_enums
+            .get(&base)
+            .filter(|_| !d.generic_args.is_empty())
+        {
+            insts.push((
+                ctx.ty_name(&HirTy::Enum(id)),
+                module_of(&base),
+                d.generic_args,
+                &def.generics,
+                &def.where_clause,
+                d.span,
+            ));
+        }
+    }
+    // Spec 2.10.4: a generic alias's bounds hold at each use.
+    let uses = env.names.alias_uses.borrow().clone();
+    for (full, args, module, span) in uses {
+        let Some(def) = env.names.generic_aliases.get(&full) else {
+            continue;
+        };
+        let sc = Scope {
+            names: &env.names,
+            module: &module,
+        };
+        let mut rcx = LowerCtx::new(env, &no_subst, None);
+        rcx.current_module.clone_from(&module);
+        let args: Vec<HirTy> = def
+            .generics
+            .params
+            .iter()
+            .zip(&args)
+            .map(|(gp, a)| match (gp, &a.kind) {
+                (rokc_ast::GenericParam::Const { .. }, AstTyKind::Const(c)) => rcx
+                    .eval_const(c)
+                    .map_or(HirTy::Unknown, |v| crate::ty::const_ty(v, None)),
+                _ => resolve_ty_with_structs(a, &env.struct_table, &env.enum_table, sc),
+            })
+            .collect();
+        let shown: Vec<String> = args.iter().map(|a| ctx.ty_name(a)).collect();
+        insts.push((
+            format!("{}<{}>", leaf_name(&full), shown.join(", ")),
+            module_of(&full),
+            args,
+            &def.generics,
+            &def.where_clause,
+            span,
+        ));
+    }
+    for (shown, module, args, generics, where_clause, span) in insts {
+        let subst = generic_subst(generics, &args);
+        let mut rcx = LowerCtx::new(env, &subst, None);
+        rcx.current_module = module;
+        let mut goals: Vec<(HirTy, &Vec<Ty>)> = Vec::new();
+        for gp in &generics.params {
+            if let rokc_ast::GenericParam::Type { name, bounds, .. } = gp {
+                if let Some(t) = subst.get(name) {
+                    goals.push((t.clone(), bounds));
+                }
+            }
+        }
+        for w in where_clause {
+            goals.push((rcx.resolve_ast_ty(&w.ty), &w.bounds));
+        }
+        for (ty, bounds) in goals {
+            if ty == HirTy::Unknown {
+                continue;
+            }
+            for b in bounds {
+                let AstTyKind::Path(p) = &b.kind else {
+                    continue;
+                };
+                let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
+                let (targs, binds) = split_trait_args(
+                    p.segments.last().map_or(&[][..], |s| s.generics.as_slice()),
+                    |t| rcx.resolve_ast_ty(t),
+                );
+                let key = bound_key(
+                    env.names.trait_key(&segs, &rcx.current_module),
+                    &targs,
+                    &binds,
+                    &env.struct_table,
+                    &env.enum_table,
+                );
+                if !rcx.implements_trait(&ty, &key, 0) {
+                    let old = rokc_diagnostic::set_current_span(span);
+                    rcx.emit_error(
+                        rokc_diagnostic::ErrorKind::Type,
+                        format!(
+                            "type `{}` does not satisfy trait bound `{key}` required by `{shown}` \
+                             (spec 2.10.4)",
+                            rcx.ty_name(&ty),
+                        ),
+                    );
+                    rokc_diagnostic::set_current_span(old);
+                }
+            }
+        }
+    }
+}
+
 fn check_impl_overlap(env: &Env<'_>) {
     let no_subst = HashMap::new();
     let ctx = LowerCtx::new(env, &no_subst, None);
@@ -2421,6 +2707,56 @@ fn impl_assoc_types(impl_def: &rokc_ast::ImplDef) -> HashMap<String, Ty> {
 
 /// Trait type parameter -> the impl's argument (or the parameter's
 /// default, `Self` meaning the impl target; spec 2.10.5).
+/// The value of a trait's const argument: a literal, a `const` item
+/// (`W`, looked up from `module` then the root) or a braced const
+/// expression over those (`{ W + 1 }`).
+fn const_arg_value(t: &Ty, consts: &HashMap<String, (Ty, Expr)>, module: &str) -> Option<i128> {
+    fn lookup(
+        name: &str,
+        consts: &HashMap<String, (Ty, Expr)>,
+        module: &str,
+        depth: u32,
+    ) -> Option<i128> {
+        let key = [format!("{module}::{name}"), name.to_owned()]
+            .into_iter()
+            .find(|k| consts.contains_key(k))?;
+        let value = rokc_ast::ConstExpr::Expr(Box::new(consts[&key].1.clone()));
+        // ponytail: depth cap instead of cycle detection.
+        (depth < 16).then(|| {
+            crate::ty::eval_const_with(&value, &|n| lookup(n, consts, module, depth + 1))
+        })?
+    }
+    let c = match &t.kind {
+        AstTyKind::Const(c) => c.clone(),
+        AstTyKind::Path(p) => rokc_ast::ConstExpr::Path(p.clone()),
+        _ => return None,
+    };
+    crate::ty::eval_const_with(&c, &|n| lookup(n, consts, module, 0))
+}
+
+/// `v` as a const type argument.
+fn const_literal_ty(v: i128, span: rokc_diagnostic::Span) -> Ty {
+    let lit = Expr {
+        kind: ExprKind::Literal(rokc_ast::Literal::Int(v.unsigned_abs().to_string())),
+        span,
+    };
+    let e = if v < 0 {
+        Expr {
+            kind: ExprKind::OpPrefix {
+                op: "-".to_owned(),
+                operand: Box::new(lit),
+            },
+            span,
+        }
+    } else {
+        lit
+    };
+    Ty {
+        kind: AstTyKind::Const(rokc_ast::ConstExpr::Expr(Box::new(e))),
+        span,
+    }
+}
+
 fn trait_param_args(t: &rokc_ast::TraitDef, impl_def: &rokc_ast::ImplDef) -> HashMap<String, Ty> {
     let given: &[Ty] = impl_def
         .trait_path
@@ -2429,8 +2765,9 @@ fn trait_param_args(t: &rokc_ast::TraitDef, impl_def: &rokc_ast::ImplDef) -> Has
         .map_or(&[], |s| s.generics.as_slice());
     let mut out = HashMap::new();
     for (i, gp) in t.generics.params.iter().enumerate() {
-        let rokc_ast::GenericParam::Type { name, default, .. } = gp else {
-            continue;
+        let (name, default) = match gp {
+            rokc_ast::GenericParam::Type { name, default, .. } => (name, default),
+            rokc_ast::GenericParam::Const { name, .. } => (name, &None),
         };
         let ty = given.get(i).cloned().or_else(|| {
             default.as_ref().map(|d| match &d.kind {
@@ -2504,7 +2841,7 @@ fn subst_assoc_sig(def: &mut FnDef, assoc: &HashMap<String, Ty>) {
     }
 }
 
-fn subst_assoc_ty(ty: &mut Ty, assoc: &HashMap<String, Ty>) {
+pub(super) fn subst_assoc_ty(ty: &mut Ty, assoc: &HashMap<String, Ty>) {
     match &mut ty.kind {
         AstTyKind::Path(p) => {
             let name = match p.segments.as_slice() {
@@ -2538,7 +2875,25 @@ fn subst_assoc_ty(ty: &mut Ty, assoc: &HashMap<String, Ty>) {
         AstTyKind::Sum(ps) | AstTyKind::Tuple(ps) => {
             ps.iter_mut().for_each(|t| subst_assoc_ty(t, assoc));
         }
-        AstTyKind::Array(e, _) => subst_assoc_ty(e, assoc),
+        AstTyKind::Array(e, len) => {
+            subst_assoc_ty(e, assoc);
+            // `[T; D]` with const parameter `D` given as `3`.
+            let name = match len {
+                rokc_ast::ConstExpr::Path(p) => {
+                    p.segments.first().filter(|_| p.segments.len() == 1)
+                }
+                rokc_ast::ConstExpr::Expr(e) => match &e.kind {
+                    ExprKind::Path(p) if p.segments.len() == 1 => p.segments.first(),
+                    _ => None,
+                },
+                rokc_ast::ConstExpr::Literal(_) => None,
+            };
+            if let Some(AstTyKind::Const(c)) =
+                name.and_then(|s| assoc.get(&s.name)).map(|t| &t.kind)
+            {
+                *len = c.clone();
+            }
+        }
         AstTyKind::Fn(args, ret, _) => {
             args.iter_mut().for_each(|t| subst_assoc_ty(t, assoc));
             subst_assoc_ty(ret, assoc);

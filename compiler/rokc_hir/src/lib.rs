@@ -380,6 +380,13 @@ pub enum HirExprKind {
         elem_ty: HirTy,
         elements: Vec<HirExpr>,
     },
+    /// `[v; len]` with a large `len`: `value` stored into every element
+    /// by a loop.
+    ArrayRepeat {
+        elem_ty: HirTy,
+        value: Box<HirExpr>,
+        len: u32,
+    },
     /// `buf_new::<T>(len)` — a zeroed `GcBuf<T>` of `len` elements.
     BufNew {
         elem: HirTy,
@@ -414,6 +421,17 @@ pub enum HirExprKind {
         buf: Box<HirExpr>,
         index: Box<HirExpr>,
         value: Box<HirExpr>,
+        elem: HirTy,
+    },
+    /// `#[intrinsic("rok.atomic.OP")]` (stdlib 2.16.2): atomic `op`
+    /// (`load`, `xchg`, `add`, `sub`, `and`, `or`, `xor`, `cas`) on
+    /// element `i` of an integer / `bool` buffer. Yields the element's
+    /// previous value; `args` are the operand (`cas`: expected, new).
+    BufAtomic {
+        op: &'static str,
+        buf: Box<HirExpr>,
+        index: Box<HirExpr>,
+        args: Vec<HirExpr>,
         elem: HirTy,
     },
     // `arr[idx]` — element read.
@@ -460,6 +478,12 @@ pub enum HirPattern {
     Wildcard,
     /// `name` — matches anything and binds the value to a fresh local.
     Binding { local: LocalId, ty: HirTy },
+    /// `name @ sub` — matches like `sub` and binds the whole value.
+    At {
+        local: LocalId,
+        ty: HirTy,
+        sub: Box<HirPattern>,
+    },
     /// `42i32`, `"foo"`, `true` — matches when the scrutinee equals
     /// the constant value.
     Literal { value: ConstVal, prim: PrimTy },
@@ -496,6 +520,24 @@ pub enum HirPattern {
         binder: Option<LocalId>,
         payload_ty: Option<HirTy>,
     },
+}
+
+impl HirPattern {
+    /// Matches every value of its type (no refutable sub-pattern).
+    #[must_use]
+    pub fn is_irrefutable(&self) -> bool {
+        match self {
+            Self::Wildcard | Self::Binding { .. } => true,
+            Self::At { sub, .. } => sub.is_irrefutable(),
+            Self::Tuple(parts) => parts.iter().all(Self::is_irrefutable),
+            Self::Struct { fields, .. } => fields.iter().all(|(_, p)| p.is_irrefutable()),
+            Self::Or(alts) => alts.iter().any(Self::is_irrefutable),
+            Self::Literal { .. }
+            | Self::Range { .. }
+            | Self::EnumVariant { .. }
+            | Self::SumVariant { .. } => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -38,6 +38,10 @@ pub const UNSAFE_FN_MARK: &str = "#unsafe";
 /// its generics are `[T, Tr]`.
 pub const QPATH_MARK: &str = "#as";
 
+/// Method name of the `using` desugar's release call (`x.#drop()`):
+/// `Drop::drop`, exempt from the direct-call ban (spec 2.13.4).
+pub const USING_DROP_METHOD: &str = "#drop";
+
 /// Error type written for an untyped `throws` (= `throws (any Error)`).
 pub const UNTYPED_THROWS_MARK: &str = "#throws";
 
@@ -214,6 +218,11 @@ pub enum ExprKind {
     SelfUpper,
     Tuple(Vec<Expr>),
     List(Vec<Expr>),
+    /// `[v; N]` — `v` repeated `N` times, a `[T; N]` (spec 2.11).
+    ArrayRepeat {
+        value: Box<Expr>,
+        len: ConstExpr,
+    },
     Dict(Vec<(Expr, Expr)>),
     Set(Vec<Expr>),
     Block(Block),
@@ -506,6 +515,8 @@ pub struct StructDef {
     pub name: String,
     pub generics: Generics,
     pub kind: StructKind,
+    /// `where` predicates after the header (spec 2.10.4).
+    pub where_clause: Vec<WherePred>,
     pub span: Span,
 }
 
@@ -541,6 +552,8 @@ pub struct EnumDef {
     pub name: String,
     pub generics: Generics,
     pub variants: Vec<EnumVariant>,
+    /// `where` predicates after the header (spec 2.10.4).
+    pub where_clause: Vec<WherePred>,
     pub span: Span,
 }
 
@@ -567,6 +580,8 @@ pub struct UnionDef {
     pub name: String,
     pub generics: Generics,
     pub fields: Vec<NamedField>,
+    /// `where` predicates after the header (spec 2.10.4).
+    pub where_clause: Vec<WherePred>,
     pub span: Span,
 }
 
@@ -590,7 +605,12 @@ pub enum TraitItem {
         bounds: Vec<Ty>,
         default: Option<Ty>,
     },
-    Const(ConstDef),
+    /// `const N: T;` / `const N: T = v;` (spec 2.8.3a).
+    Const {
+        name: String,
+        ty: Ty,
+        default: Option<Expr>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -644,6 +664,8 @@ pub struct TypeAliasDef {
     pub name: String,
     pub generics: Generics,
     pub ty: Ty,
+    /// `where` predicates after the header (spec 2.10.4).
+    pub where_clause: Vec<WherePred>,
     pub span: Span,
 }
 

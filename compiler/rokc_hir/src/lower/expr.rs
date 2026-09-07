@@ -842,6 +842,9 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             if let Some(tc) = trailing_closure {
                 all_args.push(rokc_ast::CallArg::Positional((**tc).clone()));
             }
+            if let ExprKind::Path(p) = &callee.kind {
+                check_direct_drop_path(ctx, p);
+            }
             let call = match &callee.kind {
                 ExprKind::Path(p) if p.segments[0].name == rokc_ast::QPATH_MARK => {
                     qpath_call(ctx, &p.segments, &all_args, span)
@@ -863,6 +866,10 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             }
             let recv_h = lower_expected(ctx, receiver, HirTy::Unknown);
             ctx.method_type_args.clone_from(type_args);
+            let method = match drop_method(ctx, &recv_h.ty, method, span) {
+                Ok(m) => m,
+                Err(e) => return e,
+            };
             let call = method_call_on(ctx, recv_h, method, &all_args, span);
             unpack_call(ctx, call)
         }
@@ -986,6 +993,7 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             }
         }
         ExprKind::List(items) => lower_list_lit(ctx, items, span),
+        ExprKind::ArrayRepeat { value, len } => lower_array_repeat(ctx, value, len, span),
         ExprKind::Index(arr, idx) => {
             let arr_h = lower_expected(ctx, arr, HirTy::Unknown);
             // A struct / enum indexes through `Index::index` (spec 3.6).
@@ -2422,7 +2430,12 @@ pub(super) fn call_sig(
         let v = super::mono::ref_unpack(ctx, call, &out, &places);
         return with_lets(lets, v);
     }
-    if ctx.env.extern_fn_ids.contains(&sig.id) {
+    // `rok_thread_spawn` takes a `fn` value as the whole `{code, env}`.
+    let runtime_sym = callee
+        .rsplit("::")
+        .next()
+        .is_some_and(rokc_ir_common::takes_rok_fn_values);
+    if ctx.env.extern_fn_ids.contains(&sig.id) && !runtime_sym {
         for a in &lowered {
             if matches!(a.ty, HirTy::Fn(..) | HirTy::Closure { .. })
                 && !matches!(a.kind, HirExprKind::FnRef(_))
@@ -2551,6 +2564,94 @@ fn ast_ty_mentions(ty: &Ty, name: &str) -> bool {
 }
 
 /// Method call on an already-lowered receiver (also used by `?.`).
+/// Key of the `Drop` trait (`library/core/marker.rok`).
+const DROP_TRAIT: &str = "rok::core::marker::Drop";
+
+/// `x.drop()` is banned when it is `Drop::drop`; the `using` desugar's
+/// `x.#drop()` is `drop` on a type that must implement `Drop`
+/// (spec 3.17.7).
+fn drop_method<'m>(
+    ctx: &LowerCtx<'_>,
+    recv_ty: &HirTy,
+    method: &'m str,
+    span: rokc_diagnostic::Span,
+) -> Result<&'m str, HirExpr> {
+    match method {
+        rokc_ast::USING_DROP_METHOD => {
+            if *recv_ty != HirTy::Unknown && !ctx.implements_trait(recv_ty, DROP_TRAIT, 0) {
+                return Err(ctx.error_expr(
+                    span,
+                    format!(
+                        "`using` needs a resource whose type implements `Drop`; `{}` does not \
+                         implement `Drop` (spec 3.17.7)",
+                        ctx.ty_name(recv_ty)
+                    ),
+                ));
+            }
+            Ok("drop")
+        }
+        "drop" if is_drop_method(ctx, recv_ty) => {
+            direct_drop_error(ctx, span).map_or(Ok("drop"), Err)
+        }
+        m => Ok(m),
+    }
+}
+
+/// Does `ty`'s `drop` method come from `Drop`?
+fn is_drop_method(ctx: &LowerCtx<'_>, ty: &HirTy) -> bool {
+    let trait_name = match pick_method(ctx, ty, "drop", None) {
+        Ok(Some(MethodPick::Concrete(id))) => ctx
+            .env
+            .method_info
+            .get(&id)
+            .and_then(|i| i.trait_name.clone()),
+        Ok(Some(MethodPick::Generic(gm))) => gm.info.trait_name.clone(),
+        _ => None,
+    };
+    trait_name.as_deref() == Some(DROP_TRAIT)
+}
+
+/// Spec 2.13.4: `Drop::drop` runs only when a `using` block exits;
+/// calling it directly is an error. `unsafe` code in the bare tier
+/// (`drop_in_place`) is exempt.
+fn direct_drop_error(ctx: &LowerCtx<'_>, span: rokc_diagnostic::Span) -> Option<HirExpr> {
+    if ctx.unsafe_depth > 0 && ctx.current_module.starts_with("rok::bare") {
+        return None;
+    }
+    Some(
+        ctx.error_expr(
+            span,
+            "`Drop::drop` cannot be called directly; it runs when a `using` block exits \
+         (spec 2.13.4) — expose a method such as `close()` to release early"
+                .to_owned(),
+        ),
+    )
+}
+
+/// `Drop::drop(x)` / `File::drop(f)` / `T::drop(x)`.
+fn check_direct_drop_path(ctx: &LowerCtx<'_>, p: &rokc_ast::Path) {
+    let [prefix @ .., last] = p.segments.as_slice() else {
+        return;
+    };
+    if last.name != "drop" || prefix.is_empty() {
+        return;
+    }
+    let segs: Vec<&str> = prefix.iter().map(|s| s.name.as_str()).collect();
+    let is_drop = ctx.env.names.trait_key(&segs, &ctx.current_module) == DROP_TRAIT || {
+        let ty = ctx.resolve_ast_ty(&rokc_ast::Ty {
+            kind: rokc_ast::TyKind::Path(rokc_ast::Path {
+                segments: prefix.to_vec(),
+                span: p.span,
+            }),
+            span: p.span,
+        });
+        is_drop_method(ctx, &ty)
+    };
+    if is_drop {
+        direct_drop_error(ctx, p.span);
+    }
+}
+
 pub(super) fn method_call_on(
     ctx: &mut LowerCtx<'_>,
     recv_h: HirExpr,
@@ -3518,6 +3619,17 @@ pub(super) fn call_generic_on(
         }
         lowered.push(h);
     }
+    // Missing trailing arguments take their declared defaults, lowered
+    // at the call site like a non-generic call's (`ordering = SeqCst`).
+    while let Some(d) = def
+        .params
+        .get(lowered.len())
+        .and_then(|p| p.default.clone())
+    {
+        let h = lower_expected(ctx, &d, HirTy::Unknown);
+        bind_from_arg(ctx, def, self_ty, lowered.len(), &h.ty, &mut subst);
+        lowered.push(h);
+    }
     check_ref_exclusive(ctx, callee, &lowered, &places, &reads, has_receiver);
     if lowered.len() != def.params.len() {
         return ctx.error_expr(
@@ -3645,6 +3757,9 @@ pub(super) fn lower_call(
             let targs = p.segments.last().map_or(&[][..], |s| s.generics.as_slice());
             if let Some(raw) = lower_raw_intrinsic(ctx, op, targs, args, span) {
                 return raw;
+            }
+            if let Some(atomic) = op.strip_prefix("atomic_") {
+                return lower_atomic_intrinsic(ctx, atomic, args, span);
             }
             return lower_buf_intrinsic(ctx, op, args, span);
         }
@@ -4069,6 +4184,12 @@ fn qpath_call(
         discard_args(ctx, args);
         return ctx.error_expr(span, format!("`{display}`: not a trait after `as`"));
     };
+    if method == "drop" && key == DROP_TRAIT {
+        if let Some(e) = direct_drop_error(ctx, span) {
+            discard_args(ctx, args);
+            return e;
+        }
+    }
     let (recv, rest) = match args.split_first() {
         Some((a @ (CallArg::Positional(e) | CallArg::Ref(e)), rest)) => {
             let r = lower_expected(ctx, e, t.clone());
@@ -4235,6 +4356,66 @@ fn lower_list_lit(ctx: &mut LowerCtx<'_>, items: &[Expr], span: rokc_diagnostic:
     }
 }
 
+/// `[v; N]`: `v` evaluated once, then copied into each element (one
+/// node per element up to `REPEAT_UNROLL`, a fill loop beyond).
+fn lower_array_repeat(
+    ctx: &mut LowerCtx<'_>,
+    value: &Expr,
+    len: &rokc_ast::ConstExpr,
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let elem_hint = match ctx.current_expected() {
+        Some(HirTy::Array(e, _)) => (**e).clone(),
+        _ => HirTy::Unknown,
+    };
+    let v = lower_expected(ctx, value, elem_hint.clone());
+    let v = if elem_hint == HirTy::Unknown {
+        v
+    } else {
+        coerce(ctx, &elem_hint, v, &|| "array repeat value".to_owned())
+    };
+    let Some(n) = ctx.eval_const(len).and_then(|n| u32::try_from(n).ok()) else {
+        return ctx.error_expr(
+            span,
+            "the length of `[v; N]` must be a non-negative compile-time integer (spec 2.11)"
+                .to_owned(),
+        );
+    };
+    let elem_ty = v.ty.clone();
+    let tmp = ctx.declare(None, elem_ty.clone());
+    let ty = HirTy::Array(Box::new(elem_ty.clone()), n);
+    HirExpr {
+        kind: HirExprKind::Block(Box::new(HirBlock {
+            stmts: vec![HirStmt::Let {
+                local: tmp,
+                init: v,
+            }],
+            trailing: Some(HirExpr {
+                kind: if n > REPEAT_UNROLL {
+                    HirExprKind::ArrayRepeat {
+                        value: Box::new(hir_local(tmp, &elem_ty, span)),
+                        elem_ty,
+                        len: n,
+                    }
+                } else {
+                    HirExprKind::ArrayInit {
+                        elements: (0..n).map(|_| hir_local(tmp, &elem_ty, span)).collect(),
+                        elem_ty,
+                    }
+                },
+                ty: ty.clone(),
+                span,
+            }),
+            label: None,
+        })),
+        ty,
+        span,
+    }
+}
+
+/// Longest `[v; N]` lowered element by element.
+const REPEAT_UNROLL: u32 = 16;
+
 const LIST: &str = "rok::core::collections::list::List";
 const SET: &str = "rok::core::collections::set::Set";
 const DICT: &str = "rok::core::collections::dict::Dict";
@@ -4342,6 +4523,14 @@ fn buf_intrinsic(def: &FnDef) -> Option<&'static str> {
             "rok.ptr.write_volatile" => Some("ptr_write_volatile"),
             "rok.size_of" => Some("size_of"),
             "rok.align_of" => Some("align_of"),
+            "rok.atomic.load" => Some("atomic_load"),
+            "rok.atomic.xchg" => Some("atomic_xchg"),
+            "rok.atomic.add" => Some("atomic_add"),
+            "rok.atomic.sub" => Some("atomic_sub"),
+            "rok.atomic.and" => Some("atomic_and"),
+            "rok.atomic.or" => Some("atomic_or"),
+            "rok.atomic.xor" => Some("atomic_xor"),
+            "rok.atomic.cas" => Some("atomic_cas"),
             _ => None,
         },
         _ => None,
@@ -4444,6 +4633,88 @@ fn lower_raw_intrinsic(
             span,
         }
     })
+}
+
+/// `atomic_OP(buf, i, operands..)` over a `GcBuf<T>` of an integer or
+/// `bool` `T`; yields the element's previous value.
+fn lower_atomic_intrinsic(
+    ctx: &mut LowerCtx<'_>,
+    op: &str,
+    args: &[CallArg],
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let op: &'static str = match op {
+        "load" => "load",
+        "xchg" => "xchg",
+        "add" => "add",
+        "sub" => "sub",
+        "and" => "and",
+        "or" => "or",
+        "xor" => "xor",
+        _ => "cas",
+    };
+    let pos: Vec<&Expr> = args
+        .iter()
+        .filter_map(|a| match a {
+            CallArg::Positional(e) => Some(e),
+            _ => None,
+        })
+        .collect();
+    let want = match op {
+        "load" => 2,
+        "cas" => 4,
+        _ => 3,
+    };
+    if pos.len() != want || args.len() != want {
+        discard_args(ctx, args);
+        return ctx.error_expr(span, format!("`atomic_{op}` takes {want} argument(s)"));
+    }
+    let buf = lower_expected(ctx, pos[0], HirTy::Unknown);
+    let elem = match &buf.ty {
+        HirTy::GcBuf(e) if matches!(**e, HirTy::Prim(p) if p.is_int() || p == PrimTy::Bool) => {
+            (**e).clone()
+        }
+        HirTy::Unknown => {
+            discard_args(ctx, &args[1..]);
+            return buf;
+        }
+        other => {
+            let msg = format!(
+                "`atomic_{op}` needs a `GcBuf` of an integer or `bool`, found `{}`",
+                ctx.ty_name(other)
+            );
+            discard_args(ctx, &args[1..]);
+            return ctx.error_expr(span, msg);
+        }
+    };
+    if elem == HirTy::Prim(PrimTy::Bool) && matches!(op, "add" | "sub") {
+        discard_args(ctx, &args[1..]);
+        return ctx.error_expr(
+            span,
+            format!("`atomic_{op}` needs an integer, found `bool`"),
+        );
+    }
+    let usize_ty = HirTy::Prim(PrimTy::Usize);
+    let i = lower_expected(ctx, pos[1], usize_ty.clone());
+    let i = coerce(ctx, &usize_ty, i, &|| "the buffer index".to_owned());
+    let operands = pos[2..]
+        .iter()
+        .map(|e| {
+            let v = lower_expected(ctx, e, elem.clone());
+            coerce(ctx, &elem, v, &|| "the atomic operand".to_owned())
+        })
+        .collect();
+    HirExpr {
+        ty: elem.clone(),
+        kind: HirExprKind::BufAtomic {
+            op,
+            buf: Box::new(buf),
+            index: Box::new(i),
+            args: operands,
+            elem,
+        },
+        span,
+    }
 }
 
 fn lower_buf_intrinsic(
@@ -5065,6 +5336,61 @@ pub(super) fn self_path_segs(ctx: &LowerCtx<'_>, p: &AstPath) -> Vec<String> {
         .collect()
 }
 
+/// Associated const `name` of concrete type `ty` (from one of `traits`
+/// when given): a non-generic impl of exactly `ty` first,
+/// then a generic / blanket one whose target and bounds `ty` meets.
+// ponytail: the value is lowered here, so its names resolve in the
+// caller's module and it can't use the impl's type parameters.
+fn lower_assoc_const(
+    ctx: &mut LowerCtx<'_>,
+    ty: &HirTy,
+    name: &str,
+    traits: Option<&[String]>,
+) -> Option<HirExpr> {
+    let env = ctx.env;
+    let mut hit: Option<(&ImplConsts, HashMap<String, HirTy>)> = None;
+    for set in &env.impl_consts {
+        if traits.is_some_and(|ks| !ks.contains(&set.target.trait_key))
+            || !set.consts.iter().any(|(n, ..)| n == name)
+        {
+            continue;
+        }
+        let Some(subst) = ctx.generic_impl_subst(&set.target, ty, 0) else {
+            continue;
+        };
+        let generic = !set.target.generics.params.is_empty();
+        if hit.is_none() || !generic {
+            hit = Some((set, subst));
+            if !generic {
+                break;
+            }
+        }
+    }
+    let (set, subst) = hit?;
+    let (_, cty, value) = set.consts.iter().find(|(n, ..)| n == name)?;
+    let sc = Scope {
+        names: &env.names,
+        module: &set.target.module,
+    };
+    let mut cty =
+        super::mono::resolve_ast_with_subst(cty, &env.struct_table, &env.enum_table, &subst, sc);
+    substitute_aliases(&mut cty, &env.type_aliases);
+    let v = lower_expected(ctx, value, cty.clone());
+    Some(coerce(ctx, &cty, v, &|| {
+        format!("associated const `{name}`")
+    }))
+}
+
+/// The name a type's associated consts are keyed under (`impl_consts`).
+fn const_owner(ctx: &LowerCtx<'_>, ty: &HirTy) -> Option<String> {
+    match ty {
+        HirTy::Struct(id) => Some(enum_base_name(&ctx.struct_def(*id).name).to_owned()),
+        HirTy::Enum(id) => Some(enum_base_name(&ctx.enum_def(*id).name).to_owned()),
+        HirTy::Prim(p) => Some(p.name().to_owned()),
+        _ => None,
+    }
+}
+
 pub(super) fn lower_path(
     ctx: &mut LowerCtx<'_>,
     path: &AstPath,
@@ -5093,8 +5419,61 @@ pub(super) fn lower_path(
         }
     }
     // Module-level `const NAME: T = expr;` — inline the value at the
-    // use site, typed by the const's declaration.
-    if let Some(full) = ctx.resolve_in(&segs, &ctx.env.consts) {
+    // use site, typed by the const's declaration. `T::N` / `Self::N`
+    // on a type parameter or `Self` reads the concrete type's const
+    // (spec 2.8.3a).
+    // `<T as Tr>::N` (spec 2.13.4 qualified path).
+    if let [q, name] = path.segments.as_slice() {
+        if let (rokc_ast::QPATH_MARK, [self_ty, tr]) = (q.name.as_str(), q.generics.as_slice()) {
+            let t = ctx.resolve_ast_ty(self_ty);
+            let key = match &tr.kind {
+                AstTyKind::Path(tp) => {
+                    let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
+                    ctx.env.names.trait_key(&segs, &ctx.current_module)
+                }
+                _ => String::new(),
+            };
+            if let Some(v) = lower_assoc_const(ctx, &t, &name.name, Some(&[key])) {
+                return v;
+            }
+        }
+    }
+    // `T::N` / `Self::N` on a concrete type: the impl that covers it.
+    if let [owner, name] = path.segments.as_slice() {
+        let ty = match owner.name.as_str() {
+            "Self" => ctx.self_ty.clone(),
+            n => ctx
+                .ty_subst
+                .get(n)
+                .or_else(|| ctx.explicit_generics.get(n))
+                .cloned(),
+        };
+        // A type parameter reads the const of a trait it is bounded by.
+        let bounds = ctx.ty_bounds.get(&owner.name).cloned();
+        if let Some(v) = ty
+            .filter(|_| owner.generics.is_empty())
+            .and_then(|t| lower_assoc_const(ctx, &t, &name.name, bounds.as_deref()))
+        {
+            return v;
+        }
+    }
+    let assoc = match path.segments.as_slice() {
+        [owner, name] if owner.generics.is_empty() => {
+            let ty = if owner.name == "Self" {
+                ctx.self_ty.clone()
+            } else {
+                ctx.ty_subst
+                    .get(&owner.name)
+                    .or_else(|| ctx.explicit_generics.get(&owner.name))
+                    .cloned()
+            };
+            ty.and_then(|t| const_owner(ctx, &t))
+                .map(|o| format!("{o}::{}", name.name))
+                .filter(|k| ctx.env.consts.contains_key(k))
+        }
+        _ => None,
+    };
+    if let Some(full) = assoc.or_else(|| ctx.resolve_in(&segs, &ctx.env.consts)) {
         ctx.check_item_visible(&full, "const");
         let (ty, value) = ctx.env.consts[&full].clone();
         // An impl const `m::T::N` resolves its type and value in `m`.

@@ -217,6 +217,15 @@ pub enum RValue {
         index: Operand,
         elem_ty: MirTy,
     },
+    // Atomic `op` on element `index` of a `BufAlloc` object (see
+    // `HirExprKind::BufAtomic`); yields the previous value.
+    BufAtomic {
+        op: &'static str,
+        buf: Operand,
+        index: Operand,
+        args: Vec<Operand>,
+        elem_ty: MirTy,
+    },
     // Load the `ty` payload of the `GcRef` `ptr` (a `HeapBox` object),
     // or unpack an inline payload.
     HeapLoad {

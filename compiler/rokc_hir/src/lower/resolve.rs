@@ -306,6 +306,9 @@ pub(super) fn resolve_ty_with_structs(
             if matches!(prim, HirTy::Prim(_)) {
                 return prim;
             }
+            if let Some(t) = sc.names.expand_alias(ty, sc.module) {
+                return rec(&t);
+            }
             let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
             let generics = p.segments.last().map_or(&[][..], |s| s.generics.as_slice());
             let Some(full) = sc.names.canon(&segs, sc.module, &[]) else {
@@ -344,13 +347,7 @@ pub(super) fn resolve_ty_with_structs(
             HirTy::Path(vec![full])
         }
         AstTyKind::Array(elem, len) => {
-            let n = match len {
-                rokc_ast::ConstExpr::Literal(rokc_ast::Literal::Int(s)) => {
-                    let cleaned: String = s.chars().filter(|c| *c != '_').collect();
-                    cleaned.parse::<u32>().ok()
-                }
-                _ => None,
-            };
+            let n = crate::ty::eval_const_with(len, &|_| None).and_then(|n| u32::try_from(n).ok());
             let Some(n) = n else {
                 sc.names.error(
                     "array length must be an integer literal (stage-1 limitation)".to_owned(),

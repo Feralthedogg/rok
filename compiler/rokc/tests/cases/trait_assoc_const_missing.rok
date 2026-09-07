@@ -1,0 +1,13 @@
+// expect-error: impl of `Shape` for `Dot` is missing associated const `SIDES`
+// Spec 2.8.3a: a const without a default must be given by every impl.
+trait Shape {
+    const SIDES: u32;
+}
+
+struct Dot { x: i32; }
+
+impl Shape for Dot {}
+
+fn main() -> i32 {
+    return 0;
+}

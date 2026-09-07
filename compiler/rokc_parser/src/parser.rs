@@ -845,8 +845,11 @@ impl<'a> Parser<'a> {
             return None;
         };
         let generics = self.parse_generic_params();
+        let mut where_clause = self.parse_where_clause();
         self.expect(&TokenKind::Eq, "`=`")?;
         let ty = self.parse_type()?;
+        // `type A<T> = B<T> where T: X;` reads the same.
+        where_clause.extend(self.parse_where_clause());
         self.expect(&TokenKind::Semi, "`;`")?;
         Some(rokc_ast::TypeAliasDef {
             vis,
@@ -854,6 +857,7 @@ impl<'a> Parser<'a> {
             name,
             generics,
             ty,
+            where_clause,
             span: start,
         })
     }
@@ -955,6 +959,7 @@ impl<'a> Parser<'a> {
         } else {
             Generics::default()
         };
+        let mut where_clause = self.parse_where_clause();
 
         let kind = match self.peek().clone() {
             TokenKind::Semi => {
@@ -981,6 +986,8 @@ impl<'a> Parser<'a> {
                     }
                 }
                 self.expect(&TokenKind::RParen, "`)`")?;
+                // `struct P<T>(T) where T: X;` reads the same.
+                where_clause.extend(self.parse_where_clause());
                 self.expect(&TokenKind::Semi, "`;`")?;
                 StructKind::Tuple(fields)
             }
@@ -996,6 +1003,7 @@ impl<'a> Parser<'a> {
             name,
             generics,
             kind,
+            where_clause,
             span: start,
         })
     }
@@ -1019,6 +1027,7 @@ impl<'a> Parser<'a> {
         } else {
             Generics::default()
         };
+        let where_clause = self.parse_where_clause();
         let fields = self.parse_named_fields(false)?;
         Some(UnionDef {
             vis,
@@ -1026,6 +1035,7 @@ impl<'a> Parser<'a> {
             name,
             generics,
             fields,
+            where_clause,
             span: start,
         })
     }
@@ -1181,6 +1191,7 @@ impl<'a> Parser<'a> {
         } else {
             Generics::default()
         };
+        let where_clause = self.parse_where_clause();
         self.expect(&TokenKind::LBrace, "`{`")?;
 
         let mut variants = Vec::new();
@@ -1249,6 +1260,7 @@ impl<'a> Parser<'a> {
             name,
             generics,
             variants,
+            where_clause,
             span: start,
         })
     }
@@ -1516,6 +1528,24 @@ impl<'a> Parser<'a> {
                 let f = self.parse_fn(vis, attrs)?;
                 Some(TraitItem::Method(f))
             }
+            TokenKind::Ident(k) if k == "const" => {
+                self.bump();
+                let TokenKind::Ident(name) = self.peek().clone() else {
+                    let s = self.peek_span();
+                    self.error(s, "associated const name expected");
+                    return None;
+                };
+                self.bump();
+                self.expect(&TokenKind::Colon, "`:`")?;
+                let ty = self.parse_type()?;
+                let default = if self.eat(&TokenKind::Eq) {
+                    Some(self.parse_expr()?)
+                } else {
+                    None
+                };
+                self.expect(&TokenKind::Semi, "`;`")?;
+                Some(TraitItem::Const { name, ty, default })
+            }
             TokenKind::Ident(k) if k == "type" => {
                 self.bump();
                 let name = if let TokenKind::Ident(n) = self.peek().clone() {
@@ -1620,6 +1650,12 @@ impl<'a> Parser<'a> {
                     self.error(s, "binding name expected");
                     return None;
                 };
+                // `n @ (x, y)`: bind `n`, then destructure it.
+                if self.eat(&TokenKind::At) {
+                    let inner_span = self.peek_span();
+                    let sub = self.parse_let_sub_pattern(&n, inner_span)?;
+                    self.pending_stmts.push(sub);
+                }
                 names.push(n);
             }
             if !self.eat(&TokenKind::Comma) {
@@ -1628,6 +1664,89 @@ impl<'a> Parser<'a> {
         }
         self.expect(&TokenKind::RParen, "`)`")?;
         Some((names, rest))
+    }
+
+    /// The `(a, b)` / `Point { x, .. }` after `let name @`: a destructure
+    /// of `name` (spec 3.11 binding pattern).
+    fn parse_let_sub_pattern(&mut self, name: &str, span: Span) -> Option<Stmt> {
+        let init = Expr {
+            span,
+            kind: ExprKind::Path(Path {
+                segments: vec![PathSegment {
+                    name: name.to_owned(),
+                    generics: Vec::new(),
+                }],
+                span,
+            }),
+        };
+        let kind = if matches!(self.peek(), TokenKind::LParen) {
+            let (names, rest) = self.parse_let_tuple_pattern(span)?;
+            StmtKind::LetTuple {
+                names,
+                rest,
+                ty: None,
+                init,
+            }
+        } else if self.peek_path_then_lbrace() {
+            let (path, fields, rest) = self.parse_let_struct_fields()?;
+            StmtKind::LetStruct {
+                path,
+                fields,
+                rest,
+                ty: None,
+                init,
+            }
+        } else {
+            self.error(
+                span,
+                "a tuple `(..)` or struct `Name { .. }` pattern expected after `@` in `let`",
+            );
+            return None;
+        };
+        Some(Stmt { kind, span })
+    }
+
+    /// `Path { f, g: alias, .. }` of a `let` struct destructure:
+    /// the path, `(field, binding)` pairs, and whether `..` ends it.
+    #[allow(clippy::type_complexity)]
+    fn parse_let_struct_fields(&mut self) -> Option<(Path, Vec<(String, String)>, bool)> {
+        let path = self.parse_path()?;
+        self.expect(&TokenKind::LBrace, "`{`")?;
+        let mut fields: Vec<(String, String)> = Vec::new();
+        let mut rest = false;
+        while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
+            if matches!(self.peek(), TokenKind::DotDot) {
+                self.bump();
+                rest = true;
+                break;
+            }
+            let field_name = if let Some(n) = self.peek_name() {
+                self.bump();
+                n
+            } else {
+                let s = self.peek_span();
+                self.error(s, "field name expected");
+                return None;
+            };
+            let bind_name = if self.eat(&TokenKind::Colon) {
+                if let TokenKind::Ident(n) = self.peek().clone() {
+                    self.bump();
+                    n
+                } else {
+                    let s = self.peek_span();
+                    self.error(s, "rebind name expected");
+                    return None;
+                }
+            } else {
+                field_name.clone()
+            };
+            fields.push((field_name, bind_name));
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RBrace, "`}`")?;
+        Some((path, fields, rest))
     }
 
     fn parse_visibility(&mut self) -> Visibility {
@@ -1820,6 +1939,18 @@ impl<'a> Parser<'a> {
                 return bounds;
             }
         }
+    }
+
+    /// The `N` of `[T; N]` / `[v; N]`: a const expression (`3`, `N`,
+    /// `M * N`, spec 2.11.5).
+    fn parse_const_len(&mut self) -> Option<ConstExpr> {
+        Some(match (self.peek().clone(), self.peek_next()) {
+            (TokenKind::IntLit(s), Some(TokenKind::RBracket)) => {
+                self.bump();
+                ConstExpr::Literal(Literal::Int(s))
+            }
+            _ => ConstExpr::Expr(Box::new(self.with_struct_expr(false, Self::parse_expr)?)),
+        })
     }
 
     /// Optional `where T: A + B, U::Out: C` (spec 2.10.4).
@@ -2090,14 +2221,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let elem = self.with_type_sum(true, Self::parse_type)?;
                 self.expect(&TokenKind::Semi, "`;`")?;
-                // Spec 2.11.5: a const expression (`3`, `N`, `M * N`).
-                let len = match (self.peek().clone(), self.peek_next()) {
-                    (TokenKind::IntLit(s), Some(TokenKind::RBracket)) => {
-                        self.bump();
-                        ConstExpr::Literal(Literal::Int(s))
-                    }
-                    _ => ConstExpr::Expr(Box::new(self.with_struct_expr(false, Self::parse_expr)?)),
-                };
+                let len = self.parse_const_len()?;
                 self.expect(&TokenKind::RBracket, "`]`")?;
                 TyKind::Array(Box::new(elem), len)
             }
@@ -2451,42 +2575,7 @@ impl<'a> Parser<'a> {
                 // followed by `{` is a struct pattern — no capitalisation
                 // or pre-scanned type-name table involved.
                 if self.peek_path_then_lbrace() {
-                    let path = self.parse_path()?;
-                    self.expect(&TokenKind::LBrace, "`{`")?;
-                    let mut fields: Vec<(String, String)> = Vec::new();
-                    let mut rest = false;
-                    while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
-                        if matches!(self.peek(), TokenKind::DotDot) {
-                            self.bump();
-                            rest = true;
-                            break;
-                        }
-                        let field_name = if let Some(n) = self.peek_name() {
-                            self.bump();
-                            n
-                        } else {
-                            let s = self.peek_span();
-                            self.error(s, "field name expected");
-                            return None;
-                        };
-                        let bind_name = if self.eat(&TokenKind::Colon) {
-                            if let TokenKind::Ident(n) = self.peek().clone() {
-                                self.bump();
-                                n
-                            } else {
-                                let s = self.peek_span();
-                                self.error(s, "rebind name expected");
-                                return None;
-                            }
-                        } else {
-                            field_name.clone()
-                        };
-                        fields.push((field_name, bind_name));
-                        if !self.eat(&TokenKind::Comma) {
-                            break;
-                        }
-                    }
-                    self.expect(&TokenKind::RBrace, "`}`")?;
+                    let (path, fields, rest) = self.parse_let_struct_fields()?;
                     let ty = if self.eat(&TokenKind::Colon) {
                         Some(self.parse_type()?)
                     } else {
@@ -2544,6 +2633,14 @@ impl<'a> Parser<'a> {
                     return None;
                 };
                 self.bump();
+                // `let whole @ (a, b) = init;` → `let whole = init;` then
+                // a destructure of `whole`.
+                let sub = if self.eat(&TokenKind::At) {
+                    let s = self.peek_span();
+                    Some(self.parse_let_sub_pattern(&name, s)?)
+                } else {
+                    None
+                };
                 let ty = if self.eat(&TokenKind::Colon) {
                     Some(self.parse_type()?)
                 } else {
@@ -2551,6 +2648,17 @@ impl<'a> Parser<'a> {
                 };
                 self.expect(&TokenKind::Eq, "`=`")?;
                 let init = self.parse_expr()?;
+                if let Some(sub) = sub {
+                    self.expect(&TokenKind::Semi, "`;`")?;
+                    self.pending_stmts.push(sub);
+                    return Some((
+                        Stmt {
+                            kind: StmtKind::Let { name, ty, init },
+                            span: start,
+                        },
+                        false,
+                    ));
+                }
                 // `let name [: T] = expr else { ... };` — let-else.
                 // Desugar to `let name [: T] = match expr { v: T => v, _ => { else_body } };`
                 // where the wildcard arm runs the divergent else block.
@@ -3169,7 +3277,7 @@ impl<'a> Parser<'a> {
                             span,
                             kind: ExprKind::MethodCall {
                                 receiver: Box::new(path(&name)),
-                                method: "drop".to_owned(),
+                                method: rokc_ast::USING_DROP_METHOD.to_owned(),
                                 type_args: Vec::new(),
                                 args: Vec::new(),
                                 trailing_closure: None,
@@ -3652,10 +3760,20 @@ impl<'a> Parser<'a> {
             }
             TokenKind::LBracket => {
                 self.bump();
-                let (items, _) =
+                let (mut items, trailing_comma) =
                     self.with_struct_expr(true, |p| p.expr_list(&TokenKind::RBracket))?;
-                self.expect(&TokenKind::RBracket, "`]`")?;
-                ExprKind::List(items)
+                // `[v; N]` repeat literal (spec 2.11).
+                if items.len() == 1 && !trailing_comma && self.eat(&TokenKind::Semi) {
+                    let len = self.parse_const_len()?;
+                    self.expect(&TokenKind::RBracket, "`]`")?;
+                    ExprKind::ArrayRepeat {
+                        value: Box::new(items.pop()?),
+                        len,
+                    }
+                } else {
+                    self.expect(&TokenKind::RBracket, "`]`")?;
+                    ExprKind::List(items)
+                }
             }
             TokenKind::Await => {
                 // Spec 4.12: `await expr` extracts the result of a Future.
@@ -4351,6 +4469,17 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// After a binding's name: `name` or `name @ pat` (spec 3.11 binds
+    /// the whole value matched by `pat`).
+    fn parse_binding_rest(&mut self, name: String) -> Option<PatternKind> {
+        let sub = if self.eat(&TokenKind::At) {
+            Some(Box::new(self.parse_pattern_atom()?))
+        } else {
+            None
+        };
+        Some(PatternKind::Binding { name, sub })
+    }
+
     fn parse_pattern_atom(&mut self) -> Option<Pattern> {
         self.nested(Self::parse_pattern_atom_inner)
     }
@@ -4421,18 +4550,21 @@ impl<'a> Parser<'a> {
             TokenKind::LParen => {
                 self.bump();
                 let mut subs: Vec<Pattern> = Vec::new();
+                let mut trailing_comma = false;
                 if !matches!(self.peek(), TokenKind::RParen) {
                     loop {
                         subs.push(self.parse_pattern()?);
-                        if !self.eat(&TokenKind::Comma) {
-                            break;
-                        }
-                        if matches!(self.peek(), TokenKind::RParen) {
+                        trailing_comma = self.eat(&TokenKind::Comma);
+                        if !trailing_comma || matches!(self.peek(), TokenKind::RParen) {
                             break;
                         }
                     }
                 }
                 self.expect(&TokenKind::RParen, "`)`")?;
+                // `(p)` groups; a 1-tuple pattern is `(p,)`.
+                if subs.len() == 1 && !trailing_comma {
+                    return subs.pop();
+                }
                 PatternKind::Tuple(subs)
             }
             TokenKind::Ident(_) => {
@@ -4486,7 +4618,7 @@ impl<'a> Parser<'a> {
                         unreachable!()
                     };
                     self.bump();
-                    PatternKind::Binding { name, sub: None }
+                    self.parse_binding_rest(name)?
                 }
             }
             other => {

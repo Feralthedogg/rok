@@ -1,0 +1,35 @@
+// expect-exit: 0
+// expect-stdout:
+// 1 2 3
+// 4 5 9
+// 7 8 7
+// 2 1 2
+// 4 3 4
+// 6
+// pair 6
+
+// Spec 3.11: `name @ pat` in `let` destructuring and `for`; `(p)` is
+// a grouping pattern, a 1-tuple pattern is `(p,)`.
+struct Point { x: i32; y: i32; }
+
+fn main() -> i32 {
+    let whole @ (a, b) = (1, 2);
+    rok_print_str(f"{a} {b} {whole.0 + whole.1}");
+    let (p @ (c, d), e) = ((4, 5), 9);
+    rok_print_str(f"{c} {d} {e}");
+    let pt @ Point { x, .. } = Point { x: 7, y: 8 };
+    rok_print_str(f"{x} {pt.y} {pt.x}");
+    let _ = p;
+    for t @ (i, j) in [(2, 1), (4, 3)] {
+        rok_print_str(f"{t.0} {j} {i}");
+    }
+    match 6 {
+        n @ (1 | 2) => rok_print_i32(n * 100),
+        (n) => rok_print_i32(n),
+    }
+    let one = (6,);
+    match one {
+        (v,) => rok_print_str(f"pair {v}"),
+    }
+    return 0;
+}

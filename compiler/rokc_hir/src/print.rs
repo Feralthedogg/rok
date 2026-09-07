@@ -266,6 +266,11 @@ fn print_expr(out: &mut String, e: &HirExpr) {
             print_expr(out, target);
             let _ = write!(out, ".{index}");
         }
+        HirExprKind::ArrayRepeat { value, len, .. } => {
+            out.push('[');
+            print_expr(out, value);
+            let _ = write!(out, "; {len}]");
+        }
         HirExprKind::ArrayInit { elements, .. } => {
             out.push('[');
             for (i, e) in elements.iter().enumerate() {
@@ -312,6 +317,23 @@ fn print_expr(out: &mut String, e: &HirExpr) {
             print_expr(out, index);
             out.push_str(", ");
             print_expr(out, value);
+            out.push(')');
+        }
+        HirExprKind::BufAtomic {
+            op,
+            buf,
+            index,
+            args,
+            ..
+        } => {
+            let _ = write!(out, "atomic_{op}(");
+            print_expr(out, buf);
+            out.push_str(", ");
+            print_expr(out, index);
+            for a in args {
+                out.push_str(", ");
+                print_expr(out, a);
+            }
             out.push(')');
         }
         HirExprKind::ArrayIndex { array, index, .. } => {
@@ -398,6 +420,10 @@ fn print_pattern(out: &mut String, p: &HirPattern) {
         HirPattern::Wildcard => out.push('_'),
         HirPattern::Binding { local, ty } => {
             let _ = write!(out, "_{}: {}", local.0, ty_str(ty));
+        }
+        HirPattern::At { local, ty, sub } => {
+            let _ = write!(out, "_{}: {} @ ", local.0, ty_str(ty));
+            print_pattern(out, sub);
         }
         HirPattern::Literal { value, prim } => {
             let _ = write!(out, "({})", prim.name());

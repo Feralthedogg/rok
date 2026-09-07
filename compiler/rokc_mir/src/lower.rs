@@ -49,7 +49,7 @@ pub fn lower(module: &HirModule) -> MirModule {
         externs: module
             .functions
             .iter()
-            .filter(|f| f.body.is_none())
+            .filter(|f| f.body.is_none() && !rokc_ir_common::takes_rok_fn_values(&f.name))
             .map(|f| f.id)
             .collect(),
     };
@@ -78,7 +78,7 @@ struct FnValues {
     /// a `GcRef` and loads it on entry.
     closures: std::cell::RefCell<std::collections::BTreeMap<FunctionId, MirTy>>,
     next_id: std::cell::Cell<u32>,
-    /// `extern` functions: their `fn` parameters stay thin C pointers.
+    /// `extern` functions (but `rok_thread_spawn`): their `fn` parameters stay thin C pointers.
     externs: std::collections::HashSet<FunctionId>,
 }
 
@@ -222,16 +222,22 @@ fn lower_fn(
         });
     }
 
-    // An extern's `fn` parameter is a C function pointer (thin).
+    // An extern's `fn` parameter is a C function pointer (thin); the
+    // runtime's `rok_thread_spawn` takes the fat `{code, env}` value.
     let param_tys: Vec<MirTy> = f
         .params
         .iter()
-        .map(|p| match (&p.ty, f.body.is_none()) {
-            (HirTy::Fn(args, ret, _), true) => MirTy::Fn(
-                args.iter().map(|a| lower_ty_in(a, module)).collect(),
-                Box::new(lower_ty_in(ret, module)),
-            ),
-            (t, _) => lower_ty_in(t, module),
+        .map(|p| {
+            match (
+                &p.ty,
+                f.body.is_none() && !rokc_ir_common::takes_rok_fn_values(&f.name),
+            ) {
+                (HirTy::Fn(args, ret, _), true) => MirTy::Fn(
+                    args.iter().map(|a| lower_ty_in(a, module)).collect(),
+                    Box::new(lower_ty_in(ret, module)),
+                ),
+                (t, _) => lower_ty_in(t, module),
+            }
         })
         .collect();
     let params: Vec<LocalId> = f.params.iter().map(|p| p.local).collect();
@@ -1018,6 +1024,29 @@ impl<'a> FnBuilder<'a> {
                 });
                 Operand::Copy(dst)
             }
+            HirExprKind::ArrayRepeat {
+                elem_ty,
+                value,
+                len,
+            } => {
+                let elem = lower_ty_in(elem_ty, self.module);
+                let v = self.lower_expr_to_operand(value);
+                let dst = self.fresh_local(MirTy::Array(Box::new(elem.clone()), *len));
+                if has_gc_ref(&elem) {
+                    // ponytail: no element is left unset while a GC
+                    // could scan the slot; unrolled like `ArrayInit`.
+                    self.push_stmt(Statement::Assign {
+                        target: dst,
+                        rvalue: RValue::ArrayInit {
+                            elem_ty: elem,
+                            elements: vec![v; *len as usize],
+                        },
+                    });
+                } else {
+                    self.fill_array(dst, &elem, v, *len);
+                }
+                Operand::Copy(dst)
+            }
             HirExprKind::BufNew { elem, len } => {
                 let len = self.lower_expr_to_operand(len);
                 let dst = self.fresh_local(MirTy::GcRef);
@@ -1081,6 +1110,30 @@ impl<'a> FnBuilder<'a> {
                     rvalue: RValue::BufLoad {
                         buf,
                         index,
+                        elem_ty,
+                    },
+                });
+                Operand::Copy(dst)
+            }
+            HirExprKind::BufAtomic {
+                op,
+                buf,
+                index,
+                args,
+                elem,
+            } => {
+                let buf = self.lower_expr_to_operand(buf);
+                let index = self.lower_expr_to_operand(index);
+                let args = args.iter().map(|a| self.lower_expr_to_operand(a)).collect();
+                let elem_ty = lower_ty_in(elem, self.module);
+                let dst = self.fresh_local(elem_ty.clone());
+                self.push_stmt(Statement::Assign {
+                    target: dst,
+                    rvalue: RValue::BufAtomic {
+                        op,
+                        buf,
+                        index,
+                        args,
                         elem_ty,
                     },
                 });
@@ -1357,6 +1410,9 @@ impl<'a> FnBuilder<'a> {
                     args: Vec::new(),
                 });
             }
+            HirPattern::At { sub, .. } => {
+                self.lower_pattern_test(sub, scrut_local, scrut_ty, arm_body_bb, next_bb);
+            }
             HirPattern::Literal { value, prim } => {
                 let cond = self.build_eq(scrut_local, value, *prim);
                 self.terminate(Terminator::If {
@@ -1549,13 +1605,54 @@ impl<'a> FnBuilder<'a> {
                 };
                 let tag = self.extract_tag(scrut_local, scrut_ty);
                 let cond = self.build_eq_op(tag, &value, IrPrimTy::I32);
+                // Refutable payload sub-patterns (`E::A(1)`) are tested
+                // after the tag.
+                let nested = match pat {
+                    HirPattern::EnumVariant {
+                        enum_id,
+                        variant_index,
+                        args,
+                    } if args.iter().any(|a| !a.is_irrefutable()) => {
+                        Some((*enum_id, *variant_index, args))
+                    }
+                    _ => None,
+                };
+                let tag_ok_bb = if nested.is_some() {
+                    self.new_block()
+                } else {
+                    arm_body_bb
+                };
                 self.terminate(Terminator::If {
                     cond,
-                    then_bb: arm_body_bb,
+                    then_bb: tag_ok_bb,
                     then_args: Vec::new(),
                     else_bb: next_bb,
                     else_args: Vec::new(),
                 });
+                let Some((enum_id, variant_index, args)) = nested else {
+                    return;
+                };
+                self.current = tag_ok_bb;
+                let Some(arg_locals) =
+                    self.variant_arg_locals(enum_id, variant_index, scrut_local, args.len())
+                else {
+                    self.terminate(Terminator::Goto {
+                        target: arm_body_bb,
+                        args: Vec::new(),
+                    });
+                    return;
+                };
+                for (i, (sub_pat, (local, ty))) in args.iter().zip(&arg_locals).enumerate() {
+                    let success_bb = if i + 1 < args.len() {
+                        self.new_block()
+                    } else {
+                        arm_body_bb
+                    };
+                    self.lower_pattern_test(sub_pat, *local, ty, success_bb, next_bb);
+                    if i + 1 < args.len() {
+                        self.current = success_bb;
+                    }
+                }
             }
         }
     }
@@ -1638,6 +1735,76 @@ impl<'a> FnBuilder<'a> {
 
     /// The MIR type of one enum variant's own payload (before it is
     /// moved into the enum's shared slot).
+    /// Each payload argument of enum variant `scrut` in its own local
+    /// (`None` when the variant carries no matching payload).
+    fn variant_arg_locals(
+        &mut self,
+        enum_id: rokc_hir::EnumId,
+        variant_index: u32,
+        scrut: LocalId,
+        n_args: usize,
+    ) -> Option<Vec<(LocalId, MirTy)>> {
+        if n_args == 0 {
+            return None;
+        }
+        let MirTy::Tuple(parts) = self.locals[scrut.0 as usize].ty.clone() else {
+            return None;
+        };
+        if parts.len() != 2 {
+            return None;
+        }
+        let unified_ty = parts[1].clone();
+        let payload = self.fresh_local(unified_ty.clone());
+        self.push_stmt(Statement::Assign {
+            target: payload,
+            rvalue: RValue::FieldRead {
+                target: Operand::Copy(scrut),
+                index: 1,
+                field_ty: unified_ty.clone(),
+            },
+        });
+        let variant_ty = self.variant_payload_ty(enum_id, variant_index);
+        let v = self.payload_cast(Operand::Copy(payload), &unified_ty, &variant_ty);
+        let local = match v {
+            Operand::Copy(l) => l,
+            c @ Operand::Const(_) => {
+                let l = self.fresh_local(variant_ty.clone());
+                self.push_stmt(Statement::Assign {
+                    target: l,
+                    rvalue: RValue::Use(c),
+                });
+                l
+            }
+        };
+        if n_args == 1 {
+            return Some(vec![(local, variant_ty)]);
+        }
+        let MirTy::Tuple(field_tys) = variant_ty else {
+            return None;
+        };
+        if field_tys.len() != n_args {
+            return None;
+        }
+        Some(
+            field_tys
+                .into_iter()
+                .enumerate()
+                .map(|(i, field_ty)| {
+                    let elem = self.fresh_local(field_ty.clone());
+                    self.push_stmt(Statement::Assign {
+                        target: elem,
+                        rvalue: RValue::FieldRead {
+                            target: Operand::Copy(local),
+                            index: u32::try_from(i).expect("field index overflow"),
+                            field_ty: field_ty.clone(),
+                        },
+                    });
+                    (elem, field_ty)
+                })
+                .collect(),
+        )
+    }
+
     fn variant_payload_ty(&self, enum_id: rokc_hir::EnumId, variant_index: u32) -> MirTy {
         self.module.enums[enum_id.0 as usize].variants[variant_index as usize]
             .payload_ty
@@ -1732,6 +1899,13 @@ impl<'a> FnBuilder<'a> {
                     rvalue: RValue::Use(Operand::Copy(scrut)),
                 });
             }
+            HirPattern::At { local, sub, .. } => {
+                self.push_stmt(Statement::Assign {
+                    target: *local,
+                    rvalue: RValue::Use(Operand::Copy(scrut)),
+                });
+                self.bind_pattern(sub, scrut);
+            }
             HirPattern::Or(alts) => {
                 // Bindings inside or-patterns require consistency across
                 // alternatives — not yet supported.
@@ -1742,71 +1916,13 @@ impl<'a> FnBuilder<'a> {
                 variant_index,
                 args,
             } => {
-                if args.is_empty() {
-                    return;
-                }
-                let scrut_ty = self.locals[scrut.0 as usize].ty.clone();
-                let MirTy::Tuple(parts) = &scrut_ty else {
+                let Some(arg_locals) =
+                    self.variant_arg_locals(*enum_id, *variant_index, scrut, args.len())
+                else {
                     return;
                 };
-                if parts.len() != 2 {
-                    return;
-                }
-                let unified_ty = parts[1].clone();
-                let payload = self.fresh_local(unified_ty.clone());
-                self.push_stmt(Statement::Assign {
-                    target: payload,
-                    rvalue: RValue::FieldRead {
-                        target: Operand::Copy(scrut),
-                        index: 1,
-                        field_ty: unified_ty.clone(),
-                    },
-                });
-                if args.len() == 1 {
-                    if let HirPattern::Binding { local, .. } = &args[0] {
-                        let bind_ty = self.locals[local.0 as usize].ty.clone();
-                        let v = self.payload_cast(Operand::Copy(payload), &unified_ty, &bind_ty);
-                        self.push_stmt(Statement::Assign {
-                            target: *local,
-                            rvalue: RValue::Use(v),
-                        });
-                    }
-                    return;
-                }
-                // Multi-arg variant: payload is the variant's tuple. Bind
-                // each tuple field to the corresponding pattern arg.
-                let variant_ty = self.variant_payload_ty(*enum_id, *variant_index);
-                let payload =
-                    match self.payload_cast(Operand::Copy(payload), &unified_ty, &variant_ty) {
-                        Operand::Copy(l) => l,
-                        Operand::Const(_) => return,
-                    };
-                let MirTy::Tuple(field_tys) = variant_ty else {
-                    return;
-                };
-                if args.len() != field_tys.len() {
-                    return;
-                }
-                for (i, sub_pat) in args.iter().enumerate() {
-                    let HirPattern::Binding { local, .. } = sub_pat else {
-                        continue;
-                    };
-                    let field_ty = field_tys[i].clone();
-                    let elem = self.fresh_local(field_ty.clone());
-                    self.push_stmt(Statement::Assign {
-                        target: elem,
-                        rvalue: RValue::FieldRead {
-                            target: Operand::Copy(payload),
-                            index: u32::try_from(i).expect("field index overflow"),
-                            field_ty: field_ty.clone(),
-                        },
-                    });
-                    let bind_ty = self.locals[local.0 as usize].ty.clone();
-                    let v = self.cast_to(Operand::Copy(elem), &field_ty, &bind_ty);
-                    self.push_stmt(Statement::Assign {
-                        target: *local,
-                        rvalue: RValue::Use(v),
-                    });
+                for (sub_pat, (local, _)) in args.iter().zip(arg_locals) {
+                    self.bind_pattern(sub_pat, local);
                 }
             }
             HirPattern::SumVariant { binder, sum_ty, .. } => {
@@ -1909,6 +2025,69 @@ impl<'a> FnBuilder<'a> {
             }
             HirPattern::Wildcard | HirPattern::Literal { .. } | HirPattern::Range { .. } => {}
         }
+    }
+
+    /// `for i in 0..len { array[i] = value }`.
+    fn fill_array(&mut self, array: LocalId, elem_ty: &MirTy, value: Operand, len: u32) {
+        let usize_ty = MirTy::Prim(PrimTy::Usize);
+        let i = self.fresh_local(usize_ty.clone());
+        let int = |v: i128| {
+            Operand::Const(ConstVal::Int {
+                value: v,
+                ty: PrimTy::Usize,
+            })
+        };
+        self.push_stmt(Statement::Assign {
+            target: i,
+            rvalue: RValue::Use(int(0)),
+        });
+        let header_bb = self.new_block();
+        let body_bb = self.new_block();
+        let exit_bb = self.new_block();
+        self.terminate(Terminator::Goto {
+            target: header_bb,
+            args: Vec::new(),
+        });
+        self.current = header_bb;
+        let more = self.fresh_local(MirTy::Prim(PrimTy::Bool));
+        self.push_stmt(Statement::Assign {
+            target: more,
+            rvalue: RValue::BinOp {
+                op: PrimOp::Lt,
+                op_ty: usize_ty.clone(),
+                lhs: Operand::Copy(i),
+                rhs: int(i128::from(len)),
+            },
+        });
+        self.terminate(Terminator::If {
+            cond: Operand::Copy(more),
+            then_bb: body_bb,
+            then_args: Vec::new(),
+            else_bb: exit_bb,
+            else_args: Vec::new(),
+        });
+        self.current = body_bb;
+        self.push_stmt(Statement::ArrayWrite {
+            array,
+            index: Operand::Copy(i),
+            value,
+            elem_ty: elem_ty.clone(),
+            len,
+        });
+        self.push_stmt(Statement::Assign {
+            target: i,
+            rvalue: RValue::BinOp {
+                op: PrimOp::Add,
+                op_ty: usize_ty,
+                lhs: Operand::Copy(i),
+                rhs: int(1),
+            },
+        });
+        self.terminate(Terminator::Goto {
+            target: header_bb,
+            args: Vec::new(),
+        });
+        self.current = exit_bb;
     }
 
     fn lower_while(&mut self, label: Option<String>, cond: &HirExpr, body: &HirBlock) -> Operand {

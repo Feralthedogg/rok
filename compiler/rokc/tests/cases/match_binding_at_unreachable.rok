@@ -1,0 +1,13 @@
+// expect-error: unreachable match arm 3
+// `whole @ (true, _)` and `(false, b @ _)` already cover every value.
+fn f(x: bool, y: bool) -> i32 {
+    match (x, y) {
+        whole @ (true, _) => 1,
+        (false, b @ _) => 2,
+        (false, true) => 3,
+    }
+}
+
+fn main() -> i32 {
+    return f(true, true);
+}

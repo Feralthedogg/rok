@@ -1,0 +1,385 @@
+// rok::core::sync — concurrency primitives (stdlib spec 2.16).
+//
+// Every type is a handle over GC buffers: copying it (into a closure,
+// another thread) shares the one primitive. Blocking goes through the
+// runtime's address-keyed wait queue (`rok_sync_wait` / `rok_sync_wake`,
+// futex semantics); a blocked thread counts as stopped for the GC.
+//
+// Not in 2.16 but provided because the blocking APIs need them: `Once`,
+// `Condvar` (Rust-shaped).
+
+extern "C" {
+    fn rok_sync_wait(word: GcBuf<i32>, index: usize, expected: i32);
+    fn rok_sync_wake(word: GcBuf<i32>, index: usize);
+}
+
+// Compiler intrinsics: LLVM atomics on buffer element `i` (integer or
+// `bool` elements); each returns the element's previous value.
+#[intrinsic("rok.atomic.load")]
+fn atomic_load<T>(buf: GcBuf<T>, i: usize) -> T;
+#[intrinsic("rok.atomic.xchg")]
+fn atomic_xchg<T>(buf: GcBuf<T>, i: usize, v: T) -> T;
+#[intrinsic("rok.atomic.add")]
+fn atomic_add<T>(buf: GcBuf<T>, i: usize, v: T) -> T;
+#[intrinsic("rok.atomic.sub")]
+fn atomic_sub<T>(buf: GcBuf<T>, i: usize, v: T) -> T;
+#[intrinsic("rok.atomic.and")]
+fn atomic_and<T>(buf: GcBuf<T>, i: usize, v: T) -> T;
+#[intrinsic("rok.atomic.or")]
+fn atomic_or<T>(buf: GcBuf<T>, i: usize, v: T) -> T;
+#[intrinsic("rok.atomic.xor")]
+fn atomic_xor<T>(buf: GcBuf<T>, i: usize, v: T) -> T;
+/// Store `new` if the element equals `current`; the previous value
+/// either way.
+#[intrinsic("rok.atomic.cas")]
+fn atomic_cas<T>(buf: GcBuf<T>, i: usize, current: T, new: T) -> T;
+
+fn wait(word: GcBuf<i32>, expected: i32) {
+    unsafe { rok_sync_wait(word, 0, expected) };
+}
+
+fn wake(word: GcBuf<i32>) {
+    unsafe { rok_sync_wake(word, 0) };
+}
+
+fn word(v: i32) -> GcBuf<i32> {
+    let w: GcBuf<i32> = buf_new(1);
+    buf_set(w, 0, v);
+    return w;
+}
+
+/// Memory ordering of an atomic operation (2.16.2). Spec name: `Ordering`,
+/// which would collide with `cmp::Ordering` under `use rok::core::**`.
+// ponytail: every operation runs `SeqCst` (the strongest, always
+// correct); weaker orderings are accepted and not exploited.
+pub enum AtomicOrdering {
+    Relaxed,
+    Acquire,
+    Release,
+    AcqRel,
+    SeqCst,
+}
+
+/// The element types `Atomic<T>` supports.
+pub trait AtomicPrimitive {}
+impl AtomicPrimitive for i8 {}
+impl AtomicPrimitive for i16 {}
+impl AtomicPrimitive for i32 {}
+impl AtomicPrimitive for i64 {}
+impl AtomicPrimitive for isize {}
+impl AtomicPrimitive for u8 {}
+impl AtomicPrimitive for u16 {}
+impl AtomicPrimitive for u32 {}
+impl AtomicPrimitive for u64 {}
+impl AtomicPrimitive for usize {}
+impl AtomicPrimitive for bool {}
+
+/// A lock-free cell (2.16.2). Send + Sync.
+pub struct Atomic<T> {
+    cell: GcBuf<T>;
+}
+
+impl<T: AtomicPrimitive + PartialEq> Atomic<T> {
+    pub fn new(value: T) -> Atomic<T> {
+        let cell: GcBuf<T> = buf_new(1);
+        buf_set(cell, 0, value);
+        return Atomic { cell: cell };
+    }
+
+    pub fn load(self, ordering: AtomicOrdering = SeqCst) -> T {
+        return atomic_load(self.cell, 0);
+    }
+    pub fn store(self, value: T, ordering: AtomicOrdering = SeqCst) {
+        atomic_xchg(self.cell, 0, value);
+    }
+    pub fn swap(self, value: T, ordering: AtomicOrdering = SeqCst) -> T {
+        return atomic_xchg(self.cell, 0, value);
+    }
+    /// `Ok(previous)` if it held `current` (now `new`), else
+    /// `Err(actual)`.
+    pub fn compare_exchange(
+        self, current: T, new: T, success: AtomicOrdering, failure: AtomicOrdering,
+    ) -> Result<T, T> {
+        let old = atomic_cas(self.cell, 0, current, new);
+        if old == current {
+            return Result::Ok(old);
+        }
+        return Result::Err(old);
+    }
+    /// Never fails spuriously here (same as `compare_exchange`).
+    pub fn compare_exchange_weak(
+        self, current: T, new: T, success: AtomicOrdering, failure: AtomicOrdering,
+    ) -> Result<T, T> {
+        return self.compare_exchange(current, new, success, failure);
+    }
+
+    // Integer-only (`bool` is rejected by the intrinsic for add / sub).
+    pub fn fetch_add(self, value: T, ordering: AtomicOrdering = SeqCst) -> T {
+        return atomic_add(self.cell, 0, value);
+    }
+    pub fn fetch_sub(self, value: T, ordering: AtomicOrdering = SeqCst) -> T {
+        return atomic_sub(self.cell, 0, value);
+    }
+    pub fn fetch_and(self, value: T, ordering: AtomicOrdering = SeqCst) -> T {
+        return atomic_and(self.cell, 0, value);
+    }
+    pub fn fetch_or(self, value: T, ordering: AtomicOrdering = SeqCst) -> T {
+        return atomic_or(self.cell, 0, value);
+    }
+    pub fn fetch_xor(self, value: T, ordering: AtomicOrdering = SeqCst) -> T {
+        return atomic_xor(self.cell, 0, value);
+    }
+}
+
+/// Exclusive lock around a `T` (2.16.3). No poisoning (spec): a panic
+/// ends the process, and an error leaving `using` drops the guard.
+// `state`: 0 unlocked, 1 locked, 2 locked with (possible) waiters.
+pub struct Mutex<T> {
+    state: GcBuf<i32>;
+    value: GcBuf<T>;
+}
+
+unsafe impl<T: Send> Sync for Mutex<T> {}
+
+impl<T> Mutex<T> {
+    pub fn new(value: T) -> Mutex<T> {
+        let v: GcBuf<T> = buf_new(1);
+        buf_set(v, 0, value);
+        return Mutex { state: word(0), value: v };
+    }
+
+    /// Block until the lock is ours. Bind the guard with `using`.
+    pub fn lock(self) -> MutexGuard<T> {
+        if atomic_cas(self.state, 0, 0, 1) != 0 {
+            while atomic_xchg(self.state, 0, 2) != 0 {
+                wait(self.state, 2);
+            }
+        }
+        return MutexGuard { mutex: self };
+    }
+
+    pub fn try_lock(self) -> MutexGuard<T> | none {
+        if atomic_cas(self.state, 0, 0, 1) == 0 {
+            return MutexGuard { mutex: self };
+        }
+        return none;
+    }
+
+    fn unlock(self) {
+        if atomic_xchg(self.state, 0, 0) == 2 {
+            wake(self.state);
+        }
+    }
+}
+
+/// Holds a `Mutex` locked until dropped (`using`).
+pub struct MutexGuard<T> {
+    mutex: Mutex<T>;
+}
+
+impl<T> MutexGuard<T> {
+    /// The protected value (a copy of the handle for GC types).
+    pub fn deref(self) -> T {
+        return buf_get(self.mutex.value, 0);
+    }
+    /// Replace the protected value.
+    // ponytail: spec `deref_mut(ref self) -> ref T`; rok has no `ref`
+    // returns, so writes go through `set`.
+    pub fn set(self, value: T) {
+        buf_set(self.mutex.value, 0, value);
+    }
+}
+
+impl<T> Drop for MutexGuard<T> {
+    fn drop(ref self) {
+        self.mutex.unlock();
+    }
+}
+
+/// Many readers or one writer (2.16.4).
+// `state`: 0 free, -1 writer, n > 0 readers.
+pub struct RwLock<T> {
+    state: GcBuf<i32>;
+    value: GcBuf<T>;
+}
+
+unsafe impl<T: Send> Sync for RwLock<T> {}
+
+impl<T> RwLock<T> {
+    pub fn new(value: T) -> RwLock<T> {
+        let v: GcBuf<T> = buf_new(1);
+        buf_set(v, 0, value);
+        return RwLock { state: word(0), value: v };
+    }
+
+    pub fn read(self) -> RwLockReadGuard<T> {
+        loop {
+            let s = atomic_load(self.state, 0);
+            if s >= 0 {
+                if atomic_cas(self.state, 0, s, s + 1) == s {
+                    return RwLockReadGuard { lock: self };
+                }
+            } else {
+                wait(self.state, s);
+            }
+        }
+    }
+
+    pub fn write(self) -> RwLockWriteGuard<T> {
+        loop {
+            let s = atomic_cas(self.state, 0, 0, -1);
+            if s == 0 {
+                return RwLockWriteGuard { lock: self };
+            }
+            wait(self.state, s);
+        }
+    }
+
+    pub fn try_read(self) -> RwLockReadGuard<T> | none {
+        let s = atomic_load(self.state, 0);
+        if s >= 0 {
+            if atomic_cas(self.state, 0, s, s + 1) == s {
+                return RwLockReadGuard { lock: self };
+            }
+        }
+        return none;
+    }
+
+    pub fn try_write(self) -> RwLockWriteGuard<T> | none {
+        if atomic_cas(self.state, 0, 0, -1) == 0 {
+            return RwLockWriteGuard { lock: self };
+        }
+        return none;
+    }
+}
+
+pub struct RwLockReadGuard<T> {
+    lock: RwLock<T>;
+}
+
+impl<T> RwLockReadGuard<T> {
+    pub fn deref(self) -> T {
+        return buf_get(self.lock.value, 0);
+    }
+}
+
+impl<T> Drop for RwLockReadGuard<T> {
+    fn drop(ref self) {
+        if atomic_sub(self.lock.state, 0, 1) == 1 {
+            wake(self.lock.state);
+        }
+    }
+}
+
+pub struct RwLockWriteGuard<T> {
+    lock: RwLock<T>;
+}
+
+impl<T> RwLockWriteGuard<T> {
+    pub fn deref(self) -> T {
+        return buf_get(self.lock.value, 0);
+    }
+    pub fn set(self, value: T) {
+        buf_set(self.lock.value, 0, value);
+    }
+}
+
+impl<T> Drop for RwLockWriteGuard<T> {
+    fn drop(ref self) {
+        atomic_xchg(self.lock.state, 0, 0);
+        wake(self.lock.state);
+    }
+}
+
+/// Run an initializer exactly once across threads.
+// `state`: 0 new, 1 running, 2 done.
+pub struct Once {
+    state: GcBuf<i32>;
+}
+
+impl Once {
+    pub fn new() -> Once {
+        return Once { state: word(0) };
+    }
+
+    /// Run `f` if no call has; every caller returns after it finished.
+    pub fn call_once(self, f: fn()) {
+        loop {
+            let s = atomic_cas(self.state, 0, 0, 1);
+            if s == 0 {
+                f();
+                atomic_xchg(self.state, 0, 2);
+                wake(self.state);
+                return;
+            }
+            if s == 2 {
+                return;
+            }
+            wait(self.state, 1);
+        }
+    }
+
+    pub fn is_completed(self) -> bool {
+        return atomic_load(self.state, 0) == 2;
+    }
+}
+
+/// Wait for a condition under a `Mutex`.
+// `seq` counts notifications; a waiter sleeps until it changes.
+pub struct Condvar {
+    seq: GcBuf<i32>;
+}
+
+impl Condvar {
+    pub fn new() -> Condvar {
+        return Condvar { seq: word(0) };
+    }
+
+    /// Unlock `guard`'s mutex, block until notified (or spuriously),
+    /// lock it again. Re-check the condition in a loop.
+    pub fn wait<T>(self, guard: MutexGuard<T>) -> MutexGuard<T> {
+        let s = atomic_load(self.seq, 0);
+        guard.mutex.unlock();
+        wait(self.seq, s);
+        return guard.mutex.lock();
+    }
+
+    /// Wakes every waiter (a spurious wakeup for all but one is allowed).
+    pub fn notify_one(self) {
+        self.notify_all();
+    }
+
+    pub fn notify_all(self) {
+        atomic_add(self.seq, 0, 1);
+        wake(self.seq);
+    }
+}
+
+/// Single-task interior mutability (2.16.5): neither Send nor Sync.
+pub struct Cell<T> {
+    value: GcBuf<T>;
+}
+
+impl<T> !Send for Cell<T> {}
+impl<T> !Sync for Cell<T> {}
+
+impl<T> Cell<T> {
+    pub fn new(value: T) -> Cell<T> {
+        let v: GcBuf<T> = buf_new(1);
+        buf_set(v, 0, value);
+        return Cell { value: v };
+    }
+    pub fn get(self) -> T {
+        return buf_get(self.value, 0);
+    }
+    // ponytail: spec takes `ref self`; the handle makes plain `self`
+    // share the cell.
+    pub fn set(self, value: T) {
+        buf_set(self.value, 0, value);
+    }
+    pub fn replace(self, value: T) -> T {
+        let old = buf_get(self.value, 0);
+        buf_set(self.value, 0, value);
+        return old;
+    }
+}

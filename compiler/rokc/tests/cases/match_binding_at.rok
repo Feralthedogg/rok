@@ -1,0 +1,93 @@
+// expect-exit: 0
+// expect-stdout:
+// digit 7
+// big 42
+// other -3
+// origin-x 5
+// p 1 2
+// pair 3
+// tens 10 11
+// num
+// dot 9
+// a 4
+// zero
+// guard 8
+// sum 6
+
+// `name @ pat` binds the whole value matched by `pat` — in match,
+// if let and while let, nested in tuples / structs / enum payloads.
+struct Point { x: i32; y: i32; }
+
+enum Shape { Dot(Point), Num(i32), Two(i32, i32) }
+
+fn classify(n: i32) {
+    match n {
+        d @ 0..=9 => rok_print_str(f"digit {d}"),
+        b @ 10.. => rok_print_str(f"big {b}"),
+        o @ _ => rok_print_str(f"other {o}"),
+    }
+}
+
+fn main() -> i32 {
+    classify(7);
+    classify(42);
+    classify(-3);
+
+    let q = Point { x: 0, y: 5 };
+    match q {
+        p @ Point { x: 0, .. } => rok_print_str(f"origin-x {p.y}"),
+        Point { x, y } => rok_print_str(f"p {x} {y}"),
+    }
+    let q2 = Point { x: 1, y: 2 };
+    match q2 {
+        p @ Point { x: 0, .. } => rok_print_str(f"origin-x {p.y}"),
+        Point { x, y } => rok_print_str(f"p {x} {y}"),
+    }
+
+    // Nested: inside a tuple and an enum payload.
+    match (3, true) {
+        (n @ 1..=5, true) => rok_print_str(f"pair {n}"),
+        _ => rok_print_str("no"),
+    }
+    match Shape::Two(10, 11) {
+        Shape::Two(a @ 10, b @ 11..=20) => rok_print_str(f"tens {a} {b}"),
+        Shape::Two(_, _) => rok_print_str("two"),
+        Shape::Num(n @ 1..=3) => rok_print_str(f"num {n}"),
+        Shape::Num(_) => rok_print_str("num"),
+        Shape::Dot(p @ Point { x: 0, .. }) => rok_print_str(f"dot {p.y}"),
+        Shape::Dot(_) => rok_print_str("dot"),
+    }
+
+    // A refutable payload sub-pattern falls through to the next arm.
+    let shapes = [Shape::Num(7), Shape::Dot(Point { x: 0, y: 9 })];
+    for sh in shapes {
+        match sh {
+            Shape::Num(n @ 1..=3) => rok_print_str(f"num {n}"),
+            Shape::Num(_) => rok_print_str("num"),
+            Shape::Dot(p @ Point { x: 0, .. }) => rok_print_str(f"dot {p.y}"),
+            _ => rok_print_str("other"),
+        }
+    }
+
+    // if let / while let.
+    if let a @ 4 = 2 + 2 {
+        rok_print_str(f"a {a}");
+    }
+    if let Shape::Num(z @ 0) = Shape::Num(0) {
+        rok_print_str("zero");
+        let _ = z;
+    }
+    let s = Shape::Num(8);
+    match s {
+        Shape::Num(g @ 5..) if g % 2 == 0 => rok_print_str(f"guard {g}"),
+        _ => rok_print_str("no guard"),
+    }
+    let i = 0;
+    let sum = 0;
+    while let k @ 0..=3 = i {
+        sum = sum + k;
+        i = i + 1;
+    }
+    rok_print_str(f"sum {sum}");
+    return 0;
+}

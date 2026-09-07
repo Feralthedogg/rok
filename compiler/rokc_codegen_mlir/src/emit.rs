@@ -188,8 +188,12 @@ impl Emitter {
             );
         }
         self.out.push_str(
-                "  llvm.mlir.global external thread_local @rok_tls_shadow_stack_top() {addr_space = 0 : i32} : !llvm.ptr\n",
+                "  llvm.mlir.global external thread_local @rok_tls_shadow_stack_top() {addr_space = 0 : i32} : !llvm.ptr\n  llvm.mlir.global external thread_local @rok_tls_yield_flag() {addr_space = 0 : i32} : i8\n",
             );
+        if !declared("rok_runtime_yield") {
+            self.out
+                .push_str("  func.func private @rok_runtime_yield()\n");
+        }
         if !declared("rok_gc_register_type") {
             self.out
                 .push_str("  func.func private @rok_gc_register_type(i32, !llvm.ptr)\n");
@@ -467,6 +471,53 @@ struct FnEmit<'a> {
     next_check: u32,
     pkgs: &'a crate::mangle::Pkgs,
     overflow_checks: bool,
+    /// Blocks whose terminator takes a loop back-edge: a safepoint poll
+    /// goes right before it (804 §8.4.8).
+    back_edge_blocks: HashSet<u32>,
+}
+
+/// Blocks with an edge to a block on the current DFS path (a loop
+/// back-edge), found by an iterative DFS from the entry block.
+fn back_edge_blocks(f: &MirFunction) -> HashSet<u32> {
+    let succs = |b: &BasicBlock| -> Vec<u32> {
+        match &b.terminator {
+            Terminator::Goto { target, .. } => vec![target.0],
+            Terminator::If {
+                then_bb, else_bb, ..
+            } => vec![then_bb.0, else_bb.0],
+            Terminator::Return(_) | Terminator::Unreachable => Vec::new(),
+        }
+    };
+    let index: HashMap<u32, usize> = f
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.id.0, i))
+        .collect();
+    let mut out = HashSet::new();
+    // 0 = unvisited, 1 = on the DFS path, 2 = done.
+    let mut state = vec![0u8; f.blocks.len()];
+    let mut stack: Vec<(usize, Vec<u32>)> = Vec::new();
+    if let Some(b) = f.blocks.first() {
+        state[0] = 1;
+        stack.push((0, succs(b)));
+    }
+    while let Some((i, rest)) = stack.last_mut() {
+        let i = *i;
+        let Some(t) = rest.pop() else {
+            state[i] = 2;
+            stack.pop();
+            continue;
+        };
+        let Some(&j) = index.get(&t) else { continue };
+        if state[j] == 0 {
+            state[j] = 1;
+            stack.push((j, succs(&f.blocks[j])));
+        } else if state[j] == 1 {
+            out.insert(f.blocks[i].id.0);
+        }
+    }
+    out
 }
 
 impl<'a> FnEmit<'a> {
@@ -510,7 +561,30 @@ impl<'a> FnEmit<'a> {
             next_check: 0,
             pkgs,
             overflow_checks: true,
+            back_edge_blocks: back_edge_blocks(f),
         }
+    }
+
+    /// Safepoint poll (804 §8.4.1, 809 §8.9.11): a relaxed load of this
+    /// thread's `rok_tls_yield_flag`, `rok_runtime_yield` when set.
+    /// Emission continues in a fresh fall-through block.
+    fn emit_poll(&mut self) {
+        let n = self.next_check;
+        self.next_check += 1;
+        let [a, flag, zero, set] = std::array::from_fn(|_| self.fresh_value());
+        let _ = write!(
+            self.body,
+            "    {a} = llvm.mlir.addressof @rok_tls_yield_flag : !llvm.ptr
+    {flag} = llvm.load {a} atomic monotonic {{alignment = 1 : i64}} : !llvm.ptr -> i8
+    {zero} = arith.constant 0 : i8
+    {set} = arith.cmpi ne, {flag}, {zero} : i8
+    cf.cond_br {set}, ^rok_yield{n}, ^rok_run{n}
+  ^rok_yield{n}:
+    func.call @rok_runtime_yield() : () -> ()
+    cf.br ^rok_run{n}
+  ^rok_run{n}:
+"
+        );
     }
 
     fn intern_string(&mut self, s: &str) -> String {
@@ -650,6 +724,8 @@ impl<'a> FnEmit<'a> {
                 );
             }
         }
+        // Entry poll, once the frame roots the arguments.
+        self.emit_poll();
     }
 
     /// Shadow-stack frame (704 §7.4.1) for a function that holds GC
@@ -662,18 +738,21 @@ impl<'a> FnEmit<'a> {
     // ponytail: a dead local keeps its referent alive until overwritten
     // or the function returns; liveness-based slot reuse is the upgrade.
     fn emit_gc_frame(&mut self) {
-        let calls = self.f.blocks.iter().flat_map(|b| &b.stmts).any(|s| {
-            matches!(
-                s,
-                Statement::Assign {
-                    rvalue: RValue::Call { .. }
-                        | RValue::CallIndirect { .. }
-                        | RValue::HeapBox { .. }
-                        | RValue::BufAlloc { .. },
-                    ..
-                }
-            )
-        });
+        // A loop's back-edge poll can stop this thread for a collection
+        // mid-function, like a call.
+        let calls = !self.back_edge_blocks.is_empty()
+            || self.f.blocks.iter().flat_map(|b| &b.stmts).any(|s| {
+                matches!(
+                    s,
+                    Statement::Assign {
+                        rvalue: RValue::Call { .. }
+                            | RValue::CallIndirect { .. }
+                            | RValue::HeapBox { .. }
+                            | RValue::BufAlloc { .. },
+                        ..
+                    }
+                )
+            });
         if !calls {
             return;
         }
@@ -858,7 +937,7 @@ impl<'a> FnEmit<'a> {
         for s in &b.stmts {
             self.emit_stmt(s);
         }
-        self.emit_terminator(&b.terminator);
+        self.emit_terminator(b.id.0, &b.terminator);
     }
 
     fn emit_stmt(&mut self, s: &Statement) {
@@ -906,6 +985,8 @@ impl<'a> FnEmit<'a> {
                 let vol = if *volatile { "volatile " } else { "" };
                 let _ = writeln!(self.body, "    llvm.store {vol}{v}, {p} : {t}, !llvm.ptr");
             }
+            // `()` elements take no memory (`GcBuf<()>`: a unit result).
+            Statement::BufStore { elem_ty, .. } if *elem_ty == MirTy::Unit => {}
             Statement::BufStore {
                 buf,
                 index,
@@ -1105,6 +1186,11 @@ impl<'a> FnEmit<'a> {
                 let _ = writeln!(self.body, "    {v} = arith.constant {n} : i{pw}");
                 v
             }
+            RValue::BufLoad { elem_ty, .. } if *elem_ty == MirTy::Unit => {
+                let v = self.fresh_value();
+                let _ = writeln!(self.body, "    {v} = arith.constant 0 : i1");
+                v
+            }
             RValue::BufLoad {
                 buf,
                 index,
@@ -1116,6 +1202,13 @@ impl<'a> FnEmit<'a> {
                 let _ = writeln!(self.body, "    {v} = llvm.load {p} : !llvm.ptr -> {ty}");
                 v
             }
+            RValue::BufAtomic {
+                op,
+                buf,
+                index,
+                args,
+                elem_ty,
+            } => self.emit_buf_atomic(op, buf, index, args, elem_ty),
             RValue::HeapLoad { ptr, ty } => {
                 let pw = self.pointer_width;
                 let p = self.materialize_operand(ptr, &MirTy::GcRef);
@@ -1240,6 +1333,73 @@ impl<'a> FnEmit<'a> {
             "    {p} = llvm.inttoptr {a} : i{pw} to !llvm.ptr"
         );
         p
+    }
+
+    /// LLVM atomics on a buffer element (stdlib 2.16.2). `bool` (`i1`)
+    /// goes through its `i8` storage byte.
+    // ponytail: every op is `seq_cst` whatever `Ordering` the caller
+    // passed (always correct, sometimes slower); passing the ordering
+    // through needs it as a compile-time constant at the intrinsic.
+    fn emit_buf_atomic(
+        &mut self,
+        op: &str,
+        buf: &Operand,
+        index: &Operand,
+        args: &[Operand],
+        elem_ty: &MirTy,
+    ) -> String {
+        let pw = self.pointer_width;
+        let p = self.buf_elem_addr(buf, index, elem_ty);
+        let ty = mlir_type(elem_ty, pw);
+        let is_bool = ty == "i1";
+        let at = if is_bool { "i8".to_owned() } else { ty };
+        let align = size_align(elem_ty, pw).0;
+        let ops: Vec<String> = args
+            .iter()
+            .map(|a| {
+                let v = self.materialize_operand(a, elem_ty);
+                if !is_bool {
+                    return v;
+                }
+                let w = self.fresh_value();
+                let _ = writeln!(self.body, "    {w} = arith.extui {v} : i1 to i8");
+                w
+            })
+            .collect();
+        let v = self.fresh_value();
+        match op {
+            "load" => {
+                let _ = writeln!(
+                    self.body,
+                    "    {v} = llvm.load {p} atomic seq_cst {{alignment = {align} : i64}} : !llvm.ptr -> {at}"
+                );
+            }
+            "cas" => {
+                let r = self.fresh_value();
+                let _ = writeln!(
+                    self.body,
+                    "    {r} = llvm.cmpxchg {p}, {}, {} seq_cst seq_cst : !llvm.ptr, {at}\n    {v} = llvm.extractvalue {r}[0] : !llvm.struct<({at}, i1)>",
+                    ops[0], ops[1]
+                );
+            }
+            _ => {
+                let kw = match op {
+                    "and" | "or" | "xor" => format!("_{op}"),
+                    _ => op.to_owned(),
+                };
+                let _ = writeln!(
+                    self.body,
+                    "    {v} = llvm.atomicrmw {kw} {p}, {} seq_cst : !llvm.ptr, {at}",
+                    ops[0]
+                );
+            }
+        }
+        if !is_bool {
+            return v;
+        }
+        let b = self.fresh_value();
+        let _ = writeln!(self.body, "    {b} = arith.trunci {v} : i8 to i1");
+        b
     }
 
     fn buf_elem_addr(&mut self, buf: &Operand, index: &Operand, elem_ty: &MirTy) -> String {
@@ -2065,7 +2225,10 @@ impl<'a> FnEmit<'a> {
         }
     }
 
-    fn emit_terminator(&mut self, t: &Terminator) {
+    fn emit_terminator(&mut self, b: u32, t: &Terminator) {
+        if self.back_edge_blocks.contains(&b) {
+            self.emit_poll();
+        }
         match t {
             Terminator::Return(None) => {
                 self.emit_gc_frame_pop();

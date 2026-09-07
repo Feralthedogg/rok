@@ -138,6 +138,17 @@ pub enum ConstVal {
     None,
 }
 
+/// Runtime extern whose `fn` parameters take whole rok function values.
+///
+/// That is `{code, env}`, so closures are allowed; every other extern's
+/// `fn` parameter is a thin C callback.
+// ponytail: decided by symbol name like `str`'s ABI; an ABI field on
+// extern declarations replaces both.
+#[must_use]
+pub fn takes_rok_fn_values(extern_name: &str) -> bool {
+    extern_name == "rok_thread_spawn"
+}
+
 /// Callee form after name resolution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResolvedFn {

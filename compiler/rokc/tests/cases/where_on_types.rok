@@ -1,0 +1,36 @@
+// expect-exit: 0
+// expect-stdout:
+// 5
+// 3
+// 7
+// 9
+
+// Spec 2.10.4: `where` after a struct / enum / union / type alias header (also after
+// a tuple struct's fields, Rust style) bounds the parameters like
+// inline bounds.
+struct W<T> where T: Display { v: T; }
+struct P<T> where T: Display (T);
+struct Q<T>(T) where T: Display;
+enum E<T> where T: Display { A(T), B }
+type Shown<T> where T: Display = W<T>;
+type Pair<T> = (T, T) where T: Display;
+
+impl<T: Display> W<T> {
+    fn show(self) -> str { return self.v.display(); }
+}
+
+fn main() -> i32 {
+    let w = W { v: 5 };
+    rok_print_str(w.show());
+    let e: E<i32> = E::A(3);
+    match e {
+        E::A(n) => rok_print_i32(n),
+        E::B => rok_print_i32(0),
+    }
+    let where = 7;
+    rok_print_i32(where);
+    let s: Shown<i32> = W { v: 9 };
+    let p: Pair<i32> = (1, 2);
+    rok_print_str(s.show());
+    return 0;
+}

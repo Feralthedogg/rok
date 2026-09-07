@@ -1,0 +1,62 @@
+// expect-exit: 0
+// expect-stdout:
+// body 0
+// drop 1
+// drop 0
+// skip 1
+// drop 11
+// drop 2
+// drop 1
+// stop 2
+// drop 12
+// drop 3
+// drop 2
+// drop 5
+// none
+// after
+
+// Spec 3.17.6: `break` / `continue` out of a `using` body drop its
+// resources (reverse order), and so does `?` on `none`.
+struct Res { id: i32; }
+
+impl Drop for Res {
+    fn drop(ref self) {
+        rok_print_str(f"drop {self.id}");
+    }
+}
+
+fn open(id: i32) -> Res { return Res { id: id }; }
+
+fn find(id: i32) -> i32 | none {
+    using r = open(id) {
+        let v: i32 | none = none;
+        let x = v?;
+        x + r.id
+    }
+}
+
+fn main() -> i32 {
+    for i in 0..5 {
+        using a = open(i), b = open(i + 1) {
+            if i == 1 {
+                rok_print_str("skip 1");
+                using c = open(11) {
+                    continue;
+                }
+            }
+            if i == 2 {
+                rok_print_str("stop 2");
+                using c = open(12) {
+                    break;
+                }
+            }
+            rok_print_str(f"body {a.id}");
+        }
+    }
+    match find(5) {
+        n: i32 => rok_print_i32(n),
+        none => rok_print_str("none"),
+    }
+    rok_print_str("after");
+    return 0;
+}

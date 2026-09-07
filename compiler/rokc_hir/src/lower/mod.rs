@@ -90,9 +90,50 @@ struct TypeNames<'a> {
     visibility: HashMap<String, Visibility>,
     uses: &'a crate::uses::UseTable,
     diags: std::cell::RefCell<Vec<rokc_diagnostic::RokDiagnostic>>,
+    /// Generic type aliases (`type Row<const N: usize> = [i32; N];`)
+    /// by full name. Expanded at each use.
+    generic_aliases: HashMap<String, rokc_ast::TypeAliasDef>,
+    /// Every generic alias use: (alias, arguments, module, span), for
+    /// its bounds check (`check_type_bounds`).
+    alias_uses: std::cell::RefCell<Vec<AliasUse>>,
 }
 
+/// (alias full name, arguments, module of the use, span of the use).
+type AliasUse = (String, Vec<Ty>, String, rokc_diagnostic::Span);
+
 impl TypeNames<'_> {
+    /// `Row<3>` → `[i32; 3]` when `ty` names a generic alias.
+    // ponytail: the expansion resolves in the use site's module, so the
+    // aliased type's names must be visible there too.
+    fn expand_alias(&self, ty: &Ty, module: &str) -> Option<Ty> {
+        let AstTyKind::Path(p) = &ty.kind else {
+            return None;
+        };
+        let args = &p.segments.last()?.generics;
+        if args.is_empty() || self.generic_aliases.is_empty() {
+            return None;
+        }
+        let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
+        let full = self.canon(&segs, module, &[])?;
+        let alias = self.generic_aliases.get(&full)?;
+        let map: HashMap<String, Ty> = alias
+            .generics
+            .params
+            .iter()
+            .map(|gp| match gp {
+                rokc_ast::GenericParam::Type { name, .. }
+                | rokc_ast::GenericParam::Const { name, .. } => name.clone(),
+            })
+            .zip(args.iter().cloned())
+            .collect();
+        let mut out = alias.ty.clone();
+        collect::subst_assoc_ty(&mut out, &map);
+        self.alias_uses
+            .borrow_mut()
+            .push((full, args.clone(), module.to_owned(), ty.span));
+        Some(out)
+    }
+
     fn canon(
         &self,
         segments: &[&str],
@@ -298,9 +339,22 @@ struct GenericTraitImpl {
     methods: HashMap<String, GenericMethod>,
 }
 
+/// An impl's associated consts (trait defaults included) and the impl
+/// target they apply to (spec 2.8.3a).
+struct ImplConsts {
+    /// Generics / `where` / target of the impl; `trait_key` is empty for
+    /// an inherent impl.
+    target: GenericTraitImpl,
+    /// `(NAME, type, value)`.
+    consts: Vec<(String, Ty, Expr)>,
+}
+
 /// Module-wide, read-only lowering environment shared by every function
 /// body (plus the interior-mutable `sink`).
 struct Env<'a> {
+    /// Every impl's associated consts, matched against a concrete type
+    /// (`T::N`, `Self::N`, `<T as Tr>::N`).
+    impl_consts: Vec<ImplConsts>,
     fn_table: HashMap<String, FnSig>,
     /// `extern` fns: one global C namespace, callable by bare name from
     /// every module (they are not module items, spec 5.9).
@@ -409,6 +463,9 @@ enum MethodOrFn<'a> {
         module: String,
         /// `fn_table` key, also the function's name.
         key: String,
+        /// A trait default body's trait parameters → this impl's
+        /// arguments (`trait Dim<const D: usize>` + `impl Dim<3>`).
+        subst: HashMap<String, HirTy>,
     },
 }
 
@@ -1357,7 +1414,8 @@ impl<'a> LowerCtx<'a> {
             def_id: None,
             name: key,
             fields: Vec::new(),
-            span: def.span,
+            // The use being lowered: bound errors point here.
+            span: rokc_diagnostic::current_span(),
             generic_args: args.clone(),
             union_kind: None,
         });
@@ -1419,7 +1477,7 @@ impl<'a> LowerCtx<'a> {
             def_id: None,
             name: key,
             variants: Vec::new(),
-            span: def.span,
+            span: rokc_diagnostic::current_span(),
             generic_args: args.clone(),
         });
         let subst = generic_subst(&def.generics, &args);
@@ -1663,6 +1721,16 @@ impl<'a> LowerCtx<'a> {
             // concrete before the instantiation check.
             AstTyKind::SelfUpper if self.self_ty.is_some() => {
                 self.self_ty.clone().unwrap_or(HirTy::Unknown)
+            }
+            AstTyKind::Path(_)
+                if self
+                    .env
+                    .names
+                    .expand_alias(ty, &self.current_module)
+                    .is_some() =>
+            {
+                let t = self.env.names.expand_alias(ty, &self.current_module);
+                t.map_or(HirTy::Unknown, |t| rec(&t))
             }
             AstTyKind::Path(p) => {
                 if let [seg] = p.segments.as_slice() {

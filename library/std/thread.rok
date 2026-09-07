@@ -1,0 +1,136 @@
+// rok::std::thread — OS threads, 1:1 (stdlib spec 304, refs-lang
+// 7.6.6). Each thread is a GC mutator: its frames are roots, it stops
+// at safepoints, and blocking calls (`join`, `sleep`, lock waits) let a
+// collection run without it.
+//
+// A panic in any thread ends the whole process (exit 101): panics are
+// not catchable (2.14), so `join` never sees one. `JoinError` only
+// reports an OS join failure.
+//
+// ponytail: `park` / `unpark` / `park_timeout` and `thread::local` are
+// not here yet; `current().name()` is always `none` (names live on the
+// spawner's `JoinHandle`); a never-joined handle leaks its OS thread
+// record (rok has no implicit drop to detach it).
+
+use rok::std::io::IoError;
+use rok::std::time::Duration;
+
+extern "C" {
+    fn rok_thread_new_id() -> u64;
+    fn rok_thread_spawn(f: fn() + Send, stack_size: usize, id: u64) -> usize;
+    fn rok_thread_join(handle: usize) -> i32;
+    fn rok_thread_id() -> u64;
+    fn rok_thread_sleep_ns(ns: i64);
+    fn rok_thread_yield_now();
+}
+
+/// Identifies a thread for its lifetime (its runtime worker id).
+pub struct ThreadId {
+    id: u64;
+}
+
+impl ThreadId {
+    pub fn as_u64(self) -> u64 { return self.id; }
+}
+
+impl PartialEq for ThreadId {
+    fn eq(self, rhs: ThreadId) -> bool { return self.id == rhs.id; }
+    fn ne(self, rhs: ThreadId) -> bool { return self.id != rhs.id; }
+}
+
+/// A thread's identity. ponytail: spec writes `Thread<T>`; `T` is
+/// unused by its methods, so it is left out.
+pub struct Thread {
+    id: ThreadId;
+    name: str | none;
+}
+
+impl Thread {
+    pub fn id(self) -> ThreadId { return self.id; }
+    pub fn name(self) -> str | none { return self.name; }
+}
+
+/// The OS could not join the thread.
+pub struct JoinError {
+    message: str;
+}
+
+impl JoinError {
+    pub fn message(self) -> str { return self.message; }
+}
+
+/// The running thread's result, once joined.
+pub struct JoinHandle<T> {
+    handle: usize;
+    result: GcBuf<T>;
+    thread: Thread;
+}
+
+impl<T> JoinHandle<T> {
+    /// Wait for the thread and take its result.
+    pub fn join(self) throws (JoinError) -> T {
+        if unsafe { rok_thread_join(self.handle) } != 0 {
+            throw JoinError { message: "pthread_join failed" };
+        }
+        return buf_get(self.result, 0);
+    }
+
+    pub fn thread(self) -> Thread { return self.thread; }
+}
+
+/// Spawn configuration.
+pub struct Builder {
+    name: str | none;
+    stack_size: usize | none;
+}
+
+impl Builder {
+    pub fn new() -> Builder { return Builder { name: none, stack_size: none }; }
+
+    pub fn name(self, name: str) -> Builder {
+        return Builder { name: name, stack_size: self.stack_size };
+    }
+
+    /// Stack bytes for the new thread (default 8 MiB).
+    pub fn stack_size(self, size: usize) -> Builder {
+        return Builder { name: self.name, stack_size: size };
+    }
+
+    pub fn spawn<T: Send>(self, f: fn() -> T + Send) throws (IoError) -> JoinHandle<T> {
+        let result: GcBuf<T> = buf_new(1);
+        let run: fn() + Send = || { buf_set(result, 0, f()); };
+        let id = unsafe { rok_thread_new_id() };
+        let h = unsafe { rok_thread_spawn(run, self.stack_size ?? 0usize, id) };
+        if h == 0usize {
+            throw IoError::new("could not create an OS thread");
+        }
+        return JoinHandle {
+            handle: h,
+            result: result,
+            thread: Thread { id: ThreadId { id: id }, name: self.name },
+        };
+    }
+}
+
+/// Run `f` on a new OS thread.
+pub fn spawn<T: Send>(f: fn() -> T + Send) -> JoinHandle<T> {
+    return try! Builder::new().spawn(f);
+}
+
+/// The calling thread.
+pub fn current() -> Thread {
+    return Thread { id: ThreadId { id: unsafe { rok_thread_id() } }, name: none };
+}
+
+/// Let the OS run another thread.
+pub fn yield_now() {
+    unsafe { rok_thread_yield_now() };
+}
+
+/// Block the calling thread for `dur`.
+pub fn sleep(dur: Duration) {
+    unsafe { rok_thread_sleep_ns(dur.as_nanos()) };
+}
+
+/// Always `false`: a panic ends the process before anything can ask.
+pub fn panicking() -> bool { return false; }

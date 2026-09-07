@@ -1,0 +1,45 @@
+// expect-exit: 0
+// expect-stdout:
+// 280
+// 800000
+// unit thread
+// 5
+// w
+// ids differ
+
+// std::thread (304): eight OS threads bump one `Atomic<i32>` (2.16.2);
+// `join` returns each closure's value. A `()` closure, `Builder`, and
+// `ThreadId`.
+use rok::std::thread;
+use rok::std::time::Duration;
+
+fn main() -> i32 {
+    let n = Atomic::new(0);
+    let hs: List<thread::JoinHandle<i32>> = [];
+    let i = 0;
+    while i < 8 {
+        let k = i;
+        hs.push(thread::spawn(|| {
+            let j = 0;
+            while j < 100000 {
+                n.fetch_add(1, Relaxed);
+                j += 1;
+            }
+            k * 10
+        }));
+        i += 1;
+    }
+    let sum = 0;
+    for h in hs { sum += try! h.join(); }
+    rok_print_i32(sum);
+    rok_print_i32(n.load());
+    thread::sleep(Duration::ms(1));
+    thread::yield_now();
+    let u = thread::spawn(|| { rok_print_str("unit thread"); });
+    try! u.join();
+    let b = try! thread::Builder::new().name("w").stack_size(1048576).spawn(|| 5);
+    rok_print_i32(try! b.join());
+    match b.thread().name() { s: str => rok_print_str(s), none => {}, }
+    if b.thread().id() != thread::current().id() { rok_print_str("ids differ"); }
+    return 0;
+}

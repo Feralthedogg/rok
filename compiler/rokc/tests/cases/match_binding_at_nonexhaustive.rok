@@ -1,0 +1,13 @@
+// expect-error: non-exhaustive match on `(bool, bool)`
+// A binding pattern covers exactly what its sub-pattern covers:
+// `(false, false)` is missing.
+fn f(x: bool, y: bool) -> i32 {
+    match (x, y) {
+        a @ (true, _) => 1,
+        (false, b @ true) => 2,
+    }
+}
+
+fn main() -> i32 {
+    return f(true, true);
+}

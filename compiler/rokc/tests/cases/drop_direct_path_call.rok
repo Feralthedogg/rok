@@ -1,0 +1,21 @@
+// expect-error: `Drop::drop` cannot be called directly
+// Spec 2.13.4: the path forms are banned too (`Drop::drop(x)`,
+// `File::drop(f)`, `T::drop(x)`, `<File as Drop>::drop(f)`).
+struct File { fd: i32; }
+
+impl Drop for File {
+    fn drop(ref self) { rok_print_i32(self.fd); }
+}
+
+fn close<T: Drop>(x: T) {
+    T::drop(ref x);
+}
+
+fn main() -> i32 {
+    let f = File { fd: 3 };
+    Drop::drop(ref f);
+    <File as Drop>::drop(ref f);
+    File::drop(ref f);
+    close(f);
+    return 0;
+}

@@ -3,10 +3,11 @@
 //! ponytail: stand-in for Immix (703) + sticky mark-bit generations +
 //! concurrent mark (705). Every object is its own `malloc` block; the
 //! 16-byte header (801) is untouched and a hidden [`Prefix`] in front of
-//! it links all objects for the sweep. Single mutator thread: the heap
-//! is a plain global and only the calling thread's shadow stack is
-//! walked. Upgrade path: TLAB + Immix blocks, a thread registry for
-//! roots, write-barrier logs for sticky / concurrent marking.
+//! it links all objects for the sweep. Many mutator threads: the heap
+//! is guarded by the world lock ([`world`]) and a collection stops
+//! every registered thread at a safepoint, then walks all their shadow
+//! stacks. Upgrade path: TLAB + Immix blocks, write-barrier logs for
+//! sticky / concurrent marking.
 //!
 //! Roots (704 §7.4.1): compiled code links a frame
 //! `{ prev, count, slots[count] }` into `rok_tls_shadow_stack_top` on
@@ -39,6 +40,8 @@ use rokr_common::object_header::{
     FLAG_IMMORTAL, FLAG_MARK, FLAG_PINNED, HEADER_ALIGN, HEADER_SIZE, ObjectHeader,
 };
 
+pub mod world;
+
 /// Heap size below which no collection runs.
 const MIN_HEAP: usize = 4 << 20;
 /// First type id of the user range (801 §8.1.2).
@@ -60,13 +63,6 @@ struct Prefix {
     offset: usize,
 }
 
-#[repr(C)]
-struct Frame {
-    prev: *mut Frame,
-    count: usize,
-    // `slots: [*mut usize; count]` follows.
-}
-
 struct Heap {
     objects: *mut u8,
     live_bytes: usize,
@@ -86,7 +82,7 @@ struct Heap {
 }
 
 struct Global(UnsafeCell<Heap>);
-// SAFETY: single mutator thread (see module docs).
+// SAFETY: only touched with the world lock held (see module docs).
 unsafe impl Sync for Global {}
 
 static HEAP: Global = Global(UnsafeCell::new(Heap {
@@ -104,8 +100,8 @@ static HEAP: Global = Global(UnsafeCell::new(Heap {
 }));
 
 fn heap() -> &'static mut Heap {
-    // SAFETY: single mutator thread; no caller keeps the reference across
-    // another `heap()` call.
+    // SAFETY: callers hold the world lock; no caller keeps the reference
+    // across another `heap()` call.
     unsafe { &mut *HEAP.0.get() }
 }
 
@@ -131,10 +127,6 @@ pub fn alloc(size: usize, align: usize, type_id: u32) -> *mut u8 {
     let Some(total) = size.checked_add(offset) else {
         fatal(b"rok runtime: allocation size overflow");
     };
-    let h = heap();
-    if h.live_bytes.saturating_add(size) > h.next_gc {
-        collect();
-    }
     // SAFETY: plain allocation calls; `align` is a power of two >= 8.
     let base = unsafe {
         if align <= 16 {
@@ -152,10 +144,17 @@ pub fn alloc(size: usize, align: usize, type_id: u32) -> *mut u8 {
     if base.is_null() {
         rokr_common::oom();
     }
+    world::lock();
+    let h = heap();
+    // The new block is not on the list yet, so a collection here cannot
+    // free it.
+    if h.live_bytes.saturating_add(size) > h.next_gc {
+        collect_locked();
+    }
     let h = heap();
     // SAFETY: `base..base+total` is ours; `obj` is `align`-aligned and the
     // prefix fits in the `offset` bytes before it.
-    unsafe {
+    let obj = unsafe {
         let obj = base.cast::<u8>().add(offset);
         prefix(obj).write(Prefix {
             next: h.objects,
@@ -167,7 +166,9 @@ pub fn alloc(size: usize, align: usize, type_id: u32) -> *mut u8 {
         h.count += 1;
         h.live_bytes += size;
         obj
-    }
+    };
+    world::unlock();
+    obj
 }
 
 /// Register the 802 `ScanTable` for `type_id`. Ids below the user range
@@ -177,6 +178,7 @@ pub fn register_type(type_id: u32, table: *const u8) {
         return;
     };
     let i = i as usize;
+    world::lock();
     let h = heap();
     if i >= h.scan_len {
         let len = (i + 1).next_power_of_two().max(64);
@@ -194,6 +196,7 @@ pub fn register_type(type_id: u32, table: *const u8) {
     }
     // SAFETY: `i < scan_len`.
     unsafe { *h.scan_tables.add(i) = table };
+    world::unlock();
 }
 
 fn scan_table(type_id: u32) -> *const u8 {
@@ -273,24 +276,24 @@ fn push(word: *mut u8, len: &mut usize) {
     *len += 1;
 }
 
-/// Full stop-the-world collection: mark from this thread's shadow stack
-/// and from pinned / immortal objects, then sweep.
-#[allow(clippy::cast_ptr_alignment)] // frames, slots and tables are word-aligned
+/// Full stop-the-world collection (`rok_gc_collect`).
 pub fn collect() {
+    world::lock();
+    collect_locked();
+    world::unlock();
+}
+
+/// With the world lock held: stop every other mutator, mark from all
+/// registered threads' shadow stacks and from pinned / immortal objects,
+/// sweep, resume.
+#[allow(clippy::cast_ptr_alignment)] // tables are word-aligned
+fn collect_locked() {
+    world::stop();
     build_index();
     let mut len = 0;
-    // SAFETY: every frame on the chain was linked by compiled code and
-    // stays live until its function returns, which is after this call;
-    // each slot points at a word inside such a frame's function.
+    world::for_each_root(|word| push(word, &mut len));
+    // SAFETY: walks the all-objects list.
     unsafe {
-        let mut f = (*rokr_common::tls::shadow_stack_top()).cast::<Frame>();
-        while !f.is_null() {
-            let slots = f.add(1).cast::<*const usize>();
-            for i in 0..(*f).count {
-                push(**slots.add(i) as *mut u8, &mut len);
-            }
-            f = (*f).prev;
-        }
         let mut o = heap().objects;
         while !o.is_null() {
             let flags = (*header(o)).gc_flags.load(Ordering::Relaxed);
@@ -356,26 +359,41 @@ pub fn collect() {
     }
     h.next_gc = (h.live_bytes * 2).max(MIN_HEAP);
     h.collections += 1;
+    world::resume();
 }
 
 /// Bytes held by GC objects (headers included) not yet swept.
 pub fn live_bytes() -> usize {
-    heap().live_bytes
+    world::lock();
+    let n = heap().live_bytes;
+    world::unlock();
+    n
 }
 
 pub fn collections() -> u64 {
-    heap().collections
+    world::lock();
+    let n = heap().collections;
+    world::unlock();
+    n
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[repr(C)]
+    struct Frame {
+        prev: *mut Frame,
+        count: usize,
+    }
+
     #[test]
     #[allow(clippy::cast_ptr_alignment)] // GC objects are 8-aligned
     fn collect_frees_unreachable_and_keeps_traced_children() {
         // 802 table: total 32, version 1, one STRONG_REF at offset 16.
         static TABLE: [u32; 4] = [32, 1 | (1 << 16), 16, STRONG_REF];
+        rokr_common::tls::thread_init();
+        world::attach_current();
         register_type(USER_TYPE_BASE, TABLE.as_ptr().cast());
         let base = live_bytes();
         let a = alloc(32, 8, USER_TYPE_BASE);

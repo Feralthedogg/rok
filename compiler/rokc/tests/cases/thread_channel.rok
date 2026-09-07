@@ -1,0 +1,41 @@
+// expect-exit: 0
+// expect-stdout:
+// 1
+// none
+// 20000
+// 30049990000
+
+// channel (2.17): `close()` ends the stream (`recv` → `none`); four
+// producer threads, each with its own cloned `Sender`, feed a bounded
+// channel (4 slots, so senders block) drained by `for v in rx.iter()`.
+use rok::std::thread;
+
+fn main() -> i32 {
+    let (tx, rx) = channel::<i64>();
+    try! tx.send(1);
+    tx.close();
+    match rx.recv() { v: i64 => rok_print_i64(v), none => rok_print_str("none"), }
+    match rx.recv() { v: i64 => rok_print_i64(v), none => rok_print_str("none"), }
+
+    let (tx, rx) = channel_bounded::<i64>(4);
+    let producers: List<thread::JoinHandle<()>> = [];
+    let p: i64 = 0;
+    while p < 4 {
+        let t = tx.clone();
+        let base = p * 1000000;
+        producers.push(thread::spawn(|| {
+            let i: i64 = 0;
+            while i < 5000 { try! t.send(base + i); i += 1; }
+            t.close();
+        }));
+        p += 1;
+    }
+    tx.close();
+    let sum: i64 = 0;
+    let count: i64 = 0;
+    for v in rx.iter() { sum += v; count += 1; }
+    for h in producers { try! h.join(); }
+    rok_print_i64(count);
+    rok_print_i64(sum);
+    return 0;
+}

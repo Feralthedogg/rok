@@ -1,0 +1,56 @@
+// expect-exit: 0
+// expect-stdout:
+// 7
+// 7
+// -10
+// was false
+// now true
+// 3
+// cmp ok
+// 42
+// 6
+// 9
+// 1
+// 5
+
+// core::sync (2.16) on one thread: `Atomic` ops (default `SeqCst`,
+// explicit orderings, CAS success / failure, `bool`, `u64` bit ops),
+// `Mutex` / `RwLock` guards under `using`, `Once`, `Cell`. Bare
+// `Ordering` stays `cmp::Ordering`.
+fn main() -> i32 {
+    let a = Atomic::new(5);
+    a.fetch_add(3);
+    a.fetch_sub(1, Relaxed);
+    rok_print_i32(a.load());
+    let r = a.compare_exchange(7, 10, SeqCst, SeqCst);
+    match r { Result::Ok(v) => rok_print_i32(v), Result::Err(v) => rok_print_i32(0 - v), };
+    let r2 = a.compare_exchange(7, 11, SeqCst, SeqCst);
+    match r2 { Result::Ok(v) => rok_print_i32(v), Result::Err(v) => rok_print_i32(0 - v), };
+    let f = Atomic::new(false);
+    if !f.swap(true) { rok_print_str("was false"); }
+    if f.load() { rok_print_str("now true"); }
+    let u = Atomic::new(0u64);
+    u.fetch_or(6u64); u.fetch_and(3u64); u.fetch_xor(1u64);
+    rok_print_i64(u.load() as i64);
+    let o = Ordering::Less;
+    if o.is_lt() { rok_print_str("cmp ok"); }
+
+    let m = Mutex::new(1);
+    using g = m.lock() {
+        g.set(g.deref() + 41);
+    }
+    using g = m.lock() { rok_print_i32(g.deref()); }
+    let l = RwLock::new(3);
+    using r = l.read(), r2 = l.read() { rok_print_i32(r.deref() + r2.deref()); }
+    using w = l.write() { w.set(9); }
+    using r = l.read() { rok_print_i32(r.deref()); }
+    let once = Once::new();
+    let n = Atomic::new(0);
+    once.call_once(|| { n.fetch_add(1); });
+    once.call_once(|| { n.fetch_add(1); });
+    rok_print_i32(n.load());
+    let c = Cell::new(4);
+    c.set(c.get() + 1);
+    rok_print_i32(c.replace(0));
+    return 0;
+}

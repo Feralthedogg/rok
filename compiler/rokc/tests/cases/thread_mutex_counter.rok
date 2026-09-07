@@ -1,0 +1,57 @@
+// expect-exit: 0
+// expect-stdout:
+// 40000
+// 4
+// 1
+// 6000
+
+// core::sync (2.16) across threads: a `Mutex` counter whose guard is
+// released by `using`, a `Condvar` start gate, an `RwLock`, and `Once`.
+use rok::std::thread;
+
+fn main() -> i32 {
+    let counter = Mutex::new(0i64);
+    let ready = Mutex::new(false);
+    let gate = Condvar::new();
+    let arrived = Atomic::new(0);
+    let once = Once::new();
+    let inits = Atomic::new(0);
+    let table = RwLock::new(0i64);
+    let hs: List<thread::JoinHandle<()>> = [];
+    let t = 0;
+    while t < 4 {
+        hs.push(thread::spawn(|| {
+            once.call_once(|| { inits.fetch_add(1); });
+            arrived.fetch_add(1);
+            // Wait for the start signal.
+            using g = ready.lock() {
+                while !g.deref() {
+                    g = gate.wait(g);
+                }
+            }
+            let i = 0;
+            while i < 10000 {
+                using g = counter.lock() {
+                    g.set(g.deref() + 1);
+                }
+                i += 1;
+            }
+            let j = 0;
+            while j < 1500 {
+                using w = table.write() { w.set(w.deref() + 1); }
+                using r = table.read() { if r.deref() < 0 { rok_print_str("bad"); } }
+                j += 1;
+            }
+        }));
+        t += 1;
+    }
+    while arrived.load() < 4 { thread::yield_now(); }
+    using g = ready.lock() { g.set(true); }
+    gate.notify_all();
+    for h in hs { try! h.join(); }
+    using g = counter.lock() { rok_print_i64(g.deref()); }
+    rok_print_i32(arrived.load());
+    rok_print_i32(inits.load());
+    using r = table.read() { rok_print_i64(r.deref()); }
+    return 0;
+}

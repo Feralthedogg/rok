@@ -86,9 +86,11 @@ pub fn walk_item(v: &mut impl AstVisitor, item: &Item) {
                 match ti {
                     TraitItem::Method(m) => walk_fn(v, m),
                     TraitItem::AssocType { .. } => {}
-                    TraitItem::Const(c) => {
-                        walk_ty(v, &c.ty);
-                        walk_expr(v, &c.value);
+                    TraitItem::Const { ty, default, .. } => {
+                        walk_ty(v, ty);
+                        if let Some(d) = default {
+                            walk_expr(v, d);
+                        }
                     }
                 }
             }
@@ -243,6 +245,12 @@ pub fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
         ExprKind::Tuple(items) | ExprKind::List(items) | ExprKind::Set(items) => {
             for i in items {
                 walk_expr(v, i);
+            }
+        }
+        ExprKind::ArrayRepeat { value, len } => {
+            walk_expr(v, value);
+            if let rokc_ast::ConstExpr::Expr(e) = len {
+                walk_expr(v, e);
             }
         }
         ExprKind::Dict(pairs) => {

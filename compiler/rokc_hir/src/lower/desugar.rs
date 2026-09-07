@@ -693,6 +693,20 @@ pub(super) fn bind_irrefutable(
             }
             stmts.push(ctx.declare_var(name, ty, value, pat.span));
         }
+        // `whole @ (a, b)`: bind the whole value, then destructure it.
+        (
+            AstPatternKind::Binding {
+                name,
+                sub: Some(sub),
+            },
+            ty,
+        ) => {
+            stmts.push(ctx.declare_var(name, ty, value, pat.span));
+            if let Some(local) = ctx.lookup(name) {
+                let read = ctx.read_local(local, span);
+                bind_irrefutable(ctx, sub, read, stmts);
+            }
+        }
         (AstPatternKind::Tuple(pats), HirTy::Tuple(tys)) if pats.len() == tys.len() => {
             let tmp = ctx.declare(None, value.ty.clone());
             let tuple_ty = value.ty.clone();

@@ -112,16 +112,7 @@ pub(super) fn lower_match(
 
 /// Matches every value of its type (no refutable sub-pattern).
 pub(super) fn hir_pattern_irrefutable(p: &HirPattern) -> bool {
-    match p {
-        HirPattern::Wildcard | HirPattern::Binding { .. } => true,
-        HirPattern::Tuple(parts) => parts.iter().all(hir_pattern_irrefutable),
-        HirPattern::Struct { fields, .. } => fields.iter().all(|(_, p)| hir_pattern_irrefutable(p)),
-        HirPattern::Or(alts) => alts.iter().any(hir_pattern_irrefutable),
-        HirPattern::Literal { .. }
-        | HirPattern::Range { .. }
-        | HirPattern::EnumVariant { .. }
-        | HirPattern::SumVariant { .. } => false,
-    }
+    p.is_irrefutable()
 }
 
 /// Enum variants / sum variants fully covered by `p`.
@@ -135,6 +126,7 @@ pub(super) fn covered_variants(p: &HirPattern, out: &mut Vec<u32>) {
             out.push(*variant_index);
         }
         HirPattern::SumVariant { variant_index, .. } => out.push(*variant_index),
+        HirPattern::At { sub, .. } => covered_variants(sub, out),
         HirPattern::Or(alts) => {
             for a in alts {
                 covered_variants(a, out);
@@ -166,6 +158,7 @@ enum Pat {
 fn simplify(ctx: &LowerCtx<'_>, p: &HirPattern) -> Pat {
     match p {
         HirPattern::Wildcard | HirPattern::Binding { .. } => Pat::Wild,
+        HirPattern::At { sub, .. } => simplify(ctx, sub),
         HirPattern::Literal {
             value: ConstVal::Bool(b),
             ..
@@ -416,6 +409,7 @@ pub(super) fn check_match_exhaustiveness(
                         ..
                     } => seen[usize::from(*b)] = true,
                     HirPattern::Or(alts) => alts.iter().for_each(|a| bools(a, seen)),
+                    HirPattern::At { sub, .. } => bools(sub, seen),
                     _ => {}
                 }
             }
@@ -538,7 +532,19 @@ pub(super) fn lower_pattern_inner(
             };
             lower_pattern(ctx, &variant, scrut_ty)
         }
-        AstPatternKind::Binding { name, sub: None } => {
+        AstPatternKind::Binding { name, sub } => {
+            // `name @ sub`: bind the whole value, match like `sub`.
+            let at = |ctx: &mut LowerCtx<'_>, local: LocalId| match sub {
+                None => HirPattern::Binding {
+                    local,
+                    ty: scrut_ty.clone(),
+                },
+                Some(p) => HirPattern::At {
+                    local,
+                    ty: scrut_ty.clone(),
+                    sub: Box::new(lower_pattern(ctx, p, scrut_ty)),
+                },
+            };
             // Spec 3.11.4: when an enclosing or-pattern shares this name
             // across alternatives, reuse the preset local and check that
             // each alt binds the same type.
@@ -555,23 +561,10 @@ pub(super) fn lower_pattern_inner(
                         ),
                     );
                 }
-                return HirPattern::Binding {
-                    local,
-                    ty: scrut_ty.clone(),
-                };
+                return at(ctx, local);
             }
             let local = ctx.declare_bound(name, scrut_ty.clone(), pat.span);
-            HirPattern::Binding {
-                local,
-                ty: scrut_ty.clone(),
-            }
-        }
-        AstPatternKind::Binding { name, sub: Some(_) } => {
-            ctx.emit_error(
-                rokc_diagnostic::ErrorKind::Type,
-                format!("`{name} @ pattern` bindings are not supported yet (stage-1 limitation)"),
-            );
-            HirPattern::Wildcard
+            at(ctx, local)
         }
         AstPatternKind::Literal(AstLit::None) => {
             // `none` against a sum scrutinee → match the none variant.

@@ -238,7 +238,10 @@ pub(super) fn monomorphize_on(
             .params
             .iter()
             .filter_map(|gp| match gp {
-                rokc_ast::GenericParam::Type { name, .. } if !subst.contains_key(name) => {
+                rokc_ast::GenericParam::Type { name, .. }
+                | rokc_ast::GenericParam::Const { name, .. }
+                    if !subst.contains_key(name) =>
+                {
                     Some(name.clone())
                 }
                 _ => None,
@@ -300,8 +303,9 @@ pub(super) fn monomorphize_on(
                     ctx.emit_error(
                         rokc_diagnostic::ErrorKind::Type,
                         format!(
-                            "cannot infer const parameter `{name}` of `{}` — pass it \
-                             explicitly (`::<..>`) (spec 2.11.6)",
+                            "cannot infer const parameter `{name}` of `{}` from the call \
+                             arguments or the expected type — pass it explicitly (`::<..>`) \
+                             (spec 2.11.6)",
                             fn_def.name
                         ),
                     );
@@ -593,6 +597,9 @@ pub(super) fn resolve_ast_with_subst(
                     return replacement.clone();
                 }
             }
+            if let Some(t) = sc.names.expand_alias(ty, sc.module) {
+                return rec(&t);
+            }
             // Generic-struct/enum path: resolve generic args under subst,
             // then look up the mangled instantiation.
             let generics = p.segments.last().map_or(&[][..], |s| s.generics.as_slice());
@@ -621,10 +628,17 @@ pub(super) fn resolve_ast_with_subst(
         rokc_ast::TyKind::Sum(parts) => HirTy::Sum(parts.iter().map(rec).collect()),
         rokc_ast::TyKind::Tuple(parts) if parts.is_empty() => HirTy::Unit,
         rokc_ast::TyKind::Tuple(parts) => HirTy::Tuple(parts.iter().map(rec).collect()),
-        rokc_ast::TyKind::Array(elem, _) => {
-            match resolve_ty_with_structs(ty, struct_table, enum_table, sc) {
-                HirTy::Array(_, n) => HirTy::Array(Box::new(rec(elem)), n),
-                other => other,
+        // `[T; N]` / `[T; M * N]` under the instantiation's const args.
+        rokc_ast::TyKind::Array(elem, len) => {
+            let n = crate::ty::eval_const_with(len, &|name| {
+                subst.get(name).and_then(crate::ty::as_const).map(|c| c.0)
+            });
+            match n.and_then(|n| u32::try_from(n).ok()) {
+                Some(n) => HirTy::Array(Box::new(rec(elem)), n),
+                None => match resolve_ty_with_structs(ty, struct_table, enum_table, sc) {
+                    HirTy::Array(_, n) => HirTy::Array(Box::new(rec(elem)), n),
+                    other => other,
+                },
             }
         }
         rokc_ast::TyKind::Fn(args, ret, b) => HirTy::Fn(
@@ -773,6 +787,9 @@ pub(super) fn generic_use<'t, V>(
     enum_table: &HashMap<String, EnumId>,
     sc: Scope<'_>,
 ) -> Option<(String, &'t V, Vec<HirTy>)> {
+    if let Some(t) = sc.names.expand_alias(ty, sc.module) {
+        return generic_use(&t, generic_defs, struct_table, enum_table, sc);
+    }
     let rokc_ast::TyKind::Path(p) = &ty.kind else {
         return None;
     };
@@ -825,7 +842,8 @@ pub(super) fn visit_ty_for_enum_mono(
         def_id: None,
         name: mangled,
         variants,
-        span: def.span,
+        // The first use: bound errors point here (`check_type_bounds`).
+        span: ty.span,
         generic_args: arg_tys,
     });
 }
@@ -919,7 +937,8 @@ pub(super) fn instantiate_generic_structs(
                     def_id: None,
                     name: mangled,
                     fields,
-                    span: def.span,
+                    // The first use: bound errors point here.
+                    span: ty.span,
                     generic_args: args,
                     union_kind: None,
                 });

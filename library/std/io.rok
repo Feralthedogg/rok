@@ -1,0 +1,12 @@
+// rok::std::io (stdlib spec 305). Only `IoError` so far: 305 names it in
+// every signature but does not define its shape.
+
+/// An OS-level I/O failure.
+pub struct IoError {
+    message: str;
+}
+
+impl IoError {
+    pub fn new(message: str) -> IoError { return IoError { message: message }; }
+    pub fn message(self) -> str { return self.message; }
+}

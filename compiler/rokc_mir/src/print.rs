@@ -282,6 +282,23 @@ fn print_rvalue(out: &mut String, r: &RValue) {
             print_operand(out, index);
             out.push(']');
         }
+        RValue::BufAtomic {
+            op,
+            buf,
+            index,
+            args,
+            elem_ty,
+        } => {
+            let _ = write!(out, "atomic_{op}<{}> ", ty_str(elem_ty));
+            print_operand(out, buf);
+            out.push('[');
+            print_operand(out, index);
+            out.push(']');
+            for a in args {
+                out.push_str(", ");
+                print_operand(out, a);
+            }
+        }
     }
 }
 

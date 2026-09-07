@@ -85,6 +85,12 @@ thread_local! {
     static CURRENT_SPAN: Cell<Span> = const { Cell::new(Span::DUMMY) };
 }
 
+/// The location new diagnostics default to.
+#[must_use]
+pub fn current_span() -> Span {
+    CURRENT_SPAN.with(Cell::get)
+}
+
 /// Set the location new diagnostics default to (what a later pass is
 /// working on, e.g. the expression HIR is lowering); returns the old
 /// one to restore.

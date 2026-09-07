@@ -1,0 +1,83 @@
+// expect-exit: 0
+// expect-stdout:
+// 4
+// square
+// 3
+// shape
+// 4 sides
+// 3 sides
+// 1
+// 8
+// 16
+// 2
+
+// Spec 2.8.3a: traits declare associated consts (optionally with a
+// default), impls provide them, `T::N` reads them through a bound and
+// `Self::N` inside a trait's default method.
+trait Shape {
+    const SIDES: u32;
+    const NAME: str = "shape";
+
+    fn describe(self) -> str {
+        return f"{Self::SIDES} sides";
+    }
+}
+
+struct Square { s: i32; }
+struct Tri { s: i32; }
+
+impl Shape for Square {
+    const SIDES: u32 = 4;
+    const NAME: str = "square";
+}
+
+impl Shape for Tri {
+    const SIDES: u32 = 3;
+}
+
+trait Bits {
+    const BITS: i32;
+}
+
+impl Bits for i8 {
+    const BITS: i32 = 8;
+}
+
+impl Bits for i16 {
+    const BITS: i32 = 16;
+}
+
+fn sides<T: Shape>() -> u32 {
+    return T::SIDES;
+}
+
+fn name_of<T: Shape>(x: T) -> str {
+    return T::NAME;
+}
+
+fn bits<T: Bits>(x: T) -> i32 {
+    return T::BITS;
+}
+
+// An impl const on a generic impl target.
+struct Boxed<T> { v: T; }
+
+impl<T> Boxed<T> {
+    const ONE: i32 = 1;
+
+    fn twice(self) -> i32 { return Self::ONE * 2; }
+}
+
+fn main() -> i32 {
+    rok_print_i32(sides::<Square>() as i32);
+    rok_print_str(name_of(Square { s: 1 }));
+    rok_print_i32(sides::<Tri>() as i32);
+    rok_print_str(name_of(Tri { s: 1 }));
+    rok_print_str(Square { s: 1 }.describe());
+    rok_print_str(Tri { s: 1 }.describe());
+    rok_print_i32(Boxed::ONE);
+    rok_print_i32(bits(1i8));
+    rok_print_i32(bits(1i16));
+    rok_print_i32(Boxed { v: 5 }.twice());
+    return 0;
+}
