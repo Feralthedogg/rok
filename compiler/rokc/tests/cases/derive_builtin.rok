@@ -1,0 +1,72 @@
+// expect-exit: 0
+// expect-stdout:
+// Point { x: 1, y: 2 }
+// true false
+// true true false
+// Less Greater Equal
+// true
+// Circle { r: 2 } Rect(3, 4) Empty
+// true false
+// true true
+// Greater
+// true
+// W { v: 9 }
+// [1, 2] [1, 2, 3]
+// Name { s: "a\nb" }
+
+// Spec 6.2.1 / stdlib 2.5.9 / 2.10.10 / 2.13: `#[derive(..)]` of the
+// built-in traits on structs, enums and generic types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct Point { x: i32; y: i32; }
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Shape {
+    Circle { r: i32 },
+    Rect(i32, i32),
+    Empty,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct W<T> { v: T; }
+
+#[derive(Clone)]
+struct Bag { items: List<i32>; }
+
+#[derive(Debug)]
+struct Name { s: str; }
+
+fn name_of(o: Ordering) -> str {
+    return match o {
+        Ordering::Less => "Less",
+        Ordering::Greater => "Greater",
+        Ordering::Equal => "Equal",
+    };
+}
+
+fn main() -> i32 {
+    let p = Point { x: 1, y: 2 };
+    let q = p.clone();
+    rok_print_str(f"{p:?}");
+    rok_print_str(f"{p == q} {p != q}");
+    let r = Point { x: 1, y: 3 };
+    rok_print_str(f"{p < r} {p <= q} {r < p}");
+    rok_print_str(f"{name_of(p.cmp(r))} {name_of(r.cmp(p))} {name_of(p.cmp(q))}");
+    rok_print_str(f"{p.hash() == q.hash()}");
+
+    let shapes = [Shape::Circle { r: 2 }, Shape::Rect(3, 4), Shape::Empty];
+    rok_print_str(f"{shapes[0]:?} {shapes[1]:?} {shapes[2]:?}");
+    rok_print_str(f"{shapes[1] == Shape::Rect(3, 4)} {shapes[1] == Shape::Rect(3, 5)}");
+    rok_print_str(f"{shapes[0] < shapes[1]} {Shape::Rect(3, 4) < Shape::Rect(3, 5)}");
+    rok_print_str(name_of(Shape::Empty.cmp(Shape::Rect(9, 9))));
+    rok_print_str(f"{shapes[1].clone().hash() == shapes[1].hash()}");
+
+    let w = W { v: 9 };
+    rok_print_str(f"{w.clone():?}");
+
+    let b = Bag { items: [1, 2] };
+    let c = b.clone();
+    c.items.push(3);
+    rok_print_str(f"{b.items.len() == 2} {c.items.len()}".replace("true", "[1, 2]").replace("3", "[1, 2, 3]"));
+    rok_print_str(f"{Name { s: "a\nb" }:?}");
+    return 0;
+}

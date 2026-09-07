@@ -159,7 +159,7 @@ fn err_index(ok: &HirTy) -> u32 {
 }
 
 /// Build a carrier: `Ok(v)` → `(false, v, _)`, `Err(e)` → `(true, _, e)`.
-fn carrier(
+pub(super) fn carrier(
     ok: &HirTy,
     err: &HirTy,
     value: Result<HirExpr, HirExpr>,
@@ -888,6 +888,9 @@ pub(super) fn lower_return(
     value: Option<HirExpr>,
     span: rokc_diagnostic::Span,
 ) -> HirStmt {
+    if ctx.coro.is_some() {
+        return exit_through(ctx, None, value, super::coro::coro_return, span);
+    }
     let value = match ctx.fn_throws.clone() {
         Some(err) => {
             let ok = carrier_ok(ctx);
@@ -1241,6 +1244,10 @@ fn describe_err(ctx: &mut LowerCtx<'_>, err: HirExpr, span: rokc_diagnostic::Spa
 /// The ok side of the current function's carrier: its value type,
 /// packed with the `ref` parameters (`ref_packed`).
 fn carrier_ok(ctx: &LowerCtx<'_>) -> HirTy {
+    // A coroutine body's errors ride in its step carrier.
+    if let Some(c) = &ctx.coro {
+        return c.step_ty(ctx, &ctx.fn_ret_ty);
+    }
     let refs: Vec<HirTy> = ctx.ref_params.iter().map(|(_, t)| t.clone()).collect();
     super::mono::ref_packed(&ctx.fn_ret_ty, &refs)
 }

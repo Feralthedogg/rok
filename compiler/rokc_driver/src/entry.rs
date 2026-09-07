@@ -44,6 +44,7 @@ pub fn resolve_entry(stmts: Vec<Stmt>, items: &mut Vec<Item>, diags: &mut Vec<Ro
 
 fn implicit_main(stmts: Vec<Stmt>) -> FnDef {
     let span = stmts.first().map_or(Span::DUMMY, |s| s.span);
+    let is_async = crate::coro::has_top_level_await(&stmts);
     FnDef {
         vis: rokc_core::Visibility::Private,
         attrs: vec![Attribute {
@@ -62,9 +63,8 @@ fn implicit_main(stmts: Vec<Stmt>) -> FnDef {
             span,
             label: None,
         }),
-        // ponytail: spec 4.16.5 makes it `async` when `await` appears at top
-        // level; async main needs the scheduler, which the runtime lacks.
-        is_async: false,
+        // Spec 4.16.5: `await` at top level makes it `async fn main`.
+        is_async,
         is_generator: false,
         is_unsafe: false,
         throws: ThrowsKind::None,
@@ -76,7 +76,6 @@ fn implicit_main(stmts: Vec<Stmt>) -> FnDef {
 /// Spec 4.16.3: no parameters or generics; returns `()` or `i32`, and may
 /// `throws (E)` (an escaping error exits 1, see HIR `uncaught_in_main`).
 /// A `Result` return is not an entry form (E4).
-// ponytail: `async` main (4.16.5) waits for the scheduler.
 fn check_main_signature(f: &FnDef, diags: &mut Vec<RokDiagnostic>) {
     let mut bad = |msg: &str| {
         diags.push(RokDiagnostic::error(

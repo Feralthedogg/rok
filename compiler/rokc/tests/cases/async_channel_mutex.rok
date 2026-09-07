@@ -1,0 +1,67 @@
+// expect-exit: 0
+// expect-stdout:
+// sum 150
+// received 2
+// counter 400
+
+// `recv_async` / `for await` over a channel and `lock_async` suspend the task.
+// Async waits on a channel / Mutex suspend the task, not the thread.
+use rok::std::thread;
+
+let (tx, rx) = channel::<i32>();
+// An OS thread sends; the receiving task suspends between values.
+let producer = thread::spawn(|| {
+    let i = 1;
+    while i <= 5 {
+        thread::sleep(Duration::ms(2));
+        try! tx.send(i * 10);
+        i = i + 1;
+    }
+    tx.close();
+    0
+});
+let sum = 0;
+for await v in rx {
+    sum = sum + v;
+}
+println(f"sum {sum}");
+try! producer.join();
+
+let (tx2, rx2) = channel::<str>();
+let consumer = task::spawn(async {
+    let got: List<str> = [];
+    while true {
+        match await rx2.recv_async() {
+            s: str => got.push(s),
+            none => break,
+        }
+    }
+    got.len()
+});
+await task::sleep(Duration::ms(2));
+try! tx2.send("a");
+try! tx2.send("b");
+tx2.close();
+println(f"received {await consumer}");
+
+let m = Mutex::new(0);
+let workers: List<Task<i32>> = [];
+let w = 0;
+while w < 8 {
+    workers.push(task::spawn(async {
+        let k = 0;
+        while k < 50 {
+            using g = await m.lock_async() {
+                g.set(g.get() + 1);
+                await task::yield_now();
+            }
+            k = k + 1;
+        }
+        0
+    }));
+    w = w + 1;
+}
+await task::join(workers);
+using g = m.lock() {
+    println(f"counter {g.get()}");
+}

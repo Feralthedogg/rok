@@ -1,0 +1,7 @@
+// expect-error: `await` outside an async body
+
+async fn f() -> i32 { 1 }
+fn g() -> i32 {
+    await f()
+}
+println(f"{g()}");

@@ -1,0 +1,71 @@
+// expect-exit: 0
+// expect-stdout:
+// 5
+// full 9
+// 6
+// 11
+// 199800
+// freed
+
+// channel (2.17): `channel_bounded(0)` is a rendezvous (a `send` returns
+// once the receiver took the value; `try_send` is `Full` with nobody
+// waiting); `for v in rx` (IntoIterator); a received value is not kept
+// alive by the channel.
+use rok::std::thread;
+use rok::std::time::Duration;
+
+extern "C" {
+    fn rok_gc_collect();
+    fn rok_gc_stats_live_bytes() -> usize;
+}
+
+fn main() -> i32 {
+    // Rendezvous: `send` returns only after `recv` took the value.
+    let (tx, rx) = channel_bounded::<i64>(0);
+    let got = Atomic::new(0i64);
+    let h = thread::spawn(|| {
+        thread::sleep(Duration::ms(20));
+        let total: i64 = 0;
+        for v in rx {
+            got.store(v);
+            total += v;
+        }
+        total
+    });
+    try! tx.send(5);
+    rok_print_i64(got.load());
+    // Nobody is waiting in `recv`: a rendezvous `try_send` is `Full`.
+    let (lonely, _unused) = channel_bounded::<i64>(0);
+    try lonely.try_send(9) catch e {
+        match e {
+            TrySendError::Full(v) => rok_print_str(f"full {v}"),
+            TrySendError::Closed(_) => rok_print_str("closed"),
+        };
+    };
+    try! tx.send(6);
+    rok_print_i64(got.load());
+    tx.close();
+    rok_print_i64(try! h.join());
+
+    // Received values are not kept alive by the channel.
+    let (tx2, rx2) = channel::<List<i64>>();
+    let i = 0;
+    while i < 200 {
+        let big: List<i64> = [];
+        let j: i64 = 0;
+        while j < 1000 { big.push(j); j += 1; }
+        try! tx2.send(big);
+        i += 1;
+    }
+    let sum: i64 = 0;
+    let k = 0;
+    while k < 200 {
+        match rx2.recv() { xs: List<i64> => { sum += xs[999]; }, none => {}, }
+        k += 1;
+    }
+    rok_print_i64(sum);
+    unsafe { rok_gc_collect() };
+    if unsafe { rok_gc_stats_live_bytes() } > 200000usize { return 1; }
+    rok_print_str("freed");
+    return 0;
+}

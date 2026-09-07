@@ -22,6 +22,7 @@ use core::sync::atomic::Ordering;
 use rokr_common::object_header::{FLAG_PINNED, HEADER_ALIGN, ObjectHeader};
 use rokr_common::{fatal, tls, write_stderr};
 
+mod os;
 mod str;
 mod thread;
 pub use str::RokStr;
@@ -167,6 +168,13 @@ pub unsafe extern "C" fn rok_gc_unpin(obj: *mut u8) {
     };
 }
 
+/// Register `word` (a static's reference word) as a GC root for the
+/// rest of the process. Compiled code calls it at startup.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_gc_add_root(word: *const usize) {
+    rokr_gc::world::add_root(word);
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_gc_collect() {
     rokr_gc::collect();
@@ -245,6 +253,95 @@ pub extern "C" fn rok_coro_unpark(_frame: *mut u8) {
 // ---------------------------------------------------------------------
 // 8.5.4 Scheduler
 // ---------------------------------------------------------------------
+
+/// This thread's running executor (`rok::core::task`): a GC object,
+/// pinned while installed so the collector keeps it (and every task)
+/// alive.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_task_exec_active() -> i32 {
+    i32::from(rok_task_exec_get() != 0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_task_exec_get() -> usize {
+    // SAFETY: this thread's own slot.
+    unsafe { tls::task_exec().read() }
+}
+
+/// # Safety
+/// `exec` must be a live GC object.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rok_task_exec_set(exec: usize) {
+    rok_task_exec_clear();
+    // SAFETY: caller contract; this thread's own slot.
+    unsafe {
+        rok_gc_pin(exec as *mut u8);
+        tls::task_exec().write(exec);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_task_exec_clear() {
+    let old = rok_task_exec_get();
+    if old != 0 {
+        // SAFETY: the slot only holds a pinned, hence live, object.
+        unsafe {
+            rok_gc_unpin(old as *mut u8);
+            tls::task_exec().write(0);
+        }
+    }
+}
+
+/// The process-wide registry of tasks parked on a key (async waits on a
+/// `Mutex` / channel, `rok::core::task::park` / `unpark`): installed
+/// once, pinned for good.
+static TASK_PARKING: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_task_parking_ready() -> i32 {
+    i32::from(TASK_PARKING.load(Ordering::Acquire) != 0)
+}
+
+/// Install `obj` unless a registry exists; the registry in use.
+///
+/// # Safety
+/// `obj` must be a live GC object.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rok_task_parking_install(obj: usize) -> usize {
+    match TASK_PARKING.compare_exchange(0, obj, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => {
+            // SAFETY: caller contract (the caller's frame still roots it).
+            unsafe { rok_gc_pin(obj as *mut u8) };
+            obj
+        }
+        Err(cur) => cur,
+    }
+}
+
+/// A GC object's address as a parking key (`GcBuf<i32>` argument).
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_task_key_i32(obj: usize) -> usize {
+    obj
+}
+
+/// A GC object's address as a parking key (`GcBuf<usize>` argument).
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_task_key_usize(obj: usize) -> usize {
+    obj
+}
+
+/// Monotonic clock in nanoseconds (707 timers).
+#[unsafe(no_mangle)]
+#[allow(clippy::unnecessary_cast)] // `time_t` / `c_long` widths vary by target
+pub extern "C" fn rok_time_now_ns() -> i64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: valid out-pointer.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    ts.tv_sec as i64 * 1_000_000_000 + ts.tv_nsec as i64
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_task_spawn(_coro_frame: *mut u8) -> *mut u8 {

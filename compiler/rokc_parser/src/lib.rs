@@ -4,6 +4,7 @@
 //! stdlib's `#[infix]` / `#[prefix]` / `#[postfix]` attributes only bind
 //! tokens to trait methods (`PrecTable`, consumed by HIR).
 
+pub mod derive;
 pub mod lang;
 pub mod parser;
 pub mod prec;

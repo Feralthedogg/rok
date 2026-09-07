@@ -1,0 +1,92 @@
+// expect-exit: 0
+// expect-stdout:
+// child args: child x y
+// first: [one]
+// line: [two]
+// line: [three]
+// bytes: 5
+// child stderr: [to stderr]
+// child exit: 5 false
+// code=3 out=[hi bar] err=[err]
+// PIPED TEXT
+// exit status: 0
+// pwd: /
+// env: ONLY=1
+// missing: NotFound
+// signal=9 code_none=true
+// try_wait ok, then: exit status: 0
+// id ok: true
+
+// Spec 305 / 307 / 306: the program re-runs itself as a child with
+// piped stdio (`Command`, `env::args`, `io::stdin` read_line / lines,
+// stdout / stderr writers), then drives `sh` / `tr` / `env` through
+// `output` / `spawn` / `status` with env, cwd, signals.
+
+use rok::std::process;
+use rok::std::process::{Command, Stdio};
+use rok::std::io;
+use rok::std::io::{IoError, Reader, Writer};
+use rok::std::env;
+
+fn child() throws (IoError) {
+    let a = env::args();
+    let out = io::stdout();
+    try out.write_str(f"child args: {a[1]} {a[2]} {a[3]}\n");
+    let first = try io::stdin().read_line();
+    try out.write_str("first: [" + first.trim_end() + "]\n");
+    for line in io::stdin().lock().lines() {
+        println("line: [" + (try line.get()) + "]");
+    }
+    try out.write_all([98u8, 121u8, 116u8, 101u8, 115u8]);
+    println(": 5");
+    try out.flush();
+    try io::stderr().write_str("to stderr");
+    process::exit(5);
+}
+
+fn text(bytes: List<u8>) -> str { return (try! str::from_utf8(bytes)).trim(); }
+
+fn main() throws (IoError) {
+    let args = env::args();
+    if args.len() > 1 { try child(); }
+
+    let me = try Command::new(args[0]).args(["child", "x", "y"])
+        .stdin(Stdio::Piped).stdout(Stdio::Piped).stderr(Stdio::Piped).spawn();
+    let si = me.stdin ?? panic("stdin not piped");
+    try si.write_str("one\ntwo\r\nthree");
+    try si.close();
+    print(try (me.stdout ?? panic("stdout not piped")).read_to_str());
+    println("child stderr: [" + (try (me.stderr ?? panic("stderr not piped")).read_to_str()) + "]");
+    let st = try me.wait();
+    println(f"child exit: {st.code() ?? -1} {st.success()}");
+
+    let out = try Command::new("sh").args(["-c", "echo hi $FOO; echo err >&2; exit 3"])
+        .env("FOO", "bar").output();
+    println(f"code={out.status.code() ?? -1} out=[{text(out.stdout)}] err=[{text(out.stderr)}]");
+
+    let tr = try Command::new("tr").arg("a-z").arg("A-Z")
+        .stdin(Stdio::Piped).stdout(Stdio::Piped).spawn();
+    let tin = tr.stdin ?? panic("no stdin");
+    try tin.write_str("piped text\n");
+    try tin.close();
+    print(try (tr.stdout ?? panic("no stdout")).read_to_str());
+    println(f"{try tr.wait()}");
+
+    let pwd = try Command::new("pwd").current_dir("/").output();
+    println("pwd: " + text(pwd.stdout));
+    let clean = try Command::new("/usr/bin/env").env_clear().env("ONLY", "1").output();
+    println("env: " + text(clean.stdout));
+
+    let missing = try Command::new("no-such-program-rok").status().success() catch e {
+        println("missing: " + e.kind.debug());
+        false
+    };
+    let sig = try Command::new("sh").args(["-c", "kill -9 $$"]).status();
+    println(f"signal={sig.signal() ?? 0} code_none={sig.code() is none}");
+
+    let quick = try Command::new("true").spawn();
+    let polled = try quick.try_wait();
+    let done = try quick.wait();
+    println(f"try_wait ok, then: {done}");
+    println(f"id ok: {process::id() == env::pid()}");
+}

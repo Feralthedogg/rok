@@ -1,0 +1,63 @@
+// expect-exit: 0
+// expect-stdout:
+// start
+// noisy init
+// 7
+// 7
+// 4000
+// 4
+// n2
+// hello n1
+
+// A `static` with a non-literal initializer runs it once, on first
+// access, thread-safely; its value is a GC root (it survives
+// collections with everything it references).
+use rok::std::thread;
+
+extern "C" { fn rok_gc_collect(); }
+
+static COUNTER: Atomic<i64> = Atomic::new(0);
+static LOG: Mutex<List<i32>> = Mutex::new([]);
+static NAMES: List<str> = make_names();
+static NOISY: i32 = noisy();
+
+fn noisy() -> i32 {
+    rok_print_str("noisy init");
+    return 7;
+}
+
+fn make_names() -> List<str> {
+    let xs: List<str> = [];
+    let i = 0;
+    while i < 3 { xs.push(f"n{i}"); i += 1; }
+    return xs;
+}
+
+fn main() -> i32 {
+    rok_print_str("start");
+    rok_print_i32(NOISY);
+    rok_print_i32(NOISY);
+    let hs: List<thread::JoinHandle<()>> = [];
+    let t = 0;
+    while t < 4 {
+        let k = t;
+        hs.push(thread::spawn(|| {
+            let i = 0;
+            while i < 1000 { COUNTER.fetch_add(1); i += 1; }
+            using g = LOG.lock() { g.get().push(k); }
+        }));
+        t += 1;
+    }
+    for h in hs { try! h.join(); }
+    unsafe { rok_gc_collect() };
+    let junk: List<str> = [];
+    let j = 0;
+    while j < 20000 { junk.push(f"junk{j}"); j += 1; }
+    unsafe { rok_gc_collect() };
+    rok_print_i64(COUNTER.load());
+    using g = LOG.lock() { rok_print_i64(g.get().len() as i64); }
+    rok_print_str(NAMES[2]);
+    unsafe { rok_gc_collect() };
+    rok_print_str(f"hello {NAMES[1]}");
+    return 0;
+}

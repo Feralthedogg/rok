@@ -9,30 +9,36 @@
 // `Condvar` (Rust-shaped).
 
 extern "C" {
+    fn rok_task_key_i32(word: GcBuf<i32>) -> usize;
     fn rok_sync_wait(word: GcBuf<i32>, index: usize, expected: i32);
     fn rok_sync_wake(word: GcBuf<i32>, index: usize);
 }
 
 // Compiler intrinsics: LLVM atomics on buffer element `i` (integer or
-// `bool` elements); each returns the element's previous value.
+// `bool` elements); each returns the element's previous value. The
+// trailing ordering(s) must be literal `AtomicOrdering` variants (they
+// pick the LLVM instruction's ordering at compile time).
 #[intrinsic("rok.atomic.load")]
-fn atomic_load<T>(buf: GcBuf<T>, i: usize) -> T;
+fn atomic_load<T>(buf: GcBuf<T>, i: usize, o: AtomicOrdering) -> T;
 #[intrinsic("rok.atomic.xchg")]
-fn atomic_xchg<T>(buf: GcBuf<T>, i: usize, v: T) -> T;
+fn atomic_xchg<T>(buf: GcBuf<T>, i: usize, v: T, o: AtomicOrdering) -> T;
 #[intrinsic("rok.atomic.add")]
-fn atomic_add<T>(buf: GcBuf<T>, i: usize, v: T) -> T;
+fn atomic_add<T>(buf: GcBuf<T>, i: usize, v: T, o: AtomicOrdering) -> T;
 #[intrinsic("rok.atomic.sub")]
-fn atomic_sub<T>(buf: GcBuf<T>, i: usize, v: T) -> T;
+fn atomic_sub<T>(buf: GcBuf<T>, i: usize, v: T, o: AtomicOrdering) -> T;
 #[intrinsic("rok.atomic.and")]
-fn atomic_and<T>(buf: GcBuf<T>, i: usize, v: T) -> T;
+fn atomic_and<T>(buf: GcBuf<T>, i: usize, v: T, o: AtomicOrdering) -> T;
 #[intrinsic("rok.atomic.or")]
-fn atomic_or<T>(buf: GcBuf<T>, i: usize, v: T) -> T;
+fn atomic_or<T>(buf: GcBuf<T>, i: usize, v: T, o: AtomicOrdering) -> T;
 #[intrinsic("rok.atomic.xor")]
-fn atomic_xor<T>(buf: GcBuf<T>, i: usize, v: T) -> T;
+fn atomic_xor<T>(buf: GcBuf<T>, i: usize, v: T, o: AtomicOrdering) -> T;
 /// Store `new` if the element equals `current`; the previous value
 /// either way.
 #[intrinsic("rok.atomic.cas")]
-fn atomic_cas<T>(buf: GcBuf<T>, i: usize, current: T, new: T) -> T;
+fn atomic_cas<T>(
+    buf: GcBuf<T>, i: usize, current: T, new: T, success: AtomicOrdering, failure: AtomicOrdering,
+) -> T;
+
 
 fn wait(word: GcBuf<i32>, expected: i32) {
     unsafe { rok_sync_wait(word, 0, expected) };
@@ -50,8 +56,6 @@ fn word(v: i32) -> GcBuf<i32> {
 
 /// Memory ordering of an atomic operation (2.16.2). Spec name: `Ordering`,
 /// which would collide with `cmp::Ordering` under `use rok::core::**`.
-// ponytail: every operation runs `SeqCst` (the strongest, always
-// correct); weaker orderings are accepted and not exploited.
 pub enum AtomicOrdering {
     Relaxed,
     Acquire,
@@ -59,6 +63,7 @@ pub enum AtomicOrdering {
     AcqRel,
     SeqCst,
 }
+
 
 /// The element types `Atomic<T>` supports.
 pub trait AtomicPrimitive {}
@@ -79,6 +84,9 @@ pub struct Atomic<T> {
     cell: GcBuf<T>;
 }
 
+// Each method maps its ordering argument onto the intrinsic's literal
+// ordering; with a constant argument the `match` folds away once the
+// method is inlined (`-O1` and up).
 impl<T: AtomicPrimitive + PartialEq> Atomic<T> {
     pub fn new(value: T) -> Atomic<T> {
         let cell: GcBuf<T> = buf_new(1);
@@ -86,26 +94,50 @@ impl<T: AtomicPrimitive + PartialEq> Atomic<T> {
         return Atomic { cell: cell };
     }
 
+    /// Panics on `Release` / `AcqRel` (not load orderings).
     pub fn load(self, ordering: AtomicOrdering = SeqCst) -> T {
-        return atomic_load(self.cell, 0);
+        let c = self.cell;
+        return match ordering {
+            AtomicOrdering::Relaxed => atomic_load(c, 0, Relaxed),
+            AtomicOrdering::Acquire => atomic_load(c, 0, Acquire),
+            AtomicOrdering::SeqCst => atomic_load(c, 0, SeqCst),
+            _ => panic("Atomic::load: `Release` / `AcqRel` is not a load ordering"),
+        };
     }
+
     pub fn store(self, value: T, ordering: AtomicOrdering = SeqCst) {
-        atomic_xchg(self.cell, 0, value);
+        self.swap(value, ordering);
     }
+
     pub fn swap(self, value: T, ordering: AtomicOrdering = SeqCst) -> T {
-        return atomic_xchg(self.cell, 0, value);
+        let c = self.cell;
+        return match ordering {
+            AtomicOrdering::Relaxed => atomic_xchg(c, 0, value, Relaxed),
+            AtomicOrdering::Acquire => atomic_xchg(c, 0, value, Acquire),
+            AtomicOrdering::Release => atomic_xchg(c, 0, value, Release),
+            AtomicOrdering::AcqRel => atomic_xchg(c, 0, value, AcqRel),
+            AtomicOrdering::SeqCst => atomic_xchg(c, 0, value, SeqCst),
+        };
     }
+
     /// `Ok(previous)` if it held `current` (now `new`), else
-    /// `Err(actual)`.
+    /// `Err(actual)`. `failure` is a load ordering (panics on `Release`
+    /// / `AcqRel`).
     pub fn compare_exchange(
         self, current: T, new: T, success: AtomicOrdering, failure: AtomicOrdering,
     ) -> Result<T, T> {
-        let old = atomic_cas(self.cell, 0, current, new);
+        let old = match failure {
+            AtomicOrdering::Relaxed => cas_relaxed_fail(self.cell, current, new, success),
+            AtomicOrdering::Acquire => cas_acquire_fail(self.cell, current, new, success),
+            AtomicOrdering::SeqCst => cas_seqcst_fail(self.cell, current, new, success),
+            _ => panic("Atomic::compare_exchange: `Release` / `AcqRel` is not a failure ordering"),
+        };
         if old == current {
             return Result::Ok(old);
         }
         return Result::Err(old);
     }
+
     /// Never fails spuriously here (same as `compare_exchange`).
     pub fn compare_exchange_weak(
         self, current: T, new: T, success: AtomicOrdering, failure: AtomicOrdering,
@@ -115,21 +147,86 @@ impl<T: AtomicPrimitive + PartialEq> Atomic<T> {
 
     // Integer-only (`bool` is rejected by the intrinsic for add / sub).
     pub fn fetch_add(self, value: T, ordering: AtomicOrdering = SeqCst) -> T {
-        return atomic_add(self.cell, 0, value);
+        let c = self.cell;
+        return match ordering {
+            AtomicOrdering::Relaxed => atomic_add(c, 0, value, Relaxed),
+            AtomicOrdering::Acquire => atomic_add(c, 0, value, Acquire),
+            AtomicOrdering::Release => atomic_add(c, 0, value, Release),
+            AtomicOrdering::AcqRel => atomic_add(c, 0, value, AcqRel),
+            AtomicOrdering::SeqCst => atomic_add(c, 0, value, SeqCst),
+        };
     }
     pub fn fetch_sub(self, value: T, ordering: AtomicOrdering = SeqCst) -> T {
-        return atomic_sub(self.cell, 0, value);
+        let c = self.cell;
+        return match ordering {
+            AtomicOrdering::Relaxed => atomic_sub(c, 0, value, Relaxed),
+            AtomicOrdering::Acquire => atomic_sub(c, 0, value, Acquire),
+            AtomicOrdering::Release => atomic_sub(c, 0, value, Release),
+            AtomicOrdering::AcqRel => atomic_sub(c, 0, value, AcqRel),
+            AtomicOrdering::SeqCst => atomic_sub(c, 0, value, SeqCst),
+        };
     }
     pub fn fetch_and(self, value: T, ordering: AtomicOrdering = SeqCst) -> T {
-        return atomic_and(self.cell, 0, value);
+        let c = self.cell;
+        return match ordering {
+            AtomicOrdering::Relaxed => atomic_and(c, 0, value, Relaxed),
+            AtomicOrdering::Acquire => atomic_and(c, 0, value, Acquire),
+            AtomicOrdering::Release => atomic_and(c, 0, value, Release),
+            AtomicOrdering::AcqRel => atomic_and(c, 0, value, AcqRel),
+            AtomicOrdering::SeqCst => atomic_and(c, 0, value, SeqCst),
+        };
     }
     pub fn fetch_or(self, value: T, ordering: AtomicOrdering = SeqCst) -> T {
-        return atomic_or(self.cell, 0, value);
+        let c = self.cell;
+        return match ordering {
+            AtomicOrdering::Relaxed => atomic_or(c, 0, value, Relaxed),
+            AtomicOrdering::Acquire => atomic_or(c, 0, value, Acquire),
+            AtomicOrdering::Release => atomic_or(c, 0, value, Release),
+            AtomicOrdering::AcqRel => atomic_or(c, 0, value, AcqRel),
+            AtomicOrdering::SeqCst => atomic_or(c, 0, value, SeqCst),
+        };
     }
     pub fn fetch_xor(self, value: T, ordering: AtomicOrdering = SeqCst) -> T {
-        return atomic_xor(self.cell, 0, value);
+        let c = self.cell;
+        return match ordering {
+            AtomicOrdering::Relaxed => atomic_xor(c, 0, value, Relaxed),
+            AtomicOrdering::Acquire => atomic_xor(c, 0, value, Acquire),
+            AtomicOrdering::Release => atomic_xor(c, 0, value, Release),
+            AtomicOrdering::AcqRel => atomic_xor(c, 0, value, AcqRel),
+            AtomicOrdering::SeqCst => atomic_xor(c, 0, value, SeqCst),
+        };
     }
 }
+
+// `compare_exchange` per failure ordering, each choosing the success one.
+fn cas_relaxed_fail<T>(c: GcBuf<T>, cur: T, new: T, success: AtomicOrdering) -> T {
+    return match success {
+        AtomicOrdering::Relaxed => atomic_cas(c, 0, cur, new, Relaxed, Relaxed),
+        AtomicOrdering::Acquire => atomic_cas(c, 0, cur, new, Acquire, Relaxed),
+        AtomicOrdering::Release => atomic_cas(c, 0, cur, new, Release, Relaxed),
+        AtomicOrdering::AcqRel => atomic_cas(c, 0, cur, new, AcqRel, Relaxed),
+        AtomicOrdering::SeqCst => atomic_cas(c, 0, cur, new, SeqCst, Relaxed),
+    };
+}
+fn cas_acquire_fail<T>(c: GcBuf<T>, cur: T, new: T, success: AtomicOrdering) -> T {
+    return match success {
+        AtomicOrdering::Relaxed => atomic_cas(c, 0, cur, new, Relaxed, Acquire),
+        AtomicOrdering::Acquire => atomic_cas(c, 0, cur, new, Acquire, Acquire),
+        AtomicOrdering::Release => atomic_cas(c, 0, cur, new, Release, Acquire),
+        AtomicOrdering::AcqRel => atomic_cas(c, 0, cur, new, AcqRel, Acquire),
+        AtomicOrdering::SeqCst => atomic_cas(c, 0, cur, new, SeqCst, Acquire),
+    };
+}
+fn cas_seqcst_fail<T>(c: GcBuf<T>, cur: T, new: T, success: AtomicOrdering) -> T {
+    return match success {
+        AtomicOrdering::Relaxed => atomic_cas(c, 0, cur, new, Relaxed, SeqCst),
+        AtomicOrdering::Acquire => atomic_cas(c, 0, cur, new, Acquire, SeqCst),
+        AtomicOrdering::Release => atomic_cas(c, 0, cur, new, Release, SeqCst),
+        AtomicOrdering::AcqRel => atomic_cas(c, 0, cur, new, AcqRel, SeqCst),
+        AtomicOrdering::SeqCst => atomic_cas(c, 0, cur, new, SeqCst, SeqCst),
+    };
+}
+
 
 /// Exclusive lock around a `T` (2.16.3). No poisoning (spec): a panic
 /// ends the process, and an error leaving `using` drops the guard.
@@ -150,8 +247,8 @@ impl<T> Mutex<T> {
 
     /// Block until the lock is ours. Bind the guard with `using`.
     pub fn lock(self) -> MutexGuard<T> {
-        if atomic_cas(self.state, 0, 0, 1) != 0 {
-            while atomic_xchg(self.state, 0, 2) != 0 {
+        if atomic_cas(self.state, 0, 0, 1, SeqCst, SeqCst) != 0 {
+            while atomic_xchg(self.state, 0, 2, SeqCst) != 0 {
                 wait(self.state, 2);
             }
         }
@@ -159,16 +256,45 @@ impl<T> Mutex<T> {
     }
 
     pub fn try_lock(self) -> MutexGuard<T> | none {
-        if atomic_cas(self.state, 0, 0, 1) == 0 {
+        if atomic_cas(self.state, 0, 0, 1, SeqCst, SeqCst) == 0 {
             return MutexGuard { mutex: self };
         }
         return none;
     }
 
     fn unlock(self) {
-        if atomic_xchg(self.state, 0, 0) == 2 {
+        if atomic_xchg(self.state, 0, 0, SeqCst) == 2 {
             wake(self.state);
+            rok::core::task::unpark(unsafe { rok_task_key_i32(self.state) });
         }
+    }
+
+    /// `await m.lock_async()` inside async code: suspends the task (not
+    /// the thread) until the lock is ours.
+    pub fn lock_async(self) -> LockFuture<T> {
+        return LockFuture { mutex: self };
+    }
+}
+
+/// `Mutex::lock_async`.
+pub struct LockFuture<T> {
+    mutex: Mutex<T>;
+}
+
+impl<T> rok::core::future::Future for LockFuture<T> {
+    type Output = MutexGuard<T>;
+    fn poll(ref self, ref ctx: rok::core::future::Context) -> rok::core::future::Poll<MutexGuard<T>> {
+        let m = self.mutex;
+        if atomic_cas(m.state, 0, 0, 1, SeqCst, SeqCst) == 0 {
+            return rok::core::future::Poll::Ready(MutexGuard { mutex: m });
+        }
+        // Park first, then mark "waiters" (2): an unlock after this sees
+        // the 2 and unparks us.
+        rok::core::task::park(unsafe { rok_task_key_i32(m.state) }, ctx.waker());
+        if atomic_xchg(m.state, 0, 2, SeqCst) == 0 {
+            return rok::core::future::Poll::Ready(MutexGuard { mutex: m });
+        }
+        return rok::core::future::Poll::Pending;
     }
 }
 
@@ -179,14 +305,17 @@ pub struct MutexGuard<T> {
 
 impl<T> MutexGuard<T> {
     /// The protected value (a copy of the handle for GC types).
-    pub fn deref(self) -> T {
+    pub fn get(self) -> T {
         return buf_get(self.mutex.value, 0);
     }
-    /// Replace the protected value.
-    // ponytail: spec `deref_mut(ref self) -> ref T`; rok has no `ref`
-    // returns, so writes go through `set`.
+    /// Replace the protected value (instead of spec `deref_mut`: rok has
+    /// no `ref` returns).
     pub fn set(self, value: T) {
         buf_set(self.mutex.value, 0, value);
+    }
+    /// Replace the protected value with `f(value)`.
+    pub fn update(self, f: fn(T) -> T) {
+        buf_set(self.mutex.value, 0, f(buf_get(self.mutex.value, 0)));
     }
 }
 
@@ -214,9 +343,9 @@ impl<T> RwLock<T> {
 
     pub fn read(self) -> RwLockReadGuard<T> {
         loop {
-            let s = atomic_load(self.state, 0);
+            let s = atomic_load(self.state, 0, SeqCst);
             if s >= 0 {
-                if atomic_cas(self.state, 0, s, s + 1) == s {
+                if atomic_cas(self.state, 0, s, s + 1, SeqCst, SeqCst) == s {
                     return RwLockReadGuard { lock: self };
                 }
             } else {
@@ -227,7 +356,7 @@ impl<T> RwLock<T> {
 
     pub fn write(self) -> RwLockWriteGuard<T> {
         loop {
-            let s = atomic_cas(self.state, 0, 0, -1);
+            let s = atomic_cas(self.state, 0, 0, -1, SeqCst, SeqCst);
             if s == 0 {
                 return RwLockWriteGuard { lock: self };
             }
@@ -236,9 +365,9 @@ impl<T> RwLock<T> {
     }
 
     pub fn try_read(self) -> RwLockReadGuard<T> | none {
-        let s = atomic_load(self.state, 0);
+        let s = atomic_load(self.state, 0, SeqCst);
         if s >= 0 {
-            if atomic_cas(self.state, 0, s, s + 1) == s {
+            if atomic_cas(self.state, 0, s, s + 1, SeqCst, SeqCst) == s {
                 return RwLockReadGuard { lock: self };
             }
         }
@@ -246,7 +375,7 @@ impl<T> RwLock<T> {
     }
 
     pub fn try_write(self) -> RwLockWriteGuard<T> | none {
-        if atomic_cas(self.state, 0, 0, -1) == 0 {
+        if atomic_cas(self.state, 0, 0, -1, SeqCst, SeqCst) == 0 {
             return RwLockWriteGuard { lock: self };
         }
         return none;
@@ -258,14 +387,14 @@ pub struct RwLockReadGuard<T> {
 }
 
 impl<T> RwLockReadGuard<T> {
-    pub fn deref(self) -> T {
+    pub fn get(self) -> T {
         return buf_get(self.lock.value, 0);
     }
 }
 
 impl<T> Drop for RwLockReadGuard<T> {
     fn drop(ref self) {
-        if atomic_sub(self.lock.state, 0, 1) == 1 {
+        if atomic_sub(self.lock.state, 0, 1, SeqCst) == 1 {
             wake(self.lock.state);
         }
     }
@@ -276,17 +405,20 @@ pub struct RwLockWriteGuard<T> {
 }
 
 impl<T> RwLockWriteGuard<T> {
-    pub fn deref(self) -> T {
+    pub fn get(self) -> T {
         return buf_get(self.lock.value, 0);
     }
     pub fn set(self, value: T) {
         buf_set(self.lock.value, 0, value);
     }
+    pub fn update(self, f: fn(T) -> T) {
+        buf_set(self.lock.value, 0, f(buf_get(self.lock.value, 0)));
+    }
 }
 
 impl<T> Drop for RwLockWriteGuard<T> {
     fn drop(ref self) {
-        atomic_xchg(self.lock.state, 0, 0);
+        atomic_xchg(self.lock.state, 0, 0, SeqCst);
         wake(self.lock.state);
     }
 }
@@ -305,10 +437,10 @@ impl Once {
     /// Run `f` if no call has; every caller returns after it finished.
     pub fn call_once(self, f: fn()) {
         loop {
-            let s = atomic_cas(self.state, 0, 0, 1);
+            let s = atomic_cas(self.state, 0, 0, 1, SeqCst, SeqCst);
             if s == 0 {
                 f();
-                atomic_xchg(self.state, 0, 2);
+                atomic_xchg(self.state, 0, 2, SeqCst);
                 wake(self.state);
                 return;
             }
@@ -320,7 +452,7 @@ impl Once {
     }
 
     pub fn is_completed(self) -> bool {
-        return atomic_load(self.state, 0) == 2;
+        return atomic_load(self.state, 0, SeqCst) == 2;
     }
 }
 
@@ -338,7 +470,7 @@ impl Condvar {
     /// Unlock `guard`'s mutex, block until notified (or spuriously),
     /// lock it again. Re-check the condition in a loop.
     pub fn wait<T>(self, guard: MutexGuard<T>) -> MutexGuard<T> {
-        let s = atomic_load(self.seq, 0);
+        let s = atomic_load(self.seq, 0, SeqCst);
         guard.mutex.unlock();
         wait(self.seq, s);
         return guard.mutex.lock();
@@ -350,7 +482,7 @@ impl Condvar {
     }
 
     pub fn notify_all(self) {
-        atomic_add(self.seq, 0, 1);
+        atomic_add(self.seq, 0, 1, SeqCst);
         wake(self.seq);
     }
 }

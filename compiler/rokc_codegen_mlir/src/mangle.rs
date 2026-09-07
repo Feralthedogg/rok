@@ -25,6 +25,8 @@ pub struct Pkgs {
     pub hashes: Vec<(String, String)>,
     /// `extern` statics: they keep their C name.
     pub extern_statics: std::collections::HashSet<String>,
+    /// Lazily initialized statics: name → symbol of their initializer.
+    pub lazy_statics: std::collections::HashMap<String, String>,
 }
 
 impl Pkgs {

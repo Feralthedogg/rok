@@ -395,6 +395,7 @@ fn print_expr(out: &mut String, e: &HirExpr) {
             print_expr(out, target);
             let _ = write!(out, ".{field_name}<as {}>", ty_str(field_ty));
         }
+        HirExprKind::Suspend { .. } | HirExprKind::CoroNew { .. } => print_coro(out, e),
         HirExprKind::Match { scrutinee, arms } => {
             out.push_str("match ");
             print_expr(out, scrutinee);
@@ -412,6 +413,30 @@ fn print_expr(out: &mut String, e: &HirExpr) {
             }
             out.push('}');
         }
+    }
+}
+
+fn print_coro(out: &mut String, e: &HirExpr) {
+    match &e.kind {
+        HirExprKind::Suspend { value, is_final } => {
+            out.push_str(if *is_final {
+                "suspend_final "
+            } else {
+                "suspend "
+            });
+            print_expr(out, value);
+        }
+        HirExprKind::CoroNew { body_fn, args } => {
+            let _ = write!(out, "coro_new fn#{}(", body_fn.0);
+            for (i, a) in args.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                print_expr(out, a);
+            }
+            out.push(')');
+        }
+        _ => {}
     }
 }
 

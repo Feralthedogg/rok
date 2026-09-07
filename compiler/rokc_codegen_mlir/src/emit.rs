@@ -126,6 +126,12 @@ impl Emitter {
             );
         }
 
+        self.pkgs.lazy_statics = module
+            .statics
+            .iter()
+            .filter_map(|s| Some((s.name.clone(), fns.get(&s.init_fn?)?.name.clone())))
+            .collect();
+
         self.out.push_str("module {\n");
         for f in &module.functions {
             let symbol = fns[&f.id].name.clone();
@@ -166,6 +172,11 @@ impl Emitter {
             let _ = writeln!(self.out, "  func.func private @{name}{sig}");
         }
         self.emit_static_globals(module);
+        if !self.pkgs.lazy_statics.is_empty() {
+            self.out.push_str(
+                "  func.func private @rok_static_init_begin(!llvm.ptr) -> i32\n  func.func private @rok_static_init_end(!llvm.ptr)\n",
+            );
+        }
         self.emit_string_globals();
         self.out.push_str("}\n");
     }
@@ -222,6 +233,41 @@ impl Emitter {
                 "    %t{i} = arith.constant {id} : i32\n    %s{i} = llvm.mlir.addressof @rok.scan{i} : !llvm.ptr\n    func.call @rok_gc_register_type(%t{i}, %s{i}) : (i32, !llvm.ptr) -> ()\n"
             );
         }
+        // Statics are GC roots: every reference word of their storage.
+        let mut roots = 0;
+        for s in module.statics.iter().filter(|s| !s.is_extern) {
+            let mut paths = Vec::new();
+            gc_paths(&s.ty, &mut Vec::new(), &mut paths);
+            let sym = self.pkgs.static_sym(&s.name);
+            let ty = mlir_type(&s.ty, pw);
+            for path in paths {
+                let a = format!("%r{roots}");
+                let _ = writeln!(calls, "    {a} = llvm.mlir.addressof @{sym} : !llvm.ptr");
+                let w = if path.is_empty() {
+                    a
+                } else {
+                    let idx = path
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let _ = writeln!(
+                        calls,
+                        "    {a}w = llvm.getelementptr {a}[0, {idx}] : (!llvm.ptr) -> !llvm.ptr, {ty}"
+                    );
+                    format!("{a}w")
+                };
+                let _ = writeln!(
+                    calls,
+                    "    func.call @rok_gc_add_root({w}) : (!llvm.ptr) -> ()"
+                );
+                roots += 1;
+            }
+        }
+        if roots > 0 && !declared("rok_gc_add_root") {
+            self.out
+                .push_str("  func.func private @rok_gc_add_root(!llvm.ptr)\n");
+        }
         let _ = write!(
             self.out,
             "  func.func private @rok.register_types() {{\n{calls}    func.return\n  }}\n"
@@ -240,6 +286,10 @@ impl Emitter {
                     self.out,
                     "  llvm.mlir.global external {constness}@{sym}() {{addr_space = 0 : i32}} : {ty_str}"
                 );
+                continue;
+            }
+            if let Some(init) = self.pkgs.lazy_statics.get(&s.name).cloned() {
+                self.emit_lazy_static(&sym, &ty_str, &init);
                 continue;
             }
             if let ConstVal::Str(text) = &s.init {
@@ -266,6 +316,38 @@ impl Emitter {
                 )),
             }
         }
+    }
+
+    /// A static with a non-literal initializer: zeroed storage, a state
+    /// byte (0 new, 1 running, 2 ready) and `@sym.init`, which runs the
+    /// initializer `init` exactly once across threads
+    /// (`rok_static_init_begin` / `_end`). Every access first checks the
+    /// state (`FnEmit::ensure_static_init`).
+    fn emit_lazy_static(&mut self, sym: &str, ty: &str, init: &str) {
+        let _ = write!(
+            self.out,
+            "  llvm.mlir.global internal @{sym}() {{addr_space = 0 : i32}} : {ty} {{
+    %0 = llvm.mlir.zero : {ty}
+    llvm.return %0 : {ty}
+  }}
+  llvm.mlir.global internal @{sym}.state(0 : i8) {{addr_space = 0 : i32}} : i8
+  func.func private @{sym}.init() {{
+    %0 = llvm.mlir.addressof @{sym}.state : !llvm.ptr
+    %1 = func.call @rok_static_init_begin(%0) : (!llvm.ptr) -> i32
+    %2 = arith.constant 0 : i32
+    %3 = arith.cmpi ne, %1, %2 : i32
+    cf.cond_br %3, ^bb1, ^bb2
+  ^bb1:
+    %4 = func.call @{init}() : () -> {ty}
+    %5 = llvm.mlir.addressof @{sym} : !llvm.ptr
+    llvm.store %4, %5 : {ty}, !llvm.ptr
+    func.call @rok_static_init_end(%0) : (!llvm.ptr) -> ()
+    func.return
+  ^bb2:
+    func.return
+  }}
+"
+        );
     }
 
     fn intern_global_string(&mut self, text: &str) -> String {
@@ -485,6 +567,7 @@ fn back_edge_blocks(f: &MirFunction) -> HashSet<u32> {
             Terminator::If {
                 then_bb, else_bb, ..
             } => vec![then_bb.0, else_bb.0],
+            Terminator::Suspend { resume, .. } => vec![resume.0],
             Terminator::Return(_) | Terminator::Unreachable => Vec::new(),
         }
     };
@@ -563,6 +646,31 @@ impl<'a> FnEmit<'a> {
             overflow_checks: true,
             back_edge_blocks: back_edge_blocks(f),
         }
+    }
+
+    /// Before touching a lazily initialized static: an acquire load of
+    /// its state byte, and `@sym.init()` unless it reads 2 (ready).
+    fn ensure_static_init(&mut self, name: &str) {
+        if !self.pkgs.lazy_statics.contains_key(name) {
+            return;
+        }
+        let sym = self.pkgs.static_sym(name);
+        let n = self.next_check;
+        self.next_check += 1;
+        let [a, s, two, ready] = std::array::from_fn(|_| self.fresh_value());
+        let _ = write!(
+            self.body,
+            "    {a} = llvm.mlir.addressof @{sym}.state : !llvm.ptr
+    {s} = llvm.load {a} atomic acquire {{alignment = 1 : i64}} : !llvm.ptr -> i8
+    {two} = arith.constant 2 : i8
+    {ready} = arith.cmpi eq, {s}, {two} : i8
+    cf.cond_br {ready}, ^rok_sready{n}, ^rok_sinit{n}
+  ^rok_sinit{n}:
+    func.call @{sym}.init() : () -> ()
+    cf.br ^rok_sready{n}
+  ^rok_sready{n}:
+"
+        );
     }
 
     /// Safepoint poll (804 §8.4.1, 809 §8.9.11): a relaxed load of this
@@ -748,6 +856,7 @@ impl<'a> FnEmit<'a> {
                         rvalue: RValue::Call { .. }
                             | RValue::CallIndirect { .. }
                             | RValue::HeapBox { .. }
+                            | RValue::HeapAlloc { .. }
                             | RValue::BufAlloc { .. },
                         ..
                     }
@@ -998,7 +1107,22 @@ impl<'a> FnEmit<'a> {
                 let ty = mlir_type(elem_ty, self.pointer_width);
                 let _ = writeln!(self.body, "    llvm.store {v}, {p} : {ty}, !llvm.ptr");
             }
+            Statement::HeapStore {
+                ptr,
+                ty,
+                index,
+                value,
+            } => {
+                let field = struct_field_tys(ty)[*index as usize].clone();
+                let v = self.materialize_operand(value, &field);
+                let (addr, field_ty) = self.heap_field_addr(ptr, ty, *index);
+                let _ = writeln!(
+                    self.body,
+                    "    llvm.store {v}, {addr} : {field_ty}, !llvm.ptr"
+                );
+            }
             Statement::StaticStore { name, value, ty } => {
+                self.ensure_static_init(name);
                 let val = self.materialize_operand(value, ty);
                 let ty_str = mlir_type(ty, self.pointer_width);
                 let addr = self.fresh_value();
@@ -1169,6 +1293,16 @@ impl<'a> FnEmit<'a> {
                 ret_ty,
             } => self.emit_call_indirect(callee, args, arg_tys, ret_ty),
             RValue::HeapBox { value, ty } => self.emit_heap_box(value, ty),
+            RValue::HeapAlloc { ty } => self.emit_gc_object(ty),
+            RValue::HeapField { ptr, ty, index } => {
+                let (addr, field_ty) = self.heap_field_addr(ptr, ty, *index);
+                let v = self.fresh_value();
+                let _ = writeln!(
+                    self.body,
+                    "    {v} = llvm.load {addr} : !llvm.ptr -> {field_ty}"
+                );
+                v
+            }
             RValue::BufAlloc { elem_ty, len } => self.emit_buf_alloc(elem_ty, len),
             RValue::RawLoad { addr, ty, volatile } => {
                 let p = self.raw_addr(addr);
@@ -1208,7 +1342,8 @@ impl<'a> FnEmit<'a> {
                 index,
                 args,
                 elem_ty,
-            } => self.emit_buf_atomic(op, buf, index, args, elem_ty),
+                order,
+            } => self.emit_buf_atomic(op, buf, index, args, elem_ty, *order),
             RValue::HeapLoad { ptr, ty } => {
                 let pw = self.pointer_width;
                 let p = self.materialize_operand(ptr, &MirTy::GcRef);
@@ -1229,6 +1364,7 @@ impl<'a> FnEmit<'a> {
                 dst
             }
             RValue::StaticLoad { name, ty } => {
+                self.ensure_static_init(name);
                 let ty_str = mlir_type(ty, self.pointer_width);
                 let addr = self.fresh_value();
                 let sym = self.pkgs.static_sym(name);
@@ -1262,7 +1398,23 @@ impl<'a> FnEmit<'a> {
         if self.inline_payload(ty) {
             return self.bitcast_value(v, ty, &MirTy::Prim(PrimTy::Usize));
         }
+        let obj = self.emit_gc_object(ty);
+        let [addr, payload] = std::array::from_fn(|_| self.fresh_value());
         let ty_str = mlir_type(ty, pw);
+        let _ = write!(
+            self.body,
+            "    {addr} = llvm.inttoptr {obj} : i{pw} to !llvm.ptr
+    {payload} = llvm.getelementptr {addr}[{HEADER_SIZE}] : (!llvm.ptr) -> !llvm.ptr, i8
+    llvm.store {v}, {payload} : {ty_str}, !llvm.ptr
+"
+        );
+        obj
+    }
+
+    /// `rok_gc_alloc_slow` of a zeroed object with a `ty` payload, its
+    /// type id registered with `ty`'s `ScanTable`; the object's `GcRef`.
+    fn emit_gc_object(&mut self, ty: &MirTy) -> String {
+        let pw = self.pointer_width;
         let index = self
             .gc_types
             .iter()
@@ -1273,7 +1425,7 @@ impl<'a> FnEmit<'a> {
             });
         let type_id = GC_TYPE_BASE + index as u32;
         let (size, align) = gc_object_size(ty, pw);
-        let [total, align_v, tid, obj, addr, payload] = std::array::from_fn(|_| self.fresh_value());
+        let [total, align_v, tid, obj] = std::array::from_fn(|_| self.fresh_value());
         self.uses_alloc = true;
         let _ = write!(
             self.body,
@@ -1281,12 +1433,27 @@ impl<'a> FnEmit<'a> {
     {align_v} = arith.constant {align} : i{pw}
     {tid} = arith.constant {type_id} : i32
     {obj} = func.call @rok_gc_alloc_slow({total}, {align_v}, {tid}) : (i{pw}, i{pw}, i32) -> i{pw}
-    {addr} = llvm.inttoptr {obj} : i{pw} to !llvm.ptr
-    {payload} = llvm.getelementptr {addr}[{HEADER_SIZE}] : (!llvm.ptr) -> !llvm.ptr, i8
-    llvm.store {v}, {payload} : {ty_str}, !llvm.ptr
 "
         );
         obj
+    }
+
+    /// Address of field `index` of the `ty` (tuple) payload of GC object
+    /// `ptr`, and the field's MLIR type.
+    fn heap_field_addr(&mut self, ptr: &Operand, ty: &MirTy, index: u32) -> (String, String) {
+        let pw = self.pointer_width;
+        let p = self.materialize_operand(ptr, &MirTy::GcRef);
+        let field = struct_field_tys(ty)[index as usize].clone();
+        let ty_str = mlir_type(ty, pw);
+        let [obj, payload, addr] = std::array::from_fn(|_| self.fresh_value());
+        let _ = write!(
+            self.body,
+            "    {obj} = llvm.inttoptr {p} : i{pw} to !llvm.ptr
+    {payload} = llvm.getelementptr {obj}[{HEADER_SIZE}] : (!llvm.ptr) -> !llvm.ptr, i8
+    {addr} = llvm.getelementptr {payload}[0, {index}] : (!llvm.ptr) -> !llvm.ptr, {ty_str}
+"
+        );
+        (addr, mlir_type(&field, pw))
     }
 
     /// `rok_gc_alloc_slow(header + len * size, align, type_id)` for a
@@ -1337,9 +1504,7 @@ impl<'a> FnEmit<'a> {
 
     /// LLVM atomics on a buffer element (stdlib 2.16.2). `bool` (`i1`)
     /// goes through its `i8` storage byte.
-    // ponytail: every op is `seq_cst` whatever `Ordering` the caller
-    // passed (always correct, sometimes slower); passing the ordering
-    // through needs it as a compile-time constant at the intrinsic.
+    /// `order`: the LLVM ordering (a `cas`: success, failure).
     fn emit_buf_atomic(
         &mut self,
         op: &str,
@@ -1347,6 +1512,7 @@ impl<'a> FnEmit<'a> {
         index: &Operand,
         args: &[Operand],
         elem_ty: &MirTy,
+        order: [&str; 2],
     ) -> String {
         let pw = self.pointer_width;
         let p = self.buf_elem_addr(buf, index, elem_ty);
@@ -1371,15 +1537,16 @@ impl<'a> FnEmit<'a> {
             "load" => {
                 let _ = writeln!(
                     self.body,
-                    "    {v} = llvm.load {p} atomic seq_cst {{alignment = {align} : i64}} : !llvm.ptr -> {at}"
+                    "    {v} = llvm.load {p} atomic {} {{alignment = {align} : i64}} : !llvm.ptr -> {at}",
+                    order[0]
                 );
             }
             "cas" => {
                 let r = self.fresh_value();
                 let _ = writeln!(
                     self.body,
-                    "    {r} = llvm.cmpxchg {p}, {}, {} seq_cst seq_cst : !llvm.ptr, {at}\n    {v} = llvm.extractvalue {r}[0] : !llvm.struct<({at}, i1)>",
-                    ops[0], ops[1]
+                    "    {r} = llvm.cmpxchg {p}, {}, {} {} {} : !llvm.ptr, {at}\n    {v} = llvm.extractvalue {r}[0] : !llvm.struct<({at}, i1)>",
+                    ops[0], ops[1], order[0], order[1]
                 );
             }
             _ => {
@@ -1389,8 +1556,8 @@ impl<'a> FnEmit<'a> {
                 };
                 let _ = writeln!(
                     self.body,
-                    "    {v} = llvm.atomicrmw {kw} {p}, {} seq_cst : !llvm.ptr, {at}",
-                    ops[0]
+                    "    {v} = llvm.atomicrmw {kw} {p}, {} {} : !llvm.ptr, {at}",
+                    ops[0], order[0]
                 );
             }
         }
@@ -2230,7 +2397,12 @@ impl<'a> FnEmit<'a> {
             self.emit_poll();
         }
         match t {
+            // A generic body returning a `T = ()` value returns nothing.
             Terminator::Return(None) => {
+                self.emit_gc_frame_pop();
+                self.body.push_str("    func.return\n");
+            }
+            Terminator::Return(Some(_)) if matches!(self.f.ret_ty, MirTy::Unit) => {
                 self.emit_gc_frame_pop();
                 self.body.push_str("    func.return\n");
             }
@@ -2256,6 +2428,11 @@ impl<'a> FnEmit<'a> {
                 let _ = writeln!(self.body, "    cf.cond_br {v}, {then_part}, {else_part}");
             }
             Terminator::Unreachable => {
+                self.body.push_str("    llvm.unreachable\n");
+            }
+            Terminator::Suspend { .. } => {
+                self.errors
+                    .push("internal: a coroutine suspend point survived MIR".to_owned());
                 self.body.push_str("    llvm.unreachable\n");
             }
         }

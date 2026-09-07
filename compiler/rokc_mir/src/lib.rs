@@ -1,6 +1,7 @@
 //! Mid-level IR. SSA basic blocks; the last representation before MLIR
 //! text emission. Looks at HIR only.
 
+mod coro;
 mod lower;
 mod print;
 mod ty;
@@ -34,6 +35,8 @@ pub struct MirStaticDef {
     pub is_mut: bool,
     /// `extern "C" { static .. }`: defined outside, keeps its C name.
     pub is_extern: bool,
+    /// Lazily initialized by this function on first access.
+    pub init_fn: Option<FunctionId>,
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +99,14 @@ pub enum Statement {
         value: Operand,
         ty: MirTy,
         volatile: bool,
+    },
+    // Field `index` of the `ty` (a tuple) payload of the GC object
+    // `ptr` = `value`, in place (coroutine frames, spec 708).
+    HeapStore {
+        ptr: Operand,
+        ty: MirTy,
+        index: u32,
+        value: Operand,
     },
     // `STATIC_NAME = value` — store into a module-level global.
     StaticStore {
@@ -225,12 +236,24 @@ pub enum RValue {
         index: Operand,
         args: Vec<Operand>,
         elem_ty: MirTy,
+        order: [&'static str; 2],
     },
     // Load the `ty` payload of the `GcRef` `ptr` (a `HeapBox` object),
     // or unpack an inline payload.
     HeapLoad {
         ptr: Operand,
         ty: MirTy,
+    },
+    // A zeroed GC object with a `ty` payload (traced by `ty`'s
+    // ScanTable); yields its `GcRef`. A coroutine frame (spec 708).
+    HeapAlloc {
+        ty: MirTy,
+    },
+    // Field `index` of the `ty` (a tuple) payload of GC object `ptr`.
+    HeapField {
+        ptr: Operand,
+        ty: MirTy,
+        index: u32,
     },
     // Indirect call through a function-typed operand.
     CallIndirect {
@@ -262,6 +285,14 @@ pub enum Terminator {
     },
     Return(Option<Operand>),
     Unreachable,
+    /// Coroutine suspend point (only before `coro::transform`): hand
+    /// `value` to the resumer; the next resume continues at `resume`.
+    /// `is_final` marks the point a finished coroutine parks at.
+    Suspend {
+        value: Option<Operand>,
+        resume: BlockId,
+        is_final: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]

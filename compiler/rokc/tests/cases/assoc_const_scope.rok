@@ -1,0 +1,46 @@
+// expect-exit: 0
+// expect-stdout:
+// 32
+// 64
+// 128
+// 5
+// 5
+// 11
+
+// Spec 2.8.3a: an associated const's value is the impl's — its names
+// resolve in the impl's module and it may use the impl's type
+// parameters; `Box::<i32>::N` names one instance's const.
+trait Width {
+    const BITS: i32;
+}
+
+struct Box<T> { v: T; }
+impl Width for Box<i32> { const BITS: i32 = 32; }
+impl Width for Box<f64> { const BITS: i32 = 64; }
+
+struct Twice<T> { v: T; }
+impl<T: Width> Width for Twice<T> {
+    const BITS: i32 = T::BITS * 2;
+}
+
+mod shapes {
+    const SECRET: i32 = 5;
+    pub trait Code { const CODE: i32; }
+    pub struct Tag { pub x: i32; }
+    impl Code for Tag { const CODE: i32 = SECRET; }
+}
+
+use shapes::Code;
+
+fn code<T: Code>(x: T) -> i32 { return T::CODE; }
+
+fn main() -> i32 {
+    rok_print_i32(Box::<i32>::BITS);
+    rok_print_i32(Box::<f64>::BITS);
+    rok_print_i32(Twice::<Box<f64>>::BITS);
+    rok_print_i32(shapes::Tag::CODE);
+    rok_print_i32(code(shapes::Tag { x: 1 }));
+    let SECRET = 6;
+    rok_print_i32(SECRET + shapes::Tag::CODE);
+    return 0;
+}

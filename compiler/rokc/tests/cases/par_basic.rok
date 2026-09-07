@@ -1,0 +1,51 @@
+// expect-exit: 0
+// expect-stdout:
+// 499500
+// 998001
+// 332833500
+// 500
+// 20
+// 40
+// two
+// 11
+// 8
+// 3
+
+// par (2.19) on the thread pool: for_each / map (ordered) / reduce
+// (chunk folds, then `init` + chunk results in order; empty -> init) /
+// filter (ordered) / join / scope (spawned tasks finish before it
+// returns; handles join early).
+fn main() -> i32 {
+    let xs: List<i64> = [];
+    let i: i64 = 0;
+    while i < 1000 { xs.push(i); i += 1; }
+    let seen = Atomic::new(0i64);
+    par::for_each(xs, |x: i64| { seen.fetch_add(x); });
+    rok_print_i64(seen.load());
+    let sq: List<i64> = par::map(xs, |x: i64| x * x);
+    rok_print_i64(sq[999]);
+    rok_print_i64(par::reduce(sq, 0i64, |a: i64, b: i64| a + b));
+    let ev: List<i64> = par::filter(xs, |x: i64| x % 2 == 0);
+    rok_print_i64(ev.len() as i64);
+    rok_print_i64(ev[10]);
+    let (a, b) = par::join(|| 40, || f"two");
+    rok_print_i32(a);
+    rok_print_str(b);
+    let total = Atomic::new(0i64);
+    par::scope(|s| {
+        let h = s.spawn(|| 5i64);
+        let k: i64 = 0;
+        while k < 4 {
+            let m = k;
+            s.spawn(|| { total.fetch_add(m); });
+            k += 1;
+        }
+        total.fetch_add(h.join());
+    });
+    rok_print_i64(total.load());
+    let one: List<i64> = par::map([7i64], |x: i64| x + 1);
+    rok_print_i64(one[0]);
+    let empty: List<i64> = [];
+    rok_print_i64(par::reduce(empty, 3i64, |a: i64, b: i64| a + b));
+    return 0;
+}

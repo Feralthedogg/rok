@@ -7,6 +7,47 @@ pub trait Clone {
     fn clone(self) -> Self;
 }
 
+/// Bitwise copy is a correct duplicate (stdlib 2.13.3). A marker: every
+/// value already copies on `let y = x;`; `#[derive(Copy)]` checks that
+/// every field is `Copy` and the type is not `Drop`.
+pub trait Copy: Clone {}
+
+// Primitives (and the immutable `(ptr, len)` `str`, 2.13.6) clone by
+// copying.
+impl Clone for i8 { fn clone(self) -> i8 { return self; } }
+impl Clone for i16 { fn clone(self) -> i16 { return self; } }
+impl Clone for i32 { fn clone(self) -> i32 { return self; } }
+impl Clone for i64 { fn clone(self) -> i64 { return self; } }
+impl Clone for isize { fn clone(self) -> isize { return self; } }
+impl Clone for u8 { fn clone(self) -> u8 { return self; } }
+impl Clone for u16 { fn clone(self) -> u16 { return self; } }
+impl Clone for u32 { fn clone(self) -> u32 { return self; } }
+impl Clone for u64 { fn clone(self) -> u64 { return self; } }
+impl Clone for usize { fn clone(self) -> usize { return self; } }
+impl Clone for f32 { fn clone(self) -> f32 { return self; } }
+impl Clone for f64 { fn clone(self) -> f64 { return self; } }
+impl Clone for bool { fn clone(self) -> bool { return self; } }
+impl Clone for char { fn clone(self) -> char { return self; } }
+impl Clone for c_char { fn clone(self) -> c_char { return self; } }
+impl Clone for str { fn clone(self) -> str { return self; } }
+
+impl Copy for i8 {}
+impl Copy for i16 {}
+impl Copy for i32 {}
+impl Copy for i64 {}
+impl Copy for isize {}
+impl Copy for u8 {}
+impl Copy for u16 {}
+impl Copy for u32 {}
+impl Copy for u64 {}
+impl Copy for usize {}
+impl Copy for f32 {}
+impl Copy for f64 {}
+impl Copy for bool {}
+impl Copy for char {}
+impl Copy for c_char {}
+impl Copy for str {}
+
 // Stdlib spec 2.13.4. `using` (refs-lang 3.17) calls `drop` on every way
 // out of its block. ponytail: no implicit scope-exit drop of plain
 // `let`s yet (2.13.4 RAII); `using` is the deterministic path.

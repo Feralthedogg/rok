@@ -1,0 +1,8 @@
+// expect-error: cannot derive `Display` for `P`: `Display` is written by hand
+// Stdlib 2.10.10: `Display` is not derivable.
+#[derive(Display)]
+struct P { x: i32; }
+
+fn main() -> i32 {
+    return 0;
+}

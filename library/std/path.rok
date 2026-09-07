@@ -1,0 +1,332 @@
+// rok::std::path (stdlib spec 308): `Path`, a UTF-8 path value with
+// Python-style `/` joining. Unix separators only (`/`).
+//
+// ponytail: no `RawPath` / `NonUtf8Error` (non-UTF-8 OS names are not
+// produced: the fs layer reports them as `InvalidData`), no Windows
+// prefixes. Spec 308.8 calls `Path` mutable (`/=`, `push`); here it is
+// an immutable value like `str` and `/` returns a new one. Only
+// `Div<str>`: a second `Div` impl on one type is rejected (one method
+// name per type), so `p / q` is `p / q.as_str()` or `p.join(q)`.
+
+use rok::std::fs;
+use rok::std::fs::Metadata;
+use rok::std::io::IoError;
+
+extern "C" {
+    fn rok_os_realpath(path: str, err: GcBuf<i32>) -> str;
+}
+
+pub struct Path {
+    s: str;
+}
+
+/// One piece of a path (`Path::components`).
+pub enum Component {
+    RootDir,
+    Prefix(str),
+    CurDir,
+    ParentDir,
+    Normal(str),
+}
+
+impl Component {
+    pub fn as_str(self) -> str {
+        match self {
+            Component::RootDir => "/",
+            Component::Prefix(p) => p,
+            Component::CurDir => ".",
+            Component::ParentDir => "..",
+            Component::Normal(n) => n,
+        }
+    }
+}
+
+impl PartialEq for Component {
+    fn eq(self, rhs: Component) -> bool { return self.as_str() == rhs.as_str(); }
+    fn ne(self, rhs: Component) -> bool { return self.as_str() != rhs.as_str(); }
+}
+
+impl Debug for Component {
+    fn debug(self) -> str {
+        match self {
+            Component::RootDir => "RootDir",
+            Component::Prefix(p) => "Prefix(" + p + ")",
+            Component::CurDir => "CurDir",
+            Component::ParentDir => "ParentDir",
+            Component::Normal(n) => "Normal(" + n + ")",
+        }
+    }
+}
+
+/// `p.strip_prefix(base)` where `base` is not a prefix of `p`.
+pub struct StripPrefixError {}
+
+impl Display for StripPrefixError {
+    fn display(self) -> str { return "prefix not found"; }
+}
+impl Debug for StripPrefixError {
+    fn debug(self) -> str { return "StripPrefixError"; }
+}
+impl Error for StripPrefixError {}
+
+/// What the fs functions take: a `Path` or a `str` spelling one.
+pub trait AsPath {
+    fn as_path(self) -> Path;
+}
+
+impl AsPath for Path {
+    fn as_path(self) -> Path { return self; }
+}
+
+impl AsPath for str {
+    fn as_path(self) -> Path { return Path { s: self }; }
+}
+
+/// `s` without trailing `/`s (but `/` stays `/`).
+fn trim_slashes(s: str) -> str {
+    let n = s.len();
+    while n > 1 && s.slice(n - 1, n) == "/" { n -= 1; }
+    return s.slice(0, n);
+}
+
+impl Path {
+    pub fn new() -> Path { return Path { s: "" }; }
+    pub fn from(s: str) -> Path { return Path { s: s }; }
+
+    pub fn from_components<I: Iterator<Item = str>>(components: I) -> Path {
+        let p = Path::new();
+        for c in components { p = p.join(Path::from(c)); }
+        return p;
+    }
+
+    pub fn as_str(self) -> str { return self.s; }
+
+    pub fn is_absolute(self) -> bool { return self.s.starts_with("/"); }
+    pub fn is_relative(self) -> bool { return !self.is_absolute(); }
+    pub fn has_root(self) -> bool { return self.is_absolute(); }
+
+    /// The path without its last component; `none` for `/` and `""`.
+    /// `Path::from("a").parent()` is `""` (as in Rust).
+    pub fn parent(self) -> Path | none {
+        let comps = self.component_list();
+        let n = comps.len();
+        if n == 0 { return none; }
+        let last = comps[n - 1];
+        if last == Component::RootDir { return none; }
+        let out = Path::new();
+        let i = 0usize;
+        while i + 1 < n {
+            out = out.join(Path::from(comps[i].as_str()));
+            i += 1;
+        }
+        return out;
+    }
+
+    /// The last component unless it is `..` / `/`.
+    pub fn file_name(self) -> str | none {
+        let comps = self.component_list();
+        let n = comps.len();
+        if n == 0 { return none; }
+        match comps[n - 1] {
+            Component::Normal(name) => name,
+            _ => none,
+        }
+    }
+
+    /// `file_name` without its extension.
+    pub fn file_stem(self) -> str | none {
+        let name = self.file_name()?;
+        let dot = name.rfind(".") ?? 0usize;
+        if dot == 0 { return name; }
+        return name.slice(0, dot);
+    }
+
+    /// After the last `.` of `file_name` (`none` for `.bashrc`, `a`).
+    pub fn extension(self) -> str | none {
+        let name = self.file_name()?;
+        let dot = name.rfind(".") ?? 0usize;
+        if dot == 0 { return none; }
+        return name.slice(dot + 1, name.len());
+    }
+
+    pub fn components(self) -> Components {
+        return Components { items: self.component_list(), pos: 0 };
+    }
+
+    /// `self`, its parent, its grandparent, ...
+    pub fn ancestors(self) -> Ancestors {
+        return Ancestors { next: self };
+    }
+
+    fn component_list(self) -> List<Component> {
+        let out: List<Component> = List::new();
+        if self.s.starts_with("/") { out.push(Component::RootDir); }
+        let first = true;
+        for part in self.s.split("/") {
+            if part == "" {
+                // separator run or the root
+            } else if part == "." {
+                if first && !self.s.starts_with("/") { out.push(Component::CurDir); }
+            } else if part == ".." {
+                out.push(Component::ParentDir);
+            } else {
+                out.push(Component::Normal(part));
+            }
+            first = false;
+        }
+        return out;
+    }
+
+    /// `other` appended; an absolute `other` replaces `self`.
+    pub fn join(self, other: Path) -> Path {
+        if self.s == "" || other.is_absolute() { return other; }
+        if other.s == "" { return self; }
+        if self.s.ends_with("/") { return Path { s: self.s + other.s }; }
+        return Path { s: self.s + "/" + other.s };
+    }
+
+    pub fn with_file_name(self, name: str) -> Path {
+        let parent = self.parent() ?? Path::new();
+        return parent.join(Path::from(name));
+    }
+
+    pub fn with_extension(self, ext: str) -> Path {
+        let stem = self.file_stem() ?? "";
+        if ext == "" { return self.with_file_name(stem); }
+        return self.with_file_name(stem + "." + ext);
+    }
+
+    /// Component-wise prefix test.
+    pub fn starts_with(self, base: Path) -> bool {
+        let a = self.component_list();
+        let b = base.component_list();
+        if b.len() > a.len() { return false; }
+        let i = 0usize;
+        while i < b.len() {
+            if a[i] != b[i] { return false; }
+            i += 1;
+        }
+        return true;
+    }
+
+    /// Component-wise suffix test.
+    pub fn ends_with(self, suffix: Path) -> bool {
+        let a = self.component_list();
+        let b = suffix.component_list();
+        if b.len() > a.len() { return false; }
+        let off = a.len() - b.len();
+        let i = 0usize;
+        while i < b.len() {
+            if a[off + i] != b[i] { return false; }
+            i += 1;
+        }
+        return true;
+    }
+
+    pub fn strip_prefix(self, base: Path) throws (StripPrefixError) -> Path {
+        if !self.starts_with(base) { throw StripPrefixError {}; }
+        let a = self.component_list();
+        let out = Path::new();
+        let i = base.component_list().len();
+        while i < a.len() {
+            out = out.join(Path::from(a[i].as_str()));
+            i += 1;
+        }
+        return out;
+    }
+
+    /// Lexical `.` / `..` resolution (no filesystem access).
+    pub fn normalize(self) -> Path {
+        let kept: List<Component> = List::new();
+        for c in self.component_list() {
+            match c {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    let n = kept.len();
+                    if n > 0 && kept[n - 1] != Component::RootDir && kept[n - 1] != Component::ParentDir {
+                        kept.pop();
+                    } else if !(n > 0 && kept[n - 1] == Component::RootDir) {
+                        kept.push(c);
+                    }
+                }
+                _ => kept.push(c),
+            }
+        }
+        let out = Path::new();
+        for c in kept { out = out.join(Path::from(c.as_str())); }
+        if out.s == "" { return Path::from("."); }
+        return out;
+    }
+
+    pub fn exists(self) -> bool { return fs::exists(self); }
+
+    pub fn is_file(self) -> bool {
+        let m = try fs::metadata(self) catch _ { return false; };
+        return m.is_file();
+    }
+
+    pub fn is_dir(self) -> bool {
+        let m = try fs::metadata(self) catch _ { return false; };
+        return m.is_dir();
+    }
+
+    pub fn is_symlink(self) -> bool {
+        let m = try fs::symlink_metadata(self) catch _ { return false; };
+        return m.is_symlink();
+    }
+
+    pub fn metadata(self) throws (IoError) -> Metadata { return try fs::metadata(self); }
+
+    /// Absolute, symlinks resolved (`realpath`).
+    pub fn canonicalize(self) throws (IoError) -> Path {
+        let err: GcBuf<i32> = buf_new(1);
+        let s = unsafe { rok_os_realpath(self.s, err) };
+        if buf_get(err, 0) != 0 { throw IoError::from_os(buf_get(err, 0), self.s); }
+        return Path { s: s };
+    }
+}
+
+impl Div<str> for Path {
+    type Output = Path;
+    fn div(self, rhs: str) -> Path { return self.join(Path::from(rhs)); }
+}
+
+impl PartialEq for Path {
+    fn eq(self, rhs: Path) -> bool { return self.s == rhs.s; }
+    fn ne(self, rhs: Path) -> bool { return self.s != rhs.s; }
+}
+
+impl Display for Path {
+    fn display(self) -> str { return self.s; }
+}
+
+impl Debug for Path {
+    fn debug(self) -> str { return self.s.debug(); }
+}
+
+pub struct Components {
+    items: List<Component>;
+    pos: usize;
+}
+
+impl Iterator for Components {
+    type Item = Component;
+    fn next(ref self) -> Component | none {
+        let c = self.items.get(self.pos)?;
+        self.pos += 1;
+        return c;
+    }
+}
+
+pub struct Ancestors {
+    next: Path | none;
+}
+
+impl Iterator for Ancestors {
+    type Item = Path;
+    fn next(ref self) -> Path | none {
+        let p = self.next?;
+        self.next = p.parent();
+        return p;
+    }
+}

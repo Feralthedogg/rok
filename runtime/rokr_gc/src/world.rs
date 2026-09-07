@@ -23,7 +23,7 @@
 use core::cell::UnsafeCell;
 use core::mem::size_of;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 
 use rokr_common::tls::{self, MUTATOR_GC_COOPERATING, MUTATOR_PARKED, MUTATOR_RUNNING};
 
@@ -39,8 +39,31 @@ pub struct Mutator {
     /// thread's own frames hold it).
     root: *mut u8,
     /// `rok_tls_worker_id` the spawner chose, written by [`attach`]
-    /// (`u64::MAX`: keep the one `thread_init` allocated).
+    /// (`u64::MAX`: keep the one `thread_init` allocated, then record it).
     worker_id: u64,
+    /// `thread::park` token: 1 = an `unpark` is pending.
+    pub park_token: AtomicI32,
+}
+
+/// With the world lock taken (by [`lock`]): `f` on the park token of the
+/// registered thread `worker_id` (`None`: no such thread).
+pub fn with_park_token<R>(worker_id: Option<u64>, f: impl FnOnce(Option<&AtomicI32>) -> R) -> R {
+    lock();
+    let m = match worker_id {
+        None => find_current(),
+        // SAFETY: registry guarded by the lock.
+        Some(id) => unsafe {
+            let mut m = *WORLD.threads.get();
+            while !m.is_null() && (*m).worker_id != id {
+                m = (*m).next;
+            }
+            m
+        },
+    };
+    // SAFETY: a registered record stays allocated while the lock is held.
+    let r = f(unsafe { m.as_ref() }.map(|m| &m.park_token));
+    unlock();
+    r
 }
 
 struct World {
@@ -154,6 +177,7 @@ pub fn register(root: *mut u8, worker_id: u64) -> *mut Mutator {
             stack_top: ptr::null(),
             root,
             worker_id,
+            park_token: AtomicI32::new(0),
         });
         *WORLD.threads.get() = m;
     }
@@ -178,7 +202,9 @@ pub unsafe fn attach(m: *mut Mutator) {
         (*m).yield_flag = tls::yield_flag();
         (*m).state = tls::mutator_state();
         (*m).stack_top = tls::shadow_stack_top();
-        if (*m).worker_id != u64::MAX {
+        if (*m).worker_id == u64::MAX {
+            (*m).worker_id = tls::worker_id().read();
+        } else {
             tls::worker_id().write((*m).worker_id);
         }
     }
@@ -328,5 +354,48 @@ pub fn for_each_root(mut f: impl FnMut(*mut u8)) {
             }
             m = (*m).next;
         }
+        let g = &*GLOBAL_ROOTS.0.get();
+        for i in 0..g.len {
+            f(*(*g.words.add(i)) as *mut u8);
+        }
     }
+}
+
+/// Addresses of words outside any stack that hold GC references
+/// (statics), scanned by every collection.
+struct GlobalRoots {
+    words: *mut *const usize,
+    len: usize,
+    cap: usize,
+}
+
+struct GlobalRootsCell(UnsafeCell<GlobalRoots>);
+// SAFETY: only touched with the world lock held.
+unsafe impl Sync for GlobalRootsCell {}
+
+static GLOBAL_ROOTS: GlobalRootsCell = GlobalRootsCell(UnsafeCell::new(GlobalRoots {
+    words: ptr::null_mut(),
+    len: 0,
+    cap: 0,
+}));
+
+/// Make the word at `word` a root for the rest of the process.
+pub fn add_root(word: *const usize) {
+    lock();
+    // SAFETY: guarded by the lock; realloc of our own buffer.
+    unsafe {
+        let g = &mut *GLOBAL_ROOTS.0.get();
+        if g.len == g.cap {
+            let cap = (g.cap * 2).max(16);
+            let p = libc::realloc(g.words.cast(), cap * size_of::<*const usize>());
+            if p.is_null() {
+                rokr_common::oom();
+            }
+            g.words = p.cast();
+            g.cap = cap;
+        }
+        *g.words.add(g.len) = word;
+        g.len += 1;
+    }
+    unlock();
 }

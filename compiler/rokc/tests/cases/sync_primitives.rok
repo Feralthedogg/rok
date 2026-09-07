@@ -37,13 +37,13 @@ fn main() -> i32 {
 
     let m = Mutex::new(1);
     using g = m.lock() {
-        g.set(g.deref() + 41);
+        g.update(|v| v + 41);
     }
-    using g = m.lock() { rok_print_i32(g.deref()); }
+    using g = m.lock() { rok_print_i32(g.get()); }
     let l = RwLock::new(3);
-    using r = l.read(), r2 = l.read() { rok_print_i32(r.deref() + r2.deref()); }
+    using r = l.read(), r2 = l.read() { rok_print_i32(r.get() + r2.get()); }
     using w = l.write() { w.set(9); }
-    using r = l.read() { rok_print_i32(r.deref()); }
+    using r = l.read() { rok_print_i32(r.get()); }
     let once = Once::new();
     let n = Atomic::new(0);
     once.call_once(|| { n.fetch_add(1); });

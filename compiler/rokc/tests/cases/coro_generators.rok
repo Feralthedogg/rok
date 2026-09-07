@@ -1,0 +1,132 @@
+// expect-exit: 0
+// expect-stdout:
+// sum 10
+// 0 1 2 
+// 0 1 2 3 4 
+// w0!
+// w1!
+// w2!
+// 3 kept, last w2
+// collections > 0: true
+// fizz big small fizz 
+// 2 4 6 
+// seen 6
+// still done
+// 4 6
+// 7 14 
+// 0 10 20 
+
+// Generators (spec 4.11): `yield fn` in loops / if / match, early
+// `return`, infinite generators, methods, adapters, `yield { }` blocks
+// and `yield ||` closures.
+extern "C" {
+    fn rok_gc_collect();
+    fn rok_gc_stats_collections() -> u64;
+}
+
+yield fn count_up_to(n: i32) -> i32 {
+    let i = 0;
+    while i < n {
+        yield i;
+        i = i + 1;
+    }
+}
+
+yield fn early_stop(stop: i32) -> i32 {
+    let i = 0;
+    loop {
+        if i >= stop { return; }
+        yield i;
+        i = i + 1;
+    }
+}
+
+yield fn naturals() -> i64 {
+    let i: i64 = 0;
+    loop {
+        yield i;
+        i = i + 1;
+    }
+}
+
+// GC references live across `yield`s: only the frame keeps them.
+yield fn words(n: i32) -> str {
+    let acc: List<str> = [];
+    let i = 0;
+    while i < n {
+        let s = f"w{i}";
+        acc.push(s);
+        unsafe { rok_gc_collect() };
+        yield s + "!";
+        let j = 0;
+        while j < 200 {
+            let _junk = f"junk{j}";
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    yield f"{acc.len()} kept, last {acc[acc.len() - 1]}";
+}
+
+yield fn classify(xs: List<i32>) -> str {
+    for x in xs {
+        match x % 3 {
+            0 => yield "fizz",
+            1 => { if x > 3 { yield "big"; } else { yield "small"; } }
+            _ => {}
+        }
+    }
+}
+
+struct Bag { items: List<i32>; }
+impl Bag {
+    yield fn evens(self) -> i32 {
+        for x in self.items {
+            if x % 2 == 0 { yield x; }
+        }
+    }
+}
+
+let total = 0;
+for x in count_up_to(5) { total = total + x; }
+println(f"sum {total}");
+for x in early_stop(3) { print(f"{x} "); }
+println("");
+for n in naturals() {
+    if n > 4 { break; }
+    print(f"{n} ");
+}
+println("");
+let g = words(3);
+for w in g { println(w); }
+println(f"collections > 0: {unsafe { rok_gc_stats_collections() } > 0}");
+for c in classify([3, 4, 1, 5, 6]) { print(f"{c} "); }
+println("");
+let b = Bag { items: [1, 2, 3, 4, 6] };
+for e in b.evens() { print(f"{e} "); }
+println("");
+let it = count_up_to(3);
+let seen = 0;
+while true {
+    match it.next() {
+        v: i32 => { seen = seen + v + 1; }
+        none => { break; }
+    }
+}
+println(f"seen {seen}");
+match it.next() { none => println("still done"), _ => println("bad") }
+let doubled = count_up_to(4).map(|x| x * 2).collect::<List<i32>>();
+println(f"{doubled.len()} {doubled[3]}");
+let k = 7;
+let inline = yield {
+    yield k;
+    yield k * 2;
+};
+for v in inline { print(f"{v} "); }
+println("");
+let mk = yield |n: i32| {
+    let i = 0;
+    while i < n { yield i * 10; i = i + 1; }
+};
+for v in mk(3) { print(f"{v} "); }
+println("");

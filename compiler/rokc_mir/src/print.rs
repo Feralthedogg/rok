@@ -121,6 +121,15 @@ fn print_stmt(out: &mut String, s: &Statement) {
             print_operand(out, value);
             out.push(';');
         }
+        Statement::HeapStore {
+            ptr, index, value, ..
+        } => {
+            out.push_str("heap_store ");
+            print_operand(out, ptr);
+            let _ = write!(out, ".{index} = ");
+            print_operand(out, value);
+            out.push(';');
+        }
         Statement::StaticStore { name, value, .. } => {
             let _ = write!(out, "static {name} = ");
             print_operand(out, value);
@@ -255,6 +264,14 @@ fn print_rvalue(out: &mut String, r: &RValue) {
             let _ = write!(out, "heap_box<{}> ", ty_str(ty));
             print_operand(out, value);
         }
+        RValue::HeapAlloc { ty } => {
+            let _ = write!(out, "heap_alloc<{}>", ty_str(ty));
+        }
+        RValue::HeapField { ptr, index, .. } => {
+            out.push_str("heap_field ");
+            print_operand(out, ptr);
+            let _ = write!(out, ".{index}");
+        }
         RValue::HeapLoad { ptr, ty } => {
             let _ = write!(out, "heap_load<{}> ", ty_str(ty));
             print_operand(out, ptr);
@@ -288,8 +305,14 @@ fn print_rvalue(out: &mut String, r: &RValue) {
             index,
             args,
             elem_ty,
+            order,
         } => {
-            let _ = write!(out, "atomic_{op}<{}> ", ty_str(elem_ty));
+            let _ = write!(
+                out,
+                "atomic_{op}<{}, {}> ",
+                ty_str(elem_ty),
+                order.join("/")
+            );
             print_operand(out, buf);
             out.push('[');
             print_operand(out, index);
@@ -367,6 +390,22 @@ fn print_terminator(out: &mut String, t: &Terminator) {
             }
         }
         Terminator::Unreachable => out.push_str("unreachable"),
+        Terminator::Suspend {
+            value,
+            resume,
+            is_final,
+        } => {
+            out.push_str(if *is_final {
+                "suspend_final"
+            } else {
+                "suspend"
+            });
+            if let Some(o) = value {
+                out.push(' ');
+                print_operand(out, o);
+            }
+            let _ = write!(out, " -> bb{}", resume.0);
+        }
     }
 }
 

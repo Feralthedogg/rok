@@ -1,0 +1,23 @@
+// expect-exit: 0
+// expect-stdout:
+// spawned
+// fast woke
+// mid woke
+// slow woke
+// 60
+
+// Spawned tasks run concurrently; sleeps wake in deadline order.
+async fn worker(name: str, ms: i64) -> i64 {
+    await task::sleep(Duration::ms(ms));
+    println(f"{name} woke");
+    ms
+}
+async fn main() {
+    let a = task::spawn(worker("slow", 30));
+    let b = task::spawn(worker("fast", 10));
+    let c = task::spawn(worker("mid", 20));
+    println("spawned");
+    await task::yield_now();
+    let xs = await task::join([a, b, c]);
+    println(f"{xs[0] + xs[1] + xs[2]}");
+}

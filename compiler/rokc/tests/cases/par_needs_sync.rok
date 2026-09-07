@@ -1,0 +1,9 @@
+// expect-error: the closure's captures don't meet the `fn` type's bounds
+// `par::for_each` takes `fn(T) + Send + Sync` (2.19.1): a closure
+// capturing a `Cell` (not Sync) is rejected.
+fn main() -> i32 {
+    let c = Cell::new(0);
+    let xs: List<i32> = [1, 2, 3];
+    par::for_each(xs, |x: i32| { c.set(x); });
+    return c.get();
+}

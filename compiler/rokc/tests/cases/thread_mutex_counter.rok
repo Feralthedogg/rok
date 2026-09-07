@@ -25,21 +25,21 @@ fn main() -> i32 {
             arrived.fetch_add(1);
             // Wait for the start signal.
             using g = ready.lock() {
-                while !g.deref() {
+                while !g.get() {
                     g = gate.wait(g);
                 }
             }
             let i = 0;
             while i < 10000 {
                 using g = counter.lock() {
-                    g.set(g.deref() + 1);
+                    g.set(g.get() + 1);
                 }
                 i += 1;
             }
             let j = 0;
             while j < 1500 {
-                using w = table.write() { w.set(w.deref() + 1); }
-                using r = table.read() { if r.deref() < 0 { rok_print_str("bad"); } }
+                using w = table.write() { w.set(w.get() + 1); }
+                using r = table.read() { if r.get() < 0 { rok_print_str("bad"); } }
                 j += 1;
             }
         }));
@@ -49,9 +49,9 @@ fn main() -> i32 {
     using g = ready.lock() { g.set(true); }
     gate.notify_all();
     for h in hs { try! h.join(); }
-    using g = counter.lock() { rok_print_i64(g.deref()); }
+    using g = counter.lock() { rok_print_i64(g.get()); }
     rok_print_i32(arrived.load());
     rok_print_i32(inits.load());
-    using r = table.read() { rok_print_i64(r.deref()); }
+    using r = table.read() { rok_print_i64(r.get()); }
     return 0;
 }

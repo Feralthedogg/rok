@@ -11,8 +11,9 @@ mod lower;
 mod print;
 mod ty;
 mod uses;
-mod walk;
+pub mod walk;
 
+pub use lower::FN_BLOCK_LABEL;
 pub use lower::{lower, lower_full, lower_with_uses};
 pub use print::print_hir;
 
@@ -61,6 +62,9 @@ pub struct HirStaticDef {
     pub is_mut: bool,
     /// `extern "C" { static .. }` (spec 5.9.3): no initializer here.
     pub is_extern: bool,
+    /// Non-literal initializer: this function computes the value on
+    /// first access (lazy, thread-safe); `init` is unused.
+    pub init_fn: Option<FunctionId>,
     pub span: Span,
 }
 
@@ -433,6 +437,9 @@ pub enum HirExprKind {
         index: Box<HirExpr>,
         args: Vec<HirExpr>,
         elem: HirTy,
+        /// LLVM ordering(s) (`monotonic` .. `seq_cst`); `cas` uses both
+        /// (success, failure), the others the first.
+        order: [&'static str; 2],
     },
     // `arr[idx]` — element read.
     ArrayIndex {
@@ -460,6 +467,22 @@ pub enum HirExprKind {
         field_name: String,
         storage_ty: HirTy,
         field_ty: HirTy,
+    },
+    /// Coroutine suspend point (`yield`, a pending `await`): hand `value`
+    /// (the step value, the body function's return type) to the resumer;
+    /// the next resume continues after it. `is_final` marks the point a
+    /// finished coroutine parks at (it hands back the same value on every
+    /// later resume). Unit-typed.
+    Suspend {
+        value: Box<HirExpr>,
+        is_final: bool,
+    },
+    /// A fresh coroutine of body `body_fn` (an `is_async` /
+    /// `is_generator` function) with its initial `args`: a function value
+    /// `fn(resume args..) -> step` whose env is the coroutine frame.
+    CoroNew {
+        body_fn: FunctionId,
+        args: Vec<HirExpr>,
     },
 }
 

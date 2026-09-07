@@ -30,7 +30,7 @@ pub struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
     file: String,
-    diagnostics: Vec<RokDiagnostic>,
+    pub(crate) diagnostics: Vec<RokDiagnostic>,
     /// Whether `Path { ... }` is a struct initializer at this point. We
     /// disable it inside `if`/`while`/`for` conditions so the trailing
     /// `{` is treated as the body brace, not a struct body.
@@ -65,6 +65,8 @@ pub struct Parser<'a> {
     untyped_throws: Vec<Span>,
     /// Registered extension operators (spec 1.10.4) and their levels.
     ext: ExtOps,
+    /// Items `#[derive(..)]` generated for the last item parsed.
+    pending_items: Vec<Item>,
 }
 
 /// Nesting limit for expressions, types, patterns and blocks.
@@ -119,7 +121,20 @@ impl<'a> Parser<'a> {
             next_destructure_temp: 0,
             untyped_throws: Vec::new(),
             ext: ExtOps::default(),
+            pending_items: Vec::new(),
         }
+    }
+
+    pub(crate) fn at_eof(&self) -> bool {
+        matches!(self.peek(), TokenKind::Eof)
+    }
+
+    pub(crate) const fn position(&self) -> usize {
+        self.pos
+    }
+
+    pub(crate) fn parse_item_pub(&mut self) -> Option<Item> {
+        self.parse_item()
     }
 
     /// Run `f` with `struct_expr_allowed` set to `allowed`, restoring the
@@ -355,6 +370,7 @@ impl<'a> Parser<'a> {
             if self.at_item_start() {
                 if let Some(item) = self.parse_item() {
                     items.push(item);
+                    items.append(&mut self.pending_items);
                 } else {
                     self.recover(from, Recover::TopItem);
                 }
@@ -691,6 +707,9 @@ impl<'a> Parser<'a> {
                 format!("`{n}` cannot name a {what}: it is reserved as a path root / type keyword"),
             );
         }
+        let (derived, diags) = crate::derive::derive_items(&item, &self.file);
+        self.pending_items.extend(derived);
+        self.diagnostics.extend(diags);
         Some(item)
     }
 
@@ -1360,6 +1379,7 @@ impl<'a> Parser<'a> {
                 let from = self.pos;
                 if let Some(item) = self.parse_item() {
                     items.push(item);
+                    items.append(&mut self.pending_items);
                 } else {
                     self.recover(from, Recover::NestedItem);
                 }
@@ -1582,13 +1602,16 @@ impl<'a> Parser<'a> {
     /// a nested `(...)` group (spec 3.15.4). Nested groups are desugared
     /// into a fresh temp binding plus a follow-up `LetTuple` queued on
     /// `pending_stmts`. Caller has already verified `peek() == LParen`.
+    /// The last tuple's flag is whether it ended in `,` (so `(a)` is a
+    /// grouping and `(a,)` a 1-tuple).
     fn parse_let_tuple_pattern(
         &mut self,
         outer_span: Span,
-    ) -> Option<(Vec<String>, Option<LetTupleRest>)> {
+    ) -> Option<(Vec<String>, Option<LetTupleRest>, bool)> {
         self.expect(&TokenKind::LParen, "`(`")?;
         let mut names: Vec<String> = Vec::new();
         let mut rest: Option<LetTupleRest> = None;
+        let mut trailing_comma = false;
         while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
             if matches!(self.peek(), TokenKind::DotDot) {
                 self.bump();
@@ -1619,7 +1642,17 @@ impl<'a> Parser<'a> {
             // in the surrounding scope (spec 3.15.4).
             if matches!(self.peek(), TokenKind::LParen) {
                 let inner_span = self.peek_span();
-                let (inner_names, inner_rest) = self.parse_let_tuple_pattern(inner_span)?;
+                let (mut inner_names, inner_rest, inner_comma) =
+                    self.parse_let_tuple_pattern(inner_span)?;
+                // `((a), b)`: the inner parens only group.
+                if inner_names.len() == 1 && inner_rest.is_none() && !inner_comma {
+                    names.extend(inner_names.pop());
+                    trailing_comma = self.eat(&TokenKind::Comma);
+                    if !trailing_comma {
+                        break;
+                    }
+                    continue;
+                }
                 let temp_name = self.fresh_destructure_temp();
                 names.push(temp_name.clone());
                 let init = Expr {
@@ -1658,16 +1691,17 @@ impl<'a> Parser<'a> {
                 }
                 names.push(n);
             }
-            if !self.eat(&TokenKind::Comma) {
+            trailing_comma = self.eat(&TokenKind::Comma);
+            if !trailing_comma {
                 break;
             }
         }
         self.expect(&TokenKind::RParen, "`)`")?;
-        Some((names, rest))
+        Some((names, rest, trailing_comma))
     }
 
-    /// The `(a, b)` / `Point { x, .. }` after `let name @`: a destructure
-    /// of `name` (spec 3.11 binding pattern).
+    /// The pattern after `let name @`: an irrefutable destructure of
+    /// `name` (spec 3.11 binding pattern), checked in HIR.
     fn parse_let_sub_pattern(&mut self, name: &str, span: Span) -> Option<Stmt> {
         let init = Expr {
             span,
@@ -1679,31 +1713,11 @@ impl<'a> Parser<'a> {
                 span,
             }),
         };
-        let kind = if matches!(self.peek(), TokenKind::LParen) {
-            let (names, rest) = self.parse_let_tuple_pattern(span)?;
-            StmtKind::LetTuple {
-                names,
-                rest,
-                ty: None,
-                init,
-            }
-        } else if self.peek_path_then_lbrace() {
-            let (path, fields, rest) = self.parse_let_struct_fields()?;
-            StmtKind::LetStruct {
-                path,
-                fields,
-                rest,
-                ty: None,
-                init,
-            }
-        } else {
-            self.error(
-                span,
-                "a tuple `(..)` or struct `Name { .. }` pattern expected after `@` in `let`",
-            );
-            return None;
-        };
-        Some(Stmt { kind, span })
+        let pat = self.with_struct_expr(true, Self::parse_pattern_atom)?;
+        Some(Stmt {
+            kind: StmtKind::LetPattern { pat, init },
+            span,
+        })
     }
 
     /// `Path { f, g: alias, .. }` of a `let` struct destructure:
@@ -2603,7 +2617,7 @@ impl<'a> Parser<'a> {
                 // desugar nested groups into a chain of plain LetTuple
                 // statements, queuing follow-ups onto `pending_stmts`.
                 if matches!(self.peek(), TokenKind::LParen) {
-                    let (names, rest) = self.parse_let_tuple_pattern(start)?;
+                    let (mut names, rest, trailing_comma) = self.parse_let_tuple_pattern(start)?;
                     let ty = if self.eat(&TokenKind::Colon) {
                         Some(self.parse_type()?)
                     } else {
@@ -2612,18 +2626,22 @@ impl<'a> Parser<'a> {
                     self.expect(&TokenKind::Eq, "`=`")?;
                     let init = self.parse_expr()?;
                     self.expect(&TokenKind::Semi, "`;`")?;
-                    return Some((
-                        Stmt {
-                            kind: StmtKind::LetTuple {
-                                names,
-                                rest,
-                                ty,
-                                init,
-                            },
-                            span: start,
-                        },
-                        false,
-                    ));
+                    // `let (a) = ..` only groups; `let (a,) = ..` is a 1-tuple.
+                    let kind = if names.len() == 1 && rest.is_none() && !trailing_comma {
+                        StmtKind::Let {
+                            name: names.pop()?,
+                            ty,
+                            init,
+                        }
+                    } else {
+                        StmtKind::LetTuple {
+                            names,
+                            rest,
+                            ty,
+                            init,
+                        }
+                    };
+                    return Some((Stmt { kind, span: start }, false));
                 }
                 let name = if let TokenKind::Ident(n) = self.peek() {
                     n.clone()
@@ -3385,6 +3403,7 @@ impl<'a> Parser<'a> {
                     }
                     TokenKind::For => {
                         self.bump();
+                        let is_await = self.eat(&TokenKind::Await);
                         let pat = self.parse_pattern()?;
                         self.expect_kw("in")?;
                         let iter = self.with_struct_expr(false, Self::parse_expr)?;
@@ -3394,6 +3413,7 @@ impl<'a> Parser<'a> {
                             pat,
                             iter: Box::new(iter),
                             body,
+                            is_await,
                         }
                     }
                     TokenKind::LBrace => {
@@ -3415,6 +3435,8 @@ impl<'a> Parser<'a> {
             }
             TokenKind::For => {
                 self.bump();
+                // Spec 4.13.5: `for await pat in stream`.
+                let is_await = self.eat(&TokenKind::Await);
                 let pat = self.parse_pattern()?;
                 self.expect_kw("in")?;
                 let iter = self.with_struct_expr(false, Self::parse_expr)?;
@@ -3424,6 +3446,7 @@ impl<'a> Parser<'a> {
                     pat,
                     iter: Box::new(iter),
                     body,
+                    is_await,
                 }
             }
             TokenKind::Match => {
@@ -3775,20 +3798,51 @@ impl<'a> Parser<'a> {
                     ExprKind::List(items)
                 }
             }
+            // Spec 4.12.1 / 4.13.1: `async { }`, `async yield { }`, and
+            // the closure modifiers `async ||` / `async yield ||`.
+            TokenKind::Async => {
+                self.bump();
+                let is_generator = self.eat(&TokenKind::Yield);
+                match self.peek() {
+                    TokenKind::LBrace => {
+                        let b = self.parse_block()?;
+                        if is_generator {
+                            ExprKind::AsyncYieldBlock(b)
+                        } else {
+                            ExprKind::AsyncBlock(b)
+                        }
+                    }
+                    TokenKind::Pipe | TokenKind::PipePipe => {
+                        self.coro_closure(true, is_generator)?
+                    }
+                    _ => {
+                        self.error(start, "expected `{`, `|` or `fn` after `async`");
+                        return None;
+                    }
+                }
+            }
             TokenKind::Await => {
-                // Spec 4.12: `await expr` extracts the result of a Future.
-                // Stage-1 has no scheduler/Future story, so HIR lowers
-                // this as passthrough — the parsed AST keeps `Await` so
-                // the future scheduler implementation has a hook.
+                // Spec 4.12.2: prefix `await expr`.
                 self.bump();
                 let inner = self.parse_expr_bp(0)?;
                 ExprKind::Await(Box::new(inner))
             }
+            // Spec 4.11.7: `yield {` is a generator block, `yield |` a
+            // generator closure, anything else the `yield` statement.
+            TokenKind::Yield if matches!(self.peek_next(), Some(TokenKind::LBrace)) => {
+                self.bump();
+                ExprKind::YieldBlock(self.parse_block()?)
+            }
+            TokenKind::Yield
+                if matches!(
+                    self.peek_next(),
+                    Some(TokenKind::Pipe | TokenKind::PipePipe)
+                ) =>
+            {
+                self.bump();
+                self.coro_closure(false, true)?
+            }
             TokenKind::Yield => {
-                // Spec 4.11: `yield N` inside a generator function. The
-                // parser accepts the form so generator bodies tokenise
-                // cleanly; HIR emits an explicit refusal until the
-                // coroutine runtime lands (no nullptr stub miscompile).
                 self.bump();
                 let value = if matches!(
                     self.peek(),
@@ -4193,6 +4247,21 @@ impl<'a> Parser<'a> {
     /// Parse `|args| body` or `|args| -> R body` (or `|| body`).
     /// Captures aren't supported yet — the body must reference only its
     /// parameters or globally visible items.
+    /// `async ||` / `yield ||` / `async yield ||` closure.
+    fn coro_closure(&mut self, is_async: bool, is_generator: bool) -> Option<ExprKind> {
+        let mut k = self.parse_closure_expr()?;
+        if let ExprKind::Closure {
+            is_async: a,
+            is_generator: g,
+            ..
+        } = &mut k
+        {
+            *a = is_async;
+            *g = is_generator;
+        }
+        Some(k)
+    }
+
     fn parse_closure_expr(&mut self) -> Option<ExprKind> {
         let mut params: Vec<Param> = Vec::new();
         if self.eat(&TokenKind::PipePipe) {
@@ -4704,6 +4773,10 @@ const fn starts_item(k: &TokenKind) -> bool {
 }
 
 const fn is_block_like(e: &Expr) -> bool {
+    // `try for x in g { .. }` (a throwing iterator) ends like its loop.
+    if let ExprKind::Try { operand, .. } = &e.kind {
+        return matches!(operand.kind, ExprKind::For { .. });
+    }
     matches!(
         e.kind,
         ExprKind::Block(_)

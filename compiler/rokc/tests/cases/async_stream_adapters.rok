@@ -1,0 +1,43 @@
+// expect-exit: 0
+// expect-stdout:
+// skip 2 3
+// throttle 3 true
+// buffered 0 1 4 9 16
+// unordered first 16 total 5
+// merge 9
+// zip 6
+// select stops early true
+
+// Stream adapters (stdlib 2.8.5 / 2.8.8).
+async yield fn nums(n: i32, ms: i64) -> i32 {
+    let i = 0;
+    while i < n {
+        await task::sleep(Duration::ms(ms));
+        yield i;
+        i = i + 1;
+    }
+}
+
+async fn slow_square(x: i32) -> i32 {
+    await task::sleep(Duration::ms(((5 - x) * 3) as i64));
+    x * x
+}
+
+let skipped = await nums(5, 1).skip(3).collect();
+println(f"skip {skipped.len()} {skipped[0]}");
+let start = Instant::now();
+let th = await nums(3, 0).throttle(Duration::ms(5)).collect();
+println(f"throttle {th.len()} {start.elapsed().as_millis() >= 10}");
+let ordered = await nums(5, 0).map(|x| slow_square(x)).buffered(5).collect();
+println(f"buffered {ordered[0]} {ordered[1]} {ordered[2]} {ordered[3]} {ordered[4]}");
+let unordered = await nums(5, 0).map(|x| slow_square(x)).buffer_unordered(5).collect();
+println(f"unordered first {unordered[0]} total {unordered.len()}");
+let total = 0;
+for await x in stream::merge(nums(3, 1), nums(4, 2)) { total = total + x; }
+println(f"merge {total}");
+let n = 0;
+for await p in stream::zip(nums(3, 1), nums(5, 1)) { n = n + p.0 + p.1; }
+println(f"zip {n}");
+let c = 0;
+for await x in stream::select(nums(2, 1), nums(50, 1)) { c = c + 1; }
+println(f"select stops early {c < 10}");

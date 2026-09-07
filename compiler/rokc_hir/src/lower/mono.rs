@@ -572,8 +572,8 @@ pub(super) fn lower_fn_inner(
         locals: ctx.into_locals(),
         ret_ty,
         body,
-        is_async: fn_def.is_async,
-        is_generator: fn_def.is_generator,
+        is_async: false,
+        is_generator: false,
         span: fn_def.span,
     }
 }
@@ -735,6 +735,21 @@ pub(super) fn generic_struct_fields(
 /// Generic items are left to lazy instantiation: their type uses name
 /// type parameters, which must not resolve as same-named visible types
 /// (a user `enum E` vs `impl<T, E> Result<T, E>`).
+/// No unresolved name or unknown part in `t`.
+fn concrete(t: &HirTy) -> bool {
+    match t {
+        HirTy::Unknown | HirTy::Path(_) | HirTy::Any => false,
+        HirTy::Sum(ps) | HirTy::Tuple(ps) => ps.iter().all(concrete),
+        HirTy::Array(e, _) | HirTy::GcBuf(e) => concrete(e),
+        HirTy::Fn(args, ret, _) => args.iter().all(concrete) && concrete(ret),
+        HirTy::Closure { args, ret, env } => {
+            args.iter().all(concrete) && concrete(ret) && concrete(env)
+        }
+        HirTy::Throws { ok, err } => concrete(ok) && concrete(err),
+        _ => true,
+    }
+}
+
 fn declares_type_params(item: &Item) -> bool {
     match item {
         Item::Fn(f) => !f.generics.params.is_empty(),
@@ -908,7 +923,15 @@ pub(super) fn instantiate_generic_structs(
     // other generic structs.
     for _ in 0..8 {
         let before = struct_table.len();
-        for item in program.items.iter().filter(|i| !declares_type_params(i)) {
+        // A trait's signatures name `Self` / associated types, but a
+        // fully concrete one (an `async` default method's
+        // `AsyncFuture<i32>`) is instantiated like any other.
+        for item in program
+            .items
+            .iter()
+            .filter(|i| matches!(i, Item::Trait(_)) || !declares_type_params(i))
+        {
+            let in_trait = matches!(item, Item::Trait(_));
             let module = item_module(item);
             let sc = Scope {
                 names,
@@ -920,6 +943,9 @@ pub(super) fn instantiate_generic_structs(
                 else {
                     return;
                 };
+                if in_trait && !args.iter().all(concrete) {
+                    return;
+                }
                 let mangled = mangle_inst(&full, &args);
                 if struct_table.contains_key(&mangled) {
                     return;

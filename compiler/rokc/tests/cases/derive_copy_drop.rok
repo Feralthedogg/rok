@@ -1,0 +1,12 @@
+// expect-error: cannot derive `Copy` for `File`: it implements `Drop`
+// Stdlib 2.13.3: a `Drop` type can't be `Copy`.
+#[derive(Clone, Copy)]
+struct File { fd: i32; }
+
+impl Drop for File {
+    fn drop(ref self) {}
+}
+
+fn main() -> i32 {
+    return 0;
+}

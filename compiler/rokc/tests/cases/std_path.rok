@@ -1,0 +1,72 @@
+// expect-exit: 0
+// expect-stdout:
+// /etc/nginx/nginx.conf
+// parent=/etc/nginx name=nginx.conf stem=nginx ext=conf
+// [RootDir, Normal(etc), Normal(nginx), Normal(nginx.conf)]
+// /etc/nginx/nginx.conf | /etc/nginx | /etc | /
+// /a/c
+// ../x
+// .
+// a.tar.bak
+// sub/f.rs
+// true true true
+// true false true
+// strip ok: nginx/nginx.conf
+// strip failed
+// /abs
+// a/b
+// a, ""
+// RootDir ParentDir . .. /
+
+// Spec 308: `Path` (UTF-8 newtype, `/` joining), parent / file_name /
+// extension, `Components` / `Ancestors` iterators, lexical normalize.
+
+use rok::std::path::{Path, Component};
+
+fn main() {
+    let p = Path::from("/etc") / "nginx" / "nginx.conf";
+    println(p.as_str());
+    println(f"parent={p.parent() ?? Path::new()} name={p.file_name() ?? "-"} stem={p.file_stem() ?? "-"} ext={p.extension() ?? "-"}");
+
+    let parts = "";
+    for c in p.components() {
+        if parts != "" { parts = parts + ", "; }
+        parts = parts + c.debug();
+    }
+    println("[" + parts + "]");
+
+    let chain = "";
+    for a in p.ancestors() {
+        if chain != "" { chain = chain + " | "; }
+        chain = chain + a.as_str();
+    }
+    println(chain);
+
+    println(Path::from("/a/b/../c").normalize().as_str());
+    println(Path::from("a/../../x/.").normalize().as_str());
+    println(Path::from("a/..").normalize().as_str());
+    println(Path::from("dir/a.tar.gz").with_extension("bak").file_name() ?? "-");
+    println(Path::from("sub/f.rok").with_extension("rs").as_str());
+
+    let dot = Path::from(".bashrc");
+    let root = Path::from("/");
+    println(f"{dot.extension() is none} {root.file_name() is none} {root.parent() is none}");
+    println(f"{p.starts_with(Path::from("/etc"))} {p.starts_with(Path::from("/et"))} {p.ends_with(Path::from("nginx/nginx.conf"))}");
+
+    let rel = try p.strip_prefix(Path::from("/etc")) catch _ { Path::from("?") };
+    println("strip ok: " + rel.as_str());
+    let bad = try p.strip_prefix(Path::from("/usr")).as_str() catch _ { "strip failed" };
+    println(bad);
+
+    // An absolute right side replaces the left (Python / Rust).
+    println(Path::from("a").join(Path::from("/abs")).as_str());
+    println(Path::from("a/").join(Path::from("b")).as_str());
+    let a = Path::from("a/b").parent() ?? Path::new();
+    let top = a.parent() ?? Path::from("?");
+    println(f"{a}, {top.as_str().debug()}");
+
+    let names = "";
+    for c in Path::from("/./..").components() { names = names + c.debug() + " "; }
+    for c in Path::from("./..").components() { names = names + c.as_str() + " "; }
+    println(names + Component::RootDir.as_str());
+}

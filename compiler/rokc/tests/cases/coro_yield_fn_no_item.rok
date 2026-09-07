@@ -1,0 +1,6 @@
+// expect-error: needs its item type
+
+yield fn g() {
+    yield 1;
+}
+for x in g() {}

@@ -1,0 +1,12 @@
+// expect-error: bound_unknown_trait.rok:6:9: cannot find trait `Nope2` (named in a bound)
+// Every bound position must name an existing trait: generic params,
+// `where`, supertraits, `impl Tr for`.
+struct S { x: i32; }
+impl Nope1 for S {}
+fn f<T: Nope2>(x: T) -> i32 { return 1; }
+fn g<T>(x: T) -> i32 where T: Nope3 { return 1; }
+struct W<T: Nope4> { v: T; }
+trait Tr: Nope5 {}
+fn main() -> i32 {
+    return 0;
+}

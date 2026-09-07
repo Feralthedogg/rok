@@ -1,0 +1,50 @@
+// expect-exit: 0
+// expect-stdout:
+// 6
+// -2
+// 9 -9
+
+// `try for` over a throwing generator / `try for await` over a throwing stream.
+struct Bad { at: i32; }
+impl Display for Bad { fn display(self) -> str { return f"bad {self.at}"; } }
+impl Debug for Bad { fn debug(self) -> str { return self.display(); } }
+impl Error for Bad {}
+
+yield fn checked(xs: List<i32>) throws (Bad) -> i32 {
+    for x in xs {
+        if x < 0 { throw Bad { at: x }; }
+        yield x;
+    }
+}
+
+async yield fn checked_stream(xs: List<i32>) throws (Bad) -> i32 {
+    for x in xs {
+        await task::yield_now();
+        if x < 0 { throw Bad { at: x }; }
+        yield x;
+    }
+}
+
+fn sum_all(xs: List<i32>) throws (Bad) -> i32 {
+    let s = 0;
+    try for x in checked(xs) {
+        s = s + x;
+    }
+    return s;
+}
+
+async fn sum_stream(xs: List<i32>) throws (Bad) -> i32 {
+    let s = 0;
+    try for await x in checked_stream(xs) {
+        s = s + x;
+    }
+    return s;
+}
+
+let z = try sum_all([1, 2, 3]) catch e: Bad { -1 };
+println(f"{z}");
+let r = try sum_all([1, -2, 3]) catch e: Bad { e.at };
+println(f"{r}");
+let a = try await sum_stream([4, 5]) catch e: Bad { -1 };
+let b = try await sum_stream([4, -9, 5]) catch e: Bad { e.at };
+println(f"{a} {b}");

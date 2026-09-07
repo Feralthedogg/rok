@@ -3,6 +3,9 @@
 // Modules are pub(shy) so glob imports do not pull them in implicitly.
 
 pub mod env;
+pub mod fs;
 pub mod io;
+pub mod path;
+pub mod process;
 pub mod thread;
 pub mod time;

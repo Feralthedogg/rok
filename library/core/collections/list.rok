@@ -173,6 +173,17 @@ impl<T> IntoIterator for List<T> {
 }
 
 /// `xs[i]`; panics out of bounds.
+/// A new list with every element cloned (stdlib 2.13.2).
+impl<T: Clone> Clone for List<T> {
+    fn clone(self) -> List<T> {
+        let r: List<T> = List::new();
+        for x in self {
+            r.push(x.clone());
+        }
+        return r;
+    }
+}
+
 impl<T> Index<usize> for List<T> {
     type Output = T;
     fn index(self, idx: usize) -> T {

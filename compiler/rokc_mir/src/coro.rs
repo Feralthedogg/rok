@@ -1,0 +1,583 @@
+//! Coroutine lowering (spec 708 / 810): a compiler-generated state
+//! machine over MIR, in place of `llvm.coro.*`.
+//!
+//! A coroutine body (HIR `is_async` / `is_generator`) is lowered like any
+//! function, with `Terminator::Suspend` at its `yield` / `await` points.
+//! This pass turns it into
+//!
+//! - `resume(frame, resume_args..) -> step`: reloads the live locals from the
+//!   frame, dispatches on the frame's state to the entry or the block
+//!   after the suspend point it stopped at, and at each suspend point
+//!   spills every local back, records the next state and returns the
+//!   step value;
+//! - a constructor `new(args..) -> {resume, frame}`: allocates the zeroed
+//!   frame (state 0) and stores the initial arguments into it.
+//!
+//! The frame is a GC object whose payload is `(i32 state, locals..)`;
+//! codegen registers its `ScanTable` from that type, so the collector
+//! traces the frame's GC references through the object, not the shadow
+//! stack (704). While `resume` runs its locals are ordinary shadow-stack
+//! roots.
+//!
+//! Only locals live into a resume point are spilled / reloaded there
+//! (`live_in`); the frame holds the union of those (plus the initial
+//! arguments).
+
+use std::collections::{BTreeSet, HashMap};
+
+use rokc_ir_common::{BlockId, ConstVal, FunctionId, LocalId, PrimOp, PrimTy};
+
+use crate::ty::{code_ty, fat_fn};
+use crate::{BasicBlock, LocalDecl, MirFunction, MirTy, Operand, RValue, Statement, Terminator};
+
+/// Rewrite coroutine body `f` (whose last `n_resume` params come with
+/// every resume) into its resume function, keeping `f.id`, and return its
+/// constructor `ctor`.
+pub fn transform(f: &mut MirFunction, n_resume: usize, ctor: FunctionId) -> MirFunction {
+    remove_block_params(f);
+    let n_init = f.params.len() - n_resume;
+    let resume_params: Vec<LocalId> = f.params[n_init..].to_vec();
+
+    // Old entry → a fresh id; the dispatcher becomes block 0.
+    let mut next_block = f.blocks.iter().map(|b| b.id.0 + 1).max().unwrap_or(0);
+    let old_entry = BlockId(next_block);
+    next_block += 1;
+    for b in &mut f.blocks {
+        if b.id == BlockId(0) {
+            b.id = old_entry;
+        }
+        for t in successors_mut(&mut b.terminator) {
+            if *t == BlockId(0) {
+                *t = old_entry;
+            }
+        }
+    }
+
+    // States: 0 = start, then one per suspend point in block order. A
+    // finished coroutine re-runs the block that parks it (the final
+    // value is rebuilt from the reloaded locals).
+    let mut targets: Vec<BlockId> = vec![old_entry];
+    let mut final_block = None;
+    for b in &f.blocks {
+        if let Terminator::Suspend {
+            resume, is_final, ..
+        } = &b.terminator
+        {
+            if *is_final {
+                final_block = Some((targets.len() as u32, b.id));
+                targets.push(b.id);
+            } else {
+                targets.push(*resume);
+            }
+        }
+    }
+
+    // Only the locals live into a resume point cross a suspension.
+    let live = live_in(f);
+    let skipped: BTreeSet<LocalId> = f
+        .locals
+        .iter()
+        .filter(|l| matches!(l.ty, MirTy::Unit))
+        .map(|l| l.id)
+        .chain(resume_params.iter().copied())
+        .collect();
+    let kept = |l: &LocalId| !skipped.contains(l);
+    let live_at = |b: BlockId| -> Vec<LocalId> {
+        live.get(&b)
+            .map(|s| s.iter().copied().filter(kept).collect())
+            .unwrap_or_default()
+    };
+    let mut frame_set: std::collections::BTreeSet<LocalId> =
+        f.params[..n_init].iter().copied().filter(kept).collect();
+    for t in &targets {
+        frame_set.extend(live_at(*t));
+    }
+    let frame_locals: Vec<LocalId> = frame_set.into_iter().collect();
+    let mut fields = vec![MirTy::Prim(PrimTy::I32)];
+    fields.extend(
+        frame_locals
+            .iter()
+            .map(|l| f.locals[l.0 as usize].ty.clone()),
+    );
+    let frame_ty = MirTy::Tuple(fields);
+    let field_of = |l: LocalId| -> u32 {
+        1 + u32::try_from(
+            frame_locals
+                .iter()
+                .position(|x| *x == l)
+                .expect("frame local"),
+        )
+        .expect("frame too large")
+    };
+
+    let new_local = |f: &mut MirFunction, ty: MirTy| {
+        let id = LocalId(u32::try_from(f.locals.len()).expect("too many locals"));
+        f.locals.push(LocalDecl { id, name: None, ty });
+        id
+    };
+    let frame = new_local(f, MirTy::GcRef);
+    f.locals[frame.0 as usize].name = Some("#frame".to_owned());
+    let frame_op = Operand::Copy(frame);
+    let state_const = |s: u32| {
+        Operand::Const(ConstVal::Int {
+            value: i128::from(s),
+            ty: PrimTy::I32,
+        })
+    };
+
+    let spill = |stmts: &mut Vec<Statement>, set: &[LocalId], state: u32| {
+        for &l in set {
+            stmts.push(Statement::HeapStore {
+                ptr: frame_op.clone(),
+                ty: frame_ty.clone(),
+                index: field_of(l),
+                value: Operand::Copy(l),
+            });
+        }
+        stmts.push(Statement::HeapStore {
+            ptr: frame_op.clone(),
+            ty: frame_ty.clone(),
+            index: 0,
+            value: state_const(state),
+        });
+    };
+    let (final_state, final_set) = match final_block {
+        Some((s, b)) => (s, live_at(b)),
+        None => (u32::MAX, Vec::new()),
+    };
+    let mut state = 1u32;
+    for b in &mut f.blocks {
+        match std::mem::replace(&mut b.terminator, Terminator::Unreachable) {
+            Terminator::Suspend {
+                value,
+                is_final,
+                resume,
+            } => {
+                if is_final {
+                    spill(&mut b.stmts, &final_set, final_state);
+                } else {
+                    spill(&mut b.stmts, &live_at(resume), state);
+                }
+                state += 1;
+                b.terminator = Terminator::Return(value);
+            }
+            // Only an error leaves a coroutine body by `return`.
+            Terminator::Return(value) => {
+                spill(&mut b.stmts, &final_set, final_state);
+                b.terminator = Terminator::Return(value);
+            }
+            t => b.terminator = t,
+        }
+    }
+
+    // Dispatcher: branch on the frame's state to a block that reloads
+    // what is live there.
+    let st = new_local(f, MirTy::Prim(PrimTy::I32));
+    let mut chain: Vec<BasicBlock> = Vec::new();
+    let mut cur = BasicBlock {
+        id: BlockId(0),
+        params: Vec::new(),
+        stmts: vec![Statement::Assign {
+            target: st,
+            rvalue: RValue::HeapField {
+                ptr: frame_op.clone(),
+                ty: frame_ty.clone(),
+                index: 0,
+            },
+        }],
+        terminator: Terminator::Unreachable,
+    };
+    for (s, target) in targets.iter().enumerate() {
+        let c = new_local(f, MirTy::Prim(PrimTy::Bool));
+        cur.stmts.push(Statement::Assign {
+            target: c,
+            rvalue: RValue::BinOp {
+                op: PrimOp::Eq,
+                op_ty: MirTy::Prim(PrimTy::I32),
+                lhs: Operand::Copy(st),
+                rhs: state_const(s as u32),
+            },
+        });
+        let reload = BlockId(next_block);
+        let next = BlockId(next_block + 1);
+        next_block += 2;
+        chain.push(BasicBlock {
+            id: reload,
+            params: Vec::new(),
+            stmts: live_at(*target)
+                .into_iter()
+                .map(|l| Statement::Assign {
+                    target: l,
+                    rvalue: RValue::HeapField {
+                        ptr: frame_op.clone(),
+                        ty: frame_ty.clone(),
+                        index: field_of(l),
+                    },
+                })
+                .collect(),
+            terminator: Terminator::Goto {
+                target: *target,
+                args: Vec::new(),
+            },
+        });
+        cur.terminator = Terminator::If {
+            cond: Operand::Copy(c),
+            then_bb: reload,
+            then_args: Vec::new(),
+            else_bb: next,
+            else_args: Vec::new(),
+        };
+        let done = std::mem::replace(
+            &mut cur,
+            BasicBlock {
+                id: next,
+                params: Vec::new(),
+                stmts: Vec::new(),
+                terminator: Terminator::Unreachable,
+            },
+        );
+        chain.insert(chain.len() - 1, done);
+    }
+    chain.push(cur);
+    chain.append(&mut f.blocks);
+    f.blocks = chain;
+    prune_unreachable_blocks(f);
+
+    // Constructor: a zeroed frame (state 0) holding the initial args.
+    let init_tys: Vec<MirTy> = f.param_tys[..n_init].to_vec();
+    let resume_tys: Vec<MirTy> = f.param_tys[n_init..].to_vec();
+    let mut locals: Vec<LocalDecl> = Vec::new();
+    let mut local = |ty: MirTy| {
+        let id = LocalId(u32::try_from(locals.len()).expect("too many locals"));
+        locals.push(LocalDecl { id, name: None, ty });
+        id
+    };
+    let args: Vec<LocalId> = init_tys.iter().map(|t| local(t.clone())).collect();
+    let new_frame = local(MirTy::GcRef);
+    let code_t = code_ty(resume_tys.clone(), f.ret_ty.clone());
+    let code = local(code_t.clone());
+    let fat = fat_fn(resume_tys.clone(), f.ret_ty.clone());
+    let result = local(fat.clone());
+    let mut body = vec![Statement::Assign {
+        target: new_frame,
+        rvalue: RValue::HeapAlloc {
+            ty: frame_ty.clone(),
+        },
+    }];
+    for (i, a) in args.iter().enumerate() {
+        let p = f.params[i];
+        if !frame_locals.contains(&p) {
+            continue;
+        }
+        body.push(Statement::HeapStore {
+            ptr: Operand::Copy(new_frame),
+            ty: frame_ty.clone(),
+            index: field_of(p),
+            value: Operand::Copy(*a),
+        });
+    }
+    body.push(Statement::Assign {
+        target: code,
+        rvalue: RValue::FnAddr {
+            callee: f.id,
+            fn_ty: code_t,
+        },
+    });
+    body.push(Statement::Assign {
+        target: result,
+        rvalue: RValue::StructInit {
+            ty: fat.clone(),
+            fields: vec![Operand::Copy(code), Operand::Copy(new_frame)],
+        },
+    });
+    let ctor_fn = MirFunction {
+        id: ctor,
+        def_id: None,
+        name: format!("{}__new", f.name),
+        params: args,
+        locals,
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            stmts: body,
+            terminator: Terminator::Return(Some(Operand::Copy(result))),
+        }],
+        param_tys: init_tys,
+        ret_ty: fat,
+        span: f.span,
+    };
+
+    let mut params = vec![frame];
+    params.extend(resume_params);
+    let mut param_tys = vec![MirTy::GcRef];
+    param_tys.extend(resume_tys);
+    f.params = params;
+    f.param_tys = param_tys;
+    ctor_fn
+}
+
+/// Drop blocks the dispatcher no longer reaches (the continuation of
+/// the final suspend point): MLIR leaves their ops unconverted.
+fn prune_unreachable_blocks(f: &mut MirFunction) {
+    let index: std::collections::HashMap<BlockId, usize> = f
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.id, i))
+        .collect();
+    let mut seen = vec![false; f.blocks.len()];
+    let mut work = vec![0usize];
+    while let Some(i) = work.pop() {
+        if std::mem::replace(&mut seen[i], true) {
+            continue;
+        }
+        for t in successors_mut(&mut f.blocks[i].terminator) {
+            work.push(index[t]);
+        }
+    }
+    let mut i = 0;
+    f.blocks.retain(|_| {
+        i += 1;
+        seen[i - 1]
+    });
+}
+
+/// Locals live on entry to each block (backward dataflow).
+fn live_in(f: &MirFunction) -> HashMap<BlockId, BTreeSet<LocalId>> {
+    let mut gen_kill: Vec<(BTreeSet<LocalId>, BTreeSet<LocalId>)> = Vec::new();
+    for b in &f.blocks {
+        let (mut used, mut defd) = (BTreeSet::new(), BTreeSet::new());
+        let use_op = |op: &Operand, defd: &BTreeSet<LocalId>, used: &mut BTreeSet<LocalId>| {
+            if let Operand::Copy(l) = op {
+                if !defd.contains(l) {
+                    used.insert(*l);
+                }
+            }
+        };
+        for s in &b.stmts {
+            let mut ops: Vec<Operand> = Vec::new();
+            let mut def = None;
+            match s {
+                Statement::Assign { target, rvalue } => {
+                    rvalue_operands(rvalue, &mut ops);
+                    def = Some(*target);
+                }
+                Statement::ArrayWrite {
+                    array,
+                    index,
+                    value,
+                    ..
+                } => ops.extend([Operand::Copy(*array), index.clone(), value.clone()]),
+                Statement::StorageDead(_) => {}
+                Statement::BufStore {
+                    buf, index, value, ..
+                } => ops.extend([buf.clone(), index.clone(), value.clone()]),
+                Statement::RawStore { addr, value, .. } => {
+                    ops.extend([addr.clone(), value.clone()]);
+                }
+                Statement::HeapStore { ptr, value, .. } => ops.extend([ptr.clone(), value.clone()]),
+                Statement::StaticStore { value, .. } => ops.push(value.clone()),
+            }
+            for op in &ops {
+                use_op(op, &defd, &mut used);
+            }
+            if let Some(d) = def {
+                defd.insert(d);
+            }
+        }
+        let mut ops: Vec<Operand> = Vec::new();
+        match &b.terminator {
+            Terminator::Goto { args, .. } => ops.extend(args.iter().cloned()),
+            Terminator::If {
+                cond,
+                then_args,
+                else_args,
+                ..
+            } => {
+                ops.push(cond.clone());
+                ops.extend(then_args.iter().cloned());
+                ops.extend(else_args.iter().cloned());
+            }
+            Terminator::Return(v) | Terminator::Suspend { value: v, .. } => ops.extend(v.clone()),
+            Terminator::Unreachable => {}
+        }
+        for op in &ops {
+            use_op(op, &defd, &mut used);
+        }
+        gen_kill.push((used, defd));
+    }
+    let index: HashMap<BlockId, usize> = f
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.id, i))
+        .collect();
+    let succs: Vec<Vec<usize>> = f
+        .blocks
+        .iter()
+        .map(|b| {
+            let mut t = b.terminator.clone();
+            successors_mut(&mut t)
+                .into_iter()
+                .map(|x| index[x])
+                .collect()
+        })
+        .collect();
+    let mut live: Vec<BTreeSet<LocalId>> = vec![BTreeSet::new(); f.blocks.len()];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for i in (0..f.blocks.len()).rev() {
+            let mut out: BTreeSet<LocalId> = BTreeSet::new();
+            for &s in &succs[i] {
+                out.extend(live[s].iter().copied());
+            }
+            let (used, defd) = &gen_kill[i];
+            let mut inn: BTreeSet<LocalId> = out.difference(defd).copied().collect();
+            inn.extend(used.iter().copied());
+            if inn != live[i] {
+                live[i] = inn;
+                changed = true;
+            }
+        }
+    }
+    f.blocks.iter().map(|b| b.id).zip(live).collect()
+}
+
+/// Every operand `r` reads (an array read names its local).
+fn rvalue_operands(r: &RValue, out: &mut Vec<Operand>) {
+    match r {
+        RValue::Use(o)
+        | RValue::UnaryOp { operand: o, .. }
+        | RValue::FieldRead { target: o, .. }
+        | RValue::Cast { source: o, .. }
+        | RValue::Bitcast { source: o, .. }
+        | RValue::HeapBox { value: o, .. }
+        | RValue::BufAlloc { len: o, .. }
+        | RValue::RawLoad { addr: o, .. }
+        | RValue::HeapLoad { ptr: o, .. }
+        | RValue::HeapField { ptr: o, .. } => out.push(o.clone()),
+        RValue::BinOp { lhs, rhs, .. } => out.extend([lhs.clone(), rhs.clone()]),
+        RValue::Call { args, .. }
+        | RValue::StructInit { fields: args, .. }
+        | RValue::ArrayInit { elements: args, .. } => out.extend(args.iter().cloned()),
+        RValue::WithField { source, value, .. } => out.extend([source.clone(), value.clone()]),
+        RValue::ArrayIndex { array, index, .. } => {
+            out.extend([Operand::Copy(*array), index.clone()]);
+        }
+        RValue::BufLoad { buf, index, .. } => out.extend([buf.clone(), index.clone()]),
+        RValue::BufAtomic {
+            buf, index, args, ..
+        } => {
+            out.extend([buf.clone(), index.clone()]);
+            out.extend(args.iter().cloned());
+        }
+        RValue::CallIndirect { callee, args, .. } => {
+            out.push(callee.clone());
+            out.extend(args.iter().cloned());
+        }
+        RValue::FnAddr { .. }
+        | RValue::StaticLoad { .. }
+        | RValue::SizeOf { .. }
+        | RValue::HeapAlloc { .. } => {}
+    }
+}
+
+fn successors_mut(t: &mut Terminator) -> Vec<&mut BlockId> {
+    match t {
+        Terminator::Goto { target, .. } => vec![target],
+        Terminator::If {
+            then_bb, else_bb, ..
+        } => vec![then_bb, else_bb],
+        Terminator::Suspend { resume, .. } => vec![resume],
+        Terminator::Return(_) | Terminator::Unreachable => Vec::new(),
+    }
+}
+
+/// Turn block params into plain locals assigned on each incoming edge,
+/// so every value survives the dispatcher's jumps (a block param is an
+/// SSA value only its predecessors define).
+fn remove_block_params(f: &mut MirFunction) {
+    let params: std::collections::HashMap<BlockId, Vec<LocalId>> = f
+        .blocks
+        .iter()
+        .filter(|b| !b.params.is_empty())
+        .map(|b| (b.id, b.params.clone()))
+        .collect();
+    if params.is_empty() {
+        return;
+    }
+    let mut next_block = f.blocks.iter().map(|b| b.id.0 + 1).max().unwrap_or(0);
+    let mut extra: Vec<BasicBlock> = Vec::new();
+    let mut locals = std::mem::take(&mut f.locals);
+    // Parallel copy: the args are read into temps before any param is
+    // written.
+    let mut copies = |target: BlockId, args: Vec<Operand>| -> Vec<Statement> {
+        let Some(ps) = params.get(&target) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut temps = Vec::new();
+        for (p, a) in ps.iter().zip(args) {
+            if matches!(locals[p.0 as usize].ty, MirTy::Unit) {
+                continue;
+            }
+            let id = LocalId(u32::try_from(locals.len()).expect("too many locals"));
+            locals.push(LocalDecl {
+                id,
+                name: None,
+                ty: locals[p.0 as usize].ty.clone(),
+            });
+            out.push(Statement::Assign {
+                target: id,
+                rvalue: RValue::Use(a),
+            });
+            temps.push((*p, id));
+        }
+        for (p, t) in temps {
+            out.push(Statement::Assign {
+                target: p,
+                rvalue: RValue::Use(Operand::Copy(t)),
+            });
+        }
+        out
+    };
+    for b in &mut f.blocks {
+        b.params.clear();
+        match &mut b.terminator {
+            Terminator::Goto { target, args } => {
+                let moves = copies(*target, std::mem::take(args));
+                b.stmts.extend(moves);
+            }
+            Terminator::If {
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            } => {
+                for (bb, args) in [(then_bb, then_args), (else_bb, else_args)] {
+                    if args.is_empty() {
+                        continue;
+                    }
+                    let stmts = copies(*bb, std::mem::take(args));
+                    let id = BlockId(next_block);
+                    next_block += 1;
+                    extra.push(BasicBlock {
+                        id,
+                        params: Vec::new(),
+                        stmts,
+                        terminator: Terminator::Goto {
+                            target: *bb,
+                            args: Vec::new(),
+                        },
+                    });
+                    *bb = id;
+                }
+            }
+            _ => {}
+        }
+    }
+    f.locals = locals;
+    f.blocks.extend(extra);
+}

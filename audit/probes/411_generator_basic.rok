@@ -1,7 +1,8 @@
 // spec: 004.11-generator-basic
 // probe: negative-must-fail
-// expect-error: `yield` is not yet implemented
-//                  현 단계에선 silent miscompile 차단 위해 명시 거부)
+// expect-error: cannot be used as a type directly
+//                  (`yield` 없는 `fn` 은 제너레이터가 아니고, trait 은 타입이 아님 —
+//                  `yield fn counter() -> i32` 가 맞는 형태)
 
 // spec 4.11: 명명된 제너레이터 — yield 문장.
 // 실측 의도: 제너레이터가 실제로 동작하는지 (파서만 통과하는지)

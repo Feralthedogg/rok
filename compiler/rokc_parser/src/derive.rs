@@ -1,0 +1,453 @@
+//! `#[derive(...)]` (refs-lang 6.2.1, stdlib 2.5.9 / 2.10.10 / 2.13).
+//!
+//! Each derived trait becomes an ordinary `impl` written as rok source,
+//! lexed and parsed here; every generated token carries the derive
+//! attribute's span, so diagnostics point at `#[derive(..)]`. That every
+//! field implements the trait is checked in HIR (`check_derives`).
+
+// Source text is built by formatting; the generator closures take
+// generator closures.
+#![allow(clippy::format_collect, clippy::type_complexity)]
+
+use rokc_ast::{
+    AttrArg, AttrBody, EnumDef, EnumVariantKind, GenericParam, Generics, Item, StructDef,
+    StructKind, Ty, TyKind,
+};
+use rokc_diagnostic::{RokDiagnostic, Span};
+
+use crate::parser::Parser;
+
+/// Traits `#[derive]` can implement, with the path the generated impl
+/// names.
+const DERIVABLE: &[(&str, &str)] = &[
+    ("Clone", "rok::core::marker::Clone"),
+    ("Copy", "rok::core::marker::Copy"),
+    ("Debug", "rok::core::fmt::Debug"),
+    ("PartialEq", "rok::core::ops::PartialEq"),
+    ("Eq", "rok::core::cmp::Eq"),
+    ("PartialOrd", "rok::core::ops::PartialOrd"),
+    ("Ord", "rok::core::cmp::Ord"),
+    ("Hash", "rok::core::cmp::Hash"),
+];
+
+const ORDERING: &str = "rok::core::cmp::Ordering";
+
+/// The trait names of an item's `#[derive(..)]` attributes, with the
+/// attribute's span.
+#[must_use]
+pub fn derive_names(attrs: &[rokc_ast::Attribute]) -> Vec<(String, Span)> {
+    let mut out = Vec::new();
+    for a in attrs.iter().filter(|a| a.path == ["derive"]) {
+        if let AttrBody::Args(args) = &a.body {
+            for arg in args {
+                if let AttrArg::Word(w) = arg {
+                    out.push((w.clone(), a.span));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The full path of a derivable trait.
+#[must_use]
+pub fn derivable(name: &str) -> Option<&'static str> {
+    DERIVABLE.iter().find(|(n, _)| *n == name).map(|(_, p)| *p)
+}
+
+/// The derived impls of `item` (a struct or enum).
+pub(crate) fn derive_items(item: &Item, file: &str) -> (Vec<Item>, Vec<RokDiagnostic>) {
+    let (attrs, name, generics) = match item {
+        Item::Struct(s) => (&s.attrs, &s.name, &s.generics),
+        Item::Enum(e) => (&e.attrs, &e.name, &e.generics),
+        _ => return (Vec::new(), Vec::new()),
+    };
+    let mut src = String::new();
+    let mut diags = Vec::new();
+    let mut span = None;
+    for (tr, at) in derive_names(attrs) {
+        span = Some(at);
+        let Some(path) = derivable(&tr) else {
+            let why = if tr == "Display" {
+                "`Display` is written by hand — its format is the type's own choice \
+                 (stdlib 2.10.10)"
+                    .to_owned()
+            } else {
+                format!(
+                    "`{tr}` is not a derivable trait (derivable: {})",
+                    DERIVABLE
+                        .iter()
+                        .map(|(n, _)| format!("`{n}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            diags.push(
+                RokDiagnostic::error(
+                    rokc_diagnostic::ErrorKind::Meta,
+                    format!("cannot derive `{tr}` for `{name}`: {why} (spec 6.2.1)"),
+                )
+                .with_span(at, ""),
+            );
+            continue;
+        };
+        let body = match item {
+            Item::Struct(s) => struct_body(&tr, s),
+            Item::Enum(e) => Some(enum_body(&tr, e)),
+            _ => None,
+        };
+        let Some(body) = body else {
+            diags.push(
+                RokDiagnostic::error(
+                    rokc_diagnostic::ErrorKind::Meta,
+                    format!(
+                        "cannot derive `{tr}` for tuple struct `{name}` yet (stage-1 \
+                         limitation)"
+                    ),
+                )
+                .with_span(at, ""),
+            );
+            continue;
+        };
+        src.push_str(&format!(
+            "impl{} {path} for {name}{} {{\n{body}}}\n",
+            impl_params(generics, path),
+            self_args(generics)
+        ));
+    }
+    let Some(span) = span.filter(|_| !src.is_empty()) else {
+        return (Vec::new(), diags);
+    };
+    let (mut tokens, lex_diags) = rokc_lexer::Lexer::new(&src, file).lex_all();
+    diags.extend(lex_diags);
+    for t in &mut tokens {
+        t.span = span;
+    }
+    let mut p = Parser::new(&tokens, file);
+    let mut items = Vec::new();
+    while !p.at_eof() {
+        let from = p.position();
+        match p.parse_item_pub() {
+            Some(i) => items.push(i),
+            None if p.position() == from => break,
+            None => {}
+        }
+    }
+    diags.extend(p.diagnostics);
+    (items, diags)
+}
+
+/// `<T: Tr, const N: usize>` — every type parameter bound by the trait.
+fn impl_params(g: &Generics, path: &str) -> String {
+    if g.params.is_empty() {
+        return String::new();
+    }
+    let ps: Vec<String> = g
+        .params
+        .iter()
+        .map(|gp| match gp {
+            GenericParam::Type { name, .. } => format!("{name}: {path}"),
+            GenericParam::Const { name, ty } => format!("const {name}: {}", ty_text(ty)),
+        })
+        .collect();
+    format!("<{}>", ps.join(", "))
+}
+
+/// `<T, N>` — the item's own parameters as its arguments.
+fn self_args(g: &Generics) -> String {
+    if g.params.is_empty() {
+        return String::new();
+    }
+    let ps: Vec<&str> = g
+        .params
+        .iter()
+        .map(|gp| match gp {
+            GenericParam::Type { name, .. } | GenericParam::Const { name, .. } => name.as_str(),
+        })
+        .collect();
+    format!("<{}>", ps.join(", "))
+}
+
+/// A const parameter's type (a primitive name in practice).
+fn ty_text(t: &Ty) -> String {
+    match &t.kind {
+        TyKind::Path(p) => p
+            .segments
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>()
+            .join("::"),
+        _ => "usize".to_owned(),
+    }
+}
+
+/// `h = rotl(h, 5) ^ x.hash();` — a field folded into a hash.
+fn hash_step(x: &str) -> String {
+    format!("        h = ((h << 5) | (h >> 59)) ^ {x}.hash();\n")
+}
+
+/// Lexicographic comparison over field pairs, ending in `last`.
+fn lex_cmp(pairs: &[(String, String)], method: &str, last: &str) -> String {
+    let rev = match method {
+        "lt" | "le" => "gt",
+        _ => "lt",
+    };
+    let strict = if method.starts_with('l') { "lt" } else { "gt" };
+    let mut s = String::new();
+    for (a, b) in pairs {
+        s.push_str(&format!(
+            "        if {a}.{strict}({b}) {{ return true; }}\n        if {a}.{rev}({b}) {{ return false; }}\n"
+        ));
+    }
+    s.push_str(&format!("        return {last};\n"));
+    s
+}
+
+fn ord_cmp(pairs: &[(String, String)]) -> String {
+    let mut s = String::new();
+    for (i, (a, b)) in pairs.iter().enumerate() {
+        s.push_str(&format!(
+            "        let c{i} = {a}.cmp({b});\n        if !c{i}.is_eq() {{ return c{i}; }}\n"
+        ));
+    }
+    s.push_str(&format!("        return {ORDERING}::Equal;\n"));
+    s
+}
+
+fn struct_body(tr: &str, s: &StructDef) -> Option<String> {
+    let fields: Vec<&str> = match &s.kind {
+        StructKind::Named(fs) => fs.iter().map(|f| f.name.as_str()).collect(),
+        StructKind::Unit => Vec::new(),
+        StructKind::Tuple(_) => return None,
+    };
+    let name = &s.name;
+    let pairs: Vec<(String, String)> = fields
+        .iter()
+        .map(|f| (format!("self.{f}"), format!("rhs.{f}")))
+        .collect();
+    Some(match tr {
+        "Clone" => {
+            let inits: Vec<String> = fields
+                .iter()
+                .map(|f| format!("{f}: self.{f}.clone()"))
+                .collect();
+            if fields.is_empty() {
+                "    fn clone(self) -> Self { return self; }\n".to_owned()
+            } else {
+                format!(
+                    "    fn clone(self) -> Self {{ return {name} {{ {} }}; }}\n",
+                    inits.join(", ")
+                )
+            }
+        }
+        "Debug" => {
+            let parts: Vec<String> = fields
+                .iter()
+                .map(|f| format!("\"{f}: \" + self.{f}.debug()"))
+                .collect();
+            if fields.is_empty() {
+                format!("    fn debug(self) -> str {{ return \"{name}\"; }}\n")
+            } else {
+                format!(
+                    "    fn debug(self) -> str {{ return \"{name} {{ \" + {} + \" }}\"; }}\n",
+                    parts.join(" + \", \" + ")
+                )
+            }
+        }
+        "PartialEq" => {
+            let conj: Vec<String> = pairs.iter().map(|(a, b)| format!("{a}.eq({b})")).collect();
+            let all = if conj.is_empty() {
+                "true".to_owned()
+            } else {
+                conj.join(" && ")
+            };
+            format!(
+                "    fn eq(self, rhs: Self) -> bool {{ return {all}; }}\n    fn ne(self, rhs: Self) -> bool {{ return !self.eq(rhs); }}\n"
+            )
+        }
+        "PartialOrd" => ["lt", "gt", "le", "ge"]
+            .iter()
+            .map(|m| {
+                let last = if m.len() == 2 && m.ends_with('e') {
+                    "true"
+                } else {
+                    "false"
+                };
+                format!(
+                    "    fn {m}(self, rhs: Self) -> bool {{\n{}    }}\n",
+                    lex_cmp(&pairs, m, last)
+                )
+            })
+            .collect(),
+        "Ord" => format!(
+            "    fn cmp(self, rhs: Self) -> {ORDERING} {{\n{}    }}\n",
+            ord_cmp(&pairs)
+        ),
+        "Hash" => {
+            let steps: String = fields
+                .iter()
+                .map(|f| hash_step(&format!("self.{f}")))
+                .collect();
+            format!(
+                "    fn hash(self) -> u64 {{\n        let h = 0u64;\n{steps}        return h;\n    }}\n"
+            )
+        }
+        // `Copy` / `Eq`: markers.
+        _ => String::new(),
+    })
+}
+
+/// A variant's pattern binding its fields to `{prefix}0..` and the
+/// bound names.
+fn variant_pat(e: &EnumDef, v: &rokc_ast::EnumVariant, prefix: &str) -> (String, Vec<String>) {
+    let path = format!("{}::{}", e.name, v.name);
+    match &v.kind {
+        EnumVariantKind::Unit | EnumVariantKind::Value(_) => (path, Vec::new()),
+        EnumVariantKind::Tuple(tys) => {
+            let names: Vec<String> = (0..tys.len()).map(|i| format!("{prefix}{i}")).collect();
+            (format!("{path}({})", names.join(", ")), names)
+        }
+        EnumVariantKind::Named(fs) => {
+            let names: Vec<String> = (0..fs.len()).map(|i| format!("{prefix}{i}")).collect();
+            let binds: Vec<String> = fs
+                .iter()
+                .zip(&names)
+                .map(|(f, n)| format!("{}: {n}", f.name))
+                .collect();
+            (format!("{path} {{ {} }}", binds.join(", ")), names)
+        }
+    }
+}
+
+/// `E::V`, `E::V(_, _)` or `E::V { .. }`.
+fn variant_wild(e: &EnumDef, v: &rokc_ast::EnumVariant) -> String {
+    let path = format!("{}::{}", e.name, v.name);
+    match &v.kind {
+        EnumVariantKind::Unit | EnumVariantKind::Value(_) => path,
+        EnumVariantKind::Tuple(tys) => format!("{path}({})", vec!["_"; tys.len()].join(", ")),
+        EnumVariantKind::Named(_) => format!("{path} {{ .. }}"),
+    }
+}
+
+fn enum_body(tr: &str, e: &EnumDef) -> String {
+    let arms = |f: &dyn Fn(&rokc_ast::EnumVariant, &str, &[String]) -> String| -> String {
+        e.variants
+            .iter()
+            .map(|v| {
+                let (pat, names) = variant_pat(e, v, "a");
+                format!("            {pat} => {},\n", f(v, &pat, &names))
+            })
+            .collect()
+    };
+    // `let ta = match self { .. }` — the variant's index.
+    let tag = |x: &str, var: &str| -> String {
+        let a: String = e
+            .variants
+            .iter()
+            .enumerate()
+            .map(|(i, v)| format!("            {} => {i},\n", variant_wild(e, v)))
+            .collect();
+        format!("        let {var}: i32 = match {x} {{\n{a}        }};\n")
+    };
+    // Same-variant pairs: `(E::V(a0, ..), E::V(b0, ..)) => { body }`.
+    let pair_arms = |body: &dyn Fn(&[(String, String)]) -> String, other: &str| -> String {
+        let mut s = String::new();
+        for v in &e.variants {
+            let (pa, na) = variant_pat(e, v, "a");
+            let (pb, nb) = variant_pat(e, v, "b");
+            let pairs: Vec<(String, String)> = na.into_iter().zip(nb).collect();
+            s.push_str(&format!(
+                "            ({pa}, {pb}) => {{\n{}            }},\n",
+                body(&pairs)
+            ));
+        }
+        s.push_str(&format!("            _ => {{ {other} }},\n"));
+        s
+    };
+    match tr {
+        "Clone" => format!(
+            "    fn clone(self) -> Self {{\n        return match self {{\n{}        }};\n    }}\n",
+            arms(&|v, pat, names| {
+                let cloned: Vec<String> = names.iter().map(|n| format!("{n}.clone()")).collect();
+                match &v.kind {
+                    EnumVariantKind::Unit | EnumVariantKind::Value(_) => pat.to_owned(),
+                    EnumVariantKind::Tuple(_) => {
+                        format!("{}::{}({})", e.name, v.name, cloned.join(", "))
+                    }
+                    EnumVariantKind::Named(fs) => {
+                        let inits: Vec<String> = fs
+                            .iter()
+                            .zip(&cloned)
+                            .map(|(f, c)| format!("{}: {c}", f.name))
+                            .collect();
+                        format!("{}::{} {{ {} }}", e.name, v.name, inits.join(", "))
+                    }
+                }
+            })
+        ),
+        "Debug" => format!(
+            "    fn debug(self) -> str {{\n        return match self {{\n{}        }};\n    }}\n",
+            arms(&|v, _, names| {
+                let dbg: Vec<String> = names.iter().map(|n| format!("{n}.debug()")).collect();
+                match &v.kind {
+                    EnumVariantKind::Unit | EnumVariantKind::Value(_) => format!("\"{}\"", v.name),
+                    EnumVariantKind::Tuple(_) => {
+                        format!("\"{}(\" + {} + \")\"", v.name, dbg.join(" + \", \" + "))
+                    }
+                    EnumVariantKind::Named(fs) => {
+                        let parts: Vec<String> = fs
+                            .iter()
+                            .zip(&dbg)
+                            .map(|(f, d)| format!("\"{}: \" + {d}", f.name))
+                            .collect();
+                        format!("\"{} {{ \" + {} + \" }}\"", v.name, parts.join(" + \", \" + "))
+                    }
+                }
+            })
+        ),
+        "PartialEq" => format!(
+            "    fn eq(self, rhs: Self) -> bool {{\n        match (self, rhs) {{\n{}        }}\n    }}\n    fn ne(self, rhs: Self) -> bool {{ return !self.eq(rhs); }}\n",
+            pair_arms(
+                &|pairs| {
+                    let conj: Vec<String> =
+                        pairs.iter().map(|(a, b)| format!("{a}.eq({b})")).collect();
+                    let all = if conj.is_empty() {
+                        "true".to_owned()
+                    } else {
+                        conj.join(" && ")
+                    };
+                    format!("                return {all};\n")
+                },
+                "return false;"
+            )
+        ),
+        "PartialOrd" => ["lt", "gt", "le", "ge"]
+            .iter()
+            .map(|m| {
+                let last = if m.ends_with('e') { "true" } else { "false" };
+                let tag_test = if m.starts_with('l') { "<" } else { ">" };
+                format!(
+                    "    fn {m}(self, rhs: Self) -> bool {{\n{}{}        if ta != tb {{ return ta {tag_test} tb; }}\n        match (self, rhs) {{\n{}        }}\n    }}\n",
+                    tag("self", "ta"),
+                    tag("rhs", "tb"),
+                    pair_arms(&|pairs| lex_cmp(pairs, m, last), &format!("return {last};"))
+                )
+            })
+            .collect(),
+        "Ord" => format!(
+            "    fn cmp(self, rhs: Self) -> {ORDERING} {{\n{}{}        if ta != tb {{ return ta.cmp(tb); }}\n        match (self, rhs) {{\n{}        }}\n    }}\n",
+            tag("self", "ta"),
+            tag("rhs", "tb"),
+            pair_arms(&ord_cmp, &format!("return {ORDERING}::Equal;"))
+        ),
+        "Hash" => format!(
+            "    fn hash(self) -> u64 {{\n{}        let h = ta as u64;\n        match self {{\n{}        }}\n        return h;\n    }}\n",
+            tag("self", "ta"),
+            arms(&|_, _, names| {
+                let steps: String = names.iter().map(|n| hash_step(n)).collect();
+                format!("{{\n{steps}            }}")
+            })
+        ),
+        _ => String::new(),
+    }
+}

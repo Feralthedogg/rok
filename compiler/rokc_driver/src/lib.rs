@@ -2,6 +2,7 @@
 //! HIR lowering (name resolution + type checks), and MIR lowering.
 
 mod cfg;
+mod coro;
 mod entry;
 mod toolchain;
 
@@ -136,6 +137,7 @@ pub fn compile_source(
     // `rok_uncaught_error`, `rok_print_*`, ...) so user files needn't
     // declare the externs themselves.
     all_items.insert(0, builtin_panic_extern());
+    coro::rewrite_items(&mut all_items, &mut diags);
     let program = rokc_ast::Program {
         attrs: Vec::new(),
         items: all_items,

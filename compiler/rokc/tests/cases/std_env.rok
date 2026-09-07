@@ -1,0 +1,46 @@
+// expect-exit: 0
+// expect-stdout:
+// args: 1 true
+// var: hello
+// vars has it: true
+// removed: NotPresent
+// cwd moved: true
+// cwd back: true
+// temp absolute: true
+// split: /a /b /c
+// pid: true
+
+// Spec 306: args (argv saved by the runtime), var / vars / set_var /
+// remove_var, current_dir / set_current_dir, temp_dir, split_paths.
+
+use rok::std::env;
+use rok::std::io::IoError;
+use rok::std::path::Path;
+
+fn main() throws (IoError) {
+    let args = env::args();
+    println(f"args: {args.len()} {args[0].len() > 0}");
+
+    env::set_var("ROK_STD_ENV_TEST", "hello");
+    println("var: " + (try env::var("ROK_STD_ENV_TEST") catch _ { "?" }));
+    let seen = false;
+    for kv in env::vars() {
+        let (k, v) = kv;
+        if k == "ROK_STD_ENV_TEST" && v == "hello" { seen = true; }
+    }
+    println(f"vars has it: {seen}");
+    env::remove_var("ROK_STD_ENV_TEST");
+    println("removed: " + (try env::var("ROK_STD_ENV_TEST") catch e { e.debug() }));
+
+    let start = try env::current_dir();
+    try env::set_current_dir("/");
+    println(f"cwd moved: {(try env::current_dir()).as_str() == "/"}");
+    try env::set_current_dir(start);
+    println(f"cwd back: {(try env::current_dir()) == start}");
+
+    println(f"temp absolute: {env::temp_dir().is_absolute()}");
+    let parts = "";
+    for p in env::split_paths("/a::/b:/c") { parts = parts + " " + p.as_str(); }
+    println("split:" + parts);
+    println(f"pid: {env::pid() > 0u32 && (env::parent_pid() ?? 0u32) > 0u32}");
+}

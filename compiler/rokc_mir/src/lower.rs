@@ -33,11 +33,13 @@ pub fn lower(module: &HirModule) -> MirModule {
             init: s.init.clone(),
             is_mut: s.is_mut,
             is_extern: s.is_extern,
+            init_fn: s.init_fn,
         })
         .collect();
     let fnv = FnValues {
         wrappers: std::cell::RefCell::new(std::collections::BTreeMap::new()),
         closures: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+        coro_ctors: std::cell::RefCell::new(std::collections::BTreeMap::new()),
         next_id: std::cell::Cell::new(
             module
                 .functions
@@ -58,8 +60,28 @@ pub fn lower(module: &HirModule) -> MirModule {
         .iter()
         .map(|f| lower_fn(f, module, &ret_tys, &fnv))
         .collect();
+    // Coroutine bodies → resume functions + constructors (spec 708).
+    for (i, hf) in module.functions.iter().enumerate() {
+        if !(hf.is_async || hf.is_generator) || hf.body.is_none() {
+            continue;
+        }
+        let ctor = *fnv
+            .coro_ctors
+            .borrow_mut()
+            .entry(hf.id)
+            .or_insert_with(|| fnv.fresh_id());
+        // An `async` body takes the poll's `Context` on every resume.
+        let ctor_fn = crate::coro::transform(&mut functions[i], usize::from(hf.is_async), ctor);
+        functions.push(ctor_fn);
+    }
     finish_fn_values(&mut functions, &fnv);
-    let roots: Vec<FunctionId> = module.exports.iter().map(|(id, _)| *id).collect();
+    // Lazy static initializers are called from codegen's access checks.
+    let roots: Vec<FunctionId> = module
+        .exports
+        .iter()
+        .map(|(id, _)| *id)
+        .chain(statics.iter().filter_map(|s| s.init_fn))
+        .collect();
     prune_unreachable(&mut functions, &roots);
     MirModule {
         functions,
@@ -78,8 +100,18 @@ struct FnValues {
     /// a `GcRef` and loads it on entry.
     closures: std::cell::RefCell<std::collections::BTreeMap<FunctionId, MirTy>>,
     next_id: std::cell::Cell<u32>,
+    /// Coroutine body → its constructor (`coro::transform`).
+    coro_ctors: std::cell::RefCell<std::collections::BTreeMap<FunctionId, FunctionId>>,
     /// `extern` functions (but `rok_thread_spawn`): their `fn` parameters stay thin C pointers.
     externs: std::collections::HashSet<FunctionId>,
+}
+
+impl FnValues {
+    fn fresh_id(&self) -> FunctionId {
+        let id = FunctionId(self.next_id.get());
+        self.next_id.set(id.0 + 1);
+        id
+    }
 }
 
 fn finish_fn_values(functions: &mut Vec<MirFunction>, fnv: &FnValues) {
@@ -284,6 +316,7 @@ fn reachable_blocks(blocks: Vec<BasicBlock>) -> Vec<BasicBlock> {
             Terminator::If {
                 then_bb, else_bb, ..
             } => work.extend([then_bb.0 as usize, else_bb.0 as usize]),
+            Terminator::Suspend { resume, .. } => work.push(resume.0 as usize),
             Terminator::Return(_) | Terminator::Unreachable => {}
         }
     }
@@ -742,6 +775,21 @@ impl<'a> FnBuilder<'a> {
                 let closure_op = self.lower_expr_to_operand(closure);
                 self.call_fn_value(closure_op, args, ret_ty)
             }
+            // `{resume, frame}` from the coroutine's constructor.
+            HirExprKind::CoroNew { body_fn, args } => {
+                let ctor = *self
+                    .fnv
+                    .coro_ctors
+                    .borrow_mut()
+                    .entry(*body_fn)
+                    .or_insert_with(|| self.fnv.fresh_id());
+                let args = args.iter().map(|a| self.lower_expr_to_operand(a)).collect();
+                RValue::Call {
+                    callee: ctor,
+                    args,
+                    ret_ty: lower_ty_in(&e.ty, self.module),
+                }
+            }
             _ => RValue::Use(self.lower_expr_to_operand(e)),
         }
     }
@@ -853,6 +901,7 @@ impl<'a> FnBuilder<'a> {
             | HirExprKind::PrimUnaryOp { .. }
             | HirExprKind::FnRef(_)
             | HirExprKind::ClosureValue { .. }
+            | HirExprKind::CoroNew { .. }
             | HirExprKind::CallClosure { .. } => {
                 let result_ty = lower_ty_in(&e.ty, self.module);
                 let dst = self.fresh_local(result_ty);
@@ -862,6 +911,18 @@ impl<'a> FnBuilder<'a> {
                     rvalue,
                 });
                 Operand::Copy(dst)
+            }
+            HirExprKind::Suspend { value, is_final } => {
+                let v = self.lower_expr_to_operand(value);
+                let unit = matches!(lower_ty_in(&value.ty, self.module), MirTy::Unit);
+                let resume = self.new_block();
+                self.terminate(Terminator::Suspend {
+                    value: (!unit).then_some(v),
+                    resume,
+                    is_final: *is_final,
+                });
+                self.current = resume;
+                Operand::Const(ConstVal::Unit)
             }
             HirExprKind::If {
                 cond,
@@ -962,9 +1023,13 @@ impl<'a> FnBuilder<'a> {
                     ty: IrPrimTy::I32,
                 });
                 let Some(payload_ty) = enum_payload_ty(*enum_id, self.module) else {
+                    for a in args {
+                        self.lower_expr_to_operand(a);
+                    }
                     return tag_op;
                 };
-                let payload_op = if args.is_empty() {
+                let unit_arg = matches!(args.as_slice(), [a] if lower_ty_in(&a.ty, self.module) == MirTy::Unit);
+                let payload_op = if args.is_empty() || unit_arg {
                     Operand::Const(zero_const(&payload_ty))
                 } else if args.len() == 1 {
                     let arg = &args[0];
@@ -1104,6 +1169,10 @@ impl<'a> FnBuilder<'a> {
                 let buf = self.lower_expr_to_operand(buf);
                 let index = self.lower_expr_to_operand(index);
                 let elem_ty = lower_ty_in(elem, self.module);
+                // A buffer of `()` stores nothing.
+                if elem_ty == MirTy::Unit {
+                    return Operand::Const(ConstVal::Unit);
+                }
                 let dst = self.fresh_local(elem_ty.clone());
                 self.push_stmt(Statement::Assign {
                     target: dst,
@@ -1121,6 +1190,7 @@ impl<'a> FnBuilder<'a> {
                 index,
                 args,
                 elem,
+                order,
             } => {
                 let buf = self.lower_expr_to_operand(buf);
                 let index = self.lower_expr_to_operand(index);
@@ -1135,6 +1205,7 @@ impl<'a> FnBuilder<'a> {
                         index,
                         args,
                         elem_ty,
+                        order: *order,
                     },
                 });
                 Operand::Copy(dst)
@@ -1148,12 +1219,15 @@ impl<'a> FnBuilder<'a> {
                 let buf = self.lower_expr_to_operand(buf);
                 let index = self.lower_expr_to_operand(index);
                 let value = self.lower_expr_to_operand(value);
-                self.push_stmt(Statement::BufStore {
-                    buf,
-                    index,
-                    value,
-                    elem_ty: lower_ty_in(elem, self.module),
-                });
+                let elem_ty = lower_ty_in(elem, self.module);
+                if elem_ty != MirTy::Unit {
+                    self.push_stmt(Statement::BufStore {
+                        buf,
+                        index,
+                        value,
+                        elem_ty,
+                    });
+                }
                 Operand::Const(ConstVal::Unit)
             }
             HirExprKind::ArrayIndex {
@@ -1776,7 +1850,12 @@ impl<'a> FnBuilder<'a> {
                 l
             }
         };
-        if n_args == 1 {
+        // A named-field variant's payload is the tuple of its fields,
+        // even with one field.
+        let named = !self.module.enums[enum_id.0 as usize].variants[variant_index as usize]
+            .named_fields
+            .is_empty();
+        if n_args == 1 && !named {
             return Some(vec![(local, variant_ty)]);
         }
         let MirTy::Tuple(field_tys) = variant_ty else {

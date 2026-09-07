@@ -1,0 +1,15 @@
+// expect-exit: 0
+// expect-stdout:
+// 41
+
+// An `await` chain under implicit async main (spec 4.16.5).
+async fn add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+async fn twice(x: i32) -> i32 {
+    let y = await add(x, x);
+    let z = await add(y, 1);
+    z
+}
+let r = await twice(20);
+println(f"{r}");

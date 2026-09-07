@@ -1,0 +1,882 @@
+// rok::core::task — tasks on the work-stealing executor (stdlib spec
+// 2.18, refs-lang 7.6), `block_on` (2.20.6); time is `task::time`.
+//
+// `block_on` starts a pool of N workers (N = online CPUs): the calling
+// thread is worker 0, the rest are OS threads (`rok_thread_spawn`). Each
+// worker has a local queue (`spawn_local` tasks, never stolen) and a
+// deque; a non-worker thread's wakes go to the shared injector. A worker
+// takes from its local queue, its deque, the injector, then steals from
+// the other deques; with nothing to run it fires due timers and sleeps on
+// the pool's signal word (`rok_sync_wait_timeout`) until a push or its
+// next timer.
+//
+// A task is polled by one worker at a time: its state word goes IDLE →
+// SCHEDULED (queued) → RUNNING → IDLE / DONE, and a wake while RUNNING
+// marks it NOTIFIED so it is queued again after the poll.
+//
+// ponytail: queues are `Mutex<List>` (O(n) front pops, a lock per
+// operation), not lock-free Chase-Lev deques; owners and thieves both
+// take FIFO. Idle workers all wake on any push (no targeted unpark). The
+// timer heap is one `Mutex` per pool (spec: per-driver timing wheel).
+
+pub mod time;
+
+use rok::core::task::time::{Duration, Instant};
+use rok::core::future::{Context, Future, Poll, TryAsyncFuture, Waker};
+use rok::core::collections::raw::{GcBuf, buf_get, buf_new, buf_set};
+use rok::core::sync::{AtomicOrdering, Mutex};
+
+extern "C" {
+    fn rok_time_now_ns() -> i64;
+    fn rok_cpu_count() -> usize;
+    fn rok_task_exec_active() -> i32;
+    fn rok_task_exec_get() -> GcBuf<Worker>;
+    fn rok_task_exec_set(w: GcBuf<Worker>);
+    fn rok_task_exec_clear();
+    fn rok_task_parking_ready() -> i32;
+    fn rok_task_parking_install(p: GcBuf<Parking>) -> GcBuf<Parking>;
+    fn rok_thread_new_id() -> u64;
+    fn rok_thread_spawn(f: fn() + Send, stack_size: usize, id: u64) -> usize;
+    fn rok_thread_join(handle: usize) -> i32;
+    fn rok_sync_wait_timeout(word: GcBuf<i32>, index: usize, expected: i32, ns: i64);
+    fn rok_sync_wake(word: GcBuf<i32>, index: usize);
+}
+
+#[intrinsic("rok.atomic.load")]
+fn atomic_load<T>(buf: GcBuf<T>, i: usize, o: AtomicOrdering) -> T;
+#[intrinsic("rok.atomic.xchg")]
+fn atomic_xchg<T>(buf: GcBuf<T>, i: usize, v: T, o: AtomicOrdering) -> T;
+#[intrinsic("rok.atomic.add")]
+fn atomic_add<T>(buf: GcBuf<T>, i: usize, v: T, o: AtomicOrdering) -> T;
+#[intrinsic("rok.atomic.cas")]
+fn atomic_cas<T>(
+    buf: GcBuf<T>, i: usize, current: T, new: T, success: AtomicOrdering, failure: AtomicOrdering,
+) -> T;
+
+fn now_ns() -> i64 {
+    return unsafe { rok_time_now_ns() };
+}
+
+// ---- tasks ----
+
+const IDLE: i32 = 0;
+const SCHEDULED: i32 = 1;
+const RUNNING: i32 = 2;
+const NOTIFIED: i32 = 3;
+const DONE: i32 = 4;
+
+/// A task as the executor sees it (what a `Waker` holds).
+pub struct TaskRef {
+    /// `[state, cancelled]`.
+    state: GcBuf<i32>;
+    /// One poll of the task's future; `true` once it is done.
+    poll: GcBuf<fn(Context) -> bool>;
+    /// Wakers to wake when it is done (and the lock for `DONE`).
+    joiners: Mutex<List<Waker>>;
+    pool: Pool;
+    /// `spawn_local`: runs only on worker `home`.
+    local: bool;
+    home: usize;
+}
+
+unsafe impl Send for TaskRef {}
+unsafe impl Sync for TaskRef {}
+
+fn is_done(t: TaskRef) -> bool {
+    return atomic_load(t.state, 0, SeqCst) == DONE;
+}
+
+fn is_cancelled(t: TaskRef) -> bool {
+    return atomic_load(t.state, 1, SeqCst) != 0;
+}
+
+/// Schedule `t` to be polled (`Waker::wake`); safe from any thread.
+pub fn wake_task(t: TaskRef) {
+    loop {
+        let s = atomic_load(t.state, 0, SeqCst);
+        if s == IDLE {
+            if atomic_cas(t.state, 0, IDLE, SCHEDULED, SeqCst, SeqCst) == IDLE {
+                schedule(t);
+                return;
+            }
+        } else if s == RUNNING {
+            if atomic_cas(t.state, 0, RUNNING, NOTIFIED, SeqCst, SeqCst) == RUNNING {
+                return;
+            }
+        } else {
+            return;
+        }
+    }
+}
+
+/// Wake `waiter` once `t` is done (at once if it is).
+fn join_later(t: TaskRef, waiter: Waker) -> bool {
+    let done = false;
+    using g = t.joiners.lock() {
+        if is_done(t) {
+            done = true;
+        } else {
+            g.get().push(waiter);
+        }
+    }
+    return done;
+}
+
+fn finish(t: TaskRef) {
+    let ws: List<Waker> = List::new();
+    using g = t.joiners.lock() {
+        atomic_xchg(t.state, 0, DONE, SeqCst);
+        ws = g.get();
+        g.set(List::new());
+    }
+    // The finished future (its frame) is no longer reachable from here.
+    buf_set(t.poll, 0, |ctx: Context| -> bool { return true; });
+    for w in ws {
+        w.wake();
+    }
+    // `help_until` sleepers watch the pool signal.
+    t.pool.notify();
+}
+
+// ---- the pool ----
+
+/// A work-stealing executor (`block_on` makes one per call).
+pub struct Pool {
+    locals: List<Mutex<List<TaskRef>>>;
+    deques: List<Mutex<List<TaskRef>>>;
+    injector: Mutex<List<TaskRef>>;
+    /// Timer min-heap: deadline (monotonic ns) and the waker to wake.
+    timers: Mutex<Timers>;
+    /// `[epoch, shutdown]`: idle workers wait on `epoch`, which every
+    /// push and timer bumps.
+    signal: GcBuf<i32>;
+}
+
+unsafe impl Send for Pool {}
+unsafe impl Sync for Pool {}
+
+struct Timers {
+    at: List<i64>;
+    who: List<Waker>;
+}
+
+/// This thread's worker: its pool and index.
+pub struct Worker {
+    pool: Pool;
+    index: usize;
+}
+
+impl Pool {
+    fn new(n: usize) -> Pool {
+        let locals: List<Mutex<List<TaskRef>>> = List::new();
+        let deques: List<Mutex<List<TaskRef>>> = List::new();
+        let i: usize = 0;
+        while i < n {
+            locals.push(Mutex::new(List::<TaskRef>::new()));
+            deques.push(Mutex::new(List::<TaskRef>::new()));
+            i = i + 1;
+        }
+        let signal: GcBuf<i32> = buf_new(2);
+        return Pool {
+            locals: locals,
+            deques: deques,
+            injector: Mutex::new(List::<TaskRef>::new()),
+            timers: Mutex::new(Timers { at: List::<i64>::new(), who: List::<Waker>::new() }),
+            signal: signal,
+        };
+    }
+
+    /// Number of workers.
+    pub fn workers(self) -> usize {
+        return self.deques.len();
+    }
+
+    fn notify(self) {
+        atomic_add(self.signal, 0, 1, SeqCst);
+        unsafe { rok_sync_wake(self.signal, 0) };
+    }
+}
+
+fn current() -> Worker | none {
+    if unsafe { rok_task_exec_active() } == 0 {
+        return none;
+    }
+    return buf_get(unsafe { rok_task_exec_get() }, 0);
+}
+
+fn current_worker() -> Worker {
+    match current() {
+        w: Worker => w,
+        none => panic("no task executor is running: await inside `async fn main` or `task::block_on`"),
+    }
+}
+
+fn set_current(w: Worker) {
+    let cell: GcBuf<Worker> = buf_new(1);
+    buf_set(cell, 0, w);
+    unsafe { rok_task_exec_set(cell) };
+}
+
+fn push(q: Mutex<List<TaskRef>>, t: TaskRef) {
+    using g = q.lock() {
+        g.get().push(t);
+    }
+}
+
+fn pop_front(q: Mutex<List<TaskRef>>) -> TaskRef | none {
+    let t: TaskRef | none = none;
+    using g = q.lock() {
+        let l = g.get();
+        if l.len() > 0 {
+            t = l.remove(0);
+        }
+    }
+    return t;
+}
+
+fn schedule(t: TaskRef) {
+    let pool = t.pool;
+    if t.local {
+        push(pool.locals[t.home], t);
+    } else {
+        match current() {
+            w: Worker => push(pool.deques[w.index], t),
+            none => push(pool.injector, t),
+        }
+    }
+    pool.notify();
+}
+
+/// The next task for worker `i`: its local queue, its deque, the
+/// injector, then the other workers' deques.
+fn find_task(pool: Pool, i: usize) -> TaskRef | none {
+    match pop_front(pool.locals[i]) {
+        t: TaskRef => { return t; }
+        none => {}
+    }
+    match pop_front(pool.deques[i]) {
+        t: TaskRef => { return t; }
+        none => {}
+    }
+    match pop_front(pool.injector) {
+        t: TaskRef => { return t; }
+        none => {}
+    }
+    let n = pool.workers();
+    let k: usize = 1;
+    while k < n {
+        match pop_front(pool.deques[(i + k) % n]) {
+            t: TaskRef => { return t; }
+            none => {}
+        }
+        k = k + 1;
+    }
+    return none;
+}
+
+fn run(t: TaskRef) {
+    if atomic_cas(t.state, 0, SCHEDULED, RUNNING, SeqCst, SeqCst) != SCHEDULED {
+        return;
+    }
+    if is_cancelled(t) {
+        finish(t);
+        return;
+    }
+    let poll = buf_get(t.poll, 0);
+    let ctx = Context::from_waker(Waker { task: t });
+    if poll(ctx) {
+        finish(t);
+    } else if atomic_cas(t.state, 0, RUNNING, IDLE, SeqCst, SeqCst) != RUNNING {
+        // Woken while it ran.
+        atomic_xchg(t.state, 0, SCHEDULED, SeqCst);
+        schedule(t);
+    }
+}
+
+/// Wake every due timer; the nanoseconds to the next one (-1: none).
+fn fire_timers(pool: Pool) -> i64 {
+    let due: List<Waker> = List::new();
+    let next: i64 = -1;
+    using g = pool.timers.lock() {
+        let tm = g.get();
+        let now = now_ns();
+        while tm.at.len() > 0 && tm.at[0] <= now {
+            due.push(tm.who[0]);
+            pop_timer(tm);
+        }
+        if tm.at.len() > 0 {
+            next = tm.at[0] - now;
+        }
+    }
+    for w in due {
+        w.wake();
+    }
+    if due.len() > 0 {
+        return 0;
+    }
+    return next;
+}
+
+fn add_timer(deadline: i64, w: Waker) {
+    let pool = w.task.pool;
+    using g = pool.timers.lock() {
+        let tm = g.get();
+        tm.at.push(deadline);
+        tm.who.push(w);
+        let i = tm.at.len() - 1;
+        while i > 0 {
+            let p = (i - 1) / 2;
+            if tm.at[p] <= tm.at[i] {
+                break;
+            }
+            swap_timers(tm, i, p);
+            i = p;
+        }
+    }
+    // Idle workers recompute how long to sleep.
+    pool.notify();
+}
+
+fn swap_timers(tm: Timers, i: usize, j: usize) {
+    let a = tm.at[i];
+    let w = tm.who[i];
+    tm.at[i] = tm.at[j];
+    tm.who[i] = tm.who[j];
+    tm.at[j] = a;
+    tm.who[j] = w;
+}
+
+fn pop_timer(tm: Timers) {
+    let n = tm.at.len() - 1;
+    swap_timers(tm, 0, n);
+    tm.at.pop();
+    tm.who.pop();
+    let i: usize = 0;
+    loop {
+        let l = 2 * i + 1;
+        let r = l + 1;
+        let m = i;
+        if l < n && tm.at[l] < tm.at[m] {
+            m = l;
+        }
+        if r < n && tm.at[r] < tm.at[m] {
+            m = r;
+        }
+        if m == i {
+            break;
+        }
+        swap_timers(tm, i, m);
+        i = m;
+    }
+}
+
+/// Run tasks on worker `w` until `main` is done (`none`: until the pool
+/// shuts down).
+fn work(w: Worker, main: TaskRef | none) {
+    let pool = w.pool;
+    loop {
+        match main {
+            m: TaskRef => {
+                if is_done(m) {
+                    return;
+                }
+            }
+            none => {}
+        }
+        if atomic_load(pool.signal, 1, SeqCst) != 0 {
+            return;
+        }
+        let epoch = atomic_load(pool.signal, 0, SeqCst);
+        match find_task(pool, w.index) {
+            t: TaskRef => {
+                run(t);
+                continue;
+            }
+            none => {}
+        }
+        let next = fire_timers(pool);
+        if next == 0 {
+            continue;
+        }
+        // Sleep until a push / timer bumps the epoch, or the next timer.
+        let wait: i64 = 1000000000;
+        if next > 0 && next < wait {
+            wait = next;
+        }
+        unsafe { rok_sync_wait_timeout(pool.signal, 0, epoch, wait) };
+    }
+}
+
+fn new_task(pool: Pool, poll: fn(Context) -> bool, local: bool, home: usize) -> TaskRef {
+    let state: GcBuf<i32> = buf_new(2);
+    buf_set(state, 0, SCHEDULED);
+    let p: GcBuf<fn(Context) -> bool> = buf_new(1);
+    buf_set(p, 0, poll);
+    let t = TaskRef {
+        state: state,
+        poll: p,
+        joiners: Mutex::new(List::<Waker>::new()),
+        pool: pool,
+        local: local,
+        home: home,
+    };
+    schedule(t);
+    return t;
+}
+
+/// The poll function of a task running `fut`, storing its output in
+/// `slot`.
+fn poll_fn<F: Future>(fut: F, slot: GcBuf<F::Output>) -> fn(Context) -> bool {
+    let cell: GcBuf<F> = buf_new(1);
+    buf_set(cell, 0, fut);
+    return |ctx: Context| -> bool {
+        let f = buf_get(cell, 0);
+        let c = ctx;
+        let r = f.poll(ref c);
+        buf_set(cell, 0, f);
+        match r {
+            Poll::Ready(v) => {
+                buf_set(slot, 0, v);
+                return true;
+            }
+            Poll::Pending => {
+                return false;
+            }
+        }
+    };
+}
+
+/// Start a pool and run `main` on worker 0 (this thread) until it is
+/// done; the other workers stop after their current poll.
+fn run_pool(main: fn(Context) -> bool) {
+    if unsafe { rok_task_exec_active() } != 0 {
+        panic("task::block_on inside a running task (it would deadlock); use `await`");
+    }
+    let n = unsafe { rok_cpu_count() };
+    let pool = Pool::new(n);
+    let w0 = Worker { pool: pool, index: 0 };
+    set_current(w0);
+    let handles: List<usize> = List::new();
+    let i: usize = 1;
+    while i < n {
+        let idx = i;
+        let body: fn() + Send = || {
+            set_current(Worker { pool: pool, index: idx });
+            work(Worker { pool: pool, index: idx }, none);
+            unsafe { rok_task_exec_clear() };
+        };
+        handles.push(unsafe { rok_thread_spawn(body, 0, rok_thread_new_id()) });
+        i = i + 1;
+    }
+    let t = new_task(pool, main, true, 0);
+    work(w0, t);
+    atomic_xchg(pool.signal, 1, 1, SeqCst);
+    pool.notify();
+    for h in handles {
+        unsafe { rok_thread_join(h) };
+    }
+    unsafe { rok_task_exec_clear() };
+}
+
+/// Run `fut` to completion on a fresh pool, from synchronous code
+/// (2.20.6). Tasks still running when it is done are dropped.
+pub fn block_on<F: Future>(fut: F) -> F::Output {
+    let slot: GcBuf<F::Output> = buf_new(1);
+    run_pool(poll_fn(fut, slot));
+    return buf_get(slot, 0);
+}
+
+/// `block_on` for a throwing `async` body: its error is thrown here.
+pub fn block_on_try<T, E>(fut: TryAsyncFuture<T, E>) throws (E) -> T {
+    let cell: GcBuf<TryAsyncFuture<T, E>> = buf_new(1);
+    buf_set(cell, 0, fut);
+    let out: GcBuf<T> = buf_new(1);
+    let err: GcBuf<E> = buf_new(1);
+    let failed: GcBuf<bool> = buf_new(1);
+    run_pool(|ctx: Context| -> bool {
+        let f = buf_get(cell, 0);
+        let c = ctx;
+        let r = try f.poll(ref c) catch e {
+            buf_set(err, 0, e);
+            buf_set(failed, 0, true);
+            return true;
+        };
+        buf_set(cell, 0, f);
+        match r {
+            Poll::Ready(v) => {
+                buf_set(out, 0, v);
+                return true;
+            }
+            Poll::Pending => {
+                return false;
+            }
+        }
+    });
+    if buf_get(failed, 0) {
+        throw buf_get(err, 0);
+    }
+    return buf_get(out, 0);
+}
+
+/// The running pool (inside `block_on`): for code that puts its own
+/// work on the workers, e.g. `par::*` (`spawn(async { .. })` + `join`).
+pub fn current_pool() -> Pool | none {
+    match current() {
+        w: Worker => w.pool,
+        none => none,
+    }
+}
+
+/// Workers of the running pool (1 outside `block_on`).
+pub fn workers() -> usize {
+    match current() {
+        w: Worker => w.pool.workers(),
+        none => 1,
+    }
+}
+
+/// Online CPUs: a pool's worker count.
+pub fn cpu_count() -> usize {
+    return unsafe { rok_cpu_count() };
+}
+
+// ---- the `par` seam: sync jobs on the pool ----
+
+struct RunOnce {
+    f: fn() -> bool;
+}
+
+unsafe impl Send for RunOnce {}
+
+impl Future for RunOnce {
+    type Output = bool;
+    fn poll(ref self, ref ctx: Context) -> Poll<bool> {
+        return Poll::Ready((self.f)());
+    }
+}
+
+/// Run `f()` with a pool running on this thread: the current one, or a
+/// pool started for the call (`block_on`).
+pub(pkg) fn in_pool(f: fn() -> bool) -> bool {
+    match current() {
+        w: Worker => { return f(); }
+        none => {}
+    }
+    return block_on(RunOnce { f: f });
+}
+
+/// `f` as a task on the running pool (`par`'s `fork`).
+pub(pkg) fn fork_job(f: fn() + Send) -> Task<bool> {
+    return spawn(RunOnce { f: || { f(); return true; } });
+}
+
+/// Block this worker until `t` is done, running pool tasks meanwhile
+/// (so a fork-join on a busy pool cannot deadlock).
+pub(pkg) fn help_until(t: Task<bool>) {
+    let w = current_worker();
+    let pool = w.pool;
+    while !is_done(t.task) {
+        let epoch = atomic_load(pool.signal, 0, SeqCst);
+        match find_task(pool, w.index) {
+            other: TaskRef => {
+                run(other);
+                continue;
+            }
+            none => {}
+        }
+        if fire_timers(pool) == 0 {
+            continue;
+        }
+        if !is_done(t.task) {
+            unsafe { rok_sync_wait_timeout(pool.signal, 0, epoch, 1000000) };
+        }
+    }
+}
+
+// ---- spawning ----
+
+/// A spawned task; `await` it for its result (2.18.2).
+pub struct Task<T> {
+    task: TaskRef;
+    slot: GcBuf<T>;
+}
+
+unsafe impl<T: Send> Send for Task<T> {}
+
+impl<T> Task<T> {
+    pub fn is_finished(self) -> bool { return is_done(self.task); }
+
+    /// Ask the task to stop (2.18.4): it is not polled again (it ends at
+    /// its current suspension point). Awaiting it then panics; use
+    /// `try await t.join()` to see `CancellationError`.
+    pub fn cancel(self) {
+        atomic_xchg(self.task.state, 1, 1, SeqCst);
+        wake_task(self.task);
+    }
+
+    pub fn is_cancelled(self) -> bool { return is_cancelled(self.task); }
+
+    /// Await the result, throwing `CancellationError` for a cancelled
+    /// task.
+    pub fn join(self) -> Join<T> {
+        return Join { task: self };
+    }
+}
+
+impl<T> Future for Task<T> {
+    type Output = T;
+    fn poll(ref self, ref ctx: Context) -> Poll<T> {
+        if !join_later(self.task, ctx.waker) {
+            return Poll::Pending;
+        }
+        if is_cancelled(self.task) {
+            panic("awaited a cancelled task (use `try await t.join()`)");
+        }
+        return Poll::Ready(buf_get(self.slot, 0));
+    }
+}
+
+/// `Task::join`.
+pub struct Join<T> {
+    task: Task<T>;
+}
+
+impl<T> Join<T> {
+    pub fn poll(ref self, ref ctx: Context) throws (CancellationError) -> Poll<T> {
+        if !join_later(self.task.task, ctx.waker) {
+            return Poll::Pending;
+        }
+        if is_cancelled(self.task.task) {
+            throw CancellationError {};
+        }
+        return Poll::Ready(buf_get(self.task.slot, 0));
+    }
+}
+
+/// A task was cancelled (2.18.4).
+pub struct CancellationError {}
+
+impl Display for CancellationError {
+    fn display(self) -> str { return "task cancelled"; }
+}
+
+impl Debug for CancellationError {
+    fn debug(self) -> str { return "CancellationError"; }
+}
+
+impl Error for CancellationError {}
+
+/// Run `fut` as a new task on any worker, concurrently with the
+/// spawner (2.18.1). Needs a running executor (inside `async fn main` /
+/// `block_on`).
+// ponytail: spec 2.18.1 spawns a closure `fn() -> T`; here the task is a
+// future (`task::spawn(async { .. })`), since a plain closure could not
+// `await`.
+pub fn spawn<F: Future + Send>(fut: F) -> Task<F::Output> {
+    let w = current_worker();
+    let slot: GcBuf<F::Output> = buf_new(1);
+    let t = new_task(w.pool, poll_fn(fut, slot), false, w.index);
+    return Task { task: t, slot: slot };
+}
+
+/// Run `fut` as a new task on this worker only (it need not be `Send`).
+pub fn spawn_local<F: Future>(fut: F) -> Task<F::Output> {
+    let w = current_worker();
+    let slot: GcBuf<F::Output> = buf_new(1);
+    let t = new_task(w.pool, poll_fn(fut, slot), true, w.index);
+    return Task { task: t, slot: slot };
+}
+
+/// Every task's result, in order (2.18.1).
+pub async fn join<T>(tasks: List<Task<T>>) -> List<T> {
+    let out: List<T> = List::new();
+    for t in tasks {
+        out.push(await t);
+    }
+    return out;
+}
+
+/// The result of whichever task finishes first (2.18.1).
+pub fn race<T>(tasks: List<Task<T>>) -> Race<T> {
+    return Race { tasks: tasks };
+}
+
+pub struct Race<T> {
+    tasks: List<Task<T>>;
+}
+
+impl<T> Future for Race<T> {
+    type Output = T;
+    fn poll(ref self, ref ctx: Context) -> Poll<T> {
+        for t in self.tasks {
+            if join_later(t.task, ctx.waker) {
+                return Poll::Ready(buf_get(t.slot, 0));
+            }
+        }
+        return Poll::Pending;
+    }
+}
+
+/// Index of the first task to finish (`buffer_unordered`).
+pub(pkg) fn first_done<T>(tasks: List<Task<T>>) -> FirstDone<T> {
+    return FirstDone { tasks: tasks };
+}
+
+pub(pkg) struct FirstDone<T> {
+    tasks: List<Task<T>>;
+}
+
+impl<T> Future for FirstDone<T> {
+    type Output = usize;
+    fn poll(ref self, ref ctx: Context) -> Poll<usize> {
+        let i: usize = 0;
+        while i < self.tasks.len() {
+            if join_later(self.tasks[i].task, ctx.waker) {
+                return Poll::Ready(i);
+            }
+            i = i + 1;
+        }
+        return Poll::Pending;
+    }
+}
+
+// ---- time ----
+
+/// Completes once `dur` has passed (2.18.1).
+pub fn sleep(dur: Duration) -> Sleep {
+    return Sleep { deadline: now_ns() + dur.as_nanos() };
+}
+
+/// Completes at `when`.
+pub fn sleep_until(when: Instant) -> Sleep {
+    return Sleep { deadline: when.as_nanos() };
+}
+
+pub struct Sleep {
+    deadline: i64;
+}
+
+impl Future for Sleep {
+    type Output = ();
+    fn poll(ref self, ref ctx: Context) -> Poll<()> {
+        if now_ns() >= self.deadline {
+            return Poll::Ready(());
+        }
+        add_timer(self.deadline, ctx.waker);
+        return Poll::Pending;
+    }
+}
+
+/// Let the other ready tasks run once (2.18.1).
+pub fn yield_now() -> YieldNow {
+    return YieldNow { yielded: false };
+}
+
+pub struct YieldNow {
+    yielded: bool;
+}
+
+impl Future for YieldNow {
+    type Output = ();
+    fn poll(ref self, ref ctx: Context) -> Poll<()> {
+        if self.yielded {
+            return Poll::Ready(());
+        }
+        self.yielded = true;
+        ctx.waker.wake();
+        return Poll::Pending;
+    }
+}
+
+/// `task`'s result, or `TimeoutError` once `dur` has passed (2.18.1):
+/// `try await task::timeout(d, t)`.
+pub fn timeout<T>(dur: Duration, task: Task<T>) -> Timeout<T> {
+    return Timeout { task: task, deadline: now_ns() + dur.as_nanos() };
+}
+
+pub struct Timeout<T> {
+    task: Task<T>;
+    deadline: i64;
+}
+
+impl<T> Timeout<T> {
+    pub fn poll(ref self, ref ctx: Context) throws (TimeoutError) -> Poll<T> {
+        if join_later(self.task.task, ctx.waker) {
+            return Poll::Ready(buf_get(self.task.slot, 0));
+        }
+        if now_ns() >= self.deadline {
+            throw TimeoutError {};
+        }
+        add_timer(self.deadline, ctx.waker);
+        return Poll::Pending;
+    }
+}
+
+/// `task::timeout` ran out.
+pub struct TimeoutError {}
+
+impl Display for TimeoutError {
+    fn display(self) -> str { return "timed out"; }
+}
+
+impl Debug for TimeoutError {
+    fn debug(self) -> str { return "TimeoutError"; }
+}
+
+impl Error for TimeoutError {}
+
+// ---- parking: async waits on sync primitives ----
+
+/// Tasks waiting on a key (a primitive's GC address): `Mutex::lock_async`,
+/// `Receiver::recv_async` park here; the primitive unparks the key when
+/// it may have become ready (708's park / unpark at the task level).
+// ponytail: one process-wide list behind one lock (O(n) unpark).
+pub struct Parking {
+    entries: Mutex<List<Parked>>;
+}
+
+struct Parked {
+    key: usize;
+    waker: Waker;
+}
+
+fn parking() -> Parking {
+    if unsafe { rok_task_parking_ready() } == 0 {
+        let p: GcBuf<Parking> = buf_new(1);
+        buf_set(p, 0, Parking { entries: Mutex::new(List::<Parked>::new()) });
+        return buf_get(unsafe { rok_task_parking_install(p) }, 0);
+    }
+    let p: GcBuf<Parking> = buf_new(1);
+    return buf_get(unsafe { rok_task_parking_install(p) }, 0);
+}
+
+/// Wake `waker` at the next `unpark(key)`.
+pub fn park(key: usize, waker: Waker) {
+    let p = parking();
+    using g = p.entries.lock() {
+        g.get().push(Parked { key: key, waker: waker });
+    }
+}
+
+/// Wake every task parked on `key` (cheap when no task ever parked).
+pub fn unpark(key: usize) {
+    if unsafe { rok_task_parking_ready() } == 0 {
+        return;
+    }
+    let p = parking();
+    let woken: List<Waker> = List::new();
+    using g = p.entries.lock() {
+        let l = g.get();
+        let i: usize = 0;
+        while i < l.len() {
+            if l[i].key == key {
+                woken.push(l.remove(i).waker);
+            } else {
+                i = i + 1;
+            }
+        }
+    }
+    for w in woken {
+        w.wake();
+    }
+}

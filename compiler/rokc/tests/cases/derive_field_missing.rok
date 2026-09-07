@@ -1,0 +1,9 @@
+// expect-error: cannot derive `Eq` for `Reading`: `value` has type `f64`, which does not implement `Eq`
+// Spec 2.5.9: every field must implement the derived trait (`f64` is
+// only `PartialEq`).
+#[derive(PartialEq, Eq)]
+struct Reading { id: i32; value: f64; }
+
+fn main() -> i32 {
+    return 0;
+}

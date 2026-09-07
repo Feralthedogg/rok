@@ -9,7 +9,8 @@ async fn produce() -> i32 {
     return 7;
 }
 
-fn main() -> i32 {
+// `await` 는 async 본문 안에서만 (4.12.10): async main (4.16.5).
+async fn main() -> i32 {
     let v = await produce();
     return v;
 }

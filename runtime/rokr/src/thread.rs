@@ -3,7 +3,7 @@
 
 use core::mem::size_of;
 use core::ptr;
-use core::sync::atomic::{AtomicI32, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 
 use rokr_common::object_header::HEADER_SIZE;
 use rokr_common::tls;
@@ -99,6 +99,49 @@ pub extern "C" fn rok_thread_join(handle: usize) -> i32 {
     rc
 }
 
+/// Let the thread behind `handle` release its OS resources when it ends;
+/// the handle is no longer joinable. 0 on success.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_thread_detach(handle: usize) -> i32 {
+    // SAFETY: `handle` came from `rok_thread_spawn` and was not joined.
+    unsafe { libc::pthread_detach(handle as libc::pthread_t) }
+}
+
+/// `thread::park` / `park_timeout`: block until this thread's token is
+/// set by `rok_thread_unpark` (consuming it), `timeout_ns` passes
+/// (< 0: no limit), or spuriously.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_thread_park(timeout_ns: i64) {
+    let token = world::with_park_token(None, |t| t.map(ptr::from_ref));
+    let Some(token) = token else { return };
+    // SAFETY: our own record lives until this thread detaches.
+    let token = unsafe { &*token };
+    if token.swap(0, Ordering::SeqCst) == 1 {
+        return;
+    }
+    wait_on(token, 0, timeout_ns);
+    token.store(0, Ordering::SeqCst);
+}
+
+/// Set the park token of thread `id` and wake it (no-op if it ended).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_thread_unpark(id: u64) {
+    world::with_park_token(Some(id), |t| {
+        if let Some(t) = t {
+            t.store(1, Ordering::SeqCst);
+            wake_on(t);
+        }
+    });
+}
+
+/// Online CPUs (at least 1): the `par` pool's width.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_cpu_count() -> usize {
+    // SAFETY: plain sysconf query.
+    let n = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+    n.max(1) as usize
+}
+
 /// This thread's worker id (`rok_tls_worker_id`), the `ThreadId`.
 #[unsafe(no_mangle)]
 #[allow(clippy::cast_ptr_alignment)] // 8-aligned slot
@@ -166,14 +209,58 @@ fn word(buf: *mut u8, index: usize) -> &'static AtomicI32 {
 /// as stopped for the GC meanwhile.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_sync_wait(buf: *mut u8, index: usize, expected: i32) {
+    wait_on(word(buf, index), expected, -1);
+}
+
+/// Block while `w` holds `expected`, at most `timeout_ns` (< 0: no
+/// limit); may return spuriously. Counts as stopped for the GC.
+fn wait_on(w: &AtomicI32, expected: i32, timeout_ns: i64) {
+    let b = bucket(ptr::from_ref(w) as usize);
+    world::enter_native();
+    // SAFETY: statically initialized pthread objects; valid timespecs.
+    unsafe {
+        libc::pthread_mutex_lock(b.lock.get());
+        if w.load(Ordering::SeqCst) == expected {
+            if timeout_ns < 0 {
+                libc::pthread_cond_wait(b.cond.get(), b.lock.get());
+            } else {
+                let mut at: libc::timespec = core::mem::zeroed();
+                libc::clock_gettime(libc::CLOCK_REALTIME, &mut at);
+                let ns = at.tv_nsec as i64 + timeout_ns % 1_000_000_000;
+                at.tv_sec += (timeout_ns / 1_000_000_000 + ns / 1_000_000_000) as libc::time_t;
+                at.tv_nsec = (ns % 1_000_000_000) as libc::c_long;
+                libc::pthread_cond_timedwait(b.cond.get(), b.lock.get(), &at);
+            }
+        }
+        libc::pthread_mutex_unlock(b.lock.get());
+    }
+    world::leave_native();
+}
+
+/// `rok_sync_wait` that also returns after about `ns` nanoseconds (the
+/// executor's idle wait until its next timer).
+#[unsafe(no_mangle)]
+#[allow(clippy::unnecessary_cast)] // `time_t` / `c_long` widths vary by target
+pub extern "C" fn rok_sync_wait_timeout(buf: *mut u8, index: usize, expected: i32, ns: i64) {
     let w = word(buf, index);
     let b = bucket(ptr::from_ref(w) as usize);
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: valid out-pointer.
+    unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut now) };
+    let total = now.tv_nsec as i64 + ns.max(0);
+    let deadline = libc::timespec {
+        tv_sec: now.tv_sec + (total / 1_000_000_000) as libc::time_t,
+        tv_nsec: (total % 1_000_000_000) as libc::c_long,
+    };
     world::enter_native();
     // SAFETY: statically initialized pthread objects.
     unsafe {
         libc::pthread_mutex_lock(b.lock.get());
         if w.load(Ordering::SeqCst) == expected {
-            libc::pthread_cond_wait(b.cond.get(), b.lock.get());
+            libc::pthread_cond_timedwait(b.cond.get(), b.lock.get(), &deadline);
         }
         libc::pthread_mutex_unlock(b.lock.get());
     }
@@ -183,11 +270,53 @@ pub extern "C" fn rok_sync_wait(buf: *mut u8, index: usize, expected: i32) {
 /// Wake every thread blocked in `rok_sync_wait` on that element.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_sync_wake(buf: *mut u8, index: usize) {
-    let b = bucket(ptr::from_ref(word(buf, index)) as usize);
+    wake_on(word(buf, index));
+}
+
+fn wake_on(w: &AtomicI32) {
+    let b = bucket(ptr::from_ref(w) as usize);
     // SAFETY: statically initialized pthread objects.
     unsafe {
         libc::pthread_mutex_lock(b.lock.get());
         libc::pthread_cond_broadcast(b.cond.get());
         libc::pthread_mutex_unlock(b.lock.get());
     }
+}
+
+// ---------------------------------------------------------------------
+// Lazily initialized statics: compiled code checks the state byte
+// (0 new, 1 running, 2 ready) and calls these around the initializer.
+// ---------------------------------------------------------------------
+
+/// 1: the caller runs the initializer, then calls
+/// [`rok_static_init_end`]. 0: it is ready (another thread may have
+/// just finished it; this one waited, counting as stopped for the GC).
+// ponytail: a waiter polls with `sched_yield`; initializers are short and
+// contention is rare. An initializer reading its own static waits on
+// itself forever.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_static_init_begin(state: *const AtomicU8) -> i32 {
+    // SAFETY: compiled code passes its static's state byte.
+    let s = unsafe { &*state };
+    if s.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire)
+        .is_ok()
+    {
+        return 1;
+    }
+    if s.load(Ordering::Acquire) != 2 {
+        world::enter_native();
+        while s.load(Ordering::Acquire) != 2 {
+            // SAFETY: no preconditions.
+            unsafe { libc::sched_yield() };
+        }
+        world::leave_native();
+    }
+    0
+}
+
+/// The initializer stored the value: publish it.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_static_init_end(state: *const AtomicU8) {
+    // SAFETY: as above.
+    unsafe { &*state }.store(2, Ordering::Release);
 }

@@ -20,6 +20,7 @@ use crate::{
 };
 
 mod collect;
+mod coro;
 mod desugar;
 mod expr;
 mod mono;
@@ -29,6 +30,7 @@ mod throws;
 
 use collect::collect_unknown_paths;
 pub use collect::lower_full;
+pub use coro::FN_BLOCK_LABEL;
 use desugar::{
     desugar_nullish_coalesce, desugar_question_dot, desugar_try_q, lower_closure_expr, lower_for,
 };
@@ -91,7 +93,8 @@ struct TypeNames<'a> {
     uses: &'a crate::uses::UseTable,
     diags: std::cell::RefCell<Vec<rokc_diagnostic::RokDiagnostic>>,
     /// Generic type aliases (`type Row<const N: usize> = [i32; N];`)
-    /// by full name. Expanded at each use.
+    /// by full name, expanded at each use; also the non-generic ones
+    /// with a `where` clause (checked once, never expanded here).
     generic_aliases: HashMap<String, rokc_ast::TypeAliasDef>,
     /// Every generic alias use: (alias, arguments, module, span), for
     /// its bounds check (`check_type_bounds`).
@@ -115,7 +118,10 @@ impl TypeNames<'_> {
         }
         let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
         let full = self.canon(&segs, module, &[])?;
-        let alias = self.generic_aliases.get(&full)?;
+        let alias = self
+            .generic_aliases
+            .get(&full)
+            .filter(|a| !a.generics.params.is_empty())?;
         let map: HashMap<String, Ty> = alias
             .generics
             .params
@@ -1011,6 +1017,8 @@ struct LowerCtx<'a> {
     /// Type parameter → its trait bounds and their supertraits (trait
     /// keys): `T::Item` resolves through them (`set_bounds`).
     ty_bounds: HashMap<String, Vec<String>>,
+    /// Lowering a coroutine body (`yield` / `await` are allowed).
+    coro: Option<coro::CoroCtx>,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -1048,6 +1056,7 @@ impl<'a> LowerCtx<'a> {
             next_synth: 0,
             narrowed: HashMap::new(),
             ty_bounds: HashMap::new(),
+            coro: None,
         }
     }
 

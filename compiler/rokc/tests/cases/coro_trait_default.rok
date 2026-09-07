@@ -1,0 +1,37 @@
+// expect-exit: 0
+// expect-stdout:
+// 6 100 ab
+// 3
+
+// `async` / `yield` trait default methods and overrides.
+trait Source {
+    fn base(self) -> i32;
+    async fn fetch(self) -> i32 {
+        await task::yield_now();
+        self.base() * 2
+    }
+    yield fn upto(self) -> i32 {
+        let i = 0;
+        while i < self.base() { yield i; i = i + 1; }
+    }
+    async fn plain(self) -> str;
+}
+
+struct A { n: i32; }
+impl Source for A {
+    fn base(self) -> i32 { return self.n; }
+    async fn plain(self) -> str { "a" }
+}
+
+struct B {}
+impl Source for B {
+    fn base(self) -> i32 { return 1; }
+    async fn fetch(self) -> i32 { 100 }
+    async fn plain(self) -> str { "b" }
+}
+
+let a = A { n: 3 };
+println(f"{await a.fetch()} {await B {}.fetch()} {await a.plain()}{await B {}.plain()}");
+let s = 0;
+for x in a.upto() { s = s + x; }
+println(f"{s}");

@@ -1,0 +1,55 @@
+// expect-exit: 0
+// expect-stdout:
+// 30 -3
+// done after error
+// 9 -1007
+// 13
+
+// Throwing generators error at `next`, throwing async fns at `await`
+// (spec 4.14.10); a finished generator stays done.
+struct BadInput { at: i32; }
+impl Display for BadInput { fn display(self) -> str { return f"bad input at {self.at}"; } }
+impl Debug for BadInput { fn debug(self) -> str { return self.display(); } }
+impl Error for BadInput {}
+
+yield fn checked(xs: List<i32>) throws (BadInput) -> i32 {
+    for x in xs {
+        if x < 0 { throw BadInput { at: x }; }
+        yield x * 10;
+    }
+}
+
+async fn parse(x: i32) throws (BadInput) -> i32 {
+    await task::yield_now();
+    if x < 0 { throw BadInput { at: x }; }
+    x + 1
+}
+
+async fn sum_parsed(xs: List<i32>) throws (BadInput) -> i32 {
+    let s = 0;
+    for x in xs { s = s + try await parse(x); }
+    s
+}
+
+async fn safe(xs: List<i32>) -> i32 {
+    try await sum_parsed(xs) catch e: BadInput { -1000 + e.at }
+}
+
+fn main() {
+    let g = checked([1, 2, -3, 4]);
+    let out = 0;
+    let caught = try {
+        while true {
+            match try g.next() {
+                v: i32 => { out = out + v; }
+                none => { break; }
+            }
+        }
+        0
+    } catch e: BadInput { e.at };
+    println(f"{out} {caught}");
+    match try? g.next() { none => println("done after error"), _ => println("bad") }
+    println(f"{task::block_on(safe([1, 2, 3]))} {task::block_on(safe([1, -7, 3]))}");
+    let r = try task::block_on_try(sum_parsed([5, 6])) catch e: BadInput { 0 };
+    println(f"{r}");
+}

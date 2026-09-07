@@ -1,12 +1,450 @@
-// rok::std::io (stdlib spec 305). Only `IoError` so far: 305 names it in
-// every signature but does not define its shape.
+// rok::std::io (stdlib spec 305): `IoError`, the `Reader` / `Writer` /
+// `Seek` traits and the standard streams.
+//
+// Byte buffers are `List<u8>` where the spec writes `Slice<u8>` (no
+// `Slice` yet): `read(buf)` fills `buf[0..n]` of a pre-sized list.
+// Internally bytes travel as `str` values (GC byte strings) between
+// the library and the runtime's `rok_os_*` helpers; they reach user
+// code as `str` only after a UTF-8 check.
+//
+// ponytail: no `BufReader` / `BufWriter` / `LineWriter`, `bytes()`,
+// `write_fmt`; `Stdin::lock` returns the same handle (stdio's `FILE`
+// already locks per call).
 
-/// An OS-level I/O failure.
+extern "C" {
+    fn rok_os_errno_kind(code: i32) -> i32;
+    fn rok_os_strerror(code: i32) -> str;
+    fn rok_os_stdin_line(err: GcBuf<i32>) -> str;
+    fn rok_os_stdin_read(max: usize, err: GcBuf<i32>) -> str;
+    fn rok_os_flush_stdout() -> i32;
+    fn rok_os_write_all(fd: i32, s: str) -> i32;
+    fn rok_write_str(s: str) -> i32;
+    fn rok_str_utf8_error(s: str) -> isize;
+}
+
+// ---- errors ----
+
+/// What went wrong, from `errno` (`code`) or the library itself.
+pub enum IoErrorKind {
+    Other,
+    NotFound,
+    PermissionDenied,
+    AlreadyExists,
+    NotADirectory,
+    IsADirectory,
+    DirectoryNotEmpty,
+    InvalidInput,
+    BrokenPipe,
+    Interrupted,
+    WouldBlock,
+    TimedOut,
+    StorageFull,
+    CrossesDevices,
+    Unsupported,
+    UnexpectedEof,
+    InvalidData,
+}
+
+impl IoErrorKind {
+    /// Discriminant, in declaration order (the runtime's numbering).
+    pub fn index(self) -> i32 {
+        match self {
+            IoErrorKind::Other => 0,
+            IoErrorKind::NotFound => 1,
+            IoErrorKind::PermissionDenied => 2,
+            IoErrorKind::AlreadyExists => 3,
+            IoErrorKind::NotADirectory => 4,
+            IoErrorKind::IsADirectory => 5,
+            IoErrorKind::DirectoryNotEmpty => 6,
+            IoErrorKind::InvalidInput => 7,
+            IoErrorKind::BrokenPipe => 8,
+            IoErrorKind::Interrupted => 9,
+            IoErrorKind::WouldBlock => 10,
+            IoErrorKind::TimedOut => 11,
+            IoErrorKind::StorageFull => 12,
+            IoErrorKind::CrossesDevices => 13,
+            IoErrorKind::Unsupported => 14,
+            IoErrorKind::UnexpectedEof => 15,
+            IoErrorKind::InvalidData => 16,
+        }
+    }
+}
+
+fn kind_of_index(i: i32) -> IoErrorKind {
+    match i {
+        1 => IoErrorKind::NotFound,
+        2 => IoErrorKind::PermissionDenied,
+        3 => IoErrorKind::AlreadyExists,
+        4 => IoErrorKind::NotADirectory,
+        5 => IoErrorKind::IsADirectory,
+        6 => IoErrorKind::DirectoryNotEmpty,
+        7 => IoErrorKind::InvalidInput,
+        8 => IoErrorKind::BrokenPipe,
+        9 => IoErrorKind::Interrupted,
+        10 => IoErrorKind::WouldBlock,
+        11 => IoErrorKind::TimedOut,
+        12 => IoErrorKind::StorageFull,
+        13 => IoErrorKind::CrossesDevices,
+        14 => IoErrorKind::Unsupported,
+        15 => IoErrorKind::UnexpectedEof,
+        16 => IoErrorKind::InvalidData,
+        _ => IoErrorKind::Other,
+    }
+}
+
+impl PartialEq for IoErrorKind {
+    fn eq(self, rhs: IoErrorKind) -> bool { return self.index() == rhs.index(); }
+    fn ne(self, rhs: IoErrorKind) -> bool { return self.index() != rhs.index(); }
+}
+
+impl Debug for IoErrorKind {
+    fn debug(self) -> str {
+        match self {
+            IoErrorKind::Other => "Other",
+            IoErrorKind::NotFound => "NotFound",
+            IoErrorKind::PermissionDenied => "PermissionDenied",
+            IoErrorKind::AlreadyExists => "AlreadyExists",
+            IoErrorKind::NotADirectory => "NotADirectory",
+            IoErrorKind::IsADirectory => "IsADirectory",
+            IoErrorKind::DirectoryNotEmpty => "DirectoryNotEmpty",
+            IoErrorKind::InvalidInput => "InvalidInput",
+            IoErrorKind::BrokenPipe => "BrokenPipe",
+            IoErrorKind::Interrupted => "Interrupted",
+            IoErrorKind::WouldBlock => "WouldBlock",
+            IoErrorKind::TimedOut => "TimedOut",
+            IoErrorKind::StorageFull => "StorageFull",
+            IoErrorKind::CrossesDevices => "CrossesDevices",
+            IoErrorKind::Unsupported => "Unsupported",
+            IoErrorKind::UnexpectedEof => "UnexpectedEof",
+            IoErrorKind::InvalidData => "InvalidData",
+        }
+    }
+}
+
+/// An I/O failure (305 names it everywhere but leaves its shape open):
+/// its kind, the OS error number (`0` when the library raised it) and
+/// a readable message.
 pub struct IoError {
+    pub kind: IoErrorKind;
+    pub code: i32;
     message: str;
 }
 
 impl IoError {
-    pub fn new(message: str) -> IoError { return IoError { message: message }; }
+    /// A library-raised error of kind `Other`.
+    pub fn new(message: str) -> IoError {
+        return IoError { kind: IoErrorKind::Other, code: 0, message: message };
+    }
+
+    pub fn with_kind(kind: IoErrorKind, message: str) -> IoError {
+        return IoError { kind: kind, code: 0, message: message };
+    }
+
+    /// The error for OS error number `code`; `context` (a path, a
+    /// call) prefixes the message unless empty.
+    pub fn from_os(code: i32, context: str) -> IoError {
+        let kind = kind_of_index(unsafe { rok_os_errno_kind(code) });
+        let msg = unsafe { rok_os_strerror(code) };
+        if context.len() > 0 { msg = context + ": " + msg; }
+        return IoError { kind: kind, code: code, message: msg };
+    }
+
+    pub fn kind(self) -> IoErrorKind { return self.kind; }
+    pub fn code(self) -> i32 { return self.code; }
     pub fn message(self) -> str { return self.message; }
+}
+
+impl Display for IoError {
+    fn display(self) -> str { return self.message; }
+}
+
+impl Debug for IoError {
+    fn debug(self) -> str {
+        return f"IoError({self.kind.debug()}, {self.code}, {self.message})";
+    }
+}
+
+impl Error for IoError {}
+
+/// Throw `-r` as an OS error when `r < 0` (the runtime's `-errno`).
+pub fn check(r: i64, context: str) throws (IoError) -> i64 {
+    if r < 0 { throw IoError::from_os((0 - r) as i32, context); }
+    return r;
+}
+
+/// A fresh one-element error cell for the `rok_os_*` helpers.
+pub fn err_cell() -> GcBuf<i32> { return buf_new(1); }
+
+/// Throw the cell's errno, if any.
+pub fn check_cell(err: GcBuf<i32>, context: str) throws (IoError) {
+    let e = buf_get(err, 0);
+    if e != 0 { throw IoError::from_os(e, context); }
+}
+
+// ---- byte plumbing ----
+
+/// The first `n` bytes of `buf` as a raw byte `str` (not checked).
+pub fn raw_of(buf: List<u8>, n: usize) -> str {
+    let sb = StrBuf::with_capacity(n);
+    let i = 0usize;
+    while i < n {
+        sb.push_byte(buf[i]);
+        i += 1;
+    }
+    return sb.to_str();
+}
+
+/// Copy raw bytes `s` into `buf[0..]`; returns `s.len()`.
+pub fn fill(buf: List<u8>, s: str) -> usize {
+    let i = 0usize;
+    for b in s.bytes() {
+        buf[i] = b;
+        i += 1;
+    }
+    return i;
+}
+
+/// A raw byte `str` as text, or `InvalidData`.
+pub fn text_of(s: str) throws (IoError) -> str {
+    if unsafe { rok_str_utf8_error(s) } >= 0 {
+        throw IoError::with_kind(IoErrorKind::InvalidData, "stream did not contain valid UTF-8");
+    }
+    return s;
+}
+
+/// A zero-filled list of `n` bytes (a read buffer).
+pub fn byte_buf(n: usize) -> List<u8> {
+    let out: List<u8> = List::with_capacity(n);
+    let i = 0usize;
+    while i < n {
+        out.push(0u8);
+        i += 1;
+    }
+    return out;
+}
+
+// ---- traits (305.1) ----
+
+pub trait Reader {
+    /// Read up to `buf.len()` bytes into `buf[0..n]`; `0` = end of stream.
+    fn read(ref self, buf: List<u8>) throws (IoError) -> usize;
+
+    /// Fill all of `buf`, or `UnexpectedEof`.
+    fn read_exact(ref self, buf: List<u8>) throws (IoError) {
+        let chunk = byte_buf(buf.len());
+        let at = 0usize;
+        while at < buf.len() {
+            let n = try self.read(chunk);
+            if n == 0 { throw IoError::with_kind(IoErrorKind::UnexpectedEof, "failed to fill whole buffer"); }
+            let i = 0usize;
+            while i < n && at < buf.len() {
+                buf[at] = chunk[i];
+                at += 1;
+                i += 1;
+            }
+        }
+    }
+
+    /// Every remaining byte.
+    fn read_to_end(ref self) throws (IoError) -> List<u8> {
+        let out: List<u8> = List::new();
+        let chunk = byte_buf(4096);
+        loop {
+            let n = try self.read(chunk);
+            if n == 0 { break; }
+            let i = 0usize;
+            while i < n {
+                out.push(chunk[i]);
+                i += 1;
+            }
+        }
+        return out;
+    }
+
+    /// Every remaining byte as text (`InvalidData` if not UTF-8).
+    fn read_to_str(ref self) throws (IoError) -> str {
+        let bytes = try self.read_to_end();
+        return try text_of(raw_of(bytes, bytes.len()));
+    }
+
+    /// The next line, `\n` included; `""` at the end of the stream.
+    fn read_line(ref self) throws (IoError) -> str {
+        let sb = StrBuf::new();
+        let one = byte_buf(1);
+        loop {
+            if (try self.read(one)) == 0 { break; }
+            sb.push_byte(one[0]);
+            if one[0] == 10u8 { break; }
+        }
+        return try text_of(sb.to_str());
+    }
+
+    /// The remaining lines (without `\n` / `\r\n`).
+    fn lines(ref self) -> Lines<Self> {
+        return Lines { reader: self };
+    }
+}
+
+pub trait Writer {
+    /// Write some prefix of `buf`; returns its length.
+    fn write(ref self, buf: List<u8>) throws (IoError) -> usize;
+    fn flush(ref self) throws (IoError);
+
+    fn write_all(ref self, buf: List<u8>) throws (IoError) {
+        let rest = buf;
+        loop {
+            if rest.len() == 0 { return; }
+            let n = try self.write(rest);
+            if n == 0 { throw IoError::with_kind(IoErrorKind::Other, "failed to write whole buffer"); }
+            let next: List<u8> = List::new();
+            let i = n;
+            while i < rest.len() {
+                next.push(rest[i]);
+                i += 1;
+            }
+            rest = next;
+        }
+    }
+
+    fn write_str(ref self, s: str) throws (IoError) {
+        try self.write_all(s.as_bytes());
+    }
+}
+
+/// A position for `Seek::seek` (spec puts it in 301 fs; `fs` re-exports it).
+pub enum SeekFrom {
+    Start(u64),
+    End(i64),
+    Current(i64),
+}
+
+pub trait Seek {
+    /// Move the cursor; returns the new offset from the start.
+    fn seek(ref self, pos: SeekFrom) throws (IoError) -> u64;
+
+    fn rewind(ref self) throws (IoError) {
+        try self.seek(SeekFrom::Start(0u64));
+    }
+
+    fn stream_position(ref self) throws (IoError) -> u64 {
+        return try self.seek(SeekFrom::Current(0i64));
+    }
+}
+
+/// `reader.lines()`: each item is a line or the error that ended it.
+pub struct Lines<R> {
+    reader: R;
+}
+
+impl<R: Reader> Iterator for Lines<R> {
+    type Item = Result<str, IoError>;
+    fn next(ref self) -> Result<str, IoError> | none {
+        let line = try self.reader.read_line() catch e {
+            let failed: Result<str, IoError> = Result::Err(e);
+            return failed;
+        };
+        if line.len() == 0 { return none; }
+        if line.ends_with("\n") { line = line.slice(0, line.len() - 1); }
+        if line.ends_with("\r") { line = line.slice(0, line.len() - 1); }
+        let ok: Result<str, IoError> = Result::Ok(line);
+        return ok;
+    }
+}
+
+/// Copy `reader` to its end into `writer`; returns the byte count.
+pub fn copy<R: Reader, W: Writer>(ref reader: R, ref writer: W) throws (IoError) -> u64 {
+    let chunk = byte_buf(8192);
+    let total = 0u64;
+    loop {
+        let n = try reader.read(chunk);
+        if n == 0 { return total; }
+        let part: List<u8> = List::with_capacity(n);
+        let i = 0usize;
+        while i < n {
+            part.push(chunk[i]);
+            i += 1;
+        }
+        try writer.write_all(part);
+        total += n as u64;
+    }
+}
+
+// ---- standard streams (305.2) ----
+
+/// The process's standard input, read through stdio's buffer.
+pub struct Stdin {}
+/// Standard output through stdio, shared with `print`: line-buffered
+/// on a terminal, block-buffered otherwise.
+pub struct Stdout {}
+/// Standard error, unbuffered.
+pub struct Stderr {}
+
+/// `stdin().lock()`. ponytail: the same handle; stdio locks per call.
+pub type StdinLock = Stdin;
+
+pub fn stdin() -> Stdin { return Stdin {}; }
+pub fn stdout() -> Stdout { return Stdout {}; }
+pub fn stderr() -> Stderr { return Stderr {}; }
+
+impl Stdin {
+    pub fn lock(self) -> StdinLock { return self; }
+}
+
+impl Reader for Stdin {
+    fn read(ref self, buf: List<u8>) throws (IoError) -> usize {
+        if buf.len() == 0 { return 0; }
+        let err = err_cell();
+        let s = unsafe { rok_os_stdin_read(buf.len(), err) };
+        try check_cell(err, "stdin");
+        return fill(buf, s);
+    }
+
+    fn read_to_end(ref self) throws (IoError) -> List<u8> {
+        let err = err_cell();
+        let s = unsafe { rok_os_stdin_read(0, err) };
+        try check_cell(err, "stdin");
+        return s.as_bytes();
+    }
+
+    fn read_to_str(ref self) throws (IoError) -> str {
+        let err = err_cell();
+        let s = unsafe { rok_os_stdin_read(0, err) };
+        try check_cell(err, "stdin");
+        return try text_of(s);
+    }
+
+    fn read_line(ref self) throws (IoError) -> str {
+        let err = err_cell();
+        let s = unsafe { rok_os_stdin_line(err) };
+        try check_cell(err, "stdin");
+        return try text_of(s);
+    }
+}
+
+impl Writer for Stdout {
+    fn write(ref self, buf: List<u8>) throws (IoError) -> usize {
+        unsafe { rok_write_str(raw_of(buf, buf.len())) };
+        return buf.len();
+    }
+
+    fn write_str(ref self, s: str) throws (IoError) {
+        unsafe { rok_write_str(s) };
+    }
+
+    fn flush(ref self) throws (IoError) {
+        try check(unsafe { rok_os_flush_stdout() } as i64, "stdout");
+    }
+}
+
+impl Writer for Stderr {
+    fn write(ref self, buf: List<u8>) throws (IoError) -> usize {
+        try check(unsafe { rok_os_write_all(2, raw_of(buf, buf.len())) } as i64, "stderr");
+        return buf.len();
+    }
+
+    fn write_str(ref self, s: str) throws (IoError) {
+        try check(unsafe { rok_os_write_all(2, s) } as i64, "stderr");
+    }
+
+    fn flush(ref self) throws (IoError) {}
 }

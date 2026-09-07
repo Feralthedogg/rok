@@ -1,21 +1,5 @@
-// rok::std::time (stdlib spec 303). Only `Duration`'s constructors and
-// accessors so far (what `thread::sleep` takes); clocks wait for a user.
+// rok::std::time (stdlib spec 303): `Duration` / `Instant` live in
+// `rok::core::task::time` (2.18.6). `SystemTime` / `BootTime` wait for a
+// user.
 
-/// A span of time in nanoseconds (about ±292 years).
-pub struct Duration {
-    ns: i64;
-}
-
-impl Duration {
-    pub fn ns(n: i64) -> Duration { return Duration { ns: n }; }
-    pub fn us(n: i64) -> Duration { return Duration { ns: n * 1000 }; }
-    pub fn ms(n: i64) -> Duration { return Duration { ns: n * 1000000 }; }
-    pub fn sec(n: i64) -> Duration { return Duration { ns: n * 1000000000 }; }
-    pub fn min(n: i64) -> Duration { return Duration::sec(n * 60); }
-    pub fn hours(n: i64) -> Duration { return Duration::sec(n * 3600); }
-    pub fn days(n: i64) -> Duration { return Duration::sec(n * 86400); }
-
-    pub fn as_nanos(self) -> i64 { return self.ns; }
-    pub fn as_millis(self) -> i64 { return self.ns / 1000000; }
-    pub fn as_secs(self) -> i64 { return self.ns / 1000000000; }
-}
+pub use rok::core::task::time::{Duration, Instant};

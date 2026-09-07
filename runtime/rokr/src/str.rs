@@ -47,7 +47,7 @@ fn alloc_str(len: usize) -> *mut u8 {
 }
 
 /// GC string holding the concatenation of `parts`.
-fn build(parts: &[&[u8]]) -> RokStr {
+pub fn build(parts: &[&[u8]]) -> RokStr {
     let len = parts.iter().map(|p| p.len()).sum();
     let p = alloc_str(len);
     let mut at = 0;

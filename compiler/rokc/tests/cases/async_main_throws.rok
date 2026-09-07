@@ -1,0 +1,27 @@
+// expect-exit: 1
+// expect-stderr: uncaught error: oops
+// expect-stdout:
+// step 0
+// step 1
+// step 2
+
+// `async fn main() throws`: an error escaping it exits 1 (4.16.4/5).
+struct Oops {}
+impl Display for Oops { fn display(self) -> str { return "oops"; } }
+impl Debug for Oops { fn debug(self) -> str { return "Oops"; } }
+impl Error for Oops {}
+
+async fn step(n: i32) throws (Oops) -> i32 {
+    await task::sleep(Duration::ms(1));
+    if n > 2 { throw Oops {}; }
+    n
+}
+
+async fn main() throws (Oops) {
+    let i = 0;
+    while true {
+        let v = try await step(i);
+        println(f"step {v}");
+        i = i + 1;
+    }
+}

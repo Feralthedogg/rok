@@ -178,6 +178,12 @@ pub enum StmtKind {
         ty: Option<Ty>,
         init: Expr,
     },
+    /// `let pat = init;` for any irrefutable pattern (the `pat` of
+    /// `let name @ pat = ..`, after `name` is bound).
+    LetPattern {
+        pat: Pattern,
+        init: Expr,
+    },
     /// `name = expr;` — reassignment (no `let`).
     Assign(Expr, Expr),
     /// `name op= expr;` — `op` is the lexical compound symbol (`+=` etc.).
@@ -251,6 +257,8 @@ pub enum ExprKind {
         pat: Pattern,
         iter: Box<Expr>,
         body: Block,
+        /// `for await` over a `Stream` (spec 4.13.5).
+        is_await: bool,
     },
     /// Prefix `try e` / `try? e` / `try! e`: marks the throwing calls in
     /// `e` (everything to its right).

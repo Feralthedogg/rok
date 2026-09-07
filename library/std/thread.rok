@@ -7,10 +7,9 @@
 // not catchable (2.14), so `join` never sees one. `JoinError` only
 // reports an OS join failure.
 //
-// ponytail: `park` / `unpark` / `park_timeout` and `thread::local` are
-// not here yet; `current().name()` is always `none` (names live on the
-// spawner's `JoinHandle`); a never-joined handle leaks its OS thread
-// record (rok has no implicit drop to detach it).
+// `current().name()` is always `none` (names live on the spawner's
+// `JoinHandle`). A handle that is neither joined nor `detach`ed keeps
+// its OS thread record (rok has no implicit drop to detach it).
 
 use rok::std::io::IoError;
 use rok::std::time::Duration;
@@ -19,9 +18,12 @@ extern "C" {
     fn rok_thread_new_id() -> u64;
     fn rok_thread_spawn(f: fn() + Send, stack_size: usize, id: u64) -> usize;
     fn rok_thread_join(handle: usize) -> i32;
+    fn rok_thread_detach(handle: usize) -> i32;
     fn rok_thread_id() -> u64;
     fn rok_thread_sleep_ns(ns: i64);
     fn rok_thread_yield_now();
+    fn rok_thread_park(timeout_ns: i64);
+    fn rok_thread_unpark(id: u64);
 }
 
 /// Identifies a thread for its lifetime (its runtime worker id).
@@ -48,6 +50,9 @@ pub struct Thread {
 impl Thread {
     pub fn id(self) -> ThreadId { return self.id; }
     pub fn name(self) -> str | none { return self.name; }
+    /// Wake the thread from `park` (or make its next `park` return at
+    /// once). No-op once the thread has ended.
+    pub fn unpark(self) { unsafe { rok_thread_unpark(self.id.id) }; }
 }
 
 /// The OS could not join the thread.
@@ -76,6 +81,12 @@ impl<T> JoinHandle<T> {
     }
 
     pub fn thread(self) -> Thread { return self.thread; }
+
+    /// Let the thread run on its own; its OS resources are released when
+    /// it ends. The handle must not be joined afterwards.
+    pub fn detach(self) {
+        unsafe { rok_thread_detach(self.handle) };
+    }
 }
 
 /// Spawn configuration.
@@ -134,3 +145,66 @@ pub fn sleep(dur: Duration) {
 
 /// Always `false`: a panic ends the process before anything can ask.
 pub fn panicking() -> bool { return false; }
+
+/// Block until this thread is `unpark`ed (an earlier `unpark` makes it
+/// return at once). May also return spuriously: re-check the condition.
+pub fn park() {
+    unsafe { rok_thread_park(-1) };
+}
+
+/// `park`, for at most `dur`.
+pub fn park_timeout(dur: Duration) {
+    unsafe { rok_thread_park(dur.as_nanos()) };
+}
+
+/// A value per thread, made by `init` on each thread's first use (304.4).
+// ponytail: one `Dict` keyed by thread id behind a `Mutex`; entries of
+// finished threads stay until the `ThreadLocal` is unreachable.
+pub struct ThreadLocal<T> {
+    init: fn() -> T + Sync;
+    slots: Mutex<Dict<u64, Cell<T>>>;
+}
+
+// Each `Cell` is only reached from its own thread.
+unsafe impl<T> Send for ThreadLocal<T> {}
+unsafe impl<T> Sync for ThreadLocal<T> {}
+
+impl<T> ThreadLocal<T> {
+    /// This thread's cell.
+    fn cell(self) -> Cell<T> {
+        let id = unsafe { rok_thread_id() };
+        let found: Cell<T> | none = none;
+        using g = self.slots.lock() {
+            found = g.get().get(id);
+        }
+        match found {
+            c: Cell<T> => return c,
+            none => {},
+        }
+        let init = self.init;
+        let c = Cell::new(init());
+        using g = self.slots.lock() {
+            g.get().insert(id, c);
+        }
+        return c;
+    }
+
+    /// Run `f` on this thread's value.
+    pub fn with<R>(self, f: fn(Cell<T>) -> R) -> R {
+        return f(self.cell());
+    }
+
+    pub fn get(self) -> T {
+        return self.cell().get();
+    }
+
+    pub fn set(self, value: T) {
+        self.cell().set(value);
+    }
+}
+
+/// A `ThreadLocal` whose per-thread value starts as `init()`.
+pub fn local<T>(init: fn() -> T + Sync) -> ThreadLocal<T> {
+    let slots: Dict<u64, Cell<T>> = Dict::new();
+    return ThreadLocal { init: init, slots: Mutex::new(slots) };
+}

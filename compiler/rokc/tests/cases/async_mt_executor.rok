@@ -1,0 +1,86 @@
+// expect-exit: 0
+// expect-stdout:
+// sum 23690583
+// workers true
+// samples 20
+// local on main worker: true
+// cancelled -1 true
+// par in a task 332833500
+
+// Work-stealing executor: tasks spread over worker threads while the GC runs;
+// spawn_local stays on its worker; cancel + join.
+// Tasks spread over the worker threads; GC runs while they allocate.
+extern "C" {
+    fn rok_thread_id() -> u64;
+    fn rok_gc_collect();
+}
+
+async fn crunch(seed: i64) -> i64 {
+    let acc: List<str> = [];
+    let total: i64 = 0;
+    let i: i64 = 0;
+    while i < 300 {
+        acc.push(f"{seed}-{i}");
+        total = total + i * seed;
+        if i % 50 == 0 {
+            await task::yield_now();
+        }
+        i = i + 1;
+    }
+    unsafe { rok_gc_collect() };
+    // Every string survived the collections (frames are traced).
+    total + acc.len() as i64 + acc[299].len() as i64
+}
+
+let threads: List<u64> = [];
+let tasks: List<Task<i64>> = [];
+let k: i64 = 1;
+while k <= 32 {
+    tasks.push(task::spawn(crunch(k)));
+    k = k + 1;
+}
+let ids = task::spawn(async {
+    let seen: List<u64> = [];
+    let j = 0;
+    while j < 20 {
+        seen.push(unsafe { rok_thread_id() });
+        await task::sleep(Duration::ms(1));
+        j = j + 1;
+    }
+    seen
+});
+let results = await task::join(tasks);
+let sum: i64 = 0;
+for r in results { sum = sum + r; }
+println(f"sum {sum}");
+println(f"workers {task::workers() >= 1}");
+let seen = await ids;
+println(f"samples {seen.len()}");
+
+// spawn_local keeps a task on this worker.
+let here = unsafe { rok_thread_id() };
+let local = task::spawn_local(async { unsafe { rok_thread_id() } });
+println(f"local on main worker: {(await local) == here}");
+
+// Cancellation: a cancelled task is not polled again.
+let forever = task::spawn(async {
+    let n = 0;
+    while true { await task::sleep(Duration::ms(1)); n = n + 1; }
+    n
+});
+await task::sleep(Duration::ms(3));
+forever.cancel();
+let r = try await forever.join() catch e: CancellationError { -1 };
+println(f"cancelled {r} {forever.is_cancelled()}");
+
+// `par` runs on the same pool from inside a task.
+let squares = task::spawn(async {
+    let xs: List<i64> = [];
+    let i: i64 = 0;
+    while i < 1000 { xs.push(i); i = i + 1; }
+    let ys = par::map(xs, |x: i64| x * x);
+    let t: i64 = 0;
+    for y in ys { t = t + y; }
+    t
+});
+println(f"par in a task {await squares}");

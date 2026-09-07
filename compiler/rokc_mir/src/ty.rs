@@ -201,6 +201,8 @@ fn enum_payloads(variants: &[rokc_hir::HirEnumVariant], module: &HirModule) -> V
     variants
         .iter()
         .filter_map(|v| v.payload_ty.as_ref().map(|p| lower_ty_in(p, module)))
+        // A unit payload (`Poll<()>::Ready(())`) takes no space.
+        .filter(|t| *t != MirTy::Unit)
         .collect()
 }
 

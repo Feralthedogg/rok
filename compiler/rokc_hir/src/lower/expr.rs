@@ -17,6 +17,10 @@ pub(super) fn lower_block(ctx: &mut LowerCtx<'_>, block: &Block) -> HirBlock {
             } => {
                 lower_let_struct(ctx, path, fields, ty.as_ref(), init, s.span, &mut stmts);
             }
+            StmtKind::LetPattern { pat, init } => {
+                let value = lower_expected(ctx, init, HirTy::Unknown);
+                super::desugar::bind_irrefutable(ctx, pat, value, &mut stmts);
+            }
             StmtKind::LetTuple {
                 names,
                 rest,
@@ -365,7 +369,7 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
             let a = lower_assign(ctx, target, &combined, stmt.span);
             write_through(ctx, a, stmt.span)
         }
-        StmtKind::LetTuple { .. } | StmtKind::LetStruct { .. } => {
+        StmtKind::LetTuple { .. } | StmtKind::LetStruct { .. } | StmtKind::LetPattern { .. } => {
             unreachable!("destructuring lets are expanded by lower_block")
         }
         StmtKind::Break { label, value } => {
@@ -900,7 +904,8 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             pat,
             iter,
             body,
-        } => lower_for(ctx, label.as_ref(), pat, iter, body, span),
+            is_await,
+        } => lower_for(ctx, label.as_ref(), pat, iter, body, *is_await, span),
         ExprKind::Match { scrutinee, arms } => lower_match(ctx, scrutinee, arms, span),
         ExprKind::Try { kind, operand } => lower_try(ctx, *kind, operand, span),
         ExprKind::Catch {
@@ -1054,10 +1059,8 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             is_async,
             is_generator,
         } => {
-            if *is_async || *is_generator {
-                return unsupported(ctx, "an async / generator closure");
-            }
-            lower_closure_expr(ctx, captures, params, ret_ty.as_ref(), body, span)
+            let body = super::coro::closure_body(body, *is_async, *is_generator);
+            lower_closure_expr(ctx, captures, params, ret_ty.as_ref(), &body, span)
         }
         ExprKind::QuestionDot(receiver, tail) => {
             let recv_h = lower_expected(ctx, receiver, HirTy::Unknown);
@@ -1102,18 +1105,8 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
                 span,
             }
         }
-        // Stage-1 await: drop straight through to the inner expression.
-        // The async runtime (`rok_task_*`) is all nullptr stubs; when the
-        // scheduler lands, this arm becomes a real suspend point.
-        ExprKind::Await(inner) => lower_expr(ctx, inner),
-        // Spec 4.11: generator `yield N`. Coroutine runtime is a nullptr
-        // stub at stage-1, so refuse explicitly rather than miscompile.
-        ExprKind::Yield(_) => ctx.error_expr(
-            span,
-            "`yield` is not yet implemented; generator coroutines require a scheduler \
-             that doesn't exist in stage-1 (spec 4.11)"
-                .to_owned(),
-        ),
+        ExprKind::Await(inner) => super::coro::lower_await(ctx, inner, span),
+        ExprKind::Yield(value) => super::coro::lower_yield(ctx, value.as_deref(), span),
         ExprKind::Range {
             start,
             end,
@@ -1165,7 +1158,7 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
         }
         ExprKind::LetElse { .. } => unsupported(ctx, "`let ... else` in expression position"),
         ExprKind::AsyncBlock(_) | ExprKind::YieldBlock(_) | ExprKind::AsyncYieldBlock(_) => {
-            unsupported(ctx, "an async / generator block")
+            super::coro::lower_coro_expr(ctx, &expr.kind, span)
         }
         ExprKind::Spread(_) => unsupported(ctx, "a spread expression here"),
         ExprKind::Discard(_) => unsupported(ctx, "a discard expression"),
@@ -1331,6 +1324,8 @@ pub(super) fn resolve_enum_variant(
 pub(super) fn variant_arg_tys(v: &HirEnumVariant) -> Vec<HirTy> {
     match (&v.payload_ty, v.arity) {
         (None, _) => Vec::new(),
+        // A named-field variant's payload is always the tuple of fields.
+        (Some(HirTy::Tuple(ps)), _) if !v.named_fields.is_empty() => ps.clone(),
         (Some(t), 1) => vec![t.clone()],
         (Some(HirTy::Tuple(ps)), _) => ps.clone(),
         (Some(t), _) => vec![t.clone()],
@@ -3796,6 +3791,20 @@ pub(super) fn lower_call(
                     span: p.span,
                 })
             });
+            // `let a: Atomic<i64> = Atomic::new(0)`: a constructor that
+            // returns `Self` takes `Self` from the expected type.
+            let returns_self = gm.def.ret_ty.as_ref().is_some_and(|t| {
+                matches!(&t.kind, AstTyKind::Path(rp) if rp.segments.len() == 1
+                    && (rp.segments[0].name == "Self" || rp.segments[0].name == *ty_segs[ty_segs.len() - 1]))
+            });
+            let self_hint = self_hint.or_else(|| {
+                let full = ctx.canon_type(ty_segs)?;
+                ctx.current_expected().cloned().filter(|t| {
+                    returns_self
+                        && matches!(t, HirTy::Struct(id)
+                            if enum_base_name(&ctx.struct_def(*id).name) == full)
+                })
+            });
             match bind_explicit(
                 ctx,
                 &gm.def,
@@ -4660,14 +4669,59 @@ fn lower_atomic_intrinsic(
             _ => None,
         })
         .collect();
-    let want = match op {
-        "load" => 2,
-        "cas" => 4,
-        _ => 3,
+    // Value operands, then the ordering(s) (`cas`: success, failure).
+    let (values, orders) = match op {
+        "load" => (0, 1),
+        "cas" => (2, 2),
+        _ => (1, 1),
     };
+    let want = 2 + values + orders;
     if pos.len() != want || args.len() != want {
         discard_args(ctx, args);
         return ctx.error_expr(span, format!("`atomic_{op}` takes {want} argument(s)"));
+    }
+    // The orderings must be literal `AtomicOrdering` variants: LLVM fixes
+    // them per instruction.
+    let mut order = ["seq_cst"; 2];
+    for (k, e) in pos[2 + values..].iter().enumerate() {
+        let name = match &e.kind {
+            ExprKind::Path(p) => p.segments.last().map(|s| s.name.as_str()),
+            _ => None,
+        };
+        let llvm = match name {
+            Some("Relaxed") => "monotonic",
+            Some("Acquire") => "acquire",
+            Some("Release") => "release",
+            Some("AcqRel") => "acq_rel",
+            Some("SeqCst") => "seq_cst",
+            _ => {
+                discard_args(ctx, args);
+                return ctx.error_expr(
+                    span,
+                    format!(
+                        "`atomic_{op}`: the memory ordering must be a constant `AtomicOrdering` \
+                         variant (`Relaxed`, `Acquire`, `Release`, `AcqRel`, `SeqCst`)"
+                    ),
+                );
+            }
+        };
+        // A load cannot release; a failed `cas` is a load.
+        if (op == "load" || k == 1) && matches!(llvm, "release" | "acq_rel") {
+            discard_args(ctx, args);
+            let what = if op == "load" {
+                "a load"
+            } else {
+                "a failed compare-exchange"
+            };
+            return ctx.error_expr(
+                span,
+                format!(
+                    "`atomic_{op}`: `{}` is not a valid ordering for {what}",
+                    name.unwrap_or("")
+                ),
+            );
+        }
+        order[k] = llvm;
     }
     let buf = lower_expected(ctx, pos[0], HirTy::Unknown);
     let elem = match &buf.ty {
@@ -4697,7 +4751,7 @@ fn lower_atomic_intrinsic(
     let usize_ty = HirTy::Prim(PrimTy::Usize);
     let i = lower_expected(ctx, pos[1], usize_ty.clone());
     let i = coerce(ctx, &usize_ty, i, &|| "the buffer index".to_owned());
-    let operands = pos[2..]
+    let operands = pos[2..2 + values]
         .iter()
         .map(|e| {
             let v = lower_expected(ctx, e, elem.clone());
@@ -4712,6 +4766,7 @@ fn lower_atomic_intrinsic(
             index: Box::new(i),
             args: operands,
             elem,
+            order,
         },
         span,
     }
@@ -5337,10 +5392,8 @@ pub(super) fn self_path_segs(ctx: &LowerCtx<'_>, p: &AstPath) -> Vec<String> {
 }
 
 /// Associated const `name` of concrete type `ty` (from one of `traits`
-/// when given): a non-generic impl of exactly `ty` first,
-/// then a generic / blanket one whose target and bounds `ty` meets.
-// ponytail: the value is lowered here, so its names resolve in the
-// caller's module and it can't use the impl's type parameters.
+/// when given): the one impl whose target and bounds `ty` meets; two
+/// or more is an ambiguity error.
 fn lower_assoc_const(
     ctx: &mut LowerCtx<'_>,
     ty: &HirTy,
@@ -5348,25 +5401,37 @@ fn lower_assoc_const(
     traits: Option<&[String]>,
 ) -> Option<HirExpr> {
     let env = ctx.env;
-    let mut hit: Option<(&ImplConsts, HashMap<String, HirTy>)> = None;
-    for set in &env.impl_consts {
-        if traits.is_some_and(|ks| !ks.contains(&set.target.trait_key))
-            || !set.consts.iter().any(|(n, ..)| n == name)
-        {
-            continue;
-        }
-        let Some(subst) = ctx.generic_impl_subst(&set.target, ty, 0) else {
-            continue;
-        };
-        let generic = !set.target.generics.params.is_empty();
-        if hit.is_none() || !generic {
-            hit = Some((set, subst));
-            if !generic {
-                break;
-            }
-        }
+    let hits: Vec<(&ImplConsts, HashMap<String, HirTy>)> = env
+        .impl_consts
+        .iter()
+        .filter(|set| {
+            traits.is_none_or(|ks| ks.contains(&set.target.trait_key))
+                && set.consts.iter().any(|(n, ..)| n == name)
+        })
+        .filter_map(|set| Some((set, ctx.generic_impl_subst(&set.target, ty, 0)?)))
+        .collect();
+    if hits.len() > 1 {
+        let from: Vec<String> = hits
+            .iter()
+            .map(|(s, _)| {
+                if s.target.trait_key.is_empty() {
+                    "an inherent impl".to_owned()
+                } else {
+                    format!("`{}`", leaf_name(&s.target.trait_key))
+                }
+            })
+            .collect();
+        return Some(ctx.error_expr(
+            rokc_diagnostic::current_span(),
+            format!(
+                "associated const `{name}` of `{}` is ambiguous: {} define it — name the \
+                 trait (`<T as Tr>::{name}`) (spec 2.8.3a)",
+                ctx.ty_name(ty),
+                from.join(" and ")
+            ),
+        ));
     }
-    let (set, subst) = hit?;
+    let (set, subst) = hits.into_iter().next()?;
     let (_, cty, value) = set.consts.iter().find(|(n, ..)| n == name)?;
     let sc = Scope {
         names: &env.names,
@@ -5375,10 +5440,23 @@ fn lower_assoc_const(
     let mut cty =
         super::mono::resolve_ast_with_subst(cty, &env.struct_table, &env.enum_table, &subst, sc);
     substitute_aliases(&mut cty, &env.type_aliases);
+    // The value is the impl's: its names resolve in the impl's module,
+    // with the impl's type parameters and `Self` bound for `ty`.
+    // ponytail: one leaked substitution map per use (a few entries).
+    let subst: &'static HashMap<String, HirTy> = Box::leak(Box::new(subst));
+    let saved_subst = std::mem::replace(&mut ctx.ty_subst, subst);
+    let saved_module = std::mem::replace(&mut ctx.current_module, set.target.module.clone());
+    let saved_self = std::mem::replace(&mut ctx.self_ty, Some(ty.clone()));
+    let saved_uses = std::mem::replace(&mut ctx.local_uses, vec![Vec::new()]);
+    let saved_scopes = std::mem::replace(&mut ctx.scopes, vec![HashMap::new()]);
     let v = lower_expected(ctx, value, cty.clone());
-    Some(coerce(ctx, &cty, v, &|| {
-        format!("associated const `{name}`")
-    }))
+    let v = coerce(ctx, &cty, v, &|| format!("associated const `{name}`"));
+    ctx.ty_subst = saved_subst;
+    ctx.current_module = saved_module;
+    ctx.self_ty = saved_self;
+    ctx.local_uses = saved_uses;
+    ctx.scopes = saved_scopes;
+    Some(v)
 }
 
 /// The name a type's associated consts are keyed under (`impl_consts`).
@@ -5434,6 +5512,27 @@ pub(super) fn lower_path(
                 _ => String::new(),
             };
             if let Some(v) = lower_assoc_const(ctx, &t, &name.name, Some(&[key])) {
+                return v;
+            }
+        }
+    }
+    // `Type::N` / `Box::<i32>::N`: the impl covering that type.
+    if let [prefix @ .., name] = path.segments.as_slice() {
+        let segs: Vec<&str> = prefix.iter().map(|s| s.name.as_str()).collect();
+        let owner = rokc_ast::Ty {
+            kind: AstTyKind::Path(AstPath {
+                segments: prefix.to_vec(),
+                span: path.span,
+            }),
+            span: path.span,
+        };
+        if !prefix.is_empty()
+            && segs != ["Self"]
+            && (ctx.canon_type(&segs).is_some()
+                || matches!(crate::ty::resolve_ty(&owner), HirTy::Prim(_)))
+        {
+            let ty = ctx.resolve_ast_ty(&owner);
+            if let Some(v) = lower_assoc_const(ctx, &ty, &name.name, None) {
                 return v;
             }
         }

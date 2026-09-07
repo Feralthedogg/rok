@@ -1,0 +1,33 @@
+// expect-exit: 0
+// expect-stdout:
+// 5
+// 1 2
+// 3 4 7
+// 1 9 10
+// 6 6
+// 2 5
+
+// Spec 3.11 / 3.15: `let (a) = ..` groups (only `(a,)` is a 1-tuple);
+// after `@`, `let` and `for` take any irrefutable pattern.
+struct Point { x: i32; y: i32; }
+struct Line { a: Point; b: Point; }
+
+fn main() -> i32 {
+    let (a) = 5;
+    rok_print_i32(a);
+    let ((b), c) = (1, 2);
+    rok_print_str(f"{b} {c}");
+    let l @ Line { a: Point { x, y }, b: _ } = Line { a: Point { x: 3, y: 4 }, b: Point { x: 7, y: 8 } };
+    rok_print_str(f"{x} {y} {l.b.x}");
+    let t @ (n, Point { x: px, y: py }) = (1, Point { x: 9, y: 10 });
+    rok_print_str(f"{n} {px} {py}");
+    let _ = t;
+    let pts = [Point { x: 6, y: 6 }];
+    for p @ Point { x: qx, .. } in pts {
+        rok_print_str(f"{qx} {p.y}");
+    }
+    for (i, Point { y, .. }) in [(2, Point { x: 0, y: 5 })] {
+        rok_print_str(f"{i} {y}");
+    }
+    return 0;
+}

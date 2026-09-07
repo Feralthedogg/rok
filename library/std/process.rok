@@ -1,0 +1,319 @@
+// rok::std::process (stdlib spec 307): child processes.
+//
+// Spawning is `fork` + `execvp` in the runtime (the program is looked
+// up in `PATH` unless it contains `/`); every fd the library opens is
+// close-on-exec, and an exec failure comes back as the `IoError`.
+//
+// ponytail: no `posix_spawn` fast path, `pidfd`, `process_group`,
+// signal handlers; `output()` drains stdout before stderr, so a child
+// that fills the stderr pipe (64 KiB) before closing stdout deadlocks —
+// poll both when that matters. The pipe ends are `File`s.
+
+use rok::std::fs::File;
+use rok::std::io::{IoError, Reader, check};
+use rok::std::path::AsPath;
+use rok::std::env;
+
+extern "C" {
+    fn rok_os_spawn(
+        argv: str, argc: usize, envs: str, envc: isize, cwd: str,
+        stdio_in: i32, stdio_out: i32, stdio_err: i32, out: GcBuf<i32>,
+    ) -> i32;
+    fn rok_os_waitpid(pid: i32, nohang: i32, out: GcBuf<i32>) -> i32;
+    fn rok_os_kill(pid: i32, sig: i32) -> i32;
+    fn rok_os_getpid() -> u32;
+    fn rok_os_abort() -> !;
+    fn rok_exit(code: i32) -> !;
+}
+
+/// Exit now with `code` (same as `env::exit`).
+pub fn exit(code: i32) -> ! { unsafe { rok_exit(code) }; }
+
+/// Abnormal termination (`SIGABRT`); nothing is cleaned up.
+pub fn abort() -> ! { unsafe { rok_os_abort() }; }
+
+/// This process's id.
+pub fn id() -> u32 { return unsafe { rok_os_getpid() }; }
+
+/// Send signal `sig` to process `pid`.
+pub fn kill(pid: u32, sig: i32) throws (IoError) {
+    try check(unsafe { rok_os_kill(pid as i32, sig) } as i64, "kill");
+}
+
+/// Where a child's standard stream goes.
+pub enum Stdio {
+    Inherit,
+    Null,
+    Piped,
+    File(File),
+}
+
+fn stdio_mode(s: Stdio) -> i32 {
+    match s {
+        Stdio::Inherit => -1,
+        Stdio::Null => -2,
+        Stdio::Piped => -3,
+        Stdio::File(f) => f.fd(),
+    }
+}
+
+/// A child's stdin (write end of a pipe).
+pub type ChildStdin = File;
+/// A child's stdout / stderr (read end of a pipe).
+pub type ChildStdout = File;
+pub type ChildStderr = File;
+
+/// A process to run (307.1). Builder methods return the updated command.
+pub struct Command {
+    program: str;
+    args: List<str>;
+    envs: Dict<str, str>;
+    env_clear: bool;
+    stdin: Stdio | none;
+    stdout: Stdio | none;
+    stderr: Stdio | none;
+    cwd: str | none;
+    kill_on_drop: bool;
+}
+
+impl Command {
+    pub fn new<P: AsPath>(program: P) -> Command {
+        return Command {
+            program: program.as_path().as_str(),
+            args: List::new(),
+            envs: Dict::new(),
+            env_clear: false,
+            stdin: none,
+            stdout: none,
+            stderr: none,
+            cwd: none,
+            kill_on_drop: false,
+        };
+    }
+
+    pub fn arg(self, arg: str) -> Command {
+        self.args.push(arg);
+        return self;
+    }
+
+    pub fn args<I: IntoIterator<Item = str>>(self, args: I) -> Command {
+        for a in args { self.args.push(a); }
+        return self;
+    }
+
+    pub fn env(self, key: str, value: str) -> Command {
+        self.envs.insert(key, value);
+        return self;
+    }
+
+    pub fn envs<I: IntoIterator<Item = (str, str)>>(self, envs: I) -> Command {
+        for kv in envs {
+            let (k, v) = kv;
+            self.envs.insert(k, v);
+        }
+        return self;
+    }
+
+    /// Start from an empty environment (then `env` adds to it).
+    pub fn env_clear(self) -> Command {
+        self.env_clear = true;
+        self.envs = Dict::new();
+        return self;
+    }
+
+    pub fn current_dir<P: AsPath>(self, dir: P) -> Command {
+        self.cwd = dir.as_path().as_str();
+        return self;
+    }
+
+    pub fn stdin(self, cfg: Stdio) -> Command { self.stdin = cfg; return self; }
+    pub fn stdout(self, cfg: Stdio) -> Command { self.stdout = cfg; return self; }
+    pub fn stderr(self, cfg: Stdio) -> Command { self.stderr = cfg; return self; }
+
+    /// Kill the child when its `Child` is dropped by `using`.
+    pub fn kill_on_drop(self, on: bool) -> Command { self.kill_on_drop = on; return self; }
+
+    /// Start the child; unset streams are inherited.
+    pub fn spawn(self) throws (IoError) -> Child {
+        return try self.start(Stdio::Inherit, Stdio::Inherit);
+    }
+
+    /// Run to completion, collecting stdout and stderr (stdin defaults
+    /// to null).
+    pub fn output(self) throws (IoError) -> Output {
+        if self.stdin is none { self.stdin = Stdio::Null; }
+        let child = try self.start(Stdio::Piped, Stdio::Piped);
+        let out: List<u8> = List::new();
+        let err: List<u8> = List::new();
+        let so = child.stdout;
+        if so is File {
+            out = try so.read_to_end();
+            try so.close();
+        }
+        let se = child.stderr;
+        if se is File {
+            err = try se.read_to_end();
+            try se.close();
+        }
+        let status = try child.wait();
+        return Output { status: status, stdout: out, stderr: err };
+    }
+
+    /// Run to completion with inherited streams.
+    pub fn status(self) throws (IoError) -> ExitStatus {
+        let child = try self.spawn();
+        return try child.wait();
+    }
+
+    fn start(self, out_default: Stdio, err_default: Stdio) throws (IoError) -> Child {
+        let argv = StrBuf::new();
+        argv.push_str(self.program);
+        argv.push_byte(0u8);
+        for a in self.args {
+            argv.push_str(a);
+            argv.push_byte(0u8);
+        }
+        let envs = StrBuf::new();
+        let envc: isize = -1;
+        if self.env_clear || self.envs.len() > 0 {
+            envc = 0;
+            if !self.env_clear {
+                for kv in env::vars() {
+                    let (k, v) = kv;
+                    if !self.envs.contains_key(k) {
+                        envs.push_str(k + "=" + v);
+                        envs.push_byte(0u8);
+                        envc += 1;
+                    }
+                }
+            }
+            for kv in self.envs.entries() {
+                let (k, v) = kv;
+                envs.push_str(k + "=" + v);
+                envs.push_byte(0u8);
+                envc += 1;
+            }
+        }
+        let fds: GcBuf<i32> = buf_new(3);
+        let pid = unsafe {
+            rok_os_spawn(
+                argv.to_str(), self.args.len() + 1, envs.to_str(), envc, self.cwd ?? "",
+                stdio_mode(self.stdin ?? Stdio::Inherit),
+                stdio_mode(self.stdout ?? out_default),
+                stdio_mode(self.stderr ?? err_default),
+                fds,
+            )
+        };
+        try check(pid as i64, self.program);
+        let state: GcBuf<i32> = buf_new(2);
+        return Child {
+            pid: pid,
+            stdin: pipe_end(buf_get(fds, 0), "child stdin"),
+            stdout: pipe_end(buf_get(fds, 1), "child stdout"),
+            stderr: pipe_end(buf_get(fds, 2), "child stderr"),
+            state: state,
+            kill_on_drop: self.kill_on_drop,
+        };
+    }
+}
+
+fn pipe_end(fd: i32, name: str) -> File | none {
+    if fd < 0 { return none; }
+    return File::from_fd(fd, name);
+}
+
+/// A running (or finished) child (307.2).
+pub struct Child {
+    pid: i32;
+    pub stdin: ChildStdin | none;
+    pub stdout: ChildStdout | none;
+    pub stderr: ChildStderr | none;
+    /// `[reaped, raw status]`, shared by copies of the handle.
+    state: GcBuf<i32>;
+    kill_on_drop: bool;
+}
+
+impl Child {
+    pub fn id(self) -> u32 { return self.pid as u32; }
+
+    /// `SIGKILL`.
+    pub fn kill(self) throws (IoError) { try self.signal(9); }
+
+    pub fn signal(self, sig: i32) throws (IoError) {
+        if buf_get(self.state, 0) != 0 { return; }
+        try check(unsafe { rok_os_kill(self.pid, sig) } as i64, "kill");
+    }
+
+    /// Wait for the child to end. Closes our end of its stdin first, so
+    /// a child reading to EOF can finish.
+    pub fn wait(self) throws (IoError) -> ExitStatus {
+        let si = self.stdin;
+        if si is File { try si.close(); }
+        if buf_get(self.state, 0) == 0 {
+            let out: GcBuf<i32> = buf_new(1);
+            try check(unsafe { rok_os_waitpid(self.pid, 0, out) } as i64, "waitpid");
+            buf_set(self.state, 0, 1);
+            buf_set(self.state, 1, buf_get(out, 0));
+        }
+        return ExitStatus { raw: buf_get(self.state, 1) };
+    }
+
+    /// The status if it has ended, without blocking.
+    pub fn try_wait(self) throws (IoError) -> ExitStatus | none {
+        if buf_get(self.state, 0) == 0 {
+            let out: GcBuf<i32> = buf_new(1);
+            let r = try check(unsafe { rok_os_waitpid(self.pid, 1, out) } as i64, "waitpid");
+            if r == 0 { return none; }
+            buf_set(self.state, 0, 1);
+            buf_set(self.state, 1, buf_get(out, 0));
+        }
+        return ExitStatus { raw: buf_get(self.state, 1) };
+    }
+}
+
+/// `using child = ..`: kill (with `kill_on_drop`) and reap.
+impl Drop for Child {
+    fn drop(ref self) {
+        if self.kill_on_drop && buf_get(self.state, 0) == 0 {
+            unsafe { rok_os_kill(self.pid, 9) };
+            try self.wait() catch _ { ExitStatus { raw: 0 } };
+        }
+    }
+}
+
+/// How a child ended (a raw `wait` status).
+pub struct ExitStatus {
+    raw: i32;
+}
+
+impl ExitStatus {
+    pub fn success(self) -> bool { return self.raw == 0; }
+
+    /// The exit code; `none` if a signal ended it.
+    pub fn code(self) -> i32 | none {
+        if (self.raw & 0x7f) != 0 { return none; }
+        return (self.raw >> 8) & 0xff;
+    }
+
+    /// The signal that ended it, if any.
+    pub fn signal(self) -> i32 | none {
+        let s = self.raw & 0x7f;
+        if s == 0 || s == 0x7f { return none; }
+        return s;
+    }
+}
+
+impl Display for ExitStatus {
+    fn display(self) -> str {
+        let c = self.code();
+        if c is i32 { return f"exit status: {c}"; }
+        return f"signal: {self.signal() ?? 0}";
+    }
+}
+
+/// What `output()` collected.
+pub struct Output {
+    pub status: ExitStatus;
+    pub stdout: List<u8>;
+    pub stderr: List<u8>;
+}

@@ -1,11 +1,11 @@
 // spec: 006.02-derive-eq
-// probe: negative-must-fail
-// expect-error: expansion is not yet implemented
-// expect-exit: 0  (`#[derive(...)]` expander 미구현 → silent miscompile
-//                  차단 위해 명시 거부; 실제 expander 는 별도 마일스톤)
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// equal
 
-// spec 6.2: `#[derive(Eq)]` — Eq trait 자동 구현.
-#[derive(Eq)]
+// spec 6.2: `#[derive(PartialEq, Eq)]` — field-wise equality.
+#[derive(PartialEq, Eq)]
 struct Pt { x: i32; y: i32; }
 
 fn main() -> i32 {

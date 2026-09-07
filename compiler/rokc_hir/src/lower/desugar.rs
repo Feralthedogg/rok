@@ -110,10 +110,11 @@ pub(super) fn lower_closure_expr(
         // Generic instances are cached (and may own closures), so then
         // keep everything.
         let mut lifted = ctx.env.sink.extras.borrow_mut();
-        if lifted[extras..]
-            .iter()
-            .all(|f| f.name.starts_with("__closure_") || f.name.starts_with("__thunk_"))
-        {
+        if lifted[extras..].iter().all(|f| {
+            ["__closure_", "__thunk_", "__coro_"]
+                .iter()
+                .any(|p| f.name.starts_with(p))
+        }) {
             // Cached thunks among them go too (made again for real).
             let gone: Vec<FunctionId> = lifted[extras..].iter().map(|f| f.id).collect();
             ctx.env
@@ -244,7 +245,7 @@ type Capture = (String, LocalId, HirTy, bool);
 /// Does a closure body contain a `throw` or a plain `try` (so its error
 /// type must be inferred)? Nested closures count too — a harmless
 /// over-approximation that only costs a probe.
-fn may_throw(body: &Expr) -> bool {
+pub(super) fn may_throw(body: &Expr) -> bool {
     struct V(bool);
     impl crate::walk::AstVisitor for V {
         fn expr(&mut self, e: &Expr) {
@@ -271,7 +272,7 @@ fn may_throw(body: &Expr) -> bool {
 /// (a tuple of the captured values) with one local per capture, then
 /// the closure's own parameters. Returns the context, the parameters,
 /// the capture prelude and the user-visible argument types.
-fn closure_ctx<'a>(
+pub(super) fn closure_ctx<'a>(
     ctx: &LowerCtx<'a>,
     params: &[Param],
     captures: &[Capture],
@@ -678,7 +679,7 @@ pub(super) fn desugar_nullish_coalesce(
 }
 
 /// Bind an irrefutable `for` / destructuring pattern to `value`:
-/// a name, `_`, or (nested) tuples of those.
+/// a name, `_`, `name @ pat`, or (nested) tuples / structs of those.
 pub(super) fn bind_irrefutable(
     ctx: &mut LowerCtx<'_>,
     pat: &AstPattern,
@@ -727,13 +728,59 @@ pub(super) fn bind_irrefutable(
                 bind_irrefutable(ctx, p, read, stmts);
             }
         }
+        // `Point { x, y: py, .. }`.
+        (AstPatternKind::Struct { path, fields, .. }, HirTy::Struct(sid))
+            if ctx
+                .canon_type(
+                    &path
+                        .segments
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>(),
+                )
+                .and_then(|full| ctx.lookup_struct(&full))
+                == Some(sid) =>
+        {
+            let tmp = ctx.declare(None, value.ty.clone());
+            let struct_ty = value.ty.clone();
+            stmts.push(HirStmt::Let {
+                local: tmp,
+                init: value,
+            });
+            let def = ctx.struct_def(sid);
+            for fp in fields {
+                let Some(idx) = def.fields.iter().position(|f| f.name == fp.name) else {
+                    ctx.emit_error(
+                        rokc_diagnostic::ErrorKind::Type,
+                        format!("struct `{}` has no field `{}`", def.name, fp.name),
+                    );
+                    continue;
+                };
+                ctx.check_field_visible(sid, &fp.name);
+                let field_ty = def.fields[idx].ty.clone();
+                let read = HirExpr {
+                    ty: field_ty.clone(),
+                    span,
+                    kind: HirExprKind::FieldRead {
+                        target: Box::new(hir_local(tmp, &struct_ty, span)),
+                        struct_id: sid,
+                        field_index: u32::try_from(idx).expect("field idx overflow"),
+                        field_ty: field_ty.clone(),
+                    },
+                };
+                match &fp.pat {
+                    Some(p) => bind_irrefutable(ctx, p, read, stmts),
+                    None => stmts.push(ctx.declare_var(&fp.name, field_ty, read, pat.span)),
+                }
+            }
+        }
         (AstPatternKind::Wildcard, _) | (_, HirTy::Unknown) => {}
         (_, ty) => {
             ctx.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
                 format!(
-                    "this pattern can't destructure a value of type `{}` here — `for` \
-                     bindings must be a name, `_`, or a tuple of those",
+                    "this pattern can't destructure a value of type `{}` here — it must be \
+                     irrefutable: a name, `_`, `name @ pat`, or a tuple / struct of those",
                     ctx.ty_name(&ty)
                 ),
             );
@@ -755,12 +802,17 @@ pub(super) fn lower_for(
     pat: &AstPattern,
     iter: &Expr,
     body: &Block,
+    is_await: bool,
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
     let mut out: Vec<HirStmt> = Vec::new();
     ctx.push_scope();
     ctx.breakables.push((label.cloned(), true));
     let while_expr = match &iter.kind {
+        _ if is_await => {
+            let s = lower_expected(ctx, iter, HirTy::Unknown);
+            Some(lower_for_stream(ctx, label, pat, s, body, span, &mut out))
+        }
         ExprKind::Range {
             start: Some(start_e),
             end: Some(end_e),
@@ -826,7 +878,13 @@ pub(super) fn lower_for_iter(
         super::expr::pick_method(ctx, &iter_h.ty, "into_iter", None),
         Ok(None)
     );
-    if !has_into_iter {
+    // A throwing iterator (`TryGenIter`) is stepped directly; its `next`
+    // must sit under a `try` covering the loop (`try for x in g { .. }`).
+    let has_next = matches!(
+        super::expr::pick_method(ctx, &iter_h.ty, "next", None),
+        Ok(Some(_))
+    );
+    if !has_into_iter && !has_next {
         return ctx.error_expr(
             span,
             format!(
@@ -836,7 +894,11 @@ pub(super) fn lower_for_iter(
             ),
         );
     }
-    let it_h = method_call_on(ctx, iter_h, "into_iter", &[], span);
+    let it_h = if has_into_iter {
+        method_call_on(ctx, iter_h, "into_iter", &[], span)
+    } else {
+        iter_h
+    };
     if it_h.ty == HirTy::Unknown {
         return it_h;
     }
@@ -847,6 +909,51 @@ pub(super) fn lower_for_iter(
         init: it_h,
     });
     let next = method_call_on(ctx, hir_local(it, &it_ty, span), "next", &[], span);
+    for_next_loop(ctx, label, pat, next, body, span)
+}
+
+/// `for await pat in s` (stdlib 2.8.2 / 2.8.3): `let st =
+/// s.into_stream()` (unless `s` is a `Stream`), then the `for` loop over
+/// `await`-ing `st.poll_next(ref ctx)`.
+#[allow(clippy::too_many_arguments)]
+fn lower_for_stream(
+    ctx: &mut LowerCtx<'_>,
+    label: Option<&String>,
+    pat: &AstPattern,
+    s: HirExpr,
+    body: &Block,
+    span: rokc_diagnostic::Span,
+    out: &mut Vec<HirStmt>,
+) -> HirExpr {
+    if s.ty == HirTy::Unknown {
+        return s;
+    }
+    let is_stream = matches!(
+        super::expr::pick_method(ctx, &s.ty, "poll_next", None),
+        Ok(Some(_))
+    );
+    let s = if is_stream {
+        s
+    } else {
+        method_call_on(ctx, s, "into_stream", &[], span)
+    };
+    let ty = s.ty.clone();
+    let st = ctx.declare(None, ty.clone());
+    out.push(HirStmt::Let { local: st, init: s });
+    let next = super::coro::poll_loop(ctx, st, &ty, "poll_next", span);
+    for_next_loop(ctx, label, pat, next, body, span)
+}
+
+/// `loop { match <next> { v: T => { let pat = v; body } none => break } }`
+/// for `next` of type `T | none`.
+fn for_next_loop(
+    ctx: &mut LowerCtx<'_>,
+    label: Option<&String>,
+    pat: &AstPattern,
+    next: HirExpr,
+    body: &Block,
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
     let sum_ty = next.ty.clone();
     let parts = match &sum_ty {
         HirTy::Sum(parts) => parts.clone(),

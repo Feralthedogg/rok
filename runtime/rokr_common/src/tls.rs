@@ -136,6 +136,9 @@ tls_slots! {
     wb_log_limit => rokr_tls_wb_log_limit_addr, 8, 3;
     mutator_state => rokr_tls_mutator_state_addr, 1, 0;
     worker_id => rokr_tls_worker_id_addr, 8, 3;
+    // Not an 803 slot: the GC address of this thread's running task
+    // executor (`rok::core::task`, `rok_task_exec_*`), 0 = none.
+    task_exec => rokr_tls_task_exec_addr, 8, 3;
 }
 
 /// Address of this thread's `rok_tls_shadow_stack_top` (the head of its
@@ -173,7 +176,14 @@ pub fn thread_init() {
         slot::wb_log_cursor().cast::<usize>().write(0);
         slot::wb_log_limit().cast::<usize>().write(0);
         slot::worker_id().cast::<u64>().write(new_worker_id());
+        slot::task_exec().cast::<usize>().write(0);
     }
+}
+
+/// Address of this thread's `rok_tls_task_exec` (its running executor).
+#[allow(clippy::cast_ptr_alignment)] // 8-aligned slot
+pub fn task_exec() -> *mut usize {
+    slot::task_exec().cast()
 }
 
 /// Address of this thread's `rok_tls_worker_id`.

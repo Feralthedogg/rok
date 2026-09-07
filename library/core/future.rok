@@ -1,18 +1,103 @@
-// Future + Stream traits (spec 4.12 / 4.13).
+// rok::core::future — `Future` / `Poll` / `Context` / `Waker` /
+// `IntoFuture` (stdlib spec 2.20).
 //
-// `await expr` desugars to `<typeof(expr) as Future>::poll(...)` once
-// the LangTable consumer for `future_trait` lands. Stage-1 lowers
-// `await` as passthrough (no real suspend), so this trait registration
-// is here for spec parity and to be ready for the eventual scheduler.
+// `await e` (inside an `async` body) polls `e` — or `e.into_future()` when
+// `e` has no `poll` — until `Ready`, suspending the coroutine with
+// `Pending` in between (refs-lang 4.12, `rokc_hir::lower::coro`).
 
+pub enum Poll<T> {
+    Ready(T),
+    Pending,
+}
+
+impl<T> Poll<T> {
+    pub fn is_ready(self) -> bool {
+        match self {
+            Poll::Ready(_) => true,
+            Poll::Pending => false,
+        }
+    }
+
+    pub fn is_pending(self) -> bool {
+        return !self.is_ready();
+    }
+}
+
+/// Asks the executor to poll a task again (2.20.2): a handle to the task
+/// (`rok::core::task`), usable from any thread.
+pub struct Waker {
+    pub(pkg) task: rok::core::task::TaskRef;
+}
+
+impl Waker {
+    /// Schedule the task again.
+    pub fn wake(self) {
+        rok::core::task::wake_task(self.task);
+    }
+
+    pub fn clone(self) -> Waker {
+        return self;
+    }
+}
+
+/// What a `poll` gets from the executor (2.20.2).
+pub struct Context {
+    pub(pkg) waker: Waker;
+}
+
+impl Context {
+    pub fn from_waker(waker: Waker) -> Context {
+        return Context { waker: waker };
+    }
+
+    pub fn waker(self) -> Waker {
+        return self.waker;
+    }
+}
+
+/// An asynchronous computation (2.20.1).
 #[lang("future_trait")]
 pub trait Future {
     type Output;
-    fn poll(self) -> Output | none;
+    fn poll(ref self, ref ctx: Context) -> Poll<Output>;
 }
 
-// No `stream_trait` slot in stdlib spec 0.4 — unregistered for now.
-pub trait Stream {
-    type Item;
-    fn next(self) -> Item | none;
+/// What `await` accepts besides a `Future` (2.20.5).
+pub trait IntoFuture {
+    type Output;
+    type IntoFuture;
+    fn into_future(self) -> IntoFuture;
+}
+
+/// The value of an `async fn` call / `async { .. }` block: `resume` runs
+/// the body to its next pending `await` (its env is the coroutine frame).
+// ponytail: one library type per coroutine kind instead of a fresh
+// anonymous type per coroutine (refs-lang 4.1.11).
+pub struct AsyncFuture<T> {
+    resume: fn(Context) -> Poll<T>;
+}
+
+// ponytail: `Send` follows the output only; the frame's captures and
+// locals held across `await` are not checked (Rust checks them).
+unsafe impl<T: Send> Send for AsyncFuture<T> {}
+
+impl<T> Future for AsyncFuture<T> {
+    type Output = T;
+    fn poll(ref self, ref ctx: Context) -> Poll<T> {
+        return (self.resume)(ctx);
+    }
+}
+
+/// A throwing `async` body (`async fn f() throws (E) -> T`): the error
+/// comes out of `poll`, so `try await f()` (refs-lang 4.14.10). Not a
+/// `Future` (whose `poll` cannot throw); `await` and `task::block_on_try`
+/// take it.
+pub struct TryAsyncFuture<T, E> {
+    resume: fn(Context) throws (E) -> Poll<T>;
+}
+
+impl<T, E> TryAsyncFuture<T, E> {
+    pub fn poll(ref self, ref ctx: Context) throws (E) -> Poll<T> {
+        return try (self.resume)(ctx);
+    }
 }

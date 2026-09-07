@@ -1,0 +1,71 @@
+// expect-exit: 0
+// expect-stdout:
+// item-0
+// item-1
+// item-2
+// item-3
+// item-4
+// item-0,item-1,item-2,item-3,item-4,
+// root5:5:kid-4
+// 7 steps, collections ok: true
+// x-a/x-b y-a/y-b
+
+// Coroutine frames are GC objects traced through their ScanTable (spec
+// 708 / 704): GC references held only by a suspended frame survive
+// collections forced between resumes.
+extern "C" {
+    fn rok_gc_collect();
+    fn rok_gc_stats_collections() -> u64;
+}
+
+struct Node { label: str; kids: List<str>; }
+
+yield fn builder(n: i32) -> str {
+    let keep: List<str> = [];
+    let node = Node { label: f"root{n}", kids: [] };
+    let i = 0;
+    while i < n {
+        let s = f"item-{i}";
+        keep.push(s);
+        node.kids.push(f"kid-{i}");
+        yield s;
+        i = i + 1;
+    }
+    let joined = "";
+    for k in keep { joined = joined + k + ","; }
+    yield joined;
+    yield f"{node.label}:{node.kids.len()}:{node.kids[(n - 1) as usize]}";
+}
+
+fn churn() {
+    let j = 0;
+    while j < 2000 {
+        let _s = f"garbage-{j}";
+        let _l: List<i32> = [j, j + 1, j + 2];
+        j = j + 1;
+    }
+    unsafe { rok_gc_collect() };
+}
+
+let g = builder(5);
+let n = 0;
+for s in g {
+    churn();
+    println(s);
+    n = n + 1;
+}
+println(f"{n} steps, collections ok: {unsafe { rok_gc_stats_collections() } >= 7}");
+
+async fn holder(tag: str, ms: i64) -> str {
+    let mine: List<str> = [f"{tag}-a", f"{tag}-b"];
+    await task::sleep(Duration::ms(ms));
+    churn();
+    await task::yield_now();
+    mine[0] + "/" + mine[1]
+}
+
+let t1 = task::spawn(holder("x", 5));
+let t2 = task::spawn(holder("y", 1));
+churn();
+let both = await task::join([t1, t2]);
+println(f"{both[0]} {both[1]}");

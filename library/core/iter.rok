@@ -667,3 +667,36 @@ fn for_each_of<I, T>(it: I, f: fn(T)) {
         f(x);
     }
 }
+
+// ---- generators (refs-lang 4.11) ----
+
+/// The value of a `yield fn` call / `yield { .. }` block: an iterator
+/// over what the body yields. `resume` runs the body to its next `yield`
+/// (its env is the coroutine frame, a GC object the body's state lives
+/// in, so copies of a `GenIter` share one position).
+// ponytail: one library type per coroutine kind instead of a fresh
+// anonymous type per coroutine (spec 4.1.11); it only shows in type
+// names and identity.
+pub struct GenIter<T> {
+    resume: fn() -> (T | none);
+}
+
+impl<T> Iterator for GenIter<T> {
+    type Item = T;
+    fn next(ref self) -> T | none {
+        return (self.resume)();
+    }
+}
+
+/// A throwing generator (`yield fn f() throws (E) -> T`): the error
+/// surfaces at `next` (refs-lang 4.14.10), so a loop over it throws and
+/// must be covered: `try for x in g { .. }`.
+pub struct TryGenIter<T, E> {
+    resume: fn() throws (E) -> (T | none);
+}
+
+impl<T, E> TryGenIter<T, E> {
+    pub fn next(ref self) throws (E) -> T | none {
+        return try (self.resume)();
+    }
+}

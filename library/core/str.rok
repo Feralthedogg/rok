@@ -4,10 +4,7 @@
 // built at run time are GC objects. The bodies call the runtime's
 // `rok_str_*` symbols, which take `str` by value.
 //
-// ponytail: spec 2.15.2 makes `str` a growable, in-place mutable
-// buffer shared by reference (`push`, `push_str`, `+=` in place); here
-// it is an immutable value and every operation returns a new string.
-// `from_utf8`, `split_whitespace` and `char_indices` wait for a user.
+// `str` is immutable (spec 2.15.1); `StrBuf` is the growable buffer.
 
 extern "C" {
     fn rok_str_len(s: str) -> usize;
@@ -27,10 +24,29 @@ extern "C" {
     fn rok_str_to_u64(s: str) -> u64;
     fn rok_str_float_ok(s: str) -> i32;
     fn rok_str_to_f64(s: str) -> f64;
+    fn rok_str_from_char(c: u32) -> str;
+    fn rok_str_from_buf(buf: GcBuf<u8>, off: usize, len: usize) -> str;
+    fn rok_buf_put_str(buf: GcBuf<u8>, off: usize, s: str);
+    fn rok_str_utf8_error(s: str) -> isize;
 }
 
 impl str {
     pub fn new() -> str { return ""; }
+
+    /// `bytes` as a `str`; throws if they are not UTF-8 (2.15.6).
+    pub fn from_utf8(bytes: List<u8>) throws (Utf8Error) -> str {
+        let buf = StrBuf::with_capacity(bytes.len());
+        for b in bytes { buf.push_byte(b); }
+        return try buf.to_str_checked();
+    }
+
+    /// A copy of the UTF-8 bytes. ponytail: spec returns a `Slice<u8>`
+    /// view; there is no `Slice` yet.
+    pub fn as_bytes(self) -> List<u8> {
+        let out: List<u8> = List::with_capacity(self.len());
+        for b in self.bytes() { out.push(b); }
+        return out;
+    }
 
     /// Byte length (not the char count).
     pub fn len(self) -> usize { return unsafe { rok_str_len(self) }; }
@@ -84,6 +100,15 @@ impl str {
     /// Lines without their `\n` / `\r\n`; a final line ending adds no
     /// empty line.
     pub fn lines(self) -> LinesIter { return LinesIter { rest: self }; }
+    /// `(byte offset, char)` pairs.
+    pub fn char_indices(self) -> CharIndicesIter {
+        return CharIndicesIter { chars: CharsIter { s: self, pos: 0 } };
+    }
+    /// The non-empty pieces between runs of whitespace.
+    // ponytail: ASCII whitespace, like `trim`.
+    pub fn split_whitespace(self) -> SplitWhitespaceIter {
+        return SplitWhitespaceIter { s: self, pos: 0 };
+    }
 
     /// `T`'s value spelled by this string (stdlib 2.15.7).
     pub fn parse<T: FromStr>(self) throws (T::Err) -> T { return try T::from_str(self); }
@@ -216,6 +241,157 @@ impl Iterator for LinesIter {
     }
 }
 
+pub struct CharIndicesIter {
+    chars: CharsIter;
+}
+
+impl Iterator for CharIndicesIter {
+    type Item = (usize, char);
+    fn next(ref self) -> (usize, char) | none {
+        let at = self.chars.pos;
+        let c = self.chars.next()?;
+        return (at, c);
+    }
+}
+
+fn is_ascii_space(b: u8) -> bool {
+    return b == 32u8 || (b >= 9u8 && b <= 13u8);
+}
+
+pub struct SplitWhitespaceIter {
+    s: str;
+    pos: usize;
+}
+
+impl Iterator for SplitWhitespaceIter {
+    type Item = str;
+    fn next(ref self) -> str | none {
+        let n = self.s.len();
+        while self.pos < n && is_ascii_space(unsafe { rok_str_byte(self.s, self.pos) }) {
+            self.pos += 1;
+        }
+        if self.pos >= n { return none; }
+        let start = self.pos;
+        while self.pos < n && !is_ascii_space(unsafe { rok_str_byte(self.s, self.pos) }) {
+            self.pos += 1;
+        }
+        return self.s.slice(start, self.pos);
+    }
+}
+
+// ---- StrBuf (stdlib 2.15.2) ----
+
+/// A growable UTF-8 buffer. A handle like the collections: copies
+/// share the buffer. `meta` = `[len, capacity]`, `data[0]` = bytes.
+pub struct StrBuf {
+    meta: GcBuf<usize>;
+    data: GcBuf<GcBuf<u8>>;
+}
+
+impl StrBuf {
+    pub fn new() -> StrBuf { return StrBuf::with_capacity(16); }
+
+    pub fn with_capacity(cap: usize) -> StrBuf {
+        let meta: GcBuf<usize> = buf_new(2);
+        buf_set(meta, 1, cap);
+        let data: GcBuf<GcBuf<u8>> = buf_new(1);
+        let store: GcBuf<u8> = buf_new(cap);
+        buf_set(data, 0, store);
+        return StrBuf { meta: meta, data: data };
+    }
+
+    /// Byte length.
+    pub fn len(self) -> usize { return buf_get(self.meta, 0); }
+    pub fn is_empty(self) -> bool { return self.len() == 0; }
+    pub fn capacity(self) -> usize { return buf_get(self.meta, 1); }
+    pub fn clear(self) { buf_set(self.meta, 0, 0); }
+
+    /// Room for `additional` more bytes (doubling).
+    pub fn reserve(self, additional: usize) {
+        let n = self.len();
+        let cap = self.capacity();
+        if n + additional <= cap { return; }
+        let new_cap = cap * 2;
+        if new_cap < n + additional { new_cap = n + additional; }
+        let old: GcBuf<u8> = buf_get(self.data, 0);
+        let store: GcBuf<u8> = buf_new(new_cap);
+        unsafe { rok_buf_put_str(store, 0, rok_str_from_buf(old, 0, n)) };
+        buf_set(self.data, 0, store);
+        buf_set(self.meta, 1, new_cap);
+    }
+
+    /// Append `c`, UTF-8 encoded.
+    pub fn push(self, c: char) {
+        let v = c as u32;
+        if v < 0x80u32 {
+            self.push_byte(v as u8);
+        } else if v < 0x800u32 {
+            self.push_byte((0xC0u32 | (v >> 6u32)) as u8);
+            self.push_byte((0x80u32 | (v & 0x3Fu32)) as u8);
+        } else if v < 0x10000u32 {
+            self.push_byte((0xE0u32 | (v >> 12u32)) as u8);
+            self.push_byte((0x80u32 | ((v >> 6u32) & 0x3Fu32)) as u8);
+            self.push_byte((0x80u32 | (v & 0x3Fu32)) as u8);
+        } else {
+            self.push_byte((0xF0u32 | (v >> 18u32)) as u8);
+            self.push_byte((0x80u32 | ((v >> 12u32) & 0x3Fu32)) as u8);
+            self.push_byte((0x80u32 | ((v >> 6u32) & 0x3Fu32)) as u8);
+            self.push_byte((0x80u32 | (v & 0x3Fu32)) as u8);
+        }
+    }
+
+    pub fn push_str(self, s: str) {
+        let m = s.len();
+        if m == 0 { return; }
+        self.reserve(m);
+        let n = self.len();
+        unsafe { rok_buf_put_str(buf_get(self.data, 0), n, s) };
+        buf_set(self.meta, 0, n + m);
+    }
+
+    /// Append one raw byte. ponytail: not in spec 2.15; it can break
+    /// UTF-8, so `to_str` callers that push raw bytes go through
+    /// `to_str_checked` (`str::from_utf8`) instead.
+    pub fn push_byte(self, b: u8) {
+        self.reserve(1);
+        let n = self.len();
+        buf_set(buf_get(self.data, 0), n, b);
+        buf_set(self.meta, 0, n + 1);
+    }
+
+    /// The current contents as an immutable `str` (a copy).
+    pub fn to_str(self) -> str {
+        return unsafe { rok_str_from_buf(buf_get(self.data, 0), 0, self.len()) };
+    }
+
+    /// `to_str`, throwing if raw bytes made the contents invalid UTF-8.
+    pub fn to_str_checked(self) throws (Utf8Error) -> str {
+        let s = self.to_str();
+        let at = unsafe { rok_str_utf8_error(s) };
+        if at >= 0 { throw Utf8Error { valid_up_to: at as usize }; }
+        return s;
+    }
+}
+
+impl Display for StrBuf {
+    fn display(self) -> str { return self.to_str(); }
+}
+
+/// Bytes that are not UTF-8 (`str::from_utf8`).
+pub struct Utf8Error {
+    pub valid_up_to: usize;
+}
+
+impl Display for Utf8Error {
+    fn display(self) -> str { return f"invalid UTF-8 at byte {self.valid_up_to}"; }
+}
+
+impl Debug for Utf8Error {
+    fn debug(self) -> str { return "Utf8Error(" + self.display() + ")"; }
+}
+
+impl Error for Utf8Error {}
+
 // ---- FromStr (stdlib 2.15.7) ----
 
 /// `str.parse::<T>()` dispatch.
@@ -303,6 +479,16 @@ impl FromStr for bool {
         if s == "true" { return true; }
         if s == "false" { return false; }
         throw ParseError { input: s, pos: 0, reason: "expected `true` or `false`" };
+    }
+}
+impl FromStr for char {
+    type Err = ParseError;
+    fn from_str(s: str) throws (ParseError) -> char {
+        let it = s.chars();
+        let first = it.next();
+        if s.len() == 0 { throw ParseError { input: s, pos: 0, reason: "empty string" }; }
+        if it.next() is char { throw ParseError { input: s, pos: 0, reason: "too many characters" }; }
+        return first ?? ' ';
     }
 }
 impl FromStr for str {

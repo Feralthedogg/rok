@@ -33,7 +33,7 @@ fn main() -> i32 {
     tx.close();
     let sum: i64 = 0;
     let count: i64 = 0;
-    for v in rx.iter() { sum += v; count += 1; }
+    for v in rx { sum += v; count += 1; }
     for h in producers { try! h.join(); }
     rok_print_i64(count);
     rok_print_i64(sum);

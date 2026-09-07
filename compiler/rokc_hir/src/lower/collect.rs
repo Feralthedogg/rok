@@ -48,6 +48,75 @@ pub(super) fn literal_to_const_val(expr: &Expr, ty: &HirTy) -> Option<ConstVal> 
     }
 }
 
+/// A static initializer that is not a (negated) literal runs once, on
+/// first access, as this synthesized function (`static M: Mutex<..> =
+/// Mutex::new(..)`).
+fn is_lazy_static_init(v: &Expr) -> bool {
+    match &v.kind {
+        ExprKind::Literal(_) => false,
+        ExprKind::OpPrefix { op, operand } if op == "-" => {
+            !matches!(operand.kind, ExprKind::Literal(_))
+        }
+        _ => true,
+    }
+}
+
+fn lazy_init_fn_name(static_name: &str) -> String {
+    match static_name.rsplit_once("::") {
+        Some((m, leaf)) => format!("{m}::__rok_static_init_{leaf}"),
+        None => format!("__rok_static_init_{static_name}"),
+    }
+}
+
+/// `program` plus one `fn __rok_static_init_X() -> T { init }` per lazy
+/// static (`None`: there is none).
+fn with_lazy_static_inits(program: &Program) -> Option<Program> {
+    let inits: Vec<Item> = program
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Static(s) => s
+                .value
+                .as_ref()
+                .filter(|v| is_lazy_static_init(v))
+                .map(|v| {
+                    Item::Fn(rokc_ast::FnDef {
+                        vis: Visibility::Private,
+                        attrs: Vec::new(),
+                        name: lazy_init_fn_name(&s.name),
+                        generics: rokc_ast::Generics::default(),
+                        params: Vec::new(),
+                        ret_ty: Some(s.ty.clone()),
+                        // `return v;` (not a trailing `v`): the return type
+                        // is the expected type that infers `Atomic::new(0)`.
+                        body: Some(rokc_ast::Block {
+                            stmts: vec![rokc_ast::Stmt {
+                                kind: rokc_ast::StmtKind::Return(Some(v.clone())),
+                                span: s.span,
+                            }],
+                            trailing: None,
+                            span: s.span,
+                            label: None,
+                        }),
+                        is_async: false,
+                        is_generator: false,
+                        is_unsafe: false,
+                        throws: rokc_ast::ThrowsKind::None,
+                        where_clause: Vec::new(),
+                        span: s.span,
+                    })
+                }),
+            _ => None,
+        })
+        .collect();
+    if inits.is_empty() {
+        return None;
+    }
+    let mut p = program.clone();
+    p.items.extend(inits);
+    Some(p)
+}
+
 pub(super) fn strip_int_suffix(s: &str) -> &str {
     const SUFFIXES: &[&str] = &[
         "isize", "usize", "i64", "u64", "i32", "u32", "i16", "u16", "i8", "u8",
@@ -68,6 +137,8 @@ pub fn lower_full(
     uses: &crate::uses::UseTable,
     reexports: &[crate::uses::ReExport],
 ) -> HirModule {
+    let augmented = with_lazy_static_inits(program);
+    let program = augmented.as_ref().unwrap_or(program);
     // Diagnostics emitted during pre-body passes (impl-target validation
     // etc.) — folded into module.diagnostics once the module exists.
     let mut pre_diags: Vec<rokc_diagnostic::RokDiagnostic> = Vec::new();
@@ -77,25 +148,16 @@ pub fn lower_full(
             msg,
         ));
     };
-    // Spec 6.2: `#[derive(...)]` expansion isn't implemented in stage-1.
-    // Pass over every item and emit an explicit refusal so users don't
-    // get a silent miscompile (`a == b` returning `false` when they
-    // expected the auto-derived equality, etc.).
+    // Spec 6.2: the parser expands `#[derive(..)]` on structs / enums
+    // into impls (`rokc_parser::derive`); a union has no field-wise
+    // meaning.
     for item in &program.items {
-        rokc_diagnostic::set_current_span(item.span());
-        let attrs: &[rokc_ast::Attribute] = match item {
-            Item::Struct(s) => &s.attrs,
-            Item::Enum(e) => &e.attrs,
-            Item::Union(u) => &u.attrs,
-            _ => continue,
-        };
-        for a in attrs {
-            if a.path.as_slice() == ["derive"] {
+        if let Item::Union(u) = item {
+            if let Some((_, at)) = rokc_parser::derive::derive_names(&u.attrs).first() {
+                rokc_diagnostic::set_current_span(*at);
                 err(
                     &mut pre_diags,
-                    "`#[derive(...)]` expansion is not yet implemented; \
-                     write the trait impl by hand for now (spec 6.2)"
-                        .to_owned(),
+                    format!("cannot derive traits for union `{}` (spec 6.2.1)", u.name),
                 );
             }
         }
@@ -166,7 +228,9 @@ pub fn lower_full(
             .items
             .iter()
             .filter_map(|it| match it {
-                Item::TypeAlias(a) if !a.generics.params.is_empty() => {
+                Item::TypeAlias(a)
+                    if !a.generics.params.is_empty() || !a.where_clause.is_empty() =>
+                {
                     Some((a.name.clone(), a.clone()))
                 }
                 _ => None,
@@ -174,6 +238,7 @@ pub fn lower_full(
             .collect(),
         alias_uses: std::cell::RefCell::new(Vec::new()),
     };
+    check_bound_names(program, &names, &mut pre_diags);
 
     // Pass 1a: enums. Generic enums get stashed for lazy instantiation.
     let mut enum_table: HashMap<String, EnumId> = HashMap::new();
@@ -332,8 +397,11 @@ pub fn lower_full(
             }
             _ => Vec::new(),
         };
+        // Two trait impls may both give `S::N` (an ambiguity reported
+        // where it is read, `lower_assoc_const`).
+        let trait_impl = matches!(item, Item::Impl(i) if i.trait_path.is_some());
         for (key, ty, value) in item_consts {
-            if consts.insert(key.clone(), (ty, value)).is_some() {
+            if consts.insert(key.clone(), (ty, value)).is_some() && !trait_impl {
                 err(
                     &mut pre_diags,
                     format!("const `{key}` is defined more than once"),
@@ -361,7 +429,9 @@ pub fn lower_full(
             let ty = resolve_ty_with_structs(&s.ty, &struct_table, &enum_table, sc);
             // Stage-1: the initializer must const-fold to a literal. A
             // non-literal used to zero-initialize the global silently.
+            let lazy = s.value.as_ref().is_some_and(is_lazy_static_init);
             let init = match s.value.as_ref() {
+                Some(_) if lazy => ConstVal::Unit,
                 Some(v) => literal_to_const_val(v, &ty).unwrap_or_else(|| {
                     err(
                         &mut pre_diags,
@@ -382,6 +452,7 @@ pub fn lower_full(
                 init,
                 is_mut: s.is_mut,
                 is_extern: false,
+                init_fn: None,
                 span: s.span,
             });
         }
@@ -411,6 +482,7 @@ pub fn lower_full(
                     init: ConstVal::Unit,
                     is_mut: s.is_mut,
                     is_extern: true,
+                    init_fn: None,
                     span: s.span,
                 });
             }
@@ -1300,6 +1372,7 @@ pub fn lower_full(
         names,
     };
     check_impl_overlap(&env);
+    check_derives(&env, program);
     // Eagerly instantiated generic structs whose fields name projections
     // (`Peekable<ListIter<i32>>`'s `peeked: I::Item | none`): resolve
     // them now that impls are known.
@@ -1366,6 +1439,10 @@ pub fn lower_full(
     structs.extend(sink.extra_structs.into_inner());
     let mut enums = enums;
     enums.extend(sink.extra_enums.into_inner());
+    for s in &mut static_defs {
+        let init = lazy_init_fn_name(&s.name);
+        s.init_fn = functions.iter().find(|f| f.name == init).map(|f| f.id);
+    }
     let mut module = HirModule {
         functions,
         structs,
@@ -1593,7 +1670,9 @@ pub(super) fn hir_expr_has_unknown(e: &HirExpr) -> bool {
         K::Block(b) => hir_block_has_unknown(b),
         K::PrimBinOp { lhs, rhs, .. } => hir_expr_has_unknown(lhs) || hir_expr_has_unknown(rhs),
         K::PrimUnaryOp { operand, .. } | K::Cast { operand, .. } => hir_expr_has_unknown(operand),
-        K::Call { args, .. } | K::EnumVariantInit { args, .. } => any(args),
+        K::Call { args, .. } | K::EnumVariantInit { args, .. } | K::CoroNew { args, .. } => {
+            any(args)
+        }
         K::CallIndirect { callee, args, .. } => hir_expr_has_unknown(callee) || any(args),
         K::ClosureValue { env, .. } => hir_expr_has_unknown(env),
         K::CallClosure { closure, args, .. } => hir_expr_has_unknown(closure) || any(args),
@@ -1628,7 +1707,7 @@ pub(super) fn hir_expr_has_unknown(e: &HirExpr) -> bool {
         K::ArrayIndex { array, index, .. } => {
             hir_expr_has_unknown(array) || hir_expr_has_unknown(index)
         }
-        K::UnionWrite { value, .. } => hir_expr_has_unknown(value),
+        K::UnionWrite { value, .. } | K::Suspend { value, .. } => hir_expr_has_unknown(value),
         K::BufNew { len, .. } | K::RawRead { addr: len, .. } => hir_expr_has_unknown(len),
         K::RawWrite { addr, value, .. } => {
             hir_expr_has_unknown(addr) || hir_expr_has_unknown(value)
@@ -2270,6 +2349,175 @@ fn impl_consts(
     (keyed, Some(set))
 }
 
+/// Spec 6.2.1 / stdlib 2.5.9, 2.13.3: `#[derive(Tr)]` needs every field
+/// to implement `Tr` (checked here on non-generic types; a generic one's
+/// impl bounds its parameters by `Tr`), and `Copy` excludes `Drop`.
+fn check_derives(env: &Env<'_>, program: &Program) {
+    let no_subst = HashMap::new();
+    let ctx = LowerCtx::new(env, &no_subst, None);
+    for item in &program.items {
+        let (attrs, name, generic, fields): (_, _, _, Vec<(String, HirTy)>) = match item {
+            Item::Struct(s) => (
+                &s.attrs,
+                &s.name,
+                !s.generics.params.is_empty(),
+                env.struct_table.get(&s.name).map_or_else(Vec::new, |id| {
+                    ctx.struct_def(*id)
+                        .fields
+                        .iter()
+                        .map(|f| (f.name.clone(), f.ty.clone()))
+                        .collect()
+                }),
+            ),
+            Item::Enum(e) => (
+                &e.attrs,
+                &e.name,
+                !e.generics.params.is_empty(),
+                env.enum_table.get(&e.name).map_or_else(Vec::new, |id| {
+                    ctx.enum_def(*id)
+                        .variants
+                        .iter()
+                        .flat_map(|v| {
+                            super::expr::variant_arg_tys(v)
+                                .into_iter()
+                                .map(|t| (v.name.clone(), t))
+                        })
+                        .collect()
+                }),
+            ),
+            _ => continue,
+        };
+        if generic {
+            continue;
+        }
+        let self_ty = match item {
+            Item::Struct(s) => env.struct_table.get(&s.name).map(|id| HirTy::Struct(*id)),
+            Item::Enum(e) => env.enum_table.get(&e.name).map(|id| HirTy::Enum(*id)),
+            _ => None,
+        };
+        for (tr, at) in rokc_parser::derive::derive_names(attrs) {
+            let Some(key) = rokc_parser::derive::derivable(&tr) else {
+                continue;
+            };
+            rokc_diagnostic::set_current_span(at);
+            for (field, ty) in &fields {
+                if !ctx.implements_trait(ty, key, 0) {
+                    ctx.emit_error(
+                        rokc_diagnostic::ErrorKind::Meta,
+                        format!(
+                            "cannot derive `{tr}` for `{}`: `{field}` has type `{}`, which does \
+                             not implement `{tr}` (spec 6.2.1)",
+                            leaf_name(name),
+                            ctx.ty_name(ty)
+                        ),
+                    );
+                }
+            }
+            if tr == "Copy"
+                && self_ty
+                    .as_ref()
+                    .is_some_and(|t| ctx.implements_trait(t, "rok::core::marker::Drop", 0))
+            {
+                ctx.emit_error(
+                    rokc_diagnostic::ErrorKind::Meta,
+                    format!(
+                        "cannot derive `Copy` for `{}`: it implements `Drop` (stdlib 2.13.3)",
+                        leaf_name(name)
+                    ),
+                );
+            }
+        }
+    }
+}
+
+/// Every trait named in a bound position — generic parameters, `where`
+/// clauses, supertraits, `impl Tr for` — must exist (`any Tr` and
+/// `fn() + Tr` check their own).
+fn check_bound_names(
+    program: &Program,
+    names: &TypeNames<'_>,
+    pre_diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
+) {
+    let mut check = |b: &Ty, module: &str| {
+        let AstTyKind::Path(p) = &b.kind else {
+            return;
+        };
+        let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
+        let key = names.trait_key(&segs, module);
+        // A bootstrap trait keys by its leaf (see `trait_key`).
+        if names.traits.contains(&key) || names.traits.iter().any(|t| leaf_name(t) == key) {
+            return;
+        }
+        rokc_diagnostic::set_current_span(b.span);
+        pre_diags.push(rokc_diagnostic::RokDiagnostic::error(
+            rokc_diagnostic::ErrorKind::Resolve,
+            format!("cannot find trait `{}` (named in a bound)", segs.join("::")),
+        ));
+    };
+    let mut generics = |g: &rokc_ast::Generics, w: &[rokc_ast::WherePred], module: &str| {
+        for gp in &g.params {
+            if let rokc_ast::GenericParam::Type { bounds, .. } = gp {
+                bounds.iter().for_each(|b| check(b, module));
+            }
+        }
+        for p in w {
+            p.bounds.iter().for_each(|b| check(b, module));
+        }
+    };
+    let fn_bounds =
+        |f: &FnDef, generics: &mut dyn FnMut(&rokc_ast::Generics, &[rokc_ast::WherePred], &str)| {
+            generics(&f.generics, &f.where_clause, &module_of(&f.name));
+        };
+    let mut impl_paths: Vec<(Ty, String)> = Vec::new();
+    for item in &program.items {
+        let module = item_module(item);
+        match item {
+            Item::Fn(f) => fn_bounds(f, &mut generics),
+            Item::Struct(s) => generics(&s.generics, &s.where_clause, &module),
+            Item::Enum(e) => generics(&e.generics, &e.where_clause, &module),
+            Item::Union(u) => generics(&u.generics, &u.where_clause, &module),
+            Item::TypeAlias(a) => generics(&a.generics, &a.where_clause, &module),
+            Item::Trait(t) => {
+                generics(&t.generics, &t.where_clause, &module);
+                for s in &t.supertraits {
+                    impl_paths.push((s.clone(), module.clone()));
+                }
+                for ti in &t.items {
+                    match ti {
+                        rokc_ast::TraitItem::Method(m) => fn_bounds(m, &mut generics),
+                        rokc_ast::TraitItem::AssocType { bounds, .. } => {
+                            impl_paths.extend(bounds.iter().map(|b| (b.clone(), module.clone())));
+                        }
+                        rokc_ast::TraitItem::Const { .. } => {}
+                    }
+                }
+            }
+            Item::Impl(i) => {
+                let module = impl_module(i);
+                generics(&i.generics, &i.where_clause, &module);
+                if let Some(tp) = &i.trait_path {
+                    impl_paths.push((
+                        Ty {
+                            kind: AstTyKind::Path(tp.clone()),
+                            span: tp.span,
+                        },
+                        module.clone(),
+                    ));
+                }
+                for ii in &i.items {
+                    if let AstImplItem::Method(m) = ii {
+                        fn_bounds(m, &mut generics);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for (t, module) in &impl_paths {
+        check(t, module);
+    }
+}
+
 /// Spec 2.10.4: every generic struct / union / enum instantiation must
 /// meet its parameters' bounds, inline (`T: Tr`) and `where` alike.
 fn check_type_bounds(env: &Env<'_>) {
@@ -2325,7 +2573,20 @@ fn check_type_bounds(env: &Env<'_>) {
             ));
         }
     }
-    // Spec 2.10.4: a generic alias's bounds hold at each use.
+    // Spec 2.10.4: a non-generic alias's `where` holds once (at the
+    // alias); a generic alias's bounds hold at each use.
+    for (full, def) in &env.names.generic_aliases {
+        if def.generics.params.is_empty() {
+            insts.push((
+                leaf_name(full).to_owned(),
+                module_of(full),
+                Vec::new(),
+                &def.generics,
+                &def.where_clause,
+                def.span,
+            ));
+        }
+    }
     let uses = env.names.alias_uses.borrow().clone();
     for (full, args, module, span) in uses {
         let Some(def) = env.names.generic_aliases.get(&full) else {

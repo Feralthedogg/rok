@@ -1,14 +1,18 @@
-//! One exhaustive pre-order AST walker for the lowering pre-passes
-//! (generic-instantiation discovery, closure capture analysis). Every
-//! match is exhaustive so a new AST node kind is a compile error here
-//! instead of a silently skipped subtree.
+//! One exhaustive pre-order AST walker.
+//!
+//! For the lowering pre-passes (generic-instantiation discovery, closure
+//! capture analysis) and the driver. Every match is exhaustive so a new
+//! AST node kind is a compile error here instead of a silently skipped
+//! subtree.
 
 use rokc_ast::{
     AccessTail, Block, CallArg, EnumVariantKind, Expr, ExprKind, FnDef, ImplItem, Item, Pattern,
     PatternKind, Stmt, StmtKind, StructKind, TraitItem, Ty, TyKind,
 };
 
-/// Callbacks for `walk_*`. Scope events (`push_scope` / `bind` /
+/// Callbacks for `walk_*`.
+///
+/// Scope events (`push_scope` / `bind` /
 /// `pop_scope`) follow the language's lexical rules: a `let` binds after
 /// its initializer, match / for / closure binders are scoped to their
 /// body.
@@ -24,6 +28,9 @@ pub trait AstVisitor {
     }
     fn push_scope(&mut self) {}
     fn pop_scope(&mut self) {}
+    /// Around a closure body or a coroutine (`async` / `yield`) block.
+    fn enter_body(&mut self) {}
+    fn leave_body(&mut self) {}
 }
 
 pub fn walk_item(v: &mut impl AstVisitor, item: &Item) {
@@ -180,6 +187,10 @@ pub fn walk_stmt(v: &mut impl AstVisitor, s: &Stmt) {
                 v.bind_at(r, s.span);
             }
         }
+        StmtKind::LetPattern { pat, init } => {
+            walk_expr(v, init);
+            walk_pat(v, pat);
+        }
         StmtKind::LetStruct {
             path,
             fields,
@@ -259,11 +270,12 @@ pub fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
                 walk_expr(v, val);
             }
         }
-        ExprKind::Block(b)
-        | ExprKind::Unsafe(b)
-        | ExprKind::AsyncBlock(b)
-        | ExprKind::YieldBlock(b)
-        | ExprKind::AsyncYieldBlock(b) => walk_block(v, b),
+        ExprKind::Block(b) | ExprKind::Unsafe(b) => walk_block(v, b),
+        ExprKind::AsyncBlock(b) | ExprKind::YieldBlock(b) | ExprKind::AsyncYieldBlock(b) => {
+            v.enter_body();
+            walk_block(v, b);
+            v.leave_body();
+        }
         ExprKind::If {
             cond,
             then_branch,
@@ -432,7 +444,9 @@ pub fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
             if let Some(t) = ret_ty {
                 walk_ty(v, t);
             }
+            v.enter_body();
             walk_expr(v, body);
+            v.leave_body();
             v.pop_scope();
         }
         ExprKind::StructInit {

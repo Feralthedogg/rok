@@ -1,0 +1,76 @@
+// rok::core::task::time — `Duration` / `Instant` (stdlib spec 2.18.6,
+// 3.3.2). `rok::std::time` re-exports both.
+
+extern "C" {
+    fn rok_time_now_ns() -> i64;
+}
+
+/// A span of time: `i64` nanoseconds (about ±292 years, 3.3.1).
+pub struct Duration {
+    ns: i64;
+}
+
+impl Duration {
+    pub fn ns(n: i64) -> Duration { return Duration { ns: n }; }
+    pub fn us(n: i64) -> Duration { return Duration { ns: n * 1000 }; }
+    pub fn ms(n: i64) -> Duration { return Duration { ns: n * 1000000 }; }
+    pub fn sec(n: i64) -> Duration { return Duration { ns: n * 1000000000 }; }
+    pub fn min(n: i64) -> Duration { return Duration::sec(n * 60); }
+    pub fn hours(n: i64) -> Duration { return Duration::sec(n * 3600); }
+    pub fn days(n: i64) -> Duration { return Duration::sec(n * 86400); }
+
+    pub fn as_nanos(self) -> i64 { return self.ns; }
+    pub fn as_micros(self) -> i64 { return self.ns / 1000; }
+    pub fn as_millis(self) -> i64 { return self.ns / 1000000; }
+    pub fn as_secs(self) -> i64 { return self.ns / 1000000000; }
+}
+
+impl Add for Duration {
+    type Output = Duration;
+    fn add(self, rhs: Duration) -> Duration { return Duration { ns: self.ns + rhs.ns }; }
+}
+
+impl Sub for Duration {
+    type Output = Duration;
+    fn sub(self, rhs: Duration) -> Duration { return Duration { ns: self.ns - rhs.ns }; }
+}
+
+/// A point on the monotonic clock (3.3.2); only meaningful within one
+/// process.
+pub struct Instant {
+    ns: i64;
+}
+
+impl Instant {
+    pub fn now() -> Instant { return Instant { ns: unsafe { rok_time_now_ns() } }; }
+    pub fn elapsed(self) -> Duration { return Instant::now().duration_since(self); }
+    pub fn duration_since(self, earlier: Instant) -> Duration {
+        return Duration { ns: self.ns - earlier.ns };
+    }
+    pub fn checked_duration_since(self, earlier: Instant) -> Duration | none {
+        if earlier.ns > self.ns {
+            return none;
+        }
+        return self.duration_since(earlier);
+    }
+    pub fn saturating_duration_since(self, earlier: Instant) -> Duration {
+        if earlier.ns > self.ns {
+            return Duration { ns: 0 };
+        }
+        return self.duration_since(earlier);
+    }
+    pub fn checked_add(self, d: Duration) -> Instant | none { return Instant { ns: self.ns + d.ns }; }
+    pub fn checked_sub(self, d: Duration) -> Instant | none { return Instant { ns: self.ns - d.ns }; }
+    /// Monotonic nanoseconds (the executor's clock).
+    pub fn as_nanos(self) -> i64 { return self.ns; }
+}
+
+impl Add<Duration> for Instant {
+    type Output = Instant;
+    fn add(self, rhs: Duration) -> Instant { return Instant { ns: self.ns + rhs.ns }; }
+}
+
+impl Sub<Duration> for Instant {
+    type Output = Instant;
+    fn sub(self, rhs: Duration) -> Instant { return Instant { ns: self.ns - rhs.ns }; }
+}
