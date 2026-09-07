@@ -1,0 +1,36 @@
+// expect-exit: 0
+// expect-stdout:
+// 4
+// -1
+// 9
+// -2
+
+// Spec 4.4.9: a function value that throws less goes into a `fn` slot
+// that throws more through a compiler adapter — now also a `fn`-typed
+// variable or a capturing closure (the adapter captures the callee).
+struct Negative { v: i32; }
+struct TooBig { v: i32; }
+
+fn check(x: i32) throws (Negative) -> i32 {
+    if x < 0 { throw Negative { v: x }; }
+    return x * 2;
+}
+
+fn run(f: fn(i32) throws (Negative | TooBig) -> i32, x: i32) -> i32 {
+    return try f(x) catch e: Negative { -1 } catch e: TooBig { -2 };
+}
+
+fn main() -> i32 {
+    let g: fn(i32) throws (Negative) -> i32 = check;
+    rok_print_i32(run(g, 2));
+    rok_print_i32(run(g, -5));
+    let k = 3;
+    let plain: fn(i32) -> i32 = |x| x * k;
+    rok_print_i32(run(plain, 3));
+    let limited: fn(i32) throws (Negative | TooBig) -> i32 = |x| {
+        if x > 100 { throw TooBig { v: x }; }
+        return x;
+    };
+    rok_print_i32(run(limited, 500));
+    return 0;
+}

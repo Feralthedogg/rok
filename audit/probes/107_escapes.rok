@@ -7,12 +7,12 @@
 // 1
 
 // spec 1.7.1: `\u{...}` (with `_`), `\xHH`, line continuation; non-ASCII
-// text passes through unchanged. spec 1.6.1: `.5` and `1f32` literals.
+// text passes through unchanged. spec 1.6.1: `0.5` and `1f32` literals (`.5` is a tuple index, E5).
 fn main() -> i32 {
     rok_print_str("\u{AC00}\x41\u{1_F600} 세계");
     rok_print_str("one \
                    two");
-    let h: f64 = .5;
+    let h: f64 = 0.5;
     let f: f32 = 1f32;
     if h < 1.0 {
         rok_print_i32(1);

@@ -124,6 +124,9 @@ pub enum TokenKind {
     Tilde,
     Shl,
     Shr,
+    /// Unicode math operator (spec 1.10.3): `× ⋅ ∘ √ ∈ ∉ ⊂ ⊆ ∪ ∩`.
+    /// `÷ ≡ ≠ ≤ ≥` lex as their ASCII synonyms (`Slash`, `EqEq`, ...).
+    MathOp(char),
 
     // Broadcast (`.` prefix).
     DotPlus,

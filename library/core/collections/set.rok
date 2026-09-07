@@ -92,16 +92,20 @@ impl<T: Hash> Set<T> {
     }
 
     pub fn to_list(self) -> List<T> {
+        return self.d.keys().collect();
+    }
+
+    pub fn iter(self) -> DictKeys<T, bool> {
         return self.d.keys();
     }
 }
 
 /// `for x in s` (2.9.9).
 impl<T: Hash> IntoIterator for Set<T> {
-    type IntoIter = ListIter<T>;
+    type IntoIter = DictKeys<T, bool>;
     type Item = T;
-    fn into_iter(self) -> ListIter<T> {
-        return self.d.keys().iter();
+    fn into_iter(self) -> DictKeys<T, bool> {
+        return self.d.keys();
     }
 }
 

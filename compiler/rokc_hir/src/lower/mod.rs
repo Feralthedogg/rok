@@ -49,9 +49,9 @@ use resolve::{
     split_trait_args, substitute_aliases, ty_mangle, visible_from,
 };
 use throws::{
-    ErrFrame, adapt_fn_value, erase_unbound_errors, exit_through, finish_throwing_body, jump_index,
-    lower_catch, lower_return, lower_throw, lower_try, main_frame, rethrows_value, sig_ret_ast,
-    uncaught_in_main, unpack_call,
+    ErrFrame, adapt_fn_value, adapt_never_fn, erase_unbound_errors, exit_through,
+    finish_throwing_body, jump_index, lower_catch, lower_return, lower_throw, lower_try,
+    main_frame, rethrows_value, sig_ret_ast, uncaught_in_main, unpack_call,
 };
 
 /// Outcome of glob resolution for one bare name. Single imports always
@@ -299,6 +299,9 @@ struct GenericTraitImpl {
 /// body (plus the interior-mutable `sink`).
 struct Env<'a> {
     fn_table: HashMap<String, FnSig>,
+    /// `extern` fns: one global C namespace, callable by bare name from
+    /// every module (they are not module items, spec 5.9).
+    extern_fns: std::collections::HashSet<String>,
     method_table: HashMap<(MethodTarget, String), FunctionId>,
     method_info: HashMap<FunctionId, MethodInfo>,
     structs: Vec<HirStructDef>,
@@ -328,6 +331,9 @@ struct Env<'a> {
     generic_trait_impls: Vec<GenericTraitImpl>,
     /// `#[intrinsic("rok.OP.TYPE")]` methods: calls lower to the op.
     intrinsics: HashMap<FunctionId, PrimOp>,
+    /// `extern` functions: a `fn` argument must be a named fn (a C
+    /// function pointer), not a closure or `fn` variable.
+    extern_fn_ids: std::collections::HashSet<FunctionId>,
     prec: &'a PrecTable,
     sink: ClosureSink,
     /// Visibility of every value-namespace item, keyed by full name.
@@ -465,9 +471,22 @@ fn ty_compatible(expected: &HirTy, actual: &HirTy) -> bool {
         (HirTy::Array(a, n), HirTy::Array(b, m)) => n == m && ty_compatible(a, b),
         (HirTy::GcBuf(a), HirTy::GcBuf(b)) => ty_compatible(a, b),
         // E3: `fn() + Send` flows into `fn()`, not the reverse.
+        // A `fn() -> !` value is no `fn() -> R` pointer (different
+        // return ABI): only `adapt_never_fn` makes one from a named fn.
         (HirTy::Fn(a1, r1, b1), HirTy::Fn(a2, r2, b2)) => {
-            all(a1, a2) && ty_compatible(r1, r2) && b1.iter().all(|b| b2.contains(b))
+            all(a1, a2)
+                && ty_compatible(r1, r2)
+                && (**r2 != HirTy::Never || **r1 == HirTy::Never)
+                && b1.iter().all(|b| b2.contains(b))
         }
+        // Spec 4.4.2: a closure is a value of its `fn` type (`coerce`
+        // checks a bound against its captures).
+        (
+            HirTy::Fn(a1, r1, _),
+            HirTy::Closure {
+                args: a2, ret: r2, ..
+            },
+        ) => all(a1, a2) && ty_compatible(r1, r2),
         // Error types must match exactly: a wider error slot has another
         // carrier layout (fn values are adapted by `adapt_fn_value`).
         (HirTy::Throws { ok: o1, err: e1 }, HirTy::Throws { ok: o2, err: e2 }) => {
@@ -480,13 +499,28 @@ fn ty_compatible(expected: &HirTy, actual: &HirTy) -> bool {
 /// Wrap `value` into `slot` (sum injection) and report a type mismatch.
 /// `what` names the slot for the diagnostic ("argument 1 of `f`").
 fn coerce(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr, what: &dyn Fn() -> String) -> HirExpr {
+    let value = adapt_never_fn(ctx, slot, value);
     let value = adapt_fn_value(ctx, slot, value);
     let value = box_into_any(ctx, slot, value);
     let value = drop_fn_bounds(slot, value);
-    let v = wrap_into_sum(slot, value);
-    if !ty_compatible(slot, &v.ty) {
-        let hint = if matches!((slot, &v.ty), (HirTy::Fn(..), HirTy::Closure { .. })) {
-            " — a closure that captures variables is not a plain `fn` pointer (spec 4.6)"
+    let mut v = wrap_into_sum(slot, value);
+    // Same `{code, env}` layout: the closure takes the slot's type once
+    // its captures meet the slot's bounds (`+ Send`).
+    let closure_fits = |v: &HirExpr| match (slot, &v.ty) {
+        (HirTy::Fn(_, _, want), HirTy::Closure { .. }) => {
+            ty_compatible(slot, &v.ty) && want.iter().all(|b| ctx.implements_trait(&v.ty, b, 0))
+        }
+        _ => false,
+    };
+    if closure_fits(&v) {
+        v.ty = slot.clone();
+    }
+    if !ty_compatible(slot, &v.ty)
+        || matches!(v.ty, HirTy::Closure { .. } if matches!(slot, HirTy::Fn(..)))
+    {
+        let hint = if matches!((slot, &v.ty), (HirTy::Fn(_, _, want), HirTy::Closure { .. }) if !want.is_empty())
+        {
+            " — the closure's captures don't meet the `fn` type's bounds"
         } else if matches!((slot, &v.ty), (HirTy::Fn(_, _, want), HirTy::Fn(_, _, have))
             if !want.iter().all(|b| have.contains(b)))
         {
@@ -495,8 +529,8 @@ fn coerce(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr, what: &dyn Fn() -> S
         } else if matches!((slot, &v.ty), (HirTy::Fn(_, r, _), HirTy::Fn(..))
             if matches!(**r, HirTy::Throws { .. }))
         {
-            " — only a named function or a capture-free closure is adapted to a `fn` type \
-             that throws more (spec 4.4.9)"
+            " — a function value fits a `fn` type that throws more only with the same \
+             parameters and result (spec 4.4.9)"
         } else {
             ""
         };
@@ -741,6 +775,10 @@ enum ArgSrc<'e> {
 /// generic structs. Lowering pushes here as it walks expressions.
 struct ClosureSink {
     extras: std::cell::RefCell<Vec<HirFunction>>,
+    /// `ref self` methods (spec 4.7.5) → `(declared return, Self)`. Such
+    /// a function returns `(ret, self)` (just `self` for a unit `ret`);
+    /// the call site writes `self` back into the receiver.
+    ref_self: std::cell::RefCell<HashMap<FunctionId, (HirTy, HirTy)>>,
     next_id: std::cell::Cell<u32>,
     /// Cached monomorphizations: `(generic_fn_name, concrete_type_args)`
     /// → specialized `FunctionId`.
@@ -786,6 +824,9 @@ struct LowerCtx<'a> {
     /// where `return` is not allowed (spec 4.16.4). Closures get a fresh
     /// context, so a `return` inside one stays legal.
     implicit_main: bool,
+    /// In a `ref self` method: the `self` local and its type; every
+    /// return also hands back `self`.
+    ref_self: Option<(LocalId, HirTy)>,
     /// Enclosing breakable constructs, innermost last: `(label,
     /// is_loop)` — labelled blocks accept `break 'l` but not `continue`.
     breakables: Vec<(Option<String>, bool)>,
@@ -844,6 +885,7 @@ impl<'a> LowerCtx<'a> {
             fn_ret_ty: HirTy::Unit,
             infer_ret: false,
             implicit_main: false,
+            ref_self: None,
             breakables: Vec::new(),
             break_tys: HashMap::new(),
             expected_ty_stack: Vec::new(),
@@ -1340,6 +1382,10 @@ impl<'a> LowerCtx<'a> {
     /// qualified fn-table key.
     fn resolve_fn_name(&self, segments: &[&str]) -> Option<String> {
         self.resolve_in(segments, &self.env.fn_table)
+            .or_else(|| match segments {
+                [name] if self.env.extern_fns.contains(*name) => Some((*name).to_owned()),
+                _ => None,
+            })
     }
 
     fn report_ambiguous(&self, name: &str, hits: &[String]) {

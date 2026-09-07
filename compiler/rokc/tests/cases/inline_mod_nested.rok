@@ -7,7 +7,7 @@ pub mod outer {
 
     pub mod child {
         pub fn ask() -> i32 { local_helper() }
-        fn local_helper() -> i32 { outer::shared() + outer::shared() }
+        fn local_helper() -> i32 { sup::shared() + sup::shared() }
     }
 
     pub fn forward() -> i32 { shared() }

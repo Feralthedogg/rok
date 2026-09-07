@@ -1,11 +1,11 @@
 // spec: 003.02-unicode-operator
-// probe: negative-must-fail
-// expect-error: unexpected character(s) `≡`
-// expect-exit: 0  (UserOp 토큰 emit 메커니즘이 별도 마일스톤 — 지금은
-//                  silent miscompile 차단 위해 명시 lexical error 거부)
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// equal
+// less
 
-// spec 3.2 / 변경점 1153: Unicode operator alias (`≤`, `≡` 등) — stdlib 가
-// 같은 method 에 다중 #[infix] 부착.
+// spec 1.10.3 / 3.2.3: `≡ ≤` are fixed tokens, synonyms of `== <=`.
 fn main() -> i32 {
     let a = 5;
     let b = 5;

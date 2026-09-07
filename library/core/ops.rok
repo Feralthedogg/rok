@@ -1,139 +1,136 @@
 // Operator traits — the bootstrap source for every operator token.
 //
 // `rokc` reads the `#[infix]` / `#[prefix]` / `#[postfix]` attributes on
-// these methods and builds the precedence table the parser uses. The
-// `#[lang(...)]` attributes (spec 6.4) bind each trait to a compiler
+// these methods to bind each operator token to its trait method;
+// precedence and associativity are fixed by the language (spec 3.2.3)
+// and cannot be set here. The `#[lang(...)]` attributes (spec 6.4) bind each trait to a compiler
 // slot so future passes can swap hardcoded primitive lowering for
 // trait dispatch.
 
 #[lang("add_trait")]
 pub trait Add<Rhs> {
     type Output;
-    #[infix("+", prec = 7, left)]
+    #[infix("+")]
     fn add(self, rhs: Rhs) -> Output;
 }
 
 #[lang("sub_trait")]
 pub trait Sub<Rhs> {
     type Output;
-    #[infix("-", prec = 7, left)]
+    #[infix("-")]
     fn sub(self, rhs: Rhs) -> Output;
 }
 
 #[lang("mul_trait")]
 pub trait Mul<Rhs> {
     type Output;
-    #[infix("*", prec = 8, left)]
+    #[infix("*")]
     fn mul(self, rhs: Rhs) -> Output;
 }
 
 #[lang("div_trait")]
 pub trait Div<Rhs> {
     type Output;
-    #[infix("/", prec = 8, left)]
+    #[infix("/")]
     fn div(self, rhs: Rhs) -> Output;
 }
 
 #[lang("rem_trait")]
 pub trait Rem<Rhs> {
     type Output;
-    #[infix("%", prec = 8, left)]
+    #[infix("%")]
     fn rem(self, rhs: Rhs) -> Output;
 }
 
 #[lang("neg_trait")]
 pub trait Neg {
     type Output;
-    #[prefix("-", prec = 11)]
+    #[prefix("-")]
     fn neg(self) -> Output;
 }
 
 #[lang("not_trait")]
 pub trait Not {
     type Output;
-    #[prefix("!", prec = 11)]
+    #[prefix("!")]
     fn not(self) -> Output;
 }
 
 #[lang("bitnot_trait")]
 pub trait BitNot {
     type Output;
-    #[prefix("~", prec = 11)]
+    #[prefix("~")]
     fn bitnot(self) -> Output;
 }
 
 #[lang("bitand_trait")]
 pub trait BitAnd<Rhs> {
     type Output;
-    #[infix("&", prec = 6, left)]
+    #[infix("&")]
     fn bitand(self, rhs: Rhs) -> Output;
 }
 
 #[lang("bitor_trait")]
 pub trait BitOr<Rhs> {
     type Output;
-    #[infix("|", prec = 5, left)]
+    #[infix("|")]
     fn bitor(self, rhs: Rhs) -> Output;
 }
 
 #[lang("bitxor_trait")]
 pub trait BitXor<Rhs> {
     type Output;
-    #[infix("^", prec = 6, left)]
+    #[infix("^")]
     fn bitxor(self, rhs: Rhs) -> Output;
 }
 
 #[lang("shl_trait")]
 pub trait Shl<Rhs> {
     type Output;
-    #[infix("<<", prec = 9, left)]
+    #[infix("<<")]
     fn shl(self, rhs: Rhs) -> Output;
 }
 
 #[lang("shr_trait")]
 pub trait Shr<Rhs> {
     type Output;
-    #[infix(">>", prec = 9, left)]
+    #[infix(">>")]
     fn shr(self, rhs: Rhs) -> Output;
 }
 
 #[lang("eq_trait")]
 pub trait PartialEq<Rhs> {
-    #[infix("==", prec = 4, none)]
-    #[infix("≡", prec = 4, none)]
+    #[infix("==")]
     fn eq(self, rhs: Rhs) -> bool;
 
-    #[infix("!=", prec = 4, none)]
-    #[infix("≠", prec = 4, none)]
+    #[infix("!=")]
     fn ne(self, rhs: Rhs) -> bool;
 }
 
 #[lang("cmp_trait")]
 pub trait PartialOrd<Rhs> {
-    #[infix("<", prec = 4, none)]
+    #[infix("<")]
     fn lt(self, rhs: Rhs) -> bool;
 
-    #[infix(">", prec = 4, none)]
+    #[infix(">")]
     fn gt(self, rhs: Rhs) -> bool;
 
-    #[infix("<=", prec = 4, none)]
-    #[infix("≤", prec = 4, none)]
+    #[infix("<=")]
     fn le(self, rhs: Rhs) -> bool;
 
-    #[infix(">=", prec = 4, none)]
-    #[infix("≥", prec = 4, none)]
+    #[infix(">=")]
     fn ge(self, rhs: Rhs) -> bool;
 }
 
 #[lang("logical_and_trait")]
 pub trait LogicalAnd<Rhs> {
-    #[infix("&&", prec = 3, left)]
+    #[infix("&&")]
     fn logical_and(self, rhs: Rhs) -> bool;
 }
 
 #[lang("logical_or_trait")]
 pub trait LogicalOr<Rhs> {
-    #[infix("||", prec = 2, left)]
+    #[infix("||")]
     fn logical_or(self, rhs: Rhs) -> bool;
 }
 
@@ -142,80 +139,136 @@ pub trait LogicalOr<Rhs> {
 
 pub trait DotAdd<Rhs> {
     type Output;
-    #[infix(".+", prec = 7, left)]
+    #[infix(".+")]
     fn dot_add(self, rhs: Rhs) -> Output;
 }
 
 pub trait DotSub<Rhs> {
     type Output;
-    #[infix(".-", prec = 7, left)]
+    #[infix(".-")]
     fn dot_sub(self, rhs: Rhs) -> Output;
 }
 
 pub trait DotMul<Rhs> {
     type Output;
-    #[infix(".*", prec = 8, left)]
+    #[infix(".*")]
     fn dot_mul(self, rhs: Rhs) -> Output;
 }
 
 pub trait DotDiv<Rhs> {
     type Output;
-    #[infix("./", prec = 8, left)]
+    #[infix("./")]
     fn dot_div(self, rhs: Rhs) -> Output;
 }
 
 pub trait DotRem<Rhs> {
     type Output;
-    #[infix(".%", prec = 8, left)]
+    #[infix(".%")]
     fn dot_rem(self, rhs: Rhs) -> Output;
 }
 
 pub trait DotCmp<Rhs> {
-    #[infix(".==", prec = 4, none)]
+    #[infix(".==")]
     fn dot_eq(self, rhs: Rhs) -> bool;
 
-    #[infix(".!=", prec = 4, none)]
+    #[infix(".!=")]
     fn dot_ne(self, rhs: Rhs) -> bool;
 
-    #[infix(".<", prec = 4, none)]
+    #[infix(".<")]
     fn dot_lt(self, rhs: Rhs) -> bool;
 
-    #[infix(".>", prec = 4, none)]
+    #[infix(".>")]
     fn dot_gt(self, rhs: Rhs) -> bool;
 
-    #[infix(".<=", prec = 4, none)]
+    #[infix(".<=")]
     fn dot_le(self, rhs: Rhs) -> bool;
 
-    #[infix(".>=", prec = 4, none)]
+    #[infix(".>=")]
     fn dot_ge(self, rhs: Rhs) -> bool;
 }
 
 pub trait DotBitAnd<Rhs> {
     type Output;
-    #[infix(".&", prec = 6, left)]
+    #[infix(".&")]
     fn dot_bitand(self, rhs: Rhs) -> Output;
 }
 
 pub trait DotBitOr<Rhs> {
     type Output;
-    #[infix(".|", prec = 5, left)]
+    #[infix(".|")]
     fn dot_bitor(self, rhs: Rhs) -> Output;
 }
 
 pub trait DotBitXor<Rhs> {
     type Output;
-    #[infix(".^", prec = 6, left)]
+    #[infix(".^")]
     fn dot_bitxor(self, rhs: Rhs) -> Output;
 }
 
 pub trait DotShl<Rhs> {
     type Output;
-    #[infix(".<<", prec = 9, left)]
+    #[infix(".<<")]
     fn dot_shl(self, rhs: Rhs) -> Output;
 }
 
 pub trait DotShr<Rhs> {
     type Output;
-    #[infix(".>>", prec = 9, left)]
+    #[infix(".>>")]
     fn dot_shr(self, rhs: Rhs) -> Output;
+}
+
+// Unicode math operators (stdlib spec 2.3.10). Each method has an ASCII
+// name, so it can be called by name too. `÷` is `Div`, and `≡ ≠ ≤ ≥`
+// are the comparison traits (the lexer reads them as `== != <= >=`).
+
+pub trait Cross<Rhs> {
+    type Output;
+    #[infix("×")]
+    fn cross(self, rhs: Rhs) -> Output;
+}
+
+pub trait Dot<Rhs> {
+    type Output;
+    #[infix("⋅")]
+    fn dot(self, rhs: Rhs) -> Output;
+}
+
+pub trait Compose<Rhs> {
+    type Output;
+    #[infix("∘")]
+    fn compose(self, rhs: Rhs) -> Output;
+}
+
+pub trait Sqrt {
+    type Output;
+    #[prefix("√")]
+    fn sqrt(self) -> Output;
+}
+
+// `a ∈ s` is `s.contains(a)` (`swap`, refs-lang 6.7.2).
+pub trait Contains<Item> {
+    #[infix("∈", swap)]
+    fn contains(self, item: Item) -> bool;
+    #[infix("∉", swap)]
+    fn not_contains(self, item: Item) -> bool;
+}
+
+pub trait Subset<Rhs> {
+    #[infix("⊂")]
+    fn is_proper_subset(self, rhs: Rhs) -> bool;
+    #[infix("⊆")]
+    fn is_subset(self, rhs: Rhs) -> bool;
+}
+
+pub trait Union<Rhs> {
+    type Output;
+    #[infix("∪")]
+    // ponytail: spec 2.3.10 names it `union`, a reserved keyword (1.5).
+    fn union_with(self, rhs: Rhs) -> Output;
+}
+
+pub trait Intersect<Rhs> {
+    type Output;
+    #[infix("∩")]
+    fn intersection(self, rhs: Rhs) -> Output;
 }

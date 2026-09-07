@@ -23,21 +23,30 @@ pub fn lower_ty(ty: &HirTy) -> MirTy {
         // module context can't see payloads).
         HirTy::Enum(_) => MirTy::Prim(PrimTy::I32),
         HirTy::Array(elem, n) => MirTy::Array(Box::new(lower_ty(elem)), *n),
-        HirTy::Fn(args, ret, _) => {
-            MirTy::Fn(args.iter().map(lower_ty).collect(), Box::new(lower_ty(ret)))
-        }
-        // Closure layout: `{fn_ptr, env}` 2-tuple. The lifted function
-        // takes env as its first parameter, so its full signature is
-        // `(env, args...) -> ret`.
-        HirTy::Closure { args, ret, env } => {
-            let env_ty = lower_ty(env);
-            let mut fn_args = vec![env_ty.clone()];
-            fn_args.extend(args.iter().map(lower_ty));
-            MirTy::Tuple(vec![MirTy::Fn(fn_args, Box::new(lower_ty(ret))), env_ty])
+        // Spec 4.4: every function value — named fn or closure — is
+        // `{code, env}`: `code` takes the `GcRef` env first; a named fn's
+        // env is null, a closure's is its boxed captures. Bounds (`+ Send`)
+        // don't change the layout.
+        HirTy::Fn(args, ret, _) | HirTy::Closure { args, ret, .. } => {
+            fat_fn(args.iter().map(lower_ty).collect(), lower_ty(ret))
         }
         HirTy::Throws { ok, err } => carrier(lower_ty(ok), lower_ty(err)),
         HirTy::GcBuf(_) => MirTy::GcRef,
     }
+}
+
+/// `{code: fn(GcRef env, args..) -> ret, env: GcRef}`.
+#[must_use]
+pub fn fat_fn(args: Vec<MirTy>, ret: MirTy) -> MirTy {
+    MirTy::Tuple(vec![code_ty(args, ret), MirTy::GcRef])
+}
+
+/// The code pointer of a function value: the env comes first.
+#[must_use]
+pub fn code_ty(args: Vec<MirTy>, ret: MirTy) -> MirTy {
+    let mut all = vec![MirTy::GcRef];
+    all.extend(args);
+    MirTy::Fn(all, Box::new(ret))
 }
 
 /// Return value of a throwing function: `(is_err: bool, ok, err)`, with
@@ -78,19 +87,10 @@ pub fn lower_ty_in(ty: &HirTy, module: &HirModule) -> MirTy {
             module,
         )),
         HirTy::Array(elem, n) => MirTy::Array(Box::new(lower_ty_in(elem, module)), *n),
-        HirTy::Fn(args, ret, _) => MirTy::Fn(
+        HirTy::Fn(args, ret, _) | HirTy::Closure { args, ret, .. } => fat_fn(
             args.iter().map(|a| lower_ty_in(a, module)).collect(),
-            Box::new(lower_ty_in(ret, module)),
+            lower_ty_in(ret, module),
         ),
-        HirTy::Closure { args, ret, env } => {
-            let env_ty = lower_ty_in(env, module);
-            let mut fn_args = vec![env_ty.clone()];
-            fn_args.extend(args.iter().map(|a| lower_ty_in(a, module)));
-            MirTy::Tuple(vec![
-                MirTy::Fn(fn_args, Box::new(lower_ty_in(ret, module))),
-                env_ty,
-            ])
-        }
         HirTy::Throws { ok, err } => carrier(lower_ty_in(ok, module), lower_ty_in(err, module)),
         _ => lower_ty(ty),
     }

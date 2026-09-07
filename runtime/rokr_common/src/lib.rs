@@ -24,6 +24,12 @@ pub unsafe fn write_stderr(mut msg: *const u8, mut len: usize) {
     }
 }
 
+/// Out of memory (stdlib 2.14.5 `oom_fn`; Fatal, exit 101): the one
+/// path every allocation failure and `rok::core::panic::oom()` take.
+pub fn oom() -> ! {
+    fatal(b"fatal error: out of memory")
+}
+
 /// Fatal runtime error: `msg` + `\n` to stderr, then `exit(101)`.
 /// `exit` (not `_exit`) so buffered stdout from `rok_print_*` is flushed.
 pub fn fatal(msg: &[u8]) -> ! {

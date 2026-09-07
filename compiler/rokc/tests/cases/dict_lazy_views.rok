@@ -1,0 +1,28 @@
+// expect-exit: 0
+// expect-stdout:
+// 60
+// 6
+// 3
+// 1
+// 1
+
+// `Dict::keys` / `values` / `entries` are lazy iterators (2.9.3) that
+// chain into adapters; `{e,}` is a one-element set and `[..]` with no
+// slot type is a `List` (6.5.1 / 6.5.6).
+
+fn main() -> i32 {
+    let d: Dict<i32, i32> = {1: 10, 2: 20, 3: 30};
+    rok_print_i32(d.values().sum());
+    rok_print_i32(d.keys().sum());
+    let big = 0;
+    for (k, v) in d.entries().filter(|e| e.1 > 15) {
+        big = big + k;
+    }
+    rok_print_i32(big - 2);
+    let one = {7,};
+    rok_print_i32(one.len() as i32);
+    let xs = [1, 2, 3];
+    xs.push(4);
+    rok_print_i32(if xs.len() == 4 { 1 } else { 0 });
+    return 0;
+}

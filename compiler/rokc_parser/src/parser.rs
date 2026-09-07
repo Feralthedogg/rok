@@ -1,5 +1,5 @@
 //! Parser entry point. Recursive descent with Pratt-style operator
-//! parsing driven by a `PrecTable`.
+//! parsing over the fixed precedence table (spec 3.2.3).
 //!
 //! Only enough of the grammar is implemented here to drive the rest of
 //! the pipeline end-to-end on tiny programs (`fn main` returning an int).
@@ -16,7 +16,7 @@ use rokc_core::Visibility;
 use rokc_diagnostic::{ErrorKind, RokDiagnostic, Span};
 use rokc_lexer::{Token, TokenKind};
 
-use crate::prec::{Assoc, Fixity, PrecTable};
+use crate::prec::{Assoc, CAST_PREC, COALESCE_PREC, Fixity, fixed_prec};
 
 #[path = "fstring.rs"]
 mod fstring;
@@ -30,7 +30,6 @@ pub struct Parser<'a> {
     pos: usize,
     file: String,
     diagnostics: Vec<RokDiagnostic>,
-    prec: &'a PrecTable,
     /// Whether `Path { ... }` is a struct initializer at this point. We
     /// disable it inside `if`/`while`/`for` conditions so the trailing
     /// `{` is treated as the body brace, not a struct body.
@@ -69,14 +68,10 @@ pub struct Parser<'a> {
 const MAX_DEPTH: u32 = 256;
 const PARSER_STACK: usize = 128 << 20;
 
-pub fn parse_program(
-    tokens: &[Token],
-    prec: &PrecTable,
-    file: impl Into<String>,
-) -> (Program, Vec<RokDiagnostic>) {
+pub fn parse_program(tokens: &[Token], file: impl Into<String>) -> (Program, Vec<RokDiagnostic>) {
     let file = file.into();
     let run = move || {
-        let mut p = Parser::new(tokens, prec, file);
+        let mut p = Parser::new(tokens, file);
         let program = p.parse_program();
         (program, p.diagnostics)
     };
@@ -94,13 +89,12 @@ pub fn parse_program(
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(tokens: &'a [Token], prec: &'a PrecTable, file: impl Into<String>) -> Self {
+    pub fn new(tokens: &'a [Token], file: impl Into<String>) -> Self {
         Self {
             tokens,
             pos: 0,
             file: file.into(),
             diagnostics: Vec::new(),
-            prec,
             struct_expr_allowed: true,
             type_sum_allowed: true,
             pending: None,
@@ -1534,6 +1528,24 @@ impl<'a> Parser<'a> {
         v
     }
 
+    /// A function's name. `union` / `any` are keywords only elsewhere:
+    /// `fn union` (`Set::union`, stdlib 2.9.4) and `fn any`
+    /// (`Iterator::any`, 2.7.1) name functions.
+    fn fn_name(&mut self) -> Option<String> {
+        let name = match self.peek() {
+            TokenKind::Ident(n) => n.clone(),
+            TokenKind::Union => "union".to_owned(),
+            TokenKind::Any => "any".to_owned(),
+            _ => {
+                let s = self.peek_span();
+                self.error(s, "function name expected");
+                return None;
+            }
+        };
+        self.bump();
+        Some(name)
+    }
+
     fn parse_fn(&mut self, vis: Visibility, attrs: Vec<Attribute>) -> Option<FnDef> {
         let mut is_async = false;
         let mut is_generator = false;
@@ -1551,18 +1563,7 @@ impl<'a> Parser<'a> {
             self.bump();
         }
         self.expect(&TokenKind::Fn, "`fn`")?;
-        // `union` is only a keyword at item start: `fn union` (stdlib
-        // `Set::union`, 2.9.4) names a function.
-        let name = if let TokenKind::Ident(n) = self.peek() {
-            n.clone()
-        } else if matches!(self.peek(), TokenKind::Union) {
-            "union".to_owned()
-        } else {
-            let s = self.peek_span();
-            self.error(s, "function name expected");
-            return None;
-        };
-        self.bump();
+        let name = self.fn_name()?;
         // Optional generic parameters.
         let generics = if matches!(self.peek(), TokenKind::Lt) {
             self.parse_generic_params()
@@ -2168,6 +2169,12 @@ impl<'a> Parser<'a> {
                         stmts.push(stmt);
                     }
                 } else {
+                    if let StmtKind::Trailing(e) = &stmt.kind {
+                        if !is_block_like(e) {
+                            let s = self.peek_span();
+                            self.error(s, "expected `;` after expression statement");
+                        }
+                    }
                     stmts.push(stmt);
                 }
                 // Drain follow-up stmts queued by the most recent parse
@@ -2469,6 +2476,39 @@ impl<'a> Parser<'a> {
                     false,
                 ))
             }
+            // Spec 3.9 (Rust rule): a block-like expression in statement
+            // position ends the statement — no `;` needed, and a following
+            // operator starts a new statement (`if c {} -1` is two). Only
+            // the postfix chain (`.m()`, `?`) continues it.
+            TokenKind::If
+            | TokenKind::Match
+            | TokenKind::Loop
+            | TokenKind::While
+            | TokenKind::For
+            | TokenKind::LBrace
+            | TokenKind::Label(_) => {
+                let expr = self.parse_expr_bp(u32::MAX)?;
+                let ends = is_block_like(&expr) || matches!(self.peek(), TokenKind::RBrace);
+                if self.eat(&TokenKind::Semi) || !ends {
+                    if !ends {
+                        self.expect(&TokenKind::Semi, "`;`")?;
+                    }
+                    return Some((
+                        Stmt {
+                            kind: StmtKind::Expr(expr),
+                            span: start,
+                        },
+                        false,
+                    ));
+                }
+                Some((
+                    Stmt {
+                        kind: StmtKind::Trailing(expr),
+                        span: start,
+                    },
+                    true,
+                ))
+            }
             _ => {
                 let expr = self.parse_expr()?;
                 if matches!(self.peek(), TokenKind::Eq) {
@@ -2659,18 +2699,12 @@ impl<'a> Parser<'a> {
 
     fn parse_expr_bp_inner(&mut self, min_bp: u32) -> Option<Expr> {
         let mut lhs = if let Some((sym, span)) = self.peek_op_symbol(Fixity::Prefix) {
-            let Some(entry) = self.prec.lookup(&sym, Fixity::Prefix).cloned() else {
-                self.error(
-                    span,
-                    format!("prefix operator `{sym}` is not defined (no `#[prefix]` registration)"),
-                );
-                return None;
-            };
+            let (prec, _) = fixed_prec(&sym, Fixity::Prefix)?;
             self.bump();
-            let rhs = self.parse_expr_bp(entry.prec)?;
+            let rhs = self.parse_expr_bp(prec)?;
             Expr {
                 kind: ExprKind::OpPrefix {
-                    op: entry.symbol,
+                    op: sym,
                     operand: Box::new(rhs),
                 },
                 span,
@@ -2684,36 +2718,44 @@ impl<'a> Parser<'a> {
         let mut last_none_prec: Option<u32> = None;
 
         loop {
-            // Postfix binds tightest after the primary.
-            if let Some((sym, _)) = self.peek_op_symbol(Fixity::Postfix) {
-                if let Some(entry) = self.prec.lookup(&sym, Fixity::Postfix).cloned() {
-                    if entry.prec >= min_bp {
-                        let span = lhs.span;
-                        self.bump();
-                        lhs = Expr {
-                            kind: ExprKind::OpPostfix {
-                                op: entry.symbol,
-                                operand: Box::new(lhs),
-                            },
-                            span,
-                        };
-                        continue;
-                    }
+            // Spec 3.2.3: `as` / `is` sit at level 10, left-assoc — below
+            // prefix unary (`-x as i64` is `(-x) as i64`), above arithmetic.
+            if matches!(self.peek(), TokenKind::As | TokenKind::Is) {
+                if CAST_PREC < min_bp {
+                    break;
                 }
+                let is_cast = matches!(self.peek(), TokenKind::As);
+                self.bump();
+                let ty_span = self.peek_span();
+                let ty = self.parse_cast_type()?;
+                let span = lhs.span;
+                let kind = if is_cast {
+                    ExprKind::Cast(Box::new(lhs), ty)
+                } else {
+                    // Spec 2.2.5: `v is T` — runtime type test.
+                    ExprKind::Is(
+                        Box::new(lhs),
+                        rokc_ast::Pattern {
+                            kind: rokc_ast::PatternKind::TypeCheck { binder: None, ty },
+                            span: ty_span,
+                        },
+                    )
+                };
+                lhs = Expr { kind, span };
+                continue;
             }
 
             let Some((sym, _)) = self.peek_op_symbol(Fixity::Infix) else {
                 break;
             };
-            // `??` is a language-level operator, not a stdlib trait dispatch.
-            // Hardcode a precedence just below `||` so chains read naturally.
+            // `??` is a language-level desugar (spec 3.8.4), level 1,
+            // right-assoc.
             if sym == "??" {
-                let prec_bp = 1u32;
-                if prec_bp + 1 < min_bp {
+                if COALESCE_PREC < min_bp {
                     break;
                 }
                 self.bump();
-                let rhs = self.parse_expr_bp(prec_bp)?;
+                let rhs = self.parse_expr_bp(COALESCE_PREC)?;
                 let span = lhs.span;
                 lhs = Expr {
                     kind: ExprKind::NullishCoalesce(Box::new(lhs), Box::new(rhs)),
@@ -2721,12 +2763,12 @@ impl<'a> Parser<'a> {
                 };
                 continue;
             }
-            let Some(entry) = self.prec.lookup(&sym, Fixity::Infix).cloned() else {
+            let Some((prec, assoc)) = fixed_prec(&sym, Fixity::Infix) else {
                 break;
             };
-            let (left_bp, right_bp) = match entry.assoc {
-                Assoc::Left | Assoc::None => (entry.prec, entry.prec + 1),
-                Assoc::Right => (entry.prec + 1, entry.prec),
+            let (left_bp, right_bp) = match assoc {
+                Assoc::Left | Assoc::None => (prec, prec + 1),
+                Assoc::Right => (prec + 1, prec),
             };
             if left_bp < min_bp {
                 break;
@@ -2736,31 +2778,28 @@ impl<'a> Parser<'a> {
             // the *outer* iteration would still consume the second `<`,
             // building `(a < b) < c`. Track the last non-assoc prec we
             // consumed and refuse another op at the same prec.
-            if let Some(prev) = last_none_prec {
-                if prev == entry.prec {
-                    let span = self.peek_span();
-                    self.error(
-                        span,
-                        format!(
-                            "non-associative operator `{}` cannot be chained \
-                             (parenthesise to disambiguate)",
-                            entry.symbol
-                        ),
-                    );
-                }
+            if last_none_prec == Some(prec) {
+                let span = self.peek_span();
+                self.error(
+                    span,
+                    format!(
+                        "non-associative operator `{sym}` cannot be chained \
+                         (parenthesise to disambiguate)"
+                    ),
+                );
             }
             self.bump();
             let rhs = self.parse_expr_bp(right_bp)?;
             let span = lhs.span;
             lhs = Expr {
                 kind: ExprKind::OpInfix {
-                    op: entry.symbol,
+                    op: sym,
                     lhs: Box::new(lhs),
                     rhs: Box::new(rhs),
                 },
                 span,
             };
-            last_none_prec = matches!(entry.assoc, Assoc::None).then_some(entry.prec);
+            last_none_prec = matches!(assoc, Assoc::None).then_some(prec);
         }
 
         Some(lhs)
@@ -2817,6 +2856,8 @@ impl<'a> Parser<'a> {
             // Prefix-only tokens.
             (TokenKind::Bang, Fixity::Prefix) => "!".into(),
             (TokenKind::Tilde, Fixity::Prefix) => "~".into(),
+            (TokenKind::MathOp('√'), Fixity::Prefix) => "√".into(),
+            (TokenKind::MathOp(c), Fixity::Infix) if *c != '√' => c.to_string(),
             _ => return None,
         };
         Some((sym, tok.span))
@@ -3394,6 +3435,10 @@ impl<'a> Parser<'a> {
                             self.bump();
                             "union".to_owned()
                         }
+                        TokenKind::Any => {
+                            self.bump();
+                            "any".to_owned()
+                        }
                         TokenKind::IntLit(s) | TokenKind::FloatLit(s) => {
                             // Tuple field: `expr.0`, `expr.1`, ... A float
                             // token `0.1` in `t.0.1` is two accesses.
@@ -3465,31 +3510,6 @@ impl<'a> Parser<'a> {
                             kind: ExprKind::Index(Box::new(expr), Box::new(idx)),
                         };
                     }
-                }
-                TokenKind::As => {
-                    self.bump();
-                    let ty = self.parse_cast_type()?;
-                    expr = Expr {
-                        span: expr.span,
-                        kind: ExprKind::Cast(Box::new(expr), ty),
-                    };
-                }
-                // Spec 2.2.5: `v is T` — runtime type test; binds like
-                // `as` (spec 3.2 gives `is` no precedence row).
-                TokenKind::Is => {
-                    self.bump();
-                    let span = self.peek_span();
-                    let ty = self.parse_cast_type()?;
-                    expr = Expr {
-                        span: expr.span,
-                        kind: ExprKind::Is(
-                            Box::new(expr),
-                            rokc_ast::Pattern {
-                                kind: rokc_ast::PatternKind::TypeCheck { binder: None, ty },
-                                span,
-                            },
-                        ),
-                    };
                 }
                 TokenKind::Question => {
                     self.bump();

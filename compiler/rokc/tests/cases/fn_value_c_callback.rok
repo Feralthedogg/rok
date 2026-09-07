@@ -1,0 +1,21 @@
+// expect-exit: 0
+// expect-stdout:
+// 0
+// 1
+// 2
+
+// A named fn passed to an `extern "C"` function's `fn` parameter goes as
+// a plain C function pointer (spec 5.9.10); rok `fn` values are
+// `{code, env}` pairs everywhere else.
+extern "C" {
+    fn rok_par_for(start: i64, end: i64, step: i64, callback: fn(i64));
+}
+
+fn show(i: i64) {
+    rok_print_i32(i as i32);
+}
+
+fn main() -> i32 {
+    rok_par_for(0i64, 3i64, 1i64, show);
+    return 0;
+}

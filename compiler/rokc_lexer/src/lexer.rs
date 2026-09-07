@@ -8,6 +8,10 @@ use rokc_ast::escape::{EscapeMode, unescape};
 use rokc_diagnostic::{ErrorKind, RokDiagnostic, Span};
 
 use crate::token::{Token, TokenKind, keyword_kind};
+use crate::unicode::{
+    is_bidi_control, is_ident_continue, is_ident_start, is_pictographic, mixed_script,
+    normalize_ident, skeleton,
+};
 
 const INT_SUFFIXES: &[&str] = &[
     "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize",
@@ -24,11 +28,17 @@ pub struct Lexer<'src> {
     col: u32,
     diagnostics: Vec<RokDiagnostic>,
     /// The previous token can end an expression (`x`, `1`, `)`, ...).
-    /// Decides `.5` (float) vs `t .5` (`.` then tuple index).
+    /// Also marks a following `-` as binary (see `prev_minus`).
     prev_ends_expr: bool,
-    /// The previous token was `-`: `-128i8` may use the magnitude
+    /// The previous token was a unary `-` (it did not follow an
+    /// expression): `-128i8` may use the magnitude
     /// `MAX + 1` of a signed suffix type.
     prev_minus: bool,
+    /// First occurrence of each distinct (normalized) identifier, for
+    /// the confusable check (spec 1.4.3); `any_non_ascii` gates it.
+    idents: Vec<(String, Span)>,
+    seen: std::collections::HashSet<String>,
+    any_non_ascii: bool,
 }
 
 impl<'src> Lexer<'src> {
@@ -44,6 +54,9 @@ impl<'src> Lexer<'src> {
             diagnostics: Vec::new(),
             prev_ends_expr: false,
             prev_minus: false,
+            idents: Vec::new(),
+            seen: std::collections::HashSet::new(),
+            any_non_ascii: false,
         }
     }
 
@@ -52,6 +65,7 @@ impl<'src> Lexer<'src> {
         if self.src.starts_with('\u{FEFF}') {
             self.pos = '\u{FEFF}'.len_utf8();
         }
+        self.check_bidi();
         let mut tokens = Vec::new();
         loop {
             self.skip_trivia();
@@ -61,7 +75,7 @@ impl<'src> Lexer<'src> {
             }
             // `None`: invalid input was reported and skipped.
             if let Some(tok) = self.next_token() {
-                self.prev_minus = tok.kind == TokenKind::Minus;
+                self.prev_minus = tok.kind == TokenKind::Minus && !self.prev_ends_expr;
                 self.prev_ends_expr = matches!(
                     tok.kind,
                     TokenKind::Ident(_)
@@ -85,7 +99,64 @@ impl<'src> Lexer<'src> {
                 tokens.push(tok);
             }
         }
+        self.check_confusables();
         (tokens, self.diagnostics)
+    }
+
+    /// Spec 1.1 (E7): bidirectional formatting controls are rejected
+    /// anywhere — comments and strings included (`\u{..}` escapes only).
+    fn check_bidi(&mut self) {
+        if self.src.is_ascii() {
+            return;
+        }
+        let hits: Vec<(usize, char)> = self
+            .src
+            .char_indices()
+            .filter(|&(_, c)| is_bidi_control(c))
+            .collect();
+        for (at, c) in hits {
+            let (line, col) = self.line_col(at);
+            let span = Self::make_span(at, at + c.len_utf8(), line, col);
+            self.error(
+                span,
+                format!(
+                    "bidirectional control character U+{:04X} in source; write it as an \
+                     escape (`\\u{{{:X}}}`) instead",
+                    c as u32, c as u32
+                ),
+            );
+        }
+    }
+
+    /// Spec 1.4.3: warn about distinct identifiers that share a
+    /// confusable skeleton (`σ²` / `σ2`, Latin `a` / Cyrillic `а`).
+    fn check_confusables(&mut self) {
+        if !self.any_non_ascii {
+            return;
+        }
+        let mut by_skel: std::collections::HashMap<String, &(String, Span)> =
+            std::collections::HashMap::new();
+        let mut warns = Vec::new();
+        for id in &self.idents {
+            match by_skel.entry(skeleton(&id.0)) {
+                std::collections::hash_map::Entry::Occupied(o) => {
+                    warns.push((
+                        id.1,
+                        format!(
+                            "identifier `{}` looks like `{}` (confusable spelling)",
+                            id.0,
+                            o.get().0
+                        ),
+                    ));
+                }
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(id);
+                }
+            }
+        }
+        for (span, msg) in warns {
+            self.warning(span, msg);
+        }
     }
 
     fn next_token(&mut self) -> Option<Token> {
@@ -137,6 +208,10 @@ impl<'src> Lexer<'src> {
             d if d.is_ascii_digit() => self.lex_number(),
             _ => match self.peek_char() {
                 Some(c) if is_ident_start(c) => self.lex_ident(),
+                Some(c) if math_op(c).is_some() => {
+                    self.advance(c.len_utf8());
+                    math_op(c)?
+                }
                 _ => {
                     self.skip_invalid();
                     return None;
@@ -156,7 +231,11 @@ impl<'src> Lexer<'src> {
         while let Some(c) = self.peek_char() {
             let ok_start = c.is_ascii() && b"()[]{},;@~+-*/%^=!<>&|.:?'\"".contains(&(c as u8));
             if self.pos > start
-                && (ok_start || is_ident_start(c) || is_whitespace(c) || c.is_ascii_digit())
+                && (ok_start
+                    || is_ident_start(c)
+                    || math_op(c).is_some()
+                    || is_whitespace(c)
+                    || c.is_ascii_digit())
             {
                 break;
             }
@@ -303,10 +382,13 @@ impl<'src> Lexer<'src> {
             self.advance(2);
             return TokenKind::DotDot;
         }
-        // `.5` is a float (spec 1.6.1) unless it follows an expression,
-        // where `t.5` is a tuple-field access.
+        // Spec E5: `.5` is always `.` + tuple index; a float literal needs
+        // its leading `0`. Where no expression precedes, say so.
         if !self.prev_ends_expr && self.bytes.get(self.pos + 1).is_some_and(u8::is_ascii_digit) {
-            return self.lex_number();
+            self.error_from(
+                self.pos,
+                "a float literal needs a leading digit (`0.5`); `.5` is a tuple index",
+            );
         }
         if let Some(kind) = self.try_broadcast() {
             return kind;
@@ -376,17 +458,46 @@ impl<'src> Lexer<'src> {
 
     fn lex_ident(&mut self) -> TokenKind {
         let start = self.pos;
+        let (line, col) = (self.line, self.col);
         self.eat_ident_continue();
-        let lexeme = &self.src[start..self.pos];
-        // ponytail: identifiers are compared as written; NFC
-        // normalisation (spec 1.4.2) needs Unicode tables we don't ship.
-        keyword_kind(lexeme).unwrap_or_else(|| TokenKind::Ident(lexeme.to_owned()))
+        let raw = &self.src[start..self.pos];
+        // Spec 1.4.2: identifiers compare after NFC + variation-selector
+        // removal.
+        let name = normalize_ident(raw);
+        if let Some(k) = keyword_kind(&name) {
+            return k;
+        }
+        let span = Self::make_span(start, self.pos, line, col);
+        if self.seen.insert(name.clone()) {
+            if !raw.is_ascii() {
+                self.any_non_ascii = true;
+                if mixed_script(&name) {
+                    self.warning(
+                        span,
+                        format!("identifier `{name}` mixes Cyrillic with Latin or Greek letters"),
+                    );
+                }
+            }
+            self.idents.push((name.clone(), span));
+        }
+        TokenKind::Ident(name)
     }
 
     fn eat_ident_continue(&mut self) {
+        // Last character that was not an emoji modifier / selector, for
+        // the ZWJ rule (a ZWJ only joins two pictographs).
+        let mut last_base: Option<char> = None;
         while let Some(c) = self.peek_char() {
-            if !is_ident_continue(c) {
+            if c == '\u{200D}' {
+                let next = self.src[self.pos + c.len_utf8()..].chars().next();
+                if !(last_base.is_some_and(is_pictographic) && next.is_some_and(is_pictographic)) {
+                    break;
+                }
+            } else if !is_ident_continue(c) {
                 break;
+            }
+            if !crate::unicode::is_emoji_component(c) {
+                last_base = Some(c);
             }
             self.advance(c.len_utf8());
         }
@@ -419,11 +530,6 @@ impl<'src> Lexer<'src> {
                     self.advance(1);
                 }
             }
-        } else if self.bytes[start] == b'.' {
-            // `.5`
-            is_float = true;
-            self.advance(1);
-            self.eat_digit_seq(10, start);
         } else {
             self.eat_digit_seq(10, start);
             if self.bytes.get(self.pos) == Some(&b'.') {
@@ -552,8 +658,8 @@ impl<'src> Lexer<'src> {
             "u64" | "usize" => (64, false),
             _ => return,
         };
-        // ponytail: `-` directly before the literal admits `MAX + 1`
-        // (`-128i8`); `a -128i8` (binary minus) slips through the same way.
+        // Spec E5: only a unary `-` directly before the literal admits
+        // `MAX + 1` (`-128i8`); in `a - 128i8` the literal is out of range.
         let max = if signed {
             (1u128 << (bits - 1)) - u128::from(!self.prev_minus)
         } else if bits == 128 {
@@ -849,6 +955,14 @@ impl<'src> Lexer<'src> {
         )
     }
 
+    fn warning(&mut self, span: Span, msg: impl Into<String>) {
+        self.diagnostics.push(
+            RokDiagnostic::warning(ErrorKind::Lexical, msg)
+                .with_file(self.file.clone())
+                .with_span(span, ""),
+        );
+    }
+
     fn error(&mut self, span: Span, msg: impl Into<String>) {
         self.diagnostics.push(
             RokDiagnostic::error(ErrorKind::Lexical, msg)
@@ -858,34 +972,24 @@ impl<'src> Lexer<'src> {
     }
 }
 
+/// Spec 1.10.3 Unicode math operators. `÷ ≡ ≠ ≤ ≥` are synonyms of
+/// `/ == != <= >=` and lex as those tokens.
+const fn math_op(c: char) -> Option<TokenKind> {
+    Some(match c {
+        '÷' => TokenKind::Slash,
+        '≡' => TokenKind::EqEq,
+        '≠' => TokenKind::NotEq,
+        '≤' => TokenKind::LtEq,
+        '≥' => TokenKind::GtEq,
+        '×' | '⋅' | '∘' | '√' | '∈' | '∉' | '⊂' | '⊆' | '∪' | '∩' => {
+            TokenKind::MathOp(c)
+        }
+        _ => return None,
+    })
+}
+
 const fn is_whitespace(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0B' | '\x0C')
-}
-
-// ponytail: approximates UAX #31 XID_Start / XID_Continue with std's
-// Alphabetic / Numeric properties plus the common combining-mark and
-// connector ranges (no Unicode tables — zero-dependency policy). Exact
-// XID needs a generated table; add one if an identifier is mis-lexed.
-fn is_ident_start(c: char) -> bool {
-    c == '_' || c.is_alphabetic()
-}
-
-fn is_ident_continue(c: char) -> bool {
-    if c.is_ascii() {
-        return c.is_ascii_alphanumeric() || c == '_';
-    }
-    c.is_alphanumeric()
-        || matches!(c,
-            '\u{0300}'..='\u{036F}' // combining diacritics
-            | '\u{1AB0}'..='\u{1AFF}'
-            | '\u{1DC0}'..='\u{1DFF}'
-            | '\u{20D0}'..='\u{20FF}'
-            | '\u{FE20}'..='\u{FE2F}'
-            | '\u{00B7}' | '\u{0387}' // middle dots (Other_ID_Continue)
-            | '\u{200C}' | '\u{200D}' // ZWNJ / ZWJ
-            | '\u{203F}' | '\u{2040}' | '\u{2054}' | '\u{FE33}' | '\u{FE34}'
-            | '\u{FE4D}'..='\u{FE4F}' | '\u{FF3F}' // connector punctuation
-        )
 }
 
 #[cfg(test)]
@@ -920,7 +1024,6 @@ mod tests {
             "0b1010_0101",
             "3.141_592",
             "1.",
-            ".5",
             "2e10",
             "1.5e-3f32",
             "0xFFu8",
@@ -961,7 +1064,10 @@ mod tests {
             ok("t.5"),
             vec![T::Ident("t".into()), T::Dot, T::IntLit("5".into()), T::Eof]
         );
-        assert_eq!(ok("x = .5")[2], T::FloatLit(".5".into()));
+        err("x = .5");
+        err("5 - 128i8");
+        err("0xFFi8");
+        ok("x = -128i8");
     }
 
     #[test]
@@ -993,7 +1099,7 @@ mod tests {
         assert_eq!(ok("'바깥: loop")[0], T::Label("바깥".into()));
         assert_eq!(ok("'a'")[0], T::CharLit("a".into()));
         for id in ["α", "Δt", "σ²", "변수1", "データ", "_internal", "e\u{301}"] {
-            assert_eq!(ok(id), vec![T::Ident(id.into()), T::Eof]);
+            assert_eq!(ok(id), vec![T::Ident(crate::unicode::nfc(id)), T::Eof]);
         }
         assert_eq!(ok("unsafe using")[..2], [T::Unsafe, T::Using]);
         assert_eq!(ok("a %% b %%= c .%% d .&& e .|| f")[1], T::PercentPercent);

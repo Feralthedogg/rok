@@ -1,0 +1,27 @@
+// expect-exit: 0
+// expect-stdout:
+// 12
+// 3
+// 7
+// 1
+
+// Spec 1.4 (E7): identifiers are UAX31 XID plus the math notation
+// profile (∂ ∇ ∞, sub/superscripts), primes, `∑ ∏ ∫` and emoji. `x²` is a
+// name, not a square. Identifiers compare after NFC.
+fn ∑(a: i32, b: i32) -> i32 { return a + b; }
+
+fn main() -> i32 {
+    let x² = 9;
+    let f′ = 3;
+    let v₀ = 0;
+    let ∂u = x² + f′ + v₀;
+    rok_print_i32(∑(∂u, 0));
+    let 🦀 = 3;
+    let 👩‍💻 = 4;
+    rok_print_i32(🦀);
+    rok_print_i32(🦀 + 👩‍💻);
+    // `é` precomposed and `e` + U+0301 are the same name.
+    let café = 1;
+    rok_print_i32(café);
+    return 0;
+}

@@ -301,17 +301,6 @@ pub(super) fn lower_stmt(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt>
                 if ret == HirTy::Unknown && ctx.infer_ret {
                     ctx.fn_ret_ty = lowered.ty.clone();
                     Some(lowered)
-                } else if matches!((&ret, &lowered.ty), (HirTy::Fn(..), HirTy::Closure { .. })) {
-                    // Spec 4.5/4.6: a capturing closure is a `{fn_ptr, env}`
-                    // pair, not a bare `fn(...)` pointer.
-                    Some(
-                        ctx.error_expr(
-                            lowered.span,
-                            "cannot return a closure through a `fn(...)` pointer return type — \
-                         closures with captures aren't bare function pointers (spec 4.6)"
-                                .to_owned(),
-                        ),
-                    )
                 } else {
                     Some(coerce(ctx, &ret, lowered, &|| {
                         "the return value".to_owned()
@@ -906,47 +895,7 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
                 ),
             }
         }
-        // `[a, b]` is a `List` when the slot is one (spec 6.5.1), else a
-        // fixed array.
-        ExprKind::List(items) if expects_base(ctx, LIST) => {
-            let items: Vec<Vec<Expr>> = items.iter().map(|x| vec![x.clone()]).collect();
-            lower_collection_lit(ctx, LIST, "push", &items, span)
-        }
-        ExprKind::List(items) => {
-            let expected_elem = match ctx.current_expected() {
-                Some(HirTy::Array(e, _)) => Some((**e).clone()),
-                _ => None,
-            };
-            let mut elem_ty = expected_elem;
-            let mut lowered: Vec<HirExpr> = Vec::with_capacity(items.len());
-            for (i, e) in items.iter().enumerate() {
-                let v = lower_expected(ctx, e, elem_ty.clone().unwrap_or(HirTy::Unknown));
-                let v = if let Some(t) = &elem_ty {
-                    coerce(ctx, t, v, &|| format!("array element {i}"))
-                } else {
-                    elem_ty = Some(v.ty.clone());
-                    v
-                };
-                lowered.push(v);
-            }
-            let Some(elem_ty) = elem_ty else {
-                return ctx.error_expr(
-                    span,
-                    "cannot infer the element type of an empty array literal — annotate \
-                     the binding (`let a: [i32; 0] = [];`)"
-                        .to_owned(),
-                );
-            };
-            let len = u32::try_from(lowered.len()).expect("array literal length overflow");
-            HirExpr {
-                ty: HirTy::Array(Box::new(elem_ty.clone()), len),
-                span,
-                kind: HirExprKind::ArrayInit {
-                    elem_ty,
-                    elements: lowered,
-                },
-            }
-        }
+        ExprKind::List(items) => lower_list_lit(ctx, items, span),
         ExprKind::Index(arr, idx) => {
             let arr_h = lower_expected(ctx, arr, HirTy::Unknown);
             // A struct / enum indexes through `Index::index` (spec 3.6).
@@ -2140,7 +2089,35 @@ pub(super) fn call_sig(
     args: &[CallArg],
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
+    let place = receiver.clone();
     let (lowered, lets) = lower_args_for(ctx, sig, callee, receiver, args, span);
+    if let Some((ret, self_ty)) = ctx.env.sink.ref_self.borrow().get(&sig.id).cloned() {
+        let call = HirExpr {
+            kind: HirExprKind::Call {
+                callee: sig.id,
+                args: lowered,
+            },
+            ty: super::mono::ref_self_packed(&ret, &self_ty),
+            span,
+        };
+        let v = super::mono::ref_self_unpack(ctx, call, &ret, place.as_ref());
+        return with_lets(lets, v);
+    }
+    if ctx.env.extern_fn_ids.contains(&sig.id) {
+        for a in &lowered {
+            if matches!(a.ty, HirTy::Fn(..) | HirTy::Closure { .. })
+                && !matches!(a.kind, HirExprKind::FnRef(_))
+            {
+                ctx.emit_error(
+                    rokc_diagnostic::ErrorKind::Type,
+                    format!(
+                        "`{callee}` is a C function: a `fn` argument must name a function \
+                         (a C callback has no room for a closure's captures, spec 5.9)"
+                    ),
+                );
+            }
+        }
+    }
     // Stdlib spec 0.3.2: an intrinsic method's call is its primitive op.
     let kind = match (
         ctx.env.intrinsics.get(&sig.id),
@@ -2879,6 +2856,7 @@ pub(super) fn call_generic_on(
         bind_self(ctx, def, t, hint, &mut subst);
     }
     let mut lowered: Vec<HirExpr> = Vec::with_capacity(args.len() + 1);
+    let place = receiver.clone();
     if let Some(r) = receiver {
         bind_from_arg(ctx, def, self_ty, 0, &r.ty, &mut subst);
         lowered.push(r);
@@ -2964,6 +2942,17 @@ pub(super) fn call_generic_on(
             None => a,
         })
         .collect();
+    if let Some((ret, self_ty)) = ctx.env.sink.ref_self.borrow().get(&mono_id).cloned() {
+        let call = HirExpr {
+            kind: HirExprKind::Call {
+                callee: mono_id,
+                args: lowered,
+            },
+            ty: super::mono::ref_self_packed(&ret, &self_ty),
+            span,
+        };
+        return super::mono::ref_self_unpack(ctx, call, &ret, place.as_ref());
+    }
     HirExpr {
         kind: HirExprKind::Call {
             callee: mono_id,
@@ -3389,6 +3378,30 @@ fn call_impl_method(
     ))
 }
 
+/// `[a, b]` is a `List` (spec 6.5.1); a fixed array only in a slot
+/// typed `[T; N]`.
+fn lower_list_lit(ctx: &mut LowerCtx<'_>, items: &[Expr], span: rokc_diagnostic::Span) -> HirExpr {
+    let Some(HirTy::Array(e, _)) = ctx.current_expected().cloned() else {
+        let items: Vec<Vec<Expr>> = items.iter().map(|x| vec![x.clone()]).collect();
+        return lower_collection_lit(ctx, LIST, "push", &items, span);
+    };
+    let elem_ty = (*e).clone();
+    let mut lowered: Vec<HirExpr> = Vec::with_capacity(items.len());
+    for (i, e) in items.iter().enumerate() {
+        let v = lower_expected(ctx, e, elem_ty.clone());
+        lowered.push(coerce(ctx, &elem_ty, v, &|| format!("array element {i}")));
+    }
+    let len = u32::try_from(lowered.len()).expect("array literal length overflow");
+    HirExpr {
+        ty: HirTy::Array(Box::new(elem_ty.clone()), len),
+        span,
+        kind: HirExprKind::ArrayInit {
+            elem_ty,
+            elements: lowered,
+        },
+    }
+}
+
 const LIST: &str = "rok::core::collections::list::List";
 const SET: &str = "rok::core::collections::set::Set";
 const DICT: &str = "rok::core::collections::dict::Dict";
@@ -3627,13 +3640,28 @@ pub(super) fn lower_infix(
     if matches!(lhs_h.ty, HirTy::AnyTrait(_)) || matches!(rhs_h.ty, HirTy::AnyTrait(_)) {
         return dyn_op(ctx, op, lhs_h, Some(rhs_h), span);
     }
+    // Spec 6.7.2 `swap`: `a ∈ s` is `s.contains(a)`.
+    // ponytail: the call then evaluates `s` before `a`; spill to temps if
+    // operand side effects ever need left-to-right order here.
+    let (lhs_h, rhs_h) = if ctx
+        .env
+        .prec
+        .lookup(op, Fixity::Infix)
+        .is_some_and(|e| e.swap)
+    {
+        (rhs_h, lhs_h)
+    } else {
+        (lhs_h, rhs_h)
+    };
     // Spec 0.4 / 3.1: `a + b` on a user type desugars to the operator
     // trait's method (`impl Add for T`); so does `str` (core::str impls:
-    // concatenation, content comparison).
+    // concatenation, content comparison), and a Unicode math operator
+    // (spec 1.10.3) on any type, primitives included (`impl Sqrt for f64`).
     if matches!(
         lhs_h.ty,
         HirTy::Struct(_) | HirTy::Enum(_) | HirTy::Prim(PrimTy::Str)
-    ) {
+    ) || !op.is_ascii()
+    {
         return dispatch_user_op(ctx, op, Fixity::Infix, lhs_h, Some(rhs_h), span);
     }
     if let (HirTy::Prim(lp), HirTy::Prim(rp)) = (&lhs_h.ty, &rhs_h.ty) {
@@ -3898,7 +3926,7 @@ pub(super) fn lower_prefix(
     if operand_h.ty == HirTy::Unknown {
         return operand_h;
     }
-    if matches!(operand_h.ty, HirTy::Struct(_) | HirTy::Enum(_)) {
+    if matches!(operand_h.ty, HirTy::Struct(_) | HirTy::Enum(_)) || !op.is_ascii() {
         return dispatch_user_op(ctx, op, Fixity::Prefix, operand_h, None, span);
     }
     if matches!(operand_h.ty, HirTy::AnyTrait(_)) {
@@ -4037,12 +4065,12 @@ pub(super) fn infix_for_prim(sym: &str, prim: PrimTy) -> Option<(PrimOp, HirTy)>
         "<<" if prim.is_int() => arith(PrimOp::Shl),
         ">>" if prim.is_int() => arith(PrimOp::Shr),
         // `str` compares contents through its `PartialEq` impl.
-        "==" | "≡" if prim != PrimTy::Str => cmp(PrimOp::Eq),
-        "!=" | "≠" if prim != PrimTy::Str => cmp(PrimOp::Ne),
+        "==" if prim != PrimTy::Str => cmp(PrimOp::Eq),
+        "!=" if prim != PrimTy::Str => cmp(PrimOp::Ne),
         "<" if num => cmp(PrimOp::Lt),
-        "<=" | "≤" if num => cmp(PrimOp::Le),
+        "<=" if num => cmp(PrimOp::Le),
         ">" if num => cmp(PrimOp::Gt),
-        ">=" | "≥" if num => cmp(PrimOp::Ge),
+        ">=" if num => cmp(PrimOp::Ge),
         _ => None,
     }
 }
@@ -4191,6 +4219,34 @@ pub(super) fn lower_literal(
             let Some((value, suffix_ty)) = parse_int_literal(text) else {
                 return ctx.error_expr(span, format!("malformed integer literal `{text}`"));
             };
+            let value = if negate { -value } else { value };
+            // Spec E2: an unsuffixed integer in a float slot is that float
+            // (`a * 2` with `a: f64`, `let x: f64 = 1`), if exact.
+            // An integer member of an expected sum wins (`i32 | f64`).
+            if let Some(fty) = (!has_int_suffix(text)
+                && expected_prim(ctx, PrimTy::is_int).is_none())
+            .then(|| expected_prim(ctx, PrimTy::is_float))
+            .flatten()
+            {
+                #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+                let (bits, exact) = if fty == PrimTy::F32 {
+                    let f = value as f32;
+                    (u64::from(f.to_bits()), f as i128 == value)
+                } else {
+                    let f = value as f64;
+                    (f.to_bits(), f as i128 == value)
+                };
+                if !exact {
+                    return ctx.error_expr(
+                        span,
+                        format!(
+                            "integer literal `{text}` is not exactly representable as `{}`",
+                            fty.name()
+                        ),
+                    );
+                }
+                return konst(ConstVal::Float { bits, ty: fty }, HirTy::Prim(fty));
+            }
             let ty = if has_int_suffix(text) {
                 suffix_ty
             } else {
@@ -4199,7 +4255,6 @@ pub(super) fn lower_literal(
                 })
                 .unwrap_or(PrimTy::I32)
             };
-            let value = if negate { -value } else { value };
             if negate && !ty.is_signed_int() {
                 return ctx.error_expr(
                     span,

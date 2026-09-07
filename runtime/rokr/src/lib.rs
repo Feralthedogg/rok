@@ -107,7 +107,7 @@ fn raw_alloc(size: usize, align: usize) -> *mut u8 {
         p
     };
     if p.is_null() {
-        fatal(b"rok runtime: out of memory");
+        rokr_common::oom();
     }
     p.cast()
 }
@@ -352,6 +352,13 @@ pub unsafe extern "C" fn rok_panic(msg: *const u8, msg_len: usize) -> ! {
     // SAFETY: caller contract.
     unsafe { write_stderr(msg, msg_len) };
     fatal(b"")
+}
+
+/// `rok::core::panic::oom()` (stdlib 2.14.5 `oom_fn`): out of memory,
+/// exit 101. Runtime allocation failures take the same path.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_oom() -> ! {
+    rokr_common::oom()
 }
 
 /// `rok::core::panic::panic(msg)` (stdlib 2.14.5): `rok_panic` for a

@@ -2,7 +2,7 @@
 // Runtime checks must not fire on valid operands.
 
 fn main() -> i32 {
-    let a = [10, 20, 30];
+    let a: [i32; 3] = [10, 20, 30];
     let i: i32 = 2;
     let q: i32 = -7 / 2;
     let r: i32 = -7 % 2;

@@ -151,58 +151,96 @@ impl<K: Hash, V> Dict<K, V> {
         return buf_get(s.vals, at);
     }
 
-    // ponytail: keys / values / entries return fresh `List`s rather than
-    // the spec's lazy iterator types (2.9.3); `for k in d.keys()` reads
-    // the same.
-    pub fn keys(self) -> List<K> {
-        let out: List<K> = List::with_capacity(self.len());
+    /// The first full slot at or after `from`, or the capacity.
+    fn next_full(self, from: usize) -> usize {
         let s: DictSlots<K, V> = buf_get(self.slots, 0);
         let cap: usize = buf_get(self.meta, 1);
-        let i: usize = 0;
-        while i < cap {
-            if buf_get(s.state, i) == 1u8 {
-                out.push(buf_get(s.keys, i));
-            }
+        let i = from;
+        while i < cap && buf_get(s.state, i) != 1u8 {
             i = i + 1;
         }
-        return out;
+        return i;
     }
 
-    pub fn values(self) -> List<V> {
-        let out: List<V> = List::with_capacity(self.len());
-        let s: DictSlots<K, V> = buf_get(self.slots, 0);
-        let cap: usize = buf_get(self.meta, 1);
-        let i: usize = 0;
-        while i < cap {
-            if buf_get(s.state, i) == 1u8 {
-                out.push(buf_get(s.vals, i));
-            }
-            i = i + 1;
-        }
-        return out;
+    /// The keys, lazily (2.9.3; order unspecified).
+    pub fn keys(self) -> DictKeys<K, V> {
+        return DictKeys { d: self, at: 0 };
     }
 
-    pub fn entries(self) -> List<(K, V)> {
-        let out: List<(K, V)> = List::with_capacity(self.len());
-        let s: DictSlots<K, V> = buf_get(self.slots, 0);
-        let cap: usize = buf_get(self.meta, 1);
-        let i: usize = 0;
-        while i < cap {
-            if buf_get(s.state, i) == 1u8 {
-                out.push((buf_get(s.keys, i), buf_get(s.vals, i)));
-            }
-            i = i + 1;
+    /// The values, lazily.
+    pub fn values(self) -> DictValues<K, V> {
+        return DictValues { d: self, at: 0 };
+    }
+
+    /// `(key, value)` pairs, lazily.
+    pub fn entries(self) -> DictEntries<K, V> {
+        return DictEntries { d: self, at: 0 };
+    }
+}
+
+// The iterators walk the live table; a dict changed while iterated
+// gives unspecified (but memory-safe) results.
+
+pub struct DictKeys<K, V> {
+    d: Dict<K, V>;
+    at: usize;
+}
+
+impl<K: Hash, V> Iterator for DictKeys<K, V> {
+    type Item = K;
+    fn next(ref self) -> K | none {
+        let i = self.d.next_full(self.at);
+        if i >= buf_get(self.d.meta, 1) {
+            return none;
         }
-        return out;
+        self.at = i + 1;
+        let s: DictSlots<K, V> = buf_get(self.d.slots, 0);
+        return buf_get(s.keys, i);
+    }
+}
+
+pub struct DictValues<K, V> {
+    d: Dict<K, V>;
+    at: usize;
+}
+
+impl<K: Hash, V> Iterator for DictValues<K, V> {
+    type Item = V;
+    fn next(ref self) -> V | none {
+        let i = self.d.next_full(self.at);
+        if i >= buf_get(self.d.meta, 1) {
+            return none;
+        }
+        self.at = i + 1;
+        let s: DictSlots<K, V> = buf_get(self.d.slots, 0);
+        return buf_get(s.vals, i);
+    }
+}
+
+pub struct DictEntries<K, V> {
+    d: Dict<K, V>;
+    at: usize;
+}
+
+impl<K: Hash, V> Iterator for DictEntries<K, V> {
+    type Item = (K, V);
+    fn next(ref self) -> (K, V) | none {
+        let i = self.d.next_full(self.at);
+        if i >= buf_get(self.d.meta, 1) {
+            return none;
+        }
+        self.at = i + 1;
+        let s: DictSlots<K, V> = buf_get(self.d.slots, 0);
+        return (buf_get(s.keys, i), buf_get(s.vals, i));
     }
 }
 
 /// `for (k, v) in d` (2.9.9).
 impl<K: Hash, V> IntoIterator for Dict<K, V> {
-    type IntoIter = ListIter<(K, V)>;
+    type IntoIter = DictEntries<K, V>;
     type Item = (K, V);
-    fn into_iter(self) -> ListIter<(K, V)> {
-        return self.entries().iter();
+    fn into_iter(self) -> DictEntries<K, V> {
+        return self.entries();
     }
 }
 

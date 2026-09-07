@@ -1,8 +1,8 @@
 //! Parser. Tokens in, AST out.
 //!
-//! Operator precedence is supplied externally (a `PrecTable` built from
-//! stdlib's `#[infix]` / `#[prefix]` / `#[postfix]` attributes). The
-//! parser knows the lexical operator tokens but not their semantics.
+//! Operator precedence is fixed by the language (spec 3.2.3, `prec.rs`).
+//! stdlib's `#[infix]` / `#[prefix]` / `#[postfix]` attributes only bind
+//! tokens to trait methods (`PrecTable`, consumed by HIR).
 
 pub mod lang;
 pub mod parser;

@@ -448,6 +448,7 @@ pub fn lower_full(
     // monomorphize per-call. We stash the AST aside instead of putting
     // them in `decls` / `fn_table`.
     let mut fn_table: HashMap<String, FnSig> = HashMap::new();
+    let mut extern_fns = std::collections::HashSet::new();
     let mut method_table: HashMap<(MethodTarget, String), FunctionId> = HashMap::new();
     let mut method_info: HashMap<FunctionId, MethodInfo> = HashMap::new();
     // Records `(Type, TraitName)` for each `impl Trait for Type` block
@@ -459,6 +460,8 @@ pub fn lower_full(
     let mut generic_methods: HashMap<(String, String), GenericMethod> = HashMap::new();
     let mut generic_trait_impls: Vec<GenericTraitImpl> = Vec::new();
     let mut intrinsics: HashMap<FunctionId, PrimOp> = HashMap::new();
+    let mut ref_self: HashMap<FunctionId, (HirTy, HirTy)> = HashMap::new();
+    let mut extern_fn_ids: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
     let sig_of = |fn_def: &FnDef, id: FunctionId, self_ty: Option<&HirTy>, sc: Scope<'_>| {
         let resolve = |t: &Ty| {
             let mut r = resolve_ty_with_structs(t, &struct_table, &enum_table, sc);
@@ -531,12 +534,14 @@ pub fn lower_full(
                     if fn_table.contains_key(&fn_def.name) {
                         continue;
                     }
+                    extern_fns.insert(fn_def.name.clone());
                     let id = FunctionId(u32::try_from(decls.len()).expect("FunctionId overflow"));
                     let sc = Scope {
                         names: &names,
                         module: "",
                     };
                     fn_table.insert(fn_def.name.clone(), sig_of(fn_def, id, None, sc));
+                    extern_fn_ids.insert(id);
                     decls.push(MethodOrFn::Fn(fn_def));
                 }
             }
@@ -735,23 +740,6 @@ pub fn lower_full(
                 AstImplItem::AssocType { .. } => continue,
             };
             let leaf = leaf_name(&m.name).to_owned();
-            // Spec 2.9.2: `ref self` means the receiver mutates the
-            // caller's binding. Pointer-typed receivers aren't yet
-            // wired through codegen, so the body would silently
-            // mutate a copy — reject explicitly to block the silent
-            // miscompile until ref semantics land.
-            if let Some(first) = m.params.first() {
-                if first.name == "self" && first.by_ref {
-                    err(
-                        &mut pre_diags,
-                        format!(
-                            "method `{leaf}` declares `ref self`, but ref-self \
-                             semantics aren't implemented yet — mutations \
-                             would silently target a copy (spec 2.9.2)"
-                        ),
-                    );
-                }
-            }
             if !explicit_methods.insert(leaf.clone()) {
                 err(
                     &mut pre_diags,
@@ -845,7 +833,11 @@ pub fn lower_full(
                 continue;
             }
             let id = FunctionId(u32::try_from(decls.len()).expect("FunctionId overflow"));
-            fn_table.insert(key, sig_of(m, id, Some(&target_ty), sc));
+            let sig = sig_of(m, id, Some(&target_ty), sc);
+            if is_ref_self(m) {
+                ref_self.insert(id, (sig.ret_ty.clone(), target_ty.clone()));
+            }
+            fn_table.insert(key, sig);
             if let Some(op) = intrinsic_of(m, &module, &mut pre_diags) {
                 intrinsics.insert(id, op);
             }
@@ -945,7 +937,11 @@ pub fn lower_full(
                     names: &names,
                     module: &trait_module,
                 };
-                fn_table.insert(key, sig_of(tm, id, Some(&target_ty), tsc));
+                let sig = sig_of(tm, id, Some(&target_ty), tsc);
+                if is_ref_self(tm) {
+                    ref_self.insert(id, (sig.ret_ty.clone(), target_ty.clone()));
+                }
+                fn_table.insert(key, sig);
                 if let Some(t) = target.clone() {
                     method_table.insert((t, tm.name.clone()), id);
                 }
@@ -1024,11 +1020,13 @@ pub fn lower_full(
         extra_enums: std::cell::RefCell::new(Vec::new()),
         extra_enum_table: std::cell::RefCell::new(HashMap::new()),
         any_tags: std::cell::RefCell::new(Vec::new()),
+        ref_self: std::cell::RefCell::new(ref_self),
         any_dispatch: std::cell::RefCell::new(Vec::new()),
         diagnostics: std::cell::RefCell::new(Vec::new()),
     };
     let env = Env {
         fn_table,
+        extern_fns,
         method_table,
         method_info,
         structs: struct_defs,
@@ -1043,6 +1041,7 @@ pub fn lower_full(
         generic_methods,
         generic_trait_impls,
         intrinsics,
+        extern_fn_ids,
         prec,
         sink,
         item_visibility,
@@ -2176,4 +2175,11 @@ fn subst_assoc_ty(ty: &mut Ty, assoc: &HashMap<String, Ty>) {
         }
         _ => {}
     }
+}
+
+/// A method taking `ref self` (spec 4.7.5).
+pub(super) fn is_ref_self(m: &FnDef) -> bool {
+    m.params
+        .first()
+        .is_some_and(|p| p.name == "self" && p.by_ref)
 }

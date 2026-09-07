@@ -150,7 +150,7 @@ pub fn alloc(size: usize, align: usize, type_id: u32) -> *mut u8 {
         }
     };
     if base.is_null() {
-        fatal(b"rok runtime: out of memory");
+        rokr_common::oom();
     }
     let h = heap();
     // SAFETY: `base..base+total` is ours; `obj` is `align`-aligned and the
@@ -185,7 +185,7 @@ pub fn register_type(type_id: u32, table: *const u8) {
             let p = libc::realloc(h.scan_tables.cast(), len * size_of::<*const u8>())
                 .cast::<*const u8>();
             if p.is_null() {
-                fatal(b"rok runtime: out of memory");
+                rokr_common::oom();
             }
             ptr::write_bytes(p.add(h.scan_len), 0, len - h.scan_len);
             h.scan_tables = p;
@@ -216,7 +216,7 @@ fn build_index() {
         // SAFETY: realloc of our own buffer (or null).
         let p = unsafe { libc::realloc(h.index.cast(), cap * size_of::<usize>()) };
         if p.is_null() {
-            fatal(b"rok runtime: out of memory (GC object index)");
+            rokr_common::oom();
         }
         h.index = p.cast();
         h.index_cap = cap;
@@ -263,7 +263,7 @@ fn push(word: *mut u8, len: &mut usize) {
         // SAFETY: realloc of our own stack (or null).
         let p = unsafe { libc::realloc(h.stack.cast(), cap * size_of::<*mut u8>()) };
         if p.is_null() {
-            fatal(b"rok runtime: out of memory (GC mark stack)");
+            rokr_common::oom();
         }
         h.stack = p.cast();
         h.stack_cap = cap;

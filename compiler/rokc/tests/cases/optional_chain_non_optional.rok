@@ -1,0 +1,8 @@
+// expect-error: it is not optional, so use `.`
+struct P { x: i32 }
+
+fn main() -> i32 {
+    let p = P { x: 1 };
+    let v = p?.x;
+    return 0;
+}

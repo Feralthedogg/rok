@@ -13,7 +13,7 @@
 // generic trait impl, `T::f()` on a type parameter, `i32::add(..)`.
 
 trait Show { fn show(self) -> i32; }
-trait Zero { fn zero() -> Self; }
+trait Origin { fn origin() -> Self; }
 trait Num { fn num(self) -> i32; }
 
 struct Box<T> { v: T; }
@@ -21,22 +21,24 @@ struct Meters { m: i32; }
 
 impl<T> Show for Box<T> { fn show(self) -> i32 { return 5; } }
 impl Show for Meters { fn show(self) -> i32 { return 100 + self.m; } }
-impl Zero for i32 { fn zero() -> i32 { return 3; } }
+impl Origin for i32 { fn origin() -> i32 { return 3; } }
 impl Num for i32 { fn num(self) -> i32 { return self; } }
 impl<T: Num> Show for [T; 2] { fn show(self) -> i32 { return self[0].num() + self[1].num(); } }
 
-fn zero_of<T: Zero>() -> T { return T::zero(); }
+fn origin_of<T: Origin>() -> T { return T::origin(); }
 fn shown<T: Show>(x: T) -> i32 { return T::show(x); }
 
 fn main() -> i32 {
     let b: Box<bool> = Box { v: true };
     rok_print_i32(Show::show(b));
     rok_print_i32(Show::show(Meters { m: 7 }));
-    let z: i32 = Zero::zero();
+    let z: i32 = Origin::origin();
     rok_print_i32(z);
-    rok_print_i32(Show::show([4, 5]));
+    let pair: [i32; 2] = [4, 5];
+    rok_print_i32(Show::show(pair));
     rok_print_i32(Box::show(Box { v: 1 }) + 2);
-    rok_print_i32(zero_of() + 39);
-    rok_print_i32(i32::add(shown([1, 2]), 8));
+    rok_print_i32(origin_of() + 39);
+    let small: [i32; 2] = [1, 2];
+    rok_print_i32(i32::add(shown(small), 8));
     return 0;
 }

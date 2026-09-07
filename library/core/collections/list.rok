@@ -141,7 +141,7 @@ pub struct ListIter<T> {
 
 impl<T> Iterator for ListIter<T> {
     type Item = T;
-    fn next(self) -> T | none {
+    fn next(ref self) -> T | none {
         let i: usize = buf_get(self.pos, 0);
         if i >= self.list.len() {
             return none;

@@ -6,7 +6,26 @@
 // fallback (0.3.4) and what a `fn` value of the method runs.
 // One block per (type, trait); keep it regular.
 
+/// The additive identity — where `Iterator::sum` starts (an empty sum is
+/// `0`).
+pub trait Zero {
+    fn zero() -> Self;
+}
+
+/// The multiplicative identity — where `Iterator::product` starts.
+pub trait One {
+    fn one() -> Self;
+}
+
 // i8
+
+impl Zero for i8 {
+    fn zero() -> i8 { return 0; }
+}
+
+impl One for i8 {
+    fn one() -> i8 { return 1; }
+}
 
 impl Add for i8 {
     type Output = i8;
@@ -105,14 +124,22 @@ impl Hash for i8 {
 }
 
 impl Ord for i8 {
-    fn cmp(self, other: i8) -> i32 {
-        if self < other { return -1; }
-        if self > other { return 1; }
-        return 0;
+    fn cmp(self, other: i8) -> Ordering {
+        if self < other { return Ordering::Less; }
+        if self > other { return Ordering::Greater; }
+        return Ordering::Equal;
     }
 }
 
 // i16
+
+impl Zero for i16 {
+    fn zero() -> i16 { return 0; }
+}
+
+impl One for i16 {
+    fn one() -> i16 { return 1; }
+}
 
 impl Add for i16 {
     type Output = i16;
@@ -211,14 +238,22 @@ impl Hash for i16 {
 }
 
 impl Ord for i16 {
-    fn cmp(self, other: i16) -> i32 {
-        if self < other { return -1; }
-        if self > other { return 1; }
-        return 0;
+    fn cmp(self, other: i16) -> Ordering {
+        if self < other { return Ordering::Less; }
+        if self > other { return Ordering::Greater; }
+        return Ordering::Equal;
     }
 }
 
 // i32
+
+impl Zero for i32 {
+    fn zero() -> i32 { return 0; }
+}
+
+impl One for i32 {
+    fn one() -> i32 { return 1; }
+}
 
 impl Add for i32 {
     type Output = i32;
@@ -317,14 +352,22 @@ impl Hash for i32 {
 }
 
 impl Ord for i32 {
-    fn cmp(self, other: i32) -> i32 {
-        if self < other { return -1; }
-        if self > other { return 1; }
-        return 0;
+    fn cmp(self, other: i32) -> Ordering {
+        if self < other { return Ordering::Less; }
+        if self > other { return Ordering::Greater; }
+        return Ordering::Equal;
     }
 }
 
 // i64
+
+impl Zero for i64 {
+    fn zero() -> i64 { return 0; }
+}
+
+impl One for i64 {
+    fn one() -> i64 { return 1; }
+}
 
 impl Add for i64 {
     type Output = i64;
@@ -423,14 +466,22 @@ impl Hash for i64 {
 }
 
 impl Ord for i64 {
-    fn cmp(self, other: i64) -> i32 {
-        if self < other { return -1; }
-        if self > other { return 1; }
-        return 0;
+    fn cmp(self, other: i64) -> Ordering {
+        if self < other { return Ordering::Less; }
+        if self > other { return Ordering::Greater; }
+        return Ordering::Equal;
     }
 }
 
 // isize
+
+impl Zero for isize {
+    fn zero() -> isize { return 0; }
+}
+
+impl One for isize {
+    fn one() -> isize { return 1; }
+}
 
 impl Add for isize {
     type Output = isize;
@@ -529,14 +580,22 @@ impl Hash for isize {
 }
 
 impl Ord for isize {
-    fn cmp(self, other: isize) -> i32 {
-        if self < other { return -1; }
-        if self > other { return 1; }
-        return 0;
+    fn cmp(self, other: isize) -> Ordering {
+        if self < other { return Ordering::Less; }
+        if self > other { return Ordering::Greater; }
+        return Ordering::Equal;
     }
 }
 
 // u8
+
+impl Zero for u8 {
+    fn zero() -> u8 { return 0; }
+}
+
+impl One for u8 {
+    fn one() -> u8 { return 1; }
+}
 
 impl Add for u8 {
     type Output = u8;
@@ -629,14 +688,22 @@ impl Hash for u8 {
 }
 
 impl Ord for u8 {
-    fn cmp(self, other: u8) -> i32 {
-        if self < other { return -1; }
-        if self > other { return 1; }
-        return 0;
+    fn cmp(self, other: u8) -> Ordering {
+        if self < other { return Ordering::Less; }
+        if self > other { return Ordering::Greater; }
+        return Ordering::Equal;
     }
 }
 
 // u16
+
+impl Zero for u16 {
+    fn zero() -> u16 { return 0; }
+}
+
+impl One for u16 {
+    fn one() -> u16 { return 1; }
+}
 
 impl Add for u16 {
     type Output = u16;
@@ -729,14 +796,22 @@ impl Hash for u16 {
 }
 
 impl Ord for u16 {
-    fn cmp(self, other: u16) -> i32 {
-        if self < other { return -1; }
-        if self > other { return 1; }
-        return 0;
+    fn cmp(self, other: u16) -> Ordering {
+        if self < other { return Ordering::Less; }
+        if self > other { return Ordering::Greater; }
+        return Ordering::Equal;
     }
 }
 
 // u32
+
+impl Zero for u32 {
+    fn zero() -> u32 { return 0; }
+}
+
+impl One for u32 {
+    fn one() -> u32 { return 1; }
+}
 
 impl Add for u32 {
     type Output = u32;
@@ -829,14 +904,22 @@ impl Hash for u32 {
 }
 
 impl Ord for u32 {
-    fn cmp(self, other: u32) -> i32 {
-        if self < other { return -1; }
-        if self > other { return 1; }
-        return 0;
+    fn cmp(self, other: u32) -> Ordering {
+        if self < other { return Ordering::Less; }
+        if self > other { return Ordering::Greater; }
+        return Ordering::Equal;
     }
 }
 
 // u64
+
+impl Zero for u64 {
+    fn zero() -> u64 { return 0; }
+}
+
+impl One for u64 {
+    fn one() -> u64 { return 1; }
+}
 
 impl Add for u64 {
     type Output = u64;
@@ -929,14 +1012,22 @@ impl Hash for u64 {
 }
 
 impl Ord for u64 {
-    fn cmp(self, other: u64) -> i32 {
-        if self < other { return -1; }
-        if self > other { return 1; }
-        return 0;
+    fn cmp(self, other: u64) -> Ordering {
+        if self < other { return Ordering::Less; }
+        if self > other { return Ordering::Greater; }
+        return Ordering::Equal;
     }
 }
 
 // usize
+
+impl Zero for usize {
+    fn zero() -> usize { return 0; }
+}
+
+impl One for usize {
+    fn one() -> usize { return 1; }
+}
 
 impl Add for usize {
     type Output = usize;
@@ -1029,14 +1120,22 @@ impl Hash for usize {
 }
 
 impl Ord for usize {
-    fn cmp(self, other: usize) -> i32 {
-        if self < other { return -1; }
-        if self > other { return 1; }
-        return 0;
+    fn cmp(self, other: usize) -> Ordering {
+        if self < other { return Ordering::Less; }
+        if self > other { return Ordering::Greater; }
+        return Ordering::Equal;
     }
 }
 
 // f32
+
+impl Zero for f32 {
+    fn zero() -> f32 { return 0.0f32; }
+}
+
+impl One for f32 {
+    fn one() -> f32 { return 1.0f32; }
+}
 
 impl Add for f32 {
     type Output = f32;
@@ -1093,6 +1192,14 @@ impl PartialOrd for f32 {
 }
 
 // f64
+
+impl Zero for f64 {
+    fn zero() -> f64 { return 0.0f64; }
+}
+
+impl One for f64 {
+    fn one() -> f64 { return 1.0f64; }
+}
 
 impl Add for f64 {
     type Output = f64;
@@ -1200,4 +1307,22 @@ impl Eq for char {}
 
 impl Hash for char {
     fn hash(self) -> u64 { return self as u64; }
+}
+
+// √ (stdlib spec 2.3.10). ponytail: libm `sqrt` / `sqrtf` until a
+// `rok.sqrt.TYPE` intrinsic exists in MIR / codegen.
+
+extern "C" {
+    fn sqrt(x: f64) -> f64;
+    fn sqrtf(x: f32) -> f32;
+}
+
+impl Sqrt for f64 {
+    type Output = f64;
+    fn sqrt(self) -> f64 { return sqrt(self); }
+}
+
+impl Sqrt for f32 {
+    type Output = f32;
+    fn sqrt(self) -> f32 { return sqrtf(self); }
 }

@@ -339,7 +339,7 @@ impl Parser<'_> {
             };
         }
         self.diagnostics.extend(diags);
-        let mut sub = Parser::new(&tokens, self.prec, self.file.clone());
+        let mut sub = Parser::new(&tokens, self.file.clone());
         let e = sub.parse_expr();
         if !matches!(sub.peek(), TokenKind::Eof) {
             sub.error(span, format!("unexpected tokens in f-string hole `{text}`"));

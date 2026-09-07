@@ -1,17 +1,27 @@
-// rok::core::panic — `panic(msg)` / `unreachable()` (stdlib spec 2.14.5):
-// print the message to stderr and exit 101. They never return: `-> !`
-// fits any slot.
+// rok::core::panic — the compiler hooks `panic_fn` / `oom_fn` /
+// `unreachable_fn` (stdlib spec 2.14.5): print a message to stderr and
+// exit 101. They never return: `-> !` fits any slot.
 
 extern "C" {
     fn rok_panic_str(msg: str) -> !;
+    fn rok_oom() -> !;
 }
 
 /// Abort with `msg`.
+#[lang("panic_fn")]
 pub fn panic(msg: str) -> ! {
     rok_panic_str(msg);
 }
 
+/// Out of memory (Fatal). The runtime's allocation failures end in the
+/// same `rok_oom`.
+#[lang("oom_fn")]
+pub fn oom() -> ! {
+    rok_oom();
+}
+
 /// Abort: code the program believed it could never reach ran.
+#[lang("unreachable_fn")]
 pub fn unreachable() -> ! {
     rok_panic_str("internal error: entered unreachable code");
 }

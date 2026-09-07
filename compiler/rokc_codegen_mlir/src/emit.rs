@@ -1238,7 +1238,7 @@ impl<'a> FnEmit<'a> {
         if matches!(ret_ty, MirTy::Unit) {
             let _ = writeln!(
                 self.body,
-                "    llvm.call {callee_v}({arg_list}) vararg(!llvm.func<void ({arg_ty_list})>) : !llvm.ptr, ({arg_ty_list}) -> ()"
+                "    llvm.call {callee_v}({arg_list}) : !llvm.ptr, ({arg_ty_list}) -> ()"
             );
             let dst = self.fresh_value();
             let _ = writeln!(self.body, "    {dst} = arith.constant 0 : i1");

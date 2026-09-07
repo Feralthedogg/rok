@@ -10,7 +10,7 @@ mod b {
     pub fn use_shared() -> i32 { super_shared() + 1 }
     pub(pkg) fn other() -> i32 { 8i32 }
 
-    fn super_shared() -> i32 { a::shared() }
+    fn super_shared() -> i32 { sup::a::shared() }
 }
 
 fn main() -> i32 {

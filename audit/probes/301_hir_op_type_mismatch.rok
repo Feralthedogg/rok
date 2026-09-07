@@ -5,6 +5,7 @@
 
 fn main() -> i32 {
     let a: f64 = 1.5;
-    let b = a + 2;
+    let n: i32 = 2;
+    let b = a + n;
     return 3;
 }

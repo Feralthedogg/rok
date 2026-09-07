@@ -1,0 +1,20 @@
+// expect-exit: 12
+// `!` in generics: a diverging argument does not fix `T`. A named
+// `fn() -> !` fits a `fn() -> R` slot (spec 4.4) through a thunk.
+fn choose<T>(a: T, b: T, first: bool) -> T {
+    if first { return a; }
+    return b;
+}
+fn five() -> i32 { return 5; }
+fn die() -> ! { panic("die"); }
+fn call_or(f: fn() -> i32, go: bool) -> i32 {
+    if go { return f(); }
+    return 7;
+}
+fn main() -> i32 {
+    let go = five() > 10;
+    let x: i32 = if go { choose(panic("never"), 1, false) } else { 5 };
+    let y = if go { choose(five(), panic("never"), true) } else { 5 };
+    let z = call_or(die, false);
+    return x + y + z - 5;
+}

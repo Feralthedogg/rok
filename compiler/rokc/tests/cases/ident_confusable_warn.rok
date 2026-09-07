@@ -1,0 +1,12 @@
+// expect-exit: 5
+// expect-warning: identifier `σ2` looks like `σ²`
+// expect-warning: identifier `pаy` looks like `pay`
+// expect-warning: mixes Cyrillic with Latin
+// Spec 1.4.3 (E7): distinct names with one confusable skeleton warn.
+fn main() -> i32 {
+    let σ² = 1;
+    let σ2 = 2;
+    let pay = 1;
+    let pаy = 1;
+    return σ² + σ2 + pay + pаy;
+}

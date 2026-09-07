@@ -3,92 +3,15 @@
 use rokc_ast::{AttrArg, AttrBody, ExprKind, Item, Literal, StmtKind};
 use rokc_lexer::Lexer;
 
-use crate::{Assoc, Fixity, OpEntry, PrecTable, collect_prec_table, parse_program};
+use crate::{Fixity, collect_prec_table, parse_program};
 
 fn parse(src: &str) -> rokc_ast::Program {
-    parse_with(src, &PrecTable::new())
-}
-
-fn parse_with(src: &str, prec: &PrecTable) -> rokc_ast::Program {
     let lexer = Lexer::new(src, "test");
     let (tokens, lex_diags) = lexer.lex_all();
     assert!(lex_diags.is_empty(), "lex diagnostics: {lex_diags:?}");
-    let (program, diags) = parse_program(&tokens, prec, "test");
+    let (program, diags) = parse_program(&tokens, "test");
     assert!(diags.is_empty(), "parse diagnostics: {diags:?}");
     program
-}
-
-/// Build a precedence table with the standard arithmetic / comparison
-/// operators for tests.
-fn arith_prec_table() -> PrecTable {
-    let mut t = PrecTable::new();
-    for (sym, prec, m) in [
-        ("|", 3u32, "bitor"),
-        ("+", 7u32, "add"),
-        ("-", 7, "sub"),
-        ("*", 8, "mul"),
-        ("/", 8, "div"),
-        ("%", 8, "rem"),
-    ] {
-        t.insert(OpEntry {
-            symbol: sym.into(),
-            fixity: Fixity::Infix,
-            prec,
-            assoc: Assoc::Left,
-            method_name: m.into(),
-            trait_name: String::new(),
-        });
-    }
-    for (sym, m) in [
-        ("==", "eq"),
-        ("!=", "ne"),
-        ("<", "lt"),
-        (">", "gt"),
-        ("<=", "le"),
-        (">=", "ge"),
-    ] {
-        t.insert(OpEntry {
-            symbol: sym.into(),
-            fixity: Fixity::Infix,
-            prec: 6,
-            assoc: Assoc::None,
-            method_name: m.into(),
-            trait_name: String::new(),
-        });
-    }
-    t.insert(OpEntry {
-        symbol: "&&".into(),
-        fixity: Fixity::Infix,
-        prec: 5,
-        assoc: Assoc::Left,
-        method_name: "logical_and".into(),
-        trait_name: String::new(),
-    });
-    t.insert(OpEntry {
-        symbol: "||".into(),
-        fixity: Fixity::Infix,
-        prec: 4,
-        assoc: Assoc::Left,
-        method_name: "logical_or".into(),
-        trait_name: String::new(),
-    });
-    t.insert(OpEntry {
-        symbol: "-".into(),
-        fixity: Fixity::Prefix,
-        prec: 11,
-        assoc: Assoc::Right,
-        method_name: "neg".into(),
-        trait_name: String::new(),
-    });
-    t.insert(OpEntry {
-        symbol: "!".into(),
-        fixity: Fixity::Prefix,
-        prec: 11,
-        assoc: Assoc::Right,
-        method_name: "not".into(),
-        trait_name: String::new(),
-    });
-    t
 }
 
 #[test]
@@ -102,16 +25,16 @@ fn attr_flag_only() {
 
 #[test]
 fn attr_args_mixed() {
-    let p = parse(r#"#[infix("+", prec = 9, left)] fn f() { }"#);
+    let p = parse(r#"#[attr("+", key = 9, left)] fn f() { }"#);
     let Item::Fn(f) = &p.items[0] else { panic!() };
     let attr = &f.attrs[0];
-    assert_eq!(attr.name(), "infix");
+    assert_eq!(attr.name(), "attr");
     let AttrBody::Args(args) = &attr.body else {
         panic!()
     };
     assert_eq!(args.len(), 3);
     assert!(matches!(&args[0], AttrArg::Lit(Literal::Str(s)) if s == "+"));
-    assert!(matches!(&args[1], AttrArg::KeyValue(k, Literal::Int(v)) if k == "prec" && v == "9"));
+    assert!(matches!(&args[1], AttrArg::KeyValue(k, Literal::Int(v)) if k == "key" && v == "9"));
     assert!(matches!(&args[2], AttrArg::Word(w) if w == "left"));
 }
 
@@ -173,7 +96,7 @@ fn return_expr(p: &rokc_ast::Program) -> &rokc_ast::Expr {
 #[test]
 fn pratt_left_assoc() {
     // `a - b - c` parses as `(a - b) - c`.
-    let p = parse_with("fn t() { return a - b - c; }", &arith_prec_table());
+    let p = parse("fn t() { return a - b - c; }");
     let e = return_expr(&p);
     let ExprKind::OpInfix { op, lhs, rhs: _ } = &e.kind else {
         panic!()
@@ -188,7 +111,7 @@ fn pratt_left_assoc() {
 #[test]
 fn pratt_precedence_mul_over_add() {
     // `a + b * c` parses as `a + (b * c)`.
-    let p = parse_with("fn t() { return a + b * c; }", &arith_prec_table());
+    let p = parse("fn t() { return a + b * c; }");
     let e = return_expr(&p);
     let ExprKind::OpInfix { op, rhs, .. } = &e.kind else {
         panic!()
@@ -203,7 +126,7 @@ fn pratt_precedence_mul_over_add() {
 #[test]
 fn pratt_prefix_neg() {
     // `-a + b` parses as `(-a) + b`, not `-(a + b)`.
-    let p = parse_with("fn t() { return -a + b; }", &arith_prec_table());
+    let p = parse("fn t() { return -a + b; }");
     let e = return_expr(&p);
     let ExprKind::OpInfix { op, lhs, .. } = &e.kind else {
         panic!()
@@ -216,17 +139,45 @@ fn pratt_prefix_neg() {
 }
 
 #[test]
-fn pratt_unknown_op_stops() {
-    // With an empty PrecTable, `1 + 2` cannot be parsed beyond the literal
-    // primary. The trailing `+ 2;` should produce parse diagnostics.
-    let src = "fn t() { return 1 + 2; }";
-    let lexer = Lexer::new(src, "test");
-    let (tokens, _) = lexer.lex_all();
-    let prec = PrecTable::new();
-    let (_p, diags) = parse_program(&tokens, &prec, "test");
+fn as_binds_below_prefix_above_arith() {
+    // Spec 3.2.3: `as` / `is` are level 10 — `-x as i64` is `(-x) as i64`,
+    // `a + b as i64` is `a + (b as i64)`.
+    let p = parse("fn t() { return -x as i64; }");
+    let ExprKind::Cast(inner, _) = &return_expr(&p).kind else {
+        panic!()
+    };
+    assert!(matches!(inner.kind, ExprKind::OpPrefix { .. }));
+    let p = parse("fn t() { return a + b is i32; }");
+    let ExprKind::OpInfix { op, rhs, .. } = &return_expr(&p).kind else {
+        panic!()
+    };
+    assert_eq!(op, "+");
+    assert!(matches!(rhs.kind, ExprKind::Is(..)));
+}
+
+#[test]
+fn infix_registration_rejects_precedence() {
+    let reg = |src: &str| {
+        let (tokens, _) = Lexer::new(src, "test").lex_all();
+        let (program, diags) = parse_program(&tokens, "test");
+        assert!(diags.is_empty(), "{diags:#?}");
+        collect_prec_table(&program).1
+    };
+    let errs = reg("trait A { #[infix(\"+\", prec = 7, left)] fn add(self, r: Self) -> Self; }");
     assert!(
-        !diags.is_empty(),
-        "expected parse error on `+` without PrecTable entry"
+        errs[0].message.contains("fixed by the language"),
+        "{errs:#?}"
+    );
+    let errs = reg("trait A { #[infix(\"+\", like = \"*\")] fn add(self, r: Self) -> Self; }");
+    assert!(errs[0].message.contains("fixed precedence"), "{errs:#?}");
+    let errs = reg("trait A { #[infix(\"⊕\")] fn f(self, r: Self) -> Self; }");
+    assert!(errs[0].message.contains("needs `like"), "{errs:#?}");
+    let errs = reg(
+        "trait A { #[infix(\"<\")] #[infix(\"⊲\", like = \"+\")] fn lt(self, r: Self) -> bool; }",
+    );
+    assert!(
+        errs[0].message.contains("share one precedence"),
+        "{errs:#?}"
     );
 }
 
@@ -235,7 +186,7 @@ fn trait_with_self_method() {
     let p = parse(
         r#"trait Add<Rhs> {
             type Output;
-            #[infix("+", prec = 7, left)]
+            #[infix("+")]
             fn add(self, rhs: Rhs) -> Output;
         }"#,
     );
@@ -250,20 +201,19 @@ fn trait_with_self_method() {
 fn two_traits_back_to_back() {
     let src = r#"trait Add<Rhs> {
     type Output;
-    #[infix("+", prec = 7, left)]
+    #[infix("+")]
     fn add(self, rhs: Rhs) -> Output;
 }
 
 trait Sub<Rhs> {
     type Output;
-    #[infix("-", prec = 7, left)]
+    #[infix("-")]
     fn sub(self, rhs: Rhs) -> Output;
 }
 "#;
     let lexer = Lexer::new(src, "test");
     let (tokens, _) = lexer.lex_all();
-    let prec = PrecTable::new();
-    let (program, diags) = parse_program(&tokens, &prec, "test");
+    let (program, diags) = parse_program(&tokens, "test");
     assert!(diags.is_empty(), "parse diagnostics: {diags:#?}");
     assert_eq!(program.items.len(), 2);
 }
@@ -272,40 +222,38 @@ trait Sub<Rhs> {
 fn collect_prec_from_trait_attrs() {
     let src = r#"trait Add<Rhs> {
     type Output;
-    #[infix("+", prec = 7, left)]
+    #[infix("+")]
     fn add(self, rhs: Rhs) -> Output;
 }
 
 trait Cmp<Rhs> {
-    #[infix("<=", prec = 4, none)]
-    #[infix("≤", prec = 4, none)]
+    #[infix("<=")]
+    #[infix("⊴", like = "<=")]
     fn le(self, rhs: Rhs) -> bool;
 }
 
 trait Neg {
     type Output;
-    #[prefix("-", prec = 11)]
+    #[prefix("-")]
     fn neg(self) -> Output;
 }
 "#;
     let lexer = Lexer::new(src, "test");
     let (tokens, _) = lexer.lex_all();
-    let empty = PrecTable::new();
-    let (program, diags) = parse_program(&tokens, &empty, "test");
+    let (program, diags) = parse_program(&tokens, "test");
     assert!(diags.is_empty(), "{diags:#?}");
     let (table, errs) = collect_prec_table(&program);
     assert!(errs.is_empty(), "{errs:#?}");
 
     let plus = table.lookup("+", Fixity::Infix).expect("`+` registered");
-    assert_eq!(plus.prec, 7);
-    assert!(matches!(plus.assoc, Assoc::Left));
+    assert_eq!(plus.method_name, "add");
 
-    // `<=` and `≤` share the same method, both registered.
+    // `<=` and the extension token `⊴` share the same method.
     assert!(table.lookup("<=", Fixity::Infix).is_some());
-    assert!(table.lookup("≤", Fixity::Infix).is_some());
+    assert!(table.lookup("⊴", Fixity::Infix).is_some());
 
     let neg = table.lookup("-", Fixity::Prefix).expect("prefix `-`");
-    assert_eq!(neg.prec, 11);
+    assert_eq!(neg.trait_name, "Neg");
 }
 
 #[test]
@@ -315,7 +263,7 @@ fn visibility_qualifiers_are_contextual() {
     // a `pub(sub)` qualifier coexist on the same item.
     let p = parse(
         r#"trait Sub<Rhs> {
-            #[infix("-", prec = 7, left)]
+            #[infix("-")]
             pub(sub) fn sub(self, rhs: Rhs) -> Self;
         }"#,
     );
@@ -462,7 +410,7 @@ fn untyped_throws_parses() {
 /// All lexer + parser diagnostics for `src` (arith precedence table).
 fn diags_of(src: &str) -> Vec<String> {
     let (tokens, mut diags) = Lexer::new(src, "test").lex_all();
-    let (_p, parse_diags) = parse_program(&tokens, &arith_prec_table(), "test");
+    let (_p, parse_diags) = parse_program(&tokens, "test");
     diags.extend(parse_diags);
     diags.into_iter().map(|d| d.message).collect()
 }
@@ -482,14 +430,14 @@ fn fn_param_ty(p: &rokc_ast::Program) -> &rokc_ast::Ty {
 
 #[test]
 fn cast_target_does_not_swallow_lt_or_pipe() {
-    let p = parse_with("fn t() { return a as i64 < b; }", &arith_prec_table());
+    let p = parse("fn t() { return a as i64 < b; }");
     let ExprKind::OpInfix { op, lhs, .. } = &return_expr(&p).kind else {
         panic!()
     };
     assert_eq!(op, "<");
     assert!(matches!(lhs.kind, ExprKind::Cast(..)));
 
-    let p = parse_with("fn t() { return a as i32 | b; }", &arith_prec_table());
+    let p = parse("fn t() { return a as i32 | b; }");
     let ExprKind::OpInfix { op, lhs, .. } = &return_expr(&p).kind else {
         panic!()
     };
@@ -497,7 +445,7 @@ fn cast_target_does_not_swallow_lt_or_pipe() {
     assert!(matches!(lhs.kind, ExprKind::Cast(..)));
 
     // Real generic args and parenthesised sums still work.
-    let p = parse_with("fn t() { return a as Foo<Bar<i32>>; }", &arith_prec_table());
+    let p = parse("fn t() { return a as Foo<Bar<i32>>; }");
     let ExprKind::Cast(_, ty) = &return_expr(&p).kind else {
         panic!()
     };
@@ -505,7 +453,7 @@ fn cast_target_does_not_swallow_lt_or_pipe() {
         panic!()
     };
     assert_eq!(path.segments[0].generics.len(), 1);
-    let p = parse_with("fn t() { return a as (i32 | none); }", &arith_prec_table());
+    let p = parse("fn t() { return a as (i32 | none); }");
     let ExprKind::Cast(_, ty) = &return_expr(&p).kind else {
         panic!()
     };
@@ -613,7 +561,7 @@ fn deep_nesting_is_a_diagnostic_not_a_crash() {
 #[test]
 fn open_ranges() {
     let range = |src: &str| {
-        let p = parse_with(&format!("fn t() {{ return {src}; }}"), &arith_prec_table());
+        let p = parse(&format!("fn t() {{ return {src}; }}"));
         let ExprKind::Range {
             start,
             end,
@@ -664,13 +612,8 @@ fn recovery_reports_each_mistake_once() {
                fn c() { if (x + ) { } }\n\
                fn d() { let p = P { x: 1 }; return ~p; }";
     let d = diags_of(src);
-    assert_eq!(d.len(), 6, "{d:#?}");
+    assert_eq!(d.len(), 5, "{d:#?}");
     assert!(d.iter().any(|m| m.contains("field name expected")));
-    // `~` has no `#[prefix]` entry in the test table.
-    assert!(
-        d.iter()
-            .any(|m| m.contains("prefix operator `~` is not defined"))
-    );
     // No flag leaked out of the failed `if` head in `c`: the struct
     // literal in `d` still parses (no extra diagnostic for it).
 }
@@ -704,4 +647,19 @@ fn any_trait_type_forms() {
     assert!(matches!(&parts[0].kind, TyKind::AnyTrait(b) if b.len() == 1));
     assert!(matches!(parts[1].kind, TyKind::None));
     assert!(matches!(kinds[2], TyKind::AnyTrait(b) if b.len() == 2));
+}
+
+#[test]
+fn block_like_statement_needs_no_semicolon() {
+    // Spec E5: `if c {} -1` is two statements; `f() g()` lacks a `;`.
+    let p = parse("fn t() { if c { a(); } -1; match x { _ => {} } loop { break; } }");
+    let Item::Fn(f) = &p.items[0] else { panic!() };
+    let body = f.body.as_ref().unwrap();
+    assert_eq!(body.stmts.len(), 3, "{:#?}", body.stmts);
+    assert!(body.trailing.is_some());
+    assert_rejected("fn t() { f() g(); }", "expected `;`");
+    // A postfix chain continues a block-like expression.
+    let p = parse("fn t() -> i32 { match x { _ => y }.len() }");
+    let Item::Fn(f) = &p.items[0] else { panic!() };
+    assert!(f.body.as_ref().unwrap().trailing.is_some());
 }

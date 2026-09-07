@@ -90,7 +90,12 @@ impl PartialOrd for str {
 impl Eq for str {}
 
 impl Ord for str {
-    fn cmp(self, other: str) -> i32 { return rok_str_cmp(self, other); }
+    fn cmp(self, other: str) -> Ordering {
+        let c = rok_str_cmp(self, other);
+        if c < 0 { return Ordering::Less; }
+        if c > 0 { return Ordering::Greater; }
+        return Ordering::Equal;
+    }
 }
 
 /// Byte-wise FNV-1a, so `str` keys work in `Dict` / `Set`.

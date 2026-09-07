@@ -32,9 +32,12 @@ options:
   -O0 | -O1 | -O2 | -O3 | -Os  optimization level (default -O0)
   --cfg <flag | key=value>     #[cfg] flag (repeatable)
   --bootstrap <file>           operator / lang declarations to preload (repeatable;
-                               default: $ROK_HOME/library/{core,std}/lib.rok)
+                               default: $ROK_HOME/lib/rok/{core,std}/lib.rok)
   --rokr <lib>                 runtime library: path, or name for -l<name>
-                               (default: librokr.a next to rokc, else -lrokr)
+                               (default: $ROK_HOME/lib/librokr.a, else -lrokr)
+environment:
+  ROK_HOME                     install root (default: the parent of rokc's
+                               directory); falls back to the repo dev layout
   --keep                       keep the temporary build directory
 ";
 
@@ -133,50 +136,67 @@ fn main() {
     }
 }
 
-/// The implicit `use rok::core::**;` (spec 0.0.5) needs `library/core`,
+/// The implicit `use rok::core::**;` (spec 0.0.5) needs `rok/core`,
 /// and linking needs `librokr.a`; find both without flags.
 fn with_defaults(mut a: Args) -> Args {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(Path::to_path_buf));
+    let (libs, rokr) = locate(exe_dir.as_deref());
     if a.bootstrap.is_empty() {
-        match rok_home(exe_dir.as_deref()) {
-            Some(home) => {
-                a.bootstrap.push(home.join(CORE_LIB));
+        match libs {
+            Some(libs) => {
+                a.bootstrap.push(libs.join("core/lib.rok"));
                 // `rok::std` rides along when present (no implicit glob).
-                let std_lib = home.join(STD_LIB);
+                let std_lib = libs.join("std/lib.rok");
                 if std_lib.is_file() {
                     a.bootstrap.push(std_lib);
                 }
             }
             None => eprintln!(
-                "rokc: warning: `{CORE_LIB}` not found (set ROK_HOME); \
-                 operators and lang items are unavailable"
+                "rokc: warning: `$ROK_HOME/{INSTALLED_LIBS}/core/lib.rok` not found \
+                 (set ROK_HOME); operators and lang items are unavailable"
             ),
         }
     }
     if a.opts.rokr == "rokr" {
-        let local = exe_dir.map(|d| d.join("librokr.a"));
-        if let Some(lib) = local.filter(|l| l.is_file()) {
+        if let Some(lib) = rokr {
             a.opts.rokr = lib.display().to_string();
         }
     }
     a
 }
 
-const CORE_LIB: &str = "library/core/lib.rok";
-const STD_LIB: &str = "library/std/lib.rok";
+/// Installed layout (E6): `$ROK_HOME/bin/rokc`, `$ROK_HOME/lib/librokr.a`,
+/// `$ROK_HOME/lib/rok/{core,std,bare}/`.
+const INSTALLED_LIBS: &str = "lib/rok";
+const INSTALLED_RT: &str = "lib/librokr.a";
+/// Dev layout: the repository's `library/` above `target/<profile>/rokc`,
+/// with `librokr.a` next to `rokc`.
+const DEV_LIBS: &str = "library";
 
-/// `$ROK_HOME`, else the nearest ancestor of the `rokc` binary holding
-/// `library/core` (the dev layout `impl/target/debug/rokc` → `impl/`).
-fn rok_home(exe_dir: Option<&Path>) -> Option<PathBuf> {
-    if let Some(h) = std::env::var_os("ROK_HOME") {
-        return Some(h.into());
+/// `(library root holding core/ std/ bare/, librokr.a)`. `ROK_HOME`
+/// defaults to the parent of the directory holding `rokc` (`bin/..`);
+/// when that is not an install, fall back to the dev layout.
+fn locate(exe_dir: Option<&Path>) -> (Option<PathBuf>, Option<PathBuf>) {
+    let file = |p: PathBuf| p.is_file().then_some(p);
+    let libs_in = |d: &Path, rel: &str| {
+        let libs = d.join(rel);
+        libs.join("core/lib.rok").is_file().then_some(libs)
+    };
+    let env_home = std::env::var_os("ROK_HOME").map(PathBuf::from);
+    let home = env_home
+        .clone()
+        .or_else(|| exe_dir.and_then(Path::parent).map(Path::to_path_buf));
+    if let Some(h) = home {
+        if let Some(libs) = libs_in(&h, INSTALLED_LIBS) {
+            return (Some(libs), file(h.join(INSTALLED_RT)));
+        }
     }
-    exe_dir?
-        .ancestors()
-        .find(|d| d.join(CORE_LIB).is_file())
-        .map(Path::to_path_buf)
+    let dev = env_home
+        .and_then(|h| libs_in(&h, DEV_LIBS))
+        .or_else(|| exe_dir?.ancestors().find_map(|d| libs_in(d, DEV_LIBS)));
+    (dev, exe_dir.and_then(|d| file(d.join("librokr.a"))))
 }
 
 /// Resolve the input: a `.rok` file, or a package dir holding `main.rok`.

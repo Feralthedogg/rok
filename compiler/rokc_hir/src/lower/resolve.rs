@@ -86,8 +86,8 @@ pub(super) fn lookup_in_use_entries_full(
 }
 
 /// Module-aware path resolution shared by the value (fn) and type
-/// namespaces. Order: `pkg::` / `sup::` roots are made absolute; then the
-/// current module and each ancestor, innermost first (root last); then
+/// namespaces. Order: `pkg::` / `sup::` / `rok::` roots are absolute;
+/// otherwise the current module (no ancestor walk, spec 5.7); then
 /// function-local `use`s (innermost scope first); then the module-level
 /// `use` table. `Err(hits)` = ambiguous glob import (hits sorted).
 pub(super) fn resolve_name(
@@ -97,6 +97,7 @@ pub(super) fn resolve_name(
     uses: &crate::uses::UseTable,
     set: &NameSet<'_>,
 ) -> Result<Option<String>, Vec<String>> {
+    let absolute = matches!(segments.first().copied(), Some("pkg" | "rok"));
     let resolved_segs: Vec<&str> = match segments.first().copied() {
         Some("pkg") => segments[1..].to_vec(),
         Some("sup") => {
@@ -117,23 +118,16 @@ pub(super) fn resolve_name(
     };
     let segments = resolved_segs.as_slice();
     let suffix = segments.join("::");
-    let mut cur: Vec<&str> = if module.is_empty() {
-        Vec::new()
+    // Spec 5.7: no implicit ancestor walk — the current module (its items
+    // and child modules), then the `rok::` virtual root; parents need
+    // `sup::` or a `use`.
+    let candidate = if module.is_empty() || absolute {
+        suffix.clone()
     } else {
-        module.split("::").collect()
+        format!("{module}::{suffix}")
     };
-    loop {
-        let candidate = if cur.is_empty() {
-            suffix.clone()
-        } else {
-            format!("{}::{suffix}", cur.join("::"))
-        };
-        if (set.exists)(&candidate) {
-            return Ok(Some(candidate));
-        }
-        if cur.pop().is_none() {
-            break;
-        }
+    if (set.exists)(&candidate) {
+        return Ok(Some(candidate));
     }
     for scope in local_uses.iter().rev() {
         match lookup_in_use_entries_full(scope, segments, &suffix, set) {

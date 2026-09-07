@@ -399,8 +399,15 @@ pub(super) fn desugar_question_dot(
         return recv;
     }
     let Some((none_idx, some)) = optional_parts(&recv.ty) else {
-        // Non-optional receiver — a plain access.
-        return apply_access_tail(ctx, recv, tail, span);
+        // Spec 3.8 (E5): `?.` on a non-optional receiver is an error.
+        return ctx.error_expr(
+            span,
+            format!(
+                "`?.` needs an optional (`T | none`) receiver, found `{}` — it is not \
+                 optional, so use `.`",
+                ctx.ty_name(&recv.ty)
+            ),
+        );
     };
     if some.len() != 1 {
         return ctx.error_expr(

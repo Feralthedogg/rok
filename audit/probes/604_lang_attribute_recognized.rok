@@ -6,9 +6,11 @@
 // spec 6.4: `#[lang("slot_name")]`이 trait/struct/enum/fn/const/static에
 // 부착 가능. 컴파일러는 attr 인식 + 잘못된 형태에 진단.
 // 정상 attr는 통과해야 함. (slot 이름은 stdlib spec 0.4 표에 있어야 함 — 6.4.8)
-#[lang("unreachable_fn")]
-fn never() -> i32 {
-    return 0;
+// 슬롯은 프로그램 전체에서 하나만 묶인다 (6.4.6): core 가 묶지 않는
+// 슬롯을 쓴다 (`panic_fn` / `oom_fn` / `unreachable_fn` 은 core 가 묶음).
+#[lang("char_type")]
+struct C {
+    c: i32;
 }
 
 #[lang("none_type")]

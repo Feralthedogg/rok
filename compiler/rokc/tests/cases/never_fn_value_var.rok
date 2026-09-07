@@ -1,0 +1,15 @@
+// expect-exit: 101
+// expect-stdout:
+// 1
+
+// Spec 4.4.8: a `fn() -> !` value fits a `fn() -> R` slot — a named
+// function and a `fn` variable alike (the adapter captures the
+// variable's value). Calling it never returns: it panics (exit 101).
+fn die() -> ! { panic("die"); }
+fn run(g: fn() -> i32) -> i32 { return g(); }
+fn main() -> i32 {
+    let f: fn() -> ! = die;
+    let g: fn() -> i32 = f;
+    rok_print_i32(1);
+    return run(g);
+}

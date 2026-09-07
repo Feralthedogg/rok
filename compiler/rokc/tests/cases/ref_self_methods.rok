@@ -1,0 +1,61 @@
+// expect-exit: 0
+// expect-stdout:
+// 2
+// 5
+// 0
+// 1
+// 2
+// 3
+// 4
+// 10
+// 7
+
+// Spec 4.7.5: a `ref self` method's assignments to `self` reach the
+// caller's binding — a local, or a field chain on one — with no `ref`
+// at the call. A user iterator keeps its state in its fields
+// (stdlib 2.7.1 `next(ref self)`).
+
+struct Counter { n: i32; }
+
+impl Counter {
+    fn bump(ref self) { self.n = self.n + 1; }
+    fn take(ref self) -> i32 {
+        let v = self.n;
+        self.n = 0;
+        return v;
+    }
+}
+
+struct Upto { cur: i32; end: i32; }
+
+impl Iterator for Upto {
+    type Item = i32;
+    fn next(ref self) -> i32 | none {
+        if self.cur >= self.end { return none; }
+        let v = self.cur;
+        self.cur = self.cur + 1;
+        return v;
+    }
+}
+
+struct Pair { left: Counter; right: Counter; }
+
+fn main() -> i32 {
+    let c = Counter { n: 0 };
+    c.bump();
+    c.bump();
+    rok_print_i32(c.n);
+    let p = Pair { left: Counter { n: 5 }, right: Counter { n: 0 } };
+    rok_print_i32(p.left.take());
+    rok_print_i32(p.left.n);
+    let up = Upto { cur: 1, end: 5 };
+    for x in up {
+        rok_print_i32(x);
+    }
+    let u = Upto { cur: 0, end: 5 };
+    rok_print_i32(u.sum());
+    p.right.bump();
+    let it = Upto { cur: 3, end: 5 };
+    rok_print_i32(it.map(|x| x + p.right.n).fold(0, |a, x| a + x) - 2);
+    return 0;
+}

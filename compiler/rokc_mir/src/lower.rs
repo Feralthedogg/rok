@@ -12,7 +12,7 @@ use rokc_hir::{
 use rokc_ir_common::PrimTy as IrPrimTy;
 use rokc_ir_common::{BlockId, ConstVal, FunctionId, LocalId, PrimOp, PrimTy};
 
-use crate::ty::{enum_payload_ty, has_gc_ref, lower_ty, lower_ty_in};
+use crate::ty::{code_ty, enum_payload_ty, fat_fn, has_gc_ref, lower_ty, lower_ty_in};
 use crate::{
     BasicBlock, LocalDecl, MirFunction, MirModule, MirStaticDef, MirTy, Operand, RValue, Statement,
     Terminator,
@@ -34,13 +34,130 @@ pub fn lower(module: &HirModule) -> MirModule {
             is_mut: s.is_mut,
         })
         .collect();
+    let fnv = FnValues {
+        wrappers: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+        closures: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+        next_id: std::cell::Cell::new(
+            module
+                .functions
+                .iter()
+                .map(|f| f.id.0 + 1)
+                .max()
+                .unwrap_or(0),
+        ),
+        externs: module
+            .functions
+            .iter()
+            .filter(|f| f.body.is_none())
+            .map(|f| f.id)
+            .collect(),
+    };
     let mut functions: Vec<MirFunction> = module
         .functions
         .iter()
-        .map(|f| lower_fn(f, module, &ret_tys))
+        .map(|f| lower_fn(f, module, &ret_tys, &fnv))
         .collect();
+    finish_fn_values(&mut functions, &fnv);
     prune_unreachable(&mut functions);
     MirModule { functions, statics }
+}
+
+/// What lowering function values (spec 4.4: `{code, env}`) leaves to do
+/// once every body is lowered.
+struct FnValues {
+    /// Named fn → its `(env, args..)` wrapper (the code of `f` as a value).
+    wrappers: std::cell::RefCell<std::collections::BTreeMap<FunctionId, FunctionId>>,
+    /// Lifted closure body → its env's MIR type: the body gets the env as
+    /// a `GcRef` and loads it on entry.
+    closures: std::cell::RefCell<std::collections::BTreeMap<FunctionId, MirTy>>,
+    next_id: std::cell::Cell<u32>,
+    /// `extern` functions: their `fn` parameters stay thin C pointers.
+    externs: std::collections::HashSet<FunctionId>,
+}
+
+fn finish_fn_values(functions: &mut Vec<MirFunction>, fnv: &FnValues) {
+    // Closure bodies: param 0 becomes the boxed env, unpacked on entry.
+    for (id, env_ty) in fnv.closures.borrow().iter() {
+        let Some(f) = functions.iter_mut().find(|f| f.id == *id) else {
+            continue;
+        };
+        let (Some(&env_local), false) = (f.params.first(), f.blocks.is_empty()) else {
+            continue;
+        };
+        let boxed = LocalId(u32::try_from(f.locals.len()).expect("too many locals"));
+        f.locals.push(LocalDecl {
+            id: boxed,
+            name: Some("#env".to_owned()),
+            ty: MirTy::GcRef,
+        });
+        f.params[0] = boxed;
+        f.param_tys[0] = MirTy::GcRef;
+        f.blocks[0].stmts.insert(
+            0,
+            Statement::Assign {
+                target: env_local,
+                rvalue: RValue::HeapLoad {
+                    ptr: Operand::Copy(boxed),
+                    ty: env_ty.clone(),
+                },
+            },
+        );
+    }
+    // Named fns used as values: `fn #w(env, args..) { return f(args..); }`.
+    for (target, wrapper) in fnv.wrappers.borrow().iter() {
+        let Some(f) = functions.iter().find(|f| f.id == *target) else {
+            continue;
+        };
+        let mut locals = vec![LocalDecl {
+            id: LocalId(0),
+            name: Some("#env".to_owned()),
+            ty: MirTy::GcRef,
+        }];
+        let mut params = vec![LocalId(0)];
+        for t in &f.param_tys {
+            let id = LocalId(u32::try_from(locals.len()).expect("too many locals"));
+            locals.push(LocalDecl {
+                id,
+                name: None,
+                ty: t.clone(),
+            });
+            params.push(id);
+        }
+        let ret = LocalId(u32::try_from(locals.len()).expect("too many locals"));
+        locals.push(LocalDecl {
+            id: ret,
+            name: None,
+            ty: f.ret_ty.clone(),
+        });
+        let unit = matches!(f.ret_ty, MirTy::Unit);
+        let call = Statement::Assign {
+            target: ret,
+            rvalue: RValue::Call {
+                callee: f.id,
+                args: params[1..].iter().map(|l| Operand::Copy(*l)).collect(),
+                ret_ty: f.ret_ty.clone(),
+            },
+        };
+        let mut param_tys = vec![MirTy::GcRef];
+        param_tys.extend(f.param_tys.iter().cloned());
+        let w = MirFunction {
+            id: *wrapper,
+            def_id: None,
+            name: format!("{}__fnval", f.name),
+            params,
+            locals,
+            blocks: vec![BasicBlock {
+                id: BlockId(0),
+                params: Vec::new(),
+                stmts: vec![call],
+                terminator: Terminator::Return((!unit).then_some(Operand::Copy(ret))),
+            }],
+            param_tys,
+            ret_ty: f.ret_ty.clone(),
+            span: f.span,
+        };
+        functions.push(w);
+    }
 }
 
 /// Drop functions `main` can't reach (direct calls and `fn` values).
@@ -83,8 +200,9 @@ fn lower_fn(
     f: &HirFunction,
     module: &HirModule,
     ret_tys: &HashMap<FunctionId, MirTy>,
+    fnv: &FnValues,
 ) -> MirFunction {
-    let mut builder = FnBuilder::new(module, ret_tys);
+    let mut builder = FnBuilder::new(module, ret_tys, fnv);
 
     // Mirror HIR locals so HIR LocalId == MIR LocalId.
     for l in &f.locals {
@@ -95,10 +213,17 @@ fn lower_fn(
         });
     }
 
+    // An extern's `fn` parameter is a C function pointer (thin).
     let param_tys: Vec<MirTy> = f
         .params
         .iter()
-        .map(|p| lower_ty_in(&p.ty, module))
+        .map(|p| match (&p.ty, f.body.is_none()) {
+            (HirTy::Fn(args, ret, _), true) => MirTy::Fn(
+                args.iter().map(|a| lower_ty_in(a, module)).collect(),
+                Box::new(lower_ty_in(ret, module)),
+            ),
+            (t, _) => lower_ty_in(t, module),
+        })
         .collect();
     let params: Vec<LocalId> = f.params.iter().map(|p| p.local).collect();
 
@@ -173,6 +298,7 @@ struct FnBuilder<'a> {
     current: BlockId,
     module: &'a HirModule,
     fn_ret_tys: &'a HashMap<FunctionId, MirTy>,
+    fnv: &'a FnValues,
     loop_stack: Vec<LoopFrame>,
     /// Set of block ids that have been explicitly terminated. Once a
     /// block is terminated further `push_stmt` / `terminate` calls are
@@ -181,13 +307,18 @@ struct FnBuilder<'a> {
 }
 
 impl<'a> FnBuilder<'a> {
-    fn new(module: &'a HirModule, fn_ret_tys: &'a HashMap<FunctionId, MirTy>) -> Self {
+    fn new(
+        module: &'a HirModule,
+        fn_ret_tys: &'a HashMap<FunctionId, MirTy>,
+        fnv: &'a FnValues,
+    ) -> Self {
         Self {
             locals: Vec::new(),
             blocks: Vec::new(),
             current: BlockId(0),
             module,
             fn_ret_tys,
+            fnv,
             loop_stack: Vec::new(),
             terminated: std::collections::HashSet::new(),
         }
@@ -463,8 +594,25 @@ impl<'a> FnBuilder<'a> {
                 }
             }
             HirExprKind::Call { callee, args } => {
+                let c_callback = self.fnv.externs.contains(callee);
                 let mut arg_ops = Vec::with_capacity(args.len());
                 for a in args {
+                    // A named fn passed to C: its own (thin) address.
+                    if let (true, HirExprKind::FnRef(id), HirTy::Fn(ps, r, _)) =
+                        (c_callback, &a.kind, &a.ty)
+                    {
+                        let fn_ty = MirTy::Fn(
+                            ps.iter().map(|t| lower_ty_in(t, self.module)).collect(),
+                            Box::new(lower_ty_in(r, self.module)),
+                        );
+                        let l = self.fresh_local(fn_ty.clone());
+                        self.push_stmt(Statement::Assign {
+                            target: l,
+                            rvalue: RValue::FnAddr { callee: *id, fn_ty },
+                        });
+                        arg_ops.push(Operand::Copy(l));
+                        continue;
+                    }
                     arg_ops.push(self.lower_expr_to_operand(a));
                 }
                 let ret_ty = self.fn_ret_tys.get(callee).cloned().unwrap_or(MirTy::Unit);
@@ -474,28 +622,47 @@ impl<'a> FnBuilder<'a> {
                     ret_ty,
                 }
             }
+            // A named fn as a value: `{wrapper, null}`.
             HirExprKind::FnRef(id) => {
-                let fn_ty = lower_ty_in(&e.ty, self.module);
-                RValue::FnAddr { callee: *id, fn_ty }
+                let MirTy::Tuple(parts) = lower_ty_in(&e.ty, self.module) else {
+                    return RValue::Use(Operand::Const(ConstVal::Unit));
+                };
+                let wrapper = *self
+                    .fnv
+                    .wrappers
+                    .borrow_mut()
+                    .entry(*id)
+                    .or_insert_with(|| {
+                        let w = FunctionId(self.fnv.next_id.get());
+                        self.fnv.next_id.set(w.0 + 1);
+                        w
+                    });
+                let code = self.fresh_local(parts[0].clone());
+                self.push_stmt(Statement::Assign {
+                    target: code,
+                    rvalue: RValue::FnAddr {
+                        callee: wrapper,
+                        fn_ty: parts[0].clone(),
+                    },
+                });
+                RValue::StructInit {
+                    ty: MirTy::Tuple(parts),
+                    fields: vec![
+                        Operand::Copy(code),
+                        Operand::Const(ConstVal::Int {
+                            value: 0,
+                            ty: IrPrimTy::Usize,
+                        }),
+                    ],
+                }
             }
             HirExprKind::CallIndirect {
                 callee,
                 args,
                 ret_ty,
             } => {
-                let arg_tys: Vec<MirTy> = args
-                    .iter()
-                    .map(|a| lower_ty_in(&a.ty, self.module))
-                    .collect();
-                let arg_ops: Vec<Operand> =
-                    args.iter().map(|a| self.lower_expr_to_operand(a)).collect();
                 let callee_op = self.lower_expr_to_operand(callee);
-                RValue::CallIndirect {
-                    callee: callee_op,
-                    args: arg_ops,
-                    arg_tys,
-                    ret_ty: lower_ty_in(ret_ty, self.module),
-                }
+                self.call_fn_value(callee_op, args, ret_ty)
             }
             HirExprKind::Cast {
                 operand,
@@ -509,6 +676,8 @@ impl<'a> FnBuilder<'a> {
                     to_ty: lower_ty_in(to_ty, self.module),
                 }
             }
+            // A closure value: `{body, boxed captures}`; the body takes
+            // the box (see `finish_fn_values`).
             HirExprKind::ClosureValue {
                 fn_id,
                 env,
@@ -516,79 +685,47 @@ impl<'a> FnBuilder<'a> {
                 arg_tys,
                 ret_ty,
             } => {
-                // Build closure as 2-tuple `(fn_ptr, env)`. The fn_ptr's
-                // type prepends the env to the user-visible args.
                 let env_mir = lower_ty_in(env_ty, self.module);
-                let arg_mir: Vec<MirTy> = arg_tys
+                self.fnv
+                    .closures
+                    .borrow_mut()
+                    .insert(*fn_id, env_mir.clone());
+                let args: Vec<MirTy> = arg_tys
                     .iter()
                     .map(|t| lower_ty_in(t, self.module))
                     .collect();
-                let mut fn_arg_tys = vec![env_mir.clone()];
-                fn_arg_tys.extend(arg_mir.iter().cloned());
-                let fn_ptr_ty = MirTy::Fn(fn_arg_tys, Box::new(lower_ty_in(ret_ty, self.module)));
-                let closure_ty = MirTy::Tuple(vec![fn_ptr_ty.clone(), env_mir]);
+                let ret = lower_ty_in(ret_ty, self.module);
+                let code_t = code_ty(args.clone(), ret.clone());
                 let env_op = self.lower_expr_to_operand(env);
-                let fn_addr_local = self.fresh_local(fn_ptr_ty.clone());
+                let boxed = self.fresh_local(MirTy::GcRef);
                 self.push_stmt(Statement::Assign {
-                    target: fn_addr_local,
+                    target: boxed,
+                    rvalue: RValue::HeapBox {
+                        value: env_op,
+                        ty: env_mir,
+                    },
+                });
+                let code = self.fresh_local(code_t.clone());
+                self.push_stmt(Statement::Assign {
+                    target: code,
                     rvalue: RValue::FnAddr {
                         callee: *fn_id,
-                        fn_ty: fn_ptr_ty,
+                        fn_ty: code_t,
                     },
                 });
                 RValue::StructInit {
-                    ty: closure_ty,
-                    fields: vec![Operand::Copy(fn_addr_local), env_op],
+                    ty: fat_fn(args, ret),
+                    fields: vec![Operand::Copy(code), Operand::Copy(boxed)],
                 }
             }
             HirExprKind::CallClosure {
                 closure,
                 args,
-                arg_tys,
                 ret_ty,
-                env_ty,
+                ..
             } => {
                 let closure_op = self.lower_expr_to_operand(closure);
-                let env_mir = lower_ty_in(env_ty, self.module);
-                let arg_mir: Vec<MirTy> = arg_tys
-                    .iter()
-                    .map(|t| lower_ty_in(t, self.module))
-                    .collect();
-                let ret_mir = lower_ty_in(ret_ty, self.module);
-                let mut fn_arg_tys = vec![env_mir.clone()];
-                fn_arg_tys.extend(arg_mir.iter().cloned());
-                let fn_ptr_ty = MirTy::Fn(fn_arg_tys.clone(), Box::new(ret_mir.clone()));
-
-                // Extract fn_ptr (field 0) and env (field 1).
-                let fn_ptr_local = self.fresh_local(fn_ptr_ty.clone());
-                self.push_stmt(Statement::Assign {
-                    target: fn_ptr_local,
-                    rvalue: RValue::FieldRead {
-                        target: closure_op.clone(),
-                        index: 0,
-                        field_ty: fn_ptr_ty,
-                    },
-                });
-                let env_local = self.fresh_local(env_mir.clone());
-                self.push_stmt(Statement::Assign {
-                    target: env_local,
-                    rvalue: RValue::FieldRead {
-                        target: closure_op,
-                        index: 1,
-                        field_ty: env_mir,
-                    },
-                });
-
-                let mut call_args: Vec<Operand> = vec![Operand::Copy(env_local)];
-                for a in args {
-                    call_args.push(self.lower_expr_to_operand(a));
-                }
-                RValue::CallIndirect {
-                    callee: Operand::Copy(fn_ptr_local),
-                    args: call_args,
-                    arg_tys: fn_arg_tys,
-                    ret_ty: ret_mir,
-                }
+                self.call_fn_value(closure_op, args, ret_ty)
             }
             _ => RValue::Use(self.lower_expr_to_operand(e)),
         }
@@ -1409,6 +1546,44 @@ impl<'a> FnBuilder<'a> {
             },
         });
         Operand::Copy(dst)
+    }
+
+    /// Call a function value `{code, env}`: `code(env, args..)`.
+    fn call_fn_value(&mut self, callee: Operand, args: &[HirExpr], ret_ty: &HirTy) -> RValue {
+        let arg_tys: Vec<MirTy> = args
+            .iter()
+            .map(|a| lower_ty_in(&a.ty, self.module))
+            .collect();
+        let ret = lower_ty_in(ret_ty, self.module);
+        let code_t = code_ty(arg_tys.clone(), ret.clone());
+        let code = self.fresh_local(code_t);
+        self.push_stmt(Statement::Assign {
+            target: code,
+            rvalue: RValue::FieldRead {
+                target: callee.clone(),
+                index: 0,
+                field_ty: code_ty(arg_tys.clone(), ret.clone()),
+            },
+        });
+        let env = self.fresh_local(MirTy::GcRef);
+        self.push_stmt(Statement::Assign {
+            target: env,
+            rvalue: RValue::FieldRead {
+                target: callee,
+                index: 1,
+                field_ty: MirTy::GcRef,
+            },
+        });
+        let mut call_args = vec![Operand::Copy(env)];
+        call_args.extend(args.iter().map(|a| self.lower_expr_to_operand(a)));
+        let mut all_tys = vec![MirTy::GcRef];
+        all_tys.extend(arg_tys);
+        RValue::CallIndirect {
+            callee: Operand::Copy(code),
+            args: call_args,
+            arg_tys: all_tys,
+            ret_ty: ret,
+        }
     }
 
     /// The MIR type of one enum variant's own payload (before it is

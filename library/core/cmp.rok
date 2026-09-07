@@ -5,11 +5,60 @@
 
 pub trait Eq {}
 
-// ponytail: spec 2.5.5 returns `Ordering`; an `i32` (-1 / 0 / 1) until
-// the `Ordering` enum lands.
+/// The result of a three-way comparison (2.5.4).
+pub enum Ordering {
+    Less,
+    Equal,
+    Greater,
+}
+
+impl Ordering {
+    pub fn is_lt(self) -> bool { match self { Ordering::Less => return true, _ => return false } }
+    pub fn is_eq(self) -> bool { match self { Ordering::Equal => return true, _ => return false } }
+    pub fn is_gt(self) -> bool { match self { Ordering::Greater => return true, _ => return false } }
+    pub fn reverse(self) -> Ordering {
+        match self {
+            Ordering::Less => return Ordering::Greater,
+            Ordering::Equal => return Ordering::Equal,
+            Ordering::Greater => return Ordering::Less,
+        }
+    }
+}
+
+impl PartialEq for Ordering {
+    fn eq(self, rhs: Ordering) -> bool {
+        match (self, rhs) {
+            (Ordering::Less, Ordering::Less) => return true,
+            (Ordering::Equal, Ordering::Equal) => return true,
+            (Ordering::Greater, Ordering::Greater) => return true,
+            _ => return false,
+        }
+    }
+    fn ne(self, rhs: Ordering) -> bool { return !self.eq(rhs); }
+}
+
+impl Eq for Ordering {}
+
+/// A total order (2.5.5).
 #[lang("ord_trait")]
 pub trait Ord {
-    fn cmp(self, other: Self) -> i32;
+    fn cmp(self, rhs: Self) -> Ordering;
+
+    fn min(self, rhs: Self) -> Self {
+        if self.le(rhs) { return self; }
+        return rhs;
+    }
+
+    fn max(self, rhs: Self) -> Self {
+        if self.ge(rhs) { return self; }
+        return rhs;
+    }
+
+    fn clamp(self, low: Self, high: Self) -> Self {
+        if self.lt(low) { return low; }
+        if self.gt(high) { return high; }
+        return self;
+    }
 }
 
 /// `a == b` ⇒ `a.hash() == b.hash()` (2.5.6) — what `Dict` / `Set`

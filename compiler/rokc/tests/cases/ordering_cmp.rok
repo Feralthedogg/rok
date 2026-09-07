@@ -1,0 +1,42 @@
+// expect-exit: 0
+// expect-stdout:
+// 1
+// 1
+// 1
+// 3
+// 9
+// 5
+// 1
+
+// `Ord::cmp` returns `Ordering` (stdlib 2.5.4-5) with the `min` / `max`
+// / `clamp` defaults; `str` and the primitives implement it.
+
+struct Version { major: i32; minor: i32; }
+
+impl PartialOrd for Version {
+    fn lt(self, rhs: Version) -> bool { return self.cmp(rhs).is_lt(); }
+    fn gt(self, rhs: Version) -> bool { return self.cmp(rhs).is_gt(); }
+    fn le(self, rhs: Version) -> bool { return !self.cmp(rhs).is_gt(); }
+    fn ge(self, rhs: Version) -> bool { return !self.cmp(rhs).is_lt(); }
+}
+
+impl Ord for Version {
+    fn cmp(self, rhs: Version) -> Ordering {
+        let c = self.major.cmp(rhs.major);
+        if c != Ordering::Equal { return c; }
+        return self.minor.cmp(rhs.minor);
+    }
+}
+
+fn main() -> i32 {
+    rok_print_i32(if 3.cmp(5) == Ordering::Less { 1 } else { 0 });
+    rok_print_i32(if "b".cmp("a").is_gt() && 2.cmp(2).is_eq() { 1 } else { 0 });
+    rok_print_i32(if 7.cmp(1).reverse() == Ordering::Less { 1 } else { 0 });
+    rok_print_i32(3.min(8));
+    rok_print_i32(12.clamp(0, 9));
+    let a = Version { major: 1, minor: 5 };
+    let b = Version { major: 1, minor: 2 };
+    rok_print_i32(a.max(b).minor);
+    rok_print_i32(if a.cmp(b) == Ordering::Greater { 1 } else { 0 });
+    return 0;
+}

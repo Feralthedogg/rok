@@ -1,0 +1,18 @@
+// expect-exit: 42
+// Spec E2: an unsuffixed integer literal takes a float expected type;
+// in a binary op the static side fixes the literal's type.
+fn half(x: f64) -> f64 {
+    return x / 2;
+}
+
+fn main() -> i32 {
+    let a: f64 = 10.5;
+    let b = a * 2;
+    let c: f32 = 3;
+    let d: f64 = -4;
+    let e = 1 + a;
+    if a > 10 && c == 3 && d < 0 {
+        return (b + half(e) + d) as i32 + 20;
+    }
+    return 0;
+}

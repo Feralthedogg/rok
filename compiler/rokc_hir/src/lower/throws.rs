@@ -122,7 +122,7 @@ fn fresh_label(ctx: &mut LowerCtx<'_>) -> String {
     format!("#catch{}", ctx.next_synth)
 }
 
-const fn unit_value(span: rokc_diagnostic::Span) -> HirExpr {
+pub(super) const fn unit_value(span: rokc_diagnostic::Span) -> HirExpr {
     HirExpr {
         kind: HirExprKind::Const(ConstVal::Unit),
         ty: HirTy::Unit,
@@ -463,14 +463,25 @@ fn err_fits(ctx: &LowerCtx<'_>, from: &HirTy, to: &HirTy) -> bool {
 
 /// Spec 4.4.9: a function value that throws less than its `fn` slot
 /// (not at all, or a narrower error) goes in through an adapter
-/// `fn #thunk(args) throws (E) -> T { try f(args) }`. Only a statically
-/// known function (a named fn or a capture-free closure) can be adapted:
-/// a plain `fn` value has no room for the callee a thunk would carry.
+/// `fn #thunk(args) throws (E) -> T { try f(args) }`. A named fn is
+/// called directly; any other function value (a variable, a capturing
+/// closure) is captured by the thunk, itself a closure.
 pub(super) fn adapt_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -> HirExpr {
-    let (HirTy::Fn(args, sret, _), HirTy::Fn(vargs, vret, _), HirExprKind::FnRef(target)) =
-        (slot, &value.ty, &value.kind)
+    let (
+        HirTy::Fn(args, sret, want),
+        HirTy::Fn(vargs, vret, _)
+        | HirTy::Closure {
+            args: vargs,
+            ret: vret,
+            ..
+        },
+    ) = (slot, &value.ty)
     else {
         return value;
+    };
+    let target = match &value.kind {
+        HirExprKind::FnRef(t) => Some(*t),
+        _ => None,
     };
     let HirTy::Throws { ok, err } = &**sret else {
         return value;
@@ -482,13 +493,29 @@ pub(super) fn adapt_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
             }
             t => t == &**ok,
         };
-    if !fits {
+    // The thunk captures a non-static callee: it is `Send` only if that
+    // callee is.
+    let bounds_ok = target.is_some()
+        || want.iter().all(|b| match &value.ty {
+            HirTy::Fn(_, _, have) => have.contains(b),
+            t => ctx.implements_trait(t, b, 0),
+        });
+    if !fits || !bounds_ok {
         return value;
     }
     let span = value.span;
     let id = FunctionId(ctx.env.sink.next_id.get());
     ctx.env.sink.next_id.set(id.0 + 1);
     let mut a = LowerCtx::new(ctx.env, ctx.ty_subst, None);
+    // The captured callee: `env.0` of a one-field env tuple.
+    let callee_ty = HirTy::Fn(vargs.clone(), vret.clone(), want.clone());
+    let env_ty = HirTy::Tuple(vec![callee_ty.clone()]);
+    let env_param = target.is_none().then(|| HirParam {
+        name: "#env".to_owned(),
+        local: a.declare(None, env_ty.clone()),
+        ty: env_ty.clone(),
+        by_ref: false,
+    });
     let params: Vec<HirParam> = args
         .iter()
         .enumerate()
@@ -499,14 +526,32 @@ pub(super) fn adapt_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
             by_ref: false,
         })
         .collect();
-    let call = HirExpr {
-        kind: HirExprKind::Call {
-            callee: *target,
-            args: params
-                .iter()
-                .map(|p| hir_local(p.local, &p.ty, span))
-                .collect(),
+    let call_args: Vec<HirExpr> = params
+        .iter()
+        .map(|p| hir_local(p.local, &p.ty, span))
+        .collect();
+    let kind = match (target, &env_param) {
+        (Some(t), _) => HirExprKind::Call {
+            callee: t,
+            args: call_args,
         },
+        (None, Some(env)) => HirExprKind::CallIndirect {
+            callee: Box::new(HirExpr {
+                kind: HirExprKind::TupleField {
+                    target: Box::new(hir_local(env.local, &env_ty, span)),
+                    index: 0,
+                    field_ty: callee_ty.clone(),
+                },
+                ty: callee_ty.clone(),
+                span,
+            }),
+            args: call_args,
+            ret_ty: (**vret).clone(),
+        },
+        (None, None) => unreachable!("env param exists without a static target"),
+    };
+    let call = HirExpr {
+        kind,
         ty: (**vret).clone(),
         span,
     };
@@ -530,11 +575,13 @@ pub(super) fn adapt_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
     finish_throwing_body(&a, &mut body);
     // ponytail: one thunk per adapted use; cache by (target, slot) if
     // they pile up.
+    let mut all_params: Vec<HirParam> = env_param.into_iter().collect();
+    all_params.extend(params);
     ctx.env.sink.extras.borrow_mut().push(HirFunction {
         id,
         def_id: None,
         name: format!("__thunk_{}", id.0),
-        params,
+        params: all_params,
         locals: a.into_locals(),
         ret_ty: (**sret).clone(),
         body: Some(body),
@@ -542,8 +589,151 @@ pub(super) fn adapt_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
         is_generator: false,
         span,
     });
+    let kind = if target.is_some() {
+        HirExprKind::FnRef(id)
+    } else {
+        let mut v = value;
+        v.ty = callee_ty;
+        HirExprKind::ClosureValue {
+            fn_id: id,
+            env: Box::new(HirExpr {
+                kind: HirExprKind::Tuple { fields: vec![v] },
+                ty: env_ty.clone(),
+                span,
+            }),
+            env_ty,
+            arg_tys: args.clone(),
+            ret_ty: (**sret).clone(),
+        }
+    };
     HirExpr {
-        kind: HirExprKind::FnRef(id),
+        kind,
+        ty: slot.clone(),
+        span,
+    }
+}
+
+/// Spec 4.4: a `fn(..) -> !` fits any `fn(..) -> R` slot through a
+/// thunk `fn #thunk(args) -> R { f(args) }` (the call never returns, so
+/// the thunk's body diverges). A named fn is called directly; any other
+/// function value is captured by the thunk, itself a closure.
+pub(super) fn adapt_never_fn(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -> HirExpr {
+    let (
+        HirTy::Fn(args, sret, want),
+        HirTy::Fn(vargs, vret, _)
+        | HirTy::Closure {
+            args: vargs,
+            ret: vret,
+            ..
+        },
+    ) = (slot, &value.ty)
+    else {
+        return value;
+    };
+    if **vret != HirTy::Never || **sret == HirTy::Never || args != vargs {
+        return value;
+    }
+    let target = match &value.kind {
+        HirExprKind::FnRef(t) => Some(*t),
+        _ => None,
+    };
+    let bounds_ok = target.is_some()
+        || want.iter().all(|b| match &value.ty {
+            HirTy::Fn(_, _, have) => have.contains(b),
+            t => ctx.implements_trait(t, b, 0),
+        });
+    if !bounds_ok {
+        return value;
+    }
+    let span = value.span;
+    let id = FunctionId(ctx.env.sink.next_id.get());
+    ctx.env.sink.next_id.set(id.0 + 1);
+    let mut a = LowerCtx::new(ctx.env, ctx.ty_subst, None);
+    let callee_ty = HirTy::Fn(vargs.clone(), vret.clone(), want.clone());
+    let env_ty = HirTy::Tuple(vec![callee_ty.clone()]);
+    let env_param = target.is_none().then(|| HirParam {
+        name: "#env".to_owned(),
+        local: a.declare(None, env_ty.clone()),
+        ty: env_ty.clone(),
+        by_ref: false,
+    });
+    let params: Vec<HirParam> = args
+        .iter()
+        .enumerate()
+        .map(|(i, t)| HirParam {
+            name: format!("#a{i}"),
+            local: a.declare(None, t.clone()),
+            ty: t.clone(),
+            by_ref: false,
+        })
+        .collect();
+    let call_args: Vec<HirExpr> = params
+        .iter()
+        .map(|p| hir_local(p.local, &p.ty, span))
+        .collect();
+    let kind = match (target, &env_param) {
+        (Some(t), _) => HirExprKind::Call {
+            callee: t,
+            args: call_args,
+        },
+        (None, Some(env)) => HirExprKind::CallIndirect {
+            callee: Box::new(HirExpr {
+                kind: HirExprKind::TupleField {
+                    target: Box::new(hir_local(env.local, &env_ty, span)),
+                    index: 0,
+                    field_ty: callee_ty.clone(),
+                },
+                ty: callee_ty.clone(),
+                span,
+            }),
+            args: call_args,
+            ret_ty: (**vret).clone(),
+        },
+        (None, None) => unreachable!("env param exists without a static target"),
+    };
+    let call = HirExpr {
+        kind,
+        ty: HirTy::Unit,
+        span,
+    };
+    let mut all_params: Vec<HirParam> = env_param.into_iter().collect();
+    all_params.extend(params);
+    let params = all_params;
+    ctx.env.sink.extras.borrow_mut().push(HirFunction {
+        id,
+        def_id: None,
+        name: format!("__thunk_{}", id.0),
+        params,
+        locals: a.into_locals(),
+        ret_ty: (**sret).clone(),
+        body: Some(HirBlock {
+            stmts: vec![HirStmt::Panic(call)],
+            trailing: None,
+            label: None,
+        }),
+        is_async: false,
+        is_generator: false,
+        span,
+    });
+    let kind = if target.is_some() {
+        HirExprKind::FnRef(id)
+    } else {
+        let mut v = value;
+        v.ty = callee_ty;
+        HirExprKind::ClosureValue {
+            fn_id: id,
+            env: Box::new(HirExpr {
+                kind: HirExprKind::Tuple { fields: vec![v] },
+                ty: env_ty.clone(),
+                span,
+            }),
+            env_ty,
+            arg_tys: args.clone(),
+            ret_ty: (**sret).clone(),
+        }
+    };
+    HirExpr {
+        kind,
         ty: slot.clone(),
         span,
     }
@@ -673,6 +863,12 @@ pub(super) fn lower_return(
             let v = value.unwrap_or_else(|| unit_value(span));
             Some(carrier(&ok, &err, Ok(v), span))
         }
+        // `ref self` (spec 4.7.5): hand `self` back too.
+        None if ctx.ref_self.is_some() => Some(super::mono::ref_self_pack(
+            ctx,
+            value.unwrap_or_else(|| unit_value(span)),
+            span,
+        )),
         None => value,
     };
     exit_through(ctx, None, value, HirStmt::Return, span)

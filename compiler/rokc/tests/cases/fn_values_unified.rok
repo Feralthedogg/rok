@@ -1,0 +1,45 @@
+// expect-exit: 0
+// expect-stdout:
+// 15
+// 7
+// 13
+// 30
+// 3
+// 106
+// 2
+
+// Spec 4.4.2-4.4.6: named fns and closures (capturing or not) are all
+// values of one `fn` type — passed to `fn` parameters, returned, stored
+// in struct fields and collections, called later. Captures are
+// by-value snapshots (4.6). GC collections keep the captures alive.
+extern "C" {
+    fn rok_gc_collect();
+}
+
+struct Handler { name: str; run: fn(i32) -> i32; }
+
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 { return f(x); }
+fn make_adder(n: i32) -> fn(i32) -> i32 { return |x| x + n; }
+fn twice(x: i32) -> i32 { return x * 2; }
+
+fn main() -> i32 {
+    let n = 10;
+    rok_print_i32(apply(|x| x + n, 5));
+    let add2 = make_adder(2);
+    let add3 = make_adder(3);
+    rok_gc_collect();
+    rok_print_i32(add2(5));
+    rok_print_i32(add3(add2(8)));
+    let hs: List<fn(i32) -> i32> = [twice, make_adder(100), |x| x * n];
+    rok_print_i32(hs[2](3));
+    let h = Handler { name: "inc", run: |x| x + 1 };
+    rok_print_i32((h.run)(2));
+    let by_name: Dict<str, fn(i32) -> i32> = {"twice": twice, "plus": hs[1]};
+    rok_gc_collect();
+    rok_print_i32(by_name["plus"](6));
+    // Snapshot: a later change to `n` doesn't reach the closure.
+    let snap = |x: i32| x + n;
+    n = 1000;
+    rok_print_i32(snap(0) / 5);
+    return 0;
+}

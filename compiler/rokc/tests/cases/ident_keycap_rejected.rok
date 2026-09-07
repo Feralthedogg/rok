@@ -1,0 +1,6 @@
+// expect-error: unexpected character
+// Spec 1.4.1 (E7): a keycap sequence is not an identifier.
+fn main() -> i32 {
+    let x1️⃣ = 1;
+    return 0;
+}

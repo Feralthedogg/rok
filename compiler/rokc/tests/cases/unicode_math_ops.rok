@@ -1,0 +1,49 @@
+// expect-exit: 0
+// expect-stdout:
+// 7
+// 20
+// 1
+// 0
+// 1
+// 1
+// 1
+
+// Spec 1.10.3 / 3.2.3: Unicode math operators bind to their traits with
+// fixed levels; `÷ ≤ ≥ ≠ ≡` are synonyms of `/ <= >= != ==`.
+struct V { x: i32; y: i32; }
+
+impl Dot for V {
+    type Output = i32;
+    fn dot(self, rhs: V) -> i32 { return self.x * rhs.x + self.y * rhs.y; }
+}
+
+impl Cross for V {
+    type Output = i32;
+    fn cross(self, rhs: V) -> i32 { return self.x * rhs.y - self.y * rhs.x; }
+}
+
+struct Bits { b: i32; }
+
+impl Contains<i32> for Bits {
+    fn contains(self, item: i32) -> bool { return (self.b >> item) & 1 == 1; }
+    fn not_contains(self, item: i32) -> bool { return (self.b >> item) & 1 == 0; }
+}
+
+fn main() -> i32 {
+    let a = V { x: 1, y: 2 };
+    let b = V { x: 3, y: 2 };
+    let c = V { x: 5, y: 6 };
+    // ⋅ binds like `*`: 1 + (a ⋅ b) = 1 + 7 - 1
+    rok_print_i32(1 + a ⋅ b - 1);
+    // × at the multiplicative level: 27 + (-4) - 3
+    rok_print_i32(c ⋅ b + a × c - 3);
+    let s = Bits { b: 6 };
+    if 1 ∈ s && 0 ∉ s { rok_print_i32(1); }
+    if 0 ∈ s { rok_print_i32(9); } else { rok_print_i32(0); }
+    if 3 ≤ 4 && 4 ≥ 4 && 1 ≠ 2 && 2 ≡ 2 { rok_print_i32(1); }
+    if 7 ÷ 2 == 3 { rok_print_i32(1); }
+    // √ is prefix (level 12): √x * 2 is (√x) * 2.
+    let x: f64 = 16.0;
+    if √x * 2 == 8 && √(9.0f32) == 3 { rok_print_i32(1); }
+    return 0;
+}

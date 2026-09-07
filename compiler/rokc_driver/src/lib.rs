@@ -85,7 +85,6 @@ pub fn compile_source(
         Some(source),
         Some(&root_dir),
         &[],
-        &prec,
         &cfg_env,
         &mut diags,
         &mut all_items,
@@ -112,7 +111,6 @@ pub fn compile_source(
             None,
             root.parent(),
             &["rok".to_owned(), tier],
-            &prec,
             &cfg_env,
             &mut diags,
             &mut all_items,
@@ -177,33 +175,15 @@ pub fn compile_source(
 
 fn build_prec_table(roots: &[PathBuf], diags: &mut Vec<RokDiagnostic>) -> PrecTable {
     let mut table = PrecTable::new();
-    let empty = PrecTable::new();
     for root in roots {
         // Walk the package starting from the given root file (typically
         // `lib.rok` or `main.rok`), following `mod x;` declarations to
-        // their files. Collect the parsed AST of every module visited.
-        // Parsed without operators, a library body using them errors
-        // here; the real parse (with this table) reports what is left.
-        let modules = resolve_module_tree(root, &empty, &mut Vec::new());
-        for prog in modules {
+        // their files, and bind each `#[infix]` token to its trait method.
+        // Parse errors are reported by the real parse; drop them here.
+        for prog in resolve_module_tree(root, &mut Vec::new()) {
             let (sub_table, mut collect_diags) = collect_prec_table(&prog);
             diags.append(&mut collect_diags);
-            for entry in sub_table.entries().cloned() {
-                if let Some(existing) = table.lookup(&entry.symbol, entry.fixity) {
-                    if existing.prec != entry.prec || existing.assoc != entry.assoc {
-                        diags.push(RokDiagnostic::error(
-                            rokc_diagnostic::ErrorKind::Meta,
-                            format!(
-                                "operator `{}` registered twice with different \
-                                 precedence/associativity",
-                                entry.symbol
-                            ),
-                        ));
-                        continue;
-                    }
-                }
-                table.insert(entry);
-            }
+            diags.extend(sub_table.entries().cloned().filter_map(|e| table.merge(e)));
         }
     }
     table
@@ -216,25 +196,20 @@ fn build_prec_table(roots: &[PathBuf], diags: &mut Vec<RokDiagnostic>) -> PrecTa
 ///
 /// Returns each visited module's parsed `Program`. Errors (missing files,
 /// `mod` in a single-file leaf, etc.) are appended to `diags`.
-fn resolve_module_tree(
-    root_path: &Path,
-    prec: &PrecTable,
-    diags: &mut Vec<RokDiagnostic>,
-) -> Vec<rokc_ast::Program> {
+fn resolve_module_tree(root_path: &Path, diags: &mut Vec<RokDiagnostic>) -> Vec<rokc_ast::Program> {
     let mut programs = Vec::new();
     // Submodule directory of the package root is the directory that
     // contains `lib.rok` / `main.rok` (per spec §5.4.4).
     let root_dir = root_path
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    parse_and_descend(root_path, Some(&root_dir), prec, diags, &mut programs);
+    parse_and_descend(root_path, Some(&root_dir), diags, &mut programs);
     programs
 }
 
 fn parse_and_descend(
     body_path: &Path,
     submodule_dir: Option<&Path>,
-    prec: &PrecTable,
     diags: &mut Vec<RokDiagnostic>,
     out: &mut Vec<rokc_ast::Program>,
 ) {
@@ -253,20 +228,19 @@ fn parse_and_descend(
     let (tokens, mut lex_diags) = lexer.lex_all();
     diags.append(&mut lex_diags);
 
-    let (program, mut parse_diags) = parse_program(&tokens, prec, file);
+    let (program, mut parse_diags) = parse_program(&tokens, file);
     diags.append(&mut parse_diags);
     if !program.stmts.is_empty() {
         diags.push(entry::stmts_outside_entry(body_path));
     }
 
-    walk_mod_decls(&program.items, submodule_dir, prec, diags, out);
+    walk_mod_decls(&program.items, submodule_dir, diags, out);
     out.push(program);
 }
 
 fn walk_mod_decls(
     items: &[rokc_ast::Item],
     submodule_dir: Option<&Path>,
-    prec: &PrecTable,
     diags: &mut Vec<RokDiagnostic>,
     out: &mut Vec<rokc_ast::Program>,
 ) {
@@ -276,9 +250,9 @@ fn walk_mod_decls(
         };
         match &m.items {
             // Inline module: `mod name { ... }` — walk its items directly.
-            Some(inline_items) => walk_mod_decls(inline_items, submodule_dir, prec, diags, out),
+            Some(inline_items) => walk_mod_decls(inline_items, submodule_dir, diags, out),
             // File-mapped module: resolve sibling `name.rok`.
-            None => resolve_file_mod(&m.name, submodule_dir, prec, diags, out),
+            None => resolve_file_mod(&m.name, submodule_dir, diags, out),
         }
     }
 }
@@ -286,7 +260,6 @@ fn walk_mod_decls(
 fn resolve_file_mod(
     name: &str,
     submodule_dir: Option<&Path>,
-    prec: &PrecTable,
     diags: &mut Vec<RokDiagnostic>,
     out: &mut Vec<rokc_ast::Program>,
 ) {
@@ -310,7 +283,7 @@ fn resolve_file_mod(
         return;
     }
     let next_dir = if folder.is_dir() { Some(folder) } else { None };
-    parse_and_descend(&body, next_dir.as_deref(), prec, diags, out);
+    parse_and_descend(&body, next_dir.as_deref(), diags, out);
 }
 
 /// Walk a package's module tree starting from `body_path`, qualifying
@@ -326,7 +299,6 @@ fn collect_module_tree(
     preloaded: Option<&str>,
     submodule_dir: Option<&Path>,
     module_path: &[String],
-    prec: &PrecTable,
     cfg_env: &CfgEnv,
     diags: &mut Vec<RokDiagnostic>,
     out: &mut Vec<rokc_ast::Item>,
@@ -350,7 +322,7 @@ fn collect_module_tree(
     let (tokens, mut lex_diags) = lexer.lex_all();
     diags.append(&mut lex_diags);
 
-    let (program, mut parse_diags) = parse_program(&tokens, prec, file);
+    let (program, mut parse_diags) = parse_program(&tokens, file);
     diags.append(&mut parse_diags);
 
     // Filter `#[cfg(...)]`-gated items before walking — excluded modules
@@ -361,7 +333,6 @@ fn collect_module_tree(
         filtered,
         module_path,
         submodule_dir,
-        prec,
         cfg_env,
         diags,
         out,
@@ -375,7 +346,6 @@ fn flatten_module_items(
     items: Vec<rokc_ast::Item>,
     module_path: &[String],
     submodule_dir: Option<&Path>,
-    prec: &PrecTable,
     cfg_env: &CfgEnv,
     diags: &mut Vec<RokDiagnostic>,
     out: &mut Vec<rokc_ast::Item>,
@@ -395,7 +365,6 @@ fn flatten_module_items(
                         inner,
                         &child_path,
                         submodule_dir,
-                        prec,
                         cfg_env,
                         diags,
                         out,
@@ -430,7 +399,6 @@ fn flatten_module_items(
                         None,
                         next_dir.as_deref(),
                         &child_path,
-                        prec,
                         cfg_env,
                         diags,
                         out,
@@ -549,16 +517,24 @@ fn builtin_panic_extern() -> rokc_ast::Item {
         where_clause: Vec::new(),
         span,
     };
+    let never = Ty {
+        kind: TyKind::Never,
+        span,
+    };
     // Spec 805: `rok_panic(msg, len) -> !` — message bytes to stderr,
     // exit 101. Codegen-inserted runtime checks call it too.
     let panic_fn = make_fn(
         "rok_panic",
         vec![("msg", path_ty("str")), ("len", path_ty("usize"))],
-        None,
+        Some(never.clone()),
     );
     // Spec 4.16.4: an error out of a throwing `main` — the error's
     // description (NUL-terminated `str`), exit 1.
-    let uncaught_fn = make_fn("rok_uncaught_error", vec![("what", path_ty("str"))], None);
+    let uncaught_fn = make_fn(
+        "rok_uncaught_error",
+        vec![("what", path_ty("str"))],
+        Some(never),
+    );
     let assert_fn = make_fn(
         "rok_assert",
         vec![("cond", path_ty("i32"))],

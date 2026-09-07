@@ -1,9 +1,11 @@
 // spec: 002.09.2-ref-self
-// probe: negative-must-fail
-// expect-error: ref-self semantics aren't implemented
-//                  현 단계에선 silent miscompile 차단 위해 명시 거부)
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 99
 
-// spec 2.9.2: `ref self` — caller 의 변수 binding 재할당 가능.
+// spec 2.9.2 / 4.7.5: `ref self` — the method's assignment to `self`
+// reaches the caller's binding (no `ref` at the call).
 struct Cell { v: i32; }
 
 impl Cell {

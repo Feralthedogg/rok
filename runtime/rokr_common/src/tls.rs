@@ -106,7 +106,7 @@ pub fn current() -> *mut TlsBlock {
     // SAFETY: valid out-pointer; 64 is a power of two multiple of
     // `size_of::<*mut c_void>()`.
     if unsafe { libc::posix_memalign(&mut raw, 64, size_of::<TlsBlock>()) } != 0 {
-        crate::fatal(b"rok runtime: out of memory (TLS block)");
+        crate::oom();
     }
     let p = raw.cast::<TlsBlock>();
     // SAFETY: fresh 64-byte, 64-aligned allocation; all-zero is a valid

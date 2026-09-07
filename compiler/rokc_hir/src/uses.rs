@@ -168,7 +168,7 @@ fn flatten_tree(
 }
 
 /// Convert `pkg::a::b` / `sup::a` into an absolute `module_path`-rooted
-/// segment list. Bare-ident roots (`a::b`) are taken as absolute already.
+/// segment list. Bare-ident roots (`a::b`) are relative to the module.
 fn resolve_root(segs: &[String], module_path: &str) -> Vec<String> {
     if segs.is_empty() {
         return Vec::new();
@@ -192,6 +192,14 @@ fn resolve_root(segs: &[String], module_path: &str) -> Vec<String> {
             parts.extend(segs[i..].iter().cloned());
             parts
         }
-        _ => segs.to_vec(),
+        // Spec 5.7: a bare root names something in the current module
+        // (a child module); `rok::` is the virtual stdlib root.
+        "rok" => segs.to_vec(),
+        _ if module_path.is_empty() => segs.to_vec(),
+        _ => module_path
+            .split("::")
+            .map(str::to_owned)
+            .chain(segs.iter().cloned())
+            .collect(),
     }
 }

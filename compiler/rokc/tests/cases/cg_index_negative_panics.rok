@@ -1,7 +1,7 @@
 // expect-exit: 101
 
 fn main() -> i32 {
-    let a = [1, 2, 3];
+    let a: [i32; 3] = [1, 2, 3];
     let i: i32 = -1;
     return a[i];
 }
