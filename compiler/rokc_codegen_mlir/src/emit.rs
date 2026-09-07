@@ -14,6 +14,10 @@ use rokc_mir::{BasicBlock, MirFunction, MirModule, MirTy, Operand, RValue, State
 const HEADER_SIZE: u32 = 16;
 /// First compiler-assigned type id (801 §8.1.2 user range).
 const GC_TYPE_BASE: u32 = 0x10000;
+/// Runtime type ids of a `BufAlloc` buffer (`rokr`): no traced children
+/// (the string type), or every payload word a candidate reference.
+const BUF_PLAIN_TYPE_ID: u32 = 1;
+const BUF_TRACED_TYPE_ID: u32 = 2;
 
 pub struct Emitter {
     out: String,
@@ -26,6 +30,10 @@ pub struct Emitter {
     pub errors: Vec<String>,
     /// Some codegen-inserted runtime check called `rok_panic`.
     uses_panic: bool,
+    /// Runtime helpers codegen calls on its own (`rok_cstr_len`,
+    /// `rok_str_cmp`); declared at the end unless the module declares
+    /// them.
+    needs: std::collections::BTreeSet<&'static str>,
     /// Some `HeapBox` (an `any Tr` payload) called `rok_gc_alloc_slow`.
     uses_alloc: bool,
     /// Payload type of each GC object type; index `i` is type id
@@ -43,6 +51,18 @@ pub(crate) struct FnSig {
     name: String,
     params: Vec<MirTy>,
     ret: MirTy,
+    /// External C function: `str` crosses as a NUL-terminated `char*`.
+    c_abi: bool,
+}
+
+/// An external declaration other than the runtime's own `rok_*` symbols
+/// uses the C ABI for `str` (a NUL-terminated `char*`); `rok_*` symbols
+/// take `str` by value as `(ptr, len)` (808).
+// ponytail: decided by symbol prefix because MIR has no ABI field;
+// carry the extern block's ABI string through HIR/MIR when a second
+// ABI appears.
+fn is_c_abi(f: &MirFunction) -> bool {
+    f.blocks.is_empty() && !f.name.starts_with("rok_")
 }
 
 impl Emitter {
@@ -54,6 +74,7 @@ impl Emitter {
             str_globals: std::collections::BTreeMap::new(),
             errors: Vec::new(),
             uses_panic: false,
+            needs: std::collections::BTreeSet::new(),
             uses_alloc: false,
             gc_types: Vec::new(),
             pkg: String::new(),
@@ -77,6 +98,7 @@ impl Emitter {
                     name: crate::mangle::symbol_for(f, &self.pkg),
                     params: f.param_tys.clone(),
                     ret: f.ret_ty.clone(),
+                    c_abi: is_c_abi(f),
                 },
             );
         }
@@ -98,9 +120,27 @@ impl Emitter {
         if self.uses_panic && !panic_declared {
             let _ = writeln!(
                 self.out,
-                "  func.func private @rok_panic(!llvm.ptr, i{})",
+                "  func.func private @rok_panic({}, i{})",
+                mlir_prim(PrimTy::Str, self.pointer_width),
                 self.pointer_width
             );
+        }
+        let pw = self.pointer_width;
+        let s = mlir_prim(PrimTy::Str, pw);
+        for name in std::mem::take(&mut self.needs) {
+            if module
+                .functions
+                .iter()
+                .any(|f| f.name == name && f.blocks.is_empty())
+            {
+                continue;
+            }
+            let sig = match name {
+                "rok_cstr_len" => format!("(!llvm.ptr) -> i{pw}"),
+                "rok_str_cmp" => format!("({s}, {s}) -> i32"),
+                _ => unreachable!("unknown runtime helper `{name}`"),
+            };
+            let _ = writeln!(self.out, "  func.func private @{name}{sig}");
         }
         self.emit_static_globals(module);
         self.emit_string_globals();
@@ -171,9 +211,10 @@ impl Emitter {
                 // A pointer-valued global needs an initializer region
                 // that takes the literal's address.
                 let lit = self.intern_global_string(text);
+                let n = text.len();
                 let _ = writeln!(
                     self.out,
-                    "  llvm.mlir.global internal {constness}@{sym}() {{addr_space = 0 : i32}} : !llvm.ptr {{\n    %0 = llvm.mlir.addressof @{lit} : !llvm.ptr\n    llvm.return %0 : !llvm.ptr\n  }}"
+                    "  llvm.mlir.global internal {constness}@{sym}() {{addr_space = 0 : i32}} : {ty_str} {{\n    %0 = llvm.mlir.addressof @{lit} : !llvm.ptr\n    %1 = llvm.mlir.constant({n} : i{pw}) : i{pw}\n    %2 = llvm.mlir.undef : {ty_str}\n    %3 = llvm.insertvalue %0, %2[0] : {ty_str}\n    %4 = llvm.insertvalue %1, %3[1] : {ty_str}\n    llvm.return %4 : {ty_str}\n  }}"
                 );
                 continue;
             }
@@ -242,16 +283,25 @@ impl Emitter {
         }
         self.out.push_str(symbol);
         self.out.push('(');
+        let c_abi = is_c_abi(f);
         for (i, _p) in f.params.iter().enumerate() {
             if i > 0 {
                 self.out.push_str(", ");
             }
             let ty = f.param_tys.get(i).cloned().unwrap_or(MirTy::Any);
-            let _ = write!(self.out, "%arg{i}: {}", mlir_type(&ty, self.pointer_width));
+            let _ = write!(
+                self.out,
+                "%arg{i}: {}",
+                abi_type(&ty, c_abi, self.pointer_width)
+            );
         }
         self.out.push(')');
         if !matches!(f.ret_ty, MirTy::Unit) {
-            let _ = write!(self.out, " -> {}", mlir_type(&f.ret_ty, self.pointer_width));
+            let _ = write!(
+                self.out,
+                " -> {}",
+                abi_type(&f.ret_ty, c_abi, self.pointer_width)
+            );
         }
         if is_decl {
             self.out.push('\n');
@@ -269,6 +319,7 @@ impl Emitter {
         }
         self.str_globals = std::mem::take(&mut emit.str_globals);
         self.uses_panic |= emit.uses_panic;
+        self.needs.append(&mut emit.needs);
         self.uses_alloc |= emit.uses_alloc;
         self.gc_types = std::mem::take(&mut emit.gc_types);
         for e in std::mem::take(&mut emit.errors) {
@@ -372,6 +423,7 @@ struct FnEmit<'a> {
     str_globals: std::collections::BTreeMap<String, String>,
     errors: Vec<String>,
     uses_panic: bool,
+    needs: std::collections::BTreeSet<&'static str>,
     uses_alloc: bool,
     /// Lent `Emitter::gc_types`.
     gc_types: Vec<MirTy>,
@@ -419,6 +471,7 @@ impl<'a> FnEmit<'a> {
             str_globals,
             errors: Vec::new(),
             uses_panic: false,
+            needs: std::collections::BTreeSet::new(),
             uses_alloc: false,
             gc_types: Vec::new(),
             gc_frame: None,
@@ -584,7 +637,8 @@ impl<'a> FnEmit<'a> {
                 Statement::Assign {
                     rvalue: RValue::Call { .. }
                         | RValue::CallIndirect { .. }
-                        | RValue::HeapBox { .. },
+                        | RValue::HeapBox { .. }
+                        | RValue::BufAlloc { .. },
                     ..
                 }
             )
@@ -798,6 +852,28 @@ impl<'a> FnEmit<'a> {
             } => {
                 self.emit_array_write(*array, index, value, elem_ty, *len);
             }
+            Statement::StorageDead(l) => {
+                // Only a frame-rooted slot matters; zero it (all its
+                // `GcRef` leaves become null).
+                if self.gc_frame.is_some() && self.llvm_slot.contains(&l.0) {
+                    let slot = self.slot_names[l.0 as usize].clone().unwrap();
+                    let ty = mlir_type(&self.local_ty(*l), self.pointer_width);
+                    let z = self.fresh_value();
+                    let _ = writeln!(self.body, "    {z} = llvm.mlir.zero : {ty}");
+                    let _ = writeln!(self.body, "    llvm.store {z}, {slot} : {ty}, !llvm.ptr");
+                }
+            }
+            Statement::BufStore {
+                buf,
+                index,
+                value,
+                elem_ty,
+            } => {
+                let p = self.buf_elem_addr(buf, index, elem_ty);
+                let v = self.materialize_operand(value, elem_ty);
+                let ty = mlir_type(elem_ty, self.pointer_width);
+                let _ = writeln!(self.body, "    llvm.store {v}, {p} : {ty}, !llvm.ptr");
+            }
             Statement::StaticStore { name, value, ty } => {
                 let val = self.materialize_operand(value, ty);
                 let ty_str = mlir_type(ty, self.pointer_width);
@@ -969,6 +1045,18 @@ impl<'a> FnEmit<'a> {
                 ret_ty,
             } => self.emit_call_indirect(callee, args, arg_tys, ret_ty),
             RValue::HeapBox { value, ty } => self.emit_heap_box(value, ty),
+            RValue::BufAlloc { elem_ty, len } => self.emit_buf_alloc(elem_ty, len),
+            RValue::BufLoad {
+                buf,
+                index,
+                elem_ty,
+            } => {
+                let p = self.buf_elem_addr(buf, index, elem_ty);
+                let ty = mlir_type(elem_ty, self.pointer_width);
+                let v = self.fresh_value();
+                let _ = writeln!(self.body, "    {v} = llvm.load {p} : !llvm.ptr -> {ty}");
+                v
+            }
             RValue::HeapLoad { ptr, ty } => {
                 let pw = self.pointer_width;
                 let p = self.materialize_operand(ptr, &MirTy::GcRef);
@@ -1047,6 +1135,60 @@ impl<'a> FnEmit<'a> {
 "
         );
         obj
+    }
+
+    /// `rok_gc_alloc_slow(header + len * size, align, type_id)` for a
+    /// buffer of `len` `elem_ty`s (zeroed by the runtime), typed like
+    /// `rok_gc_alloc_bytes` buffers: traced word by word when the
+    /// elements hold GC references.
+    fn emit_buf_alloc(&mut self, elem_ty: &MirTy, len: &Operand) -> String {
+        let pw = self.pointer_width;
+        let usize_ty = MirTy::Prim(PrimTy::Usize);
+        let n = self.materialize_operand(len, &usize_ty);
+        let mut refs = Vec::new();
+        gc_offsets(elem_ty, pw, 0, &mut refs);
+        let type_id = if refs.is_empty() {
+            BUF_PLAIN_TYPE_ID
+        } else {
+            BUF_TRACED_TYPE_ID
+        };
+        let (size, align) = size_align(elem_ty, pw);
+        let align = align.max(8);
+        let [sz, hd, bytes, total, align_v, tid, obj] = std::array::from_fn(|_| self.fresh_value());
+        self.uses_alloc = true;
+        let _ = write!(
+            self.body,
+            "    {sz} = arith.constant {size} : i{pw}
+    {hd} = arith.constant {HEADER_SIZE} : i{pw}
+    {bytes} = arith.muli {n}, {sz} : i{pw}
+    {total} = arith.addi {bytes}, {hd} : i{pw}
+    {align_v} = arith.constant {align} : i{pw}
+    {tid} = arith.constant {type_id} : i32
+    {obj} = func.call @rok_gc_alloc_slow({total}, {align_v}, {tid}) : (i{pw}, i{pw}, i32) -> i{pw}
+"
+        );
+        obj
+    }
+
+    /// Address of element `index` of buffer `buf` (header + index * size).
+    fn buf_elem_addr(&mut self, buf: &Operand, index: &Operand, elem_ty: &MirTy) -> String {
+        let pw = self.pointer_width;
+        let usize_ty = MirTy::Prim(PrimTy::Usize);
+        let b = self.materialize_operand(buf, &MirTy::GcRef);
+        let i = self.materialize_operand(index, &usize_ty);
+        let size = size_align(elem_ty, pw).0;
+        let [sz, hd, off, at, addr, p] = std::array::from_fn(|_| self.fresh_value());
+        let _ = write!(
+            self.body,
+            "    {sz} = arith.constant {size} : i{pw}
+    {hd} = arith.constant {HEADER_SIZE} : i{pw}
+    {off} = arith.muli {i}, {sz} : i{pw}
+    {at} = arith.addi {off}, {hd} : i{pw}
+    {addr} = llvm.inttoptr {b} : i{pw} to !llvm.ptr
+    {p} = llvm.getelementptr {addr}[{at}] : (!llvm.ptr, i{pw}) -> !llvm.ptr, i8
+"
+        );
+        p
     }
 
     fn emit_fn_addr(&mut self, callee: FunctionId, fn_ty: &MirTy) -> String {
@@ -1410,20 +1552,49 @@ impl<'a> FnEmit<'a> {
                 (None, Operand::Const(c)) => const_ty(c),
             })
             .collect();
-        let arg_vals: Vec<String> = args
+        let mut arg_vals: Vec<String> = args
             .iter()
             .zip(arg_tys.iter())
             .map(|(op, ty)| self.materialize_operand(op, ty))
             .collect();
+        let pw = self.pointer_width;
+        let str_ty = MirTy::Prim(PrimTy::Str);
+        if sig.c_abi {
+            // C side sees the NUL-terminated byte pointer.
+            for (v, t) in arg_vals.iter_mut().zip(&arg_tys) {
+                if *t == str_ty {
+                    let p = self.fresh_value();
+                    let _ = writeln!(
+                        self.body,
+                        "    {p} = llvm.extractvalue {v}[0] : {}",
+                        mlir_prim(PrimTy::Str, pw)
+                    );
+                    *v = p;
+                }
+            }
+        }
+        let abi_ty = |t: &MirTy| abi_type(t, sig.c_abi, pw);
 
         let name = sig.name.clone();
         let arg_list = arg_vals.join(", ");
-        let arg_ty_list = arg_tys
-            .iter()
-            .map(|t| mlir_type(t, self.pointer_width))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let ret = mlir_type(ret_ty, self.pointer_width);
+        let arg_ty_list = arg_tys.iter().map(abi_ty).collect::<Vec<_>>().join(", ");
+        let ret = abi_ty(ret_ty);
+        if sig.c_abi && *ret_ty == str_ty {
+            // A `char*` result becomes `(ptr, strlen)`; null reads as "".
+            let [p, l, u, h] = std::array::from_fn(|_| self.fresh_value());
+            let ty = mlir_prim(PrimTy::Str, pw);
+            let _ = write!(
+                self.body,
+                "    {p} = func.call @{name}({arg_list}) : ({arg_ty_list}) -> !llvm.ptr
+    {l} = func.call @rok_cstr_len({p}) : (!llvm.ptr) -> i{pw}
+    {u} = llvm.mlir.undef : {ty}
+    {h} = llvm.insertvalue {p}, {u}[0] : {ty}
+    {dst} = llvm.insertvalue {l}, {h}[1] : {ty}
+"
+            );
+            self.needs.insert("rok_cstr_len");
+            return;
+        }
 
         if matches!(ret_ty, MirTy::Unit) {
             // Unit-returning calls produce no SSA value; emit the call
@@ -1442,6 +1613,25 @@ impl<'a> FnEmit<'a> {
         }
     }
 
+    /// `{dst} = str` value of a literal: its NUL-terminated global and
+    /// byte length.
+    fn str_literal_into(&mut self, dst: &str, text: &str) {
+        let pw = self.pointer_width;
+        let sym = self.intern_string(text);
+        let ty = mlir_prim(PrimTy::Str, pw);
+        let [p, l, u, h] = std::array::from_fn(|_| self.fresh_value());
+        let _ = write!(
+            self.body,
+            "    {p} = llvm.mlir.addressof @{sym} : !llvm.ptr
+    {l} = arith.constant {} : i{pw}
+    {u} = llvm.mlir.undef : {ty}
+    {h} = llvm.insertvalue {p}, {u}[0] : {ty}
+    {dst} = llvm.insertvalue {l}, {h}[1] : {ty}
+",
+            text.len()
+        );
+    }
+
     /// Record an unsupported construct; returns a dummy SSA name so
     /// emission can continue and collect further errors.
     fn unsupported(&mut self, what: &str) -> String {
@@ -1458,23 +1648,20 @@ impl<'a> FnEmit<'a> {
     fn emit_check(&mut self, fail: &str, msg: &str) {
         let n = self.next_check;
         self.next_check += 1;
-        let sym = self.intern_string(msg);
         let pw = self.pointer_width;
         let _ = writeln!(
             self.body,
             "    cf.cond_br {fail}, ^rok_panic{n}, ^rok_ok{n}"
         );
         let _ = writeln!(self.body, "  ^rok_panic{n}:");
-        let p = self.fresh_value();
+        let s = self.fresh_value();
+        self.str_literal_into(&s, msg);
         let l = self.fresh_value();
-        let _ = writeln!(
-            self.body,
-            "    {p} = llvm.mlir.addressof @{sym} : !llvm.ptr"
-        );
+        let str_ty = mlir_prim(PrimTy::Str, pw);
         let _ = writeln!(self.body, "    {l} = arith.constant {} : i{pw}", msg.len());
         let _ = writeln!(
             self.body,
-            "    func.call @rok_panic({p}, {l}) : (!llvm.ptr, i{pw}) -> ()"
+            "    func.call @rok_panic({s}, {l}) : ({str_ty}, i{pw}) -> ()"
         );
         self.body.push_str("    llvm.unreachable\n");
         let _ = writeln!(self.body, "  ^rok_ok{n}:");
@@ -1646,6 +1833,21 @@ impl<'a> FnEmit<'a> {
             self.unsupported_at(dst, &format!("binary `{op:?}` on `{ty}`"));
             return;
         };
+        // String literal patterns: content equality.
+        if *prim == PrimTy::Str && matches!(op, PrimOp::Eq | PrimOp::Ne) {
+            let c = self.fresh_value();
+            let z = self.fresh_value();
+            let pred = if op == PrimOp::Eq { "eq" } else { "ne" };
+            let _ = write!(
+                self.body,
+                "    {c} = func.call @rok_str_cmp({lhs_v}, {rhs_v}) : ({ty}, {ty}) -> i32
+    {z} = arith.constant 0 : i32
+    {dst} = arith.cmpi {pred}, {c}, {z} : i32
+"
+            );
+            self.needs.insert("rok_str_cmp");
+            return;
+        }
         self.emit_arith_checks(op, *prim, rhs, &lhs_v, &rhs_v, &ty);
         if let Some(line) = arith_binop(op, *prim, dst, &lhs_v, &rhs_v, &ty) {
             self.body.push_str(&line);
@@ -1764,10 +1966,14 @@ impl<'a> FnEmit<'a> {
                 // well-typed.
                 if matches!(
                     dst_ty,
-                    MirTy::Struct(_, _) | MirTy::Tuple(_) | MirTy::Sum(_) | MirTy::Array(_, _)
+                    MirTy::Struct(_, _)
+                        | MirTy::Tuple(_)
+                        | MirTy::Sum(_)
+                        | MirTy::Array(_, _)
+                        | MirTy::Prim(PrimTy::Str)
                 ) {
                     let _ = writeln!(self.body, "    {dst} = llvm.mlir.zero : {ty}");
-                } else if matches!(dst_ty, MirTy::Fn(_, _) | MirTy::Prim(PrimTy::Str)) {
+                } else if matches!(dst_ty, MirTy::Fn(_, _)) {
                     let _ = writeln!(self.body, "    {dst} = llvm.mlir.zero : !llvm.ptr");
                 } else {
                     let _ = writeln!(self.body, "    {dst} = arith.constant 0 : {ty}");
@@ -1776,14 +1982,7 @@ impl<'a> FnEmit<'a> {
             ConstVal::Char(c) => {
                 let _ = writeln!(self.body, "    {dst} = arith.constant {c} : {ty}");
             }
-            ConstVal::Str(s) => {
-                // Look up (or intern) the string and take its address.
-                let sym = self.intern_string(s);
-                let _ = writeln!(
-                    self.body,
-                    "    {dst} = llvm.mlir.addressof @{sym} : !llvm.ptr"
-                );
-            }
+            ConstVal::Str(s) => self.str_literal_into(dst, s),
         }
     }
 
@@ -1918,6 +2117,14 @@ fn mlir_type(ty: &MirTy, pointer_width: u32) -> String {
     }
 }
 
+/// `mlir_type`, except that a C function sees `str` as `char*`.
+fn abi_type(ty: &MirTy, c_abi: bool, pointer_width: u32) -> String {
+    if c_abi && *ty == MirTy::Prim(PrimTy::Str) {
+        return "!llvm.ptr".to_owned();
+    }
+    mlir_type(ty, pointer_width)
+}
+
 // `(args) -> ret` rendering for func.constant / call sites.
 fn mlir_fn_signature(args: &[MirTy], ret: &MirTy, pointer_width: u32) -> String {
     let arg_list = args
@@ -1946,7 +2153,9 @@ fn mlir_prim(p: PrimTy, pointer_width: u32) -> String {
         // FFI-friendly form: opaque pointer to a NUL-terminated byte
         // sequence. The spec's `(ptr, len)` view is kept as a future
         // refinement under a separate stdlib type.
-        PrimTy::Str => "!llvm.ptr".to_owned(),
+        // `(ptr, len)` (808); the bytes are followed by a NUL so the
+        // pointer alone is a C string at the FFI boundary.
+        PrimTy::Str => format!("!llvm.struct<(ptr, i{pointer_width})>"),
     }
 }
 
@@ -2054,6 +2263,12 @@ fn gc_paths(ty: &MirTy, path: &mut Vec<u32>, out: &mut Vec<Vec<u32>>) {
     };
     match ty {
         MirTy::GcRef => out.push(path.clone()),
+        // A runtime-built string's pointer points into a GC object.
+        MirTy::Prim(PrimTy::Str) => {
+            path.push(0);
+            out.push(path.clone());
+            path.pop();
+        }
         MirTy::Tuple(ps) | MirTy::Struct(_, ps) => {
             for (i, t) in ps.iter().enumerate() {
                 each(i as u32, t, out);
@@ -2080,7 +2295,8 @@ fn size_align(ty: &MirTy, pw: u32) -> (u32, u32) {
             PrimTy::I16 | PrimTy::U16 => (2, 2),
             PrimTy::I32 | PrimTy::U32 | PrimTy::Char | PrimTy::F32 => (4, 4),
             PrimTy::I64 | PrimTy::U64 | PrimTy::F64 => (8, 8),
-            PrimTy::Isize | PrimTy::Usize | PrimTy::Str => word,
+            PrimTy::Isize | PrimTy::Usize => word,
+            PrimTy::Str => (2 * word.0, word.1),
         },
         MirTy::Any | MirTy::GcRef | MirTy::Fn(_, _) => word,
         MirTy::Sum(ps) => size_align(&rokc_mir::sum_layout(ps), pw),
@@ -2110,7 +2326,7 @@ fn gc_object_size(ty: &MirTy, pw: u32) -> (u32, u32) {
 /// Byte offsets of every `GcRef` inside a `ty` that starts at `at`.
 fn gc_offsets(ty: &MirTy, pw: u32, at: u32, out: &mut Vec<u32>) {
     match ty {
-        MirTy::GcRef => out.push(at),
+        MirTy::GcRef | MirTy::Prim(PrimTy::Str) => out.push(at),
         MirTy::Tuple(ps) | MirTy::Struct(_, ps) => {
             let mut off = 0u32;
             for t in ps {

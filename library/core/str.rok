@@ -1,0 +1,99 @@
+// rok::core::str — `str` methods and trait impls (stdlib 2.15).
+//
+// `str` is a `(ptr, len)` value: literals are static bytes, strings
+// built at run time are GC objects. The bodies call the runtime's
+// `rok_str_*` symbols, which take `str` by value.
+//
+// ponytail: spec 2.15.2 makes `str` a growable, in-place mutable
+// buffer shared by reference (`push`, `push_str`, `+=` in place); here
+// it is an immutable value and every operation returns a new string.
+// Iterators (`chars`, `bytes`, `split`, `lines`), `parse`, `from_utf8`
+// and `Hash` wait for List / Iterator support.
+
+extern "C" {
+    fn rok_str_len(s: str) -> usize;
+    fn rok_str_concat(a: str, b: str) -> str;
+    fn rok_str_cmp(a: str, b: str) -> i32;
+    fn rok_str_slice(s: str, start: usize, end: usize) -> str;
+    fn rok_str_find(s: str, pat: str) -> isize;
+    fn rok_str_rfind(s: str, pat: str) -> isize;
+    fn rok_str_trim(s: str, which: i32) -> str;
+    fn rok_str_case(s: str, upper: i32) -> str;
+    fn rok_str_replace(s: str, from: str, to: str) -> str;
+    fn rok_str_char_count(s: str) -> usize;
+    fn rok_str_hash(s: str) -> u64;
+}
+
+impl str {
+    pub fn new() -> str { return ""; }
+
+    /// Byte length (not the char count).
+    pub fn len(self) -> usize { return rok_str_len(self); }
+    pub fn is_empty(self) -> bool { return rok_str_len(self) == 0; }
+    /// Number of chars (`s.chars().count()` in the spec).
+    pub fn char_count(self) -> usize { return rok_str_char_count(self); }
+
+    /// `s[start:end]` by byte offsets; panics off a char boundary.
+    pub fn slice(self, start: usize, end: usize) -> str {
+        return rok_str_slice(self, start, end);
+    }
+
+    pub fn contains(self, pat: str) -> bool { return rok_str_find(self, pat) >= 0; }
+    pub fn starts_with(self, pat: str) -> bool {
+        if rok_str_len(pat) > rok_str_len(self) { return false; }
+        return rok_str_cmp(rok_str_slice(self, 0, rok_str_len(pat)), pat) == 0;
+    }
+    pub fn ends_with(self, pat: str) -> bool {
+        let n = rok_str_len(self);
+        let m = rok_str_len(pat);
+        if m > n { return false; }
+        return rok_str_cmp(rok_str_slice(self, n - m, n), pat) == 0;
+    }
+    pub fn find(self, pat: str) -> usize | none {
+        let i = rok_str_find(self, pat);
+        if i < 0 { return none; }
+        return i as usize;
+    }
+    pub fn rfind(self, pat: str) -> usize | none {
+        let i = rok_str_rfind(self, pat);
+        if i < 0 { return none; }
+        return i as usize;
+    }
+
+    pub fn trim(self) -> str { return rok_str_trim(self, 0); }
+    pub fn trim_start(self) -> str { return rok_str_trim(self, 1); }
+    pub fn trim_end(self) -> str { return rok_str_trim(self, 2); }
+
+    // ponytail: ASCII case mapping only.
+    pub fn to_lowercase(self) -> str { return rok_str_case(self, 0); }
+    pub fn to_uppercase(self) -> str { return rok_str_case(self, 1); }
+    pub fn replace(self, from: str, to: str) -> str { return rok_str_replace(self, from, to); }
+}
+
+impl Add for str {
+    type Output = str;
+    fn add(self, rhs: str) -> str { return rok_str_concat(self, rhs); }
+}
+
+impl PartialEq for str {
+    fn eq(self, rhs: str) -> bool { return rok_str_cmp(self, rhs) == 0; }
+    fn ne(self, rhs: str) -> bool { return rok_str_cmp(self, rhs) != 0; }
+}
+
+impl PartialOrd for str {
+    fn lt(self, rhs: str) -> bool { return rok_str_cmp(self, rhs) < 0; }
+    fn gt(self, rhs: str) -> bool { return rok_str_cmp(self, rhs) > 0; }
+    fn le(self, rhs: str) -> bool { return rok_str_cmp(self, rhs) <= 0; }
+    fn ge(self, rhs: str) -> bool { return rok_str_cmp(self, rhs) >= 0; }
+}
+
+impl Eq for str {}
+
+impl Ord for str {
+    fn cmp(self, other: str) -> i32 { return rok_str_cmp(self, other); }
+}
+
+/// Byte-wise FNV-1a, so `str` keys work in `Dict` / `Set`.
+impl Hash for str {
+    fn hash(self) -> u64 { return rok_str_hash(self); }
+}

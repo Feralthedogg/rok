@@ -1,0 +1,6 @@
+// expect-error: cannot return `Result`; declare `fn main() throws (E)`
+// E4: a `Result`-returning `main` is not an entry form.
+
+fn main() -> Result<i32, str> {
+    return Result::Ok(0);
+}

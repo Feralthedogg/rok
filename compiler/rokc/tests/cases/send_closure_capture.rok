@@ -1,0 +1,12 @@
+// expect-error: type `closure(i32) -> i32` does not satisfy trait bound `rok::core::marker::Send`
+// A closure is `Send` iff its captures are.
+struct Tok { v: i32; }
+impl !Send for Tok {}
+fn need_send<T: Send>(x: T) -> i32 { return 1; }
+fn spawn<T: Send>(f: fn() -> T + Send) -> T { return f(); }
+fn forty() -> i32 { return 40; }
+fn main() -> i32 {
+    let t = Tok { v: 1 };
+    let c = |x: i32| -> i32 { x + t.v };
+    return need_send(c);
+}

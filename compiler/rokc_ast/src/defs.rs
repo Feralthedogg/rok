@@ -447,9 +447,9 @@ pub enum TyKind {
     Sum(Vec<Ty>),
     /// Tuple `(A, B)`.
     Tuple(Vec<Ty>),
-    /// Function type `fn(A, B) -> R`. A throwing one has a `Throws`
-    /// return type.
-    Fn(Vec<Ty>, Box<Ty>),
+    /// Function type `fn(A, B) -> R [+ Send + Sync]`. A throwing one has
+    /// a `Throws` return type. The paths are auto-trait bounds (E3).
+    Fn(Vec<Ty>, Box<Ty>, Vec<Path>),
     /// Return slot of `fn(..) throws (err) -> ok`; only appears as the
     /// return type of `Fn`.
     Throws { ok: Box<Ty>, err: Box<Ty> },
@@ -463,6 +463,8 @@ pub enum TyKind {
     None,
     /// Self type.
     SelfUpper,
+    /// `!` — the never type of a diverging function (`panic`, `exit`).
+    Never,
 }
 
 /// Const-expression placeholder for array length / const generics.
@@ -573,6 +575,10 @@ pub struct ImplDef {
     pub attrs: Vec<Attribute>,
     pub generics: Generics,
     pub trait_path: Option<Path>,
+    /// `unsafe impl` (manual `Send` / `Sync` opt-in).
+    pub is_unsafe: bool,
+    /// `impl !Tr for T` (auto-trait opt-out).
+    pub negative: bool,
     pub self_ty: Ty,
     pub where_clause: Vec<WherePred>,
     pub items: Vec<ImplItem>,

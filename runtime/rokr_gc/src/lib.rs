@@ -20,8 +20,9 @@
 //! A root slot or `STRONG_REF` word may also hold raw bits: the compiler
 //! types the whole payload word of an `any` value as a reference, but
 //! small primitives live there inline (`ANY_SLOT`, 802 §8.2.7). Instead
-//! of decoding tags, every candidate word is checked against the sorted
-//! set of object addresses; a non-address is ignored and an integer that
+//! of decoding tags, every candidate word is looked up in the sorted set
+//! of object addresses (interior pointers count: a `str` points into its
+//! object's payload); a word outside every object is ignored and an integer that
 //! happens to equal one only retains that object. Words the compiler
 //! never typed as references (`usize`, raw `rok_alloc` memory) are never
 //! looked at, so marking stays precise everywhere else.
@@ -43,6 +44,10 @@ const MIN_HEAP: usize = 4 << 20;
 /// First type id of the user range (801 §8.1.2).
 const USER_TYPE_BASE: u32 = 0x10000;
 const STRONG_REF: u32 = 0;
+/// Reserved type id: every pointer-aligned payload word is a candidate
+/// reference (library buffers whose element layout the runtime does not
+/// know; checked like any candidate word).
+pub const SCAN_WORDS_TYPE_ID: u32 = 2;
 
 /// Hidden bookkeeping right before each object header.
 #[repr(C)]
@@ -227,22 +232,31 @@ fn build_index() {
     }
 }
 
-fn is_object(word: usize) -> bool {
+/// The object whose header address is `word` or whose memory contains
+/// it (a `str` points at its payload bytes, or into them after slicing).
+fn object_containing(word: usize) -> Option<*mut u8> {
     let h = heap();
     if h.count == 0 {
-        return false;
+        return None;
     }
     // SAFETY: `build_index` filled `count` entries.
-    unsafe { core::slice::from_raw_parts(h.index, h.count) }
-        .binary_search(&word)
-        .is_ok()
+    let index = unsafe { core::slice::from_raw_parts(h.index, h.count) };
+    let i = match index.binary_search(&word) {
+        Ok(i) => i,
+        Err(0) => return None,
+        Err(i) => i - 1,
+    };
+    let start = index[i];
+    // SAFETY: `start` is a live object with a prefix.
+    let size = unsafe { (*prefix(start as *mut u8)).size };
+    (word < start + size).then_some(start as *mut u8)
 }
 
-/// Queue `obj` for marking if it is the address of a GC object.
-fn push(obj: *mut u8, len: &mut usize) {
-    if !is_object(obj as usize) {
+/// Queue the object `word` points into, if any, for marking.
+fn push(word: *mut u8, len: &mut usize) {
+    let Some(obj) = object_containing(word as usize) else {
         return;
-    }
+    };
     let h = heap();
     if *len == h.stack_cap {
         let cap = (h.stack_cap * 2).max(1024);
@@ -293,6 +307,14 @@ pub fn collect() {
             let o = *heap().stack.add(len);
             let hd = &*header(o);
             if hd.gc_flags.fetch_or(FLAG_MARK, Ordering::Relaxed) & FLAG_MARK != 0 {
+                continue;
+            }
+            if hd.type_id == SCAN_WORDS_TYPE_ID {
+                let words = ((*prefix(o)).size - HEADER_SIZE) / size_of::<usize>();
+                let payload = o.add(HEADER_SIZE).cast::<*mut u8>();
+                for w in 0..words {
+                    push(payload.add(w).read(), &mut len);
+                }
                 continue;
             }
             let t = scan_table(hd.type_id);
@@ -378,6 +400,38 @@ mod tests {
             collect();
             assert_eq!(live_bytes(), base + 32 + 24);
             assert_eq!((*header(b)).type_id, USER_TYPE_BASE + 1);
+            *frame.1 = 0;
+            collect();
+            assert_eq!(live_bytes(), base);
+            *top = ptr::null_mut();
+        }
+        scan_words_buffers_and_interior_pointers();
+    }
+
+    // Called from the test above: the heap is a single-mutator global,
+    // so GC tests must not run on parallel test threads.
+    #[allow(clippy::cast_ptr_alignment)] // GC objects are 8-aligned
+    fn scan_words_buffers_and_interior_pointers() {
+        let base = live_bytes();
+        let buf = alloc(16 + 16, 8, SCAN_WORDS_TYPE_ID);
+        let s = alloc(24, 8, USER_TYPE_BASE + 7);
+        // SAFETY: as above; the buffer holds an interior pointer into `s`
+        // and a non-pointer word; only the buffer's payload is rooted.
+        unsafe {
+            *buf.add(16).cast::<usize>() = 0x99;
+            *buf.add(24).cast::<*mut u8>() = s.add(18);
+            let mut root = buf as usize + 20; // interior root
+            let mut frame: (Frame, *mut usize) = (
+                Frame {
+                    prev: ptr::null_mut(),
+                    count: 1,
+                },
+                &mut root,
+            );
+            let top = rokr_common::tls::shadow_stack_top();
+            *top = (&raw mut frame).cast();
+            collect();
+            assert_eq!(live_bytes(), base + 32 + 24);
             *frame.1 = 0;
             collect();
             assert_eq!(live_bytes(), base);

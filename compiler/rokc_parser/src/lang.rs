@@ -61,6 +61,9 @@ pub const KNOWN_SLOTS: &[&str] = &[
     "ord_trait",
     "hash_trait",
     "clone_trait",
+    // auto (structural) marker traits (E3; `marker.rok`)
+    "send_trait",
+    "sync_trait",
     "logical_and_trait",
     "logical_or_trait",
     // 0.4.4 fn slots

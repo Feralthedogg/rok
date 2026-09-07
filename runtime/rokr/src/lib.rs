@@ -22,6 +22,9 @@ use core::sync::atomic::Ordering;
 use rokr_common::object_header::{FLAG_PINNED, HEADER_ALIGN, ObjectHeader};
 use rokr_common::{fatal, tls, write_stderr};
 
+mod str;
+pub use str::RokStr;
+
 /// Rust panic inside the runtime = inconsistent runtime state. Report
 /// to stderr and abort. Rok exceptions are not Rust panics.
 ///
@@ -63,7 +66,6 @@ core::arch::global_asm!(
 );
 #[cfg(all(not(test), not(target_vendor = "apple")))]
 core::arch::global_asm!(
-    ".globl rust_eh_personality",
     ".weak rust_eh_personality",
     ".type rust_eh_personality, %function",
     "rust_eh_personality:",
@@ -320,22 +322,15 @@ pub extern "C" fn rok_timer_register(_deadline_ns: u64, _waker: *mut u8) {
 // an `is_err` flag with its payload) and need no runtime support. Only
 // an error escaping a throwing `main` reaches the runtime.
 
-/// Uncaught error out of `fn main() throws (..)` (spec 4.16.4).
-///
-/// Writes `what` (the error's `Display` / `Debug` / type name, as the
-/// compiler chose) to stderr after a fixed prefix, then exits with
-/// status 1 (not 101: this is not a panic).
-///
-/// # Safety
-/// `what` must be null or a NUL-terminated string.
+/// Uncaught error out of `fn main() throws (..)` (spec 4.16.4): a fixed
+/// prefix, the error's description, `\n` to stderr, then exit status 1.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rok_uncaught_error(what: *const u8) -> ! {
+pub extern "C" fn rok_uncaught_error(what: RokStr) -> ! {
     const PREFIX: &[u8] = b"error: `main` returned an uncaught error: ";
-    let what = or_empty(what);
-    // SAFETY: caller contract; `exit` flushes buffered stdout.
+    // SAFETY: `what` is a valid `str`; `exit` flushes buffered stdout.
     unsafe {
         write_stderr(PREFIX.as_ptr(), PREFIX.len());
-        write_stderr(what.cast(), libc::strlen(what));
+        write_stderr(what.ptr, what.len);
         write_stderr(b"\n".as_ptr(), 1);
         libc::exit(1)
     }
@@ -359,6 +354,14 @@ pub unsafe extern "C" fn rok_panic(msg: *const u8, msg_len: usize) -> ! {
     fatal(b"")
 }
 
+/// `rok::core::panic::panic(msg)` (stdlib 2.14.5): `rok_panic` for a
+/// rok `str` value.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_panic_str(msg: RokStr) -> ! {
+    // SAFETY: a rok `str` is valid for `len` bytes.
+    unsafe { rok_panic(msg.ptr, msg.len) }
+}
+
 // ---------------------------------------------------------------------
 // 8.5.12 appendix: convenience symbols (no ABI stability)
 // ---------------------------------------------------------------------
@@ -370,6 +373,14 @@ pub extern "C" fn rok_assert(cond: i32) -> i32 {
         fatal(b"assertion failed");
     }
     0
+}
+
+/// `rok::std::env::exit(code)` (spec 4.16.4): exit now with `code`.
+/// `finally` and `Drop` do not run; `exit` flushes buffered stdout.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_exit(code: i32) -> ! {
+    // SAFETY: plain libc call.
+    unsafe { libc::exit(code) }
 }
 
 /// User-facing allocator: no header, `size == 0` → null, otherwise
@@ -459,12 +470,12 @@ pub extern "C" fn rok_print_i32(n: i32) -> i32 {
 
 /// C string + `\n`. Null prints as an empty line.
 ///
-/// # Safety
-/// `s` must be null or a valid NUL-terminated string.
+/// `s` + `\n` to stdout.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rok_print_str(s: *const u8) -> i32 {
-    // SAFETY: caller contract; null replaced by "".
-    unsafe { libc::printf(c"%s\n".as_ptr(), or_empty(s)) };
+pub extern "C" fn rok_print_str(s: RokStr) -> i32 {
+    rok_write_str(s);
+    // SAFETY: format matches (no arguments).
+    unsafe { libc::printf(c"\n".as_ptr()) };
     0
 }
 
@@ -486,12 +497,13 @@ pub extern "C" fn rok_print_bool(b: i32) -> i32 {
 
 // `rok_write_*`: same as `rok_print_*` without the trailing newline.
 
-/// # Safety
-/// `s` must be null or a valid NUL-terminated string.
+/// `s` to stdout (through stdio, so it orders with `printf` output).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rok_write_str(s: *const u8) -> i32 {
-    // SAFETY: caller contract; null replaced by "".
-    unsafe { libc::printf(c"%s".as_ptr(), or_empty(s)) };
+pub extern "C" fn rok_write_str(s: RokStr) -> i32 {
+    if s.len > 0 {
+        // SAFETY: `s` is valid for `len` bytes; `stdout` is libc's stream.
+        unsafe { libc::fwrite(s.ptr.cast(), 1, s.len, stdout()) };
+    }
     0
 }
 
@@ -516,35 +528,34 @@ pub extern "C" fn rok_write_hex(n: i64) -> i32 {
     0
 }
 
-const fn or_empty(s: *const u8) -> *const libc::c_char {
-    if s.is_null() { c"".as_ptr() } else { s.cast() }
+/// Byte length of `s` (stdlib 2.15 `str::len`).
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_str_len(s: RokStr) -> usize {
+    s.len
 }
 
-/// `strlen`; null → 0.
-///
-/// # Safety
-/// `s` must be null or a valid NUL-terminated string.
+/// 1 if `a` and `b` hold the same bytes, else 0.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rok_str_len(s: *const u8) -> usize {
-    if s.is_null() {
-        return 0;
-    }
-    // SAFETY: caller contract.
-    unsafe { libc::strlen(s.cast()) }
+pub extern "C" fn rok_str_eq(a: RokStr, b: RokStr) -> i32 {
+    i32::from(str::rok_str_cmp(a, b) == 0)
 }
 
-/// 1 if `a` and `b` are byte-identical C strings, else 0. Two nulls are
-/// equal; null vs. non-null is not.
-///
-/// # Safety
-/// Each pointer must be null or a valid NUL-terminated string.
+/// `s` to stderr (unbuffered).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rok_str_eq(a: *const u8, b: *const u8) -> i32 {
-    if a.is_null() || b.is_null() {
-        return i32::from(a.is_null() && b.is_null());
+pub extern "C" fn rok_ewrite_str(s: RokStr) -> i32 {
+    // SAFETY: `s` is valid for `len` bytes.
+    unsafe { write_stderr(s.ptr, s.len) };
+    0
+}
+
+/// libc's `stdout` stream.
+fn stdout() -> *mut libc::FILE {
+    unsafe extern "C" {
+        #[cfg_attr(target_vendor = "apple", link_name = "__stdoutp")]
+        static mut stdout: *mut libc::FILE;
     }
-    // SAFETY: caller contract.
-    i32::from(unsafe { libc::strcmp(a.cast(), b.cast()) } == 0)
+    // SAFETY: libc initializes `stdout` before `main`.
+    unsafe { stdout }
 }
 
 #[cfg(test)]
@@ -562,6 +573,7 @@ mod tests {
         assert_eq!(h.type_id, 12345);
         assert_eq!(h.gc_flags.load(Ordering::Relaxed), 0);
         assert_eq!(h.gc_word, 0);
+        str::tests::string_ops();
     }
 
     static SUM: AtomicI64 = AtomicI64::new(0);

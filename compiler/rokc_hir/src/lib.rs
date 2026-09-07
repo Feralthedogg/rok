@@ -364,6 +364,24 @@ pub enum HirExprKind {
         elem_ty: HirTy,
         elements: Vec<HirExpr>,
     },
+    /// `buf_new::<T>(len)` — a zeroed `GcBuf<T>` of `len` elements.
+    BufNew {
+        elem: HirTy,
+        len: Box<HirExpr>,
+    },
+    /// `buf_get(buf, i)` — element `i` (unchecked).
+    BufGet {
+        buf: Box<HirExpr>,
+        index: Box<HirExpr>,
+        elem: HirTy,
+    },
+    /// `buf_set(buf, i, v)` — store element `i` (unchecked); unit.
+    BufSet {
+        buf: Box<HirExpr>,
+        index: Box<HirExpr>,
+        value: Box<HirExpr>,
+        elem: HirTy,
+    },
     // `arr[idx]` — element read.
     ArrayIndex {
         array: Box<HirExpr>,
@@ -471,8 +489,9 @@ pub enum HirTy {
     Enum(EnumId),
     // Fixed-size array `[T; N]`.
     Array(Box<HirTy>, u32),
-    // `fn(A, B) -> R` — first-class function pointer.
-    Fn(Vec<HirTy>, Box<HirTy>),
+    // `fn(A, B) -> R` — first-class function pointer. The third field
+    // is its auto-trait bounds (`+ Send + Sync`, E3): sorted trait keys.
+    Fn(Vec<HirTy>, Box<HirTy>, Vec<String>),
     // Closure value: function pointer paired with captured-by-value
     // environment. Stored in MIR as a 2-tuple `{fn_ptr, env}`. The env
     // type is part of the closure's type identity — closures with
@@ -490,4 +509,11 @@ pub enum HirTy {
         ok: Box<HirTy>,
         err: Box<HirTy>,
     },
+    /// `rok::core::collections::raw::GcBuf<T>`: a GC object holding a
+    /// run of `T`s (the storage of `List` / `Dict` / `Set`). One `GcRef`
+    /// word; its length lives with whoever owns it.
+    GcBuf(Box<HirTy>),
+    /// `!`: the type of a diverging expression (`panic(..)`, `exit(..)`,
+    /// `loop {}` without `break`). Flows into any slot.
+    Never,
 }

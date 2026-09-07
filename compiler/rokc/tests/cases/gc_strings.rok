@@ -1,0 +1,64 @@
+// expect-exit: 0
+// expect-stdout:
+// item-199999
+// item-0 item-1 item-2
+// ab|cd
+// ok
+
+// Runtime strings are GC objects: building 200k of them in a loop stays
+// in bounded memory, and strings held in locals, in struct fields
+// inside boxed `any` values, and as slices of other strings survive
+// collections intact.
+extern "C" {
+    fn rok_gc_collect();
+    fn rok_gc_stats_live_bytes() -> usize;
+}
+
+trait Named { fn name(self) -> str; fn next(self) -> any Named | none; }
+struct Item { label: str; rest: any Named | none; }
+impl Named for Item {
+    fn name(self) -> str { return self.label; }
+    fn next(self) -> any Named | none { return self.rest; }
+}
+
+fn chain(n: i32) -> any Named | none {
+    let head: any Named | none = none;
+    let i = n - 1;
+    while i >= 0 {
+        head = Item { label: f"item-{i}", rest: head };
+        i -= 1;
+    }
+    return head;
+}
+
+fn main() -> i32 {
+    let list = chain(3);
+    let tail = "abcd" + "";
+    let piece = tail[2:4];
+    let last = "";
+    let peak: usize = 0usize;
+    let i = 0;
+    while i < 200000 {
+        last = f"item-{i}";
+        let live = rok_gc_stats_live_bytes();
+        if live > peak { peak = live; }
+        i += 1;
+    }
+    rok_gc_collect();
+    println(last);
+    let out = "";
+    let cur = list;
+    let done = false;
+    while !done {
+        match cur {
+            n: any Named => { out = out + n.name() + " "; cur = n.next(); },
+            none => { done = true; },
+        }
+    }
+    println(out.trim());
+    println(tail[:2] + "|" + piece);
+    // ~200k strings of ~40 bytes each would be ~8 MB more without GC.
+    if peak > 6000000usize { return 1; }
+    println("ok");
+    return 0;
+}

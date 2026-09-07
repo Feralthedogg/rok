@@ -496,7 +496,7 @@ pub fn walk_ty(v: &mut impl AstVisitor, t: &Ty) {
             }
         }
         TyKind::Array(elem, _) => walk_ty(v, elem),
-        TyKind::Fn(args, ret) => {
+        TyKind::Fn(args, ret, _) => {
             for a in args {
                 walk_ty(v, a);
             }
@@ -511,7 +511,7 @@ pub fn walk_ty(v: &mut impl AstVisitor, t: &Ty) {
             walk_ty(v, ok);
             walk_ty(v, err);
         }
-        TyKind::Any | TyKind::None | TyKind::SelfUpper => {}
+        TyKind::Any | TyKind::None | TyKind::SelfUpper | TyKind::Never => {}
     }
 }
 

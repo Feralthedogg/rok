@@ -1,0 +1,54 @@
+// expect-exit: 0
+// expect-stdout:
+// hello, 세계!
+// 14 10
+// eq ne lt
+// 세계|hello|!
+// HELLO, 세계! hello, 세계!
+// true true true false
+// 7 none
+// [trimmed]
+// a+b+c
+// two
+// other
+// C sees 5 bytes
+// ok
+
+// stdlib 2.15 on the `(ptr, len)` str: `+` / `+=` concatenate into GC
+// strings, `==` / `<` compare contents, `s[a:b]` slices on byte offsets
+// (UTF-8 boundaries checked), core methods, string literal patterns, and
+// C functions still get a NUL-terminated `char*`.
+extern "C" {
+    fn strlen(s: str) -> usize;
+}
+
+fn word(n: i32) -> str {
+    return match n { 1 => "one", 2 => "two", _ => "many", };
+}
+
+fn kind(s: str) -> str {
+    return match s { "one" => "uno", "" => "empty", _ => "other", };
+}
+
+fn main() -> i32 {
+    let s = "hello" + ", " + "세계";
+    s += "!";
+    println(s);
+    println(f"{s.len()} {s.char_count()}");
+    let a = "abc";
+    let b = "ab" + "c";
+    if a == b && a != "abd" && a < "abd" { println("eq ne lt"); }
+    println(s[7:13] + "|" + s[:5] + "|" + s[13:]);
+    println(s.to_uppercase() + " " + s);
+    println(f"{s.starts_with("hell")} {s.ends_with("계!")} {s.contains(", ")} {s.contains("xyz")}");
+    let at = match s.find("세") { i: usize => f"{i}", none => "none", };
+    let miss = match s.find("?") { i: usize => f"{i}", none => "none", };
+    println(at + " " + miss);
+    println("[" + "  trimmed \t".trim() + "]");
+    println("a-b-c".replace("-", "+"));
+    println(word(2));
+    println(kind(word(3)));
+    println(f"C sees {strlen("he" + "llo")} bytes");
+    if "" == str::new() && "".is_empty() && "b" > "a" && "a" <= "a" { println("ok"); }
+    return 0;
+}

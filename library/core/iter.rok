@@ -1,18 +1,50 @@
-// Iterator + IntoIterator traits.
+// Iterator + IntoIterator + FromIterator (stdlib spec 2.7).
 //
-// Spec 4.10 / 6.4: `for pat in xs` desugars to
-//   let it = <typeof(xs) as IntoIterator>::into_iter(xs);
-//   loop { match it.next() { v: T => body, none => break } }
+// `for pat in xs` desugars to
+//   let it = xs.into_iter();
+//   loop { match it.next() { v: T => { let pat = v; body } none => break } }
+// (integer ranges and arrays keep a direct counting loop).
 //
-// The compiler currently hardcodes the desugar for ranges and arrays;
-// once a future pass routes `for` through the LangTable's
-// `iterator_trait` / `into_iterator_trait` slots, user types implementing
-// these traits will become iterable too.
+// `next` takes `self`: the collections' iterators keep their position in
+// a GC buffer, so a copy of the handle advances the same iterator. The
+// spec's `ref self` (2.7.1) isn't implemented yet.
 
 #[lang("iterator_trait")]
 pub trait Iterator {
     type Item;
     fn next(self) -> Item | none;
+
+    /// Lazily apply `f` to each item.
+    fn map<U>(self, f: fn(Item) -> U) -> Map<Self, Item, U> {
+        return Map { it: self, f: f };
+    }
+
+    /// Lazily keep the items `pred` accepts.
+    fn filter(self, pred: fn(Item) -> bool) -> Filter<Self, Item> {
+        return Filter { it: self, pred: pred };
+    }
+
+    fn count(self) -> usize {
+        return count_of(self);
+    }
+
+    /// The items added up; panics on an empty iterator.
+    // ponytail: the spec (2.7.1) types `sum` as `Item where Item: Add`,
+    // which leaves no zero for an empty iterator; this starts from the
+    // first item. A zero source (`Default` / a `Sum` trait) is the fix.
+    fn sum(self) -> Item {
+        return sum_of(self, self.next());
+    }
+
+    fn fold<B>(self, init: B, f: fn(B, Item) -> B) -> B {
+        return fold_of(self, init, f);
+    }
+
+    /// Gather the items into a `FromIterator` collection (the slot's
+    /// type picks it: `let v: List<i32> = it.collect();`).
+    fn collect<C>(self) -> C {
+        return C::from_iter(self);
+    }
 }
 
 #[lang("into_iterator_trait")]
@@ -20,4 +52,83 @@ pub trait IntoIterator {
     type IntoIter;
     type Item;
     fn into_iter(self) -> IntoIter;
+}
+
+/// Every iterator is iterable as itself (2.7.2).
+impl<I: Iterator> IntoIterator for I {
+    type IntoIter = I;
+    fn into_iter(self) -> I {
+        return self;
+    }
+}
+
+/// A collection buildable from an iterator (`collect`, 2.9.9).
+pub trait FromIterator<A> {
+    fn from_iter<I>(it: I) -> Self;
+}
+
+pub struct Map<I, A, U> {
+    it: I;
+    f: fn(A) -> U;
+}
+
+impl<I: Iterator, A, U> Iterator for Map<I, A, U> {
+    type Item = U;
+    fn next(self) -> U | none {
+        match self.it.next() {
+            x: A => return (self.f)(x),
+            none => return none,
+        }
+    }
+}
+
+pub struct Filter<I, A> {
+    it: I;
+    pred: fn(A) -> bool;
+}
+
+impl<I: Iterator, A> Iterator for Filter<I, A> {
+    type Item = A;
+    fn next(self) -> A | none {
+        while true {
+            match self.it.next() {
+                x: A => {
+                    if (self.pred)(x) {
+                        return x;
+                    }
+                }
+                none => return none,
+            }
+        }
+        return none;
+    }
+}
+
+fn count_of<I>(it: I) -> usize {
+    let n: usize = 0;
+    for _ in it {
+        n = n + 1;
+    }
+    return n;
+}
+
+fn sum_of<I, T>(it: I, first: T | none) -> T {
+    match first {
+        x: T => {
+            let acc = x;
+            for y in it {
+                acc = acc + y;
+            }
+            return acc;
+        }
+        none => return panic("sum of an empty iterator"),
+    }
+}
+
+fn fold_of<I, B, T>(it: I, init: B, f: fn(B, T) -> B) -> B {
+    let acc = init;
+    for x in it {
+        acc = f(acc, x);
+    }
+    return acc;
 }

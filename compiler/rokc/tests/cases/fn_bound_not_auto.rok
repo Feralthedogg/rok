@@ -1,0 +1,4 @@
+// expect-error: only `Send` / `Sync` can bound a `fn` type
+trait Show { fn show(self) -> i32; }
+fn take(f: fn() -> i32 + Show) -> i32 { return f(); }
+fn main() -> i32 { return 0; }

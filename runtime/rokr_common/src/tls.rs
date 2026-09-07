@@ -202,17 +202,21 @@ core::arch::global_asm!(
     ".globl rokr_tls_shadow_stack_top_addr",
     ".hidden rokr_tls_shadow_stack_top_addr",
     ".type rokr_tls_shadow_stack_top_addr,@function",
+);
+// Initial-exec (also valid in PIE executables).
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+core::arch::global_asm!(
     "rokr_tls_shadow_stack_top_addr:",
-    #[cfg(target_arch = "x86_64")]
     "mov rax, qword ptr fs:[0]",
-    #[cfg(target_arch = "x86_64")]
     "add rax, qword ptr [rip + rok_tls_shadow_stack_top@GOTTPOFF]",
-    // Local-exec: the runtime is always linked into the executable.
-    #[cfg(target_arch = "aarch64")]
+    "ret",
+);
+// Local-exec: the runtime is always linked into the executable.
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+core::arch::global_asm!(
+    "rokr_tls_shadow_stack_top_addr:",
     "mrs x0, tpidr_el0",
-    #[cfg(target_arch = "aarch64")]
     "add x0, x0, :tprel_hi12:rok_tls_shadow_stack_top",
-    #[cfg(target_arch = "aarch64")]
     "add x0, x0, :tprel_lo12_nc:rok_tls_shadow_stack_top",
     "ret",
 );

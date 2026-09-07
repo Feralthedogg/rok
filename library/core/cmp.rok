@@ -1,0 +1,20 @@
+// rok::core::cmp — total equality, ordering and hashing (stdlib spec
+// 2.5). `PartialEq` / `PartialOrd` carry the comparison operators and
+// stay with the other operator traits in `ops.rok`. `Eq` is a pure
+// marker with no methods, so it has no slot.
+
+pub trait Eq {}
+
+// ponytail: spec 2.5.5 returns `Ordering`; an `i32` (-1 / 0 / 1) until
+// the `Ordering` enum lands.
+#[lang("ord_trait")]
+pub trait Ord {
+    fn cmp(self, other: Self) -> i32;
+}
+
+/// `a == b` ⇒ `a.hash() == b.hash()` (2.5.6) — what `Dict` / `Set`
+/// rely on.
+#[lang("hash_trait")]
+pub trait Hash: Eq {
+    fn hash(self) -> u64;
+}

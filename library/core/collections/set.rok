@@ -1,0 +1,117 @@
+// rok::core::collections::set — `Set<T>`, a hash set (stdlib spec
+// 2.9.4) over `Dict<T, bool>`. Iteration order is unspecified.
+
+pub struct Set<T> {
+    d: Dict<T, bool>;
+}
+
+impl<T: Hash> Set<T> {
+    pub fn new() -> Set<T> {
+        let d: Dict<T, bool> = Dict::new();
+        return Set { d: d };
+    }
+
+    pub fn len(self) -> usize {
+        return self.d.len();
+    }
+
+    pub fn is_empty(self) -> bool {
+        return self.d.is_empty();
+    }
+
+    /// `true` when `x` was not there yet.
+    pub fn insert(self, x: T) -> bool {
+        match self.d.insert(x, true) {
+            none => return true,
+            _ => return false,
+        }
+    }
+
+    /// `true` when `x` was there.
+    pub fn remove(self, x: T) -> bool {
+        match self.d.remove(x) {
+            none => return false,
+            _ => return true,
+        }
+    }
+
+    pub fn contains(self, x: T) -> bool {
+        return self.d.contains_key(x);
+    }
+
+    pub fn union(self, other: Set<T>) -> Set<T> {
+        let out: Set<T> = Set::new();
+        for x in self.d.keys() {
+            out.insert(x);
+        }
+        for x in other.d.keys() {
+            out.insert(x);
+        }
+        return out;
+    }
+
+    pub fn intersection(self, other: Set<T>) -> Set<T> {
+        let out: Set<T> = Set::new();
+        for x in self.d.keys() {
+            if other.contains(x) {
+                out.insert(x);
+            }
+        }
+        return out;
+    }
+
+    pub fn difference(self, other: Set<T>) -> Set<T> {
+        let out: Set<T> = Set::new();
+        for x in self.d.keys() {
+            if !other.contains(x) {
+                out.insert(x);
+            }
+        }
+        return out;
+    }
+
+    pub fn symmetric_difference(self, other: Set<T>) -> Set<T> {
+        return self.difference(other).union(other.difference(self));
+    }
+
+    pub fn is_subset(self, other: Set<T>) -> bool {
+        for x in self.d.keys() {
+            if !other.contains(x) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    pub fn is_superset(self, other: Set<T>) -> bool {
+        return other.is_subset(self);
+    }
+
+    pub fn is_disjoint(self, other: Set<T>) -> bool {
+        return self.intersection(other).is_empty();
+    }
+
+    pub fn to_list(self) -> List<T> {
+        return self.d.keys();
+    }
+}
+
+/// `for x in s` (2.9.9).
+impl<T: Hash> IntoIterator for Set<T> {
+    type IntoIter = ListIter<T>;
+    type Item = T;
+    fn into_iter(self) -> ListIter<T> {
+        return self.d.keys().iter();
+    }
+}
+
+/// `it.collect()` into a set (2.9.9).
+impl<T: Hash> FromIterator<T> for Set<T> {
+    fn from_iter<I>(it: I) -> Set<T> {
+        let out: Set<T> = Set::new();
+        for x in it {
+            out.insert(x);
+        }
+        return out;
+    }
+}

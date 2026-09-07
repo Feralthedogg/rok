@@ -74,9 +74,8 @@ fn implicit_main(stmts: Vec<Stmt>) -> FnDef {
 
 /// Spec 4.16.3: no parameters or generics; returns `()` or `i32`, and may
 /// `throws (E)` (an escaping error exits 1, see HIR `uncaught_in_main`).
-// ponytail: `Result<..>` / `async` main forms (4.16.3-5) wait for a
-// decision on `Result` mains (D3 keeps `Result` a plain enum) and the
-// scheduler.
+/// A `Result` return is not an entry form (E4).
+// ponytail: `async` main (4.16.5) waits for the scheduler.
 fn check_main_signature(f: &FnDef, diags: &mut Vec<RokDiagnostic>) {
     let mut bad = |msg: &str| {
         diags.push(RokDiagnostic::error(
@@ -101,7 +100,15 @@ fn check_main_signature(f: &FnDef, diags: &mut Vec<RokDiagnostic>) {
             _ => false,
         },
     };
-    if !ret_ok {
+    let is_result = f.ret_ty.as_ref().is_some_and(|t| {
+        matches!(&t.kind, TyKind::Path(p) if p.segments.last().is_some_and(|s| s.name == "Result"))
+    });
+    if is_result {
+        bad(
+            "cannot return `Result`; declare `fn main() throws (E)` so an escaping error \
+             exits 1, and call `rok::std::env::exit(code)` for any other exit code",
+        );
+    } else if !ret_ok {
         bad("must return `()` or `i32`");
     }
 }

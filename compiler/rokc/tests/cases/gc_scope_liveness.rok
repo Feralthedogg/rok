@@ -1,0 +1,44 @@
+// expect-exit: 0
+// expect-stdout:
+// 5
+// 7
+// ok
+
+// GC: a block's `let`s and temporaries stop being roots when the block
+// ends, even though the function (and its shadow-stack frame) goes on;
+// the block's value still escapes intact.
+extern "C" {
+    fn rok_gc_collect();
+    fn rok_gc_stats_live_bytes() -> usize;
+}
+
+trait Val { fn val(self) -> i64; }
+struct Box2 { a: i64; b: i64; }
+impl Val for Box2 { fn val(self) -> i64 { return self.a + self.b; } }
+
+fn main() -> i32 {
+    rok_gc_collect();
+    let base = rok_gc_stats_live_bytes();
+    let v: i64 = 0;
+    if true {
+        let t: any Val = Box2 { a: 2, b: 3 };
+        v = t.val();
+    }
+    rok_gc_collect();
+    if rok_gc_stats_live_bytes() != base { return 1; }
+    rok_print_i64(v);
+
+    // Block value escapes; the block's other boxes do not.
+    let kept: any Val = if v > 0 {
+        let junk: any Val = Box2 { a: 100, b: 100 };
+        let r: any Val = Box2 { a: 3, b: 4 };
+        r
+    } else {
+        Box2 { a: 0, b: 0 }
+    };
+    rok_gc_collect();
+    if rok_gc_stats_live_bytes() - base != 32usize { return 2; }
+    rok_print_i64(kept.val());
+    rok_print_str("ok");
+    return 0;
+}

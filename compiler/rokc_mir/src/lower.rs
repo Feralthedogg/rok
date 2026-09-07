@@ -12,7 +12,7 @@ use rokc_hir::{
 use rokc_ir_common::PrimTy as IrPrimTy;
 use rokc_ir_common::{BlockId, ConstVal, FunctionId, LocalId, PrimOp, PrimTy};
 
-use crate::ty::{enum_payload_ty, lower_ty, lower_ty_in};
+use crate::ty::{enum_payload_ty, has_gc_ref, lower_ty, lower_ty_in};
 use crate::{
     BasicBlock, LocalDecl, MirFunction, MirModule, MirStaticDef, MirTy, Operand, RValue, Statement,
     Terminator,
@@ -34,14 +34,49 @@ pub fn lower(module: &HirModule) -> MirModule {
             is_mut: s.is_mut,
         })
         .collect();
-    MirModule {
-        functions: module
-            .functions
-            .iter()
-            .map(|f| lower_fn(f, module, &ret_tys))
-            .collect(),
-        statics,
+    let mut functions: Vec<MirFunction> = module
+        .functions
+        .iter()
+        .map(|f| lower_fn(f, module, &ret_tys))
+        .collect();
+    prune_unreachable(&mut functions);
+    MirModule { functions, statics }
+}
+
+/// Drop functions `main` can't reach (direct calls and `fn` values).
+/// No `main` (a library) keeps everything. Every defined function gets
+/// a mangled symbol, so nothing else is called from outside by name.
+// ponytail: `#[export_name]` items would be roots too; the attribute
+// isn't carried into MIR yet.
+fn prune_unreachable(functions: &mut Vec<MirFunction>) {
+    let Some(main) = functions.iter().find(|f| f.name == "main").map(|f| f.id) else {
+        return;
+    };
+    let index: HashMap<FunctionId, usize> = functions
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.id, i))
+        .collect();
+    let mut live: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
+    let mut work = vec![main];
+    while let Some(id) = work.pop() {
+        if !live.insert(id) {
+            continue;
+        }
+        let Some(&i) = index.get(&id) else { continue };
+        for b in &functions[i].blocks {
+            for s in &b.stmts {
+                if let Statement::Assign {
+                    rvalue: RValue::Call { callee, .. } | RValue::FnAddr { callee, .. },
+                    ..
+                } = s
+                {
+                    work.push(*callee);
+                }
+            }
+        }
     }
+    functions.retain(|f| live.contains(&f.id));
 }
 
 fn lower_fn(
@@ -233,15 +268,45 @@ impl<'a> FnBuilder<'a> {
     /// current basic block (e.g. via `return`, `break`, `continue`). The
     /// caller must not append another terminator in that case.
     fn lower_block_value(&mut self, b: &HirBlock) -> (Operand, bool) {
+        let first_temp = self.locals.len();
         for s in &b.stmts {
             if self.lower_stmt(s) {
                 return (Operand::Const(ConstVal::Unit), true);
             }
         }
-        match &b.trailing {
-            Some(t) => (self.lower_expr_to_operand(t), false),
-            None => (Operand::Const(ConstVal::Unit), false),
+        let mut value = match &b.trailing {
+            Some(t) => self.lower_expr_to_operand(t),
+            None => Operand::Const(ConstVal::Unit),
+        };
+        // The block's `let`s and the temporaries made while lowering it go
+        // out of scope (only the block value escapes, copied below): tell
+        // codegen so their shadow-stack roots stop keeping objects alive.
+        let lets = b.stmts.iter().filter_map(|s| match s {
+            HirStmt::Let { local, .. } => Some(*local),
+            _ => None,
+        });
+        let temps = (first_temp..self.locals.len()).map(|i| self.locals[i].id);
+        let mut dead: Vec<LocalId> = lets
+            .chain(temps)
+            .filter(|l| has_gc_ref(&self.locals[l.0 as usize].ty))
+            .collect();
+        dead.dedup();
+        let escaping = match &value {
+            Operand::Copy(l) => dead.contains(l).then_some(*l),
+            Operand::Const(_) => None,
+        };
+        if let Some(l) = escaping {
+            let tmp = self.fresh_local(self.locals[l.0 as usize].ty.clone());
+            self.push_stmt(Statement::Assign {
+                target: tmp,
+                rvalue: RValue::Use(value),
+            });
+            value = Operand::Copy(tmp);
         }
+        for l in dead {
+            self.push_stmt(Statement::StorageDead(l));
+        }
+        (value, false)
     }
 
     fn lower_stmt(&mut self, s: &HirStmt) -> bool {
@@ -806,6 +871,50 @@ impl<'a> FnBuilder<'a> {
                     },
                 });
                 Operand::Copy(dst)
+            }
+            HirExprKind::BufNew { elem, len } => {
+                let len = self.lower_expr_to_operand(len);
+                let dst = self.fresh_local(MirTy::GcRef);
+                self.push_stmt(Statement::Assign {
+                    target: dst,
+                    rvalue: RValue::BufAlloc {
+                        elem_ty: lower_ty_in(elem, self.module),
+                        len,
+                    },
+                });
+                Operand::Copy(dst)
+            }
+            HirExprKind::BufGet { buf, index, elem } => {
+                let buf = self.lower_expr_to_operand(buf);
+                let index = self.lower_expr_to_operand(index);
+                let elem_ty = lower_ty_in(elem, self.module);
+                let dst = self.fresh_local(elem_ty.clone());
+                self.push_stmt(Statement::Assign {
+                    target: dst,
+                    rvalue: RValue::BufLoad {
+                        buf,
+                        index,
+                        elem_ty,
+                    },
+                });
+                Operand::Copy(dst)
+            }
+            HirExprKind::BufSet {
+                buf,
+                index,
+                value,
+                elem,
+            } => {
+                let buf = self.lower_expr_to_operand(buf);
+                let index = self.lower_expr_to_operand(index);
+                let value = self.lower_expr_to_operand(value);
+                self.push_stmt(Statement::BufStore {
+                    buf,
+                    index,
+                    value,
+                    elem_ty: lower_ty_in(elem, self.module),
+                });
+                Operand::Const(ConstVal::Unit)
             }
             HirExprKind::ArrayIndex {
                 array,

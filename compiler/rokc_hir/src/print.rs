@@ -276,6 +276,29 @@ fn print_expr(out: &mut String, e: &HirExpr) {
             }
             out.push(']');
         }
+        HirExprKind::BufNew { len, .. } => {
+            out.push_str("buf_new(");
+            print_expr(out, len);
+            out.push(')');
+        }
+        HirExprKind::BufGet { buf, index, .. } => {
+            out.push_str("buf_get(");
+            print_expr(out, buf);
+            out.push_str(", ");
+            print_expr(out, index);
+            out.push(')');
+        }
+        HirExprKind::BufSet {
+            buf, index, value, ..
+        } => {
+            out.push_str("buf_set(");
+            print_expr(out, buf);
+            out.push_str(", ");
+            print_expr(out, index);
+            out.push_str(", ");
+            print_expr(out, value);
+            out.push(')');
+        }
         HirExprKind::ArrayIndex { array, index, .. } => {
             print_expr(out, array);
             out.push('[');
@@ -479,6 +502,8 @@ fn pad(out: &mut String, indent: usize) {
 
 fn ty_str(t: &HirTy) -> String {
     match t {
+        HirTy::GcBuf(e) => format!("GcBuf<{}>", ty_str(e)),
+        HirTy::Never => "!".to_owned(),
         HirTy::Unknown => "?".to_owned(),
         HirTy::Unit => "()".to_owned(),
         HirTy::Prim(p) => p.name().to_owned(),
@@ -494,7 +519,7 @@ fn ty_str(t: &HirTy) -> String {
         HirTy::Struct(id) => format!("Struct#{}", id.0),
         HirTy::Enum(id) => format!("Enum#{}", id.0),
         HirTy::Array(t, n) => format!("[{}; {n}]", ty_str(t)),
-        HirTy::Fn(args, ret) => {
+        HirTy::Fn(args, ret, _) => {
             let inner = args.iter().map(ty_str).collect::<Vec<_>>().join(", ");
             format!("fn({inner}) -> {}", ty_str(ret))
         }

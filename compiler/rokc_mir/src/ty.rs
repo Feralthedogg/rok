@@ -9,7 +9,8 @@ use crate::MirTy;
 pub fn lower_ty(ty: &HirTy) -> MirTy {
     match ty {
         HirTy::Unknown | HirTy::Path(_) | HirTy::Any => MirTy::Any,
-        HirTy::Unit => MirTy::Unit,
+        // `!` has no values; a diverging call returns nothing.
+        HirTy::Unit | HirTy::Never => MirTy::Unit,
         HirTy::Prim(p) => MirTy::Prim(*p),
         // `any Tr`: `(i32 tag, GC pointer to the boxed value)`.
         HirTy::AnyTrait(_) => MirTy::Tuple(vec![MirTy::Prim(PrimTy::I32), MirTy::GcRef]),
@@ -22,7 +23,7 @@ pub fn lower_ty(ty: &HirTy) -> MirTy {
         // module context can't see payloads).
         HirTy::Enum(_) => MirTy::Prim(PrimTy::I32),
         HirTy::Array(elem, n) => MirTy::Array(Box::new(lower_ty(elem)), *n),
-        HirTy::Fn(args, ret) => {
+        HirTy::Fn(args, ret, _) => {
             MirTy::Fn(args.iter().map(lower_ty).collect(), Box::new(lower_ty(ret)))
         }
         // Closure layout: `{fn_ptr, env}` 2-tuple. The lifted function
@@ -35,6 +36,7 @@ pub fn lower_ty(ty: &HirTy) -> MirTy {
             MirTy::Tuple(vec![MirTy::Fn(fn_args, Box::new(lower_ty(ret))), env_ty])
         }
         HirTy::Throws { ok, err } => carrier(lower_ty(ok), lower_ty(err)),
+        HirTy::GcBuf(_) => MirTy::GcRef,
     }
 }
 
@@ -76,7 +78,7 @@ pub fn lower_ty_in(ty: &HirTy, module: &HirModule) -> MirTy {
             module,
         )),
         HirTy::Array(elem, n) => MirTy::Array(Box::new(lower_ty_in(elem, module)), *n),
-        HirTy::Fn(args, ret) => MirTy::Fn(
+        HirTy::Fn(args, ret, _) => MirTy::Fn(
             args.iter().map(|a| lower_ty_in(a, module)).collect(),
             Box::new(lower_ty_in(ret, module)),
         ),
@@ -152,7 +154,9 @@ pub fn unify_payload(payloads: &[MirTy]) -> Option<MirTy> {
     Some(MirTy::Array(Box::new(elem), size.div_ceil(align)))
 }
 
-fn has_gc_ref(ty: &MirTy) -> bool {
+/// `ty` contains a `GcRef` word.
+#[must_use]
+pub fn has_gc_ref(ty: &MirTy) -> bool {
     match ty {
         MirTy::GcRef => true,
         MirTy::Tuple(ps) | MirTy::Struct(_, ps) => ps.iter().any(has_gc_ref),
@@ -170,7 +174,8 @@ fn has_gc_ref(ty: &MirTy) -> bool {
 pub fn size_align(ty: &MirTy) -> (u32, u32) {
     match ty {
         MirTy::Unit => (0, 1),
-        MirTy::Any | MirTy::GcRef | MirTy::Fn(_, _) | MirTy::Prim(PrimTy::Str) => (8, 8),
+        MirTy::Any | MirTy::GcRef | MirTy::Fn(_, _) => (8, 8),
+        MirTy::Prim(PrimTy::Str) => (16, 8),
         MirTy::Prim(p) => {
             let b = p.bit_width(64) / 8;
             (b, b)

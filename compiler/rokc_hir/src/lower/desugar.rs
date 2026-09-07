@@ -32,7 +32,7 @@ pub(super) fn lower_closure_expr(
     // the return type come from the expected signature.
     let (expected_param_tys, mut expected_ret): (Option<Vec<HirTy>>, Option<HirTy>) =
         match ctx.current_expected() {
-            Some(HirTy::Fn(args, ret) | HirTy::Closure { args, ret, .. }) => {
+            Some(HirTy::Fn(args, ret, _) | HirTy::Closure { args, ret, .. }) => {
                 (Some(args.clone()), Some((**ret).clone()))
             }
             _ => (None, None),
@@ -145,7 +145,12 @@ pub(super) fn lower_closure_expr(
     let Some(env_ty_v) = env_ty else {
         return HirExpr {
             kind: HirExprKind::FnRef(closure_id),
-            ty: HirTy::Fn(user_arg_tys, Box::new(final_ret_ty)),
+            // No captures: Send + Sync like a named function (E3).
+            ty: HirTy::Fn(
+                user_arg_tys,
+                Box::new(final_ret_ty),
+                ctx.env.names.all_auto(),
+            ),
             span,
         };
     };
@@ -694,13 +699,8 @@ pub(super) fn lower_for(
                     &mut out,
                 )),
                 HirTy::Unknown => None,
-                other => Some(ctx.error_expr(
-                    span,
-                    format!(
-                        "cannot iterate over a value of type `{}` — `for` supports integer \
-                         ranges (`a..b`) and arrays (stage-1 limitation)",
-                        ctx.ty_name(&other)
-                    ),
+                _ => Some(lower_for_iter(
+                    ctx, label, pat, iter_h, body, span, &mut out,
                 )),
             }
         }
@@ -717,6 +717,136 @@ pub(super) fn lower_for(
             trailing: None,
             label: None,
         })),
+        ty: HirTy::Unit,
+        span,
+    }
+}
+
+/// `for pat in xs` over anything else (stdlib 2.7.2):
+/// `let it = xs.into_iter(); loop { match it.next() { v: T => { let pat
+/// = v; body } none => break } }`.
+pub(super) fn lower_for_iter(
+    ctx: &mut LowerCtx<'_>,
+    label: Option<&String>,
+    pat: &AstPattern,
+    iter_h: HirExpr,
+    body: &Block,
+    span: rokc_diagnostic::Span,
+    out: &mut Vec<HirStmt>,
+) -> HirExpr {
+    let has_into_iter = method_target_for(&iter_h.ty).is_some_and(|t| {
+        ctx.env
+            .method_table
+            .contains_key(&(t, "into_iter".to_owned()))
+    }) || super::expr::generic_method_for(ctx, &iter_h.ty, "into_iter")
+        .is_some()
+        || matches!(
+            super::expr::generic_trait_method_for(ctx, &iter_h.ty, "into_iter"),
+            Ok(Some(_))
+        );
+    if !has_into_iter {
+        return ctx.error_expr(
+            span,
+            format!(
+                "cannot iterate over a value of type `{}` — `for` needs an integer range, \
+                 an array, or an `IntoIterator` / `Iterator` impl (stdlib 2.7.2)",
+                ctx.ty_name(&iter_h.ty)
+            ),
+        );
+    }
+    let it_h = method_call_on(ctx, iter_h, "into_iter", &[], span);
+    if it_h.ty == HirTy::Unknown {
+        return it_h;
+    }
+    let it_ty = it_h.ty.clone();
+    let it = ctx.declare(None, it_ty.clone());
+    out.push(HirStmt::Let {
+        local: it,
+        init: it_h,
+    });
+    let next = method_call_on(ctx, hir_local(it, &it_ty, span), "next", &[], span);
+    let sum_ty = next.ty.clone();
+    let parts = match &sum_ty {
+        HirTy::Sum(parts) => parts.clone(),
+        HirTy::Unknown => return next,
+        other => {
+            return ctx.error_expr(
+                span,
+                format!(
+                    "`next` of an iterator must return `T | none`, found `{}`",
+                    ctx.ty_name(other)
+                ),
+            );
+        }
+    };
+    let (Some(none_i), Some(item_i)) = (
+        parts.iter().position(is_none_ty),
+        parts.iter().position(|p| !is_none_ty(p)),
+    ) else {
+        return ctx.error_expr(span, "`next` must return `T | none`".to_owned());
+    };
+    let item_ty = parts[item_i].clone();
+    let v = ctx.declare(None, item_ty.clone());
+    let mut arm_stmts: Vec<HirStmt> = Vec::new();
+    bind_irrefutable(ctx, pat, hir_local(v, &item_ty, span), &mut arm_stmts);
+    let lowered_body = lower_loop_body(ctx, body);
+    arm_stmts.push(HirStmt::Expr(HirExpr {
+        kind: HirExprKind::Block(Box::new(lowered_body)),
+        ty: HirTy::Unit,
+        span,
+    }));
+    let block = |stmts: Vec<HirStmt>| HirExpr {
+        kind: HirExprKind::Block(Box::new(HirBlock {
+            stmts,
+            trailing: None,
+            label: None,
+        })),
+        ty: HirTy::Unit,
+        span,
+    };
+    let arms = vec![
+        HirMatchArm {
+            pat: HirPattern::SumVariant {
+                sum_ty: sum_ty.clone(),
+                variant_index: u32::try_from(item_i).expect("variant overflow"),
+                binder: Some(v),
+                payload_ty: Some(item_ty),
+            },
+            guard: None,
+            body: block(arm_stmts),
+        },
+        HirMatchArm {
+            pat: HirPattern::SumVariant {
+                sum_ty,
+                variant_index: u32::try_from(none_i).expect("variant overflow"),
+                binder: None,
+                payload_ty: None,
+            },
+            guard: None,
+            body: block(vec![HirStmt::Break {
+                label: label.cloned(),
+                value: None,
+            }]),
+        },
+    ];
+    let step = HirExpr {
+        kind: HirExprKind::Match {
+            scrutinee: Box::new(next),
+            arms,
+        },
+        ty: HirTy::Unit,
+        span,
+    };
+    HirExpr {
+        kind: HirExprKind::Loop {
+            label: label.cloned(),
+            body: Box::new(HirBlock {
+                stmts: vec![HirStmt::Expr(step)],
+                trailing: None,
+                label: None,
+            }),
+            result_ty: HirTy::Unit,
+        },
         ty: HirTy::Unit,
         span,
     }

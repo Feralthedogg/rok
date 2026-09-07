@@ -1,0 +1,28 @@
+// expect-exit: 10
+// `!` (never): `panic`, `env::exit` and `loop {}` without `break` have
+// type `!`, which fits any slot — no dead `return` after them.
+use rok::std::env;
+
+fn pick(x: i32) -> i32 {
+    if x > 0 {
+        return x;
+    }
+    env::exit(x + 10);
+}
+
+fn first(x: i32 | none) -> i32 {
+    let v: i32 = x ?? panic("none!");
+    return v;
+}
+
+fn spin() -> ! { loop {} }
+
+fn main() -> i32 {
+    let a = pick(3);
+    let b: i32 = if a > 100 { panic("big") } else { a };
+    let c = match a { 3 => first(4), _ => spin() };
+    let msg = "dyn";
+    if a > 1000 { panic(msg); }
+    if a == 3 { env::exit(a + b + c); }
+    return 0;
+}

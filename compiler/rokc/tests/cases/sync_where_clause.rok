@@ -1,0 +1,8 @@
+// expect-error: type `Tok` does not satisfy trait bound `rok::core::marker::Sync` required by `need`
+// A generic function's `where` bounds are checked like inline ones.
+struct Tok { v: i32; }
+impl !Sync for Tok {}
+fn need<T>(x: T) -> i32 where T: Sync { return 1; }
+fn main() -> i32 {
+    return need(Tok { v: 1 });
+}

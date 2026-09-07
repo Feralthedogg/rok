@@ -1,0 +1,12 @@
+// expect-exit: 7
+// expect-stdout: 1
+// `rok::std::env::exit(code)` ends the process at once with `code`
+// (spec 4.16.4); nothing after it runs.
+
+use rok::std::env;
+
+fn main() {
+    rok_print_i32(1);
+    env::exit(7);
+    rok_print_i32(2);
+}

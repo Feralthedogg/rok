@@ -2,6 +2,9 @@
 // expect-stdout:
 // 107
 // 9
+// 5
+// 1
+// 1
 
 // A generic impl's trait arguments and associated types are checked per
 // instantiation: `impl<T> Source<i32> for Box<T> { type Item = T; }`
@@ -18,9 +21,13 @@ impl<T> Source<i32> for Box<T> {
 fn total<S: Source<Item = i32>>(s: S) -> i32 { return s.get() + 100; }
 fn keyed<S: Source<i32>>(s: S) -> i32 { return s.id() + 8; }
 
-// Storing checks the instantiated bindings (dispatch through a
-// generic-only trait is the `any` side's business).
+// Storing checks the instantiated bindings; a call takes its signature
+// from the trait declaration with the bound's arguments / bindings.
 let x: any Source<Item = i32> = Box { v: 5 };
 rok_print_i32(total(Box { v: 7 }));
 rok_print_i32(keyed(Box { v: true }));
 let y: any Source<i32> = Box { v: false };
+rok_print_i32(x.get());
+rok_print_i32(y.id());
+let z: any Source<i32, Item = bool> = Box { v: true };
+rok_print_i32(if z.get() { 1 } else { 0 });

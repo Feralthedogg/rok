@@ -7,7 +7,7 @@ mod ty;
 
 pub use lower::lower;
 pub use print::print_mir;
-pub use ty::{lower_ty, sum_layout};
+pub use ty::{has_gc_ref, lower_ty, sum_layout};
 
 use rokc_core::DefId;
 use rokc_diagnostic::Span;
@@ -71,6 +71,16 @@ pub enum Statement {
         value: Operand,
         elem_ty: MirTy,
         len: u32,
+    },
+    // The local's scope ended (only emitted for GC-holding locals):
+    // codegen clears its shadow-stack root so it stops retaining.
+    StorageDead(LocalId),
+    // `buf[index] = value` into a `BufAlloc` object (unchecked).
+    BufStore {
+        buf: Operand,
+        index: Operand,
+        value: Operand,
+        elem_ty: MirTy,
     },
     // `STATIC_NAME = value` — store into a module-level global.
     StaticStore {
@@ -167,6 +177,19 @@ pub enum RValue {
     HeapBox {
         value: Operand,
         ty: MirTy,
+    },
+    // A zeroed GC object holding `len` `elem_ty`s; yields its `GcRef`.
+    // Its type's ScanTable traces the payload when `elem_ty` holds GC
+    // references.
+    BufAlloc {
+        elem_ty: MirTy,
+        len: Operand,
+    },
+    // Element `index` of a `BufAlloc` object (unchecked).
+    BufLoad {
+        buf: Operand,
+        index: Operand,
+        elem_ty: MirTy,
     },
     // Load the `ty` payload of the `GcRef` `ptr` (a `HeapBox` object),
     // or unpack an inline payload.

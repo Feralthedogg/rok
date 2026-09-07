@@ -1,0 +1,11 @@
+// expect-error: method `show` of the generic impl of `Show` does not apply to `Pair<Tok>`: its bound needs `Tok: rok::core::marker::Send`
+// A generic impl whose bound fails names the bound, not "no method".
+struct Tok { v: i32; }
+impl !Send for Tok {}
+struct Pair<T> { a: T; b: T; }
+trait Show { fn show(self) -> i32; }
+impl<T: Send> Show for Pair<T> { fn show(self) -> i32 { return 2; } }
+fn main() -> i32 {
+    let p = Pair { a: Tok { v: 1 }, b: Tok { v: 2 } };
+    return p.show();
+}

@@ -1,0 +1,64 @@
+// expect-exit: 0
+// expect-stdout:
+// 3
+// 2
+// 24
+// 6
+// 60
+// 5
+// -1
+// 10
+// 1
+// 7
+// 3
+
+// `List<T>` (stdlib 2.9.2): push / pop / get / insert / remove, `xs[i]`
+// through `Index`, `xs[i] = v` through `IndexSet`, `for x in xs`
+// through `IntoIterator` + `Iterator`, and `[..]` into a `List` slot.
+
+fn sum(xs: List<i32>) -> i32 {
+    let t = 0;
+    for x in xs {
+        t = t + x;
+    }
+    return t;
+}
+
+fn main() -> i32 {
+    let xs: List<i32> = List::new();
+    xs.push(1);
+    xs.push(2);
+    xs.push(3);
+    rok_print_i32(xs.len() as i32);
+    rok_print_i32(xs[1]);
+    xs[1] = 20;
+    rok_print_i32(sum(xs));
+    let ys: List<i32> = [10, 20, 30, 40, 50, 60];
+    rok_print_i32(ys.len() as i32);
+    match ys.pop() {
+        v: i32 => rok_print_i32(v),
+        none => rok_print_i32(-1),
+    }
+    rok_print_i32(ys.len() as i32);
+    match ys.get(99) {
+        v: i32 => rok_print_i32(v),
+        none => rok_print_i32(-1),
+    }
+    // Handles share: `zs` and `ys` are one list.
+    let zs = ys;
+    zs.insert(0, 5);
+    rok_print_i32(ys[0] + ys[1] - 5);
+    rok_print_i32(if ys.remove(0) == 5 && !ys.is_empty() { 1 } else { 0 });
+    let empty: List<i32> = [];
+    empty.push(7);
+    match empty.first() {
+        v: i32 => rok_print_i32(v),
+        none => rok_print_i32(-1),
+    }
+    let n = 0;
+    for x in [1, 2, 3] {
+        n = n + 1;
+    }
+    rok_print_i32(n);
+    return 0;
+}

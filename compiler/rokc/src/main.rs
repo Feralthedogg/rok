@@ -32,7 +32,7 @@ options:
   -O0 | -O1 | -O2 | -O3 | -Os  optimization level (default -O0)
   --cfg <flag | key=value>     #[cfg] flag (repeatable)
   --bootstrap <file>           operator / lang declarations to preload (repeatable;
-                               default: $ROK_HOME/library/core/lib.rok)
+                               default: $ROK_HOME/library/{core,std}/lib.rok)
   --rokr <lib>                 runtime library: path, or name for -l<name>
                                (default: librokr.a next to rokc, else -lrokr)
   --keep                       keep the temporary build directory
@@ -141,7 +141,14 @@ fn with_defaults(mut a: Args) -> Args {
         .and_then(|e| e.parent().map(Path::to_path_buf));
     if a.bootstrap.is_empty() {
         match rok_home(exe_dir.as_deref()) {
-            Some(home) => a.bootstrap.push(home.join(CORE_LIB)),
+            Some(home) => {
+                a.bootstrap.push(home.join(CORE_LIB));
+                // `rok::std` rides along when present (no implicit glob).
+                let std_lib = home.join(STD_LIB);
+                if std_lib.is_file() {
+                    a.bootstrap.push(std_lib);
+                }
+            }
             None => eprintln!(
                 "rokc: warning: `{CORE_LIB}` not found (set ROK_HOME); \
                  operators and lang items are unavailable"
@@ -158,6 +165,7 @@ fn with_defaults(mut a: Args) -> Args {
 }
 
 const CORE_LIB: &str = "library/core/lib.rok";
+const STD_LIB: &str = "library/std/lib.rok";
 
 /// `$ROK_HOME`, else the nearest ancestor of the `rokc` binary holding
 /// `library/core` (the dev layout `impl/target/debug/rokc` → `impl/`).

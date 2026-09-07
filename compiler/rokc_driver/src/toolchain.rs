@@ -136,14 +136,36 @@ pub fn mlir_text(
         opts.target.as_deref(),
         overflow_checks,
     )?;
+    let mut attrs = Vec::new();
     if let Some(t) = &opts.target {
+        attrs.push(format!("llvm.target_triple = \"{t}\""));
+    }
+    if let Some(dl) = data_layout(opts) {
+        attrs.push(format!("llvm.data_layout = \"{dl}\""));
+    }
+    if !attrs.is_empty() {
         out.text = out.text.replacen(
             "module {",
-            &format!("module attributes {{llvm.target_triple = \"{t}\"}} {{"),
+            &format!("module attributes {{{}}} {{", attrs.join(", ")),
             1,
         );
     }
     Ok(out)
+}
+
+/// The `target datalayout` clang uses for the target, so MLIR / LLVM fold
+/// `sizeof` idioms with the real layout instead of LLVM's default one
+/// (where `i64` is 4-aligned). `None` when clang is unavailable (`emit
+/// mlir` without a toolchain); the build itself needs clang anyway.
+fn data_layout(opts: &BuildOptions) -> Option<String> {
+    let mut cmd = clang(opts).ok()?;
+    cmd.args(["-S", "-emit-llvm", "-x", "c", "-", "-o", "-"])
+        .stdin(std::process::Stdio::null());
+    let text = String::from_utf8(output(&mut cmd, "clang").ok()?).ok()?;
+    let dl = text
+        .lines()
+        .find_map(|l| l.strip_prefix("target datalayout = \""))?;
+    Some(dl.trim_end_matches('"').to_owned())
 }
 
 /// Produce one artifact's bytes.

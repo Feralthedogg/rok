@@ -1,0 +1,9 @@
+// expect-exit: 101
+// expect-stderr: string slice is not on a char boundary
+
+// stdlib 2.15.3: slicing inside a UTF-8 sequence panics.
+fn main() -> i32 {
+    let s = "a세b";
+    println(s[0:2]);
+    return 0;
+}

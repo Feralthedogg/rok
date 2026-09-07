@@ -1,0 +1,4 @@
+// expect-exit: 101
+// `panic` takes any `str`, not only a literal.
+fn fail(why: str) -> i32 { panic(why); }
+fn main() -> i32 { return fail("bad " + "input"); }

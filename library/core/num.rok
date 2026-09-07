@@ -1,88 +1,108 @@
 // rok::core::num — the primitive types' operator / comparison trait
 // impls (stdlib spec 2.1, 2.3.5, 2.5). They make `T: Add` / `T: Ord`
-// bounds accept primitives. The compiler still lowers a primitive
-// `a + b` straight to its machine op; these bodies only run when the
-// method is called by name (`x.add(y)`). Generated — keep it regular.
-//
-// ponytail: spec 2.3.5 puts `#[intrinsic("rok.add.i32")]` on each;
-// the compiler has no intrinsic attribute yet, so the bodies use the
-// primitive operator instead.
+// bounds accept primitives. Each method is `#[intrinsic("rok.OP.TYPE")]`
+// (stdlib spec 0.3): a primitive `a + b` and a by-name call (`x.add(y)`,
+// `T::add(a, b)`) both lower to the machine op. The body is the
+// fallback (0.3.4) and what a `fn` value of the method runs.
+// One block per (type, trait); keep it regular.
 
 // i8
 
 impl Add for i8 {
     type Output = i8;
+    #[intrinsic("rok.add.i8")]
     fn add(self, rhs: i8) -> i8 { return self + rhs; }
 }
 
 impl Sub for i8 {
     type Output = i8;
+    #[intrinsic("rok.sub.i8")]
     fn sub(self, rhs: i8) -> i8 { return self - rhs; }
 }
 
 impl Mul for i8 {
     type Output = i8;
+    #[intrinsic("rok.mul.i8")]
     fn mul(self, rhs: i8) -> i8 { return self * rhs; }
 }
 
 impl Div for i8 {
     type Output = i8;
+    #[intrinsic("rok.div.i8")]
     fn div(self, rhs: i8) -> i8 { return self / rhs; }
 }
 
 impl Rem for i8 {
     type Output = i8;
+    #[intrinsic("rok.rem.i8")]
     fn rem(self, rhs: i8) -> i8 { return self % rhs; }
 }
 
 impl Neg for i8 {
     type Output = i8;
+    #[intrinsic("rok.neg.i8")]
     fn neg(self) -> i8 { return -self; }
 }
 
 impl BitAnd for i8 {
     type Output = i8;
+    #[intrinsic("rok.and.i8")]
     fn bitand(self, rhs: i8) -> i8 { return self & rhs; }
 }
 
 impl BitOr for i8 {
     type Output = i8;
+    #[intrinsic("rok.or.i8")]
     fn bitor(self, rhs: i8) -> i8 { return self | rhs; }
 }
 
 impl BitXor for i8 {
     type Output = i8;
+    #[intrinsic("rok.xor.i8")]
     fn bitxor(self, rhs: i8) -> i8 { return self ^ rhs; }
 }
 
 impl Shl for i8 {
     type Output = i8;
+    #[intrinsic("rok.shl.i8")]
     fn shl(self, rhs: i8) -> i8 { return self << rhs; }
 }
 
 impl Shr for i8 {
     type Output = i8;
+    #[intrinsic("rok.shr.i8")]
     fn shr(self, rhs: i8) -> i8 { return self >> rhs; }
 }
 
 impl BitNot for i8 {
     type Output = i8;
+    #[intrinsic("rok.not.i8")]
     fn bitnot(self) -> i8 { return ~self; }
 }
 
 impl PartialEq for i8 {
+    #[intrinsic("rok.eq.i8")]
     fn eq(self, rhs: i8) -> bool { return self == rhs; }
+    #[intrinsic("rok.ne.i8")]
     fn ne(self, rhs: i8) -> bool { return self != rhs; }
 }
 
 impl PartialOrd for i8 {
+    #[intrinsic("rok.lt.i8")]
     fn lt(self, rhs: i8) -> bool { return self < rhs; }
+    #[intrinsic("rok.gt.i8")]
     fn gt(self, rhs: i8) -> bool { return self > rhs; }
+    #[intrinsic("rok.le.i8")]
     fn le(self, rhs: i8) -> bool { return self <= rhs; }
+    #[intrinsic("rok.ge.i8")]
     fn ge(self, rhs: i8) -> bool { return self >= rhs; }
 }
 
 impl Eq for i8 {}
+
+impl Hash for i8 {
+    fn hash(self) -> u64 { return self as u64; }
+}
 
 impl Ord for i8 {
     fn cmp(self, other: i8) -> i32 {
@@ -96,77 +116,99 @@ impl Ord for i8 {
 
 impl Add for i16 {
     type Output = i16;
+    #[intrinsic("rok.add.i16")]
     fn add(self, rhs: i16) -> i16 { return self + rhs; }
 }
 
 impl Sub for i16 {
     type Output = i16;
+    #[intrinsic("rok.sub.i16")]
     fn sub(self, rhs: i16) -> i16 { return self - rhs; }
 }
 
 impl Mul for i16 {
     type Output = i16;
+    #[intrinsic("rok.mul.i16")]
     fn mul(self, rhs: i16) -> i16 { return self * rhs; }
 }
 
 impl Div for i16 {
     type Output = i16;
+    #[intrinsic("rok.div.i16")]
     fn div(self, rhs: i16) -> i16 { return self / rhs; }
 }
 
 impl Rem for i16 {
     type Output = i16;
+    #[intrinsic("rok.rem.i16")]
     fn rem(self, rhs: i16) -> i16 { return self % rhs; }
 }
 
 impl Neg for i16 {
     type Output = i16;
+    #[intrinsic("rok.neg.i16")]
     fn neg(self) -> i16 { return -self; }
 }
 
 impl BitAnd for i16 {
     type Output = i16;
+    #[intrinsic("rok.and.i16")]
     fn bitand(self, rhs: i16) -> i16 { return self & rhs; }
 }
 
 impl BitOr for i16 {
     type Output = i16;
+    #[intrinsic("rok.or.i16")]
     fn bitor(self, rhs: i16) -> i16 { return self | rhs; }
 }
 
 impl BitXor for i16 {
     type Output = i16;
+    #[intrinsic("rok.xor.i16")]
     fn bitxor(self, rhs: i16) -> i16 { return self ^ rhs; }
 }
 
 impl Shl for i16 {
     type Output = i16;
+    #[intrinsic("rok.shl.i16")]
     fn shl(self, rhs: i16) -> i16 { return self << rhs; }
 }
 
 impl Shr for i16 {
     type Output = i16;
+    #[intrinsic("rok.shr.i16")]
     fn shr(self, rhs: i16) -> i16 { return self >> rhs; }
 }
 
 impl BitNot for i16 {
     type Output = i16;
+    #[intrinsic("rok.not.i16")]
     fn bitnot(self) -> i16 { return ~self; }
 }
 
 impl PartialEq for i16 {
+    #[intrinsic("rok.eq.i16")]
     fn eq(self, rhs: i16) -> bool { return self == rhs; }
+    #[intrinsic("rok.ne.i16")]
     fn ne(self, rhs: i16) -> bool { return self != rhs; }
 }
 
 impl PartialOrd for i16 {
+    #[intrinsic("rok.lt.i16")]
     fn lt(self, rhs: i16) -> bool { return self < rhs; }
+    #[intrinsic("rok.gt.i16")]
     fn gt(self, rhs: i16) -> bool { return self > rhs; }
+    #[intrinsic("rok.le.i16")]
     fn le(self, rhs: i16) -> bool { return self <= rhs; }
+    #[intrinsic("rok.ge.i16")]
     fn ge(self, rhs: i16) -> bool { return self >= rhs; }
 }
 
 impl Eq for i16 {}
+
+impl Hash for i16 {
+    fn hash(self) -> u64 { return self as u64; }
+}
 
 impl Ord for i16 {
     fn cmp(self, other: i16) -> i32 {
@@ -180,77 +222,99 @@ impl Ord for i16 {
 
 impl Add for i32 {
     type Output = i32;
+    #[intrinsic("rok.add.i32")]
     fn add(self, rhs: i32) -> i32 { return self + rhs; }
 }
 
 impl Sub for i32 {
     type Output = i32;
+    #[intrinsic("rok.sub.i32")]
     fn sub(self, rhs: i32) -> i32 { return self - rhs; }
 }
 
 impl Mul for i32 {
     type Output = i32;
+    #[intrinsic("rok.mul.i32")]
     fn mul(self, rhs: i32) -> i32 { return self * rhs; }
 }
 
 impl Div for i32 {
     type Output = i32;
+    #[intrinsic("rok.div.i32")]
     fn div(self, rhs: i32) -> i32 { return self / rhs; }
 }
 
 impl Rem for i32 {
     type Output = i32;
+    #[intrinsic("rok.rem.i32")]
     fn rem(self, rhs: i32) -> i32 { return self % rhs; }
 }
 
 impl Neg for i32 {
     type Output = i32;
+    #[intrinsic("rok.neg.i32")]
     fn neg(self) -> i32 { return -self; }
 }
 
 impl BitAnd for i32 {
     type Output = i32;
+    #[intrinsic("rok.and.i32")]
     fn bitand(self, rhs: i32) -> i32 { return self & rhs; }
 }
 
 impl BitOr for i32 {
     type Output = i32;
+    #[intrinsic("rok.or.i32")]
     fn bitor(self, rhs: i32) -> i32 { return self | rhs; }
 }
 
 impl BitXor for i32 {
     type Output = i32;
+    #[intrinsic("rok.xor.i32")]
     fn bitxor(self, rhs: i32) -> i32 { return self ^ rhs; }
 }
 
 impl Shl for i32 {
     type Output = i32;
+    #[intrinsic("rok.shl.i32")]
     fn shl(self, rhs: i32) -> i32 { return self << rhs; }
 }
 
 impl Shr for i32 {
     type Output = i32;
+    #[intrinsic("rok.shr.i32")]
     fn shr(self, rhs: i32) -> i32 { return self >> rhs; }
 }
 
 impl BitNot for i32 {
     type Output = i32;
+    #[intrinsic("rok.not.i32")]
     fn bitnot(self) -> i32 { return ~self; }
 }
 
 impl PartialEq for i32 {
+    #[intrinsic("rok.eq.i32")]
     fn eq(self, rhs: i32) -> bool { return self == rhs; }
+    #[intrinsic("rok.ne.i32")]
     fn ne(self, rhs: i32) -> bool { return self != rhs; }
 }
 
 impl PartialOrd for i32 {
+    #[intrinsic("rok.lt.i32")]
     fn lt(self, rhs: i32) -> bool { return self < rhs; }
+    #[intrinsic("rok.gt.i32")]
     fn gt(self, rhs: i32) -> bool { return self > rhs; }
+    #[intrinsic("rok.le.i32")]
     fn le(self, rhs: i32) -> bool { return self <= rhs; }
+    #[intrinsic("rok.ge.i32")]
     fn ge(self, rhs: i32) -> bool { return self >= rhs; }
 }
 
 impl Eq for i32 {}
+
+impl Hash for i32 {
+    fn hash(self) -> u64 { return self as u64; }
+}
 
 impl Ord for i32 {
     fn cmp(self, other: i32) -> i32 {
@@ -264,77 +328,99 @@ impl Ord for i32 {
 
 impl Add for i64 {
     type Output = i64;
+    #[intrinsic("rok.add.i64")]
     fn add(self, rhs: i64) -> i64 { return self + rhs; }
 }
 
 impl Sub for i64 {
     type Output = i64;
+    #[intrinsic("rok.sub.i64")]
     fn sub(self, rhs: i64) -> i64 { return self - rhs; }
 }
 
 impl Mul for i64 {
     type Output = i64;
+    #[intrinsic("rok.mul.i64")]
     fn mul(self, rhs: i64) -> i64 { return self * rhs; }
 }
 
 impl Div for i64 {
     type Output = i64;
+    #[intrinsic("rok.div.i64")]
     fn div(self, rhs: i64) -> i64 { return self / rhs; }
 }
 
 impl Rem for i64 {
     type Output = i64;
+    #[intrinsic("rok.rem.i64")]
     fn rem(self, rhs: i64) -> i64 { return self % rhs; }
 }
 
 impl Neg for i64 {
     type Output = i64;
+    #[intrinsic("rok.neg.i64")]
     fn neg(self) -> i64 { return -self; }
 }
 
 impl BitAnd for i64 {
     type Output = i64;
+    #[intrinsic("rok.and.i64")]
     fn bitand(self, rhs: i64) -> i64 { return self & rhs; }
 }
 
 impl BitOr for i64 {
     type Output = i64;
+    #[intrinsic("rok.or.i64")]
     fn bitor(self, rhs: i64) -> i64 { return self | rhs; }
 }
 
 impl BitXor for i64 {
     type Output = i64;
+    #[intrinsic("rok.xor.i64")]
     fn bitxor(self, rhs: i64) -> i64 { return self ^ rhs; }
 }
 
 impl Shl for i64 {
     type Output = i64;
+    #[intrinsic("rok.shl.i64")]
     fn shl(self, rhs: i64) -> i64 { return self << rhs; }
 }
 
 impl Shr for i64 {
     type Output = i64;
+    #[intrinsic("rok.shr.i64")]
     fn shr(self, rhs: i64) -> i64 { return self >> rhs; }
 }
 
 impl BitNot for i64 {
     type Output = i64;
+    #[intrinsic("rok.not.i64")]
     fn bitnot(self) -> i64 { return ~self; }
 }
 
 impl PartialEq for i64 {
+    #[intrinsic("rok.eq.i64")]
     fn eq(self, rhs: i64) -> bool { return self == rhs; }
+    #[intrinsic("rok.ne.i64")]
     fn ne(self, rhs: i64) -> bool { return self != rhs; }
 }
 
 impl PartialOrd for i64 {
+    #[intrinsic("rok.lt.i64")]
     fn lt(self, rhs: i64) -> bool { return self < rhs; }
+    #[intrinsic("rok.gt.i64")]
     fn gt(self, rhs: i64) -> bool { return self > rhs; }
+    #[intrinsic("rok.le.i64")]
     fn le(self, rhs: i64) -> bool { return self <= rhs; }
+    #[intrinsic("rok.ge.i64")]
     fn ge(self, rhs: i64) -> bool { return self >= rhs; }
 }
 
 impl Eq for i64 {}
+
+impl Hash for i64 {
+    fn hash(self) -> u64 { return self as u64; }
+}
 
 impl Ord for i64 {
     fn cmp(self, other: i64) -> i32 {
@@ -348,77 +434,99 @@ impl Ord for i64 {
 
 impl Add for isize {
     type Output = isize;
+    #[intrinsic("rok.add.isize")]
     fn add(self, rhs: isize) -> isize { return self + rhs; }
 }
 
 impl Sub for isize {
     type Output = isize;
+    #[intrinsic("rok.sub.isize")]
     fn sub(self, rhs: isize) -> isize { return self - rhs; }
 }
 
 impl Mul for isize {
     type Output = isize;
+    #[intrinsic("rok.mul.isize")]
     fn mul(self, rhs: isize) -> isize { return self * rhs; }
 }
 
 impl Div for isize {
     type Output = isize;
+    #[intrinsic("rok.div.isize")]
     fn div(self, rhs: isize) -> isize { return self / rhs; }
 }
 
 impl Rem for isize {
     type Output = isize;
+    #[intrinsic("rok.rem.isize")]
     fn rem(self, rhs: isize) -> isize { return self % rhs; }
 }
 
 impl Neg for isize {
     type Output = isize;
+    #[intrinsic("rok.neg.isize")]
     fn neg(self) -> isize { return -self; }
 }
 
 impl BitAnd for isize {
     type Output = isize;
+    #[intrinsic("rok.and.isize")]
     fn bitand(self, rhs: isize) -> isize { return self & rhs; }
 }
 
 impl BitOr for isize {
     type Output = isize;
+    #[intrinsic("rok.or.isize")]
     fn bitor(self, rhs: isize) -> isize { return self | rhs; }
 }
 
 impl BitXor for isize {
     type Output = isize;
+    #[intrinsic("rok.xor.isize")]
     fn bitxor(self, rhs: isize) -> isize { return self ^ rhs; }
 }
 
 impl Shl for isize {
     type Output = isize;
+    #[intrinsic("rok.shl.isize")]
     fn shl(self, rhs: isize) -> isize { return self << rhs; }
 }
 
 impl Shr for isize {
     type Output = isize;
+    #[intrinsic("rok.shr.isize")]
     fn shr(self, rhs: isize) -> isize { return self >> rhs; }
 }
 
 impl BitNot for isize {
     type Output = isize;
+    #[intrinsic("rok.not.isize")]
     fn bitnot(self) -> isize { return ~self; }
 }
 
 impl PartialEq for isize {
+    #[intrinsic("rok.eq.isize")]
     fn eq(self, rhs: isize) -> bool { return self == rhs; }
+    #[intrinsic("rok.ne.isize")]
     fn ne(self, rhs: isize) -> bool { return self != rhs; }
 }
 
 impl PartialOrd for isize {
+    #[intrinsic("rok.lt.isize")]
     fn lt(self, rhs: isize) -> bool { return self < rhs; }
+    #[intrinsic("rok.gt.isize")]
     fn gt(self, rhs: isize) -> bool { return self > rhs; }
+    #[intrinsic("rok.le.isize")]
     fn le(self, rhs: isize) -> bool { return self <= rhs; }
+    #[intrinsic("rok.ge.isize")]
     fn ge(self, rhs: isize) -> bool { return self >= rhs; }
 }
 
 impl Eq for isize {}
+
+impl Hash for isize {
+    fn hash(self) -> u64 { return self as u64; }
+}
 
 impl Ord for isize {
     fn cmp(self, other: isize) -> i32 {
@@ -432,72 +540,93 @@ impl Ord for isize {
 
 impl Add for u8 {
     type Output = u8;
+    #[intrinsic("rok.add.u8")]
     fn add(self, rhs: u8) -> u8 { return self + rhs; }
 }
 
 impl Sub for u8 {
     type Output = u8;
+    #[intrinsic("rok.sub.u8")]
     fn sub(self, rhs: u8) -> u8 { return self - rhs; }
 }
 
 impl Mul for u8 {
     type Output = u8;
+    #[intrinsic("rok.mul.u8")]
     fn mul(self, rhs: u8) -> u8 { return self * rhs; }
 }
 
 impl Div for u8 {
     type Output = u8;
+    #[intrinsic("rok.div.u8")]
     fn div(self, rhs: u8) -> u8 { return self / rhs; }
 }
 
 impl Rem for u8 {
     type Output = u8;
+    #[intrinsic("rok.rem.u8")]
     fn rem(self, rhs: u8) -> u8 { return self % rhs; }
 }
 
 impl BitAnd for u8 {
     type Output = u8;
+    #[intrinsic("rok.and.u8")]
     fn bitand(self, rhs: u8) -> u8 { return self & rhs; }
 }
 
 impl BitOr for u8 {
     type Output = u8;
+    #[intrinsic("rok.or.u8")]
     fn bitor(self, rhs: u8) -> u8 { return self | rhs; }
 }
 
 impl BitXor for u8 {
     type Output = u8;
+    #[intrinsic("rok.xor.u8")]
     fn bitxor(self, rhs: u8) -> u8 { return self ^ rhs; }
 }
 
 impl Shl for u8 {
     type Output = u8;
+    #[intrinsic("rok.shl.u8")]
     fn shl(self, rhs: u8) -> u8 { return self << rhs; }
 }
 
 impl Shr for u8 {
     type Output = u8;
+    #[intrinsic("rok.shr.u8")]
     fn shr(self, rhs: u8) -> u8 { return self >> rhs; }
 }
 
 impl BitNot for u8 {
     type Output = u8;
+    #[intrinsic("rok.not.u8")]
     fn bitnot(self) -> u8 { return ~self; }
 }
 
 impl PartialEq for u8 {
+    #[intrinsic("rok.eq.u8")]
     fn eq(self, rhs: u8) -> bool { return self == rhs; }
+    #[intrinsic("rok.ne.u8")]
     fn ne(self, rhs: u8) -> bool { return self != rhs; }
 }
 
 impl PartialOrd for u8 {
+    #[intrinsic("rok.lt.u8")]
     fn lt(self, rhs: u8) -> bool { return self < rhs; }
+    #[intrinsic("rok.gt.u8")]
     fn gt(self, rhs: u8) -> bool { return self > rhs; }
+    #[intrinsic("rok.le.u8")]
     fn le(self, rhs: u8) -> bool { return self <= rhs; }
+    #[intrinsic("rok.ge.u8")]
     fn ge(self, rhs: u8) -> bool { return self >= rhs; }
 }
 
 impl Eq for u8 {}
+
+impl Hash for u8 {
+    fn hash(self) -> u64 { return self as u64; }
+}
 
 impl Ord for u8 {
     fn cmp(self, other: u8) -> i32 {
@@ -511,72 +640,93 @@ impl Ord for u8 {
 
 impl Add for u16 {
     type Output = u16;
+    #[intrinsic("rok.add.u16")]
     fn add(self, rhs: u16) -> u16 { return self + rhs; }
 }
 
 impl Sub for u16 {
     type Output = u16;
+    #[intrinsic("rok.sub.u16")]
     fn sub(self, rhs: u16) -> u16 { return self - rhs; }
 }
 
 impl Mul for u16 {
     type Output = u16;
+    #[intrinsic("rok.mul.u16")]
     fn mul(self, rhs: u16) -> u16 { return self * rhs; }
 }
 
 impl Div for u16 {
     type Output = u16;
+    #[intrinsic("rok.div.u16")]
     fn div(self, rhs: u16) -> u16 { return self / rhs; }
 }
 
 impl Rem for u16 {
     type Output = u16;
+    #[intrinsic("rok.rem.u16")]
     fn rem(self, rhs: u16) -> u16 { return self % rhs; }
 }
 
 impl BitAnd for u16 {
     type Output = u16;
+    #[intrinsic("rok.and.u16")]
     fn bitand(self, rhs: u16) -> u16 { return self & rhs; }
 }
 
 impl BitOr for u16 {
     type Output = u16;
+    #[intrinsic("rok.or.u16")]
     fn bitor(self, rhs: u16) -> u16 { return self | rhs; }
 }
 
 impl BitXor for u16 {
     type Output = u16;
+    #[intrinsic("rok.xor.u16")]
     fn bitxor(self, rhs: u16) -> u16 { return self ^ rhs; }
 }
 
 impl Shl for u16 {
     type Output = u16;
+    #[intrinsic("rok.shl.u16")]
     fn shl(self, rhs: u16) -> u16 { return self << rhs; }
 }
 
 impl Shr for u16 {
     type Output = u16;
+    #[intrinsic("rok.shr.u16")]
     fn shr(self, rhs: u16) -> u16 { return self >> rhs; }
 }
 
 impl BitNot for u16 {
     type Output = u16;
+    #[intrinsic("rok.not.u16")]
     fn bitnot(self) -> u16 { return ~self; }
 }
 
 impl PartialEq for u16 {
+    #[intrinsic("rok.eq.u16")]
     fn eq(self, rhs: u16) -> bool { return self == rhs; }
+    #[intrinsic("rok.ne.u16")]
     fn ne(self, rhs: u16) -> bool { return self != rhs; }
 }
 
 impl PartialOrd for u16 {
+    #[intrinsic("rok.lt.u16")]
     fn lt(self, rhs: u16) -> bool { return self < rhs; }
+    #[intrinsic("rok.gt.u16")]
     fn gt(self, rhs: u16) -> bool { return self > rhs; }
+    #[intrinsic("rok.le.u16")]
     fn le(self, rhs: u16) -> bool { return self <= rhs; }
+    #[intrinsic("rok.ge.u16")]
     fn ge(self, rhs: u16) -> bool { return self >= rhs; }
 }
 
 impl Eq for u16 {}
+
+impl Hash for u16 {
+    fn hash(self) -> u64 { return self as u64; }
+}
 
 impl Ord for u16 {
     fn cmp(self, other: u16) -> i32 {
@@ -590,72 +740,93 @@ impl Ord for u16 {
 
 impl Add for u32 {
     type Output = u32;
+    #[intrinsic("rok.add.u32")]
     fn add(self, rhs: u32) -> u32 { return self + rhs; }
 }
 
 impl Sub for u32 {
     type Output = u32;
+    #[intrinsic("rok.sub.u32")]
     fn sub(self, rhs: u32) -> u32 { return self - rhs; }
 }
 
 impl Mul for u32 {
     type Output = u32;
+    #[intrinsic("rok.mul.u32")]
     fn mul(self, rhs: u32) -> u32 { return self * rhs; }
 }
 
 impl Div for u32 {
     type Output = u32;
+    #[intrinsic("rok.div.u32")]
     fn div(self, rhs: u32) -> u32 { return self / rhs; }
 }
 
 impl Rem for u32 {
     type Output = u32;
+    #[intrinsic("rok.rem.u32")]
     fn rem(self, rhs: u32) -> u32 { return self % rhs; }
 }
 
 impl BitAnd for u32 {
     type Output = u32;
+    #[intrinsic("rok.and.u32")]
     fn bitand(self, rhs: u32) -> u32 { return self & rhs; }
 }
 
 impl BitOr for u32 {
     type Output = u32;
+    #[intrinsic("rok.or.u32")]
     fn bitor(self, rhs: u32) -> u32 { return self | rhs; }
 }
 
 impl BitXor for u32 {
     type Output = u32;
+    #[intrinsic("rok.xor.u32")]
     fn bitxor(self, rhs: u32) -> u32 { return self ^ rhs; }
 }
 
 impl Shl for u32 {
     type Output = u32;
+    #[intrinsic("rok.shl.u32")]
     fn shl(self, rhs: u32) -> u32 { return self << rhs; }
 }
 
 impl Shr for u32 {
     type Output = u32;
+    #[intrinsic("rok.shr.u32")]
     fn shr(self, rhs: u32) -> u32 { return self >> rhs; }
 }
 
 impl BitNot for u32 {
     type Output = u32;
+    #[intrinsic("rok.not.u32")]
     fn bitnot(self) -> u32 { return ~self; }
 }
 
 impl PartialEq for u32 {
+    #[intrinsic("rok.eq.u32")]
     fn eq(self, rhs: u32) -> bool { return self == rhs; }
+    #[intrinsic("rok.ne.u32")]
     fn ne(self, rhs: u32) -> bool { return self != rhs; }
 }
 
 impl PartialOrd for u32 {
+    #[intrinsic("rok.lt.u32")]
     fn lt(self, rhs: u32) -> bool { return self < rhs; }
+    #[intrinsic("rok.gt.u32")]
     fn gt(self, rhs: u32) -> bool { return self > rhs; }
+    #[intrinsic("rok.le.u32")]
     fn le(self, rhs: u32) -> bool { return self <= rhs; }
+    #[intrinsic("rok.ge.u32")]
     fn ge(self, rhs: u32) -> bool { return self >= rhs; }
 }
 
 impl Eq for u32 {}
+
+impl Hash for u32 {
+    fn hash(self) -> u64 { return self as u64; }
+}
 
 impl Ord for u32 {
     fn cmp(self, other: u32) -> i32 {
@@ -669,72 +840,93 @@ impl Ord for u32 {
 
 impl Add for u64 {
     type Output = u64;
+    #[intrinsic("rok.add.u64")]
     fn add(self, rhs: u64) -> u64 { return self + rhs; }
 }
 
 impl Sub for u64 {
     type Output = u64;
+    #[intrinsic("rok.sub.u64")]
     fn sub(self, rhs: u64) -> u64 { return self - rhs; }
 }
 
 impl Mul for u64 {
     type Output = u64;
+    #[intrinsic("rok.mul.u64")]
     fn mul(self, rhs: u64) -> u64 { return self * rhs; }
 }
 
 impl Div for u64 {
     type Output = u64;
+    #[intrinsic("rok.div.u64")]
     fn div(self, rhs: u64) -> u64 { return self / rhs; }
 }
 
 impl Rem for u64 {
     type Output = u64;
+    #[intrinsic("rok.rem.u64")]
     fn rem(self, rhs: u64) -> u64 { return self % rhs; }
 }
 
 impl BitAnd for u64 {
     type Output = u64;
+    #[intrinsic("rok.and.u64")]
     fn bitand(self, rhs: u64) -> u64 { return self & rhs; }
 }
 
 impl BitOr for u64 {
     type Output = u64;
+    #[intrinsic("rok.or.u64")]
     fn bitor(self, rhs: u64) -> u64 { return self | rhs; }
 }
 
 impl BitXor for u64 {
     type Output = u64;
+    #[intrinsic("rok.xor.u64")]
     fn bitxor(self, rhs: u64) -> u64 { return self ^ rhs; }
 }
 
 impl Shl for u64 {
     type Output = u64;
+    #[intrinsic("rok.shl.u64")]
     fn shl(self, rhs: u64) -> u64 { return self << rhs; }
 }
 
 impl Shr for u64 {
     type Output = u64;
+    #[intrinsic("rok.shr.u64")]
     fn shr(self, rhs: u64) -> u64 { return self >> rhs; }
 }
 
 impl BitNot for u64 {
     type Output = u64;
+    #[intrinsic("rok.not.u64")]
     fn bitnot(self) -> u64 { return ~self; }
 }
 
 impl PartialEq for u64 {
+    #[intrinsic("rok.eq.u64")]
     fn eq(self, rhs: u64) -> bool { return self == rhs; }
+    #[intrinsic("rok.ne.u64")]
     fn ne(self, rhs: u64) -> bool { return self != rhs; }
 }
 
 impl PartialOrd for u64 {
+    #[intrinsic("rok.lt.u64")]
     fn lt(self, rhs: u64) -> bool { return self < rhs; }
+    #[intrinsic("rok.gt.u64")]
     fn gt(self, rhs: u64) -> bool { return self > rhs; }
+    #[intrinsic("rok.le.u64")]
     fn le(self, rhs: u64) -> bool { return self <= rhs; }
+    #[intrinsic("rok.ge.u64")]
     fn ge(self, rhs: u64) -> bool { return self >= rhs; }
 }
 
 impl Eq for u64 {}
+
+impl Hash for u64 {
+    fn hash(self) -> u64 { return self as u64; }
+}
 
 impl Ord for u64 {
     fn cmp(self, other: u64) -> i32 {
@@ -748,72 +940,93 @@ impl Ord for u64 {
 
 impl Add for usize {
     type Output = usize;
+    #[intrinsic("rok.add.usize")]
     fn add(self, rhs: usize) -> usize { return self + rhs; }
 }
 
 impl Sub for usize {
     type Output = usize;
+    #[intrinsic("rok.sub.usize")]
     fn sub(self, rhs: usize) -> usize { return self - rhs; }
 }
 
 impl Mul for usize {
     type Output = usize;
+    #[intrinsic("rok.mul.usize")]
     fn mul(self, rhs: usize) -> usize { return self * rhs; }
 }
 
 impl Div for usize {
     type Output = usize;
+    #[intrinsic("rok.div.usize")]
     fn div(self, rhs: usize) -> usize { return self / rhs; }
 }
 
 impl Rem for usize {
     type Output = usize;
+    #[intrinsic("rok.rem.usize")]
     fn rem(self, rhs: usize) -> usize { return self % rhs; }
 }
 
 impl BitAnd for usize {
     type Output = usize;
+    #[intrinsic("rok.and.usize")]
     fn bitand(self, rhs: usize) -> usize { return self & rhs; }
 }
 
 impl BitOr for usize {
     type Output = usize;
+    #[intrinsic("rok.or.usize")]
     fn bitor(self, rhs: usize) -> usize { return self | rhs; }
 }
 
 impl BitXor for usize {
     type Output = usize;
+    #[intrinsic("rok.xor.usize")]
     fn bitxor(self, rhs: usize) -> usize { return self ^ rhs; }
 }
 
 impl Shl for usize {
     type Output = usize;
+    #[intrinsic("rok.shl.usize")]
     fn shl(self, rhs: usize) -> usize { return self << rhs; }
 }
 
 impl Shr for usize {
     type Output = usize;
+    #[intrinsic("rok.shr.usize")]
     fn shr(self, rhs: usize) -> usize { return self >> rhs; }
 }
 
 impl BitNot for usize {
     type Output = usize;
+    #[intrinsic("rok.not.usize")]
     fn bitnot(self) -> usize { return ~self; }
 }
 
 impl PartialEq for usize {
+    #[intrinsic("rok.eq.usize")]
     fn eq(self, rhs: usize) -> bool { return self == rhs; }
+    #[intrinsic("rok.ne.usize")]
     fn ne(self, rhs: usize) -> bool { return self != rhs; }
 }
 
 impl PartialOrd for usize {
+    #[intrinsic("rok.lt.usize")]
     fn lt(self, rhs: usize) -> bool { return self < rhs; }
+    #[intrinsic("rok.gt.usize")]
     fn gt(self, rhs: usize) -> bool { return self > rhs; }
+    #[intrinsic("rok.le.usize")]
     fn le(self, rhs: usize) -> bool { return self <= rhs; }
+    #[intrinsic("rok.ge.usize")]
     fn ge(self, rhs: usize) -> bool { return self >= rhs; }
 }
 
 impl Eq for usize {}
+
+impl Hash for usize {
+    fn hash(self) -> u64 { return self as u64; }
+}
 
 impl Ord for usize {
     fn cmp(self, other: usize) -> i32 {
@@ -827,43 +1040,55 @@ impl Ord for usize {
 
 impl Add for f32 {
     type Output = f32;
+    #[intrinsic("rok.add.f32")]
     fn add(self, rhs: f32) -> f32 { return self + rhs; }
 }
 
 impl Sub for f32 {
     type Output = f32;
+    #[intrinsic("rok.sub.f32")]
     fn sub(self, rhs: f32) -> f32 { return self - rhs; }
 }
 
 impl Mul for f32 {
     type Output = f32;
+    #[intrinsic("rok.mul.f32")]
     fn mul(self, rhs: f32) -> f32 { return self * rhs; }
 }
 
 impl Div for f32 {
     type Output = f32;
+    #[intrinsic("rok.div.f32")]
     fn div(self, rhs: f32) -> f32 { return self / rhs; }
 }
 
 impl Rem for f32 {
     type Output = f32;
+    #[intrinsic("rok.rem.f32")]
     fn rem(self, rhs: f32) -> f32 { return self % rhs; }
 }
 
 impl Neg for f32 {
     type Output = f32;
+    #[intrinsic("rok.neg.f32")]
     fn neg(self) -> f32 { return -self; }
 }
 
 impl PartialEq for f32 {
+    #[intrinsic("rok.eq.f32")]
     fn eq(self, rhs: f32) -> bool { return self == rhs; }
+    #[intrinsic("rok.ne.f32")]
     fn ne(self, rhs: f32) -> bool { return self != rhs; }
 }
 
 impl PartialOrd for f32 {
+    #[intrinsic("rok.lt.f32")]
     fn lt(self, rhs: f32) -> bool { return self < rhs; }
+    #[intrinsic("rok.gt.f32")]
     fn gt(self, rhs: f32) -> bool { return self > rhs; }
+    #[intrinsic("rok.le.f32")]
     fn le(self, rhs: f32) -> bool { return self <= rhs; }
+    #[intrinsic("rok.ge.f32")]
     fn ge(self, rhs: f32) -> bool { return self >= rhs; }
 }
 
@@ -871,43 +1096,55 @@ impl PartialOrd for f32 {
 
 impl Add for f64 {
     type Output = f64;
+    #[intrinsic("rok.add.f64")]
     fn add(self, rhs: f64) -> f64 { return self + rhs; }
 }
 
 impl Sub for f64 {
     type Output = f64;
+    #[intrinsic("rok.sub.f64")]
     fn sub(self, rhs: f64) -> f64 { return self - rhs; }
 }
 
 impl Mul for f64 {
     type Output = f64;
+    #[intrinsic("rok.mul.f64")]
     fn mul(self, rhs: f64) -> f64 { return self * rhs; }
 }
 
 impl Div for f64 {
     type Output = f64;
+    #[intrinsic("rok.div.f64")]
     fn div(self, rhs: f64) -> f64 { return self / rhs; }
 }
 
 impl Rem for f64 {
     type Output = f64;
+    #[intrinsic("rok.rem.f64")]
     fn rem(self, rhs: f64) -> f64 { return self % rhs; }
 }
 
 impl Neg for f64 {
     type Output = f64;
+    #[intrinsic("rok.neg.f64")]
     fn neg(self) -> f64 { return -self; }
 }
 
 impl PartialEq for f64 {
+    #[intrinsic("rok.eq.f64")]
     fn eq(self, rhs: f64) -> bool { return self == rhs; }
+    #[intrinsic("rok.ne.f64")]
     fn ne(self, rhs: f64) -> bool { return self != rhs; }
 }
 
 impl PartialOrd for f64 {
+    #[intrinsic("rok.lt.f64")]
     fn lt(self, rhs: f64) -> bool { return self < rhs; }
+    #[intrinsic("rok.gt.f64")]
     fn gt(self, rhs: f64) -> bool { return self > rhs; }
+    #[intrinsic("rok.le.f64")]
     fn le(self, rhs: f64) -> bool { return self <= rhs; }
+    #[intrinsic("rok.ge.f64")]
     fn ge(self, rhs: f64) -> bool { return self >= rhs; }
 }
 
@@ -915,36 +1152,52 @@ impl PartialOrd for f64 {
 
 impl BitAnd for bool {
     type Output = bool;
+    #[intrinsic("rok.and.bool")]
     fn bitand(self, rhs: bool) -> bool { return self & rhs; }
 }
 
 impl BitOr for bool {
     type Output = bool;
+    #[intrinsic("rok.or.bool")]
     fn bitor(self, rhs: bool) -> bool { return self | rhs; }
 }
 
 impl BitXor for bool {
     type Output = bool;
+    #[intrinsic("rok.xor.bool")]
     fn bitxor(self, rhs: bool) -> bool { return self ^ rhs; }
 }
 
 impl Not for bool {
     type Output = bool;
+    #[intrinsic("rok.not.bool")]
     fn not(self) -> bool { return !self; }
 }
 
 impl PartialEq for bool {
+    #[intrinsic("rok.eq.bool")]
     fn eq(self, rhs: bool) -> bool { return self == rhs; }
+    #[intrinsic("rok.ne.bool")]
     fn ne(self, rhs: bool) -> bool { return self != rhs; }
 }
 
 impl Eq for bool {}
 
+impl Hash for bool {
+    fn hash(self) -> u64 { return if self { 1u64 } else { 0u64 }; }
+}
+
 // char
 
 impl PartialEq for char {
+    #[intrinsic("rok.eq.char")]
     fn eq(self, rhs: char) -> bool { return self == rhs; }
+    #[intrinsic("rok.ne.char")]
     fn ne(self, rhs: char) -> bool { return self != rhs; }
 }
 
 impl Eq for char {}
+
+impl Hash for char {
+    fn hash(self) -> u64 { return self as u64; }
+}

@@ -108,7 +108,7 @@ pub(super) fn erase_unbound_errors(ty: &mut HirTy) {
             }
             erase_unbound_errors(ok);
         }
-        HirTy::Fn(args, ret) | HirTy::Closure { args, ret, .. } => {
+        HirTy::Fn(args, ret, _) | HirTy::Closure { args, ret, .. } => {
             args.iter_mut().for_each(erase_unbound_errors);
             erase_unbound_errors(ret);
         }
@@ -467,7 +467,7 @@ fn err_fits(ctx: &LowerCtx<'_>, from: &HirTy, to: &HirTy) -> bool {
 /// known function (a named fn or a capture-free closure) can be adapted:
 /// a plain `fn` value has no room for the callee a thunk would carry.
 pub(super) fn adapt_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -> HirExpr {
-    let (HirTy::Fn(args, sret), HirTy::Fn(vargs, vret), HirExprKind::FnRef(target)) =
+    let (HirTy::Fn(args, sret, _), HirTy::Fn(vargs, vret, _), HirExprKind::FnRef(target)) =
         (slot, &value.ty, &value.kind)
     else {
         return value;
@@ -577,7 +577,7 @@ pub(super) fn rethrows_value(
         }
     }
     let args: Vec<HirExpr> = match ctx.current_expected() {
-        Some(HirTy::Fn(ps, _)) if ps.len() == def.params.len() => {
+        Some(HirTy::Fn(ps, _, _)) if ps.len() == def.params.len() => {
             ps.iter().map(|t| undef(t, span)).collect()
         }
         _ => Vec::new(),
@@ -593,7 +593,7 @@ pub(super) fn rethrows_value(
         .unwrap_or_default();
     Some(HirExpr {
         kind: HirExprKind::FnRef(id),
-        ty: HirTy::Fn(params, Box::new(ret)),
+        ty: HirTy::Fn(params, Box::new(ret), ctx.env.names.all_auto()),
         span,
     })
 }

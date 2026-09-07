@@ -640,8 +640,13 @@ pub(super) fn literal_to_const(
         AstLit::CChar(s) if *sp == PrimTy::CChar => {
             parse_char_literal(s).map(|c| (ConstVal::Char(c), PrimTy::CChar))
         }
-        // String / float literal patterns would need value equality the
-        // backend doesn't lower yet.
+        // String patterns compare contents (codegen calls `rok_str_cmp`).
+        AstLit::Str(s) if *sp == PrimTy::Str => Some((
+            ConstVal::Str(super::expr::decode_str_escapes(s)),
+            PrimTy::Str,
+        )),
+        AstLit::RawStr(s) if *sp == PrimTy::Str => Some((ConstVal::Str(s.clone()), PrimTy::Str)),
+        // Float literal patterns would need a decision on NaN / -0.0.
         _ => None,
     }
 }

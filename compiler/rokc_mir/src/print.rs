@@ -98,6 +98,20 @@ fn print_stmt(out: &mut String, s: &Statement) {
             print_operand(out, value);
             out.push(';');
         }
+        Statement::StorageDead(l) => {
+            let _ = write!(out, "dead _{};", l.0);
+        }
+        Statement::BufStore {
+            buf, index, value, ..
+        } => {
+            out.push_str("buf_store ");
+            print_operand(out, buf);
+            out.push('[');
+            print_operand(out, index);
+            out.push_str("] = ");
+            print_operand(out, value);
+            out.push(';');
+        }
         Statement::StaticStore { name, value, .. } => {
             let _ = write!(out, "static {name} = ");
             print_operand(out, value);
@@ -235,6 +249,21 @@ fn print_rvalue(out: &mut String, r: &RValue) {
         RValue::HeapLoad { ptr, ty } => {
             let _ = write!(out, "heap_load<{}> ", ty_str(ty));
             print_operand(out, ptr);
+        }
+        RValue::BufAlloc { elem_ty, len } => {
+            let _ = write!(out, "buf_alloc<{}> ", ty_str(elem_ty));
+            print_operand(out, len);
+        }
+        RValue::BufLoad {
+            buf,
+            index,
+            elem_ty,
+        } => {
+            let _ = write!(out, "buf_load<{}> ", ty_str(elem_ty));
+            print_operand(out, buf);
+            out.push('[');
+            print_operand(out, index);
+            out.push(']');
         }
     }
 }

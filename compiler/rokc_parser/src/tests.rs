@@ -447,7 +447,7 @@ fn rethrows_desugars_to_error_generics() {
         [rokc_ast::GenericParam::Type { name, .. }] if name == "#E0"));
     assert!(matches!(&f.throws, rokc_ast::ThrowsKind::Typed(t) if t.len() == 1));
     let ty = f.params[0].ty.as_ref().unwrap();
-    assert!(matches!(&ty.kind, rokc_ast::TyKind::Fn(_, ret)
+    assert!(matches!(&ty.kind, rokc_ast::TyKind::Fn(_, ret, _)
         if matches!(ret.kind, rokc_ast::TyKind::Throws { .. })));
 }
 
@@ -647,8 +647,8 @@ fn unsafe_raw_strings_and_unsupported_forms() {
     assert!(matches!(&init.kind, ExprKind::Literal(Literal::RawStr(s)) if s == "a\"b"));
     assert_rejected("async unsafe fn f() { }", "expected `fn`");
     assert_rejected(
-        r#"fn f() { let s = f"x = {x}"; }"#,
-        "f-string literals (spec 1.7.3) are not yet supported",
+        r#"fn f() { let s = f"x = {x :e}"; }"#,
+        "unsupported type `e`",
     );
     assert_rejected(
         "fn f() { using x = g() { x } }",

@@ -1,0 +1,35 @@
+// expect-exit: 0
+// expect-stdout:
+// 3
+// 3
+// 3
+// 8
+// 13
+
+// Static methods (no `self`) of generic impls, called by path: `Self`
+// comes from the expected type or the type parameter, and binds the
+// impl's parameters (`Box<i32>` → `T = i32`).
+
+trait Zero { fn zero() -> Self; }
+trait Make { fn make(n: i32) -> Self; }
+struct Box<T> { v: T; }
+
+impl Zero for i32 { fn zero() -> i32 { return 3; } }
+impl<T: Zero> Zero for Box<T> { fn zero() -> Box<T> { return Box { v: T::zero() }; } }
+impl<T> Make for Box<T> { fn make(n: i32) -> Box<T> { return Box { v: T::zero() }; } }
+
+fn zero_of<T: Zero>() -> T { return T::zero(); }
+
+fn main() -> i32 {
+    let a: Box<i32> = Zero::zero();
+    rok_print_i32(a.v);
+    let b: Box<i32> = Box::zero();
+    rok_print_i32(b.v);
+    let c: Box<i32> = zero_of();
+    rok_print_i32(c.v);
+    let d: Box<i32> = Box::make(1);
+    rok_print_i32(d.v + 5);
+    let e: Box<Box<i32>> = Zero::zero();
+    rok_print_i32(e.v.v + 10);
+    return 0;
+}

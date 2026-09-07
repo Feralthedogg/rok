@@ -1,0 +1,11 @@
+// expect-error: a `fn` value must already carry the bound
+// A `fn` value without `+ Send` in its type cannot fill a `+ Send` slot.
+struct Tok { v: i32; }
+impl !Send for Tok {}
+fn need_send<T: Send>(x: T) -> i32 { return 1; }
+fn spawn<T: Send>(f: fn() -> T + Send) -> T { return f(); }
+fn forty() -> i32 { return 40; }
+fn main() -> i32 {
+    let f: fn() -> i32 = forty;
+    return spawn(f);
+}

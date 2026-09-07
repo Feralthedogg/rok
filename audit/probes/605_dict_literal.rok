@@ -1,11 +1,12 @@
 // spec: 006.05-dict-literal
-// probe: negative-must-fail-parse
-// expect-exit: 0  (`#[literal]` 핸들러 시스템 + stdlib Dict 미구현 →
-//                  지금은 parse 단계에서 거부)
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 2
 
-// spec 6.5: `{a: 1, b: 2}` dict literal — `#[literal]` 핸들러로 stdlib Dict 생성.
+// spec 6.5 / 6.5.6: `{k: v, ..}` is a dict literal — a stdlib `Dict`.
 fn main() -> i32 {
     let d = {"a": 1, "b": 2};
-    rok_print_str("got_dict");
+    rok_print_i32(d["b"]);
     return 0;
 }

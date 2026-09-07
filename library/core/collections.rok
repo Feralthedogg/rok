@@ -1,0 +1,10 @@
+// rok::core::collections — List / Dict / Set (stdlib spec 2.9).
+//
+// Each collection is a small handle struct over GC buffers (`raw`):
+// copying the handle shares the collection, so the mutating methods
+// take `self` (spec writes `ref self`; the handle makes that moot).
+
+pub mod raw;
+pub mod list;
+pub mod dict;
+pub mod set;

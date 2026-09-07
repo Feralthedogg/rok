@@ -1,0 +1,17 @@
+// rok::core::panic — `panic(msg)` / `unreachable()` (stdlib spec 2.14.5):
+// print the message to stderr and exit 101. They never return: `-> !`
+// fits any slot.
+
+extern "C" {
+    fn rok_panic_str(msg: str) -> !;
+}
+
+/// Abort with `msg`.
+pub fn panic(msg: str) -> ! {
+    rok_panic_str(msg);
+}
+
+/// Abort: code the program believed it could never reach ran.
+pub fn unreachable() -> ! {
+    rok_panic_str("internal error: entered unreachable code");
+}

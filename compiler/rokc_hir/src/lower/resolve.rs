@@ -161,6 +161,10 @@ pub(super) fn resolve_name(
     }
 }
 
+/// The compiler-known GC buffer type (`HirTy::GcBuf`), declared in core
+/// so the name resolves.
+pub const GC_BUF: &str = "rok::core::collections::raw::GcBuf";
+
 /// Module path the driver mounts `library/core` under.
 pub const CORE_PREFIX: &str = "rok::core";
 
@@ -247,8 +251,8 @@ pub(super) fn substitute_aliases(ty: &mut HirTy, aliases: &HashMap<String, HirTy
                 substitute_aliases(p, aliases);
             }
         }
-        HirTy::Array(elem, _) => substitute_aliases(elem, aliases),
-        HirTy::Fn(args, ret) | HirTy::Closure { args, ret, .. } => {
+        HirTy::Array(elem, _) | HirTy::GcBuf(elem) => substitute_aliases(elem, aliases),
+        HirTy::Fn(args, ret, _) | HirTy::Closure { args, ret, .. } => {
             for a in args {
                 substitute_aliases(a, aliases);
             }
@@ -309,6 +313,9 @@ pub(super) fn resolve_ty_with_structs(
                 ));
                 return HirTy::Any;
             }
+            if let (GC_BUF, [elem]) = (full.as_str(), generics) {
+                return HirTy::GcBuf(Box::new(rec(elem)));
+            }
             if !generics.is_empty() {
                 let args: Vec<HirTy> = generics.iter().map(rec).collect();
                 let mangled = mangle_inst(&full, &args);
@@ -351,7 +358,11 @@ pub(super) fn resolve_ty_with_structs(
         AstTyKind::Sum(parts) => HirTy::Sum(parts.iter().map(rec).collect()),
         AstTyKind::Tuple(parts) if parts.is_empty() => HirTy::Unit,
         AstTyKind::Tuple(parts) => HirTy::Tuple(parts.iter().map(rec).collect()),
-        AstTyKind::Fn(args, ret) => HirTy::Fn(args.iter().map(rec).collect(), Box::new(rec(ret))),
+        AstTyKind::Fn(args, ret, b) => HirTy::Fn(
+            args.iter().map(rec).collect(),
+            Box::new(rec(ret)),
+            sc.names.fn_bounds(b, sc.module),
+        ),
         AstTyKind::AnyTrait(bounds) => {
             let mut keys: Vec<String> = Vec::with_capacity(bounds.len());
             for b in bounds {
@@ -472,6 +483,8 @@ pub(super) fn mangle_inst(base: &str, args: &[HirTy]) -> String {
 
 pub(super) fn ty_mangle(ty: &HirTy) -> String {
     match ty {
+        HirTy::GcBuf(t) => format!("GcBuf{}", ty_mangle(t)),
+        HirTy::Never => "Never".to_owned(),
         HirTy::Struct(id) => format!("Struct{}", id.0),
         HirTy::Enum(id) => format!("Enum{}", id.0),
         HirTy::Prim(p) => p.name().to_owned(),
@@ -488,7 +501,7 @@ pub(super) fn ty_mangle(ty: &HirTy) -> String {
             let inner: Vec<String> = variants.iter().map(ty_mangle).collect();
             format!("Sum{}of{}", variants.len(), inner.join("x"))
         }
-        HirTy::Fn(params, ret) => {
+        HirTy::Fn(params, ret, _) => {
             let inner: Vec<String> = params.iter().map(ty_mangle).collect();
             format!(
                 "Fn{}of{}_to_{}",

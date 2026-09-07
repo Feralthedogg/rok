@@ -44,6 +44,12 @@ pub(super) fn unify_param_ty_with(
             }
         }
         (rokc_ast::TyKind::Array(elem, _), HirTy::Array(arg_elem, _)) => rec(elem, arg_elem),
+        // `GcBuf<T>` against `GcBuf<i32>`.
+        (rokc_ast::TyKind::Path(p), HirTy::GcBuf(e)) => {
+            if let Some(g) = p.segments.last().and_then(|s| s.generics.first()) {
+                rec(g, e);
+            }
+        }
         (rokc_ast::TyKind::Tuple(parts), HirTy::Tuple(arg_parts))
         | (rokc_ast::TyKind::Sum(parts), HirTy::Sum(arg_parts)) => {
             for (p, a) in parts.iter().zip(arg_parts.iter()) {
@@ -51,8 +57,8 @@ pub(super) fn unify_param_ty_with(
             }
         }
         (
-            rokc_ast::TyKind::Fn(args, ret),
-            HirTy::Fn(arg_args, arg_ret)
+            rokc_ast::TyKind::Fn(args, ret, _),
+            HirTy::Fn(arg_args, arg_ret, _)
             | HirTy::Closure {
                 args: arg_args,
                 ret: arg_ret,
@@ -131,7 +137,7 @@ pub(super) fn ty_size(ty: &HirTy) -> usize {
     1 + match ty {
         HirTy::Sum(p) | HirTy::Tuple(p) => p.iter().map(ty_size).sum(),
         HirTy::Array(e, _) => ty_size(e),
-        HirTy::Fn(a, r) => a.iter().map(ty_size).sum::<usize>() + ty_size(r),
+        HirTy::Fn(a, r, _) => a.iter().map(ty_size).sum::<usize>() + ty_size(r),
         HirTy::Closure { args, ret, env } => {
             args.iter().map(ty_size).sum::<usize>() + ty_size(ret) + ty_size(env)
         }
@@ -150,6 +156,39 @@ pub(super) fn monomorphize(
     fn_def: &FnDef,
     self_ty: Option<&Ty>,
     args: &[HirExpr],
+    span: rokc_diagnostic::Span,
+) -> Option<(FunctionId, HirTy)> {
+    monomorphize_on(ctx, fn_def, self_ty, None, args, span)
+}
+
+/// Bind the impl parameters of `self_ty` (`Box<T>`) from the known
+/// `Self` type `hint` (`Box<i32>` → `T = i32`).
+pub(super) fn bind_self(
+    ctx: &LowerCtx<'_>,
+    fn_def: &FnDef,
+    self_ty: &Ty,
+    hint: &HirTy,
+    subst: &mut HashMap<String, HirTy>,
+) {
+    let names: std::collections::HashSet<String> = fn_def
+        .generics
+        .params
+        .iter()
+        .filter_map(|gp| match gp {
+            rokc_ast::GenericParam::Type { name, .. } => Some(name.clone()),
+            rokc_ast::GenericParam::Const { .. } => None,
+        })
+        .collect();
+    unify_param_ty_with(self_ty, hint, &names, subst, ctx);
+}
+
+/// `monomorphize` with `Self` known up front (see `bind_self`).
+pub(super) fn monomorphize_on(
+    ctx: &LowerCtx<'_>,
+    fn_def: &FnDef,
+    self_ty: Option<&Ty>,
+    self_hint: Option<&HirTy>,
+    args: &[HirExpr],
     _span: rokc_diagnostic::Span,
 ) -> Option<(FunctionId, HirTy)> {
     let fn_module = module_of(&fn_def.name);
@@ -159,6 +198,9 @@ pub(super) fn monomorphize(
     // binding wins; a conflicting later argument is reported by the
     // argument type check at the call site.
     let mut subst: HashMap<String, HirTy> = HashMap::new();
+    if let (Some(t), Some(hint)) = (self_ty, self_hint) {
+        bind_self(ctx, fn_def, t, hint, &mut subst);
+    }
     for (i, arg) in args.iter().enumerate() {
         bind_from_arg(ctx, fn_def, self_ty, i, &arg.ty, &mut subst);
     }
@@ -262,19 +304,20 @@ pub(super) fn monomorphize(
 
     // Check generic-bound satisfaction: for each `T: Bound` declared on
     // the fn, verify that the inferred concrete type for `T` carries an
-    // `impl Bound for T` block.
+    // `impl Bound for T` block. `where` predicates count the same.
+    let mut goals: Vec<(HirTy, &Vec<rokc_ast::Ty>)> = Vec::new();
     for gp in &fn_def.generics.params {
-        let rokc_ast::GenericParam::Type {
-            name,
-            bounds,
-            default: _,
-        } = gp
-        else {
-            continue;
-        };
-        let Some(concrete) = subst.get(name) else {
-            continue;
-        };
+        if let rokc_ast::GenericParam::Type { name, bounds, .. } = gp {
+            if let Some(concrete) = subst.get(name) {
+                goals.push((concrete.clone(), bounds));
+            }
+        }
+    }
+    for w in &fn_def.where_clause {
+        goals.push((resolve_in_mono(ctx, fn_def, &subst, None, &w.ty), &w.bounds));
+    }
+    for (concrete, bounds) in goals {
+        let concrete = &concrete;
         if method_target_for(concrete).is_none() {
             continue;
         }
@@ -333,7 +376,11 @@ pub(super) fn monomorphize(
     ctx.env.sink.mono_cache.borrow_mut().insert(key, new_id);
     // Pre-resolve the return type from AST + subst so a recursive
     // `sum_down(n - 1)` inside the body sees the correct result type.
-    let self_hir = self_ty.map(|t| resolve_in_mono(ctx, fn_def, &subst, None, t));
+    // A known `Self` (the receiver's type) is used as is: the template's
+    // own module may not see the impl's type (a trait default method).
+    let self_hir = self_hint
+        .cloned()
+        .or_else(|| self_ty.map(|t| resolve_in_mono(ctx, fn_def, &subst, None, t)));
     let preview_ret_ty =
         resolve_in_mono(ctx, fn_def, &subst, self_hir.clone(), &sig_ret_ast(fn_def));
     ctx.env.sink.mono_sigs.borrow_mut().insert(
@@ -473,6 +520,9 @@ pub(super) fn resolve_ast_with_subst(
             if !generics.is_empty() {
                 let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
                 if let Some(full) = sc.names.canon(&segs, sc.module, &[]) {
+                    if let (GC_BUF, [elem]) = (full.as_str(), generics) {
+                        return HirTy::GcBuf(Box::new(rec(elem)));
+                    }
                     let args: Vec<HirTy> = generics.iter().map(rec).collect();
                     let mangled = mangle_inst(&full, &args);
                     if let Some(id) = struct_table.get(&mangled) {
@@ -498,9 +548,11 @@ pub(super) fn resolve_ast_with_subst(
                 other => other,
             }
         }
-        rokc_ast::TyKind::Fn(args, ret) => {
-            HirTy::Fn(args.iter().map(rec).collect(), Box::new(rec(ret)))
-        }
+        rokc_ast::TyKind::Fn(args, ret, b) => HirTy::Fn(
+            args.iter().map(rec).collect(),
+            Box::new(rec(ret)),
+            sc.names.fn_bounds(b, sc.module),
+        ),
         rokc_ast::TyKind::Throws { ok, err } => crate::ty::throws_ty(rec(ok), rec(err)),
         _ => {
             let mut t = resolve_ty_with_structs(ty, struct_table, enum_table, sc);
@@ -560,6 +612,9 @@ fn declares_type_params(item: &Item) -> bool {
         Item::Impl(i) => !i.generics.params.is_empty(),
         Item::Struct(s) => !s.generics.params.is_empty(),
         Item::Enum(e) => !e.generics.params.is_empty(),
+        // Method signatures name `Self` / associated types (`Map<Self,
+        // Item, U>`): never a concrete instantiation.
+        Item::Trait(_) => true,
         _ => false,
     }
 }
@@ -755,9 +810,127 @@ pub(super) fn instantiate_generic_structs(
                 });
             });
         }
+        // Generic structs an instance's fields name under its own
+        // arguments (`Dict<i32, i32>` → `DictSlots<i32, i32>`).
+        let mut i = 0;
+        while i < struct_defs.len() {
+            let inst = &struct_defs[i];
+            i += 1;
+            let base = inst.name.split("__").next().unwrap_or_default().to_owned();
+            let Some(def) = generic_structs.get(&base).copied() else {
+                continue;
+            };
+            if inst.generic_args.is_empty() {
+                continue;
+            }
+            let subst = generic_subst(&def.generics, &inst.generic_args);
+            let module = module_of(&base);
+            let sc = Scope {
+                names,
+                module: &module,
+            };
+            let mut nested = Vec::new();
+            for f in struct_field_asts(def) {
+                generic_paths(f, &mut nested);
+            }
+            for t in nested {
+                let rokc_ast::TyKind::Path(p) = &t.kind else {
+                    continue;
+                };
+                let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
+                let Some(full) = names.canon(&segs, &module, &[]) else {
+                    continue;
+                };
+                let Some(inner) = generic_structs.get(&full).copied() else {
+                    continue;
+                };
+                let generics = p.segments.last().map_or(&[][..], |s| s.generics.as_slice());
+                let args: Vec<HirTy> = generics
+                    .iter()
+                    .map(|g| resolve_ast_with_subst(g, struct_table, enum_table, &subst, sc))
+                    .collect();
+                let mut leftover = Vec::new();
+                args.iter()
+                    .for_each(|a| collect_unknown_paths(a, &mut leftover));
+                let mangled = mangle_inst(&full, &args);
+                if !leftover.is_empty() || struct_table.contains_key(&mangled) {
+                    continue;
+                }
+                let id = StructId(u32::try_from(struct_defs.len()).expect("StructId overflow"));
+                struct_table.insert(mangled.clone(), id);
+                let inner_subst = generic_subst(&inner.generics, &args);
+                let fields = generic_struct_fields(inner, &|t| {
+                    resolve_ast_with_subst(t, struct_table, enum_table, &inner_subst, sc)
+                });
+                struct_defs.push(HirStructDef {
+                    id,
+                    def_id: None,
+                    name: mangled,
+                    fields,
+                    span: inner.span,
+                    generic_args: args,
+                    union_kind: None,
+                });
+            }
+        }
         if struct_table.len() == before {
             break;
         }
+    }
+    // Re-resolve every instance's fields now that the instances they
+    // name exist.
+    for inst in struct_defs.iter_mut() {
+        let base = inst.name.split("__").next().unwrap_or_default().to_owned();
+        let Some(def) = generic_structs.get(&base).copied() else {
+            continue;
+        };
+        if inst.generic_args.is_empty() {
+            continue;
+        }
+        let subst = generic_subst(&def.generics, &inst.generic_args);
+        let module = module_of(&base);
+        let sc = Scope {
+            names,
+            module: &module,
+        };
+        let fields = generic_struct_fields(def, &|t| {
+            resolve_ast_with_subst(t, struct_table, enum_table, &subst, sc)
+        });
+        inst.fields = fields;
+    }
+}
+
+/// The AST types of a struct's fields.
+fn struct_field_asts(def: &AstStructDef) -> Vec<&Ty> {
+    match &def.kind {
+        AstStructKind::Named(fs) => fs.iter().map(|f| &f.ty).collect(),
+        AstStructKind::Tuple(fs) => fs.iter().map(|f| &f.ty).collect(),
+        AstStructKind::Unit => Vec::new(),
+    }
+}
+
+/// Every path-with-generic-arguments inside `ty` (itself included).
+fn generic_paths<'t>(ty: &'t Ty, out: &mut Vec<&'t Ty>) {
+    match &ty.kind {
+        rokc_ast::TyKind::Path(p) => {
+            if p.segments.last().is_some_and(|s| !s.generics.is_empty()) {
+                out.push(ty);
+            }
+            for s in &p.segments {
+                for g in &s.generics {
+                    generic_paths(g, out);
+                }
+            }
+        }
+        rokc_ast::TyKind::Sum(ps) | rokc_ast::TyKind::Tuple(ps) => {
+            ps.iter().for_each(|p| generic_paths(p, out));
+        }
+        rokc_ast::TyKind::Array(e, _) => generic_paths(e, out),
+        rokc_ast::TyKind::Fn(args, ret, _) => {
+            args.iter().for_each(|a| generic_paths(a, out));
+            generic_paths(ret, out);
+        }
+        _ => {}
     }
 }
 
@@ -822,6 +995,21 @@ pub(super) fn lower_fn_body(ctx: &mut LowerCtx<'_>, b: &Block, fn_name: &str) ->
 /// The value checks of `lower_fn_body`.
 fn check_fn_body(ctx: &LowerCtx<'_>, mut block: HirBlock, fn_name: &str) -> HirBlock {
     let ret = ctx.fn_ret_ty.clone();
+    let falls_off = || {
+        let name = leaf_name(fn_name);
+        if ret == HirTy::Never {
+            format!(
+                "function `{name}` returns `!` but its body can finish; it must end in a \
+                 call of a `-> !` function or a `loop` without `break`"
+            )
+        } else {
+            format!(
+                "function `{name}` returns `{}` but its body can finish without returning a \
+                 value (missing `return`)",
+                ctx.ty_name(&ret)
+            )
+        }
+    };
     match block.trailing.take() {
         // A unit function discards a trailing value (`fn f() { g() }`).
         Some(t) if ret == HirTy::Unit && t.ty != HirTy::Unit => block.stmts.push(HirStmt::Expr(t)),
@@ -829,15 +1017,7 @@ fn check_fn_body(ctx: &LowerCtx<'_>, mut block: HirBlock, fn_name: &str) -> HirB
         // `fn f() -> i32 { if c { return 1; } }`: a unit-valued tail
         // means some path falls off the end.
         Some(t) if t.ty == HirTy::Unit && !matches!(ret, HirTy::Unknown | HirTy::Unit) => {
-            ctx.emit_error(
-                rokc_diagnostic::ErrorKind::Type,
-                format!(
-                    "function `{}` returns `{}` but its body can finish without \
-                     returning a value (missing `return`)",
-                    leaf_name(fn_name),
-                    ctx.ty_name(&ret)
-                ),
-            );
+            ctx.emit_error(rokc_diagnostic::ErrorKind::Type, falls_off());
             block.trailing = Some(t);
         }
         Some(t) => {
@@ -846,15 +1026,7 @@ fn check_fn_body(ctx: &LowerCtx<'_>, mut block: HirBlock, fn_name: &str) -> HirB
         }
         None => {
             if !matches!(ret, HirTy::Unit | HirTy::Unknown) && !hir_block_diverges(&block) {
-                ctx.emit_error(
-                    rokc_diagnostic::ErrorKind::Type,
-                    format!(
-                        "function `{}` returns `{}` but its body can finish without \
-                         returning a value (missing `return`)",
-                        leaf_name(fn_name),
-                        ctx.ty_name(&ret)
-                    ),
-                );
+                ctx.emit_error(rokc_diagnostic::ErrorKind::Type, falls_off());
             }
         }
     }

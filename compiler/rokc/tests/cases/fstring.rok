@@ -1,0 +1,23 @@
+// expect-exit: 0
+// expect-stdout:
+// hello rok! n=42 {braces} sum=43
+// [   42] [42   ] [  42  ] [00042] [+42] [***rok***] [-0007]
+// 3.14 3.000 ff 0xFF 00000101 0o17 "rok\n" true 한 'x' 2.5
+// p = (1, 2) "nested"|
+
+// f-strings (refs-lang 1.7.3, stdlib 2.10): holes call `display()` (or
+// `debug()` for `?`), then the spec's fill / align / sign / `0` / width
+// / precision / radix apply; `{{` `}}` are literal braces.
+struct P { x: i32; y: i32; }
+impl Display for P { fn display(self) -> str { return f"({self.x}, {self.y})"; } }
+
+fn main() -> i32 {
+    let name = "rok";
+    let n = 42;
+    let pi = 3.14159;
+    println(f"hello {name}! n={n} {{braces}} sum={n + 1}");
+    println(f"[{n:>5}] [{n:<5}] [{n:^6}] [{n:05}] [{n:+}] [{name:*^9}] [{0 - 7:05}]");
+    println(f"{pi:.2} {3:.3} {255:x} {255:#X} {5:08b} {15:#o} {"rok\n":?} {true} {'한'} {'x':?} {2.5}");
+    println(f"p = {P { x: 1, y: 2 }} {f"{"nested"}":?}" + f"" + "|");
+    return 0;
+}

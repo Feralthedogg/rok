@@ -1,21 +1,22 @@
 // Marker traits used by #[derive(...)] (spec 6.2/6.4) and other
 // compiler-driven semantics. Slots follow stdlib spec 0.4 (6.4.8).
-// `Eq` is a pure marker with no methods, so it has no slot; `==` / `!=`
-// live on `PartialEq` (`eq_trait`, ops.rok).
+// The comparison / hashing traits live in `cmp.rok`.
 
 #[lang("clone_trait")]
 pub trait Clone {
     fn clone(self) -> Self;
 }
 
-pub trait Eq {}
+// Auto (structural) marker traits (E3). The compiler derives them: a
+// struct / enum / tuple / array / sum has one iff every component does;
+// primitives and `str` have both; a closure has one iff its captures do;
+// a `fn` type has the ones it names (`fn() -> T + Send`), and a named
+// function (no captures) has both. `unsafe impl Send for T {}` opts in,
+// `impl !Send for T {}` opts out (`Cell<T>`, `Ptr<T>` when they land).
+// `Send`: safe to move to another thread. `Sync`: safe to read through
+// shared references from several threads.
+#[lang("send_trait")]
+pub trait Send {}
 
-#[lang("ord_trait")]
-pub trait Ord {
-    fn cmp(self, other: Self) -> i32;
-}
-
-#[lang("hash_trait")]
-pub trait Hash {
-    fn hash(self) -> u64;
-}
+#[lang("sync_trait")]
+pub trait Sync {}

@@ -18,6 +18,9 @@ use rokc_lexer::{Token, TokenKind};
 
 use crate::prec::{Assoc, Fixity, PrecTable};
 
+#[path = "fstring.rs"]
+mod fstring;
+
 /// `rest` of a `let (..)` tuple pattern: splice index + optional name.
 type LetTupleRest = (usize, Option<String>);
 
@@ -381,7 +384,13 @@ impl<'a> Parser<'a> {
         match self.peek() {
             TokenKind::Unsafe | TokenKind::Async | TokenKind::Yield => matches!(
                 self.peek_next(),
-                Some(TokenKind::Fn | TokenKind::Unsafe | TokenKind::Async | TokenKind::Yield)
+                Some(
+                    TokenKind::Fn
+                        | TokenKind::Impl
+                        | TokenKind::Unsafe
+                        | TokenKind::Async
+                        | TokenKind::Yield
+                )
             ),
             k => starts_item(k),
         }
@@ -627,6 +636,15 @@ impl<'a> Parser<'a> {
             return self.skip_meta_block(vis, attrs);
         }
         match self.peek() {
+            TokenKind::Unsafe if self.peek_next() == Some(TokenKind::Impl) => {
+                self.bump();
+                self.parse_impl(vis, attrs).map(|i| {
+                    Item::Impl(ImplDef {
+                        is_unsafe: true,
+                        ..i
+                    })
+                })
+            }
             TokenKind::Fn | TokenKind::Unsafe | TokenKind::Async | TokenKind::Yield => {
                 self.parse_fn(vis, attrs).map(Item::Fn)
             }
@@ -961,7 +979,13 @@ impl<'a> Parser<'a> {
         let start = self.peek_span();
         self.expect(&TokenKind::Impl, "`impl`")?;
         let generics = self.parse_generic_params();
+        // `impl !Send for T {}` — auto-trait opt-out (E3).
+        let negative = self.eat(&TokenKind::Bang);
         let first_ty = self.parse_type()?;
+        if negative && !matches!(self.peek(), TokenKind::For) {
+            let s = self.peek_span();
+            self.error(s, "`impl !Trait` needs `for Type`");
+        }
         let (trait_path, self_ty) = if self.eat(&TokenKind::For) {
             // `impl TRAIT for SELF` — the first parsed type was the trait.
             let trait_path = match &first_ty.kind {
@@ -1034,6 +1058,8 @@ impl<'a> Parser<'a> {
             attrs,
             generics,
             trait_path,
+            is_unsafe: false,
+            negative,
             self_ty,
             where_clause,
             items,
@@ -1525,8 +1551,12 @@ impl<'a> Parser<'a> {
             self.bump();
         }
         self.expect(&TokenKind::Fn, "`fn`")?;
+        // `union` is only a keyword at item start: `fn union` (stdlib
+        // `Set::union`, 2.9.4) names a function.
         let name = if let TokenKind::Ident(n) = self.peek() {
             n.clone()
+        } else if matches!(self.peek(), TokenKind::Union) {
+            "union".to_owned()
         } else {
             let s = self.peek_span();
             self.error(s, "function name expected");
@@ -1826,6 +1856,10 @@ impl<'a> Parser<'a> {
                 self.bump();
                 TyKind::SelfUpper
             }
+            TokenKind::Bang => {
+                self.bump();
+                TyKind::Never
+            }
             TokenKind::Ident(_) => TyKind::Path(self.parse_type_path()?),
             TokenKind::Fn => {
                 self.bump();
@@ -1868,7 +1902,12 @@ impl<'a> Parser<'a> {
                         span,
                     };
                 }
-                TyKind::Fn(args, Box::new(ret))
+                // E3: `fn(..) -> R + Send + Sync` — auto-trait bounds.
+                let mut bounds = Vec::new();
+                while self.eat(&TokenKind::Plus) {
+                    bounds.push(self.parse_type_path()?);
+                }
+                TyKind::Fn(args, Box::new(ret), bounds)
             }
             TokenKind::LParen => {
                 // `()` unit, `(T)` grouping, `(T,)` / `(A, B)` tuple
@@ -2837,14 +2876,8 @@ impl<'a> Parser<'a> {
                 ExprKind::Literal(Literal::RawStr(s))
             }
             TokenKind::FStrLit(s) => {
-                // ponytail: f-strings need Display dispatch + string
-                // concatenation, which HIR/runtime don't provide yet.
-                self.unsupported(
-                    start,
-                    "f-string literals (spec 1.7.3) are not yet supported",
-                );
                 self.bump();
-                ExprKind::Literal(Literal::FStr(s))
+                self.desugar_fstring(&s, start)
             }
             TokenKind::Unsafe => {
                 // Spec 4.15 `unsafe { ... }`. ponytail: parsed as a plain
@@ -2898,8 +2931,11 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Pipe | TokenKind::PipePipe => self.parse_closure_expr()?,
             TokenKind::LBrace => {
-                let block = self.parse_block()?;
-                ExprKind::Block(block)
+                if let Some(lit) = self.try_set_or_dict() {
+                    lit
+                } else {
+                    ExprKind::Block(self.parse_block()?)
+                }
             }
             TokenKind::Label(name) => {
                 // `'label: loop`, `'label: while`, `'label: for`,
@@ -3354,6 +3390,10 @@ impl<'a> Parser<'a> {
                             self.bump();
                             n
                         }
+                        TokenKind::Union => {
+                            self.bump();
+                            "union".to_owned()
+                        }
                         TokenKind::IntLit(s) | TokenKind::FloatLit(s) => {
                             // Tuple field: `expr.0`, `expr.1`, ... A float
                             // token `0.1` in `t.0.1` is two accesses.
@@ -3402,6 +3442,11 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::LBracket => {
                     self.bump();
+                    // Spec 3.6.2 slicing: `a[start? : end? (: step?)?]`.
+                    if let Some(slice) = self.with_struct_expr(true, |p| p.parse_slice(&expr)) {
+                        expr = slice?;
+                        continue;
+                    }
                     let (indices, _) =
                         self.with_struct_expr(true, |p| p.expr_list(&TokenKind::RBracket))?;
                     if indices.is_empty() {
@@ -3516,6 +3561,121 @@ impl<'a> Parser<'a> {
                 None
             }
         }
+    }
+
+    /// Spec 6.5.6: `{ k: v, .. }` is a dict, `{ a, b, .. }` a set (two
+    /// or more items, or a trailing comma); anything else (`{}`, `{ e }`,
+    /// statements) is a block. Decided by parsing the first expression
+    /// speculatively and looking at the token after it.
+    fn try_set_or_dict(&mut self) -> Option<ExprKind> {
+        let (pos, pending, n_diags) = (self.pos, self.pending.clone(), self.diagnostics.len());
+        let rewind = |p: &mut Self| {
+            p.pos = pos;
+            p.pending.clone_from(&pending);
+            p.diagnostics.truncate(n_diags);
+        };
+        self.bump(); // `{`
+        // ponytail: only a simple-looking first item is tried, so nested
+        // blocks (`{ if .. { .. } }`) aren't re-parsed exponentially; a
+        // set / dict whose first item starts with a keyword parses as a
+        // block.
+        let first = if matches!(
+            self.peek(),
+            TokenKind::IntLit(_)
+                | TokenKind::FloatLit(_)
+                | TokenKind::CharLit(_)
+                | TokenKind::StrLit(_)
+                | TokenKind::RawStrLit(_)
+                | TokenKind::Ident(_)
+                | TokenKind::True
+                | TokenKind::False
+                | TokenKind::Minus
+                | TokenKind::LParen
+        ) {
+            self.with_struct_expr(true, Self::parse_expr)
+        } else {
+            None
+        };
+        let kind = match (first, self.peek()) {
+            (Some(k), TokenKind::Colon) => {
+                self.bump();
+                let mut pairs = Vec::new();
+                let mut key = k;
+                loop {
+                    let v = self.with_struct_expr(true, Self::parse_expr)?;
+                    pairs.push((key, v));
+                    if !self.eat(&TokenKind::Comma) || matches!(self.peek(), TokenKind::RBrace) {
+                        break;
+                    }
+                    key = self.with_struct_expr(true, Self::parse_expr)?;
+                    self.expect(&TokenKind::Colon, "`:` in a dict literal")?;
+                }
+                ExprKind::Dict(pairs)
+            }
+            (Some(first), TokenKind::Comma) => {
+                self.bump();
+                let (mut rest, _) =
+                    self.with_struct_expr(true, |p| p.expr_list(&TokenKind::RBrace))?;
+                rest.insert(0, first);
+                ExprKind::Set(rest)
+            }
+            _ => {
+                rewind(self);
+                return None;
+            }
+        };
+        self.expect(&TokenKind::RBrace, "`}`")?;
+        Some(kind)
+    }
+
+    /// After `[`: a slice `start? : end? (: step?)? ]` on `target`, or
+    /// `None` (nothing consumed) when the brackets hold a plain index.
+    #[allow(clippy::option_option)] // outer: is a slice; inner: parsed ok
+    fn parse_slice(&mut self, target: &Expr) -> Option<Option<Expr>> {
+        let save = self.pos;
+        let start = if matches!(self.peek(), TokenKind::Colon) {
+            None
+        } else {
+            let saved_diags = self.diagnostics.len();
+            let e = self.parse_expr();
+            if e.is_none() || !matches!(self.peek(), TokenKind::Colon) {
+                self.pos = save;
+                self.diagnostics.truncate(saved_diags);
+                return None;
+            }
+            e.map(Box::new)
+        };
+        self.bump(); // `:`
+        let opt = |p: &mut Self| {
+            if matches!(p.peek(), TokenKind::Colon | TokenKind::RBracket) {
+                Some(None)
+            } else {
+                p.parse_expr().map(|e| Some(Box::new(e)))
+            }
+        };
+        let Some(end) = opt(self) else {
+            return Some(None);
+        };
+        let step = if self.eat(&TokenKind::Colon) {
+            let Some(step) = opt(self) else {
+                return Some(None);
+            };
+            step
+        } else {
+            None
+        };
+        if self.expect(&TokenKind::RBracket, "`]`").is_none() {
+            return Some(None);
+        }
+        Some(Some(Expr {
+            span: target.span,
+            kind: ExprKind::Slice {
+                target: Box::new(target.clone()),
+                start,
+                end,
+                step,
+            },
+        }))
     }
 
     /// `e, e, ...` up to (not consuming) `close`. Returns the items and
@@ -4133,7 +4293,7 @@ fn desugar_rethrows(params: &mut [Param], generics: &mut Generics) -> Vec<Ty> {
                     walk(t, generics, errs);
                 }
             }
-            TyKind::Fn(args, ret) => {
+            TyKind::Fn(args, ret, _) => {
                 for t in args {
                     walk(t, generics, errs);
                 }
@@ -4144,7 +4304,11 @@ fn desugar_rethrows(params: &mut [Param], generics: &mut Generics) -> Vec<Ty> {
                 walk(err, generics, errs);
             }
             TyKind::Array(t, _) => walk(t, generics, errs),
-            TyKind::AnyTrait(_) | TyKind::Any | TyKind::None | TyKind::SelfUpper => {}
+            TyKind::AnyTrait(_)
+            | TyKind::Any
+            | TyKind::None
+            | TyKind::SelfUpper
+            | TyKind::Never => {}
         }
     }
     let mut errs = Vec::new();

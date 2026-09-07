@@ -16,6 +16,7 @@ use crate::HirTy;
 pub fn resolve_ty(ty: &Ty) -> HirTy {
     match &ty.kind {
         TyKind::Path(path) => resolve_path_ty(path),
+        TyKind::Never => HirTy::Never,
         TyKind::Sum(parts) => HirTy::Sum(parts.iter().map(resolve_ty).collect()),
         TyKind::Tuple(parts) => {
             if parts.is_empty() {
@@ -44,9 +45,11 @@ pub fn resolve_ty(ty: &Ty) -> HirTy {
             let n = const_expr_to_u32(len).unwrap_or(0);
             HirTy::Array(Box::new(resolve_ty(elem)), n)
         }
-        TyKind::Fn(args, ret) => HirTy::Fn(
+        // ponytail: name-free resolution (prim probes) drops `+ Send` bounds.
+        TyKind::Fn(args, ret, _) => HirTy::Fn(
             args.iter().map(resolve_ty).collect(),
             Box::new(resolve_ty(ret)),
+            Vec::new(),
         ),
         TyKind::Throws { ok, err } => throws_ty(resolve_ty(ok), resolve_ty(err)),
     }

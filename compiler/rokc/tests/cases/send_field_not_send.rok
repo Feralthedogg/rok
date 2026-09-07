@@ -1,0 +1,9 @@
+// expect-error: type `Wrap` does not satisfy trait bound `rok::core::marker::Send`
+// A struct with a non-`Send` field is not `Send`.
+struct Wrap { t: Tok; }
+struct Tok { v: i32; }
+impl !Send for Tok {}
+fn need_send<T: Send>(x: T) -> i32 { return 1; }
+fn spawn<T: Send>(f: fn() -> T + Send) -> T { return f(); }
+fn forty() -> i32 { return 40; }
+fn main() -> i32 { return need_send(Wrap { t: Tok { v: 1 } }); }

@@ -1,0 +1,3 @@
+// expect-error: function `f` returns `!` but its body can finish
+fn f() -> ! { let x = 1; }
+fn main() -> i32 { f(); }
