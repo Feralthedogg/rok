@@ -101,7 +101,9 @@ fn print_stmt(out: &mut String, s: &Statement) {
         Statement::StorageDead(l) => {
             let _ = write!(out, "dead _{};", l.0);
         }
-        Statement::RawStore { addr, value, ty } => {
+        Statement::RawStore {
+            addr, value, ty, ..
+        } => {
             let _ = write!(out, "raw_store<{}> ", ty_str(ty));
             print_operand(out, addr);
             out.push_str(" = ");
@@ -261,7 +263,7 @@ fn print_rvalue(out: &mut String, r: &RValue) {
             let _ = write!(out, "buf_alloc<{}> ", ty_str(elem_ty));
             print_operand(out, len);
         }
-        RValue::RawLoad { addr, ty } => {
+        RValue::RawLoad { addr, ty, .. } => {
             let _ = write!(out, "raw_load<{}> ", ty_str(ty));
             print_operand(out, addr);
         }

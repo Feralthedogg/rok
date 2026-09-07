@@ -95,6 +95,7 @@ pub enum Statement {
         addr: Operand,
         value: Operand,
         ty: MirTy,
+        volatile: bool,
     },
     // `STATIC_NAME = value` — store into a module-level global.
     StaticStore {
@@ -203,6 +204,7 @@ pub enum RValue {
     RawLoad {
         addr: Operand,
         ty: MirTy,
+        volatile: bool,
     },
     // Size (or alignment) of `ty` in bytes, as `usize`.
     SizeOf {

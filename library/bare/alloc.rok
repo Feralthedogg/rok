@@ -2,16 +2,19 @@
 // Over the runtime's `rok_alloc_raw` / `rok_realloc_raw` / `rok_free`
 // (system malloc); failure is a null `CPtr`, never an abort.
 //
-// ponytail: `Layout::array` / `from_size_align` don't `throws
-// (LayoutError)` yet (they return `Layout | none`), and the typed
-// helpers (`alloc_one`, ...) and the RAII `Allocation<T>` wait for a user.
+// ponytail: the RAII `Allocation<T>` waits for `using` (3.17).
 
-use rok::bare::ptr::{CPtr, Ptr, pointee_align, pointee_size};
+use rok::bare::ptr::{CPtr, Ptr, align_of, size_of};
 
 extern "C" {
     fn rok_alloc_raw(size: usize, align: usize, zeroed: i32) -> usize;
     fn rok_realloc_raw(ptr: usize, old_size: usize, align: usize, new_size: usize) -> usize;
     fn rok_free(ptr: usize);
+}
+
+/// Why a `Layout` cannot be made.
+pub struct LayoutError {
+    pub reason: str;
 }
 
 /// Size and alignment of a raw block.
@@ -21,20 +24,31 @@ pub struct Layout {
 }
 
 impl Layout {
-    pub fn size(self) -> usize { return self.size; }
-    pub fn align(self) -> usize { return self.align; }
-    /// `none` unless `align` is a power of two.
-    pub fn from_size_align(size: usize, align: usize) -> Layout | none {
-        if align == 0 || (align & (align - 1)) != 0 { return none; }
+    /// The layout of one `T`.
+    pub fn new<T>() -> Layout { return Layout { size: size_of::<T>(), align: align_of::<T>() }; }
+
+    /// The layout of `n` `T`s.
+    pub fn array<T>(n: usize) throws (LayoutError) -> Layout {
+        let size = size_of::<T>();
+        // usize::MAX without overflowing on the way.
+        let half = 1usize << (size_of::<usize>() * 8usize - 1usize);
+        let max = half - 1usize + half;
+        if size != 0 && n > max / size {
+            throw LayoutError { reason: "array size overflows usize" };
+        }
+        return Layout { size: size * n, align: align_of::<T>() };
+    }
+
+    /// `align` must be a power of two.
+    pub fn from_size_align(size: usize, align: usize) throws (LayoutError) -> Layout {
+        if align == 0 || (align & (align - 1)) != 0 {
+            throw LayoutError { reason: "align is not a power of two" };
+        }
         return Layout { size: size, align: align };
     }
-}
 
-/// The layout of `n` values of what `p` points at (`p` only names the
-/// type: rok has no `f::<T>()` call syntax yet; spec 1.4.1
-/// `Layout::new::<T>()` / `Layout::array::<T>(n)`).
-pub fn layout_for<T>(p: Ptr<T>, n: usize) -> Layout {
-    return Layout { size: pointee_size(p) * n, align: pointee_align(p) };
+    pub fn size(self) -> usize { return self.size; }
+    pub fn align(self) -> usize { return self.align; }
 }
 
 pub unsafe fn alloc(layout: Layout) -> CPtr<u8> {
@@ -55,3 +69,15 @@ pub unsafe fn realloc(ptr: Ptr<u8>, old_layout: Layout, new_size: usize) -> CPtr
         rok_realloc_raw(ptr.addr(), old_layout.size, old_layout.align, new_size),
     );
 }
+
+pub unsafe fn alloc_one<T>() -> CPtr<T> {
+    return CPtr::from_addr(rok_alloc_raw(size_of::<T>(), align_of::<T>(), 0));
+}
+
+pub unsafe fn alloc_array<T>(n: usize) -> CPtr<T> {
+    return CPtr::from_addr(rok_alloc_raw(size_of::<T>() * n, align_of::<T>(), 0));
+}
+
+pub unsafe fn dealloc_one<T>(ptr: Ptr<T>) { rok_free(ptr.addr()); }
+
+pub unsafe fn dealloc_array<T>(ptr: Ptr<T>, n: usize) { rok_free(ptr.addr()); }

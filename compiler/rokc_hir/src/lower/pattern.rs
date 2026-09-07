@@ -24,7 +24,8 @@ pub(super) fn lower_match(
         ctx.push_scope();
         let pat = lower_pattern(ctx, &arm.pat, &scrut_ty);
         let guard = arm.guard.as_ref().map(|g| lower_cond(ctx, g));
-        let body = lower_expr(ctx, &arm.body);
+        let cells = ctx.take_cells(arm.body.span);
+        let body = super::expr::with_lets(cells, lower_expr(ctx, &arm.body));
         ctx.pop_scope();
         arm_h.push(HirMatchArm { pat, guard, body });
     }
@@ -559,7 +560,7 @@ pub(super) fn lower_pattern_inner(
                     ty: scrut_ty.clone(),
                 };
             }
-            let local = ctx.declare(Some(name.clone()), scrut_ty.clone());
+            let local = ctx.declare_bound(name, scrut_ty.clone(), pat.span);
             HirPattern::Binding {
                 local,
                 ty: scrut_ty.clone(),
@@ -597,7 +598,7 @@ pub(super) fn lower_pattern_inner(
             let bind = |ctx: &mut LowerCtx<'_>| {
                 binder
                     .as_ref()
-                    .map(|name| ctx.declare(Some(name.clone()), target_ty.clone()))
+                    .map(|name| ctx.declare_bound(name, target_ty.clone(), pat.span))
             };
             if let HirTy::Sum(variants) = scrut_ty {
                 if let Some(idx) = sum_variant_index(variants, &target_ty) {
@@ -783,7 +784,7 @@ pub(super) fn lower_pattern_inner(
                         args[i] = if let Some(p) = &fp.pat {
                             lower_pattern(ctx, p, &ty)
                         } else {
-                            let local = ctx.declare(Some(fp.name.clone()), ty.clone());
+                            let local = ctx.declare_bound(&fp.name, ty.clone(), pat.span);
                             HirPattern::Binding { local, ty }
                         };
                     }
@@ -824,7 +825,7 @@ pub(super) fn lower_pattern_inner(
                     Some(p) => lower_pattern(ctx, p, &field_ty),
                     // Shorthand `Foo { x }` — bind a local of the field's name.
                     None => {
-                        let local = ctx.declare(Some(fp.name.clone()), field_ty.clone());
+                        let local = ctx.declare_bound(&fp.name, field_ty.clone(), pat.span);
                         HirPattern::Binding {
                             local,
                             ty: field_ty,

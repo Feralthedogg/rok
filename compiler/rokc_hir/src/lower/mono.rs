@@ -149,6 +149,7 @@ pub(super) fn resolve_in_mono(
 ) -> HirTy {
     let mut rcx = LowerCtx::new(ctx.env, subst, self_ty);
     rcx.current_module = module_of(&fn_def.name);
+    rcx.set_bounds(&fn_def.generics, &fn_def.where_clause);
     rcx.resolve_ast_ty(ty)
 }
 
@@ -508,12 +509,13 @@ pub(super) fn lower_fn_inner(
     let outer = rokc_diagnostic::set_current_span(fn_def.span);
     let mut ctx = LowerCtx::new(env, subst, self_ty);
     ctx.current_module = module;
+    ctx.set_bounds(&fn_def.generics, &fn_def.where_clause);
     ctx.unsafe_depth = u32::from(fn_def.is_unsafe);
     // Marker set by the driver on the synthesized entry (spec 4.16.2).
     ctx.implicit_main = fn_def.attrs.iter().any(|a| a.path == ["#implicit_main"]);
 
     if let Some(b) = &fn_def.body {
-        ctx.ref_captured = ref_captured_names(b);
+        ctx.ref_captured = ref_captured_bindings(&fn_def.params, b);
     }
     let mut params = Vec::with_capacity(fn_def.params.len());
     for p in &fn_def.params {
@@ -521,10 +523,10 @@ pub(super) fn lower_fn_inner(
     }
     // A `[ref]`-captured parameter moves into a cell (`let x = x;`).
     let mut prelude = Vec::new();
-    for p in &params {
-        if ctx.ref_captured.contains(&p.name) {
+    for (p, ap) in params.iter().zip(&fn_def.params) {
+        if ctx.ref_captured.contains(&(p.name.clone(), ap.span)) {
             let init = hir_local(p.local, &p.ty, fn_def.span);
-            prelude.push(ctx.declare_var(&p.name, p.ty.clone(), init));
+            prelude.push(ctx.cell_let(&p.name, p.ty.clone(), init));
         }
     }
     ctx.ref_params = params
@@ -1228,23 +1230,43 @@ pub(super) fn ref_pack(ctx: &LowerCtx<'_>, v: HirExpr, span: rokc_diagnostic::Sp
 /// packed values, `out` its shape): each `ref` parameter's final value
 /// goes back into its argument place (`places`, by parameter index: a
 /// local, a field chain on one, or a `[ref]` cell), the value comes
-/// out. A throwing call is unpacked first: on an error nothing is
-/// written back.
+/// out. A throwing callee carries the `ref` values on its error path
+/// too (`raise`), so they are written back before the error moves on,
+/// as with a real reference.
 pub(super) fn ref_unpack(
     ctx: &mut LowerCtx<'_>,
     call: HirExpr,
     out: &RefOut,
     places: &[Option<HirExpr>],
 ) -> HirExpr {
-    let call = unpack_call(ctx, call);
     let span = call.span;
     let ret = match &out.ret {
         HirTy::Throws { ok, .. } => (**ok).clone(),
         t => t.clone(),
     };
-    let packed = call.ty.clone();
-    let tmp = ctx.declare(None, packed.clone());
-    let whole = hir_local(tmp, &packed, span);
+    let call_ty = call.ty.clone();
+    let tmp = ctx.declare(None, call_ty.clone());
+    let mut stmts = vec![HirStmt::Let {
+        local: tmp,
+        init: call,
+    }];
+    // The packed values: the call's, or its carrier's ok slot (never
+    // unit: there is a `ref` parameter).
+    let (packed, whole) = match &call_ty {
+        HirTy::Throws { ok, .. } => (
+            (**ok).clone(),
+            HirExpr {
+                kind: HirExprKind::TupleField {
+                    target: Box::new(hir_local(tmp, &call_ty, span)),
+                    index: 1,
+                    field_ty: (**ok).clone(),
+                },
+                ty: (**ok).clone(),
+                span,
+            },
+        ),
+        t => (t.clone(), hir_local(tmp, t, span)),
+    };
     let unit = ret == HirTy::Unit;
     let n = usize::from(!unit) + out.refs.len();
     let field = |i: usize| -> HirExpr {
@@ -1265,15 +1287,16 @@ pub(super) fn ref_unpack(
             span,
         }
     };
-    let mut stmts = vec![HirStmt::Let {
-        local: tmp,
-        init: call,
-    }];
     for (k, (pi, _)) in out.refs.iter().enumerate() {
         let place = places.get(*pi).and_then(Option::as_ref);
         if let Some(st) = place.and_then(|p| assign_place(ctx, p, field(usize::from(!unit) + k))) {
             stmts.push(st);
         }
+    }
+    if matches!(call_ty, HirTy::Throws { .. }) {
+        // Now route a thrown error on.
+        let raised = unpack_call(ctx, hir_local(tmp, &call_ty, span));
+        stmts.push(HirStmt::Expr(raised));
     }
     HirExpr {
         kind: HirExprKind::Block(Box::new(HirBlock {

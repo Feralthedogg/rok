@@ -894,11 +894,17 @@ impl<'a> FnEmit<'a> {
                     let _ = writeln!(self.body, "    llvm.store {z}, {slot} : {ty}, !llvm.ptr");
                 }
             }
-            Statement::RawStore { addr, value, ty } => {
+            Statement::RawStore {
+                addr,
+                value,
+                ty,
+                volatile,
+            } => {
                 let p = self.raw_addr(addr);
                 let v = self.materialize_operand(value, ty);
                 let t = mlir_type(ty, self.pointer_width);
-                let _ = writeln!(self.body, "    llvm.store {v}, {p} : {t}, !llvm.ptr");
+                let vol = if *volatile { "volatile " } else { "" };
+                let _ = writeln!(self.body, "    llvm.store {vol}{v}, {p} : {t}, !llvm.ptr");
             }
             Statement::BufStore {
                 buf,
@@ -1083,11 +1089,12 @@ impl<'a> FnEmit<'a> {
             } => self.emit_call_indirect(callee, args, arg_tys, ret_ty),
             RValue::HeapBox { value, ty } => self.emit_heap_box(value, ty),
             RValue::BufAlloc { elem_ty, len } => self.emit_buf_alloc(elem_ty, len),
-            RValue::RawLoad { addr, ty } => {
+            RValue::RawLoad { addr, ty, volatile } => {
                 let p = self.raw_addr(addr);
                 let t = mlir_type(ty, self.pointer_width);
                 let v = self.fresh_value();
-                let _ = writeln!(self.body, "    {v} = llvm.load {p} : !llvm.ptr -> {t}");
+                let vol = if *volatile { "volatile " } else { "" };
+                let _ = writeln!(self.body, "    {v} = llvm.load {vol}{p} : !llvm.ptr -> {t}");
                 v
             }
             RValue::SizeOf { ty, align } => {
@@ -2045,6 +2052,8 @@ impl<'a> FnEmit<'a> {
                     let _ = writeln!(self.body, "    {dst} = llvm.mlir.zero : {ty}");
                 } else if matches!(dst_ty, MirTy::Fn(_, _)) {
                     let _ = writeln!(self.body, "    {dst} = llvm.mlir.zero : !llvm.ptr");
+                } else if matches!(dst_ty, MirTy::Prim(PrimTy::F32 | PrimTy::F64)) {
+                    let _ = writeln!(self.body, "    {dst} = arith.constant 0.0 : {ty}");
                 } else {
                     let _ = writeln!(self.body, "    {dst} = arith.constant 0 : {ty}");
                 }

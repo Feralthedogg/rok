@@ -21,17 +21,17 @@ pub trait Iterator {
     // ---- lazy adapters ----
 
     /// Apply `f` to each item.
-    fn map<U>(self, f: fn(Item) -> U) -> Map<Self, Item, U> {
+    fn map<U>(self, f: fn(Item) -> U) -> Map<Self, U> {
         return Map { it: self, f: f };
     }
 
     /// Keep the items `pred` accepts.
-    fn filter(self, pred: fn(Item) -> bool) -> Filter<Self, Item> {
+    fn filter(self, pred: fn(Item) -> bool) -> Filter<Self> {
         return Filter { it: self, pred: pred };
     }
 
     /// `(index, item)` pairs.
-    fn enumerate(self) -> Enumerate<Self, Item> {
+    fn enumerate(self) -> Enumerate<Self> {
         return Enumerate { it: self, i: 0 };
     }
 
@@ -40,18 +40,18 @@ pub trait Iterator {
         return Zip { a: self, b: other };
     }
 
-    /// This iterator's items, then `other`'s.
-    fn chain<J>(self, other: J) -> Chain<Self, J, Item> {
+    /// This iterator's items, then `other`'s (with the same item type).
+    fn chain<J: Iterator<Item = Item>>(self, other: J) -> Chain<Self, J> {
         return Chain { a: self, b: other, first: true };
     }
 
     /// At most the first `n` items.
-    fn take(self, n: usize) -> Take<Self, Item> {
+    fn take(self, n: usize) -> Take<Self> {
         return Take { it: self, left: n };
     }
 
     /// All but the first `n` items.
-    fn skip(self, n: usize) -> Skip<Self, Item> {
+    fn skip(self, n: usize) -> Skip<Self> {
         return Skip { it: self, n: n };
     }
 
@@ -69,13 +69,13 @@ pub trait Iterator {
     }
 
     /// The items of each item (each item is `IntoIterator`).
-    fn flatten(self) -> Flatten<Self, Item::IntoIter> {
+    fn flatten(self) -> Flatten<Self> {
         return Flatten { it: self, cur: none };
     }
 
-    /// `map(f).flatten()`.
-    fn flat_map<C>(self, f: fn(Item) -> C) -> Flatten<Map<Self, Item, C>, C::IntoIter> {
-        return self.map(f).flatten();
+    /// The items of each `f(item)` (an `IntoIterator`).
+    fn flat_map<U>(self, f: fn(Item) -> U) -> FlatMap<Self, U> {
+        return FlatMap { it: self, f: f, cur: none };
     }
 
     /// An iterator that can look at its next item without taking it.
@@ -196,32 +196,41 @@ pub trait FromIterator<A> {
     fn from_iter<I>(it: I) -> Self;
 }
 
-pub struct Map<I, A, U> {
+pub struct Map<I, U> {
     it: I;
-    f: fn(A) -> U;
+    f: fn(I::Item) -> U;
 }
 
-impl<I: Iterator, A, U> Iterator for Map<I, A, U> {
+impl<I: Iterator, U> Iterator for Map<I, U> {
     type Item = U;
     fn next(ref self) -> U | none {
         match self.it.next() {
-            x: A => return (self.f)(x),
+            x: I::Item => return (self.f)(x),
             none => return none,
         }
     }
 }
 
-pub struct Filter<I, A> {
-    it: I;
-    pred: fn(A) -> bool;
+impl<I: DoubleEndedIterator, U> DoubleEndedIterator for Map<I, U> {
+    fn next_back(ref self) -> U | none {
+        match self.it.next_back() {
+            x: I::Item => return (self.f)(x),
+            none => return none,
+        }
+    }
 }
 
-impl<I: Iterator, A> Iterator for Filter<I, A> {
-    type Item = A;
-    fn next(ref self) -> A | none {
+pub struct Filter<I> {
+    it: I;
+    pred: fn(I::Item) -> bool;
+}
+
+impl<I: Iterator> Iterator for Filter<I> {
+    type Item = I::Item;
+    fn next(ref self) -> I::Item | none {
         while true {
             match self.it.next() {
-                x: A => {
+                x: I::Item => {
                     if (self.pred)(x) {
                         return x;
                     }
@@ -233,43 +242,38 @@ impl<I: Iterator, A> Iterator for Filter<I, A> {
     }
 }
 
-pub struct Enumerate<I, A> {
+impl<I: DoubleEndedIterator> DoubleEndedIterator for Filter<I> {
+    fn next_back(ref self) -> I::Item | none {
+        while true {
+            match self.it.next_back() {
+                x: I::Item => {
+                    if (self.pred)(x) {
+                        return x;
+                    }
+                }
+                none => return none,
+            }
+        }
+        return none;
+    }
+}
+
+pub struct Enumerate<I> {
     it: I;
     i: usize;
 }
 
-impl<I: Iterator, A> Iterator for Enumerate<I, A> {
-    type Item = (usize, A);
-    fn next(ref self) -> (usize, A) | none {
+impl<I: Iterator> Iterator for Enumerate<I> {
+    type Item = (usize, I::Item);
+    fn next(ref self) -> (usize, I::Item) | none {
         match self.it.next() {
-            x: A => {
+            x: I::Item => {
                 let at = self.i;
                 self.i = at + 1;
                 return (at, x);
             }
             none => return none,
         }
-    }
-}
-
-pub struct Chain<I, J, A> {
-    a: I;
-    b: J;
-    first: bool;
-}
-
-impl<I: Iterator, J: Iterator, A> Iterator for Chain<I, J, A> {
-    type Item = A;
-    fn next(ref self) -> A | none {
-        if self.first {
-            match self.a.next() {
-                x: A => return x,
-                none => {
-                    self.first = false;
-                }
-            }
-        }
-        return self.b.next();
     }
 }
 
@@ -287,6 +291,36 @@ impl<I: Iterator, J: Iterator> Iterator for Zip<I, J> {
                 none => return none,
             },
             none => return none,
+        }
+    }
+}
+
+pub struct Chain<I, J> {
+    a: I;
+    b: J;
+    first: bool;
+}
+
+impl<I: Iterator, J: Iterator> Iterator for Chain<I, J> {
+    type Item = I::Item;
+    fn next(ref self) -> I::Item | none {
+        if self.first {
+            match self.a.next() {
+                x: I::Item => return x,
+                none => {
+                    self.first = false;
+                }
+            }
+        }
+        return self.b.next();
+    }
+}
+
+impl<I: DoubleEndedIterator, J: DoubleEndedIterator> DoubleEndedIterator for Chain<I, J> {
+    fn next_back(ref self) -> I::Item | none {
+        match self.b.next_back() {
+            x: I::Item => return x,
+            none => return self.a.next_back(),
         }
     }
 }
@@ -326,17 +360,53 @@ impl<I: DoubleEndedIterator> DoubleEndedIterator for Rev<I> {
 }
 
 /// `flatten`: `cur` is the inner iterator being drained.
-pub struct Flatten<I, U> {
+pub struct Flatten<I> {
     it: I;
-    cur: U | none;
+    cur: <I::Item as IntoIterator>::IntoIter | none;
 }
 
-impl<I: Iterator, U: Iterator> Iterator for Flatten<I, U> {
+impl<I: Iterator> Iterator for Flatten<I> {
+    type Item = <I::Item as IntoIterator>::Item;
+    fn next(ref self) -> <I::Item as IntoIterator>::Item | none {
+        while true {
+            match self.cur {
+                c: <I::Item as IntoIterator>::IntoIter => {
+                    let inner = c;
+                    match inner.next() {
+                        x: <I::Item as IntoIterator>::Item => {
+                            self.cur = inner;
+                            return x;
+                        }
+                        none => {
+                            self.cur = none;
+                        }
+                    }
+                }
+                none => match self.it.next() {
+                    nx: I::Item => {
+                        self.cur = nx.into_iter();
+                    }
+                    none => return none,
+                },
+            }
+        }
+        return none;
+    }
+}
+
+/// `flat_map`: `cur` is the inner iterator being drained.
+pub struct FlatMap<I, U> {
+    it: I;
+    f: fn(I::Item) -> U;
+    cur: <U as IntoIterator>::IntoIter | none;
+}
+
+impl<I: Iterator, U: IntoIterator> Iterator for FlatMap<I, U> {
     type Item = U::Item;
     fn next(ref self) -> U::Item | none {
         while true {
             match self.cur {
-                c: U => {
+                c: U::IntoIter => {
                     let inner = c;
                     match inner.next() {
                         x: U::Item => {
@@ -350,7 +420,7 @@ impl<I: Iterator, U: Iterator> Iterator for Flatten<I, U> {
                 }
                 none => match self.it.next() {
                     nx: I::Item => {
-                        self.cur = nx.into_iter();
+                        self.cur = (self.f)(nx).into_iter();
                     }
                     none => return none,
                 },
@@ -388,14 +458,14 @@ impl<I: Iterator> Iterator for Peekable<I> {
     }
 }
 
-pub struct Take<I, A> {
+pub struct Take<I> {
     it: I;
     left: usize;
 }
 
-impl<I: Iterator, A> Iterator for Take<I, A> {
-    type Item = A;
-    fn next(ref self) -> A | none {
+impl<I: Iterator> Iterator for Take<I> {
+    type Item = I::Item;
+    fn next(ref self) -> I::Item | none {
         if self.left == 0 {
             return none;
         }
@@ -404,14 +474,14 @@ impl<I: Iterator, A> Iterator for Take<I, A> {
     }
 }
 
-pub struct Skip<I, A> {
+pub struct Skip<I> {
     it: I;
     n: usize;
 }
 
-impl<I: Iterator, A> Iterator for Skip<I, A> {
-    type Item = A;
-    fn next(ref self) -> A | none {
+impl<I: Iterator> Iterator for Skip<I> {
+    type Item = I::Item;
+    fn next(ref self) -> I::Item | none {
         while self.n > 0 {
             self.n = self.n - 1;
             match self.it.next() {

@@ -724,7 +724,7 @@ pub fn lower_full(
         })
         .collect();
     let mut trait_impl_tys: HashMap<String, Vec<HirTy>> = HashMap::new();
-    let mut impl_assoc: HashMap<MethodTarget, Vec<(String, HirTy)>> = HashMap::new();
+    let mut impl_assoc: HashMap<MethodTarget, Vec<(String, String, HirTy)>> = HashMap::new();
     let mut neg_auto: std::collections::HashSet<(String, String)> =
         std::collections::HashSet::new();
 
@@ -758,7 +758,14 @@ pub fn lower_full(
         let generic_base = match &impl_def.self_ty.kind {
             AstTyKind::Path(p) if impl_def.trait_path.is_none() => {
                 let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
-                names.canon(&segs, &module, &[])
+                // `impl str { fn parse<T>(..) }`: a primitive's generic
+                // methods key by the primitive's name.
+                names.canon(&segs, &module, &[]).or_else(|| {
+                    match crate::ty::resolve_ty(&impl_def.self_ty) {
+                        HirTy::Prim(prim) => Some(prim.name().to_owned()),
+                        _ => None,
+                    }
+                })
             }
             _ => None,
         };
@@ -825,10 +832,11 @@ pub fn lower_full(
             for k in impl_bound_keys(tn, &args, &assoc, &struct_table, &enum_table) {
                 impl_traits.insert((target_key.clone(), k));
             }
-            impl_assoc
-                .entry(target_key.clone())
-                .or_default()
-                .extend(assoc.iter().cloned());
+            impl_assoc.entry(target_key.clone()).or_default().extend(
+                assoc
+                    .iter()
+                    .map(|(n, t)| (tn.clone(), n.clone(), t.clone())),
+            );
             trait_impl_tys
                 .entry(tn.clone())
                 .or_default()
@@ -1025,7 +1033,9 @@ pub fn lower_full(
                 // naming the trait's associated types (`fn map<U>(self, f:
                 // fn(Item) -> U)`) becomes a template, instantiated per
                 // call with `Item` replaced by this impl's type.
-                if !tm.generics.params.is_empty() || sig_mentions(tm, &trait_assoc_names(trait_def))
+                if !tm.generics.params.is_empty()
+                    || sig_mentions(tm, &trait_assoc_names(trait_def))
+                    || returns_self_generic(tm)
                 {
                     let base = match &target_ty {
                         HirTy::Struct(id) => Some(struct_defs[id.0 as usize].name.clone()),
@@ -1115,6 +1125,9 @@ pub fn lower_full(
             let alias_key = reexport_key(re);
             if let Some(sig) = fn_table.get(&re.full_path).cloned() {
                 fn_table.entry(alias_key.clone()).or_insert(sig);
+            }
+            if let Some(def) = generic_fns.get(&re.full_path).copied() {
+                generic_fns.entry(alias_key.clone()).or_insert(def);
             }
             if let Some(ty) = static_tys.get(&re.full_path).cloned() {
                 static_tys.entry(alias_key.clone()).or_insert(ty);
@@ -1229,7 +1242,7 @@ pub fn lower_full(
             e.clone_from(k);
         }
     }
-    let env = Env {
+    let mut env = Env {
         fn_table,
         extern_fns,
         method_table,
@@ -1268,6 +1281,32 @@ pub fn lower_full(
         names,
     };
     check_impl_overlap(&env);
+    // Eagerly instantiated generic structs whose fields name projections
+    // (`Peekable<ListIter<i32>>`'s `peeked: I::Item | none`): resolve
+    // them now that impls are known.
+    let fixes: Vec<(usize, Vec<HirField>)> = env
+        .structs
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| {
+            let mut open = Vec::new();
+            d.fields
+                .iter()
+                .for_each(|f| collect_unknown_paths(&f.ty, &mut open));
+            !d.generic_args.is_empty() && !open.is_empty()
+        })
+        .filter_map(|(i, d)| {
+            let base = enum_base_name(&d.name).to_owned();
+            let def = *env.generic_structs.get(&base)?;
+            let subst = generic_subst(&def.generics, &d.generic_args);
+            let mut rcx = LowerCtx::new(&env, &subst, None);
+            rcx.current_module = module_of(&base);
+            Some((i, generic_struct_fields(def, &|t| rcx.resolve_ast_ty(t))))
+        })
+        .collect();
+    for (i, fields) in fixes {
+        env.structs[i].fields = fields;
+    }
     let mut functions: Vec<HirFunction> = Vec::with_capacity(decls.len());
     for (i, decl) in decls.iter().enumerate() {
         let id = FunctionId(u32::try_from(i).expect("FunctionId overflow"));
@@ -1991,12 +2030,13 @@ fn generic_trait_impl(
         } else {
             format!("{def_module}::__impl{index}_{leaf}")
         };
-        def.generics.params = [&impl_def.generics.params, &m.generics.params]
+        // The method's own (assoc-substituted) generics after the impl's.
+        def.generics.params = [&impl_def.generics.params, &def.generics.params]
             .into_iter()
             .flatten()
             .cloned()
             .collect();
-        def.where_clause = [&impl_def.where_clause, &m.where_clause]
+        def.where_clause = [&impl_def.where_clause, &def.where_clause]
             .into_iter()
             .flatten()
             .cloned()
@@ -2431,6 +2471,14 @@ fn sig_mentions(m: &FnDef, assoc: &[String]) -> bool {
     out.iter().any(|n| n.starts_with("Self::"))
 }
 
+/// Does `m` return a generic type over `Self` (`Flatten<Self>`)? Such a
+/// default is instantiated only when called: the adapter type may not
+/// exist for every implementor (`Flatten` needs `IntoIterator` items).
+fn returns_self_generic(m: &FnDef) -> bool {
+    matches!(&sig_ret_ast(m).kind, AstTyKind::Path(p)
+        if p.segments.iter().any(|s| s.generics.iter().any(|g| matches!(g.kind, AstTyKind::SelfUpper))))
+}
+
 /// Replace a default method's associated-type names (`Item`,
 /// `Self::Item`) in its signature with the impl's types.
 fn subst_assoc_sig(def: &mut FnDef, assoc: &HashMap<String, Ty>) {
@@ -2444,6 +2492,15 @@ fn subst_assoc_sig(def: &mut FnDef, assoc: &HashMap<String, Ty>) {
     }
     if let Some(t) = &mut def.ret_ty {
         subst_assoc_ty(t, assoc);
+    }
+    // Bounds too: `fn chain<J: Iterator<Item = Item>>`.
+    for gp in &mut def.generics.params {
+        if let rokc_ast::GenericParam::Type { bounds, .. } = gp {
+            bounds.iter_mut().for_each(|b| subst_assoc_ty(b, assoc));
+        }
+    }
+    for w in &mut def.where_clause {
+        w.bounds.iter_mut().for_each(|b| subst_assoc_ty(b, assoc));
     }
 }
 

@@ -371,7 +371,16 @@ pub(super) fn raise(
     } else if let Some(decl) = ctx.fn_throws.clone() {
         if let Some(v) = convert_err(ctx, value, &decl) {
             let ok = carrier_ok(ctx);
-            out.push(HirStmt::Return(Some(carrier(&ok, &decl, Err(v), span))));
+            let mut c = carrier(&ok, &decl, Err(v), span);
+            // `ref` parameters: their values ride in the ok slot even on
+            // the error path, for the caller's write-back (spec 4.7).
+            if !ctx.ref_params.is_empty() {
+                if let HirExprKind::Tuple { fields } = &mut c.kind {
+                    let ret = undef(&ctx.fn_ret_ty, span);
+                    fields[1] = super::mono::ref_pack(ctx, ret, span);
+                }
+            }
+            out.push(HirStmt::Return(Some(c)));
             return out;
         }
         ctx.emit_error(

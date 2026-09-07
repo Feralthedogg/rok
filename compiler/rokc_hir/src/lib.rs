@@ -389,12 +389,14 @@ pub enum HirExprKind {
     RawRead {
         addr: Box<HirExpr>,
         ty: HirTy,
+        volatile: bool,
     },
     /// `ptr_write(addr, v)`: store `v` at a raw address; unit.
     RawWrite {
         addr: Box<HirExpr>,
         value: Box<HirExpr>,
         ty: HirTy,
+        volatile: bool,
     },
     /// `size_of::<T>()` / `align_of::<T>()` (`usize`).
     SizeOf {

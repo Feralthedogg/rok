@@ -17,6 +17,11 @@ pub trait AstVisitor {
     fn stmt(&mut self, _s: &Stmt) {}
     fn ty(&mut self, _t: &Ty) {}
     fn bind(&mut self, _name: &str) {}
+    /// `bind`, with the declaring construct's span (a `let` statement, a
+    /// parameter, a pattern) — what identifies the binding.
+    fn bind_at(&mut self, name: &str, _at: rokc_diagnostic::Span) {
+        self.bind(name);
+    }
     fn push_scope(&mut self) {}
     fn pop_scope(&mut self) {}
 }
@@ -119,7 +124,7 @@ pub fn walk_fn(v: &mut impl AstVisitor, f: &FnDef) {
         if let Some(d) = &p.default {
             walk_expr(v, d);
         }
-        v.bind(&p.name);
+        v.bind_at(&p.name, p.span);
     }
     if let Some(t) = &f.ret_ty {
         walk_ty(v, t);
@@ -154,7 +159,7 @@ pub fn walk_stmt(v: &mut impl AstVisitor, s: &Stmt) {
             if let Some(t) = ty {
                 walk_ty(v, t);
             }
-            v.bind(name);
+            v.bind_at(name, s.span);
         }
         StmtKind::LetTuple {
             names,
@@ -167,10 +172,10 @@ pub fn walk_stmt(v: &mut impl AstVisitor, s: &Stmt) {
                 walk_ty(v, t);
             }
             for n in names.iter().filter(|n| *n != "_") {
-                v.bind(n);
+                v.bind_at(n, s.span);
             }
             if let Some((_, Some(r))) = rest {
-                v.bind(r);
+                v.bind_at(r, s.span);
             }
         }
         StmtKind::LetStruct {
@@ -186,7 +191,7 @@ pub fn walk_stmt(v: &mut impl AstVisitor, s: &Stmt) {
             }
             walk_path_generics(v, path);
             for (_, bind) in fields {
-                v.bind(bind);
+                v.bind_at(bind, s.span);
             }
         }
         StmtKind::Assign(a, b) => {
@@ -414,7 +419,7 @@ pub fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
                 if let Some(t) = &p.ty {
                     walk_ty(v, t);
                 }
-                v.bind(&p.name);
+                v.bind_at(&p.name, p.span);
             }
             if let Some(t) = ret_ty {
                 walk_ty(v, t);
@@ -447,13 +452,13 @@ pub fn walk_pat(v: &mut impl AstVisitor, p: &Pattern) {
                 walk_pat(v, s);
             }
             if name != "_" {
-                v.bind(name);
+                v.bind_at(name, p.span);
             }
         }
         PatternKind::TypeCheck { binder, ty } => {
             walk_ty(v, ty);
             if let Some(b) = binder {
-                v.bind(b);
+                v.bind_at(b, p.span);
             }
         }
         PatternKind::Tuple(parts) => {
@@ -469,7 +474,7 @@ pub fn walk_pat(v: &mut impl AstVisitor, p: &Pattern) {
         }
         PatternKind::Rest(name) => {
             if let Some(n) = name {
-                v.bind(n);
+                v.bind_at(n, p.span);
             }
         }
         PatternKind::Struct { path, fields, .. } => {
@@ -477,7 +482,7 @@ pub fn walk_pat(v: &mut impl AstVisitor, p: &Pattern) {
             for fp in fields {
                 match &fp.pat {
                     Some(x) => walk_pat(v, x),
-                    None => v.bind(&fp.name),
+                    None => v.bind_at(&fp.name, p.span),
                 }
             }
         }

@@ -34,6 +34,10 @@ pub const EXTERN_C_FN_ATTR: &str = "#extern_c";
 /// user identifier).
 pub const UNSAFE_FN_MARK: &str = "#unsafe";
 
+/// First path segment of a qualified path `<T as Tr>::X` (spec 2.13.4):
+/// its generics are `[T, Tr]`.
+pub const QPATH_MARK: &str = "#as";
+
 /// Error type written for an untyped `throws` (= `throws (any Error)`).
 pub const UNTYPED_THROWS_MARK: &str = "#throws";
 

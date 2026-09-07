@@ -1,0 +1,42 @@
+// expect-exit: 0
+// expect-stdout:
+// 3 x
+// 3 x
+// 5 ok
+// left right
+
+// Spec 2.13: `T::Out` resolves through `T`'s bound (`T: Num` picks
+// `Num::Out` although `Text` has an `Out` too); `<T as Tr>::X` and
+// `<T as Tr>::m(x)` name the trait explicitly (2.13.4).
+
+trait Num { type Out; fn num(self) -> Out; }
+trait Text { type Out; fn text(self) -> Out; }
+trait Left { fn side(self) -> str; }
+trait Right { fn side(self) -> str; }
+
+struct S { n: i32; }
+impl Num for S { type Out = i32; fn num(self) -> i32 { return self.n; } }
+impl Text for S { type Out = str; fn text(self) -> str { return "x"; } }
+impl Left for S { fn side(self) -> str { return "left"; } }
+impl Right for S { fn side(self) -> str { return "right"; } }
+
+fn both<T: Num + Text>(t: T) -> (<T as Num>::Out, <T as Text>::Out) {
+    return (t.num(), t.text());
+}
+
+fn num_of<T: Num>(t: T) -> T::Out {
+    let v: T::Out = t.num();
+    return v;
+}
+
+fn main() {
+    let p = both(S { n: 3 });
+    println(f"{p.0} {p.1}");
+    let a: <S as Num>::Out = 3;
+    let b: <S as Text>::Out = "x";
+    println(f"{a} {b}");
+    let n = num_of(S { n: 5 });
+    println(f"{n} {if n == 5 { "ok" } else { "no" }}");
+    let s = S { n: 0 };
+    println(f"{<S as Left>::side(s)} {<S as Right>::side(s)}");
+}

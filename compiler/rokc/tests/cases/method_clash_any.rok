@@ -1,0 +1,27 @@
+// expect-exit: 0
+// expect-stdout:
+// left right
+// left right
+
+// `any Tr` dispatch calls each implementor's method *of `Tr`*, even
+// when another trait gives the type a method of the same name.
+
+trait Left { fn side(self) -> str; }
+trait Right { fn side(self) -> str; }
+
+struct A { n: i32; }
+struct B { n: i32; }
+
+impl Left for A { fn side(self) -> str { return "left"; } }
+impl Right for A { fn side(self) -> str { return "right"; } }
+impl Right for B { fn side(self) -> str { return "right"; } }
+impl Left for B { fn side(self) -> str { return "left"; } }
+
+fn main() {
+    let l: any Left = A { n: 1 };
+    let r: any Right = A { n: 1 };
+    println(f"{l.side()} {r.side()}");
+    let l2: any Left = B { n: 2 };
+    let r2: any Right = B { n: 2 };
+    println(f"{l2.side()} {r2.side()}");
+}

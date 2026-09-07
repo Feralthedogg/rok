@@ -102,6 +102,24 @@ impl<T, E> Result<T, E> {
     }
 }
 
+/// A `str` that is not a valid value of the requested type (stdlib
+/// spec 2.14.4; thrown by `str::parse` / `FromStr`).
+pub struct ParseError {
+    pub input: str;
+    pub pos: usize;
+    pub reason: str;
+}
+
+impl Display for ParseError {
+    fn display(self) -> str { return "cannot parse \"" + self.input + "\": " + self.reason; }
+}
+
+impl Debug for ParseError {
+    fn debug(self) -> str { return "ParseError(" + self.display() + ")"; }
+}
+
+impl Error for ParseError {}
+
 /// Every error type's surface (stdlib spec 2.14.3). Untyped `throws`
 /// means `throws (any Error)`.
 pub trait Error: Display + Debug {

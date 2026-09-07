@@ -6,4 +6,8 @@
 // explicitly.
 
 pub mod alloc;
+pub mod mem;
 pub mod ptr;
+
+// Spec 1.2: the named casts live at the tier root.
+pub use ptr::{align_cast, const_cast, ptr_cast};

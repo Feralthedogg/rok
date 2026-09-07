@@ -2003,6 +2003,8 @@ impl<'a> Parser<'a> {
                 t.kind
             }
             TokenKind::Ident(_) => TyKind::Path(self.parse_type_path()?),
+            // `<T as Tr>::X` (spec 2.13.4).
+            TokenKind::Lt => TyKind::Path(self.parse_qpath()?),
             TokenKind::Fn => {
                 self.bump();
                 self.expect(&TokenKind::LParen, "`(`")?;
@@ -2224,6 +2226,46 @@ impl<'a> Parser<'a> {
 
     fn parse_path(&mut self) -> Option<Path> {
         self.parse_path_inner(false)
+    }
+
+    /// `<T as Tr>::item` (spec 2.13.4) → the path `#as<T, Tr>::item`
+    /// (`rokc_ast::QPATH_MARK`).
+    fn parse_qpath(&mut self) -> Option<Path> {
+        let start = self.peek_span();
+        self.expect(&TokenKind::Lt, "`<`")?;
+        let self_ty = self.with_type_sum(false, Self::parse_type_atom)?;
+        self.expect(&TokenKind::As, "`as`")?;
+        let tr_start = self.peek_span();
+        let tr = self.parse_type_path()?;
+        if !self.expect_closing_gt() {
+            return None;
+        }
+        self.expect(&TokenKind::ColonColon, "`::`")?;
+        let TokenKind::Ident(name) = self.peek().clone() else {
+            let s = self.peek_span();
+            self.error(s, "associated item name expected after `<.. as ..>::`");
+            return None;
+        };
+        self.bump();
+        Some(Path {
+            segments: vec![
+                PathSegment {
+                    name: rokc_ast::QPATH_MARK.to_owned(),
+                    generics: vec![
+                        self_ty,
+                        Ty {
+                            kind: TyKind::Path(tr),
+                            span: tr_start,
+                        },
+                    ],
+                },
+                PathSegment {
+                    name,
+                    generics: Vec::new(),
+                },
+            ],
+            span: start,
+        })
     }
 
     fn parse_type_path(&mut self) -> Option<Path> {
@@ -3053,39 +3095,9 @@ impl<'a> Parser<'a> {
     fn parse_primary(&mut self) -> Option<Expr> {
         let start = self.peek_span();
         let kind = match self.peek().clone() {
-            // Spec 2.13: `<Type as Trait>::method(...)` fully-qualified
-            // path. At the start of a primary, `<` cannot begin a
-            // comparison, so it unambiguously opens a UFCS form.
-            // Stage-1 lowers it to `Type::method(...)` — the trait
-            // qualifier is informational until multi-impl resolution
-            // lands.
-            TokenKind::Lt => {
-                self.bump();
-                let ty_path = self.parse_type_path()?;
-                self.expect(&TokenKind::As, "`as`")?;
-                let _trait_path = self.parse_type_path()?;
-                if !self.expect_closing_gt() {
-                    return None;
-                }
-                self.expect(&TokenKind::ColonColon, "`::`")?;
-                let method_name = if let TokenKind::Ident(n) = self.peek().clone() {
-                    self.bump();
-                    n
-                } else {
-                    let s = self.peek_span();
-                    self.error(s, "method name expected after `<T as Trait>::`");
-                    return None;
-                };
-                let mut segments = ty_path.segments;
-                segments.push(PathSegment {
-                    name: method_name,
-                    generics: Vec::new(),
-                });
-                ExprKind::Path(Path {
-                    segments,
-                    span: start,
-                })
-            }
+            // Spec 2.13.4: `<Type as Trait>::method(...)`. At the start of
+            // a primary, `<` cannot begin a comparison.
+            TokenKind::Lt => ExprKind::Path(self.parse_qpath()?),
             TokenKind::IntLit(s) => {
                 self.bump();
                 ExprKind::Literal(Literal::Int(s))
@@ -3726,6 +3738,23 @@ impl<'a> Parser<'a> {
                             return None;
                         }
                     };
+                    // `x.m::<T>(..)`: explicit generic arguments (spec 3.5).
+                    let mut type_args = Vec::new();
+                    if matches!(self.peek(), TokenKind::ColonColon)
+                        && self.peek_next() == Some(TokenKind::Lt)
+                    {
+                        self.bump();
+                        self.bump();
+                        type_args = self.nested_type_list(TokenKind::Gt)?;
+                        if !self.expect_closing_gt() {
+                            return None;
+                        }
+                        if !matches!(self.peek(), TokenKind::LParen) {
+                            let s = self.peek_span();
+                            self.error(s, "expected `(` after a method's `::<..>`");
+                            return None;
+                        }
+                    }
                     if matches!(self.peek(), TokenKind::LParen) {
                         self.bump();
                         let args = self.parse_call_args()?;
@@ -3740,7 +3769,7 @@ impl<'a> Parser<'a> {
                             kind: ExprKind::MethodCall {
                                 receiver: Box::new(expr),
                                 method: name,
-                                type_args: Vec::new(),
+                                type_args,
                                 args,
                                 trailing_closure,
                             },

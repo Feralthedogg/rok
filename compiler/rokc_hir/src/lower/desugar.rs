@@ -282,6 +282,7 @@ fn closure_ctx<'a>(
     cl_ctx.current_module.clone_from(&ctx.current_module);
     cl_ctx.local_uses.clone_from(&ctx.local_uses);
     cl_ctx.ref_captured.clone_from(&ctx.ref_captured);
+    cl_ctx.ty_bounds.clone_from(&ctx.ty_bounds);
     cl_ctx.unsafe_depth = ctx.unsafe_depth;
 
     // Closures with captures take an extra `env` parameter (a tuple of
@@ -328,6 +329,7 @@ fn closure_ctx<'a>(
     }
 
     let mut user_arg_tys: Vec<HirTy> = Vec::with_capacity(params.len());
+    let mut cell_prelude: Vec<HirStmt> = Vec::new();
     for (pi, p) in params.iter().enumerate() {
         let ty = match &p.ty {
             Some(t) => ctx.resolve_ast_ty(t),
@@ -347,6 +349,10 @@ fn closure_ctx<'a>(
             },
         };
         let local = cl_ctx.declare(Some(p.name.clone()), ty.clone());
+        if cl_ctx.ref_captured.contains(&(p.name.clone(), p.span)) {
+            let init = hir_local(local, &ty, span);
+            cell_prelude.push(cl_ctx.cell_let(&p.name, ty.clone(), init));
+        }
         hir_params.push(HirParam {
             name: p.name.clone(),
             local,
@@ -355,6 +361,7 @@ fn closure_ctx<'a>(
         });
         user_arg_tys.push(ty);
     }
+    prelude.extend(cell_prelude);
     (cl_ctx, hir_params, prelude, user_arg_tys)
 }
 
@@ -684,8 +691,7 @@ pub(super) fn bind_irrefutable(
             if name == "_" {
                 return;
             }
-            let local = ctx.declare(Some(name.clone()), ty);
-            stmts.push(HirStmt::Let { local, init: value });
+            stmts.push(ctx.declare_var(name, ty, value, pat.span));
         }
         (AstPatternKind::Tuple(pats), HirTy::Tuple(tys)) if pats.len() == tys.len() => {
             let tmp = ctx.declare(None, value.ty.clone());

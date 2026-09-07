@@ -1,0 +1,9 @@
+// expect-error: `map_to` takes 1 generic argument(s) but 2 were supplied
+struct Boxed<T> { v: T; }
+impl<T> Boxed<T> {
+    fn map_to<U>(self, u: U) -> U { return u; }
+}
+fn main() -> i32 {
+    let b = Boxed { v: 1 };
+    return b.map_to::<i32, i32>(2);
+}

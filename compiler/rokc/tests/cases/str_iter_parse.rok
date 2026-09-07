@@ -1,0 +1,52 @@
+// expect-exit: 0
+// expect-stdout:
+// h|é|가|!
+// 4 chars, 7 bytes
+// a||b|c
+// one/two/three
+// 42 -7 255 2.5 true
+// cannot parse "12x": invalid digit
+// cannot parse "300": number out of range
+
+// `str` iterators (stdlib 2.15.3) and `parse::<T>()` / `FromStr`
+// (2.15.7).
+fn main() throws (ParseError) -> i32 {
+    let out = "";
+    for c in "hé가!".chars() {
+        if out.len() > 0 { out = out + "|"; }
+        out = out + f"{c}";
+    }
+    println(out);
+    let n = 0;
+    for _c in "hé가!".chars() { n += 1; }
+    let b = 0;
+    for _x in "hé가!".bytes() { b += 1; }
+    println(f"{n} chars, {b} bytes");
+
+    let parts = "";
+    let first = true;
+    for p in "a,,b,c".split(",") {
+        if !first { parts = parts + "|"; }
+        first = false;
+        parts = parts + p;
+    }
+    println(parts);
+
+    let joined = "";
+    for line in "one\ntwo\r\nthree\n".lines() {
+        if joined.len() > 0 { joined = joined + "/"; }
+        joined = joined + line;
+    }
+    println(joined);
+
+    let i: i32 = try "42".parse();
+    let j = try "-7".parse::<i64>();
+    let k = try "255".parse::<u8>();
+    let f: f64 = try "2.5".parse();
+    let t = try "true".parse::<bool>();
+    println(f"{i} {j} {k} {f} {t}");
+
+    let bad = try "12x".parse::<i32>() catch e: ParseError { println(e.display()); 0 };
+    let big = try "300".parse::<u8>() catch e: ParseError { println(e.display()); 0u8 };
+    return bad + big as i32;
+}

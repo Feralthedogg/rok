@@ -7,8 +7,7 @@
 // ponytail: spec 2.15.2 makes `str` a growable, in-place mutable
 // buffer shared by reference (`push`, `push_str`, `+=` in place); here
 // it is an immutable value and every operation returns a new string.
-// Iterators (`chars`, `bytes`, `split`, `lines`), `parse`, `from_utf8`
-// and `Hash` wait for List / Iterator support.
+// `from_utf8`, `split_whitespace` and `char_indices` wait for a user.
 
 extern "C" {
     fn rok_str_len(s: str) -> usize;
@@ -22,6 +21,12 @@ extern "C" {
     fn rok_str_replace(s: str, from: str, to: str) -> str;
     fn rok_str_char_count(s: str) -> usize;
     fn rok_str_hash(s: str) -> u64;
+    fn rok_str_byte(s: str, i: usize) -> u8;
+    fn rok_str_int_status(s: str, signed: i32, bits: u32) -> i32;
+    fn rok_str_to_i64(s: str) -> i64;
+    fn rok_str_to_u64(s: str) -> u64;
+    fn rok_str_float_ok(s: str) -> i32;
+    fn rok_str_to_f64(s: str) -> f64;
 }
 
 impl str {
@@ -68,6 +73,20 @@ impl str {
     pub fn to_lowercase(self) -> str { return unsafe { rok_str_case(self, 0) }; }
     pub fn to_uppercase(self) -> str { return unsafe { rok_str_case(self, 1) }; }
     pub fn replace(self, from: str, to: str) -> str { return unsafe { rok_str_replace(self, from, to) }; }
+
+    /// Unicode scalar values, in order.
+    pub fn chars(self) -> CharsIter { return CharsIter { s: self, pos: 0 }; }
+    /// UTF-8 bytes, in order.
+    pub fn bytes(self) -> BytesIter { return BytesIter { s: self, pos: 0 }; }
+    /// The pieces between occurrences of `sep` (all of them, empty ones
+    /// included).
+    pub fn split(self, sep: str) -> SplitIter { return SplitIter { rest: self, sep: sep, done: false }; }
+    /// Lines without their `\n` / `\r\n`; a final line ending adds no
+    /// empty line.
+    pub fn lines(self) -> LinesIter { return LinesIter { rest: self }; }
+
+    /// `T`'s value spelled by this string (stdlib 2.15.7).
+    pub fn parse<T: FromStr>(self) throws (T::Err) -> T { return try T::from_str(self); }
 }
 
 impl Add for str {
@@ -101,4 +120,192 @@ impl Ord for str {
 /// Byte-wise FNV-1a, so `str` keys work in `Dict` / `Set`.
 impl Hash for str {
     fn hash(self) -> u64 { return unsafe { rok_str_hash(self) }; }
+}
+
+// ---- iterators (stdlib 2.15.3) ----
+
+pub struct CharsIter {
+    s: str;
+    pos: usize;
+}
+
+impl Iterator for CharsIter {
+    type Item = char;
+    fn next(ref self) -> char | none {
+        if self.pos >= self.s.len() { return none; }
+        let b = unsafe { rok_str_byte(self.s, self.pos) } as u32;
+        let n = 1usize;
+        let c = b;
+        if b >= 0xF0u32 {
+            n = 4usize;
+            c = b & 0x07u32;
+        } else if b >= 0xE0u32 {
+            n = 3usize;
+            c = b & 0x0Fu32;
+        } else if b >= 0xC0u32 {
+            n = 2usize;
+            c = b & 0x1Fu32;
+        }
+        let i = 1usize;
+        while i < n {
+            let cont = unsafe { rok_str_byte(self.s, self.pos + i) } as u32;
+            c = (c << 6u32) | (cont & 0x3Fu32);
+            i += 1;
+        }
+        self.pos += n;
+        return c as char;
+    }
+}
+
+pub struct BytesIter {
+    s: str;
+    pos: usize;
+}
+
+impl Iterator for BytesIter {
+    type Item = u8;
+    fn next(ref self) -> u8 | none {
+        if self.pos >= self.s.len() { return none; }
+        let b = unsafe { rok_str_byte(self.s, self.pos) };
+        self.pos += 1;
+        return b;
+    }
+}
+
+pub struct SplitIter {
+    rest: str;
+    sep: str;
+    done: bool;
+}
+
+impl Iterator for SplitIter {
+    type Item = str;
+    fn next(ref self) -> str | none {
+        if self.done { return none; }
+        let at = unsafe { rok_str_find(self.rest, self.sep) };
+        if at < 0 || self.sep.len() == 0 {
+            self.done = true;
+            return self.rest;
+        }
+        let i = at as usize;
+        let piece = self.rest.slice(0, i);
+        self.rest = self.rest.slice(i + self.sep.len(), self.rest.len());
+        return piece;
+    }
+}
+
+pub struct LinesIter {
+    rest: str;
+}
+
+impl Iterator for LinesIter {
+    type Item = str;
+    fn next(ref self) -> str | none {
+        if self.rest.len() == 0 { return none; }
+        let at = unsafe { rok_str_find(self.rest, "\n") };
+        let line = self.rest;
+        if at < 0 {
+            self.rest = "";
+        } else {
+            let i = at as usize;
+            line = self.rest.slice(0, i);
+            self.rest = self.rest.slice(i + 1, self.rest.len());
+        }
+        if line.ends_with("\r") { return line.slice(0, line.len() - 1); }
+        return line;
+    }
+}
+
+// ---- FromStr (stdlib 2.15.7) ----
+
+/// `str.parse::<T>()` dispatch.
+pub trait FromStr {
+    type Err;
+    fn from_str(s: str) throws (Err) -> Self;
+}
+
+/// `s` checked as an integer of `bits` bits.
+fn int_ok(s: str, signed: i32, bits: u32) throws (ParseError) {
+    let st = unsafe { rok_str_int_status(s, signed, bits) };
+    if st == 1 { throw ParseError { input: s, pos: 0, reason: "empty string" }; }
+    if st == 2 { throw ParseError { input: s, pos: 0, reason: "invalid digit" }; }
+    if st == 3 { throw ParseError { input: s, pos: 0, reason: "number out of range" }; }
+}
+
+fn signed_of(s: str, bits: u32) throws (ParseError) -> i64 {
+    try int_ok(s, 1, bits);
+    return unsafe { rok_str_to_i64(s) };
+}
+
+fn unsigned_of(s: str, bits: u32) throws (ParseError) -> u64 {
+    try int_ok(s, 0, bits);
+    return unsafe { rok_str_to_u64(s) };
+}
+
+fn float_of(s: str) throws (ParseError) -> f64 {
+    if unsafe { rok_str_float_ok(s) } == 0 {
+        throw ParseError { input: s, pos: 0, reason: "invalid float literal" };
+    }
+    return unsafe { rok_str_to_f64(s) };
+}
+
+impl FromStr for i8 {
+    type Err = ParseError;
+    fn from_str(s: str) throws (ParseError) -> i8 { return (try signed_of(s, 8)) as i8; }
+}
+impl FromStr for i16 {
+    type Err = ParseError;
+    fn from_str(s: str) throws (ParseError) -> i16 { return (try signed_of(s, 16)) as i16; }
+}
+impl FromStr for i32 {
+    type Err = ParseError;
+    fn from_str(s: str) throws (ParseError) -> i32 { return (try signed_of(s, 32)) as i32; }
+}
+impl FromStr for i64 {
+    type Err = ParseError;
+    fn from_str(s: str) throws (ParseError) -> i64 { return try signed_of(s, 64); }
+}
+impl FromStr for isize {
+    type Err = ParseError;
+    fn from_str(s: str) throws (ParseError) -> isize { return (try signed_of(s, 64)) as isize; }
+}
+impl FromStr for u8 {
+    type Err = ParseError;
+    fn from_str(s: str) throws (ParseError) -> u8 { return (try unsigned_of(s, 8)) as u8; }
+}
+impl FromStr for u16 {
+    type Err = ParseError;
+    fn from_str(s: str) throws (ParseError) -> u16 { return (try unsigned_of(s, 16)) as u16; }
+}
+impl FromStr for u32 {
+    type Err = ParseError;
+    fn from_str(s: str) throws (ParseError) -> u32 { return (try unsigned_of(s, 32)) as u32; }
+}
+impl FromStr for u64 {
+    type Err = ParseError;
+    fn from_str(s: str) throws (ParseError) -> u64 { return try unsigned_of(s, 64); }
+}
+impl FromStr for usize {
+    type Err = ParseError;
+    fn from_str(s: str) throws (ParseError) -> usize { return (try unsigned_of(s, 64)) as usize; }
+}
+impl FromStr for f64 {
+    type Err = ParseError;
+    fn from_str(s: str) throws (ParseError) -> f64 { return try float_of(s); }
+}
+impl FromStr for f32 {
+    type Err = ParseError;
+    fn from_str(s: str) throws (ParseError) -> f32 { return (try float_of(s)) as f32; }
+}
+impl FromStr for bool {
+    type Err = ParseError;
+    fn from_str(s: str) throws (ParseError) -> bool {
+        if s == "true" { return true; }
+        if s == "false" { return false; }
+        throw ParseError { input: s, pos: 0, reason: "expected `true` or `false`" };
+    }
+}
+impl FromStr for str {
+    type Err = ParseError;
+    fn from_str(s: str) throws (ParseError) -> str { return s; }
 }

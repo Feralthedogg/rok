@@ -1,0 +1,45 @@
+// expect-exit: 0
+// expect-stdout:
+// 40,30,20,10,
+// 4 2
+// 9 5
+// 2
+// <1><2><3><4>
+// 10 10
+// 4 12
+
+// Spec-shaped adapters (stdlib 2.7.1): `Map<I, U>`, `Filter<I>`, `Chain<I, J>`,
+// `Flatten<I>`, `FlatMap<I, U>`, `Peekable<I>` reach their item type through
+// `I::Item`; `Map` / `Filter` / `Chain` are `DoubleEndedIterator`s; a concrete
+// adapter type written in a signature or field works.
+
+fn first_two(p: Peekable<ListIter<i32>>) -> i32 {
+    let a = p.peek() ?? 0;
+    let b = p.next() ?? 0;
+    return a + b;
+}
+
+struct Holder { it: Map<ListIter<i32>, str>; }
+
+fn main() {
+    let xs: List<i32> = [1, 2, 3, 4];
+    for x in xs.iter().map(|x| x * 10).rev() {
+        print(f"{x},");
+    }
+    println("");
+    let ev: List<i32> = xs.iter().filter(|x| x % 2 == 0).rev().collect();
+    println(f"{ev.get(0) ?? 0} {ev.len()}");
+    let ys: List<i32> = [9];
+    let ch: List<i32> = xs.iter().chain(ys.iter()).rev().collect();
+    println(f"{ch.get(0) ?? 0} {ch.len()}");
+    println(f"{first_two(xs.iter().peekable())}");
+    let h = Holder { it: xs.iter().map(|x| f"<{x}>") };
+    for s in h.it {
+        print(s);
+    }
+    println("");
+    let fm: List<i32> = xs.iter().flat_map(|x| 0..x).collect();
+    println(f"{fm.len()} {fm.iter().sum()}");
+    let fl: List<i32> = [0..2, 5..7].iter().flatten().collect();
+    println(f"{fl.len()} {fl.iter().sum()}");
+}

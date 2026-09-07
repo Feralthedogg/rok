@@ -3,35 +3,56 @@
 // 30
 // 7
 // 4
+// 99
 
-// `rok::bare` raw pointers (stdlib 1.1) over raw allocation (1.4):
-// arithmetic is safe, `read` / `write` need `unsafe`.
-use rok::bare::alloc::{alloc, dealloc, layout_for};
-use rok::bare::ptr::{CPtr, Ptr, ptr_cast};
+// `rok::bare` raw pointers (stdlib 1.1), casts (1.2), mem (1.3) over raw
+// allocation (1.4), with the spec's signatures: arithmetic is safe,
+// `read` / `write` need `unsafe`.
+use rok::bare::alloc::{Layout, LayoutError, alloc, dealloc};
+use rok::bare::mem::{copy_nonoverlapping, size_of, swap, write_bytes};
+use rok::bare::ptr::{CPtr, ConstPtr, ManyPtr, Ptr};
 
 struct Pair { a: i64; b: i32; }
 
-fn main() -> i32 {
+fn main() throws (LayoutError) -> i32 {
+    if size_of::<i64>() != 8usize || size_of::<Pair>() != 16usize { return 1; }
     let witness: Ptr<i64> = Ptr::dangling();
-    if witness.addr() != 8usize { return 1; }
-    let layout = layout_for(witness, 4usize);
+    if witness.addr() != 8usize || !witness.is_aligned() { return 2; }
+
+    let layout = try Layout::array::<i64>(8usize);
     let raw: CPtr<u8> = unsafe { alloc(layout) };
     let bytes: Ptr<u8> = raw.as_ptr() ?? panic("alloc failed");
-    let p: Ptr<i64> = ptr_cast(bytes);
+    let p = rok::bare::ptr_cast::<i64>(bytes);
     unsafe {
         p.write(10i64);
         p.add(1usize).write(20i64);
         p.add(2usize).write(p.read() + p.add(1usize).read());
     }
     rok_print_i64(unsafe { p.add(2usize).read() });
-    if p.add(3usize).distance(p) != 3 { return 2; }
+    if p.add(3usize).distance(p) != 3 { return 3; }
 
     // A struct through a pointer.
-    let q: Ptr<Pair> = ptr_cast(bytes);
+    let q = bytes.cast::<Pair>();
     unsafe { q.write(Pair { a: 7i64, b: 4 }); }
     let back = unsafe { q.read() };
     rok_print_i64(back.a);
     rok_print_i32(back.b);
+
+    // mem: write_bytes / copy / swap; ManyPtr indexing; volatile.
+    let m: ManyPtr<i64> = p.as_many();
+    unsafe {
+        write_bytes(p.add(4usize), 0u8, 4usize);
+        m.write(5usize, 99i64);
+        copy_nonoverlapping(p.add(5usize).as_const(), p.add(6usize), 1usize);
+        swap(p, p.add(6usize));
+        p.write_volatile(p.read_volatile());
+    }
+    let c: ConstPtr<i64> = p.as_const();
+    rok_print_i64(unsafe { c.read() });
+    if unsafe { m.read(4usize) } != 0i64 { return 4; }
+
+    let fallback = try Layout::from_size_align(8usize, 3usize) catch _ { Layout::new::<u8>() };
+    if fallback.align() != 1usize { return 5; }
     unsafe { dealloc(bytes, layout) };
     return 0;
 }

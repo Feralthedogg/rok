@@ -1030,23 +1030,33 @@ impl<'a> FnBuilder<'a> {
                 });
                 Operand::Copy(dst)
             }
-            HirExprKind::RawRead { addr, ty } => {
+            HirExprKind::RawRead { addr, ty, volatile } => {
                 let addr = self.lower_expr_to_operand(addr);
                 let ty = lower_ty_in(ty, self.module);
                 let dst = self.fresh_local(ty.clone());
                 self.push_stmt(Statement::Assign {
                     target: dst,
-                    rvalue: RValue::RawLoad { addr, ty },
+                    rvalue: RValue::RawLoad {
+                        addr,
+                        ty,
+                        volatile: *volatile,
+                    },
                 });
                 Operand::Copy(dst)
             }
-            HirExprKind::RawWrite { addr, value, ty } => {
+            HirExprKind::RawWrite {
+                addr,
+                value,
+                ty,
+                volatile,
+            } => {
                 let addr = self.lower_expr_to_operand(addr);
                 let value = self.lower_expr_to_operand(value);
                 self.push_stmt(Statement::RawStore {
                     addr,
                     value,
                     ty: lower_ty_in(ty, self.module),
+                    volatile: *volatile,
                 });
                 Operand::Const(ConstVal::Unit)
             }

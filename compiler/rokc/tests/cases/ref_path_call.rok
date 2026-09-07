@@ -1,0 +1,26 @@
+// expect-exit: 0
+// expect-stdout: 12 5
+
+// Path calls of `ref self` methods pass the receiver with `ref` (spec
+// 4.7.3): inherent, trait and generic-impl methods write it back.
+
+struct Counter { c: i32; }
+impl Counter {
+    fn tick(ref self) { self.c = self.c + 1; }
+}
+trait Bump { fn bump(ref self); }
+impl Bump for Counter { fn bump(ref self) { self.c = self.c + 10; } }
+struct Box2<T> { v: T; }
+impl<T> Box2<T> {
+    fn set(ref self, v: T) { self.v = v; }
+}
+
+fn main() {
+    let c = Counter { c: 0 };
+    Counter::tick(ref c);
+    Bump::bump(ref c);
+    c.tick();
+    let b = Box2 { v: 1 };
+    Box2::set(ref b, 5);
+    println(f"{c.c} {b.v}");
+}

@@ -1,0 +1,64 @@
+// expect-exit: 0
+// expect-stdout:
+// inner 11
+// outer 1
+// i 10
+// i 20
+// i 30
+// total 60
+// n 10
+// 2 1
+// 7
+// 101
+
+// `[ref x]` (spec 4.6.2) names one binding — the innermost `x` at the
+// closure — and only that binding lives in a cell: `let`, destructuring,
+// `for`, `match` and closure-parameter bindings.
+
+struct P { a: i32; b: i32; }
+
+fn main() {
+    // Per binding: only the inner `x` is a cell; the outer one stays plain.
+    let x = 1;
+    {
+        let x = 10;
+        let bump = [ref x] || { x = x + 1; };
+        bump();
+        println(f"inner {x}");
+    }
+    println(f"outer {x}");
+
+    // `for` bindings: a fresh cell per iteration.
+    let total = 0;
+    for i in [1, 2, 3] {
+        let add = [ref i, ref total] || { i = i * 10; total = total + i; };
+        add();
+        println(f"i {i}");
+    }
+    println(f"total {total}");
+
+    // match / destructuring bindings.
+    let v: i32 | none = 5;
+    match v {
+        n: i32 => {
+            let dbl = [ref n] || { n = n * 2; };
+            dbl();
+            println(f"n {n}");
+        }
+        none => {}
+    }
+    let (a, b) = (1, 2);
+    let sw = [ref a, ref b] || { let t = a; a = b; b = t; };
+    sw();
+    println(f"{a} {b}");
+    let P { a: pa, b: pb } = P { a: 3, b: 4 };
+    let inc = [ref pa] || { pa = pa + pb; };
+    inc();
+    println(f"{pa}");
+    let g = |k: i32| {
+        let h = [ref k] || { k = k + 100; };
+        h();
+        k
+    };
+    println(f"{g(1)}");
+}

@@ -454,6 +454,65 @@ pub extern "C" fn rok_str_from_char(c: u32) -> RokStr {
     build(&[utf8(c, &mut buf)])
 }
 
+/// Byte `i` of `s` (stdlib 2.15 `bytes()`); the caller checks `i < len`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_str_byte(s: RokStr, i: usize) -> u8 {
+    s.bytes().get(i).copied().unwrap_or(0)
+}
+
+/// `s` as UTF-8 text (it always is: `str` holds UTF-8).
+fn text(s: &RokStr) -> &str {
+    core::str::from_utf8(s.bytes()).unwrap_or("")
+}
+
+/// Whether `s` parses as an integer of `bits` bits (`signed != 0`):
+/// 0 = ok, 1 = empty, 2 = invalid digit, 3 = out of range
+/// (`FromStr` for the integer types, stdlib 2.15.7).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_str_int_status(s: RokStr, signed: i32, bits: u32) -> i32 {
+    let t = text(&s);
+    let digits = t.strip_prefix(['-', '+']).unwrap_or(t);
+    if digits.is_empty() {
+        return 1;
+    }
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return 2;
+    }
+    let fits = if signed != 0 {
+        t.parse::<i64>()
+            .is_ok_and(|v| bits >= 64 || (v >= -(1i64 << (bits - 1)) && v < (1i64 << (bits - 1))))
+    } else {
+        !t.starts_with('-')
+            && t.parse::<u64>()
+                .is_ok_and(|v| bits >= 64 || v < (1u64 << bits))
+    };
+    if fits { 0 } else { 3 }
+}
+
+/// `s` as an `i64` (checked first by `rok_str_int_status`).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_str_to_i64(s: RokStr) -> i64 {
+    text(&s).parse().unwrap_or(0)
+}
+
+/// `s` as a `u64` (checked first by `rok_str_int_status`).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_str_to_u64(s: RokStr) -> u64 {
+    text(&s).parse().unwrap_or(0)
+}
+
+/// Whether `s` parses as a float (`inf`, `NaN`, exponents included).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_str_float_ok(s: RokStr) -> i32 {
+    i32::from(text(&s).parse::<f64>().is_ok())
+}
+
+/// `s` as an `f64` (checked first by `rok_str_float_ok`).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_str_to_f64(s: RokStr) -> f64 {
+    text(&s).parse().unwrap_or(0.0)
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;

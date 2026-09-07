@@ -1,0 +1,48 @@
+// expect-exit: 0
+// expect-stdout:
+// 5 10
+// 4,3,2,1,0,
+// 2 4 2
+// 6
+// 6
+// 3
+// 3 33
+// 4
+// 2
+
+// Range values (stdlib 2.7.4): `a..b` / `a..=b` / `a..` are `Range` /
+// `RangeInclusive` / `RangeFrom` values — in `let`s, fields, arguments —
+// iterating through `Step` (2.7.3); `Range` / `RangeInclusive` are
+// `DoubleEndedIterator`s. `RangeFrom` stops before the type maximum.
+
+struct Win { r: Range<i32>; }
+
+fn total(r: Range<i64>) -> i64 {
+    let s: i64 = 0;
+    for x in r {
+        s = s + x;
+    }
+    return s;
+}
+
+fn main() {
+    let r = 0..5;
+    let v: List<i32> = r.collect();
+    println(f"{v.len()} {v.iter().sum()}");
+    for x in (0..5).rev() {
+        print(f"{x},");
+    }
+    println("");
+    let w = Win { r: 2..4 };
+    println(f"{w.r.start} {w.r.end} {w.r.count()}");
+    println(f"{total(1..4)}");
+    let inc: List<u8> = (250u8..=255u8).collect();
+    println(f"{inc.len()}");
+    let back: List<i32> = (1..=3).rev().collect();
+    println(f"{back.get(0) ?? 0}");
+    let n: usize = 3;
+    println(f"{(0..n).count()} {(10..).take(3).sum()}");
+    println(f"{(0..10).step_by(3).count()}");
+    let mx: List<i8> = (125i8..).collect();
+    println(f"{mx.len()}");
+}
