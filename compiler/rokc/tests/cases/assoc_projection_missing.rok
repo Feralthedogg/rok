@@ -1,0 +1,21 @@
+// expect-error: `Sq` has no associated type `Nope`
+
+trait Shape {
+    type Unit;
+    fn unit(self) -> Unit;
+}
+
+struct Sq { s: i32; }
+
+impl Shape for Sq {
+    type Unit = i64;
+    fn unit(self) -> i64 { return self.s as i64; }
+}
+
+fn nope<T: Shape>(t: T) -> T::Nope {
+    return t.unit();
+}
+
+fn main() {
+    nope(Sq { s: 1 });
+}

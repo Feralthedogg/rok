@@ -19,10 +19,20 @@ pub struct FnDef {
     pub body: Option<Block>,
     pub is_async: bool,
     pub is_generator: bool,
+    /// `unsafe fn` (spec 4.15.1): callers need an unsafe scope.
+    pub is_unsafe: bool,
     pub throws: ThrowsKind,
     pub where_clause: Vec<WherePred>,
     pub span: Span,
 }
+
+/// Marker attribute of an `extern "C" fn f(..) { .. }` definition
+/// (spec 5.9.10).
+pub const EXTERN_C_FN_ATTR: &str = "#extern_c";
+
+/// Bound-list marker of an `unsafe fn(..)` type (`#` cannot start a
+/// user identifier).
+pub const UNSAFE_FN_MARK: &str = "#unsafe";
 
 /// Error type written for an untyped `throws` (= `throws (any Error)`).
 pub const UNTYPED_THROWS_MARK: &str = "#throws";
@@ -203,6 +213,8 @@ pub enum ExprKind {
     Dict(Vec<(Expr, Expr)>),
     Set(Vec<Expr>),
     Block(Block),
+    /// `unsafe { ... }` (spec 4.15.2).
+    Unsafe(Block),
     If {
         cond: Box<Expr>,
         then_branch: Block,
@@ -342,8 +354,13 @@ pub enum AccessTail {
 #[derive(Clone, Debug)]
 pub enum CallArg {
     Positional(Expr),
-    Named { name: String, value: Expr },
+    Named {
+        name: String,
+        value: Expr,
+    },
     Spread(Expr),
+    /// `f(ref x)`: pass the binding `x` by reference (spec 4.7.3).
+    Ref(Expr),
 }
 
 #[derive(Clone, Debug)]
@@ -465,6 +482,9 @@ pub enum TyKind {
     SelfUpper,
     /// `!` — the never type of a diverging function (`panic`, `exit`).
     Never,
+    /// A const generic argument in a type-argument list (`Matrix<f64, 3, 4>`,
+    /// `replicate::<i32, 8>`; spec 2.11.4).
+    Const(ConstExpr),
 }
 
 /// Const-expression placeholder for array length / const generics.

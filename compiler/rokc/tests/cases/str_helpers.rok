@@ -13,16 +13,16 @@ extern "C" {
 }
 
 fn main() -> i32 {
-    rok_print_i64(rok_str_len("hello") as i64);
-    rok_print_i64(rok_str_len("") as i64);
+    rok_print_i64(unsafe { rok_str_len("hello") } as i64);
+    rok_print_i64(unsafe { rok_str_len("") } as i64);
 
-    if rok_str_eq("foo", "foo") != 0 {
+    if unsafe { rok_str_eq("foo", "foo") } != 0 {
         rok_print_str("match");
     } else {
         rok_print_str("nope");
     }
 
-    if rok_str_eq("foo", "bar") != 0 {
+    if unsafe { rok_str_eq("foo", "bar") } != 0 {
         rok_print_str("match");
     } else {
         rok_print_str("nomatch");

@@ -1,0 +1,11 @@
+// expect-error: `x` is passed as `ref` to `add_to` and also read by another argument
+
+fn inc(ref n: i32) { n = n + 1; }
+fn show(n: i32) { println(f"{n}"); }
+fn swap(ref a: i32, ref b: i32) { let t = a; a = b; b = t; }
+fn add_to(ref a: i32, b: i32) { a = a + b; }
+
+fn main() {
+    let x = 1;
+    add_to(ref x, x + 1);
+}

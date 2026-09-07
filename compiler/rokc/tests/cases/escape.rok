@@ -6,6 +6,6 @@ extern "C" {
 }
 
 fn main() -> i32 {
-    puts("line1\ttab line2");
+    unsafe { puts("line1\ttab line2") };
     return 0i32;
 }

@@ -32,6 +32,7 @@ pub fn lower(module: &HirModule) -> MirModule {
             ty: lower_ty_in(&s.ty, module),
             init: s.init.clone(),
             is_mut: s.is_mut,
+            is_extern: s.is_extern,
         })
         .collect();
     let fnv = FnValues {
@@ -58,8 +59,14 @@ pub fn lower(module: &HirModule) -> MirModule {
         .map(|f| lower_fn(f, module, &ret_tys, &fnv))
         .collect();
     finish_fn_values(&mut functions, &fnv);
-    prune_unreachable(&mut functions);
-    MirModule { functions, statics }
+    let roots: Vec<FunctionId> = module.exports.iter().map(|(id, _)| *id).collect();
+    prune_unreachable(&mut functions, &roots);
+    MirModule {
+        functions,
+        statics,
+        exports: module.exports.clone(),
+        pkg_hashes: Vec::new(),
+    }
 }
 
 /// What lowering function values (spec 4.4: `{code, env}`) leaves to do
@@ -165,7 +172,8 @@ fn finish_fn_values(functions: &mut Vec<MirFunction>, fnv: &FnValues) {
 /// a mangled symbol, so nothing else is called from outside by name.
 // ponytail: `#[export_name]` items would be roots too; the attribute
 // isn't carried into MIR yet.
-fn prune_unreachable(functions: &mut Vec<MirFunction>) {
+fn prune_unreachable(functions: &mut Vec<MirFunction>, exports: &[FunctionId]) {
+    // Roots: `main` and `#[export_name]` items (spec 902 9.2.8).
     let Some(main) = functions.iter().find(|f| f.name == "main").map(|f| f.id) else {
         return;
     };
@@ -176,6 +184,7 @@ fn prune_unreachable(functions: &mut Vec<MirFunction>) {
         .collect();
     let mut live: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
     let mut work = vec![main];
+    work.extend_from_slice(exports);
     while let Some(id) = work.pop() {
         if !live.insert(id) {
             continue;
@@ -1021,6 +1030,37 @@ impl<'a> FnBuilder<'a> {
                 });
                 Operand::Copy(dst)
             }
+            HirExprKind::RawRead { addr, ty } => {
+                let addr = self.lower_expr_to_operand(addr);
+                let ty = lower_ty_in(ty, self.module);
+                let dst = self.fresh_local(ty.clone());
+                self.push_stmt(Statement::Assign {
+                    target: dst,
+                    rvalue: RValue::RawLoad { addr, ty },
+                });
+                Operand::Copy(dst)
+            }
+            HirExprKind::RawWrite { addr, value, ty } => {
+                let addr = self.lower_expr_to_operand(addr);
+                let value = self.lower_expr_to_operand(value);
+                self.push_stmt(Statement::RawStore {
+                    addr,
+                    value,
+                    ty: lower_ty_in(ty, self.module),
+                });
+                Operand::Const(ConstVal::Unit)
+            }
+            HirExprKind::SizeOf { ty, align } => {
+                let dst = self.fresh_local(MirTy::Prim(PrimTy::Usize));
+                self.push_stmt(Statement::Assign {
+                    target: dst,
+                    rvalue: RValue::SizeOf {
+                        ty: lower_ty_in(ty, self.module),
+                        align: *align,
+                    },
+                });
+                Operand::Copy(dst)
+            }
             HirExprKind::BufGet { buf, index, elem } => {
                 let buf = self.lower_expr_to_operand(buf);
                 let index = self.lower_expr_to_operand(index);
@@ -1111,7 +1151,7 @@ impl<'a> FnBuilder<'a> {
                 let raw = self.lower_expr_to_operand(value);
                 let src_ty = lower_ty_in(from_ty, self.module);
                 let dst_ty = lower_ty_in(storage_ty, self.module);
-                self.cast_to(raw, &src_ty, &dst_ty)
+                self.union_bits(raw, &src_ty, &dst_ty)
             }
             HirExprKind::UnionRead {
                 target,
@@ -1134,7 +1174,7 @@ impl<'a> FnBuilder<'a> {
                     },
                 });
                 let dst_ty = lower_ty_in(field_ty, self.module);
-                self.cast_to(Operand::Copy(storage_local), &storage_mir_ty, &dst_ty)
+                self.union_bits(Operand::Copy(storage_local), &storage_mir_ty, &dst_ty)
             }
             HirExprKind::TupleField {
                 target,
@@ -1593,6 +1633,16 @@ impl<'a> FnBuilder<'a> {
             .payload_ty
             .as_ref()
             .map_or(MirTy::Unit, |t| lower_ty_in(t, self.module))
+    }
+
+    /// Spec 2.5.2: a union field write / read reinterprets bits (an
+    /// `f32` written and read as `i32` is its IEEE bits, not `1`).
+    fn union_bits(&mut self, source: Operand, from_ty: &MirTy, to_ty: &MirTy) -> Operand {
+        if matches!((from_ty, to_ty), (MirTy::Prim(_), MirTy::Prim(_))) {
+            self.payload_cast(source, from_ty, to_ty)
+        } else {
+            self.cast_to(source, from_ty, to_ty)
+        }
     }
 
     /// Move a value into / out of a shared payload slot, keeping bits.

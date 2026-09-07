@@ -52,6 +52,49 @@ pub fn resolve_ty(ty: &Ty) -> HirTy {
             Vec::new(),
         ),
         TyKind::Throws { ok, err } => throws_ty(resolve_ty(ok), resolve_ty(err)),
+        TyKind::Const(c) => {
+            const_expr_to_u32(c).map_or(HirTy::Unknown, |v| const_ty(v.into(), None))
+        }
+    }
+}
+
+/// A const generic argument carried in a type substitution (spec 2.11):
+/// `Path(["#const", value, prim])` (`#` cannot start a user name; `prim`
+/// is empty until the parameter's declared type is known).
+#[must_use]
+pub fn const_ty(value: i128, prim: Option<PrimTy>) -> HirTy {
+    HirTy::Path(vec![
+        "#const".to_owned(),
+        value.to_string(),
+        prim.map_or_else(String::new, |p| p.name().to_owned()),
+    ])
+}
+
+/// The value (and declared type, if known) of a `const_ty`.
+#[must_use]
+pub fn as_const(t: &HirTy) -> Option<(i128, Option<PrimTy>)> {
+    let HirTy::Path(p) = t else { return None };
+    match p.as_slice() {
+        [tag, v, prim] if tag == "#const" => Some((v.parse().ok()?, {
+            use PrimTy as P;
+            [
+                P::I8,
+                P::I16,
+                P::I32,
+                P::I64,
+                P::Isize,
+                P::U8,
+                P::U16,
+                P::U32,
+                P::U64,
+                P::Usize,
+                P::Bool,
+                P::CChar,
+            ]
+            .into_iter()
+            .find(|q| q.name() == prim)
+        })),
+        _ => None,
     }
 }
 

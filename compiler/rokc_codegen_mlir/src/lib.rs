@@ -7,6 +7,8 @@
 pub mod emit;
 mod mangle;
 
+pub use mangle::pkg_hash;
+
 use rokc_diagnostic::{ErrorKind, RokDiagnostic};
 use rokc_mir::MirModule;
 

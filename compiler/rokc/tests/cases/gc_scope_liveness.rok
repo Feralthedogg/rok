@@ -17,15 +17,15 @@ struct Box2 { a: i64; b: i64; }
 impl Val for Box2 { fn val(self) -> i64 { return self.a + self.b; } }
 
 fn main() -> i32 {
-    rok_gc_collect();
-    let base = rok_gc_stats_live_bytes();
+    unsafe { rok_gc_collect() };
+    let base = unsafe { rok_gc_stats_live_bytes() };
     let v: i64 = 0;
     if true {
         let t: any Val = Box2 { a: 2, b: 3 };
         v = t.val();
     }
-    rok_gc_collect();
-    if rok_gc_stats_live_bytes() != base { return 1; }
+    unsafe { rok_gc_collect() };
+    if unsafe { rok_gc_stats_live_bytes() } != base { return 1; }
     rok_print_i64(v);
 
     // Block value escapes; the block's other boxes do not.
@@ -36,8 +36,8 @@ fn main() -> i32 {
     } else {
         Box2 { a: 0, b: 0 }
     };
-    rok_gc_collect();
-    if rok_gc_stats_live_bytes() - base != 32usize { return 2; }
+    unsafe { rok_gc_collect() };
+    if unsafe { rok_gc_stats_live_bytes() } - base != 32usize { return 2; }
     rok_print_i64(kept.val());
     rok_print_str("ok");
     return 0;

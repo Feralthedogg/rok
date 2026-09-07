@@ -18,6 +18,12 @@ use rokc_ir_common::{BlockId, ConstVal, FunctionId, LocalId, PrimOp, PrimTy};
 pub struct MirModule {
     pub functions: Vec<MirFunction>,
     pub statics: Vec<MirStaticDef>,
+    /// `#[export_name]` functions: id → linker symbol.
+    pub exports: Vec<(FunctionId, String)>,
+    /// Package hash per item-path prefix (`rok::core`, ..., `""` for the
+    /// user package; spec 0.3.3), longest prefix first. Filled by the
+    /// driver; empty → one hash over the printed MIR.
+    pub pkg_hashes: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -26,6 +32,8 @@ pub struct MirStaticDef {
     pub ty: MirTy,
     pub init: ConstVal,
     pub is_mut: bool,
+    /// `extern "C" { static .. }`: defined outside, keeps its C name.
+    pub is_extern: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +89,12 @@ pub enum Statement {
         index: Operand,
         value: Operand,
         elem_ty: MirTy,
+    },
+    // Store `value` (a `ty`) at raw address `addr` (`usize`).
+    RawStore {
+        addr: Operand,
+        value: Operand,
+        ty: MirTy,
     },
     // `STATIC_NAME = value` — store into a module-level global.
     StaticStore {
@@ -184,6 +198,16 @@ pub enum RValue {
     BufAlloc {
         elem_ty: MirTy,
         len: Operand,
+    },
+    // Load a `ty` from raw address `addr` (`usize`).
+    RawLoad {
+        addr: Operand,
+        ty: MirTy,
+    },
+    // Size (or alignment) of `ty` in bytes, as `usize`.
+    SizeOf {
+        ty: MirTy,
+        align: bool,
     },
     // Element `index` of a `BufAlloc` object (unchecked).
     BufLoad {

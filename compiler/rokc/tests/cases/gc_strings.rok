@@ -40,11 +40,11 @@ fn main() -> i32 {
     let i = 0;
     while i < 200000 {
         last = f"item-{i}";
-        let live = rok_gc_stats_live_bytes();
+        let live = unsafe { rok_gc_stats_live_bytes() };
         if live > peak { peak = live; }
         i += 1;
     }
-    rok_gc_collect();
+    unsafe { rok_gc_collect() };
     println(last);
     let out = "";
     let cur = list;

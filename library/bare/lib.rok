@@ -5,5 +5,5 @@
 // Importing this crate is a danger signal; user code must `use rok::bare::...`
 // explicitly.
 
-// Submodule declarations land here as the bare surface fills in.
-// Until then, the package root is empty.
+pub mod alloc;
+pub mod ptr;

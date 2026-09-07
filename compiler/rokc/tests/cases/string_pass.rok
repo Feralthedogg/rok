@@ -5,7 +5,7 @@ extern "C" {
 }
 
 fn greet(name: str) -> i32 {
-    return puts(name);
+    return unsafe { puts(name) };
 }
 
 fn main() {

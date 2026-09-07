@@ -1,0 +1,12 @@
+// expect-exit: 42
+// Writing a union field (its initialiser) is safe; reading one back
+// reinterprets bits and needs `unsafe` (spec 4.15.2).
+union Repr {
+    bits: i64;
+    low: i32;
+}
+
+fn main() -> i32 {
+    let r = Repr { bits: 42i64 };
+    return unsafe { r.low };
+}

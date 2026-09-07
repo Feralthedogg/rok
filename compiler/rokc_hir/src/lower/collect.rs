@@ -82,6 +82,7 @@ pub fn lower_full(
     // get a silent miscompile (`a == b` returning `false` when they
     // expected the auto-derived equality, etc.).
     for item in &program.items {
+        rokc_diagnostic::set_current_span(item.span());
         let attrs: &[rokc_ast::Attribute] = match item {
             Item::Struct(s) => &s.attrs,
             Item::Enum(e) => &e.attrs,
@@ -109,6 +110,7 @@ pub fn lower_full(
     let mut auto_traits: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut type_vis: HashMap<String, Visibility> = HashMap::new();
     for item in &program.items {
+        rokc_diagnostic::set_current_span(item.span());
         let (name, vis) = match item {
             Item::Struct(s) => (&s.name, s.vis),
             Item::Enum(e) => (&e.name, e.vis),
@@ -167,6 +169,7 @@ pub fn lower_full(
     let mut enum_decls: Vec<&AstEnumDef> = Vec::new();
     let mut generic_enums: HashMap<String, &AstEnumDef> = HashMap::new();
     for item in &program.items {
+        rokc_diagnostic::set_current_span(item.span());
         if let Item::Enum(e) = item {
             if enum_table.contains_key(&e.name) || generic_enums.contains_key(&e.name) {
                 continue;
@@ -187,6 +190,7 @@ pub fn lower_full(
     let mut generic_structs: HashMap<String, &AstStructDef> = HashMap::new();
     let mut struct_decls: Vec<&AstStructDef> = Vec::new();
     for item in &program.items {
+        rokc_diagnostic::set_current_span(item.span());
         if let Item::Struct(s) = item {
             if struct_table.contains_key(&s.name) || generic_structs.contains_key(&s.name) {
                 continue;
@@ -207,6 +211,7 @@ pub fn lower_full(
     // the bitcast/cast access path instead of the regular field-by-index.
     let mut union_decls: Vec<&rokc_ast::UnionDef> = Vec::new();
     for item in &program.items {
+        rokc_diagnostic::set_current_span(item.span());
         if let Item::Union(u) = item {
             if struct_table.contains_key(&u.name) || generic_structs.contains_key(&u.name) {
                 continue;
@@ -302,14 +307,57 @@ pub fn lower_full(
     // + load/store at codegen time.
     let mut consts: HashMap<String, (Ty, Expr)> = HashMap::new();
     for item in &program.items {
-        if let Item::Const(c) = item {
+        rokc_diagnostic::set_current_span(item.span());
+        // Spec 2.9.1: an impl's `const` is `Type::NAME` (`Self::NAME`
+        // inside the impl).
+        let impl_consts: Vec<(String, &rokc_ast::ConstDef)> = match item {
+            Item::Const(c) => vec![(c.name.clone(), c)],
+            Item::Impl(i) => {
+                let cs: Vec<&rokc_ast::ConstDef> = i
+                    .items
+                    .iter()
+                    .filter_map(|it| match it {
+                        AstImplItem::Const(c) => Some(c),
+                        _ => None,
+                    })
+                    .collect();
+                let target = match &i.self_ty.kind {
+                    AstTyKind::Path(p)
+                        if p.segments.iter().all(|s| s.generics.is_empty()) && !cs.is_empty() =>
+                    {
+                        let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
+                        names.canon(&segs, &module_of(&cs[0].name), &[])
+                    }
+                    _ => None,
+                };
+                if let Some(t) = target {
+                    cs.into_iter()
+                        .map(|c| (format!("{t}::{}", leaf_name(&c.name)), c))
+                        .collect()
+                } else {
+                    if let Some(c) = cs.first() {
+                        err(
+                            &mut pre_diags,
+                            format!(
+                                "associated const `{}` needs a non-generic named impl target \
+                                 (stage-1 limitation)",
+                                leaf_name(&c.name)
+                            ),
+                        );
+                    }
+                    Vec::new()
+                }
+            }
+            _ => Vec::new(),
+        };
+        for (key, c) in impl_consts {
             if consts
-                .insert(c.name.clone(), (c.ty.clone(), c.value.clone()))
+                .insert(key.clone(), (c.ty.clone(), c.value.clone()))
                 .is_some()
             {
                 err(
                     &mut pre_diags,
-                    format!("const `{}` is defined more than once", c.name),
+                    format!("const `{key}` is defined more than once"),
                 );
             }
         }
@@ -317,6 +365,7 @@ pub fn lower_full(
     let mut static_defs: Vec<HirStaticDef> = Vec::new();
     let mut static_tys: HashMap<String, HirTy> = HashMap::new();
     for item in &program.items {
+        rokc_diagnostic::set_current_span(item.span());
         if let Item::Static(s) = item {
             if static_tys.contains_key(&s.name) {
                 err(
@@ -353,8 +402,39 @@ pub fn lower_full(
                 ty,
                 init,
                 is_mut: s.is_mut,
+                is_extern: false,
                 span: s.span,
             });
+        }
+        // Spec 5.9.3: `extern "C" { static errno: i32; }` — a C global,
+        // read (and with `mut` written) like a `static`.
+        if let Item::Extern(blk) = item {
+            for ei in &blk.items {
+                let rokc_ast::ExternItem::Static(s) = ei else {
+                    continue;
+                };
+                if static_tys.contains_key(&s.name) {
+                    err(
+                        &mut pre_diags,
+                        format!("static `{}` is defined more than once", s.name),
+                    );
+                    continue;
+                }
+                let sc = Scope {
+                    names: &names,
+                    module: "",
+                };
+                let ty = resolve_ty_with_structs(&s.ty, &struct_table, &enum_table, sc);
+                static_tys.insert(s.name.clone(), ty.clone());
+                static_defs.push(HirStaticDef {
+                    name: s.name.clone(),
+                    ty,
+                    init: ConstVal::Unit,
+                    is_mut: s.is_mut,
+                    is_extern: true,
+                    span: s.span,
+                });
+            }
         }
     }
     // Pass 1d: collect type aliases. Names resolve to the aliased type
@@ -362,6 +442,7 @@ pub fn lower_full(
     // expansion so the alias table can refer to other aliases.
     let mut type_aliases: HashMap<String, HirTy> = HashMap::new();
     for item in &program.items {
+        rokc_diagnostic::set_current_span(item.span());
         if let Item::TypeAlias(a) = item {
             let module = module_of(&a.name);
             let sc = Scope {
@@ -449,7 +530,7 @@ pub fn lower_full(
     // them in `decls` / `fn_table`.
     let mut fn_table: HashMap<String, FnSig> = HashMap::new();
     let mut extern_fns = std::collections::HashSet::new();
-    let mut method_table: HashMap<(MethodTarget, String), FunctionId> = HashMap::new();
+    let mut method_table: HashMap<(MethodTarget, String), Vec<FunctionId>> = HashMap::new();
     let mut method_info: HashMap<FunctionId, MethodInfo> = HashMap::new();
     // Records `(Type, TraitName)` for each `impl Trait for Type` block
     // — feeds the generic-bound check at monomorphization time.
@@ -457,10 +538,11 @@ pub fn lower_full(
         std::collections::HashSet::new();
     let mut decls: Vec<MethodOrFn<'_>> = Vec::new();
     let mut generic_fns: HashMap<String, &FnDef> = HashMap::new();
-    let mut generic_methods: HashMap<(String, String), GenericMethod> = HashMap::new();
+    let mut generic_methods: HashMap<(String, String), Vec<GenericMethod>> = HashMap::new();
     let mut generic_trait_impls: Vec<GenericTraitImpl> = Vec::new();
     let mut intrinsics: HashMap<FunctionId, PrimOp> = HashMap::new();
-    let mut ref_self: HashMap<FunctionId, (HirTy, HirTy)> = HashMap::new();
+    let mut unsafe_fns: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
+    let mut ref_out: HashMap<FunctionId, RefOut> = HashMap::new();
     let mut extern_fn_ids: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
     let sig_of = |fn_def: &FnDef, id: FunctionId, self_ty: Option<&HirTy>, sc: Scope<'_>| {
         let resolve = |t: &Ty| {
@@ -484,9 +566,11 @@ pub fn lower_full(
                 })
                 .collect(),
             param_names: fn_def.params.iter().map(|p| p.name.clone()).collect(),
+            param_refs: fn_def.params.iter().map(|p| p.by_ref).collect(),
         }
     };
     for item in &program.items {
+        rokc_diagnostic::set_current_span(item.span());
         match item {
             Item::Fn(fn_def) => {
                 if fn_table.contains_key(&fn_def.name) || generic_fns.contains_key(&fn_def.name) {
@@ -521,10 +605,19 @@ pub fn lower_full(
                     names: &names,
                     module: &module,
                 };
-                fn_table.insert(fn_def.name.clone(), sig_of(fn_def, id, None, sc));
+                let sig = sig_of(fn_def, id, None, sc);
+                if let Some(o) = ref_out_of(&sig) {
+                    ref_out.insert(id, o);
+                }
+                fn_table.insert(fn_def.name.clone(), sig);
                 decls.push(MethodOrFn::Fn(fn_def));
             }
             Item::Extern(blk) => {
+                // Spec 4.15.1: a C function is implicitly `unsafe` to call.
+                let safe = blk
+                    .attrs
+                    .iter()
+                    .any(|a| a.path == [crate::SAFE_EXTERN_ATTR]);
                 for ei in &blk.items {
                     let rokc_ast::ExternItem::Fn(fn_def) = ei else {
                         continue;
@@ -536,6 +629,9 @@ pub fn lower_full(
                     }
                     extern_fns.insert(fn_def.name.clone());
                     let id = FunctionId(u32::try_from(decls.len()).expect("FunctionId overflow"));
+                    if !safe {
+                        unsafe_fns.insert(id);
+                    }
                     let sc = Scope {
                         names: &names,
                         module: "",
@@ -552,6 +648,7 @@ pub fn lower_full(
     // can pick up default method bodies.
     let mut trait_defs: HashMap<String, &rokc_ast::TraitDef> = HashMap::new();
     for item in &program.items {
+        rokc_diagnostic::set_current_span(item.span());
         if let Item::Trait(t) = item {
             trait_defs.entry(t.name.clone()).or_insert(t);
         }
@@ -627,10 +724,12 @@ pub fn lower_full(
         })
         .collect();
     let mut trait_impl_tys: HashMap<String, Vec<HirTy>> = HashMap::new();
+    let mut impl_assoc: HashMap<MethodTarget, Vec<(String, HirTy)>> = HashMap::new();
     let mut neg_auto: std::collections::HashSet<(String, String)> =
         std::collections::HashSet::new();
 
     for item in &program.items {
+        rokc_diagnostic::set_current_span(item.span());
         let Item::Impl(impl_def) = item else { continue };
         let module = impl_module(impl_def);
         let sc = Scope {
@@ -698,6 +797,23 @@ pub fn lower_full(
                 .and_then(|tp| tp.segments.last())
                 .map(|s| s.generics.iter().map(rty).collect())
                 .unwrap_or_default();
+            // Spec 2.10.5: omitted trait arguments take the parameter's
+            // default (`trait Add<Rhs = Self>`: `impl Add for V` is
+            // `impl Add<V> for V`).
+            let mut args = args;
+            if let Some(td) = trait_defs.get(tn) {
+                for gp in td.generics.params.iter().skip(args.len()) {
+                    let rokc_ast::GenericParam::Type {
+                        default: Some(d), ..
+                    } = gp
+                    else {
+                        break;
+                    };
+                    let is_self = matches!(&d.kind, AstTyKind::Path(p)
+                        if p.segments.len() == 1 && p.segments[0].name == "Self");
+                    args.push(if is_self { target_ty.clone() } else { rty(d) });
+                }
+            }
             let assoc: Vec<(String, HirTy)> = impl_def
                 .items
                 .iter()
@@ -709,6 +825,10 @@ pub fn lower_full(
             for k in impl_bound_keys(tn, &args, &assoc, &struct_table, &enum_table) {
                 impl_traits.insert((target_key.clone(), k));
             }
+            impl_assoc
+                .entry(target_key.clone())
+                .or_default()
+                .extend(assoc.iter().cloned());
             trait_impl_tys
                 .entry(tn.clone())
                 .or_default()
@@ -726,18 +846,7 @@ pub fn lower_full(
         for ii in &impl_def.items {
             let m = match ii {
                 AstImplItem::Method(m) => m,
-                AstImplItem::Const(c) => {
-                    err(
-                        &mut pre_diags,
-                        format!(
-                            "associated const `{}` in impl blocks is not implemented yet \
-                             (stage-1 limitation)",
-                            c.name
-                        ),
-                    );
-                    continue;
-                }
-                AstImplItem::AssocType { .. } => continue,
+                AstImplItem::Const(_) | AstImplItem::AssocType { .. } => continue,
             };
             let leaf = leaf_name(&m.name).to_owned();
             if !explicit_methods.insert(leaf.clone()) {
@@ -772,25 +881,25 @@ pub fn lower_full(
                     .flatten()
                     .cloned()
                     .collect();
-                if generic_methods.contains_key(&(base.clone(), leaf.clone())) {
+                let slot = generic_methods
+                    .entry((base.clone(), leaf.clone()))
+                    .or_default();
+                if slot.iter().any(|g| g.info.trait_name.is_none()) {
                     err(
                         &mut pre_diags,
                         format!("method `{leaf}` is defined more than once for `{target_display}`"),
                     );
                     continue;
                 }
-                generic_methods.insert(
-                    (base.clone(), leaf),
-                    GenericMethod {
-                        def,
-                        self_ty: impl_def.self_ty.clone(),
-                        info: MethodInfo {
-                            module: module.clone(),
-                            vis: m.vis,
-                            trait_name: None,
-                        },
+                slot.push(GenericMethod {
+                    def,
+                    self_ty: impl_def.self_ty.clone(),
+                    info: MethodInfo {
+                        module: module.clone(),
+                        vis: m.vis,
+                        trait_name: None,
                     },
-                );
+                });
                 continue;
             }
             if let Some(td) = trait_def {
@@ -824,25 +933,30 @@ pub fn lower_full(
                     Some(_) => {}
                 }
             }
-            let key = format!("{}__{leaf}", ty_mangle(&target_ty));
-            if fn_table.contains_key(&key) {
+            let Some(key) = method_key(
+                &fn_table,
+                &method_info,
+                &target_ty,
+                &leaf,
+                trait_name.as_deref(),
+            ) else {
                 err(
                     &mut pre_diags,
                     format!("method `{leaf}` is defined more than once for `{target_display}`"),
                 );
                 continue;
-            }
+            };
             let id = FunctionId(u32::try_from(decls.len()).expect("FunctionId overflow"));
             let sig = sig_of(m, id, Some(&target_ty), sc);
-            if is_ref_self(m) {
-                ref_self.insert(id, (sig.ret_ty.clone(), target_ty.clone()));
+            if let Some(o) = ref_out_of(&sig) {
+                ref_out.insert(id, o);
             }
-            fn_table.insert(key, sig);
+            fn_table.insert(key.clone(), sig);
             if let Some(op) = intrinsic_of(m, &module, &mut pre_diags) {
                 intrinsics.insert(id, op);
             }
             if let Some(t) = target.clone() {
-                method_table.insert((t, leaf.clone()), id);
+                method_table.entry((t, leaf.clone())).or_default().push(id);
             }
             // Trait-impl methods are as visible as the trait itself;
             // inherent methods carry their own visibility.
@@ -863,6 +977,7 @@ pub fn lower_full(
                 fn_def: m,
                 self_ty: target_ty.clone(),
                 module: module.clone(),
+                key,
             });
         }
 
@@ -890,8 +1005,13 @@ pub fn lower_full(
                     );
                     continue;
                 }
-                let key = format!("{}__{}", ty_mangle(&target_ty), tm.name);
-                if fn_table.contains_key(&key) {
+                let Some(key) = method_key(
+                    &fn_table,
+                    &method_info,
+                    &target_ty,
+                    &tm.name,
+                    trait_name.as_deref(),
+                ) else {
                     err(
                         &mut pre_diags,
                         format!(
@@ -900,7 +1020,7 @@ pub fn lower_full(
                         ),
                     );
                     continue;
-                }
+                };
                 // A default with its own type parameters or a signature
                 // naming the trait's associated types (`fn map<U>(self, f:
                 // fn(Item) -> U)`) becomes a template, instantiated per
@@ -916,34 +1036,58 @@ pub fn lower_full(
                         let mut def = tm.clone();
                         subst_assoc_sig(&mut def, &impl_assoc_types(impl_def));
                         def.name = format!("{trait_module}::{}__{}", leaf_name(&base), tm.name);
-                        generic_methods
-                            .entry((base, tm.name.clone()))
-                            .or_insert_with(|| GenericMethod {
-                                def,
-                                self_ty: impl_def.self_ty.clone(),
-                                info: MethodInfo {
-                                    module: trait_module.clone(),
-                                    vis: Visibility::Pub,
-                                    trait_name: trait_name.clone(),
-                                },
-                            });
+                        let slot = generic_methods.entry((base, tm.name.clone())).or_default();
+                        if !slot.is_empty() {
+                            // Another trait's same-named default: its own
+                            // mono cache key / symbol.
+                            def.name = format!(
+                                "{}__by_{}",
+                                def.name,
+                                leaf_name(trait_name.as_deref().unwrap_or_default())
+                            );
+                        }
+                        slot.push(GenericMethod {
+                            def,
+                            self_ty: impl_def.self_ty.clone(),
+                            info: MethodInfo {
+                                module: trait_module.clone(),
+                                vis: Visibility::Pub,
+                                trait_name: trait_name.clone(),
+                            },
+                        });
                     }
                     // ponytail: a primitive / tuple target gets no such
                     // defaults; add when one needs them.
                     continue;
                 }
+                // `trait Contains<Item>` + `impl Contains<i32> for S`: the
+                // default's signature sees `Item = i32`.
+                let targs = trait_param_args(trait_def, impl_def);
+                let tm: &FnDef = if targs.is_empty() {
+                    tm
+                } else {
+                    let mut d = tm.clone();
+                    subst_assoc_sig(&mut d, &targs);
+                    // ponytail: leaked so `decls` can borrow it like the
+                    // program's own items; one small FnDef per default
+                    // instance for the life of the (short) compiler run.
+                    Box::leak(Box::new(d))
+                };
                 let id = FunctionId(u32::try_from(decls.len()).expect("FunctionId overflow"));
                 let tsc = Scope {
                     names: &names,
                     module: &trait_module,
                 };
                 let sig = sig_of(tm, id, Some(&target_ty), tsc);
-                if is_ref_self(tm) {
-                    ref_self.insert(id, (sig.ret_ty.clone(), target_ty.clone()));
+                if let Some(o) = ref_out_of(&sig) {
+                    ref_out.insert(id, o);
                 }
-                fn_table.insert(key, sig);
+                fn_table.insert(key.clone(), sig);
                 if let Some(t) = target.clone() {
-                    method_table.insert((t, tm.name.clone()), id);
+                    method_table
+                        .entry((t, tm.name.clone()))
+                        .or_default()
+                        .push(id);
                 }
                 method_info.insert(
                     id,
@@ -957,6 +1101,7 @@ pub fn lower_full(
                     fn_def: tm,
                     self_ty: target_ty.clone(),
                     module: trait_module.clone(),
+                    key,
                 });
             }
         }
@@ -993,6 +1138,7 @@ pub fn lower_full(
     // statics) plus type items; consulted by path resolution.
     let mut item_visibility: HashMap<String, Visibility> = HashMap::new();
     for item in &program.items {
+        rokc_diagnostic::set_current_span(item.span());
         match item {
             Item::Fn(f) => {
                 item_visibility.entry(f.name.clone()).or_insert(f.vis);
@@ -1020,14 +1166,74 @@ pub fn lower_full(
         extra_enums: std::cell::RefCell::new(Vec::new()),
         extra_enum_table: std::cell::RefCell::new(HashMap::new()),
         any_tags: std::cell::RefCell::new(Vec::new()),
-        ref_self: std::cell::RefCell::new(ref_self),
+        ref_out: std::cell::RefCell::new(ref_out),
         any_dispatch: std::cell::RefCell::new(Vec::new()),
+        projecting: std::cell::RefCell::new(Vec::new()),
+        thunks: std::cell::RefCell::new(HashMap::new()),
         diagnostics: std::cell::RefCell::new(Vec::new()),
     };
+    let mut exports: Vec<(FunctionId, String)> = Vec::new();
+    for (i, d) in decls.iter().enumerate() {
+        let (MethodOrFn::Fn(f) | MethodOrFn::Method { fn_def: f, .. }) = d;
+        rokc_diagnostic::set_current_span(f.span);
+        let id = FunctionId(u32::try_from(i).expect("FunctionId overflow"));
+        if f.is_unsafe {
+            unsafe_fns.insert(id);
+        }
+        if f.attrs
+            .iter()
+            .any(|a| a.path == [rokc_ast::EXTERN_C_FN_ATTR])
+        {
+            check_extern_c_fn(f, &mut pre_diags);
+        }
+        if let Some(sym) = export_name(f) {
+            if f.body.is_none() {
+                err(
+                    &mut pre_diags,
+                    format!("`#[export_name]` on `{}` needs a function body", f.name),
+                );
+            } else if exports.iter().any(|(_, s)| *s == sym) {
+                err(
+                    &mut pre_diags,
+                    format!("symbol `{sym}` is exported twice (`#[export_name]`)"),
+                );
+            } else {
+                exports.push((id, sym));
+            }
+        }
+    }
+    for f in generic_fns.values() {
+        rokc_diagnostic::set_current_span(f.span);
+        if f.attrs
+            .iter()
+            .any(|a| a.path == [rokc_ast::EXTERN_C_FN_ATTR])
+        {
+            check_extern_c_fn(f, &mut pre_diags);
+        }
+        if export_name(f).is_some() {
+            err(
+                &mut pre_diags,
+                format!(
+                    "`#[export_name]` on generic function `{}`: only a concrete function \
+                     has one symbol",
+                    f.name
+                ),
+            );
+        }
+    }
+    let mut key_of: HashMap<FunctionId, String> = HashMap::new();
+    for (k, s) in &fn_table {
+        // Re-export aliases share the id; keep the shortest (original) key.
+        let e = key_of.entry(s.id).or_insert_with(|| k.clone());
+        if k.len() < e.len() {
+            e.clone_from(k);
+        }
+    }
     let env = Env {
         fn_table,
         extern_fns,
         method_table,
+        key_of,
         method_info,
         structs: struct_defs,
         enums: enum_defs,
@@ -1048,10 +1254,17 @@ pub fn lower_full(
         field_vis,
         uses,
         impl_traits,
+        unsafe_fns,
         neg_auto,
         trait_info,
         trait_impl_tys,
+        impl_assoc,
         statics: static_tys,
+        mut_statics: static_defs
+            .iter()
+            .filter(|s| s.is_mut)
+            .map(|s| s.name.clone())
+            .collect(),
         names,
     };
     check_impl_overlap(&env);
@@ -1064,7 +1277,14 @@ pub fn lower_full(
                 fn_def,
                 self_ty,
                 module,
-            } => lower_fn(&env, fn_def, id, Some(self_ty.clone()), module.clone()),
+                key,
+            } => lower_fn(
+                &env,
+                fn_def,
+                id,
+                Some((self_ty.clone(), key.clone())),
+                module.clone(),
+            ),
         });
     }
     build_any_dispatchers(&env);
@@ -1090,6 +1310,7 @@ pub fn lower_full(
         enums,
         statics: static_defs,
         diagnostics: pre_diags,
+        exports,
     };
     // Final pass: rewrite any leftover `HirTy::Path([alias])` nodes in
     // function signatures and locals using the alias table.
@@ -1161,6 +1382,7 @@ pub(super) fn collect_field_visibility(
 ) -> HashMap<String, HashMap<String, Visibility>> {
     let mut out: HashMap<String, HashMap<String, Visibility>> = HashMap::new();
     for item in &program.items {
+        rokc_diagnostic::set_current_span(item.span());
         match item {
             Item::Struct(s) => {
                 let AstStructKind::Named(fs) = &s.kind else {
@@ -1253,7 +1475,9 @@ pub(super) fn check_unresolved_types(module: &mut HirModule) {
 
 pub(super) fn collect_unknown_paths(ty: &HirTy, out: &mut Vec<String>) {
     match ty {
-        HirTy::Path(p) if p.as_slice() != ["none"] => out.push(p.join("::")),
+        HirTy::Path(p) if p.as_slice() != ["none"] && crate::ty::as_const(ty).is_none() => {
+            out.push(p.join("::"));
+        }
         HirTy::Sum(parts) | HirTy::Tuple(parts) => {
             for p in parts {
                 collect_unknown_paths(p, out);
@@ -1303,7 +1527,7 @@ pub(super) fn hir_expr_has_unknown(e: &HirExpr) -> bool {
     let any = |es: &[HirExpr]| es.iter().any(hir_expr_has_unknown);
     match &e.kind {
         K::UnresolvedPath(_) => true,
-        K::Const(_) | K::Local(_) | K::StaticRef(_) | K::FnRef(_) => false,
+        K::Const(_) | K::Local(_) | K::StaticRef(_) | K::FnRef(_) | K::SizeOf { .. } => false,
         K::Block(b) => hir_block_has_unknown(b),
         K::PrimBinOp { lhs, rhs, .. } => hir_expr_has_unknown(lhs) || hir_expr_has_unknown(rhs),
         K::PrimUnaryOp { operand, .. } | K::Cast { operand, .. } => hir_expr_has_unknown(operand),
@@ -1342,7 +1566,10 @@ pub(super) fn hir_expr_has_unknown(e: &HirExpr) -> bool {
             hir_expr_has_unknown(array) || hir_expr_has_unknown(index)
         }
         K::UnionWrite { value, .. } => hir_expr_has_unknown(value),
-        K::BufNew { len, .. } => hir_expr_has_unknown(len),
+        K::BufNew { len, .. } | K::RawRead { addr: len, .. } => hir_expr_has_unknown(len),
+        K::RawWrite { addr, value, .. } => {
+            hir_expr_has_unknown(addr) || hir_expr_has_unknown(value)
+        }
         K::BufGet { buf, index, .. } => hir_expr_has_unknown(buf) || hir_expr_has_unknown(index),
         K::BufSet {
             buf, index, value, ..
@@ -1701,7 +1928,9 @@ fn ast_ty_needs(ty: &rokc_ast::Ty, params: &[&str], assoc: &[&str], out: &mut Ve
         AstTyKind::Path(p) => {
             match p.segments.as_slice() {
                 [s, x, ..] if s.name == "Self" => out.push(format!("Self::{}", x.name)),
-                [s] if assoc.contains(&s.name.as_str()) => out.push(format!("Self::{}", s.name)),
+                [s] | [s, _] if assoc.contains(&s.name.as_str()) => {
+                    out.push(format!("Self::{}", s.name));
+                }
                 [s, ..] if s.name == "Self" || params.contains(&s.name.as_str()) => {
                     out.push(s.name.clone());
                 }
@@ -1717,7 +1946,7 @@ fn ast_ty_needs(ty: &rokc_ast::Ty, params: &[&str], assoc: &[&str], out: &mut Ve
         AstTyKind::Fn(args, ret, _) => args.iter().chain(std::iter::once(&**ret)).collect(),
         AstTyKind::Throws { ok, err } => vec![&**ok, &**err],
         AstTyKind::Array(elem, _) => vec![&**elem],
-        AstTyKind::Any | AstTyKind::None | AstTyKind::Never => Vec::new(),
+        AstTyKind::Any | AstTyKind::None | AstTyKind::Never | AstTyKind::Const(_) => Vec::new(),
     };
     for k in kids {
         ast_ty_needs(k, params, assoc, out);
@@ -2004,6 +2233,52 @@ fn check_auto_impl(
     true
 }
 
+/// Spec 5.9.10: an `extern "C" fn` definition is called from C — no
+/// captures (it is an item), no generics, no `throws` (an error can't
+/// cross into C; a panic aborts the process), and FFI types only (a
+/// rok `str` is `(ptr, len)`, not a `char*`).
+fn check_extern_c_fn(f: &FnDef, diags: &mut Vec<rokc_diagnostic::RokDiagnostic>) {
+    let mut bad = |msg: String| {
+        diags.push(rokc_diagnostic::RokDiagnostic::error(
+            rokc_diagnostic::ErrorKind::Type,
+            format!(
+                "`extern \"C\" fn {}`: {msg} (spec 5.9.10)",
+                leaf_name(&f.name)
+            ),
+        ));
+    };
+    if !matches!(f.throws, rokc_ast::ThrowsKind::None) {
+        bad("cannot `throws` — an error cannot cross into C".to_owned());
+    }
+    if !f.generics.params.is_empty() {
+        bad("cannot be generic".to_owned());
+    }
+    if f.is_async || f.is_generator {
+        bad("cannot be `async` / a generator".to_owned());
+    }
+    let is_str = |t: &rokc_ast::Ty| matches!(&t.kind, AstTyKind::Path(p) if p.segments.len() == 1 && p.segments[0].name == "str");
+    if f.params
+        .iter()
+        .filter_map(|p| p.ty.as_ref())
+        .chain(f.ret_ty.as_ref())
+        .any(is_str)
+    {
+        bad("`str` is not an FFI type; pass a `Ptr<u8>` and a length".to_owned());
+    }
+}
+
+/// `#[export_name("sym")]` (spec 905): the symbol it names.
+fn export_name(f: &FnDef) -> Option<String> {
+    let a = f.attrs.iter().find(|a| a.name() == "export_name")?;
+    match &a.body {
+        rokc_ast::AttrBody::Args(args) => args.iter().find_map(|x| match x {
+            rokc_ast::AttrArg::Lit(rokc_ast::Literal::Str(s)) => Some(s.clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
 /// `#[lang("send_trait")]` / `#[lang("sync_trait")]`: a structural
 /// auto trait (E3).
 fn is_auto_trait_attr(a: &rokc_ast::Attribute) -> bool {
@@ -2068,6 +2343,7 @@ fn intrinsic_of(
         Some("neg") => PrimOp::Neg,
         // Bitwise on integers, logical on `bool` (picked at the call).
         Some("not") => PrimOp::Not,
+        Some("sqrt") => PrimOp::Sqrt,
         _ => {
             return err(format!(
                 "`#[intrinsic({})]` on `{}`: unknown intrinsic — expected `rok.OP.TYPE` \
@@ -2077,7 +2353,7 @@ fn intrinsic_of(
             ));
         }
     };
-    let arity = if matches!(op, PrimOp::Neg | PrimOp::Not) {
+    let arity = if matches!(op, PrimOp::Neg | PrimOp::Not | PrimOp::Sqrt) {
         1
     } else {
         2
@@ -2101,6 +2377,34 @@ fn impl_assoc_types(impl_def: &rokc_ast::ImplDef) -> HashMap<String, Ty> {
             _ => None,
         })
         .collect()
+}
+
+/// Trait type parameter -> the impl's argument (or the parameter's
+/// default, `Self` meaning the impl target; spec 2.10.5).
+fn trait_param_args(t: &rokc_ast::TraitDef, impl_def: &rokc_ast::ImplDef) -> HashMap<String, Ty> {
+    let given: &[Ty] = impl_def
+        .trait_path
+        .as_ref()
+        .and_then(|tp| tp.segments.last())
+        .map_or(&[], |s| s.generics.as_slice());
+    let mut out = HashMap::new();
+    for (i, gp) in t.generics.params.iter().enumerate() {
+        let rokc_ast::GenericParam::Type { name, default, .. } = gp else {
+            continue;
+        };
+        let ty = given.get(i).cloned().or_else(|| {
+            default.as_ref().map(|d| match &d.kind {
+                AstTyKind::Path(p) if p.segments.len() == 1 && p.segments[0].name == "Self" => {
+                    impl_def.self_ty.clone()
+                }
+                _ => d.clone(),
+            })
+        });
+        if let Some(ty) = ty {
+            out.insert(name.clone(), ty);
+        }
+    }
+    out
 }
 
 fn trait_assoc_names(t: &rokc_ast::TraitDef) -> Vec<String> {
@@ -2155,6 +2459,19 @@ fn subst_assoc_ty(ty: &mut Ty, assoc: &HashMap<String, Ty>) {
                 *ty = t.clone();
                 return;
             }
+            // `Item::IntoIter` → `List<T>::IntoIter` (a projection on
+            // the impl's type).
+            if let [s, x] = p.segments.as_slice() {
+                if let (true, Some(AstTyKind::Path(ap))) = (
+                    s.generics.is_empty() && x.generics.is_empty(),
+                    assoc.get(&s.name).map(|t| &t.kind),
+                ) {
+                    let mut segs = ap.segments.clone();
+                    segs.push(x.clone());
+                    p.segments = segs;
+                    return;
+                }
+            }
             for s in &mut p.segments {
                 for g in &mut s.generics {
                     subst_assoc_ty(g, assoc);
@@ -2177,9 +2494,45 @@ fn subst_assoc_ty(ty: &mut Ty, assoc: &HashMap<String, Ty>) {
     }
 }
 
-/// A method taking `ref self` (spec 4.7.5).
-pub(super) fn is_ref_self(m: &FnDef) -> bool {
-    m.params
-        .first()
-        .is_some_and(|p| p.name == "self" && p.by_ref)
+/// The `fn_table` key (and symbol) of method `leaf` of `target`: `Ty__m`,
+/// or `Ty__m__by_Tr` when another trait (or an inherent impl) already
+/// took that name (spec 4.9.6 picks one at the call site). `None`: the
+/// same trait / inherent impl defines it twice.
+fn method_key(
+    fn_table: &HashMap<String, FnSig>,
+    method_info: &HashMap<FunctionId, MethodInfo>,
+    target: &HirTy,
+    leaf: &str,
+    trait_name: Option<&str>,
+) -> Option<String> {
+    let key = format!("{}__{leaf}", ty_mangle(target));
+    let Some(prev) = fn_table.get(&key) else {
+        return Some(key);
+    };
+    let prev_trait = method_info
+        .get(&prev.id)
+        .and_then(|i| i.trait_name.as_deref());
+    if prev_trait == trait_name {
+        return None;
+    }
+    let alt = format!(
+        "{key}__by_{}",
+        trait_name.map_or("inherent".to_owned(), |t| t.replace("::", "_"))
+    );
+    (!fn_table.contains_key(&alt)).then_some(alt)
+}
+
+/// The copy-out shape of a function with `ref` parameters (spec 4.7).
+pub(super) fn ref_out_of(sig: &FnSig) -> Option<RefOut> {
+    let refs: Vec<(usize, HirTy)> = sig
+        .param_refs
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| **r)
+        .map(|(i, _)| (i, sig.param_tys[i].clone()))
+        .collect();
+    (!refs.is_empty()).then(|| RefOut {
+        ret: sig.ret_ty.clone(),
+        refs,
+    })
 }

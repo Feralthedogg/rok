@@ -1,0 +1,110 @@
+// expect-exit: 0
+// expect-stdout:
+// 6
+// 10 6
+// 130 13
+// 2 1
+// 6 13
+// 1 1
+// 1 2 -1 2
+// count 1
+// count 11
+// 22
+// mc 3
+
+// `ref` beyond `self` (spec 4.7): `ref` parameters and `ref x` arguments
+// (copy-in / copy-out, generic and throwing callees, disjoint fields),
+// `ref self` on a throwing method (no write-back when it throws) and
+// `[ref x]` capture lists (4.6.2: a shared cell, outliving its scope).
+
+struct P { x: i32; y: i32; }
+
+fn increment(ref n: i32) {
+    n = n + 1;
+}
+
+fn swap(ref a: i32, ref b: i32) {
+    let t = a;
+    a = b;
+    b = t;
+}
+
+fn bump_get(ref n: i32, by: i32) -> i32 {
+    n = n + by;
+    return n * 10;
+}
+
+fn push2<T>(ref a: T, ref b: T) -> bool {
+    let t = a;
+    a = b;
+    b = t;
+    return true;
+}
+
+fn checked(ref n: i32) throws (str) -> i32 {
+    n = n + 1;
+    if n > 2 {
+        throw "too big";
+    }
+    return n;
+}
+
+struct Counter { c: i32; }
+
+impl Counter {
+    fn tick(ref self) throws (str) -> i32 {
+        self.c = self.c + 1;
+        if self.c > 2 {
+            throw "overflow";
+        }
+        return self.c;
+    }
+}
+
+fn make_counter() -> fn() -> i32 {
+    let count = 0;
+    return [ref count] || { count = count + 1; count };
+}
+
+fn main() {
+    let x = 5i32;
+    let y = 10i32;
+    increment(ref x);
+    println(f"{x}");
+    swap(ref x, ref y);
+    println(f"{x} {y}");
+    let r = bump_get(ref x, 3);
+    println(f"{r} {x}");
+    let p = P { x: 1, y: 2 };
+    swap(ref p.x, ref p.y);
+    println(f"{p.x} {p.y}");
+    push2(ref x, ref y);
+    println(f"{x} {y}");
+    let k = 0;
+    let v = try checked(ref k) catch e { -1 };
+    println(f"{v} {k}");
+    let c = Counter { c: 0 };
+    let a = try c.tick() catch e { -1 };
+    let b = try c.tick() catch e { -1 };
+    let d = try c.tick() catch e { -1 };
+    println(f"{a} {b} {d} {c.c}");
+
+    let count = 0;
+    let inc = [ref count] || { count = count + 1; };
+    let dec = [ref count] || { count = count - 1; };
+    inc();
+    inc();
+    dec();
+    println(f"count {count}");
+    count = 10;
+    inc();
+    println(f"count {count}");
+    let snap = count;
+    let f = || snap + count;
+    count = 100;
+    println(f"{f()}");
+    let mc = make_counter();
+    mc();
+    mc();
+    println(f"mc {mc()}");
+}

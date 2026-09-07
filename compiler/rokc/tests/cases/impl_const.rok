@@ -1,0 +1,36 @@
+// expect-exit: 0
+// expect-stdout:
+// 3
+// 6
+// 9
+// 4
+// 12
+
+// Spec 2.9.1: `const` items inside `impl` are `Type::NAME`, and
+// `Self::NAME` inside the impl.
+struct Grid { w: i32; }
+
+impl Grid {
+    const SIDE: i32 = 3;
+    const CELLS: i32 = 9;
+
+    fn double() -> i32 { return Self::SIDE * 2; }
+    fn quad() -> i32 { return Self::double() * 2; }
+}
+
+mod shapes {
+    pub struct Sq { s: i32; }
+
+    impl Sq {
+        pub const SIDES: i32 = 4;
+    }
+}
+
+fn main() -> i32 {
+    rok_print_i32(Grid::SIDE);
+    rok_print_i32(Grid::double());
+    rok_print_i32(Grid::CELLS);
+    rok_print_i32(shapes::Sq::SIDES);
+    rok_print_i32(Grid::quad());
+    return 0;
+}

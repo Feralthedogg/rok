@@ -1,0 +1,13 @@
+// expect-error: method `zero` on `i32` is ambiguous: traits `MyZero`, `rok::core::num::Zero` all provide it
+
+// Spec 4.9.6: an explicit `use` of the core trait puts it on par with
+// the package's own trait, so the bare call is ambiguous again.
+
+use rok::core::num::Zero;
+
+trait MyZero { fn zero() -> Self; }
+impl MyZero for i32 { fn zero() -> i32 { return 7; } }
+
+fn main() {
+    println(f"{i32::zero()}");
+}

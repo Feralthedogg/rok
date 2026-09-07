@@ -66,6 +66,7 @@ fn implicit_main(stmts: Vec<Stmt>) -> FnDef {
         // level; async main needs the scheduler, which the runtime lacks.
         is_async: false,
         is_generator: false,
+        is_unsafe: false,
         throws: ThrowsKind::None,
         where_clause: Vec::new(),
         span,

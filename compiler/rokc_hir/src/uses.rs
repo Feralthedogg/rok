@@ -62,7 +62,8 @@ pub fn build_use_table(
     let mut diags: Vec<RokDiagnostic> = Vec::new();
     for (module_path, vis, tree) in raw {
         let mut entries = Vec::new();
-        flatten_tree(tree, &[], module_path, &mut entries);
+        let existing = table.entry(module_path.clone()).or_default();
+        flatten_tree(tree, &[], module_path, existing, &mut entries);
         // 5.5.12 duplicate-name detection. Compare each fresh single
         // import against earlier singles in the same module — duplicate
         // local with a different full path is an error; same full path
@@ -114,7 +115,7 @@ pub fn flatten_tree_for_local(
     module_path: &str,
     out: &mut Vec<UseEntry>,
 ) {
-    flatten_tree(tree, accumulated, module_path, out);
+    flatten_tree(tree, accumulated, module_path, &[], out);
 }
 
 /// Walk a `UseTree`, accumulating segments through `Group` nesting.
@@ -126,6 +127,7 @@ fn flatten_tree(
     tree: &UseTree,
     accumulated: &[String],
     module_path: &str,
+    earlier: &[UseEntry],
     out: &mut Vec<UseEntry>,
 ) {
     let mut prefix_segs: Vec<String> = accumulated.to_vec();
@@ -135,9 +137,14 @@ fn flatten_tree(
         .iter()
         .map(|s| s.name.clone())
         .collect();
-    // Resolve the root segment if it's `crate` / `super` / `self`.
-    let resolved = resolve_root(&raw_segs, module_path);
-    prefix_segs.extend(resolved);
+    // Only the first segment of the whole path is a root (`pkg`, `sup`,
+    // `rok`, an earlier import, or a child module); group members extend
+    // their prefix as written.
+    if accumulated.is_empty() {
+        prefix_segs.extend(resolve_root(&raw_segs, module_path, earlier));
+    } else {
+        prefix_segs.extend(raw_segs);
+    }
 
     match &tree.kind {
         UseTreeKind::Simple(alias) => {
@@ -161,7 +168,7 @@ fn flatten_tree(
         }
         UseTreeKind::Group(children) => {
             for child in children {
-                flatten_tree(child, &prefix_segs, module_path, out);
+                flatten_tree(child, &prefix_segs, module_path, earlier, out);
             }
         }
     }
@@ -169,7 +176,7 @@ fn flatten_tree(
 
 /// Convert `pkg::a::b` / `sup::a` into an absolute `module_path`-rooted
 /// segment list. Bare-ident roots (`a::b`) are relative to the module.
-fn resolve_root(segs: &[String], module_path: &str) -> Vec<String> {
+fn resolve_root(segs: &[String], module_path: &str, earlier: &[UseEntry]) -> Vec<String> {
     if segs.is_empty() {
         return Vec::new();
     }
@@ -195,6 +202,25 @@ fn resolve_root(segs: &[String], module_path: &str) -> Vec<String> {
         // Spec 5.7: a bare root names something in the current module
         // (a child module); `rok::` is the virtual stdlib root.
         "rok" => segs.to_vec(),
+        // Spec 5.5: a name an earlier `use` of this module brought in
+        // (`use a::b; use b::c;`).
+        first
+            if earlier
+                .iter()
+                .any(|e| matches!(e, UseEntry::Single { local, .. } if local == first)) =>
+        {
+            let full = earlier
+                .iter()
+                .find_map(|e| match e {
+                    UseEntry::Single { local, full } if local == first => Some(full.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            full.split("::")
+                .map(str::to_owned)
+                .chain(segs[1..].iter().cloned())
+                .collect()
+        }
         _ if module_path.is_empty() => segs.to_vec(),
         _ => module_path
             .split("::")

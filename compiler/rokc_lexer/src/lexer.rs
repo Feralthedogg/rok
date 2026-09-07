@@ -39,6 +39,8 @@ pub struct Lexer<'src> {
     idents: Vec<(String, Span)>,
     seen: std::collections::HashSet<String>,
     any_non_ascii: bool,
+    /// Registered extension operator tokens (spec 1.10.4), longest first.
+    ext_ops: Vec<String>,
 }
 
 impl<'src> Lexer<'src> {
@@ -57,7 +59,16 @@ impl<'src> Lexer<'src> {
             idents: Vec::new(),
             seen: std::collections::HashSet::new(),
             any_non_ascii: false,
+            ext_ops: Vec::new(),
         }
+    }
+
+    /// Also lex these registered extension operator tokens (spec 1.10.4,
+    /// gathered by the driver's `#[infix]` pre-pass), longest first.
+    #[must_use]
+    pub fn with_ext_ops(mut self, ops: Vec<String>) -> Self {
+        self.ext_ops = ops;
+        self
     }
 
     pub fn lex_all(mut self) -> (Vec<Token>, Vec<RokDiagnostic>) {
@@ -206,8 +217,13 @@ impl<'src> Lexer<'src> {
             b'f' if next == Some(b'"') => self.lex_str_lit(true),
             b'c' if next == Some(b'\'') => self.lex_char_lit(true),
             d if d.is_ascii_digit() => self.lex_number(),
+            _ if !self.ext_ops.is_empty() && self.peek_ext_op().is_some() => {
+                let op = self.peek_ext_op().unwrap_or_default();
+                self.advance(op.len());
+                TokenKind::ExtOp(op)
+            }
             _ => match self.peek_char() {
-                Some(c) if is_ident_start(c) => self.lex_ident(),
+                Some(c) if is_ident_start(c) || self.at_flag() => self.lex_ident(),
                 Some(c) if math_op(c).is_some() => {
                     self.advance(c.len_utf8());
                     math_op(c)?
@@ -456,6 +472,22 @@ impl<'src> Lexer<'src> {
         }
     }
 
+    fn peek_ext_op(&self) -> Option<String> {
+        let rest = &self.src[self.pos..];
+        self.ext_ops
+            .iter()
+            .find(|op| rest.starts_with(op.as_str()))
+            .cloned()
+    }
+
+    /// A flag — a pair of regional indicators — may start an identifier
+    /// (`🇰🇷`); a lone indicator may not.
+    fn at_flag(&self) -> bool {
+        let ri = |c: char| ('\u{1F1E6}'..='\u{1F1FF}').contains(&c);
+        let mut it = self.src[self.pos..].chars();
+        it.next().is_some_and(ri) && it.next().is_some_and(ri)
+    }
+
     fn lex_ident(&mut self) -> TokenKind {
         let start = self.pos;
         let (line, col) = (self.line, self.col);
@@ -687,7 +719,7 @@ impl<'src> Lexer<'src> {
             let start = self.pos;
             self.eat_ident_continue();
             if self.bytes.get(self.pos) != Some(&b'\'') {
-                return TokenKind::Label(self.src[start..self.pos].to_owned());
+                return TokenKind::Label(normalize_ident(&self.src[start..self.pos]));
             }
             (self.pos, self.line, self.col) = save;
         }

@@ -5,6 +5,6 @@ extern "C" {
     fn rok_gc_alloc_slow(size: usize, align: usize, type_id: u32) -> usize;
 }
 fn main() -> i32 {
-    let p = rok_gc_alloc_slow(4611686018427387904usize, 8usize, 0u32);
+    let p = unsafe { rok_gc_alloc_slow(4611686018427387904usize, 8usize, 0u32) };
     return 0;
 }

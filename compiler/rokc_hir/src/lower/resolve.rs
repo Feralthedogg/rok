@@ -201,11 +201,23 @@ pub(super) fn item_module(item: &Item) -> String {
 }
 
 pub(super) fn impl_module(i: &rokc_ast::ImplDef) -> String {
-    i.items
+    let marked = i
+        .attrs
         .iter()
-        .find_map(|it| match it {
-            AstImplItem::Method(m) => Some(module_of(&m.name)),
+        .filter(|a| a.path == [crate::IMPL_MODULE_ATTR])
+        .find_map(|a| match &a.body {
+            rokc_ast::AttrBody::Args(args) => args.iter().find_map(|x| match x {
+                rokc_ast::AttrArg::Lit(rokc_ast::Literal::Str(s)) => Some(s.clone()),
+                _ => None,
+            }),
             _ => None,
+        });
+    marked
+        .or_else(|| {
+            i.items.iter().find_map(|it| match it {
+                AstImplItem::Method(m) => Some(module_of(&m.name)),
+                _ => None,
+            })
         })
         .unwrap_or_default()
 }
@@ -502,6 +514,12 @@ pub(super) fn ty_mangle(ty: &HirTy) -> String {
                 params.len(),
                 inner.join("x"),
                 ty_mangle(ret)
+            )
+        }
+        HirTy::Path(segs) if segs.first().is_some_and(|s| s == "#const") => {
+            format!(
+                "C{}",
+                segs.get(1).map_or("", |v| v.as_str()).replace('-', "m")
             )
         }
         HirTy::Path(segs) => format!("Path_{}", segs.join("_")),

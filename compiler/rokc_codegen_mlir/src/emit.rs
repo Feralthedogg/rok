@@ -40,7 +40,7 @@ pub struct Emitter {
     /// `GC_TYPE_BASE + i` and gets a `ScanTable` (802).
     gc_types: Vec<MirTy>,
     /// Package hash for mangled symbols (spec 905).
-    pkg: String,
+    pkgs: crate::mangle::Pkgs,
     /// Panic on integer `+ - *` / negation overflow (debug builds); wrap
     /// otherwise (stdlib spec 0.5: debug=panic, release=wrap).
     pub overflow_checks: bool,
@@ -67,7 +67,7 @@ fn is_c_abi(f: &MirFunction) -> bool {
 
 impl Emitter {
     #[must_use]
-    pub const fn new(pointer_width: u32) -> Self {
+    pub fn new(pointer_width: u32) -> Self {
         Self {
             out: String::new(),
             pointer_width,
@@ -77,7 +77,7 @@ impl Emitter {
             needs: std::collections::BTreeSet::new(),
             uses_alloc: false,
             gc_types: Vec::new(),
-            pkg: String::new(),
+            pkgs: crate::mangle::Pkgs::default(),
             overflow_checks: true,
         }
     }
@@ -88,14 +88,37 @@ impl Emitter {
         // body with runtime init / shutdown calls.
         let user_main = module.functions.iter().find(|f| f.name == "main");
         // Content-based package hash: the printed MIR of the whole unit.
-        self.pkg = crate::mangle::pkg_hash(&rokc_mir::print_mir(module));
+        // Content-based package hashes (spec 0.3.3) from the driver; a
+        // bare MIR module (tests) hashes its printed MIR.
+        self.pkgs.extern_statics = module
+            .statics
+            .iter()
+            .filter(|s| s.is_extern)
+            .map(|s| s.name.clone())
+            .collect();
+        self.pkgs.hashes = if module.pkg_hashes.is_empty() {
+            vec![(
+                String::new(),
+                crate::mangle::pkg_hash(&rokc_mir::print_mir(module)),
+            )]
+        } else {
+            module.pkg_hashes.clone()
+        };
 
         let mut fns: HashMap<FunctionId, FnSig> = HashMap::new();
         for f in &module.functions {
             fns.insert(
                 f.id,
                 FnSig {
-                    name: crate::mangle::symbol_for(f, &self.pkg),
+                    name: crate::mangle::symbol_for(
+                        f,
+                        &self.pkgs,
+                        module
+                            .exports
+                            .iter()
+                            .find(|(id, _)| *id == f.id)
+                            .map(|(_, s)| s.as_str()),
+                    ),
                     params: f.param_tys.clone(),
                     ret: f.ret_ty.clone(),
                     c_abi: is_c_abi(f),
@@ -206,7 +229,15 @@ impl Emitter {
         for s in &module.statics {
             let ty_str = mlir_type(&s.ty, pw);
             let constness = if s.is_mut { "" } else { "constant " };
-            let sym = crate::mangle::item(&self.pkg, &s.name, "");
+            let sym = self.pkgs.static_sym(&s.name);
+            if s.is_extern {
+                // Defined elsewhere (spec 5.9.3): a declaration only.
+                let _ = writeln!(
+                    self.out,
+                    "  llvm.mlir.global external {constness}@{sym}() {{addr_space = 0 : i32}} : {ty_str}"
+                );
+                continue;
+            }
             if let ConstVal::Str(text) = &s.init {
                 // A pointer-valued global needs an initializer region
                 // that takes the literal's address.
@@ -310,7 +341,7 @@ impl Emitter {
         self.out.push_str(" {\n");
 
         let str_globals = std::mem::take(&mut self.str_globals);
-        let mut emit = FnEmit::new(f, self.pointer_width, fns, str_globals, &self.pkg);
+        let mut emit = FnEmit::new(f, self.pointer_width, fns, str_globals, &self.pkgs);
         emit.overflow_checks = self.overflow_checks;
         emit.gc_types = std::mem::take(&mut self.gc_types);
         emit.emit_prelude();
@@ -434,7 +465,7 @@ struct FnEmit<'a> {
     gc_param_slots: HashMap<u32, String>,
     /// Counter for the extra blocks runtime checks split off.
     next_check: u32,
-    pkg: &'a str,
+    pkgs: &'a crate::mangle::Pkgs,
     overflow_checks: bool,
 }
 
@@ -444,7 +475,7 @@ impl<'a> FnEmit<'a> {
         pointer_width: u32,
         fns: &'a HashMap<FunctionId, FnSig>,
         str_globals: std::collections::BTreeMap<String, String>,
-        pkg: &'a str,
+        pkgs: &'a crate::mangle::Pkgs,
     ) -> Self {
         // Block params are SSA values; everything else gets a stack slot.
         let mut block_param_set: HashSet<u32> = HashSet::new();
@@ -477,7 +508,7 @@ impl<'a> FnEmit<'a> {
             gc_frame: None,
             gc_param_slots: HashMap::new(),
             next_check: 0,
-            pkg,
+            pkgs,
             overflow_checks: true,
         }
     }
@@ -863,6 +894,12 @@ impl<'a> FnEmit<'a> {
                     let _ = writeln!(self.body, "    llvm.store {z}, {slot} : {ty}, !llvm.ptr");
                 }
             }
+            Statement::RawStore { addr, value, ty } => {
+                let p = self.raw_addr(addr);
+                let v = self.materialize_operand(value, ty);
+                let t = mlir_type(ty, self.pointer_width);
+                let _ = writeln!(self.body, "    llvm.store {v}, {p} : {t}, !llvm.ptr");
+            }
             Statement::BufStore {
                 buf,
                 index,
@@ -878,7 +915,7 @@ impl<'a> FnEmit<'a> {
                 let val = self.materialize_operand(value, ty);
                 let ty_str = mlir_type(ty, self.pointer_width);
                 let addr = self.fresh_value();
-                let sym = crate::mangle::item(self.pkg, name, "");
+                let sym = self.pkgs.static_sym(name);
                 let _ = writeln!(
                     self.body,
                     "    {addr} = llvm.mlir.addressof @{sym} : !llvm.ptr"
@@ -1046,6 +1083,21 @@ impl<'a> FnEmit<'a> {
             } => self.emit_call_indirect(callee, args, arg_tys, ret_ty),
             RValue::HeapBox { value, ty } => self.emit_heap_box(value, ty),
             RValue::BufAlloc { elem_ty, len } => self.emit_buf_alloc(elem_ty, len),
+            RValue::RawLoad { addr, ty } => {
+                let p = self.raw_addr(addr);
+                let t = mlir_type(ty, self.pointer_width);
+                let v = self.fresh_value();
+                let _ = writeln!(self.body, "    {v} = llvm.load {p} : !llvm.ptr -> {t}");
+                v
+            }
+            RValue::SizeOf { ty, align } => {
+                let pw = self.pointer_width;
+                let (size, al) = size_align(ty, pw);
+                let n = if *align { al } else { size };
+                let v = self.fresh_value();
+                let _ = writeln!(self.body, "    {v} = arith.constant {n} : i{pw}");
+                v
+            }
             RValue::BufLoad {
                 buf,
                 index,
@@ -1079,7 +1131,7 @@ impl<'a> FnEmit<'a> {
             RValue::StaticLoad { name, ty } => {
                 let ty_str = mlir_type(ty, self.pointer_width);
                 let addr = self.fresh_value();
-                let sym = crate::mangle::item(self.pkg, name, "");
+                let sym = self.pkgs.static_sym(name);
                 let _ = writeln!(
                     self.body,
                     "    {addr} = llvm.mlir.addressof @{sym} : !llvm.ptr"
@@ -1171,6 +1223,18 @@ impl<'a> FnEmit<'a> {
     }
 
     /// Address of element `index` of buffer `buf` (header + index * size).
+    /// `inttoptr` of a raw `usize` address operand.
+    fn raw_addr(&mut self, addr: &Operand) -> String {
+        let pw = self.pointer_width;
+        let a = self.materialize_operand(addr, &MirTy::Prim(PrimTy::Usize));
+        let p = self.fresh_value();
+        let _ = writeln!(
+            self.body,
+            "    {p} = llvm.inttoptr {a} : i{pw} to !llvm.ptr"
+        );
+        p
+    }
+
     fn buf_elem_addr(&mut self, buf: &Operand, index: &Operand, elem_ty: &MirTy) -> String {
         let pw = self.pointer_width;
         let usize_ty = MirTy::Prim(PrimTy::Usize);
@@ -1886,6 +1950,12 @@ impl<'a> FnEmit<'a> {
             }
             (PrimOp::Neg, p) if p.is_float() => {
                 let _ = writeln!(self.body, "    {dst} = arith.negf {v} : {ty}");
+            }
+            (PrimOp::Sqrt, p) if p.is_float() => {
+                let _ = writeln!(
+                    self.body,
+                    "    {dst} = llvm.intr.sqrt({v}) : ({ty}) -> {ty}"
+                );
             }
             (PrimOp::Not, p) if p.is_int() => {
                 // Bitwise NOT = xor with all-ones.

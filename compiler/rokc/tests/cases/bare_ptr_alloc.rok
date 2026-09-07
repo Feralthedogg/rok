@@ -1,0 +1,37 @@
+// expect-exit: 0
+// expect-stdout:
+// 30
+// 7
+// 4
+
+// `rok::bare` raw pointers (stdlib 1.1) over raw allocation (1.4):
+// arithmetic is safe, `read` / `write` need `unsafe`.
+use rok::bare::alloc::{alloc, dealloc, layout_for};
+use rok::bare::ptr::{CPtr, Ptr, ptr_cast};
+
+struct Pair { a: i64; b: i32; }
+
+fn main() -> i32 {
+    let witness: Ptr<i64> = Ptr::dangling();
+    if witness.addr() != 8usize { return 1; }
+    let layout = layout_for(witness, 4usize);
+    let raw: CPtr<u8> = unsafe { alloc(layout) };
+    let bytes: Ptr<u8> = raw.as_ptr() ?? panic("alloc failed");
+    let p: Ptr<i64> = ptr_cast(bytes);
+    unsafe {
+        p.write(10i64);
+        p.add(1usize).write(20i64);
+        p.add(2usize).write(p.read() + p.add(1usize).read());
+    }
+    rok_print_i64(unsafe { p.add(2usize).read() });
+    if p.add(3usize).distance(p) != 3 { return 2; }
+
+    // A struct through a pointer.
+    let q: Ptr<Pair> = ptr_cast(bytes);
+    unsafe { q.write(Pair { a: 7i64, b: 4 }); }
+    let back = unsafe { q.read() };
+    rok_print_i64(back.a);
+    rok_print_i32(back.b);
+    unsafe { dealloc(bytes, layout) };
+    return 0;
+}

@@ -1,0 +1,50 @@
+// expect-exit: 0
+// expect-stdout:
+// 3 20
+// 3,7,2,9,1,4,
+// 3 6
+// 6 154
+// peek 4
+// next 4
+// next 1
+// reduce 26
+// min 4
+// max 2
+// reduce none
+// 4,1,9,
+
+// stdlib 2.7.1 adapters: step_by / rev (DoubleEndedIterator, 2.7.9) /
+// flatten / flat_map / peekable (lazy), reduce / min_by_key / max_by_key.
+
+fn main() {
+    let xs: List<i32> = [4, 1, 9, 2, 7, 3];
+    let s: List<i32> = xs.iter().step_by(2).collect();
+    println(f"{s.len()} {s.iter().sum()}");
+    for x in xs.iter().rev() {
+        print(f"{x},");
+    }
+    println("");
+    let nested: List<List<i32>> = [[1, 2], [], [3]];
+    let flat: List<i32> = nested.iter().flatten().collect();
+    println(f"{flat.len()} {flat.iter().sum()}");
+    let fm: List<i32> = xs.iter().take(3).flat_map(|x| [x, x * 10]).collect();
+    println(f"{fm.len()} {fm.iter().sum()}");
+    let p = xs.iter().peekable();
+    match p.peek() { v: i32 => println(f"peek {v}"), none => println("none") }
+    match p.next() { v: i32 => println(f"next {v}"), none => println("none") }
+    match p.next() { v: i32 => println(f"next {v}"), none => println("none") }
+    match xs.iter().reduce(|a, b| a + b) { v: i32 => println(f"reduce {v}"), none => println("none") }
+    match xs.iter().min_by_key(|x| (x - 5) * (x - 5)) { v: i32 => println(f"min {v}"), none => println("none") }
+    match xs.iter().max_by_key(|x| x % 3) { v: i32 => println(f"max {v}"), none => println("none") }
+    let e: List<i32> = [];
+    match e.iter().reduce(|a, b| a + b) { v: i32 => println(f"reduce {v}"), none => println("reduce none") }
+    // Front and back meet in the middle.
+    let it = xs.iter();
+    it.next_back();
+    it.next_back();
+    it.next_back();
+    for x in it {
+        print(f"{x},");
+    }
+    println("");
+}

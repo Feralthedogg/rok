@@ -16,6 +16,6 @@ fn show(i: i64) {
 }
 
 fn main() -> i32 {
-    rok_par_for(0i64, 3i64, 1i64, show);
+    unsafe { rok_par_for(0i64, 3i64, 1i64, show) };
     return 0;
 }

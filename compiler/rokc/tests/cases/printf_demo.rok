@@ -7,7 +7,7 @@ extern "C" {
 fn say(msg: str, times: i32 = 1) {
     let i = 0;
     while i < times {
-        let _ = puts(msg);
+        let _ = unsafe { puts(msg) };
         i += 1;
     }
 }

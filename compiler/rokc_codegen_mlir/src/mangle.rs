@@ -17,19 +17,62 @@ use rokc_mir::MirFunction;
 /// (`first__mono__i32`); they become the typehash.
 const MONO_MARK: &str = "__mono__";
 
-/// Linker symbol for a MIR function.
-pub fn symbol_for(f: &MirFunction, pkg: &str) -> String {
+/// What symbol naming needs to know about the whole program.
+#[derive(Default)]
+pub struct Pkgs {
+    /// Package hash per item-path prefix, longest prefix first (`""` =
+    /// the user package).
+    pub hashes: Vec<(String, String)>,
+    /// `extern` statics: they keep their C name.
+    pub extern_statics: std::collections::HashSet<String>,
+}
+
+impl Pkgs {
+    /// Linker symbol of static `name`.
+    pub fn static_sym(&self, name: &str) -> String {
+        if self.extern_statics.contains(name) {
+            return name.to_owned();
+        }
+        item(pkg_of(&self.hashes, name), name, "")
+    }
+}
+
+/// The package hash of item `qualified`.
+pub fn pkg_of<'a>(pkgs: &'a [(String, String)], qualified: &str) -> &'a str {
+    pkgs.iter()
+        .find(|(p, _)| {
+            p.is_empty()
+                || qualified
+                    .strip_prefix(p.as_str())
+                    .is_some_and(|r| r.starts_with("::"))
+        })
+        .map_or("", |(_, h)| h.as_str())
+}
+
+/// Linker symbol for a MIR function: its `#[export_name]`, its C name
+/// (an `extern` declaration), or the mangled path.
+pub fn symbol_for(f: &MirFunction, pkgs: &Pkgs, export: Option<&str>) -> String {
+    if let Some(sym) = export {
+        return sym.to_owned();
+    }
     if f.blocks.is_empty() {
         return f.name.clone();
     }
+    let qualified = f
+        .name
+        .split_once(MONO_MARK)
+        .map_or(f.name.as_str(), |(b, _)| b);
+    let pkg = pkg_of(&pkgs.hashes, qualified);
     match f.name.split_once(MONO_MARK) {
         Some((base, args)) => item(pkg, base, &hex(&sha256(args.as_bytes()))[..16]),
         None => item(pkg, &f.name, ""),
     }
 }
 
-/// Mangle a `::`-qualified item path.
+/// Mangle a `::`-qualified item path. The package is the hash, so a
+/// library's `rok::` root is dropped (`rok::std::vec` → `std_vec`, 905.3).
 pub fn item(pkg: &str, qualified: &str, typehash: &str) -> String {
+    let qualified = qualified.strip_prefix("rok::").unwrap_or(qualified);
     let mut segs: Vec<&str> = qualified.split("::").collect();
     let name = segs.pop().unwrap_or_default();
     let path: Vec<String> = segs.iter().map(|s| escape(s)).collect();
@@ -152,5 +195,13 @@ mod tests {
         assert_eq!(item("3f8a1c2b", "a__b", ""), "_Y3f8a1c2b__a_0_0b_");
         assert_ne!(item("p", "a::b_c", ""), item("p", "a_b::c", ""));
         assert_eq!(item("p", "malloc", ""), "_Yp__malloc_");
+        assert_eq!(item("p", "rok::std::vec::new", ""), "_Yp_std_vec_new_");
+        let pkgs = [
+            ("rok::core".to_owned(), "c".to_owned()),
+            (String::new(), "u".to_owned()),
+        ];
+        assert_eq!(pkg_of(&pkgs, "rok::core::str::len"), "c");
+        assert_eq!(pkg_of(&pkgs, "rok::corex::f"), "u");
+        assert_eq!(pkg_of(&pkgs, "main"), "u");
     }
 }

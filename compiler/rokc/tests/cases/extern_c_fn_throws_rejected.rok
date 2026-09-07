@@ -1,0 +1,7 @@
+// expect-error: `extern "C" fn cb`: cannot `throws`
+struct E { code: i32; }
+extern "C" fn cb(x: i32) throws (E) -> i32 {
+    if x < 0 { throw E { code: x }; }
+    return x;
+}
+fn main() -> i32 { return 0; }

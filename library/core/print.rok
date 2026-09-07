@@ -8,7 +8,7 @@ extern "C" {
     fn rok_ewrite_str(s: str) -> i32;
 }
 
-pub fn print(s: str) { rok_write_str(s); }
-pub fn println(s: str) { rok_write_str(s); rok_write_str("\n"); }
-pub fn eprint(s: str) { rok_ewrite_str(s); }
-pub fn eprintln(s: str) { rok_ewrite_str(s); rok_ewrite_str("\n"); }
+pub fn print(s: str) { unsafe { rok_write_str(s) }; }
+pub fn println(s: str) { unsafe { rok_write_str(s); rok_write_str("\n"); } }
+pub fn eprint(s: str) { unsafe { rok_ewrite_str(s) }; }
+pub fn eprintln(s: str) { unsafe { rok_ewrite_str(s); rok_ewrite_str("\n"); } }

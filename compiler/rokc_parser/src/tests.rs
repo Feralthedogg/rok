@@ -598,10 +598,7 @@ fn unsafe_raw_strings_and_unsupported_forms() {
         r#"fn f() { let s = f"x = {x :e}"; }"#,
         "unsupported type `e`",
     );
-    assert_rejected(
-        "fn f() { using x = g() { x } }",
-        "`using` expressions (spec 3.17) are not yet supported",
-    );
+    assert!(diags_of("fn f() { using x = g(), y = h(x) { x } }").is_empty());
 }
 
 #[test]
@@ -619,12 +616,19 @@ fn recovery_reports_each_mistake_once() {
 }
 
 #[test]
-fn unsupported_impl_const_and_extern_static() {
+fn impl_const_and_extern_static_parse() {
     let d = diags_of(
         "impl S { const N: i32 = 1; fn f() { } } extern \"C\" { static mut X: i32; fn g(); }",
     );
-    assert_eq!(d.len(), 2, "{d:#?}");
-    assert!(d[0].contains("not yet supported") && d[1].contains("not yet supported"));
+    assert!(d.is_empty(), "{d:#?}");
+    let prog = parse("extern \"C\" { static mut X: i32; static Y: u8; }");
+    let Item::Extern(blk) = &prog.items[0] else {
+        panic!("expected extern block");
+    };
+    assert!(matches!(&blk.items[..], [
+        rokc_ast::ExternItem::Static(sx),
+        rokc_ast::ExternItem::Static(sy),
+    ] if sx.is_mut && !sy.is_mut && sx.name == "X"));
 }
 
 #[test]

@@ -1,0 +1,41 @@
+// expect-exit: 0
+// expect-stdout:
+// 180
+// 45
+// -90
+// 270
+
+// Spec 6.7.1: a postfix extension token `like = "?"` sits at the postfix
+// level (13), tighter than prefix `-` and every infix operator.
+trait Degrees {
+    #[postfix("°", like = "?")]
+    fn degrees(self) -> Angle;
+}
+
+struct Angle { d: i32; }
+
+impl Degrees for i32 {
+    fn degrees(self) -> Angle { return Angle { d: self }; }
+}
+
+impl Neg for Angle {
+    type Output = Angle;
+    fn neg(self) -> Angle { return Angle { d: 0 - self.d }; }
+}
+
+impl Add for Angle {
+    type Output = Angle;
+    fn add(self, rhs: Angle) -> Angle { return Angle { d: self.d + rhs.d }; }
+}
+
+fn main() -> i32 {
+    let a = 180°;
+    rok_print_i32(a.d);
+    // Extension tokens lex inside f-string holes too; `°.d` chains.
+    rok_print_str(f"{45°.d}");
+    // `-90°` is `-(90°)`.
+    rok_print_i32((-90°).d);
+    // `90° + a` is `(90°) + a`.
+    rok_print_i32((90° + a).d);
+    return 0;
+}

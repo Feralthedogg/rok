@@ -28,70 +28,70 @@ impl str {
     pub fn new() -> str { return ""; }
 
     /// Byte length (not the char count).
-    pub fn len(self) -> usize { return rok_str_len(self); }
-    pub fn is_empty(self) -> bool { return rok_str_len(self) == 0; }
+    pub fn len(self) -> usize { return unsafe { rok_str_len(self) }; }
+    pub fn is_empty(self) -> bool { return unsafe { rok_str_len(self) } == 0; }
     /// Number of chars (`s.chars().count()` in the spec).
-    pub fn char_count(self) -> usize { return rok_str_char_count(self); }
+    pub fn char_count(self) -> usize { return unsafe { rok_str_char_count(self) }; }
 
     /// `s[start:end]` by byte offsets; panics off a char boundary.
     pub fn slice(self, start: usize, end: usize) -> str {
-        return rok_str_slice(self, start, end);
+        return unsafe { rok_str_slice(self, start, end) };
     }
 
-    pub fn contains(self, pat: str) -> bool { return rok_str_find(self, pat) >= 0; }
+    pub fn contains(self, pat: str) -> bool { return unsafe { rok_str_find(self, pat) } >= 0; }
     pub fn starts_with(self, pat: str) -> bool {
-        if rok_str_len(pat) > rok_str_len(self) { return false; }
-        return rok_str_cmp(rok_str_slice(self, 0, rok_str_len(pat)), pat) == 0;
+        if unsafe { rok_str_len(pat) } > unsafe { rok_str_len(self) } { return false; }
+        return unsafe { rok_str_cmp(rok_str_slice(self, 0, rok_str_len(pat)), pat) } == 0;
     }
     pub fn ends_with(self, pat: str) -> bool {
-        let n = rok_str_len(self);
-        let m = rok_str_len(pat);
+        let n = unsafe { rok_str_len(self) };
+        let m = unsafe { rok_str_len(pat) };
         if m > n { return false; }
-        return rok_str_cmp(rok_str_slice(self, n - m, n), pat) == 0;
+        return unsafe { rok_str_cmp(rok_str_slice(self, n - m, n), pat) } == 0;
     }
     pub fn find(self, pat: str) -> usize | none {
-        let i = rok_str_find(self, pat);
+        let i = unsafe { rok_str_find(self, pat) };
         if i < 0 { return none; }
         return i as usize;
     }
     pub fn rfind(self, pat: str) -> usize | none {
-        let i = rok_str_rfind(self, pat);
+        let i = unsafe { rok_str_rfind(self, pat) };
         if i < 0 { return none; }
         return i as usize;
     }
 
-    pub fn trim(self) -> str { return rok_str_trim(self, 0); }
-    pub fn trim_start(self) -> str { return rok_str_trim(self, 1); }
-    pub fn trim_end(self) -> str { return rok_str_trim(self, 2); }
+    pub fn trim(self) -> str { return unsafe { rok_str_trim(self, 0) }; }
+    pub fn trim_start(self) -> str { return unsafe { rok_str_trim(self, 1) }; }
+    pub fn trim_end(self) -> str { return unsafe { rok_str_trim(self, 2) }; }
 
     // ponytail: ASCII case mapping only.
-    pub fn to_lowercase(self) -> str { return rok_str_case(self, 0); }
-    pub fn to_uppercase(self) -> str { return rok_str_case(self, 1); }
-    pub fn replace(self, from: str, to: str) -> str { return rok_str_replace(self, from, to); }
+    pub fn to_lowercase(self) -> str { return unsafe { rok_str_case(self, 0) }; }
+    pub fn to_uppercase(self) -> str { return unsafe { rok_str_case(self, 1) }; }
+    pub fn replace(self, from: str, to: str) -> str { return unsafe { rok_str_replace(self, from, to) }; }
 }
 
 impl Add for str {
     type Output = str;
-    fn add(self, rhs: str) -> str { return rok_str_concat(self, rhs); }
+    fn add(self, rhs: str) -> str { return unsafe { rok_str_concat(self, rhs) }; }
 }
 
 impl PartialEq for str {
-    fn eq(self, rhs: str) -> bool { return rok_str_cmp(self, rhs) == 0; }
-    fn ne(self, rhs: str) -> bool { return rok_str_cmp(self, rhs) != 0; }
+    fn eq(self, rhs: str) -> bool { return unsafe { rok_str_cmp(self, rhs) } == 0; }
+    fn ne(self, rhs: str) -> bool { return unsafe { rok_str_cmp(self, rhs) } != 0; }
 }
 
 impl PartialOrd for str {
-    fn lt(self, rhs: str) -> bool { return rok_str_cmp(self, rhs) < 0; }
-    fn gt(self, rhs: str) -> bool { return rok_str_cmp(self, rhs) > 0; }
-    fn le(self, rhs: str) -> bool { return rok_str_cmp(self, rhs) <= 0; }
-    fn ge(self, rhs: str) -> bool { return rok_str_cmp(self, rhs) >= 0; }
+    fn lt(self, rhs: str) -> bool { return unsafe { rok_str_cmp(self, rhs) } < 0; }
+    fn gt(self, rhs: str) -> bool { return unsafe { rok_str_cmp(self, rhs) } > 0; }
+    fn le(self, rhs: str) -> bool { return unsafe { rok_str_cmp(self, rhs) } <= 0; }
+    fn ge(self, rhs: str) -> bool { return unsafe { rok_str_cmp(self, rhs) } >= 0; }
 }
 
 impl Eq for str {}
 
 impl Ord for str {
     fn cmp(self, other: str) -> Ordering {
-        let c = rok_str_cmp(self, other);
+        let c = unsafe { rok_str_cmp(self, other) };
         if c < 0 { return Ordering::Less; }
         if c > 0 { return Ordering::Greater; }
         return Ordering::Equal;
@@ -100,5 +100,5 @@ impl Ord for str {
 
 /// Byte-wise FNV-1a, so `str` keys work in `Dict` / `Set`.
 impl Hash for str {
-    fn hash(self) -> u64 { return rok_str_hash(self); }
+    fn hash(self) -> u64 { return unsafe { rok_str_hash(self) }; }
 }

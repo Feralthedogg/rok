@@ -11,7 +11,9 @@ use rokc_diagnostic::RokDiagnostic;
 use rokc_hir::HirModule;
 use rokc_lexer::Lexer;
 use rokc_mir::MirModule;
-use rokc_parser::{PrecTable, collect_lang_table, collect_prec_table, parse_program};
+use rokc_parser::{
+    ExtOps, PrecTable, collect_lang_table, collect_prec_table, parse_program, parse_program_ext,
+};
 
 pub use cfg::CfgEnv;
 pub use toolchain::{BuildOptions, EmitKind, TempDir, emit, link_executable, mlir_text};
@@ -63,7 +65,15 @@ pub fn compile_source(
     let mut diags: Vec<RokDiagnostic> = Vec::new();
 
     // Bootstrap PrecTable from operator-declaration sources, if any.
-    let prec = build_prec_table(&config.bootstrap_files, &mut diags);
+    let mut prec = build_prec_table(&config.bootstrap_files, &mut diags);
+    // Spec 6.7.11: the user package's own `#[infix]` registrations are
+    // gathered by the same pre-pass, so its extension tokens lex.
+    for prog in user_programs(source, path) {
+        let (sub, mut d) = collect_prec_table(&prog);
+        diags.append(&mut d);
+        diags.extend(sub.entries().cloned().filter_map(|e| prec.merge(e)));
+    }
+    let ext = prec.ext_ops();
     // Walk the user package's module tree (`mod foo;` follows files
     // alongside the entry `main.rok` / `lib.rok`) and merge every
     // visited file's items into one `Program` so HIR sees a single
@@ -86,6 +96,7 @@ pub fn compile_source(
         Some(&root_dir),
         &[],
         &cfg_env,
+        &ext,
         &mut diags,
         &mut all_items,
         &mut all_uses,
@@ -112,6 +123,7 @@ pub fn compile_source(
             root.parent(),
             &["rok".to_owned(), tier],
             &cfg_env,
+            &ext,
             &mut diags,
             &mut all_items,
             &mut all_uses,
@@ -138,9 +150,9 @@ pub fn compile_source(
 
     // Name resolution and type / exhaustiveness checking happen during
     // HIR lowering (`rokc_hir::lower_full`), where every type is known.
-    let errors: Vec<RokDiagnostic> = diags.iter().filter(|d| d.is_error()).cloned().collect();
-    if !errors.is_empty() {
-        return Err(errors);
+    // Warnings go out with the errors (a failed build still shows them).
+    if diags.iter().any(RokDiagnostic::is_error) {
+        return Err(diags);
     }
 
     // Convert raw use trees into a per-module table of resolution
@@ -150,12 +162,14 @@ pub fn compile_source(
     let (use_table, reexports, mut use_diags) = rokc_hir::build_use_table(&all_uses);
     diags.append(&mut use_diags);
     let mut hir = rokc_hir::lower_full(&program, &prec, &use_table, &reexports);
+    rokc_diagnostic::set_current_span(rokc_diagnostic::Span::DUMMY);
     diags.append(&mut hir.diagnostics);
-    let errors: Vec<RokDiagnostic> = diags.iter().filter(|d| d.is_error()).cloned().collect();
-    if !errors.is_empty() {
-        return Err(errors);
+    // Warnings go out with the errors (a failed build still shows them).
+    if diags.iter().any(RokDiagnostic::is_error) {
+        return Err(diags);
     }
-    let mir = rokc_mir::lower(&hir);
+    let mut mir = rokc_mir::lower(&hir);
+    mir.pkg_hashes = package_hashes(&root_dir, &config.bootstrap_files);
 
     Ok(CompiledProject {
         modules: vec![CompiledModule {
@@ -173,6 +187,64 @@ pub fn compile_source(
     })
 }
 
+/// Spec 0.3.3: each package's hash is the SHA-256 (first 8 hex digits)
+/// of its source files in path order — `rok::<tier>` for each library
+/// root, `""` for the user package. A file belongs to the package whose
+/// directory is its closest ancestor. Longest prefix first (mangling
+/// picks the first match).
+fn package_hashes(user_dir: &Path, roots: &[PathBuf]) -> Vec<(String, String)> {
+    let mut pkgs: Vec<(String, PathBuf)> = roots
+        .iter()
+        .filter_map(|r| {
+            let dir = r.parent()?;
+            let tier = dir.file_name()?.to_str()?;
+            Some((format!("rok::{tier}"), dir.to_path_buf()))
+        })
+        .collect();
+    pkgs.push((String::new(), user_dir.to_path_buf()));
+    let files = rokc_diagnostic::registered_files();
+    let mut out: Vec<(String, String)> = pkgs
+        .iter()
+        .map(|(prefix, dir)| {
+            let mut mine: Vec<(String, &str)> = files
+                .iter()
+                .filter_map(|(path, text)| {
+                    let p = Path::new(path);
+                    // The closest package directory owns the file.
+                    let owner = pkgs
+                        .iter()
+                        .filter(|(_, d)| p.starts_with(d))
+                        .max_by_key(|(_, d)| d.components().count())?;
+                    (owner.1 == *dir).then(|| {
+                        let rel = p.strip_prefix(dir).unwrap_or(p);
+                        let rel: Vec<String> = rel
+                            .components()
+                            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                            .collect();
+                        (rel.join("/"), text.as_str())
+                    })
+                })
+                .collect();
+            (prefix.clone(), hash_package(&mut mine))
+        })
+        .collect();
+    out.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
+    out
+}
+
+/// Spec 0.3.3: SHA-256 over the files in byte-wise order of their
+/// package-relative `/` paths, each as `path \0 content \0`; the first
+/// 8 hex digits.
+fn hash_package(files: &mut Vec<(String, &str)>) -> String {
+    files.sort_unstable();
+    files.dedup();
+    let blob: String = files
+        .iter()
+        .flat_map(|(rel, text)| [rel.as_str(), "\0", text, "\0"])
+        .collect();
+    rokc_codegen_mlir::pkg_hash(&blob)
+}
+
 fn build_prec_table(roots: &[PathBuf], diags: &mut Vec<RokDiagnostic>) -> PrecTable {
     let mut table = PrecTable::new();
     for root in roots {
@@ -183,10 +255,25 @@ fn build_prec_table(roots: &[PathBuf], diags: &mut Vec<RokDiagnostic>) -> PrecTa
         for prog in resolve_module_tree(root, &mut Vec::new()) {
             let (sub_table, mut collect_diags) = collect_prec_table(&prog);
             diags.append(&mut collect_diags);
-            diags.extend(sub_table.entries().cloned().filter_map(|e| table.merge(e)));
+            diags.extend(sub_table.entries().cloned().filter_map(|mut e| {
+                e.from_lib = true;
+                table.merge(e)
+            }));
         }
     }
     table
+}
+
+/// The user package's modules, parsed without extension operators (the
+/// pre-pass that finds them); errors are reported by the real parse.
+fn user_programs(source: &str, path: &Path) -> Vec<rokc_ast::Program> {
+    let file = path.display().to_string();
+    let (tokens, _) = Lexer::new(source, file.clone()).lex_all();
+    let (program, _) = parse_program(&tokens, file);
+    let mut out = Vec::new();
+    walk_mod_decls(&program.items, path.parent(), &mut Vec::new(), &mut out);
+    out.push(program);
+    out
 }
 
 /// Walk a package's module tree from `root_path` (the package root file —
@@ -300,6 +387,7 @@ fn collect_module_tree(
     submodule_dir: Option<&Path>,
     module_path: &[String],
     cfg_env: &CfgEnv,
+    ext: &ExtOps,
     diags: &mut Vec<RokDiagnostic>,
     out: &mut Vec<rokc_ast::Item>,
     uses: &mut Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)>,
@@ -318,11 +406,16 @@ fn collect_module_tree(
         },
     };
     let file = body_path.display().to_string();
-    let lexer = Lexer::new(&source, file.clone());
-    let (tokens, mut lex_diags) = lexer.lex_all();
+    let lexer = Lexer::new(&source, file.clone()).with_ext_ops(ext.symbols());
+    let (mut tokens, mut lex_diags) = lexer.lex_all();
     diags.append(&mut lex_diags);
+    // Every span parsed from here on knows its file (diagnostic locations).
+    let file_id = rokc_diagnostic::register_file(file.clone(), source.clone());
+    for t in &mut tokens {
+        t.span.file = file_id;
+    }
 
-    let (program, mut parse_diags) = parse_program(&tokens, file);
+    let (program, mut parse_diags) = parse_program_ext(&tokens, file, ext);
     diags.append(&mut parse_diags);
 
     // Filter `#[cfg(...)]`-gated items before walking — excluded modules
@@ -334,6 +427,7 @@ fn collect_module_tree(
         module_path,
         submodule_dir,
         cfg_env,
+        ext,
         diags,
         out,
         uses,
@@ -347,6 +441,7 @@ fn flatten_module_items(
     module_path: &[String],
     submodule_dir: Option<&Path>,
     cfg_env: &CfgEnv,
+    ext: &ExtOps,
     diags: &mut Vec<RokDiagnostic>,
     out: &mut Vec<rokc_ast::Item>,
     uses: &mut Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)>,
@@ -366,6 +461,7 @@ fn flatten_module_items(
                         &child_path,
                         submodule_dir,
                         cfg_env,
+                        ext,
                         diags,
                         out,
                         uses,
@@ -400,6 +496,7 @@ fn flatten_module_items(
                         next_dir.as_deref(),
                         &child_path,
                         cfg_env,
+                        ext,
                         diags,
                         out,
                         uses,
@@ -461,10 +558,22 @@ fn rename_with_prefix(item: rokc_ast::Item, module_path: &[String]) -> rokc_ast:
         // bodies in the right module (HIR strips it back to the leaf).
         rokc_ast::Item::Impl(mut i) => {
             for it in &mut i.items {
-                if let rokc_ast::ImplItem::Method(m) = it {
-                    m.name = format!("{prefix}::{}", m.name);
+                match it {
+                    rokc_ast::ImplItem::Method(m) => m.name = format!("{prefix}::{}", m.name),
+                    rokc_ast::ImplItem::Const(c) => c.name = format!("{prefix}::{}", c.name),
+                    rokc_ast::ImplItem::AssocType { .. } => {}
                 }
             }
+            // An empty impl (`unsafe impl Send for S {}`) has no method
+            // to carry the module: say it with a marker attribute.
+            i.attrs.push(rokc_ast::Attribute {
+                path: vec![rokc_hir::IMPL_MODULE_ATTR.to_owned()],
+                body: rokc_ast::AttrBody::Args(vec![rokc_ast::AttrArg::Lit(
+                    rokc_ast::Literal::Str(prefix),
+                )]),
+                inner: false,
+                span: i.span,
+            });
             rokc_ast::Item::Impl(i)
         }
         rokc_ast::Item::Use(_) // already extracted into `uses`
@@ -513,6 +622,7 @@ fn builtin_panic_extern() -> rokc_ast::Item {
         body: None,
         is_async: false,
         is_generator: false,
+        is_unsafe: false,
         throws: ThrowsKind::None,
         where_clause: Vec::new(),
         span,
@@ -568,7 +678,13 @@ fn builtin_panic_extern() -> rokc_ast::Item {
         Some(path_ty("i32")),
     );
     rokc_ast::Item::Extern(ExternBlock {
-        attrs: Vec::new(),
+        // Compiler-provided hooks are safe to call (no `unsafe { }`).
+        attrs: vec![rokc_ast::Attribute {
+            path: vec![rokc_hir::SAFE_EXTERN_ATTR.to_owned()],
+            body: rokc_ast::AttrBody::Empty,
+            inner: false,
+            span,
+        }],
         abi: "C".to_owned(),
         items: vec![
             ExternItem::Fn(panic_fn),
@@ -582,4 +698,17 @@ fn builtin_panic_extern() -> rokc_ast::Item {
         ],
         span,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn package_hash_known_answer() {
+        // python3: sha256(b"lib.rok\0pub mod m;\n\0m.rok\0fn f() {}\n\0")
+        let mut files = vec![
+            ("m.rok".to_owned(), "fn f() {}\n"),
+            ("lib.rok".to_owned(), "pub mod m;\n"),
+        ];
+        assert_eq!(super::hash_package(&mut files), "b0cf4718");
+    }
 }

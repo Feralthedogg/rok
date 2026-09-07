@@ -14,9 +14,10 @@ use rokc_ast::{
 };
 use rokc_core::Visibility;
 use rokc_diagnostic::{ErrorKind, RokDiagnostic, Span};
+use rokc_lexer::token::keyword_str;
 use rokc_lexer::{Token, TokenKind};
 
-use crate::prec::{Assoc, CAST_PREC, COALESCE_PREC, Fixity, fixed_prec};
+use crate::prec::{Assoc, CAST_PREC, COALESCE_PREC, ExtOps, Fixity};
 
 #[path = "fstring.rs"]
 mod fstring;
@@ -62,6 +63,8 @@ pub struct Parser<'a> {
     /// Spans of untyped `throws` in fn types not (yet) claimed by a
     /// `rethrows` signature; reported at the end of the parse.
     untyped_throws: Vec<Span>,
+    /// Registered extension operators (spec 1.10.4) and their levels.
+    ext: ExtOps,
 }
 
 /// Nesting limit for expressions, types, patterns and blocks.
@@ -69,9 +72,20 @@ const MAX_DEPTH: u32 = 256;
 const PARSER_STACK: usize = 128 << 20;
 
 pub fn parse_program(tokens: &[Token], file: impl Into<String>) -> (Program, Vec<RokDiagnostic>) {
+    parse_program_ext(tokens, file, &ExtOps::default())
+}
+
+/// `parse_program` that also knows registered extension operators.
+pub fn parse_program_ext(
+    tokens: &[Token],
+    file: impl Into<String>,
+    ext: &ExtOps,
+) -> (Program, Vec<RokDiagnostic>) {
     let file = file.into();
+    let ext = ext.clone();
     let run = move || {
         let mut p = Parser::new(tokens, file);
+        p.ext = ext;
         let program = p.parse_program();
         (program, p.diagnostics)
     };
@@ -104,6 +118,7 @@ impl<'a> Parser<'a> {
             pending_stmts: Vec::new(),
             next_destructure_temp: 0,
             untyped_throws: Vec::new(),
+            ext: ExtOps::default(),
         }
     }
 
@@ -323,14 +338,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn unsupported(&mut self, span: Span, msg: impl Into<String>) {
-        self.diagnostics.push(
-            RokDiagnostic::error(ErrorKind::Unsupported, msg)
-                .with_file(self.file.clone())
-                .with_span(span, ""),
-        );
-    }
-
     fn error(&mut self, span: Span, msg: impl Into<String>) {
         self.diagnostics.push(
             RokDiagnostic::error(ErrorKind::Parse, msg)
@@ -386,8 +393,32 @@ impl<'a> Parser<'a> {
                         | TokenKind::Yield
                 )
             ),
+            _ if self.at_union_item() || self.at_ctx_item() => true,
             k => starts_item(k),
         }
+    }
+
+    /// Spec 1.5.4: `union` is a contextual keyword — an item only as
+    /// `union Name` at item start; elsewhere it is an identifier
+    /// (`Set::union`, `a.union(b)`).
+    /// `extern "C" {` / `extern {`, `const NAME` / `const fn`,
+    /// `static [mut] NAME`, `type Name` (E8: contextual at item start).
+    fn at_ctx_item(&self) -> bool {
+        let next = self.peek_next();
+        let TokenKind::Ident(k) = self.peek() else {
+            return false;
+        };
+        match k.as_str() {
+            "extern" => matches!(next, Some(TokenKind::StrLit(_) | TokenKind::LBrace)),
+            "const" => matches!(next, Some(TokenKind::Ident(_) | TokenKind::Fn)),
+            "static" | "type" => matches!(next, Some(TokenKind::Ident(_))),
+            _ => false,
+        }
+    }
+
+    fn at_union_item(&self) -> bool {
+        matches!(self.peek(), TokenKind::Ident(n) if n == "union")
+            && matches!(self.peek_next(), Some(TokenKind::Ident(_)))
     }
 
     /// Top-level statement of the entry file (spec 4.16.1:
@@ -458,9 +489,6 @@ impl<'a> Parser<'a> {
         loop {
             let name = match self.peek().clone() {
                 TokenKind::Ident(n) => n,
-                // `any` is a reserved keyword but valid here as a
-                // contextual identifier (`#[cfg(any(...))]`).
-                TokenKind::Any => "any".to_owned(),
                 other => {
                     let s = self.peek_span();
                     self.error(s, format!("attribute name expected, found {other:?}"));
@@ -510,11 +538,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_attr_arg(&mut self) -> Option<AttrArg> {
-        // `any` is a reserved type-keyword but in attribute args it has
-        // contextual meaning (`#[cfg(any(...))]`). Treat it as a Word.
         let ident_name = match self.peek().clone() {
             TokenKind::Ident(n) => Some(n),
-            TokenKind::Any => Some("any".to_owned()),
             _ => None,
         };
         if let Some(name) = ident_name {
@@ -605,11 +630,71 @@ impl<'a> Parser<'a> {
         Some(lit)
     }
 
+    /// The current token is the contextual keyword `w` (an identifier
+    /// token; spec 1.5 / E8).
+    fn at_kw(&self, w: &str) -> bool {
+        matches!(self.peek(), TokenKind::Ident(n) if n == w)
+    }
+
+    fn eat_kw(&mut self, w: &str) -> bool {
+        let hit = self.at_kw(w);
+        if hit {
+            self.bump();
+        }
+        hit
+    }
+
+    fn expect_kw(&mut self, w: &str) -> Option<()> {
+        if self.eat_kw(w) {
+            return Some(());
+        }
+        let s = self.peek_span();
+        self.error(s, format!("expected `{w}`, found {:?}", self.peek()));
+        None
+    }
+
+    /// A member / field / argument-label name: an identifier or any
+    /// reserved keyword but `self` (E8; `p.type`, `f(match: 1)`).
+    fn peek_name(&self) -> Option<String> {
+        match self.peek() {
+            TokenKind::Ident(n) => Some(n.clone()),
+            k => keyword_str(k).filter(|w| *w != "self").map(str::to_owned),
+        }
+    }
+
     fn peek_next(&self) -> Option<TokenKind> {
         self.tokens.get(self.pos + 1).map(|t| t.kind.clone())
     }
 
     fn parse_item(&mut self) -> Option<Item> {
+        let span = self.peek_span();
+        let item = self.parse_item_inner()?;
+        // E8: `pkg` / `sup` / `rok` are path roots and `any` is the any
+        // type, so no module or type may take those names.
+        let name = match &item {
+            Item::Struct(d) => Some(&d.name),
+            Item::Enum(d) => Some(&d.name),
+            Item::Union(d) => Some(&d.name),
+            Item::Trait(d) => Some(&d.name),
+            Item::TypeAlias(d) => Some(&d.name),
+            Item::Mod(d) => Some(&d.name),
+            _ => None,
+        };
+        if let Some(n) = name.filter(|n| matches!(n.as_str(), "pkg" | "sup" | "rok" | "any")) {
+            let what = if matches!(item, Item::Mod(_)) {
+                "module"
+            } else {
+                "type"
+            };
+            self.error(
+                span,
+                format!("`{n}` cannot name a {what}: it is reserved as a path root / type keyword"),
+            );
+        }
+        Some(item)
+    }
+
+    fn parse_item_inner(&mut self) -> Option<Item> {
         let attrs = self.parse_outer_attrs();
         let vis = self.parse_visibility();
         // Spec 6.8: user meta blocks
@@ -629,6 +714,48 @@ impl<'a> Parser<'a> {
         if is_meta_attr {
             return self.skip_meta_block(vis, attrs);
         }
+        if self.at_union_item() {
+            return self.parse_union(vis, attrs).map(Item::Union);
+        }
+        // Contextual item keywords (E8): `extern "C"`, `const NAME` /
+        // `const fn`, `static [mut] NAME`, `type Name`.
+        if self.at_kw("extern") {
+            // `extern "C" fn f(..) { .. }` (spec 5.9.10): a rok function
+            // with the C ABI, marked for HIR's checks.
+            let after_abi = self.tokens.get(self.pos + 2).map(|t| &t.kind);
+            if matches!(self.peek_next(), Some(TokenKind::StrLit(_)))
+                && matches!(after_abi, Some(TokenKind::Fn | TokenKind::Unsafe))
+            {
+                let span = self.peek_span();
+                self.bump(); // `extern`
+                self.bump(); // ABI string
+                let mut attrs = attrs;
+                attrs.push(Attribute {
+                    path: vec![rokc_ast::EXTERN_C_FN_ATTR.to_owned()],
+                    body: rokc_ast::AttrBody::Empty,
+                    inner: false,
+                    span,
+                });
+                return self.parse_fn(vis, attrs).map(Item::Fn);
+            }
+            return self.parse_extern_block(attrs).map(Item::Extern);
+        }
+        if self.at_kw("const") {
+            if matches!(self.peek_next(), Some(TokenKind::Fn)) {
+                self.bump(); // `const`
+                // Stage-1: accept `const fn` as a regular fn. CTE
+                // (compile-time evaluation) lowering is a separate
+                // milestone; the body still runs at runtime.
+                return self.parse_fn(vis, attrs).map(Item::Fn);
+            }
+            return self.parse_const(vis, attrs).map(Item::Const);
+        }
+        if self.at_kw("static") {
+            return self.parse_static(vis, attrs).map(Item::Static);
+        }
+        if self.at_kw("type") {
+            return self.parse_type_alias(vis, attrs).map(Item::TypeAlias);
+        }
         match self.peek() {
             TokenKind::Unsafe if self.peek_next() == Some(TokenKind::Impl) => {
                 self.bump();
@@ -644,30 +771,10 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Trait => self.parse_trait(vis, attrs).map(Item::Trait),
             TokenKind::Struct => self.parse_struct(vis, attrs).map(Item::Struct),
-            TokenKind::Union => self.parse_union(vis, attrs).map(Item::Union),
             TokenKind::Enum => self.parse_enum(vis, attrs).map(Item::Enum),
             TokenKind::Impl => self.parse_impl(vis, attrs).map(Item::Impl),
-            TokenKind::Extern => self.parse_extern_block(attrs).map(Item::Extern),
             TokenKind::Mod => self.parse_mod(vis, attrs).map(Item::Mod),
             TokenKind::Use => self.parse_use(vis, attrs).map(Item::Use),
-            // Spec 5.2 / variant 663: `const fn name(...) -> R { ... }` —
-            // a compile-time-evaluable function. Distinguish from a
-            // `const NAME: T = ...;` item by peeking past `const`.
-            TokenKind::Const => {
-                if matches!(
-                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
-                    Some(TokenKind::Fn)
-                ) {
-                    self.bump(); // `const`
-                    // Stage-1: accept `const fn` as a regular fn. CTE
-                    // (compile-time evaluation) lowering is a separate
-                    // milestone; the body still runs at runtime.
-                    return self.parse_fn(vis, attrs).map(Item::Fn);
-                }
-                self.parse_const(vis, attrs).map(Item::Const)
-            }
-            TokenKind::Static => self.parse_static(vis, attrs).map(Item::Static),
-            TokenKind::Type => self.parse_type_alias(vis, attrs).map(Item::TypeAlias),
             _ => {
                 let span = self.peek_span();
                 self.error(span, "expected an item");
@@ -728,7 +835,7 @@ impl<'a> Parser<'a> {
         attrs: Vec<Attribute>,
     ) -> Option<rokc_ast::TypeAliasDef> {
         let start = self.peek_span();
-        self.expect(&TokenKind::Type, "`type`")?;
+        self.bump(); // contextual `type`
         let name = if let TokenKind::Ident(n) = self.peek().clone() {
             self.bump();
             n
@@ -758,7 +865,7 @@ impl<'a> Parser<'a> {
         attrs: Vec<Attribute>,
     ) -> Option<rokc_ast::ConstDef> {
         let start = self.peek_span();
-        self.expect(&TokenKind::Const, "`const`")?;
+        self.bump(); // contextual `const`
         let name = if let TokenKind::Ident(n) = self.peek().clone() {
             self.bump();
             n
@@ -792,8 +899,8 @@ impl<'a> Parser<'a> {
         attrs: Vec<Attribute>,
     ) -> Option<rokc_ast::StaticDef> {
         let start = self.peek_span();
-        self.expect(&TokenKind::Static, "`static`")?;
-        let is_mut = self.eat(&TokenKind::Mut);
+        self.bump(); // contextual `static`
+        let is_mut = matches!(self.peek_next(), Some(TokenKind::Ident(_))) && self.eat_kw("mut");
         // Spec 5.3 / variant 656: `static mut` is permitted only inside
         // an `extern "C" { ... }` block (FFI). The regular item path
         // (this function) is not the FFI path, so reject.
@@ -898,7 +1005,7 @@ impl<'a> Parser<'a> {
     /// the largest field's MIR type (future work).
     fn parse_union(&mut self, vis: Visibility, attrs: Vec<Attribute>) -> Option<UnionDef> {
         let start = self.peek_span();
-        self.expect(&TokenKind::Union, "`union`")?;
+        self.bump(); // contextual `union`
         let name = if let TokenKind::Ident(n) = self.peek().clone() {
             self.bump();
             n
@@ -932,7 +1039,7 @@ impl<'a> Parser<'a> {
             let attrs = self.parse_outer_attrs();
             let vis = self.parse_visibility();
             let span = self.peek_span();
-            let TokenKind::Ident(name) = self.peek().clone() else {
+            let Some(name) = self.peek_name() else {
                 self.error(
                     span,
                     format!("field name expected, found {:?}", self.peek()),
@@ -1008,7 +1115,7 @@ impl<'a> Parser<'a> {
                 }
                 // Spec 2.9.1: `impl_item ::= fn_decl | "type" ident "=" ty ";" | const_decl`.
                 // Associated-type concrete binding: `type Output = V;`.
-                TokenKind::Type => {
+                TokenKind::Ident(k) if k == "type" => {
                     let _ = (item_vis, item_attrs);
                     self.bump();
                     let assoc_name = if let TokenKind::Ident(n) = self.peek().clone() {
@@ -1027,16 +1134,13 @@ impl<'a> Parser<'a> {
                         ty: aty,
                     });
                 }
-                // ponytail: parsed-but-ignored would be worse than a
-                // clear refusal — HIR has no lowering for these yet.
-                TokenKind::Const => {
-                    let s = self.peek_span();
-                    self.unsupported(
-                        s,
-                        "associated `const` in `impl` (spec 2.9.1) is not yet supported",
-                    );
+                // Spec 2.9.1 `impl_item ::= .. | const_decl`.
+                TokenKind::Ident(k) if k == "const" => {
                     let from = self.pos;
-                    self.recover(from, Recover::NestedItem);
+                    match self.parse_const(item_vis, item_attrs) {
+                        Some(c) => items.push(ImplItem::Const(c)),
+                        None => self.recover(from, Recover::NestedItem),
+                    }
                 }
                 _ => {
                     let s = self.peek_span();
@@ -1152,7 +1256,7 @@ impl<'a> Parser<'a> {
     // `extern "ABI" { fn name(args) -> ret; ... }`. ABI defaults to "C".
     fn parse_extern_block(&mut self, attrs: Vec<Attribute>) -> Option<ExternBlock> {
         let start = self.peek_span();
-        self.expect(&TokenKind::Extern, "`extern`")?;
+        self.bump(); // contextual `extern`
         let abi = match self.peek().clone() {
             TokenKind::StrLit(s) => {
                 self.bump();
@@ -1174,14 +1278,40 @@ impl<'a> Parser<'a> {
                         self.recover(from, Recover::NestedItem);
                     }
                 }
-                TokenKind::Static => {
-                    let s = self.peek_span();
-                    self.unsupported(
-                        s,
-                        "`static` in `extern` blocks (spec 5.3) is not yet supported",
-                    );
+                // Spec 5.9.3: `static mut? name: T;` defined outside.
+                TokenKind::Ident(k) if k == "static" => {
                     let from = self.pos;
-                    self.recover(from, Recover::NestedItem);
+                    let span = self.peek_span();
+                    self.bump();
+                    let is_mut =
+                        matches!(self.peek_next(), Some(TokenKind::Ident(_))) && self.eat_kw("mut");
+                    let name = match self.peek().clone() {
+                        TokenKind::Ident(n) => {
+                            self.bump();
+                            Some(n)
+                        }
+                        _ => None,
+                    };
+                    let ty = name.as_ref().and_then(|_| {
+                        self.expect(&TokenKind::Colon, "`:`")?;
+                        let ty = self.parse_type()?;
+                        self.expect(&TokenKind::Semi, "`;`")?;
+                        Some(ty)
+                    });
+                    if let (Some(name), Some(ty)) = (name, ty) {
+                        items.push(ExternItem::Static(rokc_ast::StaticDef {
+                            vis: item_vis,
+                            attrs: item_attrs,
+                            name,
+                            ty,
+                            value: None,
+                            is_mut,
+                            span,
+                        }));
+                    } else {
+                        self.error(span, "expected `static name: Type;` in `extern` block");
+                        self.recover(from, Recover::NestedItem);
+                    }
                 }
                 _ => {
                     let s = self.peek_span();
@@ -1386,7 +1516,7 @@ impl<'a> Parser<'a> {
                 let f = self.parse_fn(vis, attrs)?;
                 Some(TraitItem::Method(f))
             }
-            TokenKind::Type => {
+            TokenKind::Ident(k) if k == "type" => {
                 self.bump();
                 let name = if let TokenKind::Ident(n) = self.peek().clone() {
                     self.bump();
@@ -1528,19 +1658,13 @@ impl<'a> Parser<'a> {
         v
     }
 
-    /// A function's name. `union` / `any` are keywords only elsewhere:
-    /// `fn union` (`Set::union`, stdlib 2.9.4) and `fn any`
-    /// (`Iterator::any`, 2.7.1) name functions.
+    /// A function's name. Contextual keywords (E8) lex as identifiers,
+    /// so `fn union` (`Set::union`) and `fn any` (`Iterator::any`) work.
     fn fn_name(&mut self) -> Option<String> {
-        let name = match self.peek() {
-            TokenKind::Ident(n) => n.clone(),
-            TokenKind::Union => "union".to_owned(),
-            TokenKind::Any => "any".to_owned(),
-            _ => {
-                let s = self.peek_span();
-                self.error(s, "function name expected");
-                return None;
-            }
+        let TokenKind::Ident(name) = self.peek().clone() else {
+            let s = self.peek_span();
+            self.error(s, "function name expected");
+            return None;
         };
         self.bump();
         Some(name)
@@ -1551,9 +1675,7 @@ impl<'a> Parser<'a> {
         let mut is_generator = false;
         let start = self.peek_span();
         // Modifiers in fixed order `unsafe async yield` (spec 4.1.11).
-        // ponytail: `unsafe` is accepted but not recorded — no
-        // unsafe-call check exists yet (spec 4.15).
-        self.eat(&TokenKind::Unsafe);
+        let is_unsafe = self.eat(&TokenKind::Unsafe);
         if matches!(self.peek(), TokenKind::Async) {
             is_async = true;
             self.bump();
@@ -1625,6 +1747,7 @@ impl<'a> Parser<'a> {
             body,
             is_async,
             is_generator,
+            is_unsafe,
             throws,
             where_clause,
             span: start,
@@ -1639,7 +1762,7 @@ impl<'a> Parser<'a> {
             return Generics { params };
         }
         while !matches!(self.peek(), TokenKind::Gt | TokenKind::Eof) {
-            if self.eat(&TokenKind::Const) {
+            if matches!(self.peek_next(), Some(TokenKind::Ident(_))) && self.eat_kw("const") {
                 let TokenKind::Ident(name) = self.peek().clone() else {
                     let s = self.peek_span();
                     self.error(s, "const-generic name expected");
@@ -1702,7 +1825,7 @@ impl<'a> Parser<'a> {
     /// Optional `where T: A + B, U::Out: C` (spec 2.10.4).
     fn parse_where_clause(&mut self) -> Vec<rokc_ast::WherePred> {
         let mut preds = Vec::new();
-        if !self.eat(&TokenKind::Where) {
+        if !self.eat_kw("where") {
             return preds;
         }
         while !matches!(
@@ -1726,7 +1849,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_throws(&mut self) -> ThrowsKind {
-        if !self.eat(&TokenKind::Throws) {
+        if !self.eat_kw("throws") {
             return ThrowsKind::None;
         }
         if !self.eat(&TokenKind::LParen) {
@@ -1833,7 +1956,9 @@ impl<'a> Parser<'a> {
         let kind = match self.peek().clone() {
             // `any` | `any Tr` | `any (A + B)` (D4). The bound binds
             // tighter than `|`: `any Error | none` is `(any Error) | none`.
-            TokenKind::Any => {
+            TokenKind::Ident(k)
+                if k == "any" && !matches!(self.peek_next(), Some(TokenKind::ColonColon)) =>
+            {
                 self.bump();
                 match self.peek() {
                     TokenKind::Ident(_) => TyKind::AnyTrait(vec![self.parse_type_path()?]),
@@ -1860,6 +1985,22 @@ impl<'a> Parser<'a> {
             TokenKind::Bang => {
                 self.bump();
                 TyKind::Never
+            }
+            // `unsafe fn(A) -> R`: calling it needs an unsafe scope (4.15).
+            // The marker rides with the bounds as the path `#unsafe`.
+            TokenKind::Unsafe if self.peek_next() == Some(TokenKind::Fn) => {
+                self.bump();
+                let mut t = self.parse_type_atom_inner()?;
+                if let TyKind::Fn(_, _, bounds) = &mut t.kind {
+                    bounds.push(rokc_ast::Path {
+                        segments: vec![rokc_ast::PathSegment {
+                            name: rokc_ast::UNSAFE_FN_MARK.to_owned(),
+                            generics: Vec::new(),
+                        }],
+                        span: start,
+                    });
+                }
+                t.kind
             }
             TokenKind::Ident(_) => TyKind::Path(self.parse_type_path()?),
             TokenKind::Fn => {
@@ -1947,14 +2088,13 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let elem = self.with_type_sum(true, Self::parse_type)?;
                 self.expect(&TokenKind::Semi, "`;`")?;
-                // For now: only literal integer length.
-                let len = if let TokenKind::IntLit(s) = self.peek().clone() {
-                    self.bump();
-                    ConstExpr::Literal(Literal::Int(s))
-                } else {
-                    let s = self.peek_span();
-                    self.error(s, "array length literal expected");
-                    ConstExpr::Literal(Literal::Int("0".into()))
+                // Spec 2.11.5: a const expression (`3`, `N`, `M * N`).
+                let len = match (self.peek().clone(), self.peek_next()) {
+                    (TokenKind::IntLit(s), Some(TokenKind::RBracket)) => {
+                        self.bump();
+                        ConstExpr::Literal(Literal::Int(s))
+                    }
+                    _ => ConstExpr::Expr(Box::new(self.with_struct_expr(false, Self::parse_expr)?)),
                 };
                 self.expect(&TokenKind::RBracket, "`]`")?;
                 TyKind::Array(Box::new(elem), len)
@@ -1980,6 +2120,37 @@ impl<'a> Parser<'a> {
                     TokenKind::Eof | TokenKind::Shr | TokenKind::GtEq | TokenKind::ShrEq
                 )
             {
+                // Spec 2.11.4: a const argument — a literal, `-lit`, or a
+                // braced expression `{ M * N }`.
+                if matches!(
+                    p.peek(),
+                    TokenKind::IntLit(_)
+                        | TokenKind::Minus
+                        | TokenKind::True
+                        | TokenKind::False
+                        | TokenKind::LBrace
+                ) {
+                    let span = p.peek_span();
+                    let e = if p.eat(&TokenKind::LBrace) {
+                        let e = p.with_struct_expr(true, Self::parse_expr);
+                        p.expect(&TokenKind::RBrace, "`}`")?;
+                        e
+                    } else {
+                        p.parse_expr_bp(12)
+                    };
+                    let Some(e) = e else {
+                        ok = false;
+                        break;
+                    };
+                    tys.push(Ty {
+                        kind: TyKind::Const(ConstExpr::Expr(Box::new(e))),
+                        span,
+                    });
+                    if !p.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                    continue;
+                }
                 // `Name = Ty`: an associated-type binding (spec 2.1).
                 let binding = match (p.peek().clone(), p.tokens.get(p.pos + 1).map(|t| &t.kind)) {
                     (TokenKind::Ident(name), Some(TokenKind::Eq)) => {
@@ -2039,7 +2210,6 @@ impl<'a> Parser<'a> {
                 | TokenKind::IntLit(_)
                 | TokenKind::Fn
                 | TokenKind::Arrow
-                | TokenKind::Any
                 | TokenKind::None
                 | TokenKind::SelfUpper
                 | TokenKind::Pipe => {}
@@ -2087,6 +2257,21 @@ impl<'a> Parser<'a> {
             segments.push(PathSegment { name, generics });
             if !self.eat(&TokenKind::ColonColon) {
                 break;
+            }
+            // `f::<T, 3>(..)` — explicit generic arguments in an
+            // expression path (spec 2.11.4).
+            if !allow_generics && matches!(self.peek(), TokenKind::Lt) {
+                self.bump();
+                let args = self.nested_type_list(TokenKind::Gt)?;
+                if !self.expect_closing_gt() {
+                    return None;
+                }
+                if let Some(last) = segments.last_mut() {
+                    last.generics = args;
+                }
+                if !self.eat(&TokenKind::ColonColon) {
+                    break;
+                }
             }
         }
         Some(Path {
@@ -2234,7 +2419,7 @@ impl<'a> Parser<'a> {
                             rest = true;
                             break;
                         }
-                        let field_name = if let TokenKind::Ident(n) = self.peek().clone() {
+                        let field_name = if let Some(n) = self.peek_name() {
                             self.bump();
                             n
                         } else {
@@ -2639,11 +2824,11 @@ impl<'a> Parser<'a> {
     /// (spec 4.14). They bind loosest, so `try a() + b() catch _ { 0 }`
     /// handles both calls.
     fn parse_catch_tail(&mut self, body: Expr) -> Option<Expr> {
-        if !matches!(self.peek(), TokenKind::Catch | TokenKind::Finally) {
+        if !(self.at_kw("catch") || self.at_kw("finally")) {
             return Some(body);
         }
         let mut catches: Vec<CatchArm> = Vec::new();
-        while matches!(self.peek(), TokenKind::Catch) {
+        while self.at_kw("catch") {
             let span = self.peek_span();
             self.bump();
             let pat = if matches!(self.peek(), TokenKind::LBrace) {
@@ -2660,7 +2845,7 @@ impl<'a> Parser<'a> {
                 body: arm_body,
             });
         }
-        let finally = if self.eat(&TokenKind::Finally) {
+        let finally = if self.eat_kw("finally") {
             Some(self.parse_block()?)
         } else {
             None
@@ -2699,7 +2884,7 @@ impl<'a> Parser<'a> {
 
     fn parse_expr_bp_inner(&mut self, min_bp: u32) -> Option<Expr> {
         let mut lhs = if let Some((sym, span)) = self.peek_op_symbol(Fixity::Prefix) {
-            let (prec, _) = fixed_prec(&sym, Fixity::Prefix)?;
+            let (prec, _) = self.ext.level(&sym, Fixity::Prefix)?;
             self.bump();
             let rhs = self.parse_expr_bp(prec)?;
             Expr {
@@ -2718,7 +2903,7 @@ impl<'a> Parser<'a> {
         let mut last_none_prec: Option<u32> = None;
 
         loop {
-            // Spec 3.2.3: `as` / `is` sit at level 10, left-assoc — below
+            // Spec 3.2.3: `as` / `is` sit at level 11, left-assoc — below
             // prefix unary (`-x as i64` is `(-x) as i64`), above arithmetic.
             if matches!(self.peek(), TokenKind::As | TokenKind::Is) {
                 if CAST_PREC < min_bp {
@@ -2763,7 +2948,7 @@ impl<'a> Parser<'a> {
                 };
                 continue;
             }
-            let Some((prec, assoc)) = fixed_prec(&sym, Fixity::Infix) else {
+            let Some((prec, assoc)) = self.ext.level(&sym, Fixity::Infix) else {
                 break;
             };
             let (left_bp, right_bp) = match assoc {
@@ -2858,6 +3043,7 @@ impl<'a> Parser<'a> {
             (TokenKind::Tilde, Fixity::Prefix) => "~".into(),
             (TokenKind::MathOp('√'), Fixity::Prefix) => "√".into(),
             (TokenKind::MathOp(c), Fixity::Infix) if *c != '√' => c.to_string(),
+            (TokenKind::ExtOp(s), f) if self.ext.levels.contains_key(&(s.clone(), f)) => s.clone(),
             _ => return None,
         };
         Some((sym, tok.span))
@@ -2921,22 +3107,95 @@ impl<'a> Parser<'a> {
                 self.desugar_fstring(&s, start)
             }
             TokenKind::Unsafe => {
-                // Spec 4.15 `unsafe { ... }`. ponytail: parsed as a plain
-                // block — the unsafe-call check (spec 4.15.2) is not
-                // implemented, so the marker carries no meaning yet.
+                // Spec 4.15.2 `unsafe { ... }`.
                 self.bump();
                 if !matches!(self.peek(), TokenKind::LBrace) {
                     self.error(start, "expected `{` after `unsafe`");
                     return None;
                 }
-                ExprKind::Block(self.parse_block()?)
+                ExprKind::Unsafe(self.parse_block()?)
             }
+            // Spec 3.17: `using a = e, b = f { body }` is
+            // `{ let a = e; { let b = f; { body } finally { b.drop(); } }
+            // finally { a.drop(); } }` — resources drop in reverse order on
+            // every way out of the block.
             TokenKind::Using => {
-                self.unsupported(
-                    start,
-                    "`using` expressions (spec 3.17) are not yet supported",
-                );
-                return None;
+                self.bump();
+                let mut bindings: Vec<(String, Span, Expr)> = Vec::new();
+                loop {
+                    let span = self.peek_span();
+                    let TokenKind::Ident(name) = self.peek().clone() else {
+                        self.error(span, "`using` binds a name (`using f = open(p) { .. }`)");
+                        return None;
+                    };
+                    self.bump();
+                    self.expect(&TokenKind::Eq, "`=`")?;
+                    let init = self.with_struct_expr(false, Self::parse_expr)?;
+                    bindings.push((name, span, init));
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                let body = self.parse_block()?;
+                let mut inner = Expr {
+                    span: start,
+                    kind: ExprKind::Block(body),
+                };
+                for (name, span, init) in bindings.into_iter().rev() {
+                    let path = |name: &str| Expr {
+                        span,
+                        kind: ExprKind::Path(Path {
+                            segments: vec![PathSegment {
+                                name: name.to_owned(),
+                                generics: Vec::new(),
+                            }],
+                            span,
+                        }),
+                    };
+                    let drop_call = Stmt {
+                        kind: StmtKind::Expr(Expr {
+                            span,
+                            kind: ExprKind::MethodCall {
+                                receiver: Box::new(path(&name)),
+                                method: "drop".to_owned(),
+                                type_args: Vec::new(),
+                                args: Vec::new(),
+                                trailing_closure: None,
+                            },
+                        }),
+                        span,
+                    };
+                    let guarded = Expr {
+                        span: start,
+                        kind: ExprKind::Catch {
+                            body: Box::new(inner),
+                            catches: Vec::new(),
+                            finally: Some(Block {
+                                stmts: vec![drop_call],
+                                trailing: None,
+                                span,
+                                label: None,
+                            }),
+                        },
+                    };
+                    inner = Expr {
+                        span: start,
+                        kind: ExprKind::Block(Block {
+                            stmts: vec![Stmt {
+                                kind: StmtKind::Let {
+                                    name,
+                                    ty: None,
+                                    init,
+                                },
+                                span,
+                            }],
+                            trailing: Some(Box::new(guarded)),
+                            span: start,
+                            label: None,
+                        }),
+                    };
+                }
+                inner.kind
             }
             TokenKind::True => {
                 self.bump();
@@ -3007,7 +3266,7 @@ impl<'a> Parser<'a> {
                     TokenKind::For => {
                         self.bump();
                         let pat = self.parse_pattern()?;
-                        self.expect(&TokenKind::In, "`in`")?;
+                        self.expect_kw("in")?;
                         let iter = self.with_struct_expr(false, Self::parse_expr)?;
                         let body = self.parse_block()?;
                         ExprKind::For {
@@ -3037,7 +3296,7 @@ impl<'a> Parser<'a> {
             TokenKind::For => {
                 self.bump();
                 let pat = self.parse_pattern()?;
-                self.expect(&TokenKind::In, "`in`")?;
+                self.expect_kw("in")?;
                 let iter = self.with_struct_expr(false, Self::parse_expr)?;
                 let body = self.parse_block()?;
                 ExprKind::For {
@@ -3313,6 +3572,21 @@ impl<'a> Parser<'a> {
                 self.bump();
                 ExprKind::SelfLower
             }
+            // `Self::NAME` / `Self::f(..)` inside an impl.
+            TokenKind::SelfUpper if matches!(self.peek_next(), Some(TokenKind::ColonColon)) => {
+                self.bump();
+                self.bump();
+                let mut rest = self.parse_path()?;
+                rest.segments.insert(
+                    0,
+                    PathSegment {
+                        name: "Self".to_owned(),
+                        generics: Vec::new(),
+                    },
+                );
+                rest.span = start;
+                ExprKind::Path(rest)
+            }
             TokenKind::SelfUpper => {
                 self.bump();
                 ExprKind::SelfUpper
@@ -3427,17 +3701,10 @@ impl<'a> Parser<'a> {
                 TokenKind::Dot => {
                     self.bump();
                     let name = match self.peek().clone() {
-                        TokenKind::Ident(n) => {
+                        _ if self.peek_name().is_some() => {
+                            let n = self.peek_name().unwrap_or_default();
                             self.bump();
                             n
-                        }
-                        TokenKind::Union => {
-                            self.bump();
-                            "union".to_owned()
-                        }
-                        TokenKind::Any => {
-                            self.bump();
-                            "any".to_owned()
                         }
                         TokenKind::IntLit(s) | TokenKind::FloatLit(s) => {
                             // Tuple field: `expr.0`, `expr.1`, ... A float
@@ -3518,10 +3785,29 @@ impl<'a> Parser<'a> {
                         kind: ExprKind::TryQ(Box::new(expr)),
                     };
                 }
+                // A registered postfix extension token (`x°`): the postfix
+                // row (level 13) with `?` and member access (spec 6.7.1).
+                TokenKind::ExtOp(sym)
+                    if self
+                        .ext
+                        .levels
+                        .contains_key(&(sym.clone(), Fixity::Postfix)) =>
+                {
+                    let op = sym.clone();
+                    self.bump();
+                    expr = Expr {
+                        span: expr.span,
+                        kind: ExprKind::OpPostfix {
+                            op,
+                            operand: Box::new(expr),
+                        },
+                    };
+                }
                 TokenKind::QuestionDot => {
                     self.bump();
                     let name = match self.peek().clone() {
-                        TokenKind::Ident(n) => {
+                        _ if self.peek_name().is_some() => {
+                            let n = self.peek_name().unwrap_or_default();
                             self.bump();
                             n
                         }
@@ -3902,7 +4188,7 @@ impl<'a> Parser<'a> {
                 spread = Some(Box::new(base));
                 break;
             }
-            let name = if let TokenKind::Ident(n) = self.peek().clone() {
+            let name = if let Some(n) = self.peek_name() {
                 self.bump();
                 n
             } else {
@@ -3997,7 +4283,7 @@ impl<'a> Parser<'a> {
                 rest = true;
                 break;
             }
-            let name = if let TokenKind::Ident(n) = self.peek().clone() {
+            let name = if let Some(n) = self.peek_name() {
                 self.bump();
                 n
             } else {
@@ -4186,7 +4472,7 @@ impl<'a> Parser<'a> {
         let mut args = Vec::new();
         while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
             // `name: expr` is a named argument; otherwise positional.
-            if let TokenKind::Ident(name) = self.peek().clone() {
+            if let Some(name) = self.peek_name() {
                 if matches!(self.peek_next(), Some(TokenKind::Colon)) {
                     self.bump(); // ident
                     self.bump(); // `:`
@@ -4197,6 +4483,16 @@ impl<'a> Parser<'a> {
                     }
                     continue;
                 }
+            }
+            // `ref x` passes the binding by reference (spec 4.7.3).
+            if matches!(self.peek(), TokenKind::Ref) {
+                self.bump();
+                let value = self.parse_expr()?;
+                args.push(CallArg::Ref(value));
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+                continue;
             }
             // `..expr` is a spread argument.
             if matches!(self.peek(), TokenKind::DotDot) {
@@ -4235,15 +4531,10 @@ const fn starts_item(k: &TokenKind) -> bool {
         T::Fn
             | T::Struct
             | T::Enum
-            | T::Union
             | T::Trait
             | T::Impl
-            | T::Extern
             | T::Mod
             | T::Use
-            | T::Const
-            | T::Static
-            | T::Type
             | T::Pub
             | T::HashLBracket
             | T::Unsafe
@@ -4255,6 +4546,7 @@ const fn is_block_like(e: &Expr) -> bool {
     matches!(
         e.kind,
         ExprKind::Block(_)
+            | ExprKind::Unsafe(_)
             | ExprKind::If { .. }
             | ExprKind::Match { .. }
             | ExprKind::Loop { .. }
@@ -4324,7 +4616,8 @@ fn desugar_rethrows(params: &mut [Param], generics: &mut Generics) -> Vec<Ty> {
                 walk(err, generics, errs);
             }
             TyKind::Array(t, _) => walk(t, generics, errs),
-            TyKind::AnyTrait(_)
+            TyKind::Const(_)
+            | TyKind::AnyTrait(_)
             | TyKind::Any
             | TyKind::None
             | TyKind::SelfUpper

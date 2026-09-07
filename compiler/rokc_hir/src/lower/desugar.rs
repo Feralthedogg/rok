@@ -5,10 +5,13 @@ use super::*;
 
 /// Lift a closure into an anonymous top-level function and return a
 /// closure value. Captures named outer locals by value (snapshot at
-/// creation time). Non-capturing closures stay as plain function
-/// pointers so existing `fn(...)` types keep working.
+/// creation time); a `[ref x]` capture (spec 4.6.2) takes `x`'s cell
+/// (see `LowerCtx::ref_captured`), shared with the outer function.
+/// Non-capturing closures stay as plain function pointers so existing
+/// `fn(...)` types keep working.
 pub(super) fn lower_closure_expr(
     ctx: &LowerCtx<'_>,
+    capture_list: &[rokc_ast::CaptureSpec],
     params: &[Param],
     ret_ty: Option<&Ty>,
     body: &Expr,
@@ -16,13 +19,51 @@ pub(super) fn lower_closure_expr(
 ) -> HirExpr {
     // Names referenced but not bound inside the closure (exhaustive AST
     // walk), filtered to those that resolve to outer locals.
-    let captures: Vec<(String, LocalId, HirTy)> = crate::walk::free_names(params, body)
+    let by_ref: Vec<&str> = capture_list
+        .iter()
+        .filter_map(|c| match c {
+            rokc_ast::CaptureSpec::Ref(n) => Some(n.as_str()),
+            rokc_ast::CaptureSpec::Value(_) => None,
+        })
+        .collect();
+    for n in &by_ref {
+        match ctx.lookup(n) {
+            Some(l) if ctx.boxed.contains(&l) => {}
+            Some(_) => ctx.emit_error(
+                rokc_diagnostic::ErrorKind::Type,
+                format!(
+                    "`[ref {n}]` needs `{n}` to be a `let` variable or a parameter (spec 4.6.2)"
+                ),
+            ),
+            None => ctx.emit_error(
+                rokc_diagnostic::ErrorKind::Type,
+                format!("`[ref {n}]` names no variable in scope (spec 4.6.2)"),
+            ),
+        }
+    }
+    let captures: Vec<Capture> = crate::walk::free_names(params, body)
         .into_iter()
         .filter_map(|name| {
             let local = ctx.lookup(&name)?;
-            Some((name, local, ctx.local_ty(local)))
+            let by_ref = by_ref.contains(&name.as_str()) && ctx.boxed.contains(&local);
+            let ty = if by_ref {
+                ctx.local_ty(local)
+            } else {
+                ctx.var_ty(local)
+            };
+            Some((name, local, ty, by_ref))
         })
         .collect();
+    for p in params.iter().filter(|p| p.by_ref) {
+        ctx.emit_error(
+            rokc_diagnostic::ErrorKind::Type,
+            format!(
+                "closure parameter `{}` cannot be `ref` — a `fn` type has no `ref` \
+                 parameters (spec 4.7.6)",
+                p.name
+            ),
+        );
+    }
 
     let closure_id = FunctionId(ctx.env.sink.next_id.get());
     ctx.env.sink.next_id.set(closure_id.0 + 1);
@@ -73,6 +114,13 @@ pub(super) fn lower_closure_expr(
             .iter()
             .all(|f| f.name.starts_with("__closure_") || f.name.starts_with("__thunk_"))
         {
+            // Cached thunks among them go too (made again for real).
+            let gone: Vec<FunctionId> = lifted[extras..].iter().map(|f| f.id).collect();
+            ctx.env
+                .sink
+                .thunks
+                .borrow_mut()
+                .retain(|_, id| !gone.contains(id));
             lifted.truncate(extras);
         }
         drop(lifted);
@@ -141,7 +189,7 @@ pub(super) fn lower_closure_expr(
     ctx.env.sink.extras.borrow_mut().push(cl_fn);
 
     let env_ty = (!captures.is_empty())
-        .then(|| HirTy::Tuple(captures.iter().map(|(_, _, t)| t.clone()).collect()));
+        .then(|| HirTy::Tuple(captures.iter().map(|(_, _, t, _)| t.clone()).collect()));
     let Some(env_ty_v) = env_ty else {
         return HirExpr {
             kind: HirExprKind::FnRef(closure_id),
@@ -160,10 +208,12 @@ pub(super) fn lower_closure_expr(
         kind: HirExprKind::Tuple {
             fields: captures
                 .iter()
-                .map(|(_, outer_local, ty)| HirExpr {
-                    kind: HirExprKind::Local(*outer_local),
-                    ty: ty.clone(),
-                    span,
+                .map(|(_, outer_local, ty, by_ref)| {
+                    if *by_ref {
+                        hir_local(*outer_local, ty, span)
+                    } else {
+                        ctx.read_local(*outer_local, span)
+                    }
                 })
                 .collect(),
         },
@@ -186,6 +236,10 @@ pub(super) fn lower_closure_expr(
         span,
     }
 }
+
+/// A closure capture: name, outer local, env field type (the cell for a
+/// `[ref]` capture) and whether it is by reference.
+type Capture = (String, LocalId, HirTy, bool);
 
 /// Does a closure body contain a `throw` or a plain `try` (so its error
 /// type must be inferred)? Nested closures count too — a harmless
@@ -220,19 +274,21 @@ fn may_throw(body: &Expr) -> bool {
 fn closure_ctx<'a>(
     ctx: &LowerCtx<'a>,
     params: &[Param],
-    captures: &[(String, LocalId, HirTy)],
+    captures: &[Capture],
     expected_param_tys: Option<&Vec<HirTy>>,
     span: rokc_diagnostic::Span,
 ) -> (LowerCtx<'a>, Vec<HirParam>, Vec<HirStmt>, Vec<HirTy>) {
     let mut cl_ctx = LowerCtx::new(ctx.env, ctx.ty_subst, ctx.self_ty.clone());
     cl_ctx.current_module.clone_from(&ctx.current_module);
     cl_ctx.local_uses.clone_from(&ctx.local_uses);
+    cl_ctx.ref_captured.clone_from(&ctx.ref_captured);
+    cl_ctx.unsafe_depth = ctx.unsafe_depth;
 
     // Closures with captures take an extra `env` parameter (a tuple of
     // captured values). The env param is declared first so its LocalId
     // is stable; closure params follow.
     let env_ty = (!captures.is_empty())
-        .then(|| HirTy::Tuple(captures.iter().map(|(_, _, t)| t.clone()).collect()));
+        .then(|| HirTy::Tuple(captures.iter().map(|(_, _, t, _)| t.clone()).collect()));
     let mut hir_params: Vec<HirParam> = Vec::with_capacity(params.len() + 1);
     let mut prelude: Vec<HirStmt> = Vec::new();
     if let Some(et) = &env_ty {
@@ -245,8 +301,13 @@ fn closure_ctx<'a>(
         });
         // Each captured name becomes a local inside the body initialised
         // from the corresponding env tuple field.
-        for (i, (cap_name, _, cap_ty)) in captures.iter().enumerate() {
+        for (i, (cap_name, _, cap_ty, by_ref)) in captures.iter().enumerate() {
             let inner_local = cl_ctx.declare(Some(cap_name.clone()), cap_ty.clone());
+            if *by_ref {
+                cl_ctx.boxed.insert(inner_local);
+            } else {
+                cl_ctx.value_captured.insert(inner_local);
+            }
             prelude.push(HirStmt::Let {
                 local: inner_local,
                 init: HirExpr {
@@ -741,16 +802,10 @@ pub(super) fn lower_for_iter(
     span: rokc_diagnostic::Span,
     out: &mut Vec<HirStmt>,
 ) -> HirExpr {
-    let has_into_iter = method_target_for(&iter_h.ty).is_some_and(|t| {
-        ctx.env
-            .method_table
-            .contains_key(&(t, "into_iter".to_owned()))
-    }) || super::expr::generic_method_for(ctx, &iter_h.ty, "into_iter")
-        .is_some()
-        || matches!(
-            super::expr::generic_trait_method_for(ctx, &iter_h.ty, "into_iter"),
-            Ok(Some(_))
-        );
+    let has_into_iter = !matches!(
+        super::expr::pick_method(ctx, &iter_h.ty, "into_iter", None),
+        Ok(None)
+    );
     if !has_into_iter {
         return ctx.error_expr(
             span,

@@ -15,11 +15,11 @@ extern "C" {
 }
 
 fn main() -> i32 {
-    let p = rok_alloc(16usize, 8usize);
-    rok_store_i64(p, 100i64);
-    rok_store_i64(p + 8usize, 200i64);
-    rok_print_i64(rok_load_i64(p));
-    rok_print_i64(rok_load_i64(p + 8usize));
-    rok_free(p);
+    let p = unsafe { rok_alloc(16usize, 8usize) };
+    unsafe { rok_store_i64(p, 100i64) };
+    unsafe { rok_store_i64(p + 8usize, 200i64) };
+    rok_print_i64(unsafe { rok_load_i64(p) });
+    rok_print_i64(unsafe { rok_load_i64(p + 8usize) });
+    unsafe { rok_free(p) };
     return 0;
 }

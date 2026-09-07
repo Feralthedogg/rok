@@ -47,7 +47,27 @@ pub(super) fn unify_param_ty_with(
                 rec(param_arg, concrete);
             }
         }
-        (rokc_ast::TyKind::Array(elem, _), HirTy::Array(arg_elem, _)) => rec(elem, arg_elem),
+        (rokc_ast::TyKind::Array(elem, len), HirTy::Array(arg_elem, n)) => {
+            // `[T; N]` against `[i32; 3]` binds the const parameter `N`.
+            let len_name = match len {
+                rokc_ast::ConstExpr::Path(p) if p.segments.len() == 1 => {
+                    Some(p.segments[0].name.clone())
+                }
+                rokc_ast::ConstExpr::Expr(e) => match &e.kind {
+                    rokc_ast::ExprKind::Path(p) if p.segments.len() == 1 => {
+                        Some(p.segments[0].name.clone())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(name) = len_name.filter(|n| generic_names.contains(n)) {
+                subst
+                    .entry(name)
+                    .or_insert_with(|| crate::ty::const_ty(i128::from(*n), None));
+            }
+            unify_param_ty_with(elem, arg_elem, generic_names, subst, ctx);
+        }
         // `GcBuf<T>` against `GcBuf<i32>`.
         (rokc_ast::TyKind::Path(p), HirTy::GcBuf(e)) => {
             if let Some(g) = p.segments.last().and_then(|s| s.generics.first()) {
@@ -110,9 +130,9 @@ pub(super) fn bind_from_arg(
         .generics
         .params
         .iter()
-        .filter_map(|gp| match gp {
-            rokc_ast::GenericParam::Type { name, .. } => Some(name.clone()),
-            rokc_ast::GenericParam::Const { .. } => None,
+        .map(|gp| match gp {
+            rokc_ast::GenericParam::Type { name, .. }
+            | rokc_ast::GenericParam::Const { name, .. } => name.clone(),
         })
         .collect();
     unify_param_ty_with(t, arg_ty, &generic_names, subst, ctx);
@@ -201,7 +221,7 @@ pub(super) fn monomorphize_on(
     // arrays, tuples, sums, function types, and closures. The first
     // binding wins; a conflicting later argument is reported by the
     // argument type check at the call site.
-    let mut subst: HashMap<String, HirTy> = HashMap::new();
+    let mut subst: HashMap<String, HirTy> = ctx.explicit_generics.clone();
     if let (Some(t), Some(hint)) = (self_ty, self_hint) {
         bind_self(ctx, fn_def, t, hint, &mut subst);
     }
@@ -274,16 +294,21 @@ pub(super) fn monomorphize_on(
                     return None;
                 }
             }
-            rokc_ast::GenericParam::Const { name, .. } => {
-                ctx.emit_error(
-                    rokc_diagnostic::ErrorKind::Type,
-                    format!(
-                        "const generic parameter `{name}` of `{}` is not implemented yet \
-                         (stage-1 limitation)",
-                        fn_def.name
-                    ),
-                );
-                return None;
+            rokc_ast::GenericParam::Const { name, ty } => {
+                let Some(v) = subst.get(name).and_then(crate::ty::as_const) else {
+                    ctx.emit_error(
+                        rokc_diagnostic::ErrorKind::Type,
+                        format!(
+                            "cannot infer const parameter `{name}` of `{}` — pass it \
+                             explicitly (`::<..>`) (spec 2.11.6)",
+                            fn_def.name
+                        ),
+                    );
+                    return None;
+                };
+                let c = typed_const(ctx, name, ty, v.0)?;
+                subst.insert(name.clone(), c.clone());
+                subst_tys.push(c);
             }
         }
     }
@@ -376,7 +401,6 @@ pub(super) fn monomorphize_on(
     // Allocate a fresh id and lower the FnDef under the substitution.
     let new_id = FunctionId(ctx.env.sink.next_id.get());
     ctx.env.sink.next_id.set(new_id.0 + 1);
-    let ref_self_new = super::collect::is_ref_self(fn_def);
     // Pre-cache so a recursive call inside the body finds the in-progress mono.
     ctx.env.sink.mono_cache.borrow_mut().insert(key, new_id);
     // Pre-resolve the return type from AST + subst so a recursive
@@ -388,12 +412,28 @@ pub(super) fn monomorphize_on(
         .or_else(|| self_ty.map(|t| resolve_in_mono(ctx, fn_def, &subst, None, t)));
     let preview_ret_ty =
         resolve_in_mono(ctx, fn_def, &subst, self_hir.clone(), &sig_ret_ast(fn_def));
-    if let (true, Some(st)) = (ref_self_new, &self_hir) {
-        ctx.env
-            .sink
-            .ref_self
-            .borrow_mut()
-            .insert(new_id, (preview_ret_ty.clone(), st.clone()));
+    let refs: Vec<(usize, HirTy)> = fn_def
+        .params
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.by_ref)
+        .map(|(i, p)| {
+            let ty = match (&p.ty, &self_hir) {
+                (_, Some(st)) if p.name == "self" => st.clone(),
+                (Some(t), _) => resolve_in_mono(ctx, fn_def, &subst, self_hir.clone(), t),
+                (None, _) => HirTy::Any,
+            };
+            (i, ty)
+        })
+        .collect();
+    if !refs.is_empty() {
+        ctx.env.sink.ref_out.borrow_mut().insert(
+            new_id,
+            RefOut {
+                ret: preview_ret_ty.clone(),
+                refs,
+            },
+        );
     }
     ctx.env.sink.mono_sigs.borrow_mut().insert(
         new_id,
@@ -403,6 +443,7 @@ pub(super) fn monomorphize_on(
             param_defaults: Vec::new(),
             param_tys: Vec::new(),
             param_names: Vec::new(),
+            param_refs: Vec::new(),
         },
     );
 
@@ -445,6 +486,7 @@ pub(super) fn monomorphize_on(
             param_defaults: Vec::new(),
             param_tys: mono_param_tys,
             param_names: mono_param_names,
+            param_refs: mono_fn.params.iter().map(|p| p.by_ref).collect(),
         },
     );
     ctx.env.sink.extras.borrow_mut().push(mono_fn);
@@ -463,18 +505,33 @@ pub(super) fn lower_fn_inner(
     module: String,
     subst: &HashMap<String, HirTy>,
 ) -> HirFunction {
+    let outer = rokc_diagnostic::set_current_span(fn_def.span);
     let mut ctx = LowerCtx::new(env, subst, self_ty);
     ctx.current_module = module;
+    ctx.unsafe_depth = u32::from(fn_def.is_unsafe);
     // Marker set by the driver on the synthesized entry (spec 4.16.2).
     ctx.implicit_main = fn_def.attrs.iter().any(|a| a.path == ["#implicit_main"]);
 
+    if let Some(b) = &fn_def.body {
+        ctx.ref_captured = ref_captured_names(b);
+    }
     let mut params = Vec::with_capacity(fn_def.params.len());
     for p in &fn_def.params {
         params.push(lower_param(&mut ctx, p));
     }
-    if super::collect::is_ref_self(fn_def) {
-        ctx.ref_self = params.first().map(|p: &HirParam| (p.local, p.ty.clone()));
+    // A `[ref]`-captured parameter moves into a cell (`let x = x;`).
+    let mut prelude = Vec::new();
+    for p in &params {
+        if ctx.ref_captured.contains(&p.name) {
+            let init = hir_local(p.local, &p.ty, fn_def.span);
+            prelude.push(ctx.declare_var(&p.name, p.ty.clone(), init));
+        }
     }
+    ctx.ref_params = params
+        .iter()
+        .filter(|p| p.by_ref)
+        .map(|p| (p.local, p.ty.clone()))
+        .collect();
 
     let mut ret_ty = ctx.resolve_ast_ty(&sig_ret_ast(fn_def));
     if let HirTy::Throws { ok, err } = &ret_ty {
@@ -491,25 +548,15 @@ pub(super) fn lower_fn_inner(
         ctx.fn_ret_ty = ret_ty.clone();
     }
 
-    if ctx.ref_self.is_some() && ctx.fn_throws.is_some() {
-        ctx.emit_error(
-            rokc_diagnostic::ErrorKind::Type,
-            format!(
-                "`ref self` on the throwing method `{}` is not supported yet (stage-1 \
-                 limitation)",
-                leaf_name(&fn_def.name)
-            ),
-        );
-        ctx.ref_self = None;
-    }
-    let body = fn_def
-        .body
-        .as_ref()
-        .map(|b| lower_fn_body(&mut ctx, b, &fn_def.name));
-    // `ref self`: the function hands `self` back with its value.
-    if let Some((_, self_ty)) = &ctx.ref_self {
-        ret_ty = ref_self_packed(&ret_ty, self_ty);
-    }
+    let body = fn_def.body.as_ref().map(|b| {
+        let mut block = lower_fn_body(&mut ctx, b, &fn_def.name);
+        block.stmts.splice(0..0, prelude);
+        block
+    });
+    rokc_diagnostic::set_current_span(outer);
+    // `ref` parameters: the function hands their values back too.
+    let ref_tys: Vec<HirTy> = ctx.ref_params.iter().map(|(_, t)| t.clone()).collect();
+    ret_ty = ref_packed(&ret_ty, &ref_tys);
 
     HirFunction {
         id,
@@ -599,13 +646,49 @@ pub(super) fn generic_subst(
 ) -> HashMap<String, HirTy> {
     let mut subst = HashMap::new();
     for (i, gp) in generics.params.iter().enumerate() {
-        if let rokc_ast::GenericParam::Type { name, .. } = gp {
-            if let Some(arg) = args.get(i) {
-                subst.insert(name.clone(), arg.clone());
-            }
+        let (rokc_ast::GenericParam::Type { name, .. }
+        | rokc_ast::GenericParam::Const { name, .. }) = gp;
+        if let Some(arg) = args.get(i) {
+            subst.insert(name.clone(), arg.clone());
         }
     }
     subst
+}
+
+/// Spec 2.11.3: a const generic argument `v` for parameter `name: ty`,
+/// range-checked and tagged with the parameter's type (integers,
+/// `bool`, `c_char` only).
+pub(super) fn typed_const(ctx: &LowerCtx<'_>, name: &str, ty: &Ty, v: i128) -> Option<HirTy> {
+    let p = match ctx.resolve_ast_ty(ty) {
+        HirTy::Prim(p) if p.is_int() || matches!(p, PrimTy::Bool | PrimTy::CChar) => p,
+        other => {
+            ctx.emit_error(
+                rokc_diagnostic::ErrorKind::Type,
+                format!(
+                    "const parameter `{name}` has type `{}`; only integers, `bool` and \
+                     `c_char` may be const parameters (spec 2.11.3)",
+                    ctx.ty_name(&other)
+                ),
+            );
+            return None;
+        }
+    };
+    let fits = if p == PrimTy::Bool {
+        v == 0 || v == 1
+    } else {
+        super::pattern::int_fits(v, p)
+    };
+    if !fits {
+        ctx.emit_error(
+            rokc_diagnostic::ErrorKind::Type,
+            format!(
+                "const argument `{v}` out of range for `{name}: {}`",
+                p.name()
+            ),
+        );
+        return None;
+    }
+    Some(crate::ty::const_ty(v, Some(p)))
 }
 
 /// Field list of a generic struct instantiated with `args`.
@@ -968,15 +1051,16 @@ pub(super) fn lower_fn(
     env: &Env<'_>,
     fn_def: &FnDef,
     id: FunctionId,
-    method_self_ty: Option<HirTy>,
+    method: Option<(HirTy, String)>,
     module: String,
 ) -> HirFunction {
-    // Methods get a synthetic mangled name so multiple impls of the
-    // same method name don't collide as MLIR symbols.
-    let name = method_self_ty.as_ref().map_or_else(
-        || fn_def.name.clone(),
-        |ty| format!("{}__{}", ty_mangle(ty), leaf_name(&fn_def.name)),
-    );
+    // Methods are named by their `fn_table` key (`Ty__m`, see
+    // `method_key`) so impls of the same method name don't collide as
+    // MLIR symbols.
+    let (method_self_ty, name) = match method {
+        Some((ty, key)) => (Some(ty), key),
+        None => (None, fn_def.name.clone()),
+    };
     lower_fn_inner(
         env,
         fn_def,
@@ -1015,13 +1099,13 @@ pub(super) fn lower_fn_body(ctx: &mut LowerCtx<'_>, b: &Block, fn_name: &str) ->
     let block = lower_block(ctx, b);
     ctx.pop_expected();
     let mut block = check_fn_body(ctx, block, fn_name);
-    if ctx.ref_self.is_some() && !hir_block_diverges(&block) {
+    if !ctx.ref_params.is_empty() && !hir_block_diverges(&block) {
         let span = b.span;
         let v = block
             .trailing
             .take()
             .unwrap_or_else(|| super::throws::unit_value(span));
-        block.trailing = Some(ref_self_pack(ctx, v, span));
+        block.trailing = Some(ref_pack(ctx, v, span));
     }
     if ctx.uncaught_in_main {
         block = uncaught_in_main(ctx, block, b.span);
@@ -1071,100 +1155,158 @@ fn check_fn_body(ctx: &LowerCtx<'_>, mut block: HirBlock, fn_name: &str) -> HirB
     block
 }
 
-/// A `ref self` function's real return type: `(ret, Self)`, or `Self`
-/// for a unit `ret`.
-pub(super) fn ref_self_packed(ret: &HirTy, self_ty: &HirTy) -> HirTy {
-    if *ret == HirTy::Unit {
-        self_ty.clone()
-    } else {
-        HirTy::Tuple(vec![ret.clone(), self_ty.clone()])
+/// A function with `ref` parameters really returns `ret` packed with
+/// their final values: `(ret, r1, ..)`, without a unit `ret`, and a
+/// single field unwrapped (`ref self` on a unit method returns `Self`).
+/// A throwing function packs its carrier's ok side.
+pub(super) fn ref_packed(ret: &HirTy, refs: &[HirTy]) -> HirTy {
+    if refs.is_empty() {
+        return ret.clone();
     }
-}
-
-/// `v` packed with the current `self` (in a `ref self` method).
-pub(super) fn ref_self_pack(
-    ctx: &LowerCtx<'_>,
-    v: HirExpr,
-    span: rokc_diagnostic::Span,
-) -> HirExpr {
-    let Some((local, self_ty)) = ctx.ref_self.clone() else {
-        return v;
-    };
-    let me = hir_local(local, &self_ty, span);
-    if v.ty == HirTy::Unit {
-        return HirExpr {
-            ty: self_ty,
-            kind: HirExprKind::Block(Box::new(HirBlock {
-                stmts: vec![HirStmt::Expr(v)],
-                trailing: Some(me),
-                label: None,
-            })),
-            span,
+    if let HirTy::Throws { ok, err } = ret {
+        return HirTy::Throws {
+            ok: Box::new(ref_packed(ok, refs)),
+            err: err.clone(),
         };
     }
-    let ty = ref_self_packed(&v.ty, &self_ty);
+    let mut fields: Vec<HirTy> = Vec::new();
+    if *ret != HirTy::Unit {
+        fields.push(ret.clone());
+    }
+    fields.extend(refs.iter().cloned());
+    if fields.len() == 1 {
+        fields.pop().expect("one field")
+    } else {
+        HirTy::Tuple(fields)
+    }
+}
+
+/// `v` packed with the current values of the `ref` parameters.
+pub(super) fn ref_pack(ctx: &LowerCtx<'_>, v: HirExpr, span: rokc_diagnostic::Span) -> HirExpr {
+    if ctx.ref_params.is_empty() {
+        return v;
+    }
+    let refs: Vec<HirExpr> = ctx
+        .ref_params
+        .iter()
+        .map(|(l, _)| ctx.read_local(*l, span))
+        .collect();
+    let tys: Vec<HirTy> = refs.iter().map(|r| r.ty.clone()).collect();
+    let ty = ref_packed(&v.ty, &tys);
+    let mut fields = Vec::new();
+    let mut stmts = Vec::new();
+    if v.ty == HirTy::Unit {
+        stmts.push(HirStmt::Expr(v));
+    } else {
+        fields.push(v);
+    }
+    fields.extend(refs);
+    let value = if fields.len() == 1 {
+        fields.pop().expect("one field")
+    } else {
+        HirExpr {
+            kind: HirExprKind::Tuple { fields },
+            ty: ty.clone(),
+            span,
+        }
+    };
+    if stmts.is_empty() {
+        return value;
+    }
     HirExpr {
-        kind: HirExprKind::Tuple {
-            fields: vec![v, me],
-        },
         ty,
+        kind: HirExprKind::Block(Box::new(HirBlock {
+            stmts,
+            trailing: Some(value),
+            label: None,
+        })),
         span,
     }
 }
 
-/// The call of a `ref self` method (`call` returns the packed pair): the
-/// final `self` goes back into `place` (a local or a field chain on
-/// one), the value comes out.
-pub(super) fn ref_self_unpack(
+/// The call of a function with `ref` parameters (`call` returns the
+/// packed values, `out` its shape): each `ref` parameter's final value
+/// goes back into its argument place (`places`, by parameter index: a
+/// local, a field chain on one, or a `[ref]` cell), the value comes
+/// out. A throwing call is unpacked first: on an error nothing is
+/// written back.
+pub(super) fn ref_unpack(
     ctx: &mut LowerCtx<'_>,
     call: HirExpr,
-    ret: &HirTy,
-    place: Option<&HirExpr>,
+    out: &RefOut,
+    places: &[Option<HirExpr>],
 ) -> HirExpr {
+    let call = unpack_call(ctx, call);
     let span = call.span;
-    let packed = call.ty.clone();
-    let tmp = ctx.declare(None, packed.clone());
-    let field = |i: u32, ty: HirTy| HirExpr {
-        kind: HirExprKind::TupleField {
-            target: Box::new(hir_local(tmp, &packed, span)),
-            index: i,
-            field_ty: ty.clone(),
-        },
-        ty,
-        span,
-    };
-    let unit = *ret == HirTy::Unit;
-    let self_ty = match &packed {
-        HirTy::Tuple(ts) if !unit => ts[1].clone(),
+    let ret = match &out.ret {
+        HirTy::Throws { ok, .. } => (**ok).clone(),
         t => t.clone(),
     };
-    let new_self = if unit {
-        hir_local(tmp, &packed, span)
-    } else {
-        field(1, self_ty)
+    let packed = call.ty.clone();
+    let tmp = ctx.declare(None, packed.clone());
+    let whole = hir_local(tmp, &packed, span);
+    let unit = ret == HirTy::Unit;
+    let n = usize::from(!unit) + out.refs.len();
+    let field = |i: usize| -> HirExpr {
+        if n == 1 {
+            return whole.clone();
+        }
+        let ty = match &packed {
+            HirTy::Tuple(ts) => ts[i].clone(),
+            t => t.clone(),
+        };
+        HirExpr {
+            kind: HirExprKind::TupleField {
+                target: Box::new(whole.clone()),
+                index: u32::try_from(i).expect("field index overflow"),
+                field_ty: ty.clone(),
+            },
+            ty,
+            span,
+        }
     };
     let mut stmts = vec![HirStmt::Let {
         local: tmp,
         init: call,
     }];
-    if let Some(st) = place.and_then(|p| assign_place(p, new_self)) {
-        stmts.push(st);
+    for (k, (pi, _)) in out.refs.iter().enumerate() {
+        let place = places.get(*pi).and_then(Option::as_ref);
+        if let Some(st) = place.and_then(|p| assign_place(ctx, p, field(usize::from(!unit) + k))) {
+            stmts.push(st);
+        }
     }
     HirExpr {
         kind: HirExprKind::Block(Box::new(HirBlock {
             stmts,
-            trailing: (!unit).then(|| field(0, ret.clone())),
+            trailing: (!unit).then(|| field(0)),
             label: None,
         })),
-        ty: ret.clone(),
+        ty: ret,
         span,
     }
 }
 
-/// `place = value` for a local or a field chain on a local.
-fn assign_place(place: &HirExpr, value: HirExpr) -> Option<HirStmt> {
+/// The local at the root of place `e` (a local, a field chain on one,
+/// or a `[ref]` cell); `None`: not a place a `ref` argument can name.
+pub(super) fn place_root(e: &HirExpr) -> Option<LocalId> {
+    match &e.kind {
+        HirExprKind::Local(l) => Some(*l),
+        HirExprKind::FieldRead { target, .. } => place_root(target),
+        HirExprKind::BufGet { buf, .. } => match buf.kind {
+            HirExprKind::Local(l) => Some(l),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `place = value` for a local, a field chain on a local, or a cell.
+pub(super) fn assign_place(ctx: &LowerCtx<'_>, place: &HirExpr, value: HirExpr) -> Option<HirStmt> {
     match &place.kind {
         HirExprKind::Local(l) => Some(HirStmt::Assign { local: *l, value }),
+        HirExprKind::BufGet { buf, .. } if matches!(buf.kind, HirExprKind::Local(l) if ctx.boxed.contains(&l)) => {
+            Some(HirStmt::Expr(buf_store((**buf).clone(), value)))
+        }
         HirExprKind::FieldRead {
             target,
             struct_id,
@@ -1182,7 +1324,7 @@ fn assign_place(place: &HirExpr, value: HirExpr) -> Option<HirStmt> {
                 ty: target.ty.clone(),
                 span,
             };
-            assign_place(target, rebuilt)
+            assign_place(ctx, target, rebuilt)
         }
         _ => None,
     }

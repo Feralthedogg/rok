@@ -1,0 +1,91 @@
+// rok::bare::ptr — raw pointers (stdlib spec 1.1). A pointer is its
+// address; reading / writing through it is `unsafe` (refs-lang 4.15.2).
+//
+// ponytail: `Ptr<T>` / `CPtr<T>` only — `ConstPtr` / `ManyPtr`, provenance
+// tracking (`expose_provenance`), `map_addr`, `byte_offset`, volatile and
+// the `none` niche wait for a user. `Ptr<T> | none` is a tagged sum here.
+
+// Compiler intrinsics over a `Ptr<T>`; `T` is the pointer's argument.
+#[intrinsic("rok.ptr.read")]
+unsafe fn ptr_read<T>(p: Ptr<T>) -> T;
+
+#[intrinsic("rok.ptr.write")]
+unsafe fn ptr_write<T>(p: Ptr<T>, value: T);
+
+/// Size of `T` in bytes.
+#[intrinsic("rok.size_of")]
+pub fn pointee_size<T>(p: Ptr<T>) -> usize;
+
+/// Alignment of `T` in bytes.
+#[intrinsic("rok.align_of")]
+pub fn pointee_align<T>(p: Ptr<T>) -> usize;
+
+/// A non-null pointer to one `T` (C `T*`).
+pub struct Ptr<T> {
+    address: usize;
+}
+
+impl<T> Ptr<T> {
+    /// Well aligned, never dereferenceable.
+    pub fn dangling() -> Ptr<T> {
+        let p: Ptr<T> = Ptr { address: 0 };
+        return Ptr { address: pointee_align(p) };
+    }
+    /// Always `none` (a `Ptr` is never null).
+    pub fn null() -> Ptr<T> | none { return none; }
+
+    /// The address (provenance is lost).
+    pub fn addr(self) -> usize { return self.address; }
+    pub fn with_addr(self, addr: usize) -> Ptr<T> { return Ptr { address: addr }; }
+
+    /// `count` elements further (`count * pointee_size(self)` bytes).
+    pub fn offset(self, count: isize) -> Ptr<T> {
+        let size = pointee_size(self) as isize;
+        return Ptr { address: (self.address as isize + count * size) as usize };
+    }
+    pub fn add(self, count: usize) -> Ptr<T> {
+        return Ptr { address: self.address + count * pointee_size(self) };
+    }
+    pub fn sub(self, count: usize) -> Ptr<T> {
+        return Ptr { address: self.address - count * pointee_size(self) };
+    }
+    /// `self.addr() - origin.addr()` in elements.
+    pub fn distance(self, origin: Ptr<T>) -> isize {
+        return (self.address as isize - origin.address as isize) / pointee_size(self) as isize;
+    }
+    pub fn is_aligned(self) -> bool { return self.address % pointee_align(self) == 0; }
+
+    /// The `T` it points at. UB unless it points at a live, initialized `T`.
+    pub unsafe fn read(self) -> T { return ptr_read(self); }
+    /// Store `value` where it points. UB unless that is writable `T` memory.
+    pub unsafe fn write(self, value: T) { ptr_write(self, value); }
+}
+
+// Raw pointers never cross threads implicitly (E3).
+impl<T> !Send for Ptr<T> {}
+impl<T> !Sync for Ptr<T> {}
+impl<T> !Send for CPtr<T> {}
+impl<T> !Sync for CPtr<T> {}
+
+/// The same address as a pointer to `U` (spec 1.2.2; alignment is the
+/// caller's problem).
+pub fn ptr_cast<U, T>(p: Ptr<T>) -> Ptr<U> { return Ptr { address: p.address }; }
+
+/// A C-compatible nullable pointer (`T*` that may be `NULL`).
+pub struct CPtr<T> {
+    address: usize;
+}
+
+impl<T> CPtr<T> {
+    pub fn null() -> CPtr<T> { return CPtr { address: 0 }; }
+    pub fn from_ptr(p: Ptr<T>) -> CPtr<T> { return CPtr { address: p.addr() }; }
+    pub fn from_addr(addr: usize) -> CPtr<T> { return CPtr { address: addr }; }
+    pub fn is_null(self) -> bool { return self.address == 0; }
+    pub fn addr(self) -> usize { return self.address; }
+    /// `none` when null.
+    pub fn as_ptr(self) -> Ptr<T> | none {
+        if self.address == 0 { return none; }
+        let p: Ptr<T> = Ptr { address: self.address };
+        return p;
+    }
+}

@@ -48,7 +48,7 @@ fn main() -> i32 {
     println("a-b-c".replace("-", "+"));
     println(word(2));
     println(kind(word(3)));
-    println(f"C sees {strlen("he" + "llo")} bytes");
+    println(f"C sees {unsafe { strlen("he" + "llo") }} bytes");
     if "" == str::new() && "".is_empty() && "b" > "a" && "a" <= "a" { println("ok"); }
     return 0;
 }

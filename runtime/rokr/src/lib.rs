@@ -400,6 +400,61 @@ pub extern "C" fn rok_alloc(size: usize, align: usize) -> *mut u8 {
     raw_alloc(size, align)
 }
 
+/// `rok::bare::alloc::alloc` (stdlib 1.4): like `rok_alloc`, but null on
+/// failure (`size == 0`, bad `align`, overflow, OOM) instead of
+/// aborting. `zeroed != 0` zero-fills. Freed with `rok_free`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_alloc_raw(size: usize, align: usize, zeroed: i32) -> *mut u8 {
+    if size == 0 || !align.is_power_of_two() {
+        return ptr::null_mut();
+    }
+    let Some(rounded) = size.checked_add(align - 1).map(|s| s & !(align - 1)) else {
+        return ptr::null_mut();
+    };
+    let p: *mut libc::c_void = if align <= HEADER_ALIGN {
+        // SAFETY: plain malloc; malloc alignment >= 8 on supported targets.
+        unsafe { libc::malloc(rounded) }
+    } else {
+        let mut p: *mut libc::c_void = ptr::null_mut();
+        // SAFETY: valid out-pointer; `align` is a power of two > 8.
+        if unsafe { libc::posix_memalign(&mut p, align, rounded) } != 0 {
+            p = ptr::null_mut();
+        }
+        p
+    };
+    if !p.is_null() && zeroed != 0 {
+        // SAFETY: `p` is valid for `rounded` bytes.
+        unsafe { ptr::write_bytes(p.cast::<u8>(), 0, rounded) };
+    }
+    p.cast()
+}
+
+/// `rok::bare::alloc::realloc`: a block of `new_size` bytes holding the
+/// first `min(old_size, new_size)` bytes of `ptr`; null on failure (then
+/// `ptr` stays valid). `ptr` is freed on success.
+///
+/// # Safety
+/// `ptr` must be a live block from `rok_alloc_raw` with `old_size` and
+/// `align`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rok_realloc_raw(
+    ptr: *mut u8,
+    old_size: usize,
+    align: usize,
+    new_size: usize,
+) -> *mut u8 {
+    let q = rok_alloc_raw(new_size, align, 0);
+    if !q.is_null() {
+        // SAFETY: both blocks are valid for the copied length; caller
+        // contract on `ptr`.
+        unsafe {
+            ptr::copy_nonoverlapping(ptr, q, old_size.min(new_size));
+            libc::free(ptr.cast());
+        }
+    }
+    q
+}
+
 /// # Safety
 /// `ptr` must be null or a live pointer returned by `rok_alloc`.
 #[unsafe(no_mangle)]

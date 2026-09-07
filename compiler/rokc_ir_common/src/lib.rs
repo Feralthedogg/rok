@@ -122,6 +122,8 @@ pub enum PrimOp {
     LogicalAnd,
     LogicalOr,
     LogicalNot,
+    /// Square root (floats; `rok.sqrt.TYPE`, `√`).
+    Sqrt,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

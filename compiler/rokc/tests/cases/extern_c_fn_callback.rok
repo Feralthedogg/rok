@@ -1,0 +1,20 @@
+// expect-exit: 0
+// expect-stdout:
+// 0
+// 2
+// 4
+
+// `extern "C" fn` (spec 5.9.10): a rok function with the C ABI, passed
+// to C as a plain function pointer.
+extern "C" {
+    fn rok_par_for(start: i64, end: i64, step: i64, callback: fn(i64));
+}
+
+extern "C" fn show_twice(i: i64) {
+    rok_print_i64(i * 2);
+}
+
+fn main() -> i32 {
+    unsafe { rok_par_for(0i64, 3i64, 1i64, show_twice) };
+    return 0;
+}

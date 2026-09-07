@@ -15,6 +15,17 @@ mod walk;
 
 pub use lower::{lower, lower_full, lower_with_uses};
 pub use print::print_hir;
+
+/// Marker attribute (string argument) with the module of an `impl`
+/// block, set by the driver.
+pub const IMPL_MODULE_ATTR: &str = "#impl_module";
+
+/// Marker attribute on the compiler-injected runtime hook block.
+///
+/// Its functions are safe to call although they are `extern "C"` (spec
+/// 4.15 makes user-declared externs implicitly `unsafe`). `#` cannot
+/// start a user attribute name.
+pub const SAFE_EXTERN_ATTR: &str = "#safe_extern";
 pub use ty::resolve_ty;
 pub use uses::{ReExport, UseEntry, UseTable, build_use_table};
 
@@ -35,6 +46,9 @@ pub struct HirModule {
     /// glob conflicts, unresolved paths, etc. Driver appends these to
     /// its overall diagnostic list.
     pub diagnostics: Vec<RokDiagnostic>,
+    /// `#[export_name("sym")]` functions (spec 905 / 509.10): linker
+    /// symbol, and a root of unreachable-function pruning.
+    pub exports: Vec<(FunctionId, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -45,6 +59,8 @@ pub struct HirStaticDef {
     /// or const-folded primitives in the current slice.
     pub init: ConstVal,
     pub is_mut: bool,
+    /// `extern "C" { static .. }` (spec 5.9.3): no initializer here.
+    pub is_extern: bool,
     pub span: Span,
 }
 
@@ -368,6 +384,22 @@ pub enum HirExprKind {
     BufNew {
         elem: HirTy,
         len: Box<HirExpr>,
+    },
+    /// `ptr_read::<T>(addr)` (`rok::bare`): load a `T` at a raw address.
+    RawRead {
+        addr: Box<HirExpr>,
+        ty: HirTy,
+    },
+    /// `ptr_write(addr, v)`: store `v` at a raw address; unit.
+    RawWrite {
+        addr: Box<HirExpr>,
+        value: Box<HirExpr>,
+        ty: HirTy,
+    },
+    /// `size_of::<T>()` / `align_of::<T>()` (`usize`).
+    SizeOf {
+        ty: HirTy,
+        align: bool,
     },
     /// `buf_get(buf, i)` — element `i` (unchecked).
     BufGet {

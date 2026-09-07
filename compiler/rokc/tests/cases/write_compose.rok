@@ -14,14 +14,14 @@ extern "C" {
 }
 
 fn main() -> i32 {
-    rok_write_str("x=");
-    rok_write_i64(42i64);
-    rok_write_str(", y=");
-    rok_write_f64(3.14f64);
+    unsafe { rok_write_str("x=") };
+    unsafe { rok_write_i64(42i64) };
+    unsafe { rok_write_str(", y=") };
+    unsafe { rok_write_f64(3.14f64) };
     rok_print_str("");
 
-    rok_write_str("answer: ");
-    rok_write_hex(255i64);
+    unsafe { rok_write_str("answer: ") };
+    unsafe { rok_write_hex(255i64) };
     rok_print_str("");
 
     return 0;

@@ -98,3 +98,23 @@ pub enum Item {
     Use(UseDef),
     Extern(ExternBlock),
 }
+
+impl Item {
+    #[must_use]
+    pub const fn span(&self) -> rokc_diagnostic::Span {
+        match self {
+            Self::Fn(x) => x.span,
+            Self::Struct(x) => x.span,
+            Self::Enum(x) => x.span,
+            Self::Union(x) => x.span,
+            Self::Trait(x) => x.span,
+            Self::Impl(x) => x.span,
+            Self::Const(x) => x.span,
+            Self::Static(x) => x.span,
+            Self::TypeAlias(x) => x.span,
+            Self::Mod(x) => x.span,
+            Self::Use(x) => x.span,
+            Self::Extern(x) => x.span,
+        }
+    }
+}

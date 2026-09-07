@@ -7,6 +7,13 @@ pub trait Clone {
     fn clone(self) -> Self;
 }
 
+// Stdlib spec 2.13.4. `using` (refs-lang 3.17) calls `drop` on every way
+// out of its block. ponytail: no implicit scope-exit drop of plain
+// `let`s yet (2.13.4 RAII); `using` is the deterministic path.
+pub trait Drop {
+    fn drop(ref self);
+}
+
 // Auto (structural) marker traits (E3). The compiler derives them: a
 // struct / enum / tuple / array / sum has one iff every component does;
 // primitives and `str` have both; a closure has one iff its captures do;

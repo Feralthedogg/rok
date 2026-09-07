@@ -99,6 +99,8 @@ pub fn rokc_build(env: &Env, src: &Path, exe: &Path) -> std::io::Result<Output> 
         .arg(&env.bootstrap)
         .arg("--bootstrap")
         .arg(env.workspace.join("library/std/lib.rok"))
+        .arg("--bootstrap")
+        .arg(env.workspace.join("library/bare/lib.rok"))
         .arg("--rokr")
         .arg(&env.rokr)
         .arg("-o")

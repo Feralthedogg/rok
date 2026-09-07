@@ -98,7 +98,7 @@ fn fails(x: any Link) throws -> any Link {
 fn main() -> i32 {
     let list = build(20000);
     churn();
-    rok_gc_collect();
+    unsafe { rok_gc_collect() };
     rok_print_i64(sum(list));
     rok_print_i64(count(build(1000)));
 
@@ -110,7 +110,7 @@ fn main() -> i32 {
     // Array elements are roots too.
     let arr: [any Link; 2] = [Cons { v: 7, rest: none }, Cons { v: 9, rest: none }];
     churn();
-    rok_gc_collect();
+    unsafe { rok_gc_collect() };
     rok_print_i64(arr[0].val());
     rok_print_i64(arr[1].val());
 
@@ -124,19 +124,19 @@ fn main() -> i32 {
     rok_print_i64(r2.val() + 1);
 
     // Only the union slot references the 48-byte `Cons` made in `mk`.
-    rok_gc_collect();
-    let before = rok_gc_stats_live_bytes();
+    unsafe { rok_gc_collect() };
+    let before = unsafe { rok_gc_stats_live_bytes() };
     let s1 = mk();
     let s2 = Slot::Pair(1, 2);
     churn();
-    rok_gc_collect();
-    if rok_gc_stats_live_bytes() - before != 48usize { return 3; }
+    unsafe { rok_gc_collect() };
+    if unsafe { rok_gc_stats_live_bytes() } - before != 48usize { return 3; }
     rok_print_i64(slot_val(s1) + slot_val(s2) + slot_val(Slot::Empty));
 
-    if rok_gc_stats_collections() < 5u64 { return 1; }
+    if unsafe { rok_gc_stats_collections() } < 5u64 { return 1; }
     // Live: the 20000-node list plus a handful of small objects.
-    rok_gc_collect();
-    if rok_gc_stats_live_bytes() > 1100000usize { return 2; }
+    unsafe { rok_gc_collect() };
+    if unsafe { rok_gc_stats_live_bytes() } > 1100000usize { return 2; }
     rok_print_str("ok");
     return 0;
 }

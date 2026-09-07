@@ -43,7 +43,9 @@ pub fn fixed_prec(symbol: &str, fixity: Fixity) -> Option<(u32, Assoc)> {
     };
     match fixity {
         Fixity::Prefix => matches!(symbol, "-" | "!" | "~" | "√").then_some((12, Assoc::Right)),
-        Fixity::Postfix => None,
+        // Level 13: the postfix row (`?`, member access). `?` itself is
+        // language syntax; it is here only as a `like` target (spec 6.7.1).
+        Fixity::Postfix => (symbol == "?").then_some((13, Assoc::Left)),
         Fixity::Infix => Some(match base {
             "<<" | ">>" => (10, Assoc::Left),
             "∘" => (9, Assoc::Left),
@@ -71,6 +73,36 @@ pub struct OpEntry {
     pub trait_name: String,
     /// `#[infix("∈", swap)]`: `a ∈ s` calls `s.contains(a)` (spec 6.7.2).
     pub swap: bool,
+    /// Binding level: the table's, or `like`'s for an extension token.
+    pub level: (u32, Assoc),
+    /// Registered by a standard-library root (only `rok::…` traits
+    /// count); user registrations bind the user trait itself.
+    pub from_lib: bool,
+}
+
+/// Registered extension operator tokens: what the lexer must recognize
+/// and the level the parser gives them.
+#[derive(Clone, Debug, Default)]
+pub struct ExtOps {
+    pub levels: HashMap<(String, Fixity), (u32, Assoc)>,
+}
+
+impl ExtOps {
+    /// Distinct symbols, longest first (the lexer's longest match).
+    #[must_use]
+    pub fn symbols(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.levels.keys().map(|k| k.0.clone()).collect();
+        v.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        v.dedup();
+        v
+    }
+
+    /// Level of `symbol` at `fixity`: the fixed table, else a registration.
+    #[must_use]
+    pub fn level(&self, symbol: &str, fixity: Fixity) -> Option<(u32, Assoc)> {
+        fixed_prec(symbol, fixity)
+            .or_else(|| self.levels.get(&(symbol.to_owned(), fixity)).copied())
+    }
 }
 
 /// Operator bindings: `(symbol, fixity) -> trait method`.
@@ -97,6 +129,20 @@ impl PrecTable {
 
     pub fn entries(&self) -> impl Iterator<Item = &OpEntry> {
         self.by_key.values()
+    }
+
+    /// Extension tokens (spec 1.10.4): registered symbols outside the
+    /// fixed table, with the level they took from `like`.
+    #[must_use]
+    pub fn ext_ops(&self) -> ExtOps {
+        ExtOps {
+            levels: self
+                .by_key
+                .values()
+                .filter(|e| fixed_prec(&e.symbol, e.fixity).is_none())
+                .map(|e| ((e.symbol.clone(), e.fixity), e.level))
+                .collect(),
+        }
     }
 
     /// Insert `entry`; an error if the token is already bound to a
@@ -156,6 +202,8 @@ pub fn collect_prec_table(program: &Program) -> (PrecTable, Vec<RokDiagnostic>) 
                     symbol,
                     fixity,
                     swap,
+                    level: lv,
+                    from_lib: false,
                     method_name: m.name.clone(),
                     trait_name: t.name.clone(),
                 };
@@ -219,6 +267,13 @@ fn collect_attr(
         ));
         return None;
     };
+    if symbol == "?" {
+        diags.push(meta_err(
+            attr,
+            "`?` is language syntax (error propagation), not an operator token".to_owned(),
+        ));
+        return None;
+    }
     let level = match (fixed_prec(&symbol, fixity), like) {
         (Some(lv), None) => lv,
         (Some(_), Some(_)) => {

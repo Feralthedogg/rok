@@ -1,0 +1,19 @@
+// expect-exit: 9
+// Spec 4.15: `unsafe fn` bodies and `unsafe { }` blocks may call unsafe
+// functions; C functions are implicitly unsafe.
+extern "C" {
+    fn abs(x: i32) -> i32;
+}
+
+unsafe fn twice_abs(x: i32) -> i32 {
+    return abs(x) * 2;              // unsafe fn body: no block needed
+}
+
+fn main() -> i32 {
+    let a = unsafe { twice_abs(-3) };
+    let b: i32 = unsafe {
+        let f = |v: i32| -> i32 { abs(v) };   // closure inside the block
+        f(-3)
+    };
+    return a + b;
+}

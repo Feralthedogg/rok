@@ -1,0 +1,54 @@
+// expect-exit: 0
+// expect-stdout:
+// first 7
+// 40 40
+// 5
+// 1 a
+// 2 b
+// 3
+
+// Associated-type projections `T::Assoc` (spec 2.1 / 2.8.3) in
+// signatures, `let` annotations and type patterns, resolved per
+// instantiation; `Iterator::zip` (stdlib 2.7.1) is built on them.
+
+trait Shape {
+    type Unit;
+    fn unit(self) -> Unit;
+}
+
+struct Sq { s: i32; }
+
+impl Shape for Sq {
+    type Unit = i64;
+    fn unit(self) -> i64 { return self.s as i64 * 10; }
+}
+
+fn first<I: Iterator>(it: I) -> I::Item | none {
+    let x: I::Item | none = it.next();
+    return x;
+}
+
+fn units<T: Shape>(t: T) -> (T::Unit, T::Unit) {
+    let u: T::Unit = t.unit();
+    return (u, u);
+}
+
+fn main() {
+    let xs: List<i32> = [7, 8];
+    match first(xs.into_iter()) {
+        v: i32 => println(f"first {v}"),
+        none => println("empty"),
+    }
+    let p = units(Sq { s: 4 });
+    println(f"{p.0} {p.1}");
+    let n: Sq::Unit = 5;
+    println(f"{n}");
+
+    let a: List<i32> = [1, 2, 3];
+    let b: List<str> = ["a", "b"];
+    for q in a.iter().zip(b.iter()) {
+        println(f"{q.0} {q.1}");
+    }
+    let c: List<i32> = [1, 2, 3, 4];
+    println(f"{a.iter().zip(c.iter().map(|x| x * 2)).count()}");
+}

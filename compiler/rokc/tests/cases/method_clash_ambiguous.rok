@@ -1,0 +1,17 @@
+// expect-error: method `side` on `C` is ambiguous: traits `Left`, `Right` all provide it — call it as `Trait::side(x)`
+
+// Spec 4.9.6: two traits of the current package giving `C` the same
+// method name leave `c.side()` ambiguous.
+
+trait Left { fn side(self) -> i32; }
+trait Right { fn side(self) -> i32; }
+
+struct C { n: i32; }
+
+impl Left for C { fn side(self) -> i32 { return 10; } }
+impl Right for C { fn side(self) -> i32 { return 20; } }
+
+fn main() {
+    let c = C { n: 0 };
+    println(f"{c.side()}");
+}

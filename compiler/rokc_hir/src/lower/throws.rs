@@ -370,7 +370,7 @@ pub(super) fn raise(
         }
     } else if let Some(decl) = ctx.fn_throws.clone() {
         if let Some(v) = convert_err(ctx, value, &decl) {
-            let ok = ctx.fn_ret_ty.clone();
+            let ok = carrier_ok(ctx);
             out.push(HirStmt::Return(Some(carrier(&ok, &decl, Err(v), span))));
             return out;
         }
@@ -504,90 +504,100 @@ pub(super) fn adapt_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
         return value;
     }
     let span = value.span;
-    let id = FunctionId(ctx.env.sink.next_id.get());
-    ctx.env.sink.next_id.set(id.0 + 1);
-    let mut a = LowerCtx::new(ctx.env, ctx.ty_subst, None);
-    // The captured callee: `env.0` of a one-field env tuple.
     let callee_ty = HirTy::Fn(vargs.clone(), vret.clone(), want.clone());
     let env_ty = HirTy::Tuple(vec![callee_ty.clone()]);
-    let env_param = target.is_none().then(|| HirParam {
-        name: "#env".to_owned(),
-        local: a.declare(None, env_ty.clone()),
-        ty: env_ty.clone(),
-        by_ref: false,
-    });
-    let params: Vec<HirParam> = args
-        .iter()
-        .enumerate()
-        .map(|(i, t)| HirParam {
-            name: format!("#a{i}"),
-            local: a.declare(None, t.clone()),
-            ty: t.clone(),
+    // One thunk per (callee, slot type): a named callee by id, a
+    // captured one by its type.
+    let key = format!(
+        "throws|{target:?}|{}|{}",
+        ty_mangle(slot),
+        ty_mangle(&callee_ty)
+    );
+    let cached = ctx.env.sink.thunks.borrow().get(&key).copied();
+    let id = cached.unwrap_or_else(|| {
+        let id = FunctionId(ctx.env.sink.next_id.get());
+        ctx.env.sink.next_id.set(id.0 + 1);
+        let mut a = LowerCtx::new(ctx.env, ctx.ty_subst, None);
+        // The captured callee: `env.0` of a one-field env tuple.
+        let env_param = target.is_none().then(|| HirParam {
+            name: "#env".to_owned(),
+            local: a.declare(None, env_ty.clone()),
+            ty: env_ty.clone(),
             by_ref: false,
-        })
-        .collect();
-    let call_args: Vec<HirExpr> = params
-        .iter()
-        .map(|p| hir_local(p.local, &p.ty, span))
-        .collect();
-    let kind = match (target, &env_param) {
-        (Some(t), _) => HirExprKind::Call {
-            callee: t,
-            args: call_args,
-        },
-        (None, Some(env)) => HirExprKind::CallIndirect {
-            callee: Box::new(HirExpr {
-                kind: HirExprKind::TupleField {
-                    target: Box::new(hir_local(env.local, &env_ty, span)),
-                    index: 0,
-                    field_ty: callee_ty.clone(),
-                },
-                ty: callee_ty.clone(),
-                span,
-            }),
-            args: call_args,
-            ret_ty: (**vret).clone(),
-        },
-        (None, None) => unreachable!("env param exists without a static target"),
-    };
-    let call = HirExpr {
-        kind,
-        ty: (**vret).clone(),
-        span,
-    };
-    a.fn_throws = Some((**err).clone());
-    a.fn_ret_ty = (**ok).clone();
-    a.try_depth = 1;
-    let v = unpack_call(&mut a, call);
-    let mut body = if **ok == HirTy::Unit {
-        HirBlock {
-            stmts: vec![HirStmt::Expr(v)],
-            trailing: None,
-            label: None,
-        }
-    } else {
-        HirBlock {
-            stmts: Vec::new(),
-            trailing: Some(v),
-            label: None,
-        }
-    };
-    finish_throwing_body(&a, &mut body);
-    // ponytail: one thunk per adapted use; cache by (target, slot) if
-    // they pile up.
-    let mut all_params: Vec<HirParam> = env_param.into_iter().collect();
-    all_params.extend(params);
-    ctx.env.sink.extras.borrow_mut().push(HirFunction {
-        id,
-        def_id: None,
-        name: format!("__thunk_{}", id.0),
-        params: all_params,
-        locals: a.into_locals(),
-        ret_ty: (**sret).clone(),
-        body: Some(body),
-        is_async: false,
-        is_generator: false,
-        span,
+        });
+        let params: Vec<HirParam> = args
+            .iter()
+            .enumerate()
+            .map(|(i, t)| HirParam {
+                name: format!("#a{i}"),
+                local: a.declare(None, t.clone()),
+                ty: t.clone(),
+                by_ref: false,
+            })
+            .collect();
+        let call_args: Vec<HirExpr> = params
+            .iter()
+            .map(|p| hir_local(p.local, &p.ty, span))
+            .collect();
+        let kind = match (target, &env_param) {
+            (Some(t), _) => HirExprKind::Call {
+                callee: t,
+                args: call_args,
+            },
+            (None, Some(env)) => HirExprKind::CallIndirect {
+                callee: Box::new(HirExpr {
+                    kind: HirExprKind::TupleField {
+                        target: Box::new(hir_local(env.local, &env_ty, span)),
+                        index: 0,
+                        field_ty: callee_ty.clone(),
+                    },
+                    ty: callee_ty.clone(),
+                    span,
+                }),
+                args: call_args,
+                ret_ty: (**vret).clone(),
+            },
+            (None, None) => unreachable!("env param exists without a static target"),
+        };
+        let call = HirExpr {
+            kind,
+            ty: (**vret).clone(),
+            span,
+        };
+        a.fn_throws = Some((**err).clone());
+        a.fn_ret_ty = (**ok).clone();
+        a.try_depth = 1;
+        let v = unpack_call(&mut a, call);
+        let mut body = if **ok == HirTy::Unit {
+            HirBlock {
+                stmts: vec![HirStmt::Expr(v)],
+                trailing: None,
+                label: None,
+            }
+        } else {
+            HirBlock {
+                stmts: Vec::new(),
+                trailing: Some(v),
+                label: None,
+            }
+        };
+        finish_throwing_body(&a, &mut body);
+        let mut all_params: Vec<HirParam> = env_param.into_iter().collect();
+        all_params.extend(params);
+        ctx.env.sink.extras.borrow_mut().push(HirFunction {
+            id,
+            def_id: None,
+            name: format!("__thunk_{}", id.0),
+            params: all_params,
+            locals: a.into_locals(),
+            ret_ty: (**sret).clone(),
+            body: Some(body),
+            is_async: false,
+            is_generator: false,
+            span,
+        });
+        ctx.env.sink.thunks.borrow_mut().insert(key, id);
+        id
     });
     let kind = if target.is_some() {
         HirExprKind::FnRef(id)
@@ -646,74 +656,86 @@ pub(super) fn adapt_never_fn(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
         return value;
     }
     let span = value.span;
-    let id = FunctionId(ctx.env.sink.next_id.get());
-    ctx.env.sink.next_id.set(id.0 + 1);
-    let mut a = LowerCtx::new(ctx.env, ctx.ty_subst, None);
     let callee_ty = HirTy::Fn(vargs.clone(), vret.clone(), want.clone());
     let env_ty = HirTy::Tuple(vec![callee_ty.clone()]);
-    let env_param = target.is_none().then(|| HirParam {
-        name: "#env".to_owned(),
-        local: a.declare(None, env_ty.clone()),
-        ty: env_ty.clone(),
-        by_ref: false,
-    });
-    let params: Vec<HirParam> = args
-        .iter()
-        .enumerate()
-        .map(|(i, t)| HirParam {
-            name: format!("#a{i}"),
-            local: a.declare(None, t.clone()),
-            ty: t.clone(),
+    // One thunk per (callee, slot type): a named callee by id, a
+    // captured one by its type.
+    let key = format!(
+        "never|{target:?}|{}|{}",
+        ty_mangle(slot),
+        ty_mangle(&callee_ty)
+    );
+    let cached = ctx.env.sink.thunks.borrow().get(&key).copied();
+    let id = cached.unwrap_or_else(|| {
+        let id = FunctionId(ctx.env.sink.next_id.get());
+        ctx.env.sink.next_id.set(id.0 + 1);
+        let mut a = LowerCtx::new(ctx.env, ctx.ty_subst, None);
+        let env_param = target.is_none().then(|| HirParam {
+            name: "#env".to_owned(),
+            local: a.declare(None, env_ty.clone()),
+            ty: env_ty.clone(),
             by_ref: false,
-        })
-        .collect();
-    let call_args: Vec<HirExpr> = params
-        .iter()
-        .map(|p| hir_local(p.local, &p.ty, span))
-        .collect();
-    let kind = match (target, &env_param) {
-        (Some(t), _) => HirExprKind::Call {
-            callee: t,
-            args: call_args,
-        },
-        (None, Some(env)) => HirExprKind::CallIndirect {
-            callee: Box::new(HirExpr {
-                kind: HirExprKind::TupleField {
-                    target: Box::new(hir_local(env.local, &env_ty, span)),
-                    index: 0,
-                    field_ty: callee_ty.clone(),
-                },
-                ty: callee_ty.clone(),
-                span,
+        });
+        let params: Vec<HirParam> = args
+            .iter()
+            .enumerate()
+            .map(|(i, t)| HirParam {
+                name: format!("#a{i}"),
+                local: a.declare(None, t.clone()),
+                ty: t.clone(),
+                by_ref: false,
+            })
+            .collect();
+        let call_args: Vec<HirExpr> = params
+            .iter()
+            .map(|p| hir_local(p.local, &p.ty, span))
+            .collect();
+        let kind = match (target, &env_param) {
+            (Some(t), _) => HirExprKind::Call {
+                callee: t,
+                args: call_args,
+            },
+            (None, Some(env)) => HirExprKind::CallIndirect {
+                callee: Box::new(HirExpr {
+                    kind: HirExprKind::TupleField {
+                        target: Box::new(hir_local(env.local, &env_ty, span)),
+                        index: 0,
+                        field_ty: callee_ty.clone(),
+                    },
+                    ty: callee_ty.clone(),
+                    span,
+                }),
+                args: call_args,
+                ret_ty: (**vret).clone(),
+            },
+            (None, None) => unreachable!("env param exists without a static target"),
+        };
+        let call = HirExpr {
+            kind,
+            ty: HirTy::Unit,
+            span,
+        };
+        let mut all_params: Vec<HirParam> = env_param.into_iter().collect();
+        all_params.extend(params);
+        let params = all_params;
+        ctx.env.sink.extras.borrow_mut().push(HirFunction {
+            id,
+            def_id: None,
+            name: format!("__thunk_{}", id.0),
+            params,
+            locals: a.into_locals(),
+            ret_ty: (**sret).clone(),
+            body: Some(HirBlock {
+                stmts: vec![HirStmt::Panic(call)],
+                trailing: None,
+                label: None,
             }),
-            args: call_args,
-            ret_ty: (**vret).clone(),
-        },
-        (None, None) => unreachable!("env param exists without a static target"),
-    };
-    let call = HirExpr {
-        kind,
-        ty: HirTy::Unit,
-        span,
-    };
-    let mut all_params: Vec<HirParam> = env_param.into_iter().collect();
-    all_params.extend(params);
-    let params = all_params;
-    ctx.env.sink.extras.borrow_mut().push(HirFunction {
-        id,
-        def_id: None,
-        name: format!("__thunk_{}", id.0),
-        params,
-        locals: a.into_locals(),
-        ret_ty: (**sret).clone(),
-        body: Some(HirBlock {
-            stmts: vec![HirStmt::Panic(call)],
-            trailing: None,
-            label: None,
-        }),
-        is_async: false,
-        is_generator: false,
-        span,
+            is_async: false,
+            is_generator: false,
+            span,
+        });
+        ctx.env.sink.thunks.borrow_mut().insert(key, id);
+        id
     });
     let kind = if target.is_some() {
         HirExprKind::FnRef(id)
@@ -859,12 +881,13 @@ pub(super) fn lower_return(
 ) -> HirStmt {
     let value = match ctx.fn_throws.clone() {
         Some(err) => {
-            let ok = ctx.fn_ret_ty.clone();
+            let ok = carrier_ok(ctx);
             let v = value.unwrap_or_else(|| unit_value(span));
+            let v = super::mono::ref_pack(ctx, v, span);
             Some(carrier(&ok, &err, Ok(v), span))
         }
-        // `ref self` (spec 4.7.5): hand `self` back too.
-        None if ctx.ref_self.is_some() => Some(super::mono::ref_self_pack(
+        // `ref` parameters (spec 4.7): hand their values back too.
+        None if !ctx.ref_params.is_empty() => Some(super::mono::ref_pack(
             ctx,
             value.unwrap_or_else(|| unit_value(span)),
             span,
@@ -1206,12 +1229,19 @@ fn describe_err(ctx: &mut LowerCtx<'_>, err: HirExpr, span: rokc_diagnostic::Spa
     }
 }
 
+/// The ok side of the current function's carrier: its value type,
+/// packed with the `ref` parameters (`ref_packed`).
+fn carrier_ok(ctx: &LowerCtx<'_>) -> HirTy {
+    let refs: Vec<HirTy> = ctx.ref_params.iter().map(|(_, t)| t.clone()).collect();
+    super::mono::ref_packed(&ctx.fn_ret_ty, &refs)
+}
+
 /// A throwing function's body yields the ok carrier.
 pub(super) fn finish_throwing_body(ctx: &LowerCtx<'_>, block: &mut HirBlock) {
     let Some(err) = ctx.fn_throws.clone() else {
         return;
     };
-    let ok = ctx.fn_ret_ty.clone();
+    let ok = carrier_ok(ctx);
     match block.trailing.take() {
         Some(t) if hir_expr_diverges(&t) => block.trailing = Some(t),
         Some(t) => {

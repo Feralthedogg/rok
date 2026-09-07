@@ -1,7 +1,6 @@
 // spec: 003.12.6-unreachable-arm
 // probe: negative-must-fail
 // expect-error: [type]
-// xfail: rejected only by an mlir-opt/mlir-translate crash — no frontend diagnostic yet
 
 // spec 3.12.6: catch-all 뒤의 가지는 도달 불가능 → 컴파일 에러/강경고.
 fn main() -> i32 {

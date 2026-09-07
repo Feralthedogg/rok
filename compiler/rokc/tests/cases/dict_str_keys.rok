@@ -21,14 +21,14 @@ fn main() -> i32 {
     let k = "a" + "";
     rok_print_i32(d[k]);
     d["c" + ""] = 3;
-    rok_gc_collect();
+    unsafe { rok_gc_collect() };
     rok_print_i32(d["c"]);
     match d.get("zz") {
         v: i32 => rok_print_i32(v),
         none => println("none"),
     }
     let names: List<str> = ["a" + "b", "c"];
-    rok_gc_collect();
+    unsafe { rok_gc_collect() };
     println(names[0]);
     let s: Set<str> = {"x", "y", "x" + ""};
     rok_print_i32(s.len() as i32);

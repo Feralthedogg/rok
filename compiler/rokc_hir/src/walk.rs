@@ -212,7 +212,10 @@ pub fn walk_stmt(v: &mut impl AstVisitor, s: &Stmt) {
 fn walk_args(v: &mut impl AstVisitor, args: &[CallArg]) {
     for a in args {
         match a {
-            CallArg::Positional(e) | CallArg::Spread(e) | CallArg::Named { value: e, .. } => {
+            CallArg::Positional(e)
+            | CallArg::Spread(e)
+            | CallArg::Ref(e)
+            | CallArg::Named { value: e, .. } => {
                 walk_expr(v, e);
             }
         }
@@ -244,6 +247,7 @@ pub fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
             }
         }
         ExprKind::Block(b)
+        | ExprKind::Unsafe(b)
         | ExprKind::AsyncBlock(b)
         | ExprKind::YieldBlock(b)
         | ExprKind::AsyncYieldBlock(b) => walk_block(v, b),
@@ -511,7 +515,7 @@ pub fn walk_ty(v: &mut impl AstVisitor, t: &Ty) {
             walk_ty(v, ok);
             walk_ty(v, err);
         }
-        TyKind::Any | TyKind::None | TyKind::SelfUpper | TyKind::Never => {}
+        TyKind::Any | TyKind::None | TyKind::SelfUpper | TyKind::Never | TyKind::Const(_) => {}
     }
 }
 

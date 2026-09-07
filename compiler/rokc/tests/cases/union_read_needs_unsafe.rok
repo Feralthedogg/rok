@@ -1,0 +1,10 @@
+// expect-error: reading field `low` of union `Repr` needs an `unsafe` block
+union Repr {
+    bits: i64;
+    low: i32;
+}
+
+fn main() -> i32 {
+    let r = Repr { bits: 42i64 };
+    return r.low;
+}

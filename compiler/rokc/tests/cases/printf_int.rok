@@ -11,5 +11,5 @@ fn main() {
         total += i * i;
         i += 1;
     }
-    let _ = printf("sum=%d\n", total);
+    let _ = unsafe { printf("sum=%d\n", total) };
 }

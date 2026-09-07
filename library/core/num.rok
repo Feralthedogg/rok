@@ -1309,20 +1309,17 @@ impl Hash for char {
     fn hash(self) -> u64 { return self as u64; }
 }
 
-// √ (stdlib spec 2.3.10). ponytail: libm `sqrt` / `sqrtf` until a
-// `rok.sqrt.TYPE` intrinsic exists in MIR / codegen.
-
-extern "C" {
-    fn sqrt(x: f64) -> f64;
-    fn sqrtf(x: f32) -> f32;
-}
+// √ (stdlib spec 2.3.10): `llvm.intr.sqrt`. The body's `self.sqrt()`
+// is itself the intrinsic (a call of an intrinsic method is the op).
 
 impl Sqrt for f64 {
     type Output = f64;
-    fn sqrt(self) -> f64 { return sqrt(self); }
+    #[intrinsic("rok.sqrt.f64")]
+    fn sqrt(self) -> f64 { return self.sqrt(); }
 }
 
 impl Sqrt for f32 {
     type Output = f32;
-    fn sqrt(self) -> f32 { return sqrtf(self); }
+    #[intrinsic("rok.sqrt.f32")]
+    fn sqrt(self) -> f32 { return self.sqrt(); }
 }

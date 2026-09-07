@@ -1,0 +1,12 @@
+// expect-error: non-exhaustive match on `(bool, bool)`
+// Spec 3.12.5: `(false, false)` is not covered.
+fn f(x: bool, y: bool) -> i32 {
+    match (x, y) {
+        (true, _) => 1,
+        (false, true) => 2,
+    }
+}
+
+fn main() -> i32 {
+    return f(true, true);
+}

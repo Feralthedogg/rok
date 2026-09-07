@@ -327,7 +327,9 @@ impl Parser<'_> {
             self.error(span, "empty `{}` in f-string");
             return None;
         }
-        let (mut tokens, diags) = Lexer::new(text, self.file.clone()).lex_all();
+        let (mut tokens, diags) = Lexer::new(text, self.file.clone())
+            .with_ext_ops(self.ext.symbols())
+            .lex_all();
         for t in &mut tokens {
             // Byte offsets into the file; line / column of the literal.
             let off = u32::try_from(abs_offset).unwrap_or(u32::MAX);
@@ -336,10 +338,12 @@ impl Parser<'_> {
                 end: t.span.end.saturating_add(off),
                 line: span.line,
                 col: span.col,
+                file: span.file,
             };
         }
         self.diagnostics.extend(diags);
         let mut sub = Parser::new(&tokens, self.file.clone());
+        sub.ext = self.ext.clone();
         let e = sub.parse_expr();
         if !matches!(sub.peek(), TokenKind::Eof) {
             sub.error(span, format!("unexpected tokens in f-string hole `{text}`"));

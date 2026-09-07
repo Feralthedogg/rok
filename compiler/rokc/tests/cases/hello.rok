@@ -6,6 +6,6 @@ extern "C" {
 }
 
 fn main() -> i32 {
-    puts("hello, rok!");
+    unsafe { puts("hello, rok!") };
     return 0i32;
 }

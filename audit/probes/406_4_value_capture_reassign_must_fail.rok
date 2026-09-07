@@ -1,7 +1,6 @@
 // spec: 004.06.4-value-capture-reassign-must-fail
 // probe: negative-must-fail
 // expect-error: [type]
-// xfail: rejected only by an mlir-opt/mlir-translate crash — no frontend diagnostic yet
 
 // spec 4.6.4: 값 캡처된 외부 변수를 클로저 본체에서 재할당 시도하면
 // 컴파일 에러. [ref count] 명시 강제. 통과되면 spec 위반.

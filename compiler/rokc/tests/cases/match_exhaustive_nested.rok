@@ -1,0 +1,42 @@
+// expect-exit: 0
+// expect-stdout:
+// 3
+// 2
+// 12
+
+// Spec 3.12.5: tuple / struct / nested variant patterns count toward
+// exhaustiveness without a catch-all.
+struct P { a: bool; b: bool; }
+
+enum Shape { Dot, Line(i32), Box(i32, i32) }
+
+fn tup(x: bool, y: bool) -> i32 {
+    match (x, y) {
+        (true, true) => 3,
+        (true, false) => 2,
+        (false, _) => 1,
+    }
+}
+
+fn st(p: P) -> i32 {
+    match p {
+        P { a: true, .. } => 2,
+        P { a: false, b: true } => 1,
+        P { a: false, b: false } => 0,
+    }
+}
+
+fn area(s: Shape) -> i32 {
+    match s {
+        Shape::Dot => 0,
+        Shape::Line(n) => n,
+        Shape::Box(w, h) => w * h,
+    }
+}
+
+fn main() -> i32 {
+    rok_print_i32(tup(true, true));
+    rok_print_i32(st(P { a: true, b: false }));
+    rok_print_i32(area(Shape::Box(3, 4)));
+    return 0;
+}

@@ -27,7 +27,7 @@ fn main() -> i32 {
     rok_print_i32(apply(|x| x + n, 5));
     let add2 = make_adder(2);
     let add3 = make_adder(3);
-    rok_gc_collect();
+    unsafe { rok_gc_collect() };
     rok_print_i32(add2(5));
     rok_print_i32(add3(add2(8)));
     let hs: List<fn(i32) -> i32> = [twice, make_adder(100), |x| x * n];
@@ -35,7 +35,7 @@ fn main() -> i32 {
     let h = Handler { name: "inc", run: |x| x + 1 };
     rok_print_i32((h.run)(2));
     let by_name: Dict<str, fn(i32) -> i32> = {"twice": twice, "plus": hs[1]};
-    rok_gc_collect();
+    unsafe { rok_gc_collect() };
     rok_print_i32(by_name["plus"](6));
     // Snapshot: a later change to `n` doesn't reach the closure.
     let snap = |x: i32| x + n;

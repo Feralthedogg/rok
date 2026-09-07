@@ -1,0 +1,13 @@
+// expect-error: unreachable match arm 3
+// Spec 3.12.6: `(true, false)` is already matched by the arms above.
+fn f(x: bool, y: bool) -> i32 {
+    match (x, y) {
+        (true, _) => 1,
+        (false, _) => 2,
+        (true, false) => 3,
+    }
+}
+
+fn main() -> i32 {
+    return f(true, true);
+}

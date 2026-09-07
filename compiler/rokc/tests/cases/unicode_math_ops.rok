@@ -7,6 +7,9 @@
 // 1
 // 1
 // 1
+// 10
+// 11
+// 1
 
 // Spec 1.10.3 / 3.2.3: Unicode math operators bind to their traits with
 // fixed levels; `÷ ≤ ≥ ≠ ≡` are synonyms of `/ <= >= != ==`.
@@ -26,7 +29,6 @@ struct Bits { b: i32; }
 
 impl Contains<i32> for Bits {
     fn contains(self, item: i32) -> bool { return (self.b >> item) & 1 == 1; }
-    fn not_contains(self, item: i32) -> bool { return (self.b >> item) & 1 == 0; }
 }
 
 fn main() -> i32 {
@@ -45,5 +47,10 @@ fn main() -> i32 {
     // √ is prefix (level 12): √x * 2 is (√x) * 2.
     let x: f64 = 16.0;
     if √x * 2 == 8 && √(9.0f32) == 3 { rok_print_i32(1); }
+    // `swap` still evaluates left to right: element, then container.
+    if el() ∈ bits() { rok_print_i32(1); }
     return 0;
 }
+
+fn el() -> i32 { rok_print_i32(10); return 1; }
+fn bits() -> Bits { rok_print_i32(11); return Bits { b: 6 }; }

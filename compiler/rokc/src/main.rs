@@ -32,7 +32,7 @@ options:
   -O0 | -O1 | -O2 | -O3 | -Os  optimization level (default -O0)
   --cfg <flag | key=value>     #[cfg] flag (repeatable)
   --bootstrap <file>           operator / lang declarations to preload (repeatable;
-                               default: $ROK_HOME/lib/rok/{core,std}/lib.rok)
+                               default: $ROK_HOME/lib/rok/{core,std,bare}/lib.rok)
   --rokr <lib>                 runtime library: path, or name for -l<name>
                                (default: $ROK_HOME/lib/librokr.a, else -lrokr)
 environment:
@@ -147,10 +147,13 @@ fn with_defaults(mut a: Args) -> Args {
         match libs {
             Some(libs) => {
                 a.bootstrap.push(libs.join("core/lib.rok"));
-                // `rok::std` rides along when present (no implicit glob).
-                let std_lib = libs.join("std/lib.rok");
-                if std_lib.is_file() {
-                    a.bootstrap.push(std_lib);
+                // `rok::std` / `rok::bare` ride along when present (no
+                // implicit glob: user code names them).
+                for tier in ["std", "bare"] {
+                    let lib = libs.join(tier).join("lib.rok");
+                    if lib.is_file() {
+                        a.bootstrap.push(lib);
+                    }
                 }
             }
             None => eprintln!(

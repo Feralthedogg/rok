@@ -1,0 +1,51 @@
+// expect-exit: 0
+// expect-stdout:
+// 7
+// 4
+// 5
+// 6
+// 9
+// 3
+
+// Spec 2.11: const generic parameters — inferred from array arguments,
+// passed with `::<..>`, used as values and in array lengths (`M * N`),
+// and on structs.
+const W: usize = 2;
+
+fn middle<T, const N: usize>(arr: [T; N]) -> T {
+    return arr[N / 2];
+}
+
+fn len<const N: usize>(arr: [i32; N]) -> usize {
+    return N;
+}
+
+fn scaled<const N: i32>(v: i32) -> i32 {
+    return v * N;
+}
+
+struct Grid<const M: usize, const N: usize> {
+    cells: [i32; M * N];
+}
+
+fn total<const M: usize, const N: usize>(g: Grid<M, N>) -> i32 {
+    let s = 0;
+    for i in 0..M * N {
+        s = s + g.cells[i];
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    let a: [i32; 3] = [3, 7, 9];
+    rok_print_i32(middle(a));
+    rok_print_i32(len([1, 2, 3, 4]) as i32);
+    rok_print_i32(scaled::<-5>(-1));
+    let g: Grid<W, 3> = Grid { cells: [1, 1, 1, 1, 1, 1] };
+    rok_print_i32(total(g));
+    rok_print_i32(middle::<i32, { W + 1 }>([8, 9, 10]));
+    rok_print_i32(first_of([3, 4]));
+    return 0;
+}
+
+fn first_of<const N: usize>(a: [i32; N]) -> i32 { return a[0]; }

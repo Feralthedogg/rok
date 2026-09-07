@@ -47,18 +47,11 @@ pub enum TokenKind {
     Fn,
     Struct,
     Enum,
-    Union,
     Trait,
     Impl,
-    Type,
-    Const,
-    Static,
-    Mut,
-    Where,
     Pub,
     Mod,
     Use,
-    Extern,
     As,
     Ref,
     Unsafe,
@@ -70,17 +63,13 @@ pub enum TokenKind {
     While,
     Loop,
     For,
-    In,
     Break,
     Continue,
     Return,
     Is,
     Using,
     Try,
-    Catch,
     Throw,
-    Throws,
-    Finally,
 
     // Async / generator keywords.
     Async,
@@ -98,8 +87,6 @@ pub enum TokenKind {
     True,
     False,
     None,
-    /// `any` type slot.
-    Any,
 
     // Arithmetic / comparison / logical.
     Plus,
@@ -127,6 +114,8 @@ pub enum TokenKind {
     /// Unicode math operator (spec 1.10.3): `× ⋅ ∘ √ ∈ ∉ ⊂ ⊆ ∪ ∩`.
     /// `÷ ≡ ≠ ≤ ≥` lex as their ASCII synonyms (`Slash`, `EqEq`, ...).
     MathOp(char),
+    /// Registered extension operator token (spec 1.10.4, `like = ..`).
+    ExtOp(String),
 
     // Broadcast (`.` prefix).
     DotPlus,
@@ -205,6 +194,29 @@ impl TokenKind {
     }
 }
 
+/// Reserved keywords (spec 1.5, E8).
+///
+/// `type`, `any`, `in`, `where`,
+/// `throws`, `rethrows`, `catch`, `finally`, `const`, `static`,
+/// `extern`, `mut`, `union`, `pkg`, `sub`, `sup` and `rok` are contextual:
+/// they lex as identifiers and the parser recognizes them in place.
+pub const RESERVED: &[&str] = &[
+    "let", "fn", "if", "else", "match", "while", "loop", "for", "return", "break", "continue",
+    "try", "throw", "async", "await", "yield", "unsafe", "using", "struct", "enum", "trait",
+    "impl", "pub", "mod", "use", "as", "is", "ref", "true", "false", "none", "self", "Self",
+];
+
+/// The spelling of a reserved-keyword token (`TokenKind::Match` →
+/// `"match"`), for positions where any keyword is a name (after `.`,
+/// field declarations, argument labels).
+#[must_use]
+pub fn keyword_str(kind: &TokenKind) -> Option<&'static str> {
+    RESERVED
+        .iter()
+        .copied()
+        .find(|w| keyword_kind(w).as_ref() == Some(kind))
+}
+
 /// Match a keyword string against the reserved table.
 #[must_use]
 pub fn keyword_kind(ident: &str) -> Option<TokenKind> {
@@ -213,18 +225,11 @@ pub fn keyword_kind(ident: &str) -> Option<TokenKind> {
         "fn" => TokenKind::Fn,
         "struct" => TokenKind::Struct,
         "enum" => TokenKind::Enum,
-        "union" => TokenKind::Union,
         "trait" => TokenKind::Trait,
         "impl" => TokenKind::Impl,
-        "type" => TokenKind::Type,
-        "const" => TokenKind::Const,
-        "static" => TokenKind::Static,
-        "mut" => TokenKind::Mut,
-        "where" => TokenKind::Where,
         "pub" => TokenKind::Pub,
         "mod" => TokenKind::Mod,
         "use" => TokenKind::Use,
-        "extern" => TokenKind::Extern,
         "as" => TokenKind::As,
         "ref" => TokenKind::Ref,
         "unsafe" => TokenKind::Unsafe,
@@ -234,17 +239,13 @@ pub fn keyword_kind(ident: &str) -> Option<TokenKind> {
         "while" => TokenKind::While,
         "loop" => TokenKind::Loop,
         "for" => TokenKind::For,
-        "in" => TokenKind::In,
         "break" => TokenKind::Break,
         "continue" => TokenKind::Continue,
         "return" => TokenKind::Return,
         "is" => TokenKind::Is,
         "using" => TokenKind::Using,
         "try" => TokenKind::Try,
-        "catch" => TokenKind::Catch,
         "throw" => TokenKind::Throw,
-        "throws" => TokenKind::Throws,
-        "finally" => TokenKind::Finally,
         "async" => TokenKind::Async,
         "await" => TokenKind::Await,
         "yield" => TokenKind::Yield,
@@ -253,7 +254,6 @@ pub fn keyword_kind(ident: &str) -> Option<TokenKind> {
         "true" => TokenKind::True,
         "false" => TokenKind::False,
         "none" => TokenKind::None,
-        "any" => TokenKind::Any,
         _ => return None,
     })
 }

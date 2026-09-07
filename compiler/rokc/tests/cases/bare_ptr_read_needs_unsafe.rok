@@ -1,0 +1,8 @@
+// expect-error: call to unsafe function `read` outside an `unsafe` block
+// Dereferencing a raw pointer is `unsafe` (spec 4.15.2).
+use rok::bare::ptr::Ptr;
+
+fn main() -> i32 {
+    let p: Ptr<i32> = Ptr::dangling();
+    return p.read();
+}

@@ -1,0 +1,13 @@
+// expect-exit: 7
+// Spec 5.9.3: `extern "C" { static .. }` names a C global; `static mut`
+// can be written. `environ` and `optind` are libc globals.
+extern "C" {
+    static environ: usize;
+    static mut optind: i32;
+}
+
+fn main() -> i32 {
+    if environ == 0usize { return 1; }
+    optind = 6;
+    return optind + 1;
+}

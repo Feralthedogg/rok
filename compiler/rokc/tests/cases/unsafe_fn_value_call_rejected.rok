@@ -1,0 +1,8 @@
+// expect-error: call to unsafe function
+extern "C" {
+    fn abs(x: i32) -> i32;
+}
+fn main() -> i32 {
+    let g = abs;
+    return g(-3);
+}

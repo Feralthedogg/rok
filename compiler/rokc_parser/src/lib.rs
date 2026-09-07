@@ -12,5 +12,5 @@ pub mod prec;
 mod tests;
 
 pub use lang::{LangEntry, LangItemKind, LangTable, collect_lang_table};
-pub use parser::{Parser, parse_program};
-pub use prec::{Assoc, Fixity, OpEntry, PrecTable, collect_prec_table};
+pub use parser::{Parser, parse_program, parse_program_ext};
+pub use prec::{Assoc, ExtOps, Fixity, OpEntry, PrecTable, collect_prec_table};

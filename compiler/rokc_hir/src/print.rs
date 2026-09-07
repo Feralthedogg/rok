@@ -281,6 +281,21 @@ fn print_expr(out: &mut String, e: &HirExpr) {
             print_expr(out, len);
             out.push(')');
         }
+        HirExprKind::RawRead { addr, .. } => {
+            out.push_str("ptr_read(");
+            print_expr(out, addr);
+            out.push(')');
+        }
+        HirExprKind::RawWrite { addr, value, .. } => {
+            out.push_str("ptr_write(");
+            print_expr(out, addr);
+            out.push_str(", ");
+            print_expr(out, value);
+            out.push(')');
+        }
+        HirExprKind::SizeOf { align, .. } => {
+            out.push_str(if *align { "align_of()" } else { "size_of()" });
+        }
         HirExprKind::BufGet { buf, index, .. } => {
             out.push_str("buf_get(");
             print_expr(out, buf);

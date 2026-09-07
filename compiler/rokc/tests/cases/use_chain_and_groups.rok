@@ -1,0 +1,24 @@
+// expect-exit: 42
+// Spec 5.5: a `use` path may start with a name an earlier `use` of the
+// same module imported; group members extend their prefix as written.
+mod a {
+    pub mod inner {
+        pub fn f() -> i32 { 40 }
+        pub fn g() -> i32 { 1 }
+    }
+}
+
+mod b {
+    use sup::a::inner;
+    use inner::f;
+    use inner::{g};
+
+    pub fn h() -> i32 { f() + g() }
+}
+
+use a::inner;
+use inner::{g};
+
+fn main() -> i32 {
+    return b::h() + g();
+}

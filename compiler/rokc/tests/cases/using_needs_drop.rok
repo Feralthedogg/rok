@@ -1,0 +1,5 @@
+// expect-error: drop
+// Spec 3.17.7: the bound value must implement `Drop`.
+fn main() -> i32 {
+    using x = 42 { x }
+}

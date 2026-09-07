@@ -1,0 +1,34 @@
+// expect-exit: 0
+// expect-stdout:
+// 6 8
+// 3 3
+// -2
+
+// Adapter thunks (spec 4.4.9: a non-throwing fn into a throwing `fn`
+// slot; 4.4: a `-> !` fn into a `-> R` slot) are made once per
+// (callee, slot type) and shared by every use site.
+
+fn twice(x: i32) -> i32 { return x * 2; }
+fn bail(x: i32) -> ! { panic(f"bail {x}"); }
+
+fn apply(f: fn(i32) throws (str) -> i32, x: i32) throws (str) -> i32 {
+    return try f(x);
+}
+
+fn pick(f: fn(i32) -> i32, x: i32) -> i32 {
+    if x < 0 {
+        return f(x);
+    }
+    return x;
+}
+
+fn main() {
+    let a = try! apply(twice, 3);
+    let b = try! apply(twice, 4);
+    println(f"{a} {b}");
+    let g = twice;
+    let c = try! apply(g, 1) + 1;
+    let d = try! apply(g, 1) + 1;
+    println(f"{c} {d}");
+    println(f"{pick(bail, 5) - pick(bail, 6) - 1}");
+}

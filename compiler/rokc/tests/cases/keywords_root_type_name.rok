@@ -1,0 +1,8 @@
+// expect-error: `pkg` cannot name a type
+// E8: `pkg` / `sup` / `rok` / `any` cannot name a type (a fn or variable may).
+struct pkg { x: i32; }
+
+fn main() -> i32 {
+    let rok = 1;
+    return rok;
+}

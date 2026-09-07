@@ -11,12 +11,12 @@ extern "C" {
 }
 
 fn main() -> i32 {
-    let p = rok_alloc(64usize, 8usize);
+    let p = unsafe { rok_alloc(64usize, 8usize) };
     if p != 0usize {
         rok_print_str("alloc ok");
     } else {
         rok_print_str("alloc fail");
     }
-    rok_free(p);
+    unsafe { rok_free(p) };
     return 0;
 }

@@ -1,0 +1,21 @@
+// expect-exit: 9
+// `unsafe fn(..)` types (spec 4.15): a C function or `unsafe fn` taken
+// as a value keeps its unsafety; calling it needs `unsafe`. A safe fn
+// also fits an `unsafe fn` slot.
+extern "C" {
+    fn abs(x: i32) -> i32;
+}
+unsafe fn neg(x: i32) -> i32 { return 0 - x; }
+fn twice(x: i32) -> i32 { return x * 2; }
+
+fn apply(f: unsafe fn(i32) -> i32, x: i32) -> i32 {
+    return unsafe { f(x) };
+}
+
+fn main() -> i32 {
+    let g = abs;
+    let a = unsafe { g(-3) };          // 3
+    let b = apply(neg, -2);            // 2
+    let c = apply(twice, 2);           // 4
+    return a + b + c;
+}

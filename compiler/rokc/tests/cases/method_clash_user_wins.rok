@@ -1,0 +1,57 @@
+// expect-exit: 0
+// expect-stdout:
+// 7 6
+// mine 6
+// 1 2
+// 10 20
+// 3
+
+// Spec 4.9.6: when several traits give a type the same method name, a
+// trait of the current package beats one visible only through the
+// implicit `use rok::core::**` (core's `Zero::zero`, `Iterator::any`);
+// core code keeps seeing its own traits (`sum` still starts at 0).
+// `Trait::method(x)` names one explicitly.
+
+trait MyZero { fn zero() -> Self; }
+impl MyZero for i32 { fn zero() -> i32 { return 7; } }
+
+trait Anyish { fn any(self) -> str; }
+
+struct C { n: i32; }
+
+impl Iterator for C {
+    type Item = i32;
+    fn next(ref self) -> i32 | none {
+        if self.n < 3 {
+            self.n = self.n + 1;
+            return self.n;
+        }
+        return none;
+    }
+}
+
+impl Anyish for C {
+    fn any(self) -> str { return "mine"; }
+}
+
+trait Left { fn side(self) -> i32; }
+trait Right { fn side(self) -> i32; }
+impl Left for C { fn side(self) -> i32 { return 10; } }
+impl Right for C { fn side(self) -> i32 { return 20; } }
+
+impl C {
+    fn count(self) -> i32 { return 3; }
+}
+
+fn main() {
+    let xs: List<i32> = [1, 2, 3];
+    println(f"{i32::zero()} {xs.iter().sum()}");
+    let c = C { n: 0 };
+    println(f"{c.any()} {C { n: 0 }.sum()}");
+    let z: i32 = Zero::zero();
+    let hit = Iterator::any(C { n: 0 }, |x: i32| x > 2);
+    println(f"{hit as i32} {z + 2}");
+    println(f"{Left::side(c)} {Right::side(c)}");
+    // An inherent method beats every trait's (`Iterator::count`).
+    println(f"{c.count()}");
+}

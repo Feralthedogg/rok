@@ -28,8 +28,33 @@ pub(super) fn lower_match(
         ctx.pop_scope();
         arm_h.push(HirMatchArm { pat, guard, body });
     }
-    // Spec 3.12.5: exhaustiveness.
-    check_match_exhaustiveness(ctx, &scrut_ty, &arm_h);
+    // `let x: T = v else { ... };` is parsed as a two-arm match whose
+    // second arm is the else block (parser desugar).
+    let is_let_else = matches!(
+        arms.first().map(|a| &a.pat.kind),
+        Some(AstPatternKind::Binding { name, .. } | AstPatternKind::TypeCheck { binder: Some(name), .. })
+            if name == "__letelse_v"
+    );
+    // Spec 3.12.5 / 3.12.6: exhaustiveness and unreachable arms.
+    if !is_let_else {
+        // `if let` / `while let` desugar to `match { pat => .., _ => .. }`
+        // with the `_` at the `if` / `while` span; an irrefutable `pat`
+        // makes that arm unreachable by construction, not by mistake.
+        // ponytail: recognized by span; mark synthetic arms in the AST if
+        // another desugar ever needs it.
+        // A `catch` dispatch (`match #err { .. }`) reports unreachable
+        // catch arms itself, as warnings.
+        let catch_dispatch = matches!(&scrutinee.kind,
+            ExprKind::Path(p) if p.segments.len() == 1 && p.segments[0].name.starts_with('#'));
+        let synthetic: Vec<bool> = arms
+            .iter()
+            .map(|a| {
+                catch_dispatch
+                    || (matches!(a.pat.kind, AstPatternKind::Wildcard) && a.pat.span == span)
+            })
+            .collect();
+        check_match_arms(ctx, &scrut_ty, &arm_h, &synthetic);
+    }
 
     // Result type: the expected slot, else the first arm that produces
     // a value; every other value-producing arm must agree.
@@ -40,13 +65,6 @@ pub(super) fn lower_match(
             .find(|a| !hir_expr_diverges(&a.body))
             .map_or(HirTy::Unit, |a| a.body.ty.clone())
     });
-    // `let x: T = v else { ... };` is parsed as a two-arm match whose
-    // second arm is the else block (parser desugar).
-    let is_let_else = matches!(
-        arms.first().map(|a| &a.pat.kind),
-        Some(AstPatternKind::Binding { name, .. } | AstPatternKind::TypeCheck { binder: Some(name), .. })
-            if name == "__letelse_v"
-    );
     let mut out = Vec::with_capacity(arm_h.len());
     for (i, mut a) in arm_h.into_iter().enumerate() {
         // A unit-typed match (statement position) discards arm values.
@@ -125,6 +143,253 @@ pub(super) fn covered_variants(p: &HirPattern, out: &mut Vec<u32>) {
     }
 }
 
+/// Pattern-matrix constructor (usefulness analysis, Maranget 2007).
+#[derive(Clone, Debug, PartialEq)]
+enum Ctor {
+    Bool(bool),
+    Variant(u32),
+    /// The only constructor of a tuple / struct.
+    Single,
+    /// A literal or range of an open domain (ints, chars, strings): only
+    /// equal spellings are the same constructor.
+    Open(String),
+}
+
+#[derive(Clone, Debug)]
+enum Pat {
+    Wild,
+    C(Ctor, Vec<Pat>),
+    Or(Vec<Pat>),
+}
+
+fn simplify(ctx: &LowerCtx<'_>, p: &HirPattern) -> Pat {
+    match p {
+        HirPattern::Wildcard | HirPattern::Binding { .. } => Pat::Wild,
+        HirPattern::Literal {
+            value: ConstVal::Bool(b),
+            ..
+        } => Pat::C(Ctor::Bool(*b), Vec::new()),
+        HirPattern::Literal { value, .. } => Pat::C(Ctor::Open(format!("{value:?}")), Vec::new()),
+        HirPattern::Range {
+            start,
+            end,
+            inclusive,
+            ..
+        } => Pat::C(
+            Ctor::Open(format!("{start:?}..{inclusive}{end:?}")),
+            Vec::new(),
+        ),
+        HirPattern::Or(alts) => Pat::Or(alts.iter().map(|a| simplify(ctx, a)).collect()),
+        HirPattern::Tuple(parts) => Pat::C(
+            Ctor::Single,
+            parts.iter().map(|a| simplify(ctx, a)).collect(),
+        ),
+        HirPattern::Struct { struct_id, fields } => {
+            let n = ctx.struct_def(*struct_id).fields.len();
+            let mut args = vec![Pat::Wild; n];
+            for (i, f) in fields {
+                if let Some(slot) = args.get_mut(*i as usize) {
+                    *slot = simplify(ctx, f);
+                }
+            }
+            Pat::C(Ctor::Single, args)
+        }
+        HirPattern::EnumVariant {
+            enum_id,
+            variant_index,
+            args,
+        } => {
+            let arity = ctx
+                .enum_def(*enum_id)
+                .variants
+                .get(*variant_index as usize)
+                .map_or(args.len(), |v| v.arity);
+            let mut sub: Vec<Pat> = args.iter().map(|a| simplify(ctx, a)).collect();
+            sub.resize(arity, Pat::Wild);
+            Pat::C(Ctor::Variant(*variant_index), sub)
+        }
+        HirPattern::SumVariant { variant_index, .. } => {
+            Pat::C(Ctor::Variant(*variant_index), Vec::new())
+        }
+    }
+}
+
+/// Every constructor of `ty` with its field types; `None` = an open
+/// domain (only `_` covers it).
+fn ctors_of(ctx: &LowerCtx<'_>, ty: &HirTy) -> Option<Vec<(Ctor, Vec<HirTy>)>> {
+    Some(match ty {
+        HirTy::Prim(PrimTy::Bool) => vec![
+            (Ctor::Bool(false), Vec::new()),
+            (Ctor::Bool(true), Vec::new()),
+        ],
+        HirTy::Tuple(ts) => vec![(Ctor::Single, ts.clone())],
+        HirTy::Struct(id) => vec![(
+            Ctor::Single,
+            ctx.struct_def(*id)
+                .fields
+                .iter()
+                .map(|f| f.ty.clone())
+                .collect(),
+        )],
+        HirTy::Enum(id) => ctx
+            .enum_def(*id)
+            .variants
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let tys = match (&v.payload_ty, v.arity) {
+                    (_, 0) | (None, _) => Vec::new(),
+                    (Some(t), 1) => vec![t.clone()],
+                    (Some(HirTy::Tuple(ts)), _) => ts.clone(),
+                    (Some(_), n) => vec![HirTy::Unknown; n],
+                };
+                (
+                    Ctor::Variant(u32::try_from(i).expect("variant overflow")),
+                    tys,
+                )
+            })
+            .collect(),
+        HirTy::Sum(vs) => (0..vs.len())
+            .map(|i| {
+                (
+                    Ctor::Variant(u32::try_from(i).expect("variant overflow")),
+                    Vec::new(),
+                )
+            })
+            .collect(),
+        _ => return None,
+    })
+}
+
+fn sub_tys(ctx: &LowerCtx<'_>, ty: &HirTy, c: &Ctor, arity: usize) -> Vec<HirTy> {
+    ctors_of(ctx, ty)
+        .and_then(|cs| cs.into_iter().find(|(k, _)| k == c).map(|(_, t)| t))
+        .filter(|t| t.len() == arity)
+        .unwrap_or_else(|| vec![HirTy::Unknown; arity])
+}
+
+/// Rows with or-patterns in the first column expanded.
+fn expand_rows(rows: &[Vec<Pat>]) -> Vec<Vec<Pat>> {
+    let mut out = Vec::new();
+    for r in rows {
+        match r.first() {
+            Some(Pat::Or(alts)) => {
+                let alt_rows: Vec<Vec<Pat>> = alts
+                    .iter()
+                    .map(|a| {
+                        std::iter::once(a.clone())
+                            .chain(r[1..].iter().cloned())
+                            .collect()
+                    })
+                    .collect();
+                out.extend(expand_rows(&alt_rows));
+            }
+            _ => out.push(r.clone()),
+        }
+    }
+    out
+}
+
+fn specialize(rows: &[Vec<Pat>], c: &Ctor, arity: usize) -> Vec<Vec<Pat>> {
+    rows.iter()
+        .filter_map(|r| {
+            let head: Vec<Pat> = match &r[0] {
+                Pat::C(k, args) if k == c => args.clone(),
+                Pat::Wild => vec![Pat::Wild; arity],
+                _ => return None,
+            };
+            Some(head.into_iter().chain(r[1..].iter().cloned()).collect())
+        })
+        .collect()
+}
+
+/// Is there a value matched by `q` and by no row?
+fn useful(ctx: &LowerCtx<'_>, rows: &[Vec<Pat>], q: &[Pat], tys: &[HirTy]) -> bool {
+    let Some(head) = q.first() else {
+        return rows.is_empty();
+    };
+    let rows = expand_rows(rows);
+    let ty = tys.first().cloned().unwrap_or(HirTy::Unknown);
+    let rest_tys = tys.get(1..).unwrap_or(&[]);
+    let with = |args: Vec<Pat>, sub: Vec<HirTy>| -> (Vec<Pat>, Vec<HirTy>) {
+        (
+            args.into_iter().chain(q[1..].iter().cloned()).collect(),
+            sub.into_iter().chain(rest_tys.iter().cloned()).collect(),
+        )
+    };
+    match head {
+        Pat::Or(alts) => alts.iter().any(|a| {
+            let q2: Vec<Pat> = std::iter::once(a.clone())
+                .chain(q[1..].iter().cloned())
+                .collect();
+            useful(ctx, &rows, &q2, tys)
+        }),
+        Pat::C(c, args) => {
+            let (q2, t2) = with(args.clone(), sub_tys(ctx, &ty, c, args.len()));
+            useful(ctx, &specialize(&rows, c, args.len()), &q2, &t2)
+        }
+        Pat::Wild => {
+            let used: Vec<&Ctor> = rows
+                .iter()
+                .filter_map(|r| match &r[0] {
+                    Pat::C(k, _) => Some(k),
+                    _ => None,
+                })
+                .collect();
+            match ctors_of(ctx, &ty) {
+                Some(all) if !all.is_empty() && all.iter().all(|(c, _)| used.contains(&c)) => {
+                    all.into_iter().any(|(c, sub)| {
+                        let n = sub.len();
+                        let (q2, t2) = with(vec![Pat::Wild; n], sub);
+                        useful(ctx, &specialize(&rows, &c, n), &q2, &t2)
+                    })
+                }
+                _ => {
+                    let default: Vec<Vec<Pat>> = rows
+                        .iter()
+                        .filter(|r| matches!(r[0], Pat::Wild))
+                        .map(|r| r[1..].to_vec())
+                        .collect();
+                    useful(ctx, &default, &q[1..], rest_tys)
+                }
+            }
+        }
+    }
+}
+
+/// Spec 3.12.5 / 3.12.6: report an arm no value can reach (an error),
+/// then check that the unguarded arms cover the scrutinee's type.
+pub(super) fn check_match_arms(
+    ctx: &LowerCtx<'_>,
+    scrut_ty: &HirTy,
+    arms: &[HirMatchArm],
+    synthetic: &[bool],
+) {
+    let tys = [scrut_ty.clone()];
+    let mut rows: Vec<Vec<Pat>> = Vec::new();
+    for (i, a) in arms.iter().enumerate() {
+        let p = simplify(ctx, &a.pat);
+        if !synthetic.get(i).copied().unwrap_or(false)
+            && !useful(ctx, &rows, std::slice::from_ref(&p), &tys)
+        {
+            ctx.emit_error(
+                rokc_diagnostic::ErrorKind::Type,
+                format!(
+                    "unreachable match arm {}: earlier arms already match every value it \
+                     matches (spec 3.12.6)",
+                    i + 1
+                ),
+            );
+        }
+        if a.guard.is_none() {
+            rows.push(vec![p]);
+        }
+    }
+    if useful(ctx, &rows, &[Pat::Wild], &tys) {
+        check_match_exhaustiveness(ctx, scrut_ty, arms);
+    }
+}
+
 /// Spec 3.12.5: the arms must cover the scrutinee's type. Bool needs
 /// both literals; enums / sums need every variant (an arm with a guard
 /// covers nothing); other types need a catch-all.
@@ -141,7 +406,7 @@ pub(super) fn check_match_exhaustiveness(
     if unguarded.iter().any(|p| hir_pattern_irrefutable(p)) {
         return;
     }
-    let missing: Vec<String> = match scrut_ty {
+    let mut missing: Vec<String> = match scrut_ty {
         HirTy::Prim(PrimTy::Bool) => {
             fn bools(p: &HirPattern, seen: &mut [bool; 2]) {
                 match p {
@@ -194,7 +459,12 @@ pub(super) fn check_match_exhaustiveness(
             ctx.ty_name(other)
         )],
     };
-    if !missing.is_empty() {
+    if missing.is_empty() {
+        // Every top-level case appears but a nested one is missing
+        // (`(true, _)` without `(false, _)`).
+        missing.push("some nested values (add a `_` arm)".to_owned());
+    }
+    {
         ctx.emit_error(
             rokc_diagnostic::ErrorKind::Type,
             format!(

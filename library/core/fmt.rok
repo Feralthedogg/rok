@@ -32,31 +32,31 @@ extern "C" {
 
 /// Fill / align / sign / zero-pad / width on a formatted value.
 pub fn fstr_pad(s: str, width: usize, fill: u32, align: u32, flags: u32) -> str {
-    return rok_fmt_spec(s, width, fill, align, flags);
+    return unsafe { rok_fmt_spec(s, width, fill, align, flags) };
 }
 /// `{x:.N}`: fixed-point with `prec` decimals.
-pub fn fstr_fixed(x: f64, prec: i32) -> str { return rok_str_from_f64(x, prec); }
+pub fn fstr_fixed(x: f64, prec: i32) -> str { return unsafe { rok_str_from_f64(x, prec) }; }
 /// `{n:b}` / `{n:o}` / `{n:x}` / `{n:X}`; `flags`: 1 uppercase, 2 `#`.
 pub fn fstr_radix(n: u64, radix: u32, flags: u32) -> str {
-    return rok_str_from_radix(n, radix, flags);
+    return unsafe { rok_str_from_radix(n, radix, flags) };
 }
 
-impl Display for i8 { fn display(self) -> str { return rok_str_from_i64(self as i64); } }
-impl Display for i16 { fn display(self) -> str { return rok_str_from_i64(self as i64); } }
-impl Display for i32 { fn display(self) -> str { return rok_str_from_i64(self as i64); } }
-impl Display for i64 { fn display(self) -> str { return rok_str_from_i64(self); } }
-impl Display for isize { fn display(self) -> str { return rok_str_from_i64(self as i64); } }
-impl Display for u8 { fn display(self) -> str { return rok_str_from_u64(self as u64); } }
-impl Display for u16 { fn display(self) -> str { return rok_str_from_u64(self as u64); } }
-impl Display for u32 { fn display(self) -> str { return rok_str_from_u64(self as u64); } }
-impl Display for u64 { fn display(self) -> str { return rok_str_from_u64(self); } }
-impl Display for usize { fn display(self) -> str { return rok_str_from_u64(self as u64); } }
-impl Display for f32 { fn display(self) -> str { return rok_str_from_f64(self as f64, 0 - 1); } }
-impl Display for f64 { fn display(self) -> str { return rok_str_from_f64(self, 0 - 1); } }
+impl Display for i8 { fn display(self) -> str { return unsafe { rok_str_from_i64(self as i64) }; } }
+impl Display for i16 { fn display(self) -> str { return unsafe { rok_str_from_i64(self as i64) }; } }
+impl Display for i32 { fn display(self) -> str { return unsafe { rok_str_from_i64(self as i64) }; } }
+impl Display for i64 { fn display(self) -> str { return unsafe { rok_str_from_i64(self) }; } }
+impl Display for isize { fn display(self) -> str { return unsafe { rok_str_from_i64(self as i64) }; } }
+impl Display for u8 { fn display(self) -> str { return unsafe { rok_str_from_u64(self as u64) }; } }
+impl Display for u16 { fn display(self) -> str { return unsafe { rok_str_from_u64(self as u64) }; } }
+impl Display for u32 { fn display(self) -> str { return unsafe { rok_str_from_u64(self as u64) }; } }
+impl Display for u64 { fn display(self) -> str { return unsafe { rok_str_from_u64(self) }; } }
+impl Display for usize { fn display(self) -> str { return unsafe { rok_str_from_u64(self as u64) }; } }
+impl Display for f32 { fn display(self) -> str { return unsafe { rok_str_from_f64(self as f64, 0 - 1) }; } }
+impl Display for f64 { fn display(self) -> str { return unsafe { rok_str_from_f64(self, 0 - 1) }; } }
 impl Display for bool {
     fn display(self) -> str { if self { return "true"; } return "false"; }
 }
-impl Display for char { fn display(self) -> str { return rok_str_from_char(self as u32); } }
+impl Display for char { fn display(self) -> str { return unsafe { rok_str_from_char(self as u32) }; } }
 impl Display for str { fn display(self) -> str { return self; } }
 
 impl Debug for i8 { fn debug(self) -> str { return self.display(); } }
@@ -74,6 +74,6 @@ impl Debug for f64 { fn debug(self) -> str { return self.display(); } }
 impl Debug for bool { fn debug(self) -> str { return self.display(); } }
 // ponytail: no escaping of `'` / control chars in `char` Debug.
 impl Debug for char {
-    fn debug(self) -> str { return "'" + rok_str_from_char(self as u32) + "'"; }
+    fn debug(self) -> str { return "'" + unsafe { rok_str_from_char(self as u32) } + "'"; }
 }
-impl Debug for str { fn debug(self) -> str { return rok_str_debug(self); } }
+impl Debug for str { fn debug(self) -> str { return unsafe { rok_str_debug(self) }; } }
