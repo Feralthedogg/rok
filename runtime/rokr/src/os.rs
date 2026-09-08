@@ -891,6 +891,79 @@ pub extern "C" fn rok_os_spawn(
     r
 }
 
+/// Drain two pipes to EOF together (`poll`), so a child filling one
+/// while the other is unread cannot deadlock (`Command::output`).
+/// Stores the bytes as `str`s into `out[0]` / `out[1]` (a
+/// `GcBuf<str>`); `err` gets the errno, or 0.
+#[unsafe(no_mangle)]
+#[allow(clippy::cast_ptr_alignment)] // GC payloads are 8-aligned
+pub extern "C" fn rok_os_read_both(fd1: i32, fd2: i32, out: *mut u8, err: *mut u8) {
+    let mut bufs = [Bytes::new(), Bytes::new()];
+    let (r, e) = native(|| {
+        let mut fds = [
+            libc::pollfd {
+                fd: fd1,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: fd2,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        loop {
+            if fds.iter().all(|p| p.fd < 0) {
+                return 0;
+            }
+            // SAFETY: `fds` holds two entries; negative fds are ignored.
+            if unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) } < 0 {
+                if errno() == libc::EINTR {
+                    continue;
+                }
+                return -1;
+            }
+            for (p, b) in fds.iter_mut().zip(bufs.iter_mut()) {
+                if p.fd < 0 || p.revents == 0 {
+                    continue;
+                }
+                let spare = b.reserve(16 * 1024);
+                // SAFETY: `spare` is writable for 16 KiB.
+                let n = unsafe { libc::read(p.fd, spare.cast(), 16 * 1024) };
+                if n > 0 {
+                    b.len += n as usize;
+                } else if n == 0 {
+                    p.fd = -1;
+                } else if errno() != libc::EINTR && errno() != libc::EAGAIN {
+                    return -1;
+                }
+            }
+        }
+    });
+    set_err(err, if r < 0 { e } else { 0 });
+    let slots = out.wrapping_add(HEADER_SIZE).cast::<RokStr>();
+    // Store each string before allocating the next: `out` (rooted by
+    // the caller) keeps the first alive across the second allocation.
+    for (i, b) in bufs.iter().enumerate() {
+        let st = build(&[b.as_slice()]);
+        // SAFETY: the library passes a live two-element `GcBuf<str>`.
+        unsafe { slots.add(i).write(st) };
+    }
+}
+
+/// Bytes `start..end` of `s` as a new `str`, with no UTF-8 boundary
+/// check (raw byte buffers inside `rok::std::io`).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_bytes_slice(s: RokStr, start: usize, end: usize) -> RokStr {
+    let end = end.min(s.len);
+    let start = start.min(end);
+    if end == start {
+        return build(&[]);
+    }
+    // SAFETY: `start..end` lies within `s`.
+    build(&[unsafe { core::slice::from_raw_parts(s.ptr.add(start), end - start) }])
+}
+
 /// `waitpid`: the pid (status in `out[0]`), 0 if `nohang` and still
 /// running, or `-errno`.
 #[unsafe(no_mangle)]

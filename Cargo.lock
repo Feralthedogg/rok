@@ -12,6 +12,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 name = "rokc"
 version = "0.1.0"
 dependencies = [
+ "rokc_fmt",
  "rokc_interface",
 ]
 
@@ -51,6 +52,15 @@ dependencies = [
  "rokc_hir",
  "rokc_lexer",
  "rokc_mir",
+ "rokc_parser",
+]
+
+[[package]]
+name = "rokc_fmt"
+version = "0.1.0"
+dependencies = [
+ "rokc_diagnostic",
+ "rokc_lexer",
  "rokc_parser",
 ]
 

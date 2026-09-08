@@ -1,0 +1,47 @@
+// expect-exit: 0
+// expect-stdout:
+// false true true true
+// 2 1
+// sum hint: err 5, ok 1, end
+
+// `e is Enum::Variant` on an enum value tests the variant (any
+// payload); `Enum::f(..)` naming no variant calls an associated
+// function; `return Result::Err(e)` takes its type arguments from a
+// `Result<..> | none` return type.
+
+enum K { A, B(i32), C(str, i32) }
+
+impl K {
+    fn of(i: i32) -> K {
+        match i { 0 => K::A, 1 => K::B(7), _ => K::C("x", 2) }
+    }
+    fn code(self) -> i32 { match self { K::A => 0, K::B(_) => 1, K::C(_, _) => 2 } }
+}
+
+struct Bad { code: i32; why: str; }
+
+fn step(i: i32) -> Result<str, Bad> | none {
+    if i == 0 { return Result::Err(Bad { code: 5, why: "x" }); }
+    if i == 1 { return Result::Ok("1"); }
+    return none;
+}
+
+fn show(r: Result<str, Bad> | none) -> str {
+    if r is Result<str, Bad> {
+        match r {
+            Result::Ok(x) => { return f" ok {x},"; }
+            Result::Err(b) => { return f" err {b.code},"; }
+        }
+    }
+    return "";
+}
+
+fn main() {
+    let k = K::of(1);
+    println(f"{k is K::A} {k is K::B} {K::of(2) is K::C} {K::of(0) is K::A}");
+    if k is K::B { println(f"{K::of(9).code()} {k.code()}"); }
+
+    let out = "sum hint:";
+    out = out + show(step(0)) + show(step(1)) + show(step(2));
+    println(out + " end");
+}

@@ -96,6 +96,10 @@ struct TypeNames<'a> {
     /// by full name, expanded at each use; also the non-generic ones
     /// with a `where` clause (checked once, never expanded here).
     generic_aliases: HashMap<String, rokc_ast::TypeAliasDef>,
+    /// Non-generic aliases by full name → aliased type, so a generic
+    /// instance's argument can name one (`List<Item>`) during
+    /// instantiation, before the alias table proper exists.
+    plain_aliases: HashMap<String, Ty>,
     /// Every generic alias use: (alias, arguments, module, span), for
     /// its bounds check (`check_type_bounds`).
     alias_uses: std::cell::RefCell<Vec<AliasUse>>,
@@ -886,6 +890,8 @@ enum ArgSrc<'e> {
 /// Shared mutable sink for closures lifted into anonymous top-level
 /// functions, generic-function monomorphizations and lazily instantiated
 /// generic structs. Lowering pushes here as it walks expressions.
+type TySubst = HashMap<String, HirTy>;
+
 struct ClosureSink {
     extras: std::cell::RefCell<Vec<HirFunction>>,
     /// Functions with `ref` parameters (spec 4.7, `ref self` included).
@@ -912,6 +918,10 @@ struct ClosureSink {
     /// `T::Item` projections being resolved (cuts `impl<I: Iterator>
     /// IntoIterator for I { type Item = I::Item; }` cycles).
     projecting: std::cell::RefCell<Vec<ProjectionGoal>>,
+    /// The impl substitution an associated const's value lowers under,
+    /// per (impl, concrete type): `ty_subst` borrows it for the life of
+    /// the run (bounded like the monomorphizations).
+    const_substs: std::cell::RefCell<HashMap<(usize, String), &'static TySubst>>,
     /// Adapter thunks (`adapt_fn_value` / `adapt_never_fn`) by
     /// `kind|callee|slot type|callee type`.
     thunks: std::cell::RefCell<HashMap<String, FunctionId>>,
@@ -1182,6 +1192,19 @@ impl<'a> LowerCtx<'a> {
         if self.env.names.auto_traits.contains(trait_key) {
             return self.auto_trait(ty, trait_key, depth, &mut Vec::new());
         }
+        // A sum has the structural traits its variants have (`none`
+        // has them all); `expr::sum_structural_call` dispatches them.
+        if let HirTy::Sum(vs) = ty {
+            // `T | none` defaults to `none`.
+            if trait_key == "rok::core::marker::Default" {
+                return vs.iter().any(is_none_ty);
+            }
+            if expr::SUM_TRAITS.contains(&trait_key) {
+                return vs
+                    .iter()
+                    .all(|v| is_none_ty(v) || self.implements_trait(v, trait_key, depth + 1));
+            }
+        }
         self.impl_or_generic_impl(ty, trait_key, depth)
     }
 
@@ -1307,15 +1330,27 @@ impl<'a> LowerCtx<'a> {
             .generics
             .params
             .iter()
-            .filter_map(|gp| match gp {
-                rokc_ast::GenericParam::Type { name, .. } => Some(name.clone()),
-                rokc_ast::GenericParam::Const { .. } => None,
+            .map(|gp| match gp {
+                rokc_ast::GenericParam::Type { name, .. }
+                | rokc_ast::GenericParam::Const { name, .. } => name.clone(),
             })
             .collect();
         let mut subst = HashMap::new();
         unify_param_ty_with(&gi.self_ty, ty, &params, &mut subst, self);
         if params.iter().any(|p| !subst.contains_key(p)) {
             return Err(None);
+        }
+        // `impl<T, const N: usize> Tr for [T; N]`: `N` takes its type.
+        for gp in &gi.generics.params {
+            if let rokc_ast::GenericParam::Const { name, ty: cty } = gp {
+                let prim = match crate::ty::resolve_ty(cty) {
+                    HirTy::Prim(p) => Some(p),
+                    _ => None,
+                };
+                if let Some((v, _)) = subst.get(name).and_then(crate::ty::as_const) {
+                    subst.insert(name.clone(), crate::ty::const_ty(v, prim));
+                }
+            }
         }
         let mut rcx = LowerCtx::new(self.env, &subst, None);
         rcx.current_module.clone_from(&gi.module);
@@ -1691,6 +1726,41 @@ impl<'a> LowerCtx<'a> {
         }
     }
 
+    /// `T::N` / `Self::N` / `Type::N` / `Box::<i32>::N` in a const
+    /// expression (an array length): the covering impl's value,
+    /// evaluated in that impl.
+    fn eval_assoc_const(&self, p: &rokc_ast::Path) -> Option<i128> {
+        let [prefix @ .., name] = p.segments.as_slice() else {
+            return None;
+        };
+        let ty = match prefix {
+            [] => return None,
+            [o] if o.name == "Self" => self.self_ty.clone()?,
+            [o] if o.generics.is_empty() && self.ty_subst.contains_key(&o.name) => {
+                self.ty_subst[&o.name].clone()
+            }
+            _ => self.resolve_ast_ty(&Ty {
+                kind: AstTyKind::Path(rokc_ast::Path {
+                    segments: prefix.to_vec(),
+                    span: p.span,
+                }),
+                span: p.span,
+            }),
+        };
+        let bounds = match prefix {
+            [o] => self.ty_bounds.get(&o.name).cloned(),
+            _ => None,
+        };
+        let hits = expr::assoc_const_hits(self, &ty, &name.name, bounds.as_deref());
+        let [(set, subst)] = hits.as_slice() else {
+            return None;
+        };
+        let (_, _, value) = set.consts.iter().find(|(n, ..)| *n == name.name)?;
+        let mut rcx = LowerCtx::new(self.env, subst, Some(ty.clone()));
+        rcx.current_module.clone_from(&set.target.module);
+        rcx.eval_const_expr(value)
+    }
+
     fn eval_const_expr(&self, e: &Expr) -> Option<i128> {
         match &e.kind {
             ExprKind::Literal(l) => self.eval_const(&rokc_ast::ConstExpr::Literal(l.clone())),
@@ -1709,6 +1779,9 @@ impl<'a> LowerCtx<'a> {
                 }
             }
             ExprKind::Path(p) => {
+                if let Some(v) = self.eval_assoc_const(p) {
+                    return Some(v);
+                }
                 let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
                 if let [name] = segs.as_slice() {
                     if let Some(v) = self.ty_subst.get(*name).and_then(crate::ty::as_const) {

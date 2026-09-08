@@ -58,13 +58,19 @@ pub fn setup() -> Option<Env> {
 
     // `cargo test` doesn't rebuild the staticlib on its own (rokc must not
     // depend on rokr), so build it here to never link a stale runtime.
-    let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let status = Command::new(cargo)
-        .args(["build", "-p", "rokr"])
-        .current_dir(&workspace)
-        .status()
-        .expect("spawn cargo build -p rokr");
-    assert!(status.success(), "cargo build -p rokr failed");
+    // Once per test binary: parallel tests rebuilding it at the same time
+    // race on the archive file.
+    static BUILT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let ok = *BUILT.get_or_init(|| {
+        let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        Command::new(cargo)
+            .args(["build", "-p", "rokr"])
+            .current_dir(&workspace)
+            .status()
+            .expect("spawn cargo build -p rokr")
+            .success()
+    });
+    assert!(ok, "cargo build -p rokr failed");
     let target =
         env::var_os("CARGO_TARGET_DIR").map_or_else(|| workspace.join("target"), PathBuf::from);
     let rokr = target.join("debug/librokr.a");

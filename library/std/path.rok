@@ -112,7 +112,7 @@ impl Path {
         let n = comps.len();
         if n == 0 { return none; }
         let last = comps[n - 1];
-        if last == Component::RootDir { return none; }
+        if last is Component::RootDir { return none; }
         let out = Path::new();
         let i = 0usize;
         while i + 1 < n {
@@ -179,7 +179,7 @@ impl Path {
 
     /// `other` appended; an absolute `other` replaces `self`.
     pub fn join(self, other: Path) -> Path {
-        if self.s == "" || other.is_absolute() { return other; }
+        if other.is_absolute() || self.s == "" { return other; }
         if other.s == "" { return self; }
         if self.s.ends_with("/") { return Path { s: self.s + other.s }; }
         return Path { s: self.s + "/" + other.s };
@@ -243,9 +243,9 @@ impl Path {
                 Component::CurDir => {}
                 Component::ParentDir => {
                     let n = kept.len();
-                    if n > 0 && kept[n - 1] != Component::RootDir && kept[n - 1] != Component::ParentDir {
+                    if n > 0 && kept[n - 1] is Component::Normal {
                         kept.pop();
-                    } else if !(n > 0 && kept[n - 1] == Component::RootDir) {
+                    } else if !(n > 0 && kept[n - 1] is Component::RootDir) {
                         kept.push(c);
                     }
                 }

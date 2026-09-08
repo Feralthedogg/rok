@@ -5,6 +5,7 @@
 //! tokens to trait methods (`PrecTable`, consumed by HIR).
 
 pub mod derive;
+pub mod keyword;
 pub mod lang;
 pub mod parser;
 pub mod prec;
@@ -12,6 +13,8 @@ pub mod prec;
 #[cfg(test)]
 mod tests;
 
+pub use keyword::{KeywordDef, apply_keywords, check_keyword, collect_keywords};
 pub use lang::{LangEntry, LangItemKind, LangTable, collect_lang_table};
-pub use parser::{Parser, parse_program, parse_program_ext};
+pub use parser::meta::{MetaDef, MetaKind, MetaTable, collect_meta_blocks};
+pub use parser::{Parser, parse_program, parse_program_ext, parse_program_meta};
 pub use prec::{Assoc, ExtOps, Fixity, OpEntry, PrecTable, collect_prec_table};

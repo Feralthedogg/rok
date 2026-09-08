@@ -1059,6 +1059,12 @@ impl<'a> FnEmit<'a> {
                     return;
                 }
                 let ty = self.local_ty(*target);
+                // `let x = ();` / a unit-valued `try .. catch`: a `()`
+                // copy has no value to materialize (`()` is not an MLIR
+                // type).
+                if ty == MirTy::Unit && matches!(rvalue, RValue::Use(_)) {
+                    return;
+                }
                 let val = self.compute_rvalue(&ty, rvalue);
                 self.write_local(*target, &val);
             }

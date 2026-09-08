@@ -5,12 +5,11 @@
 // close-on-exec, and an exec failure comes back as the `IoError`.
 //
 // ponytail: no `posix_spawn` fast path, `pidfd`, `process_group`,
-// signal handlers; `output()` drains stdout before stderr, so a child
-// that fills the stderr pipe (64 KiB) before closing stdout deadlocks —
-// poll both when that matters. The pipe ends are `File`s.
+// signal handlers. `output()` drains stdout and stderr together
+// (`poll`). The pipe ends are `File`s.
 
 use rok::std::fs::File;
-use rok::std::io::{IoError, Reader, check};
+use rok::std::io::{IoError, Reader, check, err_cell, check_cell};
 use rok::std::path::AsPath;
 use rok::std::env;
 
@@ -21,6 +20,7 @@ extern "C" {
     ) -> i32;
     fn rok_os_waitpid(pid: i32, nohang: i32, out: GcBuf<i32>) -> i32;
     fn rok_os_kill(pid: i32, sig: i32) -> i32;
+    fn rok_os_read_both(fd1: i32, fd2: i32, out: GcBuf<str>, err: GcBuf<i32>);
     fn rok_os_getpid() -> u32;
     fn rok_os_abort() -> !;
     fn rok_exit(code: i32) -> !;
@@ -143,20 +143,23 @@ impl Command {
     pub fn output(self) throws (IoError) -> Output {
         if self.stdin is none { self.stdin = Stdio::Null; }
         let child = try self.start(Stdio::Piped, Stdio::Piped);
-        let out: List<u8> = List::new();
-        let err: List<u8> = List::new();
+        // Both pipes drain together (poll), so neither can fill and stall.
         let so = child.stdout;
-        if so is File {
-            out = try so.read_to_end();
-            try so.close();
-        }
         let se = child.stderr;
-        if se is File {
-            err = try se.read_to_end();
-            try se.close();
-        }
+        let fd_out = -1;
+        let fd_err = -1;
+        if so is File { fd_out = so.fd(); }
+        if se is File { fd_err = se.fd(); }
+        let both: GcBuf<str> = buf_new(2);
+        let err = err_cell();
+        unsafe { rok_os_read_both(fd_out, fd_err, both, err) };
+        if so is File { try so.close(); }
+        if se is File { try se.close(); }
+        try check_cell(err, self.program);
+        let out = buf_get(both, 0).as_bytes();
+        let errs = buf_get(both, 1).as_bytes();
         let status = try child.wait();
-        return Output { status: status, stdout: out, stderr: err };
+        return Output { status: status, stdout: out, stderr: errs };
     }
 
     /// Run to completion with inherited streams.

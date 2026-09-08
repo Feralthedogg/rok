@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use rokc_driver::{CompiledModule, CompilerConfig, compile_file};
 
-pub use rokc_diagnostic::{ErrorKind, RokDiagnostic, report};
-pub use rokc_driver::{BuildOptions, EmitKind, TempDir};
+pub use rokc_diagnostic::{ErrorKind, RokDiagnostic, report, set_report_style};
+pub use rokc_driver::{BuildOptions, Demangled, EmitKind, TempDir, demangle};
 
 #[derive(Default)]
 pub struct Session {
@@ -32,6 +32,17 @@ impl Session {
         self.config.cfg_flags.push(flag);
     }
 
+    /// `rokc test` build: keep `#[test]` functions, generate the runner
+    /// `main`, set `cfg(test)`.
+    pub const fn set_test(&mut self, on: bool) {
+        self.config.test = on;
+    }
+
+    /// The input is a lone file outside any package (spec 4.16.8).
+    pub const fn set_anonymous(&mut self, on: bool) {
+        self.config.anonymous = on;
+    }
+
     pub fn compile_file(&self, path: &Path) -> CompileResult {
         match compile_file(path, &self.config) {
             Ok(p) => CompileResult {
@@ -39,12 +50,14 @@ impl Session {
                 errors: Vec::new(),
                 warnings: p.warnings,
                 link_libraries: p.link_libraries,
+                tests: p.tests,
             },
             Err(errors) => CompileResult {
                 modules: Vec::new(),
                 errors,
                 warnings: Vec::new(),
                 link_libraries: Vec::new(),
+                tests: Vec::new(),
             },
         }
     }
@@ -56,6 +69,8 @@ pub struct CompileResult {
     pub errors: Vec<RokDiagnostic>,
     pub warnings: Vec<RokDiagnostic>,
     pub link_libraries: Vec<String>,
+    /// Test names of a `set_test` build.
+    pub tests: Vec<String>,
 }
 
 impl CompileResult {
@@ -84,5 +99,10 @@ impl CompileResult {
     /// Build an executable at `out` through mlir-opt / mlir-translate / clang.
     pub fn link(&self, opts: &BuildOptions, out: &Path) -> Result<(), RokDiagnostic> {
         rokc_driver::link_executable(self.module()?, &self.link_libraries, opts, out)
+    }
+
+    /// Build a library package's static archive at `out` (spec 902.13).
+    pub fn archive(&self, opts: &BuildOptions, out: &Path) -> Result<(), RokDiagnostic> {
+        rokc_driver::build_archive(self.module()?, opts, out)
     }
 }

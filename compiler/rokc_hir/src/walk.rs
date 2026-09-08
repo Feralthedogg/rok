@@ -187,8 +187,11 @@ pub fn walk_stmt(v: &mut impl AstVisitor, s: &Stmt) {
                 v.bind_at(r, s.span);
             }
         }
-        StmtKind::LetPattern { pat, init } => {
+        StmtKind::LetPattern { pat, ty, init } => {
             walk_expr(v, init);
+            if let Some(t) = ty {
+                walk_ty(v, t);
+            }
             walk_pat(v, pat);
         }
         StmtKind::LetStruct {

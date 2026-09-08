@@ -173,6 +173,10 @@ impl<T> IntoIterator for List<T> {
 }
 
 /// `xs[i]`; panics out of bounds.
+impl<T> Default for List<T> {
+    fn default() -> List<T> { return List::new(); }
+}
+
 /// A new list with every element cloned (stdlib 2.13.2).
 impl<T: Clone> Clone for List<T> {
     fn clone(self) -> List<T> {
@@ -213,5 +217,47 @@ impl<T> FromIterator<T> for List<T> {
             out.push(x);
         }
         return out;
+    }
+}
+
+/// Element-wise, in order.
+impl<T: PartialEq> PartialEq for List<T> {
+    fn eq(self, rhs: List<T>) -> bool {
+        let n = self.len();
+        if n != rhs.len() { return false; }
+        let i = 0usize;
+        while i < n {
+            if self[i] != rhs[i] { return false; }
+            i += 1;
+        }
+        return true;
+    }
+    fn ne(self, rhs: List<T>) -> bool { return !self.eq(rhs); }
+}
+
+impl<T: Eq> Eq for List<T> {}
+
+/// Order-dependent mix of the element hashes.
+impl<T: Hash> Hash for List<T> {
+    fn hash(self) -> u64 {
+        let h = 0xcbf29ce484222325u64 ^ (self.len() as u64);
+        for x in self {
+            h = ((h << 5u64) | (h >> 59u64)) ^ x.hash();
+        }
+        return h;
+    }
+}
+
+/// `[a, b, c]` with each element's `Debug`.
+impl<T: Debug> Debug for List<T> {
+    fn debug(self) -> str {
+        let out = "[";
+        let first = true;
+        for x in self {
+            if !first { out = out + ", "; }
+            out = out + x.debug();
+            first = false;
+        }
+        return out + "]";
     }
 }

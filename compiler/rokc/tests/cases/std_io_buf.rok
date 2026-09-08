@@ -1,0 +1,64 @@
+// expect-exit: 0
+// expect-stdout:
+// first: [line 0 é]
+// > line 1 é
+// > line 2 é
+// > line 3 é
+// > line 4 é
+// > x
+// bytes: 52
+// dropped: [kept by drop]
+// partial done
+// ends_with: true false true
+
+// Spec 305.3: `BufWriter` (batches, `write_fmt` with an f-string,
+// flush on `using` exit), `BufReader` (`read_line` / `lines` / `bytes`
+// across chunk edges that split a UTF-8 char), `line_writer`.
+
+use rok::std::io;
+use rok::std::io::{IoError, Reader, Writer, BufReader, BufWriter, LineWriter};
+use rok::std::fs;
+use rok::std::env;
+
+fn main() throws (IoError) {
+    let p = env::temp_dir() / f"rok_std_io_buf_{env::pid()}.txt";
+    using f = try fs::create(p) {
+        let w = BufWriter::with_capacity(16, f);
+        let i = 0;
+        while i < 5 {
+            try w.write_fmt(f"line {i} é\n");
+            i += 1;
+        }
+        try w.write_all([120u8, 10u8]);
+        try w.flush();
+    }
+    using g = try fs::open(p) {
+        // 7-byte chunks: every `é` straddles a chunk edge at some point.
+        let r = BufReader::with_capacity(7, g);
+        println("first: [" + (try r.read_line()).trim_end() + "]");
+        for l in r.lines() { println("> " + (try l.get())); }
+    }
+    using h = try fs::open(p) {
+        let n = 0;
+        for b in BufReader::new(h).bytes() {
+            try b.get();
+            n += 1;
+        }
+        println(f"bytes: {n}");
+    }
+
+    let q = env::temp_dir() / f"rok_std_io_buf2_{env::pid()}.txt";
+    let out = try fs::create(q);
+    using w = BufWriter::new(out) {
+        try w.write_str("kept by drop");
+    }
+    try out.close();
+    println("dropped: [" + (try fs::read_to_str(q)) + "]");
+
+    let lw = LineWriter::new(io::stdout());
+    try lw.write_str("partial ");
+    try lw.write_str("done\n");
+    println(f"ends_with: {"a세".ends_with("세")} {"a세".ends_with("\r")} {"세a".starts_with("세")}");
+    try fs::remove_file(p);
+    try fs::remove_file(q);
+}

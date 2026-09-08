@@ -8,6 +8,7 @@
 // child stderr: [to stderr]
 // child exit: 5 false
 // code=3 out=[hi bar] err=[err]
+// big stderr: 200000 out=[done]
 // PIPED TEXT
 // exit status: 0
 // pwd: /
@@ -63,6 +64,10 @@ fn main() throws (IoError) {
     let out = try Command::new("sh").args(["-c", "echo hi $FOO; echo err >&2; exit 3"])
         .env("FOO", "bar").output();
     println(f"code={out.status.code() ?? -1} out=[{text(out.stdout)}] err=[{text(out.stderr)}]");
+
+    // 200 KB to stderr before stdout closes: both pipes must drain together.
+    let big = try Command::new("sh").args(["-c", "head -c 200000 /dev/zero >&2; echo done"]).output();
+    println(f"big stderr: {big.stderr.len()} out=[{text(big.stdout)}]");
 
     let tr = try Command::new("tr").arg("a-z").arg("A-Z")
         .stdin(Stdio::Piped).stdout(Stdio::Piped).spawn();

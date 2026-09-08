@@ -667,3 +667,66 @@ fn block_like_statement_needs_no_semicolon() {
     let Item::Fn(f) = &p.items[0] else { panic!() };
     assert!(f.body.as_ref().unwrap().trailing.is_some());
 }
+
+/// Parse with the meta blocks of `src` registered (the driver's pre-pass).
+fn parse_meta(src: &str) -> (rokc_ast::Program, Vec<rokc_diagnostic::RokDiagnostic>) {
+    let (tokens, _) = Lexer::new(src, "test").lex_all();
+    let mut table = crate::MetaTable::default();
+    for d in crate::collect_meta_blocks(&tokens, "test") {
+        assert!(table.add(d).is_none());
+    }
+    crate::parse_program_meta(
+        &tokens,
+        "test",
+        &crate::ExtOps::default(),
+        &std::sync::Arc::new(table),
+    )
+}
+
+#[test]
+fn meta_derive_expands_fields() {
+    let (p, diags) = parse_meta(
+        "#[impl_derive(Tr)] pub @derive { impl Tr for @Self { fn n(self) -> i32 { \
+         let n = 0; @for_fields { n = n + self.@field; } return n; } } }\n\
+         #[derive(Tr)] struct S { a: i32; b: i32; }",
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+    // The struct (its user derive dropped from `#[derive]`) and the impl.
+    let Item::Struct(s) = &p.items[0] else {
+        panic!()
+    };
+    assert!(s.attrs.is_empty());
+    let Item::Impl(i) = &p.items[1] else { panic!() };
+    assert_eq!(i.items.len(), 1);
+}
+
+#[test]
+fn meta_error_points_at_template_and_use() {
+    let (_, diags) = parse_meta(
+        "#[impl_derive(Tr)] pub @derive {\n  impl Tr for @Self { fn f() { @nope; } }\n}\n\
+         #[derive(Tr)]\nstruct S { a: i32; }",
+    );
+    let d = diags.first().expect("an error");
+    assert!(
+        d.message.contains("unknown template token `@nope`"),
+        "{d:?}"
+    );
+    assert_eq!(d.primary.as_ref().map(|l| l.span.line), Some(2));
+    assert_eq!(d.secondary.first().map(|l| l.span.line), Some(4));
+}
+
+#[test]
+fn meta_hygiene_renames_locals_only() {
+    // `x` / `i` are template locals; `Other` (after `impl .. for`) and
+    // `len` (a member) are not.
+    let (p, diags) = parse_meta(
+        "#[impl_derive(Tr)] pub @derive { impl Tr for Other { fn f() { \
+         let x = 1; for i in 0..x { x = i.len(); } } } }\n\
+         #[derive(Tr)] struct S { a: i32; }",
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+    let text = format!("{:?}", p.items[1]);
+    assert!(text.contains("\"x__meta\"") && text.contains("\"i__meta\""));
+    assert!(text.contains("\"Other\"") && text.contains("\"len\""));
+    assert!(!text.contains("Other__meta") && !text.contains("len__meta"));
+}

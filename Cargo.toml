@@ -7,6 +7,7 @@ members = [
     "compiler/rokc_core",
     "compiler/rokc_diagnostic",
     "compiler/rokc_driver",
+    "compiler/rokc_fmt",
     "compiler/rokc_hir",
     "compiler/rokc_interface",
     "compiler/rokc_ir_common",
@@ -33,6 +34,7 @@ rokc_codegen_mlir = { path = "compiler/rokc_codegen_mlir" }
 rokc_core = { path = "compiler/rokc_core" }
 rokc_diagnostic = { path = "compiler/rokc_diagnostic" }
 rokc_driver = { path = "compiler/rokc_driver" }
+rokc_fmt = { path = "compiler/rokc_fmt" }
 rokc_hir = { path = "compiler/rokc_hir" }
 rokc_interface = { path = "compiler/rokc_interface" }
 rokc_ir_common = { path = "compiler/rokc_ir_common" }

@@ -1,0 +1,20 @@
+// expect-error: unknown template token `@fild` (spec 6.9)
+// Spec 6.9: a misspelt template token is reported at the template.
+trait Bad { fn bad(self) -> i32; }
+
+#[impl_derive(Bad)]
+pub @derive {
+    impl Bad for @Self {
+        fn bad(self) -> i32 {
+            @for_fields { let _x = @fild.name; }
+            return 0;
+        }
+    }
+}
+
+#[derive(Bad)]
+struct S { a: i32; }
+
+fn main() -> i32 {
+    return 0;
+}

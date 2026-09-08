@@ -6,6 +6,7 @@
 // User code gets an implicit `use rok::core::**;` (stdlib spec 0.1, 0.2) —
 // there is no separate prelude module.
 
+pub mod array;
 pub mod channel;
 pub mod cmp;
 pub mod collections;
@@ -25,3 +26,4 @@ pub mod str;
 pub mod stream;
 pub mod sync;
 pub mod task;
+pub mod tuple;

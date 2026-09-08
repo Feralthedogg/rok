@@ -1,0 +1,40 @@
+// expect-exit: 0
+// expect-stdout:
+// 4
+// 8
+// 3
+// 2
+
+// Spec 2.11.5 / 2.8.3a: an associated const is a compile-time integer
+// in an array length, also through a type parameter and on a generic
+// impl target.
+trait Dim { const N: usize; }
+
+struct Box<T> { v: T; }
+impl Dim for Box<i32> { const N: usize = 4; }
+impl Dim for Box<f64> { const N: usize = 8; }
+
+struct Tri { x: i32; }
+impl Dim for Tri { const N: usize = 3; }
+
+mod m {
+    pub const K: usize = 2;
+}
+
+fn len_of<const N: usize>(a: [i32; N]) -> usize { return N; }
+
+fn zeros<T: Dim>(x: T) -> usize {
+    let a: [i32; T::N] = [0; T::N];
+    return len_of(a);
+}
+
+fn main() -> i32 {
+    let a: [i32; Box::<i32>::N] = [1; 4];
+    rok_print_i32(len_of(a) as i32);
+    rok_print_i32(zeros(Box { v: 1.5 }) as i32);
+    let t: [i32; Tri::N] = [7, 8, 9];
+    rok_print_i32(len_of(t) as i32);
+    let k: [i32; m::K] = [1, 2];
+    rok_print_i32(len_of(k) as i32);
+    return 0;
+}

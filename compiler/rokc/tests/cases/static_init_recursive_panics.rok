@@ -1,0 +1,15 @@
+// expect-exit: 101
+// expect-stdout: start
+// expect-stderr: static initializer reads its own static
+
+// Spec 5.3: an initializer that reads its own `static` panics (it used
+// to wait on itself forever).
+
+static LOOP: i32 = again();
+
+fn again() -> i32 { return LOOP + 1; }
+
+fn main() {
+    println("start");
+    println(f"{LOOP}");
+}

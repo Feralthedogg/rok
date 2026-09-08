@@ -7,9 +7,8 @@
 //
 // ponytail: no reflink (`clonefile` / `FICLONE`) in `copy`, no `mmap`;
 // `Metadata` times are Unix seconds (`mtime()` ...) until std::time has
-// `SystemTime`; a `ReadDir` / `Walk` abandoned before its end keeps its
-// directory stream open until exit; `File` / `Dir` close only through
-// `close()` or `using`.
+// `SystemTime`; `File` / `Dir` close through `close()` or on leaving
+// `using`; a `ReadDir` also closes when iterated to its end.
 
 use rok::std::io::{IoError, IoErrorKind, Reader, Writer, Seek, check, err_cell, check_cell, raw_of, fill, text_of};
 pub use rok::std::io::SeekFrom;
@@ -359,7 +358,7 @@ impl Dir {
         if self.fd() >= 0 {
             let escapes = path.is_absolute();
             for c in path.components() {
-                if c == Component::ParentDir { escapes = true; }
+                if c is Component::ParentDir { escapes = true; }
             }
             if escapes {
                 throw IoError::with_kind(IoErrorKind::PermissionDenied,
@@ -408,7 +407,9 @@ impl Dir {
         try check_cell(err, self.shown(p));
         let base = p;
         if p == "." { base = ""; }
-        return ReadDir { d: d, dir: self, base: base };
+        let cell: GcBuf<usize> = buf_new(1);
+        buf_set(cell, 0, d);
+        return ReadDir { d: cell, dir: self, base: base };
     }
 
     /// Follows symlinks.
@@ -552,13 +553,11 @@ impl DirEntry {
     pub fn is_symlink(self) -> bool { return self.meta.is_symlink(); }
 }
 
-fn ok_item(e: DirEntry) -> Result<DirEntry, IoError> { return Result::Ok(e); }
-fn err_item(e: IoError) -> Result<DirEntry, IoError> { return Result::Err(e); }
-
 /// The entries of one directory, in the order the OS returns them
 /// (`.` / `..` skipped). Each item is an entry or the error reading it.
 pub struct ReadDir {
-    d: usize;
+    /// The `DIR*` (0 once closed), shared by copies of the handle.
+    d: GcBuf<usize>;
     dir: Dir;
     base: str;
 }
@@ -566,28 +565,43 @@ pub struct ReadDir {
 impl Iterator for ReadDir {
     type Item = Result<DirEntry, IoError>;
     fn next(ref self) -> Result<DirEntry, IoError> | none {
-        if self.d == 0usize { return none; }
+        let d = buf_get(self.d, 0);
+        if d == 0usize { return none; }
         let err = err_cell();
-        let name = unsafe { rok_os_readdir(self.d, err) };
+        let name = unsafe { rok_os_readdir(d, err) };
         if name.len() == 0 {
-            unsafe { rok_os_closedir(self.d) };
-            self.d = 0usize;
+            unsafe { rok_os_closedir(d) };
+            buf_set(self.d, 0, 0usize);
             let e = buf_get(err, 0);
-            if e != 0 { return err_item(IoError::from_os(e, self.dir.shown(self.base))); }
+            if e != 0 { return Result::Err(IoError::from_os(e, self.dir.shown(self.base))); }
             return none;
         }
         let path = Path::from(self.base).join(Path::from(name));
         let meta = try stat_at(self.dir.fd(), path.as_str(), false, -1) catch e {
-            return err_item(IoError::from_os(e.code, self.dir.shown(path.as_str())));
+            return Result::Err(IoError::from_os(e.code, self.dir.shown(path.as_str())));
         };
         let shown = Path::from(self.dir.shown(path.as_str()));
-        return ok_item(DirEntry { path: shown, name: name, meta: meta });
+        return Result::Ok(DirEntry { path: shown, name: name, meta: meta });
+    }
+}
+
+/// `using rd = try fs::read_dir(p) { .. }` closes the stream even when
+/// the loop stops early. A `ReadDir` held by a plain `let` and dropped
+/// before its end keeps the stream open until the process exits.
+impl Drop for ReadDir {
+    fn drop(ref self) {
+        let d = buf_get(self.d, 0);
+        if d != 0usize {
+            buf_set(self.d, 0, 0usize);
+            unsafe { rok_os_closedir(d) };
+        }
     }
 }
 
 /// Recursive walk, depth first, the root first and each directory's
 /// entries sorted by name (Go `filepath.WalkDir`). Symlinks are listed,
-/// not followed. An unreadable directory yields its error and the walk
+/// not followed. Each directory is read whole when reached, so a `Walk`
+/// never holds a stream open (stopping early leaks nothing). An unreadable directory yields its error and the walk
 /// goes on.
 pub struct Walk {
     stack: List<DirEntry>;
@@ -598,13 +612,13 @@ impl Iterator for Walk {
     type Item = Result<DirEntry, IoError>;
     fn next(ref self) -> Result<DirEntry, IoError> | none {
         let err = self.errors.pop();
-        if err is IoError { return err_item(err); }
+        if err is IoError { return Result::Err(err); }
         let e = self.stack.pop()?;
         if e.meta.is_dir() {
             let kids: List<DirEntry> = List::new();
             let rd = try Dir::root().list(e.path.as_str()) catch x {
                 self.errors.push(x);
-                return ok_item(e);
+                return Result::Ok(e);
             };
             for k in rd {
                 match k {
@@ -619,7 +633,7 @@ impl Iterator for Walk {
                 self.stack.push(kids[i]);
             }
         }
-        return ok_item(e);
+        return Result::Ok(e);
     }
 }
 

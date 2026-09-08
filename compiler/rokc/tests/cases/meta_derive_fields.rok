@@ -1,0 +1,91 @@
+// expect-exit: 0
+// expect-stdout:
+// Point { x = 1, y = 2 }
+// 3
+// Pair(7, 8)
+// 2
+// W { v = 5 }
+// true
+
+// Spec 6.8.2 / 6.9.2-6.9.3: a user derive generating a trait impl over
+// the fields (`@Self`, `@for_fields`, `@field`, `@field.name`,
+// `@field.type`, `.as_str()`), on named / tuple / generic structs.
+trait Describe {
+    fn describe(self) -> str;
+    fn arity(self) -> i32;
+}
+
+trait Zero {
+    fn zero() -> Self;
+}
+
+fn sep(first: bool) -> str {
+    if first {
+        return "";
+    }
+    return ", ";
+}
+
+#[impl_derive(Describe)]
+pub @derive {
+    @where_all(Display)
+    impl Describe for @Self {
+        fn describe(self) -> str {
+            let s = "";
+            let first = true;
+            @if_struct {
+                s = @Self.as_str();
+            }
+            @for_fields {
+                s = s + sep(first) + @field.name.as_str() + " = " + self.@field.display();
+                first = false;
+            }
+            return s;
+        }
+        fn arity(self) -> i32 {
+            let n = 0;
+            @for_fields {
+                n = n + 1;
+            }
+            return n;
+        }
+    }
+}
+
+// Every field filled with its type's zero (`@field.type`).
+#[impl_derive(Zero)]
+pub @derive {
+    impl Zero for @Self {
+        fn zero() -> Self {
+            return @Self {
+                @for_fields {
+                    @field: (0 as @field.type),
+                }
+            };
+        }
+    }
+}
+
+#[derive(Describe, Zero, Clone)]
+struct Point { x: i32; y: i64; z: u8; }
+
+#[derive(Describe)]
+struct Pair(i32, i32);
+
+#[derive(Describe)]
+struct W<T> { v: T; }
+
+fn main() -> i32 {
+    let p = Point { x: 1, y: 2, z: 0u8 };
+    let d = p.describe();
+    rok_print_str(d.replace(", z = 0", " }").replace("Point", "Point { "));
+    rok_print_str(f"{p.arity()}");
+    let q = Pair(7, 8);
+    rok_print_str(q.describe().replace("Pair0 = ", "Pair(").replace(", 1 = ", ", ") + ")");
+    rok_print_str(f"{q.arity()}");
+    let w = W { v: 5 };
+    rok_print_str(w.describe().replace("W", "W { ") + " }");
+    let z = Point::zero();
+    rok_print_str(f"{z.x == 0 && z.y == 0i64 && z.z == 0u8}");
+    return 0;
+}

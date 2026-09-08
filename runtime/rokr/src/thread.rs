@@ -3,7 +3,7 @@
 
 use core::mem::size_of;
 use core::ptr;
-use core::sync::atomic::{AtomicI32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU8, AtomicUsize, Ordering};
 
 use rokr_common::object_header::HEADER_SIZE;
 use rokr_common::tls;
@@ -288,12 +288,58 @@ fn wake_on(w: &AtomicI32) {
 // (0 new, 1 running, 2 ready) and calls these around the initializer.
 // ---------------------------------------------------------------------
 
+/// This thread's running initializers, innermost first: a malloc'd
+/// list behind a pthread key (no limit on nesting or concurrency).
+struct Initializing {
+    state: usize,
+    next: *mut Initializing,
+}
+
+/// The pthread key holding each thread's `Initializing` list head
+/// (created on first use).
+fn init_key() -> libc::pthread_key_t {
+    static KEY: AtomicUsize = AtomicUsize::new(usize::MAX);
+    let k = KEY.load(Ordering::Acquire);
+    if k != usize::MAX {
+        return k as libc::pthread_key_t;
+    }
+    let mut new: libc::pthread_key_t = 0;
+    // SAFETY: valid out-pointer; no destructor (a thread exits with an
+    // empty list: every `begin` that pushed is matched by an `end`).
+    if unsafe { libc::pthread_key_create(&mut new, None) } != 0 {
+        rokr_common::fatal(b"rok runtime: pthread_key_create failed");
+    }
+    match KEY.compare_exchange(
+        usize::MAX,
+        new as usize,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => new,
+        Err(won) => {
+            // SAFETY: our unused key.
+            unsafe { libc::pthread_key_delete(new) };
+            won as libc::pthread_key_t
+        }
+    }
+}
+
+fn initializing_head() -> *mut Initializing {
+    // SAFETY: a key from `init_key`.
+    unsafe { libc::pthread_getspecific(init_key()) }.cast()
+}
+
+fn set_initializing_head(head: *mut Initializing) {
+    // SAFETY: a key from `init_key`.
+    unsafe { libc::pthread_setspecific(init_key(), head.cast()) };
+}
+
 /// 1: the caller runs the initializer, then calls
 /// [`rok_static_init_end`]. 0: it is ready (another thread may have
 /// just finished it; this one waited, counting as stopped for the GC).
+/// An initializer that reads its own static panics (refs-lang 5.3).
 // ponytail: a waiter polls with `sched_yield`; initializers are short and
-// contention is rare. An initializer reading its own static waits on
-// itself forever.
+// contention is rare.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_static_init_begin(state: *const AtomicU8) -> i32 {
     // SAFETY: compiled code passes its static's state byte.
@@ -301,9 +347,36 @@ pub extern "C" fn rok_static_init_begin(state: *const AtomicU8) -> i32 {
     if s.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire)
         .is_ok()
     {
+        // SAFETY: malloc of one node, freed in `rok_static_init_end`.
+        let node = unsafe { libc::malloc(size_of::<Initializing>()) }.cast::<Initializing>();
+        if node.is_null() {
+            rokr_common::oom();
+        }
+        // SAFETY: fresh node.
+        unsafe {
+            node.write(Initializing {
+                state: state as usize,
+                next: initializing_head(),
+            });
+        }
+        set_initializing_head(node);
         return 1;
     }
     if s.load(Ordering::Acquire) != 2 {
+        let mut n = initializing_head();
+        let mut mine = false;
+        while !n.is_null() {
+            // SAFETY: nodes of this thread's list.
+            unsafe {
+                mine |= (*n).state == state as usize;
+                n = (*n).next;
+            }
+        }
+        if mine {
+            let msg = b"static initializer reads its own static (recursive initialization)";
+            // SAFETY: valid message.
+            unsafe { crate::rok_panic(msg.as_ptr(), msg.len()) };
+        }
         world::enter_native();
         while s.load(Ordering::Acquire) != 2 {
             // SAFETY: no preconditions.
@@ -317,6 +390,25 @@ pub extern "C" fn rok_static_init_begin(state: *const AtomicU8) -> i32 {
 /// The initializer stored the value: publish it.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_static_init_end(state: *const AtomicU8) {
+    // Unlink this static's node (the innermost one, as initializers nest).
+    let mut link: *mut *mut Initializing = ptr::null_mut();
+    let mut n = initializing_head();
+    while !n.is_null() {
+        // SAFETY: nodes of this thread's list.
+        unsafe {
+            if (*n).state == state as usize {
+                if link.is_null() {
+                    set_initializing_head((*n).next);
+                } else {
+                    *link = (*n).next;
+                }
+                libc::free(n.cast());
+                break;
+            }
+            link = &raw mut (*n).next;
+            n = (*n).next;
+        }
+    }
     // SAFETY: as above.
     unsafe { &*state }.store(2, Ordering::Release);
 }

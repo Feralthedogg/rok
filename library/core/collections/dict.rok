@@ -235,6 +235,21 @@ impl<K: Hash, V> Iterator for DictEntries<K, V> {
     }
 }
 
+impl<K: Hash, V> Default for Dict<K, V> {
+    fn default() -> Dict<K, V> { return Dict::new(); }
+}
+
+/// A new dict with every key and value cloned (stdlib 2.13.2).
+impl<K: Hash + Clone, V: Clone> Clone for Dict<K, V> {
+    fn clone(self) -> Dict<K, V> {
+        let r: Dict<K, V> = Dict::new();
+        for (k, v) in self {
+            r.insert(k.clone(), v.clone());
+        }
+        return r;
+    }
+}
+
 /// `for (k, v) in d` (2.9.9).
 impl<K: Hash, V> IntoIterator for Dict<K, V> {
     type IntoIter = DictEntries<K, V>;
@@ -262,5 +277,49 @@ impl<K: Hash, V> IndexSet<K> for Dict<K, V> {
     type Value = V;
     fn index_set(self, k: K, v: V) {
         self.insert(k, v);
+    }
+}
+
+/// Same keys, equal values (insertion order does not matter).
+impl<K: Hash, V: PartialEq> PartialEq for Dict<K, V> {
+    fn eq(self, rhs: Dict<K, V>) -> bool {
+        if self.len() != rhs.len() { return false; }
+        for kv in self {
+            let (k, v) = kv;
+            if !rhs.contains_key(k) { return false; }
+            if rhs[k] != v { return false; }
+        }
+        return true;
+    }
+    fn ne(self, rhs: Dict<K, V>) -> bool { return !self.eq(rhs); }
+}
+
+impl<K: Hash, V: Eq> Eq for Dict<K, V> {}
+
+/// Order-independent: entries combine by xor.
+impl<K: Hash, V: Hash> Hash for Dict<K, V> {
+    fn hash(self) -> u64 {
+        let h = self.len() as u64;
+        for kv in self {
+            let (k, v) = kv;
+            let vh = v.hash();
+            h = h ^ (k.hash() ^ ((vh << 17u64) | (vh >> 47u64)));
+        }
+        return h;
+    }
+}
+
+/// `{k: v, ..}` with each key's and value's `Debug`, in iteration order.
+impl<K: Hash + Debug, V: Debug> Debug for Dict<K, V> {
+    fn debug(self) -> str {
+        let out = "{";
+        let first = true;
+        for kv in self {
+            let (k, v) = kv;
+            if !first { out = out + ", "; }
+            out = out + k.debug() + ": " + v.debug();
+            first = false;
+        }
+        return out + "}";
     }
 }

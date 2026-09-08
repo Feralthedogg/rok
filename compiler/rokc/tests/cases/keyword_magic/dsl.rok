@@ -1,0 +1,6 @@
+#[keyword("guarded")]
+pub fn guarded_handler(n: i32, body: fn(i32)) {
+    rok_print_str("enter");
+    body(n);
+    rok_print_str("leave");
+}

@@ -1,0 +1,84 @@
+// expect-exit: 0
+// expect-stdout:
+// [INFO] scale
+// scale done
+// 30
+// 7
+// [WARN] noop
+// noop done
+// helper 9
+// Tag
+
+// Spec 6.8.3 / 6.9.7 / 6.8.8: `#[impl_attribute]` with `@accept`,
+// `@item`, `@item.name` / `.params` / `.return_type` / `.body`,
+// `@attribute`; hygiene of the template's locals against the item's
+// parameters; fixed-point expansion (the expansion's own `#[derive]`).
+#[impl_attribute(logged)]
+pub @attribute {
+    @accept(fn)
+    fn @item.name(@item.params) -> @item.return_type {
+        let start = @attribute;
+        rok_print_str(f"[{start}] @item.name");
+        let result = {
+            @item.body
+        };
+        rok_print_str("@item.name done");
+        return result;
+    }
+}
+
+#[impl_attribute(passthrough)]
+pub @attribute {
+    @accept(fn | struct)
+    @item
+}
+
+trait Named {
+    fn type_name() -> str;
+}
+
+#[impl_derive(Named)]
+pub @derive {
+    impl Named for @Self {
+        fn type_name() -> str { return @Self.as_str(); }
+    }
+}
+
+// Generates a struct carrying a user derive: expanded again (6.8.8).
+#[impl_attribute(with_tag)]
+pub @attribute {
+    @item
+    #[derive(Named)]
+    struct Tag {}
+}
+
+#[logged("INFO")]
+fn scale(start: i32) -> i32 {
+    start * 10
+}
+
+#[passthrough]
+fn seven() -> i32 {
+    return 7;
+}
+
+#[logged("WARN")]
+#[passthrough]
+fn noop() -> i32 {
+    0
+}
+
+#[with_tag]
+fn helper(x: i32) -> i32 {
+    return x;
+}
+
+fn main() -> i32 {
+    // `start` is both the template's local and the item's parameter.
+    rok_print_str(f"{scale(3)}");
+    rok_print_str(f"{seven()}");
+    let _z = noop();
+    rok_print_str(f"helper {helper(9)}");
+    rok_print_str(Tag::type_name());
+    return 0;
+}

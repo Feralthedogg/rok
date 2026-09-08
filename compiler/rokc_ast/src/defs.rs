@@ -182,6 +182,7 @@ pub enum StmtKind {
     /// `let name @ pat = ..`, after `name` is bound).
     LetPattern {
         pat: Pattern,
+        ty: Option<Ty>,
         init: Expr,
     },
     /// `name = expr;` — reassignment (no `let`).

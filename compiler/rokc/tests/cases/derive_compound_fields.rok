@@ -1,0 +1,58 @@
+// expect-exit: 0
+// expect-stdout:
+// Rec { pos: (1, 2), grid: [3, 4, 5], tag: 7, name: none }
+// true false
+// true
+// 2 0 2
+// Rec { pos: (0, 0), grid: [0, 0, 0], tag: none, name: none }
+// (1,) [9, 9]
+// Cfg { n: 0, s: "", on: false }
+// Mode::Off
+
+// Derives on fields that are tuples, arrays, sums and collections
+// (stdlib 2.13.6 / 2.5.7 / 2.10.9); `#[derive(Default)]`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+struct Rec {
+    pos: (i32, i32);
+    grid: [i32; 3];
+    tag: i32 | none;
+    name: str | none;
+}
+
+#[derive(Clone)]
+struct Store {
+    xs: List<i32>;
+    seen: Set<i32>;
+    names: Dict<str, i32>;
+}
+
+#[derive(Debug, Default)]
+struct Cfg { n: i32; s: str; on: bool; }
+
+#[derive(Default, Debug)]
+enum Mode { Off, On(i32) }
+
+fn main() -> i32 {
+    let r = Rec { pos: (1, 2), grid: [3, 4, 5], tag: 7, name: none };
+    rok_print_str(f"{r:?}");
+    let r2 = r.clone();
+    let r3 = Rec { pos: (1, 2), grid: [3, 4, 5], tag: none, name: none };
+    rok_print_str(f"{r == r2} {r == r3}");
+    rok_print_str(f"{r.hash() == r2.hash()}");
+
+    let s = Store { xs: [1], seen: {1,}, names: {"a": 1} };
+    let t = s.clone();
+    t.xs.push(2);
+    t.seen.insert(2);
+    rok_print_str(f"{t.xs.len()} {s.xs.len() - 1} {t.seen.len()}");
+
+    let d: Rec = Rec::default();
+    rok_print_str(f"{d:?}");
+    let one: (i32,) = (1,);
+    let a: [i32; 2] = [9; 2];
+    rok_print_str(f"{one:?} {a.clone():?}");
+    rok_print_str(f"{Cfg::default():?}");
+    let m: Mode = Mode::default();
+    rok_print_str(f"Mode::{m:?}");
+    return 0;
+}

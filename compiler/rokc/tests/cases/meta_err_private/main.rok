@@ -1,0 +1,10 @@
+// expect-error: meta block `Secret` is private to
+// Spec 6.8.6: a meta block without `pub` is usable in its own module only.
+mod derives;
+
+#[derive(Secret)]
+struct S { a: i32; }
+
+fn main() -> i32 {
+    return 0;
+}

@@ -7,6 +7,34 @@ pub trait Clone {
     fn clone(self) -> Self;
 }
 
+/// A type's default value (`0`, `false`, `'\0'`, `""`, empty
+/// collections); `#[derive(Default)]` defaults every field.
+pub trait Default {
+    fn default() -> Self;
+}
+
+/// `T::default()` where only the expected type names `T`
+/// (`#[derive(Default)]` field initializers).
+pub fn default_of<T: Default>() -> T {
+    return T::default();
+}
+
+impl Default for i8 { fn default() -> i8 { return 0; } }
+impl Default for i16 { fn default() -> i16 { return 0; } }
+impl Default for i32 { fn default() -> i32 { return 0; } }
+impl Default for i64 { fn default() -> i64 { return 0; } }
+impl Default for isize { fn default() -> isize { return 0; } }
+impl Default for u8 { fn default() -> u8 { return 0; } }
+impl Default for u16 { fn default() -> u16 { return 0; } }
+impl Default for u32 { fn default() -> u32 { return 0; } }
+impl Default for u64 { fn default() -> u64 { return 0; } }
+impl Default for usize { fn default() -> usize { return 0; } }
+impl Default for f32 { fn default() -> f32 { return 0.0; } }
+impl Default for f64 { fn default() -> f64 { return 0.0; } }
+impl Default for bool { fn default() -> bool { return false; } }
+impl Default for char { fn default() -> char { return '\0'; } }
+impl Default for str { fn default() -> str { return ""; } }
+
 /// Bitwise copy is a correct duplicate (stdlib 2.13.3). A marker: every
 /// value already copies on `let y = x;`; `#[derive(Copy)]` checks that
 /// every field is `Copy` and the type is not `Drop`.

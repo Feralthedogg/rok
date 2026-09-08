@@ -3,6 +3,7 @@
 use std::cell::Cell;
 use std::fmt;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Source location as byte offsets plus 1-based line/column. `file` is
 /// a `register_file` id (0 = unknown).
@@ -299,19 +300,170 @@ impl fmt::Display for RokDiagnostic {
     }
 }
 
-/// Print one diagnostic to stderr.
+/// How `report` prints (spec 901.8 / 909.4); set once by the CLI.
+static STYLE: AtomicU8 = AtomicU8::new(0);
+const STYLE_COLOR: u8 = 1;
+const STYLE_JSON: u8 = 2;
+
+/// `json`: one JSON object per line on stdout (`--message-format=json`);
+/// otherwise human text on stderr, ANSI-colored when `color`.
+pub fn set_report_style(json: bool, color: bool) {
+    let style = if json {
+        STYLE_JSON
+    } else if color {
+        STYLE_COLOR
+    } else {
+        0
+    };
+    STYLE.store(style, Ordering::Relaxed);
+}
+
+impl ErrorKind {
+    /// Spec 909.4 code ranges: E0xx lexical / syntax, E1xx names /
+    /// visibility, E2xx types, E3xx meta, E4xx build / link, E5xx other.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Lexical => "E001",
+            Self::Parse => "E002",
+            Self::Resolve => "E100",
+            Self::Visibility => "E101",
+            Self::Module => "E102",
+            Self::Type => "E200",
+            Self::Pattern => "E201",
+            Self::Meta => "E300",
+            Self::Lowering => "E400",
+            Self::Codegen => "E401",
+            Self::Linkage => "E402",
+            Self::Unsupported => "E500",
+            Self::Internal => "E501",
+            Self::Other => "E502",
+        }
+    }
+}
+
+/// A JSON string literal.
+#[must_use]
+pub fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+impl RokDiagnostic {
+    /// One-line JSON (spec 909.4):
+    /// `{"type","code","kind","message","spans":[..],"notes":[..]}`.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        let span_json = |l: &Label, primary: bool, file: Option<String>| {
+            let file = file.or_else(|| Some(file_by_id(l.span.file)?.0));
+            format!(
+                "{{\"file_name\":{},\"line_start\":{},\"col_start\":{},\"byte_start\":{},\
+                 \"byte_end\":{},\"is_primary\":{primary},\"label\":{}}}",
+                file.as_deref().map_or_else(|| "null".to_owned(), json_str),
+                l.span.line,
+                l.span.col,
+                l.span.start,
+                l.span.end,
+                json_str(&l.message),
+            )
+        };
+        let mut spans: Vec<String> = Vec::new();
+        if let Some(p) = &self.primary {
+            spans.push(span_json(p, true, self.path()));
+        } else if let Some(file) = self.path() {
+            spans.push(format!(
+                "{{\"file_name\":{},\"is_primary\":true}}",
+                json_str(&file)
+            ));
+        }
+        spans.extend(self.secondary.iter().map(|l| span_json(l, false, None)));
+        let notes: Vec<String> = self.notes.iter().map(|n| json_str(n)).collect();
+        format!(
+            "{{\"type\":\"{}\",\"code\":\"{}\",\"kind\":\"{}\",\"message\":{},\"spans\":[{}],\
+             \"notes\":[{}]}}",
+            self.severity,
+            self.kind.code(),
+            self.kind,
+            json_str(&self.message),
+            spans.join(","),
+            notes.join(",")
+        )
+    }
+}
+
+/// Print one diagnostic: human text on stderr, or a JSON line on stdout
+/// (see `set_report_style`).
 pub fn report(diag: &RokDiagnostic) {
-    eprintln!("{diag}");
+    let style = STYLE.load(Ordering::Relaxed);
+    if style == STYLE_JSON {
+        println!("{}", diag.to_json());
+        return;
+    }
+    let paint = |code: &str, text: &str| {
+        if style == STYLE_COLOR {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        } else {
+            text.to_owned()
+        }
+    };
+    let color = match diag.severity {
+        Severity::Error | Severity::Fatal => "1;31",
+        Severity::Warning => "1;33",
+        Severity::Note => "1;36",
+    };
+    let head = diag.to_string();
+    let sev = diag.severity.to_string();
+    eprintln!("{}{}", paint(color, &sev), &head[sev.len()..]);
     if let Some(s) = diag.snippet() {
-        eprintln!("{s}");
+        // The caret ends the snippet.
+        match s.strip_suffix('^') {
+            Some(body) => eprintln!("{body}{}", paint(color, "^")),
+            None => eprintln!("{s}"),
+        }
     }
     for label in &diag.secondary {
+        // A label in another file (a meta block's template) names it.
+        let path = file_by_id(label.span.file)
+            .map(|(p, _)| format!("{p}:"))
+            .unwrap_or_default();
         eprintln!(
-            "  note ({}:{}): {}",
-            label.span.line, label.span.col, label.message
+            "  {} ({path}{}:{}): {}",
+            paint("1;36", "note"),
+            label.span.line,
+            label.span.col,
+            label.message
         );
     }
     for note in &diag.notes {
-        eprintln!("  note: {note}");
+        eprintln!("  {}: {note}", paint("1;36", "note"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_line_escapes_and_codes() {
+        let d = RokDiagnostic::error(ErrorKind::Type, "bad \"x\"\n")
+            .with_file("a.rok")
+            .with_note("n");
+        assert_eq!(
+            d.to_json(),
+            r#"{"type":"error","code":"E200","kind":"type","message":"bad \"x\"\n","spans":[{"file_name":"a.rok","is_primary":true}],"notes":["n"]}"#
+        );
     }
 }

@@ -1,0 +1,22 @@
+// expect-exit: 0
+// expect-stdout: 1 1 2
+
+// A struct field typed `List<Result<A, B>>` (a generic struct over a
+// generic enum instance), also through a plain alias, resolves to the
+// instance instead of a bare `List`.
+
+struct E { code: i32; }
+type Item2 = Result<str, E>;
+
+struct W {
+    direct: List<Result<str, E>>;
+    aliased: List<Item2>;
+}
+
+fn main() {
+    let w = W { direct: List::new(), aliased: List::new() };
+    w.direct.push(Result::Ok("a"));
+    w.aliased.push(Result::Err(E { code: 2 }));
+    let code = match w.aliased[0] { Result::Err(e) => e.code, Result::Ok(_) => 0 };
+    println(f"{w.direct.len()} {w.aliased.len()} {code}");
+}

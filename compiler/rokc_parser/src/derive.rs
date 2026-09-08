@@ -21,6 +21,7 @@ use crate::parser::Parser;
 /// names.
 const DERIVABLE: &[(&str, &str)] = &[
     ("Clone", "rok::core::marker::Clone"),
+    ("Default", "rok::core::marker::Default"),
     ("Copy", "rok::core::marker::Copy"),
     ("Debug", "rok::core::fmt::Debug"),
     ("PartialEq", "rok::core::ops::PartialEq"),
@@ -65,8 +66,30 @@ pub(crate) fn derive_items(item: &Item, file: &str) -> (Vec<Item>, Vec<RokDiagno
     let mut src = String::new();
     let mut diags = Vec::new();
     let mut span = None;
-    for (tr, at) in derive_names(attrs) {
+    let derived = derive_names(attrs);
+    let has = |n: &str| derived.iter().any(|(d, _)| d == n);
+    for (tr, at) in derived.iter().cloned() {
         span = Some(at);
+        // Spec 2.5.1: `Eq: PartialEq`, `Ord: PartialOrd + Eq`.
+        let needs: &[&str] = match tr.as_str() {
+            "Eq" => &["PartialEq"],
+            "Ord" => &["PartialOrd", "Eq"],
+            "Copy" => &["Clone"],
+            _ => &[],
+        };
+        if let Some(missing) = needs.iter().find(|n| !has(n)) {
+            diags.push(
+                RokDiagnostic::error(
+                    rokc_diagnostic::ErrorKind::Meta,
+                    format!(
+                        "`#[derive({tr})]` on `{name}` needs `{missing}` too — derive both \
+                         (`#[derive({missing}, {tr})]`; spec 2.5.1)"
+                    ),
+                )
+                .with_span(at, ""),
+            );
+            continue;
+        }
         let Some(path) = derivable(&tr) else {
             let why = if tr == "Display" {
                 "`Display` is written by hand — its format is the type's own choice \
@@ -92,8 +115,8 @@ pub(crate) fn derive_items(item: &Item, file: &str) -> (Vec<Item>, Vec<RokDiagno
             continue;
         };
         let body = match item {
-            Item::Struct(s) => struct_body(&tr, s),
-            Item::Enum(e) => Some(enum_body(&tr, e)),
+            Item::Struct(s) => Some(struct_body(&tr, s)),
+            Item::Enum(e) => enum_body(&tr, e),
             _ => None,
         };
         let Some(body) = body else {
@@ -101,8 +124,8 @@ pub(crate) fn derive_items(item: &Item, file: &str) -> (Vec<Item>, Vec<RokDiagno
                 RokDiagnostic::error(
                     rokc_diagnostic::ErrorKind::Meta,
                     format!(
-                        "cannot derive `{tr}` for tuple struct `{name}` yet (stage-1 \
-                         limitation)"
+                        "cannot derive `Default` for enum `{name}`: its first variant must \
+                         be a unit variant (the default)"
                     ),
                 )
                 .with_span(at, ""),
@@ -169,7 +192,7 @@ fn self_args(g: &Generics) -> String {
 }
 
 /// A const parameter's type (a primitive name in practice).
-fn ty_text(t: &Ty) -> String {
+pub(crate) fn ty_text(t: &Ty) -> String {
     match &t.kind {
         TyKind::Path(p) => p
             .segments
@@ -214,45 +237,66 @@ fn ord_cmp(pairs: &[(String, String)]) -> String {
     s
 }
 
-fn struct_body(tr: &str, s: &StructDef) -> Option<String> {
-    let fields: Vec<&str> = match &s.kind {
-        StructKind::Named(fs) => fs.iter().map(|f| f.name.as_str()).collect(),
+/// `Name { a: va, .. }`, `Name(v0, ..)` or `Name` from per-field values.
+fn struct_value(s: &StructDef, fields: &[String], value: &dyn Fn(&str) -> String) -> String {
+    let name = &s.name;
+    match &s.kind {
+        StructKind::Named(_) => {
+            let inits: Vec<String> = fields
+                .iter()
+                .map(|f| format!("{f}: {}", value(f)))
+                .collect();
+            format!("{name} {{ {} }}", inits.join(", "))
+        }
+        StructKind::Tuple(_) => {
+            let vs: Vec<String> = fields.iter().map(|f| value(f)).collect();
+            format!("{name}({})", vs.join(", "))
+        }
+        StructKind::Unit => name.clone(),
+    }
+}
+
+fn struct_body(tr: &str, s: &StructDef) -> String {
+    // A tuple struct's fields are `0`, `1`, ... (`self.0`).
+    let fields: Vec<String> = match &s.kind {
+        StructKind::Named(fs) => fs.iter().map(|f| f.name.clone()).collect(),
+        StructKind::Tuple(fs) => (0..fs.len()).map(|i| i.to_string()).collect(),
         StructKind::Unit => Vec::new(),
-        StructKind::Tuple(_) => return None,
     };
     let name = &s.name;
     let pairs: Vec<(String, String)> = fields
         .iter()
         .map(|f| (format!("self.{f}"), format!("rhs.{f}")))
         .collect();
-    Some(match tr {
-        "Clone" => {
-            let inits: Vec<String> = fields
-                .iter()
-                .map(|f| format!("{f}: self.{f}.clone()"))
-                .collect();
-            if fields.is_empty() {
-                "    fn clone(self) -> Self { return self; }\n".to_owned()
-            } else {
-                format!(
-                    "    fn clone(self) -> Self {{ return {name} {{ {} }}; }}\n",
-                    inits.join(", ")
-                )
-            }
-        }
+    match tr {
+        "Clone" => format!(
+            "    fn clone(self) -> Self {{ return {}; }}\n",
+            struct_value(s, &fields, &|f| format!("self.{f}.clone()"))
+        ),
+        "Default" => format!(
+            "    fn default() -> Self {{ return {}; }}\n",
+            struct_value(s, &fields, &|_| "rok::core::marker::default_of()"
+                .to_owned())
+        ),
         "Debug" => {
-            let parts: Vec<String> = fields
+            let shown: Vec<String> = fields
                 .iter()
-                .map(|f| format!("\"{f}: \" + self.{f}.debug()"))
+                .map(|f| match &s.kind {
+                    StructKind::Named(_) => format!("\"{f}: \" + self.{f}.debug()"),
+                    _ => format!("self.{f}.debug()"),
+                })
                 .collect();
-            if fields.is_empty() {
-                format!("    fn debug(self) -> str {{ return \"{name}\"; }}\n")
-            } else {
-                format!(
-                    "    fn debug(self) -> str {{ return \"{name} {{ \" + {} + \" }}\"; }}\n",
-                    parts.join(" + \", \" + ")
-                )
-            }
+            let text = match &s.kind {
+                StructKind::Unit => format!("\"{name}\""),
+                StructKind::Tuple(_) => {
+                    format!("\"{name}(\" + {} + \")\"", shown.join(" + \", \" + "))
+                }
+                StructKind::Named(_) if fields.is_empty() => format!("\"{name}\""),
+                StructKind::Named(_) => {
+                    format!("\"{name} {{ \" + {} + \" }}\"", shown.join(" + \", \" + "))
+                }
+            };
+            format!("    fn debug(self) -> str {{ return {text}; }}\n")
         }
         "PartialEq" => {
             let conj: Vec<String> = pairs.iter().map(|(a, b)| format!("{a}.eq({b})")).collect();
@@ -294,7 +338,7 @@ fn struct_body(tr: &str, s: &StructDef) -> Option<String> {
         }
         // `Copy` / `Eq`: markers.
         _ => String::new(),
-    })
+    }
 }
 
 /// A variant's pattern binding its fields to `{prefix}0..` and the
@@ -329,7 +373,7 @@ fn variant_wild(e: &EnumDef, v: &rokc_ast::EnumVariant) -> String {
     }
 }
 
-fn enum_body(tr: &str, e: &EnumDef) -> String {
+fn enum_body(tr: &str, e: &EnumDef) -> Option<String> {
     let arms = |f: &dyn Fn(&rokc_ast::EnumVariant, &str, &[String]) -> String| -> String {
         e.variants
             .iter()
@@ -364,7 +408,15 @@ fn enum_body(tr: &str, e: &EnumDef) -> String {
         s.push_str(&format!("            _ => {{ {other} }},\n"));
         s
     };
-    match tr {
+    Some(match tr {
+        // The first variant, which must carry no payload.
+        "Default" => match e.variants.first().map(|v| &v.kind) {
+            Some(EnumVariantKind::Unit | EnumVariantKind::Value(_)) => format!(
+                "    fn default() -> Self {{ return {}::{}; }}\n",
+                e.name, e.variants[0].name
+            ),
+            _ => return None,
+        },
         "Clone" => format!(
             "    fn clone(self) -> Self {{\n        return match self {{\n{}        }};\n    }}\n",
             arms(&|v, pat, names| {
@@ -449,5 +501,5 @@ fn enum_body(tr: &str, e: &EnumDef) -> String {
             })
         ),
         _ => String::new(),
-    }
+    })
 }

@@ -86,6 +86,107 @@ pub fn pkg_hash(content: &str) -> String {
     hex(&sha256(content.as_bytes()))[..8].to_owned()
 }
 
+/// A `_Y` symbol taken apart (spec 905.4).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Demangled {
+    pub pkg: String,
+    /// Module path segments, without the dropped `rok::` / `pkg::` root.
+    pub path: Vec<String>,
+    pub name: String,
+    /// `None` for a concrete (non-generic) item.
+    pub typehash: Option<String>,
+}
+
+impl Demangled {
+    /// `rok::std::vec::push` style. The mangled form drops the root
+    /// segment, so a path starting with a library tier (`core` / `std` /
+    /// `bare`) gets `rok::` back; ponytail: a user module named `std`
+    /// is shown as `rok::std` too.
+    #[must_use]
+    pub fn qualified_path(&self) -> String {
+        let mut segs: Vec<&str> = Vec::new();
+        if self
+            .path
+            .first()
+            .is_some_and(|s| matches!(s.as_str(), "core" | "std" | "bare"))
+        {
+            segs.push("rok");
+        }
+        segs.extend(self.path.iter().map(String::as_str));
+        segs.join("::")
+    }
+
+    /// `rok::std::vec::push` (path + name).
+    #[must_use]
+    pub fn qualified_name(&self) -> String {
+        let path = self.qualified_path();
+        if path.is_empty() {
+            self.name.clone()
+        } else {
+            format!("{path}::{}", self.name)
+        }
+    }
+}
+
+/// Inverse of [`item`]: `None` when `sym` is not a well-formed `_Y`
+/// symbol (including the reserved `_YK` / `_YL` / `_YI` / `_YM`).
+#[must_use]
+pub fn demangle(sym: &str) -> Option<Demangled> {
+    let rest = sym.strip_prefix("_Y")?;
+    let is_hex = |s: &str| s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    let (pkg, rest) = (rest.get(..8)?, rest.get(8..)?);
+    if !is_hex(pkg) {
+        return None;
+    }
+    let rest = rest.strip_prefix('_')?;
+    // A typehash is 16 hex digits after the last separator; a concrete
+    // item ends in the separator (empty typehash) or, per 905.2, omits it.
+    let (body, typehash) = if let Some(b) = rest.strip_suffix('_') {
+        (b, None)
+    } else {
+        match rest.len().checked_sub(17).map(|i| rest.split_at(i)) {
+            Some((b, h)) if h.starts_with('_') && is_hex(&h[1..]) => (b, Some(h[1..].to_owned())),
+            _ => (rest, None),
+        }
+    };
+    // `_0` is `_`, `_1<hex>_` a code point, any other `_` a separator.
+    let mut segs = vec![String::new()];
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '_' {
+            segs.last_mut()?.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some('0') => {
+                chars.next();
+                segs.last_mut()?.push('_');
+            }
+            Some('1') => {
+                chars.next();
+                let hex: String = chars.by_ref().take_while(|&c| c != '_').collect();
+                segs.last_mut()?
+                    .push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
+            }
+            _ => segs.push(String::new()),
+        }
+    }
+    let name = segs.pop()?;
+    // An empty path mangles as one empty segment (`_Yp__name_`).
+    if segs.len() == 1 && segs[0].is_empty() {
+        segs.clear();
+    }
+    if name.is_empty() || segs.iter().any(String::is_empty) {
+        return None;
+    }
+    Some(Demangled {
+        pkg: pkg.to_owned(),
+        path: segs,
+        name,
+        typehash,
+    })
+}
+
 fn escape(ident: &str) -> String {
     let mut out = String::with_capacity(ident.len());
     for ch in ident.chars() {
@@ -205,5 +306,27 @@ mod tests {
         assert_eq!(pkg_of(&pkgs, "rok::core::str::len"), "c");
         assert_eq!(pkg_of(&pkgs, "rok::corex::f"), "u");
         assert_eq!(pkg_of(&pkgs, "main"), "u");
+    }
+
+    #[test]
+    fn demangle_round_trips() {
+        for (q, th) in [
+            ("a::b", ""),
+            ("a__b", ""),
+            ("malloc", ""),
+            ("rok::std::vec::push", "a7c91d8e44b2f190"),
+            ("geom::α", "0123456789abcdef"),
+            ("x_1::_y", ""),
+        ] {
+            let sym = item("3f8a1c2b", q, th);
+            let d = demangle(&sym).unwrap_or_else(|| panic!("{sym}"));
+            assert_eq!(d.qualified_name(), q, "{sym}");
+            assert_eq!(d.typehash.as_deref().unwrap_or(""), th, "{sym}");
+        }
+        let d = demangle("_Y3f8a1c2b_geom_compute_main").unwrap();
+        assert_eq!(d.qualified_name(), "geom::compute::main");
+        assert_eq!(d.typehash, None);
+        assert!(demangle("_YK00000000_x_").is_none());
+        assert!(demangle("_ZN3foo").is_none());
     }
 }

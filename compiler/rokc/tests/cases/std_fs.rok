@@ -16,6 +16,7 @@
 // walk [a/hello.txt] dir=false
 // walk [z.bin] dir=false
 // read_dir: b hello.txt
+// early-stopped read_dir under using: 20000
 // NotFound BASE/nope: No such file or directory
 // AlreadyExists
 // escape: PermissionDenied PermissionDenied
@@ -78,6 +79,17 @@ fn main() throws (IoError) {
     for e in try fs::read_dir(base / "a") { names.push((try e.get()).file_name()); }
     if names.len() == 2 && names[0] != "b" { names = [names[1], names[0]]; }
     println(f"read_dir: {names[0]} {names[1]}");
+
+    // Each `using` closes its stream although the loop stops early;
+    // leaking them would hit the fd limit long before 20000.
+    let opened = 0;
+    while opened < 20000 {
+        using rd = try fs::read_dir(base / "a") {
+            for e in rd { break; }
+        }
+        opened += 1;
+    }
+    println(f"early-stopped read_dir under using: {opened}");
 
     let missing = try fs::read_to_str(base / "nope") catch e { e.kind.debug() + " " + e.display() };
     println(missing.replace(base.as_str(), "BASE"));

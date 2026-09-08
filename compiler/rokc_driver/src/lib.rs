@@ -4,6 +4,7 @@
 mod cfg;
 mod coro;
 mod entry;
+mod harness;
 mod toolchain;
 
 use std::path::{Path, PathBuf};
@@ -13,11 +14,16 @@ use rokc_hir::HirModule;
 use rokc_lexer::Lexer;
 use rokc_mir::MirModule;
 use rokc_parser::{
-    ExtOps, PrecTable, collect_lang_table, collect_prec_table, parse_program, parse_program_ext,
+    ExtOps, KeywordDef, MetaDef, MetaTable, PrecTable, apply_keywords, check_keyword,
+    collect_keywords, collect_lang_table, collect_meta_blocks, collect_prec_table, parse_program,
+    parse_program_meta,
 };
 
 pub use cfg::CfgEnv;
-pub use toolchain::{BuildOptions, EmitKind, TempDir, emit, link_executable, mlir_text};
+pub use rokc_codegen_mlir::{Demangled, demangle};
+pub use toolchain::{
+    BuildOptions, EmitKind, TempDir, build_archive, emit, link_executable, mlir_text,
+};
 
 #[derive(Clone, Debug, Default)]
 pub struct CompilerConfig {
@@ -28,6 +34,12 @@ pub struct CompilerConfig {
     /// `key=value` pair (`"target_os=macos"`). Consulted by `#[cfg(...)]`
     /// during the pre-HIR filter pass.
     pub cfg_flags: Vec<String>,
+    /// Test build (`rokc test`): `#[test]` functions are kept and a
+    /// generated `main` runs the one named by `argv[1]`.
+    pub test: bool,
+    /// The input is a lone file outside any package (spec 4.16.8): it is
+    /// the anonymous package's `main.rok` and cannot have `mod foo;`.
+    pub anonymous: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -43,6 +55,8 @@ pub struct CompiledProject {
     pub modules: Vec<CompiledModule>,
     pub warnings: Vec<RokDiagnostic>,
     pub link_libraries: Vec<String>,
+    /// `#[test]` functions of a test build, `::`-qualified.
+    pub tests: Vec<String>,
 }
 
 pub fn compile_file(
@@ -66,15 +80,34 @@ pub fn compile_source(
     let mut diags: Vec<RokDiagnostic> = Vec::new();
 
     // Bootstrap PrecTable from operator-declaration sources, if any.
-    let mut prec = build_prec_table(&config.bootstrap_files, &mut diags);
+    // The same pre-pass gathers every meta block (spec 6.8) of the
+    // library and the user package before any derive is expanded.
+    let mut metas = PrePass::default();
+    let mut prec = build_prec_table(&config.bootstrap_files, &mut diags, &mut metas);
     // Spec 6.7.11: the user package's own `#[infix]` registrations are
     // gathered by the same pre-pass, so its extension tokens lex.
-    for prog in user_programs(source, path) {
+    for prog in user_programs(source, path, &mut metas) {
         let (sub, mut d) = collect_prec_table(&prog);
         diags.append(&mut d);
         diags.extend(sub.entries().cloned().filter_map(|e| prec.merge(e)));
     }
     let ext = prec.ext_ops();
+    let mut meta_table = MetaTable::default();
+    diags.extend(metas.metas.into_iter().filter_map(|m| meta_table.add(m)));
+    let meta_table = std::sync::Arc::new(meta_table);
+    let root_dir_kw = path
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let keywords = keyword_tables(
+        metas.keywords,
+        &root_dir_kw,
+        &config.bootstrap_files,
+        &mut diags,
+    );
+    let metas = MetaCtx {
+        table: std::sync::Arc::clone(&meta_table),
+        keywords: keywords.first().cloned().unwrap_or_default(),
+    };
     // Walk the user package's module tree (`mod foo;` follows files
     // alongside the entry `main.rok` / `lib.rok`) and merge every
     // visited file's items into one `Program` so HIR sees a single
@@ -82,11 +115,16 @@ pub fn compile_source(
     let root_dir = path
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    // Spec 4.16.8: the anonymous package has no file submodules.
+    let sub_dir = (!config.anonymous).then_some(root_dir.as_path());
     // Build cfg env from CLI flags + automatic target keys.
     let mut cfg_env = CfgEnv::new();
     cfg_env.populate_target_defaults();
     for f in &config.cfg_flags {
         cfg_env.add(f);
+    }
+    if config.test {
+        cfg_env.add("test");
     }
 
     let mut all_items: Vec<rokc_ast::Item> = Vec::new();
@@ -94,16 +132,21 @@ pub fn compile_source(
     let top_stmts = collect_module_tree(
         path,
         Some(source),
-        Some(&root_dir),
+        sub_dir,
         &[],
         &cfg_env,
         &ext,
+        &metas,
         &mut diags,
         &mut all_items,
         &mut all_uses,
     );
-    let is_lib = path.file_name().is_some_and(|n| n == "lib.rok");
-    if !is_lib {
+    let is_lib = !config.anonymous && path.file_name().is_some_and(|n| n == "lib.rok");
+    let mut tests = Vec::new();
+    if config.test {
+        // Top-level statements are the package's own entry: dropped.
+        tests = harness::install(&mut all_items, &ext, &mut diags);
+    } else if !is_lib {
         entry::resolve_entry(top_stmts, &mut all_items, &mut diags);
     } else if !top_stmts.is_empty() {
         diags.push(entry::stmts_outside_entry(path));
@@ -111,7 +154,11 @@ pub fn compile_source(
     // Mount each library root as `rok::<tier>` (`library/core/lib.rok` →
     // `rok::core`) and compile its items with the user's; HIR gives every
     // module an implicit `use rok::core::**;` (stdlib spec 0.1).
-    for root in &config.bootstrap_files {
+    for (i, root) in config.bootstrap_files.iter().enumerate() {
+        let metas = MetaCtx {
+            table: std::sync::Arc::clone(&meta_table),
+            keywords: keywords.get(i + 1).cloned().unwrap_or_default(),
+        };
         let tier = root
             .parent()
             .and_then(|d| d.file_name())
@@ -125,6 +172,7 @@ pub fn compile_source(
             &["rok".to_owned(), tier],
             &cfg_env,
             &ext,
+            &metas,
             &mut diags,
             &mut all_items,
             &mut all_uses,
@@ -186,6 +234,7 @@ pub fn compile_source(
         }],
         warnings: diags.into_iter().filter(|d| !d.is_error()).collect(),
         link_libraries: Vec::new(),
+        tests,
     })
 }
 
@@ -247,14 +296,18 @@ fn hash_package(files: &mut Vec<(String, &str)>) -> String {
     rokc_codegen_mlir::pkg_hash(&blob)
 }
 
-fn build_prec_table(roots: &[PathBuf], diags: &mut Vec<RokDiagnostic>) -> PrecTable {
+fn build_prec_table(
+    roots: &[PathBuf],
+    diags: &mut Vec<RokDiagnostic>,
+    metas: &mut PrePass,
+) -> PrecTable {
     let mut table = PrecTable::new();
     for root in roots {
         // Walk the package starting from the given root file (typically
         // `lib.rok` or `main.rok`), following `mod x;` declarations to
         // their files, and bind each `#[infix]` token to its trait method.
         // Parse errors are reported by the real parse; drop them here.
-        for prog in resolve_module_tree(root, &mut Vec::new()) {
+        for prog in resolve_module_tree(root, &mut Vec::new(), metas) {
             let (sub_table, mut collect_diags) = collect_prec_table(&prog);
             diags.append(&mut collect_diags);
             diags.extend(sub_table.entries().cloned().filter_map(|mut e| {
@@ -268,12 +321,18 @@ fn build_prec_table(roots: &[PathBuf], diags: &mut Vec<RokDiagnostic>) -> PrecTa
 
 /// The user package's modules, parsed without extension operators (the
 /// pre-pass that finds them); errors are reported by the real parse.
-fn user_programs(source: &str, path: &Path) -> Vec<rokc_ast::Program> {
+fn user_programs(source: &str, path: &Path, metas: &mut PrePass) -> Vec<rokc_ast::Program> {
     let file = path.display().to_string();
-    let (tokens, _) = Lexer::new(source, file.clone()).lex_all();
+    let tokens = prepass_tokens(source, &file, metas);
     let (program, _) = parse_program(&tokens, file);
     let mut out = Vec::new();
-    walk_mod_decls(&program.items, path.parent(), &mut Vec::new(), &mut out);
+    walk_mod_decls(
+        &program.items,
+        path.parent(),
+        &mut Vec::new(),
+        &mut out,
+        metas,
+    );
     out.push(program);
     out
 }
@@ -285,14 +344,18 @@ fn user_programs(source: &str, path: &Path) -> Vec<rokc_ast::Program> {
 ///
 /// Returns each visited module's parsed `Program`. Errors (missing files,
 /// `mod` in a single-file leaf, etc.) are appended to `diags`.
-fn resolve_module_tree(root_path: &Path, diags: &mut Vec<RokDiagnostic>) -> Vec<rokc_ast::Program> {
+fn resolve_module_tree(
+    root_path: &Path,
+    diags: &mut Vec<RokDiagnostic>,
+    metas: &mut PrePass,
+) -> Vec<rokc_ast::Program> {
     let mut programs = Vec::new();
     // Submodule directory of the package root is the directory that
     // contains `lib.rok` / `main.rok` (per spec §5.4.4).
     let root_dir = root_path
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    parse_and_descend(root_path, Some(&root_dir), diags, &mut programs);
+    parse_and_descend(root_path, Some(&root_dir), diags, &mut programs, metas);
     programs
 }
 
@@ -301,6 +364,7 @@ fn parse_and_descend(
     submodule_dir: Option<&Path>,
     diags: &mut Vec<RokDiagnostic>,
     out: &mut Vec<rokc_ast::Program>,
+    metas: &mut PrePass,
 ) {
     let source = match std::fs::read_to_string(body_path) {
         Ok(s) => s,
@@ -313,9 +377,7 @@ fn parse_and_descend(
         }
     };
     let file = body_path.display().to_string();
-    let lexer = Lexer::new(&source, file.clone());
-    let (tokens, mut lex_diags) = lexer.lex_all();
-    diags.append(&mut lex_diags);
+    let tokens = prepass_tokens(&source, &file, metas);
 
     let (program, mut parse_diags) = parse_program(&tokens, file);
     diags.append(&mut parse_diags);
@@ -323,8 +385,107 @@ fn parse_and_descend(
         diags.push(entry::stmts_outside_entry(body_path));
     }
 
-    walk_mod_decls(&program.items, submodule_dir, diags, out);
+    walk_mod_decls(&program.items, submodule_dir, diags, out, metas);
     out.push(program);
+}
+
+/// Lex a file for the pre-pass and gather its meta blocks (their
+/// template tokens keep spans into the registered file).
+fn prepass_tokens(source: &str, file: &str, metas: &mut PrePass) -> Vec<rokc_lexer::Token> {
+    let (mut tokens, _) = Lexer::new(source, file.to_owned()).lex_all();
+    if tokens.iter().any(|t| t.kind == rokc_lexer::TokenKind::At) || source.contains("#[keyword(") {
+        let id = rokc_diagnostic::register_file(file.to_owned(), source.to_owned());
+        for t in &mut tokens {
+            t.span.file = id;
+        }
+        metas.metas.extend(collect_meta_blocks(&tokens, file));
+        metas.keywords.extend(collect_keywords(&tokens, file));
+    }
+    tokens
+}
+
+/// What the pre-pass gathers besides operators: meta blocks (6.8) and
+/// keyword registrations (6.6).
+#[derive(Default)]
+struct PrePass {
+    metas: Vec<MetaDef>,
+    keywords: Vec<KeywordDef>,
+}
+
+/// What a package's parse needs from the pre-pass: every meta block,
+/// and the package's own keywords (6.6.5) with their handler paths.
+struct MetaCtx {
+    table: std::sync::Arc<MetaTable>,
+    keywords: Vec<(String, Vec<String>)>,
+}
+
+/// Spec 6.6: per package (user first, then each library root), its
+/// registered keywords and the handler's absolute path. A keyword
+/// registered twice in a build is an error (6.6.4).
+fn keyword_tables(
+    defs: Vec<KeywordDef>,
+    user_dir: &Path,
+    roots: &[PathBuf],
+    diags: &mut Vec<RokDiagnostic>,
+) -> Vec<Vec<(String, Vec<String>)>> {
+    // (package dir, path root) — user first.
+    let mut pkgs: Vec<(PathBuf, Vec<String>)> =
+        vec![(user_dir.to_path_buf(), vec!["pkg".to_owned()])];
+    for r in roots {
+        let dir = r
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let tier = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("core")
+            .to_owned();
+        pkgs.push((dir, vec!["rok".to_owned(), tier]));
+    }
+    let mut out = vec![Vec::new(); pkgs.len()];
+    let mut seen: Vec<&KeywordDef> = Vec::new();
+    for d in &defs {
+        if let Some(e) = check_keyword(d) {
+            diags.push(e);
+            continue;
+        }
+        if let Some(old) = seen.iter().find(|o| o.name == d.name) {
+            diags.push(
+                RokDiagnostic::error(
+                    rokc_diagnostic::ErrorKind::Meta,
+                    format!("keyword `{}` is registered twice (spec 6.6.4)", d.name),
+                )
+                .with_span(d.span, "")
+                .with_secondary(old.span, "first registered here"),
+            );
+            continue;
+        }
+        seen.push(d);
+        // The closest package directory owns the file; its path below
+        // that directory is the module path (`a/b.rok` → `a::b`).
+        // ponytail: a handler inside an inline `mod x { }` isn't found.
+        let file = Path::new(&d.file);
+        let Some((i, (dir, root))) = pkgs
+            .iter()
+            .enumerate()
+            .filter(|(_, (dir, _))| file.starts_with(dir))
+            .max_by_key(|(_, (dir, _))| dir.components().count())
+        else {
+            continue;
+        };
+        let mut path = root.clone();
+        let rel = file.strip_prefix(dir).unwrap_or(file).with_extension("");
+        let segs: Vec<String> = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        if !(segs.len() == 1 && (segs[0] == "lib" || segs[0] == "main")) {
+            path.extend(segs);
+        }
+        path.push(d.handler.clone());
+        out[i].push((d.name.clone(), path));
+    }
+    out
 }
 
 fn walk_mod_decls(
@@ -332,6 +493,7 @@ fn walk_mod_decls(
     submodule_dir: Option<&Path>,
     diags: &mut Vec<RokDiagnostic>,
     out: &mut Vec<rokc_ast::Program>,
+    metas: &mut PrePass,
 ) {
     for item in items {
         let rokc_ast::Item::Mod(m) = item else {
@@ -339,9 +501,9 @@ fn walk_mod_decls(
         };
         match &m.items {
             // Inline module: `mod name { ... }` — walk its items directly.
-            Some(inline_items) => walk_mod_decls(inline_items, submodule_dir, diags, out),
+            Some(inline_items) => walk_mod_decls(inline_items, submodule_dir, diags, out, metas),
             // File-mapped module: resolve sibling `name.rok`.
-            None => resolve_file_mod(&m.name, submodule_dir, diags, out),
+            None => resolve_file_mod(&m.name, submodule_dir, diags, out, metas),
         }
     }
 }
@@ -351,6 +513,7 @@ fn resolve_file_mod(
     submodule_dir: Option<&Path>,
     diags: &mut Vec<RokDiagnostic>,
     out: &mut Vec<rokc_ast::Program>,
+    metas: &mut PrePass,
 ) {
     let Some(dir) = submodule_dir else {
         diags.push(RokDiagnostic::error(
@@ -372,7 +535,7 @@ fn resolve_file_mod(
         return;
     }
     let next_dir = if folder.is_dir() { Some(folder) } else { None };
-    parse_and_descend(&body, next_dir.as_deref(), diags, out);
+    parse_and_descend(&body, next_dir.as_deref(), diags, out, metas);
 }
 
 /// Walk a package's module tree starting from `body_path`, qualifying
@@ -390,6 +553,7 @@ fn collect_module_tree(
     module_path: &[String],
     cfg_env: &CfgEnv,
     ext: &ExtOps,
+    metas: &MetaCtx,
     diags: &mut Vec<RokDiagnostic>,
     out: &mut Vec<rokc_ast::Item>,
     uses: &mut Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)>,
@@ -416,8 +580,9 @@ fn collect_module_tree(
     for t in &mut tokens {
         t.span.file = file_id;
     }
+    apply_keywords(&mut tokens, &metas.keywords, diags);
 
-    let (program, mut parse_diags) = parse_program_ext(&tokens, file, ext);
+    let (program, mut parse_diags) = parse_program_meta(&tokens, file, ext, &metas.table);
     diags.append(&mut parse_diags);
 
     // Filter `#[cfg(...)]`-gated items before walking — excluded modules
@@ -430,6 +595,7 @@ fn collect_module_tree(
         submodule_dir,
         cfg_env,
         ext,
+        metas,
         diags,
         out,
         uses,
@@ -444,6 +610,7 @@ fn flatten_module_items(
     submodule_dir: Option<&Path>,
     cfg_env: &CfgEnv,
     ext: &ExtOps,
+    metas: &MetaCtx,
     diags: &mut Vec<RokDiagnostic>,
     out: &mut Vec<rokc_ast::Item>,
     uses: &mut Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)>,
@@ -464,6 +631,7 @@ fn flatten_module_items(
                         submodule_dir,
                         cfg_env,
                         ext,
+                        metas,
                         diags,
                         out,
                         uses,
@@ -476,7 +644,8 @@ fn flatten_module_items(
                             rokc_diagnostic::ErrorKind::Module,
                             format!(
                                 "`mod {}` in a single-file module — declare a sibling `{0}/` folder \
-                                 to host submodules",
+                                 to host submodules (a lone file run outside any package \
+                                 cannot have file submodules, spec 4.16.8; use `mod {0} {{ }}`)",
                                 m.name
                             ),
                         ));
@@ -499,6 +668,7 @@ fn flatten_module_items(
                         &child_path,
                         cfg_env,
                         ext,
+                        metas,
                         diags,
                         out,
                         uses,

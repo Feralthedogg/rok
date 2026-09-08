@@ -1,0 +1,85 @@
+// expect-exit: 0
+// expect-stdout:
+// {user_name: ada, age: 36}
+// pub: name
+// 3
+
+// Spec 6.8.4 / 6.9.5 / 6.9.6: `#[impl_derive_attribute(Trait, attr)]`,
+// `@has_derive_attr` / `@derive_attr`, `@apply_if` with `!` / `&&` /
+// `||`, `@field.has_attr`, `@field.is_pub`.
+trait Ser {
+    fn ser(self) -> str;
+    fn pub_fields() -> str;
+}
+
+#[impl_derive_attribute(Ser, rename)]
+pub @derive {
+    impl Ser for @Self {
+        fn ser(self) -> str {
+            let out = "{";
+            let first = true;
+            @for_fields {
+                @apply_if(!@field.has_attr(skip)) {
+                    if !first { out = out + ", "; }
+                    first = false;
+                    @apply_if(@has_derive_attr(rename)) {
+                        out = out + @derive_attr(rename) + ": " + self.@field.display();
+                    }
+                    @apply_if(!@has_derive_attr(rename)) {
+                        out = out + @field.name.as_str() + ": " + self.@field.display();
+                    }
+                }
+            }
+            return out + "}";
+        }
+        fn pub_fields() -> str {
+            let s = "pub:";
+            @for_fields {
+                @apply_if(@field.is_pub && (!@field.has_attr(skip) || false)) {
+                    s = s + " " + @field.name.as_str();
+                }
+            }
+            return s;
+        }
+    }
+}
+
+trait Count {
+    fn count() -> i32;
+}
+
+// Hygiene (6.9.8): the template's local `n` and the field-named locals
+// `let @field.name = ..` don't capture each other.
+#[impl_derive(Count)]
+pub @derive {
+    impl Count for @Self {
+        fn count() -> i32 {
+            let n = 0;
+            @for_fields {
+                let @field.name = 1;
+                n = n + @field.name;
+            }
+            return n;
+        }
+    }
+}
+
+#[derive(Ser)]
+struct User {
+    #[rename("user_name")]
+    pub name: str;
+    age: i32;
+    #[skip]
+    pub secret: str;
+}
+
+#[derive(Count)]
+struct Counted { n: i32; a: i32; b: i32; }
+
+fn main() -> i32 {
+    let u = User { name: "ada", age: 36, secret: "x" };
+    rok_print_str(u.ser());
+    rok_print_str(User::pub_fields());
+    rok_print_str(f"{Counted::count()}");
+    return 0;
+}

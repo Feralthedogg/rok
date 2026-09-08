@@ -1,0 +1,24 @@
+// expect-exit: 0
+// expect-stdout:
+// enter
+// critical 3
+// leave
+// twice 10
+
+// Spec 6.6: `#[keyword("name")]` registers `name` in this package; a use
+// is the handler's call (here with a trailing closure), whichever module
+// the handler lives in.
+mod dsl;
+
+#[keyword("twice")]
+fn twice_handler(x: i32) -> i32 {
+    return x * 2;
+}
+
+fn main() -> i32 {
+    guarded(3) |n: i32| {
+        rok_print_str(f"critical {n}");
+    };
+    rok_print_str(f"twice {twice(5)}");
+    return 0;
+}

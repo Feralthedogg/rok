@@ -100,6 +100,21 @@ impl<T: Hash> Set<T> {
     }
 }
 
+impl<T: Hash> Default for Set<T> {
+    fn default() -> Set<T> { return Set::new(); }
+}
+
+/// A new set with every element cloned (stdlib 2.13.2).
+impl<T: Hash + Clone> Clone for Set<T> {
+    fn clone(self) -> Set<T> {
+        let r: Set<T> = Set::new();
+        for x in self {
+            r.insert(x.clone());
+        }
+        return r;
+    }
+}
+
 /// `for x in s` (2.9.9).
 impl<T: Hash> IntoIterator for Set<T> {
     type IntoIter = DictKeys<T, bool>;
@@ -117,5 +132,42 @@ impl<T: Hash> FromIterator<T> for Set<T> {
             out.insert(x);
         }
         return out;
+    }
+}
+
+/// Same members.
+impl<T: Hash> PartialEq for Set<T> {
+    fn eq(self, rhs: Set<T>) -> bool {
+        if self.len() != rhs.len() { return false; }
+        for x in self {
+            if !rhs.contains(x) { return false; }
+        }
+        return true;
+    }
+    fn ne(self, rhs: Set<T>) -> bool { return !self.eq(rhs); }
+}
+
+impl<T: Hash> Eq for Set<T> {}
+
+/// Order-independent: member hashes combine by xor.
+impl<T: Hash> Hash for Set<T> {
+    fn hash(self) -> u64 {
+        let h = self.len() as u64;
+        for x in self { h = h ^ x.hash(); }
+        return h;
+    }
+}
+
+/// `{a, b, ..}` with each member's `Debug`, in iteration order.
+impl<T: Hash + Debug> Debug for Set<T> {
+    fn debug(self) -> str {
+        let out = "{";
+        let first = true;
+        for x in self {
+            if !first { out = out + ", "; }
+            out = out + x.debug();
+            first = false;
+        }
+        return out + "}";
     }
 }

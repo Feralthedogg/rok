@@ -1,0 +1,56 @@
+// expect-exit: 0
+// expect-stdout:
+// 5
+// 7
+// 12
+// 3
+// 4 9
+// Pair(1, 2) true
+// unit
+// 7 8 3
+
+// Spec 2.3 tuple structs: construction (also generic), `.0` access,
+// patterns, methods, derives; spec 3.15: a plain `let` takes any
+// irrefutable pattern.
+struct Meters(f64);
+
+#[derive(Clone, Debug, PartialEq)]
+struct Pair<T>(T, T);
+
+struct Unit;
+
+struct Point { x: i32; y: i32; }
+struct Line { a: Point; b: Point; }
+
+impl Meters {
+    fn double(self) -> Meters { return Meters(self.0 * 2.0); }
+}
+
+impl<T> Pair<T> {
+    fn first(self) -> T { return self.0; }
+}
+
+fn main() -> i32 {
+    let d = Meters(2.5).double();
+    rok_print_i32(d.0 as i32);
+    let p = Pair(3, 4);
+    rok_print_i32(p.0 + p.1);
+    let Pair(a, b) = p;
+    rok_print_i32(a * b);
+    match p {
+        Pair(x, 4) => rok_print_i32(x),
+        Pair(_, _) => rok_print_i32(0),
+    }
+    let q: Pair<i32> = Pair(4, 9);
+    rok_print_str(f"{q.first()} {q.1}");
+    let r = Pair(1, 2);
+    rok_print_str(f"{r.clone():?} {r == Pair(1, 2)}");
+    let u = Unit;
+    match u {
+        Unit => rok_print_str("unit"),
+    }
+    let Line { a: Point { x, .. }, b: Point { y, .. } } = Line { a: Point { x: 7, y: 0 }, b: Point { x: 0, y: 8 } };
+    let (n, Pair(k, _)) = (3, Pair(1, 1));
+    rok_print_str(f"{x} {y} {n * k}");
+    return 0;
+}

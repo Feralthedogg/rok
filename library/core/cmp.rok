@@ -3,7 +3,7 @@
 // stay with the other operator traits in `ops.rok`. `Eq` is a pure
 // marker with no methods, so it has no slot.
 
-pub trait Eq {}
+pub trait Eq: PartialEq {}
 
 /// The result of a three-way comparison (2.5.4).
 pub enum Ordering {
@@ -41,7 +41,7 @@ impl Eq for Ordering {}
 
 /// A total order (2.5.5).
 #[lang("ord_trait")]
-pub trait Ord {
+pub trait Ord: PartialOrd + Eq {
     fn cmp(self, rhs: Self) -> Ordering;
 
     fn min(self, rhs: Self) -> Self {

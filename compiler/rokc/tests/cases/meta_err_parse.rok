@@ -1,0 +1,19 @@
+// expect-error: expanded from this `#[derive(T)]`
+// Spec 6.9.8: the expansion must be rok code; its errors point at the
+// template and at the derive use.
+trait T { fn t(self) -> i32; }
+
+#[impl_derive(T)]
+pub @derive {
+    impl T for @Self {
+        fn t(self) -> i32 { return 0; }
+    }
+    @for_fields { 42 }
+}
+
+#[derive(T)]
+struct S { a: i32; }
+
+fn main() -> i32 {
+    return 0;
+}

@@ -1,0 +1,8 @@
+// expect-error: `#[keyword("if")]`: `if` is already a keyword (spec 6.6.4)
+// Spec 6.6.4: a reserved keyword can't be registered.
+#[keyword("if")]
+fn if_handler() {}
+
+fn main() -> i32 {
+    return 0;
+}

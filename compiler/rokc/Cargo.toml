@@ -11,6 +11,7 @@ name = "rokc"
 path = "src/main.rs"
 
 [dependencies]
+rokc_fmt = { workspace = true }
 rokc_interface = { workspace = true }
 
 [lints]

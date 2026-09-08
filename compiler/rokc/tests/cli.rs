@@ -1,0 +1,215 @@
+//! CLI behavior (spec 901 / 902 / 905): spawn the built `rokc` on
+//! scratch package directories. Tests that build native code skip
+//! without the LLVM toolchain (see `common::setup`).
+
+mod common;
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+use common::{Env, ROKC, setup};
+
+fn workspace() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// A fresh scratch directory per test.
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("rokc-cli-{}-{name}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// `rokc <args>` in `cwd`, with the repo's library and (when given) the
+/// freshly built runtime.
+fn rokc(env: Option<&Env>, cwd: &Path, args: &[&str]) -> Output {
+    let mut cmd = Command::new(ROKC);
+    cmd.current_dir(cwd).env("ROK_HOME", workspace()).args(args);
+    if let Some(env) = env {
+        cmd.arg("--rokr").arg(&env.rokr);
+    }
+    cmd.output().unwrap()
+}
+
+fn text(b: &[u8]) -> String {
+    String::from_utf8_lossy(b).into_owned()
+}
+
+#[track_caller]
+fn assert_exit(out: &Output, code: i32) {
+    assert_eq!(
+        out.status.code(),
+        Some(code),
+        "stdout: {}\nstderr: {}",
+        text(&out.stdout),
+        text(&out.stderr)
+    );
+}
+
+#[test]
+fn new_bin_package_runs_from_its_directory() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("bin");
+    assert_exit(&rokc(None, &dir, &["new", "app"]), 0);
+    assert!(dir.join("app/main.rok").is_file());
+    // `rokc new` refuses an existing directory.
+    assert_exit(&rokc(None, &dir, &["new", "app"]), 1);
+
+    let app = dir.join("app");
+    let out = rokc(Some(&env), &app, &["run"]);
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "Hello, world!\n");
+    assert!(text(&out.stderr).contains("Compiling app"));
+
+    // A file inside the package builds the package (902.2), and `-q`
+    // silences progress.
+    fs::create_dir_all(app.join("util")).unwrap();
+    fs::write(app.join("util/x.rok"), "fn unused() {}\n").unwrap();
+    let out = rokc(Some(&env), &dir, &["-q", "build", "app/util/x.rok"]);
+    assert_exit(&out, 0);
+    assert!(out.stderr.is_empty(), "{}", text(&out.stderr));
+    assert!(app.join("target/app").is_file());
+
+    assert_exit(&rokc(None, &dir, &["--cwd=app", "clean"]), 0);
+    assert!(!app.join("target").exists());
+}
+
+#[test]
+fn lib_package_builds_archive_and_runs_tests() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("lib");
+    assert_exit(&rokc(None, &dir, &["new", "--lib", "mylib"]), 0);
+    let lib = dir.join("mylib");
+
+    assert_exit(&rokc(Some(&env), &dir, &["build", "mylib"]), 0);
+    assert!(lib.join("target/libmylib.a").is_file());
+    assert!(lib.join("target/mylib.o").is_file());
+    // A library has no entry point.
+    assert_exit(&rokc(Some(&env), &dir, &["run", "mylib"]), 1);
+
+    let out = rokc(Some(&env), &lib, &["test"]);
+    assert_exit(&out, 0);
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("test adds ... ok"), "{stdout}");
+    assert!(stdout.contains("1 passed; 0 failed"), "{stdout}");
+
+    let mut src = fs::read_to_string(lib.join("lib.rok")).unwrap();
+    src.push_str(
+        "\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn boom() {\n        \
+         println(\"from boom\");\n        panic(\"boom\");\n    }\n}\n",
+    );
+    fs::write(lib.join("lib.rok"), src).unwrap();
+    let out = rokc(Some(&env), &lib, &["test"]);
+    assert_exit(&out, 1);
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("test tests::boom ... FAILED"), "{stdout}");
+    assert!(stdout.contains("from boom"), "{stdout}");
+    assert!(stdout.contains("1 passed; 1 failed"), "{stdout}");
+
+    // Filter (a lone non-path argument), regex anchors included.
+    let out = rokc(Some(&env), &lib, &["test", "^add"]);
+    assert_exit(&out, 0);
+    assert!(text(&out.stdout).contains("1 passed; 0 failed; 1 filtered out"));
+
+    // `#[test]` functions are not part of a normal build (6.2.5).
+    assert_exit(&rokc(Some(&env), &lib, &["build"]), 0);
+}
+
+#[test]
+fn lone_file_is_an_anonymous_package() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("anon");
+    fs::write(dir.join("hello.rok"), "println(\"hi\");\n").unwrap();
+    let out = rokc(Some(&env), &dir, &["run", "hello.rok"]);
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "hi\n");
+    // `run` of a lone file leaves no target/ behind; `build` uses one.
+    assert!(!dir.join("target").exists());
+    assert_exit(&rokc(Some(&env), &dir, &["build", "hello.rok"]), 0);
+    assert!(dir.join("target/hello").is_file());
+
+    // Spec 4.16.8: no file submodules.
+    fs::write(dir.join("m.rok"), "fn f() {}\n").unwrap();
+    fs::write(dir.join("sub.rok"), "mod m;\nprintln(\"x\");\n").unwrap();
+    let out = rokc(Some(&env), &dir, &["build", "sub.rok"]);
+    assert_exit(&out, 1);
+    assert!(
+        text(&out.stderr).contains("4.16.8"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    // A directory without main.rok / lib.rok is not a package.
+    assert_exit(&rokc(Some(&env), &dir, &["build"]), 1);
+}
+
+#[test]
+fn json_and_colored_diagnostics() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("diag");
+    fs::write(dir.join("bad.rok"), "let x: i32 = nope;\n").unwrap();
+    let out = rokc(
+        Some(&env),
+        &dir,
+        &["build", "--message-format=json", "bad.rok"],
+    );
+    assert_exit(&out, 1);
+    let stdout = text(&out.stdout);
+    let line = stdout.lines().next().unwrap_or_default();
+    assert!(
+        line.starts_with("{\"type\":\"error\",\"code\":\"E"),
+        "{stdout}"
+    );
+    assert!(line.contains("\"file_name\":\"bad.rok\""), "{line}");
+    assert!(line.contains("\"line_start\":1"), "{line}");
+
+    let out = rokc(Some(&env), &dir, &["--color=always", "build", "bad.rok"]);
+    assert!(text(&out.stderr).contains("\x1b[1;31merror\x1b[0m"));
+    let out = rokc(Some(&env), &dir, &["--color=never", "build", "bad.rok"]);
+    assert!(!text(&out.stderr).contains('\x1b'));
+}
+
+#[test]
+fn fmt_check_and_rewrite() {
+    let dir = scratch("fmt");
+    let messy = "fn f() {\n  // keep me\n      let x = 1;   \n\n\n  x;\n}\n";
+    let clean = "fn f() {\n    // keep me\n    let x = 1;\n\n    x;\n}\n";
+    fs::create_dir_all(dir.join("target")).unwrap();
+    fs::write(dir.join("a.rok"), messy).unwrap();
+    fs::write(dir.join("target/skip.rok"), messy).unwrap();
+
+    let out = rokc(None, &dir, &["fmt", "--check"]);
+    assert_exit(&out, 1);
+    assert!(text(&out.stdout).contains("a.rok"));
+    assert_eq!(fs::read_to_string(dir.join("a.rok")).unwrap(), messy);
+
+    assert_exit(&rokc(None, &dir, &["fmt"]), 0);
+    assert_eq!(fs::read_to_string(dir.join("a.rok")).unwrap(), clean);
+    assert_eq!(
+        fs::read_to_string(dir.join("target/skip.rok")).unwrap(),
+        messy
+    );
+    assert_exit(&rokc(None, &dir, &["fmt", "--check", "a.rok"]), 0);
+}
+
+#[test]
+fn demangle_and_usage_errors() {
+    let dir = scratch("misc");
+    let out = rokc(
+        None,
+        &dir,
+        &["demangle", "_Y3f8a1c2b_std_vec_push_a7c91d8e44b2f190"],
+    );
+    assert_exit(&out, 0);
+    assert_eq!(
+        text(&out.stdout),
+        "package:  3f8a1c2b\npath:     rok::std::vec\nname:     push\n\
+         generics: a7c91d8e44b2f190 (type tuple hash)\n"
+    );
+    assert_exit(&rokc(None, &dir, &["demangle", "_ZN3foo"]), 1);
+    assert_exit(&rokc(None, &dir, &["build", "--bogus"]), 2);
+    assert_exit(&rokc(None, &dir, &["frobnicate"]), 2);
+    assert_exit(&rokc(None, &dir, &["--version"]), 0);
+}

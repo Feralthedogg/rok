@@ -11,6 +11,7 @@ extern "C" {
     fn rok_str_concat(a: str, b: str) -> str;
     fn rok_str_cmp(a: str, b: str) -> i32;
     fn rok_str_slice(s: str, start: usize, end: usize) -> str;
+    fn rok_bytes_slice(s: str, start: usize, end: usize) -> str;
     fn rok_str_find(s: str, pat: str) -> isize;
     fn rok_str_rfind(s: str, pat: str) -> isize;
     fn rok_str_trim(s: str, which: i32) -> str;
@@ -62,13 +63,14 @@ impl str {
     pub fn contains(self, pat: str) -> bool { return unsafe { rok_str_find(self, pat) } >= 0; }
     pub fn starts_with(self, pat: str) -> bool {
         if unsafe { rok_str_len(pat) } > unsafe { rok_str_len(self) } { return false; }
-        return unsafe { rok_str_cmp(rok_str_slice(self, 0, rok_str_len(pat)), pat) } == 0;
+        // Byte compare: a prefix length may fall inside a char of `self`.
+        return unsafe { rok_str_cmp(rok_bytes_slice(self, 0, rok_str_len(pat)), pat) } == 0;
     }
     pub fn ends_with(self, pat: str) -> bool {
         let n = unsafe { rok_str_len(self) };
         let m = unsafe { rok_str_len(pat) };
         if m > n { return false; }
-        return unsafe { rok_str_cmp(rok_str_slice(self, n - m, n), pat) } == 0;
+        return unsafe { rok_str_cmp(rok_bytes_slice(self, n - m, n), pat) } == 0;
     }
     pub fn find(self, pat: str) -> usize | none {
         let i = unsafe { rok_str_find(self, pat) };

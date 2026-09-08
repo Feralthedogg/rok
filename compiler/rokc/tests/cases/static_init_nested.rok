@@ -1,0 +1,17 @@
+// expect-exit: 0
+// expect-stdout: 3 2 1
+
+// Lazy statics whose initializers read other lazy statics (nesting
+// three deep) initialize in order; only reading one's own static panics.
+
+static A: i32 = from_b();
+static B: i32 = from_c();
+static C: i32 = one();
+
+fn one() -> i32 { return 1; }
+fn from_c() -> i32 { return C + 1; }
+fn from_b() -> i32 { return B + 1; }
+
+fn main() {
+    println(f"{A} {B} {C}");
+}

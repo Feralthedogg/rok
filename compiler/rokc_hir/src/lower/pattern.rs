@@ -677,19 +677,46 @@ pub(super) fn lower_pattern_inner(
             let (enum_id, idx) = match resolve_enum_variant(ctx, &segs, Some(scrut_ty), None) {
                 EnumRes::Found(e, i) => (e, i),
                 EnumRes::Error => return HirPattern::Wildcard,
-                EnumRes::NotEnum => {
-                    ctx.emit_error(
-                        rokc_diagnostic::ErrorKind::Type,
-                        format!("cannot find enum variant `{}`", segs.join("::")),
-                    );
-                    return HirPattern::Wildcard;
-                }
+                EnumRes::NotEnum => return tuple_struct_pattern(ctx, &segs, args, scrut_ty),
             };
             if *scrut_ty != HirTy::Enum(enum_id) {
                 return mismatch(ctx, format!("pattern `{}`", segs.join("::")));
             }
             let variant = ctx.enum_def(enum_id).variants[idx].clone();
             let slots = variant_arg_tys(&variant);
+            // `V(a, ..)` / `V(.., z)` / `V(..)`: one `..` stands for the
+            // fields not written, each matching anything.
+            let rest_at: Vec<usize> = args
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| matches!(a.kind, AstPatternKind::Rest(_)))
+                .map(|(i, _)| i)
+                .collect();
+            if let [at] = rest_at.as_slice() {
+                let (before, after) = (&args[..*at], &args[at + 1..]);
+                if before.len() + after.len() <= slots.len() {
+                    let fill = slots.len() - before.len() - after.len();
+                    let mut lowered = Vec::with_capacity(slots.len());
+                    for (p, t) in before.iter().zip(&slots) {
+                        lowered.push(lower_pattern(ctx, p, t));
+                    }
+                    lowered.extend(std::iter::repeat_n(HirPattern::Wildcard, fill));
+                    for (p, t) in after.iter().zip(&slots[before.len() + fill..]) {
+                        lowered.push(lower_pattern(ctx, p, t));
+                    }
+                    return HirPattern::EnumVariant {
+                        enum_id,
+                        variant_index: u32::try_from(idx).expect("variant overflow"),
+                        args: lowered,
+                    };
+                }
+            } else if rest_at.len() > 1 {
+                ctx.emit_error(
+                    rokc_diagnostic::ErrorKind::Type,
+                    format!("pattern `{}` has more than one `..`", segs.join("::")),
+                );
+                return HirPattern::Wildcard;
+            }
             if args.len() != slots.len() {
                 ctx.emit_error(
                     rokc_diagnostic::ErrorKind::Type,
@@ -839,6 +866,67 @@ pub(super) fn lower_pattern_inner(
             );
             HirPattern::Wildcard
         }
+    }
+}
+
+/// `Pair(x, 4)` — a tuple struct's positional fields.
+fn tuple_struct_pattern(
+    ctx: &mut LowerCtx<'_>,
+    segs: &[&str],
+    args: &[AstPattern],
+    scrut_ty: &HirTy,
+) -> HirPattern {
+    let full = ctx.canon_type(segs);
+    let HirTy::Struct(sid) = scrut_ty else {
+        ctx.emit_error(
+            rokc_diagnostic::ErrorKind::Type,
+            format!("cannot find enum variant `{}`", segs.join("::")),
+        );
+        return HirPattern::Wildcard;
+    };
+    let def = ctx.struct_def(*sid);
+    let tuple_form = def
+        .fields
+        .iter()
+        .enumerate()
+        .all(|(i, f)| f.name == i.to_string());
+    if full.as_deref() != Some(enum_base_name(&def.name)) || !tuple_form {
+        ctx.emit_error(
+            rokc_diagnostic::ErrorKind::Type,
+            format!(
+                "pattern `{}(..)` can't match a value of type `{}`",
+                segs.join("::"),
+                ctx.ty_name(scrut_ty)
+            ),
+        );
+        return HirPattern::Wildcard;
+    }
+    if args.len() != def.fields.len() {
+        ctx.emit_error(
+            rokc_diagnostic::ErrorKind::Type,
+            format!(
+                "pattern `{}` has {} field(s), but the struct has {}",
+                segs.join("::"),
+                args.len(),
+                def.fields.len()
+            ),
+        );
+        return HirPattern::Wildcard;
+    }
+    let fields = args
+        .iter()
+        .zip(&def.fields)
+        .enumerate()
+        .map(|(i, (p, f))| {
+            (
+                u32::try_from(i).expect("field index overflow"),
+                lower_pattern(ctx, p, &f.ty),
+            )
+        })
+        .collect();
+    HirPattern::Struct {
+        struct_id: *sid,
+        fields,
     }
 }
 

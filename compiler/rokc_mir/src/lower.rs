@@ -2004,8 +2004,21 @@ impl<'a> FnBuilder<'a> {
                     self.bind_pattern(sub_pat, local);
                 }
             }
-            HirPattern::SumVariant { binder, sum_ty, .. } => {
+            HirPattern::SumVariant {
+                binder,
+                sum_ty,
+                payload_ty: hir_payload,
+                ..
+            } => {
                 let Some(local) = binder else { return };
+                // `n: none` holds no payload: bind the `none` value.
+                if matches!(hir_payload, Some(HirTy::Path(p)) if p.as_slice() == ["none"]) {
+                    self.push_stmt(Statement::Assign {
+                        target: *local,
+                        rvalue: RValue::Use(Operand::Const(ConstVal::None)),
+                    });
+                    return;
+                }
                 let scrut_ty = self.locals[scrut.0 as usize].ty.clone();
                 let MirTy::Tuple(parts) = &scrut_ty else {
                     return;

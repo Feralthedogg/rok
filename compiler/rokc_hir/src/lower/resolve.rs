@@ -275,6 +275,11 @@ pub(super) fn substitute_aliases(ty: &mut HirTy, aliases: &HashMap<String, HirTy
     }
 }
 
+thread_local! {
+    /// Plain-alias expansion depth (a cyclic alias stops at the cap).
+    static ALIAS_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 /// `resolve_ty` plus module-aware struct / enum / alias name lookup.
 /// Unresolvable names stay `HirTy::Path` (generic params get substituted
 /// later; anything left over is reported by `check_unresolved_types`).
@@ -324,6 +329,26 @@ pub(super) fn resolve_ty_with_structs(
             }
             if let (GC_BUF, [elem]) = (full.as_str(), generics) {
                 return HirTy::GcBuf(Box::new(rec(elem)));
+            }
+            if generics.is_empty() {
+                // Depth-capped: a cyclic alias stays a path and is
+                // reported by the alias pass.
+                if let Some(t) = sc
+                    .names
+                    .plain_aliases
+                    .get(&full)
+                    .filter(|_| ALIAS_DEPTH.get() < 32)
+                {
+                    let module = module_of(&full);
+                    let inner = Scope {
+                        names: sc.names,
+                        module: &module,
+                    };
+                    ALIAS_DEPTH.set(ALIAS_DEPTH.get() + 1);
+                    let r = resolve_ty_with_structs(t, structs, enums, inner);
+                    ALIAS_DEPTH.set(ALIAS_DEPTH.get() - 1);
+                    return r;
+                }
             }
             if !generics.is_empty() {
                 let args: Vec<HirTy> = generics.iter().map(rec).collect();

@@ -1,0 +1,12 @@
+pub trait Width { fn width(self) -> i32; }
+
+#[impl_derive(Width)]
+pub @derive {
+    impl Width for @Self {
+        fn width(self) -> i32 {
+            let w = 0;
+            @for_fields { w = w + 1; }
+            return w;
+        }
+    }
+}

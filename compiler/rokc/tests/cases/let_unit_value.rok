@@ -1,0 +1,21 @@
+// expect-exit: 0
+// expect-stdout:
+// bad
+// blk
+// ok
+
+// A `()`-valued `let` (literal, unit call, block, unit `try .. catch`)
+// has nothing to store; codegen used to emit `arith.constant 0 : ()`.
+
+fn f(fail: bool) throws (str) { if fail { throw "bad"; } }
+fn g() {}
+
+fn main() {
+    let a = try f(true) catch e { println(e); };
+    let b = try f(false) catch e { println(e); };
+    let c = ();
+    let d = g();
+    let e = { println("blk"); };
+    let copy = a;
+    println("ok");
+}

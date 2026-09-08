@@ -39,8 +39,8 @@ impl EmitKind {
     #[must_use]
     pub const fn extension(self) -> &'static str {
         match self {
-            Self::Hir => "hir.rok",
-            Self::Mir => "mir.rok",
+            Self::Hir => "hir",
+            Self::Mir => "mir",
             Self::Mlir => "mlir",
             Self::LlvmIr => "ll",
             Self::Asm => "s",
@@ -224,6 +224,26 @@ pub fn link_executable(
     }
     cmd.arg("-o").arg(exe_out);
     run(&mut cmd, "clang")
+}
+
+/// Library build (spec 902.13): `target/foo.o` + `ar rcs target/libfoo.a`.
+/// ponytail: no RHIR `foo.hir.o` (904 is not implemented).
+pub fn build_archive(
+    module: &CompiledModule,
+    opts: &BuildOptions,
+    archive_out: &Path,
+) -> Result<(), RokDiagnostic> {
+    let stem = archive_out
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("out");
+    let obj = archive_out.with_file_name(format!("{}.o", stem.strip_prefix("lib").unwrap_or(stem)));
+    let bytes = emit(module, EmitKind::Obj, opts)?;
+    std::fs::write(&obj, bytes).map_err(|e| err(format!("cannot write {}: {e}", obj.display())))?;
+    // `ar r` appends to an existing archive; start fresh.
+    let _ = std::fs::remove_file(archive_out);
+    let ar = locate_tool("ar").or_else(|_| locate_tool("llvm-ar"))?;
+    run(Command::new(ar).arg("rcs").arg(archive_out).arg(&obj), "ar")
 }
 
 fn llvm_ir(

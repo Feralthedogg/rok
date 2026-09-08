@@ -1,0 +1,8 @@
+pub trait Secret { fn secret(self) -> i32; }
+
+#[impl_derive(Secret)]
+@derive {
+    impl Secret for @Self {
+        fn secret(self) -> i32 { return 1; }
+    }
+}

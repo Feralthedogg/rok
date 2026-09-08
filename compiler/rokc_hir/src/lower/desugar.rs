@@ -728,19 +728,33 @@ pub(super) fn bind_irrefutable(
                 bind_irrefutable(ctx, p, read, stmts);
             }
         }
-        // `Point { x, y: py, .. }`.
-        (AstPatternKind::Struct { path, fields, .. }, HirTy::Struct(sid))
-            if ctx
-                .canon_type(
-                    &path
-                        .segments
-                        .iter()
-                        .map(|s| s.name.as_str())
-                        .collect::<Vec<_>>(),
-                )
-                .and_then(|full| ctx.lookup_struct(&full))
-                == Some(sid) =>
+        // `Point { x, y: py, .. }` / tuple struct `Pair(a, b)`.
+        (
+            AstPatternKind::Struct { path, .. } | AstPatternKind::EnumVariant { path, .. },
+            HirTy::Struct(sid),
+        ) if ctx
+            .canon_type(
+                &path
+                    .segments
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .as_deref()
+            == Some(enum_base_name(&ctx.struct_def(sid).name)) =>
         {
+            let parts: Vec<(String, Option<&AstPattern>)> = match &pat.kind {
+                AstPatternKind::Struct { fields, .. } => fields
+                    .iter()
+                    .map(|f| (f.name.clone(), f.pat.as_ref()))
+                    .collect(),
+                AstPatternKind::EnumVariant { args, .. } => args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| (i.to_string(), Some(a)))
+                    .collect(),
+                _ => Vec::new(),
+            };
             let tmp = ctx.declare(None, value.ty.clone());
             let struct_ty = value.ty.clone();
             stmts.push(HirStmt::Let {
@@ -748,15 +762,15 @@ pub(super) fn bind_irrefutable(
                 init: value,
             });
             let def = ctx.struct_def(sid);
-            for fp in fields {
-                let Some(idx) = def.fields.iter().position(|f| f.name == fp.name) else {
+            for (fname, fpat) in parts {
+                let Some(idx) = def.fields.iter().position(|f| f.name == fname) else {
                     ctx.emit_error(
                         rokc_diagnostic::ErrorKind::Type,
-                        format!("struct `{}` has no field `{}`", def.name, fp.name),
+                        format!("struct `{}` has no field `{fname}`", def.name),
                     );
                     continue;
                 };
-                ctx.check_field_visible(sid, &fp.name);
+                ctx.check_field_visible(sid, &fname);
                 let field_ty = def.fields[idx].ty.clone();
                 let read = HirExpr {
                     ty: field_ty.clone(),
@@ -768,9 +782,9 @@ pub(super) fn bind_irrefutable(
                         field_ty: field_ty.clone(),
                     },
                 };
-                match &fp.pat {
+                match fpat {
                     Some(p) => bind_irrefutable(ctx, p, read, stmts),
-                    None => stmts.push(ctx.declare_var(&fp.name, field_ty, read, pat.span)),
+                    None => stmts.push(ctx.declare_var(&fname, field_ty, read, pat.span)),
                 }
             }
         }

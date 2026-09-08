@@ -17,8 +17,14 @@ pub(super) fn lower_block(ctx: &mut LowerCtx<'_>, block: &Block) -> HirBlock {
             } => {
                 lower_let_struct(ctx, path, fields, ty.as_ref(), init, s.span, &mut stmts);
             }
-            StmtKind::LetPattern { pat, init } => {
-                let value = lower_expected(ctx, init, HirTy::Unknown);
+            StmtKind::LetPattern { pat, ty, init } => {
+                let value = match ty.as_ref().map(|t| ctx.resolve_ast_ty(t)) {
+                    Some(t) => {
+                        let v = lower_expected(ctx, init, t.clone());
+                        coerce(ctx, &t, v, &|| "the destructured value".to_owned())
+                    }
+                    None => lower_expected(ctx, init, HirTy::Unknown),
+                };
                 super::desugar::bind_irrefutable(ctx, pat, value, &mut stmts);
             }
             StmtKind::LetTuple {
@@ -1248,10 +1254,22 @@ pub(super) fn resolve_enum_variant(
             .iter()
             .position(|v| v.name == vname)
     };
-    let eid = if let Some(HirTy::Enum(h)) = hint
-        .filter(|h| matches!(h, HirTy::Enum(e) if enum_base_name(&ctx.enum_def(*e).name) == full))
-    {
-        *h
+    let of_full = |e: &EnumId| enum_base_name(&ctx.enum_def(*e).name) == full;
+    // The expected type, or the one member of an expected sum
+    // (`-> Result<T, E> | none`) that is an instance of this enum.
+    let hinted: Option<EnumId> = match hint {
+        Some(HirTy::Enum(e)) if of_full(e) => Some(*e),
+        Some(HirTy::Sum(parts)) => {
+            let mut hits = parts.iter().filter_map(|p| match p {
+                HirTy::Enum(e) if of_full(e) => Some(*e),
+                _ => None,
+            });
+            hits.next().filter(|_| hits.next().is_none())
+        }
+        _ => None,
+    };
+    let eid = if let Some(h) = hinted {
+        h
     } else if let Some(eid) = ctx.lookup_enum(&full) {
         eid
     } else {
@@ -1311,6 +1329,9 @@ pub(super) fn resolve_enum_variant(
     };
     if let Some(i) = variant_of(eid) {
         EnumRes::Found(eid, i)
+    } else if pick_method(ctx, &HirTy::Enum(eid), &vname, None).is_ok_and(|p| p.is_some()) {
+        // `Mode::default()`: an associated function, not a variant.
+        EnumRes::NotEnum
     } else {
         ctx.emit_error(
             rokc_diagnostic::ErrorKind::Type,
@@ -1318,6 +1339,21 @@ pub(super) fn resolve_enum_variant(
         );
         EnumRes::Error
     }
+}
+
+/// `segs` names an enum (or generic enum base) that has no variant of
+/// that name — so `E::f(..)` is an associated function call.
+fn enum_lacks_variant(ctx: &LowerCtx<'_>, segs: &[&str]) -> bool {
+    let Some((full, vname)) = ctx.enum_path(segs) else {
+        return false;
+    };
+    let ids = ctx
+        .lookup_enum(&full)
+        .map_or_else(|| ctx.enum_instantiations(&full), |e| vec![e]);
+    !ids.is_empty()
+        && ids
+            .iter()
+            .all(|&e| ctx.enum_def(e).variants.iter().all(|v| v.name != vname))
 }
 
 /// Payload slot types of a variant, one per constructor argument.
@@ -1333,6 +1369,34 @@ pub(super) fn variant_arg_tys(v: &HirEnumVariant) -> Vec<HirTy> {
 }
 
 // `Foo { field: value, ... }` — fields are placed in declaration order.
+fn check_duplicate_fields(ctx: &LowerCtx<'_>, segs: &[&str], fields: &[(String, Expr)]) {
+    let mut seen = std::collections::HashSet::new();
+    for (n, _) in fields {
+        if !seen.insert(n.as_str()) {
+            ctx.emit_error(
+                rokc_diagnostic::ErrorKind::Type,
+                format!(
+                    "field `{n}` specified more than once in `{}` literal",
+                    segs.join("::")
+                ),
+            );
+        }
+    }
+}
+
+/// A struct's declared `(field, type)`s; a tuple struct's are `0`, `1`, ...
+fn struct_decl_fields(def: &AstStructDef) -> Vec<(String, &Ty)> {
+    match &def.kind {
+        AstStructKind::Named(fs) => fs.iter().map(|f| (f.name.clone(), &f.ty)).collect(),
+        AstStructKind::Tuple(fs) => fs
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (i.to_string(), &f.ty))
+            .collect(),
+        AstStructKind::Unit => Vec::new(),
+    }
+}
+
 pub(super) fn lower_struct_init(
     ctx: &mut LowerCtx<'_>,
     path: &AstPath,
@@ -1340,20 +1404,7 @@ pub(super) fn lower_struct_init(
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
     let segs: Vec<&str> = path.segments.iter().map(|s| s.name.as_str()).collect();
-    {
-        let mut seen = std::collections::HashSet::new();
-        for (n, _) in fields {
-            if !seen.insert(n.as_str()) {
-                ctx.emit_error(
-                    rokc_diagnostic::ErrorKind::Type,
-                    format!(
-                        "field `{n}` specified more than once in `{}` literal",
-                        segs.join("::")
-                    ),
-                );
-            }
-        }
-    }
+    check_duplicate_fields(ctx, &segs, fields);
     // `EnumName::Variant { x: ..., y: ... }` — enum named-form variant
     // initialiser (spec 2.4). Pack fields into the variant's tuple
     // payload according to declaration order.
@@ -1460,10 +1511,7 @@ pub(super) fn lower_struct_init(
                 *h
             }
             _ => {
-                let AstStructKind::Named(decl_fields) = &def.kind else {
-                    return ctx
-                        .error_expr(span, format!("`{full}` is not a struct with named fields"));
-                };
+                let decl_fields = struct_decl_fields(def);
                 let generic_names: std::collections::HashSet<String> = def
                     .generics
                     .params
@@ -1476,8 +1524,8 @@ pub(super) fn lower_struct_init(
                 let mut subst: HashMap<String, HirTy> = HashMap::new();
                 for (i, (n, e)) in fields.iter().enumerate() {
                     let v = lower_expected(ctx, e, HirTy::Unknown);
-                    if let Some(df) = decl_fields.iter().find(|f| f.name == *n) {
-                        unify_param_ty_with(&df.ty, &v.ty, &generic_names, &mut subst, ctx);
+                    if let Some((_, ty)) = decl_fields.iter().find(|(name, _)| name == n) {
+                        unify_param_ty_with(ty, &v.ty, &generic_names, &mut subst, ctx);
                     }
                     pre[i] = Some(v);
                 }
@@ -1912,9 +1960,10 @@ fn narrowings(ctx: &LowerCtx<'_>, cond: &Expr) -> Vec<(String, rokc_ast::Ty)> {
         ExprKind::Is(operand, pat) => match (&operand.kind, &pat.kind) {
             (ExprKind::Path(p), AstPatternKind::TypeCheck { binder: None, ty })
                 if p.segments.len() == 1
-                    && ctx
-                        .lookup(&p.segments[0].name)
-                        .is_some_and(|l| !ctx.boxed.contains(&l)) =>
+                    && ctx.lookup(&p.segments[0].name).is_some_and(|l| {
+                        // An enum's `x is E::V` is a variant test: no narrowing.
+                        !ctx.boxed.contains(&l) && !matches!(ctx.local_ty(l), HirTy::Enum(_))
+                    }) =>
             {
                 vec![(p.segments[0].name.clone(), ty.clone())]
             }
@@ -2036,6 +2085,35 @@ fn lower_is(
         kind: HirExprKind::Const(ConstVal::Bool(b)),
         ty: HirTy::Prim(PrimTy::Bool),
         span,
+    };
+    // `e is Enum::Variant` on an enum value: a variant test (any
+    // payload), not a type test.
+    let variant_pat;
+    let pat = match (&scrut.ty, &pat.kind) {
+        (
+            HirTy::Enum(_),
+            AstPatternKind::TypeCheck {
+                binder: None,
+                ty:
+                    rokc_ast::Ty {
+                        kind: rokc_ast::TyKind::Path(path),
+                        ..
+                    },
+            },
+        ) if path.segments.len() >= 2 => {
+            variant_pat = rokc_ast::Pattern {
+                kind: AstPatternKind::EnumVariant {
+                    path: path.clone(),
+                    args: vec![rokc_ast::Pattern {
+                        kind: AstPatternKind::Rest(None),
+                        span: pat.span,
+                    }],
+                },
+                span: pat.span,
+            };
+            &variant_pat
+        }
+        _ => pat,
     };
     // A static (non-`any`, non-sum) operand: the answer is known now.
     if let (false, AstPatternKind::TypeCheck { ty, .. }) = (
@@ -2647,6 +2725,194 @@ fn check_direct_drop_path(ctx: &LowerCtx<'_>, p: &rokc_ast::Path) {
     }
 }
 
+/// Traits a sum type has when all its variants do (spec 2.13.6, 2.5.7,
+/// 2.10.9: `T | none` is `Clone` / `Debug` / ... when `T` is).
+pub(super) const SUM_TRAITS: &[&str] = &[
+    "rok::core::marker::Clone",
+    "rok::core::marker::Copy",
+    "rok::core::fmt::Debug",
+    "rok::core::ops::PartialEq",
+    "rok::core::cmp::Eq",
+    "rok::core::cmp::Hash",
+];
+
+/// Their methods, dispatched on the variant by `sum_structural_call`.
+const SUM_METHODS: &[&str] = &["clone", "debug", "eq", "ne", "hash"];
+
+/// `x.clone()` / `.debug()` / `.eq(y)` / `.ne(y)` / `.hash()` on a sum
+/// `x`: a `match` over the variants calling the variant's method (`eq`
+/// is false across variants; `none` clones to itself, shows as `none`,
+/// equals `none`, hashes to its tag).
+fn sum_structural_call(
+    ctx: &mut LowerCtx<'_>,
+    recv: HirExpr,
+    method: &str,
+    args: &[CallArg],
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let HirTy::Sum(variants) = recv.ty.clone() else {
+        return recv;
+    };
+    let sum_ty = recv.ty.clone();
+    let binary = matches!(method, "eq" | "ne");
+    let result_ty = match method {
+        "clone" => sum_ty.clone(),
+        "debug" => HirTy::Prim(PrimTy::Str),
+        "hash" => HirTy::Prim(PrimTy::U64),
+        _ => HirTy::Prim(PrimTy::Bool),
+    };
+    let mut stmts = Vec::new();
+    let s = ctx.declare(None, sum_ty.clone());
+    stmts.push(HirStmt::Let {
+        local: s,
+        init: recv,
+    });
+    let rhs = if binary {
+        let [CallArg::Positional(e)] = args else {
+            discard_args(ctx, args);
+            return ctx.error_expr(span, format!("`{method}` takes one argument"));
+        };
+        let v = lower_expected(ctx, e, sum_ty.clone());
+        let v = coerce(ctx, &sum_ty, v, &|| format!("the argument of `{method}`"));
+        let r = ctx.declare(None, sum_ty.clone());
+        stmts.push(HirStmt::Let { local: r, init: v });
+        Some(r)
+    } else {
+        discard_args(ctx, args);
+        None
+    };
+    let path = |name: &str| Expr {
+        kind: ExprKind::Path(AstPath {
+            segments: vec![rokc_ast::PathSegment {
+                name: name.to_owned(),
+                generics: Vec::new(),
+            }],
+            span,
+        }),
+        span,
+    };
+    let call = |m: &str, arg: Option<&str>| Expr {
+        kind: ExprKind::MethodCall {
+            receiver: Box::new(path("#a")),
+            method: m.to_owned(),
+            type_args: Vec::new(),
+            args: arg
+                .map(|a| CallArg::Positional(path(a)))
+                .into_iter()
+                .collect(),
+            trailing_closure: None,
+        },
+        span,
+    };
+    let bool_c = |b: bool| HirExpr {
+        kind: HirExprKind::Const(ConstVal::Bool(b)),
+        ty: HirTy::Prim(PrimTy::Bool),
+        span,
+    };
+    let arm_pat = |ctx: &mut LowerCtx<'_>, i: usize, name: &str| {
+        let vt = &variants[i];
+        let none = is_none_ty(vt);
+        let binder = (!none).then(|| ctx.declare(Some(name.to_owned()), vt.clone()));
+        HirPattern::SumVariant {
+            sum_ty: sum_ty.clone(),
+            variant_index: u32::try_from(i).expect("variant overflow"),
+            binder,
+            payload_ty: (!none).then(|| vt.clone()),
+        }
+    };
+    let mut arms = Vec::new();
+    for (i, vt) in variants.iter().enumerate() {
+        ctx.push_scope();
+        let pat = arm_pat(ctx, i, "#a");
+        let none = is_none_ty(vt);
+        let body = match (method, rhs) {
+            ("clone", _) if none => hir_local(s, &sum_ty, span),
+            ("clone", _) => {
+                let v = lower_expr(ctx, &call("clone", None));
+                wrap_into_sum(&sum_ty, v)
+            }
+            ("debug", _) if none => HirExpr {
+                kind: HirExprKind::Const(ConstVal::Str("none".to_owned())),
+                ty: HirTy::Prim(PrimTy::Str),
+                span,
+            },
+            ("hash", _) => {
+                let tag = hir_int(i128::try_from(i).unwrap_or(0), PrimTy::U64, span);
+                if none {
+                    tag
+                } else {
+                    let h = lower_expr(ctx, &call("hash", None));
+                    HirExpr {
+                        kind: HirExprKind::PrimBinOp {
+                            op: PrimOp::BitXor,
+                            lhs: Box::new(h),
+                            rhs: Box::new(tag),
+                        },
+                        ty: HirTy::Prim(PrimTy::U64),
+                        span,
+                    }
+                }
+            }
+            (_, Some(r)) => {
+                // Same variant on the right: compare payloads.
+                ctx.push_scope();
+                let inner_pat = arm_pat(ctx, i, "#b");
+                let same = if none {
+                    bool_c(method == "eq")
+                } else {
+                    lower_expr(ctx, &call(method, Some("#b")))
+                };
+                ctx.pop_scope();
+                HirExpr {
+                    kind: HirExprKind::Match {
+                        scrutinee: Box::new(hir_local(r, &sum_ty, span)),
+                        arms: vec![
+                            HirMatchArm {
+                                pat: inner_pat,
+                                guard: None,
+                                body: same,
+                            },
+                            HirMatchArm {
+                                pat: HirPattern::Wildcard,
+                                guard: None,
+                                body: bool_c(method == "ne"),
+                            },
+                        ],
+                    },
+                    ty: HirTy::Prim(PrimTy::Bool),
+                    span,
+                }
+            }
+            _ => lower_expr(ctx, &call(method, None)),
+        };
+        ctx.pop_scope();
+        let body = coerce(ctx, &result_ty, body, &|| {
+            format!("`{method}` of a sum value")
+        });
+        arms.push(HirMatchArm {
+            pat,
+            guard: None,
+            body,
+        });
+    }
+    HirExpr {
+        kind: HirExprKind::Block(Box::new(HirBlock {
+            stmts,
+            trailing: Some(HirExpr {
+                kind: HirExprKind::Match {
+                    scrutinee: Box::new(hir_local(s, &sum_ty, span)),
+                    arms,
+                },
+                ty: result_ty.clone(),
+                span,
+            }),
+            label: None,
+        })),
+        ty: result_ty,
+        span,
+    }
+}
+
 pub(super) fn method_call_on(
     ctx: &mut LowerCtx<'_>,
     recv_h: HirExpr,
@@ -2659,6 +2925,9 @@ pub(super) fn method_call_on(
     if recv_h.ty == HirTy::Unknown {
         lower_args_only(ctx);
         return recv_h;
+    }
+    if matches!(recv_h.ty, HirTy::Sum(_)) && SUM_METHODS.contains(&method) {
+        return sum_structural_call(ctx, recv_h, method, args, span);
     }
     if let HirTy::AnyTrait(bounds) = recv_h.ty.clone() {
         return any_method_call(ctx, recv_h, &bounds, method, args, span);
@@ -3831,6 +4100,27 @@ pub(super) fn lower_call(
         }
     }
 
+    // `Pair(3, 4)` of a generic tuple struct: a struct literal with the
+    // positional field names, which infers the instantiation.
+    let generic_tuple = ctx.canon_type(&segs).is_some_and(|full| {
+        ctx.lookup_struct(&full).is_none()
+            && ctx
+                .env
+                .generic_structs
+                .get(&full)
+                .is_some_and(|d| matches!(d.kind, rokc_ast::StructKind::Tuple(_)))
+    });
+    if generic_tuple && args.iter().all(|a| matches!(a, CallArg::Positional(_))) {
+        let fields: Vec<(String, Expr)> = args
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| match a {
+                CallArg::Positional(e) => Some((i.to_string(), e.clone())),
+                _ => None,
+            })
+            .collect();
+        return lower_struct_init(ctx, p, &fields, span);
+    }
     // `Foo(arg, ...)` — tuple-struct constructor (spec 2.7.4).
     if let Some(sid) = ctx
         .canon_type(&segs)
@@ -3873,12 +4163,15 @@ pub(super) fn lower_call(
 
     // `EnumName::Variant(payload)` — tuple-form enum constructor. For a
     // generic enum without an expected type, the instantiation is
-    // picked from the argument types.
+    // picked from the argument types. `EnumName::f(..)` naming no
+    // variant is an associated function (below).
+    let not_variant = enum_lacks_variant(ctx, &segs);
     let hint = ctx.current_expected().cloned();
     let is_generic_enum_base = ctx
         .enum_path(&segs)
         .is_some_and(|(full, _)| ctx.lookup_enum(&full).is_none());
-    let pre_args: Option<Vec<HirExpr>> = if is_generic_enum_base
+    let pre_args: Option<Vec<HirExpr>> = if !not_variant
+        && is_generic_enum_base
         && !matches!(&hint, Some(HirTy::Enum(_)))
         && args.iter().all(|a| matches!(a, CallArg::Positional(_)))
     {
@@ -3896,7 +4189,12 @@ pub(super) fn lower_call(
     let arg_tys: Option<Vec<HirTy>> = pre_args
         .as_ref()
         .map(|v| v.iter().map(|e| e.ty.clone()).collect());
-    match resolve_enum_variant(ctx, &segs, hint.as_ref(), arg_tys.as_deref()) {
+    let res = if not_variant {
+        EnumRes::NotEnum
+    } else {
+        resolve_enum_variant(ctx, &segs, hint.as_ref(), arg_tys.as_deref())
+    };
+    match res {
         EnumRes::Error => return poison(span),
         EnumRes::Found(enum_id, idx) => {
             let variant = ctx.enum_def(enum_id).variants[idx].clone();
@@ -4290,6 +4588,20 @@ fn path_call_via_impls(
         return None;
     }
     let t = ctx.resolve_ast_ty(&ty_ast);
+    // `T::default()` for a `T | none` sum is `none` (stdlib 2.13).
+    if let (HirTy::Sum(vs), "default", []) = (&t, method, args) {
+        if let Some(i) = vs.iter().position(is_none_ty) {
+            return Some(HirExpr {
+                kind: HirExprKind::SumWrap {
+                    sum_ty: t.clone(),
+                    variant_index: u32::try_from(i).expect("variant overflow"),
+                    value: None,
+                },
+                ty: t.clone(),
+                span,
+            });
+        }
+    }
     let call = call_impl_method(ctx, &t, method, None, None, args, display, span);
     Some(call.unwrap_or_else(|| {
         discard_args(ctx, args);
@@ -5394,14 +5706,15 @@ pub(super) fn self_path_segs(ctx: &LowerCtx<'_>, p: &AstPath) -> Vec<String> {
 /// Associated const `name` of concrete type `ty` (from one of `traits`
 /// when given): the one impl whose target and bounds `ty` meets; two
 /// or more is an ambiguity error.
-fn lower_assoc_const(
-    ctx: &mut LowerCtx<'_>,
+/// The impls (with their substitution for `ty`) that give `ty` an
+/// associated const `name`, from one of `traits` when given.
+pub(super) fn assoc_const_hits<'e>(
+    ctx: &LowerCtx<'e>,
     ty: &HirTy,
     name: &str,
     traits: Option<&[String]>,
-) -> Option<HirExpr> {
-    let env = ctx.env;
-    let hits: Vec<(&ImplConsts, HashMap<String, HirTy>)> = env
+) -> Vec<(&'e ImplConsts, HashMap<String, HirTy>)> {
+    ctx.env
         .impl_consts
         .iter()
         .filter(|set| {
@@ -5409,7 +5722,17 @@ fn lower_assoc_const(
                 && set.consts.iter().any(|(n, ..)| n == name)
         })
         .filter_map(|set| Some((set, ctx.generic_impl_subst(&set.target, ty, 0)?)))
-        .collect();
+        .collect()
+}
+
+fn lower_assoc_const(
+    ctx: &mut LowerCtx<'_>,
+    ty: &HirTy,
+    name: &str,
+    traits: Option<&[String]>,
+) -> Option<HirExpr> {
+    let env = ctx.env;
+    let hits = assoc_const_hits(ctx, ty, name, traits);
     if hits.len() > 1 {
         let from: Vec<String> = hits
             .iter()
@@ -5442,8 +5765,13 @@ fn lower_assoc_const(
     substitute_aliases(&mut cty, &env.type_aliases);
     // The value is the impl's: its names resolve in the impl's module,
     // with the impl's type parameters and `Self` bound for `ty`.
-    // ponytail: one leaked substitution map per use (a few entries).
-    let subst: &'static HashMap<String, HirTy> = Box::leak(Box::new(subst));
+    let key = (std::ptr::from_ref(set) as usize, ty_mangle(ty));
+    let subst: &'static HashMap<String, HirTy> = env
+        .sink
+        .const_substs
+        .borrow_mut()
+        .entry(key)
+        .or_insert_with(|| Box::leak(Box::new(subst)));
     let saved_subst = std::mem::replace(&mut ctx.ty_subst, subst);
     let saved_module = std::mem::replace(&mut ctx.current_module, set.target.module.clone());
     let saved_self = std::mem::replace(&mut ctx.self_ty, Some(ty.clone()));
@@ -5467,6 +5795,68 @@ fn const_owner(ctx: &LowerCtx<'_>, ty: &HirTy) -> Option<String> {
         HirTy::Prim(p) => Some(p.name().to_owned()),
         _ => None,
     }
+}
+
+/// `<T as Tr>::N`, `Type::N` / `Box::<i32>::N`, `T::N` / `Self::N`:
+/// an associated const from the impl covering that type (spec 2.8.3a).
+fn assoc_const_path(ctx: &mut LowerCtx<'_>, path: &AstPath) -> Option<HirExpr> {
+    // `<T as Tr>::N` (spec 2.13.4 qualified path).
+    if let [q, name] = path.segments.as_slice() {
+        if let (rokc_ast::QPATH_MARK, [self_ty, tr]) = (q.name.as_str(), q.generics.as_slice()) {
+            let t = ctx.resolve_ast_ty(self_ty);
+            let key = match &tr.kind {
+                AstTyKind::Path(tp) => {
+                    let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
+                    ctx.env.names.trait_key(&segs, &ctx.current_module)
+                }
+                _ => String::new(),
+            };
+            if let Some(v) = lower_assoc_const(ctx, &t, &name.name, Some(&[key])) {
+                return Some(v);
+            }
+        }
+    }
+    // `Type::N` / `Box::<i32>::N`: the impl covering that type.
+    if let [prefix @ .., name] = path.segments.as_slice() {
+        let segs: Vec<&str> = prefix.iter().map(|s| s.name.as_str()).collect();
+        let owner = rokc_ast::Ty {
+            kind: AstTyKind::Path(AstPath {
+                segments: prefix.to_vec(),
+                span: path.span,
+            }),
+            span: path.span,
+        };
+        if !prefix.is_empty()
+            && segs != ["Self"]
+            && (ctx.canon_type(&segs).is_some()
+                || matches!(crate::ty::resolve_ty(&owner), HirTy::Prim(_)))
+        {
+            let ty = ctx.resolve_ast_ty(&owner);
+            if let Some(v) = lower_assoc_const(ctx, &ty, &name.name, None) {
+                return Some(v);
+            }
+        }
+    }
+    // `T::N` / `Self::N` on a concrete type: the impl that covers it.
+    if let [owner, name] = path.segments.as_slice() {
+        let ty = match owner.name.as_str() {
+            "Self" => ctx.self_ty.clone(),
+            n => ctx
+                .ty_subst
+                .get(n)
+                .or_else(|| ctx.explicit_generics.get(n))
+                .cloned(),
+        };
+        // A type parameter reads the const of a trait it is bounded by.
+        let bounds = ctx.ty_bounds.get(&owner.name).cloned();
+        if let Some(v) = ty
+            .filter(|_| owner.generics.is_empty())
+            .and_then(|t| lower_assoc_const(ctx, &t, &name.name, bounds.as_deref()))
+        {
+            return Some(v);
+        }
+    }
+    None
 }
 
 pub(super) fn lower_path(
@@ -5500,61 +5890,8 @@ pub(super) fn lower_path(
     // use site, typed by the const's declaration. `T::N` / `Self::N`
     // on a type parameter or `Self` reads the concrete type's const
     // (spec 2.8.3a).
-    // `<T as Tr>::N` (spec 2.13.4 qualified path).
-    if let [q, name] = path.segments.as_slice() {
-        if let (rokc_ast::QPATH_MARK, [self_ty, tr]) = (q.name.as_str(), q.generics.as_slice()) {
-            let t = ctx.resolve_ast_ty(self_ty);
-            let key = match &tr.kind {
-                AstTyKind::Path(tp) => {
-                    let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
-                    ctx.env.names.trait_key(&segs, &ctx.current_module)
-                }
-                _ => String::new(),
-            };
-            if let Some(v) = lower_assoc_const(ctx, &t, &name.name, Some(&[key])) {
-                return v;
-            }
-        }
-    }
-    // `Type::N` / `Box::<i32>::N`: the impl covering that type.
-    if let [prefix @ .., name] = path.segments.as_slice() {
-        let segs: Vec<&str> = prefix.iter().map(|s| s.name.as_str()).collect();
-        let owner = rokc_ast::Ty {
-            kind: AstTyKind::Path(AstPath {
-                segments: prefix.to_vec(),
-                span: path.span,
-            }),
-            span: path.span,
-        };
-        if !prefix.is_empty()
-            && segs != ["Self"]
-            && (ctx.canon_type(&segs).is_some()
-                || matches!(crate::ty::resolve_ty(&owner), HirTy::Prim(_)))
-        {
-            let ty = ctx.resolve_ast_ty(&owner);
-            if let Some(v) = lower_assoc_const(ctx, &ty, &name.name, None) {
-                return v;
-            }
-        }
-    }
-    // `T::N` / `Self::N` on a concrete type: the impl that covers it.
-    if let [owner, name] = path.segments.as_slice() {
-        let ty = match owner.name.as_str() {
-            "Self" => ctx.self_ty.clone(),
-            n => ctx
-                .ty_subst
-                .get(n)
-                .or_else(|| ctx.explicit_generics.get(n))
-                .cloned(),
-        };
-        // A type parameter reads the const of a trait it is bounded by.
-        let bounds = ctx.ty_bounds.get(&owner.name).cloned();
-        if let Some(v) = ty
-            .filter(|_| owner.generics.is_empty())
-            .and_then(|t| lower_assoc_const(ctx, &t, &name.name, bounds.as_deref()))
-        {
-            return v;
-        }
+    if let Some(v) = assoc_const_path(ctx, path) {
+        return v;
     }
     let assoc = match path.segments.as_slice() {
         [owner, name] if owner.generics.is_empty() => {
@@ -5711,6 +6048,22 @@ pub(super) fn lower_path(
         }
         EnumRes::Error => return poison(span),
         EnumRes::NotEnum => {}
+    }
+    // A unit struct `Unit` is its own value.
+    if let Some(sid) = ctx
+        .canon_type(&segs)
+        .and_then(|full| ctx.lookup_struct(&full))
+    {
+        if ctx.struct_def(sid).fields.is_empty() {
+            return HirExpr {
+                kind: HirExprKind::StructInit {
+                    struct_id: sid,
+                    fields: Vec::new(),
+                },
+                ty: HirTy::Struct(sid),
+                span,
+            };
+        }
     }
     ctx.error_expr(
         span,

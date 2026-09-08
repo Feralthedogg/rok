@@ -1,0 +1,48 @@
+// expect-exit: 0
+// expect-stdout:
+//  err 5, ok 1,
+// none some
+// c 1 / c x / b / first 7 / last 3
+
+// `x is none` / `n: none` on an `Enum<..> | none` value with a multi-word
+// payload binds `none` instead of reading the payload slot (codegen
+// used to fail: "payload .. stored as i64"); `V(..)`, `V(a, ..)` and
+// `V(.., z)` match the fields not written.
+
+struct Bad { code: i32; why: str; }
+
+fn step(i: i32) -> Result<str, Bad> | none {
+    if i == 0 { return Result::Err(Bad { code: 5, why: "x" }); }
+    if i == 1 { return Result::Ok("1"); }
+    return none;
+}
+
+fn show(r: Result<str, Bad> | none) -> str {
+    if r is none { return ""; }
+    match r ?? Result::Ok("?") {
+        Result::Ok(x) => { return f" ok {x},"; }
+        Result::Err(b) => { return f" err {b.code},"; }
+    }
+}
+
+enum K { A, B(i32), C(i32, str, i64) }
+
+fn kind(k: K) -> str {
+    match k {
+        K::C(1, ..) => "c 1",
+        K::C(.., 9) => "c 9",
+        K::C(..) => "c x",
+        K::B(..) => "b",
+        K::A(..) => "a",
+    }
+}
+
+fn main() {
+    println(show(step(0)) + show(step(1)) + show(step(2)));
+    let a = match step(2) { n: none => "none", _ => "some" };
+    let b = match step(1) { n: none => "none", _ => "some" };
+    println(a + " " + b);
+    let first = match K::C(7, "s", 3) { K::C(x, ..) => x, _ => 0 };
+    let last = match K::C(7, "s", 3) { K::C(.., z) => z, _ => 0i64 };
+    println(f"{kind(K::C(1, "s", 2))} / {kind(K::C(2, "s", 2))} / {kind(K::B(4))} / first {first} / last {last}");
+}

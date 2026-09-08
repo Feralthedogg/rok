@@ -1,0 +1,358 @@
+// rok::core::tuple — Clone / Copy / Default / Debug / PartialEq / Eq /
+// Hash for tuples of 1 to 12 elements, component-wise (stdlib 2.5.7,
+// 2.10.9, 2.13.6). One block per (arity, trait), all the same shape;
+// keep every arity in step.
+
+// 1-tuples
+impl<A: Clone> Clone for (A,) {
+    fn clone(self) -> (A,) { return (self.0.clone(),); }
+}
+impl<A: Copy> Copy for (A,) {}
+impl<A: Default> Default for (A,) {
+    fn default() -> (A,) { return (rok::core::marker::default_of(),); }
+}
+impl<A: Debug> Debug for (A,) {
+    fn debug(self) -> str { return "(" + self.0.debug() + ",)"; }
+}
+impl<A: PartialEq> PartialEq for (A,) {
+    fn eq(self, rhs: (A,)) -> bool { return self.0.eq(rhs.0); }
+    fn ne(self, rhs: (A,)) -> bool { return !self.eq(rhs); }
+}
+impl<A: Eq> Eq for (A,) {}
+impl<A: Hash> Hash for (A,) {
+    fn hash(self) -> u64 {
+        let h = 1u64;
+        h = ((h << 5) | (h >> 59)) ^ self.0.hash();
+        return h;
+    }
+}
+
+// 2-tuples
+impl<A: Clone, B: Clone> Clone for (A, B) {
+    fn clone(self) -> (A, B) { return (self.0.clone(), self.1.clone()); }
+}
+impl<A: Copy, B: Copy> Copy for (A, B) {}
+impl<A: Default, B: Default> Default for (A, B) {
+    fn default() -> (A, B) { return (rok::core::marker::default_of(), rok::core::marker::default_of()); }
+}
+impl<A: Debug, B: Debug> Debug for (A, B) {
+    fn debug(self) -> str { return "(" + self.0.debug() + ", " + self.1.debug() + ")"; }
+}
+impl<A: PartialEq, B: PartialEq> PartialEq for (A, B) {
+    fn eq(self, rhs: (A, B)) -> bool { return self.0.eq(rhs.0) && self.1.eq(rhs.1); }
+    fn ne(self, rhs: (A, B)) -> bool { return !self.eq(rhs); }
+}
+impl<A: Eq, B: Eq> Eq for (A, B) {}
+impl<A: Hash, B: Hash> Hash for (A, B) {
+    fn hash(self) -> u64 {
+        let h = 2u64;
+        h = ((h << 5) | (h >> 59)) ^ self.0.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.1.hash();
+        return h;
+    }
+}
+
+// 3-tuples
+impl<A: Clone, B: Clone, C: Clone> Clone for (A, B, C) {
+    fn clone(self) -> (A, B, C) { return (self.0.clone(), self.1.clone(), self.2.clone()); }
+}
+impl<A: Copy, B: Copy, C: Copy> Copy for (A, B, C) {}
+impl<A: Default, B: Default, C: Default> Default for (A, B, C) {
+    fn default() -> (A, B, C) { return (rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of()); }
+}
+impl<A: Debug, B: Debug, C: Debug> Debug for (A, B, C) {
+    fn debug(self) -> str { return "(" + self.0.debug() + ", " + self.1.debug() + ", " + self.2.debug() + ")"; }
+}
+impl<A: PartialEq, B: PartialEq, C: PartialEq> PartialEq for (A, B, C) {
+    fn eq(self, rhs: (A, B, C)) -> bool { return self.0.eq(rhs.0) && self.1.eq(rhs.1) && self.2.eq(rhs.2); }
+    fn ne(self, rhs: (A, B, C)) -> bool { return !self.eq(rhs); }
+}
+impl<A: Eq, B: Eq, C: Eq> Eq for (A, B, C) {}
+impl<A: Hash, B: Hash, C: Hash> Hash for (A, B, C) {
+    fn hash(self) -> u64 {
+        let h = 3u64;
+        h = ((h << 5) | (h >> 59)) ^ self.0.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.1.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.2.hash();
+        return h;
+    }
+}
+
+// 4-tuples
+impl<A: Clone, B: Clone, C: Clone, D: Clone> Clone for (A, B, C, D) {
+    fn clone(self) -> (A, B, C, D) { return (self.0.clone(), self.1.clone(), self.2.clone(), self.3.clone()); }
+}
+impl<A: Copy, B: Copy, C: Copy, D: Copy> Copy for (A, B, C, D) {}
+impl<A: Default, B: Default, C: Default, D: Default> Default for (A, B, C, D) {
+    fn default() -> (A, B, C, D) { return (rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of()); }
+}
+impl<A: Debug, B: Debug, C: Debug, D: Debug> Debug for (A, B, C, D) {
+    fn debug(self) -> str { return "(" + self.0.debug() + ", " + self.1.debug() + ", " + self.2.debug() + ", " + self.3.debug() + ")"; }
+}
+impl<A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq> PartialEq for (A, B, C, D) {
+    fn eq(self, rhs: (A, B, C, D)) -> bool { return self.0.eq(rhs.0) && self.1.eq(rhs.1) && self.2.eq(rhs.2) && self.3.eq(rhs.3); }
+    fn ne(self, rhs: (A, B, C, D)) -> bool { return !self.eq(rhs); }
+}
+impl<A: Eq, B: Eq, C: Eq, D: Eq> Eq for (A, B, C, D) {}
+impl<A: Hash, B: Hash, C: Hash, D: Hash> Hash for (A, B, C, D) {
+    fn hash(self) -> u64 {
+        let h = 4u64;
+        h = ((h << 5) | (h >> 59)) ^ self.0.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.1.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.2.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.3.hash();
+        return h;
+    }
+}
+
+// 5-tuples
+impl<A: Clone, B: Clone, C: Clone, D: Clone, E: Clone> Clone for (A, B, C, D, E) {
+    fn clone(self) -> (A, B, C, D, E) { return (self.0.clone(), self.1.clone(), self.2.clone(), self.3.clone(), self.4.clone()); }
+}
+impl<A: Copy, B: Copy, C: Copy, D: Copy, E: Copy> Copy for (A, B, C, D, E) {}
+impl<A: Default, B: Default, C: Default, D: Default, E: Default> Default for (A, B, C, D, E) {
+    fn default() -> (A, B, C, D, E) { return (rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of()); }
+}
+impl<A: Debug, B: Debug, C: Debug, D: Debug, E: Debug> Debug for (A, B, C, D, E) {
+    fn debug(self) -> str { return "(" + self.0.debug() + ", " + self.1.debug() + ", " + self.2.debug() + ", " + self.3.debug() + ", " + self.4.debug() + ")"; }
+}
+impl<A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq> PartialEq for (A, B, C, D, E) {
+    fn eq(self, rhs: (A, B, C, D, E)) -> bool { return self.0.eq(rhs.0) && self.1.eq(rhs.1) && self.2.eq(rhs.2) && self.3.eq(rhs.3) && self.4.eq(rhs.4); }
+    fn ne(self, rhs: (A, B, C, D, E)) -> bool { return !self.eq(rhs); }
+}
+impl<A: Eq, B: Eq, C: Eq, D: Eq, E: Eq> Eq for (A, B, C, D, E) {}
+impl<A: Hash, B: Hash, C: Hash, D: Hash, E: Hash> Hash for (A, B, C, D, E) {
+    fn hash(self) -> u64 {
+        let h = 5u64;
+        h = ((h << 5) | (h >> 59)) ^ self.0.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.1.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.2.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.3.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.4.hash();
+        return h;
+    }
+}
+
+// 6-tuples
+impl<A: Clone, B: Clone, C: Clone, D: Clone, E: Clone, F: Clone> Clone for (A, B, C, D, E, F) {
+    fn clone(self) -> (A, B, C, D, E, F) { return (self.0.clone(), self.1.clone(), self.2.clone(), self.3.clone(), self.4.clone(), self.5.clone()); }
+}
+impl<A: Copy, B: Copy, C: Copy, D: Copy, E: Copy, F: Copy> Copy for (A, B, C, D, E, F) {}
+impl<A: Default, B: Default, C: Default, D: Default, E: Default, F: Default> Default for (A, B, C, D, E, F) {
+    fn default() -> (A, B, C, D, E, F) { return (rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of()); }
+}
+impl<A: Debug, B: Debug, C: Debug, D: Debug, E: Debug, F: Debug> Debug for (A, B, C, D, E, F) {
+    fn debug(self) -> str { return "(" + self.0.debug() + ", " + self.1.debug() + ", " + self.2.debug() + ", " + self.3.debug() + ", " + self.4.debug() + ", " + self.5.debug() + ")"; }
+}
+impl<A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq> PartialEq for (A, B, C, D, E, F) {
+    fn eq(self, rhs: (A, B, C, D, E, F)) -> bool { return self.0.eq(rhs.0) && self.1.eq(rhs.1) && self.2.eq(rhs.2) && self.3.eq(rhs.3) && self.4.eq(rhs.4) && self.5.eq(rhs.5); }
+    fn ne(self, rhs: (A, B, C, D, E, F)) -> bool { return !self.eq(rhs); }
+}
+impl<A: Eq, B: Eq, C: Eq, D: Eq, E: Eq, F: Eq> Eq for (A, B, C, D, E, F) {}
+impl<A: Hash, B: Hash, C: Hash, D: Hash, E: Hash, F: Hash> Hash for (A, B, C, D, E, F) {
+    fn hash(self) -> u64 {
+        let h = 6u64;
+        h = ((h << 5) | (h >> 59)) ^ self.0.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.1.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.2.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.3.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.4.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.5.hash();
+        return h;
+    }
+}
+
+// 7-tuples
+impl<A: Clone, B: Clone, C: Clone, D: Clone, E: Clone, F: Clone, G: Clone> Clone for (A, B, C, D, E, F, G) {
+    fn clone(self) -> (A, B, C, D, E, F, G) { return (self.0.clone(), self.1.clone(), self.2.clone(), self.3.clone(), self.4.clone(), self.5.clone(), self.6.clone()); }
+}
+impl<A: Copy, B: Copy, C: Copy, D: Copy, E: Copy, F: Copy, G: Copy> Copy for (A, B, C, D, E, F, G) {}
+impl<A: Default, B: Default, C: Default, D: Default, E: Default, F: Default, G: Default> Default for (A, B, C, D, E, F, G) {
+    fn default() -> (A, B, C, D, E, F, G) { return (rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of()); }
+}
+impl<A: Debug, B: Debug, C: Debug, D: Debug, E: Debug, F: Debug, G: Debug> Debug for (A, B, C, D, E, F, G) {
+    fn debug(self) -> str { return "(" + self.0.debug() + ", " + self.1.debug() + ", " + self.2.debug() + ", " + self.3.debug() + ", " + self.4.debug() + ", " + self.5.debug() + ", " + self.6.debug() + ")"; }
+}
+impl<A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq> PartialEq for (A, B, C, D, E, F, G) {
+    fn eq(self, rhs: (A, B, C, D, E, F, G)) -> bool { return self.0.eq(rhs.0) && self.1.eq(rhs.1) && self.2.eq(rhs.2) && self.3.eq(rhs.3) && self.4.eq(rhs.4) && self.5.eq(rhs.5) && self.6.eq(rhs.6); }
+    fn ne(self, rhs: (A, B, C, D, E, F, G)) -> bool { return !self.eq(rhs); }
+}
+impl<A: Eq, B: Eq, C: Eq, D: Eq, E: Eq, F: Eq, G: Eq> Eq for (A, B, C, D, E, F, G) {}
+impl<A: Hash, B: Hash, C: Hash, D: Hash, E: Hash, F: Hash, G: Hash> Hash for (A, B, C, D, E, F, G) {
+    fn hash(self) -> u64 {
+        let h = 7u64;
+        h = ((h << 5) | (h >> 59)) ^ self.0.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.1.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.2.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.3.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.4.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.5.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.6.hash();
+        return h;
+    }
+}
+
+// 8-tuples
+impl<A: Clone, B: Clone, C: Clone, D: Clone, E: Clone, F: Clone, G: Clone, H: Clone> Clone for (A, B, C, D, E, F, G, H) {
+    fn clone(self) -> (A, B, C, D, E, F, G, H) { return (self.0.clone(), self.1.clone(), self.2.clone(), self.3.clone(), self.4.clone(), self.5.clone(), self.6.clone(), self.7.clone()); }
+}
+impl<A: Copy, B: Copy, C: Copy, D: Copy, E: Copy, F: Copy, G: Copy, H: Copy> Copy for (A, B, C, D, E, F, G, H) {}
+impl<A: Default, B: Default, C: Default, D: Default, E: Default, F: Default, G: Default, H: Default> Default for (A, B, C, D, E, F, G, H) {
+    fn default() -> (A, B, C, D, E, F, G, H) { return (rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of()); }
+}
+impl<A: Debug, B: Debug, C: Debug, D: Debug, E: Debug, F: Debug, G: Debug, H: Debug> Debug for (A, B, C, D, E, F, G, H) {
+    fn debug(self) -> str { return "(" + self.0.debug() + ", " + self.1.debug() + ", " + self.2.debug() + ", " + self.3.debug() + ", " + self.4.debug() + ", " + self.5.debug() + ", " + self.6.debug() + ", " + self.7.debug() + ")"; }
+}
+impl<A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq> PartialEq for (A, B, C, D, E, F, G, H) {
+    fn eq(self, rhs: (A, B, C, D, E, F, G, H)) -> bool { return self.0.eq(rhs.0) && self.1.eq(rhs.1) && self.2.eq(rhs.2) && self.3.eq(rhs.3) && self.4.eq(rhs.4) && self.5.eq(rhs.5) && self.6.eq(rhs.6) && self.7.eq(rhs.7); }
+    fn ne(self, rhs: (A, B, C, D, E, F, G, H)) -> bool { return !self.eq(rhs); }
+}
+impl<A: Eq, B: Eq, C: Eq, D: Eq, E: Eq, F: Eq, G: Eq, H: Eq> Eq for (A, B, C, D, E, F, G, H) {}
+impl<A: Hash, B: Hash, C: Hash, D: Hash, E: Hash, F: Hash, G: Hash, H: Hash> Hash for (A, B, C, D, E, F, G, H) {
+    fn hash(self) -> u64 {
+        let h = 8u64;
+        h = ((h << 5) | (h >> 59)) ^ self.0.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.1.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.2.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.3.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.4.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.5.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.6.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.7.hash();
+        return h;
+    }
+}
+
+// 9-tuples
+impl<A: Clone, B: Clone, C: Clone, D: Clone, E: Clone, F: Clone, G: Clone, H: Clone, I: Clone> Clone for (A, B, C, D, E, F, G, H, I) {
+    fn clone(self) -> (A, B, C, D, E, F, G, H, I) { return (self.0.clone(), self.1.clone(), self.2.clone(), self.3.clone(), self.4.clone(), self.5.clone(), self.6.clone(), self.7.clone(), self.8.clone()); }
+}
+impl<A: Copy, B: Copy, C: Copy, D: Copy, E: Copy, F: Copy, G: Copy, H: Copy, I: Copy> Copy for (A, B, C, D, E, F, G, H, I) {}
+impl<A: Default, B: Default, C: Default, D: Default, E: Default, F: Default, G: Default, H: Default, I: Default> Default for (A, B, C, D, E, F, G, H, I) {
+    fn default() -> (A, B, C, D, E, F, G, H, I) { return (rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of()); }
+}
+impl<A: Debug, B: Debug, C: Debug, D: Debug, E: Debug, F: Debug, G: Debug, H: Debug, I: Debug> Debug for (A, B, C, D, E, F, G, H, I) {
+    fn debug(self) -> str { return "(" + self.0.debug() + ", " + self.1.debug() + ", " + self.2.debug() + ", " + self.3.debug() + ", " + self.4.debug() + ", " + self.5.debug() + ", " + self.6.debug() + ", " + self.7.debug() + ", " + self.8.debug() + ")"; }
+}
+impl<A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq> PartialEq for (A, B, C, D, E, F, G, H, I) {
+    fn eq(self, rhs: (A, B, C, D, E, F, G, H, I)) -> bool { return self.0.eq(rhs.0) && self.1.eq(rhs.1) && self.2.eq(rhs.2) && self.3.eq(rhs.3) && self.4.eq(rhs.4) && self.5.eq(rhs.5) && self.6.eq(rhs.6) && self.7.eq(rhs.7) && self.8.eq(rhs.8); }
+    fn ne(self, rhs: (A, B, C, D, E, F, G, H, I)) -> bool { return !self.eq(rhs); }
+}
+impl<A: Eq, B: Eq, C: Eq, D: Eq, E: Eq, F: Eq, G: Eq, H: Eq, I: Eq> Eq for (A, B, C, D, E, F, G, H, I) {}
+impl<A: Hash, B: Hash, C: Hash, D: Hash, E: Hash, F: Hash, G: Hash, H: Hash, I: Hash> Hash for (A, B, C, D, E, F, G, H, I) {
+    fn hash(self) -> u64 {
+        let h = 9u64;
+        h = ((h << 5) | (h >> 59)) ^ self.0.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.1.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.2.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.3.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.4.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.5.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.6.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.7.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.8.hash();
+        return h;
+    }
+}
+
+// 10-tuples
+impl<A: Clone, B: Clone, C: Clone, D: Clone, E: Clone, F: Clone, G: Clone, H: Clone, I: Clone, J: Clone> Clone for (A, B, C, D, E, F, G, H, I, J) {
+    fn clone(self) -> (A, B, C, D, E, F, G, H, I, J) { return (self.0.clone(), self.1.clone(), self.2.clone(), self.3.clone(), self.4.clone(), self.5.clone(), self.6.clone(), self.7.clone(), self.8.clone(), self.9.clone()); }
+}
+impl<A: Copy, B: Copy, C: Copy, D: Copy, E: Copy, F: Copy, G: Copy, H: Copy, I: Copy, J: Copy> Copy for (A, B, C, D, E, F, G, H, I, J) {}
+impl<A: Default, B: Default, C: Default, D: Default, E: Default, F: Default, G: Default, H: Default, I: Default, J: Default> Default for (A, B, C, D, E, F, G, H, I, J) {
+    fn default() -> (A, B, C, D, E, F, G, H, I, J) { return (rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of()); }
+}
+impl<A: Debug, B: Debug, C: Debug, D: Debug, E: Debug, F: Debug, G: Debug, H: Debug, I: Debug, J: Debug> Debug for (A, B, C, D, E, F, G, H, I, J) {
+    fn debug(self) -> str { return "(" + self.0.debug() + ", " + self.1.debug() + ", " + self.2.debug() + ", " + self.3.debug() + ", " + self.4.debug() + ", " + self.5.debug() + ", " + self.6.debug() + ", " + self.7.debug() + ", " + self.8.debug() + ", " + self.9.debug() + ")"; }
+}
+impl<A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq> PartialEq for (A, B, C, D, E, F, G, H, I, J) {
+    fn eq(self, rhs: (A, B, C, D, E, F, G, H, I, J)) -> bool { return self.0.eq(rhs.0) && self.1.eq(rhs.1) && self.2.eq(rhs.2) && self.3.eq(rhs.3) && self.4.eq(rhs.4) && self.5.eq(rhs.5) && self.6.eq(rhs.6) && self.7.eq(rhs.7) && self.8.eq(rhs.8) && self.9.eq(rhs.9); }
+    fn ne(self, rhs: (A, B, C, D, E, F, G, H, I, J)) -> bool { return !self.eq(rhs); }
+}
+impl<A: Eq, B: Eq, C: Eq, D: Eq, E: Eq, F: Eq, G: Eq, H: Eq, I: Eq, J: Eq> Eq for (A, B, C, D, E, F, G, H, I, J) {}
+impl<A: Hash, B: Hash, C: Hash, D: Hash, E: Hash, F: Hash, G: Hash, H: Hash, I: Hash, J: Hash> Hash for (A, B, C, D, E, F, G, H, I, J) {
+    fn hash(self) -> u64 {
+        let h = 10u64;
+        h = ((h << 5) | (h >> 59)) ^ self.0.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.1.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.2.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.3.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.4.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.5.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.6.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.7.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.8.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.9.hash();
+        return h;
+    }
+}
+
+// 11-tuples
+impl<A: Clone, B: Clone, C: Clone, D: Clone, E: Clone, F: Clone, G: Clone, H: Clone, I: Clone, J: Clone, K: Clone> Clone for (A, B, C, D, E, F, G, H, I, J, K) {
+    fn clone(self) -> (A, B, C, D, E, F, G, H, I, J, K) { return (self.0.clone(), self.1.clone(), self.2.clone(), self.3.clone(), self.4.clone(), self.5.clone(), self.6.clone(), self.7.clone(), self.8.clone(), self.9.clone(), self.10.clone()); }
+}
+impl<A: Copy, B: Copy, C: Copy, D: Copy, E: Copy, F: Copy, G: Copy, H: Copy, I: Copy, J: Copy, K: Copy> Copy for (A, B, C, D, E, F, G, H, I, J, K) {}
+impl<A: Default, B: Default, C: Default, D: Default, E: Default, F: Default, G: Default, H: Default, I: Default, J: Default, K: Default> Default for (A, B, C, D, E, F, G, H, I, J, K) {
+    fn default() -> (A, B, C, D, E, F, G, H, I, J, K) { return (rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of()); }
+}
+impl<A: Debug, B: Debug, C: Debug, D: Debug, E: Debug, F: Debug, G: Debug, H: Debug, I: Debug, J: Debug, K: Debug> Debug for (A, B, C, D, E, F, G, H, I, J, K) {
+    fn debug(self) -> str { return "(" + self.0.debug() + ", " + self.1.debug() + ", " + self.2.debug() + ", " + self.3.debug() + ", " + self.4.debug() + ", " + self.5.debug() + ", " + self.6.debug() + ", " + self.7.debug() + ", " + self.8.debug() + ", " + self.9.debug() + ", " + self.10.debug() + ")"; }
+}
+impl<A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq> PartialEq for (A, B, C, D, E, F, G, H, I, J, K) {
+    fn eq(self, rhs: (A, B, C, D, E, F, G, H, I, J, K)) -> bool { return self.0.eq(rhs.0) && self.1.eq(rhs.1) && self.2.eq(rhs.2) && self.3.eq(rhs.3) && self.4.eq(rhs.4) && self.5.eq(rhs.5) && self.6.eq(rhs.6) && self.7.eq(rhs.7) && self.8.eq(rhs.8) && self.9.eq(rhs.9) && self.10.eq(rhs.10); }
+    fn ne(self, rhs: (A, B, C, D, E, F, G, H, I, J, K)) -> bool { return !self.eq(rhs); }
+}
+impl<A: Eq, B: Eq, C: Eq, D: Eq, E: Eq, F: Eq, G: Eq, H: Eq, I: Eq, J: Eq, K: Eq> Eq for (A, B, C, D, E, F, G, H, I, J, K) {}
+impl<A: Hash, B: Hash, C: Hash, D: Hash, E: Hash, F: Hash, G: Hash, H: Hash, I: Hash, J: Hash, K: Hash> Hash for (A, B, C, D, E, F, G, H, I, J, K) {
+    fn hash(self) -> u64 {
+        let h = 11u64;
+        h = ((h << 5) | (h >> 59)) ^ self.0.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.1.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.2.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.3.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.4.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.5.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.6.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.7.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.8.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.9.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.10.hash();
+        return h;
+    }
+}
+
+// 12-tuples
+impl<A: Clone, B: Clone, C: Clone, D: Clone, E: Clone, F: Clone, G: Clone, H: Clone, I: Clone, J: Clone, K: Clone, L: Clone> Clone for (A, B, C, D, E, F, G, H, I, J, K, L) {
+    fn clone(self) -> (A, B, C, D, E, F, G, H, I, J, K, L) { return (self.0.clone(), self.1.clone(), self.2.clone(), self.3.clone(), self.4.clone(), self.5.clone(), self.6.clone(), self.7.clone(), self.8.clone(), self.9.clone(), self.10.clone(), self.11.clone()); }
+}
+impl<A: Copy, B: Copy, C: Copy, D: Copy, E: Copy, F: Copy, G: Copy, H: Copy, I: Copy, J: Copy, K: Copy, L: Copy> Copy for (A, B, C, D, E, F, G, H, I, J, K, L) {}
+impl<A: Default, B: Default, C: Default, D: Default, E: Default, F: Default, G: Default, H: Default, I: Default, J: Default, K: Default, L: Default> Default for (A, B, C, D, E, F, G, H, I, J, K, L) {
+    fn default() -> (A, B, C, D, E, F, G, H, I, J, K, L) { return (rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of()); }
+}
+impl<A: Debug, B: Debug, C: Debug, D: Debug, E: Debug, F: Debug, G: Debug, H: Debug, I: Debug, J: Debug, K: Debug, L: Debug> Debug for (A, B, C, D, E, F, G, H, I, J, K, L) {
+    fn debug(self) -> str { return "(" + self.0.debug() + ", " + self.1.debug() + ", " + self.2.debug() + ", " + self.3.debug() + ", " + self.4.debug() + ", " + self.5.debug() + ", " + self.6.debug() + ", " + self.7.debug() + ", " + self.8.debug() + ", " + self.9.debug() + ", " + self.10.debug() + ", " + self.11.debug() + ")"; }
+}
+impl<A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq, L: PartialEq> PartialEq for (A, B, C, D, E, F, G, H, I, J, K, L) {
+    fn eq(self, rhs: (A, B, C, D, E, F, G, H, I, J, K, L)) -> bool { return self.0.eq(rhs.0) && self.1.eq(rhs.1) && self.2.eq(rhs.2) && self.3.eq(rhs.3) && self.4.eq(rhs.4) && self.5.eq(rhs.5) && self.6.eq(rhs.6) && self.7.eq(rhs.7) && self.8.eq(rhs.8) && self.9.eq(rhs.9) && self.10.eq(rhs.10) && self.11.eq(rhs.11); }
+    fn ne(self, rhs: (A, B, C, D, E, F, G, H, I, J, K, L)) -> bool { return !self.eq(rhs); }
+}
+impl<A: Eq, B: Eq, C: Eq, D: Eq, E: Eq, F: Eq, G: Eq, H: Eq, I: Eq, J: Eq, K: Eq, L: Eq> Eq for (A, B, C, D, E, F, G, H, I, J, K, L) {}
+impl<A: Hash, B: Hash, C: Hash, D: Hash, E: Hash, F: Hash, G: Hash, H: Hash, I: Hash, J: Hash, K: Hash, L: Hash> Hash for (A, B, C, D, E, F, G, H, I, J, K, L) {
+    fn hash(self) -> u64 {
+        let h = 12u64;
+        h = ((h << 5) | (h >> 59)) ^ self.0.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.1.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.2.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.3.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.4.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.5.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.6.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.7.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.8.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.9.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.10.hash();
+        h = ((h << 5) | (h >> 59)) ^ self.11.hash();
+        return h;
+    }
+}

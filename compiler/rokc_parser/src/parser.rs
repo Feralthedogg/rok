@@ -21,6 +21,8 @@ use crate::prec::{Assoc, CAST_PREC, COALESCE_PREC, ExtOps, Fixity};
 
 #[path = "fstring.rs"]
 mod fstring;
+#[path = "meta.rs"]
+pub mod meta;
 
 /// `rest` of a `let (..)` tuple pattern: splice index + optional name.
 type LetTupleRest = (usize, Option<String>);
@@ -67,6 +69,12 @@ pub struct Parser<'a> {
     ext: ExtOps,
     /// Items `#[derive(..)]` generated for the last item parsed.
     pending_items: Vec<Item>,
+    /// User meta blocks (spec 6.8), gathered by the driver's pre-pass.
+    meta: std::sync::Arc<meta::MetaTable>,
+    /// Meta expansions in progress (cycle detection, 6.8.8).
+    meta_stack: Vec<String>,
+    /// The last `parse_item` consumed an item that expanded to nothing.
+    vanished: bool,
 }
 
 /// Nesting limit for expressions, types, patterns and blocks.
@@ -83,11 +91,23 @@ pub fn parse_program_ext(
     file: impl Into<String>,
     ext: &ExtOps,
 ) -> (Program, Vec<RokDiagnostic>) {
+    parse_program_meta(tokens, file, ext, &std::sync::Arc::default())
+}
+
+/// `parse_program_ext` that also expands user meta blocks (spec 6.8).
+pub fn parse_program_meta(
+    tokens: &[Token],
+    file: impl Into<String>,
+    ext: &ExtOps,
+    metas: &std::sync::Arc<meta::MetaTable>,
+) -> (Program, Vec<RokDiagnostic>) {
     let file = file.into();
     let ext = ext.clone();
+    let metas = std::sync::Arc::clone(metas);
     let run = move || {
         let mut p = Parser::new(tokens, file);
         p.ext = ext;
+        p.meta = metas;
         let program = p.parse_program();
         (program, p.diagnostics)
     };
@@ -122,7 +142,22 @@ impl<'a> Parser<'a> {
             untyped_throws: Vec::new(),
             ext: ExtOps::default(),
             pending_items: Vec::new(),
+            meta: std::sync::Arc::default(),
+            meta_stack: Vec::new(),
+            vanished: false,
         }
+    }
+
+    /// Does `f` fail here? Always rewinds: position, diagnostics and
+    /// queued statements are as before.
+    fn backtracks<T>(&mut self, f: impl FnOnce(&mut Self) -> Option<T>) -> bool {
+        let (pos, n_diags, n_pending) =
+            (self.pos, self.diagnostics.len(), self.pending_stmts.len());
+        let failed = f(self).is_none();
+        self.pos = pos;
+        self.diagnostics.truncate(n_diags);
+        self.pending_stmts.truncate(n_pending);
+        failed
     }
 
     pub(crate) fn at_eof(&self) -> bool {
@@ -367,11 +402,14 @@ impl<'a> Parser<'a> {
         let attrs = self.parse_inner_attrs();
         while !matches!(self.peek(), TokenKind::Eof) {
             let from = self.pos;
+            if self.meta_block().is_some() {
+                continue;
+            }
             if self.at_item_start() {
                 if let Some(item) = self.parse_item() {
                     items.push(item);
                     items.append(&mut self.pending_items);
-                } else {
+                } else if !std::mem::take(&mut self.vanished) {
                     self.recover(from, Recover::TopItem);
                 }
             } else if let Some(stmt) = self.parse_top_stmt() {
@@ -684,6 +722,7 @@ impl<'a> Parser<'a> {
 
     fn parse_item(&mut self) -> Option<Item> {
         let span = self.peek_span();
+        let from = self.pos;
         let item = self.parse_item_inner()?;
         // E8: `pkg` / `sup` / `rok` are path roots and `any` is the any
         // type, so no module or type may take those names.
@@ -707,8 +746,25 @@ impl<'a> Parser<'a> {
                 format!("`{n}` cannot name a {what}: it is reserved as a path root / type keyword"),
             );
         }
+        if !self.meta.is_empty() {
+            // Spec 6.8.3: a user attribute replaces the item with its
+            // expansion (which expands again — 6.8.8).
+            if let Some(items) = self.expand_user_attribute(&item, from) {
+                let mut it = items.into_iter();
+                let first = it.next();
+                self.pending_items.extend(it);
+                self.vanished = first.is_none();
+                return first;
+            }
+        }
+        let (item, user_derived) = if self.meta.is_empty() {
+            (item, Vec::new())
+        } else {
+            self.expand_user_derives(item, from)
+        };
         let (derived, diags) = crate::derive::derive_items(&item, &self.file);
         self.pending_items.extend(derived);
+        self.pending_items.extend(user_derived);
         self.diagnostics.extend(diags);
         Some(item)
     }
@@ -716,23 +772,6 @@ impl<'a> Parser<'a> {
     fn parse_item_inner(&mut self) -> Option<Item> {
         let attrs = self.parse_outer_attrs();
         let vis = self.parse_visibility();
-        // Spec 6.8: user meta blocks
-        //   #[impl_derive(...)] / #[impl_attribute(...)] /
-        //   #[impl_derive_attribute(...)]   pub? @derive|@attribute { ... }
-        //
-        // Stage-1 has no template-token expander, so we recognise the form
-        // and reject explicitly. Without this the `@derive` token would
-        // surface as a confusing "expected an item" parse error and the
-        // attribute would silently bind to nothing.
-        let is_meta_attr = attrs.iter().any(|a| {
-            matches!(
-                a.name(),
-                "impl_derive" | "impl_attribute" | "impl_derive_attribute"
-            )
-        });
-        if is_meta_attr {
-            return self.skip_meta_block(vis, attrs);
-        }
         if self.at_union_item() {
             return self.parse_union(vis, attrs).map(Item::Union);
         }
@@ -800,51 +839,6 @@ impl<'a> Parser<'a> {
                 None
             }
         }
-    }
-
-    /// Skip the body of a `pub? @derive { ... }` / `@attribute { ... }`
-    /// meta block (spec 6.8) and emit a single "not yet implemented"
-    /// diagnostic. Recognising the shape here keeps the rest of the
-    /// item-parsing loop from reporting a stream of confusing errors.
-    fn skip_meta_block(
-        &mut self,
-        _vis: rokc_core::Visibility,
-        _attrs: Vec<Attribute>,
-    ) -> Option<Item> {
-        let span = self.peek_span();
-        self.error(
-            span,
-            "user meta blocks (#[impl_derive] / #[impl_attribute] / \
-             #[impl_derive_attribute]) are not yet implemented \
-             (spec 6.8, stage-1 unimpl)",
-        );
-        // Best-effort: consume `@derive | @attribute` then a balanced { ... }.
-        if matches!(self.peek(), TokenKind::At) {
-            self.bump();
-            if matches!(self.peek(), TokenKind::Ident(_)) {
-                self.bump();
-            }
-        }
-        if matches!(self.peek(), TokenKind::LBrace) {
-            self.bump();
-            let mut depth = 1usize;
-            while depth > 0 && !matches!(self.peek(), TokenKind::Eof) {
-                match self.peek() {
-                    TokenKind::LBrace => {
-                        depth += 1;
-                        self.bump();
-                    }
-                    TokenKind::RBrace => {
-                        depth -= 1;
-                        self.bump();
-                    }
-                    _ => {
-                        self.bump();
-                    }
-                }
-            }
-        }
-        None
     }
 
     /// `type NAME[<G>] = ty;`
@@ -1377,10 +1371,13 @@ impl<'a> Parser<'a> {
             let mut items = Vec::new();
             while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
                 let from = self.pos;
+                if self.meta_block().is_some() {
+                    continue;
+                }
                 if let Some(item) = self.parse_item() {
                     items.push(item);
                     items.append(&mut self.pending_items);
-                } else {
+                } else if !std::mem::take(&mut self.vanished) {
                     self.recover(from, Recover::NestedItem);
                 }
             }
@@ -1715,7 +1712,11 @@ impl<'a> Parser<'a> {
         };
         let pat = self.with_struct_expr(true, Self::parse_pattern_atom)?;
         Some(Stmt {
-            kind: StmtKind::LetPattern { pat, init },
+            kind: StmtKind::LetPattern {
+                pat,
+                ty: None,
+                init,
+            },
             span,
         })
     }
@@ -2583,6 +2584,42 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Let => {
                 self.bump();
+                // The flat forms below (`Point { x, y: b }`, `(a, ..rest)`,
+                // `name`) have their own statements; any other irrefutable
+                // pattern (`Pair(a, b)`, `Line { a: Point { x, .. }, .. }`,
+                // `(n, P { x, .. })`) is a `LetPattern` (spec 3.15).
+                let general = match self.peek() {
+                    TokenKind::Ident(_) => {
+                        matches!(
+                            self.peek_next(),
+                            Some(TokenKind::LParen | TokenKind::ColonColon)
+                        ) && !self.peek_path_then_lbrace()
+                    }
+                    TokenKind::LParen => self.backtracks(|p| p.parse_let_tuple_pattern(start)),
+                    _ => false,
+                } || (self.peek_path_then_lbrace()
+                    && self.backtracks(|p| {
+                        p.parse_let_struct_fields()
+                            .filter(|_| matches!(p.peek(), TokenKind::Colon | TokenKind::Eq))
+                    }));
+                if general {
+                    let pat = self.with_struct_expr(true, Self::parse_pattern_atom)?;
+                    let ty = if self.eat(&TokenKind::Colon) {
+                        Some(self.parse_type()?)
+                    } else {
+                        None
+                    };
+                    self.expect(&TokenKind::Eq, "`=`")?;
+                    let init = self.parse_expr()?;
+                    self.expect(&TokenKind::Semi, "`;`")?;
+                    return Some((
+                        Stmt {
+                            kind: StmtKind::LetPattern { pat, ty, init },
+                            span: start,
+                        },
+                        false,
+                    ));
+                }
                 // Struct destructure: `let Point { x, y, .. } [: ty] = init;`.
                 // Decided purely by syntax: `let Path {` cannot start a
                 // plain binding (`let name [: ty] = ...`), so any path
@@ -4202,10 +4239,11 @@ impl<'a> Parser<'a> {
         Some((items, trailing_comma))
     }
 
-    /// Spec 4.8: trailing closure attached to a call. A `||`, `|...|`, or
+    /// Spec 4.8: trailing closure attached to a call. A `|...|` or
     /// `{ ... }` immediately after the closing `)` of the call becomes
-    /// the last argument. Returns `None` when no trailing closure is
-    /// present.
+    /// the last argument (408.6); a 0-arg trailing closure is spelled
+    /// `{ ... }`, so `||` there is the logical-or operator. Returns
+    /// `None` when no trailing closure is present.
     ///
     /// `{ ... }` is gated on `self.struct_expr_allowed`: inside a
     /// control-flow head (`if`, `while`, `for`, `match` condition) the
@@ -4235,7 +4273,7 @@ impl<'a> Parser<'a> {
                 };
                 Some(Some(Box::new(closure)))
             }
-            TokenKind::PipePipe | TokenKind::Pipe => {
+            TokenKind::Pipe => {
                 let span = self.peek_span();
                 let kind = self.parse_closure_expr()?;
                 Some(Some(Box::new(Expr { span, kind })))
@@ -4490,6 +4528,34 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// `(p, .., q)` after a variant path (empty without parentheses).
+    /// `..` stands for the fields not written.
+    fn parse_variant_pattern_args(&mut self) -> Option<Vec<Pattern>> {
+        Some(if self.eat(&TokenKind::LParen) {
+            let mut sub = Vec::new();
+            while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
+                // `V(a, ..)`: the remaining fields, any value.
+                if matches!(self.peek(), TokenKind::DotDot) {
+                    let span = self.peek_span();
+                    self.bump();
+                    sub.push(Pattern {
+                        kind: PatternKind::Rest(None),
+                        span,
+                    });
+                } else {
+                    sub.push(self.parse_pattern()?);
+                }
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(&TokenKind::RParen, "`)`")?;
+            sub
+        } else {
+            Vec::new()
+        })
+    }
+
     fn parse_struct_pattern_body(&mut self, path: Path) -> Option<PatternKind> {
         self.expect(&TokenKind::LBrace, "`{`")?;
         let mut fields = Vec::new();
@@ -4648,19 +4714,7 @@ impl<'a> Parser<'a> {
                     if self.struct_expr_allowed && matches!(self.peek(), TokenKind::LBrace) {
                         self.parse_struct_pattern_body(path)?
                     } else {
-                        let args = if self.eat(&TokenKind::LParen) {
-                            let mut sub = Vec::new();
-                            while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
-                                sub.push(self.parse_pattern()?);
-                                if !self.eat(&TokenKind::Comma) {
-                                    break;
-                                }
-                            }
-                            self.expect(&TokenKind::RParen, "`)`")?;
-                            sub
-                        } else {
-                            Vec::new()
-                        };
+                        let args = self.parse_variant_pattern_args()?;
                         PatternKind::EnumVariant { path, args }
                     }
                 } else if self.struct_expr_allowed

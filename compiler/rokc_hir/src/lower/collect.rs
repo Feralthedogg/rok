@@ -236,6 +236,16 @@ pub fn lower_full(
                 _ => None,
             })
             .collect(),
+        plain_aliases: program
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                Item::TypeAlias(a) if a.generics.params.is_empty() => {
+                    Some((a.name.clone(), a.ty.clone()))
+                }
+                _ => None,
+            })
+            .collect(),
         alias_uses: std::cell::RefCell::new(Vec::new()),
     };
     check_bound_names(program, &names, &mut pre_diags);
@@ -375,6 +385,37 @@ pub fn lower_full(
         &mut enum_defs,
         &names,
     );
+    // Generic structs over generic enums (`List<Result<str, E>>`) could
+    // not resolve their arguments before the enum instances existed:
+    // instantiate again, then re-resolve the plain structs naming them.
+    let before = struct_table.len();
+    instantiate_generic_structs(
+        program,
+        &generic_structs,
+        &mut struct_table,
+        &mut struct_defs,
+        &enum_table,
+        &names,
+    );
+    if struct_table.len() != before {
+        for (i, s) in struct_decls.iter().enumerate() {
+            let module = module_of(&s.name);
+            let sc = Scope {
+                names: &names,
+                module: &module,
+            };
+            let id = StructId(u32::try_from(i).expect("StructId overflow"));
+            struct_defs[i] = lower_struct_def(s, id, &struct_table, &enum_table, sc);
+        }
+        instantiate_generic_enums(
+            program,
+            &generic_enums,
+            &struct_table,
+            &mut enum_table,
+            &mut enum_defs,
+            &names,
+        );
+    }
 
     // Pass 1c: collect module-level `const` items. Their value
     // expressions are stored as AST and inlined at each use site.
@@ -1272,6 +1313,7 @@ pub fn lower_full(
         ref_out: std::cell::RefCell::new(ref_out),
         any_dispatch: std::cell::RefCell::new(Vec::new()),
         projecting: std::cell::RefCell::new(Vec::new()),
+        const_substs: std::cell::RefCell::new(HashMap::new()),
         thunks: std::cell::RefCell::new(HashMap::new()),
         diagnostics: std::cell::RefCell::new(Vec::new()),
     };

@@ -118,9 +118,10 @@ pub fn filter_items(items: Vec<Item>, env: &CfgEnv) -> Vec<Item> {
 }
 
 fn item_passes(item: &Item, env: &CfgEnv) -> bool {
-    item_attrs(item)
-        .iter()
-        .all(|a| !is_cfg(a) || eval_cfg_attr(a, env))
+    let attrs = item_attrs(item);
+    // Spec 6.2.5: `#[test]` implies `#[cfg(test)]`.
+    (env.flags.contains("test") || !crate::harness::is_test(attrs))
+        && attrs.iter().all(|a| !is_cfg(a) || eval_cfg_attr(a, env))
 }
 
 fn is_cfg(a: &Attribute) -> bool {
