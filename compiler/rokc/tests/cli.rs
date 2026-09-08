@@ -70,7 +70,7 @@ fn new_bin_package_runs_from_its_directory() {
     let out = rokc(Some(&env), &dir, &["-q", "build", "app/util/x.rok"]);
     assert_exit(&out, 0);
     assert!(out.stderr.is_empty(), "{}", text(&out.stderr));
-    assert!(app.join("target/app").is_file());
+    assert!(app.join("target/debug/app").is_file());
 
     assert_exit(&rokc(None, &dir, &["--cwd=app", "clean"]), 0);
     assert!(!app.join("target").exists());
@@ -84,8 +84,8 @@ fn lib_package_builds_archive_and_runs_tests() {
     let lib = dir.join("mylib");
 
     assert_exit(&rokc(Some(&env), &dir, &["build", "mylib"]), 0);
-    assert!(lib.join("target/libmylib.a").is_file());
-    assert!(lib.join("target/mylib.o").is_file());
+    assert!(lib.join("target/debug/libmylib.a").is_file());
+    assert!(lib.join("target/debug/mylib.o").is_file());
     // A library has no entry point.
     assert_exit(&rokc(Some(&env), &dir, &["run", "mylib"]), 1);
 
@@ -128,7 +128,7 @@ fn lone_file_is_an_anonymous_package() {
     // `run` of a lone file leaves no target/ behind; `build` uses one.
     assert!(!dir.join("target").exists());
     assert_exit(&rokc(Some(&env), &dir, &["build", "hello.rok"]), 0);
-    assert!(dir.join("target/hello").is_file());
+    assert!(dir.join("target/debug/hello").is_file());
 
     // Spec 4.16.8: no file submodules.
     fs::write(dir.join("m.rok"), "fn f() {}\n").unwrap();
@@ -212,4 +212,57 @@ fn demangle_and_usage_errors() {
     assert_exit(&rokc(None, &dir, &["build", "--bogus"]), 2);
     assert_exit(&rokc(None, &dir, &["frobnicate"]), 2);
     assert_exit(&rokc(None, &dir, &["--version"]), 0);
+}
+
+#[test]
+fn extern_dependencies_are_top_level_names() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("extern");
+    // `greet` (a library with a submodule and a `pkg::` import) and
+    // `app`, which uses it from its root and from a submodule.
+    fs::create_dir_all(dir.join("greet")).unwrap();
+    fs::write(
+        dir.join("greet/lib.rok"),
+        "pub mod words;\nuse pkg::words::hello;\n\
+         pub fn greet(n: i32) -> i32 { return hello() + n; }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("greet/words.rok"),
+        "pub fn hello() -> i32 { return 40; }\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("app")).unwrap();
+    fs::write(
+        dir.join("app/main.rok"),
+        "mod sub;\nuse greet::greet;\nprintln(f\"{greet(1)} {sub::two()}\");\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("app/sub.rok"),
+        "use greet::words::hello;\npub fn two() -> i32 { return hello() + 2; }\n",
+    )
+    .unwrap();
+    let out = rokc(Some(&env), &dir, &["run", "app", "--extern", "greet=greet"]);
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "41 42\n");
+    // `--extern=name=path/lib.rok` works too; an archive does not.
+    let out = rokc(
+        Some(&env),
+        &dir,
+        &["build", "--release", "app", "--extern=greet=greet/lib.rok"],
+    );
+    assert_exit(&out, 0);
+    assert!(dir.join("app/target/release/app").is_file());
+    assert_exit(&rokc(None, &dir, &["build", "app", "--extern", "g=x.a"]), 2);
+    // Without it, `greet` is unknown.
+    assert_exit(&rokc(Some(&env), &dir, &["check", "app"]), 1);
+}
+
+#[test]
+fn init_makes_an_existing_directory_a_package() {
+    let dir = scratch("init");
+    assert_exit(&rokc(None, &dir, &["init", "--lib"]), 0);
+    assert!(dir.join("lib.rok").is_file());
+    assert_exit(&rokc(None, &dir, &["init"]), 1);
 }

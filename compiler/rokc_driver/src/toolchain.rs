@@ -217,6 +217,9 @@ pub fn link_executable(
     for lib in link_libraries {
         cmd.arg(format!("-l{lib}"));
     }
+    // core's float methods call libm (`floor`, `sin`, ..); glibc keeps it
+    // out of libc.
+    cmd.arg("-lm");
     for lib in &mlir.runtime_libraries {
         if !(lib == "rokr" && (rokr_is_path || opts.rokr == "rokr")) {
             cmd.arg(format!("-l{lib}"));
@@ -294,9 +297,29 @@ fn llvm_ir(
         )));
     }
     let ll_path = dir.join("module.ll");
-    std::fs::write(&ll_path, &out.stdout)
+    let ll = String::from_utf8(out.stdout)
+        .map_err(|_| err("mlir-translate printed non-UTF-8 LLVM IR".to_owned()))?;
+    std::fs::write(&ll_path, tls_initial_exec(&ll))
         .map_err(|e| err(format!("cannot write {}: {e}", ll_path.display())))?;
     Ok((ll_path, mlir))
+}
+
+/// 803 §8.3.8: the `rok_tls_*` slots use the initial-exec TLS model
+/// (the runtime is always linked into the executable). MLIR's
+/// `llvm.mlir.global` has no TLS-model attribute, so the external
+/// declarations are rewritten in the translated LLVM IR. Mach-O ignores
+/// the model (TLV access); ELF gets `@gottpoff` instead of
+/// `__tls_get_addr`.
+fn tls_initial_exec(ll: &str) -> String {
+    let mut out = String::with_capacity(ll.len() + 64);
+    for line in ll.split_inclusive('\n') {
+        if line.starts_with("@rok_tls_") {
+            out.push_str(&line.replacen(" thread_local ", " thread_local(initialexec) ", 1));
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
 }
 
 fn clang(opts: &BuildOptions) -> Result<Command, RokDiagnostic> {
@@ -332,4 +355,22 @@ fn locate_tool(name: &str) -> Result<PathBuf, RokDiagnostic> {
         .map(|dir| dir.join(name))
         .find(|c| c.is_file())
         .ok_or_else(|| err(format!("cannot find `{name}` in PATH (needed to build)")))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn rok_tls_slots_are_initial_exec() {
+        let ll = "@rok_tls_yield_flag = external thread_local global i8\n\
+                  @other = external thread_local global i8\n\
+                  @rok_tls_tlab_cursor = external thread_local global i64\n\
+                  define void @f() {\n  ret void\n}";
+        assert_eq!(
+            super::tls_initial_exec(ll),
+            "@rok_tls_yield_flag = external thread_local(initialexec) global i8\n\
+             @other = external thread_local global i8\n\
+             @rok_tls_tlab_cursor = external thread_local(initialexec) global i64\n\
+             define void @f() {\n  ret void\n}"
+        );
+    }
 }

@@ -1,0 +1,59 @@
+// expect-exit: 0
+// expect-stdout:
+// 5
+// 7
+// 3
+// ok
+
+// GC: a function's top-level `let`s and temporaries stop being roots
+// right after their last use (MIR liveness), not at function end; a
+// value still used later — after a loop, or on one branch — stays live.
+extern "C" {
+    fn rok_gc_collect();
+    fn rok_gc_stats_live_bytes() -> usize;
+}
+
+trait Val { fn val(self) -> i64; }
+struct Box2 { a: i64; b: i64; }
+impl Val for Box2 { fn val(self) -> i64 { return self.a + self.b; } }
+
+fn mk(a: i64, b: i64) -> any Val { return Box2 { a: a, b: b }; }
+
+fn live() -> usize {
+    unsafe { rok_gc_collect() };
+    return unsafe { rok_gc_stats_live_bytes() };
+}
+
+fn main() -> i32 {
+    let base = live();
+    let t: any Val = mk(2, 3);
+    let v = t.val();
+    // `t` is dead from here on: nothing of it is retained.
+    if live() != base { return 1; }
+    rok_print_i64(v);
+
+    // A temporary (the `mk` result) dies with the call that consumes it.
+    let w = mk(3, 4).val();
+    if live() != base { return 2; }
+    rok_print_i64(w);
+
+    // Used after the loop: live through every iteration's collection.
+    let kept: any Val = mk(1, 2);
+    let i = 0;
+    while i < 3 {
+        if live() - base != 32usize { return 3; }
+        i += 1;
+    }
+    rok_print_i64(kept.val());
+    if live() != base { return 4; }
+
+    // Used on one branch only: dead on entry to the other.
+    let maybe: any Val = mk(5, 5);
+    if v > 100 {
+        rok_print_i64(maybe.val());
+    } else {
+        if live() != base { return 5; }
+    }
+    rok_print_str("ok");
+    return 0;
+}

@@ -20,14 +20,19 @@ const USAGE: &str = "\
 usage: rokc [global options] <command> [options] [args]
 
 commands:
-  build [path]           build the package (executable target/<name>, or
-                         target/lib<name>.a for a `lib.rok` package)
+  build [path]           build the package (executable target/<profile>/<name>,
+                         or target/<profile>/lib<name>.a for a `lib.rok`
+                         package; <profile> is debug, or release at -O2+ /
+                         -Os; a --target build goes under target/<triple>/)
   run [path] [-- args]   build, then run; args after `--` are forwarded
   test [path] [filter]   build and run the `#[test]` functions (filter: regex
                          with ^ $ . * + ?, or a substring)
-  check [path]           diagnose only, no native build
+  check [path | -]       diagnose only, no native build (`-`: source on stdin)
+  repl                   interactive session (:type <expr>, :reset, :quit)
+  lsp                    language server on stdio (`rok lsp` / `rokls` run it)
   fmt [path]             format .rok files in place (file or directory)
   new [--lib|--bin] <name>  create a package directory
+  init [--lib|--bin] [dir]  make an existing directory a package
   clean [path]           remove the package's target/
   demangle <symbol>...   decode `_Y` symbols
   emit [path]            write an intermediate artifact (see --emit)
@@ -48,7 +53,8 @@ global options:
 build options:
   -o, --out, --output <path>   output file
   --emit=<kind>[,<kind>...]    hir | mir | mlir | llvmir | asm | obj
-                               (written to target/<name>.<ext> unless -o)
+                               (written to target/<profile>/build/<name>.<ext>
+                               unless -o)
   --target=<triple>            LLVM target triple
   --release                    optimized build (same as -O2)
   -O0 | -O1 | -O2 | -O3 | -Os  optimization level (default -O0)
@@ -57,6 +63,10 @@ build options:
                                $ROK_HOME/lib/rok/{core,std,bare}/lib.rok)
   --rokr <lib>                 runtime library: path, or name for -l<name>
                                (default: $ROK_HOME/lib/librokr.a, else -lrokr)
+  --extern <name>=<path>       dependency package (its directory or
+                               `lib.rok`), importable as `use name::..`
+                               (repeatable; `rok` passes these)
+  --target-dir <dir>           instead of the package's target/
   --keep                       keep the temporary build directory
 
 test options:   --threads=N, --show-output
@@ -79,6 +89,8 @@ struct Args {
     output: Option<PathBuf>,
     emit: Vec<EmitKind>,
     bootstrap: Vec<PathBuf>,
+    externs: Vec<(String, PathBuf)>,
+    target_dir: Option<PathBuf>,
     cfg: Vec<String>,
     opts: BuildOptions,
     run_args: Vec<String>,
@@ -150,6 +162,8 @@ fn parse_args(raw: Vec<String>) -> Args {
             "-o" | "--out" | "--output" => a.output = Some(value(&name, inline, &mut it).into()),
             "--bootstrap" => a.bootstrap.push(value(&name, inline, &mut it).into()),
             "--cfg" => a.cfg.push(value(&name, inline, &mut it)),
+            "--extern" => a.externs.push(parse_extern(&value(&name, inline, &mut it))),
+            "--target-dir" => a.target_dir = Some(value(&name, inline, &mut it).into()),
             "--target" => a.opts.target = Some(value(&name, inline, &mut it)),
             "--rokr" => a.opts.rokr = value(&name, inline, &mut it),
             // `--stage` is the pre-901 spelling of `--emit`.
@@ -199,6 +213,40 @@ fn parse_args(raw: Vec<String>) -> Args {
     a
 }
 
+/// `--extern name=path` (spec 902.3). The path is the dependency's
+/// package directory or its `lib.rok`: dependencies are compiled from
+/// source with the package, not linked as prebuilt `.a` archives.
+fn parse_extern(v: &str) -> (String, PathBuf) {
+    let Some((name, path)) = v.split_once('=') else {
+        usage_error(&format!("`--extern {v}`: expected <name>=<path>"));
+    };
+    let ident = |s: &str| {
+        s.chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+            && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+    };
+    if !ident(name) {
+        usage_error(&format!("`--extern`: `{name}` is not a package name"));
+    }
+    let path = PathBuf::from(path);
+    if path.extension().is_some_and(|e| e == "a") {
+        usage_error(&format!(
+            "`--extern {name}`: prebuilt archives are not supported yet; pass the package \
+             directory"
+        ));
+    }
+    let root = if path.is_dir() {
+        path.join("lib.rok")
+    } else {
+        path
+    };
+    if !root.is_file() {
+        fail(&format!("`--extern {name}`: no `{}`", root.display()));
+    }
+    (name.to_owned(), root)
+}
+
 fn main() {
     // Spec 901.6: an internal error (rokc panic) exits 101.
     let default_hook = std::panic::take_hook();
@@ -223,9 +271,28 @@ fn main() {
         }
         "check" => {
             let a = with_defaults(a);
-            let (result, _) = compile(&a, &discover_arg(&a), false);
+            // `check -`: the source is stdin (901.9), an anonymous package.
+            let pkg = if a.positional.first().is_some_and(|p| p == "-") {
+                Package::stdin()
+            } else {
+                discover_arg(&a)
+            };
+            let (result, _) = compile(&a, &pkg, false);
             // Codegen too: it rejects constructs the backend cannot lower.
             fail_on(result.emit(EmitKind::Mlir, &a.opts));
+        }
+        "lsp" => {
+            let a = with_defaults(a);
+            let io = (
+                std::io::BufReader::new(std::io::stdin()),
+                std::io::stdout().lock(),
+            );
+            process::exit(rokc_tools::lsp::serve(io.0, io.1, a.bootstrap, a.externs));
+        }
+        "repl" => {
+            let a = with_defaults(a);
+            let tty = std::io::stdin().is_terminal();
+            process::exit(rokc_tools::repl::main(a.bootstrap, a.externs, a.opts, tty));
         }
         "run" => cmd_run(&with_defaults(a)),
         "test" => cmd_test(&with_defaults(a)),
@@ -234,7 +301,8 @@ fn main() {
             let [name] = a.positional.as_slice() else {
                 usage_error("usage: rokc new [--lib | --bin] <name>");
             };
-            let root = package::new_package(Path::new(name), a.lib).unwrap_or_else(|e| fail(&e));
+            let root =
+                package::new_package(Path::new(name), a.lib, false).unwrap_or_else(|e| fail(&e));
             if !a.quiet {
                 eprintln!(
                     "     Created {} package `{name}` ({})",
@@ -243,9 +311,21 @@ fn main() {
                 );
             }
         }
+        "init" => {
+            let dir = match a.positional.as_slice() {
+                [] => ".",
+                [d] => d.as_str(),
+                _ => usage_error("usage: rokc init [--lib | --bin] [dir]"),
+            };
+            let root =
+                package::new_package(Path::new(dir), a.lib, true).unwrap_or_else(|e| fail(&e));
+            if !a.quiet {
+                eprintln!("     Created package ({})", root.display());
+            }
+        }
         "clean" => {
             let pkg = discover_arg(&a);
-            let target = pkg.target_dir();
+            let target = a.target_dir.clone().unwrap_or_else(|| pkg.target_dir());
             match std::fs::remove_dir_all(&target) {
                 Ok(()) if !a.quiet => eprintln!("     Removed {}", target.display()),
                 Ok(()) => {}
@@ -263,26 +343,14 @@ fn main() {
 /// The implicit `use rok::core::**;` (spec 0.0.5) needs `rok/core`,
 /// and linking needs `librokr.a`; find both without flags.
 fn with_defaults(mut a: Args) -> Args {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(Path::to_path_buf));
-    let (libs, rokr) = locate(exe_dir.as_deref());
+    let (roots, rokr) = rokc_interface::toolchain();
     if a.bootstrap.is_empty() {
-        match libs {
-            Some(libs) => {
-                a.bootstrap.push(libs.join("core/lib.rok"));
-                // `rok::std` / `rok::bare` ride along when present (no
-                // implicit glob: user code names them).
-                for tier in ["std", "bare"] {
-                    let lib = libs.join(tier).join("lib.rok");
-                    if lib.is_file() {
-                        a.bootstrap.push(lib);
-                    }
-                }
-            }
+        match roots {
+            Some(roots) => a.bootstrap = roots,
             None => eprintln!(
-                "rokc: warning: `$ROK_HOME/{INSTALLED_LIBS}/core/lib.rok` not found \
-                 (set ROK_HOME); operators and lang items are unavailable"
+                "rokc: warning: `$ROK_HOME/{}/core/lib.rok` not found \
+                 (set ROK_HOME); operators and lang items are unavailable",
+                rokc_interface::INSTALLED_LIBS
             ),
         }
     }
@@ -292,38 +360,6 @@ fn with_defaults(mut a: Args) -> Args {
         }
     }
     a
-}
-
-/// Installed layout (E6): `$ROK_HOME/bin/rokc`, `$ROK_HOME/lib/librokr.a`,
-/// `$ROK_HOME/lib/rok/{core,std,bare}/`.
-const INSTALLED_LIBS: &str = "lib/rok";
-const INSTALLED_RT: &str = "lib/librokr.a";
-/// Dev layout: the repository's `library/` above `target/<profile>/rokc`,
-/// with `librokr.a` next to `rokc`.
-const DEV_LIBS: &str = "library";
-
-/// `(library root holding core/ std/ bare/, librokr.a)`. `ROK_HOME`
-/// defaults to the parent of the directory holding `rokc` (`bin/..`);
-/// when that is not an install, fall back to the dev layout.
-fn locate(exe_dir: Option<&Path>) -> (Option<PathBuf>, Option<PathBuf>) {
-    let file = |p: PathBuf| p.is_file().then_some(p);
-    let libs_in = |d: &Path, rel: &str| {
-        let libs = d.join(rel);
-        libs.join("core/lib.rok").is_file().then_some(libs)
-    };
-    let env_home = std::env::var_os("ROK_HOME").map(PathBuf::from);
-    let home = env_home
-        .clone()
-        .or_else(|| exe_dir.and_then(Path::parent).map(Path::to_path_buf));
-    if let Some(h) = home {
-        if let Some(libs) = libs_in(&h, INSTALLED_LIBS) {
-            return (Some(libs), file(h.join(INSTALLED_RT)));
-        }
-    }
-    let dev = env_home
-        .and_then(|h| libs_in(&h, DEV_LIBS))
-        .or_else(|| exe_dir?.ancestors().find_map(|d| libs_in(d, DEV_LIBS)));
-    (dev, exe_dir.and_then(|d| file(d.join("librokr.a"))))
 }
 
 /// The package named by the first positional (default: `.`).
@@ -352,9 +388,20 @@ fn compile(a: &Args, pkg: &Package, test: bool) -> (CompileResult, Instant) {
     for c in &a.cfg {
         session.add_cfg(c.clone());
     }
+    for (n, p) in &a.externs {
+        session.add_extern(n.clone(), p.clone());
+    }
     session.set_anonymous(pkg.anonymous);
     session.set_test(test);
-    let result = session.compile_file(&pkg.root);
+    let result = if pkg.root == Path::new(package::STDIN) {
+        let mut src = String::new();
+        if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut src) {
+            fail(&format!("cannot read stdin: {e}"));
+        }
+        session.compile_source(&src, &pkg.root)
+    } else {
+        session.compile_file(&pkg.root)
+    };
     result.warnings.iter().for_each(report);
     if result.has_errors() {
         result.report_errors();
@@ -384,12 +431,24 @@ fn fail_on<T>(r: Result<T, rokc_interface::RokDiagnostic>) -> T {
     })
 }
 
-/// Spec 902.15 layout: `target/<name>` (executable), `target/lib<name>.a`
-/// + `target/<name>.o` (library), `target/<name>.<ext>` (`--emit`).
+/// Cargo-like output directory: `target/[<triple>/]<profile>/`, the
+/// profile `release` at `-O2` and above or `-Os`, else `debug`.
+fn out_dir(a: &Args, pkg: &Package) -> PathBuf {
+    let mut dir = a.target_dir.clone().unwrap_or_else(|| pkg.target_dir());
+    if let Some(t) = &a.opts.target {
+        dir.push(t);
+    }
+    let release = matches!(a.opts.opt_level.as_str(), "2" | "3" | "s");
+    dir.join(if release { "release" } else { "debug" })
+}
+
+/// Layout: `target/<profile>/<name>` (executable),
+/// `target/<profile>/lib<name>.a` + `<name>.o` (library),
+/// `target/<profile>/build/<name>.<ext>` (`--emit`).
 fn cmd_build(a: &Args) {
     let pkg = discover_arg(a);
     let (result, started) = compile(a, &pkg, false);
-    let target = pkg.target_dir();
+    let target = out_dir(a, &pkg);
     if !a.emit.is_empty() {
         if a.output.is_some() && a.emit.len() > 1 {
             usage_error("`-o` with several `--emit` kinds");
@@ -398,8 +457,9 @@ fn cmd_build(a: &Args) {
             let t = Instant::now();
             let bytes = fail_on(result.emit(kind, &a.opts));
             let out = a.output.clone().unwrap_or_else(|| {
-                create_dir(&target);
-                target.join(format!("{}.{}", pkg.name, kind.extension()))
+                let build = target.join("build");
+                create_dir(&build);
+                build.join(format!("{}.{}", pkg.name, kind.extension()))
             });
             if let Err(e) = std::fs::write(&out, bytes) {
                 fail(&format!("cannot write {}: {e}", out.display()));
@@ -449,7 +509,7 @@ fn cmd_run(a: &Args) {
         Some(o) => o.clone(),
         None if pkg.anonymous => tmp.path().join(&pkg.name),
         None => {
-            let target = pkg.target_dir();
+            let target = out_dir(a, &pkg);
             create_dir(&target);
             target.join(&pkg.name)
         }

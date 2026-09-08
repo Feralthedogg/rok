@@ -1,0 +1,85 @@
+// expect-exit: 0
+// expect-stdout:
+// 42 42 42 -7 200 1.5
+// 212 2.5
+// 2147483647 -2147483648 255 0 4294967295 0
+// 1 -1 255 0
+// none 5 none 255 none 9223372036854775807
+// try_from: value out of range for `u8`
+// 0 caught
+// none 1.5
+
+// Stdlib spec 2.11: lossless `from` / `into`, fallible `try_from` /
+// `try_into` (throwing `OverflowError`), `saturating_into`,
+// `wrapping_into`; `From` on a user type gives it `into`.
+
+struct Celsius { degree: f64; }
+struct Fahrenheit { degree: f64; }
+
+impl From<Celsius> for Fahrenheit {
+    fn from(c: Celsius) -> Fahrenheit { Fahrenheit { degree: c.degree * 9.0 / 5.0 + 32.0 } }
+}
+
+// Two `From` impls on one type: the argument picks.
+struct Meters { m: f64; }
+impl From<i32> for Meters {
+    fn from(v: i32) -> Meters { Meters { m: v as f64 } }
+}
+impl From<f64> for Meters {
+    fn from(v: f64) -> Meters { Meters { m: v } }
+}
+
+fn to_i16(v: u32) throws (OverflowError) -> str {
+    let x: i16 = try v.try_into();
+    f"{x}"
+}
+
+fn show<T: Display>(x: T | none) -> str {
+    if x is T { return f"{x}"; }
+    "none"
+}
+
+fn main() {
+    let n: i32 = 42;
+    let a: i64 = i64::from(n);
+    let b: i64 = n.into();
+    let c: f64 = n.into();
+    let d: isize = (-7i8).into();
+    let e: u64 = 200u8.into();
+    let f: f64 = 1.5f32.into();
+    println(f"{a} {b} {c} {d} {e} {f}");
+
+    let hot: Fahrenheit = Celsius { degree: 100.0 }.into();
+    println(f"{hot.degree} {Meters::from(2.5).m}");
+
+    let big: i64 = 9999999999;
+    let s1: i32 = big.saturating_into();
+    let s2: i32 = (-big).saturating_into();
+    let s3: u8 = 300i32.saturating_into();
+    let s4: u32 = (-5i64).saturating_into();
+    let s5: u32 = u64::MAX.saturating_into();
+    let s6: usize = (-1isize).saturating_into();
+    println(f"{s1} {s2} {s3} {s4} {s5} {s6}");
+
+    let w1: i32 = 0x100000001i64.wrapping_into();
+    let w2: i8 = 255u8.wrapping_into();
+    let w3: u8 = (-1i32).wrapping_into();
+    let w4: u16 = 0x10000u32.wrapping_into();
+    println(f"{w1} {w2} {w3} {w4}");
+
+    let t1: i32 | none = try? i32::try_from(big);
+    let t2: i32 | none = try? i32::try_from(5i64);
+    let t3: u32 | none = try? u32::try_from(-1i32);
+    let t4: u8 | none = try? u8::try_from(255u64);
+    let t5: i64 | none = try? i64::try_from(u64::MAX);
+    let t6: i64 | none = try? i64::try_from(i64::MAX as u64);
+    println(f"{show(t1)} {show(t2)} {show(t3)} {show(t4)} {show(t5)} {show(t6)}");
+
+    let v: u8 = try (-1i32).try_into() catch err: OverflowError { println(f"{err}"); 0 };
+    let caught = try to_i16(40000) catch e: OverflowError { "caught" };
+    println(f"{v} {caught}");
+
+    let narrow: f32 | none = try? f32::try_from(1e300);
+    let fine: f32 | none = try? f32::try_from(1.5);
+    println(f"{show(narrow)} {show(fine)}");
+}

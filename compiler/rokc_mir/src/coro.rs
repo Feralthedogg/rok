@@ -445,7 +445,7 @@ fn live_in(f: &MirFunction) -> HashMap<BlockId, BTreeSet<LocalId>> {
 }
 
 /// Every operand `r` reads (an array read names its local).
-fn rvalue_operands(r: &RValue, out: &mut Vec<Operand>) {
+pub fn rvalue_operands(r: &RValue, out: &mut Vec<Operand>) {
     match r {
         RValue::Use(o)
         | RValue::UnaryOp { operand: o, .. }

@@ -1,0 +1,24 @@
+[package]
+name = "rok"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# `rok`: the package manager / toolchain front (Rok.toml, Rok.lock,
+# environments, toolchains); it runs `rokc` for the compiler commands.
+[[bin]]
+name = "rok"
+path = "src/main.rs"
+
+# The language server alone (`rok lsp`), for editors that launch it by name.
+[[bin]]
+name = "rokls"
+path = "src/bin/rokls.rs"
+
+[dependencies]
+rokc_toml = { workspace = true }
+
+[lints]
+workspace = true

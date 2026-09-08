@@ -1,0 +1,18 @@
+// Alloc-heavy: 20M short-lived boxed `any` payloads (48-byte objects).
+trait Weigh { fn w(self) -> i64; }
+struct Blob { a: i64; b: i64; c: i64; d: i64; }
+impl Weigh for Blob { fn w(self) -> i64 { return self.a + self.d; } }
+
+fn make(i: i64) -> any Weigh { return Blob { a: i, b: i, c: i, d: 1 }; }
+
+fn main() -> i32 {
+    let total: i64 = 0;
+    let i: i64 = 0;
+    while i < 20000000 {
+        let x = make(i);
+        total += x.w();
+        i += 1;
+    }
+    rok_print_i64(total);
+    return 0;
+}

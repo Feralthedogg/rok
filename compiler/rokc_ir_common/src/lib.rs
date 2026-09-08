@@ -124,6 +124,17 @@ pub enum PrimOp {
     LogicalNot,
     /// Square root (floats; `rok.sqrt.TYPE`, `√`).
     Sqrt,
+    /// Integer `+ - *` that wrap even where overflow checks are on
+    /// (`rok.wrapping_add.TYPE` ..; the `wrapping_*` methods).
+    WrappingAdd,
+    WrappingSub,
+    WrappingMul,
+    /// Bit counts / byte swap on integers, same type in and out
+    /// (`rok.ctpop` / `rok.ctlz` / `rok.cttz` / `rok.bswap`).
+    CountOnes,
+    LeadingZeros,
+    TrailingZeros,
+    SwapBytes,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,7 +157,7 @@ pub enum ConstVal {
 // extern declarations replaces both.
 #[must_use]
 pub fn takes_rok_fn_values(extern_name: &str) -> bool {
-    extern_name == "rok_thread_spawn"
+    matches!(extern_name, "rok_thread_spawn" | "rok_par_spawn")
 }
 
 /// Callee form after name resolution.

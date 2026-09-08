@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 rokc_fmt = { workspace = true }
 rokc_interface = { workspace = true }
+rokc_tools = { workspace = true }
 
 [lints]
 workspace = true

@@ -161,9 +161,9 @@ pub fn mutator_state() -> &'static AtomicU8 {
     unsafe { &*slot::mutator_state().cast::<AtomicU8>() }
 }
 
-/// `rok_thread_init` slot values (803 §8.3.6). No TLAB and no write
-/// barrier log exist yet (mark-sweep allocates per object, needs no
-/// barrier), so those slots stay null.
+/// `rok_thread_init` slot values (803 §8.3.6). The TLAB starts empty
+/// (the first allocation refills it); no write barrier log exists
+/// (non-generational mark-region needs no barrier), so it stays null.
 #[allow(clippy::cast_ptr_alignment)] // 8-aligned slots
 pub fn thread_init() {
     yield_flag().store(0, Ordering::Relaxed);
@@ -178,6 +178,13 @@ pub fn thread_init() {
         slot::worker_id().cast::<u64>().write(new_worker_id());
         slot::task_exec().cast::<usize>().write(0);
     }
+}
+
+/// Addresses of this thread's `rok_tls_tlab_cursor` and
+/// `rok_tls_tlab_limit` (the bump range compiled code allocates from).
+#[allow(clippy::cast_ptr_alignment)] // 8-aligned slots
+pub fn tlab() -> [*mut usize; 2] {
+    [slot::tlab_cursor().cast(), slot::tlab_limit().cast()]
 }
 
 /// Address of this thread's `rok_tls_task_exec` (its running executor).

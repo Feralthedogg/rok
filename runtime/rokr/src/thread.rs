@@ -17,6 +17,15 @@ pub struct RokFn {
     env: *mut u8,
 }
 
+impl RokFn {
+    pub(crate) const fn new(code: unsafe extern "C" fn(*mut u8), env: *mut u8) -> Self {
+        Self {
+            code: Some(code),
+            env,
+        }
+    }
+}
+
 struct Start {
     me: *mut world::Mutator,
     f: RokFn,

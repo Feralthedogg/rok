@@ -4,7 +4,11 @@
 // (stdlib spec 0.3): a primitive `a + b` and a by-name call (`x.add(y)`,
 // `T::add(a, b)`) both lower to the machine op. The body is the
 // fallback (0.3.4) and what a `fn` value of the method runs.
-// One block per (type, trait); keep it regular.
+// One block per (type, trait); keep it regular. The inherent methods
+// (`checked_add`, `count_ones`, `floor`, ..) live in `ints` / `floats`.
+
+pub mod ints;
+pub mod floats;
 
 /// The additive identity — where `Iterator::sum` starts (an empty sum is
 /// `0`).

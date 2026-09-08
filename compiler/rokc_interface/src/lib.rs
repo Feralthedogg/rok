@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rokc_driver::{CompiledModule, CompilerConfig, compile_file};
+use rokc_driver::{CompiledModule, CompilerConfig, compile_file, compile_source};
 
 pub use rokc_diagnostic::{ErrorKind, RokDiagnostic, report, set_report_style};
 pub use rokc_driver::{BuildOptions, Demangled, EmitKind, TempDir, demangle};
@@ -26,6 +26,12 @@ impl Session {
         self.config.bootstrap_files.push(path);
     }
 
+    /// A dependency package (`--extern name=root`, spec 902.3): its
+    /// `lib.rok` is compiled with this build and mounted at `name`.
+    pub fn add_extern(&mut self, name: String, root: PathBuf) {
+        self.config.externs.push((name, root));
+    }
+
     /// Add a `--cfg` flag (either `"flag"` or `"key=value"`). Consulted
     /// by the `#[cfg(...)]` filter pass before HIR.
     pub fn add_cfg(&mut self, flag: String) {
@@ -44,7 +50,17 @@ impl Session {
     }
 
     pub fn compile_file(&self, path: &Path) -> CompileResult {
-        match compile_file(path, &self.config) {
+        Self::result(compile_file(path, &self.config))
+    }
+
+    /// `compile_file` with the root file's text given (stdin, an editor
+    /// buffer, a REPL session); `path` still locates `mod foo;` files.
+    pub fn compile_source(&self, source: &str, path: &Path) -> CompileResult {
+        Self::result(compile_source(source, path, &self.config))
+    }
+
+    fn result(r: Result<rokc_driver::CompiledProject, Vec<RokDiagnostic>>) -> CompileResult {
+        match r {
             Ok(p) => CompileResult {
                 modules: p.modules,
                 errors: Vec::new(),
@@ -105,4 +121,60 @@ impl CompileResult {
     pub fn archive(&self, opts: &BuildOptions, out: &Path) -> Result<(), RokDiagnostic> {
         rokc_driver::build_archive(self.module()?, opts, out)
     }
+}
+
+/// Installed layout (E6): `$ROK_HOME/bin/rokc`, `$ROK_HOME/lib/librokr.a`,
+/// `$ROK_HOME/lib/rok/{core,std,bare}/`.
+pub const INSTALLED_LIBS: &str = "lib/rok";
+const INSTALLED_RT: &str = "lib/librokr.a";
+/// Dev layout: the repository's `library/` above `target/<profile>/rokc`,
+/// with `librokr.a` next to `rokc`.
+const DEV_LIBS: &str = "library";
+
+/// `(library root holding core/ std/ bare/, librokr.a)`. `ROK_HOME`
+/// defaults to the parent of the directory holding `rokc` (`bin/..`);
+/// when that is not an install, fall back to the dev layout.
+pub fn locate(exe_dir: Option<&Path>) -> (Option<PathBuf>, Option<PathBuf>) {
+    let file = |p: PathBuf| p.is_file().then_some(p);
+    let libs_in = |d: &Path, rel: &str| {
+        let libs = d.join(rel);
+        libs.join("core/lib.rok").is_file().then_some(libs)
+    };
+    let env_home = std::env::var_os("ROK_HOME").map(PathBuf::from);
+    let home = env_home
+        .clone()
+        .or_else(|| exe_dir.and_then(Path::parent).map(Path::to_path_buf));
+    if let Some(h) = home {
+        if let Some(libs) = libs_in(&h, INSTALLED_LIBS) {
+            return (Some(libs), file(h.join(INSTALLED_RT)));
+        }
+    }
+    let dev = env_home
+        .and_then(|h| libs_in(&h, DEV_LIBS))
+        .or_else(|| exe_dir?.ancestors().find_map(|d| libs_in(d, DEV_LIBS)));
+    (dev, exe_dir.and_then(|d| file(d.join("librokr.a"))))
+}
+
+/// The library roots to preload from a `locate` library directory:
+/// `core/lib.rok`, then `std` / `bare` when present (no implicit glob:
+/// user code names them).
+pub fn bootstrap_roots(libs: &Path) -> Vec<PathBuf> {
+    let mut out = vec![libs.join("core/lib.rok")];
+    out.extend(
+        ["std", "bare"]
+            .iter()
+            .map(|tier| libs.join(tier).join("lib.rok"))
+            .filter(|p| p.is_file()),
+    );
+    out
+}
+
+/// `(bootstrap roots, librokr.a)` for the running executable (`locate`
+/// from its directory + `bootstrap_roots`).
+pub fn toolchain() -> (Option<Vec<PathBuf>>, Option<PathBuf>) {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf));
+    let (libs, rokr) = locate(exe_dir.as_deref());
+    (libs.as_deref().map(bootstrap_roots), rokr)
 }

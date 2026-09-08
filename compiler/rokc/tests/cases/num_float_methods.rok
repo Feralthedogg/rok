@@ -1,0 +1,42 @@
+// expect-exit: 0
+// expect-stdout:
+// 2 3 -3 2 -2 0.70
+// 0 1 -1 -0 0 true
+// true false true false true false
+// true true false true false
+// 4607182418800017408 1065353216 2 -2
+// 3.1416 2.7183 6.2832 0.000000000000000222
+// 1024 0.125 2 1 3 2 3 0
+// 0.0000 1.0000 1.0000 3.1416 5 7
+// 1 2 1 3 nan
+// 0.5 90.0000 1.5 -4 1
+// 1.5 3 true 0.5 4
+// true true
+// true inf -inf
+
+// Stdlib spec 2.1.4: `f64` / `f32` methods and constants (libm through
+// the runtime), NaN / infinity classification, bit patterns.
+
+fn main() {
+    let x = 2.7;
+    println(f"{x.floor()} {x.ceil()} {(-2.5).round()} {x.trunc()} {(-2.7).trunc()} {x.fract():.2}");
+    // signum keeps zeros (spec: -1.0, 0.0 or 1.0); NaN stays NaN.
+    println(f"{(-0.0).abs()} {7.5.signum()} {(-7.5).signum()} {(-0.0).signum()} {0.0.signum()} {f64::nan().signum().is_nan()}");
+
+    let nan = f64::nan();
+    let inf = f64::infinity();
+    println(f"{nan.is_nan()} {nan.is_finite()} {inf.is_infinite()} {inf.is_finite()} {f64::neg_infinity().is_sign_negative()} {nan == nan}");
+    println(f"{1.0.is_finite()} {f64::MIN_POSITIVE.is_normal()} {(f64::MIN_POSITIVE / 2.0).is_normal()} {(-0.0).is_sign_negative()} {0.0.is_sign_negative()}");
+
+    println(f"{1.0.to_bits()} {1.0f32.to_bits()} {f64::from_bits(4611686018427387904)} {f32::from_bits(3221225472)}");
+    println(f"{f64::PI:.4} {f64::E:.4} {f64::TAU:.4} {f64::EPSILON:.18}");
+
+    println(f"{2.0.pow(10.0)} {2.0.powi(-3)} {8.0.cbrt()} {0.0.exp()} {1000.0.log10()} {4.0.log2()} {27.0.log(3.0)} {1.0.ln()}");
+    println(f"{0.0.sin():.4} {0.0.cos():.4} {(f64::PI / 4.0).tan():.4} {1.0.atan2(1.0) * 4.0:.4} {3.0.hypot(4.0)} {2.0.mul_add(3.0, 1.0)}");
+    // min / max ignore a NaN operand; clamp leaves NaN alone.
+    println(f"{1.0.min(nan)} {nan.max(2.0)} {(-1.0).max(1.0)} {5.0.clamp(0.0, 3.0)} {nan.clamp(0.0, 1.0)}");
+    println(f"{4.0.sqrt().recip() * 1.0} {f64::FRAC_PI_2.to_degrees():.4} {1.5.copysign(-0.0).abs()} {(-7.0).div_euclid(2.0)} {(-7.0).rem_euclid(2.0)}");
+    println(f"{1.5f32.floor() + 0.5f32} {2.5f32.round()} {f32::nan().is_nan()} {0.25f32.sqrt()} {2.0f32.powi(2)}");
+    println(f"{1.0 / 0.0 == inf} {(0.0 / 0.0).is_nan()}");
+    println(f"{f64::NAN.is_nan()} {f64::INFINITY} {f32::NEG_INFINITY}");
+}

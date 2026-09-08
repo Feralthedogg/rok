@@ -891,6 +891,9 @@ pub fn lower_full(
             let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
             names.trait_key(&segs, &module)
         });
+        // `From<i32>` / `From<i8>` impls on one type keep their methods
+        // apart by the trait's arguments (`overload_args`).
+        let mut trait_args_key = String::new();
         if let (Some(tn), Some(target_key)) = (&trait_name, target.clone()) {
             // `impl Get<i32> for T { type Item = u8; }` also answers
             // `Get<i32>`, `Get<Item = u8>` and `Get<i32, Item = u8>`.
@@ -925,6 +928,21 @@ pub fn lower_full(
                     AstImplItem::AssocType { name, ty } => Some((name.clone(), rty(ty))),
                     _ => None,
                 })
+                .collect();
+            let full_key = bound_key(tn.clone(), &args, &[], &struct_table, &enum_table);
+            if !args.is_empty() && impl_traits.contains(&(target_key.clone(), full_key.clone())) {
+                err(
+                    &mut pre_diags,
+                    format!(
+                        "`{full_key}` is implemented more than once for `{}`",
+                        impl_def_display(&impl_def.self_ty)
+                    ),
+                );
+                continue;
+            }
+            trait_args_key = args
+                .iter()
+                .map(|a| "_".to_owned() + &ty_mangle(a))
                 .collect();
             for k in impl_bound_keys(tn, &args, &assoc, &struct_table, &enum_table) {
                 impl_traits.insert((target_key.clone(), k));
@@ -1044,6 +1062,7 @@ pub fn lower_full(
                 &target_ty,
                 &leaf,
                 trait_name.as_deref(),
+                &trait_args_key,
             ) else {
                 err(
                     &mut pre_diags,
@@ -1117,6 +1136,7 @@ pub fn lower_full(
                     &target_ty,
                     &tm.name,
                     trait_name.as_deref(),
+                    &trait_args_key,
                 ) else {
                     err(
                         &mut pre_diags,
@@ -2991,6 +3011,13 @@ fn intrinsic_of(
         // Bitwise on integers, logical on `bool` (picked at the call).
         Some("not") => PrimOp::Not,
         Some("sqrt") => PrimOp::Sqrt,
+        Some("wrapping_add") => PrimOp::WrappingAdd,
+        Some("wrapping_sub") => PrimOp::WrappingSub,
+        Some("wrapping_mul") => PrimOp::WrappingMul,
+        Some("ctpop") => PrimOp::CountOnes,
+        Some("ctlz") => PrimOp::LeadingZeros,
+        Some("cttz") => PrimOp::TrailingZeros,
+        Some("bswap") => PrimOp::SwapBytes,
         _ => {
             return err(format!(
                 "`#[intrinsic({})]` on `{}`: unknown intrinsic — expected `rok.OP.TYPE` \
@@ -3000,7 +3027,16 @@ fn intrinsic_of(
             ));
         }
     };
-    let arity = if matches!(op, PrimOp::Neg | PrimOp::Not | PrimOp::Sqrt) {
+    let arity = if matches!(
+        op,
+        PrimOp::Neg
+            | PrimOp::Not
+            | PrimOp::Sqrt
+            | PrimOp::CountOnes
+            | PrimOp::LeadingZeros
+            | PrimOp::TrailingZeros
+            | PrimOp::SwapBytes
+    ) {
         1
     } else {
         2
@@ -3383,6 +3419,7 @@ fn method_key(
     target: &HirTy,
     leaf: &str,
     trait_name: Option<&str>,
+    trait_args: &str,
 ) -> Option<String> {
     let key = format!("{}__{leaf}", ty_mangle(target));
     let Some(prev) = fn_table.get(&key) else {
@@ -3391,11 +3428,13 @@ fn method_key(
     let prev_trait = method_info
         .get(&prev.id)
         .and_then(|i| i.trait_name.as_deref());
-    if prev_trait == trait_name {
+    // The same trait again is a duplicate unless its arguments differ
+    // (checked per impl before this).
+    if prev_trait == trait_name && trait_args.is_empty() {
         return None;
     }
     let alt = format!(
-        "{key}__by_{}",
+        "{key}__by_{}{trait_args}",
         trait_name.map_or("inherent".to_owned(), |t| t.replace("::", "_"))
     );
     (!fn_table.contains_key(&alt)).then_some(alt)

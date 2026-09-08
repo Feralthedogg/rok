@@ -55,6 +55,16 @@ pub fn register_file(path: String, source: String) -> u32 {
     u32::try_from(files.len()).unwrap_or(0)
 }
 
+/// Forget every registered file: a long-lived embedder (LSP, REPL)
+/// calls it before each recompile so the table does not grow without
+/// bound. Spans from earlier compiles no longer resolve.
+pub fn clear_files() {
+    FILES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
 /// Every registered source file `(path, text)`, in registration order.
 pub fn registered_files() -> Vec<(String, String)> {
     FILES

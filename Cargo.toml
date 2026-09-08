@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "compiler/rok",
     "compiler/rokc",
     "compiler/rokc_ast",
     "compiler/rokc_codegen_mlir",
@@ -14,6 +15,8 @@ members = [
     "compiler/rokc_lexer",
     "compiler/rokc_mir",
     "compiler/rokc_parser",
+    "compiler/rokc_tools",
+    "compiler/rokc_toml",
     "runtime/rokr",
     "runtime/rokr_common",
     "runtime/rokr_coroutine",
@@ -41,6 +44,8 @@ rokc_ir_common = { path = "compiler/rokc_ir_common" }
 rokc_lexer = { path = "compiler/rokc_lexer" }
 rokc_mir = { path = "compiler/rokc_mir" }
 rokc_parser = { path = "compiler/rokc_parser" }
+rokc_tools = { path = "compiler/rokc_tools" }
+rokc_toml = { path = "compiler/rokc_toml" }
 
 rokr_common = { path = "runtime/rokr_common" }
 rokr_coroutine = { path = "runtime/rokr_coroutine" }

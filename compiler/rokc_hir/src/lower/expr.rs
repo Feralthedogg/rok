@@ -4578,6 +4578,9 @@ pub(super) fn lower_call(
         if !ty_segs.is_empty() {
             if let Some(full) = ctx.canon_type(ty_segs) {
                 let method = (*method).to_owned();
+                if let Some(r) = named_type_overload(ctx, &full, &method, args, &display, span) {
+                    return r;
+                }
                 let hits = match path_method_hits(ctx, &full, &method) {
                     Ok(h) => h,
                     Err(msg) => {
@@ -4880,6 +4883,10 @@ fn call_impl_method(
     display: &str,
     span: rokc_diagnostic::Span,
 ) -> Option<HirExpr> {
+    if let Some(call) = call_overload(ctx, t, method, trait_key, recv.clone(), args, display, span)
+    {
+        return Some(call);
+    }
     let gm = match pick_method(ctx, t, method, trait_key) {
         Ok(Some(MethodPick::Concrete(fid))) => {
             check_method_visible(ctx, fid, method);
@@ -4906,6 +4913,94 @@ fn call_impl_method(
         display,
         span,
     ))
+}
+
+/// `call_overload` on the struct / enum named `full`.
+fn named_type_overload(
+    ctx: &mut LowerCtx<'_>,
+    full: &str,
+    method: &str,
+    args: &[CallArg],
+    display: &str,
+    span: rokc_diagnostic::Span,
+) -> Option<HirExpr> {
+    let t = ctx
+        .lookup_struct(full)
+        .map(HirTy::Struct)
+        .or_else(|| ctx.lookup_enum(full).map(HirTy::Enum))?;
+    call_overload(ctx, &t, method, None, None, args, display, span)
+}
+
+/// `T::from(x)` where `T` implements one generic trait several times
+/// over (`From<i32>`, `From<i8>`): the impl whose first parameter is
+/// the first argument's type. `None` when `method` is not overloaded
+/// that way.
+// ponytail: picks on the first argument only, by exact type; enough
+// for `From` / `TryFrom`. Method-call and operator overloads still
+// report the ambiguity.
+#[allow(clippy::too_many_arguments)]
+fn call_overload(
+    ctx: &mut LowerCtx<'_>,
+    t: &HirTy,
+    method: &str,
+    trait_key: Option<&str>,
+    recv: Option<HirExpr>,
+    args: &[CallArg],
+    display: &str,
+    span: rokc_diagnostic::Span,
+) -> Option<HirExpr> {
+    let ids =
+        method_target_for(t).and_then(|k| ctx.env.method_table.get(&(k, method.to_owned())))?;
+    let traits: Vec<Option<&str>> = ids
+        .iter()
+        .map(|id| {
+            ctx.env
+                .method_info
+                .get(id)
+                .and_then(|i| i.trait_name.as_deref())
+        })
+        .collect();
+    let tn = *traits
+        .iter()
+        .flatten()
+        .find(|t| trait_key.is_none_or(|k| k == **t))?;
+    let ids: Vec<FunctionId> = ids
+        .iter()
+        .zip(&traits)
+        .filter(|(_, t)| **t == Some(tn))
+        .map(|(id, _)| *id)
+        .collect();
+    if ids.len() < 2 || traits.contains(&None) {
+        return None;
+    }
+    let (first, rest) = match (recv, args) {
+        (Some(r), _) => (r, args),
+        (None, [CallArg::Positional(e), rest @ ..]) => {
+            (lower_expected(ctx, e, HirTy::Unknown), rest)
+        }
+        _ => return None,
+    };
+    let hit = ids
+        .iter()
+        .map(|id| ctx.sig_by_id(*id))
+        .find(|sig| sig.param_tys.first() == Some(&first.ty));
+    let Some(sig) = hit else {
+        discard_args(ctx, rest);
+        if first.ty == HirTy::Unknown {
+            return Some(first);
+        }
+        return Some(ctx.error_expr(
+            span,
+            format!(
+                "`{display}`: no `{}<{}>` impl for `{}`",
+                leaf_name(tn),
+                ctx.ty_name(&first.ty),
+                ctx.ty_name(t)
+            ),
+        ));
+    };
+    check_method_visible(ctx, sig.id, method);
+    Some(call_sig(ctx, &sig, display, Some(first), rest, span))
 }
 
 /// `[a, b]` is a `List` (spec 6.5.1); a fixed array only in a slot

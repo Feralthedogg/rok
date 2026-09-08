@@ -1,0 +1,336 @@
+// rok::core::num::floats — `f32` / `f64` inherent methods and constants
+// (stdlib spec 2.1.4). The math functions are libm's (`floor`, `sin`,
+// `pow`, ..) behind the runtime's `rok_f64_*` / `rok_f32_*` symbols
+// (`runtime/rokr/src/math.rs`); `to_bits` / `from_bits` reinterpret
+// through a union. `sqrt` is the `Sqrt` trait's (num.rok).
+
+extern "C" {
+    fn rok_f64_floor(x: f64) -> f64;
+    fn rok_f64_ceil(x: f64) -> f64;
+    fn rok_f64_round(x: f64) -> f64;
+    fn rok_f64_trunc(x: f64) -> f64;
+    fn rok_f64_abs(x: f64) -> f64;
+    fn rok_f64_cbrt(x: f64) -> f64;
+    fn rok_f64_exp(x: f64) -> f64;
+    fn rok_f64_exp2(x: f64) -> f64;
+    fn rok_f64_exp_m1(x: f64) -> f64;
+    fn rok_f64_ln(x: f64) -> f64;
+    fn rok_f64_ln_1p(x: f64) -> f64;
+    fn rok_f64_log2(x: f64) -> f64;
+    fn rok_f64_log10(x: f64) -> f64;
+    fn rok_f64_sin(x: f64) -> f64;
+    fn rok_f64_cos(x: f64) -> f64;
+    fn rok_f64_tan(x: f64) -> f64;
+    fn rok_f64_asin(x: f64) -> f64;
+    fn rok_f64_acos(x: f64) -> f64;
+    fn rok_f64_atan(x: f64) -> f64;
+    fn rok_f64_sinh(x: f64) -> f64;
+    fn rok_f64_cosh(x: f64) -> f64;
+    fn rok_f64_tanh(x: f64) -> f64;
+    fn rok_f64_asinh(x: f64) -> f64;
+    fn rok_f64_acosh(x: f64) -> f64;
+    fn rok_f64_atanh(x: f64) -> f64;
+    fn rok_f64_pow(x: f64, y: f64) -> f64;
+    fn rok_f64_atan2(x: f64, y: f64) -> f64;
+    fn rok_f64_hypot(x: f64, y: f64) -> f64;
+    fn rok_f64_copysign(x: f64, y: f64) -> f64;
+    fn rok_f64_min(x: f64, y: f64) -> f64;
+    fn rok_f64_max(x: f64, y: f64) -> f64;
+    fn rok_f64_mul_add(x: f64, y: f64, z: f64) -> f64;
+    fn rok_f32_floor(x: f32) -> f32;
+    fn rok_f32_ceil(x: f32) -> f32;
+    fn rok_f32_round(x: f32) -> f32;
+    fn rok_f32_trunc(x: f32) -> f32;
+    fn rok_f32_abs(x: f32) -> f32;
+    fn rok_f32_cbrt(x: f32) -> f32;
+    fn rok_f32_exp(x: f32) -> f32;
+    fn rok_f32_exp2(x: f32) -> f32;
+    fn rok_f32_exp_m1(x: f32) -> f32;
+    fn rok_f32_ln(x: f32) -> f32;
+    fn rok_f32_ln_1p(x: f32) -> f32;
+    fn rok_f32_log2(x: f32) -> f32;
+    fn rok_f32_log10(x: f32) -> f32;
+    fn rok_f32_sin(x: f32) -> f32;
+    fn rok_f32_cos(x: f32) -> f32;
+    fn rok_f32_tan(x: f32) -> f32;
+    fn rok_f32_asin(x: f32) -> f32;
+    fn rok_f32_acos(x: f32) -> f32;
+    fn rok_f32_atan(x: f32) -> f32;
+    fn rok_f32_sinh(x: f32) -> f32;
+    fn rok_f32_cosh(x: f32) -> f32;
+    fn rok_f32_tanh(x: f32) -> f32;
+    fn rok_f32_asinh(x: f32) -> f32;
+    fn rok_f32_acosh(x: f32) -> f32;
+    fn rok_f32_atanh(x: f32) -> f32;
+    fn rok_f32_pow(x: f32, y: f32) -> f32;
+    fn rok_f32_atan2(x: f32, y: f32) -> f32;
+    fn rok_f32_hypot(x: f32, y: f32) -> f32;
+    fn rok_f32_copysign(x: f32, y: f32) -> f32;
+    fn rok_f32_min(x: f32, y: f32) -> f32;
+    fn rok_f32_max(x: f32, y: f32) -> f32;
+    fn rok_f32_mul_add(x: f32, y: f32, z: f32) -> f32;
+}
+
+// f64
+
+union F64Bits {
+    f: f64;
+    u: u64;
+}
+
+impl f64 {
+    pub const EPSILON: f64 = 2.2204460492503131e-16;
+    pub const MAX: f64 = 1.7976931348623157e308;
+    pub const MIN: f64 = -1.7976931348623157e308;
+    pub const MIN_POSITIVE: f64 = 2.2250738585072014e-308;
+    pub const NAN: f64 = 0.0 / 0.0;
+    pub const INFINITY: f64 = 1.0 / 0.0;
+    pub const NEG_INFINITY: f64 = -1.0 / 0.0;
+    pub const PI: f64 = 3.14159265358979323846264338327950288;
+    pub const TAU: f64 = 6.28318530717958647692528676655900577;
+    pub const E: f64 = 2.71828182845904523536028747135266250;
+    pub const FRAC_PI_2: f64 = 1.57079632679489661923132169163975144;
+    pub const FRAC_PI_4: f64 = 0.785398163397448309615660845819875721;
+    pub const FRAC_1_PI: f64 = 0.318309886183790671537767526745028724;
+    pub const SQRT_2: f64 = 1.41421356237309504880168872420969808;
+    pub const FRAC_1_SQRT_2: f64 = 0.707106781186547524400844362104849039;
+    pub const LN_2: f64 = 0.693147180559945309417232121458176568;
+    pub const LN_10: f64 = 2.30258509299404568401799145468436421;
+    pub const LOG2_E: f64 = 1.44269504088896340735992468100189214;
+    pub const LOG10_E: f64 = 0.434294481903251827651128918916605082;
+
+    pub fn nan() -> f64 { f64::NAN }
+    pub fn infinity() -> f64 { f64::INFINITY }
+    pub fn neg_infinity() -> f64 { f64::NEG_INFINITY }
+    /// The gap between `1.0` and the next f64 (`EPSILON`).
+    pub fn epsilon() -> f64 { f64::EPSILON }
+
+    /// The IEEE 754 bit pattern.
+    pub fn to_bits(self) -> u64 { unsafe { F64Bits { f: self }.u } }
+    pub fn from_bits(bits: u64) -> f64 { unsafe { F64Bits { u: bits }.f } }
+
+    pub fn is_nan(self) -> bool { self != self }
+    pub fn is_infinite(self) -> bool { self.to_bits() & 0x7fffffffffffffff == 0x7ff0000000000000 }
+    pub fn is_finite(self) -> bool { self.to_bits() & 0x7ff0000000000000 != 0x7ff0000000000000 }
+    /// Neither zero, subnormal, infinite nor NaN.
+    pub fn is_normal(self) -> bool {
+        let e = self.to_bits() & 0x7ff0000000000000;
+        e != 0 && e != 0x7ff0000000000000
+    }
+    pub fn is_sign_positive(self) -> bool { self.to_bits() & 0x8000000000000000 == 0 }
+    pub fn is_sign_negative(self) -> bool { self.to_bits() & 0x8000000000000000 != 0 }
+
+    /// Largest integer `<= self`.
+    pub fn floor(self) -> f64 { unsafe { rok_f64_floor(self) } }
+    /// Smallest integer `>= self`.
+    pub fn ceil(self) -> f64 { unsafe { rok_f64_ceil(self) } }
+    /// Nearest integer, halves away from zero.
+    pub fn round(self) -> f64 { unsafe { rok_f64_round(self) } }
+    /// Integer part (toward zero).
+    pub fn trunc(self) -> f64 { unsafe { rok_f64_trunc(self) } }
+    pub fn abs(self) -> f64 { unsafe { rok_f64_abs(self) } }
+    pub fn cbrt(self) -> f64 { unsafe { rok_f64_cbrt(self) } }
+    /// `e^self`.
+    pub fn exp(self) -> f64 { unsafe { rok_f64_exp(self) } }
+    /// `2^self`.
+    pub fn exp2(self) -> f64 { unsafe { rok_f64_exp2(self) } }
+    /// `e^self - 1`, exact near zero.
+    pub fn exp_m1(self) -> f64 { unsafe { rok_f64_exp_m1(self) } }
+    /// Natural logarithm.
+    pub fn ln(self) -> f64 { unsafe { rok_f64_ln(self) } }
+    /// `ln(1 + self)`, exact near zero.
+    pub fn ln_1p(self) -> f64 { unsafe { rok_f64_ln_1p(self) } }
+    pub fn log2(self) -> f64 { unsafe { rok_f64_log2(self) } }
+    pub fn log10(self) -> f64 { unsafe { rok_f64_log10(self) } }
+    pub fn sin(self) -> f64 { unsafe { rok_f64_sin(self) } }
+    pub fn cos(self) -> f64 { unsafe { rok_f64_cos(self) } }
+    pub fn tan(self) -> f64 { unsafe { rok_f64_tan(self) } }
+    pub fn asin(self) -> f64 { unsafe { rok_f64_asin(self) } }
+    pub fn acos(self) -> f64 { unsafe { rok_f64_acos(self) } }
+    pub fn atan(self) -> f64 { unsafe { rok_f64_atan(self) } }
+    pub fn sinh(self) -> f64 { unsafe { rok_f64_sinh(self) } }
+    pub fn cosh(self) -> f64 { unsafe { rok_f64_cosh(self) } }
+    pub fn tanh(self) -> f64 { unsafe { rok_f64_tanh(self) } }
+    pub fn asinh(self) -> f64 { unsafe { rok_f64_asinh(self) } }
+    pub fn acosh(self) -> f64 { unsafe { rok_f64_acosh(self) } }
+    pub fn atanh(self) -> f64 { unsafe { rok_f64_atanh(self) } }
+    /// `self - self.trunc()`.
+    pub fn fract(self) -> f64 { self - self.trunc() }
+    /// `-1.0` / `1.0` by sign; zeros and NaN are returned as they are
+    /// (spec 2.1.4: `-1.0, 0.0, or 1.0`).
+    pub fn signum(self) -> f64 {
+        if self > 0.0 { return 1.0; }
+        if self < 0.0 { return -1.0; }
+        self
+    }
+    pub fn recip(self) -> f64 { 1.0 / self }
+    pub fn to_degrees(self) -> f64 { self * (180.0 / f64::PI) }
+    pub fn to_radians(self) -> f64 { self * (f64::PI / 180.0) }
+    /// `ln(self) / ln(base)`.
+    pub fn log(self, base: f64) -> f64 { self.ln() / base.ln() }
+    /// `self^exp` (spec 2.1.4; `powf` in Rust).
+    pub fn pow(self, exp: f64) -> f64 { unsafe { rok_f64_pow(self, exp) } }
+    /// Angle of the point `(other, self)`.
+    pub fn atan2(self, other: f64) -> f64 { unsafe { rok_f64_atan2(self, other) } }
+    /// `sqrt(self² + other²)` without overflow.
+    pub fn hypot(self, other: f64) -> f64 { unsafe { rok_f64_hypot(self, other) } }
+    /// `self`'s magnitude with `sign`'s sign.
+    pub fn copysign(self, sign: f64) -> f64 { unsafe { rok_f64_copysign(self, sign) } }
+    /// The smaller; a NaN operand loses to a number.
+    pub fn min(self, other: f64) -> f64 { unsafe { rok_f64_min(self, other) } }
+    /// The larger; a NaN operand loses to a number.
+    pub fn max(self, other: f64) -> f64 { unsafe { rok_f64_max(self, other) } }
+    pub fn powf(self, exp: f64) -> f64 { self.pow(exp) }
+    pub fn powi(self, n: i32) -> f64 { self.pow(n as f64) }
+    /// `self * a + b` with one rounding.
+    pub fn mul_add(self, a: f64, b: f64) -> f64 { unsafe { rok_f64_mul_add(self, a, b) } }
+    /// `self` limited to `lo..=hi`; NaN stays NaN.
+    pub fn clamp(self, lo: f64, hi: f64) -> f64 {
+        if self < lo { return lo; }
+        if self > hi { return hi; }
+        self
+    }
+    pub fn div_euclid(self, rhs: f64) -> f64 {
+        let q = (self / rhs).trunc();
+        if self % rhs < 0.0 {
+            return if rhs > 0.0 { q - 1.0 } else { q + 1.0 };
+        }
+        q
+    }
+    pub fn rem_euclid(self, rhs: f64) -> f64 {
+        let r = self % rhs;
+        if r < 0.0 { r + rhs.abs() } else { r }
+    }
+}
+
+// f32
+
+union F32Bits {
+    f: f32;
+    u: u32;
+}
+
+impl f32 {
+    pub const EPSILON: f32 = 1.1920929e-7;
+    pub const MAX: f32 = 3.40282347e38;
+    pub const MIN: f32 = -3.40282347e38;
+    pub const MIN_POSITIVE: f32 = 1.17549435e-38;
+    pub const NAN: f32 = 0.0 / 0.0;
+    pub const INFINITY: f32 = 1.0 / 0.0;
+    pub const NEG_INFINITY: f32 = -1.0 / 0.0;
+    pub const PI: f32 = 3.14159265358979323846264338327950288;
+    pub const TAU: f32 = 6.28318530717958647692528676655900577;
+    pub const E: f32 = 2.71828182845904523536028747135266250;
+    pub const FRAC_PI_2: f32 = 1.57079632679489661923132169163975144;
+    pub const FRAC_PI_4: f32 = 0.785398163397448309615660845819875721;
+    pub const FRAC_1_PI: f32 = 0.318309886183790671537767526745028724;
+    pub const SQRT_2: f32 = 1.41421356237309504880168872420969808;
+    pub const FRAC_1_SQRT_2: f32 = 0.707106781186547524400844362104849039;
+    pub const LN_2: f32 = 0.693147180559945309417232121458176568;
+    pub const LN_10: f32 = 2.30258509299404568401799145468436421;
+    pub const LOG2_E: f32 = 1.44269504088896340735992468100189214;
+    pub const LOG10_E: f32 = 0.434294481903251827651128918916605082;
+
+    pub fn nan() -> f32 { f32::NAN }
+    pub fn infinity() -> f32 { f32::INFINITY }
+    pub fn neg_infinity() -> f32 { f32::NEG_INFINITY }
+    /// The gap between `1.0` and the next f32 (`EPSILON`).
+    pub fn epsilon() -> f32 { f32::EPSILON }
+
+    /// The IEEE 754 bit pattern.
+    pub fn to_bits(self) -> u32 { unsafe { F32Bits { f: self }.u } }
+    pub fn from_bits(bits: u32) -> f32 { unsafe { F32Bits { u: bits }.f } }
+
+    pub fn is_nan(self) -> bool { self != self }
+    pub fn is_infinite(self) -> bool { self.to_bits() & 0x7fffffff == 0x7f800000 }
+    pub fn is_finite(self) -> bool { self.to_bits() & 0x7f800000 != 0x7f800000 }
+    /// Neither zero, subnormal, infinite nor NaN.
+    pub fn is_normal(self) -> bool {
+        let e = self.to_bits() & 0x7f800000;
+        e != 0 && e != 0x7f800000
+    }
+    pub fn is_sign_positive(self) -> bool { self.to_bits() & 0x80000000 == 0 }
+    pub fn is_sign_negative(self) -> bool { self.to_bits() & 0x80000000 != 0 }
+
+    /// Largest integer `<= self`.
+    pub fn floor(self) -> f32 { unsafe { rok_f32_floor(self) } }
+    /// Smallest integer `>= self`.
+    pub fn ceil(self) -> f32 { unsafe { rok_f32_ceil(self) } }
+    /// Nearest integer, halves away from zero.
+    pub fn round(self) -> f32 { unsafe { rok_f32_round(self) } }
+    /// Integer part (toward zero).
+    pub fn trunc(self) -> f32 { unsafe { rok_f32_trunc(self) } }
+    pub fn abs(self) -> f32 { unsafe { rok_f32_abs(self) } }
+    pub fn cbrt(self) -> f32 { unsafe { rok_f32_cbrt(self) } }
+    /// `e^self`.
+    pub fn exp(self) -> f32 { unsafe { rok_f32_exp(self) } }
+    /// `2^self`.
+    pub fn exp2(self) -> f32 { unsafe { rok_f32_exp2(self) } }
+    /// `e^self - 1`, exact near zero.
+    pub fn exp_m1(self) -> f32 { unsafe { rok_f32_exp_m1(self) } }
+    /// Natural logarithm.
+    pub fn ln(self) -> f32 { unsafe { rok_f32_ln(self) } }
+    /// `ln(1 + self)`, exact near zero.
+    pub fn ln_1p(self) -> f32 { unsafe { rok_f32_ln_1p(self) } }
+    pub fn log2(self) -> f32 { unsafe { rok_f32_log2(self) } }
+    pub fn log10(self) -> f32 { unsafe { rok_f32_log10(self) } }
+    pub fn sin(self) -> f32 { unsafe { rok_f32_sin(self) } }
+    pub fn cos(self) -> f32 { unsafe { rok_f32_cos(self) } }
+    pub fn tan(self) -> f32 { unsafe { rok_f32_tan(self) } }
+    pub fn asin(self) -> f32 { unsafe { rok_f32_asin(self) } }
+    pub fn acos(self) -> f32 { unsafe { rok_f32_acos(self) } }
+    pub fn atan(self) -> f32 { unsafe { rok_f32_atan(self) } }
+    pub fn sinh(self) -> f32 { unsafe { rok_f32_sinh(self) } }
+    pub fn cosh(self) -> f32 { unsafe { rok_f32_cosh(self) } }
+    pub fn tanh(self) -> f32 { unsafe { rok_f32_tanh(self) } }
+    pub fn asinh(self) -> f32 { unsafe { rok_f32_asinh(self) } }
+    pub fn acosh(self) -> f32 { unsafe { rok_f32_acosh(self) } }
+    pub fn atanh(self) -> f32 { unsafe { rok_f32_atanh(self) } }
+    /// `self - self.trunc()`.
+    pub fn fract(self) -> f32 { self - self.trunc() }
+    /// `-1.0` / `1.0` by sign; zeros and NaN are returned as they are
+    /// (spec 2.1.4: `-1.0, 0.0, or 1.0`).
+    pub fn signum(self) -> f32 {
+        if self > 0.0 { return 1.0; }
+        if self < 0.0 { return -1.0; }
+        self
+    }
+    pub fn recip(self) -> f32 { 1.0 / self }
+    pub fn to_degrees(self) -> f32 { self * (180.0 / f32::PI) }
+    pub fn to_radians(self) -> f32 { self * (f32::PI / 180.0) }
+    /// `ln(self) / ln(base)`.
+    pub fn log(self, base: f32) -> f32 { self.ln() / base.ln() }
+    /// `self^exp` (spec 2.1.4; `powf` in Rust).
+    pub fn pow(self, exp: f32) -> f32 { unsafe { rok_f32_pow(self, exp) } }
+    /// Angle of the point `(other, self)`.
+    pub fn atan2(self, other: f32) -> f32 { unsafe { rok_f32_atan2(self, other) } }
+    /// `sqrt(self² + other²)` without overflow.
+    pub fn hypot(self, other: f32) -> f32 { unsafe { rok_f32_hypot(self, other) } }
+    /// `self`'s magnitude with `sign`'s sign.
+    pub fn copysign(self, sign: f32) -> f32 { unsafe { rok_f32_copysign(self, sign) } }
+    /// The smaller; a NaN operand loses to a number.
+    pub fn min(self, other: f32) -> f32 { unsafe { rok_f32_min(self, other) } }
+    /// The larger; a NaN operand loses to a number.
+    pub fn max(self, other: f32) -> f32 { unsafe { rok_f32_max(self, other) } }
+    pub fn powf(self, exp: f32) -> f32 { self.pow(exp) }
+    pub fn powi(self, n: i32) -> f32 { self.pow(n as f32) }
+    /// `self * a + b` with one rounding.
+    pub fn mul_add(self, a: f32, b: f32) -> f32 { unsafe { rok_f32_mul_add(self, a, b) } }
+    /// `self` limited to `lo..=hi`; NaN stays NaN.
+    pub fn clamp(self, lo: f32, hi: f32) -> f32 {
+        if self < lo { return lo; }
+        if self > hi { return hi; }
+        self
+    }
+    pub fn div_euclid(self, rhs: f32) -> f32 {
+        let q = (self / rhs).trunc();
+        if self % rhs < 0.0 {
+            return if rhs > 0.0 { q - 1.0 } else { q + 1.0 };
+        }
+        q
+    }
+    pub fn rem_euclid(self, rhs: f32) -> f32 {
+        let r = self % rhs;
+        if r < 0.0 { r + rhs.abs() } else { r }
+    }
+}

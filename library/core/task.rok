@@ -26,11 +26,16 @@
 // and after each resume, and leaves the coroutine body like a `return`,
 // running the `finally` / `using` cleanups it passes.
 //
-// ponytail: queues are rings behind one lock each (not lock-free
-// Chase-Lev: a `TaskRef` is several words, the atomic intrinsics are
-// word-sized); owners and thieves both take FIFO. The timer heap is one
-// `Mutex` per pool (spec: per-driver timing wheel). The I/O driver is a
-// reactor thread, not each worker polling (707 §7.7.11).
+// The deques are the runtime's lock-free Chase-Lev deques (`rok_deque_*`)
+// of boxed `TaskRef`s (a `TaskRef` is several words; a deque item is one
+// GC reference, traced through the deque). The owner takes FIFO too (a
+// steal from its own deque): LIFO would let a task that keeps waking
+// itself (`yield_now`) starve the rest of its deque.
+//
+// ponytail: the local queues and the injector are rings behind a spin
+// lock each (many producers). The timer heap is one `Mutex` per pool
+// (spec: per-driver timing wheel). The I/O driver is a reactor thread,
+// not each worker polling (707 §7.7.11).
 
 pub mod time;
 
@@ -59,6 +64,10 @@ extern "C" {
     fn rok_io_watch(fd: i32) -> i32;
     fn rok_io_poll(out: GcBuf<i64>, max: usize) -> i32;
     fn rok_net_wait(fd: i32, write: i32, timeout_ns: i64) -> i32;
+    fn rok_task_key_i32(word: GcBuf<i32>) -> usize;
+    fn rok_deque_new() -> GcBuf<GcBuf<TaskRef>>;
+    fn rok_deque_push(d: GcBuf<GcBuf<TaskRef>>, item: GcBuf<TaskRef>);
+    fn rok_deque_steal(d: GcBuf<GcBuf<TaskRef>>, out: GcBuf<GcBuf<TaskRef>>, index: usize) -> i32;
 }
 
 #[intrinsic("rok.atomic.load")]
@@ -183,7 +192,9 @@ fn queue_new() -> Queue {
 /// A work-stealing executor (`block_on` makes one per call).
 pub struct Pool {
     locals: List<Queue>;
-    deques: List<Queue>;
+    deques: List<GcBuf<GcBuf<TaskRef>>>;
+    /// Per worker: where `find_task` receives a stolen task.
+    stolen: GcBuf<GcBuf<TaskRef>>;
     injector: Queue;
     /// Timer min-heap: deadline (monotonic ns) and the waker to wake.
     timers: Mutex<Timers>;
@@ -213,16 +224,18 @@ pub struct Worker {
 impl Pool {
     fn new(n: usize) -> Pool {
         let locals: List<Queue> = List::new();
-        let deques: List<Queue> = List::new();
+        let deques: List<GcBuf<GcBuf<TaskRef>>> = List::new();
         for i in 0..n {
             locals.push(queue_new());
-            deques.push(queue_new());
+            deques.push(unsafe { rok_deque_new() });
         }
+        let stolen: GcBuf<GcBuf<TaskRef>> = buf_new(n);
         let signal: GcBuf<i32> = buf_new(4);
         let sleep: GcBuf<i32> = buf_new(n);
         Pool {
             locals: locals,
             deques: deques,
+            stolen: stolen,
             injector: queue_new(),
             timers: Mutex::new(Timers { at: List::<i64>::new(), who: List::<Waker>::new() }),
             signal: signal,
@@ -356,10 +369,30 @@ fn schedule(t: TaskRef) {
         return;
     }
     match current() {
-        w: Worker => push(pool.deques[w.index], t),
+        // Only the owner pushes to a deque: a worker of another pool
+        // goes through the injector.
+        w: Worker => if same_pool(w.pool, pool) {
+            let boxed: GcBuf<TaskRef> = buf_new(1);
+            boxed[0] = t;
+            unsafe { rok_deque_push(pool.deques[w.index], boxed) };
+        } else {
+            push(pool.injector, t);
+        },
         none => push(pool.injector, t),
     }
     pool.notify();
+}
+
+fn same_pool(a: Pool, b: Pool) -> bool {
+    unsafe { rok_task_key_i32(a.signal) == rok_task_key_i32(b.signal) }
+}
+
+/// The oldest task of deque `d`, for worker `i`.
+fn steal(pool: Pool, d: GcBuf<GcBuf<TaskRef>>, i: usize) -> TaskRef | none {
+    if unsafe { rok_deque_steal(d, pool.stolen, i) } == 0 {
+        return none;
+    }
+    pool.stolen[i][0]
 }
 
 /// The next task for worker `i`: its local queue, its deque, the
@@ -368,7 +401,7 @@ fn find_task(pool: Pool, i: usize) -> TaskRef | none {
     if let t: TaskRef = pop_front(pool.locals[i]) {
         return t;
     }
-    if let t: TaskRef = pop_front(pool.deques[i]) {
+    if let t: TaskRef = steal(pool, pool.deques[i], i) {
         return t;
     }
     if let t: TaskRef = pop_front(pool.injector) {
@@ -376,7 +409,7 @@ fn find_task(pool: Pool, i: usize) -> TaskRef | none {
     }
     let n = pool.workers();
     for k in 1..n {
-        if let t: TaskRef = pop_front(pool.deques[(i + k) % n]) {
+        if let t: TaskRef = steal(pool, pool.deques[(i + k) % n], i) {
             return t;
         }
     }

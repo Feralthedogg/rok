@@ -297,8 +297,8 @@ expensive를 호출하지 않음.
     (negative).
   - `602_derive_eq` → `#[derive(...)]` expander 미구현, HIR 명시 거부
     추가 (negative).
-  - `214_into_method` → stdlib `From/Into` 본문 미구현, method-not-found
-    명시 거부 (negative).
+  - `214_into_method` → `From<i64> for i32` 없음 (lossless 만), bound
+    불만족 거부 (negative).
   - `314_throw_catch` → setjmp/longjmp 진짜 unwind 미구현, stage-1
     throw 는 rok_panic abort. measure probe 로 전환 (정보용 기록).
 

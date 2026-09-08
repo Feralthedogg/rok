@@ -40,6 +40,82 @@ pub struct CompilerConfig {
     /// The input is a lone file outside any package (spec 4.16.8): it is
     /// the anonymous package's `main.rok` and cannot have `mod foo;`.
     pub anonymous: bool,
+    /// Dependency packages (`--extern name=path`, spec 902.3): each
+    /// `lib.rok` is compiled with the user package and mounted at the
+    /// top-level path `name`.
+    pub externs: Vec<(String, PathBuf)>,
+}
+
+/// A library root mounted beside the user package: its module path
+/// prefix and root file.
+type LibRoot = (Vec<String>, PathBuf);
+
+/// Each bootstrap file as `rok::<tier>` (`library/core/lib.rok` →
+/// `rok::core`), then each `--extern` dependency under its own name.
+fn lib_roots(config: &CompilerConfig) -> Vec<LibRoot> {
+    let mut out: Vec<LibRoot> = config
+        .bootstrap_files
+        .iter()
+        .map(|root| {
+            let tier = root
+                .parent()
+                .and_then(|d| d.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("core")
+                .to_owned();
+            (vec!["rok".to_owned(), tier], root.clone())
+        })
+        .collect();
+    out.extend(
+        config
+            .externs
+            .iter()
+            .map(|(name, root)| (vec![name.clone()], root.clone())),
+    );
+    out
+}
+
+/// Dependency names are top-level names (spec 5.7.x / 902.3): a `use
+/// dep::..` anywhere is rooted at `pkg::dep::..`, and a dependency's own
+/// `use pkg::..` means its root, `pkg::dep::..`.
+// ponytail: only `use` paths are rewritten; an expression path
+// `dep::f()` outside the root module, or `pkg::` in a dependency's
+// expression, still resolves against the user package.
+fn root_extern_uses(
+    uses: &mut [(String, rokc_core::Visibility, rokc_ast::UseTree)],
+    externs: &[(String, PathBuf)],
+) {
+    fn fix(tree: &mut rokc_ast::UseTree, module: &str, externs: &[(String, PathBuf)]) {
+        let Some(first) = tree.prefix.segments.first().cloned() else {
+            if let rokc_ast::UseTreeKind::Group(children) = &mut tree.kind {
+                children.iter_mut().for_each(|c| fix(c, module, externs));
+            }
+            return;
+        };
+        let seg = |name: &str| rokc_ast::PathSegment {
+            name: name.to_owned(),
+            generics: Vec::new(),
+        };
+        let owner = externs.iter().find(|(n, _)| {
+            module == n
+                || module
+                    .strip_prefix(n.as_str())
+                    .is_some_and(|r| r.starts_with("::"))
+        });
+        if first.name == "pkg" {
+            if let Some((dep, _)) = owner {
+                tree.prefix.segments.insert(1, seg(dep));
+            }
+        } else if externs.iter().any(|(n, _)| *n == first.name) {
+            tree.prefix.segments.insert(0, seg("pkg"));
+        }
+    }
+    if externs.is_empty() {
+        return;
+    }
+    for (module, _, tree) in uses {
+        fix(tree, module, externs);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -83,7 +159,8 @@ pub fn compile_source(
     // The same pre-pass gathers every meta block (spec 6.8) of the
     // library and the user package before any derive is expanded.
     let mut metas = PrePass::default();
-    let mut prec = build_prec_table(&config.bootstrap_files, &mut diags, &mut metas);
+    let roots = lib_roots(config);
+    let mut prec = build_prec_table(&roots, &mut diags, &mut metas);
     // Spec 6.7.11: the user package's own `#[infix]` registrations are
     // gathered by the same pre-pass, so its extension tokens lex.
     for prog in user_programs(source, path, &mut metas) {
@@ -98,21 +175,9 @@ pub fn compile_source(
     let root_dir_kw = path
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    let keywords = keyword_tables(
-        metas.keywords,
-        path,
-        &root_dir_kw,
-        &config.bootstrap_files,
-        &mut diags,
-    );
-    let (lib_lits, user_lits) = literal_tables(
-        metas.literals,
-        path,
-        &root_dir_kw,
-        &config.bootstrap_files,
-        &ext,
-        &mut diags,
-    );
+    let keywords = keyword_tables(metas.keywords, path, &root_dir_kw, &roots, &mut diags);
+    let (lib_lits, user_lits) =
+        literal_tables(metas.literals, path, &root_dir_kw, &roots, &ext, &mut diags);
     let metas = MetaCtx {
         table: std::sync::Arc::clone(&meta_table),
         keywords: keywords.first().cloned().unwrap_or_default(),
@@ -161,26 +226,20 @@ pub fn compile_source(
     } else if !top_stmts.is_empty() {
         diags.push(entry::stmts_outside_entry(path));
     }
-    // Mount each library root as `rok::<tier>` (`library/core/lib.rok` →
-    // `rok::core`) and compile its items with the user's; HIR gives every
-    // module an implicit `use rok::core::**;` (stdlib spec 0.1).
-    for (i, root) in config.bootstrap_files.iter().enumerate() {
+    // Mount each library root (`rok::<tier>`, then the dependencies) and
+    // compile its items with the user's; HIR gives every module an
+    // implicit `use rok::core::**;` (stdlib spec 0.1).
+    for (i, (prefix, root)) in roots.iter().enumerate() {
         let metas = MetaCtx {
             table: std::sync::Arc::clone(&meta_table),
             keywords: keywords.get(i + 1).cloned().unwrap_or_default(),
             literals: std::sync::Arc::clone(&lib_lits),
         };
-        let tier = root
-            .parent()
-            .and_then(|d| d.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("core")
-            .to_owned();
         let stray = collect_module_tree(
             root,
             None,
             root.parent(),
-            &["rok".to_owned(), tier],
+            prefix,
             &cfg_env,
             &ext,
             &metas,
@@ -195,6 +254,7 @@ pub fn compile_source(
     // Auto-inject the runtime hooks lowering targets (`rok_panic`,
     // `rok_uncaught_error`, `rok_print_*`, ...) so user files needn't
     // declare the externs themselves.
+    root_extern_uses(&mut all_uses, &config.externs);
     all_items.insert(0, builtin_panic_extern());
     coro::rewrite_items(&mut all_items, &mut diags);
     let program = rokc_ast::Program {
@@ -230,7 +290,7 @@ pub fn compile_source(
         return Err(diags);
     }
     let mut mir = rokc_mir::lower(&hir);
-    mir.pkg_hashes = package_hashes(&root_dir, &config.bootstrap_files);
+    mir.pkg_hashes = package_hashes(&root_dir, &roots);
 
     Ok(CompiledProject {
         modules: vec![CompiledModule {
@@ -254,14 +314,10 @@ pub fn compile_source(
 /// root, `""` for the user package. A file belongs to the package whose
 /// directory is its closest ancestor. Longest prefix first (mangling
 /// picks the first match).
-fn package_hashes(user_dir: &Path, roots: &[PathBuf]) -> Vec<(String, String)> {
+fn package_hashes(user_dir: &Path, roots: &[LibRoot]) -> Vec<(String, String)> {
     let mut pkgs: Vec<(String, PathBuf)> = roots
         .iter()
-        .filter_map(|r| {
-            let dir = r.parent()?;
-            let tier = dir.file_name()?.to_str()?;
-            Some((format!("rok::{tier}"), dir.to_path_buf()))
-        })
+        .filter_map(|(prefix, r)| Some((prefix.join("::"), r.parent()?.to_path_buf())))
         .collect();
     pkgs.push((String::new(), user_dir.to_path_buf()));
     let files = rokc_diagnostic::registered_files();
@@ -308,12 +364,12 @@ fn hash_package(files: &mut Vec<(String, &str)>) -> String {
 }
 
 fn build_prec_table(
-    roots: &[PathBuf],
+    roots: &[LibRoot],
     diags: &mut Vec<RokDiagnostic>,
     metas: &mut PrePass,
 ) -> PrecTable {
     let mut table = PrecTable::new();
-    for root in roots {
+    for (_, root) in roots {
         // Walk the package starting from the given root file (typically
         // `lib.rok` or `main.rok`), following `mod x;` declarations to
         // their files, and bind each `#[infix]` token to its trait method.
@@ -444,7 +500,7 @@ fn keyword_tables(
     defs: Vec<KeywordDef>,
     entry: &Path,
     user_dir: &Path,
-    roots: &[PathBuf],
+    roots: &[LibRoot],
     diags: &mut Vec<RokDiagnostic>,
 ) -> Vec<Vec<(String, Vec<String>)>> {
     let pkgs = package_roots(user_dir, roots);
@@ -475,19 +531,22 @@ fn keyword_tables(
 }
 
 /// (package dir, path root) of the user package, then each library root.
-fn package_roots(user_dir: &Path, roots: &[PathBuf]) -> Vec<(PathBuf, Vec<String>)> {
+fn package_roots(user_dir: &Path, roots: &[LibRoot]) -> Vec<(PathBuf, Vec<String>)> {
     let mut pkgs: Vec<(PathBuf, Vec<String>)> =
         vec![(user_dir.to_path_buf(), vec!["pkg".to_owned()])];
-    for r in roots {
+    for (prefix, r) in roots {
         let dir = r
             .parent()
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        let tier = dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("core")
-            .to_owned();
-        pkgs.push((dir, vec!["rok".to_owned(), tier]));
+        // A dependency's handlers live under `pkg::<dep>`.
+        let path = if prefix.first().is_some_and(|p| p == "rok") {
+            prefix.clone()
+        } else {
+            std::iter::once("pkg".to_owned())
+                .chain(prefix.iter().cloned())
+                .collect()
+        };
+        pkgs.push((dir, path));
     }
     pkgs
 }
@@ -530,7 +589,7 @@ fn literal_tables(
     defs: Vec<LiteralDef>,
     entry: &Path,
     user_dir: &Path,
-    roots: &[PathBuf],
+    roots: &[LibRoot],
     ext: &ExtOps,
     diags: &mut Vec<RokDiagnostic>,
 ) -> (std::sync::Arc<LiteralTable>, std::sync::Arc<LiteralTable>) {

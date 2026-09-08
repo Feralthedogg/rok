@@ -34,6 +34,9 @@ pub struct Mutator {
     yield_flag: *const AtomicU8,
     state: *const AtomicU8,
     stack_top: *const *mut u8,
+    /// `rok_tls_tlab_cursor` / `rok_tls_tlab_limit`: a collection empties
+    /// every thread's TLAB (its unused tail is reclaimed by the sweep).
+    tlab: [*mut usize; 2],
     /// Extra root, alive while the record is registered: a spawned
     /// thread's closure environment (its only reference before the
     /// thread's own frames hold it).
@@ -175,6 +178,7 @@ pub fn register(root: *mut u8, worker_id: u64) -> *mut Mutator {
             yield_flag: ptr::null(),
             state: ptr::null(),
             stack_top: ptr::null(),
+            tlab: [ptr::null_mut(); 2],
             root,
             worker_id,
             park_token: AtomicI32::new(0),
@@ -202,6 +206,7 @@ pub unsafe fn attach(m: *mut Mutator) {
         (*m).yield_flag = tls::yield_flag();
         (*m).state = tls::mutator_state();
         (*m).stack_top = tls::shadow_stack_top();
+        (*m).tlab = tls::tlab();
         if (*m).worker_id == u64::MAX {
             (*m).worker_id = tls::worker_id().read();
         } else {
@@ -303,6 +308,28 @@ pub fn stop() {
             return;
         }
         wait();
+    }
+}
+
+/// With the world stopped: empty every registered thread's TLAB (and
+/// the caller's, registered or not), so the sweep may hand its unused
+/// lines to anyone.
+pub fn reset_tlabs() {
+    // SAFETY: as in `stop`; the slots are only written by their owner,
+    // which is stopped, and by us.
+    unsafe {
+        let mut m = *WORLD.threads.get();
+        while !m.is_null() {
+            for p in (*m).tlab {
+                if !p.is_null() {
+                    p.write(0);
+                }
+            }
+            m = (*m).next;
+        }
+        for p in tls::tlab() {
+            p.write(0);
+        }
     }
 }
 

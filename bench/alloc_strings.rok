@@ -1,0 +1,17 @@
+// Alloc-heavy: 3M runtime strings plus a 200k-element list that stays
+// live (a long-lived heap every collection has to trace).
+fn main() -> i32 {
+    let keep: List<str> = [];
+    let n: i64 = 0;
+    let i = 0;
+    while i < 3000000 {
+        let s = f"item-{i}";
+        n += s.len() as i64;
+        if i % 15 == 0 {
+            keep.push(s);
+        }
+        i += 1;
+    }
+    rok_print_i64(n + keep.len() as i64);
+    return 0;
+}

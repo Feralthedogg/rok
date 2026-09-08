@@ -1,0 +1,32 @@
+// Alloc-heavy, multi-threaded: 4 threads x 5M boxed `any` payloads.
+use rok::std::thread;
+
+trait Weigh { fn w(self) -> i64; }
+struct Blob { a: i64; b: i64; c: i64; d: i64; }
+impl Weigh for Blob { fn w(self) -> i64 { return self.a + self.d; } }
+
+fn make(i: i64) -> any Weigh { return Blob { a: i, b: i, c: i, d: 1 }; }
+
+fn churn(n: i64) -> i64 {
+    let total: i64 = 0;
+    let i: i64 = 0;
+    while i < n {
+        let x = make(i);
+        total += x.w();
+        i += 1;
+    }
+    return total;
+}
+
+fn main() -> i32 {
+    let hs: List<thread::JoinHandle<i64>> = [];
+    let t = 0;
+    while t < 4 {
+        hs.push(thread::spawn(|| churn(5000000)));
+        t += 1;
+    }
+    let total: i64 = 0;
+    for h in hs { total += try! h.join(); }
+    rok_print_i64(total);
+    return 0;
+}

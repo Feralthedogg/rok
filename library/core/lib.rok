@@ -10,6 +10,7 @@ pub mod array;
 pub mod channel;
 pub mod cmp;
 pub mod collections;
+pub mod convert;
 pub mod error;
 pub mod fmt;
 pub mod future;

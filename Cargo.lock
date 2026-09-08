@@ -9,11 +9,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
+name = "rok"
+version = "0.1.0"
+dependencies = [
+ "rokc_toml",
+]
+
+[[package]]
 name = "rokc"
 version = "0.1.0"
 dependencies = [
  "rokc_fmt",
  "rokc_interface",
+ "rokc_tools",
 ]
 
 [[package]]
@@ -116,6 +124,23 @@ dependencies = [
  "rokc_core",
  "rokc_diagnostic",
  "rokc_lexer",
+]
+
+[[package]]
+name = "rokc_toml"
+version = "0.1.0"
+
+[[package]]
+name = "rokc_tools"
+version = "0.1.0"
+dependencies = [
+ "rokc_ast",
+ "rokc_diagnostic",
+ "rokc_fmt",
+ "rokc_hir",
+ "rokc_interface",
+ "rokc_lexer",
+ "rokc_parser",
 ]
 
 [[package]]

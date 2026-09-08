@@ -2,10 +2,12 @@
 //! text emission. Looks at HIR only.
 
 mod coro;
+mod liveness;
 mod lower;
 mod print;
 mod ty;
 
+pub use liveness::{Deaths, deaths};
 pub use lower::lower;
 pub use print::print_mir;
 pub use ty::{has_gc_ref, lower_ty, sum_layout};

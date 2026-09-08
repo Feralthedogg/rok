@@ -18,6 +18,9 @@ const GC_TYPE_BASE: u32 = 0x10000;
 /// (the string type), or every payload word a candidate reference.
 const BUF_PLAIN_TYPE_ID: u32 = 1;
 const BUF_TRACED_TYPE_ID: u32 = 2;
+/// Objects this large go to the runtime's large-object space, never to
+/// a TLAB (`rokr_gc::LOS_THRESHOLD`, 702 §7.2.3).
+const LOS_THRESHOLD: u32 = 8 << 10;
 
 pub struct Emitter {
     out: String,
@@ -213,6 +216,12 @@ impl Emitter {
         self.out.push_str(
                 "  llvm.mlir.global external thread_local @rok_tls_shadow_stack_top() {addr_space = 0 : i32} : !llvm.ptr\n  llvm.mlir.global external thread_local @rok_tls_yield_flag() {addr_space = 0 : i32} : i8\n",
             );
+        if self.uses_alloc {
+            let _ = writeln!(
+                self.out,
+                "  llvm.mlir.global external thread_local @rok_tls_tlab_cursor() {{addr_space = 0 : i32}} : i{pw}\n  llvm.mlir.global external thread_local @rok_tls_tlab_limit() {{addr_space = 0 : i32}} : i{pw}"
+            );
+        }
         if !declared("rok_runtime_yield") {
             self.out
                 .push_str("  func.func private @rok_runtime_yield()\n");
@@ -568,6 +577,10 @@ struct FnEmit<'a> {
     /// Blocks whose terminator takes a loop back-edge: a safepoint poll
     /// goes right before it (804 §8.4.8).
     back_edge_blocks: HashSet<u32>,
+    /// Where the frame-rooted locals die (their slots are cleared there),
+    /// and each block's index in `f.blocks`.
+    deaths: rokc_mir::Deaths,
+    block_pos: HashMap<u32, usize>,
 }
 
 /// Blocks with an edge to a block on the current DFS path (a loop
@@ -657,6 +670,13 @@ impl<'a> FnEmit<'a> {
             pkgs,
             overflow_checks: true,
             back_edge_blocks: back_edge_blocks(f),
+            deaths: rokc_mir::Deaths::default(),
+            block_pos: f
+                .blocks
+                .iter()
+                .enumerate()
+                .map(|(i, b)| (b.id.0, i))
+                .collect(),
         }
     }
 
@@ -855,8 +875,8 @@ impl<'a> FnEmit<'a> {
     /// or of a block param's spill slot. The slots are zeroed here so the
     /// collector never reads garbage, then the frame becomes this
     /// thread's `rok_tls_shadow_stack_top`; every return restores it.
-    // ponytail: a dead local keeps its referent alive until overwritten
-    // or the function returns; liveness-based slot reuse is the upgrade.
+    /// A rooted local's slot is cleared right after its last use (MIR
+    /// liveness, `rokc_mir::deaths`), so it stops retaining garbage.
     fn emit_gc_frame(&mut self) {
         // A loop's back-edge poll can stop this thread for a collection
         // mid-function, like a call.
@@ -881,6 +901,7 @@ impl<'a> FnEmit<'a> {
         let one = self.fresh_value();
         let mut header = format!("    {one} = llvm.mlir.constant(1 : i32) : i32\n");
         let mut roots = Vec::new();
+        let mut rooted = HashSet::new();
         for local in &self.f.locals {
             let mut paths = Vec::new();
             gc_paths(&local.ty, &mut Vec::new(), &mut paths);
@@ -902,6 +923,7 @@ impl<'a> FnEmit<'a> {
             } else {
                 continue; // unslotted: never holds a value across a call
             };
+            rooted.insert(id);
             let zero = self.fresh_value();
             let _ = writeln!(header, "    {zero} = llvm.mlir.zero : {ty}");
             let _ = writeln!(header, "    llvm.store {zero}, {slot} : {ty}, !llvm.ptr");
@@ -955,6 +977,19 @@ impl<'a> FnEmit<'a> {
         );
         self.body.push_str(&header);
         self.gc_frame = Some((tls, prev));
+        self.deaths = rokc_mir::deaths(self.f, |l| rooted.contains(&l.0));
+    }
+
+    /// Null the root slot of dead local `l` (all its `GcRef` leaves).
+    fn clear_root(&mut self, l: LocalId) {
+        let slot = match self.gc_param_slots.get(&l.0) {
+            Some(s) => s.clone(),
+            None => self.slot_names[l.0 as usize].clone().unwrap(),
+        };
+        let ty = mlir_type(&self.local_ty(l), self.pointer_width);
+        let z = self.fresh_value();
+        let _ = writeln!(self.body, "    {z} = llvm.mlir.zero : {ty}");
+        let _ = writeln!(self.body, "    llvm.store {z}, {slot} : {ty}, !llvm.ptr");
     }
 
     /// Unlink this function's shadow-stack frame (before every return).
@@ -1062,8 +1097,21 @@ impl<'a> FnEmit<'a> {
                 }
             }
         }
-        for s in &b.stmts {
+        let pos = self.block_pos[&b.id.0];
+        for l in self.deaths.on_entry.get(pos).cloned().unwrap_or_default() {
+            self.clear_root(l);
+        }
+        for (i, s) in b.stmts.iter().enumerate() {
             self.emit_stmt(s);
+            let dead = self
+                .deaths
+                .after_stmt
+                .get(pos)
+                .map(|d| d[i].clone())
+                .unwrap_or_default();
+            for l in dead {
+                self.clear_root(l);
+            }
         }
         self.emit_terminator(b.id.0, &b.terminator);
     }
@@ -1436,8 +1484,11 @@ impl<'a> FnEmit<'a> {
         obj
     }
 
-    /// `rok_gc_alloc_slow` of a zeroed object with a `ty` payload, its
-    /// type id registered with `ty`'s `ScanTable`; the object's `GcRef`.
+    /// A zeroed GC object with a `ty` payload, its type id registered
+    /// with `ty`'s `ScanTable`; the object's `GcRef`. Small objects bump
+    /// this thread's TLAB inline (702 §7.2.2, 809 §8.9.9) and write the
+    /// header (`type_id`; `gc_word` = size, which the block heap parses
+    /// by; the flags are already 0); `rok_gc_alloc_slow` otherwise.
     fn emit_gc_object(&mut self, ty: &MirTy) -> String {
         let pw = self.pointer_width;
         let index = self
@@ -1450,14 +1501,48 @@ impl<'a> FnEmit<'a> {
             });
         let type_id = GC_TYPE_BASE + index as u32;
         let (size, align) = gc_object_size(ty, pw);
-        let [total, align_v, tid, obj] = std::array::from_fn(|_| self.fresh_value());
+        let [total, align_v, tid] = std::array::from_fn(|_| self.fresh_value());
         self.uses_alloc = true;
         let _ = write!(
             self.body,
             "    {total} = arith.constant {size} : i{pw}
     {align_v} = arith.constant {align} : i{pw}
     {tid} = arith.constant {type_id} : i32
-    {obj} = func.call @rok_gc_alloc_slow({total}, {align_v}, {tid}) : (i{pw}, i{pw}, i32) -> i{pw}
+"
+        );
+        if size >= LOS_THRESHOLD || align > 8 {
+            let obj = self.fresh_value();
+            let _ = writeln!(
+                self.body,
+                "    {obj} = func.call @rok_gc_alloc_slow({total}, {align_v}, {tid}) : (i{pw}, i{pw}, i32) -> i{pw}"
+            );
+            return obj;
+        }
+        let n = self.next_check;
+        self.next_check += 1;
+        let [cp, lp, cur, lim, room, fits, next, hp, wp, slow, obj] =
+            std::array::from_fn(|_| self.fresh_value());
+        let _ = write!(
+            self.body,
+            "    {cp} = llvm.mlir.addressof @rok_tls_tlab_cursor : !llvm.ptr
+    {lp} = llvm.mlir.addressof @rok_tls_tlab_limit : !llvm.ptr
+    {cur} = llvm.load {cp} : !llvm.ptr -> i{pw}
+    {lim} = llvm.load {lp} : !llvm.ptr -> i{pw}
+    {room} = arith.subi {lim}, {cur} : i{pw}
+    {fits} = arith.cmpi ule, {total}, {room} : i{pw}
+    cf.cond_br {fits}, ^rok_afast{n}, ^rok_aslow{n}
+  ^rok_afast{n}:
+    {next} = arith.addi {cur}, {total} : i{pw}
+    llvm.store {next}, {cp} : i{pw}, !llvm.ptr
+    {hp} = llvm.inttoptr {cur} : i{pw} to !llvm.ptr
+    llvm.store {tid}, {hp} : i32, !llvm.ptr
+    {wp} = llvm.getelementptr {hp}[8] : (!llvm.ptr) -> !llvm.ptr, i8
+    llvm.store {total}, {wp} : i{pw}, !llvm.ptr
+    cf.br ^rok_aobj{n}({cur} : i{pw})
+  ^rok_aslow{n}:
+    {slow} = func.call @rok_gc_alloc_slow({total}, {align_v}, {tid}) : (i{pw}, i{pw}, i32) -> i{pw}
+    cf.br ^rok_aobj{n}({slow} : i{pw})
+  ^rok_aobj{n}({obj}: i{pw}):
 "
         );
         obj
@@ -2316,6 +2401,28 @@ impl<'a> FnEmit<'a> {
                     "    {dst} = llvm.intr.sqrt({v}) : ({ty}) -> {ty}"
                 );
             }
+            (PrimOp::CountOnes | PrimOp::SwapBytes, p) if p.is_int() => {
+                let name = if op == PrimOp::CountOnes {
+                    "ctpop"
+                } else {
+                    "bswap"
+                };
+                let _ = writeln!(
+                    self.body,
+                    "    {dst} = llvm.intr.{name}({v}) : ({ty}) -> {ty}"
+                );
+            }
+            (PrimOp::LeadingZeros | PrimOp::TrailingZeros, p) if p.is_int() => {
+                let name = if op == PrimOp::LeadingZeros {
+                    "ctlz"
+                } else {
+                    "cttz"
+                };
+                let _ = writeln!(
+                    self.body,
+                    "    {dst} = \"llvm.intr.{name}\"({v}) <{{is_zero_poison = false}}> : ({ty}) -> {ty}"
+                );
+            }
             (PrimOp::Not, p) if p.is_int() => {
                 // Bitwise NOT = xor with all-ones.
                 let ones = self.fresh_value();
@@ -2627,11 +2734,12 @@ fn arith_binop(
     let bool_ = matches!(prim, PrimTy::Bool);
 
     let mnemonic: Option<String> = match op {
-        PrimOp::Add if int => Some("arith.addi".into()),
+        // `Wrapping*` skip `emit_overflow_check` (it ignores them).
+        PrimOp::Add | PrimOp::WrappingAdd if int => Some("arith.addi".into()),
         PrimOp::Add if float => Some("arith.addf".into()),
-        PrimOp::Sub if int => Some("arith.subi".into()),
+        PrimOp::Sub | PrimOp::WrappingSub if int => Some("arith.subi".into()),
         PrimOp::Sub if float => Some("arith.subf".into()),
-        PrimOp::Mul if int => Some("arith.muli".into()),
+        PrimOp::Mul | PrimOp::WrappingMul if int => Some("arith.muli".into()),
         PrimOp::Mul if float => Some("arith.mulf".into()),
         PrimOp::Div if signed => Some("arith.divsi".into()),
         PrimOp::Div if int => Some("arith.divui".into()),
@@ -2847,7 +2955,8 @@ fn format_float(bits: u64, prim: PrimTy) -> String {
 }
 
 // MLIR's float literal grammar requires a decimal point — `3e0` is
-// rejected. `{:?}` on `f64` always emits at least `3.0`, which works.
+// rejected. `{:?}` on `f64` emits `3.0`, but `1e300` for big / tiny
+// values, which gets its `.0` here.
 fn format_float_decimal(v: f64) -> String {
     if v.is_infinite() {
         if v.is_sign_negative() {
@@ -2856,7 +2965,11 @@ fn format_float_decimal(v: f64) -> String {
             "0x7FF0000000000000".to_owned()
         }
     } else {
-        format!("{v:?}")
+        let s = format!("{v:?}");
+        match s.split_once('e') {
+            Some((m, e)) if !m.contains('.') => format!("{m}.0e{e}"),
+            _ => s,
+        }
     }
 }
 

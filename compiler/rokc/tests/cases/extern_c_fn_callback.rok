@@ -1,8 +1,6 @@
 // expect-exit: 0
 // expect-stdout:
-// 0
-// 2
-// 4
+// 6
 
 // `extern "C" fn` (spec 5.9.10): a rok function with the C ABI, passed
 // to C as a plain function pointer.
@@ -10,11 +8,15 @@ extern "C" {
     fn rok_par_for(start: i64, end: i64, step: i64, callback: fn(i64));
 }
 
+// `rok_par_for` runs the iterations in parallel: sum, don't print.
+static TOTAL: Atomic<i64> = Atomic::new(0);
+
 extern "C" fn show_twice(i: i64) {
-    rok_print_i64(i * 2);
+    TOTAL.fetch_add(i * 2);
 }
 
 fn main() -> i32 {
     unsafe { rok_par_for(0i64, 3i64, 1i64, show_twice) };
+    rok_print_i64(TOTAL.load());
     return 0;
 }

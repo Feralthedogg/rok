@@ -9,8 +9,8 @@
 //!
 //! Not implemented yet (calls hit [`unimplemented`] → fatal, exit 101):
 //! scheduler (007-runtime/706, 707), coroutines (708). OS threads (805
-//! §8.5.4) are in `thread`. Immix GC (703–705) is replaced by a malloc-backed mark-sweep
-//! (`rokr_gc`).
+//! §8.5.4) are in `thread`. The GC (`rokr_gc`) is a non-moving Immix-style
+//! mark-region (703) without generations or concurrent marking (704, 705).
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
@@ -22,8 +22,11 @@ use core::sync::atomic::Ordering;
 use rokr_common::object_header::{FLAG_PINNED, HEADER_ALIGN, ObjectHeader};
 use rokr_common::{fatal, tls, write_stderr};
 
+mod deque;
+mod math;
 mod net;
 mod os;
+mod par;
 mod str;
 mod thread;
 pub use str::RokStr;
@@ -357,45 +360,6 @@ pub extern "C" fn rok_task_await(_handle: *mut u8) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_task_cancel(_handle: *mut u8) {
     unimplemented(b"rok_task_cancel (scheduler, spec 007-runtime/706)")
-}
-
-/// `par::for_each` desugar. `callback` is `Ptr<u8>` in 805, i.e.
-/// nullable. ponytail: runs sequentially on the caller thread; the
-/// work-stealing pool (706) will split the range.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_par_for(
-    start: i64,
-    end: i64,
-    step: i64,
-    callback: Option<unsafe extern "C" fn(i64)>,
-) {
-    let Some(cb) = callback else {
-        fatal(b"rok_par_for: null callback");
-    };
-    if step == 0 {
-        fatal(b"rok_par_for: step is zero");
-    }
-    let mut i = start;
-    while (step > 0 && i < end) || (step < 0 && i > end) {
-        // SAFETY: the compiler passes a valid `extern "C" fn(i64)`.
-        unsafe { cb(i) };
-        let Some(next) = i.checked_add(step) else {
-            break;
-        };
-        i = next;
-    }
-}
-
-/// `par::scope` desugar. ponytail: runs the body inline (no spawned
-/// work can exist yet). The scope handle argument is null until the
-/// scheduler defines one.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_par_scope(callback: Option<unsafe extern "C" fn(*mut u8)>) {
-    let Some(cb) = callback else {
-        fatal(b"rok_par_scope: null callback");
-    };
-    // SAFETY: the compiler passes a valid `extern "C" fn(*mut u8)`.
-    unsafe { cb(ptr::null_mut()) };
 }
 
 // ---------------------------------------------------------------------
@@ -758,7 +722,6 @@ fn stdout() -> *mut libc::FILE {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::sync::atomic::AtomicI64;
 
     #[test]
     #[allow(clippy::cast_ptr_alignment)] // asserted 64-aligned below
@@ -768,20 +731,16 @@ mod tests {
         // SAFETY: fresh 24-byte allocation with an initialized header.
         let h = unsafe { &*p.cast::<ObjectHeader>() };
         assert_eq!(h.type_id, 12345);
-        assert_eq!(h.gc_flags.load(Ordering::Relaxed), 0);
-        assert_eq!(h.gc_word, 0);
+        // Over-aligned: a LOS object; `gc_word` is the size (801 §8.1.4).
+        assert_eq!(
+            h.gc_flags.load(Ordering::Relaxed),
+            rokr_common::object_header::FLAG_LARGE
+        );
+        assert_eq!(h.gc_word, 24);
+        // Block objects keep their 8-rounded size in `gc_word` too.
+        // SAFETY: as above.
+        let h = unsafe { &*rok_gc_alloc_slow(20, 8, 7).cast::<ObjectHeader>() };
+        assert_eq!((h.type_id, h.gc_word), (7, 24));
         str::tests::string_ops();
-    }
-
-    static SUM: AtomicI64 = AtomicI64::new(0);
-    extern "C" fn add(i: i64) {
-        SUM.fetch_add(i, Ordering::Relaxed);
-    }
-
-    #[test]
-    fn par_for_runs_every_iteration() {
-        rok_par_for(0, 10, 3, Some(add)); // 0+3+6+9
-        rok_par_for(10, 0, -4, Some(add)); // 10+6+2
-        assert_eq!(SUM.load(Ordering::Relaxed), 36);
     }
 }

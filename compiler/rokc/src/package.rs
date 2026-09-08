@@ -17,7 +17,21 @@ pub struct Package {
     pub anonymous: bool,
 }
 
+/// The root file name standing for standard input (`check -`, 901.9).
+pub const STDIN: &str = "<stdin>";
+
 impl Package {
+    /// Source read from stdin: an anonymous package (no file submodules).
+    pub fn stdin() -> Self {
+        Self {
+            root: PathBuf::from(STDIN),
+            dir: PathBuf::from("."),
+            name: "stdin".to_owned(),
+            lib: false,
+            anonymous: true,
+        }
+    }
+
     /// `target/` (spec 902.15); `ROKC_TARGET_DIR` overrides (901.7).
     pub fn target_dir(&self) -> PathBuf {
         std::env::var_os("ROKC_TARGET_DIR").map_or_else(|| self.dir.join("target"), PathBuf::from)
@@ -123,9 +137,15 @@ fn adds() {
 ";
 
 /// `rokc new [--lib | --bin] <name>`: a directory with `main.rok` (or
-/// `lib.rok`).
-pub fn new_package(path: &Path, lib: bool) -> Result<PathBuf, String> {
-    if path.exists() {
+/// `lib.rok`). `init`: the directory may exist, but not its root file.
+pub fn new_package(path: &Path, lib: bool, init: bool) -> Result<PathBuf, String> {
+    if init {
+        for f in ["main.rok", "lib.rok"] {
+            if path.join(f).exists() {
+                return Err(format!("`{}` already exists", path.join(f).display()));
+            }
+        }
+    } else if path.exists() {
         return Err(format!("`{}` already exists", path.display()));
     }
     std::fs::create_dir_all(path).map_err(|e| format!("{}: {e}", path.display()))?;
