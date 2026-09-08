@@ -666,6 +666,15 @@ fn block_like_statement_needs_no_semicolon() {
     let p = parse("fn t() -> i32 { match x { _ => y }.len() }");
     let Item::Fn(f) = &p.items[0] else { panic!() };
     assert!(f.body.as_ref().unwrap().trailing.is_some());
+    // ...but not a call: `(a - b) as T` after it starts a new statement.
+    let p = parse("fn t() -> u8 { if c { return 0; } (a - b) as u8 }");
+    let Item::Fn(f) = &p.items[0] else { panic!() };
+    let body = f.body.as_ref().unwrap();
+    assert_eq!(body.stmts.len(), 1);
+    assert!(matches!(
+        body.trailing.as_deref().map(|e| &e.kind),
+        Some(ExprKind::Cast(..))
+    ));
 }
 
 /// Parse with the meta blocks of `src` registered (the driver's pre-pass).

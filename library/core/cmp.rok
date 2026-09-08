@@ -13,14 +13,14 @@ pub enum Ordering {
 }
 
 impl Ordering {
-    pub fn is_lt(self) -> bool { match self { Ordering::Less => return true, _ => return false } }
-    pub fn is_eq(self) -> bool { match self { Ordering::Equal => return true, _ => return false } }
-    pub fn is_gt(self) -> bool { match self { Ordering::Greater => return true, _ => return false } }
+    pub fn is_lt(self) -> bool { match self { Ordering::Less => true, _ => false } }
+    pub fn is_eq(self) -> bool { match self { Ordering::Equal => true, _ => false } }
+    pub fn is_gt(self) -> bool { match self { Ordering::Greater => true, _ => false } }
     pub fn reverse(self) -> Ordering {
         match self {
-            Ordering::Less => return Ordering::Greater,
-            Ordering::Equal => return Ordering::Equal,
-            Ordering::Greater => return Ordering::Less,
+            Ordering::Less => Ordering::Greater,
+            Ordering::Equal => Ordering::Equal,
+            Ordering::Greater => Ordering::Less,
         }
     }
 }
@@ -28,13 +28,13 @@ impl Ordering {
 impl PartialEq for Ordering {
     fn eq(self, rhs: Ordering) -> bool {
         match (self, rhs) {
-            (Ordering::Less, Ordering::Less) => return true,
-            (Ordering::Equal, Ordering::Equal) => return true,
-            (Ordering::Greater, Ordering::Greater) => return true,
-            _ => return false,
+            (Ordering::Less, Ordering::Less) => true,
+            (Ordering::Equal, Ordering::Equal) => true,
+            (Ordering::Greater, Ordering::Greater) => true,
+            _ => false,
         }
     }
-    fn ne(self, rhs: Ordering) -> bool { return !self.eq(rhs); }
+    fn ne(self, rhs: Ordering) -> bool { !self.eq(rhs) }
 }
 
 impl Eq for Ordering {}
@@ -45,19 +45,17 @@ pub trait Ord: PartialOrd + Eq {
     fn cmp(self, rhs: Self) -> Ordering;
 
     fn min(self, rhs: Self) -> Self {
-        if self.le(rhs) { return self; }
-        return rhs;
+        if self.le(rhs) { self } else { rhs }
     }
 
     fn max(self, rhs: Self) -> Self {
-        if self.ge(rhs) { return self; }
-        return rhs;
+        if self.ge(rhs) { self } else { rhs }
     }
 
     fn clamp(self, low: Self, high: Self) -> Self {
         if self.lt(low) { return low; }
         if self.gt(high) { return high; }
-        return self;
+        self
     }
 }
 

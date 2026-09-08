@@ -833,6 +833,20 @@ pub fn lower_full(
             ));
             continue;
         }
+        // A generic inherent impl on a structural type (`impl<T, const N:
+        // usize> [T; N] { .. }`): matched against the receiver like a
+        // generic trait impl, with no trait (empty key).
+        if impl_generic && !matches!(impl_def.self_ty.kind, AstTyKind::Path(_)) {
+            generic_trait_impls.push(generic_trait_impl(
+                impl_def,
+                String::new(),
+                None,
+                &module,
+                generic_trait_impls.len(),
+                &mut pre_diags,
+            ));
+            continue;
+        }
         // Inherent methods of a generic impl (and generic methods of a
         // plain one) are templates keyed by the target's generic base.
         let generic_base = match &impl_def.self_ty.kind {
@@ -2192,7 +2206,7 @@ fn generic_trait_impl(
             info: MethodInfo {
                 module: def_module.to_owned(),
                 vis: Visibility::Pub,
-                trait_name: Some(trait_key.clone()),
+                trait_name: (!trait_key.is_empty()).then(|| trait_key.clone()),
             },
         }
     };
@@ -2757,7 +2771,11 @@ fn check_impl_overlap(env: &Env<'_>) {
     }
     let gis = &env.generic_trait_impls;
     for (i, a) in gis.iter().enumerate() {
-        for b in gis[i + 1..].iter().filter(|b| b.trait_key == a.trait_key) {
+        // Inherent ones (empty key) only clash per method, at the call.
+        for b in gis[i + 1..]
+            .iter()
+            .filter(|b| b.trait_key == a.trait_key && !a.trait_key.is_empty())
+        {
             let witness = candidates.iter().find(|t| {
                 ctx.generic_impl_subst(a, t, 0).is_some()
                     && ctx.generic_impl_subst(b, t, 0).is_some()
@@ -3257,6 +3275,10 @@ fn literal_handlers(
 ) -> Vec<super::ShapeHandler> {
     use rokc_parser::{ArgKind, PatKind, Pattern};
     let mut out = Vec::new();
+    // (pattern, priority, return type leaf) → first handler: a second
+    // one is ambiguous wherever the pattern matches (6.5.5: neither the
+    // slot type nor `priority` can tell them apart).
+    let mut seen: HashMap<(String, i64, String), (String, rokc_diagnostic::Span)> = HashMap::new();
     for item in &program.items {
         let Item::Fn(f) = item else { continue };
         let Some(attr) = f.attrs.iter().find(|a| a.name() == "literal") else {
@@ -3314,6 +3336,27 @@ fn literal_handlers(
             );
             continue;
         }
+        let ret_leaf = match f.ret_ty.as_ref().map(|t| &t.kind) {
+            Some(AstTyKind::Path(p)) => p.segments.last().map(|s| s.name.clone()),
+            _ => None,
+        };
+        let key = (pat.render(), priority, ret_leaf.unwrap_or_default());
+        if let Some((first, first_span)) = seen.get(&key) {
+            diags.push(
+                rokc_diagnostic::RokDiagnostic::error(
+                    rokc_diagnostic::ErrorKind::Meta,
+                    format!(
+                        "`#[literal({text})]` is already registered by `{first}` with the same \
+                         priority and return type: every use would be ambiguous — drop one, or \
+                         give one a `priority = N` (spec 6.5.5)"
+                    ),
+                )
+                .with_span(attr.span, "")
+                .with_secondary(*first_span, "first registered here"),
+            );
+            continue;
+        }
+        seen.insert(key, (f.name.clone(), attr.span));
         if let Ok(PatKind::Shape(shape)) = pat.kind() {
             out.push(super::ShapeHandler {
                 shape,

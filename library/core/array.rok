@@ -7,7 +7,7 @@ impl<T: Clone, const N: usize> Clone for [T; N] {
         for i in 0..N {
             r[i] = self[i].clone();
         }
-        return r;
+        r
     }
 }
 
@@ -16,7 +16,7 @@ impl<T: Copy, const N: usize> Copy for [T; N] {}
 impl<T: Default, const N: usize> Default for [T; N] {
     fn default() -> [T; N] {
         let d: T = rok::core::marker::default_of();
-        return [d; N];
+        [d; N]
     }
 }
 
@@ -24,10 +24,10 @@ impl<T: Debug, const N: usize> Debug for [T; N] {
     fn debug(self) -> str {
         let s = "[";
         for i in 0..N {
-            if i > 0 { s = s + ", "; }
-            s = s + self[i].debug();
+            if i > 0 { s += ", "; }
+            s += self[i].debug();
         }
-        return s + "]";
+        s + "]"
     }
 }
 
@@ -36,9 +36,9 @@ impl<T: PartialEq, const N: usize> PartialEq for [T; N] {
         for i in 0..N {
             if self[i].ne(rhs[i]) { return false; }
         }
-        return true;
+        true
     }
-    fn ne(self, rhs: [T; N]) -> bool { return !self.eq(rhs); }
+    fn ne(self, rhs: [T; N]) -> bool { !self.eq(rhs) }
 }
 
 impl<T: Eq, const N: usize> Eq for [T; N] {}
@@ -49,6 +49,12 @@ impl<T: Hash, const N: usize> Hash for [T; N] {
         for i in 0..N {
             h = ((h << 5) | (h >> 59)) ^ self[i].hash();
         }
-        return h;
+        h
     }
+}
+
+impl<T, const N: usize> [T; N] {
+    /// The element count `N`.
+    pub fn len(self) -> usize { N }
+    pub fn is_empty(self) -> bool { N == 0 }
 }

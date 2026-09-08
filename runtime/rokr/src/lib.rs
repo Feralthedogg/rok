@@ -629,12 +629,22 @@ pub extern "C" fn rok_print_i32(n: i32) -> i32 {
 
 /// C string + `\n`. Null prints as an empty line.
 ///
-/// `s` + `\n` to stdout.
+/// `s` + `\n` to stdout (`println`), under the stream lock so lines
+/// printed from different threads never interleave.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_print_str(s: RokStr) -> i32 {
-    rok_write_str(s);
-    // SAFETY: format matches (no arguments).
-    unsafe { libc::printf(c"\n".as_ptr()) };
+    unsafe extern "C" {
+        fn flockfile(f: *mut libc::FILE);
+        fn funlockfile(f: *mut libc::FILE);
+    }
+    let out = stdout();
+    // SAFETY: `out` is libc's stdout; lock / unlock pair up.
+    unsafe {
+        flockfile(out);
+        rok_write_str(s);
+        libc::fputc(i32::from(b'\n'), out);
+        funlockfile(out);
+    }
     0
 }
 
@@ -700,6 +710,34 @@ pub extern "C" fn rok_str_eq(a: RokStr, b: RokStr) -> i32 {
 }
 
 /// `s` to stderr (unbuffered).
+/// `s` + `\n` to stderr (`eprintln`) in one `writev`, so lines from
+/// different threads never interleave.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_eprint_str(s: RokStr) -> i32 {
+    let iov = [
+        libc::iovec {
+            iov_base: s.ptr.cast_mut().cast(),
+            iov_len: s.len,
+        },
+        libc::iovec {
+            iov_base: c"\n".as_ptr().cast_mut().cast(),
+            iov_len: 1,
+        },
+    ];
+    // SAFETY: both buffers are valid for their lengths.
+    let n = usize::try_from(unsafe { libc::writev(2, iov.as_ptr(), 2) }).unwrap_or(0);
+    // A short write (big line, full pipe): finish it piecewise.
+    if n < s.len {
+        // SAFETY: `n < len`, inside `s`.
+        unsafe { write_stderr(s.ptr.add(n), s.len - n) };
+    }
+    if n <= s.len {
+        // SAFETY: a one-byte static buffer.
+        unsafe { write_stderr(c"\n".as_ptr().cast(), 1) };
+    }
+    0
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_ewrite_str(s: RokStr) -> i32 {
     // SAFETY: `s` is valid for `len` bytes.

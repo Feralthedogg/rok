@@ -9,28 +9,27 @@ pub struct List<T> {
 
 impl<T> List<T> {
     pub fn new() -> List<T> {
-        return List::with_capacity(4);
+        List::with_capacity(4)
     }
 
     pub fn with_capacity(cap: usize) -> List<T> {
         let meta: GcBuf<usize> = buf_new(2);
-        buf_set(meta, 1, cap);
+        meta[1] = cap;
         let data: GcBuf<GcBuf<T>> = buf_new(1);
-        let store: GcBuf<T> = buf_new(cap);
-        buf_set(data, 0, store);
-        return List { meta: meta, data: data };
+        data[0] = buf_new(cap);
+        List { meta, data }
     }
 
     pub fn len(self) -> usize {
-        return buf_get(self.meta, 0);
+        self.meta[0]
     }
 
     pub fn is_empty(self) -> bool {
-        return self.len() == 0;
+        self.len() == 0
     }
 
     pub fn capacity(self) -> usize {
-        return buf_get(self.meta, 1);
+        self.meta[1]
     }
 
     /// Room for `additional` more elements (doubling).
@@ -44,22 +43,20 @@ impl<T> List<T> {
         if new_cap < n + additional {
             new_cap = n + additional;
         }
-        let old: GcBuf<T> = buf_get(self.data, 0);
+        let old = self.data[0];
         let store: GcBuf<T> = buf_new(new_cap);
-        let i: usize = 0;
-        while i < n {
-            buf_set(store, i, buf_get(old, i));
-            i = i + 1;
+        for i in 0..n {
+            store[i] = old[i];
         }
-        buf_set(self.data, 0, store);
-        buf_set(self.meta, 1, new_cap);
+        self.data[0] = store;
+        self.meta[1] = new_cap;
     }
 
     pub fn push(self, x: T) {
         self.reserve(1);
         let n = self.len();
-        buf_set(buf_get(self.data, 0), n, x);
-        buf_set(self.meta, 0, n + 1);
+        self.data[0][n] = x;
+        self.meta[0] = n + 1;
     }
 
     pub fn pop(self) -> T | none {
@@ -67,8 +64,8 @@ impl<T> List<T> {
         if n == 0 {
             return none;
         }
-        buf_set(self.meta, 0, n - 1);
-        return buf_get(buf_get(self.data, 0), n - 1);
+        self.meta[0] = n - 1;
+        self.data[0][n - 1]
     }
 
     /// Element `idx`, or `none` out of bounds.
@@ -76,11 +73,11 @@ impl<T> List<T> {
         if idx >= self.len() {
             return none;
         }
-        return buf_get(buf_get(self.data, 0), idx);
+        self.data[0][idx]
     }
 
     pub fn first(self) -> T | none {
-        return self.get(0);
+        self.get(0)
     }
 
     pub fn last(self) -> T | none {
@@ -88,7 +85,7 @@ impl<T> List<T> {
         if n == 0 {
             return none;
         }
-        return self.get(n - 1);
+        self.get(n - 1)
     }
 
     pub fn insert(self, idx: usize, x: T) {
@@ -97,14 +94,14 @@ impl<T> List<T> {
             panic("List::insert: index out of bounds");
         }
         self.reserve(1);
-        let store: GcBuf<T> = buf_get(self.data, 0);
+        let store = self.data[0];
         let i = n;
         while i > idx {
-            buf_set(store, i, buf_get(store, i - 1));
-            i = i - 1;
+            store[i] = store[i - 1];
+            i -= 1;
         }
-        buf_set(store, idx, x);
-        buf_set(self.meta, 0, n + 1);
+        store[idx] = x;
+        self.meta[0] = n + 1;
     }
 
     pub fn remove(self, idx: usize) -> T {
@@ -112,25 +109,23 @@ impl<T> List<T> {
         if idx >= n {
             return panic("List::remove: index out of bounds");
         }
-        let store: GcBuf<T> = buf_get(self.data, 0);
-        let x = buf_get(store, idx);
-        let i = idx;
-        while i + 1 < n {
-            buf_set(store, i, buf_get(store, i + 1));
-            i = i + 1;
+        let store = self.data[0];
+        let x = store[idx];
+        for i in idx + 1..n {
+            store[i - 1] = store[i];
         }
-        buf_set(self.meta, 0, n - 1);
-        return x;
+        self.meta[0] = n - 1;
+        x
     }
 
     pub fn clear(self) {
-        buf_set(self.meta, 0, 0);
+        self.meta[0] = 0;
     }
 
     pub fn iter(self) -> ListIter<T> {
         // [front index, items taken from the back]
         let pos: GcBuf<usize> = buf_new(2);
-        return ListIter { list: self, pos: pos };
+        ListIter { list: self, pos }
     }
 }
 
@@ -143,24 +138,24 @@ pub struct ListIter<T> {
 impl<T> Iterator for ListIter<T> {
     type Item = T;
     fn next(ref self) -> T | none {
-        let i: usize = buf_get(self.pos, 0);
-        if i + buf_get(self.pos, 1) >= self.list.len() {
+        let i = self.pos[0];
+        if i + self.pos[1] >= self.list.len() {
             return none;
         }
-        buf_set(self.pos, 0, i + 1);
-        return self.list.get(i);
+        self.pos[0] = i + 1;
+        self.list.get(i)
     }
 }
 
 impl<T> DoubleEndedIterator for ListIter<T> {
     fn next_back(ref self) -> T | none {
-        let i: usize = buf_get(self.pos, 0);
-        let back: usize = buf_get(self.pos, 1);
+        let i = self.pos[0];
+        let back = self.pos[1];
         if i + back >= self.list.len() {
             return none;
         }
-        buf_set(self.pos, 1, back + 1);
-        return self.list.get(self.list.len() - back - 1);
+        self.pos[1] = back + 1;
+        self.list.get(self.list.len() - back - 1)
     }
 }
 
@@ -168,13 +163,12 @@ impl<T> IntoIterator for List<T> {
     type IntoIter = ListIter<T>;
     type Item = T;
     fn into_iter(self) -> ListIter<T> {
-        return self.iter();
+        self.iter()
     }
 }
 
-/// `xs[i]`; panics out of bounds.
 impl<T> Default for List<T> {
-    fn default() -> List<T> { return List::new(); }
+    fn default() -> List<T> { List::new() }
 }
 
 /// A new list with every element cloned (stdlib 2.13.2).
@@ -184,17 +178,18 @@ impl<T: Clone> Clone for List<T> {
         for x in self {
             r.push(x.clone());
         }
-        return r;
+        r
     }
 }
 
+/// `xs[i]`; panics out of bounds.
 impl<T> Index<usize> for List<T> {
     type Output = T;
     fn index(self, idx: usize) -> T {
         if idx >= self.len() {
             return panic("List index out of bounds");
         }
-        return buf_get(buf_get(self.data, 0), idx);
+        self.data[0][idx]
     }
 }
 
@@ -205,7 +200,7 @@ impl<T> IndexSet<usize> for List<T> {
         if idx >= self.len() {
             panic("List index out of bounds");
         }
-        buf_set(buf_get(self.data, 0), idx, value);
+        self.data[0][idx] = value;
     }
 }
 
@@ -216,7 +211,7 @@ impl<T> FromIterator<T> for List<T> {
         for x in it {
             out.push(x);
         }
-        return out;
+        out
     }
 }
 
@@ -225,14 +220,12 @@ impl<T: PartialEq> PartialEq for List<T> {
     fn eq(self, rhs: List<T>) -> bool {
         let n = self.len();
         if n != rhs.len() { return false; }
-        let i = 0usize;
-        while i < n {
+        for i in 0..n {
             if self[i] != rhs[i] { return false; }
-            i += 1;
         }
-        return true;
+        true
     }
-    fn ne(self, rhs: List<T>) -> bool { return !self.eq(rhs); }
+    fn ne(self, rhs: List<T>) -> bool { !self.eq(rhs) }
 }
 
 impl<T: Eq> Eq for List<T> {}
@@ -276,7 +269,7 @@ impl<T: Hash> Hash for List<T> {
         for x in self {
             h = ((h << 5u64) | (h >> 59u64)) ^ x.hash();
         }
-        return h;
+        h
     }
 }
 
@@ -286,11 +279,11 @@ impl<T: Debug> Debug for List<T> {
         let out = "[";
         let first = true;
         for x in self {
-            if !first { out = out + ", "; }
-            out = out + x.debug();
+            if !first { out += ", "; }
+            out += x.debug();
             first = false;
         }
-        return out + "]";
+        out + "]"
     }
 }
 

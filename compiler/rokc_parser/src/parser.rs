@@ -3816,6 +3816,16 @@ impl<'a> Parser<'a> {
                             trailing_closure: Some(Box::new(closure)),
                         }
                     }
+                } else if let Some(closure) = self.paren_less_trailing_closure() {
+                    // `f |x| { .. }` → `f(|x| { .. })` (spec 4.8.1).
+                    ExprKind::Call {
+                        callee: Box::new(Expr {
+                            span: start,
+                            kind: ExprKind::Path(path),
+                        }),
+                        args: Vec::new(),
+                        trailing_closure: Some(closure),
+                    }
                 } else {
                     ExprKind::Path(path)
                 }
@@ -4056,6 +4066,18 @@ impl<'a> Parser<'a> {
                                 type_args,
                                 args,
                                 trailing_closure,
+                            },
+                        };
+                    } else if let Some(closure) = self.paren_less_trailing_closure() {
+                        // `xs.map |x| { .. }` (spec 4.8.1).
+                        expr = Expr {
+                            span: expr.span,
+                            kind: ExprKind::MethodCall {
+                                receiver: Box::new(expr),
+                                method: name,
+                                type_args,
+                                args: Vec::new(),
+                                trailing_closure: Some(closure),
                             },
                         };
                     } else {
@@ -4376,6 +4398,57 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_closure_expr(&mut self) -> Option<ExprKind> {
+        let (params, ret_ty) = self.parse_closure_head()?;
+        let body = self.parse_expr()?;
+        Some(ExprKind::Closure {
+            captures: Vec::new(),
+            params,
+            ret_ty,
+            body: Box::new(body),
+            is_async: false,
+            is_generator: false,
+        })
+    }
+
+    /// Spec 4.8.1 `primary trailing_closure` without the call's `( )`:
+    /// `xs.map |x| { .. }` / `f |x| { .. }`. A `|` after a callee is the
+    /// closure only when `|params| (-> R)? {` follows — the trailing body
+    /// is always a block — else it stays the `|` operator. `||` stays
+    /// logical-or (the 0-parameter form is `f { .. }`). Off in a
+    /// control-flow head, like the `{ .. }` form.
+    fn paren_less_trailing_closure(&mut self) -> Option<Box<Expr>> {
+        if !self.struct_expr_allowed || !matches!(self.peek(), TokenKind::Pipe) {
+            return None;
+        }
+        let not_closure = self.backtracks(|p| {
+            p.parse_closure_head()?;
+            matches!(p.peek(), TokenKind::LBrace).then_some(())
+        });
+        if not_closure {
+            return None;
+        }
+        let span = self.peek_span();
+        let (params, ret_ty) = self.parse_closure_head()?;
+        let body_span = self.peek_span();
+        let block = self.parse_block()?;
+        Some(Box::new(Expr {
+            span,
+            kind: ExprKind::Closure {
+                captures: Vec::new(),
+                params,
+                ret_ty,
+                body: Box::new(Expr {
+                    span: body_span,
+                    kind: ExprKind::Block(block),
+                }),
+                is_async: false,
+                is_generator: false,
+            },
+        }))
+    }
+
+    /// `|params|` / `||`, then an optional `-> R`.
+    fn parse_closure_head(&mut self) -> Option<(Vec<Param>, Option<Ty>)> {
         let mut params: Vec<Param> = Vec::new();
         if self.eat(&TokenKind::PipePipe) {
             // Empty param list `||`.
@@ -4398,15 +4471,7 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        let body = self.parse_expr()?;
-        Some(ExprKind::Closure {
-            captures: Vec::new(),
-            params,
-            ret_ty,
-            body: Box::new(body),
-            is_async: false,
-            is_generator: false,
-        })
+        Some((params, ret_ty))
     }
 
     /// Parse `{ field: expr, ..., ..base? }` after a leading path. The

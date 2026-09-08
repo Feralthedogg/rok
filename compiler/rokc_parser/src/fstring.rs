@@ -297,9 +297,7 @@ impl Parser<'_> {
                             Spec::default()
                         }
                     };
-                    let Some(e) =
-                        self.parse_hole(hole.expr, span.start as usize + 2 + hole.offset, span)
-                    else {
+                    let Some(e) = self.parse_hole(hole.expr, &body[..hole.offset], span) else {
                         continue;
                     };
                     format_value(e, &spec, span)
@@ -321,25 +319,44 @@ impl Parser<'_> {
         acc.map_or(ExprKind::Literal(Literal::Str(String::new())), |e| e.kind)
     }
 
-    /// Parse one hole's expression; diagnostics land on the f-string.
-    fn parse_hole(&mut self, text: &str, abs_offset: usize, span: Span) -> Option<Expr> {
+    /// Parse one hole's expression. `before` is the f-string body up to
+    /// the hole, so token and lexer-error spans land on the hole's own
+    /// line / column.
+    fn parse_hole(&mut self, text: &str, before: &str, span: Span) -> Option<Expr> {
         if text.trim().is_empty() {
             self.error(span, "empty `{}` in f-string");
             return None;
         }
-        let (mut tokens, diags) = Lexer::new(text, self.file.clone())
+        let (mut tokens, mut diags) = Lexer::new(text, self.file.clone())
             .with_ext_ops(self.ext.symbols())
             .lex_all();
-        for t in &mut tokens {
-            // Byte offsets into the file; line / column of the literal.
-            let off = u32::try_from(abs_offset).unwrap_or(u32::MAX);
-            t.span = Span {
-                start: t.span.start.saturating_add(off),
-                end: t.span.end.saturating_add(off),
-                line: span.line,
-                col: span.col,
+        let to_u32 = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        let base = to_u32(span.start as usize + 2 + before.len()); // skip `f"`
+        let remap = |s: &mut Span| {
+            let upto = (s.start as usize).min(text.len());
+            let prefix = format!("{before}{}", &text[..upto]);
+            let (line, col) = match prefix.rfind('\n') {
+                Some(nl) => (
+                    span.line + to_u32(prefix.matches('\n').count()),
+                    1 + to_u32(prefix[nl + 1..].chars().count()),
+                ),
+                None => (span.line, span.col + 2 + to_u32(prefix.chars().count())),
+            };
+            *s = Span {
+                start: s.start.saturating_add(base),
+                end: s.end.saturating_add(base),
+                line,
+                col,
                 file: span.file,
             };
+        };
+        for t in &mut tokens {
+            remap(&mut t.span);
+        }
+        for d in &mut diags {
+            if let Some(l) = d.primary.as_mut() {
+                remap(&mut l.span);
+            }
         }
         self.diagnostics.extend(diags);
         let mut sub = Parser::new(&tokens, self.file.clone());

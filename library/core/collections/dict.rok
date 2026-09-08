@@ -13,10 +13,7 @@ pub struct DictSlots<K, V> {
 }
 
 fn new_slots<K, V>(cap: usize) -> DictSlots<K, V> {
-    let keys: GcBuf<K> = buf_new(cap);
-    let vals: GcBuf<V> = buf_new(cap);
-    let state: GcBuf<u8> = buf_new(cap);
-    return DictSlots { keys: keys, vals: vals, state: state };
+    DictSlots { keys: buf_new(cap), vals: buf_new(cap), state: buf_new(cap) }
 }
 
 pub struct Dict<K, V> {
@@ -26,97 +23,92 @@ pub struct Dict<K, V> {
 
 impl<K: Hash, V> Dict<K, V> {
     pub fn new() -> Dict<K, V> {
-        return Dict::with_capacity(4);
+        Dict::with_capacity(4)
     }
 
     pub fn with_capacity(cap: usize) -> Dict<K, V> {
-        let c: usize = 8;
+        let c = 8usize;
         while c < cap * 2 {
-            c = c * 2;
+            c *= 2;
         }
         let meta: GcBuf<usize> = buf_new(3);
-        buf_set(meta, 1, c);
+        meta[1] = c;
         let slots: GcBuf<DictSlots<K, V>> = buf_new(1);
-        buf_set(slots, 0, new_slots(c));
-        return Dict { meta: meta, slots: slots };
+        slots[0] = new_slots(c);
+        Dict { meta, slots }
     }
 
     pub fn len(self) -> usize {
-        return buf_get(self.meta, 0);
+        self.meta[0]
     }
 
     pub fn is_empty(self) -> bool {
-        return self.len() == 0;
+        self.len() == 0
     }
 
     /// The slot holding `k`, or the capacity when absent.
     fn find(self, k: K) -> usize {
-        let s: DictSlots<K, V> = buf_get(self.slots, 0);
-        let cap: usize = buf_get(self.meta, 1);
+        let s = self.slots[0];
+        let cap = self.meta[1];
         let i = (k.hash() % (cap as u64)) as usize;
-        let probes: usize = 0;
-        while probes < cap {
-            let st: u8 = buf_get(s.state, i);
+        for _ in 0..cap {
+            let st = s.state[i];
             if st == 0u8 {
                 return cap;
             }
-            if st == 1u8 && buf_get(s.keys, i) == k {
+            if st == 1u8 && s.keys[i] == k {
                 return i;
             }
             i = (i + 1) % cap;
-            probes = probes + 1;
         }
-        return cap;
+        cap
     }
 
     /// Store into the first non-full slot of `k`'s probe run (`k` is
     /// known to be absent and the table to have room).
     fn place(self, k: K, v: V) {
-        let s: DictSlots<K, V> = buf_get(self.slots, 0);
-        let cap: usize = buf_get(self.meta, 1);
+        let s = self.slots[0];
+        let cap = self.meta[1];
         let i = (k.hash() % (cap as u64)) as usize;
-        while buf_get(s.state, i) == 1u8 {
+        while s.state[i] == 1u8 {
             i = (i + 1) % cap;
         }
-        if buf_get(s.state, i) == 0u8 {
-            buf_set(self.meta, 2, buf_get(self.meta, 2) + 1);
+        if s.state[i] == 0u8 {
+            self.meta[2] += 1;
         }
-        buf_set(s.keys, i, k);
-        buf_set(s.vals, i, v);
-        buf_set(s.state, i, 1u8);
-        buf_set(self.meta, 0, self.len() + 1);
+        s.keys[i] = k;
+        s.vals[i] = v;
+        s.state[i] = 1u8;
+        self.meta[0] += 1;
     }
 
     /// Rebuild into a table of `cap` slots (drops tombstones).
     fn rehash(self, cap: usize) {
-        let old: DictSlots<K, V> = buf_get(self.slots, 0);
-        let old_cap: usize = buf_get(self.meta, 1);
-        buf_set(self.slots, 0, new_slots(cap));
-        buf_set(self.meta, 0, 0);
-        buf_set(self.meta, 1, cap);
-        buf_set(self.meta, 2, 0);
-        let i: usize = 0;
-        while i < old_cap {
-            if buf_get(old.state, i) == 1u8 {
-                self.place(buf_get(old.keys, i), buf_get(old.vals, i));
+        let old = self.slots[0];
+        let old_cap = self.meta[1];
+        self.slots[0] = new_slots(cap);
+        self.meta[0] = 0;
+        self.meta[1] = cap;
+        self.meta[2] = 0;
+        for i in 0..old_cap {
+            if old.state[i] == 1u8 {
+                self.place(old.keys[i], old.vals[i]);
             }
-            i = i + 1;
         }
     }
 
     /// Insert or replace; the old value, or `none`.
     pub fn insert(self, k: K, v: V) -> V | none {
-        let cap: usize = buf_get(self.meta, 1);
+        let cap = self.meta[1];
         let at = self.find(k);
         if at < cap {
-            let s: DictSlots<K, V> = buf_get(self.slots, 0);
-            let old: V = buf_get(s.vals, at);
-            buf_set(s.vals, at, v);
+            let s = self.slots[0];
+            let old = s.vals[at];
+            s.vals[at] = v;
             return old;
         }
         // Load factor 3/4, tombstones included.
-        let used: usize = buf_get(self.meta, 2);
-        if (used + 1) * 4 > cap * 3 {
+        if (self.meta[2] + 1) * 4 > cap * 3 {
             let grown = cap;
             if (self.len() + 1) * 2 > cap {
                 grown = cap * 2;
@@ -124,57 +116,57 @@ impl<K: Hash, V> Dict<K, V> {
             self.rehash(grown);
         }
         self.place(k, v);
-        return none;
+        none
     }
 
     pub fn get(self, k: K) -> V | none {
         let at = self.find(k);
-        if at == buf_get(self.meta, 1) {
+        if at == self.meta[1] {
             return none;
         }
-        let s: DictSlots<K, V> = buf_get(self.slots, 0);
-        return buf_get(s.vals, at);
+        let s = self.slots[0];
+        s.vals[at]
     }
 
     pub fn contains_key(self, k: K) -> bool {
-        return self.find(k) < buf_get(self.meta, 1);
+        self.find(k) < self.meta[1]
     }
 
     pub fn remove(self, k: K) -> V | none {
         let at = self.find(k);
-        if at == buf_get(self.meta, 1) {
+        if at == self.meta[1] {
             return none;
         }
-        let s: DictSlots<K, V> = buf_get(self.slots, 0);
-        buf_set(s.state, at, 2u8);
-        buf_set(self.meta, 0, self.len() - 1);
-        return buf_get(s.vals, at);
+        let s = self.slots[0];
+        s.state[at] = 2u8;
+        self.meta[0] -= 1;
+        s.vals[at]
     }
 
     /// The first full slot at or after `from`, or the capacity.
     fn next_full(self, from: usize) -> usize {
-        let s: DictSlots<K, V> = buf_get(self.slots, 0);
-        let cap: usize = buf_get(self.meta, 1);
+        let s = self.slots[0];
+        let cap = self.meta[1];
         let i = from;
-        while i < cap && buf_get(s.state, i) != 1u8 {
-            i = i + 1;
+        while i < cap && s.state[i] != 1u8 {
+            i += 1;
         }
-        return i;
+        i
     }
 
     /// The keys, lazily (2.9.3; order unspecified).
     pub fn keys(self) -> DictKeys<K, V> {
-        return DictKeys { d: self, at: 0 };
+        DictKeys { d: self, at: 0 }
     }
 
     /// The values, lazily.
     pub fn values(self) -> DictValues<K, V> {
-        return DictValues { d: self, at: 0 };
+        DictValues { d: self, at: 0 }
     }
 
     /// `(key, value)` pairs, lazily.
     pub fn entries(self) -> DictEntries<K, V> {
-        return DictEntries { d: self, at: 0 };
+        DictEntries { d: self, at: 0 }
     }
 }
 
@@ -190,12 +182,12 @@ impl<K: Hash, V> Iterator for DictKeys<K, V> {
     type Item = K;
     fn next(ref self) -> K | none {
         let i = self.d.next_full(self.at);
-        if i >= buf_get(self.d.meta, 1) {
+        if i >= self.d.meta[1] {
             return none;
         }
         self.at = i + 1;
-        let s: DictSlots<K, V> = buf_get(self.d.slots, 0);
-        return buf_get(s.keys, i);
+        let s = self.d.slots[0];
+        s.keys[i]
     }
 }
 
@@ -208,12 +200,12 @@ impl<K: Hash, V> Iterator for DictValues<K, V> {
     type Item = V;
     fn next(ref self) -> V | none {
         let i = self.d.next_full(self.at);
-        if i >= buf_get(self.d.meta, 1) {
+        if i >= self.d.meta[1] {
             return none;
         }
         self.at = i + 1;
-        let s: DictSlots<K, V> = buf_get(self.d.slots, 0);
-        return buf_get(s.vals, i);
+        let s = self.d.slots[0];
+        s.vals[i]
     }
 }
 
@@ -226,17 +218,17 @@ impl<K: Hash, V> Iterator for DictEntries<K, V> {
     type Item = (K, V);
     fn next(ref self) -> (K, V) | none {
         let i = self.d.next_full(self.at);
-        if i >= buf_get(self.d.meta, 1) {
+        if i >= self.d.meta[1] {
             return none;
         }
         self.at = i + 1;
-        let s: DictSlots<K, V> = buf_get(self.d.slots, 0);
-        return (buf_get(s.keys, i), buf_get(s.vals, i));
+        let s = self.d.slots[0];
+        (s.keys[i], s.vals[i])
     }
 }
 
 impl<K: Hash, V> Default for Dict<K, V> {
-    fn default() -> Dict<K, V> { return Dict::new(); }
+    fn default() -> Dict<K, V> { Dict::new() }
 }
 
 /// A new dict with every key and value cloned (stdlib 2.13.2).
@@ -246,7 +238,7 @@ impl<K: Hash + Clone, V: Clone> Clone for Dict<K, V> {
         for (k, v) in self {
             r.insert(k.clone(), v.clone());
         }
-        return r;
+        r
     }
 }
 
@@ -255,7 +247,7 @@ impl<K: Hash, V> IntoIterator for Dict<K, V> {
     type IntoIter = DictEntries<K, V>;
     type Item = (K, V);
     fn into_iter(self) -> DictEntries<K, V> {
-        return self.entries();
+        self.entries()
     }
 }
 
@@ -264,11 +256,11 @@ impl<K: Hash, V> Index<K> for Dict<K, V> {
     type Output = V;
     fn index(self, k: K) -> V {
         let at = self.find(k);
-        if at == buf_get(self.meta, 1) {
+        if at == self.meta[1] {
             return panic("Dict: key not found");
         }
-        let s: DictSlots<K, V> = buf_get(self.slots, 0);
-        return buf_get(s.vals, at);
+        let s = self.slots[0];
+        s.vals[at]
     }
 }
 
@@ -284,14 +276,13 @@ impl<K: Hash, V> IndexSet<K> for Dict<K, V> {
 impl<K: Hash, V: PartialEq> PartialEq for Dict<K, V> {
     fn eq(self, rhs: Dict<K, V>) -> bool {
         if self.len() != rhs.len() { return false; }
-        for kv in self {
-            let (k, v) = kv;
+        for (k, v) in self {
             if !rhs.contains_key(k) { return false; }
             if rhs[k] != v { return false; }
         }
-        return true;
+        true
     }
-    fn ne(self, rhs: Dict<K, V>) -> bool { return !self.eq(rhs); }
+    fn ne(self, rhs: Dict<K, V>) -> bool { !self.eq(rhs) }
 }
 
 impl<K: Hash, V: Eq> Eq for Dict<K, V> {}
@@ -300,12 +291,11 @@ impl<K: Hash, V: Eq> Eq for Dict<K, V> {}
 impl<K: Hash, V: Hash> Hash for Dict<K, V> {
     fn hash(self) -> u64 {
         let h = self.len() as u64;
-        for kv in self {
-            let (k, v) = kv;
+        for (k, v) in self {
             let vh = v.hash();
-            h = h ^ (k.hash() ^ ((vh << 17u64) | (vh >> 47u64)));
+            h ^= k.hash() ^ ((vh << 17u64) | (vh >> 47u64));
         }
-        return h;
+        h
     }
 }
 
@@ -314,13 +304,12 @@ impl<K: Hash + Debug, V: Debug> Debug for Dict<K, V> {
     fn debug(self) -> str {
         let out = "{";
         let first = true;
-        for kv in self {
-            let (k, v) = kv;
-            if !first { out = out + ", "; }
-            out = out + k.debug() + ": " + v.debug();
+        for (k, v) in self {
+            if !first { out += ", "; }
+            out += f"{k:?}: {v:?}";
             first = false;
         }
-        return out + "}";
+        out + "}"
     }
 }
 

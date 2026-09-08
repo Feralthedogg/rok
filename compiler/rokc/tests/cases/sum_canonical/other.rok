@@ -1,0 +1,14 @@
+pub type Mixed = str | none | i32;
+
+pub fn make(b: bool) -> str | i32 {
+    if b { return "s"; }
+    return 7;
+}
+
+pub fn tag_of(v: none | i32 | str) -> i32 {
+    match v {
+        n: i32 => n,
+        s: str => s.len() as i32,
+        none => -1,
+    }
+}

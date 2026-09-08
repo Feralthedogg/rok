@@ -156,7 +156,7 @@ pub(super) fn lower_closure_expr(
     let body_h = if diverges || (body_h.ty == HirTy::Unit && final_ret_ty == HirTy::Unit) {
         body_h
     } else {
-        coerce(&cl_ctx, &final_ret_ty, body_h, &|| {
+        coerce(&mut cl_ctx, &final_ret_ty, body_h, &|| {
             "the closure body".to_owned()
         })
     };
@@ -386,7 +386,7 @@ pub(super) fn optional_parts(ty: &HirTy) -> Option<(usize, Vec<(usize, HirTy)>)>
 pub(super) fn without_none(some: &[(usize, HirTy)]) -> HirTy {
     match some {
         [(_, t)] => t.clone(),
-        many => HirTy::Sum(many.iter().map(|(_, t)| t.clone()).collect()),
+        many => HirTy::sum(many.iter().map(|(_, t)| t.clone())),
     }
 }
 
@@ -503,7 +503,7 @@ pub(super) fn desugar_question_dot(
     let result_ty = if inner_optional {
         inner.ty.clone()
     } else {
-        HirTy::Sum(vec![inner.ty.clone(), none_ty()])
+        HirTy::sum([inner.ty.clone(), none_ty()])
     };
     let some_body = if inner_optional {
         inner
@@ -662,8 +662,14 @@ pub(super) fn desugar_nullish_coalesce(
             ),
         );
     };
-    let value_ty = without_none(&some);
+    let mut value_ty = without_none(&some);
     let rhs_h = lower_expected(ctx, rhs, value_ty.clone());
+    // `a ?? b` with `b: T | none` too (a fallback chain): the result is
+    // `T | none` (spec 3.8.4: `T | typeof(b)`).
+    // ponytail: only the same-optional case; other sums still need `T`.
+    if rhs_h.ty == lhs.ty {
+        value_ty = lhs.ty.clone();
+    }
     let rhs_h = coerce(ctx, &value_ty, rhs_h, &|| "the `??` default".to_owned());
     let vt = value_ty.clone();
     optional_match(

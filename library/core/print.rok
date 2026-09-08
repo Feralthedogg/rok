@@ -6,9 +6,12 @@
 extern "C" {
     fn rok_write_str(s: str) -> i32;
     fn rok_ewrite_str(s: str) -> i32;
+    fn rok_print_str(s: str) -> i32;
+    fn rok_eprint_str(s: str) -> i32;
 }
 
 pub fn print(s: str) { unsafe { rok_write_str(s) }; }
-pub fn println(s: str) { unsafe { rok_write_str(s); rok_write_str("\n"); } }
+// One runtime call per line: lines from different threads don't interleave.
+pub fn println(s: str) { unsafe { rok_print_str(s) }; }
 pub fn eprint(s: str) { unsafe { rok_ewrite_str(s) }; }
-pub fn eprintln(s: str) { unsafe { rok_ewrite_str(s); rok_ewrite_str("\n"); } }
+pub fn eprintln(s: str) { unsafe { rok_eprint_str(s) }; }

@@ -1106,7 +1106,7 @@ pub(super) fn lower_try(
     let result_ty = if optional_parts(&body.ty).is_some() || body.ty == HirTy::Unknown {
         body.ty.clone()
     } else {
-        HirTy::Sum(vec![body.ty.clone(), none_ty()])
+        HirTy::sum([body.ty.clone(), none_ty()])
     };
     let body = wrap_into_sum(&result_ty, body);
     if !frame.hit {

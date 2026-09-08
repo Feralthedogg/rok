@@ -39,7 +39,6 @@ fn atomic_cas<T>(
     buf: GcBuf<T>, i: usize, current: T, new: T, success: AtomicOrdering, failure: AtomicOrdering,
 ) -> T;
 
-
 fn wait(word: GcBuf<i32>, expected: i32) {
     unsafe { rok_sync_wait(word, 0, expected) };
 }
@@ -50,8 +49,8 @@ fn wake(word: GcBuf<i32>) {
 
 fn word(v: i32) -> GcBuf<i32> {
     let w: GcBuf<i32> = buf_new(1);
-    buf_set(w, 0, v);
-    return w;
+    w[0] = v;
+    w
 }
 
 /// Memory ordering of an atomic operation (2.16.2). Spec name: `Ordering`,
@@ -63,7 +62,6 @@ pub enum AtomicOrdering {
     AcqRel,
     SeqCst,
 }
-
 
 /// The element types `Atomic<T>` supports.
 pub trait AtomicPrimitive {}
@@ -90,19 +88,19 @@ pub struct Atomic<T> {
 impl<T: AtomicPrimitive + PartialEq> Atomic<T> {
     pub fn new(value: T) -> Atomic<T> {
         let cell: GcBuf<T> = buf_new(1);
-        buf_set(cell, 0, value);
-        return Atomic { cell: cell };
+        cell[0] = value;
+        Atomic { cell }
     }
 
     /// Panics on `Release` / `AcqRel` (not load orderings).
     pub fn load(self, ordering: AtomicOrdering = SeqCst) -> T {
         let c = self.cell;
-        return match ordering {
+        match ordering {
             AtomicOrdering::Relaxed => atomic_load(c, 0, Relaxed),
             AtomicOrdering::Acquire => atomic_load(c, 0, Acquire),
             AtomicOrdering::SeqCst => atomic_load(c, 0, SeqCst),
             _ => panic("Atomic::load: `Release` / `AcqRel` is not a load ordering"),
-        };
+        }
     }
 
     pub fn store(self, value: T, ordering: AtomicOrdering = SeqCst) {
@@ -111,13 +109,13 @@ impl<T: AtomicPrimitive + PartialEq> Atomic<T> {
 
     pub fn swap(self, value: T, ordering: AtomicOrdering = SeqCst) -> T {
         let c = self.cell;
-        return match ordering {
+        match ordering {
             AtomicOrdering::Relaxed => atomic_xchg(c, 0, value, Relaxed),
             AtomicOrdering::Acquire => atomic_xchg(c, 0, value, Acquire),
             AtomicOrdering::Release => atomic_xchg(c, 0, value, Release),
             AtomicOrdering::AcqRel => atomic_xchg(c, 0, value, AcqRel),
             AtomicOrdering::SeqCst => atomic_xchg(c, 0, value, SeqCst),
-        };
+        }
     }
 
     /// `Ok(previous)` if it held `current` (now `new`), else
@@ -135,98 +133,97 @@ impl<T: AtomicPrimitive + PartialEq> Atomic<T> {
         if old == current {
             return Result::Ok(old);
         }
-        return Result::Err(old);
+        Result::Err(old)
     }
 
     /// Never fails spuriously here (same as `compare_exchange`).
     pub fn compare_exchange_weak(
         self, current: T, new: T, success: AtomicOrdering, failure: AtomicOrdering,
     ) -> Result<T, T> {
-        return self.compare_exchange(current, new, success, failure);
+        self.compare_exchange(current, new, success, failure)
     }
 
     // Integer-only (`bool` is rejected by the intrinsic for add / sub).
     pub fn fetch_add(self, value: T, ordering: AtomicOrdering = SeqCst) -> T {
         let c = self.cell;
-        return match ordering {
+        match ordering {
             AtomicOrdering::Relaxed => atomic_add(c, 0, value, Relaxed),
             AtomicOrdering::Acquire => atomic_add(c, 0, value, Acquire),
             AtomicOrdering::Release => atomic_add(c, 0, value, Release),
             AtomicOrdering::AcqRel => atomic_add(c, 0, value, AcqRel),
             AtomicOrdering::SeqCst => atomic_add(c, 0, value, SeqCst),
-        };
+        }
     }
     pub fn fetch_sub(self, value: T, ordering: AtomicOrdering = SeqCst) -> T {
         let c = self.cell;
-        return match ordering {
+        match ordering {
             AtomicOrdering::Relaxed => atomic_sub(c, 0, value, Relaxed),
             AtomicOrdering::Acquire => atomic_sub(c, 0, value, Acquire),
             AtomicOrdering::Release => atomic_sub(c, 0, value, Release),
             AtomicOrdering::AcqRel => atomic_sub(c, 0, value, AcqRel),
             AtomicOrdering::SeqCst => atomic_sub(c, 0, value, SeqCst),
-        };
+        }
     }
     pub fn fetch_and(self, value: T, ordering: AtomicOrdering = SeqCst) -> T {
         let c = self.cell;
-        return match ordering {
+        match ordering {
             AtomicOrdering::Relaxed => atomic_and(c, 0, value, Relaxed),
             AtomicOrdering::Acquire => atomic_and(c, 0, value, Acquire),
             AtomicOrdering::Release => atomic_and(c, 0, value, Release),
             AtomicOrdering::AcqRel => atomic_and(c, 0, value, AcqRel),
             AtomicOrdering::SeqCst => atomic_and(c, 0, value, SeqCst),
-        };
+        }
     }
     pub fn fetch_or(self, value: T, ordering: AtomicOrdering = SeqCst) -> T {
         let c = self.cell;
-        return match ordering {
+        match ordering {
             AtomicOrdering::Relaxed => atomic_or(c, 0, value, Relaxed),
             AtomicOrdering::Acquire => atomic_or(c, 0, value, Acquire),
             AtomicOrdering::Release => atomic_or(c, 0, value, Release),
             AtomicOrdering::AcqRel => atomic_or(c, 0, value, AcqRel),
             AtomicOrdering::SeqCst => atomic_or(c, 0, value, SeqCst),
-        };
+        }
     }
     pub fn fetch_xor(self, value: T, ordering: AtomicOrdering = SeqCst) -> T {
         let c = self.cell;
-        return match ordering {
+        match ordering {
             AtomicOrdering::Relaxed => atomic_xor(c, 0, value, Relaxed),
             AtomicOrdering::Acquire => atomic_xor(c, 0, value, Acquire),
             AtomicOrdering::Release => atomic_xor(c, 0, value, Release),
             AtomicOrdering::AcqRel => atomic_xor(c, 0, value, AcqRel),
             AtomicOrdering::SeqCst => atomic_xor(c, 0, value, SeqCst),
-        };
+        }
     }
 }
 
 // `compare_exchange` per failure ordering, each choosing the success one.
 fn cas_relaxed_fail<T>(c: GcBuf<T>, cur: T, new: T, success: AtomicOrdering) -> T {
-    return match success {
+    match success {
         AtomicOrdering::Relaxed => atomic_cas(c, 0, cur, new, Relaxed, Relaxed),
         AtomicOrdering::Acquire => atomic_cas(c, 0, cur, new, Acquire, Relaxed),
         AtomicOrdering::Release => atomic_cas(c, 0, cur, new, Release, Relaxed),
         AtomicOrdering::AcqRel => atomic_cas(c, 0, cur, new, AcqRel, Relaxed),
         AtomicOrdering::SeqCst => atomic_cas(c, 0, cur, new, SeqCst, Relaxed),
-    };
+    }
 }
 fn cas_acquire_fail<T>(c: GcBuf<T>, cur: T, new: T, success: AtomicOrdering) -> T {
-    return match success {
+    match success {
         AtomicOrdering::Relaxed => atomic_cas(c, 0, cur, new, Relaxed, Acquire),
         AtomicOrdering::Acquire => atomic_cas(c, 0, cur, new, Acquire, Acquire),
         AtomicOrdering::Release => atomic_cas(c, 0, cur, new, Release, Acquire),
         AtomicOrdering::AcqRel => atomic_cas(c, 0, cur, new, AcqRel, Acquire),
         AtomicOrdering::SeqCst => atomic_cas(c, 0, cur, new, SeqCst, Acquire),
-    };
+    }
 }
 fn cas_seqcst_fail<T>(c: GcBuf<T>, cur: T, new: T, success: AtomicOrdering) -> T {
-    return match success {
+    match success {
         AtomicOrdering::Relaxed => atomic_cas(c, 0, cur, new, Relaxed, SeqCst),
         AtomicOrdering::Acquire => atomic_cas(c, 0, cur, new, Acquire, SeqCst),
         AtomicOrdering::Release => atomic_cas(c, 0, cur, new, Release, SeqCst),
         AtomicOrdering::AcqRel => atomic_cas(c, 0, cur, new, AcqRel, SeqCst),
         AtomicOrdering::SeqCst => atomic_cas(c, 0, cur, new, SeqCst, SeqCst),
-    };
+    }
 }
-
 
 /// Exclusive lock around a `T` (2.16.3). No poisoning (spec): a panic
 /// ends the process, and an error leaving `using` drops the guard.
@@ -241,8 +238,8 @@ unsafe impl<T: Send> Sync for Mutex<T> {}
 impl<T> Mutex<T> {
     pub fn new(value: T) -> Mutex<T> {
         let v: GcBuf<T> = buf_new(1);
-        buf_set(v, 0, value);
-        return Mutex { state: word(0), value: v };
+        v[0] = value;
+        Mutex { state: word(0), value: v }
     }
 
     /// Block until the lock is ours. Bind the guard with `using`.
@@ -252,14 +249,14 @@ impl<T> Mutex<T> {
                 wait(self.state, 2);
             }
         }
-        return MutexGuard { mutex: self };
+        MutexGuard { mutex: self }
     }
 
     pub fn try_lock(self) -> MutexGuard<T> | none {
         if atomic_cas(self.state, 0, 0, 1, SeqCst, SeqCst) == 0 {
             return MutexGuard { mutex: self };
         }
-        return none;
+        none
     }
 
     fn unlock(self) {
@@ -272,7 +269,7 @@ impl<T> Mutex<T> {
     /// `await m.lock_async()` inside async code: suspends the task (not
     /// the thread) until the lock is ours.
     pub fn lock_async(self) -> LockFuture<T> {
-        return LockFuture { mutex: self };
+        LockFuture { mutex: self }
     }
 }
 
@@ -294,7 +291,7 @@ impl<T> rok::core::future::Future for LockFuture<T> {
         if atomic_xchg(m.state, 0, 2, SeqCst) == 0 {
             return rok::core::future::Poll::Ready(MutexGuard { mutex: m });
         }
-        return rok::core::future::Poll::Pending;
+        rok::core::future::Poll::Pending
     }
 }
 
@@ -306,16 +303,16 @@ pub struct MutexGuard<T> {
 impl<T> MutexGuard<T> {
     /// The protected value (a copy of the handle for GC types).
     pub fn get(self) -> T {
-        return buf_get(self.mutex.value, 0);
+        self.mutex.value[0]
     }
     /// Replace the protected value (instead of spec `deref_mut`: rok has
     /// no `ref` returns).
     pub fn set(self, value: T) {
-        buf_set(self.mutex.value, 0, value);
+        self.mutex.value[0] = value;
     }
     /// Replace the protected value with `f(value)`.
     pub fn update(self, f: fn(T) -> T) {
-        buf_set(self.mutex.value, 0, f(buf_get(self.mutex.value, 0)));
+        self.mutex.value[0] = f(self.mutex.value[0]);
     }
 }
 
@@ -337,8 +334,8 @@ unsafe impl<T: Send> Sync for RwLock<T> {}
 impl<T> RwLock<T> {
     pub fn new(value: T) -> RwLock<T> {
         let v: GcBuf<T> = buf_new(1);
-        buf_set(v, 0, value);
-        return RwLock { state: word(0), value: v };
+        v[0] = value;
+        RwLock { state: word(0), value: v }
     }
 
     pub fn read(self) -> RwLockReadGuard<T> {
@@ -366,19 +363,17 @@ impl<T> RwLock<T> {
 
     pub fn try_read(self) -> RwLockReadGuard<T> | none {
         let s = atomic_load(self.state, 0, SeqCst);
-        if s >= 0 {
-            if atomic_cas(self.state, 0, s, s + 1, SeqCst, SeqCst) == s {
-                return RwLockReadGuard { lock: self };
-            }
+        if s >= 0 && atomic_cas(self.state, 0, s, s + 1, SeqCst, SeqCst) == s {
+            return RwLockReadGuard { lock: self };
         }
-        return none;
+        none
     }
 
     pub fn try_write(self) -> RwLockWriteGuard<T> | none {
         if atomic_cas(self.state, 0, 0, -1, SeqCst, SeqCst) == 0 {
             return RwLockWriteGuard { lock: self };
         }
-        return none;
+        none
     }
 }
 
@@ -388,7 +383,7 @@ pub struct RwLockReadGuard<T> {
 
 impl<T> RwLockReadGuard<T> {
     pub fn get(self) -> T {
-        return buf_get(self.lock.value, 0);
+        self.lock.value[0]
     }
 }
 
@@ -406,13 +401,13 @@ pub struct RwLockWriteGuard<T> {
 
 impl<T> RwLockWriteGuard<T> {
     pub fn get(self) -> T {
-        return buf_get(self.lock.value, 0);
+        self.lock.value[0]
     }
     pub fn set(self, value: T) {
-        buf_set(self.lock.value, 0, value);
+        self.lock.value[0] = value;
     }
     pub fn update(self, f: fn(T) -> T) {
-        buf_set(self.lock.value, 0, f(buf_get(self.lock.value, 0)));
+        self.lock.value[0] = f(self.lock.value[0]);
     }
 }
 
@@ -431,7 +426,7 @@ pub struct Once {
 
 impl Once {
     pub fn new() -> Once {
-        return Once { state: word(0) };
+        Once { state: word(0) }
     }
 
     /// Run `f` if no call has; every caller returns after it finished.
@@ -452,7 +447,7 @@ impl Once {
     }
 
     pub fn is_completed(self) -> bool {
-        return atomic_load(self.state, 0, SeqCst) == 2;
+        atomic_load(self.state, 0, SeqCst) == 2
     }
 }
 
@@ -464,7 +459,7 @@ pub struct Condvar {
 
 impl Condvar {
     pub fn new() -> Condvar {
-        return Condvar { seq: word(0) };
+        Condvar { seq: word(0) }
     }
 
     /// Unlock `guard`'s mutex, block until notified (or spuriously),
@@ -473,7 +468,7 @@ impl Condvar {
         let s = atomic_load(self.seq, 0, SeqCst);
         guard.mutex.unlock();
         wait(self.seq, s);
-        return guard.mutex.lock();
+        guard.mutex.lock()
     }
 
     /// Wakes every waiter (a spurious wakeup for all but one is allowed).
@@ -498,20 +493,20 @@ impl<T> !Sync for Cell<T> {}
 impl<T> Cell<T> {
     pub fn new(value: T) -> Cell<T> {
         let v: GcBuf<T> = buf_new(1);
-        buf_set(v, 0, value);
-        return Cell { value: v };
+        v[0] = value;
+        Cell { value: v }
     }
     pub fn get(self) -> T {
-        return buf_get(self.value, 0);
+        self.value[0]
     }
     // ponytail: spec takes `ref self`; the handle makes plain `self`
     // share the cell.
     pub fn set(self, value: T) {
-        buf_set(self.value, 0, value);
+        self.value[0] = value;
     }
     pub fn replace(self, value: T) -> T {
-        let old = buf_get(self.value, 0);
-        buf_set(self.value, 0, value);
-        return old;
+        let old = self.value[0];
+        self.value[0] = value;
+        old
     }
 }

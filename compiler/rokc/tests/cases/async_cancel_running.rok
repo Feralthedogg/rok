@@ -1,0 +1,33 @@
+// expect-exit: 0
+// expect-stdout:
+// cancelled 512 of 512
+// cleanups 512 of 512
+
+// A task cancelled while a worker is polling it (its `await` already
+// checked the flag) is polled again and leaves through its `finally`.
+// It used to be finished right there, skipping the cleanup — `join`
+// reported `CancellationError` but `finally` never ran. Also: the main
+// task's `sleep` must fire while every worker is busy with tasks that
+// never park (timers used to fire only on an idle worker: a hang).
+let cleanups = Mutex::new(0);
+let cancelled = 0;
+for round in 0..8 {
+    let tasks: List<Task<i32>> = List::new();
+    for i in 0..64 {
+        tasks.push(task::spawn(async {
+            let _ = {
+                while true { await task::yield_now(); }
+            } finally {
+                using c = cleanups.lock() { c.set(c.get() + 1); }
+            };
+            1
+        }));
+    }
+    await task::sleep(Duration::ms(1));
+    for t in tasks { t.cancel(); }
+    for t in tasks {
+        try await t.join() catch e: CancellationError { cancelled += 1; 0 };
+    }
+}
+println(f"cancelled {cancelled} of 512");
+using c = cleanups.lock() { println(f"cleanups {c.get()} of 512"); }

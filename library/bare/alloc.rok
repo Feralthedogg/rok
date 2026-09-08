@@ -25,7 +25,7 @@ pub struct Layout {
 
 impl Layout {
     /// The layout of one `T`.
-    pub fn new<T>() -> Layout { return Layout { size: size_of::<T>(), align: align_of::<T>() }; }
+    pub fn new<T>() -> Layout { Layout { size: size_of::<T>(), align: align_of::<T>() } }
 
     /// The layout of `n` `T`s.
     pub fn array<T>(n: usize) throws (LayoutError) -> Layout {
@@ -36,7 +36,7 @@ impl Layout {
         if size != 0 && n > max / size {
             throw LayoutError { reason: "array size overflows usize" };
         }
-        return Layout { size: size * n, align: align_of::<T>() };
+        Layout { size: size * n, align: align_of::<T>() }
     }
 
     /// `align` must be a power of two.
@@ -44,19 +44,19 @@ impl Layout {
         if align == 0 || (align & (align - 1)) != 0 {
             throw LayoutError { reason: "align is not a power of two" };
         }
-        return Layout { size: size, align: align };
+        Layout { size, align }
     }
 
-    pub fn size(self) -> usize { return self.size; }
-    pub fn align(self) -> usize { return self.align; }
+    pub fn size(self) -> usize { self.size }
+    pub fn align(self) -> usize { self.align }
 }
 
 pub unsafe fn alloc(layout: Layout) -> CPtr<u8> {
-    return CPtr::from_addr(rok_alloc_raw(layout.size, layout.align, 0));
+    CPtr::from_addr(rok_alloc_raw(layout.size, layout.align, 0))
 }
 
 pub unsafe fn alloc_zeroed(layout: Layout) -> CPtr<u8> {
-    return CPtr::from_addr(rok_alloc_raw(layout.size, layout.align, 1));
+    CPtr::from_addr(rok_alloc_raw(layout.size, layout.align, 1))
 }
 
 pub unsafe fn dealloc(ptr: Ptr<u8>, layout: Layout) {
@@ -65,17 +65,17 @@ pub unsafe fn dealloc(ptr: Ptr<u8>, layout: Layout) {
 
 /// On failure (null) `ptr` is still valid.
 pub unsafe fn realloc(ptr: Ptr<u8>, old_layout: Layout, new_size: usize) -> CPtr<u8> {
-    return CPtr::from_addr(
+    CPtr::from_addr(
         rok_realloc_raw(ptr.addr(), old_layout.size, old_layout.align, new_size),
-    );
+    )
 }
 
 pub unsafe fn alloc_one<T>() -> CPtr<T> {
-    return CPtr::from_addr(rok_alloc_raw(size_of::<T>(), align_of::<T>(), 0));
+    CPtr::from_addr(rok_alloc_raw(size_of::<T>(), align_of::<T>(), 0))
 }
 
 pub unsafe fn alloc_array<T>(n: usize) -> CPtr<T> {
-    return CPtr::from_addr(rok_alloc_raw(size_of::<T>() * n, align_of::<T>(), 0));
+    CPtr::from_addr(rok_alloc_raw(size_of::<T>() * n, align_of::<T>(), 0))
 }
 
 pub unsafe fn dealloc_one<T>(ptr: Ptr<T>) { rok_free(ptr.addr()); }

@@ -252,7 +252,15 @@ pub(super) fn substitute_aliases(ty: &mut HirTy, aliases: &HashMap<String, HirTy
                 }
             }
         }
-        HirTy::Sum(parts) | HirTy::Tuple(parts) => {
+        HirTy::Sum(parts) => {
+            for p in parts.iter_mut() {
+                substitute_aliases(p, aliases);
+            }
+            // An alias / type parameter may have become a sum (or a
+            // member already present): back to the canon (spec 2.6.4).
+            *ty = HirTy::sum(std::mem::take(parts));
+        }
+        HirTy::Tuple(parts) => {
             for p in parts {
                 substitute_aliases(p, aliases);
             }
@@ -383,7 +391,7 @@ pub(super) fn resolve_ty_with_structs(
         }
         // `T | U` — recurse so Path("Counter") resolves to Struct(id), not
         // an opaque path the MIR layer would treat as `Any`.
-        AstTyKind::Sum(parts) => HirTy::Sum(parts.iter().map(rec).collect()),
+        AstTyKind::Sum(parts) => HirTy::sum(parts.iter().map(rec)),
         AstTyKind::Tuple(parts) if parts.is_empty() => HirTy::Unit,
         AstTyKind::Tuple(parts) => HirTy::Tuple(parts.iter().map(rec).collect()),
         AstTyKind::Fn(args, ret, b) => HirTy::Fn(

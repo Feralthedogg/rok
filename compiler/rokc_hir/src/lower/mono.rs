@@ -74,10 +74,36 @@ pub(super) fn unify_param_ty_with(
                 rec(g, e);
             }
         }
-        (rokc_ast::TyKind::Tuple(parts), HirTy::Tuple(arg_parts))
-        | (rokc_ast::TyKind::Sum(parts), HirTy::Sum(arg_parts)) => {
+        (rokc_ast::TyKind::Tuple(parts), HirTy::Tuple(arg_parts)) => {
             for (p, a) in parts.iter().zip(arg_parts.iter()) {
                 rec(p, a);
+            }
+        }
+        // Sums are sets (spec 2.6.4): the members the parameter names
+        // outright (`none`, `str`) cancel out, and a lone type parameter
+        // takes what is left — `T | none` against `i32 | str | none`
+        // binds `T = i32 | str`.
+        (rokc_ast::TyKind::Sum(parts), HirTy::Sum(arg_parts)) => {
+            let is_param = |p: &rokc_ast::Ty| {
+                matches!(&p.kind, rokc_ast::TyKind::Path(path)
+                    if path.segments.len() == 1 && generic_names.contains(&path.segments[0].name))
+            };
+            let (params, fixed): (Vec<&rokc_ast::Ty>, Vec<&rokc_ast::Ty>) =
+                parts.iter().partition(|p| is_param(p));
+            let fixed: Vec<HirTy> = fixed
+                .iter()
+                .map(|p| match &p.kind {
+                    rokc_ast::TyKind::None => super::none_ty(),
+                    _ => ctx.resolve_ast_ty(p),
+                })
+                .collect();
+            if let [param] = params.as_slice() {
+                let rest = arg_parts.iter().filter(|a| !fixed.contains(a)).cloned();
+                rec(param, &HirTy::sum(rest));
+            } else {
+                for (p, a) in parts.iter().zip(arg_parts.iter()) {
+                    rec(p, a);
+                }
             }
         }
         (
@@ -625,7 +651,7 @@ pub(super) fn resolve_ast_with_subst(
             substitute_aliases(&mut t, subst);
             t
         }
-        rokc_ast::TyKind::Sum(parts) => HirTy::Sum(parts.iter().map(rec).collect()),
+        rokc_ast::TyKind::Sum(parts) => HirTy::sum(parts.iter().map(rec)),
         rokc_ast::TyKind::Tuple(parts) if parts.is_empty() => HirTy::Unit,
         rokc_ast::TyKind::Tuple(parts) => HirTy::Tuple(parts.iter().map(rec).collect()),
         // `[T; N]` / `[T; M * N]` under the instantiation's const args.
@@ -1162,7 +1188,7 @@ pub(super) fn lower_fn_body(ctx: &mut LowerCtx<'_>, b: &Block, fn_name: &str) ->
 }
 
 /// The value checks of `lower_fn_body`.
-fn check_fn_body(ctx: &LowerCtx<'_>, mut block: HirBlock, fn_name: &str) -> HirBlock {
+fn check_fn_body(ctx: &mut LowerCtx<'_>, mut block: HirBlock, fn_name: &str) -> HirBlock {
     let ret = ctx.fn_ret_ty.clone();
     let falls_off = || {
         let name = leaf_name(fn_name);

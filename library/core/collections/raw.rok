@@ -10,17 +10,34 @@ pub struct GcBuf<T> {}
 /// A zeroed buffer of `len` elements; `T` comes from the slot's type.
 #[intrinsic("rok.buf.new")]
 pub fn buf_new<T>(len: usize) -> GcBuf<T> {
-    return buf_new(len);
+    buf_new(len)
 }
 
 /// Element `i` (no bounds check).
 #[intrinsic("rok.buf.get")]
 pub fn buf_get<T>(buf: GcBuf<T>, i: usize) -> T {
-    return buf_get(buf, i);
+    buf_get(buf, i)
 }
 
 /// Store element `i` (no bounds check).
 #[intrinsic("rok.buf.set")]
 pub fn buf_set<T>(buf: GcBuf<T>, i: usize, v: T) {
     buf_set(buf, i, v);
+}
+
+/// `b[i]`: unchecked, like `buf_get`. The compiler lowers `b[i]` on a
+/// `GcBuf` straight to `rok.buf.get`, so this body never runs.
+impl<T> Index<usize> for GcBuf<T> {
+    type Output = T;
+    fn index(self, i: usize) -> T {
+        buf_get(self, i)
+    }
+}
+
+/// `b[i] = v`: unchecked, like `buf_set`; lowered to `rok.buf.set`.
+impl<T> IndexSet<usize> for GcBuf<T> {
+    type Value = T;
+    fn index_set(self, i: usize, v: T) {
+        buf_set(self, i, v);
+    }
 }

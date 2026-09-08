@@ -798,11 +798,13 @@ impl<'src> Lexer<'src> {
         self.advance(usize::from(f_string) + 1); // optional `f`, then `"`
         let start = self.pos;
         if f_string {
-            return if let Some(end) = self.scan_fstring() {
-                TokenKind::FStrLit(self.src[start..end].to_owned())
-            } else {
-                self.error_from(lit_start, "unterminated f-string literal");
-                TokenKind::FStrLit(String::new())
+            return match self.scan_fstring() {
+                Ok(end) => TokenKind::FStrLit(self.src[start..end].to_owned()),
+                Err(true) => TokenKind::FStrLit(String::new()),
+                Err(false) => {
+                    self.error_from(lit_start, "unterminated f-string literal");
+                    TokenKind::FStrLit(String::new())
+                }
             };
         }
         let Some(end) = self.scan_quoted(b'"') else {
@@ -817,19 +819,21 @@ impl<'src> Lexer<'src> {
     }
 
     /// Body of `f"..."`: `{{` / `}}` are literal braces, `{ expr }` may
-    /// nest braces and contain string literals. Returns the end offset.
-    fn scan_fstring(&mut self) -> Option<usize> {
+    /// nest braces and contain string literals. Returns the end offset;
+    /// `Err(true)` after a reported `\"` in a hole, `Err(false)` if unterminated.
+    fn scan_fstring(&mut self) -> Result<usize, bool> {
         let mut depth = 0usize;
+        let mut poisoned = false;
         loop {
-            match self.bytes.get(self.pos)? {
+            match self.bytes.get(self.pos).ok_or(false)? {
                 b'"' if depth == 0 => {
                     let end = self.pos;
                     self.advance(1);
-                    return Some(end);
+                    return if poisoned { Err(true) } else { Ok(end) };
                 }
                 b'"' => {
                     self.advance(1);
-                    self.scan_quoted(b'"')?;
+                    self.scan_quoted(b'"').ok_or(false)?;
                 }
                 b'{' if depth == 0 && self.bytes.get(self.pos + 1) == Some(&b'{') => {
                     self.advance(2);
@@ -849,6 +853,21 @@ impl<'src> Lexer<'src> {
                 b'}' => {
                     depth -= 1;
                     self.advance(1);
+                }
+                b'\\' if depth > 0 && self.bytes.get(self.pos + 1) == Some(&b'"') => {
+                    // Spec 1.7.3: a hole holds ordinary tokens, so its
+                    // string literals use plain quotes. Keep scanning so
+                    // the literal still ends where the writer meant.
+                    let at = self.pos;
+                    self.advance(2);
+                    if !poisoned {
+                        self.error_from(
+                            at,
+                            "escaped quote inside an f-string `{...}`; holes are plain \
+                             expressions, so write `{x ?? \"a\"}`, not `{x ?? \\\"a\\\"}`",
+                        );
+                    }
+                    poisoned = true;
                 }
                 b'\\' => {
                     self.advance(1);
@@ -1121,6 +1140,12 @@ mod tests {
             T::FStrLit(r#"{a + "}"} {{x}}"#.into())
         );
         err(r#"f"a } b""#);
+        // Holes hold plain tokens: `\"` there is one error at the backslash.
+        let (toks, d) = Lexer::new("\n  f\"{n ?? \\\"a\\\"}\"", "t").lex_all();
+        assert_eq!(toks[0].kind, T::FStrLit(String::new()));
+        assert_eq!(d.len(), 1, "{d:?}");
+        let at = d[0].primary.as_ref().unwrap().span;
+        assert_eq!((at.line, at.col), (2, 11));
     }
 
     #[test]

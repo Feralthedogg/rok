@@ -1,0 +1,17 @@
+// expect-exit: 0
+// expect-stdout: 4 0 false true 3 2
+
+// Inherent impls on fixed arrays (`impl<T, const N: usize> [T; N]`):
+// core gives `len()` / `is_empty()`, so a variadic body (`xs: ...T` is
+// an array) can count its arguments; a user impl adds methods too.
+fn count<T>(xs: ...T) -> usize { xs.len() }
+
+impl<const N: usize> [i32; N] {
+    fn first_or(self, d: i32) -> i32 { if N == 0 { d } else { self[0] } }
+}
+
+fn main() {
+    let a: [i32; 4] = [2, 3, 4, 5];
+    let e: [str; 0] = [];
+    println(f"{a.len()} {e.len()} {a.is_empty()} {e.is_empty()} {count(1, 2, 3)} {a.first_or(9)}");
+}

@@ -91,7 +91,7 @@ pub(super) struct CoroCtx {
 impl CoroCtx {
     /// The step type: what one resume hands back (without the carrier).
     pub fn step_ty(&self, ctx: &LowerCtx<'_>, out: &HirTy) -> HirTy {
-        let opt = HirTy::Sum(vec![self.item.clone(), super::none_ty()]);
+        let opt = HirTy::sum([self.item.clone(), super::none_ty()]);
         match self.kind {
             CoroKind::Gen => opt,
             CoroKind::Async => poll_ty(ctx, out.clone()),
@@ -201,7 +201,7 @@ pub(super) fn lower_yield(
             span,
         };
     }
-    let opt = HirTy::Sum(vec![coro.item.clone(), super::none_ty()]);
+    let opt = HirTy::sum([coro.item.clone(), super::none_ty()]);
     let some = wrap_into_sum(&opt, v);
     let value = match coro.kind {
         CoroKind::Stream => {
@@ -634,7 +634,7 @@ fn lower_coro_block<'a>(
     let body_h = if super::hir_expr_diverges(&body_h) || out == HirTy::Unit {
         body_h
     } else {
-        super::coerce(&c, &out, body_h, &|| "the async body".to_owned())
+        super::coerce(&mut c, &out, body_h, &|| "the async body".to_owned())
     };
     let coro = c.coro.clone().expect("coroutine ctx");
     let step_ty = coro.step_ty(&c, &out);
@@ -669,7 +669,7 @@ fn lower_coro_block<'a>(
         ty: out.clone(),
         span,
     };
-    let opt = HirTy::Sum(vec![coro.item, super::none_ty()]);
+    let opt = HirTy::sum([coro.item, super::none_ty()]);
     let none = || super::desugar::sum_none(&opt, span);
     let final_value = match kind {
         CoroKind::Gen => none(),

@@ -32,12 +32,12 @@ pub struct ThreadId {
 }
 
 impl ThreadId {
-    pub fn as_u64(self) -> u64 { return self.id; }
+    pub fn as_u64(self) -> u64 { self.id }
 }
 
 impl PartialEq for ThreadId {
-    fn eq(self, rhs: ThreadId) -> bool { return self.id == rhs.id; }
-    fn ne(self, rhs: ThreadId) -> bool { return self.id != rhs.id; }
+    fn eq(self, rhs: ThreadId) -> bool { self.id == rhs.id }
+    fn ne(self, rhs: ThreadId) -> bool { self.id != rhs.id }
 }
 
 /// A thread's identity. ponytail: spec writes `Thread<T>`; `T` is
@@ -48,8 +48,8 @@ pub struct Thread {
 }
 
 impl Thread {
-    pub fn id(self) -> ThreadId { return self.id; }
-    pub fn name(self) -> str | none { return self.name; }
+    pub fn id(self) -> ThreadId { self.id }
+    pub fn name(self) -> str | none { self.name }
     /// Wake the thread from `park` (or make its next `park` return at
     /// once). No-op once the thread has ended.
     pub fn unpark(self) { unsafe { rok_thread_unpark(self.id.id) }; }
@@ -61,7 +61,7 @@ pub struct JoinError {
 }
 
 impl JoinError {
-    pub fn message(self) -> str { return self.message; }
+    pub fn message(self) -> str { self.message }
 }
 
 /// The running thread's result, once joined.
@@ -77,10 +77,10 @@ impl<T> JoinHandle<T> {
         if unsafe { rok_thread_join(self.handle) } != 0 {
             throw JoinError { message: "pthread_join failed" };
         }
-        return buf_get(self.result, 0);
+        self.result[0]
     }
 
-    pub fn thread(self) -> Thread { return self.thread; }
+    pub fn thread(self) -> Thread { self.thread }
 
     /// Let the thread run on its own; its OS resources are released when
     /// it ends. The handle must not be joined afterwards.
@@ -96,41 +96,41 @@ pub struct Builder {
 }
 
 impl Builder {
-    pub fn new() -> Builder { return Builder { name: none, stack_size: none }; }
+    pub fn new() -> Builder { Builder { name: none, stack_size: none } }
 
     pub fn name(self, name: str) -> Builder {
-        return Builder { name: name, stack_size: self.stack_size };
+        Builder { name: name, stack_size: self.stack_size }
     }
 
     /// Stack bytes for the new thread (default 8 MiB).
     pub fn stack_size(self, size: usize) -> Builder {
-        return Builder { name: self.name, stack_size: size };
+        Builder { name: self.name, stack_size: size }
     }
 
     pub fn spawn<T: Send>(self, f: fn() -> T + Send) throws (IoError) -> JoinHandle<T> {
         let result: GcBuf<T> = buf_new(1);
-        let run: fn() + Send = || { buf_set(result, 0, f()); };
+        let run: fn() + Send = || { result[0] = f(); };
         let id = unsafe { rok_thread_new_id() };
         let h = unsafe { rok_thread_spawn(run, self.stack_size ?? 0usize, id) };
         if h == 0usize {
             throw IoError::new("could not create an OS thread");
         }
-        return JoinHandle {
+        JoinHandle {
             handle: h,
             result: result,
             thread: Thread { id: ThreadId { id: id }, name: self.name },
-        };
+        }
     }
 }
 
 /// Run `f` on a new OS thread.
 pub fn spawn<T: Send>(f: fn() -> T + Send) -> JoinHandle<T> {
-    return try! Builder::new().spawn(f);
+    try! Builder::new().spawn(f)
 }
 
 /// The calling thread.
 pub fn current() -> Thread {
-    return Thread { id: ThreadId { id: unsafe { rok_thread_id() } }, name: none };
+    Thread { id: ThreadId { id: unsafe { rok_thread_id() } }, name: none }
 }
 
 /// Let the OS run another thread.
@@ -144,7 +144,7 @@ pub fn sleep(dur: Duration) {
 }
 
 /// Always `false`: a panic ends the process before anything can ask.
-pub fn panicking() -> bool { return false; }
+pub fn panicking() -> bool { false }
 
 /// Block until this thread is `unpark`ed (an earlier `unpark` makes it
 /// return at once). May also return spuriously: re-check the condition.
@@ -177,25 +177,22 @@ impl<T> ThreadLocal<T> {
         using g = self.slots.lock() {
             found = g.get().get(id);
         }
-        match found {
-            c: Cell<T> => return c,
-            none => {},
-        }
+        if let c: Cell<T> = found { return c; }
         let init = self.init;
         let c = Cell::new(init());
         using g = self.slots.lock() {
             g.get().insert(id, c);
         }
-        return c;
+        c
     }
 
     /// Run `f` on this thread's value.
     pub fn with<R>(self, f: fn(Cell<T>) -> R) -> R {
-        return f(self.cell());
+        f(self.cell())
     }
 
     pub fn get(self) -> T {
-        return self.cell().get();
+        self.cell().get()
     }
 
     pub fn set(self, value: T) {
@@ -206,5 +203,5 @@ impl<T> ThreadLocal<T> {
 /// A `ThreadLocal` whose per-thread value starts as `init()`.
 pub fn local<T>(init: fn() -> T + Sync) -> ThreadLocal<T> {
     let slots: Dict<u64, Cell<T>> = Dict::new();
-    return ThreadLocal { init: init, slots: Mutex::new(slots) };
+    ThreadLocal { init: init, slots: Mutex::new(slots) }
 }

@@ -1,10 +1,9 @@
 // Indexing + slicing traits.
 //
 // Spec 3.6: `arr[i]`, `arr[i,j]`, `arr[1:3]` all desugar through these
-// traits. The compiler currently builds memref-backed array indexing
-// directly; once a future pass routes indexing through the LangTable's
-// `index_trait` / `index_set_trait` / `slice_trait` slots, user types
-// implementing these will participate in `[...]` syntax.
+// traits. `xs[i]` / `xs[i] = v` on a struct or enum call `index` /
+// `index_set`; fixed arrays and `GcBuf<T>` index directly (no call).
+// `a[i:j]` calls a `slice(i, j)` method, not `Slice::slice` yet.
 
 #[lang("index_trait")]
 pub trait Index<I> {

@@ -17,7 +17,7 @@ pub fn resolve_ty(ty: &Ty) -> HirTy {
     match &ty.kind {
         TyKind::Path(path) => resolve_path_ty(path),
         TyKind::Never => HirTy::Never,
-        TyKind::Sum(parts) => HirTy::Sum(parts.iter().map(resolve_ty).collect()),
+        TyKind::Sum(parts) => HirTy::sum(parts.iter().map(resolve_ty)),
         TyKind::Tuple(parts) => {
             if parts.is_empty() {
                 HirTy::Unit
@@ -110,21 +110,18 @@ pub fn nothrow_ty() -> HirTy {
 /// deduplicated, `NOTHROW` parts dropped — no error left means a plain
 /// `ok` (a `rethrows` instance with non-throwing arguments).
 pub fn throws_ty(ok: HirTy, err: HirTy) -> HirTy {
-    fn flatten(t: HirTy, out: &mut Vec<HirTy>) {
-        match t {
-            HirTy::Sum(parts) => parts.into_iter().for_each(|p| flatten(p, out)),
-            HirTy::Path(p) if p.len() == 1 && p[0] == NOTHROW => {}
-            t if !out.contains(&t) => out.push(t),
-            _ => {}
-        }
-    }
-    let mut parts = Vec::new();
-    flatten(err, &mut parts);
-    let err = match parts.len() {
-        0 => return ok,
-        1 => parts.pop().expect("one part"),
-        _ => HirTy::Sum(parts),
+    let parts: Vec<HirTy> = match HirTy::sum([err]) {
+        HirTy::Sum(ps) => ps,
+        t => vec![t],
     };
+    let parts: Vec<HirTy> = parts
+        .into_iter()
+        .filter(|p| !matches!(p, HirTy::Path(p) if p.len() == 1 && p[0] == NOTHROW))
+        .collect();
+    if parts.is_empty() {
+        return ok;
+    }
+    let err = HirTy::sum(parts);
     HirTy::Throws {
         ok: Box::new(ok),
         err: Box::new(err),

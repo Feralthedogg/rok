@@ -1,7 +1,7 @@
 // spec: 003.12.5-exhaustiveness
 // probe: negative-must-fail
 // expect-exit: 0  (sum match 의 누락 variant → 에러.)
-// expect-error: non-exhaustive match on `i32 | bool | none`
+// expect-error: non-exhaustive match on `bool | i32 | none`
 
 fn g(x: i32) -> i32 | bool | none { if x > 0 { return x; } return none; }
 

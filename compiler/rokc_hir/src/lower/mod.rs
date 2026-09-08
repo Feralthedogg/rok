@@ -564,6 +564,43 @@ fn wrap_into_sum(slot_ty: &HirTy, value: HirExpr) -> HirExpr {
     }
 }
 
+/// Re-tag a sum value as the sum `to`, member by member: `match value
+/// { b: V => <b wrapped into to>, .. }` for each member `V` of the
+/// value's sum that `to` also has. Widening (every member is in `to`)
+/// is total; for a sub-sum type pattern the arms left out can't occur.
+fn resum(ctx: &mut LowerCtx<'_>, value: HirExpr, to: &HirTy) -> HirExpr {
+    let (HirTy::Sum(vs), HirTy::Sum(ws)) = (value.ty.clone(), to) else {
+        return value;
+    };
+    let span = value.span;
+    let arms = vs
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| ws.contains(v))
+        .map(|(i, v)| {
+            let b = ctx.declare(None, v.clone());
+            HirMatchArm {
+                pat: HirPattern::SumVariant {
+                    sum_ty: value.ty.clone(),
+                    variant_index: u32::try_from(i).expect("variant overflow"),
+                    binder: Some(b),
+                    payload_ty: Some(v.clone()),
+                },
+                guard: None,
+                body: wrap_into_sum(to, hir_local(b, v, span)),
+            }
+        })
+        .collect();
+    HirExpr {
+        kind: HirExprKind::Match {
+            scrutinee: Box::new(value),
+            arms,
+        },
+        ty: to.clone(),
+        span,
+    }
+}
+
 // Locate `value_ty` in a sum's variant list (structural equality).
 fn sum_variant_index(variants: &[HirTy], value_ty: &HirTy) -> Option<usize> {
     variants.iter().position(|v| v == value_ty)
@@ -611,11 +648,23 @@ fn ty_compatible(expected: &HirTy, actual: &HirTy) -> bool {
 
 /// Wrap `value` into `slot` (sum injection) and report a type mismatch.
 /// `what` names the slot for the diagnostic ("argument 1 of `f`").
-fn coerce(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr, what: &dyn Fn() -> String) -> HirExpr {
+fn coerce(
+    ctx: &mut LowerCtx<'_>,
+    slot: &HirTy,
+    value: HirExpr,
+    what: &dyn Fn() -> String,
+) -> HirExpr {
     let value = adapt_never_fn(ctx, slot, value);
     let value = adapt_fn_value(ctx, slot, value);
     let value = box_into_any(ctx, slot, value);
     let value = drop_fn_bounds(slot, value);
+    // Spec 2.6.4: a sum flows into any sum holding all its members.
+    let value = match (&value.ty, slot) {
+        (HirTy::Sum(vs), HirTy::Sum(ws)) if vs != ws && vs.iter().all(|v| ws.contains(v)) => {
+            resum(ctx, value, slot)
+        }
+        _ => value,
+    };
     let mut v = wrap_into_sum(slot, value);
     // Same `{code, env}` layout: the closure takes the slot's type once
     // its captures meet the slot's bounds (`+ Send`).
@@ -974,6 +1023,9 @@ struct LowerCtx<'a> {
     /// Pattern bindings (`declare_bound`) still to be moved into their
     /// cells (`take_cells`) before the code in their scope runs.
     pending_cells: Vec<(String, LocalId, HirTy)>,
+    /// Sub-sum type-pattern binders (`v: A | B` against `A | B | C`):
+    /// `(binder, whole-scrutinee local)`, converted by `take_cells`.
+    pending_resums: Vec<(LocalId, LocalId)>,
     /// Locals stored in such a cell (declared type `GcBuf<T>`).
     boxed: std::collections::HashSet<LocalId>,
     /// In a closure: locals holding a value capture (assigning one is an
@@ -1058,6 +1110,7 @@ impl<'a> LowerCtx<'a> {
             ref_params: Vec::new(),
             ref_captured: std::collections::HashSet::new(),
             pending_cells: Vec::new(),
+            pending_resums: Vec::new(),
             boxed: std::collections::HashSet::new(),
             value_captured: std::collections::HashSet::new(),
             unsafe_depth: 0,
@@ -1886,7 +1939,7 @@ impl<'a> LowerCtx<'a> {
                 substitute_aliases(&mut t, self.ty_subst);
                 t
             }
-            AstTyKind::Sum(parts) => HirTy::Sum(parts.iter().map(rec).collect()),
+            AstTyKind::Sum(parts) => HirTy::sum(parts.iter().map(rec)),
             AstTyKind::Tuple(parts) if parts.is_empty() => HirTy::Unit,
             AstTyKind::Tuple(parts) => HirTy::Tuple(parts.iter().map(rec).collect()),
             AstTyKind::Array(elem, len) => {
@@ -2224,11 +2277,30 @@ impl<'a> LowerCtx<'a> {
     /// call (shadowing the plain locals), to run before their scope's
     /// code.
     fn take_cells(&mut self, span: rokc_diagnostic::Span) -> Vec<HirStmt> {
-        std::mem::take(&mut self.pending_cells)
+        let mut out = self.take_resums(span);
+        let cells: Vec<HirStmt> = std::mem::take(&mut self.pending_cells)
             .into_iter()
             .map(|(name, l, ty)| {
                 let init = hir_local(l, &ty, span);
                 self.cell_let(&name, ty, init)
+            })
+            .collect();
+        out.extend(cells);
+        out
+    }
+
+    /// `binder = resum(whole)` for the sub-sum type patterns since the
+    /// last call.
+    fn take_resums(&mut self, span: rokc_diagnostic::Span) -> Vec<HirStmt> {
+        std::mem::take(&mut self.pending_resums)
+            .into_iter()
+            .map(|(binder, whole)| {
+                let (to, from) = (self.local_ty(binder), self.local_ty(whole));
+                let init = resum(self, hir_local(whole, &from, span), &to);
+                HirStmt::Let {
+                    local: binder,
+                    init,
+                }
             })
             .collect()
     }

@@ -29,7 +29,7 @@ pub struct AsyncStream<T> {
 impl<T> Stream for AsyncStream<T> {
     type Item = T;
     fn poll_next(ref self, ref ctx: Context) -> Poll<T | none> {
-        return (self.resume)(ctx);
+        (self.resume)(ctx)
     }
 }
 
@@ -37,61 +37,61 @@ impl<T> AsyncStream<T> {
     /// `f` of each item (stdlib 2.8.5).
     pub fn map<U>(self, f: fn(T) -> U) -> AsyncStream<U> {
         let s = self;
-        return async yield {
+        async yield {
             for await x in s {
                 yield f(x);
             }
-        };
+        }
     }
 
     /// The items `pred` accepts.
     pub fn filter(self, pred: fn(T) -> bool) -> AsyncStream<T> {
         let s = self;
-        return async yield {
+        async yield {
             for await x in s {
                 if pred(x) {
                     yield x;
                 }
             }
-        };
+        }
     }
 
     /// At most the first `n` items.
     pub fn take(self, n: usize) -> AsyncStream<T> {
         let s = self;
-        return async yield {
+        async yield {
             let left = n;
             if left > 0 {
                 for await x in s {
                     yield x;
-                    left = left - 1;
+                    left -= 1;
                     if left == 0 {
                         break;
                     }
                 }
             }
-        };
+        }
     }
 
     /// All but the first `n` items.
     pub fn skip(self, n: usize) -> AsyncStream<T> {
         let s = self;
-        return async yield {
+        async yield {
             let left = n;
             for await x in s {
                 if left > 0 {
-                    left = left - 1;
+                    left -= 1;
                 } else {
                     yield x;
                 }
             }
-        };
+        }
     }
 
     /// The items, at most one per `dur` (2.8.5).
     pub fn throttle(self, dur: Duration) -> AsyncStream<T> {
         let s = self;
-        return async yield {
+        async yield {
             let first = true;
             for await x in s {
                 if !first {
@@ -100,7 +100,7 @@ impl<T> AsyncStream<T> {
                 first = false;
                 yield x;
             }
-        };
+        }
     }
 
     /// All items, in order (stdlib 2.8.6 `collect` into a `List`).
@@ -109,7 +109,7 @@ impl<T> AsyncStream<T> {
         for await x in self {
             out.push(x);
         }
-        return out;
+        out
     }
 }
 
@@ -118,7 +118,7 @@ impl<F: Future> AsyncStream<F> {
     /// at once (2.8.5).
     pub fn buffered(self, n: usize) -> AsyncStream<F::Output> {
         let s = self;
-        return async yield {
+        async yield {
             let q: List<Task<F::Output>> = List::new();
             for await f in s {
                 q.push(task::spawn_local(f));
@@ -129,13 +129,13 @@ impl<F: Future> AsyncStream<F> {
             while q.len() > 0 {
                 yield await q.remove(0);
             }
-        };
+        }
     }
 
     /// Like `buffered`, in completion order.
     pub fn buffer_unordered(self, n: usize) -> AsyncStream<F::Output> {
         let s = self;
-        return async yield {
+        async yield {
             let q: List<Task<F::Output>> = List::new();
             for await f in s {
                 q.push(task::spawn_local(f));
@@ -148,18 +148,18 @@ impl<F: Future> AsyncStream<F> {
                 let i = await task::first_done(q);
                 yield await q.remove(i);
             }
-        };
+        }
     }
 }
 
 /// Both streams' items as they come; ends when both have (2.8.8).
 pub fn merge<S1: Stream, S2: Stream<Item = S1::Item>>(a: S1, b: S2) -> Merge<S1, S2> {
-    return Merge { a: a, b: b, a_done: false, b_done: false, either: false };
+    Merge { a: a, b: b, a_done: false, b_done: false, either: false }
 }
 
 /// Like `merge`, but ends as soon as either stream does (2.8.8).
 pub fn select<S1: Stream, S2: Stream<Item = S1::Item>>(a: S1, b: S2) -> Merge<S1, S2> {
-    return Merge { a: a, b: b, a_done: false, b_done: false, either: true };
+    Merge { a: a, b: b, a_done: false, b_done: false, either: true }
 }
 
 pub struct Merge<S1, S2> {
@@ -178,14 +178,11 @@ impl<S1: Stream, S2: Stream<Item = S1::Item>> Stream for Merge<S1, S2> {
             let a = self.a;
             let r = a.poll_next(ref ctx);
             self.a = a;
-            match r {
-                Poll::Ready(v) => {
-                    match v {
-                        none => { self.a_done = true; }
-                        x: S1::Item => { return Poll::Ready(x); }
-                    }
+            if let Poll::Ready(v) = r {
+                if let x: S1::Item = v {
+                    return Poll::Ready(x);
                 }
-                Poll::Pending => {}
+                self.a_done = true;
             }
         }
         if self.either && self.a_done {
@@ -195,14 +192,11 @@ impl<S1: Stream, S2: Stream<Item = S1::Item>> Stream for Merge<S1, S2> {
             let b = self.b;
             let r = b.poll_next(ref ctx);
             self.b = b;
-            match r {
-                Poll::Ready(v) => {
-                    match v {
-                        none => { self.b_done = true; }
-                        x: S1::Item => { return Poll::Ready(x); }
-                    }
+            if let Poll::Ready(v) = r {
+                if let x: S1::Item = v {
+                    return Poll::Ready(x);
                 }
-                Poll::Pending => {}
+                self.b_done = true;
             }
         }
         if self.a_done && (self.b_done || self.either) {
@@ -211,13 +205,13 @@ impl<S1: Stream, S2: Stream<Item = S1::Item>> Stream for Merge<S1, S2> {
         if self.b_done && self.either {
             return Poll::Ready(none);
         }
-        return Poll::Pending;
+        Poll::Pending
     }
 }
 
 /// Pairs of the two streams' items, until either ends (2.8.8).
 pub fn zip<S1: Stream, S2: Stream>(a: S1, b: S2) -> Zip<S1, S2> {
-    return Zip { a: a, b: b, left: none, right: none };
+    Zip { a: a, b: b, left: none, right: none }
 }
 
 pub struct Zip<S1, S2> {
@@ -234,44 +228,32 @@ impl<S1: Stream, S2: Stream> Stream for Zip<S1, S2> {
             let a = self.a;
             let r = a.poll_next(ref ctx);
             self.a = a;
-            match r {
-                Poll::Ready(v) => {
-                    match v {
-                        none => { return Poll::Ready(none); }
-                        x: S1::Item => { self.left = x; }
-                    }
+            if let Poll::Ready(v) = r {
+                if v is none {
+                    return Poll::Ready(none);
                 }
-                Poll::Pending => {}
+                self.left = v;
             }
         }
         if self.right is none {
             let b = self.b;
             let r = b.poll_next(ref ctx);
             self.b = b;
-            match r {
-                Poll::Ready(v) => {
-                    match v {
-                        none => { return Poll::Ready(none); }
-                        y: S2::Item => { self.right = y; }
-                    }
+            if let Poll::Ready(v) = r {
+                if v is none {
+                    return Poll::Ready(none);
                 }
-                Poll::Pending => {}
+                self.right = v;
             }
         }
-        match self.left {
-            x: S1::Item => {
-                match self.right {
-                    y: S2::Item => {
-                        self.left = none;
-                        self.right = none;
-                        return Poll::Ready((x, y));
-                    }
-                    none => {}
-                }
+        if let x: S1::Item = self.left {
+            if let y: S2::Item = self.right {
+                self.left = none;
+                self.right = none;
+                return Poll::Ready((x, y));
             }
-            none => {}
         }
-        return Poll::Pending;
+        Poll::Pending
     }
 }
 
@@ -283,6 +265,6 @@ pub struct TryAsyncStream<T, E> {
 
 impl<T, E> TryAsyncStream<T, E> {
     pub fn poll_next(ref self, ref ctx: Context) throws (E) -> Poll<T | none> {
-        return try (self.resume)(ctx);
+        try (self.resume)(ctx)
     }
 }

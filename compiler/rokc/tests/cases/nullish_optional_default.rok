@@ -1,0 +1,23 @@
+// expect-exit: 0
+// expect-stdout:
+// 1 2 -1
+// 5
+
+// Spec 3.8.4: `a ?? b` with `b: T | none` is a fallback chain whose
+// result is `T | none`.
+fn pick(a: i32 | none, b: i32 | none) -> i32 | none {
+    a ?? b
+}
+
+fn first<I: Iterator>(ref a: I, ref b: I) -> I::Item | none {
+    a.next() ?? b.next()
+}
+
+fn main() {
+    println(f"{pick(1, 2) ?? -1} {pick(none, 2) ?? -1} {pick(none, none) ?? -1}");
+    let xs: List<i32> = [];
+    let ys: List<i32> = [5];
+    let a = xs.iter();
+    let b = ys.iter();
+    println(f"{first(ref a, ref b) ?? -1}");
+}

@@ -79,6 +79,7 @@ pub enum Shape {
     RangeInclusive,
     RangeFrom,
     RangeTo,
+    RangeToInclusive,
     RangeFull,
     Tuple,
 }
@@ -95,6 +96,7 @@ const SHAPES: &[(&str, Shape)] = &[
     (r#"expr "..=" expr"#, Shape::RangeInclusive),
     (r#"expr "..""#, Shape::RangeFrom),
     (r#"".." expr"#, Shape::RangeTo),
+    (r#""..=" expr"#, Shape::RangeToInclusive),
     (r#""..""#, Shape::RangeFull),
 ];
 

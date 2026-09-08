@@ -32,13 +32,13 @@ extern "C" {
 }
 
 impl str {
-    pub fn new() -> str { return ""; }
+    pub fn new() -> str { "" }
 
     /// `bytes` as a `str`; throws if they are not UTF-8 (2.15.6).
     pub fn from_utf8(bytes: List<u8>) throws (Utf8Error) -> str {
         let buf = StrBuf::with_capacity(bytes.len());
         for b in bytes { buf.push_byte(b); }
-        return try buf.to_str_checked();
+        try buf.to_str_checked()
     }
 
     /// A copy of the UTF-8 bytes. ponytail: spec returns a `Slice<u8>`
@@ -46,91 +46,91 @@ impl str {
     pub fn as_bytes(self) -> List<u8> {
         let out: List<u8> = List::with_capacity(self.len());
         for b in self.bytes() { out.push(b); }
-        return out;
+        out
     }
 
     /// Byte length (not the char count).
-    pub fn len(self) -> usize { return unsafe { rok_str_len(self) }; }
-    pub fn is_empty(self) -> bool { return unsafe { rok_str_len(self) } == 0; }
+    pub fn len(self) -> usize { unsafe { rok_str_len(self) } }
+    pub fn is_empty(self) -> bool { unsafe { rok_str_len(self) } == 0 }
     /// Number of chars (`s.chars().count()` in the spec).
-    pub fn char_count(self) -> usize { return unsafe { rok_str_char_count(self) }; }
+    pub fn char_count(self) -> usize { unsafe { rok_str_char_count(self) } }
 
     /// `s[start:end]` by byte offsets; panics off a char boundary.
     pub fn slice(self, start: usize, end: usize) -> str {
-        return unsafe { rok_str_slice(self, start, end) };
+        unsafe { rok_str_slice(self, start, end) }
     }
 
-    pub fn contains(self, pat: str) -> bool { return unsafe { rok_str_find(self, pat) } >= 0; }
+    pub fn contains(self, pat: str) -> bool { unsafe { rok_str_find(self, pat) } >= 0 }
     pub fn starts_with(self, pat: str) -> bool {
         if unsafe { rok_str_len(pat) } > unsafe { rok_str_len(self) } { return false; }
         // Byte compare: a prefix length may fall inside a char of `self`.
-        return unsafe { rok_str_cmp(rok_bytes_slice(self, 0, rok_str_len(pat)), pat) } == 0;
+        unsafe { rok_str_cmp(rok_bytes_slice(self, 0, rok_str_len(pat)), pat) } == 0
     }
     pub fn ends_with(self, pat: str) -> bool {
         let n = unsafe { rok_str_len(self) };
         let m = unsafe { rok_str_len(pat) };
         if m > n { return false; }
-        return unsafe { rok_str_cmp(rok_bytes_slice(self, n - m, n), pat) } == 0;
+        unsafe { rok_str_cmp(rok_bytes_slice(self, n - m, n), pat) } == 0
     }
     pub fn find(self, pat: str) -> usize | none {
         let i = unsafe { rok_str_find(self, pat) };
         if i < 0 { return none; }
-        return i as usize;
+        i as usize
     }
     pub fn rfind(self, pat: str) -> usize | none {
         let i = unsafe { rok_str_rfind(self, pat) };
         if i < 0 { return none; }
-        return i as usize;
+        i as usize
     }
 
-    pub fn trim(self) -> str { return unsafe { rok_str_trim(self, 0) }; }
-    pub fn trim_start(self) -> str { return unsafe { rok_str_trim(self, 1) }; }
-    pub fn trim_end(self) -> str { return unsafe { rok_str_trim(self, 2) }; }
+    pub fn trim(self) -> str { unsafe { rok_str_trim(self, 0) } }
+    pub fn trim_start(self) -> str { unsafe { rok_str_trim(self, 1) } }
+    pub fn trim_end(self) -> str { unsafe { rok_str_trim(self, 2) } }
 
     // ponytail: ASCII case mapping only.
-    pub fn to_lowercase(self) -> str { return unsafe { rok_str_case(self, 0) }; }
-    pub fn to_uppercase(self) -> str { return unsafe { rok_str_case(self, 1) }; }
-    pub fn replace(self, from: str, to: str) -> str { return unsafe { rok_str_replace(self, from, to) }; }
+    pub fn to_lowercase(self) -> str { unsafe { rok_str_case(self, 0) } }
+    pub fn to_uppercase(self) -> str { unsafe { rok_str_case(self, 1) } }
+    pub fn replace(self, from: str, to: str) -> str { unsafe { rok_str_replace(self, from, to) } }
 
     /// Unicode scalar values, in order.
-    pub fn chars(self) -> CharsIter { return CharsIter { s: self, pos: 0 }; }
+    pub fn chars(self) -> CharsIter { CharsIter { s: self, pos: 0 } }
     /// UTF-8 bytes, in order.
-    pub fn bytes(self) -> BytesIter { return BytesIter { s: self, pos: 0 }; }
+    pub fn bytes(self) -> BytesIter { BytesIter { s: self, pos: 0 } }
     /// The pieces between occurrences of `sep` (all of them, empty ones
     /// included).
-    pub fn split(self, sep: str) -> SplitIter { return SplitIter { rest: self, sep: sep, done: false }; }
+    pub fn split(self, sep: str) -> SplitIter { SplitIter { rest: self, sep: sep, done: false } }
     /// Lines without their `\n` / `\r\n`; a final line ending adds no
     /// empty line.
-    pub fn lines(self) -> LinesIter { return LinesIter { rest: self }; }
+    pub fn lines(self) -> LinesIter { LinesIter { rest: self } }
     /// `(byte offset, char)` pairs.
     pub fn char_indices(self) -> CharIndicesIter {
-        return CharIndicesIter { chars: CharsIter { s: self, pos: 0 } };
+        CharIndicesIter { chars: CharsIter { s: self, pos: 0 } }
     }
     /// The non-empty pieces between runs of whitespace.
     // ponytail: ASCII whitespace, like `trim`.
     pub fn split_whitespace(self) -> SplitWhitespaceIter {
-        return SplitWhitespaceIter { s: self, pos: 0 };
+        SplitWhitespaceIter { s: self, pos: 0 }
     }
 
     /// `T`'s value spelled by this string (stdlib 2.15.7).
-    pub fn parse<T: FromStr>(self) throws (T::Err) -> T { return try T::from_str(self); }
+    pub fn parse<T: FromStr>(self) throws (T::Err) -> T { try T::from_str(self) }
 }
 
 impl Add for str {
     type Output = str;
-    fn add(self, rhs: str) -> str { return unsafe { rok_str_concat(self, rhs) }; }
+    fn add(self, rhs: str) -> str { unsafe { rok_str_concat(self, rhs) } }
 }
 
 impl PartialEq for str {
-    fn eq(self, rhs: str) -> bool { return unsafe { rok_str_cmp(self, rhs) } == 0; }
-    fn ne(self, rhs: str) -> bool { return unsafe { rok_str_cmp(self, rhs) } != 0; }
+    fn eq(self, rhs: str) -> bool { unsafe { rok_str_cmp(self, rhs) } == 0 }
+    fn ne(self, rhs: str) -> bool { unsafe { rok_str_cmp(self, rhs) } != 0 }
 }
 
 impl PartialOrd for str {
-    fn lt(self, rhs: str) -> bool { return unsafe { rok_str_cmp(self, rhs) } < 0; }
-    fn gt(self, rhs: str) -> bool { return unsafe { rok_str_cmp(self, rhs) } > 0; }
-    fn le(self, rhs: str) -> bool { return unsafe { rok_str_cmp(self, rhs) } <= 0; }
-    fn ge(self, rhs: str) -> bool { return unsafe { rok_str_cmp(self, rhs) } >= 0; }
+    fn lt(self, rhs: str) -> bool { unsafe { rok_str_cmp(self, rhs) } < 0 }
+    fn gt(self, rhs: str) -> bool { unsafe { rok_str_cmp(self, rhs) } > 0 }
+    fn le(self, rhs: str) -> bool { unsafe { rok_str_cmp(self, rhs) } <= 0 }
+    fn ge(self, rhs: str) -> bool { unsafe { rok_str_cmp(self, rhs) } >= 0 }
 }
 
 impl Eq for str {}
@@ -140,13 +140,13 @@ impl Ord for str {
         let c = unsafe { rok_str_cmp(self, other) };
         if c < 0 { return Ordering::Less; }
         if c > 0 { return Ordering::Greater; }
-        return Ordering::Equal;
+        Ordering::Equal
     }
 }
 
 /// Byte-wise FNV-1a, so `str` keys work in `Dict` / `Set`.
 impl Hash for str {
-    fn hash(self) -> u64 { return unsafe { rok_str_hash(self) }; }
+    fn hash(self) -> u64 { unsafe { rok_str_hash(self) } }
 }
 
 // ---- iterators (stdlib 2.15.3) ----
@@ -173,14 +173,12 @@ impl Iterator for CharsIter {
             n = 2usize;
             c = b & 0x1Fu32;
         }
-        let i = 1usize;
-        while i < n {
+        for i in 1..n {
             let cont = unsafe { rok_str_byte(self.s, self.pos + i) } as u32;
             c = (c << 6u32) | (cont & 0x3Fu32);
-            i += 1;
         }
         self.pos += n;
-        return c as char;
+        c as char
     }
 }
 
@@ -195,7 +193,7 @@ impl Iterator for BytesIter {
         if self.pos >= self.s.len() { return none; }
         let b = unsafe { rok_str_byte(self.s, self.pos) };
         self.pos += 1;
-        return b;
+        b
     }
 }
 
@@ -217,7 +215,7 @@ impl Iterator for SplitIter {
         let i = at as usize;
         let piece = self.rest.slice(0, i);
         self.rest = self.rest.slice(i + self.sep.len(), self.rest.len());
-        return piece;
+        piece
     }
 }
 
@@ -239,7 +237,7 @@ impl Iterator for LinesIter {
             self.rest = self.rest.slice(i + 1, self.rest.len());
         }
         if line.ends_with("\r") { return line.slice(0, line.len() - 1); }
-        return line;
+        line
     }
 }
 
@@ -252,12 +250,12 @@ impl Iterator for CharIndicesIter {
     fn next(ref self) -> (usize, char) | none {
         let at = self.chars.pos;
         let c = self.chars.next()?;
-        return (at, c);
+        (at, c)
     }
 }
 
 fn is_ascii_space(b: u8) -> bool {
-    return b == 32u8 || (b >= 9u8 && b <= 13u8);
+    b == 32u8 || (b >= 9u8 && b <= 13u8)
 }
 
 pub struct SplitWhitespaceIter {
@@ -277,7 +275,7 @@ impl Iterator for SplitWhitespaceIter {
         while self.pos < n && !is_ascii_space(unsafe { rok_str_byte(self.s, self.pos) }) {
             self.pos += 1;
         }
-        return self.s.slice(start, self.pos);
+        self.s.slice(start, self.pos)
     }
 }
 
@@ -291,22 +289,21 @@ pub struct StrBuf {
 }
 
 impl StrBuf {
-    pub fn new() -> StrBuf { return StrBuf::with_capacity(16); }
+    pub fn new() -> StrBuf { StrBuf::with_capacity(16) }
 
     pub fn with_capacity(cap: usize) -> StrBuf {
         let meta: GcBuf<usize> = buf_new(2);
-        buf_set(meta, 1, cap);
+        meta[1] = cap;
         let data: GcBuf<GcBuf<u8>> = buf_new(1);
-        let store: GcBuf<u8> = buf_new(cap);
-        buf_set(data, 0, store);
-        return StrBuf { meta: meta, data: data };
+        data[0] = buf_new(cap);
+        StrBuf { meta: meta, data: data }
     }
 
     /// Byte length.
-    pub fn len(self) -> usize { return buf_get(self.meta, 0); }
-    pub fn is_empty(self) -> bool { return self.len() == 0; }
-    pub fn capacity(self) -> usize { return buf_get(self.meta, 1); }
-    pub fn clear(self) { buf_set(self.meta, 0, 0); }
+    pub fn len(self) -> usize { self.meta[0] }
+    pub fn is_empty(self) -> bool { self.len() == 0 }
+    pub fn capacity(self) -> usize { self.meta[1] }
+    pub fn clear(self) { self.meta[0] = 0; }
 
     /// Room for `additional` more bytes (doubling).
     pub fn reserve(self, additional: usize) {
@@ -315,11 +312,11 @@ impl StrBuf {
         if n + additional <= cap { return; }
         let new_cap = cap * 2;
         if new_cap < n + additional { new_cap = n + additional; }
-        let old: GcBuf<u8> = buf_get(self.data, 0);
+        let old = self.data[0];
         let store: GcBuf<u8> = buf_new(new_cap);
         unsafe { rok_buf_put_str(store, 0, rok_str_from_buf(old, 0, n)) };
-        buf_set(self.data, 0, store);
-        buf_set(self.meta, 1, new_cap);
+        self.data[0] = store;
+        self.meta[1] = new_cap;
     }
 
     /// Append `c`, UTF-8 encoded.
@@ -347,8 +344,8 @@ impl StrBuf {
         if m == 0 { return; }
         self.reserve(m);
         let n = self.len();
-        unsafe { rok_buf_put_str(buf_get(self.data, 0), n, s) };
-        buf_set(self.meta, 0, n + m);
+        unsafe { rok_buf_put_str(self.data[0], n, s) };
+        self.meta[0] = n + m;
     }
 
     /// Append one raw byte. ponytail: not in spec 2.15; it can break
@@ -357,13 +354,13 @@ impl StrBuf {
     pub fn push_byte(self, b: u8) {
         self.reserve(1);
         let n = self.len();
-        buf_set(buf_get(self.data, 0), n, b);
-        buf_set(self.meta, 0, n + 1);
+        self.data[0][n] = b;
+        self.meta[0] = n + 1;
     }
 
     /// The current contents as an immutable `str` (a copy).
     pub fn to_str(self) -> str {
-        return unsafe { rok_str_from_buf(buf_get(self.data, 0), 0, self.len()) };
+        unsafe { rok_str_from_buf(self.data[0], 0, self.len()) }
     }
 
     /// `to_str`, throwing if raw bytes made the contents invalid UTF-8.
@@ -371,12 +368,12 @@ impl StrBuf {
         let s = self.to_str();
         let at = unsafe { rok_str_utf8_error(s) };
         if at >= 0 { throw Utf8Error { valid_up_to: at as usize }; }
-        return s;
+        s
     }
 }
 
 impl Display for StrBuf {
-    fn display(self) -> str { return self.to_str(); }
+    fn display(self) -> str { self.to_str() }
 }
 
 /// Bytes that are not UTF-8 (`str::from_utf8`).
@@ -385,11 +382,11 @@ pub struct Utf8Error {
 }
 
 impl Display for Utf8Error {
-    fn display(self) -> str { return f"invalid UTF-8 at byte {self.valid_up_to}"; }
+    fn display(self) -> str { f"invalid UTF-8 at byte {self.valid_up_to}" }
 }
 
 impl Debug for Utf8Error {
-    fn debug(self) -> str { return "Utf8Error(" + self.display() + ")"; }
+    fn debug(self) -> str { f"Utf8Error({self})" }
 }
 
 impl Error for Utf8Error {}
@@ -412,68 +409,68 @@ fn int_ok(s: str, signed: i32, bits: u32) throws (ParseError) {
 
 fn signed_of(s: str, bits: u32) throws (ParseError) -> i64 {
     try int_ok(s, 1, bits);
-    return unsafe { rok_str_to_i64(s) };
+    unsafe { rok_str_to_i64(s) }
 }
 
 fn unsigned_of(s: str, bits: u32) throws (ParseError) -> u64 {
     try int_ok(s, 0, bits);
-    return unsafe { rok_str_to_u64(s) };
+    unsafe { rok_str_to_u64(s) }
 }
 
 fn float_of(s: str) throws (ParseError) -> f64 {
     if unsafe { rok_str_float_ok(s) } == 0 {
         throw ParseError { input: s, pos: 0, reason: "invalid float literal" };
     }
-    return unsafe { rok_str_to_f64(s) };
+    unsafe { rok_str_to_f64(s) }
 }
 
 impl FromStr for i8 {
     type Err = ParseError;
-    fn from_str(s: str) throws (ParseError) -> i8 { return (try signed_of(s, 8)) as i8; }
+    fn from_str(s: str) throws (ParseError) -> i8 { (try signed_of(s, 8)) as i8 }
 }
 impl FromStr for i16 {
     type Err = ParseError;
-    fn from_str(s: str) throws (ParseError) -> i16 { return (try signed_of(s, 16)) as i16; }
+    fn from_str(s: str) throws (ParseError) -> i16 { (try signed_of(s, 16)) as i16 }
 }
 impl FromStr for i32 {
     type Err = ParseError;
-    fn from_str(s: str) throws (ParseError) -> i32 { return (try signed_of(s, 32)) as i32; }
+    fn from_str(s: str) throws (ParseError) -> i32 { (try signed_of(s, 32)) as i32 }
 }
 impl FromStr for i64 {
     type Err = ParseError;
-    fn from_str(s: str) throws (ParseError) -> i64 { return try signed_of(s, 64); }
+    fn from_str(s: str) throws (ParseError) -> i64 { try signed_of(s, 64) }
 }
 impl FromStr for isize {
     type Err = ParseError;
-    fn from_str(s: str) throws (ParseError) -> isize { return (try signed_of(s, 64)) as isize; }
+    fn from_str(s: str) throws (ParseError) -> isize { (try signed_of(s, 64)) as isize }
 }
 impl FromStr for u8 {
     type Err = ParseError;
-    fn from_str(s: str) throws (ParseError) -> u8 { return (try unsigned_of(s, 8)) as u8; }
+    fn from_str(s: str) throws (ParseError) -> u8 { (try unsigned_of(s, 8)) as u8 }
 }
 impl FromStr for u16 {
     type Err = ParseError;
-    fn from_str(s: str) throws (ParseError) -> u16 { return (try unsigned_of(s, 16)) as u16; }
+    fn from_str(s: str) throws (ParseError) -> u16 { (try unsigned_of(s, 16)) as u16 }
 }
 impl FromStr for u32 {
     type Err = ParseError;
-    fn from_str(s: str) throws (ParseError) -> u32 { return (try unsigned_of(s, 32)) as u32; }
+    fn from_str(s: str) throws (ParseError) -> u32 { (try unsigned_of(s, 32)) as u32 }
 }
 impl FromStr for u64 {
     type Err = ParseError;
-    fn from_str(s: str) throws (ParseError) -> u64 { return try unsigned_of(s, 64); }
+    fn from_str(s: str) throws (ParseError) -> u64 { try unsigned_of(s, 64) }
 }
 impl FromStr for usize {
     type Err = ParseError;
-    fn from_str(s: str) throws (ParseError) -> usize { return (try unsigned_of(s, 64)) as usize; }
+    fn from_str(s: str) throws (ParseError) -> usize { (try unsigned_of(s, 64)) as usize }
 }
 impl FromStr for f64 {
     type Err = ParseError;
-    fn from_str(s: str) throws (ParseError) -> f64 { return try float_of(s); }
+    fn from_str(s: str) throws (ParseError) -> f64 { try float_of(s) }
 }
 impl FromStr for f32 {
     type Err = ParseError;
-    fn from_str(s: str) throws (ParseError) -> f32 { return (try float_of(s)) as f32; }
+    fn from_str(s: str) throws (ParseError) -> f32 { (try float_of(s)) as f32 }
 }
 impl FromStr for bool {
     type Err = ParseError;
@@ -490,10 +487,10 @@ impl FromStr for char {
         let first = it.next();
         if s.len() == 0 { throw ParseError { input: s, pos: 0, reason: "empty string" }; }
         if it.next() is char { throw ParseError { input: s, pos: 0, reason: "too many characters" }; }
-        return first ?? ' ';
+        first ?? ' '
     }
 }
 impl FromStr for str {
     type Err = ParseError;
-    fn from_str(s: str) throws (ParseError) -> str { return s; }
+    fn from_str(s: str) throws (ParseError) -> str { s }
 }

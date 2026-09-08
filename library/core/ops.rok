@@ -250,7 +250,7 @@ pub trait Contains<Item> {
     #[infix("∈", swap)]
     fn contains(self, item: Item) -> bool;
     #[infix("∉", swap)]
-    fn not_contains(self, item: Item) -> bool { return !self.contains(item); }
+    fn not_contains(self, item: Item) -> bool { !self.contains(item) }
 }
 
 pub trait Subset<Rhs = Self> {

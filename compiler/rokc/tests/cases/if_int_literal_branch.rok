@@ -1,0 +1,25 @@
+// expect-exit: 0
+// expect-stdout:
+// 1 7 9 2
+// 9
+
+// An untyped integer literal (or literal arithmetic) takes its sibling's
+// integer type: an `if` branch from the other branch, a range bound from
+// the other bound.
+fn pick(cap: usize) -> usize {
+    let c = if cap == 0 { 1 } else { cap };
+    c
+}
+
+fn main() {
+    let n: u8 = 9;
+    let a = if n > 100 { n } else { 2 };
+    let b = if n > 1 { n } else { 2 };
+    println(f"{pick(0)} {pick(7)} {b} {a}");
+    let m = 5usize;
+    let s = 0usize;
+    for i in 1 + 1..m {
+        s += i;
+    }
+    println(f"{s}");
+}

@@ -7,36 +7,29 @@ pub struct Set<T> {
 
 impl<T: Hash> Set<T> {
     pub fn new() -> Set<T> {
-        let d: Dict<T, bool> = Dict::new();
-        return Set { d: d };
+        Set { d: Dict::new() }
     }
 
     pub fn len(self) -> usize {
-        return self.d.len();
+        self.d.len()
     }
 
     pub fn is_empty(self) -> bool {
-        return self.d.is_empty();
+        self.d.is_empty()
     }
 
     /// `true` when `x` was not there yet.
     pub fn insert(self, x: T) -> bool {
-        match self.d.insert(x, true) {
-            none => return true,
-            _ => return false,
-        }
+        self.d.insert(x, true) is none
     }
 
     /// `true` when `x` was there.
     pub fn remove(self, x: T) -> bool {
-        match self.d.remove(x) {
-            none => return false,
-            _ => return true,
-        }
+        !(self.d.remove(x) is none)
     }
 
     pub fn contains(self, x: T) -> bool {
-        return self.d.contains_key(x);
+        self.d.contains_key(x)
     }
 
     pub fn union(self, other: Set<T>) -> Set<T> {
@@ -47,7 +40,7 @@ impl<T: Hash> Set<T> {
         for x in other.d.keys() {
             out.insert(x);
         }
-        return out;
+        out
     }
 
     pub fn intersection(self, other: Set<T>) -> Set<T> {
@@ -57,7 +50,7 @@ impl<T: Hash> Set<T> {
                 out.insert(x);
             }
         }
-        return out;
+        out
     }
 
     pub fn difference(self, other: Set<T>) -> Set<T> {
@@ -67,11 +60,11 @@ impl<T: Hash> Set<T> {
                 out.insert(x);
             }
         }
-        return out;
+        out
     }
 
     pub fn symmetric_difference(self, other: Set<T>) -> Set<T> {
-        return self.difference(other).union(other.difference(self));
+        self.difference(other).union(other.difference(self))
     }
 
     pub fn is_subset(self, other: Set<T>) -> bool {
@@ -80,28 +73,28 @@ impl<T: Hash> Set<T> {
                 return false;
             }
         }
-        return true;
+        true
     }
 
     pub fn is_superset(self, other: Set<T>) -> bool {
-        return other.is_subset(self);
+        other.is_subset(self)
     }
 
     pub fn is_disjoint(self, other: Set<T>) -> bool {
-        return self.intersection(other).is_empty();
+        self.intersection(other).is_empty()
     }
 
     pub fn to_list(self) -> List<T> {
-        return self.d.keys().collect();
+        self.d.keys().collect()
     }
 
     pub fn iter(self) -> DictKeys<T, bool> {
-        return self.d.keys();
+        self.d.keys()
     }
 }
 
 impl<T: Hash> Default for Set<T> {
-    fn default() -> Set<T> { return Set::new(); }
+    fn default() -> Set<T> { Set::new() }
 }
 
 /// A new set with every element cloned (stdlib 2.13.2).
@@ -111,7 +104,7 @@ impl<T: Hash + Clone> Clone for Set<T> {
         for x in self {
             r.insert(x.clone());
         }
-        return r;
+        r
     }
 }
 
@@ -120,7 +113,7 @@ impl<T: Hash> IntoIterator for Set<T> {
     type IntoIter = DictKeys<T, bool>;
     type Item = T;
     fn into_iter(self) -> DictKeys<T, bool> {
-        return self.d.keys();
+        self.d.keys()
     }
 }
 
@@ -131,7 +124,7 @@ impl<T: Hash> FromIterator<T> for Set<T> {
         for x in it {
             out.insert(x);
         }
-        return out;
+        out
     }
 }
 
@@ -142,9 +135,9 @@ impl<T: Hash> PartialEq for Set<T> {
         for x in self {
             if !rhs.contains(x) { return false; }
         }
-        return true;
+        true
     }
-    fn ne(self, rhs: Set<T>) -> bool { return !self.eq(rhs); }
+    fn ne(self, rhs: Set<T>) -> bool { !self.eq(rhs) }
 }
 
 impl<T: Hash> Eq for Set<T> {}
@@ -153,8 +146,8 @@ impl<T: Hash> Eq for Set<T> {}
 impl<T: Hash> Hash for Set<T> {
     fn hash(self) -> u64 {
         let h = self.len() as u64;
-        for x in self { h = h ^ x.hash(); }
-        return h;
+        for x in self { h ^= x.hash(); }
+        h
     }
 }
 
@@ -164,11 +157,11 @@ impl<T: Hash + Debug> Debug for Set<T> {
         let out = "{";
         let first = true;
         for x in self {
-            if !first { out = out + ", "; }
-            out = out + x.debug();
+            if !first { out += ", "; }
+            out += x.debug();
             first = false;
         }
-        return out + "}";
+        out + "}"
     }
 }
 

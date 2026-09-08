@@ -65,30 +65,30 @@ pub struct OpenOptions {
 impl OpenOptions {
     /// Nothing set (`mode` 0o666): pick at least `read` or `write`.
     pub fn new() -> OpenOptions {
-        return OpenOptions {
+        OpenOptions {
             read: false, write: false, append: false, truncate: false,
             create: false, create_new: false, mode: 0o666u32,
-        };
+        }
     }
-    pub fn default() -> OpenOptions { return OpenOptions::new(); }
+    pub fn default() -> OpenOptions { OpenOptions::new() }
 
-    pub fn read(self, on: bool) -> OpenOptions { self.read = on; return self; }
-    pub fn write(self, on: bool) -> OpenOptions { self.write = on; return self; }
-    pub fn append(self, on: bool) -> OpenOptions { self.append = on; return self; }
-    pub fn truncate(self, on: bool) -> OpenOptions { self.truncate = on; return self; }
-    pub fn create(self, on: bool) -> OpenOptions { self.create = on; return self; }
-    pub fn create_new(self, on: bool) -> OpenOptions { self.create_new = on; return self; }
-    pub fn mode(self, mode: u32) -> OpenOptions { self.mode = mode; return self; }
+    pub fn read(self, on: bool) -> OpenOptions { self.read = on; self }
+    pub fn write(self, on: bool) -> OpenOptions { self.write = on; self }
+    pub fn append(self, on: bool) -> OpenOptions { self.append = on; self }
+    pub fn truncate(self, on: bool) -> OpenOptions { self.truncate = on; self }
+    pub fn create(self, on: bool) -> OpenOptions { self.create = on; self }
+    pub fn create_new(self, on: bool) -> OpenOptions { self.create_new = on; self }
+    pub fn mode(self, mode: u32) -> OpenOptions { self.mode = mode; self }
 
     fn bits(self) -> i32 {
         let b = 0;
-        if self.read { b = b | O_READ; }
-        if self.write { b = b | O_WRITE; }
-        if self.append { b = b | O_APPEND; }
-        if self.truncate { b = b | O_TRUNCATE; }
-        if self.create { b = b | O_CREATE; }
-        if self.create_new { b = b | O_CREATE_NEW; }
-        return b;
+        if self.read { b |= O_READ; }
+        if self.write { b |= O_WRITE; }
+        if self.append { b |= O_APPEND; }
+        if self.truncate { b |= O_TRUNCATE; }
+        if self.create { b |= O_CREATE; }
+        if self.create_new { b |= O_CREATE_NEW; }
+        b
     }
 }
 
@@ -100,13 +100,13 @@ pub struct Permissions {
 }
 
 impl Permissions {
-    pub fn from_mode(mode: u32) -> Permissions { return Permissions { mode: mode & 0o7777u32 }; }
-    pub fn mode(self) -> u32 { return self.mode; }
+    pub fn from_mode(mode: u32) -> Permissions { Permissions { mode: mode & 0o7777u32 } }
+    pub fn mode(self) -> u32 { self.mode }
     /// No write bit for anyone.
-    pub fn readonly(self) -> bool { return (self.mode & 0o222u32) == 0u32; }
+    pub fn readonly(self) -> bool { (self.mode & 0o222u32) == 0u32 }
     pub fn set_readonly(self, on: bool) -> Permissions {
         if on { return Permissions { mode: self.mode & 0o7555u32 }; }
-        return Permissions { mode: self.mode | 0o200u32 };
+        Permissions { mode: self.mode | 0o200u32 }
     }
 }
 
@@ -122,33 +122,32 @@ pub struct Metadata {
 }
 
 impl Metadata {
-    pub fn len(self) -> u64 { return self.len; }
-    pub fn is_file(self) -> bool { return self.kind == 1; }
-    pub fn is_dir(self) -> bool { return self.kind == 2; }
-    pub fn is_symlink(self) -> bool { return self.kind == 3; }
-    pub fn permissions(self) -> Permissions { return Permissions { mode: self.mode }; }
+    pub fn len(self) -> u64 { self.len }
+    pub fn is_file(self) -> bool { self.kind == 1 }
+    pub fn is_dir(self) -> bool { self.kind == 2 }
+    pub fn is_symlink(self) -> bool { self.kind == 3 }
+    pub fn permissions(self) -> Permissions { Permissions { mode: self.mode } }
     /// Last modification, Unix seconds (+ `mtime_nanos` within it).
-    pub fn mtime(self) -> i64 { return self.mtime; }
-    pub fn mtime_nanos(self) -> i64 { return self.mtime_ns; }
-    pub fn atime(self) -> i64 { return self.atime; }
-    pub fn ctime(self) -> i64 { return self.ctime; }
+    pub fn mtime(self) -> i64 { self.mtime }
+    pub fn mtime_nanos(self) -> i64 { self.mtime_ns }
+    pub fn atime(self) -> i64 { self.atime }
+    pub fn ctime(self) -> i64 { self.ctime }
 }
 
 /// `stat` through the runtime: `fd >= 0` → `fstat(fd)`.
 fn stat_at(dir: i32, path: str, follow: bool, fd: i32) throws (IoError) -> Metadata {
     let out: GcBuf<i64> = buf_new(7);
-    let f = 0;
-    if follow { f = 1; }
+    let f = if follow { 1 } else { 0 };
     try check(unsafe { rok_os_stat(dir, path, f, fd, out) } as i64, path);
-    return Metadata {
-        kind: buf_get(out, 0),
-        len: buf_get(out, 1) as u64,
-        mode: buf_get(out, 2) as u32,
-        mtime: buf_get(out, 3),
-        mtime_ns: buf_get(out, 4),
-        atime: buf_get(out, 5),
-        ctime: buf_get(out, 6),
-    };
+    Metadata {
+        kind: out[0],
+        len: out[1] as u64,
+        mode: out[2] as u32,
+        mtime: out[3],
+        mtime_ns: out[4],
+        atime: out[5],
+        ctime: out[6],
+    }
 }
 
 // ---- File ----
@@ -162,36 +161,36 @@ pub struct File {
 
 fn file_of(fd: i32, path: str) -> File {
     let cell: GcBuf<i32> = buf_new(1);
-    buf_set(cell, 0, fd);
-    return File { fd: cell, path: path };
+    cell[0] = fd;
+    File { fd: cell, path: path }
 }
 
 impl File {
     /// Open for reading.
-    pub fn open<P: AsPath>(path: P) throws (IoError) -> File { return try Dir::root().open(path); }
+    pub fn open<P: AsPath>(path: P) throws (IoError) -> File { try Dir::root().open(path) }
     /// Create or truncate for writing.
-    pub fn create<P: AsPath>(path: P) throws (IoError) -> File { return try Dir::root().create(path); }
+    pub fn create<P: AsPath>(path: P) throws (IoError) -> File { try Dir::root().create(path) }
     pub fn open_with<P: AsPath>(path: P, opts: OpenOptions) throws (IoError) -> File {
-        return try Dir::root().open_with(path, opts);
+        try Dir::root().open_with(path, opts)
     }
 
     /// Take ownership of an open descriptor; `name` labels its errors.
-    pub fn from_fd(fd: i32, name: str) -> File { return file_of(fd, name); }
+    pub fn from_fd(fd: i32, name: str) -> File { file_of(fd, name) }
 
     /// The OS file descriptor (`-1` once closed).
-    pub fn fd(self) -> i32 { return buf_get(self.fd, 0); }
+    pub fn fd(self) -> i32 { self.fd[0] }
 
     fn live(self) throws (IoError) -> i32 {
-        let fd = buf_get(self.fd, 0);
-        if fd < 0 { throw IoError::with_kind(IoErrorKind::InvalidInput, self.path + ": file is closed"); }
-        return fd;
+        let fd = self.fd[0];
+        if fd < 0 { throw IoError::with_kind(IoErrorKind::InvalidInput, f"{self.path}: file is closed"); }
+        fd
     }
 
     /// Close now; later calls fail with `InvalidInput`. Closing twice is a no-op.
     pub fn close(self) throws (IoError) {
-        let fd = buf_get(self.fd, 0);
+        let fd = self.fd[0];
         if fd < 0 { return; }
-        buf_set(self.fd, 0, -1);
+        self.fd[0] = -1;
         try check(unsafe { rok_os_close(fd) } as i64, self.path);
     }
 
@@ -199,28 +198,28 @@ impl File {
         let err = err_cell();
         let s = unsafe { rok_os_read(try self.live(), buf.len(), err) };
         try check_cell(err, self.path);
-        return fill(buf, s);
+        fill(buf, s)
     }
 
     pub fn read_to_end(self) throws (IoError) -> List<u8> {
-        return (try self.read_raw()).as_bytes();
+        (try self.read_raw()).as_bytes()
     }
 
     /// The rest of the file as text (`InvalidData` if not UTF-8).
     pub fn read_to_str(self) throws (IoError) -> str {
-        return try text_of(try self.read_raw());
+        try text_of(try self.read_raw())
     }
 
     fn read_raw(self) throws (IoError) -> str {
         let err = err_cell();
         let s = unsafe { rok_os_read_all(try self.live(), err) };
         try check_cell(err, self.path);
-        return s;
+        s
     }
 
     pub fn write(self, buf: List<u8>) throws (IoError) -> usize {
         let n = unsafe { rok_os_write(try self.live(), raw_of(buf, buf.len()), 0) };
-        return (try check(n as i64, self.path)) as usize;
+        (try check(n as i64, self.path)) as usize
     }
 
     pub fn write_all(self, buf: List<u8>) throws (IoError) {
@@ -247,11 +246,11 @@ impl File {
     }
 
     pub fn metadata(self) throws (IoError) -> Metadata {
-        return try stat_at(-1, self.path, true, try self.live());
+        try stat_at(-1, self.path, true, try self.live())
     }
 
     pub fn permissions(self) throws (IoError) -> Permissions {
-        return (try self.metadata()).permissions();
+        (try self.metadata()).permissions()
     }
 
     pub fn set_permissions(self, perm: Permissions) throws (IoError) {
@@ -265,13 +264,13 @@ impl File {
             SeekFrom::Current(n) => unsafe { rok_os_lseek(fd, n, 1) },
             SeekFrom::End(n) => unsafe { rok_os_lseek(fd, n, 2) },
         };
-        return (try check(r, self.path)) as u64;
+        (try check(r, self.path)) as u64
     }
 
     /// A second handle on the same open file (`dup`).
     pub fn try_clone(self) throws (IoError) -> File {
         let fd = try check(unsafe { rok_os_dup(try self.live()) } as i64, self.path);
-        return file_of(fd as i32, self.path);
+        file_of(fd as i32, self.path)
     }
 
     pub fn lock_exclusive(self) throws (IoError) {
@@ -284,7 +283,7 @@ impl File {
 
     /// `false` if another holder has it.
     pub fn try_lock_exclusive(self) throws (IoError) -> bool {
-        return (try check(unsafe { rok_os_flock(try self.live(), 6) } as i64, self.path)) == 1;
+        (try check(unsafe { rok_os_flock(try self.live(), 6) } as i64, self.path)) == 1
     }
 
     pub fn unlock(self) throws (IoError) {
@@ -293,28 +292,28 @@ impl File {
 }
 
 impl Reader for File {
-    fn read(ref self, buf: List<u8>) throws (IoError) -> usize { return try self.read(buf); }
-    fn read_to_end(ref self) throws (IoError) -> List<u8> { return try self.read_to_end(); }
-    fn read_to_str(ref self) throws (IoError) -> str { return try self.read_to_str(); }
+    fn read(ref self, buf: List<u8>) throws (IoError) -> usize { try self.read(buf) }
+    fn read_to_end(ref self) throws (IoError) -> List<u8> { try self.read_to_end() }
+    fn read_to_str(ref self) throws (IoError) -> str { try self.read_to_str() }
 }
 
 impl Writer for File {
-    fn write(ref self, buf: List<u8>) throws (IoError) -> usize { return try self.write(buf); }
+    fn write(ref self, buf: List<u8>) throws (IoError) -> usize { try self.write(buf) }
     fn write_all(ref self, buf: List<u8>) throws (IoError) { try self.write_all(buf); }
     fn write_str(ref self, s: str) throws (IoError) { try self.write_str(s); }
     fn flush(ref self) throws (IoError) {}
 }
 
 impl Seek for File {
-    fn seek(ref self, pos: SeekFrom) throws (IoError) -> u64 { return try self.seek(pos); }
+    fn seek(ref self, pos: SeekFrom) throws (IoError) -> u64 { try self.seek(pos) }
 }
 
 /// `using f = try fs::open(..) { .. }` closes `f` on the way out.
 impl Drop for File {
     fn drop(ref self) {
-        let fd = buf_get(self.fd, 0);
+        let fd = self.fd[0];
         if fd >= 0 {
-            buf_set(self.fd, 0, -1);
+            self.fd[0] = -1;
             unsafe { rok_os_close(fd) };
         }
     }
@@ -331,26 +330,25 @@ pub struct Dir {
 
 fn dir_of(fd: i32, path: str) -> Dir {
     let cell: GcBuf<i32> = buf_new(1);
-    buf_set(cell, 0, fd);
-    return Dir { fd: cell, path: path };
+    cell[0] = fd;
+    Dir { fd: cell, path: path }
 }
 
 impl Dir {
-    pub fn root() -> Dir { return dir_of(-1, ""); }
+    pub fn root() -> Dir { dir_of(-1, "") }
 
-    pub fn cwd() throws (IoError) -> Dir { return try Dir::root().open_dir("."); }
+    pub fn cwd() throws (IoError) -> Dir { try Dir::root().open_dir(".") }
 
     pub fn home() throws (IoError) -> Dir {
-        let home = env::home_dir();
-        if home is Path { return try Dir::root().open_dir(home); }
+        if let home: Path = env::home_dir() { return try Dir::root().open_dir(home); }
         throw IoError::with_kind(IoErrorKind::NotFound, "HOME is not set");
     }
 
     pub fn temp() throws (IoError) -> Dir {
-        return try Dir::root().open_dir(env::temp_dir());
+        try Dir::root().open_dir(env::temp_dir())
     }
 
-    fn fd(self) -> i32 { return buf_get(self.fd, 0); }
+    fn fd(self) -> i32 { self.fd[0] }
 
     /// `p` checked against this capability; the string to pass to `*at`.
     fn rel<P: AsPath>(self, p: P) throws (IoError) -> str {
@@ -362,71 +360,70 @@ impl Dir {
             }
             if escapes {
                 throw IoError::with_kind(IoErrorKind::PermissionDenied,
-                    path.as_str() + ": path escapes the directory capability");
+                    f"{path}: path escapes the directory capability");
             }
         }
         if path.as_str() == "" { return "."; }
-        return path.as_str();
+        path.as_str()
     }
 
     /// For messages: the path as the user would spell it.
     fn shown(self, p: str) -> str {
         if self.path == "" { return p; }
-        return Path::from(self.path).join(Path::from(p)).as_str();
+        Path::from(self.path).join(Path::from(p)).as_str()
     }
 
     pub fn open<P: AsPath>(self, path: P) throws (IoError) -> File {
-        return try self.open_with(path, OpenOptions::new().read(true));
+        try self.open_with(path, OpenOptions::new().read(true))
     }
 
     /// Open for writing, created or truncated.
     pub fn create<P: AsPath>(self, path: P) throws (IoError) -> File {
-        return try self.open_with(path, OpenOptions::new().write(true).create(true).truncate(true));
+        try self.open_with(path, OpenOptions::new().write(true).create(true).truncate(true))
     }
 
     pub fn open_with<P: AsPath>(self, path: P, opts: OpenOptions) throws (IoError) -> File {
         let p = try self.rel(path);
         let fd = try check(unsafe { rok_os_open(self.fd(), p, opts.bits(), opts.mode) } as i64, self.shown(p));
-        return file_of(fd as i32, self.shown(p));
+        file_of(fd as i32, self.shown(p))
     }
 
     pub fn open_dir<P: AsPath>(self, path: P) throws (IoError) -> Dir {
         let p = try self.rel(path);
         let fd = try check(unsafe { rok_os_open(self.fd(), p, O_READ | O_DIRECTORY, 0u32) } as i64, self.shown(p));
-        return dir_of(fd as i32, self.shown(p));
+        dir_of(fd as i32, self.shown(p))
     }
 
     /// The entries of this directory.
     pub fn read_dir(self) throws (IoError) -> ReadDir {
-        return try self.list(".");
+        try self.list(".")
     }
 
     fn list(self, p: str) throws (IoError) -> ReadDir {
         let err = err_cell();
         let d = unsafe { rok_os_opendir(self.fd(), p, err) };
         try check_cell(err, self.shown(p));
-        let base = p;
-        if p == "." { base = ""; }
+        let base = if p == "." { "" } else { p };
         let cell: GcBuf<usize> = buf_new(1);
-        buf_set(cell, 0, d);
-        return ReadDir { d: cell, dir: self, base: base };
+        cell[0] = d;
+        ReadDir { d: cell, dir: self, base: base }
     }
 
     /// Follows symlinks.
     pub fn metadata<P: AsPath>(self, path: P) throws (IoError) -> Metadata {
         let p = try self.rel(path);
-        return try stat_at(self.fd(), p, true, -1) catch e { throw IoError::from_os(e.code, self.shown(p)); };
+        try stat_at(self.fd(), p, true, -1) catch e { throw IoError::from_os(e.code, self.shown(p)); }
     }
 
     /// Does not follow a final symlink.
     pub fn symlink_metadata<P: AsPath>(self, path: P) throws (IoError) -> Metadata {
         let p = try self.rel(path);
-        return try stat_at(self.fd(), p, false, -1) catch e { throw IoError::from_os(e.code, self.shown(p)); };
+        try stat_at(self.fd(), p, false, -1) catch e { throw IoError::from_os(e.code, self.shown(p)); }
     }
 
     pub fn exists<P: AsPath>(self, path: P) -> bool {
         try self.metadata(path) catch _ { return false; };
-        return true;
+        true
     }
 
     pub fn create_dir<P: AsPath>(self, path: P) throws (IoError) {
@@ -452,7 +449,7 @@ impl Dir {
 
     fn is_dir_at(self, p: str) -> bool {
         let m = try stat_at(self.fd(), p, true, -1) catch _ { return false; };
-        return m.is_dir();
+        m.is_dir()
     }
 
     pub fn remove_file<P: AsPath>(self, path: P) throws (IoError) {
@@ -499,7 +496,7 @@ impl Dir {
         try dst.close();
         try check(n, dst.path);
         try check(perm as i64, dst.path);
-        return n as u64;
+        n as u64
     }
 
     /// `link` → `target` (a symbolic link; `target` is stored verbatim).
@@ -518,16 +515,16 @@ impl Dir {
     pub fn close(self) throws (IoError) {
         let fd = self.fd();
         if fd < 0 { return; }
-        buf_set(self.fd, 0, -1);
+        self.fd[0] = -1;
         try check(unsafe { rok_os_close(fd) } as i64, self.path);
     }
 }
 
 impl Drop for Dir {
     fn drop(ref self) {
-        let fd = buf_get(self.fd, 0);
+        let fd = self.fd[0];
         if fd >= 0 {
-            buf_set(self.fd, 0, -1);
+            self.fd[0] = -1;
             unsafe { rok_os_close(fd) };
         }
     }
@@ -544,13 +541,13 @@ pub struct DirEntry {
 
 impl DirEntry {
     /// The listed directory's path joined with the name.
-    pub fn path(self) -> Path { return self.path; }
-    pub fn file_name(self) -> str { return self.name; }
+    pub fn path(self) -> Path { self.path }
+    pub fn file_name(self) -> str { self.name }
     /// Metadata of the entry itself (a symlink is not followed).
-    pub fn metadata(self) -> Metadata { return self.meta; }
-    pub fn is_dir(self) -> bool { return self.meta.is_dir(); }
-    pub fn is_file(self) -> bool { return self.meta.is_file(); }
-    pub fn is_symlink(self) -> bool { return self.meta.is_symlink(); }
+    pub fn metadata(self) -> Metadata { self.meta }
+    pub fn is_dir(self) -> bool { self.meta.is_dir() }
+    pub fn is_file(self) -> bool { self.meta.is_file() }
+    pub fn is_symlink(self) -> bool { self.meta.is_symlink() }
 }
 
 /// The entries of one directory, in the order the OS returns them
@@ -565,14 +562,14 @@ pub struct ReadDir {
 impl Iterator for ReadDir {
     type Item = Result<DirEntry, IoError>;
     fn next(ref self) -> Result<DirEntry, IoError> | none {
-        let d = buf_get(self.d, 0);
+        let d = self.d[0];
         if d == 0usize { return none; }
         let err = err_cell();
         let name = unsafe { rok_os_readdir(d, err) };
         if name.len() == 0 {
             unsafe { rok_os_closedir(d) };
-            buf_set(self.d, 0, 0usize);
-            let e = buf_get(err, 0);
+            self.d[0] = 0usize;
+            let e = err[0];
             if e != 0 { return Result::Err(IoError::from_os(e, self.dir.shown(self.base))); }
             return none;
         }
@@ -581,7 +578,7 @@ impl Iterator for ReadDir {
             return Result::Err(IoError::from_os(e.code, self.dir.shown(path.as_str())));
         };
         let shown = Path::from(self.dir.shown(path.as_str()));
-        return Result::Ok(DirEntry { path: shown, name: name, meta: meta });
+        Result::Ok(DirEntry { path: shown, name: name, meta: meta })
     }
 }
 
@@ -590,9 +587,9 @@ impl Iterator for ReadDir {
 /// before its end keeps the stream open until the process exits.
 impl Drop for ReadDir {
     fn drop(ref self) {
-        let d = buf_get(self.d, 0);
+        let d = self.d[0];
         if d != 0usize {
-            buf_set(self.d, 0, 0usize);
+            self.d[0] = 0usize;
             unsafe { rok_os_closedir(d) };
         }
     }
@@ -611,8 +608,7 @@ pub struct Walk {
 impl Iterator for Walk {
     type Item = Result<DirEntry, IoError>;
     fn next(ref self) -> Result<DirEntry, IoError> | none {
-        let err = self.errors.pop();
-        if err is IoError { return Result::Err(err); }
+        if let err: IoError = self.errors.pop() { return Result::Err(err); }
         let e = self.stack.pop()?;
         if e.meta.is_dir() {
             let kids: List<DirEntry> = List::new();
@@ -633,14 +629,13 @@ impl Iterator for Walk {
                 self.stack.push(kids[i]);
             }
         }
-        return Result::Ok(e);
+        Result::Ok(e)
     }
 }
 
 /// Insertion sort by name. ponytail: O(n²); `List::sort` does not exist yet.
 fn sort_entries(xs: List<DirEntry>) {
-    let i = 1usize;
-    while i < xs.len() {
+    for i in 1..xs.len() {
         let x = xs[i];
         let j = i;
         while j > 0 && xs[j - 1].name > x.name {
@@ -648,34 +643,33 @@ fn sort_entries(xs: List<DirEntry>) {
             j -= 1;
         }
         xs[j] = x;
-        i += 1;
     }
 }
 
 // ---- convenience functions (301.4) over Dir::root() ----
 
-pub fn open<P: AsPath>(path: P) throws (IoError) -> File { return try Dir::root().open(path); }
-pub fn create<P: AsPath>(path: P) throws (IoError) -> File { return try Dir::root().create(path); }
+pub fn open<P: AsPath>(path: P) throws (IoError) -> File { try Dir::root().open(path) }
+pub fn create<P: AsPath>(path: P) throws (IoError) -> File { try Dir::root().create(path) }
 pub fn open_with<P: AsPath>(path: P, opts: OpenOptions) throws (IoError) -> File {
-    return try Dir::root().open_with(path, opts);
+    try Dir::root().open_with(path, opts)
 }
 
 pub fn read<P: AsPath>(path: P) throws (IoError) -> List<u8> {
     let f = try open(path);
     let r = try f.read_to_end() catch e { try f.close() catch _ {}; throw e; };
     try f.close();
-    return r;
+    r
 }
 
 pub fn read_to_str<P: AsPath>(path: P) throws (IoError) -> str {
     let f = try open(path);
     let r = try f.read_to_str() catch e { try f.close() catch _ {}; throw e; };
     try f.close();
-    return r;
+    r
 }
 
 /// The spelling `read_to_string` (Rust's) for `read_to_str`.
-pub fn read_to_string<P: AsPath>(path: P) throws (IoError) -> str { return try read_to_str(path); }
+pub fn read_to_string<P: AsPath>(path: P) throws (IoError) -> str { try read_to_str(path) }
 
 /// Create or truncate `path` and write `data` (a `str` or `List<u8>`).
 pub fn write<P: AsPath, D: AsBytes>(path: P, data: D) throws (IoError) {
@@ -690,7 +684,7 @@ pub fn write<P: AsPath, D: AsBytes>(path: P, data: D) throws (IoError) {
 pub fn write_atomic<P: AsPath, D: AsBytes>(path: P, data: D) throws (IoError) {
     let target = path.as_path();
     let name = target.file_name() ?? "";
-    if name == "" { throw IoError::with_kind(IoErrorKind::InvalidInput, target.as_str() + ": no file name"); }
+    if name == "" { throw IoError::with_kind(IoErrorKind::InvalidInput, f"{target}: no file name"); }
     let parent = target.parent() ?? Path::new();
     // A fresh temp name: pid + the first free counter.
     let pid = unsafe { rok_os_getpid() };
@@ -711,8 +705,7 @@ pub fn write_atomic<P: AsPath, D: AsBytes>(path: P, data: D) throws (IoError) {
         try remove_file(tmp) catch _ {};
         throw e;
     };
-    let dir_path = parent;
-    if dir_path.as_str() == "" { dir_path = Path::from("."); }
+    let dir_path = if parent.as_str() == "" { Path::from(".") } else { parent };
     let d = try open_with(dir_path, OpenOptions::new().read(true));
     try d.sync_all() catch _ {}; // some filesystems refuse fsync on a directory
     try d.close();
@@ -732,29 +725,29 @@ pub trait AsBytes {
 }
 
 impl AsBytes for str {
-    fn raw_bytes(self) -> str { return self; }
+    fn raw_bytes(self) -> str { self }
 }
 
 impl AsBytes for List<u8> {
-    fn raw_bytes(self) -> str { return raw_of(self, self.len()); }
+    fn raw_bytes(self) -> str { raw_of(self, self.len()) }
 }
 
-pub fn metadata<P: AsPath>(path: P) throws (IoError) -> Metadata { return try Dir::root().metadata(path); }
+pub fn metadata<P: AsPath>(path: P) throws (IoError) -> Metadata { try Dir::root().metadata(path) }
 pub fn symlink_metadata<P: AsPath>(path: P) throws (IoError) -> Metadata {
-    return try Dir::root().symlink_metadata(path);
+    try Dir::root().symlink_metadata(path)
 }
-pub fn exists<P: AsPath>(path: P) -> bool { return Dir::root().exists(path); }
+pub fn exists<P: AsPath>(path: P) -> bool { Dir::root().exists(path) }
 pub fn create_dir<P: AsPath>(path: P) throws (IoError) { try Dir::root().create_dir(path); }
 pub fn create_dir_all<P: AsPath>(path: P) throws (IoError) { try Dir::root().create_dir_all(path); }
 pub fn remove_file<P: AsPath>(path: P) throws (IoError) { try Dir::root().remove_file(path); }
 pub fn remove_dir<P: AsPath>(path: P) throws (IoError) { try Dir::root().remove_dir(path); }
 pub fn remove_dir_all<P: AsPath>(path: P) throws (IoError) { try Dir::root().remove_dir_all(path); }
 pub fn rename<P: AsPath, Q: AsPath>(from: P, to: Q) throws (IoError) { try Dir::root().rename(from, to); }
-pub fn copy<P: AsPath, Q: AsPath>(from: P, to: Q) throws (IoError) -> u64 { return try Dir::root().copy(from, to); }
+pub fn copy<P: AsPath, Q: AsPath>(from: P, to: Q) throws (IoError) -> u64 { try Dir::root().copy(from, to) }
 pub fn symlink<P: AsPath, Q: AsPath>(target: P, link: Q) throws (IoError) { try Dir::root().symlink(target, link); }
 pub fn hardlink<P: AsPath, Q: AsPath>(target: P, link: Q) throws (IoError) { try Dir::root().hardlink(target, link); }
 pub fn read_dir<P: AsPath>(path: P) throws (IoError) -> ReadDir {
-    return try Dir::root().list(try Dir::root().rel(path));
+    try Dir::root().list(try Dir::root().rel(path))
 }
 
 /// Everything under `root`, `root` included (see `Walk`).
@@ -763,5 +756,5 @@ pub fn walk<P: AsPath>(root: P) -> Walk {
     let w = Walk { stack: List::new(), errors: List::new() };
     let first = try symlink_metadata(p) catch e { w.errors.push(e); return w; };
     w.stack.push(DirEntry { path: p, name: p.file_name() ?? p.as_str(), meta: first });
-    return w;
+    w
 }

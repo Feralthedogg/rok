@@ -19,7 +19,7 @@ impl<T> Poll<T> {
     }
 
     pub fn is_pending(self) -> bool {
-        return !self.is_ready();
+        !self.is_ready()
     }
 }
 
@@ -36,7 +36,7 @@ impl Waker {
     }
 
     pub fn clone(self) -> Waker {
-        return self;
+        self
     }
 }
 
@@ -47,11 +47,11 @@ pub struct Context {
 
 impl Context {
     pub fn from_waker(waker: Waker) -> Context {
-        return Context { waker: waker };
+        Context { waker: waker }
     }
 
     pub fn waker(self) -> Waker {
-        return self.waker;
+        self.waker
     }
 }
 
@@ -86,7 +86,7 @@ unsafe impl<T: Send, E: Send> Send for TryAsyncFuture<T, E> {}
 impl<T> Future for AsyncFuture<T> {
     type Output = T;
     fn poll(ref self, ref ctx: Context) -> Poll<T> {
-        return (self.resume)(ctx);
+        (self.resume)(ctx)
     }
 }
 
@@ -100,6 +100,6 @@ pub struct TryAsyncFuture<T, E> {
 
 impl<T, E> TryAsyncFuture<T, E> {
     pub fn poll(ref self, ref ctx: Context) throws (E) -> Poll<T> {
-        return try (self.resume)(ctx);
+        try (self.resume)(ctx)
     }
 }

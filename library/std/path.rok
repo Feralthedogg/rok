@@ -42,18 +42,18 @@ impl Component {
 }
 
 impl PartialEq for Component {
-    fn eq(self, rhs: Component) -> bool { return self.as_str() == rhs.as_str(); }
-    fn ne(self, rhs: Component) -> bool { return self.as_str() != rhs.as_str(); }
+    fn eq(self, rhs: Component) -> bool { self.as_str() == rhs.as_str() }
+    fn ne(self, rhs: Component) -> bool { self.as_str() != rhs.as_str() }
 }
 
 impl Debug for Component {
     fn debug(self) -> str {
         match self {
             Component::RootDir => "RootDir",
-            Component::Prefix(p) => "Prefix(" + p + ")",
+            Component::Prefix(p) => f"Prefix({p})",
             Component::CurDir => "CurDir",
             Component::ParentDir => "ParentDir",
-            Component::Normal(n) => "Normal(" + n + ")",
+            Component::Normal(n) => f"Normal({n})",
         }
     }
 }
@@ -62,10 +62,10 @@ impl Debug for Component {
 pub struct StripPrefixError {}
 
 impl Display for StripPrefixError {
-    fn display(self) -> str { return "prefix not found"; }
+    fn display(self) -> str { "prefix not found" }
 }
 impl Debug for StripPrefixError {
-    fn debug(self) -> str { return "StripPrefixError"; }
+    fn debug(self) -> str { "StripPrefixError" }
 }
 impl Error for StripPrefixError {}
 
@@ -75,35 +75,35 @@ pub trait AsPath {
 }
 
 impl AsPath for Path {
-    fn as_path(self) -> Path { return self; }
+    fn as_path(self) -> Path { self }
 }
 
 impl AsPath for str {
-    fn as_path(self) -> Path { return Path { s: self }; }
+    fn as_path(self) -> Path { Path { s: self } }
 }
 
 /// `s` without trailing `/`s (but `/` stays `/`).
 fn trim_slashes(s: str) -> str {
     let n = s.len();
     while n > 1 && s.slice(n - 1, n) == "/" { n -= 1; }
-    return s.slice(0, n);
+    s.slice(0, n)
 }
 
 impl Path {
-    pub fn new() -> Path { return Path { s: "" }; }
-    pub fn from(s: str) -> Path { return Path { s: s }; }
+    pub fn new() -> Path { Path { s: "" } }
+    pub fn from(s: str) -> Path { Path { s: s } }
 
     pub fn from_components<I: Iterator<Item = str>>(components: I) -> Path {
         let p = Path::new();
         for c in components { p = p.join(Path::from(c)); }
-        return p;
+        p
     }
 
-    pub fn as_str(self) -> str { return self.s; }
+    pub fn as_str(self) -> str { self.s }
 
-    pub fn is_absolute(self) -> bool { return self.s.starts_with("/"); }
-    pub fn is_relative(self) -> bool { return !self.is_absolute(); }
-    pub fn has_root(self) -> bool { return self.is_absolute(); }
+    pub fn is_absolute(self) -> bool { self.s.starts_with("/") }
+    pub fn is_relative(self) -> bool { !self.is_absolute() }
+    pub fn has_root(self) -> bool { self.is_absolute() }
 
     /// The path without its last component; `none` for `/` and `""`.
     /// `Path::from("a").parent()` is `""` (as in Rust).
@@ -114,12 +114,10 @@ impl Path {
         let last = comps[n - 1];
         if last is Component::RootDir { return none; }
         let out = Path::new();
-        let i = 0usize;
-        while i + 1 < n {
+        for i in 0..n - 1 {
             out = out.join(Path::from(comps[i].as_str()));
-            i += 1;
         }
-        return out;
+        out
     }
 
     /// The last component unless it is `..` / `/`.
@@ -138,7 +136,7 @@ impl Path {
         let name = self.file_name()?;
         let dot = name.rfind(".") ?? 0usize;
         if dot == 0 { return name; }
-        return name.slice(0, dot);
+        name.slice(0, dot)
     }
 
     /// After the last `.` of `file_name` (`none` for `.bashrc`, `a`).
@@ -146,16 +144,16 @@ impl Path {
         let name = self.file_name()?;
         let dot = name.rfind(".") ?? 0usize;
         if dot == 0 { return none; }
-        return name.slice(dot + 1, name.len());
+        name.slice(dot + 1, name.len())
     }
 
     pub fn components(self) -> Components {
-        return Components { items: self.component_list(), pos: 0 };
+        Components { items: self.component_list(), pos: 0 }
     }
 
     /// `self`, its parent, its grandparent, ...
     pub fn ancestors(self) -> Ancestors {
-        return Ancestors { next: self };
+        Ancestors { next: self }
     }
 
     fn component_list(self) -> List<Component> {
@@ -174,7 +172,7 @@ impl Path {
             }
             first = false;
         }
-        return out;
+        out
     }
 
     /// `other` appended; an absolute `other` replaces `self`.
@@ -182,18 +180,18 @@ impl Path {
         if other.is_absolute() || self.s == "" { return other; }
         if other.s == "" { return self; }
         if self.s.ends_with("/") { return Path { s: self.s + other.s }; }
-        return Path { s: self.s + "/" + other.s };
+        Path { s: self.s + "/" + other.s }
     }
 
     pub fn with_file_name(self, name: str) -> Path {
         let parent = self.parent() ?? Path::new();
-        return parent.join(Path::from(name));
+        parent.join(Path::from(name))
     }
 
     pub fn with_extension(self, ext: str) -> Path {
         let stem = self.file_stem() ?? "";
         if ext == "" { return self.with_file_name(stem); }
-        return self.with_file_name(stem + "." + ext);
+        self.with_file_name(stem + "." + ext)
     }
 
     /// Component-wise prefix test.
@@ -201,12 +199,10 @@ impl Path {
         let a = self.component_list();
         let b = base.component_list();
         if b.len() > a.len() { return false; }
-        let i = 0usize;
-        while i < b.len() {
+        for i in 0..b.len() {
             if a[i] != b[i] { return false; }
-            i += 1;
         }
-        return true;
+        true
     }
 
     /// Component-wise suffix test.
@@ -215,24 +211,20 @@ impl Path {
         let b = suffix.component_list();
         if b.len() > a.len() { return false; }
         let off = a.len() - b.len();
-        let i = 0usize;
-        while i < b.len() {
+        for i in 0..b.len() {
             if a[off + i] != b[i] { return false; }
-            i += 1;
         }
-        return true;
+        true
     }
 
     pub fn strip_prefix(self, base: Path) throws (StripPrefixError) -> Path {
         if !self.starts_with(base) { throw StripPrefixError {}; }
         let a = self.component_list();
         let out = Path::new();
-        let i = base.component_list().len();
-        while i < a.len() {
+        for i in base.component_list().len()..a.len() {
             out = out.join(Path::from(a[i].as_str()));
-            i += 1;
         }
-        return out;
+        out
     }
 
     /// Lexical `.` / `..` resolution (no filesystem access).
@@ -255,53 +247,53 @@ impl Path {
         let out = Path::new();
         for c in kept { out = out.join(Path::from(c.as_str())); }
         if out.s == "" { return Path::from("."); }
-        return out;
+        out
     }
 
-    pub fn exists(self) -> bool { return fs::exists(self); }
+    pub fn exists(self) -> bool { fs::exists(self) }
 
     pub fn is_file(self) -> bool {
         let m = try fs::metadata(self) catch _ { return false; };
-        return m.is_file();
+        m.is_file()
     }
 
     pub fn is_dir(self) -> bool {
         let m = try fs::metadata(self) catch _ { return false; };
-        return m.is_dir();
+        m.is_dir()
     }
 
     pub fn is_symlink(self) -> bool {
         let m = try fs::symlink_metadata(self) catch _ { return false; };
-        return m.is_symlink();
+        m.is_symlink()
     }
 
-    pub fn metadata(self) throws (IoError) -> Metadata { return try fs::metadata(self); }
+    pub fn metadata(self) throws (IoError) -> Metadata { try fs::metadata(self) }
 
     /// Absolute, symlinks resolved (`realpath`).
     pub fn canonicalize(self) throws (IoError) -> Path {
         let err: GcBuf<i32> = buf_new(1);
         let s = unsafe { rok_os_realpath(self.s, err) };
-        if buf_get(err, 0) != 0 { throw IoError::from_os(buf_get(err, 0), self.s); }
-        return Path { s: s };
+        if err[0] != 0 { throw IoError::from_os(err[0], self.s); }
+        Path { s: s }
     }
 }
 
 impl Div<str> for Path {
     type Output = Path;
-    fn div(self, rhs: str) -> Path { return self.join(Path::from(rhs)); }
+    fn div(self, rhs: str) -> Path { self.join(Path::from(rhs)) }
 }
 
 impl PartialEq for Path {
-    fn eq(self, rhs: Path) -> bool { return self.s == rhs.s; }
-    fn ne(self, rhs: Path) -> bool { return self.s != rhs.s; }
+    fn eq(self, rhs: Path) -> bool { self.s == rhs.s }
+    fn ne(self, rhs: Path) -> bool { self.s != rhs.s }
 }
 
 impl Display for Path {
-    fn display(self) -> str { return self.s; }
+    fn display(self) -> str { self.s }
 }
 
 impl Debug for Path {
-    fn debug(self) -> str { return self.s.debug(); }
+    fn debug(self) -> str { self.s.debug() }
 }
 
 pub struct Components {
@@ -314,7 +306,7 @@ impl Iterator for Components {
     fn next(ref self) -> Component | none {
         let c = self.items.get(self.pos)?;
         self.pos += 1;
-        return c;
+        c
     }
 }
 
@@ -327,6 +319,6 @@ impl Iterator for Ancestors {
     fn next(ref self) -> Path | none {
         let p = self.next?;
         self.next = p.parent();
-        return p;
+        p
     }
 }

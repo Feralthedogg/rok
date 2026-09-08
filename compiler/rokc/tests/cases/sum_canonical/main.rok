@@ -1,0 +1,68 @@
+// expect-exit: 0
+// expect-stdout:
+// flow: 7 s
+// order: true false true
+// nested: 1 7 -1
+// dup: 4
+// generic: 7 5
+// cmp: Less Greater
+
+// Spec 2.6.4: a sum is a set. `A | B` and `B | A` are one type (no
+// conversion between differently-written spellings, same tags across
+// modules), `(A | B) | C` flattens, `A | A` is `A`. Ordering across
+// variants follows the canonical member order (the spec fixes none:
+// structural, `none` last), not the written order.
+mod other;
+
+use other::{Mixed, make, tag_of};
+
+fn name(o: Ordering) -> str {
+    match o { Ordering::Less => "Less", Ordering::Equal => "Equal", Ordering::Greater => "Greater" }
+}
+
+fn or_default<T>(x: T | none, def: T) -> T {
+    match x {
+        v: T => v,
+        none => def,
+    }
+}
+
+fn show(v: i32 | str) -> str {
+    match v {
+        n: i32 => f"{n}",
+        s: str => s,
+    }
+}
+
+fn main() -> i32 {
+    // Written in other orders, in another module: same type.
+    let a: i32 | str = make(false);
+    let b: str | i32 = make(true);
+    let c: i32 | str = b;
+    println(f"flow: {show(a)} {show(c)}");
+
+    // `str | i32` and `i32 | str` order the same way.
+    let x: str | i32 = "a";
+    let y: i32 | str = 1;
+    let y2: str | i32 = y;
+    println(f"order: {y2 < x} {x < y2} {y < x}");
+
+    // Nested (through an alias) and reordered: flattened.
+    let m: Mixed = 7;
+    let n: (i32 | str) | none = m;
+    let o: none | (str | (i32 | none)) = none;
+    println(f"nested: {tag_of("x")} {tag_of(n)} {tag_of(o)}");
+
+    // `A | A` is `A`.
+    let d: i32 | i32 = 3;
+    println(f"dup: {d + 1}");
+
+    // `T | none` against `i32 | str | none` binds `T = i32 | str`.
+    let p: none | str | i32 = 7;
+    let q: str | i32 | none = none;
+    let five: i32 | str = 5;
+    println(f"generic: {show(or_default(p, five))} {show(or_default(q, five))}");
+
+    println(f"cmp: {name(y.cmp(x))} {name(x.cmp(y2))}");
+    0
+}

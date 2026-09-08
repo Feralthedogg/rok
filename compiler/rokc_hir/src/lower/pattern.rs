@@ -603,6 +603,37 @@ pub(super) fn lower_pattern_inner(
                         payload_ty: Some(target_ty),
                     };
                 }
+                // `v: A | B` against `A | B | C` (spec 2.6.4: a generic
+                // `T` bound to a sum inside `T | none`): any of those
+                // tags; the binder is the value re-tagged as `A | B`.
+                if let HirTy::Sum(ws) = &target_ty {
+                    let idxs: Vec<usize> = ws
+                        .iter()
+                        .filter_map(|w| sum_variant_index(variants, w))
+                        .collect();
+                    if idxs.len() == ws.len() {
+                        let alts = idxs
+                            .into_iter()
+                            .map(|i| HirPattern::SumVariant {
+                                sum_ty: scrut_ty.clone(),
+                                variant_index: u32::try_from(i).expect("variant overflow"),
+                                binder: None,
+                                payload_ty: None,
+                            })
+                            .collect();
+                        let alts = HirPattern::Or(alts);
+                        let Some(binder) = bind(ctx) else {
+                            return alts;
+                        };
+                        let whole = ctx.declare(None, scrut_ty.clone());
+                        ctx.pending_resums.push((binder, whole));
+                        return HirPattern::At {
+                            local: whole,
+                            ty: scrut_ty.clone(),
+                            sub: Box::new(alts),
+                        };
+                    }
+                }
             } else if let (HirTy::AnyTrait(bounds), false) =
                 (scrut_ty, matches!(target_ty, HirTy::AnyTrait(_)))
             {

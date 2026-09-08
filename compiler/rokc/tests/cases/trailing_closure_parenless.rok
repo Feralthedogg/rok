@@ -1,0 +1,31 @@
+// expect-exit: 0
+// expect-stdout:
+// 12 2 7
+// 6 3 9
+// 1 2 3
+
+// Spec 4.8.1: `primary trailing_closure` — the call's `( )` may go when
+// a `|params| { .. }` trailing closure follows (`xs.map |x| { .. }`,
+// `f |x| { .. }`). Without the `{` body it is the `|` operator.
+
+fn apply(f: fn(i32) -> i32) -> i32 { f(5) + 1 }
+fn both(f: fn(i32, i32) -> i32) -> i32 { f(1, 2) }
+
+fn main() -> i32 {
+    let xs: List<i32> = [1, 2, 3];
+    let doubled = xs.iter().map |x| { x * 2 }.sum();
+    let big = xs.iter().filter |x: i32| { x > 1 }.count();
+    let a = apply |n| { n + 1 };
+    println(f"{doubled} {big} {a}");
+
+    let b = both |x, y| { x + y } * 2;
+    let m = 1;
+    let k = 2;
+    let bits = m | k | 1;
+    let c = apply |n| -> i32 { n - 2 } + 1 + bits + 1;
+    println(f"{b} {bits} {c}");
+
+    xs.iter().for_each |x| { print(f"{x}"); if x < 3 { print(" "); } };
+    println("");
+    0
+}

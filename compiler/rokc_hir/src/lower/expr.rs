@@ -502,6 +502,10 @@ pub(super) fn lower_assign(
         ExprKind::Index(arr_expr, idx_expr) => {
             let arr_h = lower_expected(ctx, arr_expr, HirTy::Unknown);
             // A struct / enum stores through `IndexSet::index_set`.
+            if let HirTy::GcBuf(elem) = arr_h.ty.clone() {
+                let set = buf_access(ctx, arr_h, *elem, idx_expr, Some(value), target.span);
+                return Some(HirStmt::Expr(set));
+            }
             if matches!(arr_h.ty, HirTy::Struct(_) | HirTy::Enum(_)) {
                 let args = [
                     CallArg::Positional((**idx_expr).clone()),
@@ -1005,6 +1009,10 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             if matches!(arr_h.ty, HirTy::Struct(_) | HirTy::Enum(_)) {
                 let args = [CallArg::Positional((**idx).clone())];
                 return method_call_on(ctx, arr_h, "index", &args, span);
+            }
+            // `GcBuf<T>`'s `Index` is the unchecked `rok.buf.get` primitive.
+            if let HirTy::GcBuf(elem) = arr_h.ty.clone() {
+                return buf_access(ctx, arr_h, *elem, idx, None, span);
             }
             let idx_h = lower_expected(ctx, idx, HirTy::Unknown);
             check_index_ty(ctx, &idx_h);
@@ -1780,6 +1788,19 @@ pub(super) fn field_access(
     }
 }
 
+/// An untyped literal built from integers only (`1`, `-1`, `1 + 1`).
+fn is_untyped_int(e: &Expr) -> bool {
+    fn no_float(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Literal(l) => !matches!(l, AstLit::Float(_)),
+            ExprKind::OpPrefix { operand, .. } => no_float(operand),
+            ExprKind::OpInfix { lhs, rhs, .. } => no_float(lhs) && no_float(rhs),
+            _ => true,
+        }
+    }
+    is_untyped_literal(e) && no_float(e)
+}
+
 /// An unsuffixed numeric literal (optionally negated): its type comes
 /// from context.
 pub(super) fn is_untyped_literal(e: &Expr) -> bool {
@@ -1787,6 +1808,12 @@ pub(super) fn is_untyped_literal(e: &Expr) -> bool {
         ExprKind::Literal(AstLit::Int(t)) => !has_int_suffix(t),
         ExprKind::Literal(AstLit::Float(t)) => !t.ends_with("f32") && !t.ends_with("f64"),
         ExprKind::OpPrefix { op, operand } if op == "-" => is_untyped_literal(operand),
+        // `1 + 1`: arithmetic on untyped literals stays untyped.
+        ExprKind::OpInfix { op, lhs, rhs }
+            if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%") =>
+        {
+            is_untyped_literal(lhs) && is_untyped_literal(rhs)
+        }
         _ => false,
     }
 }
@@ -1886,6 +1913,33 @@ pub(super) fn lower_if(
         return build(cond_h, then_h, None, HirTy::Unit);
     };
     let mut else_h = lower_expr(ctx, else_e);
+    // An unsuffixed integer literal branch takes the other branch's
+    // integer type: `if c { 1 } else { n }` with `n: usize`.
+    let int_ty = |h: &HirTy| match h {
+        HirTy::Prim(p) if p.is_int() => Some(h.clone()),
+        _ => None,
+    };
+    let then_lit = then_block.trailing.as_deref().filter(|e| is_untyped_int(e));
+    let else_lit = match &else_e.kind {
+        ExprKind::Block(b) => b.trailing.as_deref().filter(|e| is_untyped_int(e)),
+        _ => None,
+    };
+    if let (Some(lit), Some(t)) = (then_lit, int_ty(&else_h.ty)) {
+        if then_h.trailing.as_ref().is_some_and(|e| e.ty != t) {
+            then_h.trailing = Some(lower_expected(ctx, lit, t));
+        }
+    } else if let (Some(lit), Some(t)) = (
+        else_lit,
+        then_h.trailing.as_ref().and_then(|e| int_ty(&e.ty)),
+    ) {
+        if else_h.ty != t {
+            let v = lower_expected(ctx, lit, t.clone());
+            if let HirExprKind::Block(b) = &mut else_h.kind {
+                b.trailing = Some(v);
+            }
+            else_h.ty = t;
+        }
+    }
     // Spec 3.14.1: a diverging branch (`return` / `throw` / ...) takes
     // the other branch's type.
     let then_ty = then_h
@@ -1993,6 +2047,7 @@ fn bind_narrowed(ctx: &mut LowerCtx<'_>, cond: &Expr) -> Vec<HirStmt> {
         let pat_h = lower_pattern(ctx, &pat, &orig_ty);
         // ponytail: a narrowing rebinding is never a `[ref]` cell.
         ctx.pending_cells.clear();
+        let resums = ctx.take_resums(cond.span);
         let Some(new) = ctx.lookup_in_current_scope(&name) else {
             continue;
         };
@@ -2006,7 +2061,7 @@ fn bind_narrowed(ctx: &mut LowerCtx<'_>, cond: &Expr) -> Vec<HirStmt> {
                     arms: vec![HirMatchArm {
                         pat: pat_h,
                         guard: None,
-                        body: hir_local(new, &new_ty, cond.span),
+                        body: with_lets(resums, hir_local(new, &new_ty, cond.span)),
                     }],
                 },
                 ty: new_ty,
@@ -2032,7 +2087,7 @@ pub(super) fn lower_narrowed_block(ctx: &mut LowerCtx<'_>, cond: &Expr, block: &
 /// Write-through for an assignment to a narrowed binding: also store
 /// the new value, converted back, into the original slot.
 fn write_through(
-    ctx: &LowerCtx<'_>,
+    ctx: &mut LowerCtx<'_>,
     stmt: Option<HirStmt>,
     span: rokc_diagnostic::Span,
 ) -> Option<HirStmt> {
@@ -2127,6 +2182,9 @@ fn lower_is(
     // ponytail: `is` binders aren't `[ref]` cells (no scope to start
     // one in); capturing one by `ref` is reported at the closure.
     ctx.pending_cells.clear();
+    // ponytail: an `is v: A | B` sub-sum binder stays unconverted; the
+    // `if x is (A | B)` narrowing form converts.
+    ctx.pending_resums.clear();
     ctx.pop_scope();
     HirExpr {
         kind: HirExprKind::Match {
@@ -2777,8 +2835,8 @@ const SUM_METHODS: &[&str] = &[
 /// (`gt` / `le` / `ge`) / `.cmp(y)` on a sum `x`: a `match` over the
 /// variants calling the variant's method (`eq` is false across variants;
 /// `none` clones to itself, shows as `none`, equals `none`, hashes to its
-/// tag). Ordering is by variant (the order the sum type lists them),
-/// then payload — like a derived enum's.
+/// tag). Ordering is by variant (the sum's canonical member order,
+/// `HirTy::sum`), then payload — like a derived enum's.
 /// `lowered_rhs` is a binary method's already lowered argument (an
 /// operator's right operand); otherwise it comes from `args`.
 fn sum_structural_call(
@@ -2997,6 +3055,68 @@ fn sum_structural_call(
     }
 }
 
+/// `Ord`'s provided `min` / `max` / `clamp` on a sum (whose `Ord` is
+/// compiler-dispatched, `sum_structural_call`): `a.min(b)` is `if a <= b
+/// { a } else { b }`, `a.clamp(lo, hi)` is `if a < lo { lo } else if a >
+/// hi { hi } else { a }` — the trait's default bodies.
+fn sum_min_max(
+    ctx: &mut LowerCtx<'_>,
+    recv: HirExpr,
+    method: &str,
+    args: &[CallArg],
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let ty = recv.ty.clone();
+    let want = if method == "clamp" { 2 } else { 1 };
+    if args.len() != want || args.iter().any(|a| !matches!(a, CallArg::Positional(_))) {
+        discard_args(ctx, args);
+        return ctx.error_expr(span, format!("`{method}` takes {want} argument(s)"));
+    }
+    let mut stmts = Vec::new();
+    let mut local = |ctx: &mut LowerCtx<'_>, init: HirExpr| {
+        let l = ctx.declare(None, ty.clone());
+        stmts.push(HirStmt::Let { local: l, init });
+        l
+    };
+    let a = local(ctx, recv);
+    let mut ls = Vec::new();
+    for arg in args {
+        let CallArg::Positional(e) = arg else {
+            unreachable!("checked above")
+        };
+        let v = lower_expected(ctx, e, ty.clone());
+        let v = coerce(ctx, &ty, v, &|| format!("the argument of `{method}`"));
+        ls.push(local(ctx, v));
+    }
+    let get = |l: LocalId| hir_local(l, &ty, span);
+    let test = |ctx: &mut LowerCtx<'_>, op: &str, l: LocalId, r: LocalId| {
+        sum_structural_call(ctx, get(l), op, &[], Some(get(r)), span)
+    };
+    let pick = |cond: HirExpr, then: HirExpr, other: HirExpr| HirExpr {
+        kind: HirExprKind::If {
+            cond: Box::new(cond),
+            then_block: Box::new(HirBlock {
+                stmts: Vec::new(),
+                trailing: Some(then),
+                label: None,
+            }),
+            else_branch: Some(Box::new(other)),
+        },
+        ty: ty.clone(),
+        span,
+    };
+    let value = match (method, ls.as_slice()) {
+        ("min", [b]) => pick(test(ctx, "le", a, *b), get(a), get(*b)),
+        ("max", [b]) => pick(test(ctx, "ge", a, *b), get(a), get(*b)),
+        (_, [lo, hi]) => {
+            let above = pick(test(ctx, "gt", a, *hi), get(*hi), get(a));
+            pick(test(ctx, "lt", a, *lo), get(*lo), above)
+        }
+        _ => unreachable!("arity checked above"),
+    };
+    with_lets(stmts, value)
+}
+
 pub(super) fn method_call_on(
     ctx: &mut LowerCtx<'_>,
     recv_h: HirExpr,
@@ -3012,6 +3132,9 @@ pub(super) fn method_call_on(
     }
     if matches!(recv_h.ty, HirTy::Sum(_)) && SUM_METHODS.contains(&method) {
         return sum_structural_call(ctx, recv_h, method, args, None, span);
+    }
+    if matches!(recv_h.ty, HirTy::Sum(_)) && matches!(method, "min" | "max" | "clamp") {
+        return sum_min_max(ctx, recv_h, method, args, span);
     }
     if let HirTy::AnyTrait(bounds) = recv_h.ty.clone() {
         return any_method_call(ctx, recv_h, &bounds, method, args, span);
@@ -3479,7 +3602,7 @@ fn build_dispatcher(env: &Env<'_>, d: &AnyDispatch) -> HirFunction {
             span,
         )
         .unwrap_or_else(|| poison(span));
-        let body = coerce(&c, &d.ret, call, &|| {
+        let body = coerce(&mut c, &d.ret, call, &|| {
             format!("`{}` of an `any` value", d.method)
         });
         c.pop_scope();
@@ -3605,7 +3728,9 @@ pub(super) fn pick_method<'e>(
     for gi in &env.generic_trait_impls {
         if let Some(gm) = gi.methods.get(method) {
             if ctx.generic_impl_subst(gi, ty, 0).is_some() {
-                cands.push((Some(gi.trait_key.as_str()), MethodPick::Generic(gm)));
+                // An empty key: a generic inherent impl (`impl<..> [T; N]`).
+                let key = Some(gi.trait_key.as_str()).filter(|k| !k.is_empty());
+                cands.push((key, MethodPick::Generic(gm)));
             }
         }
     }
@@ -4522,7 +4647,7 @@ pub(super) fn lower_call(
 /// A range value (stdlib 2.7.4, spec 6.5.1): `a..b` / `a..=b` / `a..` /
 /// `..b` / `..` call the `#[literal]` handler of that shape (core's
 /// build `Range` / `RangeInclusive` / `RangeFrom` / `RangeTo` /
-/// `RangeFull`).
+/// `RangeToInclusive` / `RangeFull`).
 fn lower_range_value(
     ctx: &mut LowerCtx<'_>,
     start: Option<&Expr>,
@@ -4535,7 +4660,8 @@ fn lower_range_value(
         (Some(_), Some(_), false) => (Shape::Range, "`a..b`"),
         (Some(_), Some(_), true) => (Shape::RangeInclusive, "`a..=b`"),
         (Some(_), None, _) => (Shape::RangeFrom, "`a..`"),
-        (None, Some(_), _) => (Shape::RangeTo, "`..b`"),
+        (None, Some(_), false) => (Shape::RangeTo, "`..b`"),
+        (None, Some(_), true) => (Shape::RangeToInclusive, "`..=b`"),
         (None, None, _) => (Shape::RangeFull, "`..`"),
     };
     let args = [start, end]
@@ -5182,19 +5308,35 @@ fn lower_buf_intrinsic(
             ),
         );
     };
-    let i = index(ctx, pos[1]);
-    if op == "get" {
+    buf_access(ctx, buf, *elem, pos[1], pos.get(2).copied(), span)
+}
+
+/// `buf[i]` (`value: None`) or `buf[i] = value` on a lowered `GcBuf<T>`:
+/// the `rok.buf.get` / `rok.buf.set` primitive, no call. Shared by the
+/// `buf_get` / `buf_set` intrinsics and `Index` / `IndexSet` syntax.
+fn buf_access(
+    ctx: &mut LowerCtx<'_>,
+    buf: HirExpr,
+    elem: HirTy,
+    idx: &Expr,
+    value: Option<&Expr>,
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let usize_ty = HirTy::Prim(PrimTy::Usize);
+    let i = lower_expected(ctx, idx, usize_ty.clone());
+    let i = coerce(ctx, &usize_ty, i, &|| "the buffer index".to_owned());
+    let Some(value) = value else {
         return HirExpr {
-            ty: (*elem).clone(),
+            ty: elem.clone(),
             kind: HirExprKind::BufGet {
                 buf: Box::new(buf),
                 index: Box::new(i),
-                elem: *elem,
+                elem,
             },
             span,
         };
-    }
-    let v = lower_expected(ctx, pos[2], (*elem).clone());
+    };
+    let v = lower_expected(ctx, value, elem.clone());
     let v = coerce(ctx, &elem, v, &|| "the stored element".to_owned());
     HirExpr {
         ty: HirTy::Unit,
@@ -5202,7 +5344,7 @@ fn lower_buf_intrinsic(
             buf: Box::new(buf),
             index: Box::new(i),
             value: Box::new(v),
-            elem: *elem,
+            elem,
         },
         span,
     }
@@ -5289,9 +5431,14 @@ pub(super) fn lower_infix(
     // trait's method (`impl Add for T`); so does `str` (core::str impls:
     // concatenation, content comparison), and a Unicode math operator
     // (spec 1.10.3) on any type, primitives included (`impl Sqrt for f64`).
+    // Tuples / arrays: core's component-wise impls (`core::tuple`).
     if matches!(
         lhs_h.ty,
-        HirTy::Struct(_) | HirTy::Enum(_) | HirTy::Prim(PrimTy::Str)
+        HirTy::Struct(_)
+            | HirTy::Enum(_)
+            | HirTy::Prim(PrimTy::Str)
+            | HirTy::Tuple(_)
+            | HirTy::Array(..)
     ) || !op.is_ascii()
     {
         return dispatch_user_op(ctx, op, Fixity::Infix, lhs_h, Some(rhs_h), span);
@@ -5609,7 +5756,7 @@ pub(super) fn lower_prefix(
 /// trait impl (`impl Add for T`) — an inherent method that merely has
 /// the right name doesn't make the type support the operator.
 pub(super) fn dispatch_user_op(
-    ctx: &LowerCtx<'_>,
+    ctx: &mut LowerCtx<'_>,
     sym: &str,
     fixity: Fixity,
     lhs: HirExpr,

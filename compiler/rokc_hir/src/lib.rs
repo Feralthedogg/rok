@@ -616,3 +616,62 @@ pub enum HirTy {
     /// `loop {}` without `break`). Flows into any slot.
     Never,
 }
+
+impl HirTy {
+    /// Spec 2.6.4: a sum is a set — nested sums flatten, duplicates
+    /// drop, and the members take one canonical order, so `A | B` and
+    /// `B | A` are the same `HirTy` (same layout, same tags, same
+    /// `PartialOrd` across variants). One member left is that type.
+    /// Build every `HirTy::Sum` through this (or `canonicalize` after
+    /// rewriting members in place).
+    ///
+    /// The order (the spec fixes none): `none` last, the rest by their
+    /// structural `Debug` rendering — deterministic for one program
+    /// (struct / enum ids are program-wide), so tags agree across modules.
+    #[must_use]
+    pub fn sum(parts: impl IntoIterator<Item = Self>) -> Self {
+        fn flatten(t: HirTy, out: &mut Vec<HirTy>) {
+            match t {
+                HirTy::Sum(ps) => ps.into_iter().for_each(|p| flatten(p, out)),
+                t => out.push(t),
+            }
+        }
+        let mut out = Vec::new();
+        parts.into_iter().for_each(|p| flatten(p, &mut out));
+        out.sort_by_cached_key(|t| {
+            let none = matches!(t, Self::Path(p) if p.as_slice() == ["none"]);
+            (none, format!("{t:?}"))
+        });
+        out.dedup();
+        if out.len() == 1 {
+            out.pop().expect("one member")
+        } else {
+            Self::Sum(out)
+        }
+    }
+
+    /// Re-establish the `sum` canon everywhere inside `self` (after
+    /// members were rewritten in place: alias / generic substitution).
+    pub fn canonicalize(&mut self) {
+        match self {
+            Self::Sum(ps) => {
+                ps.iter_mut().for_each(Self::canonicalize);
+                *self = Self::sum(std::mem::take(ps));
+            }
+            Self::Tuple(ps) => ps.iter_mut().for_each(Self::canonicalize),
+            Self::Array(e, _) | Self::GcBuf(e) => e.canonicalize(),
+            Self::Fn(a, r, _)
+            | Self::Closure {
+                args: a, ret: r, ..
+            } => {
+                a.iter_mut().for_each(Self::canonicalize);
+                r.canonicalize();
+            }
+            Self::Throws { ok, err } => {
+                ok.canonicalize();
+                err.canonicalize();
+            }
+            _ => {}
+        }
+    }
+}

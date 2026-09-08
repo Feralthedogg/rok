@@ -49,7 +49,7 @@ extern "C" {
 }
 
 impl<T> Chan<T> {
-    fn get(self, i: usize) -> usize { return buf_get(self.meta, i); }
+    fn get(self, i: usize) -> usize { self.meta[i] }
 
     /// Wake tasks parked in `recv_async` (a value or a close arrived).
     fn notify_async(self) {
@@ -63,12 +63,12 @@ impl<T> Chan<T> {
     }
 
     fn send_key(self) -> usize {
-        return unsafe { rok_task_key_usize(self.meta) } + 1;
+        unsafe { rok_task_key_usize(self.meta) } + 1
     }
-    fn put(self, i: usize, v: usize) { buf_set(self.meta, i, v); }
+    fn put(self, i: usize, v: usize) { self.meta[i] = v; }
 
     fn full(self) -> bool {
-        return self.get(LIMIT) > 0 && self.get(LEN) >= self.get(LIMIT);
+        self.get(LIMIT) > 0 && self.get(LEN) >= self.get(LIMIT)
     }
 
     // The lock is held for the calls below.
@@ -76,51 +76,49 @@ impl<T> Chan<T> {
         let head = self.get(HEAD);
         let len = self.get(LEN);
         let cap = self.get(CAP);
-        let ring: GcBuf<GcBuf<T>> = buf_get(self.ring, 0);
+        let ring = self.ring[0];
         if len == cap {
             let bigger: GcBuf<GcBuf<T>> = buf_new(cap * 2);
-            let i = 0usize;
-            while i < len {
-                buf_set(bigger, i, buf_get(ring, (head + i) % cap));
-                i += 1;
+            for i in 0..len {
+                bigger[i] = ring[(head + i) % cap];
             }
-            buf_set(self.ring, 0, bigger);
+            self.ring[0] = bigger;
             ring = bigger;
             head = 0;
-            cap = cap * 2;
+            cap *= 2;
             self.put(HEAD, 0);
             self.put(CAP, cap);
         }
         let cell: GcBuf<T> = buf_new(1);
-        buf_set(cell, 0, v);
-        buf_set(ring, (head + len) % cap, cell);
+        cell[0] = v;
+        ring[(head + len) % cap] = cell;
         self.put(LEN, len + 1);
-        self.put(PUSHED, self.get(PUSHED) + 1);
+        self.meta[PUSHED] += 1;
     }
 
     fn pop(self) -> T {
         let head = self.get(HEAD);
-        let ring: GcBuf<GcBuf<T>> = buf_get(self.ring, 0);
-        let v = buf_get(buf_get(ring, head), 0);
-        buf_set(ring, head, self.empty);
+        let ring = self.ring[0];
+        let v = ring[head][0];
+        ring[head] = self.empty;
         self.put(HEAD, (head + 1) % self.get(CAP));
-        self.put(LEN, self.get(LEN) - 1);
-        self.put(POPPED, self.get(POPPED) + 1);
-        return v;
+        self.meta[LEN] -= 1;
+        self.meta[POPPED] += 1;
+        v
     }
 }
 
 fn make<T>(limit: usize, rendezvous: bool) -> (Sender<T>, Receiver<T>) {
     let meta: GcBuf<usize> = buf_new(10);
-    buf_set(meta, SENDERS, 1);
-    buf_set(meta, LIMIT, limit);
-    buf_set(meta, CAP, 16);
+    meta[SENDERS] = 1;
+    meta[LIMIT] = limit;
+    meta[CAP] = 16;
     if rendezvous {
-        buf_set(meta, RENDEZVOUS, 1);
+        meta[RENDEZVOUS] = 1;
     }
     let ring: GcBuf<GcBuf<GcBuf<T>>> = buf_new(1);
     let store: GcBuf<GcBuf<T>> = buf_new(16);
-    buf_set(ring, 0, store);
+    ring[0] = store;
     let empty: GcBuf<T> = buf_new(0);
     let ch = Chan {
         lock: Mutex::new(0),
@@ -131,13 +129,13 @@ fn make<T>(limit: usize, rendezvous: bool) -> (Sender<T>, Receiver<T>) {
         not_full: Condvar::new(),
     };
     let open: GcBuf<bool> = buf_new(1);
-    buf_set(open, 0, true);
-    return (Sender { ch: ch, open: open }, Receiver { ch: ch });
+    open[0] = true;
+    (Sender { ch: ch, open: open }, Receiver { ch: ch })
 }
 
 /// An unbounded channel.
 pub fn channel<T: Send>() -> (Sender<T>, Receiver<T>) {
-    return make(0usize, false);
+    make(0usize, false)
 }
 
 /// A channel holding at most `cap` queued values: `send` blocks while
@@ -147,7 +145,7 @@ pub fn channel_bounded<T: Send>(cap: usize) -> (Sender<T>, Receiver<T>) {
     if cap == 0 {
         return make(1usize, true);
     }
-    return make(cap, false);
+    make(cap, false)
 }
 
 /// The sending end. Each clone is its own sender and is closed on its
@@ -162,7 +160,7 @@ impl<T> Sender<T> {
     /// rendezvous channel until it is received). Throws it back if this
     /// sender was closed.
     pub fn send(self, value: T) throws (SendError<T>) {
-        if !buf_get(self.open, 0) {
+        if !self.open[0] {
             throw SendError::Closed(value);
         }
         using g = self.ch.lock.lock() {
@@ -184,7 +182,7 @@ impl<T> Sender<T> {
     /// Queue `value` without blocking: `Full` if a bounded channel is
     /// full, or if no receiver is waiting on a rendezvous channel.
     pub fn try_send(self, value: T) throws (TrySendError<T>) {
-        if !buf_get(self.open, 0) {
+        if !self.open[0] {
             throw TrySendError::Closed(value);
         }
         let sent = false;
@@ -210,15 +208,15 @@ impl<T> Sender<T> {
     /// suspends the task (not the thread) while a bounded channel is
     /// full, and on a rendezvous channel until the value is received.
     pub fn send_async(self, value: T) -> SendFuture<T> {
-        return SendFuture { tx: self, value: value, pushed: false, ticket: 0 };
+        SendFuture { tx: self, value: value, pushed: false, ticket: 0 }
     }
 
     /// Close this sender; later `send`s on it throw `Closed`.
     pub fn close(self) {
         using g = self.ch.lock.lock() {
-            if buf_get(self.open, 0) {
-                buf_set(self.open, 0, false);
-                self.ch.put(SENDERS, self.ch.get(SENDERS) - 1);
+            if self.open[0] {
+                self.open[0] = false;
+                self.ch.meta[SENDERS] -= 1;
             }
         }
         self.ch.not_empty.notify_all();
@@ -230,11 +228,11 @@ impl<T> Clone for Sender<T> {
     /// Another open sender on the same channel.
     fn clone(self) -> Sender<T> {
         using g = self.ch.lock.lock() {
-            self.ch.put(SENDERS, self.ch.get(SENDERS) + 1);
+            self.ch.meta[SENDERS] += 1;
         }
         let open: GcBuf<bool> = buf_new(1);
-        buf_set(open, 0, true);
-        return Sender { ch: self.ch, open: open };
+        open[0] = true;
+        Sender { ch: self.ch, open: open }
     }
 }
 
@@ -247,7 +245,7 @@ impl<T> Receiver<T> {
     /// `await rx.recv_async()` inside async code: like `recv`, but
     /// suspends the task instead of blocking the thread.
     pub fn recv_async(self) -> RecvFuture<T> {
-        return RecvFuture { rx: self };
+        RecvFuture { rx: self }
     }
 
     /// The next value, blocking until one arrives; `none` once the queue
@@ -256,11 +254,11 @@ impl<T> Receiver<T> {
         let got = false;
         let v: T | none = none;
         using g = self.ch.lock.lock() {
-            self.ch.put(WAITING, self.ch.get(WAITING) + 1);
+            self.ch.meta[WAITING] += 1;
             while self.ch.get(LEN) == 0 && self.ch.get(SENDERS) > 0 {
                 g = self.ch.not_empty.wait(g);
             }
-            self.ch.put(WAITING, self.ch.get(WAITING) - 1);
+            self.ch.meta[WAITING] -= 1;
             if self.ch.get(LEN) > 0 {
                 v = self.ch.pop();
                 got = true;
@@ -269,7 +267,7 @@ impl<T> Receiver<T> {
         if got {
             self.ch.notify_senders();
         }
-        return v;
+        v
     }
 
     /// The next value if one is queued; `none` if empty or closed.
@@ -285,12 +283,12 @@ impl<T> Receiver<T> {
         if got {
             self.ch.notify_senders();
         }
-        return v;
+        v
     }
 
     /// Values until the channel closes (also `for v in rx`).
     pub fn iter(self) -> ChannelIter<T> {
-        return ChannelIter { rx: self };
+        ChannelIter { rx: self }
     }
 }
 
@@ -299,7 +297,7 @@ impl<T> IntoIterator for Receiver<T> {
     type IntoIter = ChannelIter<T>;
     type Item = T;
     fn into_iter(self) -> ChannelIter<T> {
-        return ChannelIter { rx: self };
+        ChannelIter { rx: self }
     }
 }
 
@@ -310,7 +308,7 @@ pub struct ChannelIter<T> {
 impl<T> Iterator for ChannelIter<T> {
     type Item = T;
     fn next(ref self) -> T | none {
-        return self.rx.recv();
+        self.rx.recv()
     }
 }
 
@@ -323,7 +321,7 @@ impl<T> rok::core::future::Future for RecvFuture<T> {
     type Output = T | none;
     fn poll(ref self, ref ctx: rok::core::future::Context) -> rok::core::future::Poll<T | none> {
         let rx = self.rx;
-        return rx.poll_next(ref ctx);
+        rx.poll_next(ref ctx)
     }
 }
 
@@ -353,7 +351,7 @@ impl<T> rok::core::stream::Stream for Receiver<T> {
         if closed {
             return rok::core::future::Poll::Ready(none);
         }
-        return rok::core::future::Poll::Pending;
+        rok::core::future::Poll::Pending
     }
 }
 
@@ -369,7 +367,7 @@ impl<T> SendFuture<T> {
     pub fn poll(ref self, ref ctx: rok::core::future::Context) throws (SendError<T>) -> rok::core::future::Poll<()> {
         let ch = self.tx.ch;
         if !self.pushed {
-            if !buf_get(self.tx.open, 0) {
+            if !self.tx.open[0] {
                 throw SendError::Closed(self.value);
             }
             // Park before looking, so a receive after the look unparks us.
@@ -399,6 +397,6 @@ impl<T> SendFuture<T> {
         if taken {
             return rok::core::future::Poll::Ready(());
         }
-        return rok::core::future::Poll::Pending;
+        rok::core::future::Poll::Pending
     }
 }

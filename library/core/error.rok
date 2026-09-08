@@ -111,11 +111,11 @@ pub struct ParseError {
 }
 
 impl Display for ParseError {
-    fn display(self) -> str { return "cannot parse \"" + self.input + "\": " + self.reason; }
+    fn display(self) -> str { f"cannot parse \"{self.input}\": {self.reason}" }
 }
 
 impl Debug for ParseError {
-    fn debug(self) -> str { return "ParseError(" + self.display() + ")"; }
+    fn debug(self) -> str { f"ParseError({self})" }
 }
 
 impl Error for ParseError {}
@@ -125,6 +125,6 @@ impl Error for ParseError {}
 pub trait Error: Display + Debug {
     /// The error that caused this one, if any.
     fn source(self) -> any Error | none {
-        return none;
+        none
     }
 }

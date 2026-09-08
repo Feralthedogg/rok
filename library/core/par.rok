@@ -15,7 +15,7 @@
 
 /// Run `f` as a pool task; `wait_forked` its handle.
 fn fork(f: fn() + Send) -> Task<bool> {
-    return task::fork_job(f);
+    task::fork_job(f)
 }
 
 /// Wait for a `fork`ed job, running other pool tasks meanwhile.
@@ -42,10 +42,8 @@ fn run_chunks(chunks: usize, job: fn(usize) + Send) {
             }
         };
         let helpers: List<Task<bool>> = [];
-        let w = 1usize;
-        while w < workers {
+        for _ in 1..workers {
             helpers.push(fork(work));
-            w += 1;
         }
         work();
         for h in helpers {
@@ -64,7 +62,7 @@ fn chunking(n: usize) -> (usize, usize) {
     if chunks == 0 {
         return (0usize, 0usize);
     }
-    return (chunks, (n + chunks - 1) / chunks);
+    (chunks, (n + chunks - 1) / chunks)
 }
 
 fn collect_items<I: IntoIterator>(iter: I) -> List<I::Item> {
@@ -72,7 +70,7 @@ fn collect_items<I: IntoIterator>(iter: I) -> List<I::Item> {
     for x in iter {
         items.push(x);
     }
-    return items;
+    items
 }
 
 // ---- public API ----
@@ -83,10 +81,8 @@ pub fn for_each<I: IntoIterator, T: Send>(iter: I, f: fn(T) + Send + Sync) {
     let n = items.len();
     let (chunks, size) = chunking(n);
     run_chunks(chunks, |c| {
-        let i = c * size;
-        while i < n && i < (c + 1) * size {
+        for i in c * size..n.min((c + 1) * size) {
             f(items[i]);
-            i += 1;
         }
     });
 }
@@ -98,19 +94,15 @@ pub fn map<I: IntoIterator, T: Send, U: Send>(iter: I, f: fn(T) -> U + Send + Sy
     let out: GcBuf<U> = buf_new(n);
     let (chunks, size) = chunking(n);
     run_chunks(chunks, |c| {
-        let i = c * size;
-        while i < n && i < (c + 1) * size {
-            buf_set(out, i, f(items[i]));
-            i += 1;
+        for i in c * size..n.min((c + 1) * size) {
+            out[i] = f(items[i]);
         }
     });
     let result: List<U> = List::with_capacity(n);
-    let i = 0usize;
-    while i < n {
-        result.push(buf_get(out, i));
-        i += 1;
+    for i in 0..n {
+        result.push(out[i]);
     }
-    return result;
+    result
 }
 
 /// Fold with an associative `f` (2.19.4): chunks fold in parallel, then
@@ -120,26 +112,18 @@ pub fn reduce<T: Send + Sync>(iter: List<T>, init: T, f: fn(T, T) -> T + Send + 
     let (chunks, size) = chunking(n);
     let partial: GcBuf<T> = buf_new(chunks);
     run_chunks(chunks, |c| {
-        let i = c * size;
-        let end = (c + 1) * size;
-        if end > n {
-            end = n;
-        }
-        let acc = iter[i];
-        i += 1;
-        while i < end {
+        let start = c * size;
+        let acc = iter[start];
+        for i in start + 1..n.min((c + 1) * size) {
             acc = f(acc, iter[i]);
-            i += 1;
         }
-        buf_set(partial, c, acc);
+        partial[c] = acc;
     });
     let acc = init;
-    let c = 0usize;
-    while c < chunks {
-        acc = f(acc, buf_get(partial, c));
-        c += 1;
+    for c in 0..chunks {
+        acc = f(acc, partial[c]);
     }
-    return acc;
+    acc
 }
 
 /// The items `pred` accepts, in order.
@@ -148,21 +132,17 @@ pub fn filter<T: Send>(iter: List<T>, pred: fn(T) -> bool + Send + Sync) -> List
     let keep: GcBuf<bool> = buf_new(n);
     let (chunks, size) = chunking(n);
     run_chunks(chunks, |c| {
-        let i = c * size;
-        while i < n && i < (c + 1) * size {
-            buf_set(keep, i, pred(iter[i]));
-            i += 1;
+        for i in c * size..n.min((c + 1) * size) {
+            keep[i] = pred(iter[i]);
         }
     });
     let out: List<T> = [];
-    let i = 0usize;
-    while i < n {
-        if buf_get(keep, i) {
+    for i in 0..n {
+        if keep[i] {
             out.push(iter[i]);
         }
-        i += 1;
     }
-    return out;
+    out
 }
 
 /// Run both at once; both results.
@@ -170,12 +150,12 @@ pub fn join<T1: Send, T2: Send>(f1: fn() -> T1 + Send, f2: fn() -> T2 + Send) ->
     let first: GcBuf<T1> = buf_new(1);
     let second: GcBuf<T2> = buf_new(1);
     task::in_pool(|| {
-        let h = fork(|| { buf_set(second, 0, f2()); });
-        buf_set(first, 0, f1());
+        let h = fork(|| { second[0] = f2(); });
+        first[0] = f1();
         wait_forked(h);
         true
     });
-    return (buf_get(first, 0), buf_get(second, 0));
+    (first[0], second[0])
 }
 
 /// Structured spawning (2.19.3): every task `s.spawn`s has finished
@@ -226,13 +206,13 @@ impl Scope {
     pub fn spawn<T: Send>(self, f: fn() -> T + Send) -> ScopeHandle<T> {
         let result: GcBuf<T> = buf_new(1);
         let task = ScopeTask {
-            handle: fork(|| { buf_set(result, 0, f()); }),
+            handle: fork(|| { result[0] = f(); }),
             joined: Once::new(),
         };
         using g = self.tasks.lock() {
             g.get().push(task);
         }
-        return ScopeHandle { task: task, result: result };
+        ScopeHandle { task, result }
     }
 }
 
@@ -246,6 +226,6 @@ impl<T> ScopeHandle<T> {
     /// Wait for the task; its result.
     pub fn join(self) -> T {
         self.task.finish();
-        return buf_get(self.result, 0);
+        self.result[0]
     }
 }

@@ -7,22 +7,20 @@ pub use rok::bare::ptr::{align_of, size_of};
 use rok::bare::ptr::{ConstPtr, Ptr};
 
 /// Size of `T` (the value's own type; rok has no unsized values yet).
-pub fn size_of_val<T>(val: T) -> usize { return size_of::<T>(); }
-pub fn align_of_val<T>(val: T) -> usize { return align_of::<T>(); }
-pub fn min_align_of<T>() -> usize { return align_of::<T>(); }
+pub fn size_of_val<T>(val: T) -> usize { size_of::<T>() }
+pub fn align_of_val<T>(val: T) -> usize { align_of::<T>() }
+pub fn min_align_of<T>() -> usize { align_of::<T>() }
 
-pub unsafe fn read<T>(src: ConstPtr<T>) -> T { return src.read(); }
+pub unsafe fn read<T>(src: ConstPtr<T>) -> T { src.read() }
 pub unsafe fn write<T>(dst: Ptr<T>, value: T) { dst.write(value); }
-pub unsafe fn read_volatile<T>(src: ConstPtr<T>) -> T { return src.read_volatile(); }
+pub unsafe fn read_volatile<T>(src: ConstPtr<T>) -> T { src.read_volatile() }
 pub unsafe fn write_volatile<T>(dst: Ptr<T>, value: T) { dst.write_volatile(value); }
 
 /// Copy `count` `T`s; the ranges may overlap.
 pub unsafe fn copy<T>(src: ConstPtr<T>, dst: Ptr<T>, count: usize) {
     if dst.addr() <= src.addr() {
-        let i = 0usize;
-        while i < count {
+        for i in 0..count {
             dst.add(i).write(src.add(i).read());
-            i += 1;
         }
     } else {
         let i = count;
@@ -35,10 +33,8 @@ pub unsafe fn copy<T>(src: ConstPtr<T>, dst: Ptr<T>, count: usize) {
 
 /// Copy `count` `T`s between ranges that do not overlap.
 pub unsafe fn copy_nonoverlapping<T>(src: ConstPtr<T>, dst: Ptr<T>, count: usize) {
-    let i = 0usize;
-    while i < count {
+    for i in 0..count {
         dst.add(i).write(src.add(i).read());
-        i += 1;
     }
 }
 
@@ -46,10 +42,8 @@ pub unsafe fn copy_nonoverlapping<T>(src: ConstPtr<T>, dst: Ptr<T>, count: usize
 pub unsafe fn write_bytes<T>(dst: Ptr<T>, value: u8, count: usize) {
     let bytes: Ptr<u8> = dst.cast::<u8>();
     let n = count * size_of::<T>();
-    let i = 0usize;
-    while i < n {
+    for i in 0..n {
         bytes.add(i).write(value);
-        i += 1;
     }
 }
 
@@ -63,5 +57,5 @@ pub unsafe fn swap<T>(a: Ptr<T>, b: Ptr<T>) {
 pub unsafe fn replace<T>(dst: Ptr<T>, value: T) -> T {
     let old = dst.read();
     dst.write(value);
-    return old;
+    old
 }
