@@ -1,0 +1,69 @@
+// expect-exit: 0
+// expect-stdout:
+// started
+// drop guard
+// finally ran
+// join: CancellationError
+// inner finally
+// outer finally
+// steps 3
+// done before cancel: 7
+
+// `Task::cancel` (stdlib 2.18.4, refs-lang 7.7.10): the task's current
+// `await` is a cancellation point; the body is left like a `return`,
+// running the `finally` blocks and `using` drops on the way out.
+struct Guard {
+    name: str;
+}
+
+impl Drop for Guard {
+    fn drop(self) { println(f"drop {self.name}"); }
+}
+
+fn guard(name: str) -> Guard { return Guard { name: name }; }
+
+let steps = Mutex::new(0);
+let t = task::spawn(async {
+    let _ = {
+        using g = guard("guard") {
+            println("started");
+            while true {
+                await task::sleep(Duration::ms(1));
+                using s = steps.lock() { if s.get() < 3 { s.set(s.get() + 1); } }
+            }
+        }
+    } finally {
+        println("finally ran");
+    };
+    1
+});
+while true {
+    let n = 0;
+    using s = steps.lock() { n = s.get(); }
+    if n >= 3 { break; }
+    await task::sleep(Duration::ms(1));
+}
+t.cancel();
+let r = try await t.join() catch e: CancellationError { println(f"join: {e.debug()}"); -1 };
+
+// Nested: the inner coroutine leaves first, then its awaiting caller.
+async fn inner() -> i32 {
+    let r = { await task::sleep(Duration::sec(30)); 5 } finally { println("inner finally"); };
+    r
+}
+let t2 = task::spawn(async {
+    let v = { await inner() } finally { println("outer finally"); };
+    println(f"unreachable {v}");
+    v
+});
+await task::sleep(Duration::ms(5));
+t2.cancel();
+try await t2.join() catch e: CancellationError { 0 };
+
+using s = steps.lock() { println(f"steps {s.get()}"); }
+
+// A finished task is not affected by a later cancel.
+let t3 = task::spawn(async { 7 });
+let v = await t3;
+t3.cancel();
+println(f"done before cancel: {v}");

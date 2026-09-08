@@ -1439,6 +1439,7 @@ impl Parser<'_> {
         let mut p = Parser::new(&tokens, self.file.clone());
         p.ext = self.ext.clone();
         p.meta = Arc::clone(&self.meta);
+        p.literals = Arc::clone(&self.literals);
         p.meta_stack.clone_from(&self.meta_stack);
         p.meta_stack.push(key);
         let mut items = Vec::new();

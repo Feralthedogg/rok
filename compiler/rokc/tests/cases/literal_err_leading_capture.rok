@@ -1,0 +1,11 @@
+// expect-error: must start with a quoted token
+// A pattern that starts with `expr` would be left-recursive; only the
+// built-in range shapes do.
+#[literal(expr "@")]
+fn at(x: i32) -> i32 {
+    return x;
+}
+
+fn main() -> i32 {
+    return 0;
+}

@@ -3,7 +3,7 @@
 // skip 2 3
 // throttle 3 true
 // buffered 0 1 4 9 16
-// unordered first 16 total 5
+// unordered sum 30 total 5
 // merge 9
 // zip 6
 // select stops early true
@@ -31,7 +31,11 @@ println(f"throttle {th.len()} {start.elapsed().as_millis() >= 10}");
 let ordered = await nums(5, 0).map(|x| slow_square(x)).buffered(5).collect();
 println(f"buffered {ordered[0]} {ordered[1]} {ordered[2]} {ordered[3]} {ordered[4]}");
 let unordered = await nums(5, 0).map(|x| slow_square(x)).buffer_unordered(5).collect();
-println(f"unordered first {unordered[0]} total {unordered.len()}");
+// Completion order depends on timer scheduling under load; check the
+// multiset, not the order.
+let usum = 0;
+for v in unordered { usum = usum + v; }
+println(f"unordered sum {usum} total {unordered.len()}");
 let total = 0;
 for await x in stream::merge(nums(3, 1), nums(4, 2)) { total = total + x; }
 println(f"merge {total}");

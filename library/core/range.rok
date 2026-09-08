@@ -1,9 +1,10 @@
 // Range / RangeInclusive / RangeFrom / RangeTo / RangeFull (stdlib 2.7.4,
 // refs-lang 3.7).
 //
-// A range expression is a value of these types (`let r = 0..5;`); the
-// compiler builds the struct. `for i in a..b` with the range written in
-// the loop header keeps a direct counting loop.
+// A range expression is a value of these types (`let r = 0..5;`),
+// built by the `#[literal]` handlers at the end of this file. `for i in
+// a..b` with the range written in the loop header keeps a direct
+// counting loop.
 
 /// One step forward / back (2.7.3). Integers implement it; floats don't,
 /// so `Range<f64>` is no iterator.
@@ -436,4 +437,31 @@ impl Step for usize {
         }
         return (end - start) as usize;
     }
+}
+
+// Range literals (refs-lang 6.5.1).
+
+#[literal(expr ".." expr)]
+pub fn range_literal<T>(start: T, end: T) -> Range<T> {
+    return Range { start: start, end: end };
+}
+
+#[literal(expr "..=" expr)]
+pub fn range_inclusive_literal<T>(start: T, end: T) -> RangeInclusive<T> {
+    return RangeInclusive { start: start, end: end };
+}
+
+#[literal(expr "..")]
+pub fn range_from_literal<T>(start: T) -> RangeFrom<T> {
+    return RangeFrom { start: start };
+}
+
+#[literal(".." expr)]
+pub fn range_to_literal<T>(end: T) -> RangeTo<T> {
+    return RangeTo { end: end };
+}
+
+#[literal("..")]
+pub fn range_full_literal() -> RangeFull {
+    return RangeFull;
 }

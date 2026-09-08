@@ -1,0 +1,23 @@
+// expect-exit: 0
+// expect-stdout: 2 3 30 4 5
+
+// Spec 4.8.9: a trailing closure after named arguments fills the last
+// parameter, and its parameter types come from that parameter's `fn`
+// type — the same as a closure passed inside the parentheses. (It used
+// to take the next positional slot: "cannot infer the type of closure
+// parameter `n`".)
+fn apply(x: i32, scale: i32 = 1, f: fn(i32) -> i32) -> i32 { f(x * scale) }
+struct W { v: i32 }
+impl W {
+    fn with(self, add: i32 = 0, f: fn(i32) -> i32) -> i32 { f(self.v + add) }
+}
+
+fn main() -> i32 {
+    let a = apply(x: 1) |n| { n + 1 };
+    let b = apply(1, scale: 2) |n| { n + 1 };
+    let c = apply(scale: 10, x: 3) |n| n;
+    let d = W { v: 3 }.with(add: 1) |n| { n };
+    let e = apply(4) |n| { n + 1 };
+    println(f"{a} {b} {c} {d} {e}");
+    0
+}

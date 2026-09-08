@@ -1,0 +1,51 @@
+// expect-exit: 0
+// expect-stdout:
+// a
+// u
+// 1 2
+// done 3
+
+// `()` is a value like any other: block / if / match / loop values,
+// generic `T = ()`, closure params, tuple and struct fields, list
+// elements. Codegen used to emit `arith.constant 0 : ()` (and `()` as an
+// LLVM struct field type) for these.
+fn u() { println("u"); }
+fn id<T>(x: T) -> T { x }
+struct S<T> { v: T; n: i32; }
+enum E { A, B }
+
+fn main() -> i32 {
+    let x = 1;
+    let r1 = { println("a"); };
+    let r2 = { u() };
+    let r3 = if x > 0 { r1 } else { u(); };
+    let r4 = match E::B { E::A => {}, E::B => r2 };
+    let r5 = loop { break; };
+    let r6 = while false {};
+    let r7 = for _ in 0..2 {};
+    let r8: () = { let y = 2; };
+    let a = id(());
+    let b = id({ r3 });
+    let f = |p: ()| p;
+    let c = f(r4);
+    let t = (r5, 1);
+    let s = S { v: r6, n: 2 };
+    let m: () | none = r7;
+    let xs: List<()> = [];
+    xs.push(r8);
+    xs.push(a);
+    xs.push(b);
+    let i = 0;
+    while i < 3 {
+        let z = if i % 2 == 0 { c } else { xs[0] };
+        xs[0] = z;
+        i = i + 1;
+    }
+    println(f"{t.1} {s.n}");
+    match m {
+        none => return 1,
+        _ => {}
+    }
+    println(f"done {xs.len()}");
+    0
+}

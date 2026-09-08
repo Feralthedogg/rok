@@ -22,6 +22,7 @@ use core::sync::atomic::Ordering;
 use rokr_common::object_header::{FLAG_PINNED, HEADER_ALIGN, ObjectHeader};
 use rokr_common::{fatal, tls, write_stderr};
 
+mod net;
 mod os;
 mod str;
 mod thread;

@@ -273,6 +273,12 @@ pub fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
                 walk_expr(v, val);
             }
         }
+        // Every candidate captured the same source; walk it once.
+        ExprKind::MagicLiteral(cands) => {
+            let args = cands.iter().take(1).flat_map(|c| &c.args);
+            args.flat_map(rokc_ast::LitArg::exprs)
+                .for_each(|x| walk_expr(v, x));
+        }
         ExprKind::Block(b) | ExprKind::Unsafe(b) => walk_block(v, b),
         ExprKind::AsyncBlock(b) | ExprKind::YieldBlock(b) | ExprKind::AsyncYieldBlock(b) => {
             v.enter_body();

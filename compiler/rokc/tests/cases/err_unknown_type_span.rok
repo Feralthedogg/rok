@@ -1,0 +1,9 @@
+// expect-error: err_unknown_type_span.rok:7:1: cannot find type `pkg::Missing`
+
+// An unknown type is reported at the user item that names it, not at
+// whatever library item HIR lowered last (the leaked "current span").
+enum E { A }
+
+fn f(x: i32) throws (pkg::Missing) -> i32 { return x; }
+
+fn main() -> i32 { 0 }

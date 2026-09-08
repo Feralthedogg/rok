@@ -23,7 +23,7 @@ use crate::str::{RokStr, build};
 
 type CStrPtr = *const libc::c_char;
 
-fn errno() -> i32 {
+pub fn errno() -> i32 {
     // SAFETY: the libc errno accessor has no preconditions.
     #[cfg(target_vendor = "apple")]
     unsafe {
@@ -37,12 +37,12 @@ fn errno() -> i32 {
 }
 
 /// `r` (a libc `-1`-on-error result) as `>= 0` or `-errno`.
-fn ret(r: isize) -> isize {
+pub fn ret(r: isize) -> isize {
     if r < 0 { -(errno() as isize) } else { r }
 }
 
 /// Run a blocking call parked; `errno` survives the re-entry.
-fn native<R>(f: impl FnOnce() -> R) -> (R, i32) {
+pub fn native<R>(f: impl FnOnce() -> R) -> (R, i32) {
     world::enter_native();
     let r = f();
     let e = errno();
@@ -50,7 +50,7 @@ fn native<R>(f: impl FnOnce() -> R) -> (R, i32) {
     (r, e)
 }
 
-const fn cs(s: RokStr) -> CStrPtr {
+pub const fn cs(s: RokStr) -> CStrPtr {
     s.ptr.cast()
 }
 
@@ -65,7 +65,7 @@ const unsafe fn cell(buf: *mut u8, i: usize) -> *mut i32 {
 }
 
 /// Store `e` into the error cell `err` (may be null).
-fn set_err(err: *mut u8, e: i32) {
+pub fn set_err(err: *mut u8, e: i32) {
     if !err.is_null() {
         // SAFETY: the library passes a live one-element `GcBuf<i32>`.
         unsafe { *cell(err, 0) = e };
@@ -73,14 +73,14 @@ fn set_err(err: *mut u8, e: i32) {
 }
 
 /// A malloc-backed byte vector (the runtime is `no_std`).
-struct Bytes {
-    p: *mut u8,
-    len: usize,
-    cap: usize,
+pub struct Bytes {
+    pub p: *mut u8,
+    pub len: usize,
+    pub cap: usize,
 }
 
 impl Bytes {
-    const fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             p: ptr::null_mut(),
             len: 0,
@@ -89,7 +89,7 @@ impl Bytes {
     }
 
     /// Room for `n` more bytes; returns the spare region.
-    fn reserve(&mut self, n: usize) -> *mut u8 {
+    pub fn reserve(&mut self, n: usize) -> *mut u8 {
         if self.len + n > self.cap {
             let cap = (self.cap * 2).max(self.len + n).max(4096);
             // SAFETY: `p` is null or from malloc/realloc.
@@ -104,7 +104,7 @@ impl Bytes {
         unsafe { self.p.add(self.len) }
     }
 
-    const fn as_slice(&self) -> &[u8] {
+    pub const fn as_slice(&self) -> &[u8] {
         if self.len == 0 {
             return &[];
         }

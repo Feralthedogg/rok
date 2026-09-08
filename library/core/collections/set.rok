@@ -171,3 +171,13 @@ impl<T: Hash + Debug> Debug for Set<T> {
         return out + "}";
     }
 }
+
+/// `{a, b}` / `{a,}` (refs-lang 6.5.1, 6.5.6; `{ a }` is a block).
+#[literal("{" {expr} % "," + "}")]
+pub fn set_literal<T: Hash>(items: ...T) -> Set<T> {
+    let s: Set<T> = Set::new();
+    for x in items {
+        s.insert(x);
+    }
+    return s;
+}

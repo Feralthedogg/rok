@@ -959,6 +959,13 @@ impl<'a> FnEmit<'a> {
     // name directly; memref-slotted locals get `memref.load`; llvm-slotted
     // locals get `llvm.load`.
     fn read_local(&mut self, id: LocalId) -> String {
+        // `()` has one value and no storage: every read is a fresh one
+        // (a remapped SSA name could come from a non-dominating block).
+        if self.local_ty(id) == MirTy::Unit {
+            let v = self.fresh_value();
+            let _ = writeln!(self.body, "    {v} = llvm.mlir.zero : {UNIT_TY}");
+            return v;
+        }
         if self.is_block_param(id) || self.slot_names[id.0 as usize].is_none() {
             return self
                 .local_names
@@ -985,7 +992,7 @@ impl<'a> FnEmit<'a> {
     }
 
     fn write_local(&mut self, id: LocalId, value: &str) {
-        if self.is_block_param(id) {
+        if self.is_block_param(id) || self.local_ty(id) == MirTy::Unit {
             return;
         }
         // Non-slotted locals: just remap the SSA name.
@@ -2368,6 +2375,9 @@ impl<'a> FnEmit<'a> {
                     mlir_prim(prim, self.pointer_width)
                 );
             }
+            ConstVal::Unit | ConstVal::None if *dst_ty == MirTy::Unit => {
+                let _ = writeln!(self.body, "    {dst} = llvm.mlir.zero : {UNIT_TY}");
+            }
             ConstVal::Unit | ConstVal::None => {
                 // For aggregate destinations, materialize a zero value
                 // (null GC references); for primitives, a zero constant (also the unused
@@ -2522,9 +2532,13 @@ impl<'a> FnEmit<'a> {
     }
 }
 
+/// A `()` value (argument, field, element): an empty struct. A function
+/// returning `()` returns nothing instead (`mlir_fn_signature`).
+const UNIT_TY: &str = "!llvm.struct<()>";
+
 fn mlir_type(ty: &MirTy, pointer_width: u32) -> String {
     match ty {
-        MirTy::Unit => "()".to_owned(),
+        MirTy::Unit => UNIT_TY.to_owned(),
         MirTy::Prim(p) => mlir_prim(*p, pointer_width),
         MirTy::Any | MirTy::GcRef => format!("i{pointer_width}"),
         MirTy::Sum(parts) => mlir_type(&rokc_mir::sum_layout(parts), pointer_width),

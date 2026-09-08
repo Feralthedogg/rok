@@ -14,7 +14,9 @@ use common::*;
 fn end_to_end_cases() {
     let Some(env) = setup() else { return };
     let cases_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/cases");
-    let scratch = env.workspace.join("target/integration_tmp");
+    let scratch = env
+        .workspace
+        .join(format!("target/integration_tmp{}", opt_suffix()));
 
     let mut cases: Vec<(String, PathBuf)> = fs::read_dir(&cases_dir)
         .unwrap()
@@ -57,6 +59,9 @@ fn run_case(
     scratch: &std::path::Path,
 ) -> Result<(), String> {
     let source = fs::read_to_string(path).unwrap();
+    if optimized() && directives(&source, "debug-only").next().is_some() {
+        return Ok(());
+    }
     let case_dir = scratch.join(name);
     let _ = fs::create_dir_all(&case_dir);
     let exe = case_dir.join("out");

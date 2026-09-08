@@ -679,21 +679,6 @@ pub fn lower_full(
                     generic_fns.insert(fn_def.name.clone(), fn_def);
                     continue;
                 }
-                // Spec 4.1 / 변경점 833: `xs: ...T` variadic. Stage-1
-                // call-site lowering doesn't yet wrap trailing args into
-                // a Slice<T>, so any call would fail with arity mismatch
-                // at codegen — emit an explicit refusal up front.
-                if fn_def.params.iter().any(|p| p.variadic) {
-                    err(
-                        &mut pre_diags,
-                        format!(
-                            "function `{}` has a `...T` variadic parameter; \
-                             call-site slicing isn't implemented yet \
-                             (spec 4.1 — stage-1 limitation)",
-                            fn_def.name
-                        ),
-                    );
-                }
                 let id = FunctionId(u32::try_from(decls.len()).expect("FunctionId overflow"));
                 let module = module_of(&fn_def.name);
                 let sc = Scope {
@@ -1411,6 +1396,7 @@ pub fn lower_full(
             .filter(|s| s.is_mut)
             .map(|s| s.name.clone())
             .collect(),
+        literal_shapes: literal_handlers(program, &mut pre_diags),
         names,
     };
     check_impl_overlap(&env);
@@ -1465,6 +1451,7 @@ pub fn lower_full(
     }
     build_any_dispatchers(&env);
     check_type_bounds(&env);
+    super::send_check::check(&env, &functions);
     let Env {
         structs,
         enums,
@@ -1588,41 +1575,53 @@ pub(super) fn collect_field_visibility(
 /// `UnresolvedPath` means some lowering path fell through silently —
 /// refuse to hand that to MIR (it would be lowered as unit / `any`).
 pub(super) fn check_unresolved_types(module: &mut HirModule) {
-    let mut unknown_types: Vec<String> = Vec::new();
-    let mut note = |ty: &HirTy| collect_unknown_paths(ty, &mut unknown_types);
+    // Each unknown name is reported at the first item that mentions it.
+    // The thread-local "current span" is whatever pass ran last (usually
+    // a library item), so it must not be the default here.
+    let mut unknown_types: Vec<(String, rokc_diagnostic::Span)> = Vec::new();
+    let mut note = |ty: &HirTy, span: rokc_diagnostic::Span| {
+        let mut names = Vec::new();
+        collect_unknown_paths(ty, &mut names);
+        for n in names {
+            if !unknown_types.iter().any(|(t, _)| *t == n) {
+                unknown_types.push((n, span));
+            }
+        }
+    };
     for s in &module.structs {
         for f in &s.fields {
-            note(&f.ty);
+            note(&f.ty, s.span);
         }
     }
     for e in &module.enums {
         for v in &e.variants {
             if let Some(t) = &v.payload_ty {
-                note(t);
+                note(t, e.span);
             }
         }
     }
     for st in &module.statics {
-        note(&st.ty);
+        note(&st.ty, st.span);
     }
     for f in &module.functions {
-        note(&f.ret_ty);
+        note(&f.ret_ty, f.span);
         for p in &f.params {
-            note(&p.ty);
+            note(&p.ty, f.span);
         }
         for l in &f.locals {
-            note(&l.ty);
+            note(&l.ty, f.span);
         }
     }
-    unknown_types.sort();
-    unknown_types.dedup();
-    for t in unknown_types {
+    unknown_types.sort_by(|a, b| a.0.cmp(&b.0));
+    for (t, span) in unknown_types {
+        let old = rokc_diagnostic::set_current_span(span);
         module
             .diagnostics
             .push(rokc_diagnostic::RokDiagnostic::error(
                 rokc_diagnostic::ErrorKind::Type,
                 format!("cannot find type `{t}` in this scope"),
             ));
+        rokc_diagnostic::set_current_span(old);
     }
     if module
         .diagnostics
@@ -1631,26 +1630,24 @@ pub(super) fn check_unresolved_types(module: &mut HirModule) {
     {
         return;
     }
-    let mut bad: Option<String> = None;
-    for f in &module.functions {
-        if f.params.iter().any(|p| p.ty == HirTy::Unknown)
+    let bad = module.functions.iter().find(|f| {
+        f.params.iter().any(|p| p.ty == HirTy::Unknown)
             || f.locals.iter().any(|l| l.ty == HirTy::Unknown)
             || f.body.as_ref().is_some_and(hir_block_has_unknown)
-        {
-            bad = Some(f.name.clone());
-            break;
-        }
-    }
-    if let Some(name) = bad {
+    });
+    if let Some(f) = bad {
+        let old = rokc_diagnostic::set_current_span(f.span);
         module
             .diagnostics
             .push(rokc_diagnostic::RokDiagnostic::error(
                 rokc_diagnostic::ErrorKind::Type,
                 format!(
-                    "internal compiler error: an expression in `{name}` has no resolved type \
-                 (lowering fell through without a diagnostic) — please report"
+                    "internal compiler error: an expression in `{}` has no resolved type \
+                 (lowering fell through without a diagnostic) — please report",
+                    f.name
                 ),
             ));
+        rokc_diagnostic::set_current_span(old);
     }
 }
 
@@ -3250,4 +3247,81 @@ pub(super) fn ref_out_of(sig: &FnSig) -> Option<RefOut> {
         ret: sig.ret_ty.clone(),
         refs,
     })
+}
+
+/// Spec 6.5: every `#[literal]` function's signature against its
+/// pattern's captures; the built-in shapes' handlers.
+fn literal_handlers(
+    program: &Program,
+    diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
+) -> Vec<super::ShapeHandler> {
+    use rokc_parser::{ArgKind, PatKind, Pattern};
+    let mut out = Vec::new();
+    for item in &program.items {
+        let Item::Fn(f) = item else { continue };
+        let Some(attr) = f.attrs.iter().find(|a| a.name() == "literal") else {
+            continue;
+        };
+        let rokc_ast::AttrBody::Args(args) = &attr.body else {
+            continue;
+        };
+        let Some(rokc_ast::AttrArg::Lit(rokc_ast::Literal::Str(text))) = args.first() else {
+            continue;
+        };
+        let Some(pat) = Pattern::from_text(text) else {
+            continue;
+        };
+        let priority = args
+            .iter()
+            .find_map(|a| match a {
+                rokc_ast::AttrArg::KeyValue(k, rokc_ast::Literal::Int(v)) if k == "priority" => {
+                    v.parse().ok()
+                }
+                _ => None,
+            })
+            .unwrap_or(0);
+        let want = pat.args();
+        let fits = want.len() == f.params.len()
+            && want
+                .iter()
+                .zip(&f.params)
+                .all(|(k, p)| !p.variadic || *k == ArgKind::Many);
+        if !fits {
+            let shape: Vec<&str> = want
+                .iter()
+                .map(|k| match k {
+                    ArgKind::One => "a value",
+                    ArgKind::Many => "a repetition (`...T`, an array or a List)",
+                })
+                .collect();
+            diags.push(
+                rokc_diagnostic::RokDiagnostic::error(
+                    rokc_diagnostic::ErrorKind::Meta,
+                    format!(
+                        "`#[literal({text})]` handler `{}` must take {} parameter(s): {} \
+                         (spec 6.5.4)",
+                        f.name,
+                        want.len(),
+                        if shape.is_empty() {
+                            "none".to_owned()
+                        } else {
+                            shape.join(", ")
+                        }
+                    ),
+                )
+                .with_span(attr.span, "")
+                .with_secondary(f.span, "handler declared here"),
+            );
+            continue;
+        }
+        if let Ok(PatKind::Shape(shape)) = pat.kind() {
+            out.push(super::ShapeHandler {
+                shape,
+                name: f.name.clone(),
+                priority,
+                span: attr.span,
+            });
+        }
+    }
+    out
 }

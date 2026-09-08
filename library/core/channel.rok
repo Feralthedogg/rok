@@ -1,7 +1,7 @@
 // rok::core::channel — message passing between threads (stdlib spec
-// 2.17). Multi-producer, single-consumer; `recv` blocks the OS thread,
-// `recv_async` / `for await` suspend the task (`task::park`). A `send`
-// on a full bounded channel still blocks the thread.
+// 2.17). Multi-producer, single-consumer; `recv` / `send` block the OS
+// thread, `recv_async` / `for await` / `send_async` suspend the task
+// (`task::park`: receivers on the `meta` address, senders one past it).
 //
 // ponytail: one `Mutex` + two `Condvar`s around a growable ring of
 // one-value boxes (spec: lock-free ring / segmented list). A popped slot
@@ -32,6 +32,8 @@ const POPPED: usize = 6;
 const RENDEZVOUS: usize = 7;
 /// Receivers blocked in `recv`.
 const WAITING: usize = 8;
+/// 1 while the receiver is suspended in `recv_async` / `for await`.
+const ASYNC_WAITING: usize = 9;
 
 struct Chan<T> {
     lock: Mutex<i32>;
@@ -52,6 +54,16 @@ impl<T> Chan<T> {
     /// Wake tasks parked in `recv_async` (a value or a close arrived).
     fn notify_async(self) {
         rok::core::task::unpark(unsafe { rok_task_key_usize(self.meta) });
+    }
+
+    /// Wake tasks suspended in `send_async` (room, or a value taken).
+    fn notify_senders(self) {
+        self.not_full.notify_all();
+        rok::core::task::unpark(self.send_key());
+    }
+
+    fn send_key(self) -> usize {
+        return unsafe { rok_task_key_usize(self.meta) } + 1;
     }
     fn put(self, i: usize, v: usize) { buf_set(self.meta, i, v); }
 
@@ -99,7 +111,7 @@ impl<T> Chan<T> {
 }
 
 fn make<T>(limit: usize, rendezvous: bool) -> (Sender<T>, Receiver<T>) {
-    let meta: GcBuf<usize> = buf_new(9);
+    let meta: GcBuf<usize> = buf_new(10);
     buf_set(meta, SENDERS, 1);
     buf_set(meta, LIMIT, limit);
     buf_set(meta, CAP, 16);
@@ -178,7 +190,7 @@ impl<T> Sender<T> {
         let sent = false;
         using g = self.ch.lock.lock() {
             let ready = if self.ch.get(RENDEZVOUS) == 1 {
-                self.ch.get(WAITING) > self.ch.get(LEN)
+                self.ch.get(WAITING) + self.ch.get(ASYNC_WAITING) > self.ch.get(LEN)
             } else {
                 !self.ch.full()
             };
@@ -192,6 +204,13 @@ impl<T> Sender<T> {
         }
         self.ch.not_empty.notify_all();
         self.ch.notify_async();
+    }
+
+    /// `try await tx.send_async(v)` inside async code: like `send`, but
+    /// suspends the task (not the thread) while a bounded channel is
+    /// full, and on a rendezvous channel until the value is received.
+    pub fn send_async(self, value: T) -> SendFuture<T> {
+        return SendFuture { tx: self, value: value, pushed: false, ticket: 0 };
     }
 
     /// Close this sender; later `send`s on it throw `Closed`.
@@ -248,7 +267,7 @@ impl<T> Receiver<T> {
             }
         }
         if got {
-            self.ch.not_full.notify_all();
+            self.ch.notify_senders();
         }
         return v;
     }
@@ -264,7 +283,7 @@ impl<T> Receiver<T> {
             }
         }
         if got {
-            self.ch.not_full.notify_all();
+            self.ch.notify_senders();
         }
         return v;
     }
@@ -324,13 +343,61 @@ impl<T> rok::core::stream::Stream for Receiver<T> {
             } else if self.ch.get(SENDERS) == 0 {
                 closed = true;
             }
+            // A rendezvous `try_send` counts a suspended receiver.
+            self.ch.put(ASYNC_WAITING, if got || closed { 0 } else { 1 });
         }
         if got {
-            self.ch.not_full.notify_all();
+            self.ch.notify_senders();
             return rok::core::future::Poll::Ready(v);
         }
         if closed {
             return rok::core::future::Poll::Ready(none);
+        }
+        return rok::core::future::Poll::Pending;
+    }
+}
+
+/// `Sender::send_async`.
+pub struct SendFuture<T> {
+    tx: Sender<T>;
+    value: T;
+    pushed: bool;
+    ticket: usize;
+}
+
+impl<T> SendFuture<T> {
+    pub fn poll(ref self, ref ctx: rok::core::future::Context) throws (SendError<T>) -> rok::core::future::Poll<()> {
+        let ch = self.tx.ch;
+        if !self.pushed {
+            if !buf_get(self.tx.open, 0) {
+                throw SendError::Closed(self.value);
+            }
+            // Park before looking, so a receive after the look unparks us.
+            rok::core::task::park(ch.send_key(), ctx.waker());
+            using g = ch.lock.lock() {
+                if !ch.full() {
+                    self.ticket = ch.get(PUSHED);
+                    ch.push(self.value);
+                    self.pushed = true;
+                }
+            }
+            if !self.pushed {
+                return rok::core::future::Poll::Pending;
+            }
+            ch.not_empty.notify_all();
+            ch.notify_async();
+            if ch.get(RENDEZVOUS) == 0 {
+                return rok::core::future::Poll::Ready(());
+            }
+        }
+        // Rendezvous: done once a receiver took our value.
+        rok::core::task::park(ch.send_key(), ctx.waker());
+        let taken = false;
+        using g = ch.lock.lock() {
+            taken = ch.get(POPPED) > self.ticket;
+        }
+        if taken {
+            return rok::core::future::Poll::Ready(());
         }
         return rok::core::future::Poll::Pending;
     }

@@ -77,9 +77,11 @@ pub struct AsyncFuture<T> {
     resume: fn(Context) -> Poll<T>;
 }
 
-// ponytail: `Send` follows the output only; the frame's captures and
-// locals held across `await` are not checked (Rust checks them).
+// `Send` follows the output (and error) type; `task::spawn` checks the
+// frame's captures and locals held across `await` separately
+// (`rokc_hir::lower::send_check`).
 unsafe impl<T: Send> Send for AsyncFuture<T> {}
+unsafe impl<T: Send, E: Send> Send for TryAsyncFuture<T, E> {}
 
 impl<T> Future for AsyncFuture<T> {
     type Output = T;

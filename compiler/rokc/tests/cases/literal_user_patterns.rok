@@ -1,0 +1,92 @@
+// Spec 6.5.3 / 6.5.7: user `#[literal]` patterns — a bracket matrix
+// with nested `%` repetitions, the spec's `(x, y)@` coordinate, and a
+// user handler for the `[..]` shape picked by the slot's type (6.5.5).
+// expect-exit: 0
+// expect-stdout:
+// 2x2 1 2 3 4
+// 1x3 7 8 9
+// 3.5 1.25
+// 1 2
+// 3 6
+// 2 0
+// 4
+struct Mat {
+    rows: usize;
+    cols: usize;
+    data: List<f64>;
+}
+
+#[literal("m" "[" {{expr} % "," +} % ";" + "]")]
+fn mat_literal(rows: ...List<f64>) -> Mat {
+    let data: List<f64> = List::new();
+    let r = 0usize;
+    let c = 0usize;
+    for row in rows {
+        c = row.len();
+        for x in row {
+            data.push(x);
+        }
+        r = r + 1;
+    }
+    return Mat { rows: r, cols: c, data: data };
+}
+
+fn show(m: Mat) {
+    let s = f"{m.rows}x{m.cols}";
+    for x in m.data {
+        s = s + f" {x}";
+    }
+    println(s);
+}
+
+struct Coord {
+    x: f64;
+    y: f64;
+}
+
+#[literal("(" expr "," expr ")" "@")]
+fn coord_literal(x: f64, y: f64) -> Coord {
+    return Coord { x: x, y: y };
+}
+
+struct Bag {
+    total: i32;
+    count: i32;
+}
+
+// Lower priority than core's `List` handler: a slot of type `Bag`
+// picks it, anything else gets a `List`.
+#[literal("[" {expr} % "," * "]", priority = -1)]
+fn bag_literal(items: ...i32) -> Bag {
+    let t = 0;
+    let n = 0;
+    for x in items {
+        t = t + x;
+        n = n + 1;
+    }
+    return Bag { total: t, count: n };
+}
+
+// `"opt" "<" number? ">"`: `?` captures are a value or `none`.
+#[literal("opt" "<" number? ">")]
+fn opt_literal(n: i32 | none) -> i32 {
+    return match n {
+        v: i32 => v,
+        none => 0,
+    };
+}
+
+fn main() -> i32 {
+    show(m[1, 2; 3, 4]);
+    show(m[7, 8, 9]);
+    let p = (3.5, 1.25)@;
+    println(f"{p.x} {p.y}");
+    let t = (1, 2);
+    println(f"{t.0} {t.1}");
+    let b: Bag = [1, 2, 3];
+    println(f"{b.count} {b.total}");
+    let l = [10, 20];
+    println(f"{l.len()} {opt<>}");
+    println(f"{opt<4>}");
+    return 0;
+}

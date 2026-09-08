@@ -328,10 +328,15 @@ pub(super) fn poll_loop(
                 }],
             },
             guard: None,
-            body: block(vec![HirStmt::Break {
-                label: None,
-                value: Some(hir_local(v, &out, span)),
-            }]),
+            body: block(
+                cancel_check(ctx, span)
+                    .into_iter()
+                    .chain([HirStmt::Break {
+                        label: None,
+                        value: Some(hir_local(v, &out, span)),
+                    }])
+                    .collect(),
+            ),
         },
         HirMatchArm {
             pat: HirPattern::EnumVariant {
@@ -340,11 +345,16 @@ pub(super) fn poll_loop(
                 args: Vec::new(),
             },
             guard: None,
-            body: block(vec![HirStmt::Expr(if coro.probe {
-                pending_step
-            } else {
-                suspend(pending_step, false, span)
-            })]),
+            body: block(
+                cancel_check(ctx, span)
+                    .into_iter()
+                    .chain([HirStmt::Expr(if coro.probe {
+                        pending_step
+                    } else {
+                        suspend(pending_step, false, span)
+                    })])
+                    .collect(),
+            ),
         },
     ];
     let m = HirExpr {
@@ -355,7 +365,7 @@ pub(super) fn poll_loop(
         ty: HirTy::Unit,
         span,
     };
-    HirExpr {
+    let lp = HirExpr {
         kind: HirExprKind::Loop {
             label: None,
             body: Box::new(HirBlock {
@@ -365,9 +375,81 @@ pub(super) fn poll_loop(
             }),
             result_ty: out.clone(),
         },
+        ty: out.clone(),
+        span,
+    };
+    // Checks: on entry, after a ready poll (an awaited coroutine may
+    // have left because of the cancel) and before suspending (after a
+    // resume the awaited future is polled first, so a nested coroutine
+    // leaves through its own cleanups before this one).
+    let Some(entry) = cancel_check(ctx, span) else {
+        return lp;
+    };
+    HirExpr {
+        kind: HirExprKind::Block(Box::new(HirBlock {
+            stmts: vec![entry],
+            trailing: Some(lp),
+            label: None,
+        })),
         ty: out,
         span,
     }
+}
+
+/// A cancellation point (stdlib 2.18.4, refs-lang 7.7.10): `if
+/// task::cancel_requested(#ctx) { <leave the body like a return> }`.
+/// The exit runs the `finally` / `using` cleanups it passes; the
+/// coroutine's result is a zero value the executor drops. `None` in the
+/// probe pass.
+fn cancel_check(ctx: &mut LowerCtx<'_>, span: rokc_diagnostic::Span) -> Option<HirStmt> {
+    if ctx.coro.as_ref().is_none_or(|c| c.probe) {
+        return None;
+    }
+    let path = |names: &[&str]| Expr {
+        kind: ExprKind::Path(rokc_ast::Path {
+            segments: names
+                .iter()
+                .map(|n| rokc_ast::PathSegment {
+                    name: (*n).to_owned(),
+                    generics: Vec::new(),
+                })
+                .collect(),
+            span,
+        }),
+        span,
+    };
+    let call = Expr {
+        kind: ExprKind::Call {
+            callee: Box::new(path(&["rok", "core", "task", "cancel_requested"])),
+            args: vec![CallArg::Positional(path(&[CTX]))],
+            trailing_closure: None,
+        },
+        span,
+    };
+    let cond = super::expr::lower_expr(ctx, &call);
+    if cond.ty != HirTy::Prim(PrimTy::Bool) {
+        return None;
+    }
+    let out = ctx.fn_ret_ty.clone();
+    let value = (out != HirTy::Unit).then_some(HirExpr {
+        kind: HirExprKind::Const(ConstVal::Unit),
+        ty: out,
+        span,
+    });
+    let exit = super::throws::exit_through(ctx, None, value, coro_return, span);
+    Some(HirStmt::Expr(HirExpr {
+        kind: HirExprKind::If {
+            cond: Box::new(cond),
+            then_block: Box::new(HirBlock {
+                stmts: vec![exit],
+                trailing: None,
+                label: None,
+            }),
+            else_branch: None,
+        },
+        ty: HirTy::Unit,
+        span,
+    }))
 }
 
 /// `async || body` = `|| async { body }` (spec 4.11.5 / 4.12.5): the
@@ -429,6 +511,9 @@ fn lower_coro_block<'a>(
     // (a `yield fn` / `async fn` signature, an annotated `let`), else
     // inferred.
     let (mut val_ty, mut throws) = (HirTy::Unknown, None);
+    // The probe's errors, re-reported when it cannot infer a type (else
+    // the body's real error would vanish behind a poisoned value).
+    let mut probe_diags = Vec::new();
     if let Some(HirTy::Struct(sid)) = ctx.current_expected().cloned() {
         let def = ctx.struct_def(sid);
         for t in [false, true] {
@@ -493,7 +578,7 @@ fn lower_coro_block<'a>(
         }
         let hint = probe.fn_ret_ty.clone();
         let value = lower_expected(&mut probe, &body_expr, hint);
-        ctx.env.sink.diagnostics.borrow_mut().truncate(seen);
+        probe_diags = ctx.env.sink.diagnostics.borrow_mut().split_off(seen);
         let mut lifted = ctx.env.sink.extras.borrow_mut();
         if lifted[extras..].iter().all(|f| {
             ["__closure_", "__thunk_", "__coro_"]
@@ -537,6 +622,7 @@ fn lower_coro_block<'a>(
         }
     }
     if val_ty == HirTy::Unknown {
+        ctx.env.sink.diagnostics.borrow_mut().extend(probe_diags);
         return super::poison(span);
     }
 

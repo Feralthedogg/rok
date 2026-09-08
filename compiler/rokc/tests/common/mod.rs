@@ -8,10 +8,14 @@
 //!   - `// expect-error: text`  — build must fail and stderr must contain `text`
 //!   - `// expect-warning: text` — (repeatable) build stderr must contain `text`
 //!   - `// expect-stderr: text` — the run's stderr must contain `text`
+//!   - `// debug-only`          — skipped under `ROK_TEST_OPT` (e.g.
+//!     overflow panics, which only `-O0` checks)
 //!
 //! Environment:
 //!   - `ROK_REQUIRE_LLVM=1` — missing mlir-opt / mlir-translate / clang is a
 //!     failure instead of a skip (CI sets this).
+//!   - `ROK_TEST_OPT=-O2` (or `--release`, `-O3`, ...) — build every case
+//!     at that optimization level instead of the default `-O0`.
 #![allow(dead_code)]
 
 use std::env;
@@ -60,6 +64,7 @@ pub fn setup() -> Option<Env> {
     // depend on rokr), so build it here to never link a stale runtime.
     // Once per test binary: parallel tests rebuilding it at the same time
     // race on the archive file.
+    #[allow(clippy::items_after_statements)]
     static BUILT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let ok = *BUILT.get_or_init(|| {
         let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
@@ -96,6 +101,17 @@ fn locate(name: &str) -> Option<PathBuf> {
         .find(|c| c.is_file())
 }
 
+/// Scratch-directory suffix, so runs at different `ROK_TEST_OPT` levels
+/// don't share build outputs.
+pub fn opt_suffix() -> String {
+    env::var("ROK_TEST_OPT").unwrap_or_default()
+}
+
+/// Built above `-O0` (`ROK_TEST_OPT`).
+pub fn optimized() -> bool {
+    !matches!(opt_suffix().as_str(), "" | "-O0")
+}
+
 /// `rokc build <src> -o <exe>` with the harness bootstrap + runtime.
 pub fn rokc_build(env: &Env, src: &Path, exe: &Path) -> std::io::Result<Output> {
     Command::new(ROKC)
@@ -109,6 +125,7 @@ pub fn rokc_build(env: &Env, src: &Path, exe: &Path) -> std::io::Result<Output> 
         .arg(env.workspace.join("library/bare/lib.rok"))
         .arg("--rokr")
         .arg(&env.rokr)
+        .args(env::var("ROK_TEST_OPT").ok().filter(|o| !o.is_empty()))
         .arg("-o")
         .arg(exe)
         .output()

@@ -237,6 +237,38 @@ impl<T: PartialEq> PartialEq for List<T> {
 
 impl<T: Eq> Eq for List<T> {}
 
+/// Lexicographic (stdlib 2.5.7): the first differing element decides,
+/// else the shorter list comes first.
+impl<T: PartialEq + PartialOrd> PartialOrd for List<T> {
+    fn lt(self, rhs: List<T>) -> bool {
+        let n = self.len().min(rhs.len());
+        for i in 0..n {
+            if self[i] != rhs[i] { return self[i] < rhs[i]; }
+        }
+        self.len() < rhs.len()
+    }
+    fn le(self, rhs: List<T>) -> bool {
+        let n = self.len().min(rhs.len());
+        for i in 0..n {
+            if self[i] != rhs[i] { return self[i] < rhs[i]; }
+        }
+        self.len() <= rhs.len()
+    }
+    fn gt(self, rhs: List<T>) -> bool { rhs.lt(self) }
+    fn ge(self, rhs: List<T>) -> bool { rhs.le(self) }
+}
+
+impl<T: Ord> Ord for List<T> {
+    fn cmp(self, rhs: List<T>) -> rok::core::cmp::Ordering {
+        let n = self.len().min(rhs.len());
+        for i in 0..n {
+            let c = self[i].cmp(rhs[i]);
+            if !c.is_eq() { return c; }
+        }
+        self.len().cmp(rhs.len())
+    }
+}
+
 /// Order-dependent mix of the element hashes.
 impl<T: Hash> Hash for List<T> {
     fn hash(self) -> u64 {
@@ -260,4 +292,15 @@ impl<T: Debug> Debug for List<T> {
         }
         return out + "]";
     }
+}
+
+/// `[a, b, c]` (refs-lang 6.5.1): a `List` — a fixed array only in a
+/// `[T; N]` slot, which the compiler builds itself.
+#[literal("[" {expr} % "," * "]")]
+pub fn list_literal<T>(items: ...T) -> List<T> {
+    let l: List<T> = List::new();
+    for x in items {
+        l.push(x);
+    }
+    return l;
 }

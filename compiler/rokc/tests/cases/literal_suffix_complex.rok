@@ -1,0 +1,38 @@
+// Spec 6.5 / 1.6.2: a suffix the language doesn't define (`2i`) is the
+// call of its `#[literal(number "i")]` handler.
+// expect-exit: 0
+// expect-stdout:
+// 3 2
+// 0 2.5
+// -4 0
+struct Complex {
+    re: f64;
+    im: f64;
+}
+
+#[literal(number "i")]
+fn imaginary(n: f64) -> Complex {
+    return Complex { re: 0.0, im: n };
+}
+
+fn real(x: f64) -> Complex {
+    return Complex { re: x, im: 0.0 };
+}
+
+fn add(a: Complex, b: Complex) -> Complex {
+    return Complex { re: a.re + b.re, im: a.im + b.im };
+}
+
+fn mul(a: Complex, b: Complex) -> Complex {
+    return Complex { re: a.re * b.re - a.im * b.im, im: a.re * b.im + a.im * b.re };
+}
+
+fn main() -> i32 {
+    let z = add(real(3.0), 2i);
+    println(f"{z.re} {z.im}");
+    let w = 2.5i;
+    println(f"{w.re} {w.im}");
+    let sq = mul(2i, 2i);
+    println(f"{sq.re} {sq.im}");
+    return 0;
+}

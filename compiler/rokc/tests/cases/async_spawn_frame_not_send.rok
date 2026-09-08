@@ -1,0 +1,30 @@
+// expect-error: it captures `c: rok::core::sync::Cell<i32>`, which is not `Send`
+// expect-error: it holds `local: rok::core::sync::Cell<i32>`, which is not `Send`, across an `await`
+// expect-error: it holds `kept: rok::core::sync::Cell<i32>`, which is not `Send`, across an `await`
+
+// `task::spawn` checks the coroutine frame (stdlib 2.18.1): captures and
+// locals held across an `await` must be `Send`; `spawn_local` takes any.
+async fn holds() -> i32 {
+    let kept = Cell::new(1);
+    await task::yield_now();
+    kept.get()
+}
+
+async fn fine() -> i32 {
+    let gone = Cell::new(1);
+    let v = gone.get();
+    await task::yield_now();
+    v
+}
+
+let c = Cell::new(1);
+let a = task::spawn(async { c.get() });
+let b = task::spawn(async {
+    let local = Cell::new(2);
+    await task::yield_now();
+    local.get()
+});
+let f = holds();
+let d = task::spawn(f);
+let ok = task::spawn(fine());
+let ok2 = task::spawn_local(async { c.get() });

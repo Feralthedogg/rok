@@ -344,6 +344,7 @@ impl Parser<'_> {
         self.diagnostics.extend(diags);
         let mut sub = Parser::new(&tokens, self.file.clone());
         sub.ext = self.ext.clone();
+        sub.literals = std::sync::Arc::clone(&self.literals);
         let e = sub.parse_expr();
         if !matches!(sub.peek(), TokenKind::Eof) {
             sub.error(span, format!("unexpected tokens in f-string hole `{text}`"));

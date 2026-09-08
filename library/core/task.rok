@@ -14,10 +14,23 @@
 // SCHEDULED (queued) → RUNNING → IDLE / DONE, and a wake while RUNNING
 // marks it NOTIFIED so it is queued again after the poll.
 //
-// ponytail: queues are `Mutex<List>` (O(n) front pops, a lock per
-// operation), not lock-free Chase-Lev deques; owners and thieves both
-// take FIFO. Idle workers all wake on any push (no targeted unpark). The
-// timer heap is one `Mutex` per pool (spec: per-driver timing wheel).
+// An idle worker raises its sleep flag, looks once more, then waits on
+// that flag; a push clears one raised flag and wakes only that worker
+// (a `spawn_local` push wakes the task's home worker).
+//
+// I/O (707): a process-wide driver thread blocks in kqueue / epoll and
+// unparks the tasks waiting on a ready fd (`readable` / `writable`).
+//
+// Cancellation (2.18.4, 707 §7.7.10): `Task::cancel` sets the flag and
+// wakes the task; every `await` checks it (`cancel_requested`) on entry
+// and after each resume, and leaves the coroutine body like a `return`,
+// running the `finally` / `using` cleanups it passes.
+//
+// ponytail: queues are rings behind one lock each (not lock-free
+// Chase-Lev: a `TaskRef` is several words, the atomic intrinsics are
+// word-sized); owners and thieves both take FIFO. The timer heap is one
+// `Mutex` per pool (spec: per-driver timing wheel). The I/O driver is a
+// reactor thread, not each worker polling (707 §7.7.11).
 
 pub mod time;
 
@@ -38,8 +51,14 @@ extern "C" {
     fn rok_thread_new_id() -> u64;
     fn rok_thread_spawn(f: fn() + Send, stack_size: usize, id: u64) -> usize;
     fn rok_thread_join(handle: usize) -> i32;
+    fn rok_thread_detach(handle: usize) -> i32;
+    fn rok_thread_yield_now();
     fn rok_sync_wait_timeout(word: GcBuf<i32>, index: usize, expected: i32, ns: i64);
     fn rok_sync_wake(word: GcBuf<i32>, index: usize);
+    fn rok_io_driver_claim() -> i32;
+    fn rok_io_watch(fd: i32) -> i32;
+    fn rok_io_poll(out: GcBuf<i64>, max: usize) -> i32;
+    fn rok_net_wait(fd: i32, write: i32, timeout_ns: i64) -> i32;
 }
 
 #[intrinsic("rok.atomic.load")]
@@ -134,22 +153,48 @@ fn finish(t: TaskRef) {
     for w in ws {
         w.wake();
     }
-    // `help_until` sleepers watch the pool signal.
-    t.pool.notify();
+    // `help_until` / the main worker may be waiting on it.
+    t.pool.wake_helpers();
+    if !t.local {
+        return;
+    }
+    t.pool.wake_worker(t.home);
 }
 
 // ---- the pool ----
 
+/// A FIFO ring of tasks behind a lock; `len` is readable without it.
+struct Queue {
+    spin: GcBuf<i32>;
+    /// `[head, len, capacity]`.
+    meta: GcBuf<usize>;
+    slots: GcBuf<GcBuf<TaskRef | none>>;
+}
+
+fn queue_new() -> Queue {
+    let meta: GcBuf<usize> = buf_new(3);
+    buf_set(meta, 2, 64);
+    let slots: GcBuf<GcBuf<TaskRef | none>> = buf_new(1);
+    let ring: GcBuf<TaskRef | none> = buf_new(64);
+    buf_set(slots, 0, ring);
+    let spin: GcBuf<i32> = buf_new(1);
+    return Queue { spin: spin, meta: meta, slots: slots };
+}
+
 /// A work-stealing executor (`block_on` makes one per call).
 pub struct Pool {
-    locals: List<Mutex<List<TaskRef>>>;
-    deques: List<Mutex<List<TaskRef>>>;
-    injector: Mutex<List<TaskRef>>;
+    locals: List<Queue>;
+    deques: List<Queue>;
+    injector: Queue;
     /// Timer min-heap: deadline (monotonic ns) and the waker to wake.
     timers: Mutex<Timers>;
-    /// `[epoch, shutdown]`: idle workers wait on `epoch`, which every
-    /// push and timer bumps.
+    /// `[epoch, shutdown, helpers, searching]`: `help_until` (`helpers`
+    /// of them) waits on `epoch`, which a push or a finished task bumps;
+    /// `searching` workers are idle but awake (a push need not wake one).
     signal: GcBuf<i32>;
+    /// Per worker: 1 while it sleeps (or is about to), cleared by the
+    /// push that wakes it.
+    sleep: GcBuf<i32>;
 }
 
 unsafe impl Send for Pool {}
@@ -168,21 +213,23 @@ pub struct Worker {
 
 impl Pool {
     fn new(n: usize) -> Pool {
-        let locals: List<Mutex<List<TaskRef>>> = List::new();
-        let deques: List<Mutex<List<TaskRef>>> = List::new();
+        let locals: List<Queue> = List::new();
+        let deques: List<Queue> = List::new();
         let i: usize = 0;
         while i < n {
-            locals.push(Mutex::new(List::<TaskRef>::new()));
-            deques.push(Mutex::new(List::<TaskRef>::new()));
+            locals.push(queue_new());
+            deques.push(queue_new());
             i = i + 1;
         }
-        let signal: GcBuf<i32> = buf_new(2);
+        let signal: GcBuf<i32> = buf_new(4);
+        let sleep: GcBuf<i32> = buf_new(n);
         return Pool {
             locals: locals,
             deques: deques,
-            injector: Mutex::new(List::<TaskRef>::new()),
+            injector: queue_new(),
             timers: Mutex::new(Timers { at: List::<i64>::new(), who: List::<Waker>::new() }),
             signal: signal,
+            sleep: sleep,
         };
     }
 
@@ -191,9 +238,45 @@ impl Pool {
         return self.deques.len();
     }
 
+    /// Bump the epoch and wake one sleeping worker (if any).
     fn notify(self) {
+        self.wake_helpers();
+        if atomic_load(self.signal, 3, SeqCst) > 0 {
+            return;
+        }
+        let n = self.workers();
+        let i: usize = 0;
+        while i < n {
+            if self.wake_worker(i) {
+                return;
+            }
+            i = i + 1;
+        }
+    }
+
+    fn wake_helpers(self) {
         atomic_add(self.signal, 0, 1, SeqCst);
-        unsafe { rok_sync_wake(self.signal, 0) };
+        if atomic_load(self.signal, 2, SeqCst) > 0 {
+            unsafe { rok_sync_wake(self.signal, 0) };
+        }
+    }
+
+    /// Wake worker `i` if it sleeps; whether it did.
+    fn wake_worker(self, i: usize) -> bool {
+        if atomic_load(self.sleep, i, SeqCst) == 1 && atomic_cas(self.sleep, i, 1, 0, SeqCst, SeqCst) == 1 {
+            unsafe { rok_sync_wake(self.sleep, i) };
+            return true;
+        }
+        return false;
+    }
+
+    fn wake_all(self) {
+        let i: usize = 0;
+        while i < self.workers() {
+            atomic_xchg(self.sleep, i, 0, SeqCst);
+            unsafe { rok_sync_wake(self.sleep, i) };
+            i = i + 1;
+        }
     }
 }
 
@@ -217,20 +300,63 @@ fn set_current(w: Worker) {
     unsafe { rok_task_exec_set(cell) };
 }
 
-fn push(q: Mutex<List<TaskRef>>, t: TaskRef) {
-    using g = q.lock() {
-        g.get().push(t);
+// ponytail: the queue lock spins (with `sched_yield`) instead of
+// sleeping: its critical sections are a few loads and stores.
+fn qlock(q: Queue) {
+    while atomic_cas(q.spin, 0, 0, 1, SeqCst, SeqCst) != 0 {
+        unsafe { rok_thread_yield_now() };
     }
 }
 
-fn pop_front(q: Mutex<List<TaskRef>>) -> TaskRef | none {
+fn qunlock(q: Queue) {
+    atomic_xchg(q.spin, 0, 0, SeqCst);
+}
+
+fn push(q: Queue, t: TaskRef) {
+    qlock(q);
+    {
+        let head = buf_get(q.meta, 0);
+        let len = buf_get(q.meta, 1);
+        let cap = buf_get(q.meta, 2);
+        let ring = buf_get(q.slots, 0);
+        if len == cap {
+            let bigger: GcBuf<TaskRef | none> = buf_new(cap * 2);
+            let i: usize = 0;
+            while i < len {
+                buf_set(bigger, i, buf_get(ring, (head + i) % cap));
+                i = i + 1;
+            }
+            buf_set(q.slots, 0, bigger);
+            ring = bigger;
+            head = 0;
+            cap = cap * 2;
+            buf_set(q.meta, 0, 0);
+            buf_set(q.meta, 2, cap);
+        }
+        buf_set(ring, (head + len) % cap, t);
+        atomic_xchg(q.meta, 1, len + 1, SeqCst);
+    }
+    qunlock(q);
+}
+
+fn pop_front(q: Queue) -> TaskRef | none {
+    if atomic_load(q.meta, 1, SeqCst) == 0 {
+        return none;
+    }
     let t: TaskRef | none = none;
-    using g = q.lock() {
-        let l = g.get();
-        if l.len() > 0 {
-            t = l.remove(0);
+    qlock(q);
+    {
+        let len = buf_get(q.meta, 1);
+        if len > 0 {
+            let head = buf_get(q.meta, 0);
+            let ring = buf_get(q.slots, 0);
+            t = buf_get(ring, head);
+            buf_set(ring, head, none);
+            buf_set(q.meta, 0, (head + 1) % buf_get(q.meta, 2));
+            atomic_xchg(q.meta, 1, len - 1, SeqCst);
         }
     }
+    qunlock(q);
     return t;
 }
 
@@ -238,11 +364,12 @@ fn schedule(t: TaskRef) {
     let pool = t.pool;
     if t.local {
         push(pool.locals[t.home], t);
-    } else {
-        match current() {
-            w: Worker => push(pool.deques[w.index], t),
-            none => push(pool.injector, t),
-        }
+        pool.wake_worker(t.home);
+        return;
+    }
+    match current() {
+        w: Worker => push(pool.deques[w.index], t),
+        none => push(pool.injector, t),
     }
     pool.notify();
 }
@@ -278,19 +405,24 @@ fn run(t: TaskRef) {
     if atomic_cas(t.state, 0, SCHEDULED, RUNNING, SeqCst, SeqCst) != SCHEDULED {
         return;
     }
-    if is_cancelled(t) {
-        finish(t);
-        return;
-    }
+    // A cancelled task is polled once more: its `await` sees the flag
+    // and leaves the body through its cleanups.
     let poll = buf_get(t.poll, 0);
     let ctx = Context::from_waker(Waker { task: t });
-    if poll(ctx) {
+    let ready = poll(ctx);
+    if ready || is_cancelled(t) {
         finish(t);
     } else if atomic_cas(t.state, 0, RUNNING, IDLE, SeqCst, SeqCst) != RUNNING {
         // Woken while it ran.
         atomic_xchg(t.state, 0, SCHEDULED, SeqCst);
         schedule(t);
     }
+}
+
+/// Is the task polling with `ctx` cancelled? (The compiler's `await`
+/// checks this: 2.18.4 cancellation points.)
+pub fn cancel_requested(ctx: Context) -> bool {
+    return atomic_load(ctx.waker.task.state, 1, SeqCst) != 0;
 }
 
 /// Wake every due timer; the nanoseconds to the next one (-1: none).
@@ -333,8 +465,16 @@ fn add_timer(deadline: i64, w: Waker) {
             i = p;
         }
     }
-    // Idle workers recompute how long to sleep.
-    pool.notify();
+    // A sleeping worker recomputes how long to sleep (even while others
+    // search: they may have read the timers already).
+    pool.wake_helpers();
+    let i: usize = 0;
+    while i < pool.workers() {
+        if pool.wake_worker(i) {
+            return;
+        }
+        i = i + 1;
+    }
 }
 
 fn swap_timers(tm: Timers, i: usize, j: usize) {
@@ -374,6 +514,7 @@ fn pop_timer(tm: Timers) {
 /// shuts down).
 fn work(w: Worker, main: TaskRef | none) {
     let pool = w.pool;
+    let i = w.index;
     loop {
         match main {
             m: TaskRef => {
@@ -386,8 +527,7 @@ fn work(w: Worker, main: TaskRef | none) {
         if atomic_load(pool.signal, 1, SeqCst) != 0 {
             return;
         }
-        let epoch = atomic_load(pool.signal, 0, SeqCst);
-        match find_task(pool, w.index) {
+        match find_task(pool, i) {
             t: TaskRef => {
                 run(t);
                 continue;
@@ -398,12 +538,55 @@ fn work(w: Worker, main: TaskRef | none) {
         if next == 0 {
             continue;
         }
-        // Sleep until a push / timer bumps the epoch, or the next timer.
+        // Search a little before sleeping (pushes meanwhile wake nobody).
+        atomic_add(pool.signal, 3, 1, SeqCst);
+        let found: TaskRef | none = none;
+        let spins = 0;
+        while spins < 4 {
+            unsafe { rok_thread_yield_now() };
+            found = find_task(pool, i);
+            match found {
+                t: TaskRef => { break; }
+                none => {}
+            }
+            spins = spins + 1;
+        }
+        atomic_add(pool.signal, 3, -1, SeqCst);
+        match found {
+            t: TaskRef => {
+                run(t);
+                continue;
+            }
+            none => {}
+        }
+        // Raise the sleep flag, look once more (a push after this sees
+        // the flag), then sleep until woken or the next timer.
+        atomic_xchg(pool.sleep, i, 1, SeqCst);
+        match find_task(pool, i) {
+            t: TaskRef => {
+                atomic_xchg(pool.sleep, i, 0, SeqCst);
+                run(t);
+                continue;
+            }
+            none => {}
+        }
+        let done = match main {
+            m: TaskRef => is_done(m),
+            none => false,
+        };
+        // The timers again: one added after the flag went up wakes us,
+        // one added before is seen here.
+        next = fire_timers(pool);
+        if next == 0 || done || atomic_load(pool.signal, 1, SeqCst) != 0 {
+            atomic_xchg(pool.sleep, i, 0, SeqCst);
+            continue;
+        }
         let wait: i64 = 1000000000;
         if next > 0 && next < wait {
             wait = next;
         }
-        unsafe { rok_sync_wait_timeout(pool.signal, 0, epoch, wait) };
+        unsafe { rok_sync_wait_timeout(pool.sleep, i, 1, wait) };
+        atomic_xchg(pool.sleep, i, 0, SeqCst);
     }
 }
 
@@ -471,7 +654,7 @@ fn run_pool(main: fn(Context) -> bool) {
     let t = new_task(pool, main, true, 0);
     work(w0, t);
     atomic_xchg(pool.signal, 1, 1, SeqCst);
-    pool.notify();
+    pool.wake_all();
     for h in handles {
         unsafe { rok_thread_join(h) };
     }
@@ -575,6 +758,7 @@ pub(pkg) fn fork_job(f: fn() + Send) -> Task<bool> {
 pub(pkg) fn help_until(t: Task<bool>) {
     let w = current_worker();
     let pool = w.pool;
+    atomic_add(pool.signal, 2, 1, SeqCst);
     while !is_done(t.task) {
         let epoch = atomic_load(pool.signal, 0, SeqCst);
         match find_task(pool, w.index) {
@@ -591,6 +775,7 @@ pub(pkg) fn help_until(t: Task<bool>) {
             unsafe { rok_sync_wait_timeout(pool.signal, 0, epoch, 1000000) };
         }
     }
+    atomic_add(pool.signal, 2, -1, SeqCst);
 }
 
 // ---- spawning ----
@@ -606,9 +791,10 @@ unsafe impl<T: Send> Send for Task<T> {}
 impl<T> Task<T> {
     pub fn is_finished(self) -> bool { return is_done(self.task); }
 
-    /// Ask the task to stop (2.18.4): it is not polled again (it ends at
-    /// its current suspension point). Awaiting it then panics; use
-    /// `try await t.join()` to see `CancellationError`.
+    /// Ask the task to stop (2.18.4): it is woken, its current `await`
+    /// leaves the body (running the `finally` / `using` cleanups on the
+    /// way out) and it finishes without a result. Awaiting it then
+    /// panics; use `try await t.join()` to see `CancellationError`.
     pub fn cancel(self) {
         atomic_xchg(self.task.state, 1, 1, SeqCst);
         wake_task(self.task);
@@ -825,36 +1011,38 @@ impl Debug for TimeoutError {
 
 impl Error for TimeoutError {}
 
-// ---- parking: async waits on sync primitives ----
+// ---- parking: async waits on sync primitives and fds ----
 
-/// Tasks waiting on a key (a primitive's GC address): `Mutex::lock_async`,
-/// `Receiver::recv_async` park here; the primitive unparks the key when
-/// it may have become ready (708's park / unpark at the task level).
-// ponytail: one process-wide list behind one lock (O(n) unpark).
+/// Tasks waiting on a key (a primitive's GC address, or an fd's
+/// `io_key`): `Mutex::lock_async`, `Receiver::recv_async`, socket I/O
+/// park here; whoever may have made the key ready unparks it (708's
+/// park / unpark at the task level).
+// ponytail: one process-wide table behind one lock.
 pub struct Parking {
-    entries: Mutex<List<Parked>>;
-}
-
-struct Parked {
-    key: usize;
-    waker: Waker;
+    lock: Mutex<i32>;
+    waiting: Dict<usize, List<Waker>>;
 }
 
 fn parking() -> Parking {
-    if unsafe { rok_task_parking_ready() } == 0 {
-        let p: GcBuf<Parking> = buf_new(1);
-        buf_set(p, 0, Parking { entries: Mutex::new(List::<Parked>::new()) });
-        return buf_get(unsafe { rok_task_parking_install(p) }, 0);
-    }
     let p: GcBuf<Parking> = buf_new(1);
+    if unsafe { rok_task_parking_ready() } == 0 {
+        buf_set(p, 0, Parking { lock: Mutex::new(0), waiting: Dict::<usize, List<Waker>>::new() });
+    }
     return buf_get(unsafe { rok_task_parking_install(p) }, 0);
 }
 
 /// Wake `waker` at the next `unpark(key)`.
 pub fn park(key: usize, waker: Waker) {
     let p = parking();
-    using g = p.entries.lock() {
-        g.get().push(Parked { key: key, waker: waker });
+    using g = p.lock.lock() {
+        match p.waiting.get(key) {
+            l: List<Waker> => l.push(waker),
+            none => {
+                let l: List<Waker> = List::new();
+                l.push(waker);
+                p.waiting.insert(key, l);
+            }
+        }
     }
 }
 
@@ -864,19 +1052,84 @@ pub fn unpark(key: usize) {
         return;
     }
     let p = parking();
-    let woken: List<Waker> = List::new();
-    using g = p.entries.lock() {
-        let l = g.get();
-        let i: usize = 0;
-        while i < l.len() {
-            if l[i].key == key {
-                woken.push(l.remove(i).waker);
-            } else {
+    let woken: List<Waker> | none = none;
+    using g = p.lock.lock() {
+        woken = p.waiting.remove(key);
+    }
+    match woken {
+        l: List<Waker> => {
+            for w in l {
+                w.wake();
+            }
+        }
+        none => {}
+    }
+}
+
+// ---- the I/O driver (707) ----
+
+/// The parking key of `fd`'s read (`write == 0`) or write readiness.
+fn io_key(fd: i32, write: i32) -> usize {
+    return (1usize << 62) | ((fd as usize) * 2 + (write as usize));
+}
+
+/// Start the driver thread once: it blocks in kqueue / epoll and
+/// unparks the tasks waiting on each fd that became ready.
+fn start_driver() {
+    if unsafe { rok_io_driver_claim() } == 0 {
+        return;
+    }
+    let body: fn() + Send = || {
+        let evs: GcBuf<i64> = buf_new(128);
+        loop {
+            let n = unsafe { rok_io_poll(evs, 128) };
+            let i: i32 = 0;
+            while i < n {
+                let k = buf_get(evs, i as usize);
+                unpark(io_key((k / 2) as i32, (k % 2) as i32));
                 i = i + 1;
             }
         }
-    }
-    for w in woken {
-        w.wake();
+    };
+    let h = unsafe { rok_thread_spawn(body, 0, rok_thread_new_id()) };
+    unsafe { rok_thread_detach(h) };
+}
+
+/// Completes once `fd` may be readable (`await task::readable(fd)`
+/// after a read hit `WouldBlock`); it may also complete spuriously, so
+/// retry the operation in a loop.
+pub fn readable(fd: i32) -> IoReady {
+    return IoReady { fd: fd, write: 0, armed: false };
+}
+
+/// `readable` for writes.
+pub fn writable(fd: i32) -> IoReady {
+    return IoReady { fd: fd, write: 1, armed: false };
+}
+
+pub struct IoReady {
+    fd: i32;
+    write: i32;
+    armed: bool;
+}
+
+impl Future for IoReady {
+    type Output = ();
+    fn poll(ref self, ref ctx: Context) -> Poll<()> {
+        if self.armed {
+            return Poll::Ready(());
+        }
+        start_driver();
+        if unsafe { rok_io_watch(self.fd) } < 0 {
+            // Not pollable: let the operation report the error.
+            return Poll::Ready(());
+        }
+        // Park first, then look: an edge after the look unparks us.
+        park(io_key(self.fd, self.write), ctx.waker);
+        if unsafe { rok_net_wait(self.fd, self.write, 0) } != 0 {
+            return Poll::Ready(());
+        }
+        self.armed = true;
+        return Poll::Pending;
     }
 }

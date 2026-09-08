@@ -39,7 +39,9 @@ use common::*;
 fn spec_probes() {
     let Some(env) = setup() else { return };
     let probes_dir = env.workspace.join("audit/probes");
-    let scratch = env.workspace.join("target/probe_tmp");
+    let scratch = env
+        .workspace
+        .join(format!("target/probe_tmp{}", opt_suffix()));
     let _ = fs::create_dir_all(&scratch);
 
     let mut paths: Vec<_> = fs::read_dir(&probes_dir)

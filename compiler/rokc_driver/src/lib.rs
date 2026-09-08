@@ -14,9 +14,9 @@ use rokc_hir::HirModule;
 use rokc_lexer::Lexer;
 use rokc_mir::MirModule;
 use rokc_parser::{
-    ExtOps, KeywordDef, MetaDef, MetaTable, PrecTable, apply_keywords, check_keyword,
-    collect_keywords, collect_lang_table, collect_meta_blocks, collect_prec_table, parse_program,
-    parse_program_meta,
+    ExtOps, KeywordDef, LitRule, LiteralDef, LiteralTable, MetaDef, MetaTable, PatKind, PrecTable,
+    apply_keywords, check_keyword, collect_keywords, collect_lang_table, collect_literals,
+    collect_meta_blocks, collect_prec_table, parse_pattern, parse_program, parse_program_meta,
 };
 
 pub use cfg::CfgEnv;
@@ -100,13 +100,23 @@ pub fn compile_source(
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let keywords = keyword_tables(
         metas.keywords,
+        path,
         &root_dir_kw,
         &config.bootstrap_files,
+        &mut diags,
+    );
+    let (lib_lits, user_lits) = literal_tables(
+        metas.literals,
+        path,
+        &root_dir_kw,
+        &config.bootstrap_files,
+        &ext,
         &mut diags,
     );
     let metas = MetaCtx {
         table: std::sync::Arc::clone(&meta_table),
         keywords: keywords.first().cloned().unwrap_or_default(),
+        literals: user_lits,
     };
     // Walk the user package's module tree (`mod foo;` follows files
     // alongside the entry `main.rok` / `lib.rok`) and merge every
@@ -158,6 +168,7 @@ pub fn compile_source(
         let metas = MetaCtx {
             table: std::sync::Arc::clone(&meta_table),
             keywords: keywords.get(i + 1).cloned().unwrap_or_default(),
+            literals: std::sync::Arc::clone(&lib_lits),
         };
         let tier = root
             .parent()
@@ -393,13 +404,17 @@ fn parse_and_descend(
 /// template tokens keep spans into the registered file).
 fn prepass_tokens(source: &str, file: &str, metas: &mut PrePass) -> Vec<rokc_lexer::Token> {
     let (mut tokens, _) = Lexer::new(source, file.to_owned()).lex_all();
-    if tokens.iter().any(|t| t.kind == rokc_lexer::TokenKind::At) || source.contains("#[keyword(") {
+    if tokens.iter().any(|t| t.kind == rokc_lexer::TokenKind::At)
+        || source.contains("#[keyword(")
+        || source.contains("#[literal(")
+    {
         let id = rokc_diagnostic::register_file(file.to_owned(), source.to_owned());
         for t in &mut tokens {
             t.span.file = id;
         }
         metas.metas.extend(collect_meta_blocks(&tokens, file));
         metas.keywords.extend(collect_keywords(&tokens, file));
+        metas.literals.extend(collect_literals(&tokens, file));
     }
     tokens
 }
@@ -410,6 +425,7 @@ fn prepass_tokens(source: &str, file: &str, metas: &mut PrePass) -> Vec<rokc_lex
 struct PrePass {
     metas: Vec<MetaDef>,
     keywords: Vec<KeywordDef>,
+    literals: Vec<LiteralDef>,
 }
 
 /// What a package's parse needs from the pre-pass: every meta block,
@@ -417,6 +433,8 @@ struct PrePass {
 struct MetaCtx {
     table: std::sync::Arc<MetaTable>,
     keywords: Vec<(String, Vec<String>)>,
+    /// `#[literal]` patterns: the libraries', plus the package's own.
+    literals: std::sync::Arc<LiteralTable>,
 }
 
 /// Spec 6.6: per package (user first, then each library root), its
@@ -424,24 +442,12 @@ struct MetaCtx {
 /// registered twice in a build is an error (6.6.4).
 fn keyword_tables(
     defs: Vec<KeywordDef>,
+    entry: &Path,
     user_dir: &Path,
     roots: &[PathBuf],
     diags: &mut Vec<RokDiagnostic>,
 ) -> Vec<Vec<(String, Vec<String>)>> {
-    // (package dir, path root) — user first.
-    let mut pkgs: Vec<(PathBuf, Vec<String>)> =
-        vec![(user_dir.to_path_buf(), vec!["pkg".to_owned()])];
-    for r in roots {
-        let dir = r
-            .parent()
-            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        let tier = dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("core")
-            .to_owned();
-        pkgs.push((dir, vec!["rok".to_owned(), tier]));
-    }
+    let pkgs = package_roots(user_dir, roots);
     let mut out = vec![Vec::new(); pkgs.len()];
     let mut seen: Vec<&KeywordDef> = Vec::new();
     for d in &defs {
@@ -461,31 +467,106 @@ fn keyword_tables(
             continue;
         }
         seen.push(d);
-        // The closest package directory owns the file; its path below
-        // that directory is the module path (`a/b.rok` → `a::b`).
-        // ponytail: a handler inside an inline `mod x { }` isn't found.
-        let file = Path::new(&d.file);
-        let Some((i, (dir, root))) = pkgs
-            .iter()
-            .enumerate()
-            .filter(|(_, (dir, _))| file.starts_with(dir))
-            .max_by_key(|(_, (dir, _))| dir.components().count())
-        else {
-            continue;
-        };
-        let mut path = root.clone();
-        let rel = file.strip_prefix(dir).unwrap_or(file).with_extension("");
-        let segs: Vec<String> = rel
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect();
-        if !(segs.len() == 1 && (segs[0] == "lib" || segs[0] == "main")) {
-            path.extend(segs);
+        if let Some((i, path)) = handler_path(&pkgs, entry, &d.file, &d.handler) {
+            out[i].push((d.name.clone(), path));
         }
-        path.push(d.handler.clone());
-        out[i].push((d.name.clone(), path));
     }
     out
+}
+
+/// (package dir, path root) of the user package, then each library root.
+fn package_roots(user_dir: &Path, roots: &[PathBuf]) -> Vec<(PathBuf, Vec<String>)> {
+    let mut pkgs: Vec<(PathBuf, Vec<String>)> =
+        vec![(user_dir.to_path_buf(), vec!["pkg".to_owned()])];
+    for r in roots {
+        let dir = r
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let tier = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("core")
+            .to_owned();
+        pkgs.push((dir, vec!["rok".to_owned(), tier]));
+    }
+    pkgs
+}
+
+/// The package index and absolute path of `handler` defined in `file`:
+/// the closest package directory owns the file; its path below that
+/// directory is the module path (`a/b.rok` → `a::b`); the build's entry
+/// file is its package's root module.
+// ponytail: a handler inside an inline `mod x { }` isn't found.
+fn handler_path(
+    pkgs: &[(PathBuf, Vec<String>)],
+    entry: &Path,
+    file: &str,
+    handler: &str,
+) -> Option<(usize, Vec<String>)> {
+    let file = Path::new(file);
+    let (i, (dir, root)) = pkgs
+        .iter()
+        .enumerate()
+        .filter(|(_, (dir, _))| file.starts_with(dir))
+        .max_by_key(|(_, (dir, _))| dir.components().count())?;
+    let mut path = root.clone();
+    let rel = file.strip_prefix(dir).unwrap_or(file).with_extension("");
+    let segs: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    if file != entry && !(segs.len() == 1 && (segs[0] == "lib" || segs[0] == "main")) {
+        path.extend(segs);
+    }
+    path.push(handler.to_owned());
+    Some((i, path))
+}
+
+/// Spec 6.5: the `#[literal]` patterns the parser matches — the
+/// libraries' (seen by every package) and the user package's own (seen
+/// by it only). The built-in shapes are dispatched by HIR instead, and
+/// an invalid pattern is reported by the real parse.
+fn literal_tables(
+    defs: Vec<LiteralDef>,
+    entry: &Path,
+    user_dir: &Path,
+    roots: &[PathBuf],
+    ext: &ExtOps,
+    diags: &mut Vec<RokDiagnostic>,
+) -> (std::sync::Arc<LiteralTable>, std::sync::Arc<LiteralTable>) {
+    let pkgs = package_roots(user_dir, roots);
+    let (mut lib, mut user) = (LiteralTable::default(), LiteralTable::default());
+    for d in defs {
+        if d.handler.is_empty() {
+            diags.push(
+                RokDiagnostic::error(
+                    rokc_diagnostic::ErrorKind::Meta,
+                    "`#[literal(..)]` must be on a function — its handler (spec 6.5.2)",
+                )
+                .with_span(d.span, ""),
+            );
+            continue;
+        }
+        let Ok(pattern) = parse_pattern(&d.tokens, &ext.symbols()) else {
+            continue;
+        };
+        let Ok(kind) = pattern.kind() else { continue };
+        if matches!(kind, PatKind::Shape(_)) {
+            continue;
+        }
+        let Some((i, handler)) = handler_path(&pkgs, entry, &d.file, &d.handler) else {
+            continue;
+        };
+        let rule = LitRule {
+            pattern,
+            kind,
+            handler,
+            span: d.span,
+        };
+        if i == 0 { &mut user } else { &mut lib }.rules.push(rule);
+    }
+    user.rules.extend(lib.rules.iter().cloned());
+    (std::sync::Arc::new(lib), std::sync::Arc::new(user))
 }
 
 fn walk_mod_decls(
@@ -582,7 +663,8 @@ fn collect_module_tree(
     }
     apply_keywords(&mut tokens, &metas.keywords, diags);
 
-    let (program, mut parse_diags) = parse_program_meta(&tokens, file, ext, &metas.table);
+    let (program, mut parse_diags) =
+        parse_program_meta(&tokens, file, ext, &metas.table, &metas.literals);
     diags.append(&mut parse_diags);
 
     // Filter `#[cfg(...)]`-gated items before walking — excluded modules

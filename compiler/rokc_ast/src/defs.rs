@@ -210,6 +210,35 @@ pub enum StmtKind {
     Throw(Expr),
 }
 
+/// One `#[literal]` handler a literal matched, with its captures.
+#[derive(Clone, Debug)]
+pub struct LitCand {
+    /// The handler's absolute path.
+    pub handler: Path,
+    pub args: Vec<LitArg>,
+    pub priority: i64,
+    /// The `#[literal]` attribute.
+    pub reg: Span,
+}
+
+/// A handler argument: one capture, or a repetition's items (a
+/// variadic `...T` parameter's arguments, else one array argument).
+#[derive(Clone, Debug)]
+pub enum LitArg {
+    One(Expr),
+    Many(Vec<Expr>),
+}
+
+impl LitArg {
+    #[must_use]
+    pub fn exprs(&self) -> &[Expr] {
+        match self {
+            Self::One(e) => std::slice::from_ref(e),
+            Self::Many(es) => es,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Expr {
     pub kind: ExprKind,
@@ -232,6 +261,10 @@ pub enum ExprKind {
     },
     Dict(Vec<(Expr, Expr)>),
     Set(Vec<Expr>),
+    /// Source matched by registered `#[literal(..)]` patterns (spec
+    /// 6.5.4): one candidate per matching handler; HIR picks one by the
+    /// slot's type, then priority (6.5.5).
+    MagicLiteral(Vec<LitCand>),
     Block(Block),
     /// `unsafe { ... }` (spec 4.15.2).
     Unsafe(Block),

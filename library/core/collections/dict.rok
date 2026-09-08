@@ -323,3 +323,13 @@ impl<K: Hash + Debug, V: Debug> Debug for Dict<K, V> {
         return out + "}";
     }
 }
+
+/// `{k: v, ..}` (refs-lang 6.5.1, 6.5.6).
+#[literal("{" {expr ":" expr} % "," * "}")]
+pub fn dict_literal<K: Hash, V>(pairs: ...(K, V)) -> Dict<K, V> {
+    let d: Dict<K, V> = Dict::new();
+    for (k, v) in pairs {
+        d.insert(k, v);
+    }
+    return d;
+}

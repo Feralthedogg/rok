@@ -13,11 +13,11 @@ use crate::unicode::{
     normalize_ident, skeleton,
 };
 
-const INT_SUFFIXES: &[&str] = &[
+pub const INT_SUFFIXES: &[&str] = &[
     "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize",
     "c_char",
 ];
-const FLOAT_SUFFIXES: &[&str] = &["f32", "f64"];
+pub const FLOAT_SUFFIXES: &[&str] = &["f32", "f64"];
 
 pub struct Lexer<'src> {
     src: &'src str,
@@ -605,18 +605,14 @@ impl<'src> Lexer<'src> {
                         format!("float suffix `{suffix}` on a base-{radix} literal"),
                     );
                 }
-            } else if INT_SUFFIXES.contains(&suffix) {
-                if is_float {
-                    self.error_from(
-                        start,
-                        format!("integer suffix `{suffix}` on a float literal"),
-                    );
-                }
-            } else {
-                // ponytail: user literal suffixes (`2i`, spec 1.6.2 /
-                // 6.5 literal handlers) are not implemented yet.
-                self.error_from(start, format!("unknown numeric literal suffix `{suffix}`"));
+            } else if INT_SUFFIXES.contains(&suffix) && is_float {
+                self.error_from(
+                    start,
+                    format!("integer suffix `{suffix}` on a float literal"),
+                );
             }
+            // Any other suffix (`2i`) belongs to a `#[literal(number "i")]`
+            // handler (spec 1.6.2, 6.5); the parser resolves it.
         }
         self.check_range(start, &self.src[start..body_end], radix, is_float, suffix);
         if is_float {
@@ -1063,12 +1059,13 @@ mod tests {
             "-128i8",
             "255u8",
             "0123",
+            "2i", // a `#[literal]` suffix: the parser resolves it
         ] {
             ok(good);
         }
         for bad in [
             "0x", "0b", "0o", "1__0", "1_", "0x_FF", "1e", "0b102", "0o8", "1.5i32", "300i8",
-            "256u8", "128i8", "2i", "1e999f32", "0b1f32",
+            "256u8", "128i8", "1e999f32", "0b1f32",
         ] {
             err(bad);
         }

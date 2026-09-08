@@ -1,0 +1,9 @@
+// expect-error: a `% "sep"` separator must be followed by `*` or `+`
+#[literal("<<" {expr} % "," ">>")]
+fn f(xs: ...i32) -> i32 {
+    return 0;
+}
+
+fn main() -> i32 {
+    return 0;
+}

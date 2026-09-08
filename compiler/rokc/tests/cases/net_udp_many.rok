@@ -1,0 +1,140 @@
+// expect-exit: 0
+// expect-stdout:
+// udp blocking: ping from b -> pong
+// udp async: 10 datagrams, sum 45
+// udp connected: hi
+// would block: true
+// timed out: true
+// connections: 80 clients x 5 rounds ok, peak open >= 40: true
+
+// std::net (302): UDP round trips (blocking, async, connected), the
+// non-blocking / timeout modes, and many concurrent TCP connections
+// served by tasks on the pool.
+use rok::std::net::{TcpListener, TcpStream, UdpSocket, SocketAddr};
+use rok::std::net;
+use rok::std::io::{IoError, IoErrorKind, byte_buf};
+
+fn text(buf: List<u8>, n: usize) -> str {
+    let sb = StrBuf::new();
+    let i: usize = 0;
+    while i < n { sb.push_byte(buf[i]); i = i + 1; }
+    return sb.to_str();
+}
+
+let any: SocketAddr = try! "127.0.0.1:0".parse::<SocketAddr>();
+
+// ---- UDP, blocking ----
+let a = try! UdpSocket::bind(any);
+let b = try! net::udp_bind("127.0.0.1:0");
+let a_addr = try! a.local_addr();
+try! b.send_to("ping".as_bytes(), a_addr);
+let buf = byte_buf(64);
+let (n, from) = try! a.recv_from(buf);
+let ping = text(buf, n);
+try! a.send_to("pong".as_bytes(), from);
+let (m, _) = try! b.recv_from(buf);
+let local = if from == (try! b.local_addr()) { "b" } else { "?" };
+println(f"udp blocking: {ping} from {local} -> {text(buf, m)}");
+
+// ---- UDP, async: the receiver task suspends between datagrams ----
+let rx = task::spawn(async {
+    let sum: i32 = 0;
+    let count: i32 = 0;
+    let rbuf = byte_buf(16);
+    while count < 10 {
+        let (k, _) = try! await a.recv_from_async(rbuf);
+        sum = sum + (rbuf[0] as i32);
+        count = count + k as i32;
+    }
+    let r: (i32, i32) = (count, sum);
+    r
+});
+await task::sleep(Duration::ms(5));
+let i: u8 = 0u8;
+while i < 10u8 {
+    try! await b.send_to_async([i], a_addr);
+    await task::sleep(Duration::ms(1));
+    i = i + 1u8;
+}
+let (count, sum) = await rx;
+println(f"udp async: {count} datagrams, sum {sum}");
+
+// ---- UDP, connected ----
+try! b.connect(a_addr);
+try! b.send("hi".as_bytes());
+let got = try! a.recv(buf);
+println(f"udp connected: {text(buf, got)}");
+
+// ---- modes ----
+try! a.set_nonblocking(true);
+let wb = false;
+try a.recv(buf) catch e: IoError { wb = e.kind() == IoErrorKind::WouldBlock; };
+println(f"would block: {wb}");
+try! a.set_nonblocking(false);
+try! a.set_read_timeout(Duration::ms(20));
+let to = false;
+try a.recv(buf) catch e: IoError { to = e.kind() == IoErrorKind::TimedOut; };
+println(f"timed out: {to}");
+a.close();
+b.close();
+
+// ---- many concurrent TCP connections on the pool ----
+let l = try! TcpListener::bind(any);
+let addr = try! l.local_addr();
+let open = Atomic::new(0);
+let peak = Mutex::new(0);
+let clients = 80;
+let server = task::spawn(async {
+    let conns: List<Task<i32>> = [];
+    while conns.len() < clients as usize {
+        let (c, _) = try! await l.accept_async();
+        conns.push(task::spawn(async {
+            let cur = open.fetch_add(1) + 1;
+            using g = peak.lock() { if cur > g.get() { g.set(cur); } }
+            let rb = byte_buf(64);
+            let rounds = 0;
+            while true {
+                let k = try! await c.read_async(rb);
+                if k == 0 { break; }
+                let part: List<u8> = List::new();
+                let j: usize = 0;
+                while j < k { part.push(rb[j]); j = j + 1; }
+                try! await c.write_all_async(part);
+                rounds = rounds + 1;
+            }
+            open.fetch_sub(1);
+            c.close();
+            rounds
+        }));
+    }
+    let total = 0;
+    for r in await task::join(conns) { total = total + r; }
+    total
+});
+let tasks: List<Task<bool>> = [];
+let k = 0;
+while k < clients {
+    let me = k;
+    tasks.push(task::spawn(async {
+        let s = try! await TcpStream::connect_async(addr);
+        let ok = true;
+        let cb = byte_buf(64);
+        let r = 0;
+        while r < 5 {
+            let msg = f"c{me}r{r}";
+            try! await s.write_str_async(msg);
+            let n = try! await s.read_async(cb);
+            if text(cb, n) != msg { ok = false; }
+            await task::sleep(Duration::ms(2));
+            r = r + 1;
+        }
+        s.close();
+        ok
+    }));
+    k = k + 1;
+}
+let good = 0;
+for ok in await task::join(tasks) { if ok { good = good + 1; } }
+let rounds = await server;
+println(f"connections: {good} clients x {rounds / good} rounds ok, peak open >= 40: {peak.lock().get() >= 40}");
+l.close();

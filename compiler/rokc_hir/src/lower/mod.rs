@@ -26,6 +26,7 @@ mod expr;
 mod mono;
 mod pattern;
 mod resolve;
+mod send_check;
 mod throws;
 
 use collect::collect_unknown_paths;
@@ -433,7 +434,19 @@ struct Env<'a> {
     statics: HashMap<String, HirTy>,
     /// Statics that may be assigned (`extern` `static mut`, spec 5.9.3).
     mut_statics: std::collections::HashSet<String>,
+    /// `#[literal]` handlers of the built-in literal shapes (spec 6.5).
+    literal_shapes: Vec<ShapeHandler>,
     names: TypeNames<'a>,
+}
+
+/// A handler registered with a built-in shape's pattern (`[..]` etc.).
+struct ShapeHandler {
+    shape: rokc_parser::Shape,
+    /// The handler's full name.
+    name: String,
+    priority: i64,
+    /// The `#[literal]` attribute.
+    span: rokc_diagnostic::Span,
 }
 
 /// What `any Tr` needs from a trait declaration.

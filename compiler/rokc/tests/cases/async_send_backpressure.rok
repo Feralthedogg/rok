@@ -1,0 +1,73 @@
+// expect-exit: 0
+// expect-stdout:
+// queued while full: 2
+// received 20 sum 190
+// never more than 2 ahead: true
+// rendezvous try_send to an async receiver: ok 42
+// rendezvous send_async waited: true
+// closed: Closed(9)
+
+// `Sender::send_async` suspends the task while a bounded channel is full
+// (backpressure without blocking the worker); a rendezvous `try_send`
+// succeeds when the receiver is suspended in `recv_async`.
+let (tx, rx) = channel_bounded::<i32>(2);
+let sent = Atomic::new(0);
+let producer = task::spawn(async {
+    let i = 0;
+    while i < 20 {
+        try! await tx.send_async(i);
+        sent.fetch_add(1);
+        i = i + 1;
+    }
+    tx.close();
+    0
+});
+// Nobody receives yet: the producer stops after filling the queue.
+await task::sleep(Duration::ms(20));
+println(f"queued while full: {sent.load()}");
+let count = 0;
+let sum = 0;
+let ahead = 0;
+while true {
+    match await rx.recv_async() {
+        v: i32 => {
+            count = count + 1;
+            sum = sum + v;
+            let a = sent.load() - count;
+            if a > ahead { ahead = a; }
+            await task::sleep(Duration::ms(1));
+        }
+        none => break,
+    }
+}
+await producer;
+println(f"received {count} sum {sum}");
+println(f"never more than 2 ahead: {ahead <= 2}");
+
+// Rendezvous: a receiver suspended in `recv_async` makes `try_send` ready.
+let (rtx, rrx) = channel_bounded::<i32>(0);
+let waiter = task::spawn(async { await rrx.recv_async() });
+await task::sleep(Duration::ms(20));
+let ok = true;
+try rtx.try_send(42) catch e: TrySendError<i32> { ok = false; };
+match await waiter {
+    v: i32 => println(f"rendezvous try_send to an async receiver: {if ok { "ok" } else { "full" }} {v}"),
+    none => println("closed"),
+}
+
+// Rendezvous `send_async` returns only once the value is taken.
+let (ztx, zrx) = channel_bounded::<i32>(0);
+let taken = Atomic::new(0);
+let sender = task::spawn(async {
+    try! await ztx.send_async(7);
+    taken.load() == 1
+});
+await task::sleep(Duration::ms(20));
+taken.store(1);
+zrx.recv();
+println(f"rendezvous send_async waited: {await sender}");
+
+ztx.close();
+try await ztx.send_async(9) catch e: SendError<i32> {
+    match e { SendError::Closed(v) => println(f"closed: Closed({v})"), }
+};

@@ -1,0 +1,14 @@
+// expect-exit: 4
+
+// A block-like statement (`while` / `if` / `loop` / `match` / `{}`) ends
+// the statement: a following `(..)` / `[..]` starts a new expression, it
+// is not a call / index of the loop (spec 3.9). This used to parse
+// `while .. {} (c, 1)` as a call, and the async probe swallowed the
+// error into an ICE ("expression has no resolved type").
+fn main() -> i32 {
+    let f = async { let c = 0; while c < 3 { await task::yield_now(); c = c + 1; } (c, 1) };
+    let (a, b) = task::block_on(f);
+    let t = { if a > 0 {} (a, b) };
+    let xs = { loop { break; } [t.0, t.1] };
+    xs[0] + xs[1]
+}

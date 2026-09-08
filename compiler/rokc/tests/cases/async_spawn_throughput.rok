@@ -1,0 +1,43 @@
+// expect-exit: 0
+// expect-stdout:
+// tasks 100000 sum 4999950000
+// fan-out 1000 x 20 yields: 20000
+// within bound: true
+
+// Executor throughput: 100k tiny tasks spawned and joined, then tasks
+// that yield repeatedly. The bound is generous (debug build, shared CI).
+let start = Instant::now();
+// In batches of 1000, so the live heap (and the GC's work) stays small.
+let sum: i64 = 0;
+let i: i64 = 0;
+while i < 100000 {
+    let tasks: List<Task<i64>> = [];
+    let b = 0;
+    while b < 1000 {
+        let v = i;
+        tasks.push(task::spawn(async { v }));
+        i = i + 1;
+        b = b + 1;
+    }
+    for t in tasks { sum = sum + await t; }
+}
+println(f"tasks 100000 sum {sum}");
+
+let hops = Atomic::new(0);
+let busy: List<Task<i32>> = [];
+let k = 0;
+while k < 1000 {
+    busy.push(task::spawn(async {
+        let j = 0;
+        while j < 20 {
+            await task::yield_now();
+            hops.fetch_add(1);
+            j = j + 1;
+        }
+        0
+    }));
+    k = k + 1;
+}
+await task::join(busy);
+println(f"fan-out 1000 x 20 yields: {hops.load()}");
+println(f"within bound: {start.elapsed().as_millis() < 120000}");

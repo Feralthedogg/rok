@@ -1,0 +1,1132 @@
+// rok::std::net (stdlib spec 302): TCP / UDP sockets, addresses, DNS.
+//
+// Sockets are non-blocking underneath. The blocking calls (`accept`,
+// `read`, ...) wait for readiness with `poll` — so read / write timeouts
+// are that wait's limit — and `set_nonblocking(true)` makes them throw
+// `WouldBlock` instead. The `*_async` calls suspend the task until the
+// I/O driver (`task::readable` / `writable`, refs-lang 7.7) sees the fd
+// ready: `try await s.read_async(buf)`.
+//
+// Byte buffers are `List<u8>` where the spec writes `Slice<u8>` (as in
+// `io`): `read(buf)` fills `buf[0..n]` of a pre-sized list.
+//
+// ponytail: spec 302 makes the plain calls suspend inside a task; here
+// they block the worker and the `*_async` variants suspend (a sync fn
+// cannot suspend a stackless coroutine). No Unix sockets, TLS, IPv6
+// multicast, zero-copy hooks (302.3 / 302.5 / 302.7). `set_*_timeout`
+// applies to the blocking calls only (`task::timeout` covers async).
+
+use rok::std::io::{IoError, IoErrorKind, Reader, Writer, check, err_cell, check_cell, raw_of, fill};
+use rok::std::time::Duration;
+
+extern "C" {
+    fn rok_os_close(fd: i32) -> i32;
+    fn rok_os_dup(fd: i32) -> i32;
+    fn rok_os_read(fd: i32, max: usize, err: GcBuf<i32>) -> str;
+    fn rok_os_errno_kind(code: i32) -> i32;
+    fn rok_net_socket(family: i32, kind: i32) -> i32;
+    fn rok_net_bind(fd: i32, addr: GcBuf<i64>) -> i32;
+    fn rok_net_listen(fd: i32, backlog: i32) -> i32;
+    fn rok_net_connect(fd: i32, addr: GcBuf<i64>) -> i32;
+    fn rok_net_sock_error(fd: i32) -> i32;
+    fn rok_net_accept(fd: i32, out: GcBuf<i64>) -> i32;
+    fn rok_net_addr(fd: i32, out: GcBuf<i64>, peer: i32) -> i32;
+    fn rok_net_send(fd: i32, s: str, off: usize) -> isize;
+    fn rok_net_send_to(fd: i32, s: str, addr: GcBuf<i64>) -> isize;
+    fn rok_net_recv_from(fd: i32, max: usize, out: GcBuf<i64>, err: GcBuf<i32>) -> str;
+    fn rok_net_shutdown(fd: i32, how: i32) -> i32;
+    fn rok_net_setopt(fd: i32, opt: i32, val: i64) -> i32;
+    fn rok_net_multicast_v4(fd: i32, group: u32, iface: u32, join: i32) -> i32;
+    fn rok_net_wait(fd: i32, write: i32, timeout_ns: i64) -> i32;
+    fn rok_net_resolve(host: str, port: u16, out: GcBuf<i64>, max: usize) -> i32;
+    fn rok_net_gai_strerror(code: i32) -> str;
+}
+
+// ---- addresses (302.4) ----
+
+pub struct Ipv4Addr {
+    pub octets: [u8; 4];
+}
+
+pub struct Ipv6Addr {
+    pub segments: [u16; 8];
+}
+
+impl Ipv4Addr {
+    pub const LOCALHOST: Ipv4Addr = Ipv4Addr { octets: [127u8, 0u8, 0u8, 1u8] };
+    pub const UNSPECIFIED: Ipv4Addr = Ipv4Addr { octets: [0u8, 0u8, 0u8, 0u8] };
+
+    pub fn new(a: u8, b: u8, c: u8, d: u8) -> Ipv4Addr {
+        return Ipv4Addr { octets: [a, b, c, d] };
+    }
+
+    /// The address as a big-endian number (`a.b.c.d` = `a << 24 | ..`).
+    pub fn to_bits(self) -> u32 {
+        return ((self.octets[0] as u32) << 24) | ((self.octets[1] as u32) << 16)
+            | ((self.octets[2] as u32) << 8) | (self.octets[3] as u32);
+    }
+
+    pub fn is_loopback(self) -> bool { return self.octets[0] == 127u8; }
+    pub fn is_unspecified(self) -> bool { return self.to_bits() == 0u32; }
+    pub fn is_multicast(self) -> bool { return self.octets[0] >= 224u8 && self.octets[0] <= 239u8; }
+}
+
+impl Ipv6Addr {
+    pub const LOCALHOST: Ipv6Addr = Ipv6Addr { segments: [0u16, 0u16, 0u16, 0u16, 0u16, 0u16, 0u16, 1u16] };
+    pub const UNSPECIFIED: Ipv6Addr = Ipv6Addr { segments: [0u16, 0u16, 0u16, 0u16, 0u16, 0u16, 0u16, 0u16] };
+
+    pub fn new(a: u16, b: u16, c: u16, d: u16, e: u16, f: u16, g: u16, h: u16) -> Ipv6Addr {
+        return Ipv6Addr { segments: [a, b, c, d, e, f, g, h] };
+    }
+
+    pub fn is_loopback(self) -> bool {
+        let i = 0;
+        while i < 7 {
+            if self.segments[i] != 0u16 { return false; }
+            i = i + 1;
+        }
+        return self.segments[7] == 1u16;
+    }
+}
+
+impl PartialEq for Ipv4Addr {
+    fn eq(self, rhs: Ipv4Addr) -> bool { return self.to_bits() == rhs.to_bits(); }
+    fn ne(self, rhs: Ipv4Addr) -> bool { return !self.eq(rhs); }
+}
+
+impl PartialEq for Ipv6Addr {
+    fn eq(self, rhs: Ipv6Addr) -> bool {
+        let i = 0;
+        while i < 8 {
+            if self.segments[i] != rhs.segments[i] { return false; }
+            i = i + 1;
+        }
+        return true;
+    }
+    fn ne(self, rhs: Ipv6Addr) -> bool { return !self.eq(rhs); }
+}
+
+impl Display for Ipv4Addr {
+    fn display(self) -> str {
+        return f"{self.octets[0]}.{self.octets[1]}.{self.octets[2]}.{self.octets[3]}";
+    }
+}
+
+impl Debug for Ipv4Addr {
+    fn debug(self) -> str { return self.display(); }
+}
+
+impl Display for Ipv6Addr {
+    /// RFC 5952: lowercase hex, the longest run (2+) of zero groups as `::`.
+    fn display(self) -> str {
+        let best = 0 - 1;
+        let best_len = 1;
+        let i = 0;
+        while i < 8 {
+            let j = i;
+            while j < 8 && self.segments[j] == 0u16 { j = j + 1; }
+            if j - i > best_len {
+                best = i;
+                best_len = j - i;
+            }
+            if j > i { i = j; } else { i = i + 1; }
+        }
+        let out = "";
+        let k = 0;
+        while k < 8 {
+            if k == best {
+                out = out + "::";
+                k = k + best_len;
+                continue;
+            }
+            if out.len() > 0 && !out.ends_with(":") { out = out + ":"; }
+            out = out + hex(self.segments[k] as u64);
+            k = k + 1;
+        }
+        return out;
+    }
+}
+
+impl Debug for Ipv6Addr {
+    fn debug(self) -> str { return self.display(); }
+}
+
+fn hex(n: u64) -> str {
+    if n == 0u64 { return "0"; }
+    let digits = "0123456789abcdef";
+    let out = "";
+    while n > 0u64 {
+        let d = (n % 16u64) as usize;
+        out = digits.slice(d, d + 1) + out;
+        n = n / 16u64;
+    }
+    return out;
+}
+
+pub struct SocketAddrV4 {
+    pub ip: Ipv4Addr;
+    pub port: u16;
+}
+
+pub struct SocketAddrV6 {
+    pub ip: Ipv6Addr;
+    pub port: u16;
+    pub flow_info: u32;
+    pub scope_id: u32;
+}
+
+pub enum SocketAddr {
+    V4(SocketAddrV4),
+    V6(SocketAddrV6),
+}
+
+impl SocketAddr {
+    pub fn v4(ip: Ipv4Addr, port: u16) -> SocketAddr {
+        return SocketAddr::V4(SocketAddrV4 { ip: ip, port: port });
+    }
+
+    pub fn v6(ip: Ipv6Addr, port: u16) -> SocketAddr {
+        return SocketAddr::V6(SocketAddrV6 { ip: ip, port: port, flow_info: 0u32, scope_id: 0u32 });
+    }
+
+    pub fn port(self) -> u16 {
+        match self {
+            SocketAddr::V4(a) => a.port,
+            SocketAddr::V6(a) => a.port,
+        }
+    }
+
+    pub fn with_port(self, port: u16) -> SocketAddr {
+        match self {
+            SocketAddr::V4(a) => SocketAddr::v4(a.ip, port),
+            SocketAddr::V6(a) => SocketAddr::V6(SocketAddrV6 { ip: a.ip, port: port, flow_info: a.flow_info, scope_id: a.scope_id }),
+        }
+    }
+
+    pub fn is_ipv4(self) -> bool {
+        match self {
+            SocketAddr::V4(a) => true,
+            SocketAddr::V6(a) => false,
+        }
+    }
+
+    pub fn is_ipv6(self) -> bool { return !self.is_ipv4(); }
+
+    fn family(self) -> i32 {
+        if self.is_ipv4() { return 4; }
+        return 6;
+    }
+}
+
+impl PartialEq for SocketAddr {
+    fn eq(self, rhs: SocketAddr) -> bool { return self.display() == rhs.display(); }
+    fn ne(self, rhs: SocketAddr) -> bool { return !self.eq(rhs); }
+}
+
+impl Display for SocketAddr {
+    fn display(self) -> str {
+        match self {
+            SocketAddr::V4(a) => f"{a.ip.display()}:{a.port}",
+            SocketAddr::V6(a) => f"[{a.ip.display()}]:{a.port}",
+        }
+    }
+}
+
+impl Debug for SocketAddr {
+    fn debug(self) -> str { return self.display(); }
+}
+
+// ---- parsing ----
+
+fn bad_addr(s: str) -> ParseError {
+    return ParseError { input: s, pos: 0, reason: "invalid IP address syntax" };
+}
+
+/// Digits of `s` in `radix` (at most `max_len` of them) as a number.
+fn number(s: str, radix: u64, max_len: usize) -> u64 | none {
+    if s.len() == 0 || s.len() > max_len { return none; }
+    let n = 0u64;
+    for b in s.bytes() {
+        let d = if b >= 48u8 && b <= 57u8 {
+            (b - 48u8) as u64
+        } else if b >= 97u8 && b <= 102u8 {
+            (b - 87u8) as u64
+        } else if b >= 65u8 && b <= 70u8 {
+            (b - 55u8) as u64
+        } else {
+            99u64
+        };
+        if d >= radix { return none; }
+        n = n * radix + d;
+    }
+    return n;
+}
+
+fn parse_v4(s: str) -> Ipv4Addr | none {
+    let parts: List<u8> = List::new();
+    for p in s.split(".") {
+        match number(p, 10u64, 3) {
+            n: u64 => {
+                if n > 255u64 { return none; }
+                parts.push(n as u8);
+            }
+            none => { return none; }
+        }
+    }
+    if parts.len() != 4 { return none; }
+    return Ipv4Addr::new(parts[0], parts[1], parts[2], parts[3]);
+}
+
+/// Hex groups of one side of `::` (empty side: no groups).
+fn groups(s: str) -> List<u16> | none {
+    let out: List<u16> = List::new();
+    if s.len() == 0 { return out; }
+    for p in s.split(":") {
+        match number(p, 16u64, 4) {
+            n: u64 => out.push(n as u16),
+            none => { return none; }
+        }
+    }
+    return out;
+}
+
+fn parse_v6(s: str) -> Ipv6Addr | none {
+    let seg: List<u16> = List::new();
+    match s.find("::") {
+        at: usize => {
+            let head = groups(s.slice(0, at));
+            let tail = groups(s.slice(at + 2, s.len()));
+            match (head, tail) {
+                (h: List<u16>, t: List<u16>) => {
+                    if h.len() + t.len() > 7 { return none; }
+                    for g in h { seg.push(g); }
+                    let k = h.len() + t.len();
+                    while k < 8 { seg.push(0u16); k = k + 1; }
+                    for g in t { seg.push(g); }
+                }
+                _ => { return none; }
+            }
+        }
+        none => {
+            match groups(s) {
+                g: List<u16> => { seg = g; }
+                none => { return none; }
+            }
+        }
+    }
+    if seg.len() != 8 { return none; }
+    return Ipv6Addr::new(seg[0], seg[1], seg[2], seg[3], seg[4], seg[5], seg[6], seg[7]);
+}
+
+impl FromStr for Ipv4Addr {
+    type Err = ParseError;
+    fn from_str(s: str) throws (ParseError) -> Ipv4Addr {
+        match parse_v4(s) {
+            a: Ipv4Addr => { return a; }
+            none => { throw bad_addr(s); }
+        }
+    }
+}
+
+impl FromStr for Ipv6Addr {
+    type Err = ParseError;
+    fn from_str(s: str) throws (ParseError) -> Ipv6Addr {
+        match parse_v6(s) {
+            a: Ipv6Addr => { return a; }
+            none => { throw bad_addr(s); }
+        }
+    }
+}
+
+fn parse_socket_addr(s: str) -> SocketAddr | none {
+    if s.starts_with("[") {
+        match s.find("]:") {
+            at: usize => {
+                let ip = parse_v6(s.slice(1, at));
+                let port = number(s.slice(at + 2, s.len()), 10u64, 5);
+                match (ip, port) {
+                    (a: Ipv6Addr, p: u64) => {
+                        if p > 65535u64 { return none; }
+                        return SocketAddr::v6(a, p as u16);
+                    }
+                    _ => { return none; }
+                }
+            }
+            none => { return none; }
+        }
+    }
+    match s.rfind(":") {
+        at: usize => {
+            let ip = parse_v4(s.slice(0, at));
+            let port = number(s.slice(at + 1, s.len()), 10u64, 5);
+            match (ip, port) {
+                (a: Ipv4Addr, p: u64) => {
+                    if p > 65535u64 { return none; }
+                    return SocketAddr::v4(a, p as u16);
+                }
+                _ => { return none; }
+            }
+        }
+        none => { return none; }
+    }
+}
+
+/// `"127.0.0.1:8080"` / `"[::1]:8080"`.
+impl FromStr for SocketAddr {
+    type Err = ParseError;
+    fn from_str(s: str) throws (ParseError) -> SocketAddr {
+        match parse_socket_addr(s) {
+            a: SocketAddr => { return a; }
+            none => { throw ParseError { input: s, pos: 0, reason: "invalid socket address syntax" }; }
+        }
+    }
+}
+
+// ---- runtime marshalling: `[family, port, flow, scope, bytes..16]` ----
+
+const ADDR_WORDS: usize = 20;
+
+fn words_of(a: SocketAddr) -> GcBuf<i64> {
+    let w: GcBuf<i64> = buf_new(ADDR_WORDS);
+    match a {
+        SocketAddr::V4(v) => {
+            buf_set(w, 0, 4i64);
+            buf_set(w, 1, v.port as i64);
+            let i: usize = 0;
+            while i < 4 {
+                buf_set(w, 4 + i, v.ip.octets[i] as i64);
+                i = i + 1;
+            }
+        }
+        SocketAddr::V6(v) => {
+            buf_set(w, 0, 6i64);
+            buf_set(w, 1, v.port as i64);
+            buf_set(w, 2, v.flow_info as i64);
+            buf_set(w, 3, v.scope_id as i64);
+            let i: usize = 0;
+            while i < 8 {
+                let g = v.ip.segments[i] as i64;
+                buf_set(w, 4 + 2 * i, g / 256i64);
+                buf_set(w, 5 + 2 * i, g % 256i64);
+                i = i + 1;
+            }
+        }
+    }
+    return w;
+}
+
+fn addr_at(w: GcBuf<i64>, at: usize) -> SocketAddr {
+    let b = |i: usize| -> i64 { return buf_get(w, at + 4 + i); };
+    let port = buf_get(w, at + 1) as u16;
+    if buf_get(w, at) == 6i64 {
+        let s: List<u16> = List::new();
+        let i: usize = 0;
+        while i < 8 {
+            s.push((b(2 * i) * 256i64 + b(2 * i + 1)) as u16);
+            i = i + 1;
+        }
+        let ip = Ipv6Addr::new(s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]);
+        return SocketAddr::V6(SocketAddrV6 {
+            ip: ip,
+            port: port,
+            flow_info: buf_get(w, at + 2) as u32,
+            scope_id: buf_get(w, at + 3) as u32,
+        });
+    }
+    return SocketAddr::v4(Ipv4Addr::new(b(0) as u8, b(1) as u8, b(2) as u8, b(3) as u8), port);
+}
+
+// ---- DNS (302.4) ----
+
+const EAI_BASE: i32 = 100000;
+const MAX_ADDRS: usize = 32;
+
+fn resolve_raw(host: str, port: u16) throws (IoError) -> List<SocketAddr> {
+    let out: GcBuf<i64> = buf_new(ADDR_WORDS * MAX_ADDRS);
+    let n = unsafe { rok_net_resolve(host, port, out, MAX_ADDRS) };
+    if n <= 0 - EAI_BASE {
+        let msg = unsafe { rok_net_gai_strerror(0 - n - EAI_BASE) };
+        throw IoError::with_kind(IoErrorKind::NotFound, host + ": " + msg);
+    }
+    try check(n as i64, host);
+    let addrs: List<SocketAddr> = List::new();
+    let i: usize = 0;
+    while i < n as usize {
+        addrs.push(addr_at(out, i * ADDR_WORDS));
+        i = i + 1;
+    }
+    if addrs.len() == 0 {
+        throw IoError::with_kind(IoErrorKind::NotFound, host + ": no addresses");
+    }
+    return addrs;
+}
+
+/// Addresses of `host`: `"name:port"`, `"[v6]:port"`, a socket address,
+/// or a bare name / IP (port 0).
+pub fn resolve(host: str) throws (IoError) -> List<SocketAddr> {
+    match parse_socket_addr(host) {
+        a: SocketAddr => { return [a]; }
+        none => {}
+    }
+    let name = host;
+    let port: u16 = 0u16;
+    match host.rfind(":") {
+        at: usize => {
+            let rest = host.slice(0, at);
+            if !rest.contains(":") {
+                match number(host.slice(at + 1, host.len()), 10u64, 5) {
+                    p: u64 => {
+                        if p <= 65535u64 {
+                            name = rest;
+                            port = p as u16;
+                        }
+                    }
+                    none => {}
+                }
+            }
+        }
+        none => {}
+    }
+    if name.starts_with("[") && name.ends_with("]") {
+        name = name.slice(1, name.len() - 1);
+    }
+    return try resolve_raw(name, port);
+}
+
+/// The first address of `host` with `port`.
+pub fn resolve_one(host: str, port: u16) throws (IoError) -> SocketAddr {
+    return (try resolve_raw(host, port))[0];
+}
+
+fn addrs_of(addr: str | SocketAddr) throws (IoError) -> List<SocketAddr> {
+    match addr {
+        a: SocketAddr => { return [a]; }
+        s: str => { return try resolve(s); }
+    }
+}
+
+// ---- the socket core ----
+
+/// An fd shared by copies of a handle, plus `[nonblocking, read
+/// timeout ns, write timeout ns]` (timeouts -1: none).
+struct Sock {
+    fd: GcBuf<i32>;
+    opts: GcBuf<i64>;
+}
+
+fn sock_of(fd: i32) -> Sock {
+    let cell: GcBuf<i32> = buf_new(1);
+    buf_set(cell, 0, fd);
+    let opts: GcBuf<i64> = buf_new(3);
+    buf_set(opts, 1, -1i64);
+    buf_set(opts, 2, -1i64);
+    return Sock { fd: cell, opts: opts };
+}
+
+fn new_sock(family: i32, kind: i32) throws (IoError) -> Sock {
+    let fd = try check(unsafe { rok_net_socket(family, kind) } as i64, "socket");
+    return sock_of(fd as i32);
+}
+
+fn is_would_block(code: i32) -> bool {
+    return unsafe { rok_os_errno_kind(code) } == 10;
+}
+
+fn timed_out(what: str) -> IoError {
+    return IoError::with_kind(IoErrorKind::TimedOut, what + ": timed out");
+}
+
+impl Sock {
+    fn live(self) throws (IoError) -> i32 {
+        let fd = buf_get(self.fd, 0);
+        if fd < 0 { throw IoError::with_kind(IoErrorKind::InvalidInput, "socket is closed"); }
+        return fd;
+    }
+
+    fn close(self) {
+        let fd = buf_get(self.fd, 0);
+        if fd >= 0 {
+            buf_set(self.fd, 0, -1);
+            unsafe { rok_os_close(fd) };
+        }
+    }
+
+    /// After a `WouldBlock`: throw it (non-blocking mode) or wait for
+    /// readiness within the timeout.
+    fn block(self, write: i32, what: str) throws (IoError) {
+        if buf_get(self.opts, 0) != 0i64 {
+            throw IoError::with_kind(IoErrorKind::WouldBlock, what + ": operation would block");
+        }
+        let limit = buf_get(self.opts, 1 + write as usize);
+        let r = unsafe { rok_net_wait(try self.live(), write, limit) };
+        if r == 0 { throw timed_out(what); }
+        try check(r as i64, what);
+    }
+
+    fn set_timeout(self, write: usize, dur: Duration | none) {
+        let ns = match dur {
+            d: Duration => d.as_nanos(),
+            none => -1i64,
+        };
+        buf_set(self.opts, 1 + write, ns);
+    }
+
+    fn timeout(self, write: usize) -> Duration | none {
+        let ns = buf_get(self.opts, 1 + write);
+        if ns < 0i64 { return none; }
+        return Duration::ns(ns);
+    }
+
+    fn addr(self, peer: i32) throws (IoError) -> SocketAddr {
+        let out: GcBuf<i64> = buf_new(ADDR_WORDS);
+        try check(unsafe { rok_net_addr(try self.live(), out, peer) } as i64, "getsockname");
+        return addr_at(out, 0);
+    }
+
+    fn setopt(self, opt: i32, val: i64) throws (IoError) {
+        try check(unsafe { rok_net_setopt(try self.live(), opt, val) } as i64, "setsockopt");
+    }
+
+    fn try_clone(self) throws (IoError) -> Sock {
+        let fd = try check(unsafe { rok_os_dup(try self.live()) } as i64, "dup");
+        let s = sock_of(fd as i32);
+        buf_set(s.opts, 0, buf_get(self.opts, 0));
+        buf_set(s.opts, 1, buf_get(self.opts, 1));
+        buf_set(s.opts, 2, buf_get(self.opts, 2));
+        return s;
+    }
+
+    /// One read: the raw bytes, or `none` on `WouldBlock`.
+    fn read_once(self, max: usize) throws (IoError) -> str | none {
+        let err = err_cell();
+        let s = unsafe { rok_os_read(try self.live(), max, err) };
+        if is_would_block(buf_get(err, 0)) { return none; }
+        try check_cell(err, "read");
+        return s;
+    }
+
+    /// One write of `s[off..]`: the count, or -1 on `WouldBlock`.
+    fn write_once(self, s: str, off: usize) throws (IoError) -> i64 {
+        let n = unsafe { rok_net_send(try self.live(), s, off) } as i64;
+        if n < 0i64 && is_would_block((0i64 - n) as i32) { return -1i64; }
+        return try check(n, "write");
+    }
+
+    fn read(self, buf: List<u8>) throws (IoError) -> usize {
+        loop {
+            match try self.read_once(buf.len()) {
+                s: str => { return fill(buf, s); }
+                none => { try self.block(0, "read"); }
+            }
+        }
+    }
+
+    async fn read_async(self, buf: List<u8>) throws (IoError) -> usize {
+        loop {
+            match try self.read_once(buf.len()) {
+                s: str => { return fill(buf, s); }
+                none => { await task::readable(try self.live()); }
+            }
+        }
+    }
+
+    fn write(self, s: str) throws (IoError) -> usize {
+        loop {
+            let n = try self.write_once(s, 0);
+            if n >= 0i64 { return n as usize; }
+            try self.block(1, "write");
+        }
+    }
+
+    async fn write_async(self, s: str) throws (IoError) -> usize {
+        loop {
+            let n = try self.write_once(s, 0);
+            if n >= 0i64 { return n as usize; }
+            await task::writable(try self.live());
+        }
+    }
+
+    fn write_all(self, s: str) throws (IoError) {
+        let off: usize = 0;
+        while off < s.len() {
+            let n = try self.write_once(s, off);
+            if n < 0i64 {
+                try self.block(1, "write");
+            } else if n == 0i64 {
+                throw IoError::with_kind(IoErrorKind::Other, "failed to write whole buffer");
+            } else {
+                off = off + n as usize;
+            }
+        }
+    }
+
+    async fn write_all_async(self, s: str) throws (IoError) {
+        let off: usize = 0;
+        while off < s.len() {
+            let n = try self.write_once(s, off);
+            if n < 0i64 {
+                await task::writable(try self.live());
+            } else if n == 0i64 {
+                throw IoError::with_kind(IoErrorKind::Other, "failed to write whole buffer");
+            } else {
+                off = off + n as usize;
+            }
+        }
+    }
+}
+
+// ---- TCP (302.1) ----
+
+pub enum Shutdown {
+    Read,
+    Write,
+    Both,
+}
+
+/// A TCP connection. Copies share the socket; `close()` (or leaving a
+/// `using` block) closes it for all.
+pub struct TcpStream {
+    sock: Sock;
+}
+
+/// A listening TCP socket.
+pub struct TcpListener {
+    sock: Sock;
+}
+
+/// Start connecting `addr`: the socket and whether it is still pending.
+fn connect_start(addr: SocketAddr) throws (IoError) -> (Sock, bool) {
+    let s = try new_sock(addr.family(), 1);
+    let r = unsafe { rok_net_connect(try s.live(), words_of(addr)) };
+    if r == 0 { return (s, false); }
+    // EINPROGRESS is 36 on macOS / BSD, 115 on Linux.
+    if r == -36 || r == -115 { return (s, true); }
+    s.close();
+    throw IoError::from_os(0 - r, f"connect {addr.display()}");
+}
+
+fn connect_finish(s: Sock, addr: SocketAddr) throws (IoError) -> TcpStream {
+    let e = unsafe { rok_net_sock_error(try s.live()) };
+    if e < 0 {
+        s.close();
+        throw IoError::from_os(0 - e, f"connect {addr.display()}");
+    }
+    return TcpStream { sock: s };
+}
+
+fn connect_wait(addr: SocketAddr, limit: i64) throws (IoError) -> TcpStream {
+    let (s, pending) = try connect_start(addr);
+    if pending {
+        let r = unsafe { rok_net_wait(try s.live(), 1, limit) };
+        if r <= 0 {
+            s.close();
+            if r == 0 { throw timed_out(f"connect {addr.display()}"); }
+            throw IoError::from_os(0 - r, f"connect {addr.display()}");
+        }
+    }
+    return try connect_finish(s, addr);
+}
+
+impl TcpStream {
+    /// Connect, blocking until the handshake is done.
+    pub fn connect(addr: SocketAddr) throws (IoError) -> TcpStream {
+        return try connect_wait(addr, -1i64);
+    }
+
+    pub fn connect_timeout(addr: SocketAddr, dur: Duration) throws (IoError) -> TcpStream {
+        return try connect_wait(addr, dur.as_nanos());
+    }
+
+    /// `connect` that suspends the task during the handshake.
+    pub async fn connect_async(addr: SocketAddr) throws (IoError) -> TcpStream {
+        let (s, pending) = try connect_start(addr);
+        if pending {
+            await task::writable(try s.live());
+            // A spurious wake: wait until the connect resolved.
+            while unsafe { rok_net_wait(try s.live(), 1, 0i64) } == 0 {
+                await task::writable(try s.live());
+            }
+        }
+        return try connect_finish(s, addr);
+    }
+
+    /// The OS socket descriptor (`-1` once closed).
+    pub fn fd(self) -> i32 { return buf_get(self.sock.fd, 0); }
+
+    /// Read up to `buf.len()` bytes into `buf[0..n]`; 0 at end of stream.
+    pub fn read(self, buf: List<u8>) throws (IoError) -> usize { return try self.sock.read(buf); }
+
+    /// `read` that suspends the task until data arrives.
+    pub async fn read_async(self, buf: List<u8>) throws (IoError) -> usize {
+        return try await self.sock.read_async(buf);
+    }
+
+    /// Everything until the peer closes its side.
+    pub fn read_all(self) throws (IoError) -> List<u8> {
+        let out: List<u8> = List::new();
+        let chunk = rok::std::io::byte_buf(16384);
+        loop {
+            let n = try self.read(chunk);
+            if n == 0 { return out; }
+            let i: usize = 0;
+            while i < n { out.push(chunk[i]); i = i + 1; }
+        }
+    }
+
+    pub async fn read_all_async(self) throws (IoError) -> List<u8> {
+        let out: List<u8> = List::new();
+        let chunk = rok::std::io::byte_buf(16384);
+        loop {
+            let n = try await self.read_async(chunk);
+            if n == 0 { return out; }
+            let i: usize = 0;
+            while i < n { out.push(chunk[i]); i = i + 1; }
+        }
+    }
+
+    /// Write some prefix of `buf`; its length.
+    pub fn write(self, buf: List<u8>) throws (IoError) -> usize {
+        return try self.sock.write(raw_of(buf, buf.len()));
+    }
+
+    pub async fn write_async(self, buf: List<u8>) throws (IoError) -> usize {
+        return try await self.sock.write_async(raw_of(buf, buf.len()));
+    }
+
+    pub fn write_all(self, buf: List<u8>) throws (IoError) {
+        try self.sock.write_all(raw_of(buf, buf.len()));
+    }
+
+    pub async fn write_all_async(self, buf: List<u8>) throws (IoError) {
+        try await self.sock.write_all_async(raw_of(buf, buf.len()));
+    }
+
+    pub fn write_str(self, s: str) throws (IoError) { try self.sock.write_all(s); }
+
+    pub async fn write_str_async(self, s: str) throws (IoError) {
+        try await self.sock.write_all_async(s);
+    }
+
+    /// Nothing to flush: writes go straight to the socket.
+    pub fn flush(self) throws (IoError) {}
+
+    pub fn peer_addr(self) throws (IoError) -> SocketAddr { return try self.sock.addr(1); }
+    pub fn local_addr(self) throws (IoError) -> SocketAddr { return try self.sock.addr(0); }
+
+    pub fn shutdown(self, how: Shutdown) throws (IoError) {
+        let h = match how {
+            Shutdown::Read => 0,
+            Shutdown::Write => 1,
+            Shutdown::Both => 2,
+        };
+        try check(unsafe { rok_net_shutdown(try self.sock.live(), h) } as i64, "shutdown");
+    }
+
+    pub fn set_nodelay(self, nodelay: bool) throws (IoError) {
+        try self.sock.setopt(1, if nodelay { 1i64 } else { 0i64 });
+    }
+
+    /// Keepalive probes after `alive` idle (whole seconds); `none` = off.
+    pub fn set_keepalive(self, alive: Duration | none) throws (IoError) {
+        match alive {
+            d: Duration => try self.sock.setopt(2, d.as_nanos() / 1000000000i64),
+            none => try self.sock.setopt(2, -1i64),
+        }
+    }
+
+    pub fn set_read_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(0, dur); }
+    pub fn set_write_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(1, dur); }
+    pub fn read_timeout(self) -> Duration | none { return self.sock.timeout(0); }
+    pub fn write_timeout(self) -> Duration | none { return self.sock.timeout(1); }
+
+    /// Make the blocking calls throw `WouldBlock` instead of waiting.
+    pub fn set_nonblocking(self, nb: bool) throws (IoError) {
+        buf_set(self.sock.opts, 0, if nb { 1i64 } else { 0i64 });
+    }
+
+    pub fn try_clone(self) throws (IoError) -> TcpStream {
+        return TcpStream { sock: try self.sock.try_clone() };
+    }
+
+    /// Close now; later calls fail with `InvalidInput`.
+    pub fn close(self) { self.sock.close(); }
+}
+
+impl Reader for TcpStream {
+    fn read(ref self, buf: List<u8>) throws (IoError) -> usize { return try self.sock.read(buf); }
+}
+
+impl Writer for TcpStream {
+    fn write(ref self, buf: List<u8>) throws (IoError) -> usize {
+        return try self.sock.write(raw_of(buf, buf.len()));
+    }
+    fn write_all(ref self, buf: List<u8>) throws (IoError) { try self.sock.write_all(raw_of(buf, buf.len())); }
+    fn write_str(ref self, s: str) throws (IoError) { try self.sock.write_all(s); }
+    fn flush(ref self) throws (IoError) {}
+}
+
+impl Drop for TcpStream {
+    fn drop(ref self) { self.sock.close(); }
+}
+
+impl TcpListener {
+    /// Bind and listen (`SO_REUSEADDR`, backlog 128). Port 0 picks one:
+    /// see `local_addr`.
+    pub fn bind(addr: SocketAddr) throws (IoError) -> TcpListener {
+        let s = try new_sock(addr.family(), 1);
+        let what = f"bind {addr.display()}";
+        let r = unsafe { rok_net_bind(try s.live(), words_of(addr)) };
+        if r >= 0 { r = unsafe { rok_net_listen(try s.live(), 128) }; }
+        if r < 0 {
+            s.close();
+            throw IoError::from_os(0 - r, what);
+        }
+        return TcpListener { sock: s };
+    }
+
+    fn accept_once(self) throws (IoError) -> (TcpStream, SocketAddr) | none {
+        let out: GcBuf<i64> = buf_new(ADDR_WORDS);
+        let fd = unsafe { rok_net_accept(try self.sock.live(), out) };
+        if fd < 0 && is_would_block(0 - fd) { return none; }
+        try check(fd as i64, "accept");
+        return (TcpStream { sock: sock_of(fd) }, addr_at(out, 0));
+    }
+
+    /// The next connection and its peer, blocking until one arrives.
+    pub fn accept(self) throws (IoError) -> (TcpStream, SocketAddr) {
+        loop {
+            match try self.accept_once() {
+                c: (TcpStream, SocketAddr) => { return c; }
+                none => { try self.sock.block(0, "accept"); }
+            }
+        }
+    }
+
+    /// `accept` that suspends the task until a connection arrives.
+    pub async fn accept_async(self) throws (IoError) -> (TcpStream, SocketAddr) {
+        loop {
+            match try self.accept_once() {
+                c: (TcpStream, SocketAddr) => { return c; }
+                none => { await task::readable(try self.sock.live()); }
+            }
+        }
+    }
+
+    pub fn local_addr(self) throws (IoError) -> SocketAddr { return try self.sock.addr(0); }
+
+    pub fn try_clone(self) throws (IoError) -> TcpListener {
+        return TcpListener { sock: try self.sock.try_clone() };
+    }
+
+    pub fn set_nonblocking(self, nb: bool) throws (IoError) {
+        buf_set(self.sock.opts, 0, if nb { 1i64 } else { 0i64 });
+    }
+
+    /// `for c in l.incoming() { let s = try c.get(); .. }`: connections
+    /// forever (each item is the stream or the error `accept` threw).
+    pub fn incoming(self) -> Incoming { return Incoming { listener: self }; }
+
+    pub fn fd(self) -> i32 { return buf_get(self.sock.fd, 0); }
+
+    pub fn close(self) { self.sock.close(); }
+}
+
+impl Drop for TcpListener {
+    fn drop(ref self) { self.sock.close(); }
+}
+
+/// `TcpListener::incoming`.
+pub struct Incoming {
+    listener: TcpListener;
+}
+
+impl Iterator for Incoming {
+    type Item = Result<TcpStream, IoError>;
+    fn next(ref self) -> Result<TcpStream, IoError> | none {
+        let (s, peer) = try self.listener.accept() catch e {
+            let failed: Result<TcpStream, IoError> = Result::Err(e);
+            return failed;
+        };
+        let ok: Result<TcpStream, IoError> = Result::Ok(s);
+        return ok;
+    }
+}
+
+// ---- UDP (302.2) ----
+
+/// A UDP socket. Copies share the socket.
+pub struct UdpSocket {
+    sock: Sock;
+}
+
+impl UdpSocket {
+    pub fn bind(addr: SocketAddr) throws (IoError) -> UdpSocket {
+        let s = try new_sock(addr.family(), 2);
+        let r = unsafe { rok_net_bind(try s.live(), words_of(addr)) };
+        if r < 0 {
+            s.close();
+            throw IoError::from_os(0 - r, f"bind {addr.display()}");
+        }
+        return UdpSocket { sock: s };
+    }
+
+    fn send_to_once(self, s: str, addr: SocketAddr) throws (IoError) -> i64 {
+        let n = unsafe { rok_net_send_to(try self.sock.live(), s, words_of(addr)) } as i64;
+        if n < 0i64 && is_would_block((0i64 - n) as i32) { return -1i64; }
+        return try check(n, f"send_to {addr.display()}");
+    }
+
+    fn recv_from_once(self, max: usize) throws (IoError) -> (str, SocketAddr) | none {
+        let out: GcBuf<i64> = buf_new(ADDR_WORDS);
+        let err = err_cell();
+        let s = unsafe { rok_net_recv_from(try self.sock.live(), max, out, err) };
+        if is_would_block(buf_get(err, 0)) { return none; }
+        try check_cell(err, "recv_from");
+        return (s, addr_at(out, 0));
+    }
+
+    /// Send the datagram `buf` to `addr`; bytes sent.
+    pub fn send_to(self, buf: List<u8>, addr: SocketAddr) throws (IoError) -> usize {
+        let s = raw_of(buf, buf.len());
+        loop {
+            let n = try self.send_to_once(s, addr);
+            if n >= 0i64 { return n as usize; }
+            try self.sock.block(1, "send_to");
+        }
+    }
+
+    pub async fn send_to_async(self, buf: List<u8>, addr: SocketAddr) throws (IoError) -> usize {
+        let s = raw_of(buf, buf.len());
+        loop {
+            let n = try self.send_to_once(s, addr);
+            if n >= 0i64 { return n as usize; }
+            await task::writable(try self.sock.live());
+        }
+    }
+
+    /// The next datagram into `buf[0..n]` (truncated to `buf.len()`)
+    /// and its sender.
+    pub fn recv_from(self, buf: List<u8>) throws (IoError) -> (usize, SocketAddr) {
+        loop {
+            match try self.recv_from_once(buf.len()) {
+                r: (str, SocketAddr) => { return (fill(buf, r.0), r.1); }
+                none => { try self.sock.block(0, "recv_from"); }
+            }
+        }
+    }
+
+    pub async fn recv_from_async(self, buf: List<u8>) throws (IoError) -> (usize, SocketAddr) {
+        loop {
+            match try self.recv_from_once(buf.len()) {
+                r: (str, SocketAddr) => { return (fill(buf, r.0), r.1); }
+                none => { await task::readable(try self.sock.live()); }
+            }
+        }
+    }
+
+    /// Fix the peer: `send` / `recv` then talk to it only.
+    pub fn connect(self, addr: SocketAddr) throws (IoError) {
+        let r = unsafe { rok_net_connect(try self.sock.live(), words_of(addr)) };
+        try check(r as i64, f"connect {addr.display()}");
+    }
+
+    pub fn send(self, buf: List<u8>) throws (IoError) -> usize {
+        return try self.sock.write(raw_of(buf, buf.len()));
+    }
+
+    pub async fn send_async(self, buf: List<u8>) throws (IoError) -> usize {
+        return try await self.sock.write_async(raw_of(buf, buf.len()));
+    }
+
+    pub fn recv(self, buf: List<u8>) throws (IoError) -> usize { return try self.sock.read(buf); }
+
+    pub async fn recv_async(self, buf: List<u8>) throws (IoError) -> usize {
+        return try await self.sock.read_async(buf);
+    }
+
+    pub fn local_addr(self) throws (IoError) -> SocketAddr { return try self.sock.addr(0); }
+    pub fn peer_addr(self) throws (IoError) -> SocketAddr { return try self.sock.addr(1); }
+
+    pub fn set_broadcast(self, on: bool) throws (IoError) {
+        try self.sock.setopt(3, if on { 1i64 } else { 0i64 });
+    }
+
+    pub fn join_multicast_v4(self, addr: Ipv4Addr, iface: Ipv4Addr) throws (IoError) {
+        try check(unsafe { rok_net_multicast_v4(try self.sock.live(), addr.to_bits(), iface.to_bits(), 1) } as i64, "join_multicast_v4");
+    }
+
+    pub fn leave_multicast_v4(self, addr: Ipv4Addr, iface: Ipv4Addr) throws (IoError) {
+        try check(unsafe { rok_net_multicast_v4(try self.sock.live(), addr.to_bits(), iface.to_bits(), 0) } as i64, "leave_multicast_v4");
+    }
+
+    pub fn set_multicast_loop_v4(self, on: bool) throws (IoError) {
+        try self.sock.setopt(4, if on { 1i64 } else { 0i64 });
+    }
+
+    pub fn set_multicast_ttl_v4(self, ttl: u32) throws (IoError) {
+        try self.sock.setopt(5, ttl as i64);
+    }
+
+    /// `UDP_SEGMENT` (GSO); `Unsupported` off Linux.
+    pub fn set_segment_size(self, size: u16) throws (IoError) {
+        try self.sock.setopt(6, size as i64);
+    }
+
+    pub fn set_read_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(0, dur); }
+    pub fn set_write_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(1, dur); }
+
+    pub fn set_nonblocking(self, nb: bool) throws (IoError) {
+        buf_set(self.sock.opts, 0, if nb { 1i64 } else { 0i64 });
+    }
+
+    pub fn try_clone(self) throws (IoError) -> UdpSocket {
+        return UdpSocket { sock: try self.sock.try_clone() };
+    }
+
+    pub fn fd(self) -> i32 { return buf_get(self.sock.fd, 0); }
+
+    pub fn close(self) { self.sock.close(); }
+}
+
+impl Drop for UdpSocket {
+    fn drop(ref self) { self.sock.close(); }
+}
+
+// ---- conveniences (302.6) ----
+
+/// Connect to the first address of `addr` that accepts (names are
+/// resolved).
+pub fn tcp_connect(addr: str | SocketAddr) throws (IoError) -> TcpStream {
+    let addrs = try addrs_of(addr);
+    let last = IoError::new("no address to connect to");
+    for a in addrs {
+        let s = try TcpStream::connect(a) catch e {
+            last = e;
+            continue;
+        };
+        return s;
+    }
+    throw last;
+}
+
+/// `tcp_connect` that suspends the task while connecting.
+pub async fn tcp_connect_async(addr: str | SocketAddr) throws (IoError) -> TcpStream {
+    let addrs = try addrs_of(addr);
+    let last = IoError::new("no address to connect to");
+    for a in addrs {
+        let s = try await TcpStream::connect_async(a) catch e {
+            last = e;
+            continue;
+        };
+        return s;
+    }
+    throw last;
+}
+
+pub fn tcp_listen(addr: str | SocketAddr) throws (IoError) -> TcpListener {
+    return try TcpListener::bind((try addrs_of(addr))[0]);
+}
+
+pub fn udp_bind(addr: str | SocketAddr) throws (IoError) -> UdpSocket {
+    return try UdpSocket::bind((try addrs_of(addr))[0]);
+}

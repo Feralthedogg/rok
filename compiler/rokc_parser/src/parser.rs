@@ -21,6 +21,8 @@ use crate::prec::{Assoc, CAST_PREC, COALESCE_PREC, ExtOps, Fixity};
 
 #[path = "fstring.rs"]
 mod fstring;
+#[path = "literal.rs"]
+pub mod literal;
 #[path = "meta.rs"]
 pub mod meta;
 
@@ -73,12 +75,19 @@ pub struct Parser<'a> {
     meta: std::sync::Arc<meta::MetaTable>,
     /// Meta expansions in progress (cycle detection, 6.8.8).
     meta_stack: Vec<String>,
+    /// `#[literal]` registrations (spec 6.5), gathered by the pre-pass.
+    literals: std::sync::Arc<literal::LiteralTable>,
     /// The last `parse_item` consumed an item that expanded to nothing.
     vanished: bool,
+    /// The next primary starts a statement: if it is block-like, `(` / `[`
+    /// after it begin a new statement (`while c {} (a, b)`), not a call.
+    stmt_head: bool,
 }
 
 /// Nesting limit for expressions, types, patterns and blocks.
 const MAX_DEPTH: u32 = 256;
+/// The implicit length parameter of a variadic `...T` (spec 4.2.5).
+pub const VARIADIC_LEN: &str = "#variadic";
 const PARSER_STACK: usize = 128 << 20;
 
 pub fn parse_program(tokens: &[Token], file: impl Into<String>) -> (Program, Vec<RokDiagnostic>) {
@@ -91,23 +100,33 @@ pub fn parse_program_ext(
     file: impl Into<String>,
     ext: &ExtOps,
 ) -> (Program, Vec<RokDiagnostic>) {
-    parse_program_meta(tokens, file, ext, &std::sync::Arc::default())
+    parse_program_meta(
+        tokens,
+        file,
+        ext,
+        &std::sync::Arc::default(),
+        &std::sync::Arc::default(),
+    )
 }
 
-/// `parse_program_ext` that also expands user meta blocks (spec 6.8).
+/// `parse_program_ext` that also expands user meta blocks (spec 6.8)
+/// and matches `#[literal]` patterns (spec 6.5).
 pub fn parse_program_meta(
     tokens: &[Token],
     file: impl Into<String>,
     ext: &ExtOps,
     metas: &std::sync::Arc<meta::MetaTable>,
+    literals: &std::sync::Arc<literal::LiteralTable>,
 ) -> (Program, Vec<RokDiagnostic>) {
     let file = file.into();
     let ext = ext.clone();
     let metas = std::sync::Arc::clone(metas);
+    let literals = std::sync::Arc::clone(literals);
     let run = move || {
         let mut p = Parser::new(tokens, file);
         p.ext = ext;
         p.meta = metas;
+        p.literals = literals;
         let program = p.parse_program();
         (program, p.diagnostics)
     };
@@ -132,6 +151,7 @@ impl<'a> Parser<'a> {
             file: file.into(),
             diagnostics: Vec::new(),
             struct_expr_allowed: true,
+            stmt_head: false,
             type_sum_allowed: true,
             pending: None,
             in_cast_type: false,
@@ -144,6 +164,7 @@ impl<'a> Parser<'a> {
             pending_items: Vec::new(),
             meta: std::sync::Arc::default(),
             meta_stack: Vec::new(),
+            literals: std::sync::Arc::default(),
             vanished: false,
         }
     }
@@ -527,7 +548,11 @@ impl<'a> Parser<'a> {
         let start = self.peek_span();
         self.bump(); // `#[` or `#![`
         let path = self.parse_attr_path()?;
-        let body = self.parse_attr_body();
+        let body = if path == ["literal"] && matches!(self.peek(), TokenKind::LParen) {
+            self.parse_literal_attr_body()
+        } else {
+            self.parse_attr_body()
+        };
         self.expect(&TokenKind::RBracket, "`]`");
         Some(Attribute {
             path,
@@ -1838,6 +1863,7 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::RParen, "`)`")?;
 
         let mut generics = generics;
+        self.desugar_variadic(&mut params, &mut generics);
         let throws = if matches!(self.peek(), TokenKind::Ident(n) if n == "rethrows") {
             let span = self.peek_span();
             self.bump();
@@ -1886,6 +1912,47 @@ impl<'a> Parser<'a> {
             where_clause,
             span: start,
         })
+    }
+
+    /// Spec 4.2.5: `xs: ...T` is a stack array of the call's trailing
+    /// arguments — `xs: [T; #variadic]` with an implicit `const
+    /// #variadic: usize` (the call site wraps the arguments). Only the
+    /// last parameter can be variadic.
+    // ponytail: the body sees `[T; N]`, not a slice view; one
+    // instantiation per argument count.
+    fn desugar_variadic(&mut self, params: &mut [Param], generics: &mut Generics) {
+        let last = params.len().saturating_sub(1);
+        for (i, p) in params.iter_mut().enumerate() {
+            if !p.variadic {
+                continue;
+            }
+            if i != last {
+                self.error(
+                    p.span,
+                    "only the last parameter can be variadic `...T` (spec 4.2.5)",
+                );
+                continue;
+            }
+            let Some(elem) = p.ty.take() else { continue };
+            let span = elem.span;
+            p.ty = Some(Ty {
+                kind: TyKind::Array(
+                    Box::new(elem),
+                    rokc_ast::ConstExpr::Path(Path {
+                        segments: vec![PathSegment {
+                            name: VARIADIC_LEN.to_owned(),
+                            generics: Vec::new(),
+                        }],
+                        span,
+                    }),
+                ),
+                span,
+            });
+            generics.params.push(rokc_ast::GenericParam::Const {
+                name: VARIADIC_LEN.to_owned(),
+                ty: path_ty("usize", span),
+            });
+        }
     }
 
     /// Parse an optional `<T: Bound = Default, const N: usize>` generic
@@ -2877,6 +2944,7 @@ impl<'a> Parser<'a> {
             | TokenKind::For
             | TokenKind::LBrace
             | TokenKind::Label(_) => {
+                self.stmt_head = true;
                 let expr = self.parse_expr_bp(u32::MAX)?;
                 let ends = is_block_like(&expr) || matches!(self.peek(), TokenKind::RBrace);
                 if self.eat(&TokenKind::Semi) || !ends {
@@ -3256,6 +3324,10 @@ impl<'a> Parser<'a> {
 
     #[allow(clippy::cognitive_complexity)] // one arm per primary-expression token
     fn parse_primary(&mut self) -> Option<Expr> {
+        let stmt_head = std::mem::take(&mut self.stmt_head);
+        if let Some(e) = self.try_magic_literal() {
+            return Some(e);
+        }
         let start = self.peek_span();
         let kind = match self.peek().clone() {
             // Spec 2.13.4: `<Type as Trait>::method(...)`. At the start of
@@ -3902,6 +3974,9 @@ impl<'a> Parser<'a> {
         // optional-chaining come later.
         loop {
             match self.peek() {
+                TokenKind::LParen | TokenKind::LBracket if stmt_head && is_block_like(&expr) => {
+                    break;
+                }
                 TokenKind::LParen => {
                     self.bump();
                     let args = self.parse_call_args()?;
@@ -4621,6 +4696,22 @@ impl<'a> Parser<'a> {
 
     fn parse_pattern_atom_inner(&mut self) -> Option<Pattern> {
         let span = self.peek_span();
+        let num = match self.peek() {
+            TokenKind::Minus => self.tokens.get(self.pos + 1).map(|t| &t.kind),
+            k => Some(k),
+        };
+        if let Some(TokenKind::IntLit(t) | TokenKind::FloatLit(t)) = num {
+            if let Some(sfx) = literal::user_suffix(t) {
+                self.error(
+                    span,
+                    format!(
+                        "a `{sfx}` suffix literal is a `#[literal]` handler call and can't be a \
+                         pattern (spec 6.5)"
+                    ),
+                );
+                return None;
+            }
+        }
         // Negative numeric literal: `-NUM`.
         if matches!(self.peek(), TokenKind::Minus) {
             self.bump();
