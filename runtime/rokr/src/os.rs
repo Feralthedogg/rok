@@ -1053,3 +1053,32 @@ pub extern "C" fn rok_str_utf8_error(s: RokStr) -> isize {
         Err(e) => e.valid_up_to() as isize,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn errno_kinds() {
+        assert_eq!(rok_os_errno_kind(libc::ENOENT), 1);
+        assert_eq!(rok_os_errno_kind(libc::EPERM), 2);
+        assert_eq!(rok_os_errno_kind(libc::EACCES), 2);
+        assert_eq!(rok_os_errno_kind(libc::EEXIST), 3);
+        assert_eq!(rok_os_errno_kind(libc::ENOTSUP), 14);
+        assert_eq!(rok_os_errno_kind(0), 0);
+        assert_eq!(rok_os_errno_kind(-1), 0);
+    }
+
+    #[test]
+    fn utf8_error_offset() {
+        let s = |b: &'static [u8]| RokStr {
+            ptr: b.as_ptr(),
+            len: b.len(),
+        };
+        assert_eq!(rok_str_utf8_error(s(b"")), -1);
+        assert_eq!(rok_str_utf8_error(s("a한".as_bytes())), -1);
+        assert_eq!(rok_str_utf8_error(s(b"ab\xFFc")), 2);
+        // A truncated multi-byte sequence fails at its first byte.
+        assert_eq!(rok_str_utf8_error(s(b"a\xED\x95")), 1);
+    }
+}

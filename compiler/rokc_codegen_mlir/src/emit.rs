@@ -133,7 +133,19 @@ impl Emitter {
             .collect();
 
         self.out.push_str("module {\n");
+        // An `extern "C"` declaration of a symbol this module defines
+        // (`#[export_name]`, spec 9.5.8) is the same function: no
+        // second `func.func`.
+        let defined: std::collections::HashSet<&str> = module
+            .functions
+            .iter()
+            .filter(|f| !f.blocks.is_empty())
+            .map(|f| fns[&f.id].name.as_str())
+            .collect();
         for f in &module.functions {
+            if f.blocks.is_empty() && defined.contains(fns[&f.id].name.as_str()) {
+                continue;
+            }
             let symbol = fns[&f.id].name.clone();
             self.emit_function(f, &symbol, &fns);
         }

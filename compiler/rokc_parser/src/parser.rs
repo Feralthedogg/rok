@@ -2159,9 +2159,24 @@ impl<'a> Parser<'a> {
     }
 
     /// Everything but `|`: paths, `fn(..) -> R`, tuples / grouping,
-    /// arrays, `any`, `none`, `Self`.
+    /// arrays, `any`, `none`, `Self`, and their `T?`.
     fn parse_type_atom(&mut self) -> Option<Ty> {
-        self.nested(Self::parse_type_atom_inner)
+        let mut t = self.nested(Self::parse_type_atom_inner)?;
+        // `T?` (spec 2.6.5): postfix, tighter than `|`. A `?` right after
+        // `x as T` / `x is T` belongs to the type (propagate with
+        // `(x as T)?`), but `??` there stays coalescing.
+        loop {
+            let layers = match self.peek() {
+                TokenKind::Question => 1,
+                TokenKind::QuestionQuestion if !self.in_cast_type => 2,
+                _ => break,
+            };
+            self.bump();
+            for _ in 0..layers {
+                t = optional_ty(t);
+            }
+        }
+        Some(t)
     }
 
     fn parse_type_atom_inner(&mut self) -> Option<Ty> {
@@ -2190,6 +2205,21 @@ impl<'a> Parser<'a> {
             TokenKind::None => {
                 self.bump();
                 TyKind::None
+            }
+            // `Self::Item`: an associated type of the impl / trait.
+            TokenKind::SelfUpper if self.peek_next() == Some(TokenKind::ColonColon) => {
+                self.bump();
+                self.bump();
+                let mut p = self.parse_type_path()?;
+                p.segments.insert(
+                    0,
+                    PathSegment {
+                        name: "Self".to_owned(),
+                        generics: Vec::new(),
+                    },
+                );
+                p.span = start;
+                TyKind::Path(p)
             }
             TokenKind::SelfUpper => {
                 self.bump();
@@ -2420,7 +2450,9 @@ impl<'a> Parser<'a> {
                 | TokenKind::Arrow
                 | TokenKind::None
                 | TokenKind::SelfUpper
-                | TokenKind::Pipe => {}
+                | TokenKind::Pipe
+                | TokenKind::Question
+                | TokenKind::QuestionQuestion => {}
                 _ => return false,
             }
             if angle <= 0 {
@@ -5004,6 +5036,25 @@ const fn is_block_like(e: &Expr) -> bool {
 /// replaces it in `rethrows` parameters, HIR reads any other as
 /// `any Error`. `#` cannot start an identifier.
 use rokc_ast::UNTYPED_THROWS_MARK;
+
+/// `T?` = `#nest<T> | none`: like `Maybe<T>` (`type Maybe<T> = T |
+/// none`), `T` is a generic member, so `(i32 | none)?` keeps two layers
+/// while `i32?` is `i32 | none` (spec 2.6.4).
+fn optional_ty(t: Ty) -> Ty {
+    let span = t.span;
+    let mut nest = path_ty(rokc_ast::NEST_MARK, span);
+    if let TyKind::Path(p) = &mut nest.kind {
+        p.segments[0].generics.push(t);
+    }
+    let none = Ty {
+        kind: TyKind::None,
+        span,
+    };
+    Ty {
+        kind: TyKind::Sum(vec![nest, none]),
+        span,
+    }
+}
 
 fn path_ty(name: &str, span: Span) -> Ty {
     Ty {

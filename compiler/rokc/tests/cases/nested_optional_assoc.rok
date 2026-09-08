@@ -1,0 +1,58 @@
+// expect-exit: 0
+// expect-stdout:
+// custom: 1 none 3 (3)
+// count: 3 3
+// maybe: stored none | missing | stored 4
+// plain: true
+
+// Spec 2.6.4: `Self::Item` (an associated type) and a generic alias's
+// parameter are generic members, so `Self::Item | none` with
+// `Item = i32 | none` and `Maybe<i32 | none>` keep the outer `none`
+// apart. A non-generic alias is written source and flattens.
+struct Cnt { n: i32; }
+
+impl Iterator for Cnt {
+    type Item = i32 | none;
+    fn next(ref self) -> Self::Item | none {
+        if self.n == 3 { return none; }
+        self.n += 1;
+        let v: Self::Item = if self.n == 2 { none } else { self.n };
+        v
+    }
+}
+
+type Maybe<T> = T | none;
+type Opt = i32 | none;
+type Flat = Opt | none;
+
+fn show(x: i32 | none) -> str {
+    match x { n: i32 => f"{n}", none => "none" }
+}
+
+fn look(m: Maybe<i32 | none>) -> str {
+    match m { none => "missing", v: Opt => "stored " + show(v) }
+}
+
+fn main() {
+    let c = "custom:";
+    let n = 0;
+    let cnt = Cnt { n: 0 };
+    for v in cnt {
+        c = c + " " + show(v);
+        n += 1;
+    }
+    println(f"{c} ({n})");
+    let a = Cnt { n: 0 };
+    let b = Cnt { n: 0 };
+    println(f"count: {a.count()} {b.map(|v| v).count()}");
+
+    let s: Opt = none;
+    let x: Maybe<i32 | none> = s;
+    let y: Maybe<i32 | none> = none;
+    let z: Maybe<i32 | none> = 4;
+    println(f"maybe: {look(x)} | {look(y)} | {look(z)}");
+
+    let f: Flat = none;
+    let g: Opt = f;
+    println(f"plain: {g is none}");
+}

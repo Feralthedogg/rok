@@ -577,7 +577,7 @@ fn ty_str(t: &HirTy) -> String {
         HirTy::AnyTrait(b) if b.is_empty() => "any".to_owned(),
         HirTy::AnyTrait(b) => format!("any ({})", b.join(" + ")),
         HirTy::Path(parts) => parts.join("::"),
-        HirTy::Sum(parts) => parts.iter().map(ty_str).collect::<Vec<_>>().join(" | "),
+        HirTy::Sum(_) => t.sum_name(ty_str),
         HirTy::Tuple(parts) => {
             let inner = parts.iter().map(ty_str).collect::<Vec<_>>().join(", ");
             format!("({inner})")

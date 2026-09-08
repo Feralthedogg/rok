@@ -1,5 +1,7 @@
 // expect-exit: 0
-// expect-stdout: 5 6 true false
+// expect-stdout:
+// 5 6 true false
+// true
 
 // `..=b` builds a `RangeToInclusive` (it used to build a `RangeTo`, an
 // exclusive end); `..b` is still `RangeTo`.
@@ -10,4 +12,6 @@ fn main() {
     let a = ..5;
     let b: RangeToInclusive<i32> = ..=6;
     println(f"{a.end} {b.end} {through(..=5, 5)} {upto(a, 5)}");
+    // Parenthesized, `..5` is a `RangeTo` argument, not a spread.
+    println(f"{upto((..5), 4)}");
 }

@@ -242,41 +242,56 @@ pub(super) fn method_target_for(ty: &HirTy) -> Option<MethodTarget> {
 /// Walk a `HirTy` substituting any unresolved `Path([alias_name])`
 /// nodes with their concrete type from `aliases`. Multi-level
 /// resolution is handled by the caller (a small fixed-iteration loop
-/// over the alias table itself).
+/// over the alias table itself). An alias of a sum spreads into a sum
+/// it is a member of (spec 2.6.4).
 pub(super) fn substitute_aliases(ty: &mut HirTy, aliases: &HashMap<String, HirTy>) {
+    substitute(ty, aliases, false);
+}
+
+/// `substitute_aliases` for generic parameters (and `Self`): a
+/// parameter bound to a sum with `none` stays one member of a sum that
+/// has its own `none` — `T | none` with `T = i32 | none` is the nested
+/// optional `(i32 | none)?` (spec 2.6.4).
+pub(super) fn substitute_params(ty: &mut HirTy, params: &HashMap<String, HirTy>) {
+    substitute(ty, params, true);
+}
+
+fn substitute(ty: &mut HirTy, map: &HashMap<String, HirTy>, nest: bool) {
+    let rec = |t: &mut HirTy| substitute(t, map, nest);
     match ty {
         HirTy::Path(parts) => {
             if parts.len() == 1 {
-                if let Some(replacement) = aliases.get(&parts[0]) {
+                if let Some(replacement) = map.get(&parts[0]) {
                     *ty = replacement.clone();
                 }
             }
         }
         HirTy::Sum(parts) => {
-            for p in parts.iter_mut() {
-                substitute_aliases(p, aliases);
-            }
             // An alias / type parameter may have become a sum (or a
-            // member already present): back to the canon (spec 2.6.4).
-            *ty = HirTy::sum(std::mem::take(parts));
-        }
-        HirTy::Tuple(parts) => {
-            for p in parts {
-                substitute_aliases(p, aliases);
+            // member already present): back to the canon.
+            let mut out = Vec::new();
+            for mut p in std::mem::take(parts) {
+                let named = matches!(&p, HirTy::Path(n) if n.len() == 1 && map.contains_key(&n[0]));
+                rec(&mut p);
+                if named && !nest {
+                    p.spread(&mut out);
+                } else {
+                    out.push(p);
+                }
             }
+            *ty = HirTy::sum(out);
         }
-        HirTy::Array(elem, _) | HirTy::GcBuf(elem) => substitute_aliases(elem, aliases),
+        HirTy::Tuple(parts) => parts.iter_mut().for_each(rec),
+        HirTy::Array(elem, _) | HirTy::GcBuf(elem) => rec(elem),
         HirTy::Fn(args, ret, _) | HirTy::Closure { args, ret, .. } => {
-            for a in args {
-                substitute_aliases(a, aliases);
-            }
-            substitute_aliases(ret, aliases);
+            args.iter_mut().for_each(rec);
+            rec(ret);
         }
         // Re-normalize: a `rethrows` error parameter may have become
         // "no error".
         HirTy::Throws { ok, err } => {
-            substitute_aliases(ok, aliases);
-            substitute_aliases(err, aliases);
+            rec(ok);
+            rec(err);
             *ty = crate::ty::throws_ty((**ok).clone(), (**err).clone());
         }
         _ => {}
@@ -391,7 +406,7 @@ pub(super) fn resolve_ty_with_structs(
         }
         // `T | U` — recurse so Path("Counter") resolves to Struct(id), not
         // an opaque path the MIR layer would treat as `Any`.
-        AstTyKind::Sum(parts) => HirTy::sum(parts.iter().map(rec)),
+        AstTyKind::Sum(parts) => crate::ty::written_sum(parts, |_| false, rec),
         AstTyKind::Tuple(parts) if parts.is_empty() => HirTy::Unit,
         AstTyKind::Tuple(parts) => HirTy::Tuple(parts.iter().map(rec).collect()),
         AstTyKind::Fn(args, ret, b) => HirTy::Fn(

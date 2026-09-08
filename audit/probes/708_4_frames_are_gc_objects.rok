@@ -1,0 +1,44 @@
+// spec: 007.08-coroutine §7.8.4 / §7.8.11
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// g0:a g1:a g2:a g3:a
+// g0:b g1:b g2:b g3:b
+// done 0
+
+// spec 7.8.4: a suspended coroutine frame is a GC object — its locals are
+// traced while it sits suspended, many frames can be live at once, and
+// (7.8.11) one that is never resumed again is simply dropped.
+extern "C" {
+    fn rok_gc_collect();
+}
+
+yield fn steps(id: i32) -> str {
+    let tag = f"g{id}";
+    yield tag + ":a";
+    let i = 0;
+    while i < 1000 { let _junk = f"junk{i}"; i += 1; }
+    yield tag + ":b";
+}
+
+fn main() -> i32 {
+    let gens = [steps(0), steps(1), steps(2), steps(3)];
+    let line = "";
+    for g in gens { line = line + (g.next() ?? "?") + " "; }
+    println(line.trim());
+    unsafe { rok_gc_collect() };
+    line = "";
+    for g in gens { line = line + (g.next() ?? "?") + " "; }
+    println(line.trim());
+    let abandoned = 0;
+    while abandoned < 10000 {
+        let g = steps(abandoned);
+        let _first = g.next();
+        abandoned += 1;
+    }
+    unsafe { rok_gc_collect() };
+    let left = 0;
+    for g in gens { if g.next() is str { left += 1; } }
+    println(f"done {left}");
+    return 0;
+}

@@ -139,6 +139,8 @@ pub fn lower_full(
 ) -> HirModule {
     let augmented = with_lazy_static_inits(program);
     let program = augmented.as_ref().unwrap_or(program);
+    let assoc_sigs = with_self_assoc_sigs(program);
+    let program = assoc_sigs.as_ref().unwrap_or(program);
     // Diagnostics emitted during pre-body passes (impl-target validation
     // etc.) — folded into module.diagnostics once the module exists.
     let mut pre_diags: Vec<rokc_diagnostic::RokDiagnostic> = Vec::new();
@@ -249,6 +251,7 @@ pub fn lower_full(
         alias_uses: std::cell::RefCell::new(Vec::new()),
     };
     check_bound_names(program, &names, &mut pre_diags);
+    warn_assoc_shadowing(program, &names, &mut pre_diags);
 
     // Pass 1a: enums. Generic enums get stashed for lazy instantiation.
     let mut enum_table: HashMap<String, EnumId> = HashMap::new();
@@ -643,7 +646,7 @@ pub fn lower_full(
         let resolve = |t: &Ty| {
             let mut r = resolve_ty_with_structs(t, &struct_table, &enum_table, sc);
             if let Some(st) = self_ty {
-                substitute_aliases(&mut r, &HashMap::from([("Self".to_owned(), st.clone())]));
+                substitute_params(&mut r, &HashMap::from([("Self".to_owned(), st.clone())]));
             }
             r
         };
@@ -3136,6 +3139,137 @@ fn returns_self_generic(m: &FnDef) -> bool {
 
 /// Replace a default method's associated-type names (`Item`,
 /// `Self::Item`) in its signature with the impl's types.
+fn path_ty_named(name: &str, span: rokc_diagnostic::Span) -> Ty {
+    Ty {
+        kind: AstTyKind::Path(rokc_ast::Path {
+            segments: vec![rokc_ast::PathSegment {
+                name: name.to_owned(),
+                generics: Vec::new(),
+            }],
+            span,
+        }),
+        span,
+    }
+}
+
+/// Spec 2.6.4 / 2.8.3 / 2.13.4: in a trait or impl, both `X` and
+/// `Self::X` name its associated type `X`, shadowing an outer `X`. An
+/// impl's method signatures get the impl's type (a generic member:
+/// `Self::Item | none` with `type Item = i32 | none` nests); trait and
+/// impl methods are marked `ASSOC_TYPES_ATTR` so their bodies read bare
+/// `X` as `Self::X`.
+fn with_self_assoc_sigs(program: &Program) -> Option<Program> {
+    let hit = program.items.iter().any(|it| match it {
+        Item::Impl(i) => i
+            .items
+            .iter()
+            .any(|m| matches!(m, AstImplItem::AssocType { .. })),
+        Item::Trait(t) => !trait_assoc_names(t).is_empty(),
+        _ => false,
+    });
+    if !hit {
+        return None;
+    }
+    let mark = |d: &mut FnDef, names: Vec<String>| {
+        d.attrs.push(rokc_ast::Attribute {
+            path: std::iter::once(crate::ASSOC_TYPES_ATTR.to_owned())
+                .chain(names)
+                .collect(),
+            body: rokc_ast::AttrBody::default(),
+            inner: false,
+            span: d.span,
+        });
+    };
+    let mut p = program.clone();
+    for it in &mut p.items {
+        match it {
+            Item::Impl(i) => {
+                let assoc = impl_assoc_types(i);
+                if assoc.is_empty() {
+                    continue;
+                }
+                for m in &mut i.items {
+                    if let AstImplItem::Method(d) = m {
+                        for prm in &mut d.params {
+                            if let Some(t) = &mut prm.ty {
+                                subst_assoc_ty(t, &assoc);
+                            }
+                        }
+                        if let Some(t) = &mut d.ret_ty {
+                            subst_assoc_ty(t, &assoc);
+                        }
+                        mark(d, assoc.keys().cloned().collect());
+                    }
+                }
+            }
+            Item::Trait(t) => {
+                let names = trait_assoc_names(t);
+                if names.is_empty() {
+                    continue;
+                }
+                for ti in &mut t.items {
+                    if let rokc_ast::TraitItem::Method(d) = ti {
+                        mark(d, names.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(p)
+}
+
+/// Spec 2.8.3: warn when an associated type hides an outer type of the
+/// same name inside its trait / impl.
+fn warn_assoc_shadowing(
+    program: &Program,
+    names: &TypeNames<'_>,
+    diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
+) {
+    for it in &program.items {
+        let (assoc, module, owner) = match it {
+            Item::Impl(i) => (
+                i.items
+                    .iter()
+                    .filter_map(|m| match m {
+                        AstImplItem::AssocType { name, .. } => Some(name.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                impl_module(i),
+                format!("impl for `{}`", impl_def_display(&i.self_ty)),
+            ),
+            Item::Trait(t) => (
+                trait_assoc_names(t),
+                item_module(it),
+                format!("trait `{}`", leaf_name(&t.name)),
+            ),
+            _ => continue,
+        };
+        for a in assoc {
+            let prim = matches!(
+                crate::ty::resolve_ty(&path_ty_named(&a, it.span())),
+                HirTy::Prim(_)
+            );
+            // A trait of that name is not a type (`trait IntoFuture { type
+            // IntoFuture; }`).
+            let outer = names
+                .canon(&[a.as_str()], &module, &[])
+                .filter(|full| !names.traits.contains(full));
+            if prim || outer.is_some() {
+                rokc_diagnostic::set_current_span(it.span());
+                diags.push(rokc_diagnostic::RokDiagnostic::warning(
+                    rokc_diagnostic::ErrorKind::Type,
+                    format!(
+                        "associated type `{a}` shadows the outer type `{a}` inside the {owner}; \
+                         there `{a}` and `Self::{a}` both mean the associated type (spec 2.8.3)"
+                    ),
+                ));
+            }
+        }
+    }
+}
+
 fn subst_assoc_sig(def: &mut FnDef, assoc: &HashMap<String, Ty>) {
     if assoc.is_empty() {
         return;
@@ -3159,6 +3293,8 @@ fn subst_assoc_sig(def: &mut FnDef, assoc: &HashMap<String, Ty>) {
     }
 }
 
+/// Replace `X` and `Self::X` by `assoc[X]` (associated types, generic
+/// alias parameters).
 pub(super) fn subst_assoc_ty(ty: &mut Ty, assoc: &HashMap<String, Ty>) {
     match &mut ty.kind {
         AstTyKind::Path(p) => {
@@ -3190,9 +3326,22 @@ pub(super) fn subst_assoc_ty(ty: &mut Ty, assoc: &HashMap<String, Ty>) {
                 }
             }
         }
-        AstTyKind::Sum(ps) | AstTyKind::Tuple(ps) => {
-            ps.iter_mut().for_each(|t| subst_assoc_ty(t, assoc));
+        AstTyKind::Sum(ps) => {
+            for t in ps.iter_mut() {
+                let before = matches!(&t.kind, AstTyKind::Path(p) if p.segments.len() <= 2)
+                    .then(|| format!("{:?}", t.kind));
+                subst_assoc_ty(t, assoc);
+                // A replaced parameter stays one member (spec 2.6.4).
+                if before.is_some_and(|b| b != format!("{:?}", t.kind)) {
+                    let span = t.span;
+                    let inner = std::mem::replace(t, path_ty_named(rokc_ast::NEST_MARK, span));
+                    if let AstTyKind::Path(p) = &mut t.kind {
+                        p.segments[0].generics.push(inner);
+                    }
+                }
+            }
         }
+        AstTyKind::Tuple(ps) => ps.iter_mut().for_each(|t| subst_assoc_ty(t, assoc)),
         AstTyKind::Array(e, len) => {
             subst_assoc_ty(e, assoc);
             // `[T; D]` with const parameter `D` given as `3`.

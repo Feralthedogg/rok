@@ -88,6 +88,9 @@ pub(super) fn unify_param_ty_with(
                 matches!(&p.kind, rokc_ast::TyKind::Path(path)
                     if path.segments.len() == 1 && generic_names.contains(&path.segments[0].name))
             };
+            // `T?` is `#nest<T> | none`.
+            let parts: Vec<&rokc_ast::Ty> =
+                parts.iter().map(|p| p.nest_inner().unwrap_or(p)).collect();
             let (params, fixed): (Vec<&rokc_ast::Ty>, Vec<&rokc_ast::Ty>) =
                 parts.iter().partition(|p| is_param(p));
             let fixed: Vec<HirTy> = fixed
@@ -540,6 +543,12 @@ pub(super) fn lower_fn_inner(
     let mut ctx = LowerCtx::new(env, subst, self_ty);
     ctx.current_module = module;
     ctx.set_bounds(&fn_def.generics, &fn_def.where_clause);
+    ctx.assoc_names = fn_def
+        .attrs
+        .iter()
+        .filter(|a| a.path.first().is_some_and(|p| p == crate::ASSOC_TYPES_ATTR))
+        .flat_map(|a| a.path[1..].iter().cloned())
+        .collect();
     ctx.unsafe_depth = u32::from(fn_def.is_unsafe);
     // Marker set by the driver on the synthesized entry (spec 4.16.2).
     ctx.implicit_main = fn_def.attrs.iter().any(|a| a.path == ["#implicit_main"]);
@@ -648,10 +657,12 @@ pub(super) fn resolve_ast_with_subst(
             // Fall back to the regular resolver, then post-substitute
             // any leaked type-param paths.
             let mut t = resolve_ty_with_structs(ty, struct_table, enum_table, sc);
-            substitute_aliases(&mut t, subst);
+            substitute_params(&mut t, subst);
             t
         }
-        rokc_ast::TyKind::Sum(parts) => HirTy::sum(parts.iter().map(rec)),
+        rokc_ast::TyKind::Sum(parts) => {
+            crate::ty::written_sum(parts, |n| subst.contains_key(n), rec)
+        }
         rokc_ast::TyKind::Tuple(parts) if parts.is_empty() => HirTy::Unit,
         rokc_ast::TyKind::Tuple(parts) => HirTy::Tuple(parts.iter().map(rec).collect()),
         // `[T; N]` / `[T; M * N]` under the instantiation's const args.
@@ -675,7 +686,7 @@ pub(super) fn resolve_ast_with_subst(
         rokc_ast::TyKind::Throws { ok, err } => crate::ty::throws_ty(rec(ok), rec(err)),
         _ => {
             let mut t = resolve_ty_with_structs(ty, struct_table, enum_table, sc);
-            substitute_aliases(&mut t, subst);
+            substitute_params(&mut t, subst);
             t
         }
     }

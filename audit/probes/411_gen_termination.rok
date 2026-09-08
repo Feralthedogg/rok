@@ -1,0 +1,52 @@
+// spec: 004.11-generators §4.11.10
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 1 2 3
+// none none
+// early 0 1
+// empty true
+
+// spec 4.11.10: when the body finishes the iterator ends and every later
+// `next()` returns `none`; `return;` ends it early. A body that never
+// yields is an empty iterator.
+yield fn finite() -> i32 {
+    yield 1i32;
+    yield 2i32;
+    yield 3i32;
+}
+
+yield fn early_stop(stop: i32) -> i32 {
+    let i = 0;
+    loop {
+        if i >= stop { return; }
+        yield i;
+        i = i + 1;
+    }
+}
+
+yield fn nothing(flag: bool) -> i32 {
+    if flag { yield 99i32; }
+}
+
+fn main() -> i32 {
+    let it = finite();
+    let s = "";
+    for x in it {
+        if s != "" { s = s + " "; }
+        s = s + f"{x}";
+    }
+    println(s);
+    let a = match it.next() { none => "none", _ => "some" };
+    let b = match it.next() { none => "none", _ => "some" };
+    println(f"{a} {b}");
+
+    let e = "early";
+    for x in early_stop(2) { e = e + f" {x}"; }
+    println(e);
+
+    let n = 0;
+    for x in nothing(false) { n = n + 1; }
+    println(f"empty {n == 0}");
+    return 0;
+}

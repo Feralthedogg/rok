@@ -49,7 +49,7 @@ use pattern::{int_fits, lower_match, lower_pattern};
 use resolve::{
     GC_BUF, bound_key, impl_bound_keys, impl_module, item_module, leaf_name, mangle_inst,
     method_target_for, module_display, module_of, resolve_name, resolve_ty_with_structs,
-    split_trait_args, substitute_aliases, ty_mangle, visible_from,
+    split_trait_args, substitute_aliases, substitute_params, ty_mangle, visible_from,
 };
 use throws::{
     ErrFrame, adapt_fn_value, adapt_never_fn, erase_unbound_errors, exit_through,
@@ -545,7 +545,12 @@ fn wrap_into_sum(slot_ty: &HirTy, value: HirExpr) -> HirExpr {
         return value;
     };
     let Some(idx) = sum_variant_index(variants, &value.ty) else {
-        return value;
+        // A nested optional (spec 2.6.4): a value of the inner type's
+        // members goes in wrapped by the inner sum.
+        return match variants.iter().find(|v| nested_fits(v, &value.ty)) {
+            Some(inner) => wrap_into_sum(slot_ty, wrap_into_sum(inner, value)),
+            None => value,
+        };
     };
     let span = value.span;
     let payload = if is_none_ty(&variants[idx]) {
@@ -598,6 +603,18 @@ fn resum(ctx: &mut LowerCtx<'_>, value: HirExpr, to: &HirTy) -> HirExpr {
         },
         ty: to.clone(),
         span,
+    }
+}
+
+/// Is `member` (of an outer sum) a nested sum that takes a `value_ty`
+/// value by injection — `i32` or `none` into the `i32 | none` of
+/// `(i32 | none)?` (spec 2.6.4)?
+fn nested_fits(member: &HirTy, value_ty: &HirTy) -> bool {
+    match member {
+        HirTy::Sum(ws) => {
+            sum_variant_index(ws, value_ty).is_some() || ws.iter().any(|w| nested_fits(w, value_ty))
+        }
+        _ => false,
     }
 }
 
@@ -662,6 +679,17 @@ fn coerce(
     let value = match (&value.ty, slot) {
         (HirTy::Sum(vs), HirTy::Sum(ws)) if vs != ws && vs.iter().all(|v| ws.contains(v)) => {
             resum(ctx, value, slot)
+        }
+        // Into a nested optional's inner sum (spec 2.6.4): a sub-sum of
+        // it re-tagged, then wrapped by the outer layer.
+        (HirTy::Sum(vs), HirTy::Sum(ws)) if !ws.contains(&value.ty) => {
+            let inner = ws
+                .iter()
+                .find(|w| matches!(w, HirTy::Sum(is) if vs.iter().all(|v| is.contains(v))));
+            match inner.cloned() {
+                Some(inner) => resum(ctx, value, &inner),
+                None => value,
+            }
         }
         _ => value,
     };
@@ -1094,6 +1122,9 @@ struct LowerCtx<'a> {
     ty_bounds: HashMap<String, Vec<String>>,
     /// Lowering a coroutine body (`yield` / `await` are allowed).
     coro: Option<coro::CoroCtx>,
+    /// Associated types of the enclosing trait / impl
+    /// (`ASSOC_TYPES_ATTR`): a bare `X` is `Self::X` (spec 2.8.3).
+    assoc_names: Vec<String>,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -1133,6 +1164,7 @@ impl<'a> LowerCtx<'a> {
             narrowed: HashMap::new(),
             ty_bounds: HashMap::new(),
             coro: None,
+            assoc_names: Vec::new(),
         }
     }
 
@@ -1209,10 +1241,7 @@ impl<'a> LowerCtx<'a> {
                 let inner: Vec<String> = parts.iter().map(|t| self.ty_name(t)).collect();
                 format!("({})", inner.join(", "))
             }
-            HirTy::Sum(parts) => {
-                let inner: Vec<String> = parts.iter().map(|t| self.ty_name(t)).collect();
-                inner.join(" | ")
-            }
+            HirTy::Sum(_) => ty.sum_name(|t| self.ty_name(t)),
             HirTy::Array(e, n) => format!("[{}; {n}]", self.ty_name(e)),
             HirTy::Fn(args, ret, _) | HirTy::Closure { args, ret, .. } => {
                 let inner: Vec<String> = args.iter().map(|t| self.ty_name(t)).collect();
@@ -1768,7 +1797,7 @@ impl<'a> LowerCtx<'a> {
     fn resolve_ast_ty(&self, ty: &rokc_ast::Ty) -> HirTy {
         let mut t = self.resolve_ty_inner(ty);
         if let Some(st) = &self.self_ty {
-            substitute_aliases(&mut t, &HashMap::from([("Self".to_owned(), st.clone())]));
+            substitute_params(&mut t, &HashMap::from([("Self".to_owned(), st.clone())]));
         }
         substitute_aliases(&mut t, &self.env.type_aliases);
         t
@@ -1886,6 +1915,20 @@ impl<'a> LowerCtx<'a> {
                         if let Some(t) = self.ty_subst.get(&seg.name) {
                             return t.clone();
                         }
+                        // `X` in a trait / impl body is `Self::X`.
+                        if self.self_ty.is_some() && self.assoc_names.contains(&seg.name) {
+                            let mut sp = p.clone();
+                            sp.segments.insert(
+                                0,
+                                rokc_ast::PathSegment {
+                                    name: "Self".to_owned(),
+                                    generics: Vec::new(),
+                                },
+                            );
+                            if let Some(t) = self.projection(&sp) {
+                                return t;
+                            }
+                        }
                         // A `const` item as a const generic argument
                         // (`Grid<W, 3>`, spec 2.11.4).
                         if self.canon_type(&[seg.name.as_str()]).is_none()
@@ -1936,10 +1979,14 @@ impl<'a> LowerCtx<'a> {
                     &self.env.enum_table,
                     self.scope(),
                 );
-                substitute_aliases(&mut t, self.ty_subst);
+                substitute_params(&mut t, self.ty_subst);
                 t
             }
-            AstTyKind::Sum(parts) => HirTy::sum(parts.iter().map(rec)),
+            AstTyKind::Sum(parts) => crate::ty::written_sum(
+                parts,
+                |n| self.ty_subst.contains_key(n) || self.assoc_names.iter().any(|a| a == n),
+                rec,
+            ),
             AstTyKind::Tuple(parts) if parts.is_empty() => HirTy::Unit,
             AstTyKind::Tuple(parts) => HirTy::Tuple(parts.iter().map(rec).collect()),
             AstTyKind::Array(elem, len) => {

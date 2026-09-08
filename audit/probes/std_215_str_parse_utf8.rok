@@ -1,0 +1,21 @@
+// spec: std 215-string §2.15.2 / §2.15.6 / §2.15.7
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 42 -7
+// parse failed
+// hi
+// bad utf8
+
+// spec 2.15.2: `str::from_utf8(List<u8>) throws (Utf8Error)` validates;
+// `parse<T: FromStr>` throws `T::Err` on bad input (2.15.7);
+// (Unicode case mapping: std_215_str_case_unicode.)
+fn main() {
+    let a = try "42".parse::<i32>() catch _ { -1 };
+    let b = try "-7".parse::<i64>() catch _ { -1i64 };
+    println(f"{a} {b}");
+    let c = try "4x2".parse::<i32>() catch _ { -1 };
+    println(if c == -1 { "parse failed" } else { "parsed?" });
+    println(try str::from_utf8([104u8, 105u8]) catch _ { "bad utf8" });
+    println(try str::from_utf8([0xC3u8, 0x28u8]) catch _ { "bad utf8" });
+}

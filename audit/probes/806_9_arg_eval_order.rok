@@ -1,0 +1,35 @@
+// spec: 008.06-calling-convention §8.6.9
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// a
+// b
+// c
+// a
+// b
+// 15
+
+// spec 8.6.9: arguments are evaluated left to right, including calls to
+// `extern "C"` functions, whatever the C ABI's register order.
+extern "C" {
+    fn hypot(x: f64, y: f64) -> f64;
+}
+
+fn tag(s: str, v: i32) -> i32 {
+    println(s);
+    return v;
+}
+
+fn tagf(s: str, v: f64) -> f64 {
+    println(s);
+    return v;
+}
+
+fn add3(x: i32, y: i32, z: i32) -> i32 { return x + y + z; }
+
+fn main() -> i32 {
+    let s = add3(tag("a", 1), tag("b", 2), tag("c", 3));
+    let h = unsafe { hypot(tagf("a", 6.0), tagf("b", 8.0)) };
+    rok_print_i32(s + (h as i32) - 1);
+    return 0;
+}

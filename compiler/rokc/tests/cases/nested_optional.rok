@@ -1,0 +1,111 @@
+// expect-exit: 0
+// expect-stdout:
+// for: 1 none 3 none (4)
+// get: stored none | missing | stored 1
+// pop: stored none | missing
+// coalesce: none 7 1
+// is: false true
+// dot: none missing
+// try: none missing
+// dict: stored none | missing | stored 5
+// generic: stored none | missing
+// written: true
+// iter: 4 none | 1 none 3 none | 0:1 1:none | none 3 none 1 | 2
+// err: outer 9 | inner err 1 | inner 5
+// flat: false
+
+// Swift-style nested optionals (spec 2.6.4): a generic `T | none` with
+// `T = i32 | none` keeps its own outer `none`, so a stored `none` element
+// is not "nothing there". Written-out sums still flatten.
+type Opt = i32 | none;
+
+fn show(x: i32 | none) -> str {
+    match x { n: i32 => f"{n}", none => "none" }
+}
+
+fn describe<T>(o: T | none, f: fn(T) -> str) -> str {
+    match o { none => "missing", v: T => "stored " + f(v) }
+}
+
+fn second(xs: List<i32 | none>) -> str | none {
+    let v = xs.get(1)?;
+    show(v)
+}
+
+// Not only `none`: a generic's own member that `T` also has stays a
+// separate layer, `(i32 | MyErr) | MyErr`.
+struct MyErr { code: i32; }
+type Inner = i32 | MyErr;
+
+fn pick<T>(x: T, bad: bool) -> T | MyErr {
+    if bad { return MyErr { code: 9 }; }
+    x
+}
+
+fn inner_str(w: Inner) -> str {
+    match w { n: i32 => f"{n}", e: MyErr => f"err {e.code}" }
+}
+
+fn layer(r: bool, v: Inner) -> str {
+    match pick(v, r) { e: MyErr => f"outer {e.code}", w: Inner => "inner " + inner_str(w) }
+}
+
+// Disjoint members flatten: `T | none` with `T = i32 | str`.
+fn wrap<T>(x: T) -> T | none { x }
+
+fn main() -> i32 {
+    let xs: List<i32 | none> = [1, none, 3, none];
+    let line = "for:";
+    let n = 0;
+    for x in xs {
+        line = line + " " + show(x);
+        n += 1;
+    }
+    println(f"{line} ({n})");
+
+    let g1 = match xs.get(1) { none => "missing", v: Opt => "stored " + show(v) };
+    let g9 = match xs.get(9) { none => "missing", v: Opt => "stored " + show(v) };
+    let g0 = match xs.get(0) { none => "missing", v: Opt => "stored " + show(v) };
+    println(f"get: {g1} | {g9} | {g0}");
+
+    let ys: List<i32 | none> = [none];
+    let p1 = if let v: Opt = ys.pop() { "stored " + show(v) } else { "missing" };
+    let p2 = if let v: Opt = ys.pop() { "stored " + show(v) } else { "missing" };
+    println(f"pop: {p1} | {p2}");
+
+    println(f"coalesce: {show(xs.get(1) ?? 7)} {show(xs.get(9) ?? 7)} {show(xs.get(0) ?? 7)}");
+    println(f"is: {xs.get(1) is none} {xs.get(9) is none}");
+    println(f"dot: {xs.get(1)?.debug() ?? "missing"} {xs.get(9)?.debug() ?? "missing"}");
+
+    let one: List<i32 | none> = [1];
+    println(f"try: {second(xs) ?? "missing"} {second(one) ?? "missing"}");
+
+    let d: Dict<str, i32 | none> = {"a": none, "b": 5};
+    println(f"dict: {describe(d.get("a"), show)} | {describe(d.get("z"), show)} | {describe(d.get("b"), show)}");
+
+    println(f"generic: {describe(xs.get(3), show)} | {describe(xs.get(4), show)}");
+
+    let w: (i32 | none) | none = none;
+    let w2: Opt = w;
+    println(f"written: {w2 is none}");
+
+    let mapped = "";
+    for x in xs.iter().map(|v| v) { mapped = mapped + " " + show(x); }
+    let rev = "";
+    for x in xs.iter().rev() { rev = rev + " " + show(x); }
+    let en = "";
+    for (i, x) in xs.iter().enumerate() {
+        if i < 2 { en = en + f" {i}:" + show(x); }
+    }
+    let nones = xs.iter().filter(|v| v is none).count();
+    println(f"iter: {xs.iter().count()} {show(xs.iter().last() ?? 0)} |{mapped} |{en} |{rev} | {nones}");
+
+    let e1: Inner = MyErr { code: 1 };
+    let five: Inner = 5;
+    println(f"err: {layer(true, e1)} | {layer(false, e1)} | {layer(false, five)}");
+
+    let s: i32 | str = "s";
+    let flat: i32 | str | none = wrap(s);
+    println(f"flat: {flat is none}");
+    0
+}

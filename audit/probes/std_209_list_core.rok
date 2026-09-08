@@ -1,0 +1,41 @@
+// spec: std 209-collections §2.9.2
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 0 true
+// 3 false 1 3
+// none
+// [1, 9, 2, 3]
+// removed 9 -> [1, 2, 3]
+// popped 3, len 2
+// cleared true none
+// sum 60
+
+// spec 2.9.2: `List<T>` core methods. `get` / `first` / `last` / `pop` are
+// safe (`T | none`); `insert` / `remove` shift; `Debug` prints `[a, b]`;
+// `FromIterator` collects.
+fn show(v: i32 | none) -> str {
+    match v { x: i32 => f"{x}", none => "none" }
+}
+
+fn main() {
+    let xs: List<i32> = [];
+    println(f"{xs.len()} {xs.is_empty()}");
+    xs.push(1);
+    xs.push(2);
+    xs.push(3);
+    println(f"{xs.len()} {xs.is_empty()} {show(xs.first())} {show(xs.last())}");
+    println(show(xs.get(100)));
+    xs.insert(1, 9);
+    println(xs.debug());
+    let r = xs.remove(1);
+    println(f"removed {r} -> {xs.debug()}");
+    let p = xs.pop();
+    println(f"popped {show(p)}, len {xs.len()}");
+    xs.clear();
+    println(f"cleared {xs.is_empty()} {show(xs.pop())}");
+    let ys: List<i32> = [10, 20, 30];
+    let total = 0;
+    for y in ys { total += y; }
+    println(f"sum {total}");
+}

@@ -10,6 +10,38 @@ use rokc_ir_common::PrimTy;
 
 use crate::HirTy;
 
+/// A written sum `A | B | ..` (spec 2.6.4): a member that is itself a
+/// written sum (or an alias of one) spreads into the set, so
+/// `(i32 | none) | none` is `i32 | none`. A generic member (`param`
+/// names a type parameter; `Self`, `<T as Tr>::X`, `T::X`, `#nest<X>`) stays one
+/// member, so `HirTy::sum` keeps it a nested layer when it overlaps the
+/// written members: `T | none` with `T = i32 | none` is `(i32 | none)?`.
+pub fn written_sum(
+    parts: &[Ty],
+    param: impl Fn(&str) -> bool,
+    rec: impl Fn(&Ty) -> HirTy,
+) -> HirTy {
+    let generic = |t: &Ty| match &t.kind {
+        TyKind::SelfUpper => true,
+        TyKind::Path(p) => p
+            .segments
+            .first()
+            .is_some_and(|s| s.name == "Self" || s.name == rokc_ast::QPATH_MARK || param(&s.name)),
+        _ => false,
+    };
+    let mut out = Vec::new();
+    for p in parts {
+        if let Some(inner) = p.nest_inner() {
+            out.push(rec(inner));
+        } else if generic(p) {
+            out.push(rec(p));
+        } else {
+            rec(p).spread(&mut out);
+        }
+    }
+    HirTy::sum(out)
+}
+
 /// Resolve an AST type to HIR. Unknown paths are kept as `HirTy::Path`
 /// for later resolution.
 #[must_use]
@@ -17,7 +49,7 @@ pub fn resolve_ty(ty: &Ty) -> HirTy {
     match &ty.kind {
         TyKind::Path(path) => resolve_path_ty(path),
         TyKind::Never => HirTy::Never,
-        TyKind::Sum(parts) => HirTy::sum(parts.iter().map(resolve_ty)),
+        TyKind::Sum(parts) => written_sum(parts, |_| false, resolve_ty),
         TyKind::Tuple(parts) => {
             if parts.is_empty() {
                 HirTy::Unit

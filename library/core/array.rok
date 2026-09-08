@@ -1,5 +1,6 @@
 // rok::core::array — Clone / Copy / Default / Debug / PartialEq / Eq /
-// Hash for fixed arrays `[T; N]`, element-wise (stdlib 2.13.6, 2.10.9).
+// Hash for fixed arrays `[T; N]`, element-wise, and PartialOrd / Ord,
+// lexicographic (stdlib 2.5.7, 2.13.6, 2.10.9).
 
 impl<T: Clone, const N: usize> Clone for [T; N] {
     fn clone(self) -> [T; N] {
@@ -42,6 +43,34 @@ impl<T: PartialEq, const N: usize> PartialEq for [T; N] {
 }
 
 impl<T: Eq, const N: usize> Eq for [T; N] {}
+
+// Lexicographic, like `List` and tuples (2.5.7).
+impl<T: PartialEq + PartialOrd, const N: usize> PartialOrd for [T; N] {
+    fn lt(self, rhs: [T; N]) -> bool {
+        for i in 0..N {
+            if self[i] != rhs[i] { return self[i] < rhs[i]; }
+        }
+        false
+    }
+    fn le(self, rhs: [T; N]) -> bool {
+        for i in 0..N {
+            if self[i] != rhs[i] { return self[i] < rhs[i]; }
+        }
+        true
+    }
+    fn gt(self, rhs: [T; N]) -> bool { rhs.lt(self) }
+    fn ge(self, rhs: [T; N]) -> bool { rhs.le(self) }
+}
+
+impl<T: Ord, const N: usize> Ord for [T; N] {
+    fn cmp(self, rhs: [T; N]) -> rok::core::cmp::Ordering {
+        for i in 0..N {
+            let c = self[i].cmp(rhs[i]);
+            if !c.is_eq() { return c; }
+        }
+        rok::core::cmp::Ordering::Equal
+    }
+}
 
 impl<T: Hash, const N: usize> Hash for [T; N] {
     fn hash(self) -> u64 {

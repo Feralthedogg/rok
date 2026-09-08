@@ -284,6 +284,7 @@ pub(super) fn closure_ctx<'a>(
     cl_ctx.local_uses.clone_from(&ctx.local_uses);
     cl_ctx.ref_captured.clone_from(&ctx.ref_captured);
     cl_ctx.ty_bounds.clone_from(&ctx.ty_bounds);
+    cl_ctx.assoc_names.clone_from(&ctx.assoc_names);
     cl_ctx.unsafe_depth = ctx.unsafe_depth;
 
     // Closures with captures take an extra `env` parameter (a tuple of

@@ -1,0 +1,46 @@
+// expect-exit: 0
+// expect-stdout:
+// str-7-payload
+// str-3-payload
+// 1 2
+
+// A `str` sharing a sum payload union with a non-`str` aggregate: the
+// union must be made of GC-visible words, or a collection frees the
+// runtime-built string while the enum still holds it (used to print
+// blanks).
+extern "C" {
+    fn rok_gc_collect();
+}
+
+enum E { S(str), P(i64, i64) }
+
+fn make(i: i32) -> E {
+    if i >= 0 { E::S(f"str-{i}-payload") } else { E::P(1, 2) }
+}
+
+fn show(e: E) {
+    match e {
+        E::S(s) => println(s),
+        E::P(a, b) => println(f"{a} {b}"),
+    }
+}
+
+fn main() {
+    let xs: List<E> = [];
+    let i = 0;
+    while i < 50 {
+        xs.push(make(i));
+        i += 1;
+    }
+    let e = make(7);
+    unsafe { rok_gc_collect() };
+    let j = 0;
+    while j < 2000 {
+        let _junk = f"junk-{j}-xxxxxxxxxxxxxxxxxxxxxxxxxx";
+        j += 1;
+    }
+    unsafe { rok_gc_collect() };
+    show(e);
+    show(xs[3]);
+    show(make(-1));
+}

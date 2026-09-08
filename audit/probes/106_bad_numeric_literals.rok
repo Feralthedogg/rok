@@ -1,5 +1,6 @@
 // spec: 001.06-numeric-literals
 // probe: negative-must-fail
+// expect-error: consecutive `_` in numeric literal
 
 // spec 1.6.4 rejected forms, plus an out-of-range suffixed literal.
 fn main() -> i32 {

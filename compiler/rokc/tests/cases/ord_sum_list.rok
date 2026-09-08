@@ -15,11 +15,11 @@ fn name(o: Ordering) -> str {
     match o { Ordering::Less => "Less", Ordering::Equal => "Equal", Ordering::Greater => "Greater" }
 }
 
-// By index: with `T = i32 | none`, `next() -> T | none` flattens to
-// `i32 | none` (spec 2.6.4), so a `for` loop would stop at the first `none`.
+// With `T = i32 | none`, `next()` is the nested `(i32 | none)?` (spec
+// 2.6.4): the loop sees the stored `none`.
 fn smallest<T: Ord>(xs: List<T>) -> T {
     let m = xs[0];
-    for i in 0..xs.len() { if xs[i] < m { m = xs[i]; } }
+    for x in xs { if x < m { m = x; } }
     m
 }
 

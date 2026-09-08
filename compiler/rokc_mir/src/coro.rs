@@ -581,3 +581,148 @@ fn remove_block_params(f: &mut MirFunction) {
     f.locals = locals;
     f.blocks.extend(extra);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const I64: MirTy = MirTy::Prim(PrimTy::I64);
+
+    const fn add(target: u32, lhs: u32, rhs: u32) -> Statement {
+        Statement::Assign {
+            target: LocalId(target),
+            rvalue: RValue::BinOp {
+                op: PrimOp::Add,
+                op_ty: I64,
+                lhs: Operand::Copy(LocalId(lhs)),
+                rhs: Operand::Copy(LocalId(rhs)),
+            },
+        }
+    }
+
+    const fn block(id: u32, stmts: Vec<Statement>, terminator: Terminator) -> BasicBlock {
+        BasicBlock {
+            id: BlockId(id),
+            params: Vec::new(),
+            stmts,
+            terminator,
+        }
+    }
+
+    /// `yield fn g(n) { let a = n + n; yield a; let b = a + n; yield b (final) }`
+    fn generator() -> MirFunction {
+        MirFunction {
+            id: FunctionId(0),
+            def_id: None,
+            name: "g".to_owned(),
+            params: vec![LocalId(0)],
+            locals: (0..3)
+                .map(|i| LocalDecl {
+                    id: LocalId(i),
+                    name: None,
+                    ty: I64,
+                })
+                .collect(),
+            blocks: vec![
+                block(
+                    0,
+                    vec![add(1, 0, 0)],
+                    Terminator::Suspend {
+                        value: Some(Operand::Copy(LocalId(1))),
+                        resume: BlockId(1),
+                        is_final: false,
+                    },
+                ),
+                block(
+                    1,
+                    vec![add(2, 1, 0)],
+                    Terminator::Suspend {
+                        value: Some(Operand::Copy(LocalId(2))),
+                        resume: BlockId(2),
+                        is_final: true,
+                    },
+                ),
+                block(2, Vec::new(), Terminator::Unreachable),
+            ],
+            param_tys: vec![I64],
+            ret_ty: I64,
+            span: rokc_diagnostic::Span::default(),
+        }
+    }
+
+    #[test]
+    fn transform_builds_state_machine() {
+        let mut f = generator();
+        let ctor = transform(&mut f, 0, FunctionId(1));
+
+        // resume(frame) -> step; the constructor takes the initial args.
+        assert_eq!(f.params.len(), 1);
+        assert_eq!(f.param_tys, vec![MirTy::GcRef]);
+        assert_eq!(ctor.name, "g__new");
+        assert_eq!(ctor.param_tys, vec![I64]);
+
+        // Frame = (state, n, a): `b` never crosses a suspension.
+        let Statement::Assign {
+            rvalue: RValue::HeapAlloc { ty: frame_ty },
+            ..
+        } = &ctor.blocks[0].stmts[0]
+        else {
+            panic!("ctor must allocate the frame first");
+        };
+        assert_eq!(
+            *frame_ty,
+            MirTy::Tuple(vec![MirTy::Prim(PrimTy::I32), I64, I64])
+        );
+
+        // No suspend survives, the dispatcher (block 0) reads the state,
+        // and the dead continuation of the final suspend is pruned.
+        assert!(
+            f.blocks
+                .iter()
+                .all(|b| !matches!(b.terminator, Terminator::Suspend { .. }))
+        );
+        assert!(matches!(
+            &f.blocks[0].stmts[0],
+            Statement::Assign {
+                rvalue: RValue::HeapField { index: 0, .. },
+                ..
+            }
+        ));
+        assert!(f.blocks.iter().all(|b| b.id != BlockId(2)));
+    }
+
+    #[test]
+    fn suspend_spills_live_locals_and_next_state() {
+        let mut f = generator();
+        let _ = transform(&mut f, 0, FunctionId(1));
+        // The first suspend point (old block 0, now renumbered) stores
+        // `a` (field 2) and `n` (field 1), then state 1, and returns `a`.
+        let first = f
+            .blocks
+            .iter()
+            .find(|b| {
+                matches!(&b.terminator,
+                    Terminator::Return(Some(Operand::Copy(l))) if *l == LocalId(1))
+            })
+            .expect("first suspend point");
+        let stores: Vec<(u32, bool)> = first
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                Statement::HeapStore { index, value, .. } => {
+                    Some((*index, matches!(value, Operand::Const(_))))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stores, vec![(1, false), (2, false), (0, true)]);
+    }
+
+    #[test]
+    fn live_in_is_backward_dataflow() {
+        let f = generator();
+        let live = live_in(&f);
+        assert_eq!(live[&BlockId(0)], BTreeSet::from([LocalId(0)]));
+        assert_eq!(live[&BlockId(1)], BTreeSet::from([LocalId(0), LocalId(1)]));
+    }
+}

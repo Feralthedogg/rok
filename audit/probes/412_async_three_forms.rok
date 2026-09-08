@@ -1,0 +1,42 @@
+// spec: 004.12-async §4.12.3-4.12.5 / §4.12.13
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// fn 41
+// block 7
+// closure 3 4
+// method 15
+
+// spec 4.12.3-5: `async fn`, `async { }` and `async || { }` each give a
+// future the caller awaits; each call of an async closure makes a new
+// future (4.12.5). 4.12.13: `async` methods.
+async fn add(a: i32, b: i32) -> i32 { a + b }
+
+async fn twice(x: i32) -> i32 {
+    let y = await add(x, x);
+    await add(y, 1)
+}
+
+struct Acc { base: i32; }
+impl Acc {
+    async fn plus(self, n: i32) -> i32 { (await add(self.base, n)) }
+}
+
+async fn main() {
+    println(f"fn {await twice(20)}");
+
+    let f = async {
+        let a = await add(3, 4);
+        a
+    };
+    println(f"block {await f}");
+
+    let base = 1;
+    let g = async |n: i32| { await add(base, n) };
+    let f1 = g(2);
+    let f2 = g(3);
+    println(f"closure {await f1} {await f2}");
+
+    let acc = Acc { base: 10 };
+    println(f"method {await acc.plus(5)}");
+}

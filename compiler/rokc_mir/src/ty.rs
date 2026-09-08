@@ -154,11 +154,12 @@ pub fn unify_payload(payloads: &[MirTy]) -> Option<MirTy> {
     Some(MirTy::Array(Box::new(elem), size.div_ceil(align)))
 }
 
-/// `ty` contains a `GcRef` word.
+/// `ty` contains a word the collector must see: a `GcRef`, or a `str`
+/// (whose pointer may point into a GC string, like codegen's `gc_paths`).
 #[must_use]
 pub fn has_gc_ref(ty: &MirTy) -> bool {
     match ty {
-        MirTy::GcRef => true,
+        MirTy::GcRef | MirTy::Prim(PrimTy::Str) => true,
         MirTy::Tuple(ps) | MirTy::Struct(_, ps) => ps.iter().any(has_gc_ref),
         MirTy::Array(t, _) => has_gc_ref(t),
         MirTy::Sum(ps) => has_gc_ref(&sum_layout(ps)),
@@ -216,5 +217,65 @@ pub fn enum_payload_ty(id: rokc_hir::EnumId, module: &HirModule) -> Option<MirTy
     )) {
         MirTy::Tuple(mut parts) => parts.pop(),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const fn p(t: PrimTy) -> MirTy {
+        MirTy::Prim(t)
+    }
+
+    #[test]
+    fn c_layout_sizes() {
+        assert_eq!(size_align(&MirTy::Unit), (0, 1));
+        assert_eq!(size_align(&p(PrimTy::Bool)), (1, 1));
+        assert_eq!(size_align(&p(PrimTy::Str)), (16, 8));
+        // (i8, i64, i16): padding after i8 and at the tail.
+        let t = MirTy::Tuple(vec![p(PrimTy::I8), p(PrimTy::I64), p(PrimTy::I16)]);
+        assert_eq!(size_align(&t), (24, 8));
+        assert_eq!(
+            size_align(&MirTy::Array(Box::new(p(PrimTy::U16)), 3)),
+            (6, 2)
+        );
+    }
+
+    #[test]
+    fn sum_layouts() {
+        // No payload: a bare tag.
+        assert_eq!(sum_layout(&[]), p(PrimTy::I32));
+        let i32_ = p(PrimTy::I32);
+        // Differing scalars share an unsigned int as wide as the widest.
+        assert_eq!(
+            sum_layout(&[p(PrimTy::I8), p(PrimTy::F64)]),
+            MirTy::Tuple(vec![i32_.clone(), p(PrimTy::U64)])
+        );
+        // Identical payloads keep their type.
+        assert_eq!(
+            sum_layout(&[p(PrimTy::Str), p(PrimTy::Str)]),
+            MirTy::Tuple(vec![i32_, p(PrimTy::Str)])
+        );
+        // Aggregates without references: a byte-array union.
+        let pair = MirTy::Tuple(vec![p(PrimTy::I32), p(PrimTy::I32)]);
+        assert_eq!(
+            unify_payload(&[pair, p(PrimTy::I16)]),
+            Some(MirTy::Array(Box::new(p(PrimTy::U32)), 2))
+        );
+    }
+
+    #[test]
+    fn str_in_a_union_stays_gc_visible() {
+        // Regression: `enum E { S(str), P(i64, i64) }` once unified to
+        // `[u64; 2]`, so a collection freed the runtime string.
+        assert!(has_gc_ref(&p(PrimTy::Str)));
+        let pair = MirTy::Tuple(vec![p(PrimTy::I64), p(PrimTy::I64)]);
+        assert_eq!(
+            unify_payload(&[p(PrimTy::Str), pair]),
+            Some(MirTy::Array(Box::new(MirTy::GcRef), 2))
+        );
+        assert!(!has_gc_ref(&p(PrimTy::I64)));
+        assert!(has_gc_ref(&MirTy::Sum(vec![p(PrimTy::I64), MirTy::GcRef])));
     }
 }

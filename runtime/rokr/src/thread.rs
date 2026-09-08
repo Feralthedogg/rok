@@ -412,3 +412,26 @@ pub extern "C" fn rok_static_init_end(state: *const AtomicU8) {
     // SAFETY: as above.
     unsafe { &*state }.store(2, Ordering::Release);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 0 = uninitialized, 1 = running, 2 = ready (refs-lang 5.3).
+    #[test]
+    fn static_init_states_nest() {
+        let outer = AtomicU8::new(0);
+        let inner = AtomicU8::new(0);
+        assert_eq!(rok_static_init_begin(&raw const outer), 1);
+        assert_eq!(outer.load(Ordering::Relaxed), 1);
+        // An initializer touching another static initializes it first.
+        assert_eq!(rok_static_init_begin(&raw const inner), 1);
+        rok_static_init_end(&raw const inner);
+        assert_eq!(inner.load(Ordering::Relaxed), 2);
+        rok_static_init_end(&raw const outer);
+        assert_eq!(outer.load(Ordering::Relaxed), 2);
+        // Ready statics are not re-run, and the per-thread list is empty.
+        assert_eq!(rok_static_init_begin(&raw const outer), 0);
+        assert!(initializing_head().is_null());
+    }
+}

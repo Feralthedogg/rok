@@ -1,0 +1,27 @@
+// expect-exit: 0
+// expect-stdout:
+// lt: true false false true
+// le: true true false
+// gt: true false true
+// cmp: Less Equal Greater
+// max: 1 0
+
+// `PartialOrd` / `Ord` for `[T; N]`: lexicographic, like `List` and
+// tuples (stdlib 2.5.7).
+fn name(o: Ordering) -> str {
+    match o { Ordering::Less => "Less", Ordering::Equal => "Equal", Ordering::Greater => "Greater" }
+}
+
+fn main() {
+    let a: [i32; 3] = [1, 2, 3];
+    let b: [i32; 3] = [1, 2, 4];
+    let c: [i32; 3] = [0, 9, 9];
+    let s: [str; 2] = ["a", "b"];
+    let t: [str; 2] = ["a", "c"];
+    println(f"lt: {a < b} {b < a} {a < a} {s < t}");
+    println(f"le: {a <= b} {a <= a} {b <= c}");
+    println(f"gt: {b > a} {c > a} {a >= c}");
+    println(f"cmp: {name(a.cmp(b))} {name(a.cmp(a))} {name(a.cmp(c))}");
+    let m = a.max(c);
+    println(f"max: {m[0]} {a.min(c)[0]}");
+}

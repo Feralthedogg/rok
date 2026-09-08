@@ -1,0 +1,48 @@
+// spec: 007.06-scheduler §7.6.6 / 008.05 §8.5.4 rok_cpu_count
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// cpus >= 1: true
+// distinct threads: 4
+// 0 10 20 30
+
+// spec 7.6.6: `thread::spawn` maps 1:1 onto an OS thread — each spawned
+// thread has its own id, distinct from the main thread — and `join`
+// hands back the closure's value. `rok_cpu_count` reports >= 1.
+use rok::std::thread;
+
+extern "C" {
+    fn rok_cpu_count() -> usize;
+}
+
+fn main() -> i32 {
+    println(f"cpus >= 1: {unsafe { rok_cpu_count() } >= 1usize}");
+    let main_id = thread::current().id();
+    let hs: List<thread::JoinHandle<i32>> = [];
+    let ids: List<thread::ThreadId> = [];
+    let gate = Atomic::new(0);
+    let i = 0;
+    while i < 4 {
+        let k = i;
+        hs.push(thread::spawn(|| {
+            gate.fetch_add(1, Relaxed);
+            k * 10
+        }));
+        i += 1;
+    }
+    for h in hs { ids.push(h.thread().id()); }
+    let distinct = 0;
+    let a = 0;
+    while a < 4 {
+        let unique = ids[a as usize] != main_id;
+        let b = 0;
+        while b < a { if ids[a as usize] == ids[b as usize] { unique = false; } b += 1; }
+        if unique { distinct += 1; }
+        a += 1;
+    }
+    println(f"distinct threads: {distinct}");
+    let out = "";
+    for h in hs { out = out + f"{try! h.join()} "; }
+    println(out.trim());
+    return 0;
+}

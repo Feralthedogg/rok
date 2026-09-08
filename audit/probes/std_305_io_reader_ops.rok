@@ -1,0 +1,52 @@
+// spec: std 305-io §3.5.1
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// read_exact: abc
+// short read_exact: UnexpectedEof
+// pos 6, rewind 0
+// line [abcdef\n] then end []
+// copied 8
+// copy: [abcdef\ng]
+
+// spec 3.5.1: `read_exact` fills the whole buffer or throws
+// `UnexpectedEof`; `stream_position` / `rewind`; `read_line` keeps `\n`
+// and returns "" at end; `io::copy(reader, writer)` returns bytes copied.
+use rok::std::io;
+use rok::std::io::{IoError, IoErrorKind, Reader, Writer};
+use rok::std::fs;
+use rok::std::fs::File;
+use rok::std::env;
+
+fn main() throws (IoError) {
+    let p = env::temp_dir() / f"rok_probe_305_{env::pid()}.txt";
+    let q = env::temp_dir() / f"rok_probe_305_{env::pid()}.out";
+    try fs::write(p, "abcdef\ng");
+    let f = try File::open(p);
+    let buf: List<u8> = [0u8, 0u8, 0u8];
+    try f.read_exact(buf);
+    println("read_exact: " + (try! str::from_utf8(buf)));
+    let big: List<u8> = List::new();
+    let i = 0;
+    while i < 64 { big.push(0u8); i += 1; }
+    try f.read_exact(big) catch e { println(f"short read_exact: {e.kind.debug()}"); };
+    try f.seek(rok::std::io::SeekFrom::Start(6u64));
+    let pos = try f.stream_position();
+    try f.rewind();
+    println(f"pos {pos}, rewind {try f.stream_position()}");
+    let l1 = try f.read_line();
+    try f.read_line();
+    let l3 = try f.read_line();
+    println("line [" + l1.replace("\n", "\\n") + "] then end [" + l3 + "]");
+    try f.close();
+
+    let src = try File::open(p);
+    let dst = try fs::create(q);
+    let n = try io::copy(ref src, ref dst);
+    try src.close();
+    try dst.close();
+    println(f"copied {n}");
+    println("copy: [" + (try fs::read_to_str(q)).replace("\n", "\\n") + "]");
+    try fs::remove_file(p);
+    try fs::remove_file(q);
+}

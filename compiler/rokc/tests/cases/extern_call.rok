@@ -1,4 +1,5 @@
 // expect-exit: 42
+// expect-stdout: forty-two
 
 // Calling a user-declared `extern "C"` function whose name doesn't
 // collide with the auto-injected runtime hooks. `puts` from libc takes

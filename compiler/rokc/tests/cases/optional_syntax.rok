@@ -1,0 +1,59 @@
+// expect-exit: 0
+// expect-stdout:
+// flat: 3 true true
+// nested: stored none | stored none | missing
+// fn: none true
+// generic: s s 7 none
+// is: true false
+
+// `T?` (spec 2.6.5) is the generic alias `Maybe<T>`: `i32?` is
+// `i32 | none` and `(i32 | str)?` flattens, but `(i32 | none)?` and
+// `i32??` keep two layers. Postfix `?` binds tighter than `|`.
+type Opt = i32 | none;
+type Maybe<T> = T | none;
+
+fn show(x: i32?) -> str {
+    match x { n: i32 => f"{n}", none => "none" }
+}
+
+fn look(m: (i32 | none)?) -> str {
+    match m { none => "missing", v: Opt => "stored " + show(v) }
+}
+
+fn look2(m: i32??) -> str { look(m) }
+
+fn first<T>(xs: List<T>) -> T? { xs.get(0) }
+
+fn wrap<T>(x: T?) -> str { if x is none { "n" } else { "s" } }
+
+fn ret() -> i32? { none }
+// `fn() -> i32?` returns an optional; `(fn() -> i32)?` is an optional fn.
+fn mk() -> fn() -> i32? { ret }
+
+fn main() {
+    let a: i32? = 3;
+    let b: i32 | none = a;
+    let c: (i32 | str)? = "s";
+    let d: i32 | str | none = c;
+    let e: i32 | str? = none;
+    let f: i32 | str | none = e;
+    println(f"flat: {show(b)} {d is str} {f is none}");
+
+    let xs: List<i32 | none> = [none];
+    let g: (i32 | none)? = xs.get(0);
+    let h: Maybe<i32 | none> = g;
+    let i: i32?? = xs.get(5);
+    println(f"nested: {look(g)} | {look(h)} | {look2(i)}");
+
+    let ff: (fn() -> i32)? = none;
+    println(f"fn: {show(mk()())} {ff is none}");
+
+    let ys: List<i32> = [7];
+    let zs: List<i32> = [];
+    println(f"generic: {wrap(a)} {wrap(xs.get(0))} {show(first(ys))} {show(first(zs))}");
+
+    // `x is T?`: the `?` belongs to the type.
+    let k: i32? = 4;
+    let s: str | i32 | none = "t";
+    println(f"is: {k is i32?} {s is i32?}");
+}

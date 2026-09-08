@@ -1,4 +1,8 @@
 // expect-exit: 0
+// expect-stdout:
+// hello
+// hello
+// hello
 
 extern "C" {
     fn puts(s: str) -> i32;

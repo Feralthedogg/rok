@@ -38,6 +38,15 @@ pub const UNSAFE_FN_MARK: &str = "#unsafe";
 /// its generics are `[T, Tr]`.
 pub const QPATH_MARK: &str = "#as";
 
+/// Sum member `#nest<X>`: a substituted generic member.
+///
+/// A generic alias's parameter or an associated type replaced by its
+/// argument `X` inside a sum (`Maybe<i32 | none>`
+/// with `type Maybe<T> = T | none`, `Self::Item | none`). Like a type
+/// parameter, `X` stays one member, so an overlap with the sum's own
+/// members keeps it a nested layer (spec 2.6.4).
+pub const NEST_MARK: &str = "#nest";
+
 /// Method name of the `using` desugar's release call (`x.#drop()`):
 /// `Drop::drop`, exempt from the direct-call ban (spec 2.13.4).
 pub const USING_DROP_METHOD: &str = "#drop";
@@ -509,6 +518,20 @@ pub struct PathSegment {
 pub struct Ty {
     pub kind: TyKind,
     pub span: Span,
+}
+
+impl Ty {
+    /// `X` of a `#nest<X>` sum member (`NEST_MARK`).
+    #[must_use]
+    pub fn nest_inner(&self) -> Option<&Self> {
+        match &self.kind {
+            TyKind::Path(p) => match p.segments.as_slice() {
+                [s] if s.name == NEST_MARK => s.generics.first(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

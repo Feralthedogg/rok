@@ -1,0 +1,31 @@
+// spec: 007.08-coroutine §7.8.5
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// created
+// body start
+// got 1
+// between
+// got 2
+// body end
+// exhausted
+
+// spec 7.8.5 (generator, returned-continuation): calling a `yield fn`
+// only allocates the frame; each `next()` runs the body up to the next
+// `yield` and control returns to the caller in between.
+yield fn count() -> i32 {
+    println("body start");
+    yield 1;
+    println("between");
+    yield 2;
+    println("body end");
+}
+
+fn main() -> i32 {
+    let g = count();
+    println("created");
+    println(f"got {g.next() ?? -1}");
+    println(f"got {g.next() ?? -1}");
+    match g.next() { none => println("exhausted"), _ => println("extra") }
+    return 0;
+}

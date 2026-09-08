@@ -525,6 +525,41 @@ fn paren_type_grouping_vs_tuple() {
 }
 
 #[test]
+fn optional_type_suffix() {
+    use rokc_ast::TyKind;
+    let pty = |s: &str| fn_param_ty(&parse(s)).clone();
+    // `T?` is `#nest<T> | none`.
+    let opt_of = |t: &rokc_ast::Ty| match &t.kind {
+        TyKind::Sum(v) if v.len() == 2 && matches!(v[1].kind, TyKind::None) => {
+            v[0].nest_inner().cloned()
+        }
+        _ => None,
+    };
+    // Postfix `?` binds tighter than `|`: `i32 | str?` is `i32 | (str?)`.
+    let ty = pty("fn f(x: i32 | str?) { }");
+    let TyKind::Sum(v) = &ty.kind else {
+        panic!("{ty:?}")
+    };
+    assert!(matches!(v[0].kind, TyKind::Path(_)) && opt_of(&v[1]).is_some());
+    // `i32??` is two layers.
+    let ty = pty("fn f(x: i32??) { }");
+    assert!(opt_of(&ty).and_then(|t| opt_of(&t)).is_some(), "{ty:?}");
+    // `fn() -> i32?` returns an optional; `(fn() -> i32)?` is optional.
+    let ty = pty("fn f(x: fn() -> i32?) { }");
+    assert!(matches!(&ty.kind, TyKind::Fn(_, r, _) if opt_of(r).is_some()));
+    let ty = pty("fn f(x: (fn() -> i32)?) { }");
+    assert!(opt_of(&ty).is_some_and(|t| matches!(t.kind, TyKind::Fn(..))));
+    // After `as`, `?` is the type's but `??` stays coalescing.
+    let p = parse("fn t() { return a as i32?; }");
+    assert!(matches!(&return_expr(&p).kind, ExprKind::Cast(_, t) if opt_of(t).is_some()));
+    let p = parse("fn t() { return a as i32 ?? 0; }");
+    assert!(matches!(
+        &return_expr(&p).kind,
+        ExprKind::NullishCoalesce(..)
+    ));
+}
+
+#[test]
 fn tuple_field_indices() {
     let p = parse("fn t() { return x.0.1; }");
     let ExprKind::TupleField(inner, 1) = &return_expr(&p).kind else {

@@ -1,7 +1,12 @@
 // expect-exit: 0
+// expect-stdout: 14
 
+// Passing an i32 to a fixed-arity C function. (This used to call `printf`
+// declared as `fn printf(fmt: str, value: i32)`: a C variadic called through
+// a fixed-arity prototype is UB, and on arm64 Darwin `%d` read stack garbage.
+// C variadic externs (spec 8.6.10) are a TODOS.md §4 gap.)
 extern "C" {
-    fn printf(fmt: str, value: i32) -> i32;
+    fn abs(value: i32) -> i32;
 }
 
 fn main() {
@@ -11,5 +16,5 @@ fn main() {
         total += i * i;
         i += 1;
     }
-    let _ = unsafe { printf("sum=%d\n", total) };
+    rok_print_i32(unsafe { abs(-total) });
 }

@@ -524,6 +524,45 @@ pub mod tests {
         }
     }
 
+    // Non-allocating entries: safe to run alongside other tests.
+    #[test]
+    fn non_allocating_ops() {
+        // FNV-1a: the empty string hashes to the offset basis.
+        assert_eq!(rok_str_hash(s(b"")), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(rok_str_hash(s(b"ab")), rok_str_hash(s(b"ab")));
+        assert_ne!(rok_str_hash(s(b"ab")), rok_str_hash(s(b"ba")));
+        assert_eq!(rok_str_char_count(s("a한😀".as_bytes())), 3);
+        assert_eq!(rok_str_find(s(b"abc"), s(b"")), 0);
+        assert_eq!(rok_str_find(s(b"abc"), s(b"x")), -1);
+        assert_eq!(rok_str_rfind(s(b"abc"), s(b"")), 3);
+        assert_eq!(rok_str_byte(s(b"ab"), 1), b'b');
+        assert_eq!(rok_str_byte(s(b"ab"), 9), 0);
+    }
+
+    #[test]
+    fn parse_numbers() {
+        // FromStr status: 0 ok, 1 empty, 2 bad digit, 3 out of range.
+        let st = |v: &'static [u8], signed, bits| rok_str_int_status(s(v), signed, bits);
+        assert_eq!(st(b"-128", 1, 8), 0);
+        assert_eq!(st(b"128", 1, 8), 3);
+        assert_eq!(st(b"255", 0, 8), 0);
+        assert_eq!(st(b"256", 0, 8), 3);
+        assert_eq!(st(b"-1", 0, 32), 3);
+        assert_eq!(st(b"+7", 1, 32), 0);
+        assert_eq!(st(b"", 1, 32), 1);
+        assert_eq!(st(b"-", 1, 32), 1);
+        assert_eq!(st(b"1_000", 1, 32), 2);
+        assert_eq!(st(b" 1", 1, 32), 2);
+        assert_eq!(st(b"-9223372036854775808", 1, 64), 0);
+        assert_eq!(st(b"18446744073709551616", 0, 64), 3);
+        assert_eq!(rok_str_to_i64(s(b"-42")), -42);
+        assert_eq!(rok_str_to_u64(s(b"18446744073709551615")), u64::MAX);
+        assert_eq!(rok_str_float_ok(s(b"1e-3")), 1);
+        assert_eq!(rok_str_float_ok(s(b"inf")), 1);
+        assert_eq!(rok_str_float_ok(s(b"1.2.3")), 0);
+        assert!((rok_str_to_f64(s(b"2.5")) - 2.5).abs() < f64::EPSILON);
+    }
+
     // Run from `gc_alloc_initializes_header_and_alignment`: the GC heap is
     // single-mutator, so allocating tests must not run in parallel.
     pub fn string_ops() {

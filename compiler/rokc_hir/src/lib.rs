@@ -21,6 +21,11 @@ pub use print::print_hir;
 /// block, set by the driver.
 pub const IMPL_MODULE_ATTR: &str = "#impl_module";
 
+/// Marker attribute on a trait / impl method, path `[ASSOC_TYPES_ATTR,
+/// X, ..]`: the associated types whose bare name `X` means `Self::X` in
+/// the body (spec 2.8.3).
+pub const ASSOC_TYPES_ATTR: &str = "#assoc";
+
 /// Marker attribute on the compiler-injected runtime hook block.
 ///
 /// Its functions are safe to call although they are `extern "C"` (spec
@@ -625,29 +630,72 @@ impl HirTy {
     /// Build every `HirTy::Sum` through this (or `canonicalize` after
     /// rewriting members in place).
     ///
+    /// Except a nested layer: a member sum sharing a member with the
+    /// outer set's own (non-sum) members stays one member. Generic
+    /// substitution builds that shape: `T | none` with `T = i32 | none`
+    /// is `(i32 | none)?`, whose outer `none` is not the inner one, and
+    /// `T | E` with `T = i32 | E` keeps the generic's `E` apart from
+    /// `T`'s. Disjoint members flatten (`T | none` with `T = i32 | str`
+    /// is `i32 | str | none`). A written sum is `spread` first, so
+    /// `(i32 | none) | none` is `i32 | none`. Each layer is canonical
+    /// on its own.
+    ///
     /// The order (the spec fixes none): `none` last, the rest by their
     /// structural `Debug` rendering — deterministic for one program
     /// (struct / enum ids are program-wide), so tags agree across modules.
     #[must_use]
     pub fn sum(parts: impl IntoIterator<Item = Self>) -> Self {
-        fn flatten(t: HirTy, out: &mut Vec<HirTy>) {
-            match t {
-                HirTy::Sum(ps) => ps.into_iter().for_each(|p| flatten(p, out)),
+        let parts: Vec<Self> = parts.into_iter().collect();
+        let own: Vec<Self> = parts
+            .iter()
+            .filter(|p| !matches!(p, Self::Sum(_)))
+            .cloned()
+            .collect();
+        let mut out = Vec::new();
+        for p in parts {
+            match p {
+                Self::Sum(ps) if !ps.iter().any(|m| own.contains(m)) => out.extend(ps),
                 t => out.push(t),
             }
         }
-        let mut out = Vec::new();
-        parts.into_iter().for_each(|p| flatten(p, &mut out));
-        out.sort_by_cached_key(|t| {
-            let none = matches!(t, Self::Path(p) if p.as_slice() == ["none"]);
-            (none, format!("{t:?}"))
-        });
+        out.sort_by_cached_key(|t| (t.is_none(), format!("{t:?}")));
         out.dedup();
         if out.len() == 1 {
             out.pop().expect("one member")
         } else {
             Self::Sum(out)
         }
+    }
+
+    /// A written member of a written sum: its members join the outer set
+    /// (`(A | B) | C` is `A | B | C`, flattening even `none` layers).
+    pub fn spread(self, out: &mut Vec<Self>) {
+        match self {
+            Self::Sum(ps) => out.extend(ps),
+            t => out.push(t),
+        }
+    }
+
+    /// `A | B`, with a nested layer in parentheses: `(i32 | E) | E`,
+    /// and `(i32 | none)?` for one beside just the outer `none`.
+    pub fn sum_name(&self, name: impl Fn(&Self) -> String) -> String {
+        let Self::Sum(ps) = self else {
+            return name(self);
+        };
+        let member = |t: &Self| match t {
+            Self::Sum(_) => format!("({})", name(t)),
+            t => name(t),
+        };
+        match ps.as_slice() {
+            [inner @ Self::Sum(_), n] if n.is_none() => format!("{}?", member(inner)),
+            _ => ps.iter().map(member).collect::<Vec<_>>().join(" | "),
+        }
+    }
+
+    /// The `none` type.
+    #[must_use]
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::Path(p) if p.as_slice() == ["none"])
     }
 
     /// Re-establish the `sum` canon everywhere inside `self` (after

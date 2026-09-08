@@ -1,0 +1,31 @@
+// spec: 008.06-calling-convention §8.6.5
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// ok 10
+// err 10
+// ok 30 30
+
+// spec 8.6.5: the error channel is part of the signature, so `T` and `E`
+// may be the same type; a large `T` (sret) still round-trips.
+struct Big { a: i64; b: i64; c: i64; d: i64; }
+
+fn half(x: i32) throws (i32) -> i32 {
+    if x % 2 != 0 { throw x - 1; }
+    return x / 2;
+}
+
+fn big(x: i64) throws (i32) -> Big {
+    if x < 0i64 { throw 1; }
+    return Big { a: x, b: x, c: x, d: x };
+}
+
+fn main() -> i32 {
+    let a = try half(20) catch e { -e };
+    println(f"ok {a}");
+    let b = try half(11) catch e { e };
+    println(f"err {b}");
+    let c = try big(30i64) catch _ { Big { a: 0i64, b: 0i64, c: 0i64, d: 0i64 } };
+    println(f"ok {c.a} {c.d}");
+    return 0;
+}

@@ -780,6 +780,19 @@ pub(super) fn lower_expr(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
     }
 }
 
+/// `x as T?` casts to the type `T?` (spec 2.6.5); say so when the cast
+/// fails, since `?` propagation was likely meant.
+fn optional_cast_hint(ty: &Ty) -> &'static str {
+    let optional = matches!(&ty.kind, AstTyKind::Sum(ps)
+        if matches!(ps.as_slice(), [n, t] if n.nest_inner().is_some()
+            && matches!(t.kind, AstTyKind::None)));
+    if optional {
+        "; the trailing `?` is part of the type `T?` — to propagate, write `(x as T)?`"
+    } else {
+        ""
+    }
+}
+
 fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
     let span = expr.span;
     let unsupported = |ctx: &LowerCtx<'_>, what: &str| {
@@ -1097,9 +1110,10 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
                 return ctx.error_expr(
                     span,
                     format!(
-                        "cannot cast `{}` as `{}` (only numeric / bool / char casts)",
+                        "cannot cast `{}` as `{}` (only numeric / bool / char casts){}",
                         ctx.ty_name(&from_ty),
-                        ctx.ty_name(&to_ty)
+                        ctx.ty_name(&to_ty),
+                        optional_cast_hint(ty)
                     ),
                 );
             }

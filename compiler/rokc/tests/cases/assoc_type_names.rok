@@ -1,0 +1,96 @@
+// expect-exit: 0
+// expect-warning: associated type `Item` shadows the outer type `Item` inside the impl for `Bag`
+// expect-warning: associated type `Out` shadows the outer type `Out` inside the trait `Src`
+// expect-stdout:
+// trait: 3 1 | 5 2
+// impl: 3 none
+// generic: 9 1 6
+// shadow: 7 outer
+
+// Spec 2.8.3: inside a trait or impl, bare `X` and `Self::X` both name
+// the associated type `X` (signatures and bodies), shadowing an outer
+// type `X` (with a warning).
+struct Out { tag: str; }
+struct Item { name: str; }
+
+trait Src {
+    type Out;
+    fn get(ref self) -> Self::Out;
+    // `Self::Out` and bare `Out` in a default's signature and body.
+    fn pair(ref self) -> List<Self::Out> {
+        let a: Self::Out = self.get();
+        let b: Out = self.get();
+        [a, b]
+    }
+    // A generic default (a template per call).
+    fn apply<U>(ref self, f: fn(Out) -> U) -> U {
+        let o: Out = self.get();
+        f(o)
+    }
+}
+
+struct N { n: i32; }
+impl Src for N {
+    type Out = i32;
+    fn get(ref self) -> Out { self.n }
+}
+
+struct S { s: str; }
+impl Src for S {
+    type Out = str;
+    fn get(ref self) -> Self::Out { self.s }
+}
+
+// A non-generic impl: bare `Item` in the signature and body is the
+// associated type, and it nests like `Self::Item` (`Item | none` with
+// `Item = i32 | none`).
+struct Cnt { n: i32; }
+impl Iterator for Cnt {
+    type Item = i32 | none;
+    fn next(ref self) -> Item | none {
+        if self.n == 2 { return none; }
+        self.n += 1;
+        let v: Item = if self.n == 2 { none } else { self.n + 2 };
+        v
+    }
+}
+
+struct Wrap<T> { v: T; }
+impl<T: Copy> Src for Wrap<T> {
+    type Out = T;
+    fn get(ref self) -> Out {
+        let x: Out = self.v;
+        x
+    }
+}
+
+// `Item` here is the associated type `i32`, not `struct Item`.
+struct Bag { n: i32; }
+impl Iterator for Bag {
+    type Item = i32;
+    fn next(ref self) -> Item | none {
+        if self.n == 0 { return none; }
+        let v: Item = self.n;
+        self.n = 0;
+        v
+    }
+}
+
+fn show(x: i32 | none) -> str {
+    match x { n: i32 => f"{n}", none => "none" }
+}
+
+fn main() {
+    let n = N { n: 3 };
+    let s = S { s: "5" };
+    println(f"trait: {n.get()} {n.pair().len() - 1} | {s.get()} {s.pair().len()}");
+    let c = Cnt { n: 0 };
+    let line = "impl:";
+    for v in c { line = line + " " + show(v); }
+    println(line);
+    let w = Wrap { v: 9 };
+    println(f"generic: {w.get()} {w.pair().len() - 1} {n.apply(|x| x * 2)}");
+    let b = Bag { n: 7 };
+    let outer = Item { name: "outer" };
+    println(f"shadow: {show(b.next() ?? 0)} {outer.name}");
+}

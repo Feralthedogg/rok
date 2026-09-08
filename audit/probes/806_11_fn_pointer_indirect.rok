@@ -1,0 +1,27 @@
+// spec: 008.06-calling-convention §8.6.11-8.6.12
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// 12 12
+// 3.5
+// 17
+
+// spec 8.6.11: an indirect call through a `fn(...)` value gives the same
+// result as the direct call; 8.6.12: a closure call sees its captures.
+struct Op { f: fn(i32, i32) -> i32; }
+
+fn mul(a: i32, b: i32) -> i32 { return a * b; }
+fn halve(x: f64) -> f64 { return x / 2.0; }
+
+fn apply(g: fn(f64) -> f64, x: f64) -> f64 { return g(x); }
+
+fn main() -> i32 {
+    let op = Op { f: mul };
+    let g = op.f;
+    println(f"{mul(3, 4)} {g(3, 4)}");
+    rok_print_f64(apply(halve, 7.0));
+    let k = 10;
+    let add_k = |x: i32| x + k;
+    rok_print_i32(add_k(7));
+    return 0;
+}

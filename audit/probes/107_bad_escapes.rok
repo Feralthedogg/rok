@@ -1,5 +1,6 @@
 // spec: 001.07-string-escapes / 001.08-char-literals
 // probe: negative-must-fail
+// expect-error: unknown escape sequence `\q`
 
 // Unknown escapes, `\x` above 0x7F and multi-code-point char literals are
 // lexical errors (spec 1.7.1, 1.8.3), not passed through verbatim.
