@@ -47,6 +47,10 @@ pub struct Emitter {
     /// Panic on integer `+ - *` / negation overflow (debug builds); wrap
     /// otherwise (stdlib spec 0.5: debug=panic, release=wrap).
     pub overflow_checks: bool,
+    /// C ABI used for aggregates crossing `extern "C"` (spec 8.6.3).
+    pub c_target: crate::abi::CTarget,
+    /// `-g`: DWARF state (spec 9.9.6).
+    pub debug: Option<crate::debug::DebugInfo>,
 }
 
 /// Symbol + signature of a module function, for call-site typing.
@@ -56,6 +60,10 @@ pub(crate) struct FnSig {
     ret: MirTy,
     /// External C function: `str` crosses as a NUL-terminated `char*`.
     c_abi: bool,
+    /// C lowering of its aggregates (`c_abi` only, spec 8.6.3).
+    abi: Option<crate::abi::FnAbi>,
+    /// C variadic (spec 8.6.10): an `llvm.func` called with `llvm.call`.
+    variadic: bool,
 }
 
 /// An external declaration other than the runtime's own `rok_*` symbols
@@ -82,6 +90,8 @@ impl Emitter {
             gc_types: Vec::new(),
             pkgs: crate::mangle::Pkgs::default(),
             overflow_checks: true,
+            c_target: crate::abi::CTarget::from_triple(None),
+            debug: None,
         }
     }
 
@@ -125,8 +135,30 @@ impl Emitter {
                     params: f.param_tys.clone(),
                     ret: f.ret_ty.clone(),
                     c_abi: is_c_abi(f),
+                    abi: is_c_abi(f).then(|| {
+                        crate::abi::classify(
+                            self.c_target,
+                            &f.param_tys,
+                            &f.ret_ty,
+                            self.pointer_width,
+                        )
+                    }),
+                    variadic: module.c_variadic.contains(&f.id),
                 },
             );
+            if self.c_target == crate::abi::CTarget::Other
+                && is_c_abi(f)
+                && f.param_tys
+                    .iter()
+                    .chain([&f.ret_ty])
+                    .any(crate::abi::is_aggregate)
+            {
+                self.errors.push(format!(
+                    "unsupported in codegen: `{}` passes a `struct` by value across the C ABI, \
+                     which is only implemented for aarch64 and x86_64 targets",
+                    f.name
+                ));
+            }
         }
 
         self.pkgs.lazy_statics = module
@@ -414,6 +446,10 @@ impl Emitter {
         // Empty-body functions become external declarations — no body
         // braces, just a signature with `private` linkage.
         let is_decl = f.blocks.is_empty();
+        if is_decl && is_c_abi(f) {
+            self.emit_c_decl(symbol, &fns[&f.id]);
+            return;
+        }
         if is_decl {
             self.out.push_str("  func.func private @");
         } else {
@@ -451,6 +487,27 @@ impl Emitter {
         let mut emit = FnEmit::new(f, self.pointer_width, fns, str_globals, &self.pkgs);
         emit.overflow_checks = self.overflow_checks;
         emit.gc_types = std::mem::take(&mut self.gc_types);
+        if let Some(di) = self.debug.as_mut() {
+            let name = f.name.split(crate::mangle::MONO_MARK).next().unwrap_or("");
+            emit.dbg = di.subprogram(f, name);
+            if let Some(d) = &emit.dbg {
+                let lines = crate::debug::decl_lines(f);
+                for l in &f.locals {
+                    let Some(name) = l.name.as_deref().filter(|n| !n.starts_with('#')) else {
+                        continue;
+                    };
+                    if emit.is_block_param(l.id) {
+                        continue;
+                    }
+                    let arg = f.params.iter().position(|p| *p == l.id).map(|i| i + 1);
+                    let line = lines.get(&l.id.0).copied().unwrap_or(d.line);
+                    if let Some(var) = di.local(&d.subprogram, f.span.file, name, &l.ty, line, arg)
+                    {
+                        emit.dbg_vars.push((l.id.0, var));
+                    }
+                }
+            }
+        }
         emit.emit_prelude();
         for b in &f.blocks {
             emit.emit_block(b);
@@ -463,9 +520,45 @@ impl Emitter {
         for e in std::mem::take(&mut emit.errors) {
             self.errors.push(format!("in `{}`: {e}", f.name));
         }
+        let fn_loc = emit.dbg.as_ref().map(|d| {
+            format!(
+                " loc(fused<{}>[\"{}\":{}:{}])",
+                d.subprogram, d.file, d.line, d.col
+            )
+        });
         self.out.push_str(&emit.finish());
 
-        self.out.push_str("  }\n");
+        self.out.push_str("  }");
+        self.out.push_str(fn_loc.as_deref().unwrap_or_default());
+        self.out.push('\n');
+    }
+
+    /// An `extern "C"` declaration under the platform C ABI (spec 8.6):
+    /// aggregates per `abi::classify`, `str` as `char*`, small integers
+    /// caller-extended, variadic ones as an `llvm.func` with `...`.
+    fn emit_c_decl(&mut self, symbol: &str, sig: &FnSig) {
+        let (params, ret) = c_signature(sig, self.pointer_width);
+        let ret = ret.map(|r| format!(" -> {r}")).unwrap_or_default();
+        let mut params: Vec<String> = params.into_iter().map(|(t, a)| t + &a).collect();
+        if sig.variadic {
+            params.push("...".to_owned());
+            let _ = writeln!(
+                self.out,
+                "  llvm.func @{symbol}({}){ret}",
+                params.join(", ")
+            );
+            return;
+        }
+        let params: Vec<String> = params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| format!("%arg{i}: {p}"))
+            .collect();
+        let _ = writeln!(
+            self.out,
+            "  func.func private @{symbol}({}){ret}",
+            params.join(", ")
+        );
     }
 
     // Synthetic C `main` (spec 905.9) wrapping the user's body with
@@ -525,7 +618,10 @@ impl Emitter {
 
     #[must_use]
     pub fn finish(self) -> String {
-        self.out
+        match self.debug {
+            Some(d) => d.defs + &self.out,
+            None => self.out,
+        }
     }
 
     #[must_use]
@@ -581,6 +677,13 @@ struct FnEmit<'a> {
     /// and each block's index in `f.blocks`.
     deaths: rokc_mir::Deaths,
     block_pos: HashMap<u32, usize>,
+    /// `llvm.alloca`s hoisted to the entry block (`entry_alloca`), so a
+    /// scratch slot used in a loop does not grow the stack.
+    entry_allocas: String,
+    /// `-g`: this function's subprogram, and its described locals
+    /// (local id, `#di_var` alias).
+    dbg: Option<crate::debug::FnDebug>,
+    dbg_vars: Vec<(u32, String)>,
 }
 
 /// Blocks with an edge to a block on the current DFS path (a loop
@@ -677,7 +780,30 @@ impl<'a> FnEmit<'a> {
                 .enumerate()
                 .map(|(i, b)| (b.id.0, i))
                 .collect(),
+            entry_allocas: String::new(),
+            dbg: None,
+            dbg_vars: Vec::new(),
         }
+    }
+
+    /// Scratch for reinterpreting an aggregate `ty` as its C coerced
+    /// type: big enough for either (a coerced type is at most 16 bytes,
+    /// or the HFA's own size).
+    fn coerce_slot(&mut self, ty: &MirTy) -> String {
+        let size = size_align(ty, self.pointer_width).0.max(16);
+        self.entry_alloca(&format!("!llvm.array<{size} x i8>"), 16)
+    }
+
+    /// A stack slot of type `ty` allocated once in the entry block.
+    fn entry_alloca(&mut self, ty: &str, align: u32) -> String {
+        let [one, slot] = std::array::from_fn(|_| self.fresh_value());
+        let _ = write!(
+            self.entry_allocas,
+            "    {one} = llvm.mlir.constant(1 : i32) : i32
+    {slot} = llvm.alloca {one} x {ty} {{alignment = {align} : i64}} : (i32) -> !llvm.ptr
+"
+        );
+        slot
     }
 
     /// Before touching a lazily initialized static: an acquire load of
@@ -774,7 +900,9 @@ impl<'a> FnEmit<'a> {
                 );
                 continue;
             }
-            if is_memref_storable(&local.ty) {
+            // `-g` keeps every scalar in an `llvm.alloca`, the address an
+            // `llvm.intr.dbg.declare` describes.
+            if is_memref_storable(&local.ty) && self.dbg.is_none() {
                 let ty = mlir_type(&local.ty, self.pointer_width);
                 let slot = format!("%p{}", local.id.0);
                 self.slot_names[local.id.0 as usize] = Some(slot.clone());
@@ -783,7 +911,7 @@ impl<'a> FnEmit<'a> {
             }
             // Aggregates and pointer-shaped values get an LLVM-dialect
             // slot so they can survive across loop back-edges.
-            if is_llvm_storable(&local.ty) {
+            if is_llvm_storable(&local.ty) || is_memref_storable(&local.ty) {
                 let ty = mlir_type(&local.ty, self.pointer_width);
                 let slot = format!("%p{}", local.id.0);
                 let size = if let Some(s) = &alloca_size {
@@ -838,6 +966,17 @@ impl<'a> FnEmit<'a> {
                     "    {slot} = llvm.alloca {size} x {ty} : (i32) -> !llvm.ptr"
                 );
                 self.union_scratch.insert(ty, slot);
+            }
+        }
+        for (l, var) in std::mem::take(&mut self.dbg_vars) {
+            if let (true, Some(slot)) = (
+                self.llvm_slot.contains(&l),
+                self.slot_names[l as usize].clone(),
+            ) {
+                let _ = writeln!(
+                    self.body,
+                    "    llvm.intr.dbg.declare {var} = {slot} : !llvm.ptr"
+                );
             }
         }
         self.emit_gc_frame();
@@ -1063,7 +1202,11 @@ impl<'a> FnEmit<'a> {
     }
 
     fn finish(self) -> String {
-        self.body
+        let body = self.entry_allocas + &self.body;
+        match &self.dbg {
+            Some(d) => crate::debug::locate(&body, d),
+            None => body,
+        }
     }
 
     fn fresh_value(&mut self) -> String {
@@ -1143,6 +1286,17 @@ impl<'a> FnEmit<'a> {
                 len,
             } => {
                 self.emit_array_write(*array, index, value, elem_ty, *len);
+            }
+            Statement::Loc(sp) => {
+                if self.dbg.is_some() {
+                    let _ = writeln!(
+                        self.body,
+                        "{}{} {}",
+                        crate::debug::MARK,
+                        sp.line,
+                        sp.col.max(1)
+                    );
+                }
             }
             Statement::StorageDead(l) => {
                 // Only a frame-rooted slot matters; zero it (all its
@@ -1701,6 +1855,15 @@ impl<'a> FnEmit<'a> {
 
     fn emit_fn_addr(&mut self, callee: FunctionId, fn_ty: &MirTy) -> String {
         let name = self.fns[&callee].name.clone();
+        if self.fns[&callee].variadic {
+            // An `llvm.func`: no `func.constant` of it.
+            let dst = self.fresh_value();
+            let _ = writeln!(
+                self.body,
+                "    {dst} = llvm.mlir.addressof @{name} : !llvm.ptr"
+            );
+            return dst;
+        }
         let MirTy::Fn(args, ret) = fn_ty else {
             return self.unsupported("address of a function with a non-function type");
         };
@@ -1708,7 +1871,19 @@ impl<'a> FnEmit<'a> {
         // `!llvm.ptr` so it can flow through closure structs and
         // llvm-dialect call sites.
         let typed = self.fresh_value();
-        let sig = mlir_fn_signature(args, ret, self.pointer_width);
+        let sig = if self.fns[&callee].c_abi {
+            // The C declaration's own (lowered) type; calling it back
+            // through the pointer from rok does not redo the C ABI.
+            let (params, ret) = c_signature(&self.fns[&callee], self.pointer_width);
+            let params: Vec<String> = params.into_iter().map(|(t, _)| t).collect();
+            format!(
+                "({}) -> {}",
+                params.join(", "),
+                ret.unwrap_or_else(|| "()".to_owned())
+            )
+        } else {
+            mlir_fn_signature(args, ret, self.pointer_width)
+        };
         let _ = writeln!(self.body, "    {typed} = func.constant @{name} : {sig}");
         let dst = self.fresh_value();
         let _ = writeln!(
@@ -2081,6 +2256,11 @@ impl<'a> FnEmit<'a> {
                 }
             }
         }
+        if let Some(abi) = sig.abi.as_ref().filter(|a| sig.variadic || !a.is_trivial()) {
+            let abi = abi.clone();
+            self.emit_c_call(dst, sig, &abi, arg_vals, &arg_tys);
+            return;
+        }
         let abi_ty = |t: &MirTy| abi_type(t, sig.c_abi, pw);
 
         let name = sig.name.clone();
@@ -2118,6 +2298,132 @@ impl<'a> FnEmit<'a> {
                 self.body,
                 "    {dst} = func.call @{name}({arg_list}) : ({arg_ty_list}) -> {ret}"
             );
+        }
+    }
+
+    /// A call to a C function whose aggregates need the C ABI rewrite
+    /// (`abi::classify`) or that is variadic. `vals` are the arguments
+    /// at their rok types (`str` already a `char*`).
+    fn emit_c_call(
+        &mut self,
+        dst: &str,
+        sig: &FnSig,
+        abi: &crate::abi::FnAbi,
+        vals: Vec<String>,
+        tys: &[MirTy],
+    ) {
+        use crate::abi::{ArgAbi, RetAbi};
+        let pw = self.pointer_width;
+        let mut ops: Vec<String> = Vec::new();
+        let mut op_tys: Vec<String> = Vec::new();
+        let ret_mlir = mlir_type(&sig.ret, pw);
+        let sret = if abi.ret == RetAbi::Sret {
+            let slot = self.entry_alloca(&ret_mlir, size_align(&sig.ret, pw).1);
+            ops.push(slot.clone());
+            op_tys.push("!llvm.ptr".to_owned());
+            Some(slot)
+        } else {
+            None
+        };
+        for (i, (v, t)) in vals.into_iter().zip(tys).enumerate() {
+            let ty = mlir_type(t, pw);
+            match abi.args.get(i).unwrap_or(&ArgAbi::Direct) {
+                ArgAbi::Direct => {
+                    ops.push(v);
+                    op_tys.push(abi_type(t, true, pw));
+                }
+                ArgAbi::Coerce(c) => {
+                    // Store as the struct, reload as the coerced type
+                    // (16 bytes or less, but an HFA: up to 32).
+                    let slot = self.coerce_slot(t);
+                    let r = self.fresh_value();
+                    let _ = write!(
+                        self.body,
+                        "    llvm.store {v}, {slot} : {ty}, !llvm.ptr
+    {r} = llvm.load {slot} : !llvm.ptr -> {c}
+"
+                    );
+                    ops.push(r);
+                    op_tys.push(c.clone());
+                }
+                ArgAbi::Indirect { .. } => {
+                    let slot = self.entry_alloca(&ty, size_align(t, pw).1.max(8));
+                    let _ = writeln!(self.body, "    llvm.store {v}, {slot} : {ty}, !llvm.ptr");
+                    ops.push(slot);
+                    op_tys.push("!llvm.ptr".to_owned());
+                }
+            }
+        }
+        let call_ret = match &abi.ret {
+            RetAbi::Direct if sig.ret != MirTy::Unit => Some(abi_type(&sig.ret, true, pw)),
+            RetAbi::Coerce(c) => Some(c.clone()),
+            _ => None,
+        };
+        let name = &sig.name;
+        let list = ops.join(", ");
+        let tlist = op_tys.join(", ");
+        let plain = abi.ret == RetAbi::Direct && sig.ret != MirTy::Prim(PrimTy::Str);
+        let res = call_ret.as_ref().map(|_| {
+            if plain {
+                dst.to_owned()
+            } else {
+                self.fresh_value()
+            }
+        });
+        let lhs = res.as_ref().map(|r| format!("{r} = ")).unwrap_or_default();
+        let rty = call_ret.clone().unwrap_or_else(|| "()".to_owned());
+        if sig.variadic {
+            // Fixed part of the prototype: the hidden sret pointer and
+            // the declared parameters.
+            let fixed = usize::from(sret.is_some()) + sig.params.len();
+            let fn_ret = call_ret.unwrap_or_else(|| "!llvm.void".to_owned());
+            let mut proto: Vec<&str> = op_tys[..fixed].iter().map(String::as_str).collect();
+            proto.push("...");
+            let _ = writeln!(
+                self.body,
+                "    {lhs}llvm.call @{name}({list}) vararg(!llvm.func<{fn_ret} ({})>) : ({tlist}) -> {rty}",
+                proto.join(", ")
+            );
+        } else {
+            let _ = writeln!(
+                self.body,
+                "    {lhs}func.call @{name}({list}) : ({tlist}) -> {rty}"
+            );
+        }
+        match (&abi.ret, res) {
+            (RetAbi::Sret, _) => {
+                let slot = sret.expect("sret slot");
+                let _ = writeln!(
+                    self.body,
+                    "    {dst} = llvm.load {slot} : !llvm.ptr -> {ret_mlir}"
+                );
+            }
+            (RetAbi::Coerce(c), Some(r)) => {
+                let slot = self.coerce_slot(&sig.ret);
+                let _ = write!(
+                    self.body,
+                    "    llvm.store {r}, {slot} : {c}, !llvm.ptr
+    {dst} = llvm.load {slot} : !llvm.ptr -> {ret_mlir}
+"
+                );
+            }
+            (_, Some(r)) if sig.ret == MirTy::Prim(PrimTy::Str) => {
+                // A `char*` result becomes `(ptr, strlen)`.
+                let [l, u, h] = std::array::from_fn(|_| self.fresh_value());
+                let _ = write!(
+                    self.body,
+                    "    {l} = func.call @rok_cstr_len({r}) : (!llvm.ptr) -> i{pw}
+    {u} = llvm.mlir.undef : {ret_mlir}
+    {h} = llvm.insertvalue {r}, {u}[0] : {ret_mlir}
+    {dst} = llvm.insertvalue {l}, {h}[1] : {ret_mlir}
+"
+                );
+                self.needs.insert("rok_cstr_len");
+            }
+            (_, Some(_)) => {} // `dst` is the call's own result.
+            (_, None) => {
+                let _ = writeln!(self.body, "    {dst} = arith.constant 0 : i1");
+            }
         }
     }
 
@@ -2675,6 +2981,57 @@ fn mlir_type(ty: &MirTy, pointer_width: u32) -> String {
     }
 }
 
+/// A C declaration's lowered parameters `(MLIR type, attributes)` (a
+/// leading `sret` pointer included) and result type.
+fn c_signature(sig: &FnSig, pw: u32) -> (Vec<(String, String)>, Option<String>) {
+    use crate::abi::{ArgAbi, RetAbi};
+    let abi = sig.abi.as_ref().expect("C declaration has an ABI");
+    let mut params = Vec::new();
+    if abi.ret == RetAbi::Sret {
+        params.push((
+            "!llvm.ptr".to_owned(),
+            format!(
+                " {{llvm.sret = {}, llvm.align = {} : i64}}",
+                mlir_type(&sig.ret, pw),
+                size_align(&sig.ret, pw).1
+            ),
+        ));
+    }
+    for (t, a) in sig.params.iter().zip(&abi.args) {
+        params.push(match a {
+            ArgAbi::Direct => (abi_type(t, true, pw), c_ext_attr(t).to_owned()),
+            ArgAbi::Coerce(c) => (c.clone(), String::new()),
+            ArgAbi::Indirect { byval: true } => (
+                "!llvm.ptr".to_owned(),
+                format!(
+                    " {{llvm.byval = {}, llvm.align = {} : i64}}",
+                    mlir_type(t, pw),
+                    size_align(t, pw).1.max(8)
+                ),
+            ),
+            ArgAbi::Indirect { byval: false } => ("!llvm.ptr".to_owned(), String::new()),
+        });
+    }
+    let ret = match &abi.ret {
+        RetAbi::Direct if sig.ret != MirTy::Unit => Some(abi_type(&sig.ret, true, pw)),
+        RetAbi::Coerce(c) => Some(c.clone()),
+        _ => None,
+    };
+    (params, ret)
+}
+
+/// Caller-side extension of a narrow integer C parameter: Apple arm64
+/// and `x86_64` callees (clang) assume it (`signext` / `zeroext`).
+// ponytail: `c_char` taken as signed everywhere (Linux aarch64's is
+// unsigned; only values > 127 would see the difference).
+const fn c_ext_attr(ty: &MirTy) -> &'static str {
+    match ty {
+        MirTy::Prim(PrimTy::I8 | PrimTy::I16 | PrimTy::CChar) => " {llvm.signext}",
+        MirTy::Prim(PrimTy::U8 | PrimTy::U16 | PrimTy::Bool) => " {llvm.zeroext}",
+        _ => "",
+    }
+}
+
 /// `mlir_type`, except that a C function sees `str` as `char*`.
 fn abi_type(ty: &MirTy, c_abi: bool, pointer_width: u32) -> String {
     if c_abi && *ty == MirTy::Prim(PrimTy::Str) {
@@ -2845,7 +3202,7 @@ fn gc_paths(ty: &MirTy, path: &mut Vec<u32>, out: &mut Vec<Vec<u32>>) {
 
 /// `(size, align)` in bytes of `ty` as lowered by `mlir_type`, under the
 /// C struct layout LLVM uses on every supported target.
-fn size_align(ty: &MirTy, pw: u32) -> (u32, u32) {
+pub(crate) fn size_align(ty: &MirTy, pw: u32) -> (u32, u32) {
     let word = (pw / 8, pw / 8);
     match ty {
         MirTy::Unit => (0, 1),

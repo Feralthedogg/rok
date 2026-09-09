@@ -119,8 +119,10 @@ pub fn filter_items(items: Vec<Item>, env: &CfgEnv) -> Vec<Item> {
 
 fn item_passes(item: &Item, env: &CfgEnv) -> bool {
     let attrs = item_attrs(item);
-    // Spec 6.2.5: `#[test]` implies `#[cfg(test)]`.
-    (env.flags.contains("test") || !crate::harness::is_test(attrs))
+    // Spec 6.2.5: `#[test]` implies `#[cfg(test)]`; so does `#[bench]`
+    // (a bench build is a test build, as with cargo).
+    (env.flags.contains("test")
+        || !(crate::harness::is_test(attrs) || crate::harness::has_attr(attrs, "bench")))
         && attrs.iter().all(|a| !is_cfg(a) || eval_cfg_attr(a, env))
 }
 

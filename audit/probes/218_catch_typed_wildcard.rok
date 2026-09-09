@@ -1,6 +1,5 @@
 // spec: std 200-core/218-task §2.18.4 / refs-lang 003.11 §3.11.4
 // probe: positive
-// xfail: parser rejects `_: Type` type-check pattern (expected `{`, found Colon)
 // expect-exit: 0
 // expect-stdout:
 // fallback -1

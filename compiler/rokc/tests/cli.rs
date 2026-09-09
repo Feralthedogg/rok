@@ -260,6 +260,75 @@ fn extern_dependencies_are_top_level_names() {
 }
 
 #[test]
+fn extern_dependency_is_a_package_boundary() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("extern-boundary");
+    // `pkg::` inside `dep` is `dep`; `dep::..` expression paths work in a
+    // submodule; `pub(pkg)` / private items of `dep` stay inside it.
+    fs::create_dir_all(dir.join("dep")).unwrap();
+    fs::write(
+        dir.join("dep/lib.rok"),
+        "pub mod words;\nfn secret() -> i32 { return 1; }\n\
+         pub(pkg) fn internal() -> i32 { return 2; }\n\
+         pub fn via_pkg() -> i32 { return pkg::words::deep() + secret(); }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("dep/words.rok"),
+        "pub fn hello() -> i32 { return 40; }\n\
+         pub fn deep() -> i32 { return pkg::internal() * 10; }\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("app")).unwrap();
+    fs::write(
+        dir.join("app/main.rok"),
+        "mod sub;\nfn internal() -> i32 { return 7; }\n\
+         println(f\"{sub::two()} {dep::via_pkg()} {pkg::internal()}\");\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("app/sub.rok"),
+        "pub fn two() -> i32 { return dep::words::hello() + 2; }\n",
+    )
+    .unwrap();
+    let out = rokc(Some(&env), &dir, &["run", "app", "--extern", "dep=dep"]);
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "42 21 7\n");
+
+    fs::create_dir_all(dir.join("bad")).unwrap();
+    fs::write(
+        dir.join("bad/main.rok"),
+        "println(f\"{dep::secret()} {dep::internal()}\");\n",
+    )
+    .unwrap();
+    let out = rokc(None, &dir, &["check", "bad", "--extern", "dep=dep"]);
+    assert_exit(&out, 1);
+    let err = text(&out.stderr);
+    assert!(err.contains("`dep::secret` is private"), "{err}");
+    assert!(err.contains("`dep::internal` is `pub(pkg)`"), "{err}");
+
+    // A user module may not take a dependency's name.
+    fs::create_dir_all(dir.join("clash")).unwrap();
+    fs::write(
+        dir.join("clash/main.rok"),
+        "mod dep;\nprintln(f\"{dep::own()}\");\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("clash/dep.rok"),
+        "pub fn own() -> i32 { return 3; }\n",
+    )
+    .unwrap();
+    let out = rokc(None, &dir, &["check", "clash", "--extern", "dep=dep"]);
+    assert_exit(&out, 1);
+    assert!(
+        text(&out.stderr).contains("module `dep` has the name of the dependency `dep`"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+#[test]
 fn init_makes_an_existing_directory_a_package() {
     let dir = scratch("init");
     assert_exit(&rokc(None, &dir, &["init", "--lib"]), 0);

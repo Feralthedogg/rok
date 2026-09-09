@@ -23,6 +23,7 @@ mod collect;
 mod coro;
 mod desugar;
 mod expr;
+mod fstring;
 mod mono;
 mod pattern;
 mod resolve;
@@ -48,8 +49,9 @@ use mono::{
 use pattern::{int_fits, lower_match, lower_pattern};
 use resolve::{
     GC_BUF, bound_key, impl_bound_keys, impl_module, item_module, leaf_name, mangle_inst,
-    method_target_for, module_display, module_of, resolve_name, resolve_ty_with_structs,
-    split_trait_args, substitute_aliases, substitute_params, ty_mangle, visible_from,
+    method_target_for, module_display, module_of, package_of, resolve_name,
+    resolve_ty_with_structs, split_trait_args, substitute_aliases, substitute_params, ty_mangle,
+    visible_from,
 };
 use throws::{
     ErrFrame, adapt_fn_value, adapt_never_fn, erase_unbound_errors, exit_through,
@@ -406,6 +408,9 @@ struct Env<'a> {
     /// `extern` functions: a `fn` argument must be a named fn (a C
     /// function pointer), not a closure or `fn` variable.
     extern_fn_ids: std::collections::HashSet<FunctionId>,
+    /// C variadic `extern` declarations (`fn printf(fmt: str, ...)`):
+    /// extra arguments take the C default argument promotions.
+    c_variadic: std::collections::HashSet<FunctionId>,
     prec: &'a PrecTable,
     sink: ClosureSink,
     /// Visibility of every value-namespace item, keyed by full name.
@@ -994,6 +999,10 @@ struct ClosureSink {
     mono_sigs: std::cell::RefCell<HashMap<FunctionId, FnSig>>,
     /// Current monomorphization nesting (bounded by `MONO_DEPTH_LIMIT`).
     mono_depth: std::cell::Cell<u32>,
+    /// Bumped by every "type annotations needed" failure (a generic
+    /// parameter / literal with nothing to infer it from), so an
+    /// un-annotated `let` knows to look at its later uses.
+    uninferred: std::cell::Cell<u32>,
     /// Generic structs instantiated from a literal during body lowering
     /// (ids continue after `Env::structs`).
     extra_structs: std::cell::RefCell<Vec<HirStructDef>>,
@@ -1022,6 +1031,7 @@ struct ClosureSink {
 
 /// Per-function lowering state: scoped name → local-id map plus the
 /// running list of local declarations, on top of the shared `Env`.
+#[derive(Clone)]
 struct LowerCtx<'a> {
     env: &'a Env<'a>,
     locals: Vec<HirLocal>,
@@ -1125,9 +1135,69 @@ struct LowerCtx<'a> {
     /// Associated types of the enclosing trait / impl
     /// (`ASSOC_TYPES_ATTR`): a bare `X` is `Self::X` (spec 2.8.3).
     assoc_names: Vec<String>,
+    /// Probing a block for the type an un-annotated `let` must have:
+    /// the local, and the first concrete expected type it is read
+    /// under (`expr::infer_from_later_use`).
+    infer_probe: Option<(LocalId, Option<HirTy>)>,
+}
+
+/// Where a lowering probe started: what to roll back afterwards.
+struct ProbeMark {
+    diagnostics: usize,
+    extras: usize,
+    uninferred: u32,
 }
 
 impl<'a> LowerCtx<'a> {
+    fn probe_mark(&self) -> ProbeMark {
+        ProbeMark {
+            diagnostics: self.env.sink.diagnostics.borrow().len(),
+            extras: self.env.sink.extras.borrow().len(),
+            uninferred: self.env.sink.uninferred.get(),
+        }
+    }
+
+    /// Drop the diagnostics (and "annotations needed" count) since
+    /// `mark`, and the closures / thunks /
+    /// coroutine bodies lifted since (they are made again for real).
+    /// Generic instances are cached (and may own closures), so when any
+    /// were made everything is kept.
+    fn rollback(&self, mark: &ProbeMark) {
+        self.env
+            .sink
+            .diagnostics
+            .borrow_mut()
+            .truncate(mark.diagnostics);
+        self.env.sink.uninferred.set(mark.uninferred);
+        let mut lifted = self.env.sink.extras.borrow_mut();
+        if lifted[mark.extras..].iter().all(|f| {
+            ["__closure_", "__thunk_", "__coro_"]
+                .iter()
+                .any(|p| f.name.starts_with(p))
+        }) {
+            // Cached thunks among them go too.
+            let gone: Vec<FunctionId> = lifted[mark.extras..].iter().map(|f| f.id).collect();
+            self.env
+                .sink
+                .thunks
+                .borrow_mut()
+                .retain(|_, id| !gone.contains(id));
+            lifted.truncate(mark.extras);
+        }
+    }
+
+    /// A "type annotations needed" error (see `ClosureSink::uninferred`).
+    fn emit_uninferred(&self, msg: String) {
+        self.env
+            .sink
+            .uninferred
+            .set(self.env.sink.uninferred.get() + 1);
+        self.emit_error(
+            rokc_diagnostic::ErrorKind::Type,
+            format!("type annotations needed: {msg}"),
+        );
+    }
+
     fn new(env: &'a Env<'a>, ty_subst: &'a HashMap<String, HirTy>, self_ty: Option<HirTy>) -> Self {
         Self {
             env,
@@ -1165,6 +1235,7 @@ impl<'a> LowerCtx<'a> {
             ty_bounds: HashMap::new(),
             coro: None,
             assoc_names: Vec::new(),
+            infer_probe: None,
         }
     }
 
@@ -1736,6 +1807,17 @@ impl<'a> LowerCtx<'a> {
         let def_module = module_of(full);
         if self.is_visible(&def_module, vis) {
             return true;
+        }
+        if vis == Visibility::Pkg {
+            self.emit_error(
+                rokc_diagnostic::ErrorKind::Module,
+                format!(
+                    "{what} `{full}` is `pub(pkg)`: visible only inside its package \
+                     `{}` (spec 5.6.4)",
+                    module_display(&package_of(&def_module))
+                ),
+            );
+            return false;
         }
         self.emit_error(
             rokc_diagnostic::ErrorKind::Module,

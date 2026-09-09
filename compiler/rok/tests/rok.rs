@@ -396,12 +396,50 @@ fn new_and_init_write_a_manifest() {
     ok(&rok(&home, &dir, &["init"]));
     assert!(dir.join("main.rok").is_file() && dir.join("Rok.toml").is_file());
     fails(&rok(&home, &dir, &["init"]), "already exists");
-    fails(&rok(&home, &dir, &["bench"]), "not supported yet");
-    fails(&rok(&home, &dir, &["lint"]), "not supported yet");
     assert_eq!(
         ok(&rok(&home, &dir, &["--version"])),
         format!("rok {}\n", env!("CARGO_PKG_VERSION"))
     );
+}
+
+#[test]
+fn lint_and_doc_with_dependencies() {
+    let root = scratch("lintdoc");
+    let home = root.join("home");
+    write(
+        &root.join("util/lib.rok"),
+        "/// Says hi.\npub fn hello() -> i32 { let unused = 1; 1 }\n",
+    );
+    let app = root.join("app");
+    write(
+        &app.join("Rok.toml"),
+        "[package]\nname = \"app\"\n\n[deps]\nutil = { path = \"../util\" }\n\n\
+         [lints]\nunused_variables = \"deny\"\n",
+    );
+    write(
+        &app.join("main.rok"),
+        "use util::hello;\nlet x = hello();\nprintln(\"hi\");\n",
+    );
+    // `[lints]` sets the level, the command line overrides it, and the
+    // dependency is not linted.
+    let out = rok(&home, &app, &["lint"]);
+    fails(&out, "unused variable `x`");
+    assert!(
+        !text(&out.stderr).contains("`unused`"),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = rok(&home, &app, &["lint", "-W", "unused_variables"]);
+    ok(&out);
+    assert!(text(&out.stderr).contains("warning: [lint]"));
+    fails(
+        &rok(&home, &app, &["lint", "-D", "all"]),
+        "unused variable `x`",
+    );
+
+    ok(&rok(&home, &app, &["-q", "doc"]));
+    assert!(read(&app.join("target/doc/util/index.html")).contains("Says hi."));
+    assert!(read(&app.join("target/doc/index.html")).contains("app/index.html"));
 }
 
 #[test]
@@ -633,10 +671,10 @@ fn build_run_and_repl_with_dependencies() {
     ok(&rok(&home, &app, &["-q", "clean"]));
     assert!(!app.join("target").exists());
 
-    // `:add` in the REPL goes to the active environment.
+    // `:add` in the REPL goes to the active environment; bare `rok` is `rok repl`.
     write(&root.join("lib1/lib.rok"), LIB_V1);
     ok(&rok(&home, &root, &["env", "create", "r"]));
-    let mut child = rok_cmd(&home, &root, &["repl", "--env", "r"])
+    let mut child = rok_cmd(&home, &root, &["--env", "r"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

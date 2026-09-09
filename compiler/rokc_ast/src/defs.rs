@@ -30,6 +30,10 @@ pub struct FnDef {
 /// (spec 5.9.10).
 pub const EXTERN_C_FN_ATTR: &str = "#extern_c";
 
+/// Marker attribute of a C variadic declaration `fn printf(fmt: str, ...)`
+/// (spec 8.6.10).
+pub const C_VARIADIC_ATTR: &str = "#c_variadic";
+
 /// Bound-list marker of an `unsafe fn(..)` type (`#` cannot start a
 /// user identifier).
 pub const UNSAFE_FN_MARK: &str = "#unsafe";
@@ -401,6 +405,29 @@ pub enum ExprKind {
     Spread(Box<Expr>),
     /// Discard expression `_ = expr`.
     Discard(Box<Expr>),
+    /// `f"..."` (refs-lang 1.7.3): literal runs and `{expr:spec}` holes,
+    /// formatted by type in HIR (stdlib 2.10).
+    FString(Vec<FStringPart>),
+}
+
+#[derive(Clone, Debug)]
+pub enum FStringPart {
+    /// Literal text as written (escapes not yet decoded, `{{` / `}}`
+    /// folded).
+    Lit(String),
+    Hole {
+        expr: Expr,
+        /// The format spec after `:`; empty when there is none.
+        spec: Vec<SpecPiece>,
+    },
+}
+
+/// A piece of a format spec: text (`$$` folded to `$`) or a dynamic
+/// `${expr}`.
+#[derive(Clone, Debug)]
+pub enum SpecPiece {
+    Text(String),
+    Expr(Expr),
 }
 
 #[derive(Clone, Debug)]

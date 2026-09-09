@@ -1,0 +1,7 @@
+// expect-error: cannot be passed as a C variadic
+struct P { x: i32; }
+extern "C" { fn printf(fmt: str, ...) -> i32; }
+fn main() -> i32 {
+    let _ = unsafe { printf("%d\n", P { x: 1 }) };
+    return 0;
+}

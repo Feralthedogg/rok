@@ -87,6 +87,7 @@ pub fn lower(module: &HirModule) -> MirModule {
         functions,
         statics,
         exports: module.exports.clone(),
+        c_variadic: module.c_variadic.clone(),
         pkg_hashes: Vec::new(),
     }
 }
@@ -428,6 +429,7 @@ impl<'a> FnBuilder<'a> {
             }
         }
         if let Some(t) = &b.trailing {
+            self.push_loc(t.span);
             let op = self.lower_expr_to_operand(t);
             // Unit-typed trailing — emit a no-args return so void-fn
             // signatures stay well-typed.
@@ -454,7 +456,10 @@ impl<'a> FnBuilder<'a> {
             }
         }
         let mut value = match &b.trailing {
-            Some(t) => self.lower_expr_to_operand(t),
+            Some(t) => {
+                self.push_loc(t.span);
+                self.lower_expr_to_operand(t)
+            }
             None => Operand::Const(ConstVal::Unit),
         };
         // The block's `let`s and the temporaries made while lowering it go
@@ -488,7 +493,35 @@ impl<'a> FnBuilder<'a> {
         (value, false)
     }
 
+    /// Mark the source position of what follows (debug line info);
+    /// a repeat of the same line is dropped.
+    fn push_loc(&mut self, span: rokc_diagnostic::Span) {
+        if span.line == 0 || !self.block_is_live() {
+            return;
+        }
+        let stmts = &mut self.current_block().stmts;
+        if let Some(Statement::Loc(prev)) = stmts.last_mut() {
+            *prev = span;
+            return;
+        }
+        stmts.push(Statement::Loc(span));
+    }
+
     fn lower_stmt(&mut self, s: &HirStmt) -> bool {
+        let at = match s {
+            HirStmt::Let { init: e, .. }
+            | HirStmt::Assign { value: e, .. }
+            | HirStmt::ArrayAssign { value: e, .. }
+            | HirStmt::StaticAssign { value: e, .. }
+            | HirStmt::Expr(e)
+            | HirStmt::Return(Some(e))
+            | HirStmt::Break { value: Some(e), .. }
+            | HirStmt::Panic(e) => Some(e.span),
+            _ => None,
+        };
+        if let Some(span) = at {
+            self.push_loc(span);
+        }
         match s {
             HirStmt::Let { local, init } => {
                 // Array literals write directly into the target slot —

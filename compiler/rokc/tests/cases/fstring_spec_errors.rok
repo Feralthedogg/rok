@@ -1,0 +1,15 @@
+// expect-error: 10:23: format type `x` needs an integer (stdlib 2.10.5), found `str`
+// expect-error: 11:30: format type `e` needs a number (stdlib 2.10.6), found `bool`
+// expect-error: 12:26: invalid format spec `5q`
+// expect-error: 13:31: cannot find value `nope`
+
+// A static spec is checked against the hole's type; errors point at the
+// hole's expression, not at the f-string.
+fn main() -> i32 {
+    let s = "abc";
+    println(f"value: {s:x}");
+    println(f"a {1} b {2} c {true:e}");
+    println(f"spaced {   s:5q}");
+    println(f"line {s}, then {nope}");
+    return 0;
+}

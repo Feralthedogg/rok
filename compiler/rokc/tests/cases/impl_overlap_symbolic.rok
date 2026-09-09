@@ -1,0 +1,22 @@
+// expect-error: 17:21: conflicting implementations of trait `Show`: `impl<..> Show for Box<T>` and `impl<..> Show for Box<U>` both cover `Box<T>` with `T = i32`
+// expect-error: 20:19: conflicting implementations of trait `Pairy`: `impl<..> Pairy for (T, i32)` and `impl<..> Pairy for (i32, U)` both cover `(T, i32)` with `T = i32`
+
+// Spec 2.9.3: overlapping generic impls are found at their declaration
+// even when no type in use shows the overlap — the targets unify and a
+// known type (`i32`) meets both impls' bounds. `Box<i32>` is never
+// written, and neither is `(i32, i32)`.
+trait A {}
+trait B {}
+trait Show { fn show(self) -> i32; }
+trait Pairy { fn p(self) -> i32; }
+impl A for i32 {}
+impl B for i32 {}
+
+struct Box<T> { v: T; }
+impl<T: A> Show for Box<T> { fn show(self) -> i32 { return 1; } }
+impl<U: B> Show for Box<U> { fn show(self) -> i32 { return 2; } }
+
+impl<T> Pairy for (T, i32) { fn p(self) -> i32 { return 1; } }
+impl<U> Pairy for (i32, U) { fn p(self) -> i32 { return 2; } }
+
+fn main() -> i32 { return 0; }

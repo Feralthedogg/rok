@@ -135,6 +135,7 @@ name = "rokc_tools"
 version = "0.1.0"
 dependencies = [
  "rokc_ast",
+ "rokc_core",
  "rokc_diagnostic",
  "rokc_fmt",
  "rokc_hir",

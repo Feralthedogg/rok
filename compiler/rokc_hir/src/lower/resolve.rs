@@ -98,7 +98,12 @@ pub(super) fn resolve_name(
     set: &NameSet<'_>,
 ) -> Result<Option<String>, Vec<String>> {
     let absolute = matches!(segments.first().copied(), Some("pkg" | "rok"));
+    let package = package_of(module);
     let resolved_segs: Vec<&str> = match segments.first().copied() {
+        // `pkg::` is the root of the package the code is in.
+        Some("pkg") if is_dependency(&package) => std::iter::once(package.as_str())
+            .chain(segments[1..].iter().copied())
+            .collect(),
         Some("pkg") => segments[1..].to_vec(),
         Some("sup") => {
             let mut parts: Vec<&str> = if module.is_empty() {
@@ -128,6 +133,10 @@ pub(super) fn resolve_name(
     };
     if (set.exists)(&candidate) {
         return Ok(Some(candidate));
+    }
+    // A dependency's name is a top-level name in every module (902.3).
+    if !absolute && segments.first().is_some_and(|s| is_dependency(s)) && (set.exists)(&suffix) {
+        return Ok(Some(suffix));
     }
     for scope in local_uses.iter().rev() {
         match lookup_in_use_entries_full(scope, segments, &suffix, set) {
@@ -166,16 +175,43 @@ pub const CORE_PREFIX: &str = "rok::core";
 /// visibility `vis`? (spec 5.6)
 pub(super) fn visible_from(cur_module: &str, def_module: &str, vis: Visibility) -> bool {
     match vis {
-        // Single-package compilation today: everything reaching out
-        // (Pub) or staying within the package (Pkg) is reachable.
-        Visibility::Pub | Visibility::Pkg => true,
+        Visibility::Pub => true,
+        // Spec 5.6.4: the package the item is declared in.
+        Visibility::Pkg => package_of(cur_module) == package_of(def_module),
         Visibility::Sub => {
-            def_module.is_empty()
-                || cur_module == def_module
-                || cur_module.starts_with(&format!("{def_module}::"))
+            package_of(cur_module) == package_of(def_module)
+                && (def_module.is_empty()
+                    || cur_module == def_module
+                    || cur_module.starts_with(&format!("{def_module}::")))
         }
         // Spec 5.6.2: no keyword = visible in the declaring module only.
         Visibility::Private => cur_module == def_module,
+    }
+}
+
+thread_local! {
+    /// The dependency packages' top-level names (`PACKAGES_ATTR`), set
+    /// by `lower_full` for the program being lowered.
+    static PACKAGES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub(super) fn set_packages(names: Vec<String>) {
+    PACKAGES.with(|p| *p.borrow_mut() = names);
+}
+
+fn is_dependency(name: &str) -> bool {
+    PACKAGES.with(|p| p.borrow().iter().any(|n| n == name))
+}
+
+/// The package `module` belongs to: `rok::<tier>` (each library tier is
+/// its own package, spec 5.7), a dependency's name, or `""` — the
+/// package being compiled.
+pub(super) fn package_of(module: &str) -> String {
+    let mut parts = module.split("::");
+    match parts.next() {
+        Some("rok") => format!("rok::{}", parts.next().unwrap_or_default()),
+        Some(first) if is_dependency(first) => first.to_owned(),
+        _ => String::new(),
     }
 }
 

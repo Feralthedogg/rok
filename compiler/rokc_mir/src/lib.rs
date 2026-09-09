@@ -23,6 +23,9 @@ pub struct MirModule {
     pub statics: Vec<MirStaticDef>,
     /// `#[export_name]` functions: id → linker symbol.
     pub exports: Vec<(FunctionId, String)>,
+    /// C variadic `extern` declarations (spec 8.6.10): calls pass the
+    /// arguments past the declared parameters as C `...` arguments.
+    pub c_variadic: Vec<FunctionId>,
     /// Package hash per item-path prefix (`rok::core`, ..., `""` for the
     /// user package; spec 0.3.3), longest prefix first. Filled by the
     /// driver; empty → one hash over the printed MIR.
@@ -95,6 +98,9 @@ pub enum Statement {
         value: Operand,
         elem_ty: MirTy,
     },
+    /// The following statements come from source position `Span` (a
+    /// HIR statement or block value): debug line info only.
+    Loc(Span),
     // Store `value` (a `ty`) at raw address `addr` (`usize`).
     RawStore {
         addr: Operand,

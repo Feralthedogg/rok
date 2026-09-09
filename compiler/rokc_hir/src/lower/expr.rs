@@ -6,7 +6,7 @@ use super::*;
 pub(super) fn lower_block(ctx: &mut LowerCtx<'_>, block: &Block) -> HirBlock {
     ctx.push_scope();
     let mut stmts = Vec::with_capacity(block.stmts.len());
-    for s in &block.stmts {
+    for (i, s) in block.stmts.iter().enumerate() {
         match &s.kind {
             StmtKind::LetStruct {
                 path,
@@ -42,6 +42,31 @@ pub(super) fn lower_block(ctx: &mut LowerCtx<'_>, block: &Block) -> HirBlock {
                     s.span,
                     &mut stmts,
                 );
+            }
+            StmtKind::Let {
+                name,
+                ty: None,
+                init,
+            } => {
+                let mark = ctx.probe_mark();
+                let mut stmt = lower_stmt(ctx, s);
+                // Nothing in the initializer fixed a generic parameter /
+                // literal type: take the type the later code reads it as.
+                if ctx.env.sink.uninferred.get() != mark.uninferred {
+                    if let Some(t) = infer_from_later_use(ctx, name, &block.stmts[i + 1..], block) {
+                        ctx.rollback(&mark);
+                        // The failed attempt's binding stays unused.
+                        if let Some(old) = ctx.scopes.last_mut().and_then(|sc| sc.remove(name)) {
+                            ctx.locals[old.0 as usize].ty = t.clone();
+                        }
+                        let outer = rokc_diagnostic::set_current_span(s.span);
+                        let v = lower_expected(ctx, init, t.clone());
+                        let v = coerce(ctx, &t, v, &|| format!("`let {name}`"));
+                        stmt = Some(ctx.declare_var(name, t, v, s.span));
+                        rokc_diagnostic::set_current_span(outer);
+                    }
+                }
+                stmts.extend(stmt);
             }
             _ => {
                 if let Some(stmt) = lower_stmt(ctx, s) {
@@ -425,6 +450,67 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
     }
 }
 
+/// A method call's receiver. One whose generic parameter nothing fixed
+/// (`B::new().with(1)`) is retried with the call's expected type when
+/// that makes it exactly the expected type — a chain of methods that
+/// return their receiver's type (builders).
+fn lower_receiver(ctx: &mut LowerCtx<'_>, receiver: &Expr) -> HirExpr {
+    let mark = ctx.probe_mark();
+    let recv = lower_expected(ctx, receiver, HirTy::Unknown);
+    if ctx.env.sink.uninferred.get() == mark.uninferred {
+        return recv;
+    }
+    let Some(expected) = ctx
+        .current_expected()
+        .filter(|t| !matches!(t, HirTy::Unknown | HirTy::Unit | HirTy::Any))
+        .cloned()
+    else {
+        return recv;
+    };
+    let retry = ctx.probe_mark();
+    let mut probe = ctx.clone();
+    let fits = lower_expected(&mut probe, receiver, expected.clone()).ty == expected
+        && ctx.env.sink.diagnostics.borrow().len() == retry.diagnostics;
+    ctx.rollback(&retry);
+    if !fits {
+        return recv;
+    }
+    ctx.rollback(&mark);
+    lower_expected(ctx, receiver, expected)
+}
+
+/// The type `name` (an un-annotated `let` whose initializer left a
+/// generic parameter open; declared `Unknown`) must have: lower the rest
+/// of the block as a probe and take the first concrete expected type a
+/// read of it meets — an argument slot, a `let` annotation, a struct
+/// field, `return` (local HM-style unification, one variable). The
+/// probe's output and diagnostics are dropped.
+fn infer_from_later_use(
+    ctx: &LowerCtx<'_>,
+    name: &str,
+    rest: &[Stmt],
+    block: &Block,
+) -> Option<HirTy> {
+    let local = ctx.lookup(name)?;
+    if rest.is_empty() && block.trailing.is_none() {
+        return None;
+    }
+    let mark = ctx.probe_mark();
+    let mut probe = ctx.clone();
+    probe.infer_probe = Some((local, None));
+    let tail = Block {
+        stmts: rest.to_vec(),
+        trailing: block.trailing.clone(),
+        span: block.span,
+        label: None,
+    };
+    let hint = ctx.current_expected().cloned().unwrap_or(HirTy::Unknown);
+    probe.expected_ty_stack.push(hint);
+    lower_block(&mut probe, &tail);
+    ctx.rollback(&mark);
+    probe.infer_probe.and_then(|(_, t)| t)
+}
+
 /// D1: an un-annotated `let` takes its initializer's static type, so
 /// the initializer must have one. `none` alone and an initializer that
 /// never produces a value don't (empty `[]` and differing `if` / `match`
@@ -526,6 +612,29 @@ pub(super) fn lower_assign(
                 (_, HirTy::Unknown) => return None,
                 _ => None,
             };
+            // `s.arr[i] = v` / `xs[j][i] = v` on a value array that isn't
+            // a local: copy the array, store into the copy, write it back.
+            if elem.is_none()
+                && matches!(arr_h.ty, HirTy::Array(..))
+                && matches!(arr_expr.kind, ExprKind::Field(..) | ExprKind::Index(..))
+            {
+                return Some(rewrite_index_store(
+                    ctx,
+                    idx_expr,
+                    |copy, i| {
+                        let store = Expr {
+                            kind: ExprKind::Index(Box::new(copy.clone()), Box::new(i.clone())),
+                            span: target.span,
+                        };
+                        vec![
+                            let_stmt(copy, (**arr_expr).clone()),
+                            assign_stmt(store, value.clone()),
+                            assign_stmt((**arr_expr).clone(), copy.clone()),
+                        ]
+                    },
+                    target.span,
+                ));
+            }
             let Some((array_local, elem_ty)) = elem else {
                 ctx.emit_error(
                     rokc_diagnostic::ErrorKind::Type,
@@ -563,6 +672,32 @@ pub(super) fn lower_assign(
                 cur = inner;
             }
             chain.reverse();
+            // `xs[i].f = v`: the element is a value, so read it, update
+            // the copy and store it back (`xs[i] = copy`).
+            if let ExprKind::Index(arr, idx) = &cur.kind {
+                let field_target = |elem: &Expr| {
+                    chain.iter().fold(elem.clone(), |acc, name| Expr {
+                        kind: ExprKind::Field(Box::new(acc), (*name).to_owned()),
+                        span: target.span,
+                    })
+                };
+                return Some(rewrite_index_store(
+                    ctx,
+                    idx,
+                    |elem, i| {
+                        let at = Expr {
+                            kind: ExprKind::Index(arr.clone(), Box::new(i.clone())),
+                            span: cur.span,
+                        };
+                        vec![
+                            let_stmt(elem, at.clone()),
+                            assign_stmt(field_target(elem), value.clone()),
+                            assign_stmt(at, elem.clone()),
+                        ]
+                    },
+                    target.span,
+                ));
+            }
             let root_h = lower_expected(ctx, cur, HirTy::Unknown);
             if root_h.ty == HirTy::Unknown {
                 return None;
@@ -709,6 +844,80 @@ pub(super) fn lower_assign(
             None
         }
     }
+}
+
+fn tmp_path(what: &str, span: rokc_diagnostic::Span) -> Expr {
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Expr {
+        kind: ExprKind::Path(rokc_ast::Path {
+            segments: vec![rokc_ast::PathSegment {
+                name: format!("#{what}{n}"),
+                generics: Vec::new(),
+            }],
+            span,
+        }),
+        span,
+    }
+}
+
+fn path_name(e: &Expr) -> String {
+    let ExprKind::Path(p) = &e.kind else {
+        unreachable!("temp is a path")
+    };
+    p.segments[0].name.clone()
+}
+
+fn let_stmt(name: &Expr, init: Expr) -> Stmt {
+    Stmt {
+        span: init.span,
+        kind: StmtKind::Let {
+            name: path_name(name),
+            ty: None,
+            init,
+        },
+    }
+}
+
+const fn assign_stmt(target: Expr, value: Expr) -> Stmt {
+    Stmt {
+        span: target.span,
+        kind: StmtKind::Assign(target, value),
+    }
+}
+
+/// `{ let #i = idx; <body(#tmp, #i)> }` — a store through a value
+/// element that has no local to write in place: `body` copies it into
+/// `#tmp`, updates the copy and writes it back. The index is evaluated
+/// once.
+fn rewrite_index_store(
+    ctx: &mut LowerCtx<'_>,
+    idx: &Expr,
+    body: impl FnOnce(&Expr, &Expr) -> Vec<Stmt>,
+    span: rokc_diagnostic::Span,
+) -> HirStmt {
+    let tmp = tmp_path("tmp", span);
+    // A literal / name index is read as is (and keeps its expected
+    // `usize` type); anything else goes through a temp.
+    let mut stmts = Vec::new();
+    let i = if matches!(idx.kind, ExprKind::Literal(_) | ExprKind::Path(_)) {
+        idx.clone()
+    } else {
+        let i = tmp_path("idx", span);
+        stmts.push(let_stmt(&i, idx.clone()));
+        i
+    };
+    stmts.extend(body(&tmp, &i));
+    let block = Expr {
+        kind: ExprKind::Block(Block {
+            stmts,
+            trailing: None,
+            span,
+            label: None,
+        }),
+        span,
+    };
+    HirStmt::Expr(lower_expr(ctx, &block))
 }
 
 /// `break` / `continue` must target an enclosing loop (or, for a
@@ -885,7 +1094,7 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             type_args,
         } => {
             let all_args = with_trailing_closure(args, trailing_closure.as_deref());
-            let recv_h = lower_expected(ctx, receiver, HirTy::Unknown);
+            let recv_h = lower_receiver(ctx, receiver);
             ctx.method_type_args.clone_from(type_args);
             let method = match drop_method(ctx, &recv_h.ty, method, span) {
                 Ok(m) => m,
@@ -1189,6 +1398,7 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
         }
         ExprKind::Spread(_) => unsupported(ctx, "a spread expression here"),
         ExprKind::Discard(_) => unsupported(ctx, "a discard expression"),
+        ExprKind::FString(parts) => super::fstring::lower_fstring(ctx, parts, span),
     }
 }
 
@@ -1336,14 +1546,11 @@ pub(super) fn resolve_enum_variant(
                 return EnumRes::Error;
             }
             _ => {
-                ctx.emit_error(
-                    rokc_diagnostic::ErrorKind::Type,
-                    format!(
-                        "cannot infer the type arguments of `{full}` for `{}` — annotate the \
-                         binding with the concrete type",
-                        segs.join("::")
-                    ),
-                );
+                ctx.emit_uninferred(format!(
+                    "cannot infer the type arguments of `{full}` for `{}` — annotate the \
+                     binding with the concrete type",
+                    segs.join("::")
+                ));
                 return EnumRes::Error;
             }
         }
@@ -1557,19 +1764,15 @@ pub(super) fn lower_struct_init(
                             .get(name)
                             .and_then(crate::ty::as_const)
                             .and_then(|(v, _)| super::mono::typed_const(ctx, name, ty, v));
-                        match c {
-                            Some(c) => args.push(c),
-                            None => {
-                                return ctx.error_expr(
-                                    span,
-                                    format!(
-                                        "cannot infer const parameter `{name}` of `{full}` — \
-                                         annotate the binding (`let v: {}<..> = ..`)",
-                                        segs.join("::")
-                                    ),
-                                );
-                            }
-                        }
+                        let Some(c) = c else {
+                            ctx.emit_uninferred(format!(
+                                "cannot infer const parameter `{name}` of `{full}` — \
+                                 annotate the binding (`let v: {}<..> = ..`)",
+                                segs.join("::")
+                            ));
+                            return poison(span);
+                        };
+                        args.push(c);
                     }
                     if let rokc_ast::GenericParam::Type { name, default, .. } = gp {
                         match subst
@@ -1580,14 +1783,12 @@ pub(super) fn lower_struct_init(
                             Some(t) if t != HirTy::Unknown => args.push(t),
                             Some(_) => return poison(span),
                             None => {
-                                return ctx.error_expr(
-                                    span,
-                                    format!(
-                                        "cannot infer type parameter `{name}` of `{full}` — \
-                                         write `{}<...> {{ ... }}`",
-                                        segs.join("::")
-                                    ),
-                                );
+                                ctx.emit_uninferred(format!(
+                                    "cannot infer type parameter `{name}` of `{full}` — \
+                                     write `{}<...> {{ ... }}`",
+                                    segs.join("::")
+                                ));
+                                return poison(span);
                             }
                         }
                     }
@@ -2277,6 +2478,7 @@ pub(super) fn lower_args_ref(
     let mut slots: Vec<Option<ArgSrc<'_>>> = (0..n).map(|_| None).collect();
     let mut next = 0usize;
     let mut extra = 0usize;
+    let mut c_varargs: Vec<HirExpr> = Vec::new();
     if let Some(r) = receiver {
         if n > 0 {
             slots[0] = Some(ArgSrc::Lowered(r));
@@ -2299,8 +2501,7 @@ pub(super) fn lower_args_ref(
                         ArgSrc::Ast(e)
                     });
                 } else {
-                    lower_expected(ctx, e, HirTy::Unknown);
-                    extra += 1;
+                    c_varargs.push(lower_expected(ctx, e, HirTy::Unknown));
                 }
                 next += 1;
             }
@@ -2364,15 +2565,7 @@ pub(super) fn lower_args_ref(
             }
         }
     }
-    if extra > 0 {
-        ctx.emit_error(
-            rokc_diagnostic::ErrorKind::Type,
-            format!(
-                "`{callee}` takes {n} argument(s) but {} were supplied",
-                n + extra
-            ),
-        );
-    }
+    let c_varargs = check_arity(ctx, sig, callee, extra, c_varargs);
     let mut out = Vec::with_capacity(n);
     let mut places: Vec<Option<HirExpr>> = vec![None; n];
     // Names other (non-`ref`) arguments read, for the exclusivity check.
@@ -2443,7 +2636,73 @@ pub(super) fn lower_args_ref(
         }));
     }
     check_ref_exclusive(ctx, callee, &out, &places, &reads, has_receiver);
+    out.extend(c_varargs);
     (out, lets, places)
+}
+
+/// Report surplus arguments, unless `sig` is C variadic: then `surplus`
+/// are its `...` arguments, returned promoted.
+fn check_arity(
+    ctx: &LowerCtx<'_>,
+    sig: &FnSig,
+    callee: &str,
+    extra: usize,
+    surplus: Vec<HirExpr>,
+) -> Vec<HirExpr> {
+    if ctx.env.c_variadic.contains(&sig.id) {
+        return surplus
+            .into_iter()
+            .map(|a| c_vararg_promote(ctx, callee, a))
+            .collect();
+    }
+    let extra = extra + surplus.len();
+    if extra > 0 {
+        let n = sig.param_tys.len();
+        ctx.emit_error(
+            rokc_diagnostic::ErrorKind::Type,
+            format!(
+                "`{callee}` takes {n} argument(s) but {} were supplied",
+                n + extra
+            ),
+        );
+    }
+    Vec::new()
+}
+
+/// An argument past a C variadic declaration's parameters (spec 8.6.10)
+/// gets C's default argument promotions: integers narrower than `int`
+/// (and `bool`) widen to `i32`, `f32` to `f64`. Aggregates are refused
+/// (no `va_arg` of a rok struct on the C side to match).
+fn c_vararg_promote(ctx: &LowerCtx<'_>, callee: &str, a: HirExpr) -> HirExpr {
+    let to = match &a.ty {
+        HirTy::Prim(
+            PrimTy::I8 | PrimTy::I16 | PrimTy::U8 | PrimTy::U16 | PrimTy::CChar | PrimTy::Bool,
+        ) => PrimTy::I32,
+        HirTy::Prim(PrimTy::F32) => PrimTy::F64,
+        HirTy::Prim(_) | HirTy::Fn(..) | HirTy::Unknown => return a,
+        other => {
+            let name = ctx.ty_name(other);
+            ctx.emit_error(
+                rokc_diagnostic::ErrorKind::Type,
+                format!(
+                    "`{callee}`: a `{name}` cannot be passed as a C variadic `...` argument \
+                     (only numbers, `bool`, `char`, `str` and C function pointers; spec 8.6.10)"
+                ),
+            );
+            return a;
+        }
+    };
+    let span = a.span;
+    let from_ty = a.ty.clone();
+    HirExpr {
+        kind: HirExprKind::Cast {
+            operand: Box::new(a),
+            from_ty,
+            to_ty: HirTy::Prim(to),
+        },
+        ty: HirTy::Prim(to),
+        span,
+    }
 }
 
 /// A path call's first argument standing in for `self` (`T::m(ref x)`,
@@ -3955,6 +4214,158 @@ pub(super) fn call_generic_on(
     callee: &str,
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
+    if args
+        .iter()
+        .all(|a| matches!(a, CallArg::Positional(_) | CallArg::Ref(_)))
+    {
+        return call_generic_positional(ctx, def, self_ty, self_hint, receiver, args, callee, span);
+    }
+    let mut lets = Vec::new();
+    let offset = usize::from(receiver.is_some());
+    let Some(args) = generic_positional_args(ctx, def, offset, args, callee, &mut lets) else {
+        return poison(span);
+    };
+    let call = call_generic_positional(ctx, def, self_ty, self_hint, receiver, &args, callee, span);
+    if lets.is_empty() {
+        return call;
+    }
+    HirExpr {
+        ty: call.ty.clone(),
+        kind: HirExprKind::Block(Box::new(HirBlock {
+            stmts: lets,
+            trailing: Some(call),
+            label: None,
+        })),
+        span,
+    }
+}
+
+/// A generic call's named (`name: v`) and spread (`..t`) arguments as
+/// positional ones in parameter order (spec 4.1): a skipped parameter
+/// takes its default, a spread tuple is evaluated once into a temp (a
+/// `let` in `lets`) whose fields fill consecutive slots, a trailing
+/// closure fills the last parameter (4.8.3). `offset` parameters (the
+/// receiver) come first. `None` after an error.
+fn generic_positional_args(
+    ctx: &mut LowerCtx<'_>,
+    def: &FnDef,
+    offset: usize,
+    args: &[CallArg],
+    callee: &str,
+    lets: &mut Vec<HirStmt>,
+) -> Option<Vec<CallArg>> {
+    let params = def.params.get(offset..).unwrap_or_default();
+    let n = params.len();
+    let mut slots: Vec<Option<CallArg>> = vec![None; n];
+    let (mut next, mut extra) = (0usize, 0usize);
+    let mut ok = true;
+    for a in args {
+        match a {
+            CallArg::Positional(e)
+                if n > next && slots[n - 1].is_none() && is_trailing_closure(e) =>
+            {
+                slots[n - 1] = Some(a.clone());
+                next = n;
+            }
+            CallArg::Positional(_) | CallArg::Ref(_) => {
+                match slots.get_mut(next) {
+                    Some(s) => *s = Some(a.clone()),
+                    None => extra += 1,
+                }
+                next += 1;
+            }
+            CallArg::Named { name, value } => match params.iter().position(|p| p.name == *name) {
+                Some(i) if slots[i].is_none() => {
+                    slots[i] = Some(CallArg::Positional(value.clone()));
+                }
+                Some(_) => {
+                    ok = false;
+                    ctx.emit_error(
+                        rokc_diagnostic::ErrorKind::Type,
+                        format!("argument `{name}` provided more than once (spec 4.1)"),
+                    );
+                }
+                None => {
+                    ok = false;
+                    ctx.emit_error(
+                        rokc_diagnostic::ErrorKind::Type,
+                        format!("`{callee}` has no parameter named `{name}` (spec 4.1)"),
+                    );
+                }
+            },
+            CallArg::Spread(e) => {
+                let h = lower_expected(ctx, e, HirTy::Unknown);
+                let HirTy::Tuple(parts) = h.ty.clone() else {
+                    if h.ty != HirTy::Unknown {
+                        ctx.emit_error(
+                            rokc_diagnostic::ErrorKind::Type,
+                            format!(
+                                "spread `f(..x)` needs a tuple value, found `{}` (spec 4.1)",
+                                ctx.ty_name(&h.ty)
+                            ),
+                        );
+                    }
+                    return None;
+                };
+                let name = format!("#spread{}", ctx.locals.len());
+                let local = ctx.declare(Some(name.clone()), h.ty.clone());
+                lets.push(HirStmt::Let { local, init: h });
+                for k in 0..parts.len() {
+                    let field = Expr {
+                        kind: ExprKind::TupleField(
+                            Box::new(super::throws::path_expr(&name, e.span)),
+                            u32::try_from(k).expect("tuple field overflow"),
+                        ),
+                        span: e.span,
+                    };
+                    match slots.get_mut(next) {
+                        Some(s) => *s = Some(CallArg::Positional(field)),
+                        None => extra += 1,
+                    }
+                    next += 1;
+                }
+            }
+        }
+    }
+    if extra > 0 {
+        ctx.emit_error(
+            rokc_diagnostic::ErrorKind::Type,
+            format!(
+                "`{callee}` takes {n} argument(s) but {} were supplied",
+                n + extra
+            ),
+        );
+        return None;
+    }
+    let mut out = Vec::with_capacity(n);
+    for (slot, p) in slots.into_iter().zip(params) {
+        match (slot, &p.default) {
+            (Some(a), _) => out.push(a),
+            (None, Some(d)) => out.push(CallArg::Positional(d.clone())),
+            (None, None) => {
+                ctx.emit_error(
+                    rokc_diagnostic::ErrorKind::Type,
+                    format!("missing argument `{}` in call to `{callee}`", p.name),
+                );
+                ok = false;
+            }
+        }
+    }
+    ok.then_some(out)
+}
+
+/// `call_generic_on` with positional (and `ref`) arguments only.
+#[allow(clippy::too_many_arguments)]
+fn call_generic_positional(
+    ctx: &mut LowerCtx<'_>,
+    def: &FnDef,
+    self_ty: Option<&Ty>,
+    self_hint: Option<&HirTy>,
+    receiver: Option<HirExpr>,
+    args: &[CallArg],
+    callee: &str,
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
     if def.is_unsafe {
         check_unsafe_call(ctx, callee);
     }
@@ -4022,10 +4433,7 @@ pub(super) fn call_generic_on(
     let mut deferred: Vec<(usize, &Expr)> = Vec::new();
     for a in args {
         let (CallArg::Positional(e) | CallArg::Ref(e)) = a else {
-            return ctx.error_expr(
-                span,
-                format!("named / spread arguments to generic `{callee}` are not supported yet"),
-            );
+            unreachable!("named / spread arguments are made positional first")
         };
         let i = lowered.len();
         let is_ref = matches!(a, CallArg::Ref(_));
@@ -6178,6 +6586,14 @@ pub(super) fn lower_path(
     let segs: Vec<&str> = self_segs.iter().map(String::as_str).collect();
     if let [name] = segs.as_slice() {
         if let Some(local) = ctx.lookup(name) {
+            if let Some((target, None)) = &ctx.infer_probe {
+                let expected = ctx
+                    .current_expected()
+                    .filter(|t| !matches!(t, HirTy::Unknown | HirTy::Unit | HirTy::Any));
+                if *target == local && expected.is_some() {
+                    ctx.infer_probe = Some((local, expected.cloned()));
+                }
+            }
             return ctx.read_local(local, span);
         }
     }
@@ -6634,10 +7050,10 @@ fn lower_shape(
         .iter()
         .any(|a| matches!(a, rokc_ast::LitArg::Many(v) if v.is_empty()));
     if empty && ctx.current_expected().is_none_or(|t| *t == HirTy::Unknown) {
-        return ctx.error_expr(
-            span,
-            format!("cannot infer the type of an empty {what} literal — annotate the slot"),
-        );
+        ctx.emit_uninferred(format!(
+            "cannot infer the type of an empty {what} literal — annotate the slot"
+        ));
+        return poison(span);
     }
     lower_magic(ctx, &cands, span)
 }

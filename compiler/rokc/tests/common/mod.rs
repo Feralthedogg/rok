@@ -211,16 +211,16 @@ pub fn parse_expect_stdout(source: &str) -> Option<String> {
     None
 }
 
-/// Check a failed build's stderr against `// expect-error:`.
+/// Check a failed build's stderr against every `// expect-error:`.
 pub fn check_expect_error(source: &str, stderr: &str) -> Result<(), String> {
-    match parse_expect_error(source) {
-        Some(want) if !stderr.contains(want) => Err(format!(
+    match directives(source, "expect-error:").find(|want| !stderr.contains(want)) {
+        Some(want) => Err(format!(
             "build failed but stderr lacks expect-error {want:?}\n    stderr: {:?}",
             stderr
                 .lines()
                 .find(|l| l.starts_with("error"))
                 .unwrap_or_else(|| stderr.trim())
         )),
-        _ => Ok(()),
+        None => Ok(()),
     }
 }

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use rokc_driver::{CompiledModule, CompilerConfig, compile_file, compile_source};
 
 pub use rokc_diagnostic::{ErrorKind, RokDiagnostic, report, set_report_style};
-pub use rokc_driver::{BuildOptions, Demangled, EmitKind, TempDir, demangle};
+pub use rokc_driver::{BuildOptions, Demangled, EmitKind, SourceFile, TempDir, demangle};
 
 #[derive(Default)]
 pub struct Session {
@@ -44,6 +44,18 @@ impl Session {
         self.config.test = on;
     }
 
+    /// `rokc bench` build: keep `#[bench]` functions, generate the
+    /// timing `main`, set `cfg(test)`.
+    pub const fn set_bench(&mut self, on: bool) {
+        self.config.bench = on;
+    }
+
+    /// Keep each parsed file's AST in `CompileResult::sources` (lint,
+    /// doc).
+    pub const fn set_keep_ast(&mut self, on: bool) {
+        self.config.keep_ast = on;
+    }
+
     /// The input is a lone file outside any package (spec 4.16.8).
     pub const fn set_anonymous(&mut self, on: bool) {
         self.config.anonymous = on;
@@ -67,6 +79,7 @@ impl Session {
                 warnings: p.warnings,
                 link_libraries: p.link_libraries,
                 tests: p.tests,
+                sources: p.sources,
             },
             Err(errors) => CompileResult {
                 modules: Vec::new(),
@@ -74,6 +87,7 @@ impl Session {
                 warnings: Vec::new(),
                 link_libraries: Vec::new(),
                 tests: Vec::new(),
+                sources: Vec::new(),
             },
         }
     }
@@ -85,8 +99,10 @@ pub struct CompileResult {
     pub errors: Vec<RokDiagnostic>,
     pub warnings: Vec<RokDiagnostic>,
     pub link_libraries: Vec<String>,
-    /// Test names of a `set_test` build.
+    /// Test names of a `set_test` build (bench names of `set_bench`).
     pub tests: Vec<String>,
+    /// Parsed files of a `set_keep_ast` build (user package first).
+    pub sources: Vec<SourceFile>,
 }
 
 impl CompileResult {

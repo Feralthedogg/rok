@@ -30,6 +30,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const USAGE: &str = "\
 usage: rok [options] <command> [args]
+       rok [options]                same as `rok repl`
 
 packages:
   new [--lib|--bin] <name>     create a package (with Rok.toml)
@@ -47,7 +48,9 @@ build (run by rokc, with the dependencies):
                                active environment)
   lsp                          language server (also `rokls`)
   fmt [path]                   format .rok files
-  bench | doc | lint           not yet
+  bench [path] [filter]        time the `#[bench]` functions
+  lint [path]                  lint (levels: Rok.toml [lints], then -A/-W/-D)
+  doc [path]                   HTML docs (with dependencies) in target/doc/
 
 environments:
   env create|remove|use <name>      a named environment
@@ -101,6 +104,14 @@ const VALUE_FLAGS: &[&str] = &[
     "--message-format",
     "--target-dir",
     "--extern",
+    "-A",
+    "-W",
+    "-D",
+    "--allow",
+    "--warn",
+    "--deny",
+    "--iters",
+    "--samples",
 ];
 
 /// `ROK_HOME`, else the parent of the directory holding `rok`.
@@ -162,20 +173,21 @@ pub fn main_with(args: Vec<String>) -> i32 {
         };
     }
     if i >= rest.len() || rest[i] == "--" {
-        return match rest
+        match rest
             .iter()
             .find(|a| matches!(a.as_str(), "-V" | "--version" | "-h" | "--help"))
         {
             Some(v) if v == "-V" || v == "--version" => {
                 println!("rok {VERSION}");
-                0
+                return 0;
             }
             Some(_) => {
                 print!("{USAGE}");
-                0
+                return 0;
             }
-            None => usage("missing command"),
-        };
+            // Bare `rok` (options only) is `rok repl`, like `python` / `julia`.
+            None => rest.insert(i, "repl".into()),
+        }
     }
     let cmd = rest[i].clone();
     let pre = rest[..i].to_vec();
@@ -197,10 +209,7 @@ pub fn main_with(args: Vec<String>) -> i32 {
         "env" => env::cmd(&g, &post),
         "toolchain" => toolchain::cmd(&post),
         "build" | "check" | "run" | "test" | "repl" | "lsp" | "fmt" | "clean" | "demangle"
-        | "emit" => delegate(&g, &cmd, &pre, &post),
-        "bench" => Err("`rok bench` is not supported yet: `#[bench]` is not implemented".into()),
-        "doc" => Err("`rok doc` is not supported yet (it will write target/doc/)".into()),
-        "lint" => lint(&post),
+        | "emit" | "bench" | "doc" | "lint" => delegate(&g, &cmd, &pre, &post),
         other => return usage(&format!("unknown command `{other}`")),
     };
     r.unwrap_or_else(|e| {
@@ -217,13 +226,6 @@ pub fn main_with(args: Vec<String>) -> i32 {
 fn usage(msg: &str) -> i32 {
     eprintln!("rok: {msg}\nrun `rok help` for usage");
     2
-}
-
-/// `rok lint`: the hook for the lint pass (not written yet).
-// ponytail: a stub until the linter lands; it should run rokc's front
-// end with the lint rules (spec 901.2 `rok lint`).
-fn lint(_args: &[String]) -> Result<i32, String> {
-    Err("`rok lint` is not supported yet".into())
 }
 
 /// Positional arguments of a rokc command line (up to `--`).
@@ -360,16 +362,21 @@ const fn options(g: &Global) -> Options {
 fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i32, String> {
     let pos = positionals(post);
     let path = match cmd {
-        "build" | "check" | "run" | "clean" | "emit" => pos.first().copied().filter(|p| *p != "-"),
+        "build" | "check" | "run" | "clean" | "emit" | "lint" | "doc" => {
+            pos.first().copied().filter(|p| *p != "-")
+        }
         // `test [path] [filter]`: a lone non-path argument is the filter.
-        "test" => pos.first().copied().filter(|p| Path::new(p).exists()),
+        "test" | "bench" => pos.first().copied().filter(|p| Path::new(p).exists()),
         _ => None,
     };
     let t = target_for(g, path)?;
     let externs: Vec<Resolved> = match cmd {
         "fmt" | "clean" | "demangle" => Vec::new(),
         _ => match resolve::resolve(&home(), &t.ctx, &options(g)) {
-            Ok(r) => r.into_iter().filter(|p| cmd == "test" || !p.dev).collect(),
+            Ok(r) => r
+                .into_iter()
+                .filter(|p| matches!(cmd, "test" | "bench") || !p.dev)
+                .collect(),
             // The language server still starts (without dependencies).
             Err(e) if cmd == "lsp" => {
                 eprintln!("rok: warning: {e}");
@@ -384,6 +391,12 @@ fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i3
     for p in &externs {
         c.arg("--extern")
             .arg(format!("{}={}", p.name, p.root.display()));
+    }
+    // `[lints]` go first: the command line's own `-A/-W/-D` win.
+    if cmd == "lint" {
+        for (name, level) in &t.ctx.manifest.lints {
+            c.arg(level.flag()).arg(name);
+        }
     }
     c.args(post);
     if let Ok(me) = std::env::current_exe() {

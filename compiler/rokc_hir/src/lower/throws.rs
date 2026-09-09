@@ -17,6 +17,7 @@ use super::*;
 
 use super::desugar::{optional_parts, sum_none};
 
+#[derive(Clone)]
 pub(super) enum ErrFrame {
     Catch(CatchFrame),
     Finally {
@@ -28,6 +29,7 @@ pub(super) enum ErrFrame {
     },
 }
 
+#[derive(Clone)]
 pub(super) struct CatchFrame {
     /// The catch body runs in a block with this label; a raise breaks
     /// out of it.
@@ -1510,7 +1512,7 @@ fn bind_name(ctx: &mut LowerCtx<'_>, name: &str, local: LocalId) {
     }
 }
 
-fn path_expr(name: &str, span: rokc_diagnostic::Span) -> Expr {
+pub(super) fn path_expr(name: &str, span: rokc_diagnostic::Span) -> Expr {
     Expr {
         kind: ExprKind::Path(AstPath {
             segments: vec![rokc_ast::PathSegment {

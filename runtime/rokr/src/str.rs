@@ -37,7 +37,7 @@ impl RokStr {
 
 /// A fresh GC string of `len` bytes (zeroed, NUL-terminated); returns
 /// the writable byte pointer.
-fn alloc_str(len: usize) -> *mut u8 {
+pub fn alloc_str(len: usize) -> *mut u8 {
     let Some(size) = len.checked_add(HEADER_SIZE + 1) else {
         rokr_common::fatal(b"rok runtime: string too long");
     };
@@ -245,95 +245,6 @@ pub extern "C" fn rok_str_char_count(s: RokStr) -> usize {
     s.bytes().iter().filter(|&&b| (b & 0xC0) != 0x80).count()
 }
 
-/// f-string spec (refs-lang 1.7.3) applied to an already formatted
-/// value `s`: `flags` bit 0 = `+` (sign on non-negative numbers), bit 1 =
-/// `0` (zero padding after the sign). Then `s` is padded with `fill` to
-/// `width` chars; `align` is the ASCII `<` / `>` / `^` / `=` (0 = left,
-/// or `=` with the `0` flag).
-#[unsafe(no_mangle)]
-#[allow(clippy::many_single_char_names)] // byte-crunching locals
-pub extern "C" fn rok_fmt_spec(
-    s: RokStr,
-    width: usize,
-    fill: u32,
-    align: u32,
-    flags: u32,
-) -> RokStr {
-    let b = s.bytes();
-    let (sign, digits): (&[u8], &[u8]) = match b {
-        [c @ (b'-' | b'+'), rest @ ..] => (core::slice::from_ref(c), rest),
-        _ if flags & 1 != 0 => (b"+", b),
-        _ => (b"", b),
-    };
-    let (fill, align) = if flags & 2 != 0 && align == 0 {
-        (u32::from(b'0'), u32::from(b'='))
-    } else {
-        (fill, align)
-    };
-    let n = rok_str_char_count(RokStr {
-        ptr: digits.as_ptr(),
-        len: digits.len(),
-    }) + sign.len();
-    let pad = width.saturating_sub(n);
-    let mut buf = [0u8; 4];
-    let f = utf8(fill, &mut buf);
-    let (left, right) = match align {
-        0x3E | 0x3D => (pad, 0),          // '>' and '='
-        0x5E => (pad / 2, pad - pad / 2), // '^'
-        _ => (0, pad),
-    };
-    let fills = |k: usize| core::iter::repeat_n(f, k);
-    // `=` puts the padding between the sign and the digits.
-    let total = digits.len() + sign.len() + pad * f.len();
-    let p = alloc_str(total);
-    let mut at = 0;
-    let mut put = |bytes: &[u8]| {
-        // SAFETY: exactly `total` bytes are written.
-        unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), p.add(at), bytes.len()) };
-        at += bytes.len();
-    };
-    if align == 0x3D {
-        put(sign);
-        fills(left).for_each(&mut put);
-    } else {
-        fills(left).for_each(&mut put);
-        put(sign);
-    }
-    put(digits);
-    fills(right).for_each(&mut put);
-    RokStr { ptr: p, len: total }
-}
-
-/// `n` in base `radix` (2, 8 or 16); `flags` bit 0 = uppercase digits,
-/// bit 1 = `#` prefix (`0b` / `0o` / `0x`).
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_str_from_radix(n: u64, radix: u32, flags: u32) -> RokStr {
-    let digits: &[u8; 16] = if flags & 1 != 0 {
-        b"0123456789ABCDEF"
-    } else {
-        b"0123456789abcdef"
-    };
-    let radix = u64::from(radix.clamp(2, 16));
-    let mut buf = [0u8; 64];
-    let mut i = buf.len();
-    let mut v = n;
-    loop {
-        i -= 1;
-        buf[i] = digits[(v % radix) as usize];
-        v /= radix;
-        if v == 0 {
-            break;
-        }
-    }
-    let prefix: &[u8] = match (flags & 2 != 0, radix) {
-        (false, _) => b"",
-        (true, 2) => b"0b",
-        (true, 8) => b"0o",
-        (true, _) => b"0x",
-    };
-    build(&[prefix, &buf[i..]])
-}
-
 /// `Debug` of a string: double-quoted, with `\`, `"`, `\n`, `\r`, `\t`
 /// and other control bytes escaped.
 #[unsafe(no_mangle)]
@@ -461,7 +372,7 @@ pub extern "C" fn rok_str_byte(s: RokStr, i: usize) -> u8 {
 }
 
 /// `s` as UTF-8 text (it always is: `str` holds UTF-8).
-fn text(s: &RokStr) -> &str {
+pub fn text(s: &RokStr) -> &str {
     core::str::from_utf8(s.bytes()).unwrap_or("")
 }
 
@@ -580,16 +491,6 @@ pub mod tests {
             rok_str_replace(s(b"a-b-c"), s(b"-"), s(b"+")).bytes(),
             b"a+b+c"
         );
-        let sp = |v, w, f: char, a: char, fl| rok_fmt_spec(s(v), w, u32::from(f), u32::from(a), fl);
-        assert_eq!(sp(b"7", 3, '0', '>', 0).bytes(), b"007");
-        assert_eq!(sp(b"-7", 4, ' ', '\0', 2).bytes(), b"-007");
-        assert_eq!(sp(b"7", 4, '*', '^', 1).bytes(), b"*+7*");
-        assert_eq!(
-            sp("한".as_bytes(), 3, '.', '<', 0).bytes(),
-            "한..".as_bytes()
-        );
-        assert_eq!(rok_str_from_radix(255, 16, 3).bytes(), b"0xFF");
-        assert_eq!(rok_str_from_radix(5, 2, 0).bytes(), b"101");
         assert_eq!(rok_str_debug(s(b"a\"\n")).bytes(), b"\"a\\\"\\n\"");
         assert_eq!(rok_str_from_i64(-120).bytes(), b"-120");
         assert_eq!(rok_str_from_u64(u64::MAX).bytes(), b"18446744073709551615");

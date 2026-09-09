@@ -1,0 +1,33 @@
+// expect-exit: 0
+// expect-stdout:
+// 1
+// 1
+// 2
+// 3
+// 4
+
+// Spec 4.12.5 / 4.6: an `async ||` closure is a closure — it captures by
+// value when it is created (4.6.1), and `[ref x]` shares the binding
+// (4.6.2). The snapshot doesn't move at `await`: every call's future
+// sees the value captured when the closure was made.
+async fn main() {
+    let n = 1;
+    let f = async || {
+        await task::sleep(Duration::ms(1));
+        n
+    };
+    n = 2;
+    println(f"{await f()}");
+    n = 5;
+    println(f"{await f()}");
+
+    let m = 1;
+    let g = async [ref m] || {
+        await task::sleep(Duration::ms(1));
+        m = m + 1;
+        m
+    };
+    println(f"{await g()}");
+    println(f"{await g()}");
+    println(f"{m + 1}");
+}

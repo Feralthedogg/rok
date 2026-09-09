@@ -1,0 +1,26 @@
+// expect-exit: 0
+// expect-stdout:
+// int
+// str
+// other
+// caught
+
+// Spec 3.11.4: `_: T` is a type-check pattern without a binding.
+struct E1 {}
+struct E2 {}
+
+fn kind(v: i32 | str | bool) -> str {
+    return match v {
+        _: i32 => "int",
+        _: str => "str",
+        _ => "other",
+    };
+}
+
+fn fail() throws (E1 | E2) -> i32 { throw E2 {}; }
+
+println(kind(1));
+println(kind("a"));
+println(kind(true));
+let r = try fail() catch _: E1 { 1 } catch _: E2 { 2 };
+if r == 2 { println("caught"); }

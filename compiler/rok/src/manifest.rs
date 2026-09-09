@@ -58,6 +58,25 @@ pub struct Dep {
     pub source: Source,
 }
 
+/// A `[lints]` level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LintLevel {
+    Allow,
+    Warn,
+    Deny,
+}
+
+impl LintLevel {
+    /// The `rokc lint` flag that sets it.
+    pub const fn flag(self) -> &'static str {
+        match self {
+            Self::Allow => "-A",
+            Self::Warn => "-W",
+            Self::Deny => "-D",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Manifest {
     pub name: Option<String>,
@@ -65,6 +84,9 @@ pub struct Manifest {
     pub toolchain: Option<String>,
     pub deps: Vec<Dep>,
     pub dev_deps: Vec<Dep>,
+    /// `[lints]`: `name = "allow" | "warn" | "deny"`, in file order
+    /// (lint names are checked by `rokc lint`).
+    pub lints: Vec<(String, LintLevel)>,
 }
 
 /// A dependency name is a top-level name in `use`: an identifier.
@@ -157,13 +179,32 @@ pub fn parse(text: &str, file: &str) -> Result<Manifest, String> {
             }
             "deps" => m.deps = deps(text, file, item)?,
             "dev-deps" => m.dev_deps = deps(text, file, item)?,
+            "lints" => {
+                let t = table(item, "[lints]").map_err(|e| err(item, e))?;
+                for (k, v) in t.iter() {
+                    let level = match v.value.as_str() {
+                        Some("allow") => LintLevel::Allow,
+                        Some("warn") => LintLevel::Warn,
+                        Some("deny") => LintLevel::Deny,
+                        _ => {
+                            return Err(err(
+                                v,
+                                format!("lint `{}` takes \"allow\", \"warn\" or \"deny\"", k.name),
+                            ));
+                        }
+                    };
+                    m.lints.push((k.name.clone(), level));
+                }
+            }
             "registry" => return Err(key_err(&root, "registry", not_yet("registries"))),
             "native" => return Err(key_err(&root, "native", not_yet("`native`"))),
             other => {
                 return Err(key_err(
                     &root,
                     other,
-                    format!("unknown key `{other}` (expected [package], [deps], [dev-deps])"),
+                    format!(
+                        "unknown key `{other}` (expected [package], [deps], [dev-deps], [lints])"
+                    ),
                 ));
             }
         }
@@ -295,6 +336,14 @@ mod tests {
             }
         );
         assert_eq!(m.dev_deps[0].name, "c");
+        let m = parse("[lints]\nunused = \"allow\"\nall = \"deny\"\n", "Rok.toml").unwrap();
+        assert_eq!(
+            m.lints,
+            [
+                ("unused".to_owned(), LintLevel::Allow),
+                ("all".to_owned(), LintLevel::Deny)
+            ]
+        );
         for (src, want) in [
             (
                 "[deps]\na = \"1.0\"",
@@ -319,6 +368,7 @@ mod tests {
             ),
             ("[package]\nedition = \"x\"", "unknown key `edition`"),
             ("[deps]\na = {}", "needs `path` or `git`"),
+            ("[lints]\nunused = \"off\"", "takes \"allow\""),
         ] {
             let e = parse(src, "Rok.toml").unwrap_err();
             assert!(e.contains(want), "{src:?}: {e}");

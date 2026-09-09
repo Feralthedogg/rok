@@ -7,6 +7,8 @@
 //! bootstrap: function definitions, blocks, locals, and primitive
 //! literals carrying an explicit type suffix.
 
+#[path = "../../../runtime/rokr/src/fmt_spec.rs"]
+mod fmt_spec;
 mod lower;
 mod print;
 mod ty;
@@ -16,6 +18,15 @@ pub mod walk;
 pub use lower::FN_BLOCK_LABEL;
 pub use lower::{lower, lower_full, lower_with_uses};
 pub use print::print_hir;
+
+/// Program attribute set by the driver: the dependency packages' names.
+///
+/// Its args are words, the top-level module names that are dependency
+/// packages (`--extern`). Visibility stops
+/// at a package (`pub(pkg)`, `pub(sub)`), `pkg::` in a dependency is the
+/// dependency, and a path starting with a dependency's name reaches it
+/// from any module.
+pub const PACKAGES_ATTR: &str = "#packages";
 
 /// Marker attribute (string argument) with the module of an `impl`
 /// block, set by the driver.
@@ -55,6 +66,8 @@ pub struct HirModule {
     /// `#[export_name("sym")]` functions (spec 905 / 509.10): linker
     /// symbol, and a root of unreachable-function pruning.
     pub exports: Vec<(FunctionId, String)>,
+    /// C variadic `extern` declarations (spec 8.6.10).
+    pub c_variadic: Vec<FunctionId>,
 }
 
 #[derive(Clone, Debug)]

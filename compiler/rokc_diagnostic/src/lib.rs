@@ -149,6 +149,8 @@ pub enum ErrorKind {
     Unsupported,
     Internal,
     Other,
+    /// A `rokc lint` finding (its lint name is in a note).
+    Lint,
 }
 
 impl fmt::Display for ErrorKind {
@@ -168,6 +170,7 @@ impl fmt::Display for ErrorKind {
             Self::Unsupported => "unsupported",
             Self::Internal => "internal",
             Self::Other => "other",
+            Self::Lint => "lint",
         };
         f.write_str(s)
     }
@@ -348,6 +351,7 @@ impl ErrorKind {
             Self::Unsupported => "E500",
             Self::Internal => "E501",
             Self::Other => "E502",
+            Self::Lint => "E503",
         }
     }
 }

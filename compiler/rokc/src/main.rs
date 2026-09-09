@@ -5,6 +5,7 @@
 //! 2 usage error, 101 rokc internal error. `run` exits with the
 //! program's own code.
 
+mod bench_runner;
 mod package;
 mod test_runner;
 
@@ -15,6 +16,7 @@ use std::time::Instant;
 
 use package::Package;
 use rokc_interface::{BuildOptions, CompileResult, EmitKind, Session, TempDir, report};
+use rokc_tools::lint::Level;
 
 const USAGE: &str = "\
 usage: rokc [global options] <command> [options] [args]
@@ -27,10 +29,16 @@ commands:
   run [path] [-- args]   build, then run; args after `--` are forwarded
   test [path] [filter]   build and run the `#[test]` functions (filter: regex
                          with ^ $ . * + ?, or a substring)
+  bench [path] [filter]  build (-O2 unless -O given) and time the `#[bench]`
+                         functions; prints ns/iter (+/- deviation)
   check [path | -]       diagnose only, no native build (`-`: source on stdin)
   repl                   interactive session (:type <expr>, :reset, :quit)
   lsp                    language server on stdio (`rok lsp` / `rokls` run it)
   fmt [path]             format .rok files in place (file or directory)
+  lint [path]            compile diagnostics plus lint checks (no native
+                         build); exit 1 if a `deny` lint fires
+  doc [path]             HTML API docs of the package (and its --extern
+                         dependencies) in target/doc/
   new [--lib|--bin] <name>  create a package directory
   init [--lib|--bin] [dir]  make an existing directory a package
   clean [path]           remove the package's target/
@@ -67,9 +75,15 @@ build options:
                                `lib.rok`), importable as `use name::..`
                                (repeatable; `rok` passes these)
   --target-dir <dir>           instead of the package's target/
+  -g, --debug                  DWARF debug info (macOS: a .dSYM next to the
+                               executable)
   --keep                       keep the temporary build directory
 
 test options:   --threads=N, --show-output
+bench options:  --iters=N (calls per sample; default: calibrated to ~10ms),
+                --samples=N (timed samples, default 10)
+lint options:   -A|-W|-D <lint|group> (allow / warn / deny; repeatable, later
+                wins; `#[allow(..)]` etc. in the source override), --list
 fmt options:    --check (exit 1 if a file would change), --diff
 
 environment:
@@ -103,6 +117,12 @@ struct Args {
     diff: bool,
     threads: Option<usize>,
     show_output: bool,
+    lint_levels: Vec<(Level, String)>,
+    list: bool,
+    iters: Option<u64>,
+    samples: Option<u64>,
+    /// An `-O` level or `--release` was given.
+    opt_set: bool,
 }
 
 fn usage_error(msg: &str) -> ! {
@@ -175,14 +195,43 @@ fn parse_args(raw: Vec<String>) -> Args {
                     );
                 }
             }
-            "--release" => "2".clone_into(&mut a.opts.opt_level),
-            "-O0" | "-O1" | "-O2" | "-O3" | "-Os" => name[2..].clone_into(&mut a.opts.opt_level),
+            "--release" => {
+                "2".clone_into(&mut a.opts.opt_level);
+                a.opt_set = true;
+            }
+            "-O0" | "-O1" | "-O2" | "-O3" | "-Os" => {
+                name[2..].clone_into(&mut a.opts.opt_level);
+                a.opt_set = true;
+            }
             "--keep" => a.opts.keep_temps = true,
+            "-g" | "--debug" => a.opts.debug = true,
             "--lib" => a.lib = true,
             "--bin" => a.lib = false,
             "--check" => a.check = true,
             "--diff" => a.diff = true,
             "--show-output" => a.show_output = true,
+            "--list" => a.list = true,
+            "-A" | "-W" | "-D" | "--allow" | "--warn" | "--deny" => {
+                let lvl = match name.as_str() {
+                    "-A" | "--allow" => Level::Allow,
+                    "-W" | "--warn" => Level::Warn,
+                    _ => Level::Deny,
+                };
+                a.lint_levels.push((lvl, value(&name, inline, &mut it)));
+            }
+            "--iters" | "--samples" => {
+                let n = value(&name, inline, &mut it);
+                let n = n
+                    .parse()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .unwrap_or_else(|| usage_error(&format!("bad {name} `{n}`")));
+                if name == "--iters" {
+                    a.iters = Some(n);
+                } else {
+                    a.samples = Some(n);
+                }
+            }
             "--threads" => {
                 let n = value(&name, inline, &mut it);
                 a.threads = Some(
@@ -277,7 +326,7 @@ fn main() {
             } else {
                 discover_arg(&a)
             };
-            let (result, _) = compile(&a, &pkg, false);
+            let (result, _) = compile(&a, &pkg, Mode::Build);
             // Codegen too: it rejects constructs the backend cannot lower.
             fail_on(result.emit(EmitKind::Mlir, &a.opts));
         }
@@ -296,6 +345,9 @@ fn main() {
         }
         "run" => cmd_run(&with_defaults(a)),
         "test" => cmd_test(&with_defaults(a)),
+        "bench" => cmd_bench(with_defaults(a)),
+        "lint" => cmd_lint(&with_defaults(a)),
+        "doc" => cmd_doc(&with_defaults(a)),
         "fmt" => cmd_fmt(&a),
         "new" => {
             let [name] = a.positional.as_slice() else {
@@ -374,12 +426,29 @@ fn create_dir(dir: &Path) {
     }
 }
 
+/// What `compile` builds for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Build,
+    Test,
+    Bench,
+    /// Front end only, ASTs kept; warnings left to the caller.
+    Lint,
+    /// Front end only, ASTs kept.
+    Doc,
+}
+
 /// Front end for `pkg`; exits 1 on errors. Prints the 901.8 progress
 /// line unless `-q`.
-fn compile(a: &Args, pkg: &Package, test: bool) -> (CompileResult, Instant) {
+fn compile(a: &Args, pkg: &Package, mode: Mode) -> (CompileResult, Instant) {
     let started = Instant::now();
     if !a.quiet {
-        eprintln!("   Compiling {} ({})", pkg.name, pkg.dir.display());
+        let verb = match mode {
+            Mode::Lint => "     Linting",
+            Mode::Doc => " Documenting",
+            _ => "   Compiling",
+        };
+        eprintln!("{verb} {} ({})", pkg.name, pkg.dir.display());
     }
     let mut session = Session::new();
     for b in &a.bootstrap {
@@ -392,7 +461,9 @@ fn compile(a: &Args, pkg: &Package, test: bool) -> (CompileResult, Instant) {
         session.add_extern(n.clone(), p.clone());
     }
     session.set_anonymous(pkg.anonymous);
-    session.set_test(test);
+    session.set_test(mode == Mode::Test);
+    session.set_bench(mode == Mode::Bench);
+    session.set_keep_ast(matches!(mode, Mode::Lint | Mode::Doc));
     let result = if pkg.root == Path::new(package::STDIN) {
         let mut src = String::new();
         if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut src) {
@@ -402,7 +473,9 @@ fn compile(a: &Args, pkg: &Package, test: bool) -> (CompileResult, Instant) {
     } else {
         session.compile_file(&pkg.root)
     };
-    result.warnings.iter().for_each(report);
+    if mode != Mode::Lint || result.has_errors() {
+        result.warnings.iter().for_each(report);
+    }
     if result.has_errors() {
         result.report_errors();
         process::exit(1);
@@ -447,7 +520,7 @@ fn out_dir(a: &Args, pkg: &Package) -> PathBuf {
 /// `target/<profile>/build/<name>.<ext>` (`--emit`).
 fn cmd_build(a: &Args) {
     let pkg = discover_arg(a);
-    let (result, started) = compile(a, &pkg, false);
+    let (result, started) = compile(a, &pkg, Mode::Build);
     let target = out_dir(a, &pkg);
     if !a.emit.is_empty() {
         if a.output.is_some() && a.emit.len() > 1 {
@@ -501,7 +574,7 @@ fn cmd_run(a: &Args) {
             pkg.dir.display()
         ));
     }
-    let (result, started) = compile(a, &pkg, false);
+    let (result, started) = compile(a, &pkg, Mode::Build);
     // An anonymous file builds in a scratch directory (no `target/` next
     // to a loose script); a package builds into its `target/`.
     let tmp = fail_on(TempDir::new(a.opts.keep_temps));
@@ -533,18 +606,23 @@ fn cmd_run(a: &Args) {
     process::exit(status.code().unwrap_or(1));
 }
 
-/// `rokc test [path] [filter]`. A lone argument that is not an existing
-/// path is the filter.
-fn cmd_test(a: &Args) {
-    let (path, filter) = match a.positional.as_slice() {
+/// `[path] [filter]` of `test` / `bench`: a lone argument that is not an
+/// existing path is the filter.
+fn path_and_filter(a: &Args) -> (&str, Option<&str>) {
+    match a.positional.as_slice() {
         [] => (".", None),
         [p] if Path::new(p).exists() => (p.as_str(), None),
         [f] => (".", Some(f.as_str())),
         [p, f] => (p.as_str(), Some(f.as_str())),
-        _ => usage_error("usage: rokc test [path] [filter]"),
-    };
+        _ => usage_error(&format!("usage: rokc {} [path] [filter]", a.cmd)),
+    }
+}
+
+/// `rokc test [path] [filter]`.
+fn cmd_test(a: &Args) {
+    let (path, filter) = path_and_filter(a);
     let pkg = package::discover(Path::new(path)).unwrap_or_else(|e| fail(&e));
-    let (result, started) = compile(a, &pkg, true);
+    let (result, started) = compile(a, &pkg, Mode::Test);
     let tmp = fail_on(TempDir::new(a.opts.keep_temps));
     let exe = tmp.path().join(format!("{}-test", pkg.name));
     let t = Instant::now();
@@ -566,6 +644,77 @@ fn cmd_test(a: &Args) {
     );
     drop(tmp);
     process::exit(i32::from(!ok));
+}
+
+/// `rokc bench [path] [filter]`: an optimized build (`-O2` unless an
+/// `-O` level was given) of the `#[bench]` harness, then
+/// `bench_runner`.
+fn cmd_bench(mut a: Args) {
+    if !a.opt_set {
+        "2".clone_into(&mut a.opts.opt_level);
+    }
+    let (path, filter) = path_and_filter(&a);
+    let pkg = package::discover(Path::new(path)).unwrap_or_else(|e| fail(&e));
+    let (result, started) = compile(&a, &pkg, Mode::Bench);
+    let tmp = fail_on(TempDir::new(a.opts.keep_temps));
+    let exe = tmp.path().join(format!("{}-bench", pkg.name));
+    let t = Instant::now();
+    fail_on(result.link(&a.opts, &exe));
+    stage(&a, "codegen + link", t);
+    finished(&a, started);
+    let ok = bench_runner::run(
+        &exe,
+        &result.tests,
+        &bench_runner::Options {
+            filter,
+            iters: a.iters,
+            samples: a.samples.unwrap_or(10),
+        },
+    );
+    drop(tmp);
+    process::exit(i32::from(!ok));
+}
+
+/// `rokc lint [path]`: the front end (with ASTs), then the lints; exit 1
+/// when one at `deny` fired.
+fn cmd_lint(a: &Args) {
+    if a.list {
+        print!("{}", rokc_tools::lint::list());
+        return;
+    }
+    let pkg = discover_arg(a);
+    let (result, started) = compile(a, &pkg, Mode::Lint);
+    let diags = rokc_tools::lint::run(&result, &a.lint_levels);
+    diags.iter().for_each(report);
+    let errors = diags.iter().filter(|d| d.is_error()).count();
+    let warnings = diags.len() - errors;
+    if !a.quiet && !a.json {
+        eprintln!(
+            "     Checked {}: {errors} error{}, {warnings} warning{}",
+            pkg.name,
+            if errors == 1 { "" } else { "s" },
+            if warnings == 1 { "" } else { "s" },
+        );
+    }
+    finished(a, started);
+    process::exit(i32::from(errors > 0));
+}
+
+/// `rokc doc [path]`: HTML into `target/doc/` (see `rokc_tools::doc`).
+fn cmd_doc(a: &Args) {
+    let pkg = discover_arg(a);
+    let (result, started) = compile(a, &pkg, Mode::Doc);
+    let out = a
+        .target_dir
+        .clone()
+        .unwrap_or_else(|| pkg.target_dir())
+        .join("doc");
+    let index = rokc_tools::doc::generate(&result, &pkg.name, &out)
+        .unwrap_or_else(|e| fail(&format!("cannot write {}: {e}", out.display())));
+    finished(a, started);
+    if !a.quiet {
+        eprintln!("   Generated {}", index.display());
+    }
 }
 
 /// `rokc fmt [path]`: a file, or every `.rok` under a directory (skipping

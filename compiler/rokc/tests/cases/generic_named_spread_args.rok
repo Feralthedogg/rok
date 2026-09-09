@@ -1,0 +1,45 @@
+// expect-exit: 0
+// expect-stdout:
+// 7 x
+// 3 y
+// 10 z
+// 2 5
+// 9
+// evaluated once
+// 12
+// 3 4
+// 1 2 3
+
+// Spec 4.1: named and spread arguments work for generic functions too —
+// named ones go to their parameter, a skipped parameter takes its
+// default, a tuple spread fills consecutive parameters (evaluated once).
+fn show<T: Display, U: Display>(a: T, b: U, sep: str = " ") {
+    println(f"{a}{sep}{b}");
+}
+fn pick<T>(first: T, second: T, take_second: bool = false) -> T {
+    return if take_second { second } else { first };
+}
+struct Pair<T> { a: T; b: T; }
+impl<T: Display> Pair<T> {
+    fn print(self, gap: str = " ") { println(f"{self.a}{gap}{self.b}"); }
+}
+fn mid<T: Display>(a: T, b: i32 = 2, c: T) { println(f"{a} {b} {c}"); }
+fn sum3<T: Add<Output = T>>(a: T, b: T, c: T) -> T { return a + b + c; }
+
+fn make() -> (i32, i32) {
+    println("evaluated once");
+    return (5, 6);
+}
+
+fn main() -> i32 {
+    show(a: 7, b: "x");
+    show(b: "y", a: 3);
+    show(10, sep: " ", b: "z");
+    Pair { a: 2, b: 5 }.print(gap: " ");
+    println(f"{pick(first: 4, second: 9, take_second: true)}");
+    println(f"{sum3(1, ..make())}");
+    let t = (3, 4);
+    show(..t);
+    mid(a: 1, c: 3);
+    return 0;
+}

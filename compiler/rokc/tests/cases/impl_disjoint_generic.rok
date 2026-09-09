@@ -1,0 +1,25 @@
+// expect-exit: 0
+// expect-stdout:
+// 1 2
+// 3 4
+
+// Generic impls of one trait whose targets don't unify, or whose bounds
+// no known type meets together, are not an overlap (spec 2.9.3).
+trait A {}
+trait B {}
+trait Show { fn show(self) -> i32; }
+impl A for i32 {}
+impl B for bool {}
+
+struct Box<T> { v: T; }
+struct Cell<T> { v: T; }
+impl<T: A> Show for Box<T> { fn show(self) -> i32 { return 1; } }
+impl<U: B> Show for Box<U> { fn show(self) -> i32 { return 2; } }
+impl<T> Show for Cell<T> { fn show(self) -> i32 { return 3; } }
+impl<T> Show for (T, T, T) { fn show(self) -> i32 { return 4; } }
+
+fn main() -> i32 {
+    println(f"{Box { v: 1 }.show()} {Box { v: true }.show()}");
+    println(f"{Cell { v: 0 }.show()} {(1, 2, 3).show()}");
+    return 0;
+}

@@ -23,10 +23,13 @@ use rokr_common::object_header::{FLAG_PINNED, HEADER_ALIGN, ObjectHeader};
 use rokr_common::{fatal, tls, write_stderr};
 
 mod deque;
+mod fmt;
+mod fmt_spec;
 mod math;
 mod net;
 mod os;
 mod par;
+mod stack;
 mod str;
 mod thread;
 pub use str::RokStr;
@@ -203,7 +206,7 @@ pub extern "C" fn rok_gc_stats_collections() -> u64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_runtime_init() {
-    rok_thread_init();
+    init_thread(true);
 }
 
 /// The main thread is done with rok code: from here it counts as
@@ -224,14 +227,20 @@ pub extern "C" fn rok_runtime_yield() {
 /// mutator (its shadow stack becomes a GC root set).
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_thread_init() {
+    init_thread(false);
+}
+
+fn init_thread(main: bool) {
     tls::thread_init();
     rokr_gc::world::attach_current();
+    stack::thread_start(main);
 }
 
 /// Unregister this thread; it must not touch GC objects afterwards.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_thread_shutdown() {
     rokr_gc::world::detach();
+    stack::thread_exit();
 }
 
 // ---------------------------------------------------------------------
@@ -742,5 +751,6 @@ mod tests {
         let h = unsafe { &*rok_gc_alloc_slow(20, 8, 7).cast::<ObjectHeader>() };
         assert_eq!((h.type_id, h.gc_word), (7, 24));
         str::tests::string_ops();
+        fmt::tests::fmt_ops();
     }
 }

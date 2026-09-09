@@ -2,7 +2,7 @@
 // expect-stdout:
 // hello rok! n=42 {braces} sum=43
 // [   42] [42   ] [  42  ] [00042] [+42] [***rok***] [-0007]
-// 3.14 3.000 ff 0xFF 00000101 0o17 "rok\n" true 한 'x' 2.5
+// 3.14 3 ff 0xFF 00000101 0o17 "rok\n" true 한 'x' 2.5
 // p = (1, 2) "nested"|
 
 // f-strings (refs-lang 1.7.3, stdlib 2.10): holes call `display()` (or

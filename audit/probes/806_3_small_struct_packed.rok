@@ -1,6 +1,5 @@
 // spec: 008.06-calling-convention §8.6.3
 // probe: positive
-// xfail: struct {i32, i32} return not coerced to the C ABI (aarch64 packs it in x0; rok reads w0/w1)
 // expect-exit: 0
 // expect-stdout:
 // 3 1

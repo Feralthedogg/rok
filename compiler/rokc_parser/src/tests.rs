@@ -629,10 +629,8 @@ fn unsafe_raw_strings_and_unsupported_forms() {
     };
     assert!(matches!(&init.kind, ExprKind::Literal(Literal::RawStr(s)) if s == "a\"b"));
     assert_rejected("async unsafe fn f() { }", "expected `fn`");
-    assert_rejected(
-        r#"fn f() { let s = f"x = {x :e}"; }"#,
-        "unsupported type `e`",
-    );
+    // Specs are read by HIR (by the hole's type); `e` and `${..}` parse.
+    assert!(diags_of(r#"fn f() { let s = f"x = {x :e} {y:.${p}}"; }"#).is_empty());
     assert!(diags_of("fn f() { using x = g(), y = h(x) { x } }").is_empty());
 }
 

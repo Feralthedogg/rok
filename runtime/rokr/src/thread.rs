@@ -41,6 +41,7 @@ extern "C" fn thread_main(arg: *mut libc::c_void) -> *mut libc::c_void {
     // SAFETY: allocated with `malloc` in `rok_thread_spawn`.
     unsafe { libc::free(arg) };
     tls::thread_init();
+    crate::stack::thread_start(false);
     // SAFETY: registered for this thread by `rok_thread_spawn`.
     unsafe { world::attach(s.me) };
     if let Some(code) = s.f.code {
@@ -48,6 +49,7 @@ extern "C" fn thread_main(arg: *mut libc::c_void) -> *mut libc::c_void {
         unsafe { code(s.f.env) };
     }
     world::detach();
+    crate::stack::thread_exit();
     ptr::null_mut()
 }
 

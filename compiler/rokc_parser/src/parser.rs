@@ -1854,7 +1854,11 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::LParen, "`(`")?;
         let untyped_mark = self.untyped_throws.len();
         let mut params = Vec::new();
+        let mut attrs = attrs;
         while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
+            if self.eat_c_variadic(&mut attrs) {
+                break;
+            }
             params.push(self.parse_param()?);
             if !self.eat(&TokenKind::Comma) {
                 break;
@@ -1912,6 +1916,31 @@ impl<'a> Parser<'a> {
             where_clause,
             span: start,
         })
+    }
+
+    /// `fn printf(fmt: str, ...)`: a C variadic marker (spec 8.6.10),
+    /// recorded as an attribute; only last, and only in an `extern`
+    /// block (checked by HIR).
+    fn eat_c_variadic(&mut self, attrs: &mut Vec<Attribute>) -> bool {
+        if !(matches!(self.peek(), TokenKind::DotDot)
+            && matches!(self.peek_next(), Some(TokenKind::Dot)))
+        {
+            return false;
+        }
+        let span = self.peek_span();
+        self.bump();
+        self.bump();
+        attrs.push(Attribute {
+            path: vec![rokc_ast::C_VARIADIC_ATTR.to_owned()],
+            body: rokc_ast::AttrBody::Empty,
+            inner: false,
+            span,
+        });
+        self.eat(&TokenKind::Comma);
+        if !matches!(self.peek(), TokenKind::RParen) {
+            self.error(span, "`...` must be the last parameter (spec 8.6.10)");
+        }
+        true
     }
 
     /// Spec 4.2.5: `xs: ...T` is a stack array of the call's trailing
@@ -3383,7 +3412,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::FStrLit(s) => {
                 self.bump();
-                self.desugar_fstring(&s, start)
+                self.parse_fstring(&s, start)
             }
             TokenKind::Unsafe => {
                 // Spec 4.15.2 `unsafe { ... }`.
@@ -3895,42 +3924,7 @@ impl<'a> Parser<'a> {
                     Some(TokenKind::Ref)
                 ) =>
             {
-                self.bump(); // `[`
-                let mut captures: Vec<rokc_ast::CaptureSpec> = Vec::new();
-                while !matches!(self.peek(), TokenKind::RBracket | TokenKind::Eof) {
-                    if self.eat(&TokenKind::Ref) {
-                        let name = if let TokenKind::Ident(n) = self.peek().clone() {
-                            self.bump();
-                            n
-                        } else {
-                            let s = self.peek_span();
-                            self.error(s, "capture name expected after `ref`");
-                            return None;
-                        };
-                        captures.push(rokc_ast::CaptureSpec::Ref(name));
-                    } else if let TokenKind::Ident(n) = self.peek().clone() {
-                        self.bump();
-                        captures.push(rokc_ast::CaptureSpec::Value(n));
-                    } else {
-                        let s = self.peek_span();
-                        self.error(s, "capture-list item expected");
-                        return None;
-                    }
-                    if !self.eat(&TokenKind::Comma) {
-                        break;
-                    }
-                }
-                self.expect(&TokenKind::RBracket, "`]`")?;
-                if !matches!(self.peek(), TokenKind::Pipe | TokenKind::PipePipe) {
-                    let s = self.peek_span();
-                    self.error(s, "`|` or `||` expected after capture list");
-                    return None;
-                }
-                let mut closure_kind = self.parse_closure_expr()?;
-                if let ExprKind::Closure { captures: c, .. } = &mut closure_kind {
-                    *c = captures;
-                }
-                closure_kind
+                self.parse_capture_closure()?
             }
             TokenKind::LBracket => {
                 self.bump();
@@ -3963,7 +3957,7 @@ impl<'a> Parser<'a> {
                             ExprKind::AsyncBlock(b)
                         }
                     }
-                    TokenKind::Pipe | TokenKind::PipePipe => {
+                    TokenKind::Pipe | TokenKind::PipePipe | TokenKind::LBracket => {
                         self.coro_closure(true, is_generator)?
                     }
                     _ => {
@@ -3988,7 +3982,11 @@ impl<'a> Parser<'a> {
                 if matches!(
                     self.peek_next(),
                     Some(TokenKind::Pipe | TokenKind::PipePipe)
-                ) =>
+                ) || (matches!(self.peek_next(), Some(TokenKind::LBracket))
+                    && matches!(
+                        self.tokens.get(self.pos + 2).map(|t| &t.kind),
+                        Some(TokenKind::Ref)
+                    )) =>
             {
                 self.bump();
                 self.coro_closure(false, true)?
@@ -4414,9 +4412,53 @@ impl<'a> Parser<'a> {
     /// Parse `|args| body` or `|args| -> R body` (or `|| body`).
     /// Captures aren't supported yet — the body must reference only its
     /// parameters or globally visible items.
+    /// `[ref x, y] |..| body` — a closure with a capture list (spec 4.6.2).
+    fn parse_capture_closure(&mut self) -> Option<ExprKind> {
+        self.bump(); // `[`
+        let mut captures: Vec<rokc_ast::CaptureSpec> = Vec::new();
+        while !matches!(self.peek(), TokenKind::RBracket | TokenKind::Eof) {
+            if self.eat(&TokenKind::Ref) {
+                let name = if let TokenKind::Ident(n) = self.peek().clone() {
+                    self.bump();
+                    n
+                } else {
+                    let s = self.peek_span();
+                    self.error(s, "capture name expected after `ref`");
+                    return None;
+                };
+                captures.push(rokc_ast::CaptureSpec::Ref(name));
+            } else if let TokenKind::Ident(n) = self.peek().clone() {
+                self.bump();
+                captures.push(rokc_ast::CaptureSpec::Value(n));
+            } else {
+                let s = self.peek_span();
+                self.error(s, "capture-list item expected");
+                return None;
+            }
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RBracket, "`]`")?;
+        if !matches!(self.peek(), TokenKind::Pipe | TokenKind::PipePipe) {
+            let s = self.peek_span();
+            self.error(s, "`|` or `||` expected after capture list");
+            return None;
+        }
+        let mut closure_kind = self.parse_closure_expr()?;
+        if let ExprKind::Closure { captures: c, .. } = &mut closure_kind {
+            *c = captures;
+        }
+        Some(closure_kind)
+    }
+
     /// `async ||` / `yield ||` / `async yield ||` closure.
     fn coro_closure(&mut self, is_async: bool, is_generator: bool) -> Option<ExprKind> {
-        let mut k = self.parse_closure_expr()?;
+        let mut k = if matches!(self.peek(), TokenKind::LBracket) {
+            self.parse_capture_closure()?
+        } else {
+            self.parse_closure_expr()?
+        };
         if let ExprKind::Closure {
             is_async: a,
             is_generator: g,
@@ -4868,7 +4910,13 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident(name) if name == "_" => {
                 self.bump();
-                PatternKind::Wildcard
+                // `_: T` — type-check pattern without a binding (3.11.4).
+                if self.eat(&TokenKind::Colon) {
+                    let ty = self.parse_type()?;
+                    PatternKind::TypeCheck { binder: None, ty }
+                } else {
+                    PatternKind::Wildcard
+                }
             }
             TokenKind::LParen => {
                 self.bump();

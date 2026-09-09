@@ -1,0 +1,37 @@
+// expect-exit: 0
+// expect-stdout:
+// 1 20 3
+// 7 2
+// 5 9
+// 42
+// calls 1
+// 100
+
+// `xs[i].f = v` writes the field of the element in place (the element
+// is a value: read, update, store back). The index is evaluated once.
+struct Bx { v: i32; }
+struct Inner { a: i32; b: i32; }
+struct Outer { inner: Inner; arr: [i32; 2]; }
+struct Holder { items: List<Bx>; }
+
+let calls = 0;
+fn one(ref c: i32) -> usize { c += 1; return 1; }
+
+let boxes = [Bx { v: 1 }, Bx { v: 2 }, Bx { v: 3 }];
+boxes[one(ref calls)].v = 20;
+println(f"{boxes[0].v} {boxes[1].v} {boxes[2].v}");
+
+let os = [Outer { inner: Inner { a: 1, b: 2 }, arr: [5, 6] }];
+os[0].inner.a = 7;
+println(f"{os[0].inner.a} {os[0].inner.b}");
+os[0].arr[1] = 9;
+println(f"{os[0].arr[0]} {os[0].arr[1]}");
+
+let xs: List<Bx> = [Bx { v: 0 }];
+xs[0].v = 42;
+println(f"{xs[0].v}");
+println(f"calls {calls}");
+
+let h = Holder { items: [Bx { v: 0 }] };
+h.items[0].v = 100;
+println(f"{h.items[0].v}");

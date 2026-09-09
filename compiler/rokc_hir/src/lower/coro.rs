@@ -46,6 +46,10 @@ use crate::{
 /// Label of the block the driver wraps a `yield fn` / `async fn` body in
 /// (its params are then the function's own, assignable).
 pub const FN_BLOCK_LABEL: &str = "#coro_fn";
+/// The body block of an `async ||` / `yield ||` closure: its `[ref x]`
+/// captures (the closure's boxed cells) pass into the coroutine as the
+/// same cells, so every call's future shares them (spec 4.6.2).
+const CLOSURE_BLOCK_LABEL: &str = "#coro_closure";
 const BODY_LABEL: &str = "#coro";
 const CTX: &str = "#ctx";
 const CONTEXT: &str = "rok::core::future::Context";
@@ -467,6 +471,23 @@ pub(super) fn closure_body(body: &Expr, is_async: bool, is_generator: bool) -> E
             label: None,
         },
     };
+    // A labelled body (`'a: { .. }`) keeps its label on an inner block.
+    let block = if block.label.is_some() {
+        Block {
+            stmts: Vec::new(),
+            trailing: Some(Box::new(Expr {
+                kind: ExprKind::Block(block),
+                span: body.span,
+            })),
+            span: body.span,
+            label: Some(CLOSURE_BLOCK_LABEL.to_owned()),
+        }
+    } else {
+        Block {
+            label: Some(CLOSURE_BLOCK_LABEL.to_owned()),
+            ..block
+        }
+    };
     let kind = match (is_async, is_generator) {
         (true, true) => ExprKind::AsyncYieldBlock(block),
         (true, false) => ExprKind::AsyncBlock(block),
@@ -500,6 +521,7 @@ fn lower_coro_block<'a>(
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
     let from_fn = body.label.as_deref() == Some(FN_BLOCK_LABEL);
+    let from_closure = body.label.as_deref() == Some(CLOSURE_BLOCK_LABEL);
     let body_expr = Expr {
         kind: ExprKind::Block(Block {
             label: None,
@@ -529,6 +551,9 @@ fn lower_coro_block<'a>(
             .into_iter()
             .filter_map(|name| {
                 let local = ctx.lookup(&name)?;
+                if from_closure && ctx.boxed.contains(&local) {
+                    return Some((name, local, ctx.local_ty(local), true));
+                }
                 let ty = ctx.var_ty(local);
                 Some((name, local, ty, false))
             })
@@ -713,7 +738,13 @@ fn lower_coro_block<'a>(
     let env = (!captures.is_empty()).then(|| {
         let fields: Vec<HirExpr> = captures
             .iter()
-            .map(|(_, l, _, _)| ctx.read_local(*l, span))
+            .map(|(_, l, ty, by_ref)| {
+                if *by_ref {
+                    hir_local(*l, ty, span)
+                } else {
+                    ctx.read_local(*l, span)
+                }
+            })
             .collect();
         HirExpr {
             ty: HirTy::Tuple(captures.iter().map(|(_, _, t, _)| t.clone()).collect()),

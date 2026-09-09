@@ -59,6 +59,8 @@ pub struct BuildOptions {
     pub rokr: String,
     /// Keep the scratch directory instead of deleting it.
     pub keep_temps: bool,
+    /// `-g`: DWARF debug info (spec 9.9.6).
+    pub debug: bool,
 }
 
 impl Default for BuildOptions {
@@ -68,6 +70,7 @@ impl Default for BuildOptions {
             opt_level: "0".to_owned(),
             rokr: "rokr".to_owned(),
             keep_temps: false,
+            debug: false,
         }
     }
 }
@@ -135,6 +138,7 @@ pub fn mlir_text(
         &module.mir,
         opts.target.as_deref(),
         overflow_checks,
+        opts.debug,
     )?;
     let mut attrs = Vec::new();
     if let Some(t) = &opts.target {
@@ -263,6 +267,10 @@ fn llvm_ir(
     if opts.opt_level != "0" {
         opt.args(["--canonicalize", "--cse"]);
     }
+    if opts.debug {
+        // Keep the locations in the text mlir-translate reads.
+        opt.arg("--mlir-print-debuginfo");
+    }
     opt.args([
         "--convert-func-to-llvm",
         "--convert-arith-to-llvm",
@@ -326,6 +334,10 @@ fn clang(opts: &BuildOptions) -> Result<Command, RokDiagnostic> {
     let mut cmd = Command::new(locate_tool("clang")?);
     cmd.arg("-Wno-override-module")
         .arg(format!("-O{}", opts.opt_level));
+    if opts.debug {
+        // Also makes clang run `dsymutil` after a macOS link.
+        cmd.arg("-g");
+    }
     if let Some(t) = &opts.target {
         cmd.arg(format!("--target={t}"));
     }

@@ -3,10 +3,11 @@
 //
 // ponytail: spec 2.10 has `fn fmt(self, ref f: Formatter) throws
 // (FmtError)` writing into a `Formatter` and eight traits (Binary,
-// LowerHex, ...). Here `display` / `debug` return a new `str`, and the
-// f-string desugar applies the spec (fill / align / sign / `0` / width /
-// precision / b o x X) to that string through the `fstr_*` functions
-// below. Upgrade when `ref` parameters and a growable `str` exist.
+// LowerHex, ...). Here `display` / `debug` return a new `str`; HIR
+// lowers `f"..."` by each hole's type to `display()` / `debug()` or the
+// `fstr_*` functions below, which apply the spec (fill / align / sign /
+// `#` / `0` / width / precision / type letter) in the runtime. Upgrade
+// when `ref` parameters and a growable `str` exist.
 
 #[lang("display_trait")]
 pub trait Display {
@@ -23,22 +24,47 @@ extern "C" {
     fn rok_str_from_u64(n: u64) -> str;
     fn rok_str_from_f64(d: f64, prec: i32) -> str;
     fn rok_str_from_char(c: u32) -> str;
-    fn rok_str_from_radix(n: u64, radix: u32, flags: u32) -> str;
     fn rok_str_debug(s: str) -> str;
-    fn rok_fmt_spec(s: str, width: usize, fill: u32, align: u32, flags: u32) -> str;
+    fn rok_fmt_int(v: u64, kind: u32, spec: str) -> str;
+    fn rok_fmt_float(v: f64, is_f32: u32, spec: str) -> str;
+    fn rok_fmt_str(disp: str, dbg: str, spec: str) -> str;
+    fn rok_gc_alloc_bytes(size: usize, traced: i32) -> str;
+    fn rok_str_write_at(dst: str, off: usize, src: str);
 }
 
-// f-string desugar targets (the parser calls them by full path).
+// f-string lowering targets (HIR calls them by full path; `spec` is the
+// text after `:`).
 
-/// Fill / align / sign / zero-pad / width on a formatted value.
-pub fn fstr_pad(s: str, width: usize, fill: u32, align: u32, flags: u32) -> str {
-    unsafe { rok_fmt_spec(s, width, fill, align, flags) }
+/// A signed integer of `bits` bits.
+pub fn fstr_int(v: i64, bits: u32, spec: str) -> str {
+    unsafe { rok_fmt_int(v as u64, bits | 256u32, spec) }
 }
-/// `{x:.N}`: fixed-point with `prec` decimals.
-pub fn fstr_fixed(x: f64, prec: i32) -> str { unsafe { rok_str_from_f64(x, prec) } }
-/// `{n:b}` / `{n:o}` / `{n:x}` / `{n:X}`; `flags`: 1 uppercase, 2 `#`.
-pub fn fstr_radix(n: u64, radix: u32, flags: u32) -> str {
-    unsafe { rok_str_from_radix(n, radix, flags) }
+/// An unsigned integer of `bits` bits.
+pub fn fstr_uint(v: u64, bits: u32, spec: str) -> str { unsafe { rok_fmt_int(v, bits, spec) } }
+/// A float (`is_f32`: format as `f32`).
+pub fn fstr_float(v: f64, is_f32: bool, spec: str) -> str {
+    unsafe { rok_fmt_float(v, if is_f32 { 1u32 } else { 0u32 }, spec) }
+}
+/// Any other value as its `display()` (or `debug()` for `?`).
+pub fn fstr_str(disp: str, dbg: str, spec: str) -> str { unsafe { rok_fmt_str(disp, dbg, spec) } }
+
+/// The pieces of an f-string in one allocation.
+pub fn fstr_join<const N: usize>(parts: [str; N]) -> str {
+    let n = 0usize;
+    let i = 0usize;
+    while i < N {
+        n = n + parts[i].len();
+        i = i + 1;
+    }
+    let out = unsafe { rok_gc_alloc_bytes(n, 0) };
+    let at = 0usize;
+    i = 0;
+    while i < N {
+        unsafe { rok_str_write_at(out, at, parts[i]) };
+        at = at + parts[i].len();
+        i = i + 1;
+    }
+    out
 }
 
 impl Display for i8 { fn display(self) -> str { unsafe { rok_str_from_i64(self as i64) } } }

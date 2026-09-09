@@ -139,6 +139,15 @@ tls_slots! {
     // Not an 803 slot: the GC address of this thread's running task
     // executor (`rok::core::task`, `rok_task_exec_*`), 0 = none.
     task_exec => rokr_tls_task_exec_addr, 8, 3;
+    // Not an 803 slot: `[lo, hi)`, the addresses whose fault means this
+    // thread overflowed its stack (`rokr::stack`); `[0, 0)` = unknown.
+    stack_guard => rokr_tls_stack_guard_addr, 16, 3;
+}
+
+/// Address of this thread's `rok_tls_stack_guard` (`[lo, hi)`).
+#[allow(clippy::cast_ptr_alignment)] // 8-aligned slot
+pub fn stack_guard() -> *mut [usize; 2] {
+    slot::stack_guard().cast()
 }
 
 /// Address of this thread's `rok_tls_shadow_stack_top` (the head of its

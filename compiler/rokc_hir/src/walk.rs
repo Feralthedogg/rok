@@ -251,6 +251,19 @@ fn walk_path_generics(v: &mut impl AstVisitor, p: &rokc_ast::Path) {
     }
 }
 
+fn walk_fstring(v: &mut impl AstVisitor, parts: &[rokc_ast::FStringPart]) {
+    for p in parts {
+        if let rokc_ast::FStringPart::Hole { expr, spec } = p {
+            walk_expr(v, expr);
+            for piece in spec {
+                if let rokc_ast::SpecPiece::Expr(e) = piece {
+                    walk_expr(v, e);
+                }
+            }
+        }
+    }
+}
+
 pub fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
     v.expr(e);
     match &e.kind {
@@ -432,6 +445,7 @@ pub fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
         | ExprKind::Await(inner)
         | ExprKind::Spread(inner)
         | ExprKind::Discard(inner) => walk_expr(v, inner),
+        ExprKind::FString(parts) => walk_fstring(v, parts),
         ExprKind::Yield(inner) => {
             if let Some(i) = inner {
                 walk_expr(v, i);

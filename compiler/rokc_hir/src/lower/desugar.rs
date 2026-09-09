@@ -96,8 +96,7 @@ pub(super) fn lower_closure_expr(
     // escape it, and the type it returns.
     let mut throws = expected_err;
     if (throws.is_some() || may_throw(body)) && (throws.is_none() || fixed_ret.is_none()) {
-        let seen = ctx.env.sink.diagnostics.borrow().len();
-        let extras = ctx.env.sink.extras.borrow().len();
+        let mark = ctx.probe_mark();
         let (mut probe, ..) =
             closure_ctx(ctx, params, &captures, expected_param_tys.as_ref(), span);
         probe.fn_ret_ty = fixed_ret.clone().unwrap_or(HirTy::Unknown);
@@ -105,26 +104,7 @@ pub(super) fn lower_closure_expr(
         probe.throws_probe = Some(Vec::new());
         let hint = probe.fn_ret_ty.clone();
         let value = lower_expected(&mut probe, body, hint);
-        ctx.env.sink.diagnostics.borrow_mut().truncate(seen);
-        // Nested closures / thunks the probe made are made again for real.
-        // Generic instances are cached (and may own closures), so then
-        // keep everything.
-        let mut lifted = ctx.env.sink.extras.borrow_mut();
-        if lifted[extras..].iter().all(|f| {
-            ["__closure_", "__thunk_", "__coro_"]
-                .iter()
-                .any(|p| f.name.starts_with(p))
-        }) {
-            // Cached thunks among them go too (made again for real).
-            let gone: Vec<FunctionId> = lifted[extras..].iter().map(|f| f.id).collect();
-            ctx.env
-                .sink
-                .thunks
-                .borrow_mut()
-                .retain(|_, id| !gone.contains(id));
-            lifted.truncate(extras);
-        }
-        drop(lifted);
+        ctx.rollback(&mark);
         let errs = probe.throws_probe.take().unwrap_or_default();
         if throws.is_none() {
             throws = match crate::ty::throws_ty(HirTy::Unit, HirTy::Sum(errs)) {

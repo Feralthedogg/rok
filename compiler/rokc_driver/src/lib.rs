@@ -25,6 +25,8 @@ pub use toolchain::{
     BuildOptions, EmitKind, TempDir, build_archive, emit, link_executable, mlir_text,
 };
 
+// Independent switches, one per session setter.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Default)]
 pub struct CompilerConfig {
     /// Files containing operator declarations to pre-load before parsing
@@ -37,6 +39,12 @@ pub struct CompilerConfig {
     /// Test build (`rokc test`): `#[test]` functions are kept and a
     /// generated `main` runs the one named by `argv[1]`.
     pub test: bool,
+    /// Bench build (`rokc bench`): a test build whose generated `main`
+    /// times the `#[bench]` function named by `argv[1]`.
+    pub bench: bool,
+    /// Keep every parsed file's AST in `CompiledProject::sources`
+    /// (`rokc lint` / `rokc doc`).
+    pub keep_ast: bool,
     /// The input is a lone file outside any package (spec 4.16.8): it is
     /// the anonymous package's `main.rok` and cannot have `mod foo;`.
     pub anonymous: bool,
@@ -77,10 +85,8 @@ fn lib_roots(config: &CompilerConfig) -> Vec<LibRoot> {
 
 /// Dependency names are top-level names (spec 5.7.x / 902.3): a `use
 /// dep::..` anywhere is rooted at `pkg::dep::..`, and a dependency's own
-/// `use pkg::..` means its root, `pkg::dep::..`.
-// ponytail: only `use` paths are rewritten; an expression path
-// `dep::f()` outside the root module, or `pkg::` in a dependency's
-// expression, still resolves against the user package.
+/// `use pkg::..` means its root, `pkg::dep::..`. (Expression and type
+/// paths get the same treatment in HIR, from `PACKAGES_ATTR`.)
 fn root_extern_uses(
     uses: &mut [(String, rokc_core::Visibility, rokc_ast::UseTree)],
     externs: &[(String, PathBuf)],
@@ -118,6 +124,67 @@ fn root_extern_uses(
     }
 }
 
+/// One parsed source file, as tools see it: after `#[cfg]` filtering,
+/// before the driver flattens modules (so `use` / `mod` items, nested
+/// item names and inner attributes are as written).
+#[derive(Clone, Debug)]
+pub struct SourceFile {
+    pub path: PathBuf,
+    /// Its `Span::file` id.
+    pub file_id: u32,
+    /// `""` for the user package, else the library root's mount path
+    /// (`rok::core`, a dependency's name).
+    pub package: String,
+    /// Module path (with the package's mount prefix).
+    pub module: Vec<String>,
+    /// Inner (`#![..]`) attributes.
+    pub attrs: Vec<rokc_ast::Attribute>,
+    pub items: Vec<rokc_ast::Item>,
+    /// Top-level statements (the entry file's implicit `main`).
+    pub stmts: Vec<rokc_ast::Stmt>,
+}
+
+/// A user module named like a dependency would merge with it: dependency
+/// names are top-level (902.3). Modules are seen through their items and
+/// `use`s (an empty one can't clash).
+fn check_dependency_names(
+    items: &[rokc_ast::Item],
+    uses: &[(String, rokc_core::Visibility, rokc_ast::UseTree)],
+    externs: &[(String, PathBuf)],
+    diags: &mut Vec<RokDiagnostic>,
+) {
+    use rokc_ast::Item;
+    let item_modules = items.iter().filter_map(|item| {
+        let name = match item {
+            Item::Fn(f) => &f.name,
+            Item::Struct(s) => &s.name,
+            Item::Enum(e) => &e.name,
+            Item::Union(u) => &u.name,
+            Item::Trait(t) => &t.name,
+            Item::Const(c) => &c.name,
+            Item::Static(s) => &s.name,
+            Item::TypeAlias(a) => &a.name,
+            _ => return None,
+        };
+        name.rsplit_once("::").map(|(m, _)| m)
+    });
+    let modules: Vec<&str> = item_modules
+        .chain(uses.iter().map(|(m, _, _)| m.as_str()))
+        .collect();
+    for (dep, _) in externs {
+        let under = format!("{dep}::");
+        if modules.iter().any(|m| m == dep || m.starts_with(&under)) {
+            diags.push(RokDiagnostic::error(
+                rokc_diagnostic::ErrorKind::Module,
+                format!(
+                    "module `{dep}` has the name of the dependency `{dep}` — dependency names \
+                     are top-level paths (spec 902.3); rename the module"
+                ),
+            ));
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CompiledModule {
     pub name: String,
@@ -131,8 +198,11 @@ pub struct CompiledProject {
     pub modules: Vec<CompiledModule>,
     pub warnings: Vec<RokDiagnostic>,
     pub link_libraries: Vec<String>,
-    /// `#[test]` functions of a test build, `::`-qualified.
+    /// `#[test]` functions of a test build (`#[bench]` functions of a
+    /// bench build), `::`-qualified.
     pub tests: Vec<String>,
+    /// Parsed files, when `CompilerConfig::keep_ast`.
+    pub sources: Vec<SourceFile>,
 }
 
 pub fn compile_file(
@@ -198,9 +268,10 @@ pub fn compile_source(
     for f in &config.cfg_flags {
         cfg_env.add(f);
     }
-    if config.test {
+    if config.test || config.bench {
         cfg_env.add("test");
     }
+    let mut sources = Vec::new();
 
     let mut all_items: Vec<rokc_ast::Item> = Vec::new();
     let mut all_uses: Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)> = Vec::new();
@@ -215,17 +286,19 @@ pub fn compile_source(
         &mut diags,
         &mut all_items,
         &mut all_uses,
+        config.keep_ast.then_some(&mut sources),
     );
     let is_lib = !config.anonymous && path.file_name().is_some_and(|n| n == "lib.rok");
     let mut tests = Vec::new();
-    if config.test {
+    if config.test || config.bench {
         // Top-level statements are the package's own entry: dropped.
-        tests = harness::install(&mut all_items, &ext, &mut diags);
+        tests = harness::install(&mut all_items, &ext, &mut diags, config.bench);
     } else if !is_lib {
         entry::resolve_entry(top_stmts, &mut all_items, &mut diags);
     } else if !top_stmts.is_empty() {
         diags.push(entry::stmts_outside_entry(path));
     }
+    check_dependency_names(&all_items, &all_uses, &config.externs, &mut diags);
     // Mount each library root (`rok::<tier>`, then the dependencies) and
     // compile its items with the user's; HIR gives every module an
     // implicit `use rok::core::**;` (stdlib spec 0.1).
@@ -235,6 +308,7 @@ pub fn compile_source(
             keywords: keywords.get(i + 1).cloned().unwrap_or_default(),
             literals: std::sync::Arc::clone(&lib_lits),
         };
+        let first = sources.len();
         let stray = collect_module_tree(
             root,
             None,
@@ -246,9 +320,14 @@ pub fn compile_source(
             &mut diags,
             &mut all_items,
             &mut all_uses,
+            config.keep_ast.then_some(&mut sources),
         );
         if !stray.is_empty() {
             diags.push(entry::stmts_outside_entry(root));
+        }
+        let pkg = prefix.join("::");
+        for f in &mut sources[first..] {
+            f.package.clone_from(&pkg);
         }
     }
     // Auto-inject the runtime hooks lowering targets (`rok_panic`,
@@ -257,8 +336,20 @@ pub fn compile_source(
     root_extern_uses(&mut all_uses, &config.externs);
     all_items.insert(0, builtin_panic_extern());
     coro::rewrite_items(&mut all_items, &mut diags);
+    let packages = rokc_ast::Attribute {
+        path: vec![rokc_hir::PACKAGES_ATTR.to_owned()],
+        body: rokc_ast::AttrBody::Args(
+            config
+                .externs
+                .iter()
+                .map(|(n, _)| rokc_ast::AttrArg::Word(n.clone()))
+                .collect(),
+        ),
+        inner: true,
+        span: rokc_diagnostic::Span::DUMMY,
+    };
     let program = rokc_ast::Program {
-        attrs: Vec::new(),
+        attrs: vec![packages],
         items: all_items,
         stmts: Vec::new(),
     };
@@ -306,6 +397,7 @@ pub fn compile_source(
         warnings: diags.into_iter().filter(|d| !d.is_error()).collect(),
         link_libraries: Vec::new(),
         tests,
+        sources,
     })
 }
 
@@ -697,6 +789,7 @@ fn collect_module_tree(
     diags: &mut Vec<RokDiagnostic>,
     out: &mut Vec<rokc_ast::Item>,
     uses: &mut Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)>,
+    mut keep: Option<&mut Vec<SourceFile>>,
 ) -> Vec<rokc_ast::Stmt> {
     let source = match preloaded {
         Some(s) => s.to_owned(),
@@ -714,12 +807,18 @@ fn collect_module_tree(
     let file = body_path.display().to_string();
     let lexer = Lexer::new(&source, file.clone()).with_ext_ops(ext.symbols());
     let (mut tokens, mut lex_diags) = lexer.lex_all();
-    diags.append(&mut lex_diags);
     // Every span parsed from here on knows its file (diagnostic locations).
     let file_id = rokc_diagnostic::register_file(file.clone(), source.clone());
     for t in &mut tokens {
         t.span.file = file_id;
     }
+    // The lexer's own warnings (confusables) too.
+    for d in &mut lex_diags {
+        if let Some(p) = d.primary.as_mut().filter(|p| p.span.file == 0) {
+            p.span.file = file_id;
+        }
+    }
+    diags.append(&mut lex_diags);
     apply_keywords(&mut tokens, &metas.keywords, diags);
 
     let (program, mut parse_diags) =
@@ -729,6 +828,17 @@ fn collect_module_tree(
     // Filter `#[cfg(...)]`-gated items before walking — excluded modules
     // shouldn't get their files resolved or their inline items flattened.
     let filtered = cfg::filter_items(program.items, cfg_env);
+    if let Some(keep) = keep.as_deref_mut() {
+        keep.push(SourceFile {
+            path: body_path.to_path_buf(),
+            file_id,
+            package: String::new(),
+            module: module_path.to_vec(),
+            attrs: program.attrs.clone(),
+            items: filtered.clone(),
+            stmts: program.stmts.clone(),
+        });
+    }
 
     flatten_module_items(
         filtered,
@@ -740,6 +850,7 @@ fn collect_module_tree(
         diags,
         out,
         uses,
+        keep,
     );
     program.stmts
 }
@@ -755,6 +866,7 @@ fn flatten_module_items(
     diags: &mut Vec<RokDiagnostic>,
     out: &mut Vec<rokc_ast::Item>,
     uses: &mut Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)>,
+    mut keep: Option<&mut Vec<SourceFile>>,
 ) {
     let module_key = module_path.join("::");
     for item in items {
@@ -776,6 +888,7 @@ fn flatten_module_items(
                         diags,
                         out,
                         uses,
+                        keep.as_deref_mut(),
                     );
                 } else {
                     // File-mapped `mod foo;`. Resolve to `foo.rok` (and
@@ -813,6 +926,7 @@ fn flatten_module_items(
                         diags,
                         out,
                         uses,
+                        keep.as_deref_mut(),
                     );
                     if !stray.is_empty() {
                         diags.push(entry::stmts_outside_entry(&body));

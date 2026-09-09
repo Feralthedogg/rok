@@ -1,0 +1,61 @@
+// expect-exit: 0
+// expect-stdout:
+// 3
+// 8
+// 1
+// 7
+// 2
+// 5
+// 30
+
+// A type parameter that only appears in the return type, with no
+// expected type at the call, is fixed by how the binding is used later
+// in the block: an argument slot, an annotated `let`, a struct field,
+// the function's return value; a method chain returning its receiver's
+// type takes the chain's expected type.
+struct Box<T> { v: T; }
+struct Holder { b: Box<i32> | none; }
+
+fn make<T>(n: i32) -> Box<T> | none { return none; }
+fn wrap<T>(v: i32) -> Result<i32, T> { return Ok(v); }
+fn take(b: Result<i32, bool>) -> i32 { return b.unwrap_or(0) * 2; }
+fn count(xs: List<i64>) -> i32 { return xs.len() as i32; }
+struct B<T> { n: i32; }
+impl<T> B<T> {
+    fn new() -> B<T> { return B { n: 0 }; }
+    fn add(self, k: i32) -> B<T> { return B { n: self.n + k }; }
+}
+
+fn give() -> Result<i32, str> {
+    let r = wrap(5);
+    return r;
+}
+
+fn main() -> i32 {
+    let a = wrap(3);
+    let b: Result<i32, str> = a;
+    rok_print_i32(b.unwrap_or(0));
+
+    let c = wrap(4);
+    rok_print_i32(take(c));
+
+    let m = make(1);
+    let n: Box<i64> | none = m;
+    rok_print_i32(match n { none => 1, _ => 0 });
+
+    let h = make(7);
+    let holder = Holder { b: h };
+    rok_print_i32(match holder.b { none => 7, _ => 0 });
+
+    let xs = [];
+    xs.push(1i64);
+    rok_print_i32(count(xs) + 1);
+
+    rok_print_i32(give().unwrap_or(0));
+
+    // A builder chain: the expected type reaches the receiver through
+    // methods that return their receiver's type.
+    let built: B<str> = B::new().add(10).add(20);
+    rok_print_i32(built.n);
+    return 0;
+}

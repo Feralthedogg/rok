@@ -316,28 +316,23 @@ pub(super) fn monomorphize_on(
                 if let Some(t) = subst.get(name) {
                     subst_tys.push(t.clone());
                 } else {
-                    ctx.emit_error(
-                        rokc_diagnostic::ErrorKind::Type,
-                        format!(
-                            "cannot infer type parameter `{name}` of `{}` from the call \
-                         arguments or the expected type — annotate the binding",
-                            fn_def.name
-                        ),
-                    );
+                    ctx.emit_uninferred(format!(
+                        "cannot infer type parameter `{name}` of `{}` from the call \
+                         arguments, the expected type or a later use — annotate the \
+                         binding or write `::<..>`",
+                        fn_def.name
+                    ));
                     return None;
                 }
             }
             rokc_ast::GenericParam::Const { name, ty } => {
                 let Some(v) = subst.get(name).and_then(crate::ty::as_const) else {
-                    ctx.emit_error(
-                        rokc_diagnostic::ErrorKind::Type,
-                        format!(
-                            "cannot infer const parameter `{name}` of `{}` from the call \
-                             arguments or the expected type — pass it explicitly (`::<..>`) \
-                             (spec 2.11.6)",
-                            fn_def.name
-                        ),
-                    );
+                    ctx.emit_uninferred(format!(
+                        "cannot infer const parameter `{name}` of `{}` from the call \
+                         arguments or the expected type — pass it explicitly (`::<..>`) \
+                         (spec 2.11.6)",
+                        fn_def.name
+                    ));
                     return None;
                 };
                 let c = typed_const(ctx, name, ty, v.0)?;

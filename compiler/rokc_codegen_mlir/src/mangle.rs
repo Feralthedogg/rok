@@ -15,7 +15,7 @@ use rokc_mir::MirFunction;
 
 /// Monomorphized names carry their type arguments after this marker
 /// (`first__mono__i32`); they become the typehash.
-const MONO_MARK: &str = "__mono__";
+pub const MONO_MARK: &str = "__mono__";
 
 /// What symbol naming needs to know about the whole program.
 #[derive(Default)]
