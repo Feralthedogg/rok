@@ -310,7 +310,7 @@ pub trait Writer {
     }
 
     fn write_str(ref self, s: str) throws (IoError) {
-        try self.write_all(s.as_bytes());
+        try self.write_all(s.as_bytes().to_list());
     }
 
     /// Write formatted text: `try w.write_fmt(f"{x}\n")`.
@@ -349,8 +349,8 @@ impl<R: Reader> Iterator for Lines<R> {
     fn next(ref self) -> Result<str, IoError> | none {
         let line = try self.reader.read_line() catch e { return Result::Err(e); };
         if line.len() == 0 { return none; }
-        if line.ends_with("\n") { line = line.slice(0, line.len() - 1); }
-        if line.ends_with("\r") { line = line.slice(0, line.len() - 1); }
+        if line.ends_with("\n") { line = line[:line.len() - 1]; }
+        if line.ends_with("\r") { line = line[:line.len() - 1]; }
         Result::Ok(line)
     }
 }
@@ -587,7 +587,7 @@ impl Reader for Stdin {
         let err = err_cell();
         let s = unsafe { rok_os_stdin_read(0, err) };
         try check_cell(err, "stdin");
-        s.as_bytes()
+        s.as_bytes().to_list()
     }
 
     fn read_to_str(ref self) throws (IoError) -> str {

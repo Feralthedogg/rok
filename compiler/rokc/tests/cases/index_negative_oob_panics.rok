@@ -1,0 +1,11 @@
+// expect-exit: 101
+// expect-stderr: index -4 out of bounds for length 3
+
+// Spec 3.6: a negative index past the start panics after the
+// adjustment (`len + i` < 0).
+fn main() {
+    let xs: List<i32> = [1, 2, 3];
+    let i: i64 = -3;
+    println(f"{xs[i]}");
+    println(f"{xs[i - 1]}");
+}

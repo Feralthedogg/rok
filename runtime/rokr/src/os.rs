@@ -563,6 +563,53 @@ pub extern "C" fn rok_os_realpath(path: RokStr, err: *mut u8) -> RokStr {
     build(&[&buf[..n]])
 }
 
+#[cfg(target_vendor = "apple")]
+unsafe extern "C" {
+    #[link_name = "_NSGetExecutablePath"]
+    fn ns_get_executable_path(buf: *mut libc::c_char, size: *mut u32) -> i32;
+}
+
+/// Absolute path of the running executable (`env::current_exe`).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_os_current_exe(err: *mut u8) -> RokStr {
+    let mut buf = [0u8; libc::PATH_MAX as usize + 1];
+    #[cfg(target_vendor = "apple")]
+    let path = {
+        let mut raw = [0u8; libc::PATH_MAX as usize + 1];
+        let mut size = raw.len() as u32;
+        // SAFETY: `raw` is writable for `size` bytes.
+        if unsafe { ns_get_executable_path(raw.as_mut_ptr().cast(), &mut size) } != 0 {
+            set_err(err, libc::ENAMETOOLONG);
+            return build(&[]);
+        }
+        // SAFETY: `raw` is NUL-terminated; `buf` has PATH_MAX bytes.
+        if unsafe { libc::realpath(raw.as_ptr().cast(), buf.as_mut_ptr().cast()) }.is_null() {
+            set_err(err, errno());
+            return build(&[]);
+        }
+        let n = buf.iter().position(|&b| b == 0).unwrap_or(0);
+        &buf[..n]
+    };
+    #[cfg(not(target_vendor = "apple"))]
+    let path = {
+        // SAFETY: `buf` is writable for its length.
+        let n = unsafe {
+            libc::readlink(
+                c"/proc/self/exe".as_ptr(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+            )
+        };
+        if n < 0 {
+            set_err(err, errno());
+            return build(&[]);
+        }
+        &buf[..n as usize]
+    };
+    set_err(err, 0);
+    build(&[path])
+}
+
 // ---------------------------------------------------------------------
 // Standard streams (stdio `FILE`s, so they order with `print`)
 // ---------------------------------------------------------------------

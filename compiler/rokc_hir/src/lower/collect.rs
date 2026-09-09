@@ -61,6 +61,10 @@ fn is_lazy_static_init(v: &Expr) -> bool {
     }
 }
 
+fn is_lazy_init_fn(name: &str) -> bool {
+    leaf_name(name).starts_with("__rok_static_init_")
+}
+
 fn lazy_init_fn_name(static_name: &str) -> String {
     match static_name.rsplit_once("::") {
         Some((m, leaf)) => format!("{m}::__rok_static_init_{leaf}"),
@@ -650,6 +654,9 @@ pub fn lower_full(
     let mut impl_traits: std::collections::HashSet<(MethodTarget, String)> =
         std::collections::HashSet::new();
     let mut decls: Vec<MethodOrFn<'_>> = Vec::new();
+    // Per decl: its body is library code (`rok::<tier>` / a dependency),
+    // lowered only when reached (`lower_bodies`).
+    let mut lib_decl: Vec<bool> = Vec::new();
     let mut generic_fns: HashMap<String, &FnDef> = HashMap::new();
     let mut generic_methods: HashMap<(String, String), Vec<GenericMethod>> = HashMap::new();
     let mut generic_trait_impls: Vec<GenericTraitImpl> = Vec::new();
@@ -710,6 +717,7 @@ pub fn lower_full(
                 }
                 fn_table.insert(fn_def.name.clone(), sig);
                 decls.push(MethodOrFn::Fn(fn_def));
+                lib_decl.push(!package_of(&module).is_empty());
             }
             Item::Extern(blk) => {
                 // Spec 4.15.1: a C function is implicitly `unsafe` to call.
@@ -745,6 +753,7 @@ pub fn lower_full(
                         c_variadic.insert(id);
                     }
                     decls.push(MethodOrFn::Fn(fn_def));
+                    lib_decl.push(false);
                 }
             }
             _ => {}
@@ -1127,6 +1136,7 @@ pub fn lower_full(
                 key,
                 subst: HashMap::new(),
             });
+            lib_decl.push(!package_of(&module).is_empty());
         }
 
         // Pull in default-method bodies from the trait this impl
@@ -1289,6 +1299,8 @@ pub fn lower_full(
                     key,
                     subst: body_subst,
                 });
+                // A library default in a user impl is checked with it.
+                lib_decl.push(!package_of(&module).is_empty());
             }
         }
     }
@@ -1503,29 +1515,49 @@ pub fn lower_full(
     for (i, fields) in fixes {
         env.structs[i].fields = fields;
     }
-    let mut functions: Vec<HirFunction> = Vec::with_capacity(decls.len());
-    for (i, decl) in decls.iter().enumerate() {
-        let id = FunctionId(u32::try_from(i).expect("FunctionId overflow"));
-        functions.push(match decl {
-            MethodOrFn::Fn(fn_def) => lower_fn(&env, fn_def, id, None, module_of(&fn_def.name)),
-            MethodOrFn::Method {
-                fn_def,
-                self_ty,
-                module,
-                key,
-                subst,
-            } => super::mono::lower_fn_inner(
-                &env,
-                fn_def,
-                id,
-                key.clone(),
-                Some(self_ty.clone()),
-                module.clone(),
-                subst,
-            ),
-        });
+    // A static of a generic type (`static mut l: List<i32>`) is left a
+    // path by the early pass: instantiate it now.
+    let no_subst = HashMap::new();
+    let static_fixes: Vec<(usize, HirTy)> = static_defs
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| {
+            let mut open = Vec::new();
+            collect_unknown_paths(&d.ty, &mut open);
+            !open.is_empty()
+        })
+        .filter_map(|(i, d)| {
+            let (ast, module) = program.items.iter().find_map(|item| match item {
+                Item::Static(s) if s.name == d.name && !d.is_extern => {
+                    Some((&s.ty, module_of(&s.name)))
+                }
+                Item::Extern(blk) if d.is_extern => blk.items.iter().find_map(|ei| match ei {
+                    rokc_ast::ExternItem::Static(s) if s.name == d.name => {
+                        Some((&s.ty, String::new()))
+                    }
+                    _ => None,
+                }),
+                _ => None,
+            })?;
+            let mut rcx = LowerCtx::new(&env, &no_subst, None);
+            rcx.current_module = module;
+            Some((i, rcx.resolve_ast_ty(ast)))
+        })
+        .collect();
+    for (i, ty) in static_fixes {
+        env.statics.insert(static_defs[i].name.clone(), ty.clone());
+        static_defs[i].ty = ty;
     }
-    build_any_dispatchers(&env);
+    let roots: Vec<bool> = decls
+        .iter()
+        .zip(&lib_decl)
+        .enumerate()
+        .map(|(i, (d, &lib))| {
+            let (MethodOrFn::Fn(f) | MethodOrFn::Method { fn_def: f, .. }) = d;
+            !lib || exports.iter().any(|(id, _)| id.0 as usize == i) || is_lazy_init_fn(&f.name)
+        })
+        .collect();
+    let (mut functions, unlowered) = lower_bodies(&env, &decls, &roots);
     check_type_bounds(&env);
     super::send_check::check(&env, &functions);
     let Env {
@@ -1555,6 +1587,7 @@ pub fn lower_full(
         statics: static_defs,
         diagnostics: pre_diags,
         exports,
+        unlowered,
         c_variadic: {
             let mut v: Vec<FunctionId> = c_variadic.into_iter().collect();
             v.sort_by_key(|f| f.0);
@@ -2487,6 +2520,128 @@ fn impl_consts(
     (keyed, Some(set))
 }
 
+/// Pass 3: function bodies. The `roots` (user code, exports, lazy static
+/// initializers) are lowered, then every decl a lowered body names —
+/// calls, `fn` values, closures, coroutines; f-string helpers, operator
+/// traits, iterator protocols and `any` dispatchers all resolve to these
+/// — lowest id first, so user code keeps its order. A library body never
+/// reached stays a body-less stub (its signature, for tools) and is
+/// listed as unlowered (MIR drops it). `ROK_EAGER_LIBRARY` set lowers
+/// (and so checks) every library body.
+// ponytail: worklist over one run; no cache of library HIR across runs
+// (that is the RHIR work).
+fn lower_bodies(
+    env: &Env<'_>,
+    decls: &[MethodOrFn<'_>],
+    roots: &[bool],
+) -> (Vec<HirFunction>, Vec<FunctionId>) {
+    let eager = std::env::var_os("ROK_EAGER_LIBRARY").is_some();
+    let lower = |i: usize, stub: bool| {
+        let id = FunctionId(u32::try_from(i).expect("FunctionId overflow"));
+        let (MethodOrFn::Fn(f) | MethodOrFn::Method { fn_def: f, .. }) = &decls[i];
+        let bodiless;
+        let f: &FnDef = if stub {
+            bodiless = FnDef {
+                vis: f.vis,
+                attrs: f.attrs.clone(),
+                name: f.name.clone(),
+                generics: f.generics.clone(),
+                params: f.params.clone(),
+                ret_ty: f.ret_ty.clone(),
+                body: None,
+                is_async: f.is_async,
+                is_generator: f.is_generator,
+                is_unsafe: f.is_unsafe,
+                throws: f.throws.clone(),
+                where_clause: f.where_clause.clone(),
+                span: f.span,
+            };
+            &bodiless
+        } else {
+            f
+        };
+        match &decls[i] {
+            MethodOrFn::Fn(_) => lower_fn(env, f, id, None, module_of(&f.name)),
+            MethodOrFn::Method {
+                self_ty,
+                module,
+                key,
+                subst,
+                ..
+            } => super::mono::lower_fn_inner(
+                env,
+                f,
+                id,
+                key.clone(),
+                Some(self_ty.clone()),
+                module.clone(),
+                subst,
+            ),
+        }
+    };
+    let mut done: Vec<Option<HirFunction>> = (0..decls.len()).map(|_| None).collect();
+    let mut pending: std::collections::BTreeSet<usize> =
+        (0..decls.len()).filter(|&i| eager || roots[i]).collect();
+    let named = |f: &HirFunction, pending: &mut std::collections::BTreeSet<usize>| {
+        let Some(body) = &f.body else { return };
+        crate::each_block(body, &mut |e| {
+            if let HirExprKind::Call { callee: id, .. }
+            | HirExprKind::FnRef(id)
+            | HirExprKind::ClosureValue { fn_id: id, .. }
+            | HirExprKind::CoroNew { body_fn: id, .. } = &e.kind
+            {
+                pending.insert(id.0 as usize);
+            }
+        });
+    };
+    // Lifted closures / monomorphizations / dispatchers already looked at.
+    let mut scanned = 0;
+    loop {
+        while let Some(i) = pending.pop_first() {
+            if done.get(i).is_none_or(Option::is_some) {
+                continue; // an extra (already lowered) or a done decl
+            }
+            let f = lower(i, false);
+            named(&f, &mut pending);
+            done[i] = Some(f);
+            let extras = env.sink.extras.borrow();
+            extras[scanned..]
+                .iter()
+                .for_each(|f| named(f, &mut pending));
+            scanned = extras.len();
+        }
+        build_any_dispatchers(env);
+        let extras = env.sink.extras.borrow();
+        extras[scanned..]
+            .iter()
+            .for_each(|f| named(f, &mut pending));
+        drop(extras);
+        pending.retain(|&i| done.get(i).is_some_and(Option::is_none));
+        if pending.is_empty() {
+            break;
+        }
+        // The new bodies may add `any` tags: drop the dispatchers (the
+        // last ones in) and build them again after.
+        let n = env.sink.any_dispatch.borrow().len();
+        let mut extras = env.sink.extras.borrow_mut();
+        scanned = extras.len() - n;
+        extras.truncate(scanned);
+    }
+    let mut unlowered = Vec::new();
+    let functions = done
+        .into_iter()
+        .enumerate()
+        .map(|(i, f)| {
+            f.unwrap_or_else(|| {
+                let stub = lower(i, true);
+                unlowered.push(stub.id);
+                stub
+            })
+        })
+        .collect();
+    (functions, unlowered)
+}
+
 /// Spec 6.2.1 / stdlib 2.5.9, 2.13.3: `#[derive(Tr)]` needs every field
 /// to implement `Tr` (checked here on non-generic types; a generic one's
 /// impl bounds its parameters by `Tr`), and `Copy` excludes `Drop`.
@@ -2856,18 +3011,24 @@ fn check_impl_overlap(env: &Env<'_>) {
         }
     }
     let gis = &env.generic_trait_impls;
+    // (impl, candidate) → matches, asked in the same order as unmemoized:
+    // each impl meets every candidate once, not once per pair.
+    let mut memo: Vec<Vec<Option<bool>>> = vec![vec![None; candidates.len()]; gis.len()];
+    let mut covers = |i: usize, c: usize| {
+        *memo[i][c]
+            .get_or_insert_with(|| ctx.generic_impl_subst(&gis[i], &candidates[c], 0).is_some())
+    };
     for (i, a) in gis.iter().enumerate() {
         // Inherent ones (empty key) only clash per method, at the call.
-        for b in gis[i + 1..]
+        for (j, b) in gis
             .iter()
-            .filter(|b| b.trait_key == a.trait_key && !a.trait_key.is_empty())
+            .enumerate()
+            .skip(i + 1)
+            .filter(|(_, b)| b.trait_key == a.trait_key && !a.trait_key.is_empty())
         {
-            let witness = candidates
-                .iter()
-                .find(|t| {
-                    ctx.generic_impl_subst(a, t, 0).is_some()
-                        && ctx.generic_impl_subst(b, t, 0).is_some()
-                })
+            let witness = (0..candidates.len())
+                .find(|&c| covers(i, c) && covers(j, c))
+                .map(|c| &candidates[c])
                 .map(|t| ctx.ty_name(t))
                 .or_else(|| symbolic_overlap(&ctx, a, b, &candidates));
             if let Some(t) = witness {
@@ -3660,10 +3821,17 @@ fn subst_assoc_sig(def: &mut FnDef, assoc: &HashMap<String, Ty>) {
     if let Some(t) = &mut def.ret_ty {
         subst_assoc_ty(t, assoc);
     }
-    // Bounds too: `fn chain<J: Iterator<Item = Item>>`.
+    // Bounds and defaults too: `fn chain<J: Iterator<Item = Item>>`,
+    // `fn collect<C = List<Item>>`.
     for gp in &mut def.generics.params {
-        if let rokc_ast::GenericParam::Type { bounds, .. } = gp {
+        if let rokc_ast::GenericParam::Type {
+            bounds, default, ..
+        } = gp
+        {
             bounds.iter_mut().for_each(|b| subst_assoc_ty(b, assoc));
+            if let Some(d) = default {
+                subst_assoc_ty(d, assoc);
+            }
         }
     }
     for w in &mut def.where_clause {

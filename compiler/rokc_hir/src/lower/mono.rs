@@ -297,12 +297,8 @@ pub(super) fn monomorphize_on(
         } = gp
         {
             if !subst.contains_key(name) {
-                let sc = Scope {
-                    names: &ctx.env.names,
-                    module: &fn_module,
-                };
-                let resolved =
-                    resolve_ty_with_structs(d, &ctx.env.struct_table, &ctx.env.enum_table, sc);
+                // Earlier parameters stay in scope: `C = List<T>`.
+                let resolved = resolve_in_mono(ctx, fn_def, &subst, None, d);
                 subst.insert(name.clone(), resolved);
             }
         }

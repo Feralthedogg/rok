@@ -32,6 +32,11 @@ impl<T> List<T> {
         self.meta[1]
     }
 
+    /// The current element buffer (`Slice` views it).
+    pub(pkg) fn buffer(self) -> GcBuf<T> {
+        self.data[0]
+    }
+
     /// Room for `additional` more elements (doubling).
     pub fn reserve(self, additional: usize) {
         let n = self.len();
@@ -50,6 +55,28 @@ impl<T> List<T> {
         }
         self.data[0] = store;
         self.meta[1] = new_cap;
+    }
+
+    /// Capacity cut down to the length.
+    pub fn shrink_to_fit(self) {
+        let n = self.len();
+        if n == self.capacity() {
+            return;
+        }
+        let old = self.data[0];
+        let store: GcBuf<T> = buf_new(n);
+        for i in 0..n {
+            store[i] = old[i];
+        }
+        self.data[0] = store;
+        self.meta[1] = n;
+    }
+
+    /// Push every item of `items`, in order.
+    pub fn extend<I: IntoIterator<Item = T>>(self, items: I) {
+        for x in items {
+            self.push(x);
+        }
     }
 
     pub fn push(self, x: T) {

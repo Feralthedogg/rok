@@ -1,6 +1,5 @@
 // spec: std 215-string §2.15.2
 // probe: positive
-// xfail: case mapping is ASCII-only (TODOS §6)
 // expect-exit: 0
 // expect-stdout:
 // ÉCOLE école

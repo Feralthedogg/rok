@@ -11,7 +11,9 @@
 // Spec-shaped adapters (stdlib 2.7.1): `Map<I, U>`, `Filter<I>`, `Chain<I, J>`,
 // `Flatten<I>`, `FlatMap<I, U>`, `Peekable<I>` reach their item type through
 // `I::Item`; `Map` / `Filter` / `Chain` are `DoubleEndedIterator`s; a concrete
-// adapter type written in a signature or field works.
+// adapter type written in a signature or field works. `Map` needs naming:
+// `stream::Map` (2.8.5) shares the leaf name under the core glob (5.5.6).
+use rok::core::iter::Map;
 
 fn first_two(p: Peekable<ListIter<i32>>) -> i32 {
     let a = p.peek() ?? 0;

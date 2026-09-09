@@ -86,7 +86,10 @@ pub(super) fn lower_fstring(ctx: &mut LowerCtx<'_>, parts: &[FStringPart], span:
 
 /// `let #fN = e;` — the temp's path, or `None` when `e` didn't type.
 fn bind(ctx: &mut LowerCtx<'_>, stmts: &mut Vec<HirStmt>, e: &Expr) -> Option<Expr> {
+    // A hole has no expected type: the f-string's own `str` slot is not it.
+    ctx.push_expected(HirTy::Unknown);
     let init = lower_expr(ctx, e);
+    ctx.pop_expected();
     if init.ty == HirTy::Unknown {
         return None;
     }

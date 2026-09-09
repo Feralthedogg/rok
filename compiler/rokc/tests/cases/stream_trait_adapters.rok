@@ -1,0 +1,66 @@
+// expect-exit: 0
+// expect-stdout:
+// set 3 true
+// dict 2 b=1
+// each 0 10 20
+// mixed 4 ints 2 strs 2
+// chan [2, 4, 6]
+// custom 6
+use rok::core::stream::{Stream, Map, merge};
+use rok::core::future::{Context, Poll};
+
+// Stream adapters live on the `Stream` trait (stdlib 2.8.5): any stream,
+// not just `AsyncStream`, gets them; `collect` goes through `FromStream`.
+async yield fn nums(n: i32) -> i32 {
+    let i = 0;
+    while i < n {
+        yield i;
+        i = i + 1;
+    }
+}
+
+async yield fn words() -> str {
+    yield "a";
+    yield "b";
+}
+
+/// A hand-written stream: counts down from `n`.
+struct Countdown {
+    n: i32;
+}
+
+impl Stream for Countdown {
+    type Item = i32;
+    fn poll_next(ref self, ref ctx: Context) -> Poll<i32 | none> {
+        if self.n == 0 {
+            return Poll::Ready(none);
+        }
+        self.n -= 1;
+        Poll::Ready(self.n + 1)
+    }
+}
+
+let s: Set<i32> = await nums(5).map(|x| x % 3).collect();
+println(f"set {s.len()} {s.contains(2)}");
+let d: Dict<str, i32> = await words().map(|w| (w, w.len() as i32)).collect();
+println(f"dict {d.len()} b={d["b"]}");
+let line = "each";
+await nums(3).map(|x| x * 10).for_each([ref line] |x: i32| { line = line + f" {x}"; });
+println(line);
+let ints = 0;
+let strs = 0;
+for await v in merge(nums(2), words()) {
+    if v is i32 { ints += 1; } else { strs += 1; }
+}
+println(f"mixed {ints + strs} ints {ints} strs {strs}");
+let (tx, rx) = channel::<i32>();
+task::spawn(async {
+    for i in 1..4 { try! tx.send(i); }
+    tx.close();
+});
+let doubled: List<i32> = await rx.map(|x| x * 2).collect();
+println(f"chan {doubled.debug()}");
+let m: Map<Countdown, i32> = Countdown { n: 3 }.map(|x| x * 1);
+let total = 0;
+for await x in m { total += x; }
+println(f"custom {total}");

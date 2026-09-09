@@ -226,7 +226,15 @@ pub(super) fn lower_await(
     e: &Expr,
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
-    let fut = super::expr::lower_expr(ctx, e);
+    // `let v: T = await e`: `e` is expected to be a future of `T` (an
+    // `AsyncFuture<T>` hint, so `await s.collect()` picks `T`), not a `T`.
+    let hint = ctx
+        .current_expected()
+        .filter(|t| !matches!(t, HirTy::Unknown | HirTy::Unit))
+        .cloned()
+        .and_then(|t| ctx.instantiate_struct(CoroKind::Async.wrapper(false), vec![t]))
+        .map_or(HirTy::Unknown, HirTy::Struct);
+    let fut = super::lower_expected(ctx, e, hint);
     let has_poll =
         |ctx: &LowerCtx<'_>, t: &HirTy| matches!(pick_method(ctx, t, "poll", None), Ok(Some(_)));
     let fut = if fut.ty == HirTy::Unknown || has_poll(ctx, &fut.ty) {

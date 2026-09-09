@@ -1,6 +1,5 @@
 // spec: std 306-env §3.6.1
 // probe: positive
-// xfail: no var_os / current_exe / join_paths (TODOS §6)
 // expect-exit: 0
 // expect-stdout:
 // var_os none: true

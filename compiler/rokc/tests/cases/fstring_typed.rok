@@ -1,6 +1,6 @@
 // expect-exit: 0
 // expect-stdout:
-// [42   ] [   42] [-0042] [ 42] [+   42] [**42***]
+// [   42] [42   ] [-0042] [ 42] [+   42] [**42***]
 // ff ffff ffffffff 0b11111111 377 0xCAFE 0x0000002a
 // 3.14 3.1416 0.1 2.500 5.00
 // 1.2345678e4 1.235e4 1.23E4 4.2e1 1e3 1.5e-1
@@ -8,8 +8,8 @@
 // [  -2.50] [ab   ] [abc] [  "q"] [P(1)      ] [p<1>]
 // [1010] [ff] ["a"] [$$a] [hello]
 
-// Typed f-strings (refs-lang 1.7.3, stdlib 2.10): no align = left for
-// every type (2.10.8), precision on floats (any width), `b o x X` in the
+// Typed f-strings (refs-lang 1.7.3, stdlib 2.10): no align = numbers right,
+// the rest left (2.10.8), precision on floats (any width), `b o x X` in the
 // integer's own width, `e` / `E`, dynamic `${..}` width / precision / spec.
 struct P { v: i32; }
 impl Display for P { fn display(self) -> str { return f"P({self.v})"; } }
@@ -18,7 +18,7 @@ impl Debug for P { fn debug(self) -> str { return f"p<{self.v}>"; } }
 fn main() -> i32 {
     let n = 42;
     let neg = -42;
-    println(f"[{n:5}] [{n:>5}] [{neg:05}] [{n: }] [{n:=+6}] [{n:*^7}]");
+    println(f"[{n:5}] [{n:<5}] [{neg:05}] [{n: }] [{n:=+6}] [{n:*^7}]");
     let b: i8 = -1;
     let h: i16 = -1;
     let w: i32 = -1;

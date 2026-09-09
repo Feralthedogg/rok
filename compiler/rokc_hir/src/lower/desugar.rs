@@ -975,6 +975,9 @@ fn for_next_loop(
     ) else {
         return ctx.error_expr(span, "`next` must return `T | none`".to_owned());
     };
+    if parts.len() > 2 {
+        return for_next_loop_sum(ctx, label, pat, next, &parts, none_i, body, span);
+    }
     let item_ty = parts[item_i].clone();
     let v = ctx.declare(None, item_ty.clone());
     let mut arm_stmts: Vec<HirStmt> = Vec::new();
@@ -1032,6 +1035,104 @@ fn for_next_loop(
             label: label.cloned(),
             body: Box::new(HirBlock {
                 stmts: vec![HirStmt::Expr(step)],
+                trailing: None,
+                label: None,
+            }),
+            result_ty: HirTy::Unit,
+        },
+        ty: HirTy::Unit,
+        span,
+    }
+}
+
+/// `for_next_loop` when the item is itself a sum (`T = A | B`, so `next`
+/// is the flattened `A | B | none`): `let item: A | B = match next { a:
+/// A => a, b: B => b, none => break }`, then the body on `item`.
+#[allow(clippy::too_many_arguments)]
+fn for_next_loop_sum(
+    ctx: &mut LowerCtx<'_>,
+    label: Option<&String>,
+    pat: &AstPattern,
+    next: HirExpr,
+    parts: &[HirTy],
+    none_i: usize,
+    body: &Block,
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let sum_ty = next.ty.clone();
+    let item_ty = HirTy::sum(
+        parts
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != none_i)
+            .map(|(_, p)| p.clone()),
+    );
+    let mut arms = Vec::new();
+    for (i, p) in parts.iter().enumerate() {
+        let index = u32::try_from(i).expect("variant overflow");
+        if i == none_i {
+            arms.push(HirMatchArm {
+                pat: HirPattern::SumVariant {
+                    sum_ty: sum_ty.clone(),
+                    variant_index: index,
+                    binder: None,
+                    payload_ty: None,
+                },
+                guard: None,
+                body: HirExpr {
+                    kind: HirExprKind::Block(Box::new(HirBlock {
+                        stmts: vec![HirStmt::Break {
+                            label: label.cloned(),
+                            value: None,
+                        }],
+                        trailing: None,
+                        label: None,
+                    })),
+                    ty: HirTy::Never,
+                    span,
+                },
+            });
+            continue;
+        }
+        let v = ctx.declare(None, p.clone());
+        let value = coerce(ctx, &item_ty, hir_local(v, p, span), &|| {
+            "the loop item".to_owned()
+        });
+        arms.push(HirMatchArm {
+            pat: HirPattern::SumVariant {
+                sum_ty: sum_ty.clone(),
+                variant_index: index,
+                binder: Some(v),
+                payload_ty: Some(p.clone()),
+            },
+            guard: None,
+            body: value,
+        });
+    }
+    let item = ctx.declare(None, item_ty.clone());
+    let mut stmts = vec![HirStmt::Let {
+        local: item,
+        init: HirExpr {
+            kind: HirExprKind::Match {
+                scrutinee: Box::new(next),
+                arms,
+            },
+            ty: item_ty.clone(),
+            span,
+        },
+    }];
+    bind_irrefutable(ctx, pat, hir_local(item, &item_ty, span), &mut stmts);
+    let lowered_body = lower_loop_body(ctx, body);
+    stmts.push(HirStmt::Expr(HirExpr {
+        kind: HirExprKind::Block(Box::new(lowered_body)),
+        ty: HirTy::Unit,
+        span,
+    }));
+    HirExpr {
+        kind: HirExprKind::Loop {
+            label: label.cloned(),
+            body: Box::new(HirBlock {
+                stmts,
                 trailing: None,
                 label: None,
             }),

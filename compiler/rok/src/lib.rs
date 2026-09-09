@@ -44,8 +44,9 @@ packages:
 
 build (run by rokc, with the dependencies):
   build | check | run | test [path] ...   see `rokc help` for their options
-  repl                         interactive session (`:add <dep>` adds to the
-                               active environment)
+  repl [--replay]              interactive session (`:add <dep>` adds to the
+                               active environment; --replay reruns every
+                               cell for each new one)
   lsp                          language server (also `rokls`)
   fmt [path]                   format .rok files
   bench [path] [filter]        time the `#[bench]` functions

@@ -1,6 +1,5 @@
 // spec: std 216-sync §2.16.5
 // probe: positive
-// xfail: Cell has no `take`
 // expect-exit: 0
 // expect-stdout:
 // take 7 then 0

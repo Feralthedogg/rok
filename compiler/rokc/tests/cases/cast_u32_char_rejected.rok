@@ -1,0 +1,8 @@
+// expect-error: only `u8` can be cast as `char`, not `u32`; use `char::from_u32(n)`
+
+// Like Rust, only `u8` casts to `char`: a wider value may be a
+// surrogate or past U+10FFFF.
+fn main() {
+    let n: u32 = 0x41;
+    let c = n as char;
+}

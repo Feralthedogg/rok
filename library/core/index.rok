@@ -3,7 +3,8 @@
 // Spec 3.6: `arr[i]`, `arr[i,j]`, `arr[1:3]` all desugar through these
 // traits. `xs[i]` / `xs[i] = v` on a struct or enum call `index` /
 // `index_set`; fixed arrays and `GcBuf<T>` index directly (no call).
-// `a[i:j]` calls a `slice(i, j)` method, not `Slice::slice` yet.
+// `a[i:j:k]` calls `a.slice(i..j)` (then `.step(k)`), see
+// `collections::slice`.
 
 #[lang("index_trait")]
 pub trait Index<I> {
@@ -17,8 +18,29 @@ pub trait IndexSet<I> {
     fn index_set(ref self, idx: I, value: Value);
 }
 
+/// `a[i:j]` (spec 2.3.4 names it `Slice`, which is also the view type
+/// of 2.9.7; one glob-imported name cannot be both).
 #[lang("slice_trait")]
-pub trait Slice<R> {
+pub trait Sliceable<R> {
     type Output;
     fn slice(self, range: R) -> Output;
+}
+
+/// Spec 3.6: the position of a signed index `i` in a length `len` —
+/// `i` itself, or `len + i` when negative (`xs[-1]` is the last). The
+/// compiler routes every signed position (`xs[i]` / `a[i]` on a `List`,
+/// `Slice`, fixed array; slice bounds of those and of `str` / `StrBuf`)
+/// through here; an unsigned one never is. A non-negative `i` is
+/// checked by the indexed type as before; a negative one past the
+/// start panics here.
+pub fn index_from_end(i: isize, len: usize) -> usize {
+    if i >= 0 {
+        return i as usize;
+    }
+    // `-(i + 1)`: no overflow at `isize::MIN`.
+    let back = (-(i + 1)) as usize;
+    if back >= len {
+        panic(f"index {i} out of bounds for length {len}");
+    }
+    len - 1 - back
 }

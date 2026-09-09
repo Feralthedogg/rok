@@ -1123,3 +1123,60 @@ impl Future for IoReady {
         Poll::Pending
     }
 }
+
+// ---- blocking work (regular files) ----
+
+/// Run `f` on its own OS thread; the future completes with its result
+/// (tokio's `spawn_blocking`). For syscalls with no readiness to wait
+/// on, like regular files under kqueue / epoll. `f` starts at once; a
+/// cancelled awaiter leaves it to finish in the background and its
+/// result is dropped.
+// ponytail: one OS thread per call (tens of µs to start); a persistent
+// blocking pool if file-heavy code needs the throughput.
+pub fn spawn_blocking<T: Send>(f: fn() -> T + Send) -> Blocking<T> {
+    let slot: GcBuf<T> = buf_new(1);
+    let done: GcBuf<bool> = buf_new(1);
+    let waiter: Mutex<Waker | none> = Mutex::new(none);
+    let body: fn() + Send = || {
+        slot[0] = f();
+        let w: Waker | none = none;
+        using g = waiter.lock() {
+            done[0] = true;
+            w = g.get();
+        }
+        if let k: Waker = w {
+            k.wake();
+        }
+    };
+    let h = unsafe { rok_thread_spawn(body, 0, rok_thread_new_id()) };
+    if h == 0 {
+        body(); // no thread to be had: run it here
+    } else {
+        unsafe { rok_thread_detach(h) };
+    }
+    Blocking { slot: slot, done: done, waiter: waiter }
+}
+
+pub struct Blocking<T> {
+    slot: GcBuf<T>;
+    /// Set under `waiter`'s lock, after `slot`.
+    done: GcBuf<bool>;
+    waiter: Mutex<Waker | none>;
+}
+
+impl<T> Future for Blocking<T> {
+    type Output = T;
+    fn poll(ref self, ref ctx: Context) -> Poll<T> {
+        let done = false;
+        using g = self.waiter.lock() {
+            done = self.done[0];
+            if !done {
+                g.set(ctx.waker);
+            }
+        }
+        if done {
+            return Poll::Ready(self.slot[0]);
+        }
+        Poll::Pending
+    }
+}

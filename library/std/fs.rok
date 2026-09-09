@@ -9,6 +9,15 @@
 // `Metadata` times are Unix seconds (`mtime()` ...) until std::time has
 // `SystemTime`; `File` / `Dir` close through `close()` or on leaving
 // `using`; a `ReadDir` also closes when iterated to its end.
+//
+// Async (`*_async`, as in std::net): kqueue / epoll cannot wait on a
+// regular file, so each call runs its sync twin on its own thread
+// (`task::spawn_blocking`) and the task suspends until it is done.
+// Errors are thrown as by the sync call. A cancelled task leaves the
+// call to finish in the background (a `read_async` still fills its
+// buffer); the result is dropped. ponytail: `Dir` has no async methods
+// (the free functions cover `Dir::root()`); no async `ReadDir` stream
+// (`read_dir_async` lists the whole directory at once).
 
 use rok::std::io::{IoError, IoErrorKind, Reader, Writer, Seek, check, err_cell, check_cell, raw_of, fill, text_of};
 pub use rok::std::io::SeekFrom;
@@ -202,7 +211,7 @@ impl File {
     }
 
     pub fn read_to_end(self) throws (IoError) -> List<u8> {
-        (try self.read_raw()).as_bytes()
+        (try self.read_raw()).as_bytes().to_list()
     }
 
     /// The rest of the file as text (`InvalidData` if not UTF-8).
@@ -217,13 +226,14 @@ impl File {
         s
     }
 
-    pub fn write(self, buf: List<u8>) throws (IoError) -> usize {
-        let n = unsafe { rok_os_write(try self.live(), raw_of(buf, buf.len()), 0) };
+    /// Write some of `data` (a `str` or bytes); the count written.
+    pub fn write<B: AsBytes>(self, data: B) throws (IoError) -> usize {
+        let n = unsafe { rok_os_write(try self.live(), data.raw_bytes(), 0) };
         (try check(n as i64, self.path)) as usize
     }
 
-    pub fn write_all(self, buf: List<u8>) throws (IoError) {
-        try self.write_str(raw_of(buf, buf.len()));
+    pub fn write_all<B: AsBytes>(self, data: B) throws (IoError) {
+        try self.write_str(data.raw_bytes());
     }
 
     pub fn write_str(self, s: str) throws (IoError) {
@@ -289,6 +299,53 @@ impl File {
     pub fn unlock(self) throws (IoError) {
         try check(unsafe { rok_os_flock(try self.live(), 8) } as i64, self.path);
     }
+}
+
+// ---- async (see the top) ----
+
+/// `f()` on a blocking thread, its error thrown here.
+async fn off<T: Send>(f: fn() throws (IoError) -> T + Send) throws (IoError) -> T {
+    let r = await task::spawn_blocking(|| Result::catching(f));
+    try r.get()
+}
+
+/// `off` for a call with no value.
+// ponytail: `Result<(), E>::get` hits a codegen gap (a unit payload), so
+// the call is wrapped to yield a `bool`.
+async fn off0(f: fn() throws (IoError) + Send) throws (IoError) {
+    try await off(|| { try f(); true });
+}
+
+impl File {
+    pub async fn open_async<P: AsPath>(path: P) throws (IoError) -> File { try await open_async(path) }
+    pub async fn create_async<P: AsPath>(path: P) throws (IoError) -> File { try await create_async(path) }
+
+    pub async fn read_async(self, buf: List<u8>) throws (IoError) -> usize {
+        try await off(|| try self.read(buf))
+    }
+    pub async fn read_to_end_async(self) throws (IoError) -> List<u8> {
+        try await off(|| try self.read_to_end())
+    }
+    pub async fn read_to_str_async(self) throws (IoError) -> str {
+        try await off(|| try self.read_to_str())
+    }
+    pub async fn write_async<B: AsBytes>(self, data: B) throws (IoError) -> usize {
+        let s = data.raw_bytes();
+        try await off(|| try self.write(s))
+    }
+    pub async fn write_all_async<B: AsBytes>(self, data: B) throws (IoError) {
+        let s = data.raw_bytes();
+        try await off0(|| try self.write_str(s));
+    }
+    pub async fn write_str_async(self, s: str) throws (IoError) {
+        try await off0(|| try self.write_str(s));
+    }
+    pub async fn sync_all_async(self) throws (IoError) { try await off0(|| try self.sync_all()); }
+    pub async fn sync_data_async(self) throws (IoError) { try await off0(|| try self.sync_data()); }
+    pub async fn set_len_async(self, size: u64) throws (IoError) { try await off0(|| try self.set_len(size)); }
+    pub async fn metadata_async(self) throws (IoError) -> Metadata { try await off(|| try self.metadata()) }
+    pub async fn lock_exclusive_async(self) throws (IoError) { try await off0(|| try self.lock_exclusive()); }
+    pub async fn lock_shared_async(self) throws (IoError) { try await off0(|| try self.lock_shared()); }
 }
 
 impl Reader for File {
@@ -718,7 +775,7 @@ fn stage(f: File, data: str, tmp: Path, target: Path) throws (IoError) {
     try rename(tmp, target);
 }
 
-/// Bytes for `write`: a `str` (its UTF-8) or a `List<u8>`.
+/// Bytes for `write`: a `str` (its UTF-8), a `List<u8>` or a `Slice<u8>`.
 pub trait AsBytes {
     /// As a raw byte string (not necessarily UTF-8).
     fn raw_bytes(self) -> str;
@@ -730,6 +787,14 @@ impl AsBytes for str {
 
 impl AsBytes for List<u8> {
     fn raw_bytes(self) -> str { raw_of(self, self.len()) }
+}
+
+impl AsBytes for Slice<u8> {
+    fn raw_bytes(self) -> str {
+        let sb = StrBuf::with_capacity(self.len());
+        for b in self { sb.push_byte(b); }
+        sb.to_str()
+    }
 }
 
 pub fn metadata<P: AsPath>(path: P) throws (IoError) -> Metadata { try Dir::root().metadata(path) }
@@ -757,4 +822,102 @@ pub fn walk<P: AsPath>(root: P) -> Walk {
     let first = try symlink_metadata(p) catch e { w.errors.push(e); return w; };
     w.stack.push(DirEntry { path: p, name: p.file_name() ?? p.as_str(), meta: first });
     w
+}
+
+// ---- async convenience functions (see the top) ----
+
+pub async fn open_async<P: AsPath>(path: P) throws (IoError) -> File {
+    let p = path.as_path();
+    try await off(|| try open(p))
+}
+pub async fn create_async<P: AsPath>(path: P) throws (IoError) -> File {
+    let p = path.as_path();
+    try await off(|| try create(p))
+}
+pub async fn open_with_async<P: AsPath>(path: P, opts: OpenOptions) throws (IoError) -> File {
+    let p = path.as_path();
+    try await off(|| try open_with(p, opts))
+}
+pub async fn read_async<P: AsPath>(path: P) throws (IoError) -> List<u8> {
+    let p = path.as_path();
+    try await off(|| try read(p))
+}
+pub async fn read_to_str_async<P: AsPath>(path: P) throws (IoError) -> str {
+    let p = path.as_path();
+    try await off(|| try read_to_str(p))
+}
+pub async fn read_to_string_async<P: AsPath>(path: P) throws (IoError) -> str { try await read_to_str_async(path) }
+pub async fn write_async<P: AsPath, D: AsBytes>(path: P, data: D) throws (IoError) {
+    let p = path.as_path();
+    let s = data.raw_bytes();
+    try await off0(|| try write(p, s));
+}
+pub async fn write_atomic_async<P: AsPath, D: AsBytes>(path: P, data: D) throws (IoError) {
+    let p = path.as_path();
+    let s = data.raw_bytes();
+    try await off0(|| try write_atomic(p, s));
+}
+pub async fn metadata_async<P: AsPath>(path: P) throws (IoError) -> Metadata {
+    let p = path.as_path();
+    try await off(|| try metadata(p))
+}
+pub async fn symlink_metadata_async<P: AsPath>(path: P) throws (IoError) -> Metadata {
+    let p = path.as_path();
+    try await off(|| try symlink_metadata(p))
+}
+pub async fn exists_async<P: AsPath>(path: P) -> bool {
+    let p = path.as_path();
+    await task::spawn_blocking(|| exists(p))
+}
+pub async fn create_dir_async<P: AsPath>(path: P) throws (IoError) {
+    let p = path.as_path();
+    try await off0(|| try create_dir(p));
+}
+pub async fn create_dir_all_async<P: AsPath>(path: P) throws (IoError) {
+    let p = path.as_path();
+    try await off0(|| try create_dir_all(p));
+}
+pub async fn remove_file_async<P: AsPath>(path: P) throws (IoError) {
+    let p = path.as_path();
+    try await off0(|| try remove_file(p));
+}
+pub async fn remove_dir_async<P: AsPath>(path: P) throws (IoError) {
+    let p = path.as_path();
+    try await off0(|| try remove_dir(p));
+}
+pub async fn remove_dir_all_async<P: AsPath>(path: P) throws (IoError) {
+    let p = path.as_path();
+    try await off0(|| try remove_dir_all(p));
+}
+pub async fn rename_async<P: AsPath, Q: AsPath>(from: P, to: Q) throws (IoError) {
+    let a = from.as_path();
+    let b = to.as_path();
+    try await off0(|| try rename(a, b));
+}
+pub async fn copy_async<P: AsPath, Q: AsPath>(from: P, to: Q) throws (IoError) -> u64 {
+    let a = from.as_path();
+    let b = to.as_path();
+    try await off(|| try copy(a, b))
+}
+pub async fn symlink_async<P: AsPath, Q: AsPath>(target: P, link: Q) throws (IoError) {
+    let a = target.as_path();
+    let b = link.as_path();
+    try await off0(|| try symlink(a, b));
+}
+pub async fn hardlink_async<P: AsPath, Q: AsPath>(target: P, link: Q) throws (IoError) {
+    let a = target.as_path();
+    let b = link.as_path();
+    try await off0(|| try hardlink(a, b));
+}
+/// The whole listing (the first entry error is thrown), unlike the
+/// lazy `read_dir`.
+pub async fn read_dir_async<P: AsPath>(path: P) throws (IoError) -> List<DirEntry> {
+    let p = path.as_path();
+    try await off(|| {
+        let out: List<DirEntry> = List::new();
+        using rd = try read_dir(p) {
+            for e in rd { out.push(try e.get()); }
+        }
+        out
+    })
 }

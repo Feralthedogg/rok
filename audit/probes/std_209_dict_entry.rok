@@ -1,6 +1,5 @@
 // spec: std 209-collections §2.9.3
 // probe: positive
-// xfail: Dict has no `entry` API
 // expect-exit: 0
 // expect-stdout:
 // a=2 b=1

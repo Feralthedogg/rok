@@ -51,6 +51,8 @@ pub struct Emitter {
     pub c_target: crate::abi::CTarget,
     /// `-g`: DWARF state (spec 9.9.6).
     pub debug: Option<crate::debug::DebugInfo>,
+    /// Build a REPL cell instead of a program (`crate::ReplCell`).
+    pub repl: Option<crate::ReplCell>,
 }
 
 /// Symbol + signature of a module function, for call-site typing.
@@ -92,7 +94,20 @@ impl Emitter {
             overflow_checks: true,
             c_target: crate::abi::CTarget::from_triple(None),
             debug: None,
+            repl: None,
         }
+    }
+
+    /// First GC type id of this module.
+    fn gc_type_base(&self) -> u32 {
+        GC_TYPE_BASE + self.repl.as_ref().map_or(0, |r| r.type_offset)
+    }
+
+    /// An `extern` static this REPL cell defines (`ReplCell::define`).
+    fn defines(&self, name: &str) -> bool {
+        self.repl
+            .as_ref()
+            .is_some_and(|r| r.define.iter().any(|d| d == name))
     }
 
     pub fn emit_module(&mut self, module: &MirModule) {
@@ -186,7 +201,20 @@ impl Emitter {
         }
         if let Some(m) = user_main {
             let symbol = fns[&m.id].name.clone();
-            self.emit_main_wrapper(&symbol, &m.ret_ty);
+            if self.repl.is_some() {
+                // The host already runs the runtime: register this
+                // cell's types and roots, then its statements.
+                let (ret, ty) = match &m.ret_ty {
+                    MirTy::Unit => ("", "()".to_owned()),
+                    t => ("%0 = ", mlir_type(t, self.pointer_width)),
+                };
+                let _ = write!(
+                    self.out,
+                    "  func.func @rok_repl_cell() {{\n    func.call @rok.register_types() : () -> ()\n    {ret}func.call @{symbol}() : () -> {ty}\n    func.return\n  }}\n"
+                );
+            } else {
+                self.emit_main_wrapper(&symbol, &m.ret_ty);
+            }
         }
         self.emit_gc_support(module);
         let panic_declared = module
@@ -280,7 +308,7 @@ impl Emitter {
                 "  llvm.mlir.global internal constant @rok.scan{i}(dense<[{}]> : tensor<{n}xi32>) {{addr_space = 0 : i32}} : !llvm.array<{n} x i32>",
                 list.join(", ")
             );
-            let id = GC_TYPE_BASE + i as u32;
+            let id = self.gc_type_base() + i as u32;
             let _ = write!(
                 calls,
                 "    %t{i} = arith.constant {id} : i32\n    %s{i} = llvm.mlir.addressof @rok.scan{i} : !llvm.ptr\n    func.call @rok_gc_register_type(%t{i}, %s{i}) : (i32, !llvm.ptr) -> ()\n"
@@ -288,7 +316,11 @@ impl Emitter {
         }
         // Statics are GC roots: every reference word of their storage.
         let mut roots = 0;
-        for s in module.statics.iter().filter(|s| !s.is_extern) {
+        for s in module
+            .statics
+            .iter()
+            .filter(|s| !s.is_extern || self.defines(&s.name))
+        {
             let mut paths = Vec::new();
             gc_paths(&s.ty, &mut Vec::new(), &mut paths);
             let sym = self.pkgs.static_sym(&s.name);
@@ -333,6 +365,14 @@ impl Emitter {
             let ty_str = mlir_type(&s.ty, pw);
             let constness = if s.is_mut { "" } else { "constant " };
             let sym = self.pkgs.static_sym(&s.name);
+            if s.is_extern && self.defines(&s.name) {
+                // A REPL binding's slot: zeroed, exported.
+                let _ = writeln!(
+                    self.out,
+                    "  llvm.mlir.global external @{sym}() {{addr_space = 0 : i32}} : {ty_str} {{\n    %0 = llvm.mlir.zero : {ty_str}\n    llvm.return %0 : {ty_str}\n  }}"
+                );
+                continue;
+            }
             if s.is_extern {
                 // Defined elsewhere (spec 5.9.3): a declaration only.
                 let _ = writeln!(
@@ -486,6 +526,7 @@ impl Emitter {
         let str_globals = std::mem::take(&mut self.str_globals);
         let mut emit = FnEmit::new(f, self.pointer_width, fns, str_globals, &self.pkgs);
         emit.overflow_checks = self.overflow_checks;
+        emit.gc_type_base = self.gc_type_base();
         emit.gc_types = std::mem::take(&mut self.gc_types);
         if let Some(di) = self.debug.as_mut() {
             let name = f.name.split(crate::mangle::MONO_MARK).next().unwrap_or("");
@@ -617,6 +658,11 @@ impl Emitter {
     }
 
     #[must_use]
+    pub fn gc_type_count(&self) -> u32 {
+        self.gc_types.len() as u32
+    }
+
+    #[must_use]
     pub fn finish(self) -> String {
         match self.debug {
             Some(d) => d.defs + &self.out,
@@ -670,6 +716,8 @@ struct FnEmit<'a> {
     next_check: u32,
     pkgs: &'a crate::mangle::Pkgs,
     overflow_checks: bool,
+    /// Lent `Emitter::gc_type_base()`.
+    gc_type_base: u32,
     /// Blocks whose terminator takes a loop back-edge: a safepoint poll
     /// goes right before it (804 §8.4.8).
     back_edge_blocks: HashSet<u32>,
@@ -772,6 +820,7 @@ impl<'a> FnEmit<'a> {
             next_check: 0,
             pkgs,
             overflow_checks: true,
+            gc_type_base: GC_TYPE_BASE,
             back_edge_blocks: back_edge_blocks(f),
             deaths: rokc_mir::Deaths::default(),
             block_pos: f
@@ -1653,7 +1702,7 @@ impl<'a> FnEmit<'a> {
                 self.gc_types.push(ty.clone());
                 self.gc_types.len() - 1
             });
-        let type_id = GC_TYPE_BASE + index as u32;
+        let type_id = self.gc_type_base + index as u32;
         let (size, align) = gc_object_size(ty, pw);
         let [total, align_v, tid] = std::array::from_fn(|_| self.fresh_value());
         self.uses_alloc = true;

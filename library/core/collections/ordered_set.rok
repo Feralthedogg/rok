@@ -1,0 +1,141 @@
+// rok::core::collections::ordered_set — `OrderedSet<T>`, a hash set that
+// iterates in insertion order (stdlib spec 2.9.5), over
+// `OrderedDict<T, bool>`.
+
+pub struct OrderedSet<T> {
+    d: OrderedDict<T, bool>;
+}
+
+impl<T: Hash> OrderedSet<T> {
+    pub fn new() -> OrderedSet<T> {
+        OrderedSet { d: OrderedDict::new() }
+    }
+
+    /// The items inserted in order (later duplicates dropped).
+    pub fn from(items: List<T>) -> OrderedSet<T> {
+        let s: OrderedSet<T> = OrderedSet { d: OrderedDict::with_capacity(items.len()) };
+        for x in items {
+            s.insert(x);
+        }
+        s
+    }
+
+    pub fn len(self) -> usize {
+        self.d.len()
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.d.is_empty()
+    }
+
+    /// `true` when `x` was not there yet.
+    pub fn insert(self, x: T) -> bool {
+        self.d.insert(x, true) is none
+    }
+
+    /// `true` when `x` was there.
+    pub fn remove(self, x: T) -> bool {
+        !(self.d.remove(x) is none)
+    }
+
+    pub fn contains(self, x: T) -> bool {
+        self.d.contains_key(x)
+    }
+
+    /// The members in insertion order, lazily.
+    pub fn iter(self) -> ListIter<T> {
+        self.d.keys()
+    }
+
+    pub fn to_list(self) -> List<T> {
+        self.iter().collect()
+    }
+
+    /// `self`'s members, then `other`'s new ones.
+    pub fn union(self, other: OrderedSet<T>) -> OrderedSet<T> {
+        let out = OrderedSet::from(self.to_list());
+        for x in other {
+            out.insert(x);
+        }
+        out
+    }
+
+    pub fn intersection(self, other: OrderedSet<T>) -> OrderedSet<T> {
+        self.iter().filter(|x: T| other.contains(x)).collect()
+    }
+
+    pub fn difference(self, other: OrderedSet<T>) -> OrderedSet<T> {
+        self.iter().filter(|x: T| !other.contains(x)).collect()
+    }
+
+    pub fn symmetric_difference(self, other: OrderedSet<T>) -> OrderedSet<T> {
+        self.difference(other).union(other.difference(self))
+    }
+
+    pub fn is_subset(self, other: OrderedSet<T>) -> bool {
+        self.iter().all(|x: T| other.contains(x))
+    }
+
+    pub fn is_superset(self, other: OrderedSet<T>) -> bool {
+        other.is_subset(self)
+    }
+
+    pub fn is_disjoint(self, other: OrderedSet<T>) -> bool {
+        !self.iter().any(|x: T| other.contains(x))
+    }
+}
+
+impl<T: Hash> Default for OrderedSet<T> {
+    fn default() -> OrderedSet<T> { OrderedSet::new() }
+}
+
+impl<T: Hash + Clone> Clone for OrderedSet<T> {
+    fn clone(self) -> OrderedSet<T> {
+        let r: OrderedSet<T> = OrderedSet::new();
+        for x in self {
+            r.insert(x.clone());
+        }
+        r
+    }
+}
+
+/// `for x in s`, in insertion order (2.9.9).
+impl<T: Hash> IntoIterator for OrderedSet<T> {
+    type IntoIter = ListIter<T>;
+    type Item = T;
+    fn into_iter(self) -> ListIter<T> {
+        self.iter()
+    }
+}
+
+impl<T: Hash> FromIterator<T> for OrderedSet<T> {
+    fn from_iter<I>(it: I) -> OrderedSet<T> {
+        let out: OrderedSet<T> = OrderedSet::new();
+        for x in it {
+            out.insert(x);
+        }
+        out
+    }
+}
+
+/// Same members (order does not matter, as for `Set`).
+impl<T: Hash> PartialEq for OrderedSet<T> {
+    fn eq(self, rhs: OrderedSet<T>) -> bool {
+        self.len() == rhs.len() && self.is_subset(rhs)
+    }
+    fn ne(self, rhs: OrderedSet<T>) -> bool { !self.eq(rhs) }
+}
+
+/// `{a, b, ..}` in insertion order.
+impl<T: Hash + Debug> Debug for OrderedSet<T> {
+    fn debug(self) -> str {
+        let out = "{";
+        let first = true;
+        for x in self {
+            if !first { out += ", "; }
+            out += x.debug();
+            first = false;
+        }
+        out + "}"
+    }
+}

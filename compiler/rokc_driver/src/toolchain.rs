@@ -61,6 +61,8 @@ pub struct BuildOptions {
     pub keep_temps: bool,
     /// `-g`: DWARF debug info (spec 9.9.6).
     pub debug: bool,
+    /// Codegen a REPL cell (`link_shared`).
+    pub repl: Option<rokc_codegen_mlir::ReplCell>,
 }
 
 impl Default for BuildOptions {
@@ -71,6 +73,7 @@ impl Default for BuildOptions {
             rokr: "rokr".to_owned(),
             keep_temps: false,
             debug: false,
+            repl: None,
         }
     }
 }
@@ -139,6 +142,7 @@ pub fn mlir_text(
         opts.target.as_deref(),
         overflow_checks,
         opts.debug,
+        opts.repl.as_ref(),
     )?;
     let mut attrs = Vec::new();
     if let Some(t) = &opts.target {
@@ -230,6 +234,55 @@ pub fn link_executable(
         }
     }
     cmd.arg("-o").arg(exe_out);
+    run(&mut cmd, "clang")
+}
+
+/// A REPL cell (`opts.repl`) as a shared library at `out`: its runtime
+/// symbols and earlier cells' slots resolve when the session host
+/// loads it. Returns the GC type ids the cell used.
+pub fn link_shared(
+    module: &CompiledModule,
+    link_libraries: &[String],
+    opts: &BuildOptions,
+    out: &Path,
+) -> Result<u32, RokDiagnostic> {
+    let tmp = TempDir::new(opts.keep_temps)?;
+    let (ll, mlir) = llvm_ir(module, opts, tmp.path())?;
+    let mut cmd = clang(opts)?;
+    cmd.arg(&ll).args(["-shared", "-fPIC"]);
+    if cfg!(target_vendor = "apple") {
+        cmd.args(["-undefined", "dynamic_lookup"]);
+    } else {
+        // ponytail: untested off macOS. Each cell carries its own copy
+        // of the library code; bind its calls to that copy.
+        cmd.arg("-Wl,-Bsymbolic");
+    }
+    for lib in link_libraries {
+        cmd.arg(format!("-l{lib}"));
+    }
+    cmd.arg("-o").arg(out);
+    run(&mut cmd, "clang")?;
+    Ok(mlir.gc_types)
+}
+
+/// The REPL's session host: the C program `c_src` with the whole
+/// runtime linked in and exported, for the cells it loads.
+pub fn link_host(c_src: &Path, opts: &BuildOptions, out: &Path) -> Result<(), RokDiagnostic> {
+    let mut cmd = clang(opts)?;
+    cmd.arg(c_src);
+    let whole = if Path::new(&opts.rokr).extension().is_some() {
+        opts.rokr.clone()
+    } else {
+        format!("-l{}", opts.rokr)
+    };
+    if cfg!(target_vendor = "apple") {
+        cmd.arg("-Wl,-all_load").arg(whole);
+    } else {
+        cmd.args(["-rdynamic", "-Wl,--whole-archive"])
+            .arg(whole)
+            .args(["-Wl,--no-whole-archive", "-ldl", "-lpthread"]);
+    }
+    cmd.arg("-lm").arg("-o").arg(out);
     run(&mut cmd, "clang")
 }
 

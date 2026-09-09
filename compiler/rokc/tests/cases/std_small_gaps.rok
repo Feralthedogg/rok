@@ -1,0 +1,37 @@
+// expect-exit: 0
+// expect-stdout:
+// [1, 2, 3, 4, 5] cap 5
+// take 7 then 0
+// a=3 b=1 c=0 e=1
+// ababab [] tail none
+// head [key] [v=1] true
+// args_os ok true
+use rok::std::env;
+
+fn main() {
+    let xs: List<i32> = [1, 2];
+    xs.extend([3, 4]);
+    xs.extend(5..6);
+    xs.shrink_to_fit();
+    println(f"{xs.debug()} cap {xs.capacity()}");
+
+    let c = Cell::new(7);
+    let t = c.take();
+    println(f"take {t} then {c.get()}");
+
+    let d: Dict<str, i32> = Dict::new();
+    for w in ["a", "b", "a", "a"] {
+        d.entry(w).and_modify(|v: i32| v + 1).or_insert(1);
+    }
+    let z = d.entry("c").or_default();
+    let e = d.entry("e").or_insert_with(|| 1);
+    println(f"a={d["a"]} b={d["b"]} c={z} e={e}");
+
+    println(f"{"ab".repeat(3)} [{"x".repeat(0)}] tail {"abc".strip_prefix("b") ?? "none"}");
+    let kv = "key=v=1".split_once("=") ?? ("", "");
+    println(f"head [{kv.0}] [{kv.1}] {"abc".split_once(";") is none}");
+
+    let a = env::args_os();
+    let first = try a[0].to_str() catch _ { "" };
+    println(f"args_os ok {first != ""}");
+}

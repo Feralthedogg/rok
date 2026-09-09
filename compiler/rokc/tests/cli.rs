@@ -328,6 +328,22 @@ fn extern_dependency_is_a_package_boundary() {
     );
 }
 
+/// Library bodies nothing reaches are skipped by default;
+/// `ROK_EAGER_LIBRARY` lowers (so type-checks) every one of them.
+#[test]
+fn eager_library_checks_every_body() {
+    let dir = scratch("eager-lib");
+    fs::write(dir.join("main.rok"), "fn main() {}\n").unwrap();
+    let out = Command::new(ROKC)
+        .current_dir(&dir)
+        .env("ROK_HOME", workspace())
+        .env("ROK_EAGER_LIBRARY", "1")
+        .args(["check", "main.rok"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 0);
+}
+
 #[test]
 fn init_makes_an_existing_directory_a_package() {
     let dir = scratch("init");

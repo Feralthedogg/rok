@@ -29,24 +29,28 @@ extern "C" {
     fn rok_str_from_buf(buf: GcBuf<u8>, off: usize, len: usize) -> str;
     fn rok_buf_put_str(buf: GcBuf<u8>, off: usize, s: str);
     fn rok_str_utf8_error(s: str) -> isize;
+    fn rok_char_props(c: u32) -> u32;
+    fn rok_char_to_case(c: u32, upper: i32) -> u32;
 }
 
 impl str {
     pub fn new() -> str { "" }
 
-    /// `bytes` as a `str`; throws if they are not UTF-8 (2.15.6).
-    pub fn from_utf8(bytes: List<u8>) throws (Utf8Error) -> str {
-        let buf = StrBuf::with_capacity(bytes.len());
+    /// `bytes` (a `List<u8>`, `Slice<u8>`, ...) as a `str`; throws if
+    /// they are not UTF-8 (2.15.6).
+    pub fn from_utf8<B: IntoIterator<Item = u8>>(bytes: B) throws (Utf8Error) -> str {
+        let buf = StrBuf::new();
         for b in bytes { buf.push_byte(b); }
         try buf.to_str_checked()
     }
 
-    /// A copy of the UTF-8 bytes. ponytail: spec returns a `Slice<u8>`
-    /// view; there is no `Slice` yet.
-    pub fn as_bytes(self) -> List<u8> {
-        let out: List<u8> = List::with_capacity(self.len());
-        for b in self.bytes() { out.push(b); }
-        out
+    /// The UTF-8 bytes. ponytail: a view of a copy (`GcBuf` holds a word
+    /// per element, so it cannot view the string's bytes in place).
+    pub fn as_bytes(self) -> Slice<u8> {
+        let n = self.len();
+        let buf: GcBuf<u8> = buf_new(n);
+        for i in 0..n { buf[i] = unsafe { rok_str_byte(self, i) }; }
+        Slice { buf: buf, start: 0, len: n, stride: 1 }
     }
 
     /// Byte length (not the char count).
@@ -54,11 +58,6 @@ impl str {
     pub fn is_empty(self) -> bool { unsafe { rok_str_len(self) } == 0 }
     /// Number of chars (`s.chars().count()` in the spec).
     pub fn char_count(self) -> usize { unsafe { rok_str_char_count(self) } }
-
-    /// `s[start:end]` by byte offsets; panics off a char boundary.
-    pub fn slice(self, start: usize, end: usize) -> str {
-        unsafe { rok_str_slice(self, start, end) }
-    }
 
     pub fn contains(self, pat: str) -> bool { unsafe { rok_str_find(self, pat) } >= 0 }
     pub fn starts_with(self, pat: str) -> bool {
@@ -83,11 +82,35 @@ impl str {
         i as usize
     }
 
+    /// `self` without a leading `prefix`, or `none` if it does not start
+    /// with it.
+    pub fn strip_prefix(self, prefix: str) -> str | none {
+        if !self.starts_with(prefix) { return none; }
+        self[prefix.len():]
+    }
+    /// `self` without a trailing `suffix`, or `none`.
+    pub fn strip_suffix(self, suffix: str) -> str | none {
+        if !self.ends_with(suffix) { return none; }
+        self[:self.len() - suffix.len()]
+    }
+    /// The pieces before and after the first `sep`, or `none`.
+    pub fn split_once(self, sep: str) -> (str, str) | none {
+        let i = self.find(sep)?;
+        (self[:i], self[i + sep.len():])
+    }
+    /// `n` copies back to back. ponytail: not in spec 2.15.
+    pub fn repeat(self, n: usize) -> str {
+        let b = StrBuf::with_capacity(self.len() * n);
+        for _ in 0..n { b.push_str(self); }
+        b.to_str()
+    }
+
     pub fn trim(self) -> str { unsafe { rok_str_trim(self, 0) } }
     pub fn trim_start(self) -> str { unsafe { rok_str_trim(self, 1) } }
     pub fn trim_end(self) -> str { unsafe { rok_str_trim(self, 2) } }
 
-    // ponytail: ASCII case mapping only.
+    /// Full Unicode case mapping (`"ß"` → `"SS"`, final `σ` → `ς`); no
+    /// locale rules.
     pub fn to_lowercase(self) -> str { unsafe { rok_str_case(self, 0) } }
     pub fn to_uppercase(self) -> str { unsafe { rok_str_case(self, 1) } }
     pub fn replace(self, from: str, to: str) -> str { unsafe { rok_str_replace(self, from, to) } }
@@ -114,6 +137,15 @@ impl str {
 
     /// `T`'s value spelled by this string (stdlib 2.15.7).
     pub fn parse<T: FromStr>(self) throws (T::Err) -> T { try T::from_str(self) }
+}
+
+/// `s[a:b]` by byte offsets (2.15.3): a new `str`; panics out of bounds
+/// or off a char boundary.
+impl Sliceable<Range<usize>> for str {
+    type Output = str;
+    fn slice(self, r: Range<usize>) -> str {
+        unsafe { rok_str_slice(self, r.start, r.end) }
+    }
 }
 
 impl Add for str {
@@ -178,7 +210,7 @@ impl Iterator for CharsIter {
             c = (c << 6u32) | (cont & 0x3Fu32);
         }
         self.pos += n;
-        c as char
+        unsafe { char::from_u32_unchecked(c) }
     }
 }
 
@@ -213,8 +245,8 @@ impl Iterator for SplitIter {
             return self.rest;
         }
         let i = at as usize;
-        let piece = self.rest.slice(0, i);
-        self.rest = self.rest.slice(i + self.sep.len(), self.rest.len());
+        let piece = self.rest[:i];
+        self.rest = self.rest[i + self.sep.len():];
         piece
     }
 }
@@ -233,10 +265,10 @@ impl Iterator for LinesIter {
             self.rest = "";
         } else {
             let i = at as usize;
-            line = self.rest.slice(0, i);
-            self.rest = self.rest.slice(i + 1, self.rest.len());
+            line = self.rest[:i];
+            self.rest = self.rest[i + 1:];
         }
-        if line.ends_with("\r") { return line.slice(0, line.len() - 1); }
+        if line.ends_with("\r") { return line[:line.len() - 1]; }
         line
     }
 }
@@ -275,7 +307,159 @@ impl Iterator for SplitWhitespaceIter {
         while self.pos < n && !is_ascii_space(unsafe { rok_str_byte(self.s, self.pos) }) {
             self.pos += 1;
         }
-        self.s.slice(start, self.pos)
+        self.s[start:self.pos]
+    }
+}
+
+// ---- char (stdlib 2.15.4) ----
+//
+// The Unicode properties and case maps are runtime tables generated
+// from the UCD (`runtime/rokr/gen_unicode.py`).
+
+fn char_props(c: char) -> u32 { unsafe { rok_char_props(c as u32) } }
+
+/// The bits of a `char` (`char::from_u32_unchecked`).
+union CharBits {
+    n: u32;
+    c: char;
+}
+
+impl char {
+    /// `n` as a char; `none` for a surrogate or a value past U+10FFFF.
+    /// (`as char` takes only a `u8`.)
+    pub fn from_u32(n: u32) -> char | none {
+        if (n >= 0xD800u32 && n <= 0xDFFFu32) || n > 0x10FFFFu32 {
+            return none;
+        }
+        unsafe { char::from_u32_unchecked(n) }
+    }
+
+    /// `n` as a char, unchecked: `n` must be a Unicode scalar value.
+    pub unsafe fn from_u32_unchecked(n: u32) -> char {
+        let b = CharBits { n: n };
+        unsafe { b.c }
+    }
+
+    /// Digit `d` in base `radix` (2..=36; lowercase letters past `9`).
+    /// Panics if `d` is not a digit of that base.
+    pub fn from_digit(d: u32, radix: u32) -> char {
+        if radix < 2u32 || radix > 36u32 { panic("char::from_digit: radix must be in 2..=36"); }
+        if d >= radix { panic("char::from_digit: not a digit of the radix"); }
+        if d < 10u32 { return (0x30u8 + d as u8) as char; }
+        (0x61u8 + d as u8 - 10u8) as char
+    }
+
+    /// The value of this digit in base `radix` (2..=36, either letter
+    /// case); throws if it is not one.
+    pub fn to_digit(self, radix: u32) throws (ValueError) -> u32 {
+        if radix < 2u32 || radix > 36u32 { throw ValueError { msg: "radix must be in 2..=36" }; }
+        let c = self as u32;
+        let d = 99u32;
+        if c >= 0x30u32 && c <= 0x39u32 {
+            d = c - 0x30u32;
+        } else if c >= 0x61u32 && c <= 0x7Au32 {
+            d = c - 0x61u32 + 10u32;
+        } else if c >= 0x41u32 && c <= 0x5Au32 {
+            d = c - 0x41u32 + 10u32;
+        }
+        if d >= radix { throw ValueError { msg: f"{self.debug()} is not a base-{radix} digit" }; }
+        d
+    }
+
+    pub fn is_digit(self, radix: u32) -> bool {
+        try { self.to_digit(radix); true } catch _ { false }
+    }
+
+    /// Bytes in UTF-8.
+    pub fn len_utf8(self) -> usize {
+        let c = self as u32;
+        if c < 0x80u32 { return 1; }
+        if c < 0x800u32 { return 2; }
+        if c < 0x10000u32 { return 3; }
+        4
+    }
+
+    /// 16-bit units in UTF-16.
+    pub fn len_utf16(self) -> usize {
+        if (self as u32) < 0x10000u32 { return 1; }
+        2
+    }
+
+    pub fn is_alphabetic(self) -> bool { char_props(self) & 1u32 != 0u32 }
+    pub fn is_lowercase(self) -> bool { char_props(self) & 2u32 != 0u32 }
+    pub fn is_uppercase(self) -> bool { char_props(self) & 4u32 != 0u32 }
+    /// Unicode `White_Space`.
+    pub fn is_whitespace(self) -> bool { char_props(self) & 8u32 != 0u32 }
+    /// General category `Nd`, `Nl` or `No`.
+    pub fn is_numeric(self) -> bool { char_props(self) & 16u32 != 0u32 }
+    pub fn is_alphanumeric(self) -> bool { char_props(self) & 17u32 != 0u32 }
+    /// General category `Cc`.
+    pub fn is_control(self) -> bool {
+        let c = self as u32;
+        c < 0x20u32 || (c >= 0x7Fu32 && c < 0xA0u32)
+    }
+
+    /// The simple (one-char) lowercase mapping; `self` if none. Strings
+    /// map fully with `str::to_lowercase`.
+    pub fn to_lowercase(self) -> char {
+        unsafe { char::from_u32_unchecked(rok_char_to_case(self as u32, 0)) }
+    }
+    /// The simple (one-char) uppercase mapping (`'ß'` stays `'ß'`; `"ß"`
+    /// becomes `"SS"` through `str::to_uppercase`).
+    pub fn to_uppercase(self) -> char {
+        unsafe { char::from_u32_unchecked(rok_char_to_case(self as u32, 1)) }
+    }
+
+    pub fn is_ascii(self) -> bool { (self as u32) < 0x80u32 }
+    pub fn is_ascii_uppercase(self) -> bool { self >= 'A' && self <= 'Z' }
+    pub fn is_ascii_lowercase(self) -> bool { self >= 'a' && self <= 'z' }
+    pub fn is_ascii_alphabetic(self) -> bool { self.is_ascii_uppercase() || self.is_ascii_lowercase() }
+    pub fn is_ascii_digit(self) -> bool { self >= '0' && self <= '9' }
+    pub fn is_ascii_alphanumeric(self) -> bool { self.is_ascii_alphabetic() || self.is_ascii_digit() }
+    pub fn is_ascii_hexdigit(self) -> bool {
+        self.is_ascii_digit() || (self >= 'a' && self <= 'f') || (self >= 'A' && self <= 'F')
+    }
+    /// Space, `\t`, `\n`, form feed, `\r`.
+    pub fn is_ascii_whitespace(self) -> bool {
+        self == ' ' || self == '\t' || self == '\n' || self == '\x0C' || self == '\r'
+    }
+    pub fn is_ascii_control(self) -> bool { (self as u32) < 0x20u32 || self == '\x7F' }
+    /// `!` ..= `~` (printable, not space).
+    pub fn is_ascii_graphic(self) -> bool { self >= '!' && self <= '~' }
+    pub fn is_ascii_punctuation(self) -> bool { self.is_ascii_graphic() && !self.is_ascii_alphanumeric() }
+
+    pub fn to_ascii_uppercase(self) -> char {
+        if self.is_ascii_lowercase() { return ((self as u8) - 32u8) as char; }
+        self
+    }
+    pub fn to_ascii_lowercase(self) -> char {
+        if self.is_ascii_uppercase() { return ((self as u8) + 32u8) as char; }
+        self
+    }
+    pub fn eq_ignore_ascii_case(self, other: char) -> bool {
+        self.to_ascii_lowercase() == other.to_ascii_lowercase()
+    }
+}
+
+/// Code point order.
+impl PartialOrd for char {
+    fn lt(self, rhs: char) -> bool { (self as u32) < (rhs as u32) }
+    fn le(self, rhs: char) -> bool { (self as u32) <= (rhs as u32) }
+    fn gt(self, rhs: char) -> bool { (self as u32) > (rhs as u32) }
+    fn ge(self, rhs: char) -> bool { (self as u32) >= (rhs as u32) }
+}
+
+impl Ord for char {
+    fn cmp(self, other: char) -> Ordering { (self as u32).cmp(other as u32) }
+}
+
+/// `char::try_from(n)` (2.15.4): throws for a surrogate or a value past
+/// U+10FFFF (`OverflowError`, the shape `TryFrom` fixes).
+impl TryFrom<u32> for char {
+    fn try_from(value: u32) throws (OverflowError) -> char {
+        let c = char::from_u32(value);
+        if c is char { return c; }
+        throw OverflowError { op: "try_from", ty: "char" };
     }
 }
 
@@ -369,6 +553,15 @@ impl StrBuf {
         let at = unsafe { rok_str_utf8_error(s) };
         if at >= 0 { throw Utf8Error { valid_up_to: at as usize }; }
         s
+    }
+}
+
+/// `b[a:b]`: the bytes `a..b` of the current contents as a `str`, checked
+/// like `str` slicing. ponytail: copies the whole buffer first.
+impl Sliceable<Range<usize>> for StrBuf {
+    type Output = str;
+    fn slice(self, r: Range<usize>) -> str {
+        self.to_str()[r.start:r.end]
     }
 }
 

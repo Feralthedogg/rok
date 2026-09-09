@@ -1,6 +1,5 @@
 // spec: std 301-fs §3.1.3
 // probe: positive
-// xfail: File::write / write_all take List<u8> only, not `B: AsBytes`
 // expect-exit: 0
 // expect-stdout:
 // 3 [hi!]

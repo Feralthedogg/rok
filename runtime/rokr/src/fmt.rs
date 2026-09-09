@@ -273,7 +273,8 @@ pub mod tests {
             text(&r).to_owned()
         };
         let u = |v: u64, bits: u32, sp| text(&rok_fmt_int(v, bits, s(sp))).to_owned();
-        assert_eq!(i(42, 32, "5"), "42   ");
+        assert_eq!(i(42, 32, "5"), "   42");
+        assert_eq!(i(42, 32, "<5"), "42   ");
         assert_eq!(i(42, 32, ">5"), "   42");
         assert_eq!(i(-42, 32, "05"), "-0042");
         assert_eq!(i(42, 32, "+"), "+42");

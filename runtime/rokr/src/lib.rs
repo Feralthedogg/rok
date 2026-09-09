@@ -32,6 +32,8 @@ mod par;
 mod stack;
 mod str;
 mod thread;
+mod unicode;
+mod unicode_tables;
 pub use str::RokStr;
 
 /// Rust panic inside the runtime = inconsistent runtime state. Report

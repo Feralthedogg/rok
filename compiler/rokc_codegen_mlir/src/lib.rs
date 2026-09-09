@@ -19,10 +19,28 @@ pub struct MlirOutput {
     pub text: String,
     /// Names hinted to the linker (e.g. `rokr`, ABI shims).
     pub runtime_libraries: Vec<String>,
+    /// Number of GC type ids used (`ReplCell::type_offset`).
+    pub gc_types: u32,
+}
+
+/// One REPL cell (`rokc repl`).
+///
+/// A shared library the session host loads into a process whose
+/// runtime is already up. Instead of a C
+/// `main`, `rok_repl_cell()` registers the cell's GC types and roots
+/// and runs the user `main`.
+#[derive(Clone, Debug, Default)]
+pub struct ReplCell {
+    /// Added to the GC type ids: objects of earlier cells keep theirs,
+    /// so each cell takes fresh ones.
+    pub type_offset: u32,
+    /// `extern` statics this cell defines (zeroed, exported, GC roots):
+    /// the slots of the session's new bindings.
+    pub define: Vec<String>,
 }
 
 pub fn codegen(module: &MirModule) -> Result<MlirOutput, RokDiagnostic> {
-    codegen_with_target(module, None, true, false)
+    codegen_with_target(module, None, true, false, None)
 }
 
 pub fn codegen_with_target(
@@ -30,6 +48,7 @@ pub fn codegen_with_target(
     target: Option<&str>,
     overflow_checks: bool,
     debug: bool,
+    repl: Option<&ReplCell>,
 ) -> Result<MlirOutput, RokDiagnostic> {
     let pointer_width = pointer_width_for_target(target);
     let mut e = emit::Emitter::new(pointer_width);
@@ -38,6 +57,7 @@ pub fn codegen_with_target(
     if debug {
         e.debug = Some(debug::DebugInfo::new());
     }
+    e.repl = repl.cloned();
     e.emit_module(module);
     if let Some(first) = e.errors.first() {
         let mut d = RokDiagnostic::error(ErrorKind::Unsupported, first.clone());
@@ -46,7 +66,9 @@ pub fn codegen_with_target(
         }
         return Err(d);
     }
+    let gc_types = e.gc_type_count();
     Ok(MlirOutput {
+        gc_types,
         text: e.finish(),
         runtime_libraries: vec!["rokr".to_owned()],
     })

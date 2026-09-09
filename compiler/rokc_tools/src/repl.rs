@@ -2,24 +2,49 @@
 //!
 //! The session is one anonymous `main.rok` (907.1: a run of cells is
 //! the implicit `main.rok` with top-level statements and items appended).
-//! Each input recompiles that whole program, links it, and runs it; the
-//! output of the new cell is what follows a marker the cell prints
-//! first, so earlier cells' output is not shown again. Earlier cells do
-//! run again: their side effects (I/O, time, randomness) repeat.
+//!
+//! Default mode: a long-lived host process (`repl_host.c`, the runtime
+//! linked in, initialized once) loads each cell as a shared library and
+//! runs it once. Items (`fn`, `struct`, `impl`, ..) are recompiled into
+//! every cell; statements are not. A top-level binding lives in an
+//! exported global slot (a GC root) the defining cell owns; later cells
+//! declare it `extern "C" { static mut .. }` with its type as written
+//! and copy it into a local of the same name on entry (and back out on
+//! exit, so assignments persist). A cell that dies (panic) leaves the
+//! session as it was before it: the host forks a snapshot per cell.
+//!
+//! `--replay` mode: each input recompiles the whole program, links it,
+//! and runs it; the output of the new cell is what follows a marker the
+//! cell prints first. Earlier cells run again: their side effects (I/O,
+//! time, randomness) repeat. It keeps bindings whose types cannot be
+//! named in source (closures, ..), which the default mode refuses.
 
 use std::collections::HashSet;
-use std::io::{BufRead, Write};
+use std::fmt::Write as _;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 
-use rokc_hir::{HirModule, HirTy};
-use rokc_interface::{BuildOptions, CompileResult, EmitKind, Session, TempDir, report};
+use rokc_hir::{HirExpr, HirExprKind, HirModule, HirStmt, HirTy};
+use rokc_interface::{
+    BuildOptions, CompileResult, EmitKind, ReplCell, Session, TempDir, link_host, report,
+};
 
 use crate::analysis::ty_name;
 
 const OUT_MARK: &str = "@@rok-repl-out@@";
 const VAL_MARK: &str = "@@rok-repl-val@@";
 const VALUE: &str = "__rok_repl_v";
+/// The host's `__rok_repl_out`: a cell's shown value.
+const SHOWN: &str = "__rok_repl_out";
+const HOST_C: &str = include_str!("repl_host.c");
+const DYLIB: &str = if cfg!(target_vendor = "apple") {
+    "dylib"
+} else {
+    "so"
+};
 
 const HELP: &str = "\
   <expr>         evaluate and print `type: value`
@@ -76,13 +101,44 @@ impl State {
     }
 }
 
+/// A top-level binding (default mode).
+#[derive(Clone)]
+struct Binding {
+    name: String,
+    /// The exported global holding its value.
+    sym: String,
+    /// Its type, as source.
+    ty: String,
+}
+
+/// The session host (`repl_host.c`) and its command socket.
+struct Host {
+    child: Child,
+    ctl: UnixStream,
+}
+
+impl Drop for Host {
+    fn drop(&mut self) {
+        let _ = self.ctl.shutdown(std::net::Shutdown::Both);
+        let _ = self.child.wait();
+    }
+}
+
 pub struct Repl {
     bootstrap: Vec<PathBuf>,
     /// Dependencies (`--extern name=root`).
     pub externs: Vec<(String, PathBuf)>,
+    /// `--replay`: every cell reruns the whole session.
+    pub replay: bool,
     opts: BuildOptions,
-    tmp: TempDir,
     state: State,
+    host: Option<Host>,
+    bindings: Vec<Binding>,
+    /// Cells built (library and slot names).
+    built: u32,
+    /// GC type ids earlier cells took.
+    type_offset: u32,
+    tmp: TempDir,
 }
 
 impl Repl {
@@ -90,9 +146,14 @@ impl Repl {
         Ok(Self {
             bootstrap,
             externs: Vec::new(),
+            replay: false,
             tmp: TempDir::new(opts.keep_temps).map_err(|d| d.message)?,
             opts,
             state: State::default(),
+            host: None,
+            bindings: Vec::new(),
+            built: 0,
+            type_offset: 0,
         })
     }
 
@@ -131,11 +192,15 @@ impl Repl {
         match cell {
             "" => {}
             ":q" | ":quit" | ":exit" => return false,
-            ":reset" => self.state = State::default(),
+            ":reset" => {
+                self.state = State::default();
+                self.bindings.clear();
+            }
             ":help" | ":h" => print!("{HELP}"),
             _ if cell.starts_with(":type ") || cell.starts_with(":t ") => {
                 let expr = cell.split_once(' ').map_or("", |(_, e)| e).trim();
-                let src = self.state.program(&format!("let {VALUE} = ({expr});"));
+                let src =
+                    self.session(&self.state, &format!("let {VALUE} = ({expr});"), None, None);
                 if let Some(ty) = self
                     .compile(&src, false)
                     .and_then(|r| binding_ty(&r, VALUE))
@@ -147,6 +212,11 @@ impl Repl {
             _ if cell.starts_with(':') => eprintln!("unknown command `{cell}` (:help lists them)"),
             _ => match classify(cell) {
                 Cell::Item(key) => self.item(cell, key),
+                Cell::Let(name) if !self.replay => self.run_once(cell, name),
+                Cell::Stmt if !self.replay => self.run_once(cell, None),
+                Cell::Expr if !self.replay => {
+                    self.run_once(&format!("let {VALUE} = ({cell});"), Some(VALUE));
+                }
                 Cell::Let(name) => {
                     // 907.3: rebinding a name at the top level opens a
                     // block, so the old binding is shadowed instead of
@@ -221,14 +291,286 @@ impl Repl {
         // A new definition replaces the old one of the same name.
         let mut next = self.state.clone();
         next.items.retain(|(k, _)| key.is_none() || *k != key);
-        next.items.push((key, cell.to_owned()));
-        let Some(r) = self.compile(&next.program(""), false) else {
+        next.items.push((key.clone(), cell.to_owned()));
+        let Some(r) = self.compile(&self.session(&next, "", None, None), false) else {
             return;
         };
         // Codegen too, like `check`: it rejects what cannot be lowered.
-        match r.emit(EmitKind::Mlir, &self.opts) {
-            Ok(_) => self.state = next,
-            Err(d) => report(&d),
+        if let Err(d) = r.emit(EmitKind::Mlir, &self.opts) {
+            report(&d);
+            return;
+        }
+        // A binding of a redefined type would be read with the new
+        // layout: forget it.
+        let old = key.as_deref().filter(|k| {
+            !k.starts_with("fn ")
+                && self
+                    .state
+                    .items
+                    .iter()
+                    .any(|(o, _)| o.as_deref() == Some(k))
+        });
+        if let Some(ty) = old.and_then(|k| k.split(' ').nth(1)) {
+            self.bindings.retain(|b| {
+                let keep = !b
+                    .ty
+                    .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .any(|w| w == ty);
+                if !keep {
+                    eprintln!("note: `{}` is gone: its type `{ty}` was redefined", b.name);
+                }
+                keep
+            });
+        }
+        self.state = next;
+    }
+
+    /// The source of a cell: the replayed session (`--replay`), or the
+    /// items, the bindings' slots, `body`, and (unless `new` is `None`:
+    /// a front-end pass) the stores of the bindings back to their slots
+    /// (`new`: the cell's own) and of `show`'s `Debug` text to the host.
+    fn session(
+        &self,
+        state: &State,
+        body: &str,
+        new: Option<&[Binding]>,
+        show: Option<&str>,
+    ) -> String {
+        if self.replay {
+            return state.program(body);
+        }
+        let mut src = String::new();
+        for (_, item) in &state.items {
+            src.push_str(item);
+            src.push('\n');
+        }
+        let _ = writeln!(src, "extern \"C\" {{\n    static mut {SHOWN}: str;");
+        for b in self.bindings.iter().chain(new.unwrap_or_default()) {
+            let _ = writeln!(src, "    static mut {}: {};", b.sym, b.ty);
+        }
+        src.push_str("}\n");
+        for b in &self.bindings {
+            let _ = writeln!(src, "let {} = {};", b.name, b.sym);
+        }
+        // Its own block: a `let` may rebind a name (907.3, 5.1.4).
+        src.push_str("{\n");
+        src.push_str(body);
+        src.push('\n');
+        let Some(new) = new else {
+            src.push_str("}\n");
+            return src;
+        };
+        // ponytail: every binding goes back (a `let` can be assigned);
+        // only the ones the cell assigns would need to.
+        for b in &self.bindings {
+            if !new.iter().any(|n| n.name == b.name) {
+                let _ = writeln!(src, "{} = {};", b.sym, b.name);
+            }
+        }
+        for b in new {
+            let _ = writeln!(src, "{} = {};", b.sym, b.name);
+        }
+        if let Some(n) = show {
+            let _ = writeln!(src, "{SHOWN} = f\"{{{n}:?}}\";");
+        }
+        src.push_str("}\n");
+        src
+    }
+
+    /// Default mode: build `cell` as a library, run it in the host, keep
+    /// its top-level bindings and show `type: value` of `show`.
+    fn run_once(&mut self, cell: &str, show: Option<&str>) {
+        // The new bindings' names and types: a front-end pass first (not
+        // needed without a `let`, nor for the value of an expression).
+        let user = cell
+            .strip_prefix(&format!("let {VALUE} = "))
+            .unwrap_or(cell);
+        let new = if user.contains("let") {
+            let src = self.session(&self.state, cell, None, None);
+            let Some(r) = self.compile(&src, false) else {
+                return;
+            };
+            match self.new_bindings(&r) {
+                Ok(new) => new,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return;
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let mut shown = show.is_some();
+        let r = loop {
+            let src = self.session(&self.state, cell, Some(&new), show.filter(|_| shown));
+            match self.compile(&src, shown) {
+                Some(r) => break r,
+                // Most likely no `Debug`; the plain build reports real errors.
+                None if shown => shown = false,
+                None => {
+                    if !new.is_empty() {
+                        eprintln!(
+                            "note: a later cell names each binding's type; `rokc repl --replay` \
+                             keeps bindings whose type cannot be named"
+                        );
+                    }
+                    return;
+                }
+            }
+        };
+        self.built += 1;
+        let lib = self.tmp.path().join(format!("cell{}.{DYLIB}", self.built));
+        let mut opts = self.opts.clone();
+        opts.repl = Some(ReplCell {
+            type_offset: self.type_offset,
+            define: new.iter().map(|b| b.sym.clone()).collect(),
+        });
+        match r.link_shared(&opts, &lib) {
+            Ok(n) => self.type_offset += n,
+            Err(d) => {
+                report(&d);
+                return;
+            }
+        }
+        let Some(value) = self.load(&lib) else {
+            return;
+        };
+        self.bindings
+            .retain(|b| !new.iter().any(|n| n.name == b.name));
+        self.bindings.extend(new);
+        if let Some(ty) = show.and_then(|n| binding_ty(&r, n)) {
+            if ty == "()" {
+            } else if shown {
+                println!("{ty}: {value}");
+            } else {
+                println!("{ty}");
+            }
+        }
+        let _ = std::io::stdout().flush();
+    }
+
+    /// The `let`s at the top of the cell's block in a front-end result
+    /// (`session`): the last one of each name.
+    fn new_bindings(&self, r: &CompileResult) -> Result<Vec<Binding>, String> {
+        let Some(hir) = r.modules.first().map(|m| &m.hir) else {
+            return Ok(Vec::new());
+        };
+        let Some(main) = hir.functions.iter().find(|f| f.name == "main") else {
+            return Ok(Vec::new());
+        };
+        // The cell's block (`session`).
+        let Some(block) = main
+            .body
+            .iter()
+            .flat_map(|b| &b.stmts)
+            .find_map(|s| match s {
+                HirStmt::Expr(HirExpr {
+                    kind: HirExprKind::Block(b),
+                    ..
+                }) => Some(b),
+                _ => None,
+            })
+        else {
+            return Ok(Vec::new());
+        };
+        let lets = block.stmts.iter().filter_map(|s| match s {
+            HirStmt::Let { local, .. } => Some(*local),
+            _ => None,
+        });
+        let mut out: Vec<Binding> = Vec::new();
+        for (i, id) in lets.enumerate() {
+            let Some(l) = main.locals.iter().find(|l| l.id == id) else {
+                continue;
+            };
+            let Some(name) = l
+                .name
+                .as_deref()
+                .filter(|n| !n.starts_with("__") && *n != "_")
+            else {
+                continue;
+            };
+            let ty = ty_name(hir, &l.ty);
+            // ponytail: what the HIR printer cannot write as source
+            // (closures, unresolved types) is refused; `--replay` keeps it.
+            if ty.contains('{') || ty.starts_with("closure") {
+                return Err(format!(
+                    "`{name}: {ty}` cannot be kept for later cells (its type has no name); \
+                     `rokc repl --replay` keeps it"
+                ));
+            }
+            out.retain(|b| b.name != name);
+            out.push(Binding {
+                name: name.to_owned(),
+                sym: format!("__rok_repl_{}_{i}", self.built + 1),
+                ty,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Run the library `lib` in the host (started on first use): the
+    /// shown value, or `None` when the cell failed.
+    fn load(&mut self, lib: &std::path::Path) -> Option<String> {
+        if self.host.is_none() {
+            self.host = Some(self.start_host()?);
+        }
+        let host = self.host.as_mut()?;
+        let _ = std::io::stdout().flush();
+        let reply = (|| {
+            writeln!(host.ctl, "{}", lib.display())?;
+            let mut rd = BufReader::new(&host.ctl);
+            let mut line = String::new();
+            rd.read_line(&mut line)?;
+            let Some(n) = line.strip_prefix("ok ") else {
+                return Ok(line);
+            };
+            let mut value = vec![0; n.trim().parse().unwrap_or(0)];
+            rd.read_exact(&mut value)?;
+            Ok::<_, std::io::Error>(format!("ok {}", String::from_utf8_lossy(&value)))
+        })();
+        match reply {
+            Ok(r) if r.starts_with("ok ") => Some(r[3..].to_owned()),
+            Ok(r) if r == "err\n" => {
+                eprintln!("error: the cell failed; the session is as it was before it");
+                None
+            }
+            _ => {
+                eprintln!("error: the session host is gone; the bindings are lost");
+                self.host = None;
+                self.bindings.clear();
+                None
+            }
+        }
+    }
+
+    /// Build and start the session host.
+    fn start_host(&self) -> Option<Host> {
+        let src = self.tmp.path().join("host.c");
+        let exe = self.tmp.path().join("host");
+        if let Err(e) = std::fs::write(&src, HOST_C) {
+            eprintln!("error: cannot write {}: {e}", src.display());
+            return None;
+        }
+        if let Err(d) = link_host(&src, &self.opts, &exe) {
+            report(&d);
+            return None;
+        }
+        let (ctl, theirs) = match UnixStream::pair() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: cannot make the host socket: {e}");
+                return None;
+            }
+        };
+        match Command::new(&exe)
+            .stdin(Stdio::from(OwnedFd::from(theirs)))
+            .spawn()
+        {
+            Ok(child) => Some(Host { child, ctl }),
+            Err(e) => {
+                eprintln!("error: cannot run {}: {e}", exe.display());
+                None
+            }
         }
     }
 
@@ -451,10 +793,12 @@ pub fn main(
     externs: Vec<(String, PathBuf)>,
     opts: BuildOptions,
     interactive: bool,
+    replay: bool,
 ) -> i32 {
     match Repl::new(bootstrap, opts) {
         Ok(mut r) => {
             r.externs = externs;
+            r.replay = replay;
             r.run(std::io::stdin().lock(), interactive);
             0
         }

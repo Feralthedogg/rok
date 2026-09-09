@@ -1,0 +1,36 @@
+// expect-exit: 0
+// expect-stdout:
+// int 2
+// str s
+// int 0
+// 3
+
+// `for` over an iterator whose item is itself a sum (`Item = i32 | str`,
+// so `next` returns the flattened `i32 | str | none`): every variant
+// reaches the body.
+struct U {
+    n: i32;
+}
+
+impl Iterator for U {
+    type Item = i32 | str;
+    fn next(ref self) -> i32 | str | none {
+        if self.n == 0 { return none; }
+        self.n -= 1;
+        if self.n == 1 { return "s"; }
+        self.n
+    }
+}
+
+fn main() {
+    let c = 0;
+    let u = U { n: 3 };
+    for v in u {
+        match v {
+            i: i32 => println(f"int {i}"),
+            s: str => println(f"str {s}"),
+        }
+        c += 1;
+    }
+    println(f"{c}");
+}

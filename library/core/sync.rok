@@ -510,3 +510,10 @@ impl<T> Cell<T> {
         old
     }
 }
+
+impl<T: Default> Cell<T> {
+    /// The value, leaving `T::default()` in its place.
+    pub fn take(self) -> T {
+        self.replace(T::default())
+    }
+}

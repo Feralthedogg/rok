@@ -32,7 +32,8 @@ commands:
   bench [path] [filter]  build (-O2 unless -O given) and time the `#[bench]`
                          functions; prints ns/iter (+/- deviation)
   check [path | -]       diagnose only, no native build (`-`: source on stdin)
-  repl                   interactive session (:type <expr>, :reset, :quit)
+  repl [--replay]        interactive session (:type <expr>, :reset, :quit);
+                         --replay reruns every cell for each new one
   lsp                    language server on stdio (`rok lsp` / `rokls` run it)
   fmt [path]             format .rok files in place (file or directory)
   lint [path]            compile diagnostics plus lint checks (no native
@@ -119,6 +120,8 @@ struct Args {
     show_output: bool,
     lint_levels: Vec<(Level, String)>,
     list: bool,
+    /// `repl --replay`.
+    replay: bool,
     iters: Option<u64>,
     samples: Option<u64>,
     /// An `-O` level or `--release` was given.
@@ -211,6 +214,7 @@ fn parse_args(raw: Vec<String>) -> Args {
             "--diff" => a.diff = true,
             "--show-output" => a.show_output = true,
             "--list" => a.list = true,
+            "--replay" => a.replay = true,
             "-A" | "-W" | "-D" | "--allow" | "--warn" | "--deny" => {
                 let lvl = match name.as_str() {
                     "-A" | "--allow" => Level::Allow,
@@ -341,7 +345,13 @@ fn main() {
         "repl" => {
             let a = with_defaults(a);
             let tty = std::io::stdin().is_terminal();
-            process::exit(rokc_tools::repl::main(a.bootstrap, a.externs, a.opts, tty));
+            process::exit(rokc_tools::repl::main(
+                a.bootstrap,
+                a.externs,
+                a.opts,
+                tty,
+                a.replay,
+            ));
         }
         "run" => cmd_run(&with_defaults(a)),
         "test" => cmd_test(&with_defaults(a)),

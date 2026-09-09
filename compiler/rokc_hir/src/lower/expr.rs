@@ -593,20 +593,21 @@ pub(super) fn lower_assign(
                 return Some(HirStmt::Expr(set));
             }
             if matches!(arr_h.ty, HirTy::Struct(_) | HirTy::Enum(_)) {
-                let args = [
-                    CallArg::Positional((**idx_expr).clone()),
-                    CallArg::Positional(value.clone()),
-                ];
+                let rest = [CallArg::Positional(value.clone())];
                 let span = target.span;
-                return Some(HirStmt::Expr(method_call_on(
+                return Some(HirStmt::Expr(index_call(
                     ctx,
                     arr_h,
                     "index_set",
-                    &args,
+                    idx_expr,
+                    &rest,
                     span,
                 )));
             }
-            let idx_h = lower_expected(ctx, idx_expr, HirTy::Unknown);
+            let idx_h = match arr_h.ty {
+                HirTy::Array(_, n) => array_position(ctx, idx_expr, n),
+                _ => lower_expected(ctx, idx_expr, HirTy::Unknown),
+            };
             let elem = match (&arr_h.kind, &arr_h.ty) {
                 (HirExprKind::Local(l), HirTy::Array(elem, _)) => Some((*l, (**elem).clone())),
                 (_, HirTy::Unknown) => return None,
@@ -646,7 +647,6 @@ pub(super) fn lower_assign(
                 );
                 return None;
             };
-            check_index_ty(ctx, &idx_h);
             let v = lower_expected(ctx, value, elem_ty.clone());
             let value = coerce(ctx, &elem_ty, v, &|| "the array element".to_owned());
             Some(HirStmt::ArrayAssign {
@@ -989,6 +989,62 @@ pub(super) fn lower_expr(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
     }
 }
 
+/// `operand as ty` (spec 2.10.5): numeric / bool / char casts.
+fn lower_cast(
+    ctx: &mut LowerCtx<'_>,
+    operand: &Expr,
+    ty: &Ty,
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let operand_h = lower_expected(ctx, operand, HirTy::Unknown);
+    // Spec 2.10.5: monomorphized bodies need `as T` to substitute
+    // the concrete type for the type-param (`resolve_ast_ty`).
+    let to_ty = ctx.resolve_ast_ty(ty);
+    let from_ty = operand_h.ty.clone();
+    let castable = |t: &HirTy| matches!(t, HirTy::Prim(p) if p.is_int() || p.is_float() || matches!(p, PrimTy::Bool | PrimTy::CChar | PrimTy::Char));
+    if !(from_ty == to_ty
+        || matches!(from_ty, HirTy::Unknown)
+        || matches!(to_ty, HirTy::Unknown)
+        || (castable(&from_ty) && castable(&to_ty)))
+    {
+        return ctx.error_expr(
+            span,
+            format!(
+                "cannot cast `{}` as `{}` (only numeric / bool / char casts){}",
+                ctx.ty_name(&from_ty),
+                ctx.ty_name(&to_ty),
+                optional_cast_hint(ty)
+            ),
+        );
+    }
+    // Like Rust: only `u8` (always a scalar value) casts to
+    // `char`; a wider value may be a surrogate or past U+10FFFF.
+    if to_ty == HirTy::Prim(PrimTy::Char)
+        && !matches!(
+            from_ty,
+            HirTy::Unknown | HirTy::Prim(PrimTy::U8 | PrimTy::Char)
+        )
+    {
+        return ctx.error_expr(
+            span,
+            format!(
+                "only `u8` can be cast as `char`, not `{}`; use `char::from_u32(n)` \
+                 (`char | none`) for a wider value",
+                ctx.ty_name(&from_ty)
+            ),
+        );
+    }
+    HirExpr {
+        kind: HirExprKind::Cast {
+            operand: Box::new(operand_h),
+            from_ty,
+            to_ty: to_ty.clone(),
+        },
+        ty: to_ty,
+        span,
+    }
+}
+
 /// `x as T?` casts to the type `T?` (spec 2.6.5); say so when the cast
 /// fails, since `?` propagation was likely meant.
 fn optional_cast_hint(ty: &Ty) -> &'static str {
@@ -1225,19 +1281,35 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
         }
         ExprKind::List(items) => lower_list_lit(ctx, items, span),
         ExprKind::ArrayRepeat { value, len } => lower_array_repeat(ctx, value, len, span),
+        // `xs[a..b]` / `xs[..]` (stdlib 2.9.7 spelling) is `xs[a:b]` / `xs[:]`.
+        ExprKind::Index(arr, idx)
+            if matches!(
+                &idx.kind,
+                ExprKind::Range {
+                    inclusive: false,
+                    ..
+                }
+            ) =>
+        {
+            let ExprKind::Range { start, end, .. } = &idx.kind else {
+                unreachable!()
+            };
+            lower_slice(ctx, arr, start.as_deref(), end.as_deref(), None, span)
+        }
         ExprKind::Index(arr, idx) => {
             let arr_h = lower_expected(ctx, arr, HirTy::Unknown);
             // A struct / enum indexes through `Index::index` (spec 3.6).
             if matches!(arr_h.ty, HirTy::Struct(_) | HirTy::Enum(_)) {
-                let args = [CallArg::Positional((**idx).clone())];
-                return method_call_on(ctx, arr_h, "index", &args, span);
+                return index_call(ctx, arr_h, "index", idx, &[], span);
             }
             // `GcBuf<T>`'s `Index` is the unchecked `rok.buf.get` primitive.
             if let HirTy::GcBuf(elem) = arr_h.ty.clone() {
                 return buf_access(ctx, arr_h, *elem, idx, None, span);
             }
-            let idx_h = lower_expected(ctx, idx, HirTy::Unknown);
-            check_index_ty(ctx, &idx_h);
+            let idx_h = match arr_h.ty {
+                HirTy::Array(_, n) => array_position(ctx, idx, n),
+                _ => lower_expected(ctx, idx, HirTy::Unknown),
+            };
             let elem_ty = match &arr_h.ty {
                 HirTy::Array(t, _) => (**t).clone(),
                 HirTy::Unknown => return arr_h,
@@ -1304,38 +1376,7 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             let lhs_h = lower_expected(ctx, lhs, HirTy::Unknown);
             desugar_nullish_coalesce(ctx, lhs_h, rhs, span)
         }
-        ExprKind::Cast(operand, ty) => {
-            let operand_h = lower_expected(ctx, operand, HirTy::Unknown);
-            // Spec 2.10.5: monomorphized bodies need `as T` to substitute
-            // the concrete type for the type-param (`resolve_ast_ty`).
-            let to_ty = ctx.resolve_ast_ty(ty);
-            let from_ty = operand_h.ty.clone();
-            let castable = |t: &HirTy| matches!(t, HirTy::Prim(p) if p.is_int() || p.is_float() || matches!(p, PrimTy::Bool | PrimTy::CChar | PrimTy::Char));
-            if !(from_ty == to_ty
-                || matches!(from_ty, HirTy::Unknown)
-                || matches!(to_ty, HirTy::Unknown)
-                || (castable(&from_ty) && castable(&to_ty)))
-            {
-                return ctx.error_expr(
-                    span,
-                    format!(
-                        "cannot cast `{}` as `{}` (only numeric / bool / char casts){}",
-                        ctx.ty_name(&from_ty),
-                        ctx.ty_name(&to_ty),
-                        optional_cast_hint(ty)
-                    ),
-                );
-            }
-            HirExpr {
-                kind: HirExprKind::Cast {
-                    operand: Box::new(operand_h),
-                    from_ty,
-                    to_ty: to_ty.clone(),
-                },
-                ty: to_ty,
-                span,
-            }
-        }
+        ExprKind::Cast(operand, ty) => lower_cast(ctx, operand, ty, span),
         ExprKind::Await(inner) => super::coro::lower_await(ctx, inner, span),
         ExprKind::Yield(value) => super::coro::lower_yield(ctx, value.as_deref(), span),
         ExprKind::Range {
@@ -1360,38 +1401,19 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
         }
         ExprKind::MagicLiteral(cands) => lower_magic(ctx, cands, span),
         ExprKind::Is(operand, pat) => lower_is(ctx, operand, pat, span),
-        // Spec 3.6.2: `a[i:j]` is `a.slice(i, j)`; a missing bound is `0`
-        // / `a.len()` (the target is then written twice — fine for the
-        // locals and literals it is used on). Only `str` has `slice` yet.
         ExprKind::Slice {
             target,
             start,
             end,
             step,
-        } => {
-            if step.is_some() {
-                return unsupported(ctx, "a slice step (`a[i:j:k]`)");
-            }
-            let call = |recv: Expr, method: &str, args: Vec<Expr>| Expr {
-                kind: ExprKind::MethodCall {
-                    receiver: Box::new(recv),
-                    method: method.to_owned(),
-                    type_args: Vec::new(),
-                    args: args.into_iter().map(CallArg::Positional).collect(),
-                    trailing_closure: None,
-                },
-                span,
-            };
-            let start = start.as_deref().cloned().unwrap_or_else(|| Expr {
-                kind: ExprKind::Literal(AstLit::Int("0usize".to_owned())),
-                span,
-            });
-            let end = end
-                .as_deref()
-                .cloned()
-                .unwrap_or_else(|| call((**target).clone(), "len", Vec::new()));
-            lower_expr(ctx, &call((**target).clone(), "slice", vec![start, end]))
-        }
+        } => lower_slice(
+            ctx,
+            target,
+            start.as_deref(),
+            end.as_deref(),
+            step.as_deref(),
+            span,
+        ),
         ExprKind::LetElse { .. } => unsupported(ctx, "`let ... else` in expression position"),
         ExprKind::AsyncBlock(_) | ExprKind::YieldBlock(_) | ExprKind::AsyncYieldBlock(_) => {
             super::coro::lower_coro_expr(ctx, &expr.kind, span)
@@ -6585,6 +6607,9 @@ pub(super) fn lower_path(
     let self_segs = self_path_segs(ctx, path);
     let segs: Vec<&str> = self_segs.iter().map(String::as_str).collect();
     if let [name] = segs.as_slice() {
+        if let Some(h) = ctx.splices.get(*name) {
+            return h.clone();
+        }
         if let Some(local) = ctx.lookup(name) {
             if let Some((target, None)) = &ctx.infer_probe {
                 let expected = ctx
@@ -7180,4 +7205,306 @@ fn lower_magic(
         ctx.explicit_generics = subst;
     }
     lower_expected(ctx, &call, expected)
+}
+
+/// An AST stand-in (a `#sN` path) for the already lowered `h`, so a
+/// desugar can place it without lowering its source twice. Use it once:
+/// each use evaluates `h` again.
+fn splice(ctx: &mut LowerCtx<'_>, h: HirExpr) -> Expr {
+    let span = h.span;
+    let name = format!("#s{}", ctx.splices.len());
+    ctx.splices.insert(name.clone(), h);
+    Expr {
+        kind: ExprKind::Path(rokc_ast::Path {
+            segments: vec![rokc_ast::PathSegment {
+                name,
+                generics: Vec::new(),
+            }],
+            span,
+        }),
+        span,
+    }
+}
+
+const fn is_signed(ty: &HirTy) -> bool {
+    matches!(ty, HirTy::Prim(p) if p.is_signed_int())
+}
+
+/// An index / slice bound in a `usize` position slot: a negative
+/// untyped literal (`xs[-1]`) is an `isize`.
+fn lower_position(ctx: &mut LowerCtx<'_>, idx: &Expr) -> HirExpr {
+    let neg = matches!(&idx.kind, ExprKind::OpPrefix { op, .. } if op == "-");
+    let want = if neg && is_untyped_literal(idx) {
+        PrimTy::Isize
+    } else {
+        PrimTy::Usize
+    };
+    lower_expected(ctx, idx, HirTy::Prim(want))
+}
+
+/// Spec 3.6: `rok::core::index::index_from_end(i as isize, len)` — a
+/// signed position `i` < 0 is `len + i`.
+fn from_end(i: Expr, len: Expr, span: rokc_diagnostic::Span) -> Expr {
+    let mk = |kind| Expr { kind, span };
+    let path = |names: &[&str]| rokc_ast::Path {
+        segments: names
+            .iter()
+            .map(|n| rokc_ast::PathSegment {
+                name: (*n).to_owned(),
+                generics: Vec::new(),
+            })
+            .collect(),
+        span,
+    };
+    let isize = Ty {
+        kind: AstTyKind::Path(path(&["isize"])),
+        span,
+    };
+    mk(ExprKind::Call {
+        callee: Box::new(mk(ExprKind::Path(path(&[
+            "rok",
+            "core",
+            "index",
+            "index_from_end",
+        ])))),
+        args: vec![
+            CallArg::Positional(mk(ExprKind::Cast(Box::new(i), isize))),
+            CallArg::Positional(len),
+        ],
+        trailing_closure: None,
+    })
+}
+
+fn len_of(recv: &Expr, span: rokc_diagnostic::Span) -> Expr {
+    Expr {
+        kind: ExprKind::MethodCall {
+            receiver: Box::new(recv.clone()),
+            method: "len".to_owned(),
+            type_args: Vec::new(),
+            args: Vec::new(),
+            trailing_closure: None,
+        },
+        span,
+    }
+}
+
+/// Index `idx` of a fixed array of length `n`; a signed one counts
+/// from the end (spec 3.6).
+fn array_position(ctx: &mut LowerCtx<'_>, idx: &Expr, n: u32) -> HirExpr {
+    let i = lower_position(ctx, idx);
+    check_index_ty(ctx, &i);
+    if !is_signed(&i.ty) {
+        return i;
+    }
+    let span = i.span;
+    let len = Expr {
+        kind: ExprKind::Literal(AstLit::Int(format!("{n}usize"))),
+        span,
+    };
+    let i = splice(ctx, i);
+    lower_expr(ctx, &from_end(i, len, span))
+}
+
+/// Does `ty`'s `method` (`index` / `index_set` / `slice`) take a
+/// position (`usize`, or `Range<usize>` for `slice`) — a `List` / `Slice`
+/// / `str`, not a `Dict<i64, V>`?
+fn takes_position(ctx: &LowerCtx<'_>, ty: &HirTy, method: &str) -> bool {
+    fn text(t: &Ty) -> String {
+        let AstTyKind::Path(p) = &t.kind else {
+            return String::new();
+        };
+        let Some(seg) = p.segments.last() else {
+            return String::new();
+        };
+        if seg.generics.is_empty() {
+            return seg.name.clone();
+        }
+        let args: Vec<String> = seg.generics.iter().map(text).collect();
+        format!("{}<{}>", seg.name, args.join(", "))
+    }
+    let param = match pick_method(ctx, ty, method, None) {
+        Ok(Some(MethodPick::Concrete(id))) => {
+            ctx.sig_by_id(id).param_tys.get(1).map(|t| ctx.ty_name(t))
+        }
+        Ok(Some(MethodPick::Generic(gm))) => {
+            gm.def.params.get(1).and_then(|p| p.ty.as_ref()).map(text)
+        }
+        _ => None,
+    };
+    let want = if method == "slice" {
+        "Range<usize>"
+    } else {
+        "usize"
+    };
+    param.is_some_and(|p| p == want || p.ends_with(&format!("::{want}")))
+}
+
+/// `recv.index(idx)` / `recv.index_set(idx, rest..)` (spec 3.6). On a
+/// position-indexed receiver (`takes_position`) a signed `idx` counts
+/// from the end: `{ let #t = recv; #t.index(index_from_end(idx, #t.len())) }`.
+/// An unsigned one lowers exactly as a plain call.
+fn index_call(
+    ctx: &mut LowerCtx<'_>,
+    recv_h: HirExpr,
+    method: &str,
+    idx: &Expr,
+    rest: &[CallArg],
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let mut args = rest.to_vec();
+    if !takes_position(ctx, &recv_h.ty, method) {
+        args.insert(0, CallArg::Positional(idx.clone()));
+        return method_call_on(ctx, recv_h, method, &args, span);
+    }
+    let i = lower_position(ctx, idx);
+    if !is_signed(&i.ty) {
+        args.insert(0, CallArg::Positional(splice(ctx, i)));
+        return method_call_on(ctx, recv_h, method, &args, span);
+    }
+    let t = tmp_path("t", span);
+    let i = splice(ctx, i);
+    args.insert(0, CallArg::Positional(from_end(i, len_of(&t, span), span)));
+    let recv = splice(ctx, recv_h);
+    let call = Expr {
+        kind: ExprKind::MethodCall {
+            receiver: Box::new(t.clone()),
+            method: method.to_owned(),
+            type_args: Vec::new(),
+            args,
+            trailing_closure: None,
+        },
+        span,
+    };
+    lower_expr(ctx, &block_of(vec![let_stmt(&t, recv)], call, span))
+}
+
+fn block_of(stmts: Vec<Stmt>, tail: Expr, span: rokc_diagnostic::Span) -> Expr {
+    Expr {
+        kind: ExprKind::Block(Block {
+            stmts,
+            trailing: Some(Box::new(tail)),
+            span,
+            label: None,
+        }),
+        span,
+    }
+}
+
+/// `t[a:b:k]` (`slice_desugar`). On a position-sliced target
+/// (`takes_position`) a signed bound counts from the end:
+/// `{ let #t = t; #t[index_from_end(a, #t.len()):b:k] }`.
+fn lower_slice(
+    ctx: &mut LowerCtx<'_>,
+    target: &Expr,
+    start: Option<&Expr>,
+    end: Option<&Expr>,
+    step: Option<&Expr>,
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let t_h = lower_expected(ctx, target, HirTy::Unknown);
+    if !takes_position(ctx, &t_h.ty, "slice") {
+        let t = splice(ctx, t_h);
+        return lower_expr(ctx, &slice_desugar(&t, start, end, step, span));
+    }
+    let a = start.map(|e| lower_position(ctx, e));
+    let b = end.map(|e| lower_position(ctx, e));
+    let signed = |h: &Option<HirExpr>| h.as_ref().is_some_and(|h| is_signed(&h.ty));
+    if !signed(&a) && !signed(&b) {
+        let t = splice(ctx, t_h);
+        let a = a.map(|h| splice(ctx, h));
+        let b = b.map(|h| splice(ctx, h));
+        return lower_expr(ctx, &slice_desugar(&t, a.as_ref(), b.as_ref(), step, span));
+    }
+    let t = tmp_path("t", span);
+    let recv = splice(ctx, t_h);
+    let mut pos = |h: Option<HirExpr>| {
+        h.map(|h| {
+            let neg = is_signed(&h.ty);
+            let e = splice(ctx, h);
+            if neg {
+                from_end(e, len_of(&t, span), span)
+            } else {
+                e
+            }
+        })
+    };
+    let (a, b) = (pos(a), pos(b));
+    let body = slice_desugar(&t, a.as_ref(), b.as_ref(), step, span);
+    lower_expr(ctx, &block_of(vec![let_stmt(&t, recv)], body, span))
+}
+
+/// Spec 3.6.2 / stdlib 2.3.4: `t[a:b]` is `t.slice(a..b)` (`Sliceable`)
+/// and `t[a:b:k]` is `t.slice(a..b).step(k)`. A missing `a` is `0`; a
+/// missing `b` is `t.len()`, with `t` evaluated once into a temporary.
+fn slice_desugar(
+    target: &Expr,
+    start: Option<&Expr>,
+    end: Option<&Expr>,
+    step: Option<&Expr>,
+    span: rokc_diagnostic::Span,
+) -> Expr {
+    const TEMP: &str = "__rok_slice_target";
+    let call = |recv: Expr, method: &str, args: Vec<Expr>| Expr {
+        kind: ExprKind::MethodCall {
+            receiver: Box::new(recv),
+            method: method.to_owned(),
+            type_args: Vec::new(),
+            args: args.into_iter().map(CallArg::Positional).collect(),
+            trailing_closure: None,
+        },
+        span,
+    };
+    let temp = end.is_none();
+    let recv = if temp {
+        Expr {
+            kind: ExprKind::Path(rokc_ast::Path {
+                segments: vec![rokc_ast::PathSegment {
+                    name: TEMP.to_owned(),
+                    generics: Vec::new(),
+                }],
+                span,
+            }),
+            span,
+        }
+    } else {
+        target.clone()
+    };
+    let start = start.cloned().unwrap_or_else(|| Expr {
+        kind: ExprKind::Literal(AstLit::Int("0usize".to_owned())),
+        span,
+    });
+    let end = end
+        .cloned()
+        .unwrap_or_else(|| call(recv.clone(), "len", Vec::new()));
+    let range = Expr {
+        kind: ExprKind::Range {
+            start: Some(Box::new(start)),
+            end: Some(Box::new(end)),
+            inclusive: false,
+        },
+        span,
+    };
+    let mut e = call(recv, "slice", vec![range]);
+    if let Some(k) = step {
+        e = call(e, "step", vec![k.clone()]);
+    }
+    if !temp {
+        return e;
+    }
+    Expr {
+        kind: ExprKind::Block(rokc_ast::Block {
+            stmts: vec![rokc_ast::Stmt {
+                kind: rokc_ast::StmtKind::Let {
+                    name: TEMP.to_owned(),
+                    ty: None,
+                    init: target.clone(),
+                },
+                span,
+            }],
+            trailing: Some(Box::new(e)),
+            span,
+            label: None,
+        }),
+        span,
+    }
 }

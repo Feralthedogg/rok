@@ -1139,6 +1139,9 @@ struct LowerCtx<'a> {
     /// the local, and the first concrete expected type it is read
     /// under (`expr::infer_from_later_use`).
     infer_probe: Option<(LocalId, Option<HirTy>)>,
+    /// Already lowered expressions an AST desugar refers to by a `#sN`
+    /// path (`expr::splice`).
+    splices: HashMap<String, HirExpr>,
 }
 
 /// Where a lowering probe started: what to roll back afterwards.
@@ -1236,6 +1239,7 @@ impl<'a> LowerCtx<'a> {
             coro: None,
             assoc_names: Vec::new(),
             infer_probe: None,
+            splices: HashMap::new(),
         }
     }
 

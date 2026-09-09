@@ -75,6 +75,7 @@ pub fn lower(module: &HirModule) -> MirModule {
         functions.push(ctor_fn);
     }
     finish_fn_values(&mut functions, &fnv);
+    functions.retain(|f| !module.unlowered.contains(&f.id));
     // Lazy static initializers are called from codegen's access checks.
     let roots: Vec<FunctionId> = module
         .exports

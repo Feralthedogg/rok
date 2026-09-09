@@ -85,8 +85,8 @@ impl AsPath for str {
 /// `s` without trailing `/`s (but `/` stays `/`).
 fn trim_slashes(s: str) -> str {
     let n = s.len();
-    while n > 1 && s.slice(n - 1, n) == "/" { n -= 1; }
-    s.slice(0, n)
+    while n > 1 && s[n - 1:n] == "/" { n -= 1; }
+    s[:n]
 }
 
 impl Path {
@@ -136,7 +136,7 @@ impl Path {
         let name = self.file_name()?;
         let dot = name.rfind(".") ?? 0usize;
         if dot == 0 { return name; }
-        name.slice(0, dot)
+        name[:dot]
     }
 
     /// After the last `.` of `file_name` (`none` for `.bashrc`, `a`).
@@ -144,7 +144,7 @@ impl Path {
         let name = self.file_name()?;
         let dot = name.rfind(".") ?? 0usize;
         if dot == 0 { return none; }
-        name.slice(dot + 1, name.len())
+        name[dot + 1:]
     }
 
     pub fn components(self) -> Components {

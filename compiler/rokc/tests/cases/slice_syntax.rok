@@ -1,0 +1,57 @@
+// expect-exit: 0
+// expect-stdout:
+// [2, 3, 4] len 3 sum 9
+// [1, 3, 5] [5, 4, 3, 2, 1] [4, 2]
+// [4, 5] [1, 2] [1, 2, 3, 4, 5] [2, 3]
+// [3] first 3 last 3 get none
+// sub [3, 4] [4, 3]
+// live 30 owned [2, 30, 4]
+// array [8, 9] [7, 8] [9, 8, 7]
+// str 세계 ello hello h
+// buf bc
+// evaluated once 1 [20, 30]
+// empty true [] 0
+// for 2 3 4
+// eq true
+fn make(n: Cell<i32>) -> List<i32> {
+    n.set(n.get() + 1);
+    [10, 20, 30]
+}
+
+fn main() {
+    let xs: List<i32> = [1, 2, 3, 4, 5];
+    let s: Slice<i32> = xs[1:4];
+    println(f"{s.debug()} len {s.len()} sum {s.iter().sum()}");
+    println(f"{xs[::2].debug()} {xs[::-1].debug()} {xs[1:4:-2].debug()}");
+    println(f"{xs[3:].debug()} {xs[:2].debug()} {xs[..].debug()} {xs[1..3].debug()}");
+    let one = xs[2:3];
+    println(f"{one.debug()} first {one.first() ?? 0} last {one.last() ?? 0} get {if one.get(1) is none { "none" } else { "some" }}");
+    println(f"sub {s[1:].debug()} {s[::-1][:2].debug()}");
+    xs[2] = 30;
+    let owned = s.to_list();
+    println(f"live {s[1]} owned {owned.debug()}");
+
+    let a: [i32; 3] = [7, 8, 9];
+    println(f"array {a[1:].debug()} {a[:2].debug()} {a[::-1].debug()}");
+
+    let t = "hello, 세계!";
+    println(f"str {t[7:13]} {t[1:5]} {t[:5]} {t[..1]}");
+    let b = StrBuf::new();
+    b.push_str("abcd");
+    println(f"buf {b[1:3]}");
+
+    let calls = Cell::new(0);
+    let tail = make(calls)[1:];
+    println(f"evaluated once {calls.get()} {tail.debug()}");
+
+    let e = xs[5:];
+    println(f"empty {e.is_empty()} {e.debug()} {e.to_list().len()}");
+    let line = "for";
+    for x in xs[1:4] {
+        let y = if x == 30 { 3 } else { x };
+        line = line + f" {y}";
+    }
+    println(line);
+    let z: List<i32> = [2, 30, 4];
+    println(f"eq {xs[1:4] == z[:]}");
+}

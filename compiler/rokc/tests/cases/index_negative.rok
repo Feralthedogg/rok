@@ -1,0 +1,70 @@
+// expect-exit: 0
+// expect-stdout:
+// list 5 4 2 2 4
+// set [1, 20, 3, 40, 50]
+// array 9 7 8 [7, 8, 90]
+// slice 40 3 40
+// bounds [3, 40, 50] [1, 20, 3, 40] [20, 3, 40] [40, 50] [40, 3, 20]
+// array [8, 90] str llo ell lo
+// elem 6 field 9
+// dict 5
+// once 30 [20, 30] 1
+fn make(n: Cell<i32>) -> List<i32> {
+    n.set(n.get() + 1);
+    [10, 20, 30]
+}
+
+struct P {
+    x: i32;
+}
+
+struct Holder {
+    arr: [i32; 2];
+}
+
+// Spec 3.6: a signed index counts from the end (`len + i` when < 0);
+// an unsigned one is a plain position.
+fn main() {
+    let xs: List<i32> = [1, 2, 3, 4, 5];
+    let i: i64 = -2;
+    let j: i32 = 1;
+    let u: usize = 1;
+    let pos: isize = 3;
+    println(f"list {xs[-1]} {xs[i]} {xs[j]} {xs[u]} {xs[pos]}");
+    xs[-1] = 50;
+    xs[i] = 40;
+    xs[-4] = 20;
+    println(f"set {xs.debug()}");
+
+    let a = [7, 8, 9];
+    let k: i8 = -3;
+    let before = f"{a[-1]} {a[k]} {a[-2]}";
+    a[-1] = 90;
+    println(f"array {before} {a.debug()}");
+
+    let s = xs[1:4];
+    println(f"slice {s[-1]} {s[-2]} {s[i + 1]}");
+
+    let neg_one: i32 = -1;
+    println(
+        f"bounds {xs[-3:].debug()} {xs[:-1].debug()} {xs[j:neg_one].debug()} {xs[i:].debug()} {xs[1:-1:-1].debug()}",
+    );
+    println(f"array {a[-2:].debug()} str {"hello"[-3:]} {"hello"[1:-1]} {"hello"[-2..]}");
+
+    let ps: List<P> = [P { x: 5 }, P { x: 0 }];
+    ps[-1].x = 6;
+    let h = Holder { arr: [1, 2] };
+    h.arr[-1] = 9;
+    println(f"elem {ps[-1].x} field {h.arr[-1]}");
+
+    // A `Dict<i64, _>` key is a key, not a position.
+    let d: Dict<i64, i32> = Dict::new();
+    d[-1] = 5;
+    println(f"dict {d[-1]}");
+
+    // The target is evaluated once.
+    let calls = Cell::new(0);
+    let last = make(calls)[-1];
+    let tail = make(calls)[-2:];
+    println(f"once {last} {tail.debug()} {calls.get() - 1}");
+}

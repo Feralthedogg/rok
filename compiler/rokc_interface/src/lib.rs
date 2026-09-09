@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use rokc_driver::{CompiledModule, CompilerConfig, compile_file, compile_source};
 
 pub use rokc_diagnostic::{ErrorKind, RokDiagnostic, report, set_report_style};
-pub use rokc_driver::{BuildOptions, Demangled, EmitKind, SourceFile, TempDir, demangle};
+pub use rokc_driver::{
+    BuildOptions, Demangled, EmitKind, ReplCell, SourceFile, TempDir, demangle, link_host,
+};
 
 #[derive(Default)]
 pub struct Session {
@@ -131,6 +133,12 @@ impl CompileResult {
     /// Build an executable at `out` through mlir-opt / mlir-translate / clang.
     pub fn link(&self, opts: &BuildOptions, out: &Path) -> Result<(), RokDiagnostic> {
         rokc_driver::link_executable(self.module()?, &self.link_libraries, opts, out)
+    }
+
+    /// Build a REPL cell (`opts.repl`) as a shared library at `out`;
+    /// the GC type ids it used.
+    pub fn link_shared(&self, opts: &BuildOptions, out: &Path) -> Result<u32, RokDiagnostic> {
+        rokc_driver::link_shared(self.module()?, &self.link_libraries, opts, out)
     }
 
     /// Build a library package's static archive at `out` (spec 902.13).

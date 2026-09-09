@@ -1,0 +1,17 @@
+// expect-exit: 0
+// expect-stdout:
+// A 가 true true
+// 44032 122 B
+
+// `u8 as char` is the only integer cast to `char`; anything wider goes
+// through `char::from_u32` (`char | none`). `char as <int>` is allowed.
+fn main() {
+    let b: u8 = 65;
+    let n: u32 = 0xAC00;
+    let c = char::from_u32(n) ?? '?';
+    let surrogate = char::from_u32(0xD800u32);
+    let past = char::from_u32(0x110000u32);
+    println(f"{b as char} {c} {surrogate is none} {past is none}");
+    let t: char = try char::try_from(66u32) catch _ { '?' };
+    println(f"{c as u32} {'z' as u8} {t}");
+}

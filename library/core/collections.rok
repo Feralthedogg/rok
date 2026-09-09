@@ -1,4 +1,5 @@
-// rok::core::collections — List / Dict / Set (stdlib spec 2.9).
+// rok::core::collections — List / Dict / Set / OrderedDict / OrderedSet /
+// Slice (stdlib spec 2.9).
 //
 // Each collection is a small handle struct over GC buffers (`raw`):
 // copying the handle shares the collection, so the mutating methods
@@ -8,3 +9,6 @@ pub mod raw;
 pub mod list;
 pub mod dict;
 pub mod set;
+pub mod ordered_dict;
+pub mod ordered_set;
+pub mod slice;

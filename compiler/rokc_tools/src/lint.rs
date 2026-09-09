@@ -19,8 +19,9 @@
 use std::collections::{HashMap, HashSet};
 
 use rokc_ast::{
-    AttrArg, AttrBody, Attribute, Block, CallArg, Expr, ExprKind, FnDef, ImplItem, Item, Literal,
-    Pattern, PatternKind, Stmt, StmtKind, TraitItem, TryKind, Ty, TyKind, UseTree, UseTreeKind,
+    AccessTail, AttrArg, AttrBody, Attribute, Block, CallArg, Expr, ExprKind, FnDef, ImplItem,
+    Item, Literal, Pattern, PatternKind, Stmt, StmtKind, TraitItem, TryKind, Ty, TyKind, UseTree,
+    UseTreeKind,
 };
 use rokc_core::Visibility;
 use rokc_diagnostic::{ErrorKind, RokDiagnostic, Span};
@@ -876,6 +877,15 @@ impl<'a> Cx<'a> {
     }
 
     fn unused_imports(&mut self, items: &[Item]) {
+        // `use a::inner; use inner::f;` — a path's first segment may be an
+        // earlier import (spec 5.5).
+        for item in items {
+            if let Item::Use(u) = item {
+                if let Some(first) = u.tree.prefix.segments.first() {
+                    self.file_names.insert(first.name.clone());
+                }
+            }
+        }
         for item in items {
             match item {
                 Item::Use(u) if u.vis == Visibility::Private => {
@@ -1360,6 +1370,9 @@ impl AstVisitor for Cx<'_> {
                         self.file_names.insert(name.clone());
                     }
                 }
+            }
+            ExprKind::QuestionDot(_, AccessTail::Method { method, .. }) => {
+                self.file_names.insert(method.clone());
             }
             ExprKind::StructInit { path, .. } => {
                 self.file_names

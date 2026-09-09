@@ -4304,19 +4304,19 @@ impl<'a> Parser<'a> {
     #[allow(clippy::option_option)] // outer: is a slice; inner: parsed ok
     fn parse_slice(&mut self, target: &Expr) -> Option<Option<Expr>> {
         let save = self.pos;
-        let start = if matches!(self.peek(), TokenKind::Colon) {
+        let colon = |p: &Self| matches!(p.peek(), TokenKind::Colon | TokenKind::ColonColon);
+        let start = if colon(self) {
             None
         } else {
             let saved_diags = self.diagnostics.len();
             let e = self.parse_expr();
-            if e.is_none() || !matches!(self.peek(), TokenKind::Colon) {
+            if e.is_none() || !colon(self) {
                 self.pos = save;
                 self.diagnostics.truncate(saved_diags);
                 return None;
             }
             e.map(Box::new)
         };
-        self.bump(); // `:`
         let opt = |p: &mut Self| {
             if matches!(p.peek(), TokenKind::Colon | TokenKind::RBracket) {
                 Some(None)
@@ -4324,10 +4324,17 @@ impl<'a> Parser<'a> {
                 p.parse_expr().map(|e| Some(Box::new(e)))
             }
         };
-        let Some(end) = opt(self) else {
-            return Some(None);
+        // `a::k` lexes `::` as one token: no end, then the step.
+        let (end, has_step) = if self.eat(&TokenKind::ColonColon) {
+            (None, true)
+        } else {
+            self.bump(); // `:`
+            let Some(end) = opt(self) else {
+                return Some(None);
+            };
+            (end, self.eat(&TokenKind::Colon))
         };
-        let step = if self.eat(&TokenKind::Colon) {
+        let step = if has_step {
             let Some(step) = opt(self) else {
                 return Some(None);
             };

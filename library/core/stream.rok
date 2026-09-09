@@ -1,10 +1,16 @@
-// rok::core::stream — `Stream` / `IntoStream` (stdlib spec 2.8).
+// rok::core::stream — `Stream` / `IntoStream` / `FromStream` (stdlib
+// spec 2.8).
 //
 // `for await x in s` polls `s.poll_next(ref ctx)` (after
 // `s.into_stream()` when `s` has no `poll_next`) like `await`, until it
 // is `Ready(none)`.
+//
+// The adapters (2.8.5) are provided methods of `Stream` returning the
+// structs below (`stream::Map<S, U>` is not `iter::Map`). `throttle` /
+// `buffered` / `buffer_unordered` wrap an `async yield` stream built by
+// a generic helper, the others poll their source directly.
 
-use rok::core::future::{Context, Future, Poll};
+use rok::core::future::{AsyncFuture, Context, Future, Poll};
 use rok::core::task;
 use rok::core::task::Task;
 use rok::core::task::time::Duration;
@@ -12,12 +18,94 @@ use rok::core::task::time::Duration;
 pub trait Stream {
     type Item;
     fn poll_next(ref self, ref ctx: Context) -> Poll<Item | none>;
+
+    /// `f` of each item.
+    fn map<U>(self, f: fn(Item) -> U) -> Map<Self, U> {
+        Map { s: self, f: f }
+    }
+
+    /// The items `pred` accepts.
+    fn filter(self, pred: fn(Item) -> bool) -> Filter<Self> {
+        Filter { s: self, pred: pred }
+    }
+
+    /// At most the first `n` items.
+    fn take(self, n: usize) -> Take<Self> {
+        Take { s: self, left: n }
+    }
+
+    /// All but the first `n` items.
+    fn skip(self, n: usize) -> Skip<Self> {
+        Skip { s: self, n: n }
+    }
+
+    /// The items, at most one per `dur`.
+    fn throttle(self, dur: Duration) -> Throttle<Self> {
+        Throttle { inner: throttle_of(self, dur) }
+    }
+
+    /// The outputs of a stream of futures, in stream order, running up
+    /// to `n` of them at once.
+    fn buffered(self, n: usize) -> Buffered<Self> {
+        Buffered { inner: buffered_of(self, n, true) }
+    }
+
+    /// Like `buffered`, in completion order.
+    fn buffer_unordered(self, n: usize) -> BufferUnordered<Self> {
+        BufferUnordered { inner: buffered_of(self, n, false) }
+    }
+
+    /// All items gathered into a `FromStream` collection (2.8.6); a
+    /// `List` when the slot does not pick one.
+    async fn collect<C: FromStream<Item> = List<Item>>(self) -> C {
+        await C::from_stream(self)
+    }
+
+    /// `f` of each item, in order.
+    async fn for_each(self, f: fn(Item)) {
+        await for_each_of(self, f)
+    }
 }
 
 pub trait IntoStream {
     type Item;
     type IntoStream;
     fn into_stream(self) -> IntoStream;
+}
+
+/// `collect`'s target (2.8.6): a collection built from a stream's items.
+pub trait FromStream<T> {
+    async fn from_stream<S>(s: S) -> Self;
+}
+
+impl<T> FromStream<T> for List<T> {
+    async fn from_stream<S>(s: S) -> List<T> {
+        let out: List<T> = List::new();
+        for await x in s {
+            out.push(x);
+        }
+        out
+    }
+}
+
+impl<T: Hash> FromStream<T> for Set<T> {
+    async fn from_stream<S>(s: S) -> Set<T> {
+        let out: Set<T> = Set::new();
+        for await x in s {
+            out.insert(x);
+        }
+        out
+    }
+}
+
+impl<K: Hash, V> FromStream<(K, V)> for Dict<K, V> {
+    async fn from_stream<S>(s: S) -> Dict<K, V> {
+        let out: Dict<K, V> = Dict::new();
+        for await (k, v) in s {
+            out.insert(k, v);
+        }
+        out
+    }
 }
 
 /// The value of an `async yield fn` call / `async yield { .. }` block.
@@ -33,133 +121,185 @@ impl<T> Stream for AsyncStream<T> {
     }
 }
 
-impl<T> AsyncStream<T> {
-    /// `f` of each item (stdlib 2.8.5).
-    pub fn map<U>(self, f: fn(T) -> U) -> AsyncStream<U> {
-        let s = self;
-        async yield {
-            for await x in s {
-                yield f(x);
-            }
-        }
-    }
+// ---- adapters (2.8.5) ----
 
-    /// The items `pred` accepts.
-    pub fn filter(self, pred: fn(T) -> bool) -> AsyncStream<T> {
-        let s = self;
-        async yield {
-            for await x in s {
-                if pred(x) {
-                    yield x;
+pub struct Map<S, U> {
+    s: S;
+    f: fn(S::Item) -> U;
+}
+
+impl<S: Stream, U> Stream for Map<S, U> {
+    type Item = U;
+    fn poll_next(ref self, ref ctx: Context) -> Poll<U | none> {
+        match self.s.poll_next(ref ctx) {
+            Poll::Ready(v) => {
+                if let x: S::Item = v {
+                    return Poll::Ready((self.f)(x));
                 }
+                Poll::Ready(none)
             }
+            Poll::Pending => Poll::Pending,
         }
-    }
-
-    /// At most the first `n` items.
-    pub fn take(self, n: usize) -> AsyncStream<T> {
-        let s = self;
-        async yield {
-            let left = n;
-            if left > 0 {
-                for await x in s {
-                    yield x;
-                    left -= 1;
-                    if left == 0 {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    /// All but the first `n` items.
-    pub fn skip(self, n: usize) -> AsyncStream<T> {
-        let s = self;
-        async yield {
-            let left = n;
-            for await x in s {
-                if left > 0 {
-                    left -= 1;
-                } else {
-                    yield x;
-                }
-            }
-        }
-    }
-
-    /// The items, at most one per `dur` (2.8.5).
-    pub fn throttle(self, dur: Duration) -> AsyncStream<T> {
-        let s = self;
-        async yield {
-            let first = true;
-            for await x in s {
-                if !first {
-                    await task::sleep(dur);
-                }
-                first = false;
-                yield x;
-            }
-        }
-    }
-
-    /// All items, in order (stdlib 2.8.6 `collect` into a `List`).
-    pub async fn collect(self) -> List<T> {
-        let out: List<T> = List::new();
-        for await x in self {
-            out.push(x);
-        }
-        out
     }
 }
 
-impl<F: Future> AsyncStream<F> {
-    /// The futures' outputs in stream order, running up to `n` of them
-    /// at once (2.8.5).
-    pub fn buffered(self, n: usize) -> AsyncStream<F::Output> {
-        let s = self;
-        async yield {
-            let q: List<Task<F::Output>> = List::new();
-            for await f in s {
-                q.push(task::spawn_local(f));
-                if q.len() >= n {
-                    yield await q.remove(0);
+pub struct Filter<S> {
+    s: S;
+    pred: fn(S::Item) -> bool;
+}
+
+impl<S: Stream> Stream for Filter<S> {
+    type Item = S::Item;
+    fn poll_next(ref self, ref ctx: Context) -> Poll<S::Item | none> {
+        loop {
+            match self.s.poll_next(ref ctx) {
+                Poll::Ready(v) => {
+                    if let x: S::Item = v {
+                        if (self.pred)(x) {
+                            return Poll::Ready(x);
+                        }
+                    } else {
+                        return Poll::Ready(none);
+                    }
                 }
-            }
-            while q.len() > 0 {
-                yield await q.remove(0);
+                Poll::Pending => {
+                    return Poll::Pending;
+                }
             }
         }
     }
+}
 
-    /// Like `buffered`, in completion order.
-    pub fn buffer_unordered(self, n: usize) -> AsyncStream<F::Output> {
-        let s = self;
-        async yield {
-            let q: List<Task<F::Output>> = List::new();
-            for await f in s {
-                q.push(task::spawn_local(f));
-                if q.len() >= n {
-                    let i = await task::first_done(q);
-                    yield await q.remove(i);
+pub struct Take<S> {
+    s: S;
+    left: usize;
+}
+
+impl<S: Stream> Stream for Take<S> {
+    type Item = S::Item;
+    fn poll_next(ref self, ref ctx: Context) -> Poll<S::Item | none> {
+        if self.left == 0 {
+            return Poll::Ready(none);
+        }
+        let r = self.s.poll_next(ref ctx);
+        if let Poll::Ready(v) = r {
+            if v is none {
+                self.left = 0;
+            } else {
+                self.left -= 1;
+            }
+        }
+        r
+    }
+}
+
+pub struct Skip<S> {
+    s: S;
+    n: usize;
+}
+
+impl<S: Stream> Stream for Skip<S> {
+    type Item = S::Item;
+    fn poll_next(ref self, ref ctx: Context) -> Poll<S::Item | none> {
+        loop {
+            let r = self.s.poll_next(ref ctx);
+            if self.n == 0 {
+                return r;
+            }
+            match r {
+                Poll::Ready(v) => {
+                    if v is none {
+                        return Poll::Ready(none);
+                    }
+                    self.n -= 1;
+                }
+                Poll::Pending => {
+                    return Poll::Pending;
                 }
             }
-            while q.len() > 0 {
-                let i = await task::first_done(q);
+        }
+    }
+}
+
+pub struct Throttle<S> {
+    inner: AsyncStream<S::Item>;
+}
+
+impl<S: Stream> Stream for Throttle<S> {
+    type Item = S::Item;
+    fn poll_next(ref self, ref ctx: Context) -> Poll<S::Item | none> {
+        self.inner.poll_next(ref ctx)
+    }
+}
+
+pub struct Buffered<S> {
+    inner: AsyncStream< <S::Item as Future>::Output>;
+}
+
+impl<S: Stream> Stream for Buffered<S> {
+    type Item = <S::Item as Future>::Output;
+    fn poll_next(ref self, ref ctx: Context) -> Poll< <S::Item as Future>::Output | none> {
+        self.inner.poll_next(ref ctx)
+    }
+}
+
+pub struct BufferUnordered<S> {
+    inner: AsyncStream< <S::Item as Future>::Output>;
+}
+
+impl<S: Stream> Stream for BufferUnordered<S> {
+    type Item = <S::Item as Future>::Output;
+    fn poll_next(ref self, ref ctx: Context) -> Poll< <S::Item as Future>::Output | none> {
+        self.inner.poll_next(ref ctx)
+    }
+}
+
+fn throttle_of<S: Stream>(s: S, dur: Duration) -> AsyncStream<S::Item> {
+    async yield {
+        let first = true;
+        for await x in s {
+            if !first {
+                await task::sleep(dur);
+            }
+            first = false;
+            yield x;
+        }
+    }
+}
+
+fn buffered_of<S: Stream>(s: S, n: usize, ordered: bool) -> AsyncStream< <S::Item as Future>::Output> {
+    async yield {
+        let q: List<Task< <S::Item as Future>::Output>> = List::new();
+        for await f in s {
+            q.push(task::spawn_local(f));
+            if q.len() >= n {
+                let i = if ordered { 0 } else { await task::first_done(q) };
                 yield await q.remove(i);
             }
         }
+        while q.len() > 0 {
+            let i = if ordered { 0 } else { await task::first_done(q) };
+            yield await q.remove(i);
+        }
     }
 }
 
-/// Both streams' items as they come; ends when both have (2.8.8).
-pub fn merge<S1: Stream, S2: Stream<Item = S1::Item>>(a: S1, b: S2) -> Merge<S1, S2> {
+async fn for_each_of<S: Stream>(s: S, f: fn(S::Item)) {
+    for await x in s {
+        f(x);
+    }
+}
+
+// ---- combinators (2.8.8) ----
+
+/// Both streams' items as they come; ends when both have.
+pub fn merge<S1: Stream, S2: Stream>(a: S1, b: S2) -> Merge<S1, S2> {
     Merge { a: a, b: b, a_done: false, b_done: false, either: false }
 }
 
-/// Like `merge`, but ends as soon as either stream does (2.8.8).
-pub fn select<S1: Stream, S2: Stream<Item = S1::Item>>(a: S1, b: S2) -> Merge<S1, S2> {
-    Merge { a: a, b: b, a_done: false, b_done: false, either: true }
+/// Like `merge`, but ends as soon as either stream does.
+pub fn select<S1: Stream, S2: Stream>(a: S1, b: S2) -> Select<S1, S2> {
+    Select { m: Merge { a: a, b: b, a_done: false, b_done: false, either: true } }
 }
 
 pub struct Merge<S1, S2> {
@@ -171,14 +311,11 @@ pub struct Merge<S1, S2> {
     either: bool;
 }
 
-impl<S1: Stream, S2: Stream<Item = S1::Item>> Stream for Merge<S1, S2> {
-    type Item = S1::Item;
-    fn poll_next(ref self, ref ctx: Context) -> Poll<S1::Item | none> {
+impl<S1: Stream, S2: Stream> Stream for Merge<S1, S2> {
+    type Item = S1::Item | S2::Item;
+    fn poll_next(ref self, ref ctx: Context) -> Poll<S1::Item | S2::Item | none> {
         if !self.a_done {
-            let a = self.a;
-            let r = a.poll_next(ref ctx);
-            self.a = a;
-            if let Poll::Ready(v) = r {
+            if let Poll::Ready(v) = self.a.poll_next(ref ctx) {
                 if let x: S1::Item = v {
                     return Poll::Ready(x);
                 }
@@ -189,11 +326,8 @@ impl<S1: Stream, S2: Stream<Item = S1::Item>> Stream for Merge<S1, S2> {
             return Poll::Ready(none);
         }
         if !self.b_done {
-            let b = self.b;
-            let r = b.poll_next(ref ctx);
-            self.b = b;
-            if let Poll::Ready(v) = r {
-                if let x: S1::Item = v {
+            if let Poll::Ready(v) = self.b.poll_next(ref ctx) {
+                if let x: S2::Item = v {
                     return Poll::Ready(x);
                 }
                 self.b_done = true;
@@ -209,7 +343,18 @@ impl<S1: Stream, S2: Stream<Item = S1::Item>> Stream for Merge<S1, S2> {
     }
 }
 
-/// Pairs of the two streams' items, until either ends (2.8.8).
+pub struct Select<S1, S2> {
+    m: Merge<S1, S2>;
+}
+
+impl<S1: Stream, S2: Stream> Stream for Select<S1, S2> {
+    type Item = S1::Item | S2::Item;
+    fn poll_next(ref self, ref ctx: Context) -> Poll<S1::Item | S2::Item | none> {
+        self.m.poll_next(ref ctx)
+    }
+}
+
+/// Pairs of the two streams' items, until either ends.
 pub fn zip<S1: Stream, S2: Stream>(a: S1, b: S2) -> Zip<S1, S2> {
     Zip { a: a, b: b, left: none, right: none }
 }
@@ -225,10 +370,7 @@ impl<S1: Stream, S2: Stream> Stream for Zip<S1, S2> {
     type Item = (S1::Item, S2::Item);
     fn poll_next(ref self, ref ctx: Context) -> Poll<(S1::Item, S2::Item) | none> {
         if self.left is none {
-            let a = self.a;
-            let r = a.poll_next(ref ctx);
-            self.a = a;
-            if let Poll::Ready(v) = r {
+            if let Poll::Ready(v) = self.a.poll_next(ref ctx) {
                 if v is none {
                     return Poll::Ready(none);
                 }
@@ -236,10 +378,7 @@ impl<S1: Stream, S2: Stream> Stream for Zip<S1, S2> {
             }
         }
         if self.right is none {
-            let b = self.b;
-            let r = b.poll_next(ref ctx);
-            self.b = b;
-            if let Poll::Ready(v) = r {
+            if let Poll::Ready(v) = self.b.poll_next(ref ctx) {
                 if v is none {
                     return Poll::Ready(none);
                 }

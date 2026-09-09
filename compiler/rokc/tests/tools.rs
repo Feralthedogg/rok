@@ -64,13 +64,25 @@ panic(\"boom\");
 :quit
 1 + 1
 ";
-    let out = piped(ROKC, &["repl", "--rokr", &rokr], input);
-    let stdout = text(&out.stdout);
-    let stderr = text(&out.stderr);
-    assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
-    assert_eq!(
-        stdout,
-        "\
+    // The default (one library per cell) and `--replay` modes agree.
+    let runs: Vec<_> = [&[][..], &["--replay"][..]]
+        .map(|mode| {
+            let rokr = rokr.clone();
+            std::thread::spawn(move || {
+                let args = [&["repl", "--rokr", &rokr][..], mode].concat();
+                piped(ROKC, &args, input)
+            })
+        })
+        .into_iter()
+        .collect();
+    for run in runs {
+        let out = run.join().unwrap();
+        let stdout = text(&out.stdout);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
+        assert_eq!(
+            stdout,
+            "\
 i32: 3
 i32: 40
 P: P { x: 40, y: 2 }
@@ -82,13 +94,56 @@ str: \"rebound\"
 i32: 80
 List<i32>: [1, 2, 3]
 ",
+            "stderr: {stderr}"
+        );
+        // A bad cell reports and is dropped; so is one that fails at run time.
+        assert!(stderr.contains("cannot find value `nope`"), "{stderr}");
+        assert!(stderr.contains("boom"), "{stderr}");
+        // After `:reset` nothing is bound.
+        assert!(stderr.contains("cannot find value `x`"), "{stderr}");
+    }
+}
+
+/// The default mode runs a cell once, in one process: its side effects
+/// do not repeat, its bindings / items stay, and a cell that dies
+/// leaves the session as it was.
+#[test]
+fn repl_runs_each_cell_once() {
+    let Some(env) = setup() else { return };
+    let rokr = env.rokr.display().to_string();
+    let log = std::env::temp_dir().join(format!("rok_repl_once_{}", std::process::id()));
+    let log_s = log.display().to_string();
+    let _ = std::fs::remove_file(&log);
+    // Cell 1 appends to `log`: a rerun would append again.
+    let input = format!(
+        "\
+println(\"once\"); let old = try fs::read_to_str(\"{log_s}\") catch _ {{ \"\" }}; try fs::write(\"{log_s}\", old + \"x\") catch _ {{ }};
+let n = 1i32;
+#[derive(Debug)]
+struct P {{ x: i32; }}
+fn twice(p: P) -> i32 {{ p.x * 2 }}
+let p = P {{ x: 21 }};
+n += 1;
+n += 100; panic(\"boom\");
+n
+twice(p)
+p
+"
+    );
+    let out = piped(
+        ROKC,
+        &["repl", "--rokr", &rokr],
+        &format!("use rok::std::fs;\n{input}"),
+    );
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+    assert_eq!(
+        stdout, "once\ni32: 1\nP: P { x: 21 }\ni32: 2\ni32: 42\nP: P { x: 21 }\n",
         "stderr: {stderr}"
     );
-    // A bad cell reports and is dropped; so is one that fails at run time.
-    assert!(stderr.contains("cannot find value `nope`"), "{stderr}");
     assert!(stderr.contains("boom"), "{stderr}");
-    // After `:reset` nothing is bound.
-    assert!(stderr.contains("cannot find value `x`"), "{stderr}");
+    assert_eq!(std::fs::read_to_string(&log).ok().as_deref(), Some("x"));
+    let _ = std::fs::remove_file(&log);
 }
 
 fn frame(body: &str) -> String {

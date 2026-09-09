@@ -168,6 +168,58 @@ impl<K: Hash, V> Dict<K, V> {
     pub fn entries(self) -> DictEntries<K, V> {
         DictEntries { d: self, at: 0 }
     }
+
+    /// `k`'s place in the dict, present or not (2.9.3).
+    pub fn entry(self, k: K) -> Entry<K, V> {
+        Entry { d: self, key: k }
+    }
+}
+
+/// `d.entry(k)`: read or fill one key's slot. ponytail: each call
+/// looks the key up again (no cached slot index).
+pub struct Entry<K, V> {
+    d: Dict<K, V>;
+    key: K;
+}
+
+impl<K: Hash, V> Entry<K, V> {
+    pub fn key(self) -> K {
+        self.key
+    }
+
+    /// The value, after inserting `v` if the key is absent.
+    pub fn or_insert(self, v: V) -> V {
+        if !self.d.contains_key(self.key) {
+            self.d.insert(self.key, v);
+        }
+        self.d[self.key]
+    }
+
+    /// The value, after inserting `f()` if the key is absent.
+    pub fn or_insert_with(self, f: fn() -> V) -> V {
+        if !self.d.contains_key(self.key) {
+            self.d.insert(self.key, f());
+        }
+        self.d[self.key]
+    }
+
+    /// A present value replaced by `f(value)`; an absent key is left alone.
+    pub fn and_modify(self, f: fn(V) -> V) -> Entry<K, V> {
+        if self.d.contains_key(self.key) {
+            self.d.insert(self.key, f(self.d[self.key]));
+        }
+        self
+    }
+}
+
+impl<K: Hash, V: Default> Entry<K, V> {
+    /// The value, after inserting `V::default()` if the key is absent.
+    pub fn or_default(self) -> V {
+        if !self.d.contains_key(self.key) {
+            self.d.insert(self.key, V::default());
+        }
+        self.d[self.key]
+    }
 }
 
 // The iterators walk the live table; a dict changed while iterated

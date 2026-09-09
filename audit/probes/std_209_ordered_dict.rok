@@ -1,6 +1,5 @@
 // spec: std 209-collections §2.9.5
 // probe: positive
-// xfail: no OrderedDict / OrderedSet
 // expect-exit: 0
 // expect-stdout:
 // z a m

@@ -26,7 +26,7 @@ pub struct RokStr {
 }
 
 impl RokStr {
-    const fn bytes(&self) -> &[u8] {
+    pub(crate) const fn bytes(&self) -> &[u8] {
         if self.len == 0 {
             return &[];
         }
@@ -159,45 +159,6 @@ pub extern "C" fn rok_str_rfind(s: RokStr, pat: RokStr) -> isize {
     h.windows(n.len())
         .rposition(|w| w == n)
         .map_or(-1, |i| i as isize)
-}
-
-/// `which`: 0 = both ends, 1 = start, 2 = end. ASCII whitespace only.
-// ponytail: Unicode `White_Space` needs a table; ASCII covers the tests.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_str_trim(s: RokStr, which: i32) -> RokStr {
-    let mut b = s.bytes();
-    if which != 2 {
-        while let [first, rest @ ..] = b {
-            if !first.is_ascii_whitespace() {
-                break;
-            }
-            b = rest;
-        }
-    }
-    if which != 1 {
-        while let [rest @ .., last] = b {
-            if !last.is_ascii_whitespace() {
-                break;
-            }
-            b = rest;
-        }
-    }
-    build(&[b])
-}
-
-/// `upper` != 0 → uppercase, else lowercase. ASCII letters only.
-// ponytail: Unicode case mapping needs tables.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_str_case(s: RokStr, upper: i32) -> RokStr {
-    let out = build(&[s.bytes()]);
-    // SAFETY: `out` is a fresh GC string of `len` bytes.
-    let b = unsafe { core::slice::from_raw_parts_mut(out.ptr.cast_mut(), out.len) };
-    if upper != 0 {
-        b.make_ascii_uppercase();
-    } else {
-        b.make_ascii_lowercase();
-    }
-    out
 }
 
 /// Every non-overlapping `from` replaced by `to`.
@@ -486,7 +447,8 @@ pub mod tests {
         );
         assert_eq!(rok_str_find(s(b"hello"), s(b"ll")), 2);
         assert_eq!(rok_str_rfind(s(b"abab"), s(b"ab")), 2);
-        assert_eq!(rok_str_trim(s(b"  x "), 0).bytes(), b"x");
+        assert_eq!(crate::unicode::rok_str_trim(s(b"  x "), 0).bytes(), b"x");
+        crate::unicode::tests::str_case_and_trim();
         assert_eq!(
             rok_str_replace(s(b"a-b-c"), s(b"-"), s(b"+")).bytes(),
             b"a+b+c"

@@ -155,8 +155,8 @@ impl Command {
         if so is File { try so.close(); }
         if se is File { try se.close(); }
         try check_cell(err, self.program);
-        let out = both[0].as_bytes();
-        let errs = both[1].as_bytes();
+        let out = both[0].as_bytes().to_list();
+        let errs = both[1].as_bytes().to_list();
         let status = try child.wait();
         Output { status: status, stdout: out, stderr: errs }
     }

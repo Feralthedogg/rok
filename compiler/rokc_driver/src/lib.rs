@@ -20,9 +20,11 @@ use rokc_parser::{
 };
 
 pub use cfg::CfgEnv;
+pub use rokc_codegen_mlir::ReplCell;
 pub use rokc_codegen_mlir::{Demangled, demangle};
 pub use toolchain::{
-    BuildOptions, EmitKind, TempDir, build_archive, emit, link_executable, mlir_text,
+    BuildOptions, EmitKind, TempDir, build_archive, emit, link_executable, link_host, link_shared,
+    mlir_text,
 };
 
 // Independent switches, one per session setter.

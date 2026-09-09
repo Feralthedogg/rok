@@ -1,0 +1,10 @@
+// expect-exit: 0
+// expect-stdout: 3 2 w
+// A static of a generic type is instantiated like any other use of it.
+struct W<T> { v: T; }
+static L: List<i32> = [1, 2, 3];
+static G: W<str> = W { v: "w" };
+
+fn main() {
+    println(f"{L.len()} {L[1]} {G.v}");
+}

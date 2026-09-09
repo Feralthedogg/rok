@@ -1,0 +1,180 @@
+// rok::core::collections::slice — `Slice<T>`, a zero-copy view (stdlib
+// spec 2.9.7): element `i` is `buf[start + i * stride]`. The view holds
+// its buffer, so the storage stays alive as long as the view does.
+//
+// `xs[a:b]` desugars to `xs.slice(a..b)` (`Sliceable<Range<usize>>`, 2.3.4;
+// a missing bound is `0` / `xs.len()`), and `xs[a:b:k]` to
+// `xs.slice(a..b).step(k)`: the step walks the selected range, from its
+// end when negative (`xs[::-1]` reverses). A view of a `List` sees later
+// writes to the list's elements but not a regrowth (the list moves to a
+// new buffer and the view keeps the old one); a view of a fixed array
+// or a `str` / `StrBuf` views a copy.
+
+pub struct Slice<T> {
+    pub(pkg) buf: GcBuf<T>;
+    pub(pkg) start: usize;
+    pub(pkg) len: usize;
+    pub(pkg) stride: isize;
+}
+
+/// Panics unless `r` is a forward range within a length `n`.
+pub(pkg) fn check_range(r: Range<usize>, n: usize) {
+    if r.start > r.end || r.end > n {
+        panic(f"slice {r.start}:{r.end} out of bounds for length {n}");
+    }
+}
+
+/// A contiguous view of `buf[r]` (checked against the length `n`).
+pub(pkg) fn view_of<T>(buf: GcBuf<T>, r: Range<usize>, n: usize) -> Slice<T> {
+    check_range(r, n);
+    Slice { buf: buf, start: r.start, len: r.end - r.start, stride: 1 }
+}
+
+impl<T> Slice<T> {
+    pub fn len(self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    /// Buffer index of element `i` (`i < len`).
+    fn at(self, i: usize) -> usize {
+        ((self.start as isize) + (i as isize) * self.stride) as usize
+    }
+
+    /// Element `i`, or `none` out of bounds.
+    pub fn get(self, i: usize) -> T | none {
+        if i >= self.len {
+            return none;
+        }
+        self.buf[self.at(i)]
+    }
+
+    pub fn first(self) -> T | none {
+        self.get(0)
+    }
+
+    pub fn last(self) -> T | none {
+        if self.len == 0 {
+            return none;
+        }
+        self.get(self.len - 1)
+    }
+
+    /// Every `k`th element (`k` != 0), back to front when `k` < 0.
+    pub fn step(self, k: isize) -> Slice<T> {
+        if k == 0 {
+            panic("slice step must not be zero");
+        }
+        let m = if k < 0 { -k } else { k };
+        let n = (self.len + (m as usize) - 1) / (m as usize);
+        let first = if k < 0 && self.len > 0 { self.at(self.len - 1) } else { self.start };
+        Slice { buf: self.buf, start: first, len: n, stride: self.stride * k }
+    }
+
+    pub fn iter(self) -> SliceIter<T> {
+        SliceIter { s: self, i: 0 }
+    }
+
+    /// A new list holding the viewed elements.
+    pub fn to_list(self) -> List<T> {
+        let out: List<T> = List::with_capacity(self.len);
+        for x in self {
+            out.push(x);
+        }
+        out
+    }
+}
+
+/// `s.iter()` / `for x in s`, in view order.
+pub struct SliceIter<T> {
+    s: Slice<T>;
+    i: usize;
+}
+
+impl<T> Iterator for SliceIter<T> {
+    type Item = T;
+    fn next(ref self) -> T | none {
+        if self.i >= self.s.len {
+            return none;
+        }
+        self.i += 1;
+        self.s.buf[self.s.at(self.i - 1)]
+    }
+}
+
+impl<T> IntoIterator for Slice<T> {
+    type IntoIter = SliceIter<T>;
+    type Item = T;
+    fn into_iter(self) -> SliceIter<T> {
+        self.iter()
+    }
+}
+
+/// `s[i]`; panics out of bounds. Views are read-only (no `IndexSet`).
+impl<T> Index<usize> for Slice<T> {
+    type Output = T;
+    fn index(self, i: usize) -> T {
+        if i >= self.len {
+            return panic(f"slice index {i} out of bounds for length {self.len}");
+        }
+        self.buf[self.at(i)]
+    }
+}
+
+/// `s[a:b]`: a view of the view.
+impl<T> Sliceable<Range<usize>> for Slice<T> {
+    type Output = Slice<T>;
+    fn slice(self, r: Range<usize>) -> Slice<T> {
+        check_range(r, self.len);
+        let first = if r.start < self.len { self.at(r.start) } else { self.start };
+        Slice { buf: self.buf, start: first, len: r.end - r.start, stride: self.stride }
+    }
+}
+
+/// `xs[a:b]` (2.9.8): a view of the list's current buffer.
+impl<T> Sliceable<Range<usize>> for List<T> {
+    type Output = Slice<T>;
+    fn slice(self, r: Range<usize>) -> Slice<T> {
+        view_of(self.buffer(), r, self.len())
+    }
+}
+
+/// `a[i:j]` on a fixed array: a view of a GC copy (arrays are values).
+impl<T, const N: usize> Sliceable<Range<usize>> for [T; N] {
+    type Output = Slice<T>;
+    fn slice(self, r: Range<usize>) -> Slice<T> {
+        check_range(r, N);
+        let buf: GcBuf<T> = buf_new(r.end - r.start);
+        for i in r.start..r.end {
+            buf[i - r.start] = self[i];
+        }
+        Slice { buf: buf, start: 0, len: r.end - r.start, stride: 1 }
+    }
+}
+
+/// Element-wise, in view order.
+impl<T: PartialEq> PartialEq for Slice<T> {
+    fn eq(self, rhs: Slice<T>) -> bool {
+        if self.len != rhs.len { return false; }
+        for i in 0..self.len {
+            if self[i] != rhs[i] { return false; }
+        }
+        true
+    }
+    fn ne(self, rhs: Slice<T>) -> bool { !self.eq(rhs) }
+}
+
+/// `[a, b, c]` like a list.
+impl<T: Debug> Debug for Slice<T> {
+    fn debug(self) -> str {
+        let out = "[";
+        for i in 0..self.len {
+            if i > 0 { out += ", "; }
+            out += self[i].debug();
+        }
+        out + "]"
+    }
+}

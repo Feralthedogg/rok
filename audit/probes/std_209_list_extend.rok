@@ -1,6 +1,5 @@
 // spec: std 209-collections §2.9.2
 // probe: positive
-// xfail: List has no `extend` / `shrink_to_fit`
 // expect-exit: 0
 // expect-stdout:
 // cap ok true

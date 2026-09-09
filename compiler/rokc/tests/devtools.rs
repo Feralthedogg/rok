@@ -161,6 +161,20 @@ fn lint_finds_each_kind_and_honors_levels() {
 
     let (out, _) = exit(&rokc(&dir, &["lint", "--list"]), 0);
     assert!(out.contains("unused_variables") && out.contains("nonstandard_style"));
+
+    // No false hits: a method reached only through `?.`, an import used
+    // only as the head of a later `use`.
+    fs::write(
+        dir.join("main.rok"),
+        "mod a { pub mod inner { pub fn f() -> i32 { 1 } } }\n\
+         use a::inner;\nuse inner::f;\n\
+         struct V { x: i32; }\nimpl V { fn get(self) -> i32 { self.x } }\n\
+         fn mk() -> V | none { V { x: f() } }\n\
+         fn main() { println(f\"{mk()?.get() ?? 0}\"); }\n",
+    )
+    .unwrap();
+    let (_, err) = exit(&rokc(&dir, &["lint"]), 0);
+    assert!(!err.contains("[lint]"), "{err}");
 }
 
 #[test]
