@@ -1,0 +1,77 @@
+// expect-error: it captures `by_param: rok::core::sync::Cell<i32>`, which is not `Send`
+// expect-error: it holds `in_field: rok::core::sync::Cell<i32>`, which is not `Send`, across an `await`
+// expect-error: it captures `from_helper: rok::core::sync::Cell<i32>`, which is not `Send`
+// expect-error: it holds a temporary `rok::core::sync::Cell<i32>`, which is not `Send`, across an `await`
+// expect-error: it holds `nested: rok::core::sync::Cell<i32>`, which is not `Send`, across an `await`
+// expect-error: it holds `to_thread: rok::core::sync::Cell<i32>`, which is not `Send`, across an `await`
+// expect-error: it captures `via_closure: rok::core::sync::Cell<i32>`, which is not `Send`
+
+// The `Send` check of `task::spawn` (stdlib 2.18.1) follows a future
+// with a non-`Send` frame wherever it goes: through a parameter, a
+// struct field, a helper's result, another coroutine's frame, a closure,
+// and into `thread::spawn`. A non-`Send` temporary live across an
+// `await` makes the frame non-`Send` too.
+use rok::std::thread;
+
+fn launch<F: Future + Send>(f: F) -> Task<F::Output> {
+    task::spawn(f)
+}
+
+struct Job {
+    fut: AsyncFuture<i32>;
+}
+
+fn helper() -> AsyncFuture<i32> {
+    let from_helper = Cell::new(3);
+    async { from_helper.get() }
+}
+
+fn plus(c: Cell<i32>, v: i32) -> i32 {
+    c.get() + v
+}
+
+async fn one() -> i32 {
+    1
+}
+
+async fn inner() -> i32 {
+    let nested = Cell::new(5);
+    await task::yield_now();
+    nested.get()
+}
+
+// Through a parameter of a generic helper.
+let by_param = Cell::new(1);
+let a = launch(async { by_param.get() });
+
+// Through a struct field.
+let job = Job {
+    fut: async {
+        let in_field = Cell::new(2);
+        await task::yield_now();
+        in_field.get()
+    },
+};
+let b = task::spawn(job.fut);
+
+// Through a helper function's result.
+let c = task::spawn(helper());
+
+// A temporary held across an `await`.
+let d = task::spawn(async { plus(Cell::new(4), await one()) });
+
+// Inside another coroutine's frame.
+let e = task::spawn(async { await inner() });
+
+// Into another OS thread inside a closure.
+let g = async {
+    let to_thread = Cell::new(6);
+    await task::yield_now();
+    to_thread.get()
+};
+let h = thread::spawn(|| task::block_on(g));
+
+// Returned by a closure.
+let via_closure = Cell::new(7);
+let make = || async { via_closure.get() };
+let i = task::spawn(make());

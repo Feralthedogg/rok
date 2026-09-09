@@ -1,0 +1,80 @@
+// expect-exit: 0
+// expect-stdout:
+// waiting: true
+// socket read: cancelled, finally ran true
+// accept: cancelled
+// sleep: cancelled
+// lock: cancelled
+// recv: cancelled
+// registrations left: 0
+// still works: hi
+
+// Cancelling a task suspended in async I/O (2.18.4): the cancel wakes
+// it, its `await` leaves the body through `finally`, and its parking /
+// timer registrations (socket readiness, a 1 h `sleep`, `lock_async`,
+// `recv_async`) are dropped instead of waiting for a wake that may never
+// come.
+use rok::std::net::{TcpListener, TcpStream, SocketAddr};
+use rok::std::io::byte_buf;
+
+let any: SocketAddr = try! "127.0.0.1:0".parse::<SocketAddr>();
+let listener = try! TcpListener::bind(any);
+let client = try! TcpStream::connect(try! listener.local_addr());
+let (server, _) = try! listener.accept();
+let idle = try! TcpListener::bind(any);
+let m = Mutex::new(0);
+let (tx, rx) = channel::<i32>();
+let finally_ran = Mutex::new(false);
+
+let reader = task::spawn(async {
+    let _ = {
+        try await server.read_async(byte_buf(16)) catch _ { 0 }
+    } finally {
+        using f = finally_ran.lock() { f.set(true); }
+    };
+    1
+});
+let acceptor = task::spawn(async {
+    try await idle.accept_async() catch _ { return 0; };
+    1
+});
+let sleeper = task::spawn(async {
+    await task::sleep(Duration::sec(3600));
+    1
+});
+let locker = task::spawn(async {
+    using g = await m.lock_async() { g.set(1); }
+    1
+});
+let receiver = task::spawn(async {
+    await rx.recv_async();
+    1
+});
+
+using held = m.lock() {
+    await task::sleep(Duration::ms(50));
+    println(f"waiting: {task::registrations() >= 5}");
+    for t in [reader, acceptor, sleeper, locker, receiver] { t.cancel(); }
+    let r = try await reader.join() catch _: CancellationError { -1 };
+    using f = finally_ran.lock() {
+        println(f"socket read: {if r == -1 { "cancelled" } else { "finished" }}, finally ran {f.get()}");
+    }
+    let names = ["accept", "sleep", "lock", "recv"];
+    let rest = [acceptor, sleeper, locker, receiver];
+    for i in 0..4 {
+        let v = try await rest[i].join() catch _: CancellationError { -1 };
+        println(f"{names[i]}: {if v == -1 { "cancelled" } else { "finished" }}");
+    }
+}
+println(f"registrations left: {task::registrations()}");
+
+// The socket is still usable by a later task.
+try! client.write_str("hi");
+let got = await task::spawn(async {
+    let buf = byte_buf(16);
+    let n = try! await server.read_async(buf);
+    let sb = StrBuf::new();
+    for i in 0..n { sb.push_byte(buf[i]); }
+    sb.to_str()
+});
+println(f"still works: {got}");

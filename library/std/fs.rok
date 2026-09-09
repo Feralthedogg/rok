@@ -15,14 +15,17 @@
 // (`task::spawn_blocking`) and the task suspends until it is done.
 // Errors are thrown as by the sync call. A cancelled task leaves the
 // call to finish in the background (a `read_async` still fills its
-// buffer); the result is dropped. ponytail: `Dir` has no async methods
-// (the free functions cover `Dir::root()`); no async `ReadDir` stream
-// (`read_dir_async` lists the whole directory at once).
+// buffer); the result is dropped. `Dir` has the same `*_async` methods;
+// `Dir::read_dir_async` is a `Stream` of entries read in batches, while
+// the free `read_dir_async` lists the whole directory at once (301).
 
 use rok::std::io::{IoError, IoErrorKind, Reader, Writer, Seek, check, err_cell, check_cell, raw_of, fill, text_of};
 pub use rok::std::io::SeekFrom;
 use rok::std::path::{Path, AsPath, Component};
 use rok::std::env;
+use rok::core::future::{Context, Poll};
+use rok::core::stream::Stream;
+use rok::core::task::Blocking;
 
 extern "C" {
     fn rok_os_open(dir: i32, path: str, flags: i32, mode: u32) -> i32;
@@ -309,13 +312,6 @@ async fn off<T: Send>(f: fn() throws (IoError) -> T + Send) throws (IoError) -> 
     try r.get()
 }
 
-/// `off` for a call with no value.
-// ponytail: `Result<(), E>::get` hits a codegen gap (a unit payload), so
-// the call is wrapped to yield a `bool`.
-async fn off0(f: fn() throws (IoError) + Send) throws (IoError) {
-    try await off(|| { try f(); true });
-}
-
 impl File {
     pub async fn open_async<P: AsPath>(path: P) throws (IoError) -> File { try await open_async(path) }
     pub async fn create_async<P: AsPath>(path: P) throws (IoError) -> File { try await create_async(path) }
@@ -335,17 +331,167 @@ impl File {
     }
     pub async fn write_all_async<B: AsBytes>(self, data: B) throws (IoError) {
         let s = data.raw_bytes();
-        try await off0(|| try self.write_str(s));
+        try await off(|| try self.write_str(s));
     }
     pub async fn write_str_async(self, s: str) throws (IoError) {
-        try await off0(|| try self.write_str(s));
+        try await off(|| try self.write_str(s));
     }
-    pub async fn sync_all_async(self) throws (IoError) { try await off0(|| try self.sync_all()); }
-    pub async fn sync_data_async(self) throws (IoError) { try await off0(|| try self.sync_data()); }
-    pub async fn set_len_async(self, size: u64) throws (IoError) { try await off0(|| try self.set_len(size)); }
+    pub async fn sync_all_async(self) throws (IoError) { try await off(|| try self.sync_all()); }
+    pub async fn sync_data_async(self) throws (IoError) { try await off(|| try self.sync_data()); }
+    pub async fn set_len_async(self, size: u64) throws (IoError) { try await off(|| try self.set_len(size)); }
     pub async fn metadata_async(self) throws (IoError) -> Metadata { try await off(|| try self.metadata()) }
-    pub async fn lock_exclusive_async(self) throws (IoError) { try await off0(|| try self.lock_exclusive()); }
-    pub async fn lock_shared_async(self) throws (IoError) { try await off0(|| try self.lock_shared()); }
+    pub async fn lock_exclusive_async(self) throws (IoError) { try await off(|| try self.lock_exclusive()); }
+    pub async fn lock_shared_async(self) throws (IoError) { try await off(|| try self.lock_shared()); }
+}
+
+impl Dir {
+    pub async fn cwd_async() throws (IoError) -> Dir { try await off(|| try Dir::cwd()) }
+    pub async fn home_async() throws (IoError) -> Dir { try await off(|| try Dir::home()) }
+    pub async fn temp_async() throws (IoError) -> Dir { try await off(|| try Dir::temp()) }
+
+    pub async fn open_async<P: AsPath>(self, path: P) throws (IoError) -> File {
+        let p = path.as_path();
+        try await off(|| try self.open(p))
+    }
+    pub async fn create_async<P: AsPath>(self, path: P) throws (IoError) -> File {
+        let p = path.as_path();
+        try await off(|| try self.create(p))
+    }
+    pub async fn open_with_async<P: AsPath>(self, path: P, opts: OpenOptions) throws (IoError) -> File {
+        let p = path.as_path();
+        try await off(|| try self.open_with(p, opts))
+    }
+    pub async fn open_dir_async<P: AsPath>(self, path: P) throws (IoError) -> Dir {
+        let p = path.as_path();
+        try await off(|| try self.open_dir(p))
+    }
+    /// This directory's entries as a `Stream` (`for await e in try await
+    /// d.read_dir_async() { let x = try e.get(); .. }`), read in batches
+    /// on a blocking thread.
+    pub async fn read_dir_async(self) throws (IoError) -> ReadDirStream {
+        let rd = try await off(|| try self.read_dir());
+        ReadDirStream { rd: rd, lock: Mutex::new(0), batch: List::new(), pos: 0, pending: none }
+    }
+    pub async fn metadata_async<P: AsPath>(self, path: P) throws (IoError) -> Metadata {
+        let p = path.as_path();
+        try await off(|| try self.metadata(p))
+    }
+    pub async fn symlink_metadata_async<P: AsPath>(self, path: P) throws (IoError) -> Metadata {
+        let p = path.as_path();
+        try await off(|| try self.symlink_metadata(p))
+    }
+    pub async fn exists_async<P: AsPath>(self, path: P) -> bool {
+        let p = path.as_path();
+        await task::spawn_blocking(|| self.exists(p))
+    }
+    pub async fn create_dir_async<P: AsPath>(self, path: P) throws (IoError) {
+        let p = path.as_path();
+        try await off(|| try self.create_dir(p));
+    }
+    pub async fn create_dir_all_async<P: AsPath>(self, path: P) throws (IoError) {
+        let p = path.as_path();
+        try await off(|| try self.create_dir_all(p));
+    }
+    pub async fn remove_file_async<P: AsPath>(self, path: P) throws (IoError) {
+        let p = path.as_path();
+        try await off(|| try self.remove_file(p));
+    }
+    pub async fn remove_dir_async<P: AsPath>(self, path: P) throws (IoError) {
+        let p = path.as_path();
+        try await off(|| try self.remove_dir(p));
+    }
+    pub async fn remove_dir_all_async<P: AsPath>(self, path: P) throws (IoError) {
+        let p = path.as_path();
+        try await off(|| try self.remove_dir_all(p));
+    }
+    pub async fn rename_async<P: AsPath, Q: AsPath>(self, from: P, to: Q) throws (IoError) {
+        let a = from.as_path();
+        let b = to.as_path();
+        try await off(|| try self.rename(a, b));
+    }
+    pub async fn copy_async<P: AsPath, Q: AsPath>(self, from: P, to: Q) throws (IoError) -> u64 {
+        let a = from.as_path();
+        let b = to.as_path();
+        try await off(|| try self.copy(a, b))
+    }
+    pub async fn symlink_async<P: AsPath, Q: AsPath>(self, target: P, link: Q) throws (IoError) {
+        let a = target.as_path();
+        let b = link.as_path();
+        try await off(|| try self.symlink(a, b));
+    }
+    pub async fn hardlink_async<P: AsPath, Q: AsPath>(self, target: P, link: Q) throws (IoError) {
+        let a = target.as_path();
+        let b = link.as_path();
+        try await off(|| try self.hardlink(a, b));
+    }
+    pub async fn close_async(self) throws (IoError) { try await off(|| try self.close()); }
+}
+
+/// Entries per blocking-thread trip of a `ReadDirStream`.
+const DIR_BATCH: usize = 64;
+
+/// `Dir::read_dir_async`: a `ReadDir` as a `Stream`. Each refill reads up
+/// to `DIR_BATCH` entries on a blocking thread while the task suspends.
+/// Closed at its end or on leaving `using`; a cancelled task's refill
+/// finishes in the background first.
+pub struct ReadDirStream {
+    rd: ReadDir;
+    /// Held by a refill while it reads, and by `drop` to close.
+    lock: Mutex<i32>;
+    batch: List<Result<DirEntry, IoError>>;
+    pos: usize;
+    pending: Blocking<List<Result<DirEntry, IoError>>> | none;
+}
+
+impl Stream for ReadDirStream {
+    type Item = Result<DirEntry, IoError>;
+    fn poll_next(ref self, ref ctx: Context) -> Poll<Result<DirEntry, IoError> | none> {
+        loop {
+            if self.pos < self.batch.len() {
+                self.pos += 1;
+                return Poll::Ready(self.batch[self.pos - 1]);
+            }
+            let job = match self.pending {
+                b: Blocking<List<Result<DirEntry, IoError>>> => b,
+                none => {
+                    if self.rd.d[0] == 0usize { return Poll::Ready(none); }
+                    let rd = self.rd;
+                    let lock = self.lock;
+                    task::spawn_blocking(|| {
+                        let out: List<Result<DirEntry, IoError>> = List::new();
+                        using g = lock.lock() {
+                            while out.len() < DIR_BATCH {
+                                match rd.next() {
+                                    e: Result<DirEntry, IoError> => out.push(e),
+                                    none => break,
+                                }
+                            }
+                        }
+                        out
+                    })
+                }
+            };
+            match job.poll(ref ctx) {
+                Poll::Ready(b) => {
+                    self.pending = none;
+                    self.batch = b;
+                    self.pos = 0;
+                }
+                Poll::Pending => {
+                    self.pending = job;
+                    return Poll::Pending;
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ReadDirStream {
+    fn drop(ref self) {
+        using g = self.lock.lock() {
+            close_dir(self.rd.d);
+        }
+    }
 }
 
 impl Reader for File {
@@ -644,11 +790,15 @@ impl Iterator for ReadDir {
 /// before its end keeps the stream open until the process exits.
 impl Drop for ReadDir {
     fn drop(ref self) {
-        let d = self.d[0];
-        if d != 0usize {
-            self.d[0] = 0usize;
-            unsafe { rok_os_closedir(d) };
-        }
+        close_dir(self.d);
+    }
+}
+
+fn close_dir(cell: GcBuf<usize>) {
+    let d = cell[0];
+    if d != 0usize {
+        cell[0] = 0usize;
+        unsafe { rok_os_closedir(d) };
     }
 }
 
@@ -850,12 +1000,12 @@ pub async fn read_to_string_async<P: AsPath>(path: P) throws (IoError) -> str { 
 pub async fn write_async<P: AsPath, D: AsBytes>(path: P, data: D) throws (IoError) {
     let p = path.as_path();
     let s = data.raw_bytes();
-    try await off0(|| try write(p, s));
+    try await off(|| try write(p, s));
 }
 pub async fn write_atomic_async<P: AsPath, D: AsBytes>(path: P, data: D) throws (IoError) {
     let p = path.as_path();
     let s = data.raw_bytes();
-    try await off0(|| try write_atomic(p, s));
+    try await off(|| try write_atomic(p, s));
 }
 pub async fn metadata_async<P: AsPath>(path: P) throws (IoError) -> Metadata {
     let p = path.as_path();
@@ -871,28 +1021,28 @@ pub async fn exists_async<P: AsPath>(path: P) -> bool {
 }
 pub async fn create_dir_async<P: AsPath>(path: P) throws (IoError) {
     let p = path.as_path();
-    try await off0(|| try create_dir(p));
+    try await off(|| try create_dir(p));
 }
 pub async fn create_dir_all_async<P: AsPath>(path: P) throws (IoError) {
     let p = path.as_path();
-    try await off0(|| try create_dir_all(p));
+    try await off(|| try create_dir_all(p));
 }
 pub async fn remove_file_async<P: AsPath>(path: P) throws (IoError) {
     let p = path.as_path();
-    try await off0(|| try remove_file(p));
+    try await off(|| try remove_file(p));
 }
 pub async fn remove_dir_async<P: AsPath>(path: P) throws (IoError) {
     let p = path.as_path();
-    try await off0(|| try remove_dir(p));
+    try await off(|| try remove_dir(p));
 }
 pub async fn remove_dir_all_async<P: AsPath>(path: P) throws (IoError) {
     let p = path.as_path();
-    try await off0(|| try remove_dir_all(p));
+    try await off(|| try remove_dir_all(p));
 }
 pub async fn rename_async<P: AsPath, Q: AsPath>(from: P, to: Q) throws (IoError) {
     let a = from.as_path();
     let b = to.as_path();
-    try await off0(|| try rename(a, b));
+    try await off(|| try rename(a, b));
 }
 pub async fn copy_async<P: AsPath, Q: AsPath>(from: P, to: Q) throws (IoError) -> u64 {
     let a = from.as_path();
@@ -902,12 +1052,12 @@ pub async fn copy_async<P: AsPath, Q: AsPath>(from: P, to: Q) throws (IoError) -
 pub async fn symlink_async<P: AsPath, Q: AsPath>(target: P, link: Q) throws (IoError) {
     let a = target.as_path();
     let b = link.as_path();
-    try await off0(|| try symlink(a, b));
+    try await off(|| try symlink(a, b));
 }
 pub async fn hardlink_async<P: AsPath, Q: AsPath>(target: P, link: Q) throws (IoError) {
     let a = target.as_path();
     let b = link.as_path();
-    try await off0(|| try hardlink(a, b));
+    try await off(|| try hardlink(a, b));
 }
 /// The whole listing (the first entry error is thrown), unlike the
 /// lazy `read_dir`.

@@ -452,6 +452,20 @@ fn named_environments() {
     fs::create_dir_all(&elsewhere).unwrap();
 
     ok(&rok(&home, &root, &["env", "create", "work"]));
+    // `rok --env work jupyter install`: a kernelspec that runs the
+    // kernel in that environment.
+    let jupyter = root.join("jupyter");
+    ok(
+        &rok_cmd(&home, &root, &["--env", "work", "jupyter", "install"])
+            .env("JUPYTER_DATA_DIR", &jupyter)
+            .output()
+            .unwrap(),
+    );
+    let spec = read(&jupyter.join("kernels/rok-work/kernel.json"));
+    assert!(
+        spec.contains(r#""--env","work","jupyter","--connection-file","{connection_file}"],"display_name":"rok (work)""#),
+        "{spec}"
+    );
     fails(
         &rok(&home, &root, &["env", "create", "work"]),
         "already exists",
@@ -698,6 +712,80 @@ fn build_run_and_repl_with_dependencies() {
         text(&out.stderr)
     );
     assert!(read(&home.join("envs/r/Rok.toml")).contains("g = { path"));
+}
+
+/// `rok build` builds each dependency once into `target/<profile>/deps`
+/// (`lib<name>.a` + `<name>.rhir`), reuses it while nothing it depends
+/// on changes, and rebuilds it (and the ones after it) when its source
+/// does. A dependency of a dependency is built first.
+#[test]
+fn prebuilt_dependencies_are_reused_and_rebuilt() {
+    if !llvm() {
+        return;
+    }
+    let root = scratch("prebuilt");
+    let home = root.join("home");
+    write(
+        &root.join("base/lib.rok"),
+        "pub struct Cell { pub v: i32; }\npub fn cell(v: i32) -> Cell { return Cell { v: v }; }\n",
+    );
+    write(&root.join("base/Rok.toml"), "[package]\nname = \"base\"\n");
+    write(
+        &root.join("mid/lib.rok"),
+        "pub fn twice<T>(x: T) -> (T, T) { return (x, x); }\n\
+         pub fn get() -> i32 { return base::cell(20).v + 1; }\n",
+    );
+    write(
+        &root.join("mid/Rok.toml"),
+        "[package]\nname = \"mid\"\n\n[deps]\nbase = { path = \"../base\" }\n",
+    );
+    let app = root.join("app");
+    ok(&rok(&home, &root, &["new", "app"]));
+    write(
+        &app.join("main.rok"),
+        "let (a, b) = mid::twice(\"x\");\nprintln(f\"{mid::get()} {a}{b}\");\n",
+    );
+    write(
+        &app.join("Rok.toml"),
+        "[package]\nname = \"app\"\n\n[deps]\nmid = { path = \"../mid\" }\n",
+    );
+    let built = |out: &Output, dep: &str| text(&out.stderr).contains(&format!("Compiling {dep} "));
+    let out = rok(&home, &app, &["run"]);
+    assert_eq!(ok(&out), "21 xx\n");
+    assert!(
+        built(&out, "base") && built(&out, "mid"),
+        "{}",
+        text(&out.stderr)
+    );
+    let deps = app.join("target/debug/deps");
+    for f in ["libbase.a", "base.rhir", "libmid.a", "mid.rhir"] {
+        assert!(deps.join(f).is_file(), "{f}");
+    }
+    // Nothing changed: both reused.
+    let out = rok(&home, &app, &["run"]);
+    assert_eq!(ok(&out), "21 xx\n");
+    assert!(
+        !built(&out, "base") && !built(&out, "mid"),
+        "{}",
+        text(&out.stderr)
+    );
+    // `base` changed: it and `mid` (built after it) are rebuilt.
+    write(
+        &root.join("base/lib.rok"),
+        "pub struct Cell { pub v: i32; }\npub fn cell(v: i32) -> Cell { return Cell { v: v * 2 }; }\n",
+    );
+    let out = rok(&home, &app, &["run"]);
+    assert_eq!(ok(&out), "41 xx\n");
+    assert!(
+        built(&out, "base") && built(&out, "mid"),
+        "{}",
+        text(&out.stderr)
+    );
+    // Another profile is another build.
+    let out = rok(&home, &app, &["build", "--release"]);
+    ok(&out);
+    assert!(built(&out, "mid"), "{}", text(&out.stderr));
+    assert!(app.join("target/release/deps/mid.rhir").is_file());
 }
 
 #[test]

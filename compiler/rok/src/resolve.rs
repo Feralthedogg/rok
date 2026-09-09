@@ -29,12 +29,15 @@ pub struct Context {
     pub lock_path: Option<PathBuf>,
 }
 
+#[derive(Clone)]
 pub struct Resolved {
     pub name: String,
     /// The package's `lib.rok`.
     pub root: PathBuf,
     /// Reached only through the root's `[dev-deps]`.
     pub dev: bool,
+    /// Its own dependencies' names.
+    pub deps: Vec<String>,
 }
 
 /// Where a package came from: two requirements of one name must agree.
@@ -140,9 +143,11 @@ impl Resolver<'_> {
                     dir.display()
                 ));
             }
+            let mut deps = Vec::new();
             if let Some(m) = manifest::find(&dir) {
                 let m = manifest::load(&m)?;
                 let me = format!("`{}`", dep.name);
+                deps = m.deps.iter().map(|d| d.name.clone()).collect();
                 queue.extend(m.deps.into_iter().map(|d| (d, dir.clone(), me.clone())));
             }
             self.seen.insert(dep.name.clone(), (id, by));
@@ -150,6 +155,7 @@ impl Resolver<'_> {
                 name: dep.name,
                 root,
                 dev,
+                deps,
             });
         }
         Ok(())

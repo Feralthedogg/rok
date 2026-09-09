@@ -1,0 +1,74 @@
+// expect-exit: 0
+// expect-stdout:
+// param 1, field 2, helper 3, list 30, local 5, nested 6, consumed 7, pinned 8
+
+// The `Send` check of `task::spawn` follows futures through parameters,
+// fields, helpers and lists, but only rejects the ones whose frame is
+// not `Send`: non-`Send` futures of the same type elsewhere (on
+// `spawn_local`) and non-`Send` values dropped before an `await` are
+// fine.
+
+fn launch<F: Future + Send>(f: F) -> Task<F::Output> {
+    task::spawn(f)
+}
+
+struct Job {
+    fut: AsyncFuture<i32>;
+}
+
+fn helper(n: i32) -> AsyncFuture<i32> {
+    let m = Mutex::new(n);
+    async {
+        await task::yield_now();
+        using g = m.lock() { g.get() }
+    }
+}
+
+async fn pinned() -> i32 {
+    let c = Cell::new(8);
+    await task::yield_now();
+    c.get()
+}
+
+let shared = Mutex::new(1);
+let a = launch(async {
+    await task::yield_now();
+    using g = shared.lock() { g.get() }
+});
+
+let job = Job { fut: async { await task::yield_now(); 2 } };
+let b = task::spawn(job.fut);
+
+let c = task::spawn(helper(3));
+
+let futs: List<AsyncFuture<i32>> = List::new();
+for i in 0..4 {
+    futs.push(helper(i * 5));
+}
+let tasks: List<Task<i32>> = List::new();
+for f in futs {
+    tasks.push(task::spawn(f));
+}
+let list = 0;
+for t in tasks {
+    list += await t;
+}
+
+// A non-`Send` future of the same type, pinned with `spawn_local`.
+let l = task::spawn_local(async {
+    let k = Cell::new(5);
+    await task::yield_now();
+    k.get()
+});
+
+// A spawned task awaits a `spawn_local` task's handle.
+let nested = task::spawn(async { (await task::spawn_local(pinned())) - 2 });
+
+// A non-`Send` value used up before the `await`.
+let consumed = task::spawn(async {
+    let v = Cell::new(7).get();
+    await task::yield_now();
+    v
+});
+
+println(f"param {await a}, field {await b}, helper {await c}, list {list}, local {await l}, nested {await nested}, consumed {await consumed}, pinned {await task::spawn_local(pinned())}");

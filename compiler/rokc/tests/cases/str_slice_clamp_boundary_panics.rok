@@ -1,0 +1,10 @@
+// expect-exit: 101
+// expect-stderr: string slice is not on a char boundary
+
+// stdlib 2.15.3: `str` bounds are byte offsets clamped to the length;
+// a clamped bound inside a UTF-8 sequence still panics.
+fn main() {
+    let s = "a세b";
+    println(s[-10:100]);
+    println(s[-3:]);
+}

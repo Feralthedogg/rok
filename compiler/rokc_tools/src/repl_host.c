@@ -1,10 +1,14 @@
 // The `rokc repl` session host (repl.rs). One process, runtime up
 // once: each cell is a shared library loaded here and run once, so
 // earlier cells never run again. Commands come on the socket rokc
-// passes as stdin: a library path per line; the reply is
-// `ok <n>\n<n bytes of the shown value>` or `err\n`.
+// passes as stdin: a library path per line; the reply is `pid <p>\n`
+// (the process running the cell) and then
+// `ok <n>\n<n bytes of the shown value>` or `err\n`. `SIGINT` ends a
+// running cell (the session goes on as before it) and is ignored
+// between cells.
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -23,6 +27,7 @@ int main(void) {
     dup2(nul, 0);  // the cells' stdin
     close(nul);
     rok_runtime_init();
+    signal(SIGINT, SIG_IGN);
     for (;;) {
         char path[4096], c;
         size_t n = 0;
@@ -48,6 +53,8 @@ int main(void) {
             continue;
         }
         close(verdict[0]);
+        dprintf(ctl, "pid %d\n", (int)getpid());
+        signal(SIGINT, SIG_DFL);
         void *lib = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
         void (*cell)(void) = lib ? (void (*)(void))dlsym(lib, "rok_repl_cell") : NULL;
         __rok_repl_out.len = 0;
@@ -55,6 +62,7 @@ int main(void) {
             cell();
         else
             fprintf(stderr, "error: %s\n", dlerror());
+        signal(SIGINT, SIG_IGN);
         fflush(stdout);
         if (write(verdict[1], "", 1) != 1) {}
         close(verdict[1]);

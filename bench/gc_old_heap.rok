@@ -1,0 +1,32 @@
+// Generational case: a 1M-entry long-lived `List` of structs (each
+// holding a boxed payload) while 30M short-lived boxes churn; every
+// 256th iteration stores a fresh box into the old list (old -> young).
+trait Weigh { fn w(self) -> i64; }
+struct Blob { a: i64; b: i64; c: i64; d: i64; }
+impl Weigh for Blob { fn w(self) -> i64 { return self.a + self.d; } }
+struct Item { id: i64; v: any Weigh; }
+
+fn make(i: i64) -> any Weigh { return Blob { a: i, b: i, c: i, d: 1 }; }
+
+fn main() -> i32 {
+    let n: i64 = 1000000;
+    let keep: List<Item> = [];
+    let i: i64 = 0;
+    while i < n {
+        keep.push(Item { id: i, v: make(i) });
+        i += 1;
+    }
+    let total: i64 = 0;
+    i = 0;
+    while i < 30000000 {
+        let x = make(i);
+        total += x.w();
+        if i % 256 == 0 {
+            keep[(i % n) as usize] = Item { id: i, v: x };
+        }
+        i += 1;
+    }
+    for it in keep { total += it.v.w() + it.id; }
+    rok_print_i64(total);
+    return 0;
+}

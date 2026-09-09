@@ -23,9 +23,9 @@ usage: rokc [global options] <command> [options] [args]
 
 commands:
   build [path]           build the package (executable target/<profile>/<name>,
-                         or target/<profile>/lib<name>.a for a `lib.rok`
-                         package; <profile> is debug, or release at -O2+ /
-                         -Os; a --target build goes under target/<triple>/)
+                         or target/<profile>/lib<name>.a + <name>.rhir for a
+                         `lib.rok` package; <profile> is debug, or release at
+                         -O2+ / -Os; a --target build goes under target/<triple>/)
   run [path] [-- args]   build, then run; args after `--` are forwarded
   test [path] [filter]   build and run the `#[test]` functions (filter: regex
                          with ^ $ . * + ?, or a substring)
@@ -35,6 +35,13 @@ commands:
   repl [--replay]        interactive session (:type <expr>, :reset, :quit);
                          --replay reruns every cell for each new one
   lsp                    language server on stdio (`rok lsp` / `rokls` run it)
+  jupyter --connection-file <file>
+                         Jupyter kernel (Jupyter starts it; the REPL engine)
+  jupyter --install-kernel [--user]
+                         write the `rok` kernelspec (kernel.json) into
+                         $JUPYTER_DATA_DIR, else ~/Library/Jupyter (macOS) /
+                         ~/.local/share/jupyter; `rok jupyter install` makes
+                         one that starts the kernel through `rok`
   fmt [path]             format .rok files in place (file or directory)
   lint [path]            compile diagnostics plus lint checks (no native
                          build); exit 1 if a `deny` lint fires
@@ -44,6 +51,10 @@ commands:
   init [--lib|--bin] [dir]  make an existing directory a package
   clean [path]           remove the package's target/
   demangle <symbol>...   decode `_Y` symbols
+  rhir-text <file>       dump a prebuilt library's RHIR (<name>.rhir or
+                         the lib<name>.a beside it)
+  inspect <file>         a prebuilt library's package, exports, generic
+                         items and archive members
   emit [path]            write an intermediate artifact (see --emit)
   version                print the version
   help                   print this help
@@ -73,8 +84,11 @@ build options:
   --rokr <lib>                 runtime library: path, or name for -l<name>
                                (default: $ROK_HOME/lib/librokr.a, else -lrokr)
   --extern <name>=<path>       dependency package (its directory or
-                               `lib.rok`), importable as `use name::..`
+                               `lib.rok`, or a prebuilt <name>.rhir /
+                               lib<name>.a), importable as `use name::..`
                                (repeatable; `rok` passes these)
+  --name <name>                a library's package name (default: its
+                               directory's); it is in the library's symbols
   --target-dir <dir>           instead of the package's target/
   -g, --debug                  DWARF debug info (macOS: a .dSYM next to the
                                executable)
@@ -105,6 +119,8 @@ struct Args {
     emit: Vec<EmitKind>,
     bootstrap: Vec<PathBuf>,
     externs: Vec<(String, PathBuf)>,
+    /// `--name`: a library build's package name.
+    name: Option<String>,
     target_dir: Option<PathBuf>,
     cfg: Vec<String>,
     opts: BuildOptions,
@@ -122,6 +138,12 @@ struct Args {
     list: bool,
     /// `repl --replay`.
     replay: bool,
+    /// `jupyter --connection-file`.
+    connection_file: Option<PathBuf>,
+    /// `jupyter --install-kernel` (`--user` is the default, accepted).
+    install_kernel: bool,
+    /// `jupyter --install-kernel --env <name>` (from `rok --env`).
+    env: Option<String>,
     iters: Option<u64>,
     samples: Option<u64>,
     /// An `-O` level or `--release` was given.
@@ -186,6 +208,7 @@ fn parse_args(raw: Vec<String>) -> Args {
             "--bootstrap" => a.bootstrap.push(value(&name, inline, &mut it).into()),
             "--cfg" => a.cfg.push(value(&name, inline, &mut it)),
             "--extern" => a.externs.push(parse_extern(&value(&name, inline, &mut it))),
+            "--name" => a.name = Some(value(&name, inline, &mut it)),
             "--target-dir" => a.target_dir = Some(value(&name, inline, &mut it).into()),
             "--target" => a.opts.target = Some(value(&name, inline, &mut it)),
             "--rokr" => a.opts.rokr = value(&name, inline, &mut it),
@@ -215,6 +238,12 @@ fn parse_args(raw: Vec<String>) -> Args {
             "--show-output" => a.show_output = true,
             "--list" => a.list = true,
             "--replay" => a.replay = true,
+            "--connection-file" => {
+                a.connection_file = Some(value(&name, inline, &mut it).into());
+            }
+            "--install-kernel" => a.install_kernel = true,
+            "--user" => {}
+            "--env" => a.env = Some(value(&name, inline, &mut it)),
             "-A" | "-W" | "-D" | "--allow" | "--warn" | "--deny" => {
                 let lvl = match name.as_str() {
                     "-A" | "--allow" => Level::Allow,
@@ -267,8 +296,8 @@ fn parse_args(raw: Vec<String>) -> Args {
 }
 
 /// `--extern name=path` (spec 902.3). The path is the dependency's
-/// package directory or its `lib.rok`: dependencies are compiled from
-/// source with the package, not linked as prebuilt `.a` archives.
+/// package directory or its `lib.rok` (compiled from source with the
+/// package), or a prebuilt `<name>.rhir` / `lib<name>.a` (spec 904).
 fn parse_extern(v: &str) -> (String, PathBuf) {
     let Some((name, path)) = v.split_once('=') else {
         usage_error(&format!("`--extern {v}`: expected <name>=<path>"));
@@ -283,13 +312,10 @@ fn parse_extern(v: &str) -> (String, PathBuf) {
         usage_error(&format!("`--extern`: `{name}` is not a package name"));
     }
     let path = PathBuf::from(path);
-    if path.extension().is_some_and(|e| e == "a") {
-        usage_error(&format!(
-            "`--extern {name}`: prebuilt archives are not supported yet; pass the package \
-             directory"
-        ));
-    }
-    let root = if path.is_dir() {
+    let prebuilt = path.extension().is_some_and(|e| e == "a" || e == "rhir");
+    let root = if prebuilt {
+        rokc_interface::rhir::companions(&path).0
+    } else if path.is_dir() {
         path.join("lib.rok")
     } else {
         path
@@ -353,6 +379,7 @@ fn main() {
                 a.replay,
             ));
         }
+        "jupyter" => cmd_jupyter(with_defaults(a)),
         "run" => cmd_run(&with_defaults(a)),
         "test" => cmd_test(&with_defaults(a)),
         "bench" => cmd_bench(with_defaults(a)),
@@ -396,9 +423,64 @@ fn main() {
             }
         }
         "demangle" => cmd_demangle(&a),
+        "rhir-text" | "inspect" => {
+            let [file] = a.positional.as_slice() else {
+                usage_error(&format!("usage: rokc {} <file.rhir | lib<name>.a>", a.cmd));
+            };
+            let path = Path::new(file);
+            let out = if a.cmd == "inspect" {
+                rokc_interface::rhir::inspect(path)
+            } else {
+                let rhir = rokc_interface::rhir::companions(path).0;
+                std::fs::read(&rhir)
+                    .map_err(|e| format!("{}: {e}", rhir.display()))
+                    .and_then(|b| rokc_interface::rhir::Rhir::decode(&b))
+                    .map(|r| r.text())
+            };
+            print!("{}", out.unwrap_or_else(|e| fail(&e)));
+        }
         "version" => println!("rokc {}", env!("CARGO_PKG_VERSION")),
         "help" => print!("{USAGE}"),
         other => usage_error(&format!("unknown command `{other}`")),
+    }
+}
+
+/// `jupyter`: run the kernel, or install its kernelspec. Started by
+/// `rok` (`$ROK` set), the kernel goes through `rok` so it gets the
+/// dependencies of the notebook's project or of `--env`.
+fn cmd_jupyter(a: Args) {
+    if !a.install_kernel {
+        let Some(file) = &a.connection_file else {
+            usage_error("usage: rokc jupyter --connection-file <file> | --install-kernel");
+        };
+        process::exit(rokc_tools::jupyter::serve(
+            file,
+            a.bootstrap,
+            a.externs,
+            a.opts,
+        ));
+    }
+    let exe = |p: Option<std::ffi::OsString>| {
+        p.map(PathBuf::from)
+            .or_else(|| std::env::current_exe().ok())
+            .map_or_else(
+                || fail("cannot find the kernel executable"),
+                |p| p.display().to_string(),
+            )
+    };
+    let mut argv = vec![exe(std::env::var_os("ROK").filter(|r| !r.is_empty()))];
+    if let Some(e) = &a.env {
+        argv.extend(["--env".to_owned(), e.clone()]);
+    }
+    argv.extend(["jupyter", "--connection-file", "{connection_file}"].map(str::to_owned));
+    let (name, display) = match &a.env {
+        Some(e) => (format!("rok-{e}"), format!("rok ({e})")),
+        None => ("rok".to_owned(), "rok".to_owned()),
+    };
+    match rokc_tools::jupyter::install(&name, &display, &argv) {
+        Ok(file) if !a.quiet => eprintln!("   Installed kernel `{name}` ({})", file.display()),
+        Ok(_) => {}
+        Err(e) => fail(&e),
     }
 }
 
@@ -471,6 +553,10 @@ fn compile(a: &Args, pkg: &Package, mode: Mode) -> (CompileResult, Instant) {
         session.add_extern(n.clone(), p.clone());
     }
     session.set_anonymous(pkg.anonymous);
+    // A library's `build` is a prebuilt library: `lib<name>.a` + RHIR.
+    if pkg.lib && matches!(a.cmd.as_str(), "build" | "emit") {
+        session.set_lib_name(Some(lib_name(a, pkg)));
+    }
     session.set_test(mode == Mode::Test);
     session.set_bench(mode == Mode::Bench);
     session.set_keep_ast(matches!(mode, Mode::Lint | Mode::Doc));
@@ -492,6 +578,23 @@ fn compile(a: &Args, pkg: &Package, mode: Mode) -> (CompileResult, Instant) {
     }
     stage(a, "front end", started);
     (result, started)
+}
+
+/// A library's package name: `--name`, else its directory's (made an
+/// identifier).
+fn lib_name(a: &Args, pkg: &Package) -> String {
+    a.name.clone().unwrap_or_else(|| {
+        let n: String = pkg
+            .name
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect();
+        if n.starts_with(|c: char| c.is_ascii_digit()) {
+            format!("_{n}")
+        } else {
+            n
+        }
+    })
 }
 
 /// `-v`: per-stage timing (909.5).
@@ -558,7 +661,7 @@ fn cmd_build(a: &Args) {
     let out = a.output.clone().unwrap_or_else(|| {
         create_dir(&target);
         target.join(if pkg.lib {
-            format!("lib{}.a", pkg.name)
+            format!("lib{}.a", lib_name(a, &pkg))
         } else {
             pkg.name.clone()
         })

@@ -1,0 +1,127 @@
+// rok::core::reflect — `Reflect` / `Inspect` (refs-lang 6.10, stdlib 2.12).
+//
+// `Reflect` is implemented by the compiler for every type (no impl in
+// source; a manual one is an error): `T::type_name()`, `T::size()`,
+// `T::align()` are constants, and `x.type_name_of()` / `x.size_of()` look
+// at the variant an `any` or sum value holds at run time. A type's own
+// method of the same name wins.
+//
+// `Inspect` is opt-in through `#[derive(Inspect)]`, written below as a
+// meta block (6.10.2): field names, dynamic field get / set through
+// `any`, and the type's inherent methods.
+
+pub trait Reflect {
+    fn type_name() -> str;
+    fn size() -> usize;
+    fn align() -> usize;
+    fn type_name_of(self) -> str;
+    fn size_of(self) -> usize;
+}
+
+pub trait Inspect: Reflect {
+    fn field_names() -> List<str>;
+    fn get_field(self, name: str) -> any | none;
+    fn set_field(ref self, name: str, value: any) -> bool;
+    fn methods() -> List<MethodInfo>;
+}
+
+/// One inherent method of an `Inspect` type. 6.10 names `name` / `arity` /
+/// `is_static`, 2.12 `name` / `arg_types` / `return_type`: both are here.
+/// `arity` and `arg_types` leave out `self`.
+pub struct MethodInfo {
+    pub name: str;
+    pub arity: usize;
+    pub is_static: bool;
+    pub arg_types: List<str>;
+    pub return_type: str;
+}
+
+/// `value` as a `T`: the value when it holds a `T`; an integer of another
+/// integer type when it fits in `T` (`set_field("id", 42)` on a `u64`
+/// field); else `none`.
+#[intrinsic("rok.any_cast")]
+pub fn cast<T>(value: any) -> T | none;
+
+// `T`'s inherent methods, one per line: `name \t static(0/1) \t return
+// type \t argument types..`.
+#[intrinsic("rok.method_table")]
+fn method_table<T>() -> str;
+
+/// `T`'s inherent methods, by name.
+pub fn methods_of<T>() -> List<MethodInfo> {
+    let out: List<MethodInfo> = List::new();
+    for line in method_table::<T>().split("\n") {
+        if line.len() == 0 {
+            continue;
+        }
+        let parts: List<str> = List::new();
+        for p in line.split("\t") {
+            parts.push(p);
+        }
+        let args: List<str> = List::new();
+        let i: usize = 3;
+        while i < parts.len() {
+            args.push(parts[i]);
+            i += 1;
+        }
+        out.push(MethodInfo {
+            name: parts[0],
+            arity: args.len(),
+            is_static: parts[1] == "1",
+            arg_types: args,
+            return_type: parts[2],
+        });
+    }
+    return out;
+}
+
+// ponytail: an enum has no fields here (`@for_fields` needs a variant);
+// it still lists its methods.
+#[impl_derive(Inspect)]
+pub @derive {
+    impl rok::core::reflect::Inspect for @Self {
+        fn field_names() -> List<str> {
+            let names: List<str> = List::new();
+            @if_struct {
+                @for_fields {
+                    names.push(@field.name.as_str());
+                }
+            }
+            return names;
+        }
+
+        fn get_field(self, name: str) -> any | none {
+            @if_struct {
+                @for_fields {
+                    if name == @field.name.as_str() {
+                        return self.@field;
+                    }
+                }
+            }
+            return none;
+        }
+
+        fn set_field(ref self, name: str, value: any) -> bool {
+            @if_struct {
+                @for_fields {
+                    if name == @field.name.as_str() {
+                        match rok::core::reflect::cast::<@field.type>(value) {
+                            v: @field.type => {
+                                self.@field = v;
+                                return true;
+                            },
+                            none => {
+                                return false;
+                            },
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
+        fn methods() -> List<rok::core::reflect::MethodInfo> {
+            return rok::core::reflect::methods_of::<@Self>();
+        }
+    }
+}

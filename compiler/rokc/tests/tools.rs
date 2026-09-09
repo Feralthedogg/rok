@@ -146,6 +146,31 @@ p
     let _ = std::fs::remove_file(&log);
 }
 
+/// A binding a later cell could not use is refused in the cell that
+/// makes it (`--replay` keeps it); one a later cell can name is kept.
+#[test]
+fn repl_refuses_bindings_later_cells_cannot_use() {
+    let Some(env) = setup() else { return };
+    let rokr = env.rokr.display().to_string();
+    let input = "\
+mod geo { struct Hid { x: i32; } pub fn mk() -> Hid { Hid { x: 1 } } pub struct Pt { pub x: i32; } }
+let h = geo::mk();
+let d: any Debug = 5i32;
+let pt = geo::Pt { x: 3 };
+pt.x
+";
+    let out = piped(ROKC, &["repl", "--rokr", &rokr], input);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+    assert_eq!(stdout, "Pt\ni32: 3\n", "stderr: {stderr}");
+    assert!(
+        stderr.contains("`h: Hid` cannot be kept for later cells (`geo::Hid` is private"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("it holds an `any` value"), "{stderr}");
+    assert!(stderr.contains("--replay` keeps it"), "{stderr}");
+}
+
 fn frame(body: &str) -> String {
     format!("Content-Length: {}\r\n\r\n{body}", body.len())
 }
@@ -192,4 +217,157 @@ fn check_reads_stdin() {
         "{}",
         text(&out.stderr)
     );
+}
+
+/// `rokc jupyter` driven by a hand-written ZMTP client (no Jupyter
+/// needed): heartbeat, `kernel_info`, cells that bind, show, print and
+/// panic, completion, and `shutdown`. Every message must be signed.
+#[test]
+fn jupyter_kernel_speaks_the_wire_protocol() {
+    use rokc_tools::json::Json;
+    use rokc_tools::jupyter::{encode, handshake, parse_msg, read_msg, write_msg};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    let Some(env) = setup() else { return };
+    let key = b"secret-key";
+    let listeners: Vec<_> = (0..5)
+        .map(|_| TcpListener::bind("127.0.0.1:0").unwrap())
+        .collect();
+    let ports: Vec<u16> = listeners
+        .iter()
+        .map(|l| l.local_addr().unwrap().port())
+        .collect();
+    drop(listeners);
+    let dir = std::env::temp_dir().join(format!("rok_jupyter_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("kernel.json");
+    std::fs::write(
+        &file,
+        format!(
+            r#"{{"transport":"tcp","ip":"127.0.0.1","shell_port":{},"iopub_port":{},
+"stdin_port":{},"control_port":{},"hb_port":{},"key":"secret-key",
+"signature_scheme":"hmac-sha256","kernel_name":"rok"}}"#,
+            ports[0], ports[1], ports[2], ports[3], ports[4]
+        ),
+    )
+    .unwrap();
+    let kernel = Command::new(ROKC)
+        .args(["jupyter", "--connection-file"])
+        .arg(&file)
+        .args(["--rokr", &env.rokr.display().to_string()])
+        .env("ROK_HOME", workspace())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let connect = |port: u16, kind: &str| {
+        let mut s = (0..200)
+            .find_map(|_| {
+                TcpStream::connect(("127.0.0.1", port)).ok().or_else(|| {
+                    std::thread::sleep(Duration::from_millis(50));
+                    None
+                })
+            })
+            .expect("the kernel does not listen");
+        s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+        handshake(&mut s, kind).unwrap();
+        s
+    };
+    let mut iopub = connect(ports[1], "SUB");
+    write_msg(&mut iopub, &[b"\x01".to_vec()]).unwrap();
+    let mut shell = connect(ports[0], "DEALER");
+    let mut control = connect(ports[3], "DEALER");
+    let mut hb = connect(ports[4], "REQ");
+    write_msg(&mut hb, &[Vec::new(), b"ping".to_vec()]).unwrap();
+    assert_eq!(read_msg(&mut hb).unwrap(), [Vec::new(), b"ping".to_vec()]);
+
+    // Send a request: its reply (type, content) and the iopub messages
+    // it caused, up to its `idle`.
+    let mut request = |s: &mut TcpStream, kind: &str, content: Json| {
+        let frames = encode(key, "test", &[], kind, &Json::obj([]), &content);
+        let mine = parse_msg(key, frames.clone()).unwrap().header;
+        let id = mine.get("msg_id").clone();
+        write_msg(s, &frames).unwrap();
+        let reply = parse_msg(key, read_msg(s).unwrap()).expect("a signed reply");
+        assert!(reply.ids.is_empty());
+        assert_eq!(reply.parent.get("msg_id"), &id);
+        let mut published = Vec::new();
+        loop {
+            let m = parse_msg(key, read_msg(&mut iopub).unwrap()).expect("signed iopub");
+            if m.parent.get("msg_id") != &id {
+                continue;
+            }
+            if m.content.get("execution_state").as_str() == Some("idle") {
+                break;
+            }
+            published.push((m.kind().to_owned(), m.content));
+        }
+        (reply.kind().to_owned(), reply.content, published)
+    };
+    let exec = |code: &str| Json::obj([("code", Json::str(code)), ("silent", Json::Bool(false))]);
+    let shows = |published: &[(String, Json)], text: &str| {
+        published.iter().any(|(k, c)| {
+            k == "execute_result" && c.get("data").get("text/plain").as_str() == Some(text)
+        })
+    };
+
+    let (kind, info, _) = request(&mut shell, "kernel_info_request", Json::obj([]));
+    assert_eq!(kind, "kernel_info_reply");
+    assert_eq!(info.get("language_info").get("name").as_str(), Some("rok"));
+
+    let (_, reply, _) = request(&mut shell, "execute_request", exec("let x = 40i32;"));
+    assert_eq!(reply.get("status").as_str(), Some("ok"), "{reply}");
+    let (_, reply, published) = request(&mut shell, "execute_request", exec("x + 2"));
+    assert_eq!(reply.get("execution_count"), &Json::num(2));
+    assert!(shows(&published, "i32: 42"), "{published:?}");
+    assert!(
+        published
+            .iter()
+            .any(|(k, c)| k == "execute_input" && c.get("code").as_str() == Some("x + 2"))
+    );
+
+    let (_, _, published) = request(&mut shell, "execute_request", exec("println(f\"hi {x}\");"));
+    assert!(
+        published.iter().any(|(k, c)| k == "stream"
+            && c.get("name").as_str() == Some("stdout")
+            && c.get("text").as_str() == Some("hi 40\n")),
+        "{published:?}"
+    );
+
+    let (_, reply, published) = request(&mut shell, "execute_request", exec("panic(\"boom\");"));
+    assert_eq!(reply.get("status").as_str(), Some("error"), "{reply}");
+    let error = published.iter().find(|(k, _)| k == "error").expect("error");
+    assert!(error.1.to_string().contains("boom"), "{}", error.1);
+    // The session goes on, as it was before the failed cell.
+    let (_, _, published) = request(&mut shell, "execute_request", exec("x"));
+    assert!(shows(&published, "i32: 40"), "{published:?}");
+
+    let (_, reply, _) = request(
+        &mut shell,
+        "is_complete_request",
+        Json::obj([("code", Json::str("fn f() {"))]),
+    );
+    assert_eq!(reply.get("status").as_str(), Some("incomplete"));
+    let (_, reply, _) = request(
+        &mut shell,
+        "complete_request",
+        Json::obj([("code", Json::str("1 + x")), ("cursor_pos", Json::num(5))]),
+    );
+    assert_eq!(
+        reply.get("matches"),
+        &Json::Arr(vec![Json::str("x")]),
+        "{reply}"
+    );
+    assert_eq!(reply.get("cursor_start"), &Json::num(4));
+
+    let (kind, _, _) = request(
+        &mut control,
+        "shutdown_request",
+        Json::obj([("restart", Json::Bool(false))]),
+    );
+    assert_eq!(kind, "shutdown_reply");
+    let out = kernel.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let _ = std::fs::remove_dir_all(&dir);
 }

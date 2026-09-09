@@ -26,6 +26,7 @@ mod expr;
 mod fstring;
 mod mono;
 mod pattern;
+mod reflect;
 mod resolve;
 mod send_check;
 mod throws;
@@ -106,10 +107,22 @@ struct TypeNames<'a> {
     /// Every generic alias use: (alias, arguments, module, span), for
     /// its bounds check (`check_type_bounds`).
     alias_uses: std::cell::RefCell<Vec<AliasUse>>,
+    /// `canon` results without local `use`s or diagnostics, by (path,
+    /// module): its glob lookups scan every type name.
+    canon_memo: std::cell::RefCell<HashMap<(String, String), Option<String>>>,
 }
 
 /// (alias full name, arguments, module of the use, span of the use).
 type AliasUse = (String, Vec<Ty>, String, rokc_diagnostic::Span);
+
+/// Can code in `module` name the type-like item `full` (spec 5.6)?
+/// Unknown names (primitives, ..) are visible.
+#[must_use]
+pub fn type_visible(m: &crate::HirModule, full: &str, module: &str) -> bool {
+    m.type_visibility
+        .get(full)
+        .is_none_or(|&vis| visible_from(module, &module_of(full), vis))
+}
 
 impl TypeNames<'_> {
     /// `Row<3>` → `[i32; 3]` when `ty` names a generic alias.
@@ -148,6 +161,27 @@ impl TypeNames<'_> {
     }
 
     fn canon(
+        &self,
+        segments: &[&str],
+        module: &str,
+        local_uses: &[Vec<crate::uses::UseEntry>],
+    ) -> Option<String> {
+        if !local_uses.iter().all(Vec::is_empty) {
+            return self.canon_uncached(segments, module, local_uses);
+        }
+        let key = (segments.join("::"), module.to_owned());
+        if let Some(hit) = self.canon_memo.borrow().get(&key) {
+            return hit.clone();
+        }
+        let errors = self.diags.borrow().len();
+        let out = self.canon_uncached(segments, module, local_uses);
+        if self.diags.borrow().len() == errors {
+            self.canon_memo.borrow_mut().insert(key, out.clone());
+        }
+        out
+    }
+
+    fn canon_uncached(
         &self,
         segments: &[&str],
         module: &str,
@@ -1010,8 +1044,8 @@ struct ClosureSink {
     /// Same for generic enums (ids continue after `Env::enums`).
     extra_enums: std::cell::RefCell<Vec<HirEnumDef>>,
     extra_enum_table: std::cell::RefCell<HashMap<String, EnumId>>,
-    /// `any` type tags: index = tag of that concrete type.
-    any_tags: std::cell::RefCell<Vec<HirTy>>,
+    /// `any` type tags of the concrete types stored so far (`any_tag`).
+    any_tags: std::cell::RefCell<Vec<(HirTy, u32)>>,
     /// `any Tr` method dispatchers (bodies built after all lowering).
     any_dispatch: std::cell::RefCell<Vec<expr::AnyDispatch>>,
     /// `T::Item` projections being resolved (cuts `impl<I: Iterator>
@@ -1359,6 +1393,9 @@ impl<'a> LowerCtx<'a> {
 
     /// `implements`, or a generic impl of the trait covers `ty`.
     fn implements_trait(&self, ty: &HirTy, trait_key: &str, depth: u32) -> bool {
+        if trait_key == reflect::REFLECT {
+            return true;
+        }
         if self.env.names.auto_traits.contains(trait_key) {
             return self.auto_trait(ty, trait_key, depth, &mut Vec::new());
         }
@@ -1578,15 +1615,23 @@ impl<'a> LowerCtx<'a> {
         Ok(subst)
     }
 
-    /// Program-wide `any` type tag of concrete type `ty`, assigned on
-    /// first use (whole-program compilation: closed world).
+    /// `any` type tag of concrete type `ty`: a hash of its type name, so
+    /// a prebuilt dependency (separately compiled) tags its values alike.
+    // ponytail: a 31-bit name hash; two names colliding within one build
+    // probe to the next free tag, which is then build-local.
     fn any_tag(&self, ty: &HirTy) -> u32 {
         let mut tags = self.env.sink.any_tags.borrow_mut();
-        let i = tags.iter().position(|t| t == ty).unwrap_or_else(|| {
-            tags.push(ty.clone());
-            tags.len() - 1
-        });
-        u32::try_from(i).expect("any tag overflow")
+        if let Some((_, tag)) = tags.iter().find(|(t, _)| t == ty) {
+            return *tag;
+        }
+        let mut tag = self.ty_name(ty).bytes().fold(0x811c_9dc5_u32, |h, b| {
+            (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+        }) & 0x7fff_ffff;
+        while tags.iter().any(|(_, t)| *t == tag) {
+            tag = (tag + 1) & 0x7fff_ffff;
+        }
+        tags.push((ty.clone(), tag));
+        tag
     }
 
     fn struct_def(&self, id: StructId) -> HirStructDef {

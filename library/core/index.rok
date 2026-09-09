@@ -4,7 +4,8 @@
 // traits. `xs[i]` / `xs[i] = v` on a struct or enum call `index` /
 // `index_set`; fixed arrays and `GcBuf<T>` index directly (no call).
 // `a[i:j:k]` calls `a.slice(i..j)` (then `.step(k)`), see
-// `collections::slice`.
+// `collections::slice`. Slices follow Python: bounds clamp to the
+// length (never panic), a negative step reads them from the end.
 
 #[lang("index_trait")]
 pub trait Index<I> {
@@ -43,4 +44,59 @@ pub fn index_from_end(i: isize, len: usize) -> usize {
         panic(f"index {i} out of bounds for length {len}");
     }
     len - 1 - back
+}
+
+/// `r` clamped to a length `n` the way Python clamps slice bounds: the
+/// end to `n`, the start to the end (`a >= b` is empty). Every
+/// `Sliceable<Range<usize>>` impl goes through here, so `xs[5:100]` and
+/// `xs.slice(9..2)` never panic.
+pub fn clamp_range(r: Range<usize>, n: usize) -> Range<usize> {
+    let end = if r.end > n { n } else { r.end };
+    let start = if r.start > end { end } else { r.start };
+    start..end
+}
+
+/// A signed slice bound (`xs[-3:]`, no step): `len + i` when negative,
+/// clamped at 0 (`xs[-10:]` is the whole list). The top is clamped by
+/// `clamp_range`.
+pub fn slice_bound(i: isize, len: usize) -> usize {
+    if i >= 0 {
+        return i as usize;
+    }
+    let back = (-(i + 1)) as usize;
+    if back >= len {
+        return 0;
+    }
+    len - 1 - back
+}
+
+/// Python's `slice(start, stop, step).indices(len)` as the forward range
+/// `r` for which `xs.slice(r).step(step)` is `xs[start:stop:step]` (the
+/// compiler lowers every stepped slice of a `List` / `Slice` / array
+/// this way). A missing bound is `none`: `0` / `len` when `step > 0`,
+/// the last element / before the first when `step < 0`. A step of 0
+/// panics.
+pub fn slice_range(start: isize | none, stop: isize | none, step: isize, len: usize) -> Range<usize> {
+    if step == 0 {
+        panic("slice step must not be zero");
+    }
+    let n = len as isize;
+    if step > 0 {
+        let a = py_bound(start ?? 0, n, 0, n);
+        let b = py_bound(stop ?? n, n, 0, n);
+        let hi = if b < a { a } else { b };
+        return (a as usize)..(hi as usize);
+    }
+    // Walked from `a` down to just above `b`; both in `-1..n`.
+    let a = py_bound(start ?? isize::MAX, n, -1, n - 1);
+    let b = py_bound(stop ?? isize::MIN, n, -1, n - 1);
+    let lo = b + 1;
+    let hi = if a + 1 < lo { lo } else { a + 1 };
+    (lo as usize)..(hi as usize)
+}
+
+/// `i` (`n + i` when negative) clamped to `lo..=hi`.
+fn py_bound(i: isize, n: isize, lo: isize, hi: isize) -> isize {
+    let x = if i < 0 { i + n } else { i };
+    if x < lo { lo } else if x > hi { hi } else { x }
 }

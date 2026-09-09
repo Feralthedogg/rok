@@ -140,6 +140,7 @@ dependencies = [
  "rokc_fmt",
  "rokc_hir",
  "rokc_interface",
+ "rokc_ir_common",
  "rokc_lexer",
  "rokc_parser",
 ]

@@ -1,0 +1,911 @@
+//! `rokc jupyter`: a Jupyter kernel (spec 908) on the REPL session
+//! engine (`repl::Repl::eval`, the default mode: each cell runs once).
+//!
+//! Wire: Jupyter messaging 5.3 over a hand-written minimal ZMTP 3.0
+//! (TCP, NULL mechanism; no external crates, targets.md). Shell, control
+//! and stdin act as ROUTER (a reply goes back on the connection the
+//! request came on), iopub as PUB (every message to every subscriber),
+//! heartbeat as REP (echo). Messages are signed with HMAC-SHA256.
+//!
+//! ponytail: no CURVE / ipc transport, no topic filtering on iopub, no
+//! rich display (`text/plain` only), no `input_request` (cells read
+//! `/dev/null`), no debugger, no `inspect` (always not found). Output
+//! is sent when the cell ends, not as it is printed.
+
+use std::fmt::Write as _;
+use std::io::{self, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use rokc_interface::BuildOptions;
+
+use crate::json::Json;
+use crate::repl::{Repl, incomplete};
+
+const PROTOCOL: &str = "5.3";
+const DELIM: &[u8] = b"<IDS|MSG>";
+/// Written after a cell to stdout / stderr: the capture ends there.
+const END: &[u8] = b"\x00@@rok-kernel-end@@\x00";
+
+// --- SHA-256 (FIPS 180-4) and HMAC (RFC 2104) -------------------------
+
+#[rustfmt::skip]
+const K: [u32; 64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+// The standard's names.
+#[allow(clippy::many_single_char_names)]
+pub fn sha256(data: &[u8]) -> [u8; 32] {
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&(data.len() as u64 * 8).to_be_bytes());
+    for block in msg.chunks(64) {
+        let mut w = [0u32; 64];
+        for (w, b) in w.iter_mut().zip(block.chunks(4)) {
+            *w = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+        }
+        for i in 16..64 {
+            let (a, b) = (w[i - 15], w[i - 2]);
+            let s0 = a.rotate_right(7) ^ a.rotate_right(18) ^ (a >> 3);
+            let s1 = b.rotate_right(17) ^ b.rotate_right(19) ^ (b >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+        let mut v = h;
+        for (k, w) in K.iter().zip(w) {
+            let [a, b, c, d, e, f, g, hh] = v;
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ (!e & g);
+            let t1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(*k)
+                .wrapping_add(w);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let t2 = s0.wrapping_add((a & b) ^ (a & c) ^ (b & c));
+            v = [t1.wrapping_add(t2), a, b, c, d.wrapping_add(t1), e, f, g];
+        }
+        for (h, v) in h.iter_mut().zip(v) {
+            *h = h.wrapping_add(v);
+        }
+    }
+    let mut out = [0; 32];
+    for (o, h) in out.chunks_mut(4).zip(h) {
+        o.copy_from_slice(&h.to_be_bytes());
+    }
+    out
+}
+
+/// HMAC-SHA256 of the concatenation of `parts`.
+pub fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+    let mut k = [0u8; 64];
+    if key.len() > 64 {
+        k[..32].copy_from_slice(&sha256(key));
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut inner: Vec<u8> = k.iter().map(|b| b ^ 0x36).collect();
+    for p in parts {
+        inner.extend_from_slice(p);
+    }
+    let mut outer: Vec<u8> = k.iter().map(|b| b ^ 0x5c).collect();
+    outer.extend_from_slice(&sha256(&inner));
+    sha256(&outer)
+}
+
+/// The Jupyter signature of a message's four JSON frames (hex; empty
+/// when there is no key).
+pub fn sign(key: &[u8], frames: &[&[u8]]) -> String {
+    if key.is_empty() {
+        return String::new();
+    }
+    hex(&hmac_sha256(key, frames))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+// --- ZMTP 3.0 -----------------------------------------------------------
+
+/// Greeting and `READY` both ways, as a socket of `kind` (`ROUTER`,
+/// `PUB`, `REP`, or a client's `DEALER` / `SUB` / `REQ`).
+pub fn handshake(s: &mut TcpStream, kind: &str) -> io::Result<()> {
+    let mut g = [0u8; 64];
+    g[0] = 0xff;
+    g[9] = 0x7f;
+    g[10] = 3;
+    g[12..16].copy_from_slice(b"NULL");
+    s.write_all(&g)?;
+    let mut peer = [0u8; 64];
+    s.read_exact(&mut peer)?;
+    if peer[0] != 0xff || peer[9] & 1 == 0 || peer[10] < 3 || &peer[12..17] != b"NULL\0" {
+        return Err(bad("not a ZMTP 3 NULL peer"));
+    }
+    let mut ready = b"\x05READY\x0bSocket-Type".to_vec();
+    ready.extend_from_slice(&(kind.len() as u32).to_be_bytes());
+    ready.extend_from_slice(kind.as_bytes());
+    s.write_all(&frame(&ready, false, true))?;
+    match read_frame(s)? {
+        (flags, body) if flags & 4 != 0 && body.starts_with(b"\x05READY") => Ok(()),
+        _ => Err(bad("no READY")),
+    }
+}
+
+fn bad(msg: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg)
+}
+
+/// One frame on the wire.
+pub fn frame(body: &[u8], more: bool, command: bool) -> Vec<u8> {
+    let flags = u8::from(more) | (u8::from(command) << 2);
+    let mut out = Vec::with_capacity(body.len() + 9);
+    if body.len() > 255 {
+        out.push(flags | 2);
+        out.extend_from_slice(&(body.len() as u64).to_be_bytes());
+    } else {
+        out.push(flags);
+        out.push(body.len() as u8);
+    }
+    out.extend_from_slice(body);
+    out
+}
+
+/// One frame: its flags and body.
+fn read_frame(s: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
+    let mut flags = [0u8];
+    s.read_exact(&mut flags)?;
+    let len = if flags[0] & 2 != 0 {
+        let mut n = [0u8; 8];
+        s.read_exact(&mut n)?;
+        u64::from_be_bytes(n)
+    } else {
+        let mut n = [0u8];
+        s.read_exact(&mut n)?;
+        u64::from(n[0])
+    };
+    if len > 1 << 30 {
+        return Err(bad("frame too large"));
+    }
+    let mut body = vec![0; len as usize];
+    s.read_exact(&mut body)?;
+    Ok((flags[0], body))
+}
+
+/// The next message (its frames); commands (`PING`, `SUBSCRIBE`, ..)
+/// are skipped.
+pub fn read_msg(s: &mut impl Read) -> io::Result<Vec<Vec<u8>>> {
+    let mut frames = Vec::new();
+    loop {
+        let (flags, body) = read_frame(s)?;
+        if flags & 4 != 0 {
+            continue;
+        }
+        frames.push(body);
+        if flags & 1 == 0 {
+            return Ok(frames);
+        }
+    }
+}
+
+/// A message as one write (so writers sharing a stream do not mix).
+pub fn write_msg(s: &mut impl Write, frames: &[Vec<u8>]) -> io::Result<()> {
+    let mut buf = Vec::new();
+    for (i, f) in frames.iter().enumerate() {
+        buf.extend(frame(f, i + 1 < frames.len(), false));
+    }
+    s.write_all(&buf)
+}
+
+// --- Jupyter messages ---------------------------------------------------
+
+pub struct Msg {
+    /// Routing frames before `<IDS|MSG>`.
+    pub ids: Vec<Vec<u8>>,
+    pub header: Json,
+    pub parent: Json,
+    pub content: Json,
+}
+
+impl Msg {
+    pub fn kind(&self) -> &str {
+        self.header.get("msg_type").as_str().unwrap_or("")
+    }
+}
+
+/// Split and check a message's frames.
+pub fn parse_msg(key: &[u8], frames: Vec<Vec<u8>>) -> Option<Msg> {
+    let d = frames.iter().position(|f| f == DELIM)?;
+    let parts = frames.get(d + 2..d + 6)?;
+    let refs: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
+    let want = sign(key, &refs);
+    let got = &frames[d + 1];
+    // Constant time: the key is the kernel's only secret.
+    if got.len() != want.len()
+        || got
+            .iter()
+            .zip(want.bytes())
+            .fold(0, |a, (x, y)| a | (x ^ y))
+            != 0
+    {
+        return None;
+    }
+    let json = |b: &[u8]| Json::parse(std::str::from_utf8(b).ok()?).ok();
+    Some(Msg {
+        ids: frames[..d].to_vec(),
+        header: json(&parts[0])?,
+        parent: json(&parts[1])?,
+        content: json(&parts[3])?,
+    })
+}
+
+/// The frames of a message of type `kind` in reply to (or caused by)
+/// `parent`.
+pub fn encode(
+    key: &[u8],
+    session: &str,
+    ids: &[Vec<u8>],
+    kind: &str,
+    parent: &Json,
+    content: &Json,
+) -> Vec<Vec<u8>> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let id = format!(
+        "{session}-{}",
+        SEQ.fetch_add(1, Ordering::Relaxed) // unique within the session
+    );
+    let header = Json::obj([
+        ("msg_id", Json::Str(id)),
+        ("session", Json::str(session)),
+        ("username", Json::str("rok")),
+        (
+            "date",
+            Json::Str(iso8601(now.as_secs(), now.subsec_micros())),
+        ),
+        ("msg_type", Json::str(kind)),
+        ("version", Json::str(PROTOCOL)),
+    ]);
+    let parts = [
+        header.to_string().into_bytes(),
+        parent.to_string().into_bytes(),
+        b"{}".to_vec(),
+        content.to_string().into_bytes(),
+    ];
+    let refs: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
+    let sig = sign(key, &refs);
+    let mut frames = ids.to_vec();
+    frames.push(DELIM.to_vec());
+    frames.push(sig.into_bytes());
+    frames.extend(parts);
+    frames
+}
+
+/// `2026-10-13T01:02:03.000004Z` (UTC).
+#[allow(clippy::many_single_char_names)]
+fn iso8601(secs: u64, micros: u32) -> String {
+    // Days to civil date (H. Hinnant's algorithm).
+    let z = secs / 86400 + 719_468;
+    let (era, doe) = (z / 146_097, z % 146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + u64::from(m <= 2);
+    let t = secs % 86400;
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{micros:06}Z",
+        t / 3600,
+        t / 60 % 60,
+        t % 60
+    )
+}
+
+// --- the kernel ---------------------------------------------------------
+
+/// A ROUTER connection's writing end.
+type Conn = Arc<Mutex<TcpStream>>;
+
+struct Wire {
+    key: Vec<u8>,
+    session: String,
+    subscribers: Mutex<Vec<TcpStream>>,
+}
+
+impl Wire {
+    fn reply(&self, conn: &Conn, req: &Msg, kind: &str, content: &Json) {
+        let frames = encode(
+            &self.key,
+            &self.session,
+            &req.ids,
+            kind,
+            &req.header,
+            content,
+        );
+        let _ = write_msg(&mut *conn.lock().unwrap(), &frames);
+    }
+
+    /// To every iopub subscriber; one that is gone is dropped.
+    fn publish(&self, parent: &Json, kind: &str, content: &Json) {
+        let topic = format!("kernel.{}.{kind}", self.session).into_bytes();
+        let frames = encode(&self.key, &self.session, &[topic], kind, parent, content);
+        let mut subs = self.subscribers.lock().unwrap();
+        subs.retain_mut(|s| write_msg(s, &frames).is_ok());
+    }
+
+    fn status(&self, parent: &Json, state: &str) {
+        self.publish(
+            parent,
+            "status",
+            &Json::obj([("execution_state", Json::str(state))]),
+        );
+    }
+}
+
+/// Accept connections on `l` and run `f` on each, in its own thread.
+fn serve_each(l: TcpListener, f: impl Fn(TcpStream) + Send + Sync + 'static) {
+    let f = Arc::new(f);
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            let f = f.clone();
+            std::thread::spawn(move || f(s));
+        }
+    });
+}
+
+/// Send what is written to `fd` from now on to the receiver, one string
+/// per `END` mark.
+fn capture(fd: i32) -> io::Result<mpsc::Receiver<String>> {
+    unsafe extern "C" {
+        fn dup2(old: i32, new: i32) -> i32;
+    }
+    let (mut r, w) = UnixStream::pair()?;
+    // SAFETY: plain fd duplication; `w` stays open until then.
+    if unsafe { dup2(w.as_raw_fd(), fd) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut acc, mut buf) = (Vec::new(), [0u8; 8192]);
+        while let Ok(n) = r.read(&mut buf) {
+            if n == 0 {
+                return;
+            }
+            acc.extend_from_slice(&buf[..n]);
+            while let Some(at) = acc.windows(END.len()).position(|w| w == END) {
+                let text = String::from_utf8_lossy(&acc[..at]).into_owned();
+                acc.drain(..at + END.len());
+                let _ = tx.send(text);
+            }
+        }
+    });
+    Ok(rx)
+}
+
+/// The REPL cells of a Jupyter cell: lines until the input is complete
+/// (`repl::incomplete`), as the terminal REPL reads them.
+fn split_cells(code: &str) -> Vec<String> {
+    let mut cells = Vec::new();
+    let mut buf = String::new();
+    for line in code.lines() {
+        let t = line.trim();
+        if buf.is_empty() && (t.is_empty() || t.starts_with("//")) {
+            continue;
+        }
+        buf.push_str(line);
+        buf.push('\n');
+        if !incomplete(&buf) {
+            cells.push(std::mem::take(&mut buf).trim().to_owned());
+        }
+    }
+    if !buf.trim().is_empty() {
+        cells.push(buf.trim().to_owned());
+    }
+    cells
+}
+
+struct Kernel {
+    wire: Arc<Wire>,
+    repl: Repl,
+    count: u32,
+    out: mpsc::Receiver<String>,
+    err: mpsc::Receiver<String>,
+}
+
+impl Kernel {
+    /// Run `code`: (stdout, stderr, what the last cell shows), `Err` at
+    /// the first failing cell. Like `IPython`, only the last cell's value
+    /// is shown.
+    // ponytail: the cells before a failing one keep their effects.
+    fn run(&mut self, code: &str) -> (String, String, Result<Option<String>, ()>) {
+        let mut result = Ok(None);
+        for cell in split_cells(code) {
+            result = if cell.starts_with(':') {
+                self.repl.cell(&cell);
+                Ok(None)
+            } else {
+                self.repl.eval(&cell)
+            };
+            if result.is_err() {
+                break;
+            }
+        }
+        let mut stdout = io::stdout();
+        let _ = stdout.write_all(END).and_then(|()| stdout.flush());
+        let _ = io::stderr().write_all(END);
+        let out = self.out.recv().unwrap_or_default();
+        let err = self.err.recv().unwrap_or_default();
+        (out, err, result)
+    }
+
+    fn execute(&mut self, conn: &Conn, req: &Msg) {
+        let c = &req.content;
+        let code = c.get("code").as_str().unwrap_or("");
+        let silent = c.get("silent") == &Json::Bool(true);
+        if !silent && c.get("store_history") != &Json::Bool(false) {
+            self.count += 1;
+        }
+        let n = Json::num(self.count);
+        let wire = self.wire.clone();
+        let publish = |kind: &str, content: Json| {
+            if !silent {
+                wire.publish(&req.header, kind, &content);
+            }
+        };
+        publish(
+            "execute_input",
+            Json::obj([("code", Json::str(code)), ("execution_count", n.clone())]),
+        );
+        let (out, err, result) = self.run(code);
+        let stream = |name: &str, text: String| {
+            if !text.is_empty() {
+                publish(
+                    "stream",
+                    Json::obj([("name", Json::str(name)), ("text", Json::Str(text))]),
+                );
+            }
+        };
+        stream("stdout", out);
+        let reply = if let Ok(shown) = result {
+            stream("stderr", err);
+            if let Some(v) = shown {
+                publish(
+                    "execute_result",
+                    Json::obj([
+                        ("execution_count", n.clone()),
+                        ("data", Json::obj([("text/plain", Json::Str(v))])),
+                        ("metadata", Json::obj([])),
+                    ]),
+                );
+            }
+            Json::obj([
+                ("status", Json::str("ok")),
+                ("execution_count", n),
+                ("user_expressions", Json::obj([])),
+                ("payload", Json::Arr(Vec::new())),
+            ])
+        } else {
+            let lines: Vec<&str> = err.lines().filter(|l| !l.trim().is_empty()).collect();
+            let evalue = lines.first().map_or("the cell failed", |l| l.trim());
+            let error = [
+                ("ename", Json::str("Error")),
+                ("evalue", Json::str(evalue)),
+                (
+                    "traceback",
+                    Json::Arr(lines.iter().map(|l| Json::str(*l)).collect()),
+                ),
+            ];
+            publish("error", Json::obj(error.clone()));
+            let mut reply = vec![
+                ("status".to_owned(), Json::str("error")),
+                ("execution_count".to_owned(), n),
+            ];
+            reply.extend(error.map(|(k, v)| (k.to_owned(), v)));
+            Json::Obj(reply)
+        };
+        self.wire.reply(conn, req, "execute_reply", &reply);
+    }
+
+    /// Answer one shell / control request; `false` after `shutdown`.
+    fn handle(&mut self, conn: &Conn, req: &Msg) -> bool {
+        let ok = ("status", Json::str("ok"));
+        let c = &req.content;
+        self.wire.status(&req.header, "busy");
+        let (kind, content) = match req.kind() {
+            "kernel_info_request" => (
+                "kernel_info_reply",
+                Json::obj([
+                    ok,
+                    ("protocol_version", Json::str(PROTOCOL)),
+                    ("implementation", Json::str("rokc")),
+                    (
+                        "implementation_version",
+                        Json::str(env!("CARGO_PKG_VERSION")),
+                    ),
+                    (
+                        "language_info",
+                        Json::obj([
+                            ("name", Json::str("rok")),
+                            ("version", Json::str(env!("CARGO_PKG_VERSION"))),
+                            ("mimetype", Json::str("text/x-rok")),
+                            ("file_extension", Json::str(".rok")),
+                        ]),
+                    ),
+                    ("banner", Json::str("rok (rokc jupyter)")),
+                    ("help_links", Json::Arr(Vec::new())),
+                ]),
+            ),
+            "execute_request" => {
+                self.execute(conn, req);
+                ("", Json::Null)
+            }
+            "is_complete_request" => {
+                let code = c.get("code").as_str().unwrap_or("");
+                let status = if incomplete(code) {
+                    "incomplete"
+                } else {
+                    "complete"
+                };
+                let indent = ("indent", Json::str(""));
+                (
+                    "is_complete_reply",
+                    Json::obj([("status", Json::str(status)), indent]),
+                )
+            }
+            "complete_request" => {
+                // ponytail: the session's names only (no members, paths).
+                let code = c.get("code").as_str().unwrap_or("");
+                let pos = c.get("cursor_pos").as_u32().unwrap_or(0) as usize;
+                let end = code.char_indices().nth(pos).map_or(code.len(), |(i, _)| i);
+                let ident = |ch: char| ch.is_alphanumeric() || ch == '_';
+                let start = code[..end].trim_end_matches(ident).len();
+                let word = &code[start..end];
+                let matches = self.repl.names();
+                let matches = matches.iter().filter(|n| n.starts_with(word));
+                (
+                    "complete_reply",
+                    Json::obj([
+                        ok,
+                        (
+                            "matches",
+                            Json::Arr(matches.map(|n| Json::str(*n)).collect()),
+                        ),
+                        (
+                            "cursor_start",
+                            Json::num(code[..start].chars().count() as u32),
+                        ),
+                        ("cursor_end", Json::num(pos as u32)),
+                        ("metadata", Json::obj([])),
+                    ]),
+                )
+            }
+            "inspect_request" => (
+                "inspect_reply",
+                Json::obj([
+                    ok,
+                    ("found", Json::Bool(false)),
+                    ("data", Json::obj([])),
+                    ("metadata", Json::obj([])),
+                ]),
+            ),
+            "history_request" => (
+                "history_reply",
+                Json::obj([ok, ("history", Json::Arr(Vec::new()))]),
+            ),
+            "comm_info_request" => ("comm_info_reply", Json::obj([ok, ("comms", Json::obj([]))])),
+            "shutdown_request" => {
+                let restart = c.get("restart").clone();
+                self.wire.reply(
+                    conn,
+                    req,
+                    "shutdown_reply",
+                    &Json::obj([ok, ("restart", restart)]),
+                );
+                self.wire.status(&req.header, "idle");
+                return false;
+            }
+            _ => ("", Json::Null),
+        };
+        if !kind.is_empty() {
+            self.wire.reply(conn, req, kind, &content);
+        }
+        self.wire.status(&req.header, "idle");
+        true
+    }
+}
+
+/// Run the kernel for the connection file `file`; the exit code.
+pub fn serve(
+    file: &Path,
+    bootstrap: Vec<PathBuf>,
+    externs: Vec<(String, PathBuf)>,
+    opts: BuildOptions,
+) -> i32 {
+    match start(file, bootstrap, externs, opts) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("rokc jupyter: {e}");
+            1
+        }
+    }
+}
+
+fn start(
+    file: &Path,
+    bootstrap: Vec<PathBuf>,
+    externs: Vec<(String, PathBuf)>,
+    opts: BuildOptions,
+) -> Result<(), String> {
+    let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let cf = Json::parse(&text).map_err(|e| format!("{}: {e}", file.display()))?;
+    if cf.get("transport").as_str().is_some_and(|t| t != "tcp") {
+        return Err("only the tcp transport is supported".into());
+    }
+    if cf
+        .get("signature_scheme")
+        .as_str()
+        .is_some_and(|s| !s.is_empty() && s != "hmac-sha256")
+    {
+        return Err("only hmac-sha256 signatures are supported".into());
+    }
+    let ip = match cf.get("ip").as_str().unwrap_or("127.0.0.1") {
+        "*" => "0.0.0.0",
+        ip => ip,
+    };
+    let bind = |name: &str| {
+        let port = cf
+            .get(name)
+            .as_u32()
+            .ok_or_else(|| format!("no `{name}`"))?;
+        TcpListener::bind((ip, port as u16)).map_err(|e| format!("{name} {ip}:{port}: {e}"))
+    };
+    let (shell, control, stdin, iopub, hb) = (
+        bind("shell_port")?,
+        bind("control_port")?,
+        bind("stdin_port")?,
+        bind("iopub_port")?,
+        bind("hb_port")?,
+    );
+    let mut repl = Repl::new(bootstrap, opts)?;
+    repl.externs = externs;
+    let running = repl.running.clone();
+    let key = cf.get("key").as_str().unwrap_or("").as_bytes().to_vec();
+    let wire = Arc::new(Wire {
+        key,
+        session: format!("rok-{}", std::process::id()),
+        subscribers: Mutex::new(Vec::new()),
+    });
+
+    serve_each(hb, |mut s| {
+        if handshake(&mut s, "REP").is_ok() {
+            while let Ok(m) = read_msg(&mut s) {
+                if write_msg(&mut s, &m).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    let w = wire.clone();
+    serve_each(iopub, move |mut s| {
+        if handshake(&mut s, "PUB").is_ok() {
+            if let Ok(c) = s.try_clone() {
+                w.subscribers.lock().unwrap().push(c);
+            }
+            // Subscriptions: every subscriber gets everything.
+            while read_msg(&mut s).is_ok() {}
+        }
+    });
+    // ponytail: no `input_request`; stdin only accepts connections.
+    serve_each(stdin, |mut s| {
+        if handshake(&mut s, "ROUTER").is_ok() {
+            while read_msg(&mut s).is_ok() {}
+        }
+    });
+    let (tx, rx) = mpsc::channel::<(Conn, Msg)>();
+    for (l, control) in [(shell, false), (control, true)] {
+        let (tx, wire, running) = (tx.clone(), wire.clone(), running.clone());
+        serve_each(l, move |mut s| {
+            if handshake(&mut s, "ROUTER").is_err() {
+                return;
+            }
+            let Ok(conn) = s.try_clone() else { return };
+            let conn = Arc::new(Mutex::new(conn));
+            while let Ok(frames) = read_msg(&mut s) {
+                let Some(m) = parse_msg(&wire.key, frames) else {
+                    continue; // unsigned or malformed: dropped
+                };
+                // A shutdown also ends a running cell (the kernel answers
+                // between cells).
+                if control && matches!(m.kind(), "interrupt_request" | "shutdown_request") {
+                    interrupt(&running);
+                }
+                if control && m.kind() == "interrupt_request" {
+                    wire.reply(
+                        &conn,
+                        &m,
+                        "interrupt_reply",
+                        &Json::obj([("status", Json::str("ok"))]),
+                    );
+                } else if tx.send((conn.clone(), m)).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+
+    let out = capture(1).map_err(|e| format!("stdout: {e}"))?;
+    let err = capture(2).map_err(|e| format!("stderr: {e}"))?;
+    let mut k = Kernel {
+        wire,
+        repl,
+        count: 0,
+        out,
+        err,
+    };
+    k.wire.status(&Json::obj([]), "starting");
+    while let Ok((conn, m)) = rx.recv() {
+        if !k.handle(&conn, &m) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// End the running cell, if any (`interrupt_request`): `SIGINT` to the
+/// host process running it (`repl_host.c`).
+// ponytail: a cell still compiling is not interrupted.
+fn interrupt(running: &AtomicU32) {
+    let pid = running.load(Ordering::Relaxed);
+    if pid != 0 {
+        let _ = std::process::Command::new("kill")
+            .args(["-INT", &pid.to_string()])
+            .status();
+    }
+}
+
+/// Write the kernelspec `kernels/<name>/kernel.json` into the Jupyter
+/// data directory (`$JUPYTER_DATA_DIR`, else the platform's per-user
+/// one); the file written.
+pub fn install(name: &str, display: &str, argv: &[String]) -> Result<PathBuf, String> {
+    let home = || std::env::var_os("HOME").map(PathBuf::from);
+    let data = std::env::var_os("JUPYTER_DATA_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            if cfg!(target_vendor = "apple") {
+                Some(home()?.join("Library/Jupyter"))
+            } else {
+                std::env::var_os("XDG_DATA_HOME")
+                    .filter(|d| !d.is_empty())
+                    .map(|d| PathBuf::from(d).join("jupyter"))
+                    .or_else(|| Some(home()?.join(".local/share/jupyter")))
+            }
+        })
+        .ok_or("cannot find the Jupyter data directory (set JUPYTER_DATA_DIR)")?;
+    let dir = data.join("kernels").join(name);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut spec = vec![
+        (
+            "argv".to_owned(),
+            Json::Arr(argv.iter().map(|a| Json::str(a.as_str())).collect()),
+        ),
+        ("display_name".to_owned(), Json::str(display)),
+        ("language".to_owned(), Json::str("rok")),
+        ("interrupt_mode".to_owned(), Json::str("message")),
+    ];
+    // A toolchain found through ROK_HOME needs it in the kernel too.
+    if let Some(h) = std::env::var("ROK_HOME").ok().filter(|h| !h.is_empty()) {
+        spec.push(("env".to_owned(), Json::obj([("ROK_HOME", Json::Str(h))])));
+    }
+    let file = dir.join("kernel.json");
+    std::fs::write(&file, format!("{}\n", Json::Obj(spec)))
+        .map_err(|e| format!("{}: {e}", file.display()))?;
+    Ok(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sha256_and_hmac_vectors() {
+        // FIPS 180-4 examples.
+        assert_eq!(
+            hex(&sha256(b"")),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            hex(&sha256(b"abc")),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            hex(&sha256(
+                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+            )),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+        // RFC 4231 test cases 1, 2 and 6 (key longer than a block).
+        assert_eq!(
+            hex(&hmac_sha256(&[0x0b; 20], &[b"Hi There"])),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+        assert_eq!(
+            hex(&hmac_sha256(
+                b"Jefe",
+                &[b"what do ya want ", b"for nothing?"]
+            )),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        assert_eq!(
+            hex(&hmac_sha256(
+                &[0xaa; 131],
+                &[b"Test Using Larger Than Block-Size Key - Hash Key First"]
+            )),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
+        assert_eq!(sign(b"", &[b"x"]), "");
+    }
+
+    #[test]
+    fn frames_and_messages_round_trip() {
+        // Short and long frames, `more` flags, commands skipped.
+        let mut wire = frame(b"\x04PING", false, true);
+        let long = vec![7u8; 300];
+        let mut msg = Vec::new();
+        write_msg(&mut msg, &[b"a".to_vec(), long.clone()]).unwrap();
+        assert_eq!(&msg[..3], b"\x01\x01a");
+        assert_eq!(msg[3], 2);
+        wire.extend(msg);
+        assert_eq!(
+            read_msg(&mut wire.as_slice()).unwrap(),
+            [b"a".to_vec(), long]
+        );
+
+        let parent = Json::obj([("msg_id", Json::str("p"))]);
+        let content = Json::obj([("code", Json::str("1 + 1"))]);
+        let frames = encode(b"k", "s", &[b"id".to_vec()], "t", &parent, &content);
+        let m = parse_msg(b"k", frames.clone()).unwrap();
+        assert_eq!(m.ids, [b"id".to_vec()]);
+        assert_eq!(m.kind(), "t");
+        assert_eq!(m.content, content);
+        assert!(parse_msg(b"other", frames).is_none());
+        assert_eq!(iso8601(0, 5), "1970-01-01T00:00:00.000005Z");
+        assert_eq!(iso8601(1_709_210_096, 0), "2024-02-29T12:34:56.000000Z");
+    }
+
+    #[test]
+    fn jupyter_cells_split_like_the_repl() {
+        assert_eq!(
+            split_cells("// note\nlet x =\n  40i32;\n\nfn f() {\n}\nx + 2"),
+            ["let x =\n  40i32;", "fn f() {\n}", "x + 2"]
+        );
+    }
+}

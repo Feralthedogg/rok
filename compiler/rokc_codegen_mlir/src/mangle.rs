@@ -27,6 +27,8 @@ pub struct Pkgs {
     pub extern_statics: std::collections::HashSet<String>,
     /// Lazily initialized statics: name → symbol of their initializer.
     pub lazy_statics: std::collections::HashMap<String, String>,
+    /// Body-less functions of a prebuilt dependency: mangled, not C names.
+    pub prebuilt: std::collections::HashSet<rokc_ir_common::FunctionId>,
 }
 
 impl Pkgs {
@@ -57,7 +59,7 @@ pub fn symbol_for(f: &MirFunction, pkgs: &Pkgs, export: Option<&str>) -> String 
     if let Some(sym) = export {
         return sym.to_owned();
     }
-    if f.blocks.is_empty() {
+    if f.blocks.is_empty() && !pkgs.prebuilt.contains(&f.id) {
         return f.name.clone();
     }
     let qualified = f

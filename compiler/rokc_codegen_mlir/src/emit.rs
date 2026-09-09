@@ -18,6 +18,9 @@ const GC_TYPE_BASE: u32 = 0x10000;
 /// (the string type), or every payload word a candidate reference.
 const BUF_PLAIN_TYPE_ID: u32 = 1;
 const BUF_TRACED_TYPE_ID: u32 = 2;
+/// `gc_flags` bit of an old object not yet in the remembered set
+/// (`rokr_common::object_header::FLAG_UNLOGGED`).
+const GC_FLAG_UNLOGGED: u32 = 1 << 6;
 /// Objects this large go to the runtime's large-object space, never to
 /// a TLAB (`rokr_gc::LOS_THRESHOLD`, 702 §7.2.3).
 const LOS_THRESHOLD: u32 = 8 << 10;
@@ -53,6 +56,8 @@ pub struct Emitter {
     pub debug: Option<crate::debug::DebugInfo>,
     /// Build a REPL cell instead of a program (`crate::ReplCell`).
     pub repl: Option<crate::ReplCell>,
+    /// Linking with prebuilt dependencies (`MirModule::link`).
+    link: rokc_mir::Link,
 }
 
 /// Symbol + signature of a module function, for call-site typing.
@@ -74,8 +79,18 @@ pub(crate) struct FnSig {
 // ponytail: decided by symbol prefix because MIR has no ABI field;
 // carry the extern block's ABI string through HIR/MIR when a second
 // ABI appears.
-fn is_c_abi(f: &MirFunction) -> bool {
-    f.blocks.is_empty() && !f.name.starts_with("rok_")
+fn is_c_abi(f: &MirFunction, pkgs: &crate::mangle::Pkgs) -> bool {
+    f.blocks.is_empty() && !f.name.starts_with("rok_") && !pkgs.prebuilt.contains(&f.id)
+}
+
+/// An `any Tr` method dispatcher (HIR `build_dispatcher`).
+fn is_any_dispatcher(name: &str) -> bool {
+    name.starts_with("__any_")
+}
+
+/// `name` (a function or static path) belongs to package `pkg`.
+fn owned_by(pkg: &str, name: &str) -> bool {
+    name.strip_prefix(pkg).is_some_and(|r| r.starts_with("::"))
 }
 
 impl Emitter {
@@ -95,12 +110,13 @@ impl Emitter {
             c_target: crate::abi::CTarget::from_triple(None),
             debug: None,
             repl: None,
+            link: rokc_mir::Link::default(),
         }
     }
 
     /// First GC type id of this module.
     fn gc_type_base(&self) -> u32 {
-        GC_TYPE_BASE + self.repl.as_ref().map_or(0, |r| r.type_offset)
+        GC_TYPE_BASE + self.link.type_offset + self.repl.as_ref().map_or(0, |r| r.type_offset)
     }
 
     /// An `extern` static this REPL cell defines (`ReplCell::define`).
@@ -110,11 +126,38 @@ impl Emitter {
             .is_some_and(|r| r.define.iter().any(|d| d == name))
     }
 
+    /// A definition kept to this object (spec 904 separate compilation):
+    /// in a prebuilt library everything but the package's own items; with
+    /// prebuilt dependencies, the copies of their code compiled here.
+    fn private_copy(&self, name: &str) -> bool {
+        match &self.link.lib {
+            Some(lib) => !owned_by(lib, name) && !is_any_dispatcher(name),
+            None => self.link.prebuilt.iter().any(|d| owned_by(d, name)),
+        }
+    }
+
+    /// A static whose storage a prebuilt dependency's `.a` defines.
+    fn prebuilt_static(&self, name: &str) -> bool {
+        self.link.prebuilt.iter().any(|d| owned_by(d, name))
+    }
+
+    /// Linkage of a static this object defines: a prebuilt library
+    /// exports its package's statics (its users declare them).
+    fn static_linkage(&self, name: &str) -> &'static str {
+        if self.link.lib.as_deref().is_some_and(|l| owned_by(l, name)) {
+            "external"
+        } else {
+            "internal"
+        }
+    }
+
     pub fn emit_module(&mut self, module: &MirModule) {
         // The user's `fn main` is renamed to its mangled symbol; the real
         // C entry point is a synthetic wrapper that brackets the user
         // body with runtime init / shutdown calls.
         let user_main = module.functions.iter().find(|f| f.name == "main");
+        self.link = module.link.clone();
+        self.pkgs.prebuilt = module.link.prebuilt_fns.iter().copied().collect();
         // Content-based package hash: the printed MIR of the whole unit.
         // Content-based package hashes (spec 0.3.3) from the driver; a
         // bare MIR module (tests) hashes its printed MIR.
@@ -149,8 +192,8 @@ impl Emitter {
                     ),
                     params: f.param_tys.clone(),
                     ret: f.ret_ty.clone(),
-                    c_abi: is_c_abi(f),
-                    abi: is_c_abi(f).then(|| {
+                    c_abi: is_c_abi(f, &self.pkgs),
+                    abi: is_c_abi(f, &self.pkgs).then(|| {
                         crate::abi::classify(
                             self.c_target,
                             &f.param_tys,
@@ -162,7 +205,7 @@ impl Emitter {
                 },
             );
             if self.c_target == crate::abi::CTarget::Other
-                && is_c_abi(f)
+                && is_c_abi(f, &self.pkgs)
                 && f.param_tys
                     .iter()
                     .chain([&f.ret_ty])
@@ -242,6 +285,7 @@ impl Emitter {
             let sig = match name {
                 "rok_cstr_len" => format!("(!llvm.ptr) -> i{pw}"),
                 "rok_str_cmp" => format!("({s}, {s}) -> i32"),
+                "rok_gc_wb_slow" => format!("(i{pw})"),
                 _ => unreachable!("unknown runtime helper `{name}`"),
             };
             let _ = writeln!(self.out, "  func.func private @{name}{sig}");
@@ -319,7 +363,7 @@ impl Emitter {
         for s in module
             .statics
             .iter()
-            .filter(|s| !s.is_extern || self.defines(&s.name))
+            .filter(|s| (!s.is_extern || self.defines(&s.name)) && !self.prebuilt_static(&s.name))
         {
             let mut paths = Vec::new();
             gc_paths(&s.ty, &mut Vec::new(), &mut paths);
@@ -353,10 +397,20 @@ impl Emitter {
             self.out
                 .push_str("  func.func private @rok_gc_add_root(!llvm.ptr)\n");
         }
-        let _ = write!(
-            self.out,
-            "  func.func private @rok.register_types() {{\n{calls}    func.return\n  }}\n"
-        );
+        // A prebuilt library exports its registration as
+        // `rok.register_types.<pkg>`; a program's calls its dependencies'.
+        for dep in &self.link.prebuilt {
+            let _ = writeln!(self.out, "  func.func private @rok.register_types.{dep}()");
+            let _ = writeln!(
+                calls,
+                "    func.call @rok.register_types.{dep}() : () -> ()"
+            );
+        }
+        let head = match &self.link.lib {
+            Some(lib) => format!("func.func @rok.register_types.{lib}"),
+            None => "func.func private @rok.register_types".to_owned(),
+        };
+        let _ = write!(self.out, "  {head}() {{\n{calls}    func.return\n  }}\n");
     }
 
     fn emit_static_globals(&mut self, module: &MirModule) {
@@ -373,6 +427,22 @@ impl Emitter {
                 );
                 continue;
             }
+            if self.prebuilt_static(&s.name) {
+                // In the dependency's `.a`; a lazy one's state byte too
+                // (`.init` stays a private copy here).
+                let _ = writeln!(
+                    self.out,
+                    "  llvm.mlir.global external {constness}@{sym}() {{addr_space = 0 : i32}} : {ty_str}"
+                );
+                if let Some(init) = self.pkgs.lazy_statics.get(&s.name).cloned() {
+                    let _ = writeln!(
+                        self.out,
+                        "  llvm.mlir.global external @{sym}.state() {{addr_space = 0 : i32}} : i8"
+                    );
+                    self.emit_lazy_init(&sym, &ty_str, &init);
+                }
+                continue;
+            }
             if s.is_extern {
                 // Defined elsewhere (spec 5.9.3): a declaration only.
                 let _ = writeln!(
@@ -381,8 +451,9 @@ impl Emitter {
                 );
                 continue;
             }
+            let linkage = self.static_linkage(&s.name);
             if let Some(init) = self.pkgs.lazy_statics.get(&s.name).cloned() {
-                self.emit_lazy_static(&sym, &ty_str, &init);
+                self.emit_lazy_static(&sym, &ty_str, &init, linkage);
                 continue;
             }
             if let ConstVal::Str(text) = &s.init {
@@ -392,7 +463,7 @@ impl Emitter {
                 let n = text.len();
                 let _ = writeln!(
                     self.out,
-                    "  llvm.mlir.global internal {constness}@{sym}() {{addr_space = 0 : i32}} : {ty_str} {{\n    %0 = llvm.mlir.addressof @{lit} : !llvm.ptr\n    %1 = llvm.mlir.constant({n} : i{pw}) : i{pw}\n    %2 = llvm.mlir.undef : {ty_str}\n    %3 = llvm.insertvalue %0, %2[0] : {ty_str}\n    %4 = llvm.insertvalue %1, %3[1] : {ty_str}\n    llvm.return %4 : {ty_str}\n  }}"
+                    "  llvm.mlir.global {linkage} {constness}@{sym}() {{addr_space = 0 : i32}} : {ty_str} {{\n    %0 = llvm.mlir.addressof @{lit} : !llvm.ptr\n    %1 = llvm.mlir.constant({n} : i{pw}) : i{pw}\n    %2 = llvm.mlir.undef : {ty_str}\n    %3 = llvm.insertvalue %0, %2[0] : {ty_str}\n    %4 = llvm.insertvalue %1, %3[1] : {ty_str}\n    llvm.return %4 : {ty_str}\n  }}"
                 );
                 continue;
             }
@@ -400,7 +471,7 @@ impl Emitter {
                 Some(init) => {
                     let _ = writeln!(
                         self.out,
-                        "  llvm.mlir.global internal {constness}@{sym}({init}) {{addr_space = 0 : i32}} : {ty_str}"
+                        "  llvm.mlir.global {linkage} {constness}@{sym}({init}) {{addr_space = 0 : i32}} : {ty_str}"
                     );
                 }
                 None => self.errors.push(format!(
@@ -416,15 +487,24 @@ impl Emitter {
     /// initializer `init` exactly once across threads
     /// (`rok_static_init_begin` / `_end`). Every access first checks the
     /// state (`FnEmit::ensure_static_init`).
-    fn emit_lazy_static(&mut self, sym: &str, ty: &str, init: &str) {
+    fn emit_lazy_static(&mut self, sym: &str, ty: &str, init: &str, linkage: &str) {
         let _ = write!(
             self.out,
-            "  llvm.mlir.global internal @{sym}() {{addr_space = 0 : i32}} : {ty} {{
+            "  llvm.mlir.global {linkage} @{sym}() {{addr_space = 0 : i32}} : {ty} {{
     %0 = llvm.mlir.zero : {ty}
     llvm.return %0 : {ty}
   }}
-  llvm.mlir.global internal @{sym}.state(0 : i8) {{addr_space = 0 : i32}} : i8
-  func.func private @{sym}.init() {{
+  llvm.mlir.global {linkage} @{sym}.state(0 : i8) {{addr_space = 0 : i32}} : i8
+"
+        );
+        self.emit_lazy_init(sym, ty, init);
+    }
+
+    /// `@sym.init`: runs initializer `init` once (see `emit_lazy_static`).
+    fn emit_lazy_init(&mut self, sym: &str, ty: &str, init: &str) {
+        let _ = write!(
+            self.out,
+            "  func.func private @{sym}.init() attributes {{llvm.linkage = #llvm.linkage<internal>}} {{
     %0 = llvm.mlir.addressof @{sym}.state : !llvm.ptr
     %1 = func.call @rok_static_init_begin(%0) : (!llvm.ptr) -> i32
     %2 = arith.constant 0 : i32
@@ -486,18 +566,18 @@ impl Emitter {
         // Empty-body functions become external declarations — no body
         // braces, just a signature with `private` linkage.
         let is_decl = f.blocks.is_empty();
-        if is_decl && is_c_abi(f) {
+        if is_decl && is_c_abi(f, &self.pkgs) {
             self.emit_c_decl(symbol, &fns[&f.id]);
             return;
         }
-        if is_decl {
+        if is_decl || self.private_copy(&f.name) {
             self.out.push_str("  func.func private @");
         } else {
             self.out.push_str("  func.func @");
         }
         self.out.push_str(symbol);
         self.out.push('(');
-        let c_abi = is_c_abi(f);
+        let c_abi = is_c_abi(f, &self.pkgs);
         for (i, _p) in f.params.iter().enumerate() {
             if i > 0 {
                 self.out.push_str(", ");
@@ -520,6 +600,15 @@ impl Emitter {
         if is_decl {
             self.out.push('\n');
             return;
+        }
+        if self.private_copy(&f.name) {
+            // `private` is MLIR visibility only; this is the LLVM linkage.
+            self.out
+                .push_str(" attributes {llvm.linkage = #llvm.linkage<internal>}");
+        } else if self.link.lib.is_some() && is_any_dispatcher(&f.name) {
+            // The program's own (complete) dispatcher replaces it.
+            self.out
+                .push_str(" attributes {llvm.linkage = #llvm.linkage<weak>}");
         }
         self.out.push_str(" {\n");
 
@@ -876,6 +965,43 @@ impl<'a> FnEmit<'a> {
     func.call @{sym}.init() : () -> ()
     cf.br ^rok_sready{n}
   ^rok_sready{n}:
+"
+        );
+    }
+
+    /// A value of `ty` has words the collector traces.
+    fn holds_gc_ref(&self, ty: &MirTy) -> bool {
+        let mut offs = Vec::new();
+        gc_offsets(ty, self.pointer_width, 0, &mut offs);
+        !offs.is_empty()
+    }
+
+    /// Write barrier (704 §7.4.2, 809 §8.9.10) before storing a GC
+    /// reference into the GC object `obj`: the inline fast path tests the
+    /// header's `UNLOGGED` bit (set only on old, not yet remembered
+    /// objects); `rok_gc_wb_slow(obj)` when set. Not a safepoint.
+    /// Emission continues in a fresh fall-through block.
+    fn emit_write_barrier(&mut self, obj: &Operand) {
+        let pw = self.pointer_width;
+        let obj_v = self.materialize_operand(obj, &MirTy::GcRef);
+        let n = self.next_check;
+        self.next_check += 1;
+        self.needs.insert("rok_gc_wb_slow");
+        let [hp, fp, flags, bit, masked, zero, set] = std::array::from_fn(|_| self.fresh_value());
+        let _ = write!(
+            self.body,
+            "    {hp} = llvm.inttoptr {obj_v} : i{pw} to !llvm.ptr
+    {fp} = llvm.getelementptr {hp}[4] : (!llvm.ptr) -> !llvm.ptr, i8
+    {flags} = llvm.load {fp} atomic monotonic {{alignment = 4 : i64}} : !llvm.ptr -> i32
+    {bit} = arith.constant {GC_FLAG_UNLOGGED} : i32
+    {masked} = arith.andi {flags}, {bit} : i32
+    {zero} = arith.constant 0 : i32
+    {set} = arith.cmpi ne, {masked}, {zero} : i32
+    cf.cond_br {set}, ^rok_wb{n}, ^rok_wbok{n}
+  ^rok_wb{n}:
+    func.call @rok_gc_wb_slow({obj_v}) : (i{pw}) -> ()
+    cf.br ^rok_wbok{n}
+  ^rok_wbok{n}:
 "
         );
     }
@@ -1380,6 +1506,9 @@ impl<'a> FnEmit<'a> {
             } => {
                 let p = self.buf_elem_addr(buf, index, elem_ty);
                 let v = self.materialize_operand(value, elem_ty);
+                if self.holds_gc_ref(elem_ty) {
+                    self.emit_write_barrier(buf);
+                }
                 let ty = mlir_type(elem_ty, self.pointer_width);
                 let _ = writeln!(self.body, "    llvm.store {v}, {p} : {ty}, !llvm.ptr");
             }
@@ -1391,6 +1520,9 @@ impl<'a> FnEmit<'a> {
             } => {
                 let field = struct_field_tys(ty)[*index as usize].clone();
                 let v = self.materialize_operand(value, &field);
+                if self.holds_gc_ref(&field) {
+                    self.emit_write_barrier(ptr);
+                }
                 let (addr, field_ty) = self.heap_field_addr(ptr, ty, *index);
                 let _ = writeln!(
                     self.body,
@@ -2166,6 +2298,14 @@ impl<'a> FnEmit<'a> {
     /// wider slot and truncate back out.
     fn bitcast_value(&mut self, v: String, from_ty: &MirTy, to_ty: &MirTy) -> String {
         let pw = self.pointer_width;
+        // `()` carries no bits: going in, the slot just reads zero; coming
+        // out, it is the one unit value.
+        if *from_ty == MirTy::Unit || *to_ty == MirTy::Unit {
+            let n = self.fresh_value();
+            let to = mlir_type(to_ty, pw);
+            let _ = writeln!(self.body, "    {n} = llvm.mlir.zero : {to}");
+            return n;
+        }
         let (MirTy::Prim(fp), MirTy::Prim(tp)) = (from_ty, to_ty) else {
             // Byte-array union: store as one type, load as the other.
             let (from, to) = (mlir_type(from_ty, pw), mlir_type(to_ty, pw));

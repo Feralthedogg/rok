@@ -1,0 +1,20 @@
+// Write-barrier overhead: 200M reference stores into a 1024-entry
+// `List<str>` (made old by a collection first), no allocation.
+extern "C" { fn rok_gc_collect(); }
+
+fn main() -> i32 {
+    let xs: List<str> = [];
+    let i = 0;
+    while i < 1024 {
+        xs.push(f"s{i}");
+        i += 1;
+    }
+    unsafe { rok_gc_collect() };
+    let k: i64 = 0;
+    while k < 200000000 {
+        xs[(k & 1023) as usize] = xs[((k * 7 + 3) & 1023) as usize];
+        k += 1;
+    }
+    rok_print_i64(xs[5].len() as i64);
+    return 0;
+}

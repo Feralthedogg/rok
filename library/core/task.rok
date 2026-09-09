@@ -95,13 +95,16 @@ const DONE: i32 = 4;
 
 /// A task as the executor sees it (what a `Waker` holds).
 pub struct TaskRef {
-    /// `[state, cancelled]`.
+    /// `[state, cancelled, timed]` (`timed`: it has added a timer).
     state: GcBuf<i32>;
     /// One poll of the task's future; `true` once it is done.
     poll: GcBuf<fn(Context) -> bool>;
     /// Wakers to wake when it is done (and the lock for `DONE`).
     joiners: Mutex<List<Waker>>;
     pool: Pool;
+    /// Parking keys it may still be parked on (under the parking lock):
+    /// dropped from the table when it finishes (a cancelled task's).
+    parked: List<usize>;
     /// `spawn_local`: runs only on worker `home`.
     local: bool;
     home: usize;
@@ -159,6 +162,12 @@ fn finish(t: TaskRef) {
     }
     // The finished future (its frame) is no longer reachable from here.
     t.poll[0] = |ctx: Context| -> bool { true };
+    // Its parking entries go with it (a cancelled task left its `await`
+    // without the wake it waited for), and a cancelled task's timers.
+    unpark_task(t);
+    if is_cancelled(t) && atomic_load(t.state, 2, SeqCst) != 0 {
+        remove_timers(t);
+    }
     for w in ws {
         w.wake();
     }
@@ -481,6 +490,7 @@ fn timers_while_busy(pool: Pool, ran: i64) -> i64 {
 
 fn add_timer(deadline: i64, w: Waker) {
     let pool = w.task.pool;
+    atomic_xchg(w.task.state, 2, 1, SeqCst);
     using g = pool.timers.lock() {
         let tm = g.get();
         tm.at.push(deadline);
@@ -519,7 +529,35 @@ fn pop_timer(tm: Timers) {
     swap_timers(tm, 0, n);
     tm.at.pop();
     tm.who.pop();
-    let i: usize = 0;
+    sift_down(tm, 0);
+}
+
+/// Drop `t`'s timers from its pool's heap (a cancelled task's).
+// ponytail: O(heap) filter + rebuild per cancelled task that ever slept
+// (spec: a timing wheel's O(1) cancel).
+fn remove_timers(t: TaskRef) {
+    using g = t.pool.timers.lock() {
+        let tm = g.get();
+        let at: List<i64> = List::new();
+        let who: List<Waker> = List::new();
+        for i in 0..tm.at.len() {
+            if !same_task(tm.who[i].task, t) {
+                at.push(tm.at[i]);
+                who.push(tm.who[i]);
+            }
+        }
+        g.set(Timers { at: at, who: who });
+        let i = at.len() / 2;
+        while i > 0 {
+            i -= 1;
+            sift_down(g.get(), i);
+        }
+    }
+}
+
+fn sift_down(tm: Timers, from: usize) {
+    let n = tm.at.len();
+    let i = from;
     loop {
         let l = 2 * i + 1;
         let r = l + 1;
@@ -606,7 +644,7 @@ fn work(w: Worker, main: TaskRef | none) {
 }
 
 fn new_task(pool: Pool, poll: fn(Context) -> bool, local: bool, home: usize) -> TaskRef {
-    let state: GcBuf<i32> = buf_new(2);
+    let state: GcBuf<i32> = buf_new(3);
     state[0] = SCHEDULED;
     let p: GcBuf<fn(Context) -> bool> = buf_new(1);
     p[0] = poll;
@@ -615,6 +653,7 @@ fn new_task(pool: Pool, poll: fn(Context) -> bool, local: bool, home: usize) -> 
         poll: p,
         joiners: Mutex::new(List::<Waker>::new()),
         pool: pool,
+        parked: List::new(),
         local: local,
         home: home,
     };
@@ -1026,7 +1065,8 @@ fn parking() -> Parking {
     (unsafe { rok_task_parking_install(p) })[0]
 }
 
-/// Wake `waker` at the next `unpark(key)`.
+/// Wake `waker` at the next `unpark(key)`. The entry goes at that
+/// `unpark` or when the waker's task finishes (a cancelled task's wait).
 pub fn park(key: usize, waker: Waker) {
     let p = parking();
     using g = p.lock.lock() {
@@ -1038,7 +1078,83 @@ pub fn park(key: usize, waker: Waker) {
                 p.waiting.insert(key, l);
             }
         }
+        let ks = waker.task.parked;
+        let known = false;
+        for k in ks {
+            if k == key { known = true; }
+        }
+        if !known {
+            // Keys it was since unparked from, once in a while (a
+            // long-lived task parking on many keys).
+            if ks.len() >= 16 && ks.len() % 16 == 0 {
+                let live: List<usize> = List::new();
+                for k in ks {
+                    if parked_on(p, k, waker.task) { live.push(k); }
+                }
+                ks.clear();
+                for k in live { ks.push(k); }
+            }
+            ks.push(key);
+        }
     }
+}
+
+/// Is `t` in `key`'s list? (Under `p.lock`.)
+fn parked_on(p: Parking, key: usize, t: TaskRef) -> bool {
+    if let l: List<Waker> = p.waiting.get(key) {
+        for w in l {
+            if same_task(w.task, t) { return true; }
+        }
+    }
+    false
+}
+
+/// Drop finished task `t`'s parking entries.
+fn unpark_task(t: TaskRef) {
+    if t.parked.len() == 0 || unsafe { rok_task_parking_ready() } == 0 {
+        return;
+    }
+    let p = parking();
+    using g = p.lock.lock() {
+        for k in t.parked {
+            if let l: List<Waker> = p.waiting.get(k) {
+                let rest: List<Waker> = List::new();
+                for w in l {
+                    if !same_task(w.task, t) { rest.push(w); }
+                }
+                if rest.len() == 0 {
+                    p.waiting.remove(k);
+                } else {
+                    p.waiting.insert(k, rest);
+                }
+            }
+        }
+        t.parked.clear();
+    }
+}
+
+fn same_task(a: TaskRef, b: TaskRef) -> bool {
+    unsafe { rok_task_key_i32(a.state) == rok_task_key_i32(b.state) }
+}
+
+/// Parked wakers (all keys) plus pending timers of the running pool: a
+/// diagnostic (a cancelled task leaves none behind).
+pub fn registrations() -> usize {
+    let n: usize = 0;
+    if unsafe { rok_task_parking_ready() } != 0 {
+        let p = parking();
+        using g = p.lock.lock() {
+            for l in p.waiting.values() {
+                n += l.len();
+            }
+        }
+    }
+    if let pool: Pool = current_pool() {
+        using g = pool.timers.lock() {
+            n += g.get().at.len();
+        }
+    }
+    n
 }
 
 /// Wake every task parked on `key` (cheap when no task ever parked).
@@ -1126,18 +1242,16 @@ impl Future for IoReady {
 
 // ---- blocking work (regular files) ----
 
-/// Run `f` on its own OS thread; the future completes with its result
+/// Run `f` on the blocking pool; the future completes with its result
 /// (tokio's `spawn_blocking`). For syscalls with no readiness to wait
-/// on, like regular files under kqueue / epoll. `f` starts at once; a
+/// on, like regular files under kqueue / epoll. `f` is queued at once; a
 /// cancelled awaiter leaves it to finish in the background and its
 /// result is dropped.
-// ponytail: one OS thread per call (tens of µs to start); a persistent
-// blocking pool if file-heavy code needs the throughput.
 pub fn spawn_blocking<T: Send>(f: fn() -> T + Send) -> Blocking<T> {
     let slot: GcBuf<T> = buf_new(1);
     let done: GcBuf<bool> = buf_new(1);
     let waiter: Mutex<Waker | none> = Mutex::new(none);
-    let body: fn() + Send = || {
+    let job: fn() + Send = || {
         slot[0] = f();
         let w: Waker | none = none;
         using g = waiter.lock() {
@@ -1148,13 +1262,118 @@ pub fn spawn_blocking<T: Send>(f: fn() -> T + Send) -> Blocking<T> {
             k.wake();
         }
     };
-    let h = unsafe { rok_thread_spawn(body, 0, rok_thread_new_id()) };
-    if h == 0 {
-        body(); // no thread to be had: run it here
-    } else {
-        unsafe { rok_thread_detach(h) };
-    }
+    BLOCKING.submit(job);
     Blocking { slot: slot, done: done, waiter: waiter }
+}
+
+/// Most pool threads at once (tokio's default); past it jobs queue.
+const BLOCKING_MAX_THREADS: usize = 512;
+/// A pool thread idle this long exits (tokio's default).
+const BLOCKING_KEEP_ALIVE_NS: i64 = 10_000_000_000;
+
+/// The process-wide blocking pool: threads start lazily when a job finds
+/// no idle one (up to `BLOCKING_MAX_THREADS`), take jobs FIFO, and exit
+/// after `BLOCKING_KEEP_ALIVE_NS` without one.
+static BLOCKING: BlockingPool = BlockingPool::new();
+
+struct BlockingPool {
+    lock: Mutex<i32>;
+    /// Queued jobs are `jobs[head..]` (under `lock`).
+    jobs: List<fn() + Send>;
+    /// `[head, threads]` (under `lock`).
+    counts: GcBuf<usize>;
+    /// The sleeping threads' wake words (under `lock`): a submit pops one,
+    /// sets it to 1 and wakes that thread only.
+    idle: List<GcBuf<i32>>;
+}
+
+unsafe impl Send for BlockingPool {}
+unsafe impl Sync for BlockingPool {}
+
+impl BlockingPool {
+    fn new() -> BlockingPool {
+        let counts: GcBuf<usize> = buf_new(2);
+        BlockingPool { lock: Mutex::new(0), jobs: List::new(), counts: counts, idle: List::new() }
+    }
+
+    fn submit(self, job: fn() + Send) {
+        let spawn = false;
+        let wake: GcBuf<i32> | none = none;
+        using g = self.lock.lock() {
+            self.jobs.push(job);
+            // Hand the job to one sleeping thread, else start one.
+            if let w: GcBuf<i32> = self.idle.pop() {
+                w[0] = 1;
+                wake = w;
+            } else if self.counts[1] < BLOCKING_MAX_THREADS {
+                self.counts[1] += 1;
+                spawn = true;
+            }
+        }
+        if let w: GcBuf<i32> = wake {
+            unsafe { rok_sync_wake(w, 0) };
+        }
+        if spawn {
+            let pool = self;
+            let h = unsafe { rok_thread_spawn(|| pool.work(BLOCKING_KEEP_ALIVE_NS), 0, rok_thread_new_id()) };
+            if h == 0 {
+                self.work(0); // no thread to be had: drain the queue here
+            } else {
+                unsafe { rok_thread_detach(h) };
+            }
+        }
+    }
+
+    /// A pool thread: run queued jobs until idle for `keep_alive` ns.
+    fn work(self, keep_alive: i64) {
+        let me: GcBuf<i32> = buf_new(1);
+        let idle_since = now_ns();
+        loop {
+            let job: (fn() + Send) | none = none;
+            let quit = false;
+            using g = self.lock.lock() {
+                let head = self.counts[0];
+                if head < self.jobs.len() {
+                    job = self.jobs[head];
+                    if head + 1 == self.jobs.len() {
+                        self.jobs.clear();
+                        self.counts[0] = 0;
+                    } else {
+                        self.counts[0] = head + 1;
+                    }
+                } else if now_ns() - idle_since >= keep_alive {
+                    self.counts[1] -= 1;
+                    quit = true;
+                } else {
+                    me[0] = 0;
+                    self.idle.push(me);
+                }
+            }
+            if quit {
+                return;
+            }
+            if let f: fn() + Send = job {
+                f();
+                idle_since = now_ns();
+                continue;
+            }
+            let left = idle_since + keep_alive - now_ns();
+            unsafe { rok_sync_wait_timeout(me, 0, 0, left) };
+            using g = self.lock.lock() {
+                // Not handed a job (a timeout or a spurious wake): leave
+                // the idle list.
+                if me[0] == 0 {
+                    let mine = unsafe { rok_task_key_i32(me) };
+                    for i in 0..self.idle.len() {
+                        if unsafe { rok_task_key_i32(self.idle[i]) } == mine {
+                            self.idle.remove(i);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub struct Blocking<T> {

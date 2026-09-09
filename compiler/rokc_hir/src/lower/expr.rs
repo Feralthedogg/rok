@@ -659,17 +659,27 @@ pub(super) fn lower_assign(
         // `a.f1.f2.... = value` — peel field accesses to find the root
         // local, then thread `WithField` updates back out so the rebuilt
         // aggregate gets assigned to that local.
-        ExprKind::Field(_, _) => {
+        // A tuple struct's field is `s.0`.
+        ExprKind::Field(_, _) | ExprKind::TupleField(_, _) => {
             struct Step {
                 ty: HirTy,
                 struct_id: StructId,
                 field_index: u32,
             }
-            let mut chain: Vec<&str> = Vec::new();
+            let mut chain: Vec<String> = Vec::new();
             let mut cur: &Expr = target;
-            while let ExprKind::Field(inner, name) = &cur.kind {
-                chain.push(name);
-                cur = inner;
+            loop {
+                match &cur.kind {
+                    ExprKind::Field(inner, name) => {
+                        chain.push(name.clone());
+                        cur = inner;
+                    }
+                    ExprKind::TupleField(inner, i) => {
+                        chain.push(i.to_string());
+                        cur = inner;
+                    }
+                    _ => break,
+                }
             }
             chain.reverse();
             // `xs[i].f = v`: the element is a value, so read it, update
@@ -677,7 +687,7 @@ pub(super) fn lower_assign(
             if let ExprKind::Index(arr, idx) = &cur.kind {
                 let field_target = |elem: &Expr| {
                     chain.iter().fold(elem.clone(), |acc, name| Expr {
-                        kind: ExprKind::Field(Box::new(acc), (*name).to_owned()),
+                        kind: ExprKind::Field(Box::new(acc), name.clone()),
                         span: target.span,
                     })
                 };
@@ -788,7 +798,7 @@ pub(super) fn lower_assign(
                 });
                 step_ty = def.fields[idx].ty.clone();
             }
-            let last_name = chain.last().copied().unwrap_or_default().to_owned();
+            let last_name = chain.last().cloned().unwrap_or_default();
             let mut acc = match union_value {
                 // `u.f = x` with `u` a local: replace the whole union.
                 Some(u) if steps.is_empty() => {
@@ -3428,6 +3438,14 @@ pub(super) fn method_call_on(
     if matches!(recv_h.ty, HirTy::Sum(_)) && SUM_METHODS.contains(&method) {
         return sum_structural_call(ctx, recv_h, method, args, None, span);
     }
+    let recv_h = if matches!(recv_h.ty, HirTy::Sum(_)) {
+        match super::reflect::method_call(ctx, recv_h, method, args) {
+            Ok(r) => return r,
+            Err(r) => r,
+        }
+    } else {
+        recv_h
+    };
     if matches!(recv_h.ty, HirTy::Sum(_)) && matches!(method, "min" | "max" | "clamp") {
         return sum_min_max(ctx, recv_h, method, args, span);
     }
@@ -3505,7 +3523,11 @@ pub(super) fn method_call_on(
             );
         }
         // Spec 3.5.2: a missing method is a hard error, not a silent
-        // unit return.
+        // unit return — unless `Reflect` (every type's) answers it.
+        let recv_h = match super::reflect::method_call(ctx, recv_h, method, args) {
+            Ok(r) => return r,
+            Err(r) => r,
+        };
         return ctx.error_expr(
             span,
             format!(
@@ -3573,6 +3595,9 @@ fn any_method_call(
     }
     let recv_ty = recv_h.ty.clone();
     let Some((provider, bound)) = provider else {
+        if let Ok(r) = super::reflect::method_call(ctx, recv_h, method, args) {
+            return r;
+        }
         discard_args(ctx, args);
         return ctx.error_expr(
             span,
@@ -3793,7 +3818,7 @@ pub(super) struct AnyDispatch {
     span: rokc_diagnostic::Span,
 }
 
-fn any_dispatcher(
+pub(super) fn any_dispatcher(
     ctx: &LowerCtx<'_>,
     recv_ty: &HirTy,
     trait_key: &str,
@@ -3820,6 +3845,112 @@ fn any_dispatcher(
         span,
     });
     id
+}
+
+/// `any` across separately compiled packages (spec 904). Dispatchers are
+/// closed-world, so (1) each one gets a stable symbol `rok.any.<hash>`
+/// (weak in a prebuilt library, strong in its user, which wins), and
+/// (2) a prebuilt library `lib` describes its stored types and its
+/// dispatchers as rok source `seeds` for its RHIR: compiled by its user,
+/// they put the library's types into the user's dispatchers and make
+/// the user build every dispatcher the library calls.
+/// Returns `(seeds as (module, text), dispatcher exports)`.
+// ponytail: a seed names its types as `ty_name` prints them; a type it
+// can't name (closures) is skipped, and one not visible from the
+// module of its first `lib` type fails the user's build.
+#[allow(clippy::type_complexity)] // two lists, each read once
+pub(super) fn any_link(
+    env: &Env<'_>,
+    lib: Option<&str>,
+) -> (Vec<(String, String)>, Vec<(FunctionId, String)>) {
+    let empty = HashMap::new();
+    let c = LowerCtx::new(env, &empty, None);
+    let fnv = |s: &str| {
+        s.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        })
+    };
+    let dispatch = env.sink.any_dispatch.borrow().clone();
+    let names = |tys: &[HirTy]| tys.iter().map(|t| c.ty_name(t)).collect::<Vec<_>>();
+    let exports = dispatch
+        .iter()
+        .map(|d| {
+            let key = format!(
+                "{}|{}|{}|{}|{}",
+                c.ty_name(&d.recv_ty),
+                d.trait_key,
+                d.method,
+                names(&d.params).join(","),
+                c.ty_name(&d.ret)
+            );
+            (d.id, format!("rok.any.{:016x}", fnv(&key)))
+        })
+        .collect();
+    let Some(lib) = lib else {
+        return (Vec::new(), exports);
+    };
+    let under = format!("{lib}::");
+    // The module of the first `lib` item a type names (else the root).
+    let home = |text: &str| -> String {
+        text.split(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == ':'))
+            .find(|w| w.starts_with(&under))
+            .map_or_else(|| lib.to_owned(), module_of)
+    };
+    let nameable = |s: &str| {
+        !["closure", "{unknown}", "Self", "#", "GcBuf"]
+            .iter()
+            .any(|b| s.contains(b))
+    };
+    let mut seeds = Vec::new();
+    let stored: Vec<HirTy> = env
+        .sink
+        .any_tags
+        .borrow()
+        .iter()
+        .map(|(t, _)| t.clone())
+        .collect();
+    for t in stored {
+        let name = c.ty_name(&t);
+        if matches!(t, HirTy::AnyTrait(_)) || !nameable(&name) {
+            continue;
+        }
+        let n = seeds.len();
+        seeds.push((
+            home(&name),
+            format!(
+                "#[export_name(\"__rok_seed_{lib}_{n}\")]\nfn __rok_seed_{n}(x: {name}) -> any {{ return x; }}\n"
+            ),
+        ));
+    }
+    for d in &dispatch {
+        let recv = c.ty_name(&d.recv_ty);
+        let params = names(&d.params);
+        if !nameable(&recv) || !params.iter().all(|p| nameable(p)) {
+            continue;
+        }
+        let n = seeds.len();
+        let decl: Vec<String> = params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| format!(", a{i}: {p}"))
+            .collect();
+        let args: Vec<String> = (0..params.len()).map(|i| format!("a{i}")).collect();
+        let (throws, try_) = if matches!(d.ret, HirTy::Throws { .. }) {
+            (" throws", "try ")
+        } else {
+            ("", "")
+        };
+        seeds.push((
+            home(&recv),
+            format!(
+                "#[export_name(\"__rok_seed_{lib}_{n}\")]\nfn __rok_seed_{n}(x: {recv}{}){throws} {{ {try_}x.{}({}); }}\n",
+                decl.concat(),
+                d.method,
+                args.join(", ")
+            ),
+        ));
+    }
+    (seeds, exports)
 }
 
 /// Build every dispatcher's body (see `AnyDispatch`). A body can
@@ -3877,7 +4008,13 @@ fn build_dispatcher(env: &Env<'_>, d: &AnyDispatch) -> HirFunction {
             })
         })
         .collect();
-    let stored: Vec<HirTy> = env.sink.any_tags.borrow().clone();
+    let stored: Vec<HirTy> = env
+        .sink
+        .any_tags
+        .borrow()
+        .iter()
+        .map(|(t, _)| t.clone())
+        .collect();
     let mut arms = Vec::new();
     for t in stored {
         if matches!(t, HirTy::AnyTrait(_)) || !bounds.iter().all(|b| c.implements_trait(&t, b, 0)) {
@@ -3886,17 +4023,21 @@ fn build_dispatcher(env: &Env<'_>, d: &AnyDispatch) -> HirFunction {
         c.push_scope();
         let x = c.declare(None, t.clone());
         let recv = hir_local(x, &t, span);
-        let call = call_impl_method(
-            &mut c,
-            &t,
-            &d.method,
-            Some(&d.trait_key),
-            Some(recv),
-            &args,
-            &d.method,
-            span,
-        )
-        .unwrap_or_else(|| poison(span));
+        let call = if d.trait_key == super::reflect::REFLECT {
+            super::reflect::dynamic(&mut c, recv, &d.method)
+        } else {
+            call_impl_method(
+                &mut c,
+                &t,
+                &d.method,
+                Some(&d.trait_key),
+                Some(recv),
+                &args,
+                &d.method,
+                span,
+            )
+            .unwrap_or_else(|| poison(span))
+        };
         let body = coerce(&mut c, &d.ret, call, &|| {
             format!("`{}` of an `any` value", d.method)
         });
@@ -5025,6 +5166,11 @@ pub(super) fn lower_call(
                         return call_sig(ctx, &sig, &display, None, args, span);
                     }
                     [] => {
+                        if let Some(r) =
+                            named_type_call(ctx, &p.segments, &full, &method, args, span)
+                        {
+                            return r;
+                        }
                         // A generic trait impl's method: `Self` is the
                         // expected type (`let b: Box<i32> = Box::zero()`)
                         // or else `self`'s.
@@ -5089,6 +5235,37 @@ pub(super) fn lower_call(
         span,
         format!("cannot find function `{display}` in this scope"),
     )
+}
+
+/// `Box::<f64>::f()` — the named instantiation's (generic-impl) method
+/// — or `Reflect`'s `T::type_name()` / `size()` / `align()` of a struct /
+/// enum (`List::<i64>::type_name()`).
+fn named_type_call(
+    ctx: &mut LowerCtx<'_>,
+    segs: &[rokc_ast::PathSegment],
+    full: &str,
+    method: &str,
+    args: &[CallArg],
+    span: rokc_diagnostic::Span,
+) -> Option<HirExpr> {
+    let ty_segs = &segs[..segs.len() - 1];
+    let own = if ty_segs.last().is_some_and(|s| !s.generics.is_empty()) {
+        ctx.resolve_ast_ty(&Ty {
+            kind: AstTyKind::Path(AstPath {
+                segments: ty_segs.to_vec(),
+                span,
+            }),
+            span,
+        })
+    } else {
+        ctx.lookup_struct(full)
+            .map(HirTy::Struct)
+            .or_else(|| ctx.lookup_enum(full).map(HirTy::Enum))?
+    };
+    if let Some(r) = call_impl_method(ctx, &own, method, None, None, args, method, span) {
+        return Some(r);
+    }
+    super::reflect::static_call(ctx, &own, method, args, span)
 }
 
 /// A range value (stdlib 2.7.4, spec 6.5.1): `a..b` / `a..=b` / `a..` /
@@ -5246,6 +5423,12 @@ fn path_call_via_impls(
                 ),
             ));
         };
+        if key == super::reflect::REFLECT {
+            ctx.explicit_recv = None;
+            if let Some(r) = super::reflect::trait_call(ctx, &t, recv.clone(), method, rest, span) {
+                return Some(r);
+            }
+        }
         let call = call_impl_method(ctx, &t, method, Some(&key), recv, rest, display, span);
         ctx.explicit_recv = None;
         return Some(call.unwrap_or_else(|| {
@@ -5290,7 +5473,8 @@ fn path_call_via_impls(
             });
         }
     }
-    let call = call_impl_method(ctx, &t, method, None, None, args, display, span);
+    let call = call_impl_method(ctx, &t, method, None, None, args, display, span)
+        .or_else(|| super::reflect::static_call(ctx, &t, method, args, span));
     Some(call.unwrap_or_else(|| {
         discard_args(ctx, args);
         ctx.error_expr(
@@ -5552,6 +5736,8 @@ fn buf_intrinsic(def: &FnDef) -> Option<&'static str> {
             "rok.atomic.or" => Some("atomic_or"),
             "rok.atomic.xor" => Some("atomic_xor"),
             "rok.atomic.cas" => Some("atomic_cas"),
+            "rok.any_cast" => Some("any_cast"),
+            "rok.method_table" => Some("method_table"),
             _ => None,
         },
         _ => None,
@@ -5570,6 +5756,9 @@ fn lower_raw_intrinsic(
     args: &[CallArg],
     span: rokc_diagnostic::Span,
 ) -> Option<HirExpr> {
+    if let Some(r) = super::reflect::intrinsic(ctx, op, targs, args, span) {
+        return Some(r);
+    }
     let usize_ty = HirTy::Prim(PrimTy::Usize);
     if matches!(op, "size_of" | "align_of") {
         let (Some(t), true) = (targs.first(), args.is_empty() && targs.len() == 1) else {
@@ -7242,11 +7431,10 @@ fn lower_position(ctx: &mut LowerCtx<'_>, idx: &Expr) -> HirExpr {
     lower_expected(ctx, idx, HirTy::Prim(want))
 }
 
-/// Spec 3.6: `rok::core::index::index_from_end(i as isize, len)` — a
-/// signed position `i` < 0 is `len + i`.
-fn from_end(i: Expr, len: Expr, span: rokc_diagnostic::Span) -> Expr {
-    let mk = |kind| Expr { kind, span };
-    let path = |names: &[&str]| rokc_ast::Path {
+/// `rok::core::index::<name>(args..)`.
+fn index_fn(name: &str, args: Vec<Expr>, span: rokc_diagnostic::Span) -> Expr {
+    let names = ["rok", "core", "index", name];
+    let path = rokc_ast::Path {
         segments: names
             .iter()
             .map(|n| rokc_ast::PathSegment {
@@ -7256,23 +7444,44 @@ fn from_end(i: Expr, len: Expr, span: rokc_diagnostic::Span) -> Expr {
             .collect(),
         span,
     };
-    let isize = Ty {
-        kind: AstTyKind::Path(path(&["isize"])),
+    Expr {
+        kind: ExprKind::Call {
+            callee: Box::new(Expr {
+                kind: ExprKind::Path(path),
+                span,
+            }),
+            args: args.into_iter().map(CallArg::Positional).collect(),
+            trailing_closure: None,
+        },
         span,
-    };
-    mk(ExprKind::Call {
-        callee: Box::new(mk(ExprKind::Path(path(&[
-            "rok",
-            "core",
-            "index",
-            "index_from_end",
-        ])))),
-        args: vec![
-            CallArg::Positional(mk(ExprKind::Cast(Box::new(i), isize))),
-            CallArg::Positional(len),
-        ],
-        trailing_closure: None,
-    })
+    }
+}
+
+fn isize_ty(span: rokc_diagnostic::Span) -> Ty {
+    Ty {
+        kind: AstTyKind::Path(rokc_ast::Path {
+            segments: vec![rokc_ast::PathSegment {
+                name: "isize".to_owned(),
+                generics: Vec::new(),
+            }],
+            span,
+        }),
+        span,
+    }
+}
+
+/// `e as isize`.
+fn as_isize(e: Expr, span: rokc_diagnostic::Span) -> Expr {
+    Expr {
+        kind: ExprKind::Cast(Box::new(e), isize_ty(span)),
+        span,
+    }
+}
+
+/// Spec 3.6: `rok::core::index::index_from_end(i as isize, len)` — a
+/// signed position `i` < 0 is `len + i`.
+fn from_end(i: Expr, len: Expr, span: rokc_diagnostic::Span) -> Expr {
+    index_fn("index_from_end", vec![as_isize(i, span), len], span)
 }
 
 fn len_of(recv: &Expr, span: rokc_diagnostic::Span) -> Expr {
@@ -7390,9 +7599,15 @@ fn block_of(stmts: Vec<Stmt>, tail: Expr, span: rokc_diagnostic::Span) -> Expr {
     }
 }
 
-/// `t[a:b:k]` (`slice_desugar`). On a position-sliced target
-/// (`takes_position`) a signed bound counts from the end:
-/// `{ let #t = t; #t[index_from_end(a, #t.len()):b:k] }`.
+/// `t[a:b:k]` (`slice_desugar`), with Python's semantics on a
+/// position-sliced target (`takes_position`; the `Sliceable` impls clamp
+/// the range to the length):
+/// - no step, unsigned bounds: `t.slice(a..b)` as is;
+/// - no step, a signed bound counts from the end, clamped at 0:
+///   `{ let #t = t; #t.slice(slice_bound(a, #t.len())..b) }`;
+/// - a step: `{ let #t = t; let #k: isize = k;
+///   #t.slice(slice_range(a, b, #k, #t.len())).step(#k) }`, a missing
+///   bound passed as `none` (its default depends on the step's sign).
 fn lower_slice(
     ctx: &mut LowerCtx<'_>,
     target: &Expr,
@@ -7409,28 +7624,69 @@ fn lower_slice(
     let a = start.map(|e| lower_position(ctx, e));
     let b = end.map(|e| lower_position(ctx, e));
     let signed = |h: &Option<HirExpr>| h.as_ref().is_some_and(|h| is_signed(&h.ty));
-    if !signed(&a) && !signed(&b) {
+    if step.is_none() && !signed(&a) && !signed(&b) {
         let t = splice(ctx, t_h);
         let a = a.map(|h| splice(ctx, h));
         let b = b.map(|h| splice(ctx, h));
-        return lower_expr(ctx, &slice_desugar(&t, a.as_ref(), b.as_ref(), step, span));
+        return lower_expr(ctx, &slice_desugar(&t, a.as_ref(), b.as_ref(), None, span));
     }
     let t = tmp_path("t", span);
     let recv = splice(ctx, t_h);
-    let mut pos = |h: Option<HirExpr>| {
-        h.map(|h| {
-            let neg = is_signed(&h.ty);
-            let e = splice(ctx, h);
-            if neg {
-                from_end(e, len_of(&t, span), span)
-            } else {
-                e
-            }
-        })
+    let mut bound = |h: Option<HirExpr>| h.map(|h| (is_signed(&h.ty), splice(ctx, h)));
+    let (a, b) = (bound(a), bound(b));
+    let Some(k) = step else {
+        let pos = |x: Option<(bool, Expr)>| {
+            x.map(|(neg, e)| {
+                if neg {
+                    index_fn(
+                        "slice_bound",
+                        vec![as_isize(e, span), len_of(&t, span)],
+                        span,
+                    )
+                } else {
+                    e
+                }
+            })
+        };
+        let (a, b) = (pos(a), pos(b));
+        let body = slice_desugar(&t, a.as_ref(), b.as_ref(), None, span);
+        return lower_expr(ctx, &block_of(vec![let_stmt(&t, recv)], body, span));
     };
-    let (a, b) = (pos(a), pos(b));
-    let body = slice_desugar(&t, a.as_ref(), b.as_ref(), step, span);
-    lower_expr(ctx, &block_of(vec![let_stmt(&t, recv)], body, span))
+    let kt = tmp_path("k", span);
+    let opt = |x: Option<(bool, Expr)>| {
+        x.map_or(
+            Expr {
+                kind: ExprKind::Literal(AstLit::None),
+                span,
+            },
+            |(_, e)| as_isize(e, span),
+        )
+    };
+    let range = index_fn(
+        "slice_range",
+        vec![opt(a), opt(b), kt.clone(), len_of(&t, span)],
+        span,
+    );
+    let call = |recv: Expr, method: &str, arg: Expr| Expr {
+        kind: ExprKind::MethodCall {
+            receiver: Box::new(recv),
+            method: method.to_owned(),
+            type_args: Vec::new(),
+            args: vec![CallArg::Positional(arg)],
+            trailing_closure: None,
+        },
+        span,
+    };
+    let body = call(call(t.clone(), "slice", range), "step", kt.clone());
+    let let_k = Stmt {
+        span,
+        kind: StmtKind::Let {
+            name: path_name(&kt),
+            ty: Some(isize_ty(span)),
+            init: k.clone(),
+        },
+    };
+    lower_expr(ctx, &block_of(vec![let_stmt(&t, recv), let_k], body, span))
 }
 
 /// Spec 3.6.2 / stdlib 2.3.4: `t[a:b]` is `t.slice(a..b)` (`Sliceable`)

@@ -156,6 +156,18 @@ pub fn lower_full(
             })
             .collect(),
     );
+    // A prebuilt-library build: every body of that package is a root.
+    let lib_pkg: Option<String> = program
+        .attrs
+        .iter()
+        .find(|a| a.path == [crate::LIB_ATTR])
+        .and_then(|a| match &a.body {
+            rokc_ast::AttrBody::Args(args) => args.iter().find_map(|x| match x {
+                rokc_ast::AttrArg::Word(w) => Some(w.clone()),
+                _ => None,
+            }),
+            _ => None,
+        });
     let augmented = with_lazy_static_inits(program);
     let program = augmented.as_ref().unwrap_or(program);
     let assoc_sigs = with_self_assoc_sigs(program);
@@ -268,6 +280,7 @@ pub fn lower_full(
             })
             .collect(),
         alias_uses: std::cell::RefCell::new(Vec::new()),
+        canon_memo: std::cell::RefCell::default(),
     };
     check_bound_names(program, &names, &mut pre_diags);
     warn_assoc_shadowing(program, &names, &mut pre_diags);
@@ -657,6 +670,8 @@ pub fn lower_full(
     // Per decl: its body is library code (`rok::<tier>` / a dependency),
     // lowered only when reached (`lower_bodies`).
     let mut lib_decl: Vec<bool> = Vec::new();
+    // Decl index → symbol path of a dependency's method (see below).
+    let mut link_names: HashMap<usize, String> = HashMap::new();
     let mut generic_fns: HashMap<String, &FnDef> = HashMap::new();
     let mut generic_methods: HashMap<(String, String), Vec<GenericMethod>> = HashMap::new();
     let mut generic_trait_impls: Vec<GenericTraitImpl> = Vec::new();
@@ -1129,6 +1144,20 @@ pub fn lower_full(
                     trait_name: trait_name.clone(),
                 },
             );
+            // A dependency's method symbol must not depend on this
+            // build's struct numbering (`Struct70__m`): a prebuilt
+            // dependency and its users name it alike.
+            if resolve::is_dependency(&package_of(&module)) {
+                let mut name = format!("{module}::{}.{leaf}", impl_def_display(&impl_def.self_ty));
+                if let Some(tp) = &impl_def.trait_path {
+                    name.push_str("__by_");
+                    name.push_str(&impl_def_display(&Ty {
+                        kind: AstTyKind::Path(tp.clone()),
+                        span: tp.span,
+                    }));
+                }
+                link_names.insert(decls.len(), name);
+            }
             decls.push(MethodOrFn::Method {
                 fn_def: m,
                 self_ty: target_ty.clone(),
@@ -1376,6 +1405,7 @@ pub fn lower_full(
         diagnostics: std::cell::RefCell::new(Vec::new()),
     };
     let mut exports: Vec<(FunctionId, String)> = Vec::new();
+    let mut prebuilt: Vec<FunctionId> = Vec::new();
     for (i, d) in decls.iter().enumerate() {
         let (MethodOrFn::Fn(f) | MethodOrFn::Method { fn_def: f, .. }) = d;
         rokc_diagnostic::set_current_span(f.span);
@@ -1403,8 +1433,12 @@ pub fn lower_full(
                 ),
             );
         }
+        let prebuilt_fn = f.attrs.iter().any(|a| a.path == [crate::PREBUILT_ATTR]);
+        if prebuilt_fn {
+            prebuilt.push(id);
+        }
         if let Some(sym) = export_name(f) {
-            if f.body.is_none() {
+            if f.body.is_none() && !prebuilt_fn {
                 err(
                     &mut pre_diags,
                     format!("`#[export_name]` on `{}` needs a function body", f.name),
@@ -1554,12 +1588,25 @@ pub fn lower_full(
         .enumerate()
         .map(|(i, (d, &lib))| {
             let (MethodOrFn::Fn(f) | MethodOrFn::Method { fn_def: f, .. }) = d;
-            !lib || exports.iter().any(|(id, _)| id.0 as usize == i) || is_lazy_init_fn(&f.name)
+            let module = match d {
+                MethodOrFn::Fn(f) => module_of(&f.name),
+                MethodOrFn::Method { module, .. } => module.clone(),
+            };
+            !lib || exports.iter().any(|(id, _)| id.0 as usize == i)
+                || is_lazy_init_fn(&f.name)
+                || lib_pkg.as_ref().is_some_and(|p| package_of(&module) == *p)
         })
         .collect();
     let (mut functions, unlowered) = lower_bodies(&env, &decls, &roots);
+    for (i, name) in link_names {
+        functions[i].name = name;
+    }
     check_type_bounds(&env);
     super::send_check::check(&env, &functions);
+    let (any_seeds, any_exports) = super::expr::any_link(&env, lib_pkg.as_deref());
+    if lib_pkg.is_some() || !prebuilt.is_empty() {
+        exports.extend(any_exports);
+    }
     let Env {
         structs,
         enums,
@@ -1588,11 +1635,14 @@ pub fn lower_full(
         diagnostics: pre_diags,
         exports,
         unlowered,
+        prebuilt,
+        any_seeds,
         c_variadic: {
             let mut v: Vec<FunctionId> = c_variadic.into_iter().collect();
             v.sort_by_key(|f| f.0);
             v
         },
+        type_visibility: names.visibility.clone(),
     };
     // Final pass: rewrite any leftover `HirTy::Path([alias])` nodes in
     // function signatures and locals using the alias table.
@@ -3354,6 +3404,16 @@ fn check_auto_impl(
     let key = names.trait_key(&segs, module);
     let target = impl_def_display(&impl_def.self_ty);
     let tr = segs.join("::");
+    if key == super::reflect::REFLECT {
+        err(
+            diags,
+            format!(
+                "`Reflect` is implemented by the compiler for every type; remove `impl {tr} for \
+                 {target}` (spec 6.10.1)"
+            ),
+        );
+        return false;
+    }
     if !names.auto_traits.contains(&key) {
         if impl_def.is_unsafe || impl_def.negative {
             err(

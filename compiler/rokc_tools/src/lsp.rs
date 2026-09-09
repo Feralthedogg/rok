@@ -466,7 +466,7 @@ fn path_completions(hir: &HirModule, segs: &[&str], push: &mut impl FnMut(&str, 
     names.extend(
         hir.functions
             .iter()
-            .filter(|f| !f.name.contains("__"))
+            .filter(|f| !f.name.contains("__") && !f.name.contains('.'))
             .map(|f| (f.name.as_str(), 3)),
     );
     names.extend(hir.structs.iter().map(|s| (s.name.as_str(), 22)));
@@ -499,6 +499,12 @@ fn path_completions(hir: &HirModule, segs: &[&str], push: &mut impl FnMut(&str, 
         if let Some((key, method)) = f.name.split_once("__") {
             if keys.iter().any(|k| k == key) {
                 push(method, 3, signature(hir, f));
+            }
+        }
+        // A dependency's method: `<module>::<Type>.<method>`.
+        if let Some((ty, _)) = f.name.rsplit("::").next().and_then(|l| l.split_once('.')) {
+            if ty == last {
+                push(short_name(&f.name), 3, signature(hir, f));
             }
         }
     }

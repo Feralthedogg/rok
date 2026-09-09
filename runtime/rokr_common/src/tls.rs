@@ -171,8 +171,8 @@ pub fn mutator_state() -> &'static AtomicU8 {
 }
 
 /// `rok_thread_init` slot values (803 §8.3.6). The TLAB starts empty
-/// (the first allocation refills it); no write barrier log exists
-/// (non-generational mark-region needs no barrier), so it stays null.
+/// (the first allocation refills it); the write barrier logs into one
+/// global remembered set (`rokr_gc`), so the wb log slots stay null.
 #[allow(clippy::cast_ptr_alignment)] // 8-aligned slots
 pub fn thread_init() {
     yield_flag().store(0, Ordering::Relaxed);

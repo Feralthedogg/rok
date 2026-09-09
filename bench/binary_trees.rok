@@ -1,0 +1,35 @@
+// binary-trees (benchmarks game shape): one long-lived tree of depth
+// 18 while many short-lived trees of depth 4..18 are built and checked.
+trait Tree { fn check(self) -> i64; }
+struct Node { l: any Tree; r: any Tree; }
+struct Leaf { x: i64; y: i64; }
+impl Tree for Node {
+    fn check(self) -> i64 { return 1 + self.l.check() + self.r.check(); }
+}
+impl Tree for Leaf { fn check(self) -> i64 { return 1 + self.x; } }
+
+fn make(d: i64) -> any Tree {
+    if d == 0 { return Leaf { x: 0, y: 0 }; }
+    return Node { l: make(d - 1), r: make(d - 1) };
+}
+
+fn main() -> i32 {
+    let max: i64 = 18;
+    let min: i64 = 4;
+    rok_print_i64(make(max + 1).check());
+    let long = make(max);
+    let d = min;
+    while d <= max {
+        let iters: i64 = 1 << (max - d + min);
+        let c: i64 = 0;
+        let k: i64 = 0;
+        while k < iters {
+            c += make(d).check();
+            k += 1;
+        }
+        rok_print_i64(c);
+        d += 2;
+    }
+    rok_print_i64(long.check());
+    return 0;
+}

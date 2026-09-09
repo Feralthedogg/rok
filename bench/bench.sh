@@ -8,6 +8,14 @@
 #   alloc_boxes        0.54s               0.21s
 #   alloc_strings      0.39s               0.18s
 #   alloc_threads      1.05s               0.16s
+#
+# Sticky mark-bit generations (2026-10-13, loaded shared machine, so
+# min user+sys CPU of 5; ROK_GC_GEN=0 = previous collector):
+#                  non-generational    generational
+#   binary_trees       2.22s               1.62s
+#   gc_old_heap        0.75s               0.68s
+#   store_heavy        1.98s (no barrier)  2.04s (barrier fast path)
+# ROK_GC_STATS=1 prints collections / pause totals at exit.
 set -e
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"

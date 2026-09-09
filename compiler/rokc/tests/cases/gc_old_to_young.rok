@@ -1,0 +1,62 @@
+// expect-exit: 0
+// expect-stdout:
+// fresh-0 fresh-99 fresh-199
+// 7 7
+// 20
+// minor ok: true
+
+// Generational GC (sticky mark bits): after a full collection the list
+// and the struct are old; fresh (young) objects stored into them are
+// reachable only through those old objects, so the write barrier must
+// remember them for the minor collections that follow.
+extern "C" {
+    fn rok_gc_collect();
+    fn rok_gc_collect_young();
+    fn rok_gc_stats_collections() -> u64;
+}
+
+trait Val { fn v(self) -> i64; }
+struct Box2 { a: i64; b: i64; }
+impl Val for Box2 { fn v(self) -> i64 { return self.a + self.b; } }
+struct Holder { name: str; item: any Val; kids: List<str>; }
+
+fn churn() {
+    let j = 0;
+    while j < 3000 {
+        let _s = f"garbage-{j}";
+        let _l: List<i32> = [j, j + 1];
+        j = j + 1;
+    }
+}
+
+fn main() -> i32 {
+    let olds: List<str> = [];
+    let i = 0;
+    while i < 200 {
+        olds.push("init");
+        i = i + 1;
+    }
+    let h: List<Holder> = [Holder { name: "x", item: Box2 { a: 0, b: 0 }, kids: [] }];
+    let before = unsafe { rok_gc_stats_collections() };
+    unsafe { rok_gc_collect() };
+    i = 0;
+    while i < 200 {
+        olds[i as usize] = f"fresh-{i}";
+        i = i + 1;
+    }
+    h[0] = Holder { name: f"n{i}", item: Box2 { a: 3, b: 4 }, kids: [] };
+    let k = 0;
+    while k < 20 {
+        h[0].kids.push(f"kid-{k}");
+        unsafe { rok_gc_collect_young() };
+        churn();
+        k = k + 1;
+    }
+    unsafe { rok_gc_collect_young() };
+    println(f"{olds[0]} {olds[99]} {olds[199]}");
+    println(f"{h[0].item.v()} {h[0].item.v()}");
+    println(f"{h[0].kids.len()}");
+    let after = unsafe { rok_gc_stats_collections() };
+    println(f"minor ok: {after - before >= 21}");
+    return 0;
+}

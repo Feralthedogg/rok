@@ -5,6 +5,7 @@ mod cfg;
 mod coro;
 mod entry;
 mod harness;
+pub mod rhir;
 mod toolchain;
 
 use std::path::{Path, PathBuf};
@@ -52,8 +53,99 @@ pub struct CompilerConfig {
     pub anonymous: bool,
     /// Dependency packages (`--extern name=path`, spec 902.3): each
     /// `lib.rok` is compiled with the user package and mounted at the
-    /// top-level path `name`.
+    /// top-level path `name`; a `<name>.rhir` (spec 904) is a prebuilt
+    /// one, linked from the `lib<name>.a` beside it.
     pub externs: Vec<(String, PathBuf)>,
+    /// Build the library package as prebuilt dependency `name`: it is
+    /// mounted as `name` (as its users will see it), every body is
+    /// compiled, and `CompiledModule::interface` holds its RHIR.
+    pub lib_name: Option<String>,
+}
+
+thread_local! {
+    /// Files served instead of the disk: the interface sources of the
+    /// prebuilt dependencies (`rhir::Rhir::files`) at their old paths.
+    static OVERLAY: std::cell::RefCell<std::collections::HashMap<PathBuf, String>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn read_source(path: &Path) -> std::io::Result<String> {
+    match OVERLAY.with(|o| o.borrow().get(path).cloned()) {
+        Some(text) => Ok(text),
+        None => std::fs::read_to_string(path),
+    }
+}
+
+fn source_exists(path: &Path) -> bool {
+    OVERLAY.with(|o| o.borrow().contains_key(path)) || path.exists()
+}
+
+fn source_dir_exists(dir: &Path) -> bool {
+    OVERLAY.with(|o| o.borrow().keys().any(|p| p.starts_with(dir) && p != dir)) || dir.is_dir()
+}
+
+/// A prebuilt dependency of this build (`--extern name=x.rhir`).
+struct Prebuilt {
+    rhir: rhir::Rhir,
+    archive: PathBuf,
+}
+
+/// Load the `.rhir` externs into the overlay; `config` with each one's
+/// root replaced by its (overlaid) `lib.rok`.
+fn load_prebuilt(
+    config: &CompilerConfig,
+    diags: &mut Vec<RokDiagnostic>,
+) -> (CompilerConfig, Vec<Prebuilt>) {
+    let mut config = config.clone();
+    let mut out: Vec<Prebuilt> = Vec::new();
+    OVERLAY.with(|o| o.borrow_mut().clear());
+    for (name, root) in &mut config.externs {
+        if root.extension().is_none_or(|e| e != "rhir") {
+            continue;
+        }
+        let r = match rhir::Rhir::load(root) {
+            Ok(r) if r.name == *name => r,
+            Ok(r) => {
+                diags.push(RokDiagnostic::error(
+                    rokc_diagnostic::ErrorKind::Module,
+                    format!(
+                        "`--extern {name}={}`: it was built as `{}`, and the name is in its \
+                         symbols — rebuild it as `{name}`",
+                        root.display(),
+                        r.name
+                    ),
+                ));
+                continue;
+            }
+            Err(e) => {
+                diags.push(RokDiagnostic::error(rokc_diagnostic::ErrorKind::Module, e));
+                continue;
+            }
+        };
+        if let Some(p) = out
+            .iter()
+            .find(|p| r.type_offset < p.rhir.type_end() && p.rhir.type_offset < r.type_end())
+        {
+            diags.push(RokDiagnostic::error(
+                rokc_diagnostic::ErrorKind::Module,
+                format!(
+                    "prebuilt `{}` and `{}` use the same GC type ids — build each dependency \
+                     with the ones before it as `--extern` (`rok build` does)",
+                    p.rhir.name, r.name
+                ),
+            ));
+        }
+        OVERLAY.with(|o| {
+            let mut o = o.borrow_mut();
+            for (rel, text) in &r.files {
+                o.insert(r.src_dir.join(rel), text.clone());
+            }
+        });
+        let archive = rhir::companions(root).1;
+        *root = r.src_dir.join("lib.rok");
+        out.push(Prebuilt { rhir: r, archive });
+    }
+    (config, out)
 }
 
 /// A library root mounted beside the user package: its module path
@@ -193,6 +285,11 @@ pub struct CompiledModule {
     pub path: PathBuf,
     pub hir: HirModule,
     pub mir: MirModule,
+    /// Prebuilt dependencies' archives, in link order.
+    pub archives: Vec<PathBuf>,
+    /// A `CompilerConfig::lib_name` build: its RHIR, but the GC type
+    /// count (known after codegen).
+    pub interface: Option<rhir::Rhir>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -224,6 +321,71 @@ pub fn compile_source(
     source: &str,
     path: &Path,
     config: &CompilerConfig,
+) -> Result<CompiledProject, Vec<RokDiagnostic>> {
+    let mut diags: Vec<RokDiagnostic> = Vec::new();
+    let (mut config, prebuilt) = load_prebuilt(config, &mut diags);
+    if !diags.is_empty() {
+        return Err(diags);
+    }
+    let archives: Vec<PathBuf> = prebuilt.iter().rev().map(|p| p.archive.clone()).collect();
+    let Some(lib) = config.lib_name.take() else {
+        let r = compile_unit(source, path, &config, &prebuilt, None);
+        OVERLAY.with(|o| o.borrow_mut().clear());
+        let mut p = r?;
+        if let Some(m) = p.modules.first_mut() {
+            m.archives = archives;
+        }
+        return Ok(p);
+    };
+    // The library is a dependency `lib` of an empty package (whose own
+    // hash is unique per library: closures etc. are named in it).
+    let src_dir = path.parent().unwrap_or_else(|| Path::new(""));
+    let dir = std::path::absolute(src_dir).unwrap_or_default();
+    let keep_ast = config.keep_ast;
+    config.keep_ast = true;
+    config.externs.push((lib.clone(), path.to_path_buf()));
+    let root = dir.join(format!("{lib}.prebuilt")).join("lib.rok");
+    let stub = format!("// prebuilt library `{lib}`\n");
+    let r = compile_unit(&stub, &root, &config, &prebuilt, Some(&lib));
+    OVERLAY.with(|o| o.borrow_mut().clear());
+    let mut p = r?;
+    let seeds = p
+        .modules
+        .first()
+        .map(|m| m.hir.any_seeds.clone())
+        .unwrap_or_default();
+    let files = rhir::interface(&p.sources, &lib, src_dir, &seeds);
+    if !keep_ast {
+        p.sources.clear();
+    }
+    if let Some(m) = p.modules.first_mut() {
+        m.archives = archives;
+        let hash = m
+            .mir
+            .pkg_hashes
+            .iter()
+            .find(|(n, _)| *n == lib)
+            .map(|(_, h)| h.clone())
+            .unwrap_or_default();
+        m.interface = Some(rhir::Rhir {
+            producer: rhir::producer(),
+            hash,
+            name: lib,
+            src_dir: dir,
+            type_offset: m.mir.link.type_offset,
+            type_count: 0,
+            files,
+        });
+    }
+    Ok(p)
+}
+
+fn compile_unit(
+    source: &str,
+    path: &Path,
+    config: &CompilerConfig,
+    prebuilt: &[Prebuilt],
+    lib: Option<&str>,
 ) -> Result<CompiledProject, Vec<RokDiagnostic>> {
     let mut diags: Vec<RokDiagnostic> = Vec::new();
 
@@ -311,6 +473,7 @@ pub fn compile_source(
             literals: std::sync::Arc::clone(&lib_lits),
         };
         let first = sources.len();
+        let first_item = all_items.len();
         let stray = collect_module_tree(
             root,
             None,
@@ -331,6 +494,9 @@ pub fn compile_source(
         for f in &mut sources[first..] {
             f.package.clone_from(&pkg);
         }
+        if prebuilt.iter().any(|p| p.rhir.name == pkg) {
+            mark_prebuilt(&mut all_items[first_item..]);
+        }
     }
     // Auto-inject the runtime hooks lowering targets (`rok_panic`,
     // `rok_uncaught_error`, `rok_print_*`, ...) so user files needn't
@@ -350,8 +516,15 @@ pub fn compile_source(
         inner: true,
         span: rokc_diagnostic::Span::DUMMY,
     };
+    let mut attrs = vec![packages];
+    attrs.extend(lib.map(|l| rokc_ast::Attribute {
+        path: vec![rokc_hir::LIB_ATTR.to_owned()],
+        body: rokc_ast::AttrBody::Args(vec![rokc_ast::AttrArg::Word(l.to_owned())]),
+        inner: true,
+        span: rokc_diagnostic::Span::DUMMY,
+    }));
     let program = rokc_ast::Program {
-        attrs: vec![packages],
+        attrs,
         items: all_items,
         stmts: Vec::new(),
     };
@@ -384,6 +557,18 @@ pub fn compile_source(
     }
     let mut mir = rokc_mir::lower(&hir);
     mir.pkg_hashes = package_hashes(&root_dir, &roots);
+    for p in prebuilt {
+        if let Some(h) = mir.pkg_hashes.iter_mut().find(|(n, _)| *n == p.rhir.name) {
+            h.1.clone_from(&p.rhir.hash);
+        }
+    }
+    mir.link.lib = lib.map(str::to_owned);
+    mir.link.prebuilt = prebuilt.iter().map(|p| p.rhir.name.clone()).collect();
+    mir.link.type_offset = prebuilt
+        .iter()
+        .map(|p| p.rhir.type_end())
+        .max()
+        .unwrap_or(0);
 
     Ok(CompiledProject {
         modules: vec![CompiledModule {
@@ -395,12 +580,48 @@ pub fn compile_source(
             path: path.to_path_buf(),
             hir,
             mir,
+            archives: Vec::new(),
+            interface: None,
         }],
         warnings: diags.into_iter().filter(|d| !d.is_error()).collect(),
         link_libraries: Vec::new(),
         tests,
         sources,
     })
+}
+
+/// Lower MIR again after an embedder edited the HIR (the REPL's slot
+/// stores).
+pub fn relower(m: &mut CompiledModule) {
+    let hashes = std::mem::take(&mut m.mir.pkg_hashes);
+    m.mir = rokc_mir::lower(&m.hir);
+    m.mir.pkg_hashes = hashes;
+}
+
+/// A prebuilt dependency's body-less functions (cut from its interface)
+/// are declarations of its `.a`'s symbols.
+fn mark_prebuilt(items: &mut [rokc_ast::Item]) {
+    let attr = || rokc_ast::Attribute {
+        path: vec![rokc_hir::PREBUILT_ATTR.to_owned()],
+        body: rokc_ast::AttrBody::Empty,
+        inner: false,
+        span: rokc_diagnostic::Span::DUMMY,
+    };
+    for item in items {
+        match item {
+            rokc_ast::Item::Fn(f) if f.body.is_none() => f.attrs.push(attr()),
+            rokc_ast::Item::Impl(i) => {
+                for it in &mut i.items {
+                    if let rokc_ast::ImplItem::Method(m) = it {
+                        if m.body.is_none() {
+                            m.attrs.push(attr());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Spec 0.3.3: each package's hash is the SHA-256 (first 8 hex digits)
@@ -527,7 +748,7 @@ fn parse_and_descend(
     out: &mut Vec<rokc_ast::Program>,
     metas: &mut PrePass,
 ) {
-    let source = match std::fs::read_to_string(body_path) {
+    let source = match read_source(body_path) {
         Ok(s) => s,
         Err(e) => {
             diags.push(RokDiagnostic::error(
@@ -761,14 +982,18 @@ fn resolve_file_mod(
     };
     let body = dir.join(format!("{name}.rok"));
     let folder = dir.join(name);
-    if !body.exists() {
+    if !source_exists(&body) {
         diags.push(RokDiagnostic::error(
             rokc_diagnostic::ErrorKind::Module,
             format!("module `{name}` body not found at `{}`", body.display()),
         ));
         return;
     }
-    let next_dir = if folder.is_dir() { Some(folder) } else { None };
+    let next_dir = if source_dir_exists(&folder) {
+        Some(folder)
+    } else {
+        None
+    };
     parse_and_descend(&body, next_dir.as_deref(), diags, out, metas);
 }
 
@@ -795,7 +1020,7 @@ fn collect_module_tree(
 ) -> Vec<rokc_ast::Stmt> {
     let source = match preloaded {
         Some(s) => s.to_owned(),
-        None => match std::fs::read_to_string(body_path) {
+        None => match read_source(body_path) {
             Ok(s) => s,
             Err(e) => {
                 diags.push(RokDiagnostic::error(
@@ -909,14 +1134,18 @@ fn flatten_module_items(
                     };
                     let body = dir.join(format!("{}.rok", m.name));
                     let folder = dir.join(&m.name);
-                    if !body.exists() {
+                    if !source_exists(&body) {
                         diags.push(RokDiagnostic::error(
                             rokc_diagnostic::ErrorKind::Module,
                             format!("module `{}` body not found at `{}`", m.name, body.display()),
                         ));
                         continue;
                     }
-                    let next_dir = if folder.is_dir() { Some(folder) } else { None };
+                    let next_dir = if source_dir_exists(&folder) {
+                        Some(folder)
+                    } else {
+                        None
+                    };
                     let stray = collect_module_tree(
                         &body,
                         None,

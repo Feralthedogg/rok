@@ -1,0 +1,10 @@
+// expect-exit: 101
+// expect-stderr: slice step must not be zero
+
+// Spec 3.6.2: bounds clamp, but a zero step panics (Python's ValueError).
+fn main() {
+    let xs: List<i32> = [1, 2, 3, 4, 5];
+    println(xs[-10:100].debug());
+    let k: isize = 0;
+    println(xs[: :k].debug());
+}

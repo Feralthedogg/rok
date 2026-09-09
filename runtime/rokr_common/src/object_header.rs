@@ -4,7 +4,8 @@
 //! Layout (offsets in bytes):
 //!   0  : `type_id`   u32
 //!   4  : `gc_flags`  u32 (bit 0=MARK, 1=STICKY, 2=PINNED, 3=FORWARDED,
-//!                          4=LARGE, 5=IMMORTAL)
+//!                          4=LARGE, 5=IMMORTAL; 6=UNLOGGED is this
+//!                          runtime's write-barrier bit)
 //!   8  : `gc_word`   u64 (forwarding pointer or LOS payload size)
 //!   16 : payload     ...
 
@@ -26,6 +27,12 @@ pub const FLAG_PINNED: u32 = 1 << 2;
 pub const FLAG_FORWARDED: u32 = 1 << 3;
 pub const FLAG_LARGE: u32 = 1 << 4;
 pub const FLAG_IMMORTAL: u32 = 1 << 5;
+/// An old (`STICKY`) object not yet in the remembered set.
+///
+/// Implementation bit (801 §8.1.3 bits 6..). The write barrier's fast path tests
+/// only this bit; the slow path (`rok_gc_wb_slow`) clears it and logs
+/// the object.
+pub const FLAG_UNLOGGED: u32 = 1 << 6;
 
 pub const HEADER_SIZE: usize = 16;
 pub const HEADER_ALIGN: usize = 8;

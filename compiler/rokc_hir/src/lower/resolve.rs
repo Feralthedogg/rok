@@ -199,7 +199,7 @@ pub(super) fn set_packages(names: Vec<String>) {
     PACKAGES.with(|p| *p.borrow_mut() = names);
 }
 
-fn is_dependency(name: &str) -> bool {
+pub(super) fn is_dependency(name: &str) -> bool {
     PACKAGES.with(|p| p.borrow().iter().any(|n| n == name))
 }
 

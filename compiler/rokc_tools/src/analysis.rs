@@ -90,13 +90,27 @@ impl Analysis {
 
 /// User-facing type name (struct / enum by name, generics as `<..>`).
 pub fn ty_name(hir: &HirModule, ty: &HirTy) -> String {
-    let rec = |t: &HirTy| ty_name(hir, t);
+    ty_text(hir, ty, false)
+}
+
+/// `ty_name` with struct / enum by their full path (`rok::core::..`),
+/// which names them from any module without a `use`.
+pub fn ty_path(hir: &HirModule, ty: &HirTy) -> String {
+    ty_text(hir, ty, true)
+}
+
+fn ty_text(hir: &HirModule, ty: &HirTy, full: bool) -> String {
+    let rec = |t: &HirTy| ty_text(hir, t, full);
     let list = |ts: &[HirTy]| ts.iter().map(rec).collect::<Vec<_>>().join(", ");
     // Types by their own name (`List<i32>`, not the module path), as
     // the REPL shows them (907.7).
     let generic = |name: &str, args: &[HirTy]| {
         let base = name.split("__").next().unwrap_or(name);
-        let base = base.rsplit("::").next().unwrap_or(base);
+        let base = if full {
+            base
+        } else {
+            base.rsplit("::").next().unwrap_or(base)
+        };
         if args.is_empty() {
             base.to_owned()
         } else {
@@ -147,8 +161,12 @@ pub fn signature(hir: &HirModule, f: &HirFunction) -> String {
 }
 
 /// The name a user writes for a HIR function: the last `::` segment,
-/// and the method name of an `<Type>__method` impl function.
+/// and the method name of an `<Type>__method` impl function (a
+/// dependency's: `<module>::<Type>.method[__by_Trait]`).
 pub fn short_name(name: &str) -> &str {
     let last = name.rsplit("::").next().unwrap_or(name);
+    if let Some((_, method)) = last.split_once('.') {
+        return method.split("__").next().unwrap_or(method);
+    }
     last.rsplit("__").next().unwrap_or(last)
 }

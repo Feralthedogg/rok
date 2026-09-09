@@ -7,7 +7,7 @@ use rokc_driver::{CompiledModule, CompilerConfig, compile_file, compile_source};
 
 pub use rokc_diagnostic::{ErrorKind, RokDiagnostic, report, set_report_style};
 pub use rokc_driver::{
-    BuildOptions, Demangled, EmitKind, ReplCell, SourceFile, TempDir, demangle, link_host,
+    BuildOptions, Demangled, EmitKind, ReplCell, SourceFile, TempDir, demangle, link_host, rhir,
 };
 
 #[derive(Default)]
@@ -56,6 +56,12 @@ impl Session {
     /// doc).
     pub const fn set_keep_ast(&mut self, on: bool) {
         self.config.keep_ast = on;
+    }
+
+    /// Build the library package as prebuilt dependency `name`
+    /// (`archive` then also writes `<name>.rhir`, spec 904).
+    pub fn set_lib_name(&mut self, name: Option<String>) {
+        self.config.lib_name = name;
     }
 
     /// The input is a lone file outside any package (spec 4.16.8).
@@ -128,6 +134,13 @@ impl CompileResult {
     /// One intermediate artifact (`--emit=<kind>`).
     pub fn emit(&self, kind: EmitKind, opts: &BuildOptions) -> Result<Vec<u8>, RokDiagnostic> {
         rokc_driver::emit(self.module()?, kind, opts)
+    }
+
+    /// Lower MIR again after editing `modules[0].hir`.
+    pub fn relower(&mut self) {
+        if let Some(m) = self.modules.first_mut() {
+            rokc_driver::relower(m);
+        }
     }
 
     /// Build an executable at `out` through mlir-opt / mlir-translate / clang.

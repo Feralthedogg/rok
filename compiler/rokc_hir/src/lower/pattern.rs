@@ -779,6 +779,8 @@ pub(super) fn lower_pattern_inner(
                     .map(|(p, t)| lower_pattern(ctx, p, t))
                     .collect(),
             ),
+            // `()` matches the one unit value.
+            HirTy::Unit if pats.is_empty() => HirPattern::Wildcard,
             _ => mismatch(ctx, format!("a {}-tuple pattern", pats.len())),
         },
         AstPatternKind::Range {

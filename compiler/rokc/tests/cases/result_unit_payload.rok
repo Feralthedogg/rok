@@ -1,0 +1,102 @@
+// expect-exit: 0
+// expect-stdout:
+// get ok
+// get err
+// match ok
+// match err
+// try ok
+// try err
+// list 2 1
+// field ok
+// generic ok
+// catching ok
+// catching err
+// str err boom
+// opt some
+// opt none
+// sum unit
+// enum unit
+// unwrap ok
+// async ok
+// async err
+
+// A `()` payload is zero-sized: moving it into / out of a variant's
+// payload slot used to fail in codegen with "payload of `i32` stored as
+// `!llvm.struct<()>`" (`Result<(), E>::get`).
+enum E { Bad }
+
+fn check(x: i32) throws (E) { if x < 0 { throw E::Bad; } }
+
+fn keep(x: i32) -> Result<(), E> { Result::catching(|| try check(x)) }
+
+fn relay(x: i32) throws (E) {
+    let r = keep(x);
+    try r.get();
+}
+
+fn id<T>(x: T) -> T { x }
+
+struct Holder { r: Result<(), E>; n: i32; }
+
+enum Unitish { U(()), N(i64) }
+
+fn noisy() throws (str) { throw "boom"; }
+
+// The `std::fs` async shape: a unit call kept as a `Result` across a
+// blocking-thread hop, then `get` back into the error flow.
+async fn off(f: fn() throws (E) + Send) throws (E) {
+    let r = await task::spawn_blocking(|| Result::catching(f));
+    try r.get();
+}
+
+async fn unit_task() throws (E) {
+    try await off(|| try check(1));
+    println("async ok");
+    try await off(|| try check(-1));
+}
+
+fn main() -> i32 {
+    let ok: Result<(), E> = Result::Ok(());
+    let err: Result<(), E> = Result::Err(E::Bad);
+    try ok.get() catch _ { println("bad"); };
+    println("get ok");
+    try err.get() catch E::Bad { println("get err"); };
+    match ok {
+        Result::Ok(u) => { let _v: () = u; println("match ok"); },
+        Result::Err(_) => println("bad"),
+    };
+    match err {
+        Result::Ok(()) => println("bad"),
+        Result::Err(_) => println("match err"),
+    };
+    try relay(1) catch _ { println("bad"); };
+    println("try ok");
+    try relay(-1) catch E::Bad { println("try err"); };
+    let xs: List<Result<(), E>> = [];
+    xs.push(ok);
+    xs.push(keep(-1));
+    xs.push(keep(2));
+    let oks = 0usize;
+    for r in xs { if r.is_ok() { oks = oks + 1; } }
+    println(f"list {oks} {xs.len() - oks}");
+    let h = Holder { r: keep(3), n: 1 };
+    try h.r.get() catch _ { println("bad"); };
+    println("field ok");
+    let g = id(keep(4));
+    try g.get() catch _ { println("bad"); };
+    println("generic ok");
+    if Result::catching(|| try check(5)).is_ok() { println("catching ok"); }
+    if Result::catching(|| try check(-5)).is_err() { println("catching err"); }
+    let s: Result<(), str> = Result::catching(noisy);
+    try s.get() catch m { println(f"str err {m}"); };
+    let o: () | none = ok.ok();
+    match o { none => println("opt none"), _ => println("opt some") };
+    match err.ok() { none => println("opt none"), _ => println("opt some") };
+    let su: () | i64 = ();
+    match su { v: i64 => println(f"sum {v}"), _ => println("sum unit") };
+    match Unitish::U(()) { Unitish::U(u) => { let _w: () = id(u); println("enum unit"); }, Unitish::N(_) => println("bad") };
+    ok.unwrap();
+    println("unwrap ok");
+    try task::block_on_try(unit_task()) catch E::Bad { println("async err"); };
+    0
+}

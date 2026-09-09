@@ -10,7 +10,8 @@
 //! Not implemented yet (calls hit [`unimplemented`] → fatal, exit 101):
 //! scheduler (007-runtime/706, 707), coroutines (708). OS threads (805
 //! §8.5.4) are in `thread`. The GC (`rokr_gc`) is a non-moving Immix-style
-//! mark-region (703) without generations or concurrent marking (704, 705).
+//! mark-region (703) with sticky mark-bit generations (704), without
+//! concurrent marking (705).
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
@@ -134,10 +135,17 @@ pub extern "C" fn rok_gc_alloc_slow(size: usize, align: usize, type_id: u32) -> 
     rokr_gc::alloc(size, align, type_id)
 }
 
-// Mark-sweep is neither generational nor incremental: nothing to log.
-// Kept callable for codegen that already emits barriers (8.9.10).
+/// Write barrier slow path (704 §7.4.2, 809 §8.9.10): compiled code
+/// calls it before storing a GC reference into the old object `obj`
+/// (its `UNLOGGED` header bit set); `obj` joins the remembered set.
+///
+/// # Safety
+/// `obj` must be a live GC object.
 #[unsafe(no_mangle)]
-pub const extern "C" fn rok_gc_wb_slow(_obj: *mut u8) {}
+pub unsafe extern "C" fn rok_gc_wb_slow(obj: *mut u8) {
+    // SAFETY: caller contract.
+    unsafe { rokr_gc::write_barrier_slow(obj) };
+}
 
 /// # Safety
 /// `scan_table` must be a valid 802 `ScanTable` that lives for the rest
@@ -187,6 +195,12 @@ pub extern "C" fn rok_gc_add_root(word: *const usize) {
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_gc_collect() {
     rokr_gc::collect();
+}
+
+/// A minor collection (full when `ROK_GC_GEN=0`); tests, diagnostics.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_gc_collect_young() {
+    rokr_gc::collect_young();
 }
 
 /// Bytes held by not-yet-swept GC objects, headers included (tests,

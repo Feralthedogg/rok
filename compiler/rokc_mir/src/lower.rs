@@ -51,7 +51,11 @@ pub fn lower(module: &HirModule) -> MirModule {
         externs: module
             .functions
             .iter()
-            .filter(|f| f.body.is_none() && !rokc_ir_common::takes_rok_fn_values(&f.name))
+            .filter(|f| {
+                f.body.is_none()
+                    && !rokc_ir_common::takes_rok_fn_values(&f.name)
+                    && !module.prebuilt.contains(&f.id)
+            })
             .map(|f| f.id)
             .collect(),
     };
@@ -90,6 +94,10 @@ pub fn lower(module: &HirModule) -> MirModule {
         exports: module.exports.clone(),
         c_variadic: module.c_variadic.clone(),
         pkg_hashes: Vec::new(),
+        link: crate::Link {
+            prebuilt_fns: module.prebuilt.clone(),
+            ..crate::Link::default()
+        },
     }
 }
 
@@ -261,17 +269,12 @@ fn lower_fn(
     let param_tys: Vec<MirTy> = f
         .params
         .iter()
-        .map(|p| {
-            match (
-                &p.ty,
-                f.body.is_none() && !rokc_ir_common::takes_rok_fn_values(&f.name),
-            ) {
-                (HirTy::Fn(args, ret, _), true) => MirTy::Fn(
-                    args.iter().map(|a| lower_ty_in(a, module)).collect(),
-                    Box::new(lower_ty_in(ret, module)),
-                ),
-                (t, _) => lower_ty_in(t, module),
-            }
+        .map(|p| match (&p.ty, fnv.externs.contains(&f.id)) {
+            (HirTy::Fn(args, ret, _), true) => MirTy::Fn(
+                args.iter().map(|a| lower_ty_in(a, module)).collect(),
+                Box::new(lower_ty_in(ret, module)),
+            ),
+            (t, _) => lower_ty_in(t, module),
         })
         .collect();
     let params: Vec<LocalId> = f.params.iter().map(|p| p.local).collect();
@@ -1064,6 +1067,11 @@ impl<'a> FnBuilder<'a> {
                 };
                 let unit_arg = matches!(args.as_slice(), [a] if lower_ty_in(&a.ty, self.module) == MirTy::Unit);
                 let payload_op = if args.is_empty() || unit_arg {
+                    // A `()` payload has no bits, but its expression still
+                    // runs (`Ok(f())` must call `f` and see its throw).
+                    for a in args {
+                        self.lower_expr_to_operand(a);
+                    }
                     Operand::Const(zero_const(&payload_ty))
                 } else if args.len() == 1 {
                     let arg = &args[0];

@@ -19,14 +19,35 @@
 //! zeroed memory without a memset.
 //!
 //! A collection (heap over `max(4 MiB, 2 x live)`, or `rok_gc_collect`)
-//! stops every mutator ([`world`]), empties all TLABs, parses the used
-//! blocks into per-block object-start bitmaps, marks from all shadow
-//! stacks, then sweeps: live objects mark their lines, dead ones are
-//! zeroed, unmarked lines are free for the next cycle's TLABs.
+//! stops every mutator ([`world`]), empties all TLABs, parses the lines
+//! handed out since the last one into the per-block object-start
+//! bitmaps (kept across collections; the sweep clears dead objects'
+//! bits), marks from all shadow stacks, then sweeps: live objects mark
+//! their lines, dead ones are zeroed, unmarked lines are free for the
+//! next cycle's TLABs.
 //!
-//! ponytail: no evacuation / defragmentation, no sticky mark-bit
-//! generations (704), no concurrent marking (705); blocks are never
-//! returned to the OS (`madvise` of clean blocks is the upgrade).
+//! Generations (sticky mark bits, 703 §7.3.2, on unless
+//! `ROK_GC_GEN=0`): a survivor of any collection is old (`STICKY`). A
+//! minor collection marks from the roots and the remembered set only,
+//! never enters an old object, and sweeps only the lines handed out
+//! since the last collection (all young objects live there). An old
+//! object also carries `UNLOGGED`; compiled code's write barrier tests
+//! that bit before storing a reference into a GC object, and the slow
+//! path ([`write_barrier_slow`]) clears it and records the object. A
+//! full collection (old bytes over `max(4 MiB, 2 x live after the last
+//! full one)`, or `rok_gc_collect`) marks everything and resets the
+//! remembered set.
+//!
+//! ponytail: no evacuation / defragmentation, no concurrent marking
+//! (705); blocks are never returned to the OS (`madvise` of clean
+//! blocks is the upgrade). The remembered set logs whole objects, so a
+//! store into a big old buffer rescans all of it at the next minor
+//! collection (card marking is the upgrade).
+//!
+//! Env (read once): `ROK_GC_GEN=0|1`, `ROK_GC_STRESS=N` (every object
+//! allocation through the runtime; a collection every `N` of them,
+//! every 8th one full), `ROK_GC_STATS=1` (counts and pause times to
+//! stderr at exit).
 //!
 //! Roots (704 §7.4.1): compiled code links a frame
 //! `{ prev, count, slots[count] }` into `rok_tls_shadow_stack_top` on
@@ -50,13 +71,15 @@
 #![cfg_attr(not(test), no_std)]
 
 use core::cell::UnsafeCell;
+use core::fmt::Write as _;
 use core::mem::size_of;
 use core::ptr;
 use core::sync::atomic::Ordering;
 
 use rokr_common::fatal;
 use rokr_common::object_header::{
-    FLAG_IMMORTAL, FLAG_LARGE, FLAG_MARK, FLAG_PINNED, HEADER_ALIGN, HEADER_SIZE, ObjectHeader,
+    FLAG_IMMORTAL, FLAG_LARGE, FLAG_MARK, FLAG_PINNED, FLAG_STICKY, FLAG_UNLOGGED, HEADER_ALIGN,
+    HEADER_SIZE, ObjectHeader,
 };
 
 pub mod world;
@@ -90,11 +113,14 @@ const LIVE: u8 = 1;
 /// Handed out (TLAB or medium object) since the last collection.
 const TAKEN: u8 = 2;
 
+/// Granules (start bits) per line.
+const LINE_GRANULES: usize = LINE_SIZE / 8;
+
 /// Side metadata of one block.
 struct BlockMeta {
     lines: [u8; LINES],
-    /// Object starts (one bit per 8-byte granule), rebuilt by every
-    /// collection before marking.
+    /// Object starts (one bit per 8-byte granule): `TAKEN` lines are
+    /// parsed in by every collection, dead objects cleared by its sweep.
     starts: [u64; GRANULES / 64],
     /// Holds objects or was handed out since the last sweep (else it
     /// is all zero and all `FREE`).
@@ -118,6 +144,22 @@ struct Heap {
     live_bytes: usize,
     next_gc: usize,
     collections: u64,
+    /// Bytes alive after the last collection (all old when generational).
+    old_bytes: usize,
+    /// Generational: the next automatic collection is full once
+    /// `old_bytes` reaches this.
+    full_at: usize,
+    minors: u64,
+    /// Total / longest pause (`ROK_GC_STATS`).
+    gc_ns: u64,
+    max_ns: u64,
+    /// `ROK_GC_*` read (first slow-path allocation or collection).
+    configured: bool,
+    generational: bool,
+    /// `ROK_GC_STRESS`: collect every `stress` runtime allocations (0 =
+    /// off); `allocs` counts them.
+    stress: u64,
+    allocs: u64,
     /// `scan_tables[type_id - USER_TYPE_BASE]`, null = unregistered.
     scan_tables: *mut *const u8,
     scan_len: usize,
@@ -149,6 +191,15 @@ static HEAP: Global = Global(UnsafeCell::new(Heap {
     live_bytes: 0,
     next_gc: MIN_HEAP,
     collections: 0,
+    old_bytes: 0,
+    full_at: MIN_HEAP,
+    minors: 0,
+    gc_ns: 0,
+    max_ns: 0,
+    configured: false,
+    generational: true,
+    stress: 0,
+    allocs: 0,
     scan_tables: ptr::null_mut(),
     scan_len: 0,
     stack: ptr::null_mut(),
@@ -227,11 +278,7 @@ pub fn alloc(size: usize, align: usize, type_id: u32) -> *mut u8 {
         }
     }
     world::lock();
-    let h = heap();
-    let want = if size8 > LINE_SIZE { size8 } else { LINE_SIZE };
-    if h.live_bytes.saturating_add(want) > h.next_gc {
-        collect_locked();
-    }
+    before_alloc(if size8 > LINE_SIZE { size8 } else { LINE_SIZE });
     let obj = if size8 > LINE_SIZE {
         // A medium object that does not fit the TLAB: its own lines, so
         // the TLAB's tail stays usable.
@@ -240,8 +287,14 @@ pub fn alloc(size: usize, align: usize, type_id: u32) -> *mut u8 {
         obj
     } else {
         let start = take_run(1, false);
-        let end = (start as usize + 1).next_multiple_of(LINE_SIZE);
-        let end = end_of_run(start as usize, end);
+        let end = if heap().stress == 0 {
+            let end = (start as usize + 1).next_multiple_of(LINE_SIZE);
+            end_of_run(start as usize, end)
+        } else {
+            // Stress: a TLAB of exactly this object, so the next
+            // allocation comes back here too.
+            start as usize + size8
+        };
         heap().live_bytes += end - start as usize;
         // SAFETY: this thread's own TLAB slots.
         unsafe {
@@ -253,6 +306,88 @@ pub fn alloc(size: usize, align: usize, type_id: u32) -> *mut u8 {
     world::unlock();
     init_header(obj, type_id, size8, 0);
     obj
+}
+
+/// With the lock held, before handing out `want` more bytes: collect
+/// if the heap outgrew its budget or `ROK_GC_STRESS` says so.
+fn before_alloc(want: usize) {
+    let h = heap();
+    configure(h);
+    h.allocs += 1;
+    let stressed = h.stress != 0 && h.allocs % h.stress == 0;
+    if stressed || h.live_bytes.saturating_add(want) > h.next_gc {
+        let full = !h.generational
+            || h.old_bytes >= h.full_at
+            || (stressed && (h.allocs / h.stress) % 8 == 0);
+        collect_locked(full);
+    }
+}
+
+/// Read `ROK_GC_GEN` / `ROK_GC_STRESS` / `ROK_GC_STATS` once (before
+/// the first collection, so no object is old yet).
+fn configure(h: &mut Heap) {
+    if h.configured {
+        return;
+    }
+    h.configured = true;
+    h.generational = env_num(c"ROK_GC_GEN").is_none_or(|v| v != 0);
+    h.stress = env_num(c"ROK_GC_STRESS").unwrap_or(0);
+    if env_num(c"ROK_GC_STATS").is_some_and(|v| v != 0) {
+        // SAFETY: registering a plain `extern "C" fn()`.
+        unsafe { libc::atexit(print_stats) };
+    }
+}
+
+/// Decimal value of env var `name` (`Some(0)` if set but not a number).
+fn env_num(name: &core::ffi::CStr) -> Option<u64> {
+    // SAFETY: `name` is NUL-terminated; getenv's result is NUL-terminated.
+    unsafe {
+        let mut p = libc::getenv(name.as_ptr()).cast::<u8>().cast_const();
+        if p.is_null() {
+            return None;
+        }
+        let mut n = 0u64;
+        while (*p).is_ascii_digit() {
+            n = n.saturating_mul(10).saturating_add(u64::from(*p - b'0'));
+            p = p.add(1);
+        }
+        Some(n)
+    }
+}
+
+extern "C" fn print_stats() {
+    struct Stderr;
+    impl core::fmt::Write for Stderr {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            // SAFETY: `s` is valid for its own length.
+            unsafe { rokr_common::write_stderr(s.as_ptr(), s.len()) };
+            Ok(())
+        }
+    }
+    world::lock();
+    let h = heap();
+    let _ = writeln!(
+        Stderr,
+        "rok gc: {} collections ({} minor), {}.{:03} ms total pause, max {}.{:03} ms, {} KiB live",
+        h.collections,
+        h.minors,
+        h.gc_ns / 1_000_000,
+        h.gc_ns / 1000 % 1000,
+        h.max_ns / 1_000_000,
+        h.max_ns / 1000 % 1000,
+        h.old_bytes >> 10
+    );
+    world::unlock();
+}
+
+fn now_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: valid out-pointer.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
 
 /// With the lock held: `lines` free lines (exactly, if `exact`; else
@@ -405,12 +540,9 @@ fn alloc_large(size: usize, align: usize, type_id: u32) -> *mut u8 {
         rokr_common::oom();
     }
     world::lock();
-    let h = heap();
     // The new block is not on the list yet, so a collection here cannot
     // free it.
-    if h.live_bytes.saturating_add(size) > h.next_gc {
-        collect_locked();
-    }
+    before_alloc(size);
     let h = heap();
     // SAFETY: `base..base+total` is ours; `obj` is `align`-aligned and the
     // prefix fits in the `offset` bytes before it.
@@ -468,45 +600,77 @@ fn scan_table(type_id: u32) -> *const u8 {
     }
 }
 
-/// Call `f(offset)` for every object of the block at `block` (line
-/// states `lines`), by parsing it: an object has a nonzero `type_id`
-/// (0 is reserved, 801 §8.1.2) and its size in `gc_word`; everything
-/// else is zero. Lines free since the last sweep are skipped whole.
-fn parse_block(block: usize, lines: &[u8; LINES], mut f: impl FnMut(usize)) {
-    let mut off = 0;
-    // An object needs at least a header's room.
-    while off + HEADER_SIZE <= BLOCK_SIZE {
-        if off % LINE_SIZE == 0 && lines[off / LINE_SIZE] == FREE {
-            off += LINE_SIZE;
+/// Set the start bits of every object in the `TAKEN` lines of the block
+/// at `block` by parsing them: an object has a nonzero `type_id` (0 is
+/// reserved, 801 §8.1.2) and its size in `gc_word`; everything else is
+/// zero. A run of `TAKEN` lines was all free when handed out, so no
+/// object crosses its ends.
+fn parse_taken(block: usize, m: &mut BlockMeta) {
+    let mut l = 0;
+    while l < LINES {
+        if m.lines[l] != TAKEN {
+            l += 1;
             continue;
         }
-        let obj = (block + off) as *mut u8;
-        // SAFETY: `off + 16 <= BLOCK_SIZE`: an object header or zeroes.
-        if unsafe { (*header(obj)).type_id } == 0 {
-            off += 8;
-        } else {
-            f(off);
-            off += obj_size(obj);
+        let mut end = l + 1;
+        while end < LINES && m.lines[end] == TAKEN {
+            end += 1;
+        }
+        let mut off = l * LINE_SIZE;
+        while off < end * LINE_SIZE {
+            let obj = (block + off) as *mut u8;
+            // SAFETY: `off` is inside the run: an object header or zeroes.
+            if unsafe { (*header(obj)).type_id } == 0 {
+                off += 8;
+            } else {
+                m.starts[off / 8 / 64] |= 1 << (off / 8 % 64);
+                off += obj_size(obj);
+            }
+        }
+        l = end;
+    }
+}
+
+/// `f(offset)` for every object start in the lines of `lines` that are
+/// `TAKEN` (all lines if `all`), from the start bitmap `starts`.
+fn for_each_start(
+    lines: &[u8; LINES],
+    starts: &[u64; GRANULES / 64],
+    all: bool,
+    mut f: impl FnMut(usize),
+) {
+    const PER_WORD: usize = 64 / LINE_GRANULES;
+    for (w, &word) in starts.iter().enumerate() {
+        let mut bits = word;
+        if !all {
+            for k in 0..PER_WORD {
+                if lines[w * PER_WORD + k] != TAKEN {
+                    bits &= !(((1u64 << LINE_GRANULES) - 1) << (k * LINE_GRANULES));
+                }
+            }
+        }
+        while bits != 0 {
+            f((w * 64 + bits.trailing_zeros() as usize) * 8);
+            bits &= bits - 1;
         }
     }
 }
 
-/// Before marking: object-start bitmaps of all used blocks, the sorted
-/// LOS index, and the pinned / immortal objects queued as roots.
-fn build_index(len: &mut usize) {
+/// Before marking: start bits of the lines handed out since the last
+/// collection, the sorted LOS index, and the pinned / immortal objects
+/// queued as roots (only young ones in a minor collection).
+fn build_index(full: bool, len: &mut usize) {
     for b in 0..heap().nblocks {
         let h = heap();
         // SAFETY: `b < nblocks`.
         let m = unsafe { &mut *h.meta.add(b) };
-        let mut starts = [0u64; GRANULES / 64];
         if m.used {
             let block = h.base + b * BLOCK_SIZE;
-            parse_block(block, &m.lines, |off| {
-                starts[off / 8 / 64] |= 1 << (off / 8 % 64);
+            parse_taken(block, m);
+            for_each_start(&m.lines, &m.starts, full, |off| {
                 pin_root((block + off) as *mut u8, len);
             });
         }
-        m.starts = starts;
     }
     let h = heap();
     if h.los_count == 0 {
@@ -546,16 +710,18 @@ fn pin_root(obj: *mut u8, len: &mut usize) {
 
 /// The object whose header address is `word` or whose memory contains
 /// it (a `str` points at its payload bytes, or into them after slicing).
-fn object_containing(word: usize) -> Option<*mut u8> {
+/// `young`: block objects outside `TAKEN` lines (old ones) are `None`,
+/// decided from the line table without touching the object.
+fn object_containing(word: usize, young: bool) -> Option<*mut u8> {
     let h = heap();
     if word >= h.base && word < h.base + h.nblocks * BLOCK_SIZE {
         let blk = (word - h.base) / BLOCK_SIZE;
         // SAFETY: `blk < nblocks`.
         let meta = unsafe { &*h.meta.add(blk) };
-        if !meta.used {
+        let block = h.base + blk * BLOCK_SIZE;
+        if !meta.used || (young && meta.lines[(word - block) / LINE_SIZE] != TAKEN) {
             return None;
         }
-        let block = h.base + blk * BLOCK_SIZE;
         let granule = (word - block) / 8;
         // The nearest object start at or before `granule`: objects are
         // smaller than `LOS_THRESHOLD`, so only that many granules back.
@@ -589,9 +755,10 @@ fn object_containing(word: usize) -> Option<*mut u8> {
     (word < start + obj_size(start as *mut u8)).then_some(start as *mut u8)
 }
 
-/// Queue the object `word` points into, if any, for marking.
-fn push(word: *mut u8, len: &mut usize) {
-    if let Some(obj) = object_containing(word as usize) {
+/// Queue the object `word` points into, if any (and young, unless
+/// `full`), for marking.
+fn push(word: *mut u8, full: bool, len: &mut usize) {
+    if let Some(obj) = object_containing(word as usize, !full) {
         push_obj(obj, len);
     }
 }
@@ -613,115 +780,188 @@ fn push_obj(obj: *mut u8, len: &mut usize) {
     *len += 1;
 }
 
+/// Queue the referents of `o`'s reference words.
+#[allow(clippy::cast_ptr_alignment)] // tables and payloads are word-aligned
+fn scan_children(o: *mut u8, full: bool, len: &mut usize) {
+    // SAFETY: `o` is a live GC object; its ScanTable (802) describes it.
+    unsafe {
+        let hd = &*header(o);
+        if hd.type_id == SCAN_WORDS_TYPE_ID {
+            let words = (obj_size(o) - HEADER_SIZE) / size_of::<usize>();
+            let payload = o.add(HEADER_SIZE).cast::<*mut u8>();
+            for w in 0..words {
+                push(payload.add(w).read(), full, len);
+            }
+            return;
+        }
+        let t = scan_table(hd.type_id);
+        if t.is_null() {
+            return;
+        }
+        let n = t.add(6).cast::<u16>().read_unaligned() as usize;
+        for e in 0..n {
+            let entry = t.add(8 + 8 * e).cast::<u32>();
+            if entry.add(1).read_unaligned() == STRONG_REF {
+                let off = entry.read_unaligned() as usize;
+                push(o.add(off).cast::<*mut u8>().read_unaligned(), full, len);
+            }
+        }
+    }
+}
+
 /// Full stop-the-world collection (`rok_gc_collect`).
 pub fn collect() {
     world::lock();
-    collect_locked();
+    configure(heap());
+    collect_locked(true);
+    world::unlock();
+}
+
+/// A minor collection if generational, else a full one
+/// (`rok_gc_collect_young`, tests).
+pub fn collect_young() {
+    world::lock();
+    let h = heap();
+    configure(h);
+    collect_locked(!h.generational);
     world::unlock();
 }
 
 /// With the world lock held: stop every other mutator, mark from all
-/// registered threads' shadow stacks and from pinned / immortal objects,
-/// sweep, resume.
-#[allow(clippy::cast_ptr_alignment)] // tables are word-aligned
-fn collect_locked() {
+/// registered threads' shadow stacks, pinned / immortal objects and
+/// (minor) the remembered set, sweep, resume.
+fn collect_locked(full: bool) {
+    let t0 = now_ns();
     world::stop();
     world::reset_tlabs();
     let mut len = 0;
-    build_index(&mut len);
-    world::for_each_root(|word| push(word, &mut len));
-
+    build_index(full, &mut len);
+    world::for_each_root(|word| push(word, full, &mut len));
+    // Nobody logs while the world is stopped (the barrier has no
+    // safepoint).
+    // SAFETY: as above; the log is ours until `resume`.
+    let log = unsafe { &mut *REMSET.log.get() };
+    if !full {
+        for i in 0..log.len {
+            // SAFETY: `i < len`.
+            scan_children(unsafe { *log.objs.add(i) }, false, &mut len);
+        }
+    }
     while len > 0 {
         len -= 1;
         // SAFETY: `push` only queues addresses of live GC objects.
-        unsafe {
-            let o = *heap().stack.add(len);
-            let hd = &*header(o);
-            if hd.gc_flags.fetch_or(FLAG_MARK, Ordering::Relaxed) & FLAG_MARK != 0 {
-                continue;
-            }
-            if hd.type_id == SCAN_WORDS_TYPE_ID {
-                let words = (obj_size(o) - HEADER_SIZE) / size_of::<usize>();
-                let payload = o.add(HEADER_SIZE).cast::<*mut u8>();
-                for w in 0..words {
-                    push(payload.add(w).read(), &mut len);
-                }
-                continue;
-            }
-            let t = scan_table(hd.type_id);
-            if t.is_null() {
-                continue;
-            }
-            let n = t.add(6).cast::<u16>().read_unaligned() as usize;
-            for e in 0..n {
-                let entry = t.add(8 + 8 * e).cast::<u32>();
-                if entry.add(1).read_unaligned() == STRONG_REF {
-                    let off = entry.read_unaligned() as usize;
-                    push(o.add(off).cast::<*mut u8>().read_unaligned(), &mut len);
-                }
-            }
+        let o = unsafe { *heap().stack.add(len) };
+        // SAFETY: as above.
+        let flags = unsafe { &(*header(o)).gc_flags };
+        // A minor collection never enters an old object: whatever young
+        // object it references is in the remembered set's reach.
+        if (!full && flags.load(Ordering::Relaxed) & FLAG_STICKY != 0)
+            || flags.fetch_or(FLAG_MARK, Ordering::Relaxed) & FLAG_MARK != 0
+        {
+            continue;
+        }
+        scan_children(o, full, &mut len);
+    }
+    if !full {
+        // The logged (old) objects all survive: unlogged again.
+        for i in 0..log.len {
+            // SAFETY: `i < len`; logged objects are live.
+            unsafe {
+                (*header(*log.objs.add(i)))
+                    .gc_flags
+                    .fetch_or(FLAG_UNLOGGED, Ordering::Relaxed)
+            };
         }
     }
-    let live = sweep_blocks() + sweep_los();
+    log.len = 0;
+    let survived = sweep_blocks(full) + sweep_los(full);
     let h = heap();
+    let live = if full {
+        survived
+    } else {
+        h.old_bytes + survived
+    };
     h.live_bytes = live;
+    h.old_bytes = live;
     h.next_gc = (live * 2).max(MIN_HEAP);
+    if full {
+        h.full_at = h.next_gc;
+    } else {
+        h.minors += 1;
+    }
     h.small_cursor = 0;
     h.medium_cursor = 0;
     h.collections += 1;
+    let dt = now_ns() - t0;
+    h.gc_ns += dt;
+    h.max_ns = h.max_ns.max(dt);
     world::resume();
 }
 
-/// Clear the mark of `obj`; whether it was set.
-fn unmark(obj: *mut u8) -> bool {
-    // SAFETY: `obj` is an object header.
-    unsafe {
-        (*header(obj))
-            .gc_flags
-            .fetch_and(!FLAG_MARK, Ordering::Relaxed)
-            & FLAG_MARK
-            != 0
+/// After marking: whether `obj` lives on (it was marked); a survivor's
+/// mark is cleared and it becomes old (`STICKY | UNLOGGED`) when
+/// generational.
+fn survives(obj: *mut u8, generational: bool) -> bool {
+    // SAFETY: `obj` is an object header; the world is stopped.
+    let flags = unsafe { &(*header(obj)).gc_flags };
+    let f = flags.load(Ordering::Relaxed);
+    if f & FLAG_MARK == 0 {
+        return false;
     }
+    let f = f & !(FLAG_MARK | FLAG_STICKY | FLAG_UNLOGGED);
+    let old = if generational {
+        FLAG_STICKY | FLAG_UNLOGGED
+    } else {
+        0
+    };
+    flags.store(f | old, Ordering::Relaxed);
+    true
 }
 
-/// Sweep the blocks: marked objects keep their lines, dead ones are
-/// zeroed. Bytes of the survivors.
-fn sweep_blocks() -> usize {
+/// Sweep the blocks (minor: only the `TAKEN` lines, where all young
+/// objects are): survivors keep their lines, dead objects are zeroed
+/// and lose their start bit. Bytes of the swept survivors.
+fn sweep_blocks(full: bool) -> usize {
+    let generational = heap().generational;
     let mut live = 0;
     for b in 0..heap().nblocks {
         let h = heap();
         // SAFETY: `b < nblocks`.
         let m = unsafe { &mut *h.meta.add(b) };
-        if !m.used {
+        if !m.used || (!full && !m.lines.contains(&TAKEN)) {
             continue;
         }
         let block = h.base + b * BLOCK_SIZE;
-        let mut lines = [FREE; LINES];
-        for (w, &word) in m.starts.iter().enumerate() {
-            let mut bits = word;
-            while bits != 0 {
-                let off = (w * 64 + bits.trailing_zeros() as usize) * 8;
-                bits &= bits - 1;
-                let obj = (block + off) as *mut u8;
-                let size = obj_size(obj);
-                if unmark(obj) {
-                    live += size;
-                    lines[off / LINE_SIZE..(off + size).div_ceil(LINE_SIZE)].fill(LIVE);
-                } else {
-                    // SAFETY: a dead object's memory, ours to reuse.
-                    unsafe { ptr::write_bytes(obj, 0, size) };
-                }
+        let mut lines = m.lines;
+        for l in &mut lines {
+            if full || *l == TAKEN {
+                *l = FREE;
             }
         }
+        let (old_lines, starts) = (m.lines, m.starts);
+        for_each_start(&old_lines, &starts, full, |off| {
+            let obj = (block + off) as *mut u8;
+            let size = obj_size(obj);
+            if survives(obj, generational) {
+                live += size;
+                lines[off / LINE_SIZE..(off + size).div_ceil(LINE_SIZE)].fill(LIVE);
+            } else {
+                m.starts[off / 8 / 64] &= !(1 << (off / 8 % 64));
+                // SAFETY: a dead object's memory, ours to reuse.
+                unsafe { ptr::write_bytes(obj, 0, size) };
+            }
+        });
         m.used = lines.contains(&LIVE);
         m.lines = lines;
     }
     live
 }
 
-/// Sweep the LOS list: free unmarked objects. Bytes of the survivors.
-fn sweep_los() -> usize {
+/// Sweep the LOS list: free dead objects (minor: old ones stay
+/// unexamined). Bytes of the swept survivors.
+fn sweep_los(full: bool) -> usize {
     let h = heap();
+    let generational = h.generational;
     let mut live = 0;
     let mut link: *mut *mut u8 = &mut h.los;
     // SAFETY: walks the LOS list; freed objects are unlinked before their
@@ -730,7 +970,10 @@ fn sweep_los() -> usize {
         while !(*link).is_null() {
             let o = *link;
             let p = prefix(o);
-            if unmark(o) {
+            let old = (*header(o)).gc_flags.load(Ordering::Relaxed) & FLAG_STICKY != 0;
+            if !full && old {
+                link = &mut (*p).next;
+            } else if survives(o, generational) {
                 live += (*p).size;
                 link = &mut (*p).next;
             } else {
@@ -741,6 +984,87 @@ fn sweep_los() -> usize {
         }
     }
     live
+}
+
+/// The remembered set (generational): old objects that had a reference
+/// stored into them since the last collection, each logged once (its
+/// `UNLOGGED` bit cleared by the barrier).
+// ponytail: one global spin-locked log; per-thread logs in the
+// `rok_tls_wb_log_*` slots (803) if the slow path ever contends.
+struct Remset {
+    lock: core::sync::atomic::AtomicBool,
+    log: UnsafeCell<Log>,
+}
+
+struct Log {
+    objs: *mut *mut u8,
+    len: usize,
+    cap: usize,
+}
+
+// SAFETY: `log` is only touched under `lock`, or with the world stopped.
+unsafe impl Sync for Remset {}
+
+static REMSET: Remset = Remset {
+    lock: core::sync::atomic::AtomicBool::new(false),
+    log: UnsafeCell::new(Log {
+        objs: ptr::null_mut(),
+        len: 0,
+        cap: 0,
+    }),
+};
+
+/// Write barrier for runtime code: call before storing a GC reference
+/// into the GC object `obj` (the same test compiled code inlines).
+///
+/// # Safety
+/// `obj` must be a live GC object.
+pub unsafe fn write_barrier(obj: *mut u8) {
+    // SAFETY: caller contract.
+    if unsafe { (*header(obj)).gc_flags.load(Ordering::Relaxed) } & FLAG_UNLOGGED != 0 {
+        // SAFETY: caller contract.
+        unsafe { write_barrier_slow(obj) };
+    }
+}
+
+/// `rok_gc_wb_slow`: remember `obj` for the next minor collection.
+///
+/// `obj` (old, `UNLOGGED`) is about to hold a reference that may be
+/// young. Not a safepoint: no collection runs between the
+/// barrier and the store that follows it.
+///
+/// # Safety
+/// `obj` must be a live GC object.
+pub unsafe fn write_barrier_slow(obj: *mut u8) {
+    // SAFETY: caller contract.
+    let flags = unsafe { &(*header(obj)).gc_flags };
+    // Racing stores: exactly one thread logs it.
+    if flags.fetch_and(!FLAG_UNLOGGED, Ordering::Relaxed) & FLAG_UNLOGGED == 0 {
+        return;
+    }
+    while REMSET
+        .lock
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    // SAFETY: we hold the log's lock.
+    unsafe {
+        let log = &mut *REMSET.log.get();
+        if log.len == log.cap {
+            let cap = (log.cap * 2).max(256);
+            let p = libc::realloc(log.objs.cast(), cap * size_of::<*mut u8>());
+            if p.is_null() {
+                rokr_common::oom();
+            }
+            log.objs = p.cast();
+            log.cap = cap;
+        }
+        *log.objs.add(log.len) = obj;
+        log.len += 1;
+    }
+    REMSET.lock.store(false, Ordering::Release);
 }
 
 /// Bytes held by GC objects (headers included) as of the last
@@ -812,6 +1136,52 @@ mod tests {
         scan_words_buffers_and_interior_pointers();
         medium_and_large_objects();
         free_lines_are_reused();
+        minor_collection_keeps_logged_children();
+    }
+
+    /// Generational: a young object reachable only through an old one
+    /// (stored behind the write barrier) survives minor collections;
+    /// unreachable young objects do not.
+    #[allow(clippy::cast_ptr_alignment)] // GC objects are 8-aligned
+    fn minor_collection_keeps_logged_children() {
+        assert!(heap().generational);
+        let base = live_bytes();
+        let old = alloc(32, 8, USER_TYPE_BASE);
+        // SAFETY: as above.
+        unsafe {
+            let mut root = old as usize;
+            let mut frame: (Frame, *mut usize) = (
+                Frame {
+                    prev: ptr::null_mut(),
+                    count: 1,
+                },
+                &mut root,
+            );
+            let top = rokr_common::tls::shadow_stack_top();
+            *top = (&raw mut frame).cast();
+            collect();
+            let flags = (*header(old)).gc_flags.load(Ordering::Relaxed);
+            assert_eq!(
+                flags & (FLAG_STICKY | FLAG_UNLOGGED),
+                FLAG_STICKY | FLAG_UNLOGGED
+            );
+            let young = alloc(24, 8, USER_TYPE_BASE + 1);
+            let garbage = alloc(24, 8, USER_TYPE_BASE + 1);
+            write_barrier(old);
+            *old.add(16).cast::<*mut u8>() = young;
+            let minors = heap().minors;
+            collect_young();
+            collect_young();
+            assert_eq!(heap().minors, minors + 2);
+            assert_eq!((*header(young)).type_id, USER_TYPE_BASE + 1);
+            assert_eq!((*header(garbage)).type_id, 0);
+            assert_eq!(live_bytes(), base + 32 + 24);
+            *old.add(16).cast::<*mut u8>() = ptr::null_mut();
+            *frame.1 = 0;
+            collect();
+            assert_eq!(live_bytes(), base);
+            *top = ptr::null_mut();
+        }
     }
 
     // Called from the test above: the heap is a single-mutator global,

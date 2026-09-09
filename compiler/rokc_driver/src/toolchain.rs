@@ -165,7 +165,22 @@ pub fn mlir_text(
 /// `sizeof` idioms with the real layout instead of LLVM's default one
 /// (where `i64` is 4-aligned). `None` when clang is unavailable (`emit
 /// mlir` without a toolchain); the build itself needs clang anyway.
+/// Asked once per target (a REPL session builds many cells).
 fn data_layout(opts: &BuildOptions) -> Option<String> {
+    type Layouts = Vec<(Option<String>, Option<String>)>;
+    static SEEN: std::sync::Mutex<Layouts> = std::sync::Mutex::new(Vec::new());
+    let mut seen = SEEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, dl)) = seen.iter().find(|(t, _)| *t == opts.target) {
+        return dl.clone();
+    }
+    let dl = ask_data_layout(opts);
+    seen.push((opts.target.clone(), dl.clone()));
+    dl
+}
+
+fn ask_data_layout(opts: &BuildOptions) -> Option<String> {
     let mut cmd = clang(opts).ok()?;
     cmd.args(["-S", "-emit-llvm", "-x", "c", "-", "-o", "-"])
         .stdin(std::process::Stdio::null());
@@ -216,6 +231,7 @@ pub fn link_executable(
     // not go looking for it on its search path.
     let mut cmd = clang(opts)?;
     cmd.arg(&ll);
+    cmd.args(&module.archives);
     let rokr_is_path = Path::new(&opts.rokr).extension().is_some();
     if rokr_is_path {
         cmd.arg(&opts.rokr);
@@ -286,8 +302,11 @@ pub fn link_host(c_src: &Path, opts: &BuildOptions, out: &Path) -> Result<(), Ro
     run(&mut cmd, "clang")
 }
 
-/// Library build (spec 902.13): `target/foo.o` + `ar rcs target/libfoo.a`.
-/// ponytail: no RHIR `foo.hir.o` (904 is not implemented).
+/// Library build (spec 902.13): `target/foo.o` + `ar rcs target/libfoo.a`,
+/// and, for a prebuilt-library build (`CompiledModule::interface`), its
+/// RHIR `foo.rhir` beside them (spec 904).
+// ponytail: the RHIR is a sibling file, not an `.a` member `foo.hir.o`
+// (903): no object-section writer / reader needed.
 pub fn build_archive(
     module: &CompiledModule,
     opts: &BuildOptions,
@@ -297,13 +316,24 @@ pub fn build_archive(
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("out");
-    let obj = archive_out.with_file_name(format!("{}.o", stem.strip_prefix("lib").unwrap_or(stem)));
-    let bytes = emit(module, EmitKind::Obj, opts)?;
-    std::fs::write(&obj, bytes).map_err(|e| err(format!("cannot write {}: {e}", obj.display())))?;
+    let name = stem.strip_prefix("lib").unwrap_or(stem);
+    let obj = archive_out.with_file_name(format!("{name}.o"));
+    let tmp = TempDir::new(opts.keep_temps)?;
+    let (ll, mlir) = llvm_ir(module, opts, tmp.path())?;
+    let mut cmd = clang(opts)?;
+    run(cmd.arg("-c").arg(&ll).arg("-o").arg(&obj), "clang")?;
     // `ar r` appends to an existing archive; start fresh.
     let _ = std::fs::remove_file(archive_out);
     let ar = locate_tool("ar").or_else(|_| locate_tool("llvm-ar"))?;
-    run(Command::new(ar).arg("rcs").arg(archive_out).arg(&obj), "ar")
+    run(Command::new(ar).arg("rcs").arg(archive_out).arg(&obj), "ar")?;
+    if let Some(r) = &module.interface {
+        let mut r = r.clone();
+        r.type_count = mlir.gc_types;
+        let path = archive_out.with_file_name(format!("{}.rhir", r.name));
+        std::fs::write(&path, r.encode())
+            .map_err(|e| err(format!("cannot write {}: {e}", path.display())))?;
+    }
+    Ok(())
 }
 
 fn llvm_ir(

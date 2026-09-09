@@ -17,6 +17,7 @@ mod env;
 mod git;
 mod lock;
 mod manifest;
+mod prebuilt;
 mod resolve;
 mod toolchain;
 
@@ -48,6 +49,9 @@ build (run by rokc, with the dependencies):
                                active environment; --replay reruns every
                                cell for each new one)
   lsp                          language server (also `rokls`)
+  jupyter install [--user]     install the `rok` Jupyter kernel (with --env:
+                               `rok-<env>`, running in that environment)
+  jupyter --connection-file <f>  the kernel (Jupyter starts it)
   fmt [path]                   format .rok files
   bench [path] [filter]        time the `#[bench]` functions
   lint [path]                  lint (levels: Rok.toml [lints], then -A/-W/-D)
@@ -113,6 +117,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--deny",
     "--iters",
     "--samples",
+    "--connection-file",
 ];
 
 /// `ROK_HOME`, else the parent of the directory holding `rok`.
@@ -209,8 +214,15 @@ pub fn main_with(args: Vec<String>) -> i32 {
         "deps" => cmd_deps(&g, &post),
         "env" => env::cmd(&g, &post),
         "toolchain" => toolchain::cmd(&post),
+        // The kernelspec runs `rok [--env <name>] jupyter ..`: rokc writes it.
+        "jupyter" if post.first().is_some_and(|p| p == "install") => {
+            let mut args = vec!["--install-kernel".to_owned()];
+            args.extend(post[1..].iter().cloned());
+            args.extend(g.env.iter().flat_map(|e| ["--env".to_owned(), e.clone()]));
+            delegate(&g, &cmd, &pre, &args)
+        }
         "build" | "check" | "run" | "test" | "repl" | "lsp" | "fmt" | "clean" | "demangle"
-        | "emit" | "bench" | "doc" | "lint" => delegate(&g, &cmd, &pre, &post),
+        | "emit" | "bench" | "doc" | "lint" | "jupyter" => delegate(&g, &cmd, &pre, &post),
         other => return usage(&format!("unknown command `{other}`")),
     };
     r.unwrap_or_else(|e| {
@@ -373,6 +385,7 @@ fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i3
     let t = target_for(g, path)?;
     let externs: Vec<Resolved> = match cmd {
         "fmt" | "clean" | "demangle" => Vec::new(),
+        "jupyter" if post.iter().any(|a| a == "--install-kernel") => Vec::new(),
         _ => match resolve::resolve(&home(), &t.ctx, &options(g)) {
             Ok(r) => r
                 .into_iter()
@@ -387,11 +400,39 @@ fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i3
         },
     };
     let (rokc, toolchain_home) = toolchain::rokc_for(t.ctx.manifest.toolchain.as_deref())?;
+    // A package's build links its dependencies prebuilt (`.a` + RHIR),
+    // each rebuilt only when it changed; other commands (and scripts /
+    // environments) compile them from source.
+    let mut flags: Vec<String> = pre.to_vec();
+    flags.extend(post.iter().cloned());
+    if cmd == "bench"
+        && !flags
+            .iter()
+            .any(|f| f == "--release" || f.starts_with("-O"))
+    {
+        flags.push("-O2".to_owned()); // rokc's bench default
+    }
+    let pkg = package_dir(Path::new(path.unwrap_or(".")));
+    let roots: Vec<(String, PathBuf)> = match pkg {
+        Some(dir) if t.env.is_none() && matches!(cmd, "build" | "run" | "test" | "bench") => {
+            prebuilt::build(
+                &rokc,
+                toolchain_home.as_deref(),
+                &dir,
+                &flags,
+                &externs,
+                g.quiet,
+            )?
+        }
+        _ => externs
+            .iter()
+            .map(|p| (p.name.clone(), p.root.clone()))
+            .collect(),
+    };
     let mut c = Command::new(&rokc);
     c.args(pre).arg(cmd);
-    for p in &externs {
-        c.arg("--extern")
-            .arg(format!("{}={}", p.name, p.root.display()));
+    for (name, root) in &roots {
+        c.arg("--extern").arg(format!("{name}={}", root.display()));
     }
     // `[lints]` go first: the command line's own `-A/-W/-D` win.
     if cmd == "lint" {

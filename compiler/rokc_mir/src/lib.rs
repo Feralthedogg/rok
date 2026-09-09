@@ -30,6 +30,27 @@ pub struct MirModule {
     /// user package; spec 0.3.3), longest prefix first. Filled by the
     /// driver; empty → one hash over the printed MIR.
     pub pkg_hashes: Vec<(String, String)>,
+    /// Separate compilation with prebuilt dependencies (spec 904).
+    pub link: Link,
+}
+
+/// How this module links with prebuilt dependency packages (their
+/// `lib<name>.a` + `<name>.rhir`). Filled by the driver, but
+/// `prebuilt_fns` (from HIR).
+#[derive(Clone, Debug, Default)]
+pub struct Link {
+    /// This module is package `lib`'s prebuilt library: only that
+    /// package's functions and statics are exported, the rest of the
+    /// code it uses (library, instances) is a private copy.
+    pub lib: Option<String>,
+    /// Packages loaded from RHIR: their code and statics live in their
+    /// `.a`; bodies compiled here (generics, kept bodies) are private.
+    pub prebuilt: Vec<String>,
+    /// Body-less declarations of prebuilt functions (rok ABI, mangled).
+    pub prebuilt_fns: Vec<FunctionId>,
+    /// Added to every GC type id: the ids below belong to the prebuilt
+    /// dependencies.
+    pub type_offset: u32,
 }
 
 #[derive(Clone, Debug)]

@@ -139,11 +139,12 @@ impl str {
     pub fn parse<T: FromStr>(self) throws (T::Err) -> T { try T::from_str(self) }
 }
 
-/// `s[a:b]` by byte offsets (2.15.3): a new `str`; panics out of bounds
-/// or off a char boundary.
+/// `s[a:b]` by byte offsets (2.15.3): a new `str`. The bounds clamp to
+/// the length (like Python); a clamped bound off a char boundary panics.
 impl Sliceable<Range<usize>> for str {
     type Output = str;
     fn slice(self, r: Range<usize>) -> str {
+        let r = clamp_range(r, self.len());
         unsafe { rok_str_slice(self, r.start, r.end) }
     }
 }
@@ -557,7 +558,7 @@ impl StrBuf {
 }
 
 /// `b[a:b]`: the bytes `a..b` of the current contents as a `str`, checked
-/// like `str` slicing. ponytail: copies the whole buffer first.
+/// like `str` slicing (clamped). ponytail: copies the whole buffer first.
 impl Sliceable<Range<usize>> for StrBuf {
     type Output = str;
     fn slice(self, r: Range<usize>) -> str {

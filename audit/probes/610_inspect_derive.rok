@@ -1,0 +1,23 @@
+// spec: 006.10-inspect
+// probe: positive
+// expect-exit: 0
+// expect-stdout:
+// ["host", "port"]
+// i32
+// true
+// 9090
+// false
+
+// 6.10.2: `#[derive(Inspect)]` — field names, dynamic get / set via `any`.
+#[derive(Inspect)]
+struct Config { host: str; port: i32; }
+
+let c = Config { host: "localhost", port: 8080 };
+rok_print_str(f"{Config::field_names():?}");
+match c.get_field("port") {
+    v: any => rok_print_str(v.type_name_of()),
+    none => rok_print_str("none"),
+}
+rok_print_str(f"{c.set_field("port", 9090)}");
+rok_print_str(f"{c.port}");
+rok_print_str(f"{c.set_field("xxx", 1)}");

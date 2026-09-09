@@ -1,0 +1,95 @@
+// expect-exit: 0
+// expect-stdout:
+// -10: [1, 2, 3, 4, 5]
+// 5:100 []
+// 3:1 []
+// 2:2 []
+// :-10 []
+// -2:100 [4, 5]
+// 10:20 []
+// -1:0:-1 [5, 4, 3, 2]
+// ::-1 [5, 4, 3, 2, 1]
+// 3:1:-1 [4, 3]
+// 1:-1:-1 []
+// 1:4:-2 []
+// ::-2 [5, 3, 1]
+// -1:-10:-1 [5, 4, 3, 2, 1]
+// 10::-1 [5, 4, 3, 2, 1]
+// :2:-1 [5, 4]
+// 2::-1 [3, 2, 1]
+// -100::-1 []
+// ::2 [1, 3, 5]
+// -10:10:3 [1, 4]
+// 4:0:-3 [5, 2]
+// 0:5:7 [1]
+// ::-7 [5]
+// 3:3:-1 []
+// 0:-1:-1 []
+// vars [4, 3, 2] [2, 3, 4] [] [5, 4, 3, 2, 1]
+// usize [4, 3] []
+// view [4, 3, 2] [3] [4, 2] []
+// array [9, 8] [7, 8, 9] [9, 7]
+// str hello  hello lo  he
+// buf cd abcd
+// method [3, 4, 5] []
+
+// Python slice semantics (spec 3.6.2): bounds clamp to the length, a
+// negative step reads them from the end. Every expected line is
+// Python's `xs[a:b:k]` for the same `xs`.
+fn main() {
+    let xs: List<i32> = [1, 2, 3, 4, 5];
+    println(f"-10: {xs[-10:].debug()}");
+    println(f"5:100 {xs[5:100].debug()}");
+    println(f"3:1 {xs[3:1].debug()}");
+    println(f"2:2 {xs[2:2].debug()}");
+    println(f":-10 {xs[:-10].debug()}");
+    println(f"-2:100 {xs[-2:100].debug()}");
+    println(f"10:20 {xs[10:20].debug()}");
+    println(f"-1:0:-1 {xs[-1:0:-1].debug()}");
+    println(f"::-1 {xs[: :-1].debug()}");
+    println(f"3:1:-1 {xs[3:1:-1].debug()}");
+    println(f"1:-1:-1 {xs[1:-1:-1].debug()}");
+    println(f"1:4:-2 {xs[1:4:-2].debug()}");
+    println(f"::-2 {xs[: :-2].debug()}");
+    println(f"-1:-10:-1 {xs[-1:-10:-1].debug()}");
+    println(f"10::-1 {xs[10: :-1].debug()}");
+    println(f":2:-1 {xs[:2:-1].debug()}");
+    println(f"2::-1 {xs[2: :-1].debug()}");
+    println(f"-100::-1 {xs[-100: :-1].debug()}");
+    println(f"::2 {xs[: :2].debug()}");
+    println(f"-10:10:3 {xs[-10:10:3].debug()}");
+    println(f"4:0:-3 {xs[4:0:-3].debug()}");
+    println(f"0:5:7 {xs[0:5:7].debug()}");
+    println(f"::-7 {xs[: :-7].debug()}");
+    println(f"3:3:-1 {xs[3:3:-1].debug()}");
+    println(f"0:-1:-1 {xs[0:-1:-1].debug()}");
+
+    // Runtime bounds / step: the step's sign picks the defaults.
+    let a: i64 = -2;
+    let b: i32 = 0;
+    let k: isize = -1;
+    let one: isize = 1;
+    println(f"vars {xs[a:b:k].debug()} {xs[1:a + 1:one].debug()} {xs[b:a:k].debug()} {xs[: :k].debug()}");
+
+    // Unsigned bounds with a negative step read Python-style too.
+    let hi: usize = 3;
+    let lo: usize = 1;
+    println(f"usize {xs[hi:lo:-1].debug()} {xs[lo:hi:-1].debug()}");
+
+    // A view of a view, stepped.
+    let s = xs[1:4];
+    println(f"view {s[: :-1].debug()} {s[-2:-1].debug()} {s[10: :-2].debug()} {s[-10:-5].debug()}");
+
+    let arr: [i32; 3] = [7, 8, 9];
+    println(f"array {arr[:-3:-1].debug()} {arr[-50:50].debug()} {arr[: :-2].debug()}");
+
+    // `str` / `StrBuf`: byte offsets, clamped.
+    let t = "hello";
+    println(f"str {t[-10:]} {t[7:]} {t[:99]} {t[-2:100]} {t[4:1]} {t[:-3]}");
+    let buf = StrBuf::new();
+    buf.push_str("abcd");
+    println(f"buf {buf[-2:9]} {buf[-9:]}");
+
+    // `Sliceable::slice` clamps when called directly too.
+    println(f"method {xs.slice(2..50).debug()} {xs.slice(4..1).debug()}");
+}

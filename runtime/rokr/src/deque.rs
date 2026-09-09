@@ -101,9 +101,11 @@ pub unsafe extern "C" fn rok_deque_push(d: *mut u8, item: usize) {
             for i in t..b {
                 slot(bigger, i).store(slot(r, i).load(Ordering::Relaxed), Ordering::Relaxed);
             }
+            rokr_gc::write_barrier(d);
             q.ring.store(bigger as usize, Ordering::Release);
             r = bigger;
         }
+        rokr_gc::write_barrier(r.cast::<u8>().sub(HEADER_SIZE));
         slot(r, b).store(item, Ordering::Relaxed);
     }
     fence(Ordering::Release);
@@ -142,7 +144,10 @@ pub unsafe extern "C" fn rok_deque_pop(d: *mut u8, out: *mut u8, index: usize) -
         }
     }
     // SAFETY: caller contract.
-    unsafe { out.add(HEADER_SIZE).cast::<usize>().add(index).write(item) };
+    unsafe {
+        rokr_gc::write_barrier(out);
+        out.add(HEADER_SIZE).cast::<usize>().add(index).write(item);
+    }
     1
 }
 
@@ -171,7 +176,10 @@ pub unsafe extern "C" fn rok_deque_steal(d: *mut u8, out: *mut u8, index: usize)
             .is_ok()
         {
             // SAFETY: caller contract.
-            unsafe { out.add(HEADER_SIZE).cast::<usize>().add(index).write(item) };
+            unsafe {
+                rokr_gc::write_barrier(out);
+                out.add(HEADER_SIZE).cast::<usize>().add(index).write(item);
+            }
             return 1;
         }
     }
@@ -212,29 +220,30 @@ mod tests {
             for k in 0..3 {
                 let (d, seen, done) = (&d, &seen, &done);
                 s.spawn(move || {
-                    let mut out = [0usize; 4];
-                    let buf = out.as_mut_ptr().cast::<u8>().wrapping_sub(HEADER_SIZE);
+                    // A zero (young) header, then the slots.
+                    let mut out = [0usize; 2 + 4];
+                    let buf = out.as_mut_ptr().cast::<u8>();
                     loop {
-                        // SAFETY: `buf + HEADER_SIZE` is `out`.
+                        // SAFETY: `buf + HEADER_SIZE` is the slots.
                         if unsafe { rok_deque_steal(d.0, buf, k) } == 1 {
-                            seen[out[k] - 1].fetch_add(1, Ordering::Relaxed);
+                            seen[out[2 + k] - 1].fetch_add(1, Ordering::Relaxed);
                         } else if done.load(Ordering::Acquire) {
                             break;
                         }
                     }
                 });
             }
-            let mut out = [0usize; 1];
-            let buf = out.as_mut_ptr().cast::<u8>().wrapping_sub(HEADER_SIZE);
+            let mut out = [0usize; 2 + 1];
+            let buf = out.as_mut_ptr().cast::<u8>();
             for i in 0..N {
                 // SAFETY: owner thread.
                 unsafe { rok_deque_push(d.0, i + 1) };
                 if i % 3 == 0 && unsafe { rok_deque_pop(d.0, buf, 0) } == 1 {
-                    seen[out[0] - 1].fetch_add(1, Ordering::Relaxed);
+                    seen[out[2] - 1].fetch_add(1, Ordering::Relaxed);
                 }
             }
             while unsafe { rok_deque_pop(d.0, buf, 0) } == 1 {
-                seen[out[0] - 1].fetch_add(1, Ordering::Relaxed);
+                seen[out[2] - 1].fetch_add(1, Ordering::Relaxed);
             }
             done.store(true, Ordering::Release);
         });

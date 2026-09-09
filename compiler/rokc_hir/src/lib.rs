@@ -16,6 +16,7 @@ mod uses;
 pub mod walk;
 
 pub use lower::FN_BLOCK_LABEL;
+pub use lower::type_visible;
 pub use lower::{lower, lower_full, lower_with_uses};
 pub use print::print_hir;
 
@@ -43,6 +44,16 @@ pub const ASSOC_TYPES_ATTR: &str = "#assoc";
 /// 4.15 makes user-declared externs implicitly `unsafe`). `#` cannot
 /// start a user attribute name.
 pub const SAFE_EXTERN_ATTR: &str = "#safe_extern";
+
+/// Marker attribute on a function of a prebuilt dependency (loaded from
+/// its RHIR, spec 904) whose body is in the dependency's `.a`: a
+/// declaration with the dependency's mangled symbol and the rok ABI.
+pub const PREBUILT_ATTR: &str = "#prebuilt";
+
+/// Program attribute (one word): the dependency package this build
+/// compiles as a prebuilt library (`lib<name>.a` + `<name>.rhir`). Every
+/// body of that package is lowered, not only the reachable ones.
+pub const LIB_ATTR: &str = "#lib";
 pub use ty::resolve_ty;
 pub use uses::{ReExport, UseEntry, UseTable, build_use_table};
 
@@ -71,6 +82,14 @@ pub struct HirModule {
     pub unlowered: Vec<FunctionId>,
     /// C variadic `extern` declarations (spec 8.6.10).
     pub c_variadic: Vec<FunctionId>,
+    /// Every type-like item (struct, enum, union, alias, trait) by full
+    /// name: its visibility (`type_visible`).
+    pub type_visibility: std::collections::HashMap<String, rokc_core::Visibility>,
+    /// Declarations of a prebuilt dependency's functions (`PREBUILT_ATTR`).
+    pub prebuilt: Vec<FunctionId>,
+    /// A prebuilt-library build's `any` seeds for its RHIR: `(module,
+    /// rok source)` (see `lower::expr::any_link`).
+    pub any_seeds: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug)]

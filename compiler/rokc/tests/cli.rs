@@ -246,7 +246,7 @@ fn extern_dependencies_are_top_level_names() {
     let out = rokc(Some(&env), &dir, &["run", "app", "--extern", "greet=greet"]);
     assert_exit(&out, 0);
     assert_eq!(text(&out.stdout), "41 42\n");
-    // `--extern=name=path/lib.rok` works too; an archive does not.
+    // `--extern=name=path/lib.rok` works too; a missing prebuilt one fails.
     let out = rokc(
         Some(&env),
         &dir,
@@ -254,7 +254,7 @@ fn extern_dependencies_are_top_level_names() {
     );
     assert_exit(&out, 0);
     assert!(dir.join("app/target/release/app").is_file());
-    assert_exit(&rokc(None, &dir, &["build", "app", "--extern", "g=x.a"]), 2);
+    assert_exit(&rokc(None, &dir, &["build", "app", "--extern", "g=x.a"]), 1);
     // Without it, `greet` is unknown.
     assert_exit(&rokc(Some(&env), &dir, &["check", "app"]), 1);
 }
@@ -325,6 +325,177 @@ fn extern_dependency_is_a_package_boundary() {
         text(&out.stderr).contains("module `dep` has the name of the dependency `dep`"),
         "{}",
         text(&out.stderr)
+    );
+}
+
+/// A library built once (`lib<name>.a` + `<name>.rhir`, spec 904) and
+/// linked prebuilt: its concrete code comes from the archive, its
+/// generics are instantiated by the user, `any` values (a thrown error,
+/// a trait object) cross the boundary both ways, and a lazy static is
+/// one static. `rhir-text` / `inspect` show the interface.
+#[test]
+fn prebuilt_dependency_is_linked_and_instantiated() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("prebuilt");
+    fs::create_dir_all(dir.join("geo")).unwrap();
+    fs::write(
+        dir.join("geo/lib.rok"),
+        "pub mod shapes;\n\
+         static COUNT: Atomic<i32> = Atomic::new(0);\n\
+         pub fn bump() -> i32 { return COUNT.fetch_add(1) + 1; }\n\
+         pub struct Bad { pub at: i32; }\n\
+         impl Display for Bad { fn display(self) -> str { return f\"bad {self.at}\"; } }\n\
+         impl Debug for Bad { fn debug(self) -> str { return self.display(); } }\n\
+         impl Error for Bad {}\n\
+         pub fn check(x: i32) throws -> i32 { if x < 0 { throw Bad { at: x }; } return x * 2; }\n\
+         pub struct Stack<T> { items: List<T>; }\n\
+         impl<T> Stack<T> {\n\
+             pub fn new() -> Stack<T> { return Stack { items: List::new() }; }\n\
+             pub fn push(self, v: T) { self.items.push(v); bump(); }\n\
+             pub fn len(self) -> usize { return self.items.len(); }\n\
+         }\n\
+         pub fn largest(xs: List<any shapes::Shape>) -> i32 {\n\
+             let best = 0;\n\
+             for s in xs { if s.area() > best { best = s.area(); } }\n\
+             return best;\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("geo/shapes.rok"),
+        "pub trait Shape { fn area(self) -> i32; }\n\
+         pub struct Sq { pub s: i32; }\n\
+         impl Shape for Sq { fn area(self) -> i32 { return self.s * self.s; } }\n\
+         pub fn sq(s: i32) -> any Shape { return Sq { s: s }; }\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("app")).unwrap();
+    fs::write(
+        dir.join("app/main.rok"),
+        "use geo::shapes::{Shape, sq};\n\
+         struct Rect { w: i32; h: i32; }\n\
+         impl Shape for Rect { fn area(self) -> i32 { return self.w * self.h; } }\n\
+         let st: geo::Stack<str> = geo::Stack::new();\n\
+         st.push(\"a\");\n\
+         println(f\"{st.len()} {geo::bump()}\");\n\
+         try geo::check(-3) catch e { println(f\"caught {e}\"); };\n\
+         let xs: List<any Shape> = List::new();\n\
+         xs.push(Rect { w: 2, h: 9 });\n\
+         xs.push(sq(4));\n\
+         println(f\"{geo::largest(xs)}\");\n",
+    )
+    .unwrap();
+    let out = rokc(Some(&env), &dir, &["build", "geo"]);
+    assert_exit(&out, 0);
+    let rhir = dir.join("geo/target/debug/geo.rhir");
+    assert!(rhir.is_file() && dir.join("geo/target/debug/libgeo.a").is_file());
+    let out = rokc(
+        Some(&env),
+        &dir,
+        &[
+            "run",
+            "-q",
+            "app",
+            "--extern",
+            &format!("geo={}", rhir.display()),
+        ],
+    );
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "1 2\ncaught bad -3\n18\n");
+    // The `.a` names it too; the build used the archive, not the source.
+    fs::write(dir.join("geo/lib.rok"), "this is not rok\n").unwrap();
+    let out = rokc(
+        Some(&env),
+        &dir,
+        &[
+            "run",
+            "-q",
+            "app",
+            "--extern",
+            "geo=geo/target/debug/libgeo.a",
+        ],
+    );
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "1 2\ncaught bad -3\n18\n");
+
+    // The interface: concrete bodies cut, generic ones kept.
+    let out = rokc(None, &dir, &["rhir-text", "geo/target/debug/geo.rhir"]);
+    assert_exit(&out, 0);
+    let dump = text(&out.stdout);
+    assert!(dump.contains("package: geo (hash: "), "{dump}");
+    assert!(dump.contains("pub fn bump() -> i32 ;"), "{dump}");
+    assert!(
+        dump.contains("pub fn new() -> Stack<T> { return Stack"),
+        "{dump}"
+    );
+    let out = rokc(None, &dir, &["inspect", "geo/target/debug/libgeo.a"]);
+    assert_exit(&out, 0);
+    let info = text(&out.stdout);
+    for want in [
+        "Package: geo\n",
+        "RHIR version: 1\n",
+        "Exports:\n",
+        "  pub fn check(x: i32) throws -> i32\n",
+        "Generic items (RHIR):\n  pub struct Stack<T>\n",
+        "Concrete .o files:\n  geo.o (",
+    ] {
+        assert!(info.contains(want), "{want:?} in\n{info}");
+    }
+}
+
+/// A RHIR from another format version or compiler, or built under
+/// another name, is refused with a "rebuild" message.
+#[test]
+fn stale_rhir_is_rejected() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("stale-rhir");
+    fs::create_dir_all(dir.join("dep")).unwrap();
+    fs::write(
+        dir.join("dep/lib.rok"),
+        "pub fn one() -> i32 { return 1; }\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("app")).unwrap();
+    fs::write(dir.join("app/main.rok"), "println(f\"{dep::one()}\");\n").unwrap();
+    assert_exit(&rokc(Some(&env), &dir, &["build", "dep"]), 0);
+    let rhir = dir.join("dep/target/debug/dep.rhir");
+    let ext = format!("dep={}", rhir.display());
+    let out = rokc(Some(&env), &dir, &["run", "-q", "app", "--extern", &ext]);
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "1\n");
+
+    let other = format!("other={}", rhir.display());
+    let out = rokc(Some(&env), &dir, &["check", "app", "--extern", &other]);
+    assert_exit(&out, 1);
+    assert!(
+        text(&out.stderr).contains("built as `dep`"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    let good = fs::read(&rhir).unwrap();
+    let mut bad = good.clone();
+    bad[4] = 99; // format version
+    fs::write(&rhir, &bad).unwrap();
+    let out = rokc(Some(&env), &dir, &["check", "app", "--extern", &ext]);
+    assert_exit(&out, 1);
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("RHIR format version 99") && err.contains("rebuild"),
+        "{err}"
+    );
+
+    // Another compiler's: the producer string (after the 16-byte
+    // header and its length byte) differs.
+    let mut bad = good;
+    bad[17 + 5] ^= 1; // inside "rokc 0.."
+    fs::write(&rhir, &bad).unwrap();
+    let out = rokc(Some(&env), &dir, &["check", "app", "--extern", &ext]);
+    assert_exit(&out, 1);
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("was built by") && err.contains("rebuild"),
+        "{err}"
     );
 }
 

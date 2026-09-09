@@ -1,0 +1,55 @@
+// expect-exit: 0
+// expect-stdout:
+// i32 4 4 1
+// Config List<i64> Box<f64>
+// Sq
+// 4
+// none
+// i32
+// none
+// Color
+// Color
+// (i32, f64)
+// List<i32>
+// f64 | i32/f64
+// Sq/Sq
+// 7
+
+// Spec 6.10.1 / stdlib 2.12.2: `Reflect` on every type with no impl —
+// static `type_name` / `size` / `align` (module paths dropped), and
+// `type_name_of` / `size_of` switching on what an `any` / `any Tr` /
+// sum holds (an `any` holding a sum looks inside it). `Reflect::m(x)`
+// names the trait; a type's own method of the same name wins.
+trait Shape { fn area(self) -> i32; }
+struct Sq { s: i32; }
+impl Shape for Sq { fn area(self) -> i32 { self.s * self.s } }
+struct Config { port: i32; }
+struct Box<T> { v: T; }
+enum Color { Red, Green(i32) }
+struct Own { n: i32; }
+impl Own { fn size(self) -> i32 { 7 } }
+
+fn describe<T: Reflect>(x: T) -> str { f"{T::type_name()}/{x.type_name_of()}" }
+fn pick() -> i32 | f64 { return 2.5; }
+
+rok_print_str(f"{i32::type_name()} {i32::size()} {i32::align()} {u8::size()}");
+rok_print_str(f"{Config::type_name()} {List::<i64>::type_name()} {Box::<f64>::type_name()}");
+let s: any Shape = Sq { s: 2 };
+rok_print_str(s.type_name_of());
+rok_print_str(f"{s.size_of()}");
+let o: i32 | none = none;
+let a: any = o;
+rok_print_str(a.type_name_of());
+let o2: i32 | none = 3;
+let a2: any = o2;
+rok_print_str(a2.type_name_of());
+rok_print_str(o.type_name_of());
+let c = Color::Green(3);
+rok_print_str(c.type_name_of());
+rok_print_str(Reflect::type_name_of(c));
+rok_print_str((1, 2.0).type_name_of());
+rok_print_str([1, 2, 3].type_name_of());
+let v: i32 | f64 = pick();
+rok_print_str(describe(v));
+rok_print_str(describe(Sq { s: 1 }));
+rok_print_str(f"{Own { n: 1 }.size()}");
