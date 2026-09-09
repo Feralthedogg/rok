@@ -4,8 +4,8 @@
 //! Layout (offsets in bytes):
 //!   0  : `type_id`   u32
 //!   4  : `gc_flags`  u32 (bit 0=MARK, 1=STICKY, 2=PINNED, 3=FORWARDED,
-//!                          4=LARGE, 5=IMMORTAL; 6=UNLOGGED is this
-//!                          runtime's write-barrier bit)
+//!                          4=LARGE, 5=IMMORTAL; 6=UNLOGGED, 7=CARDED
+//!                          are this runtime's write-barrier bits)
 //!   8  : `gc_word`   u64 (forwarding pointer or LOS payload size)
 //!   16 : payload     ...
 
@@ -33,6 +33,12 @@ pub const FLAG_IMMORTAL: u32 = 1 << 5;
 /// only this bit; the slow path (`rok_gc_wb_slow`) clears it and logs
 /// the object.
 pub const FLAG_UNLOGGED: u32 = 1 << 6;
+/// An old large object whose reference stores mark cards.
+///
+/// The word before the header points at its card table, one byte per
+/// `rokr_gc::CARD_SIZE` bytes of the object (from the header).
+/// Implementation bit; the barrier tests it together with `UNLOGGED`.
+pub const FLAG_CARDED: u32 = 1 << 7;
 
 pub const HEADER_SIZE: usize = 16;
 pub const HEADER_ALIGN: usize = 8;

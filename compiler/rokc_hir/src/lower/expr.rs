@@ -3953,6 +3953,30 @@ pub(super) fn any_link(
     (seeds, exports)
 }
 
+/// Every type the program stores into an `any` slot that source can
+/// name (`HirModule::any_types`), as `ty_name` prints it.
+pub(super) fn any_types(env: &Env<'_>) -> Vec<String> {
+    let empty = HashMap::new();
+    let c = LowerCtx::new(env, &empty, None);
+    let stored: Vec<HirTy> = env
+        .sink
+        .any_tags
+        .borrow()
+        .iter()
+        .map(|(t, _)| t.clone())
+        .collect();
+    stored
+        .iter()
+        .filter(|t| !matches!(t, HirTy::AnyTrait(_)))
+        .map(|t| c.ty_name(t))
+        .filter(|s| {
+            !["closure", "{unknown}", "Self", "#", "GcBuf"]
+                .iter()
+                .any(|b| s.contains(b))
+        })
+        .collect()
+}
+
 /// Build every dispatcher's body (see `AnyDispatch`). A body can
 /// instantiate generic methods that store new types into `any` (or ask
 /// for new dispatchers), so rebuild until nothing new appears.

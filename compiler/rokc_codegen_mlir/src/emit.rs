@@ -14,6 +14,8 @@ use rokc_mir::{BasicBlock, MirFunction, MirModule, MirTy, Operand, RValue, State
 const HEADER_SIZE: u32 = 16;
 /// First compiler-assigned type id (801 §8.1.2 user range).
 const GC_TYPE_BASE: u32 = 0x10000;
+/// The REPL session's package hash (`"repl"`).
+const REPL_PKG_HASH: &str = "7265706c";
 /// Runtime type ids of a `BufAlloc` buffer (`rokr`): no traced children
 /// (the string type), or every payload word a candidate reference.
 const BUF_PLAIN_TYPE_ID: u32 = 1;
@@ -21,6 +23,12 @@ const BUF_TRACED_TYPE_ID: u32 = 2;
 /// `gc_flags` bit of an old object not yet in the remembered set
 /// (`rokr_common::object_header::FLAG_UNLOGGED`).
 const GC_FLAG_UNLOGGED: u32 = 1 << 6;
+/// `gc_flags` bit of an old large object whose stores mark cards
+/// (`rokr_common::object_header::FLAG_CARDED`); its card table pointer
+/// is the word before the header, one byte per [`GC_CARD_SHIFT`] card
+/// of the object (`rokr_gc::CARD_SIZE`).
+const GC_FLAG_CARDED: u32 = 1 << 7;
+const GC_CARD_SHIFT: u32 = 9;
 /// Objects this large go to the runtime's large-object space, never to
 /// a TLAB (`rokr_gc::LOS_THRESHOLD`, 702 §7.2.3).
 const LOS_THRESHOLD: u32 = 8 << 10;
@@ -136,15 +144,21 @@ impl Emitter {
         }
     }
 
-    /// A static whose storage a prebuilt dependency's `.a` defines.
+    /// A static whose storage a prebuilt dependency's `.a` defines, or
+    /// (a REPL cell) an earlier cell (`ReplCell::statics`).
     fn prebuilt_static(&self, name: &str) -> bool {
         self.link.prebuilt.iter().any(|d| owned_by(d, name))
+            || self
+                .repl
+                .as_ref()
+                .is_some_and(|r| r.statics.iter().any(|s| s == name))
     }
 
     /// Linkage of a static this object defines: a prebuilt library
-    /// exports its package's statics (its users declare them).
+    /// exports its package's statics (its users declare them), a REPL
+    /// cell all of them (later cells use them).
     fn static_linkage(&self, name: &str) -> &'static str {
-        if self.link.lib.as_deref().is_some_and(|l| owned_by(l, name)) {
+        if self.repl.is_some() || self.link.lib.as_deref().is_some_and(|l| owned_by(l, name)) {
             "external"
         } else {
             "internal"
@@ -175,6 +189,15 @@ impl Emitter {
         } else {
             module.pkg_hashes.clone()
         };
+        if self.repl.is_some() {
+            // The session's package is one program: its symbols (statics
+            // that later cells share) do not change with each cell's text.
+            for (p, h) in &mut self.pkgs.hashes {
+                if p.is_empty() {
+                    REPL_PKG_HASH.clone_into(h);
+                }
+            }
+        }
 
         let mut fns: HashMap<FunctionId, FnSig> = HashMap::new();
         for f in &module.functions {
@@ -977,28 +1000,70 @@ impl<'a> FnEmit<'a> {
     }
 
     /// Write barrier (704 §7.4.2, 809 §8.9.10) before storing a GC
-    /// reference into the GC object `obj`: the inline fast path tests the
-    /// header's `UNLOGGED` bit (set only on old, not yet remembered
-    /// objects); `rok_gc_wb_slow(obj)` when set. Not a safepoint.
-    /// Emission continues in a fresh fall-through block.
-    fn emit_write_barrier(&mut self, obj: &Operand) {
+    /// reference into the GC object `obj` at `slot` (`len` bytes): the
+    /// inline fast path tests the header's `UNLOGGED | CARDED` bits (set
+    /// only on old objects). `CARDED` (a large old object): mark the
+    /// cards of the slot's first and last byte inline; else
+    /// `rok_gc_wb_slow(obj)`. Not a safepoint. Emission continues in a
+    /// fresh fall-through block.
+    fn emit_write_barrier(&mut self, obj: &Operand, slot: &str, len: u32) {
         let pw = self.pointer_width;
         let obj_v = self.materialize_operand(obj, &MirTy::GcRef);
         let n = self.next_check;
         self.next_check += 1;
         self.needs.insert("rok_gc_wb_slow");
-        let [hp, fp, flags, bit, masked, zero, set] = std::array::from_fn(|_| self.fresh_value());
+        let [hp, fp, flags, bits, masked, zero, set] = std::array::from_fn(|_| self.fresh_value());
+        let [
+            cbit,
+            cmask,
+            carded,
+            ctp,
+            ct,
+            si,
+            off,
+            last,
+            sh,
+            i0,
+            e1,
+            i1,
+            c0,
+            c1,
+            one,
+        ] = std::array::from_fn(|_| self.fresh_value());
+        let mask = GC_FLAG_UNLOGGED | GC_FLAG_CARDED;
+        let tail = len.max(1) - 1;
         let _ = write!(
             self.body,
             "    {hp} = llvm.inttoptr {obj_v} : i{pw} to !llvm.ptr
     {fp} = llvm.getelementptr {hp}[4] : (!llvm.ptr) -> !llvm.ptr, i8
     {flags} = llvm.load {fp} atomic monotonic {{alignment = 4 : i64}} : !llvm.ptr -> i32
-    {bit} = arith.constant {GC_FLAG_UNLOGGED} : i32
-    {masked} = arith.andi {flags}, {bit} : i32
+    {bits} = arith.constant {mask} : i32
+    {masked} = arith.andi {flags}, {bits} : i32
     {zero} = arith.constant 0 : i32
     {set} = arith.cmpi ne, {masked}, {zero} : i32
     cf.cond_br {set}, ^rok_wb{n}, ^rok_wbok{n}
   ^rok_wb{n}:
+    {cbit} = arith.constant {GC_FLAG_CARDED} : i32
+    {cmask} = arith.andi {flags}, {cbit} : i32
+    {carded} = arith.cmpi ne, {cmask}, {zero} : i32
+    cf.cond_br {carded}, ^rok_wbcard{n}, ^rok_wbslow{n}
+  ^rok_wbcard{n}:
+    {ctp} = llvm.getelementptr {hp}[-8] : (!llvm.ptr) -> !llvm.ptr, i8
+    {ct} = llvm.load {ctp} : !llvm.ptr -> !llvm.ptr
+    {si} = llvm.ptrtoint {slot} : !llvm.ptr to i{pw}
+    {off} = arith.subi {si}, {obj_v} : i{pw}
+    {last} = arith.constant {tail} : i{pw}
+    {sh} = arith.constant {GC_CARD_SHIFT} : i{pw}
+    {i0} = arith.shrui {off}, {sh} : i{pw}
+    {e1} = arith.addi {off}, {last} : i{pw}
+    {i1} = arith.shrui {e1}, {sh} : i{pw}
+    {c0} = llvm.getelementptr {ct}[{i0}] : (!llvm.ptr, i{pw}) -> !llvm.ptr, i8
+    {c1} = llvm.getelementptr {ct}[{i1}] : (!llvm.ptr, i{pw}) -> !llvm.ptr, i8
+    {one} = arith.constant 1 : i8
+    llvm.store {one}, {c0} : i8, !llvm.ptr
+    llvm.store {one}, {c1} : i8, !llvm.ptr
+    cf.br ^rok_wbok{n}
+  ^rok_wbslow{n}:
     func.call @rok_gc_wb_slow({obj_v}) : (i{pw}) -> ()
     cf.br ^rok_wbok{n}
   ^rok_wbok{n}:
@@ -1507,7 +1572,8 @@ impl<'a> FnEmit<'a> {
                 let p = self.buf_elem_addr(buf, index, elem_ty);
                 let v = self.materialize_operand(value, elem_ty);
                 if self.holds_gc_ref(elem_ty) {
-                    self.emit_write_barrier(buf);
+                    let len = size_align(elem_ty, self.pointer_width).0;
+                    self.emit_write_barrier(buf, &p, len);
                 }
                 let ty = mlir_type(elem_ty, self.pointer_width);
                 let _ = writeln!(self.body, "    llvm.store {v}, {p} : {ty}, !llvm.ptr");
@@ -1520,10 +1586,11 @@ impl<'a> FnEmit<'a> {
             } => {
                 let field = struct_field_tys(ty)[*index as usize].clone();
                 let v = self.materialize_operand(value, &field);
-                if self.holds_gc_ref(&field) {
-                    self.emit_write_barrier(ptr);
-                }
                 let (addr, field_ty) = self.heap_field_addr(ptr, ty, *index);
+                if self.holds_gc_ref(&field) {
+                    let len = size_align(&field, self.pointer_width).0;
+                    self.emit_write_barrier(ptr, &addr, len);
+                }
                 let _ = writeln!(
                     self.body,
                     "    llvm.store {v}, {addr} : {field_ty}, !llvm.ptr"

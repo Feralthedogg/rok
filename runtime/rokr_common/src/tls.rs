@@ -171,8 +171,8 @@ pub fn mutator_state() -> &'static AtomicU8 {
 }
 
 /// `rok_thread_init` slot values (803 §8.3.6). The TLAB starts empty
-/// (the first allocation refills it); the write barrier logs into one
-/// global remembered set (`rokr_gc`), so the wb log slots stay null.
+/// (the first allocation refills it); the write barrier logs into its
+/// own remembered-set chunk, allocated by the first logged store.
 #[allow(clippy::cast_ptr_alignment)] // 8-aligned slots
 pub fn thread_init() {
     yield_flag().store(0, Ordering::Relaxed);
@@ -187,6 +187,13 @@ pub fn thread_init() {
         slot::worker_id().cast::<u64>().write(new_worker_id());
         slot::task_exec().cast::<usize>().write(0);
     }
+}
+
+/// Addresses of this thread's `rok_tls_wb_log_cursor` and
+/// `rok_tls_wb_log_limit` (its remembered-set chunk, `rokr_gc`).
+#[allow(clippy::cast_ptr_alignment)] // 8-aligned slots
+pub fn wb_log() -> [*mut usize; 2] {
+    [slot::wb_log_cursor().cast(), slot::wb_log_limit().cast()]
 }
 
 /// Addresses of this thread's `rok_tls_tlab_cursor` and

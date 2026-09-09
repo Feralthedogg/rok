@@ -69,6 +69,12 @@ impl Session {
         self.config.anonymous = on;
     }
 
+    /// Keep the library's parse across compiles (a long-lived session
+    /// over a library that does not change: the REPL).
+    pub const fn set_cache_library(&mut self, on: bool) {
+        self.config.cache_library = on;
+    }
+
     pub fn compile_file(&self, path: &Path) -> CompileResult {
         Self::result(compile_file(path, &self.config))
     }
@@ -152,6 +158,12 @@ impl CompileResult {
     /// the GC type ids it used.
     pub fn link_shared(&self, opts: &BuildOptions, out: &Path) -> Result<u32, RokDiagnostic> {
         rokc_driver::link_shared(self.module()?, &self.link_libraries, opts, out)
+    }
+
+    /// Build a REPL cell (`opts.repl`) as a relocatable object at `out`
+    /// (the session host loads it itself); the GC type ids it used.
+    pub fn compile_object(&self, opts: &BuildOptions, out: &Path) -> Result<u32, RokDiagnostic> {
+        rokc_driver::compile_object(self.module()?, opts, out)
     }
 
     /// Build a library package's static archive at `out` (spec 902.13).

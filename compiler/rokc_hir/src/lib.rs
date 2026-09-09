@@ -90,6 +90,9 @@ pub struct HirModule {
     /// A prebuilt-library build's `any` seeds for its RHIR: `(module,
     /// rok source)` (see `lower::expr::any_link`).
     pub any_seeds: Vec<(String, String)>,
+    /// The types this program stores into `any` slots that source can
+    /// name, as written (the REPL seeds later cells with them).
+    pub any_types: Vec<String>,
 }
 
 #[derive(Clone, Debug)]

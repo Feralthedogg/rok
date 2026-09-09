@@ -1,0 +1,35 @@
+// Remembered-set logging under threads: 4 threads, each with 100k old
+// small `List<str>` buffers, store a fresh string into a different one
+// every iteration (each buffer is logged once per minor collection).
+use rok::std::thread;
+
+fn churn(n: i64, iters: i64) -> i64 {
+    let xs: List<List<str>> = [];
+    let i: i64 = 0;
+    while i < n {
+        xs.push(["a", "b"]);
+        i += 1;
+    }
+    let total: i64 = 0;
+    let k: i64 = 0;
+    while k < iters {
+        let s = f"t{k}";
+        xs[(k % n) as usize][0] = s;
+        total += s.len() as i64;
+        k += 1;
+    }
+    return total;
+}
+
+fn main() -> i32 {
+    let hs: List<thread::JoinHandle<i64>> = [];
+    let t = 0;
+    while t < 4 {
+        hs.push(thread::spawn(|| churn(100000, 5000000)));
+        t += 1;
+    }
+    let total: i64 = 0;
+    for h in hs { total += try! h.join(); }
+    rok_print_i64(total);
+    return 0;
+}

@@ -995,7 +995,7 @@ pub extern "C" fn rok_os_read_both(fd1: i32, fd2: i32, out: *mut u8, err: *mut u
         let st = build(&[b.as_slice()]);
         // SAFETY: the library passes a live two-element `GcBuf<str>`.
         unsafe {
-            rokr_gc::write_barrier(out);
+            rokr_gc::write_barrier(out, slots.add(i).cast());
             slots.add(i).write(st);
         }
     }

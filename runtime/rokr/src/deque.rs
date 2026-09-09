@@ -101,11 +101,11 @@ pub unsafe extern "C" fn rok_deque_push(d: *mut u8, item: usize) {
             for i in t..b {
                 slot(bigger, i).store(slot(r, i).load(Ordering::Relaxed), Ordering::Relaxed);
             }
-            rokr_gc::write_barrier(d);
+            rokr_gc::write_barrier(d, (&raw const q.ring).cast());
             q.ring.store(bigger as usize, Ordering::Release);
             r = bigger;
         }
-        rokr_gc::write_barrier(r.cast::<u8>().sub(HEADER_SIZE));
+        rokr_gc::write_barrier(r.cast::<u8>().sub(HEADER_SIZE), slot(r, b).as_ptr().cast());
         slot(r, b).store(item, Ordering::Relaxed);
     }
     fence(Ordering::Release);
@@ -145,7 +145,7 @@ pub unsafe extern "C" fn rok_deque_pop(d: *mut u8, out: *mut u8, index: usize) -
     }
     // SAFETY: caller contract.
     unsafe {
-        rokr_gc::write_barrier(out);
+        rokr_gc::write_barrier(out, out.add(HEADER_SIZE).cast::<usize>().add(index).cast());
         out.add(HEADER_SIZE).cast::<usize>().add(index).write(item);
     }
     1
@@ -177,7 +177,7 @@ pub unsafe extern "C" fn rok_deque_steal(d: *mut u8, out: *mut u8, index: usize)
         {
             // SAFETY: caller contract.
             unsafe {
-                rokr_gc::write_barrier(out);
+                rokr_gc::write_barrier(out, out.add(HEADER_SIZE).cast::<usize>().add(index).cast());
                 out.add(HEADER_SIZE).cast::<usize>().add(index).write(item);
             }
             return 1;

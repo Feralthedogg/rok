@@ -4,8 +4,8 @@
 //! the implicit `main.rok` with top-level statements and items appended).
 //!
 //! Default mode: a long-lived host process (`repl_host.c`, the runtime
-//! linked in, initialized once) loads each cell as a shared library and
-//! runs it once. Items (`fn`, `struct`, `impl`, ..) are recompiled into
+//! linked in, initialized once) loads each cell's object into memory
+//! itself (a shared library where its loader cannot) and runs it once. Items (`fn`, `struct`, `impl`, ..) are recompiled into
 //! every cell; statements are not. A top-level binding lives in an
 //! exported global slot (a GC root) the defining cell owns; later cells
 //! declare it `extern "C" { static mut .. }` with its type as written
@@ -81,6 +81,36 @@ enum Cell<'a> {
     Expr,
 }
 
+/// `ROK_REPL_TIME=1`: each phase of a cell's build on stderr.
+struct Lap(Option<std::time::Instant>);
+
+impl Lap {
+    fn start() -> Self {
+        Self(
+            std::env::var_os("ROK_REPL_TIME")
+                .is_some_and(|v| !v.is_empty() && v != "0")
+                .then(std::time::Instant::now),
+        )
+    }
+
+    fn mark(&mut self, what: &str) {
+        if let Some(t) = &mut self.0 {
+            eprintln!("[repl] {what}: {:.1}ms", t.elapsed().as_secs_f64() * 1e3);
+            *t = std::time::Instant::now();
+        }
+    }
+}
+
+/// The host's reply to a cell.
+enum Loaded {
+    /// It ran; its shown value.
+    Value(String),
+    /// It failed (reported); the session is as before it.
+    Failed,
+    /// The object loader cannot take it (why); nothing ran.
+    Unsupported(String),
+}
+
 #[derive(PartialEq, Eq)]
 enum Outcome {
     Ok,
@@ -112,6 +142,8 @@ struct Binding {
     sym: String,
     /// Its type, as source.
     ty: String,
+    /// It holds an `any` value (whose type a redefinition may change).
+    holds_any: bool,
 }
 
 /// The session host (`repl_host.c`) and its command socket.
@@ -139,10 +171,20 @@ pub struct Repl {
     /// The host being built while the first cell compiles.
     starting: Option<std::thread::JoinHandle<Option<Host>>>,
     bindings: Vec<Binding>,
+    /// Statics (MIR names) a loaded cell defined: later cells use its
+    /// storage (`ReplCell::statics`), so their state carries over.
+    statics: HashSet<String>,
+    /// Types loaded cells stored into `any` slots: every cell stores
+    /// them too (`any_seeds`), so its `any` methods know them all (the
+    /// tags are the same in every cell: a hash of the type's name).
+    any_types: std::collections::BTreeSet<String>,
     /// Cells built (library and slot names).
     built: u32,
     /// GC type ids earlier cells took.
     type_offset: u32,
+    /// Cells go to the host as relocatable objects it loads itself
+    /// (macOS arm64; `ROK_REPL_DYLIB=1`: shared libraries).
+    objects: bool,
     tmp: TempDir,
     /// The host process running the current cell (0: none). `SIGINT`
     /// to it ends the cell; the session goes on as before it.
@@ -161,8 +203,12 @@ impl Repl {
             host: None,
             starting: None,
             bindings: Vec::new(),
+            statics: HashSet::new(),
+            any_types: std::collections::BTreeSet::new(),
             built: 0,
             type_offset: 0,
+            objects: cfg!(all(target_vendor = "apple", target_arch = "aarch64"))
+                && std::env::var_os("ROK_REPL_DYLIB").is_none_or(|v| v.is_empty() || v == "0"),
             running: Arc::default(),
         })
     }
@@ -205,6 +251,8 @@ impl Repl {
             ":reset" => {
                 self.state = State::default();
                 self.bindings.clear();
+                self.statics.clear();
+                self.any_types.clear();
             }
             ":help" | ":h" => print!("{HELP}"),
             _ if cell.starts_with(":type ") || cell.starts_with(":t ") => {
@@ -354,9 +402,30 @@ impl Repl {
                     .any(|w| w == ty);
                 if !keep {
                     eprintln!("note: `{}` is gone: its type `{ty}` was redefined", b.name);
+                } else if b.holds_any {
+                    // ponytail: it may hold an old `{ty}`, which the new
+                    // one's tag would claim; keeping the ones that cannot
+                    // needs the value's tag.
+                    eprintln!(
+                        "note: `{}` is gone: it holds an `any` value and `{ty}` was redefined",
+                        b.name
+                    );
+                    return false;
                 }
                 keep
             });
+        }
+        // A redefined static starts over: the next cell defines it anew.
+        if let Some(name) = key.as_deref().and_then(|k| k.strip_prefix("static ")) {
+            let lib = |s: &str| {
+                s.starts_with("rok::")
+                    || self
+                        .externs
+                        .iter()
+                        .any(|(n, _)| s.starts_with(&format!("{n}::")))
+            };
+            self.statics
+                .retain(|s| lib(s) || s.rsplit("::").next() != Some(name));
         }
         self.state = next;
         true
@@ -374,6 +443,10 @@ impl Repl {
         for (_, item) in &state.items {
             src.push_str(item);
             src.push('\n');
+        }
+        // Every type earlier cells stored in `any` slots: stored here too.
+        for (i, t) in self.any_types.iter().enumerate() {
+            let _ = writeln!(src, "fn __rok_repl_any_{i}(x: {t}) -> any {{ return x; }}");
         }
         let _ = writeln!(src, "extern \"C\" {{\n    static mut {SHOWN}: str;");
         for b in &self.bindings {
@@ -401,6 +474,7 @@ impl Repl {
             let (dir, opts) = (self.tmp.path().to_owned(), self.opts.clone());
             self.starting = Some(std::thread::spawn(move || start_host(&dir, &opts)));
         }
+        let mut lap = Lap::start();
         let mut shown = show.is_some();
         let mut r = loop {
             let src = self.session(&self.state, cell, show.filter(|_| shown));
@@ -411,6 +485,7 @@ impl Repl {
                 None => return Err(()),
             }
         };
+        lap.mark("front end");
         let new = match self.keep(&mut r) {
             Ok(new) => new,
             Err(e) => {
@@ -418,24 +493,61 @@ impl Repl {
                 return Err(());
             }
         };
+        lap.mark("bindings");
         self.built += 1;
-        let lib = self.tmp.path().join(format!("cell{}.{DYLIB}", self.built));
         let mut opts = self.opts.clone();
         opts.repl = Some(ReplCell {
             type_offset: self.type_offset,
             define: new.iter().map(|b| b.sym.clone()).collect(),
+            statics: self.statics.iter().cloned().collect(),
         });
-        match r.link_shared(&opts, &lib) {
-            Ok(n) => self.type_offset += n,
-            Err(d) => {
-                report(&d);
-                return Err(());
+        // An object the host loads itself; a shared library when it
+        // cannot (or `ROK_REPL_DYLIB`).
+        let mut object = self.objects;
+        let value = loop {
+            let ext = if object { "o" } else { DYLIB };
+            let file = self.tmp.path().join(format!("cell{}.{ext}", self.built));
+            let built = if object {
+                r.compile_object(&opts, &file)
+            } else {
+                r.link_shared(&opts, &file)
+            };
+            let n = match built {
+                Ok(n) => n,
+                Err(d) => {
+                    report(&d);
+                    return Err(());
+                }
+            };
+            lap.mark(if object { "clang -c" } else { "clang -shared" });
+            let loaded = self.load(&file);
+            lap.mark(if object { "load + run" } else { "dlopen + run" });
+            match loaded {
+                Loaded::Value(v) => {
+                    self.type_offset += n;
+                    break v;
+                }
+                Loaded::Unsupported(why) if object => {
+                    eprintln!("note: {why}; this cell is loaded as a shared library");
+                    object = false;
+                }
+                Loaded::Failed | Loaded::Unsupported(_) => return Err(()),
             }
-        }
-        let value = self.load(&lib).ok_or(())?;
+        };
         self.bindings
             .retain(|b| !new.iter().any(|n| n.name == b.name));
         self.bindings.extend(new);
+        if let Some(m) = r.modules.first() {
+            let defined = m.mir.statics.iter().filter(|s| !s.is_extern);
+            self.statics.extend(defined.map(|s| s.name.clone()));
+            // Names a later cell writes at its top level: visible there.
+            let visible = |t: &&String| {
+                t.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'))
+                    .all(|p| p.is_empty() || rokc_hir::type_visible(&m.hir, p, ""))
+            };
+            let stored = m.hir.any_types.iter().filter(visible);
+            self.any_types.extend(stored.cloned());
+        }
         Ok(show
             .and_then(|n| binding_ty(&r, n))
             .filter(|ty| ty != "()")
@@ -505,16 +617,7 @@ impl Repl {
                     ty_name(hir, &l.ty)
                 ));
             }
-            // ponytail: an `any Tr` value's tag numbers the implementors
-            // its own program reaches; a later cell numbers them anew.
-            // Stable ids across cells would keep it.
-            if holds_any(hir, &l.ty, &mut Vec::new()) {
-                return Err(format!(
-                    "`{name}: {}` cannot be kept for later cells (it holds an `any` value); \
-                     `rokc repl --replay` keeps it",
-                    ty_name(hir, &l.ty)
-                ));
-            }
+            let holds_any = holds_any(hir, &l.ty, &mut Vec::new());
             // The next cell writes `ty` at the top level of the session:
             // every type it names must be visible there (spec 5.6).
             let hidden = ty
@@ -530,7 +633,15 @@ impl Repl {
             new.retain(|(b, _)| b.name != name);
             let sym = format!("__rok_repl_{}_{i}", self.built + 1);
             let name = name.to_owned();
-            new.push((Binding { name, sym, ty }, id));
+            new.push((
+                Binding {
+                    name,
+                    sym,
+                    ty,
+                    holds_any,
+                },
+                id,
+            ));
         }
         // ponytail: every binding goes back (a `let` can be assigned);
         // only the ones the cell assigns would need to.
@@ -583,16 +694,18 @@ impl Repl {
         Ok(new.into_iter().map(|(b, _)| b).collect())
     }
 
-    /// Run the library `lib` in the host (started on first use): the
-    /// shown value, or `None` when the cell failed.
-    fn load(&mut self, lib: &std::path::Path) -> Option<String> {
+    /// Run the cell `lib` (an object or a shared library) in the host
+    /// (started on first use).
+    fn load(&mut self, lib: &std::path::Path) -> Loaded {
         if self.host.is_none() {
             self.host = match self.starting.take() {
                 Some(h) => h.join().ok().flatten(),
                 None => start_host(self.tmp.path(), &self.opts),
             };
         }
-        let host = self.host.as_mut()?;
+        let Some(host) = self.host.as_mut() else {
+            return Loaded::Failed;
+        };
         let _ = std::io::stdout().flush();
         let reply = (|| {
             writeln!(host.ctl, "{}", lib.display())?;
@@ -615,16 +728,21 @@ impl Repl {
             Ok::<_, std::io::Error>(format!("ok {}", String::from_utf8_lossy(&value)))
         })();
         match reply {
-            Ok(r) if r.starts_with("ok ") => Some(r[3..].to_owned()),
+            Ok(r) if r.starts_with("ok ") => Loaded::Value(r[3..].to_owned()),
             Ok(r) if r == "err\n" => {
                 eprintln!("error: the cell failed; the session is as it was before it");
-                None
+                Loaded::Failed
+            }
+            Ok(r) if r.starts_with("unsupported ") => {
+                Loaded::Unsupported(r["unsupported ".len()..].trim_end().to_owned())
             }
             _ => {
                 eprintln!("error: the session host is gone; the bindings are lost");
                 self.host = None;
                 self.bindings.clear();
-                None
+                self.statics.clear();
+                self.any_types.clear();
+                Loaded::Failed
             }
         }
     }
@@ -657,6 +775,7 @@ impl Repl {
             s.add_extern(n.clone(), p.clone());
         }
         s.set_anonymous(true);
+        s.set_cache_library(true);
         rokc_diagnostic::clear_files();
         let r = s.compile_source(src, &self.tmp.path().join("repl.rok"));
         if !r.has_errors() {

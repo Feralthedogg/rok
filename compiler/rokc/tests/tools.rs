@@ -16,9 +16,15 @@ fn workspace() -> PathBuf {
 
 /// `exe args` with `input` on stdin.
 fn piped(exe: &str, args: &[&str], input: &str) -> Output {
+    piped_env(exe, args, input, &[])
+}
+
+/// `piped` with environment variables `env`.
+fn piped_env(exe: &str, args: &[&str], input: &str, env: &[(&str, &str)]) -> Output {
     let mut child = Command::new(exe)
         .args(args)
         .env("ROK_HOME", workspace())
+        .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -147,7 +153,8 @@ p
 }
 
 /// A binding a later cell could not use is refused in the cell that
-/// makes it (`--replay` keeps it); one a later cell can name is kept.
+/// makes it (`--replay` keeps it); one a later cell can name is kept,
+/// `any` values too (their methods and type tests work in later cells).
 #[test]
 fn repl_refuses_bindings_later_cells_cannot_use() {
     let Some(env) = setup() else { return };
@@ -158,17 +165,74 @@ let h = geo::mk();
 let d: any Debug = 5i32;
 let pt = geo::Pt { x: 3 };
 pt.x
+#[derive(Debug)]
+struct Q { v: i32; }
+let q: any Debug = Q { v: 9 };
+d
+q
+match q { x: Q => x.v, _ => 0 }
 ";
     let out = piped(ROKC, &["repl", "--rokr", &rokr], input);
     let stdout = text(&out.stdout);
     let stderr = text(&out.stderr);
-    assert_eq!(stdout, "Pt\ni32: 3\n", "stderr: {stderr}");
+    let any = "any rok::core::fmt::Debug";
+    assert_eq!(
+        stdout,
+        format!(
+            "{any}: 5\nPt\ni32: 3\n{any}: Q {{ v: 9 }}\n{any}: 5\n{any}: Q {{ v: 9 }}\ni32: 9\n"
+        ),
+        "stderr: {stderr}"
+    );
     assert!(
         stderr.contains("`h: Hid` cannot be kept for later cells (`geo::Hid` is private"),
         "{stderr}"
     );
-    assert!(stderr.contains("it holds an `any` value"), "{stderr}");
     assert!(stderr.contains("--replay` keeps it"), "{stderr}");
+}
+
+/// `static` items keep their state across cells (a redefinition starts
+/// it over). On macOS arm64 the host loads each cell's object itself;
+/// `ROK_REPL_DYLIB=1` loads shared libraries instead.
+#[test]
+fn repl_statics_persist() {
+    let Some(env) = setup() else { return };
+    let rokr = env.rokr.display().to_string();
+    let input = "\
+static N: Atomic<i32> = Atomic::new(0);
+fn bump() -> i32 { return N.fetch_add(1) + 1; }
+bump()
+bump()
+N.load()
+";
+    let redefined = "\
+static N: Atomic<i32> = Atomic::new(100);
+bump()
+bump()
+";
+    let args = ["repl", "--rokr", &rokr];
+    let out = piped_env(
+        ROKC,
+        &args,
+        &format!("{input}{redefined}"),
+        &[("ROK_REPL_TIME", "1")],
+    );
+    let stderr = text(&out.stderr);
+    assert_eq!(
+        text(&out.stdout),
+        "i32: 1\ni32: 2\ni32: 2\ni32: 101\ni32: 102\n",
+        "stderr: {stderr}"
+    );
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        assert!(stderr.contains("[repl] load + run"), "{stderr}");
+        assert!(!stderr.contains("dlopen"), "{stderr}");
+    }
+    let out = piped_env(ROKC, &args, input, &[("ROK_REPL_DYLIB", "1")]);
+    assert_eq!(
+        text(&out.stdout),
+        "i32: 1\ni32: 2\ni32: 2\n",
+        "stderr: {}",
+        text(&out.stderr)
+    );
 }
 
 fn frame(body: &str) -> String {

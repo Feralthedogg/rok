@@ -14,17 +14,18 @@
 //! Every object's `gc_word` (801 §8.1.4) holds its size (8-rounded;
 //! this collector never forwards) and block objects have a nonzero
 //! `type_id`, so a block is parsable: memory that is not an object is
-//! all zero. Free lines are zero because the sweep
-//! zeroes every dead object; the TLAB fast path therefore hands out
-//! zeroed memory without a memset.
+//! all zero. The refill zeroes the lines it hands out (outside the
+//! world lock; dead objects are not zeroed by the sweep), so the TLAB
+//! fast path hands out zeroed memory without a memset.
 //!
 //! A collection (heap over `max(4 MiB, 2 x live)`, or `rok_gc_collect`)
-//! stops every mutator ([`world`]), empties all TLABs, parses the lines
-//! handed out since the last one into the per-block object-start
-//! bitmaps (kept across collections; the sweep clears dead objects'
-//! bits), marks from all shadow stacks, then sweeps: live objects mark
-//! their lines, dead ones are zeroed, unmarked lines are free for the
-//! next cycle's TLABs.
+//! stops every mutator ([`world`]), empties all TLABs, marks from all
+//! shadow stacks, then sweeps: live objects mark their lines, dead ones
+//! lose their start bit, unmarked lines are free for the next cycle's
+//! TLABs. Object lookup uses per-block object-start bitmaps, kept
+//! across collections; the lines handed out since the last collection
+//! are parsed into them only in blocks a lookup lands in, so a block of
+//! young objects that nothing reaches is freed without being read.
 //!
 //! Generations (sticky mark bits, 703 §7.3.2, on unless
 //! `ROK_GC_GEN=0`): a survivor of any collection is old (`STICKY`). A
@@ -38,11 +39,15 @@
 //! full one)`, or `rok_gc_collect`) marks everything and resets the
 //! remembered set.
 //!
+//! An old LOS object is `CARDED` instead: the barrier dirties the
+//! 512-byte card of the slot (card table behind the object, pointer in
+//! the word before its header) and a minor collection scans only the
+//! dirty cards, so a store into a big old buffer costs one card.
+//!
 //! ponytail: no evacuation / defragmentation, no concurrent marking
 //! (705); blocks are never returned to the OS (`madvise` of clean
-//! blocks is the upgrade). The remembered set logs whole objects, so a
-//! store into a big old buffer rescans all of it at the next minor
-//! collection (card marking is the upgrade).
+//! blocks is the upgrade). Block objects (< 8 KiB) are remembered
+//! whole.
 //!
 //! Env (read once): `ROK_GC_GEN=0|1`, `ROK_GC_STRESS=N` (every object
 //! allocation through the runtime; a collection every `N` of them,
@@ -78,7 +83,7 @@ use core::sync::atomic::Ordering;
 
 use rokr_common::fatal;
 use rokr_common::object_header::{
-    FLAG_IMMORTAL, FLAG_LARGE, FLAG_MARK, FLAG_PINNED, FLAG_STICKY, FLAG_UNLOGGED, HEADER_ALIGN,
+    FLAG_CARDED, FLAG_LARGE, FLAG_MARK, FLAG_PINNED, FLAG_STICKY, FLAG_UNLOGGED, HEADER_ALIGN,
     HEADER_SIZE, ObjectHeader,
 };
 
@@ -101,6 +106,10 @@ const LINES: usize = BLOCK_SIZE / LINE_SIZE;
 const GRANULES: usize = BLOCK_SIZE / 8;
 /// Objects this large (header included) go to the LOS (702 §7.2.3).
 pub const LOS_THRESHOLD: usize = 8 << 10;
+/// Card size of an old LOS object (`FLAG_CARDED`): a reference store
+/// dirties the card(s) of its slot and a minor collection scans only
+/// dirty cards, not the whole object.
+pub const CARD_SIZE: usize = 512;
 /// Address space reserved for blocks (committed one block at a time).
 // ponytail: a fixed reservation caps the block heap at 64 GiB; chain
 // several reservations if a program ever needs more.
@@ -125,6 +134,10 @@ struct BlockMeta {
     /// Holds objects or was handed out since the last sweep (else it
     /// is all zero and all `FREE`).
     used: bool,
+    /// This collection parsed the `TAKEN` lines (on the first lookup
+    /// that landed in one): a block nobody looked into this time holds
+    /// no survivor there, so its `TAKEN` lines just become free.
+    parsed: bool,
 }
 
 /// Hidden bookkeeping right before each LOS object header.
@@ -136,6 +149,10 @@ struct Prefix {
     size: usize,
     /// Bytes from the `malloc` base to the header.
     offset: usize,
+    /// Card table (one byte per [`CARD_SIZE`] of the object, after its
+    /// end in the same `malloc` block). Last field: compiled code's
+    /// barrier loads it from the word before the header.
+    cards: *mut u8,
 }
 
 struct Heap {
@@ -153,6 +170,8 @@ struct Heap {
     /// Total / longest pause (`ROK_GC_STATS`).
     gc_ns: u64,
     max_ns: u64,
+    /// Collector-thread CPU time in pauses (robust on a loaded machine).
+    gc_cpu_ns: u64,
     /// `ROK_GC_*` read (first slow-path allocation or collection).
     configured: bool,
     generational: bool,
@@ -196,6 +215,7 @@ static HEAP: Global = Global(UnsafeCell::new(Heap {
     minors: 0,
     gc_ns: 0,
     max_ns: 0,
+    gc_cpu_ns: 0,
     configured: false,
     generational: true,
     stress: 0,
@@ -279,21 +299,25 @@ pub fn alloc(size: usize, align: usize, type_id: u32) -> *mut u8 {
     }
     world::lock();
     before_alloc(if size8 > LINE_SIZE { size8 } else { LINE_SIZE });
-    let obj = if size8 > LINE_SIZE {
+    // `obj..lines_end`: the lines just taken, zeroed below (free lines
+    // keep their dead objects' bytes until reused).
+    let (obj, lines_end) = if size8 > LINE_SIZE {
         // A medium object that does not fit the TLAB: its own lines, so
         // the TLAB's tail stays usable.
-        let obj = take_run(size8.div_ceil(LINE_SIZE), true);
+        let lines = size8.div_ceil(LINE_SIZE);
+        let obj = take_run(lines, true);
         heap().live_bytes += size8;
-        obj
+        (obj, obj as usize + lines * LINE_SIZE)
     } else {
         let start = take_run(1, false);
-        let end = if heap().stress == 0 {
-            let end = (start as usize + 1).next_multiple_of(LINE_SIZE);
-            end_of_run(start as usize, end)
+        let line_end = (start as usize + 1).next_multiple_of(LINE_SIZE);
+        let (end, lines_end) = if heap().stress == 0 {
+            let end = end_of_run(start as usize, line_end);
+            (end, end)
         } else {
             // Stress: a TLAB of exactly this object, so the next
             // allocation comes back here too.
-            start as usize + size8
+            (start as usize + size8, line_end)
         };
         heap().live_bytes += end - start as usize;
         // SAFETY: this thread's own TLAB slots.
@@ -301,9 +325,12 @@ pub fn alloc(size: usize, align: usize, type_id: u32) -> *mut u8 {
             cursor.write(start as usize + size8);
             limit.write(end);
         }
-        start
+        (start, lines_end)
     };
     world::unlock();
+    // SAFETY: the lines are `TAKEN` for us; outside the lock, which no
+    // collection can need before this thread's next safepoint.
+    unsafe { ptr::write_bytes(obj, 0, lines_end - obj as usize) };
     init_header(obj, type_id, size8, 0);
     obj
 }
@@ -368,25 +395,31 @@ extern "C" fn print_stats() {
     let h = heap();
     let _ = writeln!(
         Stderr,
-        "rok gc: {} collections ({} minor), {}.{:03} ms total pause, max {}.{:03} ms, {} KiB live",
+        "rok gc: {} collections ({} minor), {}.{:03} ms total pause, max {}.{:03} ms, {}.{:03} ms cpu, {} KiB live",
         h.collections,
         h.minors,
         h.gc_ns / 1_000_000,
         h.gc_ns / 1000 % 1000,
         h.max_ns / 1_000_000,
         h.max_ns / 1000 % 1000,
+        h.gc_cpu_ns / 1_000_000,
+        h.gc_cpu_ns / 1000 % 1000,
         h.old_bytes >> 10
     );
     world::unlock();
 }
 
 fn now_ns() -> u64 {
+    clock_ns(libc::CLOCK_MONOTONIC)
+}
+
+fn clock_ns(clock: libc::clockid_t) -> u64 {
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
     // SAFETY: valid out-pointer.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    unsafe { libc::clock_gettime(clock, &mut ts) };
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
 
@@ -509,6 +542,7 @@ fn new_block() -> usize {
             lines: [FREE; LINES],
             starts: [0; GRANULES / 64],
             used: false,
+            parsed: false,
         });
     }
     h.nblocks += 1;
@@ -519,7 +553,10 @@ fn new_block() -> usize {
 fn alloc_large(size: usize, align: usize, type_id: u32) -> *mut u8 {
     let align = align.max(HEADER_ALIGN);
     let offset = size_of::<Prefix>().next_multiple_of(align);
-    let Some(total) = size.checked_add(offset) else {
+    let Some(total) = size
+        .checked_add(offset)
+        .and_then(|t| t.checked_add(size.div_ceil(CARD_SIZE)))
+    else {
         fatal(b"rok runtime: allocation size overflow");
     };
     // SAFETY: plain allocation calls; `align` is a power of two >= 8.
@@ -552,6 +589,7 @@ fn alloc_large(size: usize, align: usize, type_id: u32) -> *mut u8 {
             next: h.los,
             size,
             offset,
+            cards: obj.add(size),
         });
         init_header(obj, type_id, size, FLAG_LARGE);
         h.los = obj;
@@ -656,22 +694,10 @@ fn for_each_start(
     }
 }
 
-/// Before marking: start bits of the lines handed out since the last
-/// collection, the sorted LOS index, and the pinned / immortal objects
-/// queued as roots (only young ones in a minor collection).
-fn build_index(full: bool, len: &mut usize) {
-    for b in 0..heap().nblocks {
-        let h = heap();
-        // SAFETY: `b < nblocks`.
-        let m = unsafe { &mut *h.meta.add(b) };
-        if m.used {
-            let block = h.base + b * BLOCK_SIZE;
-            parse_taken(block, m);
-            for_each_start(&m.lines, &m.starts, full, |off| {
-                pin_root((block + off) as *mut u8, len);
-            });
-        }
-    }
+/// Before marking: the sorted LOS index. (Block start bits of the lines
+/// handed out since the last collection are parsed lazily, by
+/// [`object_containing`].)
+fn build_index() {
     let h = heap();
     if h.los_count == 0 {
         return;
@@ -692,20 +718,89 @@ fn build_index(full: bool, len: &mut usize) {
         let mut o = h.los;
         for i in 0..h.los_count {
             *h.index.add(i) = o as usize;
-            pin_root(o, len);
             o = (*prefix(o)).next;
         }
         core::slice::from_raw_parts_mut(h.index, h.los_count).sort_unstable();
     }
 }
 
-/// Queue `obj` if it is pinned or immortal.
-fn pin_root(obj: *mut u8, len: &mut usize) {
-    // SAFETY: `obj` is an object header.
-    let flags = unsafe { (*header(obj)).gc_flags.load(Ordering::Relaxed) };
-    if flags & (FLAG_PINNED | FLAG_IMMORTAL) != 0 {
-        push_obj(obj, len);
+/// Pinned objects (`rok_gc_pin`, `FLAG_PINNED`): roots until unpinned.
+/// A list, so a collection does not visit every header looking for the
+/// flag.
+// ponytail: spin lock + linear unpin; pins are few (deque setup, the
+// running executor, the parking registry).
+struct Pins {
+    lock: core::sync::atomic::AtomicBool,
+    list: UnsafeCell<(*mut *mut u8, usize, usize)>,
+}
+
+// SAFETY: `list` is only touched under `lock` (or with the world
+// stopped, when no thread is inside `pin` / `unpin`).
+unsafe impl Sync for Pins {}
+
+static PINS: Pins = Pins {
+    lock: core::sync::atomic::AtomicBool::new(false),
+    list: UnsafeCell::new((ptr::null_mut(), 0, 0)),
+};
+
+fn with_pins<R>(f: impl FnOnce(&mut (*mut *mut u8, usize, usize)) -> R) -> R {
+    while PINS
+        .lock
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
     }
+    // SAFETY: we hold the lock.
+    let r = f(unsafe { &mut *PINS.list.get() });
+    PINS.lock.store(false, Ordering::Release);
+    r
+}
+
+/// Keep `obj` (and what it references) alive until [`unpin`]. Not a
+/// safepoint.
+///
+/// # Safety
+/// `obj` must be a live GC object.
+pub unsafe fn pin(obj: *mut u8) {
+    // SAFETY: caller contract.
+    let flags = unsafe { &(*header(obj)).gc_flags };
+    if flags.fetch_or(FLAG_PINNED, Ordering::Relaxed) & FLAG_PINNED != 0 {
+        return;
+    }
+    with_pins(|(objs, len, cap)| {
+        if *len == *cap {
+            *cap = (*cap * 2).max(16);
+            // SAFETY: realloc of our own list (or null).
+            *objs = unsafe { libc::realloc(objs.cast(), *cap * size_of::<*mut u8>()) }.cast();
+            if objs.is_null() {
+                rokr_common::oom();
+            }
+        }
+        // SAFETY: `len < cap`.
+        unsafe { *objs.add(*len) = obj };
+        *len += 1;
+    });
+}
+
+/// Undo [`pin`].
+///
+/// # Safety
+/// `obj` must be a live GC object.
+pub unsafe fn unpin(obj: *mut u8) {
+    // SAFETY: caller contract.
+    let flags = unsafe { &(*header(obj)).gc_flags };
+    if flags.fetch_and(!FLAG_PINNED, Ordering::Relaxed) & FLAG_PINNED == 0 {
+        return;
+    }
+    with_pins(|(objs, len, _)| {
+        // SAFETY: the first `len` entries are initialized.
+        let list = unsafe { core::slice::from_raw_parts_mut(*objs, *len) };
+        if let Some(i) = list.iter().position(|&o| o == obj) {
+            list.swap(i, *len - 1);
+            *len -= 1;
+        }
+    });
 }
 
 /// The object whose header address is `word` or whose memory contains
@@ -717,10 +812,15 @@ fn object_containing(word: usize, young: bool) -> Option<*mut u8> {
     if word >= h.base && word < h.base + h.nblocks * BLOCK_SIZE {
         let blk = (word - h.base) / BLOCK_SIZE;
         // SAFETY: `blk < nblocks`.
-        let meta = unsafe { &*h.meta.add(blk) };
+        let meta = unsafe { &mut *h.meta.add(blk) };
         let block = h.base + blk * BLOCK_SIZE;
-        if !meta.used || (young && meta.lines[(word - block) / LINE_SIZE] != TAKEN) {
+        let line = meta.lines[(word - block) / LINE_SIZE];
+        if !meta.used || (young && line != TAKEN) {
             return None;
+        }
+        if line == TAKEN && !meta.parsed {
+            parse_taken(block, meta);
+            meta.parsed = true;
         }
         let granule = (word - block) / 8;
         // The nearest object start at or before `granule`: objects are
@@ -781,16 +881,23 @@ fn push_obj(obj: *mut u8, len: &mut usize) {
 }
 
 /// Queue the referents of `o`'s reference words.
-#[allow(clippy::cast_ptr_alignment)] // tables and payloads are word-aligned
 fn scan_children(o: *mut u8, full: bool, len: &mut usize) {
+    scan_range(o, 0, usize::MAX, full, len);
+}
+
+/// Queue the referents of `o`'s reference words at byte offsets
+/// `lo..hi` (from the header).
+#[allow(clippy::cast_ptr_alignment)] // tables and payloads are word-aligned
+fn scan_range(o: *mut u8, lo: usize, hi: usize, full: bool, len: &mut usize) {
     // SAFETY: `o` is a live GC object; its ScanTable (802) describes it.
     unsafe {
         let hd = &*header(o);
         if hd.type_id == SCAN_WORDS_TYPE_ID {
-            let words = (obj_size(o) - HEADER_SIZE) / size_of::<usize>();
-            let payload = o.add(HEADER_SIZE).cast::<*mut u8>();
-            for w in 0..words {
-                push(payload.add(w).read(), full, len);
+            let hi = hi.min(obj_size(o)) & !7;
+            let mut off = lo.max(HEADER_SIZE).next_multiple_of(8);
+            while off < hi {
+                push(o.add(off).cast::<*mut u8>().read(), full, len);
+                off += 8;
             }
             return;
         }
@@ -801,8 +908,8 @@ fn scan_children(o: *mut u8, full: bool, len: &mut usize) {
         let n = t.add(6).cast::<u16>().read_unaligned() as usize;
         for e in 0..n {
             let entry = t.add(8 + 8 * e).cast::<u32>();
-            if entry.add(1).read_unaligned() == STRONG_REF {
-                let off = entry.read_unaligned() as usize;
+            let off = entry.read_unaligned() as usize;
+            if entry.add(1).read_unaligned() == STRONG_REF && (lo..hi).contains(&off) {
                 push(o.add(off).cast::<*mut u8>().read_unaligned(), full, len);
             }
         }
@@ -832,20 +939,26 @@ pub fn collect_young() {
 /// (minor) the remembered set, sweep, resume.
 fn collect_locked(full: bool) {
     let t0 = now_ns();
+    let c0 = clock_ns(libc::CLOCK_THREAD_CPUTIME_ID);
     world::stop();
     world::reset_tlabs();
     let mut len = 0;
-    build_index(full, &mut len);
+    build_index();
+    // SAFETY: the world is stopped: nobody is inside `pin` / `unpin`.
+    let (pins, npins, _) = unsafe { *PINS.list.get() };
+    for i in 0..npins {
+        // Through the lookup, so a young one's block gets parsed.
+        // SAFETY: `i < npins`.
+        push(unsafe { *pins.add(i) }, full, &mut len);
+    }
     world::for_each_root(|word| push(word, full, &mut len));
     // Nobody logs while the world is stopped (the barrier has no
-    // safepoint).
-    // SAFETY: as above; the log is ours until `resume`.
-    let log = unsafe { &mut *REMSET.log.get() };
+    // safepoint): every thread's chunk joins the retired ones.
+    world::for_each_wb_log(retire_log);
+    let log = LOG_FULL.swap(ptr::null_mut(), Ordering::Acquire);
     if !full {
-        for i in 0..log.len {
-            // SAFETY: `i < len`.
-            scan_children(unsafe { *log.objs.add(i) }, false, &mut len);
-        }
+        for_each_logged(log, |o| scan_children(o, false, &mut len));
+        scan_dirty_cards(&mut len);
     }
     while len > 0 {
         len -= 1;
@@ -864,16 +977,16 @@ fn collect_locked(full: bool) {
     }
     if !full {
         // The logged (old) objects all survive: unlogged again.
-        for i in 0..log.len {
-            // SAFETY: `i < len`; logged objects are live.
+        for_each_logged(log, |o| {
+            // SAFETY: logged objects are live.
             unsafe {
-                (*header(*log.objs.add(i)))
+                (*header(o))
                     .gc_flags
                     .fetch_or(FLAG_UNLOGGED, Ordering::Relaxed)
             };
-        }
+        });
     }
-    log.len = 0;
+    free_logs(log);
     let survived = sweep_blocks(full) + sweep_los(full);
     let h = heap();
     let live = if full {
@@ -893,14 +1006,40 @@ fn collect_locked(full: bool) {
     h.medium_cursor = 0;
     h.collections += 1;
     let dt = now_ns() - t0;
+    h.gc_cpu_ns += clock_ns(libc::CLOCK_THREAD_CPUTIME_ID) - c0;
     h.gc_ns += dt;
     h.max_ns = h.max_ns.max(dt);
     world::resume();
 }
 
+/// Minor collection: queue the referents in the dirty cards of every
+/// carded (old LOS) object, cleaning the cards (every survivor of this
+/// collection is old, so no old -> young reference outlives it).
+fn scan_dirty_cards(len: &mut usize) {
+    // SAFETY: walks the LOS list; each prefix's card table covers its
+    // object.
+    unsafe {
+        let mut o = heap().los;
+        while !o.is_null() {
+            let p = prefix(o);
+            if (*header(o)).gc_flags.load(Ordering::Relaxed) & FLAG_CARDED != 0 {
+                let n = (*p).size.div_ceil(CARD_SIZE);
+                let cards = core::slice::from_raw_parts_mut((*p).cards, n);
+                for (c, dirty) in cards.iter_mut().enumerate() {
+                    if *dirty != 0 {
+                        *dirty = 0;
+                        scan_range(o, c * CARD_SIZE, (c + 1) * CARD_SIZE, false, len);
+                    }
+                }
+            }
+            o = (*p).next;
+        }
+    }
+}
+
 /// After marking: whether `obj` lives on (it was marked); a survivor's
-/// mark is cleared and it becomes old (`STICKY | UNLOGGED`) when
-/// generational.
+/// mark is cleared and it becomes old (`STICKY | UNLOGGED`, or
+/// `STICKY | CARDED` for a LOS object) when generational.
 fn survives(obj: *mut u8, generational: bool) -> bool {
     // SAFETY: `obj` is an object header; the world is stopped.
     let flags = unsafe { &(*header(obj)).gc_flags };
@@ -908,19 +1047,21 @@ fn survives(obj: *mut u8, generational: bool) -> bool {
     if f & FLAG_MARK == 0 {
         return false;
     }
-    let f = f & !(FLAG_MARK | FLAG_STICKY | FLAG_UNLOGGED);
-    let old = if generational {
-        FLAG_STICKY | FLAG_UNLOGGED
-    } else {
+    let f = f & !(FLAG_MARK | FLAG_STICKY | FLAG_UNLOGGED | FLAG_CARDED);
+    let old = if !generational {
         0
+    } else if f & FLAG_LARGE != 0 {
+        FLAG_STICKY | FLAG_CARDED
+    } else {
+        FLAG_STICKY | FLAG_UNLOGGED
     };
     flags.store(f | old, Ordering::Relaxed);
     true
 }
 
 /// Sweep the blocks (minor: only the `TAKEN` lines, where all young
-/// objects are): survivors keep their lines, dead objects are zeroed
-/// and lose their start bit. Bytes of the swept survivors.
+/// objects are): survivors keep their lines, dead objects lose their
+/// start bit. Bytes of the swept survivors.
 fn sweep_blocks(full: bool) -> usize {
     let generational = heap().generational;
     let mut live = 0;
@@ -938,6 +1079,13 @@ fn sweep_blocks(full: bool) -> usize {
                 *l = FREE;
             }
         }
+        if !full && !m.parsed {
+            // No young survivor here, and no start bits to clear.
+            m.used = lines.contains(&LIVE);
+            m.lines = lines;
+            continue;
+        }
+        m.parsed = false;
         let (old_lines, starts) = (m.lines, m.starts);
         for_each_start(&old_lines, &starts, full, |off| {
             let obj = (block + off) as *mut u8;
@@ -946,9 +1094,8 @@ fn sweep_blocks(full: bool) -> usize {
                 live += size;
                 lines[off / LINE_SIZE..(off + size).div_ceil(LINE_SIZE)].fill(LIVE);
             } else {
+                // Its bytes stay until the line is handed out again.
                 m.starts[off / 8 / 64] &= !(1 << (off / 8 % 64));
-                // SAFETY: a dead object's memory, ours to reuse.
-                unsafe { ptr::write_bytes(obj, 0, size) };
             }
         });
         m.used = lines.contains(&LIVE);
@@ -975,6 +1122,8 @@ fn sweep_los(full: bool) -> usize {
                 link = &mut (*p).next;
             } else if survives(o, generational) {
                 live += (*p).size;
+                // Clean: everything it references is old now.
+                ptr::write_bytes((*p).cards, 0, (*p).size.div_ceil(CARD_SIZE));
                 link = &mut (*p).next;
             } else {
                 *link = (*p).next;
@@ -988,40 +1137,112 @@ fn sweep_los(full: bool) -> usize {
 
 /// The remembered set (generational): old objects that had a reference
 /// stored into them since the last collection, each logged once (its
-/// `UNLOGGED` bit cleared by the barrier).
-// ponytail: one global spin-locked log; per-thread logs in the
-// `rok_tls_wb_log_*` slots (803) if the slow path ever contends.
-struct Remset {
-    lock: core::sync::atomic::AtomicBool,
-    log: UnsafeCell<Log>,
+/// `UNLOGGED` bit cleared by the barrier). Each thread appends to its
+/// own chunk through `rok_tls_wb_log_cursor` / `_limit` (803) without
+/// a lock; a full chunk (and every thread's chunk at a collection or
+/// thread exit) is retired onto the lock-free [`LOG_FULL`] stack.
+#[repr(C)]
+struct LogChunk {
+    next: *mut LogChunk,
+    /// End of the logged objects (`*mut u8` each, from `self + 1`).
+    end: usize,
 }
 
-struct Log {
-    objs: *mut *mut u8,
-    len: usize,
-    cap: usize,
+/// Words per log chunk (header included).
+const LOG_CHUNK_WORDS: usize = 512;
+
+/// Retired chunks: pushed by any thread, taken with the world stopped.
+static LOG_FULL: core::sync::atomic::AtomicPtr<LogChunk> =
+    core::sync::atomic::AtomicPtr::new(ptr::null_mut());
+
+/// Retire the chunk behind the wb log slots `[cursor, limit]` (none if
+/// null) and clear them.
+fn retire_log([cursor, limit]: [*mut usize; 2]) {
+    // SAFETY: the slots are the owner's (or a stopped / exiting
+    // thread's); a non-null limit ends a chunk from `refill_log`.
+    unsafe {
+        let end = limit.read();
+        if end == 0 {
+            return;
+        }
+        let c = (end - LOG_CHUNK_WORDS * size_of::<usize>()) as *mut LogChunk;
+        (*c).end = cursor.read();
+        let mut head = LOG_FULL.load(Ordering::Relaxed);
+        loop {
+            (*c).next = head;
+            match LOG_FULL.compare_exchange_weak(head, c, Ordering::Release, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(h) => head = h,
+            }
+        }
+        cursor.write(0);
+        limit.write(0);
+    }
 }
 
-// SAFETY: `log` is only touched under `lock`, or with the world stopped.
-unsafe impl Sync for Remset {}
+/// The calling thread's wb log is full (or absent): retire it and start
+/// a fresh chunk.
+fn refill_log(slots: [*mut usize; 2]) {
+    retire_log(slots);
+    // SAFETY: plain allocation; the slots are ours.
+    unsafe {
+        let c = libc::malloc(LOG_CHUNK_WORDS * size_of::<usize>()).cast::<LogChunk>();
+        if c.is_null() {
+            rokr_common::oom();
+        }
+        slots[0].write(c.add(1) as usize);
+        slots[1].write(c as usize + LOG_CHUNK_WORDS * size_of::<usize>());
+    }
+}
 
-static REMSET: Remset = Remset {
-    lock: core::sync::atomic::AtomicBool::new(false),
-    log: UnsafeCell::new(Log {
-        objs: ptr::null_mut(),
-        len: 0,
-        cap: 0,
-    }),
-};
+/// `f` on every object logged in the chunk list `log`.
+fn for_each_logged(mut log: *mut LogChunk, mut f: impl FnMut(*mut u8)) {
+    // SAFETY: retired chunks hold objects up to their `end`.
+    unsafe {
+        while !log.is_null() {
+            let mut e = log.add(1).cast::<*mut u8>();
+            while (e as usize) < (*log).end {
+                f(*e);
+                e = e.add(1);
+            }
+            log = (*log).next;
+        }
+    }
+}
+
+fn free_logs(mut log: *mut LogChunk) {
+    while !log.is_null() {
+        // SAFETY: chunks come from `refill_log`'s malloc.
+        unsafe {
+            let next = (*log).next;
+            libc::free(log.cast());
+            log = next;
+        }
+    }
+}
+
+/// Before the calling thread leaves the registry: retire its wb log so
+/// the next collection still sees what it logged.
+pub fn retire_own_log() {
+    retire_log(rokr_common::tls::wb_log());
+}
 
 /// Write barrier for runtime code: call before storing a GC reference
-/// into the GC object `obj` (the same test compiled code inlines).
+/// into the word at `slot` of the GC object `obj` (what compiled code
+/// inlines).
 ///
 /// # Safety
-/// `obj` must be a live GC object.
-pub unsafe fn write_barrier(obj: *mut u8) {
+/// `obj` must be a live GC object and `slot` a word inside it.
+pub unsafe fn write_barrier(obj: *mut u8, slot: *const u8) {
     // SAFETY: caller contract.
-    if unsafe { (*header(obj)).gc_flags.load(Ordering::Relaxed) } & FLAG_UNLOGGED != 0 {
+    let flags = unsafe { (*header(obj)).gc_flags.load(Ordering::Relaxed) };
+    if flags & FLAG_CARDED != 0 {
+        // SAFETY: a carded object is a LOS object with a card table.
+        unsafe {
+            let cards = (*prefix(obj)).cards;
+            *cards.add((slot as usize - obj as usize) / CARD_SIZE) = 1;
+        }
+    } else if flags & FLAG_UNLOGGED != 0 {
         // SAFETY: caller contract.
         unsafe { write_barrier_slow(obj) };
     }
@@ -1042,29 +1263,16 @@ pub unsafe fn write_barrier_slow(obj: *mut u8) {
     if flags.fetch_and(!FLAG_UNLOGGED, Ordering::Relaxed) & FLAG_UNLOGGED == 0 {
         return;
     }
-    while REMSET
-        .lock
-        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
-    // SAFETY: we hold the log's lock.
+    let slots = rokr_common::tls::wb_log();
+    // SAFETY: this thread's own slots: `cursor < limit` inside its chunk.
     unsafe {
-        let log = &mut *REMSET.log.get();
-        if log.len == log.cap {
-            let cap = (log.cap * 2).max(256);
-            let p = libc::realloc(log.objs.cast(), cap * size_of::<*mut u8>());
-            if p.is_null() {
-                rokr_common::oom();
-            }
-            log.objs = p.cast();
-            log.cap = cap;
+        if slots[0].read() == slots[1].read() {
+            refill_log(slots);
         }
-        *log.objs.add(log.len) = obj;
-        log.len += 1;
+        let c = slots[0].read();
+        (c as *mut *mut u8).write(obj);
+        slots[0].write(c + size_of::<usize>());
     }
-    REMSET.lock.store(false, Ordering::Release);
 }
 
 /// Bytes held by GC objects (headers included) as of the last
@@ -1126,8 +1334,7 @@ mod tests {
             collect();
             assert_eq!(live_bytes(), base + 32 + 24);
             assert_eq!((*header(b)).type_id, USER_TYPE_BASE + 1);
-            // The dead object was zeroed for reuse.
-            assert_eq!(*garbage.add(16), 0);
+            assert_eq!(object_containing(garbage as usize + 16, false), None);
             *frame.1 = 0;
             collect();
             assert_eq!(live_bytes(), base);
@@ -1137,6 +1344,7 @@ mod tests {
         medium_and_large_objects();
         free_lines_are_reused();
         minor_collection_keeps_logged_children();
+        minor_collection_scans_dirty_cards();
     }
 
     /// Generational: a young object reachable only through an old one
@@ -1167,16 +1375,66 @@ mod tests {
             );
             let young = alloc(24, 8, USER_TYPE_BASE + 1);
             let garbage = alloc(24, 8, USER_TYPE_BASE + 1);
-            write_barrier(old);
+            write_barrier(old, old.add(16));
             *old.add(16).cast::<*mut u8>() = young;
             let minors = heap().minors;
             collect_young();
             collect_young();
             assert_eq!(heap().minors, minors + 2);
             assert_eq!((*header(young)).type_id, USER_TYPE_BASE + 1);
-            assert_eq!((*header(garbage)).type_id, 0);
+            assert_eq!(object_containing(garbage as usize, false), None);
             assert_eq!(live_bytes(), base + 32 + 24);
             *old.add(16).cast::<*mut u8>() = ptr::null_mut();
+            *frame.1 = 0;
+            collect();
+            assert_eq!(live_bytes(), base);
+            *top = ptr::null_mut();
+        }
+    }
+
+    /// Generational: an old LOS buffer is carded; a young object stored
+    /// into it (behind the barrier) survives minors through its card
+    /// alone; once overwritten it dies at the next minor.
+    #[allow(clippy::cast_ptr_alignment)] // GC objects are 8-aligned
+    fn minor_collection_scans_dirty_cards() {
+        let base = live_bytes();
+        let size = 64 << 10;
+        let buf = alloc(size, 8, SCAN_WORDS_TYPE_ID);
+        // SAFETY: as above.
+        unsafe {
+            let mut root = buf as usize;
+            let mut frame: (Frame, *mut usize) = (
+                Frame {
+                    prev: ptr::null_mut(),
+                    count: 1,
+                },
+                &mut root,
+            );
+            let top = rokr_common::tls::shadow_stack_top();
+            *top = (&raw mut frame).cast();
+            collect();
+            let flags = (*header(buf)).gc_flags.load(Ordering::Relaxed);
+            assert_eq!(
+                flags & (FLAG_STICKY | FLAG_CARDED),
+                FLAG_STICKY | FLAG_CARDED
+            );
+            let young = alloc(24, 8, USER_TYPE_BASE + 1);
+            let slot = buf.add(40_000);
+            write_barrier(buf, slot);
+            *slot.cast::<*mut u8>() = young;
+            assert_eq!(*(*prefix(buf)).cards.add(40_000 / CARD_SIZE), 1);
+            collect_young();
+            assert_eq!((*header(young)).type_id, USER_TYPE_BASE + 1);
+            assert_eq!(live_bytes(), base + size + 24);
+            let young2 = alloc(24, 8, USER_TYPE_BASE + 1);
+            write_barrier(buf, slot);
+            *slot.cast::<*mut u8>() = young2;
+            collect_young();
+            // `young` is old now (it survived a minor): only a full
+            // collection frees it.
+            assert_eq!(live_bytes(), base + size + 48);
+            collect();
+            assert_eq!(live_bytes(), base + size + 24);
             *frame.1 = 0;
             collect();
             assert_eq!(live_bytes(), base);

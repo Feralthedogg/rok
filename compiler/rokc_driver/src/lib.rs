@@ -24,8 +24,8 @@ pub use cfg::CfgEnv;
 pub use rokc_codegen_mlir::ReplCell;
 pub use rokc_codegen_mlir::{Demangled, demangle};
 pub use toolchain::{
-    BuildOptions, EmitKind, TempDir, build_archive, emit, link_executable, link_host, link_shared,
-    mlir_text,
+    BuildOptions, EmitKind, TempDir, build_archive, compile_object, emit, link_executable,
+    link_host, link_shared, mlir_text,
 };
 
 // Independent switches, one per session setter.
@@ -60,6 +60,10 @@ pub struct CompilerConfig {
     /// mounted as `name` (as its users will see it), every body is
     /// compiled, and `CompiledModule::interface` holds its RHIR.
     pub lib_name: Option<String>,
+    /// Keep the library's parse for the next build with the same
+    /// library and the same user declarations that change its lexing
+    /// (`#[infix]`, meta blocks, keywords): a long-lived session (REPL).
+    pub cache_library: bool,
 }
 
 thread_local! {
@@ -392,9 +396,18 @@ fn compile_unit(
     // Bootstrap PrecTable from operator-declaration sources, if any.
     // The same pre-pass gathers every meta block (spec 6.8) of the
     // library and the user package before any derive is expanded.
-    let mut metas = PrePass::default();
     let roots = lib_roots(config);
-    let mut prec = build_prec_table(&roots, &mut diags, &mut metas);
+    // The library's parses are cached across builds (a REPL session)
+    // when nothing that changes them changed; never with prebuilt
+    // dependencies (their sources are an overlay) or kept ASTs.
+    let cache = config.cache_library && prebuilt.is_empty() && !config.keep_ast && lib.is_none();
+    let (mut prec, mut d, mut metas) = cached(&PREPASS_CACHE, cache, format!("{roots:?}"), || {
+        let (mut diags, mut metas) = (Vec::new(), PrePass::default());
+        let prec = build_prec_table(&roots, &mut diags, &mut metas);
+        (prec, diags, metas)
+    });
+    diags.append(&mut d);
+    let lib_metas = metas.metas.len();
     // Spec 6.7.11: the user package's own `#[infix]` registrations are
     // gathered by the same pre-pass, so its extension tokens lex.
     for prog in user_programs(source, path, &mut metas) {
@@ -402,6 +415,7 @@ fn compile_unit(
         diags.append(&mut d);
         diags.extend(sub.entries().cloned().filter_map(|e| prec.merge(e)));
     }
+    let user_metas = format!("{:?}", &metas.metas[lib_metas..]);
     let ext = prec.ext_ops();
     let mut meta_table = MetaTable::default();
     diags.extend(metas.metas.into_iter().filter_map(|m| meta_table.add(m)));
@@ -466,38 +480,49 @@ fn compile_unit(
     // Mount each library root (`rok::<tier>`, then the dependencies) and
     // compile its items with the user's; HIR gives every module an
     // implicit `use rok::core::**;` (stdlib spec 0.1).
-    for (i, (prefix, root)) in roots.iter().enumerate() {
-        let metas = MetaCtx {
-            table: std::sync::Arc::clone(&meta_table),
-            keywords: keywords.get(i + 1).cloned().unwrap_or_default(),
-            literals: std::sync::Arc::clone(&lib_lits),
-        };
-        let first = sources.len();
-        let first_item = all_items.len();
-        let stray = collect_module_tree(
-            root,
-            None,
-            root.parent(),
-            prefix,
-            &cfg_env,
-            &ext,
-            &metas,
-            &mut diags,
-            &mut all_items,
-            &mut all_uses,
-            config.keep_ast.then_some(&mut sources),
-        );
-        if !stray.is_empty() {
-            diags.push(entry::stmts_outside_entry(root));
+    let key = format!(
+        "{roots:?}|{:?}|{}|{}|{ext:?}|{user_metas}|{keywords:?}",
+        config.cfg_flags, config.test, config.bench
+    );
+    let (mut items, mut uses, mut d) = cached(&LIB_CACHE, cache, key, || {
+        let (mut items, mut uses, mut diags) = (Vec::new(), Vec::new(), Vec::new());
+        for (i, (prefix, root)) in roots.iter().enumerate() {
+            let metas = MetaCtx {
+                table: std::sync::Arc::clone(&meta_table),
+                keywords: keywords.get(i + 1).cloned().unwrap_or_default(),
+                literals: std::sync::Arc::clone(&lib_lits),
+            };
+            let first = sources.len();
+            let first_item = items.len();
+            let stray = collect_module_tree(
+                root,
+                None,
+                root.parent(),
+                prefix,
+                &cfg_env,
+                &ext,
+                &metas,
+                &mut diags,
+                &mut items,
+                &mut uses,
+                config.keep_ast.then_some(&mut sources),
+            );
+            if !stray.is_empty() {
+                diags.push(entry::stmts_outside_entry(root));
+            }
+            let pkg = prefix.join("::");
+            for f in &mut sources[first..] {
+                f.package.clone_from(&pkg);
+            }
+            if prebuilt.iter().any(|p| p.rhir.name == pkg) {
+                mark_prebuilt(&mut items[first_item..]);
+            }
         }
-        let pkg = prefix.join("::");
-        for f in &mut sources[first..] {
-            f.package.clone_from(&pkg);
-        }
-        if prebuilt.iter().any(|p| p.rhir.name == pkg) {
-            mark_prebuilt(&mut all_items[first_item..]);
-        }
-    }
+        (items, uses, diags)
+    });
+    all_items.append(&mut items);
+    all_uses.append(&mut uses);
+    diags.append(&mut d);
     // Auto-inject the runtime hooks lowering targets (`rok_panic`,
     // `rok_uncaught_error`, `rok_print_*`, ...) so user files needn't
     // declare the externs themselves.
@@ -792,11 +817,52 @@ fn prepass_tokens(source: &str, file: &str, metas: &mut PrePass) -> Vec<rokc_lex
 
 /// What the pre-pass gathers besides operators: meta blocks (6.8) and
 /// keyword registrations (6.6).
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct PrePass {
     metas: Vec<MetaDef>,
     keywords: Vec<KeywordDef>,
     literals: Vec<LiteralDef>,
+}
+
+/// One cached parse (`cached`): its key, the files it registered, its
+/// result.
+type Cached<T> = std::sync::Mutex<Option<(String, Vec<(String, String)>, T)>>;
+type LibParse = (
+    Vec<rokc_ast::Item>,
+    Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)>,
+    Vec<RokDiagnostic>,
+);
+static PREPASS_CACHE: Cached<(PrecTable, Vec<RokDiagnostic>, PrePass)> =
+    std::sync::Mutex::new(None);
+static LIB_CACHE: Cached<LibParse> = std::sync::Mutex::new(None);
+
+/// `parse()`, or (`on`) a copy of its last result when `key` and the
+/// number of registered files before it are the same: its files are
+/// registered again, so they get the ids its spans have.
+// ponytail: one entry per parse, and the files are not checked for
+// changes on disk (`CompilerConfig::cache_library` is for a session
+// over a fixed library).
+fn cached<T: Clone>(slot: &Cached<T>, on: bool, key: String, parse: impl FnOnce() -> T) -> T {
+    if !on {
+        return parse();
+    }
+    let key = format!("{}|{key}", rokc_diagnostic::registered_count());
+    let mut slot = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((k, files, v)) = slot.as_ref() {
+        if *k == key {
+            for (path, text) in files {
+                rokc_diagnostic::register_file(path.clone(), text.clone());
+            }
+            return v.clone();
+        }
+    }
+    let before = rokc_diagnostic::registered_count();
+    let v = parse();
+    let files = rokc_diagnostic::registered_files().split_off(before);
+    *slot = Some((key, files, v.clone()));
+    v
 }
 
 /// What a package's parse needs from the pre-pass: every meta block,

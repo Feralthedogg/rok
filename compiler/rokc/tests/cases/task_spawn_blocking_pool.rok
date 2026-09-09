@@ -1,11 +1,12 @@
 // expect-exit: 0
 // expect-stdout:
-// sequential 200 sum 19900 threads 1
+// sequential 200 sum 19900 reused true
 // concurrent 1000 sum 499500 bounded true
 // cancelled job finished true
 
 // `task::spawn_blocking` runs jobs on a persistent pool: awaited one at
-// a time they reuse one thread; 1000 at once stay within the pool's cap
+// a time they reuse a thread (a job can race the previous thread going
+// idle, so allow a few); 1000 at once stay within the pool's cap
 // (512 threads) and all complete.
 use rok::std::thread;
 use rok::std::time::Duration;
@@ -21,7 +22,7 @@ for i in 0..200 {
     sum += r.0;
     ids.insert(r.1);
 }
-println(f"sequential 200 sum {sum} threads {ids.len()}");
+println(f"sequential 200 sum {sum} reused {ids.len() <= 4}");
 
 let jobs: List<task::Blocking<(i32, u64)>> = List::new();
 for i in 0..1000 {

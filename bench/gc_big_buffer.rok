@@ -1,0 +1,28 @@
+// Card marking case: a 2M-entry old `List<str>` (a 32 MB LOS buffer)
+// while 40M short-lived strings churn; every 4096th one is stored into
+// the old list (a few old -> young stores per minor collection).
+extern "C" { fn rok_gc_collect(); }
+
+fn main() -> i32 {
+    let n: i64 = 2000000;
+    let keep: List<str> = [];
+    let i: i64 = 0;
+    while i < n {
+        keep.push(f"k{i}");
+        i += 1;
+    }
+    unsafe { rok_gc_collect() };
+    let total: i64 = 0;
+    i = 0;
+    while i < 40000000 {
+        let s = f"t{i}";
+        total += s.len() as i64;
+        if i % 4096 == 0 {
+            keep[((i * 7919) % n) as usize] = s;
+        }
+        i += 1;
+    }
+    for s in keep { total += s.len() as i64; }
+    rok_print_i64(total);
+    return 0;
+}

@@ -15,7 +15,18 @@
 #   binary_trees       2.22s               1.62s
 #   gc_old_heap        0.75s               0.68s
 #   store_heavy        1.98s (no barrier)  2.04s (barrier fast path)
-# ROK_GC_STATS=1 prints collections / pause totals at exit.
+#
+# GC limits removed (2026-10-13, load average 20-30: process CPU
+# user+sys min of 5 / collector CPU from ROK_GC_STATS min of 3):
+#                  before          +cards          +per-thread log  +lazy zero/parse, pin list
+#   binary_trees   1.62s / 582ms   1.60s / 591ms   1.62s / 591ms    1.12s /  83ms
+#   gc_old_heap    0.70s / 382ms   0.64s / 316ms   0.63s / 318ms    0.51s / 177ms
+#   gc_big_buffer  1.74s / 752ms   1.55s / 562ms   1.56s / 585ms    0.90s /  93ms
+#   wb_threads     2.26s / 407ms   2.64s / 391ms   1.47s / 409ms    1.33s / 229ms
+#   alloc_boxes    0.27s / 122ms   0.26s / 124ms   0.25s / 127ms    0.13s /   2ms
+#   alloc_threads  0.44s / 199ms   0.45s / 192ms   0.44s / 195ms    0.25s /   6ms
+#   store_heavy    1.5-2.0s in every column (noise; barrier fast path unchanged)
+# ROK_GC_STATS=1 prints collections / pause totals / collector CPU at exit.
 set -e
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"

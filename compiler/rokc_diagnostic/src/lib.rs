@@ -65,6 +65,14 @@ pub fn clear_files() {
         .clear();
 }
 
+/// How many files are registered (the next one's id is this plus 1).
+pub fn registered_count() -> usize {
+    FILES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .len()
+}
+
 /// Every registered source file `(path, text)`, in registration order.
 pub fn registered_files() -> Vec<(String, String)> {
     FILES

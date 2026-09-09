@@ -37,6 +37,9 @@ pub struct ReplCell {
     /// `extern` statics this cell defines (zeroed, exported, GC roots):
     /// the slots of the session's new bindings.
     pub define: Vec<String>,
+    /// Statics (MIR names) an earlier cell defined: declared, not
+    /// defined, so their state carries over.
+    pub statics: Vec<String>,
 }
 
 pub fn codegen(module: &MirModule) -> Result<MlirOutput, RokDiagnostic> {

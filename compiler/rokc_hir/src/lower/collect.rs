@@ -1604,6 +1604,7 @@ pub fn lower_full(
     check_type_bounds(&env);
     super::send_check::check(&env, &functions);
     let (any_seeds, any_exports) = super::expr::any_link(&env, lib_pkg.as_deref());
+    let any_types = super::expr::any_types(&env);
     if lib_pkg.is_some() || !prebuilt.is_empty() {
         exports.extend(any_exports);
     }
@@ -1637,6 +1638,7 @@ pub fn lower_full(
         unlowered,
         prebuilt,
         any_seeds,
+        any_types,
         c_variadic: {
             let mut v: Vec<FunctionId> = c_variadic.into_iter().collect();
             v.sort_by_key(|f| f.0);

@@ -262,10 +262,8 @@ pub fn link_shared(
     opts: &BuildOptions,
     out: &Path,
 ) -> Result<u32, RokDiagnostic> {
-    let tmp = TempDir::new(opts.keep_temps)?;
-    let (ll, mlir) = llvm_ir(module, opts, tmp.path())?;
     let mut cmd = clang(opts)?;
-    cmd.arg(&ll).args(["-shared", "-fPIC"]);
+    cmd.args(["-shared", "-fPIC"]);
     if cfg!(target_vendor = "apple") {
         cmd.args(["-undefined", "dynamic_lookup"]);
     } else {
@@ -276,9 +274,97 @@ pub fn link_shared(
     for lib in link_libraries {
         cmd.arg(format!("-l{lib}"));
     }
-    cmd.arg("-o").arg(out);
-    run(&mut cmd, "clang")?;
+    piped_build(module, opts, cmd, out)
+}
+
+/// A REPL cell (`opts.repl`) as a relocatable object at `out`, which
+/// the session host loads itself. Returns the GC type ids it used.
+pub fn compile_object(
+    module: &CompiledModule,
+    opts: &BuildOptions,
+    out: &Path,
+) -> Result<u32, RokDiagnostic> {
+    let mut cmd = clang(opts)?;
+    cmd.arg("-c");
+    piped_build(module, opts, cmd, out)
+}
+
+/// `mlir-opt | mlir-translate | clang <cmd> -x ir -`: the three tools
+/// start together (most of each one's time is its own startup) and no
+/// intermediate file is written. Without `tls_initial_exec`: the
+/// general-dynamic model is what a loaded cell wants anyway (Mach-O
+/// ignores the model).
+fn piped_build(
+    module: &CompiledModule,
+    opts: &BuildOptions,
+    mut cc: Command,
+    out: &Path,
+) -> Result<u32, RokDiagnostic> {
+    let mlir = mlir_text(module, opts)?;
+    let spawn = |cmd: &mut Command, what: &str| {
+        cmd.stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| err(format!("cannot run {what}: {e}")))
+    };
+    let mut opt = Command::new(locate_tool("mlir-opt")?);
+    opt.args(opt_passes(opts)).stdin(Stdio::piped());
+    let mut opt = spawn(&mut opt, "mlir-opt")?;
+    let mut translate = Command::new(locate_tool("mlir-translate")?);
+    translate
+        .arg("--mlir-to-llvmir")
+        .stdin(opt.stdout.take().expect("piped stdout"));
+    let mut translate = spawn(&mut translate, "mlir-translate")?;
+    cc.args(["-x", "ir", "-", "-o"])
+        .arg(out)
+        .stdin(translate.stdout.take().expect("piped stdout"));
+    let cc = spawn(&mut cc, "clang")?;
+    let mut stdin = opt.stdin.take().expect("piped stdin");
+    let text = mlir.text;
+    let writer = std::thread::spawn(move || stdin.write_all(text.as_bytes()));
+    // Each one's stderr on its own thread: a full pipe cannot stall the
+    // others.
+    let waits = [
+        (opt, "mlir-opt"),
+        (translate, "mlir-translate"),
+        (cc, "clang"),
+    ]
+    .map(|(c, what)| (std::thread::spawn(move || c.wait_with_output()), what));
+    let _ = writer.join();
+    for (w, what) in waits {
+        let o = w
+            .join()
+            .map_err(|_| err(format!("{what} waiter panicked")))?
+            .map_err(|e| err(format!("{what}: {e}")))?;
+        if !o.status.success() {
+            // The first tool that failed says why; the later ones only
+            // saw its missing output.
+            return Err(err(format!(
+                "{what} failed:\n{}",
+                String::from_utf8_lossy(&o.stderr)
+            )));
+        }
+    }
     Ok(mlir.gc_types)
+}
+
+fn opt_passes(opts: &BuildOptions) -> Vec<&'static str> {
+    let mut v = Vec::new();
+    if opts.opt_level != "0" {
+        v.extend(["--canonicalize", "--cse"]);
+    }
+    if opts.debug {
+        // Keep the locations in the text mlir-translate reads.
+        v.push("--mlir-print-debuginfo");
+    }
+    v.extend([
+        "--convert-func-to-llvm",
+        "--convert-arith-to-llvm",
+        "--convert-cf-to-llvm",
+        "--finalize-memref-to-llvm",
+        "--reconcile-unrealized-casts",
+    ]);
+    v
 }
 
 /// The REPL's session host: the C program `c_src` with the whole
@@ -347,21 +433,7 @@ fn llvm_ir(
         .map_err(|e| err(format!("cannot write {}: {e}", mlir_path.display())))?;
 
     let mut opt = Command::new(locate_tool("mlir-opt")?);
-    if opts.opt_level != "0" {
-        opt.args(["--canonicalize", "--cse"]);
-    }
-    if opts.debug {
-        // Keep the locations in the text mlir-translate reads.
-        opt.arg("--mlir-print-debuginfo");
-    }
-    opt.args([
-        "--convert-func-to-llvm",
-        "--convert-arith-to-llvm",
-        "--convert-cf-to-llvm",
-        "--finalize-memref-to-llvm",
-        "--reconcile-unrealized-casts",
-    ])
-    .arg(&mlir_path);
+    opt.args(opt_passes(opts)).arg(&mlir_path);
     let opt_out = output(&mut opt, "mlir-opt")?;
 
     let mut translate = Command::new(locate_tool("mlir-translate")?)

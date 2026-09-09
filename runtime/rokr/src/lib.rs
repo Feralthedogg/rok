@@ -20,7 +20,7 @@ use core::ptr;
 
 use core::sync::atomic::Ordering;
 
-use rokr_common::object_header::{FLAG_PINNED, HEADER_ALIGN, ObjectHeader};
+use rokr_common::object_header::HEADER_ALIGN;
 use rokr_common::{fatal, tls, write_stderr};
 
 mod deque;
@@ -161,28 +161,18 @@ pub unsafe extern "C" fn rok_gc_register_type(type_id: u32, scan_table: *const u
 /// # Safety
 /// `obj` must be a live GC object.
 #[unsafe(no_mangle)]
-#[allow(clippy::cast_ptr_alignment)] // GC objects are 8-aligned
 pub unsafe extern "C" fn rok_gc_pin(obj: *mut u8) -> *mut u8 {
     // SAFETY: caller contract.
-    unsafe {
-        (*obj.cast::<ObjectHeader>())
-            .gc_flags
-            .fetch_or(FLAG_PINNED, Ordering::Relaxed)
-    };
+    unsafe { rokr_gc::pin(obj) };
     obj
 }
 
 /// # Safety
 /// `obj` must be a live GC object.
 #[unsafe(no_mangle)]
-#[allow(clippy::cast_ptr_alignment)] // GC objects are 8-aligned
 pub unsafe extern "C" fn rok_gc_unpin(obj: *mut u8) {
     // SAFETY: caller contract.
-    unsafe {
-        (*obj.cast::<ObjectHeader>())
-            .gc_flags
-            .fetch_and(!FLAG_PINNED, Ordering::Relaxed)
-    };
+    unsafe { rokr_gc::unpin(obj) };
 }
 
 /// Register `word` (a static's reference word) as a GC root for the
@@ -747,6 +737,7 @@ fn stdout() -> *mut libc::FILE {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rokr_common::object_header::ObjectHeader;
 
     #[test]
     #[allow(clippy::cast_ptr_alignment)] // asserted 64-aligned below
