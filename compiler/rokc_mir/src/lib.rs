@@ -158,6 +158,13 @@ pub enum Statement {
         value: Operand,
         ty: MirTy,
     },
+    /// The statements up to the matching `MlirRegionEnd` are one region
+    /// of the next `RValue::MlirOp` (bare 1.9), its entry block taking
+    /// `params`. Regions nest; the op takes the last `regions` closed.
+    MlirRegion {
+        params: Vec<LocalId>,
+    },
+    MlirRegionEnd,
 }
 
 #[derive(Clone, Debug)]
@@ -282,6 +289,16 @@ pub enum RValue {
         elem_ty: MirTy,
         order: [&'static str; 2],
     },
+    // `HirExprKind::MlirOp`: one MLIR op in generic form; `args` with
+    // their types, the result is the target's `ty` (`Unit`: none);
+    // its `regions` are the last ones closed (`Statement::MlirRegion`).
+    MlirOp {
+        op: String,
+        attrs: Vec<(String, String)>,
+        args: Vec<(Operand, MirTy)>,
+        ty: MirTy,
+        regions: u32,
+    },
     // Load the `ty` payload of the `GcRef` `ptr` (a `HeapBox` object),
     // or unpack an inline payload.
     HeapLoad {
@@ -299,12 +316,14 @@ pub enum RValue {
         ty: MirTy,
         index: u32,
     },
-    // Indirect call through a function-typed operand.
+    // Indirect call through a function-typed operand. `c_abi`: an
+    // `extern "C" fn` pointer, called with the C ABI (spec 5.9.4).
     CallIndirect {
         callee: Operand,
         args: Vec<Operand>,
         arg_tys: Vec<MirTy>,
         ret_ty: MirTy,
+        c_abi: bool,
     },
 }
 
@@ -359,4 +378,7 @@ pub enum MirTy {
     /// and traces exactly these words; the collector ignores a word that
     /// is not an object address.
     GcRef,
+    /// `__mlir_type<"text">` (stdlib bare 1.9): an opaque MLIR type;
+    /// its values are SSA only (no slot, never in memory).
+    Mlir(String),
 }

@@ -356,15 +356,20 @@ fn jupyter_kernel_speaks_the_wire_protocol() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    // The kernel binds every socket before anything slow, but on a loaded
+    // machine its process can take long to start: poll up to 60s.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
     let connect = |port: u16, kind: &str| {
-        let mut s = (0..200)
-            .find_map(|_| {
-                TcpStream::connect(("127.0.0.1", port)).ok().or_else(|| {
-                    std::thread::sleep(Duration::from_millis(50));
-                    None
-                })
-            })
-            .expect("the kernel does not listen");
+        let mut s = loop {
+            if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
+                break s;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the kernel does not listen on {port} after 60s"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        };
         s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
         handshake(&mut s, kind).unwrap();
         s

@@ -13,7 +13,10 @@ pub fn lower_ty(ty: &HirTy) -> MirTy {
         HirTy::Unit | HirTy::Never => MirTy::Unit,
         HirTy::Prim(p) => MirTy::Prim(*p),
         HirTy::AnyTrait(_) => any_ty(),
-        HirTy::Sum(parts) => sum_layout(&non_none(parts).map(lower_ty).collect::<Vec<_>>()),
+        HirTy::Sum(parts) => match c_fn_niche(parts) {
+            Some(f) => lower_ty(f),
+            None => sum_layout(&non_none(parts).map(lower_ty).collect::<Vec<_>>()),
+        },
         HirTy::Tuple(parts) => MirTy::Tuple(parts.iter().map(lower_ty).collect()),
         // Struct types need the field shape; this stub only allocates
         // the marker — see `lower_ty_in` for the concrete shape.
@@ -25,12 +28,17 @@ pub fn lower_ty(ty: &HirTy) -> MirTy {
         // Spec 4.4: every function value — named fn or closure — is
         // `{code, env}`: `code` takes the `GcRef` env first; a named fn's
         // env is null, a closure's is its boxed captures. Bounds (`+ Send`)
-        // don't change the layout.
+        // don't change the layout. A C function pointer is the bare code
+        // pointer, without the env.
+        HirTy::Fn(args, ret, _) if ty.is_c_fn() => {
+            MirTy::Fn(args.iter().map(lower_ty).collect(), Box::new(lower_ty(ret)))
+        }
         HirTy::Fn(args, ret, _) | HirTy::Closure { args, ret, .. } => {
             fat_fn(args.iter().map(lower_ty).collect(), lower_ty(ret))
         }
         HirTy::Throws { ok, err } => carrier(lower_ty(ok), lower_ty(err)),
         HirTy::GcBuf(_) => MirTy::GcRef,
+        HirTy::Mlir(t) => MirTy::Mlir(t.clone()),
     }
 }
 
@@ -102,17 +110,24 @@ pub fn lower_ty_in(ty: &HirTy, module: &HirModule) -> MirTy {
                     .collect(),
             )
         }
-        HirTy::Sum(parts) => sum_layout(
-            &non_none(parts)
-                .map(|p| lower_ty_in(p, module))
-                .collect::<Vec<_>>(),
-        ),
+        HirTy::Sum(parts) => match c_fn_niche(parts) {
+            Some(f) => lower_ty_in(f, module),
+            None => sum_layout(
+                &non_none(parts)
+                    .map(|p| lower_ty_in(p, module))
+                    .collect::<Vec<_>>(),
+            ),
+        },
         HirTy::Tuple(parts) => MirTy::Tuple(parts.iter().map(|t| lower_ty_in(t, module)).collect()),
         HirTy::Enum(id) => sum_layout(&enum_payloads(
             &module.enums[id.0 as usize].variants,
             module,
         )),
         HirTy::Array(elem, n) => MirTy::Array(Box::new(lower_ty_in(elem, module)), *n),
+        HirTy::Fn(args, ret, _) if ty.is_c_fn() => MirTy::Fn(
+            args.iter().map(|a| lower_ty_in(a, module)).collect(),
+            Box::new(lower_ty_in(ret, module)),
+        ),
         HirTy::Fn(args, ret, _) | HirTy::Closure { args, ret, .. } => fat_fn(
             args.iter().map(|a| lower_ty_in(a, module)).collect(),
             lower_ty_in(ret, module),
@@ -122,10 +137,49 @@ pub fn lower_ty_in(ty: &HirTy, module: &HirModule) -> MirTy {
     }
 }
 
+fn is_none(v: &HirTy) -> bool {
+    matches!(v, HirTy::Path(p) if p.as_slice() == ["none"])
+}
+
 fn non_none(variants: &[HirTy]) -> impl Iterator<Item = &HirTy> {
-    variants
-        .iter()
-        .filter(|v| !matches!(v, HirTy::Path(p) if p.as_slice() == ["none"]))
+    variants.iter().filter(|v| !is_none(v))
+}
+
+/// The null niche (spec 5.9.4): `extern "C" fn(..) | none` — a C
+/// function pointer and `none`, nothing else — is the bare pointer, null
+/// = `none` (like Rust's `Option<extern "C" fn>`), so it crosses the C
+/// ABI unchanged. Returns the fn member. MIR builds it in `SumWrap`
+/// (the pointer / null), tests it in `extract_tag` (`ptr != null` is the
+/// fn member's stored tag 1, null is `none`'s 0) and unwraps it as the
+/// pointer itself; a wider sum re-tags member by member (`resum`).
+fn c_fn_niche(parts: &[HirTy]) -> Option<&HirTy> {
+    match parts {
+        [f, n] | [n, f] if is_none(n) && f.is_c_fn() => Some(f),
+        _ => None,
+    }
+}
+
+/// `sum_ty` uses the [`c_fn_niche`] layout.
+#[must_use]
+pub fn is_c_fn_niche(sum_ty: &HirTy) -> bool {
+    matches!(sum_ty, HirTy::Sum(parts) if c_fn_niche(parts).is_some())
+}
+
+/// Stored tag of member `index` of `sum_ty`. A sum with `none` stores
+/// `none` as tag 0 and shifts the members before it up by one, so
+/// zeroed memory (a fresh `GcBuf` / `List` slot) reads back as `none`.
+/// HIR keeps the canonical member index (`none` last); only the bits
+/// differ. Other types (enums, `any`) store the index as is.
+#[must_use]
+pub fn sum_tag(sum_ty: &HirTy, index: u32) -> u32 {
+    let HirTy::Sum(parts) = sum_ty else {
+        return index;
+    };
+    match parts.iter().position(is_none).map(|k| k as u32) {
+        Some(k) if index == k => 0,
+        Some(k) if index < k => index + 1,
+        _ => index,
+    }
 }
 
 /// The single tagged-union layout shared by enums and sums:
@@ -201,7 +255,9 @@ pub fn has_gc_ref(ty: &MirTy) -> bool {
 pub fn size_align(ty: &MirTy) -> (u32, u32) {
     match ty {
         MirTy::Unit => (0, 1),
-        MirTy::Any | MirTy::GcRef | MirTy::Fn(_, _) => (8, 8),
+        // ponytail: an MLIR type is pointer-sized here; its values stay
+        // SSA (never stored), so only an aggregate holding one asks.
+        MirTy::Any | MirTy::GcRef | MirTy::Fn(_, _) | MirTy::Mlir(_) => (8, 8),
         MirTy::Prim(PrimTy::Str) => (16, 8),
         MirTy::Prim(p) => {
             let b = p.bit_width(64) / 8;
@@ -289,6 +345,43 @@ mod tests {
             unify_payload(&[pair, p(PrimTy::I16)]),
             Some(MirTy::Array(Box::new(p(PrimTy::U32)), 2))
         );
+    }
+
+    #[test]
+    fn c_fn_or_none_is_a_bare_pointer() {
+        let i64_ = HirTy::Prim(PrimTy::I64);
+        let c_fn = HirTy::Fn(
+            vec![i64_.clone()],
+            Box::new(i64_.clone()),
+            vec!["#extern_c".to_owned()],
+        );
+        let none = HirTy::Path(vec!["none".to_owned()]);
+        let thin = MirTy::Fn(vec![p(PrimTy::I64)], Box::new(p(PrimTy::I64)));
+        for parts in [
+            vec![c_fn.clone(), none.clone()],
+            vec![none.clone(), c_fn.clone()],
+        ] {
+            let sum = HirTy::Sum(parts);
+            assert!(is_c_fn_niche(&sum));
+            assert_eq!(lower_ty(&sum), thin);
+            // Non-null tests as the fn member's stored tag.
+            assert_eq!(sum_tag(&sum, sum_tag_index(&sum, &c_fn)), 1);
+        }
+        assert!(!has_gc_ref(&thin));
+        // A wider sum keeps the tagged layout.
+        let wide = HirTy::Sum(vec![c_fn, i64_, none.clone()]);
+        assert!(!is_c_fn_niche(&wide));
+        assert!(matches!(lower_ty(&wide), MirTy::Tuple(_)));
+        // A rok `fn` value or none is no niche.
+        let rok_fn = HirTy::Fn(vec![], Box::new(HirTy::Unit), vec![]);
+        assert!(!is_c_fn_niche(&HirTy::Sum(vec![rok_fn, none])));
+    }
+
+    fn sum_tag_index(sum: &HirTy, member: &HirTy) -> u32 {
+        let HirTy::Sum(parts) = sum else {
+            unreachable!()
+        };
+        parts.iter().position(|m| m == member).unwrap() as u32
     }
 
     #[test]

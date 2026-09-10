@@ -568,6 +568,7 @@ impl WrappingFrom<Float> for f32 { fn wrapping_from(value: Float) -> f32 { value
 /// Truncated toward zero (spec 2.11.8 `float → i32`: `try_into`
 /// truncates); NaN, ±inf or out of range throw.
 impl TryFrom<Float> for i32 {
+    type Error = OverflowError;
     fn try_from(value: Float) throws (OverflowError) -> i32 {
         match value.to_int() {
             v: Int => try i32::try_from(v),
@@ -576,6 +577,7 @@ impl TryFrom<Float> for i32 {
     }
 }
 impl TryFrom<Float> for i64 {
+    type Error = OverflowError;
     fn try_from(value: Float) throws (OverflowError) -> i64 {
         match value.to_int() {
             v: Int => try i64::try_from(v),

@@ -1,0 +1,77 @@
+// expect-exit: 0
+// rokc-arg: --cfg fancy
+// expect-stdout:
+// fancy
+// 2
+// plain
+// 3
+
+// Spec 6.9.8: `#[cfg]` runs before meta expansion — a meta block whose
+// own `#[cfg(..)]` is false is not registered, so two blocks may define
+// the same attribute under exclusive conditions.
+#[cfg(fancy)]
+#[impl_attribute(tagged)]
+pub @attribute {
+    @accept(fn)
+    fn @item.name(@item.params) -> @item.return_type {
+        rok_print_str("fancy");
+        @item.body
+    }
+}
+
+#[cfg(not(fancy))]
+#[impl_attribute(tagged)]
+pub @attribute {
+    @accept(fn)
+    fn @item.name(@item.params) -> @item.return_type {
+        rok_print_str("plain");
+        @item.body
+    }
+}
+
+// Not registered, so it may take a name another block registers.
+#[cfg(nope)]
+#[impl_attribute(plain_only)]
+pub @attribute {
+    @accept(fn)
+    @item
+}
+
+#[cfg(not(nope))]
+#[impl_attribute(plain_only)]
+pub @attribute {
+    @accept(fn)
+    fn @item.name(@item.params) -> @item.return_type {
+        rok_print_str("plain");
+        @item.body
+    }
+}
+
+// The cfg of an enclosing inline `mod` holds for the blocks inside it:
+// this one is not registered either (else `plain_only` is defined twice).
+#[cfg(nope)]
+pub mod off {
+    mod inner {
+        #[impl_attribute(plain_only)]
+        pub @attribute {
+            @accept(fn)
+            @item
+        }
+    }
+}
+
+#[tagged]
+fn two() -> i32 {
+    2
+}
+
+#[plain_only]
+fn three() -> i32 {
+    3
+}
+
+fn main() -> i32 {
+    rok_print_str(f"{two()}");
+    rok_print_str(f"{three()}");
+    0
+}

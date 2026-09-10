@@ -1,0 +1,90 @@
+// expect-exit: 0
+// expect-stdout:
+// default: negative
+// even 4
+// overflow: try_from: value out of range for `u8`
+// path: path is not UTF-8 (valid up to byte 1)
+// path ok a/b
+// generic 200 / OverflowError
+// generic even: odd
+// from str: odd length 3
+// propagated OverflowError
+// char: try_from: value out of range for `char`
+
+// Stdlib spec 2.11.4: `TryFrom<U>` throws its associated `Error`, which
+// defaults to `ConversionError`; the numeric impls say `OverflowError`,
+// `Path` says `NonUtf8Error`. `try_into` throws the target's `Error`,
+// and a generic fn can name it as `T::Error`.
+
+use rok::std::path::{Path, RawPath, NonUtf8Error};
+
+struct Even { v: i64; }
+
+// No `type Error`: the default `ConversionError`.
+impl TryFrom<i64> for Even {
+    fn try_from(value: i64) throws (Self::Error) -> Even {
+        if value < 0 { throw ConversionError { msg: "negative" }; }
+        if value % 2 != 0 { throw ConversionError { msg: "odd" }; }
+        Even { v: value }
+    }
+}
+
+// A second `TryFrom` with another `Error`: `T::Error` under the bound
+// `TryFrom<i64>` (and `try_into` from `str`) picks the matching impl.
+impl TryFrom<str> for Even {
+    type Error = ValueError;
+    fn try_from(value: str) throws (ValueError) -> Even {
+        if value.len() % 2 != 0 { throw ValueError { msg: f"odd length {value.len()}" }; }
+        Even { v: value.len() as i64 }
+    }
+}
+
+fn conv<T: TryFrom<i64>>(x: i64) throws (T::Error) -> T { try T::try_from(x) }
+
+fn narrow(x: i64) throws (OverflowError) -> u8 {
+    let b: u8 = try x.try_into();
+    b
+}
+
+fn main() {
+    let e = try Even::try_from(-1) catch e: ConversionError {
+        println(f"default: {e}");
+        Even { v: 0 }
+    };
+    let four: i64 = 4;
+    let f: Even = try four.try_into() catch _: ConversionError { Even { v: 0 } };
+    println(f"even {f.v}");
+    let b: u8 = try 300.try_into() catch e: OverflowError {
+        println(f"overflow: {e}");
+        0
+    };
+
+    let bad = RawPath::from_bytes([0x61, 0xff]);
+    let p = try Path::try_from(bad) catch e: NonUtf8Error {
+        println(f"path: {e}");
+        Path::new()
+    };
+    let ok: Path = try RawPath::from_bytes([0x61, 0x2f, 0x62]).try_into() catch _: NonUtf8Error {
+        Path::new()
+    };
+    println(f"path ok {ok.as_str()}");
+
+    let g: u8 = try conv::<u8>(200) catch _: OverflowError { 0 };
+    let h: u8 = try conv::<u8>(-1) catch _: OverflowError { 0 };
+    println(f"generic {g} / OverflowError");
+    let i = try conv::<Even>(3) catch e: ConversionError {
+        println(f"generic even: {e}");
+        Even { v: 0 }
+    };
+    let s: str = "abc";
+    let j: Even = try s.try_into() catch e: ValueError {
+        println(f"from str: {e}");
+        Even { v: 0 }
+    };
+    try narrow(1000) catch e: OverflowError { println("propagated OverflowError"); 0 };
+    let c = try char::try_from(0xD800 as u32) catch e: OverflowError {
+        println(f"char: {e}");
+        'x'
+    };
+    let _ = (e.v, b, p, h, i.v, j.v, c);
+}

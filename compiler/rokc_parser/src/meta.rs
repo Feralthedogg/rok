@@ -62,6 +62,9 @@ pub struct MetaDef {
     pub span: Span,
     /// Tokens between the body's braces.
     pub body: Vec<Token>,
+    /// The block's own `#[cfg(..)]` attributes: the driver registers it
+    /// only when they hold (6.9.8: cfg runs before expansion).
+    pub cfg: Vec<Attribute>,
 }
 
 /// Every meta block of the compilation, by name.
@@ -155,9 +158,21 @@ impl MetaTable {
 pub fn collect_meta_blocks(tokens: &[Token], file: &str) -> Vec<MetaDef> {
     let mut p = Parser::new(tokens, file);
     let mut out = Vec::new();
+    // Open inline `mod`s: the index of their closing `}` and their
+    // `#[cfg(..)]`s, which hold for every block inside too.
+    let mut mods: Vec<(usize, Vec<Attribute>)> = Vec::new();
     while !p.at_eof() {
+        mods.retain(|(end, _)| p.pos < *end);
+        if let Some(m) = p.cfg_mod_open() {
+            mods.push(m);
+            continue;
+        }
         match p.meta_block() {
-            Some(Some(d)) => out.push(d),
+            Some(Some(mut d)) => {
+                d.cfg
+                    .extend(mods.iter().flat_map(|(_, c)| c.iter().cloned()));
+                out.push(d);
+            }
             Some(None) => {}
             None => {
                 p.bump();
@@ -1101,6 +1116,35 @@ impl Parser<'_> {
     /// At `#[..] pub? @derive { .. }`: consume the meta block. `None`
     /// (position unchanged) when the attributes aren't a meta block;
     /// `Some(None)` for a malformed one (reported).
+    /// `#[cfg(..)] mod m {`: steps into the body and returns the index
+    /// of its closing `}` and the `cfg`s. Anything else: `None`, nothing
+    /// consumed.
+    fn cfg_mod_open(&mut self) -> Option<(usize, Vec<Attribute>)> {
+        if self.peek() != &TokenKind::HashLBracket {
+            return None;
+        }
+        let (start, n_diags) = (self.pos, self.diagnostics.len());
+        let attrs = self.parse_outer_attrs();
+        self.parse_visibility();
+        let open = self.pos + 2;
+        let is_mod = self.peek() == &TokenKind::Mod
+            && matches!(
+                self.tokens.get(open).map(|t| &t.kind),
+                Some(TokenKind::LBrace)
+            );
+        let cfg: Vec<Attribute> = attrs.into_iter().filter(|a| a.name() == "cfg").collect();
+        let Some(end) = (is_mod && !cfg.is_empty())
+            .then(|| close_of(self.tokens, open))
+            .flatten()
+        else {
+            self.pos = start;
+            self.diagnostics.truncate(n_diags);
+            return None;
+        };
+        self.pos = open + 1;
+        Some((end, cfg))
+    }
+
     pub(crate) fn meta_block(&mut self) -> Option<Option<MetaDef>> {
         if self.peek() != &TokenKind::HashLBracket {
             return None;
@@ -1187,6 +1231,7 @@ impl Parser<'_> {
             file: self.file.clone(),
             span: ma.span,
             body: self.tokens[body_start + 1..end].to_vec(),
+            cfg: attrs.into_iter().filter(|a| a.name() == "cfg").collect(),
         }))
     }
 

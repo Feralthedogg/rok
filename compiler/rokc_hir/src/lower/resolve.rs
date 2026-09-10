@@ -45,7 +45,10 @@ pub(super) fn lookup_in_use_entries_full(
                 } else {
                     format!("{prefix}::{suffix}")
                 };
-                if (set.exists)(&candidate) && !glob_hits.contains(&candidate) {
+                if (set.exists)(&candidate)
+                    && (set.visible)(&candidate)
+                    && !glob_hits.contains(&candidate)
+                {
                     glob_hits.push(candidate);
                 }
             }
@@ -55,7 +58,7 @@ pub(super) fn lookup_in_use_entries_full(
                 } else {
                     format!("{prefix}::{suffix}")
                 };
-                if (set.exists)(&direct) && !glob_hits.contains(&direct) {
+                if (set.exists)(&direct) && (set.visible)(&direct) && !glob_hits.contains(&direct) {
                     glob_hits.push(direct);
                     continue;
                 }
@@ -68,6 +71,7 @@ pub(super) fn lookup_in_use_entries_full(
                 for key in (set.keys)() {
                     if key.starts_with(&prefix_with_sep)
                         && key.ends_with(&suffix_with_sep)
+                        && (set.visible)(&key)
                         && !glob_hits.contains(&key)
                     {
                         glob_hits.push(key);
@@ -167,6 +171,34 @@ pub(super) fn resolve_name(
 /// The compiler-known GC buffer type (`HirTy::GcBuf`), declared in core
 /// so the name resolves.
 pub const GC_BUF: &str = "rok::core::collections::raw::GcBuf";
+pub const MLIR_TYPE: &str = "rok::bare::mlir::__mlir_type";
+
+/// A string literal (`"arith.addi"`), as a const type argument or an
+/// expression.
+pub(super) fn str_lit_of(e: &rokc_ast::Expr) -> Option<&str> {
+    match &e.kind {
+        rokc_ast::ExprKind::Literal(rokc_ast::Literal::Str(s) | rokc_ast::Literal::RawStr(s)) => {
+            Some(s)
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn str_targ(t: &rokc_ast::Ty) -> Option<&str> {
+    match &t.kind {
+        AstTyKind::Const(rokc_ast::ConstExpr::Expr(e)) => str_lit_of(e),
+        AstTyKind::Const(rokc_ast::ConstExpr::Literal(rokc_ast::Literal::Str(s))) => Some(s),
+        _ => None,
+    }
+}
+
+/// `__mlir_type<"text">` (stdlib bare 1.9): an opaque MLIR type.
+pub(super) fn mlir_ty(full: &str, generics: &[rokc_ast::Ty]) -> Option<HirTy> {
+    match (full, generics) {
+        (MLIR_TYPE, [t]) => str_targ(t).map(|s| HirTy::Mlir(s.to_owned())),
+        _ => None,
+    }
+}
 
 /// Module path the driver mounts `library/core` under.
 pub const CORE_PREFIX: &str = "rok::core";
@@ -389,6 +421,9 @@ pub(super) fn resolve_ty_with_structs(
             if let (GC_BUF, [elem]) = (full.as_str(), generics) {
                 return HirTy::GcBuf(Box::new(rec(elem)));
             }
+            if let Some(t) = mlir_ty(&full, generics) {
+                return t;
+            }
             if generics.is_empty() {
                 // Depth-capped: a cyclic alias stays a path and is
                 // reported by the alias pass.
@@ -591,6 +626,12 @@ pub(super) fn ty_mangle(ty: &HirTy) -> String {
     match ty {
         HirTy::GcBuf(t) => format!("GcBuf{}", ty_mangle(t)),
         HirTy::Never => "Never".to_owned(),
+        HirTy::Mlir(t) => format!(
+            "Mlir{}",
+            t.chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect::<String>()
+        ),
         HirTy::Struct(id) => format!("Struct{}", id.0),
         HirTy::Enum(id) => format!("Enum{}", id.0),
         HirTy::Prim(p) => p.name().to_owned(),

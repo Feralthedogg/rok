@@ -147,14 +147,8 @@ fn print_expr(out: &mut String, e: &HirExpr) {
             out.push(')');
         }
         HirExprKind::Call { callee, args } => {
-            let _ = write!(out, "fn#{}(", callee.0);
-            for (i, a) in args.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                print_expr(out, a);
-            }
-            out.push(')');
+            let _ = write!(out, "fn#{}", callee.0);
+            print_args(out, args);
         }
         HirExprKind::FnRef(id) => {
             let _ = write!(out, "&fn#{}", id.0);
@@ -319,6 +313,10 @@ fn print_expr(out: &mut String, e: &HirExpr) {
             print_expr(out, value);
             out.push(')');
         }
+        HirExprKind::MlirOp { op, args, .. } => {
+            let _ = write!(out, "__mlir_op::<{op:?}>");
+            print_args(out, args);
+        }
         HirExprKind::BufAtomic {
             op,
             buf,
@@ -414,6 +412,18 @@ fn print_expr(out: &mut String, e: &HirExpr) {
             out.push('}');
         }
     }
+}
+
+/// `(a, b, ..)`.
+fn print_args(out: &mut String, args: &[HirExpr]) {
+    out.push('(');
+    for (i, a) in args.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        print_expr(out, a);
+    }
+    out.push(')');
 }
 
 fn print_coro(out: &mut String, e: &HirExpr) {
@@ -570,6 +580,7 @@ fn ty_str(t: &HirTy) -> String {
     match t {
         HirTy::GcBuf(e) => format!("GcBuf<{}>", ty_str(e)),
         HirTy::Never => "!".to_owned(),
+        HirTy::Mlir(t) => format!("__mlir_type<{t:?}>"),
         HirTy::Unknown => "?".to_owned(),
         HirTy::Unit => "()".to_owned(),
         HirTy::Prim(p) => p.name().to_owned(),

@@ -1,0 +1,64 @@
+// expect-exit: 0
+// expect-stdout:
+// 9 0 15 6
+// 3 0 2
+// first=1 rest=[2, 3]
+// 3: int int int
+// 4: int hi int int
+// 8 6
+// 7
+
+// Spec 4.2.5 / 4.2.6: a variadic `...T` body sees a `Slice<T>` (one
+// instantiation for every argument count), so a `List` spread passes
+// a runtime number of arguments; spreads mix with plain arguments.
+
+fn sum(xs: ...i32) -> i32 {
+    let total = 0;
+    for x in xs { total = total + x; }
+    total
+}
+
+fn count<T>(xs: ...T) -> usize { xs.len() }
+
+fn head_rest<T: Debug>(first: T, rest: ...T) -> str {
+    f"first={first.debug()} rest={rest.debug()}"
+}
+
+fn log_all(xs: ...any) {
+    print(f"{xs.len()}:");
+    for x in xs {
+        if x is i32 {
+            print(" int");
+        } else if x is str {
+            print(f" {x}");
+        } else {
+            print(" other");
+        }
+    }
+    println("");
+}
+
+// A `Slice` spread forwards one variadic call's arguments to another.
+fn forward(xs: ...i32) -> i32 { sum(..xs) }
+
+struct Acc { base: i32 }
+
+impl Acc {
+    fn add(self, xs: ...i32) -> i32 { self.base + sum(..xs) }
+}
+
+fn main() -> i32 {
+    let ys: List<i32> = [2, 3, 4];
+    let empty: List<i32> = List::new();
+    let t = (1i32, 2i32);
+    println(f"{sum(..ys)} {sum(..empty)} {sum(1, ..ys, 5)} {sum(..t, ..[3i32])}");
+    let words: List<str> = ["a", "b"];
+    println(f"{count(1, 2, 3)} {count(..empty)} {count(..words)}");
+    println(head_rest(1, ..[2, 3]));
+    log_all(..ys);
+    log_all(1i32, "hi", ..[5i32, 6i32]);
+    let arr = [1i32, 2i32, 3i32];
+    println(f"{forward(..ys[0:1], ..arr[1:3], 1)} {sum(..arr)}");
+    println(f"{Acc { base: 4 }.add(..[1i32, 2i32])}");
+    0
+}

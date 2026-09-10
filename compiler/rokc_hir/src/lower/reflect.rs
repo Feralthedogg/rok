@@ -165,6 +165,7 @@ pub(super) fn dynamic(ctx: &mut LowerCtx<'_>, recv: HirExpr, method: &str) -> Hi
                 param_tys: vec![recv.ty.clone()],
                 param_names: vec!["#0".to_owned()],
                 param_refs: Vec::new(),
+                variadic: false,
             };
             let id = any_dispatcher(ctx, &recv.ty, REFLECT, method, &sig, span);
             HirExpr {

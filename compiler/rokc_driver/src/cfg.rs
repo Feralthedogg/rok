@@ -123,7 +123,12 @@ fn item_passes(item: &Item, env: &CfgEnv) -> bool {
     // (a bench build is a test build, as with cargo).
     (env.flags.contains("test")
         || !(crate::harness::is_test(attrs) || crate::harness::has_attr(attrs, "bench")))
-        && attrs.iter().all(|a| !is_cfg(a) || eval_cfg_attr(a, env))
+        && attrs_pass(attrs, env)
+}
+
+/// Whether every `#[cfg(..)]` among `attrs` holds.
+pub fn attrs_pass(attrs: &[Attribute], env: &CfgEnv) -> bool {
+    attrs.iter().all(|a| !is_cfg(a) || eval_cfg_attr(a, env))
 }
 
 fn is_cfg(a: &Attribute) -> bool {

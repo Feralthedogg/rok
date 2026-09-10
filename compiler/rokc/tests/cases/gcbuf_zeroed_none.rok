@@ -1,0 +1,36 @@
+// A zeroed `T | none` slot is `none`: the `none` member is stored as tag
+// 0 whatever the canonical member order, so a fresh `GcBuf` reads back
+// as `none` (no explicit initialisation needed).
+// expect-exit: 0
+// expect-stdout:
+// none none none none
+// 7 hi 3
+// 1
+
+struct P { s: str; xs: List<i32>; }
+
+fn show<T: Display>(v: T | none) -> str {
+    match v {
+        none => "none",
+        x: T => x.display(),
+    }
+}
+
+fn main() -> i32 {
+    let ps: GcBuf<P | none> = buf_new(4);
+    let ns: GcBuf<i32 | none> = buf_new(4);
+    let ss: GcBuf<str | none> = buf_new(4);
+    let mixed: GcBuf<i32 | bool | none> = buf_new(4);
+    let p_none = match ps[3] { none => "none", _: P => "P" };
+    let m_none = match mixed[0] { none => "none", _: i32 | bool => "some" };
+    println(f"{p_none} {show(ns[2])} {show(ss[1])} {m_none}");
+    ns[2] = 7;
+    ss[1] = "hi";
+    ps[3] = P { s: "x", xs: [1, 2, 3] };
+    let n: usize = match ps[3] { p: P => p.xs.len(), none => 0 };
+    println(f"{show(ns[2])} {show(ss[1])} {n}");
+    let nested: GcBuf<(i32 | none)?> = buf_new(2);
+    let outer_none = match nested[1] { none => 1, _: i32 | none => 2 };
+    println(f"{outer_none}");
+    return 0;
+}

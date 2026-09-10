@@ -25,8 +25,8 @@ pub use cfg::CfgEnv;
 pub use rokc_codegen_mlir::ReplCell;
 pub use rokc_codegen_mlir::{Demangled, demangle};
 pub use toolchain::{
-    BuildOptions, EmitKind, TempDir, build_archive, compile_object, emit, link_executable,
-    link_host, link_shared, mlir_text,
+    BuildOptions, EmitKind, TempDir, build_archive, compile_object, emit, find_mlir_plugin,
+    link_executable, link_host, link_shared, mlir_text,
 };
 
 // Independent switches, one per session setter.
@@ -425,8 +425,23 @@ fn compile_unit(
     let user_metas = format!("{:?}", &metas.metas[lib_metas..]);
     let ext = prec.ext_ops();
     relex_metas(&mut metas, &ext);
+    // Build cfg env from CLI flags + automatic target keys.
+    let mut cfg_env = CfgEnv::new();
+    cfg_env.populate_target_defaults();
+    for f in &config.cfg_flags {
+        cfg_env.add(f);
+    }
+    if config.test || config.bench {
+        cfg_env.add("test");
+    }
     let mut meta_table = MetaTable::default();
-    diags.extend(metas.metas.into_iter().filter_map(|m| meta_table.add(m)));
+    diags.extend(
+        metas
+            .metas
+            .into_iter()
+            .filter(|m| cfg::attrs_pass(&m.cfg, &cfg_env))
+            .filter_map(|m| meta_table.add(m)),
+    );
     let meta_table = std::sync::Arc::new(meta_table);
     let root_dir_kw = path
         .parent()
@@ -448,15 +463,6 @@ fn compile_unit(
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     // Spec 4.16.8: the anonymous package has no file submodules.
     let sub_dir = (!config.anonymous).then_some(root_dir.as_path());
-    // Build cfg env from CLI flags + automatic target keys.
-    let mut cfg_env = CfgEnv::new();
-    cfg_env.populate_target_defaults();
-    for f in &config.cfg_flags {
-        cfg_env.add(f);
-    }
-    if config.test || config.bench {
-        cfg_env.add("test");
-    }
     let mut sources = Vec::new();
 
     let mut all_items: Vec<rokc_ast::Item> = Vec::new();
@@ -1135,11 +1141,18 @@ fn walk_mod_decls(
         let rokc_ast::Item::Mod(m) = item else {
             continue;
         };
+        let before = metas.metas.len();
         match &m.items {
             // Inline module: `mod name { ... }` — walk its items directly.
             Some(inline_items) => walk_mod_decls(inline_items, submodule_dir, diags, out, metas),
             // File-mapped module: resolve sibling `name.rok`.
             None => resolve_file_mod(&m.name, submodule_dir, diags, out, metas),
+        }
+        // The module's `#[cfg]` holds for the meta blocks of its files
+        // (the pre-pass registers a block only when its cfgs hold).
+        let cfg = m.attrs.iter().filter(|a| a.name() == "cfg");
+        for d in &mut metas.metas[before..] {
+            d.cfg.extend(cfg.clone().cloned());
         }
     }
 }

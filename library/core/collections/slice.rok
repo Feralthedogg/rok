@@ -44,7 +44,7 @@ impl<T> Slice<T> {
         if i >= self.len {
             return none;
         }
-        self.buf[self.at(i)]
+        return self.buf[self.at(i)];
     }
 
     pub fn first(self) -> T | none {
@@ -96,7 +96,8 @@ impl<T> Iterator for SliceIter<T> {
             return none;
         }
         self.i += 1;
-        self.s.buf[self.s.at(self.i - 1)]
+        // `return`: with `T = ()` a bare tail reads as a missing value.
+        return self.s.buf[self.s.at(self.i - 1)];
     }
 }
 

@@ -1,0 +1,11 @@
+// expect-error: an `extern "C" fn` value is a bare C function pointer
+// A C function pointer does not flow into a rok `fn` slot (spec 5.9.4):
+// other ABI, no env.
+
+extern "C" fn add(a: i32, b: i32) -> i32 { a + b }
+
+fn main() {
+    let c: extern "C" fn(i32, i32) -> i32 = add;
+    let r: fn(i32, i32) -> i32 = c;
+    println(f"{r(1, 2)}");
+}

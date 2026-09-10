@@ -1,0 +1,80 @@
+// expect-exit: 0
+// expect-stdout:
+// default EA2
+// override EB1
+// projection EA3
+// generic default EA4
+// let EA9
+// pair i64 7
+
+// Associated type defaults (spec 2.8.3): `type X = T;` in a trait. An
+// impl that omits `type X` gets the default — resolved in the trait's
+// module, with the trait's parameters replaced by the impl's
+// arguments — and one that writes it overrides it. `Self::X` in a
+// `throws` list, `T::X` through a generic bound and `<T as Tr>::X` all
+// see the chosen type.
+
+mod errs {
+    pub struct EA { pub n: i32; }
+    impl Display for EA { fn display(self) -> str { f"EA{self.n}" } }
+    impl Debug for EA { fn debug(self) -> str { f"EA{self.n}" } }
+    impl Error for EA {}
+}
+
+mod conv {
+    use sup::errs::EA;
+    // `EA` is only in scope here: the default is resolved in this module.
+    pub trait Conv<U> {
+        type Err = EA;
+        type Out = U;
+        fn conv(value: U) throws (Self::Err) -> Self;
+        fn out(self) -> Self::Out;
+    }
+}
+
+use conv::Conv;
+
+struct EB { n: i32; }
+impl Display for EB { fn display(self) -> str { f"EB{self.n}" } }
+impl Debug for EB { fn debug(self) -> str { f"EB{self.n}" } }
+impl Error for EB {}
+
+struct P { v: i64; }
+impl Conv<i64> for P {
+    type Err = EB;
+    fn conv(value: i64) throws (Self::Err) -> P {
+        if value < 0 { throw EB { n: 1 }; }
+        P { v: value }
+    }
+    fn out(self) -> i64 { self.v }
+}
+
+struct Q { v: i64; }
+impl Conv<i64> for Q {
+    fn conv(value: i64) throws (Err) -> Q {
+        if value < 0 { throw errs::EA { n: (-value) as i32 }; }
+        Q { v: value }
+    }
+    fn out(self) -> Out { self.v }
+}
+
+fn go<T: Conv<i64>>(x: i64) throws (T::Err) -> T { try T::conv(x) }
+
+fn main() {
+    let q: Q = try go::<Q>(-2) catch e: errs::EA { println(f"default {e}"); Q { v: 0 } };
+    let p: P = try go::<P>(-3) catch e: EB { println(f"override {e}"); P { v: 0 } };
+    let r: Q = try Q::conv(-3) catch e: <Q as Conv<i64>>::Err {
+        println(f"projection {e}");
+        Q { v: 0 }
+    };
+    let s: Q = try go::<Q>(-4) catch e: <Q as Conv<i64>>::Err {
+        println(f"generic default {e}");
+        Q { v: 0 }
+    };
+    let n: Q::Err = errs::EA { n: 9 };
+    println(f"let {n}");
+    let o: <Q as Conv<i64>>::Out = (try go::<Q>(7) catch _ { Q { v: 0 } }).out();
+    let k: i64 = o;
+    println(f"pair i64 {k}");
+    let _ = (p.v, q.v, r.v, s.v);
+}

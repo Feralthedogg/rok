@@ -155,6 +155,22 @@ impl Debug for OverflowError {
 
 impl Error for OverflowError {}
 
+/// A failed `TryFrom` conversion: the trait's default `Error` (stdlib
+/// spec 2.11.4) for impls that name no more specific one.
+pub struct ConversionError {
+    pub msg: str;
+}
+
+impl Display for ConversionError {
+    fn display(self) -> str { self.msg }
+}
+
+impl Debug for ConversionError {
+    fn debug(self) -> str { f"ConversionError({self.msg.debug()})" }
+}
+
+impl Error for ConversionError {}
+
 /// Every error type's surface (stdlib spec 2.14.3). Untyped `throws`
 /// means `throws (any Error)`.
 pub trait Error: Display + Debug {

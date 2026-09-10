@@ -170,8 +170,6 @@ pub fn lower_full(
         });
     let augmented = with_lazy_static_inits(program);
     let program = augmented.as_ref().unwrap_or(program);
-    let assoc_sigs = with_self_assoc_sigs(program);
-    let program = assoc_sigs.as_ref().unwrap_or(program);
     // Diagnostics emitted during pre-body passes (impl-target validation
     // etc.) — folded into module.diagnostics once the module exists.
     let mut pre_diags: Vec<rokc_diagnostic::RokDiagnostic> = Vec::new();
@@ -298,8 +296,12 @@ pub fn lower_full(
         alias_uses: std::cell::RefCell::new(Vec::new()),
         canon_memo: std::cell::RefCell::default(),
     };
-    check_bound_names(program, &names, &mut pre_diags);
     warn_assoc_shadowing(program, &names, &mut pre_diags);
+    let defaults = with_assoc_defaults(program, &names);
+    let program = defaults.as_ref().unwrap_or(program);
+    let assoc_sigs = with_self_assoc_sigs(program);
+    let program = assoc_sigs.as_ref().unwrap_or(program);
+    check_bound_names(program, &names, &mut pre_diags);
 
     // Pass 1a: enums. Generic enums get stashed for lazy instantiation.
     let mut enum_table: HashMap<String, EnumId> = HashMap::new();
@@ -719,6 +721,7 @@ pub fn lower_full(
                 .collect(),
             param_names: fn_def.params.iter().map(|p| p.name.clone()).collect(),
             param_refs: fn_def.params.iter().map(|p| p.by_ref).collect(),
+            variadic: fn_def.params.last().is_some_and(|p| p.variadic),
         }
     };
     for item in &program.items {
@@ -870,7 +873,7 @@ pub fn lower_full(
         })
         .collect();
     let mut trait_impl_tys: HashMap<String, Vec<HirTy>> = HashMap::new();
-    let mut impl_assoc: HashMap<MethodTarget, Vec<(String, String, HirTy)>> = HashMap::new();
+    let mut impl_assoc: HashMap<MethodTarget, Vec<ImplAssoc>> = HashMap::new();
     let mut neg_auto: std::collections::HashSet<(String, String)> =
         std::collections::HashSet::new();
 
@@ -1013,7 +1016,7 @@ pub fn lower_full(
             impl_assoc.entry(target_key.clone()).or_default().extend(
                 assoc
                     .iter()
-                    .map(|(n, t)| (tn.clone(), n.clone(), t.clone())),
+                    .map(|(n, t)| (tn.clone(), args.clone(), n.clone(), t.clone())),
             );
             trait_impl_tys
                 .entry(tn.clone())
@@ -1521,6 +1524,7 @@ pub fn lower_full(
         intrinsics,
         extern_fn_ids,
         c_variadic: c_variadic.clone(),
+        c_defs: c_defs.iter().copied().collect(),
         prec,
         sink,
         item_visibility,
@@ -1977,6 +1981,9 @@ pub(super) fn hir_expr_has_unknown(e: &HirExpr) -> bool {
         K::BufAtomic {
             buf, index, args, ..
         } => hir_expr_has_unknown(buf) || hir_expr_has_unknown(index) || any(args),
+        K::MlirOp { args, regions, .. } => {
+            any(args) || regions.iter().any(|(_, b)| hir_expr_has_unknown(b))
+        }
     }
 }
 
@@ -2313,6 +2320,7 @@ pub(super) fn ty_size_align_bytes(ty: &HirTy) -> Option<(u32, u32)> {
         | HirTy::Unit
         | HirTy::Fn(..)
         | HirTy::Closure { .. }
+        | HirTy::Mlir(_)
         | HirTy::Throws { .. } => None,
     }
 }
@@ -3892,6 +3900,9 @@ fn with_self_assoc_sigs(program: &Program) -> Option<Program> {
                         if let Some(t) = &mut d.ret_ty {
                             subst_assoc_ty(t, &assoc);
                         }
+                        if let rokc_ast::ThrowsKind::Typed(ts) = &mut d.throws {
+                            ts.iter_mut().for_each(|t| subst_assoc_ty(t, &assoc));
+                        }
                         mark(d, assoc.keys().cloned().collect());
                     }
                 }
@@ -3911,6 +3922,73 @@ fn with_self_assoc_sigs(program: &Program) -> Option<Program> {
         }
     }
     Some(p)
+}
+
+/// Associated type defaults (`trait TryFrom<U> { type Error =
+/// ConversionError; }`): an impl that omits `type X` gets the trait's
+/// default, its names resolved in the trait's module and the trait's
+/// parameters replaced by the impl's arguments. Everything after sees
+/// an ordinary `type X = ..;` in the impl.
+fn with_assoc_defaults(program: &Program, names: &TypeNames<'_>) -> Option<Program> {
+    let traits: HashMap<&str, &rokc_ast::TraitDef> = program
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            Item::Trait(t) => Some((t.name.as_str(), t)),
+            _ => None,
+        })
+        .filter(|(_, t)| {
+            t.items.iter().any(|i| {
+                matches!(
+                    i,
+                    rokc_ast::TraitItem::AssocType {
+                        default: Some(_),
+                        ..
+                    }
+                )
+            })
+        })
+        .collect();
+    if traits.is_empty() {
+        return None;
+    }
+    let mut p = program.clone();
+    let mut hit = false;
+    for it in &mut p.items {
+        let Item::Impl(i) = it else { continue };
+        let Some(tp) = &i.trait_path else { continue };
+        let module = impl_module(i);
+        let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
+        let Some(td) = traits.get(names.trait_key(&segs, &module).as_str()) else {
+            continue;
+        };
+        let have = impl_assoc_types(i);
+        let params = trait_param_args(td, i);
+        let mut added = Vec::new();
+        for ti in &td.items {
+            let rokc_ast::TraitItem::AssocType {
+                name,
+                default: Some(d),
+                ..
+            } = ti
+            else {
+                continue;
+            };
+            if have.contains_key(name) {
+                continue;
+            }
+            let mut ty = d.clone();
+            names.absolutize(&mut ty, &module_of(&td.name), &module, &params);
+            subst_assoc_ty(&mut ty, &params);
+            added.push(AstImplItem::AssocType {
+                name: name.clone(),
+                ty,
+            });
+        }
+        hit |= !added.is_empty();
+        i.items.extend(added);
+    }
+    hit.then_some(p)
 }
 
 /// Spec 2.8.3: warn when an associated type hides an outer type of the
@@ -3975,6 +4053,9 @@ fn subst_assoc_sig(def: &mut FnDef, assoc: &HashMap<String, Ty>) {
     }
     if let Some(t) = &mut def.ret_ty {
         subst_assoc_ty(t, assoc);
+    }
+    if let rokc_ast::ThrowsKind::Typed(ts) = &mut def.throws {
+        ts.iter_mut().for_each(|t| subst_assoc_ty(t, assoc));
     }
     // Bounds and defaults too: `fn chain<J: Iterator<Item = Item>>`,
     // `fn collect<C = List<Item>>`.

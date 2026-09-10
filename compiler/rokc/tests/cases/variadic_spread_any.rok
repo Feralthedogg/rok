@@ -6,7 +6,7 @@
 
 // Spec 4.2.6: a tuple spread fills a variadic `...T` slot (`sum(..t)`,
 // mixed with plain arguments). Spec 4.2.5: `...any` takes arguments of
-// different types (`[any; N]`).
+// different types (a `Slice<any>`).
 
 fn sum(xs: ...i32) -> i32 {
     let total = 0;

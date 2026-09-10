@@ -1,0 +1,61 @@
+// expect-exit: 0
+// expect-stdout:
+// negative
+// 3000000000
+// 1.5
+// 300 100000000000000000000000
+// into 300 / try_into 4
+// static 8
+// mul 6
+
+// Spec 3.1.3 "impl 고르기" for any impl chosen by an argument's type: an
+// unsuffixed literal takes its default type's impl (`i32` / `f64`) if
+// there is one, else the unique impl whose parameter it fits.
+
+struct Even { v: i64; }
+impl TryFrom<i64> for Even {
+    fn try_from(value: i64) throws (Self::Error) -> Even {
+        if value < 0 { throw ConversionError { msg: "negative" }; }
+        Even { v: value }
+    }
+}
+impl TryFrom<str> for Even {
+    type Error = ValueError;
+    fn try_from(value: str) throws (ValueError) -> Even { Even { v: value.len() as i64 } }
+}
+
+struct W { v: f64; }
+impl From<f32> for W { fn from(x: f32) -> W { W { v: x as f64 } } }
+impl From<str> for W { fn from(x: str) -> W { W { v: 0.0 } } }
+
+// Two integer impls: the literal goes where it fits (300 is no `u8`).
+struct X { v: i64; }
+impl From<i64> for X { fn from(x: i64) -> X { X { v: x } } }
+impl From<u8> for X { fn from(x: u8) -> X { X { v: x as i64 } } }
+
+struct B { v: int; }
+impl From<int> for B { fn from(x: int) -> B { B { v: x } } }
+impl From<str> for B { fn from(x: str) -> B { B { v: 0 } } }
+
+struct D { v: i64; }
+impl Mul<i64> for D { type Output = D; fn mul(self, k: i64) -> D { D { v: self.v * k } } }
+impl Mul<D> for D { type Output = D; fn mul(self, k: D) -> D { D { v: self.v * k.v } } }
+
+fn main() {
+    let e = try Even::try_from(-1) catch e: ConversionError { println(f"{e}"); Even { v: 0 } };
+    let f = try Even::try_from(3000000000) catch _: ConversionError { Even { v: 0 } };
+    println(f"{f.v}");
+    let w = W::from(1.5);
+    println(f"{w.v}");
+    let a = X::from(300);
+    let c = B::from(100000000000000000000000);
+    println(f"{a.v} {c.v}");
+    let d: X = 300.into();
+    let g: Even = try 4.try_into() catch _: ConversionError { Even { v: 0 } };
+    println(f"into {d.v} / try_into {g.v}");
+    let h: Even = try TryFrom::try_from(8) catch _: ConversionError { Even { v: 0 } };
+    println(f"static {h.v}");
+    let m = D { v: 3 } * 2;
+    println(f"mul {m.v}");
+    let _ = (e.v, w.v);
+}

@@ -117,7 +117,10 @@ pub fn optimized() -> bool {
 
 /// `rokc build <src> -o <exe>` with the harness bootstrap + runtime.
 pub fn rokc_build(env: &Env, src: &Path, exe: &Path) -> std::io::Result<Output> {
+    // `// rokc-arg: <arg>`: extra command-line arguments (`--cfg feat`).
+    let source = std::fs::read_to_string(src).unwrap_or_default();
     Command::new(ROKC)
+        .args(directives(&source, "rokc-arg:").flat_map(str::split_whitespace))
         .arg("build")
         .arg(src)
         .arg("--bootstrap")

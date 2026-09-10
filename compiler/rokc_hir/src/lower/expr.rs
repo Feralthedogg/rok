@@ -1174,7 +1174,8 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             type_args,
         } => {
             let all_args = with_trailing_closure(args, trailing_closure.as_deref());
-            let recv_h = lower_receiver(ctx, receiver);
+            let recv_h = literal_conv_receiver(ctx, receiver, method)
+                .unwrap_or_else(|| lower_receiver(ctx, receiver));
             ctx.method_type_args.clone_from(type_args);
             let method = match drop_method(ctx, &recv_h.ty, method, span) {
                 Ok(m) => m,
@@ -2509,6 +2510,7 @@ pub(super) fn lower_args_for(
 
 /// `lower_args_for`, also returning each `ref` parameter's argument
 /// place (by parameter index) for the copy-out (spec 4.7).
+#[allow(clippy::cognitive_complexity)]
 pub(super) fn lower_args_ref(
     ctx: &mut LowerCtx<'_>,
     sig: &FnSig,
@@ -2531,10 +2533,25 @@ pub(super) fn lower_args_ref(
         }
         next = 1;
     }
+    // Spec 4.2.5: a variadic `...T` (the last slot) takes every argument
+    // from its position on, spreads included.
+    let var_at = if sig.variadic { n - 1 } else { usize::MAX };
+    let mut var_parts: Vec<VarPart<'_>> = Vec::new();
     for a in args {
         match a {
+            CallArg::Positional(e) | CallArg::Ref(e) | CallArg::Spread(e) if next >= var_at => {
+                var_parts.push(if matches!(a, CallArg::Spread(_)) {
+                    VarPart::Spread(e)
+                } else {
+                    VarPart::Arg(e)
+                });
+                next += 1;
+            }
             CallArg::Positional(e)
-                if n > next && slots[n - 1].is_none() && is_trailing_closure(e) =>
+                if !sig.variadic
+                    && n > next
+                    && slots[n - 1].is_none()
+                    && is_trailing_closure(e) =>
             {
                 slots[n - 1] = Some(ArgSrc::Ast(e));
                 next = n;
@@ -2590,7 +2607,9 @@ pub(super) fn lower_args_ref(
                                 ty: part_ty.clone(),
                                 span,
                             };
-                            if next < n {
+                            if next >= var_at {
+                                var_parts.push(VarPart::Value(field));
+                            } else if next < n {
                                 slots[next] = Some(ArgSrc::Lowered(field));
                             } else {
                                 extra += 1;
@@ -2610,6 +2629,10 @@ pub(super) fn lower_args_ref(
                 }
             }
         }
+    }
+    if sig.variadic && slots[var_at].is_none() {
+        let elem = variadic_elem(ctx, &sig.param_tys[var_at]);
+        slots[var_at] = Some(ArgSrc::Lowered(lower_variadic(ctx, elem, var_parts, span)));
     }
     let c_varargs = check_arity(ctx, sig, callee, extra, c_varargs);
     let mut out = Vec::with_capacity(n);
@@ -2690,6 +2713,209 @@ pub(super) fn lower_args_ref(
     check_ref_exclusive(ctx, callee, &out, &places, &reads, has_receiver);
     out.extend(c_varargs);
     (out, lets, places)
+}
+
+const LIST: &str = "rok::core::collections::list::List";
+
+/// One trailing argument of a variadic `...T` call (spec 4.2.5).
+pub(super) enum VarPart<'e> {
+    Arg(&'e Expr),
+    /// `..x`: a tuple's fields, or a `List` / `Slice` / array's elements.
+    Spread(&'e Expr),
+    /// A field of a tuple spread that started in a fixed slot.
+    Value(HirExpr),
+}
+
+/// The element type `T` of the `Slice<T>` a variadic parameter takes
+/// (`Unknown` when `ty` is not one yet).
+pub(super) fn variadic_elem(ctx: &LowerCtx<'_>, ty: &HirTy) -> HirTy {
+    match ty {
+        HirTy::Struct(sid) => ctx
+            .struct_def(*sid)
+            .generic_args
+            .first()
+            .cloned()
+            .unwrap_or(HirTy::Unknown),
+        _ => HirTy::Unknown,
+    }
+}
+
+/// Spec 4.2.5 / 4.2.6: a variadic call's trailing arguments as the one
+/// `Slice<T>` value its `...T` parameter takes. `elem` is `T`, or
+/// `Unknown` (an open type parameter: the first argument's type).
+/// Plain arguments and tuple fields become a fixed array viewed as a
+/// slice; a `List` / `Slice` / array spread makes it a fresh `List` of
+/// every argument in order.
+pub(super) fn lower_variadic(
+    ctx: &mut LowerCtx<'_>,
+    mut elem: HirTy,
+    parts: Vec<VarPart<'_>>,
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let mut stmts: Vec<HirStmt> = Vec::new();
+    // Each argument once into a temp, in order: (is a spread collection, temp).
+    let mut temps: Vec<(bool, String, HirTy)> = Vec::new();
+    let temp = |ctx: &mut LowerCtx<'_>, stmts: &mut Vec<HirStmt>, init: HirExpr| {
+        let name = format!("#va{}", ctx.locals.len());
+        let ty = init.ty.clone();
+        let local = ctx.declare(Some(name.clone()), ty.clone());
+        stmts.push(HirStmt::Let { local, init });
+        (name, ty)
+    };
+    let one = |ctx: &mut LowerCtx<'_>, elem: &mut HirTy, v: HirExpr| {
+        if *elem == HirTy::Unknown {
+            elem.clone_from(&v.ty);
+            v
+        } else {
+            coerce(ctx, elem, v, &|| "variadic argument".to_owned())
+        }
+    };
+    for part in parts {
+        let v = match part {
+            VarPart::Arg(e) => lower_expected(ctx, e, elem.clone()),
+            VarPart::Value(v) => v,
+            VarPart::Spread(e) => {
+                let h = lower_expected(ctx, e, HirTy::Unknown);
+                match h.ty.clone() {
+                    HirTy::Tuple(fields) => {
+                        let (name, ty) = temp(ctx, &mut stmts, h);
+                        let local = ctx.lookup(&name).expect("temp just declared");
+                        for (k, fty) in fields.iter().enumerate() {
+                            let field = HirExpr {
+                                kind: HirExprKind::TupleField {
+                                    target: Box::new(hir_local(local, &ty, span)),
+                                    index: u32::try_from(k).expect("tuple field overflow"),
+                                    field_ty: fty.clone(),
+                                },
+                                ty: fty.clone(),
+                                span,
+                            };
+                            let v = one(ctx, &mut elem, field);
+                            let (name, ty) = temp(ctx, &mut stmts, v);
+                            temps.push((false, name, ty));
+                        }
+                    }
+                    HirTy::Array(..) | HirTy::Struct(_) => {
+                        if elem == HirTy::Unknown {
+                            elem = match &h.ty {
+                                HirTy::Array(t, _) => (**t).clone(),
+                                t => variadic_elem(ctx, t),
+                            };
+                        }
+                        let (name, ty) = temp(ctx, &mut stmts, h);
+                        temps.push((true, name, ty));
+                    }
+                    HirTy::Unknown => {}
+                    other => ctx.emit_error(
+                        rokc_diagnostic::ErrorKind::Type,
+                        format!(
+                            "spread into a variadic `...T` needs a tuple, a `List`, a `Slice` or \
+                             an array, found `{}` (spec 4.2.6)",
+                            ctx.ty_name(&other)
+                        ),
+                    ),
+                }
+                continue;
+            }
+        };
+        let v = one(ctx, &mut elem, v);
+        let (name, ty) = temp(ctx, &mut stmts, v);
+        temps.push((false, name, ty));
+    }
+    // No argument fixed `T` (`count()`): the call reports it uninferred.
+    if elem == HirTy::Unknown {
+        return poison(span);
+    }
+    let path = |name: &str| super::throws::path_expr(name, span);
+    let ast = |kind: ExprKind| Expr { kind, span };
+    let slice_of = |target: Expr| {
+        ast(ExprKind::Slice {
+            target: Box::new(target),
+            start: None,
+            end: None,
+            step: None,
+        })
+    };
+    let trailing = if temps.iter().all(|(many, ..)| !many) {
+        // `[a, b, c][:]`: a fixed array (built here, not by the list
+        // literal handler, which is itself variadic) viewed as a slice.
+        let n = u32::try_from(temps.len()).expect("variadic argument count overflow");
+        let elements = temps
+            .iter()
+            .map(|(_, name, ty)| {
+                let local = ctx.lookup(name).expect("temp declared");
+                hir_local(local, ty, span)
+            })
+            .collect();
+        let arr = HirExpr {
+            kind: HirExprKind::ArrayInit {
+                elem_ty: elem.clone(),
+                elements,
+            },
+            ty: HirTy::Array(Box::new(elem), n),
+            span,
+        };
+        let (name, _) = temp(ctx, &mut stmts, arr);
+        lower_expected(ctx, &slice_of(path(&name)), HirTy::Unknown)
+    } else {
+        // `let l = List::new(); l.push(a); for x in xs { l.push(x); } l[:]`
+        let new = ast(ExprKind::Call {
+            callee: Box::new(super::bignum::path_expr(LIST, "new", span)),
+            args: Vec::new(),
+            trailing_closure: None,
+        });
+        let list_ty = ctx
+            .instantiate_struct(LIST, vec![elem])
+            .map_or(HirTy::Unknown, HirTy::Struct);
+        let init = lower_expected(ctx, &new, list_ty);
+        let (list, _) = temp(ctx, &mut stmts, init);
+        let push = |x: Expr| {
+            ast(ExprKind::MethodCall {
+                receiver: Box::new(path(&list)),
+                method: "push".to_owned(),
+                type_args: Vec::new(),
+                args: vec![CallArg::Positional(x)],
+                trailing_closure: None,
+            })
+        };
+        for (many, name, _) in &temps {
+            let e = if *many {
+                let x = format!("#vx{}", ctx.locals.len());
+                ast(ExprKind::For {
+                    label: None,
+                    pat: rokc_ast::Pattern {
+                        kind: rokc_ast::PatternKind::Binding {
+                            name: x.clone(),
+                            sub: None,
+                        },
+                        span,
+                    },
+                    iter: Box::new(path(name)),
+                    body: rokc_ast::Block {
+                        stmts: Vec::new(),
+                        trailing: Some(Box::new(push(path(&x)))),
+                        span,
+                        label: None,
+                    },
+                    is_await: false,
+                })
+            } else {
+                push(path(name))
+            };
+            let h = lower_expected(ctx, &e, HirTy::Unknown);
+            stmts.push(HirStmt::Expr(h));
+        }
+        lower_expected(ctx, &slice_of(path(&list)), HirTy::Unknown)
+    };
+    HirExpr {
+        ty: trailing.ty.clone(),
+        kind: HirExprKind::Block(Box::new(HirBlock {
+            stmts,
+            trailing: Some(trailing),
+            label: None,
+        })),
+        span,
+    }
 }
 
 /// Report surplus arguments, unless `sig` is C variadic: then `surplus`
@@ -2923,7 +3149,9 @@ pub(super) fn call_sig(
         .is_some_and(rokc_ir_common::takes_rok_fn_values);
     if ctx.env.extern_fn_ids.contains(&sig.id) && !runtime_sym {
         for a in &lowered {
+            // An `extern "C" fn` value is already a C function pointer.
             if matches!(a.ty, HirTy::Fn(..) | HirTy::Closure { .. })
+                && !a.ty.is_c_fn()
                 && !matches!(a.kind, HirExprKind::FnRef(_))
             {
                 ctx.emit_error(
@@ -3706,6 +3934,7 @@ fn any_method_call(
         param_names: (0..param_tys.len()).map(|i| format!("#{i}")).collect(),
         param_refs: Vec::new(),
         param_tys,
+        variadic: false,
     };
     let (lowered, lets) = lower_args_for(ctx, &sig, method, Some(recv_h), args, span);
     let id = any_dispatcher(ctx, &recv_ty, &provider, method, &sig, span);
@@ -4349,6 +4578,7 @@ pub(super) fn call_value(
         param_tys: arg_tys.clone(),
         param_names: (0..arg_tys.len()).map(|i| format!("#{}", i + 1)).collect(),
         param_refs: Vec::new(),
+        variadic: false,
     };
     let (lowered, lets) = lower_args_for(ctx, &sig, "the function value", None, args, span);
     let kind = match env {
@@ -4504,6 +4734,14 @@ fn generic_positional_args(
                     );
                 }
             },
+            // In the variadic slot: `lower_variadic` expands it.
+            CallArg::Spread(_) if variadic && next + 1 >= n => {
+                match slots.get_mut(next) {
+                    Some(s) => *s = Some(a.clone()),
+                    None => rest.push(a.clone()),
+                }
+                next += 1;
+            }
             CallArg::Spread(e) => {
                 let h = lower_expected(ctx, e, HirTy::Unknown);
                 let HirTy::Tuple(parts) = h.ty.clone() else {
@@ -4584,35 +4822,15 @@ fn call_generic_positional(
         check_unsafe_call(ctx, callee);
     }
     // Spec 4.2.5: the trailing arguments of a variadic `...T` call are
-    // one array argument (`[a, b]` in the `[T; N]` slot).
-    let wrapped: Vec<CallArg>;
-    let args = match def.params.last().filter(|p| p.variadic) {
+    // one `Slice<T>` argument, built once the other arguments are in
+    // (`lower_variadic`).
+    let (args, tail) = match def.params.last().filter(|p| p.variadic) {
         Some(_) => {
             let k = (def.params.len() - 1).saturating_sub(usize::from(receiver.is_some()));
-            let tail = args.get(k..).unwrap_or_default();
-            let items: Option<Vec<Expr>> = tail
-                .iter()
-                .map(|a| match a {
-                    CallArg::Positional(e) => Some(e.clone()),
-                    _ => None,
-                })
-                .collect();
-            match items {
-                Some(items) if args.len() >= k => {
-                    wrapped = args[..k]
-                        .iter()
-                        .cloned()
-                        .chain(std::iter::once(CallArg::Positional(Expr {
-                            kind: ExprKind::List(items),
-                            span,
-                        })))
-                        .collect();
-                    &wrapped[..]
-                }
-                _ => args,
-            }
+            args.split_at_checked(k)
+                .map_or((args, None), |(a, t)| (a, Some(t)))
         }
-        None => args,
+        None => (args, None),
     };
     // A method's `Self` is its receiver's type.
     let recv_ty = receiver
@@ -4740,6 +4958,22 @@ fn call_generic_positional(
     {
         let h = lower_expected(ctx, &d, HirTy::Unknown);
         bind_from_arg(ctx, def, self_ty, lowered.len(), &h.ty, &mut subst);
+        lowered.push(h);
+    }
+    if let Some(tail) = tail.filter(|_| lowered.len() + 1 == def.params.len()) {
+        let i = lowered.len();
+        let hint = generic_arg_hint(ctx, def, &subst, i, &super::throws::path_expr("#", span));
+        let elem = variadic_elem(ctx, &hint);
+        let parts = tail
+            .iter()
+            .filter_map(|a| match a {
+                CallArg::Positional(e) | CallArg::Ref(e) => Some(VarPart::Arg(e)),
+                CallArg::Spread(e) => Some(VarPart::Spread(e)),
+                CallArg::Named { .. } => None,
+            })
+            .collect();
+        let h = lower_variadic(ctx, elem, parts, span);
+        bind_from_arg(ctx, def, self_ty, i, &h.ty, &mut subst);
         lowered.push(h);
     }
     check_ref_exclusive(ctx, callee, &lowered, &places, &reads, has_receiver);
@@ -4941,7 +5175,7 @@ pub(super) fn lower_call(
     }
 
     // Generic function — monomorphize on the argument types.
-    if let Some(full) = ctx.resolve_in(&segs, &ctx.env.generic_fns) {
+    if let Some(full) = ctx.resolve_generic_fn_name(&segs) {
         ctx.check_item_visible(&full, "function");
         let generic_def = ctx.env.generic_fns[&full];
         if let Some(op) = buf_intrinsic(generic_def) {
@@ -5076,6 +5310,7 @@ pub(super) fn lower_call(
             param_tys: def.fields.iter().map(|f| f.ty.clone()).collect(),
             param_names: def.fields.iter().map(|f| f.name.clone()).collect(),
             param_refs: Vec::new(),
+            variadic: false,
         };
         let (fields, lets) = lower_args_for(ctx, &sig, &display, None, args, span);
         return with_lets(
@@ -5097,9 +5332,9 @@ pub(super) fn lower_call(
     // variant is an associated function (below).
     let not_variant = enum_lacks_variant(ctx, &segs);
     let hint = ctx.current_expected().cloned();
-    let is_generic_enum_base = ctx
-        .enum_path(&segs)
-        .is_some_and(|(full, _)| ctx.lookup_enum(&full).is_none());
+    let is_generic_enum_base = ctx.enum_path(&segs).is_some_and(|(full, _)| {
+        ctx.lookup_enum(&full).is_none() && !ctx.enum_instantiations(&full).is_empty()
+    });
     let pre_args: Option<Vec<HirExpr>> = if !not_variant
         && is_generic_enum_base
         && !matches!(&hint, Some(HirTy::Enum(_)))
@@ -5162,6 +5397,7 @@ pub(super) fn lower_call(
                     param_tys: slots.clone(),
                     param_names: (0..slots.len()).map(|i| format!("#{}", i + 1)).collect(),
                     param_refs: Vec::new(),
+                    variadic: false,
                 };
                 let (a, l) = lower_args_for(ctx, &sig, &display, None, args, span);
                 lets = l;
@@ -5451,7 +5687,19 @@ fn path_call_via_impls(
         .canon_type(ty_segs)
         .filter(|f| ctx.env.names.traits.contains(f));
     if let Some(key) = trait_key {
+        // A static method (`TryFrom::try_from(8)`) takes `Self` from the
+        // expected type; its first argument is not `self`.
+        let static_self = ctx
+            .env
+            .trait_info
+            .get(&key)
+            .and_then(|i| i.decls.get(method))
+            .is_some_and(|d| d.params.first().is_none_or(|p| p.name != "self"))
+            .then(|| ctx.current_expected().cloned())
+            .flatten()
+            .filter(|t| *t != HirTy::Unknown);
         let (recv, rest) = match args.split_first() {
+            _ if static_self.is_some() => (None, args),
             Some((a @ (CallArg::Positional(e) | CallArg::Ref(e)), rest)) => {
                 let r = lower_expected(ctx, e, HirTy::Unknown);
                 ctx.explicit_recv = Some(matches!(a, CallArg::Ref(_)));
@@ -5459,9 +5707,8 @@ fn path_call_via_impls(
             }
             _ => (None, args),
         };
-        let self_ty = recv
-            .as_ref()
-            .map(|r| r.ty.clone())
+        let self_ty = static_self
+            .or_else(|| recv.as_ref().map(|r| r.ty.clone()))
             .or_else(|| ctx.current_expected().cloned())
             .filter(|t| *t != HirTy::Unknown);
         let Some(t) = self_ty else {
@@ -5667,7 +5914,27 @@ fn call_overload(
     let (first, rest) = match (recv, args) {
         (Some(r), _) => (r, args),
         (None, [CallArg::Positional(e), rest @ ..]) => {
-            (lower_expected(ctx, e, HirTy::Unknown), rest)
+            // An unsuffixed literal takes the impl it fits (spec 3.1.3).
+            let params: Vec<HirTy> = ids
+                .iter()
+                .filter_map(|id| ctx.sig_by_id(*id).param_tys.first().cloned())
+                .collect();
+            match pick_literal_impl(ctx, e, &params) {
+                Ok(Some(i)) => (lower_expected(ctx, e, params[i].clone()), rest),
+                Ok(None) => (lower_expected(ctx, e, HirTy::Unknown), rest),
+                Err(fits) => {
+                    discard_args(ctx, args);
+                    return Some(ctx.error_expr(
+                        span,
+                        format!(
+                            "`{display}`: the literal fits several `{}` impls of `{}` ({fits}); \
+                             add a suffix or `as`",
+                            leaf_name(tn),
+                            ctx.ty_name(t)
+                        ),
+                    ));
+                }
+            }
         }
         _ => return None,
     };
@@ -5692,6 +5959,115 @@ fn call_overload(
     };
     check_method_visible(ctx, sig.id, method);
     Some(call_sig(ctx, &sig, display, Some(first), rest, span))
+}
+
+/// An unsuffixed numeric literal's value, read off the AST.
+// ponytail: plain and negated literals only; `1 + 1` keeps its default
+// type. Fold constants here if that ever matters.
+#[derive(Clone, Copy)]
+enum LitVal {
+    Int(i128),
+    Float(f64),
+}
+
+fn untyped_lit_value(e: &Expr) -> Option<LitVal> {
+    let (lit, neg) = match &e.kind {
+        ExprKind::Literal(l) => (l, false),
+        ExprKind::OpPrefix { op, operand } if op == "-" => match &operand.kind {
+            ExprKind::Literal(l) => (l, true),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if !is_untyped_literal(e) {
+        return None;
+    }
+    match lit {
+        AstLit::Int(t) => parse_int_literal(t).map(|(v, _)| LitVal::Int(if neg { -v } else { v })),
+        AstLit::Float(t) => {
+            let cleaned: String = t.chars().filter(|c| *c != '_').collect();
+            cleaned.parse::<f64>().ok().map(LitVal::Float)
+        }
+        _ => None,
+    }
+}
+
+/// Whether a literal of value `v` can take type `ty`: an integer any
+/// integer type it is in range of (or `int`), a float `f32` / `f64` it
+/// stays finite in (or `float`).
+fn literal_fits(ctx: &LowerCtx<'_>, v: LitVal, ty: &HirTy) -> bool {
+    #[allow(clippy::cast_possible_truncation)]
+    match (v, ty) {
+        (LitVal::Int(v), HirTy::Prim(p)) => {
+            p.is_int()
+                && !matches!(p, PrimTy::Char | PrimTy::CChar)
+                && super::pattern::int_fits(v, *p)
+        }
+        (LitVal::Float(f), HirTy::Prim(PrimTy::F32)) => (f as f32).is_finite(),
+        (LitVal::Float(f), HirTy::Prim(PrimTy::F64)) => f.is_finite(),
+        (LitVal::Int(_), _) => super::bignum::big_of(ctx, ty) == Some(super::bignum::Big::Int),
+        (LitVal::Float(_), _) => super::bignum::big_of(ctx, ty) == Some(super::bignum::Big::Float),
+    }
+}
+
+/// Spec 3.1.3 "impl 고르기", for any trait impl chosen by an argument's
+/// type (`a * 2`, `T::from(2)`, `T::try_from(-1)`, `2.into()`): when
+/// `lit` is an unsuffixed literal and `params` are the candidate impls'
+/// types for its slot, the index of the one it should take — its
+/// default type (`i32` / `f64`) if some impl has it, else the unique
+/// impl it fits. `Ok(None)`: not a literal, or nothing fits.
+/// `Err`: several fit (their names, for the diagnostic).
+fn pick_literal_impl(
+    ctx: &LowerCtx<'_>,
+    lit: &Expr,
+    params: &[HirTy],
+) -> Result<Option<usize>, String> {
+    let Some(v) = untyped_lit_value(lit) else {
+        return Ok(None);
+    };
+    let default = match v {
+        LitVal::Int(_) => HirTy::Prim(PrimTy::I32),
+        LitVal::Float(_) => HirTy::Prim(PrimTy::F64),
+    };
+    if let Some(i) = params.iter().position(|p| *p == default) {
+        if literal_fits(ctx, v, &default) {
+            return Ok(Some(i));
+        }
+    }
+    let fits: Vec<usize> = (0..params.len())
+        .filter(|i| literal_fits(ctx, v, &params[*i]))
+        .collect();
+    match fits[..] {
+        [] => Ok(None),
+        [i] => Ok(Some(i)),
+        _ => Err(fits
+            .iter()
+            .map(|i| format!("`{}`", ctx.ty_name(&params[*i])))
+            .collect::<Vec<_>>()
+            .join(", ")),
+    }
+}
+
+/// `lit.into()` / `lit.try_into()` in a slot of type `expected`: the
+/// literal receiver takes the `From` / `TryFrom` impl of `expected` it
+/// fits (`let e: Even = 4.try_into()` with `impl TryFrom<i64> for Even`).
+fn literal_conv_receiver(ctx: &mut LowerCtx<'_>, receiver: &Expr, method: &str) -> Option<HirExpr> {
+    let conv = match method {
+        "into" => "from",
+        "try_into" => "try_from",
+        _ => return None,
+    };
+    untyped_lit_value(receiver)?;
+    let expected = ctx.current_expected()?.clone();
+    let ids = method_target_for(&expected)
+        .and_then(|k| ctx.env.method_table.get(&(k, conv.to_owned())))?;
+    let params: Vec<HirTy> = ids
+        .iter()
+        .filter_map(|id| ctx.sig_by_id(*id).param_tys.first().cloned())
+        .collect();
+    // Ambiguous or nothing fits: the ordinary lowering reports it.
+    let i = pick_literal_impl(ctx, receiver, &params).ok()??;
+    Some(lower_expected(ctx, receiver, params[i].clone()))
 }
 
 /// `[a, b]` is a `List` (spec 6.5.1); a fixed array only in a slot
@@ -5815,10 +6191,238 @@ fn buf_intrinsic(def: &FnDef) -> Option<&'static str> {
             "rok.atomic.cas" => Some("atomic_cas"),
             "rok.any_cast" => Some("any_cast"),
             "rok.method_table" => Some("method_table"),
+            "rok.mlir.op" => Some("mlir_op"),
+            "rok.mlir.attr" => Some("mlir_attr"),
             _ => None,
         },
         _ => None,
     })
+}
+
+use super::resolve::{str_lit_of, str_targ};
+
+/// `__mlir_attr::<"text">` (also called, `()`, or a plain string): the
+/// attribute's text.
+fn mlir_attr_text(e: &Expr) -> Option<String> {
+    if let Some(s) = str_lit_of(e) {
+        return Some(s.to_owned());
+    }
+    let p = match &e.kind {
+        ExprKind::Path(p) => p,
+        ExprKind::Call { callee, args, .. } if args.is_empty() => match &callee.kind {
+            ExprKind::Path(p) => p,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let last = p.segments.last()?;
+    match (last.name.as_str(), last.generics.as_slice()) {
+        ("__mlir_attr", [t]) => str_targ(t).map(str::to_owned),
+        _ => None,
+    }
+}
+
+/// `attributes = { "name": __mlir_attr::<"text">, .. }`: its pairs.
+fn mlir_attrs(e: &Expr) -> Option<Vec<(String, String)>> {
+    let pair = |k: &Expr, v: &Expr| Some((str_lit_of(k)?.to_owned(), mlir_attr_text(v)?));
+    match &e.kind {
+        ExprKind::Dict(pairs) => pairs.iter().map(|(k, v)| pair(k, v)).collect(),
+        // `{ k: v }` matched by the `Dict` literal handler: its one
+        // repetition of `(k, v)` items.
+        ExprKind::MagicLiteral(cands) => cands.iter().find_map(|c| match c.args.as_slice() {
+            [rokc_ast::LitArg::Many(items)] => items
+                .iter()
+                .map(|it| match &it.kind {
+                    ExprKind::Tuple(kv) if kv.len() == 2 => pair(&kv[0], &kv[1]),
+                    _ => None,
+                })
+                .collect(),
+            _ => None,
+        }),
+        ExprKind::Block(b) if b.stmts.is_empty() && b.trailing.is_none() => Some(Vec::new()),
+        _ => None,
+    }
+}
+
+/// `regions = [|a: A, ..| -> R { ..; __mlir_op::<"d.yield", ()>(..); v }, ..]`
+/// (bare 1.9): each closure is one region, lowered inline in this
+/// function — its parameters are the entry block's arguments, captures
+/// are plain uses of the enclosing locals (MLIR regions see the values
+/// above them). The body is straight-line ops; the terminator op it
+/// ends with is the region's last op (a trailing value is not
+/// evaluated).
+fn lower_mlir_regions(ctx: &mut LowerCtx<'_>, e: &Expr) -> Vec<(Vec<LocalId>, HirExpr)> {
+    let items: &[Expr] = match &e.kind {
+        ExprKind::List(xs) => xs,
+        ExprKind::MagicLiteral(cands) => cands
+            .iter()
+            .find_map(|c| match c.args.as_slice() {
+                [rokc_ast::LitArg::Many(xs)] => Some(xs.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[]),
+        _ => {
+            ctx.emit_error(
+                rokc_diagnostic::ErrorKind::Type,
+                "`regions` of `__mlir_op` is a list of closures `[|args| { .. }, ..]` (bare 1.9)"
+                    .to_owned(),
+            );
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for it in items {
+        let ExprKind::Closure {
+            params,
+            ret_ty,
+            body,
+            is_async: false,
+            is_generator: false,
+            ..
+        } = &it.kind
+        else {
+            ctx.emit_error(
+                rokc_diagnostic::ErrorKind::Type,
+                "a region of `__mlir_op` is a closure `|args| { .. }` (bare 1.9)".to_owned(),
+            );
+            continue;
+        };
+        ctx.push_scope();
+        let locals = params
+            .iter()
+            .map(|p| {
+                let ty = p.ty.as_ref().map_or_else(
+                    || {
+                        ctx.emit_error(
+                            rokc_diagnostic::ErrorKind::Type,
+                            format!(
+                                "region argument `{}` of `__mlir_op` needs a type (bare 1.9)",
+                                p.name
+                            ),
+                        );
+                        HirTy::Unknown
+                    },
+                    |t| ctx.resolve_ast_ty(t),
+                );
+                ctx.declare(Some(p.name.clone()), ty)
+            })
+            .collect();
+        let ret = ret_ty
+            .as_ref()
+            .map_or(HirTy::Unknown, |t| ctx.resolve_ast_ty(t));
+        let body = lower_expected(ctx, body, ret);
+        ctx.pop_scope();
+        if has_control_flow(&body) {
+            ctx.emit_error(
+                rokc_diagnostic::ErrorKind::Type,
+                "a region of `__mlir_op` is straight-line ops (no `if` / `match` / loops / \
+                 `return`; use `scf` ops) (bare 1.9)"
+                    .to_owned(),
+            );
+        }
+        out.push((locals, body));
+    }
+    out
+}
+
+/// Whether `e` has control flow (MIR blocks), which a region body
+/// can't hold.
+fn has_control_flow(e: &HirExpr) -> bool {
+    let mut branchy = false;
+    crate::each_expr(e, &mut |x| match &x.kind {
+        HirExprKind::If { .. }
+        | HirExprKind::While { .. }
+        | HirExprKind::Loop { .. }
+        | HirExprKind::Match { .. }
+        | HirExprKind::Suspend { .. } => branchy = true,
+        HirExprKind::Block(b) => {
+            if b.stmts.iter().any(|s| {
+                matches!(
+                    s,
+                    HirStmt::Return(_)
+                        | HirStmt::Break { .. }
+                        | HirStmt::Continue { .. }
+                        | HirStmt::Panic(_)
+                )
+            }) {
+                branchy = true;
+            }
+        }
+        _ => {}
+    });
+    branchy
+}
+
+/// `__mlir_op::<"dialect.op", R>(operands.., attributes = {..}, regions = [..])`
+/// (stdlib bare 1.9): one op in MLIR's generic form. `R` is a rok type
+/// or `__mlir_type<"..">` (`_`: the expected type; `()`: no result).
+fn lower_mlir_op(
+    ctx: &mut LowerCtx<'_>,
+    targs: &[Ty],
+    args: &[CallArg],
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let shape = "`__mlir_op` is called as `__mlir_op::<\"dialect.op\", R>(operands..)` (bare 1.9)";
+    let (Some(op), Some(r)) = (targs.first().and_then(str_targ), targs.get(1)) else {
+        discard_args(ctx, args);
+        return ctx.error_expr(span, shape.to_owned());
+    };
+    let op = op.to_owned();
+    if targs.len() != 2 || !op.contains('.') {
+        discard_args(ctx, args);
+        return ctx.error_expr(span, shape.to_owned());
+    }
+    let infer = matches!(&r.kind, rokc_ast::TyKind::Path(p)
+        if p.segments.len() == 1 && p.segments[0].name == "_");
+    let ty = if infer {
+        ctx.current_expected().cloned().unwrap_or(HirTy::Unknown)
+    } else {
+        ctx.resolve_ast_ty(r)
+    };
+    let mut attrs = Vec::new();
+    let mut regions = Vec::new();
+    let mut lowered = Vec::new();
+    for a in args {
+        match a {
+            CallArg::Positional(e) => lowered.push(lower_expected(ctx, e, HirTy::Unknown)),
+            CallArg::Named { name, value } if name == "attributes" => match mlir_attrs(value) {
+                Some(kv) => attrs = kv,
+                None => ctx.emit_error(
+                    rokc_diagnostic::ErrorKind::Type,
+                    "`attributes` of `__mlir_op` is `{ \"name\": __mlir_attr::<\"text\">, .. }` \
+                     (bare 1.9)"
+                        .to_owned(),
+                ),
+            },
+            CallArg::Named { name, value } if name == "regions" => {
+                regions = lower_mlir_regions(ctx, value);
+            }
+            _ => {
+                ctx.emit_error(
+                    rokc_diagnostic::ErrorKind::Type,
+                    "`__mlir_op` takes operands, `attributes = {..}` and `regions = [..]` \
+                     (bare 1.9)"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    if ty == HirTy::Unknown {
+        return ctx.error_expr(
+            span,
+            format!("type annotations needed: the result type of `__mlir_op::<\"{op}\", _>`"),
+        );
+    }
+    HirExpr {
+        kind: HirExprKind::MlirOp {
+            op,
+            attrs,
+            args: lowered,
+            regions,
+        },
+        ty,
+        span,
+    }
 }
 
 /// `rok::bare` raw-memory intrinsics. `size_of::<T>()` /
@@ -5835,6 +6439,19 @@ fn lower_raw_intrinsic(
 ) -> Option<HirExpr> {
     if let Some(r) = super::reflect::intrinsic(ctx, op, targs, args, span) {
         return Some(r);
+    }
+    if op == "mlir_op" {
+        return Some(lower_mlir_op(ctx, targs, args, span));
+    }
+    if op == "mlir_attr" {
+        discard_args(ctx, args);
+        return Some(
+            ctx.error_expr(
+                span,
+                "`__mlir_attr::<\"..\">` is only an `attributes` value of `__mlir_op` (bare 1.9)"
+                    .to_owned(),
+            ),
+        );
     }
     let usize_ty = HirTy::Prim(PrimTy::Usize);
     if matches!(op, "size_of" | "align_of") {
@@ -6246,16 +6863,22 @@ pub(super) fn lower_infix(
             | HirTy::Array(..)
     ) || !op.is_ascii()
     {
-        let lit = is_untyped_literal(rhs);
-        return dispatch_user_op_lit(ctx, op, Fixity::Infix, lhs_h, Some(rhs_h), lit, span);
+        return dispatch_user_op_lit(ctx, op, Fixity::Infix, lhs_h, Some(rhs_h), Some(rhs), span);
     }
     // A primitive on the left of a user type (`impl Mul<Duration> for f64`),
     // or an operator with no primitive lowering (`%%` → core's `Modulo`).
     if let HirTy::Prim(lp) = lhs_h.ty {
         if matches!(rhs_h.ty, HirTy::Struct(_) | HirTy::Enum(_)) || infix_for_prim(op, lp).is_none()
         {
-            let lit = is_untyped_literal(rhs);
-            return dispatch_user_op_lit(ctx, op, Fixity::Infix, lhs_h, Some(rhs_h), lit, span);
+            return dispatch_user_op_lit(
+                ctx,
+                op,
+                Fixity::Infix,
+                lhs_h,
+                Some(rhs_h),
+                Some(rhs),
+                span,
+            );
         }
     }
     // Comparisons on a sum dispatch on the variant (`sum_structural_call`).
@@ -6579,18 +7202,18 @@ pub(super) fn dispatch_user_op(
     rhs: Option<HirExpr>,
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
-    dispatch_user_op_lit(ctx, sym, fixity, lhs, rhs, false, span)
+    dispatch_user_op_lit(ctx, sym, fixity, lhs, rhs, None, span)
 }
 
-/// `dispatch_user_op`; `untyped_rhs`: the right operand is an unsuffixed
-/// integer literal, free to take the impl's `Rhs` integer type.
+/// `dispatch_user_op`; `lit_rhs`: the right operand's source when it may
+/// be an unsuffixed literal, free to take the impl's `Rhs` type.
 pub(super) fn dispatch_user_op_lit(
     ctx: &mut LowerCtx<'_>,
     sym: &str,
     fixity: Fixity,
     lhs: HirExpr,
     rhs: Option<HirExpr>,
-    untyped_rhs: bool,
+    lit_rhs: Option<&Expr>,
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
     let ty_name = ctx.ty_name(&lhs.ty);
@@ -6628,36 +7251,40 @@ pub(super) fn dispatch_user_op_lit(
         .unwrap_or_default();
     // Several impls of the trait (`impl Sub<Duration> for Instant` and
     // `impl Sub<Instant> for Instant`): the one whose `Rhs` is the right
-    // operand's type, else the one an untyped integer literal fits
-    // (`d * 2` with `impl Mul<i64>`), else the first.
-    let rhs_param =
-        |ctx: &LowerCtx<'_>, id: FunctionId| ctx.sig_by_id(id).param_tys.get(1).cloned();
-    let lit_fits = |ctx: &LowerCtx<'_>, id: FunctionId, value: i128| matches!(rhs_param(ctx, id), Some(HirTy::Prim(p)) if p.is_int() && super::pattern::int_fits(value, p));
-    let exact = rhs.as_ref().and_then(|r| {
-        impls
-            .iter()
-            .copied()
-            .find(|id| rhs_param(ctx, *id).as_ref() == Some(&r.ty))
-    });
-    let lit_value = match rhs.as_ref().map(|r| &r.kind) {
-        Some(HirExprKind::Const(ConstVal::Int { value, .. })) if untyped_rhs => Some(*value),
-        _ => None,
+    // operand's type, else the one an unsuffixed literal fits (`d * 2`
+    // with `impl Mul<i64>`, `pick_literal_impl`), else the first.
+    let rhs_param = |ctx: &LowerCtx<'_>, id: FunctionId| {
+        ctx.sig_by_id(id)
+            .param_tys
+            .get(1)
+            .cloned()
+            .unwrap_or(HirTy::Unknown)
     };
-    let fn_id = exact
-        .or_else(|| {
-            let value = lit_value?;
-            impls.iter().copied().find(|id| lit_fits(ctx, *id, value))
-        })
-        .or_else(|| impls.first().copied());
-    let rhs = match (rhs, fn_id, lit_value) {
-        (Some(r), Some(id), Some(value)) if exact.is_none() && lit_fits(ctx, id, value) => {
-            let Some(HirTy::Prim(p)) = rhs_param(ctx, id) else {
-                unreachable!()
-            };
-            Some(hir_int(value, p, r.span))
+    let exact = rhs
+        .as_ref()
+        .and_then(|r| impls.iter().copied().find(|id| rhs_param(ctx, *id) == r.ty));
+    let mut rhs = rhs;
+    let mut lit_pick = None;
+    if let (None, Some(e)) = (exact, lit_rhs) {
+        let params: Vec<HirTy> = impls.iter().map(|id| rhs_param(ctx, *id)).collect();
+        match pick_literal_impl(ctx, e, &params) {
+            Ok(Some(i)) => {
+                rhs = Some(lower_expected(ctx, e, params[i].clone()));
+                lit_pick = Some(impls[i]);
+            }
+            Ok(None) => {}
+            Err(fits) => {
+                return ctx.error_expr(
+                    span,
+                    format!(
+                        "operator `{sym}` on `{ty_name}`: the literal fits several \
+                         `{op_trait}` impls ({fits}); add a suffix or `as`"
+                    ),
+                );
+            }
         }
-        (r, ..) => r,
-    };
+    }
+    let fn_id = exact.or(lit_pick).or_else(|| impls.first().copied());
     let Some(fn_id) = fn_id else {
         // `impl<T> Add for Pair<T>` (spec 2.9.4): monomorphize on the
         // operand types.
@@ -7051,7 +7678,7 @@ pub(super) fn lower_path(
             span,
         };
     }
-    if let Some(full) = ctx.resolve_in(&segs, &ctx.env.generic_fns) {
+    if let Some(full) = ctx.resolve_generic_fn_name(&segs) {
         ctx.check_item_visible(&full, "function");
         let def = ctx.env.generic_fns[&full];
         // `id::<i32>`: every type argument given — that instance's value.
@@ -7500,13 +8127,25 @@ fn lower_magic(
     };
     let name = handler_name(c);
     let def = ctx.env.generic_fns.get(&name).copied();
+    // The handler's last parameter is a variadic `...T`.
+    let variadic_at = match def {
+        Some(d) => d
+            .params
+            .last()
+            .filter(|p| p.variadic)
+            .map(|_| d.params.len() - 1),
+        None => ctx
+            .env
+            .fn_table
+            .get(&name)
+            .filter(|s| s.variadic)
+            .map(|s| s.param_tys.len() - 1),
+    };
     let mut args: Vec<CallArg> = Vec::new();
     for (i, a) in c.args.iter().enumerate() {
         match a {
             rokc_ast::LitArg::One(e) => args.push(CallArg::Positional(e.clone())),
-            rokc_ast::LitArg::Many(items)
-                if def.is_some_and(|d| d.params.get(i).is_some_and(|p| p.variadic)) =>
-            {
+            rokc_ast::LitArg::Many(items) if variadic_at == Some(i) => {
                 args.extend(items.iter().cloned().map(CallArg::Positional));
             }
             rokc_ast::LitArg::Many(items) => args.push(CallArg::Positional(Expr {

@@ -2,8 +2,8 @@
 // expect-stdout: 4 0 false true 3 2
 
 // Inherent impls on fixed arrays (`impl<T, const N: usize> [T; N]`):
-// core gives `len()` / `is_empty()`, so a variadic body (`xs: ...T` is
-// an array) can count its arguments; a user impl adds methods too.
+// core gives `len()` / `is_empty()`; a variadic body (`xs: ...T` is a
+// `Slice<T>`) counts its arguments; a user impl adds methods too.
 fn count<T>(xs: ...T) -> usize { xs.len() }
 
 impl<const N: usize> [i32; N] {

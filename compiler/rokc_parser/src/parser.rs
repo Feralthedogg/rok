@@ -88,8 +88,34 @@ pub struct Parser<'a> {
 
 /// Nesting limit for expressions, types, patterns and blocks.
 const MAX_DEPTH: u32 = 256;
-/// The implicit length parameter of a variadic `...T` (spec 4.2.5).
-pub const VARIADIC_LEN: &str = "#variadic";
+/// The path of the type a variadic `xs: ...T` parameter has in the body
+/// (`Slice<T>`, spec 4.2.5).
+pub const VARIADIC_SLICE: [&str; 5] = ["rok", "core", "collections", "slice", "Slice"];
+
+/// `Slice<elem>`: a variadic `...elem` parameter's type.
+#[must_use]
+pub fn variadic_slice_ty(elem: Ty) -> Ty {
+    let span = elem.span;
+    let n = VARIADIC_SLICE.len();
+    Ty {
+        kind: TyKind::Path(Path {
+            segments: VARIADIC_SLICE
+                .iter()
+                .enumerate()
+                .map(|(k, name)| PathSegment {
+                    name: (*name).to_owned(),
+                    generics: if k + 1 == n {
+                        vec![elem.clone()]
+                    } else {
+                        Vec::new()
+                    },
+                })
+                .collect(),
+            span,
+        }),
+        span,
+    }
+}
 const PARSER_STACK: usize = 128 << 20;
 
 pub fn parse_program(tokens: &[Token], file: impl Into<String>) -> (Program, Vec<RokDiagnostic>) {
@@ -715,6 +741,38 @@ impl<'a> Parser<'a> {
 
     /// The current token is the contextual keyword `w` (an identifier
     /// token; spec 1.5 / E8).
+    /// A `fn` type behind `unsafe` (calling it needs an unsafe scope,
+    /// 4.15) and / or `extern "C"` (a C function pointer, 5.9.4). Each
+    /// prefix rides with the bounds as a marker path (`#unsafe`,
+    /// `#extern_c`).
+    fn parse_marked_fn_type(&mut self, start: Span) -> Option<TyKind> {
+        let mark = if self.eat(&TokenKind::Unsafe) {
+            rokc_ast::UNSAFE_FN_MARK
+        } else {
+            self.bump(); // `extern`
+            if let TokenKind::StrLit(abi) = self.peek().clone() {
+                if abi != "C" {
+                    self.error(start, format!("unsupported ABI `\"{abi}\"` (only \"C\")"));
+                }
+            }
+            self.bump(); // ABI string
+            rokc_ast::C_FN_MARK
+        };
+        let mut t = self.parse_type_atom_inner()?;
+        if let TyKind::Fn(_, _, bounds) = &mut t.kind {
+            bounds.push(mark_path(mark, start));
+        }
+        Some(t.kind)
+    }
+
+    /// `extern "<abi>" fn` starting `k` tokens ahead (a C fn pointer type).
+    fn at_c_fn_type(&self, k: usize) -> bool {
+        let at = |i: usize| self.tokens.get(self.pos + k + i).map(|t| &t.kind);
+        matches!(at(0), Some(TokenKind::Ident(n)) if n == "extern")
+            && matches!(at(1), Some(TokenKind::StrLit(_)))
+            && matches!(at(2), Some(TokenKind::Fn))
+    }
+
     fn at_kw(&self, w: &str) -> bool {
         matches!(self.peek(), TokenKind::Ident(n) if n == w)
     }
@@ -1646,17 +1704,23 @@ impl<'a> Parser<'a> {
                     self.error(s, "associated type name expected");
                     return None;
                 };
-                // Optional bounds (`: A + B`) and default (`= T`) — skip
-                // until the terminating `;`.
-                while !matches!(self.peek(), TokenKind::Semi | TokenKind::Eof) {
-                    self.bump();
-                }
+                // Optional bounds (`: A + B`) and default (`= T`).
+                let bounds = if self.eat(&TokenKind::Colon) {
+                    self.parse_bounds()
+                } else {
+                    Vec::new()
+                };
+                let default = if self.eat(&TokenKind::Eq) {
+                    self.parse_type()
+                } else {
+                    None
+                };
                 self.expect(&TokenKind::Semi, "`;`")?;
                 let _ = attrs;
                 Some(TraitItem::AssocType {
                     name,
-                    bounds: Vec::new(),
-                    default: None,
+                    bounds,
+                    default,
                 })
             }
             _ => {
@@ -1915,7 +1979,7 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::RParen, "`)`")?;
 
         let mut generics = generics;
-        self.desugar_variadic(&mut params, &mut generics);
+        self.desugar_variadic(&mut params);
         let throws = if matches!(self.peek(), TokenKind::Ident(n) if n == "rethrows") {
             let span = self.peek_span();
             self.bump();
@@ -1991,13 +2055,11 @@ impl<'a> Parser<'a> {
         true
     }
 
-    /// Spec 4.2.5: `xs: ...T` is a stack array of the call's trailing
-    /// arguments — `xs: [T; #variadic]` with an implicit `const
-    /// #variadic: usize` (the call site wraps the arguments). Only the
-    /// last parameter can be variadic.
-    // ponytail: the body sees `[T; N]`, not a slice view; one
-    // instantiation per argument count.
-    fn desugar_variadic(&mut self, params: &mut [Param], generics: &mut Generics) {
+    /// Spec 4.2.5: `xs: ...T` is a read-only view of the call's trailing
+    /// arguments — `xs: Slice<T>` (the call site builds it), so a
+    /// variadic function is not instantiated per argument count. Only
+    /// the last parameter can be variadic.
+    fn desugar_variadic(&mut self, params: &mut [Param]) {
         let last = params.len().saturating_sub(1);
         for (i, p) in params.iter_mut().enumerate() {
             if !p.variadic {
@@ -2011,24 +2073,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
             let Some(elem) = p.ty.take() else { continue };
-            let span = elem.span;
-            p.ty = Some(Ty {
-                kind: TyKind::Array(
-                    Box::new(elem),
-                    rokc_ast::ConstExpr::Path(Path {
-                        segments: vec![PathSegment {
-                            name: VARIADIC_LEN.to_owned(),
-                            generics: Vec::new(),
-                        }],
-                        span,
-                    }),
-                ),
-                span,
-            });
-            generics.params.push(rokc_ast::GenericParam::Const {
-                name: VARIADIC_LEN.to_owned(),
-                ty: path_ty("usize", span),
-            });
+            p.ty = Some(variadic_slice_ty(elem));
         }
     }
 
@@ -2185,10 +2230,8 @@ impl<'a> Parser<'a> {
             self.error(s, "parameter name expected");
             return None;
         };
-        // Spec 4.1 / variant 833: `xs: ...T` variadic — `...` precedes the
-        // element type. Stage-1 stores the element type plain and marks
-        // the param `variadic`; lowering still needs to wrap the call's
-        // trailing args into a Slice<T>, which is a separate milestone.
+        // Spec 4.2.5: `xs: ...T` — `...` precedes the element type; the
+        // param is marked `variadic` (its type becomes `Slice<T>`).
         let (ty, variadic) = if self.eat(&TokenKind::Colon) {
             if self.eat(&TokenKind::DotDot) && self.eat(&TokenKind::Dot) {
                 // `...T` — three dots. Lexed as `..` then `.`.
@@ -2306,22 +2349,12 @@ impl<'a> Parser<'a> {
                 self.bump();
                 TyKind::Never
             }
-            // `unsafe fn(A) -> R`: calling it needs an unsafe scope (4.15).
-            // The marker rides with the bounds as the path `#unsafe`.
-            TokenKind::Unsafe if self.peek_next() == Some(TokenKind::Fn) => {
-                self.bump();
-                let mut t = self.parse_type_atom_inner()?;
-                if let TyKind::Fn(_, _, bounds) = &mut t.kind {
-                    bounds.push(rokc_ast::Path {
-                        segments: vec![rokc_ast::PathSegment {
-                            name: rokc_ast::UNSAFE_FN_MARK.to_owned(),
-                            generics: Vec::new(),
-                        }],
-                        span: start,
-                    });
-                }
-                t.kind
+            TokenKind::Unsafe
+                if self.peek_next() == Some(TokenKind::Fn) || self.at_c_fn_type(1) =>
+            {
+                self.parse_marked_fn_type(start)?
             }
+            TokenKind::Ident(_) if self.at_c_fn_type(0) => self.parse_marked_fn_type(start)?,
             TokenKind::Ident(_) => TyKind::Path(self.parse_type_path()?),
             // `<T as Tr>::X` (spec 2.13.4).
             TokenKind::Lt => TyKind::Path(self.parse_qpath()?),
@@ -2436,10 +2469,12 @@ impl<'a> Parser<'a> {
                 )
             {
                 // Spec 2.11.4: a const argument — a literal, `-lit`, or a
-                // braced expression `{ M * N }`.
+                // braced expression `{ M * N }`; a string names an MLIR op
+                // (`__mlir_op::<"arith.addi", i32>`, bare 1.9).
                 if matches!(
                     p.peek(),
                     TokenKind::IntLit(_)
+                        | TokenKind::StrLit(_)
                         | TokenKind::Minus
                         | TokenKind::True
                         | TokenKind::False
@@ -2616,8 +2651,9 @@ impl<'a> Parser<'a> {
                 break;
             }
             // `f::<T, 3>(..)` — explicit generic arguments in an
-            // expression path (spec 2.11.4).
-            if !allow_generics && matches!(self.peek(), TokenKind::Lt) {
+            // expression path (spec 2.11.4); a type path takes the same
+            // spelling (`__mlir_type::<"index">`, bare 1.9).
+            if matches!(self.peek(), TokenKind::Lt) {
                 self.bump();
                 let args = self.nested_type_list(TokenKind::Gt)?;
                 if !self.expect_closing_gt() {
@@ -5086,8 +5122,13 @@ impl<'a> Parser<'a> {
         let mut args = Vec::new();
         while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
             // `name: expr` is a named argument; otherwise positional.
+            // `__mlir_op`'s `attributes = {..}` / `regions = [..]` are
+            // too (bare 1.9).
             if let Some(name) = self.peek_name() {
-                if matches!(self.peek_next(), Some(TokenKind::Colon)) {
+                if matches!(self.peek_next(), Some(TokenKind::Colon))
+                    || (matches!(name.as_str(), "attributes" | "regions")
+                        && matches!(self.peek_next(), Some(TokenKind::Eq)))
+                {
                     self.bump(); // ident
                     self.bump(); // `:`
                     let value = self.parse_expr()?;
@@ -5213,6 +5254,18 @@ fn optional_ty(t: Ty) -> Ty {
     };
     Ty {
         kind: TyKind::Sum(vec![nest, none]),
+        span,
+    }
+}
+
+/// A one-segment marker path (`#unsafe`, `#extern_c`) for a `fn` type's
+/// bound list.
+fn mark_path(name: &str, span: Span) -> Path {
+    Path {
+        segments: vec![PathSegment {
+            name: name.to_owned(),
+            generics: Vec::new(),
+        }],
         span,
     }
 }

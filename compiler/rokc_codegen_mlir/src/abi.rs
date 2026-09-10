@@ -121,7 +121,7 @@ fn leaves(ty: &MirTy, at: u32, pw: u32, out: &mut Vec<(u32, u32, Leaf)>) {
             out.push((at, pw / 8, Leaf::Int));
             out.push((at + pw / 8, pw / 8, Leaf::Int));
         }
-        MirTy::Prim(_) | MirTy::Any | MirTy::GcRef | MirTy::Fn(..) => {
+        MirTy::Prim(_) | MirTy::Any | MirTy::GcRef | MirTy::Fn(..) | MirTy::Mlir(_) => {
             out.push((at, size_align(ty, pw).0, Leaf::Int));
         }
         MirTy::Sum(ps) => leaves(&rokc_mir::sum_layout(ps), at, pw, out),

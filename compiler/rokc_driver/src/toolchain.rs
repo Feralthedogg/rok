@@ -76,6 +76,14 @@ pub struct BuildOptions {
     pub repl: Option<rokc_codegen_mlir::ReplCell>,
     /// `-C overflow-checks=yes|no`; `None` = on at `-O0` only.
     pub overflow_checks: Option<bool>,
+    /// `--load-mlir-plugin`: MLIR dialect plugins `mlir-opt` loads
+    /// (`--load-dialect-plugin`, stdlib bare 1.10).
+    pub mlir_dialect_plugins: Vec<PathBuf>,
+    /// `--load-mlir-pass-plugin`: MLIR pass plugins (`--load-pass-plugin`).
+    pub mlir_pass_plugins: Vec<PathBuf>,
+    /// `--mlir-pass <pass>`: extra `mlir-opt` passes, run before the
+    /// lowering to the LLVM dialect (a plugin dialect's own lowering).
+    pub mlir_passes: Vec<String>,
 }
 
 impl Default for BuildOptions {
@@ -88,6 +96,9 @@ impl Default for BuildOptions {
             debug: false,
             repl: None,
             overflow_checks: None,
+            mlir_dialect_plugins: Vec::new(),
+            mlir_pass_plugins: Vec::new(),
+            mlir_passes: Vec::new(),
         }
     }
 }
@@ -353,7 +364,7 @@ fn piped_build(
             .join()
             .map_err(|_| err(format!("{what} waiter panicked")))?
             .map_err(|e| err(format!("{what}: {e}")))?;
-        if !o.status.success() {
+        if failed(&o) {
             // The first tool that failed says why; the later ones only
             // saw its missing output.
             return Err(err(format!(
@@ -365,23 +376,65 @@ fn piped_build(
     Ok(mlir.gc_types)
 }
 
-fn opt_passes(opts: &BuildOptions) -> Vec<&'static str> {
-    let mut v = Vec::new();
+fn opt_passes(opts: &BuildOptions) -> Vec<String> {
+    let mut v: Vec<String> = Vec::new();
+    let plugins = [
+        ("--load-dialect-plugin", &opts.mlir_dialect_plugins),
+        ("--load-pass-plugin", &opts.mlir_pass_plugins),
+    ];
+    for (flag, paths) in plugins {
+        v.extend(paths.iter().map(|p| format!("{flag}={}", p.display())));
+    }
+    v.extend(opts.mlir_passes.iter().map(|p| format!("--{p}")));
     if opts.opt_level != "0" {
-        v.extend(["--canonicalize", "--cse"]);
+        v.extend(["--canonicalize".to_owned(), "--cse".to_owned()]);
     }
     if opts.debug {
         // Keep the locations in the text mlir-translate reads.
-        v.push("--mlir-print-debuginfo");
+        v.push("--mlir-print-debuginfo".to_owned());
     }
-    v.extend([
-        "--convert-func-to-llvm",
-        "--convert-arith-to-llvm",
-        "--convert-cf-to-llvm",
-        "--finalize-memref-to-llvm",
-        "--reconcile-unrealized-casts",
-    ]);
+    v.extend(
+        [
+            // `scf` regions written with `__mlir_op` (bare 1.9).
+            "--convert-scf-to-cf",
+            "--convert-func-to-llvm",
+            "--convert-arith-to-llvm",
+            "--convert-cf-to-llvm",
+            "--finalize-memref-to-llvm",
+            "--reconcile-unrealized-casts",
+        ]
+        .map(str::to_owned),
+    );
     v
+}
+
+/// `--load-mlir-plugin <path | name>` (stdlib bare 1.10.3): a path must
+/// exist; a bare name is `lib<name>.{dylib,so}` / `<name>.dll` in a
+/// directory of `ROK_MLIR_PLUGIN_PATH`.
+///
+/// # Errors
+/// The plugin is not there.
+pub fn find_mlir_plugin(spec: &str) -> Result<PathBuf, String> {
+    let p = Path::new(spec);
+    if p.components().count() > 1 || p.extension().is_some() {
+        return if p.is_file() {
+            Ok(p.to_path_buf())
+        } else {
+            Err(format!("MLIR plugin `{spec}`: no such file"))
+        };
+    }
+    let dirs = std::env::var_os("ROK_MLIR_PLUGIN_PATH").unwrap_or_default();
+    let names = [
+        format!("lib{spec}.dylib"),
+        format!("lib{spec}.so"),
+        format!("{spec}.dll"),
+    ];
+    std::env::split_paths(&dirs)
+        .flat_map(|d| names.iter().map(move |n| d.join(n)))
+        .find(|c| c.is_file())
+        .ok_or_else(|| {
+            format!("MLIR plugin `{spec}` not found (looked for lib{spec}.dylib / .so in ROK_MLIR_PLUGIN_PATH)")
+        })
 }
 
 /// The REPL's session host: the C program `c_src` with the whole
@@ -516,11 +569,17 @@ fn clang(opts: &BuildOptions) -> Result<Command, RokDiagnostic> {
     Ok(cmd)
 }
 
+/// A tool failed — or `mlir-opt` could not load an MLIR plugin, which it
+/// only reports ("Failed to load .. Request ignored.") and goes on.
+fn failed(o: &std::process::Output) -> bool {
+    !o.status.success() || o.stderr.windows(15).any(|w| w == b"Failed to load ")
+}
+
 fn output(cmd: &mut Command, what: &str) -> Result<Vec<u8>, RokDiagnostic> {
     let out = cmd
         .output()
         .map_err(|e| err(format!("cannot run {what}: {e}")))?;
-    if !out.status.success() {
+    if failed(&out) {
         return Err(err(format!(
             "{what} failed:\n{}",
             String::from_utf8_lossy(&out.stderr)
@@ -543,6 +602,28 @@ fn locate_tool(name: &str) -> Result<PathBuf, RokDiagnostic> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mlir_plugins_reach_mlir_opt_before_the_llvm_lowering() {
+        let opts = super::BuildOptions {
+            mlir_dialect_plugins: vec!["/p/libd.so".into()],
+            mlir_pass_plugins: vec!["/p/libpass.so".into()],
+            mlir_passes: vec!["convert-d-to-llvm".to_owned()],
+            ..super::BuildOptions::default()
+        };
+        let v = super::opt_passes(&opts);
+        assert_eq!(
+            v[..3],
+            [
+                "--load-dialect-plugin=/p/libd.so",
+                "--load-pass-plugin=/p/libpass.so",
+                "--convert-d-to-llvm"
+            ]
+        );
+        assert!(v.iter().any(|f| f == "--convert-func-to-llvm"));
+        assert!(super::find_mlir_plugin("/no/such/libx.so").is_err());
+        assert!(super::find_mlir_plugin("no_such_plugin_xyz").is_err());
+    }
+
     #[test]
     fn rok_tls_slots_are_initial_exec() {
         let ll = "@rok_tls_yield_flag = external thread_local global i8\n\

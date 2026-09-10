@@ -1,6 +1,7 @@
 // rok::core::convert — conversion traits (stdlib spec 2.11) and their
 // primitive impls (2.11.8). Four policies, each named at the call:
-// lossless `into`, fallible `try_into` (throws `OverflowError`),
+// lossless `into`, fallible `try_into` (throws the target's
+// `TryFrom::Error`; `OverflowError` for numbers),
 // `saturating_into`, `wrapping_into` (= `as`).
 //
 // ponytail: spec 2.11.3 / 2.11.4 / 2.11.5 write the `Into`-side traits
@@ -28,18 +29,21 @@ impl<S> Into for S {
     fn into<T: From<S>>(self) -> T { T::from(self) }
 }
 
-/// A conversion that throws when the value does not fit (2.11.4).
+/// A conversion that can fail (2.11.4). `Error` is what it throws:
+/// `ConversionError` unless the impl names another (the numeric impls
+/// say `OverflowError`).
 pub trait TryFrom<U> {
-    fn try_from(value: U) throws (OverflowError) -> Self;
+    type Error = ConversionError;
+    fn try_from(value: U) throws (Self::Error) -> Self;
 }
 
-/// `x.try_into()` = `T::try_from(x)` (2.11.4).
+/// `x.try_into()` = `T::try_from(x)` (2.11.4); throws `T`'s `Error`.
 pub trait TryInto {
-    fn try_into<T: TryFrom<Self>>(self) throws (OverflowError) -> T;
+    fn try_into<T: TryFrom<Self>>(self) throws (T::Error) -> T;
 }
 
 impl<S> TryInto for S {
-    fn try_into<T: TryFrom<S>>(self) throws (OverflowError) -> T { try T::try_from(self) }
+    fn try_into<T: TryFrom<S>>(self) throws (T::Error) -> T { try T::try_from(self) }
 }
 
 /// Out-of-range values clamp to the nearest end (2.11.5).
@@ -211,6 +215,7 @@ impl From<f32> for f64 {
 // TryFrom (integers that may not fit)
 
 impl TryFrom<i8> for u8 {
+    type Error = OverflowError;
     fn try_from(value: i8) throws (OverflowError) -> u8 {
         if value < 0 { throw overflow("u8"); }
         value as u8
@@ -218,6 +223,7 @@ impl TryFrom<i8> for u8 {
 }
 
 impl TryFrom<i8> for u16 {
+    type Error = OverflowError;
     fn try_from(value: i8) throws (OverflowError) -> u16 {
         if value < 0 { throw overflow("u16"); }
         value as u16
@@ -225,6 +231,7 @@ impl TryFrom<i8> for u16 {
 }
 
 impl TryFrom<i8> for u32 {
+    type Error = OverflowError;
     fn try_from(value: i8) throws (OverflowError) -> u32 {
         if value < 0 { throw overflow("u32"); }
         value as u32
@@ -232,6 +239,7 @@ impl TryFrom<i8> for u32 {
 }
 
 impl TryFrom<i8> for u64 {
+    type Error = OverflowError;
     fn try_from(value: i8) throws (OverflowError) -> u64 {
         if value < 0 { throw overflow("u64"); }
         value as u64
@@ -239,6 +247,7 @@ impl TryFrom<i8> for u64 {
 }
 
 impl TryFrom<i8> for usize {
+    type Error = OverflowError;
     fn try_from(value: i8) throws (OverflowError) -> usize {
         if value < 0 { throw overflow("usize"); }
         value as usize
@@ -246,6 +255,7 @@ impl TryFrom<i8> for usize {
 }
 
 impl TryFrom<i16> for i8 {
+    type Error = OverflowError;
     fn try_from(value: i16) throws (OverflowError) -> i8 {
         if value < i8::MIN as i16 || value > i8::MAX as i16 { throw overflow("i8"); }
         value as i8
@@ -253,6 +263,7 @@ impl TryFrom<i16> for i8 {
 }
 
 impl TryFrom<i16> for u8 {
+    type Error = OverflowError;
     fn try_from(value: i16) throws (OverflowError) -> u8 {
         if value < 0 || value > u8::MAX as i16 { throw overflow("u8"); }
         value as u8
@@ -260,6 +271,7 @@ impl TryFrom<i16> for u8 {
 }
 
 impl TryFrom<i16> for u16 {
+    type Error = OverflowError;
     fn try_from(value: i16) throws (OverflowError) -> u16 {
         if value < 0 { throw overflow("u16"); }
         value as u16
@@ -267,6 +279,7 @@ impl TryFrom<i16> for u16 {
 }
 
 impl TryFrom<i16> for u32 {
+    type Error = OverflowError;
     fn try_from(value: i16) throws (OverflowError) -> u32 {
         if value < 0 { throw overflow("u32"); }
         value as u32
@@ -274,6 +287,7 @@ impl TryFrom<i16> for u32 {
 }
 
 impl TryFrom<i16> for u64 {
+    type Error = OverflowError;
     fn try_from(value: i16) throws (OverflowError) -> u64 {
         if value < 0 { throw overflow("u64"); }
         value as u64
@@ -281,6 +295,7 @@ impl TryFrom<i16> for u64 {
 }
 
 impl TryFrom<i16> for usize {
+    type Error = OverflowError;
     fn try_from(value: i16) throws (OverflowError) -> usize {
         if value < 0 { throw overflow("usize"); }
         value as usize
@@ -288,6 +303,7 @@ impl TryFrom<i16> for usize {
 }
 
 impl TryFrom<i32> for i8 {
+    type Error = OverflowError;
     fn try_from(value: i32) throws (OverflowError) -> i8 {
         if value < i8::MIN as i32 || value > i8::MAX as i32 { throw overflow("i8"); }
         value as i8
@@ -295,6 +311,7 @@ impl TryFrom<i32> for i8 {
 }
 
 impl TryFrom<i32> for i16 {
+    type Error = OverflowError;
     fn try_from(value: i32) throws (OverflowError) -> i16 {
         if value < i16::MIN as i32 || value > i16::MAX as i32 { throw overflow("i16"); }
         value as i16
@@ -302,6 +319,7 @@ impl TryFrom<i32> for i16 {
 }
 
 impl TryFrom<i32> for u8 {
+    type Error = OverflowError;
     fn try_from(value: i32) throws (OverflowError) -> u8 {
         if value < 0 || value > u8::MAX as i32 { throw overflow("u8"); }
         value as u8
@@ -309,6 +327,7 @@ impl TryFrom<i32> for u8 {
 }
 
 impl TryFrom<i32> for u16 {
+    type Error = OverflowError;
     fn try_from(value: i32) throws (OverflowError) -> u16 {
         if value < 0 || value > u16::MAX as i32 { throw overflow("u16"); }
         value as u16
@@ -316,6 +335,7 @@ impl TryFrom<i32> for u16 {
 }
 
 impl TryFrom<i32> for u32 {
+    type Error = OverflowError;
     fn try_from(value: i32) throws (OverflowError) -> u32 {
         if value < 0 { throw overflow("u32"); }
         value as u32
@@ -323,6 +343,7 @@ impl TryFrom<i32> for u32 {
 }
 
 impl TryFrom<i32> for u64 {
+    type Error = OverflowError;
     fn try_from(value: i32) throws (OverflowError) -> u64 {
         if value < 0 { throw overflow("u64"); }
         value as u64
@@ -330,6 +351,7 @@ impl TryFrom<i32> for u64 {
 }
 
 impl TryFrom<i32> for usize {
+    type Error = OverflowError;
     fn try_from(value: i32) throws (OverflowError) -> usize {
         if value < 0 { throw overflow("usize"); }
         value as usize
@@ -337,6 +359,7 @@ impl TryFrom<i32> for usize {
 }
 
 impl TryFrom<i64> for i8 {
+    type Error = OverflowError;
     fn try_from(value: i64) throws (OverflowError) -> i8 {
         if value < i8::MIN as i64 || value > i8::MAX as i64 { throw overflow("i8"); }
         value as i8
@@ -344,6 +367,7 @@ impl TryFrom<i64> for i8 {
 }
 
 impl TryFrom<i64> for i16 {
+    type Error = OverflowError;
     fn try_from(value: i64) throws (OverflowError) -> i16 {
         if value < i16::MIN as i64 || value > i16::MAX as i64 { throw overflow("i16"); }
         value as i16
@@ -351,6 +375,7 @@ impl TryFrom<i64> for i16 {
 }
 
 impl TryFrom<i64> for i32 {
+    type Error = OverflowError;
     fn try_from(value: i64) throws (OverflowError) -> i32 {
         if value < i32::MIN as i64 || value > i32::MAX as i64 { throw overflow("i32"); }
         value as i32
@@ -358,6 +383,7 @@ impl TryFrom<i64> for i32 {
 }
 
 impl TryFrom<i64> for u8 {
+    type Error = OverflowError;
     fn try_from(value: i64) throws (OverflowError) -> u8 {
         if value < 0 || value > u8::MAX as i64 { throw overflow("u8"); }
         value as u8
@@ -365,6 +391,7 @@ impl TryFrom<i64> for u8 {
 }
 
 impl TryFrom<i64> for u16 {
+    type Error = OverflowError;
     fn try_from(value: i64) throws (OverflowError) -> u16 {
         if value < 0 || value > u16::MAX as i64 { throw overflow("u16"); }
         value as u16
@@ -372,6 +399,7 @@ impl TryFrom<i64> for u16 {
 }
 
 impl TryFrom<i64> for u32 {
+    type Error = OverflowError;
     fn try_from(value: i64) throws (OverflowError) -> u32 {
         if value < 0 || value > u32::MAX as i64 { throw overflow("u32"); }
         value as u32
@@ -379,6 +407,7 @@ impl TryFrom<i64> for u32 {
 }
 
 impl TryFrom<i64> for u64 {
+    type Error = OverflowError;
     fn try_from(value: i64) throws (OverflowError) -> u64 {
         if value < 0 { throw overflow("u64"); }
         value as u64
@@ -386,6 +415,7 @@ impl TryFrom<i64> for u64 {
 }
 
 impl TryFrom<i64> for usize {
+    type Error = OverflowError;
     fn try_from(value: i64) throws (OverflowError) -> usize {
         if value < 0 { throw overflow("usize"); }
         value as usize
@@ -393,6 +423,7 @@ impl TryFrom<i64> for usize {
 }
 
 impl TryFrom<isize> for i8 {
+    type Error = OverflowError;
     fn try_from(value: isize) throws (OverflowError) -> i8 {
         if value < i8::MIN as isize || value > i8::MAX as isize { throw overflow("i8"); }
         value as i8
@@ -400,6 +431,7 @@ impl TryFrom<isize> for i8 {
 }
 
 impl TryFrom<isize> for i16 {
+    type Error = OverflowError;
     fn try_from(value: isize) throws (OverflowError) -> i16 {
         if value < i16::MIN as isize || value > i16::MAX as isize { throw overflow("i16"); }
         value as i16
@@ -407,6 +439,7 @@ impl TryFrom<isize> for i16 {
 }
 
 impl TryFrom<isize> for i32 {
+    type Error = OverflowError;
     fn try_from(value: isize) throws (OverflowError) -> i32 {
         if value < i32::MIN as isize || value > i32::MAX as isize { throw overflow("i32"); }
         value as i32
@@ -414,6 +447,7 @@ impl TryFrom<isize> for i32 {
 }
 
 impl TryFrom<isize> for u8 {
+    type Error = OverflowError;
     fn try_from(value: isize) throws (OverflowError) -> u8 {
         if value < 0 || value > u8::MAX as isize { throw overflow("u8"); }
         value as u8
@@ -421,6 +455,7 @@ impl TryFrom<isize> for u8 {
 }
 
 impl TryFrom<isize> for u16 {
+    type Error = OverflowError;
     fn try_from(value: isize) throws (OverflowError) -> u16 {
         if value < 0 || value > u16::MAX as isize { throw overflow("u16"); }
         value as u16
@@ -428,6 +463,7 @@ impl TryFrom<isize> for u16 {
 }
 
 impl TryFrom<isize> for u32 {
+    type Error = OverflowError;
     fn try_from(value: isize) throws (OverflowError) -> u32 {
         if value < 0 || value > u32::MAX as isize { throw overflow("u32"); }
         value as u32
@@ -435,6 +471,7 @@ impl TryFrom<isize> for u32 {
 }
 
 impl TryFrom<isize> for u64 {
+    type Error = OverflowError;
     fn try_from(value: isize) throws (OverflowError) -> u64 {
         if value < 0 { throw overflow("u64"); }
         value as u64
@@ -442,6 +479,7 @@ impl TryFrom<isize> for u64 {
 }
 
 impl TryFrom<isize> for usize {
+    type Error = OverflowError;
     fn try_from(value: isize) throws (OverflowError) -> usize {
         if value < 0 { throw overflow("usize"); }
         value as usize
@@ -449,6 +487,7 @@ impl TryFrom<isize> for usize {
 }
 
 impl TryFrom<u8> for i8 {
+    type Error = OverflowError;
     fn try_from(value: u8) throws (OverflowError) -> i8 {
         if value > i8::MAX as u8 { throw overflow("i8"); }
         value as i8
@@ -456,6 +495,7 @@ impl TryFrom<u8> for i8 {
 }
 
 impl TryFrom<u8> for isize {
+    type Error = OverflowError;
     fn try_from(value: u8) throws (OverflowError) -> isize {
         if value > isize::MAX as u8 { throw overflow("isize"); }
         value as isize
@@ -463,6 +503,7 @@ impl TryFrom<u8> for isize {
 }
 
 impl TryFrom<u16> for i8 {
+    type Error = OverflowError;
     fn try_from(value: u16) throws (OverflowError) -> i8 {
         if value > i8::MAX as u16 { throw overflow("i8"); }
         value as i8
@@ -470,6 +511,7 @@ impl TryFrom<u16> for i8 {
 }
 
 impl TryFrom<u16> for i16 {
+    type Error = OverflowError;
     fn try_from(value: u16) throws (OverflowError) -> i16 {
         if value > i16::MAX as u16 { throw overflow("i16"); }
         value as i16
@@ -477,6 +519,7 @@ impl TryFrom<u16> for i16 {
 }
 
 impl TryFrom<u16> for isize {
+    type Error = OverflowError;
     fn try_from(value: u16) throws (OverflowError) -> isize {
         if value > isize::MAX as u16 { throw overflow("isize"); }
         value as isize
@@ -484,6 +527,7 @@ impl TryFrom<u16> for isize {
 }
 
 impl TryFrom<u16> for u8 {
+    type Error = OverflowError;
     fn try_from(value: u16) throws (OverflowError) -> u8 {
         if value > u8::MAX as u16 { throw overflow("u8"); }
         value as u8
@@ -491,6 +535,7 @@ impl TryFrom<u16> for u8 {
 }
 
 impl TryFrom<u32> for i8 {
+    type Error = OverflowError;
     fn try_from(value: u32) throws (OverflowError) -> i8 {
         if value > i8::MAX as u32 { throw overflow("i8"); }
         value as i8
@@ -498,6 +543,7 @@ impl TryFrom<u32> for i8 {
 }
 
 impl TryFrom<u32> for i16 {
+    type Error = OverflowError;
     fn try_from(value: u32) throws (OverflowError) -> i16 {
         if value > i16::MAX as u32 { throw overflow("i16"); }
         value as i16
@@ -505,6 +551,7 @@ impl TryFrom<u32> for i16 {
 }
 
 impl TryFrom<u32> for i32 {
+    type Error = OverflowError;
     fn try_from(value: u32) throws (OverflowError) -> i32 {
         if value > i32::MAX as u32 { throw overflow("i32"); }
         value as i32
@@ -512,6 +559,7 @@ impl TryFrom<u32> for i32 {
 }
 
 impl TryFrom<u32> for isize {
+    type Error = OverflowError;
     fn try_from(value: u32) throws (OverflowError) -> isize {
         if value > isize::MAX as u32 { throw overflow("isize"); }
         value as isize
@@ -519,6 +567,7 @@ impl TryFrom<u32> for isize {
 }
 
 impl TryFrom<u32> for u8 {
+    type Error = OverflowError;
     fn try_from(value: u32) throws (OverflowError) -> u8 {
         if value > u8::MAX as u32 { throw overflow("u8"); }
         value as u8
@@ -526,6 +575,7 @@ impl TryFrom<u32> for u8 {
 }
 
 impl TryFrom<u32> for u16 {
+    type Error = OverflowError;
     fn try_from(value: u32) throws (OverflowError) -> u16 {
         if value > u16::MAX as u32 { throw overflow("u16"); }
         value as u16
@@ -533,6 +583,7 @@ impl TryFrom<u32> for u16 {
 }
 
 impl TryFrom<u64> for i8 {
+    type Error = OverflowError;
     fn try_from(value: u64) throws (OverflowError) -> i8 {
         if value > i8::MAX as u64 { throw overflow("i8"); }
         value as i8
@@ -540,6 +591,7 @@ impl TryFrom<u64> for i8 {
 }
 
 impl TryFrom<u64> for i16 {
+    type Error = OverflowError;
     fn try_from(value: u64) throws (OverflowError) -> i16 {
         if value > i16::MAX as u64 { throw overflow("i16"); }
         value as i16
@@ -547,6 +599,7 @@ impl TryFrom<u64> for i16 {
 }
 
 impl TryFrom<u64> for i32 {
+    type Error = OverflowError;
     fn try_from(value: u64) throws (OverflowError) -> i32 {
         if value > i32::MAX as u64 { throw overflow("i32"); }
         value as i32
@@ -554,6 +607,7 @@ impl TryFrom<u64> for i32 {
 }
 
 impl TryFrom<u64> for i64 {
+    type Error = OverflowError;
     fn try_from(value: u64) throws (OverflowError) -> i64 {
         if value > i64::MAX as u64 { throw overflow("i64"); }
         value as i64
@@ -561,6 +615,7 @@ impl TryFrom<u64> for i64 {
 }
 
 impl TryFrom<u64> for isize {
+    type Error = OverflowError;
     fn try_from(value: u64) throws (OverflowError) -> isize {
         if value > isize::MAX as u64 { throw overflow("isize"); }
         value as isize
@@ -568,6 +623,7 @@ impl TryFrom<u64> for isize {
 }
 
 impl TryFrom<u64> for u8 {
+    type Error = OverflowError;
     fn try_from(value: u64) throws (OverflowError) -> u8 {
         if value > u8::MAX as u64 { throw overflow("u8"); }
         value as u8
@@ -575,6 +631,7 @@ impl TryFrom<u64> for u8 {
 }
 
 impl TryFrom<u64> for u16 {
+    type Error = OverflowError;
     fn try_from(value: u64) throws (OverflowError) -> u16 {
         if value > u16::MAX as u64 { throw overflow("u16"); }
         value as u16
@@ -582,6 +639,7 @@ impl TryFrom<u64> for u16 {
 }
 
 impl TryFrom<u64> for u32 {
+    type Error = OverflowError;
     fn try_from(value: u64) throws (OverflowError) -> u32 {
         if value > u32::MAX as u64 { throw overflow("u32"); }
         value as u32
@@ -589,6 +647,7 @@ impl TryFrom<u64> for u32 {
 }
 
 impl TryFrom<usize> for i8 {
+    type Error = OverflowError;
     fn try_from(value: usize) throws (OverflowError) -> i8 {
         if value > i8::MAX as usize { throw overflow("i8"); }
         value as i8
@@ -596,6 +655,7 @@ impl TryFrom<usize> for i8 {
 }
 
 impl TryFrom<usize> for i16 {
+    type Error = OverflowError;
     fn try_from(value: usize) throws (OverflowError) -> i16 {
         if value > i16::MAX as usize { throw overflow("i16"); }
         value as i16
@@ -603,6 +663,7 @@ impl TryFrom<usize> for i16 {
 }
 
 impl TryFrom<usize> for i32 {
+    type Error = OverflowError;
     fn try_from(value: usize) throws (OverflowError) -> i32 {
         if value > i32::MAX as usize { throw overflow("i32"); }
         value as i32
@@ -610,6 +671,7 @@ impl TryFrom<usize> for i32 {
 }
 
 impl TryFrom<usize> for i64 {
+    type Error = OverflowError;
     fn try_from(value: usize) throws (OverflowError) -> i64 {
         if value > i64::MAX as usize { throw overflow("i64"); }
         value as i64
@@ -617,6 +679,7 @@ impl TryFrom<usize> for i64 {
 }
 
 impl TryFrom<usize> for isize {
+    type Error = OverflowError;
     fn try_from(value: usize) throws (OverflowError) -> isize {
         if value > isize::MAX as usize { throw overflow("isize"); }
         value as isize
@@ -624,6 +687,7 @@ impl TryFrom<usize> for isize {
 }
 
 impl TryFrom<usize> for u8 {
+    type Error = OverflowError;
     fn try_from(value: usize) throws (OverflowError) -> u8 {
         if value > u8::MAX as usize { throw overflow("u8"); }
         value as u8
@@ -631,6 +695,7 @@ impl TryFrom<usize> for u8 {
 }
 
 impl TryFrom<usize> for u16 {
+    type Error = OverflowError;
     fn try_from(value: usize) throws (OverflowError) -> u16 {
         if value > u16::MAX as usize { throw overflow("u16"); }
         value as u16
@@ -638,6 +703,7 @@ impl TryFrom<usize> for u16 {
 }
 
 impl TryFrom<usize> for u32 {
+    type Error = OverflowError;
     fn try_from(value: usize) throws (OverflowError) -> u32 {
         if value > u32::MAX as usize { throw overflow("u32"); }
         value as u32
@@ -645,6 +711,7 @@ impl TryFrom<usize> for u32 {
 }
 
 impl TryFrom<f64> for f32 {
+    type Error = OverflowError;
     /// Throws when a finite `value` is beyond `f32`'s range.
     fn try_from(value: f64) throws (OverflowError) -> f32 {
         if value.is_finite() && value.abs() > f32::MAX as f64 { throw overflow("f32"); }

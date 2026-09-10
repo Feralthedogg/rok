@@ -481,6 +481,10 @@ pub(super) fn adapt_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
     else {
         return value;
     };
+    // An `extern "C" fn` slot takes a C function as is (no thunk).
+    if super::is_c_fn(want) {
+        return value;
+    }
     let target = match &value.kind {
         HirExprKind::FnRef(t) => Some(*t),
         _ => None,
@@ -642,6 +646,10 @@ pub(super) fn adapt_never_fn(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
     else {
         return value;
     };
+    // An `extern "C" fn` slot takes a C function as is (no thunk).
+    if super::is_c_fn(want) {
+        return value;
+    }
     if **vret != HirTy::Never || **sret == HirTy::Never || args != vargs {
         return value;
     }

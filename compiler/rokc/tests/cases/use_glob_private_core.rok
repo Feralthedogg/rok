@@ -1,0 +1,19 @@
+// expect-exit: 42
+// A private core helper (`rok::core::num::bigint::nat_zero` / `int_small`)
+// is not imported by the implicit `use rok::core::**` (spec 5.6), and a
+// generic fn reached by the module's own `use` beats any core glob hit
+// whether the core item is generic or not (spec 5.7).
+
+mod util {
+    pub fn nat_zero<T>(x: T) -> T { x }
+    pub fn int_small(v: i32) -> i32 { v * 2 }
+}
+
+use util::nat_zero;
+use util::*;
+
+fn int_radix_chunk<T>(x: T) -> T { x }
+
+fn main() -> i32 {
+    return nat_zero(10i32) + int_small(11i32) + int_radix_chunk(10i32);
+}

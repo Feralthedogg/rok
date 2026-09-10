@@ -677,3 +677,44 @@ fn dependency_trait_is_not_the_current_package() {
     assert_exit(&out, 0);
     assert_eq!(text(&out.stdout), "7\n");
 }
+
+#[test]
+fn mlir_plugins_go_to_mlir_opt() {
+    // Stdlib bare 1.10.3: a missing plugin is a clean error up front.
+    let dir = scratch("mlir-plugin");
+    fs::write(dir.join("p.rok"), "println(\"hi\");\n").unwrap();
+    let out = rokc(
+        None,
+        &dir,
+        &["build", "p.rok", "--load-mlir-plugin", "/no/such/libd.so"],
+    );
+    assert_exit(&out, 1);
+    assert!(
+        text(&out.stderr).contains("no such file"),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = rokc(
+        None,
+        &dir,
+        &["build", "p.rok", "--load-mlir-plugin=nosuchdialect"],
+    );
+    assert_exit(&out, 1);
+    assert!(
+        text(&out.stderr).contains("ROK_MLIR_PLUGIN_PATH"),
+        "{}",
+        text(&out.stderr)
+    );
+    // A file that is no plugin reaches mlir-opt (`--load-dialect-plugin`
+    // / `--load-pass-plugin`), whose refusal fails the build.
+    let Some(env) = setup() else { return };
+    for flag in ["--load-mlir-plugin", "--load-mlir-pass-plugin"] {
+        let out = rokc(Some(&env), &dir, &["build", "p.rok", flag, "p.rok"]);
+        assert_exit(&out, 1);
+        let err = text(&out.stderr);
+        assert!(
+            err.contains("mlir-opt failed") && err.contains("Failed to load"),
+            "{err}"
+        );
+    }
+}

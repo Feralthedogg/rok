@@ -12,7 +12,9 @@ use rokc_hir::{
 use rokc_ir_common::PrimTy as IrPrimTy;
 use rokc_ir_common::{BlockId, ConstVal, FunctionId, LocalId, PrimOp, PrimTy};
 
-use crate::ty::{code_ty, enum_payload_ty, fat_fn, has_gc_ref, lower_ty, lower_ty_in};
+use crate::ty::{
+    code_ty, enum_payload_ty, fat_fn, has_gc_ref, is_c_fn_niche, lower_ty, lower_ty_in, sum_tag,
+};
 use crate::{
     BasicBlock, LocalDecl, MirFunction, MirModule, MirStaticDef, MirTy, Operand, RValue, Statement,
     Terminator,
@@ -762,6 +764,12 @@ impl<'a> FnBuilder<'a> {
                     ret_ty,
                 }
             }
+            // A C-ABI fn as an `extern "C" fn` value: its own address
+            // (codegen picks the C entry).
+            HirExprKind::FnRef(id) if e.ty.is_c_fn() => RValue::FnAddr {
+                callee: *id,
+                fn_ty: lower_ty_in(&e.ty, self.module),
+            },
             // A named fn as a value: `{wrapper, null}`.
             HirExprKind::FnRef(id) => {
                 let MirTy::Tuple(parts) = lower_ty_in(&e.ty, self.module) else {
@@ -802,6 +810,19 @@ impl<'a> FnBuilder<'a> {
                 ret_ty,
             } => {
                 let callee_op = self.lower_expr_to_operand(callee);
+                if callee.ty.is_c_fn() {
+                    // A C function pointer: no env, the C ABI.
+                    return RValue::CallIndirect {
+                        callee: callee_op,
+                        args: args.iter().map(|a| self.lower_expr_to_operand(a)).collect(),
+                        arg_tys: args
+                            .iter()
+                            .map(|a| lower_ty_in(&a.ty, self.module))
+                            .collect(),
+                        ret_ty: lower_ty_in(ret_ty, self.module),
+                        c_abi: true,
+                    };
+                }
                 self.call_fn_value(callee_op, args, ret_ty)
             }
             HirExprKind::Cast {
@@ -1051,8 +1072,20 @@ impl<'a> FnBuilder<'a> {
                 value,
             } => {
                 let mir_ty = lower_ty_in(sum_ty, self.module);
+                // The C fn pointer null niche: the pointer, or null.
+                if is_c_fn_niche(sum_ty) {
+                    if let Some(v) = value {
+                        return self.lower_expr_to_operand(v);
+                    }
+                    let dst = self.fresh_local(mir_ty);
+                    self.push_stmt(Statement::Assign {
+                        target: dst,
+                        rvalue: RValue::Use(Operand::Const(ConstVal::None)),
+                    });
+                    return Operand::Copy(dst);
+                }
                 let tag_op = Operand::Const(ConstVal::Int {
-                    value: i128::from(*variant_index),
+                    value: i128::from(sum_tag(sum_ty, *variant_index)),
                     ty: IrPrimTy::I32,
                 });
                 // `any Tr` (D4): the payload is the value itself if it
@@ -1310,6 +1343,55 @@ impl<'a> FnBuilder<'a> {
                         args,
                         elem_ty,
                         order: *order,
+                    },
+                });
+                Operand::Copy(dst)
+            }
+            HirExprKind::MlirOp {
+                op,
+                attrs,
+                args,
+                regions,
+            } => {
+                let args = args
+                    .iter()
+                    .map(|a| {
+                        let t = lower_ty_in(&a.ty, self.module);
+                        (self.lower_expr_to_operand(a), t)
+                    })
+                    .collect();
+                // Regions come after the operands (their text goes into
+                // the op, `Statement::MlirRegion`).
+                for (params, body) in regions {
+                    self.push_stmt(Statement::MlirRegion {
+                        params: params.clone(),
+                    });
+                    // The terminator op is the region's last op: a
+                    // trailing (non-`()`) value is not evaluated.
+                    let (stmts, tail) = match &body.kind {
+                        HirExprKind::Block(b) => (&b.stmts[..], b.trailing.as_ref()),
+                        _ => (&[][..], Some(body)),
+                    };
+                    for s in stmts {
+                        self.lower_stmt(s);
+                    }
+                    if let Some(t) = tail.filter(|t| lower_ty_in(&t.ty, self.module) == MirTy::Unit)
+                    {
+                        self.push_loc(t.span);
+                        self.lower_expr_to_operand(t);
+                    }
+                    self.push_stmt(Statement::MlirRegionEnd);
+                }
+                let ty = lower_ty_in(&e.ty, self.module);
+                let dst = self.fresh_local(ty.clone());
+                self.push_stmt(Statement::Assign {
+                    target: dst,
+                    rvalue: RValue::MlirOp {
+                        op: op.clone(),
+                        attrs: attrs.clone(),
+                        args,
+                        ty,
+                        regions: u32::try_from(regions.len()).expect("too many regions"),
                     },
                 });
                 Operand::Copy(dst)
@@ -1777,8 +1859,12 @@ impl<'a> FnBuilder<'a> {
             | HirPattern::SumVariant { variant_index, .. } => {
                 // Tag check; payload binding (if any) happens in
                 // `bind_pattern` after the arm body block is selected.
+                let stored = match pat {
+                    HirPattern::SumVariant { sum_ty, .. } => sum_tag(sum_ty, *variant_index),
+                    _ => *variant_index,
+                };
                 let value = ConstVal::Int {
-                    value: i128::from(*variant_index),
+                    value: i128::from(stored),
                     ty: IrPrimTy::I32,
                 };
                 let tag = self.extract_tag(scrut_local, scrut_ty);
@@ -1865,6 +1951,17 @@ impl<'a> FnBuilder<'a> {
             return Operand::Copy(dst);
         }
         match scrut_ty {
+            // The C fn pointer null niche (`ty::c_fn_niche`): non-null is
+            // the fn member's stored tag 1, null is `none`'s 0.
+            MirTy::Fn(..) => {
+                let set =
+                    self.cast_to(Operand::Copy(scrut), scrut_ty, &MirTy::Prim(IrPrimTy::Bool));
+                self.cast_to(
+                    set,
+                    &MirTy::Prim(IrPrimTy::Bool),
+                    &MirTy::Prim(IrPrimTy::I32),
+                )
+            }
             MirTy::Tuple(parts) if parts.len() == 2 => {
                 let dst = self.fresh_local(parts[0].clone());
                 self.push_stmt(Statement::Assign {
@@ -1934,6 +2031,7 @@ impl<'a> FnBuilder<'a> {
             args: call_args,
             arg_tys: all_tys,
             ret_ty: ret,
+            c_abi: false,
         }
     }
 
@@ -2146,6 +2244,14 @@ impl<'a> FnBuilder<'a> {
                     self.push_stmt(Statement::Assign {
                         target: *local,
                         rvalue: RValue::Use(Operand::Const(ConstVal::None)),
+                    });
+                    return;
+                }
+                // The C fn pointer null niche: the payload is the pointer.
+                if is_c_fn_niche(sum_ty) {
+                    self.push_stmt(Statement::Assign {
+                        target: *local,
+                        rvalue: RValue::Use(Operand::Copy(scrut)),
                     });
                     return;
                 }

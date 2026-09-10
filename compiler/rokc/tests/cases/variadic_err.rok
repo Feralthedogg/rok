@@ -1,0 +1,11 @@
+// expect-error: cannot infer type parameter `T` of `count`
+// expect-error: spread into a variadic `...T` needs a tuple, a `List`, a `Slice` or an array, found `i32`
+
+fn count<T>(xs: ...T) -> usize { xs.len() }
+fn sum(xs: ...i32) -> i32 { 0 }
+
+fn main() -> i32 {
+    let n = 3i32;
+    let _a = sum(..n);
+    count() as i32
+}

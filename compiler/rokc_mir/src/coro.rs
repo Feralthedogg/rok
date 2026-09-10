@@ -368,7 +368,8 @@ fn live_in(f: &MirFunction) -> HashMap<BlockId, BTreeSet<LocalId>> {
                     value,
                     ..
                 } => ops.extend([Operand::Copy(*array), index.clone(), value.clone()]),
-                Statement::StorageDead(_) | Statement::Loc(..) => {}
+                Statement::StorageDead(_) | Statement::Loc(..) | Statement::MlirRegionEnd => {}
+                Statement::MlirRegion { params } => defd.extend(params.iter().copied()),
                 Statement::BufStore {
                     buf, index, value, ..
                 } => ops.extend([buf.clone(), index.clone(), value.clone()]),
@@ -476,6 +477,7 @@ pub fn rvalue_operands(r: &RValue, out: &mut Vec<Operand>) {
             out.push(callee.clone());
             out.extend(args.iter().cloned());
         }
+        RValue::MlirOp { args, .. } => out.extend(args.iter().map(|(a, _)| a.clone())),
         RValue::FnAddr { .. }
         | RValue::StaticLoad { .. }
         | RValue::SizeOf { .. }

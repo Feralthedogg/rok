@@ -455,8 +455,9 @@ impl Ord for char {
 }
 
 /// `char::try_from(n)` (2.15.4): throws for a surrogate or a value past
-/// U+10FFFF (`OverflowError`, the shape `TryFrom` fixes).
+/// U+10FFFF (`OverflowError`, as spec 2.15.4 says).
 impl TryFrom<u32> for char {
+    type Error = OverflowError;
     fn try_from(value: u32) throws (OverflowError) -> char {
         let c = char::from_u32(value);
         if c is char { return c; }

@@ -77,6 +77,10 @@ enum LookupOutcome {
 struct NameSet<'b> {
     exists: &'b dyn Fn(&str) -> bool,
     keys: &'b dyn Fn() -> Vec<String>,
+    /// Is the key visible from the module being resolved? A glob import
+    /// brings in only the items it can see (spec 5.6), so a private
+    /// helper of `rok::core::x` never competes through `rok::core::**`.
+    visible: &'b dyn Fn(&str) -> bool,
 }
 
 /// Type-namespace index: every struct / union / enum / alias / trait
@@ -239,6 +243,13 @@ impl TypeNames<'_> {
         out
     }
 
+    /// Can `module` see type-namespace key `k`?
+    fn visible_type(&self, k: &str, module: &str) -> bool {
+        self.visibility
+            .get(k)
+            .is_none_or(|&vis| visible_from(module, &module_of(k), vis))
+    }
+
     fn canon_uncached(
         &self,
         segments: &[&str],
@@ -251,9 +262,11 @@ impl TypeNames<'_> {
             v.extend(self.reexports.keys().cloned());
             v
         };
+        let visible = |k: &str| self.visible_type(k, module);
         let set = NameSet {
             exists: &exists,
             keys: &keys,
+            visible: &visible,
         };
         let mut full = match resolve_name(segments, module, local_uses, self.uses, &set) {
             Ok(r) => r?,
@@ -308,9 +321,12 @@ impl TypeNames<'_> {
         };
         let exists = |k: &str| full_key(k).is_some();
         let keys = || self.variants.iter().cloned().collect::<Vec<_>>();
+        // A variant is as visible as its enum (spec 5.6.9).
+        let visible = |k: &str| self.visible_type(&module_of(k), module);
         let set = NameSet {
             exists: &exists,
             keys: &keys,
+            visible: &visible,
         };
         match resolve_name(segments, module, local_uses, self.uses, &set) {
             Ok(r) => full_key(&r?),
@@ -336,8 +352,8 @@ impl TypeNames<'_> {
             .iter()
             .filter_map(|b| {
                 let segs: Vec<&str> = b.segments.iter().map(|s| s.name.as_str()).collect();
-                if segs == [rokc_ast::UNSAFE_FN_MARK] {
-                    return Some(rokc_ast::UNSAFE_FN_MARK.to_owned());
+                if let [m @ (rokc_ast::UNSAFE_FN_MARK | rokc_ast::C_FN_MARK)] = segs.as_slice() {
+                    return Some((*m).to_owned());
                 }
                 let key = self.trait_key(&segs, module);
                 if self.auto_traits.contains(&key) {
@@ -454,6 +470,10 @@ struct ImplConsts {
     consts: Vec<(String, Ty, Expr)>,
 }
 
+/// A concrete impl's associated type: `(trait key, trait arguments,
+/// name, type)`.
+type ImplAssoc = (String, Vec<HirTy>, String, HirTy);
+
 /// Module-wide, read-only lowering environment shared by every function
 /// body (plus the interior-mutable `sink`).
 struct Env<'a> {
@@ -503,6 +523,9 @@ struct Env<'a> {
     /// C variadic `extern` declarations (`fn printf(fmt: str, ...)`):
     /// extra arguments take the C default argument promotions.
     c_variadic: std::collections::HashSet<FunctionId>,
+    /// `extern "C" fn` definitions (spec 5.9.10): with `extern_fn_ids`,
+    /// the named functions an `extern "C" fn(..)` value can point to.
+    c_defs: std::collections::HashSet<FunctionId>,
     prec: &'a PrecTable,
     sink: ClosureSink,
     /// Visibility of every value-namespace item, keyed by full name.
@@ -526,7 +549,8 @@ struct Env<'a> {
     trait_impl_tys: HashMap<String, Vec<HirTy>>,
     /// Concrete impls' associated types: target → `(name, type)` (the
     /// `T::Item` projections of a type with no generic impl).
-    impl_assoc: HashMap<MethodTarget, Vec<(String, String, HirTy)>>,
+    /// `(trait, trait args, name, type)`.
+    impl_assoc: HashMap<MethodTarget, Vec<ImplAssoc>>,
     /// Module-level `static` items by name → declared type.
     statics: HashMap<String, HirTy>,
     /// Statics that may be assigned (`extern` `static mut`, spec 5.9.3).
@@ -624,6 +648,9 @@ struct FnSig {
     param_names: Vec<String>,
     /// Which parameters are `ref` (empty = none).
     param_refs: Vec<bool>,
+    /// The last parameter is a variadic `...T` (a `Slice<T>` the call
+    /// builds from its trailing arguments, spec 4.2.5).
+    variadic: bool,
 }
 
 fn none_ty() -> HirTy {
@@ -768,6 +795,7 @@ fn coerce(
     value: HirExpr,
     what: &dyn Fn() -> String,
 ) -> HirExpr {
+    let value = c_fn_value(ctx, slot, value);
     let value = adapt_never_fn(ctx, slot, value);
     let value = adapt_fn_value(ctx, slot, value);
     let value = box_into_any(ctx, slot, value);
@@ -805,27 +833,7 @@ fn coerce(
     if !ty_compatible(slot, &v.ty)
         || matches!(v.ty, HirTy::Closure { .. } if matches!(slot, HirTy::Fn(..)))
     {
-        let hint = if matches!((slot, &v.ty), (HirTy::Fn(_, _, want), HirTy::Closure { .. }) if !want.is_empty())
-        {
-            " — the closure's captures don't meet the `fn` type's bounds"
-        } else if matches!((slot, &v.ty), (HirTy::Fn(_, _, want), HirTy::Fn(_, _, have))
-            if have.iter().any(|k| k == rokc_ast::UNSAFE_FN_MARK)
-                && !want.iter().any(|k| k == rokc_ast::UNSAFE_FN_MARK))
-        {
-            " — an `unsafe fn` value only fits an `unsafe fn` type (spec 4.15)"
-        } else if matches!((slot, &v.ty), (HirTy::Fn(_, _, want), HirTy::Fn(_, _, have))
-            if !fn_bounds_fit(want, have))
-        {
-            " — a `fn` value must already carry the bound in its type; only a named \
-             function or a capture-free closure is always `Send + Sync`"
-        } else if matches!((slot, &v.ty), (HirTy::Fn(_, r, _), HirTy::Fn(..))
-            if matches!(**r, HirTy::Throws { .. }))
-        {
-            " — a function value fits a `fn` type that throws more only with the same \
-             parameters and result (spec 4.4.9)"
-        } else {
-            ""
-        };
+        let hint = fn_mismatch_hint(slot, &v.ty);
         ctx.emit_error(
             rokc_diagnostic::ErrorKind::Type,
             format!(
@@ -839,6 +847,70 @@ fn coerce(
     v
 }
 
+/// Why a function value does not fit a `fn` slot (`""`: no hint).
+fn fn_mismatch_hint(slot: &HirTy, ty: &HirTy) -> &'static str {
+    if matches!((slot, ty), (HirTy::Fn(_, _, want), HirTy::Closure { .. }) if !want.is_empty()) {
+        " — the closure's captures don't meet the `fn` type's bounds"
+    } else if matches!((slot, ty), (HirTy::Fn(_, _, want), HirTy::Fn(_, _, have))
+        if have.iter().any(|k| k == rokc_ast::UNSAFE_FN_MARK)
+            && !want.iter().any(|k| k == rokc_ast::UNSAFE_FN_MARK))
+    {
+        " — an `unsafe fn` value only fits an `unsafe fn` type (spec 4.15)"
+    } else if matches!((slot, ty), (HirTy::Fn(_, _, want), HirTy::Fn(_, _, have))
+        if is_c_fn(want) != is_c_fn(have))
+    {
+        " — an `extern \"C\" fn` value is a bare C function pointer, not a rok `fn` value \
+         (spec 5.9.4)"
+    } else if matches!((slot, ty), (HirTy::Fn(_, _, want), HirTy::Fn(_, _, have))
+        if !fn_bounds_fit(want, have))
+    {
+        " — a `fn` value must already carry the bound in its type; only a named \
+         function or a capture-free closure is always `Send + Sync`"
+    } else if matches!((slot, ty), (HirTy::Fn(_, r, _), HirTy::Fn(..))
+        if matches!(**r, HirTy::Throws { .. }))
+    {
+        " — a function value fits a `fn` type that throws more only with the same \
+         parameters and result (spec 4.4.9)"
+    } else {
+        ""
+    }
+}
+
+/// Spec 5.9.4: a named C-ABI function (an `extern` block declaration
+/// or an `extern "C" fn` definition) fills an `extern "C" fn(..)` slot
+/// (or such a member of a sum slot) as its own address: the value is
+/// retyped, and MIR takes the thin code pointer (the C ABI entry).
+fn c_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, mut value: HirExpr) -> HirExpr {
+    let (HirExprKind::FnRef(id), HirTy::Fn(va, vr, have)) = (&value.kind, &value.ty) else {
+        return value;
+    };
+    if is_c_fn(have) {
+        return value;
+    }
+    let fits =
+        |t: &&HirTy| matches!(t, HirTy::Fn(a, r, want) if is_c_fn(want) && a == va && r == vr);
+    let target = match slot {
+        HirTy::Sum(vs) => vs.iter().find(fits),
+        s => Some(s).filter(fits),
+    };
+    if target.is_none() {
+        return value;
+    }
+    if !(ctx.env.extern_fn_ids.contains(id) || ctx.env.c_defs.contains(id)) {
+        ctx.emit_error(
+            rokc_diagnostic::ErrorKind::Type,
+            "only an `extern \"C\"` function (an `extern` block declaration or an \
+             `extern \"C\" fn` definition) is an `extern \"C\" fn(..)` value (spec 5.9.4)"
+                .to_owned(),
+        );
+    }
+    let mut bounds = have.clone();
+    bounds.push(rokc_ast::C_FN_MARK.to_owned());
+    bounds.sort();
+    value.ty = HirTy::Fn(va.clone(), vr.clone(), bounds);
+    value
+}
+
 /// Can a `fn` value with bounds `have` fill a slot with bounds `want`?
 /// It must carry every auto trait the slot names (E3), and an `unsafe
 /// fn` only fills an `unsafe fn` slot (a safe one fills either).
@@ -847,6 +919,12 @@ fn fn_bounds_fit(want: &[String], have: &[String]) -> bool {
     want.iter()
         .all(|b| b == rokc_ast::UNSAFE_FN_MARK || have.contains(b))
         && (!unsafe_mark(have) || unsafe_mark(want))
+        && is_c_fn(want) == is_c_fn(have)
+}
+
+/// The bounds of an `extern "C" fn(..)` type (a thin C function pointer).
+fn is_c_fn(bounds: &[String]) -> bool {
+    bounds.iter().any(|k| k == rokc_ast::C_FN_MARK)
 }
 
 /// E3: a `fn` value with more auto-trait bounds than the slot (or the
@@ -1250,6 +1328,10 @@ struct LowerCtx<'a> {
     /// Type parameter → its trait bounds and their supertraits (trait
     /// keys): `T::Item` resolves through them (`set_bounds`).
     ty_bounds: HashMap<String, Vec<String>>,
+    /// Type parameter → its direct bounds' trait keys and written
+    /// arguments (`T: TryFrom<S>` → `(TryFrom, [S])`): `T::Error` takes
+    /// the impl of `TryFrom<S>`, not every `TryFrom` impl of `T`.
+    ty_bound_args: HashMap<String, Vec<(String, Vec<Ty>)>>,
     /// Lowering a coroutine body (`yield` / `await` are allowed).
     coro: Option<coro::CoroCtx>,
     /// Associated types of the enclosing trait / impl
@@ -1356,6 +1438,7 @@ impl<'a> LowerCtx<'a> {
             next_synth: 0,
             narrowed: HashMap::new(),
             ty_bounds: HashMap::new(),
+            ty_bound_args: HashMap::new(),
             coro: None,
             assoc_names: Vec::new(),
             infer_probe: None,
@@ -1413,6 +1496,7 @@ impl<'a> LowerCtx<'a> {
         match ty {
             HirTy::GcBuf(t) => format!("GcBuf<{}>", self.ty_name(t)),
             HirTy::Never => "!".to_owned(),
+            HirTy::Mlir(t) => format!("__mlir_type<{t:?}>"),
             HirTy::Struct(_) | HirTy::Enum(_) => {
                 let (name, generic_args) = match ty {
                     HirTy::Struct(id) => {
@@ -1465,13 +1549,14 @@ impl<'a> LowerCtx<'a> {
                 let (bounds, kw): (String, &str) = match ty {
                     HirTy::Fn(_, _, b) => (
                         b.iter()
-                            .filter(|k| *k != rokc_ast::UNSAFE_FN_MARK)
+                            .filter(|k| !k.starts_with('#'))
                             .flat_map(|k| [" + ", leaf_name(k)])
                             .collect(),
-                        if b.iter().any(|k| k == rokc_ast::UNSAFE_FN_MARK) {
-                            "unsafe fn"
-                        } else {
-                            kw
+                        match (b.iter().any(|k| k == rokc_ast::UNSAFE_FN_MARK), is_c_fn(b)) {
+                            (true, true) => "unsafe extern \"C\" fn",
+                            (true, false) => "unsafe fn",
+                            (false, true) => "extern \"C\" fn",
+                            (false, false) => kw,
                         },
                     ),
                     _ => (String::new(), kw),
@@ -1569,6 +1654,7 @@ impl<'a> LowerCtx<'a> {
             HirTy::Prim(_)
             | HirTy::Unit
             | HirTy::Never
+            | HirTy::Mlir(_)
             | HirTy::Any
             | HirTy::Unknown
             | HirTy::Path(_) => true,
@@ -1910,9 +1996,46 @@ impl<'a> LowerCtx<'a> {
     fn resolve_in<T>(&self, segments: &[&str], table: &HashMap<String, T>) -> Option<String> {
         let exists = |k: &str| table.contains_key(k);
         let keys = || table.keys().cloned().collect::<Vec<_>>();
+        let visible = |k: &str| {
+            let vis = self.env.item_visibility.get(k).copied();
+            vis.is_none_or(|v| self.is_visible(&module_of(k), v))
+        };
         let set = NameSet {
             exists: &exists,
             keys: &keys,
+            visible: &visible,
+        };
+        match resolve_name(
+            segments,
+            &self.current_module,
+            &self.local_uses,
+            self.env.uses,
+            &set,
+        ) {
+            Ok(r) => r,
+            Err(hits) => {
+                self.report_ambiguous(&segments.join("::"), &hits);
+                hits.into_iter().next()
+            }
+        }
+    }
+
+    /// Resolve a function path in the one value namespace that holds
+    /// both concrete (`fn_table`) and generic (`generic_fns`) functions,
+    /// so the nearest declaration wins whichever kind it is (spec 5.7:
+    /// the module's own items, then its `use`s, then `rok::core::**`).
+    fn resolve_any_fn(&self, segments: &[&str]) -> Option<String> {
+        let (fns, gens) = (&self.env.fn_table, &self.env.generic_fns);
+        let exists = |k: &str| fns.contains_key(k) || gens.contains_key(k);
+        let keys = || fns.keys().chain(gens.keys()).cloned().collect::<Vec<_>>();
+        let visible = |k: &str| {
+            let vis = self.env.item_visibility.get(k).copied();
+            vis.is_none_or(|v| self.is_visible(&module_of(k), v))
+        };
+        let set = NameSet {
+            exists: &exists,
+            keys: &keys,
+            visible: &visible,
         };
         match resolve_name(
             segments,
@@ -1930,20 +2053,21 @@ impl<'a> LowerCtx<'a> {
     }
 
     /// Resolve a callee name (single- or multi-segment path) to a fully
-    /// qualified fn-table key.
-    /// A generic fn of the current module shadows a non-generic one from
-    /// elsewhere (a glob import: `fn id<T>` vs `rok::core::task::id`).
+    /// qualified fn-table key (a concrete fn), or an `extern "C"` one.
     fn resolve_fn_name(&self, segments: &[&str]) -> Option<String> {
-        let here = |k: &String| resolve::module_of(k) == self.current_module;
-        let local_generic = self
-            .resolve_in(segments, &self.env.generic_fns)
-            .is_some_and(|g| here(&g));
-        self.resolve_in(segments, &self.env.fn_table)
-            .filter(|f| !local_generic || here(f))
-            .or_else(|| match segments {
+        match self.resolve_any_fn(segments) {
+            Some(f) => self.env.fn_table.contains_key(&f).then_some(f),
+            None => match segments {
                 [name] if self.env.extern_fns.contains(*name) => Some((*name).to_owned()),
                 _ => None,
-            })
+            },
+        }
+    }
+
+    /// `resolve_fn_name` for a generic fn (a `generic_fns` key).
+    fn resolve_generic_fn_name(&self, segments: &[&str]) -> Option<String> {
+        self.resolve_any_fn(segments)
+            .filter(|f| self.env.generic_fns.contains_key(f))
     }
 
     fn report_ambiguous(&self, name: &str, hits: &[String]) {
@@ -2203,6 +2327,9 @@ impl<'a> LowerCtx<'a> {
                         if let (GC_BUF, [elem]) = (full.as_str(), generics) {
                             return HirTy::GcBuf(Box::new(rec(elem)));
                         }
+                        if let Some(t) = resolve::mlir_ty(&full, generics) {
+                            return t;
+                        }
                         let args: Vec<HirTy> = generics.iter().map(rec).collect();
                         let mut leftover = Vec::new();
                         args.iter()
@@ -2333,7 +2460,14 @@ impl<'a> LowerCtx<'a> {
                     );
                     return Some(HirTy::Unknown);
                 }
-                return Some(self.project_or_report(&base, &last.name, Some(&[key]), true));
+                let args = self.bound_args(tp);
+                return Some(self.project_or_report(
+                    &base,
+                    &last.name,
+                    Some(&[key.clone()]),
+                    &[(key, args)],
+                    true,
+                ));
             }
         }
         let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
@@ -2374,24 +2508,49 @@ impl<'a> LowerCtx<'a> {
             [n] => self.ty_bounds.get(*n).cloned(),
             _ => None,
         };
-        Some(self.project_or_report(&base, &last.name, via.as_deref(), false))
+        let with_args: Vec<(String, Vec<HirTy>)> = match pre.as_slice() {
+            [n] => self
+                .ty_bound_args
+                .get(*n)
+                .into_iter()
+                .flatten()
+                .map(|(k, args)| {
+                    let args = split_trait_args(args, |t| self.resolve_ty_inner(t)).0;
+                    (k.clone(), args)
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        Some(self.project_or_report(&base, &last.name, via.as_deref(), &with_args, false))
+    }
+
+    /// The positional arguments of trait path `tp` (`TryFrom<i64>` →
+    /// `[i64]`).
+    fn bound_args(&self, tp: &AstPath) -> Vec<HirTy> {
+        let generics = tp
+            .segments
+            .last()
+            .map_or(&[][..], |s| s.generics.as_slice());
+        split_trait_args(generics, |t| self.resolve_ty_inner(t)).0
     }
 
     /// `project`, reporting a miss. `strict`: only `traits` count;
     /// otherwise they are preferred and every impl is the fallback.
+    /// `args`: a trait's impls must have these leading arguments.
     fn project_or_report(
         &self,
         base: &HirTy,
         name: &str,
         traits: Option<&[String]>,
+        args: &[(String, Vec<HirTy>)],
         strict: bool,
     ) -> HirTy {
         let hit = match traits {
-            Some(t) if strict => self.project(base, name, Some(t)),
+            Some(t) if strict => self.project(base, name, Some(t), args),
             Some(t) => self
-                .project(base, name, Some(t))
-                .or_else(|| self.project(base, name, None)),
-            None => self.project(base, name, None),
+                .project(base, name, Some(t), args)
+                .or_else(|| self.project(base, name, None, &[])),
+            None => self.project(base, name, None, &[]),
         };
         hit.unwrap_or_else(|| {
             let via = match traits {
@@ -2411,7 +2570,13 @@ impl<'a> LowerCtx<'a> {
 
     /// Associated type `name` of concrete type `base`, from its trait
     /// impls (concrete or generic) — of `traits` only, when given.
-    fn project(&self, base: &HirTy, name: &str, traits: Option<&[String]>) -> Option<HirTy> {
+    fn project(
+        &self,
+        base: &HirTy,
+        name: &str,
+        traits: Option<&[String]>,
+        args: &[(String, Vec<HirTy>)],
+    ) -> Option<HirTy> {
         let key = (
             base.clone(),
             name.to_owned(),
@@ -2422,13 +2587,25 @@ impl<'a> LowerCtx<'a> {
             return Some(HirTy::Unknown);
         }
         let wanted = |t: &str| traits.is_none_or(|ts| ts.iter().any(|x| x == t));
+        // An impl's trait arguments against a bound's (`TryFrom<i64>`);
+        // an argument not yet concrete matches anything.
+        let args_fit = |t: &str, have: &[HirTy]| {
+            args.iter().filter(|(k, _)| k == t).all(|(_, want)| {
+                want.iter().zip(have).all(|(w, h)| {
+                    let mut open = Vec::new();
+                    collect_unknown_paths(w, &mut open);
+                    collect_unknown_paths(h, &mut open);
+                    !open.is_empty() || w == h || *w == HirTy::Unknown || *h == HirTy::Unknown
+                })
+            })
+        };
         self.env.sink.projecting.borrow_mut().push(key);
         let mut hits: Vec<HirTy> = method_target_for(base)
             .and_then(|t| self.env.impl_assoc.get(&t))
             .into_iter()
             .flatten()
-            .filter(|(tr, n, _)| n == name && wanted(tr))
-            .map(|(_, _, t)| t.clone())
+            .filter(|(tr, a, n, _)| n == name && wanted(tr) && args_fit(tr, a))
+            .map(|(_, _, _, t)| t.clone())
             .collect();
         for gi in &self.env.generic_trait_impls {
             if !wanted(&gi.trait_key) {
@@ -2441,7 +2618,11 @@ impl<'a> LowerCtx<'a> {
                 let mut rcx = LowerCtx::new(self.env, &subst, None);
                 rcx.current_module.clone_from(&gi.module);
                 rcx.set_bounds(&gi.generics, &gi.where_clause);
-                hits.push(rcx.resolve_ast_ty(ty));
+                let have: Vec<HirTy> =
+                    split_trait_args(&gi.trait_args, |t| rcx.resolve_ast_ty(t)).0;
+                if args_fit(&gi.trait_key, &have) {
+                    hits.push(rcx.resolve_ast_ty(ty));
+                }
             }
         }
         self.env.sink.projecting.borrow_mut().pop();
@@ -2479,7 +2660,14 @@ impl<'a> LowerCtx<'a> {
                     continue;
                 };
                 let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
-                let mut stack = vec![self.env.names.trait_key(&segs, &self.current_module)];
+                let key = self.env.names.trait_key(&segs, &self.current_module);
+                if let Some(args) = p.segments.last().map(|s| &s.generics) {
+                    self.ty_bound_args
+                        .entry(name.to_owned())
+                        .or_default()
+                        .push((key.clone(), args.clone()));
+                }
+                let mut stack = vec![key];
                 while let Some(k) = stack.pop() {
                     let entry = self.ty_bounds.entry(name.to_owned()).or_default();
                     if entry.contains(&k) {

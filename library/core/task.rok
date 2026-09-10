@@ -276,9 +276,6 @@ impl Pool {
         let signal: GcBuf<i32> = buf_new(4);
         let sleep: GcBuf<i32> = buf_new(n);
         let running: GcBuf<TaskRef | none> = buf_new(n);
-        for i in 0..n {
-            running[i] = none;
-        }
         Pool {
             locals: locals,
             deques: deques,
@@ -1093,8 +1090,6 @@ pub fn select<F: Future>(futs: List<F>) -> SelectFuture<F> {
     }
     let started: GcBuf<bool> = buf_new(futs.len());
     let proxy: GcBuf<TaskRef | none> = buf_new(1);
-    // A zeroed slot is not `none` for a struct union: store it.
-    proxy[0] = none;
     SelectFuture { futs: futs, started: started, proxy: proxy }
 }
 

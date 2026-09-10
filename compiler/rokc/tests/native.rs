@@ -86,6 +86,10 @@ double cb_d4(double (*f)(D4)) { D4 d = { 1, 2, 3, 4 }; return f(d); }
 Small cb_small(Small (*f)(Small)) { Small s = { 4, 5 }; return f(s); }
 Mix rok_mix(Mix m);
 double call_rok_mix(void) { Mix m = { 3, 0.5 }; Mix r = rok_mix(m); return r.a + r.b; }
+Big rev_c(Big b) { Big r = { b.c, b.b, b.a }; return r; }
+V3 (*get_v3_scale(void))(V3, float) { return v3_scale; }
+Big (*get_rev(void))(Big) { return rev_c; }
+long cb_big2(Big (*f)(Big)) { return cb_big(f); }
 ";
 
 const ROK_SIDE: &str = r#"
@@ -117,6 +121,10 @@ extern "C" {
     fn cb_d4(f: fn(D4) -> f64) -> f64;
     fn cb_small(f: fn(Small) -> Small) -> Small;
     fn call_rok_mix() -> f64;
+    // C function pointers as values (spec 5.9.4).
+    fn get_v3_scale() -> extern "C" fn(V3, f32) -> V3;
+    fn get_rev() -> extern "C" fn(Big) -> Big;
+    fn cb_big2(f: extern "C" fn(Big) -> Big) -> i64;
 }
 
 // C calls these (spec 5.9.10): aggregates the C way both ways.
@@ -156,6 +164,17 @@ fn main() {
     // From rok they are rok functions.
     let r = rev_big(Big { a: 7, b: 8, c: 9 });
     println(f"{r.a}{r.b}{r.c}");
+    // `extern "C" fn` values: received from C, made from a rok `extern
+    // "C" fn` (its C entry), called with the C ABI, handed back to C.
+    let f = unsafe { get_v3_scale() };
+    let w = f(V3 { x: 1.0, y: 2.0, z: 3.0 }, 2.0);
+    let g: extern "C" fn(Big) -> Big = unsafe { get_rev() };
+    let rb = g(Big { a: 1, b: 2, c: 3 });
+    let h: extern "C" fn(Big) -> Big = rev_big;
+    let rh = h(Big { a: 4, b: 5, c: 6 });
+    let k: extern "C" fn(Small) -> Small | none = neg_small;
+    let ks = match k { none => Small { a: 0, b: 0 }, p: extern "C" fn(Small) -> Small => p(Small { a: 1, b: 2 }) };
+    println(f"{w.x} {w.y} {w.z} {rb.a}{rb.b}{rb.c} {rh.a}{rh.b}{rh.c} {ks.a} {ks.b} {unsafe { cb_big2(h) }}");
 }
 "#;
 
@@ -336,6 +355,115 @@ fn debug_info_names_functions_lines_and_locals() {
 
 /// Aggregates by value both ways, HFAs, `sret`, register exhaustion,
 /// caller-extended narrow ints and variadic promotions, against clang.
+const NICHE_C: &str = r"
+#include <stddef.h>
+typedef long (*op)(long);
+typedef struct { op f; long x; } Cb;
+long twice(long x) { return 2 * x; }
+op get_op(int some) { return some ? twice : NULL; }
+long call_or(op f, long x, long d) { return f ? f(x) : d; }
+long run_cb(Cb c) { return c.f ? c.f(c.x) : -1; }
+Cb make_cb(int some) { Cb c = { some ? twice : NULL, 21 }; return c; }
+op slot;
+long call_slot(long x) { return slot ? slot(x) : -1; }
+";
+
+const NICHE_ROK: &str = r#"
+struct Cb { f: extern "C" fn(i64) -> i64 | none; x: i64; }
+
+extern "C" {
+    fn twice(x: i64) -> i64;
+    fn get_op(some: i32) -> extern "C" fn(i64) -> i64 | none;
+    fn call_or(f: extern "C" fn(i64) -> i64 | none, x: i64, d: i64) -> i64;
+    fn run_cb(c: Cb) -> i64;
+    fn make_cb(some: i32) -> Cb;
+    fn call_slot(x: i64) -> i64;
+    static mut slot: extern "C" fn(i64) -> i64 | none;
+}
+
+extern "C" fn neg(x: i64) -> i64 { -x }
+
+fn show(f: extern "C" fn(i64) -> i64 | none) -> str {
+    match f { none => "none", g: extern "C" fn(i64) -> i64 => f"{g(5)}" }
+}
+
+fn widen(f: extern "C" fn(i64) -> i64 | none) -> extern "C" fn(i64) -> i64 | none | i32 { f }
+
+fn back(v: extern "C" fn(i64) -> i64 | none | i32) -> str {
+    match v { g: extern "C" fn(i64) -> i64 => f"fn {g(1)}", none => "none", i: i32 => f"i32 {i}" }
+}
+
+fn main() {
+    let a = unsafe { get_op(1) };
+    let z = unsafe { get_op(0) };
+    println(f"{a is none} {z is none} {show(a)} {show(z)}");
+    if let g: extern "C" fn(i64) -> i64 = a { println(f"if-let {g(21)}"); }
+    if let g: extern "C" fn(i64) -> i64 = z { println(f"bad {g(1)}"); } else { println("if-let none"); }
+    let n: extern "C" fn(i64) -> i64 | none = none;
+    let p: extern "C" fn(i64) -> i64 | none = neg;
+    println(f"{unsafe { call_or(n, 4, 99) }} {unsafe { call_or(p, 4, 99) }} {unsafe { call_or(a, 4, 99) }}");
+    let xs: List<extern "C" fn(i64) -> i64 | none> = List::new();
+    xs.push(a);
+    xs.push(z);
+    xs.push(p);
+    for f in xs { print(f"{show(f)},"); }
+    println("");
+    let c = Cb { f: p, x: 7 };
+    let d = Cb { f: none, x: 7 };
+    let m = unsafe { make_cb(1) };
+    let k = unsafe { make_cb(0) };
+    println(f"{unsafe { run_cb(c) }} {unsafe { run_cb(d) }} {show(m.f)} {m.x} {show(k.f)} {unsafe { run_cb(m) }}");
+    let wi: extern "C" fn(i64) -> i64 | none | i32 = 3;
+    println(f"{back(widen(a))} {back(widen(z))} {back(wi)}");
+    let narrow: extern "C" fn(i64) -> i64 | none = match widen(a) { i: i32 => none, g: extern "C" fn(i64) -> i64 | none => g };
+    println(f"{show(narrow)}");
+    let dflt: extern "C" fn(i64) -> i64 = neg;
+    let h = z ?? dflt;
+    let h2 = a ?? dflt;
+    println(f"{h(3)} {h2(3)}");
+    unsafe {
+        println(f"{show(slot)} {call_slot(50)}");
+        slot = neg;
+        println(f"{show(slot)} {call_slot(50)}");
+        slot = none;
+        println(f"{slot is none} {call_slot(50)}");
+    }
+}
+"#;
+
+/// Spec 5.9.4 null niche: `extern "C" fn(..) | none` is one pointer,
+/// null = `none`, through C arguments / results, struct fields, a
+/// `List`, a `static`, widening into a tagged sum and back, and `??`.
+#[test]
+fn c_fn_ptr_null_niche() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("cniche");
+    fs::write(dir.join("side.c"), NICHE_C).unwrap();
+    fs::write(dir.join("main.rok"), NICHE_ROK).unwrap();
+    let obj = dir.join("main.o");
+    ok(&build(
+        &env,
+        &dir.join("main.rok"),
+        &["--emit=obj", "-o", obj.to_str().unwrap()],
+    ));
+    let exe = dir.join("out");
+    ok(&Command::new("clang")
+        .arg(&obj)
+        .arg(dir.join("side.c"))
+        .arg(&env.rokr)
+        .args(["-lm", "-o"])
+        .arg(&exe)
+        .output()
+        .unwrap());
+    let run = Command::new(&exe).output().unwrap();
+    ok(&run);
+    assert_eq!(
+        text(&run.stdout),
+        "false true 10 none\nif-let 42\nif-let none\n99 -4 8\n10,none,-5,\n\
+         -7 -1 10 21 none 42\nfn 2 none i32 3\n10\n-3 6\nnone -1\n-5 -50\ntrue -1\n"
+    );
+}
+
 #[test]
 fn c_abi_matches_clang() {
     let Some(env) = setup() else { return };
@@ -361,7 +489,7 @@ fn c_abi_matches_clang() {
     ok(&run);
     assert_eq!(
         text(&run.stdout),
-        "2 4 6\n10.5\n5 10 15 30\n-2 301\n42 2.5\n6\n45\n-434465\n82\n0.75\n21\n18 321 10 5 -4 -5\n987\n"
+        "2 4 6\n10.5\n5 10 15 30\n-2 301\n42 2.5\n6\n45\n-434465\n82\n0.75\n21\n18 321 10 5 -4 -5\n987\n2 4 6 321 654 -1 -2 321\n"
     );
 
     // The other targets' lowering, as LLVM IR declarations (what clang
@@ -397,6 +525,14 @@ fn c_abi_matches_clang() {
     ] {
         assert!(x86.contains(want), "x86_64 lacks `{want}`:\n{x86}");
     }
+    // A call through an `extern "C" fn(Big) -> Big` pointer: `sret` and
+    // `byval` on the call site, as on a declaration.
+    assert!(
+        x86.lines().any(|l| l.contains("call void %")
+            && l.contains("ptr sret({ i64, i64, i64 })")
+            && l.contains("ptr byval({ i64, i64, i64 })")),
+        "x86_64 lacks an indirect C call with sret / byval:\n{x86}"
+    );
     let a64 = decls("aarch64-unknown-linux-gnu");
     for want in [
         "declare [3 x float] @v3_scale([3 x float], float)",

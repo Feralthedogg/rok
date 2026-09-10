@@ -221,8 +221,12 @@ impl DebugInfo {
                 Self::composite("str", size, align, &[("ptr", ptr, 0), ("len", len, pw / 8)])
             }
             MirTy::Prim(p) => return self.basic_type(*p),
-            MirTy::GcRef | MirTy::Fn(..) => {
-                let name = if *ty == MirTy::GcRef { "gcref" } else { "fn" };
+            MirTy::GcRef | MirTy::Fn(..) | MirTy::Mlir(_) => {
+                let name = match ty {
+                    MirTy::GcRef => "gcref",
+                    MirTy::Fn(..) => "fn",
+                    _ => "mlir",
+                };
                 format!(
                     "#llvm.di_derived_type<tag = DW_TAG_pointer_type, name = \"{name}\", sizeInBits = {pw}>"
                 )
@@ -401,7 +405,14 @@ pub fn locate(body: &str, d: &FnDebug) -> String {
         }
         out.push_str(l);
         let t = l.trim_start();
-        if !(t.is_empty() || t.starts_with('^') || t.starts_with("//") || t.contains(" loc(")) {
+        // A line opening a region (`"scf.if"(%c) ({`, `}, {`) is not the
+        // op's end; its location goes after the closing `})`.
+        if !(t.is_empty()
+            || t.starts_with('^')
+            || t.starts_with("//")
+            || t.ends_with('{')
+            || t.contains(" loc("))
+        {
             match scope {
                 Some(lb) => {
                     let _ = write!(out, " loc(fused<{lb}>[\"{}\":{line}:{col}])", d.file);

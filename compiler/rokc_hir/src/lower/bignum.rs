@@ -48,7 +48,7 @@ pub(super) fn big_of(ctx: &LowerCtx<'_>, ty: &HirTy) -> Option<Big> {
     }
 }
 
-fn path_expr(full: &str, leaf: &str, span: Span) -> Expr {
+pub(super) fn path_expr(full: &str, leaf: &str, span: Span) -> Expr {
     let segments = full
         .split("::")
         .chain(std::iter::once(leaf))

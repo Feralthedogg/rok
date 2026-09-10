@@ -75,6 +75,18 @@ impl Printer {
         self.out.push_str(s);
     }
 
+    /// A local's name; a parser temp (`#using12`) becomes `__rok_using12`
+    /// so the output parses back.
+    fn name(&mut self, n: &str) {
+        match n.strip_prefix('#') {
+            Some(rest) => {
+                self.s("__rok_");
+                self.s(rest);
+            }
+            None => self.s(n),
+        }
+    }
+
     fn nl(&mut self) {
         self.out.push('\n');
         for _ in 0..self.indent {
@@ -515,10 +527,12 @@ impl Printer {
         if let Some(t) = &p.ty {
             self.s(": ");
             match &t.kind {
-                // `xs: ...T` is `xs: [T; #variadic]`.
-                TyKind::Array(elem, _) if p.variadic => {
+                // `xs: ...T` is `xs: Slice<T>`.
+                TyKind::Path(path) if p.variadic => {
                     self.s("...");
-                    self.ty(elem);
+                    if let Some(elem) = path.segments.last().and_then(|s| s.generics.first()) {
+                        self.ty(elem);
+                    }
                 }
                 _ => self.ty(t),
             }
@@ -530,7 +544,7 @@ impl Printer {
     }
 
     fn generics(&mut self, g: &Generics) {
-        // Not the parser's own (`...T`'s `#variadic`, `rethrows`' `#E0`).
+        // Not the parser's own (`rethrows`' `#E0`).
         let params: Vec<&GenericParam> = g
             .params
             .iter()
@@ -607,10 +621,16 @@ impl Printer {
                 self.s(")");
             }
             TyKind::Fn(args, ret, bounds) => {
-                let unsafe_mark =
-                    |b: &Path| b.segments.len() == 1 && b.segments[0].name == crate::UNSAFE_FN_MARK;
-                if bounds.iter().any(unsafe_mark) {
+                let mark = |m: &str| {
+                    bounds
+                        .iter()
+                        .any(|b: &Path| b.segments.len() == 1 && b.segments[0].name == m)
+                };
+                if mark(crate::UNSAFE_FN_MARK) {
                     self.s("unsafe ");
+                }
+                if mark(crate::C_FN_MARK) {
+                    self.s("extern \"C\" ");
                 }
                 self.s("fn(");
                 self.list(args, ", ", Self::ty);
@@ -630,7 +650,10 @@ impl Printer {
                 };
                 self.s(" -> ");
                 self.ty_tight(ret);
-                for b in bounds.iter().filter(|b| !unsafe_mark(b)) {
+                for b in bounds
+                    .iter()
+                    .filter(|b| !b.segments[0].name.starts_with('#'))
+                {
                     self.s(" + ");
                     self.ty_path(b);
                 }
@@ -720,7 +743,7 @@ impl Printer {
                 self.list(&seg.generics, ", ", Self::ty);
                 continue;
             }
-            self.s(&seg.name);
+            self.name(&seg.name);
             if !seg.generics.is_empty() {
                 self.s(if turbofish { "::<" } else { "<" });
                 let at = self.out.len();
@@ -793,7 +816,7 @@ impl Printer {
         match &s.kind {
             StmtKind::Let { name, ty, init } => {
                 self.s("let ");
-                self.s(name);
+                self.name(name);
                 self.let_tail(ty.as_ref(), init);
             }
             StmtKind::LetTuple {
@@ -1358,7 +1381,8 @@ impl Printer {
                 fields,
                 spread,
             } => {
-                self.ty_path(path);
+                // `W::<T> { .. }`: in an expression `W<T` is a comparison.
+                self.path(path, true);
                 if fields.is_empty() && spread.is_none() {
                     self.s(" {}");
                     return;
@@ -1469,7 +1493,7 @@ impl Printer {
         match &p.kind {
             PatternKind::Wildcard => self.s("_"),
             PatternKind::Binding { name, sub } => {
-                self.s(name);
+                self.name(name);
                 if let Some(sub) = sub {
                     self.s(" @ ");
                     self.pat(sub);

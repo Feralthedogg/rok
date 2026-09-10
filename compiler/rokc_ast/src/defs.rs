@@ -38,6 +38,10 @@ pub const C_VARIADIC_ATTR: &str = "#c_variadic";
 /// user identifier).
 pub const UNSAFE_FN_MARK: &str = "#unsafe";
 
+/// Bound-list marker of an `extern "C" fn(..)` type: a thin C function
+/// pointer called with the C ABI (spec 5.9.4).
+pub const C_FN_MARK: &str = "#extern_c";
+
 /// First path segment of a qualified path `<T as Tr>::X` (spec 2.13.4):
 /// its generics are `[T, Tr]`.
 pub const QPATH_MARK: &str = "#as";

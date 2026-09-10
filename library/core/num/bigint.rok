@@ -851,6 +851,7 @@ impl From<usize> for Int { fn from(value: usize) -> Int { Int::from_u64(value as
 impl From<Int> for f64 { fn from(value: Int) -> f64 { value.to_f64() } }
 
 impl TryFrom<Int> for i8 {
+    type Error = OverflowError;
     fn try_from(value: Int) throws (OverflowError) -> i8 {
         let v = value.to_i64() ?? 128;
         if v < -128 || v > 127 { throw int_overflow("i8"); }
@@ -858,6 +859,7 @@ impl TryFrom<Int> for i8 {
     }
 }
 impl TryFrom<Int> for i16 {
+    type Error = OverflowError;
     fn try_from(value: Int) throws (OverflowError) -> i16 {
         let v = value.to_i64() ?? 32768;
         if v < -32768 || v > 32767 { throw int_overflow("i16"); }
@@ -865,6 +867,7 @@ impl TryFrom<Int> for i16 {
     }
 }
 impl TryFrom<Int> for i32 {
+    type Error = OverflowError;
     fn try_from(value: Int) throws (OverflowError) -> i32 {
         match value.to_i32() {
             v: i32 => v,
@@ -873,6 +876,7 @@ impl TryFrom<Int> for i32 {
     }
 }
 impl TryFrom<Int> for i64 {
+    type Error = OverflowError;
     fn try_from(value: Int) throws (OverflowError) -> i64 {
         match value.to_i64() {
             v: i64 => v,
@@ -881,6 +885,7 @@ impl TryFrom<Int> for i64 {
     }
 }
 impl TryFrom<Int> for isize {
+    type Error = OverflowError;
     fn try_from(value: Int) throws (OverflowError) -> isize {
         match value.to_i64() {
             v: i64 => v as isize,
@@ -889,6 +894,7 @@ impl TryFrom<Int> for isize {
     }
 }
 impl TryFrom<Int> for u8 {
+    type Error = OverflowError;
     fn try_from(value: Int) throws (OverflowError) -> u8 {
         let v = value.to_u64() ?? 256u64;
         if v > 255u64 { throw int_overflow("u8"); }
@@ -896,6 +902,7 @@ impl TryFrom<Int> for u8 {
     }
 }
 impl TryFrom<Int> for u16 {
+    type Error = OverflowError;
     fn try_from(value: Int) throws (OverflowError) -> u16 {
         let v = value.to_u64() ?? 65536u64;
         if v > 65535u64 { throw int_overflow("u16"); }
@@ -903,6 +910,7 @@ impl TryFrom<Int> for u16 {
     }
 }
 impl TryFrom<Int> for u32 {
+    type Error = OverflowError;
     fn try_from(value: Int) throws (OverflowError) -> u32 {
         let v = value.to_u64() ?? 0x1_0000_0000u64;
         if v > 0xFFFF_FFFFu64 { throw int_overflow("u32"); }
@@ -910,6 +918,7 @@ impl TryFrom<Int> for u32 {
     }
 }
 impl TryFrom<Int> for u64 {
+    type Error = OverflowError;
     fn try_from(value: Int) throws (OverflowError) -> u64 {
         match value.to_u64() {
             v: u64 => v,
@@ -918,6 +927,7 @@ impl TryFrom<Int> for u64 {
     }
 }
 impl TryFrom<Int> for usize {
+    type Error = OverflowError;
     fn try_from(value: Int) throws (OverflowError) -> usize {
         match value.to_u64() {
             v: u64 => v as usize,

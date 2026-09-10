@@ -1,0 +1,5 @@
+#[impl_attribute(plain_only)]
+pub @attribute {
+    @accept(fn)
+    @item
+}

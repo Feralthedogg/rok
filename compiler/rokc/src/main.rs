@@ -86,6 +86,14 @@ build options:
   -O0 | -O1 | -O2 | -O3 | -Os  optimization level (default -O0)
   -C overflow-checks[=yes|no]  integer overflow panics (default: on at -O0)
   --cfg <flag | key=value>     #[cfg] flag (repeatable)
+  --load-mlir-plugin <path|name>
+                               MLIR dialect plugin for mlir-opt
+                               (--load-dialect-plugin; a name is searched
+                               in $ROK_MLIR_PLUGIN_PATH; repeatable)
+  --load-mlir-pass-plugin <path|name>
+                               MLIR pass plugin (--load-pass-plugin)
+  --mlir-pass <pass>           extra mlir-opt pass, before the LLVM
+                               lowering (repeatable)
   --bootstrap <file>           library root to preload (repeatable; default:
                                $ROK_HOME/lib/rok/{core,std,bare}/lib.rok)
   --rokr <lib>                 runtime library: path, or name for -l<name>
@@ -221,6 +229,16 @@ fn parse_args(raw: Vec<String>) -> Args {
             "--target-dir" => a.target_dir = Some(value(&name, inline, &mut it).into()),
             "--target" => a.opts.target = Some(value(&name, inline, &mut it)),
             "--rokr" => a.opts.rokr = value(&name, inline, &mut it),
+            "--load-mlir-plugin" | "--load-mlir-pass-plugin" => {
+                let v = value(&name, inline, &mut it);
+                let p = rokc_interface::find_mlir_plugin(&v).unwrap_or_else(|e| fail(&e));
+                if name == "--load-mlir-plugin" {
+                    a.opts.mlir_dialect_plugins.push(p);
+                } else {
+                    a.opts.mlir_pass_plugins.push(p);
+                }
+            }
+            "--mlir-pass" => a.opts.mlir_passes.push(value(&name, inline, &mut it)),
             // `--stage` is the pre-901 spelling of `--emit`.
             "--emit" | "--stage" => {
                 for k in value(&name, inline, &mut it).split(',') {
@@ -742,6 +760,8 @@ fn fingerprint(a: &Args, pkg: &Package, out: &Path) -> fresh::Fingerprint {
     }];
     let mut stamped: Vec<PathBuf> = std::env::current_exe().into_iter().collect();
     stamped.push(PathBuf::from(&a.opts.rokr));
+    stamped.extend(a.opts.mlir_dialect_plugins.iter().cloned());
+    stamped.extend(a.opts.mlir_pass_plugins.iter().cloned());
     for b in &a.bootstrap {
         words.push(b.display().to_string());
         inputs.push(b.parent().map_or_else(|| b.clone(), Path::to_path_buf));

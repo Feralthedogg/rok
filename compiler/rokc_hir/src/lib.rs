@@ -486,6 +486,17 @@ pub enum HirExprKind {
         /// (success, failure), the others the first.
         order: [&'static str; 2],
     },
+    /// `__mlir_op::<"dialect.op", R>(args.., attributes = {..},
+    /// regions = [..])` (stdlib bare 1.9): one MLIR op in generic form,
+    /// `attrs` (`name`, MLIR attribute text) verbatim; the expression's
+    /// type is the result. Each region is its block arguments (locals of
+    /// this function) and a straight-line body ending in the terminator.
+    MlirOp {
+        op: String,
+        attrs: Vec<(String, String)>,
+        args: Vec<HirExpr>,
+        regions: Vec<(Vec<LocalId>, HirExpr)>,
+    },
     // `arr[idx]` — element read.
     ArrayIndex {
         array: Box<HirExpr>,
@@ -660,9 +671,19 @@ pub enum HirTy {
     /// `!`: the type of a diverging expression (`panic(..)`, `exit(..)`,
     /// `loop {}` without `break`). Flows into any slot.
     Never,
+    /// `rok::bare::mlir::__mlir_type<"text">` (stdlib bare 1.9): an
+    /// opaque MLIR type, written verbatim into the MLIR text.
+    Mlir(String),
 }
 
 impl HirTy {
+    /// An `extern "C" fn(..)` type: a thin C function pointer, called
+    /// with the C ABI (spec 5.9.4), rather than a `{code, env}` value.
+    #[must_use]
+    pub fn is_c_fn(&self) -> bool {
+        matches!(self, Self::Fn(_, _, b) if b.iter().any(|k| k == rokc_ast::C_FN_MARK))
+    }
+
     /// Spec 2.6.4: a sum is a set — nested sums flatten, duplicates
     /// drop, and the members take one canonical order, so `A | B` and
     /// `B | A` are the same `HirTy` (same layout, same tags, same
@@ -887,6 +908,10 @@ pub fn each_expr<'a>(e: &'a HirExpr, f: &mut impl FnMut(&'a HirExpr)) {
             go(buf);
             go(index);
             args.iter().for_each(go);
+        }
+        HirExprKind::MlirOp { args, regions, .. } => {
+            args.iter().for_each(&mut go);
+            regions.iter().for_each(|(_, b)| go(b));
         }
     }
 }

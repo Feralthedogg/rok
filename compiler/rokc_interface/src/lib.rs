@@ -7,7 +7,8 @@ use rokc_driver::{CompiledModule, CompilerConfig, compile_file, compile_source};
 
 pub use rokc_diagnostic::{ErrorKind, RokDiagnostic, report, set_report_style};
 pub use rokc_driver::{
-    BuildOptions, Demangled, EmitKind, ReplCell, SourceFile, TempDir, demangle, link_host, rhir,
+    BuildOptions, Demangled, EmitKind, ReplCell, SourceFile, TempDir, demangle, find_mlir_plugin,
+    link_host, rhir,
 };
 
 #[derive(Default)]

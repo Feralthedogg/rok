@@ -100,8 +100,6 @@ impl Path {
 
     pub fn as_str(self) -> str { self.s }
     pub fn to_raw(self) -> RawPath { RawPath { raw: self.s } }
-    /// `raw` as a path; throws if it is not UTF-8 (3.8.4).
-    pub fn try_from(raw: RawPath) throws (NonUtf8Error) -> Path { try raw.try_to_path() }
 
     pub fn is_absolute(self) -> bool { self.s.starts_with("/") }
     pub fn is_relative(self) -> bool { !self.is_absolute() }
@@ -339,6 +337,13 @@ impl PartialEq for RawPath {
 
 impl Debug for RawPath {
     fn debug(self) -> str { f"RawPath({self.to_path_lossy().as_str().debug()})" }
+}
+
+/// `Path::try_from(raw)`: `raw` as a path; throws if it is not UTF-8
+/// (3.8.4).
+impl TryFrom<RawPath> for Path {
+    type Error = NonUtf8Error;
+    fn try_from(raw: RawPath) throws (NonUtf8Error) -> Path { try raw.try_to_path() }
 }
 
 /// `RawPath` bytes that are not UTF-8.

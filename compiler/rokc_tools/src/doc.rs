@@ -512,13 +512,19 @@ impl Docs<'_> {
                 if p.by_ref {
                     x.push_str("ref ");
                 }
-                if p.variadic {
-                    x.push_str("...");
-                }
                 x.push_str(&esc(&p.name));
                 if let Some(t) = &p.ty {
                     x.push_str(": ");
-                    x.push_str(&self.ty(t));
+                    // `xs: ...T` is `xs: Slice<T>`.
+                    match &t.kind {
+                        rokc_ast::TyKind::Path(path) if p.variadic => {
+                            x.push_str("...");
+                            if let Some(e) = path.segments.last().and_then(|s| s.generics.first()) {
+                                x.push_str(&self.ty(e));
+                            }
+                        }
+                        _ => x.push_str(&self.ty(t)),
+                    }
                 }
                 if p.default.is_some() {
                     x.push_str(" = ..");

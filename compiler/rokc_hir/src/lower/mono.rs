@@ -469,6 +469,7 @@ pub(super) fn monomorphize_on(
             param_tys: Vec::new(),
             param_names: Vec::new(),
             param_refs: Vec::new(),
+            variadic: false,
         },
     );
 
@@ -512,6 +513,7 @@ pub(super) fn monomorphize_on(
             param_tys: mono_param_tys,
             param_names: mono_param_names,
             param_refs: mono_fn.params.iter().map(|p| p.by_ref).collect(),
+            variadic: false,
         },
     );
     ctx.env.sink.extras.borrow_mut().push(mono_fn);
@@ -645,6 +647,9 @@ pub(super) fn resolve_ast_with_subst(
                 if let Some(full) = sc.names.canon(&segs, sc.module, &[]) {
                     if let (GC_BUF, [elem]) = (full.as_str(), generics) {
                         return HirTy::GcBuf(Box::new(rec(elem)));
+                    }
+                    if let Some(t) = super::resolve::mlir_ty(&full, generics) {
+                        return t;
                     }
                     let args: Vec<HirTy> = generics.iter().map(rec).collect();
                     let mangled = mangle_inst(&full, &args);

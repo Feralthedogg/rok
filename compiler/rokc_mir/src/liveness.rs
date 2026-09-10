@@ -60,7 +60,12 @@ fn stmt_uses(s: &Statement) -> (Vec<LocalId>, Option<LocalId>) {
             value,
             ..
         } => ops.extend([Operand::Copy(*array), index.clone(), value.clone()]),
-        Statement::StorageDead(_) | Statement::Loc(..) => {}
+        // ponytail: region parameters are not tracked as definitions
+        // (MLIR values, not GC references).
+        Statement::StorageDead(_)
+        | Statement::Loc(..)
+        | Statement::MlirRegion { .. }
+        | Statement::MlirRegionEnd => {}
         Statement::BufStore {
             buf, index, value, ..
         } => ops.extend([buf.clone(), index.clone(), value.clone()]),
