@@ -1,0 +1,34 @@
+// expect-exit: 0
+// expect-stdout:
+// err never
+// err neg
+// 5 100
+
+// D4: a throwing trait method called through `any Tr` (and a
+// `List<any Tr>`) dispatches, and its error reaches `catch`.
+trait Parse {
+    fn parse(self, s: i32) throws (str) -> i32;
+}
+struct A { k: i32; }
+impl Parse for A {
+    fn parse(self, s: i32) throws (str) -> i32 {
+        if s < 0 { throw "neg"; }
+        return s * self.k;
+    }
+}
+struct B {}
+impl Parse for B {
+    fn parse(self, s: i32) throws (str) -> i32 { throw "never"; }
+}
+fn main() -> i32 {
+    let xs: List<any Parse> = [A { k: 2 }, B {}];
+    let total = 0;
+    for x in xs {
+        let v = try x.parse(3) catch e { println(f"err {e}"); -1 };
+        total = total + v;
+    }
+    let a: any Parse = A { k: 5 };
+    let r = try a.parse(-1) catch e { println(f"err {e}"); 100 };
+    println(f"{total} {r}");
+    return 0;
+}

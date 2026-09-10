@@ -187,6 +187,109 @@ pub enum TokenKind {
 }
 
 impl TokenKind {
+    /// The token as source text (`rokc build --emit=expanded`, spec
+    /// 6.9.9): lexing the result gives the token back.
+    #[must_use]
+    pub fn text(&self) -> String {
+        if let Some(k) = keyword_str(self) {
+            return k.to_owned();
+        }
+        let p = match self {
+            Self::IntLit(s) | Self::FloatLit(s) | Self::Ident(s) | Self::ExtOp(s) => {
+                return s.clone();
+            }
+            Self::CharLit(s) => return format!("'{s}'"),
+            Self::CCharLit(s) => return format!("c'{s}'"),
+            Self::StrLit(s) => return format!("\"{s}\""),
+            Self::FStrLit(s) => return format!("f\"{s}\""),
+            Self::RawStrLit(s) => {
+                let mut h = String::new();
+                while s.contains(&format!("\"{h}")) {
+                    h.push('#');
+                }
+                return format!("r{h}\"{s}\"{h}");
+            }
+            Self::Label(s) => return format!("'{s}"),
+            Self::MathOp(c) => return c.to_string(),
+            Self::Plus => "+",
+            Self::Minus => "-",
+            Self::Star => "*",
+            Self::Slash => "/",
+            Self::Percent => "%",
+            Self::PercentPercent => "%%",
+            Self::EqEq => "==",
+            Self::NotEq => "!=",
+            Self::Lt => "<",
+            Self::Gt => ">",
+            Self::LtEq => "<=",
+            Self::GtEq => ">=",
+            Self::AmpAmp => "&&",
+            Self::PipePipe => "||",
+            Self::Bang => "!",
+            Self::Amp => "&",
+            Self::Pipe => "|",
+            Self::Caret => "^",
+            Self::Tilde => "~",
+            Self::Shl => "<<",
+            Self::Shr => ">>",
+            Self::DotPlus => ".+",
+            Self::DotMinus => ".-",
+            Self::DotStar => ".*",
+            Self::DotSlash => "./",
+            Self::DotPercent => ".%",
+            Self::DotPercentPercent => ".%%",
+            Self::DotEqEq => ".==",
+            Self::DotNotEq => ".!=",
+            Self::DotLt => ".<",
+            Self::DotGt => ".>",
+            Self::DotLtEq => ".<=",
+            Self::DotGtEq => ".>=",
+            Self::DotAmp => ".&",
+            Self::DotPipe => ".|",
+            Self::DotAmpAmp => ".&&",
+            Self::DotPipePipe => ".||",
+            Self::DotCaret => ".^",
+            Self::DotShl => ".<<",
+            Self::DotShr => ".>>",
+            Self::Eq => "=",
+            Self::PlusEq => "+=",
+            Self::MinusEq => "-=",
+            Self::StarEq => "*=",
+            Self::SlashEq => "/=",
+            Self::PercentEq => "%=",
+            Self::PercentPercentEq => "%%=",
+            Self::AmpEq => "&=",
+            Self::PipeEq => "|=",
+            Self::CaretEq => "^=",
+            Self::ShlEq => "<<=",
+            Self::ShrEq => ">>=",
+            Self::DotDot => "..",
+            Self::DotDotEq => "..=",
+            Self::Colon => ":",
+            Self::ColonColon => "::",
+            Self::Dot => ".",
+            Self::QuestionDot => "?.",
+            Self::QuestionQuestion => "??",
+            Self::Question => "?",
+            Self::Arrow => "->",
+            Self::FatArrow => "=>",
+            Self::LParen => "(",
+            Self::RParen => ")",
+            Self::LBracket => "[",
+            Self::RBracket => "]",
+            Self::LBrace => "{",
+            Self::RBrace => "}",
+            Self::Comma => ",",
+            Self::Semi => ";",
+            Self::At => "@",
+            Self::HashLBracket => "#[",
+            Self::HashBangLBracket => "#![",
+            // Keywords were handled above; `Eof` has no text.
+            _ => "",
+        };
+        p.to_owned()
+    }
+
     /// Statement terminator token.
     #[must_use]
     pub const fn is_semi(&self) -> bool {

@@ -1,12 +1,23 @@
-// spec: 004.16.4-implicit-main-no-throw
-// probe: negative-must-fail
-// expect-exit: 0  (D3: the implicit `main` (top-level statements) is non-throwing; an uncaught `try` is an error.)
-// expect-error: top-level statements can't throw
+// spec: 004.16.4-implicit-main-throws
+// probe: positive
+// expect-exit: 1
+// expect-stderr: `main` returned an uncaught error: bad 7
+// expect-stdout:
+// 1
 
-fn parse(s: i32) throws (i32) -> i32 {
-    if s < 0 { throw -1; }
-    return s;
+// spec 4.16.4: the implicit `main` is `fn main() throws`; an error a
+// top-level `try` lets escape is printed (Display) and exits 1.
+struct Bad { n: i32; }
+impl Display for Bad { fn display(self) -> str { return f"bad {self.n}"; } }
+impl Debug for Bad { fn debug(self) -> str { return "Bad"; } }
+impl Error for Bad {}
+
+fn parse(x: i32) throws (Bad) -> i32 {
+    if x > 0 { throw Bad { n: x }; }
+    return 1;
 }
 
-let v = try parse(1);
-rok_print_i32(v);
+let a = try parse(0);
+rok_print_i32(a);
+let b = try parse(7);
+rok_print_i32(b);

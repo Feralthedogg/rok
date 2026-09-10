@@ -1,0 +1,38 @@
+// expect-exit: 0
+// expect-stdout:
+// 6
+
+// Spec 1.10.4 / 6.9.8: a meta block's template may use an extension
+// operator token (`⊕`) registered anywhere in the build.
+trait XorAdd {
+    #[infix("⊕", like = "+")]
+    fn xor_add(self, rhs: Self) -> Self;
+}
+
+trait Fold {
+    fn fold_xor(self) -> i32;
+}
+
+#[impl_derive(Fold)]
+pub @derive {
+    impl Fold for @Self {
+        fn fold_xor(self) -> i32 {
+            let acc = 0;
+            @for_fields { acc = acc ⊕ self.@field; }
+            acc
+        }
+    }
+}
+
+impl XorAdd for i32 {
+    fn xor_add(self, rhs: i32) -> i32 { self ^ rhs }
+}
+
+#[derive(Fold)]
+struct P { a: i32; b: i32; c: i32; }
+
+fn main() -> i32 {
+    let p = P { a: 1, b: 2, c: 5 };
+    println(f"{p.fold_xor()}");
+    0
+}

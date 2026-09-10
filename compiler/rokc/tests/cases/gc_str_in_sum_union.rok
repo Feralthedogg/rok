@@ -1,4 +1,5 @@
 // expect-exit: 0
+// gc-stress: 50
 // expect-stdout:
 // str-7-payload
 // str-3-payload

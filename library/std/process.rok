@@ -4,20 +4,27 @@
 // up in `PATH` unless it contains `/`); every fd the library opens is
 // close-on-exec, and an exec failure comes back as the `IoError`.
 //
-// ponytail: no `posix_spawn` fast path, `pidfd`, `process_group`,
-// signal handlers. `output()` drains stdout and stderr together
-// (`poll`). The pipe ends are `File`s.
+// ponytail: no `posix_spawn` fast path, no `pidfd`. `output()` drains
+// stdout and stderr together (`poll`). The pipe ends are `File`s.
+//
+// `signal(sig, f)`: the C handler writes the signal number to a pipe;
+// one dispatcher thread (`rok-signal`, started by the first `signal`)
+// reads it and calls `f` there — never in signal context, so `f` may do
+// anything. A burst that fills the pipe drops signals.
 
 use rok::std::fs::File;
 use rok::std::io::{IoError, Reader, check, err_cell, check_cell};
 use rok::std::path::AsPath;
 use rok::std::env;
+use rok::std::thread;
 
 extern "C" {
     fn rok_os_spawn(
         argv: str, argc: usize, envs: str, envc: isize, cwd: str,
-        stdio_in: i32, stdio_out: i32, stdio_err: i32, out: GcBuf<i32>,
+        stdio_in: i32, stdio_out: i32, stdio_err: i32, pgid: i32, out: GcBuf<i32>,
     ) -> i32;
+    fn rok_os_signal_install(sig: i32, read_end: GcBuf<i32>) -> i32;
+    fn rok_os_raise(sig: i32) -> i32;
     fn rok_os_waitpid(pid: i32, nohang: i32, out: GcBuf<i32>) -> i32;
     fn rok_os_kill(pid: i32, sig: i32) -> i32;
     fn rok_os_read_both(fd1: i32, fd2: i32, out: GcBuf<str>, err: GcBuf<i32>);
@@ -38,6 +45,61 @@ pub fn id() -> u32 { unsafe { rok_os_getpid() } }
 /// Send signal `sig` to process `pid`.
 pub fn kill(pid: u32, sig: i32) throws (IoError) {
     try check(unsafe { rok_os_kill(pid as i32, sig) } as i64, "kill");
+}
+
+/// Send `sig` to this process.
+pub fn raise(sig: i32) throws (IoError) {
+    try check(unsafe { rok_os_raise(sig) } as i64, "raise");
+}
+
+/// `signal` could not route the signal (`SIGKILL` / `SIGSTOP`, a bad
+/// number, or the OS refused).
+pub struct SignalError {
+    pub sig: i32;
+    /// The errno.
+    pub code: i32;
+}
+
+impl Display for SignalError {
+    fn display(self) -> str { f"cannot handle signal {self.sig} (errno {self.code})" }
+}
+impl Debug for SignalError {
+    fn debug(self) -> str { f"SignalError {{ sig: {self.sig}, code: {self.code} }}" }
+}
+impl Error for SignalError {}
+
+static SIGNAL_HANDLERS: Mutex<Dict<i32, fn() + Send>> = Mutex::new(Dict::new());
+
+/// Call `handler` (on the `rok-signal` thread) each time the process
+/// receives `sig`; a later `signal` for the same `sig` replaces it.
+pub fn signal(sig: i32, handler: fn() + Send) throws (SignalError) {
+    using g = SIGNAL_HANDLERS.lock() { g.get().insert(sig, handler); }
+    let fd: GcBuf<i32> = buf_new(1);
+    let r = unsafe { rok_os_signal_install(sig, fd) };
+    if r < 0 {
+        using g = SIGNAL_HANDLERS.lock() { g.get().remove(sig); }
+        throw SignalError { sig: sig, code: -r };
+    }
+    if fd[0] >= 0 {
+        let pipe = File::from_fd(fd[0], "signal pipe");
+        let h = try thread::Builder::new().name("rok-signal").spawn(|| dispatch_signals(pipe))
+            catch _ { throw SignalError { sig: sig, code: 11 }; };
+        h.detach();
+    }
+}
+
+fn dispatch_signals(pipe: File) {
+    let buf: List<u8> = List::with_capacity(64);
+    for _ in 0..64 { buf.push(0u8); }
+    loop {
+        let n = try pipe.read(buf) catch _ { return; };
+        if n == 0usize { return; }
+        for i in 0..n {
+            let h: (fn() + Send) | none = none;
+            using g = SIGNAL_HANDLERS.lock() { h = g.get().get(buf[i] as i32); }
+            if let f: fn() + Send = h { f(); }
+        }
+    }
 }
 
 /// Where a child's standard stream goes.
@@ -74,6 +136,7 @@ pub struct Command {
     stderr: Stdio | none;
     cwd: str | none;
     kill_on_drop: bool;
+    pgid: i32;
 }
 
 impl Command {
@@ -88,6 +151,7 @@ impl Command {
             stderr: none,
             cwd: none,
             kill_on_drop: false,
+            pgid: -1,
         }
     }
 
@@ -128,6 +192,9 @@ impl Command {
     pub fn stdin(self, cfg: Stdio) -> Command { self.stdin = cfg; self }
     pub fn stdout(self, cfg: Stdio) -> Command { self.stdout = cfg; self }
     pub fn stderr(self, cfg: Stdio) -> Command { self.stderr = cfg; self }
+
+    /// Put the child in process group `pgid` (0: a new group it leads).
+    pub fn process_group(self, pgid: i32) -> Command { self.pgid = pgid; self }
 
     /// Kill the child when its `Child` is dropped by `using`.
     pub fn kill_on_drop(self, on: bool) -> Command { self.kill_on_drop = on; self }
@@ -201,6 +268,7 @@ impl Command {
                 stdio_mode(self.stdin ?? Stdio::Inherit),
                 stdio_mode(self.stdout ?? out_default),
                 stdio_mode(self.stderr ?? err_default),
+                self.pgid,
                 fds,
             )
         };

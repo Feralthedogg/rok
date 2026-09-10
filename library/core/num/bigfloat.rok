@@ -1,0 +1,585 @@
+// rok::core::num::bigfloat — `float` (stdlib spec 2.1.3).
+// `#[keyword("float")]` routes the lowercase type name here; an
+// unsuffixed literal in a `float` slot is `Float::from_f64` (or
+// `Float::from_literal` when `f64` can't hold it).
+//
+// Semantics (spec 2.1.3 leaves the promoted form's precision open):
+// a `float` is a binary float with `f64`'s 53-bit significand and an
+// unbounded (`i64`) exponent. In `f64`'s normal range it *is* an `f64`
+// (`e == 0`) and every operation is the IEEE 754 one (`0.1 + 0.2 !=
+// 0.3`, NaN / ±inf / signed zero as IEEE). A finite result past
+// `f64`'s exponent range — overflow or underflow — is promoted instead
+// of becoming ±inf / 0 / subnormal: `m * 2^e`, `1 <= |m| < 2`, still
+// correctly rounded to 53 bits (round to nearest, ties to even). So
+// `+ - * / %` never overflow and every non-zero result keeps 53 bits;
+// only `/ 0` (and inf / NaN operands) produce inf / NaN.
+// ponytail: a fixed 53-bit significand, not mpmath-style selectable
+// precision — add a precision field when a caller needs more digits.
+
+use rok::core::num::bigint::Int;
+
+/// `m * 2^e`. `e == 0`: `m` is the value (zero, normal, inf or NaN —
+/// never subnormal). `e != 0`: `1 <= |m| < 2` and `e` is outside
+/// `f64`'s normal exponents `-1022..=1023`.
+#[lang("float_type")]
+#[keyword("float")]
+pub struct Float {
+    m: f64;
+    e: i64;
+}
+
+/// `2^k` for `k` in `-1022..=1023`.
+fn flt_pow2(k: i64) -> f64 { f64::from_bits(((k + 1023) as u64) << 52u64) }
+
+fn flt_exp_field(x: f64) -> i64 { ((x.to_bits() >> 52u64) & 0x7FFu64) as i64 }
+
+fn flt_is_normal(x: f64) -> bool {
+    let k = flt_exp_field(x);
+    k != 0 && k != 0x7FF
+}
+
+/// A normal `x` as `(m, e)`, `x = m * 2^e`, `1 <= |m| < 2`.
+fn flt_split_f64(x: f64) -> (f64, i64) {
+    let b = x.to_bits();
+    let m = f64::from_bits((b & 0x800F_FFFF_FFFF_FFFFu64) | 0x3FF0_0000_0000_0000u64);
+    (m, flt_exp_field(x) - 1023)
+}
+
+/// `m * 2^e` in canonical form; `m` finite, non-zero and normal.
+fn flt_build(m: f64, e: i64) -> Float {
+    let (mm, k) = flt_split_f64(m);
+    let t = k + e;
+    if t >= -1022 && t <= 1023 { return Float { m: mm * flt_pow2(t), e: 0 }; }
+    Float { m: mm, e: t }
+}
+
+fn flt_plain(x: f64) -> Float { Float { m: x, e: 0 } }
+
+impl Float {
+    pub fn from_f64(x: f64) -> Float {
+        if x != 0.0 && flt_exp_field(x) == 0 {
+            // Subnormal: exact as a promoted value.
+            return flt_build(x * flt_pow2(64), -64);
+        }
+        flt_plain(x)
+    }
+
+    pub fn from_f32(x: f32) -> Float { Float::from_f64(x as f64) }
+
+    /// `(m, e)` with `1 <= |m| < 2` of a finite non-zero value.
+    fn split(self) -> (f64, i64) {
+        if self.e != 0 { return (self.m, self.e); }
+        flt_split_f64(self.m)
+    }
+
+    pub fn is_nan(self) -> bool { self.m != self.m }
+    pub fn is_infinite(self) -> bool { self.e == 0 && !self.m.is_nan() && !self.m.is_finite() }
+    pub fn is_finite(self) -> bool { self.e != 0 || self.m.is_finite() }
+    pub fn is_zero(self) -> bool { self.e == 0 && self.m == 0.0 }
+    pub fn is_sign_negative(self) -> bool { self.m.is_sign_negative() }
+    pub fn abs(self) -> Float { Float { m: self.m.abs(), e: self.e } }
+
+    /// The nearest `f64`: ±inf past `f64::MAX`, ties to even into the
+    /// subnormals, ±0 below them.
+    pub fn to_f64(self) -> f64 {
+        if self.e == 0 { return self.m; }
+        if self.e > 0 { return self.m * f64::infinity(); }
+        if self.e < -1100 { return self.m * 0.0; }
+        // One rounding: `m 2^-1022` is exact, the second factor normal.
+        (self.m * flt_pow2(-1022)) * flt_pow2(self.e + 1022)
+    }
+
+    /// `none` when a finite value is past `f32`'s range (spec 2.1.3
+    /// leaves precision loss open: it rounds).
+    pub fn to_f32(self) -> f32 | none {
+        let v = self.to_f64();
+        let r = v as f32;
+        if self.is_finite() && !r.is_finite() { return none; }
+        r
+    }
+
+    /// The nearest `float` to `n` (ties to even).
+    pub fn from_int(n: Int) -> Float {
+        if let v: i64 = n.to_i64() {
+            if v > -9007199254740992 && v < 9007199254740992 { return flt_plain(v as f64); }
+        }
+        flt_round_scaled(n.is_negative(), n.abs(), 0, false)
+    }
+
+    /// Truncated toward zero; `none` for NaN / ±inf.
+    pub fn to_int(self) -> Int | none {
+        if !self.is_finite() { return none; }
+        if self.e == 0 {
+            let t = self.m.trunc();
+            if t > -9.2e18 && t < 9.2e18 { return Int::from_i64(t as i64); }
+        }
+        let (m, e) = self.split();
+        if e < 0 { return Int::from_i64(0); }
+        let mant = Int::from_u64((m.abs() * flt_pow2(52)) as u64);
+        let v = if e >= 52 { mant << ((e - 52) as u32) } else { mant >> ((52 - e) as u32) };
+        if m < 0.0 { -v } else { v }
+    }
+
+    /// `s` as flt_decimal (`-1.5e400`, `.5`, `inf`, `nan`), correctly
+    /// rounded; `none` when it isn't one. ponytail: decimal exponents
+    /// past ±10^6 are `none` (the exact conversion would need a
+    /// million-digit power of ten).
+    pub fn from_str(s: str) -> Float | none {
+        let bs = s.as_bytes();
+        let n = s.len();
+        let i = 0usize;
+        let neg = false;
+        if n > 0 && (bs[0] == 45u8 || bs[0] == 43u8) {
+            neg = bs[0] == 45u8;
+            i = 1;
+        }
+        let word = s[i:].to_lowercase();
+        if word == "inf" || word == "infinity" {
+            return flt_plain(if neg { -f64::infinity() } else { f64::infinity() });
+        }
+        if word == "nan" { return flt_plain(f64::nan()); }
+        let digits = StrBuf::new();
+        let frac = 0i64;
+        let seen_point = false;
+        let any = false;
+        while i < n {
+            let c = bs[i];
+            if c >= 48u8 && c <= 57u8 {
+                digits.push_byte(c);
+                any = true;
+                if seen_point { frac += 1; }
+            } else if c == 46u8 && !seen_point {
+                seen_point = true;
+            } else {
+                break;
+            }
+            i += 1;
+        }
+        if !any { return none; }
+        let exp = 0i64;
+        if i < n {
+            if bs[i] != 101u8 && bs[i] != 69u8 { return none; }
+            i += 1;
+            let eneg = false;
+            if i < n && (bs[i] == 45u8 || bs[i] == 43u8) {
+                eneg = bs[i] == 45u8;
+                i += 1;
+            }
+            if i == n { return none; }
+            while i < n {
+                let c = bs[i];
+                if c < 48u8 || c > 57u8 { return none; }
+                if exp < 100000000 { exp = exp * 10 + ((c - 48u8) as i64); }
+                i += 1;
+            }
+            if eneg { exp = -exp; }
+        }
+        flt_decimal(neg, digits.to_str(), exp - frac)
+    }
+
+    /// An unsuffixed float literal (`_` allowed) too large or small for
+    /// `f64` in a `float` slot.
+    pub fn from_literal(s: str) -> Float {
+        match Float::from_str(s.replace("_", "")) {
+            v: Float => v,
+            none => panic(f"malformed float literal `{s}`"),
+        }
+    }
+
+    /// `-1`, `0` or `1` (`2`: unordered, a NaN).
+    fn cmp3(self, rhs: Float) -> i32 {
+        if self.e == 0 && rhs.e == 0 {
+            if self.m < rhs.m { return -1; }
+            if self.m > rhs.m { return 1; }
+            return if self.m == rhs.m { 0 } else { 2 };
+        }
+        if self.is_nan() || rhs.is_nan() { return 2; }
+        let sa = flt_sign(self);
+        let sb = flt_sign(rhs);
+        if sa != sb { return if sa < sb { -1 } else { 1 }; }
+        if sa == 0 { return 0; }
+        // Same sign, both non-zero: compare magnitudes.
+        let c = 0;
+        if self.is_infinite() || rhs.is_infinite() {
+            c = if self.is_infinite() { if rhs.is_infinite() { 0 } else { 1 } } else { -1 };
+        } else {
+            let (ma, ea) = self.split();
+            let (mb, eb) = rhs.split();
+            if ea != eb {
+                c = if ea < eb { -1 } else { 1 };
+            } else {
+                let x = ma.abs();
+                let y = mb.abs();
+                c = if x < y { -1 } else if x > y { 1 } else { 0 };
+            }
+        }
+        sa * c
+    }
+}
+
+fn flt_sign(x: Float) -> i32 {
+    if x.m > 0.0 { 1 } else if x.m < 0.0 { -1 } else { 0 }
+}
+
+/// `±q 2^exp2` rounded to 53 bits (ties to even); `sticky`: more
+/// non-zero bits below `q` (only when `q` has more than 53 bits).
+fn flt_round_scaled(neg: bool, q: Int, exp2: i64, sticky: bool) -> Float {
+    let bits = q.bit_length();
+    if bits == 0u64 { return flt_plain(if neg { -0.0 } else { 0.0 }); }
+    let top = q;
+    let shift = 0i64;
+    if bits > 53u64 {
+        let drop = (bits - 53u64) as u32;
+        top = q >> drop;
+        let low = q - (top << drop);
+        let half = Int::from_i64(1) << (drop - 1u32);
+        let c = if low > half { 1 } else if low == half { 0 } else { -1 };
+        if c > 0 || (c == 0 && (sticky || (top % Int::from_i64(2)) != Int::from_i64(0))) {
+            top = top + Int::from_i64(1);
+        }
+        shift = drop as i64;
+    }
+    let mant = (top.to_u64() ?? 0u64) as f64;
+    flt_build(if neg { -mant } else { mant }, exp2 + shift)
+}
+
+fn flt_pow10(k: i64) -> Int { Int::from_i64(10).pow(k as u32) }
+
+/// `±digits * 10^k`, correctly rounded.
+fn flt_decimal(neg: bool, digits: str, k: i64) -> Float | none {
+    let d = Int::from_str_radix(digits, 10u32)?;
+    if d.is_zero() { return flt_plain(if neg { -0.0 } else { 0.0 }); }
+    // Clinger's fast path: both exact in `f64`, one rounding.
+    if let v: i64 = d.to_i64() {
+        if v < 9007199254740992 && k >= -22 && k <= 22 {
+            let x = v as f64;
+            let p = 1.0;
+            let j = 0i64;
+            while j < (if k < 0 { -k } else { k }) {
+                p = p * 10.0;
+                j += 1;
+            }
+            let r = if k < 0 { x / p } else { x * p };
+            return flt_plain(if neg { -r } else { r });
+        }
+    }
+    let size = (digits.len() as i64) + k;
+    if k > 1000000 || k < -1000000 || size > 1000000 || size < -1000000 { return none; }
+    if k >= 0 { return flt_round_scaled(neg, d * flt_pow10(k), 0, false); }
+    // d / 10^-k with at least 55 quotient bits; the remainder is sticky.
+    let p = flt_pow10(-k);
+    let s = 55 + (p.bit_length() as i64) - (d.bit_length() as i64);
+    if s < 0 { s = 0; }
+    let (q, r) = (d << (s as u32)).div_rem(p);
+    flt_round_scaled(neg, q, -s, !r.is_zero())
+}
+
+/// The significand of a finite non-zero value as an integer: `|x| =
+/// M * 2^E`.
+fn flt_mant_exp(x: Float) -> (Int, i64) {
+    let (m, e) = x.split();
+    (Int::from_u64((m.abs() * flt_pow2(52)) as u64), e - 52)
+}
+
+/// `p` significant decimal digits of `|x|` (finite, non-zero; ties to
+/// even) and the decimal exponent of the first: `|x| ≈ d.ddd * 10^k`.
+/// ponytail: exact through `int` arithmetic up to binary exponents of
+/// ±2^20; beyond that the digits come from `f64` logarithms (about 13
+/// correct digits) instead of a multi-megabit division.
+fn flt_sig_digits(x: Float, p: i64) -> (str, i64) {
+    let (m, e) = x.split();
+    let est = (e as f64) * 0.30102999566398120 + m.abs().log10();
+    let k = est.floor() as i64;
+    if e > 1048576 || e < -1048576 {
+        let frac = est - (k as f64);
+        let t = (10.0f64).pow(frac);
+        let scaled = (t * (10.0f64).pow((p - 1) as f64)).round();
+        if scaled >= (10.0f64).pow(p as f64) {
+            scaled = scaled / 10.0;
+            k += 1;
+        }
+        return (Int::from_i64(scaled as i64).to_str_radix(10u32), k);
+    }
+    let (mi, ei) = flt_mant_exp(x);
+    let lo = flt_pow10(p - 1);
+    let hi = lo * Int::from_i64(10);
+    loop {
+        let t = k - p + 1;
+        let num = mi;
+        let den = Int::from_i64(1);
+        if ei >= 0 { num = num << (ei as u32); } else { den = den << ((-ei) as u32); }
+        if t >= 0 { den = den * flt_pow10(t); } else { num = num * flt_pow10(-t); }
+        let (q, r) = num.div_rem(den);
+        let twice = r + r;
+        if twice > den || (twice == den && q % Int::from_i64(2) != Int::from_i64(0)) {
+            q = q + Int::from_i64(1);
+        }
+        if q >= hi {
+            k += 1;
+        } else if q < lo {
+            k -= 1;
+        } else {
+            return (q.to_str_radix(10u32), k);
+        }
+    }
+}
+
+/// `d.ddd` from a digit string, trailing zeros dropped (`trim`).
+fn flt_point(digits: str, trim: bool) -> str {
+    let body = digits;
+    if trim {
+        let n = body.len();
+        while n > 1 && body.as_bytes()[n - 1] == 48u8 { n -= 1; }
+        body = body[0:n];
+    }
+    if body.len() == 1 { return body; }
+    body[0:1] + "." + body[1:]
+}
+
+/// `%g`-style text of a promoted value: `p` significant digits,
+/// trailing zeros dropped, `e+NN` / `e-NN` (the form `f64`'s Display
+/// takes for such exponents).
+fn flt_sci(x: Float, p: i64) -> str {
+    let (d, k) = flt_sig_digits(x, p);
+    let sgn = if x.m < 0.0 { "-" } else { "" };
+    let es = if k < 0 { "-" } else { "+" };
+    let ka = if k < 0 { -k } else { k };
+    sgn + flt_point(d, true) + "e" + es + (if ka < 10 { "0" } else { "" }) + ka.display()
+}
+
+impl Add for Float {
+    type Output = Float;
+    fn add(self, rhs: Float) -> Float {
+        if self.e == 0 && rhs.e == 0 {
+            let r = self.m + rhs.m;
+            if flt_is_normal(r) { return flt_plain(r); }
+        }
+        if !self.is_finite() || !rhs.is_finite() { return flt_plain(self.m + rhs.m); }
+        if self.is_zero() { return if rhs.is_zero() { flt_plain(self.m + rhs.m) } else { rhs }; }
+        if rhs.is_zero() { return self; }
+        let (ma, ea) = self.split();
+        let (mb, eb) = rhs.split();
+        if ea < eb {
+            let (tm, te) = (ma, ea);
+            ma = mb;
+            ea = eb;
+            mb = tm;
+            eb = te;
+        }
+        let d = ea - eb;
+        // Past 64 bits apart the smaller is under half an ulp.
+        if d > 64 { return flt_build(ma, ea); }
+        let r = ma + mb * flt_pow2(-d);
+        if r == 0.0 { return flt_plain(0.0); }
+        flt_build(r, ea)
+    }
+}
+
+impl Sub for Float {
+    type Output = Float;
+    fn sub(self, rhs: Float) -> Float { self + (-rhs) }
+}
+
+impl Mul for Float {
+    type Output = Float;
+    fn mul(self, rhs: Float) -> Float {
+        if self.e == 0 && rhs.e == 0 {
+            let r = self.m * rhs.m;
+            if flt_is_normal(r) { return flt_plain(r); }
+        }
+        // inf / NaN / zero: the IEEE result (a promoted `m` stands in
+        // with the right sign).
+        if !self.is_finite() || !rhs.is_finite() || self.is_zero() || rhs.is_zero() {
+            return flt_plain(self.m * rhs.m);
+        }
+        let (ma, ea) = self.split();
+        let (mb, eb) = rhs.split();
+        flt_build(ma * mb, ea + eb)
+    }
+}
+
+impl Div for Float {
+    type Output = Float;
+    fn div(self, rhs: Float) -> Float {
+        if self.e == 0 && rhs.e == 0 {
+            let r = self.m / rhs.m;
+            if flt_is_normal(r) { return flt_plain(r); }
+        }
+        if !self.is_finite() || !rhs.is_finite() || self.is_zero() || rhs.is_zero() {
+            return flt_plain(self.m / rhs.m);
+        }
+        let (ma, ea) = self.split();
+        let (mb, eb) = rhs.split();
+        flt_build(ma / mb, ea - eb)
+    }
+}
+
+/// IEEE `fmod`: exact, the dividend's sign.
+impl Rem for Float {
+    type Output = Float;
+    fn rem(self, rhs: Float) -> Float {
+        if self.e == 0 && rhs.e == 0 { return Float::from_f64(self.m % rhs.m); }
+        if !self.is_finite() || rhs.is_zero() || rhs.is_nan() { return flt_plain(f64::nan()); }
+        if !rhs.is_finite() || self.is_zero() { return self; }
+        let (a, ka) = flt_mant_exp(self);
+        let (b, kb) = flt_mant_exp(rhs);
+        let r = Int::from_i64(0);
+        let k = ka;
+        if ka >= kb {
+            // a 2^(ka-kb) mod b, with 2^(ka-kb) mod b by squaring.
+            let t = Int::from_i64(1);
+            let base = Int::from_i64(2);
+            let n = (ka - kb) as u64;
+            while n > 0u64 {
+                if n & 1u64 == 1u64 { t = (t * base) % b; }
+                base = (base * base) % b;
+                n = n >> 1u64;
+            }
+            r = (a * t) % b;
+            k = kb;
+        } else {
+            if self.abs() < rhs.abs() { return self; }
+            r = a % (b << ((kb - ka) as u32));
+        }
+        let v = flt_round_scaled(false, r, k, false);
+        if self.m < 0.0 { -v } else { v }
+    }
+}
+
+/// `%%`: floored — the divisor's sign.
+impl Modulo for Float {
+    type Output = Float;
+    fn modulo(self, rhs: Float) -> Float {
+        let r = self % rhs;
+        if !r.is_zero() && r.is_finite() && (r.m < 0.0) != (rhs.m < 0.0) { r + rhs } else { r }
+    }
+}
+
+impl Neg for Float {
+    type Output = Float;
+    fn neg(self) -> Float { Float { m: -self.m, e: self.e } }
+}
+
+/// IEEE equality: NaN is unequal to everything (no `Eq`, spec 2.1.3).
+impl PartialEq for Float {
+    fn eq(self, rhs: Float) -> bool { self.cmp3(rhs) == 0 }
+    fn ne(self, rhs: Float) -> bool { self.cmp3(rhs) != 0 }
+}
+
+impl PartialOrd for Float {
+    fn lt(self, rhs: Float) -> bool { self.cmp3(rhs) == -1 }
+    fn gt(self, rhs: Float) -> bool { self.cmp3(rhs) == 1 }
+    fn le(self, rhs: Float) -> bool {
+        let c = self.cmp3(rhs);
+        c == -1 || c == 0
+    }
+    fn ge(self, rhs: Float) -> bool {
+        let c = self.cmp3(rhs);
+        c == 1 || c == 0
+    }
+}
+
+impl Clone for Float {
+    fn clone(self) -> Float { self }
+}
+
+impl Copy for Float {}
+
+impl Default for Float {
+    fn default() -> Float { flt_plain(0.0) }
+}
+
+impl Zero for Float {
+    fn zero() -> Float { flt_plain(0.0) }
+}
+
+impl One for Float {
+    fn one() -> Float { flt_plain(1.0) }
+}
+
+/// `f64`'s Display in its range; a promoted value in the same `%g`
+/// form (six significant digits, `1.5e+400`).
+impl Display for Float {
+    fn display(self) -> str {
+        if self.e == 0 { return self.m.display(); }
+        flt_sci(self, 6)
+    }
+}
+
+impl Debug for Float {
+    fn debug(self) -> str { self.display() }
+}
+
+impl FromStr for Float {
+    type Err = ParseError;
+    fn from_str(s: str) throws (ParseError) -> Float {
+        match Float::from_str(s) {
+            v: Float => v,
+            none => throw ParseError { input: s, pos: 0, reason: "invalid float literal" },
+        }
+    }
+}
+
+extern "C" {
+    fn rok_fmt_spec_info(spec: str) -> u64;
+    fn rok_fmt_num(neg: u32, prefix: str, body: str, spec: str) -> str;
+}
+
+/// `f"{x:spec}"` for a `float`: `f64`'s formatting in its range; a
+/// promoted value gets `e` / `E` (`p + 1` digits, 17 without a
+/// precision — ponytail: not the shortest round trip), `f` (exact
+/// integer digits when huge, zeros when tiny) and `%g` otherwise.
+pub fn fstr_bigfloat(v: Float, spec: str) -> str {
+    let info = unsafe { rok_fmt_spec_info(spec) };
+    let ty = (info & 0xFFu64) as u8;
+    let prec = (info >> 16u64) as i64 - 1;
+    if v.e == 0 || ty == 98u8 || ty == 111u8 || ty == 120u8 || ty == 88u8 {
+        return rok::core::fmt::fstr_float(v.m, false, spec);
+    }
+    let a = v.abs();
+    let body = "";
+    if ty == 101u8 || ty == 69u8 {
+        let (d, k) = flt_sig_digits(a, if prec < 0 { 17 } else { prec + 1 });
+        body = flt_point(d, prec < 0) + (if ty == 69u8 { "E" } else { "e" }) + k.display();
+    } else if ty == 102u8 {
+        let p = if prec < 0 { 6 } else { prec };
+        if v.e > 0 {
+            let (mi, ei) = flt_mant_exp(a);
+            body = (mi << (ei as u32)).to_str_radix(10u32);
+        } else {
+            body = "0";
+        }
+        if p > 0 { body = body + "." + "0".repeat(p as usize); }
+    } else {
+        body = flt_sci(a, if prec < 0 { 6 } else if prec == 0 { 1 } else { prec });
+    }
+    unsafe { rok_fmt_num(if v.m < 0.0 { 1u32 } else { 0u32 }, "", body, spec) }
+}
+
+// ---- conversions (stdlib 2.11.8) ----
+
+impl From<f32> for Float { fn from(value: f32) -> Float { Float::from_f32(value) } }
+impl From<f64> for Float { fn from(value: f64) -> Float { Float::from_f64(value) } }
+/// `float → f64` (`into`, spec 2.11.8): rounds; ±inf / 0 past the range.
+impl From<Float> for f64 { fn from(value: Float) -> f64 { value.to_f64() } }
+impl WrappingFrom<Float> for f64 { fn wrapping_from(value: Float) -> f64 { value.to_f64() } }
+impl WrappingFrom<Float> for f32 { fn wrapping_from(value: Float) -> f32 { value.to_f64() as f32 } }
+
+/// Truncated toward zero (spec 2.11.8 `float → i32`: `try_into`
+/// truncates); NaN, ±inf or out of range throw.
+impl TryFrom<Float> for i32 {
+    fn try_from(value: Float) throws (OverflowError) -> i32 {
+        match value.to_int() {
+            v: Int => try i32::try_from(v),
+            none => throw OverflowError { op: "try_from", ty: "i32" },
+        }
+    }
+}
+impl TryFrom<Float> for i64 {
+    fn try_from(value: Float) throws (OverflowError) -> i64 {
+        match value.to_int() {
+            v: Int => try i64::try_from(v),
+            none => throw OverflowError { op: "try_from", ty: "i64" },
+        }
+    }
+}

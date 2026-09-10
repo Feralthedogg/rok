@@ -92,20 +92,47 @@ fn run_case(
         }
     }
 
-    let run = std::process::Command::new(&exe)
+    for unwanted in directives(&source, "forbid-warning:") {
+        if stderr.contains(unwanted) {
+            return Err(format!(
+                "build stderr has warning {unwanted:?}\n    stderr: {stderr:?}"
+            ));
+        }
+    }
+
+    check_run(&source, &exe, expected, &[])?;
+    // `// gc-stress: N`: again with a collection every N allocations and
+    // every full one evacuating all it may (objects move all the time).
+    if let Some(n) = directive(&source, "gc-stress:") {
+        let env = [("ROK_GC_STRESS", n.trim()), ("ROK_GC_EVAC", "always")];
+        check_run(&source, &exe, expected, &env).map_err(|e| format!("gc-stress: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Run `exe` (with `env`) and check its exit code, stderr and stdout
+/// against the case's directives.
+fn check_run(
+    source: &str,
+    exe: &std::path::Path,
+    expected: i32,
+    env: &[(&str, &str)],
+) -> Result<(), String> {
+    let run = std::process::Command::new(exe)
+        .envs(env.iter().copied())
         .output()
         .map_err(|e| format!("exec: {e}"))?;
     let exit = run.status.code().ok_or("no exit code")?;
     if exit != expected {
         return Err(format!("exit={exit} (expected {expected})"));
     }
-    if let Some(want) = directive(&source, "expect-stderr:") {
+    if let Some(want) = directive(source, "expect-stderr:") {
         let got = String::from_utf8_lossy(&run.stderr);
         if !got.contains(want) {
             return Err(format!("stderr lacks {want:?}\n    stderr: {got:?}"));
         }
     }
-    if let Some(want) = parse_expect_stdout(&source) {
+    if let Some(want) = parse_expect_stdout(source) {
         let got = String::from_utf8_lossy(&run.stdout);
         if got.trim_end() != want.trim_end() {
             return Err(format!(

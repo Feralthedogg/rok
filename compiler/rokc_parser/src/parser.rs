@@ -75,6 +75,8 @@ pub struct Parser<'a> {
     meta: std::sync::Arc<meta::MetaTable>,
     /// Meta expansions in progress (cycle detection, 6.8.8).
     meta_stack: Vec<String>,
+    /// Source text of the meta expansions so far (`Program::expanded`).
+    expanded: Vec<String>,
     /// `#[literal]` registrations (spec 6.5), gathered by the pre-pass.
     literals: std::sync::Arc<literal::LiteralTable>,
     /// The last `parse_item` consumed an item that expanded to nothing.
@@ -164,6 +166,7 @@ impl<'a> Parser<'a> {
             pending_items: Vec::new(),
             meta: std::sync::Arc::default(),
             meta_stack: Vec::new(),
+            expanded: Vec::new(),
             literals: std::sync::Arc::default(),
             vanished: false,
         }
@@ -450,6 +453,7 @@ impl<'a> Parser<'a> {
             attrs,
             items,
             stmts,
+            expanded: std::mem::take(&mut self.expanded),
         }
     }
 
@@ -512,7 +516,7 @@ impl<'a> Parser<'a> {
                 );
                 None
             }
-            StmtKind::Trailing(expr) if !is_block_like(&expr) => {
+            StmtKind::Trailing(expr) if !ends_stmt(&expr) => {
                 self.error(span, "expected `;` after top-level expression");
                 None
             }
@@ -1150,13 +1154,15 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::LBrace, "`{`")?;
         let mut items = Vec::new();
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
+            let attrs_from = self.pos;
             let item_attrs = self.parse_outer_attrs();
             let item_vis = self.parse_visibility();
             match self.peek() {
                 TokenKind::Fn | TokenKind::Unsafe | TokenKind::Async | TokenKind::Yield => {
                     let from = self.pos;
                     if let Some(f) = self.parse_fn(item_vis, item_attrs) {
-                        items.push(ImplItem::Method(f));
+                        let fs = self.expand_method(f, attrs_from);
+                        items.extend(fs.into_iter().map(ImplItem::Method));
                     } else {
                         self.recover(from, Recover::NestedItem);
                     }
@@ -1211,6 +1217,32 @@ impl<'a> Parser<'a> {
             items,
             span: start,
         })
+    }
+
+    /// A method (impl or trait) with a user attribute (spec 6.9.5:
+    /// `@accept(fn)` takes methods too) becomes its expansion, which must
+    /// be methods.
+    fn expand_method(&mut self, f: FnDef, from: usize) -> Vec<FnDef> {
+        if self.meta.is_empty() {
+            return vec![f];
+        }
+        let span = f.span;
+        let item = Item::Fn(f);
+        let Some(items) = self.expand_user_attribute(&item, from) else {
+            let Item::Fn(f) = item else { unreachable!() };
+            return vec![f];
+        };
+        let mut out = Vec::new();
+        for i in items {
+            match i {
+                Item::Fn(f) => out.push(f),
+                _ => self.error(
+                    span,
+                    "an attribute on a method must expand to methods only (spec 6.9.5)",
+                ),
+            }
+        }
+        out
     }
 
     fn parse_enum(&mut self, vis: Visibility, attrs: Vec<Attribute>) -> Option<EnumDef> {
@@ -1399,7 +1431,17 @@ impl<'a> Parser<'a> {
                 if self.meta_block().is_some() {
                     continue;
                 }
-                if let Some(item) = self.parse_item() {
+                if !self.at_item_start() {
+                    let span = self.peek_span();
+                    self.error(
+                        span,
+                        format!(
+                            "expected an item in `mod {name}`: module bodies are \
+                             definitions-only; statements belong in `main.rok` (spec 4.16.6)"
+                        ),
+                    );
+                    self.recover(from, Recover::NestedItem);
+                } else if let Some(item) = self.parse_item() {
                     items.push(item);
                     items.append(&mut self.pending_items);
                 } else if !std::mem::take(&mut self.vanished) {
@@ -1544,7 +1586,13 @@ impl<'a> Parser<'a> {
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
             let from = self.pos;
             if let Some(item) = self.parse_trait_item() {
-                items.push(item);
+                match item {
+                    TraitItem::Method(f) => {
+                        let fs = self.expand_method(f, from);
+                        items.extend(fs.into_iter().map(TraitItem::Method));
+                    }
+                    item => items.push(item),
+                }
             } else {
                 self.recover(from, Recover::NestedItem);
             }
@@ -2664,7 +2712,7 @@ impl<'a> Parser<'a> {
                     }
                 } else {
                     if let StmtKind::Trailing(e) = &stmt.kind {
-                        if !is_block_like(e) {
+                        if !ends_stmt(e) {
                             let s = self.peek_span();
                             self.error(s, "expected `;` after expression statement");
                         }
@@ -3429,27 +3477,58 @@ impl<'a> Parser<'a> {
             // every way out of the block.
             TokenKind::Using => {
                 self.bump();
-                let mut bindings: Vec<(String, Span, Expr)> = Vec::new();
+                // Spec 3.17.1 `using_binding ::= pattern "=" expr`: a name,
+                // or any irrefutable pattern over a temp that is dropped.
+                let mut bindings: Vec<(String, Span, Expr, Option<Pattern>)> = Vec::new();
                 loop {
                     let span = self.peek_span();
-                    let TokenKind::Ident(name) = self.peek().clone() else {
-                        self.error(span, "`using` binds a name (`using f = open(p) { .. }`)");
-                        return None;
+                    let (name, pat) = match self.peek().clone() {
+                        TokenKind::Ident(name) if self.peek_next() == Some(TokenKind::Eq) => {
+                            self.bump();
+                            (name, None)
+                        }
+                        _ => {
+                            let pat = self.with_struct_expr(true, Self::parse_pattern_atom)?;
+                            (format!("#using{}", self.pos), Some(pat))
+                        }
                     };
-                    self.bump();
                     self.expect(&TokenKind::Eq, "`=`")?;
                     let init = self.with_struct_expr(false, Self::parse_expr)?;
-                    bindings.push((name, span, init));
+                    bindings.push((name, span, init, pat));
                     if !self.eat(&TokenKind::Comma) {
                         break;
                     }
                 }
-                let body = self.parse_block()?;
+                let mut body = self.parse_block()?;
+                // The patterns bind in source order, before the body.
+                let lets: Vec<Stmt> = bindings
+                    .iter()
+                    .filter_map(|(name, span, _, pat)| {
+                        Some(Stmt {
+                            kind: StmtKind::LetPattern {
+                                pat: pat.clone()?,
+                                ty: None,
+                                init: Expr {
+                                    span: *span,
+                                    kind: ExprKind::Path(Path {
+                                        segments: vec![PathSegment {
+                                            name: name.clone(),
+                                            generics: Vec::new(),
+                                        }],
+                                        span: *span,
+                                    }),
+                                },
+                            },
+                            span: *span,
+                        })
+                    })
+                    .collect();
+                body.stmts.splice(0..0, lets);
                 let mut inner = Expr {
                     span: start,
                     kind: ExprKind::Block(body),
                 };
-                for (name, span, init) in bindings.into_iter().rev() {
+                for (name, span, init, _) in bindings.into_iter().rev() {
                     let path = |name: &str| Expr {
                         span,
                         kind: ExprKind::Path(Path {
@@ -4723,6 +4802,14 @@ impl<'a> Parser<'a> {
                 self.bump();
                 Some(Literal::Float(s))
             }
+            TokenKind::CharLit(s) => {
+                self.bump();
+                Some(Literal::Char(s))
+            }
+            TokenKind::CCharLit(s) => {
+                self.bump();
+                Some(Literal::CChar(s))
+            }
             TokenKind::Minus => {
                 self.bump();
                 match self.peek().clone() {
@@ -5067,6 +5154,25 @@ const fn starts_item(k: &TokenKind) -> bool {
             | T::Unsafe
             | T::Async
     )
+}
+
+/// A statement that may omit its `;`: a block-like expression (spec
+/// 1.3.4), or a call whose trailing closure has a block body
+/// (`with_lock(m) { .. }`, `xs.each |x| { .. }` — spec 4.8.8 writes them
+/// keyword-like, without `;`). The call's value is discarded like `;`.
+const fn ends_stmt(e: &Expr) -> bool {
+    let (ExprKind::Call {
+        trailing_closure: Some(c),
+        ..
+    }
+    | ExprKind::MethodCall {
+        trailing_closure: Some(c),
+        ..
+    }) = &e.kind
+    else {
+        return is_block_like(e);
+    };
+    matches!(&c.kind, ExprKind::Closure { body, .. } if matches!(body.kind, ExprKind::Block(_)))
 }
 
 const fn is_block_like(e: &Expr) -> bool {

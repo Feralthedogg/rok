@@ -1,0 +1,29 @@
+// expect-exit: 0
+// expect-stdout:
+// try 0
+// try 1
+// try 2
+// 1 2 3
+// done
+
+// Spec 4.8.8: a trailing-closure call with a block body reads like a
+// statement keyword — it ends the statement without `;`, like `if`.
+
+fn retry(n: i32, body: fn(i32) -> ()) {
+    for i in 0..n { body(i); }
+}
+
+fn guarded(body: fn() -> ()) { body(); }
+
+fn main() -> i32 {
+    retry(3) |i| {
+        println(f"try {i}");
+    }
+    let xs: List<i32> = [1, 2, 3];
+    xs.iter().for_each |x| { print(f"{x}"); if x < 3 { print(" "); } }
+    println("");
+    guarded {
+        println("done");
+    }
+    0
+}

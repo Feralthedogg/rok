@@ -13,24 +13,33 @@ use crate::CompiledModule;
 /// Intermediate artifact selectable with `--emit=<kind>` (spec 901).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EmitKind {
+    /// The user package's whole AST after meta expansion and the
+    /// parser's desugaring, as rok source; needs the parsed files
+    /// (`keep_ast`). (`expanded` shows the meta expansions alone.)
+    Ast,
     Hir,
     Mir,
     Mlir,
     LlvmIr,
     Asm,
     Obj,
+    /// Meta expansions as source text (spec 6.9.9); needs the parsed
+    /// sources (`Session::set_keep_ast`), so `CompileResult::emit` makes it.
+    Expanded,
 }
 
 impl EmitKind {
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
+            "ast" => Self::Ast,
             "hir" => Self::Hir,
             "mir" => Self::Mir,
             "mlir" => Self::Mlir,
             "llvmir" | "llvm-ir" | "ll" => Self::LlvmIr,
             "asm" => Self::Asm,
             "obj" => Self::Obj,
+            "expanded" => Self::Expanded,
             _ => return None,
         })
     }
@@ -39,12 +48,14 @@ impl EmitKind {
     #[must_use]
     pub const fn extension(self) -> &'static str {
         match self {
+            Self::Ast => "ast.rok",
             Self::Hir => "hir",
             Self::Mir => "mir",
             Self::Mlir => "mlir",
             Self::LlvmIr => "ll",
             Self::Asm => "s",
             Self::Obj => "o",
+            Self::Expanded => "expanded.rok",
         }
     }
 }
@@ -63,6 +74,8 @@ pub struct BuildOptions {
     pub debug: bool,
     /// Codegen a REPL cell (`link_shared`).
     pub repl: Option<rokc_codegen_mlir::ReplCell>,
+    /// `-C overflow-checks=yes|no`; `None` = on at `-O0` only.
+    pub overflow_checks: Option<bool>,
 }
 
 impl Default for BuildOptions {
@@ -74,6 +87,7 @@ impl Default for BuildOptions {
             keep_temps: false,
             debug: false,
             repl: None,
+            overflow_checks: None,
         }
     }
 }
@@ -134,9 +148,7 @@ pub fn mlir_text(
     module: &CompiledModule,
     opts: &BuildOptions,
 ) -> Result<rokc_codegen_mlir::MlirOutput, RokDiagnostic> {
-    // ponytail: overflow checks follow -O0 (debug); add `-C overflow-checks` if
-    // someone needs checked release builds.
-    let overflow_checks = opts.opt_level == "0";
+    let overflow_checks = opts.overflow_checks.unwrap_or(opts.opt_level == "0");
     let mut out = rokc_codegen_mlir::codegen_with_target(
         &module.mir,
         opts.target.as_deref(),
@@ -198,8 +210,13 @@ pub fn emit(
     opts: &BuildOptions,
 ) -> Result<Vec<u8>, RokDiagnostic> {
     match kind {
+        EmitKind::Ast => Err(RokDiagnostic::error(
+            rokc_diagnostic::ErrorKind::Internal,
+            "--emit=ast needs the parsed files (keep_ast)",
+        )),
         EmitKind::Hir => Ok(rokc_hir::print_hir(&module.hir).into_bytes()),
         EmitKind::Mir => Ok(rokc_mir::print_mir(&module.mir).into_bytes()),
+        EmitKind::Expanded => Err(err("`--emit=expanded` needs the parsed sources".to_owned())),
         EmitKind::Mlir => Ok(mlir_text(module, opts)?.text.into_bytes()),
         EmitKind::LlvmIr | EmitKind::Asm | EmitKind::Obj => {
             let tmp = TempDir::new(opts.keep_temps)?;

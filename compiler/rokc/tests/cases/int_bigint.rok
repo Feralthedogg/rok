@@ -1,0 +1,125 @@
+// expect-exit: 0
+// expect-stdout:
+// 1000000000000000000000000000000000000000001
+// 123456789012345678901234567890 -98765432109876543210 123456788913580246791358024680 123456789111111111011111111100 42 15511210043330985984000000
+// 2568 40238726007709377354 641419708
+// true
+// true true true true
+// -3 -3 -1 1 1 -1 3 -1
+// -14285714285714285714285714285 -6 1 true
+// -340282366920938463463374607431768211455 -ffffffffffffffffffffffffffffffff -f5lxx1zz5pnorynqglhzmsp33 129
+// true true true 35
+// 1208925819614629174706175 256
+// [ff] [0xFF] [-ff] [0b11111111] [377] [     255] [255     ] [   255   ] [+255] [00000255] [-0000255]
+// [1.2345678901234567890123e22] [1.235e22] [1.2345678901234567890123E22] [255.00] [       12345678901234567890123] [-    255] [12345678901234567890123]
+// 123456789012345678901064827458 -817913889 -123456789012345678901882741347 987654320 -123456791 -1252000592833654354567462788044156829696 6692605942
+// 6 10 5 9223372036854775807 -987654321 79 -4362896299872285998 2770 -9.87654e+08 1.23457e+29 true -987654321
+// true
+// 100000000000000000000000000000000000000000000000000 1 -27 28181790 97 987654321 -1
+// 9223372036854775808 9223372036854775807 -9223372036854775808 -9223372036854775809 -9223372036854775808
+// five x 2 123456789012345678901234567890 123456789012345678900246913574 true true true true
+// 0 0 true 0 0
+
+// stdlib spec 2.1.2 / 2.1.6 / 2.1.7 / 2.10.5: `int`, the arbitrary
+// precision integer — literals in `int` slots (past i64 too), the
+// operator traits, Karatsuba-sized products, Knuth division, parse /
+// print in any radix, bit ops on infinite two's complement, the
+// conversion policies and f-string formatting. Values checked against
+// Python.
+
+fn fact(n: i64) -> int {
+    let acc: int = 1;
+    for i in 2..=n { acc = acc * int::from(i); }
+    acc
+}
+
+fn twice(x: int) -> int { x * 2 }
+
+fn main() {
+    // Spec 2.1.2 example: 10^42 with no wrap.
+    let big: int = 1;
+    big = big * 1000;
+    big = big * 1000;
+    big = big * 1000;
+    big = big * 1000;
+    big = big * 1000;
+    big = big * 1000;
+    big = big * 1000;
+    big = big * big;
+    big += 1;
+    println(f"{big}");
+    let lit: int = 123456789012345678901234567890;
+    let neg: int = -98765432109876543210;
+    println(f"{lit} {neg} {lit + neg} {lit - neg} {twice(21)} {fact(25)}");
+
+    // Products past the Karatsuba threshold, division with many limbs.
+    let f = fact(1000);
+    let s = f.to_str_radix(10u32);
+    println(f"{s.len()} {s[0:20]} {f % 1000000007}");
+    let g = f + 1;
+    println(f"{g * g == f * f + f * 2 + 1}");
+    let a = fact(300) + 12345;
+    let b = fact(200) - 777;
+    let c = fact(150) + 99;
+    let (q, r) = (a * b + c).div_rem(b);
+    println(f"{q == a} {r == c} {(a * b + c) / b == a} {(a * b + c) % b == c}");
+
+    // Truncating `/` and `%`, floored `%%` (spec 2.1.2, 2.3).
+    let m7: int = -7;
+    let p7: int = 7;
+    let two: int = 2;
+    let mtwo: int = -2;
+    println(f"{m7 / two} {p7 / mtwo} {m7 % two} {p7 % mtwo} {m7 %% two} {p7 %% mtwo} {m7 / mtwo} {m7 % mtwo}");
+    let huge: int = -100000000000000000000000000001;
+    let d: int = 7;
+    println(f"{huge / d} {huge % d} {huge %% d} {(huge / d) * d + huge % d == huge}");
+
+    // Parse / print.
+    let h = int::from_str("-ffffffffffffffffffffffffffffffff", 16u32) ?? 0 as int;
+    println(f"{h} {h.to_str_radix(16u32)} {h.to_str_radix(36u32)} {h.to_str_radix(2u32).len()}");
+    let parsed: int = try! "123456789012345678901234567890".parse::<int>();
+    println(f"{parsed == lit} {int::from_str("12x", 10u32) is none} {int::from_str("", 10u32) is none} {int::from_str("+z", 36u32) ?? 0 as int}");
+    let hexlit: int = 0xffff_ffff_ffff_ffff_ffff;
+    println(f"{hexlit} {int::from_literal("0b1_0000_0000")}");
+
+    // f-strings: the magnitude in the base, sign first.
+    let n: int = 255;
+    let mn: int = -255;
+    let w: int = 12345678901234567890123;
+    println(f"[{n:x}] [{n:#X}] [{mn:x}] [{n:#b}] [{n:o}] [{n:>8}] [{n:<8}] [{n:^9}] [{n:+}] [{n:08}] [{mn:08}]");
+    println(f"[{w:e}] [{w:.3e}] [{w:E}] [{n:.2f}] [{w:>30}] [{mn:=+8}] [{w:?}]");
+
+    // Bit ops on infinite two's complement (Python semantics).
+    let x: int = 123456789012345678901234567890;
+    let y: int = -987654321;
+    println(f"{x & y} {x | y} {x ^ y} {~y} {y >> 3u32} {y << 100u32} {x >> 64u32}");
+
+    // Conversions (2.1.7, 2.11): into is lossless, try / saturating /
+    // wrapping (= `as`) spell the policy.
+    let i: i32 = 5;
+    let into: int = i.into();
+    let t: i64 = x.saturating_into();
+    let u: i32 = try! y.try_into();
+    let v: u8 = y.wrapping_into();
+    println(f"{into + 1} {int::from(i) * 2} {i as int} {t} {u} {v} {x as i64} {x as u16} {y as f64} {x.to_f64()} {x.to_i64() is none} {y.to_i32() ?? 0}");
+    let fits: i32 | none = try? x.try_into::<i32>();
+    println(f"{fits is none}");
+
+    // Methods.
+    let ten: int = 10;
+    println(f"{ten.pow(50u32)} {ten.pow(0u32)} {int::from(-3i32).pow(3u32)} {x.gcd(fact(40))} {x.bit_length()} {y.abs()} {y.signum()}");
+    let e: i64 = 9223372036854775807;
+    let e1 = int::from(e) + 1;
+    println(f"{e1} {e1 - 1} {-(e1)} {-(e1) - 1} {(-(e1)).to_i64() ?? 0}");
+
+    // Eq / Ord / Hash: Dict keys, max, sum.
+    let dict: Dict<int, str> = Dict::new();
+    dict[x] = "x";
+    dict[int::from(5i32)] = "five";
+    let k: int = 5;
+    let mx = [x, y, k].iter().max() ?? k;
+    let total: int = [x, y, k].iter().sum();
+    println(f"{dict[k]} {dict[x + 0]} {dict.len()} {mx} {total} {x > y} {y < k} {x == x + 0} {x != y}");
+    let z: int = 0;
+    println(f"{z} {-z} {z.is_zero()} {int::new()} {int::default()}");
+}

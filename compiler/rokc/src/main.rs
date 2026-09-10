@@ -6,6 +6,7 @@
 //! program's own code.
 
 mod bench_runner;
+mod fresh;
 mod package;
 mod test_runner;
 
@@ -32,8 +33,10 @@ commands:
   bench [path] [filter]  build (-O2 unless -O given) and time the `#[bench]`
                          functions; prints ns/iter (+/- deviation)
   check [path | -]       diagnose only, no native build (`-`: source on stdin)
-  repl [--replay]        interactive session (:type <expr>, :reset, :quit);
-                         --replay reruns every cell for each new one
+  repl [--replay] [--package <path>]
+                         interactive session (:type <expr>, :reset, :quit);
+                         --replay reruns every cell for each new one;
+                         --package loads a library package and `use`s it
   lsp                    language server on stdio (`rok lsp` / `rokls` run it)
   jupyter --connection-file <file>
                          Jupyter kernel (Jupyter starts it; the REPL engine)
@@ -72,12 +75,16 @@ global options:
 
 build options:
   -o, --out, --output <path>   output file
-  --emit=<kind>[,<kind>...]    hir | mir | mlir | llvmir | asm | obj
+  --emit=<kind>[,<kind>...]    ast | hir | mir | mlir | llvmir | asm | obj | expanded
+                               (ast: the package's whole AST after meta
+                               expansion and desugaring, as rok source;
+                               expanded: each meta expansion's output)
                                (written to target/<profile>/build/<name>.<ext>
                                unless -o)
   --target=<triple>            LLVM target triple
   --release                    optimized build (same as -O2)
   -O0 | -O1 | -O2 | -O3 | -Os  optimization level (default -O0)
+  -C overflow-checks[=yes|no]  integer overflow panics (default: on at -O0)
   --cfg <flag | key=value>     #[cfg] flag (repeatable)
   --bootstrap <file>           library root to preload (repeatable; default:
                                $ROK_HOME/lib/rok/{core,std,bare}/lib.rok)
@@ -138,6 +145,8 @@ struct Args {
     list: bool,
     /// `repl --replay`.
     replay: bool,
+    /// `repl --package`: a library package to load and `use`.
+    package: Option<PathBuf>,
     /// `jupyter --connection-file`.
     connection_file: Option<PathBuf>,
     /// `jupyter --install-kernel` (`--user` is the default, accepted).
@@ -229,6 +238,14 @@ fn parse_args(raw: Vec<String>) -> Args {
                 name[2..].clone_into(&mut a.opts.opt_level);
                 a.opt_set = true;
             }
+            "-C" | "--codegen" => {
+                let v = value(&name, inline, &mut it);
+                a.opts.overflow_checks = Some(match v.as_str() {
+                    "overflow-checks" | "overflow-checks=yes" | "overflow-checks=on" => true,
+                    "overflow-checks=no" | "overflow-checks=off" => false,
+                    _ => usage_error(&format!("unknown codegen option `{v}`")),
+                });
+            }
             "--keep" => a.opts.keep_temps = true,
             "-g" | "--debug" => a.opts.debug = true,
             "--lib" => a.lib = true,
@@ -238,6 +255,7 @@ fn parse_args(raw: Vec<String>) -> Args {
             "--show-output" => a.show_output = true,
             "--list" => a.list = true,
             "--replay" => a.replay = true,
+            "--package" => a.package = Some(value(&name, inline, &mut it).into()),
             "--connection-file" => {
                 a.connection_file = Some(value(&name, inline, &mut it).into());
             }
@@ -369,7 +387,21 @@ fn main() {
             process::exit(rokc_tools::lsp::serve(io.0, io.1, a.bootstrap, a.externs));
         }
         "repl" => {
-            let a = with_defaults(a);
+            let mut a = with_defaults(a);
+            // `--package` (901.2): the library is a dependency of the
+            // session, and its first cell is `use <name>::*;`.
+            let prelude = a.package.clone().map(|p| {
+                let pkg = package::discover(&p).unwrap_or_else(|e| fail(&e));
+                if !pkg.lib {
+                    fail(&format!(
+                        "`--package {}`: not a library package (no `lib.rok`)",
+                        p.display()
+                    ));
+                }
+                let name = lib_name(&a, &pkg);
+                a.externs.push((name.clone(), pkg.root));
+                format!("use {name}::*;")
+            });
             let tty = std::io::stdin().is_terminal();
             process::exit(rokc_tools::repl::main(
                 a.bootstrap,
@@ -377,6 +409,7 @@ fn main() {
                 a.opts,
                 tty,
                 a.replay,
+                prelude.as_deref(),
             ));
         }
         "jupyter" => cmd_jupyter(with_defaults(a)),
@@ -559,7 +592,11 @@ fn compile(a: &Args, pkg: &Package, mode: Mode) -> (CompileResult, Instant) {
     }
     session.set_test(mode == Mode::Test);
     session.set_bench(mode == Mode::Bench);
-    session.set_keep_ast(matches!(mode, Mode::Lint | Mode::Doc));
+    session.set_keep_ast(
+        matches!(mode, Mode::Lint | Mode::Doc)
+            || a.emit.contains(&EmitKind::Expanded)
+            || a.emit.contains(&EmitKind::Ast),
+    );
     let result = if pkg.root == Path::new(package::STDIN) {
         let mut src = String::new();
         if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut src) {
@@ -633,9 +670,9 @@ fn out_dir(a: &Args, pkg: &Package) -> PathBuf {
 /// `target/<profile>/build/<name>.<ext>` (`--emit`).
 fn cmd_build(a: &Args) {
     let pkg = discover_arg(a);
-    let (result, started) = compile(a, &pkg, Mode::Build);
     let target = out_dir(a, &pkg);
     if !a.emit.is_empty() {
+        let (result, started) = compile(a, &pkg, Mode::Build);
         if a.output.is_some() && a.emit.len() > 1 {
             usage_error("`-o` with several `--emit` kinds");
         }
@@ -666,6 +703,11 @@ fn cmd_build(a: &Args) {
             pkg.name.clone()
         })
     });
+    let fp = fingerprint(a, &pkg, &out);
+    if skip_fresh(a, &pkg, &fp) {
+        return;
+    }
+    let (result, started) = compile(a, &pkg, Mode::Build);
     let t = Instant::now();
     if !a.quiet {
         eprintln!("    Building {}", out.display());
@@ -675,8 +717,64 @@ fn cmd_build(a: &Args) {
     } else {
         fail_on(result.link(&a.opts, &out));
     }
+    if result.warnings.is_empty() {
+        fp.save();
+    }
     stage(a, "codegen + link", t);
     finished(a, started);
+}
+
+/// The incremental-build key of `pkg` built into `out` (see `fresh`).
+fn fingerprint(a: &Args, pkg: &Package, out: &Path) -> fresh::Fingerprint {
+    let mut words = vec![
+        format!("{:?}", a.opts),
+        out.display().to_string(),
+        pkg.root.display().to_string(),
+        std::env::var("PATH").unwrap_or_default(),
+        std::env::var("ROK_EAGER_LIBRARY").unwrap_or_default(),
+    ];
+    words.extend(a.cfg.iter().cloned());
+    words.extend(pkg.lib.then(|| lib_name(a, pkg)));
+    let mut inputs = vec![if pkg.anonymous {
+        pkg.root.clone()
+    } else {
+        pkg.dir.clone()
+    }];
+    let mut stamped: Vec<PathBuf> = std::env::current_exe().into_iter().collect();
+    stamped.push(PathBuf::from(&a.opts.rokr));
+    for b in &a.bootstrap {
+        words.push(b.display().to_string());
+        inputs.push(b.parent().map_or_else(|| b.clone(), Path::to_path_buf));
+    }
+    for (n, p) in &a.externs {
+        words.push(format!("{n}={}", p.display()));
+        if p.extension().is_some_and(|e| e == "rhir") {
+            let (rhir, archive) = rokc_interface::rhir::companions(p);
+            inputs.push(rhir);
+            stamped.push(archive);
+        } else {
+            inputs.push(p.parent().map_or_else(|| p.clone(), Path::to_path_buf));
+        }
+    }
+    let also = if pkg.lib {
+        vec![rokc_interface::rhir::companions(out).0]
+    } else {
+        Vec::new()
+    };
+    fresh::Fingerprint::new(out, also, &words, &inputs, &stamped)
+}
+
+/// `true` (after saying so) when `fp`'s output is up to date; else
+/// forget the old record, so a failed build leaves none.
+fn skip_fresh(a: &Args, pkg: &Package, fp: &fresh::Fingerprint) -> bool {
+    if fp.fresh() {
+        if !a.quiet {
+            eprintln!("       Fresh {} ({})", pkg.name, pkg.dir.display());
+        }
+        return true;
+    }
+    fp.clear();
+    false
 }
 
 fn cmd_run(a: &Args) {
@@ -687,7 +785,6 @@ fn cmd_run(a: &Args) {
             pkg.dir.display()
         ));
     }
-    let (result, started) = compile(a, &pkg, Mode::Build);
     // An anonymous file builds in a scratch directory (no `target/` next
     // to a loose script); a package builds into its `target/`.
     let tmp = fail_on(TempDir::new(a.opts.keep_temps));
@@ -700,10 +797,17 @@ fn cmd_run(a: &Args) {
             target.join(&pkg.name)
         }
     };
-    let t = Instant::now();
-    fail_on(result.link(&a.opts, &exe));
-    stage(a, "codegen + link", t);
-    finished(a, started);
+    let fp = (a.output.is_some() || !pkg.anonymous).then(|| fingerprint(a, &pkg, &exe));
+    if !fp.as_ref().is_some_and(|fp| skip_fresh(a, &pkg, fp)) {
+        let (result, started) = compile(a, &pkg, Mode::Build);
+        let t = Instant::now();
+        fail_on(result.link(&a.opts, &exe));
+        if result.warnings.is_empty() {
+            fp.iter().for_each(fresh::Fingerprint::save);
+        }
+        stage(a, "codegen + link", t);
+        finished(a, started);
+    }
     if !a.quiet {
         eprintln!("     Running `{}`", exe.display());
     }

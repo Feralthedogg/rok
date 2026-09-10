@@ -19,7 +19,19 @@ const REPL_PKG_HASH: &str = "7265706c";
 /// Runtime type ids of a `BufAlloc` buffer (`rokr`): no traced children
 /// (the string type), or every payload word a candidate reference.
 const BUF_PLAIN_TYPE_ID: u32 = 1;
-const BUF_TRACED_TYPE_ID: u32 = 2;
+/// `ScanTable` `field_kind`s (802 §8.2.3): a reference to an object
+/// header, a pointer into an object (`str`), an `any` (tag + payload),
+/// and the implementation kind for a word that may hold a reference or
+/// other bits (an enum union payload word: the collector keeps its
+/// referent and never moves it).
+const STRONG_REF: u32 = 0;
+const INTERIOR_REF: u32 = 2;
+const ANY_SLOT: u32 = 3;
+const AMBIGUOUS: u32 = 5;
+/// `ScanTable` `version` bit (implementation, `rokr_gc`): the table
+/// describes one element of `total_size` bytes repeated over the payload
+/// (a `BufAlloc` buffer).
+const TABLE_ARRAY: u32 = 0x8000;
 /// `gc_flags` bit of an old object not yet in the remembered set
 /// (`rokr_common::object_header::FLAG_UNLOGGED`).
 const GC_FLAG_UNLOGGED: u32 = 1 << 6;
@@ -51,8 +63,9 @@ pub struct Emitter {
     /// Some `HeapBox` (an `any Tr` payload) called `rok_gc_alloc_slow`.
     uses_alloc: bool,
     /// Payload type of each GC object type; index `i` is type id
-    /// `GC_TYPE_BASE + i` and gets a `ScanTable` (802).
-    gc_types: Vec<MirTy>,
+    /// `GC_TYPE_BASE + i` and gets a `ScanTable` (802). `true`: a buffer
+    /// of such elements (`BufAlloc`, an array table).
+    gc_types: Vec<(MirTy, bool)>,
     /// Package hash for mangled symbols (spec 905).
     pkgs: crate::mangle::Pkgs,
     /// Panic on integer `+ - *` / negation overflow (debug builds); wrap
@@ -79,6 +92,10 @@ pub(crate) struct FnSig {
     abi: Option<crate::abi::FnAbi>,
     /// C variadic (spec 8.6.10): an `llvm.func` called with `llvm.call`.
     variadic: bool,
+    /// An `extern "C" fn` definition with aggregates (spec 5.9.10,
+    /// 8.6.3): the symbol and `(params) -> ret` type of its C ABI entry
+    /// (`emit_c_entry`), which C calls; `name` is the rok-ABI body.
+    c_entry: Option<(String, String)>,
 }
 
 /// An external declaration other than the runtime's own `rok_*` symbols
@@ -171,6 +188,9 @@ impl Emitter {
         // body with runtime init / shutdown calls.
         let user_main = module.functions.iter().find(|f| f.name == "main");
         self.link = module.link.clone();
+        if let Some(di) = self.debug.as_mut() {
+            di.struct_names.clone_from(&module.struct_names);
+        }
         self.pkgs.prebuilt = module.link.prebuilt_fns.iter().copied().collect();
         // Content-based package hash: the printed MIR of the whole unit.
         // Content-based package hashes (spec 0.3.3) from the driver; a
@@ -200,19 +220,53 @@ impl Emitter {
         }
 
         let mut fns: HashMap<FunctionId, FnSig> = HashMap::new();
+        let mut c_entries: Vec<(FunctionId, crate::abi::FnAbi)> = Vec::new();
         for f in &module.functions {
+            let export = module
+                .exports
+                .iter()
+                .find(|(id, _)| *id == f.id)
+                .map(|(_, s)| s.as_str());
+            let entry_abi = (module.c_defs.contains(&f.id) && !f.blocks.is_empty())
+                .then(|| {
+                    crate::abi::classify(self.c_target, &f.param_tys, &f.ret_ty, self.pointer_width)
+                })
+                .filter(|a| !a.is_trivial());
+            let body = crate::mangle::symbol_for(f, &self.pkgs, export);
+            let mut c_entry = None;
+            if let Some(abi) = entry_abi {
+                // The exported name (or `<body>.c`) is the C entry.
+                let body = crate::mangle::symbol_for(f, &self.pkgs, None);
+                let entry = export.map_or_else(|| format!("{body}.c"), str::to_owned);
+                let (params, ret) = c_signature(
+                    &FnSig {
+                        name: entry.clone(),
+                        params: f.param_tys.clone(),
+                        ret: f.ret_ty.clone(),
+                        c_abi: true,
+                        abi: Some(abi.clone()),
+                        variadic: false,
+                        c_entry: None,
+                    },
+                    self.pointer_width,
+                );
+                let params: Vec<String> = params.into_iter().map(|(t, _)| t).collect();
+                let ty = format!(
+                    "({}) -> {}",
+                    params.join(", "),
+                    ret.unwrap_or_else(|| "()".to_owned())
+                );
+                c_entry = Some((entry, ty));
+                c_entries.push((f.id, abi));
+            }
             fns.insert(
                 f.id,
                 FnSig {
-                    name: crate::mangle::symbol_for(
-                        f,
-                        &self.pkgs,
-                        module
-                            .exports
-                            .iter()
-                            .find(|(id, _)| *id == f.id)
-                            .map(|(_, s)| s.as_str()),
-                    ),
+                    name: if c_entry.is_some() {
+                        crate::mangle::symbol_for(f, &self.pkgs, None)
+                    } else {
+                        body
+                    },
                     params: f.param_tys.clone(),
                     ret: f.ret_ty.clone(),
                     c_abi: is_c_abi(f, &self.pkgs),
@@ -225,10 +279,11 @@ impl Emitter {
                         )
                     }),
                     variadic: module.c_variadic.contains(&f.id),
+                    c_entry,
                 },
             );
             if self.c_target == crate::abi::CTarget::Other
-                && is_c_abi(f, &self.pkgs)
+                && (is_c_abi(f, &self.pkgs) || module.c_defs.contains(&f.id))
                 && f.param_tys
                     .iter()
                     .chain([&f.ret_ty])
@@ -256,7 +311,14 @@ impl Emitter {
             .functions
             .iter()
             .filter(|f| !f.blocks.is_empty())
-            .map(|f| fns[&f.id].name.as_str())
+            .flat_map(|f| {
+                let sig = &fns[&f.id];
+                [
+                    Some(sig.name.as_str()),
+                    sig.c_entry.as_ref().map(|(e, _)| e.as_str()),
+                ]
+            })
+            .flatten()
             .collect();
         for f in &module.functions {
             if f.blocks.is_empty() && defined.contains(fns[&f.id].name.as_str()) {
@@ -264,6 +326,9 @@ impl Emitter {
             }
             let symbol = fns[&f.id].name.clone();
             self.emit_function(f, &symbol, &fns);
+        }
+        for (id, abi) in &c_entries {
+            self.emit_c_entry(&fns[id], abi, module.exports.iter().any(|(e, _)| e == id));
         }
         if let Some(m) = user_main {
             let symbol = fns[&m.id].name.clone();
@@ -358,15 +423,22 @@ impl Emitter {
                 .push_str("  func.func private @rok_gc_register_type(i32, !llvm.ptr)\n");
         }
         let mut calls = String::new();
-        for (i, ty) in self.gc_types.iter().enumerate() {
+        for (i, (ty, array)) in self.gc_types.iter().enumerate() {
             let mut offsets = Vec::new();
-            gc_offsets(ty, pw, HEADER_SIZE, &mut offsets);
-            let total = gc_object_size(ty, pw).0;
             // Header {total_size u32, version u16 = 1, num_entries u16},
-            // then {field_offset u32, field_kind u32 = STRONG_REF} each.
-            let mut words = vec![total, 1 | ((offsets.len() as u32) << 16)];
-            for o in offsets {
-                words.extend([o, 0]);
+            // then {field_offset u32, field_kind u32} each. An array
+            // table's size is the element stride, its offsets
+            // element-relative.
+            let (total, version) = if *array {
+                gc_offsets(ty, pw, 0, &mut offsets);
+                (size_align(ty, pw).0, 1 | TABLE_ARRAY)
+            } else {
+                gc_offsets(ty, pw, HEADER_SIZE, &mut offsets);
+                (gc_object_size(ty, pw).0, 1)
+            };
+            let mut words = vec![total, version | ((offsets.len() as u32) << 16)];
+            for (o, kind) in offsets {
+                words.extend(<[u32; 2]>::from((o, kind)));
             }
             let list = words.iter().map(u32::to_string).collect::<Vec<_>>();
             let n = words.len();
@@ -653,10 +725,13 @@ impl Emitter {
                         continue;
                     }
                     let arg = f.params.iter().position(|p| *p == l.id).map(|i| i + 1);
-                    let line = lines.get(&l.id.0).copied().unwrap_or(d.line);
-                    if let Some(var) = di.local(&d.subprogram, f.span.file, name, &l.ty, line, arg)
-                    {
-                        emit.dbg_vars.push((l.id.0, var));
+                    let (line, scope) = lines.get(&l.id.0).copied().unwrap_or((d.line, 0));
+                    let scope = d.scopes.get(&scope).unwrap_or(&d.subprogram);
+                    if let Some(var) = di.local(scope, f.span.file, name, &l.ty, line, arg) {
+                        // LLVM puts a stack variable in the scope of its
+                        // declare's location, not of the variable.
+                        let at = format!("loc(fused<{scope}>[\"{}\":{line}:1])", d.file);
+                        emit.dbg_vars.push((l.id.0, var, at));
                     }
                 }
             }
@@ -684,6 +759,123 @@ impl Emitter {
         self.out.push_str("  }");
         self.out.push_str(fn_loc.as_deref().unwrap_or_default());
         self.out.push('\n');
+    }
+
+    /// The C ABI entry of an `extern "C" fn` definition `sig` (spec
+    /// 8.6.3): takes the arguments as C passes them (coerced, by
+    /// pointer, `sret`), calls the rok body with the values, returns
+    /// the result the C way. Exported under `#[export_name]`, else
+    /// internal (C gets it as a function pointer).
+    fn emit_c_entry(&mut self, sig: &FnSig, abi: &crate::abi::FnAbi, exported: bool) {
+        use crate::abi::{ArgAbi, RetAbi};
+        let pw = self.pointer_width;
+        let Some((entry, _)) = &sig.c_entry else {
+            return;
+        };
+        let c = FnSig {
+            name: entry.clone(),
+            params: sig.params.clone(),
+            ret: sig.ret.clone(),
+            c_abi: true,
+            abi: Some(abi.clone()),
+            variadic: false,
+            c_entry: None,
+        };
+        let (params, ret) = c_signature(&c, pw);
+        let head: Vec<String> = params
+            .iter()
+            .enumerate()
+            .map(|(i, (t, a))| format!("%arg{i}: {t}{a}"))
+            .collect();
+        let arrow = ret.as_ref().map(|r| format!(" -> {r}")).unwrap_or_default();
+        let (vis, linkage) = if exported {
+            ("", "")
+        } else {
+            (
+                "private ",
+                " attributes {llvm.linkage = #llvm.linkage<internal>}",
+            )
+        };
+        let mut b = format!(
+            "  func.func {vis}@{entry}({}){arrow}{linkage} {{
+    %one = llvm.mlir.constant(1 : i32) : i32
+",
+            head.join(", ")
+        );
+        let slot = |b: &mut String, n: &str, ty: &MirTy| {
+            let size = size_align(ty, pw).0.max(16);
+            let _ = writeln!(
+                b,
+                "    {n} = llvm.alloca %one x !llvm.array<{size} x i8> {{alignment = 16 : i64}} : (i32) -> !llvm.ptr"
+            );
+        };
+        let sret = usize::from(abi.ret == RetAbi::Sret);
+        let mut vals = Vec::new();
+        for (i, t) in sig.params.iter().enumerate() {
+            let a = format!("%arg{}", i + sret);
+            let ty = mlir_type(t, pw);
+            match abi.args.get(i).unwrap_or(&ArgAbi::Direct) {
+                ArgAbi::Direct => vals.push(a),
+                ArgAbi::Coerce(c) => {
+                    slot(&mut b, &format!("%s{i}"), t);
+                    let _ = write!(
+                        b,
+                        "    llvm.store {a}, %s{i} : {c}, !llvm.ptr
+    %v{i} = llvm.load %s{i} : !llvm.ptr -> {ty}
+"
+                    );
+                    vals.push(format!("%v{i}"));
+                }
+                ArgAbi::Indirect { .. } => {
+                    let _ = writeln!(b, "    %v{i} = llvm.load {a} : !llvm.ptr -> {ty}");
+                    vals.push(format!("%v{i}"));
+                }
+            }
+        }
+        let tys: Vec<String> = sig.params.iter().map(|t| mlir_type(t, pw)).collect();
+        let rty = mlir_type(&sig.ret, pw);
+        let unit = sig.ret == MirTy::Unit;
+        let _ = writeln!(
+            b,
+            "    {}func.call @{}({}) : ({}) -> {}",
+            if unit { "" } else { "%r = " },
+            sig.name,
+            vals.join(", "),
+            tys.join(", "),
+            if unit { "()" } else { &rty }
+        );
+        match &abi.ret {
+            _ if unit => b.push_str(
+                "    func.return
+",
+            ),
+            RetAbi::Direct => {
+                let _ = writeln!(b, "    func.return %r : {rty}");
+            }
+            RetAbi::Coerce(c) => {
+                slot(&mut b, "%rs", &sig.ret);
+                let _ = write!(
+                    b,
+                    "    llvm.store %r, %rs : {rty}, !llvm.ptr
+    %rc = llvm.load %rs : !llvm.ptr -> {c}
+    func.return %rc : {c}
+"
+                );
+            }
+            RetAbi::Sret => {
+                let _ = write!(
+                    b,
+                    "    llvm.store %r, %arg0 : {rty}, !llvm.ptr
+    func.return
+"
+                );
+            }
+        }
+        b.push_str(
+            "  }
+",
+        );
+        self.out.push_str(&b);
     }
 
     /// An `extern "C"` declaration under the platform C ABI (spec 8.6):
@@ -818,7 +1010,7 @@ struct FnEmit<'a> {
     needs: std::collections::BTreeSet<&'static str>,
     uses_alloc: bool,
     /// Lent `Emitter::gc_types`.
-    gc_types: Vec<MirTy>,
+    gc_types: Vec<(MirTy, bool)>,
     /// `(address of rok_tls_shadow_stack_top, caller's frame)` once this
     /// function linked a shadow-stack frame; every return restores it.
     gc_frame: Option<(String, String)>,
@@ -841,9 +1033,9 @@ struct FnEmit<'a> {
     /// scratch slot used in a loop does not grow the stack.
     entry_allocas: String,
     /// `-g`: this function's subprogram, and its described locals
-    /// (local id, `#di_var` alias).
+    /// (local id, `#di_var` alias, the declare's location).
     dbg: Option<crate::debug::FnDebug>,
-    dbg_vars: Vec<(u32, String)>,
+    dbg_vars: Vec<(u32, String, String)>,
 }
 
 /// Blocks with an edge to a block on the current DFS path (a loop
@@ -1208,14 +1400,14 @@ impl<'a> FnEmit<'a> {
                 self.union_scratch.insert(ty, slot);
             }
         }
-        for (l, var) in std::mem::take(&mut self.dbg_vars) {
+        for (l, var, at) in std::mem::take(&mut self.dbg_vars) {
             if let (true, Some(slot)) = (
                 self.llvm_slot.contains(&l),
                 self.slot_names[l as usize].clone(),
             ) {
                 let _ = writeln!(
                     self.body,
-                    "    llvm.intr.dbg.declare {var} = {slot} : !llvm.ptr"
+                    "    llvm.intr.dbg.declare {var} = {slot} : !llvm.ptr {at}"
                 );
             }
         }
@@ -1527,14 +1719,15 @@ impl<'a> FnEmit<'a> {
             } => {
                 self.emit_array_write(*array, index, value, elem_ty, *len);
             }
-            Statement::Loc(sp) => {
+            Statement::Loc(sp, scope) => {
                 if self.dbg.is_some() {
                     let _ = writeln!(
                         self.body,
-                        "{}{} {}",
+                        "{}{} {} {}",
                         crate::debug::MARK,
                         sp.line,
-                        sp.col.max(1)
+                        sp.col.max(1),
+                        scope.id
                     );
                 }
             }
@@ -1860,7 +2053,7 @@ impl<'a> FnEmit<'a> {
     /// A `HeapBox` payload that fits the `usize` word itself (spec 2.2.2:
     /// small primitives are stored directly).
     fn inline_payload(&self, ty: &MirTy) -> bool {
-        matches!(ty, MirTy::Prim(p) if *p != PrimTy::Str && p.bit_width(self.pointer_width) <= self.pointer_width)
+        rokc_mir::any_inline(ty, self.pointer_width)
     }
 
     /// `rok_gc_alloc_slow(total_size, align, type_id)` + store of the
@@ -1893,15 +2086,7 @@ impl<'a> FnEmit<'a> {
     /// by; the flags are already 0); `rok_gc_alloc_slow` otherwise.
     fn emit_gc_object(&mut self, ty: &MirTy) -> String {
         let pw = self.pointer_width;
-        let index = self
-            .gc_types
-            .iter()
-            .position(|t| t == ty)
-            .unwrap_or_else(|| {
-                self.gc_types.push(ty.clone());
-                self.gc_types.len() - 1
-            });
-        let type_id = self.gc_type_base + index as u32;
+        let type_id = self.gc_type_id(ty, false);
         let (size, align) = gc_object_size(ty, pw);
         let [total, align_v, tid] = std::array::from_fn(|_| self.fresh_value());
         self.uses_alloc = true;
@@ -1968,20 +2153,33 @@ impl<'a> FnEmit<'a> {
         (addr, mlir_type(&field, pw))
     }
 
+    /// The GC type id of `ty` objects (`array`: of buffers of `ty`
+    /// elements), registered with its `ScanTable` at startup.
+    fn gc_type_id(&mut self, ty: &MirTy, array: bool) -> u32 {
+        let key = (ty.clone(), array);
+        let index = self
+            .gc_types
+            .iter()
+            .position(|t| *t == key)
+            .unwrap_or_else(|| {
+                self.gc_types.push(key);
+                self.gc_types.len() - 1
+            });
+        self.gc_type_base + index as u32
+    }
+
     /// `rok_gc_alloc_slow(header + len * size, align, type_id)` for a
-    /// buffer of `len` `elem_ty`s (zeroed by the runtime), typed like
-    /// `rok_gc_alloc_bytes` buffers: traced word by word when the
-    /// elements hold GC references.
+    /// buffer of `len` `elem_ty`s (zeroed by the runtime): a byte buffer
+    /// (type id 1, untraced) unless the elements hold GC references, then
+    /// traced element by element through an array `ScanTable`.
     fn emit_buf_alloc(&mut self, elem_ty: &MirTy, len: &Operand) -> String {
         let pw = self.pointer_width;
         let usize_ty = MirTy::Prim(PrimTy::Usize);
         let n = self.materialize_operand(len, &usize_ty);
-        let mut refs = Vec::new();
-        gc_offsets(elem_ty, pw, 0, &mut refs);
-        let type_id = if refs.is_empty() {
-            BUF_PLAIN_TYPE_ID
+        let type_id = if self.holds_gc_ref(elem_ty) {
+            self.gc_type_id(elem_ty, true)
         } else {
-            BUF_TRACED_TYPE_ID
+            BUF_PLAIN_TYPE_ID
         };
         let (size, align) = size_align(elem_ty, pw);
         let align = align.max(8);
@@ -2119,7 +2317,12 @@ impl<'a> FnEmit<'a> {
         // `!llvm.ptr` so it can flow through closure structs and
         // llvm-dialect call sites.
         let typed = self.fresh_value();
-        let sig = if self.fns[&callee].c_abi {
+        let mut name = name;
+        let sig = if let Some((entry, ty)) = &self.fns[&callee].c_entry {
+            // An `extern "C" fn` handed to C: its C ABI entry.
+            name.clone_from(entry);
+            ty.clone()
+        } else if self.fns[&callee].c_abi {
             // The C declaration's own (lowered) type; calling it back
             // through the pointer from rok does not redo the C ABI.
             let (params, ret) = c_signature(&self.fns[&callee], self.pointer_width);
@@ -2818,12 +3021,15 @@ impl<'a> FnEmit<'a> {
         op: PrimOp,
         prim: PrimTy,
         dst: &str,
-        lhs: &str,
-        rhs: &str,
+        (lhs, rhs): (&str, &str),
+        consts: (Option<i128>, Option<i128>),
         ty: &str,
     ) {
         let signed = prim.is_signed_int();
-        if !self.overflow_checks || !(signed || prim.is_unsigned_int()) {
+        if !self.overflow_checks
+            || !(signed || prim.is_unsigned_int())
+            || cannot_overflow(op, prim, prim.bit_width(self.pointer_width), consts)
+        {
             return;
         }
         let fail = match op {
@@ -2921,7 +3127,8 @@ impl<'a> FnEmit<'a> {
         self.emit_arith_checks(op, *prim, rhs, &lhs_v, &rhs_v, &ty);
         if let Some(line) = arith_binop(op, *prim, dst, &lhs_v, &rhs_v, &ty) {
             self.body.push_str(&line);
-            self.emit_overflow_check(op, *prim, dst, &lhs_v, &rhs_v, &ty);
+            let consts = (const_int(lhs), const_int(rhs));
+            self.emit_overflow_check(op, *prim, dst, (&lhs_v, &rhs_v), consts, &ty);
             return;
         }
         self.unsupported_at(dst, &format!("binary `{op:?}` on `{ty}`"));
@@ -2948,8 +3155,10 @@ impl<'a> FnEmit<'a> {
                 let zero = self.fresh_value();
                 let _ = writeln!(self.body, "    {zero} = arith.constant 0 : {ty}");
                 let _ = writeln!(self.body, "    {dst} = arith.subi {zero}, {v} : {ty}");
-                if self.overflow_checks {
-                    let bits = p.bit_width(self.pointer_width);
+                let bits = p.bit_width(self.pointer_width);
+                if self.overflow_checks
+                    && const_int(operand).is_none_or(|c| c == -(1i128 << (bits - 1)))
+                {
                     let fail = self.cmp_const("eq", &v, -(1i128 << (bits - 1)), &ty);
                     self.emit_check(&fail, "attempt to negate with overflow");
                 }
@@ -3456,8 +3665,32 @@ fn gc_paths(ty: &MirTy, path: &mut Vec<u32>, out: &mut Vec<Vec<u32>>) {
     }
 }
 
+thread_local! {
+    /// ABI alignment of `i64` / `u64` / `f64` on the target being
+    /// compiled: 4 on 32-bit x86 outside Windows (the SysV i386 ABI;
+    /// LLVM's `i64:32` / `f64:32`), else 8.
+    // ponytail: per thread like the codegen run that sets it
+    // (`codegen_with_target`); a field threaded through `size_align`'s
+    // ~30 callers if targets ever mix in one thread.
+    pub(crate) static WIDE_ALIGN: std::cell::Cell<u32> = const { std::cell::Cell::new(8) };
+}
+
+/// `WIDE_ALIGN` for a target triple (`None`: the host).
+pub(crate) fn wide_align_for_target(target: Option<&str>) -> u32 {
+    let x86_32 = |t: &str| {
+        ["i386", "i486", "i586", "i686"]
+            .iter()
+            .any(|p| t.starts_with(p))
+    };
+    let sysv_i386 = match target {
+        Some(t) => x86_32(t) && !t.contains("windows"),
+        None => cfg!(all(target_arch = "x86", not(windows))),
+    };
+    if sysv_i386 { 4 } else { 8 }
+}
+
 /// `(size, align)` in bytes of `ty` as lowered by `mlir_type`, under the
-/// C struct layout LLVM uses on every supported target.
+/// C struct layout LLVM uses on the target (`WIDE_ALIGN`).
 pub(crate) fn size_align(ty: &MirTy, pw: u32) -> (u32, u32) {
     let word = (pw / 8, pw / 8);
     match ty {
@@ -3466,7 +3699,7 @@ pub(crate) fn size_align(ty: &MirTy, pw: u32) -> (u32, u32) {
             PrimTy::I8 | PrimTy::U8 | PrimTy::CChar | PrimTy::Bool => (1, 1),
             PrimTy::I16 | PrimTy::U16 => (2, 2),
             PrimTy::I32 | PrimTy::U32 | PrimTy::Char | PrimTy::F32 => (4, 4),
-            PrimTy::I64 | PrimTy::U64 | PrimTy::F64 => (8, 8),
+            PrimTy::I64 | PrimTy::U64 | PrimTy::F64 => (8, WIDE_ALIGN.get()),
             PrimTy::Isize | PrimTy::Usize => word,
             PrimTy::Str => (2 * word.0, word.1),
         },
@@ -3495,10 +3728,21 @@ fn gc_object_size(ty: &MirTy, pw: u32) -> (u32, u32) {
     (HEADER_SIZE + size.next_multiple_of(align), align)
 }
 
-/// Byte offsets of every `GcRef` inside a `ty` that starts at `at`.
-fn gc_offsets(ty: &MirTy, pw: u32, at: u32, out: &mut Vec<u32>) {
+/// `(byte offset, ScanTable kind)` of every word inside a `ty` that
+/// starts at `at` that may hold a GC reference.
+fn gc_offsets(ty: &MirTy, pw: u32, at: u32, out: &mut Vec<(u32, u32)>) {
     match ty {
-        MirTy::GcRef | MirTy::Prim(PrimTy::Str) => out.push(at),
+        MirTy::GcRef => out.push((at, STRONG_REF)),
+        MirTy::Prim(PrimTy::Str) => out.push((at, INTERIOR_REF)),
+        MirTy::Struct(rokc_mir::ANY_STRUCT, _) => out.push((at, ANY_SLOT)),
+        // An enum union payload (`unify_payload`) holds references or
+        // other bits depending on the tag; a real `[GcRef; n]` array
+        // looks the same.
+        // ponytail: ambiguous words; a per-variant `SUM_PAYLOAD` table
+        // (802 §8.2.6) needs MIR unions that keep their variants.
+        MirTy::Array(t, n) if **t == MirTy::GcRef => {
+            out.extend((0..*n).map(|i| (at + i * (pw / 8), AMBIGUOUS)));
+        }
         MirTy::Tuple(ps) | MirTy::Struct(_, ps) => {
             let mut off = 0u32;
             for t in ps {
@@ -3527,6 +3771,44 @@ fn struct_field_tys(ty: &MirTy) -> Vec<MirTy> {
 }
 
 /// Integer value of a constant operand (`Int` / in-range `UInt`).
+/// `+ - *` whose constant operands rule out overflow: both constant and
+/// the result fits, or an identity / absorbing constant (`x + 0`, `x - 0`,
+/// `x * 1`, `x * 0`).
+fn cannot_overflow(
+    op: PrimOp,
+    prim: PrimTy,
+    bits: u32,
+    (l, r): (Option<i128>, Option<i128>),
+) -> bool {
+    if let (Some(a), Some(b)) = (l, r) {
+        let v = match op {
+            PrimOp::Add => a.checked_add(b),
+            PrimOp::Sub => a.checked_sub(b),
+            PrimOp::Mul => a.checked_mul(b),
+            _ => None,
+        };
+        let (lo, hi) = if prim.is_signed_int() {
+            (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
+        } else {
+            (
+                0,
+                if bits >= 127 {
+                    i128::MAX
+                } else {
+                    (1i128 << bits) - 1
+                },
+            )
+        };
+        return v.is_some_and(|v| (lo..=hi).contains(&v));
+    }
+    match op {
+        PrimOp::Add => l == Some(0) || r == Some(0),
+        PrimOp::Sub => r == Some(0),
+        PrimOp::Mul => matches!(l, Some(0 | 1)) || matches!(r, Some(0 | 1)),
+        _ => false,
+    }
+}
+
 fn const_int(op: &Operand) -> Option<i128> {
     match op {
         Operand::Const(ConstVal::Int { value, .. }) => Some(*value),
@@ -3615,4 +3897,32 @@ fn format_const_attr(v: &ConstVal, ty: &MirTy, pointer_width: u32) -> Option<Str
         }
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+
+    #[test]
+    fn constant_operands_skip_the_check() {
+        let i8_ = |op, l, r| cannot_overflow(op, PrimTy::I8, 8, (l, r));
+        assert!(i8_(PrimOp::Add, Some(100), Some(27)));
+        assert!(!i8_(PrimOp::Add, Some(100), Some(28)));
+        assert!(i8_(PrimOp::Mul, None, Some(1)));
+        assert!(i8_(PrimOp::Sub, None, Some(0)));
+        assert!(!i8_(PrimOp::Sub, Some(0), None));
+        assert!(!i8_(PrimOp::Add, None, Some(1)));
+        assert!(!cannot_overflow(
+            PrimOp::Sub,
+            PrimTy::U8,
+            8,
+            (Some(1), Some(2))
+        ));
+        assert!(cannot_overflow(
+            PrimOp::Mul,
+            PrimTy::U64,
+            64,
+            (Some(1 << 40), Some(2))
+        ));
+    }
 }

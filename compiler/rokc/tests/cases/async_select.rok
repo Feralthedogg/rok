@@ -1,0 +1,86 @@
+// expect-exit: 0
+// expect-stdout:
+// first: 1 fast
+// tie: 0
+// winner: 1
+// loser cleanup ran: true
+// never started: 0
+// lock still free: true
+// loop of 200 selects leaves registrations: 0
+// cancel reaches the children: true
+
+// `task::select(list)`: the first future to complete and its index, run
+// inside the awaiting task. Losers that started are polled once more as
+// cancelled (their `finally` runs); ones never polled do not run at all.
+let cleaned = Mutex::new(false);
+let started = Mutex::new(0);
+
+let (i, v) = await task::select([
+    async { await task::sleep(Duration::sec(3600)); "slow" },
+    async { await task::sleep(Duration::ms(5)); "fast" },
+]);
+println(f"first: {i} {v}");
+
+let (j, _) = await task::select([async { 1 }, async { 2 }]);
+println(f"tie: {j}");
+
+let m = Mutex::new(0);
+using held = m.lock() {
+    let (k, _) = await task::select([
+        async {
+            let _ = {
+                // Parked in `lock_async` when cancelled: it must not take the
+                // lock on the way out.
+                using g = await m.lock_async() { g.set(1); }
+                0
+            } finally {
+                using c = cleaned.lock() { c.set(true); }
+            };
+            0
+        },
+        async { await task::sleep(Duration::ms(5)); 1 },
+    ]);
+    println(f"winner: {k}");
+}
+using c = cleaned.lock() { println(f"loser cleanup ran: {c.get()}"); }
+
+let _ = await task::select([
+    async { 0 },
+    async {
+        using s = started.lock() { s.set(s.get() + 1); }
+        1
+    },
+]);
+using s = started.lock() { println(f"never started: {s.get()}"); }
+println(f"lock still free: {m.try_lock() is MutexGuard<i32>}");
+
+// Each child registers with the select's own waker, dropped when the
+// select ends: a loop with a long `sleep` and a parked `recv_async`
+// loser leaves nothing behind.
+let (tx, rx) = channel::<i32>();
+for round in 0..200 {
+    let _ = await task::select([
+        async { await task::sleep(Duration::sec(3600)); 0 },
+        async { (await rx.recv_async()) ?? 0 },
+        async { await task::yield_now(); 1 },
+    ]);
+}
+println(f"loop of 200 selects leaves registrations: {task::registrations()}");
+
+// Cancelling the awaiting task reaches the children (their `finally`).
+let inner = Mutex::new(false);
+let t = task::spawn(async {
+    let _ = await task::select([
+        async {
+            let _ = { await task::sleep(Duration::sec(3600)); 0 } finally {
+                using c = inner.lock() { c.set(true); }
+            };
+            0
+        },
+    ]);
+    1
+});
+await task::sleep(Duration::ms(10));
+t.cancel();
+try await t.join() catch _: CancellationError { 0 };
+using c = inner.lock() { println(f"cancel reaches the children: {c.get()}"); }

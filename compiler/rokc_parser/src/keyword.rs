@@ -9,6 +9,12 @@
 //!
 //! ponytail: the handler is a free `fn` named by path; 6.6.8 leaves its
 //! signature to the library, so the call shape is the use site's.
+//!
+//! On a `struct` (stdlib spec 2.1.2 / 2.1.3: `#[keyword("int")] struct
+//! Int`) the keyword is a type name: every `name` token becomes the
+//! struct's path, `name::item` included (`int::from_i64`). A standard
+//! library type keyword applies to every package (the driver's
+//! `keyword_tables`), like the built-in type names.
 
 use rokc_diagnostic::{ErrorKind, RokDiagnostic, Span};
 use rokc_lexer::token::{RESERVED, keyword_kind};
@@ -17,8 +23,11 @@ use rokc_lexer::{Token, TokenKind};
 #[derive(Clone, Debug)]
 pub struct KeywordDef {
     pub name: String,
-    /// The handler function's name (leaf).
+    /// The handler function's path in its file (`f`, `inner::f`), or the
+    /// struct's name for a type keyword.
     pub handler: String,
+    /// On a `struct`: a type name, not a call.
+    pub ty: bool,
     pub file: String,
     /// The `#[keyword(..)]` attribute.
     pub span: Span,
@@ -51,23 +60,72 @@ pub fn collect_keywords(tokens: &[Token], file: &str) -> Vec<KeywordDef> {
         if attr != "keyword" {
             continue;
         }
-        // The function the attribute (and any after it) sits on.
-        let handler = tokens[k + 6..]
+        // The function (or struct) the attribute (and any after it)
+        // sits on.
+        let item = tokens[k + 6..]
             .windows(2)
-            .find(|p| p[0].kind == TokenKind::Fn)
-            .and_then(|p| match &p[1].kind {
+            .find(|p| matches!(p[0].kind, TokenKind::Fn | TokenKind::Struct));
+        let ty = item.is_some_and(|p| p[0].kind == TokenKind::Struct);
+        let handler = if ty {
+            item.and_then(|p| match &p[1].kind {
                 TokenKind::Ident(f) => Some(f.clone()),
                 _ => None,
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+        } else {
+            handler_at(tokens, k, k + 6)
+        };
         out.push(KeywordDef {
             name: name.clone(),
             handler,
+            ty,
             file: file.to_owned(),
             span: h.span,
         });
     }
     out
+}
+
+/// The function an attribute at `attr` sits on (the first `fn` from
+/// `after`), as a path in its file: `f`, or `a::b::f` inside inline
+/// `mod a { mod b { .. } }`. Empty when no `fn` follows.
+pub(crate) fn handler_at(tokens: &[Token], attr: usize, after: usize) -> String {
+    let Some(name) = tokens[after.min(tokens.len())..]
+        .windows(2)
+        .find(|p| p[0].kind == TokenKind::Fn)
+        .and_then(|p| match &p[1].kind {
+            TokenKind::Ident(f) => Some(f.clone()),
+            _ => None,
+        })
+    else {
+        return String::new();
+    };
+    // Inline `mod m {` still open at the attribute (brace depth).
+    let mut mods: Vec<(String, usize)> = Vec::new();
+    let mut depth = 0usize;
+    for (i, t) in tokens[..attr].iter().enumerate() {
+        match &t.kind {
+            TokenKind::LBrace => {
+                depth += 1;
+                if let (Some(TokenKind::Mod), Some(TokenKind::Ident(m))) = (
+                    i.checked_sub(2).map(|j| &tokens[j].kind),
+                    i.checked_sub(1).map(|j| &tokens[j].kind),
+                ) {
+                    mods.push((m.clone(), depth));
+                }
+            }
+            TokenKind::RBrace => {
+                if mods.last().is_some_and(|(_, d)| *d == depth) {
+                    mods.pop();
+                }
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+    let mut path: Vec<String> = mods.into_iter().map(|(m, _)| m).collect();
+    path.push(name);
+    path.join("::")
 }
 
 /// 6.6.4: a reserved / contextual keyword can't be registered, nor can
@@ -99,12 +157,12 @@ pub fn check_keyword(def: &KeywordDef) -> Option<RokDiagnostic> {
     None
 }
 
+/// A package's keywords: name, the handler's (or type's) absolute
+/// path, and whether it is a type keyword.
+pub type KeywordTable = Vec<(String, Vec<String>, bool)>;
+
 /// Rewrite the package's registered keywords (`name` → handler path).
-pub fn apply_keywords(
-    tokens: &mut Vec<Token>,
-    kws: &[(String, Vec<String>)],
-    diags: &mut Vec<RokDiagnostic>,
-) {
+pub fn apply_keywords(tokens: &mut Vec<Token>, kws: &KeywordTable, diags: &mut Vec<RokDiagnostic>) {
     if kws.is_empty() {
         return;
     }
@@ -119,7 +177,7 @@ pub fn apply_keywords(
             out.push(t.clone());
             continue;
         };
-        let Some((_, path)) = kws.iter().find(|(kw, _)| kw == n) else {
+        let Some((_, path, ty)) = kws.iter().find(|(kw, ..)| kw == n) else {
             out.push(t.clone());
             continue;
         };
@@ -139,7 +197,8 @@ pub fn apply_keywords(
                     | TokenKind::ColonColon
                     | TokenKind::For
             )
-        ) || matches!(next, Some(TokenKind::Colon | TokenKind::ColonColon));
+        ) || matches!(next, Some(TokenKind::Colon))
+            || (!ty && matches!(next, Some(TokenKind::ColonColon)));
         if names {
             diags.push(
                 RokDiagnostic::error(
@@ -164,7 +223,7 @@ pub fn apply_keywords(
 }
 
 /// The keywords inside an f-string's `{..}` holes (re-lexed later).
-fn fstr_keywords(text: &str, kws: &[(String, Vec<String>)]) -> String {
+fn fstr_keywords(text: &str, kws: &KeywordTable) -> String {
     let chars: Vec<char> = text.chars().collect();
     let (mut out, mut depth, mut i) = (String::new(), 0u32, 0);
     while i < chars.len() {
@@ -186,8 +245,8 @@ fn fstr_keywords(text: &str, kws: &[(String, Vec<String>)]) -> String {
             }
             let word: String = chars[start..i].iter().collect();
             let member = start > 0 && matches!(chars[start - 1], '.' | ':');
-            match kws.iter().find(|(k, _)| *k == word).filter(|_| !member) {
-                Some((_, path)) => out.push_str(&path.join("::")),
+            match kws.iter().find(|(k, ..)| *k == word).filter(|_| !member) {
+                Some((_, path, _)) => out.push_str(&path.join("::")),
                 None => out.push_str(&word),
             }
             continue;

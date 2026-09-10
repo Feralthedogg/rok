@@ -1436,6 +1436,17 @@ impl Parser<'_> {
         if failed {
             return Vec::new();
         }
+        let what = match def.kind {
+            MetaKind::Derive => format!("expanded from this `#[derive({})]`", def.name),
+            MetaKind::Attribute => format!("expanded from this `#[{}]`", def.name),
+        };
+        let (file, at) = (&self.file, target.at);
+        self.expanded.push(format!(
+            "// {what} ({file}:{}:{})\n{}",
+            at.line,
+            at.col,
+            render(&tokens)
+        ));
         let mut p = Parser::new(&tokens, self.file.clone());
         p.ext = self.ext.clone();
         p.meta = Arc::clone(&self.meta);
@@ -1465,12 +1476,9 @@ impl Parser<'_> {
                 "expected an item in the meta block's expansion",
             ));
         }
+        self.expanded.append(&mut p.expanded);
         // Errors in generated code point at the template (its own file)
         // and at the use.
-        let what = match def.kind {
-            MetaKind::Derive => format!("expanded from this `#[derive({})]`", def.name),
-            MetaKind::Attribute => format!("expanded from this `#[{}]`", def.name),
-        };
         for mut d in p.diagnostics {
             if d.primary.as_ref().is_some_and(|l| l.span.file != 0) {
                 d.file = None;
@@ -1491,6 +1499,92 @@ impl Parser<'_> {
         }
         items
     }
+}
+
+/// Tokens as source text: one statement / brace per line, indented.
+// ponytail: no line breaking inside long expressions.
+fn render(tokens: &[Token]) -> String {
+    use TokenKind as K;
+    let mut out = String::new();
+    let mut depth = 0usize;
+    let mut prev: Option<&K> = None;
+    // `},` ends a match arm / struct field: break after the comma too.
+    let mut brace_comma = false;
+    // Open `[` / `#[` (an attribute's `]` ends its line).
+    let mut brackets: Vec<bool> = Vec::new();
+    let mut attr_end = false;
+    for t in tokens {
+        let k = &t.kind;
+        if *k == K::RBrace {
+            depth = depth.saturating_sub(1);
+        }
+        // A new line after `{` / `;`, and after `}` unless what follows
+        // continues it (`},` `})` `} else` `}.m()` ..).
+        let continues = matches!(
+            k,
+            K::Comma
+                | K::Semi
+                | K::RParen
+                | K::RBracket
+                | K::Dot
+                | K::Question
+                | K::Else
+                | K::FatArrow
+        ) || matches!(k, K::Ident(w) if w == "catch" || w == "finally");
+        let new_line = match prev {
+            None | Some(K::LBrace | K::Semi) => true,
+            Some(K::RBracket) if attr_end => true,
+            Some(K::Comma) if brace_comma => *k != K::RParen,
+            Some(K::RBrace) => !continues,
+            _ => *k == K::RBrace,
+        };
+        if new_line {
+            if prev.is_some() {
+                out.push('\n');
+            }
+            out.push_str(&"    ".repeat(depth));
+        } else {
+            let glued_after = matches!(
+                prev,
+                Some(K::LParen | K::LBracket | K::Dot | K::ColonColon | K::HashLBracket | K::Bang)
+            );
+            let glued_before = matches!(
+                k,
+                K::RParen
+                    | K::RBracket
+                    | K::Comma
+                    | K::Semi
+                    | K::Dot
+                    | K::ColonColon
+                    | K::Colon
+                    | K::Question
+            ) || (matches!(k, K::LParen | K::LBracket)
+                && matches!(
+                    prev,
+                    Some(
+                        K::Ident(_) | K::RParen | K::RBracket | K::Gt | K::SelfLower | K::SelfUpper
+                    )
+                ));
+            if !glued_after && !glued_before {
+                out.push(' ');
+            }
+        }
+        out.push_str(&k.text());
+        if *k == K::LBrace {
+            depth += 1;
+        }
+        brace_comma = *k == K::Comma && prev == Some(&K::RBrace);
+        attr_end = false;
+        match k {
+            K::LBracket => brackets.push(false),
+            K::HashLBracket | K::HashBangLBracket => brackets.push(true),
+            K::RBracket => attr_end = brackets.pop().unwrap_or(false),
+            _ => {}
+        }
+        prev = Some(k);
+    }
+    out.push('\n');
+    out
 }
 
 const fn item_attrs(item: &Item) -> &Vec<Attribute> {

@@ -414,7 +414,7 @@ impl PatParser<'_> {
 pub struct LiteralDef {
     /// The tokens between the attribute's parentheses.
     pub tokens: Vec<Token>,
-    /// The handler function's name (leaf).
+    /// The handler function's path in its file (`f`, `inner::f`).
     pub handler: String,
     pub file: String,
     /// The `#[literal(..)]` attribute.
@@ -437,14 +437,7 @@ pub fn collect_literals(tokens: &[Token], file: &str) -> Vec<LiteralDef> {
         let Some(close) = balanced_close(tokens, k + 2) else {
             continue;
         };
-        let handler = tokens[close..]
-            .windows(2)
-            .find(|p| p[0].kind == TokenKind::Fn)
-            .and_then(|p| match &p[1].kind {
-                TokenKind::Ident(f) => Some(f.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
+        let handler = crate::keyword::handler_at(tokens, k, close);
         out.push(LiteralDef {
             tokens: tokens[k + 3..close].to_vec(),
             handler,

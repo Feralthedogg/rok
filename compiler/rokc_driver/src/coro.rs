@@ -48,7 +48,7 @@ pub fn rewrite_items(items: &mut [Item], diags: &mut Vec<RokDiagnostic>) {
     }
 }
 
-fn path(segs: &[&str], generics: Vec<Ty>, span: Span) -> Path {
+pub fn path(segs: &[&str], generics: Vec<Ty>, span: Span) -> Path {
     let n = segs.len();
     Path {
         segments: segs
@@ -138,14 +138,20 @@ fn rewrite_fn(f: &mut FnDef, free: bool, diags: &mut Vec<RokDiagnostic>) {
     f.is_generator = false;
     if is_main {
         // 4.16.5: the body is the top-level task of the executor.
-        let (runner, throws) = match err {
-            Some(e) => ("block_on_try", ThrowsKind::Typed(vec![e])),
-            None => ("block_on", ThrowsKind::None),
+        // `block_on_try::<T, E>`: the body's future type comes from the
+        // signature, so a body that never throws still fits.
+        let (runner, generics, throws) = match err {
+            Some(e) => (
+                "block_on_try",
+                vec![val.clone(), e.clone()],
+                ThrowsKind::Typed(vec![e]),
+            ),
+            None => ("block_on", Vec::new(), ThrowsKind::None),
         };
         let call = Expr {
             kind: ExprKind::Call {
                 callee: Box::new(Expr {
-                    kind: ExprKind::Path(path(&["rok", "core", "task", runner], Vec::new(), span)),
+                    kind: ExprKind::Path(path(&["rok", "core", "task", runner], generics, span)),
                     span,
                 }),
                 args: coro

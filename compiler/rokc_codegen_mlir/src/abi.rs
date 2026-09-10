@@ -339,6 +339,23 @@ mod tests {
     }
     use PrimTy::{F32, F64, I8, I32, I64};
 
+    /// `struct { int; long long; double; }` as clang lays it out:
+    /// 20 / 4 on i686 Linux, 24 / 8 on i686 Windows, armv7 and wasm32.
+    #[test]
+    fn wide_alignment_follows_the_target() {
+        use crate::emit::{WIDE_ALIGN, wide_align_for_target};
+        let t = st(&[I32, I64, F64]);
+        let at = |triple: &str| {
+            WIDE_ALIGN.set(wide_align_for_target(Some(triple)));
+            size_align(&t, 32)
+        };
+        assert_eq!(at("i686-unknown-linux-gnu"), (20, 4));
+        assert_eq!(at("i686-pc-windows-msvc"), (24, 8));
+        assert_eq!(at("armv7-unknown-linux-gnueabihf"), (24, 8));
+        assert_eq!(at("wasm32-unknown-unknown"), (24, 8));
+        WIDE_ALIGN.set(8);
+    }
+
     #[test]
     fn aapcs64() {
         let a = |t: &MirTy| aapcs_arg(t, 64);

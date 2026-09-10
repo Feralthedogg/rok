@@ -6,6 +6,7 @@ extern "C" {
 }
 
 /// A span of time: `i64` nanoseconds (about ±292 years, 3.3.1).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Duration {
     ns: i64;
 }
@@ -19,10 +20,94 @@ impl Duration {
     pub fn hours(n: i64) -> Duration { Duration::sec(n * 3600) }
     pub fn days(n: i64) -> Duration { Duration::sec(n * 86400) }
 
+    pub const ZERO: Duration = Duration { ns: 0 };
+    pub const MAX: Duration = Duration { ns: 9223372036854775807 };
+
+    /// `s` seconds, truncated to whole nanoseconds (saturating at the
+    /// `i64` range, NaN → 0 — the `as` rules).
+    pub fn from_secs_f64(s: f64) -> Duration { Duration { ns: (s * 1000000000.0) as i64 } }
+
+    pub fn as_ns(self) -> i64 { self.ns }
+    pub fn as_us(self) -> i64 { self.ns / 1000 }
+    pub fn as_ms(self) -> i64 { self.ns / 1000000 }
+    pub fn as_secs(self) -> i64 { self.ns / 1000000000 }
+    pub fn as_secs_f64(self) -> f64 { self.ns as f64 / 1000000000.0 }
+    // ponytail: Rust-style aliases kept for existing callers (task.rok, net).
     pub fn as_nanos(self) -> i64 { self.ns }
     pub fn as_micros(self) -> i64 { self.ns / 1000 }
     pub fn as_millis(self) -> i64 { self.ns / 1000000 }
-    pub fn as_secs(self) -> i64 { self.ns / 1000000000 }
+
+    /// The part below one second (of the magnitude for a negative span).
+    pub fn subsec_ns(self) -> u32 { (self.ns % 1000000000).abs() as u32 }
+    pub fn subsec_us(self) -> u32 { self.subsec_ns() / 1000 }
+    pub fn subsec_ms(self) -> u32 { self.subsec_ns() / 1000000 }
+
+    pub fn checked_add(self, rhs: Duration) -> Duration | none {
+        Duration { ns: self.ns.checked_add(rhs.ns)? }
+    }
+    pub fn checked_sub(self, rhs: Duration) -> Duration | none {
+        Duration { ns: self.ns.checked_sub(rhs.ns)? }
+    }
+    pub fn checked_mul(self, factor: i64) -> Duration | none {
+        Duration { ns: self.ns.checked_mul(factor)? }
+    }
+    pub fn checked_div(self, divisor: i64) -> Duration | none {
+        Duration { ns: self.ns.checked_div(divisor)? }
+    }
+    pub fn saturating_add(self, rhs: Duration) -> Duration { Duration { ns: self.ns.saturating_add(rhs.ns) } }
+    pub fn saturating_sub(self, rhs: Duration) -> Duration { Duration { ns: self.ns.saturating_sub(rhs.ns) } }
+    pub fn saturating_mul(self, factor: i64) -> Duration { Duration { ns: self.ns.saturating_mul(factor) } }
+}
+
+impl Mul<i64> for Duration {
+    type Output = Duration;
+    fn mul(self, rhs: i64) -> Duration { Duration { ns: self.ns * rhs } }
+}
+
+impl Div<i64> for Duration {
+    type Output = Duration;
+    fn div(self, rhs: i64) -> Duration { Duration { ns: self.ns / rhs } }
+}
+
+impl Mul<Duration> for f64 {
+    type Output = Duration;
+    fn mul(self, rhs: Duration) -> Duration { Duration { ns: (self * rhs.ns as f64) as i64 } }
+}
+
+/// The largest unit the span reaches, fraction without trailing zeros:
+/// `1.234s`, `5ms`, `1.5µs`, `100ns`, `0ns`, `-2s`.
+impl Display for Duration {
+    fn display(self) -> str {
+        let mag = self.ns.unsigned_abs();
+        let sign = if self.ns < 0 { "-" } else { "" };
+        let (unit, name, width) = if mag >= 1000000000u64 {
+            (1000000000u64, "s", 9usize)
+        } else if mag >= 1000000u64 {
+            (1000000u64, "ms", 6usize)
+        } else if mag >= 1000u64 {
+            (1000u64, "µs", 3usize)
+        } else {
+            (1u64, "ns", 0usize)
+        };
+        let whole = mag / unit;
+        let frac = mag % unit;
+        if frac == 0u64 {
+            return f"{sign}{whole}{name}";
+        }
+        while frac % 10u64 == 0u64 {
+            frac = frac / 10u64;
+            width = width - 1;
+        }
+        let digits = f"{frac}";
+        let s = StrBuf::new();
+        for _ in digits.len()..width { s.push_str("0"); }
+        s.push_str(digits);
+        f"{sign}{whole}.{s.to_str()}{name}"
+    }
+}
+
+impl Debug for Duration {
+    fn debug(self) -> str { self.display() }
 }
 
 impl Add for Duration {
@@ -37,6 +122,7 @@ impl Sub for Duration {
 
 /// A point on the monotonic clock (3.3.2); only meaningful within one
 /// process.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Instant {
     ns: i64;
 }
@@ -59,8 +145,8 @@ impl Instant {
         }
         self.duration_since(earlier)
     }
-    pub fn checked_add(self, d: Duration) -> Instant | none { Instant { ns: self.ns + d.ns } }
-    pub fn checked_sub(self, d: Duration) -> Instant | none { Instant { ns: self.ns - d.ns } }
+    pub fn checked_add(self, d: Duration) -> Instant | none { Instant { ns: self.ns.checked_add(d.ns)? } }
+    pub fn checked_sub(self, d: Duration) -> Instant | none { Instant { ns: self.ns.checked_sub(d.ns)? } }
     /// Monotonic nanoseconds (the executor's clock).
     pub fn as_nanos(self) -> i64 { self.ns }
 }
@@ -73,4 +159,9 @@ impl Add<Duration> for Instant {
 impl Sub<Duration> for Instant {
     type Output = Instant;
     fn sub(self, rhs: Duration) -> Instant { Instant { ns: self.ns - rhs.ns } }
+}
+
+impl Sub<Instant> for Instant {
+    type Output = Duration;
+    fn sub(self, rhs: Instant) -> Duration { Duration { ns: self.ns - rhs.ns } }
 }

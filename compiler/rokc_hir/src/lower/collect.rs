@@ -203,6 +203,7 @@ pub fn lower_full(
     let mut type_set: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut traits: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut auto_traits: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut lang: HashMap<String, String> = HashMap::new();
     let mut type_vis: HashMap<String, Visibility> = HashMap::new();
     for item in &program.items {
         rokc_diagnostic::set_current_span(item.span());
@@ -215,6 +216,20 @@ pub fn lower_full(
                 traits.insert(t.name.clone());
                 if t.attrs.iter().any(is_auto_trait_attr) {
                     auto_traits.insert(t.name.clone());
+                }
+                // Spec 6.4: trait slots, and a method slot (`drop_method`)
+                // names its trait.
+                let methods = t.items.iter().filter_map(|i| match i {
+                    rokc_ast::TraitItem::Method(f) => Some(&f.attrs),
+                    _ => None,
+                });
+                for slot in t
+                    .attrs
+                    .iter()
+                    .chain(methods.flatten())
+                    .filter_map(lang_slot)
+                {
+                    lang.insert(slot, t.name.clone());
                 }
                 (&t.name, t.vis)
             }
@@ -253,6 +268,7 @@ pub fn lower_full(
         variants,
         traits,
         auto_traits,
+        lang,
         reexports: type_reexports,
         visibility: type_vis,
         uses,
@@ -1402,10 +1418,13 @@ pub fn lower_full(
         projecting: std::cell::RefCell::new(Vec::new()),
         const_substs: std::cell::RefCell::new(HashMap::new()),
         thunks: std::cell::RefCell::new(HashMap::new()),
+        instances: std::cell::RefCell::new(Vec::new()),
+        instance_warns: std::cell::RefCell::new(super::InstanceWarns::default()),
         diagnostics: std::cell::RefCell::new(Vec::new()),
     };
     let mut exports: Vec<(FunctionId, String)> = Vec::new();
     let mut prebuilt: Vec<FunctionId> = Vec::new();
+    let mut c_defs: Vec<FunctionId> = Vec::new();
     for (i, d) in decls.iter().enumerate() {
         let (MethodOrFn::Fn(f) | MethodOrFn::Method { fn_def: f, .. }) = d;
         rokc_diagnostic::set_current_span(f.span);
@@ -1418,6 +1437,7 @@ pub fn lower_full(
             .any(|a| a.path == [rokc_ast::EXTERN_C_FN_ATTR])
         {
             check_extern_c_fn(f, &mut pre_diags);
+            c_defs.push(id);
         }
         if !c_variadic.contains(&id)
             && f.attrs
@@ -1644,6 +1664,7 @@ pub fn lower_full(
             v.sort_by_key(|f| f.0);
             v
         },
+        c_defs,
         type_visibility: names.visibility.clone(),
     };
     // Final pass: rewrite any leftover `HirTy::Path([alias])` nodes in
@@ -1661,6 +1682,9 @@ pub fn lower_full(
     }
     module.diagnostics.extend(names.diags.into_inner());
     module.diagnostics.extend(sink.diagnostics.into_inner());
+    module
+        .diagnostics
+        .extend(sink.instance_warns.into_inner().agreed());
     check_unresolved_types(&mut module);
     // The same root cause can be reached from several passes (e.g. a
     // type resolved once per instantiation sweep): report it once.
@@ -1706,6 +1730,15 @@ pub(super) fn impl_def_display(ty: &Ty) -> String {
         AstTyKind::Array(e, rokc_ast::ConstExpr::Literal(rokc_ast::Literal::Int(n))) => {
             format!("[{}; {n}]", impl_def_display(e))
         }
+        AstTyKind::Array(e, rokc_ast::ConstExpr::Path(p)) if p.segments.len() == 1 => {
+            format!("[{}; {}]", impl_def_display(e), p.segments[0].name)
+        }
+        AstTyKind::Array(e, rokc_ast::ConstExpr::Expr(x)) => match &x.kind {
+            ExprKind::Path(p) if p.segments.len() == 1 => {
+                format!("[{}; {}]", impl_def_display(e), p.segments[0].name)
+            }
+            _ => format!("[{}; _]", impl_def_display(e)),
+        },
         _ => "<type>".to_owned(),
     }
 }
@@ -2761,7 +2794,7 @@ fn check_derives(env: &Env<'_>, program: &Program) {
             if tr == "Copy"
                 && self_ty
                     .as_ref()
-                    .is_some_and(|t| ctx.implements_trait(t, "rok::core::marker::Drop", 0))
+                    .is_some_and(|t| ctx.implements_trait(t, ctx.lang_trait("drop_method"), 0))
             {
                 ctx.emit_error(
                     rokc_diagnostic::ErrorKind::Meta,
@@ -3071,19 +3104,39 @@ fn check_impl_overlap(env: &Env<'_>) {
             .get_or_insert_with(|| ctx.generic_impl_subst(&gis[i], &candidates[c], 0).is_some())
     };
     for (i, a) in gis.iter().enumerate() {
-        // Inherent ones (empty key) only clash per method, at the call.
-        for (j, b) in gis
-            .iter()
-            .enumerate()
-            .skip(i + 1)
-            .filter(|(_, b)| b.trait_key == a.trait_key && !a.trait_key.is_empty())
-        {
+        // Inherent ones (empty key) clash when they share a method name.
+        let shared = |b: &GenericTraitImpl| {
+            let mut m: Vec<&String> = a
+                .methods
+                .keys()
+                .filter(|k| b.methods.contains_key(*k))
+                .collect();
+            m.sort();
+            m.first().map(|s| (*s).clone())
+        };
+        for (j, b) in gis.iter().enumerate().skip(i + 1).filter(|(_, b)| {
+            b.trait_key == a.trait_key && (!a.trait_key.is_empty() || shared(b).is_some())
+        }) {
             let witness = (0..candidates.len())
                 .find(|&c| covers(i, c) && covers(j, c))
                 .map(|c| &candidates[c])
                 .map(|t| ctx.ty_name(t))
                 .or_else(|| symbolic_overlap(&ctx, a, b, &candidates));
-            if let Some(t) = witness {
+            if let (Some(t), Some(m)) = (
+                &witness,
+                a.trait_key.is_empty().then(|| shared(b)).flatten(),
+            ) {
+                rokc_diagnostic::set_current_span(b.self_ty.span);
+                ctx.emit_error(
+                    rokc_diagnostic::ErrorKind::Type,
+                    format!(
+                        "duplicate method `{m}`: `impl<..> {}` and `impl<..> {}` both define it \
+                         for `{t}`",
+                        impl_def_display(&a.self_ty),
+                        impl_def_display(&b.self_ty),
+                    ),
+                );
+            } else if let Some(t) = witness {
                 rokc_diagnostic::set_current_span(b.self_ty.span);
                 ctx.emit_error(
                     rokc_diagnostic::ErrorKind::Type,
@@ -3122,18 +3175,21 @@ fn symbolic_overlap(
         gi.generics
             .params
             .iter()
-            .filter_map(|gp| match gp {
-                rokc_ast::GenericParam::Type { name, .. } => {
-                    Some((name.clone(), format!("{tag}{name}")))
+            .map(|gp| match gp {
+                rokc_ast::GenericParam::Type { name, .. }
+                | rokc_ast::GenericParam::Const { name, .. } => {
+                    (name.clone(), format!("{tag}{name}"))
                 }
-                rokc_ast::GenericParam::Const { .. } => None,
             })
             .collect()
     };
     let (va, vb) = (names(a, "#a."), names(b, "#b."));
-    if va.len() + vb.len() < a.generics.params.len() + b.generics.params.len() {
-        return None; // const parameters: not modelled
-    }
+    let is_const = |name: &str| {
+        a.generics
+            .params
+            .iter()
+            .any(|gp| matches!(gp, rokc_ast::GenericParam::Const { name: n, .. } if n == name))
+    };
     let canon = |gi: &GenericTraitImpl, vars: &HashMap<String, String>, t: &Ty| {
         canon_ast_ty(ctx, &gi.module, vars, t)
     };
@@ -3213,6 +3269,7 @@ fn symbolic_overlap(
         .iter()
         .map(|(name, v)| {
             let t = match u.resolve(v) {
+                CanonTy::Var(_) if is_const(name) => "1".to_owned(),
                 CanonTy::Var(fv) => pick.get(&fv).cloned().unwrap_or_else(|| "i32".to_owned()),
                 t => t.to_string(),
             };
@@ -3235,7 +3292,8 @@ enum CanonTy {
     Var(String),
     Named(String, Vec<CanonTy>),
     Tuple(Vec<CanonTy>),
-    Array(Box<CanonTy>, String),
+    /// Element and length (a literal `Named` or a const parameter).
+    Array(Box<CanonTy>, Box<CanonTy>),
     Sum(Vec<CanonTy>),
 }
 
@@ -3269,7 +3327,25 @@ fn canon_ast_ty(
         AstTyKind::Sum(ts) => CanonTy::Sum(ts.iter().map(rec).collect::<Option<_>>()?),
         AstTyKind::None => CanonTy::Named("none".to_owned(), Vec::new()),
         AstTyKind::Array(e, rokc_ast::ConstExpr::Literal(rokc_ast::Literal::Int(n))) => {
-            CanonTy::Array(Box::new(rec(e)?), n.clone())
+            CanonTy::Array(
+                Box::new(rec(e)?),
+                Box::new(CanonTy::Named(n.clone(), Vec::new())),
+            )
+        }
+        AstTyKind::Array(e, len) => {
+            let p = match len {
+                rokc_ast::ConstExpr::Path(p) => p,
+                rokc_ast::ConstExpr::Expr(x) => match &x.kind {
+                    ExprKind::Path(p) => p,
+                    _ => return None,
+                },
+                rokc_ast::ConstExpr::Literal(_) => return None,
+            };
+            let [seg] = p.segments.as_slice() else {
+                return None;
+            };
+            let v = vars.get(&seg.name)?;
+            CanonTy::Array(Box::new(rec(e)?), Box::new(CanonTy::Var(v.clone())))
         }
         _ => return None,
     })
@@ -3350,7 +3426,7 @@ impl Unifier {
             }
             CanonTy::Tuple(ts) => CanonTy::Tuple(ts.iter().map(|a| self.walk(a)).collect()),
             CanonTy::Sum(ts) => CanonTy::Sum(ts.iter().map(|a| self.walk(a)).collect()),
-            CanonTy::Array(e, n) => CanonTy::Array(Box::new(self.walk(e)), n.clone()),
+            CanonTy::Array(e, n) => CanonTy::Array(Box::new(self.walk(e)), Box::new(self.walk(n))),
         }
     }
 
@@ -3368,7 +3444,10 @@ impl Unifier {
             (CanonTy::Tuple(xs), CanonTy::Tuple(ys)) if xs.len() == ys.len() => {
                 xs.iter().zip(&ys).try_for_each(|(p, q)| self.unify(p, q))
             }
-            (CanonTy::Array(p, n), CanonTy::Array(q, m)) if n == m => self.unify(&p, &q),
+            (CanonTy::Array(p, n), CanonTy::Array(q, m)) => {
+                self.unify(&n, &m)?;
+                self.unify(&p, &q)
+            }
             // ponytail: sums only unify member-for-member in written order.
             (CanonTy::Sum(xs), CanonTy::Sum(ys)) if xs.len() == ys.len() => {
                 xs.iter().zip(&ys).try_for_each(|(p, q)| self.unify(p, q))
@@ -3502,6 +3581,20 @@ fn check_extern_c_fn(f: &FnDef, diags: &mut Vec<rokc_diagnostic::RokDiagnostic>)
 /// `#[export_name("sym")]` (spec 905): the symbol it names.
 fn export_name(f: &FnDef) -> Option<String> {
     let a = f.attrs.iter().find(|a| a.name() == "export_name")?;
+    match &a.body {
+        rokc_ast::AttrBody::Args(args) => args.iter().find_map(|x| match x {
+            rokc_ast::AttrArg::Lit(rokc_ast::Literal::Str(s)) => Some(s.clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// The slot a `#[lang("slot")]` attribute names.
+fn lang_slot(a: &rokc_ast::Attribute) -> Option<String> {
+    if a.name() != "lang" {
+        return None;
+    }
     match &a.body {
         rokc_ast::AttrBody::Args(args) => args.iter().find_map(|x| match x {
             rokc_ast::AttrArg::Lit(rokc_ast::Literal::Str(s)) => Some(s.clone()),

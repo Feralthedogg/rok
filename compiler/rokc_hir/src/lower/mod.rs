@@ -19,6 +19,7 @@ use crate::{
     HirTy, HirUnionKind, StructId, UnionStorage,
 };
 
+mod bignum;
 mod collect;
 mod coro;
 mod desugar;
@@ -88,6 +89,9 @@ struct TypeNames<'a> {
     /// Structural auto traits (`#[lang("send_trait" | "sync_trait")]`,
     /// E3): a type has them unless a component lacks them.
     auto_traits: std::collections::HashSet<String>,
+    /// Lang slot → the trait bound to it (spec 6.4; a method slot gives
+    /// its trait).
+    lang: HashMap<String, String>,
     /// Every enum variant as `a::E::V` (generic bases unmangled). A
     /// variant is as visible as its enum (spec 5.6.9).
     variants: std::collections::HashSet<String>,
@@ -125,9 +129,9 @@ pub fn type_visible(m: &crate::HirModule, full: &str, module: &str) -> bool {
 }
 
 impl TypeNames<'_> {
-    /// `Row<3>` → `[i32; 3]` when `ty` names a generic alias.
-    // ponytail: the expansion resolves in the use site's module, so the
-    // aliased type's names must be visible there too.
+    /// `Row<3>` → `[i32; 3]` when `ty` names a generic alias. The
+    /// alias body's own names are resolved in the alias's module and
+    /// written absolute, so the expansion means the same at the use site.
     fn expand_alias(&self, ty: &Ty, module: &str) -> Option<Ty> {
         let AstTyKind::Path(p) = &ty.kind else {
             return None;
@@ -153,11 +157,65 @@ impl TypeNames<'_> {
             .zip(args.iter().cloned())
             .collect();
         let mut out = alias.ty.clone();
+        self.absolutize(&mut out, &module_of(&full), module, &map);
         collect::subst_assoc_ty(&mut out, &map);
         self.alias_uses
             .borrow_mut()
             .push((full, args.clone(), module.to_owned(), ty.span));
         Some(out)
+    }
+
+    /// Rewrite the type names in `ty` (outside `params`) that resolve in
+    /// module `from` to absolute paths valid in module `to`.
+    fn absolutize(&self, ty: &mut Ty, from: &str, to: &str, params: &HashMap<String, Ty>) {
+        let mut rec = |t: &mut Ty| self.absolutize(t, from, to, params);
+        match &mut ty.kind {
+            AstTyKind::Path(p) => {
+                for s in &mut p.segments {
+                    s.generics.iter_mut().for_each(&mut rec);
+                }
+                let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
+                if params.contains_key(segs[0]) || matches!(segs[0], "pkg" | "rok" | "Self") {
+                    return;
+                }
+                let Some(full) = self.canon(&segs, from, &[]) else {
+                    return;
+                };
+                let pkg = resolve::package_of(&full);
+                let abs: Vec<String> = if full.starts_with("rok::") {
+                    full.split("::").map(str::to_owned).collect()
+                } else if pkg == resolve::package_of(to) {
+                    let rest = full.strip_prefix(&pkg).unwrap_or(&full);
+                    std::iter::once("pkg")
+                        .chain(rest.split("::").filter(|x| !x.is_empty()))
+                        .map(str::to_owned)
+                        .collect()
+                } else {
+                    full.split("::").map(str::to_owned).collect()
+                };
+                let last = p.segments.pop().map(|s| s.generics).unwrap_or_default();
+                let n = abs.len();
+                p.segments = abs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, name)| rokc_ast::PathSegment {
+                        name,
+                        generics: if i + 1 == n { last.clone() } else { Vec::new() },
+                    })
+                    .collect();
+            }
+            AstTyKind::Sum(ts) | AstTyKind::Tuple(ts) => ts.iter_mut().for_each(rec),
+            AstTyKind::Array(e, _) => rec(e),
+            AstTyKind::Fn(args, ret, _) => {
+                args.iter_mut().for_each(&mut rec);
+                rec(ret);
+            }
+            AstTyKind::Throws { ok, err } => {
+                rec(ok);
+                rec(err);
+            }
+            _ => {}
+        }
     }
 
     fn canon(
@@ -1021,6 +1079,27 @@ enum ArgSrc<'e> {
 /// generic structs. Lowering pushes here as it walks expressions.
 type TySubst = HashMap<String, HirTy>;
 
+#[derive(Default)]
+struct InstanceWarns {
+    instances: HashMap<rokc_diagnostic::Span, std::collections::HashSet<FunctionId>>,
+    warns: Vec<(
+        rokc_diagnostic::Span,
+        rokc_diagnostic::RokDiagnostic,
+        std::collections::HashSet<FunctionId>,
+    )>,
+}
+
+impl InstanceWarns {
+    /// The warnings every instance of their template raised.
+    fn agreed(self) -> impl Iterator<Item = rokc_diagnostic::RokDiagnostic> {
+        let instances = self.instances;
+        self.warns
+            .into_iter()
+            .filter(move |(t, _, by)| instances.get(t).is_some_and(|all| all.is_subset(by)))
+            .map(|(_, d, _)| d)
+    }
+}
+
 struct ClosureSink {
     extras: std::cell::RefCell<Vec<HirFunction>>,
     /// Functions with `ref` parameters (spec 4.7, `ref self` included).
@@ -1058,6 +1137,13 @@ struct ClosureSink {
     /// Adapter thunks (`adapt_fn_value` / `adapt_never_fn`) by
     /// `kind|callee|slot type|callee type`.
     thunks: std::cell::RefCell<HashMap<String, FunctionId>>,
+    /// Generic instance bodies being lowered: `(template span, instance
+    /// id)`, `None` for a non-instance body nested in one.
+    instances: std::cell::RefCell<Vec<Option<(rokc_diagnostic::Span, FunctionId)>>>,
+    /// Instances lowered per template, and the warnings each raised
+    /// (keyed by template, span, message): a warning is reported when
+    /// every instance of its template raised it.
+    instance_warns: std::cell::RefCell<InstanceWarns>,
     /// Diagnostics emitted during lowering — surfaced through
     /// `HirModule.diagnostics` so the driver can fail the build.
     diagnostics: std::cell::RefCell<Vec<rokc_diagnostic::RokDiagnostic>>,
@@ -1287,18 +1373,27 @@ impl<'a> LowerCtx<'a> {
             .push(rokc_diagnostic::RokDiagnostic::error(kind, msg));
     }
 
-    /// A warning, except in generic instances: a `rethrows` instance
-    /// with a non-throwing argument would flag every `try` in its body.
+    /// A warning. In a generic instance it is held until all lowering
+    /// is done and reported only if every instance of the template
+    /// raised it: a `rethrows` instance with a non-throwing argument
+    /// would otherwise flag every `try` in its body.
     fn emit_warning(&self, msg: String) {
+        let d = rokc_diagnostic::RokDiagnostic::warning(rokc_diagnostic::ErrorKind::Type, msg);
         if self.ty_subst.is_empty() {
-            self.env
-                .sink
-                .diagnostics
-                .borrow_mut()
-                .push(rokc_diagnostic::RokDiagnostic::warning(
-                    rokc_diagnostic::ErrorKind::Type,
-                    msg,
-                ));
+            self.env.sink.diagnostics.borrow_mut().push(d);
+            return;
+        }
+        let Some(Some((template, id))) = self.env.sink.instances.borrow().last().copied() else {
+            return;
+        };
+        let mut iw = self.env.sink.instance_warns.borrow_mut();
+        let same = |(t, w, _): &&mut (_, rokc_diagnostic::RokDiagnostic, _)| {
+            *t == template && w.message == d.message && w.primary == d.primary
+        };
+        if let Some((_, _, by)) = iw.warns.iter_mut().find(same) {
+            by.insert(id);
+        } else {
+            iw.warns.push((template, d, std::iter::once(id).collect()));
         }
     }
 
@@ -1330,7 +1425,11 @@ impl<'a> LowerCtx<'a> {
                     }
                     _ => unreachable!("matched struct / enum"),
                 };
-                if generic_args.is_empty() {
+                if name == bignum::INT {
+                    "int".to_owned()
+                } else if name == bignum::FLOAT {
+                    "float".to_owned()
+                } else if generic_args.is_empty() {
                     name
                 } else {
                     let base = name.split("__").next().unwrap_or(&name).to_owned();
@@ -1386,6 +1485,11 @@ impl<'a> LowerCtx<'a> {
     }
 
     /// Does `ty` have an `impl {trait_key} for ty`?
+    /// The trait bound to lang slot `slot` (spec 6.4), `""` if unbound.
+    fn lang_trait(&self, slot: &str) -> &'a str {
+        self.env.names.lang.get(slot).map_or("", String::as_str)
+    }
+
     fn implements(&self, ty: &HirTy, trait_key: &str) -> bool {
         method_target_for(ty)
             .is_some_and(|t| self.env.impl_traits.contains(&(t, trait_key.to_owned())))
@@ -1444,7 +1548,15 @@ impl<'a> LowerCtx<'a> {
             HirTy::Array(e, _) | HirTy::GcBuf(e) => rec(e),
             HirTy::Closure { env, .. } => rec(env),
             HirTy::Throws { ok, err } => rec(ok) && rec(err),
-            HirTy::Struct(id) => self.struct_def(*id).fields.iter().all(|f| rec(&f.ty)),
+            HirTy::Struct(id) => {
+                let def = self.struct_def(*id);
+                // A union has what every declared field has (its storage
+                // is plain bytes).
+                match &def.union_kind {
+                    Some(u) => u.aliases.iter().all(|(_, t)| rec(t)),
+                    None => def.fields.iter().all(|f| rec(&f.ty)),
+                }
+            }
             HirTy::Enum(id) => self
                 .enum_def(*id)
                 .variants
@@ -1819,8 +1931,15 @@ impl<'a> LowerCtx<'a> {
 
     /// Resolve a callee name (single- or multi-segment path) to a fully
     /// qualified fn-table key.
+    /// A generic fn of the current module shadows a non-generic one from
+    /// elsewhere (a glob import: `fn id<T>` vs `rok::core::task::id`).
     fn resolve_fn_name(&self, segments: &[&str]) -> Option<String> {
+        let here = |k: &String| resolve::module_of(k) == self.current_module;
+        let local_generic = self
+            .resolve_in(segments, &self.env.generic_fns)
+            .is_some_and(|g| here(&g));
         self.resolve_in(segments, &self.env.fn_table)
+            .filter(|f| !local_generic || here(f))
             .or_else(|| match segments {
                 [name] if self.env.extern_fns.contains(*name) => Some((*name).to_owned()),
                 _ => None,

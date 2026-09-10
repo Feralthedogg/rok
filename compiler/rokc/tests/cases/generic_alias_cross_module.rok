@@ -1,0 +1,24 @@
+// expect-exit: 0
+// expect-stdout:
+// 3 4 5
+
+// A generic type alias expands to the same types wherever it is used:
+// its body's names resolve in the alias's own module (`S`, `inner::T`
+// below are not visible from the root by those names).
+mod geo {
+    pub struct S { pub v: i32; }
+    pub mod inner {
+        pub struct T { pub w: i32; }
+    }
+    pub type Pair<X> = (S, X, inner::T);
+}
+
+fn make(n: i32) -> geo::Pair<i32> {
+    return (geo::S { v: n }, n + 1, geo::inner::T { w: n + 2 });
+}
+
+fn main() -> i32 {
+    let p = make(3);
+    println(f"{p.0.v} {p.1} {p.2.w}");
+    return 0;
+}

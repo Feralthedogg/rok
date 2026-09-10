@@ -12,8 +12,7 @@ pub fn lower_ty(ty: &HirTy) -> MirTy {
         // `!` has no values; a diverging call returns nothing.
         HirTy::Unit | HirTy::Never => MirTy::Unit,
         HirTy::Prim(p) => MirTy::Prim(*p),
-        // `any Tr`: `(i32 tag, GC pointer to the boxed value)`.
-        HirTy::AnyTrait(_) => MirTy::Tuple(vec![MirTy::Prim(PrimTy::I32), MirTy::GcRef]),
+        HirTy::AnyTrait(_) => any_ty(),
         HirTy::Sum(parts) => sum_layout(&non_none(parts).map(lower_ty).collect::<Vec<_>>()),
         HirTy::Tuple(parts) => MirTy::Tuple(parts.iter().map(lower_ty).collect()),
         // Struct types need the field shape; this stub only allocates
@@ -35,6 +34,32 @@ pub fn lower_ty(ty: &HirTy) -> MirTy {
     }
 }
 
+/// Struct id marking the MIR type of an `any Tr` value, so the
+/// collector's `ScanTable` gets an `ANY_SLOT` (802 §8.2.7) for it.
+pub const ANY_STRUCT: rokc_hir::StructId = rokc_hir::StructId(u32::MAX);
+
+/// `any` tag bit: the payload word is a box (a GC reference), not the
+/// value itself (802 §8.2.7; `rokr_gc::ANY_BOXED`). Set where a value is
+/// stored into an `any`, masked off where the tag is tested.
+pub const ANY_BOXED: u32 = 1 << 31;
+
+/// `any Tr`: `(i32 tag, payload word)`. The payload is the value itself
+/// when [`any_inline`], else a GC reference to a boxed copy.
+#[must_use]
+pub fn any_ty() -> MirTy {
+    MirTy::Struct(ANY_STRUCT, vec![MirTy::Prim(PrimTy::I32), MirTy::GcRef])
+}
+
+/// An `any` payload of type `ty` is stored in the payload word itself
+/// (spec 2.2.2): a number / bool / char no wider than a pointer.
+// ponytail: MIR decides the tag's `ANY_BOXED` bit with 64-bit pointers
+// (`size_align` assumes them too); a 32-bit target must pass its width
+// here from MIR lowering before it can run.
+#[must_use]
+pub fn any_inline(ty: &MirTy, pointer_width: u32) -> bool {
+    matches!(ty, MirTy::Prim(p) if *p != PrimTy::Str && p.bit_width(pointer_width) <= pointer_width)
+}
+
 /// `{code: fn(GcRef env, args..) -> ret, env: GcRef}`.
 #[must_use]
 pub fn fat_fn(args: Vec<MirTy>, ret: MirTy) -> MirTy {
@@ -51,8 +76,9 @@ pub fn code_ty(args: Vec<MirTy>, ret: MirTy) -> MirTy {
 
 /// Return value of a throwing function: `(is_err: bool, ok, err)`, with
 /// a unit `ok` left out (HIR reads the fields at the same indices).
-// ponytail: both payloads stored side by side; a union needs the
-// byte-array aggregate storage `unify_payload` also waits for.
+// ponytail: both payloads stored side by side. A `unify_payload` union
+// would do, except that `ref` parameters ride the ok slot on the error
+// path too (HIR `throws.rs` raise); move them out of the payload first.
 fn carrier(ok: MirTy, err: MirTy) -> MirTy {
     let mut fields = vec![MirTy::Prim(PrimTy::Bool)];
     if ok != MirTy::Unit {

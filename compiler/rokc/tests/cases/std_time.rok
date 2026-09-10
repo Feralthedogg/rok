@@ -1,0 +1,52 @@
+// expect-exit: 0
+// expect-stdout:
+// 1.234s 1.234s 5ms 100ns 0ns 1.5µs -2s
+// 1234000000 1234000 1234 1 1.234 234 234000 234000000
+// 1.5s 2.468s 617ms 2.468s 2.468s 1s
+// none true true 3.702s
+// true true true
+// 3ms true true
+// 1700000000 1700000000000000005 true
+// second time provided was later than self by 1700000000.000000005s
+// 1700000000.000000005s true
+// boot true
+// mtime true true
+// 6 true
+
+// Stdlib spec 303: `Duration` arithmetic / formatting / checked forms,
+// `Instant - Instant`, `SystemTime` + `UNIX_EPOCH`, `BootTime`, and
+// `Metadata::modified` (301 + 3.3.3).
+use rok::std::time::{Duration, Instant, SystemTime, SystemTimeError, BootTime, UNIX_EPOCH};
+use rok::std::fs;
+use rok::std::io::IoError;
+
+fn main() throws (SystemTimeError | IoError) {
+    let d = Duration::ms(1234);
+    println(f"{d} {d:?} {Duration::ms(5)} {Duration::ns(100)} {Duration::ZERO} {Duration::ns(1500)} {Duration::sec(-2)}");
+    println(f"{d.as_ns()} {d.as_us()} {d.as_ms()} {d.as_secs()} {d.as_secs_f64()} {d.subsec_ms()} {d.subsec_us()} {d.subsec_ns()}");
+    println(f"{Duration::from_secs_f64(1.5)} {d * 2} {d / 2} {2.0 * d} {d + d} {d - Duration::ms(234)}");
+    let over = Duration::MAX.checked_add(Duration::ns(1));
+    println(f"{if over is none { "none" } else { "some" }} {Duration::MAX.saturating_add(d) == Duration::MAX} {d.checked_div(0) is none} {d.saturating_mul(3)}");
+    println(f"{d < Duration::sec(2)} {Duration::sec(1) == Duration::ms(1000)} {Duration::MAX.checked_mul(2) is none}");
+
+    let a = Instant::now();
+    let b = a + Duration::ms(3);
+    println(f"{b - a} {(b - Duration::ms(3)) == a} {a < b}");
+
+    let t = SystemTime::from_unix(1700000000, 5);
+    println(f"{try t.unix_seconds()} {try t.unix_nanos()} {(try SystemTime::now().unix_seconds()) > 1700000000}");
+    println(try UNIX_EPOCH.duration_since(t).display() catch e { e.display() });
+    println(f"{try t.duration_since(UNIX_EPOCH)} {(t + Duration::sec(1)) - Duration::sec(1) == t}");
+
+    let bt = BootTime::now();
+    println(f"boot {bt.elapsed() >= Duration::ZERO}");
+
+    let path = "target_std_time_probe.txt";
+    try fs::write(path, "x");
+    let m = try (try fs::metadata(path)).modified();
+    let age = try SystemTime::now().duration_since(m) catch e { Duration::ZERO };
+    println(f"mtime {age < Duration::sec(60)} {(try m.unix_seconds()) == (try fs::metadata(path)).mtime()}");
+    try fs::remove_file(path);
+
+    println(f"{2.0 * 3.0} {Duration::ms(1) * 1000 == Duration::sec(1)}");
+}

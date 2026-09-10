@@ -53,6 +53,31 @@ fn word(v: i32) -> GcBuf<i32> {
     w
 }
 
+fn key(w: GcBuf<i32>) -> usize {
+    unsafe { rok_task_key_i32(w) }
+}
+
+// The async waits of `RwLock` / `Condvar` (which have no "waiters" state
+// like `Mutex`'s 2): `w[1]` is set by a task that parked on `w`'s key,
+// and whoever may have made `w` ready unparks only when it is set (an
+// unpark takes the process-wide parking lock).
+
+/// Park the task on `w`'s key and flag it; re-check after this.
+fn park_on(w: GcBuf<i32>, ctx: rok::core::future::Context) {
+    rok::core::task::park(key(w), ctx.waker());
+    atomic_xchg(w, 1, 1, SeqCst);
+}
+
+fn unpark_parked(w: GcBuf<i32>) {
+    if atomic_xchg(w, 1, 0, SeqCst) != 0 {
+        rok::core::task::unpark(key(w));
+    }
+}
+
+fn two_words() -> GcBuf<i32> {
+    buf_new(2)
+}
+
 /// Memory ordering of an atomic operation (2.16.2). Spec name: `Ordering`,
 /// which would collide with `cmp::Ordering` under `use rok::core::**`.
 pub enum AtomicOrdering {
@@ -227,7 +252,8 @@ fn cas_seqcst_fail<T>(c: GcBuf<T>, cur: T, new: T, success: AtomicOrdering) -> T
 
 /// Exclusive lock around a `T` (2.16.3). No poisoning (spec): a panic
 /// ends the process, and an error leaving `using` drops the guard.
-// `state`: 0 unlocked, 1 locked, 2 locked with (possible) waiters.
+// `state[0]`: 0 unlocked, 1 locked, 2 locked with (possible) waiters;
+// `state[1]`: entries in `OWED` (a cancelled `Condvar::wait_async`).
 pub struct Mutex<T> {
     state: GcBuf<i32>;
     value: GcBuf<T>;
@@ -239,7 +265,7 @@ impl<T> Mutex<T> {
     pub fn new(value: T) -> Mutex<T> {
         let v: GcBuf<T> = buf_new(1);
         v[0] = value;
-        Mutex { state: word(0), value: v }
+        Mutex { state: two_words(), value: v }
     }
 
     /// Block until the lock is ours. Bind the guard with `using`.
@@ -260,10 +286,47 @@ impl<T> Mutex<T> {
     }
 
     fn unlock(self) {
+        if atomic_load(self.state, 1, SeqCst) != 0 && self.forgive() {
+            return;
+        }
         if atomic_xchg(self.state, 0, 0, SeqCst) == 2 {
             wake(self.state);
-            rok::core::task::unpark(unsafe { rok_task_key_i32(self.state) });
+            rok::core::task::unpark(key(self.state));
         }
+    }
+
+    /// Owe the next `unlock` by the running task: it holds a guard of a
+    /// lock it does not have (a `Condvar::wait_async` cancelled while
+    /// another task held the mutex), and that guard's drop must not
+    /// unlock the holder's lock.
+    fn owe(self, task: u64) {
+        using g = OWED.lock() {
+            g.get().push((key(self.state), task));
+            atomic_add(self.state, 1, 1, SeqCst);
+        }
+    }
+
+    /// Whether this `unlock` was owed (by the running task): then it is
+    /// settled and does nothing.
+    fn forgive(self) -> bool {
+        let me = match rok::core::task::try_id() {
+            id: rok::core::task::TaskId => id.as_u64(),
+            none => return false,
+        };
+        let k = key(self.state);
+        let found = false;
+        using g = OWED.lock() {
+            let l = g.get();
+            for i in 0..l.len() {
+                if l[i] == (k, me) {
+                    l.remove(i);
+                    atomic_sub(self.state, 1, 1, SeqCst);
+                    found = true;
+                    break;
+                }
+            }
+        }
+        found
     }
 
     /// `await m.lock_async()` inside async code: suspends the task (not
@@ -282,18 +345,28 @@ impl<T> rok::core::future::Future for LockFuture<T> {
     type Output = MutexGuard<T>;
     fn poll(ref self, ref ctx: rok::core::future::Context) -> rok::core::future::Poll<MutexGuard<T>> {
         let m = self.mutex;
+        // A cancelled task leaves at this `await`: taking the lock now
+        // would hand it a guard nobody drops.
+        if rok::core::task::cancel_requested(ctx) {
+            return rok::core::future::Poll::Pending;
+        }
         if atomic_cas(m.state, 0, 0, 1, SeqCst, SeqCst) == 0 {
             return rok::core::future::Poll::Ready(MutexGuard { mutex: m });
         }
         // Park first, then mark "waiters" (2): an unlock after this sees
         // the 2 and unparks us.
-        rok::core::task::park(unsafe { rok_task_key_i32(m.state) }, ctx.waker());
+        rok::core::task::park(key(m.state), ctx.waker());
         if atomic_xchg(m.state, 0, 2, SeqCst) == 0 {
             return rok::core::future::Poll::Ready(MutexGuard { mutex: m });
         }
         rok::core::future::Poll::Pending
     }
 }
+
+/// `(mutex key, task id)`: unlocks owed (`Mutex::owe`).
+// ponytail: one global list; it only holds cancelled `wait_async`s whose
+// guard has not dropped yet.
+static OWED: Mutex<List<(usize, u64)>> = Mutex::new(List::new());
 
 /// Holds a `Mutex` locked until dropped (`using`).
 pub struct MutexGuard<T> {
@@ -323,7 +396,8 @@ impl<T> Drop for MutexGuard<T> {
 }
 
 /// Many readers or one writer (2.16.4).
-// `state`: 0 free, -1 writer, n > 0 readers.
+// `state[0]`: 0 free, -1 writer, n > 0 readers; `state[1]`: a task is
+// parked on it (`read_async` / `write_async`).
 pub struct RwLock<T> {
     state: GcBuf<i32>;
     value: GcBuf<T>;
@@ -335,7 +409,7 @@ impl<T> RwLock<T> {
     pub fn new(value: T) -> RwLock<T> {
         let v: GcBuf<T> = buf_new(1);
         v[0] = value;
-        RwLock { state: word(0), value: v }
+        RwLock { state: two_words(), value: v }
     }
 
     pub fn read(self) -> RwLockReadGuard<T> {
@@ -375,6 +449,62 @@ impl<T> RwLock<T> {
         }
         none
     }
+
+    /// `await l.read_async()`: suspends the task (not the thread) while
+    /// a writer holds the lock.
+    pub fn read_async(self) -> ReadFuture<T> {
+        ReadFuture { lock: self }
+    }
+
+    /// `await l.write_async()`: suspends the task until no reader or
+    /// writer holds the lock.
+    pub fn write_async(self) -> WriteFuture<T> {
+        WriteFuture { lock: self }
+    }
+}
+
+/// `RwLock::read_async`.
+pub struct ReadFuture<T> {
+    lock: RwLock<T>;
+}
+
+impl<T> rok::core::future::Future for ReadFuture<T> {
+    type Output = RwLockReadGuard<T>;
+    fn poll(ref self, ref ctx: rok::core::future::Context) -> rok::core::future::Poll<RwLockReadGuard<T>> {
+        if rok::core::task::cancel_requested(ctx) {
+            return rok::core::future::Poll::Pending;
+        }
+        if let g: RwLockReadGuard<T> = self.lock.try_read() {
+            return rok::core::future::Poll::Ready(g);
+        }
+        park_on(self.lock.state, ctx);
+        if let g: RwLockReadGuard<T> = self.lock.try_read() {
+            return rok::core::future::Poll::Ready(g);
+        }
+        rok::core::future::Poll::Pending
+    }
+}
+
+/// `RwLock::write_async`.
+pub struct WriteFuture<T> {
+    lock: RwLock<T>;
+}
+
+impl<T> rok::core::future::Future for WriteFuture<T> {
+    type Output = RwLockWriteGuard<T>;
+    fn poll(ref self, ref ctx: rok::core::future::Context) -> rok::core::future::Poll<RwLockWriteGuard<T>> {
+        if rok::core::task::cancel_requested(ctx) {
+            return rok::core::future::Poll::Pending;
+        }
+        if let g: RwLockWriteGuard<T> = self.lock.try_write() {
+            return rok::core::future::Poll::Ready(g);
+        }
+        park_on(self.lock.state, ctx);
+        if let g: RwLockWriteGuard<T> = self.lock.try_write() {
+            return rok::core::future::Poll::Ready(g);
+        }
+        rok::core::future::Poll::Pending
+    }
 }
 
 pub struct RwLockReadGuard<T> {
@@ -391,6 +521,7 @@ impl<T> Drop for RwLockReadGuard<T> {
     fn drop(ref self) {
         if atomic_sub(self.lock.state, 0, 1, SeqCst) == 1 {
             wake(self.lock.state);
+            unpark_parked(self.lock.state);
         }
     }
 }
@@ -415,6 +546,7 @@ impl<T> Drop for RwLockWriteGuard<T> {
     fn drop(ref self) {
         atomic_xchg(self.lock.state, 0, 0, SeqCst);
         wake(self.lock.state);
+        unpark_parked(self.lock.state);
     }
 }
 
@@ -452,14 +584,26 @@ impl Once {
 }
 
 /// Wait for a condition under a `Mutex`.
-// `seq` counts notifications; a waiter sleeps until it changes.
+// `seq[0]` counts notifications; a waiter sleeps until it changes.
+// `seq[1]`: a task is parked on it (`wait_async`).
 pub struct Condvar {
     seq: GcBuf<i32>;
 }
 
 impl Condvar {
     pub fn new() -> Condvar {
-        Condvar { seq: word(0) }
+        Condvar { seq: two_words() }
+    }
+
+    /// `g = await cv.wait_async(g)`: `wait` that suspends the task (not
+    /// the thread), both for the notification and to lock again.
+    /// Spurious wakeups as for `wait`. A task cancelled while it waits
+    /// takes the lock back if it is free (its `using` guard unlocks it);
+    /// if another task holds it, the guard's unlock is owed instead and
+    /// does nothing (the worker never blocks).
+    pub fn wait_async<T>(self, guard: MutexGuard<T>) -> CondvarWait<T> {
+        let st: GcBuf<i32> = buf_new(2);
+        CondvarWait { cv: self, mutex: guard.mutex, st: st }
     }
 
     /// Unlock `guard`'s mutex, block until notified (or spuriously),
@@ -479,6 +623,47 @@ impl Condvar {
     pub fn notify_all(self) {
         atomic_add(self.seq, 0, 1, SeqCst);
         wake(self.seq);
+        unpark_parked(self.seq);
+    }
+}
+
+/// `Condvar::wait_async`.
+pub struct CondvarWait<T> {
+    cv: Condvar;
+    mutex: Mutex<T>;
+    /// `[phase, seen]`: phase 0 not started, 1 waiting for a notify after
+    /// `seen`, 2 locking again.
+    st: GcBuf<i32>;
+}
+
+impl<T> rok::core::future::Future for CondvarWait<T> {
+    type Output = MutexGuard<T>;
+    fn poll(ref self, ref ctx: rok::core::future::Context) -> rok::core::future::Poll<MutexGuard<T>> {
+        let st = self.st;
+        let m = self.mutex;
+        if st[0] == 0 {
+            st[1] = atomic_load(self.cv.seq, 0, SeqCst);
+            st[0] = 1;
+            m.unlock();
+        }
+        if rok::core::task::cancel_requested(ctx) {
+            // The task leaves this `await` and its `using` guard drops:
+            // take the lock back if it is free, else owe that drop (it
+            // must not unlock another holder's lock). Never blocks.
+            if m.try_lock() is none {
+                m.owe(rok::core::task::id().as_u64());
+            }
+            return rok::core::future::Poll::Ready(MutexGuard { mutex: m });
+        }
+        if st[0] == 1 {
+            park_on(self.cv.seq, ctx);
+            if atomic_load(self.cv.seq, 0, SeqCst) == st[1] {
+                return rok::core::future::Poll::Pending;
+            }
+            st[0] = 2;
+        }
+        let lf = m.lock_async();
+        lf.poll(ref ctx)
     }
 }
 

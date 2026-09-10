@@ -93,6 +93,15 @@ pub fn lower(module: &HirModule) -> MirModule {
         statics,
         exports: module.exports.clone(),
         c_variadic: module.c_variadic.clone(),
+        c_defs: module.c_defs.clone(),
+        struct_names: module
+            .structs
+            .iter()
+            .map(|s| {
+                let fields = s.fields.iter().map(|f| f.name.clone()).collect();
+                (s.id.0, (s.name.clone(), fields))
+            })
+            .collect(),
         pkg_hashes: Vec::new(),
         link: crate::Link {
             prebuilt_fns: module.prebuilt.clone(),
@@ -210,23 +219,48 @@ fn finish_fn_values(functions: &mut Vec<MirFunction>, fnv: &FnValues) {
 }
 
 /// Drop functions `main` can't reach (direct calls and `fn` values).
-/// No `main` (a library) keeps everything. Every defined function gets
-/// a mangled symbol, so nothing else is called from outside by name.
-// ponytail: `#[export_name]` items would be roots too; the attribute
-// isn't carried into MIR yet.
+/// No `main` keeps everything (a prebuilt library prunes with
+/// `prune_library` once its package is known). Every defined function
+/// gets a mangled symbol, so nothing else is called from outside by
+/// name.
 fn prune_unreachable(functions: &mut Vec<MirFunction>, exports: &[FunctionId]) {
     // Roots: `main` and `#[export_name]` items (spec 902 9.2.8).
     let Some(main) = functions.iter().find(|f| f.name == "main").map(|f| f.id) else {
         return;
     };
+    let mut roots = vec![main];
+    roots.extend_from_slice(exports);
+    retain_reachable(functions, roots);
+}
+
+/// Drop what a prebuilt library of package `lib` cannot reach (9.2.8).
+///
+/// Its package's functions are all roots (users call them, and the bodies RHIR keeps
+/// call the rest), with the exports, the lazy static initializers and
+/// the `any` dispatchers (`__any_*`, weak in the library); the library
+/// code and instances only they reach are kept.
+pub fn prune_library(m: &mut MirModule, lib: &str) {
+    let owned = |n: &str| n.strip_prefix(lib).is_some_and(|r| r.starts_with("::"));
+    let roots = m
+        .functions
+        .iter()
+        .filter(|f| owned(&f.name) || f.name.starts_with("__any_"))
+        .map(|f| f.id)
+        .chain(m.exports.iter().map(|(id, _)| *id))
+        .chain(m.statics.iter().filter_map(|s| s.init_fn))
+        .collect();
+    retain_reachable(&mut m.functions, roots);
+}
+
+/// Keep the functions `roots` reach through calls and `fn` values.
+fn retain_reachable(functions: &mut Vec<MirFunction>, roots: Vec<FunctionId>) {
     let index: HashMap<FunctionId, usize> = functions
         .iter()
         .enumerate()
         .map(|(i, f)| (f.id, i))
         .collect();
     let mut live: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
-    let mut work = vec![main];
-    work.extend_from_slice(exports);
+    let mut work = roots;
     while let Some(id) = work.pop() {
         if !live.insert(id) {
             continue;
@@ -357,6 +391,9 @@ struct FnBuilder<'a> {
     /// block is terminated further `push_stmt` / `terminate` calls are
     /// dropped — the rest of the source path is dead code.
     terminated: std::collections::HashSet<u32>,
+    /// Lexical scope being lowered (`Statement::Loc`), and the last id.
+    scope: crate::Scope,
+    scopes: u32,
 }
 
 impl<'a> FnBuilder<'a> {
@@ -374,6 +411,8 @@ impl<'a> FnBuilder<'a> {
             fnv,
             loop_stack: Vec::new(),
             terminated: std::collections::HashSet::new(),
+            scope: crate::Scope::default(),
+            scopes: 0,
         }
     }
 
@@ -453,6 +492,18 @@ impl<'a> FnBuilder<'a> {
     /// current basic block (e.g. via `return`, `break`, `continue`). The
     /// caller must not append another terminator in that case.
     fn lower_block_value(&mut self, b: &HirBlock) -> (Operand, bool) {
+        let outer = self.scope;
+        self.scopes += 1;
+        self.scope = crate::Scope {
+            id: self.scopes,
+            parent: outer.id,
+        };
+        let r = self.lower_scope(b);
+        self.scope = outer;
+        r
+    }
+
+    fn lower_scope(&mut self, b: &HirBlock) -> (Operand, bool) {
         let first_temp = self.locals.len();
         for s in &b.stmts {
             if self.lower_stmt(s) {
@@ -503,12 +554,16 @@ impl<'a> FnBuilder<'a> {
         if span.line == 0 || !self.block_is_live() {
             return;
         }
+        let scope = self.scope;
         let stmts = &mut self.current_block().stmts;
-        if let Some(Statement::Loc(prev)) = stmts.last_mut() {
-            *prev = span;
-            return;
+        // Another scope keeps its own `Loc` (it names that scope).
+        if let Some(Statement::Loc(prev, s)) = stmts.last_mut() {
+            if *s == scope {
+                *prev = span;
+                return;
+            }
         }
-        stmts.push(Statement::Loc(span));
+        stmts.push(Statement::Loc(span, scope));
     }
 
     fn lower_stmt(&mut self, s: &HirStmt) -> bool {
@@ -1000,18 +1055,25 @@ impl<'a> FnBuilder<'a> {
                     value: i128::from(*variant_index),
                     ty: IrPrimTy::I32,
                 });
-                // `any Tr` (D4): the payload is a heap copy of the value.
-                // ponytail: always boxed; inline values that fit a word
-                // once `ANY_SLOT` tracing (802 §8.2.7) exists.
+                // `any Tr` (D4): the payload is the value itself if it
+                // fits the word, else a heap copy; the tag's `ANY_BOXED`
+                // bit says which (the collector's `ANY_SLOT`, 802 §8.2.7).
                 if let (HirTy::AnyTrait(_), Some(v)) = (sum_ty, value) {
                     let raw = self.lower_expr_to_operand(v);
+                    let ty = lower_ty_in(&v.ty, self.module);
+                    let tag = if crate::any_inline(&ty, 64) {
+                        *variant_index
+                    } else {
+                        *variant_index | crate::ANY_BOXED
+                    };
+                    let tag_op = Operand::Const(ConstVal::Int {
+                        value: i128::from(tag as i32),
+                        ty: IrPrimTy::I32,
+                    });
                     let ptr = self.fresh_local(MirTy::GcRef);
                     self.push_stmt(Statement::Assign {
                         target: ptr,
-                        rvalue: RValue::HeapBox {
-                            value: raw,
-                            ty: lower_ty_in(&v.ty, self.module),
-                        },
+                        rvalue: RValue::HeapBox { value: raw, ty },
                     });
                     let dst = self.fresh_local(mir_ty.clone());
                     self.push_stmt(Statement::Assign {
@@ -1774,8 +1836,34 @@ impl<'a> FnBuilder<'a> {
     }
 
     // Read the tag from an enum scrutinee. Payload-less enums are i32
-    // outright; payload-bearing enums are `(i32, payload)` tuples.
+    // outright; payload-bearing enums are `(i32, payload)` tuples; an
+    // `any`'s tag loses its `ANY_BOXED` bit.
     fn extract_tag(&mut self, scrut: LocalId, scrut_ty: &MirTy) -> Operand {
+        if let MirTy::Struct(crate::ANY_STRUCT, _) = scrut_ty {
+            let i32_ = MirTy::Prim(IrPrimTy::I32);
+            let [raw, dst] = [(); 2].map(|()| self.fresh_local(i32_.clone()));
+            self.push_stmt(Statement::Assign {
+                target: raw,
+                rvalue: RValue::FieldRead {
+                    target: Operand::Copy(scrut),
+                    index: 0,
+                    field_ty: i32_.clone(),
+                },
+            });
+            self.push_stmt(Statement::Assign {
+                target: dst,
+                rvalue: RValue::BinOp {
+                    op: PrimOp::BitAnd,
+                    op_ty: i32_,
+                    lhs: Operand::Copy(raw),
+                    rhs: Operand::Const(ConstVal::Int {
+                        value: i128::from(!crate::ANY_BOXED),
+                        ty: IrPrimTy::I32,
+                    }),
+                },
+            });
+            return Operand::Copy(dst);
+        }
         match scrut_ty {
             MirTy::Tuple(parts) if parts.len() == 2 => {
                 let dst = self.fresh_local(parts[0].clone());
@@ -2062,7 +2150,7 @@ impl<'a> FnBuilder<'a> {
                     return;
                 }
                 let scrut_ty = self.locals[scrut.0 as usize].ty.clone();
-                let MirTy::Tuple(parts) = &scrut_ty else {
+                let (MirTy::Tuple(parts) | MirTy::Struct(_, parts)) = &scrut_ty else {
                     return;
                 };
                 if parts.len() != 2 {

@@ -1,0 +1,23 @@
+// expect-exit: 0
+// expect-stdout:
+// 7
+// int
+
+// D4 / 2.2.10: `any Tr<A>` where only a generic impl implements `Tr` and
+// `A` is a tuple / sum: the call's signature comes from the bound.
+trait Get<T> {
+    fn get(self) -> T;
+}
+struct W<T> { v: T; }
+impl<T> Get<T> for W<T> {
+    fn get(self) -> T { return self.v; }
+}
+fn main() -> i32 {
+    let a: any Get<(i32, i32)> = W { v: (3, 4) };
+    let p = a.get();
+    let b: any Get<i32 | str> = W::<i32 | str> { v: 5 };
+    let q = b.get();
+    println(f"{p.0 + p.1}");
+    if q is i32 { println("int"); }
+    return 0;
+}

@@ -341,7 +341,7 @@ pub(super) fn poll_loop(
             },
             guard: None,
             body: block(
-                cancel_check(ctx, span)
+                cancel_check(ctx, "unwinding", span)
                     .into_iter()
                     .chain([HirStmt::Break {
                         label: None,
@@ -358,7 +358,7 @@ pub(super) fn poll_loop(
             },
             guard: None,
             body: block(
-                cancel_check(ctx, span)
+                cancel_check(ctx, "cancel_requested", span)
                     .into_iter()
                     .chain([HirStmt::Expr(if coro.probe {
                         pending_step
@@ -391,10 +391,12 @@ pub(super) fn poll_loop(
         span,
     };
     // Checks: on entry, after a ready poll (an awaited coroutine may
-    // have left because of the cancel) and before suspending (after a
-    // resume the awaited future is polled first, so a nested coroutine
-    // leaves through its own cleanups before this one).
-    let Some(entry) = cancel_check(ctx, span) else {
+    // have left because of the cancel: `unwinding`, not the bare flag —
+    // a hand-written future's value, like a received message or a lock
+    // guard, is kept and the next check leaves) and before suspending
+    // (after a resume the awaited future is polled first, so a nested
+    // coroutine leaves through its own cleanups before this one).
+    let Some(entry) = cancel_check(ctx, "cancel_requested", span) else {
         return lp;
     };
     HirExpr {
@@ -409,11 +411,16 @@ pub(super) fn poll_loop(
 }
 
 /// A cancellation point (stdlib 2.18.4, refs-lang 7.7.10): `if
-/// task::cancel_requested(#ctx) { <leave the body like a return> }`.
+/// task::<check>(#ctx) { <leave the body like a return> }`, `check`
+/// being `cancel_requested` or (after a ready poll) `unwinding`.
 /// The exit runs the `finally` / `using` cleanups it passes; the
 /// coroutine's result is a zero value the executor drops. `None` in the
 /// probe pass.
-fn cancel_check(ctx: &mut LowerCtx<'_>, span: rokc_diagnostic::Span) -> Option<HirStmt> {
+fn cancel_check(
+    ctx: &mut LowerCtx<'_>,
+    check: &str,
+    span: rokc_diagnostic::Span,
+) -> Option<HirStmt> {
     if ctx.coro.as_ref().is_none_or(|c| c.probe) {
         return None;
     }
@@ -432,7 +439,7 @@ fn cancel_check(ctx: &mut LowerCtx<'_>, span: rokc_diagnostic::Span) -> Option<H
     };
     let call = Expr {
         kind: ExprKind::Call {
-            callee: Box::new(path(&["rok", "core", "task", "cancel_requested"])),
+            callee: Box::new(path(&["rok", "core", "task", check])),
             args: vec![CallArg::Positional(path(&[CTX]))],
             trailing_closure: None,
         },
@@ -575,6 +582,8 @@ fn lower_coro_block<'a>(
         let (mut c, mut params, prelude, _) = closure_ctx(ctx, &[], &captures, None, span);
         if from_fn {
             c.value_captured.clear();
+            // 4.16.5: an async implicit `main`'s body keeps its rules.
+            c.implicit_main = ctx.implicit_main;
         }
         if kind.is_async() {
             let cty = ctx

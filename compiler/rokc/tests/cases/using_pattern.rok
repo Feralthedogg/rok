@@ -1,0 +1,40 @@
+// expect-exit: 0
+// expect-stdout:
+// fd 3 at /tmp/x
+// close 3
+// pair 1 2
+// close 4
+// 7
+
+// Spec 3.17.1 `using_binding ::= pattern "=" expr`: the pattern binds
+// from the resource, and the whole resource is dropped.
+struct File { fd: i32; path: str; }
+
+impl Drop for File {
+    fn drop(ref self) {
+        println(f"close {self.fd}");
+    }
+}
+
+struct Pair { a: i32; b: i32; tag: i32; }
+
+impl Drop for Pair {
+    fn drop(ref self) {
+        println(f"close {self.tag}");
+    }
+}
+
+fn open(fd: i32, path: str) -> File { File { fd: fd, path: path } }
+fn pair(a: i32, b: i32) -> Pair { Pair { a: a, b: b, tag: 4 } }
+
+fn main() -> i32 {
+    using File { fd, path } = open(3, "/tmp/x") {
+        println(f"fd {fd} at {path}");
+    }
+    let n = using Pair { a, b, .. } = pair(1, 2) {
+        println(f"pair {a} {b}");
+        a + b * 3
+    };
+    println(f"{n}");
+    0
+}

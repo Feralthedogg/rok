@@ -150,7 +150,7 @@ fn item_info(item: &Item) -> Option<(&'static str, &str, Visibility, &[Attribute
 
 /// The `///` lines above `span`'s line (skipping attribute lines), then
 /// `#[doc = ".."]`.
-fn outer_doc(src: &str, attrs: &[Attribute], span: Span) -> String {
+pub(crate) fn outer_doc(src: &str, attrs: &[Attribute], span: Span) -> String {
     let first = attrs
         .iter()
         .map(|a| a.span.line)

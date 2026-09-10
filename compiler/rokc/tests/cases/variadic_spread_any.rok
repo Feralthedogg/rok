@@ -1,0 +1,38 @@
+// expect-exit: 0
+// expect-stdout:
+// 6 10 0
+// 3: int hi other
+// 2: int int
+
+// Spec 4.2.6: a tuple spread fills a variadic `...T` slot (`sum(..t)`,
+// mixed with plain arguments). Spec 4.2.5: `...any` takes arguments of
+// different types (`[any; N]`).
+
+fn sum(xs: ...i32) -> i32 {
+    let total = 0;
+    for x in xs { total = total + x; }
+    total
+}
+
+fn log_all(xs: ...any) {
+    print(f"{xs.len()}:");
+    for x in xs {
+        if x is i32 {
+            print(" int");
+        } else if x is str {
+            print(f" {x}");
+        } else {
+            print(" other");
+        }
+    }
+    println("");
+}
+
+fn main() -> i32 {
+    let t = (1, 2, 3);
+    println(f"{sum(..t)} {sum(0, ..t, 4)} {sum()}");
+    log_all(1i32, "hi", 3.14f64);
+    let u = (5i32, 6i32);
+    log_all(..u);
+    0
+}

@@ -67,7 +67,15 @@ fn implicit_main(stmts: Vec<Stmt>) -> FnDef {
         is_async,
         is_generator: false,
         is_unsafe: false,
-        throws: ThrowsKind::None,
+        // Spec 4.16.4: the implicit `main` is `fn main() throws` (untyped).
+        throws: ThrowsKind::Typed(vec![rokc_ast::Ty {
+            kind: TyKind::Path(crate::coro::path(
+                &[rokc_ast::UNTYPED_THROWS_MARK],
+                Vec::new(),
+                span,
+            )),
+            span,
+        }]),
         where_clause: Vec::new(),
         span,
     }

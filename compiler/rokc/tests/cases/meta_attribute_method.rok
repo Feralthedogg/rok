@@ -1,0 +1,57 @@
+// expect-exit: 0
+// expect-stdout:
+// [enter] area
+// 12
+// [enter] scaled
+// [enter] area
+// 24
+// 5
+// [enter] describe
+// R
+
+// Spec 6.9.5: `@accept(fn)` is "a function or a method" — a user
+// attribute on an impl or trait method expands in place (to methods).
+#[impl_attribute(traced)]
+pub @attribute {
+    @accept(fn)
+    fn @item.name(@item.params) -> @item.return_type {
+        println("[enter] @item.name");
+        @item.body
+    }
+}
+
+#[impl_attribute(with_twin)]
+pub @attribute {
+    @accept(fn)
+    @item
+    fn twin(self) -> i32 { self.w + 1 }
+}
+
+trait Describe {
+    #[traced]
+    fn describe(self) -> str { "R" }
+}
+
+struct R { w: i32; h: i32; }
+
+impl Describe for R {}
+
+impl R {
+    #[traced]
+    fn area(self) -> i32 { self.w * self.h }
+
+    #[traced]
+    fn scaled(self, k: i32) -> i32 { self.area() * k }
+
+    #[with_twin]
+    fn plain(self) -> i32 { 0 }
+}
+
+fn main() -> i32 {
+    let r = R { w: 4, h: 3 };
+    println(f"{r.area()}");
+    println(f"{r.scaled(2)}");
+    println(f"{r.twin() + r.plain()}");
+    println(r.describe());
+    0
+}

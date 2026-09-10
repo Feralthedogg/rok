@@ -1,0 +1,18 @@
+// expect-exit: 3
+// expect-warning: this `try` covers no throwing call
+// expect-warning: no error reaches this `catch`
+
+// A generic body's `try` / `catch` warnings are reported when every
+// instance raises them (here both `i32` and `str` instances).
+fn pure(x: i32) -> i32 { x }
+
+fn keep<T>(x: T) -> T {
+    _ = try pure(1);
+    _ = try pure(2) catch _ { 0 };
+    x
+}
+
+fn main() -> i32 {
+    let s = keep("a");
+    keep(3)
+}

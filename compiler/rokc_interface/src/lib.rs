@@ -139,7 +139,40 @@ impl CompileResult {
 
     /// One intermediate artifact (`--emit=<kind>`).
     pub fn emit(&self, kind: EmitKind, opts: &BuildOptions) -> Result<Vec<u8>, RokDiagnostic> {
+        if kind == EmitKind::Expanded {
+            // The user package's files (a `set_keep_ast` build).
+            let text: Vec<&str> = self
+                .sources
+                .iter()
+                .filter(|s| s.package.is_empty())
+                .flat_map(|s| &s.expanded)
+                .map(String::as_str)
+                .collect();
+            return Ok(text.join("\n").into_bytes());
+        }
+        if kind == EmitKind::Ast && !self.sources.is_empty() {
+            return Ok(self.ast_source().into_bytes());
+        }
         rokc_driver::emit(self.module()?, kind, opts)
+    }
+
+    /// The user package's files (of a `set_keep_ast` build) after meta
+    /// expansion, as rok source, each under a `// <file> (<module>)`
+    /// line (`--emit=ast`).
+    #[must_use]
+    pub fn ast_source(&self) -> String {
+        let mut out = String::new();
+        for f in self.sources.iter().filter(|f| f.package.is_empty()) {
+            let module = if f.module.is_empty() {
+                "pkg".to_owned()
+            } else {
+                f.module.join("::")
+            };
+            out.push_str(&format!("// {} ({module})\n", f.path.display()));
+            out.push_str(&rokc_ast::print::print_file(&f.attrs, &f.items, &f.stmts));
+            out.push('\n');
+        }
+        out
     }
 
     /// Lower MIR again after editing `modules[0].hir`.

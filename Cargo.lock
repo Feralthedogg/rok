@@ -87,6 +87,7 @@ dependencies = [
 name = "rokc_interface"
 version = "0.1.0"
 dependencies = [
+ "rokc_ast",
  "rokc_diagnostic",
  "rokc_driver",
 ]

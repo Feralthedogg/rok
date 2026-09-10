@@ -368,7 +368,7 @@ fn live_in(f: &MirFunction) -> HashMap<BlockId, BTreeSet<LocalId>> {
                     value,
                     ..
                 } => ops.extend([Operand::Copy(*array), index.clone(), value.clone()]),
-                Statement::StorageDead(_) | Statement::Loc(_) => {}
+                Statement::StorageDead(_) | Statement::Loc(..) => {}
                 Statement::BufStore {
                     buf, index, value, ..
                 } => ops.extend([buf.clone(), index.clone(), value.clone()]),

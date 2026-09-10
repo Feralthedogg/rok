@@ -1,0 +1,74 @@
+// expect-exit: 0
+// expect-stdout:
+// ok: 10
+// join of the failed child: bad 3
+// child threw: bad 3
+// skipped after the error: true
+// body threw: body
+// child cancelled: true
+// nested in a task: bad 7
+
+// `par::try_scope` (2.19.3, "an exception cancels the children"): the
+// first error cancels the scope — tasks that have not started never run,
+// running ones finish — and the scope throws it once all are done.
+struct Bad { n: i32; }
+
+fn check(n: i32) throws (Bad) -> i32 {
+    if n == 3 || n == 7 { throw Bad { n: n }; }
+    n
+}
+
+fn main() {
+    let sum = Atomic::new(0);
+    try! par::try_scope(|s: TryScope<Bad>| {
+        for i in 0..5 {
+            s.spawn(|| { sum.fetch_add(i); 0 });
+        }
+    });
+    println(f"ok: {sum.load()}");
+
+    // Child 3 throws; the 1000 tasks spawned after it see the cancelled
+    // scope (each waits for it first) and never run their body.
+    let ran = Atomic::new(0);
+    try par::try_scope(|s: TryScope<Bad>| {
+        let h = s.spawn(|| try check(3));
+        // Wait until the error has cancelled the scope.
+        try h.join() catch e { println(f"join of the failed child: bad {e.n}"); 0 };
+        for i in 0..1000 {
+            s.spawn(|| { ran.fetch_add(1); 0 });
+        }
+    }) catch e {
+        println(f"child threw: bad {e.n}");
+    };
+    println(f"skipped after the error: {ran.load() == 0}");
+
+    // The body itself throws: the child is skipped, or (already running)
+    // sees `is_cancelled` and ends — the scope waits for it either way.
+    let saw = Atomic::new(false);
+    let started = Atomic::new(false);
+    try par::try_scope(|s: TryScope<Bad>| {
+        s.spawn(|| {
+            started.store(true);
+            while !s.is_cancelled() { }
+            saw.store(true);
+            0
+        });
+        throw Bad { n: -1 };
+    }) catch e {
+        println(f"body threw: {if e.n == -1 { "body" } else { "child" }}");
+    };
+    println(f"child cancelled: {saw.load() || !started.load()}");
+
+    let r = task::block_on(async {
+        let t = task::spawn(async {
+            try par::try_scope(|s: TryScope<Bad>| {
+                for i in 5..10 {
+                    s.spawn(|| try check(i));
+                }
+            }) catch e { return e.n; };
+            0
+        });
+        await t
+    });
+    println(f"nested in a task: bad {r}");
+}

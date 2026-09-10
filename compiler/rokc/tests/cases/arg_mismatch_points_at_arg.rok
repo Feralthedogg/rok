@@ -1,0 +1,14 @@
+// expect-error: 10:9: mismatched types: argument `b` of `f` expects `str`, found `i32`
+// expect-error: 12:9: mismatched types: argument `x` of `m` expects `i32`, found `str`
+
+// An argument type mismatch points at the argument, not the call.
+fn f(a: i32, b: str) -> i32 { return a; }
+struct S {}
+impl S { fn m(self, x: i32) -> i32 { return x; } }
+fn main() -> i32 {
+    let r = f(1,
+        2);
+    let q = S {}.m(
+        "x");
+    return r + q;
+}

@@ -69,7 +69,7 @@ fn print_block(out: &mut String, b: &BasicBlock) {
         out.push(')');
     }
     out.push_str(":\n");
-    for s in b.stmts.iter().filter(|s| !matches!(s, Statement::Loc(_))) {
+    for s in b.stmts.iter().filter(|s| !matches!(s, Statement::Loc(..))) {
         out.push_str("        ");
         print_stmt(out, s);
         out.push('\n');
@@ -83,7 +83,7 @@ fn print_stmt(out: &mut String, s: &Statement) {
     match s {
         // Skipped by `print_block`: the text feeds the package hash (a
         // moved line must not change symbols).
-        Statement::Loc(_) => {}
+        Statement::Loc(..) => {}
         Statement::Assign { target, rvalue } => {
             let _ = write!(out, "_{} = ", target.0);
             print_rvalue(out, rvalue);

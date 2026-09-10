@@ -9,9 +9,11 @@
 //!
 //! Not implemented yet (calls hit [`unimplemented`] → fatal, exit 101):
 //! scheduler (007-runtime/706, 707), coroutines (708). OS threads (805
-//! §8.5.4) are in `thread`. The GC (`rokr_gc`) is a non-moving Immix-style
-//! mark-region (703) with sticky mark-bit generations (704), without
-//! concurrent marking (705).
+//! §8.5.4) are in `thread`. The GC (`rokr_gc`) is an Immix-style
+//! mark-region (703) with opportunistic evacuation and sticky mark-bit
+//! generations (704), without concurrent marking (705). Objects a root
+//! reaches never move, so a GC pointer a runtime function got as an
+//! argument stays valid across its allocations and blocking calls.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
@@ -23,6 +25,7 @@ use core::sync::atomic::Ordering;
 use rokr_common::object_header::HEADER_ALIGN;
 use rokr_common::{fatal, tls, write_stderr};
 
+mod bignum;
 mod deque;
 mod fmt;
 mod fmt_spec;
@@ -155,8 +158,8 @@ pub unsafe extern "C" fn rok_gc_register_type(type_id: u32, scan_table: *const u
     rokr_gc::register_type(type_id, scan_table);
 }
 
-/// Non-moving collector: pinning only keeps the object (and what it
-/// references) alive until `rok_gc_unpin`.
+/// Keep `obj` (and what it references) alive and in place until
+/// `rok_gc_unpin`.
 ///
 /// # Safety
 /// `obj` must be a live GC object.
@@ -204,6 +207,12 @@ pub extern "C" fn rok_gc_stats_live_bytes() -> usize {
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_gc_stats_collections() -> u64 {
     rokr_gc::collections()
+}
+
+/// Bytes evacuation has copied so far (tests, diagnostics).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_gc_stats_moved_bytes() -> u64 {
+    rokr_gc::moved_bytes()
 }
 
 // ---------------------------------------------------------------------
@@ -259,14 +268,17 @@ pub extern "C" fn rok_coro_frame_alloc(size: usize, type_id: u32) -> *mut u8 {
     rok_gc_alloc_slow(size, HEADER_ALIGN, type_id)
 }
 
+/// Park `waker` on coroutine `frame` (its address is the parking key)
+/// until `rok_coro_unpark(frame)`.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_coro_park(_frame: *mut u8, _waker: *mut u8) {
-    unimplemented(b"rok_coro_park (coroutines, spec 007-runtime/708)")
+pub extern "C" fn rok_coro_park(frame: *mut u8, waker: *mut u8) {
+    task_abi(2, frame as i64, 0, waker);
 }
 
+/// Wake every waker parked on `frame`.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_coro_unpark(_frame: *mut u8) {
-    unimplemented(b"rok_coro_unpark (coroutines, spec 007-runtime/708)")
+pub extern "C" fn rok_coro_unpark(frame: *mut u8) {
+    task_abi(3, frame as i64, 0, ptr::null_mut());
 }
 
 // ---------------------------------------------------------------------
@@ -337,29 +349,62 @@ pub unsafe extern "C" fn rok_task_parking_install(obj: usize) -> usize {
     }
 }
 
-/// A GC object's address as a parking key (`GcBuf<i32>` argument).
+/// A GC object's address as a parking key (`GcBuf<i32>` argument):
+/// from now on the collector never moves it, so the key stays its own.
+///
+/// # Safety
+/// `obj` must be a live GC object.
 #[unsafe(no_mangle)]
-pub const extern "C" fn rok_task_key_i32(obj: usize) -> usize {
+pub unsafe extern "C" fn rok_task_key_i32(obj: usize) -> usize {
+    // SAFETY: caller contract.
+    unsafe { rokr_gc::no_move(obj as *mut u8) };
     obj
 }
 
-/// A GC object's address as a parking key (`GcBuf<usize>` argument).
+/// [`rok_task_key_i32`] for a `GcBuf<usize>`.
+///
+/// # Safety
+/// `obj` must be a live GC object.
 #[unsafe(no_mangle)]
-pub const extern "C" fn rok_task_key_usize(obj: usize) -> usize {
-    obj
+pub unsafe extern "C" fn rok_task_key_usize(obj: usize) -> usize {
+    // SAFETY: caller contract.
+    unsafe { rok_task_key_i32(obj) }
 }
 
-/// Monotonic clock in nanoseconds (707 timers).
-#[unsafe(no_mangle)]
 #[allow(clippy::unnecessary_cast)] // `time_t` / `c_long` widths vary by target
-pub extern "C" fn rok_time_now_ns() -> i64 {
+fn clock_ns(clock: libc::clockid_t) -> i64 {
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
     // SAFETY: valid out-pointer.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    unsafe { libc::clock_gettime(clock, &mut ts) };
     ts.tv_sec as i64 * 1_000_000_000 + ts.tv_nsec as i64
+}
+
+/// Monotonic clock in nanoseconds (707 timers).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_time_now_ns() -> i64 {
+    clock_ns(libc::CLOCK_MONOTONIC)
+}
+
+/// Wall clock, nanoseconds since the Unix epoch (`SystemTime`, 3.3.3).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_time_realtime_ns() -> i64 {
+    clock_ns(libc::CLOCK_REALTIME)
+}
+
+/// Time since boot, counting suspend (`BootTime`, 3.3.4).
+///
+/// `CLOCK_BOOTTIME` on Linux, `CLOCK_MONOTONIC` (which counts sleep) on
+/// macOS — spec 3.3.7 names `CLOCK_UPTIME_RAW`, which stops in sleep.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_time_boot_ns() -> i64 {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let clock = libc::CLOCK_BOOTTIME;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let clock = libc::CLOCK_MONOTONIC;
+    clock_ns(clock)
 }
 
 #[unsafe(no_mangle)]
@@ -381,14 +426,71 @@ pub extern "C" fn rok_task_cancel(_handle: *mut u8) {
 // 8.5.5 I/O / timer
 // ---------------------------------------------------------------------
 
+// `rok_io_register` / `rok_timer_register` and 8.5.3's `rok_coro_park` /
+// `rok_coro_unpark` act on `rok::core::task`'s parking table and timers
+// (GC wakers), so they call into it: the executor installs one hook
+// `fn(op, a, b, waker)` when a pool starts (`rok_task_abi_install`).
+// Defining them in rok (`#[export_name]`) would compile the executor
+// into every program.
+
+/// The hook's `{code, env}` (0 until an executor has started).
+static TASK_ABI_CODE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static TASK_ABI_ENV: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// A closure's code takes its arguments, then its env.
+type TaskAbiHook = unsafe extern "C" fn(i32, i64, i64, *mut u8, *mut u8);
+
+/// Install `rok::core::task`'s ABI hook (the first call wins; its env is
+/// pinned).
+///
+/// # Safety
+/// `code` / `env` are a rok `fn(i32, i64, i64, GcBuf<Waker>)` value.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_io_register(_fd: i32, _interest: u32, _waker: *mut u8) {
-    unimplemented(b"rok_io_register (I/O driver, spec 007-runtime/707)")
+pub unsafe extern "C" fn rok_task_abi_install(code: TaskAbiHook, env: *mut u8) {
+    if TASK_ABI_CODE.load(Ordering::Acquire) != 0 {
+        return;
+    }
+    if !env.is_null() {
+        // SAFETY: caller contract (a live GC object).
+        unsafe { rok_gc_pin(env) };
+    }
+    TASK_ABI_ENV.store(env as usize, Ordering::Release);
+    let _ = TASK_ABI_CODE.compare_exchange(0, code as usize, Ordering::AcqRel, Ordering::Acquire);
 }
 
+fn task_abi(op: i32, a: i64, b: i64, waker: *mut u8) {
+    let code = TASK_ABI_CODE.load(Ordering::Acquire);
+    if code == 0 {
+        unimplemented(
+            b"rok_io_register / rok_timer_register / rok_coro_park outside a task executor",
+        )
+    }
+    // SAFETY: installed by `rok_task_abi_install` from a rok fn value.
+    unsafe {
+        let f: TaskAbiHook = core::mem::transmute::<usize, TaskAbiHook>(code);
+        f(
+            op,
+            a,
+            b,
+            waker,
+            TASK_ABI_ENV.load(Ordering::Acquire) as *mut u8,
+        );
+    }
+}
+
+/// Wake `waker` (a one-element `GcBuf<Waker>`) once `fd` may be readable
+/// (`interest & 1`) or writable (`interest & 2`); one-shot,
+/// edge-triggered (spurious wakes possible).
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_timer_register(_deadline_ns: u64, _waker: *mut u8) {
-    unimplemented(b"rok_timer_register (timing wheel, spec 007-runtime/707)")
+pub extern "C" fn rok_io_register(fd: i32, interest: u32, waker: *mut u8) {
+    task_abi(0, i64::from(fd), i64::from(interest), waker);
+}
+
+/// Wake `waker` once `rok_time_now_ns()` reaches `deadline` (ns).
+#[unsafe(no_mangle)]
+#[allow(clippy::cast_possible_wrap)] // a monotonic ns deadline fits i64
+pub extern "C" fn rok_timer_register(deadline: u64, waker: *mut u8) {
+    task_abi(1, deadline as i64, 0, waker);
 }
 
 // ---------------------------------------------------------------------

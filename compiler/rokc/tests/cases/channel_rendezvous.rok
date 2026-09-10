@@ -1,4 +1,5 @@
 // expect-exit: 0
+// gc-stress: 50
 // expect-stdout:
 // 5
 // full 9

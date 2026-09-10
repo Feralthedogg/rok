@@ -82,6 +82,8 @@ pub struct HirModule {
     pub unlowered: Vec<FunctionId>,
     /// C variadic `extern` declarations (spec 8.6.10).
     pub c_variadic: Vec<FunctionId>,
+    /// `extern "C" fn` definitions (spec 5.9.10): C code calls them.
+    pub c_defs: Vec<FunctionId>,
     /// Every type-like item (struct, enum, union, alias, trait) by full
     /// name: its visibility (`type_visible`).
     pub type_visibility: std::collections::HashMap<String, rokc_core::Visibility>,

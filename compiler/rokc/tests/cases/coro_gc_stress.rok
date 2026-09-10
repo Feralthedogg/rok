@@ -1,4 +1,5 @@
 // expect-exit: 0
+// gc-stress: 50
 // expect-stdout:
 // item-0
 // item-1

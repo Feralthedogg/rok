@@ -386,8 +386,27 @@ pub extern "C" fn rok_os_copy_fd(src: i32, dst: i32) -> i64 {
 // Paths and directories
 // ---------------------------------------------------------------------
 
+/// Reflink `from` (a regular file) to a new `to`, both under `dir`
+/// (macOS `clonefileat`: same-volume APFS copies share their blocks).
+/// 0, or `-errno` (`EEXIST`, cross-volume, no support) — the caller
+/// then copies the bytes. Elsewhere always `-ENOTSUP`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_os_clone(dir: i32, from: RokStr, to: RokStr) -> i32 {
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: both are C strings.
+        let (r, e) = native(|| unsafe { libc::clonefileat(at(dir), cs(from), at(dir), cs(to), 0) });
+        if r < 0 { -e } else { 0 }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (dir, from, to);
+        -libc::ENOTSUP
+    }
+}
+
 /// `fstatat` (`fd < 0`) or `fstat(fd)`, filling the `GcBuf<i64>` `out`:
-/// `[kind, size, mode, mtime_s, mtime_ns, atime_s, ctime_s]`, kind 1
+/// `[kind, size, mode, mtime_s, mtime_ns, atime_s, ctime_s, atime_ns]`, kind 1
 /// file, 2 dir, 3 symlink, 0 other. 0 or `-errno`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_stat(dir: i32, path: RokStr, follow: i32, fd: i32, out: *mut u8) -> i32 {
@@ -423,8 +442,9 @@ pub extern "C" fn rok_os_stat(dir: i32, path: RokStr, follow: i32, fd: i32, out:
         st.st_mtime_nsec as i64,
         st.st_atime as i64,
         st.st_ctime as i64,
+        st.st_atime_nsec as i64,
     ];
-    // SAFETY: the library passes a live `GcBuf<i64>` of 7 elements.
+    // SAFETY: the library passes a live `GcBuf<i64>` of 8 elements.
     unsafe { ptr::copy_nonoverlapping(vals.as_ptr(), out.add(HEADER_SIZE).cast(), vals.len()) };
     0
 }
@@ -815,7 +835,8 @@ fn split_blob(blob: RokStr, count: usize) -> *mut CStrPtr {
 
 /// `fork` + `execvp`. `argv` / `envs` hold `argc` / `envc`
 /// NUL-terminated pieces (`envc < 0`: inherit the environment);
-/// `cwd` empty = inherit. Stdio modes: `-1` inherit, `-2` null,
+/// `cwd` empty = inherit; `pgid >= 0` joins that process group (0: a
+/// new one led by the child). Stdio modes: `-1` inherit, `-2` null,
 /// `-3` piped, `>= 0` that fd. The pipe ends (or -1) go to
 /// `out[0..3]` (stdin write end, stdout / stderr read ends).
 /// Returns the pid or `-errno` (exec failures included).
@@ -830,6 +851,7 @@ pub extern "C" fn rok_os_spawn(
     stdio_in: i32,
     stdio_out: i32,
     stdio_err: i32,
+    pgid: i32,
     out: *mut u8,
 ) -> i32 {
     let av = split_blob(argv, argc);
@@ -891,6 +913,9 @@ pub extern "C" fn rok_os_spawn(
                     }
                 }
                 if cwd.len > 0 && libc::chdir(cs(cwd)) < 0 {
+                    fail(errno());
+                }
+                if pgid >= 0 && libc::setpgid(0, pgid) < 0 {
                     fail(errno());
                 }
                 if !ev.is_null() {
@@ -1037,6 +1062,74 @@ pub extern "C" fn rok_os_waitpid(pid: i32, nohang: i32, out: *mut u8) -> i32 {
     r
 }
 
+/// Write end of the signal pipe (`rok_os_signal_install`), or -1.
+static SIGNAL_PIPE: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(-1);
+
+/// The C handler: the signal number as one byte down the pipe. Only
+/// async-signal-safe calls; a full pipe drops the signal.
+extern "C" fn on_signal(sig: libc::c_int) {
+    let fd = SIGNAL_PIPE.load(core::sync::atomic::Ordering::Relaxed);
+    if fd >= 0 {
+        let saved = errno();
+        let b = sig as u8;
+        // SAFETY: one byte from a local; `write` is async-signal-safe.
+        unsafe {
+            libc::write(fd, (&raw const b).cast(), 1);
+            set_errno(saved);
+        }
+    }
+}
+
+/// Route signal `sig` to the signal pipe (`process::signal`). The first
+/// call creates the pipe; `*read_end` gets its read end (blocking,
+/// close-on-exec) on that call, -1 after. 0 or `-errno` (`EINVAL` for
+/// `SIGKILL` / `SIGSTOP` / a bad number).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_os_signal_install(sig: i32, read_end: *mut u8) -> i32 {
+    // SAFETY: the library passes a live `GcBuf<i32>` of 1 element.
+    unsafe { *cell(read_end, 0) = -1 };
+    if !(1..64).contains(&sig) || sig == libc::SIGKILL || sig == libc::SIGSTOP {
+        return -libc::EINVAL;
+    }
+    if SIGNAL_PIPE.load(core::sync::atomic::Ordering::Acquire) < 0 {
+        let mut p = [0i32; 2];
+        // SAFETY: `p` is writable; fcntl on our own fds.
+        unsafe {
+            if libc::pipe(p.as_mut_ptr()) < 0 {
+                return -errno();
+            }
+            for fd in p {
+                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+            let fl = libc::fcntl(p[1], libc::F_GETFL);
+            libc::fcntl(p[1], libc::F_SETFL, fl | libc::O_NONBLOCK);
+            *cell(read_end, 0) = p[0];
+        }
+        SIGNAL_PIPE.store(p[1], core::sync::atomic::Ordering::Release);
+    }
+    // SAFETY: a zeroed `sigaction` with the fields set below is valid.
+    unsafe {
+        let mut sa: libc::sigaction = core::mem::zeroed();
+        sa.sa_sigaction = on_signal as *const () as libc::sighandler_t;
+        sa.sa_flags = libc::SA_RESTART;
+        libc::sigemptyset(&mut sa.sa_mask);
+        if libc::sigaction(sig, &sa, ptr::null_mut()) < 0 {
+            return -errno();
+        }
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_os_raise(sig: i32) -> i32 {
+    // SAFETY: plain libc call.
+    if unsafe { libc::raise(sig) } != 0 {
+        -libc::EINVAL
+    } else {
+        0
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_kill(pid: i32, sig: i32) -> i32 {
     // SAFETY: plain libc call.
@@ -1073,7 +1166,7 @@ pub extern "C" fn rok_os_abort() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rok_str_from_buf(buf: *mut u8, off: usize, len: usize) -> RokStr {
     // SAFETY: caller contract. `build` may collect before copying; the
-    // caller's frame roots `buf` and the collector does not move objects.
+    // caller's frame roots `buf`, so it stays in place.
     build(&[unsafe { core::slice::from_raw_parts(buf.add(HEADER_SIZE + off), len) }])
 }
 

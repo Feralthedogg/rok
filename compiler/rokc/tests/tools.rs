@@ -110,6 +110,37 @@ List<i32>: [1, 2, 3]
     }
 }
 
+/// `repl --package <lib>` (901.2): the library is loaded and its items
+/// are in scope from the first cell, also after `:reset`.
+#[test]
+fn repl_package_loads_and_uses_a_library() {
+    let Some(env) = setup() else { return };
+    let rokr = env.rokr.display().to_string();
+    let dir = std::env::temp_dir().join(format!("rok_repl_pkg_{}", std::process::id()));
+    let lib = dir.join("geom");
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(
+        lib.join("lib.rok"),
+        "pub fn twice(x: i32) -> i32 { x * 2 }\n",
+    )
+    .unwrap();
+    let pkg = lib.display().to_string();
+    let out = piped(
+        ROKC,
+        &["repl", "--rokr", &rokr, "--package", &pkg],
+        "twice(21)\n:reset\ntwice(2)\n",
+    );
+    let stdout = text(&out.stdout);
+    assert_eq!(stdout, "i32: 42\ni32: 4\n", "{}", text(&out.stderr));
+    // A main package is refused.
+    std::fs::write(dir.join("main.rok"), "").unwrap();
+    let main = dir.display().to_string();
+    let out = piped(ROKC, &["repl", "--rokr", &rokr, "--package", &main], "");
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("not a library package"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The default mode runs a cell once, in one process: its side effects
 /// do not repeat, its bindings / items stay, and a cell that dies
 /// leaves the session as it was.

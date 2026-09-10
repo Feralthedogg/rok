@@ -773,3 +773,64 @@ fn meta_hygiene_renames_locals_only() {
     assert!(text.contains("\"Other\"") && text.contains("\"len\""));
     assert!(!text.contains("Other__meta") && !text.contains("len__meta"));
 }
+
+/// `--emit=ast` (spec 9.9.10): printing a parsed file and parsing
+/// the print gives the same print back, for every library and test
+/// case file that parses without the extension operators.
+#[test]
+fn printed_ast_parses_back() {
+    fn files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                files(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rok") {
+                out.push(p);
+            }
+        }
+    }
+    let try_parse = |src: &str| {
+        let (tokens, lex) = Lexer::new(src, "t").lex_all();
+        let (program, diags) = parse_program(&tokens, "t");
+        match lex.iter().chain(&diags).next() {
+            None => Ok(program),
+            Some(d) => Err(format!("{d:?}")),
+        }
+    };
+    // Without the `// #[derive(..)]` notes (comments do not parse back).
+    let print = |p: &rokc_ast::Program| {
+        let text = rokc_ast::print::print_file(&p.attrs, &p.items, &p.stmts);
+        let lines = text.lines().filter(|l| !l.trim_start().starts_with("//"));
+        lines.collect::<Vec<_>>().join("\n")
+    };
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut all = Vec::new();
+    files(&root.join("library"), &mut all);
+    files(&root.join("compiler/rokc/tests/cases"), &mut all);
+    let (mut checked, mut bad) = (0, Vec::new());
+    for f in &all {
+        let src = std::fs::read_to_string(f).unwrap();
+        let Ok(p) = try_parse(&src) else { continue };
+        checked += 1;
+        let once = print(&p);
+        match try_parse(&once) {
+            Ok(again) if print(&again) == once => {}
+            Ok(again) => bad.push(format!(
+                "{}: differs\n{once}\n----\n{}",
+                f.display(),
+                print(&again)
+            )),
+            Err(d) => bad.push(format!("{}: does not parse: {d}\n{once}", f.display())),
+        }
+    }
+    assert!(checked > 100, "{checked}");
+    assert!(
+        bad.is_empty(),
+        "{} of {checked}:\n{}",
+        bad.len(),
+        bad.join("\n=====\n")
+    );
+}

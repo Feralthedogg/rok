@@ -34,15 +34,15 @@
 //
 // ponytail: the local queues and the injector are rings behind a spin
 // lock each (many producers). The timer heap is one `Mutex` per pool
-// (spec: per-driver timing wheel). The I/O driver is a reactor thread,
-// not each worker polling (707 §7.7.11).
+// (7.7.5 allows a heap; it recommends a timing wheel). The I/O driver
+// is a reactor thread, not each worker polling (707 §7.7.11).
 
 pub mod time;
 
 use rok::core::task::time::{Duration, Instant};
 use rok::core::future::{Context, Future, Poll, TryAsyncFuture, Waker};
 use rok::core::collections::raw::{GcBuf, buf_new};
-use rok::core::sync::{AtomicOrdering, Mutex};
+use rok::core::sync::{Atomic, AtomicOrdering, Mutex};
 
 extern "C" {
     fn rok_time_now_ns() -> i64;
@@ -65,6 +65,7 @@ extern "C" {
     fn rok_io_poll(out: GcBuf<i64>, max: usize) -> i32;
     fn rok_net_wait(fd: i32, write: i32, timeout_ns: i64) -> i32;
     fn rok_task_key_i32(word: GcBuf<i32>) -> usize;
+    fn rok_task_abi_install(hook: fn(i32, i64, i64, GcBuf<Waker>));
     fn rok_deque_new() -> GcBuf<GcBuf<TaskRef>>;
     fn rok_deque_push(d: GcBuf<GcBuf<TaskRef>>, item: GcBuf<TaskRef>);
     fn rok_deque_steal(d: GcBuf<GcBuf<TaskRef>>, out: GcBuf<GcBuf<TaskRef>>, index: usize) -> i32;
@@ -95,7 +96,9 @@ const DONE: i32 = 4;
 
 /// A task as the executor sees it (what a `Waker` holds).
 pub struct TaskRef {
-    /// `[state, cancelled, timed]` (`timed`: it has added a timer).
+    /// `[state, cancelled, timed, proxy, unwinding]` (`timed`: it has
+    /// added a timer; `proxy`: a `select` stand-in, see `up`;
+    /// `unwinding`: a cancellation point saw the cancel).
     state: GcBuf<i32>;
     /// One poll of the task's future; `true` once it is done.
     poll: GcBuf<fn(Context) -> bool>;
@@ -108,6 +111,12 @@ pub struct TaskRef {
     /// `spawn_local`: runs only on worker `home`.
     local: bool;
     home: usize;
+    /// Its `TaskId`.
+    id: u64;
+    /// A `select`'s stand-in for its children (`state[3]` set): wakes
+    /// go to `up[0]` (while not done) and its cancel flag is that one's
+    /// too. Other tasks share their pool's empty `no_up`.
+    up: GcBuf<Waker>;
 }
 
 unsafe impl Send for TaskRef {}
@@ -121,8 +130,21 @@ fn is_cancelled(t: TaskRef) -> bool {
     atomic_load(t.state, 1, SeqCst) != 0
 }
 
+/// A finished task that left by its cancel (no result). One cancelled
+/// after its last cancellation point finished normally: its result
+/// stands (a value it received is not lost).
+fn no_result(t: TaskRef) -> bool {
+    is_cancelled(t) && atomic_load(t.state, 4, SeqCst) != 0
+}
+
 /// Schedule `t` to be polled (`Waker::wake`); safe from any thread.
 pub fn wake_task(t: TaskRef) {
+    if t.state[3] != 0 {
+        if atomic_load(t.state, 0, SeqCst) != DONE {
+            t.up[0].wake();
+        }
+        return;
+    }
     loop {
         let s = atomic_load(t.state, 0, SeqCst);
         if s == IDLE {
@@ -164,9 +186,10 @@ fn finish(t: TaskRef) {
     t.poll[0] = |ctx: Context| -> bool { true };
     // Its parking entries go with it (a cancelled task left its `await`
     // without the wake it waited for), and a cancelled task's timers.
-    unpark_task(t);
-    if is_cancelled(t) && atomic_load(t.state, 2, SeqCst) != 0 {
-        remove_timers(t);
+    if is_cancelled(t) {
+        finish_cancelled(t);
+    } else {
+        unpark_task(t);
     }
     for w in ws {
         w.wake();
@@ -214,6 +237,10 @@ pub struct Pool {
     /// Per worker: 1 while it sleeps (or is about to), cleared by the
     /// push that wakes it.
     sleep: GcBuf<i32>;
+    /// Per worker: the task it is polling (`task::id`).
+    running: GcBuf<TaskRef | none>;
+    /// Every non-proxy task's `up`.
+    no_up: GcBuf<Waker>;
 }
 
 unsafe impl Send for Pool {}
@@ -222,6 +249,13 @@ unsafe impl Sync for Pool {}
 struct Timers {
     at: List<i64>;
     who: List<Waker>;
+    /// `[dead]`: cancelled tasks with timers since the last sweep.
+    dead: GcBuf<usize>;
+}
+
+fn timers_new(at: List<i64>, who: List<Waker>) -> Timers {
+    let dead: GcBuf<usize> = buf_new(1);
+    Timers { at: at, who: who, dead: dead }
 }
 
 /// This thread's worker: its pool and index.
@@ -241,14 +275,20 @@ impl Pool {
         let stolen: GcBuf<GcBuf<TaskRef>> = buf_new(n);
         let signal: GcBuf<i32> = buf_new(4);
         let sleep: GcBuf<i32> = buf_new(n);
+        let running: GcBuf<TaskRef | none> = buf_new(n);
+        for i in 0..n {
+            running[i] = none;
+        }
         Pool {
             locals: locals,
             deques: deques,
             stolen: stolen,
             injector: queue_new(),
-            timers: Mutex::new(Timers { at: List::<i64>::new(), who: List::<Waker>::new() }),
+            timers: Mutex::new(timers_new(List::<i64>::new(), List::<Waker>::new())),
             signal: signal,
             sleep: sleep,
+            running: running,
+            no_up: buf_new(0),
         }
     }
 
@@ -425,7 +465,8 @@ fn find_task(pool: Pool, i: usize) -> TaskRef | none {
     none
 }
 
-fn run(t: TaskRef) {
+/// Poll `t` on worker `i`.
+fn run(t: TaskRef, i: usize) {
     if atomic_cas(t.state, 0, SCHEDULED, RUNNING, SeqCst, SeqCst) != SCHEDULED {
         return;
     }
@@ -437,8 +478,16 @@ fn run(t: TaskRef) {
     let cancelled = is_cancelled(t);
     let poll = t.poll[0];
     let ctx = Context::from_waker(Waker { task: t });
+    // `help_until` runs tasks inside a task's poll: restore the outer one.
+    let outer = t.pool.running[i];
+    t.pool.running[i] = t;
     let ready = poll(ctx);
+    t.pool.running[i] = outer;
     if ready || cancelled {
+        if !ready {
+            // Ended without a result (no cancellation point reached).
+            atomic_xchg(t.state, 4, 1, SeqCst);
+        }
         finish(t);
     } else if atomic_cas(t.state, 0, RUNNING, IDLE, SeqCst, SeqCst) != RUNNING {
         // Woken while it ran.
@@ -448,9 +497,42 @@ fn run(t: TaskRef) {
 }
 
 /// Is the task polling with `ctx` cancelled? (The compiler's `await`
-/// checks this: 2.18.4 cancellation points.)
+/// checks this: 2.18.4 cancellation points.) A true answer means the
+/// caller leaves: the cancelled task (or `select` proxy) is marked
+/// `unwinding`.
 pub fn cancel_requested(ctx: Context) -> bool {
-    atomic_load(ctx.waker.task.state, 1, SeqCst) != 0
+    match cancel_source(ctx.waker.task) {
+        t: TaskRef => {
+            atomic_xchg(t.state, 4, 1, SeqCst);
+            true
+        }
+        none => false,
+    }
+}
+
+/// Whether a future that just returned `Ready` with `ctx` may have left
+/// because of a cancel (its value is then a placeholder): the `await`
+/// after a ready poll checks this, not the bare flag, so a value a
+/// hand-written future handed over (a message, a guard) is kept when the
+/// cancel lands meanwhile — the next cancellation point leaves.
+pub fn unwinding(ctx: Context) -> bool {
+    let t = ctx.waker.task;
+    if atomic_load(t.state, 4, SeqCst) != 0 {
+        return true;
+    }
+    t.state[3] != 0 && unwinding(Context::from_waker(t.up[0]))
+}
+
+/// The cancelled task `t` answers to: itself, or (a `select` proxy) its
+/// parent's chain.
+fn cancel_source(t: TaskRef) -> TaskRef | none {
+    if atomic_load(t.state, 1, SeqCst) != 0 {
+        return t;
+    }
+    if t.state[3] == 0 {
+        return none;
+    }
+    cancel_source(t.up[0].task)
 }
 
 /// Wake every due timer; the nanoseconds to the next one (-1: none).
@@ -532,25 +614,32 @@ fn pop_timer(tm: Timers) {
     sift_down(tm, 0);
 }
 
-/// Drop `t`'s timers from its pool's heap (a cancelled task's).
-// ponytail: O(heap) filter + rebuild per cancelled task that ever slept
-// (spec: a timing wheel's O(1) cancel).
+/// Drop cancelled task `t`'s timers from its pool's heap, lazily: a
+/// finished task's timer wakes nobody, and once the cancelled tasks
+/// since the last sweep reach half the heap, one O(heap) sweep drops
+/// every finished task's timers (amortized O(1) per cancel).
+// ponytail: a binary heap (spec 7.7.5 allows it; the recommended timing
+// wheel would make insert O(1) too — worth it with ~millions of timers).
 fn remove_timers(t: TaskRef) {
     using g = t.pool.timers.lock() {
         let tm = g.get();
-        let at: List<i64> = List::new();
-        let who: List<Waker> = List::new();
-        for i in 0..tm.at.len() {
-            if !same_task(tm.who[i].task, t) {
-                at.push(tm.at[i]);
-                who.push(tm.who[i]);
+        tm.dead[0] += 1;
+        if tm.dead[0] * 2 >= tm.at.len() {
+            let at: List<i64> = List::new();
+            let who: List<Waker> = List::new();
+            for i in 0..tm.at.len() {
+                if !is_done(tm.who[i].task) {
+                    at.push(tm.at[i]);
+                    who.push(tm.who[i]);
+                }
             }
-        }
-        g.set(Timers { at: at, who: who });
-        let i = at.len() / 2;
-        while i > 0 {
-            i -= 1;
-            sift_down(g.get(), i);
+            let fresh = timers_new(at, who);
+            g.set(fresh);
+            let i = at.len() / 2;
+            while i > 0 {
+                i -= 1;
+                sift_down(fresh, i);
+            }
         }
     }
 }
@@ -592,7 +681,7 @@ fn work(w: Worker, main: TaskRef | none) {
             return;
         }
         if let t: TaskRef = find_task(pool, i) {
-            run(t);
+            run(t, i);
             ran = timers_while_busy(pool, ran);
             continue;
         }
@@ -612,7 +701,7 @@ fn work(w: Worker, main: TaskRef | none) {
         }
         atomic_add(pool.signal, 3, -1, SeqCst);
         if let t: TaskRef = found {
-            run(t);
+            run(t, i);
             continue;
         }
         // Raise the sleep flag, look once more (a push after this sees
@@ -620,7 +709,7 @@ fn work(w: Worker, main: TaskRef | none) {
         atomic_xchg(pool.sleep, i, 1, SeqCst);
         if let t: TaskRef = find_task(pool, i) {
             atomic_xchg(pool.sleep, i, 0, SeqCst);
-            run(t);
+            run(t, i);
             continue;
         }
         let done = match main {
@@ -644,7 +733,7 @@ fn work(w: Worker, main: TaskRef | none) {
 }
 
 fn new_task(pool: Pool, poll: fn(Context) -> bool, local: bool, home: usize) -> TaskRef {
-    let state: GcBuf<i32> = buf_new(3);
+    let state: GcBuf<i32> = buf_new(5);
     state[0] = SCHEDULED;
     let p: GcBuf<fn(Context) -> bool> = buf_new(1);
     p[0] = poll;
@@ -656,6 +745,8 @@ fn new_task(pool: Pool, poll: fn(Context) -> bool, local: bool, home: usize) -> 
         parked: List::new(),
         local: local,
         home: home,
+        id: NEXT_TASK_ID.fetch_add(1),
+        up: pool.no_up,
     };
     schedule(t);
     t
@@ -686,6 +777,7 @@ fn run_pool(main: fn(Context) -> bool) {
         panic("task::block_on inside a running task (it would deadlock); use `await`");
     }
     let n = unsafe { rok_cpu_count() };
+    unsafe { rok_task_abi_install(|op: i32, a: i64, b: i64, w: GcBuf<Waker>| abi_hook(op, a, b, w)) };
     let pool = Pool::new(n);
     let w0 = Worker { pool: pool, index: 0 };
     set_current(w0);
@@ -800,7 +892,7 @@ pub(pkg) fn help_until(t: Task<bool>) {
     while !is_done(t.task) {
         let epoch = atomic_load(pool.signal, 0, SeqCst);
         if let other: TaskRef = find_task(pool, w.index) {
-            run(other);
+            run(other, w.index);
             ran = timers_while_busy(pool, ran);
             continue;
         }
@@ -827,10 +919,15 @@ unsafe impl<T: Send> Send for Task<T> {}
 impl<T> Task<T> {
     pub fn is_finished(self) -> bool { is_done(self.task) }
 
+    /// This task's id (what `task::id()` returns inside it).
+    pub fn id(self) -> TaskId { TaskId { id: self.task.id } }
+
     /// Ask the task to stop (2.18.4): it is woken, its current `await`
     /// leaves the body (running the `finally` / `using` cleanups on the
     /// way out) and it finishes without a result. Awaiting it then
-    /// panics; use `try await t.join()` to see `CancellationError`.
+    /// panics; use `try await t.join()` to see `CancellationError`. A
+    /// task that reaches no cancellation point after the cancel finishes
+    /// normally, with its result.
     pub fn cancel(self) {
         atomic_xchg(self.task.state, 1, 1, SeqCst);
         wake_task(self.task);
@@ -851,7 +948,7 @@ impl<T> Future for Task<T> {
         if !join_later(self.task, ctx.waker) {
             return Poll::Pending;
         }
-        if is_cancelled(self.task) {
+        if no_result(self.task) {
             panic("awaited a cancelled task (use `try await t.join()`)");
         }
         Poll::Ready(self.slot[0])
@@ -868,11 +965,56 @@ impl<T> Join<T> {
         if !join_later(self.task.task, ctx.waker) {
             return Poll::Pending;
         }
-        if is_cancelled(self.task.task) {
+        if no_result(self.task.task) {
             throw CancellationError {};
         }
         Poll::Ready(self.task.slot[0])
     }
+}
+
+/// Identifies a task for as long as the process runs (ids are never
+/// reused): `Task::id`, `task::id()`. Not in spec 2.18 (tokio's
+/// `task::Id`).
+pub struct TaskId {
+    id: u64;
+}
+
+static NEXT_TASK_ID: Atomic<u64> = Atomic::new(1);
+
+impl TaskId {
+    pub fn as_u64(self) -> u64 { self.id }
+}
+
+impl PartialEq for TaskId {
+    fn eq(self, rhs: TaskId) -> bool { self.id == rhs.id }
+    fn ne(self, rhs: TaskId) -> bool { self.id != rhs.id }
+}
+
+impl Eq for TaskId {}
+
+impl Hash for TaskId {
+    fn hash(self) -> u64 { self.id.hash() }
+}
+
+impl Display for TaskId {
+    fn display(self) -> str { self.id.display() }
+}
+
+impl Debug for TaskId {
+    fn debug(self) -> str { f"TaskId({self.id})" }
+}
+
+/// The running task's id; panics outside a task (`try_id`).
+pub fn id() -> TaskId {
+    try_id() ?? panic("task::id() outside a task")
+}
+
+/// The running task's id, or `none` outside a task (sync code, a
+/// `spawn_blocking` thread).
+pub fn try_id() -> TaskId | none {
+    let w = current()?;
+    let t = w.pool.running[w.index]?;
+    TaskId { id: t.id }
 }
 
 /// A task was cancelled (2.18.4).
@@ -891,10 +1033,7 @@ impl Error for CancellationError {}
 /// Run `fut` as a new task on any worker, concurrently with the
 /// spawner (2.18.1). Needs a running executor (inside `async fn main` /
 /// `block_on`).
-// ponytail: spec 2.18.1 spawns a closure `fn() -> T`; here the task is a
-// future (`task::spawn(async { .. })`), since a plain closure could not
-// `await`.
-pub fn spawn<F: Future + Send>(fut: F) -> Task<F::Output> {
+pub fn spawn<F: Future + Send>(fut: F) -> Task<F::Output> where F::Output: Send {
     let w = current_worker();
     let slot: GcBuf<F::Output> = buf_new(1);
     let t = new_task(w.pool, poll_fn(fut, slot), false, w.index);
@@ -936,6 +1075,109 @@ impl<T> Future for Race<T> {
             }
         }
         Poll::Pending
+    }
+}
+
+/// The first of `futs` to complete, with its index: `let (i, v) = await
+/// task::select([a, b])` (refs-lang 4.12.9 names `select`; 2.18 gives no
+/// signature). Unlike `race` the futures are not spawned: they run inside
+/// the awaiting task, polled in list order (ties go to the lower index).
+/// The futures share one type: `async { .. }` blocks with the same
+/// output do (wrap differing outputs, `async { Msg::A(await a) }`).
+/// Once one completes, every other one that has started is polled once
+/// more as cancelled (its `await` leaves through `finally` / `using`, as
+/// for `Task::cancel`) and dropped. Panics on an empty list.
+pub fn select<F: Future>(futs: List<F>) -> SelectFuture<F> {
+    if futs.len() == 0 {
+        panic("task::select of no futures");
+    }
+    let started: GcBuf<bool> = buf_new(futs.len());
+    let proxy: GcBuf<TaskRef | none> = buf_new(1);
+    // A zeroed slot is not `none` for a struct union: store it.
+    proxy[0] = none;
+    SelectFuture { futs: futs, started: started, proxy: proxy }
+}
+
+pub struct SelectFuture<F> {
+    futs: List<F>;
+    started: GcBuf<bool>;
+    /// The children's waker (`proxy_task`), made at the first poll: what
+    /// they register (parking, timers) is dropped when `select` ends.
+    proxy: GcBuf<TaskRef | none>;
+}
+
+impl<F: Future> Future for SelectFuture<F> {
+    type Output = (usize, F::Output);
+    fn poll(ref self, ref ctx: Context) -> Poll<(usize, F::Output)> {
+        let p = match self.proxy[0] {
+            t: TaskRef => t,
+            none => {
+                let t = proxy_task(ctx.waker);
+                self.proxy[0] = t;
+                t
+            }
+        };
+        let c = Context::from_waker(Waker { task: p });
+        let n = self.futs.len();
+        for i in 0..n {
+            let f = self.futs[i];
+            self.started[i] = true;
+            let r = f.poll(ref c);
+            self.futs[i] = f;
+            if let Poll::Ready(v) = r {
+                self.cancel_others(i, p);
+                return Poll::Ready((i, v));
+            }
+        }
+        Poll::Pending
+    }
+}
+
+impl<F: Future> SelectFuture<F> {
+    /// Finish the proxy (its wakes stop) as cancelled, poll the started
+    /// losers once with it (their cancellation path), then drop all it
+    /// registered.
+    fn cancel_others(self, winner: usize, p: TaskRef) {
+        atomic_xchg(p.state, 0, DONE, SeqCst);
+        atomic_xchg(p.state, 1, 1, SeqCst);
+        let c = Context::from_waker(Waker { task: p });
+        for i in 0..self.futs.len() {
+            if i != winner && self.started[i] {
+                let f = self.futs[i];
+                f.poll(ref c);
+            }
+        }
+        finish_cancelled(p);
+    }
+}
+
+/// A stand-in task for `select`'s children: never scheduled; its wakes
+/// go to `parent` until it is done.
+fn proxy_task(parent: Waker) -> TaskRef {
+    let state: GcBuf<i32> = buf_new(5);
+    state[3] = 1;
+    let p: GcBuf<fn(Context) -> bool> = buf_new(1);
+    p[0] = |ctx: Context| -> bool { true };
+    let up: GcBuf<Waker> = buf_new(1);
+    up[0] = parent;
+    TaskRef {
+        state: state,
+        poll: p,
+        joiners: Mutex::new(List::<Waker>::new()),
+        pool: parent.task.pool,
+        parked: List::new(),
+        local: false,
+        home: 0,
+        id: 0,
+        up: up,
+    }
+}
+
+/// Drop a finished cancelled task's parking entries and timers.
+fn finish_cancelled(t: TaskRef) {
+    unpark_task(t);
+    if atomic_load(t.state, 2, SeqCst) != 0 {
+        remove_timers(t);
     }
 }
 
@@ -1137,8 +1379,9 @@ fn same_task(a: TaskRef, b: TaskRef) -> bool {
     unsafe { rok_task_key_i32(a.state) == rok_task_key_i32(b.state) }
 }
 
-/// Parked wakers (all keys) plus pending timers of the running pool: a
-/// diagnostic (a cancelled task leaves none behind).
+/// Parked wakers (all keys) plus pending timers of unfinished tasks of
+/// the running pool: a diagnostic (a cancelled task leaves none
+/// behind).
 pub fn registrations() -> usize {
     let n: usize = 0;
     if unsafe { rok_task_parking_ready() } != 0 {
@@ -1151,7 +1394,9 @@ pub fn registrations() -> usize {
     }
     if let pool: Pool = current_pool() {
         using g = pool.timers.lock() {
-            n += g.get().at.len();
+            for w in g.get().who {
+                if !is_done(w.task) { n += 1; }
+            }
         }
     }
     n
@@ -1237,6 +1482,50 @@ impl Future for IoReady {
         }
         self.armed = true;
         Poll::Pending
+    }
+}
+
+// ---- runtime ABI (805 §8.5.5, 708 §7.8.8) ----
+//
+// `rok_io_register` / `rok_timer_register` / `rok_coro_park` /
+// `rok_coro_unpark` are runtime symbols that call back here (`abi_hook`,
+// installed when a pool starts), for hand-written futures and foreign
+// code. A `waker` is a one-element `GcBuf<Waker>`; a coroutine `frame`
+// is any GC object, whose address is the parking key. Each registration
+// wakes once: register again for the next wait.
+
+/// The runtime's ABI calls: `op` 0 `rok_io_register(fd = a, interest =
+/// b)`, 1 `rok_timer_register(deadline = a)`, 2 `rok_coro_park(frame =
+/// a)`, 3 `rok_coro_unpark(frame = a)` (`w` unused).
+fn abi_hook(op: i32, a: i64, b: i64, w: GcBuf<Waker>) {
+    if op == 0 {
+        io_register(a as i32, b, w[0]);
+    } else if op == 1 {
+        add_timer(a, w[0]);
+    } else if op == 2 {
+        park(a as usize, w[0]);
+    } else {
+        unpark(a as usize);
+    }
+}
+
+/// Wake `w` once `fd` may be readable (`interest & 1`) or writable
+/// (`interest & 2`) — at once if it already is, or if the fd cannot be
+/// watched (the retried operation reports the error).
+fn io_register(fd: i32, interest: i64, w: Waker) {
+    start_driver();
+    if unsafe { rok_io_watch(fd) } < 0 {
+        w.wake();
+        return;
+    }
+    for dir in 0..2 {
+        if (interest >> (dir as i64)) & 1 != 0 {
+            // Park first, then look (as `readable`).
+            park(io_key(fd, dir), w);
+            if unsafe { rok_net_wait(fd, dir, 0) } != 0 {
+                w.wake();
+            }
+        }
     }
 }
 

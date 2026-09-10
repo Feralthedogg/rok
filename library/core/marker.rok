@@ -80,6 +80,7 @@ impl Copy for str {}
 // out of its block. ponytail: no implicit scope-exit drop of plain
 // `let`s yet (2.13.4 RAII); `using` is the deterministic path.
 pub trait Drop {
+    #[lang("drop_method")]
     fn drop(ref self);
 }
 

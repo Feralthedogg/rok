@@ -481,6 +481,18 @@ pub(super) fn resolve_ty_with_structs(
     }
 }
 
+thread_local! {
+    /// Mangled bound-key argument → its type, for the arguments a bound
+    /// key spells by `ty_mangle` (tuples, sums, ...); `bound_arg_ty`
+    /// reads them back.
+    static BOUND_ARGS: std::cell::RefCell<HashMap<String, HirTy>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+pub(super) fn bound_arg(mangled: &str) -> Option<HirTy> {
+    BOUND_ARGS.with(|b| b.borrow().get(mangled).cloned())
+}
+
 /// `any` bound / impl key with the trait's generic arguments
 /// (`Index<i32>`); a struct or enum argument prints by its name.
 pub(super) fn bound_key(
@@ -503,7 +515,14 @@ pub(super) fn bound_key(
             HirTy::Enum(id) => enums.iter().filter(|(_, v)| *v == id).map(|(k, _)| k).min(),
             _ => None,
         }
-        .map_or_else(|| ty_mangle(t), Clone::clone)
+        .map_or_else(
+            || {
+                let m = ty_mangle(t);
+                BOUND_ARGS.with(|b| b.borrow_mut().insert(m.clone(), t.clone()));
+                m
+            },
+            Clone::clone,
+        )
     };
     let mut binds = binds.to_vec();
     binds.sort_by(|a, b| a.0.cmp(&b.0));

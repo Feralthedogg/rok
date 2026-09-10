@@ -80,6 +80,12 @@ double vmix(int n, ...) {
     for (int i = 0; i < n; i++) { t += va_arg(ap, int); t += va_arg(ap, double); }
     va_end(ap); return t;
 }
+int cb_v3(V3 (*f)(V3, float)) { V3 v = { 1, 2, 3 }; V3 r = f(v, 3.0f); return (int)(r.x + r.y + r.z); }
+long cb_big(Big (*f)(Big)) { Big b = { 1, 2, 3 }; Big r = f(b); return r.a * 100 + r.b * 10 + r.c; }
+double cb_d4(double (*f)(D4)) { D4 d = { 1, 2, 3, 4 }; return f(d); }
+Small cb_small(Small (*f)(Small)) { Small s = { 4, 5 }; return f(s); }
+Mix rok_mix(Mix m);
+double call_rok_mix(void) { Mix m = { 3, 0.5 }; Mix r = rok_mix(m); return r.a + r.b; }
 ";
 
 const ROK_SIDE: &str = r#"
@@ -106,7 +112,20 @@ extern "C" {
     fn dt_div(n: i32, d: i32) -> DT;
     fn via(f: unsafe fn(i32, i32) -> DT) -> i32;
     fn printf(fmt: str, ...) -> i32;
+    fn cb_v3(f: fn(V3, f32) -> V3) -> i32;
+    fn cb_big(f: fn(Big) -> Big) -> i64;
+    fn cb_d4(f: fn(D4) -> f64) -> f64;
+    fn cb_small(f: fn(Small) -> Small) -> Small;
+    fn call_rok_mix() -> f64;
 }
+
+// C calls these (spec 5.9.10): aggregates the C way both ways.
+extern "C" fn scale_v3(v: V3, k: f32) -> V3 { V3 { x: v.x * k, y: v.y * k, z: v.z * k } }
+extern "C" fn rev_big(b: Big) -> Big { Big { a: b.c, b: b.b, c: b.a } }
+extern "C" fn sum_d4(d: D4) -> f64 { d.a + d.b + d.c + d.d }
+extern "C" fn neg_small(s: Small) -> Small { Small { a: -s.a, b: -s.b } }
+#[export_name("rok_mix")]
+extern "C" fn mix_rok(m: Mix) -> Mix { Mix { a: m.a + 1, b: m.b * 2.0 } }
 
 fn main() {
     unsafe {
@@ -131,7 +150,12 @@ fn main() {
         println(f"{vmix(2, small, half, true, 1.25)}");
         // A C function handed back to C as a pointer keeps its C type.
         println(f"{via(dt_div)}");
+        let n = cb_small(neg_small);
+        println(f"{cb_v3(scale_v3)} {cb_big(rev_big)} {cb_d4(sum_d4) as i64} {call_rok_mix() as i64} {n.a} {n.b}");
     }
+    // From rok they are rok functions.
+    let r = rev_big(Big { a: 7, b: 8, c: 9 });
+    println(f"{r.a}{r.b}{r.c}");
 }
 "#;
 
@@ -208,8 +232,16 @@ const DEBUGGEE: &str = "fn add(a: i32, b: i32) -> i32 {
 
 fn main() {
     let x = add(3, 4);
-    println(f\"{x}\");
+    let p = P { x: x, y: 2.5 };
+    let name = \"rok\";
+    let pair = (p, [1u8, 2u8]);
+    if x > 0 {
+        let x = pair.1[0];
+        println(f\"{pair.0.x + x as i32 - 1}\");
+    }
 }
+
+struct P { x: i32; y: f64; }
 ";
 
 /// `-g` (spec 9.9.6): a subprogram named by the rok path with its
@@ -255,6 +287,37 @@ fn debug_info_names_functions_lines_and_locals() {
         info.contains("(\"main\")"),
         "no rok `main` subprogram:\n{info}"
     );
+    // The shadowing `x` lives in the `if` body's lexical block.
+    let main = info
+        .split("DW_TAG_subprogram")
+        .find(|s| s.contains("(\"main\")") && s.contains("main.rok"))
+        .unwrap_or_else(|| panic!("no rok `main`:\n{info}"));
+    let block = main
+        .split("DW_TAG_lexical_block")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no lexical block:\n{main}"));
+    assert!(
+        block.contains("(\"x\")") && block.contains("\"u8\")"),
+        "{block}"
+    );
+    // Aggregates: a struct with its fields, `str`, a tuple, an array.
+    let p = info
+        .split("DW_TAG_structure_type")
+        .find(|s| s.contains("DW_AT_name\t(\"P\")"))
+        .unwrap_or_else(|| panic!("no `P` type:\n{info}"));
+    for want in ["(\"x\")", "(\"y\")", "DW_AT_data_member_location\t(0x08)"] {
+        assert!(p.contains(want), "`P` lacks {want}:\n{p}");
+    }
+    for want in [
+        "(\"p\")",
+        "(\"name\")",
+        "(\"pair\")",
+        "(\"str\")",
+        "(\"tuple\")",
+        "DW_TAG_array_type",
+    ] {
+        assert!(info.contains(want), "no {want}:\n{info}");
+    }
     let lines = Command::new(dump)
         .arg("--debug-line")
         .arg(&target)
@@ -298,7 +361,7 @@ fn c_abi_matches_clang() {
     ok(&run);
     assert_eq!(
         text(&run.stdout),
-        "2 4 6\n10.5\n5 10 15 30\n-2 301\n42 2.5\n6\n45\n-434465\n82\n0.75\n21\n"
+        "2 4 6\n10.5\n5 10 15 30\n-2 301\n42 2.5\n6\n45\n-434465\n82\n0.75\n21\n18 321 10 5 -4 -5\n987\n"
     );
 
     // The other targets' lowering, as LLVM IR declarations (what clang

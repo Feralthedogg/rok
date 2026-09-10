@@ -165,6 +165,9 @@ pub struct Repl {
     pub externs: Vec<(String, PathBuf)>,
     /// `--replay`: every cell reruns the whole session.
     pub replay: bool,
+    /// The first cell (`repl --package`: `use <pkg>::*;`); `:reset`
+    /// runs it again.
+    pub prelude: Option<String>,
     opts: BuildOptions,
     state: State,
     host: Option<Host>,
@@ -197,6 +200,7 @@ impl Repl {
             bootstrap,
             externs: Vec::new(),
             replay: false,
+            prelude: None,
             tmp: TempDir::new(opts.keep_temps).map_err(|d| d.message)?,
             opts,
             state: State::default(),
@@ -253,6 +257,9 @@ impl Repl {
                 self.bindings.clear();
                 self.statics.clear();
                 self.any_types.clear();
+                if let Some(p) = self.prelude.clone() {
+                    self.cell(&p);
+                }
             }
             ":help" | ":h" => print!("{HELP}"),
             _ if cell.starts_with(":type ") || cell.starts_with(":t ") => {
@@ -1026,11 +1033,16 @@ pub fn main(
     opts: BuildOptions,
     interactive: bool,
     replay: bool,
+    prelude: Option<&str>,
 ) -> i32 {
     match Repl::new(bootstrap, opts) {
         Ok(mut r) => {
             r.externs = externs;
             r.replay = replay;
+            if let Some(p) = prelude {
+                r.prelude = Some(p.to_owned());
+                r.cell(p);
+            }
             r.run(std::io::stdin().lock(), interactive);
             0
         }

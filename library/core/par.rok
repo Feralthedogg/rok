@@ -169,9 +169,13 @@ pub fn scope(f: fn(Scope)) {
 
 fn run_scope(f: fn(Scope)) {
     let tasks: List<ScopeTask> = [];
-    let s = Scope { tasks: Mutex::new(tasks) };
+    let s = Scope { tasks: Mutex::new(tasks), cancelled: Atomic::new(false) };
     f(s);
-    // Tasks may spawn more tasks: drain until none is left.
+    drain(s);
+}
+
+/// Wait for every task of `s` (they may spawn more: until none is left).
+fn drain(s: Scope) {
     loop {
         let next: ScopeTask | none = none;
         using g = s.tasks.lock() {
@@ -200,13 +204,21 @@ impl ScopeTask {
 /// Spawns tasks that `scope` waits for.
 pub struct Scope {
     tasks: Mutex<List<ScopeTask>>;
+    /// Set once a `try_scope` child or body threw: tasks that have not
+    /// started yet never run.
+    cancelled: Atomic<bool>;
 }
 
 impl Scope {
     pub fn spawn<T: Send>(self, f: fn() -> T + Send) -> ScopeHandle<T> {
         let result: GcBuf<T> = buf_new(1);
+        let cancelled = self.cancelled;
         let task = ScopeTask {
-            handle: fork(|| { result[0] = f(); }),
+            handle: fork(|| {
+                if !cancelled.load() {
+                    result[0] = f();
+                }
+            }),
             joined: Once::new(),
         };
         using g = self.tasks.lock() {
@@ -227,5 +239,99 @@ impl<T> ScopeHandle<T> {
     pub fn join(self) -> T {
         self.task.finish();
         self.result[0]
+    }
+}
+
+/// `scope` whose body and tasks may throw (2.19.3: "an exception cancels
+/// the children"). The first error cancels the scope: tasks that have
+/// not started never run (a running one finishes: a sync closure has no
+/// cancellation point), `try_scope` waits for the rest and throws that
+/// error. Not in spec 2.19, whose `scope` takes a non-throwing
+/// `fn(Scope)`.
+pub fn try_scope<E: Send>(f: fn(TryScope<E>) throws (E)) throws (E) {
+    let err: GcBuf<E> = buf_new(1);
+    let failed = Atomic::new(false);
+    task::in_pool(|| {
+        let tasks: List<ScopeTask> = [];
+        let s = TryScope {
+            scope: Scope { tasks: Mutex::new(tasks), cancelled: Atomic::new(false) },
+            err: err,
+            failed: failed,
+        };
+        try f(s) catch e { s.fail(e); };
+        drain(s.scope);
+        true
+    });
+    if failed.load() {
+        throw err[0];
+    }
+}
+
+/// The `Scope` of `try_scope`.
+pub struct TryScope<E> {
+    scope: Scope;
+    /// The first error (`failed` set once it is written).
+    err: GcBuf<E>;
+    failed: Atomic<bool>;
+}
+
+impl<E: Send> TryScope<E> {
+    /// Keep the first error and cancel the scope.
+    fn fail(self, e: E) {
+        // Only the first: a skipped task's `join` reads `err` once it sees
+        // the scope cancelled.
+        if self.failed.compare_exchange(false, true, SeqCst, SeqCst).is_ok() {
+            self.err[0] = e;
+            self.scope.cancelled.store(true);
+        }
+    }
+
+    /// `Scope::spawn` for a throwing `f`: its error cancels the scope.
+    pub fn spawn<T: Send>(self, f: fn() throws (E) -> T + Send) -> TryScopeHandle<T, E> {
+        let out: GcBuf<T> = buf_new(1);
+        let own: GcBuf<E> = buf_new(1);
+        // 0: ran, 1: threw (`own`), 2: cancelled before it started.
+        let status = Atomic::new(2);
+        let me = self;
+        let h = self.scope.spawn(|| {
+            status.store(0);
+            out[0] = try f() catch e {
+                own[0] = e;
+                status.store(1);
+                me.fail(e);
+                return;
+            };
+        });
+        TryScopeHandle { inner: h, out: out, own: own, status: status, scope: self }
+    }
+
+    /// Whether the scope was cancelled: a long task may poll this.
+    pub fn is_cancelled(self) -> bool {
+        self.scope.cancelled.load()
+    }
+}
+
+/// One `TryScope::spawn`ed task.
+pub struct TryScopeHandle<T, E> {
+    inner: ScopeHandle<()>;
+    out: GcBuf<T>;
+    own: GcBuf<E>;
+    status: Atomic<i32>;
+    scope: TryScope<E>;
+}
+
+impl<T, E: Send> TryScopeHandle<T, E> {
+    /// Wait for the task: its result, its error, or (cancelled before it
+    /// ran) the scope's first error.
+    pub fn join(self) throws (E) -> T {
+        self.inner.join();
+        let st = self.status.load();
+        if st == 1 {
+            throw self.own[0];
+        }
+        if st == 2 {
+            throw self.scope.err[0];
+        }
+        self.out[0]
     }
 }

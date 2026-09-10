@@ -78,8 +78,8 @@ const SRC: &str = "\
 #[derive(Debug)]
 struct P { x: i32; y: i32; }
 impl P {
-    fn sum(self) -> i32 { self.x + self.y }
-}
+    fn sum(self) -> i32 { self.x + self.y } }
+/// Doubles `n`.
 fn twice(n: i32) -> i32 { n * 2 }
 let p = P { x: 1, y: 2 };
 let s = p.sum();
@@ -179,6 +179,7 @@ fn scripted_session() {
     );
     assert!(hover(2).contains("p: P"), "{}", hover(2));
     assert!(hover(3).contains("fn twice(n: i32) -> i32"), "{}", hover(3));
+    assert!(hover(3).ends_with("```\n\nDoubles `n`."), "{}", hover(3));
     let line = |r: &Json| r.get("range").get("start").get("line").clone();
     assert_eq!(line(&result(4)), Json::num(5));
     assert_eq!(result(4).get("uri").as_str(), Some(uri));

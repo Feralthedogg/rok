@@ -15,9 +15,10 @@ use rokc_hir::HirModule;
 use rokc_lexer::Lexer;
 use rokc_mir::MirModule;
 use rokc_parser::{
-    ExtOps, KeywordDef, LitRule, LiteralDef, LiteralTable, MetaDef, MetaTable, PatKind, PrecTable,
-    apply_keywords, check_keyword, collect_keywords, collect_lang_table, collect_literals,
-    collect_meta_blocks, collect_prec_table, parse_pattern, parse_program, parse_program_meta,
+    ExtOps, KeywordDef, KeywordTable, LitRule, LiteralDef, LiteralTable, MetaDef, MetaTable,
+    PatKind, PrecTable, apply_keywords, check_keyword, collect_keywords, collect_lang_table,
+    collect_literals, collect_meta_blocks, collect_prec_table, parse_pattern, parse_program,
+    parse_program_meta,
 };
 
 pub use cfg::CfgEnv;
@@ -240,6 +241,8 @@ pub struct SourceFile {
     pub items: Vec<rokc_ast::Item>,
     /// Top-level statements (the entry file's implicit `main`).
     pub stmts: Vec<rokc_ast::Stmt>,
+    /// Its meta expansions as source text (`--emit=expanded`).
+    pub expanded: Vec<String>,
 }
 
 /// A user module named like a dependency would merge with it: dependency
@@ -410,13 +413,18 @@ fn compile_unit(
     let lib_metas = metas.metas.len();
     // Spec 6.7.11: the user package's own `#[infix]` registrations are
     // gathered by the same pre-pass, so its extension tokens lex.
+    metas.idents = Some(Vec::new());
     for prog in user_programs(source, path, &mut metas) {
         let (sub, mut d) = collect_prec_table(&prog);
         diags.append(&mut d);
         diags.extend(sub.entries().cloned().filter_map(|e| prec.merge(e)));
     }
+    diags.extend(cross_file_confusables(
+        metas.idents.take().unwrap_or_default(),
+    ));
     let user_metas = format!("{:?}", &metas.metas[lib_metas..]);
     let ext = prec.ext_ops();
+    relex_metas(&mut metas, &ext);
     let mut meta_table = MetaTable::default();
     diags.extend(metas.metas.into_iter().filter_map(|m| meta_table.add(m)));
     let meta_table = std::sync::Arc::new(meta_table);
@@ -552,11 +560,12 @@ fn compile_unit(
         attrs,
         items: all_items,
         stmts: Vec::new(),
+        expanded: Vec::new(),
     };
 
     // Spec 6.4: `#[lang(...)]` slots over library + user items; a slot
     // bound twice is an error (6.4.6).
-    // ponytail: the table is only validated; HIR doesn't consume it yet.
+    // HIR reads the trait slots off the same attributes (`lang_trait`).
     let (_lang, mut lang_diags) = collect_lang_table(&program);
     diags.append(&mut lang_diags);
 
@@ -586,6 +595,9 @@ fn compile_unit(
         if let Some(h) = mir.pkg_hashes.iter_mut().find(|(n, _)| *n == p.rhir.name) {
             h.1.clone_from(&p.rhir.hash);
         }
+    }
+    if let Some(l) = lib {
+        rokc_mir::prune_library(&mut mir, l);
     }
     mir.link.lib = lib.map(str::to_owned);
     mir.link.prebuilt = prebuilt.iter().map(|p| p.rhir.name.clone()).collect();
@@ -800,6 +812,21 @@ fn parse_and_descend(
 /// template tokens keep spans into the registered file).
 fn prepass_tokens(source: &str, file: &str, metas: &mut PrePass) -> Vec<rokc_lexer::Token> {
     let (mut tokens, _) = Lexer::new(source, file.to_owned()).lex_all();
+    if let Some(idents) = &mut metas.idents {
+        // The user package's names, first use per file (spans in a
+        // registered copy of the file).
+        let id = rokc_diagnostic::register_file(file.to_owned(), source.to_owned());
+        let mut seen = std::collections::HashSet::new();
+        for t in &tokens {
+            if let rokc_lexer::TokenKind::Ident(n) = &t.kind {
+                if seen.insert(n.as_str()) {
+                    let mut span = t.span;
+                    span.file = id;
+                    idents.push((n.clone(), span));
+                }
+            }
+        }
+    }
     if tokens.iter().any(|t| t.kind == rokc_lexer::TokenKind::At)
         || source.contains("#[keyword(")
         || source.contains("#[literal(")
@@ -808,11 +835,72 @@ fn prepass_tokens(source: &str, file: &str, metas: &mut PrePass) -> Vec<rokc_lex
         for t in &mut tokens {
             t.span.file = id;
         }
-        metas.metas.extend(collect_meta_blocks(&tokens, file));
+        let found = collect_meta_blocks(&tokens, file);
+        if !found.is_empty() {
+            metas
+                .meta_files
+                .push((file.to_owned(), source.to_owned(), id));
+        }
+        metas.metas.extend(found);
         metas.keywords.extend(collect_keywords(&tokens, file));
         metas.literals.extend(collect_literals(&tokens, file));
     }
     tokens
+}
+
+/// Spec 1.4.2: distinct names of one package with the same confusable
+/// skeleton warn. The lexer checks each file; this checks pairs across
+/// the package's files.
+fn cross_file_confusables(idents: Vec<(String, rokc_diagnostic::Span)>) -> Vec<RokDiagnostic> {
+    if idents.iter().all(|(n, _)| n.is_ascii()) {
+        return Vec::new();
+    }
+    let mut first: std::collections::HashMap<String, &(String, rokc_diagnostic::Span)> =
+        std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for id in &idents {
+        match first.entry(rokc_lexer::unicode::skeleton(&id.0)) {
+            std::collections::hash_map::Entry::Occupied(o) => {
+                let (name, at) = o.get();
+                if *name != id.0 && at.file != id.1.file {
+                    out.push(
+                        RokDiagnostic::warning(
+                            rokc_diagnostic::ErrorKind::Lexical,
+                            format!(
+                                "identifier `{}` looks like `{name}` (confusable spelling)",
+                                id.0
+                            ),
+                        )
+                        .with_span(id.1, "")
+                        .with_secondary(*at, "the other spelling"),
+                    );
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(id);
+            }
+        }
+    }
+    out
+}
+
+/// The pre-pass lexed meta block bodies before the extension operators
+/// (spec 1.10.4) were known: gather them again with those operators, so
+/// a template can use `⊕`.
+fn relex_metas(metas: &mut PrePass, ext: &rokc_parser::ExtOps) {
+    let symbols = ext.symbols();
+    if symbols.is_empty() || metas.meta_files.is_empty() {
+        return;
+    }
+    metas.metas.clear();
+    for (file, source, id) in &metas.meta_files {
+        let lexer = Lexer::new(source, file.clone()).with_ext_ops(symbols.clone());
+        let (mut tokens, _) = lexer.lex_all();
+        for t in &mut tokens {
+            t.span.file = *id;
+        }
+        metas.metas.extend(collect_meta_blocks(&tokens, file));
+    }
 }
 
 /// What the pre-pass gathers besides operators: meta blocks (6.8) and
@@ -820,6 +908,12 @@ fn prepass_tokens(source: &str, file: &str, metas: &mut PrePass) -> Vec<rokc_lex
 #[derive(Clone, Default)]
 struct PrePass {
     metas: Vec<MetaDef>,
+    /// While the user package is pre-lexed: its identifiers, first use
+    /// per file (`cross_file_confusables`).
+    idents: Option<Vec<(String, rokc_diagnostic::Span)>>,
+    /// Files with meta blocks (path, source, file id): lexed again once
+    /// the extension operators are known (`relex_metas`).
+    meta_files: Vec<(String, String, u32)>,
     keywords: Vec<KeywordDef>,
     literals: Vec<LiteralDef>,
 }
@@ -869,21 +963,23 @@ fn cached<T: Clone>(slot: &Cached<T>, on: bool, key: String, parse: impl FnOnce(
 /// and the package's own keywords (6.6.5) with their handler paths.
 struct MetaCtx {
     table: std::sync::Arc<MetaTable>,
-    keywords: Vec<(String, Vec<String>)>,
+    keywords: KeywordTable,
     /// `#[literal]` patterns: the libraries', plus the package's own.
     literals: std::sync::Arc<LiteralTable>,
 }
 
 /// Spec 6.6: per package (user first, then each library root), its
 /// registered keywords and the handler's absolute path. A keyword
-/// registered twice in a build is an error (6.6.4).
+/// registered twice in a build is an error (6.6.4). A standard library
+/// type keyword (`#[keyword("int")] struct Int`, stdlib 2.1) goes to
+/// every package; only the standard library may register one.
 fn keyword_tables(
     defs: Vec<KeywordDef>,
     entry: &Path,
     user_dir: &Path,
     roots: &[LibRoot],
     diags: &mut Vec<RokDiagnostic>,
-) -> Vec<Vec<(String, Vec<String>)>> {
+) -> Vec<KeywordTable> {
     let pkgs = package_roots(user_dir, roots);
     let mut out = vec![Vec::new(); pkgs.len()];
     let mut seen: Vec<&KeywordDef> = Vec::new();
@@ -904,8 +1000,27 @@ fn keyword_tables(
             continue;
         }
         seen.push(d);
-        if let Some((i, path)) = handler_path(&pkgs, entry, &d.file, &d.handler) {
-            out[i].push((d.name.clone(), path));
+        let Some((i, path)) = handler_path(&pkgs, entry, &d.file, &d.handler) else {
+            continue;
+        };
+        if !d.ty {
+            out[i].push((d.name.clone(), path, false));
+        } else if path.first().is_some_and(|p| p == "rok") {
+            for t in &mut out {
+                t.push((d.name.clone(), path.clone(), true));
+            }
+        } else {
+            diags.push(
+                RokDiagnostic::error(
+                    rokc_diagnostic::ErrorKind::Meta,
+                    format!(
+                        "`#[keyword(\"{}\")]` must be on a function — its handler (spec 6.6.2); \
+                         only the standard library names a type with it",
+                        d.name
+                    ),
+                )
+                .with_span(d.span, ""),
+            );
         }
     }
     out
@@ -935,8 +1050,8 @@ fn package_roots(user_dir: &Path, roots: &[LibRoot]) -> Vec<(PathBuf, Vec<String
 /// The package index and absolute path of `handler` defined in `file`:
 /// the closest package directory owns the file; its path below that
 /// directory is the module path (`a/b.rok` → `a::b`); the build's entry
-/// file is its package's root module.
-// ponytail: a handler inside an inline `mod x { }` isn't found.
+/// file is its package's root module; `handler` may go through inline
+/// `mod`s (`inner::f`).
 fn handler_path(
     pkgs: &[(PathBuf, Vec<String>)],
     entry: &Path,
@@ -958,7 +1073,7 @@ fn handler_path(
     if file != entry && !(segs.len() == 1 && (segs[0] == "lib" || segs[0] == "main")) {
         path.extend(segs);
     }
-    path.push(handler.to_owned());
+    path.extend(handler.split("::").map(str::to_owned));
     Some((i, path))
 }
 
@@ -1130,6 +1245,7 @@ fn collect_module_tree(
             attrs: program.attrs.clone(),
             items: filtered.clone(),
             stmts: program.stmts.clone(),
+            expanded: program.expanded.clone(),
         });
     }
 

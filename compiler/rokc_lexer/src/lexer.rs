@@ -648,8 +648,13 @@ impl<'src> Lexer<'src> {
         self.error_from(lit_start, msg);
     }
 
-    /// An explicit suffix fixes the type: the value must fit it.
+    /// An explicit suffix fixes the type: the value must fit it. An
+    /// unsuffixed literal takes its type from the slot (`int` / `float`
+    /// hold any value, stdlib 2.1), so HIR checks it.
     fn check_range(&mut self, start: usize, body: &str, radix: u32, is_float: bool, suffix: &str) {
+        if suffix.is_empty() {
+            return;
+        }
         let clean: String = body.chars().filter(|&c| c != '_').collect();
         if is_float {
             let inf = match suffix {
@@ -1173,5 +1178,15 @@ mod tests {
         );
         err("/* unterminated");
         err("a # b");
+    }
+
+    #[test]
+    fn token_text_lexes_back() {
+        let src = r##"#[derive(X)] fn f<T>(x: ...T) -> i32 throws { 'l: loop { a .+= b; } }
+            let s = "q\"\n" + f"{x:>4}" + r#"a"b"# + 'c' + c'\x01';
+            x %%= 1e-3f32 ?? y?.z .<= 0xFFu8 << 2 ∈ ws; @x; #![a] .. ..= => ::"##;
+        let toks = ok(src);
+        let back: Vec<String> = toks.iter().map(T::text).collect();
+        assert_eq!(ok(&back.join(" ")), toks);
     }
 }

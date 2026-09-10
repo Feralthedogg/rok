@@ -13,7 +13,7 @@ pub mod prec;
 #[cfg(test)]
 mod tests;
 
-pub use keyword::{KeywordDef, apply_keywords, check_keyword, collect_keywords};
+pub use keyword::{KeywordDef, KeywordTable, apply_keywords, check_keyword, collect_keywords};
 pub use lang::{LangEntry, LangItemKind, LangTable, collect_lang_table};
 pub use parser::literal::{
     ArgKind, LitRule, LiteralDef, LiteralTable, PatKind, Pattern, Shape, collect_literals,

@@ -54,11 +54,12 @@ pub fn codegen_with_target(
     repl: Option<&ReplCell>,
 ) -> Result<MlirOutput, RokDiagnostic> {
     let pointer_width = pointer_width_for_target(target);
+    emit::WIDE_ALIGN.set(emit::wide_align_for_target(target));
     let mut e = emit::Emitter::new(pointer_width);
     e.overflow_checks = overflow_checks;
     e.c_target = abi::CTarget::from_triple(target);
     if debug {
-        e.debug = Some(debug::DebugInfo::new());
+        e.debug = Some(debug::DebugInfo::new(pointer_width));
     }
     e.repl = repl.cloned();
     e.emit_module(module);

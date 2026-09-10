@@ -76,6 +76,83 @@ fn new_bin_package_runs_from_its_directory() {
     assert!(!app.join("target").exists());
 }
 
+/// `--emit=ast` (9.9.10): the package after meta expansion, as rok
+/// source (derived impls, `if let` as `match`; no comments).
+#[test]
+fn emit_ast_shows_derives_and_desugaring() {
+    let dir = scratch("ast");
+    fs::write(
+        dir.join("main.rok"),
+        "// gone\n#[derive(Clone)]\nstruct P { x: i32; }\n\
+         fn main() {\n    let v: i32 | none = 3;\n    if let n: i32 = v { println(f\"{n}\"); }\n}\n",
+    )
+    .unwrap();
+    let out = rokc(None, &dir, &["build", "--emit=ast", "-o", "x.rok"]);
+    assert_exit(&out, 0);
+    let text = fs::read_to_string(dir.join("x.rok")).unwrap();
+    assert!(
+        text.contains("impl rok::core::marker::Clone for P {")
+            && text.contains("return P { x: self.x.clone() };")
+            && text.contains("match v {\n        n: i32 => {")
+            && !text.contains("gone"),
+        "{text}"
+    );
+}
+
+/// 9.2.8 in a library build: every function of the package is a root
+/// (even a private one nothing calls), library code it does not reach
+/// is dropped.
+#[test]
+fn library_build_drops_code_its_package_does_not_reach() {
+    let dir = scratch("libprune");
+    let lib = dir.join("plib");
+    fs::create_dir_all(&lib).unwrap();
+    fs::write(
+        lib.join("lib.rok"),
+        "pub fn f() -> f64 { 2.0.sqrt() }\nfn unused_private() -> i32 { 2 }\n",
+    )
+    .unwrap();
+    let out = rokc(None, &dir, &["emit", "plib", "--emit=mir", "-o", "p.mir"]);
+    assert_exit(&out, 0);
+    let mir = fs::read_to_string(dir.join("p.mir")).unwrap();
+    assert!(mir.contains("fn plib::unused_private()"), "{mir}");
+    assert!(mir.contains("fn plib::f()"), "{mir}");
+    assert!(!mir.contains("fn rok_f64_cbrt("), "{mir}");
+    assert!(mir.matches("\nfn ").count() < 40, "{mir}");
+}
+
+/// 902.16: an unchanged package is not rebuilt; a changed source, a
+/// different option or a replaced output rebuilds it.
+#[test]
+fn unchanged_package_is_fresh() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("fresh");
+    assert_exit(&rokc(None, &dir, &["new", "app"]), 0);
+    let app = dir.join("app");
+    let built = |args: &[&str]| {
+        let out = rokc(Some(&env), &app, args);
+        assert_exit(&out, 0);
+        let stderr = text(&out.stderr);
+        assert!(
+            stderr.contains("Fresh app") != stderr.contains("Compiling app"),
+            "{stderr}"
+        );
+        (stderr.contains("Compiling app"), text(&out.stdout))
+    };
+    assert!(built(&["build"]).0);
+    assert_eq!(built(&["run"]), (false, "Hello, world!\n".to_owned()));
+    fs::write(app.join("main.rok"), "println(\"changed\");\n").unwrap();
+    assert_eq!(built(&["run"]), (true, "changed\n".to_owned()));
+    assert!(!built(&["build"]).0);
+    assert!(built(&["build", "-g"]).0);
+    assert!(!built(&["build", "-g"]).0);
+    // A file the package does not use is still one of its sources.
+    fs::write(app.join("other.rok"), "fn f() {}\n").unwrap();
+    assert!(built(&["build", "-g"]).0);
+    fs::write(app.join("target/debug/app"), "").unwrap();
+    assert!(built(&["build", "-g"]).0);
+}
+
 #[test]
 fn lib_package_builds_archive_and_runs_tests() {
     let Some(env) = setup() else { return };
@@ -521,4 +598,82 @@ fn init_makes_an_existing_directory_a_package() {
     assert_exit(&rokc(None, &dir, &["init", "--lib"]), 0);
     assert!(dir.join("lib.rok").is_file());
     assert_exit(&rokc(None, &dir, &["init"]), 1);
+}
+
+#[test]
+fn emit_expanded_prints_meta_expansions() {
+    // Spec 6.9.9: `--emit=expanded` writes what user derives /
+    // attributes generate, as source (the nested expansion of `Tag`'s
+    // derive, used in the template at 11:5, is listed after the
+    // attribute's).
+    let dir = scratch("expanded");
+    let src = "trait Named { fn type_name() -> str; }\n\
+               #[impl_derive(Named)]\n\
+               pub @derive {\n    impl Named for @Self {\n        \
+               fn type_name() -> str { return @Self.as_str(); }\n    }\n}\n\
+               #[impl_attribute(with_tag)]\n\
+               pub @attribute {\n    @item\n    #[derive(Named)]\n    struct Tag {}\n}\n\
+               #[with_tag]\nfn f() -> i32 { 1 }\n\
+               println(Tag::type_name());\n";
+    fs::write(dir.join("m.rok"), src).unwrap();
+    let out = rokc(
+        None,
+        &dir,
+        &["build", "m.rok", "--emit=expanded", "-o", "m.expanded.rok"],
+    );
+    assert_exit(&out, 0);
+    let got = fs::read_to_string(dir.join("m.expanded.rok")).unwrap();
+    let want = "// expanded from this `#[with_tag]` (m.rok:14:1)\n\
+                fn f() -> i32 {\n    1\n}\n\
+                #[derive(Named)]\nstruct Tag {\n}\n\n\
+                // expanded from this `#[derive(Named)]` (m.rok:11:5)\n\
+                impl Named for Tag {\n    fn type_name() -> str {\n        \
+                return \"Tag\";\n    }\n}\n";
+    assert_eq!(got, want);
+}
+
+#[test]
+fn overflow_checks_option_overrides_the_opt_level() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("ovf");
+    fs::write(
+        dir.join("ovf.rok"),
+        "fn add(a: i32, b: i32) -> i32 { return a + b; }\nprintln(f\"{add(2147483647, 1)}\");\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| rokc(Some(&env), &dir, &[&["run", "ovf.rok"], args].concat());
+    assert_exit(&run(&["-O2", "-C", "overflow-checks"]), 101);
+    assert_exit(&run(&["-O0", "-C", "overflow-checks=no"]), 0);
+    assert_exit(&run(&["-C", "bogus"]), 2);
+}
+
+#[test]
+fn dependency_trait_is_not_the_current_package() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("clash");
+    // Spec 4.9.6: a dependency's trait ranks with core's unless `use`d.
+    fs::create_dir_all(dir.join("dz")).unwrap();
+    fs::write(
+        dir.join("dz/lib.rok"),
+        "pub trait DepZero { fn zero() -> Self; }\n\
+         impl DepZero for i32 { fn zero() -> i32 { return 7; } }\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("app")).unwrap();
+    fs::write(dir.join("app/main.rok"), "println(f\"{i32::zero()}\");\n").unwrap();
+    let out = rokc(Some(&env), &dir, &["run", "app", "--extern", "dz=dz"]);
+    assert_exit(&out, 1);
+    assert!(
+        text(&out.stderr).contains("is ambiguous"),
+        "{}",
+        text(&out.stderr)
+    );
+    fs::write(
+        dir.join("app/main.rok"),
+        "use dz::DepZero;\nprintln(f\"{i32::zero()}\");\n",
+    )
+    .unwrap();
+    let out = rokc(Some(&env), &dir, &["run", "app", "--extern", "dz=dz"]);
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "7\n");
 }

@@ -329,6 +329,15 @@ impl<T> rok::core::future::Future for RecvFuture<T> {
 impl<T> rok::core::stream::Stream for Receiver<T> {
     type Item = T;
     fn poll_next(ref self, ref ctx: rok::core::future::Context) -> rok::core::future::Poll<T | none> {
+        // A cancelled task leaves at this `await`: a value taken now
+        // would be dropped, so leave it queued (and stop counting as a
+        // suspended receiver).
+        if rok::core::task::cancel_requested(ctx) {
+            using g = self.ch.lock.lock() {
+                self.ch.put(ASYNC_WAITING, 0);
+            }
+            return rok::core::future::Poll::Pending;
+        }
         // Park before looking, so a send after the look unparks us.
         rok::core::task::park(unsafe { rok_task_key_usize(self.ch.meta) }, ctx.waker());
         let got = false;
@@ -369,6 +378,10 @@ impl<T> SendFuture<T> {
         if !self.pushed {
             if !self.tx.open[0] {
                 throw SendError::Closed(self.value);
+            }
+            // A cancelled task does not send.
+            if rok::core::task::cancel_requested(ctx) {
+                return rok::core::future::Poll::Pending;
             }
             // Park before looking, so a receive after the look unparks us.
             rok::core::task::park(ch.send_key(), ctx.waker());

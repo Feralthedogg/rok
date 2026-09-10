@@ -394,15 +394,6 @@ pub(super) fn raise(
                 ctx.ty_name(&decl)
             ),
         );
-    } else if ctx.implicit_main {
-        ctx.emit_error(
-            rokc_diagnostic::ErrorKind::Type,
-            format!(
-                "error `{}` is not handled: top-level statements can't throw — catch it \
-                 or use an explicit `fn main() throws ({0})` (spec 4.16)",
-                ctx.ty_name(&ety)
-            ),
-        );
     } else {
         ctx.emit_error(
             rokc_diagnostic::ErrorKind::Type,

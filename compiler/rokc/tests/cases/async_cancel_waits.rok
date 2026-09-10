@@ -1,0 +1,51 @@
+// expect-exit: 0
+// expect-stdout:
+// recv: 200 values, none lost
+// condvar: left while the mutex was held: true
+// held lock untouched: true
+// free afterwards: true
+// registrations left: 0
+
+// Cancelling a task at an async wait never loses or duplicates work:
+// `recv_async` does not take a value on a cancelled poll (it stays in
+// the channel), and `Condvar::wait_async` leaves without blocking the
+// worker on a mutex another task holds — and its guard's drop does
+// not unlock that task's lock.
+
+// recv: the send wakes the receiver, the cancel lands at the same time.
+let lost = 0;
+let seen = 0;
+for round in 0..200 {
+    let (tx, rx) = channel::<i32>();
+    let t = task::spawn(async { (await rx.recv_async()) ?? -1 });
+    await task::sleep(Duration::us(200));
+    try! tx.send(round);
+    t.cancel();
+    let got = try await t.join() catch _: CancellationError { -2 };
+    if got == round {
+        seen += 1;
+    } else if rx.try_recv() == round {
+        seen += 1;
+    } else {
+        lost += 1;
+    }
+}
+println(f"recv: {seen} values, {if lost == 0 { "none" } else { "some" }} lost");
+
+let m = Mutex::new(0);
+let cv = Condvar::new();
+let waiter = task::spawn(async {
+    using g = await m.lock_async() {
+        g = await cv.wait_async(g);
+    }
+    1
+});
+await task::sleep(Duration::ms(10));
+using held = await m.lock_async() {
+    waiter.cancel();
+    let r = try await waiter.join() catch _: CancellationError { 0 };
+    println(f"condvar: left while the mutex was held: {r == 0}");
+    println(f"held lock untouched: {m.try_lock() is none}");
+}
+println(f"free afterwards: {m.try_lock() is MutexGuard<i32>}");
+println(f"registrations left: {task::registrations()}");

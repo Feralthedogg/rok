@@ -1,0 +1,22 @@
+// expect-exit: 0
+// expect-stdout:
+// 7
+// 8
+
+// The positive side of `where F::Output: Send`: a hand-written `Send`
+// future with a `Send` output spawns; a `!Send` output still runs on
+// `spawn_local`.
+struct Seven {}
+impl Future for Seven {
+    type Output = i32;
+    fn poll(ref self, ref ctx: Context) -> Poll<i32> { Poll::Ready(7) }
+}
+struct MakeCell {}
+impl Future for MakeCell {
+    type Output = Cell<i32>;
+    fn poll(ref self, ref ctx: Context) -> Poll<Cell<i32>> { Poll::Ready(Cell::new(8)) }
+}
+
+println(f"{await task::spawn(Seven {})}");
+let c = await task::spawn_local(MakeCell {});
+println(f"{c.get()}");

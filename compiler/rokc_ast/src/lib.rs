@@ -6,6 +6,7 @@
 
 pub mod defs;
 pub mod escape;
+pub mod print;
 
 pub use defs::*;
 
@@ -18,6 +19,8 @@ pub struct Program {
     /// Top-level statements in source order (spec 4.16.1). Only the entry
     /// file `main.rok` may have them; they become the implicit `main`.
     pub stmts: Vec<Stmt>,
+    /// Source text of each meta expansion (spec 6.9.9, `--emit=expanded`).
+    pub expanded: Vec<String>,
 }
 
 /// Parsed attribute. Spec 6.1 grammar:

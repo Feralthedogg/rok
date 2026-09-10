@@ -5,7 +5,8 @@
 //!   0  : `type_id`   u32
 //!   4  : `gc_flags`  u32 (bit 0=MARK, 1=STICKY, 2=PINNED, 3=FORWARDED,
 //!                          4=LARGE, 5=IMMORTAL; 6=UNLOGGED, 7=CARDED
-//!                          are this runtime's write-barrier bits)
+//!                          are this runtime's write-barrier bits,
+//!                          8=NOMOVE, 9=NOEVAC its evacuation bits)
 //!   8  : `gc_word`   u64 (forwarding pointer or LOS payload size)
 //!   16 : payload     ...
 
@@ -39,6 +40,14 @@ pub const FLAG_UNLOGGED: u32 = 1 << 6;
 /// `rokr_gc::CARD_SIZE` bytes of the object (from the header).
 /// Implementation bit; the barrier tests it together with `UNLOGGED`.
 pub const FLAG_CARDED: u32 = 1 << 7;
+/// The object's address was taken as a number (a parking key, 805
+/// `rok_task_key_*`): the collector never moves it. Implementation bit;
+/// permanent, unlike `PINNED` it does not keep the object alive.
+pub const FLAG_NOMOVE: u32 = 1 << 8;
+/// Collector-internal, one full collection: an ambiguous word (a root,
+/// an `any` / union payload word the collector cannot decode) refers to
+/// the object, so this evacuation leaves it in place.
+pub const FLAG_NOEVAC: u32 = 1 << 9;
 
 pub const HEADER_SIZE: usize = 16;
 pub const HEADER_ALIGN: usize = 8;

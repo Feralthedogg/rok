@@ -5,9 +5,8 @@
 // resolve against the working directory. A `Dir` opened from it confines
 // paths to itself: absolute paths and `..` are refused.
 //
-// ponytail: no reflink (`clonefile` / `FICLONE`) in `copy`, no `mmap`;
-// `Metadata` times are Unix seconds (`mtime()` ...) until std::time has
-// `SystemTime`; `File` / `Dir` close through `close()` or on leaving
+// ponytail: `copy` reflinks on macOS only (`clonefileat`; no Linux
+// `FICLONE` / `copy_file_range`), no `mmap`; `File` / `Dir` close through `close()` or on leaving
 // `using`; a `ReadDir` also closes when iterated to its end.
 //
 // Async (`*_async`, as in std::net): kqueue / epoll cannot wait on a
@@ -23,6 +22,7 @@ use rok::std::io::{IoError, IoErrorKind, Reader, Writer, Seek, check, err_cell, 
 pub use rok::std::io::SeekFrom;
 use rok::std::path::{Path, AsPath, Component};
 use rok::std::env;
+use rok::std::time::SystemTime;
 use rok::core::future::{Context, Poll};
 use rok::core::stream::Stream;
 use rok::core::task::Blocking;
@@ -42,6 +42,7 @@ extern "C" {
     fn rok_os_flock(fd: i32, op: i32) -> i32;
     fn rok_os_copy_fd(src: i32, dst: i32) -> i64;
     fn rok_os_stat(dir: i32, path: str, follow: i32, fd: i32, out: GcBuf<i64>) -> i32;
+    fn rok_os_clone(dir: i32, from: str, to: str) -> i32;
     fn rok_os_mkdir(dir: i32, path: str, mode: u32) -> i32;
     fn rok_os_unlink(dir: i32, path: str, is_dir: i32) -> i32;
     fn rok_os_rename(dir: i32, from: str, to_dir: i32, to: str) -> i32;
@@ -131,6 +132,7 @@ pub struct Metadata {
     mtime_ns: i64;
     atime: i64;
     ctime: i64;
+    atime_ns: i64;
 }
 
 impl Metadata {
@@ -144,11 +146,16 @@ impl Metadata {
     pub fn mtime_nanos(self) -> i64 { self.mtime_ns }
     pub fn atime(self) -> i64 { self.atime }
     pub fn ctime(self) -> i64 { self.ctime }
+    /// Last modification as a `SystemTime` (3.3.3). Never throws on
+    /// Unix; `throws` keeps room for platforms without the field.
+    pub fn modified(self) throws (IoError) -> SystemTime { SystemTime::from_unix(self.mtime, self.mtime_ns as u32) }
+    /// Last access as a `SystemTime`.
+    pub fn accessed(self) throws (IoError) -> SystemTime { SystemTime::from_unix(self.atime, self.atime_ns as u32) }
 }
 
 /// `stat` through the runtime: `fd >= 0` → `fstat(fd)`.
 fn stat_at(dir: i32, path: str, follow: bool, fd: i32) throws (IoError) -> Metadata {
-    let out: GcBuf<i64> = buf_new(7);
+    let out: GcBuf<i64> = buf_new(8);
     let f = if follow { 1 } else { 0 };
     try check(unsafe { rok_os_stat(dir, path, f, fd, out) } as i64, path);
     Metadata {
@@ -159,6 +166,7 @@ fn stat_at(dir: i32, path: str, follow: bool, fd: i32) throws (IoError) -> Metad
         mtime_ns: out[4],
         atime: out[5],
         ctime: out[6],
+        atime_ns: out[7],
     }
 }
 
@@ -691,6 +699,13 @@ impl Dir {
     pub fn copy<P: AsPath, Q: AsPath>(self, from: P, to: Q) throws (IoError) -> u64 {
         let src = try self.open(from);
         let meta = try src.metadata() catch e { try src.close() catch _ {}; throw e; };
+        // Reflink when the OS can (a new `to` on the same volume).
+        let a = try self.rel(from) catch e { try src.close() catch _ {}; throw e; };
+        let b = try self.rel(to) catch e { try src.close() catch _ {}; throw e; };
+        if meta.is_file() && unsafe { rok_os_clone(self.fd(), a, b) } == 0 {
+            try src.close() catch _ {};
+            return meta.len();
+        }
         let dst = try self.open_with(to, OpenOptions::new().write(true).create(true).truncate(true).mode(meta.mode))
             catch e { try src.close() catch _ {}; throw e; };
         let n = unsafe { rok_os_copy_fd(src.fd(), dst.fd()) };

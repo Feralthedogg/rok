@@ -354,10 +354,7 @@ impl<W: Write> Server<W> {
                 let value = hover(a, &key, text, off)?;
                 Some(Json::obj([(
                     "contents",
-                    Json::obj([
-                        ("kind", Json::str("markdown")),
-                        ("value", Json::str(format!("```rok\n{value}\n```"))),
-                    ]),
+                    Json::obj([("kind", Json::str("markdown")), ("value", Json::str(value))]),
                 )]))
             }
             "textDocument/definition" => {
@@ -510,8 +507,23 @@ fn path_completions(hir: &HirModule, segs: &[&str], push: &mut impl FnMut(&str, 
     }
 }
 
+/// Hover markdown: the code in a `rok` fence, then a function's `///`
+/// docs (spec 1.2: doc comments reach tools as text).
 fn hover(a: &Analysis, key: &str, text: &str, off: usize) -> Option<String> {
     let hir = a.hir.as_ref()?;
+    let fenced = |code: String| format!("```rok\n{code}\n```");
+    let with_doc = |f: &rokc_hir::HirFunction| {
+        let doc = a
+            .file(f.span)
+            .map(|(_, src)| crate::doc::outer_doc(src, &[], f.span))
+            .unwrap_or_default();
+        let code = fenced(signature(hir, f));
+        if doc.is_empty() {
+            code
+        } else {
+            format!("{code}\n\n{doc}")
+        }
+    };
     let ident = ident_at(text, off).map(|(s, _)| s);
     if let Some(e) = a.find_expr(
         key,
@@ -521,15 +533,15 @@ fn hover(a: &Analysis, key: &str, text: &str, off: usize) -> Option<String> {
         if let HirExprKind::Call { callee, .. } | HirExprKind::FnRef(callee) = &e.kind {
             let f = hir.functions.iter().find(|f| f.id == *callee)?;
             if ident == Some(short_name(&f.name)) {
-                return Some(signature(hir, f));
+                return Some(with_doc(f));
             }
         }
         let ty = ty_name(hir, &e.ty);
         let src = text.get(e.span.start as usize..e.span.end as usize);
-        return Some(match ident {
+        return Some(fenced(match ident {
             Some(name) if src == Some(name) => format!("{name}: {ty}"),
             _ => ty,
-        });
+        }));
     }
     // A binding site (`let x`, a parameter) has no expression: the
     // buffer's locals and items of that name.
@@ -540,10 +552,10 @@ fn hover(a: &Analysis, key: &str, text: &str, off: usize) -> Option<String> {
         .filter(|f| a.file(f.span).is_some_and(|(p, _)| p == key));
     for f in doc_fns {
         if short_name(&f.name) == name {
-            return Some(signature(hir, f));
+            return Some(with_doc(f));
         }
         if let Some(l) = f.locals.iter().find(|l| l.name.as_deref() == Some(name)) {
-            return Some(format!("{name}: {}", ty_name(hir, &l.ty)));
+            return Some(fenced(format!("{name}: {}", ty_name(hir, &l.ty))));
         }
     }
     None

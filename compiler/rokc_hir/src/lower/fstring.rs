@@ -16,6 +16,7 @@
 //! into the spec text at run time) is checked when formatting. The
 //! pieces are joined in one allocation.
 
+use super::bignum::Big;
 #[allow(clippy::wildcard_imports)]
 use super::*;
 use crate::fmt_spec;
@@ -132,8 +133,9 @@ fn static_piece(ctx: &LowerCtx<'_>, value: Expr, ty: &HirTy, text: &str, at: Spa
             return None;
         }
     };
-    let (int, float) = match ty {
-        HirTy::Prim(p) => (p.is_int(), p.is_float()),
+    let (int, float) = match (ty, super::bignum::big_of(ctx, ty)) {
+        (HirTy::Prim(p), _) => (p.is_int(), p.is_float()),
+        (_, Some(b)) => (b == Big::Int, b == Big::Float),
         _ => (false, false),
     };
     let needs = match spec.ty {
@@ -220,8 +222,27 @@ fn format(
             return call("fstr_float", vec![v, f32, spec]);
         }
     }
-    let display = "rok::core::fmt::Display";
-    let debug = "rok::core::fmt::Debug";
+    // `int` / `float`: the library's own formatter (sign / width from
+    // the runtime, digits from the value).
+    if let Some(b) = super::bignum::big_of(ctx, ty).filter(|_| letter != b'?') {
+        let (module, name) = match b {
+            Big::Int => (super::bignum::INT, "fstr_bigint"),
+            Big::Float => (super::bignum::FLOAT, "fstr_bigfloat"),
+        };
+        let mut segs: Vec<&str> = module.split("::").collect();
+        segs.pop();
+        segs.push(name);
+        return mk(
+            ExprKind::Call {
+                callee: Box::new(mk(ExprKind::Path(path(&segs, at)), at)),
+                args: vec![CallArg::Positional(value), CallArg::Positional(spec)],
+                trailing_closure: None,
+            },
+            at,
+        );
+    }
+    let display = ctx.lang_trait("display_trait");
+    let debug = ctx.lang_trait("debug_trait");
     let (disp, dbg) = if letter == b'?' {
         let d = method(value, "debug", at);
         (d.clone(), d)

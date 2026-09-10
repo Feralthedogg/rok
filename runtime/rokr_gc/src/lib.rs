@@ -1,5 +1,6 @@
-//! Garbage collector: precise, non-moving, stop-the-world mark-region
-//! (Immix-style blocks and lines, 703 §7.3.1, without evacuation).
+//! Garbage collector: stop-the-world mark-region (Immix-style blocks
+//! and lines, 703 §7.3.1) with opportunistic evacuation: precise in the
+//! heap, roots and a few ambiguous words pin what they reach.
 //!
 //! Small and medium objects (< [`LOS_THRESHOLD`], align <= 8) live in
 //! 32 KiB blocks of 128-byte lines carved from one reserved address
@@ -11,8 +12,8 @@
 //! Large objects (LOS, 702 §7.2.9) are one `malloc` each, linked through
 //! a hidden [`Prefix`] in front of the header.
 //!
-//! Every object's `gc_word` (801 §8.1.4) holds its size (8-rounded;
-//! this collector never forwards) and block objects have a nonzero
+//! Every object's `gc_word` (801 §8.1.4) holds its size (8-rounded; its
+//! new address while an evacuation runs) and block objects have a nonzero
 //! `type_id`, so a block is parsable: memory that is not an object is
 //! all zero. The refill zeroes the lines it hands out (outside the
 //! world lock; dead objects are not zeroed by the sweep), so the TLAB
@@ -44,14 +45,30 @@
 //! the word before its header) and a minor collection scans only the
 //! dirty cards, so a store into a big old buffer costs one card.
 //!
-//! ponytail: no evacuation / defragmentation, no concurrent marking
-//! (705); blocks are never returned to the OS (`madvise` of clean
-//! blocks is the upgrade). Block objects (< 8 KiB) are remembered
-//! whole.
+//! Evacuation (defragmentation, full collections only): after the
+//! sweep, if a quarter of the used blocks' lines are free, every block
+//! at most half occupied is a candidate ([`select_candidates`]); its
+//! survivors are copied into the holes of the other blocks (then free,
+//! then fresh blocks) and leave their new address behind (`FORWARDED`,
+//! `gc_word`); one pass over the live heap rewrites every precise
+//! reference ([`fix_references`]). An object stays where it is if a
+//! root or an ambiguous word reaches it (the mark records those), if it
+//! is pinned, or if its address was taken (`NOMOVE`, parking keys).
+//! Roots pin because a root word may be an inline `any` payload and
+//! because compiled code and runtime calls derive pointers from rooted
+//! values (`str` bytes passed to C or a blocking call, element
+//! addresses): an object a frame reaches directly never moves. After a
+//! full collection the pages of free blocks beyond the next cycle's
+//! allocation budget go back to the OS.
+//!
+//! ponytail: no concurrent marking (705, see TODOS); block objects
+//! (< 8 KiB) are remembered whole.
 //!
 //! Env (read once): `ROK_GC_GEN=0|1`, `ROK_GC_STRESS=N` (every object
 //! allocation through the runtime; a collection every `N` of them,
-//! every 8th one full), `ROK_GC_STATS=1` (counts and pause times to
+//! every 8th one full), `ROK_GC_EVAC=always|off` (evacuate every block
+//! each full collection / never; default: when fragmented),
+//! `ROK_GC_STATS=1` (counts, pause times, blocks and bytes moved to
 //! stderr at exit).
 //!
 //! Roots (704 §7.4.1): compiled code links a frame
@@ -60,18 +77,18 @@
 //! word that holds a GC reference (0 = none).
 //!
 //! Children (802): `type_id → ScanTable` registered by
-//! [`register_type`]; only `STRONG_REF` entries are traced. An object
-//! whose type was never registered has no traced children.
-//!
-//! A root slot or `STRONG_REF` word may also hold raw bits: the compiler
-//! types the whole payload word of an `any` value as a reference, but
-//! small primitives live there inline (`ANY_SLOT`, 802 §8.2.7). Instead
-//! of decoding tags, every candidate word is looked up among the
-//! objects (interior pointers count: a `str` points into its object's
-//! payload); a word outside every object is ignored and an integer that
-//! happens to equal one only retains that object. Words the compiler
-//! never typed as references (`usize`, raw `rok_alloc` memory) are never
-//! looked at, so marking stays precise everywhere else.
+//! [`register_type`] ([`for_each_ref`]): `STRONG_REF` / `INTERIOR_REF`
+//! words (a reference, a `str` pointer into an object, or a non-heap
+//! address), `ANY_SLOT` (the payload is a reference iff the tag has
+//! [`ANY_BOXED`]; else it is the value), and the implementation kind
+//! `AMBIGUOUS` (enum union payload words, which may hold anything). A
+//! table with the `TABLE_ARRAY` version bit describes one element of a
+//! buffer, repeated over its payload. Type id 2 (runtime word buffers)
+//! is all ambiguous words. An object whose type was never registered
+//! has no traced children. Any reference word (root, interior, or an
+//! integer that happens to equal an address) is looked up among the
+//! objects; a word outside every object is ignored and an ambiguous one
+//! only retains (and pins) the object it hits.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -83,8 +100,8 @@ use core::sync::atomic::Ordering;
 
 use rokr_common::fatal;
 use rokr_common::object_header::{
-    FLAG_CARDED, FLAG_LARGE, FLAG_MARK, FLAG_PINNED, FLAG_STICKY, FLAG_UNLOGGED, HEADER_ALIGN,
-    HEADER_SIZE, ObjectHeader,
+    FLAG_CARDED, FLAG_FORWARDED, FLAG_LARGE, FLAG_MARK, FLAG_NOEVAC, FLAG_NOMOVE, FLAG_PINNED,
+    FLAG_STICKY, FLAG_UNLOGGED, HEADER_ALIGN, HEADER_SIZE, ObjectHeader,
 };
 
 pub mod world;
@@ -93,10 +110,27 @@ pub mod world;
 const MIN_HEAP: usize = 4 << 20;
 /// First type id of the user range (801 §8.1.2).
 const USER_TYPE_BASE: u32 = 0x10000;
+/// `ScanTable` `field_kind`s (802 §8.2.3). `STRONG_REF` / `INTERIOR_REF`
+/// words hold a reference (to the header / into the object: a `str`)
+/// or a non-heap address; both are updated when the referent moves.
 const STRONG_REF: u32 = 0;
-/// Reserved type id: every pointer-aligned payload word is a candidate
-/// reference (library buffers whose element layout the runtime does not
-/// know; checked like any candidate word).
+const INTERIOR_REF: u32 = 2;
+/// `tag: u32` here, the payload word pointer-aligned after it: a box
+/// reference iff the tag has [`ANY_BOXED`] (802 §8.2.7).
+const ANY_SLOT: u32 = 3;
+/// Implementation kind (802 "5 ~"): a word that may hold a reference or
+/// any other bits (an enum union payload word). Its referent is kept
+/// alive and never moved.
+const AMBIGUOUS: u32 = 5;
+/// `ScanTable` `version` bit (implementation): the table describes one
+/// element of `total_size` bytes, repeated over the whole payload (a
+/// `GcBuf` / collection buffer; entry offsets are element-relative).
+const TABLE_ARRAY: u16 = 0x8000;
+/// `any` tag bit: the payload word is a box reference (else the value
+/// itself: a number / bool / char no wider than a pointer).
+pub const ANY_BOXED: u32 = 1 << 31;
+/// Reserved type id: every pointer-aligned payload word is an ambiguous
+/// reference (runtime word buffers: the work-stealing deque).
 pub const SCAN_WORDS_TYPE_ID: u32 = 2;
 
 /// Immix block / line geometry (703 §7.3.1).
@@ -126,6 +160,7 @@ const TAKEN: u8 = 2;
 const LINE_GRANULES: usize = LINE_SIZE / 8;
 
 /// Side metadata of one block.
+#[allow(clippy::struct_excessive_bools)] // independent per-block states
 struct BlockMeta {
     lines: [u8; LINES],
     /// Object starts (one bit per 8-byte granule): `TAKEN` lines are
@@ -138,6 +173,11 @@ struct BlockMeta {
     /// that landed in one): a block nobody looked into this time holds
     /// no survivor there, so its `TAKEN` lines just become free.
     parsed: bool,
+    /// An evacuation candidate of the running full collection.
+    evac: bool,
+    /// Free, and its pages were given back to the OS (they fault in
+    /// zeroed when the block is used again).
+    released: bool,
 }
 
 /// Hidden bookkeeping right before each LOS object header.
@@ -200,7 +240,36 @@ struct Heap {
     /// Sorted LOS addresses, rebuilt by every collection.
     index: *mut usize,
     index_cap: usize,
+    /// `ROK_GC_EVAC`: [`EVAC_OFF`], [`EVAC_AUTO`] or [`EVAC_ALWAYS`].
+    evac_mode: u8,
+    /// This (full) collection may evacuate: the mark records `pinned`.
+    evacuating: bool,
+    /// Block objects a root or an ambiguous word reaches (repeats
+    /// allowed): an evacuation leaves them in place.
+    pinned: *mut usize,
+    pinned_len: usize,
+    pinned_cap: usize,
+    /// Copy allocator of an evacuation: bump `copy_cursor..copy_limit`
+    /// (free lines of a non-candidate block); `copy_line` is the next
+    /// global line index it looks at.
+    copy_cursor: usize,
+    copy_limit: usize,
+    copy_line: usize,
+    /// 0: holes of used blocks, 1: free blocks, 2: fresh blocks.
+    copy_phase: u8,
+    /// Fresh blocks the copy allocator may still commit (unbounded for
+    /// `ROK_GC_EVAC=always`).
+    fresh_blocks: usize,
+    /// `ROK_GC_STATS`: evacuating collections, bytes moved.
+    evacuations: u64,
+    moved_bytes: u64,
 }
+
+/// `ROK_GC_EVAC` modes.
+const EVAC_OFF: u8 = 0;
+const EVAC_AUTO: u8 = 1;
+/// Every full collection evacuates every block it may (tests).
+const EVAC_ALWAYS: u8 = 2;
 
 struct Global(UnsafeCell<Heap>);
 // SAFETY: only touched with the world lock held (see module docs).
@@ -234,6 +303,18 @@ static HEAP: Global = Global(UnsafeCell::new(Heap {
     los_count: 0,
     index: ptr::null_mut(),
     index_cap: 0,
+    evac_mode: EVAC_AUTO,
+    evacuating: false,
+    pinned: ptr::null_mut(),
+    pinned_len: 0,
+    pinned_cap: 0,
+    copy_cursor: 0,
+    copy_limit: 0,
+    copy_line: 0,
+    copy_phase: 0,
+    fresh_blocks: 0,
+    evacuations: 0,
+    moved_bytes: 0,
 }));
 
 fn heap() -> &'static mut Heap {
@@ -250,11 +331,24 @@ const fn header(obj: *mut u8) -> *mut ObjectHeader {
     obj.cast()
 }
 
-/// Size of the object at `obj` (its `gc_word`).
+/// Size of the object at `obj` (its `gc_word`; not of an evacuated
+/// one, see [`moved_size`]).
 fn obj_size(obj: *mut u8) -> usize {
     // SAFETY: callers pass object headers (or zeroed block memory, which
     // reads as 0).
     unsafe { (*header(obj)).gc_word as usize }
+}
+
+/// [`obj_size`] that also reads an evacuated object's (its copy's).
+fn moved_size(obj: *mut u8) -> usize {
+    // SAFETY: an object header; a forwarded one's `gc_word` is its copy.
+    unsafe {
+        let h = &*header(obj);
+        if h.gc_flags.load(Ordering::Relaxed) & FLAG_FORWARDED != 0 {
+            return obj_size(h.gc_word as *mut u8);
+        }
+        h.gc_word as usize
+    }
 }
 
 /// Write a fresh header with `size` in `gc_word` into zeroed memory.
@@ -359,6 +453,16 @@ fn configure(h: &mut Heap) {
     h.configured = true;
     h.generational = env_num(c"ROK_GC_GEN").is_none_or(|v| v != 0);
     h.stress = env_num(c"ROK_GC_STRESS").unwrap_or(0);
+    // SAFETY: `getenv` result is null or NUL-terminated.
+    h.evac_mode = match unsafe { libc::getenv(c"ROK_GC_EVAC".as_ptr()) } {
+        p if p.is_null() => EVAC_AUTO,
+        // SAFETY: as above.
+        p => match unsafe { core::ffi::CStr::from_ptr(p) }.to_bytes() {
+            b"always" => EVAC_ALWAYS,
+            b"off" | b"0" => EVAC_OFF,
+            _ => EVAC_AUTO,
+        },
+    };
     if env_num(c"ROK_GC_STATS").is_some_and(|v| v != 0) {
         // SAFETY: registering a plain `extern "C" fn()`.
         unsafe { libc::atexit(print_stats) };
@@ -405,6 +509,17 @@ extern "C" fn print_stats() {
         h.gc_cpu_ns / 1_000_000,
         h.gc_cpu_ns / 1000 % 1000,
         h.old_bytes >> 10
+    );
+    // SAFETY: `nblocks` initialized metas.
+    let metas = unsafe { core::slice::from_raw_parts(h.meta, h.nblocks) };
+    let released = metas.iter().filter(|m| m.released).count();
+    let _ = writeln!(
+        Stderr,
+        "rok gc: {} blocks ({} KiB resident), {} evacuations moved {} KiB",
+        h.nblocks,
+        ((h.nblocks - released) * BLOCK_SIZE) >> 10,
+        h.evacuations,
+        h.moved_bytes >> 10
     );
     world::unlock();
 }
@@ -453,6 +568,7 @@ fn take_run(lines: usize, exact: bool) -> *mut u8 {
         }
         meta.lines[line..line + run].fill(TAKEN);
         meta.used = true;
+        meta.released = false;
         if exact {
             h.medium_cursor = at + run;
         } else {
@@ -466,6 +582,7 @@ fn take_run(lines: usize, exact: bool) -> *mut u8 {
     let m = unsafe { &mut *h.meta.add(b) };
     m.lines[..lines].fill(TAKEN);
     m.used = true;
+    m.released = false;
     if exact {
         h.medium_cursor = b * LINES + lines;
     }
@@ -543,6 +660,8 @@ fn new_block() -> usize {
             starts: [0; GRANULES / 64],
             used: false,
             parsed: false,
+            evac: false,
+            released: false,
         });
     }
     h.nblocks += 1;
@@ -803,11 +922,31 @@ pub unsafe fn unpin(obj: *mut u8) {
     });
 }
 
+/// Never move `obj` again (its address became a number: a parking key).
+/// It still dies when unreachable.
+///
+/// # Safety
+/// `obj` must be a live GC object.
+pub unsafe fn no_move(obj: *mut u8) {
+    // SAFETY: caller contract.
+    unsafe {
+        (*header(obj))
+            .gc_flags
+            .fetch_or(FLAG_NOMOVE, Ordering::Relaxed)
+    };
+}
+
 /// The object whose header address is `word` or whose memory contains
 /// it (a `str` points at its payload bytes, or into them after slicing).
 /// `young`: block objects outside `TAKEN` lines (old ones) are `None`,
 /// decided from the line table without touching the object.
 fn object_containing(word: usize, young: bool) -> Option<*mut u8> {
+    object_in::<false>(word, young)
+}
+
+/// [`object_containing`]; `MOVED`: objects may be evacuated already.
+fn object_in<const MOVED: bool>(word: usize, young: bool) -> Option<*mut u8> {
+    let size_of = |o: *mut u8| if MOVED { moved_size(o) } else { obj_size(o) };
     let h = heap();
     if word >= h.base && word < h.base + h.nblocks * BLOCK_SIZE {
         let blk = (word - h.base) / BLOCK_SIZE;
@@ -831,7 +970,7 @@ fn object_containing(word: usize, young: bool) -> Option<*mut u8> {
         loop {
             if bits != 0 {
                 let start = block + (i * 64 + 63 - bits.leading_zeros() as usize) * 8;
-                let size = obj_size(start as *mut u8);
+                let size = size_of(start as *mut u8);
                 return (word < start + size).then_some(start as *mut u8);
             }
             if i == 0 || (i - 1) * 64 + 63 < lowest {
@@ -852,15 +991,42 @@ fn object_containing(word: usize, young: bool) -> Option<*mut u8> {
         Err(i) => i - 1,
     };
     let start = index[i];
-    (word < start + obj_size(start as *mut u8)).then_some(start as *mut u8)
+    (word < start + size_of(start as *mut u8)).then_some(start as *mut u8)
 }
 
 /// Queue the object `word` points into, if any (and young, unless
-/// `full`), for marking.
-fn push(word: *mut u8, full: bool, len: &mut usize) {
-    if let Some(obj) = object_containing(word as usize, !full) {
-        push_obj(obj, len);
+/// `full`), for marking. `pin`: `word` is a root or ambiguous, so the
+/// object must not move.
+fn push(word: usize, full: bool, len: &mut usize, pin: bool) {
+    let Some(obj) = object_containing(word, !full) else {
+        return;
+    };
+    let h = heap();
+    if pin && h.evacuating && (obj as usize) < h.base + h.nblocks * BLOCK_SIZE {
+        if h.pinned_len == h.pinned_cap {
+            let cap = (h.pinned_cap * 2).max(1024);
+            // SAFETY: realloc of our own buffer (or null).
+            let p = unsafe { libc::realloc(h.pinned.cast(), cap * size_of::<usize>()) };
+            if p.is_null() {
+                rokr_common::oom();
+            }
+            h.pinned = p.cast();
+            h.pinned_cap = cap;
+        }
+        // SAFETY: `pinned_len < pinned_cap`.
+        unsafe { *h.pinned.add(h.pinned_len) = obj as usize };
+        h.pinned_len += 1;
     }
+    push_obj(obj, len);
+}
+
+/// `addr` lies in an evacuation candidate block.
+fn in_candidate(addr: usize) -> bool {
+    let h = heap();
+    // SAFETY: bounds-checked block index.
+    addr >= h.base
+        && addr < h.base + h.nblocks * BLOCK_SIZE
+        && unsafe { (*h.meta.add((addr - h.base) / BLOCK_SIZE)).evac }
 }
 
 fn push_obj(obj: *mut u8, len: &mut usize) {
@@ -881,14 +1047,66 @@ fn push_obj(obj: *mut u8, len: &mut usize) {
 }
 
 /// Queue the referents of `o`'s reference words.
+// The mark loop's hot path: a plain (non-array) table read inline, the
+// general `for_each_ref` otherwise.
+#[allow(clippy::cast_ptr_alignment)] // tables are 4-aligned, payloads 8
 fn scan_children(o: *mut u8, full: bool, len: &mut usize) {
-    scan_range(o, 0, usize::MAX, full, len);
+    // SAFETY: `o` is a live GC object; its ScanTable (802) describes it.
+    unsafe {
+        let type_id = (*header(o)).type_id;
+        let t = if type_id == SCAN_WORDS_TYPE_ID {
+            ptr::null()
+        } else {
+            scan_table(type_id)
+        };
+        if t.is_null() || t.add(4).cast::<u16>().read_unaligned() & TABLE_ARRAY != 0 {
+            scan_range(o, 0, usize::MAX, full, len);
+            return;
+        }
+        let n = t.add(6).cast::<u16>().read_unaligned() as usize;
+        for e in 0..n {
+            let entry = t.add(8 + 8 * e).cast::<u32>();
+            let mut off = entry.read_unaligned() as usize;
+            let precise = match entry.add(1).read_unaligned() {
+                STRONG_REF | INTERIOR_REF => true,
+                ANY_SLOT => {
+                    if o.add(off).cast::<u32>().read() & ANY_BOXED == 0 {
+                        continue;
+                    }
+                    off += size_of::<usize>();
+                    true
+                }
+                AMBIGUOUS => false,
+                _ => continue,
+            };
+            push(
+                o.add(off).cast::<usize>().read_unaligned(),
+                full,
+                len,
+                !precise,
+            );
+        }
+    }
 }
 
 /// Queue the referents of `o`'s reference words at byte offsets
 /// `lo..hi` (from the header).
-#[allow(clippy::cast_ptr_alignment)] // tables and payloads are word-aligned
 fn scan_range(o: *mut u8, lo: usize, hi: usize, full: bool, len: &mut usize) {
+    for_each_ref(o, lo, hi, |off, precise| {
+        // SAFETY: `off` is a word inside the live object `o`.
+        let word = unsafe { o.add(off).cast::<usize>().read_unaligned() };
+        push(word, full, len, !precise);
+    });
+}
+
+/// `f(offset, precise)` for every word of the live object `o` at byte
+/// offsets `lo..hi` (from the header) that may hold a reference, per
+/// its `ScanTable` (802). A `precise` word holds a reference or an
+/// address outside the heap; an ambiguous one may hold anything. An
+/// `ANY_SLOT` yields its payload word only when the tag says it is a
+/// box. An object whose type was never registered has none.
+#[allow(clippy::cast_ptr_alignment)] // tables are 4-aligned, payloads 8
+fn for_each_ref(o: *mut u8, lo: usize, hi: usize, mut f: impl FnMut(usize, bool)) {
     // SAFETY: `o` is a live GC object; its ScanTable (802) describes it.
     unsafe {
         let hd = &*header(o);
@@ -896,7 +1114,7 @@ fn scan_range(o: *mut u8, lo: usize, hi: usize, full: bool, len: &mut usize) {
             let hi = hi.min(obj_size(o)) & !7;
             let mut off = lo.max(HEADER_SIZE).next_multiple_of(8);
             while off < hi {
-                push(o.add(off).cast::<*mut u8>().read(), full, len);
+                f(off, false);
                 off += 8;
             }
             return;
@@ -905,13 +1123,55 @@ fn scan_range(o: *mut u8, lo: usize, hi: usize, full: bool, len: &mut usize) {
         if t.is_null() {
             return;
         }
+        let version = t.add(4).cast::<u16>().read_unaligned();
         let n = t.add(6).cast::<u16>().read_unaligned() as usize;
-        for e in 0..n {
-            let entry = t.add(8 + 8 * e).cast::<u32>();
-            let off = entry.read_unaligned() as usize;
-            if entry.add(1).read_unaligned() == STRONG_REF && (lo..hi).contains(&off) {
-                push(o.add(off).cast::<*mut u8>().read_unaligned(), full, len);
+        if n == 0 {
+            return;
+        }
+        let entries = core::slice::from_raw_parts(t.add(8).cast::<[u32; 2]>(), n);
+        if version & TABLE_ARRAY == 0 {
+            if lo == 0 && hi == usize::MAX {
+                visit_entries(o, entries, 0, &mut f);
+            } else {
+                visit_entries(o, entries, 0, &mut |off, p| {
+                    if (lo..hi).contains(&off) {
+                        f(off, p);
+                    }
+                });
             }
+            return;
+        }
+        // An array table repeats its entries every `stride` bytes after
+        // the header: visit the elements that overlap `lo..hi` (an `any`
+        // counts by its payload word).
+        let stride = t.cast::<u32>().read_unaligned() as usize;
+        let count = (obj_size(o) - HEADER_SIZE) / stride;
+        let first = lo.saturating_sub(HEADER_SIZE + size_of::<usize>()) / stride;
+        let last = hi.saturating_sub(HEADER_SIZE).div_ceil(stride).min(count);
+        for i in first..last {
+            visit_entries(o, entries, HEADER_SIZE + i * stride, &mut |off, p| {
+                if (lo..hi).contains(&off) {
+                    f(off, p);
+                }
+            });
+        }
+    }
+}
+
+/// [`for_each_ref`] over the `entries` of one table at byte offset `at`.
+#[inline]
+#[allow(clippy::cast_ptr_alignment)] // the tag is 4-aligned
+fn visit_entries(o: *mut u8, entries: &[[u32; 2]], at: usize, f: &mut impl FnMut(usize, bool)) {
+    for &[eo, kind] in entries {
+        let off = at + eo as usize;
+        match kind {
+            STRONG_REF | INTERIOR_REF => f(off, true),
+            // SAFETY: the tag word of an `any` inside the live `o`.
+            ANY_SLOT if unsafe { o.add(off).cast::<u32>().read() } & ANY_BOXED != 0 => {
+                f(off + size_of::<usize>(), true);
+            }
+            AMBIGUOUS => f(off, false),
+            _ => {}
         }
     }
 }
@@ -944,14 +1204,20 @@ fn collect_locked(full: bool) {
     world::reset_tlabs();
     let mut len = 0;
     build_index();
+    let h = heap();
+    h.evacuating = full && h.evac_mode != EVAC_OFF;
     // SAFETY: the world is stopped: nobody is inside `pin` / `unpin`.
     let (pins, npins, _) = unsafe { *PINS.list.get() };
     for i in 0..npins {
         // Through the lookup, so a young one's block gets parsed.
         // SAFETY: `i < npins`.
-        push(unsafe { *pins.add(i) }, full, &mut len);
+        push(unsafe { *pins.add(i) } as usize, full, &mut len, true);
     }
-    world::for_each_root(|word| push(word, full, &mut len));
+    // Roots pin their referents: a root word may be an inline `any`
+    // payload, and compiled code / runtime calls derive pointers from
+    // rooted values (`str` bytes handed to C, element addresses), so an
+    // object a frame reaches directly never moves.
+    world::for_each_root(|word| push(word as usize, full, &mut len, true));
     // Nobody logs while the world is stopped (the barrier has no
     // safepoint): every thread's chunk joins the retired ones.
     world::for_each_wb_log(retire_log);
@@ -988,6 +1254,14 @@ fn collect_locked(full: bool) {
     }
     free_logs(log);
     let survived = sweep_blocks(full) + sweep_los(full);
+    if heap().evacuating {
+        if select_candidates() {
+            evacuate();
+        }
+        let h = heap();
+        h.evacuating = false;
+        h.pinned_len = 0;
+    }
     let h = heap();
     let live = if full {
         survived
@@ -1005,6 +1279,10 @@ fn collect_locked(full: bool) {
     h.small_cursor = 0;
     h.medium_cursor = 0;
     h.collections += 1;
+    if full {
+        release_free_blocks();
+    }
+    let h = heap();
     let dt = now_ns() - t0;
     h.gc_cpu_ns += clock_ns(libc::CLOCK_THREAD_CPUTIME_ID) - c0;
     h.gc_ns += dt;
@@ -1133,6 +1411,317 @@ fn sweep_los(full: bool) -> usize {
         }
     }
     live
+}
+
+/// After a full collection's sweep: choose the evacuation candidates
+/// (703 §7.3.1 opportunistic defragmentation) from the exact line
+/// states the sweep left: when free lines are at least a quarter of the
+/// used blocks' lines, every block at most half occupied — if together
+/// they hold an eighth of the used lines free. `ROK_GC_EVAC=always`:
+/// every used block. Whether there is any.
+// ponytail: occupancy counts lines, not live bytes; an object-level
+// histogram (Immix's "holes") is the upgrade if this picks poorly.
+#[allow(clippy::naive_bytecount)] // 256 bytes per block
+fn select_candidates() -> bool {
+    let h = heap();
+    if h.nblocks == 0 {
+        return false;
+    }
+    // SAFETY: `nblocks` initialized metas.
+    let metas = unsafe { core::slice::from_raw_parts_mut(h.meta, h.nblocks) };
+    if h.evac_mode == EVAC_ALWAYS {
+        let mut any = false;
+        for m in metas {
+            m.evac = m.used;
+            any |= m.used;
+        }
+        h.fresh_blocks = usize::MAX;
+        return any;
+    }
+    let occupied = |m: &BlockMeta| m.lines.iter().filter(|&&l| l == LIVE).count();
+    let (mut used_lines, mut free_lines, mut gain, mut moved) = (0, 0, 0, 0);
+    for m in metas.iter().filter(|m| m.used) {
+        let occ = occupied(m);
+        used_lines += LINES;
+        free_lines += LINES - occ;
+        if occ <= LINES / 2 {
+            gain += LINES - occ;
+            moved += occ;
+        }
+    }
+    if used_lines == 0 || free_lines * 4 < used_lines || gain * 8 < used_lines {
+        return false;
+    }
+    for m in metas {
+        m.evac = m.used && occupied(m) <= LINES / 2;
+    }
+    // At most half full each, the candidates fit in half as many blocks:
+    // fresh ones may be taken when the holes and free blocks run out.
+    h.fresh_blocks = moved.div_ceil(LINES) + 1;
+    true
+}
+
+/// Copy every movable survivor out of the candidate blocks (leaving its
+/// new address in the old header's `gc_word`, `FORWARDED`), rewrite
+/// every precise reference to a moved object, then recompute the
+/// candidates' lines. A survivor stays put if it is pinned, address-
+/// taken (`NOMOVE`), reached through a root or an ambiguous word, or no
+/// free line is left for it.
+fn evacuate() {
+    let h = heap();
+    h.evacuations += 1;
+    h.copy_cursor = 0;
+    h.copy_limit = 0;
+    h.copy_line = 0;
+    h.copy_phase = 0;
+    for i in 0..h.pinned_len {
+        // SAFETY: `pinned_len` recorded live block objects.
+        let o = unsafe { *h.pinned.add(i) };
+        if in_candidate(o) {
+            // SAFETY: as above.
+            unsafe {
+                (*header(o as *mut u8))
+                    .gc_flags
+                    .fetch_or(FLAG_NOEVAC, Ordering::Relaxed)
+            };
+        }
+    }
+    let (base, nblocks) = (h.base, h.nblocks);
+    let mut moved = 0;
+    for b in 0..nblocks {
+        // SAFETY: `b < nblocks`; copied out, as `copy_alloc` may grow
+        // (move) the meta table.
+        let (evac, lines, starts) = unsafe {
+            let m = &*heap().meta.add(b);
+            (m.evac, m.lines, m.starts)
+        };
+        if !evac {
+            continue;
+        }
+        let block = base + b * BLOCK_SIZE;
+        for_each_start(&lines, &starts, true, |off| {
+            let obj = (block + off) as *mut u8;
+            // SAFETY: a survivor's header.
+            let flags = unsafe { &(*header(obj)).gc_flags };
+            let f = flags.fetch_and(!FLAG_NOEVAC, Ordering::Relaxed);
+            if f & (FLAG_NOEVAC | FLAG_NOMOVE | FLAG_PINNED) != 0 {
+                return;
+            }
+            let size = obj_size(obj);
+            let Some(to) = copy_alloc(size) else {
+                return;
+            };
+            // SAFETY: `to` is `size` free bytes outside every candidate.
+            unsafe {
+                ptr::copy_nonoverlapping(obj, to, size);
+                (*header(obj)).gc_word = to as u64;
+            }
+            flags.fetch_or(FLAG_FORWARDED, Ordering::Relaxed);
+            moved += size;
+        });
+    }
+    if moved > 0 {
+        fix_references();
+    }
+    for b in 0..nblocks {
+        // SAFETY: `b < nblocks`; nothing else touches the table here.
+        let m = unsafe { &mut *heap().meta.add(b) };
+        if !m.evac {
+            continue;
+        }
+        m.evac = false;
+        let block = base + b * BLOCK_SIZE;
+        let (lines, starts) = (m.lines, m.starts);
+        m.lines = [FREE; LINES];
+        for_each_start(&lines, &starts, true, |off| {
+            let obj = (block + off) as *mut u8;
+            // SAFETY: an object header (moved or not).
+            let f = unsafe { (*header(obj)).gc_flags.load(Ordering::Relaxed) };
+            if f & FLAG_FORWARDED != 0 {
+                m.starts[off / 8 / 64] &= !(1 << (off / 8 % 64));
+            } else {
+                let end = (off + obj_size(obj)).div_ceil(LINE_SIZE);
+                m.lines[off / LINE_SIZE..end].fill(LIVE);
+            }
+        });
+        m.used = m.lines.contains(&LIVE);
+    }
+    heap().moved_bytes += moved as u64;
+}
+
+/// After the copies: rewrite every precise reference word of every
+/// survivor (copies included, old copies not) that points into a moved
+/// object. Roots and ambiguous words only reach objects that stayed.
+// ponytail: a second pass over the live heap; recording the slots that
+// point into candidates during the mark needs the candidates before
+// the mark, from stale line states (young objects refill the holes and
+// look live, so sparse blocks are rarely seen).
+#[allow(clippy::cast_ptr_alignment)] // reference words are 8-aligned
+fn fix_references() {
+    let fix = |o: *mut u8| {
+        for_each_ref(o, 0, usize::MAX, |off, precise| {
+            if !precise {
+                return;
+            }
+            // SAFETY: `off` is a reference word inside the live `o`.
+            unsafe {
+                let slot = o.add(off).cast::<usize>();
+                let w = slot.read_unaligned();
+                if !in_candidate(w) {
+                    return;
+                }
+                if let Some(old) = object_in::<true>(w, false) {
+                    slot.write_unaligned(forwarded(old as usize) + (w - old as usize));
+                }
+            }
+        });
+    };
+    let h = heap();
+    let (base, nblocks) = (h.base, h.nblocks);
+    for b in 0..nblocks {
+        // SAFETY: `b < nblocks`; `fix` only reads the table.
+        let (used, lines, starts) = unsafe {
+            let m = &*heap().meta.add(b);
+            (m.used, m.lines, m.starts)
+        };
+        if !used {
+            continue;
+        }
+        let block = base + b * BLOCK_SIZE;
+        for_each_start(&lines, &starts, true, |off| {
+            let obj = (block + off) as *mut u8;
+            // SAFETY: a survivor's (or an old copy's) header.
+            if unsafe { (*header(obj)).gc_flags.load(Ordering::Relaxed) } & FLAG_FORWARDED == 0 {
+                fix(obj);
+            }
+        });
+    }
+    // SAFETY: walks the LOS list.
+    unsafe {
+        let mut o = heap().los;
+        while !o.is_null() {
+            fix(o);
+            o = (*prefix(o)).next;
+        }
+    }
+}
+
+/// The new address of the object at `o` if it was evacuated, else `o`.
+fn forwarded(o: usize) -> usize {
+    // SAFETY: `o` is an object header.
+    unsafe {
+        let h = &*header(o as *mut u8);
+        if h.gc_flags.load(Ordering::Relaxed) & FLAG_FORWARDED != 0 {
+            h.gc_word as usize
+        } else {
+            o
+        }
+    }
+}
+
+/// Evacuation's bump allocator: `size` bytes in the free lines of a
+/// block that is not a candidate (holes of used blocks first, then
+/// free blocks, then fresh blocks within the budget). Its lines
+/// become `LIVE` and its start bit is set. `None`: no room.
+fn copy_alloc(size: usize) -> Option<*mut u8> {
+    let h = heap();
+    if size > h.copy_limit - h.copy_cursor && !next_copy_run(size.div_ceil(LINE_SIZE)) {
+        return None;
+    }
+    let h = heap();
+    let to = h.copy_cursor;
+    h.copy_cursor += size;
+    let b = (to - h.base) / BLOCK_SIZE;
+    let off = to - h.base - b * BLOCK_SIZE;
+    // SAFETY: `b < nblocks`.
+    let m = unsafe { &mut *h.meta.add(b) };
+    m.lines[off / LINE_SIZE..(off + size).div_ceil(LINE_SIZE)].fill(LIVE);
+    m.starts[off / 8 / 64] |= 1 << (off / 8 % 64);
+    m.used = true;
+    m.released = false;
+    Some(to as *mut u8)
+}
+
+/// Point the copy allocator at the next run of at least `lines` free
+/// lines; false when there is none (and no fresh block may be taken).
+fn next_copy_run(lines: usize) -> bool {
+    let h = heap();
+    while h.copy_phase < 2 {
+        let total = h.nblocks * LINES;
+        while h.copy_line < total {
+            let (b, l) = (h.copy_line / LINES, h.copy_line % LINES);
+            // SAFETY: `b < nblocks`.
+            let m = unsafe { &*h.meta.add(b) };
+            if m.evac || m.used != (h.copy_phase == 0) {
+                h.copy_line = (b + 1) * LINES;
+                continue;
+            }
+            let mut end = l;
+            while end < LINES && m.lines[end] == FREE {
+                end += 1;
+            }
+            h.copy_line = b * LINES + end.max(l + 1);
+            if end - l >= lines {
+                h.copy_cursor = h.base + b * BLOCK_SIZE + l * LINE_SIZE;
+                h.copy_limit = h.base + b * BLOCK_SIZE + end * LINE_SIZE;
+                return true;
+            }
+        }
+        h.copy_phase += 1;
+        h.copy_line = 0;
+    }
+    if h.fresh_blocks == 0 {
+        return false;
+    }
+    h.fresh_blocks -= 1;
+    let b = new_block();
+    let h = heap();
+    h.copy_cursor = h.base + b * BLOCK_SIZE;
+    h.copy_limit = h.copy_cursor + BLOCK_SIZE;
+    true
+}
+
+/// After a full collection: give the pages of the free blocks beyond
+/// the next cycle's allocation budget back to the OS. They stay
+/// reserved and writable, and fault back in zeroed when reused.
+fn release_free_blocks() {
+    let h = heap();
+    let mut keep = h.next_gc.saturating_sub(h.live_bytes).div_ceil(BLOCK_SIZE);
+    let mut b = 0;
+    while b < h.nblocks {
+        // SAFETY: `b < nblocks`.
+        let m = unsafe { &*h.meta.add(b) };
+        if m.used || m.released || keep > 0 {
+            keep -= usize::from(!m.used && !m.released);
+            b += 1;
+            continue;
+        }
+        let first = b;
+        while b < h.nblocks {
+            // SAFETY: `b < nblocks`.
+            let m = unsafe { &mut *h.meta.add(b) };
+            if m.used || m.released {
+                break;
+            }
+            m.released = true;
+            b += 1;
+        }
+        // SAFETY: remaps whole blocks of our reservation that hold no
+        // object (fresh zero pages, same protection).
+        let p = unsafe {
+            libc::mmap(
+                (h.base + first * BLOCK_SIZE) as *mut libc::c_void,
+                (b - first) * BLOCK_SIZE,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_FIXED,
+                -1,
+                0,
+            )
+        };
+        if p == libc::MAP_FAILED {
+            rokr_common::oom();
+        }
+    }
 }
 
 /// The remembered set (generational): old objects that had a reference
@@ -1291,7 +1880,20 @@ pub fn collections() -> u64 {
     n
 }
 
+/// Bytes evacuation has copied so far.
+pub fn moved_bytes() -> u64 {
+    world::lock();
+    let n = heap().moved_bytes;
+    world::unlock();
+    n
+}
+
 #[cfg(test)]
+#[allow(
+    clippy::missing_const_for_fn,
+    clippy::cast_ptr_alignment,
+    clippy::items_after_statements
+)]
 mod tests {
     use super::*;
 
@@ -1345,6 +1947,183 @@ mod tests {
         free_lines_are_reused();
         minor_collection_keeps_logged_children();
         minor_collection_scans_dirty_cards();
+        evacuation_moves_objects_and_fixes_references();
+        evacuation_defragments_sparse_blocks();
+    }
+
+    fn word(o: *mut u8, off: usize) -> usize {
+        // SAFETY: tests read words inside their own objects.
+        unsafe { o.add(off).cast::<usize>().read_unaligned() }
+    }
+
+    fn set(o: *mut u8, off: usize, v: usize) {
+        // SAFETY: tests write words inside their own objects.
+        unsafe { o.add(off).cast::<usize>().write_unaligned(v) };
+    }
+
+    /// `ROK_GC_EVAC=always`: a full collection moves what it may and
+    /// fixes every precise reference (header, interior `str`, boxed
+    /// `any` payload, array-table buffer element); roots, ambiguous
+    /// words, `NOMOVE` objects and inline `any` payloads behave.
+    #[allow(clippy::many_single_char_names)]
+    fn evacuation_moves_objects_and_fixes_references() {
+        // A: {ref @16, str ptr @24, any tag @32 + payload @40}.
+        static A: [u32; 8] = [
+            48,
+            1 | (3 << 16),
+            16,
+            STRONG_REF,
+            24,
+            INTERIOR_REF,
+            32,
+            ANY_SLOT,
+        ];
+        // R: a buffer of references (array table, 8-byte elements).
+        static R: [u32; 4] = [8, 1 | TABLE_ARRAY as u32 | (1 << 16), 0, STRONG_REF];
+        let (ta, tr, leaf) = (USER_TYPE_BASE + 10, USER_TYPE_BASE + 11, USER_TYPE_BASE + 1);
+        register_type(ta, A.as_ptr().cast());
+        register_type(tr, R.as_ptr().cast());
+        heap().evac_mode = EVAC_ALWAYS;
+        let base = live_bytes();
+        let a = alloc(48, 8, ta);
+        let a2 = alloc(48, 8, ta);
+        let (b, c, d, e, f, g) = (
+            alloc(24, 8, leaf),
+            alloc(32, 8, leaf),
+            alloc(24, 8, leaf),
+            alloc(24, 8, leaf),
+            alloc(24, 8, leaf),
+            alloc(24, 8, leaf),
+        );
+        let r = alloc(16 + 16, 8, tr);
+        let w = alloc(16 + 8, 8, SCAN_WORDS_TYPE_ID);
+        for (o, v) in [(b, 0xB), (c, 0xC), (d, 0xD), (e, 0xE), (f, 0xF)] {
+            set(o, 16, v);
+        }
+        set(a, 16, b as usize);
+        set(a, 24, c as usize + 20);
+        // SAFETY: tests write their own objects' headers / words.
+        unsafe {
+            a.add(32).cast::<u32>().write(0x1234 | ANY_BOXED);
+            a2.add(32).cast::<u32>().write(0x1234); // inline: payload is bits
+            no_move(f);
+        }
+        set(a, 40, r as usize);
+        set(a2, 40, g as usize);
+        set(r, 16, e as usize);
+        set(r, 24, f as usize);
+        set(w, 16, d as usize);
+        // SAFETY: frame layout matches `Frame` + three slots, unlinked
+        // before it dies.
+        unsafe {
+            let (mut ra, mut ra2, mut rw) = (a as usize, a2 as usize, w as usize);
+            let mut frame: (Frame, *mut usize, *mut usize, *mut usize) = (
+                Frame {
+                    prev: ptr::null_mut(),
+                    count: 3,
+                },
+                &mut ra,
+                &mut ra2,
+                &mut rw,
+            );
+            let top = rokr_common::tls::shadow_stack_top();
+            *top = (&raw mut frame).cast();
+            let moved = heap().moved_bytes;
+            collect();
+            assert!(heap().moved_bytes > moved);
+            // Rooted objects stay; what they reach precisely moves.
+            assert_eq!((ra, ra2, rw), (a as usize, a2 as usize, w as usize));
+            let b2 = word(a, 16) as *mut u8;
+            assert_ne!(b2, b);
+            assert_eq!(word(b2, 16), 0xB);
+            let c2 = (word(a, 24) - 20) as *mut u8;
+            assert_ne!(c2, c);
+            assert_eq!(word(c2, 16), 0xC);
+            let r2 = word(a, 40) as *mut u8;
+            assert_ne!(r2, r);
+            assert_eq!((*header(r2)).type_id, tr);
+            let e2 = word(r2, 16) as *mut u8;
+            assert_ne!(e2, e);
+            assert_eq!(word(e2, 16), 0xE);
+            // Address-taken, ambiguous: in place.
+            assert_eq!(word(r2, 24), f as usize);
+            assert_eq!(word(f, 16), 0xF);
+            assert_eq!(word(w, 16), d as usize);
+            assert_eq!(word(d, 16), 0xD);
+            // `g` was only behind an inline `any` payload: dead.
+            assert_eq!(object_containing(g as usize, false), None);
+            assert_eq!(object_containing(b as usize, false), None);
+            assert_eq!(live_bytes(), base + 48 * 2 + 24 * 4 + 32 + 32 + 24);
+            // A second round moves the copies again.
+            collect();
+            let b3 = word(a, 16) as *mut u8;
+            assert_eq!(word(b3, 16), 0xB);
+            assert_eq!(word(word(word(a, 40) as *mut u8, 16) as *mut u8, 16), 0xE);
+            *frame.1 = 0;
+            *frame.2 = 0;
+            *frame.3 = 0;
+            collect();
+            assert_eq!(live_bytes(), base);
+            *top = ptr::null_mut();
+        }
+        heap().evac_mode = EVAC_AUTO;
+    }
+
+    /// Default mode: after most of a block-filling population dies, the
+    /// sparse blocks are emptied into one and the rest freed.
+    fn evacuation_defragments_sparse_blocks() {
+        static R: [u32; 4] = [8, 1 | TABLE_ARRAY as u32 | (1 << 16), 0, STRONG_REF];
+        let (tr, leaf) = (USER_TYPE_BASE + 12, USER_TYPE_BASE + 1);
+        register_type(tr, R.as_ptr().cast());
+        assert_eq!(heap().evac_mode, EVAC_AUTO);
+        collect();
+        let base = live_bytes();
+        const N: usize = 4096;
+        let r = alloc(16 + 8 * N, 8, tr);
+        let used = || {
+            // SAFETY: `nblocks` initialized metas.
+            unsafe { core::slice::from_raw_parts(heap().meta, heap().nblocks) }
+                .iter()
+                .filter(|m| m.used)
+                .count()
+        };
+        // SAFETY: as above.
+        unsafe {
+            let mut root = r as usize;
+            let mut frame: (Frame, *mut usize) = (
+                Frame {
+                    prev: ptr::null_mut(),
+                    count: 1,
+                },
+                &mut root,
+            );
+            let top = rokr_common::tls::shadow_stack_top();
+            *top = (&raw mut frame).cast();
+            let before = used();
+            for i in 0..N {
+                let o = alloc(64, 8, leaf);
+                set(o, 16, i);
+                set(r, 16 + 8 * i, o as usize);
+            }
+            collect();
+            let full = used();
+            assert!(full >= before + N * 64 / BLOCK_SIZE, "{before} -> {full}");
+            for i in (0..N).filter(|i| i % 16 != 0) {
+                set(r, 16 + 8 * i, 0);
+            }
+            let moved = heap().moved_bytes;
+            collect(); // sweeps the dead: blocks 1/16 live
+            collect(); // evacuates them
+            assert!(heap().moved_bytes - moved >= (N / 16 * 64) as u64);
+            assert!(used() <= before + 2, "{before} -> {full} -> {}", used());
+            for i in (0..N).step_by(16) {
+                assert_eq!(word(word(r, 16 + 8 * i) as *mut u8, 16), i);
+            }
+            assert_eq!(live_bytes(), base + 16 + 8 * N + N / 16 * 64);
+            *frame.1 = 0;
+            collect();
+            *top = ptr::null_mut();
+        }
     }
 
     /// Generational: a young object reachable only through an old one

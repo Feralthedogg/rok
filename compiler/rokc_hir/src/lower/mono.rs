@@ -531,6 +531,16 @@ pub(super) fn lower_fn_inner(
     subst: &HashMap<String, HirTy>,
 ) -> HirFunction {
     let outer = rokc_diagnostic::set_current_span(fn_def.span);
+    // A `rethrows` instance with a non-throwing argument doesn't vote on
+    // warnings (its `try`s cover nothing by construction).
+    let nothrow = crate::ty::nothrow_ty();
+    let instance =
+        (!subst.is_empty() && !subst.values().any(|t| *t == nothrow)).then_some((fn_def.span, id));
+    if let Some((t, id)) = instance {
+        let mut iw = env.sink.instance_warns.borrow_mut();
+        iw.instances.entry(t).or_default().insert(id);
+    }
+    env.sink.instances.borrow_mut().push(instance);
     let mut ctx = LowerCtx::new(env, subst, self_ty);
     ctx.current_module = module;
     ctx.set_bounds(&fn_def.generics, &fn_def.where_clause);
@@ -570,7 +580,7 @@ pub(super) fn lower_fn_inner(
         ctx.fn_ret_ty = (**ok).clone();
         // Spec 4.16.3: an error escaping a throwing `main` is reported by
         // the entry itself (exit 1); `main` keeps a plain C return type.
-        if name == "main" && ctx.self_ty.is_none() && !ctx.implicit_main {
+        if name == "main" && ctx.self_ty.is_none() {
             ctx.uncaught_in_main = true;
             ret_ty = ctx.fn_ret_ty.clone();
         } else {
@@ -586,6 +596,7 @@ pub(super) fn lower_fn_inner(
         block
     });
     rokc_diagnostic::set_current_span(outer);
+    env.sink.instances.borrow_mut().pop();
     // `ref` parameters: the function hands their values back too.
     let ref_tys: Vec<HirTy> = ctx.ref_params.iter().map(|(_, t)| t.clone()).collect();
     ret_ty = ref_packed(&ret_ty, &ref_tys);

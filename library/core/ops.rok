@@ -14,6 +14,14 @@ pub trait Add<Rhs = Self> {
     fn add(self, rhs: Rhs) -> Output;
 }
 
+/// `%%`: floored modulo (2.3) — the result takes the divisor's sign, so
+/// a positive divisor gives `[0, rhs)` (Python's `%`). No lang slot.
+pub trait Modulo<Rhs = Self> {
+    type Output;
+    #[infix("%%")]
+    fn modulo(self, rhs: Rhs) -> Output;
+}
+
 #[lang("sub_trait")]
 pub trait Sub<Rhs = Self> {
     type Output;
@@ -120,6 +128,14 @@ pub trait PartialOrd<Rhs = Self> {
 
     #[infix(">=")]
     fn ge(self, rhs: Rhs) -> bool;
+
+    /// The order, or `none` when the two are incomparable (NaN).
+    fn partial_cmp(self, rhs: Rhs) -> rok::core::cmp::Ordering | none {
+        if self.lt(rhs) { return rok::core::cmp::Ordering::Less; }
+        if self.gt(rhs) { return rok::core::cmp::Ordering::Greater; }
+        if self.le(rhs) { return rok::core::cmp::Ordering::Equal; }
+        none
+    }
 }
 
 #[lang("logical_and_trait")]
@@ -167,6 +183,12 @@ pub trait DotRem<Rhs = Self> {
     fn dot_rem(self, rhs: Rhs) -> Output;
 }
 
+pub trait DotModulo<Rhs = Self> {
+    type Output;
+    #[infix(".%%")]
+    fn dot_modulo(self, rhs: Rhs) -> Output;
+}
+
 pub trait DotCmp<Rhs = Self> {
     #[infix(".==")]
     fn dot_eq(self, rhs: Rhs) -> bool;
@@ -185,6 +207,19 @@ pub trait DotCmp<Rhs = Self> {
 
     #[infix(".>=")]
     fn dot_ge(self, rhs: Rhs) -> bool;
+}
+
+/// `.&&` / `.||`: element-wise, both sides always evaluated (2.6).
+pub trait DotLogicalAnd<Rhs = Self> {
+    type Output;
+    #[infix(".&&")]
+    fn dot_logical_and(self, rhs: Rhs) -> Output;
+}
+
+pub trait DotLogicalOr<Rhs = Self> {
+    type Output;
+    #[infix(".||")]
+    fn dot_logical_or(self, rhs: Rhs) -> Output;
 }
 
 pub trait DotBitAnd<Rhs = Self> {

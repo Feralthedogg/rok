@@ -1,0 +1,20 @@
+// expect-exit: 0
+// expect-stdout:
+// 24 0 3 2
+// true
+
+// stdlib 1.1.2: `map_addr` keeps provenance and rewrites the address;
+// `align_offset` counts elements to the next `align` boundary.
+use rok::bare::ptr::Ptr;
+
+struct Three { a: u8; b: u8; c: u8; }
+
+fn main() -> i32 {
+    let p: Ptr<i64> = Ptr::dangling();
+    let q = p.map_addr(|a: usize| a * 3usize);
+    let r: Ptr<u8> = p.cast::<u8>().with_addr(5usize);
+    let t: Ptr<Three> = p.cast::<Three>().with_addr(2usize);
+    println(f"{q.addr()} {p.align_offset(8usize)} {r.align_offset(8usize)} {t.align_offset(8usize)}");
+    println(f"{r.align_offset(8usize) < 8usize}");
+    return 0;
+}

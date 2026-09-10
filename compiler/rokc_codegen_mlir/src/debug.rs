@@ -3,8 +3,11 @@
 //! `#llvm.di_subprogram` named by its rok path as its fused location (no
 //! linkage name: lldb would show the `_Y` symbol, which it cannot
 //! demangle, instead of the name); each op gets the `file:line:col` of
-//! the MIR `Statement::Loc` before it; named primitive locals get an
-//! `llvm.intr.dbg.declare` of their stack slot.
+//! the MIR `Statement::Loc` before it; named locals get an
+//! `llvm.intr.dbg.declare` of their stack slot, typed by `di_type`
+//! (primitives; structs with their field names, tuples, `str`, `any`,
+//! sums and arrays as composites; GC references and `fn` values as
+//! pointers).
 //!
 //! The attribute aliases are module-level text placed before `module`;
 //! op locations are appended to the op lines of a finished function
@@ -26,8 +29,13 @@ pub struct DebugInfo {
     /// `#di_file` alias by file id.
     files: BTreeMap<u32, String>,
     cu: Option<String>,
-    types: BTreeMap<&'static str, String>,
+    /// DWARF type alias by `MirTy` (its `Debug` text).
+    types: BTreeMap<String, String>,
     next: u32,
+    /// Target pointer width in bits.
+    pw: u32,
+    /// Struct name and field names by `StructId` (`MirModule::struct_names`).
+    pub struct_names: std::collections::HashMap<u32, (String, Vec<String>)>,
 }
 
 /// What a function body needs to place its locations.
@@ -37,6 +45,8 @@ pub struct FnDebug {
     pub line: u32,
     pub col: u32,
     pub subprogram: String,
+    /// `#llvm.di_lexical_block` alias by MIR scope id (not 0, the body).
+    pub scopes: BTreeMap<u32, String>,
 }
 
 /// Marker line the body emitter writes for a `Statement::Loc`.
@@ -48,13 +58,13 @@ fn escape(s: &str) -> String {
 
 impl Default for DebugInfo {
     fn default() -> Self {
-        Self::new()
+        Self::new(64)
     }
 }
 
 impl DebugInfo {
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(pw: u32) -> Self {
         let cwd = std::env::current_dir().unwrap_or_default();
         let paths = rokc_diagnostic::registered_files()
             .into_iter()
@@ -67,6 +77,8 @@ impl DebugInfo {
             cu: None,
             types: BTreeMap::new(),
             next: 0,
+            pw,
+            struct_names: std::collections::HashMap::new(),
         }
     }
 
@@ -131,12 +143,37 @@ impl DebugInfo {
             escape(name),
             line = span.line
         );
-        Some(FnDebug {
+        let mut d = FnDebug {
             file: escape(&self.path(span.file)?.to_string_lossy()),
             line: span.line,
             col: span.col.max(1),
             subprogram: sp,
-        })
+            scopes: BTreeMap::new(),
+        };
+        // A lexical block per nested scope, at its first position;
+        // parents have smaller ids, so they come first.
+        let mut first: BTreeMap<u32, (rokc_diagnostic::Span, u32)> = BTreeMap::new();
+        for s in f.blocks.iter().flat_map(|b| &b.stmts) {
+            if let Statement::Loc(at, sc) = s {
+                if sc.id != 0 {
+                    first.entry(sc.id).or_insert((*at, sc.parent));
+                }
+            }
+        }
+        for (id, (at, parent)) in first {
+            let parent = d.scopes.get(&parent).unwrap_or(&d.subprogram).clone();
+            let n = self.fresh();
+            let alias = format!("#di_lb{n}");
+            let _ = writeln!(
+                self.defs,
+                "{alias} = #llvm.di_lexical_block<scope = {parent}, file = {file}, line = {}, \
+                 column = {}>",
+                at.line,
+                at.col.max(1)
+            );
+            d.scopes.insert(id, alias);
+        }
+        Some(d)
     }
 
     /// A `#llvm.di_local_variable` for local `name` (a `ty`) of the
@@ -151,8 +188,7 @@ impl DebugInfo {
         line: u32,
         arg: Option<usize>,
     ) -> Option<String> {
-        let MirTy::Prim(p) = ty else { return None };
-        let ty = self.basic_type(*p)?;
+        let ty = self.di_type(ty)?;
         let file = self.file_alias(file)?;
         let n = self.fresh();
         let alias = format!("#di_var{n}");
@@ -166,18 +202,148 @@ impl DebugInfo {
         Some(alias)
     }
 
+    /// A DWARF type for `ty`, or `None` for `()`.
+    fn di_type(&mut self, ty: &MirTy) -> Option<String> {
+        let key = format!("{ty:?}");
+        if let Some(a) = self.types.get(&key) {
+            return Some(a.clone());
+        }
+        let pw = self.pw;
+        let (size, align) = crate::emit::size_align(ty, pw);
+        let def = match ty {
+            MirTy::Unit => return None,
+            MirTy::Prim(PrimTy::Str) => {
+                let u8 = self.basic_type(PrimTy::U8)?;
+                let ptr = format!(
+                    "#llvm.di_derived_type<tag = DW_TAG_pointer_type, baseType = {u8}, sizeInBits = {pw}>"
+                );
+                let len = self.basic_type(PrimTy::Usize)?;
+                Self::composite("str", size, align, &[("ptr", ptr, 0), ("len", len, pw / 8)])
+            }
+            MirTy::Prim(p) => return self.basic_type(*p),
+            MirTy::GcRef | MirTy::Fn(..) => {
+                let name = if *ty == MirTy::GcRef { "gcref" } else { "fn" };
+                format!(
+                    "#llvm.di_derived_type<tag = DW_TAG_pointer_type, name = \"{name}\", sizeInBits = {pw}>"
+                )
+            }
+            MirTy::Any => {
+                let tag = self.basic_type(PrimTy::I32)?;
+                let payload = self.basic_type(PrimTy::Usize)?;
+                Self::composite(
+                    "any",
+                    size,
+                    align,
+                    &[("tag", tag, 0), ("payload", payload, pw / 8)],
+                )
+            }
+            MirTy::Sum(ps) => {
+                let layout = rokc_mir::sum_layout(ps);
+                let MirTy::Tuple(parts) = &layout else {
+                    return self.di_type(&layout);
+                };
+                let fields = self.members(parts, &["tag", "payload"]);
+                Self::composite("sum", size, align, &fields)
+            }
+            MirTy::Tuple(ps) => {
+                let fields = self.members(ps, &[]);
+                Self::composite("tuple", size, align, &fields)
+            }
+            MirTy::Struct(id, ps) => {
+                let (name, names) = self
+                    .struct_names
+                    .get(&id.0)
+                    .cloned()
+                    .unwrap_or_else(|| (format!("Struct#{}", id.0), Vec::new()));
+                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                let names = if names.len() == ps.len() {
+                    names
+                } else {
+                    Vec::new()
+                };
+                let fields = self.members(ps, &names);
+                Self::composite(&name, size, align, &fields)
+            }
+            MirTy::Array(elem, n) => {
+                let base = self.di_type(elem)?;
+                format!(
+                    "#llvm.di_composite_type<tag = DW_TAG_array_type, baseType = {base}, \
+                     sizeInBits = {}, alignInBits = {}, elements = #llvm.di_subrange<count = {n} : i64>>",
+                    size * 8,
+                    align * 8
+                )
+            }
+        };
+        let alias = format!("#di_ty{}", self.fresh());
+        let _ = writeln!(self.defs, "{alias} = {def}");
+        self.types.insert(key, alias.clone());
+        Some(alias)
+    }
+
+    /// `(name, type, byte offset)` of each part of a C-laid-out aggregate
+    /// (`names[i]`, else `i`); `()` parts are left out.
+    fn members(&mut self, parts: &[MirTy], names: &[&str]) -> Vec<(String, String, u32)> {
+        let mut out = Vec::new();
+        let mut off = 0u32;
+        for (i, t) in parts.iter().enumerate() {
+            let (s, a) = crate::emit::size_align(t, self.pw);
+            off = off.next_multiple_of(a);
+            if let Some(ty) = self.di_type(t) {
+                let name = names
+                    .get(i)
+                    .map_or_else(|| i.to_string(), |n| (*n).to_owned());
+                out.push((name, ty, off));
+            }
+            off += s;
+        }
+        out
+    }
+
+    /// A `DW_TAG_structure_type` of `members` (`(name, type, offset)`).
+    fn composite<N: AsRef<str>>(
+        name: &str,
+        size: u32,
+        align: u32,
+        members: &[(N, String, u32)],
+    ) -> String {
+        let elements: Vec<String> = members
+            .iter()
+            .map(|(n, t, off)| {
+                format!(
+                    "#llvm.di_derived_type<tag = DW_TAG_member, name = \"{}\", baseType = {t}, \
+                     offsetInBits = {}>",
+                    escape(n.as_ref()),
+                    off * 8
+                )
+            })
+            .collect();
+        let elements = if elements.is_empty() {
+            String::new()
+        } else {
+            format!(", elements = {}", elements.join(", "))
+        };
+        format!(
+            "#llvm.di_composite_type<tag = DW_TAG_structure_type, name = \"{}\", \
+             sizeInBits = {}, alignInBits = {}{elements}>",
+            escape(name),
+            size * 8,
+            align * 8
+        )
+    }
+
     fn basic_type(&mut self, p: PrimTy) -> Option<String> {
+        let word = self.pw;
         let (name, bits, enc) = match p {
             PrimTy::I8 => ("i8", 8, "DW_ATE_signed"),
             PrimTy::I16 => ("i16", 16, "DW_ATE_signed"),
             PrimTy::I32 => ("i32", 32, "DW_ATE_signed"),
             PrimTy::I64 => ("i64", 64, "DW_ATE_signed"),
-            PrimTy::Isize => ("isize", 64, "DW_ATE_signed"),
+            PrimTy::Isize => ("isize", word, "DW_ATE_signed"),
             PrimTy::U8 => ("u8", 8, "DW_ATE_unsigned"),
             PrimTy::U16 => ("u16", 16, "DW_ATE_unsigned"),
             PrimTy::U32 => ("u32", 32, "DW_ATE_unsigned"),
             PrimTy::U64 => ("u64", 64, "DW_ATE_unsigned"),
-            PrimTy::Usize => ("usize", 64, "DW_ATE_unsigned"),
+            PrimTy::Usize => ("usize", word, "DW_ATE_unsigned"),
             PrimTy::F32 => ("f32", 32, "DW_ATE_float"),
             PrimTy::F64 => ("f64", 64, "DW_ATE_float"),
             PrimTy::Bool => ("bool", 8, "DW_ATE_boolean"),
@@ -194,23 +360,23 @@ impl DebugInfo {
             "{alias} = #llvm.di_basic_type<tag = DW_TAG_base_type, name = \"{name}\", \
              sizeInBits = {bits}, encoding = {enc}>"
         );
-        self.types.insert(name, alias.clone());
+        self.types.insert(name.to_owned(), alias.clone());
         Some(alias)
     }
 }
 
-/// Line of each named local's first assignment (its `let`), from the
-/// `Statement::Loc` markers in block order.
+/// Line and lexical scope of each named local's first assignment (its
+/// `let`), from the `Statement::Loc` markers in block order.
 #[must_use]
-pub fn decl_lines(f: &MirFunction) -> BTreeMap<u32, u32> {
+pub fn decl_lines(f: &MirFunction) -> BTreeMap<u32, (u32, u32)> {
     let mut out = BTreeMap::new();
-    let mut line = f.span.line;
+    let (mut line, mut scope) = (f.span.line, 0);
     for b in &f.blocks {
         for s in &b.stmts {
             match s {
-                Statement::Loc(sp) => line = sp.line,
+                Statement::Loc(sp, sc) => (line, scope) = (sp.line, sc.id),
                 Statement::Assign { target, .. } => {
-                    out.entry(target.0).or_insert(line);
+                    out.entry(target.0).or_insert((line, scope));
                 }
                 _ => {}
             }
@@ -224,18 +390,26 @@ pub fn decl_lines(f: &MirFunction) -> BTreeMap<u32, u32> {
 #[must_use]
 pub fn locate(body: &str, d: &FnDebug) -> String {
     let mut out = String::with_capacity(body.len() * 2);
-    let (mut line, mut col) = (d.line, d.col);
+    let (mut line, mut col, mut scope) = (d.line, d.col, None);
     for l in body.lines() {
         if let Some(pos) = l.strip_prefix(MARK) {
             let mut it = pos.split(' ').filter_map(|n| n.parse::<u32>().ok());
             line = it.next().unwrap_or(line);
             col = it.next().unwrap_or(col);
+            scope = it.next().and_then(|s| d.scopes.get(&s));
             continue;
         }
         out.push_str(l);
         let t = l.trim_start();
-        if !(t.is_empty() || t.starts_with('^') || t.starts_with("//")) {
-            let _ = write!(out, " loc(\"{}\":{line}:{col})", d.file);
+        if !(t.is_empty() || t.starts_with('^') || t.starts_with("//") || t.contains(" loc(")) {
+            match scope {
+                Some(lb) => {
+                    let _ = write!(out, " loc(fused<{lb}>[\"{}\":{line}:{col}])", d.file);
+                }
+                None => {
+                    let _ = write!(out, " loc(\"{}\":{line}:{col})", d.file);
+                }
+            }
         }
         out.push('\n');
     }
@@ -253,13 +427,14 @@ mod tests {
             line: 3,
             col: 1,
             subprogram: "#di_sp1".to_owned(),
+            scopes: BTreeMap::from([(2, "#di_lb3".to_owned())]),
         };
-        let body =
-            "    %0 = arith.constant 1 : i32\n    //loc 4 5\n  ^bb1:\n    func.return %0 : i32\n";
+        let body = "    %0 = arith.constant 1 : i32\n    //loc 4 5\n  ^bb1:\n    func.return %0 : i32\n    //loc 6 2 2\n    %1 = arith.constant 2 : i32\n";
         assert_eq!(
             locate(body, &d),
             "    %0 = arith.constant 1 : i32 loc(\"/p/a.rok\":3:1)\n  ^bb1:\n    \
-             func.return %0 : i32 loc(\"/p/a.rok\":4:5)\n"
+             func.return %0 : i32 loc(\"/p/a.rok\":4:5)\n    \
+             %1 = arith.constant 2 : i32 loc(fused<#di_lb3>[\"/p/a.rok\":6:2])\n"
         );
     }
 }

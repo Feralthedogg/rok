@@ -1,0 +1,54 @@
+// Fragmentation case (evacuation): every round fills a list with 200K
+// small boxes, keeps one in 16 for good and drops the rest, so the
+// survivors sit one per line or two across all the blocks; then it
+// allocates 1 KiB strings (9 contiguous lines each, a ring of the last
+// 16K kept) that the holes between survivors cannot take. Without
+// evacuation the sparse blocks stay and the heap grows; with it full
+// collections pack the survivors and hand whole blocks back.
+trait Weigh { fn w(self) -> i64; }
+struct Blob { a: i64; b: i64; c: i64; d: i64; }
+impl Weigh for Blob { fn w(self) -> i64 { return self.a + self.d; } }
+
+fn make(i: i64) -> any Weigh { return Blob { a: i, b: i, c: i, d: 1 }; }
+
+fn main() -> i32 {
+    let pad = "0123456789abcdef";
+    while pad.len() < 1000 {
+        pad = pad + pad;
+    }
+    let keep: List<any Weigh> = [];
+    let ring: List<str> = [];
+    let total: i64 = 0;
+    let round: i64 = 0;
+    while round < 40 {
+        let batch: List<any Weigh> = [];
+        let i: i64 = 0;
+        while i < 200000 {
+            batch.push(make(round * 200000 + i));
+            i += 1;
+        }
+        i = 0;
+        while i < 200000 {
+            if i % 16 == 0 {
+                keep.push(batch[i as usize]);
+            }
+            i += 1;
+        }
+        i = 0;
+        while i < 4000 {
+            let s = f"{pad}{round}.{i}";
+            total += s.len() as i64;
+            if ring.len() < 16000 {
+                ring.push(s);
+            } else {
+                ring[((round * 4000 + i) % 16000) as usize] = s;
+            }
+            i += 1;
+        }
+        round += 1;
+    }
+    for b in keep { total += b.w(); }
+    for s in ring { total += s.len() as i64; }
+    rok_print_i64(total);
+    return 0;
+}

@@ -47,7 +47,8 @@ build (run by rokc, with the dependencies):
   build | check | run | test [path] ...   see `rokc help` for their options
   repl [--replay]              interactive session (`:add <dep>` adds to the
                                active environment; --replay reruns every
-                               cell for each new one)
+                               cell for each new one; --package <path>
+                               loads a library package and `use`s it)
   lsp                          language server (also `rokls`)
   jupyter install [--user]     install the `rok` Jupyter kernel (with --env:
                                `rok-<env>`, running in that environment)

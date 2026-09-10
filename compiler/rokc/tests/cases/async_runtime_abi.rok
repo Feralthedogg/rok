@@ -1,0 +1,91 @@
+// expect-exit: 0
+// expect-stdout:
+// timer: true
+// coro: 42
+// io: 5 bytes
+// registrations left: 0
+
+// The runtime ABI (805 §8.5.5, 708 §7.8.8) from hand-written futures:
+// `rok_timer_register` wakes at a deadline, `rok_coro_park` /
+// `rok_coro_unpark` park on a frame address, `rok_io_register` wakes on
+// fd readiness. A waker crosses as a one-element `GcBuf<Waker>`.
+use rok::core::collections::raw::{GcBuf, buf_new};
+use rok::std::net::{TcpListener, TcpStream, SocketAddr};
+use rok::std::io::byte_buf;
+
+extern "C" {
+    fn rok_time_now_ns() -> i64;
+    fn rok_timer_register(deadline: u64, waker: GcBuf<Waker>);
+    fn rok_coro_park(frame: GcBuf<i32>, waker: GcBuf<Waker>);
+    fn rok_coro_unpark(frame: GcBuf<i32>);
+    fn rok_io_register(fd: i32, interest: u32, waker: GcBuf<Waker>);
+}
+
+fn boxed(w: Waker) -> GcBuf<Waker> {
+    let b: GcBuf<Waker> = buf_new(1);
+    b[0] = w;
+    b
+}
+
+/// Ready once the clock passes `at`.
+struct Deadline { at: i64; }
+impl Future for Deadline {
+    type Output = bool;
+    fn poll(ref self, ref ctx: Context) -> Poll<bool> {
+        if unsafe { rok_time_now_ns() } >= self.at { return Poll::Ready(true); }
+        unsafe { rok_timer_register(self.at as u64, boxed(ctx.waker())) };
+        Poll::Pending
+    }
+}
+
+/// Ready once `frame[0]` is set (by whoever then unparks `frame`).
+struct Slot { frame: GcBuf<i32>; }
+impl Future for Slot {
+    type Output = i32;
+    fn poll(ref self, ref ctx: Context) -> Poll<i32> {
+        unsafe { rok_coro_park(self.frame, boxed(ctx.waker())) };
+        if self.frame[0] != 0 { return Poll::Ready(self.frame[0]); }
+        Poll::Pending
+    }
+}
+
+/// Ready once `fd` may be readable.
+struct Readable { fd: i32; armed: bool; }
+impl Future for Readable {
+    type Output = ();
+    fn poll(ref self, ref ctx: Context) -> Poll<()> {
+        if self.armed { return Poll::Ready(()); }
+        self.armed = true;
+        unsafe { rok_io_register(self.fd, 1, boxed(ctx.waker())) };
+        Poll::Pending
+    }
+}
+
+let start = unsafe { rok_time_now_ns() };
+let ok = await Deadline { at: start + 20_000_000 };
+println(f"timer: {ok && unsafe { rok_time_now_ns() } - start >= 20_000_000}");
+
+let frame: GcBuf<i32> = buf_new(1);
+let waiter = task::spawn(async { await Slot { frame: frame } });
+await task::sleep(Duration::ms(10));
+frame[0] = 42;
+unsafe { rok_coro_unpark(frame) };
+println(f"coro: {await waiter}");
+
+let any: SocketAddr = try! "127.0.0.1:0".parse::<SocketAddr>();
+let listener = try! TcpListener::bind(any);
+let client = try! TcpStream::connect(try! listener.local_addr());
+let (server, _) = try! listener.accept();
+try! server.set_nonblocking(true);
+let reader = task::spawn(async {
+    let buf = byte_buf(16);
+    loop {
+        await Readable { fd: server.fd(), armed: false };
+        let n = try server.read(buf) catch _ { 0 };
+        if n > 0 { return n; }
+    }
+});
+await task::sleep(Duration::ms(10));
+try! client.write_str("hello");
+println(f"io: {await reader} bytes");
+println(f"registrations left: {task::registrations()}");

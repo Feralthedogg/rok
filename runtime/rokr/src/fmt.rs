@@ -227,6 +227,55 @@ fn float(value: f64, is_f32: bool, spec: &FmtSpec) -> RokStr {
     assemble(spec, sign_of(spec, neg), b"", out.bytes(), mag.is_finite())
 }
 
+/// The parts of `spec` a library formatter needs (`int` / `float`):
+/// the type letter (bits 0..8, 0 if none), `#` (bit 8), the precision
+/// plus one (bits 16.., 0 if none). Panics on a bad spec.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_fmt_spec_info(spec: RokStr) -> u64 {
+    let s = spec_of(&spec);
+    let prec = s.precision.map_or(0, |p| p.min(MAX_PREC) as u64 + 1);
+    u64::from(s.ty) | (u64::from(s.alt) << 8) | (prec << 16)
+}
+
+/// `1.5e3` form of the decimal digits `digits` (an integer; `prec < 0`:
+/// shortest exact), as `{n:e}` prints an integer.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_fmt_exp_digits(digits: RokStr, prec: i64, upper: u32) -> RokStr {
+    let mut out = Buf::new();
+    exp_digits(
+        text(&digits).as_bytes(),
+        usize::try_from(prec).ok(),
+        upper != 0,
+        &mut out,
+    );
+    build_str(out.bytes())
+}
+
+/// A number the library already rendered (`body`, no sign; `prefix`
+/// like `0x`) padded per `spec` with the sign (`neg != 0`) — the `int`
+/// / `float` f-string hooks.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_fmt_num(neg: u32, prefix: RokStr, body: RokStr, spec: RokStr) -> RokStr {
+    let s = spec_of(&spec);
+    assemble(
+        &s,
+        sign_of(&s, neg != 0),
+        prefix.bytes(),
+        body.bytes(),
+        true,
+    )
+}
+
+fn build_str(b: &[u8]) -> RokStr {
+    let p = alloc_str(b.len());
+    // SAFETY: a fresh allocation of `b.len()` bytes.
+    unsafe { ptr::copy_nonoverlapping(b.as_ptr(), p, b.len()) };
+    RokStr {
+        ptr: p,
+        len: b.len(),
+    }
+}
+
 /// Any other value, already rendered: `disp` (Display) or, for `?`, `dbg`
 /// (Debug). A precision keeps that many chars.
 #[unsafe(no_mangle)]

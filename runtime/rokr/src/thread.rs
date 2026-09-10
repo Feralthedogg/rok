@@ -210,8 +210,9 @@ fn bucket(addr: usize) -> &'static Bucket {
 /// Address of `i32` element `index` of the `GcBuf<i32>` object `buf`.
 #[allow(clippy::cast_ptr_alignment)] // i32 buffer elements are 4-aligned
 fn word(buf: *mut u8, index: usize) -> &'static AtomicI32 {
-    // SAFETY: the caller's frame keeps `buf` alive; the collector does not
-    // move objects; element `index` is inside it.
+    // SAFETY: the caller's frame roots `buf` (alive, and in place while
+    // this thread waits on it: a waker's address is the same); element
+    // `index` is inside it.
     unsafe { &*buf.add(HEADER_SIZE + index * 4).cast::<AtomicI32>() }
 }
 

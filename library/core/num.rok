@@ -9,6 +9,8 @@
 
 pub mod ints;
 pub mod floats;
+pub mod bigint;
+pub mod bigfloat;
 
 /// The additive identity — where `Iterator::sum` starts (an empty sum is
 /// `0`).
@@ -1326,4 +1328,88 @@ impl Sqrt for f32 {
     type Output = f32;
     #[intrinsic("rok.sqrt.f32")]
     fn sqrt(self) -> f32 { self.sqrt() }
+}
+
+// `%%` (2.3 `Modulo`): floored — `r = a % b`, moved by `b` when `r` and
+// `b` have opposite signs. Unsigned: plain `%`.
+
+impl Modulo for i8 {
+    type Output = i8;
+    fn modulo(self, rhs: i8) -> i8 {
+        let r = self % rhs;
+        if r != 0 && (r < 0) != (rhs < 0) { r + rhs } else { r }
+    }
+}
+
+impl Modulo for i16 {
+    type Output = i16;
+    fn modulo(self, rhs: i16) -> i16 {
+        let r = self % rhs;
+        if r != 0 && (r < 0) != (rhs < 0) { r + rhs } else { r }
+    }
+}
+
+impl Modulo for i32 {
+    type Output = i32;
+    fn modulo(self, rhs: i32) -> i32 {
+        let r = self % rhs;
+        if r != 0 && (r < 0) != (rhs < 0) { r + rhs } else { r }
+    }
+}
+
+impl Modulo for i64 {
+    type Output = i64;
+    fn modulo(self, rhs: i64) -> i64 {
+        let r = self % rhs;
+        if r != 0 && (r < 0) != (rhs < 0) { r + rhs } else { r }
+    }
+}
+
+impl Modulo for isize {
+    type Output = isize;
+    fn modulo(self, rhs: isize) -> isize {
+        let r = self % rhs;
+        if r != 0 && (r < 0) != (rhs < 0) { r + rhs } else { r }
+    }
+}
+
+impl Modulo for f32 {
+    type Output = f32;
+    fn modulo(self, rhs: f32) -> f32 {
+        let r = self % rhs;
+        if r != 0.0 && (r < 0.0) != (rhs < 0.0) { r + rhs } else { r }
+    }
+}
+
+impl Modulo for f64 {
+    type Output = f64;
+    fn modulo(self, rhs: f64) -> f64 {
+        let r = self % rhs;
+        if r != 0.0 && (r < 0.0) != (rhs < 0.0) { r + rhs } else { r }
+    }
+}
+
+impl Modulo for u8 {
+    type Output = u8;
+    fn modulo(self, rhs: u8) -> u8 { self % rhs }
+}
+
+impl Modulo for u16 {
+    type Output = u16;
+    fn modulo(self, rhs: u16) -> u16 { self % rhs }
+}
+
+impl Modulo for u32 {
+    type Output = u32;
+    fn modulo(self, rhs: u32) -> u32 { self % rhs }
+}
+
+impl Modulo for u64 {
+    type Output = u64;
+    fn modulo(self, rhs: u64) -> u64 { self % rhs }
+}
+
+impl Modulo for usize {
+    type Output = usize;
+    fn modulo(self, rhs: usize) -> usize { self % rhs }
 }

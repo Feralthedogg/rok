@@ -39,6 +39,16 @@ impl PartialEq for Ordering {
 
 impl Eq for Ordering {}
 
+impl Debug for Ordering {
+    fn debug(self) -> str {
+        match self {
+            Ordering::Less => "Less",
+            Ordering::Equal => "Equal",
+            Ordering::Greater => "Greater",
+        }
+    }
+}
+
 /// A total order (2.5.5).
 #[lang("ord_trait")]
 pub trait Ord: PartialOrd + Eq {

@@ -1,4 +1,5 @@
 // expect-exit: 0
+// gc-stress: 50
 // expect-stdout:
 // s-0 s-63 s-1999
 // 2000 2000

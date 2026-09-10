@@ -1,0 +1,113 @@
+// expect-exit: 0
+// gc-stress: 400
+// expect-stdout:
+// moved
+// strs ok
+// slices ok
+// anys ok
+// dict ok
+// closures ok
+// enums ok
+// nested ok
+
+// Evacuation (703 opportunistic defragmentation): survivors of every
+// kind sit among 15x as much garbage, so after the garbage dies their
+// blocks are sparse and full collections move them. Every reference
+// to a moved object is rewritten — list / dict buffers (per-element
+// scan tables), `str` interior pointers (slices), boxed `any` payloads
+// (inline ones are numbers and stay), closure environments, struct
+// fields — and every value reads back intact.
+extern "C" {
+    fn rok_gc_collect();
+    fn rok_gc_stats_moved_bytes() -> u64;
+}
+
+trait Weigh { fn w(self) -> i64; }
+struct Blob { a: i64; b: i64; }
+impl Weigh for Blob { fn w(self) -> i64 { return self.a * 2 + self.b; } }
+impl Weigh for i64 { fn w(self) -> i64 { return self; } }
+
+enum Slot { Name(str), Pair(i64, i64) }
+
+struct Node { id: i64; label: str; kids: List<i64>; }
+
+fn junk(i: i64) -> i64 {
+    let n: i64 = 0;
+    let k = 0;
+    while k < 15 {
+        let s = f"garbage-{i}-{k}-xxxxxxxx";
+        n += s.len() as i64;
+        k += 1;
+    }
+    return n;
+}
+
+fn main() {
+    let strs: List<str> = [];
+    let slices: List<str> = [];
+    let anys: List<any Weigh> = [];
+    let dict: Dict<str, i64> = Dict::new();
+    let fns: List<fn() -> i64> = [];
+    let enums: List<Slot> = [];
+    let nodes: List<Node> = [];
+    let n: i64 = 0;
+    let i: i64 = 0;
+    while i < 3000 {
+        strs.push(f"s{i}");
+        slices.push(f"  slice{i}  ".trim());
+        if i % 2 == 0 {
+            anys.push(Blob { a: i, b: 1 });
+        } else {
+            anys.push(i);
+        }
+        dict.insert(f"k{i}", i * 3);
+        let cap = f"c{i}";
+        fns.push(|| cap.len() as i64);
+        if i % 3 == 0 {
+            enums.push(Slot::Name(f"e{i}"));
+        } else {
+            enums.push(Slot::Pair(i, -i));
+        }
+        let kids: List<i64> = [];
+        kids.push(i);
+        nodes.push(Node { id: i, label: f"n{i}", kids: kids });
+        n += junk(i);
+        i += 1;
+    }
+    let before = unsafe { rok_gc_stats_moved_bytes() };
+    unsafe { rok_gc_collect() };
+    unsafe { rok_gc_collect() };
+    unsafe { rok_gc_collect() };
+    if unsafe { rok_gc_stats_moved_bytes() } > before {
+        println("moved");
+    }
+    let bad = 0;
+    i = 0;
+    while i < 3000 {
+        if strs[i as usize] != f"s{i}" { bad += 1; }
+        if slices[i as usize] != f"slice{i}" { bad += 1; }
+        let want = if i % 2 == 0 { i * 2 + 1 } else { i };
+        if anys[i as usize].w() != want { bad += 1; }
+        match dict.get(f"k{i}") {
+            v: i64 => if v != i * 3 { bad += 1; },
+            none => { bad += 1; },
+        }
+        if fns[i as usize]() != f"c{i}".len() as i64 { bad += 1; }
+        match enums[i as usize] {
+            Slot::Name(s) => if s != f"e{i}" { bad += 1; },
+            Slot::Pair(a, b) => if a != i || b != -i { bad += 1; },
+        }
+        let nd = nodes[i as usize];
+        if nd.id != i || nd.label != f"n{i}" || nd.kids[0] != i { bad += 1; }
+        i += 1;
+    }
+    if bad == 0 && n > 0 {
+        println("strs ok");
+        println("slices ok");
+        println("anys ok");
+        println("dict ok");
+        println("closures ok");
+        println("enums ok");
+        println("nested ok");
+    }
+}

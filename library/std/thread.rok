@@ -7,9 +7,8 @@
 // not catchable (2.14), so `join` never sees one. `JoinError` only
 // reports an OS join failure.
 //
-// `current().name()` is always `none` (names live on the spawner's
-// `JoinHandle`). A handle that is neither joined nor `detach`ed keeps
-// its OS thread record (rok has no implicit drop to detach it).
+// A handle that is neither joined nor `detach`ed keeps its OS thread
+// record (rok has no implicit drop to detach it).
 
 use rok::std::io::IoError;
 use rok::std::time::Duration;
@@ -40,8 +39,7 @@ impl PartialEq for ThreadId {
     fn ne(self, rhs: ThreadId) -> bool { self.id != rhs.id }
 }
 
-/// A thread's identity. ponytail: spec writes `Thread<T>`; `T` is
-/// unused by its methods, so it is left out.
+/// A thread's identity (non-generic, 304.1).
 pub struct Thread {
     id: ThreadId;
     name: str | none;
@@ -109,8 +107,16 @@ impl Builder {
 
     pub fn spawn<T: Send>(self, f: fn() -> T + Send) throws (IoError) -> JoinHandle<T> {
         let result: GcBuf<T> = buf_new(1);
-        let run: fn() + Send = || { result[0] = f(); };
         let id = unsafe { rok_thread_new_id() };
+        let run: fn() + Send = || { result[0] = f(); };
+        if let name: str = self.name {
+            // Registered before the thread starts, dropped as it ends.
+            using g = NAMES.lock() { g.get().insert(id, name); }
+            run = || {
+                result[0] = f();
+                using g = NAMES.lock() { g.get().remove(id); }
+            };
+        }
         let h = unsafe { rok_thread_spawn(run, self.stack_size ?? 0usize, id) };
         if h == 0usize {
             throw IoError::new("could not create an OS thread");
@@ -128,9 +134,16 @@ pub fn spawn<T: Send>(f: fn() -> T + Send) -> JoinHandle<T> {
     try! Builder::new().spawn(f)
 }
 
+/// Names of the running threads spawned with `Builder::name`.
+// ponytail: one global lock, taken only by named threads and `current()`.
+static NAMES: Mutex<Dict<u64, str>> = Mutex::new(Dict::new());
+
 /// The calling thread.
 pub fn current() -> Thread {
-    Thread { id: ThreadId { id: unsafe { rok_thread_id() } }, name: none }
+    let id = unsafe { rok_thread_id() };
+    let name: str | none = none;
+    using g = NAMES.lock() { name = g.get().get(id); }
+    Thread { id: ThreadId { id: id }, name: name }
 }
 
 /// Let the OS run another thread.

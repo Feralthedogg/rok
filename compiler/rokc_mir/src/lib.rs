@@ -8,9 +8,9 @@ mod print;
 mod ty;
 
 pub use liveness::{Deaths, deaths};
-pub use lower::lower;
+pub use lower::{lower, prune_library};
 pub use print::print_mir;
-pub use ty::{has_gc_ref, lower_ty, sum_layout};
+pub use ty::{ANY_BOXED, ANY_STRUCT, any_inline, any_ty, has_gc_ref, lower_ty, sum_layout};
 
 use rokc_core::DefId;
 use rokc_diagnostic::Span;
@@ -26,6 +26,12 @@ pub struct MirModule {
     /// C variadic `extern` declarations (spec 8.6.10): calls pass the
     /// arguments past the declared parameters as C `...` arguments.
     pub c_variadic: Vec<FunctionId>,
+    /// `extern "C" fn` definitions (spec 5.9.10): what C calls (a
+    /// function pointer passed to it, an `#[export_name]`) is their C
+    /// ABI entry, which converts aggregates (spec 8.6.3).
+    pub c_defs: Vec<FunctionId>,
+    /// Struct name and field names by `StructId` (`-g` DWARF types).
+    pub struct_names: std::collections::HashMap<u32, (String, Vec<String>)>,
     /// Package hash per item-path prefix (`rok::core`, ..., `""` for the
     /// user package; spec 0.3.3), longest prefix first. Filled by the
     /// driver; empty → one hash over the printed MIR.
@@ -78,6 +84,15 @@ pub struct MirFunction {
     pub span: Span,
 }
 
+/// A lexical scope of a function (a block with its own `let`s), for
+/// debug info: `id` 0 is the function body; `parent` encloses it. The
+/// first `Loc` of a scope is at its block's start.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Scope {
+    pub id: u32,
+    pub parent: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct LocalDecl {
     pub id: LocalId,
@@ -120,8 +135,8 @@ pub enum Statement {
         elem_ty: MirTy,
     },
     /// The following statements come from source position `Span` (a
-    /// HIR statement or block value): debug line info only.
-    Loc(Span),
+    /// HIR statement or block value) in lexical `Scope`: debug info only.
+    Loc(Span, Scope),
     // Store `value` (a `ty`) at raw address `addr` (`usize`).
     RawStore {
         addr: Operand,

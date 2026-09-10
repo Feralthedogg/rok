@@ -1,4 +1,5 @@
 // expect-exit: 0
+// gc-stress: 50
 // expect-stdout:
 // fresh-0 fresh-99 fresh-199
 // 7 7
