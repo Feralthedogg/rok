@@ -1210,6 +1210,15 @@ fn flatten_module_items(
             rokc_ast::Item::Mod(m) => {
                 let mut child_path = module_path.to_vec();
                 child_path.push(m.name.clone());
+                // An empty stub named by the full path keeps the module's
+                // visibility for HIR (spec 5.6.13).
+                out.push(rokc_ast::Item::Mod(rokc_ast::ModDef {
+                    vis: m.vis,
+                    attrs: Vec::new(),
+                    name: child_path.join("::"),
+                    items: Some(Vec::new()),
+                    span: m.span,
+                }));
                 if let Some(inner) = m.items {
                     flatten_module_items(
                         inner,

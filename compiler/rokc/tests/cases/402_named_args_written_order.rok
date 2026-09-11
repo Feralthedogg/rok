@@ -1,0 +1,29 @@
+// expect-exit: 0
+// expect-stdout:
+// g
+// f
+// 1 2
+// m
+// k
+// h
+// 3 4
+
+// 4.2.8: named arguments are evaluated in written order, not parameter
+// order; a method's receiver still runs first.
+fn f() -> i32 { println("f"); 1 }
+fn g() -> i32 { println("g"); 2 }
+fn h() -> i32 { println("h"); 3 }
+fn k() -> i32 { println("k"); 4 }
+
+fn pair(a: i32, b: i32) -> str { f"{a} {b}" }
+
+struct S { v: i32; }
+impl S {
+    fn two(self, a: i32, b: i32) -> str { f"{a} {b}" }
+}
+fn m() -> S { println("m"); S { v: 0 } }
+
+fn main() {
+    println(pair(b: g(), a: f()));
+    println(m().two(b: k(), a: h()));
+}

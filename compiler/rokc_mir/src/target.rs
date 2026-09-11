@@ -6,6 +6,18 @@ use rokc_ir_common::PrimTy;
 use crate::MirTy;
 use crate::gc_abi::{AMBIGUOUS, ANY_SLOT, INTERIOR_REF, STRONG_REF};
 
+/// What the collector must see of a value (802 §8.2.3), offsets in
+/// bytes from the same base.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GcSlot {
+    /// `(offset, kind)`: a `STRONG_REF`, `INTERIOR_REF`, `ANY_SLOT` or
+    /// `AMBIGUOUS` word.
+    Word(u32, u32),
+    /// A sum (`SUM_PAYLOAD`) whose `u32` tag is at the offset: the
+    /// slots of each data variant that has any, by stored tag.
+    Sum(u32, Vec<(u32, Vec<GcSlot>)>),
+}
+
 /// Platform C calling convention for aggregates (spec 8.6.3).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CAbi {
@@ -118,6 +130,7 @@ impl Target {
             // An MLIR type's values stay SSA; only an aggregate holding
             // one asks, and gets a word.
             MirTy::Any | MirTy::GcRef | MirTy::Fn(_, _) | MirTy::Mlir(_) => word,
+            MirTy::Union(_, n) => (word.0 * n, word.1),
             MirTy::Tuple(ps) | MirTy::Struct(_, ps) => {
                 let (mut size, mut align) = (0u32, 1);
                 for t in ps {
@@ -134,19 +147,47 @@ impl Target {
         }
     }
 
-    /// `(byte offset, ScanTable kind)` of every word of a `ty` at `at`
-    /// that may hold a GC reference. The one walk behind scan tables,
-    /// write barriers and stack / static roots.
-    pub fn gc_offsets(&self, ty: &MirTy, at: u32, out: &mut Vec<(u32, u32)>) {
+    /// The words of a `ty` at `at` that may hold a GC reference. The one
+    /// walk behind scan tables, write barriers and stack / static roots.
+    pub fn gc_offsets(&self, ty: &MirTy, at: u32, out: &mut Vec<GcSlot>) {
         match ty {
-            MirTy::GcRef => out.push((at, STRONG_REF)),
-            MirTy::Prim(PrimTy::Str) => out.push((at, INTERIOR_REF)),
-            MirTy::Struct(crate::ANY_STRUCT, _) => out.push((at, ANY_SLOT)),
-            // An enum union payload (`unify_payload`) holds references or
-            // other bits depending on the tag.
-            MirTy::Array(t, n) if **t == MirTy::GcRef => {
-                let w = self.pointer_width / 8;
-                out.extend((0..*n).map(|i| (at + i * w, AMBIGUOUS)));
+            MirTy::GcRef => out.push(GcSlot::Word(at, STRONG_REF)),
+            MirTy::Prim(PrimTy::Str) => out.push(GcSlot::Word(at, INTERIOR_REF)),
+            MirTy::Struct(crate::ANY_STRUCT, _) => out.push(GcSlot::Word(at, ANY_SLOT)),
+            // A sum (`sum_layout`): `(i32 tag, union)`.
+            MirTy::Tuple(ps)
+                if matches!(ps.as_slice(), [MirTy::Prim(PrimTy::I32), MirTy::Union(..)]) =>
+            {
+                let MirTy::Union(vs, _) = &ps[1] else {
+                    unreachable!()
+                };
+                let payload = at
+                    + self
+                        .size_align(&ps[0])
+                        .0
+                        .next_multiple_of(self.size_align(&ps[1]).1);
+                let variants = vs
+                    .iter()
+                    .filter_map(|(tag, t)| {
+                        let mut slots = Vec::new();
+                        self.gc_offsets(t, payload, &mut slots);
+                        (!slots.is_empty()).then_some((*tag, slots))
+                    })
+                    .collect();
+                out.push(GcSlot::Sum(at, variants));
+            }
+            // A union away from its tag (a payload temporary): any word
+            // a variant keeps a reference in, kept alive and never moved.
+            MirTy::Union(vs, _) => {
+                let mut slots = Vec::new();
+                for (_, t) in vs {
+                    self.gc_offsets(t, at, &mut slots);
+                }
+                out.extend(
+                    self.flat_words(&slots)
+                        .into_iter()
+                        .map(|off| GcSlot::Word(off, AMBIGUOUS)),
+                );
             }
             MirTy::Tuple(ps) | MirTy::Struct(_, ps) => {
                 let mut off = 0u32;
@@ -167,25 +208,41 @@ impl Target {
         }
     }
 
+    /// Sorted offsets of every word `slots` may hold a reference in (any
+    /// variant of a sum; an `any`'s payload word, not its tag).
+    #[must_use]
+    pub fn flat_words(&self, slots: &[GcSlot]) -> Vec<u32> {
+        fn walk(slots: &[GcSlot], w: u32, out: &mut Vec<u32>) {
+            for s in slots {
+                match s {
+                    GcSlot::Word(off, ANY_SLOT) => out.push(off + w),
+                    GcSlot::Word(off, _) => out.push(*off),
+                    GcSlot::Sum(_, vs) => vs.iter().for_each(|(_, v)| walk(v, w, out)),
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(slots, self.pointer_width / 8, &mut out);
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     /// Byte offsets of the words of a `ty` a root slot must cover: every
-    /// `gc_offsets` word, an `any`'s payload word rather than its tag.
+    /// word any variant of it may hold a reference in.
     #[must_use]
     pub fn root_offsets(&self, ty: &MirTy) -> Vec<u32> {
-        let mut words = Vec::new();
-        self.gc_offsets(ty, 0, &mut words);
-        let w = self.pointer_width / 8;
-        words
-            .into_iter()
-            .map(|(off, kind)| if kind == ANY_SLOT { off + w } else { off })
-            .collect()
+        let mut slots = Vec::new();
+        self.gc_offsets(ty, 0, &mut slots);
+        self.flat_words(&slots)
     }
 
     /// `ty` has a word the collector must see.
     #[must_use]
     pub fn has_gc_ref(&self, ty: &MirTy) -> bool {
-        let mut words = Vec::new();
-        self.gc_offsets(ty, 0, &mut words);
-        !words.is_empty()
+        let mut slots = Vec::new();
+        self.gc_offsets(ty, 0, &mut slots);
+        !slots.is_empty()
     }
 
     /// An `any` payload of type `ty` is the payload word itself (spec
@@ -307,7 +364,46 @@ mod tests {
         let ty = MirTy::Tuple(vec![p(PrimTy::Str), crate::any_ty()]);
         let mut words = Vec::new();
         t.gc_offsets(&ty, 0, &mut words);
-        assert_eq!(words, [(0, INTERIOR_REF), (16, ANY_SLOT)]);
+        assert_eq!(
+            words,
+            [GcSlot::Word(0, INTERIOR_REF), GcSlot::Word(16, ANY_SLOT)]
+        );
         assert_eq!(t.root_offsets(&ty), [0, 24]);
+    }
+
+    /// `S(str) | P(i64, GcRef) | N(i64)` at offset 8: one `SUM_PAYLOAD`
+    /// with the reference words of each variant; roots cover their
+    /// union; a bare union is ambiguous words.
+    #[test]
+    fn sums_scan_by_variant() {
+        let t = Target::new(Some("x86_64-unknown-linux-gnu"));
+        let pair = MirTy::Tuple(vec![p(PrimTy::I64), MirTy::GcRef]);
+        let vs = vec![(0, p(PrimTy::Str)), (1, pair), (2, p(PrimTy::I64))];
+        let union = MirTy::Union(vs, 2);
+        let sum = MirTy::Tuple(vec![p(PrimTy::I32), union.clone()]);
+        assert_eq!(t.size_align(&sum), (24, 8));
+        let mut slots = Vec::new();
+        t.gc_offsets(
+            &MirTy::Tuple(vec![p(PrimTy::I64), sum.clone()]),
+            0,
+            &mut slots,
+        );
+        assert_eq!(
+            slots,
+            [GcSlot::Sum(
+                8,
+                vec![
+                    (0, vec![GcSlot::Word(16, INTERIOR_REF)]),
+                    (1, vec![GcSlot::Word(24, STRONG_REF)])
+                ]
+            )]
+        );
+        assert_eq!(t.root_offsets(&sum), [8, 16]);
+        let mut slots = Vec::new();
+        t.gc_offsets(&union, 0, &mut slots);
+        assert_eq!(
+            slots,
+            [GcSlot::Word(0, AMBIGUOUS), GcSlot::Word(8, AMBIGUOUS)]
+        );
     }
 }

@@ -775,6 +775,16 @@ pub(super) fn bind_irrefutable(
             }
         }
         (AstPatternKind::Wildcard, _) | (_, HirTy::Unknown) => {}
+        // `let (a: i32, b: str) = ..`: an annotated element is a slot of
+        // that type, not a runtime test.
+        (AstPatternKind::TypeCheck { binder, ty }, _) => {
+            let want = ctx.resolve_ast_ty(ty);
+            let name = binder.clone().unwrap_or_else(|| "_".to_owned());
+            let value = coerce(ctx, &want, value, &|| format!("the pattern `{name}`"));
+            if binder.is_some() {
+                stmts.push(ctx.declare_var(&name, want, value, pat.span));
+            }
+        }
         (_, ty) => {
             ctx.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
@@ -815,10 +825,18 @@ pub(super) fn lower_for(
         }
         ExprKind::Range {
             start: Some(start_e),
-            end: Some(end_e),
+            end,
             inclusive,
-        } => lower_for_range(
-            ctx, label, pat, start_e, end_e, *inclusive, body, span, &mut out,
+        } if end.is_some() || !*inclusive => lower_for_range(
+            ctx,
+            label,
+            pat,
+            start_e,
+            end.as_deref(),
+            *inclusive,
+            body,
+            span,
+            &mut out,
         ),
         ExprKind::Range { .. } => Some(ctx.error_expr(
             span,
@@ -1150,26 +1168,33 @@ pub(super) fn lower_for_range(
     label: Option<&String>,
     pat: &AstPattern,
     start_e: &Expr,
-    end_e: &Expr,
+    end_e: Option<&Expr>,
     inclusive: bool,
     body: &Block,
     span: rokc_diagnostic::Span,
     out: &mut Vec<HirStmt>,
 ) -> Option<HirExpr> {
-    let (start_h, end_h) = lower_sibling_pair(ctx, start_e, end_e, HirTy::Unknown);
-    if start_h.ty == HirTy::Unknown || end_h.ty == HirTy::Unknown {
+    // `a..` (spec 3.7.8) counts up until a `break` (or overflow panics).
+    let (start_h, end_h) = match end_e {
+        Some(end_e) => {
+            let (s, e) = lower_sibling_pair(ctx, start_e, end_e, HirTy::Unknown);
+            (s, Some(e))
+        }
+        None => (lower_expected(ctx, start_e, HirTy::Unknown), None),
+    };
+    if start_h.ty == HirTy::Unknown || end_h.as_ref().is_some_and(|e| e.ty == HirTy::Unknown) {
         return None;
     }
     let elem_ty = start_h.ty.clone();
     let prim = match &elem_ty {
-        HirTy::Prim(p) if p.is_int() && start_h.ty == end_h.ty => *p,
+        HirTy::Prim(p) if p.is_int() && end_h.as_ref().is_none_or(|e| e.ty == start_h.ty) => *p,
         _ => {
             return Some(ctx.error_expr(
                 span,
                 format!(
                     "range bounds must be integers of the same type, found `{}` and `{}`",
                     ctx.ty_name(&start_h.ty),
-                    ctx.ty_name(&end_h.ty)
+                    ctx.ty_name(end_h.as_ref().map_or(&start_h.ty, |e| &e.ty))
                 ),
             ));
         }
@@ -1181,10 +1206,13 @@ pub(super) fn lower_for_range(
         local: counter,
         init: start_h,
     });
-    out.push(HirStmt::Let {
-        local: end,
-        init: end_h,
-    });
+    let unbounded = end_h.is_none();
+    if let Some(end_h) = end_h {
+        out.push(HirStmt::Let {
+            local: end,
+            init: end_h,
+        });
+    }
     let c = || hir_local(counter, &elem_ty, span);
     let e = || hir_local(end, &elem_ty, span);
     let inc = |c: HirExpr| {
@@ -1236,7 +1264,15 @@ pub(super) fn lower_for_range(
             local: counter,
             value: inc(c()),
         });
-        hir_binop(PrimOp::Lt, c(), e(), bool_ty, span)
+        if unbounded {
+            HirExpr {
+                kind: HirExprKind::Const(ConstVal::Bool(true)),
+                ty: bool_ty,
+                span,
+            }
+        } else {
+            hir_binop(PrimOp::Lt, c(), e(), bool_ty, span)
+        }
     };
     bind_irrefutable(ctx, pat, hir_local(snap, &elem_ty, span), &mut body_stmts);
     let lowered_body = lower_loop_body(ctx, body);

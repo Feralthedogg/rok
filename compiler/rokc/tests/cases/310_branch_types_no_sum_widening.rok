@@ -1,0 +1,14 @@
+// expect-error: 7:13: `if` branches have different types `i32` and `str` — rok does not infer a sum type; annotate the slot
+// expect-error: 8:13: `match` arms have different types `i32` and `str` (arm 2) — rok does not infer a sum type
+
+// Branch results are not widened to a sum on their own; an expected sum
+// type (an annotated slot) accepts them.
+fn pick(c: bool) {
+    let x = if c { 1 } else { "a" };
+    let y = match c { true => 1, false => "b" };
+    let z: i32 | str = if c { 1 } else { "a" };
+}
+
+fn main() {
+    pick(true);
+}

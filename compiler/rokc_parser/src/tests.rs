@@ -812,6 +812,16 @@ fn meta_hygiene_renames_locals_only() {
 /// case file that parses without the extension operators.
 #[test]
 fn printed_ast_parses_back() {
+    // Deep case files (a 2000-term chain) need the compiler's big stack.
+    std::thread::Builder::new()
+        .stack_size(1 << 30)
+        .spawn(printed_ast_parses_back_body)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn printed_ast_parses_back_body() {
     fn files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         let Ok(rd) = std::fs::read_dir(dir) else {
             return;

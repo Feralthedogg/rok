@@ -1,0 +1,137 @@
+// expect-exit: 0
+// gc-stress: 300
+// expect-stdout:
+// moved
+// enums ok
+// sums ok
+// fields ok
+
+// Evacuation through enum / sum payloads (802 `SUM_PAYLOAD`): the
+// collector decodes each payload's tag and scans only the active
+// variant's reference words, so what a payload references moves like
+// anything else and every variant shape reads back intact. Only the
+// list buffers are rooted (and so pinned): every byte moved here was
+// reached through a payload.
+extern "C" {
+    fn rok_gc_collect();
+    fn rok_gc_stats_moved_bytes() -> u64;
+}
+
+trait Weigh { fn w(self) -> i64; }
+struct Blob { a: i64; b: i64; }
+impl Weigh for Blob { fn w(self) -> i64 { return self.a * 2 + self.b; } }
+
+struct Pt { x: i64; name: str; }
+enum Inner { X(str), Y(i64, i64), Z }
+enum Shape {
+    S(str),
+    P(i64, str),
+    L(List<i64>),
+    A(any Weigh),
+    F(fn() -> i64),
+    N(Inner),
+    R(Pt),
+    I(i64),
+    U,
+}
+struct Holder { tag: i64; s: Shape; m: str | i64 | none; }
+
+fn make(i: i64) -> Shape {
+    let k = i % 10;
+    if k == 0 { return Shape::S(f"s{i}"); }
+    if k == 1 { return Shape::P(i, f"p{i}"); }
+    if k == 2 {
+        let l: List<i64> = [];
+        l.push(i);
+        l.push(i + 1);
+        return Shape::L(l);
+    }
+    if k == 3 { return Shape::A(Blob { a: i, b: 3 }); }
+    if k == 4 {
+        let cap = f"f{i}";
+        return Shape::F(|| cap.len() as i64);
+    }
+    if k == 5 { return Shape::N(Inner::X(f"x{i}")); }
+    if k == 6 { return Shape::N(Inner::Y(i, -i)); }
+    if k == 7 { return Shape::R(Pt { x: i, name: f"r{i}" }); }
+    if k == 8 { return Shape::I(i * 7); }
+    return Shape::U;
+}
+
+fn check(i: i64, s: Shape) -> bool {
+    let k = i % 10;
+    match s {
+        Shape::S(v) => return k == 0 && v == f"s{i}",
+        Shape::P(a, v) => return k == 1 && a == i && v == f"p{i}",
+        Shape::L(l) => return k == 2 && l.len() == 2 && l[0] == i && l[1] == i + 1,
+        Shape::A(a) => return k == 3 && a.w() == i * 2 + 3,
+        Shape::F(f) => return k == 4 && f() == f"f{i}".len() as i64,
+        Shape::N(n) => match n {
+            Inner::X(v) => return k == 5 && v == f"x{i}",
+            Inner::Y(a, b) => return k == 6 && a == i && b == -i,
+            Inner::Z => return false,
+        },
+        Shape::R(p) => return k == 7 && p.x == i && p.name == f"r{i}",
+        Shape::I(v) => return k == 8 && v == i * 7,
+        Shape::U => return k == 9,
+    }
+}
+
+fn mixed(i: i64) -> str | i64 | none {
+    if i % 3 == 0 { return f"m{i}"; }
+    if i % 3 == 1 { return i; }
+    return none;
+}
+
+fn mixed_ok(i: i64, m: str | i64 | none) -> bool {
+    match m {
+        s: str => return i % 3 == 0 && s == f"m{i}",
+        v: i64 => return i % 3 == 1 && v == i,
+        none => return i % 3 == 2,
+    }
+}
+
+fn junk(i: i64) -> i64 {
+    let n: i64 = 0;
+    let k = 0;
+    while k < 15 {
+        let s = f"garbage-{i}-{k}-xxxxxxxx";
+        n += s.len() as i64;
+        k += 1;
+    }
+    return n;
+}
+
+fn main() {
+    let shapes: List<Shape> = [];
+    let sums: List<str | i64 | none> = [];
+    let holders: List<Holder> = [];
+    let n: i64 = 0;
+    let i: i64 = 0;
+    while i < 3000 {
+        shapes.push(make(i));
+        sums.push(mixed(i));
+        holders.push(Holder { tag: i, s: make(i + 3), m: mixed(i + 1) });
+        n += junk(i);
+        i += 1;
+    }
+    let before = unsafe { rok_gc_stats_moved_bytes() };
+    unsafe { rok_gc_collect() };
+    unsafe { rok_gc_collect() };
+    unsafe { rok_gc_collect() };
+    if unsafe { rok_gc_stats_moved_bytes() } > before {
+        println("moved");
+    }
+    let bad = [0, 0, 0];
+    i = 0;
+    while i < 3000 {
+        if !check(i, shapes[i as usize]) { bad[0] += 1; }
+        if !mixed_ok(i, sums[i as usize]) { bad[1] += 1; }
+        let h = holders[i as usize];
+        if h.tag != i || !check(i + 3, h.s) || !mixed_ok(i + 1, h.m) { bad[2] += 1; }
+        i += 1;
+    }
+    if bad[0] == 0 && n > 0 { println("enums ok"); }
+    if bad[1] == 0 { println("sums ok"); }
+    if bad[2] == 0 { println("fields ok"); }
+}

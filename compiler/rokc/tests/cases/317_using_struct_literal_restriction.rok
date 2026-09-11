@@ -1,0 +1,14 @@
+// expect-error: 13:20: expression expected, found Colon
+
+// `using` takes the same top-level struct-literal restriction as `if` /
+// `while` / `match` / `for`: `{` after the initializer opens the body,
+// so a struct literal there needs parentheses.
+struct R { n: i32; }
+impl Drop for R {
+    fn drop(ref self) {}
+}
+
+fn main() {
+    using a = (R { n: 1 }) {}
+    using b = R { n: 2 } {}
+}

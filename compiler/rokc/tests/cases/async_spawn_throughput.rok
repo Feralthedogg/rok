@@ -2,15 +2,20 @@
 // expect-stdout:
 // tasks 100000 sum 4999950000
 // fan-out 1000 x 20 yields: 20000
-// within bound: true
+// no slowdown: true
 
 // Executor throughput: 100k tiny tasks spawned and joined, then tasks
-// that yield repeatedly. The bound is generous (debug build, shared CI).
-let start = Instant::now();
+// that yield repeatedly. No wall-clock bound (a loaded machine or
+// `ROK_GC_STRESS` makes everything slower): the fastest batch of the
+// second half stays within 10x the fastest of the first (load only adds
+// time, so minimums filter it out), while cost growing with the tasks
+// already run (quadratic) would be 50x or more.
+let fastest = [i64::MAX, i64::MAX];
 // In batches of 1000, so the live heap (and the GC's work) stays small.
 let sum: i64 = 0;
 let i: i64 = 0;
 while i < 100000 {
+    let t0 = Instant::now();
     let tasks: List<Task<i64>> = [];
     let b = 0;
     while b < 1000 {
@@ -20,6 +25,9 @@ while i < 100000 {
         b = b + 1;
     }
     for t in tasks { sum = sum + await t; }
+    let half = if i <= 50000 { 0 } else { 1 };
+    let ns = t0.elapsed().as_ns();
+    if ns < fastest[half] { fastest[half] = ns; }
 }
 println(f"tasks 100000 sum {sum}");
 
@@ -40,4 +48,4 @@ while k < 1000 {
 }
 await task::join(busy);
 println(f"fan-out 1000 x 20 yields: {hops.load()}");
-println(f"within bound: {start.elapsed().as_ms() < 120000}");
+println(f"no slowdown: {fastest[1] < 10 * fastest[0] + 1000000}");

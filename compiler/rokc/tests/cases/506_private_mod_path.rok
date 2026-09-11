@@ -1,0 +1,24 @@
+// expect-error: 17:5: `a::hidden::f` is not visible from `<root>`: module `a::hidden` is private to `a`
+// expect-error: 21:16: `a::hidden::f` is not visible from `<root>`
+// expect-error: 22:13: `a::hidden::S` is not visible from `<root>`
+// expect-error: 23:22: `a::hidden::C` is not visible from `<root>`
+
+// 5.6.2 / 5.6.13: every module on a path must be visible, not only the
+// item at its end; `pub use` of a `pub` item re-exports it (5.8.4).
+mod a {
+    mod hidden {
+        pub fn f() -> i32 { 1 }
+        pub struct S { pub v: i32; }
+        pub const C: i32 = 3;
+    }
+    pub use hidden::f;
+    pub fn ok() -> i32 { hidden::f() + hidden::C }
+}
+use a::hidden::f as g;
+
+fn main() {
+    println(f"{a::ok()} {a::f()}");
+    println(f"{a::hidden::f()}");
+    let s = a::hidden::S { v: 2 };
+    println(f"{s.v} {a::hidden::C} {g()}");
+}

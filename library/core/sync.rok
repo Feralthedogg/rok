@@ -277,9 +277,9 @@ impl<T> Mutex<T> {
     }
 
     /// Owe the next `unlock` by the running task: it holds a guard of a
-    /// lock it does not have (a `Condvar::wait_async` cancelled while
-    /// another task held the mutex), and that guard's drop must not
-    /// unlock the holder's lock.
+    /// lock it does not have (a `Condvar::wait_async` between its unlock
+    /// and taking the lock back), and that guard's drop must not unlock
+    /// another holder's lock.
     fn owe(self, task: u64) {
         using g = OWED.lock() {
             g.get().push((key(self.state), task));
@@ -287,8 +287,8 @@ impl<T> Mutex<T> {
         }
     }
 
-    /// Whether this `unlock` was owed (by the running task): then it is
-    /// settled and does nothing.
+    /// Whether an `unlock` by the running task was owed: then it is
+    /// settled (and that `unlock` does nothing).
     fn forgive(self) -> bool {
         let me = match rok::core::task::try_id() {
             id: rok::core::task::TaskId => id.as_u64(),
@@ -622,17 +622,21 @@ impl<T> rok::core::future::Future for CondvarWait<T> {
     fn poll(ref self, ref ctx: rok::core::future::Context) -> rok::core::future::Poll<MutexGuard<T>> {
         let st = self.st;
         let m = self.mutex;
+        // From the unlock until the lock is ours again the task's guard
+        // holds nothing: its drop is owed. The `await` may leave on a
+        // cancel after any `Pending` without polling again.
         if st[0] == 0 {
             st[1] = atomic_load(self.cv.seq, 0, SeqCst);
             st[0] = 1;
             m.unlock();
+            m.owe(rok::core::task::id().as_u64());
         }
         if rok::core::task::cancel_requested(ctx) {
             // The task leaves this `await` and its `using` guard drops:
-            // take the lock back if it is free, else owe that drop (it
-            // must not unlock another holder's lock). Never blocks.
-            if m.try_lock() is none {
-                m.owe(rok::core::task::id().as_u64());
+            // take the lock back if it is free (the drop unlocks it),
+            // else the drop stays owed. Never blocks.
+            if m.try_lock() is MutexGuard<T> {
+                m.forgive();
             }
             return rok::core::future::Poll::Ready(MutexGuard { mutex: m });
         }
@@ -644,7 +648,13 @@ impl<T> rok::core::future::Future for CondvarWait<T> {
             st[0] = 2;
         }
         let lf = m.lock_async();
-        lf.poll(ref ctx)
+        match lf.poll(ref ctx) {
+            rok::core::future::Poll::Ready(g) => {
+                m.forgive();
+                rok::core::future::Poll::Ready(g)
+            }
+            rok::core::future::Poll::Pending => rok::core::future::Poll::Pending,
+        }
     }
 }
 

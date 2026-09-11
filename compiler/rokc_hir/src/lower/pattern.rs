@@ -633,6 +633,8 @@ pub(super) fn lower_pattern(
     pat: &AstPattern,
     scrut_ty: &HirTy,
 ) -> HirPattern {
+    let typed = bare_type_patterns(ctx, pat, scrut_ty);
+    let pat = typed.as_ref().unwrap_or(pat);
     let p = lower_pattern_inner(ctx, pat, scrut_ty);
     // A pattern that failed to lower still declares its names (as
     // poisoned locals) so their uses don't cascade into "cannot find".
@@ -644,6 +646,57 @@ pub(super) fn lower_pattern(
         }
     }
     p
+}
+
+/// Spec 3.11.1: against a sum or `any` value, a bare type name (`f64 =>`,
+/// `i32 | str =>`) is a type pattern binding nothing, not a binding.
+/// Elsewhere a type test is a plain match, so the name stays a binding.
+fn bare_type_patterns(
+    ctx: &LowerCtx<'_>,
+    pat: &AstPattern,
+    scrut_ty: &HirTy,
+) -> Option<AstPattern> {
+    if !matches!(scrut_ty, HirTy::Sum(_) | HirTy::AnyTrait(_)) {
+        return None;
+    }
+    let as_check = |p: &AstPattern| {
+        let AstPatternKind::Binding { name, sub: None } = &p.kind else {
+            return None;
+        };
+        if ctx.enum_path(&[name.as_str()]).is_some() {
+            return None;
+        }
+        let ty = rokc_ast::Ty {
+            kind: rokc_ast::TyKind::Path(rokc_ast::Path {
+                segments: vec![rokc_ast::PathSegment {
+                    name: name.clone(),
+                    generics: Vec::new(),
+                }],
+                span: p.span,
+            }),
+            span: p.span,
+        };
+        let resolved = ctx.resolve_ast_ty(&ty);
+        (!matches!(resolved, HirTy::Path(_) | HirTy::Unknown)).then_some(AstPattern {
+            kind: AstPatternKind::TypeCheck { binder: None, ty },
+            span: p.span,
+        })
+    };
+    match &pat.kind {
+        AstPatternKind::Or(alts) => {
+            let new: Vec<Option<AstPattern>> = alts.iter().map(as_check).collect();
+            new.iter().any(Option::is_some).then(|| AstPattern {
+                kind: AstPatternKind::Or(
+                    new.into_iter()
+                        .zip(alts)
+                        .map(|(n, a)| n.unwrap_or_else(|| a.clone()))
+                        .collect(),
+                ),
+                span: pat.span,
+            })
+        }
+        _ => as_check(pat),
+    }
 }
 
 #[allow(clippy::cognitive_complexity)] // one arm per pattern kind
@@ -702,24 +755,6 @@ pub(super) fn lower_pattern_inner(
                     sub: Box::new(lower_pattern(ctx, p, scrut_ty)),
                 },
             };
-            // Spec 3.11.4: when an enclosing or-pattern shares this name
-            // across alternatives, reuse the preset local and check that
-            // each alt binds the same type.
-            if let Some(&local) = ctx.or_pattern_binders.last().and_then(|m| m.get(name)) {
-                let existing = ctx.local_ty(local);
-                if matches!(existing, HirTy::Unknown) {
-                    ctx.locals[local.0 as usize].ty = scrut_ty.clone();
-                } else if existing != *scrut_ty {
-                    ctx.emit_error(
-                        rokc_diagnostic::ErrorKind::Type,
-                        format!(
-                            "or-pattern binding `{name}` has inconsistent types across \
-                             alternatives (spec 3.11.4)"
-                        ),
-                    );
-                }
-                return at(ctx, local);
-            }
             let local = ctx.declare_bound(name, scrut_ty.clone(), pat.span);
             at(ctx, local)
         }
@@ -790,6 +825,35 @@ pub(super) fn lower_pattern_inner(
                             sub: Box::new(alts),
                         };
                     }
+                }
+            } else if let (HirTy::AnyTrait(bounds), HirTy::Sum(ws)) = (scrut_ty, &target_ty) {
+                // `x: A | B` on `any`: the tag of a stored `A | B` value
+                // or of either member; the binder is the value as `A | B`.
+                if ws
+                    .iter()
+                    .all(|w| bounds.iter().all(|b| ctx.implements_trait(w, b, 0)))
+                {
+                    let alts = HirPattern::Or(
+                        std::iter::once(&target_ty)
+                            .chain(ws)
+                            .map(|w| HirPattern::SumVariant {
+                                sum_ty: scrut_ty.clone(),
+                                variant_index: ctx.any_tag(w),
+                                binder: None,
+                                payload_ty: None,
+                            })
+                            .collect(),
+                    );
+                    let Some(binder) = bind(ctx) else {
+                        return alts;
+                    };
+                    let whole = ctx.declare(None, scrut_ty.clone());
+                    ctx.pending_resums.push((binder, whole));
+                    return HirPattern::At {
+                        local: whole,
+                        ty: scrut_ty.clone(),
+                        sub: Box::new(alts),
+                    };
                 }
             } else if let (HirTy::AnyTrait(bounds), false) =
                 (scrut_ty, matches!(target_ty, HirTy::AnyTrait(_)))

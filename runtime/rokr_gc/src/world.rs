@@ -39,6 +39,9 @@ pub struct Mutator {
     /// `rok_tls_wb_log_cursor` / `_limit`: a collection retires every
     /// thread's remembered-set chunk.
     wb_log: [*mut usize; 2],
+    /// `rok_tls_satb_cursor` / `_limit`: the final pause of a concurrent
+    /// mark retires every thread's SATB chunk.
+    satb: [*mut usize; 2],
     /// Extra root, alive while the record is registered: a spawned
     /// thread's closure environment (its only reference before the
     /// thread's own frames hold it).
@@ -159,6 +162,7 @@ pub fn register(root: *mut u8, worker_id: u64) -> *mut Mutator {
             stack_top: ptr::null(),
             tlab: [ptr::null_mut(); 2],
             wb_log: [ptr::null_mut(); 2],
+            satb: [ptr::null_mut(); 2],
             root,
             worker_id,
         });
@@ -187,6 +191,7 @@ pub unsafe fn attach(m: *mut Mutator) {
         (*m).stack_top = tls::shadow_stack_top();
         (*m).tlab = tls::tlab();
         (*m).wb_log = tls::wb_log();
+        (*m).satb = tls::satb_log();
         if (*m).worker_id == u64::MAX {
             (*m).worker_id = tls::worker_id().read();
         } else {
@@ -225,7 +230,7 @@ fn find_current() -> *mut Mutator {
 /// It must not touch GC objects afterwards.
 pub fn detach() {
     lock();
-    crate::retire_own_log();
+    crate::retire_own_logs();
     let me = find_current();
     // SAFETY: registry guarded by the lock; `me` came from `register`.
     unsafe {
@@ -328,6 +333,22 @@ pub fn for_each_wb_log(mut f: impl FnMut([*mut usize; 2])) {
         }
     }
     f(tls::wb_log());
+}
+
+/// With the world stopped: `f` on the SATB log slots of every registered
+/// thread and the caller's.
+pub fn for_each_satb(mut f: impl FnMut([*mut usize; 2])) {
+    // SAFETY: as in `reset_tlabs`.
+    unsafe {
+        let mut m = *WORLD.threads.get();
+        while !m.is_null() {
+            if !(*m).satb[0].is_null() {
+                f((*m).satb);
+            }
+            m = (*m).next;
+        }
+    }
+    f(tls::satb_log());
 }
 
 /// With the lock held: end the pause and wake every parked mutator.

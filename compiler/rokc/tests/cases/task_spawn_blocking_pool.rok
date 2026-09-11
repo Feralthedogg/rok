@@ -40,20 +40,24 @@ for j in jobs {
 }
 println(f"concurrent 1000 sum {total} bounded {all.len() <= 512}");
 
+// Cancelled once the job runs (a loaded machine may take long to start
+// it); then the job finishes all the same.
+let started = Atomic::new(0);
 let flag: Mutex<bool> = Mutex::new(false);
 let t = task::spawn(async {
     await task::spawn_blocking(|| {
+        started.store(1);
         thread::sleep(Duration::ms(20));
         using g = flag.lock() { g.set(true); }
         0
     });
 });
-await task::sleep(Duration::ms(1));
+let deadline = Instant::now() + Duration::sec(60);
+while started.load() == 0 && Instant::now() < deadline { await task::yield_now(); }
 t.cancel();
 let seen = false;
-for _ in 0..500 {
+while !seen && Instant::now() < deadline {
     using g = flag.lock() { seen = g.get(); }
-    if seen { break; }
-    thread::sleep(Duration::ms(2));
+    if !seen { thread::sleep(Duration::ms(2)); }
 }
 println(f"cancelled job finished {seen}");

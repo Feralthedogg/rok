@@ -285,6 +285,53 @@ fn demangle_and_usage_errors() {
     assert_exit(&rokc(None, &dir, &["build", "--bogus"]), 2);
     assert_exit(&rokc(None, &dir, &["frobnicate"]), 2);
     assert_exit(&rokc(None, &dir, &["--version"]), 0);
+    let out = rokc(None, &dir, &["-V", "-v"]);
+    assert!(
+        text(&out.stdout).contains("\nhost: "),
+        "{}",
+        text(&out.stdout)
+    );
+    // Per-command help: the entry and its options only.
+    let out = rokc(None, &dir, &["test", "--help"]);
+    assert_exit(&out, 0);
+    let help = text(&out.stdout);
+    assert!(help.contains("test [path] [filter]") && help.contains("--threads=N"));
+    assert!(
+        !help.contains("demangle") && !help.contains("--iters"),
+        "{help}"
+    );
+}
+
+/// rokc's library and runtime are under its own sysroot (`bin/..`),
+/// whatever `ROK_HOME` says; a missing one is named.
+#[test]
+fn sysroot_is_beside_rokc() {
+    let dir = scratch("sysroot");
+    let sys = dir.join("sys");
+    fs::create_dir_all(sys.join("bin")).unwrap();
+    fs::create_dir_all(sys.join("lib/rok/core")).unwrap();
+    fs::copy(ROKC, sys.join("bin/rokc")).unwrap();
+    fs::write(sys.join("lib/rok/core/lib.rok"), "fn (\n").unwrap();
+    fs::write(dir.join("x.rok"), "let x = 1;\n").unwrap();
+    let run = |args: &[&str]| {
+        Command::new(sys.join("bin/rokc"))
+            .current_dir(&dir)
+            .env("ROK_HOME", workspace())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let out = run(&["check", "x.rok"]);
+    assert_exit(&out, 1);
+    assert!(text(&out.stderr).contains("sys/lib/rok/core/lib.rok"));
+    fs::write(sys.join("lib/rok/core/lib.rok"), "").unwrap();
+    let out = run(&["run", "x.rok"]);
+    assert_exit(&out, 1);
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("the runtime library is missing: no ") && err.contains("sys/lib/librokr.a"),
+        "{err}"
+    );
 }
 
 #[test]

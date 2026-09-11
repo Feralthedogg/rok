@@ -1196,7 +1196,19 @@ impl Printer {
                 self.block(else_body);
             }
             ExprKind::OpInfix { op, lhs, rhs } => {
-                self.operand(lhs);
+                // A left-associative chain (`1 + 1 + 1`) prints flat: its
+                // nesting would otherwise come back as groups.
+                const LEFT: &[&str] = &[
+                    "+", "-", "*", "/", "%", "%%", "&", "|", "^", "<<", ">>", "&&", "||",
+                ];
+                match &lhs.kind {
+                    ExprKind::OpInfix { op: inner, .. }
+                        if inner == op && LEFT.contains(&op.as_str()) =>
+                    {
+                        self.expr(lhs);
+                    }
+                    _ => self.operand(lhs),
+                }
                 let _ = write!(self.out, " {op} ");
                 self.operand(rhs);
             }
@@ -1590,7 +1602,16 @@ impl Printer {
                     self.s(")");
                 }
             }
-            PatternKind::Or(alts) => self.list(alts, " | ", Self::pat),
+            // `(n: i32) | (m: i64)`: a type pattern's type would take the `|`.
+            PatternKind::Or(alts) => self.list(alts, " | ", |p, a| {
+                if matches!(a.kind, PatternKind::TypeCheck { .. }) {
+                    p.s("(");
+                    p.pat(a);
+                    p.s(")");
+                } else {
+                    p.pat(a);
+                }
+            }),
         }
     }
 }

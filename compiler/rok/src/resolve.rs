@@ -143,7 +143,7 @@ fn order(deps: Vec<Resolved>) -> Vec<Resolved> {
         }
         state[i] = 1;
         for n in &all[i].deps {
-            if let Some(j) = all.iter().position(|x| x.name == *n) {
+            if let Some(j) = all.iter().position(|x| manifest::same(&x.name, n)) {
                 visit(j, all, state, out);
             }
         }
@@ -172,7 +172,7 @@ impl Resolver<'_> {
             if let (
                 Some((Id::Stone { registry, vers }, prev_by, prev_req)),
                 Source::Registry { req, .. },
-            ) = (self.seen.get(&dep.name), &dep.source)
+            ) = (self.seen.get(&manifest::key(&dep.name)), &dep.source)
             {
                 let url = self.registry_of(&dep.source);
                 if *registry == url && Req::parse(req)?.matches(vers) {
@@ -187,7 +187,7 @@ impl Resolver<'_> {
                 ));
             }
             let (dir, id, stone_deps) = self.locate(&dep, &base)?;
-            if let Some((prev, prev_by, _)) = self.seen.get(&dep.name) {
+            if let Some((prev, prev_by, _)) = self.seen.get(&manifest::key(&dep.name)) {
                 if *prev == id {
                     continue;
                 }
@@ -219,7 +219,7 @@ impl Resolver<'_> {
                 Source::Registry { req, .. } => req.clone(),
                 _ => String::new(),
             };
-            self.seen.insert(dep.name.clone(), (id, by, req));
+            self.seen.insert(manifest::key(&dep.name), (id, by, req));
             self.out.push(Resolved {
                 name: dep.name,
                 root,
@@ -243,7 +243,7 @@ impl Resolver<'_> {
         self.opts
             .update
             .as_ref()
-            .is_some_and(|names| names.is_empty() || names.iter().any(|n| n == name))
+            .is_some_and(|names| names.is_empty() || names.iter().any(|n| manifest::same(n, name)))
     }
 
     /// The package directory of `dep`, its identity, and for a stone its
@@ -310,7 +310,12 @@ impl Resolver<'_> {
                 ));
             }
         }
-        if !self.new.packages.iter().any(|p| p.name == dep.name) {
+        if !self
+            .new
+            .packages
+            .iter()
+            .any(|p| manifest::same(&p.name, &dep.name))
+        {
             self.new.packages.push(Locked {
                 name: dep.name.clone(),
                 vers: None,
@@ -400,7 +405,12 @@ impl Resolver<'_> {
                 e.vers, e.rev, e.cksum
             ));
         }
-        if !self.new.packages.iter().any(|p| p.name == name) {
+        if !self
+            .new
+            .packages
+            .iter()
+            .any(|p| manifest::same(&p.name, name))
+        {
             self.new.packages.push(Locked {
                 name: name.to_owned(),
                 vers: Some(e.vers.to_string()),

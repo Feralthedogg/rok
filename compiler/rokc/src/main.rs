@@ -93,16 +93,17 @@ build options:
   --mlir-pass <pass>           extra mlir-opt pass, before the LLVM
                                lowering (repeatable)
   --bootstrap <file>           library root to preload (repeatable; default:
-                               $ROK_HOME/lib/rok/{core,std,bare}/lib.rok)
+                               <sysroot>/lib/rok/{core,std,bare}/lib.rok)
   --rokr <lib>                 runtime library: path, or name for -l<name>
-                               (default: $ROK_HOME/lib/librokr.a, else -lrokr)
+                               (default: <sysroot>/lib/librokr.a)
   --extern <name>=<path>       dependency package: its directory or `lib.rok`
                                (prebuilt into target/<profile>/deps/ first,
                                each after the ones before it), or a prebuilt
                                <name>.rhir / lib<name>.a; importable as
                                `use name::..` (repeatable; `rok` passes these)
-  --name <name>                a library's package name (default: its
-                               directory's); it is in the library's symbols
+  --name <name>                the package name (default: its directory's;
+                               `rok` passes rok.rokon's `name`); a
+                               library's is in its symbols
   --target-dir <dir>           instead of the package's target/ (without a
                                package: the system temp directory's
                                rokc-target/)
@@ -117,9 +118,13 @@ bench options:  --iters=N (calls per sample; default: calibrated to ~10ms),
 lint options:   --list
 fmt options:    --check (exit 1 if a file would change), --diff
 
+The sysroot is the directory above rokc's own bin/ (a toolchain:
+$ROK_HOME/toolchains/<version>-<triple>/); a build in the repository uses
+its library/ and the librokr.a beside rokc.
+
 environment:
-  ROK_HOME          install root (default: the parent of rokc's directory);
-                    falls back to the repo dev layout
+  ROK_CC            C compiler driver for the final link (default: clang;
+                    on macOS Apple's, from xcrun)
   ROKC_TARGET_DIR   target/ location (default: inside the package)
   ROKC_VERBOSE      same as --verbose
   ROKC_NUM_JOBS     default for --threads
@@ -164,6 +169,42 @@ struct Args {
     samples: Option<u64>,
     /// An `-O` level or `--release` was given.
     opt_set: bool,
+}
+
+/// The version, and the commit and its date when built from git.
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), env!("ROK_COMMIT_INFO"));
+
+/// `rokc <cmd> --help`: the command's entry in `USAGE` and its options.
+fn command_help(cmd: &str) -> String {
+    let Some(entry) = rokc_core::command_help(USAGE, cmd) else {
+        usage_error(&format!("unknown command `{cmd}`"));
+    };
+    let mut out = format!("usage: rokc [global options] {cmd} [options] [args]\n\n{entry}");
+    let sections: &[&str] = match cmd {
+        "build" | "run" | "emit" => &["build options"],
+        "test" => &["build options", "test options"],
+        "bench" => &["build options", "bench options"],
+        "check" => &["check options"],
+        "lint" => &["lint options"],
+        "fmt" => &["fmt options"],
+        _ => &[],
+    };
+    for s in sections {
+        let mut lines = USAGE
+            .lines()
+            .skip_while(|l| !l.starts_with(&format!("{s}:")));
+        out.push('\n');
+        if let Some(head) = lines.next() {
+            out.push_str(head);
+            out.push('\n');
+        }
+        for l in lines.take_while(|l| l.starts_with(' ') && !l.trim().is_empty()) {
+            out.push_str(l);
+            out.push('\n');
+        }
+    }
+    out.push_str("\nglobal options and the environment: `rokc help`\n");
+    out
 }
 
 fn usage_error(msg: &str) -> ! {
@@ -300,7 +341,7 @@ fn parse_args(raw: Vec<String>) -> Args {
             }
             "-h" | "--help" if a.cmd.is_empty() => "help".clone_into(&mut a.cmd),
             "-h" | "--help" => {
-                print!("{USAGE}");
+                print!("{}", command_help(&a.cmd));
                 process::exit(0);
             }
             "--version" | "-V" if a.cmd.is_empty() => "version".clone_into(&mut a.cmd),
@@ -328,6 +369,8 @@ fn parse_extern(v: &str) -> (String, PathBuf) {
     let Some((name, path)) = v.split_once('=') else {
         usage_error(&format!("`--extern {v}`: expected <name>=<path>"));
     };
+    // A package name (`my-lib`) stands for its code name (`my_lib`).
+    let name = &name.replace('-', "_");
     let ident = |s: &str| {
         s.chars()
             .next()
@@ -352,6 +395,11 @@ fn parse_extern(v: &str) -> (String, PathBuf) {
     (name.to_owned(), root)
 }
 
+/// Every pass recurses over the tree (the parser caps its depth): run
+/// the whole command on a thread whose stack is sized for that cap in a
+/// debug build (address space only until used).
+const COMPILER_STACK: usize = 1 << 30;
+
 fn main() {
     // Spec 901.6: an internal error (rokc panic) exits 101.
     let default_hook = std::panic::take_hook();
@@ -360,6 +408,16 @@ fn main() {
         eprintln!("rokc: internal compiler error");
         process::exit(101);
     }));
+    std::thread::Builder::new()
+        .name("main".into())
+        .stack_size(COMPILER_STACK)
+        .spawn(real_main)
+        .expect("spawn compiler thread")
+        .join()
+        .unwrap_or_else(|e| std::panic::resume_unwind(e));
+}
+
+fn real_main() {
     let a = parse_args(std::env::args().skip(1).collect());
     let color = a.color.unwrap_or_else(|| {
         std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
@@ -445,8 +503,16 @@ fn main() {
             };
             print!("{}", out.unwrap_or_else(|e| fail(&e)));
         }
-        "version" => println!("rokc {}", env!("CARGO_PKG_VERSION")),
-        "help" => print!("{USAGE}"),
+        "version" => {
+            println!("rokc {}", VERSION);
+            if a.verbose > 0 {
+                println!("host: {}", env!("ROK_HOST"));
+            }
+        }
+        "help" => match a.positional.first() {
+            Some(c) => print!("{}", command_help(c)),
+            None => print!("{USAGE}"),
+        },
         other => usage_error(&format!("unknown command `{other}`")),
     }
 }
@@ -454,20 +520,24 @@ fn main() {
 /// The implicit `use rok::core::**;` (spec 0.0.5) needs `rok/core`,
 /// and linking needs `librokr.a`; find both without flags.
 fn with_defaults(mut a: Args) -> Args {
-    let (roots, rokr) = rokc_interface::toolchain();
+    let sys = rokc_interface::sysroot();
     if a.bootstrap.is_empty() {
-        match roots {
-            Some(roots) => a.bootstrap = roots,
-            None => eprintln!(
-                "rokc: warning: `$ROK_HOME/{}/core/lib.rok` not found \
-                 (set ROK_HOME); operators and lang items are unavailable",
-                rokc_interface::INSTALLED_LIBS
-            ),
+        match sys.libs {
+            Ok(roots) => a.bootstrap = roots,
+            // The language server still starts.
+            Err(e) if a.cmd == "lsp" => eprintln!("rokc: warning: {e}"),
+            Err(e) => fail(&e),
         }
     }
+    let links = matches!(
+        a.cmd.as_str(),
+        "run" | "test" | "bench" | "repl" | "jupyter"
+    ) || (a.cmd == "build" && a.emit.is_empty());
     if a.opts.rokr == "rokr" {
-        if let Some(lib) = rokr {
-            a.opts.rokr = lib.display().to_string();
+        match sys.rokr {
+            Ok(lib) => a.opts.rokr = lib.display().to_string(),
+            Err(e) if links => fail(&e),
+            Err(_) => {}
         }
     }
     a
@@ -475,8 +545,16 @@ fn with_defaults(mut a: Args) -> Args {
 
 /// The package named by the first positional (default: `.`).
 fn discover_arg(a: &Args) -> Package {
-    let path = a.positional.first().map_or(".", String::as_str);
-    rokc_interface::discover(Path::new(path)).unwrap_or_else(|e| fail(&e))
+    discover_at(a, a.positional.first().map_or(".", String::as_str))
+}
+
+/// The package at `path`, named `--name` when given.
+fn discover_at(a: &Args, path: &str) -> Package {
+    let mut pkg = rokc_interface::discover(Path::new(path)).unwrap_or_else(|e| fail(&e));
+    if let Some(n) = a.name.as_ref().filter(|_| !pkg.anonymous) {
+        pkg.name.clone_from(n);
+    }
+    pkg
 }
 
 fn create_dir(dir: &Path) {
@@ -575,18 +653,19 @@ fn compile(a: &Args, pkg: &Package, mode: Mode) -> (CompileResult, String, Insta
 /// A library's package name: `--name`, else its directory's (made an
 /// identifier).
 fn lib_name(a: &Args, pkg: &Package) -> String {
-    a.name.clone().unwrap_or_else(|| {
-        let n: String = pkg
-            .name
-            .chars()
-            .map(|c| if c.is_alphanumeric() { c } else { '_' })
-            .collect();
-        if n.starts_with(|c: char| c.is_ascii_digit()) {
-            format!("_{n}")
-        } else {
-            n
-        }
-    })
+    // `my-app` is `my_app` in code and symbols.
+    let n: String = a
+        .name
+        .as_ref()
+        .unwrap_or(&pkg.name)
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    if n.starts_with(|c: char| c.is_ascii_digit()) {
+        format!("_{n}")
+    } else {
+        n
+    }
 }
 
 /// `-v`: per-stage timing (909.5).
@@ -704,6 +783,7 @@ fn fingerprint(a: &Args, pkg: &Package, out: &Path) -> Fingerprint {
         out.display().to_string(),
         pkg.root.display().to_string(),
         std::env::var("PATH").unwrap_or_default(),
+        std::env::var("ROK_CC").unwrap_or_default(),
     ];
     words.extend(a.cfg.iter().cloned());
     words.extend(pkg.lib.then(|| lib_name(a, pkg)));
@@ -869,7 +949,7 @@ fn path_and_filter(a: &Args) -> (&str, Option<&str>) {
 fn cmd_test(mut a: Args) {
     let (path, filter) = path_and_filter(&a);
     let filter = filter.map(str::to_owned);
-    let pkg = rokc_interface::discover(Path::new(path)).unwrap_or_else(|e| fail(&e));
+    let pkg = discover_at(&a, path);
     prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
     let (result, _, started) = compile(&a, &pkg, Mode::Test);
     let tmp = fail_on(TempDir::new(a.opts.keep_temps));
@@ -904,7 +984,7 @@ fn cmd_bench(mut a: Args) {
     }
     let (path, filter) = path_and_filter(&a);
     let filter = filter.map(str::to_owned);
-    let pkg = rokc_interface::discover(Path::new(path)).unwrap_or_else(|e| fail(&e));
+    let pkg = discover_at(&a, path);
     prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
     let (result, _, started) = compile(&a, &pkg, Mode::Bench);
     let tmp = fail_on(TempDir::new(a.opts.keep_temps));

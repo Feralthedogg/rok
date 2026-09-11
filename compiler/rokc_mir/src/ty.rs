@@ -63,7 +63,15 @@ pub fn lower_ty(ty: &HirTy, module: &HirModule, target: &Target) -> MirTy {
         ),
         HirTy::Sum(parts) => match crate::lower::niche::sum_niche(ty, module, target) {
             Some((m, n)) => crate::lower::niche::sum_repr(m, &n, module, target),
-            None => sum_layout(&non_none(parts).map(lower).collect::<Vec<_>>(), target),
+            None => sum_layout(
+                &parts
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| !is_none(v))
+                    .map(|(i, v)| (sum_tag(ty, i as u32), lower(v)))
+                    .collect::<Vec<_>>(),
+                target,
+            ),
         },
         HirTy::Tuple(parts) => MirTy::Tuple(parts.iter().map(lower).collect()),
         HirTy::Enum(id) => sum_layout(
@@ -90,10 +98,6 @@ fn is_none(v: &HirTy) -> bool {
     matches!(v, HirTy::Path(p) if p.as_slice() == ["none"])
 }
 
-fn non_none(variants: &[HirTy]) -> impl Iterator<Item = &HirTy> {
-    variants.iter().filter(|v| !is_none(v))
-}
-
 /// Stored tag of member `index` of `sum_ty`. A sum with `none` stores
 /// `none` as tag 0 and shifts the members before it up by one, so
 /// zeroed memory (a fresh `GcBuf` / `List` slot) reads back as `none`.
@@ -114,10 +118,11 @@ pub fn sum_tag(sum_ty: &HirTy, index: u32) -> u32 {
 
 /// The single tagged-union layout shared by enums and sums:
 /// `(i32 tag, payload)`, or a bare `i32` tag when nothing carries data.
-/// `payloads` excludes `none` / unit variants.
+/// `payloads` are `(stored tag, payload)`, without `none` / unit
+/// variants.
 #[must_use]
-pub fn sum_layout(payloads: &[MirTy], target: &Target) -> MirTy {
-    match unify_payload(payloads, target).or_else(|| payloads.first().cloned()) {
+pub fn sum_layout(payloads: &[(u32, MirTy)], target: &Target) -> MirTy {
+    match unify_payload(payloads, target) {
         Some(p) => MirTy::Tuple(vec![MirTy::Prim(PrimTy::I32), p]),
         None => MirTy::Prim(PrimTy::I32),
     }
@@ -127,11 +132,13 @@ pub fn sum_layout(payloads: &[MirTy], target: &Target) -> MirTy {
 /// their type; differing scalar payloads share an unsigned integer as
 /// wide as the widest one; any other mix (aggregates, `str`) shares a
 /// byte-array union `[uN; k]` with the max size and max align (N bits
-/// = max align). Both are written / read through `RValue::Bitcast`.
+/// = max align), or a [`MirTy::Union`] when a payload holds a GC
+/// reference. All are written / read through `RValue::Bitcast`.
 #[must_use]
-pub fn unify_payload(payloads: &[MirTy], target: &Target) -> Option<MirTy> {
-    let first = payloads.first()?;
-    if payloads.iter().all(|p| p == first) {
+pub fn unify_payload(variants: &[(u32, MirTy)], target: &Target) -> Option<MirTy> {
+    let payloads: Vec<&MirTy> = variants.iter().map(|(_, p)| p).collect();
+    let first = *payloads.first()?;
+    if payloads.iter().all(|p| *p == first) {
         return Some(first.clone());
     }
     let uint = |bytes: u32| {
@@ -153,27 +160,34 @@ pub fn unify_payload(payloads: &[MirTy], target: &Target) -> Option<MirTy> {
         .iter()
         .map(|p| target.size_align(p))
         .fold((0, 1), |(s, a), (ps, pa)| (s.max(ps), a.max(pa)));
-    // A union that can hold a GC reference is all `GcRef` words (a
-    // `GcRef` is word-aligned, so it always lands on one), so the
-    // collector sees it; non-reference bits there are ignored by it.
-    let elem = if payloads.iter().any(|p| target.has_gc_ref(p)) {
-        MirTy::GcRef
-    } else {
-        uint(align)
-    };
-    Some(MirTy::Array(Box::new(elem), size.div_ceil(align)))
+    // A union that can hold a GC reference is pointer-width words (a
+    // `GcRef` is word-aligned, so it always lands on one) that keep the
+    // variants: the collector decodes the tag and scans only the active
+    // variant's reference words.
+    if payloads.iter().any(|p| target.has_gc_ref(p)) {
+        let w = target.pointer_width / 8;
+        return Some(MirTy::Union(variants.to_vec(), size.div_ceil(w)));
+    }
+    Some(MirTy::Array(Box::new(uint(align)), size.div_ceil(align)))
 }
 
+/// `(tag, payload)` of the variants that carry data (the tag is the
+/// variant index).
 fn enum_payloads(
     variants: &[rokc_hir::HirEnumVariant],
     module: &HirModule,
     target: &Target,
-) -> Vec<MirTy> {
+) -> Vec<(u32, MirTy)> {
     variants
         .iter()
-        .filter_map(|v| v.payload_ty.as_ref().map(|p| lower_ty(p, module, target)))
+        .enumerate()
+        .filter_map(|(i, v)| {
+            v.payload_ty
+                .as_ref()
+                .map(|p| (i as u32, lower_ty(p, module, target)))
+        })
         // A unit payload (`Poll<()>::Ready(())`) takes no space.
-        .filter(|t| *t != MirTy::Unit)
+        .filter(|(_, t)| *t != MirTy::Unit)
         .collect()
 }
 
@@ -197,6 +211,15 @@ mod tests {
         MirTy::Prim(t)
     }
 
+    /// Payloads tagged 0, 1, ..
+    fn tagged(ps: &[MirTy]) -> Vec<(u32, MirTy)> {
+        ps.iter()
+            .cloned()
+            .enumerate()
+            .map(|(i, p)| (i as u32, p))
+            .collect()
+    }
+
     fn x64() -> Target {
         Target::new(Some("x86_64-unknown-linux-gnu"))
     }
@@ -205,22 +228,22 @@ mod tests {
     fn sum_layouts() {
         let t = x64();
         // No payload: a bare tag.
-        assert_eq!(sum_layout(&[], &t), p(PrimTy::I32));
+        assert_eq!(sum_layout(&tagged(&[]), &t), p(PrimTy::I32));
         let i32_ = p(PrimTy::I32);
         // Differing scalars share an unsigned int as wide as the widest.
         assert_eq!(
-            sum_layout(&[p(PrimTy::I8), p(PrimTy::F64)], &t),
+            sum_layout(&tagged(&[p(PrimTy::I8), p(PrimTy::F64)]), &t),
             MirTy::Tuple(vec![i32_.clone(), p(PrimTy::U64)])
         );
         // Identical payloads keep their type.
         assert_eq!(
-            sum_layout(&[p(PrimTy::Str), p(PrimTy::Str)], &t),
+            sum_layout(&tagged(&[p(PrimTy::Str), p(PrimTy::Str)]), &t),
             MirTy::Tuple(vec![i32_, p(PrimTy::Str)])
         );
         // Aggregates without references: a byte-array union.
         let pair = MirTy::Tuple(vec![p(PrimTy::I32), p(PrimTy::I32)]);
         assert_eq!(
-            unify_payload(&[pair, p(PrimTy::I16)], &t),
+            unify_payload(&tagged(&[pair, p(PrimTy::I16)]), &t),
             Some(MirTy::Array(Box::new(p(PrimTy::U32)), 2))
         );
     }
@@ -271,10 +294,8 @@ mod tests {
         let t = x64();
         assert!(t.has_gc_ref(&p(PrimTy::Str)));
         let pair = MirTy::Tuple(vec![p(PrimTy::I64), p(PrimTy::I64)]);
-        assert_eq!(
-            unify_payload(&[p(PrimTy::Str), pair], &t),
-            Some(MirTy::Array(Box::new(MirTy::GcRef), 2))
-        );
+        let vs = tagged(&[p(PrimTy::Str), pair]);
+        assert_eq!(unify_payload(&vs, &t), Some(MirTy::Union(vs, 2)));
         assert!(!t.has_gc_ref(&p(PrimTy::I64)));
     }
 
@@ -282,9 +303,7 @@ mod tests {
     fn unions_follow_the_pointer_width() {
         // `str | i64` on a 32-bit target: an 8-byte `str`, 4-aligned.
         let t = Target::new(Some("i686-unknown-linux-gnu"));
-        assert_eq!(
-            unify_payload(&[p(PrimTy::Str), p(PrimTy::I64)], &t),
-            Some(MirTy::Array(Box::new(MirTy::GcRef), 2))
-        );
+        let vs = tagged(&[p(PrimTy::Str), p(PrimTy::I64)]);
+        assert_eq!(unify_payload(&vs, &t), Some(MirTy::Union(vs, 2)));
     }
 }

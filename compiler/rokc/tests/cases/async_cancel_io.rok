@@ -26,33 +26,38 @@ let m = Mutex::new(0);
 let (tx, rx) = channel::<i32>();
 let finally_ran = Mutex::new(false);
 
-let reader = task::spawn(async {
-    let _ = {
-        try await server.read_async(byte_buf(16)) catch _ { 0 }
-    } finally {
-        using f = finally_ran.lock() { f.set(true); }
-    };
-    1
-});
-let acceptor = task::spawn(async {
-    try await idle.accept_async() catch _ { return 0; };
-    1
-});
-let sleeper = task::spawn(async {
-    await task::sleep(Duration::sec(3600));
-    1
-});
-let locker = task::spawn(async {
-    using g = await m.lock_async() { g.set(1); }
-    1
-});
-let receiver = task::spawn(async {
-    await rx.recv_async();
-    1
-});
-
+// `m` is held before `locker` exists, so it can only wait.
 using held = m.lock() {
-    await task::sleep(Duration::ms(50));
+    let reader = task::spawn(async {
+        let _ = {
+            try await server.read_async(byte_buf(16)) catch _ { 0 }
+        } finally {
+            using f = finally_ran.lock() { f.set(true); }
+        };
+        1
+    });
+    let acceptor = task::spawn(async {
+        try await idle.accept_async() catch _ { return 0; };
+        1
+    });
+    let sleeper = task::spawn(async {
+        await task::sleep(Duration::sec(3600));
+        1
+    });
+    let locker = task::spawn(async {
+        using g = await m.lock_async() { g.set(1); }
+        1
+    });
+    let receiver = task::spawn(async {
+        await rx.recv_async();
+        1
+    });
+
+    // Until all five are parked (a loaded machine may take long).
+    let deadline = Instant::now() + Duration::sec(60);
+    while task::registrations() < 5 && Instant::now() < deadline {
+        await task::yield_now();
+    }
     println(f"waiting: {task::registrations() >= 5}");
     for t in [reader, acceptor, sleeper, locker, receiver] { t.cancel(); }
     let r = try await reader.join() catch _: CancellationError { -1 };

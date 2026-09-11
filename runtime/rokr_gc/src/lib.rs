@@ -1,5 +1,6 @@
-//! Garbage collector: stop-the-world mark-region (Immix-style blocks
-//! and lines, 703 §7.3.1) with opportunistic evacuation: precise in the
+//! Garbage collector: mark-region (Immix-style blocks and lines, 703
+//! §7.3.1), generational, with opportunistic evacuation and concurrent
+//! marking of big full collections ([`concurrent`]): precise in the
 //! heap, roots and a few ambiguous words pin what they reach.
 //!
 //! Small and medium objects (< [`LOS_THRESHOLD`], align <= 8) live in
@@ -37,7 +38,11 @@
 //! path ([`write_barrier_slow`]) clears it and records the object. A
 //! full collection (old bytes over `max(4 MiB, 2 x live after the last
 //! full one)`, or `rok_gc_collect`) marks everything and resets the
-//! remembered set.
+//! remembered set. An automatic one marks concurrently once the old heap
+//! reaches [`CONCURRENT_MIN`]: a minor collection in a pause, then the
+//! marker thread while mutators run, then a short pause to finish and
+//! sweep (no evacuation; a fragmented heap makes the next full
+//! collection stop the world).
 //!
 //! An old LOS object is `CARDED` instead: the barrier dirties the
 //! 512-byte card of the slot (card table behind the object, pointer in
@@ -60,13 +65,15 @@
 //! full collection the pages of free blocks beyond the next cycle's
 //! allocation budget go back to the OS.
 //!
-//! Limits: no concurrent marking (705); block objects (< 8 KiB) are
-//! remembered whole.
+//! Limits: block objects (< 8 KiB) are remembered whole; the sweep and
+//! evacuation run in pauses.
 //!
 //! Debug knobs (env, read once): `ROK_GC_STRESS=N` (a collection every
 //! `N` object allocations through the runtime, every 8th one full),
 //! `ROK_GC_EVAC=always` (every full collection evacuates every block it
-//! may), `ROK_GC_STATS=1` (counts, pause times, blocks and bytes moved
+//! may), `ROK_GC_CONCURRENT=always|off` (every automatic full collection
+//! marks concurrently / none does), `ROK_GC_STATS=1` (counts, pause
+//! times, blocks and bytes moved, full-collection pauses and marker CPU
 //! to stderr at exit).
 //!
 //! Roots (704 §7.4.1): compiled code links a frame
@@ -78,11 +85,12 @@
 //! [`register_type`] ([`for_each_ref`]): `STRONG_REF` / `INTERIOR_REF`
 //! words (a reference, a `str` pointer into an object, or a non-heap
 //! address), `ANY_SLOT` (the payload is a reference iff the tag has
-//! [`ANY_BOXED`]; else it is the value), and the implementation kind
-//! `AMBIGUOUS` (enum union payload words, which may hold anything). A
-//! table with the `TABLE_ARRAY` version bit describes one element of a
-//! buffer, repeated over its payload. Type id 2 (runtime word buffers)
-//! is all ambiguous words. An object whose type was never registered
+//! [`ANY_BOXED`]; else it is the value), `SUM_PAYLOAD` (an enum / sum:
+//! its tag selects the variant whose entries apply, [`visit_sum`]) and
+//! `AMBIGUOUS` (a word that may hold anything). A table with the
+//! `TABLE_ARRAY` version bit describes one element of a buffer, repeated
+//! over its payload. Type id 2 (runtime word buffers) is all ambiguous
+//! words. An object whose type was never registered
 //! has no traced children. Any reference word (root, interior, or an
 //! integer that happens to equal an address) is looked up among the
 //! objects; a word outside every object is ignored and an ambiguous one
@@ -94,17 +102,21 @@ use core::cell::UnsafeCell;
 use core::fmt::Write as _;
 use core::mem::size_of;
 use core::ptr;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 use rokr_common::fatal;
 use rokr_common::object_header::{
     FLAG_CARDED, FLAG_FORWARDED, FLAG_LARGE, FLAG_MARK, FLAG_NOEVAC, FLAG_NOMOVE, FLAG_PINNED,
-    FLAG_STICKY, FLAG_UNLOGGED, HEADER_ALIGN, HEADER_SIZE, ObjectHeader,
+    FLAG_SATB, FLAG_SCANNED, FLAG_STICKY, FLAG_UNLOGGED, HEADER_ALIGN, HEADER_SIZE, ObjectHeader,
 };
 
+mod concurrent;
 pub mod world;
 
-use rokr_common::gc_abi::{AMBIGUOUS, ANY_SLOT, INTERIOR_REF, STRONG_REF, USER_TYPE_BASE};
+use rokr_common::gc_abi::{
+    AMBIGUOUS, ANY_SLOT, INTERIOR_REF, KIND_MASK, STRONG_REF, SUM_DESC_SHIFT, SUM_PAYLOAD,
+    USER_TYPE_BASE,
+};
 pub use rokr_common::gc_abi::{ANY_BOXED, SCAN_WORDS_TYPE_ID};
 
 /// Heap size below which no collection runs.
@@ -132,6 +144,24 @@ const FREE: u8 = 0;
 const LIVE: u8 = 1;
 /// Handed out (TLAB or medium object) since the last collection.
 const TAKEN: u8 = 2;
+/// Handed out while a concurrent mark runs: its objects are younger than
+/// the mark, which neither reads nor sweeps them (allocate-black, line
+/// granular); `TAKEN` once the mark is done.
+const BLACK: u8 = 3;
+
+/// The state of line `l` of the block whose metadata is at `m`. Atomic:
+/// a concurrent mark reads lines that refills write.
+fn line(m: *const BlockMeta, l: usize) -> u8 {
+    // SAFETY: `m` is a block's metadata, `l < LINES`.
+    unsafe { core::sync::atomic::AtomicU8::from_ptr((&raw const (*m).lines[l]).cast_mut()) }
+        .load(Ordering::Relaxed)
+}
+
+fn set_line(m: *mut BlockMeta, l: usize, state: u8) {
+    // SAFETY: as in `line`.
+    unsafe { core::sync::atomic::AtomicU8::from_ptr(&raw mut (*m).lines[l]) }
+        .store(state, Ordering::Relaxed);
+}
 
 /// Granules (start bits) per line.
 const LINE_GRANULES: usize = LINE_SIZE / 8;
@@ -172,6 +202,7 @@ struct Prefix {
     cards: *mut u8,
 }
 
+#[allow(clippy::struct_excessive_bools)] // independent states
 struct Heap {
     /// Bytes of objects alive after the last collection plus everything
     /// handed out since (TLABs count in full).
@@ -189,43 +220,52 @@ struct Heap {
     max_ns: u64,
     /// Collector-thread CPU time in pauses (robust on a loaded machine).
     gc_cpu_ns: u64,
+    /// Pauses of full collections (both pauses of a concurrent one):
+    /// count, total, longest.
+    full_pauses: u64,
+    full_ns: u64,
+    full_max_ns: u64,
+    /// Their collector-thread CPU time: total, longest.
+    full_cpu_ns: u64,
+    full_cpu_max_ns: u64,
     /// `ROK_GC_*` read (first slow-path allocation or collection).
     configured: bool,
     /// `ROK_GC_STRESS`: collect every `stress` runtime allocations (0 =
     /// off); `allocs` counts them.
     stress: u64,
     allocs: u64,
-    /// `scan_tables[type_id - USER_TYPE_BASE]`, null = unregistered.
-    scan_tables: *mut *const u8,
-    scan_len: usize,
-    /// Mark stack (grown with `realloc`).
-    stack: *mut *mut u8,
-    stack_cap: usize,
     /// Block `i` is at `base + i * BLOCK_SIZE`; 0 until the first one.
+    /// `meta` is reserved for every block of the reservation, so it never
+    /// moves.
     base: usize,
     nblocks: usize,
     meta: *mut BlockMeta,
-    meta_cap: usize,
     /// Next line (global index `block * LINES + line`) the small / medium
     /// refill looks at; both restart at 0 after every sweep.
     small_cursor: usize,
     medium_cursor: usize,
-    /// LOS objects, linked through their prefixes.
+    /// LOS objects, linked through their prefixes (newest first).
     los: *mut u8,
     los_count: usize,
-    /// Sorted LOS addresses, rebuilt by every collection.
-    index: *mut usize,
-    index_cap: usize,
     /// `ROK_GC_EVAC=always`: every full collection evacuates every block
     /// it may (tests); otherwise only when fragmented.
     evac_always: bool,
-    /// This (full) collection may evacuate: the mark records `pinned`.
-    evacuating: bool,
-    /// Block objects a root or an ambiguous word reaches (repeats
-    /// allowed): an evacuation leaves them in place.
-    pinned: *mut usize,
-    pinned_len: usize,
-    pinned_cap: usize,
+    /// `ROK_GC_CONCURRENT`: whether full collections mark concurrently.
+    concurrent: Concurrent,
+    /// A concurrent mark runs: refills hand out `BLACK` lines.
+    marking: bool,
+    /// The LOS list head when the running concurrent mark started (the
+    /// objects in front of it are younger than the mark).
+    los_mark_head: *mut u8,
+    /// `live_bytes` when the running concurrent mark started.
+    mark_start_live: usize,
+    /// A concurrent mark found the heap fragmented: the next full
+    /// collection stops the world and evacuates.
+    stw_next: bool,
+    /// `ROK_GC_STATS`: concurrent marks, and those the allocation budget
+    /// finished before the marker did.
+    cycles: u64,
+    forced: u64,
     /// Copy allocator of an evacuation: bump `copy_cursor..copy_limit`
     /// (free lines of a non-candidate block); `copy_line` is the next
     /// global line index it looks at.
@@ -242,11 +282,24 @@ struct Heap {
     moved_bytes: u64,
 }
 
-struct Global(UnsafeCell<Heap>);
-// SAFETY: only touched with the world lock held (see module docs).
-unsafe impl Sync for Global {}
+/// `ROK_GC_CONCURRENT`: `auto` marks concurrently once the old heap
+/// reaches [`CONCURRENT_MIN`]; `always` / `off` are for tests.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Concurrent {
+    Auto,
+    Always,
+    Off,
+}
 
-static HEAP: Global = Global(UnsafeCell::new(Heap {
+/// Old bytes from which `ROK_GC_CONCURRENT=auto` marks concurrently.
+const CONCURRENT_MIN: usize = 32 << 20;
+
+struct Global<T>(UnsafeCell<T>);
+// SAFETY: `HEAP` is only touched with the world lock held, `MARK` with
+// the mark lock held (see their accessors).
+unsafe impl<T> Sync for Global<T> {}
+
+static HEAP: Global<Heap> = Global(UnsafeCell::new(Heap {
     live_bytes: 0,
     next_gc: MIN_HEAP,
     collections: 0,
@@ -256,28 +309,29 @@ static HEAP: Global = Global(UnsafeCell::new(Heap {
     gc_ns: 0,
     max_ns: 0,
     gc_cpu_ns: 0,
+    full_pauses: 0,
+    full_ns: 0,
+    full_max_ns: 0,
+    full_cpu_ns: 0,
+    full_cpu_max_ns: 0,
     configured: false,
     stress: 0,
     allocs: 0,
-    scan_tables: ptr::null_mut(),
-    scan_len: 0,
-    stack: ptr::null_mut(),
-    stack_cap: 0,
     base: 0,
     nblocks: 0,
     meta: ptr::null_mut(),
-    meta_cap: 0,
     small_cursor: 0,
     medium_cursor: 0,
     los: ptr::null_mut(),
     los_count: 0,
-    index: ptr::null_mut(),
-    index_cap: 0,
     evac_always: false,
-    evacuating: false,
-    pinned: ptr::null_mut(),
-    pinned_len: 0,
-    pinned_cap: 0,
+    concurrent: Concurrent::Auto,
+    marking: false,
+    los_mark_head: ptr::null_mut(),
+    mark_start_live: 0,
+    stw_next: false,
+    cycles: 0,
+    forced: 0,
     copy_cursor: 0,
     copy_limit: 0,
     copy_line: 0,
@@ -291,6 +345,65 @@ fn heap() -> &'static mut Heap {
     // SAFETY: callers hold the world lock; no caller keeps the reference
     // across another `heap()` call.
     unsafe { &mut *HEAP.0.get() }
+}
+
+/// Marking state: the collector's while the world is stopped, the
+/// marker thread's while a concurrent mark runs. Guarded by
+/// [`concurrent::MARK_LOCK`]. Marking never calls [`heap`]: mutators
+/// may hold it meanwhile.
+struct Mark {
+    /// Mark stack (grown with `realloc`), `len` entries.
+    stack: *mut *mut u8,
+    stack_cap: usize,
+    len: usize,
+    /// The blocks lookups land in: `nblocks` from `base` as of this
+    /// collection's start (a concurrent mark ignores later ones).
+    base: usize,
+    nblocks: usize,
+    meta: *mut BlockMeta,
+    /// Sorted LOS addresses as of this collection's start.
+    index: *mut usize,
+    index_cap: usize,
+    los_count: usize,
+    /// A full collection (a minor one marks young objects only).
+    full: bool,
+    /// A concurrent mark: lines may turn `BLACK` meanwhile, scanned
+    /// objects get `SCANNED`.
+    concurrent: bool,
+    /// This (full) collection may evacuate: the mark records `pinned`.
+    evacuating: bool,
+    /// Block objects a root or an ambiguous word reaches (repeats
+    /// allowed): an evacuation leaves them in place.
+    pinned: *mut usize,
+    pinned_len: usize,
+    pinned_cap: usize,
+}
+
+/// Marker thread CPU time (`ROK_GC_STATS`).
+static MARKER_CPU_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+static MARK: Global<Mark> = Global(UnsafeCell::new(Mark {
+    stack: ptr::null_mut(),
+    stack_cap: 0,
+    len: 0,
+    base: 0,
+    nblocks: 0,
+    meta: ptr::null_mut(),
+    index: ptr::null_mut(),
+    index_cap: 0,
+    los_count: 0,
+    full: false,
+    concurrent: false,
+    evacuating: false,
+    pinned: ptr::null_mut(),
+    pinned_len: 0,
+    pinned_cap: 0,
+}));
+
+fn mark() -> &'static mut Mark {
+    // SAFETY: callers hold the mark lock; no caller keeps the reference
+    // across another `mark()` call.
+    unsafe { &mut *MARK.0.get() }
 }
 
 const fn prefix(obj: *mut u8) -> *mut Prefix {
@@ -406,9 +519,16 @@ fn before_alloc(want: usize) {
     configure(h);
     h.allocs += 1;
     let stressed = h.stress != 0 && h.allocs % h.stress == 0;
-    if stressed || h.live_bytes.saturating_add(want) > h.next_gc {
+    // A concurrent mark gets twice the young budget before the
+    // allocation finishes it in a pause.
+    let budget = if h.marking {
+        2 * h.next_gc - h.mark_start_live.min(h.next_gc)
+    } else {
+        h.next_gc
+    };
+    if stressed || h.live_bytes.saturating_add(want) > budget {
         let full = h.old_bytes >= h.full_at || (stressed && (h.allocs / h.stress) % 8 == 0);
-        collect_locked(full);
+        collect_locked(full, true);
     }
 }
 
@@ -419,15 +539,28 @@ fn configure(h: &mut Heap) {
     }
     h.configured = true;
     h.stress = env_num(c"ROK_GC_STRESS").unwrap_or(0);
-    // SAFETY: `getenv` result is null or NUL-terminated.
-    h.evac_always = match unsafe { libc::getenv(c"ROK_GC_EVAC".as_ptr()) } {
-        p if p.is_null() => false,
-        // SAFETY: as above.
-        p => unsafe { core::ffi::CStr::from_ptr(p) }.to_bytes() == b"always",
+    h.evac_always = env_str(c"ROK_GC_EVAC") == b"always";
+    h.concurrent = match env_str(c"ROK_GC_CONCURRENT") {
+        b"always" => Concurrent::Always,
+        b"off" => Concurrent::Off,
+        _ => Concurrent::Auto,
     };
     if env_num(c"ROK_GC_STATS").is_some_and(|v| v != 0) {
         // SAFETY: registering a plain `extern "C" fn()`.
         unsafe { libc::atexit(print_stats) };
+    }
+}
+
+/// The bytes of env var `name` (empty if unset).
+fn env_str(name: &core::ffi::CStr) -> &'static [u8] {
+    // SAFETY: `name` is NUL-terminated; getenv's result is null or
+    // NUL-terminated (read once, before any thread may set it).
+    unsafe {
+        let p = libc::getenv(name.as_ptr());
+        if p.is_null() {
+            return b"";
+        }
+        core::ffi::CStr::from_ptr(p).to_bytes()
     }
 }
 
@@ -483,6 +616,15 @@ extern "C" fn print_stats() {
         h.evacuations,
         h.moved_bytes >> 10
     );
+    let ms = |ns: u64| (ns / 1_000_000, ns / 1000 % 1000);
+    let ((ft, ftu), (fm, fmu)) = (ms(h.full_ns), ms(h.full_max_ns));
+    let ((ct, ctu), (cm, cmu)) = (ms(h.full_cpu_ns), ms(h.full_cpu_max_ns));
+    let (mc, mcu) = ms(MARKER_CPU_NS.load(Ordering::Relaxed));
+    let _ = writeln!(
+        Stderr,
+        "rok gc: {} full pauses, {ft}.{ftu:03} ms total, max {fm}.{fmu:03} ms ({ct}.{ctu:03} / {cm}.{cmu:03} ms cpu); {} concurrent marks ({} finished by allocation), {mc}.{mcu:03} ms marker cpu",
+        h.full_pauses, h.cycles, h.forced
+    );
     world::unlock();
 }
 
@@ -511,26 +653,34 @@ fn take_run(lines: usize, exact: bool) -> *mut u8 {
     } else {
         h.small_cursor
     };
+    let state = if h.marking { BLACK } else { TAKEN };
     let mut at = cursor;
+    // Raw metadata pointers and atomic line writes: a concurrent mark
+    // reads these lines.
     while at < h.nblocks * LINES {
-        let (blk, line) = (at / LINES, at % LINES);
+        let (blk, l) = (at / LINES, at % LINES);
         // SAFETY: `blk < nblocks`.
-        let meta = unsafe { &mut *h.meta.add(blk) };
-        if meta.lines[line] != FREE {
+        let meta = unsafe { h.meta.add(blk) };
+        if line(meta, l) != FREE {
             at += 1;
             continue;
         }
         let mut run = 1;
-        while line + run < LINES && run < lines && meta.lines[line + run] == FREE {
+        while l + run < LINES && run < lines && line(meta, l + run) == FREE {
             run += 1;
         }
         if run < lines {
             at += run;
             continue;
         }
-        meta.lines[line..line + run].fill(TAKEN);
-        meta.used = true;
-        meta.released = false;
+        for i in l..l + run {
+            set_line(meta, i, state);
+        }
+        // SAFETY: fields the mark does not read.
+        unsafe {
+            (*meta).used = true;
+            (*meta).released = false;
+        }
         if exact {
             h.medium_cursor = at + run;
         } else {
@@ -540,9 +690,9 @@ fn take_run(lines: usize, exact: bool) -> *mut u8 {
     }
     let b = new_block();
     let h = heap();
-    // SAFETY: `b` was just committed.
+    // SAFETY: `b` was just committed (no mark looks at it).
     let m = unsafe { &mut *h.meta.add(b) };
-    m.lines[..lines].fill(TAKEN);
+    m.lines[..lines].fill(state);
     m.used = true;
     m.released = false;
     if exact {
@@ -552,16 +702,17 @@ fn take_run(lines: usize, exact: bool) -> *mut u8 {
 }
 
 /// With the lock held: extend a small run that starts at `start` (its
-/// first line already `TAKEN`, ending at `end`) over the following free
-/// lines of its block; the run's end address.
+/// first line already handed out, ending at `end`) over the following
+/// free lines of its block; the run's end address.
 fn end_of_run(start: usize, mut end: usize) -> usize {
     let h = heap();
+    let state = if h.marking { BLACK } else { TAKEN };
     let b = (start - h.base) / BLOCK_SIZE;
     // SAFETY: `start` is in block `b < nblocks`.
-    let m = unsafe { &mut *h.meta.add(b) };
+    let m = unsafe { h.meta.add(b) };
     let mut l = (end - h.base) / LINE_SIZE - b * LINES;
-    while l < LINES && m.lines[l] == FREE {
-        m.lines[l] = TAKEN;
+    while l < LINES && line(m, l) == FREE {
+        set_line(m, l, state);
         l += 1;
         end += LINE_SIZE;
     }
@@ -605,17 +756,27 @@ fn new_block() -> usize {
     if rc != 0 {
         rokr_common::oom();
     }
-    if b == h.meta_cap {
-        let cap = (h.meta_cap * 2).max(64);
-        // SAFETY: realloc of our own table (or null).
-        let p = unsafe { libc::realloc(h.meta.cast(), cap * size_of::<BlockMeta>()) };
-        if p.is_null() {
+    if h.meta.is_null() {
+        // Metadata for every block of the reservation, reserved once (its
+        // pages fault in as blocks are used): a concurrent mark reads it
+        // while refills commit blocks.
+        // SAFETY: a fresh anonymous mapping.
+        let p = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                RESERVE / BLOCK_SIZE * size_of::<BlockMeta>(),
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        if p == libc::MAP_FAILED {
             rokr_common::oom();
         }
         h.meta = p.cast();
-        h.meta_cap = cap;
     }
-    // SAFETY: `b < meta_cap`.
+    // SAFETY: `b` is below the reserved count.
     unsafe {
         h.meta.add(b).write(BlockMeta {
             lines: [FREE; LINES],
@@ -690,31 +851,43 @@ pub fn register_type(type_id: u32, table: *const u8) {
     };
     let i = i as usize;
     world::lock();
-    let h = heap();
-    if i >= h.scan_len {
-        let len = (i + 1).next_power_of_two().max(64);
-        // SAFETY: realloc of our own table (or null); new tail zeroed.
-        unsafe {
-            let p = libc::realloc(h.scan_tables.cast(), len * size_of::<*const u8>())
-                .cast::<*const u8>();
+    let mut t = TABLES.load(Ordering::Acquire);
+    // SAFETY: `t` is null or a `[len, tables..]` array from below; a
+    // grown array replaces it whole and the old one is never freed (the
+    // marker and barriers read it without the lock).
+    unsafe {
+        let len = if t.is_null() { 0 } else { *t };
+        if i >= len {
+            let cap = (i + 1).next_power_of_two().max(64);
+            let p = libc::calloc(cap + 1, size_of::<usize>()).cast::<usize>();
             if p.is_null() {
                 rokr_common::oom();
             }
-            ptr::write_bytes(p.add(h.scan_len), 0, len - h.scan_len);
-            h.scan_tables = p;
-            h.scan_len = len;
+            *p = cap;
+            if len != 0 {
+                ptr::copy_nonoverlapping(t.add(1), p.add(1), len);
+            }
+            t = p;
         }
+        core::sync::atomic::AtomicUsize::from_ptr(t.add(1 + i))
+            .store(table as usize, Ordering::Release);
+        TABLES.store(t, Ordering::Release);
     }
-    // SAFETY: `i < scan_len`.
-    unsafe { *h.scan_tables.add(i) = table };
     world::unlock();
 }
 
+/// Registered `ScanTable`s: `[len, table of USER_TYPE_BASE + i..]`.
+static TABLES: core::sync::atomic::AtomicPtr<usize> =
+    core::sync::atomic::AtomicPtr::new(ptr::null_mut());
+
 fn scan_table(type_id: u32) -> *const u8 {
-    let h = heap();
+    let t = TABLES.load(Ordering::Acquire);
     match type_id.checked_sub(USER_TYPE_BASE) {
-        // SAFETY: bounds-checked index into our table.
-        Some(i) if (i as usize) < h.scan_len => unsafe { *h.scan_tables.add(i as usize) },
+        // SAFETY: a bounds-checked entry of the live array.
+        Some(i) if !t.is_null() && (i as usize) < unsafe { *t } => unsafe {
+            core::sync::atomic::AtomicUsize::from_ptr(t.add(1 + i as usize)).load(Ordering::Acquire)
+                as *const u8
+        },
         _ => ptr::null(),
     }
 }
@@ -778,30 +951,34 @@ fn for_each_start(
 /// Before marking: the sorted LOS index. (Block start bits of the lines
 /// handed out since the last collection are parsed lazily, by
 /// [`object_containing`].)
+/// Also the block heap view lookups use ([`Mark`]). With the world
+/// stopped and the mark lock held.
 fn build_index() {
-    let h = heap();
+    let (h, m) = (heap(), mark());
+    (m.base, m.nblocks, m.meta) = (h.base, h.nblocks, h.meta);
+    m.los_count = h.los_count;
     if h.los_count == 0 {
         return;
     }
-    if h.index_cap < h.los_count {
+    if m.index_cap < h.los_count {
         let cap = h.los_count.next_power_of_two();
         // SAFETY: realloc of our own buffer (or null).
-        let p = unsafe { libc::realloc(h.index.cast(), cap * size_of::<usize>()) };
+        let p = unsafe { libc::realloc(m.index.cast(), cap * size_of::<usize>()) };
         if p.is_null() {
             rokr_common::oom();
         }
-        h.index = p.cast();
-        h.index_cap = cap;
+        m.index = p.cast();
+        m.index_cap = cap;
     }
     // SAFETY: the list holds exactly `los_count` objects; `index` has
     // room.
     unsafe {
         let mut o = h.los;
         for i in 0..h.los_count {
-            *h.index.add(i) = o as usize;
+            *m.index.add(i) = o as usize;
             o = (*prefix(o)).next;
         }
-        core::slice::from_raw_parts_mut(h.index, h.los_count).sort_unstable();
+        core::slice::from_raw_parts_mut(m.index, h.los_count).sort_unstable();
     }
 }
 
@@ -901,7 +1078,9 @@ pub unsafe fn no_move(obj: *mut u8) {
 /// The object whose header address is `word` or whose memory contains
 /// it (a `str` points at its payload bytes, or into them after slicing).
 /// `young`: block objects outside `TAKEN` lines (old ones) are `None`,
-/// decided from the line table without touching the object.
+/// decided from the line table without touching the object. Free and
+/// `BLACK` lines hold none (a live object covers only its own lines;
+/// a concurrent mark never looks at what was allocated meanwhile).
 fn object_containing(word: usize, young: bool) -> Option<*mut u8> {
     object_in::<false>(word, young)
 }
@@ -909,26 +1088,32 @@ fn object_containing(word: usize, young: bool) -> Option<*mut u8> {
 /// [`object_containing`]; `MOVED`: objects may be evacuated already.
 fn object_in<const MOVED: bool>(word: usize, young: bool) -> Option<*mut u8> {
     let size_of = |o: *mut u8| if MOVED { moved_size(o) } else { obj_size(o) };
-    let h = heap();
-    if word >= h.base && word < h.base + h.nblocks * BLOCK_SIZE {
-        let blk = (word - h.base) / BLOCK_SIZE;
+    let m = mark();
+    if word >= m.base && word < m.base + m.nblocks * BLOCK_SIZE {
+        let blk = (word - m.base) / BLOCK_SIZE;
         // SAFETY: `blk < nblocks`.
-        let meta = unsafe { &mut *h.meta.add(blk) };
-        let block = h.base + blk * BLOCK_SIZE;
-        let line = meta.lines[(word - block) / LINE_SIZE];
-        if !meta.used || (young && line != TAKEN) {
+        let meta = unsafe { m.meta.add(blk) };
+        let block = m.base + blk * BLOCK_SIZE;
+        let state = line(meta, (word - block) / LINE_SIZE);
+        if state == FREE || state == BLACK || (young && state != TAKEN) {
             return None;
         }
-        if line == TAKEN && !meta.parsed {
-            parse_taken(block, meta);
-            meta.parsed = true;
-        }
+        // SAFETY: only lookups write start bits, and only while the
+        // world is stopped: `TAKEN` lines exist only then (a concurrent
+        // mark starts right after a sweep and makes `BLACK` ones).
+        let starts = unsafe {
+            if state == TAKEN && !(*meta).parsed {
+                parse_taken(block, &mut *meta);
+                (*meta).parsed = true;
+            }
+            &(*meta).starts
+        };
         let granule = (word - block) / 8;
         // The nearest object start at or before `granule`: objects are
         // smaller than `LOS_THRESHOLD`, so only that many granules back.
         let lowest = granule.saturating_sub(LOS_THRESHOLD / 8);
         let mut i = granule / 64;
-        let mut bits = meta.starts[i] & (u64::MAX >> (63 - granule % 64));
+        let mut bits = starts[i] & (u64::MAX >> (63 - granule % 64));
         loop {
             if bits != 0 {
                 let start = block + (i * 64 + 63 - bits.leading_zeros() as usize) * 8;
@@ -939,14 +1124,15 @@ fn object_in<const MOVED: bool>(word: usize, young: bool) -> Option<*mut u8> {
                 return None;
             }
             i -= 1;
-            bits = meta.starts[i];
+            bits = starts[i];
         }
     }
-    if h.los_count == 0 {
+    if m.los_count == 0 || (m.base != 0 && word >= m.base && word < m.base + RESERVE) {
+        // No LOS object, or a block committed after the view.
         return None;
     }
     // SAFETY: `build_index` filled `los_count` entries.
-    let index = unsafe { core::slice::from_raw_parts(h.index, h.los_count) };
+    let index = unsafe { core::slice::from_raw_parts(m.index, m.los_count) };
     let i = match index.binary_search(&word) {
         Ok(i) => i,
         Err(0) => return None,
@@ -956,30 +1142,50 @@ fn object_in<const MOVED: bool>(word: usize, young: bool) -> Option<*mut u8> {
     (word < start + size_of(start as *mut u8)).then_some(start as *mut u8)
 }
 
-/// Queue the object `word` points into, if any (and young, unless
-/// `full`), for marking. `pin`: `word` is a root or ambiguous, so the
-/// object must not move.
-fn push(word: usize, full: bool, len: &mut usize, pin: bool) {
-    let Some(obj) = object_containing(word, !full) else {
+/// The word at `p` (8-aligned): an atomic load, as a concurrent mark
+/// reads what mutators store.
+fn load_word(p: *const u8) -> usize {
+    // SAFETY: callers pass an aligned word inside a live object.
+    #[allow(clippy::cast_ptr_alignment)]
+    unsafe { core::sync::atomic::AtomicUsize::from_ptr(p.cast::<usize>().cast_mut()) }
+        .load(Ordering::Relaxed)
+}
+
+/// The `u32` at `p` (4-aligned), like [`load_word`].
+fn load_u32(p: *const u8) -> u32 {
+    // SAFETY: as in `load_word`.
+    #[allow(clippy::cast_ptr_alignment)]
+    unsafe { core::sync::atomic::AtomicU32::from_ptr(p.cast::<u32>().cast_mut()) }
+        .load(Ordering::Relaxed)
+}
+
+/// Queue the object `word` points into, if any (and young, unless the
+/// mark is full) and not marked yet. `pin`: `word` is a root or
+/// ambiguous, so the object must not move.
+fn push(word: usize, pin: bool) {
+    let Some(obj) = object_containing(word, !mark().full) else {
         return;
     };
-    let h = heap();
-    if pin && h.evacuating && (obj as usize) < h.base + h.nblocks * BLOCK_SIZE {
-        if h.pinned_len == h.pinned_cap {
-            let cap = (h.pinned_cap * 2).max(1024);
+    let m = mark();
+    if pin && m.evacuating && (obj as usize) < m.base + m.nblocks * BLOCK_SIZE {
+        if m.pinned_len == m.pinned_cap {
+            let cap = (m.pinned_cap * 2).max(1024);
             // SAFETY: realloc of our own buffer (or null).
-            let p = unsafe { libc::realloc(h.pinned.cast(), cap * size_of::<usize>()) };
+            let p = unsafe { libc::realloc(m.pinned.cast(), cap * size_of::<usize>()) };
             if p.is_null() {
                 rokr_common::oom();
             }
-            h.pinned = p.cast();
-            h.pinned_cap = cap;
+            m.pinned = p.cast();
+            m.pinned_cap = cap;
         }
         // SAFETY: `pinned_len < pinned_cap`.
-        unsafe { *h.pinned.add(h.pinned_len) = obj as usize };
-        h.pinned_len += 1;
+        unsafe { *m.pinned.add(m.pinned_len) = obj as usize };
+        m.pinned_len += 1;
     }
-    push_obj(obj, len);
+    // SAFETY: an object header.
+    if unsafe { (*header(obj)).gc_flags.load(Ordering::Relaxed) } & FLAG_MARK == 0 {
+        push_obj(obj);
+    }
 }
 
 /// `addr` lies in an evacuation candidate block.
@@ -991,28 +1197,58 @@ fn in_candidate(addr: usize) -> bool {
         && unsafe { (*h.meta.add((addr - h.base) / BLOCK_SIZE)).evac }
 }
 
-fn push_obj(obj: *mut u8, len: &mut usize) {
-    let h = heap();
-    if *len == h.stack_cap {
-        let cap = (h.stack_cap * 2).max(1024);
+fn push_obj(obj: *mut u8) {
+    let m = mark();
+    if m.len == m.stack_cap {
+        let cap = (m.stack_cap * 2).max(1024);
         // SAFETY: realloc of our own stack (or null).
-        let p = unsafe { libc::realloc(h.stack.cast(), cap * size_of::<*mut u8>()) };
+        let p = unsafe { libc::realloc(m.stack.cast(), cap * size_of::<*mut u8>()) };
         if p.is_null() {
             rokr_common::oom();
         }
-        h.stack = p.cast();
-        h.stack_cap = cap;
+        m.stack = p.cast();
+        m.stack_cap = cap;
     }
-    // SAFETY: `*len < stack_cap`.
-    unsafe { *h.stack.add(*len) = obj };
-    *len += 1;
+    // SAFETY: `len < stack_cap`.
+    unsafe { *m.stack.add(m.len) = obj };
+    m.len += 1;
+}
+
+/// Mark the queued objects until none is left (`batch`: at most that
+/// many). A minor collection never enters an old object: whatever young
+/// object it references is in the remembered set's reach.
+fn drain(mut batch: usize) {
+    while batch > 0 {
+        let m = mark();
+        if m.len == 0 {
+            return;
+        }
+        batch -= 1;
+        m.len -= 1;
+        // SAFETY: `push` only queues addresses of live GC objects.
+        let o = unsafe { *m.stack.add(m.len) };
+        let (full, concurrent) = (m.full, m.concurrent);
+        // SAFETY: as above.
+        let flags = unsafe { &(*header(o)).gc_flags };
+        if (!full && flags.load(Ordering::Relaxed) & FLAG_STICKY != 0)
+            || flags.fetch_or(FLAG_MARK, Ordering::Relaxed) & FLAG_MARK != 0
+        {
+            continue;
+        }
+        scan_children(o);
+        if concurrent {
+            // The first store into `o` from now on need not log what it
+            // held (`write_barrier_slow`).
+            flags.fetch_or(FLAG_SCANNED, Ordering::Release);
+        }
+    }
 }
 
 /// Queue the referents of `o`'s reference words.
 // The mark loop's hot path: a plain (non-array) table read inline, the
 // general `for_each_ref` otherwise.
 #[allow(clippy::cast_ptr_alignment)] // tables are 4-aligned, payloads 8
-fn scan_children(o: *mut u8, full: bool, len: &mut usize) {
+fn scan_children(o: *mut u8) {
     // SAFETY: `o` is a live GC object; its ScanTable (802) describes it.
     unsafe {
         let type_id = (*header(o)).type_id;
@@ -1022,42 +1258,43 @@ fn scan_children(o: *mut u8, full: bool, len: &mut usize) {
             scan_table(type_id)
         };
         if t.is_null() || t.add(4).cast::<u16>().read_unaligned() & TABLE_ARRAY != 0 {
-            scan_range(o, 0, usize::MAX, full, len);
+            scan_range(o, 0, usize::MAX);
             return;
         }
         let n = t.add(6).cast::<u16>().read_unaligned() as usize;
         for e in 0..n {
             let entry = t.add(8 + 8 * e).cast::<u32>();
             let mut off = entry.read_unaligned() as usize;
-            let precise = match entry.add(1).read_unaligned() {
+            let kind = entry.add(1).read_unaligned();
+            let precise = match kind & KIND_MASK {
                 STRONG_REF | INTERIOR_REF => true,
                 ANY_SLOT => {
-                    if o.add(off).cast::<u32>().read() & ANY_BOXED == 0 {
+                    if load_u32(o.add(off)) & ANY_BOXED == 0 {
                         continue;
                     }
                     off += size_of::<usize>();
                     true
                 }
+                SUM_PAYLOAD => {
+                    visit_sum(o, t, kind, off, &mut |off, precise| {
+                        push(load_word(o.add(off)), !precise);
+                    });
+                    continue;
+                }
                 AMBIGUOUS => false,
                 _ => continue,
             };
-            push(
-                o.add(off).cast::<usize>().read_unaligned(),
-                full,
-                len,
-                !precise,
-            );
+            push(load_word(o.add(off)), !precise);
         }
     }
 }
 
 /// Queue the referents of `o`'s reference words at byte offsets
 /// `lo..hi` (from the header).
-fn scan_range(o: *mut u8, lo: usize, hi: usize, full: bool, len: &mut usize) {
+fn scan_range(o: *mut u8, lo: usize, hi: usize) {
     for_each_ref(o, lo, hi, |off, precise| {
         // SAFETY: `off` is a word inside the live object `o`.
-        let word = unsafe { o.add(off).cast::<usize>().read_unaligned() };
-        push(word, full, len, !precise);
+        push(load_word(unsafe { o.add(off) }), !precise);
     });
 }
 
@@ -1093,9 +1330,9 @@ fn for_each_ref(o: *mut u8, lo: usize, hi: usize, mut f: impl FnMut(usize, bool)
         let entries = core::slice::from_raw_parts(t.add(8).cast::<[u32; 2]>(), n);
         if version & TABLE_ARRAY == 0 {
             if lo == 0 && hi == usize::MAX {
-                visit_entries(o, entries, 0, &mut f);
+                visit_entries(o, t, entries, 0, &mut f);
             } else {
-                visit_entries(o, entries, 0, &mut |off, p| {
+                visit_entries(o, t, entries, 0, &mut |off, p| {
                     if (lo..hi).contains(&off) {
                         f(off, p);
                     }
@@ -1111,7 +1348,7 @@ fn for_each_ref(o: *mut u8, lo: usize, hi: usize, mut f: impl FnMut(usize, bool)
         let first = lo.saturating_sub(HEADER_SIZE + size_of::<usize>()) / stride;
         let last = hi.saturating_sub(HEADER_SIZE).div_ceil(stride).min(count);
         for i in first..last {
-            visit_entries(o, entries, HEADER_SIZE + i * stride, &mut |off, p| {
+            visit_entries(o, t, entries, HEADER_SIZE + i * stride, &mut |off, p| {
                 if (lo..hi).contains(&off) {
                     f(off, p);
                 }
@@ -1120,29 +1357,64 @@ fn for_each_ref(o: *mut u8, lo: usize, hi: usize, mut f: impl FnMut(usize, bool)
     }
 }
 
-/// [`for_each_ref`] over the `entries` of one table at byte offset `at`.
+/// [`for_each_ref`] over the `entries` of table `t` at byte offset `at`.
 #[inline]
 #[allow(clippy::cast_ptr_alignment)] // the tag is 4-aligned
-fn visit_entries(o: *mut u8, entries: &[[u32; 2]], at: usize, f: &mut impl FnMut(usize, bool)) {
+fn visit_entries(
+    o: *mut u8,
+    t: *const u8,
+    entries: &[[u32; 2]],
+    at: usize,
+    f: &mut impl FnMut(usize, bool),
+) {
     for &[eo, kind] in entries {
         let off = at + eo as usize;
-        match kind {
+        match kind & KIND_MASK {
             STRONG_REF | INTERIOR_REF => f(off, true),
             // SAFETY: the tag word of an `any` inside the live `o`.
-            ANY_SLOT if unsafe { o.add(off).cast::<u32>().read() } & ANY_BOXED != 0 => {
+            ANY_SLOT if load_u32(unsafe { o.add(off) }) & ANY_BOXED != 0 => {
                 f(off + size_of::<usize>(), true);
             }
+            SUM_PAYLOAD => visit_sum(o, t, kind, off, f),
             AMBIGUOUS => f(off, false),
             _ => {}
         }
     }
 }
 
-/// Full stop-the-world collection (`rok_gc_collect`).
+/// The `SUM_PAYLOAD` entry `kind` of table `t` whose tag is at byte
+/// offset `at` of `o`: visit the entries of the variant the tag selects.
+#[allow(clippy::cast_ptr_alignment)] // tables and tags are 4-aligned
+fn visit_sum(o: *mut u8, t: *const u8, kind: u32, at: usize, f: &mut impl FnMut(usize, bool)) {
+    // SAFETY: the tag of a sum inside the live `o`; the descriptor and
+    // its variants' entries lie inside the table (802, `gc_abi`).
+    unsafe {
+        let tag = load_u32(o.add(at));
+        let t32 = t.cast::<u32>();
+        let desc = t32.add((kind >> SUM_DESC_SHIFT) as usize);
+        for v in 0..desc.read() as usize {
+            let head = desc.add(1 + 3 * v);
+            if head.read() == tag {
+                let entries = core::slice::from_raw_parts(
+                    t32.add(head.add(2).read() as usize).cast::<[u32; 2]>(),
+                    head.add(1).read() as usize,
+                );
+                visit_entries(o, t, entries, at, f);
+                return;
+            }
+        }
+    }
+}
+
+/// Full stop-the-world collection (`rok_gc_collect`); a running
+/// concurrent mark is finished first.
 pub fn collect() {
     world::lock();
     configure(heap());
-    collect_locked(true);
+    if heap().marking {
+        concurrent::finish(false);
+    }
+    collect_locked(true, false);
     world::unlock();
 }
 
@@ -1150,57 +1422,117 @@ pub fn collect() {
 pub fn collect_young() {
     world::lock();
     configure(heap());
-    collect_locked(false);
+    if heap().marking {
+        concurrent::finish(false);
+    }
+    collect_locked(false, false);
     world::unlock();
 }
 
-/// With the world lock held: stop every other mutator, mark from all
-/// registered threads' shadow stacks, pinned objects and
-/// (minor) the remembered set, sweep, resume.
-fn collect_locked(full: bool) {
-    let t0 = now_ns();
-    let c0 = clock_ns(libc::CLOCK_THREAD_CPUTIME_ID);
-    world::stop();
-    world::reset_tlabs();
-    let mut len = 0;
-    build_index();
+/// With the world lock held: stop every other mutator, collect, resume.
+/// While a concurrent mark runs, finish it instead (no minor collection
+/// runs meanwhile). A full collection that `may_concur` marks
+/// concurrently if `ROK_GC_CONCURRENT` says so: this pause is then a
+/// minor collection that starts the mark.
+fn collect_locked(full: bool, may_concur: bool) {
+    if heap().marking {
+        concurrent::finish(true);
+        return;
+    }
+    let concur = full && may_concur && wants_concurrent();
+    let p = Pause::begin();
+    if concur {
+        mark_sweep(false);
+        concurrent::start();
+    } else {
+        mark_sweep(full);
+    }
+    p.end(full);
+}
+
+/// A full collection due now should mark concurrently.
+fn wants_concurrent() -> bool {
     let h = heap();
-    h.evacuating = full;
+    match h.concurrent {
+        Concurrent::Always => true,
+        Concurrent::Off => false,
+        Concurrent::Auto => !h.stw_next && !h.evac_always && h.old_bytes >= CONCURRENT_MIN,
+    }
+}
+
+/// A stop-the-world pause: every other mutator stopped, every TLAB
+/// empty, the mark lock held (the marker thread waits).
+struct Pause {
+    t0: u64,
+    c0: u64,
+}
+
+impl Pause {
+    /// With the world lock held.
+    fn begin() -> Self {
+        let p = Self {
+            t0: now_ns(),
+            c0: clock_ns(libc::CLOCK_THREAD_CPUTIME_ID),
+        };
+        world::stop();
+        world::reset_tlabs();
+        concurrent::lock_mark();
+        p
+    }
+
+    /// `full`: the pause belongs to a full collection.
+    fn end(self, full: bool) {
+        concurrent::unlock_mark();
+        let h = heap();
+        let dt = now_ns() - self.t0;
+        let cpu = clock_ns(libc::CLOCK_THREAD_CPUTIME_ID) - self.c0;
+        h.gc_cpu_ns += cpu;
+        h.gc_ns += dt;
+        h.max_ns = h.max_ns.max(dt);
+        if full {
+            h.full_pauses += 1;
+            h.full_ns += dt;
+            h.full_max_ns = h.full_max_ns.max(dt);
+            h.full_cpu_ns += cpu;
+            h.full_cpu_max_ns = h.full_cpu_max_ns.max(cpu);
+        }
+        world::resume();
+    }
+}
+
+/// Queue the pinned objects and every root. `pin`: their referents must
+/// not move (an evacuating collection).
+fn mark_roots(pin: bool) {
     // SAFETY: the world is stopped: nobody is inside `pin` / `unpin`.
     let (pins, npins, _) = unsafe { *PINS.list.get() };
     for i in 0..npins {
         // Through the lookup, so a young one's block gets parsed.
         // SAFETY: `i < npins`.
-        push(unsafe { *pins.add(i) } as usize, full, &mut len, true);
+        push(unsafe { *pins.add(i) } as usize, pin);
     }
     // Roots pin their referents: a root word may be an inline `any`
     // payload, and compiled code / runtime calls derive pointers from
     // rooted values (`str` bytes handed to C, element addresses), so an
     // object a frame reaches directly never moves.
-    world::for_each_root(|word| push(word as usize, full, &mut len, true));
+    world::for_each_root(|word| push(word as usize, pin));
+}
+
+/// In a pause: mark from all registered threads' shadow stacks, pinned
+/// objects and (minor) the remembered set, sweep, maybe evacuate.
+fn mark_sweep(full: bool) {
+    build_index();
+    let m = mark();
+    (m.full, m.concurrent, m.evacuating, m.len) = (full, false, full, 0);
+    mark_roots(true);
     // Nobody logs while the world is stopped (the barrier has no
     // safepoint): every thread's chunk joins the retired ones.
     world::for_each_wb_log(retire_log);
     let log = LOG_FULL.swap(ptr::null_mut(), Ordering::Acquire);
     if !full {
-        for_each_logged(log, |o| scan_children(o, false, &mut len));
-        scan_dirty_cards(&mut len);
+        for_each_logged(log, scan_children);
+        scan_dirty_cards();
     }
-    while len > 0 {
-        len -= 1;
-        // SAFETY: `push` only queues addresses of live GC objects.
-        let o = unsafe { *heap().stack.add(len) };
-        // SAFETY: as above.
-        let flags = unsafe { &(*header(o)).gc_flags };
-        // A minor collection never enters an old object: whatever young
-        // object it references is in the remembered set's reach.
-        if (!full && flags.load(Ordering::Relaxed) & FLAG_STICKY != 0)
-            || flags.fetch_or(FLAG_MARK, Ordering::Relaxed) & FLAG_MARK != 0
-        {
-            continue;
-        }
-        scan_children(o, full, &mut len);
-    }
+    drain(usize::MAX);
     if !full {
         // The logged (old) objects all survive: unlogged again.
         for_each_logged(log, |o| {
@@ -1213,14 +1545,14 @@ fn collect_locked(full: bool) {
         });
     }
     free_logs(log);
-    let survived = sweep_blocks(full) + sweep_los(full);
-    if heap().evacuating {
+    let survived = sweep_blocks(full) + sweep_los(full, false);
+    if mark().evacuating {
         if select_candidates() {
             evacuate();
         }
-        let h = heap();
-        h.evacuating = false;
-        h.pinned_len = 0;
+        let m = mark();
+        m.evacuating = false;
+        m.pinned_len = 0;
     }
     let h = heap();
     let live = if full {
@@ -1233,6 +1565,7 @@ fn collect_locked(full: bool) {
     h.next_gc = (live * 2).max(MIN_HEAP);
     if full {
         h.full_at = h.next_gc;
+        h.stw_next = false;
     } else {
         h.minors += 1;
     }
@@ -1242,18 +1575,12 @@ fn collect_locked(full: bool) {
     if full {
         release_free_blocks();
     }
-    let h = heap();
-    let dt = now_ns() - t0;
-    h.gc_cpu_ns += clock_ns(libc::CLOCK_THREAD_CPUTIME_ID) - c0;
-    h.gc_ns += dt;
-    h.max_ns = h.max_ns.max(dt);
-    world::resume();
 }
 
 /// Minor collection: queue the referents in the dirty cards of every
 /// carded (old LOS) object, cleaning the cards (every survivor of this
 /// collection is old, so no old -> young reference outlives it).
-fn scan_dirty_cards(len: &mut usize) {
+fn scan_dirty_cards() {
     // SAFETY: walks the LOS list; each prefix's card table covers its
     // object.
     unsafe {
@@ -1266,7 +1593,7 @@ fn scan_dirty_cards(len: &mut usize) {
                 for (c, dirty) in cards.iter_mut().enumerate() {
                     if *dirty != 0 {
                         *dirty = 0;
-                        scan_range(o, c * CARD_SIZE, (c + 1) * CARD_SIZE, false, len);
+                        scan_range(o, c * CARD_SIZE, (c + 1) * CARD_SIZE);
                     }
                 }
             }
@@ -1285,7 +1612,7 @@ fn survives(obj: *mut u8) -> bool {
     if f & FLAG_MARK == 0 {
         return false;
     }
-    let f = f & !(FLAG_MARK | FLAG_STICKY | FLAG_UNLOGGED | FLAG_CARDED);
+    let f = f & !(FLAG_MARK | FLAG_STICKY | FLAG_UNLOGGED | FLAG_CARDED | FLAG_SATB | FLAG_SCANNED);
     let old = if f & FLAG_LARGE != 0 {
         FLAG_STICKY | FLAG_CARDED
     } else {
@@ -1297,7 +1624,9 @@ fn survives(obj: *mut u8) -> bool {
 
 /// Sweep the blocks (minor: only the `TAKEN` lines, where all young
 /// objects are): survivors keep their lines, dead objects lose their
-/// start bit. Bytes of the swept survivors.
+/// start bit. A concurrent mark's `BLACK` lines (full) stay unswept and
+/// become `TAKEN`: their objects are young. Bytes of the swept
+/// survivors.
 fn sweep_blocks(full: bool) -> usize {
     let mut live = 0;
     for b in 0..heap().nblocks {
@@ -1310,9 +1639,12 @@ fn sweep_blocks(full: bool) -> usize {
         let block = h.base + b * BLOCK_SIZE;
         let mut lines = m.lines;
         for l in &mut lines {
-            if full || *l == TAKEN {
-                *l = FREE;
-            }
+            *l = match *l {
+                BLACK => TAKEN,
+                TAKEN => FREE,
+                _ if full => FREE,
+                l => l,
+            };
         }
         if !full && !m.parsed {
             // No young survivor here, and no start bits to clear.
@@ -1333,31 +1665,38 @@ fn sweep_blocks(full: bool) -> usize {
                 m.starts[off / 8 / 64] &= !(1 << (off / 8 % 64));
             }
         });
-        m.used = lines.contains(&LIVE);
+        m.used = lines.iter().any(|&l| l != FREE);
         m.lines = lines;
     }
     live
 }
 
 /// Sweep the LOS list: free dead objects (minor: old ones stay
-/// unexamined). Bytes of the swept survivors.
-fn sweep_los(full: bool) -> usize {
+/// unexamined). Bytes of the swept survivors. `concurrent`: after a
+/// concurrent mark, whose younger objects (in front of `los_mark_head`)
+/// stay unexamined and whose survivors keep their dirty cards (they may
+/// reference objects allocated during the mark, which are young).
+fn sweep_los(full: bool, concurrent: bool) -> usize {
     let h = heap();
     let mut live = 0;
     let mut link: *mut *mut u8 = &mut h.los;
+    let mut young = concurrent;
     // SAFETY: walks the LOS list; freed objects are unlinked before their
     // memory is released.
     unsafe {
         while !(*link).is_null() {
             let o = *link;
             let p = prefix(o);
+            young &= o != h.los_mark_head;
             let old = (*header(o)).gc_flags.load(Ordering::Relaxed) & FLAG_STICKY != 0;
-            if !full && old {
+            if young || (!full && old) {
                 link = &mut (*p).next;
             } else if survives(o) {
                 live += (*p).size;
-                // Clean: everything it references is old now.
-                ptr::write_bytes((*p).cards, 0, (*p).size.div_ceil(CARD_SIZE));
+                if !concurrent {
+                    // Clean: everything it references is old now.
+                    ptr::write_bytes((*p).cards, 0, (*p).size.div_ceil(CARD_SIZE));
+                }
                 link = &mut (*p).next;
             } else {
                 *link = (*p).next;
@@ -1429,9 +1768,10 @@ fn evacuate() {
     h.copy_limit = 0;
     h.copy_line = 0;
     h.copy_phase = 0;
-    for i in 0..h.pinned_len {
+    let (pinned, npinned) = (mark().pinned, mark().pinned_len);
+    for i in 0..npinned {
         // SAFETY: `pinned_len` recorded live block objects.
-        let o = unsafe { *h.pinned.add(i) };
+        let o = unsafe { *pinned.add(i) };
         if in_candidate(o) {
             // SAFETY: as above.
             unsafe {
@@ -1696,14 +2036,13 @@ struct LogChunk {
 const LOG_CHUNK_WORDS: usize = 512;
 
 /// Retired chunks: pushed by any thread, taken with the world stopped.
-static LOG_FULL: core::sync::atomic::AtomicPtr<LogChunk> =
-    core::sync::atomic::AtomicPtr::new(ptr::null_mut());
+static LOG_FULL: AtomicPtr<LogChunk> = AtomicPtr::new(ptr::null_mut());
 
-/// Retire the chunk behind the wb log slots `[cursor, limit]` (none if
-/// null) and clear them.
-fn retire_log([cursor, limit]: [*mut usize; 2]) {
+/// Retire the chunk behind the log slots `[cursor, limit]` (none if
+/// null) onto `stack` and clear them.
+fn retire_to([cursor, limit]: [*mut usize; 2], stack: &AtomicPtr<LogChunk>) {
     // SAFETY: the slots are the owner's (or a stopped / exiting
-    // thread's); a non-null limit ends a chunk from `refill_log`.
+    // thread's); a non-null limit ends a chunk from `log_word`.
     unsafe {
         let end = limit.read();
         if end == 0 {
@@ -1711,37 +2050,54 @@ fn retire_log([cursor, limit]: [*mut usize; 2]) {
         }
         let c = (end - LOG_CHUNK_WORDS * size_of::<usize>()) as *mut LogChunk;
         (*c).end = cursor.read();
-        let mut head = LOG_FULL.load(Ordering::Relaxed);
-        loop {
-            (*c).next = head;
-            match LOG_FULL.compare_exchange_weak(head, c, Ordering::Release, Ordering::Relaxed) {
-                Ok(_) => break,
-                Err(h) => head = h,
-            }
-        }
+        push_chunks(stack, c, c);
         cursor.write(0);
         limit.write(0);
     }
 }
 
-/// The calling thread's wb log is full (or absent): retire it and start
-/// a fresh chunk.
-fn refill_log(slots: [*mut usize; 2]) {
-    retire_log(slots);
-    // SAFETY: plain allocation; the slots are ours.
-    unsafe {
-        let c = libc::malloc(LOG_CHUNK_WORDS * size_of::<usize>()).cast::<LogChunk>();
-        if c.is_null() {
-            rokr_common::oom();
+/// Push the chunk list `first..=last` onto `stack`.
+fn push_chunks(stack: &AtomicPtr<LogChunk>, first: *mut LogChunk, last: *mut LogChunk) {
+    let mut head = stack.load(Ordering::Relaxed);
+    loop {
+        // SAFETY: `last` is a chunk nobody else holds.
+        unsafe { (*last).next = head };
+        match stack.compare_exchange_weak(head, first, Ordering::Release, Ordering::Relaxed) {
+            Ok(_) => return,
+            Err(h) => head = h,
         }
-        slots[0].write(c.add(1) as usize);
-        slots[1].write(c as usize + LOG_CHUNK_WORDS * size_of::<usize>());
     }
 }
 
-/// `f` on every object logged in the chunk list `log`.
+/// Retire a thread's wb log chunk (the remembered set).
+fn retire_log(slots: [*mut usize; 2]) {
+    retire_to(slots, &LOG_FULL);
+}
+
+/// Append `word` to the calling thread's log behind `slots`, retiring a
+/// full chunk onto `stack`.
+fn log_word(slots: [*mut usize; 2], stack: &AtomicPtr<LogChunk>, word: usize) {
+    // SAFETY: this thread's own slots: `cursor < limit` inside its chunk
+    // (or both 0).
+    unsafe {
+        if slots[0].read() == slots[1].read() {
+            retire_to(slots, stack);
+            let c = libc::malloc(LOG_CHUNK_WORDS * size_of::<usize>()).cast::<LogChunk>();
+            if c.is_null() {
+                rokr_common::oom();
+            }
+            slots[0].write(c.add(1) as usize);
+            slots[1].write(c as usize + LOG_CHUNK_WORDS * size_of::<usize>());
+        }
+        let c = slots[0].read();
+        (c as *mut usize).write(word);
+        slots[0].write(c + size_of::<usize>());
+    }
+}
+
+/// `f` on every word logged in the chunk list `log`.
 fn for_each_logged(mut log: *mut LogChunk, mut f: impl FnMut(*mut u8)) {
-    // SAFETY: retired chunks hold objects up to their `end`.
+    // SAFETY: retired chunks hold words up to their `end`.
     unsafe {
         while !log.is_null() {
             let mut e = log.add(1).cast::<*mut u8>();
@@ -1756,7 +2112,7 @@ fn for_each_logged(mut log: *mut LogChunk, mut f: impl FnMut(*mut u8)) {
 
 fn free_logs(mut log: *mut LogChunk) {
     while !log.is_null() {
-        // SAFETY: chunks come from `refill_log`'s malloc.
+        // SAFETY: chunks come from `log_word`'s malloc.
         unsafe {
             let next = (*log).next;
             libc::free(log.cast());
@@ -1765,60 +2121,61 @@ fn free_logs(mut log: *mut LogChunk) {
     }
 }
 
-/// Before the calling thread leaves the registry: retire its wb log so
-/// the next collection still sees what it logged.
-pub fn retire_own_log() {
+/// Before the calling thread leaves the registry: retire its logs so
+/// the next collection (or the running mark) still sees them.
+pub fn retire_own_logs() {
     retire_log(rokr_common::tls::wb_log());
+    concurrent::retire_satb(rokr_common::tls::satb_log());
 }
 
 /// Write barrier for runtime code: call before storing a GC reference
-/// into the word at `slot` of the GC object `obj` (what compiled code
-/// inlines).
+/// into the word at `slot` of the GC object `obj`.
+///
+/// What compiled code inlines: the slow path for `UNLOGGED`, then the
+/// card for `CARDED` (a concurrent mark sets both on old LOS objects).
 ///
 /// # Safety
 /// `obj` must be a live GC object and `slot` a word inside it.
 pub unsafe fn write_barrier(obj: *mut u8, slot: *const u8) {
     // SAFETY: caller contract.
     let flags = unsafe { (*header(obj)).gc_flags.load(Ordering::Relaxed) };
+    if flags & FLAG_UNLOGGED != 0 {
+        // SAFETY: caller contract.
+        unsafe { write_barrier_slow(obj) };
+    }
     if flags & FLAG_CARDED != 0 {
         // SAFETY: a carded object is a LOS object with a card table.
         unsafe {
             let cards = (*prefix(obj)).cards;
             *cards.add((slot as usize - obj as usize) / CARD_SIZE) = 1;
         }
-    } else if flags & FLAG_UNLOGGED != 0 {
-        // SAFETY: caller contract.
-        unsafe { write_barrier_slow(obj) };
     }
 }
 
 /// `rok_gc_wb_slow`: remember `obj` for the next minor collection.
 ///
 /// `obj` (old, `UNLOGGED`) is about to hold a reference that may be
-/// young. Not a safepoint: no collection runs between the
-/// barrier and the store that follows it.
+/// young. Not a safepoint: no collection runs between the barrier and
+/// the store that follows it. While a concurrent mark runs, every old
+/// object is `UNLOGGED` and this is also its snapshot barrier
+/// ([`concurrent::snapshot`]).
 ///
 /// # Safety
 /// `obj` must be a live GC object.
 pub unsafe fn write_barrier_slow(obj: *mut u8) {
     // SAFETY: caller contract.
     let flags = unsafe { &(*header(obj)).gc_flags };
+    if concurrent::MARKING.load(Ordering::Relaxed) {
+        // SAFETY: caller contract.
+        unsafe { concurrent::snapshot(obj) };
+        return;
+    }
     // Racing stores: exactly one thread logs it.
     if flags.fetch_and(!FLAG_UNLOGGED, Ordering::Relaxed) & FLAG_UNLOGGED == 0 {
         return;
     }
-    let slots = rokr_common::tls::wb_log();
-    // SAFETY: this thread's own slots: `cursor < limit` inside its chunk.
-    unsafe {
-        if slots[0].read() == slots[1].read() {
-            refill_log(slots);
-        }
-        let c = slots[0].read();
-        (c as *mut *mut u8).write(obj);
-        slots[0].write(c + size_of::<usize>());
-    }
+    log_word(rokr_common::tls::wb_log(), &LOG_FULL, obj as usize);
 }
-
 /// Bytes held by GC objects (headers included) as of the last
 /// collection, plus everything handed out since (whole TLABs).
 pub fn live_bytes() -> usize {
@@ -1903,6 +2260,8 @@ mod tests {
         minor_collection_keeps_logged_children();
         minor_collection_scans_dirty_cards();
         evacuation_moves_objects_and_fixes_references();
+        sum_payloads_scan_the_active_variant();
+        concurrent_mark_keeps_the_snapshot();
         evacuation_defragments_sparse_blocks();
     }
 
@@ -2014,6 +2373,148 @@ mod tests {
             let b3 = word(a, 16) as *mut u8;
             assert_eq!(word(b3, 16), 0xB);
             assert_eq!(word(word(word(a, 40) as *mut u8, 16) as *mut u8, 16), 0xE);
+            *frame.1 = 0;
+            *frame.2 = 0;
+            *frame.3 = 0;
+            collect();
+            assert_eq!(live_bytes(), base);
+            *top = ptr::null_mut();
+        }
+        heap().evac_always = false;
+    }
+
+    /// A concurrent mark (held off by the test, so the stores below
+    /// happen mid-mark): a reference moved out of a scanned-later old
+    /// object into a new one survives through the snapshot barrier; a new
+    /// object stored into an old one is young afterwards and survives the
+    /// next minor collection through the carried remembered set.
+    fn concurrent_mark_keeps_the_snapshot() {
+        let leaf = USER_TYPE_BASE + 1;
+        let base = live_bytes();
+        let a = alloc(32, 8, USER_TYPE_BASE);
+        let b = alloc(24, 8, leaf);
+        set(b, 16, 0xB);
+        set(a, 16, b as usize);
+        // SAFETY: frame layout matches `Frame` + two slots, unlinked
+        // before it dies.
+        unsafe {
+            let (mut ra, mut rc) = (a as usize, 0usize);
+            let mut frame: (Frame, *mut usize, *mut usize) = (
+                Frame {
+                    prev: ptr::null_mut(),
+                    count: 2,
+                },
+                &mut ra,
+                &mut rc,
+            );
+            let top = rokr_common::tls::shadow_stack_top();
+            *top = (&raw mut frame).cast();
+            collect();
+            // `b` may have moved (evacuation); `a` is rooted.
+            let b = word(a, 16) as *mut u8;
+            heap().concurrent = Concurrent::Always;
+            world::lock();
+            collect_locked(true, true);
+            world::unlock();
+            assert!(heap().marking);
+            concurrent::lock_mark();
+            let c = alloc(32, 8, USER_TYPE_BASE);
+            set(c, 16, b as usize);
+            *frame.2 = c as usize;
+            write_barrier(a, a.add(16));
+            set(a, 16, 0);
+            let d = alloc(24, 8, leaf);
+            set(d, 16, 0xD);
+            write_barrier(a, a.add(16));
+            set(a, 16, d as usize);
+            concurrent::unlock_mark();
+            world::lock();
+            if heap().marking {
+                concurrent::finish(false);
+            }
+            world::unlock();
+            heap().concurrent = Concurrent::Auto;
+            assert_eq!(object_containing(b as usize, false), Some(b));
+            assert_eq!(word(b, 16), 0xB);
+            collect_young();
+            assert_eq!(word(a, 16), d as usize);
+            assert_eq!(object_containing(d as usize, false), Some(d));
+            assert_eq!(word(d, 16), 0xD);
+            assert_eq!(live_bytes(), base + 32 * 2 + 24 * 2);
+            *frame.1 = 0;
+            *frame.2 = 0;
+            collect();
+            assert_eq!(live_bytes(), base);
+            *top = ptr::null_mut();
+        }
+    }
+
+    /// `SUM_PAYLOAD`: only the active variant's words are references —
+    /// they move and are fixed; the same word under a scalar variant
+    /// keeps nothing alive.
+    #[allow(clippy::many_single_char_names)]
+    fn sum_payloads_scan_the_active_variant() {
+        // {u32 tag @16, payload @24..40}: variant 0 a reference @+8,
+        // variant 2 a `str` @+16, variant 1 scalars. Descriptor at word
+        // 4, variant entries at words 11 and 13.
+        let (ts, leaf) = (USER_TYPE_BASE + 13, USER_TYPE_BASE + 1);
+        static U: [u32; 15] = [
+            40,
+            1 | (1 << 16),
+            16,
+            SUM_PAYLOAD | (4 << SUM_DESC_SHIFT),
+            2,
+            0,
+            1,
+            11,
+            2,
+            1,
+            13,
+            8,
+            STRONG_REF,
+            16,
+            INTERIOR_REF,
+        ];
+        register_type(ts, U.as_ptr().cast());
+        heap().evac_always = true;
+        let base = live_bytes();
+        let (a, b, c) = (alloc(40, 8, ts), alloc(40, 8, ts), alloc(40, 8, ts));
+        let (x, y, z) = (alloc(24, 8, leaf), alloc(24, 8, leaf), alloc(32, 8, leaf));
+        set(x, 16, 0xA);
+        set(z, 16, 0xC);
+        // SAFETY: tests write their own objects' words.
+        unsafe {
+            a.add(16).cast::<u32>().write(0);
+            b.add(16).cast::<u32>().write(1);
+            c.add(16).cast::<u32>().write(2);
+        }
+        set(a, 24, x as usize);
+        set(b, 24, y as usize); // scalar bits under variant 1
+        set(c, 32, z as usize + 20); // `str` into `z`
+        // SAFETY: frame layout matches `Frame` + three slots.
+        unsafe {
+            let (mut ra, mut rb, mut rc) = (a as usize, b as usize, c as usize);
+            let mut frame: (Frame, *mut usize, *mut usize, *mut usize) = (
+                Frame {
+                    prev: ptr::null_mut(),
+                    count: 3,
+                },
+                &mut ra,
+                &mut rb,
+                &mut rc,
+            );
+            let top = rokr_common::tls::shadow_stack_top();
+            *top = (&raw mut frame).cast();
+            collect();
+            let x2 = word(a, 24) as *mut u8;
+            assert_ne!(x2, x);
+            assert_eq!(word(x2, 16), 0xA);
+            let z2 = (word(c, 32) - 20) as *mut u8;
+            assert_ne!(z2, z);
+            assert_eq!(word(z2, 16), 0xC);
+            assert_eq!(word(b, 24), y as usize);
+            assert_eq!(object_containing(y as usize, false), None);
+            assert_eq!(live_bytes(), base + 40 * 3 + 24 + 32);
             *frame.1 = 0;
             *frame.2 = 0;
             *frame.3 = 0;

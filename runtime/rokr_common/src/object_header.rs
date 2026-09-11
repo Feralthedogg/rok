@@ -44,9 +44,15 @@ pub const FLAG_CARDED: u32 = crate::gc_abi::FLAG_CARDED;
 /// permanent, unlike `PINNED` it does not keep the object alive.
 pub const FLAG_NOMOVE: u32 = 1 << 8;
 /// Collector-internal, one full collection: an ambiguous word (a root,
-/// an `any` / union payload word the collector cannot decode) refers to
-/// the object, so this evacuation leaves it in place.
+/// a runtime word buffer's word) refers to the object, so this
+/// evacuation leaves it in place.
 pub const FLAG_NOEVAC: u32 = 1 << 9;
+/// Collector-internal, one concurrent mark: a store into this old object
+/// is logging (or logged) its references as of the mark's start (SATB).
+pub const FLAG_SATB: u32 = 1 << 10;
+/// Collector-internal, one concurrent mark: the marker has scanned the
+/// object, so the first store into it need not log its references.
+pub const FLAG_SCANNED: u32 = 1 << 11;
 
 pub const HEADER_SIZE: usize = crate::gc_abi::HEADER_SIZE as usize;
 pub const HEADER_ALIGN: usize = 8;

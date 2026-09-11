@@ -103,10 +103,20 @@ fn run_case(
 
     check_run(&source, &exe, expected, &[])?;
     // `// gc-stress: N`: again with a collection every N allocations and
-    // every full one evacuating all it may (objects move all the time).
+    // every full one evacuating all it may (objects move all the time),
+    // then once more with every automatic full collection marking
+    // concurrently (mutators store while the marker runs; explicit
+    // collections still stop the world and evacuate).
     if let Some(n) = directive(&source, "gc-stress:") {
         let env = [("ROK_GC_STRESS", n.trim()), ("ROK_GC_EVAC", "always")];
         check_run(&source, &exe, expected, &env).map_err(|e| format!("gc-stress: {e}"))?;
+        let env = [
+            ("ROK_GC_STRESS", n.trim()),
+            ("ROK_GC_EVAC", "always"),
+            ("ROK_GC_CONCURRENT", "always"),
+        ];
+        check_run(&source, &exe, expected, &env)
+            .map_err(|e| format!("gc-stress concurrent: {e}"))?;
     }
     Ok(())
 }

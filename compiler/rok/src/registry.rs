@@ -38,18 +38,7 @@ pub fn default_url(home: &Path) -> Result<String, String> {
     if let Some(u) = std::env::var("ROK_REGISTRY").ok().filter(|u| !u.is_empty()) {
         return Ok(u);
     }
-    let path = home.join("config.rokon");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Ok(DEFAULT.to_owned());
-    };
-    let file = path.display().to_string();
-    let doc = Doc::parse(&text, &file)?;
-    let c = doc.root().record("Config")?;
-    c.only(&["registry"])?;
-    Ok(c.opt("registry")
-        .map(|r| r.string())
-        .transpose()?
-        .unwrap_or_else(|| DEFAULT.to_owned()))
+    Ok(crate::config(home, "registry")?.unwrap_or_else(|| DEFAULT.to_owned()))
 }
 
 /// A stone's file in the index.
@@ -197,12 +186,25 @@ impl Entry {
 /// The versions of stone `name` in the cached index `url` (none when it
 /// has no such stone).
 pub fn entries(cache: &Cache, url: &str, name: &str) -> Result<Vec<Entry>, String> {
-    let file = path(name);
-    let Some(text) = cache.show(url, &file)? else {
+    // `a_b` finds stone `a-b` (and back): one name, two spellings.
+    let mut text = None;
+    let mut file = path(name);
+    for n in [
+        name.to_owned(),
+        name.replace('_', "-"),
+        name.replace('-', "_"),
+    ] {
+        file = path(&n);
+        text = cache.show(url, &file)?;
+        if text.is_some() {
+            break;
+        }
+    }
+    let Some(text) = text else {
         return Ok(Vec::new());
     };
     let mut all = parse_file(&text, &format!("{url}: {file}"))?;
-    all.retain(|e| e.name == name);
+    all.retain(|e| manifest::same(&e.name, name));
     Ok(all)
 }
 
@@ -341,10 +343,18 @@ fn commit(index: &Path, file: &Path, text: &str, msg: &str) -> Result<(), String
 pub fn publish(index: &Path, e: &Entry, write: bool) -> Result<PathBuf, String> {
     let (file, text) = local(index, &e.name)?;
     let have = parse_file(&text, &file.display().to_string())?;
-    if let Some(o) = have.iter().find(|o| o.name != e.name) {
+    // `a-b` and `a_b` (or another case) are one stone; the other spelling
+    // has its own file.
+    let files = git::run(index, &["ls-files"])?;
+    let other = files
+        .lines()
+        .filter_map(|f| f.rsplit('/').next())
+        .chain(have.iter().map(|o| o.name.as_str()))
+        .find(|n| *n != e.name && manifest::same(n, &e.name));
+    if let Some(o) = other {
         return Err(format!(
-            "the index has stone `{}`; `{}` differs from it only in case",
-            o.name, e.name
+            "the index has stone `{o}`; `{}` is the same name (`-` / `_` and case are one)",
+            e.name
         ));
     }
     if have.iter().any(|o| o.vers == e.vers) {
@@ -381,7 +391,7 @@ pub fn yank(index: &Path, name: &str, vers: &str, yanked: bool) -> Result<(), St
             .then(|| Doc::parse(line, &at).and_then(|d| entry(d.root())))
             .transpose()?;
         match &mut e {
-            Some(e) if e.name == name && e.vers == vers => {
+            Some(e) if manifest::same(&e.name, name) && e.vers == vers => {
                 found = true;
                 e.yanked = yanked;
                 out.push_str(&e.to_line());

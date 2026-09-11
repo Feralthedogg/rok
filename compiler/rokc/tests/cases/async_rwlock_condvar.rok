@@ -48,19 +48,21 @@ for i in 0..40 {
 await task::join(writers);
 using r = rw.read() { println(f"writes: {r.get()}"); }
 
-// A reader waits (parked) while a writer holds it.
+// A reader waits (parked) while a writer holds it: the writer first,
+// so the reader cannot get in before.
 let order = Mutex::new("");
-let reader = task::spawn(async {
-    using r = await rw.read_async() {
-        using o = order.lock() { o.set(o.get() + "r"); }
-    }
-    0
-});
+let reader: Task<i32> | none = none;
 using w = await rw.write_async() {
+    reader = task::spawn(async {
+        using r = await rw.read_async() {
+            using o = order.lock() { o.set(o.get() + "r"); }
+        }
+        0
+    });
     await task::sleep(Duration::ms(20));
     using o = order.lock() { o.set(o.get() + "w"); }
 }
-await reader;
+if let t: Task<i32> = reader { await t; }
 using o = order.lock() { println(f"waited for writer: {o.get() == "wr"}"); }
 
 // Condvar: 64 tasks wait for a flag; one notify_all wakes them all.
@@ -92,6 +94,7 @@ println(f"condvar: {woken.load()} woken, sum {sum}");
 let m2 = Mutex::new(0);
 let cv2 = Condvar::new();
 let blocked: List<Task<i32>> = List::new();
+let base = task::registrations();
 using w = await rw.write_async() {
     blocked.push(task::spawn(async { using r = await rw.read_async() { } 1 }));
     blocked.push(task::spawn(async { using x = await rw.write_async() { } 1 }));
@@ -101,7 +104,11 @@ using w = await rw.write_async() {
         }
         1
     }));
-    await task::sleep(Duration::ms(20));
+    // Until all three are parked.
+    let deadline = Instant::now() + Duration::sec(60);
+    while task::registrations() < base + 3 && Instant::now() < deadline {
+        await task::yield_now();
+    }
     for t in blocked { t.cancel(); }
     let n = 0;
     for t in blocked {

@@ -1,0 +1,19 @@
+// expect-exit: 0
+// expect-stdout:
+// true
+// 3
+
+// `try!` is one word: `try !x` is `try (!x)` (a plain `try` over a
+// negation), not a forced `try!` over `x`.
+fn ok(b: bool) throws -> bool {
+    return b;
+}
+
+fn parse3() throws -> i32 { 3 }
+
+fn main() throws {
+    let y = try !ok(false);
+    println(f"{y}");
+    let z: i32 = try! parse3();
+    println(f"{z}");
+}

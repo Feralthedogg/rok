@@ -253,8 +253,13 @@ impl DebugInfo {
                 let fields = self.members(ps, &names);
                 Self::composite(&name, size, align, &fields)
             }
-            MirTy::Array(elem, n) => {
-                let base = self.di_type(elem)?;
+            MirTy::Array(..) | MirTy::Union(..) => {
+                let (elem, n) = match ty {
+                    MirTy::Array(elem, n) => ((**elem).clone(), *n),
+                    MirTy::Union(_, n) => (MirTy::Prim(PrimTy::Usize), *n),
+                    _ => unreachable!(),
+                };
+                let base = self.di_type(&elem)?;
                 format!(
                     "#llvm.di_composite_type<tag = DW_TAG_array_type, baseType = {base}, \
                      sizeInBits = {}, alignInBits = {}, elements = #llvm.di_subrange<count = {n} : i64>>",

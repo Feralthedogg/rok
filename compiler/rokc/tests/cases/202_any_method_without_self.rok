@@ -1,0 +1,15 @@
+// expect-error: 13:16: cannot call `make` on `any Make`: it takes no `self`
+
+// A trait method without `self` has no receiver to dispatch on through
+// `any Tr`: a diagnostic, not an internal error.
+trait Make {
+    fn make() -> i32;
+    fn show(self) -> i32;
+}
+impl Make for i32 { fn make() -> i32 { 7 } fn show(self) -> i32 { self } }
+
+fn main() {
+    let v: any Make = 3;
+    println(f"{v.make()}");
+    println(f"{v.show()}");
+}

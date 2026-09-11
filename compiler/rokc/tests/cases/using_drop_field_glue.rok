@@ -1,0 +1,47 @@
+// expect-exit: 0
+// expect-stdout:
+// container
+// b
+// a
+// --
+// y
+// x
+// --
+// t2
+// t1
+// --
+// payload p
+// --
+// sum s
+// end
+
+// stdlib 2.13.4: after a value's own `drop`, `using` drops its `Drop`
+// fields in reverse declaration order — also for a struct without its
+// own `Drop`, tuple elements and the payload an enum / sum holds.
+struct R { name: str; }
+impl Drop for R {
+    fn drop(ref self) { println(self.name); }
+}
+
+struct Container { a: R; n: i32; b: R; }
+impl Drop for Container {
+    fn drop(ref self) { println("container"); }
+}
+
+struct Plain { x: R; y: R; }
+
+enum E { Empty, Holds(R) }
+
+fn main() {
+    using c = (Container { a: R { name: "a" }, n: 1, b: R { name: "b" } }) {}
+    println("--");
+    using p = (Plain { x: R { name: "x" }, y: R { name: "y" } }) {}
+    println("--");
+    using t = (R { name: "t1" }, 5, R { name: "t2" }) {}
+    println("--");
+    using e = E::Holds(R { name: "payload p" }) {}
+    println("--");
+    let s: R | none = R { name: "sum s" };
+    using s2 = s {}
+    println("end");
+}

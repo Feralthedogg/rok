@@ -1,0 +1,16 @@
+// expect-exit: 0
+// expect-stdout:
+// 3
+// 6
+// 2
+
+// 3.6: a slice step may be any signed integer (it widens to `isize`).
+fn main() {
+    let xs = [1, 2, 3, 4, 5, 6];
+    let s: i32 = 2;
+    let back: i8 = -1;
+    let k: i16 = 3;
+    println(f"{xs[0:6:s].len()}");
+    println(f"{xs[::back].len()}");
+    println(f"{xs[::k].len()}");
+}

@@ -4,6 +4,7 @@
 // condvar: left while the mutex was held: true
 // held lock untouched: true
 // free afterwards: true
+// cancelled as it parks, held lock untouched: true
 // registrations left: 0
 
 // Cancelling a task at an async wait never loses or duplicates work:
@@ -40,7 +41,9 @@ let waiter = task::spawn(async {
     }
     1
 });
-await task::sleep(Duration::ms(10));
+// Until it waits on `cv` (a loaded machine may take long).
+let deadline = Instant::now() + Duration::sec(60);
+while task::registrations() < 1 && Instant::now() < deadline { await task::yield_now(); }
 using held = await m.lock_async() {
     waiter.cancel();
     let r = try await waiter.join() catch _: CancellationError { 0 };
@@ -48,4 +51,26 @@ using held = await m.lock_async() {
     println(f"held lock untouched: {m.try_lock() is none}");
 }
 println(f"free afterwards: {m.try_lock() is MutexGuard<i32>}");
+
+// Cancelled the moment it parks: the cancel can land while `wait_async`
+// returns `Pending`, and the `await` then leaves without polling it
+// again. Its guard's drop still must not unlock the holder's lock.
+let unlocked = 0;
+for round in 0..200 {
+    let m2 = Mutex::new(0);
+    let cv2 = Condvar::new();
+    let w2 = task::spawn(async {
+        using g = await m2.lock_async() {
+            g = await cv2.wait_async(g);
+        }
+        1
+    });
+    while task::registrations() < 1 && Instant::now() < deadline { await task::yield_now(); }
+    using held2 = await m2.lock_async() {
+        w2.cancel();
+        try await w2.join() catch _: CancellationError { 0 };
+        if m2.try_lock() is MutexGuard<i32> { unlocked += 1; }
+    }
+}
+println(f"cancelled as it parks, held lock untouched: {unlocked == 0}");
 println(f"registrations left: {task::registrations()}");

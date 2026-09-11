@@ -9,8 +9,10 @@
 //!   - `// expect-stderr: text` — (repeatable) the run's stderr must contain `text`
 //!   - `// debug-only`          — skipped under `ROK_TEST_OPT` (e.g.
 //!     overflow panics, which only `-O0` checks)
-//!   - `// gc-stress: N`        — run once more with
-//!     `ROK_GC_STRESS=N ROK_GC_EVAC=always`, same expectations
+//!   - `// gc-stress: N`        — run twice more, with
+//!     `ROK_GC_STRESS=N ROK_GC_EVAC=always` and with
+//!     `ROK_GC_STRESS=N ROK_GC_EVAC=always ROK_GC_CONCURRENT=always`,
+//!     same expectations
 //!   - `// rokc-arg: args`      — extra `rokc` arguments (`--cfg feat`)
 //!   - `// spec: <section>`     — the spec section a case checks (a tag)
 //!

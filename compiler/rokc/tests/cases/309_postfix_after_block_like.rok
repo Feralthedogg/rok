@@ -1,0 +1,25 @@
+// expect-exit: 0
+// expect-stdout:
+// 3
+// 2
+// ok
+
+// 3.9: a postfix chain after a block-like statement continues it
+// (`match .. {}.len();`, `match .. {}?;`); `;;` is an empty statement.
+fn opt(v: i32) -> i32 | none {
+    if v == 0 { none } else { v }
+}
+
+fn first(v: i32) -> i32 | none {
+    let n = match v { 3 => [1, 2, 3], _ => [4, 5, 6] }.len();;
+    println(f"{n}");
+    if v == 3 { "ab" } else { "c" }.len();
+    match v { 3 => opt(v), _ => opt(0) }?;
+    return v - 1;
+}
+
+fn main() {
+    ;
+    println(f"{first(3) ?? 0}");;
+    println("ok");
+}

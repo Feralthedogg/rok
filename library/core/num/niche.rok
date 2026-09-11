@@ -43,11 +43,11 @@ impl NicheFloat for f64 {
 pub struct ZeroError;
 
 impl Display for ZeroError {
-    fn display(self) -> str { "zero is not a valid `NonZero` value" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("zero is not a valid `NonZero` value") }
 }
 
 impl Debug for ZeroError {
-    fn debug(self) -> str { "ZeroError" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("ZeroError") }
 }
 
 impl Error for ZeroError {}
@@ -98,11 +98,11 @@ impl<T: NicheInt> Hash for NonZero<T> {
 }
 
 impl<T: NicheInt> Display for NonZero<T> {
-    fn display(self) -> str { f"{self.0}" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self.0, ref f) }
 }
 
 impl<T: NicheInt> Debug for NonZero<T> {
-    fn debug(self) -> str { f"NonZero({self.0.debug()})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"NonZero({self.0:?})") }
 }
 
 /// Never 0: a wrapped (unchecked) product that lands on 0 panics.
@@ -275,11 +275,11 @@ impl<T: NicheInt> Hash for Positive<T> {
 }
 
 impl<T: NicheInt> Display for Positive<T> {
-    fn display(self) -> str { f"{self.0}" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self.0, ref f) }
 }
 
 impl<T: NicheInt> Debug for Positive<T> {
-    fn debug(self) -> str { f"Positive({self.0.debug()})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"Positive({self.0:?})") }
 }
 
 // NonNan
@@ -337,11 +337,11 @@ impl<F: NicheFloat> Hash for NonNan<F> {
 }
 
 impl<F: NicheFloat> Display for NonNan<F> {
-    fn display(self) -> str { f"{self.0}" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self.0, ref f) }
 }
 
 impl<F: NicheFloat> Debug for NonNan<F> {
-    fn debug(self) -> str { f"NonNan({self.0.debug()})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"NonNan({self.0:?})") }
 }
 
 /// May be NaN (`∞ - ∞`): a plain `F` (2.2.3).
@@ -436,11 +436,11 @@ impl<F: NicheFloat> Hash for Finite<F> {
 }
 
 impl<F: NicheFloat> Display for Finite<F> {
-    fn display(self) -> str { f"{self.0}" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self.0, ref f) }
 }
 
 impl<F: NicheFloat> Debug for Finite<F> {
-    fn debug(self) -> str { f"Finite({self.0.debug()})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"Finite({self.0:?})") }
 }
 
 /// Finite unless it overflows to ±∞ (2.2.4).

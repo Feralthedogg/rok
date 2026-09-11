@@ -142,6 +142,10 @@ tls_slots! {
     // Not an 803 slot: `[lo, hi)`, the addresses whose fault means this
     // thread overflowed its stack (`rokr::stack`); `[0, 0)` = unknown.
     stack_guard => rokr_tls_stack_guard_addr, 16, 3;
+    // Not 803 slots: this thread's SATB log chunk (`rokr_gc`, concurrent
+    // marking), like the wb log pair.
+    satb_cursor => rokr_tls_satb_cursor_addr, 8, 3;
+    satb_limit => rokr_tls_satb_limit_addr, 8, 3;
 }
 
 /// Address of this thread's `rok_tls_stack_guard` (`[lo, hi)`).
@@ -184,6 +188,8 @@ pub fn thread_init() {
         shadow_stack_top().write(core::ptr::null_mut());
         slot::wb_log_cursor().cast::<usize>().write(0);
         slot::wb_log_limit().cast::<usize>().write(0);
+        slot::satb_cursor().cast::<usize>().write(0);
+        slot::satb_limit().cast::<usize>().write(0);
         slot::worker_id().cast::<u64>().write(new_worker_id());
         slot::task_worker().cast::<usize>().write(0);
     }
@@ -194,6 +200,13 @@ pub fn thread_init() {
 #[allow(clippy::cast_ptr_alignment)] // 8-aligned slots
 pub fn wb_log() -> [*mut usize; 2] {
     [slot::wb_log_cursor().cast(), slot::wb_log_limit().cast()]
+}
+
+/// Addresses of this thread's `rok_tls_satb_cursor` and
+/// `rok_tls_satb_limit` (its SATB log chunk, `rokr_gc`).
+#[allow(clippy::cast_ptr_alignment)] // 8-aligned slots
+pub fn satb_log() -> [*mut usize; 2] {
+    [slot::satb_cursor().cast(), slot::satb_limit().cast()]
 }
 
 /// Addresses of this thread's `rok_tls_tlab_cursor` and

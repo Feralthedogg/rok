@@ -419,50 +419,65 @@ fn jupyter_kernel_speaks_the_wire_protocol() {
 
     let Some(env) = setup() else { return };
     let key = b"secret-key";
-    let listeners: Vec<_> = (0..5)
-        .map(|_| TcpListener::bind("127.0.0.1:0").unwrap())
-        .collect();
-    let ports: Vec<u16> = listeners
-        .iter()
-        .map(|l| l.local_addr().unwrap().port())
-        .collect();
-    drop(listeners);
     let dir = std::env::temp_dir().join(format!("rok_jupyter_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("kernel.json");
-    std::fs::write(
-        &file,
-        format!(
-            r#"{{"transport":"tcp","ip":"127.0.0.1","shell_port":{},"iopub_port":{},
+    // The kernel binds every socket (heartbeat last) before anything slow,
+    // but on a loaded machine its process can take long to start: poll up
+    // to 60s. A probed port can be taken again before the kernel binds it
+    // (it then exits): start over on fresh ports.
+    let mut attempts = 0;
+    let (kernel, ports) = loop {
+        let listeners: Vec<_> = (0..5)
+            .map(|_| TcpListener::bind("127.0.0.1:0").unwrap())
+            .collect();
+        let ports: Vec<u16> = listeners
+            .iter()
+            .map(|l| l.local_addr().unwrap().port())
+            .collect();
+        drop(listeners);
+        std::fs::write(
+            &file,
+            format!(
+                r#"{{"transport":"tcp","ip":"127.0.0.1","shell_port":{},"iopub_port":{},
 "stdin_port":{},"control_port":{},"hb_port":{},"key":"secret-key",
 "signature_scheme":"hmac-sha256","kernel_name":"rok"}}"#,
-            ports[0], ports[1], ports[2], ports[3], ports[4]
-        ),
-    )
-    .unwrap();
-    let kernel = Command::new(ROKC)
-        .args(["jupyter", "--connection-file"])
-        .arg(&file)
-        .args(["--rokr", &env.rokr.display().to_string()])
-        .env("ROK_HOME", workspace())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+                ports[0], ports[1], ports[2], ports[3], ports[4]
+            ),
+        )
         .unwrap();
-    // The kernel binds every socket before anything slow, but on a loaded
-    // machine its process can take long to start: poll up to 60s.
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    let connect = |port: u16, kind: &str| {
-        let mut s = loop {
-            if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
-                break s;
+        let mut kernel = Command::new(ROKC)
+            .args(["jupyter", "--connection-file"])
+            .arg(&file)
+            .args(["--rokr", &env.rokr.display().to_string()])
+            .env("ROK_HOME", workspace())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let listening = loop {
+            if kernel.try_wait().unwrap().is_some() {
+                break false;
+            }
+            if TcpStream::connect(("127.0.0.1", ports[4])).is_ok() {
+                break true;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "the kernel does not listen on {port} after 60s"
+                "the kernel does not listen after 60s"
             );
             std::thread::sleep(Duration::from_millis(100));
         };
+        if listening {
+            break (kernel, ports);
+        }
+        let out = kernel.wait_with_output().unwrap();
+        attempts += 1;
+        assert!(attempts < 5, "the kernel exits: {}", text(&out.stderr));
+    };
+    let connect = |port: u16, kind: &str| {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
         handshake(&mut s, kind).unwrap();
         s
@@ -474,6 +489,37 @@ fn jupyter_kernel_speaks_the_wire_protocol() {
     let mut hb = connect(ports[4], "REQ");
     write_msg(&mut hb, &[Vec::new(), b"ping".to_vec()]).unwrap();
     assert_eq!(read_msg(&mut hb).unwrap(), [Vec::new(), b"ping".to_vec()]);
+
+    // The kernel adds a subscriber on its own thread after the handshake
+    // and publishes nothing to it before (ZeroMQ's slow joiner): send
+    // `kernel_info_request` until iopub has something. (`request` skips
+    // what these probes publish.)
+    iopub
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let probe = encode(
+            key,
+            "test",
+            &[],
+            "kernel_info_request",
+            &Json::obj([]),
+            &Json::obj([]),
+        );
+        write_msg(&mut shell, &probe).unwrap();
+        read_msg(&mut shell).unwrap();
+        if iopub.peek(&mut [0u8]).is_ok_and(|n| n > 0) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "nothing on iopub after 60s"
+        );
+    }
+    iopub
+        .set_read_timeout(Some(Duration::from_secs(120)))
+        .unwrap();
 
     // Send a request: its reply (type, content) and the iopub messages
     // it caused, up to its `idle`.

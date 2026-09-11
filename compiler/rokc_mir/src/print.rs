@@ -448,6 +448,14 @@ fn ty_str(t: &MirTy) -> String {
             format!("Struct#{}{{{inner}}}", id.0)
         }
         MirTy::Array(t, n) => format!("[{}; {n}]", ty_str(t)),
+        MirTy::Union(vs, n) => {
+            let inner = vs
+                .iter()
+                .map(|(tag, t)| format!("{tag}: {}", ty_str(t)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("union<{n}>{{{inner}}}")
+        }
         MirTy::Fn(args, ret) => {
             let inner = args.iter().map(ty_str).collect::<Vec<_>>().join(", ");
             format!("fn({inner}) -> {}", ty_str(ret))

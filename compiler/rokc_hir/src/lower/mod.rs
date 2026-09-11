@@ -33,6 +33,7 @@ mod mono;
 mod pattern;
 mod reflect;
 mod resolve;
+pub use resolve::{hidden_module, hidden_module_msg, module_visibility, visibility_rank};
 mod send_check;
 mod throws;
 
@@ -104,6 +105,8 @@ struct TypeNames<'a> {
     /// `pub use` alias key → full path it re-exports.
     reexports: HashMap<String, String>,
     visibility: HashMap<String, Visibility>,
+    /// Module path → its `mod` visibility (the driver's flattened stubs).
+    mod_vis: HashMap<String, Visibility>,
     uses: &'a crate::uses::UseTable,
     diags: std::cell::RefCell<Vec<rokc_diagnostic::RokDiagnostic>>,
     /// Generic type aliases (`type Row<const N: usize> = [i32; N];`)
@@ -283,6 +286,11 @@ impl TypeNames<'_> {
                 hits.into_iter().next()?
             }
         };
+        // Spec 5.6.13: every module on the path as written (a re-export
+        // key, before following it) must be visible too.
+        if let Some(m) = resolve::hidden_module(&self.mod_vis, module, &full) {
+            self.error(resolve::hidden_module_msg(&full, &m, module));
+        }
         for _ in 0..8 {
             match self.reexports.get(&full) {
                 Some(t) => full = t.clone(),
@@ -710,25 +718,35 @@ fn wrap_into_sum(slot_ty: &HirTy, value: HirExpr) -> HirExpr {
 /// value's sum that `to` also has. Widening (every member is in `to`)
 /// is total; for a sub-sum type pattern the arms left out can't occur.
 fn resum(ctx: &mut LowerCtx<'_>, value: HirExpr, to: &HirTy) -> HirExpr {
-    let (HirTy::Sum(vs), HirTy::Sum(ws)) = (value.ty.clone(), to) else {
-        return value;
+    // An `any` value (narrowed by `x: A | B`) is matched by tag.
+    let members: Vec<(u32, HirTy)> = match (&value.ty, to) {
+        (HirTy::Sum(vs), HirTy::Sum(ws)) => vs
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| ws.contains(v))
+            .map(|(i, v)| (u32::try_from(i).expect("variant overflow"), v.clone()))
+            .collect(),
+        // A stored `to` value, or one of its members.
+        (HirTy::AnyTrait(_), HirTy::Sum(ws)) => std::iter::once(to)
+            .chain(ws)
+            .map(|w| (ctx.any_tag(w), w.clone()))
+            .collect(),
+        _ => return value,
     };
     let span = value.span;
-    let arms = vs
-        .iter()
-        .enumerate()
-        .filter(|(_, v)| ws.contains(v))
+    let arms = members
+        .into_iter()
         .map(|(i, v)| {
             let b = ctx.declare(None, v.clone());
             HirMatchArm {
                 pat: HirPattern::SumVariant {
                     sum_ty: value.ty.clone(),
-                    variant_index: u32::try_from(i).expect("variant overflow"),
+                    variant_index: i,
                     binder: Some(b),
                     payload_ty: Some(v.clone()),
                 },
                 guard: None,
-                body: wrap_into_sum(to, hir_local(b, v, span)),
+                body: wrap_into_sum(to, hir_local(b, &v, span)),
             }
         })
         .collect();
@@ -766,6 +784,9 @@ fn ty_compatible(expected: &HirTy, actual: &HirTy) -> bool {
     let all = |a: &[HirTy], b: &[HirTy]| {
         a.len() == b.len() && a.iter().zip(b).all(|(x, y)| ty_compatible(x, y))
     };
+    let exact = |a: &[HirTy], b: &[HirTy]| {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| ty_exact(x, y))
+    };
     match (expected, actual) {
         // `!` (a diverging expression) fits any slot.
         (HirTy::Unknown | HirTy::Any, _) | (_, HirTy::Unknown | HirTy::Any | HirTy::Never) => true,
@@ -776,9 +797,10 @@ fn ty_compatible(expected: &HirTy, actual: &HirTy) -> bool {
         // `fn() + Send` flows into `fn()`, not the reverse.
         // A `fn() -> !` value is no `fn() -> R` pointer (different
         // return ABI): only `adapt_never_fn` makes one from a named fn.
+        // Spec 4.4.9: no fn subtyping — parameters and return match exactly.
         (HirTy::Fn(a1, r1, b1), HirTy::Fn(a2, r2, b2)) => {
-            all(a1, a2)
-                && ty_compatible(r1, r2)
+            exact(a1, a2)
+                && ty_exact(r1, r2)
                 && (**r2 != HirTy::Never || **r1 == HirTy::Never)
                 && fn_bounds_fit(b1, b2)
         }
@@ -789,13 +811,32 @@ fn ty_compatible(expected: &HirTy, actual: &HirTy) -> bool {
             HirTy::Closure {
                 args: a2, ret: r2, ..
             },
-        ) => all(a1, a2) && ty_compatible(r1, r2),
+        ) => exact(a1, a2) && ty_exact(r1, r2),
         // Error types must match exactly: a wider error slot has another
         // carrier layout (fn values are adapted by `adapt_fn_value`).
         (HirTy::Throws { ok: o1, err: e1 }, HirTy::Throws { ok: o2, err: e2 }) => {
             ty_compatible(o1, o2) && (e1 == e2 || **e1 == HirTy::Unknown || **e2 == HirTy::Unknown)
         }
         _ => expected == actual,
+    }
+}
+
+/// Type identity inside a fn type: `ty_compatible` without sum
+/// widening (an unresolved type still matches anything).
+fn ty_exact(a: &HirTy, b: &HirTy) -> bool {
+    let all = |a: &[HirTy], b: &[HirTy]| {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| ty_exact(x, y))
+    };
+    match (a, b) {
+        (HirTy::Unknown | HirTy::Any, _) | (_, HirTy::Unknown | HirTy::Any) => true,
+        (HirTy::Tuple(a), HirTy::Tuple(b)) | (HirTy::Sum(a), HirTy::Sum(b)) => all(a, b),
+        (HirTy::Array(a, n), HirTy::Array(b, m)) => n == m && ty_exact(a, b),
+        (HirTy::GcBuf(a), HirTy::GcBuf(b)) => ty_exact(a, b),
+        (HirTy::Fn(..), HirTy::Fn(..) | HirTy::Closure { .. }) => ty_compatible(a, b),
+        (HirTy::Throws { ok: o1, err: e1 }, HirTy::Throws { ok: o2, err: e2 }) => {
+            ty_exact(o1, o2) && ty_exact(e1, e2)
+        }
+        _ => a == b,
     }
 }
 
@@ -2166,6 +2207,14 @@ impl<'a> LowerCtx<'a> {
             .copied()
             .unwrap_or(Visibility::Pub);
         let def_module = module_of(full);
+        if let Some(m) = resolve::hidden_module(&self.env.names.mod_vis, &self.current_module, full)
+        {
+            self.emit_error(
+                rokc_diagnostic::ErrorKind::Module,
+                resolve::hidden_module_msg(full, &m, &self.current_module),
+            );
+            return false;
+        }
         if self.is_visible(&def_module, vis) {
             return true;
         }
@@ -2774,7 +2823,30 @@ impl<'a> LowerCtx<'a> {
 
     /// A pattern binding (declared at `at`): a plain local the pattern
     /// binds; a `[ref]`-captured one is moved into a cell by `take_cells`.
+    /// Spec 3.11.4: under an or-pattern sharing `name` across
+    /// alternatives, the preset local, and each alternative binds the
+    /// same type.
     fn declare_bound(&mut self, name: &str, ty: HirTy, at: rokc_diagnostic::Span) -> LocalId {
+        if let Some(&local) = self.or_pattern_binders.last().and_then(|m| m.get(name)) {
+            let existing = self.local_ty(local);
+            if matches!(existing, HirTy::Unknown) {
+                self.locals[local.0 as usize].ty = ty;
+            } else if existing != ty {
+                self.emit_error(
+                    rokc_diagnostic::ErrorKind::Type,
+                    format!(
+                        "or-pattern binding `{name}` has inconsistent types across \
+                         alternatives (`{}` and `{}`, spec 3.11.4); to bind either as \
+                         their sum, write one type pattern: `{name}: {} | {}`",
+                        self.ty_name(&existing),
+                        self.ty_name(&ty),
+                        self.ty_name(&existing),
+                        self.ty_name(&ty),
+                    ),
+                );
+            }
+            return local;
+        }
         let local = self.declare(Some(name.to_owned()), ty.clone());
         if self.ref_captured.contains(&(name.to_owned(), at)) {
             self.pending_cells.push((name.to_owned(), local, ty));

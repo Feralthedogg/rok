@@ -28,7 +28,9 @@ pub struct Lock {
 
 impl Lock {
     pub fn find(&self, name: &str) -> Option<&Locked> {
-        self.packages.iter().find(|p| p.name == name)
+        self.packages
+            .iter()
+            .find(|p| crate::manifest::same(&p.name, name))
     }
 
     pub fn read(path: &Path) -> Result<Option<Self>, String> {

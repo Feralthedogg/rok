@@ -173,6 +173,46 @@ pub fn lower_full(
         }
     }
 
+    // A field / variant name declared twice in one type.
+    for item in &program.items {
+        let (kind, owner, names): (&str, &str, Vec<(&str, rokc_diagnostic::Span)>) = match item {
+            Item::Struct(s) => match &s.kind {
+                rokc_ast::StructKind::Named(fs) => (
+                    "field",
+                    &s.name,
+                    fs.iter().map(|f| (f.name.as_str(), f.span)).collect(),
+                ),
+                _ => continue,
+            },
+            Item::Union(u) => (
+                "field",
+                &u.name,
+                u.fields.iter().map(|f| (f.name.as_str(), f.span)).collect(),
+            ),
+            Item::Enum(e) => (
+                "variant",
+                &e.name,
+                e.variants
+                    .iter()
+                    .map(|v| (v.name.as_str(), v.span))
+                    .collect(),
+            ),
+            _ => continue,
+        };
+        for (i, (n, at)) in names.iter().enumerate() {
+            if names[..i].iter().any(|(m, _)| m == n) {
+                rokc_diagnostic::set_current_span(*at);
+                err(
+                    &mut pre_diags,
+                    format!(
+                        "{kind} `{n}` is declared more than once in `{}`",
+                        leaf_name(owner)
+                    ),
+                );
+            }
+        }
+    }
+
     // Pass 0: the type namespace. Every type-like item name (already
     // module-qualified by the driver) goes into one index; a second
     // definition of the same name is an error (and is skipped below so
@@ -248,6 +288,7 @@ pub fn lower_full(
         lang,
         reexports: type_reexports,
         visibility: type_vis,
+        mod_vis: super::resolve::module_visibility(&program.items),
         uses,
         diags: std::cell::RefCell::new(Vec::new()),
         generic_aliases: program
@@ -593,17 +634,63 @@ pub fn lower_full(
             substitute_aliases(v, &snapshot);
         }
     }
-    // An alias still naming an alias after expansion is cyclic
-    // (`type A = B; type B = A;`).
+    // An alias naming itself, directly or through other aliases and
+    // anywhere in the type (`type A = B; type B = A;`, `type T = List<T>;`).
     {
-        let mut cyclic: Vec<&String> = type_aliases
+        let alias_items: HashMap<&str, &rokc_ast::TypeAliasDef> = program
+            .items
             .iter()
-            .filter(|(_, v)| ty_mentions_any(v, &type_aliases))
-            .map(|(k, _)| k)
+            .filter_map(|i| match i {
+                Item::TypeAlias(a) if a.generics.params.is_empty() => Some((a.name.as_str(), a)),
+                _ => None,
+            })
             .collect();
-        cyclic.sort();
-        for k in cyclic {
-            err(&mut pre_diags, format!("type alias `{k}` is cyclic"));
+        let mentions = |a: &rokc_ast::TypeAliasDef| {
+            struct Names(Vec<String>);
+            impl crate::walk::AstVisitor for Names {
+                fn ty(&mut self, t: &rokc_ast::Ty) {
+                    if let rokc_ast::TyKind::Path(p) = &t.kind {
+                        if let [s] = p.segments.as_slice() {
+                            self.0.push(s.name.clone());
+                        }
+                    }
+                }
+            }
+            let mut v = Names(Vec::new());
+            crate::walk::walk_ty(&mut v, &a.ty);
+            let module = module_of(&a.name);
+            v.0.into_iter()
+                .map(|n| {
+                    if module.is_empty() {
+                        n
+                    } else {
+                        format!("{module}::{n}")
+                    }
+                })
+                .filter(|n| alias_items.contains_key(n.as_str()))
+                .collect::<Vec<_>>()
+        };
+        let mut cyclic: Vec<&rokc_ast::TypeAliasDef> = alias_items
+            .values()
+            .filter(|a| {
+                let mut stack = mentions(a);
+                let mut seen = std::collections::HashSet::new();
+                while let Some(n) = stack.pop() {
+                    if n == a.name {
+                        return true;
+                    }
+                    if seen.insert(n.clone()) {
+                        stack.extend(mentions(alias_items[n.as_str()]));
+                    }
+                }
+                false
+            })
+            .copied()
+            .collect();
+        cyclic.sort_by(|a, b| a.name.cmp(&b.name));
+        for a in cyclic {
+            rokc_diagnostic::set_current_span(a.span);
+            err(&mut pre_diags, format!("type alias `{}` is cyclic", a.name));
         }
     }
     // Substitute aliases inside struct field types so the rest of the
@@ -617,39 +704,6 @@ pub fn lower_full(
         for v in &mut e.variants {
             if let Some(t) = v.payload_ty.as_mut() {
                 substitute_aliases(t, &type_aliases);
-            }
-        }
-    }
-
-    // A struct that contains itself by value (directly or through
-    // tuples / arrays / sums / other structs) has no finite size.
-    for (i, sd) in struct_defs.iter().enumerate() {
-        let me = StructId(u32::try_from(i).expect("StructId overflow"));
-        let mut stack: Vec<HirTy> = sd.fields.iter().map(|f| f.ty.clone()).collect();
-        let mut seen: std::collections::HashSet<StructId> = std::collections::HashSet::new();
-        while let Some(t) = stack.pop() {
-            match t {
-                HirTy::Struct(id) if id == me => {
-                    err(
-                        &mut pre_diags,
-                        format!(
-                            "recursive type `{}` has infinite size (a struct can't contain \
-                             itself by value)",
-                            sd.name
-                        ),
-                    );
-                    break;
-                }
-                HirTy::Struct(id) => {
-                    if seen.insert(id) {
-                        if let Some(d) = struct_defs.get(id.0 as usize) {
-                            stack.extend(d.fields.iter().map(|f| f.ty.clone()));
-                        }
-                    }
-                }
-                HirTy::Tuple(ps) | HirTy::Sum(ps) => stack.extend(ps),
-                HirTy::Array(e, _) => stack.push(*e),
-                _ => {}
             }
         }
     }
@@ -1762,6 +1816,7 @@ pub fn lower_full(
         .diagnostics
         .extend(sink.instance_warns.into_inner().agreed());
     check_unresolved_types(&mut module);
+    check_value_types(&mut module);
     // The same root cause can be reached from several passes (e.g. a
     // type resolved once per instantiation sweep): report it once.
     let mut seen = std::collections::HashSet::new();
@@ -1819,24 +1874,6 @@ pub(super) fn impl_def_display(ty: &Ty) -> String {
     }
 }
 
-/// Does `ty` still name any key of `aliases`? (alias-cycle detection)
-pub(super) fn ty_mentions_any(ty: &HirTy, aliases: &HashMap<String, HirTy>) -> bool {
-    match ty {
-        HirTy::Path(p) => p.len() == 1 && aliases.contains_key(&p[0]),
-        HirTy::Sum(parts) | HirTy::Tuple(parts) => {
-            parts.iter().any(|p| ty_mentions_any(p, aliases))
-        }
-        HirTy::Array(e, _) => ty_mentions_any(e, aliases),
-        HirTy::Fn(a, r, _)
-        | HirTy::Closure {
-            args: a, ret: r, ..
-        } => a.iter().any(|p| ty_mentions_any(p, aliases)) || ty_mentions_any(r, aliases),
-        HirTy::Throws { ok, err } => ty_mentions_any(ok, aliases) || ty_mentions_any(err, aliases),
-        _ => false,
-    }
-}
-
-/// `struct name → field name → visibility` from the AST (driver-qualified
 /// struct names; generic instantiations look up their base name).
 pub(super) fn collect_field_visibility(
     program: &Program,
@@ -1947,6 +1984,184 @@ pub(super) fn check_unresolved_types(module: &mut HirModule) {
                  (lowering fell through without a diagnostic) — please report",
                     f.name
                 ),
+            ));
+        rokc_diagnostic::set_current_span(old);
+    }
+}
+
+/// Most scalar slots one value type may flatten to: nesting a generic
+/// that doubles its payload (`W<W<..>>`) grows exponentially.
+const MAX_VALUE_LEAVES: u64 = 1 << 16;
+/// Largest value type, in (estimated) bytes.
+const MAX_VALUE_BYTES: u64 = 1 << 32;
+
+/// A struct / enum that holds itself by value (through fields, tuples,
+/// sums, arrays or payloads) has no finite size; one whose flattened
+/// layout passes the caps above is refused before MIR expands it.
+fn check_value_types(module: &mut HirModule) {
+    use std::collections::{HashMap, HashSet};
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    enum Def {
+        S(usize),
+        E(usize),
+    }
+    struct Defs<'m> {
+        m: &'m HirModule,
+        structs: HashMap<StructId, usize>,
+        enums: HashMap<EnumId, usize>,
+    }
+    impl Defs<'_> {
+        fn of(&self, t: &HirTy) -> Option<Def> {
+            match t {
+                HirTy::Struct(id) => self.structs.get(id).copied().map(Def::S),
+                HirTy::Enum(id) => self.enums.get(id).copied().map(Def::E),
+                _ => None,
+            }
+        }
+        fn children(&self, d: Def) -> Vec<&HirTy> {
+            match d {
+                Def::S(i) => self.m.structs[i].fields.iter().map(|f| &f.ty).collect(),
+                Def::E(i) => self.m.enums[i]
+                    .variants
+                    .iter()
+                    .filter_map(|v| v.payload_ty.as_ref())
+                    .collect(),
+            }
+        }
+        // Defs held by value, through tuples / sums / arrays.
+        fn inline(&self, t: &HirTy, out: &mut Vec<Def>) {
+            match t {
+                HirTy::Tuple(ps) | HirTy::Sum(ps) => ps.iter().for_each(|p| self.inline(p, out)),
+                HirTy::Array(e, _) => self.inline(e, out),
+                t => out.extend(self.of(t)),
+            }
+        }
+        fn edges(&self, d: Def) -> Vec<Def> {
+            let mut out = Vec::new();
+            for t in self.children(d) {
+                self.inline(t, &mut out);
+            }
+            out
+        }
+        // Source name (`W<..>` for an instance), span, "a struct" / "an enum".
+        fn name_span(&self, d: Def) -> (String, rokc_diagnostic::Span, &'static str) {
+            let (name, generic, span, kind) = match d {
+                Def::S(i) => {
+                    let s = &self.m.structs[i];
+                    (&s.name, !s.generic_args.is_empty(), s.span, "a struct")
+                }
+                Def::E(i) => {
+                    let e = &self.m.enums[i];
+                    (&e.name, !e.generic_args.is_empty(), e.span, "an enum")
+                }
+            };
+            let base = name.split("__").next().unwrap_or(name);
+            let name = if generic {
+                format!("{base}<..>")
+            } else {
+                base.to_owned()
+            };
+            (name, span, kind)
+        }
+        // (scalar slots, estimated bytes); saturating.
+        fn size(&self, t: &HirTy, memo: &mut HashMap<Def, (u64, u64)>) -> (u64, u64) {
+            let add =
+                |a: (u64, u64), b: (u64, u64)| (a.0.saturating_add(b.0), a.1.saturating_add(b.1));
+            match t {
+                HirTy::Tuple(ps) | HirTy::Sum(ps) => ps
+                    .iter()
+                    .fold((1, 8), |acc, p| add(acc, self.size(p, memo))),
+                HirTy::Array(elem, len) => {
+                    let (slots, bytes) = self.size(elem, memo);
+                    (slots, bytes.saturating_mul(u64::from(*len)))
+                }
+                t => match self.of(t) {
+                    Some(d) => {
+                        if let Some(v) = memo.get(&d) {
+                            return *v;
+                        }
+                        // Provisional entry: cycles were reported already.
+                        memo.insert(d, (1, 8));
+                        let v = self
+                            .children(d)
+                            .iter()
+                            .fold((1, 8), |acc, c| add(acc, self.size(c, memo)));
+                        memo.insert(d, v);
+                        v
+                    }
+                    None => (1, 8),
+                },
+            }
+        }
+    }
+    let defs = Defs {
+        m: module,
+        structs: module
+            .structs
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.id, i))
+            .collect(),
+        enums: module
+            .enums
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.id, i))
+            .collect(),
+    };
+    let all: Vec<Def> = (0..module.structs.len())
+        .map(Def::S)
+        .chain((0..module.enums.len()).map(Def::E))
+        .collect();
+    let mut errs = Vec::new();
+    for &d in &all {
+        let mut stack = defs.edges(d);
+        let mut seen = HashSet::new();
+        while let Some(x) = stack.pop() {
+            if x == d {
+                let (name, span, kind) = defs.name_span(d);
+                errs.push((
+                    span,
+                    format!(
+                        "recursive type `{name}` has infinite size ({kind} can't contain \
+                         itself by value; hold it through a reference type such as `List`)"
+                    ),
+                ));
+                break;
+            }
+            if seen.insert(x) {
+                stack.extend(defs.edges(x));
+            }
+        }
+    }
+    if errs.is_empty() {
+        let mut memo = HashMap::new();
+        for &d in &all {
+            let t = match d {
+                Def::S(i) => HirTy::Struct(module.structs[i].id),
+                Def::E(i) => HirTy::Enum(module.enums[i].id),
+            };
+            let (leaves, bytes) = defs.size(&t, &mut memo);
+            if leaves > MAX_VALUE_LEAVES || bytes > MAX_VALUE_BYTES {
+                let (name, span, _) = defs.name_span(d);
+                errs.push((
+                    span,
+                    format!(
+                        "value type `{name}` is too large ({leaves} scalar slots, ~{bytes} \
+                         bytes; the limit is {MAX_VALUE_LEAVES} slots / {MAX_VALUE_BYTES} bytes)"
+                    ),
+                ));
+                break;
+            }
+        }
+    }
+    for (span, msg) in errs {
+        let old = rokc_diagnostic::set_current_span(span);
+        module
+            .diagnostics
+            .push(rokc_diagnostic::RokDiagnostic::error(
+                rokc_diagnostic::ErrorKind::Type,
+                msg,
             ));
         rokc_diagnostic::set_current_span(old);
     }

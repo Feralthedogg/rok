@@ -119,26 +119,52 @@ pub struct Manifest {
     pub lints: Vec<(String, Level)>,
 }
 
-/// A dependency name is a top-level name in `use`: an identifier.
+/// A package (and dependency) name: `[a-z][a-z0-9_-]*`. Code names it
+/// with `-` as `_` (`code_name`), so it starts with a letter.
 pub fn check_name(name: &str) -> Result<(), String> {
-    let ok = name
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-    if ok {
-        Ok(())
-    } else {
-        Err(format!(
-            "`{name}` is not a valid package name: it is imported as `use {name}::..`, so it \
-             must be an identifier (letters, digits, `_`){}",
-            if name.contains('-') {
-                format!("; try `{}`", name.replace('-', "_"))
-            } else {
-                String::new()
-            }
-        ))
+    let valid = |n: &str| {
+        n.starts_with(|c: char| c.is_ascii_lowercase())
+            && n.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    };
+    if valid(name) {
+        return Ok(());
     }
+    let fixed: String = name
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    Err(format!(
+        "`{name}` is not a valid package name: lowercase ASCII letters, digits, `-` and `_`, \
+         starting with a letter{}",
+        if valid(&fixed) {
+            format!("; try `{fixed}`")
+        } else {
+            String::new()
+        }
+    ))
+}
+
+/// The name code uses for package `name` (`use`, `--extern`): `-` as `_`.
+pub fn code_name(name: &str) -> String {
+    name.replace('-', "_")
+}
+
+/// A package's identity: names equal up to case and `-` / `_` are one
+/// package (so they cannot both exist).
+pub fn key(name: &str) -> String {
+    code_name(&name.to_ascii_lowercase())
+}
+
+pub fn same(a: &str, b: &str) -> bool {
+    key(a) == key(b)
 }
 
 /// `dir/rok.rokon`, if present. A file whose name differs only in case
@@ -201,6 +227,10 @@ pub fn parse(text: &str, file: &str) -> Result<Manifest, String> {
             lints.push((k.string()?, level));
         }
     }
+    // The package name is the dependency name others give it.
+    if let Some(d) = pkg.opt("name") {
+        check_name(&d.string()?).map_err(|m| d.error(&m))?;
+    }
     Ok(Manifest {
         name: string("name")?,
         version: string("version")?,
@@ -216,6 +246,12 @@ fn deps(d: Decoder<'_>) -> Result<Vec<Dep>, String> {
     for (k, v) in d.dict()? {
         let name = k.string()?;
         check_name(&name).map_err(|m| k.error(&m))?;
+        if let Some(o) = out.iter().find(|o: &&Dep| same(&o.name, &name)) {
+            return Err(k.error(&format!(
+                "`{name}` and `{}` are the same package (`-` and `_` are one)",
+                o.name
+            )));
+        }
         let source = source(v)?;
         out.push(Dep { name, source });
     }
@@ -408,9 +444,14 @@ mod tests {
             ("Package { native: 1 }", "`native` is reserved"),
             ("Package { registry: {} }", "registries is reserved"),
             (
-                "Package { deps: { \"my-dep\": Dep::path(\"x\") } }",
-                "try `my_dep`",
+                "Package { deps: { \"My Dep\": Dep::path(\"x\") } }",
+                "try `my-dep`",
             ),
+            (
+                "Package { deps: { \"a-b\": Dep::path(\"x\"), \"a_b\": Dep::path(\"y\") } }",
+                "`a_b` and `a-b` are the same package",
+            ),
+            ("Package { name: \"1x\" }", "starting with a letter"),
             (
                 "Package { deps: { \"a\": Dep::git(\"u\", tag: \"t\", rev: \"r\") } }",
                 "at most one",
@@ -490,7 +531,10 @@ mod tests {
         assert!(parse(&t, "f").unwrap().dev_deps.is_empty());
         assert!(remove_dep(APP, "f", "deps", "zz").unwrap().is_none());
         // An edit that makes a bad manifest is refused.
-        assert!(set_dep(APP, "f", "deps", "my-x", &src).is_err());
+        assert!(set_dep(APP, "f", "deps", "My.x", &src).is_err());
+        // `-` is a package name's, `_` its code name's.
+        assert_eq!(code_name("rok-syntax"), "rok_syntax");
+        assert!(same("rok-syntax", "Rok_Syntax") && !same("rok-syntax", "roksyntax"));
         let git = Source::Git {
             url: "u".into(),
             reference: GitRef::Branch("b".into()),

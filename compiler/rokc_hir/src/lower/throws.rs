@@ -1673,6 +1673,19 @@ fn covers(ctx: &LowerCtx<'_>, arms: &[AstMatchArm], ety: &HirTy) -> bool {
                 }
                 tys.push(t);
             }
+            // `HttpError { code, .. }`: every value of that struct.
+            AstPatternKind::Struct { fields, .. }
+                if fields
+                    .iter()
+                    .all(|f| f.pat.as_ref().is_none_or(irrefutable)) =>
+            {
+                if let Some(t) = arm_filter(ctx, &a.pat) {
+                    if t == *ety {
+                        return true;
+                    }
+                    tys.push(t);
+                }
+            }
             AstPatternKind::EnumVariant { path, args } if args.iter().all(irrefutable) => {
                 let segs: Vec<&str> = path.segments.iter().map(|s| s.name.as_str()).collect();
                 if let EnumRes::Found(_, i) = resolve_enum_variant(ctx, &segs, Some(ety), None) {

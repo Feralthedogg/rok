@@ -102,6 +102,9 @@ pub extern "C" fn rok_gc_alloc_slow(size: usize, align: usize, type_id: u32) -> 
 /// calls it before storing a GC reference into the old object `obj`
 /// (its `UNLOGGED` header bit set); `obj` joins the remembered set.
 ///
+/// During a concurrent mark it also logs the references `obj` holds
+/// (snapshot at the beginning).
+///
 /// # Safety
 /// `obj` must be a live GC object.
 #[unsafe(no_mangle)]

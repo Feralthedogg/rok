@@ -1,10 +1,19 @@
 //! Native back half of the AOT pipeline (spec 902.11-902.14): MLIR text
 //! → `mlir-opt` → `mlir-translate` (`lower_to_llvm`) → `clang`
 //! (`finish`). rokc links no LLVM, so the tools run as processes.
+//!
+//! The tools: `mlir-opt` / `mlir-translate` of a supported LLVM
+//! (`llvm_bin`); the clang of that same LLVM turns its IR into objects
+//! (an older clang may not read a newer LLVM's IR); the final link (and
+//! the REPL host) goes through `linker`: `ROK_CC`, else on Apple
+//! platforms Xcode's clang, which knows the SDK's `.tbd` stubs that a
+//! Homebrew clang / ld may not (`unknown architecture arm64e.x1-macos`).
 
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 use rokc_diagnostic::{ErrorKind, RokDiagnostic};
 
@@ -291,10 +300,10 @@ pub fn lower_to_llvm(
             .spawn()
             .map_err(|e| err(format!("cannot run {what}: {e}")))
     };
-    let mut opt = Command::new(locate_tool("mlir-opt")?);
+    let mut opt = Command::new(llvm_bin()?.join("mlir-opt"));
     opt.args(opt_passes(opts)).stdin(Stdio::piped());
     let mut opt = spawn(&mut opt, "mlir-opt")?;
-    let mut translate = Command::new(locate_tool("mlir-translate")?);
+    let mut translate = Command::new(llvm_bin()?.join("mlir-translate"));
     translate
         .arg("--mlir-to-llvmir")
         .stdin(opt.stdout.take().expect("piped stdout"));
@@ -349,10 +358,21 @@ pub fn finish(
     let mut cmd = clang(opts, module.mir.target.triple.as_deref())?;
     match what {
         Artifact::Exe => {
-            cmd.arg(&ll_path).args(&module.archives).arg(rokr_arg(opts));
+            let obj = tmp.path().join("module.o");
+            run(cmd.arg("-c").arg(&ll_path).arg("-o").arg(&obj), "clang")?;
+            let mut link = linker(opts, module.mir.target.triple.as_deref())?;
+            link.arg(&obj).args(&module.archives).arg(rokr_arg(opts));
             // core's float methods call libm; glibc keeps it out of libc.
-            cmd.arg("-lm").arg("-o").arg(out);
-            run(&mut cmd, "clang")
+            link.arg("-lm").arg("-o").arg(out);
+            run(&mut link, "the link")?;
+            // Mach-O keeps DWARF in the objects: gather it into a
+            // `.dSYM` while `module.o` still exists (clang does so itself
+            // only when it also compiles).
+            if opts.debug && cfg!(target_vendor = "apple") {
+                let mut d = Command::new("xcrun");
+                run(d.arg("dsymutil").arg(out), "dsymutil")?;
+            }
+            Ok(())
         }
         Artifact::Obj | Artifact::Asm => {
             cmd.arg(if what == Artifact::Asm { "-S" } else { "-c" });
@@ -445,8 +465,8 @@ pub fn find_mlir_plugin(spec: &str) -> Result<PathBuf, String> {
 /// runtime linked in and exported, for the cells it JIT-compiles, and
 /// LLVM's ORC JIT (`libLLVM`, found by `llvm_prefix`).
 pub fn link_host(c_src: &Path, opts: &BuildOptions, out: &Path) -> Result<(), RokDiagnostic> {
-    let mut cmd = clang(opts, None)?;
-    cmd.arg(c_src);
+    let mut cmd = linker(opts, None)?;
+    cmd.arg(format!("-O{}", opts.opt_level)).arg(c_src);
     let whole = rokr_arg(opts);
     if cfg!(target_vendor = "apple") {
         cmd.arg("-Wl,-all_load").arg(whole);
@@ -468,7 +488,7 @@ pub fn link_host(c_src: &Path, opts: &BuildOptions, out: &Path) -> Result<(), Ro
 /// `bin/..`): the session host JITs that tool's LLVM IR with the same
 /// LLVM's ORC (`lib/libLLVM`, the C API headers in `include/llvm-c`).
 fn llvm_prefix() -> Result<PathBuf, RokDiagnostic> {
-    let tool = locate_tool("mlir-translate")?;
+    let tool = llvm_bin()?.join("mlir-translate");
     let tool = std::fs::canonicalize(&tool).unwrap_or(tool);
     let prefix = tool
         .parent()
@@ -514,18 +534,125 @@ fn tls_initial_exec(ll: &str) -> String {
     out
 }
 
+/// The clang of `llvm_bin` (else PATH's) for LLVM IR.
 fn clang(opts: &BuildOptions, triple: Option<&str>) -> Result<Command, RokDiagnostic> {
-    let mut cmd = Command::new(locate_tool("clang")?);
+    let own = llvm_bin()?.join("clang");
+    let mut cmd = Command::new(if own.is_file() {
+        own
+    } else {
+        locate_tool("clang")?
+    });
     cmd.arg("-Wno-override-module")
         .arg(format!("-O{}", opts.opt_level));
     if opts.debug {
-        // Also makes clang run `dsymutil` after a macOS link.
         cmd.arg("-g");
     }
     if let Some(t) = triple {
         cmd.arg(format!("--target={t}"));
     }
     Ok(cmd)
+}
+
+/// The C compiler driver that links: `ROK_CC`; on Apple platforms
+/// Xcode's clang (`xcrun clang`, which also finds the SDK); else the
+/// IR clang.
+fn linker(opts: &BuildOptions, triple: Option<&str>) -> Result<Command, RokDiagnostic> {
+    static XCODE: OnceLock<bool> = OnceLock::new();
+    let xcode = || {
+        cfg!(target_vendor = "apple")
+            && Command::new("xcrun")
+                .args(["-f", "clang"])
+                .output()
+                .is_ok_and(|o| o.status.success())
+    };
+    let mut cmd = match std::env::var_os("ROK_CC").filter(|c| !c.is_empty()) {
+        Some(cc) => Command::new(cc),
+        None if *XCODE.get_or_init(xcode) => {
+            let mut c = Command::new("xcrun");
+            c.arg("clang");
+            c
+        }
+        None => {
+            let own = llvm_bin()?.join("clang");
+            Command::new(if own.is_file() {
+                own
+            } else {
+                locate_tool("clang")?
+            })
+        }
+    };
+    if opts.debug {
+        cmd.arg("-g");
+    }
+    if let Some(t) = triple {
+        cmd.arg(format!("--target={t}"));
+    }
+    Ok(cmd)
+}
+
+/// LLVM majors whose MLIR rokc's output is tested with.
+const LLVM_MAJORS: std::ops::RangeInclusive<u32> = 21..=22;
+
+/// LLVM installs looked in after PATH (Homebrew, apt.llvm.org).
+const LLVM_DIRS: [&str; 6] = [
+    "/opt/homebrew/opt/llvm@21/bin",
+    "/usr/local/opt/llvm@21/bin",
+    "/usr/lib/llvm-21/bin",
+    "/opt/homebrew/opt/llvm/bin",
+    "/usr/local/opt/llvm/bin",
+    "/usr/lib/llvm-22/bin",
+];
+
+/// The `bin/` of the LLVM rokc uses: the first directory of PATH, then of
+/// `LLVM_DIRS`, with `mlir-opt` of a supported version and `mlir-translate`.
+fn llvm_bin() -> Result<&'static Path, RokDiagnostic> {
+    static BIN: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    BIN.get_or_init(find_llvm)
+        .as_deref()
+        .map_err(|e| err(e.clone()))
+}
+
+fn find_llvm() -> Result<PathBuf, String> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let dirs = std::env::split_paths(&path).chain(LLVM_DIRS.map(PathBuf::from));
+    let mut seen: Vec<(PathBuf, Option<u32>)> = Vec::new();
+    for dir in dirs {
+        let opt = dir.join("mlir-opt");
+        if !opt.is_file() || seen.iter().any(|(d, _)| *d == dir) {
+            continue;
+        }
+        let major = llvm_major(&opt);
+        if major.is_some_and(|m| LLVM_MAJORS.contains(&m)) && dir.join("mlir-translate").is_file() {
+            return Ok(dir);
+        }
+        seen.push((dir, major));
+    }
+    let mut found = String::new();
+    for (d, m) in &seen {
+        let v = m.map_or_else(|| "unknown version".to_owned(), |m| format!("LLVM {m}"));
+        let _ = write!(found, "\n  {} ({v})", d.join("mlir-opt").display());
+    }
+    Err(format!(
+        "cannot find mlir-opt / mlir-translate of LLVM {} to {} (needed to build native code){}\n\
+         install LLVM 21 with MLIR: `brew install llvm@21` (macOS), `apt install \
+         mlir-21-tools clang-21` from apt.llvm.org (Debian / Ubuntu); rokc also looks in \
+         /opt/homebrew/opt/llvm@21/bin and /usr/lib/llvm-21/bin, else put its bin/ on PATH",
+        LLVM_MAJORS.start(),
+        LLVM_MAJORS.end(),
+        if found.is_empty() {
+            String::new()
+        } else {
+            format!("; found only:{found}")
+        }
+    ))
+}
+
+/// The major version in `tool --version` (`.. LLVM version 21.1.8`).
+fn llvm_major(tool: &Path) -> Option<u32> {
+    let out = Command::new(tool).arg("--version").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let v = text.split("LLVM version ").nth(1)?;
+    v.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
 }
 
 /// A tool failed — or `mlir-opt` could not load an MLIR plugin, which it

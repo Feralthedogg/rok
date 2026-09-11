@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use rokc_ast::{AttrArg, AttrBody, Attribute, Item, Literal, Program, TraitItem};
 use rokc_diagnostic::{ErrorKind, RokDiagnostic};
+use rokc_lexer::TokenKind;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Fixity {
@@ -216,6 +217,37 @@ pub fn collect_prec_table(program: &Program) -> (PrecTable, Vec<RokDiagnostic>) 
     (table, diags)
 }
 
+/// Spec 1.10.4: a registered token is `Pattern_Syntax` code points only
+/// (no identifier character, no space) and no fixed token.
+fn bad_new_token(symbol: &str) -> Option<&'static str> {
+    if symbol.is_empty() {
+        return Some("it is empty");
+    }
+    if symbol
+        .chars()
+        .any(|c| !is_pattern_syntax(c) || rokc_lexer::unicode::is_ident_continue(c))
+    {
+        return Some("every character must be a Unicode `Pattern_Syntax` code point");
+    }
+    let (tokens, diags) = rokc_lexer::Lexer::new(symbol, "").lex_all();
+    let fixed = diags.is_empty()
+        && matches!(tokens.as_slice(), [t, end] if end.kind == TokenKind::Eof
+            && !matches!(t.kind, TokenKind::ExtOp(_)));
+    fixed.then_some("it is a fixed token of the language")
+}
+
+/// Unicode `Pattern_Syntax` (a stable property).
+const fn is_pattern_syntax(c: char) -> bool {
+    matches!(c,
+        '!'..='/' | ':'..='@' | '['..='^' | '`' | '{'..='~'
+        | '\u{A1}'..='\u{A7}' | '\u{A9}' | '\u{AB}' | '\u{AC}' | '\u{AE}' | '\u{B0}' | '\u{B1}'
+        | '\u{B6}' | '\u{BB}' | '\u{BF}' | '\u{D7}' | '\u{F7}'
+        | '\u{2010}'..='\u{2027}' | '\u{2030}'..='\u{203E}' | '\u{2041}'..='\u{2053}'
+        | '\u{2055}'..='\u{205E}' | '\u{2190}'..='\u{245F}' | '\u{2500}'..='\u{2775}'
+        | '\u{2794}'..='\u{2BFF}' | '\u{2E00}'..='\u{2E7F}' | '\u{3001}'..='\u{3003}'
+        | '\u{3008}'..='\u{3020}' | '\u{3030}' | '\u{FD3E}' | '\u{FD3F}' | '\u{FE45}' | '\u{FE46}')
+}
+
 fn meta_err(attr: &Attribute, msg: String) -> RokDiagnostic {
     RokDiagnostic::error(ErrorKind::Meta, msg).with_span(attr.span, "")
 }
@@ -286,6 +318,13 @@ fn collect_attr(
             return None;
         }
         (None, Some(l)) => {
+            if let Some(why) = bad_new_token(&symbol) {
+                diags.push(meta_err(
+                    attr,
+                    format!("`{symbol}` can't be a new operator token: {why} (spec 1.10.4)"),
+                ));
+                return None;
+            }
             let Some(lv) = fixed_prec(&l, fixity) else {
                 diags.push(meta_err(
                     attr,

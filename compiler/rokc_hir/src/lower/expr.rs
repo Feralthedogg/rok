@@ -341,8 +341,25 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
         }
         // Statement position: the value is discarded (expected `()`), so
         // `if` / `match` arms needn't agree on a type.
-        StmtKind::Expr(expr) | StmtKind::Trailing(expr) => {
-            Some(HirStmt::Expr(lower_expected(ctx, expr, HirTy::Unit)))
+        StmtKind::Expr(expr) => Some(HirStmt::Expr(lower_expected(ctx, expr, HirTy::Unit))),
+        // A block-like statement without `;` before more statements
+        // (`if c { 1 } else { 2 }  next();`) must not produce a value.
+        StmtKind::Trailing(expr) => {
+            let h = lower_expected(ctx, expr, HirTy::Unit);
+            if let Some(t) = arm_value_ty(&h) {
+                let old = rokc_diagnostic::set_current_span(stmt.span);
+                ctx.emit_error(
+                    rokc_diagnostic::ErrorKind::Type,
+                    format!(
+                        "this block-like statement leaves a value of type `{}` without `;`: a \
+                         statement must be `()` (add `;` to discard it, or make it the \
+                         block's last expression)",
+                        ctx.ty_name(&t)
+                    ),
+                );
+                rokc_diagnostic::set_current_span(old);
+            }
+            Some(HirStmt::Expr(h))
         }
         StmtKind::Item(rokc_ast::Item::Use(u)) => {
             // Function-local `use`: visible in the current scope only.
@@ -614,9 +631,10 @@ pub(super) fn lower_assign(
         // aggregate gets assigned to that local.
         // A tuple struct's field is `s.0`.
         ExprKind::Field(_, _) | ExprKind::TupleField(_, _) => {
+            // `struct_id` is `None` for a plain tuple's element (`t.0 = x`).
             struct Step {
                 ty: HirTy,
-                struct_id: StructId,
+                struct_id: Option<StructId>,
                 field_index: u32,
             }
             let mut chain: Vec<String> = Vec::new();
@@ -681,6 +699,18 @@ pub(super) fn lower_assign(
             // from that field; it must be the last step of the target.
             let mut union_value: Option<HirExpr> = None;
             for (ci, name) in chain.iter().enumerate() {
+                if let HirTy::Tuple(parts) = &step_ty {
+                    if let Some(i) = name.parse::<usize>().ok().filter(|i| *i < parts.len()) {
+                        let next = parts[i].clone();
+                        steps.push(Step {
+                            ty: step_ty.clone(),
+                            struct_id: None,
+                            field_index: u32::try_from(i).expect("tuple field overflow"),
+                        });
+                        step_ty = next;
+                        continue;
+                    }
+                }
                 let HirTy::Struct(sid) = step_ty.clone() else {
                     ctx.emit_error(
                         rokc_diagnostic::ErrorKind::Type,
@@ -745,7 +775,7 @@ pub(super) fn lower_assign(
                 ctx.check_field_visible(sid, name);
                 steps.push(Step {
                     ty: step_ty.clone(),
-                    struct_id: sid,
+                    struct_id: Some(sid),
                     field_index: u32::try_from(idx).expect("field index overflow"),
                 });
                 step_ty = def.fields[idx].ty.clone();
@@ -765,35 +795,81 @@ pub(super) fn lower_assign(
             // Materialize parent values via field reads so each
             // WithField has a concrete target.
             let mut targets: Vec<HirExpr> = Vec::new();
+            let read = |ctx: &LowerCtx<'_>, from: &HirExpr, step: &Step| {
+                let (kind, ty) = match (step.struct_id, &step.ty) {
+                    (Some(sid), _) => {
+                        let ty = ctx.struct_def(sid).fields[step.field_index as usize]
+                            .ty
+                            .clone();
+                        let kind = HirExprKind::FieldRead {
+                            target: Box::new(from.clone()),
+                            struct_id: sid,
+                            field_index: step.field_index,
+                            field_ty: ty.clone(),
+                        };
+                        (kind, ty)
+                    }
+                    (None, HirTy::Tuple(parts)) => {
+                        let ty = parts[step.field_index as usize].clone();
+                        let kind = HirExprKind::TupleField {
+                            target: Box::new(from.clone()),
+                            index: step.field_index,
+                            field_ty: ty.clone(),
+                        };
+                        (kind, ty)
+                    }
+                    (None, _) => unreachable!("a tuple step is on a tuple"),
+                };
+                HirExpr {
+                    kind,
+                    ty,
+                    span: target.span,
+                }
+            };
             let mut walk = root_h;
             for step in &steps[..steps.len() - 1] {
-                let next_ty = ctx.struct_def(step.struct_id).fields[step.field_index as usize]
-                    .ty
-                    .clone();
-                let read = HirExpr {
-                    ty: next_ty.clone(),
-                    span: target.span,
-                    kind: HirExprKind::FieldRead {
-                        target: Box::new(walk.clone()),
-                        struct_id: step.struct_id,
-                        field_index: step.field_index,
-                        field_ty: next_ty,
-                    },
-                };
+                let next = read(ctx, &walk, step);
                 targets.push(walk);
-                walk = read;
+                walk = next;
             }
             targets.push(walk);
             for (i, step) in steps.iter().enumerate().rev() {
-                acc = HirExpr {
-                    ty: step.ty.clone(),
-                    span: target.span,
-                    kind: HirExprKind::WithField {
+                let kind = match (step.struct_id, &step.ty) {
+                    (Some(sid), _) => HirExprKind::WithField {
                         target: Box::new(targets[i].clone()),
-                        struct_id: step.struct_id,
+                        struct_id: sid,
                         field_index: step.field_index,
                         value: Box::new(acc),
                     },
+                    // A tuple is rebuilt with the one element replaced.
+                    (None, HirTy::Tuple(parts)) => {
+                        let mut acc = Some(acc);
+                        let fields = (0..parts.len())
+                            .map(|j| {
+                                let j = u32::try_from(j).expect("tuple field overflow");
+                                if j == step.field_index {
+                                    acc.take().expect("replaced once")
+                                } else {
+                                    read(
+                                        ctx,
+                                        &targets[i],
+                                        &Step {
+                                            ty: step.ty.clone(),
+                                            struct_id: None,
+                                            field_index: j,
+                                        },
+                                    )
+                                }
+                            })
+                            .collect();
+                        HirExprKind::Tuple { fields }
+                    }
+                    (None, _) => unreachable!("a tuple step is on a tuple"),
+                };
+                acc = HirExpr {
+                    ty: step.ty.clone(),
+                    span: target.span,
+                    kind,
                 };
             }
             super::mono::assign_place(ctx, &root_place, acc)
@@ -1127,6 +1203,18 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
                 Ok(m) => m,
                 Err(e) => return e,
             };
+            if method == rokc_ast::USING_DROP_METHOD {
+                let stmts = drop_glue(ctx, recv_h, span, 0);
+                return HirExpr {
+                    kind: HirExprKind::Block(Box::new(HirBlock {
+                        stmts,
+                        trailing: None,
+                        label: None,
+                    })),
+                    ty: HirTy::Unit,
+                    span,
+                };
+            }
             let call = method_call_on(ctx, recv_h, method, &all_args, span);
             unpack_call(ctx, call)
         }
@@ -2483,7 +2571,9 @@ pub(super) fn lower_args_ref(
     // from its position on, spreads included.
     let var_at = if sig.variadic { n - 1 } else { usize::MAX };
     let mut var_parts: Vec<VarPart<'_>> = Vec::new();
-    for a in args {
+    // Slot → its argument's written position (spec 4.2.8).
+    let mut written: Vec<Option<usize>> = vec![None; n];
+    for (k, a) in args.iter().enumerate() {
         match a {
             CallArg::Positional(e) | CallArg::Ref(e) | CallArg::Spread(e) if next >= var_at => {
                 var_parts.push(if matches!(a, CallArg::Spread(_)) {
@@ -2500,10 +2590,12 @@ pub(super) fn lower_args_ref(
                     && is_trailing_closure(e) =>
             {
                 slots[n - 1] = Some(ArgSrc::Ast(e));
+                written[n - 1] = Some(k);
                 next = n;
             }
             CallArg::Positional(e) | CallArg::Ref(e) => {
                 if next < n {
+                    written[next] = Some(k);
                     slots[next] = Some(if matches!(a, CallArg::Ref(_)) {
                         ArgSrc::Ref(e)
                     } else {
@@ -2516,7 +2608,10 @@ pub(super) fn lower_args_ref(
             }
             CallArg::Named { name, value } => {
                 match sig.param_names.iter().position(|p| p == name) {
-                    Some(i) if slots[i].is_none() => slots[i] = Some(ArgSrc::Ast(value)),
+                    Some(i) if slots[i].is_none() => {
+                        slots[i] = Some(ArgSrc::Ast(value));
+                        written[i] = Some(k);
+                    }
                     Some(i) => ctx.emit_error(
                         rokc_diagnostic::ErrorKind::Type,
                         format!(
@@ -2657,6 +2752,28 @@ pub(super) fn lower_args_ref(
         }
     }
     check_ref_exclusive(ctx, callee, &out, &places, &reads, has_receiver);
+    // Spec 4.2.8: arguments run in written order. Named ones out of
+    // parameter order (`f(b: g(), a: h())`) are evaluated into temps in
+    // that order, after the receiver.
+    let mut order: Vec<(usize, usize)> = written
+        .iter()
+        .enumerate()
+        .filter_map(|(i, w)| w.filter(|_| places[i].is_none()).map(|w| (w, i)))
+        .collect();
+    if order.windows(2).any(|w| w[0].0 > w[1].0) {
+        order.sort_unstable();
+        let recv = (has_receiver && places.first().is_some_and(Option::is_none)).then_some(0);
+        for i in recv.into_iter().chain(order.into_iter().map(|(_, i)| i)) {
+            let v = std::mem::replace(&mut out[i], poison(span));
+            let ty = v.ty.clone();
+            let tmp = ctx.declare(None, ty.clone());
+            lets.push(HirStmt::Let {
+                local: tmp,
+                init: v,
+            });
+            out[i] = hir_local(tmp, &ty, span);
+        }
+    }
     out.extend(c_varargs);
     (out, lets, places)
 }
@@ -3138,6 +3255,7 @@ pub(super) fn call_sig(
             args,
         },
     };
+    check_const_overflow(ctx, &kind, &sig.ret_ty, span);
     with_lets(
         lets,
         HirExpr {
@@ -3146,6 +3264,98 @@ pub(super) fn call_sig(
             span,
         },
     )
+}
+
+/// The type of a value an `if` / `match` / block arm leaves (lowered in
+/// statement position, the value is otherwise silently dropped).
+fn arm_value_ty(e: &HirExpr) -> Option<HirTy> {
+    let block = |b: &HirBlock| b.trailing.as_ref().and_then(arm_value_ty);
+    match &e.kind {
+        HirExprKind::Block(b) => block(b),
+        HirExprKind::If {
+            then_block,
+            else_branch,
+            ..
+        } => block(then_block).or_else(|| else_branch.as_deref().and_then(arm_value_ty)),
+        HirExprKind::Match { arms, .. } => arms.iter().find_map(|a| arm_value_ty(&a.body)),
+        _ if matches!(e.ty, HirTy::Unit | HirTy::Never | HirTy::Unknown) => None,
+        _ => Some(e.ty.clone()),
+    }
+}
+
+/// The value of integer arithmetic over literals (`2 * 200`), if it is
+/// one; `None` past an overflow (reported where it happened).
+fn const_int(e: &HirExpr) -> Option<i128> {
+    let HirTy::Prim(p) = e.ty else {
+        return None;
+    };
+    if !p.is_int() {
+        return None;
+    }
+    let v = match &e.kind {
+        HirExprKind::Const(ConstVal::Int { value, .. }) => *value,
+        HirExprKind::Const(ConstVal::UInt { value, .. }) => i128::try_from(*value).ok()?,
+        HirExprKind::PrimUnaryOp {
+            op: PrimOp::Neg,
+            operand,
+        } => const_int(operand)?.checked_neg()?,
+        HirExprKind::PrimBinOp { op, lhs, rhs } => {
+            const_arith(*op, const_int(lhs)?, const_int(rhs)?)?
+        }
+        _ => return None,
+    };
+    super::pattern::int_fits(v, p).then_some(v)
+}
+
+const fn const_arith(op: PrimOp, a: i128, b: i128) -> Option<i128> {
+    match op {
+        PrimOp::Add => a.checked_add(b),
+        PrimOp::Sub => a.checked_sub(b),
+        PrimOp::Mul => a.checked_mul(b),
+        PrimOp::Div => a.checked_div(b),
+        PrimOp::Rem => a.checked_rem(b),
+        _ => None,
+    }
+}
+
+/// `let m: u8 = 2 * 200;`: integer arithmetic folded from literals that
+/// leaves its type (or divides by zero) is a compile error.
+fn check_const_overflow(
+    ctx: &LowerCtx<'_>,
+    kind: &HirExprKind,
+    ty: &HirTy,
+    span: rokc_diagnostic::Span,
+) {
+    let HirTy::Prim(p) = *ty else {
+        return;
+    };
+    let (op, lhs, rhs) = match kind {
+        HirExprKind::PrimBinOp { op, lhs, rhs } => (*op, lhs, rhs),
+        _ => return,
+    };
+    if !p.is_int()
+        || !matches!(
+            op,
+            PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div | PrimOp::Rem
+        )
+    {
+        return;
+    }
+    let (Some(a), Some(b)) = (const_int(lhs), const_int(rhs)) else {
+        return;
+    };
+    let msg = match const_arith(op, a, b) {
+        None if b == 0 => format!("constant expression divides by zero (`{a}` by `0`)"),
+        Some(v) if super::pattern::int_fits(v, p) => return,
+        Some(v) => format!(
+            "constant expression overflows `{}`: the result is {v}",
+            p.name()
+        ),
+        None => format!("constant expression overflows `{}`", p.name()),
+    };
+    let old = rokc_diagnostic::set_current_span(span);
+    ctx.emit_error(rokc_diagnostic::ErrorKind::Type, msg);
+    rokc_diagnostic::set_current_span(old);
 }
 
 /// `{ lets; e }` — temporaries a spread argument introduced, so the
@@ -3230,25 +3440,210 @@ fn drop_method<'m>(
 ) -> Result<&'m str, HirExpr> {
     match method {
         rokc_ast::USING_DROP_METHOD => {
-            if *recv_ty != HirTy::Unknown
-                && !ctx.implements_trait(recv_ty, ctx.lang_trait("drop_method"), 0)
-            {
+            if *recv_ty != HirTy::Unknown && !needs_drop(ctx, recv_ty, 0) {
                 return Err(ctx.error_expr(
                     span,
                     format!(
                         "`using` needs a resource whose type implements `Drop`; `{}` does not \
-                         implement `Drop` (spec 3.17.7)",
+                         implement `Drop` nor hold a `Drop` field (spec 3.17.7)",
                         ctx.ty_name(recv_ty)
                     ),
                 ));
             }
-            Ok("drop")
+            Ok(method)
         }
         "drop" if is_drop_method(ctx, recv_ty) => {
             direct_drop_error(ctx, span).map_or(Ok("drop"), Err)
         }
         m => Ok(m),
     }
+}
+
+/// Nesting past which drop glue stops looking (types are finite; this
+/// bounds the work on deep ones).
+const DROP_GLUE_DEPTH: u32 = 64;
+
+/// Does releasing a `ty` run any `Drop::drop` — its own, or one of a
+/// field / tuple element / payload's (stdlib spec 2.13.4)?
+fn needs_drop(ctx: &LowerCtx<'_>, ty: &HirTy, depth: u32) -> bool {
+    if depth > DROP_GLUE_DEPTH {
+        return false;
+    }
+    if ctx.implements_trait(ty, ctx.lang_trait("drop_method"), 0) {
+        return true;
+    }
+    let any = |ts: &[HirTy]| ts.iter().any(|t| needs_drop(ctx, t, depth + 1));
+    match ty {
+        HirTy::Struct(sid) => {
+            let fields: Vec<HirTy> = ctx
+                .struct_def(*sid)
+                .fields
+                .iter()
+                .map(|f| f.ty.clone())
+                .collect();
+            any(&fields)
+        }
+        HirTy::Enum(eid) => {
+            let tys: Vec<HirTy> = ctx
+                .enum_def(*eid)
+                .variants
+                .iter()
+                .flat_map(variant_arg_tys)
+                .collect();
+            any(&tys)
+        }
+        HirTy::Tuple(ts) | HirTy::Sum(ts) => any(ts),
+        _ => false,
+    }
+}
+
+/// What a `using` exit runs for `value` (stdlib spec 2.13.4): its own
+/// `drop`, then each `Drop`-carrying field / tuple element in reverse
+/// declaration order, recursively; an enum / sum releases the payload
+/// of the variant it holds.
+fn drop_glue(
+    ctx: &mut LowerCtx<'_>,
+    value: HirExpr,
+    span: rokc_diagnostic::Span,
+    depth: u32,
+) -> Vec<HirStmt> {
+    let mut out = Vec::new();
+    if !needs_drop(ctx, &value.ty, depth) {
+        return out;
+    }
+    let ty = value.ty.clone();
+    if ctx.implements_trait(&ty, ctx.lang_trait("drop_method"), 0) {
+        out.push(HirStmt::Expr(method_call_on(
+            ctx,
+            value.clone(),
+            "drop",
+            &[],
+            span,
+        )));
+    }
+    let block = |stmts: Vec<HirStmt>| HirExpr {
+        kind: HirExprKind::Block(Box::new(HirBlock {
+            stmts,
+            trailing: None,
+            label: None,
+        })),
+        ty: HirTy::Unit,
+        span,
+    };
+    let unit_arm = || HirMatchArm {
+        pat: HirPattern::Wildcard,
+        guard: None,
+        body: block(Vec::new()),
+    };
+    match &ty {
+        HirTy::Struct(sid) => {
+            let fields: Vec<HirTy> = ctx
+                .struct_def(*sid)
+                .fields
+                .iter()
+                .map(|f| f.ty.clone())
+                .collect();
+            for (i, fty) in fields.iter().enumerate().rev() {
+                let field = HirExpr {
+                    kind: HirExprKind::FieldRead {
+                        target: Box::new(value.clone()),
+                        struct_id: *sid,
+                        field_index: u32::try_from(i).expect("field overflow"),
+                        field_ty: fty.clone(),
+                    },
+                    ty: fty.clone(),
+                    span,
+                };
+                out.extend(drop_glue(ctx, field, span, depth + 1));
+            }
+        }
+        HirTy::Tuple(ts) => {
+            for (i, t) in ts.iter().enumerate().rev() {
+                let elem = HirExpr {
+                    kind: HirExprKind::TupleField {
+                        target: Box::new(value.clone()),
+                        index: u32::try_from(i).expect("tuple field overflow"),
+                        field_ty: t.clone(),
+                    },
+                    ty: t.clone(),
+                    span,
+                };
+                out.extend(drop_glue(ctx, elem, span, depth + 1));
+            }
+        }
+        HirTy::Enum(eid) => {
+            let variants = ctx.enum_def(*eid).variants;
+            let mut arms = Vec::new();
+            for (vi, v) in variants.iter().enumerate() {
+                let tys = variant_arg_tys(v);
+                if !tys.iter().any(|t| needs_drop(ctx, t, depth + 1)) {
+                    continue;
+                }
+                let locals: Vec<LocalId> =
+                    tys.iter().map(|t| ctx.declare(None, t.clone())).collect();
+                let mut stmts = Vec::new();
+                for (l, t) in locals.iter().zip(&tys).rev() {
+                    stmts.extend(drop_glue(ctx, hir_local(*l, t, span), span, depth + 1));
+                }
+                arms.push(HirMatchArm {
+                    pat: HirPattern::EnumVariant {
+                        enum_id: *eid,
+                        variant_index: u32::try_from(vi).expect("variant overflow"),
+                        args: locals
+                            .iter()
+                            .zip(&tys)
+                            .map(|(l, t)| HirPattern::Binding {
+                                local: *l,
+                                ty: t.clone(),
+                            })
+                            .collect(),
+                    },
+                    guard: None,
+                    body: block(stmts),
+                });
+            }
+            arms.push(unit_arm());
+            out.push(HirStmt::Expr(HirExpr {
+                kind: HirExprKind::Match {
+                    scrutinee: Box::new(value),
+                    arms,
+                },
+                ty: HirTy::Unit,
+                span,
+            }));
+        }
+        HirTy::Sum(ts) => {
+            let mut arms = Vec::new();
+            for (vi, t) in ts.iter().enumerate() {
+                if !needs_drop(ctx, t, depth + 1) {
+                    continue;
+                }
+                let l = ctx.declare(None, t.clone());
+                let stmts = drop_glue(ctx, hir_local(l, t, span), span, depth + 1);
+                arms.push(HirMatchArm {
+                    pat: HirPattern::SumVariant {
+                        sum_ty: ty.clone(),
+                        variant_index: u32::try_from(vi).expect("variant overflow"),
+                        binder: Some(l),
+                        payload_ty: Some(t.clone()),
+                    },
+                    guard: None,
+                    body: block(stmts),
+                });
+            }
+            arms.push(unit_arm());
+            out.push(HirStmt::Expr(HirExpr {
+                kind: HirExprKind::Match {
+                    scrutinee: Box::new(value),
+                    arms,
+                },
+                ty: HirTy::Unit,
+                span,
+            }));
+        }
+        _ => {}
+    }
+    out
 }
 
 /// Does `ty`'s `drop` method come from `Drop`?
@@ -3852,27 +4247,36 @@ fn any_method_call(
         .get(method)
         .cloned()
         .unwrap_or_default();
-    let why = needs.iter().find_map(|n| {
-        if n == "Self" {
-            Some(
-                "its signature mentions `Self`, which is a different type for each implementor"
-                    .to_owned(),
-            )
-        } else if let Some(x) = n.strip_prefix("Self::") {
-            (!fixed.contains(&format!("{x} = "))).then(|| {
-                format!(
-                    "its signature uses `Self::{x}`, which the bound leaves open — bind it \
+    let no_self = ctx.env.trait_info[&provider]
+        .decls
+        .get(method)
+        .is_some_and(|d| d.params.first().is_none_or(|p| p.name != "self"));
+    let why = no_self.then(|| {
+        "it takes no `self`, so there is no value to dispatch on (not object-safe)".to_owned()
+    });
+    let why = why.or_else(|| {
+        needs.iter().find_map(|n| {
+            if n == "Self" {
+                Some(
+                    "its signature mentions `Self`, which is a different type for each implementor"
+                        .to_owned(),
+                )
+            } else if let Some(x) = n.strip_prefix("Self::") {
+                (!fixed.contains(&format!("{x} = "))).then(|| {
+                    format!(
+                        "its signature uses `Self::{x}`, which the bound leaves open — bind it \
                      (`any {provider}<{x} = ..>`)"
-                )
-            })
-        } else {
-            (!has_args).then(|| {
-                format!(
-                    "its signature uses type parameters of `{provider}` that the bound leaves \
+                    )
+                })
+            } else {
+                (!has_args).then(|| {
+                    format!(
+                        "its signature uses type parameters of `{provider}` that the bound leaves \
                      open — name them (`any {provider}<..>`)"
-                )
-            })
-        }
+                    )
+                })
+            }
+        })
     });
     if let Some(why) = why {
         discard_args(ctx, args);
@@ -7060,7 +7464,9 @@ pub(super) fn lower_infix(
     if let (HirTy::Prim(lp), HirTy::Prim(rp)) = (&lhs_h.ty, &rhs_h.ty) {
         if lp == rp {
             if let Some((primop, result_ty)) = infix_for_prim(op, *lp) {
-                return hir_binop(primop, lhs_h, rhs_h, result_ty, span);
+                let e = hir_binop(primop, lhs_h, rhs_h, result_ty, span);
+                check_const_overflow(ctx, &e.kind, &e.ty, span);
+                return e;
             }
         }
     }
@@ -8642,12 +9048,16 @@ fn lower_slice(
         span,
     };
     let body = call(call(t.clone(), "slice", range), "step", kt.clone());
+    // Any signed integer step widens to `isize`.
+    let k_h = lower_expected(ctx, k, HirTy::Prim(PrimTy::Isize));
+    let k_signed = is_signed(&k_h.ty);
+    let k_e = splice(ctx, k_h);
     let let_k = Stmt {
         span,
         kind: StmtKind::Let {
             name: path_name(&kt),
             ty: Some(isize_ty(span)),
-            init: k.clone(),
+            init: if k_signed { as_isize(k_e, span) } else { k_e },
         },
     };
     lower_expr(ctx, &block_of(vec![let_stmt(&t, recv), let_k], body, span))

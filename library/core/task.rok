@@ -137,6 +137,10 @@ fn join_later(t: TaskRef, waiter: Waker) -> bool {
 }
 
 fn finish(t: TaskRef) {
+    // Its parking entries go first (a cancelled task left its `await`
+    // without the wake it waited for): a joiner that sees it done sees
+    // none of them.
+    unpark_task(t);
     let ws: List<Waker> = List::new();
     using g = t.joiners.lock() {
         atomic_xchg(t.state, 0, DONE, SeqCst);
@@ -145,12 +149,9 @@ fn finish(t: TaskRef) {
     }
     // The finished future (its frame) is no longer reachable from here.
     t.poll[0] = |ctx: Context| -> bool { true };
-    // Its parking entries go with it (a cancelled task left its `await`
-    // without the wake it waited for), and a cancelled task's timers.
-    if is_cancelled(t) {
-        finish_cancelled(t);
-    } else {
-        unpark_task(t);
+    // A cancelled task's timers (a done task's no longer count).
+    if is_cancelled(t) && atomic_load(t.state, 2, SeqCst) != 0 {
+        remove_timers(t);
     }
     for w in ws {
         w.wake();

@@ -25,16 +25,28 @@ pub const PLAIN_TYPE_ID: u32 = 1;
 /// reference (runtime word buffers).
 pub const SCAN_WORDS_TYPE_ID: u32 = 2;
 
-/// `ScanTable` field kinds (802 §8.2.3).
+/// `ScanTable` field kinds (802 §8.2.3), the low byte of `field_kind`.
 ///
 /// A reference to an object header, a pointer into an object (`str`), an
-/// `any` (`u32` tag, then the payload word), and a word that holds a
-/// reference or other bits (an enum union word: its referent is kept
-/// alive and never moved).
+/// `any` (`u32` tag, then the payload word), a sum (below), and a word
+/// that holds a reference or other bits (its referent is kept alive and
+/// never moved).
 pub const STRONG_REF: u32 = 0;
 pub const INTERIOR_REF: u32 = 2;
 pub const ANY_SLOT: u32 = 3;
+pub const SUM_PAYLOAD: u32 = 4;
 pub const AMBIGUOUS: u32 = 5;
+/// Mask of the kind in `field_kind`.
+pub const KIND_MASK: u32 = 0xff;
+/// Where a `SUM_PAYLOAD` entry's descriptor is.
+///
+/// The entry's `field_offset` is its `u32` tag;
+/// `field_kind >> SUM_DESC_SHIFT` is the `u32` index (from the table
+/// start) of its descriptor: `num_variants`, then `{tag, num_entries,
+/// entries}` per variant that holds references, where `entries` is the
+/// `u32` index of that many `{offset from the tag, field_kind}` pairs.
+/// A tag no variant lists has no references.
+pub const SUM_DESC_SHIFT: u32 = 8;
 /// `ScanTable` version bit: the table is one element of `total_size`
 /// bytes repeated over the payload (a buffer).
 pub const TABLE_ARRAY: u32 = 0x8000;

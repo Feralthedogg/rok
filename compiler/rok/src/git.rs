@@ -145,7 +145,23 @@ impl Cache {
             None,
         )
         .map(drop)
-        .map_err(|e| format!("cannot fetch {url}: {e}"))
+        .map_err(|e| {
+            // git's own words, without the refspecs we gave it.
+            let why = e.split_once("` failed: ").map_or(e.as_str(), |(_, w)| w);
+            let hint = if why.contains("Could not resolve host") || why.contains("unable to access")
+            {
+                "\n(cannot reach the host; with a cached clone, `--offline` works without it)"
+            } else if why.contains("not found")
+                || why.contains("does not exist")
+                || why.contains("could not read Username")
+                || why.contains("does not appear to be a git repository")
+            {
+                "\n(no such repository, or it needs credentials; check the url)"
+            } else {
+                ""
+            };
+            format!("cannot fetch {url}: {why}{hint}")
+        })
     }
 
     /// The commit `reference` names in the cached clone of `url`.

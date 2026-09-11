@@ -7,10 +7,11 @@ use std::fmt::Write;
 use rokc_ir_common::{Abi, ConstVal, FnRole, FunctionId, Linkage, LocalId, PrimOp, PrimTy};
 use rokc_mir::gc_abi::{
     CARD_SHIFT, FLAG_CARDED, FLAG_UNLOGGED, GC_FLAGS_OFFSET, GC_WORD_OFFSET, HEADER_SIZE,
-    LOS_THRESHOLD, PLAIN_TYPE_ID, TABLE_ARRAY, USER_TYPE_BASE,
+    LOS_THRESHOLD, PLAIN_TYPE_ID, SUM_DESC_SHIFT, SUM_PAYLOAD, TABLE_ARRAY, USER_TYPE_BASE,
 };
 use rokc_mir::{
-    BasicBlock, Link, MirFunction, MirModule, MirTy, Operand, RValue, Statement, Target, Terminator,
+    BasicBlock, GcSlot, Link, MirFunction, MirModule, MirTy, Operand, RValue, Statement, Target,
+    Terminator,
 };
 
 use crate::abi::{ArgAbi, FnAbi, RetAbi};
@@ -1070,17 +1071,29 @@ impl<'a> FnEmit<'a> {
     /// Write barrier (704 §7.4.2, 809 §8.9.10) before storing a GC
     /// reference into the GC object `obj` at `slot` (`len` bytes): the
     /// inline fast path tests the header's `UNLOGGED | CARDED` bits (set
-    /// only on old objects). `CARDED` (a large old object): mark the
-    /// cards of the slot's first and last byte inline; else
-    /// `rok_gc_wb_slow(obj)`. Not a safepoint. Emission continues in a
-    /// fresh fall-through block.
+    /// only on old objects). `UNLOGGED`: `rok_gc_wb_slow(obj)`; then
+    /// `CARDED` (a large old object): mark the cards of the slot's first
+    /// and last byte inline. (A concurrent mark sets both on old large
+    /// objects: the slow path snapshots, the card remembers.) Not a
+    /// safepoint. Emission continues in a fresh fall-through block.
     fn emit_write_barrier(&mut self, obj: &Operand, slot: &str, len: u32) {
         let pw = self.pw;
         let obj_v = self.materialize_operand(obj, &MirTy::GcRef);
         let n = self.next_check;
         self.next_check += 1;
         self.needs.insert("rok_gc_wb_slow");
-        let [hp, fp, flags, bits, masked, zero, set] = std::array::from_fn(|_| self.fresh_value());
+        let [
+            hp,
+            fp,
+            flags,
+            bits,
+            masked,
+            zero,
+            set,
+            ubit,
+            umask,
+            unlogged,
+        ] = std::array::from_fn(|_| self.fresh_value());
         let [
             cbit,
             cmask,
@@ -1112,10 +1125,18 @@ impl<'a> FnEmit<'a> {
     {set} = arith.cmpi ne, {masked}, {zero} : i32
     cf.cond_br {set}, ^rok_wb{n}, ^rok_wbok{n}
   ^rok_wb{n}:
+    {ubit} = arith.constant {FLAG_UNLOGGED} : i32
+    {umask} = arith.andi {flags}, {ubit} : i32
+    {unlogged} = arith.cmpi ne, {umask}, {zero} : i32
+    cf.cond_br {unlogged}, ^rok_wbslow{n}, ^rok_wbcq{n}
+  ^rok_wbslow{n}:
+    func.call @rok_gc_wb_slow({obj_v}) : (i{pw}) -> ()
+    cf.br ^rok_wbcq{n}
+  ^rok_wbcq{n}:
     {cbit} = arith.constant {FLAG_CARDED} : i32
     {cmask} = arith.andi {flags}, {cbit} : i32
     {carded} = arith.cmpi ne, {cmask}, {zero} : i32
-    cf.cond_br {carded}, ^rok_wbcard{n}, ^rok_wbslow{n}
+    cf.cond_br {carded}, ^rok_wbcard{n}, ^rok_wbok{n}
   ^rok_wbcard{n}:
     {ctp} = llvm.getelementptr {hp}[-{word}] : (!llvm.ptr) -> !llvm.ptr, i8
     {ct} = llvm.load {ctp} : !llvm.ptr -> !llvm.ptr
@@ -1131,9 +1152,6 @@ impl<'a> FnEmit<'a> {
     {one} = arith.constant 1 : i8
     llvm.store {one}, {c0} : i8, !llvm.ptr
     llvm.store {one}, {c1} : i8, !llvm.ptr
-    cf.br ^rok_wbok{n}
-  ^rok_wbslow{n}:
-    func.call @rok_gc_wb_slow({obj_v}) : (i{pw}) -> ()
     cf.br ^rok_wbok{n}
   ^rok_wbok{n}:
 "
@@ -1209,7 +1227,7 @@ impl<'a> FnEmit<'a> {
                 };
                 let Some(union_ty) = [from_ty, to_ty]
                     .into_iter()
-                    .find(|t| matches!(t, MirTy::Array(_, _)))
+                    .find(|t| matches!(t, MirTy::Array(_, _) | MirTy::Union(..)))
                 else {
                     continue;
                 };
@@ -3165,6 +3183,7 @@ impl<'a> FnEmit<'a> {
                     MirTy::Struct(_, _)
                         | MirTy::Tuple(_)
                         | MirTy::Array(_, _)
+                        | MirTy::Union(..)
                         | MirTy::Prim(PrimTy::Str)
                 ) {
                     let _ = writeln!(self.body, "    {dst} = llvm.mlir.zero : {ty}");
@@ -3323,6 +3342,7 @@ fn mlir_type(ty: &MirTy, pointer_width: u32) -> String {
         MirTy::Array(elem, n) => {
             format!("!llvm.array<{n} x {}>", mlir_type(elem, pointer_width))
         }
+        MirTy::Union(_, n) => format!("!llvm.array<{n} x i{pointer_width}>"),
         // Function values are opaque pointers inside aggregates; each
         // call site supplies the `(args) -> ret` shape.
         MirTy::Fn(_, _) => "!llvm.ptr".to_owned(),
@@ -3510,23 +3530,50 @@ fn gc_object_size(ty: &MirTy, target: &Target) -> (u32, u32) {
 
 /// The `ScanTable` (802) of `ty` objects (`array`: of buffers of `ty`
 /// elements) as `u32` words: header `{total_size u32, version u16 = 1,
-/// num_entries u16}`, then `{field_offset u32, field_kind u32}` each.
-/// An array table's size is the element stride, its offsets
-/// element-relative.
+/// num_entries u16}`, then `{field_offset u32, field_kind u32}` each,
+/// then the sum descriptors (`gc_abi::SUM_PAYLOAD`). An array table's
+/// size is the element stride, its offsets element-relative.
 fn scan_table(ty: &MirTy, array: bool, target: &Target) -> Vec<u32> {
-    let mut offsets = Vec::new();
+    let mut slots = Vec::new();
     let (total, version) = if array {
-        target.gc_offsets(ty, 0, &mut offsets);
+        target.gc_offsets(ty, 0, &mut slots);
         (target.size_align(ty).0, 1 | TABLE_ARRAY)
     } else {
-        target.gc_offsets(ty, HEADER_SIZE, &mut offsets);
+        target.gc_offsets(ty, HEADER_SIZE, &mut slots);
         (gc_object_size(ty, target).0, 1)
     };
-    let mut words = vec![total, version | ((offsets.len() as u32) << 16)];
-    for entry in offsets {
-        words.extend(<[u32; 2]>::from(entry));
-    }
+    let mut words = vec![total, version | ((slots.len() as u32) << 16)];
+    words.resize(2 + 2 * slots.len(), 0);
+    encode_slots(&slots, 0, 2, &mut words);
     words
+}
+
+/// `slots` as entries at word `at` of `words` (already reserved), their
+/// offsets relative to `base`. A sum's entry is its tag offset and
+/// `SUM_PAYLOAD | descriptor << SUM_DESC_SHIFT`; the descriptor, appended,
+/// is `n`, then `{tag, num_entries, entries}` per data variant, each
+/// variant's entries (offsets from the tag) appended in turn.
+fn encode_slots(slots: &[GcSlot], base: u32, at: usize, words: &mut Vec<u32>) {
+    for (i, slot) in slots.iter().enumerate() {
+        let (off, kind) = match slot {
+            GcSlot::Word(off, kind) => (*off, *kind),
+            GcSlot::Sum(off, variants) => {
+                let desc = words.len();
+                words.push(variants.len() as u32);
+                words.resize(desc + 1 + 3 * variants.len(), 0);
+                for (k, (tag, v)) in variants.iter().enumerate() {
+                    let entries = words.len();
+                    words.resize(entries + 2 * v.len(), 0);
+                    let head = desc + 1 + 3 * k;
+                    words[head..head + 3].copy_from_slice(&[*tag, v.len() as u32, entries as u32]);
+                    encode_slots(v, *off, entries, words);
+                }
+                (*off, SUM_PAYLOAD | ((desc as u32) << SUM_DESC_SHIFT))
+            }
+        };
+        words[at + 2 * i] = off - base;
+        words[at + 2 * i + 1] = kind;
+    }
 }
 
 fn struct_field_tys(ty: &MirTy) -> Vec<MirTy> {

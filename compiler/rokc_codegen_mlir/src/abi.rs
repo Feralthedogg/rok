@@ -67,7 +67,10 @@ impl FnAbi {
 /// A by-value aggregate (as opposed to a scalar, `str` or `()`).
 #[must_use]
 pub const fn is_aggregate(ty: &MirTy) -> bool {
-    matches!(ty, MirTy::Struct(..) | MirTy::Tuple(_) | MirTy::Array(..))
+    matches!(
+        ty,
+        MirTy::Struct(..) | MirTy::Tuple(_) | MirTy::Array(..) | MirTy::Union(..)
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -104,6 +107,11 @@ fn leaves(ty: &MirTy, at: u32, target: &Target, out: &mut Vec<(u32, u32, Leaf)>)
             let s = target.size_align(e).0;
             for i in 0..*n {
                 leaves(e, at + i * s, target, out);
+            }
+        }
+        MirTy::Union(_, n) => {
+            for i in 0..*n {
+                out.push((at + i * word, word, Leaf::Int));
             }
         }
     }

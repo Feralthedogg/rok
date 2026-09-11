@@ -221,43 +221,57 @@ impl CompileResult {
     }
 }
 
-/// Installed layout: `$ROK_HOME/bin/rokc`, `$ROK_HOME/lib/librokr.a`,
-/// `$ROK_HOME/lib/rok/{core,std,bare}/`.
-pub const INSTALLED_LIBS: &str = "lib/rok";
-const INSTALLED_RT: &str = "lib/librokr.a";
-/// Dev layout: the repository's `library/` above `target/<profile>/rokc`,
-/// with `librokr.a` next to `rokc`.
-const DEV_LIBS: &str = "library";
+/// The standard library and the runtime of this `rokc` (spec 9.2.19).
+///
+/// They are under its sysroot (the executable's `..`: `lib/rok/{core,std,bare}/`,
+/// `lib/librokr.a`), else, for a build in the repository, its
+/// `library/` and the `librokr.a` cargo puts beside `rokc`. `ROK_HOME`
+/// plays no part. Each `Err` lists where it looked.
+pub struct Sysroot {
+    /// The library roots to preload (`core`, then `std` / `bare`).
+    pub libs: Result<Vec<PathBuf>, String>,
+    pub rokr: Result<PathBuf, String>,
+}
 
-/// `(bootstrap roots, librokr.a)`: the install at `ROK_HOME`, else the dev
-/// layout around the running executable.
+/// The sysroot's library directory.
+pub const SYSROOT_LIBS: &str = "lib/rok";
+const SYSROOT_RT: &str = "lib/librokr.a";
+/// The repository's `library/` (a dev build).
+const DEV_LIBS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../library");
+
 #[must_use]
-pub fn toolchain() -> (Option<Vec<PathBuf>>, Option<PathBuf>) {
-    let file = |p: PathBuf| p.is_file().then_some(p);
-    let libs_in = |d: &Path, rel: &str| {
-        let libs = d.join(rel);
-        libs.join("core/lib.rok").is_file().then_some(libs)
-    };
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(Path::to_path_buf));
-    let home = rokc_core::rok_home();
-    let installed = home.as_deref().and_then(|h| libs_in(h, INSTALLED_LIBS));
-    let (libs, rokr) = if installed.is_some() {
-        (installed, home.and_then(|h| file(h.join(INSTALLED_RT))))
-    } else {
-        let dev = home
-            .as_deref()
-            .and_then(|h| libs_in(h, DEV_LIBS))
-            .or_else(|| {
-                exe_dir
-                    .as_deref()?
-                    .ancestors()
-                    .find_map(|d| libs_in(d, DEV_LIBS))
-            });
-        (dev, exe_dir.and_then(|d| file(d.join("librokr.a"))))
-    };
-    (libs.as_deref().map(bootstrap_roots), rokr)
+pub fn sysroot() -> Sysroot {
+    let exe = std::env::current_exe().unwrap_or_default();
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let bin = exe.parent().unwrap_or_else(|| Path::new("."));
+    let root = bin.parent().unwrap_or(bin);
+    let dev = Path::new(DEV_LIBS);
+    let dev = std::fs::canonicalize(dev).unwrap_or_else(|_| dev.to_path_buf());
+    let lib_dirs = [root.join(SYSROOT_LIBS), dev];
+    let libs = lib_dirs
+        .iter()
+        .find(|d| d.join("core/lib.rok").is_file())
+        .map(|d| bootstrap_roots(d))
+        .ok_or_else(|| {
+            format!(
+                "the standard library is missing: no {} (the sysroot of {}) nor {} (a build in \
+                 the repository); reinstall the toolchain, or pass --bootstrap <core/lib.rok>",
+                lib_dirs[0].join("core/lib.rok").display(),
+                exe.display(),
+                lib_dirs[1].join("core/lib.rok").display(),
+            )
+        });
+    let rt = [root.join(SYSROOT_RT), bin.join("librokr.a")];
+    let rokr = rt.iter().find(|p| p.is_file()).cloned().ok_or_else(|| {
+        format!(
+            "the runtime library is missing: no {} (the sysroot of {}) nor {} (a build in the \
+             repository: `cargo build -p rokr`); reinstall the toolchain, or pass --rokr <lib>",
+            rt[0].display(),
+            exe.display(),
+            rt[1].display(),
+        )
+    });
+    Sysroot { libs, rokr }
 }
 
 /// The library roots to preload from a library directory: `core/lib.rok`,

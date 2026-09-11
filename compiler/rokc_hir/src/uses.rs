@@ -148,8 +148,24 @@ pub fn check_use_targets(
         .flat_map(|k| k.match_indices("::").map(|(i, _)| k[..i].to_owned()))
         .collect();
     known.extend(modules);
+    let mod_vis = crate::lower::module_visibility(items);
+    let item_vis: HashMap<&str, Visibility> = items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Fn(f) => Some((f.name.as_str(), f.vis)),
+            Item::Struct(s) => Some((s.name.as_str(), s.vis)),
+            Item::Union(u) => Some((u.name.as_str(), u.vis)),
+            Item::Trait(t) => Some((t.name.as_str(), t.vis)),
+            Item::Const(c) => Some((c.name.as_str(), c.vis)),
+            Item::Static(s) => Some((s.name.as_str(), s.vis)),
+            Item::TypeAlias(a) => Some((a.name.as_str(), a.vis)),
+            Item::Enum(e) => Some((e.name.as_str(), e.vis)),
+            Item::Mod(m) => Some((m.name.as_str(), m.vis)),
+            _ => None,
+        })
+        .collect();
     let mut diags = Vec::new();
-    for (module_path, _, tree) in raw {
+    for (module_path, use_vis, tree) in raw {
         let bare = tree
             .prefix
             .segments
@@ -163,6 +179,33 @@ pub fn check_use_targets(
                 UseEntry::Single { full, .. } => full,
                 UseEntry::Glob { prefix } | UseEntry::GlobDeep { prefix } => prefix,
             };
+            if let UseEntry::Single { full, .. } = &entry {
+                rokc_diagnostic::set_current_span(span);
+                if let Some(m) = crate::lower::hidden_module(&mod_vis, module_path, full) {
+                    diags.push(RokDiagnostic::error(
+                        ErrorKind::Module,
+                        crate::lower::hidden_module_msg(full, &m, module_path),
+                    ));
+                    continue;
+                }
+                // Spec 5.8.4: a named re-export reaches no further than
+                // its item.
+                if let Some(&vis) = item_vis.get(full.as_str()) {
+                    let rank = crate::lower::visibility_rank;
+                    if *use_vis != Visibility::Private && rank(*use_vis) > rank(vis) {
+                        diags.push(RokDiagnostic::error(
+                            ErrorKind::Module,
+                            format!(
+                                "`{full}` is {} but re-exported as {} — a re-export can't \
+                                 be wider than its item (spec 5.8.4)",
+                                vis_word(vis),
+                                vis_word(*use_vis)
+                            ),
+                        ));
+                        continue;
+                    }
+                }
+            }
             if path.is_empty() || known.contains(path) {
                 continue;
             }
@@ -185,6 +228,15 @@ pub fn check_use_targets(
     }
     rokc_diagnostic::set_current_span(Span::DUMMY);
     diags
+}
+
+const fn vis_word(v: Visibility) -> &'static str {
+    match v {
+        Visibility::Pub => "`pub`",
+        Visibility::Pkg => "`pub(pkg)`",
+        Visibility::Sub => "`pub(sub)`",
+        Visibility::Private => "private",
+    }
 }
 
 /// Public alias of `flatten_tree` for the lower pass to expand a

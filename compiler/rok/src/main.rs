@@ -1,4 +1,5 @@
-//! `rok`: see the library.
+//! `rok`: see the library. Installed as `$ROK_HOME/bin/{rok,rokc,rokls}`
+//! it is the toolchain proxy.
 
 fn main() {
     let default_hook = std::panic::take_hook();
@@ -7,5 +8,9 @@ fn main() {
         eprintln!("rok: internal error");
         std::process::exit(101);
     }));
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if let Some(code) = rok::proxy(&args) {
+        std::process::exit(code);
+    }
     std::process::exit(rok::main_with(std::env::args().skip(1).collect()));
 }

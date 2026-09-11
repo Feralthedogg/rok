@@ -1,0 +1,35 @@
+// expect-exit: 0
+// expect-stdout:
+// float
+// int
+// str
+// int or str
+// 7
+
+// 3.11.1: a bare type name against a sum is a type pattern binding
+// nothing (not a catch-all binding); against a plain value a name binds.
+fn kind(v: i32 | f64 | str) -> str {
+    match v {
+        f64 => "float",
+        i32 => "int",
+        str => "str",
+    }
+}
+
+fn group(v: i32 | f64 | str) -> str {
+    match v {
+        i32 | str => "int or str",
+        _ => "float",
+    }
+}
+
+fn main() {
+    println(kind(1.5));
+    println(kind(2));
+    println(kind("a"));
+    println(group("b"));
+    let n = match 7 {
+        x => x,
+    };
+    println(f"{n}");
+}

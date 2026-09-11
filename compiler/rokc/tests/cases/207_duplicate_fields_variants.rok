@@ -1,0 +1,9 @@
+// expect-error: 6:20: field `a` is declared more than once in `S`
+// expect-error: 7:16: variant `A` is declared more than once in `E`
+
+// A field / variant name is declared once per type.
+
+struct S { a: i32; a: str; }
+enum E { A, B, A }
+
+fn main() {}

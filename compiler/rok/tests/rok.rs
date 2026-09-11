@@ -279,8 +279,8 @@ fn add_lock_update_offline_remove() {
     );
     assert_eq!(read(&app.join("rok.rokon")), before);
     fails(
-        &rok(&home, &app, &["add", "my-x", "--path", "."]),
-        "try `my_x`",
+        &rok(&home, &app, &["add", "My.X", "--path", "."]),
+        "try `my-x`",
     );
 }
 
@@ -414,15 +414,116 @@ fn new_and_init_write_a_manifest() {
         read(&root.join("mylib/rok.rokon")),
         "Package { name: \"mylib\", version: \"0.1.0\", deps: {} }\n"
     );
-    let dir = root.join("existing");
+    // Its own git repository, ignoring target/.
+    assert_eq!(read(&root.join("mylib/.gitignore")), "target/\n");
+    assert!(root.join("mylib/.git").is_dir());
+    // Package names: `[a-z][a-z0-9_-]*`.
+    fails(&rok(&home, &root, &["new", "My App"]), "try `my-app`");
+    assert!(!root.join("My App").exists());
+    let dir = root.join("Existing.Dir");
     fs::create_dir_all(&dir).unwrap();
-    ok(&rok(&home, &dir, &["init"]));
-    assert!(dir.join("main.rok").is_file() && dir.join("rok.rokon").is_file());
+    // Inside a repository: no new one.
+    git(&dir, &["init", "-q"]);
+    let out = rok(&home, &dir, &["init"]);
+    ok(&out);
+    assert!(text(&out.stderr).contains("the package name is `existing-dir`"));
+    assert!(dir.join("main.rok").is_file());
+    assert!(read(&dir.join("rok.rokon")).contains("name: \"existing-dir\""));
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    ok(&rok(&home, &dir.join("sub"), &["new", "inner"]));
+    assert!(!dir.join("sub/inner/.git").exists());
     fails(&rok(&home, &dir, &["init"]), "already exists");
-    assert_eq!(
-        ok(&rok(&home, &dir, &["--version"])),
-        format!("rok {}\n", env!("CARGO_PKG_VERSION"))
+    let version = ok(&rok(&home, &dir, &["--version"]));
+    assert!(
+        version.starts_with(&format!("rok {}", env!("CARGO_PKG_VERSION"))),
+        "{version}"
     );
+    // Usage errors exit 2 (spec 9.1.6); the rest 1.
+    let usage = |args: &[&str]| rok(&home, &root, args).status.code();
+    assert_eq!(usage(&["new"]), Some(2));
+    assert_eq!(usage(&["add", "x", "--frob"]), Some(2));
+    assert_eq!(usage(&["frob"]), Some(2));
+    assert_eq!(usage(&["toolchain", "frob"]), Some(2));
+    // A command on a package, outside one: rok says so.
+    let out = rok(&home, &root, &["check"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).starts_with("rok: error: not inside a package"),
+        "{}",
+        text(&out.stderr)
+    );
+    // Per-command help.
+    let help = ok(&rok(&home, &root, &["add", "--help"]));
+    assert!(help.contains("add <name> --path <dir>") && !help.contains("publish"));
+    assert_eq!(ok(&rok(&home, &root, &["help", "add"])), help);
+    let help = ok(&rok(&home, &root, &["test", "--help"]));
+    assert!(
+        help.contains("--threads") && !help.contains("--iters"),
+        "{help}"
+    );
+}
+
+#[test]
+fn rok_add_writes_canonical_rokon() {
+    let root = scratch("canon");
+    let home = root.join("home");
+    write(&root.join("u/lib.rok"), LIB_V1);
+    ok(&rok(&home, &root, &["new", "app"]));
+    let app = root.join("app");
+    ok(&rok(&home, &app, &["add", "u", "--path", "../u"]));
+    // Fits in 100 columns: one line.
+    assert_eq!(
+        read(&app.join("rok.rokon")),
+        "Package { name: \"app\", version: \"0.1.0\", deps: { \"u\": Dep::path(\"../u\") } }\n"
+    );
+    ok(&rok(
+        &home,
+        &app,
+        &["add", "a_rather_long_dependency_name", "--path", "../u"],
+    ));
+    assert_eq!(
+        read(&app.join("rok.rokon")),
+        "Package {\n    name: \"app\",\n    version: \"0.1.0\",\n    deps: { \"u\": \
+         Dep::path(\"../u\"), \"a_rather_long_dependency_name\": Dep::path(\"../u\") },\n}\n"
+    );
+    // A file with comments keeps its layout.
+    let mine = "// mine\nPackage { name: \"app\", deps: { \"u\": Dep::path(\"../u\") } }\n";
+    write(&app.join("rok.rokon"), mine);
+    ok(&rok(&home, &app, &["remove", "u"]));
+    assert!(read(&app.join("rok.rokon")).starts_with("// mine\nPackage { name: \"app\""));
+    // The manifest's name is the package's.
+    write(
+        &app.join("rok.rokon"),
+        "Package { name: \"hello\", deps: {} }\n",
+    );
+    let out = rok(&home, &app, &["build"]);
+    if llvm() {
+        ok(&out);
+        assert!(app.join("target/debug/hello").is_file());
+    }
+    write(&app.join("rok.rokon"), "Package { name: \"My_App\" }\n");
+    fails(&rok(&home, &app, &["check"]), "try `my_app`");
+
+    // `my-lib` is a package name; code says `my_lib`. `-` and `_` are one
+    // name, so both spellings cannot be dependencies.
+    ok(&rok(&home, &root, &["new", "--lib", "my-lib"]));
+    assert!(read(&root.join("my-lib/rok.rokon")).contains("name: \"my-lib\""));
+    write(&app.join("rok.rokon"), "Package { name: \"my-app\" }\n");
+    write(
+        &app.join("main.rok"),
+        "use my_lib::add;\nprintln(f\"{add(1, 2)}\");\n",
+    );
+    ok(&rok(&home, &app, &["add", "my-lib", "--path", "../my-lib"]));
+    ok(&rok(&home, &app, &["-q", "check"]));
+    assert!(ok(&rok(&home, &app, &["deps"])).starts_with("my_lib="));
+    fails(
+        &rok(&home, &app, &["add", "my_lib", "--path", "../my-lib"]),
+        "are the same package",
+    );
+    if llvm() {
+        assert_eq!(ok(&rok(&home, &app, &["-q", "run"])), "3\n");
+        assert!(app.join("target/debug/my-app").is_file());
+    }
 }
 
 #[test]
@@ -489,6 +590,8 @@ fn named_environments() {
         spec.contains(r#""--env","work","jupyter","--connection-file","{connection_file}"],"display_name":"rok (work)""#),
         "{spec}"
     );
+    // A kernel started from a GUI still finds the tools.
+    assert!(spec.contains(r#""env":{"ROK_HOME":"#) && spec.contains(r#""PATH":"#));
     fails(
         &rok(&home, &root, &["env", "create", "work"]),
         "already exists",
@@ -572,68 +675,118 @@ fn named_environments() {
     assert_eq!(deps(&home, &elsewhere, &[])[0].0, "d");
 }
 
+/// A fake toolchain `version` in `dir`: the real `rok`, and a `rokc`
+/// that says which toolchain it is and how it was called.
+#[cfg(unix)]
+fn fake_toolchain(dir: &Path, version: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let host = env!("ROK_HOST");
+    write(
+        &dir.join("bin/rokc"),
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'rokc {version} (fake)'; echo \
+             'host: {host}'; exit 0; fi\necho \"rokc {version}: $*\"\n"
+        ),
+    );
+    fs::set_permissions(dir.join("bin/rokc"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::copy(ROK, dir.join("bin/rok")).unwrap();
+    write(&dir.join("bin/rokls"), "");
+    write(&dir.join("lib/librokr.a"), "");
+    write(&dir.join("lib/rok/core/lib.rok"), "");
+}
+
+#[cfg(unix)]
 #[test]
 fn pinned_toolchains() {
     let root = scratch("toolchain");
     let home = root.join("home");
     let app = root.join("app");
+    let host = env!("ROK_HOST");
     write(&app.join("main.rok"), "println(\"x\");\n");
     write(&app.join("rok.rokon"), "Package { toolchain: \"9.9\" }\n");
     fails(&rok(&home, &app, &["build"]), "rok toolchain install 9.9");
 
-    // A fake toolchain whose rokc reports how it was called.
-    let fake = root.join("fake");
-    write(
-        &fake.join("bin/rokc"),
-        "#!/bin/sh\necho \"fake rokc ROK_HOME=$ROK_HOME $*\"\n",
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(fake.join("bin/rokc"), fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    fake_toolchain(&root.join("fake1"), "9.9.1");
+    fake_toolchain(&root.join("fake2/rok-9.10.0"), "9.10.0");
+    let tc = |args: &[&str]| rok(&home, &root, &[&["toolchain"][..], args].concat());
+    assert_eq!(tc(&["install", "9.9.1"]).status.code(), Some(2));
+    fails(&tc(&["install", "9.9.1", "--from", "app"]), "no bin/rokc");
+    // The version is the toolchain's own (`bin/rokc --version`).
     fails(
-        &rok(&home, &root, &["toolchain", "install", "9.9.1"]),
-        "--from <dir | tarball>",
+        &tc(&["install", "9.11", "--from", "fake1"]),
+        "is rokc 9.9.1, not 9.11",
     );
-    fails(
-        &rok(
-            &home,
-            &root,
-            &["toolchain", "install", "9.9.1", "--from", "app"],
-        ),
-        "no bin/rokc",
-    );
-    ok(&rok(
-        &home,
-        &root,
-        &["toolchain", "install", "9.9.1", "--from", "fake"],
-    ));
-    let out = ok(&rok(&home, &app, &["-q", "build", "--release"]));
-    let tc = home.join("toolchains/9.9.1");
-    assert_eq!(
-        out,
-        format!("fake rokc ROK_HOME={} -q build --release\n", tc.display())
-    );
-
-    // From a tarball with one top directory.
-    let ok_tar = Command::new("tar")
-        .current_dir(&root)
-        .args(["-czf", "tc.tar.gz", "fake"])
+    ok(&tc(&["install", "9.9.1", "--from", "fake1"]));
+    // A tarball with one top directory.
+    let tar = Command::new("tar")
+        .current_dir(root.join("fake2"))
+        .args(["-czf", "../tc.tar.gz", "rok-9.10.0"])
         .status()
-        .unwrap()
-        .success();
-    assert!(ok_tar);
-    ok(&rok(
-        &home,
-        &root,
-        &["toolchain", "install", "9.10", "--from", "tc.tar.gz"],
-    ));
-    assert!(home.join("toolchains/9.10/bin/rokc").is_file());
-    let list = ok(&rok(&home, &root, &["toolchain", "list"]));
-    assert!(list.ends_with("9.9.1\n9.10\n"), "{list}");
-    ok(&rok(&home, &root, &["toolchain", "remove", "9.9.1"]));
-    fails(&rok(&home, &app, &["build"]), "is not installed");
+        .unwrap();
+    assert!(tar.success());
+    ok(&tc(&["install", "9.10", "--from", "tc.tar.gz"]));
+    assert!(
+        home.join(format!("toolchains/9.10.0-{host}/bin/rokc"))
+            .is_file()
+    );
+    // The first one became the default, with the proxies.
+    assert_eq!(
+        ok(&tc(&["list"])),
+        format!("9.9.1-{host} (default)\n9.10.0-{host}\n")
+    );
+    assert!(home.join("bin/rok").is_file() && home.join("bin/rokc").is_file());
+
+    // The proxies (no ROK_HOME: theirs is where they are). Precedence:
+    // `+<version>` > ROK_TOOLCHAIN > rok.rokon > the default.
+    let proxy = |tool: &str, cwd: &Path, env: Option<&str>, args: &[&str]| {
+        let mut c = Command::new(home.join("bin").join(tool));
+        c.current_dir(cwd).env_remove("ROK_HOME").args(args);
+        match env {
+            Some(t) => c.env("ROK_TOOLCHAIN", t),
+            None => c.env_remove("ROK_TOOLCHAIN"),
+        };
+        ok(&c.output().unwrap())
+    };
+    assert_eq!(proxy("rokc", &root, None, &["x"]), "rokc 9.9.1: x\n");
+    let out = rok(&home, &root, &["toolchain", "default", "9.10"]);
+    ok(&out);
+    assert_eq!(proxy("rokc", &root, None, &["x"]), "rokc 9.10.0: x\n");
+    assert_eq!(proxy("rokc", &app, None, &["x"]), "rokc 9.9.1: x\n");
+    assert_eq!(
+        proxy("rokc", &app, Some("9.10"), &["x"]),
+        "rokc 9.10.0: x\n"
+    );
+    assert_eq!(
+        proxy("rokc", &app, Some("9.10"), &["+9.9", "x"]),
+        "rokc 9.9.1: x\n"
+    );
+    // The proxy `rok` runs the toolchain's `rok`, which runs its pin's
+    // `rokc` with the arguments for it.
+    assert_eq!(
+        proxy("rok", &app, None, &["-q", "build", "--release"]),
+        "rokc 9.9.1: -q build --release\n"
+    );
+    assert_eq!(
+        proxy("rok", &root, None, &["+9.9", "-q", "fmt"]),
+        "rokc 9.9.1: -q fmt\n"
+    );
+    // `rok toolchain` through the proxy is the proxy's own.
+    assert_eq!(
+        proxy("rok", &root, None, &["toolchain", "default"]),
+        "9.10\n"
+    );
+    // An unknown pin names where it came from.
+    write(&app.join("rok.rokon"), "Package { toolchain: \"9.8\" }\n");
+    let out = Command::new(home.join("bin/rokc"))
+        .current_dir(&app)
+        .env_remove("ROK_TOOLCHAIN")
+        .output()
+        .unwrap();
+    fails(&out, "toolchain 9.8 (pinned by ");
+
+    ok(&tc(&["remove", "9.9.1"]));
+    fails(&tc(&["remove", "9.9.1"]), "is not installed");
+    assert_eq!(ok(&tc(&["list"])), format!("9.10.0-{host} (default)\n"));
     // Pinning this rok's own version runs the rokc beside it.
     let mine: String = env!("CARGO_PKG_VERSION")
         .split('.')

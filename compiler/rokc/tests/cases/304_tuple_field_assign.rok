@@ -1,0 +1,18 @@
+// expect-exit: 0
+// expect-stdout:
+// 5 a
+// 5 b 9
+
+// 3.4: `t.0 = v` writes one element of a plain tuple, nested too.
+struct S { p: (i32, str); }
+
+fn main() {
+    let t = (1, "a");
+    t.0 = 5;
+    println(f"{t.0} {t.1}");
+    let s = S { p: (5, "x") };
+    s.p.1 = "b";
+    let n = ((1, 2), 3);
+    n.0.1 = 9;
+    println(f"{s.p.0} {s.p.1} {n.0.1}");
+}

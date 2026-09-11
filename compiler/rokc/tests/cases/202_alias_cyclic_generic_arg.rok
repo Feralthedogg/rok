@@ -1,0 +1,12 @@
+// An alias naming itself anywhere, generic arguments included, is
+// cyclic: reported at its declaration.
+// expect-error: 6:1: type alias `T` is cyclic
+// expect-error: 7:1: type alias `A` is cyclic
+
+type T = List<T>;
+type A = (i32, A | none);
+type Fine = List<i32>;
+
+fn main() {
+    let f: Fine = [1];
+}

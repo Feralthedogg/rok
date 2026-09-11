@@ -43,6 +43,9 @@ fn junk(i: i64) -> i64 {
 }
 
 fn main() {
+    // From the start: with `ROK_GC_STRESS` the collections during the
+    // loop may already have moved (and compacted) everything.
+    let before = unsafe { rok_gc_stats_moved_bytes() };
     let strs: List<str> = [];
     let slices: List<str> = [];
     let anys: List<any Weigh> = [];
@@ -74,7 +77,6 @@ fn main() {
         n += junk(i);
         i += 1;
     }
-    let before = unsafe { rok_gc_stats_moved_bytes() };
     unsafe { rok_gc_collect() };
     unsafe { rok_gc_collect() };
     unsafe { rok_gc_collect() };

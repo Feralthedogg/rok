@@ -99,9 +99,12 @@ pub(super) fn resolve_name(
     uses: &crate::uses::UseTable,
     set: &NameSet<'_>,
 ) -> Result<Option<String>, Vec<String>> {
-    let absolute = matches!(segments.first().copied(), Some("pkg" | "rok"));
+    // A lone `pkg` / `sup` / `rok` is an ordinary name (`fn sup()`); as
+    // a path root it needs something after it.
+    let root = segments.first().copied().filter(|_| segments.len() > 1);
+    let absolute = matches!(root, Some("pkg" | "rok"));
     let package = package_of(module);
-    let resolved_segs: Vec<&str> = match segments.first().copied() {
+    let resolved_segs: Vec<&str> = match root {
         // `pkg::` is the root of the package the code is in.
         Some("pkg") if is_dependency(&package) => std::iter::once(package.as_str())
             .chain(segments[1..].iter().copied())
@@ -247,6 +250,63 @@ pub(super) fn package_of(module: &str) -> String {
 
 pub(super) const fn module_display(m: &str) -> &str {
     if m.is_empty() { "<root>" } else { m }
+}
+
+/// Module path → visibility of its `mod`, from the driver's flattened
+/// module stubs (`Item::Mod` named by its full path).
+pub fn module_visibility(items: &[Item]) -> HashMap<String, Visibility> {
+    items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Mod(m) => Some((m.name.clone(), m.vis)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Spec 5.6.2 / 5.6.13: the first module on `full`'s path that code in
+/// `cur` can't see (a module is visible inside itself and below).
+pub fn hidden_module(
+    mod_vis: &HashMap<String, Visibility>,
+    cur: &str,
+    full: &str,
+) -> Option<String> {
+    let def = module_of(full);
+    def.match_indices("::")
+        .map(|(i, _)| &def[..i])
+        .chain((!def.is_empty()).then_some(def.as_str()))
+        .filter(|m| cur != *m && !cur.starts_with(&format!("{m}::")))
+        .find(|m| {
+            // A private module is visible throughout its parent.
+            let vis = |v| match v {
+                Visibility::Private => Visibility::Sub,
+                v => v,
+            };
+            mod_vis
+                .get(*m)
+                .is_some_and(|&v| !visible_from(cur, &module_of(m), vis(v)))
+        })
+        .map(str::to_owned)
+}
+
+pub fn hidden_module_msg(full: &str, module: &str, cur: &str) -> String {
+    format!(
+        "`{full}` is not visible from `{}`: module `{module}` is private to `{}` \
+         (spec 5.6.13 — add `pub` to the `mod` to expose it)",
+        module_display(cur),
+        module_display(&module_of(module))
+    )
+}
+
+/// Order of reach for spec 5.8.4: a re-export may not be wider than its
+/// item.
+pub const fn visibility_rank(v: Visibility) -> u8 {
+    match v {
+        Visibility::Private => 0,
+        Visibility::Sub => 1,
+        Visibility::Pkg => 2,
+        Visibility::Pub => 3,
+    }
 }
 
 /// Module path of an item after the driver flattened the module tree

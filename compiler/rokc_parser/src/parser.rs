@@ -50,6 +50,8 @@ pub struct Parser<'a> {
     /// so hostile input gets a diagnostic instead of a stack overflow.
     depth: u32,
     depth_reported: bool,
+    /// Links on the operator / postfix chains enclosing this point.
+    chain: u32,
     /// Extra statements from a site that emits several (nested tuple
     /// destructure `let ((a, b), c) = ..;`, spec 3.15.4). `parse_block`
     /// drains it after each statement, so they land in the same scope.
@@ -80,6 +82,8 @@ pub struct Parser<'a> {
 
 /// Nesting limit for expressions, types, patterns and blocks.
 const MAX_DEPTH: u32 = 256;
+/// Links in one left-nested operator / postfix chain.
+const MAX_CHAIN: u32 = 4096;
 /// The path of the type a variadic `xs: ...T` parameter has in the body
 /// (`Slice<T>`, spec 4.2.5).
 pub const VARIADIC_SLICE: [&str; 5] = ["rok", "core", "collections", "slice", "Slice"];
@@ -199,6 +203,7 @@ impl<'a> Parser<'a> {
             in_cast_type: false,
             depth: 0,
             depth_reported: false,
+            chain: 0,
             pending_stmts: Vec::new(),
             next_destructure_temp: 0,
             untyped_throws: Vec::new(),
@@ -371,6 +376,53 @@ impl<'a> Parser<'a> {
         r
     }
 
+    /// One more operator / postfix link on a left-nested chain (`1 + 1 +
+    /// ..`, `a.f().g()..`): the tree deepens without `nested`, so the
+    /// links of all enclosing chains share their own cap.
+    fn chain_link(&mut self) -> Option<()> {
+        self.chain += 1;
+        if self.chain <= MAX_CHAIN {
+            return Some(());
+        }
+        if !self.depth_reported {
+            self.depth_reported = true;
+            let span = self.peek_span();
+            self.error(
+                span,
+                format!("expression chain too long (limit {MAX_CHAIN})"),
+            );
+        }
+        None
+    }
+
+    /// From a path (`a::E`) at the cursor: is its `{ .. }` group followed
+    /// by another `{`?
+    fn braces_then_block(&self) -> bool {
+        let mut i = self.pos;
+        let kind = |i: usize| self.tokens.get(i).map(|t| &t.kind);
+        while matches!(kind(i), Some(TokenKind::Ident(_) | TokenKind::ColonColon)) {
+            i += 1;
+        }
+        if i == self.pos || !matches!(kind(i), Some(TokenKind::LBrace)) {
+            return false;
+        }
+        let mut depth = 0u32;
+        while let Some(k) = kind(i) {
+            match k {
+                TokenKind::LBrace => depth += 1,
+                TokenKind::RBrace => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return matches!(kind(i + 1), Some(TokenKind::LBrace));
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        false
+    }
+
     fn fresh_destructure_temp(&mut self) -> String {
         let n = self.next_destructure_temp;
         self.next_destructure_temp = self.next_destructure_temp.wrapping_add(1);
@@ -500,7 +552,7 @@ impl<'a> Parser<'a> {
         let attrs = self.parse_inner_attrs();
         while !matches!(self.peek(), TokenKind::Eof) {
             let from = self.pos;
-            if self.meta_block().is_some() {
+            if self.meta_block().is_some() || self.eat(&TokenKind::Semi) {
                 continue;
             }
             if self.at_item_start() {
@@ -2858,6 +2910,10 @@ impl<'a> Parser<'a> {
         let mut trailing: Option<Box<Expr>> = None;
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
             let from = self.pos;
+            // An empty statement (`;;`).
+            if self.eat(&TokenKind::Semi) {
+                continue;
+            }
             if let Some((stmt, is_trailing)) = self.parse_stmt() {
                 if is_trailing && matches!(self.peek(), TokenKind::RBrace) {
                     if let StmtKind::Trailing(expr) = stmt.kind {
@@ -3205,7 +3261,7 @@ impl<'a> Parser<'a> {
                 self.stmt_head = true;
                 let expr = self.parse_expr_bp(u32::MAX)?;
                 let ends = is_block_like(&expr) || matches!(self.peek(), TokenKind::RBrace);
-                if self.eat(&TokenKind::Semi) || !ends {
+                if !ends || self.eat(&TokenKind::Semi) {
                     if !ends {
                         self.expect(&TokenKind::Semi, "`;`")?;
                     }
@@ -3365,7 +3421,10 @@ impl<'a> Parser<'a> {
                     span,
                 }
             } else {
-                self.with_struct_expr(false, Self::parse_pattern)?
+                // `catch E { code, .. } { body }`: a struct pattern when a
+                // second block follows the first.
+                let struct_pat = self.braces_then_block();
+                self.with_struct_expr(struct_pat, Self::parse_pattern)?
             };
             let arm_body = self.parse_block()?;
             catches.push(CatchArm {
@@ -3407,7 +3466,10 @@ impl<'a> Parser<'a> {
     /// Pratt loop. `min_bp` is the minimum binding power that the next
     /// infix/postfix operator must exceed for the loop to consume it.
     fn parse_expr_bp(&mut self, min_bp: u32) -> Option<Expr> {
-        self.nested(|p| p.parse_expr_bp_inner(min_bp))
+        let chain = self.chain;
+        let r = self.nested(|p| p.parse_expr_bp_inner(min_bp));
+        self.chain = chain;
+        r
     }
 
     fn parse_expr_bp_inner(&mut self, min_bp: u32) -> Option<Expr> {
@@ -3431,6 +3493,7 @@ impl<'a> Parser<'a> {
         let mut last_none_prec: Option<u32> = None;
 
         loop {
+            self.chain_link()?;
             // Spec 3.2.3: `as` / `is` sit at level 11, left-assoc — below
             // prefix unary (`-x as i64` is `(-x) as i64`), above arithmetic.
             if matches!(self.peek(), TokenKind::As | TokenKind::Is) {
@@ -3866,10 +3929,13 @@ impl<'a> Parser<'a> {
                 // `try e` / `try? e` / `try! e` covers the whole expression
                 // to its right, up to a `catch` / `finally` (attached
                 // around the result by `parse_catch_tail`).
+                let try_end = self.peek_span().end;
                 self.bump();
+                // `try!` is one word: `try !x` tries the negation.
+                let glued = self.peek_span().start == try_end;
                 let kind = if self.eat(&TokenKind::Question) {
                     TryKind::Optional
-                } else if self.eat(&TokenKind::Bang) {
+                } else if glued && self.eat(&TokenKind::Bang) {
                     TryKind::Force
                 } else {
                     TryKind::Plain
@@ -4228,6 +4294,7 @@ impl<'a> Parser<'a> {
 
         // Postfix chain: calls, members, indexing, `?`, `?.`.
         loop {
+            self.chain_link()?;
             match self.peek() {
                 TokenKind::LParen | TokenKind::LBracket if stmt_head && is_block_like(&expr) => {
                     break;

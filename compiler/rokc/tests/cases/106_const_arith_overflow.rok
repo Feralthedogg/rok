@@ -1,0 +1,14 @@
+// expect-error: 9:17: constant expression overflows `u8`: the result is 400
+// expect-error: 10:18: constant expression overflows `i32`: the result is 2147483648
+// expect-error: 11:17: constant expression overflows `i8`: the result is -129
+// expect-error: 12:18: constant expression divides by zero
+
+// Integer arithmetic folded from literals that leaves its type is a
+// compile error, not a runtime panic.
+fn main() {
+    let m: u8 = 2 * 200;
+    let j: i32 = 2147483647 + 1;
+    let q: i8 = -128 - 1;
+    let d: i32 = 7 / 0;
+    let ok: u8 = 250 + 5;
+}

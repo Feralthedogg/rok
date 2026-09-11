@@ -6,3 +6,4 @@ Cargo.lock.bak
 /*.mir.rok
 /*.mlir
 .claude/
+/dist
