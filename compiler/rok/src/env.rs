@@ -1,4 +1,4 @@
-//! Named environments: `$ROK_HOME/envs/<name>/{Rok.toml, Rok.lock}`,
+//! Named environments: `$ROK_HOME/envs/<name>/{rok.rokon, rok.lock}`,
 //! dependency sets used outside a project (no activation step: `--env`,
 //! `$ROK_ENV`, `rok env use`, else `default`).
 
@@ -31,7 +31,7 @@ pub fn create(name: &str) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     std::fs::write(
         dir.join(MANIFEST),
-        format!("# rok environment `{name}`\n[deps]\n"),
+        format!("// rok environment `{name}`\n{}", manifest::EMPTY),
     )
     .map_err(|e| format!("{}: {e}", dir.display()))?;
     Ok(dir)
@@ -112,7 +112,7 @@ pub fn cmd(g: &Global, args: &[String]) -> Result<i32, String> {
         _ => {
             return Err(
                 "usage: rok env create|remove|use <name> | list | export <name> <dir> | \
-                        import <name> <dir|Rok.toml> | shell [name]"
+                        import <name> <dir|rok.rokon> | shell [name]"
                     .into(),
             );
         }
@@ -120,11 +120,11 @@ pub fn cmd(g: &Global, args: &[String]) -> Result<i32, String> {
     Ok(0)
 }
 
-/// Copy a project's (or an export's) `Rok.toml` and `Rok.lock` into a
+/// Copy a project's (or an export's) `rok.rokon` and `rok.lock` into a
 /// new environment, with relative path dependencies made absolute, then
 /// resolve it (the lock keeps the same commits).
 fn import(g: &Global, name: &str, from: &Path) -> Result<(), String> {
-    let (src_dir, toml) = if from.is_dir() {
+    let (src_dir, path) = if from.is_dir() {
         let m =
             manifest::find(from).ok_or_else(|| format!("no {MANIFEST} in {}", from.display()))?;
         (from.to_path_buf(), m)
@@ -136,25 +136,24 @@ fn import(g: &Global, name: &str, from: &Path) -> Result<(), String> {
             from.to_path_buf(),
         )
     };
-    let text = std::fs::read_to_string(&toml).map_err(|e| format!("{}: {e}", toml.display()))?;
-    let file = toml.display().to_string();
+    let mut text =
+        std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let file = path.display().to_string();
     let m = manifest::parse(&text, &file)?;
-    let mut doc = rokc_toml::Document::parse(&text).map_err(|e| e.render(&text, &file))?;
-    for (section, deps) in [("deps", &m.deps), ("dev-deps", &m.dev_deps)] {
+    for (section, deps) in [("deps", &m.deps), ("dev_deps", &m.dev_deps)] {
         for d in deps {
             if let Source::Path(p) = &d.source {
                 if Path::new(p).is_relative() {
                     let abs = std::fs::canonicalize(src_dir.join(p))
                         .map_err(|e| format!("dependency `{}`: {p}: {e}", d.name))?;
                     let s = Source::Path(abs.display().to_string());
-                    doc.set(&[section], &d.name, &s.to_toml())
-                        .map_err(|e| format!("cannot rewrite `{}`: {e}", d.name))?;
+                    text = manifest::set_dep(&text, &file, section, &d.name, &s.to_rok())?;
                 }
             }
         }
     }
     let dir = create(name)?;
-    let done = std::fs::write(dir.join(MANIFEST), doc.text())
+    let done = std::fs::write(dir.join(MANIFEST), &text)
         .map_err(|e| e.to_string())
         .and_then(|()| {
             if src_dir.join(LOCK).is_file() {

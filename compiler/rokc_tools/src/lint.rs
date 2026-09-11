@@ -5,7 +5,7 @@
 //! Most lints walk the user package's AST as parsed (`SourceFile`s, kept
 //! by the driver); `redundant_cast` / `redundant_clone` read HIR types.
 //! Levels: each lint's default, then the command line (`-A/-W/-D name`,
-//! later wins; `rok` turns `Rok.toml [lints]` into leading flags), then
+//! later wins; `rok` turns `rok.rokon` `lints` into leading flags), then
 //! `#[allow/warn/deny(name)]` on an enclosing item, `mod`, or `#![..]`
 //! at the top of a file (innermost wins).
 //!

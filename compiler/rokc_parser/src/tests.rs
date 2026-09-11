@@ -834,3 +834,19 @@ fn printed_ast_parses_back() {
         bad.join("\n=====\n")
     );
 }
+
+#[test]
+fn expr_file() {
+    let parse = |src: &str| {
+        let (tokens, _) = Lexer::new(src, "t").lex_all();
+        crate::parse_expr_file(&tokens, "t")
+    };
+    let (e, d) = parse("Package {\n    deps: { \"a\": Dep::git(\"u\", tag: \"v\") },\n}\n");
+    assert!(d.is_empty(), "{d:?}");
+    assert!(matches!(e.unwrap().kind, ExprKind::StructInit { .. }));
+    let (_, d) = parse("Package {} x");
+    assert!(
+        d[0].message.contains("expected the end of the file"),
+        "{d:?}"
+    );
+}

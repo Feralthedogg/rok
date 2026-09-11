@@ -1,0 +1,11 @@
+// expect-error: 9:5: conflicting uses of `c`
+// expect-error: `str` here, but `i32` fixed at 8:5
+
+// Two later uses that disagree: the error names both sites.
+
+fn main() -> i32 {
+    let c = List::new();
+    c.push(1);
+    c.push("x");
+    return 0;
+}

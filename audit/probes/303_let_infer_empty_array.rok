@@ -1,6 +1,6 @@
 // spec: 003.03-let
 // probe: negative-must-fail
-// expect-error: cannot infer the type of an empty `List` literal
+// expect-error: cannot infer the type of `xs`
 
 // D1: 원소 없는 리스트 리터럴 (`[]` 는 `List`, 6.5.1) 은 원소 타입을 정할 수 없다 — 타입을 적어야 한다.
 let xs = [];

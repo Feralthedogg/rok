@@ -12,7 +12,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 name = "rok"
 version = "0.1.0"
 dependencies = [
- "rokc_toml",
+ "rokc_rokon",
 ]
 
 [[package]]
@@ -70,6 +70,7 @@ dependencies = [
  "rokc_diagnostic",
  "rokc_lexer",
  "rokc_parser",
+ "rokc_rokon",
 ]
 
 [[package]]
@@ -128,8 +129,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "rokc_toml"
+name = "rokc_rokon"
 version = "0.1.0"
+dependencies = [
+ "rokc_ast",
+ "rokc_diagnostic",
+ "rokc_lexer",
+ "rokc_parser",
+]
 
 [[package]]
 name = "rokc_tools"
@@ -144,6 +151,7 @@ dependencies = [
  "rokc_ir_common",
  "rokc_lexer",
  "rokc_parser",
+ "rokc_rokon",
 ]
 
 [[package]]

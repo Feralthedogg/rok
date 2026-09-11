@@ -1,0 +1,62 @@
+// expect-exit: 0
+// expect-stdout:
+// 3 5 5 2 4
+// 30 40 50 1
+// 0 5 1 7
+// 12 22
+
+// Spec 3.5.3: a method path without a call is a `fn` value — a static
+// method `fn(args) -> R`, an instance one `fn(Self, args) -> R`.
+// `#[intrinsic]` methods (`i32::add`) get a thunk, generic ones take
+// their type arguments from the path or the expected `fn` type, and a
+// throwing method gives a throwing `fn`.
+struct Point { x: f64; y: f64; }
+impl Point {
+    fn new(x: f64, y: f64) -> Point { return Point { x: x, y: y }; }
+    fn norm(self) -> f64 { return self.x + self.y; }
+    fn twice(self) -> f64 { let f = Self::norm; return f(self) * 2.0; }
+}
+
+struct Box<T> { v: T; }
+impl<T> Box<T> {
+    fn new(v: T) -> Box<T> { return Box { v: v }; }
+    fn get(self) -> T { return self.v; }
+}
+
+trait Shape { fn area(self) -> i32; fn unit() -> Self; }
+impl Shape for i32 {
+    fn area(self) -> i32 { return self * 10; }
+    fn unit() -> i32 { return 1; }
+}
+
+fn parse(s: str) throws -> i32 {
+    if s == "x" { throw ValueError { msg: "bad" }; }
+    return 5;
+}
+struct P {}
+impl P { fn parse(s: str) throws -> i32 { return try parse(s); } }
+
+fn apply<A, R>(f: fn(A) -> R, a: A) -> R { return f(a); }
+fn area_of<T: Shape>(x: T) -> i32 { let f = T::area; return f(x) + 2; }
+
+fn main() -> i32 {
+    let mk = Point::new;
+    let n = Point::norm;
+    let add = i32::add;
+    let xs = [Point::new(1.0, 1.0), Point::new(2.0, 3.0)];
+    let ys: List<f64> = xs.iter().map(Point::norm).collect();
+    let bs: List<Box<i32>> = [1, 2].iter().map(Box::new).collect();
+    let g = Box::<i32>::get;
+    println(f"{n(mk(1.0, 2.0))} {add(2, 3)} {ys[1]} {bs.len()} {g(Box::new(4))}");
+
+    let a: fn(i32) -> i32 = Shape::area;
+    let u: fn() -> i32 = Shape::unit;
+    println(f"{a(3)} {apply(i32::area, 4)} {apply(<i32 as Shape>::area, 5)} {u()}");
+
+    let q = P::parse;
+    let r = try? q("x");
+    println(f"{r ?? 0} {try! q("y")} {apply(Point::norm, Point::new(0.5, 0.5))} {Point::new(1.5, 2.0).twice()}");
+
+    println(f"{area_of(1)} {area_of(2)}");
+    return 0;
+}

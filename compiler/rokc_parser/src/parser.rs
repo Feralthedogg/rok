@@ -158,9 +158,31 @@ pub fn parse_program_meta(
         let program = p.parse_program();
         (program, p.diagnostics)
     };
-    // Recursive descent: `MAX_DEPTH` levels of debug-build frames need
-    // more than a default 2-8 MiB stack, so parse on a dedicated thread
-    // whose stack is sized for the cap (address space only until used).
+    on_parser_stack(run)
+}
+
+/// A file that is one expression and nothing else (a `.rokon` file: the package
+/// manifest): parse it without top-level statement rules (no `;`).
+pub fn parse_expr_file(
+    tokens: &[Token],
+    file: impl Into<String>,
+) -> (Option<Expr>, Vec<RokDiagnostic>) {
+    let file = file.into();
+    on_parser_stack(move || {
+        let mut p = Parser::new(tokens, file);
+        let e = p.parse_expr();
+        if e.is_some() && !matches!(p.peek(), TokenKind::Eof) {
+            let span = p.peek_span();
+            p.error(span, "expected the end of the file after the expression");
+        }
+        (e, p.diagnostics)
+    })
+}
+
+/// Recursive descent: `MAX_DEPTH` levels of debug-build frames need more
+/// than a default 2-8 MiB stack, so parse on a dedicated thread whose
+/// stack is sized for the cap (address space only until used).
+fn on_parser_stack<T: Send>(run: impl FnOnce() -> T + Send) -> T {
     std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(PARSER_STACK)

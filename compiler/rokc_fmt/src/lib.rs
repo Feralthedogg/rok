@@ -1,4 +1,5 @@
-//! `rokc fmt` (spec 901): the standard layout for `.rok` sources.
+//! `rokc fmt` (spec 901): the standard layout for `.rok` sources and
+//! `.rokon` data files.
 //!
 //! Layout-only and token-preserving: the formatter re-indents lines by
 //! bracket nesting (4 spaces per level), strips trailing whitespace,
@@ -129,6 +130,16 @@ pub fn format_source(src: &str) -> Result<String, String> {
     Ok(out)
 }
 
+/// Format a `.rokon` file with the same layout rules.
+///
+/// It must be one RokON value (`Err`: the rendered error, against
+/// `file`). ponytail: re-indented in place, not rewritten to the canonical
+/// one-line-if-it-fits form (that would drop comments).
+pub fn format_rokon(src: &str, file: &str) -> Result<String, String> {
+    rokc_rokon::parse(src).map_err(|e| e.render(src, file))?;
+    format_source(src)
+}
+
 const fn is_open(k: &TokenKind) -> bool {
     matches!(
         k,
@@ -238,6 +249,17 @@ mod tests {
     fn keeps_multiline_strings_and_continuations() {
         let src = "fn f() {\n    let s = \"a  \n\n  b\";\n    let y = x\n        .g();\n}\n";
         assert_eq!(format_source(src).unwrap(), src);
+    }
+
+    #[test]
+    fn rokon_files() {
+        let src = "// cfg\nCfg {\n  tags: [\n      \"a\", // first\n  ],\n}\n";
+        assert_eq!(
+            format_rokon(src, "c.rokon").unwrap(),
+            "// cfg\nCfg {\n    tags: [\n        \"a\", // first\n    ],\n}\n"
+        );
+        let e = format_rokon("Cfg { a: x }", "c.rokon").unwrap_err();
+        assert!(e.starts_with("c.rokon:1:10: error: bare identifier"), "{e}");
     }
 
     #[test]

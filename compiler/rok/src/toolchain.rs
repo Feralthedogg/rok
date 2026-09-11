@@ -49,7 +49,7 @@ pub fn rokc_for(pin: Option<&str>) -> Result<(PathBuf, Option<PathBuf>), String>
         Some(p) if !matches(p, VERSION) => {
             let Some(v) = installed().into_iter().rev().find(|v| matches(p, v)) else {
                 return Err(format!(
-                    "this project pins toolchain {p} (Rok.toml), but this rok is {VERSION} and \
+                    "this project pins toolchain {p} (rok.rokon), but this rok is {VERSION} and \
                      {p} is not installed; install it with `rok toolchain install {p} --from \
                      <dir | tarball>`"
                 ));

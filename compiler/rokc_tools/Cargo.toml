@@ -16,6 +16,7 @@ rokc_interface = { workspace = true }
 rokc_ir_common = { workspace = true }
 rokc_lexer = { workspace = true }
 rokc_parser = { workspace = true }
+rokc_rokon = { workspace = true }
 
 [lints]
 workspace = true

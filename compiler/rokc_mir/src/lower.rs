@@ -907,6 +907,45 @@ impl<'a> FnBuilder<'a> {
         }
     }
 
+    /// A labeled block: a frame so `break 'label value` exits with a value
+    /// via a join block.
+    fn lower_labeled_block(&mut self, b: &HirBlock, label: String, ty: &HirTy) -> Operand {
+        let exit_bb = self.new_block();
+        let result_ty = lower_ty_in(ty, self.module);
+        let break_param = if matches!(result_ty, MirTy::Unit) {
+            None
+        } else {
+            Some(self.add_block_param(exit_bb, result_ty))
+        };
+        self.loop_stack.push(LoopFrame {
+            // `continue` inside a labeled block isn't
+            // meaningful — point it at exit so misuse
+            // becomes a no-op rather than a crash.
+            continue_bb: exit_bb,
+            break_bb: exit_bb,
+            break_param,
+            label: Some(label),
+            is_loop: false,
+        });
+        let (value, diverged) = self.lower_block_value(b);
+        self.loop_stack.pop();
+        if !diverged {
+            let args = match break_param {
+                Some(_) => vec![value],
+                None => Vec::new(),
+            };
+            self.terminate(Terminator::Goto {
+                target: exit_bb,
+                args,
+            });
+        }
+        self.current = exit_bb;
+        match break_param {
+            Some(p) => Operand::Copy(p),
+            None => Operand::Const(ConstVal::Unit),
+        }
+    }
+
     fn lower_expr_to_operand(&mut self, e: &HirExpr) -> Operand {
         match &e.kind {
             HirExprKind::Const(c) => Operand::Const(c.clone()),
@@ -928,40 +967,7 @@ impl<'a> FnBuilder<'a> {
                 // frame so `break 'label value` exits with a value via
                 // a join block.
                 if let Some(label) = b.label.clone() {
-                    let exit_bb = self.new_block();
-                    let result_ty = lower_ty_in(&e.ty, self.module);
-                    let break_param = if matches!(result_ty, MirTy::Unit) {
-                        None
-                    } else {
-                        Some(self.add_block_param(exit_bb, result_ty))
-                    };
-                    self.loop_stack.push(LoopFrame {
-                        // `continue` inside a labeled block isn't
-                        // meaningful — point it at exit so misuse
-                        // becomes a no-op rather than a crash.
-                        continue_bb: exit_bb,
-                        break_bb: exit_bb,
-                        break_param,
-                        label: Some(label),
-                        is_loop: false,
-                    });
-                    let (value, diverged) = self.lower_block_value(b);
-                    self.loop_stack.pop();
-                    if !diverged {
-                        let args = match break_param {
-                            Some(_) => vec![value],
-                            None => Vec::new(),
-                        };
-                        self.terminate(Terminator::Goto {
-                            target: exit_bb,
-                            args,
-                        });
-                    }
-                    self.current = exit_bb;
-                    match break_param {
-                        Some(p) => Operand::Copy(p),
-                        None => Operand::Const(ConstVal::Unit),
-                    }
+                    self.lower_labeled_block(b, label, &e.ty)
                 } else {
                     for s in &b.stmts {
                         self.lower_stmt(s);

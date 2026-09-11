@@ -1,5 +1,5 @@
-//! Dependency resolution: from a manifest's `[deps]` (and `[dev-deps]`)
-//! through every dependency's own `Rok.toml`, to one package per name.
+//! Dependency resolution: from a manifest's `deps` (and `dev_deps`)
+//! through every dependency's own `rok.rokon`, to one package per name.
 //! Git packages come from the lock unless `update` names them.
 
 use std::collections::HashMap;
@@ -12,15 +12,15 @@ use crate::manifest::{self, Dep, Manifest, Source};
 #[derive(Default)]
 pub struct Options {
     pub offline: bool,
-    /// `--locked`: fail instead of changing `Rok.lock`.
+    /// `--locked`: fail instead of changing `rok.lock`.
     pub locked: bool,
     /// `rok update [names]`: re-resolve these git packages (empty: all).
     pub update: Option<Vec<String>>,
     pub quiet: bool,
 }
 
-/// What a command works on: a project (a directory with `Rok.toml`), a
-/// named environment, a script's `//! ```toml` block, or nothing.
+/// What a command works on: a project (a directory with `rok.rokon`), a
+/// named environment, a script's `//! ```rokon` block, or nothing.
 pub struct Context {
     pub manifest: Manifest,
     /// Path dependencies are relative to this directory.
@@ -81,7 +81,7 @@ pub fn resolve(home: &Path, ctx: &Context, opts: &Options) -> Result<Vec<Resolve
             .chain(&ctx.manifest.dev_deps)
             .any(|d| matches!(d.source, Source::Git { .. }));
         if any_git {
-            return Err("there is no Rok.lock, and --locked forbids writing one".to_owned());
+            return Err("there is no rok.lock, and --locked forbids writing one".to_owned());
         }
     }
     let mut r = Resolver {
@@ -197,7 +197,7 @@ impl Resolver<'_> {
         } else {
             if self.opts.locked && !updating {
                 return Err(format!(
-                    "`{}` is not in Rok.lock (or its source changed), and --locked forbids \
+                    "`{}` is not in rok.lock (or its source changed), and --locked forbids \
                      changing it",
                     dep.name
                 ));
@@ -215,7 +215,7 @@ impl Resolver<'_> {
         if let Some(l) = &pinned {
             if l.tree != tree {
                 return Err(format!(
-                    "`{}`: commit {} has tree {tree}, but Rok.lock says {}",
+                    "`{}`: commit {} has tree {tree}, but rok.lock says {}",
                     dep.name, l.commit, l.tree
                 ));
             }

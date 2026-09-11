@@ -1,0 +1,30 @@
+// expect-error: 24:13: `Point::bump` has a `ref` parameter (or `ref self`) and cannot be used as a `fn` value
+// expect-error: 25:13: `Point::set` has a `ref` parameter
+// expect-error: 26:13: struct `Point` has no field `norm`
+// expect-error: 27:5: type annotations needed: cannot infer the type of `d` (`fn(_) -> _
+// expect-error: 28:5: type annotations needed: cannot infer the type of `e`
+
+// Spec 3.5.3 / 3.5.4 / 4.7.6: a method with a `ref` parameter or `ref
+// self` is no `fn` value, `x.method` without a call is no value, and a
+// trait / generic-type method path needs its `fn` type from context or
+// from later calls (none here).
+struct Point { x: f64; y: f64; }
+impl Point {
+    fn bump(ref self) { self.x = self.x + 1.0; }
+    fn set(self, ref out: f64) { out = self.x; }
+    fn norm(self) -> f64 { return self.x + self.y; }
+}
+struct Box<T> { v: T; }
+impl<T> Box<T> { fn get(self) -> T { return self.v; } }
+trait Shape { fn area(self) -> i32; }
+impl Shape for i32 { fn area(self) -> i32 { return self * 10; } }
+
+fn main() -> i32 {
+    let p = Point { x: 1.0, y: 2.0 };
+    let a = Point::bump;
+    let b = Point::set;
+    let c = p.norm;
+    let d = Shape::area;
+    let e = Box::get;
+    return 0;
+}

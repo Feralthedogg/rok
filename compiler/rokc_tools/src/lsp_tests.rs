@@ -246,3 +246,67 @@ fn scripted_session() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A `.rokon` buffer (`rok.rokon`, the package manifest) is one RokON
+/// value: only its syntax is checked, not compiled as a module.
+#[test]
+fn manifest_buffer() {
+    let uri = "file:///nowhere/rok.rokon";
+    let open = notify(
+        "textDocument/didOpen",
+        Json::obj([(
+            "textDocument",
+            Json::obj([
+                ("uri", Json::str(uri)),
+                ("languageId", Json::str("rok")),
+                ("version", Json::num(1)),
+                (
+                    "text",
+                    Json::str("Package {\n    deps: { \"a\": Dep::path(\"x\") },\n}\n"),
+                ),
+            ]),
+        )]),
+    );
+    let script = [
+        open,
+        request(1, "textDocument/hover", at(uri, 0, 1)),
+        change(uri, "Package {\n    name: \"a\"\n    version: \"1\",\n}\n"),
+        request(2, "textDocument/hover", at(uri, 0, 1)),
+        // Valid rok, but not RokON data.
+        change(uri, "Package {\n    name: bare,\n}\n"),
+        request(4, "textDocument/hover", at(uri, 0, 1)),
+        request(3, "shutdown", Json::Null),
+        notify("exit", Json::Null),
+    ];
+    let input: String = script.iter().map(frame).collect();
+    let mut out = Vec::new();
+    let code = serve(
+        Cursor::new(input.into_bytes()),
+        &mut out,
+        Vec::new(),
+        Vec::new(),
+    );
+    assert_eq!(code, 0);
+    let published: Vec<Json> = messages(&out)
+        .into_iter()
+        .filter(|m| m.get("method").as_str() == Some("textDocument/publishDiagnostics"))
+        .map(|m| m.get("params").get("diagnostics").clone())
+        .collect();
+    assert_eq!(published[0], Json::Arr(Vec::new()));
+    let Json::Arr(errs) = &published[1] else {
+        panic!("{published:?}")
+    };
+    assert!(!errs.is_empty(), "{published:?}");
+    assert_eq!(errs[0].get("range").get("start").get("line"), &Json::num(2));
+    let Json::Arr(errs) = &published[2] else {
+        panic!("{published:?}")
+    };
+    assert_eq!(errs[0].get("range").get("start").get("line"), &Json::num(1));
+    assert!(
+        errs[0]
+            .get("message")
+            .as_str()
+            .is_some_and(|m| m.starts_with("bare identifier `bare`")),
+        "{published:?}"
+    );
+}

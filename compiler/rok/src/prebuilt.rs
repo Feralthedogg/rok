@@ -84,7 +84,7 @@ fn deps_dir(pkg_dir: &Path, args: &[String], flags: &[String]) -> PathBuf {
         .join("deps")
 }
 
-/// Every `.rok` / `Rok.toml` under `dir` (not `target/`, not dot
+/// Every `.rok` and `.rokon` (`rok.rokon`) under `dir` (not `target/`, not dot
 /// directories), sorted.
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = std::fs::read_dir(dir) else {
@@ -97,7 +97,7 @@ fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
             if name != "target" && !name.starts_with('.') {
                 sources(&p, out);
             }
-        } else if p.extension().is_some_and(|x| x == "rok") || name == "Rok.toml" {
+        } else if p.extension().is_some_and(|x| x == "rok" || x == "rokon") {
             out.push(p);
         }
     }

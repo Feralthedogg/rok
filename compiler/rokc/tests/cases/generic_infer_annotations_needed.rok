@@ -1,7 +1,7 @@
-// expect-error: 11:13: type annotations needed: cannot infer type parameter `T` of `wrap`
+// expect-error: 11:5: type annotations needed: cannot infer the type of `r`
 
 // Nothing after the binding fixes `T` (a method call on it doesn't): the
-// error asks for an annotation at the call.
+// error asks for an annotation at the `let`.
 fn wrap<T>(v: i32) -> Result<i32, T> { return Ok(v); }
 
 fn show(n: i32) { println(f"{n}"); }

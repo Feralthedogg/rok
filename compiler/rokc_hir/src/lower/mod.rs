@@ -25,6 +25,8 @@ mod coro;
 mod desugar;
 mod expr;
 mod fstring;
+mod infer;
+mod method_value;
 mod mono;
 mod pattern;
 mod reflect;
@@ -795,6 +797,9 @@ fn coerce(
     value: HirExpr,
     what: &dyn Fn() -> String,
 ) -> HirExpr {
+    if infer::unify_value(ctx, slot, &value) {
+        return value;
+    }
     let value = c_fn_value(ctx, slot, value);
     let value = adapt_never_fn(ctx, slot, value);
     let value = adapt_fn_value(ctx, slot, value);
@@ -1225,11 +1230,19 @@ struct ClosureSink {
     /// Diagnostics emitted during lowering — surfaced through
     /// `HirModule.diagnostics` so the driver can fail the build.
     diagnostics: std::cell::RefCell<Vec<rokc_diagnostic::RokDiagnostic>>,
+    /// Inference variables (`infer`): one per open type parameter of an
+    /// un-annotated `let` being inferred from its later uses.
+    infer_vars: std::cell::RefCell<Vec<infer::Var>>,
+    /// `let` inferences in progress: unification only runs when > 0.
+    infer_depth: std::cell::Cell<u32>,
+    /// Variables before the outermost inference in progress.
+    infer_floor: std::cell::Cell<usize>,
 }
 
 /// Per-function lowering state: scoped name → local-id map plus the
 /// running list of local declarations, on top of the shared `Env`.
 #[derive(Clone)]
+#[allow(clippy::struct_excessive_bools)] // independent per-body modes
 struct LowerCtx<'a> {
     env: &'a Env<'a>,
     locals: Vec<HirLocal>,
@@ -1340,7 +1353,10 @@ struct LowerCtx<'a> {
     /// Probing a block for the type an un-annotated `let` must have:
     /// the local, and the first concrete expected type it is read
     /// under (`expr::infer_from_later_use`).
-    infer_probe: Option<(LocalId, Option<HirTy>)>,
+    /// Lowering an un-annotated `let`'s initializer or the code after
+    /// it for inference: an open type parameter becomes an inference
+    /// variable instead of an error (`infer`).
+    infer_vars: bool,
     /// Already lowered expressions an AST desugar refers to by a `#sN`
     /// path (`expr::splice`).
     splices: HashMap<String, HirExpr>,
@@ -1351,6 +1367,8 @@ struct ProbeMark {
     diagnostics: usize,
     extras: usize,
     uninferred: u32,
+    next_id: u32,
+    any_tags: usize,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -1359,7 +1377,33 @@ impl<'a> LowerCtx<'a> {
             diagnostics: self.env.sink.diagnostics.borrow().len(),
             extras: self.env.sink.extras.borrow().len(),
             uninferred: self.env.sink.uninferred.get(),
+            next_id: self.env.sink.next_id.get(),
+            any_tags: self.env.sink.any_tags.borrow().len(),
         }
+    }
+
+    /// Undo everything lowered since `mark`: diagnostics, and every
+    /// function made since (closures, thunks and generic instances, with
+    /// their cache entries) — an inference probe may have made them over
+    /// inference variables. Struct / enum instances stay (keyed by their
+    /// arguments; `infer::drop_var_instances` empties the open ones).
+    fn rollback_all(&self, mark: &ProbeMark) {
+        let sink = &self.env.sink;
+        let old = |id: &FunctionId| id.0 < mark.next_id;
+        sink.diagnostics.borrow_mut().truncate(mark.diagnostics);
+        sink.uninferred.set(mark.uninferred);
+        sink.extras.borrow_mut().retain(|f| old(&f.id));
+        sink.mono_cache.borrow_mut().retain(|_, id| old(id));
+        sink.mono_sigs.borrow_mut().retain(|id, _| old(id));
+        sink.ref_out.borrow_mut().retain(|id, _| old(id));
+        sink.thunks.borrow_mut().retain(|_, id| old(id));
+        sink.any_dispatch.borrow_mut().retain(|d| old(&d.id));
+        sink.any_tags.borrow_mut().truncate(mark.any_tags);
+        let mut iw = sink.instance_warns.borrow_mut();
+        for set in iw.instances.values_mut() {
+            set.retain(old);
+        }
+        iw.warns.retain(|(_, _, by)| by.iter().any(old));
     }
 
     /// Drop the diagnostics (and "annotations needed" count) since
@@ -1441,7 +1485,7 @@ impl<'a> LowerCtx<'a> {
             ty_bound_args: HashMap::new(),
             coro: None,
             assoc_names: Vec::new(),
-            infer_probe: None,
+            infer_vars: false,
             splices: HashMap::new(),
         }
     }
@@ -1528,6 +1572,7 @@ impl<'a> LowerCtx<'a> {
             HirTy::AnyTrait(b) if b.len() == 1 => format!("any {}", b[0]),
             HirTy::AnyTrait(b) => format!("any ({})", b.join(" + ")),
             HirTy::Unknown => "{unknown}".to_owned(),
+            HirTy::Path(p) if p.first().is_some_and(|s| s == infer::VAR) => "_".to_owned(),
             HirTy::Path(p) => p.join("::"),
             HirTy::Tuple(parts) => {
                 let inner: Vec<String> = parts.iter().map(|t| self.ty_name(t)).collect();
@@ -2334,6 +2379,8 @@ impl<'a> LowerCtx<'a> {
                         let mut leftover = Vec::new();
                         args.iter()
                             .for_each(|a| collect_unknown_paths(a, &mut leftover));
+                        // An inference variable is an argument like any type.
+                        leftover.retain(|p| !p.starts_with(infer::VAR));
                         if leftover.is_empty() && self.env.generic_structs.contains_key(&full) {
                             if let Some(id) = self.instantiate_struct(&full, args) {
                                 return HirTy::Struct(id);

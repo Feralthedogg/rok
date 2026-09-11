@@ -1,6 +1,6 @@
 // spec: 002.10-generics-inference
 // probe: negative-must-fail
-// expect-error: cannot infer type parameter `E`
+// expect-error: cannot infer the type of `r`
 
 // A type parameter that appears only in the return type needs an
 // expected type (annotation / parameter slot / return); with none it

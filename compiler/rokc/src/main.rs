@@ -45,7 +45,7 @@ commands:
                          $JUPYTER_DATA_DIR, else ~/Library/Jupyter (macOS) /
                          ~/.local/share/jupyter; `rok jupyter install` makes
                          one that starts the kernel through `rok`
-  fmt [path]             format .rok files in place (file or directory)
+  fmt [path]             format .rok / .rokon files in place (file or directory)
   lint [path]            compile diagnostics plus lint checks (no native
                          build); exit 1 if a `deny` lint fires
   doc [path]             HTML API docs of the package (and its --extern
@@ -978,7 +978,12 @@ fn cmd_fmt(a: &Args) {
             Ok(s) => s,
             Err(e) => fail(&format!("{}: {e}", f.display())),
         };
-        let formatted = match rokc_fmt::format_source(&src) {
+        let formatted = if f.extension().is_some_and(|x| x == "rokon") {
+            rokc_fmt::format_rokon(&src, &f.display().to_string())
+        } else {
+            rokc_fmt::format_source(&src)
+        };
+        let formatted = match formatted {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("rokc: cannot format {}: {e}", f.display());
@@ -1022,7 +1027,7 @@ fn rok_files(dir: &Path, out: &mut Vec<PathBuf>) {
             if name != "target" && !name.starts_with('.') {
                 rok_files(&p, out);
             }
-        } else if p.extension().is_some_and(|x| x == "rok") {
+        } else if p.extension().is_some_and(|x| x == "rok" || x == "rokon") {
             out.push(p);
         }
     }

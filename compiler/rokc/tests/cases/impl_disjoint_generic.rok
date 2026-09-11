@@ -3,8 +3,8 @@
 // 1 2
 // 3 4
 
-// Generic impls of one trait whose targets don't unify, or whose bounds
-// no known type meets together, are not an overlap (spec 2.9.3).
+// Generic impls of one trait whose targets don't unify are disjoint; so
+// is a concrete impl whose type fails the generic one's bound (`bool: A`; spec 2.9.5).
 trait A {}
 trait B {}
 trait Show { fn show(self) -> i32; }
@@ -14,7 +14,7 @@ impl B for bool {}
 struct Box<T> { v: T; }
 struct Cell<T> { v: T; }
 impl<T: A> Show for Box<T> { fn show(self) -> i32 { return 1; } }
-impl<U: B> Show for Box<U> { fn show(self) -> i32 { return 2; } }
+impl Show for Box<bool> { fn show(self) -> i32 { return 2; } }
 impl<T> Show for Cell<T> { fn show(self) -> i32 { return 3; } }
 impl<T> Show for (T, T, T) { fn show(self) -> i32 { return 4; } }
 

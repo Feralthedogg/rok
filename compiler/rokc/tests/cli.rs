@@ -269,6 +269,22 @@ fn fmt_check_and_rewrite() {
         messy
     );
     assert_exit(&rokc(None, &dir, &["fmt", "--check", "a.rok"]), 0);
+
+    // `.rokon` data files too: re-indented, and checked to be RokON.
+    fs::write(dir.join("rok.rokon"), "Package {\n  deps: {}, // none\n}\n").unwrap();
+    assert_exit(&rokc(None, &dir, &["fmt"]), 0);
+    assert_eq!(
+        fs::read_to_string(dir.join("rok.rokon")).unwrap(),
+        "Package {\n    deps: {}, // none\n}\n"
+    );
+    fs::write(dir.join("bad.rokon"), "Package { name: x }\n").unwrap();
+    let out = rokc(None, &dir, &["fmt", "--check"]);
+    assert_exit(&out, 1);
+    assert!(
+        text(&out.stderr).contains("bad.rokon:1:17: error: bare identifier `x`"),
+        "{}",
+        text(&out.stderr)
+    );
 }
 
 #[test]
@@ -676,6 +692,44 @@ fn dependency_trait_is_not_the_current_package() {
     let out = rokc(Some(&env), &dir, &["run", "app", "--extern", "dz=dz"]);
     assert_exit(&out, 0);
     assert_eq!(text(&out.stdout), "7\n");
+}
+
+/// Spec 2.9.5: a user impl overlapping a dependency's bounded blanket
+/// impl is an error at its declaration; without the bound's impl for
+/// the user type, the two are disjoint.
+#[test]
+fn dependency_blanket_impl_overlaps_user_impl() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("overlap_dep");
+    fs::create_dir_all(dir.join("dd")).unwrap();
+    fs::write(
+        dir.join("dd/lib.rok"),
+        "pub trait Shape {}\n\
+         pub trait Describe { fn d(self) -> i32; }\n\
+         impl<T: Shape> Describe for T { fn d(self) -> i32 { return 1; } }\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("app")).unwrap();
+    let main = "use dd::{Shape, Describe};\n\
+                struct Mine<T> { v: T; }\n\
+                impl<T> Describe for Mine<T> { fn d(self) -> i32 { return 2; } }\n\
+                println(f\"{Mine { v: 1 }.d()}\");\n";
+    fs::write(dir.join("app/main.rok"), main).unwrap();
+    let out = rokc(Some(&env), &dir, &["run", "app", "--extern", "dd=dd"]);
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "2\n");
+    fs::write(
+        dir.join("app/main.rok"),
+        format!("{main}impl<T> Shape for Mine<T> {{}}\n"),
+    )
+    .unwrap();
+    let out = rokc(Some(&env), &dir, &["check", "app", "--extern", "dd=dd"]);
+    assert_exit(&out, 1);
+    assert!(
+        text(&out.stderr).contains("overlap on `Mine<T>` — bounds don't make impls disjoint"),
+        "{}",
+        text(&out.stderr)
+    );
 }
 
 #[test]

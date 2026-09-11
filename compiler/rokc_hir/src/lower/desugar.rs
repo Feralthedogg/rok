@@ -267,6 +267,7 @@ pub(super) fn closure_ctx<'a>(
     cl_ctx.ty_bound_args.clone_from(&ctx.ty_bound_args);
     cl_ctx.assoc_names.clone_from(&ctx.assoc_names);
     cl_ctx.unsafe_depth = ctx.unsafe_depth;
+    cl_ctx.infer_vars = ctx.infer_vars;
 
     // Closures with captures take an extra `env` parameter (a tuple of
     // captured values). The env param is declared first so its LocalId
@@ -318,6 +319,7 @@ pub(super) fn closure_ctx<'a>(
             Some(t) => ctx.resolve_ast_ty(t),
             None => match expected_param_tys.as_ref().and_then(|v| v.get(pi)) {
                 Some(t) if *t != HirTy::Unknown => t.clone(),
+                _ if ctx.infer_vars => super::infer::fresh(ctx),
                 _ => {
                     ctx.emit_error(
                         rokc_diagnostic::ErrorKind::Type,

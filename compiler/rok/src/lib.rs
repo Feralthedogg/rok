@@ -1,5 +1,5 @@
-//! `rok`: the toolchain front (spec 901). It owns `Rok.toml` /
-//! `Rok.lock`, dependency resolution and the git cache, environments and
+//! `rok`: the toolchain front (spec 901). It owns `rok.rokon` /
+//! `rok.lock`, dependency resolution and the git cache, environments and
 //! toolchains, and runs the compiler `rokc` (next to itself, or a pinned
 //! toolchain's) with the resolved dependencies as `--extern name=root`.
 //!
@@ -8,7 +8,7 @@
 //! $ROK_HOME/lib/...                  runtime and standard library (rokc)
 //! $ROK_HOME/cache/git/               shared git cache (see `git`)
 //! $ROK_HOME/cache/scripts/<hash>/    a script's lock
-//! $ROK_HOME/envs/<name>/             a named environment (Rok.toml, Rok.lock)
+//! $ROK_HOME/envs/<name>/             a named environment (rok.rokon, rok.lock)
 //! $ROK_HOME/envs/CURRENT             `rok env use`'s choice
 //! $ROK_HOME/toolchains/<version>/    installed toolchains (`bin/rokc`, `lib/`)
 //! ```
@@ -34,12 +34,12 @@ usage: rok [options] <command> [args]
        rok [options]                same as `rok repl`
 
 packages:
-  new [--lib|--bin] <name>     create a package (with Rok.toml)
+  new [--lib|--bin] <name>     create a package (with rok.rokon)
   init [--lib|--bin] [dir]     make a directory a package
-  add <name> --path <dir>      add a dependency (--dev: to [dev-deps])
+  add <name> --path <dir>      add a dependency (--dev: to dev_deps)
   add <name> --git <url> [--rev <r> | --tag <t> | --branch <b>]
   remove <name>                remove a dependency
-  update [name...]             re-resolve git dependencies, rewrite Rok.lock
+  update [name...]             re-resolve git dependencies, rewrite rok.lock
   deps                         print the resolved dependencies (name=lib.rok)
   clean [path]                 remove target/
 
@@ -53,16 +53,16 @@ build (run by rokc, with the dependencies):
   jupyter install [--user]     install the `rok` Jupyter kernel (with --env:
                                `rok-<env>`, running in that environment)
   jupyter --connection-file <f>  the kernel (Jupyter starts it)
-  fmt [path]                   format .rok files
+  fmt [path]                   format .rok and .rokon files
   bench [path] [filter]        time the `#[bench]` functions
-  lint [path]                  lint (levels: Rok.toml [lints], then -A/-W/-D)
+  lint [path]                  lint (levels: rok.rokon lints, then -A/-W/-D)
   doc [path]                   HTML docs (with dependencies) in target/doc/
 
 environments:
   env create|remove|use <name>      a named environment
   env list                          (`*`: the active one)
-  env export <name> <dir>           write its Rok.toml / Rok.lock to <dir>
-  env import <name> <dir|Rok.toml>  create it from a project or export
+  env export <name> <dir>           write its rok.rokon / rok.lock to <dir>
+  env import <name> <dir|rok.rokon> create it from a project or export
   env shell [name]                  a $SHELL with ROK_ENV=<name>
 
 toolchains:
@@ -73,15 +73,15 @@ toolchains:
 options:
   --env <name>    use that environment instead of the project's
   --offline       never fetch (git dependencies must be cached)
-  --locked        fail instead of changing Rok.lock
+  --locked        fail instead of changing rok.lock
   --cwd <dir>     change directory first
   -q, --quiet     less output
   version, help
 
-A directory with Rok.toml is a project (its own environment). Outside one,
+A directory with rok.rokon is a project (its own environment). Outside one,
 the environment is $ROK_ENV, else the one `rok env use` chose, else
-`default`. A lone script may start with a //! ```toml block holding
-[deps].
+`default`. A lone script may start with a //! ```rokon block holding
+`Package { deps: {..} }`.
 
 environment: ROK_HOME (default: the parent of rok's bin/), ROK_ENV
 ";
@@ -262,7 +262,8 @@ fn positionals(args: &[String]) -> Vec<&str> {
 }
 
 /// The package directory `start` belongs to: the nearest directory at
-/// or above it holding `main.rok`, `lib.rok` or `Rok.toml`.
+/// or above it holding `main.rok`, `lib.rok` or `rok.rokon`
+/// (or an old-named manifest, so that its error shows).
 fn package_dir(start: &Path) -> Option<PathBuf> {
     let abs = std::path::absolute(start).ok()?;
     let from = if abs.is_file() { abs.parent()? } else { &abs };
@@ -337,15 +338,17 @@ fn target_for(g: &Global, path: Option<&str>) -> Result<Target, String> {
             });
         }
     } else if start.is_file() {
-        // A lone script: its own `//! ```toml` block, if any.
+        // A lone script: its own `//! ```rokon` block, if any.
         let src = std::fs::read_to_string(start).unwrap_or_default();
+        let file = format!("{} (//! rokon block)", start.display());
         if let Some(block) = manifest::script_block(&src) {
-            let file = format!("{} (//! toml block)", start.display());
             let manifest = manifest::parse(&block, &file)?;
-            if manifest.dev_deps.len() + usize::from(manifest.toolchain.is_some()) > 0
+            if manifest.dev_deps.len() + manifest.lints.len() > 0
+                || manifest.toolchain.is_some()
                 || manifest.name.is_some()
+                || manifest.version.is_some()
             {
-                return Err(format!("{file}: a script block holds only [deps]"));
+                return Err(format!("{file}: a script block holds only `deps`"));
             }
             let abs = std::fs::canonicalize(start).map_err(|e| e.to_string())?;
             let key = format!("{}\0{block}", abs.display());
@@ -438,7 +441,7 @@ fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i3
     for (name, root) in &roots {
         c.arg("--extern").arg(format!("{name}={}", root.display()));
     }
-    // `[lints]` go first: the command line's own `-A/-W/-D` win.
+    // `lints` go first: the command line's own `-A/-W/-D` win.
     if cmd == "lint" {
         for (name, level) in &t.ctx.manifest.lints {
             c.arg(level.flag()).arg(name);
@@ -476,7 +479,7 @@ fn exec(mut c: Command, what: &Path) -> i32 {
     }
 }
 
-/// `rok new` / `rok init`: rokc makes the package; rok adds `Rok.toml`.
+/// `rok new` / `rok init`: rokc makes the package; rok adds `rok.rokon`.
 fn cmd_new(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i32, String> {
     let pos = positionals(post);
     let dir = PathBuf::from(pos.first().copied().unwrap_or("."));
@@ -498,8 +501,8 @@ fn cmd_new(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i32
             .unwrap_or("app")
             .to_owned();
         let text = format!(
-            "[package]\nname = {}\nversion = \"0.1.0\"\n\n[deps]\n",
-            rokc_toml::format_value(&rokc_toml::Value::String(name))
+            "Package {{\n    name: {},\n    version: \"0.1.0\",\n    deps: {{}},\n}}\n",
+            manifest::quote(&name)
         );
         let path = dir.join(MANIFEST);
         std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -571,7 +574,7 @@ fn manifest_to_edit(g: &Global) -> Result<(PathBuf, bool), String> {
         return Ok((dir.join(MANIFEST), true));
     }
     let dir = package_dir(Path::new(".")).ok_or(
-        "not inside a package (no main.rok, lib.rok or Rok.toml here or above); run `rok init`, \
+        "not inside a package (no main.rok, lib.rok or rok.rokon here or above); run `rok init`, \
          or pass `--env <name>`",
     )?;
     Ok((
@@ -628,15 +631,18 @@ fn cmd_add(g: &Global, args: &[String]) -> Result<i32, String> {
         dep.source = Source::Path(shown.display().to_string().replace('\\', "/"));
     }
     let old = std::fs::read_to_string(&path).ok();
-    let mut doc = rokc_toml::Document::parse(old.as_deref().unwrap_or(""))
-        .map_err(|e| e.render(old.as_deref().unwrap_or(""), &path.display().to_string()))?;
-    let section = if dev { "dev-deps" } else { "deps" };
-    doc.set(&[section], &dep.name, &dep.source.to_toml())
-        .map_err(|e| format!("cannot edit {}: {e}", path.display()))?;
-    write_and_resolve(g, &path, old.as_deref(), doc.text())?;
+    let section = if dev { "dev_deps" } else { "deps" };
+    let text = manifest::set_dep(
+        old.as_deref().unwrap_or(manifest::EMPTY),
+        &path.display().to_string(),
+        section,
+        &dep.name,
+        &dep.source.to_rok(),
+    )?;
+    write_and_resolve(g, &path, old.as_deref(), &text)?;
     if !g.quiet {
         eprintln!(
-            "       Added {} to [{section}] of {}",
+            "       Added {} to {section} of {}",
             dep.name,
             path.display()
         );
@@ -650,21 +656,18 @@ fn cmd_remove(g: &Global, args: &[String]) -> Result<i32, String> {
     };
     let (path, _) = manifest_to_edit(g)?;
     let old = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut doc = rokc_toml::Document::parse(&old)
-        .map_err(|e| e.render(&old, &path.display().to_string()))?;
-    let mut removed = false;
-    for section in ["deps", "dev-deps"] {
-        removed |= doc
-            .remove(&[section], name)
-            .map_err(|e| format!("cannot edit {}: {e}", path.display()))?;
+    let file = path.display().to_string();
+    let mut text: Option<String> = None;
+    for section in ["deps", "dev_deps"] {
+        let now = text.as_deref().unwrap_or(&old);
+        if let Some(t) = manifest::remove_dep(now, &file, section, name)? {
+            text = Some(t);
+        }
     }
-    if !removed {
-        return Err(format!(
-            "`{name}` is not a dependency in {}",
-            path.display()
-        ));
-    }
-    write_and_resolve(g, &path, Some(&old), doc.text())?;
+    let Some(text) = text else {
+        return Err(format!("`{name}` is not a dependency in {file}"));
+    };
+    write_and_resolve(g, &path, Some(&old), &text)?;
     if !g.quiet {
         eprintln!("     Removed {name} from {}", path.display());
     }

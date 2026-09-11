@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 
-# `rok`: the package manager / toolchain front (Rok.toml, Rok.lock,
+# `rok`: the package manager / toolchain front (rok.rokon, rok.lock,
 # environments, toolchains); it runs `rokc` for the compiler commands.
 [[bin]]
 name = "rok"
@@ -18,7 +18,7 @@ name = "rokls"
 path = "src/bin/rokls.rs"
 
 [dependencies]
-rokc_toml = { workspace = true }
+rokc_rokon = { workspace = true }
 
 [lints]
 workspace = true

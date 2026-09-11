@@ -1424,6 +1424,9 @@ pub fn lower_full(
         instances: std::cell::RefCell::new(Vec::new()),
         instance_warns: std::cell::RefCell::new(super::InstanceWarns::default()),
         diagnostics: std::cell::RefCell::new(Vec::new()),
+        infer_vars: std::cell::RefCell::new(Vec::new()),
+        infer_depth: std::cell::Cell::new(0),
+        infer_floor: std::cell::Cell::new(0),
     };
     let mut exports: Vec<(FunctionId, String)> = Vec::new();
     let mut prebuilt: Vec<FunctionId> = Vec::new();
@@ -1648,6 +1651,7 @@ pub fn lower_full(
     structs.extend(sink.extra_structs.into_inner());
     let mut enums = enums;
     enums.extend(sink.extra_enums.into_inner());
+    super::infer::drop_var_instances(&mut structs, &mut enums);
     for s in &mut static_defs {
         let init = lazy_init_fn_name(&s.name);
         s.init_fn = functions.iter().find(|f| f.name == init).map(|f| f.id);
@@ -3080,37 +3084,13 @@ fn check_impl_overlap(env: &Env<'_>) {
             }
         }
     }
-    // Two generic impls conflict when a type the program names (a
-    // concrete impl target or a generic instantiation in use) meets
-    // both — target and bounds.
-    // ponytail: witnesses come from the program's own types; no
-    // symbolic disjointness proof, so an overlap only a not-yet-named
-    // type would show is caught at the ambiguous call instead.
-    let mut candidates: Vec<HirTy> = Vec::new();
-    let named = env.trait_impl_tys.values().flatten().cloned();
-    let structs = env
-        .structs
-        .iter()
-        .filter(|s| !s.generic_args.is_empty())
-        .map(|s| HirTy::Struct(s.id));
-    let enums = env
-        .enums
-        .iter()
-        .filter(|e| !e.generic_args.is_empty())
-        .map(|e| HirTy::Enum(e.id));
-    for t in named.chain(structs).chain(enums) {
-        if !candidates.contains(&t) {
-            candidates.push(t);
-        }
-    }
+    // Two generic impls conflict when their targets (and trait
+    // arguments) unify — bounds on what stays generic don't separate
+    // them (`impl<T: A> X for T` / `impl<T: B> X for T` clash even if
+    // no type is `A + B` yet). Targets beyond `symbolic_overlap` fall
+    // back to a witness among the types the program names.
     let gis = &env.generic_trait_impls;
-    // (impl, candidate) → matches, asked in the same order as unmemoized:
-    // each impl meets every candidate once, not once per pair.
-    let mut memo: Vec<Vec<Option<bool>>> = vec![vec![None; candidates.len()]; gis.len()];
-    let mut covers = |i: usize, c: usize| {
-        *memo[i][c]
-            .get_or_insert_with(|| ctx.generic_impl_subst(&gis[i], &candidates[c], 0).is_some())
-    };
+    let mut candidates: Option<Vec<HirTy>> = None;
     for (i, a) in gis.iter().enumerate() {
         // Inherent ones (empty key) clash when they share a method name.
         let shared = |b: &GenericTraitImpl| {
@@ -3122,14 +3102,19 @@ fn check_impl_overlap(env: &Env<'_>) {
             m.sort();
             m.first().map(|s| (*s).clone())
         };
-        for (j, b) in gis.iter().enumerate().skip(i + 1).filter(|(_, b)| {
+        for b in gis.iter().skip(i + 1).filter(|b| {
             b.trait_key == a.trait_key && (!a.trait_key.is_empty() || shared(b).is_some())
         }) {
-            let witness = (0..candidates.len())
-                .find(|&c| covers(i, c) && covers(j, c))
-                .map(|c| &candidates[c])
-                .map(|t| ctx.ty_name(t))
-                .or_else(|| symbolic_overlap(&ctx, a, b, &candidates));
+            let witness = symbolic_overlap(&ctx, a, b).unwrap_or_else(|| {
+                let cands = candidates.get_or_insert_with(|| named_types(env));
+                cands
+                    .iter()
+                    .find(|t| {
+                        ctx.generic_impl_subst(a, t, 0).is_some()
+                            && ctx.generic_impl_subst(b, t, 0).is_some()
+                    })
+                    .map(|t| ctx.ty_name(t))
+            });
             if let (Some(t), Some(m)) = (
                 &witness,
                 a.trait_key.is_empty().then(|| shared(b)).flatten(),
@@ -3139,7 +3124,7 @@ fn check_impl_overlap(env: &Env<'_>) {
                     rokc_diagnostic::ErrorKind::Type,
                     format!(
                         "duplicate method `{m}`: `impl<..> {}` and `impl<..> {}` both define it \
-                         for `{t}`",
+                         for `{t}` (bounds don't make impls disjoint)",
                         impl_def_display(&a.self_ty),
                         impl_def_display(&b.self_ty),
                     ),
@@ -3150,8 +3135,8 @@ fn check_impl_overlap(env: &Env<'_>) {
                     rokc_diagnostic::ErrorKind::Type,
                     format!(
                         "conflicting implementations of trait `{}`: `impl<..> {} for {}` and \
-                         `impl<..> {} for {}` both cover `{t}` (spec 2.9.3 — one impl per trait \
-                         and type)",
+                         `impl<..> {} for {}` overlap on `{t}` — bounds don't make impls \
+                         disjoint (spec 2.9.5 coherence; no specialization)",
                         a.trait_key,
                         a.trait_key,
                         impl_def_display(&a.self_ty),
@@ -3164,21 +3149,42 @@ fn check_impl_overlap(env: &Env<'_>) {
     }
 }
 
-/// Two generic impls of one trait overlap without a type in use that
-/// shows it: unify their targets (and trait arguments) with the impl
-/// parameters as variables, then give every parameter left free a
-/// known type meeting all its bounds (`candidates` and the primitives).
-/// The witness as text (`Box<T>` with `T = i32`), or `None` when the
-/// targets don't unify, a bound fails, or a bound is beyond this check
-/// (on a compound type, with trait arguments) — that stays a call-time
-/// ambiguity.
-#[allow(clippy::many_single_char_names)] // the two impls `a` / `b`, the unifier `u`
+/// Concrete impl targets and generic struct / enum instantiations: the
+/// witnesses for impl targets `symbolic_overlap` can't read.
+fn named_types(env: &Env<'_>) -> Vec<HirTy> {
+    let mut out: Vec<HirTy> = Vec::new();
+    let named = env.trait_impl_tys.values().flatten().cloned();
+    let structs = env
+        .structs
+        .iter()
+        .filter(|s| !s.generic_args.is_empty())
+        .map(|s| HirTy::Struct(s.id));
+    let enums = env
+        .enums
+        .iter()
+        .filter(|e| !e.generic_args.is_empty())
+        .map(|e| HirTy::Enum(e.id));
+    for t in named.chain(structs).chain(enums) {
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
+}
+
+/// Whether two generic impls of one trait overlap, structurally: unify
+/// their targets (and trait arguments) with the impl parameters as
+/// variables. Bounds on a type left generic are assumed satisfiable
+/// (coherence is open-world); a bound on a parameter the unification
+/// made concrete (`i32: A`) is checked, as for a concrete impl.
+/// `Some(Some(shown))` overlaps on `shown`, `Some(None)` is disjoint,
+/// `None` is a target this check can't read (fn types, aliases ..).
+#[allow(clippy::option_option)] // overlap / disjoint / can't tell
 fn symbolic_overlap(
     ctx: &LowerCtx<'_>,
     a: &GenericTraitImpl,
     b: &GenericTraitImpl,
-    candidates: &[HirTy],
-) -> Option<String> {
+) -> Option<Option<String>> {
     let names = |gi: &GenericTraitImpl, tag: &str| -> HashMap<String, String> {
         gi.generics
             .params
@@ -3192,105 +3198,115 @@ fn symbolic_overlap(
             .collect()
     };
     let (va, vb) = (names(a, "#a."), names(b, "#b."));
-    let is_const = |name: &str| {
-        a.generics
-            .params
-            .iter()
-            .any(|gp| matches!(gp, rokc_ast::GenericParam::Const { name: n, .. } if n == name))
-    };
     let canon = |gi: &GenericTraitImpl, vars: &HashMap<String, String>, t: &Ty| {
         canon_ast_ty(ctx, &gi.module, vars, t)
     };
-    let mut u = Unifier::default();
-    u.unify(&canon(a, &va, &a.self_ty)?, &canon(b, &vb, &b.self_ty)?)?;
+    let a_self = canon(a, &va, &a.self_ty)?;
+    let b_self = canon(b, &vb, &b.self_ty)?;
     if a.trait_args.len() != b.trait_args.len() {
-        return None;
+        return Some(None);
     }
+    let mut args = Vec::new();
     for (x, y) in a.trait_args.iter().zip(&b.trait_args) {
-        u.unify(&canon(a, &va, x)?, &canon(b, &vb, y)?)?;
+        args.push((canon(a, &va, x)?, canon(b, &vb, y)?));
     }
-    // Bounds per free variable; a bound on a type the unification made
-    // concrete is checked on the spot.
-    let mut need: HashMap<String, Vec<String>> = HashMap::new();
+    let mut u = Unifier::default();
+    if u.unify(&a_self, &b_self).is_none() || args.iter().any(|(x, y)| u.unify(x, y).is_none()) {
+        return Some(None);
+    }
+    // Bounds whose subject the unification gave a type constructor:
+    // negative reasoning on known types (`List<T>: Iterator` fails when
+    // no impl of `Iterator` targets `List`). A subject still a bare
+    // variable is open — some type may meet any bounds.
     for (gi, vars) in [(a, &va), (b, &vb)] {
-        let mut goals: Vec<(String, &Vec<Ty>)> = Vec::new();
+        let mut goals: Vec<(CanonTy, &Vec<Ty>)> = Vec::new();
         for gp in &gi.generics.params {
             if let rokc_ast::GenericParam::Type { name, bounds, .. } = gp {
-                goals.push((vars[name].clone(), bounds));
+                goals.push((u.resolve(&vars[name]), bounds));
             }
         }
         for w in &gi.where_clause {
-            let AstTyKind::Path(p) = &w.ty.kind else {
-                return None;
-            };
-            let v = vars
-                .get(&p.segments.first()?.name)
-                .filter(|_| p.segments.len() == 1)?;
-            goals.push((v.clone(), &w.bounds));
+            if let Some(t) = canon(gi, vars, &w.ty) {
+                goals.push((u.walk(&t), &w.bounds));
+            }
         }
-        for (v, bounds) in goals {
-            let subject = u.resolve(&v);
+        for (subject, bounds) in goals {
+            if matches!(subject, CanonTy::Var(_)) {
+                continue;
+            }
             for bound in bounds {
                 let AstTyKind::Path(bp) = &bound.kind else {
-                    return None;
+                    continue;
                 };
                 if bp.segments.iter().any(|s| !s.generics.is_empty()) {
-                    return None;
+                    continue;
                 }
                 let segs: Vec<&str> = bp.segments.iter().map(|s| s.name.as_str()).collect();
                 let key = ctx.env.names.trait_key(&segs, &gi.module);
-                match &subject {
-                    CanonTy::Var(fv) => need.entry(fv.clone()).or_default().push(key),
-                    t => {
-                        if !ctx.implements_trait(&canon_hir(ctx, t)?, &key, 0) {
-                            return None;
-                        }
-                    }
+                if !may_implement(ctx, &subject, &key) {
+                    return Some(None);
                 }
             }
         }
     }
-    let mut prims: Vec<HirTy> = [
-        PrimTy::I32,
-        PrimTy::I64,
-        PrimTy::U8,
-        PrimTy::U32,
-        PrimTy::U64,
-        PrimTy::Usize,
-        PrimTy::F64,
-        PrimTy::Bool,
-        PrimTy::Char,
-        PrimTy::Str,
-    ]
-    .map(HirTy::Prim)
-    .to_vec();
-    prims.extend(candidates.iter().cloned());
-    let mut pick: HashMap<String, String> = HashMap::new();
-    for (v, keys) in need {
-        let t = prims
-            .iter()
-            .find(|t| keys.iter().all(|k| ctx.implements_trait(t, k, 0)))?;
-        pick.insert(v, ctx.ty_name(t));
+    Some(Some(u.walk(&a_self).to_string()))
+}
+
+/// Whether `subject` (not a bare variable) may implement trait `key`: a
+/// concrete type is asked directly; one with variables does when some
+/// impl of `key` targets its constructor (`List<..>`, a 2-tuple ..) or
+/// a bare parameter.
+fn may_implement(ctx: &LowerCtx<'_>, subject: &CanonTy, key: &str) -> bool {
+    if let Some(t) = canon_hir(ctx, subject) {
+        return ctx.implements_trait(&t, key, 0);
     }
-    // `a`'s parameters in the witness (an unbounded one: any type).
-    let mut chosen: Vec<String> = va
-        .iter()
-        .map(|(name, v)| {
-            let t = match u.resolve(v) {
-                CanonTy::Var(_) if is_const(name) => "1".to_owned(),
-                CanonTy::Var(fv) => pick.get(&fv).cloned().unwrap_or_else(|| "i32".to_owned()),
-                t => t.to_string(),
-            };
-            format!("{name} = {t}")
-        })
-        .collect();
-    let shown = impl_def_display(&a.self_ty);
-    chosen.sort();
-    Some(if chosen.is_empty() {
-        shown
-    } else {
-        format!("{shown}` with `{}", chosen.join(", "))
-    })
+    let head = canon_head(subject);
+    let env = ctx.env;
+    let concrete = env.trait_impl_tys.get(key).into_iter().flatten().any(|t| {
+        let h = match t {
+            HirTy::Struct(id) => enum_base_name(&ctx.struct_def(*id).name).to_owned(),
+            HirTy::Enum(id) => enum_base_name(&ctx.enum_def(*id).name).to_owned(),
+            HirTy::Tuple(ts) => format!("({})", ts.len()),
+            HirTy::Array(..) => "[]".to_owned(),
+            HirTy::Sum(_) => "|".to_owned(),
+            _ => return false,
+        };
+        h == head
+    });
+    concrete
+        || env
+            .generic_trait_impls
+            .iter()
+            .filter(|gi| gi.trait_key == key)
+            .any(|gi| {
+                let vars = gi
+                    .generics
+                    .params
+                    .iter()
+                    .filter_map(|gp| match gp {
+                        rokc_ast::GenericParam::Type { name, .. } => {
+                            Some((name.clone(), format!("#c.{name}")))
+                        }
+                        rokc_ast::GenericParam::Const { .. } => None,
+                    })
+                    .collect();
+                match canon_ast_ty(ctx, &gi.module, &vars, &gi.self_ty) {
+                    Some(CanonTy::Var(_)) | None => true,
+                    Some(t) => canon_head(&t) == head,
+                }
+            })
+}
+
+/// A type's constructor for `may_implement`: a path's name, `(n)` for an
+/// n-tuple, `[]`, `|`.
+fn canon_head(t: &CanonTy) -> String {
+    match t {
+        CanonTy::Named(n, _) => n.clone(),
+        CanonTy::Tuple(ts) => format!("({})", ts.len()),
+        CanonTy::Array(..) => "[]".to_owned(),
+        CanonTy::Sum(_) => "|".to_owned(),
+        CanonTy::Var(_) => String::new(),
+    }
 }
 
 /// A type for `symbolic_overlap`: paths by canonical name, impl

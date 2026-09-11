@@ -48,25 +48,8 @@ pub(super) fn lower_block(ctx: &mut LowerCtx<'_>, block: &Block) -> HirBlock {
                 ty: None,
                 init,
             } => {
-                let mark = ctx.probe_mark();
-                let mut stmt = lower_stmt(ctx, s);
-                // Nothing in the initializer fixed a generic parameter /
-                // literal type: take the type the later code reads it as.
-                if ctx.env.sink.uninferred.get() != mark.uninferred {
-                    if let Some(t) = infer_from_later_use(ctx, name, &block.stmts[i + 1..], block) {
-                        ctx.rollback(&mark);
-                        // The failed attempt's binding stays unused.
-                        if let Some(old) = ctx.scopes.last_mut().and_then(|sc| sc.remove(name)) {
-                            ctx.locals[old.0 as usize].ty = t.clone();
-                        }
-                        let outer = rokc_diagnostic::set_current_span(s.span);
-                        let v = lower_expected(ctx, init, t.clone());
-                        let v = coerce(ctx, &t, v, &|| format!("`let {name}`"));
-                        stmt = Some(ctx.declare_var(name, t, v, s.span));
-                        rokc_diagnostic::set_current_span(outer);
-                    }
-                }
-                stmts.extend(stmt);
+                let rest = &block.stmts[i + 1..];
+                stmts.extend(super::infer::lower_let(ctx, s, name, init, rest, block));
             }
             _ => {
                 if let Some(stmt) = lower_stmt(ctx, s) {
@@ -477,38 +460,6 @@ fn lower_receiver(ctx: &mut LowerCtx<'_>, receiver: &Expr) -> HirExpr {
     }
     ctx.rollback(&mark);
     lower_expected(ctx, receiver, expected)
-}
-
-/// The type `name` (an un-annotated `let` whose initializer left a
-/// generic parameter open; declared `Unknown`) must have: lower the rest
-/// of the block as a probe and take the first concrete expected type a
-/// read of it meets — an argument slot, a `let` annotation, a struct
-/// field, `return` (local HM-style unification, one variable). The
-/// probe's output and diagnostics are dropped.
-fn infer_from_later_use(
-    ctx: &LowerCtx<'_>,
-    name: &str,
-    rest: &[Stmt],
-    block: &Block,
-) -> Option<HirTy> {
-    let local = ctx.lookup(name)?;
-    if rest.is_empty() && block.trailing.is_none() {
-        return None;
-    }
-    let mark = ctx.probe_mark();
-    let mut probe = ctx.clone();
-    probe.infer_probe = Some((local, None));
-    let tail = Block {
-        stmts: rest.to_vec(),
-        trailing: block.trailing.clone(),
-        span: block.span,
-        label: None,
-    };
-    let hint = ctx.current_expected().cloned().unwrap_or(HirTy::Unknown);
-    probe.expected_ty_stack.push(hint);
-    lower_block(&mut probe, &tail);
-    ctx.rollback(&mark);
-    probe.infer_probe.and_then(|(_, t)| t)
 }
 
 /// D1: an un-annotated `let` takes its initializer's static type, so
@@ -1829,6 +1780,7 @@ pub(super) fn lower_struct_init(
                         {
                             Some(t) if t != HirTy::Unknown => args.push(t),
                             Some(_) => return poison(span),
+                            None if ctx.infer_vars => args.push(super::infer::fresh(ctx)),
                             None => {
                                 ctx.emit_uninferred(format!(
                                     "cannot infer type parameter `{name}` of `{full}` — \
@@ -4056,7 +4008,7 @@ fn strip_self_assoc(ty: &mut Ty) {
 /// stored types are known (closed world).
 #[derive(Clone)]
 pub(super) struct AnyDispatch {
-    id: FunctionId,
+    pub(super) id: FunctionId,
     recv_ty: HirTy,
     /// The trait declaring `method` (each implementor's method of it,
     /// whatever other traits share the name).
@@ -7522,7 +7474,9 @@ fn assoc_const_path(ctx: &mut LowerCtx<'_>, path: &AstPath) -> Option<HirExpr> {
         };
         if !prefix.is_empty()
             && segs != ["Self"]
-            && (ctx.canon_type(&segs).is_some()
+            && (ctx
+                .canon_type(&segs)
+                .is_some_and(|f| !ctx.env.names.traits.contains(&f))
                 || matches!(crate::ty::resolve_ty(&owner), HirTy::Prim(_)))
         {
             let ty = ctx.resolve_ast_ty(&owner);
@@ -7565,14 +7519,6 @@ pub(super) fn lower_path(
             return h.clone();
         }
         if let Some(local) = ctx.lookup(name) {
-            if let Some((target, None)) = &ctx.infer_probe {
-                let expected = ctx
-                    .current_expected()
-                    .filter(|t| !matches!(t, HirTy::Unknown | HirTy::Unit | HirTy::Any));
-                if *target == local && expected.is_some() {
-                    ctx.infer_probe = Some((local, expected.cloned()));
-                }
-            }
             return ctx.read_local(local, span);
         }
     }
@@ -7731,6 +7677,10 @@ pub(super) fn lower_path(
                 segs.join("::")
             ),
         );
+    }
+    // `S::new` / `i32::add` / `Tr::m` without a call (spec 3.5.3).
+    if let Some(v) = super::method_value::method_path_value(ctx, path, span) {
+        return v;
     }
     // `EnumName::Variant` (unit form). Tuple variants come through
     // `lower_call` because the parser wraps them in a Call expression.
@@ -8044,7 +7994,7 @@ fn lower_shape(
     let empty = args
         .iter()
         .any(|a| matches!(a, rokc_ast::LitArg::Many(v) if v.is_empty()));
-    if empty && ctx.current_expected().is_none_or(|t| *t == HirTy::Unknown) {
+    if empty && !ctx.infer_vars && ctx.current_expected().is_none_or(|t| *t == HirTy::Unknown) {
         ctx.emit_uninferred(format!(
             "cannot infer the type of an empty {what} literal — annotate the slot"
         ));

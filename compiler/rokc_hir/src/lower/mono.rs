@@ -311,6 +311,10 @@ pub(super) fn monomorphize_on(
             rokc_ast::GenericParam::Type { name, .. } => {
                 if let Some(t) = subst.get(name) {
                     subst_tys.push(t.clone());
+                } else if ctx.infer_vars {
+                    let v = super::infer::fresh(ctx);
+                    subst.insert(name.clone(), v.clone());
+                    subst_tys.push(v);
                 } else {
                     ctx.emit_uninferred(format!(
                         "cannot infer type parameter `{name}` of `{}` from the call \
@@ -340,6 +344,9 @@ pub(super) fn monomorphize_on(
     if subst_tys.iter().any(|t| matches!(t, HirTy::Unknown)) {
         // An argument already failed to lower (reported).
         return None;
+    }
+    if subst_tys.iter().any(|t| super::infer::has_var(ctx, t)) {
+        return Some(var_instance(ctx, fn_def, self_ty, self_hint, &subst));
     }
     if subst_tys.iter().any(|t| ty_size(t) > MONO_TYPE_SIZE_LIMIT)
         || ctx.env.sink.mono_depth.get() >= MONO_DEPTH_LIMIT
@@ -518,6 +525,62 @@ pub(super) fn monomorphize_on(
     );
     ctx.env.sink.extras.borrow_mut().push(mono_fn);
     Some((new_id, ret_ty))
+}
+
+/// An instance over `let` inference variables (`infer`): its signature
+/// only — the probe that asked for it is rolled back.
+fn var_instance(
+    ctx: &LowerCtx<'_>,
+    fn_def: &FnDef,
+    self_ty: Option<&Ty>,
+    self_hint: Option<&HirTy>,
+    subst: &HashMap<String, HirTy>,
+) -> (FunctionId, HirTy) {
+    let id = FunctionId(ctx.env.sink.next_id.get());
+    ctx.env.sink.next_id.set(id.0 + 1);
+    let self_hir = self_hint
+        .cloned()
+        .or_else(|| self_ty.map(|t| resolve_in_mono(ctx, fn_def, subst, None, t)));
+    let ret_ty = resolve_in_mono(ctx, fn_def, subst, self_hir.clone(), &sig_ret_ast(fn_def));
+    let param_tys: Vec<HirTy> = fn_def
+        .params
+        .iter()
+        .map(|p| match (&p.ty, &self_hir) {
+            (_, Some(st)) if p.name == "self" => st.clone(),
+            (Some(t), _) => resolve_in_mono(ctx, fn_def, subst, self_hir.clone(), t),
+            (None, _) => HirTy::Any,
+        })
+        .collect();
+    let refs: Vec<(usize, HirTy)> = fn_def
+        .params
+        .iter()
+        .zip(&param_tys)
+        .enumerate()
+        .filter(|(_, (p, _))| p.by_ref)
+        .map(|(i, (_, t))| (i, t.clone()))
+        .collect();
+    if !refs.is_empty() {
+        ctx.env.sink.ref_out.borrow_mut().insert(
+            id,
+            RefOut {
+                ret: ret_ty.clone(),
+                refs,
+            },
+        );
+    }
+    ctx.env.sink.mono_sigs.borrow_mut().insert(
+        id,
+        FnSig {
+            id,
+            ret_ty: ret_ty.clone(),
+            param_defaults: Vec::new(),
+            param_names: fn_def.params.iter().map(|p| p.name.clone()).collect(),
+            param_refs: fn_def.params.iter().map(|p| p.by_ref).collect(),
+            param_tys,
+            variadic: false,
+        },
+    );
+    (id, ret_ty)
 }
 
 /// Lower one function body. `subst` is the type-parameter substitution

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use rokc_ast::{Expr, ExprKind, ImplItem, Item, TraitItem};
-use rokc_diagnostic::Span;
+use rokc_diagnostic::{RokDiagnostic, Span};
 use rokc_hir::walk::{AstVisitor, walk_item, walk_stmt};
 use rokc_hir::{HirExprKind, HirModule, HirTy};
 use rokc_interface::Session;
@@ -279,6 +279,21 @@ impl<W: Write> Server<W> {
             return;
         };
         let path = uri_path(uri);
+        // A `.rokon` data file (`rok.rokon`, the package manifest) is one
+        // RokON value, not a module: only its syntax is checked here.
+        if path.extension().is_some_and(|x| x == "rokon") {
+            let diags = match rokc_rokon::parse(&doc.text) {
+                Ok(_) => Vec::new(),
+                Err(e) => {
+                    let d = RokDiagnostic::error(rokc_diagnostic::ErrorKind::Parse, &e.message)
+                        .with_span(e.span, "");
+                    vec![diag_json(&d, &doc.text)]
+                }
+            };
+            self.docs.get_mut(uri).expect("checked above").dirty = false;
+            self.publish(uri, diags);
+            return;
+        }
         let a = self.compile(&path, &doc.text);
         let key = path.display().to_string();
         let diags = a
@@ -287,19 +302,7 @@ impl<W: Write> Server<W> {
             .filter(|d| a.diag_path(d).is_none_or(|p| p == key))
             .map(|d| {
                 let span = d.primary.as_ref().map(|l| l.span).unwrap_or_default();
-                let text = a.file(span).map_or("", |(_, t)| t.as_str());
-                let mut message = d.message.clone();
-                for n in &d.notes {
-                    message.push_str("\nnote: ");
-                    message.push_str(n);
-                }
-                Json::obj([
-                    ("range", range(text, span.start as usize, span.end as usize)),
-                    ("severity", Json::num(if d.is_error() { 1 } else { 2 })),
-                    ("code", Json::str(d.kind.code())),
-                    ("source", Json::str("rokc")),
-                    ("message", Json::str(message)),
-                ])
+                diag_json(d, a.file(span).map_or("", |(_, t)| t.as_str()))
             })
             .collect();
         let doc = self.docs.get_mut(uri).expect("checked above");
@@ -658,6 +661,23 @@ fn walk_items(v: &mut Locals, items: &[Item]) {
             item => walk_item(v, item),
         }
     }
+}
+
+/// LSP `Diagnostic` of `d`, whose span is in `text`.
+fn diag_json(d: &RokDiagnostic, text: &str) -> Json {
+    let span = d.primary.as_ref().map(|l| l.span).unwrap_or_default();
+    let mut message = d.message.clone();
+    for n in &d.notes {
+        message.push_str("\nnote: ");
+        message.push_str(n);
+    }
+    Json::obj([
+        ("range", range(text, span.start as usize, span.end as usize)),
+        ("severity", Json::num(if d.is_error() { 1 } else { 2 })),
+        ("code", Json::str(d.kind.code())),
+        ("source", Json::str("rokc")),
+        ("message", Json::str(message)),
+    ])
 }
 
 /// The buffer alone, parsed for its shape (no library operators).

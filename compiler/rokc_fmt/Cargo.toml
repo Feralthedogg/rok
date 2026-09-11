@@ -10,6 +10,7 @@ authors.workspace = true
 rokc_diagnostic = { workspace = true }
 rokc_lexer = { workspace = true }
 rokc_parser = { workspace = true }
+rokc_rokon = { workspace = true }
 
 [lints]
 workspace = true

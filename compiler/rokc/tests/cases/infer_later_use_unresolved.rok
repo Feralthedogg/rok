@@ -1,0 +1,10 @@
+// expect-error: 7:5: type annotations needed: cannot infer the type of `d`
+
+// Nothing later fixes the key / value types: the error points at the `let`.
+
+fn main() -> i32 {
+    let n = 0;
+    let d = Dict::new();
+    println(f"{d.len()} {n}");
+    return 0;
+}

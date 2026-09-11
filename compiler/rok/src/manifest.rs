@@ -1,12 +1,38 @@
-//! `Rok.toml`: the package manifest (also an environment's), and the
-//! `//! ```toml` block of a single-file script.
+//! `rok.rokon`: the package manifest (also an environment's), and the
+//! `//! ```rokon` block of a single-file script.
+//!
+//! The file is one RokON value (`rokc_rokon`), a `Package { .. }` struct
+//! (the name `Package` may be left out). It is data only: strings,
+//! `{ "key": value }` dicts and the `Dep::path(..)` / `Dep::git(..)`
+//! variants.
+//!
+//! ```rokon
+//! Package {
+//!     name: "app",
+//!     version: "0.1.0",
+//!     toolchain: "0.3",
+//!     deps: {
+//!         "json": Dep::git("https://example.com/json.git", tag: "v1.2"),
+//!         "util": Dep::path("../util"),
+//!     },
+//!     dev_deps: {},
+//!     lints: { "dead_code": "allow" },
+//! }
+//! ```
 
 use std::path::{Path, PathBuf};
 
-use rokc_toml::{Item, Table, Value, render};
+use rokc_rokon::edit::{self, Step};
+use rokc_rokon::{Decoder, Doc, Value};
 
-pub const MANIFEST: &str = "Rok.toml";
-pub const LOCK: &str = "Rok.lock";
+pub use rokc_rokon::quote;
+
+pub const MANIFEST: &str = "rok.rokon";
+pub const LOCK: &str = "rok.lock";
+/// A manifest with nothing in it, for `rok add` to fill.
+pub const EMPTY: &str = "Package {\n    deps: {},\n}\n";
+
+const FIELDS: [&str; 6] = ["name", "version", "toolchain", "deps", "dev_deps", "lints"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitRef {
@@ -17,7 +43,7 @@ pub enum GitRef {
 }
 
 impl GitRef {
-    /// `(key, value)` as written in `Rok.toml` / `Rok.lock`.
+    /// `(name, value)` of the `Dep::git(.., name: value)` argument.
     pub fn pair(&self) -> Option<(&'static str, &str)> {
         match self {
             Self::Default => None,
@@ -39,16 +65,25 @@ pub enum Source {
 }
 
 impl Source {
-    /// The inline-table text for `Rok.toml`.
-    pub fn to_toml(&self) -> String {
-        let q = |s: &str| rokc_toml::format_value(&Value::String(s.to_owned()));
+    /// The `Dep::..` value.
+    pub fn to_value(&self) -> Value {
         match self {
-            Self::Path(p) => format!("{{ path = {} }}", q(p)),
-            Self::Git { url, reference } => match reference.pair() {
-                None => format!("{{ git = {} }}", q(url)),
-                Some((k, v)) => format!("{{ git = {}, {k} = {} }}", q(url), q(v)),
-            },
+            Self::Path(p) => Value::call("Dep::path", vec![Value::str(p)], Vec::new()),
+            Self::Git { url, reference } => Value::call(
+                "Dep::git",
+                vec![Value::str(url)],
+                reference
+                    .pair()
+                    .map(|(k, v)| (k, Value::str(v)))
+                    .into_iter()
+                    .collect(),
+            ),
         }
+    }
+
+    /// The `Dep::..` text for `rok.rokon`, on one line (it is spliced in).
+    pub fn to_rok(&self) -> String {
+        rokc_rokon::to_line(&self.to_value())
     }
 }
 
@@ -58,7 +93,7 @@ pub struct Dep {
     pub source: Source,
 }
 
-/// A `[lints]` level.
+/// A `lints` level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LintLevel {
     Allow,
@@ -84,7 +119,7 @@ pub struct Manifest {
     pub toolchain: Option<String>,
     pub deps: Vec<Dep>,
     pub dev_deps: Vec<Dep>,
-    /// `[lints]`: `name = "allow" | "warn" | "deny"`, in file order
+    /// `lints`: `"name": "allow" | "warn" | "deny"`, in file order
     /// (lint names are checked by `rokc lint`).
     pub lints: Vec<(String, LintLevel)>,
 }
@@ -111,19 +146,25 @@ pub fn check_name(name: &str) -> Result<(), String> {
     }
 }
 
-/// `dir/Rok.toml`, if present. A file whose name differs only in case
-/// (`rok.toml`) is not the manifest: warn, whatever the file system.
+/// `dir/rok.rokon`, if present. A file whose name differs only in case
+/// (`Rok.rokon`) is not the manifest: warn, whatever the file system.
 pub fn find(dir: &Path) -> Option<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return None;
+    };
     let mut found = None;
-    for e in std::fs::read_dir(dir).ok()?.flatten() {
-        let name = e.file_name();
-        let Some(name) = name.to_str() else { continue };
+    let mut names: Vec<(String, PathBuf)> = rd
+        .flatten()
+        .filter_map(|e| Some((e.file_name().into_string().ok()?, e.path())))
+        .collect();
+    names.sort();
+    for (name, path) in names {
         if name == MANIFEST {
-            found = Some(e.path());
+            found = Some(path);
         } else if name.eq_ignore_ascii_case(MANIFEST) {
             eprintln!(
-                "rok: warning: ignoring `{}`: the manifest is named `{MANIFEST}`",
-                e.path().display()
+                "rok: warning: ignoring `{}`: the manifest is named `{MANIFEST}` (lowercase)",
+                path.display()
             );
         }
     }
@@ -136,173 +177,149 @@ pub fn load(path: &Path) -> Result<Manifest, String> {
     parse(&text, &path.display().to_string())
 }
 
-/// Parse manifest text; `file` names it in errors.
-pub fn parse(text: &str, file: &str) -> Result<Manifest, String> {
-    let root = rokc_toml::parse(text).map_err(|e| e.render(text, file))?;
-    let err = |item: &Item, msg: String| render(text, file, item.span, &msg);
-    let key_err = |t: &Table, key: &str, msg: String| {
-        render(
-            text,
-            file,
-            t.key(key).map(|k| k.span).unwrap_or_default(),
-            &msg,
-        )
-    };
-    let mut m = Manifest::default();
-    for (k, item) in root.iter() {
-        match k.name.as_str() {
-            "package" => {
-                let t = table(item, "[package]").map_err(|e| err(item, e))?;
-                for (pk, v) in t.iter() {
-                    let slot = match pk.name.as_str() {
-                        "name" => &mut m.name,
-                        "version" => &mut m.version,
-                        "toolchain" => &mut m.toolchain,
-                        "native" => return Err(key_err(t, "native", not_yet("`native`"))),
-                        other => {
-                            return Err(key_err(
-                                t,
-                                other,
-                                format!(
-                                    "unknown key `{other}` in [package] (expected name, version, \
-                                     toolchain)"
-                                ),
-                            ));
-                        }
-                    };
-                    let s = v
-                        .value
-                        .as_str()
-                        .ok_or_else(|| err(v, format!("`{}` must be a string", pk.name)))?;
-                    *slot = Some(s.to_owned());
-                }
-            }
-            "deps" => m.deps = deps(text, file, item)?,
-            "dev-deps" => m.dev_deps = deps(text, file, item)?,
-            "lints" => {
-                let t = table(item, "[lints]").map_err(|e| err(item, e))?;
-                for (k, v) in t.iter() {
-                    let level = match v.value.as_str() {
-                        Some("allow") => LintLevel::Allow,
-                        Some("warn") => LintLevel::Warn,
-                        Some("deny") => LintLevel::Deny,
-                        _ => {
-                            return Err(err(
-                                v,
-                                format!("lint `{}` takes \"allow\", \"warn\" or \"deny\"", k.name),
-                            ));
-                        }
-                    };
-                    m.lints.push((k.name.clone(), level));
-                }
-            }
-            "registry" => return Err(key_err(&root, "registry", not_yet("registries"))),
-            "native" => return Err(key_err(&root, "native", not_yet("`native`"))),
-            other => {
-                return Err(key_err(
-                    &root,
-                    other,
-                    format!(
-                        "unknown key `{other}` (expected [package], [deps], [dev-deps], [lints])"
-                    ),
-                ));
-            }
-        }
-    }
-    Ok(m)
-}
-
 fn not_yet(what: &str) -> String {
     format!("{what} is reserved and not supported yet")
 }
 
-fn table<'a>(item: &'a Item, what: &str) -> Result<&'a Table, String> {
-    item.value
-        .as_table()
-        .ok_or_else(|| format!("{what} must be a table"))
+/// Parse manifest text; `file` names it in errors.
+pub fn parse(text: &str, file: &str) -> Result<Manifest, String> {
+    let doc = Doc::parse(text, file)?;
+    let pkg = doc.root().record("Package")?;
+    if pkg.get("registry").is_some() {
+        return Err(pkg.field_error("registry", &not_yet("registries")));
+    }
+    if pkg.get("native").is_some() {
+        return Err(pkg.field_error("native", &not_yet("`native`")));
+    }
+    pkg.only(&FIELDS)?;
+    let string = |f: &str| pkg.opt(f).map(|d| d.string()).transpose();
+    let deps = |f: &str| pkg.opt(f).map_or(Ok(Vec::new()), deps);
+    let mut lints = Vec::new();
+    if let Some(d) = pkg.opt("lints") {
+        for (k, v) in d.dict()? {
+            let level = match v.string()?.as_str() {
+                "allow" => LintLevel::Allow,
+                "warn" => LintLevel::Warn,
+                "deny" => LintLevel::Deny,
+                _ => {
+                    return Err(v.error(&format!(
+                        "lint `{}` takes \"allow\", \"warn\" or \"deny\"",
+                        k.string()?
+                    )));
+                }
+            };
+            lints.push((k.string()?, level));
+        }
+    }
+    Ok(Manifest {
+        name: string("name")?,
+        version: string("version")?,
+        toolchain: string("toolchain")?,
+        deps: deps("deps")?,
+        dev_deps: deps("dev_deps")?,
+        lints,
+    })
 }
 
-fn deps(text: &str, file: &str, item: &Item) -> Result<Vec<Dep>, String> {
-    let err = |span, msg: &str| render(text, file, span, msg);
-    let t = table(item, "a dependency list").map_err(|e| err(item.span, &e))?;
+fn deps(d: Decoder<'_>) -> Result<Vec<Dep>, String> {
     let mut out = Vec::new();
-    for (k, v) in t.iter() {
-        check_name(&k.name).map_err(|e| err(k.span, &e))?;
-        let Some(spec) = v.value.as_table() else {
-            return Err(err(
-                v.span,
-                &format!(
-                    "registry dependencies are not supported yet; write `{} = {{ path = \"..\" }}` \
-                     or `{{ git = \"..\" }}`",
-                    k.name
-                ),
-            ));
-        };
-        let field = |name: &str| -> Result<Option<String>, String> {
-            spec.get(name).map_or(Ok(None), |i| {
-                i.value
-                    .as_str()
-                    .map(|s| Some(s.to_owned()))
-                    .ok_or_else(|| err(i.span, &format!("`{name}` must be a string")))
-            })
-        };
-        for (sk, _) in spec.iter() {
-            match sk.name.as_str() {
-                "path" | "git" | "rev" | "tag" | "branch" => {}
-                "version" | "registry" => {
-                    return Err(err(sk.span, &not_yet("registry dependencies")));
-                }
-                "native" => return Err(err(sk.span, &not_yet("`native` dependencies"))),
-                other => {
-                    return Err(err(
-                        sk.span,
-                        &format!(
-                            "unknown key `{other}` (expected path, or git with rev, tag or branch)"
-                        ),
-                    ));
-                }
-            }
-        }
-        let refs: Vec<GitRef> = [
-            field("rev")?.map(GitRef::Rev),
-            field("tag")?.map(GitRef::Tag),
-            field("branch")?.map(GitRef::Branch),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        let source = match (field("path")?, field("git")?) {
-            (Some(p), None) if refs.is_empty() => Source::Path(p),
-            (Some(_), None) => {
-                return Err(err(v.span, "rev / tag / branch only go with `git`"));
-            }
-            (None, Some(url)) => Source::Git {
-                url,
-                reference: match refs.len() {
-                    0 => GitRef::Default,
-                    1 => refs.into_iter().next().unwrap(),
-                    _ => return Err(err(v.span, "give at most one of rev, tag, branch")),
-                },
-            },
-            (Some(_), Some(_)) => return Err(err(v.span, "give `path` or `git`, not both")),
-            (None, None) => return Err(err(v.span, "a dependency needs `path` or `git`")),
-        };
-        out.push(Dep {
-            name: k.name.clone(),
-            source,
-        });
+    for (k, v) in d.dict()? {
+        let name = k.string()?;
+        check_name(&name).map_err(|m| k.error(&m))?;
+        let source = source(v, &name)?;
+        out.push(Dep { name, source });
     }
     Ok(out)
 }
 
-/// A script's leading block of `//!` lines from a ```` ```toml ```` line to a
-/// ```` ``` ```` line: a `Rok.toml` fragment, without the `//!` prefixes.
+/// A `Dep::path(..)` / `Dep::git(..)` value (the dependency `name`, for
+/// the hint on a registry form).
+pub fn source(d: Decoder<'_>, name: &str) -> Result<Source, String> {
+    if d.string().is_ok() {
+        return Err(d.error(&format!(
+            "registry dependencies are not supported yet; write `\"{name}\": Dep::path(\"..\")` \
+             or `\"{name}\": Dep::git(\"..\")`"
+        )));
+    }
+    let v = d
+        .variant("Dep")
+        .map_err(|_| d.expected("`Dep::path(\"..\")` or `Dep::git(\"..\")`"))?;
+    let one = |what: &str| match v.args.as_slice() {
+        [x] => x.string(),
+        _ => Err(d.error(&format!("`Dep::{}` takes one string, the {what}", v.name))),
+    };
+    Ok(match v.name {
+        "path" => {
+            v.fields.only(&[])?;
+            Source::Path(one("path")?)
+        }
+        "git" => {
+            v.fields.only(&["rev", "tag", "branch"])?;
+            let mut refs = Vec::new();
+            for k in v.fields.names() {
+                let s = v.fields.req(k)?.string()?;
+                refs.push(match k {
+                    "rev" => GitRef::Rev(s),
+                    "tag" => GitRef::Tag(s),
+                    _ => GitRef::Branch(s),
+                });
+            }
+            Source::Git {
+                url: one("url")?,
+                reference: match refs.len() {
+                    0 => GitRef::Default,
+                    1 => refs.remove(0),
+                    _ => return Err(d.error("give at most one of rev, tag, branch")),
+                },
+            }
+        }
+        "version" | "registry" => return Err(d.error(&not_yet("registry dependencies"))),
+        "native" => return Err(d.error(&not_yet("`native` dependencies"))),
+        other => {
+            return Err(d.error(&format!(
+                "unknown dependency kind `Dep::{other}` (expected Dep::path, Dep::git)"
+            )));
+        }
+    })
+}
+
+/// `text` with `field` (`deps` / `dev_deps`) entry `key` set to the
+/// RokON text `value`; the rest of the text (comments too) as it was.
+pub fn set_dep(
+    text: &str,
+    file: &str,
+    field: &str,
+    key: &str,
+    value: &str,
+) -> Result<String, String> {
+    parse(text, file)?;
+    let out = edit::set(text, &[Step::Field(field), Step::Key(key)], value)
+        .map_err(|e| e.render(text, file))?;
+    parse(&out, file).map(|_| out)
+}
+
+/// `text` without `field` entry `key`, or `None` when it has none.
+pub fn remove_dep(
+    text: &str,
+    file: &str,
+    field: &str,
+    key: &str,
+) -> Result<Option<String>, String> {
+    parse(text, file)?;
+    edit::remove(text, &[Step::Field(field), Step::Key(key)]).map_err(|e| e.render(text, file))
+}
+
+/// A script's leading block of `//!` lines from a ```` ```rokon ```` line
+/// to a ```` ``` ```` line: a `rok.rokon` value, without the `//!`
+/// prefixes.
 pub fn script_block(src: &str) -> Option<String> {
     let mut lines = src
         .lines()
         .map_while(|l| l.strip_prefix("//!"))
         .map(|l| l.strip_prefix(' ').unwrap_or(l));
-    lines.by_ref().find(|l| l.trim() == "```toml")?;
+    if !lines.by_ref().any(|l| l.trim() == "```rokon") {
+        return None;
+    }
     let mut out = String::new();
     for l in lines {
         if l.trim() == "```" {
@@ -318,14 +335,14 @@ pub fn script_block(src: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    const APP: &str = "// the app\nPackage {\n    name: \"app\",\n    toolchain: \"0.3\",\n    \
+                       deps: {\n        \"a\": Dep::path(\"../a\"), // local\n        \"b\": \
+                       Dep::git(\"u\", tag: \"v1\"),\n    },\n    dev_deps: { \"c\": \
+                       Dep::git(\"u2\") },\n}\n";
+
     #[test]
     fn manifest_forms_and_errors() {
-        let m = parse(
-            "[package]\nname = \"app\"\ntoolchain = \"0.3\"\n[deps]\na = { path = \"../a\" }\n\
-             b = { git = \"u\", tag = \"v1\" }\n[dev-deps]\nc = { git = \"u2\" }\n",
-            "Rok.toml",
-        )
-        .unwrap();
+        let m = parse(APP, "rok.rokon").unwrap();
         assert_eq!(m.toolchain.as_deref(), Some("0.3"));
         assert_eq!(m.deps[0].source, Source::Path("../a".into()));
         assert_eq!(
@@ -336,7 +353,11 @@ mod tests {
             }
         );
         assert_eq!(m.dev_deps[0].name, "c");
-        let m = parse("[lints]\nunused = \"allow\"\nall = \"deny\"\n", "Rok.toml").unwrap();
+        let m = parse(
+            "Package { lints: { \"unused\": \"allow\", \"all\": \"deny\" }, deps: {} }",
+            "rok.rokon",
+        )
+        .unwrap();
         assert_eq!(
             m.lints,
             [
@@ -344,46 +365,130 @@ mod tests {
                 ("all".to_owned(), LintLevel::Deny)
             ]
         );
+        assert_eq!(
+            parse("Package { name: \"a\\u{62}\" }", "f")
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("ab")
+        );
+        // The root name is optional; `none` is a missing field.
+        let m = parse("{ name: \"x\", toolchain: none }", "f").unwrap();
+        assert_eq!(m.name.as_deref(), Some("x"));
+        assert!(m.toolchain.is_none());
+        assert!(parse("{}", "f").unwrap().deps.is_empty());
         for (src, want) in [
             (
-                "[deps]\na = \"1.0\"",
+                "Package { deps: { \"a\": \"1.0\" } }",
                 "registry dependencies are not supported yet",
             ),
-            ("[deps]\na = { version = \"1\" }", "not supported yet"),
             (
-                "[deps]\na = { native = \"z\" }",
+                "Package { deps: { \"a\": Dep::version(\"1\") } }",
+                "not supported yet",
+            ),
+            (
+                "Package { deps: { \"a\": Dep::native(\"z\") } }",
                 "`native` dependencies is reserved",
             ),
-            ("native = 1", "`native` is reserved"),
-            ("[registry]", "registries is reserved"),
-            ("[deps]\nmy-dep = { path = \"x\" }", "try `my_dep`"),
+            ("Package { native: 1 }", "`native` is reserved"),
+            ("Package { registry: {} }", "registries is reserved"),
             (
-                "[deps]\na = { git = \"u\", tag = \"t\", rev = \"r\" }",
+                "Package { deps: { \"my-dep\": Dep::path(\"x\") } }",
+                "try `my_dep`",
+            ),
+            (
+                "Package { deps: { \"a\": Dep::git(\"u\", tag: \"t\", rev: \"r\") } }",
                 "at most one",
             ),
-            ("[deps]\na = { path = \"p\", git = \"u\" }", "not both"),
             (
-                "[deps]\na = { path = \"p\", tag = \"t\" }",
-                "only go with `git`",
+                "Package { deps: { \"a\": Dep::git(\"u\", sha: \"t\") } }",
+                "unknown argument `sha`",
             ),
-            ("[package]\nedition = \"x\"", "unknown key `edition`"),
-            ("[deps]\na = {}", "needs `path` or `git`"),
-            ("[lints]\nunused = \"off\"", "takes \"allow\""),
+            (
+                "Package { deps: { \"a\": Dep::path(\"p\", tag: \"t\") } }",
+                "unknown argument `tag`",
+            ),
+            (
+                "Package { deps: { \"a\": Dep::path() } }",
+                "takes one string, the path",
+            ),
+            (
+                "Package { deps: { \"a\": Dep::svn(\"u\") } }",
+                "unknown dependency kind `Dep::svn`",
+            ),
+            ("Package { deps: { \"a\": 1 } }", "found an integer"),
+            (
+                "Package { deps: { \"a\": Dep::path(\"x\"), \"a\": Dep::path(\"y\") } }",
+                "given twice",
+            ),
+            ("Package { deps: [] }", "`deps` must be a dict"),
+            ("Package { edition: \"x\" }", "unknown field `edition`"),
+            ("Package { name: \"a\", name: \"b\" }", "given twice"),
+            ("Package { name: 1 + 2 }", "operator `+` is not allowed"),
+            ("Package { name: x }", "bare identifier `x`"),
+            (
+                "Package { name: 1 }",
+                "`name` must be a string, found an integer",
+            ),
+            (
+                "Package { lints: { \"unused\": \"off\" } }",
+                "takes \"allow\"",
+            ),
+            (
+                "Manifest { }",
+                "expected `Package { .. }`, found a struct `Manifest",
+            ),
+            ("Package { } Package { }", "holds one value"),
+            ("", "expected a value"),
+            ("Package { name: \"x }", "unterminated"),
         ] {
-            let e = parse(src, "Rok.toml").unwrap_err();
+            let e = parse(src, "rok.rokon").unwrap_err();
             assert!(e.contains(want), "{src:?}: {e}");
-            assert!(e.starts_with("Rok.toml:"), "{e}");
+            assert!(e.starts_with("rok.rokon:1:"), "{e}");
         }
+        // The position is the offending token's.
+        let e = parse(
+            "Package {\n    name: \"a\",\n    edtion: \"x\",\n}",
+            "rok.rokon",
+        )
+        .unwrap_err();
+        assert!(
+            e.starts_with("rok.rokon:3:5: error: unknown field `edtion`"),
+            "{e}"
+        );
+        let e = parse(APP.replace("tag", "tga").as_str(), "rok.rokon").unwrap_err();
+        assert!(
+            e.starts_with("rok.rokon:7:28: error: unknown argument `tga`"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn edits_keep_the_rest() {
+        let src = Source::Path("x".into()).to_rok();
+        assert_eq!(src, "Dep::path(\"x\")");
+        let t = set_dep(APP, "f", "deps", "a", &src).unwrap();
+        assert!(t.contains("\"a\": Dep::path(\"x\"), // local\n"), "{t}");
+        let t = set_dep("Package {\n    name: \"n\"\n}\n", "f", "deps", "d", &src).unwrap();
+        assert_eq!(parse(&t, "f").unwrap().deps[0].name, "d");
+        let t = remove_dep(APP, "f", "dev_deps", "c").unwrap().unwrap();
+        assert!(parse(&t, "f").unwrap().dev_deps.is_empty());
+        assert!(remove_dep(APP, "f", "deps", "zz").unwrap().is_none());
+        // An edit that makes a bad manifest is refused.
+        assert!(set_dep(APP, "f", "deps", "my-x", &src).is_err());
+        let git = Source::Git {
+            url: "u".into(),
+            reference: GitRef::Branch("b".into()),
+        };
+        assert_eq!(git.to_rok(), "Dep::git(\"u\", branch: \"b\")");
     }
 
     #[test]
     fn script_blocks() {
-        let src = "//! ```toml\n//! [deps]\n//! a = { path = \"x\" }\n//! ```\nprintln(\"hi\");\n";
-        assert_eq!(
-            script_block(src).as_deref(),
-            Some("[deps]\na = { path = \"x\" }\n")
-        );
-        assert_eq!(script_block("//! ```toml\n//! [deps]\nfn main() {}"), None);
-        assert_eq!(script_block("println(1);\n//! ```toml\n//! ```"), None);
+        let src = "//! ```rokon\n//! Package { deps: {} }\n//! ```\nprintln(\"hi\");\n";
+        assert_eq!(script_block(src).as_deref(), Some("Package { deps: {} }\n"));
+        assert_eq!(script_block("//! ```rokon\n//! x\nfn main() {}"), None);
+        assert_eq!(script_block("println(1);\n//! ```rokon\n//! ```"), None);
+        assert_eq!(script_block("//! ```rok\n//! let x = 1;\n//! ```\n"), None);
     }
 }
