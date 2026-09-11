@@ -1,0 +1,10 @@
+// spec: 002.04-enum-variant
+// A wrong enum variant argument count is an error.
+// expect-error: `E::A` takes 1 argument(s) but 3 were supplied
+
+enum E { A(i32) }
+
+fn main() -> i32 {
+    let e = E::A(1, 2, 3);
+    return match e { E::A(a) => a };
+}

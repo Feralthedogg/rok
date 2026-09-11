@@ -7,7 +7,7 @@
 // 4
 // 5
 
-// E8: contextual keywords are identifiers outside their fixed positions,
+// Contextual keywords are identifiers outside their fixed positions,
 // and every keyword but `self` names a field, member or argument label.
 struct Ev { type: i32; match: i32; }
 

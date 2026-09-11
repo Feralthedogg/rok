@@ -23,7 +23,7 @@
 // caught
 // 9
 
-// `finally` runs on every way out (D3): normal completion, after a
+// `finally` runs on every way out: normal completion, after a
 // handled `catch`, on `return` / `break` / `continue` leaving it, and
 // while an error propagates.
 fn fail(x: i32) throws (i32) -> i32 {

@@ -246,11 +246,8 @@ pub(super) fn monomorphize_on(
     _span: rokc_diagnostic::Span,
 ) -> Option<(FunctionId, HirTy)> {
     let fn_module = module_of(&fn_def.name);
-    // Infer concrete types for each generic param by unifying the AST
-    // parameter type ascription against the call's arg type. Walks into
-    // arrays, tuples, sums, function types, and closures. The first
-    // binding wins; a conflicting later argument is reported by the
-    // argument type check at the call site.
+    // Unify each parameter's AST type with its argument's type; the
+    // argument type check reports conflicts.
     let mut subst: HashMap<String, HirTy> = ctx.explicit_generics.clone();
     if let (Some(t), Some(hint)) = (self_ty, self_hint) {
         bind_self(ctx, fn_def, t, hint, &mut subst);
@@ -286,9 +283,8 @@ pub(super) fn monomorphize_on(
         }
     }
 
-    // Spec 2.10.5: if a generic param has a default and no concrete type
-    // got inferred for it, apply the default. Order is one pass — defaults
-    // can't depend on other defaults (would need iteration).
+    // Spec 2.10.5: unbound params take their defaults. One pass: a default
+    // can't depend on another default.
     for gp in &fn_def.generics.params {
         if let rokc_ast::GenericParam::Type {
             name,
@@ -363,9 +359,7 @@ pub(super) fn monomorphize_on(
         return None;
     }
 
-    // Check generic-bound satisfaction: for each `T: Bound` declared on
-    // the fn, verify that the inferred concrete type for `T` carries an
-    // `impl Bound for T` block. `where` predicates count the same.
+    // Each `T: Bound` (or `where` predicate) needs an impl for the bound type.
     let mut goals: Vec<(HirTy, &Vec<rokc_ast::Ty>)> = Vec::new();
     for gp in &fn_def.generics.params {
         if let rokc_ast::GenericParam::Type { name, bounds, .. } = gp {
@@ -430,13 +424,11 @@ pub(super) fn monomorphize_on(
         return Some((existing_id, ret_ty));
     }
 
-    // Allocate a fresh id and lower the FnDef under the substitution.
     let new_id = FunctionId(ctx.env.sink.next_id.get());
     ctx.env.sink.next_id.set(new_id.0 + 1);
     // Pre-cache so a recursive call inside the body finds the in-progress mono.
     ctx.env.sink.mono_cache.borrow_mut().insert(key, new_id);
-    // Pre-resolve the return type from AST + subst so a recursive
-    // `sum_down(n - 1)` inside the body sees the correct result type.
+    // Resolve the return type up front for recursive calls in the body.
     // A known `Self` (the receiver's type) is used as is: the template's
     // own module may not see the impl's type (a trait default method).
     let self_hir = self_hint
@@ -605,6 +597,15 @@ pub(super) fn lower_fn_inner(
         iw.instances.entry(t).or_default().insert(id);
     }
     env.sink.instances.borrow_mut().push(instance);
+    let is_const = fn_def
+        .attrs
+        .iter()
+        .any(|a| a.path == [rokc_ast::CONST_FN_ATTR]);
+    let is_std = module == "rok" || module.starts_with("rok::");
+    env.sink
+        .fn_origin
+        .borrow_mut()
+        .insert(id, (is_const, is_std));
     let mut ctx = LowerCtx::new(env, subst, self_ty);
     ctx.current_module = module;
     ctx.set_bounds(&fn_def.generics, &fn_def.where_clause);
@@ -680,9 +681,8 @@ pub(super) fn lower_fn_inner(
     }
 }
 
-/// Like `resolve_ty_with_structs`, but applies an AST-level type-param
-/// substitution before lookup. For `Pair<T>` with `subst = {T → i32}`,
-/// resolves to `Pair__i32`. Walks recursively into nested types.
+/// `resolve_ty_with_structs` under a type-param substitution: `Pair<T>`
+/// with `{T → i32}` resolves to `Pair__i32`.
 pub(super) fn resolve_ast_with_subst(
     ty: &rokc_ast::Ty,
     struct_table: &HashMap<String, StructId>,
@@ -693,7 +693,6 @@ pub(super) fn resolve_ast_with_subst(
     let rec = |t: &rokc_ast::Ty| resolve_ast_with_subst(t, struct_table, enum_table, subst, sc);
     match &ty.kind {
         rokc_ast::TyKind::Path(p) => {
-            // Bare type-param reference — resolve directly from subst.
             if p.segments.len() == 1 && p.segments[0].generics.is_empty() {
                 if let Some(replacement) = subst.get(&p.segments[0].name) {
                     return replacement.clone();
@@ -702,8 +701,8 @@ pub(super) fn resolve_ast_with_subst(
             if let Some(t) = sc.names.expand_alias(ty, sc.module) {
                 return rec(&t);
             }
-            // Generic-struct/enum path: resolve generic args under subst,
-            // then look up the mangled instantiation.
+            // Generic struct / enum: the mangled instantiation of the
+            // substituted args.
             let generics = p.segments.last().map_or(&[][..], |s| s.generics.as_slice());
             if !generics.is_empty() {
                 let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
@@ -737,7 +736,7 @@ pub(super) fn resolve_ast_with_subst(
         rokc_ast::TyKind::Tuple(parts) => HirTy::Tuple(parts.iter().map(rec).collect()),
         // `[T; N]` / `[T; M * N]` under the instantiation's const args.
         rokc_ast::TyKind::Array(elem, len) => {
-            let n = crate::ty::eval_const_with(len, &|name| {
+            let n = super::const_eval::syntactic_int(len, &|name| {
                 subst.get(name).and_then(crate::ty::as_const).map(|c| c.0)
             });
             match n.and_then(|n| u32::try_from(n).ok()) {
@@ -839,10 +838,9 @@ pub(super) fn generic_struct_fields(
     }
 }
 
-/// Generic items are left to lazy instantiation: their type uses name
-/// type parameters, which must not resolve as same-named visible types
-/// (a user `enum E` vs `impl<T, E> Result<T, E>`).
-/// No unresolved name or unknown part in `t`.
+/// No unresolved name or unknown part in `t`. Generic items instantiate
+/// lazily: their types name type parameters, which must not resolve as
+/// same-named visible types (a user `enum E` vs `impl<T, E> Result<T, E>`).
 fn concrete(t: &HirTy) -> bool {
     match t {
         HirTy::Unknown | HirTy::Path(_) | HirTy::Any => false,
@@ -931,7 +929,9 @@ pub(super) fn generic_use<'t, V>(
     for a in &args {
         collect_unknown_paths(a, &mut leftover);
     }
-    if !leftover.is_empty() {
+    // An argument only a body context evaluates (`{ f(2) }`): left to
+    // the lazy instantiation.
+    if !leftover.is_empty() || args.contains(&HirTy::Unknown) {
         return None;
     }
     Some((full, def, args))

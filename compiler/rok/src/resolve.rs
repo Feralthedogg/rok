@@ -1,6 +1,7 @@
 //! Dependency resolution: from a manifest's `deps` (and `dev_deps`)
-//! through every dependency's own `rok.rokon`, to one package per name.
-//! Git packages come from the lock unless `update` names them.
+//! through every dependency's own `rok.rokon`, to one package per name,
+//! each after its own dependencies (the order rokc builds them in). Git
+//! packages come from the lock unless `update` names them.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,7 +35,7 @@ pub struct Resolved {
     pub name: String,
     /// The package's `lib.rok`.
     pub root: PathBuf,
-    /// Reached only through the root's `[dev-deps]`.
+    /// Reached only through the root's `dev_deps`.
     pub dev: bool,
     /// Its own dependencies' names.
     pub deps: Vec<String>,
@@ -111,7 +112,32 @@ pub fn resolve(home: &Path, ctx: &Context, opts: &Options) -> Result<Vec<Resolve
                 .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         }
     }
-    Ok(r.out)
+    Ok(order(r.out))
+}
+
+/// Each package after its own dependencies.
+fn order(deps: Vec<Resolved>) -> Vec<Resolved> {
+    fn visit(i: usize, all: &[Resolved], state: &mut [u8], out: &mut Vec<usize>) {
+        // 0 new, 1 on the stack (a cycle is cut there), 2 placed.
+        if state[i] != 0 {
+            return;
+        }
+        state[i] = 1;
+        for n in &all[i].deps {
+            if let Some(j) = all.iter().position(|x| x.name == *n) {
+                visit(j, all, state, out);
+            }
+        }
+        state[i] = 2;
+        out.push(i);
+    }
+    let mut state = vec![0; deps.len()];
+    let mut idx = Vec::new();
+    for i in 0..deps.len() {
+        visit(i, &deps, &mut state, &mut idx);
+    }
+    let mut slots: Vec<Option<Resolved>> = deps.into_iter().map(Some).collect();
+    idx.into_iter().filter_map(|i| slots[i].take()).collect()
 }
 
 impl Resolver<'_> {
@@ -253,5 +279,24 @@ impl Resolver<'_> {
         self.cache.fetch(url)?;
         self.fetched.push(url.to_owned());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dependencies_come_first() {
+        let r = |n: &str, deps: &[&str]| Resolved {
+            name: n.into(),
+            root: PathBuf::new(),
+            dev: false,
+            deps: deps.iter().map(|d| (*d).to_owned()).collect(),
+        };
+        // Breadth-first from the root: b, a, c; c needs a.
+        let all = vec![r("b", &["a", "c"]), r("a", &[]), r("c", &["a"])];
+        let names: Vec<String> = order(all).into_iter().map(|d| d.name).collect();
+        assert_eq!(names, ["a", "c", "b"]);
     }
 }

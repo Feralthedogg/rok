@@ -4,9 +4,7 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
-/// Strip the leaf segment from a `module::path::name` string and
-/// return the module path joined back with `::`. Returns an empty
-/// string for free functions in the package root.
+/// The module path of `module::path::name` (`""` at the package root).
 pub(super) fn module_of(name: &str) -> String {
     match name.rsplit_once("::") {
         Some((mod_path, _)) => mod_path.to_owned(),
@@ -222,7 +220,7 @@ pub(super) fn visible_from(cur_module: &str, def_module: &str, vis: Visibility) 
 }
 
 thread_local! {
-    /// The dependency packages' top-level names (`PACKAGES_ATTR`), set
+    /// The dependency packages' top-level names (`HirInput::packages`), set
     /// by `lower_full` for the program being lowered.
     static PACKAGES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -466,7 +464,8 @@ pub(super) fn resolve_ty_with_structs(
             HirTy::Path(vec![full])
         }
         AstTyKind::Array(elem, len) => {
-            let n = crate::ty::eval_const_with(len, &|_| None).and_then(|n| u32::try_from(n).ok());
+            let n = super::const_eval::syntactic_int(len, &|_| None)
+                .and_then(|n| u32::try_from(n).ok());
             let Some(n) = n else {
                 sc.names.error(
                     "array length must be an integer literal (stage-1 limitation)".to_owned(),
@@ -580,8 +579,8 @@ pub(super) fn impl_bound_keys(
     enums: &HashMap<String, EnumId>,
 ) -> Vec<String> {
     let mut keys = vec![tn.to_owned()];
-    // ponytail: every subset of the bindings — 2^n keys; fine for the
-    // one or two associated types traits have.
+    // Every subset of the bindings: 2^n keys, fine for the one or two
+    // associated types a trait has.
     for mask in 0..1u32 << assoc.len().min(8) {
         let binds: Vec<(String, HirTy)> = assoc
             .iter()

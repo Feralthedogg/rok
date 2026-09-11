@@ -5,21 +5,10 @@
 mod common;
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
 
-use common::{Env, ROKC, setup};
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rokc-native-{}-{name}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-fn text(b: &[u8]) -> String {
-    String::from_utf8_lossy(b).into_owned()
-}
+use common::{Env, ROKC, scratch, setup, text};
 
 /// `rokc build <src> <extra..>` with the harness library and runtime.
 fn build(env: &Env, src: &Path, extra: &[&str]) -> Output {

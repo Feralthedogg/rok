@@ -4,9 +4,7 @@
 // 200
 
 // Two i64 slots in a single heap allocation, addressed by offset.
-// This is what the runtime needs to express any record-of-primitives
-// layout — Box / heap structs will reuse this same idiom once codegen
-// supports struct-pointer types directly.
+// The same idiom expresses any record-of-primitives layout.
 extern "C" {
     fn rok_alloc(size: usize, align: usize) -> usize;
     fn rok_free(ptr: usize);

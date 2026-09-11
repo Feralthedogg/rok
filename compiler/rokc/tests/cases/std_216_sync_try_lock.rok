@@ -1,0 +1,47 @@
+// spec: std 216-sync §2.16.3 / §2.16.4
+// expect-exit: 0
+// expect-stdout:
+// try_lock while held: none
+// try_lock after release: 5
+// try_write under read: none
+// try_read under read: ok
+// try_read under write: none
+// write after readers: 2
+
+// spec 2.16.3: `try_lock` is non-blocking and returns none while locked;
+// 2.16.4: readers share, a writer is exclusive (`try_read` / `try_write`
+// return none on conflict). Acquired guards are released with `using`
+// (no scope-exit drop, 2.13.4).
+fn main() {
+    let m = Mutex::new(5);
+    using g = m.lock() {
+        match m.try_lock() {
+            none => println("try_lock while held: none"),
+            g2: MutexGuard<i32> => { using x = g2 { println("try_lock while held: GOT"); } }
+        };
+    }
+    match m.try_lock() {
+        none => println("try_lock after release: none"),
+        g2: MutexGuard<i32> => { using x = g2 { println(f"try_lock after release: {x.get()}"); } }
+    };
+
+    let l = RwLock::new(1);
+    using r = l.read() {
+        match l.try_write() {
+            none => println("try_write under read: none"),
+            w: RwLockWriteGuard<i32> => { using x = w { println("try_write under read: GOT"); } }
+        };
+        match l.try_read() {
+            none => println("try_read under read: none"),
+            r2: RwLockReadGuard<i32> => { using x = r2 { println("try_read under read: ok"); } }
+        };
+    }
+    using w = l.write() {
+        match l.try_read() {
+            none => println("try_read under write: none"),
+            r3: RwLockReadGuard<i32> => { using x = r3 { println("try_read under write: GOT"); } }
+        };
+        w.set(2);
+    }
+    using r = l.read() { println(f"write after readers: {r.get()}"); }
+}

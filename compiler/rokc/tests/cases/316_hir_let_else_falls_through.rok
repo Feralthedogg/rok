@@ -1,0 +1,12 @@
+// spec: 003.15-let-else
+// The else of a let-else must diverge.
+// expect-error: the `else` block of `let ... else` must diverge
+
+fn g(x: i32) -> i32 | none { if x > 0 { return x; } return none; }
+
+fn main() -> i32 {
+    let n: i32 = g(0) else {
+        let z = 1;
+    };
+    return n;
+}

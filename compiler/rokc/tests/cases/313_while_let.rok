@@ -1,0 +1,25 @@
+// spec: 003.13.2-while-let
+// expect-exit: 0
+// expect-stdout:
+// 7
+// 14
+// 21
+// done
+
+// spec 3.13.2: `while let v: T = compute()` matches each iteration and stops on failure.
+fn next(state: i32) -> i32 | none {
+    if state >= 20 {
+        return none;
+    }
+    return state + 7;
+}
+
+fn main() -> i32 {
+    let s = 0;
+    while let v: i32 = next(s) {
+        println(f"{v}");
+        s = v;
+    }
+    println("done");
+    return 0;
+}

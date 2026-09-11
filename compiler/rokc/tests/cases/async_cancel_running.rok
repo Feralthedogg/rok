@@ -5,10 +5,8 @@
 
 // A task cancelled while a worker is polling it (its `await` already
 // checked the flag) is polled again and leaves through its `finally`.
-// It used to be finished right there, skipping the cleanup — `join`
-// reported `CancellationError` but `finally` never ran. Also: the main
-// task's `sleep` must fire while every worker is busy with tasks that
-// never park (timers used to fire only on an idle worker: a hang).
+// The main task's `sleep` must also fire while every worker is busy with
+// tasks that never park.
 let cleanups = Mutex::new(0);
 let cancelled = 0;
 for round in 0..8 {

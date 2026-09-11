@@ -1,0 +1,51 @@
+// spec: 007.08-coroutine §7.8.4 / §7.8.11
+// expect-exit: 0
+// expect-stdout:
+// item0:item0
+// item1:item1
+// item2:item2
+// kept 3 last item2
+// async kept abcabcabc
+// collected true
+
+// spec 7.8.4 / 7.8.11: the coroutine frame is a GC object and keeps the
+// references held across `yield` / `await` alive through collections.
+extern "C" {
+    fn rok_gc_collect();
+    fn rok_gc_stats_collections() -> u64;
+}
+
+yield fn items(n: i32) -> str {
+    let acc: List<str> = [];
+    let i = 0;
+    while i < n {
+        let s = f"item{i}";
+        acc.push(s);
+        unsafe { rok_gc_collect() };
+        yield s + ":" + acc[acc.len() - 1];
+        let j = 0;
+        while j < 100 { let _junk = f"junk{j}"; j = j + 1; }
+        i = i + 1;
+    }
+    yield f"kept {acc.len()} last {acc[acc.len() - 1]}";
+}
+
+async fn grow(n: i32) -> str {
+    let s = "";
+    let piece = "abc";
+    let i = 0;
+    while i < n {
+        await task::yield_now();
+        unsafe { rok_gc_collect() };
+        s = s + piece;
+        i = i + 1;
+    }
+    s
+}
+
+async fn main() {
+    for x in items(3) { println(x); }
+    let r = await grow(3);
+    println(f"async kept {r}");
+    println(f"collected {unsafe { rok_gc_stats_collections() } > 0}");
+}

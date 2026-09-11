@@ -1,0 +1,7 @@
+// spec: 004.01-call-arg-type
+// An argument type mismatch is an error.
+// expect-error: argument `a` of `f` expects `i32`, found `bool`
+
+fn f(a: i32) -> i32 { return a; }
+
+fn main() -> i32 { return f(true); }

@@ -1,0 +1,57 @@
+// spec: std 301-fs §3.1.2 / §3.1.4
+// expect-exit: 0
+// expect-stdout:
+// created: true
+// set_len: 3 [abc]
+// try_clone shares offset: [def]
+// remove_file: false
+// remove missing: NotFound
+// remove non-empty dir fails: true
+// remove_dir: false
+
+// spec 301: `Dir::create` (open + create + truncate), `File::set_len`
+// truncates, `try_clone` dups the fd (shared offset), `remove_file`,
+// `remove_dir` (fails on a non-empty dir), `exists`.
+use rok::std::fs;
+use rok::std::fs::{Dir, File, OpenOptions};
+use rok::std::io::IoError;
+use rok::std::env;
+
+fn main() throws (IoError) {
+    let base = env::temp_dir() / f"rok_probe_301_{env::pid()}";
+    try fs::create_dir_all(base / "sub");
+    let d = try Dir::root().open_dir(base);
+    let f = try d.create("x.txt");
+    try f.write_str("abcdef");
+    try f.close();
+    println(f"created: {fs::exists(base / "x.txt")}");
+
+    let g = try File::open_with(base / "x.txt", OpenOptions::new().read(true).write(true));
+    try g.set_len(3u64);
+    try g.close();
+    println(f"set_len: {(try fs::metadata(base / "x.txt")).len()} [{try fs::read_to_str(base / "x.txt")}]");
+
+    try fs::write(base / "y.txt", "abcdef");
+    let h = try File::open(base / "y.txt");
+    let h2 = try h.try_clone();
+    let three: List<u8> = [0u8, 0u8, 0u8];
+    try h.read(three);
+    println(f"try_clone shares offset: [{try h2.read_to_str()}]");
+    try h.close();
+    try h2.close();
+
+    try fs::remove_file(base / "x.txt");
+    println(f"remove_file: {fs::exists(base / "x.txt")}");
+    try fs::remove_file(base / "x.txt") catch e { println(f"remove missing: {e.kind.debug()}"); };
+
+    try fs::write(base / "sub" / "z", "z");
+    let failed = false;
+    try d.remove_dir("sub") catch _ { failed = true; };
+    println(f"remove non-empty dir fails: {failed}");
+    try fs::remove_file(base / "sub" / "z");
+    try d.remove_dir("sub");
+    try fs::remove_file(base / "y.txt");
+    try d.close();
+    try Dir::root().remove_dir(base);
+    println(f"remove_dir: {fs::exists(base)}");
+}

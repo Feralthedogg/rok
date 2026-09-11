@@ -162,8 +162,12 @@ impl Drop for Host {
 
 pub struct Repl {
     bootstrap: Vec<PathBuf>,
-    /// Dependencies (`--extern name=root`).
+    /// Dependencies (`--extern name=<name>.rhir`).
     pub externs: Vec<(String, PathBuf)>,
+    /// Where `:add` prebuilds dependencies.
+    pub deps_dir: PathBuf,
+    /// The dependency archives the host has linked.
+    linked: HashSet<PathBuf>,
     /// `--replay`: every cell reruns the whole session.
     pub replay: bool,
     /// The first cell (`repl --package`: `use <pkg>::*;`); `:reset`
@@ -201,6 +205,8 @@ impl Repl {
         Ok(Self {
             bootstrap,
             externs: Vec::new(),
+            deps_dir: PathBuf::new(),
+            linked: HashSet::new(),
             replay: false,
             prelude: None,
             tmp: TempDir::new(opts.keep_temps).map_err(|d| d.message)?,
@@ -345,7 +351,7 @@ impl Repl {
     }
 
     /// `:add <args>`: `$ROK add [--env $ROK_ENV] <args>` (the `rok`
-    /// that started this session), then reload the dependency list from
+    /// that started this session), then prebuild the dependency list of
     /// `$ROK deps`.
     fn add_dep(&mut self, args: &str) {
         let Some(rok) = std::env::var_os("ROK") else {
@@ -372,11 +378,23 @@ impl Repl {
             return;
         }
         let Some(out) = run("deps", &[]) else { return };
-        self.externs = String::from_utf8_lossy(&out.stdout)
+        let deps: Vec<(String, PathBuf)> = String::from_utf8_lossy(&out.stdout)
             .lines()
             .filter_map(|l| l.split_once('='))
             .map(|(n, p)| (n.to_owned(), PathBuf::from(p)))
             .collect();
+        let build = rokc_interface::DepBuild {
+            bootstrap: &self.bootstrap,
+            cfg: &[],
+            opts: &self.opts,
+            target: None,
+            dir: &self.deps_dir,
+            quiet: true,
+        };
+        match build.prebuild(&deps) {
+            Ok(externs) => self.externs = externs,
+            Err(e) => eprintln!("error: {e}"),
+        }
     }
 
     fn item(&mut self, cell: &str, key: Option<String>) -> bool {
@@ -411,7 +429,7 @@ impl Repl {
                 if !keep {
                     eprintln!("note: `{}` is gone: its type `{ty}` was redefined", b.name);
                 } else if b.holds_any {
-                    // ponytail: it may hold an old `{ty}`, which the new
+                    // It may hold an old `{ty}`, which the new
                     // one's tag would claim; keeping the ones that cannot
                     // needs the value's tag.
                     eprintln!(
@@ -501,7 +519,7 @@ impl Repl {
         lap.mark("bindings");
         self.built += 1;
         let mut opts = self.opts.clone();
-        // ponytail: `-g` cells compile everything (their text carries
+        // `-g` cells compile everything (their text carries
         // locations, which differ from cell to cell anyway).
         let known = if opts.debug {
             HashMap::new()
@@ -530,6 +548,7 @@ impl Repl {
             out.fns.len(),
             out.reused
         ));
+        self.link_archives(&r);
         let value = self.load("cell", &ir);
         lap.mark("jit + run");
         let value = value.ok_or(())?;
@@ -607,7 +626,7 @@ impl Repl {
             let (Some(name), Some(l)) = (named(id), local(id)) else {
                 continue;
             };
-            // ponytail: what the HIR printer cannot write as source
+            // What the HIR printer cannot write as source
             // (closures, unresolved types) is refused; `--replay` keeps it.
             // Full paths, so later cells name the type without a `use`.
             let ty = ty_path(hir, &l.ty);
@@ -644,7 +663,7 @@ impl Repl {
                 id,
             ));
         }
-        // ponytail: every binding goes back (a `let` can be assigned);
+        // Every binding goes back (a `let` can be assigned);
         // only the ones the cell assigns would need to.
         let old = self
             .bindings
@@ -729,15 +748,45 @@ impl Repl {
         }
     }
 
-    /// Send the host (started on first use) `<head> <len>` and the
-    /// cell's LLVM IR; its shown value.
-    fn load(&mut self, head: &str, ir: &[u8]) -> Loaded {
+    /// The host, started on first use.
+    fn host(&mut self) -> Option<&mut Host> {
         if self.host.is_none() {
             self.host = match self.starting.take() {
                 Some(h) => h.join().ok().flatten(),
                 None => start_host(self.tmp.path(), &self.opts),
             };
         }
+        self.host.as_mut()
+    }
+
+    /// Link the prebuilt dependencies `r` uses into the host, once each.
+    fn link_archives(&mut self, r: &CompileResult) {
+        let archives = r.modules.first().map_or(&[][..], |m| &m.archives[..]);
+        for a in archives {
+            if self.linked.contains(a) {
+                continue;
+            }
+            let Some(host) = self.host() else { return };
+            let path = a.display().to_string();
+            let reply = (|| {
+                writeln!(host.ctl, "lib {}", path.len())?;
+                host.ctl.write_all(path.as_bytes())?;
+                let mut line = String::new();
+                BufReader::new(&host.ctl).read_line(&mut line)?;
+                Ok::<_, std::io::Error>(line)
+            })();
+            if reply.is_ok_and(|l| l.starts_with("ok")) {
+                self.linked.insert(a.clone());
+            } else {
+                eprintln!("error: cannot link {path} into the session");
+            }
+        }
+    }
+
+    /// Send the host (started on first use) `<head> <len>` and the
+    /// cell's LLVM IR; its shown value.
+    fn load(&mut self, head: &str, ir: &[u8]) -> Loaded {
+        self.host()?;
         let host = self.host.as_mut()?;
         let _ = std::io::stdout().flush();
         let reply = (|| {
@@ -773,6 +822,7 @@ impl Repl {
             _ => {
                 eprintln!("error: the session host is gone; the bindings are lost");
                 self.host = None;
+                self.linked.clear();
                 self.bindings.clear();
                 self.statics.clear();
                 self.any_types.clear();
@@ -841,6 +891,7 @@ impl Repl {
             }
         };
         let (out, err) = (self.tmp.path().join("out"), self.tmp.path().join("err"));
+        self.link_archives(&r);
         let ran = self.load(&format!("once {} {}", out.display(), err.display()), &ir);
         let mark = format!("{OUT_MARK}\n");
         let after = |f: &std::path::Path| {
@@ -856,7 +907,7 @@ impl Repl {
         print!("{printed}");
         eprint!("{}", after(&err));
         if ran.is_none() {
-            // ponytail: replaying a failing cell would fail every later
+            // Replaying a failing cell would fail every later
             // run, so unlike 907.5 the cell is dropped.
             eprintln!("error: the cell failed; it is not kept");
             return Outcome::RunError;
@@ -906,7 +957,8 @@ fn start_host(dir: &std::path::Path, opts: &BuildOptions) -> Option<Host> {
     }
 }
 
-/// The type of the last top-level binding `name` of `main`, as written.
+/// Whether a value of `ty` can hold an `any` value (`seen` cuts
+/// recursive types).
 fn holds_any(hir: &HirModule, ty: &HirTy, seen: &mut Vec<HirTy>) -> bool {
     if seen.contains(ty) {
         return false;
@@ -934,6 +986,7 @@ fn holds_any(hir: &HirModule, ty: &HirTy, seen: &mut Vec<HirTy>) -> bool {
     }
 }
 
+/// The type of the last top-level binding `name` of `main`, as written.
 fn binding_ty(r: &CompileResult, name: &str) -> Option<String> {
     let hir: &HirModule = &r.modules.first()?.hir;
     let main = hir.functions.iter().find(|f| f.name == "main")?;
@@ -1061,6 +1114,7 @@ pub(crate) fn incomplete(src: &str) -> bool {
 pub fn main(
     bootstrap: Vec<PathBuf>,
     externs: Vec<(String, PathBuf)>,
+    deps_dir: PathBuf,
     opts: BuildOptions,
     interactive: bool,
     replay: bool,
@@ -1069,6 +1123,7 @@ pub fn main(
     match Repl::new(bootstrap, opts) {
         Ok(mut r) => {
             r.externs = externs;
+            r.deps_dir = deps_dir;
             r.replay = replay;
             if let Some(p) = prelude {
                 r.prelude = Some(p.to_owned());

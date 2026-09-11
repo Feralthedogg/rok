@@ -1,0 +1,11 @@
+// spec: 005.06-visibility
+// Calling a private method from outside is an error.
+// expect-error: method `secret` is private to module `a`
+
+mod a {
+    pub struct S { pub x: i32; }
+    impl S { fn secret(self) -> i32 { return 42; } }
+    pub fn mk() -> S { return S { x: 1 }; }
+}
+
+fn main() -> i32 { let s = a::mk(); return s.secret(); }

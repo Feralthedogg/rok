@@ -1,8 +1,0 @@
-// spec: 003.09-branch-unify-sum
-// probe: negative-must-fail
-// expect-error: `if` branches have different types `i32` and `f64` — rok does not infer a sum type
-
-// D1: 분기 타입이 다르면 합 타입으로 자동 추론하지 않는다 —
-// `let v: i32 | f64 = if ...` 로 적는다 (`309_branch_unify_sum`).
-let c = true;
-let v = if c { 7 } else { 3.14 };

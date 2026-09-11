@@ -1,0 +1,22 @@
+// spec: 003.03-let
+// expect-exit: 0
+// expect-stdout:
+// 7
+// 5
+// 2
+// 9
+
+// An unannotated `let` is a slot of the initializer's static type; reassignment
+// is checked against it (`304_assign_type_mismatch`). Sum types must be written.
+struct P { x: i32; }
+
+let a = 7;
+let p = P { x: 5 };
+let s: i32 | none = none;
+let t = if a > 3 { a } else { 0 };
+let u = match s { none => 2, n: i32 => n, };
+let w = 'b: { break 'b 9; };
+println(f"{t}");
+println(f"{p.x}");
+println(f"{u}");
+println(f"{w}");

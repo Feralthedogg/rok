@@ -7,7 +7,7 @@
 use rokc_ast::escape::{EscapeMode, unescape};
 use rokc_diagnostic::{ErrorKind, RokDiagnostic, Span};
 
-use crate::token::{Token, TokenKind, keyword_kind};
+use crate::token::{DocLine, Token, TokenKind, keyword_kind};
 use crate::unicode::{
     is_bidi_control, is_ident_continue, is_ident_start, is_pictographic, mixed_script,
     normalize_ident, skeleton,
@@ -41,6 +41,8 @@ pub struct Lexer<'src> {
     any_non_ascii: bool,
     /// Registered extension operator tokens (spec 1.10.4), longest first.
     ext_ops: Vec<String>,
+    /// Doc comments seen since the last token.
+    docs: Vec<DocLine>,
 }
 
 impl<'src> Lexer<'src> {
@@ -60,6 +62,7 @@ impl<'src> Lexer<'src> {
             seen: std::collections::HashSet::new(),
             any_non_ascii: false,
             ext_ops: Vec::new(),
+            docs: Vec::new(),
         }
     }
 
@@ -81,11 +84,14 @@ impl<'src> Lexer<'src> {
         loop {
             self.skip_trivia();
             if self.pos >= self.bytes.len() {
-                tokens.push(Token::new(TokenKind::Eof, self.span_here()));
+                let mut eof = Token::new(TokenKind::Eof, self.span_here());
+                eof.docs = std::mem::take(&mut self.docs);
+                tokens.push(eof);
                 break;
             }
             // `None`: invalid input was reported and skipped.
-            if let Some(tok) = self.next_token() {
+            if let Some(mut tok) = self.next_token() {
+                tok.docs = std::mem::take(&mut self.docs);
                 self.prev_minus = tok.kind == TokenKind::Minus && !self.prev_ends_expr;
                 self.prev_ends_expr = matches!(
                     tok.kind,
@@ -114,7 +120,7 @@ impl<'src> Lexer<'src> {
         (tokens, self.diagnostics)
     }
 
-    /// Spec 1.1 (E7): bidirectional formatting controls are rejected
+    /// Spec 1.1: bidirectional formatting controls are rejected
     /// anywhere — comments and strings included (`\u{..}` escapes only).
     fn check_bidi(&mut self) {
         if self.src.is_ascii() {
@@ -398,7 +404,7 @@ impl<'src> Lexer<'src> {
             self.advance(2);
             return TokenKind::DotDot;
         }
-        // Spec E5: `.5` is always `.` + tuple index; a float literal needs
+        // `.5` is always `.` + tuple index; a float literal needs
         // its leading `0`. Where no expression precedes, say so.
         if !self.prev_ends_expr && self.bytes.get(self.pos + 1).is_some_and(u8::is_ascii_digit) {
             self.error_from(
@@ -691,7 +697,7 @@ impl<'src> Lexer<'src> {
             "u64" | "usize" => (64, false),
             _ => return,
         };
-        // Spec E5: only a unary `-` directly before the literal admits
+        // Only a unary `-` directly before the literal admits
         // `MAX + 1` (`-128i8`); in `a - 128i8` the literal is out of range.
         let max = if signed {
             (1u128 << (bits - 1)) - u128::from(!self.prev_minus)
@@ -921,6 +927,22 @@ impl<'src> Lexer<'src> {
                     let len = self.src[self.pos..]
                         .find(['\n', '\r'])
                         .unwrap_or(self.bytes.len() - self.pos);
+                    let line = &self.src[self.pos..self.pos + len];
+                    // `////` is a plain comment, as in Rust.
+                    let doc = match line.get(..3) {
+                        Some("///") if !line.starts_with("////") => Some(false),
+                        Some("//!") => Some(true),
+                        _ => None,
+                    };
+                    if let Some(inner) = doc {
+                        let span = Self::make_span(self.pos, self.pos + len, self.line, self.col);
+                        let text = &line[3..];
+                        self.docs.push(DocLine {
+                            inner,
+                            text: text.strip_prefix(' ').unwrap_or(text).to_owned(),
+                            span,
+                        });
+                    }
                     self.advance(len);
                 }
                 b'/' if self.bytes.get(self.pos + 1) == Some(&b'*') => self.skip_block_comment(),

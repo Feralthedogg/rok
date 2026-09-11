@@ -1,0 +1,13 @@
+// spec: 002.09.3-impl-overlap
+// expect-error: conflicting implementations of trait
+
+// spec 2.9.3: one impl of a trait per type. A concrete impl the blanket
+// impl also covers is a duplicate — there is no specialization.
+trait Num { fn num(self) -> i32; }
+trait Twice { fn twice(self) -> i32; }
+
+impl Num for i32 { fn num(self) -> i32 { return self; } }
+impl<T: Num> Twice for T { fn twice(self) -> i32 { return self.num() * 2; } }
+impl Twice for i32 { fn twice(self) -> i32 { return 0; } }
+
+fn main() -> i32 { return 7.twice(); }

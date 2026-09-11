@@ -1,0 +1,11 @@
+// spec: 002.10-generics
+// expect-error: does not satisfy trait bound `Source<Item = i32>`
+
+// A generic impl answers a bound's associated-type binding with its own
+// instantiated `type Item` — `Box<bool>` has `Item = bool`.
+trait Source { type Item; fn get(self) -> Item; }
+struct Box<T> { v: T; }
+impl<T> Source for Box<T> { type Item = T; fn get(self) -> T { return self.v; } }
+
+fn total<S: Source<Item = i32>>(s: S) -> i32 { return 0; }
+let t = total(Box { v: true });

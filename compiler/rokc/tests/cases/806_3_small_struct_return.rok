@@ -1,0 +1,21 @@
+// spec: 008.06-calling-convention §8.6.3
+// expect-exit: 0
+// expect-stdout:
+// 4000000001 7
+// -3 -1
+
+// spec 8.6.3: a small `struct` returned by C comes back in registers;
+// rok sees the same field layout (libc `lldiv` -> 16-byte `lldiv_t`).
+struct LLDivT { quot: i64; rem: i64; }
+
+extern "C" {
+    fn lldiv(n: i64, d: i64) -> LLDivT;
+}
+
+fn main() -> i32 {
+    let c = unsafe { lldiv(28000000007i64, 7i64) };
+    println(f"{c.quot} {c.rem + 7i64}");
+    let d = unsafe { lldiv(-7i64, 2i64) };
+    println(f"{d.quot} {d.rem}");
+    return 0;
+}

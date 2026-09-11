@@ -18,6 +18,8 @@ name = "rokls"
 path = "src/bin/rokls.rs"
 
 [dependencies]
+rokc_core = { workspace = true }
+rokc_diagnostic = { workspace = true }
 rokc_rokon = { workspace = true }
 
 [lints]

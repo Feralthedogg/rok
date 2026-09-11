@@ -3,8 +3,7 @@
 // 5 6 true false
 // true
 
-// `..=b` builds a `RangeToInclusive` (it used to build a `RangeTo`, an
-// exclusive end); `..b` is still `RangeTo`.
+// `..=b` builds a `RangeToInclusive`; `..b` is a `RangeTo`.
 fn upto(r: RangeTo<i32>, x: i32) -> bool { x < r.end }
 fn through(r: RangeToInclusive<i32>, x: i32) -> bool { x <= r.end }
 

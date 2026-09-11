@@ -4,11 +4,9 @@
 use super::*;
 
 /// Lift a closure into an anonymous top-level function and return a
-/// closure value. Captures named outer locals by value (snapshot at
-/// creation time); a `[ref x]` capture (spec 4.6.2) takes `x`'s cell
-/// (see `LowerCtx::ref_captured`), shared with the outer function.
-/// Non-capturing closures stay as plain function pointers so existing
-/// `fn(...)` types keep working.
+/// closure value. Captures outer locals by value at creation; a `[ref x]`
+/// capture (spec 4.6.2) shares `x`'s cell (`LowerCtx::ref_captured`).
+/// A non-capturing closure stays a plain function pointer.
 pub(super) fn lower_closure_expr(
     ctx: &LowerCtx<'_>,
     capture_list: &[rokc_ast::CaptureSpec],
@@ -175,7 +173,7 @@ pub(super) fn lower_closure_expr(
     let Some(env_ty_v) = env_ty else {
         return HirExpr {
             kind: HirExprKind::FnRef(closure_id),
-            // No captures: Send + Sync like a named function (E3).
+            // No captures: Send + Sync like a named function.
             ty: HirTy::Fn(
                 user_arg_tys,
                 Box::new(final_ret_ty),
@@ -184,8 +182,7 @@ pub(super) fn lower_closure_expr(
             span,
         };
     };
-    // Materialize the env value at the creation site: a tuple of the
-    // current outer locals' values, snapshotted by-value.
+    // The env: captured values snapshotted at the creation site.
     let env_value = HirExpr {
         kind: HirExprKind::Tuple {
             fields: captures
@@ -270,9 +267,7 @@ pub(super) fn closure_ctx<'a>(
     cl_ctx.unsafe_depth = ctx.unsafe_depth;
     cl_ctx.infer_vars = ctx.infer_vars;
 
-    // Closures with captures take an extra `env` parameter (a tuple of
-    // captured values). The env param is declared first so its LocalId
-    // is stable; closure params follow.
+    // `env` is declared first so its LocalId is stable.
     let env_ty = (!captures.is_empty())
         .then(|| HirTy::Tuple(captures.iter().map(|(_, _, t, _)| t.clone()).collect()));
     let mut hir_params: Vec<HirParam> = Vec::with_capacity(params.len() + 1);
@@ -285,8 +280,6 @@ pub(super) fn closure_ctx<'a>(
             ty: et.clone(),
             by_ref: false,
         });
-        // Each captured name becomes a local inside the body initialised
-        // from the corresponding env tuple field.
         for (i, (cap_name, _, cap_ty, by_ref)) in captures.iter().enumerate() {
             let inner_local = cl_ctx.declare(Some(cap_name.clone()), cap_ty.clone());
             if *by_ref {
@@ -453,7 +446,7 @@ pub(super) fn desugar_question_dot(
         return recv;
     }
     let Some((none_idx, some)) = optional_parts(&recv.ty) else {
-        // Spec 3.8 (E5): `?.` on a non-optional receiver is an error.
+        // Spec 3.8: `?.` on a non-optional receiver is an error.
         return ctx.error_expr(
             span,
             format!(
@@ -651,7 +644,7 @@ pub(super) fn desugar_nullish_coalesce(
     let rhs_h = lower_expected(ctx, rhs, value_ty.clone());
     // `a ?? b` with `b: T | none` too (a fallback chain): the result is
     // `T | none` (spec 3.8.4: `T | typeof(b)`).
-    // ponytail: only the same-optional case; other sums still need `T`.
+    // Only the same-optional case; other sums still need `T`.
     if rhs_h.ty == lhs.ty {
         value_ty = lhs.ty.clone();
     }

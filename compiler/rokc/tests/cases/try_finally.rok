@@ -1,8 +1,7 @@
 // expect-exit: 11
 
-// `try { body } finally { fin }` — body runs, then finally runs, even
-// though catch arms are inert in stage 1. No throw → finally still
-// fires (sequential model).
+// `try { body } finally { fin }`: with no throw, the body runs and then
+// `finally` still fires.
 fn main() -> i32 {
     let total = 0;
     let result = try {

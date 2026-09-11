@@ -1,14 +1,15 @@
 //! `rok`: the toolchain front (spec 901). It owns `rok.rokon` /
-//! `rok.lock`, dependency resolution and the git cache, environments and
-//! toolchains, and runs the compiler `rokc` (next to itself, or a pinned
-//! toolchain's) with the resolved dependencies as `--extern name=root`.
+//! `rok.lock`, dependency resolution and the git cache, environments,
+//! toolchains, package scaffolding and the Jupyter kernelspec, and runs
+//! the compiler `rokc` (next to itself, or a pinned toolchain's) with the
+//! resolved dependencies as `--extern name=lib.rok`; rokc prebuilds them.
 //!
 //! ```text
 //! $ROK_HOME/bin/{rok,rokc,rokls}     the toolchain
 //! $ROK_HOME/lib/...                  runtime and standard library (rokc)
 //! $ROK_HOME/cache/git/               shared git cache (see `git`)
-//! $ROK_HOME/cache/scripts/<hash>/    a script's lock
-//! $ROK_HOME/envs/<name>/             a named environment (rok.rokon, rok.lock)
+//! $ROK_HOME/cache/scripts/<hash>/    a script's lock and prebuilt dependencies
+//! $ROK_HOME/envs/<name>/             a named environment (rok.rokon, rok.lock, target/)
 //! $ROK_HOME/envs/CURRENT             `rok env use`'s choice
 //! $ROK_HOME/toolchains/<version>/    installed toolchains (`bin/rokc`, `lib/`)
 //! ```
@@ -17,7 +18,6 @@ mod env;
 mod git;
 mod lock;
 mod manifest;
-mod prebuilt;
 mod resolve;
 mod toolchain;
 
@@ -26,6 +26,8 @@ use std::process::Command;
 
 use manifest::{Dep, GitRef, MANIFEST, Manifest, Source};
 use resolve::{Context, Options, Resolved};
+use rokc_diagnostic::Json;
+use rokc_rokon::{Kind, Value};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -40,23 +42,25 @@ packages:
   add <name> --git <url> [--rev <r> | --tag <t> | --branch <b>]
   remove <name>                remove a dependency
   update [name...]             re-resolve git dependencies, rewrite rok.lock
-  deps                         print the resolved dependencies (name=lib.rok)
+  deps                         print the resolved dependencies (name=lib.rok),
+                               each after its own
   clean [path]                 remove target/
 
-build (run by rokc, with the dependencies):
-  build | check | run | test [path] ...   see `rokc help` for their options
-  repl [--replay]              interactive session (`:add <dep>` adds to the
-                               active environment; --replay reruns every
-                               cell for each new one; --package <path>
-                               loads a library package and `use`s it)
+compiler commands (rokc, with the dependencies; see `rokc help`):
+  build | check | run | test | bench | lint | doc | emit [path] ...
+  repl [--replay] [--package <path>]
+                               interactive session (`:add <dep>` adds to the
+                               active environment)
   lsp                          language server (also `rokls`)
-  jupyter install [--user]     install the `rok` Jupyter kernel (with --env:
-                               `rok-<env>`, running in that environment)
   jupyter --connection-file <f>  the kernel (Jupyter starts it)
   fmt [path]                   format .rok and .rokon files
-  bench [path] [filter]        time the `#[bench]` functions
-  lint [path]                  lint (levels: rok.rokon lints, then -A/-W/-D)
-  doc [path]                   HTML docs (with dependencies) in target/doc/
+
+  The path, if any, comes first after the command; it picks the project
+  (or script) whose dependencies and `lints` apply.
+
+jupyter:
+  jupyter install              install the `rok` Jupyter kernel (with --env:
+                               `rok-<env>`, running in that environment)
 
 environments:
   env create|remove|use <name>      a named environment
@@ -70,7 +74,7 @@ toolchains:
   toolchain install <version> --from <dir | .tar[.gz]>
   toolchain remove <version>
 
-options:
+options (anywhere before `--`):
   --env <name>    use that environment instead of the project's
   --offline       never fetch (git dependencies must be cached)
   --locked        fail instead of changing rok.lock
@@ -94,46 +98,9 @@ struct Global {
     quiet: bool,
 }
 
-/// rokc options that take a separate value (`--name value`).
-const VALUE_FLAGS: &[&str] = &[
-    "-o",
-    "--out",
-    "--output",
-    "--bootstrap",
-    "--cfg",
-    "--load-mlir-plugin",
-    "--load-mlir-pass-plugin",
-    "--mlir-pass",
-    "--target",
-    "--rokr",
-    "--emit",
-    "--stage",
-    "--threads",
-    "--color",
-    "--message-format",
-    "--target-dir",
-    "--extern",
-    "-A",
-    "-W",
-    "-D",
-    "--allow",
-    "--warn",
-    "--deny",
-    "--iters",
-    "--samples",
-    "--connection-file",
-];
-
-/// `ROK_HOME`, else the parent of the directory holding `rok`.
+/// The install root (`rokc_core::rok_home`).
 pub fn home() -> PathBuf {
-    std::env::var_os("ROK_HOME")
-        .filter(|h| !h.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            let exe = std::env::current_exe().ok()?;
-            Some(exe.parent()?.parent()?.to_path_buf())
-        })
-        .unwrap_or_else(|| PathBuf::from("."))
+    rokc_core::rok_home().unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// Run `rok` with `args` (without the program name); the exit code.
@@ -141,6 +108,7 @@ pub fn main_with(args: Vec<String>) -> i32 {
     let mut g = Global::default();
     let mut rest = Vec::new();
     let mut it = args.into_iter();
+    // rok's own options, anywhere before `--`; the rest goes to rokc.
     while let Some(a) = it.next() {
         let (name, inline) = match a.split_once('=') {
             Some((n, v)) if n.starts_with("--") => (n.to_owned(), Some(v.to_owned())),
@@ -173,36 +141,28 @@ pub fn main_with(args: Vec<String>) -> i32 {
             _ => rest.push(a),
         }
     }
-    // The command: the first word that is not an option or its value.
-    let mut i = 0;
-    while i < rest.len() && rest[i].starts_with('-') && rest[i] != "--" {
-        i += if VALUE_FLAGS.contains(&rest[i].as_str()) {
-            2
-        } else {
-            1
-        };
-    }
-    if i >= rest.len() || rest[i] == "--" {
-        match rest
-            .iter()
-            .find(|a| matches!(a.as_str(), "-V" | "--version" | "-h" | "--help"))
-        {
-            Some(v) if v == "-V" || v == "--version" => {
-                println!("rok {VERSION}");
-                return 0;
-            }
-            Some(_) => {
-                print!("{USAGE}");
-                return 0;
-            }
-            // Bare `rok` (options only) is `rok repl`, like `python` / `julia`.
-            None => rest.insert(i, "repl".into()),
+    // The command: the first word that is not an option. rokc options
+    // with a separate value go after it.
+    let Some(i) = rest.iter().position(|a| !a.starts_with('-') || a == "--") else {
+        if rest.iter().any(|a| a == "-V" || a == "--version") {
+            println!("rok {VERSION}");
+            return 0;
         }
+        if rest.iter().any(|a| a == "-h" || a == "--help") {
+            print!("{USAGE}");
+            return 0;
+        }
+        // Bare `rok` (options only) is `rok repl`, like `python` / `julia`.
+        return run(&g, "repl", &rest, &[]);
+    };
+    if rest[i] == "--" {
+        return run(&g, "repl", &rest[..i], &rest[i..]);
     }
-    let cmd = rest[i].clone();
-    let pre = rest[..i].to_vec();
-    let post = rest[i + 1..].to_vec();
-    let r = match cmd.as_str() {
+    run(&g, &rest[i], &rest[..i], &rest[i + 1..])
+}
+
+fn run(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> i32 {
+    let r = match cmd {
         "version" => {
             println!("rok {VERSION}");
             Ok(0)
@@ -211,22 +171,16 @@ pub fn main_with(args: Vec<String>) -> i32 {
             print!("{USAGE}");
             Ok(0)
         }
-        "new" | "init" => cmd_new(&g, &cmd, &pre, &post),
-        "add" => cmd_add(&g, &post),
-        "remove" => cmd_remove(&g, &post),
-        "update" => cmd_update(&g, &post),
-        "deps" => cmd_deps(&g, &post),
-        "env" => env::cmd(&g, &post),
-        "toolchain" => toolchain::cmd(&post),
-        // The kernelspec runs `rok [--env <name>] jupyter ..`: rokc writes it.
-        "jupyter" if post.first().is_some_and(|p| p == "install") => {
-            let mut args = vec!["--install-kernel".to_owned()];
-            args.extend(post[1..].iter().cloned());
-            args.extend(g.env.iter().flat_map(|e| ["--env".to_owned(), e.clone()]));
-            delegate(&g, &cmd, &pre, &args)
-        }
+        "new" | "init" => cmd_new(g, cmd, post),
+        "add" => cmd_add(g, post),
+        "remove" => cmd_remove(g, post),
+        "update" => cmd_update(g, post),
+        "deps" => cmd_deps(g, post),
+        "env" => env::cmd(g, post),
+        "toolchain" => toolchain::cmd(post),
+        "jupyter" if post.first().is_some_and(|p| p == "install") => install_kernel(g, &post[1..]),
         "build" | "check" | "run" | "test" | "repl" | "lsp" | "fmt" | "clean" | "demangle"
-        | "emit" | "bench" | "doc" | "lint" | "jupyter" => delegate(&g, &cmd, &pre, &post),
+        | "emit" | "bench" | "doc" | "lint" | "jupyter" => delegate(g, cmd, pre, post),
         other => return usage(&format!("unknown command `{other}`")),
     };
     r.unwrap_or_else(|e| {
@@ -245,25 +199,8 @@ fn usage(msg: &str) -> i32 {
     2
 }
 
-/// Positional arguments of a rokc command line (up to `--`).
-fn positionals(args: &[String]) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < args.len() && args[i] != "--" {
-        let a = args[i].as_str();
-        if VALUE_FLAGS.contains(&a) {
-            i += 1;
-        } else if !a.starts_with('-') || a == "-" {
-            out.push(a);
-        }
-        i += 1;
-    }
-    out
-}
-
 /// The package directory `start` belongs to: the nearest directory at
-/// or above it holding `main.rok`, `lib.rok` or `rok.rokon`
-/// (or an old-named manifest, so that its error shows).
+/// or above it holding `main.rok`, `lib.rok` or `rok.rokon`.
 fn package_dir(start: &Path) -> Option<PathBuf> {
     let abs = std::path::absolute(start).ok()?;
     let from = if abs.is_file() { abs.parent()? } else { &abs };
@@ -276,11 +213,12 @@ fn package_dir(start: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// What a command works on, the environment name to hand down, and
-/// the pinned toolchain.
+/// What a command works on, and where its dependencies are prebuilt when
+/// it is not a package (an environment's or a script's `target/`).
 struct Target {
     ctx: Context,
     env: Option<String>,
+    target_dir: Option<PathBuf>,
 }
 
 fn env_dir(name: &str) -> PathBuf {
@@ -316,6 +254,7 @@ fn env_target(name: &str) -> Result<Target, String> {
     Ok(Target {
         ctx: load_dir(&env_dir(name))?,
         env: Some(name.to_owned()),
+        target_dir: Some(env_dir(name).join("target")),
     })
 }
 
@@ -335,6 +274,7 @@ fn target_for(g: &Global, path: Option<&str>) -> Result<Target, String> {
             return Ok(Target {
                 ctx: load_dir(&dir)?,
                 env: None,
+                target_dir: None,
             });
         }
     } else if start.is_file() {
@@ -354,7 +294,7 @@ fn target_for(g: &Global, path: Option<&str>) -> Result<Target, String> {
             let key = format!("{}\0{block}", abs.display());
             let cache = home()
                 .join("cache/scripts")
-                .join(format!("{:016x}", git::fnv(&key)));
+                .join(format!("{:016x}", rokc_core::hash::fnv(key.as_bytes())));
             std::fs::create_dir_all(&cache).map_err(|e| format!("{}: {e}", cache.display()))?;
             return Ok(Target {
                 ctx: Context {
@@ -363,6 +303,7 @@ fn target_for(g: &Global, path: Option<&str>) -> Result<Target, String> {
                     lock_path: Some(cache.join(manifest::LOCK)),
                 },
                 env: None,
+                target_dir: Some(cache.join("target")),
             });
         }
     }
@@ -378,76 +319,43 @@ const fn options(g: &Global) -> Options {
     }
 }
 
-/// Run `rokc <pre> <cmd> --extern.. <post>` for `build` / `run` / ...
+/// Run `rokc <pre> <cmd> [--extern..] [lint levels] [--target-dir] <post>`.
 fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i32, String> {
-    let pos = positionals(post);
-    let path = match cmd {
-        "build" | "check" | "run" | "clean" | "emit" | "lint" | "doc" => {
-            pos.first().copied().filter(|p| *p != "-")
-        }
-        // `test [path] [filter]`: a lone non-path argument is the filter.
-        "test" | "bench" => pos.first().copied().filter(|p| Path::new(p).exists()),
-        _ => None,
-    };
+    // The path, when given, is the first argument after the command.
+    let path = post
+        .first()
+        .map(String::as_str)
+        .filter(|p| !p.starts_with('-') && Path::new(p).exists());
     let t = target_for(g, path)?;
-    let externs: Vec<Resolved> = match cmd {
-        "fmt" | "clean" | "demangle" => Vec::new(),
-        "jupyter" if post.iter().any(|a| a == "--install-kernel") => Vec::new(),
-        _ => match resolve::resolve(&home(), &t.ctx, &options(g)) {
-            Ok(r) => r
-                .into_iter()
-                .filter(|p| matches!(cmd, "test" | "bench") || !p.dev)
-                .collect(),
+    let mut extra: Vec<String> = Vec::new();
+    if !matches!(cmd, "fmt" | "clean" | "demangle") {
+        let deps = match resolve::resolve(&home(), &t.ctx, &options(g)) {
+            Ok(r) => r,
             // The language server still starts (without dependencies).
             Err(e) if cmd == "lsp" => {
                 eprintln!("rok: warning: {e}");
                 Vec::new()
             }
             Err(e) => return Err(e),
-        },
-    };
-    let (rokc, toolchain_home) = toolchain::rokc_for(t.ctx.manifest.toolchain.as_deref())?;
-    // A package's build links its dependencies prebuilt (`.a` + RHIR),
-    // each rebuilt only when it changed; other commands (and scripts /
-    // environments) compile them from source.
-    let mut flags: Vec<String> = pre.to_vec();
-    flags.extend(post.iter().cloned());
-    if cmd == "bench"
-        && !flags
-            .iter()
-            .any(|f| f == "--release" || f.starts_with("-O"))
-    {
-        flags.push("-O2".to_owned()); // rokc's bench default
-    }
-    let pkg = package_dir(Path::new(path.unwrap_or(".")));
-    let roots: Vec<(String, PathBuf)> = match pkg {
-        Some(dir) if t.env.is_none() && matches!(cmd, "build" | "run" | "test" | "bench") => {
-            prebuilt::build(
-                &rokc,
-                toolchain_home.as_deref(),
-                &dir,
-                &flags,
-                &externs,
-                g.quiet,
-            )?
+        };
+        let dev_too = matches!(cmd, "test" | "bench");
+        for p in deps.iter().filter(|p| dev_too || !p.dev) {
+            extra.push("--extern".to_owned());
+            extra.push(format!("{}={}", p.name, p.root.display()));
         }
-        _ => externs
-            .iter()
-            .map(|p| (p.name.clone(), p.root.clone()))
-            .collect(),
-    };
-    let mut c = Command::new(&rokc);
-    c.args(pre).arg(cmd);
-    for (name, root) in &roots {
-        c.arg("--extern").arg(format!("{name}={}", root.display()));
-    }
-    // `lints` go first: the command line's own `-A/-W/-D` win.
-    if cmd == "lint" {
+        // `lints` go first: the command line's own `-A/-W/-D` win.
         for (name, level) in &t.ctx.manifest.lints {
-            c.arg(level.flag()).arg(name);
+            extra.push(level.flag().to_owned());
+            extra.push(name.clone());
+        }
+        let in_package = package_dir(Path::new(path.unwrap_or("."))).is_some();
+        if let Some(dir) = t.target_dir.as_ref().filter(|_| !in_package) {
+            extra.push(format!("--target-dir={}", dir.display()));
         }
     }
-    c.args(post);
+    let (rokc, toolchain_home) = toolchain::rokc_for(t.ctx.manifest.toolchain.as_deref())?;
+    let mut c = Command::new(&rokc);
+    c.args(pre).arg(cmd).args(&extra).args(post);
     if let Ok(me) = std::env::current_exe() {
         c.env("ROK", me);
     }
@@ -479,36 +387,133 @@ fn exec(mut c: Command, what: &Path) -> i32 {
     }
 }
 
-/// `rok new` / `rok init`: rokc makes the package; rok adds `rok.rokon`.
-fn cmd_new(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i32, String> {
-    let pos = positionals(post);
-    let dir = PathBuf::from(pos.first().copied().unwrap_or("."));
-    let (rokc, _) = toolchain::rokc_for(None)?;
-    let status = Command::new(&rokc)
-        .args(pre)
-        .arg(cmd)
-        .args(post)
-        .status()
-        .map_err(|e| format!("cannot run {}: {e}", rokc.display()))?;
-    if !status.success() {
-        return Ok(status.code().unwrap_or(1));
+const MAIN_TEMPLATE: &str = "println(\"Hello, world!\");\n";
+
+const LIB_TEMPLATE: &str = "\
+pub fn add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+
+#[test]
+fn adds() {
+    if add(2, 2) != 4 {
+        panic(\"add(2, 2) != 4\");
     }
+}
+";
+
+/// `rok new [--lib|--bin] <name>`: a new directory with `main.rok` (or
+/// `lib.rok`) and `rok.rokon`. `init [--lib|--bin] [dir]`: the directory
+/// may exist, but not its root file.
+fn cmd_new(g: &Global, cmd: &str, args: &[String]) -> Result<i32, String> {
+    let mut lib = false;
+    let mut pos = Vec::new();
+    for a in args {
+        match a.as_str() {
+            "--lib" => lib = true,
+            "--bin" => lib = false,
+            f if f.starts_with('-') => return Err(format!("unknown option `{f}`")),
+            p => pos.push(p),
+        }
+    }
+    let init = cmd == "init";
+    let dir = match (init, pos.as_slice()) {
+        (false, [name]) => PathBuf::from(name),
+        (true, []) => PathBuf::from("."),
+        (true, [d]) => PathBuf::from(d),
+        _ => return Err(format!("usage: rok {cmd} [--lib | --bin] <name>")),
+    };
+    if init {
+        for f in ["main.rok", "lib.rok"] {
+            if dir.join(f).exists() {
+                return Err(format!("`{}` already exists", dir.join(f).display()));
+            }
+        }
+    } else if dir.exists() {
+        return Err(format!("`{}` already exists", dir.display()));
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let (file, text) = if lib {
+        ("lib.rok", LIB_TEMPLATE)
+    } else {
+        ("main.rok", MAIN_TEMPLATE)
+    };
+    let root = dir.join(file);
+    std::fs::write(&root, text).map_err(|e| format!("{}: {e}", root.display()))?;
     if manifest::find(&dir).is_none() {
         let abs = std::path::absolute(&dir).map_err(|e| e.to_string())?;
-        let name = abs
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("app")
-            .to_owned();
-        let text = format!(
-            "Package {{\n    name: {},\n    version: \"0.1.0\",\n    deps: {{}},\n}}\n",
-            manifest::quote(&name)
+        let name = abs.file_name().and_then(|n| n.to_str()).unwrap_or("app");
+        let value = Value::record(
+            Some("Package"),
+            vec![
+                ("name", Value::str(name)),
+                ("version", Value::str("0.1.0")),
+                ("deps", Value::new(Kind::Dict(Vec::new()))),
+            ],
         );
         let path = dir.join(MANIFEST);
-        std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
-        if !g.quiet {
-            eprintln!("     Created {}", path.display());
-        }
+        std::fs::write(&path, rokc_rokon::to_string(&value) + "\n")
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    if !g.quiet {
+        let what = if lib { "library" } else { "executable" };
+        eprintln!("     Created {what} package ({})", dir.display());
+    }
+    Ok(0)
+}
+
+/// `rok jupyter install`: the kernelspec `kernels/<name>/kernel.json` in
+/// the Jupyter data directory (`$JUPYTER_DATA_DIR`, else the platform's
+/// per-user one), starting the kernel through this `rok`.
+fn install_kernel(g: &Global, args: &[String]) -> Result<i32, String> {
+    if let Some(a) = args.first() {
+        return Err(format!("`rok jupyter install` takes no `{a}`"));
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut argv = vec![exe.display().to_string()];
+    if let Some(e) = &g.env {
+        argv.extend(["--env".to_owned(), e.clone()]);
+    }
+    argv.extend(["jupyter", "--connection-file", "{connection_file}"].map(str::to_owned));
+    let (name, display) = match &g.env {
+        Some(e) => (format!("rok-{e}"), format!("rok ({e})")),
+        None => ("rok".to_owned(), "rok".to_owned()),
+    };
+    let user_home = || std::env::var_os("HOME").map(PathBuf::from);
+    let data = std::env::var_os("JUPYTER_DATA_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            if cfg!(target_vendor = "apple") {
+                Some(user_home()?.join("Library/Jupyter"))
+            } else {
+                std::env::var_os("XDG_DATA_HOME")
+                    .filter(|d| !d.is_empty())
+                    .map(|d| PathBuf::from(d).join("jupyter"))
+                    .or_else(|| Some(user_home()?.join(".local/share/jupyter")))
+            }
+        })
+        .ok_or("cannot find the Jupyter data directory (set JUPYTER_DATA_DIR)")?;
+    let dir = data.join("kernels").join(&name);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut spec = vec![
+        (
+            "argv".to_owned(),
+            Json::Arr(argv.into_iter().map(Json::Str).collect()),
+        ),
+        ("display_name".to_owned(), Json::Str(display)),
+        ("language".to_owned(), Json::str("rok")),
+        ("interrupt_mode".to_owned(), Json::str("message")),
+    ];
+    // A toolchain found through ROK_HOME needs it in the kernel too.
+    if let Some(h) = std::env::var("ROK_HOME").ok().filter(|h| !h.is_empty()) {
+        spec.push(("env".to_owned(), Json::obj([("ROK_HOME", Json::Str(h))])));
+    }
+    let file = dir.join("kernel.json");
+    std::fs::write(&file, format!("{}\n", Json::Obj(spec)))
+        .map_err(|e| format!("{}: {e}", file.display()))?;
+    if !g.quiet {
+        eprintln!("   Installed kernel `{name}` ({})", file.display());
     }
     Ok(0)
 }
@@ -674,12 +679,16 @@ fn cmd_remove(g: &Global, args: &[String]) -> Result<i32, String> {
     Ok(0)
 }
 
-#[allow(clippy::many_single_char_names)]
 fn cmd_update(g: &Global, names: &[String]) -> Result<i32, String> {
     let t = target_for(g, None)?;
-    let m = &t.ctx.manifest;
+    let manifest = &t.ctx.manifest;
     for n in names {
-        if !m.deps.iter().chain(&m.dev_deps).any(|d| d.name == *n) {
+        if !manifest
+            .deps
+            .iter()
+            .chain(&manifest.dev_deps)
+            .any(|d| d.name == *n)
+        {
             let lock = t
                 .ctx
                 .lock_path
@@ -690,9 +699,9 @@ fn cmd_update(g: &Global, names: &[String]) -> Result<i32, String> {
             }
         }
     }
-    let mut o = options(g);
-    o.update = Some(names.to_vec());
-    let r = resolve::resolve(&home(), &t.ctx, &o)?;
+    let mut opts = options(g);
+    opts.update = Some(names.to_vec());
+    let r = resolve::resolve(&home(), &t.ctx, &opts)?;
     if !g.quiet {
         if let Some(p) = &t.ctx.lock_path {
             eprintln!("     Updated {} ({} packages)", p.display(), r.len());
@@ -701,16 +710,18 @@ fn cmd_update(g: &Global, names: &[String]) -> Result<i32, String> {
     Ok(0)
 }
 
-/// `rok deps [path]`: `name=<lib.rok>` per dependency (plumbing for the
-/// REPL's `:add`).
+/// `rok deps [path] [--dev]`: `name=<lib.rok>` per dependency, each after
+/// its own (the REPL's `:add` reads it).
 fn cmd_deps(g: &Global, args: &[String]) -> Result<i32, String> {
-    let pos = positionals(args);
-    let t = target_for(g, pos.first().copied())?;
+    let path = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(String::as_str);
+    let t = target_for(g, path)?;
     let dev = args.iter().any(|a| a == "--dev");
-    for p in resolve::resolve(&home(), &t.ctx, &options(g))? {
-        if dev || !p.dev {
-            println!("{}={}", p.name, p.root.display());
-        }
+    let deps: Vec<Resolved> = resolve::resolve(&home(), &t.ctx, &options(g))?;
+    for p in deps.iter().filter(|p| dev || !p.dev) {
+        println!("{}={}", p.name, p.root.display());
     }
     Ok(0)
 }

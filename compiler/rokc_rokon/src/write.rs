@@ -107,7 +107,7 @@ fn scalar(v: &Value) -> String {
         Kind::None => "none".into(),
         Kind::Bool(b) => b.to_string(),
         Kind::Int(i) => i.to_string(),
-        // ponytail: `{:?}` keeps a `.0` / exponent so it reads back as a
+        // `{:?}` keeps a `.0` / exponent so it reads back as a
         // float; NaN / infinity have no RokON form.
         Kind::Float(f) => format!("{f:?}"),
         Kind::Char(c) => quoted(&c.to_string(), '\''),

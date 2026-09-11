@@ -1,0 +1,18 @@
+// spec: 004.11-generator-basic
+// expect-error: cannot be used as a type directly
+// A `fn` without `yield` is not a generator and a trait is not a type;
+// the right form is `yield fn counter() -> i32`.
+
+// spec 4.11: named generator with yield statements.
+fn counter() -> Iterator<i32> {
+    yield 1;
+    yield 2;
+    yield 3;
+}
+
+fn main() -> i32 {
+    for x in counter() {
+        println(f"{x}");
+    }
+    return 0;
+}

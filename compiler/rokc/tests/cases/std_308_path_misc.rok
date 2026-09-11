@@ -1,0 +1,25 @@
+// spec: std 308-path §3.8.1
+// expect-exit: 0
+// expect-stdout:
+// abs true false rel false true root true false
+// /etc/hosts.bak
+// a/b/c
+// canonical root: /
+// fs probes: true true false
+
+// spec 3.8.1: `is_absolute` / `is_relative` / `has_root`, `with_file_name`,
+// `from_components`, `canonicalize` (realpath), and the filesystem
+// queries `exists` / `is_dir` / `is_file` on `Path`.
+use rok::std::path::Path;
+
+fn main() {
+    let a = Path::from("/etc/x");
+    let r = Path::from("etc/x");
+    println(f"abs {a.is_absolute()} {r.is_absolute()} rel {a.is_relative()} {r.is_relative()} root {a.has_root()} {r.has_root()}");
+    println(Path::from("/etc/passwd").with_file_name("hosts.bak").as_str());
+    println(Path::from_components(["a", "b", "c"].iter()).as_str());
+    let c = try Path::from("/usr/..").canonicalize() catch _ { Path::from("?") };
+    println(f"canonical root: {c.as_str()}");
+    let root = Path::from("/");
+    println(f"fs probes: {root.exists()} {root.is_dir()} {root.is_file()}");
+}

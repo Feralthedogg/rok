@@ -7,7 +7,7 @@
 // 4
 // 22
 
-// `rethrows` (D3): the call throws only when the function argument does.
+// `rethrows`: the call throws only when the function argument does.
 // A non-throwing argument needs no `try`; a throwing one needs `try` and
 // its error type propagates.
 enum Bad { Odd }

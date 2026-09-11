@@ -1,7 +1,8 @@
-//! End-to-end driver: `rokc build` (which fans out to mlir-opt + mlir-translate + clang) → exec.
-//! Each `tests/cases/*.rok` (or `tests/cases/<dir>/main.rok`) needs either
-//! `// expect-exit: N` (optionally `// expect-stdout:`) or `// expect-error: text`
-//! for a case that must fail to build. Directive details: `common/mod.rs`.
+//! End to end: `rokc build` each `tests/cases/*.rok` (or
+//! `tests/cases/<dir>/main.rok`), then run it. A case has
+//! `// expect-exit: N` (optionally `// expect-stdout:`), or
+//! `// expect-error: text` when it must fail to build. Directives:
+//! `common/mod.rs`.
 
 mod common;
 

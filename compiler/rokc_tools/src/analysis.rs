@@ -1,36 +1,75 @@
-//! Front-end queries shared by the LSP and the REPL: compile a buffer
-//! through HIR, then look things up by byte offset in the typed HIR.
+//! The check pipeline (`rokc check`, `rokc lint`, the language server)
+//! and the queries the language server and the REPL run on its result.
 
 use std::path::Path;
 
+use rokc_ast::{ImplItem, Item, TraitItem};
 use rokc_diagnostic::{RokDiagnostic, Span};
 pub use rokc_hir::each_block;
 use rokc_hir::{HirExpr, HirFunction, HirModule, HirTy};
-use rokc_interface::Session;
+use rokc_interface::{BuildOptions, CompileResult, EmitKind, Session, SourceFile};
 
-/// One compile of a buffer.
+use crate::lint::{self, Level};
+
+/// Front end, then the lints at `levels`, then with `codegen` MLIR codegen.
+///
+/// Codegen rejects what the backend cannot lower. `source` stands for the
+/// root file's text (`None`: read `path`). The diagnostics are in report
+/// order; the result keeps the parsed files.
+pub fn check(
+    session: &mut Session,
+    source: Option<&str>,
+    path: &Path,
+    levels: &[(Level, String)],
+    codegen: Option<&BuildOptions>,
+) -> (CompileResult, Vec<RokDiagnostic>) {
+    session.set_keep_ast(true);
+    let result = match source {
+        Some(s) => session.compile_source(s, path),
+        None => session.compile_file(path),
+    };
+    if result.has_errors() {
+        let diags = result
+            .warnings
+            .iter()
+            .chain(&result.errors)
+            .cloned()
+            .collect();
+        return (result, diags);
+    }
+    let mut diags = lint::run(&result, levels);
+    if let Some(opts) = codegen {
+        diags.extend(result.emit(EmitKind::Mlir, opts).err());
+    }
+    (result, diags)
+}
+
+/// One check of a buffer.
 pub struct Analysis {
-    /// Errors, then warnings.
     pub diags: Vec<RokDiagnostic>,
     /// The registered files of this compile, `Span::file - 1` indexed.
     pub files: Vec<(String, String)>,
     /// Present when the program type-checked.
     pub hir: Option<HirModule>,
+    pub sources: Vec<SourceFile>,
 }
 
-/// Compile `source` as the root file `path` (front end through HIR + MIR,
-/// no codegen).
-pub fn analyze(session: &Session, source: &str, path: &Path) -> Analysis {
-    // ponytail: one global file table; cleared per compile so a
-    // long-lived server does not grow it forever.
+/// Check `source` as the root file `path` (no codegen).
+pub fn analyze(
+    session: &mut Session,
+    source: &str,
+    path: &Path,
+    levels: &[(Level, String)],
+) -> Analysis {
+    // The file table is global: cleared per compile so a long-lived
+    // server does not grow it forever.
     rokc_diagnostic::clear_files();
-    let r = session.compile_source(source, path);
-    let mut diags = r.errors;
-    diags.extend(r.warnings);
+    let (r, diags) = check(session, Some(source), path, levels, None);
     Analysis {
         diags,
         files: rokc_diagnostic::registered_files(),
         hir: r.modules.into_iter().next().map(|m| m.hir),
+        sources: r.sources,
     }
 }
 
@@ -43,6 +82,31 @@ impl Analysis {
 
     fn in_file(&self, span: Span, path: &str) -> bool {
         self.file(span).is_some_and(|(p, _)| p == path)
+    }
+
+    /// The doc comment of the function defined at `span`.
+    pub fn fn_doc(&self, span: Span) -> String {
+        fn find(items: &[Item], span: Span) -> Option<&[rokc_ast::Attribute]> {
+            items.iter().find_map(|item| match item {
+                Item::Fn(f) if f.span == span => Some(f.attrs.as_slice()),
+                Item::Impl(i) => i.items.iter().find_map(|ii| match ii {
+                    ImplItem::Method(m) if m.span == span => Some(m.attrs.as_slice()),
+                    _ => None,
+                }),
+                Item::Trait(t) => t.items.iter().find_map(|ti| match ti {
+                    TraitItem::Method(m) if m.span == span => Some(m.attrs.as_slice()),
+                    _ => None,
+                }),
+                Item::Mod(m) => find(m.items.as_deref().unwrap_or_default(), span),
+                _ => None,
+            })
+        }
+        self.sources
+            .iter()
+            .filter(|f| f.file_id == span.file)
+            .find_map(|f| find(&f.items, span))
+            .map(crate::doc::doc_text)
+            .unwrap_or_default()
     }
 
     /// The path a diagnostic belongs to (explicit, else its primary span's).

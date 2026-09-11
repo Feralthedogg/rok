@@ -1,5 +1,5 @@
 //! Toolchains: `$ROK_HOME/toolchains/<version>/` holds an install
-//! (`bin/rokc`, `lib/`). A project pinning `toolchain = "X"` whose
+//! (`bin/rokc`, `lib/`). A project pinning `toolchain: "X"` whose
 //! version differs from this `rok` runs that toolchain's `rokc`.
 
 use std::path::{Path, PathBuf};
@@ -69,11 +69,9 @@ pub fn rokc_for(pin: Option<&str>) -> Result<(PathBuf, Option<PathBuf>), String>
 }
 
 /// Where a toolchain comes from.
-// ponytail: no download server exists; `Remote` is the hook for one.
 enum Origin<'a> {
     Dir(&'a Path),
     Tarball(&'a Path),
-    Remote,
 }
 
 fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
@@ -122,12 +120,6 @@ fn install(version: &str, origin: &Origin<'_>) -> Result<PathBuf, String> {
                     return Err(format!("cannot unpack {}", t.display()));
                 }
             }
-            Origin::Remote => {
-                return Err(format!(
-                    "there is no toolchain download server yet; install from a local build: \
-                     rok toolchain install {version} --from <dir | tarball>"
-                ));
-            }
         }
         // A tarball holding one top directory: that directory.
         let mut top = tmp.clone();
@@ -161,20 +153,21 @@ pub fn cmd(args: &[String]) -> Result<i32, String> {
         }
         ["install", version, rest @ ..] => {
             let from = match rest {
-                [] => None,
-                ["--from", f] => Some(*f),
-                [f] if f.starts_with("--from=") => Some(&f[7..]),
+                ["--from", f] => *f,
+                [f] if f.starts_with("--from=") => &f[7..],
                 _ => {
                     return Err(
                         "usage: rok toolchain install <version> --from <dir | tarball>".into(),
                     );
                 }
             };
-            let origin = match from.map(Path::new) {
-                None => Origin::Remote,
-                Some(p) if p.is_dir() => Origin::Dir(p),
-                Some(p) if p.is_file() => Origin::Tarball(p),
-                Some(p) => return Err(format!("{} does not exist", p.display())),
+            let p = Path::new(from);
+            let origin = if p.is_dir() {
+                Origin::Dir(p)
+            } else if p.is_file() {
+                Origin::Tarball(p)
+            } else {
+                return Err(format!("{} does not exist", p.display()));
             };
             std::fs::create_dir_all(root()).map_err(|e| e.to_string())?;
             let dir = install(version, &origin)?;

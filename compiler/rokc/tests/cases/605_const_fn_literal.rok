@@ -1,0 +1,22 @@
+// spec: 006.05.08-const-fn-literal
+// expect-error: literal cannot be evaluated at compile time: panicked: zero is not a positive number
+
+// spec 6.5.8: a `const fn` literal handler runs at compile time, so a
+// literal it rejects is a compile error.
+struct Pos {
+    n: i64;
+}
+
+#[literal(number "pos")]
+const fn pos(n: i64) -> Pos {
+    if n <= 0 {
+        panic("zero is not a positive number");
+    }
+    Pos { n: n }
+}
+
+fn main() -> i32 {
+    let a = 3pos;
+    let b = 0pos;
+    return (a.n + b.n) as i32;
+}

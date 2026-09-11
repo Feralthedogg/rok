@@ -1,9 +1,0 @@
-// spec: 001.06-numeric-literal
-// probe: negative-must-fail
-// expect-exit: 0  (기대 타입으로 범위를 넘는 리터럴 → 에러.)
-// expect-error: integer literal `300` out of range for `u8`
-
-fn main() -> i32 {
-    let x: u8 = 300;
-    return 0;
-}

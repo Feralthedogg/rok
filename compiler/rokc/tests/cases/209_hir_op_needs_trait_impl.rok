@@ -1,0 +1,8 @@
+// spec: 000.04-operator-dispatch
+// Operators dispatch only through trait impls; a same-named inherent method is not enough.
+// expect-error: an inherent `fn add` is not enough
+
+struct V { x: i32; }
+impl V { fn add(self, o: V) -> i32 { return self.x * 100 + o.x; } }
+
+fn main() -> i32 { let a = V { x: 1 }; let b = V { x: 2 }; return a + b; }

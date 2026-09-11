@@ -311,7 +311,8 @@ fn transitive_dependencies_and_conflicts() {
         &["add", "a", "--git", &a.display().to_string()],
     ));
     let names: Vec<String> = deps(&home, &app, &[]).into_iter().map(|(n, _)| n).collect();
-    assert_eq!(names, ["a", "b"]);
+    // Each package after its own dependencies.
+    assert_eq!(names, ["b", "a"]);
     let lock = read(&app.join("rok.lock"));
     assert!(
         lock.contains("name: \"a\"") && lock.contains("name: \"b\""),
@@ -410,7 +411,7 @@ fn new_and_init_write_a_manifest() {
     assert!(root.join("mylib/lib.rok").is_file());
     assert_eq!(
         read(&root.join("mylib/rok.rokon")),
-        "Package {\n    name: \"mylib\",\n    version: \"0.1.0\",\n    deps: {},\n}\n"
+        "Package { name: \"mylib\", version: \"0.1.0\", deps: {} }\n"
     );
     let dir = root.join("existing");
     fs::create_dir_all(&dir).unwrap();
@@ -592,7 +593,7 @@ fn pinned_toolchains() {
     }
     fails(
         &rok(&home, &root, &["toolchain", "install", "9.9.1"]),
-        "no toolchain download server",
+        "--from <dir | tarball>",
     );
     fails(
         &rok(

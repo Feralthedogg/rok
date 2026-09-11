@@ -3,7 +3,7 @@
 // 7
 // int
 
-// D4 / 2.2.10: `any Tr<A>` where only a generic impl implements `Tr` and
+// 2.2.10: `any Tr<A>` where only a generic impl implements `Tr` and
 // `A` is a tuple / sum: the call's signature comes from the bound.
 trait Get<T> {
     fn get(self) -> T;

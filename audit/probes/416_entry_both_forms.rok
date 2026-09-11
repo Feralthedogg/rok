@@ -1,7 +1,0 @@
-// spec: 004.16-entry-both-forms
-// probe: negative-must-fail
-// expect-error: both top-level statements and `fn main`
-
-// spec 4.16.1: top-level statements and `fn main` are mutually exclusive.
-fn main() -> i32 { return 0; }
-println(f"{1}");

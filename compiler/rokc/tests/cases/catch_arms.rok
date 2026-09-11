@@ -9,7 +9,7 @@
 // 11
 // 7
 
-// `catch` arms (D3): matched top to bottom against the error's type; a
+// `catch` arms: matched top to bottom against the error's type; a
 // catch that covers every error type makes the expression non-throwing,
 // otherwise the rest propagates. The catch expression's value is the
 // body's or the handler's.

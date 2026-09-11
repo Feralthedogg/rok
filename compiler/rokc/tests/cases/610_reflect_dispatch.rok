@@ -1,0 +1,28 @@
+// spec: 006.10-reflect
+// expect-exit: 0
+// expect-stdout:
+// int
+// str
+// other
+// integer
+// float
+
+// 6.10.5: `type_name_of` on an `any` slot; a type pattern on a sum.
+fn handle(x: any) -> str {
+    if x.type_name_of() == "i32" { return "int"; }
+    else if x.type_name_of() == "str" { return "str"; }
+    return "other";
+}
+
+fn classify(v: i32 | f64) -> str {
+    match v {
+        n: i32 => "integer",
+        f: f64 => "float",
+    }
+}
+
+println(handle(1));
+println(handle("s"));
+println(handle(true));
+println(classify(1));
+println(classify(1.0));

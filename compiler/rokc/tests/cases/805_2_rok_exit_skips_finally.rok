@@ -1,0 +1,25 @@
+// spec: 008.05-extern-symbols §8.5.2 rok_exit / 004.16 §4.16.4
+// expect-exit: 3
+// expect-stdout:
+// before
+// inner
+
+// spec 8.5.2: `rok_exit` (behind `env::exit`) ends the process at once
+// with the code; `finally` and `Drop` do not run, but what was already
+// printed is not lost.
+use rok::std::env;
+
+fn work() throws (str) {
+    try {
+        println("inner");
+        env::exit(3);
+    } finally {
+        println("finally ran");
+    }
+}
+
+fn main() throws (str) {
+    println("before");
+    try work();
+    println("after");
+}

@@ -1,0 +1,26 @@
+// spec: 003.08.2-optional-chain-multi
+// expect-exit: 0
+// expect-stdout:
+// got_inner
+
+// spec 3.8.2: multi-level optional chaining `x?.field?.field`.
+struct Inner {
+    n: i32;
+}
+struct Outer {
+    inner: Inner | none;
+}
+
+fn make() -> Outer | none {
+    return Outer { inner: Inner { n: 7 } };
+}
+
+fn main() -> i32 {
+    let o = make();
+    let v = o?.inner?.n;
+    match v {
+        x: i32 => println("got_inner"),
+        none => println("nope"),
+    };
+    return 0;
+}

@@ -1146,9 +1146,6 @@ fn fn_parts(item: &[Token]) -> Option<(Vec<Token>, Vec<Token>, Vec<Token>)> {
 }
 
 impl Parser<'_> {
-    /// At `#[..] pub? @derive { .. }`: consume the meta block. `None`
-    /// (position unchanged) when the attributes aren't a meta block;
-    /// `Some(None)` for a malformed one (reported).
     /// `#[cfg(..)] mod m {`: steps into the body and returns the index
     /// of its closing `}` and the `cfg`s. Anything else: `None`, nothing
     /// consumed.
@@ -1178,6 +1175,9 @@ impl Parser<'_> {
         Some((end, cfg))
     }
 
+    /// At `#[..] pub? @derive { .. }`: consume the meta block. `None`
+    /// (position unchanged) when the attributes aren't a meta block;
+    /// `Some(None)` for a malformed one (reported).
     pub(crate) fn meta_block(&mut self) -> Option<Option<MetaDef>> {
         if self.peek() != &TokenKind::HashLBracket {
             return None;
@@ -1582,8 +1582,7 @@ impl Parser<'_> {
             ));
         }
         self.expanded.append(&mut p.expanded);
-        // Errors in generated code point at the template (its own file)
-        // and at the use.
+        // Errors in generated code point at the template and at the use.
         for mut d in p.diagnostics {
             if d.primary.as_ref().is_some_and(|l| l.span.file != 0) {
                 d.file = None;
@@ -1607,7 +1606,7 @@ impl Parser<'_> {
 }
 
 /// Tokens as source text: one statement / brace per line, indented.
-// ponytail: no line breaking inside long expressions.
+/// Long expressions are not line-broken.
 fn render(tokens: &[Token]) -> String {
     use TokenKind as K;
     let mut out = String::new();

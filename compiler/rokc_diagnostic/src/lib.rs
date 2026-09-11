@@ -1,5 +1,9 @@
 //! Diagnostics shared across compiler stages.
 
+mod json;
+
+pub use json::Json;
+
 use std::cell::Cell;
 use std::fmt;
 use std::sync::Mutex;
@@ -372,26 +376,6 @@ impl ErrorKind {
     }
 }
 
-/// A JSON string literal.
-#[must_use]
-pub fn json_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
 impl RokDiagnostic {
     /// One-line JSON (spec 909.4):
     /// `{"type","code","kind","message","spans":[..],"notes":[..]}`.
@@ -399,48 +383,69 @@ impl RokDiagnostic {
     pub fn to_json(&self) -> String {
         let span_json = |l: &Label, primary: bool, file: Option<String>| {
             let file = file.or_else(|| Some(file_by_id(l.span.file)?.0));
-            format!(
-                "{{\"file_name\":{},\"line_start\":{},\"col_start\":{},\"byte_start\":{},\
-                 \"byte_end\":{},\"is_primary\":{primary},\"label\":{}}}",
-                file.as_deref().map_or_else(|| "null".to_owned(), json_str),
-                l.span.line,
-                l.span.col,
-                l.span.start,
-                l.span.end,
-                json_str(&l.message),
-            )
+            Json::obj([
+                ("file_name", file.map_or(Json::Null, Json::Str)),
+                ("line_start", Json::num(l.span.line)),
+                ("col_start", Json::num(l.span.col)),
+                ("byte_start", Json::num(l.span.start)),
+                ("byte_end", Json::num(l.span.end)),
+                ("is_primary", Json::Bool(primary)),
+                ("label", Json::str(&l.message)),
+            ])
         };
-        let mut spans: Vec<String> = Vec::new();
+        let mut spans = Vec::new();
         if let Some(p) = &self.primary {
             spans.push(span_json(p, true, self.path()));
         } else if let Some(file) = self.path() {
-            spans.push(format!(
-                "{{\"file_name\":{},\"is_primary\":true}}",
-                json_str(&file)
-            ));
+            spans.push(Json::obj([
+                ("file_name", Json::Str(file)),
+                ("is_primary", Json::Bool(true)),
+            ]));
         }
         spans.extend(self.secondary.iter().map(|l| span_json(l, false, None)));
-        let notes: Vec<String> = self.notes.iter().map(|n| json_str(n)).collect();
-        format!(
-            "{{\"type\":\"{}\",\"code\":\"{}\",\"kind\":\"{}\",\"message\":{},\"spans\":[{}],\
-             \"notes\":[{}]}}",
-            self.severity,
-            self.kind.code(),
-            self.kind,
-            json_str(&self.message),
-            spans.join(","),
-            notes.join(",")
-        )
+        Json::obj([
+            ("type", Json::str(self.severity.to_string())),
+            ("code", Json::str(self.kind.code())),
+            ("kind", Json::str(self.kind.to_string())),
+            ("message", Json::str(&self.message)),
+            ("spans", Json::Arr(spans)),
+            (
+                "notes",
+                Json::Arr(self.notes.iter().map(Json::str).collect()),
+            ),
+        ])
+        .to_string()
     }
+}
+
+/// The report style in effect (part of a build key whose warnings are
+/// replayed as rendered).
+#[must_use]
+pub fn report_style() -> u8 {
+    STYLE.load(Ordering::Relaxed)
 }
 
 /// Print one diagnostic: human text on stderr, or a JSON line on stdout
 /// (see `set_report_style`).
 pub fn report(diag: &RokDiagnostic) {
-    let style = STYLE.load(Ordering::Relaxed);
+    print_rendered(&render(diag));
+}
+
+/// Print text from `render` where `report` would.
+pub fn print_rendered(text: &str) {
+    if report_style() == STYLE_JSON {
+        print!("{text}");
+    } else {
+        eprint!("{text}");
+    }
+}
+
+/// `diag` as `report` prints it, newline-terminated.
+#[must_use]
+pub fn render(diag: &RokDiagnostic) -> String {
+    let style = report_style();
     if style == STYLE_JSON {
-        println!("{}", diag.to_json());
-        return;
+        return format!("{}\n", diag.to_json());
     }
     let paint = |code: &str, text: &str| {
         if style == STYLE_COLOR {
@@ -456,12 +461,12 @@ pub fn report(diag: &RokDiagnostic) {
     };
     let head = diag.to_string();
     let sev = diag.severity.to_string();
-    eprintln!("{}{}", paint(color, &sev), &head[sev.len()..]);
+    let mut out = format!("{}{}\n", paint(color, &sev), &head[sev.len()..]);
     if let Some(s) = diag.snippet() {
         // The caret ends the snippet.
         match s.strip_suffix('^') {
-            Some(body) => eprintln!("{body}{}", paint(color, "^")),
-            None => eprintln!("{s}"),
+            Some(body) => out.push_str(&format!("{body}{}\n", paint(color, "^"))),
+            None => out.push_str(&format!("{s}\n")),
         }
     }
     for label in &diag.secondary {
@@ -469,17 +474,18 @@ pub fn report(diag: &RokDiagnostic) {
         let path = file_by_id(label.span.file)
             .map(|(p, _)| format!("{p}:"))
             .unwrap_or_default();
-        eprintln!(
-            "  {} ({path}{}:{}): {}",
+        out.push_str(&format!(
+            "  {} ({path}{}:{}): {}\n",
             paint("1;36", "note"),
             label.span.line,
             label.span.col,
             label.message
-        );
+        ));
     }
     for note in &diag.notes {
-        eprintln!("  {}: {note}", paint("1;36", "note"));
+        out.push_str(&format!("  {}: {note}\n", paint("1;36", "note")));
     }
+    out
 }
 
 #[cfg(test)]

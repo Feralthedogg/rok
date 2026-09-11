@@ -1,8 +1,7 @@
 // expect-exit: 7
 
-// `union` parses as an item. Layout (fields share storage) is future
-// work — for now the declaration is accepted and the rest of the
-// compiler ignores it. Calling code uses an unrelated path.
+// A `union` declaration parses as an item; an unused one does not
+// affect the program.
 union Repr {
     bits: i64;
     parts: i32;

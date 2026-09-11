@@ -1,0 +1,6 @@
+// spec: 003.03-let
+// expect-error: cannot infer the type of `x`: `none` alone has no value type
+
+// An unannotated `let` takes the initializer's static type; `none` alone has
+// none, so write `let x: T | none = none;`.
+let x = none;

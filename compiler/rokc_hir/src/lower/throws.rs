@@ -1,4 +1,4 @@
-//! Value-based errors (spec 4.14 as revised by decision D3): `throws`
+//! Value-based errors (spec 4.14): `throws`
 //! signatures, `throw`, prefix `try` / `try?` / `try!`, postfix `catch`
 //! / `finally`.
 //!

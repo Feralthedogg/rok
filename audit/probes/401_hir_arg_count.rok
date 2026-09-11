@@ -1,8 +1,0 @@
-// spec: 004.01-call-arity
-// probe: negative-must-fail
-// expect-exit: 0  (인자 개수 부족 → 에러 (이전: mlir-opt 에러).)
-// expect-error: missing argument `b` in call to `f`
-
-fn f(a: i32, b: i32) -> i32 { return a + b; }
-
-fn main() -> i32 { return f(1); }

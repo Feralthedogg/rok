@@ -5,8 +5,8 @@
 // received 2
 // counter 400
 
-// `recv_async` / `for await` over a channel and `lock_async` suspend the task.
-// Async waits on a channel / Mutex suspend the task, not the thread.
+// `recv_async` / `for await` over a channel and `lock_async` suspend the
+// task, not the thread.
 use rok::std::thread;
 
 let (tx, rx) = channel::<i32>();

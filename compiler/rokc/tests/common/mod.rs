@@ -1,7 +1,5 @@
-//! Shared plumbing for the `.rok` build+run harnesses (`integration.rs`,
-//! `spec_probes.rs`).
-//!
-//! Directives read from leading `//` comments of each source:
+//! Shared plumbing of the `rokc` integration tests, and the directives of
+//! the `.rok` cases (`integration.rs`), read from `//` comment lines:
 //!   - `// expect-exit: N`      — runtime exit code
 //!   - `// expect-stdout: text` — single-line stdout, or an empty value
 //!     followed by `// line` comments for a multi-line block
@@ -11,8 +9,10 @@
 //!   - `// expect-stderr: text` — the run's stderr must contain `text`
 //!   - `// debug-only`          — skipped under `ROK_TEST_OPT` (e.g.
 //!     overflow panics, which only `-O0` checks)
-//!   - `// gc-stress: N`        — (integration) run once more with
+//!   - `// gc-stress: N`        — run once more with
 //!     `ROK_GC_STRESS=N ROK_GC_EVAC=always`, same expectations
+//!   - `// rokc-arg: args`      — extra `rokc` arguments (`--cfg feat`)
+//!   - `// spec: <section>`     — the spec section a case checks (a tag)
 //!
 //! Environment:
 //!   - `ROK_REQUIRE_LLVM=1` — missing mlir-opt / mlir-translate / clang is a
@@ -30,6 +30,34 @@ use std::thread;
 
 pub const ROKC: &str = env!("CARGO_BIN_EXE_rokc");
 
+/// The repository root (`compiler/rokc/../..`).
+pub fn workspace() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// A fresh, empty scratch directory for this test binary.
+pub fn scratch(name: &str) -> PathBuf {
+    let dir = env::temp_dir().join(format!("rokc-test-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+pub fn text(b: &[u8]) -> String {
+    String::from_utf8_lossy(b).into_owned()
+}
+
+#[track_caller]
+pub fn assert_exit(out: &Output, code: i32) {
+    assert_eq!(
+        out.status.code(),
+        Some(code),
+        "stdout: {}\nstderr: {}",
+        text(&out.stdout),
+        text(&out.stderr)
+    );
+}
+
 pub struct Env {
     pub workspace: PathBuf,
     pub bootstrap: PathBuf,
@@ -39,12 +67,7 @@ pub struct Env {
 /// Locate the workspace, rebuild `librokr.a`, and check the LLVM toolchain.
 /// Returns `None` when the suite should be skipped.
 pub fn setup() -> Option<Env> {
-    // compiler/rokc → workspace root.
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .unwrap()
-        .to_path_buf();
+    let workspace = std::fs::canonicalize(workspace()).unwrap();
     let bootstrap = workspace.join("library/core/lib.rok");
     assert!(bootstrap.exists(), "missing {bootstrap:?}");
 
@@ -117,7 +140,6 @@ pub fn optimized() -> bool {
 
 /// `rokc build <src> -o <exe>` with the harness bootstrap + runtime.
 pub fn rokc_build(env: &Env, src: &Path, exe: &Path) -> std::io::Result<Output> {
-    // `// rokc-arg: <arg>`: extra command-line arguments (`--cfg feat`).
     let source = std::fs::read_to_string(src).unwrap_or_default();
     Command::new(ROKC)
         .args(directives(&source, "rokc-arg:").flat_map(str::split_whitespace))

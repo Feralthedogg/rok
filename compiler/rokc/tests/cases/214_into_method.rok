@@ -1,0 +1,11 @@
+// spec: 002.14-into-method
+// expect-error: does not satisfy trait bound `rok::core::convert::From<i64>`
+// stdlib 2.11.3: `into` is lossless only; there is no `From<i64> for i32`,
+// so use try_into / saturating_into / as.
+
+fn main() -> i32 {
+    let big: i64 = 100i64;
+    let n: i32 = big.into();
+    println(f"{n}");
+    return 0;
+}

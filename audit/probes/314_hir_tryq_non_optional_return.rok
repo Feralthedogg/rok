@@ -1,8 +1,0 @@
-// spec: 003.14-try-q
-// probe: negative-must-fail
-// expect-exit: 0  (`?` 는 반환 타입에 none 이 있어야 (이전: 0 반환, H-C7).)
-// expect-error: `?` propagates `none`, but the enclosing function returns `i32`
-
-fn g(x: i32) -> i32 | none { if x > 0 { return x; } return none; }
-fn h(x: i32) -> i32 { let v = g(x)?; return v + 1; }
-fn main() -> i32 { return h(0); }

@@ -1,6 +1,6 @@
 // expect-error: type `U` does not satisfy trait bound `rok::core::marker::Send`
-// A union is `Send` only when every declared field is (E3), whatever
-// its byte storage.
+// A union is `Send` only when every declared field is, whatever its
+// byte storage.
 struct Tok { v: i32; }
 impl !Send for Tok {}
 union U { t: Tok; n: i32; }

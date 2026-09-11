@@ -1,0 +1,10 @@
+// spec: 003.03-let
+// expect-error: cannot infer the type of `x`: the initializer never produces a value
+
+// An initializer that only diverges (`return` / `loop {}`) has no type.
+fn f(c: bool) -> i32 {
+    let x = if c { return 1; } else { return 2; };
+    return 0;
+}
+
+println(f"{f(true)}");

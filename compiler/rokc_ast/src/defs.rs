@@ -30,6 +30,10 @@ pub struct FnDef {
 /// (spec 5.9.10).
 pub const EXTERN_C_FN_ATTR: &str = "#extern_c";
 
+/// Marker attribute of a `const fn` (spec 5.2.5): callable in const
+/// contexts, evaluated at compile time there.
+pub const CONST_FN_ATTR: &str = "#const_fn";
+
 /// Marker attribute of a C variadic declaration `fn printf(fmt: str, ...)`
 /// (spec 8.6.10).
 pub const C_VARIADIC_ATTR: &str = "#c_variadic";
@@ -148,10 +152,8 @@ pub struct Block {
     pub stmts: Vec<Stmt>,
     pub trailing: Option<Box<Expr>>,
     pub span: Span,
-    /// Optional `'label:` prefix. When set, `break 'label value` inside
-    /// the block exits the block with `value`. Loop / `while` / `for`
-    /// carry the label on their own variant; this field is for plain
-    /// labeled blocks `'b: { ... }`.
+    /// `'b: { ... }` label; `break 'b value` exits the block with `value`.
+    /// Loops carry their label on their own variant.
     pub label: Option<String>,
 }
 
@@ -409,7 +411,7 @@ pub enum ExprKind {
     Spread(Box<Expr>),
     /// Discard expression `_ = expr`.
     Discard(Box<Expr>),
-    /// `f"..."` (refs-lang 1.7.3): literal runs and `{expr:spec}` holes,
+    /// `f"..."` (spec 1.7.3): literal runs and `{expr:spec}` holes,
     /// formatted by type in HIR (stdlib 2.10).
     FString(Vec<FStringPart>),
 }
@@ -574,7 +576,7 @@ pub enum TyKind {
     /// Tuple `(A, B)`.
     Tuple(Vec<Ty>),
     /// Function type `fn(A, B) -> R [+ Send + Sync]`. A throwing one has
-    /// a `Throws` return type. The paths are auto-trait bounds (E3).
+    /// a `Throws` return type. The paths are auto-trait bounds.
     Fn(Vec<Ty>, Box<Ty>, Vec<Path>),
     /// Return slot of `fn(..) throws (err) -> ok`; only appears as the
     /// return type of `Fn`.
@@ -583,7 +585,7 @@ pub enum TyKind {
     Array(Box<Ty>, ConstExpr),
     /// `any` slot.
     Any,
-    /// `any Tr` / `any (A + B)` — a dynamic slot bounded by traits (D4).
+    /// `any Tr` / `any (A + B)` — a dynamic slot bounded by traits.
     AnyTrait(Vec<Path>),
     /// `none` (used inside sum types).
     None,

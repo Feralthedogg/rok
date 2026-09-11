@@ -3567,39 +3567,32 @@ const fn const_ty(c: &ConstVal) -> MirTy {
 }
 
 fn format_float(bits: u64, prim: PrimTy) -> String {
+    // A non-finite value has no decimal form: MLIR takes the bits of the
+    // type's own width as a hex literal.
     if prim == PrimTy::F32 {
         let v = f32::from_bits(bits as u32);
-        if v.is_nan() {
-            "0x7FC00000".to_owned()
-        } else {
+        if v.is_finite() {
             format_float_decimal(f64::from(v))
+        } else {
+            format!("0x{:08X}", v.to_bits())
         }
     } else {
         let v = f64::from_bits(bits);
-        if v.is_nan() {
-            "0x7FF8000000000000".to_owned()
-        } else {
+        if v.is_finite() {
             format_float_decimal(v)
+        } else {
+            format!("0x{bits:016X}")
         }
     }
 }
 
-// MLIR's float literal grammar requires a decimal point — `3e0` is
-// rejected. `{:?}` on `f64` emits `3.0`, but `1e300` for big / tiny
-// values, which gets its `.0` here.
+/// A finite float as MLIR's literal grammar wants it: with a decimal
+/// point (`3e0` is rejected; `{:?}` writes `1e300` for big values).
 fn format_float_decimal(v: f64) -> String {
-    if v.is_infinite() {
-        if v.is_sign_negative() {
-            "0xFFF0000000000000".to_owned()
-        } else {
-            "0x7FF0000000000000".to_owned()
-        }
-    } else {
-        let s = format!("{v:?}");
-        match s.split_once('e') {
-            Some((m, e)) if !m.contains('.') => format!("{m}.0e{e}"),
-            _ => s,
-        }
+    let s = format!("{v:?}");
+    match s.split_once('e') {
+        Some((m, e)) if !m.contains('.') => format!("{m}.0e{e}"),
+        _ => s,
     }
 }
 
@@ -3659,5 +3652,17 @@ mod overflow_tests {
             64,
             (Some(1 << 40), Some(2))
         ));
+    }
+
+    #[test]
+    fn non_finite_floats_take_their_own_width() {
+        let f32_ = |v: f32| format_float(u64::from(v.to_bits()), PrimTy::F32);
+        assert_eq!(f32_(f32::NEG_INFINITY), "0xFF800000");
+        assert_eq!(f32_(f32::INFINITY), "0x7F800000");
+        assert_eq!(f32_(f32::NAN), "0x7FC00000");
+        assert_eq!(f32_(1.5), "1.5");
+        let f64_ = |v: f64| format_float(v.to_bits(), PrimTy::F64);
+        assert_eq!(f64_(f64::NEG_INFINITY), "0xFFF0000000000000");
+        assert_eq!(f64_(1e300), "1.0e300");
     }
 }

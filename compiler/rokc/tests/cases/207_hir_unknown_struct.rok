@@ -1,0 +1,8 @@
+// spec: 002.07-struct-literal
+// A literal of an undefined struct is an error.
+// expect-error: cannot find struct `Q`
+
+fn main() -> i32 {
+    let x = Q { a: 1 };
+    return 9;
+}

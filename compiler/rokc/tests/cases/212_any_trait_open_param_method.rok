@@ -1,0 +1,10 @@
+// spec: 002.12-any-trait
+// expect-error: cannot call `get` on `any Get`: its signature uses type parameters of `Get`
+
+// On a bare `any Get`, `I` differs per impl, so `get` has no single signature.
+trait Get<I> { fn get(self, i: I) -> I; }
+struct C { v: i32; }
+impl Get<bool> for C { fn get(self, i: bool) -> bool { return !i; } }
+
+let y: any Get = C { v: 0 };
+let b = y.get(true);

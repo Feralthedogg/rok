@@ -1,0 +1,7 @@
+// spec: 003.09-branch-unify-sum
+// expect-error: `if` branches have different types `i32` and `f64` — rok does not infer a sum type
+
+// Differing branch types are not inferred as a sum type; write
+// `let v: i32 | f64 = if ...` (`309_branch_unify_sum`).
+let c = true;
+let v = if c { 7 } else { 3.14 };

@@ -1,9 +1,0 @@
-// spec: 002.07-struct-field
-// probe: negative-must-fail
-// expect-exit: 0  (struct 가 아닌 값의 필드 → 에러.)
-// expect-error: no field `x` on type `i32`
-
-fn main() -> i32 {
-    let a = 5;
-    return a.x;
-}

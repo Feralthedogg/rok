@@ -1,0 +1,12 @@
+// spec: 002.x-union-repr-c
+// expect-error: byte-storage union is not yet implemented
+// A `#[repr(C)]` union needs byte-array storage, which codegen does not
+// implement; it is rejected rather than miscompiled.
+
+#[repr(C)]
+union ED { fd: i32; val: u64; }
+
+fn main() -> i32 {
+    let x = ED { fd: 5 };
+    return unsafe { x.fd };
+}

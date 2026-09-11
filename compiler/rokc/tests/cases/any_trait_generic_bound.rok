@@ -8,7 +8,7 @@
 // 9
 // 3
 
-// D4: `any Get<i32>` admits only `impl Get<i32>` types, and its methods
+// `any Get<i32>` admits only `impl Get<i32>` types, and its methods
 // that use the trait parameter dispatch with the bound's arguments.
 // `any Get<i32>` widens to `any Get` (arguments open) and to `any`.
 // Methods mentioning `Self` stay callable on the concrete type; the

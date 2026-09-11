@@ -1,0 +1,29 @@
+// spec: std 200-core/218-task §2.18.1
+// expect-exit: 0
+// expect-stdout:
+// race fast
+// timeout ok 7
+// timeout TimeoutError
+
+// stdlib 2.18.1: `race` yields the first finished task's result;
+// `timeout` returns the value when the task beats the deadline and
+// throws `TimeoutError` (via `try await`) when it doesn't. The margins
+// are seconds wide so scheduling noise can't flip the result.
+async fn after(ms: i64, name: str) -> str {
+    await task::sleep(Duration::ms(ms));
+    name
+}
+
+async fn main() {
+    let first = await task::race([
+        task::spawn(after(5000, "slow")),
+        task::spawn(after(1, "fast")),
+    ]);
+    println(f"race {first}");
+
+    let v = try await task::timeout(Duration::sec(5), task::spawn(async { 7 })) catch e: TimeoutError { -1 };
+    println(f"timeout ok {v}");
+
+    let w = try await task::timeout(Duration::ms(5), task::spawn(after(5000, "late"))) catch e: TimeoutError { e.debug() };
+    println(f"timeout {w}");
+}

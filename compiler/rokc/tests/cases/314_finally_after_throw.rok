@@ -1,0 +1,19 @@
+// spec: 003.14.3-finally-after-throw
+// expect-exit: 0
+// expect-stdout:
+// finally_ran
+// propagated
+
+// spec 314.3: finally runs on a throw too, before the error leaves the function.
+fn f() throws (i32) {
+    try {
+        throw 1;
+    } finally {
+        println("finally_ran");
+    };
+}
+
+fn main() -> i32 {
+    try f() catch _ { println("propagated"); };
+    return 0;
+}

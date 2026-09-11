@@ -1,0 +1,10 @@
+// spec: 003.01-operator-types
+// Mismatched operand types are an error.
+// expect-error: operator `+` cannot be applied to `f64` and `i32`
+
+fn main() -> i32 {
+    let a: f64 = 1.5;
+    let n: i32 = 2;
+    let b = a + n;
+    return 3;
+}

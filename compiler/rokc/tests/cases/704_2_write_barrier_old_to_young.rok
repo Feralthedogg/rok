@@ -1,0 +1,38 @@
+// spec: 007.04-barriers-and-roots §7.4.2 / 007.03-gc-algorithm §7.3.2
+// expect-exit: 0
+// expect-stdout:
+// 300 n0 n299
+// 300 v0 v299
+
+// spec 7.4.2 / 7.3.2: an object that survived a collection (old, sticky
+// mark) that is later made to point at freshly allocated (young) objects
+// must keep them alive across the following collections — the write
+// barrier records the old -> young edge.
+extern "C" {
+    fn rok_gc_collect();
+}
+
+struct Box { v: str; }
+
+fn main() -> i32 {
+    let old: List<str> = [];
+    let boxes: List<Box> = [];
+    let i = 0;
+    while i < 300 { boxes.push(Box { v: "" }); i += 1; }
+    unsafe { rok_gc_collect() };
+    unsafe { rok_gc_collect() };
+    i = 0;
+    while i < 300 {
+        old.push(f"n{i}");
+        let b = boxes[i as usize];
+        b.v = f"v{i}";
+        boxes[i as usize] = b;
+        if i % 50 == 0 { unsafe { rok_gc_collect() }; }
+        let _junk = f"junk{i}";
+        i += 1;
+    }
+    unsafe { rok_gc_collect() };
+    println(f"{old.len()} {old[0]} {old[299]}");
+    println(f"{boxes.len()} {boxes[0].v} {boxes[299].v}");
+    return 0;
+}

@@ -1,0 +1,9 @@
+// spec: 000.04-operator-dispatch
+// `+` dispatches only through the add_trait (Add) impl, not another trait's `add`.
+// expect-error: it needs `impl Add for V`
+
+trait Plus { fn add(self, o: V) -> V; }
+struct V { x: i32; }
+impl Plus for V { fn add(self, o: V) -> V { return V { x: self.x + o.x }; } }
+
+fn main() -> i32 { let a = V { x: 1 }; let c = a + V { x: 2 }; return c.x; }

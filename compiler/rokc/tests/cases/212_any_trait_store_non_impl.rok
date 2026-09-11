@@ -1,0 +1,10 @@
+// spec: 002.12-any-trait
+// expect-error: `Circle` does not implement `Shape`, so it cannot be stored in an `any Shape` slot
+
+// A value stored in an `any Tr` slot must have a static type implementing `Tr`.
+trait Shape { fn area(self) -> i32; }
+struct Sq { s: i32; }
+struct Circle { r: i32; }
+impl Shape for Sq { fn area(self) -> i32 { return self.s * self.s; } }
+
+let s: any Shape = Circle { r: 2 };

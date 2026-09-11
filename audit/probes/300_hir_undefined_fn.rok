@@ -1,8 +1,0 @@
-// spec: 003.00-name-resolution
-// probe: negative-must-fail
-// expect-exit: 0  (미정의 함수 호출은 컴파일 에러 (이전: unit 반환, H-C1).)
-// expect-error: cannot find function `undefined_fn`
-
-fn main() -> i32 {
-    return undefined_fn(3);
-}

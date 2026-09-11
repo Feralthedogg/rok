@@ -13,7 +13,7 @@
 // 4
 // 25
 
-// D4 beyond the basics: supertrait and default methods, a primitive
+// `any Tr` beyond the basics: supertrait and default methods, a primitive
 // implementor, `any` struct fields, `any (A + B)` with upcast to `any A`,
 // `if` branches into an annotated `any` slot, narrowing by type pattern,
 // `any Tr | none`, and reassignment of an `any` local.

@@ -41,8 +41,8 @@ pub(super) fn lower_match(
         // `if let` / `while let` desugar to `match { pat => .., _ => .. }`
         // with the `_` at the `if` / `while` span; an irrefutable `pat`
         // makes that arm unreachable by construction, not by mistake.
-        // ponytail: recognized by span; mark synthetic arms in the AST if
-        // another desugar ever needs it.
+        // Recognized by span; mark synthetic arms in the AST if another
+        // desugar needs it.
         // A `catch` dispatch (`match #err { .. }`) reports unreachable
         // catch arms itself, as warnings.
         let catch_dispatch = matches!(&scrutinee.kind,
@@ -81,7 +81,7 @@ pub(super) fn lower_match(
                 && a.body.ty != HirTy::Unknown
                 && !coercible(ctx, &result_ty, &a.body.ty)
             {
-                // D1: no sum type is inferred from differing arms.
+                // No sum type is inferred from differing arms.
                 ctx.emit_error(
                     rokc_diagnostic::ErrorKind::Type,
                     format!(
@@ -154,8 +154,7 @@ enum Ctor {
 }
 
 /// A literal's point in the `Ctor::Int` domain. `u128` above `i128::MAX`
-/// saturates (ponytail: such patterns then overlap; exact if anyone
-/// matches near `u128::MAX`).
+/// saturates, so such patterns overlap.
 fn int_point(v: &ConstVal) -> Option<i128> {
     match v {
         ConstVal::Int { value, .. } => Some(*value),
@@ -795,7 +794,7 @@ pub(super) fn lower_pattern_inner(
             } else if let (HirTy::AnyTrait(bounds), false) =
                 (scrut_ty, matches!(target_ty, HirTy::AnyTrait(_)))
             {
-                // D4: narrow `any Tr` to a concrete implementor (tag test).
+                // Narrow `any Tr` to a concrete implementor (tag test).
                 if bounds
                     .iter()
                     .all(|b| ctx.implements_trait(&target_ty, b, 0))
@@ -820,10 +819,8 @@ pub(super) fn lower_pattern_inner(
             mismatch(ctx, format!("type pattern `{}`", ctx.ty_name(&target_ty)))
         }
         AstPatternKind::Or(alts) => {
-            // Spec 3.11.4: every alternative must bind the same set of
-            // names. Pre-allocate one shared local per name (with type
-            // resolved during the first alt's lowering and checked for
-            // consistency on subsequent alts).
+            // Spec 3.11.4: every alternative binds the same names. One
+            // shared local per name, typed by the first alternative.
             let name_sets: Vec<std::collections::BTreeSet<String>> =
                 alts.iter().map(pattern_bound_names).collect();
             let bound_names = name_sets.first().cloned().unwrap_or_default();
@@ -966,9 +963,8 @@ pub(super) fn lower_pattern_inner(
         }
         AstPatternKind::Struct { path, fields, .. } => {
             let segs: Vec<&str> = path.segments.iter().map(|s| s.name.as_str()).collect();
-            // `EnumName::Variant { x, y }` — enum named-form variant
-            // pattern. Map each field name to its position in the
-            // variant's tuple payload (spec 2.4).
+            // `Enum::Variant { x, y }`: field names map to positions in
+            // the variant's tuple payload (spec 2.4).
             match resolve_enum_variant(ctx, &segs, Some(scrut_ty), None) {
                 EnumRes::Error => return HirPattern::Wildcard,
                 EnumRes::Found(enum_id, idx) => {

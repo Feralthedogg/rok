@@ -1,9 +1,0 @@
-// spec: 003.05-tuple-field-index
-// probe: negative-must-fail-parse
-// expect-error: invalid tuple field index `1u8`
-
-// A tuple index is plain decimal digits. `t.1u8` used to become `t.0`.
-fn main() -> i32 {
-    let t = (1, 2);
-    return t.1u8;
-}

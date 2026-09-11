@@ -7,8 +7,7 @@
 
 // `()` is a value like any other: block / if / match / loop values,
 // generic `T = ()`, closure params, tuple and struct fields, list
-// elements. Codegen used to emit `arith.constant 0 : ()` (and `()` as an
-// LLVM struct field type) for these.
+// elements.
 fn u() { println("u"); }
 fn id<T>(x: T) -> T { x }
 struct S<T> { v: T; n: i32; }

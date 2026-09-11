@@ -339,7 +339,7 @@ fn int_fits(x: HirExpr, from: PrimTy, to: PrimTy, span: rokc_diagnostic::Span) -
 
 /// `ty`'s inherent methods (concrete and generic-impl ones), sorted by
 /// name: `name \t static \t return \t args..` per line.
-// ponytail: a generic impl's method shows its types as written (`T`).
+// A generic impl's method shows its types as written (`T`).
 fn method_table(ctx: &LowerCtx<'_>, ty: &HirTy) -> String {
     let mut rows: Vec<(String, String)> = Vec::new();
     let target = super::resolve::method_target_for(ty);

@@ -1,0 +1,12 @@
+// spec: 002.04-trait-as-type
+// expect-error: cannot be used as a type directly
+// A trait name is not a type; use a closed sum or a generic parameter.
+
+trait Number {
+    fn val(self) -> i32;
+}
+
+fn main() -> i32 {
+    let a: Number = 32;
+    return 0;
+}

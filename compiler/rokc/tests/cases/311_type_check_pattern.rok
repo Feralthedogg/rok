@@ -1,0 +1,20 @@
+// spec: 003.11-type-check-pattern
+// expect-exit: 0
+// expect-stdout:
+// got_int
+// got_float
+
+// spec 311: type-check pattern `v: T` branching on a sum type.
+fn classify(x: i32 | f64) -> i32 {
+    let r = match x {
+        v: i32 => 1,
+        v: f64 => 2,
+    };
+    return r;
+}
+
+fn main() -> i32 {
+    if classify(7) == 1 { println("got_int"); }
+    if classify(3.14) == 2 { println("got_float"); }
+    return 0;
+}

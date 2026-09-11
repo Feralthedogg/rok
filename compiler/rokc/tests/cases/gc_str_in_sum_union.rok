@@ -7,8 +7,7 @@
 
 // A `str` sharing a sum payload union with a non-`str` aggregate: the
 // union must be made of GC-visible words, or a collection frees the
-// runtime-built string while the enum still holds it (used to print
-// blanks).
+// runtime-built string while the enum still holds it.
 extern "C" {
     fn rok_gc_collect();
 }

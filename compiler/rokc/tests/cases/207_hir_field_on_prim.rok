@@ -1,0 +1,8 @@
+// spec: 002.07-struct-field
+// Field access on a non-struct value is an error.
+// expect-error: no field `x` on type `i32`
+
+fn main() -> i32 {
+    let a = 5;
+    return a.x;
+}

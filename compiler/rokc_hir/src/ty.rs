@@ -1,9 +1,7 @@
 //! Type lowering: AST `Ty` → `HirTy`.
 //!
-//! Primitive type names (`i32`, `f64`, `bool`, ...) are recognised here
-//! so the rest of the compiler can lower without first running the stdlib
-//! bootstrap. Once the stdlib registers `#[lang(...)]` markers these
-//! mappings can be derived from the `DefTable` instead.
+//! Primitive type names are recognised by spelling, not through the
+//! library's `#[lang]` slots.
 
 use rokc_ast::{Path, Ty, TyKind};
 use rokc_ir_common::PrimTy;
@@ -57,7 +55,7 @@ pub fn resolve_ty(ty: &Ty) -> HirTy {
                 HirTy::Tuple(parts.iter().map(resolve_ty).collect())
             }
         }
-        // Plain `any` = `any ()`: tag + payload with no bound (D4).
+        // Plain `any` = `any ()`: tag + payload, no bound.
         TyKind::Any => HirTy::AnyTrait(Vec::new()),
         TyKind::AnyTrait(bounds) => HirTy::AnyTrait(
             bounds
@@ -77,7 +75,7 @@ pub fn resolve_ty(ty: &Ty) -> HirTy {
             let n = const_expr_to_u32(len).unwrap_or(0);
             HirTy::Array(Box::new(resolve_ty(elem)), n)
         }
-        // ponytail: name-free resolution (prim probes) drops `+ Send` bounds.
+        // Name-free resolution (prim probes) drops `+ Send` bounds.
         TyKind::Fn(args, ret, _) => HirTy::Fn(
             args.iter().map(resolve_ty).collect(),
             Box::new(resolve_ty(ret)),
@@ -162,53 +160,7 @@ pub fn throws_ty(ok: HirTy, err: HirTy) -> HirTy {
 
 // Name-free: literals and arithmetic over them.
 fn const_expr_to_u32(c: &rokc_ast::ConstExpr) -> Option<u32> {
-    eval_const_with(c, &|_| None).and_then(|v| u32::try_from(v).ok())
-}
-
-/// A const expression (spec 2.11.5) over decimal literals, names
-/// `lookup` knows, unary `-` and `+ - * / %`.
-pub fn eval_const_with(
-    c: &rokc_ast::ConstExpr,
-    lookup: &dyn Fn(&str) -> Option<i128>,
-) -> Option<i128> {
-    fn lit(s: &str) -> Option<i128> {
-        let s: String = s.chars().filter(|c| *c != '_').collect();
-        let (radix, body) = match s.get(..2) {
-            Some("0x") => (16, &s[2..]),
-            Some("0o") => (8, &s[2..]),
-            Some("0b") => (2, &s[2..]),
-            _ => (10, s.as_str()),
-        };
-        // An `i32` / `usize` style suffix.
-        let end = body.find(['i', 'u']).unwrap_or(body.len());
-        i128::from_str_radix(&body[..end], radix).ok()
-    }
-    fn expr(e: &rokc_ast::Expr, lookup: &dyn Fn(&str) -> Option<i128>) -> Option<i128> {
-        use rokc_ast::ExprKind as K;
-        match &e.kind {
-            K::Literal(rokc_ast::Literal::Int(s)) => lit(s),
-            K::Path(p) if p.segments.len() == 1 => lookup(&p.segments[0].name),
-            K::OpPrefix { op, operand } if op == "-" => expr(operand, lookup).map(|v| -v),
-            K::OpInfix { op, lhs, rhs } => {
-                let (a, b) = (expr(lhs, lookup)?, expr(rhs, lookup)?);
-                match op.as_str() {
-                    "+" => a.checked_add(b),
-                    "-" => a.checked_sub(b),
-                    "*" => a.checked_mul(b),
-                    "/" => a.checked_div(b),
-                    "%" => a.checked_rem(b),
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
-    }
-    match c {
-        rokc_ast::ConstExpr::Literal(rokc_ast::Literal::Int(s)) => lit(s),
-        rokc_ast::ConstExpr::Path(p) if p.segments.len() == 1 => lookup(&p.segments[0].name),
-        rokc_ast::ConstExpr::Literal(_) | rokc_ast::ConstExpr::Path(_) => None,
-        rokc_ast::ConstExpr::Expr(e) => expr(e, lookup),
-    }
+    crate::lower::const_eval::syntactic_int(c, &|_| None).and_then(|v| u32::try_from(v).ok())
 }
 
 fn resolve_path_ty(path: &Path) -> HirTy {

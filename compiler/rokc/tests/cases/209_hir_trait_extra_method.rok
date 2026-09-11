@@ -1,0 +1,12 @@
+// spec: 002.09-trait-impl
+// A trait impl defining a method the trait lacks is an error.
+// expect-error: method `extra` is not a member of trait `Sh`
+
+trait Sh { fn sh(self) -> i32; }
+struct A { v: i32; }
+impl Sh for A {
+    fn sh(self) -> i32 { return self.v; }
+    fn extra(self) -> i32 { return 1; }
+}
+
+fn main() -> i32 { let a = A { v: 4 }; return a.sh(); }

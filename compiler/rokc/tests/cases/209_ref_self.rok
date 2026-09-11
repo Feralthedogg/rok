@@ -1,0 +1,21 @@
+// spec: 002.09.2-ref-self
+// expect-exit: 0
+// expect-stdout:
+// 99
+
+// spec 2.9.2 / 4.7.5: `ref self` — the method's assignment to `self`
+// reaches the caller's binding (no `ref` at the call).
+struct Cell { v: i32; }
+
+impl Cell {
+    fn replace_with(ref self, n: i32) {
+        self.v = n;
+    }
+}
+
+fn main() -> i32 {
+    let c = Cell { v: 0 };
+    c.replace_with(99);
+    println(f"{c.v}");
+    return 0;
+}

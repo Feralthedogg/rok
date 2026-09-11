@@ -25,9 +25,9 @@
 //! anywhere inside), or whose type opts into `Send` by an explicit
 //! `unsafe impl` (`Task<T>`: the future stays with its worker), holds
 //! none.
-// ponytail: the flow is context-insensitive (all calls of one function
-// instance share its parameters and result) and a store through an
-// alias the callee did not get as a parameter is not seen: e.g. two
+// The flow is context-insensitive (all calls of one function instance
+// share its parameters and result), and a store through an alias the
+// callee did not get as a parameter is not seen: two
 // `List<AsyncFuture<i32>>` that `push` fills look like one list. Exact
 // would be per-coroutine future types (4.1.11) checked by the `Send`
 // bound itself.
@@ -531,8 +531,8 @@ impl Flow<'_> {
             }
             HirStmt::Break { value: Some(e), .. } => {
                 let v = self.expr(e);
-                // ponytail: labels are not matched; every enclosing
-                // loop / labelled block may get the value.
+                // Labels are not matched: every enclosing loop / labelled
+                // block may get the value.
                 for b in &mut self.breaks {
                     b.extend(v.iter().copied());
                 }

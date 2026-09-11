@@ -1,8 +1,0 @@
-// spec: 002.10-generic-instantiation
-// probe: negative-must-fail
-// expect-exit: 0  (끝나지 않는 단형화 → 에러 (이전: hang).)
-// expect-error: recursed past the limit
-
-fn r<T>(x: T, n: i32) -> i32 { if n == 0 { return 0; } return r((x, x), n - 1); }
-
-fn main() -> i32 { return r(1, 3); }

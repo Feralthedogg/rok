@@ -1,0 +1,18 @@
+// spec: 003.02-short-circuit-or
+// expect-exit: 0
+// expect-stdout:
+// no_call
+
+// `||` short-circuits: a true left side skips the right one.
+fn loud() -> i32 {
+    println("called");
+    return 1;
+}
+
+fn main() -> i32 {
+    let cond = true;
+    if cond || (loud() == 1) {
+        println("no_call");
+    }
+    return 0;
+}

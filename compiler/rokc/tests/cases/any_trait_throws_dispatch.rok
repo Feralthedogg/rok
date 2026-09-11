@@ -4,7 +4,7 @@
 // err neg
 // 5 100
 
-// D4: a throwing trait method called through `any Tr` (and a
+// A throwing trait method called through `any Tr` (and a
 // `List<any Tr>`) dispatches, and its error reaches `catch`.
 trait Parse {
     fn parse(self, s: i32) throws (str) -> i32;

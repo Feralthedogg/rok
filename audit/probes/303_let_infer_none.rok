@@ -1,7 +1,0 @@
-// spec: 003.03-let
-// probe: negative-must-fail
-// expect-error: cannot infer the type of `x`: `none` alone has no value type
-
-// D1: 타입 생략 `let` 은 초기값의 정적 타입을 받는다. `none` 만으로는 타입을
-// 정할 수 없으니 `let x: T | none = none;` 처럼 적어야 한다.
-let x = none;

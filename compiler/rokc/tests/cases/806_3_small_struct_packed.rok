@@ -1,0 +1,22 @@
+// spec: 008.06-calling-convention §8.6.3
+// expect-exit: 0
+// expect-stdout:
+// 3 1
+// -3 -1
+
+// spec 8.6.3: an 8-byte `struct` of two i32 (libc `div` -> `div_t`) is
+// packed into one register by the platform C ABI ("LLVM byval / sret
+// handles it"); rok must read both fields back.
+struct DivT { quot: i32; rem: i32; }
+
+extern "C" {
+    fn div(n: i32, d: i32) -> DivT;
+}
+
+fn main() -> i32 {
+    let a = unsafe { div(7, 2) };
+    println(f"{a.quot} {a.rem}");
+    let b = unsafe { div(-7, 2) };
+    println(f"{b.quot} {b.rem}");
+    return 0;
+}

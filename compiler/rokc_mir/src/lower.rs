@@ -1588,17 +1588,12 @@ impl<'a> FnBuilder<'a> {
 
             self.current = next_bb;
         }
-        // No arm can reach the merge — the merge is unreachable, so
-        // mark it terminated to prevent dead-code emission landing
-        // there from downstream lowering.
+        // No arm reaches the merge: nothing may be lowered into it.
         if !any_arm_to_merge {
             self.terminated.insert(merge_bb.0);
         }
 
-        // No arm matched: spec leaves this as a runtime error / undefined
-        // behaviour for now. Mark as unreachable so optimisation can
-        // collapse it. Exhaustiveness checking in the type checker will
-        // turn this into a compile-time error later.
+        // HIR checked exhaustiveness: falling past the last arm cannot happen.
         self.terminate(Terminator::Unreachable);
 
         self.current = merge_bb;
@@ -2166,11 +2161,6 @@ impl<'a> FnBuilder<'a> {
                 });
                 self.bind_pattern(sub, scrut);
             }
-            HirPattern::Or(alts) => {
-                // Bindings inside or-patterns require consistency across
-                // alternatives — not yet supported.
-                let _ = alts;
-            }
             HirPattern::EnumVariant {
                 enum_id,
                 variant_index,
@@ -2301,7 +2291,12 @@ impl<'a> FnBuilder<'a> {
                     self.bind_pattern(sub_pat, elem_local);
                 }
             }
-            HirPattern::Wildcard | HirPattern::Literal { .. } | HirPattern::Range { .. } => {}
+            // An or-pattern's alternatives bind in their own success
+            // blocks (`lower_pattern_test`).
+            HirPattern::Wildcard
+            | HirPattern::Literal { .. }
+            | HirPattern::Range { .. }
+            | HirPattern::Or(_) => {}
         }
     }
 
@@ -2536,18 +2531,6 @@ impl<'a> FnBuilder<'a> {
             Some(p) => Operand::Copy(p),
             None => Operand::Const(ConstVal::Unit),
         }
-    }
-}
-
-// Helper trait used in print.rs to keep the surface noise out of lib.rs.
-#[allow(dead_code)]
-trait HirTyExt {
-    fn is_unit(&self) -> bool;
-}
-
-impl HirTyExt for HirTy {
-    fn is_unit(&self) -> bool {
-        matches!(self, Self::Unit)
     }
 }
 

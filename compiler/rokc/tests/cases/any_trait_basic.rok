@@ -5,7 +5,7 @@
 // 4
 // 0
 
-// D4: `any Shape` stores any implementor (tag + heap payload); a method
+// `any Shape` stores any implementor (tag + heap payload); a method
 // call switches on the tag over every implementor in the program.
 trait Shape { fn area(self) -> i32; }
 struct Sq { s: i32; }

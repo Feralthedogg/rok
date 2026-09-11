@@ -8,6 +8,7 @@ authors.workspace = true
 
 [dependencies]
 rokc_ast = { workspace = true }
+rokc_core = { workspace = true }
 rokc_diagnostic = { workspace = true }
 rokc_driver = { workspace = true }
 

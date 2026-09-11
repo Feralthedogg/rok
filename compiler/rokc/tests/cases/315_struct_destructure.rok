@@ -1,0 +1,16 @@
+// spec: 003.15-struct-destructure
+// expect-exit: 0
+// expect-stdout:
+// 5
+// 7
+
+// spec 3.15: struct destructuring `let Point { x, y } = origin;`.
+struct Pt { x: i32; y: i32; }
+
+fn main() -> i32 {
+    let p = Pt { x: 5, y: 7 };
+    let Pt { x, y } = p;
+    println(f"{x}");
+    println(f"{y}");
+    return 0;
+}

@@ -1,0 +1,19 @@
+// spec: 003.05-method-chain
+// expect-exit: 0
+// expect-stdout:
+// 14
+
+// spec 3.5.2: method chaining.
+struct V { n: i32; }
+
+impl V {
+    fn add(self, k: i32) -> V { return V { n: self.n + k }; }
+    fn unwrap(self) -> i32 { return self.n; }
+}
+
+fn main() -> i32 {
+    let v = V { n: 5 };
+    let r = v.add(3).add(6).unwrap();
+    println(f"{r}");
+    return 0;
+}

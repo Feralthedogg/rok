@@ -1,8 +1,0 @@
-// spec: 002.07-struct
-// probe: negative-must-fail
-// expect-exit: 0  (자기 자신을 값으로 포함하는 struct → 에러.)
-// expect-error: recursive type `L` has infinite size
-
-struct L { next: L; v: i32; }
-
-fn main() -> i32 { return 1; }

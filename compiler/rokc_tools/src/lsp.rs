@@ -1,6 +1,6 @@
 //! Language server over stdio (JSON-RPC 2.0 with `Content-Length`
-//! framing). Full-text sync; every query runs on the last front-end
-//! compile (lexer → parser → HIR type checking, no codegen).
+//! framing). Full-text sync; every query runs on the last check of the
+//! buffer (`analysis::check`: front end and lints, no codegen).
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -13,8 +13,10 @@ use rokc_hir::walk::{AstVisitor, walk_item, walk_stmt};
 use rokc_hir::{HirExprKind, HirModule, HirTy};
 use rokc_interface::Session;
 
+use rokc_diagnostic::Json;
+
 use crate::analysis::{Analysis, analyze, short_name, signature, ty_name};
-use crate::json::Json;
+use crate::lint::Level;
 
 struct Doc {
     text: String,
@@ -29,17 +31,20 @@ struct Server<W> {
     out: W,
     bootstrap: Vec<PathBuf>,
     externs: Vec<(String, PathBuf)>,
+    levels: Vec<(Level, String)>,
     docs: HashMap<String, Doc>,
     shutdown: bool,
 }
 
-/// Serve requests from `input` until `exit` (or end of input). Returns
-/// the process exit code: 0 after a `shutdown`, else 1 (LSP spec).
+/// Serve requests from `input` until `exit` (or end of input), linting
+/// at `levels`. Returns the process exit code: 0 after a `shutdown`,
+/// else 1 (LSP spec).
 pub fn serve(
     input: impl BufRead + Send + 'static,
     out: impl Write,
     bootstrap: Vec<PathBuf>,
     externs: Vec<(String, PathBuf)>,
+    levels: Vec<(Level, String)>,
 ) -> i32 {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -54,6 +59,7 @@ pub fn serve(
         out,
         bootstrap,
         externs,
+        levels,
         docs: HashMap::new(),
         shutdown: false,
     };
@@ -239,37 +245,27 @@ impl<W: Write> Server<W> {
         s
     }
 
-    /// Compile `text` standing for the buffer `path`: the package root
+    /// Check `text` standing for the buffer `path`: the package root
     /// (902.2) with this buffer's text when it is the root, else the
     /// root as open or on disk; a file outside any package is anonymous.
+    /// Unsaved edits of a submodule buffer are not seen (module files are
+    /// read from disk).
     fn compile(&self, path: &Path, text: &str) -> Analysis {
-        let named_root = path
-            .file_name()
-            .is_some_and(|n| n == "main.rok" || n == "lib.rok");
-        let root = if named_root {
-            Some(path.to_path_buf())
-        } else {
-            path.parent().and_then(|d| {
-                d.ancestors().find_map(|d| {
-                    ["main.rok", "lib.rok"]
-                        .iter()
-                        .map(|n| d.join(n))
-                        .find(|p| p.is_file())
-                })
-            })
-        };
+        let root = rokc_interface::discover(path)
+            .ok()
+            .filter(|p| !p.anonymous)
+            .and_then(|p| std::path::absolute(&p.root).ok());
+        let levels = &self.levels;
         match root {
             Some(root) if root != path => {
-                // ponytail: unsaved edits of a submodule buffer are not
-                // seen (the driver reads module files from disk).
                 let open = self.docs.get(&path_uri(&root)).map(|d| d.text.clone());
                 let root_text = open
                     .or_else(|| std::fs::read_to_string(&root).ok())
                     .unwrap_or_default();
-                analyze(&self.session(false), &root_text, &root)
+                analyze(&mut self.session(false), &root_text, &root, levels)
             }
-            Some(_) => analyze(&self.session(false), text, path),
-            None => analyze(&self.session(true), text, path),
+            Some(_) => analyze(&mut self.session(false), text, path, levels),
+            None => analyze(&mut self.session(true), text, path, levels),
         }
     }
 
@@ -332,7 +328,7 @@ impl<W: Write> Server<W> {
         let off = offset(text, line, col);
         match method {
             "textDocument/formatting" => {
-                let new = rokc_fmt::format_source(text).ok()?;
+                let new = rokc_fmt::format_file(&path, text).ok()?;
                 Some(Json::Arr(if new == text {
                     Vec::new()
                 } else {
@@ -510,16 +506,13 @@ fn path_completions(hir: &HirModule, segs: &[&str], push: &mut impl FnMut(&str, 
     }
 }
 
-/// Hover markdown: the code in a `rok` fence, then a function's `///`
-/// docs (spec 1.2: doc comments reach tools as text).
+/// Hover markdown: the code in a `rok` fence, then a function's doc
+/// text from its `#[doc]` attributes (spec 1.2).
 fn hover(a: &Analysis, key: &str, text: &str, off: usize) -> Option<String> {
     let hir = a.hir.as_ref()?;
     let fenced = |code: String| format!("```rok\n{code}\n```");
     let with_doc = |f: &rokc_hir::HirFunction| {
-        let doc = a
-            .file(f.span)
-            .map(|(_, src)| crate::doc::outer_doc(src, &[], f.span))
-            .unwrap_or_default();
+        let doc = a.fn_doc(f.span);
         let code = fenced(signature(hir, f));
         if doc.is_empty() {
             code

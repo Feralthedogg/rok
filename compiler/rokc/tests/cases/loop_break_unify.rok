@@ -6,7 +6,7 @@
 // 2
 
 // Every `break` value of a loop / labelled block has one type: the
-// annotated slot's, else the first `break`'s (D1, like `if` / `match`).
+// annotated slot's, else the first `break`'s (like `if` / `match`).
 
 fn find(xs: [i32; 4], want: i32) -> i64 {
     let i = 0;

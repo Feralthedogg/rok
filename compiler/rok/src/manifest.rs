@@ -22,10 +22,9 @@
 
 use std::path::{Path, PathBuf};
 
+use rokc_core::lint::Level;
 use rokc_rokon::edit::{self, Step};
 use rokc_rokon::{Decoder, Doc, Value};
-
-pub use rokc_rokon::quote;
 
 pub const MANIFEST: &str = "rok.rokon";
 pub const LOCK: &str = "rok.lock";
@@ -93,25 +92,6 @@ pub struct Dep {
     pub source: Source,
 }
 
-/// A `lints` level.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LintLevel {
-    Allow,
-    Warn,
-    Deny,
-}
-
-impl LintLevel {
-    /// The `rokc lint` flag that sets it.
-    pub const fn flag(self) -> &'static str {
-        match self {
-            Self::Allow => "-A",
-            Self::Warn => "-W",
-            Self::Deny => "-D",
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct Manifest {
     pub name: Option<String>,
@@ -121,7 +101,7 @@ pub struct Manifest {
     pub dev_deps: Vec<Dep>,
     /// `lints`: `"name": "allow" | "warn" | "deny"`, in file order
     /// (lint names are checked by `rokc lint`).
-    pub lints: Vec<(String, LintLevel)>,
+    pub lints: Vec<(String, Level)>,
 }
 
 /// A dependency name is a top-level name in `use`: an identifier.
@@ -197,16 +177,11 @@ pub fn parse(text: &str, file: &str) -> Result<Manifest, String> {
     let mut lints = Vec::new();
     if let Some(d) = pkg.opt("lints") {
         for (k, v) in d.dict()? {
-            let level = match v.string()?.as_str() {
-                "allow" => LintLevel::Allow,
-                "warn" => LintLevel::Warn,
-                "deny" => LintLevel::Deny,
-                _ => {
-                    return Err(v.error(&format!(
-                        "lint `{}` takes \"allow\", \"warn\" or \"deny\"",
-                        k.string()?
-                    )));
-                }
+            let Some(level) = Level::parse(&v.string()?) else {
+                return Err(v.error(&format!(
+                    "lint `{}` takes \"allow\", \"warn\" or \"deny\"",
+                    k.string()?
+                )));
             };
             lints.push((k.string()?, level));
         }
@@ -361,8 +336,8 @@ mod tests {
         assert_eq!(
             m.lints,
             [
-                ("unused".to_owned(), LintLevel::Allow),
-                ("all".to_owned(), LintLevel::Deny)
+                ("unused".to_owned(), Level::Allow),
+                ("all".to_owned(), Level::Deny)
             ]
         );
         assert_eq!(

@@ -1,0 +1,29 @@
+// spec: std 200-core/218-task §2.18.4
+// expect-exit: 0
+// expect-stdout:
+// finally
+// join CancellationError
+// cancelled true
+// finished true
+
+// stdlib 2.18.4: `cancel()` requests cancellation; the task leaves at its
+// next `await` like a `return`, running `finally` but never entering a
+// `catch` inside the task (cancellation is not a catchable error). The
+// awaiting side gets `CancellationError` from `try await t.join()`.
+async fn forever() throws (CancellationError) -> i32 {
+    while true { await task::sleep(Duration::ms(1)); }
+    0
+}
+
+async fn main() {
+    let t = task::spawn(async {
+        let r = { try await forever() catch _ { println("caught inside (wrong)"); 1 } } finally { println("finally"); };
+        r
+    });
+    await task::sleep(Duration::ms(5));
+    t.cancel();
+    let c = t.is_cancelled();
+    let v = try await t.join() catch e: CancellationError { println(f"join {e.debug()}"); -1 };
+    println(f"cancelled {c}");
+    println(f"finished {t.is_finished()}");
+}

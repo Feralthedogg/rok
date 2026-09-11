@@ -7,8 +7,8 @@
 //! `with(m) { .. }` is the call `pkg::with_handler(m) { .. }` (trailing
 //! closure) and `name` in a declaration / member position is an error.
 //!
-//! ponytail: the handler is a free `fn` named by path; 6.6.8 leaves its
-//! signature to the library, so the call shape is the use site's.
+//! The handler is a free `fn` named by path; its signature is the
+//! library's (6.6.8), so the call shape is the use site's.
 //!
 //! On a `struct` (stdlib spec 2.1.2 / 2.1.3: `#[keyword("int")] struct
 //! Int`) the keyword is a type name: every `name` token becomes the
@@ -34,7 +34,7 @@ pub struct KeywordDef {
 }
 
 /// Identifiers the language already gives meaning to in fixed positions
-/// (E8 contextual keywords, path roots).
+/// (contextual keywords, path roots).
 const CONTEXTUAL: &[&str] = &[
     "type", "any", "in", "where", "throws", "rethrows", "catch", "finally", "const", "static",
     "extern", "mut", "union", "pkg", "sub", "sup", "rok",
@@ -60,8 +60,7 @@ pub fn collect_keywords(tokens: &[Token], file: &str) -> Vec<KeywordDef> {
         if attr != "keyword" {
             continue;
         }
-        // The function (or struct) the attribute (and any after it)
-        // sits on.
+        // The fn (or struct) this attribute and any following ones sit on.
         let item = tokens[k + 6..]
             .windows(2)
             .find(|p| matches!(p[0].kind, TokenKind::Fn | TokenKind::Struct));

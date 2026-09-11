@@ -1,0 +1,33 @@
+// spec: 004.12-async §4.12.14
+// expect-exit: 0
+// expect-stdout:
+// ok 5
+// caught bad 9
+// fallback 100
+// finally ran
+
+// spec 4.12.14: a throwing `async fn`'s error surfaces at the `await`,
+// covered by `try await`; `catch` / `finally` work as in sync code.
+struct Bad { n: i32; }
+impl Display for Bad { fn display(self) -> str { f"bad {self.n}" } }
+impl Debug for Bad { fn debug(self) -> str { "Bad" } }
+impl Error for Bad {}
+
+async fn check(n: i32) throws (Bad) -> i32 {
+    await task::yield_now();
+    if n > 5 { throw Bad { n: n }; }
+    n
+}
+
+async fn safe(n: i32) -> i32 {
+    try await check(n) catch e: Bad { 100 }
+}
+
+async fn main() {
+    let a = try await check(5) catch _ { -1 };
+    println(f"ok {a}");
+    let b = try await check(9) catch e: Bad { println(f"caught {e.display()}"); -1 };
+    let c = await safe(50);
+    println(f"fallback {c}");
+    let d = { try await check(1) catch _ { 0 } } finally { println("finally ran"); };
+}

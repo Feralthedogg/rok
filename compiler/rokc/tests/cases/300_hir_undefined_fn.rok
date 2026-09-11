@@ -1,0 +1,7 @@
+// spec: 003.00-name-resolution
+// Calling an undefined function is a compile error.
+// expect-error: cannot find function `undefined_fn`
+
+fn main() -> i32 {
+    return undefined_fn(3);
+}

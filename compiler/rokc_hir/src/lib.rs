@@ -1,11 +1,5 @@
-//! High-level IR.
-//!
-//! Lowering from AST. The compiler still has no operator semantics —
-//! `OpInfix` etc. would resolve to stdlib trait method calls in a later
-//! pass that has access to the registered `#[infix]` table. The current
-//! lowering only handles the subset that is independent of stdlib
-//! bootstrap: function definitions, blocks, locals, and primitive
-//! literals carrying an explicit type suffix.
+//! High-level IR: the AST with names resolved, types checked and
+//! generics instantiated.
 
 #[path = "../../../runtime/rokr/src/fmt_spec.rs"]
 mod fmt_spec;
@@ -34,6 +28,9 @@ pub struct HirInput {
     /// Packages loaded from RHIR (spec 904): their body-less functions
     /// are declarations of the symbols in their archives.
     pub prebuilt: Vec<String>,
+    /// Lower (and so check) every library body, reached or not
+    /// (`rokc check --check-library`).
+    pub check_library: bool,
 }
 
 /// Marker attribute (string argument) with the module of an `impl`
@@ -88,8 +85,7 @@ pub struct HirModule {
 pub struct HirStaticDef {
     pub name: String,
     pub ty: HirTy,
-    /// Const value the global is initialized to. Restricted to literal
-    /// or const-folded primitives in the current slice.
+    /// Initial value: a literal or const-folded primitive.
     pub init: ConstVal,
     pub is_mut: bool,
     /// `extern "C" { static .. }` (spec 5.9.3): no initializer here.
@@ -115,20 +111,16 @@ pub struct HirEnumDef {
     pub generic_args: Vec<HirTy>,
 }
 
-// Unit + single-primitive tuple variants in this slice.
 #[derive(Clone, Debug)]
 pub struct HirEnumVariant {
     pub name: String,
     pub tag: u32,
     pub payload_ty: Option<HirTy>,
-    /// For named-form variants (`Move { x: i32; y: i32; }`), the field
-    /// names in declaration order. The payload is a tuple keyed by
-    /// position, so this list maps field name → tuple index. Empty
-    /// for unit and tuple-form variants.
+    /// Field names of a named-form variant (`Move { x: i32; y: i32; }`),
+    /// by payload tuple index. Empty for unit and tuple-form variants.
     pub named_fields: Vec<String>,
-    /// Number of constructor arguments (0 = unit variant). Needed because
-    /// `V(T)` and `V(A, B)` both store one `payload_ty` (a tuple for the
-    /// latter), so a tuple-typed single payload is otherwise ambiguous.
+    /// Constructor argument count (0 = unit). `V(T)` and `V(A, B)` both
+    /// store one `payload_ty`, so a tuple payload is otherwise ambiguous.
     pub arity: usize,
 }
 
@@ -142,40 +134,29 @@ pub struct HirStructDef {
     pub name: String,
     pub fields: Vec<HirField>,
     pub span: Span,
-    /// Concrete type-arg substitution if this struct is a
-    /// monomorphization of a generic struct. Empty for non-generic
-    /// struct definitions.
+    /// Type arguments of a generic struct instance; empty otherwise.
     pub generic_args: Vec<HirTy>,
-    /// `Some(_)` when this entry actually models a `union { ... }`
-    /// declaration (spec 2.x / i-want 322-340). The struct backing
-    /// has a single synthetic `__data` field whose type comes from
-    /// the chosen `UnionStorage`; declared field names are kept in
-    /// `aliases` for lookup at init/read sites.
+    /// `Some` for a `union`: one synthetic `__data` field typed by its
+    /// `UnionStorage`; declared fields live in `aliases`.
     pub union_kind: Option<HirUnionKind>,
 }
 
-/// How a `union` decl is laid out in storage. Spec lets the compiler
-/// choose the default layout; `#[repr(C)]` and non-primitive fields
-/// force the byte-array path so the layout matches C ABI semantics.
+/// A `union`'s storage. `#[repr(C)]` or a non-primitive field forces
+/// the byte array, so the layout matches C.
 #[derive(Clone, Debug)]
 pub enum UnionStorage {
-    /// All declared fields are primitive and the union isn't `#[repr(C)]`.
-    /// The backing store is a single primitive wide enough to hold any
-    /// field; access is via int/float cast (`zext`/`trunc`/`bitcast`).
-    /// Optimised for register allocation.
+    /// One primitive wide enough for every field, accessed by cast;
+    /// stays in registers.
     WidestPrim(PrimTy),
-    /// At least one declared field is a struct/enum, or `#[repr(C)]`
-    /// is set. Backing store is `[u8; size]` aligned to `align`; field
-    /// access goes through `llvm.bitcast`+load/store on the storage
-    /// pointer (see codegen).
+    /// `[u8; size]` aligned to `align`, accessed by load / store
+    /// through the storage pointer.
     ByteArray { size: u32, align: u32 },
 }
 
 #[derive(Clone, Debug)]
 pub struct HirUnionKind {
     pub storage: UnionStorage,
-    /// Each declared field name → its declared `HirTy`. Cast targets
-    /// at write/read sites use this map.
+    /// Declared fields and their types: the cast targets at access sites.
     pub aliases: Vec<(String, HirTy)>,
     pub is_repr_c: bool,
 }
@@ -184,12 +165,9 @@ pub struct HirUnionKind {
 pub struct HirField {
     pub name: String,
     pub ty: HirTy,
-    /// Default expression (spec 2.x / i-want 942-950) — evaluated at
-    /// init time when this field is omitted from the struct literal.
-    /// Stored as the raw AST expression so the init site can lower it
-    /// in the surrounding context (one local-set per instance is fine
-    /// because the spec requires the expression to be const, hence
-    /// side-effect free).
+    /// Default for a field a struct literal omits. Kept as AST and
+    /// lowered at each literal; it is const, so re-evaluating it has no
+    /// side effects.
     pub default: Option<rokc_ast::Expr>,
 }
 
@@ -290,10 +268,8 @@ pub enum HirExprKind {
     StaticRef(String),
     /// Pre-resolution placeholder for unresolved paths.
     UnresolvedPath(Vec<String>),
-    /// Primitive binary op produced by short-circuit dispatch when both
-    /// operands are the same primitive type. The full path goes through
-    /// trait dispatch + `#[lang(...)]` recognition; for primitives the
-    /// short-circuit gives the same result.
+    /// Binary op on two operands of one primitive type, bypassing trait
+    /// dispatch (same result).
     PrimBinOp {
         op: PrimOp,
         lhs: Box<HirExpr>,
@@ -308,8 +284,7 @@ pub enum HirExprKind {
         callee: FunctionId,
         args: Vec<HirExpr>,
     },
-    /// Function pointer literal — refers to a known module-level function
-    /// id. Used by closures lifted to anonymous top-level functions.
+    /// A function as a value (also lifted closure bodies).
     FnRef(FunctionId),
     /// Indirect call through a function-typed expression.
     CallIndirect {
@@ -317,8 +292,7 @@ pub enum HirExprKind {
         args: Vec<HirExpr>,
         ret_ty: HirTy,
     },
-    /// `expr as Type` — primitive integer cast for now (zext/sext/trunc).
-    /// Codegen picks the right op from `from_ty`/`to_ty`.
+    /// `expr as Type`; codegen picks the op from `from_ty` / `to_ty`.
     Cast {
         operand: Box<HirExpr>,
         from_ty: HirTy,
@@ -491,20 +465,15 @@ pub enum HirExprKind {
         index: Box<HirExpr>,
         elem_ty: HirTy,
     },
-    /// Cast a value into the synthetic `__data` storage of a union
-    /// during initialiser lowering. For `WidestPrim` storage this is
-    /// an int/float cast (zext / sext / trunc / float-to-int bitcast).
-    /// For `ByteArray` storage MIR/codegen lowers it to an alloca +
-    /// pointer bitcast + store + reload pattern. Spec 2.x.
+    /// Cast a value into a union's `__data` storage: a numeric cast for
+    /// `WidestPrim`, a store through memory for `ByteArray`.
     UnionWrite {
         struct_id: StructId,
         from_ty: HirTy,
         storage_ty: HirTy,
         value: Box<HirExpr>,
     },
-    /// Read a declared field from a union's `__data` storage. The
-    /// storage value is cast/bitcast back to `field_ty`. Symmetric
-    /// counterpart of `UnionWrite`.
+    /// Read a declared field back out of a union's `__data` storage.
     UnionRead {
         struct_id: StructId,
         target: Box<HirExpr>,
@@ -537,8 +506,7 @@ pub struct HirMatchArm {
     pub body: HirExpr,
 }
 
-/// Pattern subset supported by the current lowering. Range / struct /
-/// enum / tuple patterns land later, together with exhaustiveness.
+/// A lowered pattern.
 #[derive(Clone, Debug)]
 pub enum HirPattern {
     /// `_` — matches anything, no binding.
@@ -617,7 +585,7 @@ pub enum HirTy {
     /// Untyped wildcard (error recovery, untyped parameters); compatible
     /// with everything. The user's `any` is `AnyTrait(vec![])`.
     Any,
-    /// `any` / `any Tr` / `any (A + B)`: canonical trait keys, sorted (D4);
+    /// `any` / `any Tr` / `any (A + B)`: canonical trait keys, sorted;
     /// plain `any` has none.
     /// Tag + heap payload; the tag numbers concrete types program-wide.
     /// Construction reuses `SumWrap` (variant index = tag) and narrowing
@@ -633,7 +601,7 @@ pub enum HirTy {
     // Fixed-size array `[T; N]`.
     Array(Box<HirTy>, u32),
     // `fn(A, B) -> R` — first-class function pointer. The third field
-    // is its auto-trait bounds (`+ Send + Sync`, E3): sorted trait keys.
+    // is its auto-trait bounds (`+ Send + Sync`): sorted trait keys.
     Fn(Vec<HirTy>, Box<HirTy>, Vec<String>),
     // Closure value: function pointer paired with captured-by-value
     // environment. Stored in MIR as a 2-tuple `{fn_ptr, env}`. The env

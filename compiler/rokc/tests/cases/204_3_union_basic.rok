@@ -1,0 +1,13 @@
+// spec: 002.x-union-basic
+// expect-exit: 0
+// expect-stdout:
+// 5
+
+// spec 2.x: `union { ... }` single-storage initializer + field read.
+union ED { ptr: usize; fd: i32; val: u64; }
+
+fn main() -> i32 {
+    let x = ED { fd: 5 };
+    println(f"{unsafe { x.fd }}");
+    return 0;
+}

@@ -1,0 +1,15 @@
+// spec: 002.11-const-generic-value
+// expect-exit: 0
+// expect-stdout:
+// 3
+
+// spec 2.11: `<const N: usize>` const-generic value.
+fn first<const N: usize>(arr: [i32; N]) -> i32 {
+    return arr[0];
+}
+
+fn main() -> i32 {
+    let a: [i32; 3] = [3, 7, 9];
+    println(f"{first::<3>(a)}");
+    return 0;
+}

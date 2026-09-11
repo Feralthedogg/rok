@@ -1,0 +1,12 @@
+// spec: 006.04.8-lang-unknown-slot
+// expect-error: unknown lang slot `nonexistent_slot`
+
+// spec 6.4.8: an unknown slot name is a compile error.
+#[lang("nonexistent_slot")]
+trait T {
+    fn foo(self) -> i32;
+}
+
+fn main() -> i32 {
+    return 0;
+}

@@ -13,17 +13,12 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use rokc_core::hash::fnv;
+
 use crate::manifest::GitRef;
 
 pub struct Cache {
     root: PathBuf,
-}
-
-/// FNV-1a: a stable short name for a url (std's hasher may change).
-pub fn fnv(s: &str) -> u64 {
-    s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
-        (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
-    })
 }
 
 fn git(dir: &Path, args: &[&str], index: Option<&Path>) -> Result<String, String> {
@@ -71,7 +66,7 @@ impl Cache {
             .collect();
         self.root
             .join("db")
-            .join(format!("{base}-{:016x}", fnv(url)))
+            .join(format!("{base}-{:016x}", fnv(url.as_bytes())))
     }
 
     /// Bring the bare clone of `url` up to date (branches, tags, HEAD).

@@ -1,0 +1,26 @@
+// spec: std 201-numbers §2.1.7, 211-conversion §2.11.8 int / float
+// expect-exit: 0
+// expect-stdout:
+// -42 -42 2147483647 -1294967296 -1294967296 3e+09 -42
+// try_from: value out of range for `i32`
+// 0 -7 -7.9
+
+// Spec 2.1.7 / 2.11.8: fixed → int is lossless (`into`, `int::from_i32`);
+// int → i32 is `try_into` (throws `OverflowError`), `saturating_into`
+// (clamps) or `wrapping_into` / `as` (modular); int → f64 is `into`
+// (rounds). float → i32 / i64 `try_into` truncates.
+fn main() {
+    let small: i32 = -42;
+    let n: int = small.into();
+    let big: int = 3000000000;
+    let a: i32 = try! n.try_into();
+    let b: i32 = big.saturating_into();
+    let c: i32 = big.wrapping_into();
+    let d: f64 = big.into();
+    println(f"{n} {a} {b} {c} {big as i32} {d} {int::from_i32(small)}");
+    let r = try big.try_into::<i32>() catch e { println(f"{e}"); 0 };
+    let f: float = -7.9;
+    let g: i32 = try! f.try_into();
+    let h: f64 = f.into();
+    println(f"{r} {g} {h}");
+}

@@ -1,0 +1,20 @@
+// spec: 004.14-throws-typed
+// expect-exit: 0
+// expect-stdout:
+// got_value
+// caught
+
+// spec 4.14: typed throws `fn foo() throws (E) -> T`; the call site marks
+// the throwing call with `try`.
+fn parse(s: i32) throws (i32) -> i32 {
+    if s < 0 { throw -1; }
+    return s * 2;
+}
+
+fn main() -> i32 {
+    let v = try parse(5) catch _ { 0 };
+    if v == 10 { println("got_value"); }
+    let w = try parse(-5) catch e: i32 { e };
+    if w == -1 { println("caught"); }
+    return 0;
+}

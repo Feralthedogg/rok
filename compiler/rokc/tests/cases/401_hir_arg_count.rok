@@ -1,0 +1,7 @@
+// spec: 004.01-call-arity
+// Too few arguments is an error.
+// expect-error: missing argument `b` in call to `f`
+
+fn f(a: i32, b: i32) -> i32 { return a + b; }
+
+fn main() -> i32 { return f(1); }

@@ -1,9 +1,5 @@
 //! Parser entry point. Recursive descent with Pratt-style operator
 //! parsing over the fixed precedence table (spec 3.2.3).
-//!
-//! Only enough of the grammar is implemented here to drive the rest of
-//! the pipeline end-to-end on tiny programs (`fn main` returning an int).
-//! Each block of the grammar is added incrementally.
 
 use rokc_ast::{
     AccessTail, AttrArg, AttrBody, Attribute, Block, CallArg, CatchArm, ConstExpr, EnumDef,
@@ -35,9 +31,8 @@ pub struct Parser<'a> {
     pos: usize,
     file: String,
     pub(crate) diagnostics: Vec<RokDiagnostic>,
-    /// Whether `Path { ... }` is a struct initializer at this point. We
-    /// disable it inside `if`/`while`/`for` conditions so the trailing
-    /// `{` is treated as the body brace, not a struct body.
+    /// Whether `Path { .. }` is a struct literal here; off in `if` /
+    /// `while` / `for` heads so the `{` opens the body.
     struct_expr_allowed: bool,
     /// `|` mid-type expands to sum-type alternation. Inside closure
     /// parameter lists the closing `|` must end the list instead.
@@ -55,14 +50,11 @@ pub struct Parser<'a> {
     /// so hostile input gets a diagnostic instead of a stack overflow.
     depth: u32,
     depth_reported: bool,
-    /// Statements queued by a parsing site that emits more than one
-    /// statement at a time (currently nested-tuple destructure
-    /// `let ((a, b), c) = ...;` — spec 3.15.4). `parse_block` drains
-    /// this after every successful `parse_stmt` so the synthesized
-    /// follow-up stmts land in the same enclosing scope.
+    /// Extra statements from a site that emits several (nested tuple
+    /// destructure `let ((a, b), c) = ..;`, spec 3.15.4). `parse_block`
+    /// drains it after each statement, so they land in the same scope.
     pending_stmts: Vec<Stmt>,
-    /// Counter for generating unique temp names across nested-tuple
-    /// destructures within a single parse session.
+    /// Counter for unique temp names of nested tuple destructures.
     next_destructure_temp: u32,
     /// Spans of untyped `throws` in fn types not (yet) claimed by a
     /// `rethrows` signature; reported at the end of the parse.
@@ -426,16 +418,11 @@ impl<'a> Parser<'a> {
                 .tokens
                 .get(self.pos.saturating_sub(1))
                 .map_or(Span::DUMMY, |t| t.span);
-            return Token { kind, span };
+            return Token::new(kind, span);
         }
-        // Past EOF: hand back a synthetic Eof token instead of panicking.
-        // Recovery paths can call `bump()` past the last real token while
-        // skipping malformed input; previously this indexed out of bounds.
+        // Recovery can bump past the last token: hand back a synthetic Eof.
         let Some(t) = self.tokens.get(self.pos).cloned() else {
-            return Token {
-                kind: TokenKind::Eof,
-                span: Span::DUMMY,
-            };
+            return Token::new(TokenKind::Eof, Span::DUMMY);
         };
         self.pos += 1;
         t
@@ -525,11 +512,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Spec 1.5.4: `union` is a contextual keyword — an item only as
-    /// `union Name` at item start; elsewhere it is an identifier
-    /// (`Set::union`, `a.union(b)`).
     /// `extern "C" {` / `extern {`, `const NAME` / `const fn`,
-    /// `static [mut] NAME`, `type Name` (E8: contextual at item start).
+    /// `static [mut] NAME`, `type Name`: contextual at item start.
     fn at_ctx_item(&self) -> bool {
         let next = self.peek_next();
         let TokenKind::Ident(k) = self.peek() else {
@@ -543,6 +527,9 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Spec 1.5.4: `union` is a contextual keyword — an item only as
+    /// `union Name` at item start; elsewhere it is an identifier
+    /// (`Set::union`, `a.union(b)`).
     fn at_union_item(&self) -> bool {
         matches!(self.peek(), TokenKind::Ident(n) if n == "union")
             && matches!(self.peek_next(), Some(TokenKind::Ident(_)))
@@ -578,22 +565,56 @@ impl<'a> Parser<'a> {
 
     fn parse_inner_attrs(&mut self) -> Vec<Attribute> {
         let mut attrs = Vec::new();
-        while matches!(self.peek(), TokenKind::HashBangLBracket) {
+        loop {
+            self.doc_attrs(true, &mut attrs);
+            if !matches!(self.peek(), TokenKind::HashBangLBracket) {
+                return attrs;
+            }
             if let Some(attr) = self.parse_attr(true) {
                 attrs.push(attr);
             }
         }
-        attrs
     }
 
     fn parse_outer_attrs(&mut self) -> Vec<Attribute> {
         let mut attrs = Vec::new();
-        while matches!(self.peek(), TokenKind::HashLBracket) {
+        loop {
+            self.doc_attrs(false, &mut attrs);
+            if !matches!(self.peek(), TokenKind::HashLBracket) {
+                return attrs;
+            }
             if let Some(attr) = self.parse_attr(false) {
                 attrs.push(attr);
             }
         }
-        attrs
+    }
+
+    /// The next token's `///` (or `//!`) lines as `#[doc = ".."]`
+    /// attributes (the text escaped, as a string literal holds it). Doc
+    /// comments where no attribute can go are dropped.
+    fn doc_attrs(&self, inner: bool, out: &mut Vec<Attribute>) {
+        if self.pending.is_some() {
+            return;
+        }
+        let Some(t) = self.tokens.get(self.pos) else {
+            return;
+        };
+        out.extend(
+            t.docs
+                .iter()
+                .filter(|d| d.inner == inner)
+                .map(|d| Attribute {
+                    path: vec!["doc".to_owned()],
+                    body: AttrBody::Value(Literal::Str(
+                        d.text.replace('\\', "\\\\").replace('"', "\\\""),
+                    )),
+                    inner,
+                    span: Span {
+                        file: t.span.file,
+                        ..d.span
+                    },
+                }),
+        );
     }
 
     fn parse_attr(&mut self, inner: bool) -> Option<Attribute> {
@@ -761,8 +782,6 @@ impl<'a> Parser<'a> {
         Some(lit)
     }
 
-    /// The current token is the contextual keyword `w` (an identifier
-    /// token; spec 1.5 / E8).
     /// A `fn` type behind `unsafe` (calling it needs an unsafe scope,
     /// 4.15) and / or `extern "C"` (a C function pointer, 5.9.4). Each
     /// prefix rides with the bounds as a marker path (`#unsafe`,
@@ -795,6 +814,8 @@ impl<'a> Parser<'a> {
             && matches!(at(2), Some(TokenKind::Fn))
     }
 
+    /// The current token is the contextual keyword `w` (an identifier
+    /// token; spec 1.5).
     fn at_kw(&self, w: &str) -> bool {
         matches!(self.peek(), TokenKind::Ident(n) if n == w)
     }
@@ -817,7 +838,7 @@ impl<'a> Parser<'a> {
     }
 
     /// A member / field / argument-label name: an identifier or any
-    /// reserved keyword but `self` (E8; `p.type`, `f(match: 1)`).
+    /// reserved keyword but `self` (`p.type`, `f(match: 1)`).
     fn peek_name(&self) -> Option<String> {
         match self.peek() {
             TokenKind::Ident(n) => Some(n.clone()),
@@ -833,7 +854,7 @@ impl<'a> Parser<'a> {
         let span = self.peek_span();
         let from = self.pos;
         let item = self.parse_item_inner()?;
-        // E8: `pkg` / `sup` / `rok` are path roots and `any` is the any
+        // `pkg` / `sup` / `rok` are path roots and `any` is the any
         // type, so no module or type may take those names.
         let name = match &item {
             Item::Struct(d) => Some(&d.name),
@@ -884,7 +905,7 @@ impl<'a> Parser<'a> {
         if self.at_union_item() {
             return self.parse_union(vis, attrs).map(Item::Union);
         }
-        // Contextual item keywords (E8): `extern "C"`, `const NAME` /
+        // Contextual item keywords: `extern "C"`, `const NAME` /
         // `const fn`, `static [mut] NAME`, `type Name`.
         if self.at_kw("extern") {
             // `extern "C" fn f(..) { .. }` (spec 5.9.10): a rok function
@@ -909,11 +930,7 @@ impl<'a> Parser<'a> {
         }
         if self.at_kw("const") {
             if matches!(self.peek_next(), Some(TokenKind::Fn)) {
-                self.bump(); // `const`
-                // Stage-1: accept `const fn` as a regular fn. CTE
-                // (compile-time evaluation) lowering is a separate
-                // milestone; the body still runs at runtime.
-                return self.parse_fn(vis, attrs).map(Item::Fn);
+                return self.parse_const_fn(vis, attrs).map(Item::Fn);
             }
             return self.parse_const(vis, attrs).map(Item::Const);
         }
@@ -1015,10 +1032,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// `static [mut] NAME: T = expr;` — module-level binding.
-    /// Currently treated like `const` (the initializer is inlined at
-    /// each use). A future stage will give `static` its own `mlir.global`
-    /// storage and honour `mut`.
+    /// `static [mut] NAME: T = expr;` — a module-level global.
     fn parse_static(
         &mut self,
         vis: Visibility,
@@ -1027,9 +1041,8 @@ impl<'a> Parser<'a> {
         let start = self.peek_span();
         self.bump(); // contextual `static`
         let is_mut = matches!(self.peek_next(), Some(TokenKind::Ident(_))) && self.eat_kw("mut");
-        // Spec 5.3 / variant 656: `static mut` is permitted only inside
-        // an `extern "C" { ... }` block (FFI). The regular item path
-        // (this function) is not the FFI path, so reject.
+        // Spec 5.3: `static mut` only inside `extern "C" { .. }` (FFI),
+        // which doesn't come through here.
         if is_mut {
             let mut_span = self.peek_span();
             self.error(
@@ -1089,7 +1102,6 @@ impl<'a> Parser<'a> {
                 StructKind::Unit
             }
             TokenKind::LParen => {
-                // Tuple struct accepted but not yet lowered past parsing.
                 self.bump();
                 let mut fields = Vec::new();
                 while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
@@ -1131,8 +1143,6 @@ impl<'a> Parser<'a> {
     }
 
     /// `union Name<G> { f: T; g: U; }` — fields share storage.
-    /// Parsed only at this stage; the layout pass will treat unions as
-    /// the largest field's MIR type (future work).
     fn parse_union(&mut self, vis: Visibility, attrs: Vec<Attribute>) -> Option<UnionDef> {
         let start = self.peek_span();
         self.bump(); // contextual `union`
@@ -1202,17 +1212,12 @@ impl<'a> Parser<'a> {
         Some(fields)
     }
 
-    // Spec 2.4: `enum Name { Variant, Variant(T), Variant { x: T }, ... }`.
-    // Current slice only emits unit variants — tuple / named / value
-    // variants parse but lower to placeholders.
-    // Both inherent and trait impl. For `impl Trait for Type` the
-    // trait_path is captured but isn't yet used for trait checking;
-    // the methods are registered on the target type directly.
+    /// `impl [Trait for] Type { .. }`: an inherent or trait impl.
     fn parse_impl(&mut self, vis: Visibility, attrs: Vec<Attribute>) -> Option<ImplDef> {
         let start = self.peek_span();
         self.expect(&TokenKind::Impl, "`impl`")?;
         let generics = self.parse_generic_params();
-        // `impl !Send for T {}` — auto-trait opt-out (E3).
+        // `impl !Send for T {}` — auto-trait opt-out.
         let negative = self.eat(&TokenKind::Bang);
         let first_ty = self.parse_type()?;
         if negative && !matches!(self.peek(), TokenKind::For) {
@@ -1267,6 +1272,17 @@ impl<'a> Parser<'a> {
                         name: assoc_name,
                         ty: aty,
                     });
+                }
+                TokenKind::Ident(k)
+                    if k == "const" && matches!(self.peek_next(), Some(TokenKind::Fn)) =>
+                {
+                    let from = self.pos;
+                    if let Some(f) = self.parse_const_fn(item_vis, item_attrs) {
+                        let fs = self.expand_method(f, attrs_from);
+                        items.extend(fs.into_iter().map(ImplItem::Method));
+                    } else {
+                        self.recover(from, Recover::NestedItem);
+                    }
                 }
                 // Spec 2.9.1 `impl_item ::= .. | const_decl`.
                 TokenKind::Ident(k) if k == "const" => {
@@ -1325,6 +1341,7 @@ impl<'a> Parser<'a> {
         out
     }
 
+    /// `enum Name { V, V(T), V { x: T }, .. }` (spec 2.4).
     fn parse_enum(&mut self, vis: Visibility, attrs: Vec<Attribute>) -> Option<EnumDef> {
         let start = self.peek_span();
         self.expect(&TokenKind::Enum, "`enum`")?;
@@ -1562,11 +1579,9 @@ impl<'a> Parser<'a> {
         let prefix_start = self.peek_span();
         let mut segments: Vec<PathSegment> = Vec::new();
         loop {
-            // Path roots in `use`: bare identifier (absolute), or the
-            // contextual roots `pkg::` (package root) and `sup::`
-            // (parent module). `self::` is intentionally not a `use`
-            // root — same-module children resolve via the lookup-time
-            // ancestors walk without an explicit prefix.
+            // `use` roots: a bare identifier (absolute), `pkg::` (package
+            // root) or `sup::` (parent). No `self::`: same-module children
+            // resolve through the ancestor walk.
             let seg_name = if let TokenKind::Ident(n) = self.peek().clone() {
                 self.bump();
                 n
@@ -1697,6 +1712,11 @@ impl<'a> Parser<'a> {
             TokenKind::Fn | TokenKind::Unsafe | TokenKind::Async | TokenKind::Yield => {
                 let f = self.parse_fn(vis, attrs)?;
                 Some(TraitItem::Method(f))
+            }
+            TokenKind::Ident(k)
+                if k == "const" && matches!(self.peek_next(), Some(TokenKind::Fn)) =>
+            {
+                self.parse_const_fn(vis, attrs).map(TraitItem::Method)
             }
             TokenKind::Ident(k) if k == "const" => {
                 self.bump();
@@ -1951,7 +1971,7 @@ impl<'a> Parser<'a> {
         v
     }
 
-    /// A function's name. Contextual keywords (E8) lex as identifiers,
+    /// A function's name. Contextual keywords lex as identifiers,
     /// so `fn union` (`Set::union`) and `fn any` (`Iterator::any`) work.
     fn fn_name(&mut self) -> Option<String> {
         let TokenKind::Ident(name) = self.peek().clone() else {
@@ -1961,6 +1981,19 @@ impl<'a> Parser<'a> {
         };
         self.bump();
         Some(name)
+    }
+
+    /// `const fn` (spec 5.2.5): a plain fn carrying `CONST_FN_ATTR`.
+    fn parse_const_fn(&mut self, vis: Visibility, mut attrs: Vec<Attribute>) -> Option<FnDef> {
+        let span = self.peek_span();
+        self.bump(); // `const`
+        attrs.push(Attribute {
+            path: vec![rokc_ast::CONST_FN_ATTR.to_owned()],
+            body: rokc_ast::AttrBody::Empty,
+            inner: false,
+            span,
+        });
+        self.parse_fn(vis, attrs)
     }
 
     fn parse_fn(&mut self, vis: Visibility, attrs: Vec<Attribute>) -> Option<FnDef> {
@@ -2324,7 +2357,7 @@ impl<'a> Parser<'a> {
     fn parse_type_atom_inner(&mut self) -> Option<Ty> {
         let start = self.peek_span();
         let kind = match self.peek().clone() {
-            // `any` | `any Tr` | `any (A + B)` (D4). The bound binds
+            // `any` | `any Tr` | `any (A + B)`. The bound binds
             // tighter than `|`: `any Error | none` is `(any Error) | none`.
             TokenKind::Ident(k)
                 if k == "any" && !matches!(self.peek_next(), Some(TokenKind::ColonColon)) =>
@@ -2421,7 +2454,7 @@ impl<'a> Parser<'a> {
                         span,
                     };
                 }
-                // E3: `fn(..) -> R + Send + Sync` — auto-trait bounds.
+                // `fn(..) -> R + Send + Sync` — auto-trait bounds.
                 let mut bounds = Vec::new();
                 while self.eat(&TokenKind::Plus) {
                     bounds.push(self.parse_type_path()?);
@@ -2695,8 +2728,6 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// `{ stmts }`. Inside braces a struct literal is always allowed
-    /// again, even when the block itself sits in an `if`/`while` head.
     /// Match arm body. `return` / `break` / `continue` / `throw` are
     /// statements, so `none => return 0,` (spec 3.12) wraps one in a block.
     fn parse_arm_body(&mut self) -> Option<Expr> {
@@ -2750,6 +2781,8 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// `{ stmts }`. Inside braces a struct literal is always allowed
+    /// again, even when the block itself sits in an `if`/`while` head.
     fn parse_block(&mut self) -> Option<Block> {
         self.nested(|p| p.with_struct_expr(true, Self::parse_block_inner))
     }
@@ -2777,9 +2810,8 @@ impl<'a> Parser<'a> {
                     }
                     stmts.push(stmt);
                 }
-                // Drain follow-up stmts queued by the most recent parse
-                // (e.g. nested-tuple destructure: spec 3.15.4 desugars
-                // `let ((a, b), c) = …;` to a chain of LetTuple stmts).
+                // Follow-ups queued by the statement (nested tuple
+                // destructure, spec 3.15.4).
                 while let Some(extra) = self.pending_stmts.pop() {
                     stmts.push(extra);
                 }
@@ -2854,11 +2886,8 @@ impl<'a> Parser<'a> {
                         false,
                     ));
                 }
-                // Struct destructure: `let Point { x, y, .. } [: ty] = init;`.
-                // Decided purely by syntax: `let Path {` cannot start a
-                // plain binding (`let name [: ty] = ...`), so any path
-                // followed by `{` is a struct pattern — no capitalisation
-                // or pre-scanned type-name table involved.
+                // `let Point { x, y, .. } [: ty] = init;`: `let Path {`
+                // can't start a plain binding, so it is a struct pattern.
                 if self.peek_path_then_lbrace() {
                     let (path, fields, rest) = self.parse_let_struct_fields()?;
                     let ty = if self.eat(&TokenKind::Colon) {
@@ -2883,10 +2912,8 @@ impl<'a> Parser<'a> {
                         false,
                     ));
                 }
-                // Tuple destructure: `let (a, b) = ...;`. Spec 3.15.4
-                // allows nested patterns `let ((a, b), c) = ...;`. We
-                // desugar nested groups into a chain of plain LetTuple
-                // statements, queuing follow-ups onto `pending_stmts`.
+                // `let (a, b) = ..;`. Nested groups (spec 3.15.4) become
+                // a chain of `LetTuple`s queued on `pending_stmts`.
                 if matches!(self.peek(), TokenKind::LParen) {
                     let (mut names, rest, trailing_comma) = self.parse_let_tuple_pattern(start)?;
                     let ty = if self.eat(&TokenKind::Colon) {
@@ -3139,12 +3166,9 @@ impl<'a> Parser<'a> {
                 if matches!(self.peek(), TokenKind::Eq) {
                     self.bump();
                     let value = self.parse_expr()?;
-                    // Spec 4.6.2's example `|| { count = count + 1 }` writes the
-                    // assignment without a trailing `;` in the block. Strict
-                    // 3.9.1 demands the `;`; we accept the `;`-less form when
-                    // it sits in trailing position (`}` follows) so the spec
-                    // example parses while still requiring `;` between
-                    // statements in the middle of a block.
+                    // Spec 4.6.2 writes `|| { count = count + 1 }`: a
+                    // trailing assignment (`}` follows) may omit its `;`
+                    // (3.9.1 otherwise requires it).
                     if matches!(self.peek(), TokenKind::RBrace) {
                         let _ = self.eat(&TokenKind::Semi);
                     } else {
@@ -3398,11 +3422,8 @@ impl<'a> Parser<'a> {
             if left_bp < min_bp {
                 break;
             }
-            // Spec 3.2.5: non-associative ops cannot chain. The Pratt loop
-            // already prevents `a < b < c` parsing as `a < (b < c)`, but
-            // the *outer* iteration would still consume the second `<`,
-            // building `(a < b) < c`. Track the last non-assoc prec we
-            // consumed and refuse another op at the same prec.
+            // Spec 3.2.5: non-associative ops don't chain. Without this
+            // the loop would build `(a < b) < c`.
             if last_none_prec == Some(prec) {
                 let span = self.peek_span();
                 self.error(
@@ -3430,11 +3451,9 @@ impl<'a> Parser<'a> {
         Some(lhs)
     }
 
-    /// Peek the current token and convert it to an operator-symbol string
-    /// if it is a candidate for the given fixity. Tokens that are also
-    /// language syntax (e.g. `|` in lambda parameters, `<` in generic
-    /// arguments) are filtered by the caller's context — here we only
-    /// expose tokens that have an unambiguous lexical operator meaning.
+    /// The current token as an operator symbol for `fixity`. Tokens that
+    /// are also syntax (`|` in closure params, `<` in generic args) are
+    /// the caller's to filter.
     fn peek_op_symbol(&self, fixity: Fixity) -> Option<(String, Span)> {
         let tok = self.tokens.get(self.pos)?;
         let sym = match (&tok.kind, fixity) {
@@ -3957,12 +3976,9 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident(_) => {
                 let mut path = self.parse_path()?;
-                // Spec 2.10: explicit generic instantiation in struct
-                // literal — `Pair<i32, i32> { a: 5, b: 7 }`. The `<` at
-                // expression position is normally a comparison, so we
-                // only accept generics when a balanced `>` is followed
-                // by `{` or `(` (turbofish-style heuristic). The args
-                // attach to the last path segment.
+                // Spec 2.10: `Pair<i32, i32> { a: 5, b: 7 }`. `<` is a
+                // comparison unless a balanced `>` is followed by `{` or
+                // `(`. The args attach to the last path segment.
                 if matches!(self.peek(), TokenKind::Lt) && self.peek_struct_or_call_after_generics()
                 {
                     self.bump(); // `<`
@@ -4147,8 +4163,7 @@ impl<'a> Parser<'a> {
         };
         let mut expr = Expr { kind, span: start };
 
-        // Postfix chain: `(...)`, `.field`, `.method(...)`. Indexing and
-        // optional-chaining come later.
+        // Postfix chain: calls, members, indexing, `?`, `?.`.
         loop {
             match self.peek() {
                 TokenKind::LParen | TokenKind::LBracket if stmt_head && is_block_like(&expr) => {
@@ -4268,10 +4283,8 @@ impl<'a> Parser<'a> {
                         self.error(s, "index expression expected");
                     }
                     self.expect(&TokenKind::RBracket, "`]`")?;
-                    // Spec 3.6.1: `m[i, j]` lowers to `m[i][j]`. Until
-                    // `Index<(I, J)>` trait dispatch lands the sugar maps
-                    // straight to chained primitive indexing — which is
-                    // the right semantic for fixed-size 2D arrays.
+                    // Spec 3.6.1: `m[i, j]` is chained indexing `m[i][j]`,
+                    // not `Index<(I, J)>`.
                     let span = expr.span;
                     for idx in indices {
                         expr = Expr {
@@ -4383,10 +4396,9 @@ impl<'a> Parser<'a> {
             p.diagnostics.truncate(n_diags);
         };
         self.bump(); // `{`
-        // ponytail: only a simple-looking first item is tried, so nested
-        // blocks (`{ if .. { .. } }`) aren't re-parsed exponentially; a
-        // set / dict whose first item starts with a keyword parses as a
-        // block.
+        // Only a simple-looking first item is tried, so nested blocks
+        // (`{ if .. { .. } }`) aren't re-parsed exponentially; a set /
+        // dict whose first item starts with a keyword parses as a block.
         let first = if matches!(
             self.peek(),
             TokenKind::IntLit(_)
@@ -4516,11 +4528,8 @@ impl<'a> Parser<'a> {
     /// `{ ... }`, so `||` there is the logical-or operator. Returns
     /// `None` when no trailing closure is present.
     ///
-    /// `{ ... }` is gated on `self.struct_expr_allowed`: inside a
-    /// control-flow head (`if`, `while`, `for`, `match` condition) the
-    /// brace is reserved for the construct body, not a 0-arg closure.
-    /// The flag is reused (not duplicated) because both situations share
-    /// the same disambiguation question.
+    /// `{ ... }` is gated on `struct_expr_allowed`: in a control-flow
+    /// head the brace is the construct's body, not a 0-arg closure.
     #[allow(clippy::option_option)] // outer None = parse error (for `?`), inner None = no closure
     fn try_parse_trailing_closure(&mut self) -> Option<Option<Box<Expr>>> {
         match self.peek() {
@@ -4553,9 +4562,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse `|args| body` or `|args| -> R body` (or `|| body`).
-    /// Captures aren't supported yet — the body must reference only its
-    /// parameters or globally visible items.
     /// `[ref x, y] |..| body` — a closure with a capture list (spec 4.6.2).
     fn parse_capture_closure(&mut self) -> Option<ExprKind> {
         self.bump(); // `[`
@@ -4615,6 +4621,7 @@ impl<'a> Parser<'a> {
         Some(k)
     }
 
+    /// `|args| body`, `|args| -> R body` or `|| body`.
     fn parse_closure_expr(&mut self) -> Option<ExprKind> {
         let (params, ret_ty) = self.parse_closure_head()?;
         let body = self.parse_expr()?;
@@ -4692,24 +4699,10 @@ impl<'a> Parser<'a> {
         Some((params, ret_ty))
     }
 
-    /// Parse `{ field: expr, ..., ..base? }` after a leading path. The
-    /// caller already has the path; we consume from the opening `{`.
-    /// Disambiguate `Path { ... }`: struct init vs 0-arg trailing closure.
-    /// Looks two tokens past the `{` without consuming.
-    ///   `{ }`              → struct init (empty/unit)
-    ///   `{ .. }`           → struct init (rest)
-    ///   `{ ident : ... }`  → struct init (named field)
-    ///   `{ ident , ... }`  → struct init (shorthand)
-    ///   `{ ident } `       → struct init (single shorthand)
-    ///   anything else      → trailing closure body
-    /// Heuristic for `Path<...>` in expression position. Walks forward
-    /// from the `<` token, balancing nested angle brackets. Returns
-    /// true when a matched `>` is followed by `{` or `(` — the only
-    /// shapes for an explicit generic instantiation that immediately
-    /// constructs (struct init) or calls (turbofish). Stops scanning
-    /// at tokens that can't appear inside a generic-arg list (block
-    /// braces, semicolons, etc.) to keep the lookahead short and
-    /// rule out comparisons.
+    /// `Path<...>` in expression position: true when a balanced `>` is
+    /// followed by `{` or `(` (a struct literal or turbofish call).
+    /// Stops at tokens a generic-arg list can't hold, which rules out
+    /// comparisons and keeps the lookahead short.
     fn peek_struct_or_call_after_generics(&self) -> bool {
         // Caller has already confirmed `peek() == Lt`.
         let mut depth: i32 = 0;
@@ -4774,6 +4767,14 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// `Path { .. }`: struct literal or 0-arg trailing closure? Looks two
+    /// tokens past the `{` without consuming.
+    ///   `{ }`              → struct init (empty/unit)
+    ///   `{ .. }`           → struct init (rest)
+    ///   `{ ident : ... }`  → struct init (named field)
+    ///   `{ ident , ... }`  → struct init (shorthand)
+    ///   `{ ident } `       → struct init (single shorthand)
+    ///   anything else      → trailing closure body
     fn peek_struct_init_body(&self) -> bool {
         // Caller has just confirmed `peek() == LBrace`.
         let after_brace = self.tokens.get(self.pos + 1).map(|t| &t.kind);
@@ -4790,6 +4791,7 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// `{ field: expr, .., ..base? }` after a path, from the `{`.
     fn parse_struct_init_body(&mut self, path: Path) -> Option<ExprKind> {
         self.expect(&TokenKind::LBrace, "`{`")?;
         let mut fields = Vec::new();
@@ -5372,7 +5374,7 @@ const fn starts_stmt(k: &TokenKind) -> bool {
     )
 }
 
-// Map a compound-assign token to its base operator symbol.
+/// The base operator symbol of a compound-assign token.
 const fn compound_assign_op(tok: &rokc_lexer::TokenKind) -> Option<&'static str> {
     use rokc_lexer::TokenKind as T;
     Some(match tok {

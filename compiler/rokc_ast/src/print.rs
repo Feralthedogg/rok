@@ -9,7 +9,7 @@
 //! `#[derive]` as a comment (its impls follow), so the print parses
 //! back and prints the same again.
 //!
-//! ponytail: a debug view, not a formatter (no line breaking).
+//! A debug view, not a formatter: no line breaking.
 
 use std::fmt::Write as _;
 
@@ -182,7 +182,12 @@ impl Printer {
     fn attrs(&mut self, attrs: &[Attribute]) {
         for a in attrs {
             if a.path.len() == 1
-                && [crate::EXTERN_C_FN_ATTR, crate::C_VARIADIC_ATTR].contains(&a.path[0].as_str())
+                && [
+                    crate::EXTERN_C_FN_ATTR,
+                    crate::C_VARIADIC_ATTR,
+                    crate::CONST_FN_ATTR,
+                ]
+                .contains(&a.path[0].as_str())
             {
                 continue;
             }
@@ -468,6 +473,9 @@ impl Printer {
         self.attrs(&f.attrs);
         self.vis(f.vis);
         let marked = |m: &str| f.attrs.iter().any(|a| a.path.len() == 1 && a.path[0] == m);
+        if marked(crate::CONST_FN_ATTR) {
+            self.s("const ");
+        }
         if marked(crate::EXTERN_C_FN_ATTR) {
             self.s("extern \"C\" ");
         }

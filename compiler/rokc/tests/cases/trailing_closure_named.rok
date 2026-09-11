@@ -3,9 +3,7 @@
 
 // Spec 4.8.9: a trailing closure after named arguments fills the last
 // parameter, and its parameter types come from that parameter's `fn`
-// type — the same as a closure passed inside the parentheses. (It used
-// to take the next positional slot: "cannot infer the type of closure
-// parameter `n`".)
+// type — the same as a closure passed inside the parentheses.
 fn apply(x: i32, scale: i32 = 1, f: fn(i32) -> i32) -> i32 { f(x * scale) }
 struct W { v: i32 }
 impl W {

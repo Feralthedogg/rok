@@ -2,7 +2,7 @@
 // expect-stdout:
 // alloc ok
 
-// Stage-1 heap: `rok_alloc` is a libc-malloc-backed runtime hook.
+// `rok_alloc` is a libc-malloc-backed runtime hook.
 // `rok_free` returns the memory. No GC, no tracing — short-running
 // programs only. Pointers cross the FFI boundary as `usize`.
 extern "C" {

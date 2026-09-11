@@ -1,0 +1,9 @@
+// spec: 002.12-any-trait
+// expect-error: cannot call `same` on `any Same`: its signature mentions `Self`
+
+// A method with `Self` in a parameter can't be called on `any Tr` either.
+trait Same { fn same(self, o: Self) -> bool; }
+impl Same for i32 { fn same(self, o: i32) -> bool { return self == o; } }
+
+let y: any Same = 1;
+let b = y.same(2);

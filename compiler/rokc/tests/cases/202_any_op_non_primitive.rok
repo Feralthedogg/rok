@@ -1,0 +1,7 @@
+// spec: 002.02-any-slot
+// expect-error: on an `any` value it dispatches only over primitive types
+
+// `any` dispatches operators dynamically only for primitive types.
+struct S { a: i32; }
+let v: any = 1;
+let w = v + S { a: 1 };

@@ -1,0 +1,10 @@
+// spec: 005.06-visibility
+// Accessing a private field from outside is an error (spec 5.6: fields are private by default).
+// expect-error: field `x` of `a::S` is private to module `a`
+
+mod a {
+    pub struct S { x: i32; }
+    pub fn mk() -> S { return S { x: 3 }; }
+}
+
+fn main() -> i32 { let s = a::mk(); return s.x; }

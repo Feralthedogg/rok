@@ -1,0 +1,8 @@
+// spec: 004.01-item-uniqueness
+// A duplicate function definition is an error.
+// expect-error: function `f` is defined more than once
+
+fn f() -> i32 { return 1; }
+fn f() -> i32 { return 2; }
+
+fn main() -> i32 { return f(); }

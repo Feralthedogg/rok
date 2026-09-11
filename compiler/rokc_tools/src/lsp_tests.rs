@@ -4,8 +4,8 @@
 use std::io::Cursor;
 use std::path::Path;
 
-use crate::json::Json;
 use crate::lsp::serve;
+use rokc_diagnostic::Json;
 
 fn frame(msg: &Json) -> String {
     let body = msg.to_string();
@@ -153,6 +153,7 @@ fn scripted_session() {
         &mut out,
         vec![bootstrap],
         Vec::new(),
+        vec![(crate::lint::Level::Allow, "dead_code".to_owned())],
     );
     assert_eq!(code, 0);
     let msgs = messages(&out);
@@ -239,11 +240,13 @@ fn scripted_session() {
         .find(|d| d.get("severity") == &Json::num(1))
         .unwrap_or_else(|| panic!("no error in {second:?}"));
     assert_eq!(line(err), Json::num(5));
-    // The formatted-away buffer compiles clean again.
-    assert_eq!(
-        published.last().unwrap().get("diagnostics"),
-        &Json::Arr(Vec::new())
-    );
+    // The last buffer type-checks; its lints follow the given levels.
+    let Json::Arr(last) = published.last().unwrap().get("diagnostics").clone() else {
+        panic!()
+    };
+    assert_eq!(last.len(), 1, "{last:?}");
+    let msg = last[0].get("message").as_str().unwrap_or("");
+    assert!(msg.starts_with("unused variable `a`"), "{msg}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -283,6 +286,7 @@ fn manifest_buffer() {
     let code = serve(
         Cursor::new(input.into_bytes()),
         &mut out,
+        Vec::new(),
         Vec::new(),
         Vec::new(),
     );

@@ -6,7 +6,7 @@
 // 7
 // unit ok
 
-// Typed `throws` + `try` propagation (D3): errors travel up as values
+// Typed `throws` + `try` propagation: errors travel up as values
 // through functions whose `throws` covers them; a sum `throws (A | B)`
 // takes either.
 enum ParseError { Empty, Bad }

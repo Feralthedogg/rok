@@ -1,11 +1,22 @@
-//! Thin façade over the driver. Used by the `rokc` binary and any
-//! embedder that wants a simple session API (REPL, Jupyter, LSP).
+//! The compiler as a library: sessions, package discovery, prebuilt
+//! dependencies and incremental-build records, for the `rokc` binary and
+//! its embedded tools (REPL, Jupyter, LSP).
+
+mod deps;
+mod fresh;
+mod package;
 
 use std::path::{Path, PathBuf};
 
+pub use deps::DepBuild;
+pub use fresh::Fingerprint;
+pub use package::{Package, STDIN, discover, source_files};
+
 use rokc_driver::{CompiledModule, CompilerConfig, compile_file, compile_source};
 
-pub use rokc_diagnostic::{ErrorKind, RokDiagnostic, report, set_report_style};
+pub use rokc_diagnostic::{
+    ErrorKind, Json, RokDiagnostic, clear_files, print_rendered, render, report, set_report_style,
+};
 pub use rokc_driver::{
     BuildOptions, Demangled, EmitKind, ReplCell, ReplFn, SourceFile, TempDir, demangle,
     find_mlir_plugin, link_host, rhir,
@@ -79,6 +90,11 @@ impl Session {
     /// over a library that does not change: the REPL).
     pub const fn set_cache_library(&mut self, on: bool) {
         self.config.cache_library = on;
+    }
+
+    /// Lower (and so check) every library body, reached or not.
+    pub const fn set_check_library(&mut self, on: bool) {
+        self.config.check_library = on;
     }
 
     pub fn compile_file(&self, path: &Path) -> CompileResult {
@@ -205,7 +221,7 @@ impl CompileResult {
     }
 }
 
-/// Installed layout (E6): `$ROK_HOME/bin/rokc`, `$ROK_HOME/lib/librokr.a`,
+/// Installed layout: `$ROK_HOME/bin/rokc`, `$ROK_HOME/lib/librokr.a`,
 /// `$ROK_HOME/lib/rok/{core,std,bare}/`.
 pub const INSTALLED_LIBS: &str = "lib/rok";
 const INSTALLED_RT: &str = "lib/librokr.a";
@@ -213,34 +229,41 @@ const INSTALLED_RT: &str = "lib/librokr.a";
 /// with `librokr.a` next to `rokc`.
 const DEV_LIBS: &str = "library";
 
-/// `(library root holding core/ std/ bare/, librokr.a)`. `ROK_HOME`
-/// defaults to the parent of the directory holding `rokc` (`bin/..`);
-/// when that is not an install, fall back to the dev layout.
-pub fn locate(exe_dir: Option<&Path>) -> (Option<PathBuf>, Option<PathBuf>) {
+/// `(bootstrap roots, librokr.a)`: the install at `ROK_HOME`, else the dev
+/// layout around the running executable.
+#[must_use]
+pub fn toolchain() -> (Option<Vec<PathBuf>>, Option<PathBuf>) {
     let file = |p: PathBuf| p.is_file().then_some(p);
     let libs_in = |d: &Path, rel: &str| {
         let libs = d.join(rel);
         libs.join("core/lib.rok").is_file().then_some(libs)
     };
-    let env_home = std::env::var_os("ROK_HOME").map(PathBuf::from);
-    let home = env_home
-        .clone()
-        .or_else(|| exe_dir.and_then(Path::parent).map(Path::to_path_buf));
-    if let Some(h) = home {
-        if let Some(libs) = libs_in(&h, INSTALLED_LIBS) {
-            return (Some(libs), file(h.join(INSTALLED_RT)));
-        }
-    }
-    let dev = env_home
-        .and_then(|h| libs_in(&h, DEV_LIBS))
-        .or_else(|| exe_dir?.ancestors().find_map(|d| libs_in(d, DEV_LIBS)));
-    (dev, exe_dir.and_then(|d| file(d.join("librokr.a"))))
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf));
+    let home = rokc_core::rok_home();
+    let installed = home.as_deref().and_then(|h| libs_in(h, INSTALLED_LIBS));
+    let (libs, rokr) = if installed.is_some() {
+        (installed, home.and_then(|h| file(h.join(INSTALLED_RT))))
+    } else {
+        let dev = home
+            .as_deref()
+            .and_then(|h| libs_in(h, DEV_LIBS))
+            .or_else(|| {
+                exe_dir
+                    .as_deref()?
+                    .ancestors()
+                    .find_map(|d| libs_in(d, DEV_LIBS))
+            });
+        (dev, exe_dir.and_then(|d| file(d.join("librokr.a"))))
+    };
+    (libs.as_deref().map(bootstrap_roots), rokr)
 }
 
-/// The library roots to preload from a `locate` library directory:
-/// `core/lib.rok`, then `std` / `bare` when present (no implicit glob:
-/// user code names them).
-pub fn bootstrap_roots(libs: &Path) -> Vec<PathBuf> {
+/// The library roots to preload from a library directory: `core/lib.rok`,
+/// then `std` / `bare` when present (no implicit glob: user code names
+/// them).
+fn bootstrap_roots(libs: &Path) -> Vec<PathBuf> {
     let mut out = vec![libs.join("core/lib.rok")];
     out.extend(
         ["std", "bare"]
@@ -249,14 +272,4 @@ pub fn bootstrap_roots(libs: &Path) -> Vec<PathBuf> {
             .filter(|p| p.is_file()),
     );
     out
-}
-
-/// `(bootstrap roots, librokr.a)` for the running executable (`locate`
-/// from its directory + `bootstrap_roots`).
-pub fn toolchain() -> (Option<Vec<PathBuf>>, Option<PathBuf>) {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(Path::to_path_buf));
-    let (libs, rokr) = locate(exe_dir.as_deref());
-    (libs.as_deref().map(bootstrap_roots), rokr)
 }

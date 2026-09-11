@@ -277,9 +277,8 @@ pub(super) fn lower_stmt(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt>
 fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
     match &stmt.kind {
         StmtKind::Let { name, ty, init } => {
-            // Spec variant 238-239: same-scope `let` redeclaration is
-            // banned (typo guard, no shadowing). Different scopes still
-            // create fresh bindings.
+            // Same-scope redeclaration is an error (typo guard, no
+            // shadowing); an inner scope makes a fresh binding.
             if name != "_" && ctx.lookup_in_current_scope(name).is_some() {
                 ctx.emit_error(
                     rokc_diagnostic::ErrorKind::Type,
@@ -346,8 +345,7 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
             Some(HirStmt::Expr(lower_expected(ctx, expr, HirTy::Unit)))
         }
         StmtKind::Item(rokc_ast::Item::Use(u)) => {
-            // Function-local `use` — flatten the tree into UseEntries
-            // and push them into the current scope's local_uses list.
+            // Function-local `use`: visible in the current scope only.
             let mut entries = Vec::new();
             crate::uses::flatten_tree_for_local(&u.tree, &[], &ctx.current_module, &mut entries);
             for e in entries {
@@ -462,7 +460,7 @@ fn lower_receiver(ctx: &mut LowerCtx<'_>, receiver: &Expr) -> HirExpr {
     lower_expected(ctx, receiver, expected)
 }
 
-/// D1: an un-annotated `let` takes its initializer's static type, so
+/// An un-annotated `let` takes its initializer's static type, so
 /// the initializer must have one. `none` alone and an initializer that
 /// never produces a value don't (empty `[]` and differing `if` / `match`
 /// branches are rejected where they are lowered).
@@ -529,8 +527,7 @@ pub(super) fn lower_assign(
                 let value = coerce(ctx, &ty, v, &|| format!("assignment to `{name}`"));
                 return Some(HirStmt::StaticAssign { name: full, value });
             }
-            // Spec variant 234-235: bare-name assign requires the name to
-            // have been previously declared (with `let`).
+            // Only `let` declares; assigning an undeclared name is an error.
             ctx.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
                 format!(
@@ -677,7 +674,6 @@ pub(super) fn lower_assign(
                 );
                 return None;
             }
-            // Walk the chain to get each level's struct id and field index.
             let root_place = root_h.clone();
             let mut steps: Vec<Step> = Vec::new();
             let mut step_ty = root_h.ty.clone();
@@ -964,8 +960,7 @@ fn lower_cast(
 ) -> HirExpr {
     let mark = ctx.probe_mark();
     let operand_h = lower_expected(ctx, operand, HirTy::Unknown);
-    // Spec 2.10.5: monomorphized bodies need `as T` to substitute
-    // the concrete type for the type-param (`resolve_ast_ty`).
+    // In a monomorphized body `as T` names the concrete type.
     let to_ty = ctx.resolve_ast_ty(ty);
     let from_ty = operand_h.ty.clone();
     // `int` / `float`: a conversion call (stdlib 2.11.1).
@@ -1431,7 +1426,7 @@ pub(super) fn open_break_target(ctx: &mut LowerCtx<'_>, idx: usize) {
 
 /// `break value` to the target at `depth`: the value takes the target's
 /// slot type, or (unannotated) the first `break`'s type, which every
-/// other `break` must match — D1, as for `if` / `match` arms.
+/// other `break` must match, as for `if` / `match` arms.
 pub(super) fn lower_break_value(ctx: &mut LowerCtx<'_>, depth: usize, e: &Expr) -> HirExpr {
     let slot = ctx.break_tys.get(&depth).cloned();
     let v = lower_expected(
@@ -1594,7 +1589,6 @@ pub(super) fn variant_arg_tys(v: &HirEnumVariant) -> Vec<HirTy> {
     }
 }
 
-// `Foo { field: value, ... }` — fields are placed in declaration order.
 fn check_duplicate_fields(ctx: &LowerCtx<'_>, segs: &[&str], fields: &[(String, Expr)]) {
     let mut seen = std::collections::HashSet::new();
     for (n, _) in fields {
@@ -1803,9 +1797,8 @@ pub(super) fn lower_struct_init(
     };
     let def = ctx.struct_def(struct_id);
     let ty_display = ctx.ty_name(&HirTy::Struct(struct_id));
-    // Spec 2.x / i-want 322: `union { ... }` initialiser. Exactly one
-    // declared field gets its value cast/bitcast into the synthetic
-    // `__data` storage slot.
+    // `union { f: v }`: exactly one field, cast/bitcast into the
+    // synthetic `__data` slot.
     if let Some(union_kind) = def.union_kind.clone() {
         if fields.len() != 1 {
             return ctx.error_expr(
@@ -1874,8 +1867,7 @@ pub(super) fn lower_struct_init(
             format!("field `{name}`")
         }));
     }
-    // Spec 2.x / i-want 942-950: missing fields fall back to their
-    // declared default expression; no default → "missing field" error.
+    // A missing field takes its declared default, else it is an error.
     let mut out = Vec::with_capacity(ordered.len());
     for (f, v) in def.fields.iter().zip(ordered) {
         match (v, &f.default) {
@@ -1938,9 +1930,8 @@ pub(super) fn field_access(
         }
     };
     let def = ctx.struct_def(struct_id);
-    // Spec 2.x / i-want 322: union field read goes through `UnionRead`
-    // so MIR/codegen can issue the right cast/bitcast against the
-    // single `__data` storage slot.
+    // A union field read is a `UnionRead`: a cast/bitcast of the one
+    // `__data` slot.
     if let Some(union_kind) = def.union_kind.clone() {
         // Spec 4.15.2: reinterpreting the bits can make an invalid value
         // (a bad `bool`, a forged GC reference).
@@ -2177,7 +2168,7 @@ pub(super) fn lower_if(
     {
         t
     } else {
-        // D1: branches of different types are an error, not an inferred
+        // Branches of different types are an error, not an inferred
         // sum — the slot's annotation must name the sum.
         ctx.emit_error(
             rokc_diagnostic::ErrorKind::Type,
@@ -2259,7 +2250,7 @@ fn bind_narrowed(ctx: &mut LowerCtx<'_>, cond: &Expr) -> Vec<HirStmt> {
             span: cond.span,
         };
         let pat_h = lower_pattern(ctx, &pat, &orig_ty);
-        // ponytail: a narrowing rebinding is never a `[ref]` cell.
+        // A narrowing rebinding is never a `[ref]` cell.
         ctx.pending_cells.clear();
         let resums = ctx.take_resums(cond.span);
         let Some(new) = ctx.lookup_in_current_scope(&name) else {
@@ -2393,10 +2384,10 @@ fn lower_is(
     }
     ctx.push_scope();
     let pat_h = lower_pattern(ctx, pat, &scrut.ty);
-    // ponytail: `is` binders aren't `[ref]` cells (no scope to start
+    // `is` binders aren't `[ref]` cells (no scope to start
     // one in); capturing one by `ref` is reported at the closure.
     ctx.pending_cells.clear();
-    // ponytail: an `is v: A | B` sub-sum binder stays unconverted; the
+    // An `is v: A | B` sub-sum binder stays unconverted; the
     // `if x is (A | B)` narrowing form converts.
     ctx.pending_resums.clear();
     ctx.pop_scope();
@@ -2537,7 +2528,7 @@ pub(super) fn lower_args_ref(
                 }
             }
             CallArg::Spread(e) => {
-                // Spec 4.1 / variant 838: `f(..t)` with a tuple value.
+                // `f(..t)` with a tuple value (spec 4.1).
                 let lh = lower_expected(ctx, e, HirTy::Unknown);
                 match lh.ty.clone() {
                     HirTy::Tuple(parts) => {
@@ -3041,7 +3032,7 @@ fn check_ref_exclusive(
     } else {
         None
     };
-    // ponytail: only a whole-variable `ref x` is checked against reads;
+    // Only a whole-variable `ref x` is checked against reads;
     // `ref p.a` beside a read of `p.b` is fine, and telling it from a read
     // of `p.a` would need per-field read analysis.
     for (k, (_, root)) in roots.iter().enumerate() {
@@ -3172,7 +3163,6 @@ pub(super) fn with_lets(lets: Vec<HirStmt>, e: HirExpr) -> HirExpr {
     }
 }
 
-// `recv.method(args)` → Call to `Type__method(recv, args)`.
 /// Explicit `::<..>` arguments of a call of generic `def`, bound by
 /// position to its own type parameters — those `self_ty` (an impl
 /// target) does not fix. More arguments than parameters is an error;
@@ -3759,7 +3749,7 @@ pub(super) fn method_call_on(
     call_sig(ctx, &sig, method, Some(recv_h), args, span)
 }
 
-/// `v.m(args)` on an `any Tr` value (D4). Only methods of the bound
+/// `v.m(args)` on an `any Tr` value. Only methods of the bound
 /// traits and their supertraits are callable; the call becomes a switch
 /// on the tag over every implementor in the program:
 /// `match v { x: T1 => T1::m(x, args), x: T2 => T2::m(x, args), ... }`.
@@ -4053,7 +4043,7 @@ pub(super) fn any_dispatcher(
 /// they put the library's types into the user's dispatchers and make
 /// the user build every dispatcher the library calls.
 /// Returns `(seeds as (module, text), dispatcher exports)`.
-// ponytail: a seed names its types as `ty_name` prints them; a type it
+// A seed names its types as `ty_name` prints them; a type it
 // can't name (closures) is skipped, and one not visible from the
 // module of its first `lib` type fails the user's build.
 #[allow(clippy::type_complexity)] // two lists, each read once
@@ -4063,11 +4053,6 @@ pub(super) fn any_link(
 ) -> (Vec<(String, String)>, Vec<(FunctionId, String)>) {
     let empty = HashMap::new();
     let c = LowerCtx::new(env, &empty, None);
-    let fnv = |s: &str| {
-        s.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
-            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
-        })
-    };
     let dispatch = env.sink.any_dispatch.borrow().clone();
     let names = |tys: &[HirTy]| tys.iter().map(|t| c.ty_name(t)).collect::<Vec<_>>();
     let exports = dispatch
@@ -4081,7 +4066,10 @@ pub(super) fn any_link(
                 names(&d.params).join(","),
                 c.ty_name(&d.ret)
             );
-            (d.id, format!("rok.any.{:016x}", fnv(&key)))
+            (
+                d.id,
+                format!("rok.any.{:016x}", rokc_core::hash::fnv(key.as_bytes())),
+            )
         })
         .collect();
     let Some(lib) = lib else {
@@ -5120,7 +5108,7 @@ pub(super) fn lower_call(
         }
     }
 
-    // Free function / extern / re-export, module-aware (spec 5.x).
+    // Free function / extern / re-export, module-aware.
     if let Some(full) = ctx.resolve_fn_name(&segs) {
         ctx.check_item_visible(&full, "function");
         let sig = ctx.env.fn_table[&full].clone();
@@ -5826,7 +5814,7 @@ fn named_type_overload(
 /// over (`From<i32>`, `From<i8>`): the impl whose first parameter is
 /// the first argument's type. `None` when `method` is not overloaded
 /// that way.
-// ponytail: picks on the first argument only, by exact type; enough
+// Picks on the first argument only, by exact type; enough
 // for `From` / `TryFrom`. Method-call and operator overloads still
 // report the ambiguity.
 #[allow(clippy::too_many_arguments)]
@@ -5915,8 +5903,7 @@ fn call_overload(
 }
 
 /// An unsuffixed numeric literal's value, read off the AST.
-// ponytail: plain and negated literals only; `1 + 1` keeps its default
-// type. Fold constants here if that ever matters.
+// Plain and negated literals only: `1 + 1` keeps its default type.
 #[derive(Clone, Copy)]
 enum LitVal {
     Int(i128),
@@ -5963,7 +5950,7 @@ fn literal_fits(ctx: &LowerCtx<'_>, v: LitVal, ty: &HirTy) -> bool {
     }
 }
 
-/// Spec 3.1.3 "impl 고르기", for any trait impl chosen by an argument's
+/// Impl selection (spec 3.1.3) for any trait impl chosen by an argument's
 /// type (`a * 2`, `T::from(2)`, `T::try_from(-1)`, `2.into()`): when
 /// `lit` is an unsuffixed literal and `params` are the candidate impls'
 /// types for its slot, the index of the one it should take — its
@@ -6870,7 +6857,7 @@ pub(super) fn lower_infix(
     )
 }
 
-/// Spec 2.2.3 / 808 §8.8.9: an operator with an `any` operand switches
+/// Spec 2.2.3 / 808: an operator with an `any` operand switches
 /// on the tag over the primitive types that have the operator (both
 /// operands the same type, as for static primitive operators); a
 /// static operand fixes that type. Arithmetic results are boxed back
@@ -7181,8 +7168,8 @@ pub(super) fn dispatch_user_op_lit(
     // The impl must be of the trait that registered the operator: a
     // library operator needs the `rok::` trait, not a user trait that
     // happens to share its name.
-    // ponytail: matched by leaf name (+ `rok::` for library entries);
-    // record the defining module in OpEntry if user traits ever collide.
+    // Matched by leaf name (+ `rok::` for library entries); two user
+    // traits sharing a name would need the defining module in `OpEntry`.
     let from_lib = entry.from_lib;
     let is_op_trait = |t: &str| {
         (!from_lib || t.starts_with("rok::")) && t.rsplit("::").next() == Some(op_trait.as_str())
@@ -7424,14 +7411,21 @@ fn lower_assoc_const(
     let saved_self = std::mem::replace(&mut ctx.self_ty, Some(ty.clone()));
     let saved_uses = std::mem::replace(&mut ctx.local_uses, vec![Vec::new()]);
     let saved_scopes = std::mem::replace(&mut ctx.scopes, vec![HashMap::new()]);
-    let v = lower_expected(ctx, value, cty.clone());
-    let v = coerce(ctx, &cty, v, &|| format!("associated const `{name}`"));
+    let key = format!("{}::{name}", ctx.ty_name(ty));
+    let span = rokc_diagnostic::current_span();
+    let v = super::const_eval::guard(ctx, &key, span, |ctx| {
+        let v = lower_expected(ctx, value, cty.clone());
+        coerce(ctx, &cty, v, &|| format!("associated const `{name}`"))
+    });
     ctx.ty_subst = saved_subst;
     ctx.current_module = saved_module;
     ctx.self_ty = saved_self;
     ctx.local_uses = saved_uses;
     ctx.scopes = saved_scopes;
-    Some(v)
+    Some(v.map_or_else(
+        || poison(span),
+        |v| super::const_eval::const_item(ctx, &key, v),
+    ))
 }
 
 /// The name a type's associated consts are keyed under (`impl_consts`).
@@ -7582,11 +7576,19 @@ pub(super) fn lower_path(
         let saved_module = std::mem::replace(&mut ctx.current_module, module);
         let saved_uses = std::mem::replace(&mut ctx.local_uses, vec![Vec::new()]);
         let saved_scopes = std::mem::replace(&mut ctx.scopes, vec![HashMap::new()]);
-        let v = lower_expected(ctx, &value, ty.clone());
+        let Some(v) = super::const_eval::guard(ctx, &full, span, |ctx| {
+            lower_expected(ctx, &value, ty.clone())
+        }) else {
+            ctx.current_module = saved_module;
+            ctx.local_uses = saved_uses;
+            ctx.scopes = saved_scopes;
+            return poison(span);
+        };
         ctx.current_module = saved_module;
         ctx.local_uses = saved_uses;
         ctx.scopes = saved_scopes;
-        return coerce(ctx, &ty, v, &|| format!("const `{full}`"));
+        let v = coerce(ctx, &ty, v, &|| format!("const `{full}`"));
+        return super::const_eval::const_item(ctx, &full, v);
     }
     // Module-level `static` — a load through the global address.
     if let Some(full) = ctx.resolve_in(&segs, &ctx.env.statics) {
@@ -7613,7 +7615,7 @@ pub(super) fn lower_path(
         }
         return HirExpr {
             kind: HirExprKind::FnRef(sig.id),
-            // A named function captures nothing: Send + Sync (E3).
+            // A named function captures nothing: Send + Sync.
             ty: HirTy::Fn(sig.param_tys, Box::new(sig.ret_ty), {
                 // An `unsafe fn` / C function value keeps its unsafety.
                 let mut b = ctx.env.names.all_auto();
@@ -7774,7 +7776,7 @@ pub(super) fn lower_literal(
                 );
             };
             let value = if negate { -value } else { value };
-            // Spec E2: an unsuffixed integer in a float slot is that float
+            // An unsuffixed integer in a float slot is that float
             // (`a * 2` with `a: f64`, `let x: f64 = 1`), if exact.
             // An integer member of an expected sum wins (`i32 | f64`).
             if let Some(fty) = (!has_int_suffix(text)
@@ -7893,8 +7895,7 @@ pub(super) fn parse_char_literal(text: &str) -> Option<u32> {
     chars.next().is_none().then_some(c as u32)
 }
 
-/// Parse an integer literal. Bare (unsuffixed) integer literals fall
-/// back to `i32` — the most common integer type in rok programs.
+/// Parse an integer literal; an unsuffixed one defaults to `i32`.
 pub(super) fn parse_int_literal(text: &str) -> Option<(i128, PrimTy)> {
     const SUFFIXES: &[(&str, PrimTy)] = &[
         ("isize", PrimTy::Isize),
@@ -8137,7 +8138,9 @@ fn lower_magic(
         super::mono::unify_param_ty_with(ret, &expected, &names, &mut subst, ctx);
         ctx.explicit_generics = subst;
     }
-    lower_expected(ctx, &call, expected)
+    let mut h = lower_expected(ctx, &call, expected);
+    super::const_eval::fold_literal(ctx, &mut h, span);
+    h
 }
 
 /// An AST stand-in (a `#sN` path) for the already lowered `h`, so a

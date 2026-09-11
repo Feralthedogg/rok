@@ -16,7 +16,7 @@
 // -1
 // 77
 
-// Plain `any` = `any ()` (D4): tag + payload with no bound. Values of any
+// Plain `any` = `any ()`: tag + payload with no bound. Values of any
 // type go in and come back out by type pattern; small primitives stay
 // inline in the payload word, bigger values are boxed. `any Tr` widens
 // to `any` implicitly.

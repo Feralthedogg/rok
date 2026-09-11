@@ -1,9 +1,0 @@
-// spec: 004.01-item-uniqueness
-// probe: negative-must-fail
-// expect-exit: 0  (중복 함수 정의 → 에러 (이전: mlir 심볼 재정의).)
-// expect-error: function `f` is defined more than once
-
-fn f() -> i32 { return 1; }
-fn f() -> i32 { return 2; }
-
-fn main() -> i32 { return f(); }

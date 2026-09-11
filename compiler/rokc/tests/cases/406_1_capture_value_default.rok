@@ -1,0 +1,15 @@
+// spec: 004.06.1-capture-value-default
+// expect-exit: 0
+// expect-stdout:
+// 1
+
+// spec 4.6.1: captures copy by value: the closure snapshots count = 0, so
+// setting count to 10 afterwards still gives 0 + 1 = 1.
+fn main() -> i32 {
+    let count = 0;
+    let f = || { count + 1 };
+    let _ = count;
+    let r = f();
+    println(f"{r}");
+    return 0;
+}

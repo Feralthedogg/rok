@@ -1,0 +1,11 @@
+// spec: 001.10.3-broadcast-rem
+// expect-error: operator `.%` cannot be applied to `i32`
+
+// `.%` is a fixed token; arithmetic needs a `DotRem` impl, which the
+// library does not register for primitives.
+fn main() -> i32 {
+    let a = 7;
+    let b = 3;
+    let c = a .% b;
+    return 0;
+}

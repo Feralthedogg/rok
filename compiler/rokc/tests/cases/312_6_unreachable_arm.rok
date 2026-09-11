@@ -1,0 +1,12 @@
+// spec: 003.12.6-unreachable-arm
+// expect-error: [type]
+
+// spec 3.12.6: an arm after a catch-all is unreachable, a compile error.
+fn main() -> i32 {
+    let n = 1;
+    let r = match n {
+        _ => 0,
+        1 => 1,    // ERROR: the `_` above always matches
+    };
+    return r;
+}

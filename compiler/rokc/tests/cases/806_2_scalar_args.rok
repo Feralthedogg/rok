@@ -1,0 +1,29 @@
+// spec: 008.06-calling-convention §8.6.1-8.6.2
+// expect-exit: 0
+// expect-stdout:
+// 1024
+// 5
+// 12
+// 9000000000
+// 3.5
+
+// spec 8.6.1/8.6.2: rok scalars cross `extern "C"` with the platform C
+// ABI — f64 and i32 mixed in registers, i64 not truncated.
+extern "C" {
+    fn pow(x: f64, y: f64) -> f64;
+    fn hypot(x: f64, y: f64) -> f64;
+    fn ldexp(x: f64, e: i32) -> f64;
+    fn llabs(x: i64) -> i64;
+    fn fmax(a: f64, b: f64) -> f64;
+}
+
+fn main() -> i32 {
+    unsafe {
+        println(f"{pow(2.0, 10.0)}");
+        println(f"{hypot(3.0, 4.0)}");
+        println(f"{ldexp(1.5, 3)}");
+        println(f"{llabs(-9000000000i64)}");
+        println(f"{fmax(-1.0, 3.5)}");
+    }
+    return 0;
+}

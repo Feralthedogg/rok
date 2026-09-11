@@ -1,0 +1,12 @@
+// spec: 005.06-visibility
+// Using a private type path from outside is an error.
+// expect-error: type `a::Hidden` is private to module `a`
+
+mod a {
+    struct Hidden { x: i32; }
+    pub fn f() -> i32 { return 2; }
+}
+
+fn g(h: a::Hidden) -> i32 { return 1; }
+
+fn main() -> i32 { return a::f(); }

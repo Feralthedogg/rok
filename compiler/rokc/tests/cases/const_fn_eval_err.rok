@@ -1,0 +1,48 @@
+// Spec 5.2.4 / 5.2.5: a const value must evaluate at compile time.
+// Overflow, a call to a non-`const` fn, a const defined through
+// itself and runaway recursion / loops are compile errors, even for a
+// const nothing uses.
+// expect-error: const `BIG` cannot be evaluated at compile time: attempt to multiply with overflow
+// expect-error: const `RT` cannot be evaluated at compile time: calls `plain`, which is not a `const fn`
+// expect-error: const `A` is defined in terms of itself
+// expect-error: const `DEEP` cannot be evaluated at compile time: evaluation exceeds the call depth limit
+// expect-error: const `SPIN` cannot be evaluated at compile time: evaluation exceeds the step limit
+// expect-error: const `DIV` cannot be evaluated at compile time: attempt to divide by zero
+// expect-error: array length must be a compile-time integer (spec 2.11.5): attempt to multiply with overflow
+const fn sq(x: i32) -> i32 {
+    x * x
+}
+
+fn plain() -> i32 {
+    3
+}
+
+const fn forever(n: i32) -> i32 {
+    forever(n + 1)
+}
+
+const fn spin() -> i32 {
+    let i = 0;
+    while true {
+        i = i + 1;
+        i = i - 1;
+    }
+    i
+}
+
+const fn ratio(a: i32, b: i32) -> i32 {
+    a / b
+}
+
+const BIG: i32 = sq(100000);
+const RT: i32 = plain() + 1;
+const A: i32 = B + 1;
+const B: i32 = A + 1;
+const DEEP: i32 = forever(0);
+const SPIN: i32 = spin();
+const DIV: i32 = ratio(1, 0);
+
+fn main() -> i32 {
+    let xs: [i32; sq(70000) as usize] = [0; 4];
+    return xs[0];
+}

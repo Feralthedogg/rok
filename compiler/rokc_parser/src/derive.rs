@@ -5,8 +5,7 @@
 //! attribute's span, so diagnostics point at `#[derive(..)]`. That every
 //! field implements the trait is checked in HIR (`check_derives`).
 
-// Source text is built by formatting; the generator closures take
-// generator closures.
+// Impl source is built by `format!`; generators take generator closures.
 #![allow(clippy::format_collect, clippy::type_complexity)]
 
 use rokc_ast::{

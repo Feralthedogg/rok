@@ -1,13 +1,11 @@
-//! `rokc` — the rok compiler binary (spec 901). Arguments are parsed by
-//! hand: the workspace takes no external crates (targets.md).
+//! `rokc`: the rok compiler (spec 901). Arguments are parsed by hand: the
+//! workspace takes no external crates (targets.md).
 //!
 //! Exit codes (901.6): 0 ok, 1 user error (compile error / failed test),
-//! 2 usage error, 101 rokc internal error. `run` exits with the
-//! program's own code.
+//! 2 usage error, 101 internal error. `run` exits with the program's own
+//! code.
 
 mod bench_runner;
-mod fresh;
-mod package;
 mod test_runner;
 
 use std::io::IsTerminal;
@@ -15,8 +13,10 @@ use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::time::Instant;
 
-use package::Package;
-use rokc_interface::{BuildOptions, CompileResult, EmitKind, Session, TempDir, report};
+use rokc_interface::{
+    BuildOptions, CompileResult, DepBuild, EmitKind, Fingerprint, Package, Session, TempDir,
+    print_rendered, render, report,
+};
 use rokc_tools::lint::Level;
 
 const USAGE: &str = "\
@@ -32,7 +32,9 @@ commands:
                          with ^ $ . * + ?, or a substring)
   bench [path] [filter]  build (-O2 unless -O given) and time the `#[bench]`
                          functions; prints ns/iter (+/- deviation)
-  check [path | -]       diagnose only, no native build (`-`: source on stdin)
+  check [path | -]       front end, lints and codegen, no native build
+                         (`-`: source on stdin)
+  lint [path]            front end and lints; exit 1 if a `deny` lint fires
   repl [--replay] [--package <path>]
                          interactive session on LLVM's ORC JIT (needs
                          libLLVM; :type <expr>, :reset, :quit);
@@ -40,19 +42,11 @@ commands:
                          --package loads a library package and `use`s it
   lsp                    language server on stdio (`rok lsp` / `rokls` run it)
   jupyter --connection-file <file>
-                         Jupyter kernel (Jupyter starts it; the REPL engine)
-  jupyter --install-kernel [--user]
-                         write the `rok` kernelspec (kernel.json) into
-                         $JUPYTER_DATA_DIR, else ~/Library/Jupyter (macOS) /
-                         ~/.local/share/jupyter; `rok jupyter install` makes
-                         one that starts the kernel through `rok`
+                         Jupyter kernel (Jupyter starts it; `rok jupyter
+                         install` writes its kernelspec)
   fmt [path]             format .rok / .rokon files in place (file or directory)
-  lint [path]            compile diagnostics plus lint checks (no native
-                         build); exit 1 if a `deny` lint fires
   doc [path]             HTML API docs of the package (and its --extern
                          dependencies) in target/doc/
-  new [--lib|--bin] <name>  create a package directory
-  init [--lib|--bin] [dir]  make an existing directory a package
   clean [path]           remove the package's target/
   demangle <symbol>...   decode `_Y` symbols
   rhir-text <file>       dump a prebuilt library's RHIR (<name>.rhir or
@@ -73,6 +67,9 @@ global options:
   --color=auto|always|never    color diagnostics (--no-color = never)
   --cwd=<path>                 change directory first
   --message-format=human|json  diagnostics as JSON lines on stdout
+  -A|-W|-D <lint|group>        allow / warn / deny a lint (repeatable, later
+                               wins; `#[allow(..)]` etc. in the source
+                               override); check, lint and lsp
 
 build options:
   -o, --out, --output <path>   output file
@@ -99,22 +96,25 @@ build options:
                                $ROK_HOME/lib/rok/{core,std,bare}/lib.rok)
   --rokr <lib>                 runtime library: path, or name for -l<name>
                                (default: $ROK_HOME/lib/librokr.a, else -lrokr)
-  --extern <name>=<path>       dependency package (its directory or
-                               `lib.rok`, or a prebuilt <name>.rhir /
-                               lib<name>.a), importable as `use name::..`
-                               (repeatable; `rok` passes these)
+  --extern <name>=<path>       dependency package: its directory or `lib.rok`
+                               (prebuilt into target/<profile>/deps/ first,
+                               each after the ones before it), or a prebuilt
+                               <name>.rhir / lib<name>.a; importable as
+                               `use name::..` (repeatable; `rok` passes these)
   --name <name>                a library's package name (default: its
                                directory's); it is in the library's symbols
-  --target-dir <dir>           instead of the package's target/
+  --target-dir <dir>           instead of the package's target/ (without a
+                               package: the system temp directory's
+                               rokc-target/)
   -g, --debug                  DWARF debug info (macOS: a .dSYM next to the
                                executable)
   --keep                       keep the temporary build directory
 
+check options:  --check-library (check every library body, reached or not)
 test options:   --threads=N, --show-output
 bench options:  --iters=N (calls per sample; default: calibrated to ~10ms),
                 --samples=N (timed samples, default 10)
-lint options:   -A|-W|-D <lint|group> (allow / warn / deny; repeatable, later
-                wins; `#[allow(..)]` etc. in the source override), --list
+lint options:   --list
 fmt options:    --check (exit 1 if a file would change), --diff
 
 environment:
@@ -147,8 +147,8 @@ struct Args {
     quiet: bool,
     json: bool,
     color: Option<bool>,
-    lib: bool,
     check: bool,
+    check_library: bool,
     diff: bool,
     threads: Option<usize>,
     show_output: bool,
@@ -160,10 +160,6 @@ struct Args {
     package: Option<PathBuf>,
     /// `jupyter --connection-file`.
     connection_file: Option<PathBuf>,
-    /// `jupyter --install-kernel` (`--user` is the default, accepted).
-    install_kernel: bool,
-    /// `jupyter --install-kernel --env <name>` (from `rok --env`).
-    env: Option<String>,
     iters: Option<u64>,
     samples: Option<u64>,
     /// An `-O` level or `--release` was given.
@@ -220,7 +216,7 @@ fn parse_args(raw: Vec<String>) -> Args {
             "--message-format" => {
                 a.json = match value(&name, inline, &mut it).as_str() {
                     "json" => true,
-                    "human" | "short" => false,
+                    "human" => false,
                     v => usage_error(&format!("unknown message format `{v}`")),
                 };
             }
@@ -242,8 +238,7 @@ fn parse_args(raw: Vec<String>) -> Args {
                 }
             }
             "--mlir-pass" => a.opts.mlir_passes.push(value(&name, inline, &mut it)),
-            // `--stage` is the pre-901 spelling of `--emit`.
-            "--emit" | "--stage" => {
+            "--emit" => {
                 for k in value(&name, inline, &mut it).split(',') {
                     a.emit.push(
                         EmitKind::parse(k)
@@ -269,9 +264,8 @@ fn parse_args(raw: Vec<String>) -> Args {
             }
             "--keep" => a.opts.keep_temps = true,
             "-g" | "--debug" => a.opts.debug = true,
-            "--lib" => a.lib = true,
-            "--bin" => a.lib = false,
             "--check" => a.check = true,
+            "--check-library" => a.check_library = true,
             "--diff" => a.diff = true,
             "--show-output" => a.show_output = true,
             "--list" => a.list = true,
@@ -280,15 +274,8 @@ fn parse_args(raw: Vec<String>) -> Args {
             "--connection-file" => {
                 a.connection_file = Some(value(&name, inline, &mut it).into());
             }
-            "--install-kernel" => a.install_kernel = true,
-            "--user" => {}
-            "--env" => a.env = Some(value(&name, inline, &mut it)),
             "-A" | "-W" | "-D" | "--allow" | "--warn" | "--deny" => {
-                let lvl = match name.as_str() {
-                    "-A" | "--allow" => Level::Allow,
-                    "-W" | "--warn" => Level::Warn,
-                    _ => Level::Deny,
-                };
+                let lvl = Level::from_flag(&name).expect("a lint level flag");
                 a.lint_levels.push((lvl, value(&name, inline, &mut it)));
             }
             "--iters" | "--samples" => {
@@ -335,8 +322,8 @@ fn parse_args(raw: Vec<String>) -> Args {
 }
 
 /// `--extern name=path` (spec 902.3). The path is the dependency's
-/// package directory or its `lib.rok` (compiled from source with the
-/// package), or a prebuilt `<name>.rhir` / `lib<name>.a` (spec 904).
+/// package directory or its `lib.rok`, or a prebuilt `<name>.rhir` /
+/// `lib<name>.a` (spec 904).
 fn parse_extern(v: &str) -> (String, PathBuf) {
     let Some((name, path)) = v.split_once('=') else {
         usage_error(&format!("`--extern {v}`: expected <name>=<path>"));
@@ -379,93 +366,58 @@ fn main() {
     });
     rokc_interface::set_report_style(a.json, color);
     match a.cmd.as_str() {
-        "build" => cmd_build(&with_defaults(a)),
+        "build" => cmd_build(with_defaults(a)),
         "emit" => {
             let mut a = with_defaults(a);
             if a.emit.is_empty() {
                 a.emit.push(EmitKind::Mlir);
             }
-            cmd_build(&a);
+            cmd_build(a);
         }
-        "check" => {
-            let a = with_defaults(a);
-            // `check -`: the source is stdin (901.9), an anonymous package.
-            let pkg = if a.positional.first().is_some_and(|p| p == "-") {
-                Package::stdin()
-            } else {
-                discover_arg(&a)
-            };
-            let (result, _) = compile(&a, &pkg, Mode::Build);
-            // Codegen too: it rejects constructs the backend cannot lower.
-            fail_on(result.emit(EmitKind::Mlir, &a.opts));
-        }
+        "check" => cmd_check(with_defaults(a), true),
+        "lint" if a.list => print!("{}", rokc_tools::lint::list()),
+        "lint" => cmd_check(with_defaults(a), false),
         "lsp" => {
-            let a = with_defaults(a);
+            let mut a = with_defaults(a);
+            let pkg = rokc_interface::discover(Path::new(".")).ok();
+            // The server starts without the dependencies it cannot build.
+            if let Err(e) = prebuild(&mut a, pkg.as_ref()) {
+                eprintln!("rokc: warning: {e}");
+                a.externs.clear();
+            }
             let io = (
                 std::io::BufReader::new(std::io::stdin()),
                 std::io::stdout().lock(),
             );
-            process::exit(rokc_tools::lsp::serve(io.0, io.1, a.bootstrap, a.externs));
-        }
-        "repl" => {
-            let mut a = with_defaults(a);
-            // `--package` (901.2): the library is a dependency of the
-            // session, and its first cell is `use <name>::*;`.
-            let prelude = a.package.clone().map(|p| {
-                let pkg = package::discover(&p).unwrap_or_else(|e| fail(&e));
-                if !pkg.lib {
-                    fail(&format!(
-                        "`--package {}`: not a library package (no `lib.rok`)",
-                        p.display()
-                    ));
-                }
-                let name = lib_name(&a, &pkg);
-                a.externs.push((name.clone(), pkg.root));
-                format!("use {name}::*;")
-            });
-            let tty = std::io::stdin().is_terminal();
-            process::exit(rokc_tools::repl::main(
+            process::exit(rokc_tools::lsp::serve(
+                io.0,
+                io.1,
                 a.bootstrap,
                 a.externs,
-                a.opts,
-                tty,
-                a.replay,
-                prelude.as_deref(),
+                a.lint_levels,
             ));
         }
-        "jupyter" => cmd_jupyter(with_defaults(a)),
-        "run" => cmd_run(&with_defaults(a)),
-        "test" => cmd_test(&with_defaults(a)),
+        "repl" => cmd_repl(with_defaults(a)),
+        "jupyter" => {
+            let mut a = with_defaults(a);
+            let Some(file) = a.connection_file.take() else {
+                usage_error("usage: rokc jupyter --connection-file <file>");
+            };
+            let pkg = rokc_interface::discover(Path::new(".")).ok();
+            let deps = prebuild(&mut a, pkg.as_ref()).unwrap_or_else(|e| fail(&e));
+            process::exit(rokc_tools::jupyter::serve(
+                &file,
+                a.bootstrap,
+                a.externs,
+                deps,
+                a.opts,
+            ));
+        }
+        "run" => cmd_run(with_defaults(a)),
+        "test" => cmd_test(with_defaults(a)),
         "bench" => cmd_bench(with_defaults(a)),
-        "lint" => cmd_lint(&with_defaults(a)),
-        "doc" => cmd_doc(&with_defaults(a)),
+        "doc" => cmd_doc(with_defaults(a)),
         "fmt" => cmd_fmt(&a),
-        "new" => {
-            let [name] = a.positional.as_slice() else {
-                usage_error("usage: rokc new [--lib | --bin] <name>");
-            };
-            let root =
-                package::new_package(Path::new(name), a.lib, false).unwrap_or_else(|e| fail(&e));
-            if !a.quiet {
-                eprintln!(
-                    "     Created {} package `{name}` ({})",
-                    if a.lib { "library" } else { "executable" },
-                    root.display()
-                );
-            }
-        }
-        "init" => {
-            let dir = match a.positional.as_slice() {
-                [] => ".",
-                [d] => d.as_str(),
-                _ => usage_error("usage: rokc init [--lib | --bin] [dir]"),
-            };
-            let root =
-                package::new_package(Path::new(dir), a.lib, true).unwrap_or_else(|e| fail(&e));
-            if !a.quiet {
-                eprintln!("     Created package ({})", root.display());
-            }
-        }
         "clean" => {
             let pkg = discover_arg(&a);
             let target = a.target_dir.clone().unwrap_or_else(|| pkg.target_dir());
@@ -499,45 +451,6 @@ fn main() {
     }
 }
 
-/// `jupyter`: run the kernel, or install its kernelspec. Started by
-/// `rok` (`$ROK` set), the kernel goes through `rok` so it gets the
-/// dependencies of the notebook's project or of `--env`.
-fn cmd_jupyter(a: Args) {
-    if !a.install_kernel {
-        let Some(file) = &a.connection_file else {
-            usage_error("usage: rokc jupyter --connection-file <file> | --install-kernel");
-        };
-        process::exit(rokc_tools::jupyter::serve(
-            file,
-            a.bootstrap,
-            a.externs,
-            a.opts,
-        ));
-    }
-    let exe = |p: Option<std::ffi::OsString>| {
-        p.map(PathBuf::from)
-            .or_else(|| std::env::current_exe().ok())
-            .map_or_else(
-                || fail("cannot find the kernel executable"),
-                |p| p.display().to_string(),
-            )
-    };
-    let mut argv = vec![exe(std::env::var_os("ROK").filter(|r| !r.is_empty()))];
-    if let Some(e) = &a.env {
-        argv.extend(["--env".to_owned(), e.clone()]);
-    }
-    argv.extend(["jupyter", "--connection-file", "{connection_file}"].map(str::to_owned));
-    let (name, display) = match &a.env {
-        Some(e) => (format!("rok-{e}"), format!("rok ({e})")),
-        None => ("rok".to_owned(), "rok".to_owned()),
-    };
-    match rokc_tools::jupyter::install(&name, &display, &argv) {
-        Ok(file) if !a.quiet => eprintln!("   Installed kernel `{name}` ({})", file.display()),
-        Ok(_) => {}
-        Err(e) => fail(&e),
-    }
-}
-
 /// The implicit `use rok::core::**;` (spec 0.0.5) needs `rok/core`,
 /// and linking needs `librokr.a`; find both without flags.
 fn with_defaults(mut a: Args) -> Args {
@@ -563,7 +476,7 @@ fn with_defaults(mut a: Args) -> Args {
 /// The package named by the first positional (default: `.`).
 fn discover_arg(a: &Args) -> Package {
     let path = a.positional.first().map_or(".", String::as_str);
-    package::discover(Path::new(path)).unwrap_or_else(|e| fail(&e))
+    rokc_interface::discover(Path::new(path)).unwrap_or_else(|e| fail(&e))
 }
 
 fn create_dir(dir: &Path) {
@@ -572,30 +485,34 @@ fn create_dir(dir: &Path) {
     }
 }
 
+/// Prebuild the source `--extern`s into `<out dir>/deps` and use their
+/// RHIRs; the deps directory.
+fn prebuild(a: &mut Args, pkg: Option<&Package>) -> Result<PathBuf, String> {
+    let dir = out_dir(a, pkg).join("deps");
+    let build = DepBuild {
+        bootstrap: &a.bootstrap,
+        cfg: &a.cfg,
+        opts: &a.opts,
+        target: a.target.as_deref(),
+        dir: &dir,
+        quiet: a.quiet,
+    };
+    a.externs = build.prebuild(&a.externs)?;
+    Ok(dir)
+}
+
 /// What `compile` builds for.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Build,
     Test,
     Bench,
-    /// Front end only, ASTs kept; warnings left to the caller.
-    Lint,
     /// Front end only, ASTs kept.
     Doc,
 }
 
-/// Front end for `pkg`; exits 1 on errors. Prints the 901.8 progress
-/// line unless `-q`.
-fn compile(a: &Args, pkg: &Package, mode: Mode) -> (CompileResult, Instant) {
-    let started = Instant::now();
-    if !a.quiet {
-        let verb = match mode {
-            Mode::Lint => "     Linting",
-            Mode::Doc => " Documenting",
-            _ => "   Compiling",
-        };
-        eprintln!("{verb} {} ({})", pkg.name, pkg.dir.display());
-    }
+/// A session for `pkg` with the command line's libraries and flags.
+fn session(a: &Args, pkg: &Package) -> Session {
     let mut session = Session::new();
     for b in &a.bootstrap {
         session.add_bootstrap_file(b.clone());
@@ -608,6 +525,30 @@ fn compile(a: &Args, pkg: &Package, mode: Mode) -> (CompileResult, Instant) {
     }
     session.set_anonymous(pkg.anonymous);
     session.set_target(a.target.as_deref());
+    session
+}
+
+fn progress(a: &Args, verb: &str, pkg: &Package) {
+    if !a.quiet {
+        eprintln!("{verb:>12} {} ({})", pkg.name, pkg.dir.display());
+    }
+}
+
+/// Front end for `pkg` (its dependencies prebuilt); reports the warnings
+/// (also returned, rendered) and exits 1 on errors. Prints the 901.8
+/// progress line unless `-q`.
+fn compile(a: &Args, pkg: &Package, mode: Mode) -> (CompileResult, String, Instant) {
+    let started = Instant::now();
+    progress(
+        a,
+        if mode == Mode::Doc {
+            "Documenting"
+        } else {
+            "Compiling"
+        },
+        pkg,
+    );
+    let mut session = session(a, pkg);
     // A library's `build` is a prebuilt library: `lib<name>.a` + RHIR.
     if pkg.lib && matches!(a.cmd.as_str(), "build" | "emit") {
         session.set_lib_name(Some(lib_name(a, pkg)));
@@ -615,28 +556,20 @@ fn compile(a: &Args, pkg: &Package, mode: Mode) -> (CompileResult, Instant) {
     session.set_test(mode == Mode::Test);
     session.set_bench(mode == Mode::Bench);
     session.set_keep_ast(
-        matches!(mode, Mode::Lint | Mode::Doc)
+        mode == Mode::Doc
             || a.emit.contains(&EmitKind::Expanded)
             || a.emit.contains(&EmitKind::Ast),
     );
-    let result = if pkg.root == Path::new(package::STDIN) {
-        let mut src = String::new();
-        if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut src) {
-            fail(&format!("cannot read stdin: {e}"));
-        }
-        session.compile_source(&src, &pkg.root)
-    } else {
-        session.compile_file(&pkg.root)
-    };
-    if mode != Mode::Lint || result.has_errors() {
-        result.warnings.iter().for_each(report);
-    }
+    rokc_interface::clear_files();
+    let result = session.compile_file(&pkg.root);
+    let warnings: String = result.warnings.iter().map(render).collect();
+    print_rendered(&warnings);
     if result.has_errors() {
         result.report_errors();
         process::exit(1);
     }
     stage(a, "front end", started);
-    (result, started)
+    (result, warnings, started)
 }
 
 /// A library's package name: `--name`, else its directory's (made an
@@ -676,10 +609,16 @@ fn fail_on<T>(r: Result<T, rokc_interface::RokDiagnostic>) -> T {
     })
 }
 
-/// Cargo-like output directory: `target/[<triple>/]<profile>/`, the
-/// profile `release` at `-O2` and above or `-Os`, else `debug`.
-fn out_dir(a: &Args, pkg: &Package) -> PathBuf {
-    let mut dir = a.target_dir.clone().unwrap_or_else(|| pkg.target_dir());
+/// Cargo-like output directory: `<target>/[<triple>/]<profile>/`, the
+/// profile `release` at `-O2` and above or `-Os`, else `debug`. Without a
+/// package, `<target>` is the system temp directory's `rokc-target/`.
+fn out_dir(a: &Args, pkg: Option<&Package>) -> PathBuf {
+    let mut dir = a
+        .target_dir
+        .clone()
+        .or_else(|| pkg.map(Package::target_dir))
+        .or_else(|| std::env::var_os("ROKC_TARGET_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| std::env::temp_dir().join("rokc-target"));
     if let Some(t) = &a.target {
         dir.push(t);
     }
@@ -688,13 +627,14 @@ fn out_dir(a: &Args, pkg: &Package) -> PathBuf {
 }
 
 /// Layout: `target/<profile>/<name>` (executable),
-/// `target/<profile>/lib<name>.a` + `<name>.o` (library),
+/// `target/<profile>/lib<name>.a` + `<name>.rhir` (library),
 /// `target/<profile>/build/<name>.<ext>` (`--emit`).
-fn cmd_build(a: &Args) {
-    let pkg = discover_arg(a);
-    let target = out_dir(a, &pkg);
+fn cmd_build(mut a: Args) {
+    let pkg = discover_arg(&a);
+    prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
+    let target = out_dir(&a, Some(&pkg));
     if !a.emit.is_empty() {
-        let (result, started) = compile(a, &pkg, Mode::Build);
+        let (result, _, started) = compile(&a, &pkg, Mode::Build);
         if a.output.is_some() && a.emit.len() > 1 {
             usage_error("`-o` with several `--emit` kinds");
         }
@@ -709,51 +649,61 @@ fn cmd_build(a: &Args) {
             if let Err(e) = std::fs::write(&out, bytes) {
                 fail(&format!("cannot write {}: {e}", out.display()));
             }
-            stage(a, &format!("emit {}", kind.extension()), t);
+            stage(&a, &format!("emit {}", kind.extension()), t);
             if !a.quiet {
                 eprintln!("       Wrote {}", out.display());
             }
         }
-        finished(a, started);
+        finished(&a, started);
         return;
     }
     let out = a.output.clone().unwrap_or_else(|| {
         create_dir(&target);
         target.join(if pkg.lib {
-            format!("lib{}.a", lib_name(a, &pkg))
+            format!("lib{}.a", lib_name(&a, &pkg))
         } else {
             pkg.name.clone()
         })
     });
-    let fp = fingerprint(a, &pkg, &out);
-    if skip_fresh(a, &pkg, &fp) {
+    build_fresh(&a, &pkg, &out, |a, result| {
+        if !a.quiet {
+            eprintln!("    Building {}", out.display());
+        }
+        if pkg.lib {
+            fail_on(result.archive(&a.opts, &out));
+        } else {
+            fail_on(result.link(&a.opts, &out));
+        }
+    });
+}
+
+/// Build `pkg` into `out` with `link` unless the record says it is up to
+/// date (then its warnings are printed again).
+fn build_fresh(a: &Args, pkg: &Package, out: &Path, link: impl FnOnce(&Args, &CompileResult)) {
+    let fp = fingerprint(a, pkg, out);
+    if let Some(warnings) = fp.fresh() {
+        print_rendered(&warnings);
+        if !a.quiet {
+            eprintln!("       Fresh {} ({})", pkg.name, pkg.dir.display());
+        }
         return;
     }
-    let (result, started) = compile(a, &pkg, Mode::Build);
+    fp.clear();
+    let (result, warnings, started) = compile(a, pkg, Mode::Build);
     let t = Instant::now();
-    if !a.quiet {
-        eprintln!("    Building {}", out.display());
-    }
-    if pkg.lib {
-        fail_on(result.archive(&a.opts, &out));
-    } else {
-        fail_on(result.link(&a.opts, &out));
-    }
-    if result.warnings.is_empty() {
-        fp.save();
-    }
+    link(a, &result);
+    fp.save(&warnings);
     stage(a, "codegen + link", t);
     finished(a, started);
 }
 
-/// The incremental-build key of `pkg` built into `out` (see `fresh`).
-fn fingerprint(a: &Args, pkg: &Package, out: &Path) -> fresh::Fingerprint {
+/// The incremental-build key of `pkg` built into `out` (see `Fingerprint`).
+fn fingerprint(a: &Args, pkg: &Package, out: &Path) -> Fingerprint {
     let mut words = vec![
         format!("{:?}", a.opts),
         out.display().to_string(),
         pkg.root.display().to_string(),
         std::env::var("PATH").unwrap_or_default(),
-        std::env::var("ROK_EAGER_LIBRARY").unwrap_or_default(),
     ];
     words.extend(a.cfg.iter().cloned());
     words.extend(pkg.lib.then(|| lib_name(a, pkg)));
@@ -762,8 +712,7 @@ fn fingerprint(a: &Args, pkg: &Package, out: &Path) -> fresh::Fingerprint {
     } else {
         pkg.dir.clone()
     }];
-    let mut stamped: Vec<PathBuf> = std::env::current_exe().into_iter().collect();
-    stamped.push(PathBuf::from(&a.opts.rokr));
+    let mut stamped = vec![PathBuf::from(&a.opts.rokr)];
     stamped.extend(a.opts.mlir_dialect_plugins.iter().cloned());
     stamped.extend(a.opts.mlir_pass_plugins.iter().cloned());
     for b in &a.bootstrap {
@@ -772,43 +721,101 @@ fn fingerprint(a: &Args, pkg: &Package, out: &Path) -> fresh::Fingerprint {
     }
     for (n, p) in &a.externs {
         words.push(format!("{n}={}", p.display()));
-        if p.extension().is_some_and(|e| e == "rhir") {
-            let (rhir, archive) = rokc_interface::rhir::companions(p);
-            inputs.push(rhir);
-            stamped.push(archive);
-        } else {
-            inputs.push(p.parent().map_or_else(|| p.clone(), Path::to_path_buf));
-        }
+        let (rhir, archive) = rokc_interface::rhir::companions(p);
+        inputs.push(rhir);
+        stamped.push(archive);
     }
     let also = if pkg.lib {
         vec![rokc_interface::rhir::companions(out).0]
     } else {
         Vec::new()
     };
-    fresh::Fingerprint::new(out, also, &words, &inputs, &stamped)
+    Fingerprint::new(out, also, &words, &inputs, &stamped)
 }
 
-/// `true` (after saying so) when `fp`'s output is up to date; else
-/// forget the old record, so a failed build leaves none.
-fn skip_fresh(a: &Args, pkg: &Package, fp: &fresh::Fingerprint) -> bool {
-    if fp.fresh() {
-        if !a.quiet {
-            eprintln!("       Fresh {} ({})", pkg.name, pkg.dir.display());
+/// `rokc check` (with codegen) and `rokc lint` (without): the check
+/// pipeline over the package; exit 1 on an error or a `deny` lint.
+fn cmd_check(mut a: Args, codegen: bool) {
+    // `check -`: the source is stdin (901.9), an anonymous package.
+    let stdin = a.positional.first().is_some_and(|p| p == "-");
+    let pkg = if stdin {
+        Package::stdin()
+    } else {
+        discover_arg(&a)
+    };
+    prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
+    let started = Instant::now();
+    progress(&a, "Checking", &pkg);
+    let source = stdin.then(|| {
+        let mut src = String::new();
+        if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut src) {
+            fail(&format!("cannot read stdin: {e}"));
         }
-        return true;
+        src
+    });
+    let mut session = session(&a, &pkg);
+    session.set_check_library(a.check_library);
+    rokc_interface::clear_files();
+    let (_, diags) = rokc_tools::analysis::check(
+        &mut session,
+        source.as_deref(),
+        &pkg.root,
+        &a.lint_levels,
+        codegen.then_some(&a.opts),
+    );
+    diags.iter().for_each(report);
+    let errors = diags.iter().filter(|d| d.is_error()).count();
+    let warnings = diags.len() - errors;
+    if !a.quiet && !a.json {
+        eprintln!(
+            "     Checked {}: {errors} error{}, {warnings} warning{}",
+            pkg.name,
+            if errors == 1 { "" } else { "s" },
+            if warnings == 1 { "" } else { "s" },
+        );
     }
-    fp.clear();
-    false
+    finished(&a, started);
+    process::exit(i32::from(errors > 0));
 }
 
-fn cmd_run(a: &Args) {
-    let pkg = discover_arg(a);
+fn cmd_repl(mut a: Args) {
+    // `--package` (901.2): the library is a dependency of the session,
+    // and its first cell is `use <name>::*;`.
+    let prelude = a.package.clone().map(|p| {
+        let pkg = rokc_interface::discover(&p).unwrap_or_else(|e| fail(&e));
+        if !pkg.lib {
+            fail(&format!(
+                "`--package {}`: not a library package (no `lib.rok`)",
+                p.display()
+            ));
+        }
+        let name = lib_name(&a, &pkg);
+        a.externs.push((name.clone(), pkg.root));
+        format!("use {name}::*;")
+    });
+    let pkg = rokc_interface::discover(Path::new(".")).ok();
+    let deps = prebuild(&mut a, pkg.as_ref()).unwrap_or_else(|e| fail(&e));
+    let tty = std::io::stdin().is_terminal();
+    process::exit(rokc_tools::repl::main(
+        a.bootstrap,
+        a.externs,
+        deps,
+        a.opts,
+        tty,
+        a.replay,
+        prelude.as_deref(),
+    ));
+}
+
+fn cmd_run(mut a: Args) {
+    let pkg = discover_arg(&a);
     if pkg.lib {
         fail(&format!(
             "`{}` is a library package (`lib.rok`); there is nothing to run",
             pkg.dir.display()
         ));
     }
+    prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
     // An anonymous file builds in a scratch directory (no `target/` next
     // to a loose script); a package builds into its `target/`.
     let tmp = fail_on(TempDir::new(a.opts.keep_temps));
@@ -816,21 +823,20 @@ fn cmd_run(a: &Args) {
         Some(o) => o.clone(),
         None if pkg.anonymous => tmp.path().join(&pkg.name),
         None => {
-            let target = out_dir(a, &pkg);
+            let target = out_dir(&a, Some(&pkg));
             create_dir(&target);
             target.join(&pkg.name)
         }
     };
-    let fp = (a.output.is_some() || !pkg.anonymous).then(|| fingerprint(a, &pkg, &exe));
-    if !fp.as_ref().is_some_and(|fp| skip_fresh(a, &pkg, fp)) {
-        let (result, started) = compile(a, &pkg, Mode::Build);
+    let link = |a: &Args, result: &CompileResult| fail_on(result.link(&a.opts, &exe));
+    if a.output.is_some() || !pkg.anonymous {
+        build_fresh(&a, &pkg, &exe, link);
+    } else {
+        let (result, _, started) = compile(&a, &pkg, Mode::Build);
         let t = Instant::now();
-        fail_on(result.link(&a.opts, &exe));
-        if result.warnings.is_empty() {
-            fp.iter().for_each(fresh::Fingerprint::save);
-        }
-        stage(a, "codegen + link", t);
-        finished(a, started);
+        link(&a, &result);
+        stage(&a, "codegen + link", t);
+        finished(&a, started);
     }
     if !a.quiet {
         eprintln!("     Running `{}`", exe.display());
@@ -860,16 +866,18 @@ fn path_and_filter(a: &Args) -> (&str, Option<&str>) {
 }
 
 /// `rokc test [path] [filter]`.
-fn cmd_test(a: &Args) {
-    let (path, filter) = path_and_filter(a);
-    let pkg = package::discover(Path::new(path)).unwrap_or_else(|e| fail(&e));
-    let (result, started) = compile(a, &pkg, Mode::Test);
+fn cmd_test(mut a: Args) {
+    let (path, filter) = path_and_filter(&a);
+    let filter = filter.map(str::to_owned);
+    let pkg = rokc_interface::discover(Path::new(path)).unwrap_or_else(|e| fail(&e));
+    prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
+    let (result, _, started) = compile(&a, &pkg, Mode::Test);
     let tmp = fail_on(TempDir::new(a.opts.keep_temps));
     let exe = tmp.path().join(format!("{}-test", pkg.name));
     let t = Instant::now();
     fail_on(result.link(&a.opts, &exe));
-    stage(a, "codegen + link", t);
-    finished(a, started);
+    stage(&a, "codegen + link", t);
+    finished(&a, started);
     let threads = a
         .threads
         .or_else(|| std::env::var("ROKC_NUM_JOBS").ok()?.parse().ok())
@@ -878,7 +886,7 @@ fn cmd_test(a: &Args) {
         &exe,
         &result.tests,
         &test_runner::Options {
-            filter,
+            filter: filter.as_deref(),
             threads,
             show_output: a.show_output,
         },
@@ -895,8 +903,10 @@ fn cmd_bench(mut a: Args) {
         "2".clone_into(&mut a.opts.opt_level);
     }
     let (path, filter) = path_and_filter(&a);
-    let pkg = package::discover(Path::new(path)).unwrap_or_else(|e| fail(&e));
-    let (result, started) = compile(&a, &pkg, Mode::Bench);
+    let filter = filter.map(str::to_owned);
+    let pkg = rokc_interface::discover(Path::new(path)).unwrap_or_else(|e| fail(&e));
+    prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
+    let (result, _, started) = compile(&a, &pkg, Mode::Bench);
     let tmp = fail_on(TempDir::new(a.opts.keep_temps));
     let exe = tmp.path().join(format!("{}-bench", pkg.name));
     let t = Instant::now();
@@ -907,7 +917,7 @@ fn cmd_bench(mut a: Args) {
         &exe,
         &result.tests,
         &bench_runner::Options {
-            filter,
+            filter: filter.as_deref(),
             iters: a.iters,
             samples: a.samples.unwrap_or(10),
         },
@@ -916,35 +926,11 @@ fn cmd_bench(mut a: Args) {
     process::exit(i32::from(!ok));
 }
 
-/// `rokc lint [path]`: the front end (with ASTs), then the lints; exit 1
-/// when one at `deny` fired.
-fn cmd_lint(a: &Args) {
-    if a.list {
-        print!("{}", rokc_tools::lint::list());
-        return;
-    }
-    let pkg = discover_arg(a);
-    let (result, started) = compile(a, &pkg, Mode::Lint);
-    let diags = rokc_tools::lint::run(&result, &a.lint_levels);
-    diags.iter().for_each(report);
-    let errors = diags.iter().filter(|d| d.is_error()).count();
-    let warnings = diags.len() - errors;
-    if !a.quiet && !a.json {
-        eprintln!(
-            "     Checked {}: {errors} error{}, {warnings} warning{}",
-            pkg.name,
-            if errors == 1 { "" } else { "s" },
-            if warnings == 1 { "" } else { "s" },
-        );
-    }
-    finished(a, started);
-    process::exit(i32::from(errors > 0));
-}
-
 /// `rokc doc [path]`: HTML into `target/doc/` (see `rokc_tools::doc`).
-fn cmd_doc(a: &Args) {
-    let pkg = discover_arg(a);
-    let (result, started) = compile(a, &pkg, Mode::Doc);
+fn cmd_doc(mut a: Args) {
+    let pkg = discover_arg(&a);
+    prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
+    let (result, _, started) = compile(&a, &pkg, Mode::Doc);
     let out = a
         .target_dir
         .clone()
@@ -952,14 +938,13 @@ fn cmd_doc(a: &Args) {
         .join("doc");
     let index = rokc_tools::doc::generate(&result, &pkg.name, &out)
         .unwrap_or_else(|e| fail(&format!("cannot write {}: {e}", out.display())));
-    finished(a, started);
+    finished(&a, started);
     if !a.quiet {
         eprintln!("   Generated {}", index.display());
     }
 }
 
-/// `rokc fmt [path]`: a file, or every `.rok` under a directory (skipping
-/// `target/` and dot-directories).
+/// `rokc fmt [path]`: a file, or every source file under a directory.
 fn cmd_fmt(a: &Args) {
     let roots: Vec<PathBuf> = if a.positional.is_empty() {
         vec![PathBuf::from(".")]
@@ -969,7 +954,7 @@ fn cmd_fmt(a: &Args) {
     let mut files = Vec::new();
     for r in &roots {
         if r.is_dir() {
-            rok_files(r, &mut files);
+            files.extend(rokc_interface::source_files(r));
         } else if r.is_file() {
             files.push(r.clone());
         } else {
@@ -982,12 +967,7 @@ fn cmd_fmt(a: &Args) {
             Ok(s) => s,
             Err(e) => fail(&format!("{}: {e}", f.display())),
         };
-        let formatted = if f.extension().is_some_and(|x| x == "rokon") {
-            rokc_fmt::format_rokon(&src, &f.display().to_string())
-        } else {
-            rokc_fmt::format_source(&src)
-        };
-        let formatted = match formatted {
+        let formatted = match rokc_fmt::format_file(f, &src) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("rokc: cannot format {}: {e}", f.display());
@@ -1016,24 +996,6 @@ fn cmd_fmt(a: &Args) {
     }
     if errors > 0 || (a.check && changed > 0) {
         process::exit(1);
-    }
-}
-
-fn rok_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
-    entries.sort();
-    for p in entries {
-        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if p.is_dir() {
-            if name != "target" && !name.starts_with('.') {
-                rok_files(&p, out);
-            }
-        } else if p.extension().is_some_and(|x| x == "rok" || x == "rokon") {
-            out.push(p);
-        }
     }
 }
 

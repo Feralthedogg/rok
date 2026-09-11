@@ -1,0 +1,18 @@
+// spec: 004.15-unsafe / 001.07-raw-string
+// expect-exit: 0
+// expect-stdout:
+// C:\path\n "q"
+// 5
+
+// `unsafe fn` / `unsafe { }` parse (spec 4.15; the unsafe-call check is
+// not implemented yet) and raw strings work in expression position.
+unsafe fn five() -> i32 {
+    return 5;
+}
+
+fn main() -> i32 {
+    println(r#"C:\path\n "q""#);
+    let v = unsafe { five() };
+    println(f"{v}");
+    return 0;
+}

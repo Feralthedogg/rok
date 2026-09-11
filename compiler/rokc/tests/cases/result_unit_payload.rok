@@ -20,9 +20,8 @@
 // async ok
 // async err
 
-// A `()` payload is zero-sized: moving it into / out of a variant's
-// payload slot used to fail in codegen with "payload of `i32` stored as
-// `!llvm.struct<()>`" (`Result<(), E>::get`).
+// A `()` payload is zero-sized: it still moves into / out of a variant's
+// payload slot (`Result<(), E>::get`).
 enum E { Bad }
 
 fn check(x: i32) throws (E) { if x < 0 { throw E::Bad; } }

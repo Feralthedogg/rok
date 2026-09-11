@@ -1,7 +1,7 @@
 // expect-exit: 21
 
 // `pub(pkg)` items are visible package-wide. Same package = always
-// reachable today.
+// reachable.
 mod a {
     pub(pkg) fn shared() -> i32 { 12i32 }
 }

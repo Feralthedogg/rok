@@ -5,9 +5,8 @@
 // c 1 / c x / b / first 7 / last 3
 
 // `x is none` / `n: none` on an `Enum<..> | none` value with a multi-word
-// payload binds `none` instead of reading the payload slot (codegen
-// used to fail: "payload .. stored as i64"); `V(..)`, `V(a, ..)` and
-// `V(.., z)` match the fields not written.
+// payload binds `none` instead of reading the payload slot; `V(..)`,
+// `V(a, ..)` and `V(.., z)` match the fields not written.
 
 struct Bad { code: i32; why: str; }
 

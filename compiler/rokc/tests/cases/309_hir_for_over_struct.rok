@@ -1,0 +1,12 @@
+// spec: 003.09-for
+// An unsupported for-loop target is rejected explicitly.
+// expect-error: cannot iterate over a value of type `S`
+
+struct S { a: i32; }
+
+fn main() -> i32 {
+    let s = S { a: 1 };
+    let t = 0;
+    for x in s { t = t + 1; }
+    return t;
+}

@@ -2,8 +2,8 @@
 // expect-stdout: start
 // expect-stderr: static initializer reads its own static
 
-// Spec 5.3: an initializer that reads its own `static` panics (it used
-// to wait on itself forever).
+// Spec 5.3: an initializer that reads its own `static` panics rather
+// than wait on itself forever.
 
 static LOOP: i32 = again();
 

@@ -7,8 +7,11 @@
 //   `once <n> <out> <err>\n` + n bytes of LLVM IR (`--replay`): compile
 //     and run it in a throwaway child (stdout / stderr into the files
 //     `out` / `err`); the session itself never runs anything.
+//   `lib <n>\n` + an n-byte path: link a prebuilt dependency's static
+//     library into the session (its members load as cells need them);
+//     the reply is `ok 0\n` or `err\n`.
 //
-// The reply is `pid <p>\n` (the process running the cell) and then
+// A cell's reply is `pid <p>\n` (the process running the cell) and then
 // `ok <n>\n<n bytes of the shown value>` or `err\n`. `SIGINT` ends a
 // running cell (the session goes on as before it) and is ignored
 // between cells. argv[1] is the opt level (`0`..`3`, `s`).
@@ -109,7 +112,7 @@ static void *host_symbol(const char *name) {
     const char *base = (const char *)(linkedit->vmaddr + slide - linkedit->fileoff);
     const struct nlist_64 *nl = (const void *)(base + st->symoff);
     const char *strs = base + st->stroff;
-    // ponytail: a linear scan, once per thread-local the session uses.
+    // Linear scan: runs once per thread-local the session uses.
     for (uint32_t i = 0; i < st->nsyms; i++)
         if (!(nl[i].n_type & N_STAB) && (nl[i].n_type & N_TYPE) == N_SECT &&
             !strcmp(strs + nl[i].n_un.n_strx, name))
@@ -142,7 +145,7 @@ static int define_thread_locals(LLVMModuleRef m) {
     return 0;
 }
 #else
-// ponytail: ELF thread-locals go through the process-symbol generator;
+// ELF thread-locals go through the process-symbol generator;
 // untested off macOS.
 static int define_thread_locals(LLVMModuleRef m) {
     (void)m;
@@ -303,6 +306,18 @@ int main(int argc, char **argv) {
         size_t n = 0;
         if (!read_command(ctl, line, sizeof line)) return 0;
         char *ir = NULL;
+        if (sscanf(line, "lib %zu", &n) == 1) {
+            char *path = read_ir(ctl, n);
+            if (!path) return 1;
+            path[n] = 0;
+            LLVMOrcDefinitionGeneratorRef lib;
+            LLVMOrcObjectLayerRef layer = LLVMOrcLLJITGetObjLinkingLayer(jit);
+            int bad = report(LLVMOrcCreateStaticLibrarySearchGeneratorForPath(&lib, layer, path));
+            if (!bad) LLVMOrcJITDylibAddGenerator(jd, lib);
+            free(path);
+            dprintf(ctl, bad ? "err\n" : "ok 0\n");
+            continue;
+        }
         if (sscanf(line, "cell %zu", &n) == 1 || sscanf(line, "once %zu %4095s %4095s", &n, out, err) == 3)
             ir = read_ir(ctl, n);
         if (!ir) return 1;
@@ -317,7 +332,7 @@ int main(int argc, char **argv) {
         // compile) the copy carries on as the session; otherwise it is
         // told to go. The JIT has no threads of its own (in-place
         // compilation), so the copy's is whole.
-        // ponytail: threads other than this one are not in the copy.
+        // Threads other than this one are not in the copy.
         int verdict[2];
         if (pipe(verdict) != 0) return 1;
         pid_t snap = fork();

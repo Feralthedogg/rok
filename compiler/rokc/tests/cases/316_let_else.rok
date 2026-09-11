@@ -1,0 +1,26 @@
+// spec: 003.16-let-else
+// expect-exit: 0
+// expect-stdout:
+// 7
+// fallback
+
+// spec 3.16: `let pat = expr else { ... };` runs else when the match fails
+// (else diverges: return/break/continue/throw).
+fn maybe(b: i32) -> i32 | none {
+    if b == 1 { return 7; }
+    return none;
+}
+
+fn unwrap_or_print(b: i32) {
+    let v: i32 = maybe(b) else {
+        println("fallback");
+        return;
+    };
+    println(f"{v}");
+}
+
+fn main() -> i32 {
+    unwrap_or_print(1);
+    unwrap_or_print(0);
+    return 0;
+}

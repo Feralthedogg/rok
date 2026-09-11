@@ -12,6 +12,8 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 name = "rok"
 version = "0.1.0"
 dependencies = [
+ "rokc_core",
+ "rokc_diagnostic",
  "rokc_rokon",
 ]
 
@@ -36,6 +38,7 @@ dependencies = [
 name = "rokc_codegen_mlir"
 version = "0.1.0"
 dependencies = [
+ "rokc_core",
  "rokc_diagnostic",
  "rokc_ir_common",
  "rokc_mir",
@@ -90,6 +93,7 @@ name = "rokc_interface"
 version = "0.1.0"
 dependencies = [
  "rokc_ast",
+ "rokc_core",
  "rokc_diagnostic",
  "rokc_driver",
 ]

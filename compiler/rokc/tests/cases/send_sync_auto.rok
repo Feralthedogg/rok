@@ -1,5 +1,5 @@
 // expect-exit: 0
-// E3: `Send` / `Sync` are structural auto traits. `impl !Send` opts out,
+// `Send` / `Sync` are structural auto traits. `impl !Send` opts out,
 // `unsafe impl Send` opts in; `fn() -> T + Send` slots take named
 // functions, capture-free closures and `fn` values carrying the bound.
 struct Tok { v: i32; }

@@ -66,10 +66,10 @@ pub fn fixed_prec(symbol: &str, fixity: Fixity) -> Option<(u32, Assoc)> {
 pub struct OpEntry {
     pub symbol: String,
     pub fixity: Fixity,
-    // Trait method name this operator dispatches to (e.g. "add" for "+").
+    /// Trait method the operator dispatches to (`add` for `+`).
     pub method_name: String,
-    // Trait declaring that method (e.g. "Add"). Only an impl of this trait
-    // makes a user type support the operator (spec 0.4 / 6.4).
+    /// Trait declaring that method; only its impls make a type support
+    /// the operator (spec 6.4).
     pub trait_name: String,
     /// `#[infix("∈", swap)]`: `a ∈ s` calls `s.contains(a)` (spec 6.7.2).
     pub swap: bool,

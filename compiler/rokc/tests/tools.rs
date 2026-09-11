@@ -5,14 +5,9 @@
 mod common;
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use common::{ROKC, setup};
-
-fn workspace() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
+use common::{ROKC, scratch, setup, text, workspace};
 
 /// `exe args` with `input` on stdin.
 fn piped(exe: &str, args: &[&str], input: &str) -> Output {
@@ -37,10 +32,6 @@ fn piped_env(exe: &str, args: &[&str], input: &str, env: &[(&str, &str)]) -> Out
         .write_all(input.as_bytes())
         .unwrap();
     child.wait_with_output().unwrap()
-}
-
-fn text(b: &[u8]) -> String {
-    String::from_utf8_lossy(b).into_owned()
 }
 
 #[test]
@@ -329,6 +320,76 @@ fn rokc_lsp_answers_over_stdio() {
     assert_eq!(out.status.code(), Some(1));
 }
 
+/// The server builds its dependencies first and answers from their RHIR:
+/// hover shows a dependency function's doc comment, definition goes to
+/// its source.
+#[test]
+fn lsp_sees_prebuilt_dependencies() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("lsp-deps");
+    let (util, app) = (dir.join("util"), dir.join("app"));
+    std::fs::create_dir_all(&util).unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        util.join("lib.rok"),
+        "/// Says hi.\npub fn hello() -> i32 {\n    return 1;\n}\n",
+    )
+    .unwrap();
+    let main = app.join("main.rok");
+    let src = "use util::hello;\nlet x = hello();\nprintln(f\"{x}\");\n";
+    std::fs::write(&main, src).unwrap();
+    let uri = format!("file://{}", main.display());
+    let doc = format!(r#"{{"uri":"{uri}","languageId":"rok","version":1,"text":{src:?}}}"#);
+    let at =
+        format!(r#"{{"textDocument":{{"uri":"{uri}"}},"position":{{"line":1,"character":10}}}}"#);
+    let input = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}"#.to_owned(),
+        format!(r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{doc}}}}}"#),
+        format!(r#"{{"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{at}}}"#),
+        format!(r#"{{"jsonrpc":"2.0","id":3,"method":"textDocument/definition","params":{at}}}"#),
+        r#"{"jsonrpc":"2.0","id":4,"method":"shutdown"}"#.to_owned(),
+        r#"{"jsonrpc":"2.0","method":"exit"}"#.to_owned(),
+    ]
+    .map(|m| frame(&m))
+    .concat();
+    let ext = format!("util={}", util.display());
+    let mut child = Command::new(ROKC)
+        .current_dir(&app)
+        .env("ROK_HOME", workspace())
+        .args(["lsp", "--extern", &ext, "--rokr"])
+        .arg(&env.rokr)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(app.join("target/debug/deps/util.rhir").is_file());
+    let stdout = text(&out.stdout);
+    let reply = |id: u32| {
+        let at = stdout
+            .find(&format!(r#""id":{id},"#))
+            .unwrap_or_else(|| panic!("{stdout}"));
+        stdout[at..]
+            .split("Content-Length")
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    assert!(reply(2).contains("Says hi."), "{stdout}");
+    let def = reply(3);
+    let want = format!("file://{}", util.join("lib.rok").display());
+    assert!(def.contains(&want), "{def}");
+    assert!(def.contains(r#""start":{"line":1,"#), "{def}");
+}
+
 #[test]
 fn check_reads_stdin() {
     let out = piped(
@@ -351,7 +412,7 @@ fn check_reads_stdin() {
 /// panic, completion, and `shutdown`. Every message must be signed.
 #[test]
 fn jupyter_kernel_speaks_the_wire_protocol() {
-    use rokc_tools::json::Json;
+    use rokc_interface::Json;
     use rokc_tools::jupyter::{encode, handshake, parse_msg, read_msg, write_msg};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;

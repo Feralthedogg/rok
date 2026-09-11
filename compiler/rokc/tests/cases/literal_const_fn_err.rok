@@ -1,0 +1,55 @@
+// Spec 6.5.8: a `const fn` literal handler that panics or throws at
+// compile time is a compile error at the literal.
+// expect-error: literal cannot be evaluated at compile time: panicked: an `rgb` literal has 6 hex digits
+// expect-error: literal_const_fn_err.rok:52:15
+// expect-error: literal cannot be evaluated at compile time: the handler threw "port out of range"
+struct Rgb {
+    v: u32;
+}
+
+const fn hex_digit(c: char) -> u32 {
+    if c >= '0' && c <= '9' {
+        return c as u32 - '0' as u32;
+    }
+    if c >= 'a' && c <= 'f' {
+        return c as u32 - 'a' as u32 + 10;
+    }
+    panic("not a hex digit");
+}
+
+#[literal("rgb" string)]
+const fn rgb(s: str) -> Rgb {
+    let v: u32 = 0;
+    let n = 0;
+    for c in s.chars() {
+        v = v * 16 + hex_digit(c);
+        n = n + 1;
+    }
+    if n != 6 {
+        panic("an `rgb` literal has 6 hex digits");
+    }
+    Rgb { v: v }
+}
+
+struct Port {
+    n: i64;
+}
+
+struct PortError {
+    msg: str;
+}
+
+#[literal(number "port")]
+const fn port(n: i64) throws (PortError) -> Port {
+    if n > 65535 {
+        throw PortError { msg: "port out of range" };
+    }
+    Port { n: n }
+}
+
+fn main() -> i32 {
+    let ok = rgb "00ff00";
+    let bad = rgb "fff";
+    let p = try! 70000port;
+    return (ok.v + bad.v) as i32 + p.n as i32;
+}

@@ -1,0 +1,11 @@
+// spec: 003.12.5-exhaustiveness
+// An enum match missing a variant is an error.
+// expect-error: non-exhaustive match on `C`: `C::B` not covered
+
+enum C { R, G, B }
+
+fn f(c: C) -> i32 {
+    return match c { C::R => 1, C::G => 2 };
+}
+
+fn main() -> i32 { return f(C::B); }

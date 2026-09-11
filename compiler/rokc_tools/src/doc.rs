@@ -12,27 +12,26 @@
 //! ```
 //!
 //! Documented: the user package and its `--extern` dependencies (not the
-//! standard library), their `pub` items in `pub` modules. Doc text comes
-//! from `///` lines right above an item (attributes may sit between),
-//! `#[doc = ".."]`, and a file's leading `//!` lines (its module). Doc
+//! standard library), their `pub` items in `pub` modules. Doc text is
+//! the item's `#[doc = ".."]` attributes (the parser turns `///` lines
+//! into them, and a file's leading `//!` lines into its module's). Doc
 //! text is a markdown subset: headings, fenced code blocks, inline code,
 //! links, `**bold**`, `-` / `*` / `1.` lists, paragraphs. Type names in
 //! signatures and inline code naming a documented item link to it.
 //!
-//! ponytail: `///` is read from the source text (the lexer drops
-//! comments), so an item produced by a meta block gets the doc above its
-//! attribute. Signatures are printed from the AST as written.
+//! Signatures are printed from the AST as written.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use rokc_ast::escape::{EscapeMode, unescape};
 use rokc_ast::{
     AttrBody, Attribute, ConstExpr, EnumVariantKind, FnDef, GenericParam, Generics, ImplItem, Item,
     Literal, NamedField, StructKind, ThrowsKind, TraitItem, Ty, TyKind,
 };
 use rokc_core::Visibility;
-use rokc_diagnostic::{Span, json_str};
+use rokc_diagnostic::Json;
 use rokc_interface::{CompileResult, SourceFile};
 
 /// One documented item.
@@ -60,7 +59,6 @@ type Key = (String, Vec<String>);
 /// Write the docs of `result` (built with `Session::set_keep_ast`) into
 /// `out`; `name` is the user package's. Returns `out/index.html`.
 pub fn generate(result: &CompileResult, name: &str, out: &Path) -> std::io::Result<PathBuf> {
-    let texts = rokc_diagnostic::registered_files();
     // The user package (`""`) as `name`, then each dependency.
     let files: Vec<(String, Vec<String>, &SourceFile)> = result
         .sources
@@ -80,7 +78,6 @@ pub fn generate(result: &CompileResult, name: &str, out: &Path) -> std::io::Resu
         .collect();
 
     let mut d = Docs {
-        texts: &texts,
         modules: BTreeMap::new(),
         links: HashMap::new(),
         private: Vec::new(),
@@ -88,12 +85,12 @@ pub fn generate(result: &CompileResult, name: &str, out: &Path) -> std::io::Resu
     // Pass 1: module docs and visibility, and every item's link target.
     for (pkg, rel, f) in &files {
         let m = d.modules.entry((pkg.clone(), rel.clone())).or_default();
-        m.doc = inner_doc(text(&texts, f.file_id));
-        d.scan(pkg, rel, f.file_id, &f.items);
+        m.doc = doc_text(&f.attrs);
+        d.scan(pkg, rel, &f.items);
     }
-    // Pass 2: entries.
+    // Pass 2: entries, which link to any item from pass 1.
     for (pkg, rel, f) in &files {
-        d.module(pkg, rel, f.file_id, &f.items);
+        d.module(pkg, rel, &f.items);
     }
     let private = std::mem::take(&mut d.private);
     d.modules
@@ -107,21 +104,12 @@ pub fn generate(result: &CompileResult, name: &str, out: &Path) -> std::io::Resu
     d.write(out, name)
 }
 
-struct Docs<'a> {
-    texts: &'a [(String, String)],
+struct Docs {
     modules: BTreeMap<Key, Module>,
     /// Item name → its URL from the doc root.
     links: HashMap<String, String>,
     /// Modules that are not `pub` (and so neither is what is inside).
     private: Vec<Key>,
-}
-
-fn text(texts: &[(String, String)], file: u32) -> &str {
-    usize::try_from(file)
-        .ok()
-        .and_then(|i| i.checked_sub(1))
-        .and_then(|i| texts.get(i))
-        .map_or("", |(_, t)| t.as_str())
 }
 
 fn page(pkg: &str, rel: &[String]) -> String {
@@ -133,63 +121,31 @@ fn page(pkg: &str, rel: &[String]) -> String {
     p + "/index.html"
 }
 
-fn item_info(item: &Item) -> Option<(&'static str, &str, Visibility, &[Attribute], Span)> {
+fn item_info(item: &Item) -> Option<(&'static str, &str, Visibility, &[Attribute])> {
     Some(match item {
-        Item::Fn(x) => ("fn", &x.name, x.vis, &x.attrs, x.span),
-        Item::Struct(x) => ("struct", &x.name, x.vis, &x.attrs, x.span),
-        Item::Enum(x) => ("enum", &x.name, x.vis, &x.attrs, x.span),
-        Item::Union(x) => ("union", &x.name, x.vis, &x.attrs, x.span),
-        Item::Trait(x) => ("trait", &x.name, x.vis, &x.attrs, x.span),
-        Item::TypeAlias(x) => ("type", &x.name, x.vis, &x.attrs, x.span),
-        Item::Const(x) => ("const", &x.name, x.vis, &x.attrs, x.span),
-        Item::Static(x) => ("static", &x.name, x.vis, &x.attrs, x.span),
-        Item::Mod(x) => ("mod", &x.name, x.vis, &x.attrs, x.span),
+        Item::Fn(x) => ("fn", &x.name, x.vis, &x.attrs),
+        Item::Struct(x) => ("struct", &x.name, x.vis, &x.attrs),
+        Item::Enum(x) => ("enum", &x.name, x.vis, &x.attrs),
+        Item::Union(x) => ("union", &x.name, x.vis, &x.attrs),
+        Item::Trait(x) => ("trait", &x.name, x.vis, &x.attrs),
+        Item::TypeAlias(x) => ("type", &x.name, x.vis, &x.attrs),
+        Item::Const(x) => ("const", &x.name, x.vis, &x.attrs),
+        Item::Static(x) => ("static", &x.name, x.vis, &x.attrs),
+        Item::Mod(x) => ("mod", &x.name, x.vis, &x.attrs),
         Item::Impl(_) | Item::Use(_) | Item::Extern(_) => return None,
     })
 }
 
-/// The `///` lines above `span`'s line (skipping attribute lines), then
-/// `#[doc = ".."]`.
-pub(crate) fn outer_doc(src: &str, attrs: &[Attribute], span: Span) -> String {
-    let first = attrs
+/// The text of the `#[doc = ".."]` attributes (`///` lines), one line each.
+pub(crate) fn doc_text(attrs: &[Attribute]) -> String {
+    let lines: Vec<String> = attrs
         .iter()
-        .map(|a| a.span.line)
-        .chain([span.line])
-        .filter(|l| *l > 0)
-        .min()
-        .unwrap_or(0);
-    let lines: Vec<&str> = src.lines().collect();
-    let mut docs = Vec::new();
-    let mut i = usize::try_from(first).unwrap_or(0).saturating_sub(1);
-    while i > 0 {
-        i -= 1;
-        let l = lines.get(i).map_or("", |l| l.trim_start());
-        if let Some(d) = l.strip_prefix("///") {
-            docs.push(d.strip_prefix(' ').unwrap_or(d));
-        } else if !l.starts_with("#[") {
-            break;
-        }
-    }
-    docs.reverse();
-    let mut out = docs.join("\n");
-    for a in attrs.iter().filter(|a| a.name() == "doc") {
-        if let AttrBody::Value(Literal::Str(s) | Literal::RawStr(s)) = &a.body {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(s.trim_matches('"'));
-        }
-    }
-    out
-}
-
-/// A file's leading `//!` lines.
-fn inner_doc(src: &str) -> String {
-    let lines: Vec<&str> = src
-        .lines()
-        .skip_while(|l| l.trim().is_empty())
-        .map_while(|l| l.trim_start().strip_prefix("//!"))
-        .map(|l| l.strip_prefix(' ').unwrap_or(l))
+        .filter(|a| a.name() == "doc")
+        .filter_map(|a| match &a.body {
+            AttrBody::Value(Literal::Str(s)) => Some(unescape(s, EscapeMode::Str).ok()?),
+            AttrBody::Value(Literal::RawStr(s)) => Some(s.clone()),
+            _ => None,
+        })
         .collect();
     lines.join("\n")
 }
@@ -208,6 +164,16 @@ fn esc(s: &str) -> String {
     o
 }
 
+/// One `SEARCH_INDEX` record: path, kind, URL, summary.
+fn search_entry(path: &str, kind: &str, url: &str, doc: &str) -> Json {
+    Json::obj([
+        ("p", Json::str(path)),
+        ("k", Json::str(kind)),
+        ("u", Json::str(url)),
+        ("d", Json::str(summary(doc))),
+    ])
+}
+
 /// First sentence-ish line of a doc, as plain text (search results).
 fn summary(doc: &str) -> String {
     doc.lines()
@@ -217,10 +183,10 @@ fn summary(doc: &str) -> String {
         .replace('`', "")
 }
 
-impl Docs<'_> {
-    fn scan(&mut self, pkg: &str, rel: &[String], file: u32, items: &[Item]) {
+impl Docs {
+    fn scan(&mut self, pkg: &str, rel: &[String], items: &[Item]) {
         for item in items {
-            let Some((kind, name, vis, attrs, span)) = item_info(item) else {
+            let Some((kind, name, vis, attrs)) = item_info(item) else {
                 continue;
             };
             if kind == "mod" {
@@ -229,7 +195,7 @@ impl Docs<'_> {
                 if vis != Visibility::Pub {
                     self.private.push((pkg.to_owned(), child.clone()));
                 }
-                let doc = outer_doc(text(self.texts, file), attrs, span);
+                let doc = doc_text(attrs);
                 let m = self
                     .modules
                     .entry((pkg.to_owned(), child.clone()))
@@ -255,7 +221,7 @@ impl Docs<'_> {
                     .or_insert_with(|| page(pkg, &child));
                 if let Item::Mod(m) = item {
                     if let Some(inner) = &m.items {
-                        self.scan(pkg, &child, file, inner);
+                        self.scan(pkg, &child, inner);
                     }
                 }
             } else if vis == Visibility::Pub {
@@ -266,32 +232,31 @@ impl Docs<'_> {
         }
     }
 
-    fn module(&mut self, pkg: &str, rel: &[String], file: u32, items: &[Item]) {
-        let src = text(self.texts, file);
+    fn module(&mut self, pkg: &str, rel: &[String], items: &[Item]) {
         let mut entries = Vec::new();
         for item in items {
             if let Item::Mod(m) = item {
                 if let Some(inner) = &m.items {
                     let mut child = rel.to_vec();
                     child.push(m.name.clone());
-                    self.module(pkg, &child, file, inner);
+                    self.module(pkg, &child, inner);
                 }
                 continue;
             }
-            let Some((kind, name, vis, attrs, span)) = item_info(item) else {
+            let Some((kind, name, vis, attrs)) = item_info(item) else {
                 continue;
             };
             if vis != Visibility::Pub {
                 continue;
             }
-            let doc = outer_doc(src, attrs, span);
+            let doc = doc_text(attrs);
             let mut members = Vec::new();
             let sig = match item {
                 Item::Fn(f) => self.fn_sig(f),
                 Item::Struct(s) => {
                     let fields = match &s.kind {
                         StructKind::Named(fs) => {
-                            members.extend(self.fields(src, kind, name, fs));
+                            members.extend(self.fields(kind, name, fs));
                             " { .. }".to_owned()
                         }
                         StructKind::Tuple(ts) => {
@@ -307,7 +272,7 @@ impl Docs<'_> {
                     )
                 }
                 Item::Union(u) => {
-                    members.extend(self.fields(src, kind, name, &u.fields));
+                    members.extend(self.fields(kind, name, &u.fields));
                     format!(
                         "pub union {}{} {{ .. }}",
                         esc(name),
@@ -334,7 +299,7 @@ impl Docs<'_> {
                         members.push((
                             format!("variant.{name}.{}", v.name),
                             format!("{}{shape}", esc(&v.name)),
-                            outer_doc(src, &v.attrs, v.span),
+                            doc_text(&v.attrs),
                         ));
                     }
                     format!("pub enum {}{}", esc(name), self.generics(&e.generics))
@@ -345,7 +310,7 @@ impl Docs<'_> {
                             TraitItem::Method(m) => members.push((
                                 format!("tymethod.{name}.{}", m.name),
                                 self.fn_sig(m),
-                                outer_doc(src, &m.attrs, m.span),
+                                doc_text(&m.attrs),
                             )),
                             TraitItem::AssocType { name: n, .. } => members.push((
                                 format!("associatedtype.{name}.{n}"),
@@ -424,7 +389,7 @@ impl Docs<'_> {
                         e.members.push((
                             format!("method.{ty_name}.{}", m.name),
                             self.fn_sig(m),
-                            outer_doc(src, &m.attrs, m.span),
+                            doc_text(&m.attrs),
                         ));
                     }
                 }
@@ -437,20 +402,14 @@ impl Docs<'_> {
             .extend(entries);
     }
 
-    fn fields(
-        &self,
-        src: &str,
-        kind: &str,
-        owner: &str,
-        fs: &[NamedField],
-    ) -> Vec<(String, String, String)> {
+    fn fields(&self, kind: &str, owner: &str, fs: &[NamedField]) -> Vec<(String, String, String)> {
         fs.iter()
             .filter(|f| f.vis == Visibility::Pub)
             .map(|f| {
                 (
                     format!("{kind}field.{owner}.{}", f.name),
                     format!("{}: {}", esc(&f.name), self.ty(&f.ty)),
-                    outer_doc(src, &f.attrs, f.span),
+                    doc_text(&f.attrs),
                 )
             })
             .collect()
@@ -642,20 +601,20 @@ impl Docs<'_> {
             if !rel.is_empty() {
                 let _ = writeln!(
                     index,
-                    "{{\"p\":{},\"k\":\"mod\",\"u\":{},\"d\":{}}},",
-                    json_str(&path.join("::")),
-                    json_str(&url),
-                    json_str(&summary(&m.doc))
+                    "{},",
+                    search_entry(&path.join("::"), "mod", &url, &m.doc)
                 );
             }
             for e in &m.entries {
                 let _ = writeln!(
                     index,
-                    "{{\"p\":{},\"k\":\"{}\",\"u\":{},\"d\":{}}},",
-                    json_str(&format!("{}::{}", path.join("::"), e.name)),
-                    e.kind,
-                    json_str(&format!("{url}#{}.{}", e.kind, e.name)),
-                    json_str(&summary(&e.doc))
+                    "{},",
+                    search_entry(
+                        &format!("{}::{}", path.join("::"), e.name),
+                        e.kind,
+                        &format!("{url}#{}.{}", e.kind, e.name),
+                        &e.doc
+                    )
                 );
             }
             let file = out.join(&url);
@@ -1010,11 +969,10 @@ const SEARCH_JS: &str = "\
 mod tests {
     use super::*;
 
-    fn docs() -> Docs<'static> {
+    fn docs() -> Docs {
         let mut links = HashMap::new();
         links.insert("Point".to_owned(), "app/index.html#struct.Point".to_owned());
         Docs {
-            texts: &[],
             modules: BTreeMap::new(),
             links,
             private: Vec::new(),
@@ -1044,15 +1002,15 @@ mod tests {
     }
 
     #[test]
-    fn doc_comments_from_source() {
-        let src =
-            "//! Module doc.\n//! More.\n\n/// Adds.\n/// Twice.\n#[inline]\npub fn add() {}\n";
-        assert_eq!(inner_doc(src), "Module doc.\nMore.");
-        let span = Span {
-            line: 7,
-            ..Span::DUMMY
-        };
-        assert_eq!(outer_doc(src, &[], span), "Adds.\nTwice.");
+    fn doc_comments_are_attributes() {
+        let src = "//! Module doc.\n//!More.\n\n/// Adds.\n#[inline]\n/// Twice.\n//// not doc\n\
+                   pub fn add() {}\n";
+        let (tokens, _) = rokc_lexer::Lexer::new(src, "a.rok").lex_all();
+        let (p, diags) = rokc_parser::parse_program(&tokens, "a.rok");
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(doc_text(&p.attrs), "Module doc.\nMore.");
+        let Item::Fn(f) = &p.items[0] else { panic!() };
+        assert_eq!(doc_text(&f.attrs), "Adds.\nTwice.");
         assert_eq!(summary("\n`a` b\nc"), "a b");
     }
 }

@@ -1,0 +1,7 @@
+// spec: 003.00-name-resolution
+// An undefined name is a compile error.
+// expect-error: cannot find value `yy`
+
+fn main() -> i32 {
+    return yy + 1;
+}

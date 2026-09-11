@@ -1,0 +1,9 @@
+// spec: 003.04-typo-undeclared
+// expect-error: `coutner` is not declared
+
+// Assigning to a name with no `let` is an error (catches typos like `coutner`).
+fn main() -> i32 {
+    let counter = 0;
+    coutner = counter + 1;    // typo: 'coutner' is undeclared
+    return counter;
+}

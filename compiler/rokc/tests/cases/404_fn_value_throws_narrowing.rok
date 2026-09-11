@@ -1,0 +1,12 @@
+// spec: 004.04.9-fn-type-error-channel
+// a throwing fn value can't fill a non-throwing `fn` slot.
+// expect-error: mismatched types
+
+enum P { Bad }
+
+fn half(x: i32) throws (P) -> i32 { if x % 2 == 1 { throw P::Bad; } x / 2 }
+
+fn main() -> i32 {
+    let r: fn(i32) -> i32 = half;
+    return r(4);
+}

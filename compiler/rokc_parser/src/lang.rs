@@ -61,7 +61,7 @@ pub const KNOWN_SLOTS: &[&str] = &[
     "ord_trait",
     "hash_trait",
     "clone_trait",
-    // auto (structural) marker traits (E3; `marker.rok`)
+    // auto (structural) marker traits (`marker.rok`)
     "send_trait",
     "sync_trait",
     "logical_and_trait",
@@ -74,9 +74,8 @@ pub const KNOWN_SLOTS: &[&str] = &[
     "drop_method",
 ];
 
-/// What kind of item the `#[lang]` attribute is attached to. Consumers
-/// can use this to validate slots that demand a specific shape (e.g.
-/// `none_type` must be a type, `add_trait` must be a trait).
+/// The item kind a `#[lang]` attribute sits on, for slots that demand a
+/// shape (`none_type` is a type, `add_trait` a trait).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LangItemKind {
     Trait,
@@ -115,9 +114,8 @@ impl LangTable {
         self.by_slot.values()
     }
 
-    /// Append a pre-validated entry. Caller is responsible for spec
-    /// 6.4.6 duplicate detection — this just stores. Used by the driver
-    /// to merge per-module tables.
+    /// Append a pre-validated entry; the caller checks duplicates (spec
+    /// 6.4.6). The driver merges per-module tables with it.
     pub fn insert_entry(&mut self, entry: LangEntry) {
         self.by_slot.insert(entry.slot.clone(), entry);
     }

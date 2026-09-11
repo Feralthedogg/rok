@@ -1,0 +1,15 @@
+// spec: 002.x-union-reinterpret
+// expect-exit: 0
+// expect-stdout:
+// 5
+
+// spec 2.x: `let x = ED { fd: 5 }; let v = x.val;` reinterprets the bits
+// under another field: i32 -> u64 keeps the pattern, so 5 reads back.
+union ED { fd: i32; val: u64; }
+
+fn main() -> i32 {
+    let x = ED { fd: 5 };
+    let v: u64 = unsafe { x.val };
+    println(f"{v as i64}");
+    return 0;
+}

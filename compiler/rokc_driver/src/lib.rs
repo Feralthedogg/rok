@@ -68,6 +68,8 @@ pub struct CompilerConfig {
     pub cache_library: bool,
     /// The target (`--target`): `#[cfg]`, layout and code follow it.
     pub target: rokc_mir::Target,
+    /// Lower every library body, not only the reachable ones.
+    pub check_library: bool,
 }
 
 thread_local! {
@@ -188,7 +190,7 @@ fn lib_roots(config: &CompilerConfig) -> Vec<LibRoot> {
 /// Dependency names are top-level names (spec 5.7.x / 902.3): a `use
 /// dep::..` anywhere is rooted at `pkg::dep::..`, and a dependency's own
 /// `use pkg::..` means its root, `pkg::dep::..`. (Expression and type
-/// paths get the same treatment in HIR, from `PACKAGES_ATTR`.)
+/// paths get the same treatment in HIR, from `HirInput::packages`.)
 fn root_extern_uses(
     uses: &mut [(String, rokc_core::Visibility, rokc_ast::UseTree)],
     externs: &[(String, PathBuf)],
@@ -543,6 +545,7 @@ fn compile_unit(
         packages: config.externs.iter().map(|(n, _)| n.clone()).collect(),
         lib: lib.map(str::to_owned),
         prebuilt: prebuilt.iter().map(|p| p.rhir.name.clone()).collect(),
+        check_library: config.check_library,
     };
     let program = rokc_ast::Program {
         attrs: Vec::new(),

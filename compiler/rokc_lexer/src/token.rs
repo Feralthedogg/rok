@@ -6,13 +6,29 @@ use rokc_diagnostic::Span;
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
+    /// The `///` / `//!` lines in the trivia before this token; the
+    /// parser turns them into `#[doc]` / `#![doc]` attributes.
+    pub docs: Vec<DocLine>,
 }
 
 impl Token {
     #[must_use]
     pub const fn new(kind: TokenKind, span: Span) -> Self {
-        Self { kind, span }
+        Self {
+            kind,
+            span,
+            docs: Vec::new(),
+        }
     }
+}
+
+/// One doc comment line: its text after the marker and one space.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocLine {
+    /// `//!` (documents the enclosing module).
+    pub inner: bool,
+    pub text: String,
+    pub span: Span,
 }
 
 /// Token kinds. Strings carry the lexeme as written; the parser owns
@@ -76,10 +92,8 @@ pub enum TokenKind {
     Await,
     Yield,
 
-    // Self keywords. `pkg` and `sup` are contextual identifiers, not
-    // tokens — they only carry path-root meaning when followed by `::`,
-    // so they remain ordinary identifiers in other positions
-    // (consistent with `pub(pkg)` / `pub(sub)`).
+    // Self keywords. `pkg` / `sup` are identifiers: they are path roots
+    // only before `::`.
     SelfLower,
     SelfUpper,
 
@@ -297,7 +311,7 @@ impl TokenKind {
     }
 }
 
-/// Reserved keywords (spec 1.5, E8).
+/// Reserved keywords (spec 1.5).
 ///
 /// `type`, `any`, `in`, `where`,
 /// `throws`, `rethrows`, `catch`, `finally`, `const`, `static`,

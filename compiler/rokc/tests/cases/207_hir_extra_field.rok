@@ -1,0 +1,10 @@
+// spec: 002.07-struct-field
+// An extra field in a struct literal is an error.
+// expect-error: struct `P` has no field `zz`
+
+struct P { x: i32; }
+
+fn main() -> i32 {
+    let p = P { x: 5, zz: 9 };
+    return p.x;
+}

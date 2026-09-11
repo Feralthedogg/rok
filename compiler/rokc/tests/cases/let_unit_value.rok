@@ -5,7 +5,7 @@
 // ok
 
 // A `()`-valued `let` (literal, unit call, block, unit `try .. catch`)
-// has nothing to store; codegen used to emit `arith.constant 0 : ()`.
+// has nothing to store, so no constant is emitted for it.
 
 fn f(fail: bool) throws (str) { if fail { throw "bad"; } }
 fn g() {}

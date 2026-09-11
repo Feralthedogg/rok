@@ -1,9 +1,0 @@
-// spec: 003.11-literal-pattern
-// probe: positive
-// expect-exit: 2
-
-// String literal patterns compare contents.
-fn main() -> i32 {
-    let s = "ab" + "c";
-    return match s { "x" => 1, "abc" => 2, _ => 3 };
-}

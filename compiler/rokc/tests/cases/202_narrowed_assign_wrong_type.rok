@@ -1,0 +1,6 @@
+// spec: 002.02-any-slot
+// expect-error: mismatched types: assignment to `v` expects `i32`, found `bool`
+
+// Inside the narrowed block `v` is `i32`; assign another type outside the narrowing.
+let v: any = 1;
+if v is i32 { v = true; }

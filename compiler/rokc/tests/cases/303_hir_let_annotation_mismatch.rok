@@ -1,0 +1,8 @@
+// spec: 003.03-let
+// A let annotation that disagrees with the initializer is an error.
+// expect-error: `let x` expects `i32`, found `bool`
+
+fn main() -> i32 {
+    let x: i32 = true;
+    return x;
+}

@@ -1,0 +1,28 @@
+// spec: 007.02-allocation §7.2.8
+// expect-exit: 0
+// expect-stdout:
+// no explicit collect yet: true
+// triggered by allocation: true
+// kept 64 w63
+
+// spec 7.2.8: the allocation slow path triggers GC on its own when the
+// heap fills — no explicit `rok_gc_collect` call is needed — and live
+// data survives those cycles.
+extern "C" {
+    fn rok_gc_stats_collections() -> u64;
+}
+
+fn main() -> i32 {
+    println(f"no explicit collect yet: {unsafe { rok_gc_stats_collections() } == 0u64}");
+    let keep: List<str> = [];
+    let i = 0;
+    while i < 2000000 {
+        let s = f"garbage {i} {i * 3}";
+        if i % 31250 == 0 { keep.push(f"w{keep.len()}"); }
+        if s.len() == 0 { return 1; }
+        i += 1;
+    }
+    println(f"triggered by allocation: {unsafe { rok_gc_stats_collections() } > 0u64}");
+    println(f"kept {keep.len()} {keep[63]}");
+    return 0;
+}

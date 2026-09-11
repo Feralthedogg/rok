@@ -8,16 +8,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use common::{ROKC, setup};
-
-fn workspace() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
+use common::{ROKC, scratch, setup, text, workspace};
 
 /// A fresh scratch package directory holding `files`.
 fn package(name: &str, files: &[(&str, &str)]) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rokc-devtools-{}-{name}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
+    let dir = scratch(name);
     for (path, text) in files {
         let p = dir.join(path);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -33,10 +28,6 @@ fn rokc(cwd: &Path, args: &[&str]) -> Output {
         .args(args)
         .output()
         .unwrap()
-}
-
-fn text(b: &[u8]) -> String {
-    String::from_utf8_lossy(b).into_owned()
 }
 
 #[track_caller]
@@ -220,7 +211,7 @@ fn doc_writes_html_with_links_and_search_index() {
             .unwrap_or_else(|| panic!("{s} not in {index}"))
     };
     assert!(
-        at("rokc-devtools") < at("util/index.html"),
+        at("rokc-test") < at("util/index.html"),
         "user package first"
     );
 

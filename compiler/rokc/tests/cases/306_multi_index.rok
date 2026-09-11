@@ -1,0 +1,14 @@
+// spec: 003.06.1-multi-dimensional-index
+// expect-exit: 0
+// expect-stdout:
+// 6
+
+// spec 3.6.1: `m[i, j]` multi-dimensional indexing via `Index<(I, J)>`,
+// here on an array of arrays.
+fn main() -> i32 {
+    let row1: [i32; 2] = [1, 2];
+    let row2: [i32; 2] = [3, 4];
+    let m: [[i32; 2]; 2] = [row1, row2];
+    println(f"{m[1, 1] + m[0, 1]}");   // 4 + 2 = 6
+    return 0;
+}

@@ -5,16 +5,14 @@
 use super::*;
 use rokc_ir_common::{Abi, FnRole, Linkage};
 
-/// Best-effort const-folding of a static initializer. Accepts integer
-/// and bool literals (with optional unary minus) plus string literals.
-/// Returns `None` for non-literal initializers — caller falls back to
-/// `ConstVal::Unit` and the codegen emits a zero-init global.
+/// Const-fold a static initializer: an integer (optionally negated),
+/// bool, string or `none` literal; `None` for anything else.
 pub(super) fn literal_to_const_val(expr: &Expr, ty: &HirTy) -> Option<ConstVal> {
     use rokc_ast::Literal as L;
     let lit = match &expr.kind {
         ExprKind::Literal(l) => l,
         ExprKind::OpPrefix { op, operand } if op == "-" => {
-            // Negate a leading unary minus (`static N: i32 = -1;`).
+            // `static N: i32 = -1;`
             if let ExprKind::Literal(L::Int(text)) = &operand.kind {
                 let stripped = strip_int_suffix(text.as_str());
                 if let Ok(n) = stripped.parse::<i128>() {
@@ -54,6 +52,8 @@ pub(super) fn literal_to_const_val(expr: &Expr, ty: &HirTy) -> Option<ConstVal> 
 /// Mutex::new(..)`).
 fn is_lazy_static_init(v: &Expr) -> bool {
     match &v.kind {
+        // Folded by the compile-time evaluator instead.
+        ExprKind::Literal(AstLit::Float(_)) => true,
         ExprKind::Literal(_) => false,
         ExprKind::OpPrefix { op, operand } if op == "-" => {
             !matches!(operand.kind, ExprKind::Literal(_))
@@ -146,6 +146,7 @@ pub fn lower_full(
     resolve::set_packages(input.packages.clone());
     // A prebuilt-library build: every body of that package is a root.
     let lib_pkg: Option<String> = input.lib.clone();
+    let check_library = input.check_library;
     let augmented = with_lazy_static_inits(program);
     let program = augmented.as_ref().unwrap_or(program);
     // Diagnostics emitted during pre-body passes (impl-target validation
@@ -321,11 +322,8 @@ pub fn lower_full(
             struct_decls.push(s);
         }
     }
-    // Spec 2.x / i-want 322-340: `union { ... }` declarations live in
-    // the same name space as structs. Register each one in
-    // `struct_table` so paths resolve uniformly, and tag the resulting
-    // `HirStructDef` with a `union_kind` so init/read sites know to use
-    // the bitcast/cast access path instead of the regular field-by-index.
+    // Unions share the struct namespace and id space; `union_kind` sends
+    // init / read sites to the bitcast access path.
     let mut union_decls: Vec<&rokc_ast::UnionDef> = Vec::new();
     for item in &program.items {
         rokc_diagnostic::set_current_span(item.span());
@@ -460,11 +458,8 @@ pub fn lower_full(
         enum_defs[i] = lower_enum_def(e, id, &struct_table, &enum_table, sc, &mut Vec::new());
     }
 
-    // Pass 1c: collect module-level `const` items. Their value
-    // expressions are stored as AST and inlined at each use site.
-    // `static` items follow a different path — they get stable global
-    // storage (`HirStaticDef`) and reads/writes go through addressof
-    // + load/store at codegen time.
+    // Pass 1c: module-level `const`s, kept as AST and inlined at each
+    // use; `static`s get global storage (`HirStaticDef`).
     let mut consts: HashMap<String, (Ty, Expr)> = HashMap::new();
     let mut impl_const_sets: Vec<ImplConsts> = Vec::new();
     for item in &program.items {
@@ -511,8 +506,7 @@ pub fn lower_full(
                 module: &module,
             };
             let ty = resolve_ty_with_structs(&s.ty, &struct_table, &enum_table, sc);
-            // Stage-1: the initializer must const-fold to a literal. A
-            // non-literal used to zero-initialize the global silently.
+            // A non-lazy initializer must const-fold to a literal.
             let lazy = s.value.as_ref().is_some_and(is_lazy_static_init);
             let init = match s.value.as_ref() {
                 Some(_) if lazy => ConstVal::Unit,
@@ -572,9 +566,8 @@ pub fn lower_full(
             }
         }
     }
-    // Pass 1d: collect type aliases. Names resolve to the aliased type
-    // wherever a `Path` appears in a type position. We do a post-pass
-    // expansion so the alias table can refer to other aliases.
+    // Pass 1d: type aliases, expanded afterwards so one alias can name
+    // another.
     let mut type_aliases: HashMap<String, HirTy> = HashMap::new();
     for item in &program.items {
         rokc_diagnostic::set_current_span(item.span());
@@ -599,8 +592,8 @@ pub fn lower_full(
             substitute_aliases(v, &snapshot);
         }
     }
-    // Spec 2.x: an alias that still mentions an alias after expansion is
-    // cyclic (`type A = B; type B = A;`) and has no meaning.
+    // An alias still naming an alias after expansion is cyclic
+    // (`type A = B; type B = A;`).
     {
         let mut cyclic: Vec<&String> = type_aliases
             .iter()
@@ -660,18 +653,15 @@ pub fn lower_full(
         }
     }
 
-    // Pass 2: collect every function-like declaration. Free functions
-    // first, then `impl` methods (each method becomes a synthetic free
-    // function `Type::method` with `self` as its first parameter).
-    // Generic functions don't get a single concrete signature — they
-    // monomorphize per-call. We stash the AST aside instead of putting
-    // them in `decls` / `fn_table`.
+    // Pass 2: function-like declarations. Free functions first, then
+    // `impl` methods (a free function `Type::method` taking `self`
+    // first). Generic functions stay AST templates, monomorphized per
+    // call, outside `decls` / `fn_table`.
     let mut fn_table: HashMap<String, FnSig> = HashMap::new();
     let mut extern_fns = std::collections::HashSet::new();
     let mut method_table: HashMap<(MethodTarget, String), Vec<FunctionId>> = HashMap::new();
     let mut method_info: HashMap<FunctionId, MethodInfo> = HashMap::new();
-    // Records `(Type, TraitName)` for each `impl Trait for Type` block
-    // — feeds the generic-bound check at monomorphization time.
+    // `(Type, TraitName)` per `impl Trait for Type`, for generic bounds.
     let mut impl_traits: std::collections::HashSet<(MethodTarget, String)> =
         std::collections::HashSet::new();
     let mut decls: Vec<MethodOrFn<'_>> = Vec::new();
@@ -802,7 +792,7 @@ pub fn lower_full(
             trait_defs.entry(t.name.clone()).or_insert(t);
         }
     }
-    // `any Tr` (D4): each trait's method names and supertrait keys, and
+    // `any Tr`: each trait's method names and supertrait keys, and
     // (filled per impl below) its implementing types in source order.
     let trait_info: HashMap<String, TraitInfo> = trait_defs
         .iter()
@@ -1027,9 +1017,7 @@ pub fn lower_full(
             .as_ref()
             .and_then(|tn| trait_defs.get(tn).copied());
         let target_display = impl_def_display(&impl_def.self_ty);
-        // Names of methods this impl block explicitly provides —
-        // used below to avoid double-registering a default that's
-        // overridden here.
+        // Methods this impl provides: their trait defaults are skipped.
         let mut explicit_methods: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         for ii in &impl_def.items {
@@ -1052,9 +1040,8 @@ pub fn lower_full(
                 // `Self` take the impl target type at instantiation.
                 let mut def = m.clone();
                 let base_leaf = leaf_name(base);
-                // ponytail: `Box__get` doubles as the mono cache key and
-                // the name in diagnostics ("cannot infer `U` of
-                // `Box__get`"); carry a display name if that reads badly.
+                // `Box__get` is both the mono cache key and the name
+                // diagnostics print.
                 def.name = if module.is_empty() {
                     format!("{base_leaf}__{leaf}")
                 } else {
@@ -1187,11 +1174,8 @@ pub fn lower_full(
             lib_decl.push(!package_of(&module).is_empty());
         }
 
-        // Pull in default-method bodies from the trait this impl
-        // is for, when the impl doesn't override them. Each default
-        // gets specialized for `Self = target_ty` by reusing the
-        // method-lowering machinery. A required method (no body) that
-        // the impl doesn't provide is an error.
+        // Trait defaults the impl doesn't override, lowered as methods
+        // with `Self = target_ty`. A missing required method is an error.
         if let Some(trait_def) = trait_def {
             let trait_module = module_of(&trait_def.name);
             for ti in &trait_def.items {
@@ -1265,8 +1249,7 @@ pub fn lower_full(
                             },
                         });
                     }
-                    // ponytail: a primitive / tuple target gets no such
-                    // defaults; add when one needs them.
+                    // A primitive / tuple target gets no such defaults.
                     continue;
                 }
                 // `trait Contains<Item>` + `impl Contains<i32> for S`: the
@@ -1295,7 +1278,9 @@ pub fn lower_full(
                         }),
                         rokc_ast::GenericParam::Const { name, ty } => {
                             let v = match &targs.get(name)?.kind {
-                                AstTyKind::Const(c) => crate::ty::eval_const_with(c, &|_| None)?,
+                                AstTyKind::Const(c) => {
+                                    super::const_eval::syntactic_int(c, &|_| None)?
+                                }
                                 _ => return None,
                             };
                             let prim = match resolve_ty(ty) {
@@ -1311,9 +1296,8 @@ pub fn lower_full(
                 } else {
                     let mut d = tm.clone();
                     subst_assoc_sig(&mut d, &targs);
-                    // ponytail: leaked so `decls` can borrow it like the
-                    // program's own items; one small FnDef per default
-                    // instance for the life of the (short) compiler run.
+                    // Leaked so `decls` can borrow it like the program's
+                    // items: one small FnDef per default instance per run.
                     Box::leak(Box::new(d))
                 };
                 let id = FunctionId(u32::try_from(decls.len()).expect("FunctionId overflow"));
@@ -1427,6 +1411,9 @@ pub fn lower_full(
         infer_vars: std::cell::RefCell::new(Vec::new()),
         infer_depth: std::cell::Cell::new(0),
         infer_floor: std::cell::Cell::new(0),
+        fn_origin: std::cell::RefCell::new(HashMap::new()),
+        const_lowering: std::cell::RefCell::new(std::collections::HashSet::new()),
+        const_stack: std::cell::RefCell::new(Vec::new()),
     };
     let mut exports: Vec<(FunctionId, String)> = Vec::new();
     let mut prebuilt: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
@@ -1536,6 +1523,7 @@ pub fn lower_full(
         generic_trait_impls,
         intrinsics,
         extern_fn_ids: extern_fn_ids.clone(),
+        rok_externs: rok_externs.clone(),
         c_variadic: c_variadic.clone(),
         c_defs: c_defs.iter().copied().collect(),
         prec,
@@ -1557,6 +1545,7 @@ pub fn lower_full(
             .collect(),
         literal_shapes: literal_handlers(program, &mut pre_diags),
         names,
+        decls,
     };
     check_impl_overlap(&env);
     check_derives(&env, program);
@@ -1619,7 +1608,8 @@ pub fn lower_full(
         env.statics.insert(static_defs[i].name.clone(), ty.clone());
         static_defs[i].ty = ty;
     }
-    let decl_roots: Vec<bool> = decls
+    let decl_roots: Vec<bool> = env
+        .decls
         .iter()
         .zip(&lib_decl)
         .enumerate()
@@ -1629,12 +1619,23 @@ pub fn lower_full(
                 MethodOrFn::Fn(f) => module_of(&f.name),
                 MethodOrFn::Method { module, .. } => module.clone(),
             };
-            !lib || exports.iter().any(|(id, _)| id.0 as usize == i)
+            !lib || check_library
+                || exports.iter().any(|(id, _)| id.0 as usize == i)
                 || is_lazy_init_fn(&f.name)
                 || lib_pkg.as_ref().is_some_and(|p| package_of(&module) == *p)
         })
         .collect();
-    let (mut functions, unlowered) = lower_bodies(&env, &decls, &decl_roots);
+    super::const_eval::check_user_consts(&env);
+    let (mut functions, unlowered) = lower_bodies(&env, &decl_roots);
+    // Spec 5.3.1: an initializer evaluated now needs no lazy init.
+    let folded_statics: HashMap<String, ConstVal> = static_defs
+        .iter()
+        .filter_map(|s| {
+            let init = lazy_init_fn_name(&s.name);
+            let f = functions.iter().find(|f| f.name == init)?;
+            Some((s.name.clone(), super::const_eval::static_init(&env, f)?))
+        })
+        .collect();
     for (i, name) in link_names {
         functions[i].name = name;
     }
@@ -1663,6 +1664,10 @@ pub fn lower_full(
     enums.extend(sink.extra_enums.into_inner());
     super::infer::drop_var_instances(&mut structs, &mut enums);
     for s in &mut static_defs {
+        if let Some(c) = folded_statics.get(&s.name) {
+            s.init = c.clone();
+            continue;
+        }
         let init = lazy_init_fn_name(&s.name);
         s.init_fn = functions.iter().find(|f| f.name == init).map(|f| f.id);
     }
@@ -1701,11 +1706,9 @@ pub fn lower_full(
     }
     let lazy_inits = static_defs.iter().filter_map(|s| s.init_fn);
     let roots = if lib_pkg.is_some() {
-        let package = decls
-            .iter()
-            .enumerate()
-            .filter(|&(i, _)| decl_roots[i] && lib_decl[i])
-            .map(|(i, _)| FunctionId(i as u32));
+        let package = (0..decl_roots.len())
+            .filter(|&i| decl_roots[i] && lib_decl[i])
+            .map(|i| FunctionId(i as u32));
         let dispatchers = functions
             .iter()
             .filter(|f| f.facts.role == FnRole::AnyDispatcher)
@@ -2155,9 +2158,7 @@ pub(super) fn lower_struct_def(
             .map(|f| HirField {
                 name: f.name.clone(),
                 ty: resolve_ty_with_structs(&f.ty, structs, enums, sc),
-                // Spec 2.x / i-want 942-950: keep the default expr so
-                // a literal that omits this field can fill it lazily
-                // at the use site.
+                // A literal omitting the field fills it at the use site.
                 default: f.default.clone(),
             })
             .collect(),
@@ -2317,13 +2318,9 @@ pub(super) fn union_storage_strategy(
     }
     // Round size up to align (C ABI: padding to alignment boundary).
     let padded = size.div_ceil(align) * align;
-    // Stage-1: byte-array storage path is reserved in HIR (model B) but
-    // codegen for value-level bitcast between primitive ↔ `[u8; N]` is
-    // not yet wired through (mlir-translate rejects
-    // `unrealized_conversion_cast` for these). Emit an explicit message
-    // up front so users see a clear stage-1 limitation rather than an
-    // opaque MLIR error. Stage-2 will replace this with alloca + GEP +
-    // pointer bitcast + store/load pattern.
+    // Codegen can't bitcast a primitive ↔ `[u8; N]` value yet
+    // (mlir-translate rejects the cast): report it here rather than as
+    // an opaque MLIR error.
     pre_diags.push(rokc_diagnostic::RokDiagnostic::error(
         rokc_diagnostic::ErrorKind::Type,
         format!(
@@ -2373,10 +2370,8 @@ pub(super) fn ty_size_align_bytes(ty: &HirTy) -> Option<(u32, u32)> {
             let (sz, al) = ty_size_align_bytes(elem)?;
             Some((sz * n, al))
         }
-        // Stage-1: struct/enum sizes need module access; report as
-        // unknown so the caller falls back to the byte-array
-        // diagnostic. Adding accurate sizing requires plumbing the
-        // module reference here — separate milestone.
+        // Struct / enum sizes need the module: unknown, so the caller
+        // reports the byte-array diagnostic.
         HirTy::Struct(_)
         | HirTy::Enum(_)
         | HirTy::Path(_)
@@ -2459,8 +2454,8 @@ fn generic_trait_impl(
         let mut def = m.clone();
         subst_assoc_sig(&mut def, &assoc);
         let leaf = leaf_name(&m.name);
-        // ponytail: `__impl3_show` is both the mono cache key and the
-        // name diagnostics print; carry a display name if that reads badly.
+        // `__impl3_show` is both the mono cache key and the name
+        // diagnostics print.
         def.name = if def_module.is_empty() {
             format!("__impl{index}_{leaf}")
         } else {
@@ -2558,14 +2553,11 @@ fn generic_trait_impl(
     }
 }
 
-/// A type has at most one impl of a trait (spec 2.9.3): a concrete impl
-/// that a generic impl also covers is a duplicate — there is no
-/// specialization.
 /// `(Type::NAME, type, value)` for an impl's consts plus, in a trait
 /// impl, the trait's defaults it leaves out. The key uses the generic
 /// base (`Box::N` for `impl<T> Box<T>`) or a primitive's name.
-// ponytail: one key per base type — two impls of a generic base
-// (`Box<i32>`, `Box<f64>`) can't give the same const different values.
+// One key per base type: two impls of a generic base (`Box<i32>`,
+// `Box<f64>`) can't give the same const different values.
 fn impl_consts(
     i: &rokc_ast::ImplDef,
     program: &Program,
@@ -2679,68 +2671,66 @@ fn impl_consts(
     (keyed, Some(set))
 }
 
+/// Lower declaration `i` (`stub`: its signature only).
+pub(super) fn lower_decl(env: &Env<'_>, i: usize, stub: bool) -> HirFunction {
+    let id = FunctionId(u32::try_from(i).expect("FunctionId overflow"));
+    let (MethodOrFn::Fn(f) | MethodOrFn::Method { fn_def: f, .. }) = &env.decls[i];
+    let bodiless;
+    let f: &FnDef = if stub {
+        bodiless = FnDef {
+            vis: f.vis,
+            attrs: f.attrs.clone(),
+            name: f.name.clone(),
+            generics: f.generics.clone(),
+            params: f.params.clone(),
+            ret_ty: f.ret_ty.clone(),
+            body: None,
+            is_async: f.is_async,
+            is_generator: f.is_generator,
+            is_unsafe: f.is_unsafe,
+            throws: f.throws.clone(),
+            where_clause: f.where_clause.clone(),
+            span: f.span,
+        };
+        &bodiless
+    } else {
+        f
+    };
+    match &env.decls[i] {
+        MethodOrFn::Fn(_) => lower_fn(env, f, id, None, module_of(&f.name)),
+        MethodOrFn::Method {
+            self_ty,
+            module,
+            key,
+            subst,
+            ..
+        } => super::mono::lower_fn_inner(
+            env,
+            f,
+            id,
+            key.clone(),
+            Some(self_ty.clone()),
+            module.clone(),
+            subst,
+        ),
+    }
+}
+
 /// Pass 3: function bodies. The `roots` (user code, exports, lazy static
 /// initializers) are lowered, then every decl a lowered body names —
 /// calls, `fn` values, closures, coroutines; f-string helpers, operator
 /// traits, iterator protocols and `any` dispatchers all resolve to these
 /// — lowest id first, so user code keeps its order. A library body never
 /// reached stays a body-less stub (its signature, for tools) and is
-/// listed as unlowered (MIR drops it). `ROK_EAGER_LIBRARY` set lowers
-/// (and so checks) every library body.
-// ponytail: worklist over one run; no cache of library HIR across runs
-// (that is the RHIR work).
-fn lower_bodies(
-    env: &Env<'_>,
-    decls: &[MethodOrFn<'_>],
-    roots: &[bool],
-) -> (Vec<HirFunction>, Vec<FunctionId>) {
-    let eager = std::env::var_os("ROK_EAGER_LIBRARY").is_some();
-    let lower = |i: usize, stub: bool| {
-        let id = FunctionId(u32::try_from(i).expect("FunctionId overflow"));
-        let (MethodOrFn::Fn(f) | MethodOrFn::Method { fn_def: f, .. }) = &decls[i];
-        let bodiless;
-        let f: &FnDef = if stub {
-            bodiless = FnDef {
-                vis: f.vis,
-                attrs: f.attrs.clone(),
-                name: f.name.clone(),
-                generics: f.generics.clone(),
-                params: f.params.clone(),
-                ret_ty: f.ret_ty.clone(),
-                body: None,
-                is_async: f.is_async,
-                is_generator: f.is_generator,
-                is_unsafe: f.is_unsafe,
-                throws: f.throws.clone(),
-                where_clause: f.where_clause.clone(),
-                span: f.span,
-            };
-            &bodiless
-        } else {
-            f
-        };
-        match &decls[i] {
-            MethodOrFn::Fn(_) => lower_fn(env, f, id, None, module_of(&f.name)),
-            MethodOrFn::Method {
-                self_ty,
-                module,
-                key,
-                subst,
-                ..
-            } => super::mono::lower_fn_inner(
-                env,
-                f,
-                id,
-                key.clone(),
-                Some(self_ty.clone()),
-                module.clone(),
-                subst,
-            ),
-        }
-    };
+/// listed as unlowered (MIR drops it). `--check-library` lowers (and so
+/// checks) every library body.
+// No cache of library HIR across runs.
+fn lower_bodies(env: &Env<'_>, roots: &[bool]) -> (Vec<HirFunction>, Vec<FunctionId>) {
+    let decls = &env.decls;
+    let lower = |i: usize, stub: bool| lower_decl(env, i, stub);
     let mut done: Vec<Option<HirFunction>> = (0..decls.len()).map(|_| None).collect();
     let mut pending: std::collections::BTreeSet<usize> =
-        (0..decls.len()).filter(|&i| eager || roots[i]).collect();
+        (0..decls.len()).filter(|&i| roots[i]).collect();
     let named = |f: &HirFunction, pending: &mut std::collections::BTreeSet<usize>| {
         let Some(body) = &f.body else { return };
         crate::each_block(body, &mut |e| {
@@ -3124,6 +3114,8 @@ fn check_type_bounds(env: &Env<'_>) {
     }
 }
 
+/// A type has at most one impl of a trait (spec 2.9.3): a concrete impl
+/// that a generic impl also covers is a duplicate (no specialization).
 fn check_impl_overlap(env: &Env<'_>) {
     let no_subst = HashMap::new();
     let ctx = LowerCtx::new(env, &no_subst, None);
@@ -3534,7 +3526,7 @@ impl Unifier {
                 self.unify(&n, &m)?;
                 self.unify(&p, &q)
             }
-            // ponytail: sums only unify member-for-member in written order.
+            // Sums only unify member-for-member in written order.
             (CanonTy::Sum(xs), CanonTy::Sum(ys)) if xs.len() == ys.len() => {
                 xs.iter().zip(&ys).try_for_each(|(p, q)| self.unify(p, q))
             }
@@ -3543,7 +3535,7 @@ impl Unifier {
     }
 }
 
-/// E3 rules for impls of auto traits (`Send` / `Sync`): opting in is
+/// Rules for impls of auto traits (`Send` / `Sync`): opting in is
 /// `unsafe impl`; opting out is `impl !Tr for S` on a struct / enum,
 /// recorded in `neg` as `(generic base, trait key)`. `unsafe impl` and
 /// `!` are for auto traits only. Returns whether to go on registering
@@ -3691,7 +3683,7 @@ fn lang_slot(a: &rokc_ast::Attribute) -> Option<String> {
 }
 
 /// `#[lang("send_trait")]` / `#[lang("sync_trait")]`: a structural
-/// auto trait (E3).
+/// auto trait.
 fn is_auto_trait_attr(a: &rokc_ast::Attribute) -> bool {
     a.name() == "lang"
         && matches!(&a.body, rokc_ast::AttrBody::Args(args) if args.iter().any(|x| matches!(
@@ -3806,8 +3798,6 @@ fn impl_assoc_types(impl_def: &rokc_ast::ImplDef) -> HashMap<String, Ty> {
         .collect()
 }
 
-/// Trait type parameter -> the impl's argument (or the parameter's
-/// default, `Self` meaning the impl target; spec 2.10.5).
 /// The value of a trait's const argument: a literal, a `const` item
 /// (`W`, looked up from `module` then the root) or a braced const
 /// expression over those (`{ W + 1 }`).
@@ -3816,23 +3806,27 @@ fn const_arg_value(t: &Ty, consts: &HashMap<String, (Ty, Expr)>, module: &str) -
         name: &str,
         consts: &HashMap<String, (Ty, Expr)>,
         module: &str,
-        depth: u32,
+        seen: &std::cell::RefCell<Vec<String>>,
     ) -> Option<i128> {
         let key = [format!("{module}::{name}"), name.to_owned()]
             .into_iter()
             .find(|k| consts.contains_key(k))?;
+        if seen.borrow().contains(&key) {
+            return None;
+        }
+        seen.borrow_mut().push(key.clone());
         let value = rokc_ast::ConstExpr::Expr(Box::new(consts[&key].1.clone()));
-        // ponytail: depth cap instead of cycle detection.
-        (depth < 16).then(|| {
-            crate::ty::eval_const_with(&value, &|n| lookup(n, consts, module, depth + 1))
-        })?
+        let v = super::const_eval::syntactic_int(&value, &|n| lookup(n, consts, module, seen));
+        seen.borrow_mut().pop();
+        v
     }
     let c = match &t.kind {
         AstTyKind::Const(c) => c.clone(),
         AstTyKind::Path(p) => rokc_ast::ConstExpr::Path(p.clone()),
         _ => return None,
     };
-    crate::ty::eval_const_with(&c, &|n| lookup(n, consts, module, 0))
+    let seen = std::cell::RefCell::new(Vec::new());
+    super::const_eval::syntactic_int(&c, &|n| lookup(n, consts, module, &seen))
 }
 
 /// `v` as a const type argument.
@@ -3858,6 +3852,8 @@ fn const_literal_ty(v: i128, span: rokc_diagnostic::Span) -> Ty {
     }
 }
 
+/// Trait type parameter → the impl's argument (or the parameter's
+/// default, `Self` meaning the impl target; spec 2.10.5).
 fn trait_param_args(t: &rokc_ast::TraitDef, impl_def: &rokc_ast::ImplDef) -> HashMap<String, Ty> {
     let given: &[Ty] = impl_def
         .trait_path

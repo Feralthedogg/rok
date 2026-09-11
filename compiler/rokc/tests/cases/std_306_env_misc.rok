@@ -1,0 +1,17 @@
+// spec: std 306-env §3.6.1
+// expect-exit: 0
+// expect-stdout:
+// missing var: NotPresent
+// home: true
+
+// spec 3.6.1: `var` throws (VarError) for an unset name; `home_dir`
+// follows $HOME. (`var_os` / `current_exe` / `join_paths`:
+// std_306_env_missing_fns.)
+use rok::std::env;
+use rok::std::path::Path;
+
+fn main() {
+    println("missing var: " + (try env::var("ROK_PROBE_SURELY_UNSET_9") catch e { e.debug() }));
+    env::set_var("HOME", "/tmp/rokhome");
+    println(f"home: {(env::home_dir() ?? Path::new()).as_str() == "/tmp/rokhome"}");
+}

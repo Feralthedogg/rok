@@ -10,9 +10,7 @@
 // Spawned tasks run concurrently and no sleep wakes before its deadline.
 // The deadlines are absolute (fixed before spawning) and the workers
 // don't print: when each task is first polled, and in which order tasks
-// woken together print, is up to OS scheduling (the old version slept
-// relative to its first poll and printed from the workers, and failed
-// under load).
+// woken together print, is up to OS scheduling.
 async fn worker(name: str, at: Instant) -> str {
     await task::sleep_until(at);
     if Instant::now().as_nanos() >= at.as_nanos() { f"{name} woke on time" } else { f"{name} woke EARLY" }

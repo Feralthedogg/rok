@@ -1,0 +1,24 @@
+// spec: std 200-core/218-task §2.18.1 / refs-lang 004.12 §4.12.9
+// expect-exit: 0
+// expect-stdout:
+// a b c
+// 3 tasks finished true
+
+// stdlib 2.18.1: `task::join` awaits every task and returns the results in
+// the order of the input list, not completion order (the first task
+// sleeps longest).
+async fn after(ms: i64, name: str) -> str {
+    await task::sleep(Duration::ms(ms));
+    name
+}
+
+async fn main() {
+    let ts = [
+        task::spawn(after(30, "a")),
+        task::spawn(after(1, "b")),
+        task::spawn(after(10, "c")),
+    ];
+    let rs = await task::join(ts);
+    println(f"{rs[0]} {rs[1]} {rs[2]}");
+    println(f"{rs.len()} tasks finished {ts[0].is_finished() && ts[1].is_finished() && ts[2].is_finished()}");
+}

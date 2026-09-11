@@ -1,0 +1,23 @@
+// spec: 009.05-symbol-mangling §9.5.8
+// expect-exit: 0
+// expect-stdout:
+// 42
+// 42
+
+// spec 9.5.8: `#[export_name("name")]` exposes a rok function under that
+// exact (unmangled) symbol, so an `extern "C"` declaration of the name
+// links back to it.
+#[export_name("rok_probe_905_compute")]
+pub extern "C" fn compute(x: i64) -> i64 {
+    return x * 2i64;
+}
+
+extern "C" {
+    fn rok_probe_905_compute(x: i64) -> i64;
+}
+
+fn main() -> i32 {
+    println(f"{compute(21i64)}");
+    println(f"{unsafe { rok_probe_905_compute(21i64) }}");
+    return 0;
+}

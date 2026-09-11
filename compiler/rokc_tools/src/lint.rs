@@ -9,8 +9,7 @@
 //! `#[allow/warn/deny(name)]` on an enclosing item, `mod`, or `#![..]`
 //! at the top of a file (innermost wins).
 //!
-//! ponytail: items have only start spans, so an item's attribute scope
-//! runs to the next sibling item's start. Name-based lints (`dead_code`,
+//! Items have only start spans, so an item's attribute scope runs to the next sibling item's start. Name-based lints (`dead_code`,
 //! `unused_imports`, `deprecated`, `unused_must_use`) match by the last
 //! path segment, so a same-named item elsewhere hides a finding (never
 //! the reverse). Names starting with an uppercase letter are not tracked
@@ -31,40 +30,7 @@ use rokc_interface::{CompileResult, SourceFile};
 
 use crate::analysis::{each_block, short_name};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Level {
-    Allow,
-    Warn,
-    Deny,
-}
-
-impl Level {
-    #[must_use]
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "allow" => Some(Self::Allow),
-            "warn" => Some(Self::Warn),
-            "deny" => Some(Self::Deny),
-            _ => None,
-        }
-    }
-
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Allow => "allow",
-            Self::Warn => "warn",
-            Self::Deny => "deny",
-        }
-    }
-
-    const fn flag(self) -> &'static str {
-        match self {
-            Self::Allow => "-A",
-            Self::Warn => "-W",
-            Self::Deny => "-D",
-        }
-    }
-}
+pub use rokc_core::lint::Level;
 
 pub struct Lint {
     pub name: &'static str,

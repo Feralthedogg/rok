@@ -140,8 +140,8 @@ fn pratt_prefix_neg() {
 
 #[test]
 fn as_binds_below_prefix_above_arith() {
-    // Spec 3.2.3: `as` / `is` are level 10 — `-x as i64` is `(-x) as i64`,
-    // `a + b as i64` is `a + (b as i64)`.
+    // Spec 3.2.3: `-x as i64` is `(-x) as i64`, `a + b as i64` is
+    // `a + (b as i64)`.
     let p = parse("fn t() { return -x as i64; }");
     let ExprKind::Cast(inner, _) = &return_expr(&p).kind else {
         panic!()
@@ -292,8 +292,8 @@ fn attr_derive_words() {
 
 #[test]
 fn struct_literal_decided_by_syntax_not_prescan() {
-    // Regression: the old scanner registered `size` (from the comment)
-    // as a type name, so `Foo { size: 1 }` became a trailing closure.
+    // `size` in a comment must not register as a type name, or
+    // `Foo { size: 1 }` parses as a trailing closure.
     let p = parse(
         "// compute the struct size\nstruct Foo { size: i32; }\n\
          fn f() { let v = Foo { size: 1 }; }",
@@ -688,7 +688,7 @@ fn any_trait_type_forms() {
 
 #[test]
 fn block_like_statement_needs_no_semicolon() {
-    // Spec E5: `if c {} -1` is two statements; `f() g()` lacks a `;`.
+    // `if c {} -1` is two statements; `f() g()` lacks a `;`.
     let p = parse("fn t() { if c { a(); } -1; match x { _ => {} } loop { break; } }");
     let Item::Fn(f) = &p.items[0] else { panic!() };
     let body = f.body.as_ref().unwrap();

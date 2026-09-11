@@ -1,31 +1,37 @@
 //! `rokc fmt` (spec 901): the standard layout for `.rok` sources and
 //! `.rokon` data files.
 //!
-//! Layout-only and token-preserving: the formatter re-indents lines by
-//! bracket nesting (4 spaces per level), strips trailing whitespace,
-//! collapses runs of blank lines to one, and ends the file with a single
-//! newline. It never moves tokens between lines or touches what is
-//! between tokens on a line, so comments survive as written and the token
-//! stream is unchanged by construction.
+//! Layout only: lines are re-indented by bracket nesting (4 spaces per
+//! level), trailing whitespace is stripped, blank-line runs collapse to
+//! one and the file ends with one newline. Tokens never move between
+//! lines and nothing between tokens on a line changes, so comments
+//! survive and the token stream is unchanged by construction.
 //!
-//! Why not an AST printer: the parser desugars (`if let`, `catch`,
-//! derives, f-strings) and drops comments, so printing the AST cannot
-//! reproduce the source. ponytail: no line breaking / joining or
-//! intra-line spacing rules; add them on the token stream if a style
-//! guide asks for them.
+//! Not an AST printer: the parser desugars (`if let`, `catch`, derives,
+//! f-strings) and drops comments. No line breaking or intra-line spacing.
+
+use std::path::Path;
 
 use rokc_lexer::{Lexer, TokenKind};
 
 const INDENT: usize = 4;
 
-/// Format one source file. `Err` holds the first lexical error (the file
-/// is left alone).
-pub fn format_source(src: &str) -> Result<String, String> {
+/// Format the file `path` whose text is `src`: a `.rokon` file must be
+/// one RokON value. `Err` is the rendered error; the file is left alone.
+pub fn format_file(path: &Path, src: &str) -> Result<String, String> {
+    if path.extension().is_some_and(|x| x == "rokon") {
+        rokc_rokon::parse(src).map_err(|e| e.render(src, &path.display().to_string()))?;
+    }
+    format_source(src)
+}
+
+/// `Err` holds the first lexical error.
+fn format_source(src: &str) -> Result<String, String> {
     let (mut tokens, mut diags) = Lexer::new(src, "<fmt>").lex_all();
     if diags.iter().any(rokc_diagnostic::RokDiagnostic::is_error) {
         // The file may register extension operators (`#[infix("⊕")]`,
-        // spec 1.10.4): lex again with them, as the compiler's pre-pass
-        // does. ponytail: operators from other files are not seen.
+        // spec 1.10.4): lex again with them. Operators registered in
+        // other files are not seen.
         let (program, _) = rokc_parser::parse_program(&tokens, "<fmt>");
         let ops = rokc_parser::collect_prec_table(&program)
             .0
@@ -130,16 +136,6 @@ pub fn format_source(src: &str) -> Result<String, String> {
     Ok(out)
 }
 
-/// Format a `.rokon` file with the same layout rules.
-///
-/// It must be one RokON value (`Err`: the rendered error, against
-/// `file`). ponytail: re-indented in place, not rewritten to the canonical
-/// one-line-if-it-fits form (that would drop comments).
-pub fn format_rokon(src: &str, file: &str) -> Result<String, String> {
-    rokc_rokon::parse(src).map_err(|e| e.render(src, file))?;
-    format_source(src)
-}
-
 const fn is_open(k: &TokenKind) -> bool {
     matches!(
         k,
@@ -198,9 +194,8 @@ fn block_comments(src: &str, from: usize, to: usize, out: &mut Vec<(usize, usize
     }
 }
 
-/// A minimal unified-style line diff (`--diff`): `-old` / `+new` lines
-/// with their 1-based line numbers. LCS over lines; ponytail: O(n·m),
-/// fine for source files.
+/// A minimal line diff (`--diff`): `-old` / `+new` lines with their
+/// 1-based line numbers. O(n·m) LCS: source files are small.
 #[must_use]
 pub fn line_diff(old: &str, new: &str) -> String {
     let a: Vec<&str> = old.lines().collect();
@@ -255,10 +250,10 @@ mod tests {
     fn rokon_files() {
         let src = "// cfg\nCfg {\n  tags: [\n      \"a\", // first\n  ],\n}\n";
         assert_eq!(
-            format_rokon(src, "c.rokon").unwrap(),
+            format_file(Path::new("c.rokon"), src).unwrap(),
             "// cfg\nCfg {\n    tags: [\n        \"a\", // first\n    ],\n}\n"
         );
-        let e = format_rokon("Cfg { a: x }", "c.rokon").unwrap_err();
+        let e = format_file(Path::new("c.rokon"), "Cfg { a: x }").unwrap_err();
         assert!(e.starts_with("c.rokon:1:10: error: bare identifier"), "{e}");
     }
 

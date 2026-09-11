@@ -1,0 +1,78 @@
+// Spec 6.5.8: a `const fn` literal handler runs at compile time and its
+// result is embedded as a constant; a handler argument known only at
+// run time leaves an ordinary call.
+// expect-exit: 0
+// expect-stdout:
+// 1500 0.25
+// 255 128 15
+// 4 7
+// 17
+struct Meters {
+    v: f64;
+}
+
+#[literal(number "km")]
+const fn km(n: f64) -> Meters {
+    Meters { v: n * 1000.0 }
+}
+
+#[literal(number "cm")]
+const fn cm(n: f64) -> Meters {
+    Meters { v: n / 100.0 }
+}
+
+struct Rgb {
+    r: u8;
+    g: u8;
+    b: u8;
+}
+
+const fn hex_digit(c: char) -> u32 {
+    if c >= '0' && c <= '9' {
+        return c as u32 - '0' as u32;
+    }
+    if c >= 'a' && c <= 'f' {
+        return c as u32 - 'a' as u32 + 10;
+    }
+    panic("not a hex digit");
+}
+
+// A validating literal: `rgb "ff800f"`.
+#[literal("rgb" string)]
+const fn rgb(s: str) -> Rgb {
+    let v: u32 = 0;
+    let n = 0;
+    for c in s.chars() {
+        v = v * 16 + hex_digit(c);
+        n = n + 1;
+    }
+    if n != 6 {
+        panic("an `rgb` literal has 6 hex digits");
+    }
+    Rgb { r: (v >> 16) as u8, g: ((v >> 8) & 255) as u8, b: (v & 255) as u8 }
+}
+
+struct Pair {
+    a: i32;
+    b: i32;
+}
+
+#[literal("@" "(" expr "," expr ")")]
+const fn pair(a: i32, b: i32) -> Pair {
+    Pair { a: a, b: b }
+}
+
+fn main() -> i32 {
+    let d = 1.5km;
+    let e = 25cm;
+    println(f"{d.v} {e.v}");
+    let c = rgb "ff800f";
+    println(f"{c.r} {c.g} {c.b}");
+    let p = @(4, 7);
+    println(f"{p.a} {p.b}");
+    // Run-time arguments: called at run time.
+    let x = 10;
+    let q = @(x, x + 7);
+    println(f"{q.b}");
+    return 0;
+}

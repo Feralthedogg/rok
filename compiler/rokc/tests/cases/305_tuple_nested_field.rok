@@ -1,0 +1,14 @@
+// spec: 003.05-tuple-field-nested
+// expect-exit: 0
+// expect-stdout:
+// 2
+// 3
+
+// `t.0.1` lexes as `t` `.` `0.1` (float); the parser must split it into
+// two tuple-field accesses.
+fn main() -> i32 {
+    let t = ((1, 2), 3);
+    println(f"{t.0.1}");
+    println(f"{t.1}");
+    return 0;
+}

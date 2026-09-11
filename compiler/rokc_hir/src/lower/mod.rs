@@ -21,6 +21,7 @@ use crate::{
 
 mod bignum;
 mod collect;
+pub mod const_eval;
 mod coro;
 mod desugar;
 mod expr;
@@ -63,11 +64,9 @@ use throws::{
     main_frame, rethrows_value, sig_ret_ast, uncaught_in_main, unpack_call,
 };
 
-/// Outcome of glob resolution for one bare name. Single imports always
-/// trump glob imports (per Rust 2018+ rules), so a Single hit returns
-/// immediately. Glob hits are accumulated — two distinct globs landing
-/// on the same suffix yield `Ambiguous`, which the caller surfaces as
-/// a diagnostic.
+/// Outcome of glob resolution for one bare name. A single import beats
+/// any glob; two distinct globs landing on the same suffix are
+/// `Ambiguous`.
 enum LookupOutcome {
     None,
     Resolved(String),
@@ -92,8 +91,8 @@ struct NameSet<'b> {
 struct TypeNames<'a> {
     names: std::collections::HashSet<String>,
     traits: std::collections::HashSet<String>,
-    /// Structural auto traits (`#[lang("send_trait" | "sync_trait")]`,
-    /// E3): a type has them unless a component lacks them.
+    /// Structural auto traits (`#[lang("send_trait" | "sync_trait")]`):
+    /// a type has them unless a component lacks them.
     auto_traits: std::collections::HashSet<String>,
     /// Lang slot → the trait bound to it (spec 6.4; a method slot gives
     /// its trait).
@@ -345,10 +344,7 @@ impl TypeNames<'_> {
         }
     }
 
-    /// Key under which `impl Trait for T` is recorded: a user trait's
-    /// qualified name, else (bootstrap traits such as `core::ops::Add`)
-    /// the last path segment.
-    /// `fn(..) -> R + Send + Sync` bounds → sorted auto-trait keys (E3).
+    /// `fn(..) -> R + Send + Sync` bounds → sorted auto-trait keys.
     fn fn_bounds(&self, bounds: &[rokc_ast::Path], module: &str) -> Vec<String> {
         let mut keys: Vec<String> = bounds
             .iter()
@@ -531,9 +527,11 @@ struct Env<'a> {
     generic_trait_impls: Vec<GenericTraitImpl>,
     /// `#[intrinsic("rok.OP.TYPE")]` methods: calls lower to the op.
     intrinsics: HashMap<FunctionId, PrimOp>,
-    /// `extern` functions: a `fn` argument must be a named fn (a C
+    /// `extern "C"` functions: a `fn` argument must be a named fn (a C
     /// function pointer), not a closure or `fn` variable.
     extern_fn_ids: std::collections::HashSet<FunctionId>,
+    /// `extern "rok"` declarations: the runtime's own functions.
+    rok_externs: std::collections::HashSet<FunctionId>,
     /// C variadic `extern` declarations (`fn printf(fmt: str, ...)`):
     /// extra arguments take the C default argument promotions.
     c_variadic: std::collections::HashSet<FunctionId>,
@@ -572,6 +570,9 @@ struct Env<'a> {
     /// `#[literal]` handlers of the built-in literal shapes (spec 6.5).
     literal_shapes: Vec<ShapeHandler>,
     names: TypeNames<'a>,
+    /// Every non-generic function by `FunctionId` (the ids below
+    /// `sink.next_id`'s start).
+    decls: Vec<MethodOrFn<'a>>,
 }
 
 /// A handler registered with a built-in shape's pattern (`[..]` etc.).
@@ -651,14 +652,10 @@ struct FnSig {
     id: FunctionId,
     ret_ty: HirTy,
     param_defaults: Vec<Option<Expr>>,
-    /// Resolved parameter types in declaration order. Used by `lower_call`
-    /// to push expected-type hints into argument lowering — that's how an
-    /// untyped closure (`apply(3, |x| { x*4 })`) picks up `i32` for `x`
-    /// from the callee's `f: fn(i32) -> i32` signature.
+    /// Resolved parameter types: the expected types of the arguments, so
+    /// an untyped closure argument takes its parameter types from them.
     param_tys: Vec<HirTy>,
-    /// Parameter names in declaration order. Used by `lower_call` to
-    /// reorder named arguments (`f(name: 42)` per spec 4.1) into their
-    /// positional slots.
+    /// Parameter names, to place named arguments (spec 4.1).
     param_names: Vec<String>,
     /// Which parameters are `ref` (empty = none).
     param_refs: Vec<bool>,
@@ -671,7 +668,7 @@ fn none_ty() -> HirTy {
     HirTy::Path(vec!["none".to_owned()])
 }
 
-/// The `none` sentinel type (spec 2.x `T | none`).
+/// The `none` type (`T | none`).
 fn is_none_ty(ty: &HirTy) -> bool {
     matches!(ty, HirTy::Path(p) if p.as_slice() == ["none"])
 }
@@ -775,7 +772,7 @@ fn ty_compatible(expected: &HirTy, actual: &HirTy) -> bool {
         (HirTy::Tuple(a), HirTy::Tuple(b)) | (HirTy::Sum(a), HirTy::Sum(b)) => all(a, b),
         (HirTy::Array(a, n), HirTy::Array(b, m)) => n == m && ty_compatible(a, b),
         (HirTy::GcBuf(a), HirTy::GcBuf(b)) => ty_compatible(a, b),
-        // E3: `fn() + Send` flows into `fn()`, not the reverse.
+        // `fn() + Send` flows into `fn()`, not the reverse.
         // A `fn() -> !` value is no `fn() -> R` pointer (different
         // return ABI): only `adapt_never_fn` makes one from a named fn.
         (HirTy::Fn(a1, r1, b1), HirTy::Fn(a2, r2, b2)) => {
@@ -929,7 +926,7 @@ fn c_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, mut value: HirExpr) -> HirExpr {
 }
 
 /// Can a `fn` value with bounds `have` fill a slot with bounds `want`?
-/// It must carry every auto trait the slot names (E3), and an `unsafe
+/// It must carry every auto trait the slot names, and an `unsafe
 /// fn` only fills an `unsafe fn` slot (a safe one fills either).
 fn fn_bounds_fit(want: &[String], have: &[String]) -> bool {
     let unsafe_mark = |b: &[String]| b.iter().any(|k| k == rokc_ast::UNSAFE_FN_MARK);
@@ -944,7 +941,7 @@ fn is_c_fn(bounds: &[String]) -> bool {
     bounds.iter().any(|k| k == rokc_ast::C_FN_MARK)
 }
 
-/// E3: a `fn` value with more auto-trait bounds than the slot (or the
+/// A `fn` value with more auto-trait bounds than the slot (or the
 /// slot's matching sum variant) asks for takes the slot's type, so
 /// `fn() + Send` → `fn()` (and → `fn() | none`) needs no conversion.
 fn drop_fn_bounds(slot: &HirTy, mut value: HirExpr) -> HirExpr {
@@ -1002,7 +999,7 @@ fn any_slot_for<'s>(slot: &'s HirTy, ty: &HirTy) -> Option<&'s HirTy> {
     }
 }
 
-/// D4 store check + boxing: a value flowing into an `any Tr` slot must
+/// Store check + boxing: a value flowing into an `any Tr` slot must
 /// implement every bound; it becomes `SumWrap { tag, value }` (tag =
 /// program-wide type number, payload = heap copy). `any (A + B)` → `any
 /// A` keeps the value as is (same tag numbering).
@@ -1239,8 +1236,7 @@ struct ClosureSink {
     /// (keyed by template, span, message): a warning is reported when
     /// every instance of its template raised it.
     instance_warns: std::cell::RefCell<InstanceWarns>,
-    /// Diagnostics emitted during lowering — surfaced through
-    /// `HirModule.diagnostics` so the driver can fail the build.
+    /// Diagnostics emitted during lowering (`HirModule.diagnostics`).
     diagnostics: std::cell::RefCell<Vec<rokc_diagnostic::RokDiagnostic>>,
     /// Inference variables (`infer`): one per open type parameter of an
     /// un-annotated `let` being inferred from its later uses.
@@ -1249,6 +1245,12 @@ struct ClosureSink {
     infer_depth: std::cell::Cell<u32>,
     /// Variables before the outermost inference in progress.
     infer_floor: std::cell::Cell<usize>,
+    /// Every lowered function's `(const fn, standard library)`.
+    fn_origin: std::cell::RefCell<HashMap<FunctionId, (bool, bool)>>,
+    /// Declarations being lowered for a compile-time evaluation.
+    const_lowering: std::cell::RefCell<std::collections::HashSet<FunctionId>>,
+    /// Const items being lowered, innermost last (cycle check).
+    const_stack: std::cell::RefCell<Vec<String>>,
 }
 
 /// Per-function lowering state: scoped name → local-id map plus the
@@ -1419,8 +1421,8 @@ impl<'a> LowerCtx<'a> {
     }
 
     /// Drop the diagnostics (and "annotations needed" count) since
-    /// `mark`, and the closures / thunks /
-    /// coroutine bodies lifted since (they are made again for real).
+    /// `mark`, and the closures / thunks / coroutine bodies lifted since
+    /// (they are made again for real).
     /// Generic instances are cached (and may own closures), so when any
     /// were made everything is kept.
     fn rollback(&self, mark: &ProbeMark) {
@@ -1502,8 +1504,7 @@ impl<'a> LowerCtx<'a> {
         }
     }
 
-    /// Push a lowering-time diagnostic onto the shared sink. Drained
-    /// into `HirModule.diagnostics` at the end of the lower pass.
+    /// Push a lowering-time diagnostic onto the shared sink.
     fn emit_error(&self, kind: rokc_diagnostic::ErrorKind, msg: String) {
         self.env
             .sink
@@ -1626,12 +1627,12 @@ impl<'a> LowerCtx<'a> {
         }
     }
 
-    /// Does `ty` have an `impl {trait_key} for ty`?
     /// The trait bound to lang slot `slot` (spec 6.4), `""` if unbound.
     fn lang_trait(&self, slot: &str) -> &'a str {
         self.env.names.lang.get(slot).map_or("", String::as_str)
     }
 
+    /// Does `ty` have an `impl {trait_key} for ty`?
     fn implements(&self, ty: &HirTy, trait_key: &str) -> bool {
         method_target_for(ty)
             .is_some_and(|t| self.env.impl_traits.contains(&(t, trait_key.to_owned())))
@@ -1661,7 +1662,7 @@ impl<'a> LowerCtx<'a> {
         self.impl_or_generic_impl(ty, trait_key, depth)
     }
 
-    /// E3: structural auto trait (`Send` / `Sync`). An `unsafe impl`
+    /// Structural auto trait (`Send` / `Sync`). An `unsafe impl`
     /// opts in, `impl !Tr` opts out; otherwise every component must
     /// have it. Primitives and `str` do. A recursive type assumes it
     /// for itself (`seen`).
@@ -1706,8 +1707,8 @@ impl<'a> LowerCtx<'a> {
                 .all(|v| v.payload_ty.as_ref().is_none_or(&mut rec)),
             HirTy::Fn(_, _, b) => b.iter().any(|k| k == key),
             HirTy::AnyTrait(b) => bound_covers(self, b, key),
-            // ponytail: unresolved paths (`none`, type-param leftovers)
-            // and error types count as having it — no cascade errors.
+            // Unresolved paths (`none`, type-param leftovers) and error
+            // types count as having it: no cascade errors.
             HirTy::Prim(_)
             | HirTy::Unit
             | HirTy::Never
@@ -1783,8 +1784,7 @@ impl<'a> LowerCtx<'a> {
         ty: &HirTy,
         depth: u32,
     ) -> Result<HashMap<String, HirTy>, Option<(HirTy, String)>> {
-        // ponytail: depth cap stops `impl<T: Tr> Tr for T` cycles; a
-        // real cycle check would remember the (type, trait) goals.
+        // Depth cap instead of cycle detection (`impl<T: Tr> Tr for T`).
         if depth > 8 || matches!(ty, HirTy::Unknown) {
             return Err(None);
         }
@@ -1872,8 +1872,8 @@ impl<'a> LowerCtx<'a> {
 
     /// `any` type tag of concrete type `ty`: a hash of its type name, so
     /// a prebuilt dependency (separately compiled) tags its values alike.
-    // ponytail: a 31-bit name hash; two names colliding within one build
-    // probe to the next free tag, which is then build-local.
+    // 31-bit hash: a collision within one build probes to the next free
+    // tag, which is then build-local.
     fn any_tag(&self, ty: &HirTy) -> u32 {
         let mut tags = self.env.sink.any_tags.borrow_mut();
         if let Some((_, tag)) = tags.iter().find(|(t, _)| t == ty) {
@@ -2235,91 +2235,38 @@ impl<'a> LowerCtx<'a> {
     }
 
     /// Spec 2.11.4 / 2.11.5: a compile-time integer — a literal, a
-    /// `const` item, a const generic parameter of this instantiation, or
-    /// `+ - * / %` / unary `-` over those.
+    /// const generic parameter of this instantiation, or any const
+    /// expression (`const` items, `const fn` calls) evaluated by
+    /// `const_eval`.
     fn eval_const(&self, c: &rokc_ast::ConstExpr) -> Option<i128> {
-        match c {
+        self.eval_const_msg(c).ok()
+    }
+
+    fn eval_const_msg(&self, c: &rokc_ast::ConstExpr) -> Result<i128, String> {
+        let not_int = || "not an integer".to_owned();
+        let e = match c {
             rokc_ast::ConstExpr::Literal(rokc_ast::Literal::Int(s)) => {
-                expr::parse_int_literal(s).map(|(v, _)| v)
+                return expr::parse_int_literal(s)
+                    .map(|(v, _)| v)
+                    .ok_or_else(not_int);
             }
-            rokc_ast::ConstExpr::Literal(rokc_ast::Literal::Bool(b)) => Some(i128::from(*b)),
-            rokc_ast::ConstExpr::Literal(_) => None,
-            rokc_ast::ConstExpr::Path(p) => self.eval_const_expr(&Expr {
-                kind: ExprKind::Path(p.clone()),
-                span: p.span,
-            }),
-            rokc_ast::ConstExpr::Expr(e) => self.eval_const_expr(e),
-        }
-    }
-
-    /// `T::N` / `Self::N` / `Type::N` / `Box::<i32>::N` in a const
-    /// expression (an array length): the covering impl's value,
-    /// evaluated in that impl.
-    fn eval_assoc_const(&self, p: &rokc_ast::Path) -> Option<i128> {
-        let [prefix @ .., name] = p.segments.as_slice() else {
-            return None;
-        };
-        let ty = match prefix {
-            [] => return None,
-            [o] if o.name == "Self" => self.self_ty.clone()?,
-            [o] if o.generics.is_empty() && self.ty_subst.contains_key(&o.name) => {
-                self.ty_subst[&o.name].clone()
-            }
-            _ => self.resolve_ast_ty(&Ty {
-                kind: AstTyKind::Path(rokc_ast::Path {
-                    segments: prefix.to_vec(),
-                    span: p.span,
-                }),
-                span: p.span,
-            }),
-        };
-        let bounds = match prefix {
-            [o] => self.ty_bounds.get(&o.name).cloned(),
-            _ => None,
-        };
-        let hits = expr::assoc_const_hits(self, &ty, &name.name, bounds.as_deref());
-        let [(set, subst)] = hits.as_slice() else {
-            return None;
-        };
-        let (_, _, value) = set.consts.iter().find(|(n, ..)| *n == name.name)?;
-        let mut rcx = LowerCtx::new(self.env, subst, Some(ty.clone()));
-        rcx.current_module.clone_from(&set.target.module);
-        rcx.eval_const_expr(value)
-    }
-
-    fn eval_const_expr(&self, e: &Expr) -> Option<i128> {
-        match &e.kind {
-            ExprKind::Literal(l) => self.eval_const(&rokc_ast::ConstExpr::Literal(l.clone())),
-            ExprKind::OpPrefix { op, operand } if op == "-" => {
-                self.eval_const_expr(operand).map(|v| -v)
-            }
-            ExprKind::OpInfix { op, lhs, rhs } => {
-                let (a, b) = (self.eval_const_expr(lhs)?, self.eval_const_expr(rhs)?);
-                match op.as_str() {
-                    "+" => a.checked_add(b),
-                    "-" => a.checked_sub(b),
-                    "*" => a.checked_mul(b),
-                    "/" => a.checked_div(b),
-                    "%" => a.checked_rem(b),
-                    _ => None,
-                }
-            }
-            ExprKind::Path(p) => {
-                if let Some(v) = self.eval_assoc_const(p) {
-                    return Some(v);
-                }
-                let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
-                if let [name] = segs.as_slice() {
-                    if let Some(v) = self.ty_subst.get(*name).and_then(crate::ty::as_const) {
-                        return Some(v.0);
+            rokc_ast::ConstExpr::Literal(rokc_ast::Literal::Bool(b)) => return Ok(i128::from(*b)),
+            rokc_ast::ConstExpr::Literal(_) => return Err(not_int()),
+            rokc_ast::ConstExpr::Path(p) => {
+                if let [seg] = p.segments.as_slice() {
+                    if let Some((v, _)) = self.ty_subst.get(&seg.name).and_then(crate::ty::as_const)
+                    {
+                        return Ok(v);
                     }
                 }
-                let full = self.resolve_in(&segs, &self.env.consts)?;
-                let (_, value) = &self.env.consts[&full];
-                self.eval_const_expr(value)
+                Expr {
+                    kind: ExprKind::Path(p.clone()),
+                    span: p.span,
+                }
             }
-            _ => None,
-        }
+            rokc_ast::ConstExpr::Expr(e) => (**e).clone(),
+        };
+        const_eval::eval_int(self, &e)
     }
 
     fn resolve_ty_inner(&self, ty: &rokc_ast::Ty) -> HirTy {
@@ -2438,39 +2385,45 @@ impl<'a> LowerCtx<'a> {
                     };
                 }
                 // Spec 2.11.5: `[T; N]`, `[T; M * N]`.
-                match self.eval_const(len).and_then(|v| u32::try_from(v).ok()) {
-                    Some(n) => HirTy::Array(Box::new(rec(elem)), n),
+                let n = self.eval_const_msg(len).and_then(|v| {
+                    u32::try_from(v).map_err(|_| format!("length {v} is out of range"))
+                });
+                match n {
+                    Ok(n) => HirTy::Array(Box::new(rec(elem)), n),
                     // A const parameter not bound yet (argument hints
                     // before inference): no type yet, not an error.
-                    None if self.ty_subst.values().any(
-                        |t| matches!(t, HirTy::Path(p) if p.len() == 1 && p[0].starts_with('#')),
-                    ) =>
+                    Err(_)
+                        if self.ty_subst.values().any(|t| {
+                            matches!(t, HirTy::Path(p) if p.len() == 1 && p[0].starts_with('#'))
+                        }) =>
                     {
                         HirTy::Unknown
                     }
-                    None => {
+                    Err(why) => {
                         self.emit_error(
                             rokc_diagnostic::ErrorKind::Type,
-                            "array length must be a compile-time integer: a literal, a `const`, \
-                             a const generic parameter, or `+ - * / %` over those (spec 2.11.5)"
-                                .to_owned(),
+                            format!(
+                                "array length must be a compile-time integer (spec 2.11.5): \
+                                 {why}"
+                            ),
                         );
                         HirTy::Unknown
                     }
                 }
             }
-            AstTyKind::Const(c) => {
-                if let Some(v) = self.eval_const(c) {
-                    return crate::ty::const_ty(v, None);
+            AstTyKind::Const(c) => match self.eval_const_msg(c) {
+                Ok(v) => crate::ty::const_ty(v, None),
+                Err(why) => {
+                    self.emit_error(
+                        rokc_diagnostic::ErrorKind::Type,
+                        format!(
+                            "a const generic argument must be a compile-time integer or \
+                                 `bool` (spec 2.11.4): {why}"
+                        ),
+                    );
+                    HirTy::Unknown
                 }
-                self.emit_error(
-                    rokc_diagnostic::ErrorKind::Type,
-                    "a const generic argument must be a compile-time integer or `bool` \
-                     (spec 2.11.4)"
-                        .to_owned(),
-                );
-                HirTy::Unknown
-            }
+            },
             AstTyKind::Fn(args, ret, b) => HirTy::Fn(
                 args.iter().map(rec).collect(),
                 Box::new(rec(ret)),
@@ -2929,9 +2882,8 @@ impl<'a> LowerCtx<'a> {
         None
     }
 
-    /// Look up a name only in the innermost scope. Used by the let
-    /// redeclaration check (spec variant 238): nested scopes can
-    /// rebind, but the same scope cannot.
+    /// Look up a name only in the innermost scope, for the `let`
+    /// redeclaration check: nested scopes can rebind, the same one cannot.
     fn lookup_in_current_scope(&self, name: &str) -> Option<LocalId> {
         self.scopes.last().and_then(|s| s.get(name).copied())
     }

@@ -1,0 +1,8 @@
+// spec: 002.10-generics
+// expect-error: [parse]
+// expect-error: expected `>` to close generic arguments
+
+// A missing `>` must be a parse error, not silently accepted.
+fn f(x: Vec<i32) -> i32 { return 0; }
+
+fn main() -> i32 { return 0; }

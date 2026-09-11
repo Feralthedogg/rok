@@ -1,0 +1,18 @@
+// spec: 005.08-reexport
+// expect-exit: 0
+// expect-stdout:
+// 7
+
+// spec 5.8: `pub use` re-export: the inner module's struct is exposed under
+// the alias path and can be built at the root as `Point { x: 7 }`.
+mod inner {
+    pub struct Point { pub x: i32; }
+}
+
+pub use inner::Point;
+
+fn main() -> i32 {
+    let p = Point { x: 7 };
+    println(f"{p.x}");
+    return 0;
+}

@@ -1,0 +1,10 @@
+// spec: 002.07-struct-field
+// Reading a nonexistent field is an error.
+// expect-error: struct `P` has no field `y`
+
+struct P { x: i32; }
+
+fn main() -> i32 {
+    let p = P { x: 5 };
+    return p.y;
+}

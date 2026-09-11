@@ -1,0 +1,26 @@
+// spec: 002.09-stdlib-trait-impl
+// expect-exit: 10
+// expect-stdout:
+
+// Implementing stdlib `core::ops::Add` for a user struct makes `+` dispatch
+// to its method.
+use rok::core::ops::Add;
+
+struct V {
+    x: i32;
+    y: i32;
+}
+
+impl Add<V> for V {
+    type Output = V;
+    fn add(self, rhs: V) -> V {
+        return V { x: self.x + rhs.x, y: self.y + rhs.y };
+    }
+}
+
+fn main() -> i32 {
+    let a = V { x: 1, y: 2 };
+    let b = V { x: 3, y: 4 };
+    let c = a + b;
+    return c.x + c.y;
+}

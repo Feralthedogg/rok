@@ -10,7 +10,6 @@
 
 // Work-stealing executor: tasks spread over worker threads while the GC runs;
 // spawn_local stays on its worker; cancel + join.
-// Tasks spread over the worker threads; GC runs while they allocate.
 extern "C" {
     fn rok_thread_id() -> u64;
     fn rok_gc_collect();

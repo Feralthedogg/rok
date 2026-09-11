@@ -1,9 +1,0 @@
-// spec: 000.04-operator-dispatch
-// probe: negative-must-fail
-// expect-exit: 0  (연산자 trait 메서드의 rhs 타입 검사.)
-// expect-error: the right operand of `+` expects `V`, found `i32`
-
-struct V { x: i32; }
-impl Add for V { fn add(self, o: V) -> V { return V { x: self.x + o.x }; } }
-
-fn main() -> i32 { let a = V { x: 1 }; let c = a + 5; return c.x; }

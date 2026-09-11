@@ -8,19 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use common::{Env, ROKC, setup};
-
-fn workspace() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-/// A fresh scratch directory per test.
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rokc-cli-{}-{name}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
+use common::{Env, ROKC, assert_exit, scratch, setup, text, workspace};
 
 /// `rokc <args>` in `cwd`, with the repo's library and (when given) the
 /// freshly built runtime.
@@ -33,31 +21,25 @@ fn rokc(env: Option<&Env>, cwd: &Path, args: &[&str]) -> Output {
     cmd.output().unwrap()
 }
 
-fn text(b: &[u8]) -> String {
-    String::from_utf8_lossy(b).into_owned()
-}
-
-#[track_caller]
-fn assert_exit(out: &Output, code: i32) {
-    assert_eq!(
-        out.status.code(),
-        Some(code),
-        "stdout: {}\nstderr: {}",
-        text(&out.stdout),
-        text(&out.stderr)
-    );
+/// `dir/name/main.rok` (or `lib.rok` with a test), as `rok new` makes it.
+fn new_package(dir: &Path, name: &str, lib: bool) -> PathBuf {
+    let pkg = dir.join(name);
+    fs::create_dir_all(&pkg).unwrap();
+    if lib {
+        let src = "pub fn add(a: i32, b: i32) -> i32 {\n    return a + b;\n}\n\n#[test]\n\
+                   fn adds() {\n    if add(2, 2) != 4 {\n        panic(\"add(2, 2) != 4\");\n    }\n}\n";
+        fs::write(pkg.join("lib.rok"), src).unwrap();
+    } else {
+        fs::write(pkg.join("main.rok"), "println(\"Hello, world!\");\n").unwrap();
+    }
+    pkg
 }
 
 #[test]
 fn new_bin_package_runs_from_its_directory() {
     let Some(env) = setup() else { return };
     let dir = scratch("bin");
-    assert_exit(&rokc(None, &dir, &["new", "app"]), 0);
-    assert!(dir.join("app/main.rok").is_file());
-    // `rokc new` refuses an existing directory.
-    assert_exit(&rokc(None, &dir, &["new", "app"]), 1);
-
-    let app = dir.join("app");
+    let app = new_package(&dir, "app", false);
     let out = rokc(Some(&env), &app, &["run"]);
     assert_exit(&out, 0);
     assert_eq!(text(&out.stdout), "Hello, world!\n");
@@ -127,8 +109,7 @@ fn library_build_drops_code_its_package_does_not_reach() {
 fn unchanged_package_is_fresh() {
     let Some(env) = setup() else { return };
     let dir = scratch("fresh");
-    assert_exit(&rokc(None, &dir, &["new", "app"]), 0);
-    let app = dir.join("app");
+    let app = new_package(&dir, "app", false);
     let built = |args: &[&str]| {
         let out = rokc(Some(&env), &app, args);
         assert_exit(&out, 0);
@@ -157,8 +138,7 @@ fn unchanged_package_is_fresh() {
 fn lib_package_builds_archive_and_runs_tests() {
     let Some(env) = setup() else { return };
     let dir = scratch("lib");
-    assert_exit(&rokc(None, &dir, &["new", "--lib", "mylib"]), 0);
-    let lib = dir.join("mylib");
+    let lib = new_package(&dir, "mylib", true);
 
     assert_exit(&rokc(Some(&env), &dir, &["build", "mylib"]), 0);
     assert!(lib.join("target/debug/libmylib.a").is_file());
@@ -593,27 +573,15 @@ fn stale_rhir_is_rejected() {
 }
 
 /// Library bodies nothing reaches are skipped by default;
-/// `ROK_EAGER_LIBRARY` lowers (so type-checks) every one of them.
+/// `--check-library` lowers (so type-checks) every one of them.
 #[test]
-fn eager_library_checks_every_body() {
-    let dir = scratch("eager-lib");
+fn check_library_checks_every_body() {
+    let dir = scratch("check-lib");
     fs::write(dir.join("main.rok"), "fn main() {}\n").unwrap();
-    let out = Command::new(ROKC)
-        .current_dir(&dir)
-        .env("ROK_HOME", workspace())
-        .env("ROK_EAGER_LIBRARY", "1")
-        .args(["check", "main.rok"])
-        .output()
-        .unwrap();
-    assert_exit(&out, 0);
-}
-
-#[test]
-fn init_makes_an_existing_directory_a_package() {
-    let dir = scratch("init");
-    assert_exit(&rokc(None, &dir, &["init", "--lib"]), 0);
-    assert!(dir.join("lib.rok").is_file());
-    assert_exit(&rokc(None, &dir, &["init"]), 1);
+    assert_exit(
+        &rokc(None, &dir, &["check", "--check-library", "main.rok"]),
+        0,
+    );
 }
 
 #[test]

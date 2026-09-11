@@ -5,7 +5,7 @@
 // 3
 // 40
 
-// D4: a type that implements the trait only through a generic impl
+// A type that implements the trait only through a generic impl
 // (`impl<T> Tr for Box<T>`, blanket `impl<T: Big> Tr for T`) can be
 // stored in `any Tr`; dispatch covers every type actually stored.
 trait Size { fn size(self) -> i32; }

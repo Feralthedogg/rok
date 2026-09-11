@@ -107,10 +107,11 @@ fn describe(o: &Output) -> String {
     }
 }
 
-/// The test filter (spec 901: "regex or plain substring"): unanchored
-/// match supporting `^ $ . * + ?` and `\` escapes; a filter without
-/// those is a substring search. ponytail: no classes / groups /
-/// alternation; add them if filters need them.
+/// The test filter (spec 901: "regex or plain substring").
+///
+/// An unanchored match supporting `^ $ . * + ?` and `\` escapes; a
+/// filter without those is a substring search. No classes, groups or
+/// alternation.
 pub fn re_match(re: &str, text: &str) -> bool {
     let re: Vec<char> = re.chars().collect();
     let text: Vec<char> = text.chars().collect();

@@ -1,0 +1,9 @@
+// spec: 002.02-any-slot
+// expect-error: no method `show` on `any`
+
+// A bare `any` has no bound, so its methods can't be called until it is narrowed.
+trait Show { fn show(self); }
+impl Show for i32 { fn show(self) { println(f"{self}"); } }
+
+let v: any = 1;
+v.show();

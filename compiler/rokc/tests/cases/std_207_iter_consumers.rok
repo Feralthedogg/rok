@@ -1,0 +1,33 @@
+// spec: std 207-iter §2.7.1
+// expect-exit: 0
+// expect-stdout:
+// count 5 sum 10 product 24
+// empty sum 0 empty product 1
+// fold 15 reduce 6 reduce-empty none
+// any true all false
+// find 3 position 2 miss none
+// min 1 max 9 min-empty none
+// last 4 nth 2
+
+// spec 2.7.1 consumers: count / sum (empty -> 0) / product (empty -> 1) /
+// fold / reduce / any / all / find / position / min / max / last / nth.
+fn show(v: i32 | none) -> str {
+    match v { x: i32 => f"{x}", none => "none" }
+}
+fn showu(v: usize | none) -> str {
+    match v { x: usize => f"{x}", none => "none" }
+}
+
+fn main() {
+    println(f"count {(0..5).count()} sum {(0..5).sum()} product {(1..5).product()}");
+    println(f"empty sum {(0..0).sum()} empty product {(0..0).product()}");
+    let f = (1..6).fold(0, |a: i32, x: i32| a + x);
+    println(f"fold {f} reduce {show((1..4).reduce(|a: i32, b: i32| a + b))} reduce-empty {show((0..0).reduce(|a: i32, b: i32| a + b))}");
+    println(f"any {(0..5).any(|x: i32| x == 3)} all {(0..5).all(|x: i32| x < 3)}");
+    println(f"find {show((0..10).find(|x: i32| x > 2))} position {showu([5, 6, 7].iter().position(|x: i32| x == 7))} miss {showu([5].iter().position(|x: i32| x == 0))}");
+    let xs: List<i32> = [4, 1, 9, 3];
+    println(f"min {show(xs.iter().min())} max {show(xs.iter().max())} min-empty {show((0..0).min())}");
+    let r = 0..5;
+    let n = r.nth(2);
+    println(f"last {show((0..5).last())} nth {show(n)}");
+}

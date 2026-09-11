@@ -12,8 +12,8 @@
 //! bench fib_20 ... bench:       41,503 ns/iter (+/- 312)
 //! ```
 //!
-//! ponytail: benches run one at a time (parallel runs would disturb the
-//! timings); no `black_box`, so an optimizer may delete a bench body
+//! Benches run one at a time (parallel runs would disturb the timings).
+//! There is no `black_box`, so an optimizer may delete a bench body
 //! whose result is unused.
 
 use std::path::Path;

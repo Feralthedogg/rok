@@ -1,0 +1,10 @@
+// spec: 002.12-any-trait
+// expect-error: cannot call `dup` on `any Dup`: its signature mentions `Self`
+
+// A method returning `Self` has a different type per impl, so `any Tr` can't call it.
+trait Dup { fn dup(self) -> Self; }
+struct C { v: i32; }
+impl Dup for C { fn dup(self) -> Self { return self; } }
+
+let y: any Dup = C { v: 0 };
+let b = y.dup();

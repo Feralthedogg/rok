@@ -1,11 +1,8 @@
 //! `use` declarations as a name-resolution table.
 //!
-//! The driver hands HIR a list of `(module_path, UseTree)` pairs — one
-//! entry per `use` statement encountered, tagged with the module the
-//! statement appeared in. We flatten those trees into per-module
-//! `UseEntry` lists. Lower-time name resolution consults the entries
-//! whenever a bare name fails to resolve through the local scopes and
-//! module-path ancestors.
+//! Each `use` tree, tagged with its module, is flattened into per-module
+//! `UseEntry` lists. Name resolution consults them when a bare name
+//! misses the local scopes and module ancestors.
 
 use std::collections::HashMap;
 
@@ -13,13 +10,11 @@ use rokc_ast::{UseTree, UseTreeKind};
 use rokc_core::Visibility;
 use rokc_diagnostic::{ErrorKind, RokDiagnostic};
 
-/// One resolved `use` entry. All paths are stored fully qualified (no
-/// `crate::` / `super::` / `self::` left in the strings) so the lookup
-/// loop can do plain string concatenation.
+/// One resolved `use` entry. Paths are fully qualified (no `pkg::` /
+/// `sup::` left), so lookup is plain concatenation.
 #[derive(Clone, Debug)]
 pub enum UseEntry {
-    /// `use foo::bar;` or `use foo::bar as baz;`
-    /// — the local name `local` resolves to `full`.
+    /// `use foo::bar [as baz];`: `local` resolves to `full`.
     Single { local: String, full: String },
     /// `use foo::*;` — bare name `name` is tried as `prefix::name`.
     Glob { prefix: String },
@@ -32,9 +27,8 @@ pub enum UseEntry {
 /// Empty key = root module.
 pub type UseTable = HashMap<String, Vec<UseEntry>>;
 
-/// `pub use mod_path::name as alias;` — re-export. The lower pass
-/// installs each entry as an fn-table alias so callers can reach the
-/// item via `module_path::short_name` instead of its original path.
+/// `pub use mod_path::name as alias;`, installed as an fn-table alias
+/// at `module_path::short_name`.
 #[derive(Clone, Debug)]
 pub struct ReExport {
     pub module_path: String,
@@ -46,13 +40,9 @@ pub struct ReExport {
 /// Build the per-module use table plus the re-export list from
 /// `(module_path, vis, UseTree)` triples.
 ///
-/// Group trees (`use foo::{a, b}`)
-/// expand into multiple entries with the prefix prepended. Each `pub use`
-/// (or `pub(...) use`) Single contributes both a use-table entry (so the
-/// declaring module can use the short name itself) and a re-export the
-/// lower pass installs as an fn-table alias. Returns diagnostics for any
-/// `use` conflict (5.5.12: same short name imported from different full
-/// paths inside one module).
+/// A `pub use` single yields both a use entry (for the declaring module)
+/// and a re-export. Diagnoses one short name imported from two different
+/// paths in one module (spec 5.5.12).
 #[must_use]
 pub fn build_use_table(
     raw: &[(String, Visibility, UseTree)],
@@ -64,10 +54,7 @@ pub fn build_use_table(
         let mut entries = Vec::new();
         let existing = table.entry(module_path.clone()).or_default();
         flatten_tree(tree, &[], module_path, existing, &mut entries);
-        // 5.5.12 duplicate-name detection. Compare each fresh single
-        // import against earlier singles in the same module — duplicate
-        // local with a different full path is an error; same full path
-        // is silently allowed (5.5.11).
+        // The same full path imported twice is fine (spec 5.5.11).
         let existing = table.entry(module_path.clone()).or_default();
         for entry in entries {
             if let UseEntry::Single { local, full } = &entry {
@@ -91,7 +78,6 @@ pub fn build_use_table(
                         continue;
                     }
                 }
-                // `pub use` with a Single entry yields a re-export.
                 if *vis != Visibility::Private {
                     reexports.push(ReExport {
                         module_path: module_path.clone(),
@@ -118,11 +104,9 @@ pub fn flatten_tree_for_local(
     flatten_tree(tree, accumulated, module_path, &[], out);
 }
 
-/// Walk a `UseTree`, accumulating segments through `Group` nesting.
-/// Each leaf produces one `UseEntry`. The current `module_path` is
-/// used to resolve `pkg::` / `sup::` roots. (`self::` is intentionally
-/// not a `use` root — same-module children are reachable through the
-/// lookup-time ancestors walk.)
+/// One `UseEntry` per leaf of `tree`; `module_path` resolves `pkg::` /
+/// `sup::` roots. `self::` is not a root: lookup already walks the
+/// module's ancestors.
 fn flatten_tree(
     tree: &UseTree,
     accumulated: &[String],

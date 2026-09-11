@@ -1,0 +1,12 @@
+// spec: 002.12-any-trait
+// expect-error: no method `side` on `any Shape`
+
+// On an `any Tr` value only methods of `Tr` (and its supertraits) are callable;
+// call the implementing type's own methods after narrowing with a type pattern.
+trait Shape { fn area(self) -> i32; }
+struct Sq { s: i32; }
+impl Sq { fn side(self) -> i32 { return self.s; } }
+impl Shape for Sq { fn area(self) -> i32 { return self.s * self.s; } }
+
+let s: any Shape = Sq { s: 3 };
+println(f"{s.side()}");

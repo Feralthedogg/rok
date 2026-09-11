@@ -1,0 +1,11 @@
+// spec: 002.02-any-slot
+// expect-error: cannot call `get` on `any Source`: its signature uses `Self::Item`
+
+// With `Item` unbound, `any Source`'s `get` returns a different type per impl.
+trait Source { type Item; fn get(self) -> Item; fn id(self) -> i32; }
+struct A { v: i32; }
+struct C { v: bool; }
+impl Source for A { type Item = i32; fn get(self) -> i32 { return self.v; } fn id(self) -> i32 { return 1; } }
+impl Source for C { type Item = bool; fn get(self) -> bool { return self.v; } fn id(self) -> i32 { return 3; } }
+let y: any Source = C { v: true };
+let g = y.get();

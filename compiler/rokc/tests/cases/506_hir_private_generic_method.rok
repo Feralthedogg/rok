@@ -1,0 +1,10 @@
+// spec: 005.06-visibility
+// A private method of a generic impl can't be called from outside either.
+// expect-error: method `secret` is private to module `a`
+
+mod a {
+    pub struct S<T> { pub x: T; }
+    impl<T> S<T> { fn secret(self) -> T { return self.x; } }
+}
+
+fn main() -> i32 { let s: a::S<i32> = a::S { x: 1 }; return s.secret(); }

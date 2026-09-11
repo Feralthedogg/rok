@@ -1,0 +1,25 @@
+// spec: 001.04-identifiers / 002.03-struct
+// expect-exit: 0
+// expect-stdout:
+// 3
+// 7
+// 4
+
+// Struct literal / destructuring is decided by syntax, not a source pre-scan:
+// words after `struct` in this comment (compute the struct size) are not type
+// names, and `Box { size: 3 }` is a literal. Non-ASCII and lower-case type names work.
+struct Box { size: i32; }
+struct 점 { x: i32; y: i32; }
+struct pt { a: i32; }
+
+fn main() -> i32 {
+    let b = Box { size: 3 };
+    println(f"{b.size}");
+    let p = 점 { x: 3, y: 4 };
+    let 점 { x, y } = p;
+    println(f"{x + y}");
+    let q = pt { a: 4 };
+    let pt { a } = q;
+    println(f"{a}");
+    return 0;
+}

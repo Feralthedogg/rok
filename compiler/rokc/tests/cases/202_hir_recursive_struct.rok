@@ -1,0 +1,7 @@
+// spec: 002.07-struct
+// A struct that contains itself by value is an error.
+// expect-error: recursive type `L` has infinite size
+
+struct L { next: L; v: i32; }
+
+fn main() -> i32 { return 1; }
