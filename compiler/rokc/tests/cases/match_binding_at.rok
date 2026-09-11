@@ -91,3 +91,5 @@ fn main() -> i32 {
     println(f"sum {sum}");
     return 0;
 }
+
+// spec: 003.12-match-expression

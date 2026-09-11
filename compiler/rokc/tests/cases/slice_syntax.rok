@@ -55,3 +55,5 @@ fn main() {
     let z: List<i32> = [2, 30, 4];
     println(f"eq {xs[1:4] == z[:]}");
 }
+
+// spec: 003.06-indexing-and-slicing

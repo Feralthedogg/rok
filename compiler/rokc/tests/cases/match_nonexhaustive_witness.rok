@@ -13,3 +13,5 @@ fn f(p: (bool, Shape)) -> i32 {
 fn main() -> i32 {
     return f((true, Shape::Dot));
 }
+
+// spec: 003.12-match-expression

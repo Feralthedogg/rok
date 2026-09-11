@@ -1,0 +1,12 @@
+// expect-exit: 101
+// expect-stdout: before
+// expect-stderr: allocation too large
+
+// A buffer whose `len * size + header` overflows `usize` is a fatal
+// "allocation too large", not a small allocation written past its end.
+fn main() {
+    let n: usize = 2305843009213693952; // 2^61: `n * 8` wraps to 0
+    println("before");
+    let xs: List<i64> = List::with_capacity(n);
+    println(f"after {xs.len()}");
+}

@@ -15,3 +15,5 @@ fn main() {
     let t: char = try char::try_from(66u32) catch _ { '?' };
     println(f"{c as u32} {'z' as u8} {t}");
 }
+
+// spec: std 215-string

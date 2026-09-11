@@ -15,3 +15,5 @@ fn main() -> i32 {
     let t: Tagged<i32> = Tagged { tag: 5, value: 6 };
     return t.doubled();
 }
+
+// spec: 002.10-generics

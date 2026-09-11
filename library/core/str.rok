@@ -77,7 +77,7 @@ impl str {
     }
     /// `n` copies back to back.
     pub fn repeat(self, n: usize) -> str {
-        let b = StrBuf::with_capacity(self.len() * n);
+        let b = StrBuf::with_capacity(cap_mul(self.len(), n));
         for _ in 0..n { b.push_str(self); }
         b.to_str()
     }
@@ -438,57 +438,84 @@ pub struct StrBuf {
     data: GcBuf<GcBuf<u8>>;
 }
 
+// Shares its buffer like `List` (stdlib 2.13.9).
+impl !Sync for StrBuf {}
+
 impl StrBuf {
     pub fn new() -> StrBuf { StrBuf::with_capacity(16) }
 
     pub fn with_capacity(cap: usize) -> StrBuf {
-        let meta: GcBuf<usize> = buf_new(2);
-        meta[1] = cap;
-        let data: GcBuf<GcBuf<u8>> = buf_new(1);
-        data[0] = buf_new(cap);
-        StrBuf { meta: meta, data: data }
+        unsafe {
+            let meta: GcBuf<usize> = buf_new(2);
+            meta[1] = cap;
+            let data: GcBuf<GcBuf<u8>> = buf_new(1);
+            data[0] = buf_new(buf_len(cap, 1));
+            StrBuf { meta: meta, data: data }
+        }
     }
 
     /// Byte length.
-    pub fn len(self) -> usize { self.meta[0] }
+    pub fn len(self) -> usize {
+        unsafe {
+            self.meta[0]
+        }
+    }
     pub fn is_empty(self) -> bool { self.len() == 0 }
-    pub fn capacity(self) -> usize { self.meta[1] }
-    pub fn clear(self) { self.meta[0] = 0; }
+    pub fn capacity(self) -> usize {
+        unsafe {
+            self.meta[1]
+        }
+    }
+    pub fn clear(self) {
+        unsafe {
+            self.meta[0] = 0;
+        }
+    }
 
     /// Room for `additional` more bytes (doubling).
     pub fn reserve(self, additional: usize) {
-        let n = self.len();
-        let cap = self.capacity();
-        if n + additional <= cap { return; }
-        let new_cap = cap * 2;
-        if new_cap < n + additional { new_cap = n + additional; }
-        let store: GcBuf<u8> = buf_new(new_cap);
-        unsafe { rok_buf_copy(store, 0, self.data[0], 0, n) };
-        self.data[0] = store;
-        self.meta[1] = new_cap;
+        unsafe {
+            let n = self.len();
+            let cap = self.capacity();
+            let need = cap_add(n, additional);
+            if need <= cap { return; }
+            let new_cap = cap.saturating_mul(2).max(need);
+            let store: GcBuf<u8> = buf_new(buf_len(new_cap, 1));
+            rok_buf_copy(store, 0, self.data[0], 0, n);
+            self.data[0] = store;
+            self.meta[1] = new_cap;
+        }
     }
 
     /// Append `c`, UTF-8 encoded.
     pub fn push(self, c: char) {
-        self.reserve(4);
-        let n = self.len();
-        self.meta[0] = n + unsafe { rok_buf_put_char(self.data[0], n, c as u32) };
+        unsafe {
+            self.reserve(4);
+            let n = self.len();
+            self.meta[0] = n + rok_buf_put_char(self.data[0], n, c as u32);
+        }
     }
 
     pub fn push_str(self, s: str) {
-        let m = s.len();
-        if m == 0 { return; }
-        self.reserve(m);
-        let n = self.len();
-        unsafe { rok_buf_put_str(self.data[0], n, s) };
-        self.meta[0] = n + m;
+        unsafe {
+            let m = s.len();
+            if m == 0 { return; }
+            self.reserve(m);
+            let n = self.len();
+            rok_buf_put_str(self.data[0], n, s);
+            self.meta[0] = n + m;
+        }
     }
 
-    /// Append one byte; the caller keeps the contents UTF-8.
-    pub fn push_byte(self, b: u8) {
-        self.reserve(1);
+    /// Append one byte. `unsafe`: `to_str` hands out the bytes as a
+    /// `str`, which must be UTF-8 (2.15.1); the caller keeps them so by
+    /// the time it is called. Bytes of unknown encoding go through
+    /// `str::from_utf8`.
+    pub unsafe fn push_byte(self, b: u8) {
         let n = self.len();
-        self.data[0][n] = b;
+        self.reserve(1);
+        let store = self.data[0];
+        store[n] = b;
         self.meta[0] = n + 1;
     }
 
@@ -537,12 +564,14 @@ pub trait FromStr {
 
 /// `s` as a decimal integer of `bits` bits (its bits as `i64`).
 fn int_of(s: str, signed: i32, bits: u32) throws (ParseError) -> i64 {
-    let out: GcBuf<i64> = buf_new(1);
-    let st = unsafe { rok_str_parse_int(s, 10u32, signed, bits, out) };
-    if st == 1 { throw ParseError { input: s, pos: 0, reason: "empty string" }; }
-    if st == 2 { throw ParseError { input: s, pos: 0, reason: "invalid digit" }; }
-    if st == 3 { throw ParseError { input: s, pos: 0, reason: "number out of range" }; }
-    out[0]
+    unsafe {
+        let out: GcBuf<i64> = buf_new(1);
+        let st = rok_str_parse_int(s, 10u32, signed, bits, out);
+        if st == 1 { throw ParseError { input: s, pos: 0, reason: "empty string" }; }
+        if st == 2 { throw ParseError { input: s, pos: 0, reason: "invalid digit" }; }
+        if st == 3 { throw ParseError { input: s, pos: 0, reason: "number out of range" }; }
+        out[0]
+    }
 }
 
 fn signed_of(s: str, bits: u32) throws (ParseError) -> i64 { try int_of(s, 1, bits) }
@@ -550,11 +579,13 @@ fn signed_of(s: str, bits: u32) throws (ParseError) -> i64 { try int_of(s, 1, bi
 fn unsigned_of(s: str, bits: u32) throws (ParseError) -> u64 { (try int_of(s, 0, bits)) as u64 }
 
 fn float_of(s: str) throws (ParseError) -> f64 {
-    let out: GcBuf<f64> = buf_new(1);
-    if unsafe { rok_str_parse_float(s, out) } != 0 {
-        throw ParseError { input: s, pos: 0, reason: "invalid float literal" };
+    unsafe {
+        let out: GcBuf<f64> = buf_new(1);
+        if rok_str_parse_float(s, out) != 0 {
+            throw ParseError { input: s, pos: 0, reason: "invalid float literal" };
+        }
+        out[0]
     }
-    out[0]
 }
 
 impl FromStr for i8 {

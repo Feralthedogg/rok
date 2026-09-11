@@ -67,3 +67,5 @@ let t3 = task::spawn(async { 7 });
 let v = await t3;
 t3.cancel();
 println(f"done before cancel: {v}");
+
+// spec: 004.12-async

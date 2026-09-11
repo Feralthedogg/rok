@@ -44,3 +44,5 @@ fn main() -> i32 {
     println(f"{total as i32}");
     return 0;
 }
+
+// spec: 002.04-enum

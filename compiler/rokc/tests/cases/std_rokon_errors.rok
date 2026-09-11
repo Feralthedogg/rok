@@ -137,3 +137,5 @@ fn main() {
     let v = Value::List([Value::Int(1), Value::Str("x")]);
     let _ = try List::<i32>::from_rokon(v) catch e { println(f"value: {e}"); return; };
 }
+
+// spec: std 309-rokon

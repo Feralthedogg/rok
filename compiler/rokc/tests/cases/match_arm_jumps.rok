@@ -31,3 +31,5 @@ for k in 0..5 {
     }
 }
 println(f"{s}");
+
+// spec: 003.12-match-expression

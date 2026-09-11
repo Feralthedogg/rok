@@ -10,3 +10,5 @@ fn main() -> i32 {
     let bad: Shown<Tok> = W { v: Tok { v: 2 } };
     return ok.v + bad.v.v;
 }
+
+// spec: 002.10-generics

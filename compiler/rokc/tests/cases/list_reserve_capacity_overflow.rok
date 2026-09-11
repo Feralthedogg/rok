@@ -1,0 +1,14 @@
+// expect-exit: 101
+// expect-stdout: ok
+// expect-stderr: capacity overflow
+
+// Collection growth checks its arithmetic at every opt level: `len +
+// additional` past `usize::MAX` panics instead of wrapping to a small
+// buffer that later writes would overrun.
+fn main() {
+    let xs: List<i64> = [1, 2, 3];
+    xs.reserve(10);
+    println("ok");
+    xs.reserve(18446744073709551615usize);
+    println("unreachable");
+}

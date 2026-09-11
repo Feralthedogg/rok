@@ -697,19 +697,75 @@ fn wrap_into_sum(slot_ty: &HirTy, value: HirExpr) -> HirExpr {
         };
     };
     let span = value.span;
-    let payload = if is_none_ty(&variants[idx]) {
-        None
-    } else {
-        Some(Box::new(value))
-    };
+    if is_none_ty(&variants[idx]) {
+        return wrap_none(slot_ty, idx, value);
+    }
     HirExpr {
         kind: HirExprKind::SumWrap {
             sum_ty: slot_ty.clone(),
             variant_index: u32::try_from(idx).expect("variant overflow"),
-            value: payload,
+            value: Some(Box::new(value)),
         },
         ty: slot_ty.clone(),
         span,
+    }
+}
+
+/// `value: none` as member `idx` of `slot_ty`. The tag needs no payload,
+/// but the value may have effects (`{ f(); none }`, an `if` / `match`
+/// / call yielding `none`): the wrap moves into its branches, or the
+/// value runs first.
+fn wrap_none(slot_ty: &HirTy, idx: usize, mut value: HirExpr) -> HirExpr {
+    let span = value.span;
+    let tag = HirExpr {
+        kind: HirExprKind::SumWrap {
+            sum_ty: slot_ty.clone(),
+            variant_index: u32::try_from(idx).expect("variant overflow"),
+            value: None,
+        },
+        ty: slot_ty.clone(),
+        span,
+    };
+    let wrap_block = |b: &mut HirBlock| {
+        if let Some(t) = b.trailing.take() {
+            b.trailing = Some(wrap_none(slot_ty, idx, t));
+        }
+    };
+    match &mut value.kind {
+        HirExprKind::Const(_) | HirExprKind::Local(_) | HirExprKind::UnresolvedPath(_) => tag,
+        HirExprKind::Block(b) => {
+            wrap_block(b);
+            value.ty = slot_ty.clone();
+            value
+        }
+        HirExprKind::If {
+            then_block,
+            else_branch: Some(e),
+            ..
+        } => {
+            wrap_block(then_block);
+            let inner = std::mem::replace(&mut **e, tag);
+            **e = wrap_none(slot_ty, idx, inner);
+            value.ty = slot_ty.clone();
+            value
+        }
+        HirExprKind::Match { arms, .. } => {
+            for a in arms.iter_mut() {
+                let body = std::mem::replace(&mut a.body, tag.clone());
+                a.body = wrap_none(slot_ty, idx, body);
+            }
+            value.ty = slot_ty.clone();
+            value
+        }
+        _ => HirExpr {
+            kind: HirExprKind::Block(Box::new(HirBlock {
+                stmts: vec![HirStmt::Expr(value)],
+                trailing: Some(tag),
+                label: None,
+            })),
+            ty: slot_ty.clone(),
+            span,
+        },
     }
 }
 
@@ -1741,7 +1797,14 @@ impl<'a> LowerCtx<'a> {
         let ok = match ty {
             HirTy::Tuple(ts) | HirTy::Sum(ts) => ts.iter().all(&mut rec),
             HirTy::Array(e, _) | HirTy::GcBuf(e) => rec(e),
-            HirTy::Closure { env, .. } => rec(env),
+            // A capture is a copy of a handle the creating thread keeps
+            // using, so a closure that crosses threads shares every
+            // capture: each must be `Sync` too (a `[ref x]` cell is a
+            // `GcBuf<X>`, so `X: Sync` — spec 4.6.9).
+            HirTy::Closure { env, .. } => {
+                let sync = self.lang_trait("sync_trait");
+                rec(env) && (key == sync || self.auto_trait(env, sync, depth, &mut Vec::new()))
+            }
             HirTy::Throws { ok, err } => rec(ok) && rec(err),
             HirTy::Struct(id) => {
                 let def = self.struct_def(*id);
@@ -1757,7 +1820,12 @@ impl<'a> LowerCtx<'a> {
                 .variants
                 .iter()
                 .all(|v| v.payload_ty.as_ref().is_none_or(&mut rec)),
-            HirTy::Fn(_, _, b) => b.iter().any(|k| k == key),
+            // A `+ Send` closure's captures are all `Sync` (above), so a
+            // `+ Send` value is also `Sync`.
+            HirTy::Fn(_, _, b) => b.iter().any(|k| {
+                k == key
+                    || (key == self.lang_trait("sync_trait") && *k == self.lang_trait("send_trait"))
+            }),
             HirTy::AnyTrait(b) => bound_covers(self, b, key),
             // Unresolved paths (`none`, type-param leftovers) and error
             // types count as having it: no cascade errors.
@@ -1977,6 +2045,7 @@ impl<'a> LowerCtx<'a> {
         // instantiate further structs, which must not take this id.
         self.env.sink.extra_structs.borrow_mut().push(HirStructDef {
             id,
+            repr: collect::repr_of(&def.attrs).unwrap_or_default(),
             def_id: None,
             name: key,
             fields: Vec::new(),
@@ -2041,6 +2110,7 @@ impl<'a> LowerCtx<'a> {
         // instantiate further enums, which must not take this id.
         self.env.sink.extra_enums.borrow_mut().push(HirEnumDef {
             id,
+            repr: collect::repr_of(&def.attrs).unwrap_or_default(),
             def_id: None,
             name: key,
             variants: Vec::new(),

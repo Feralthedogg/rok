@@ -20,9 +20,11 @@ fn wake(word: GcBuf<i32>) {
 }
 
 fn word(v: i32) -> GcBuf<i32> {
-    let w: GcBuf<i32> = buf_new(1);
-    w[0] = v;
-    w
+    unsafe {
+        let w: GcBuf<i32> = buf_new(1);
+        w[0] = v;
+        w
+    }
 }
 
 // The async waits of `RwLock` / `Condvar` (which have no "waiters" state
@@ -43,7 +45,9 @@ fn unpark_parked(w: GcBuf<i32>) {
 }
 
 fn two_words() -> GcBuf<i32> {
-    buf_new(2)
+    unsafe {
+        buf_new(2)
+    }
 }
 
 /// Memory ordering of an atomic operation (2.16.2). Spec name: `Ordering`,
@@ -80,9 +84,11 @@ pub struct Atomic<T> {
 // method is inlined (`-O1` and up).
 impl<T: AtomicPrimitive + PartialEq> Atomic<T> {
     pub fn new(value: T) -> Atomic<T> {
-        let cell: GcBuf<T> = buf_new(1);
-        cell[0] = value;
-        Atomic { cell }
+        unsafe {
+            let cell: GcBuf<T> = buf_new(1);
+            cell[0] = value;
+            Atomic { cell }
+        }
     }
 
     /// Panics on `Release` / `AcqRel` (not load orderings).
@@ -244,9 +250,11 @@ unsafe impl<T: Send> Sync for Mutex<T> {}
 
 impl<T> Mutex<T> {
     pub fn new(value: T) -> Mutex<T> {
-        let v: GcBuf<T> = buf_new(1);
-        v[0] = value;
-        Mutex { state: two_words(), value: v }
+        unsafe {
+            let v: GcBuf<T> = buf_new(1);
+            v[0] = value;
+            Mutex { state: two_words(), value: v }
+        }
     }
 
     /// Block until the lock is ours. Bind the guard with `using`.
@@ -357,16 +365,22 @@ pub struct MutexGuard<T> {
 impl<T> MutexGuard<T> {
     /// The protected value (a copy of the handle for GC types).
     pub fn get(self) -> T {
-        self.mutex.value[0]
+        unsafe {
+            self.mutex.value[0]
+        }
     }
     /// Replace the protected value (instead of spec `deref_mut`: rok has
     /// no `ref` returns).
     pub fn set(self, value: T) {
-        self.mutex.value[0] = value;
+        unsafe {
+            self.mutex.value[0] = value;
+        }
     }
     /// Replace the protected value with `f(value)`.
     pub fn update(self, f: fn(T) -> T) {
-        self.mutex.value[0] = f(self.mutex.value[0]);
+        unsafe {
+            self.mutex.value[0] = f(self.mutex.value[0]);
+        }
     }
 }
 
@@ -388,9 +402,11 @@ unsafe impl<T: Send> Sync for RwLock<T> {}
 
 impl<T> RwLock<T> {
     pub fn new(value: T) -> RwLock<T> {
-        let v: GcBuf<T> = buf_new(1);
-        v[0] = value;
-        RwLock { state: two_words(), value: v }
+        unsafe {
+            let v: GcBuf<T> = buf_new(1);
+            v[0] = value;
+            RwLock { state: two_words(), value: v }
+        }
     }
 
     pub fn read(self) -> RwLockReadGuard<T> {
@@ -494,7 +510,9 @@ pub struct RwLockReadGuard<T> {
 
 impl<T> RwLockReadGuard<T> {
     pub fn get(self) -> T {
-        self.lock.value[0]
+        unsafe {
+            self.lock.value[0]
+        }
     }
 }
 
@@ -513,13 +531,19 @@ pub struct RwLockWriteGuard<T> {
 
 impl<T> RwLockWriteGuard<T> {
     pub fn get(self) -> T {
-        self.lock.value[0]
+        unsafe {
+            self.lock.value[0]
+        }
     }
     pub fn set(self, value: T) {
-        self.lock.value[0] = value;
+        unsafe {
+            self.lock.value[0] = value;
+        }
     }
     pub fn update(self, f: fn(T) -> T) {
-        self.lock.value[0] = f(self.lock.value[0]);
+        unsafe {
+            self.lock.value[0] = f(self.lock.value[0]);
+        }
     }
 }
 
@@ -583,8 +607,10 @@ impl Condvar {
     /// if another task holds it, the guard's unlock is owed instead and
     /// does nothing (the worker never blocks).
     pub fn wait_async<T>(self, guard: MutexGuard<T>) -> CondvarWait<T> {
-        let st: GcBuf<i32> = buf_new(2);
-        CondvarWait { cv: self, mutex: guard.mutex, st: st }
+        unsafe {
+            let st: GcBuf<i32> = buf_new(2);
+            CondvarWait { cv: self, mutex: guard.mutex, st: st }
+        }
     }
 
     /// Unlock `guard`'s mutex, block until notified (or spuriously),
@@ -620,40 +646,42 @@ pub struct CondvarWait<T> {
 impl<T> rok::core::future::Future for CondvarWait<T> {
     type Output = MutexGuard<T>;
     fn poll(ref self, ref ctx: rok::core::future::Context) -> rok::core::future::Poll<MutexGuard<T>> {
-        let st = self.st;
-        let m = self.mutex;
-        // From the unlock until the lock is ours again the task's guard
-        // holds nothing: its drop is owed. The `await` may leave on a
-        // cancel after any `Pending` without polling again.
-        if st[0] == 0 {
-            st[1] = atomic_load(self.cv.seq, 0, SeqCst);
-            st[0] = 1;
-            m.unlock();
-            m.owe(rok::core::task::id().as_u64());
-        }
-        if rok::core::task::cancel_requested(ctx) {
-            // The task leaves this `await` and its `using` guard drops:
-            // take the lock back if it is free (the drop unlocks it),
-            // else the drop stays owed. Never blocks.
-            if m.try_lock() is MutexGuard<T> {
-                m.forgive();
+        unsafe {
+            let st = self.st;
+            let m = self.mutex;
+            // From the unlock until the lock is ours again the task's guard
+            // holds nothing: its drop is owed. The `await` may leave on a
+            // cancel after any `Pending` without polling again.
+            if st[0] == 0 {
+                st[1] = atomic_load(self.cv.seq, 0, SeqCst);
+                st[0] = 1;
+                m.unlock();
+                m.owe(rok::core::task::id().as_u64());
             }
-            return rok::core::future::Poll::Ready(MutexGuard { mutex: m });
-        }
-        if st[0] == 1 {
-            park_on(self.cv.seq, ctx);
-            if atomic_load(self.cv.seq, 0, SeqCst) == st[1] {
-                return rok::core::future::Poll::Pending;
+            if rok::core::task::cancel_requested(ctx) {
+                // The task leaves this `await` and its `using` guard drops:
+                // take the lock back if it is free (the drop unlocks it),
+                // else the drop stays owed. Never blocks.
+                if m.try_lock() is MutexGuard<T> {
+                    m.forgive();
+                }
+                return rok::core::future::Poll::Ready(MutexGuard { mutex: m });
             }
-            st[0] = 2;
-        }
-        let lf = m.lock_async();
-        match lf.poll(ref ctx) {
-            rok::core::future::Poll::Ready(g) => {
-                m.forgive();
-                rok::core::future::Poll::Ready(g)
+            if st[0] == 1 {
+                park_on(self.cv.seq, ctx);
+                if atomic_load(self.cv.seq, 0, SeqCst) == st[1] {
+                    return rok::core::future::Poll::Pending;
+                }
+                st[0] = 2;
             }
-            rok::core::future::Poll::Pending => rok::core::future::Poll::Pending,
+            let lf = m.lock_async();
+            match lf.poll(ref ctx) {
+                rok::core::future::Poll::Ready(g) => {
+                    m.forgive();
+                    rok::core::future::Poll::Ready(g)
+                }
+                rok::core::future::Poll::Pending => rok::core::future::Poll::Pending,
+            }
         }
     }
 }
@@ -668,21 +696,29 @@ impl<T> !Sync for Cell<T> {}
 
 impl<T> Cell<T> {
     pub fn new(value: T) -> Cell<T> {
-        let v: GcBuf<T> = buf_new(1);
-        v[0] = value;
-        Cell { value: v }
+        unsafe {
+            let v: GcBuf<T> = buf_new(1);
+            v[0] = value;
+            Cell { value: v }
+        }
     }
     pub fn get(self) -> T {
-        self.value[0]
+        unsafe {
+            self.value[0]
+        }
     }
     // Spec takes `ref self`; the handle makes plain `self` share the cell.
     pub fn set(self, value: T) {
-        self.value[0] = value;
+        unsafe {
+            self.value[0] = value;
+        }
     }
     pub fn replace(self, value: T) -> T {
-        let old = self.value[0];
-        self.value[0] = value;
-        old
+        unsafe {
+            let old = self.value[0];
+            self.value[0] = value;
+            old
+        }
     }
 }
 

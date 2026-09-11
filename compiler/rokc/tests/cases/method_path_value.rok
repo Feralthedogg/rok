@@ -60,3 +60,5 @@ fn main() -> i32 {
     println(f"{area_of(1)} {area_of(2)}");
     return 0;
 }
+
+// spec: 004.09-method

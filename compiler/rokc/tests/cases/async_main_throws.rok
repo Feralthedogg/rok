@@ -25,3 +25,5 @@ async fn main() throws (Oops) {
         i = i + 1;
     }
 }
+
+// spec: 004.12-async

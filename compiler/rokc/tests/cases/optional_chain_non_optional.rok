@@ -6,3 +6,5 @@ fn main() -> i32 {
     let v = p?.x;
     return 0;
 }
+
+// spec: 003.08-optional-chaining-and-coalescing

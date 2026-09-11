@@ -8,3 +8,5 @@ fn main() {
     let k: isize = 0;
     println(f"{xs[: :k]:?}");
 }
+
+// spec: 003.06-indexing-and-slicing

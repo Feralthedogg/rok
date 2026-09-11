@@ -1,0 +1,52 @@
+// expect-exit: 0
+// expect-stdout:
+// a b c d e
+// -1 -1 -1 -1 7
+
+// A `none`-typed value flowing into a `T | none` slot is still
+// evaluated: its block statements, `if` / `match` branches and calls
+// run (only the payload is empty).
+fn a() -> i32 | none {
+    {
+        print("a ");
+        none
+    }
+}
+
+fn b(x: i32) -> i32 | none {
+    if x > 0 {
+        print("b ");
+        none
+    } else {
+        none
+    }
+}
+
+fn note(s: str) -> none {
+    print(s);
+    none
+}
+
+fn c() -> i32 | none {
+    unsafe {
+        print("c ");
+        none
+    }
+}
+
+fn d(x: i32) -> i32 | none {
+    match x {
+        1 => note("d "),
+        _ => none,
+    }
+}
+
+fn main() {
+    let r1 = a();
+    let r2 = b(1);
+    let r3 = c();
+    let r4 = d(1);
+    let r5: i32 | none = { print("e"); 7 };
+    println("");
+    println(f"{r1 ?? -1} {r2 ?? -1} {r3 ?? -1} {r4 ?? -1} {r5 ?? -1}");
+}

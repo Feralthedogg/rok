@@ -14,3 +14,5 @@ fn first_double_over(start: i32, limit: i32) -> i32 {
 fn main() -> i32 {
     return first_double_over(1i32, 100i32);
 }
+
+// spec: 003.13-loop-expressions

@@ -9,3 +9,5 @@ fn main() -> i32 {
     let s = twice(2, |n: i32| -> i32 { n * 2 });
     return r + s + 3;
 }
+
+// spec: 002.10-generics

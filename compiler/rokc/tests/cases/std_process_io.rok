@@ -95,3 +95,5 @@ fn main() throws (IoError) {
     println(f"try_wait ok, then: {done}");
     println(f"id ok: {process::id() == env::pid()}");
 }
+
+// spec: std 307-process

@@ -19,3 +19,5 @@ println(f"{x.get()}");
 let y: any Source = C { v: true };
 println(f"{y.id()}");
 println(f"{total(A { v: 1 })}");
+
+// spec: 002.02-any-slot

@@ -104,3 +104,5 @@ fn main() -> i32 {
     }
     return 0;
 }
+
+// spec: 005.02-const

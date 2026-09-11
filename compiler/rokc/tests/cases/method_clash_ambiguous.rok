@@ -15,3 +15,5 @@ fn main() {
     let c = C { n: 0 };
     println(f"{c.side()}");
 }
+
+// spec: 004.09-method

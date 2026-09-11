@@ -17,3 +17,5 @@ fn main() -> i32 {
     let p = run(Op::Mul(4, 4));
     return s + p;
 }
+
+// spec: 002.04-enum

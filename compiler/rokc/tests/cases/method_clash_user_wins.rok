@@ -55,3 +55,5 @@ fn main() {
     // An inherent method beats every trait's (`Iterator::count`).
     println(f"{c.count()}");
 }
+
+// spec: 004.09-method

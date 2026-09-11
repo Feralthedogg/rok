@@ -79,6 +79,10 @@ Big rev_c(Big b) { Big r = { b.c, b.b, b.a }; return r; }
 V3 (*get_v3_scale(void))(V3, float) { return v3_scale; }
 Big (*get_rev(void))(Big) { return rev_c; }
 long cb_big2(Big (*f)(Big)) { return cb_big(f); }
+signed char neg8(signed char c) { return -c; }
+signed char rok_neg8(signed char c);
+unsigned short rok_dbl16(unsigned short u);
+int call_narrow(void) { return rok_neg8(-7) * 100000 + rok_dbl16(40000); }
 ";
 
 const ROK_SIDE: &str = r#"
@@ -114,6 +118,8 @@ extern "C" {
     fn get_v3_scale() -> extern "C" fn(V3, f32) -> V3;
     fn get_rev() -> extern "C" fn(Big) -> Big;
     fn cb_big2(f: extern "C" fn(Big) -> Big) -> i64;
+    fn neg8(c: i8) -> i8;
+    fn call_narrow() -> i32;
 }
 
 // C calls these (spec 5.9.10): aggregates the C way both ways.
@@ -123,6 +129,11 @@ extern "C" fn sum_d4(d: D4) -> f64 { d.a + d.b + d.c + d.d }
 extern "C" fn neg_small(s: Small) -> Small { Small { a: -s.a, b: -s.b } }
 #[export_name("rok_mix")]
 extern "C" fn mix_rok(m: Mix) -> Mix { Mix { a: m.a + 1, b: m.b * 2.0 } }
+// Narrow results come back extended where the platform ABI says so.
+#[export_name("rok_neg8")]
+extern "C" fn neg8_rok(c: i8) -> i8 { -c }
+#[export_name("rok_dbl16")]
+extern "C" fn dbl16_rok(u: u16) -> u16 { u.wrapping_mul(2) }
 
 fn main() {
     unsafe {
@@ -164,6 +175,7 @@ fn main() {
     let k: extern "C" fn(Small) -> Small | none = neg_small;
     let ks = match k { none => Small { a: 0, b: 0 }, p: extern "C" fn(Small) -> Small => p(Small { a: 1, b: 2 }) };
     println(f"{w.x} {w.y} {w.z} {rb.a}{rb.b}{rb.c} {rh.a}{rh.b}{rh.c} {ks.a} {ks.b} {unsafe { cb_big2(h) }}");
+    println(f"{unsafe { neg8(5) }} {unsafe { call_narrow() }}");
 }
 "#;
 
@@ -229,6 +241,113 @@ fn stack_overflow_is_reported() {
             "{mode}: {stderr}"
         );
         assert_eq!(text(&run.stdout), "before\n", "{mode}");
+    }
+}
+
+// A 2.4 MB frame: without stack probes its first store lands far below
+// the guard page.
+const WIDE: &str = r#"
+fn wide(n: i64) -> i64 {
+    let a: [i64; 300000] = [n; 300000];
+    if n == 0 { return a[7]; }
+    return wide(n - 1) % 7 + a[(n % 300000) as usize];
+}
+
+fn main() {
+    print("before\n");
+    println(f"{wide(1000)}");
+}
+"#;
+
+/// Recursion through huge frames is reported like any overflow (stack
+/// probes). Built at -O0 whatever `ROK_TEST_OPT` says: LLVM's optimizer
+/// is very slow on the 300000-element array value.
+#[test]
+fn big_frame_overflow_is_reported() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("wide");
+    fs::write(dir.join("main.rok"), WIDE).unwrap();
+    let exe = dir.join("out");
+    let out = Command::new(ROKC)
+        .args(["-q", "build"])
+        .arg(dir.join("main.rok"))
+        .arg("--bootstrap")
+        .arg(&env.bootstrap)
+        .arg("--rokr")
+        .arg(&env.rokr)
+        .arg("-O0")
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .unwrap();
+    ok(&out);
+    let run = Command::new(&exe).output().unwrap();
+    let stderr = text(&run.stderr);
+    assert!(!run.status.success(), "{:?}", run.status);
+    assert!(
+        stderr.contains("thread 'main' has overflowed its stack"),
+        "{stderr}"
+    );
+    assert_eq!(text(&run.stdout), "before\n");
+}
+
+const CHATTY: &str = r#"
+use rok::std::thread;
+
+async fn main() {
+    let busy = Atomic::new(0);
+    for i in 0..4 {
+        let t = thread::spawn(|| {
+            while true {
+                println("tick");
+                busy.store(1);
+            }
+        });
+        t.detach();
+    }
+    let s = task::spawn(async {
+        while true {
+            println("task");
+            await task::yield_now();
+        }
+    });
+    while busy.load() == 0 {}
+    print("end\n");
+}
+"#;
+
+/// `rok_runtime_shutdown` (spec 8.5.2): once `main` returns, threads
+/// still running and the executor's workers stop at their next
+/// safepoint, after leaving the runtime code they are in, so the exit
+/// path (the stdout flush) never waits on a lock one of them holds.
+/// And the flush is registered before the first byte is buffered: it
+/// used to be lost when another thread wrote first.
+#[test]
+fn shutdown_stops_other_threads() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("chatty");
+    fs::write(dir.join("main.rok"), CHATTY).unwrap();
+    let exe = dir.join("out");
+    let out = Command::new(ROKC)
+        .args(["-q", "build"])
+        .arg(dir.join("main.rok"))
+        .arg("--bootstrap")
+        .arg(&env.bootstrap)
+        .arg("--bootstrap")
+        .arg(env.workspace.join("library/std/lib.rok"))
+        .arg("--rokr")
+        .arg(&env.rokr)
+        .args(std::env::var("ROK_TEST_OPT").ok().filter(|o| !o.is_empty()))
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .unwrap();
+    ok(&out);
+    for _ in 0..20 {
+        let run = Command::new(&exe).output().unwrap();
+        ok(&run);
+        let stdout = text(&run.stdout);
+        assert!(stdout.contains("end\n"), "{stdout:?}");
     }
 }
 
@@ -481,6 +600,230 @@ fn c_fn_ptr_null_niche() {
     );
 }
 
+/// Ten arguments, `str`s past the last argument register. Runtime ABI
+/// (spec 8.5): a `str` is a by-value `(ptr, len)` struct, never split
+/// between the last register and the stack. C ABI: a `char*`.
+const PAIRS_C: &str = r"
+#include <string.h>
+typedef struct { const char *p; unsigned long n; } S;
+static long h(S s) { return s.n ? (long)s.n * 1000 + s.p[0] : 0; }
+long rt10(S a, long b, long c, long d, S e, S f, long g, S h1, long i, S j) {
+    return h(a) + b + c * 10 + d * 100 + h(e) * 2 + h(f) * 3 + g * 7 + h(h1) * 5 + i * 11 + h(j) * 13;
+}
+S rt_pick(long a, long b, long c, long d, long e, long f, long g, S s, long i) {
+    S r = { s.p + (a + b + c + d + e + f + g + i - 35), s.n - 1 };
+    return r;
+}
+static long hc(const char *s) { return (long)strlen(s) * 1000 + s[0]; }
+long c10(const char *a, long b, long c, long d, const char *e, const char *f, long g,
+         const char *h1, long i, const char *j) {
+    return hc(a) + b + c * 10 + d * 100 + hc(e) * 2 + hc(f) * 3 + g * 7 + hc(h1) * 5 + i * 11 + hc(j) * 13;
+}
+";
+
+const PAIRS_ROK: &str = r#"
+extern "rok" {
+    fn rt10(a: str, b: i64, c: i64, d: i64, e: str, f: str, g: i64, h: str, i: i64, j: str) -> i64;
+    fn rt_pick(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, s: str, i: i64) -> str;
+}
+
+extern "C" {
+    fn c10(a: str, b: i64, c: i64, d: i64, e: str, f: str, g: i64, h: str, i: i64, j: str) -> i64;
+}
+
+fn main() {
+    let x = unsafe { rt10("a", 1, 2, 3, "bc", "def", 4, "ghij", 5, "klmno") };
+    let y = unsafe { c10("a", 1, 2, 3, "bc", "def", 4, "ghij", 5, "klmno") };
+    let s = unsafe { rt_pick(1, 2, 3, 4, 5, 6, 7, "xyzw", 8) };
+    println(f"{x} {y} {s}");
+}
+"#;
+
+#[test]
+fn ten_argument_calls_with_strs() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("pairs");
+    fs::write(dir.join("side.c"), PAIRS_C).unwrap();
+    fs::write(dir.join("main.rok"), PAIRS_ROK).unwrap();
+    let obj = dir.join("main.o");
+    ok(&build(
+        &env,
+        &dir.join("main.rok"),
+        &["--emit=obj", "-o", obj.to_str().unwrap()],
+    ));
+    let exe = dir.join("out");
+    ok(&Command::new("clang")
+        .arg(&obj)
+        .arg(dir.join("side.c"))
+        .arg(&env.rokr)
+        .args(["-lm", "-o"])
+        .arg(&exe)
+        .output()
+        .unwrap());
+    let run = Command::new(&exe).output().unwrap();
+    ok(&run);
+    // h(s) = len * 1000 + first byte.
+    let h = |s: &str| s.len() as i64 * 1000 + i64::from(s.as_bytes()[0]);
+    let want = h("a")
+        + 1
+        + 20
+        + 300
+        + h("bc") * 2
+        + h("def") * 3
+        + 28
+        + h("ghij") * 5
+        + 55
+        + h("klmno") * 13;
+    assert_eq!(text(&run.stdout), format!("{want} {want} yzw\n"));
+    // x86_64 has six argument registers: `e` (words 5, 6) would
+    // straddle, so it and every later pair go whole on the stack.
+    let ll = dir.join("x86.ll");
+    ok(&build(
+        &env,
+        &dir.join("main.rok"),
+        &[
+            "--emit=llvmir",
+            "--target=x86_64-unknown-linux-gnu",
+            "-o",
+            ll.to_str().unwrap(),
+        ],
+    ));
+    let x86 = fs::read_to_string(ll).unwrap();
+    assert!(
+        x86.contains(
+            "declare i64 @rt10({ i64, i64 }, i64, i64, i64, ptr byval({ ptr, i64 }) align 8, \
+             ptr byval({ ptr, i64 }) align 8, i64, ptr byval({ ptr, i64 }) align 8, i64, \
+             ptr byval({ ptr, i64 }) align 8)"
+        ),
+        "{x86}"
+    );
+}
+
+/// `#[repr(..)]` layouts against clang's (spec 6.2.2).
+const REPR_C: &str = r"
+#include <stddef.h>
+typedef struct { char a; int b; char c; } C1;
+typedef struct __attribute__((packed)) { char a; int b; short c; } P;
+typedef struct { char x; P p; char y; } HasP;
+typedef struct __attribute__((aligned(16))) { char a; } A;
+typedef struct { char x; A a; char y; } Outer;
+long layout(int i) {
+    static const long t[] = {
+        sizeof(C1), _Alignof(C1), offsetof(C1, b), offsetof(C1, c),
+        sizeof(P), _Alignof(P), offsetof(P, b), offsetof(P, c),
+        sizeof(HasP), offsetof(HasP, p), offsetof(HasP, y),
+        sizeof(A), _Alignof(A), sizeof(Outer), offsetof(Outer, a), offsetof(Outer, y),
+    };
+    return t[i];
+}
+long c1_sum(C1 s) { return s.a * 100 + s.b * 10 + s.c; }
+long p_sum(P p) { return p.a * 100 + p.b * 10 + p.c; }
+long has_p(HasP h) { return h.x * 1000 + h.p.b * 10 + h.y; }
+long outer(Outer o) { return o.x * 100 + o.a.a * 10 + o.y; }
+P p_make(int b) { P p = { 1, b, 3 }; return p; }
+double twice(double d) { return d * 2; }
+";
+
+const REPR_ROK: &str = r#"
+use rok::bare::ptr::{align_of, size_of};
+
+#[repr(C)]
+struct C1 { a: i8; b: i32; c: i8; }
+#[repr(packed)]
+struct P { a: i8; b: i32; c: i16; }
+struct HasP { x: i8; p: P; y: i8; }
+#[repr(align(16))]
+struct A { a: i8; }
+struct Outer { x: i8; a: A; y: i8; }
+#[repr(transparent)]
+struct T { v: f64; }
+
+extern "C" {
+    fn layout(i: i32) -> i64;
+    fn c1_sum(s: C1) -> i64;
+    fn p_sum(p: P) -> i64;
+    fn has_p(h: HasP) -> i64;
+    fn outer(o: Outer) -> i64;
+    fn p_make(b: i32) -> P;
+    fn twice(t: T) -> T;
+}
+
+fn main() {
+    let c = unsafe { [layout(0), layout(1), layout(4), layout(5), layout(8), layout(11), layout(12), layout(13)] };
+    println(f"{c[0]} {c[1]} {c[2]} {c[3]} {c[4]} {c[5]} {c[6]} {c[7]}");
+    println(f"{size_of::<C1>()} {align_of::<C1>()} {size_of::<P>()} {align_of::<P>()} {size_of::<HasP>()} {size_of::<A>()} {align_of::<A>()} {size_of::<Outer>()}");
+    let p = unsafe { p_make(7) };
+    unsafe {
+        println(f"{c1_sum(C1 { a: 1, b: 2, c: 3 })} {p_sum(P { a: 4, b: 5, c: 6 })} {has_p(HasP { x: 1, p: P { a: 0, b: 2, c: 0 }, y: 3 })} {outer(Outer { x: 7, a: A { a: 8 }, y: 9 })}");
+        println(f"{p.a} {p.b} {p.c} {twice(T { v: 1.25 }).v}");
+    }
+}
+"#;
+
+#[test]
+fn repr_layouts_match_clang() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("repr");
+    fs::write(dir.join("side.c"), REPR_C).unwrap();
+    fs::write(dir.join("main.rok"), REPR_ROK).unwrap();
+    let obj = dir.join("main.o");
+    let bare = env.workspace.join("library/bare/lib.rok");
+    ok(&build(
+        &env,
+        &dir.join("main.rok"),
+        &[
+            "--bootstrap",
+            bare.to_str().unwrap(),
+            "--emit=obj",
+            "-o",
+            obj.to_str().unwrap(),
+        ],
+    ));
+    let exe = dir.join("out");
+    ok(&Command::new("clang")
+        .arg(&obj)
+        .arg(dir.join("side.c"))
+        .arg(&env.rokr)
+        .args(["-lm", "-o"])
+        .arg(&exe)
+        .output()
+        .unwrap());
+    let run = Command::new(&exe).output().unwrap();
+    ok(&run);
+    let out = text(&run.stdout);
+    let lines: Vec<&str> = out.lines().collect();
+    // clang's sizes / alignments, then rok's: the same.
+    assert_eq!(lines[0], "12 4 7 1 9 16 16 48", "{out}");
+    assert_eq!(lines[1], lines[0], "{out}");
+    assert_eq!(lines[2], "123 456 1023 789", "{out}");
+    assert_eq!(lines[3], "1 7 3 2.5", "{out}");
+    // System V: a packed struct's unaligned fields make it MEMORY both
+    // ways, like clang; the over-aligned one goes byval at 16.
+    let ll = dir.join("x86.ll");
+    ok(&build(
+        &env,
+        &dir.join("main.rok"),
+        &[
+            "--bootstrap",
+            bare.to_str().unwrap(),
+            "--emit=llvmir",
+            "--target=x86_64-unknown-linux-gnu",
+            "-o",
+            ll.to_str().unwrap(),
+        ],
+    ));
+    let x86 = fs::read_to_string(ll).unwrap();
+    for want in [
+        "declare i64 @c1_sum({ i64, i8 })",
+        "declare i64 @p_sum(ptr byval(<{ i8, i32, i16 }>) align 8)",
+        "declare void @p_make(ptr sret(<{ i8, i32, i16 }>) align 1, i32)",
+        "@outer(ptr byval(<{ i8, [15 x i8], <{ i8, [15 x i8] }>, i8, [15 x i8] }>) align 16)",
+        "declare double @twice(double)",
+    ] {
+        assert!(x86.contains(want), "x86_64 lacks `{want}`:\n{x86}");
+    }
+}
+
 #[test]
 fn c_abi_matches_clang() {
     let Some(env) = setup() else { return };
@@ -506,7 +849,7 @@ fn c_abi_matches_clang() {
     ok(&run);
     assert_eq!(
         text(&run.stdout),
-        "2 4 6\n10.5\n5 10 15 30\n-2 301\n42 2.5\n6\n45\n-434465\n82\n0.75\n21\n18 321 10 5 -4 -5\n987\n2 4 6 321 654 -1 -2 321\n"
+        "2 4 6\n10.5\n5 10 15 30\n-2 301\n42 2.5\n6\n45\n-434465\n82\n0.75\n21\n18 321 10 5 -4 -5\n987\n2 4 6 321 654 -1 -2 321\n-5 714464\n"
     );
 
     // The other targets' lowering, as LLVM IR declarations (what clang
@@ -537,6 +880,10 @@ fn c_abi_matches_clang() {
         // Only one GPR left for a two-eightbyte struct: all in memory.
         "declare i64 @many(i64, i64, i64, i64, i64, ptr byval({ i32, i32, i32 }) align 8, i64)",
         "declare i32 @sx(i8 signext, i16 zeroext)",
+        // Narrow results too, and C-callable definitions both ways.
+        "declare signext i8 @neg8(i8 signext)",
+        "signext i8 @rok_neg8(i8 signext",
+        "zeroext i16 @rok_dbl16(i16 zeroext",
         "declare i64 @vsum(i32, ...)",
         "call double (i32, ...) @vmix(i32 2, i32",
     ] {
@@ -559,7 +906,18 @@ fn c_abi_matches_clang() {
         "declare i32 @small_inc(i64)",
         "declare [2 x i64] @mix_twice([2 x i64])",
         "declare i64 @many(i64, i64, i64, i64, i64, [2 x i64], i64)",
+        // AAPCS64 leaves the upper bits unspecified: no extension.
+        "declare i32 @sx(i8, i16)",
+        "declare i8 @neg8(i8)",
     ] {
         assert!(a64.contains(want), "aarch64 lacks `{want}`:\n{a64}");
+    }
+    let apple = decls("arm64-apple-macosx14.0.0");
+    for want in [
+        "declare i32 @sx(i8 signext, i16 zeroext)",
+        "declare signext i8 @neg8(i8 signext)",
+        "zeroext i16 @rok_dbl16(i16 zeroext",
+    ] {
+        assert!(apple.contains(want), "Apple arm64 lacks `{want}`:\n{apple}");
     }
 }

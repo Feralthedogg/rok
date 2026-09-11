@@ -1,3 +1,5 @@
 // expect-error: `str` is not an FFI type
 extern "C" fn greet(name: str) -> i32 { return 0; }
 fn main() -> i32 { return 0; }
+
+// spec: 005.09-extern-block

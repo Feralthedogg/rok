@@ -75,3 +75,5 @@ let h = thread::spawn(|| task::block_on(g));
 let via_closure = Cell::new(7);
 let make = || async { via_closure.get() };
 let i = task::spawn(make());
+
+// spec: 004.12-async

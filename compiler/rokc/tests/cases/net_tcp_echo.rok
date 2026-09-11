@@ -18,10 +18,7 @@ use rok::std::io::{IoError, Reader, Writer, byte_buf};
 use rok::std::thread;
 
 fn text(buf: List<u8>, n: usize) -> str {
-    let sb = StrBuf::new();
-    let i: usize = 0;
-    while i < n { sb.push_byte(buf[i]); i = i + 1; }
-    return sb.to_str();
+    return try! str::from_utf8(buf[0:n]);
 }
 
 let any: SocketAddr = try! "127.0.0.1:0".parse::<SocketAddr>();
@@ -103,8 +100,9 @@ println(f"async echo: {oks} clients ok");
 // A large payload: write and read concurrently (the socket buffers fill).
 let big = task::spawn(async {
     let s = try! await net::tcp_connect_async(a2);
-    let data = byte_buf(100000);
+    // The writer task owns its buffer: a list cannot be shared with it.
     let w = task::spawn(async {
+        let data = byte_buf(100000);
         try! await s.write_all_async(data);
         try! s.shutdown(Shutdown::Write);
         0

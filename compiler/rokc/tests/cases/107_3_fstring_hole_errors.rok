@@ -14,3 +14,5 @@ fn main() -> i32 {
     println(f"{}");
     return 0;
 }
+
+// spec: 001.07.3-string-literals

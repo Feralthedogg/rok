@@ -20,6 +20,9 @@ pub struct Slice<T> {
     pub(pkg) stride: isize;
 }
 
+// Shares its buffer like `List` (stdlib 2.13.9).
+impl<T> !Sync for Slice<T> {}
+
 /// A contiguous view of `buf[r]` (`r` clamped to the length `n`).
 pub(pkg) fn view_of<T>(buf: GcBuf<T>, r: Range<usize>, n: usize) -> Slice<T> {
     let r = clamp_range(r, n);
@@ -42,10 +45,12 @@ impl<T> Slice<T> {
 
     /// Element `i`, or `none` out of bounds.
     pub fn get(self, i: usize) -> T | none {
-        if i >= self.len {
-            return none;
+        unsafe {
+            if i >= self.len {
+                return none;
+            }
+            return self.buf[self.at(i)];
         }
-        return self.buf[self.at(i)];
     }
 
     pub fn first(self) -> T | none {
@@ -104,12 +109,14 @@ pub struct SliceIter<T> {
 impl<T> Iterator for SliceIter<T> {
     type Item = T;
     fn next(ref self) -> T | none {
-        if self.i >= self.s.len {
-            return none;
+        unsafe {
+            if self.i >= self.s.len {
+                return none;
+            }
+            self.i += 1;
+            // `return`: with `T = ()` a bare tail reads as a missing value.
+            return self.s.buf[self.s.at(self.i - 1)];
         }
-        self.i += 1;
-        // `return`: with `T = ()` a bare tail reads as a missing value.
-        return self.s.buf[self.s.at(self.i - 1)];
     }
 }
 
@@ -126,10 +133,12 @@ impl<T> Index<usize> for Slice<T> {
     type Output = T;
     #[track_caller]
     fn index(self, i: usize) -> T {
-        if i >= self.len {
-            return panic(f"slice index {i} out of bounds for length {self.len}");
+        unsafe {
+            if i >= self.len {
+                return panic(f"slice index {i} out of bounds for length {self.len}");
+            }
+            self.buf[self.at(i)]
         }
-        self.buf[self.at(i)]
     }
 }
 
@@ -155,12 +164,14 @@ impl<T> Sliceable<Range<usize>> for List<T> {
 impl<T, const N: usize> Sliceable<Range<usize>> for [T; N] {
     type Output = Slice<T>;
     fn slice(self, r: Range<usize>) -> Slice<T> {
-        let r = clamp_range(r, N);
-        let buf: GcBuf<T> = buf_new(r.end - r.start);
-        for i in r.start..r.end {
-            buf[i - r.start] = self[i];
+        unsafe {
+            let r = clamp_range(r, N);
+            let buf: GcBuf<T> = buf_new(r.end - r.start);
+            for i in r.start..r.end {
+                buf[i - r.start] = self[i];
+            }
+            Slice { buf: buf, start: 0, len: r.end - r.start, stride: 1 }
         }
-        Slice { buf: buf, start: 0, len: r.end - r.start, stride: 1 }
     }
 }
 

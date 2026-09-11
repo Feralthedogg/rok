@@ -12,3 +12,5 @@ pub mod parent {
 fn main() -> i32 {
     return parent::child::caller();   // 5+7 = 12
 }
+
+// spec: 005.05-use

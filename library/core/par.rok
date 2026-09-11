@@ -58,7 +58,10 @@ pub fn for_each<I: IntoIterator, T: Send>(iter: I, f: fn(T) + Send + Sync) {
     let items: List<T> = collect_items(iter);
     let n = items.len();
     let (chunks, size) = chunking(n);
+    // Workers only read `items`, and only until `run_chunks` returns.
+    let shared = unsafe { Handoff::new(items) };
     run_chunks(chunks, |c| {
+        let items = shared.get();
         for i in c * size..n.min((c + 1) * size) {
             f(items[i]);
         }
@@ -67,73 +70,94 @@ pub fn for_each<I: IntoIterator, T: Send>(iter: I, f: fn(T) + Send + Sync) {
 
 /// `f` of every item, in the items' order.
 pub fn map<I: IntoIterator, T: Send, U: Send>(iter: I, f: fn(T) -> U + Send + Sync) -> List<U> {
-    let items: List<T> = collect_items(iter);
-    let n = items.len();
-    let out: GcBuf<U> = buf_new(n);
-    let (chunks, size) = chunking(n);
-    run_chunks(chunks, |c| {
-        for i in c * size..n.min((c + 1) * size) {
-            out[i] = f(items[i]);
+    unsafe {
+        let items: List<T> = collect_items(iter);
+        let n = items.len();
+        let out: GcBuf<U> = buf_new(n);
+        let (chunks, size) = chunking(n);
+        // Each chunk writes its own slots of `out`; all done before the read.
+        let shared = Handoff::new((items, out));
+        run_chunks(chunks, |c| {
+            let (items, out) = shared.get();
+            for i in c * size..n.min((c + 1) * size) {
+                out[i] = f(items[i]);
+            }
+        });
+        let result: List<U> = List::with_capacity(n);
+        for i in 0..n {
+            result.push(out[i]);
         }
-    });
-    let result: List<U> = List::with_capacity(n);
-    for i in 0..n {
-        result.push(out[i]);
+        result
     }
-    result
 }
 
 /// Fold with an associative `f` (2.19.4): chunks fold in parallel, then
 /// `init` and the chunk results fold in order.
 pub fn reduce<T: Send + Sync>(iter: List<T>, init: T, f: fn(T, T) -> T + Send + Sync) -> T {
-    let n = iter.len();
-    let (chunks, size) = chunking(n);
-    let partial: GcBuf<T> = buf_new(chunks);
-    run_chunks(chunks, |c| {
-        let start = c * size;
-        let acc = iter[start];
-        for i in start + 1..n.min((c + 1) * size) {
-            acc = f(acc, iter[i]);
+    unsafe {
+        let n = iter.len();
+        let (chunks, size) = chunking(n);
+        let partial: GcBuf<T> = buf_new(chunks);
+        let shared = Handoff::new((iter, partial));
+        run_chunks(chunks, |c| {
+            let (iter, partial) = shared.get();
+            let start = c * size;
+            let acc = iter[start];
+            for i in start + 1..n.min((c + 1) * size) {
+                acc = f(acc, iter[i]);
+            }
+            partial[c] = acc;
+        });
+        let acc = init;
+        for c in 0..chunks {
+            acc = f(acc, partial[c]);
         }
-        partial[c] = acc;
-    });
-    let acc = init;
-    for c in 0..chunks {
-        acc = f(acc, partial[c]);
+        acc
     }
-    acc
 }
 
 /// The items `pred` accepts, in order.
 pub fn filter<T: Send>(iter: List<T>, pred: fn(T) -> bool + Send + Sync) -> List<T> {
-    let n = iter.len();
-    let keep: GcBuf<bool> = buf_new(n);
-    let (chunks, size) = chunking(n);
-    run_chunks(chunks, |c| {
-        for i in c * size..n.min((c + 1) * size) {
-            keep[i] = pred(iter[i]);
+    unsafe {
+        let n = iter.len();
+        let keep: GcBuf<bool> = buf_new(n);
+        let (chunks, size) = chunking(n);
+        let shared = Handoff::new(iter);
+        run_chunks(chunks, |c| {
+            let iter = shared.get();
+            for i in c * size..n.min((c + 1) * size) {
+                keep[i] = pred(iter[i]);
+            }
+        });
+        let out: List<T> = [];
+        for i in 0..n {
+            if keep[i] {
+                out.push(iter[i]);
+            }
         }
-    });
-    let out: List<T> = [];
-    for i in 0..n {
-        if keep[i] {
-            out.push(iter[i]);
-        }
+        out
     }
-    out
 }
 
 /// Run both at once; both results.
 pub fn join<T1: Send, T2: Send>(f1: fn() -> T1 + Send, f2: fn() -> T2 + Send) -> (T1, T2) {
-    let first: GcBuf<T1> = buf_new(1);
-    let second: GcBuf<T2> = buf_new(1);
-    task::in_pool(|| {
-        let h = task::fork_job(|| { second[0] = f2(); });
-        first[0] = f1();
-        task::help_until(h);
-        true
-    });
-    (first[0], second[0])
+    unsafe {
+        let first: GcBuf<T1> = buf_new(1);
+        let second: GcBuf<T2> = buf_new(1);
+        // Each result cell is written once, then read after both joined.
+        let cells = Handoff::new((first, second));
+        task::in_pool(|| {
+            let h = task::fork_job(|| {
+                let (_, second) = cells.get();
+                second[0] = f2();
+            });
+            let (first, _) = cells.get();
+            first[0] = f1();
+            task::help_until(h);
+            true
+        });
+        (first[0], second[0])
+    }
 }
 
 /// Structured spawning (2.19.3): every task `s.spawn`s has finished
@@ -189,20 +213,25 @@ pub struct Scope {
 
 impl Scope {
     pub fn spawn<T: Send>(self, f: fn() -> T + Send) -> ScopeHandle<T> {
-        let result: GcBuf<T> = buf_new(1);
-        let cancelled = self.cancelled;
-        let task = ScopeTask {
-            handle: task::fork_job(|| {
-                if !cancelled.load() {
-                    result[0] = f();
-                }
-            }),
-            joined: Once::new(),
-        };
-        using g = self.tasks.lock() {
-            g.get().push(task);
+        unsafe {
+            let result: GcBuf<T> = buf_new(1);
+            let cancelled = self.cancelled;
+            // Written once by the task, read by `join` after it.
+            let cell = Handoff::new(result);
+            let task = ScopeTask {
+                handle: task::fork_job(|| {
+                    if !cancelled.load() {
+                        let result = cell.get();
+                        result[0] = f();
+                    }
+                }),
+                joined: Once::new(),
+            };
+            using g = self.tasks.lock() {
+                g.get().push(task);
+            }
+            ScopeHandle { task, result }
         }
-        ScopeHandle { task, result }
     }
 }
 
@@ -215,8 +244,10 @@ pub struct ScopeHandle<T> {
 impl<T> ScopeHandle<T> {
     /// Wait for the task; its result.
     pub fn join(self) -> T {
-        self.task.finish();
-        self.result[0]
+        unsafe {
+            self.task.finish();
+            self.result[0]
+        }
     }
 }
 
@@ -227,21 +258,23 @@ impl<T> ScopeHandle<T> {
 /// error. Not in spec 2.19, whose `scope` takes a non-throwing
 /// `fn(Scope)`.
 pub fn try_scope<E: Send>(f: fn(TryScope<E>) throws (E)) throws (E) {
-    let err: GcBuf<E> = buf_new(1);
-    let failed = Atomic::new(false);
-    task::in_pool(|| {
-        let tasks: List<ScopeTask> = [];
-        let s = TryScope {
-            scope: Scope { tasks: Mutex::new(tasks), cancelled: Atomic::new(false) },
-            err: err,
-            failed: failed,
-        };
-        try f(s) catch e { s.fail(e); };
-        drain(s.scope);
-        true
-    });
-    if failed.load() {
-        throw err[0];
+    unsafe {
+        let err: GcBuf<E> = buf_new(1);
+        let failed = Atomic::new(false);
+        task::in_pool(|| {
+            let tasks: List<ScopeTask> = [];
+            let s = TryScope {
+                scope: Scope { tasks: Mutex::new(tasks), cancelled: Atomic::new(false) },
+                err: Handoff::new(err),
+                failed: failed,
+            };
+            try f(s) catch e { s.fail(e); };
+            drain(s.scope);
+            true
+        });
+        if failed.load() {
+            throw err[0];
+        }
     }
 }
 
@@ -249,38 +282,45 @@ pub fn try_scope<E: Send>(f: fn(TryScope<E>) throws (E)) throws (E) {
 pub struct TryScope<E> {
     scope: Scope;
     /// The first error (`failed` set once it is written).
-    err: GcBuf<E>;
+    err: Handoff<GcBuf<E>>;
     failed: Atomic<bool>;
 }
 
 impl<E: Send> TryScope<E> {
     /// Keep the first error and cancel the scope.
     fn fail(self, e: E) {
-        // Only the first: a skipped task's `join` reads `err` once it sees
-        // the scope cancelled.
-        if self.failed.compare_exchange(false, true, SeqCst, SeqCst).is_ok() {
-            self.err[0] = e;
-            self.scope.cancelled.store(true);
+        unsafe {
+            // Only the first: a skipped task's `join` reads `err` once it sees
+            // the scope cancelled.
+            if self.failed.compare_exchange(false, true, SeqCst, SeqCst).is_ok() {
+                let err = self.err.get();
+                err[0] = e;
+                self.scope.cancelled.store(true);
+            }
         }
     }
 
     /// `Scope::spawn` for a throwing `f`: its error cancels the scope.
     pub fn spawn<T: Send>(self, f: fn() throws (E) -> T + Send) -> TryScopeHandle<T, E> {
-        let out: GcBuf<T> = buf_new(1);
-        let own: GcBuf<E> = buf_new(1);
-        // 0: ran, 1: threw (`own`), 2: cancelled before it started.
-        let status = Atomic::new(2);
-        let me = self;
-        let h = self.scope.spawn(|| {
-            status.store(0);
-            out[0] = try f() catch e {
-                own[0] = e;
-                status.store(1);
-                me.fail(e);
-                return;
-            };
-        });
-        TryScopeHandle { inner: h, out: out, own: own, status: status, scope: self }
+        unsafe {
+            let out: GcBuf<T> = buf_new(1);
+            let own: GcBuf<E> = buf_new(1);
+            // 0: ran, 1: threw (`own`), 2: cancelled before it started.
+            let status = Atomic::new(2);
+            let me = self;
+            let cells = Handoff::new((out, own));
+            let h = self.scope.spawn(|| {
+                status.store(0);
+                let (out, own) = cells.get();
+                out[0] = try f() catch e {
+                    own[0] = e;
+                    status.store(1);
+                    me.fail(e);
+                    return;
+                };
+            });
+            TryScopeHandle { inner: h, out: out, own: own, status: status, scope: self }
+        }
     }
 
     /// Whether the scope was cancelled: a long task may poll this.
@@ -302,14 +342,17 @@ impl<T, E: Send> TryScopeHandle<T, E> {
     /// Wait for the task: its result, its error, or (cancelled before it
     /// ran) the scope's first error.
     pub fn join(self) throws (E) -> T {
-        self.inner.join();
-        let st = self.status.load();
-        if st == 1 {
-            throw self.own[0];
+        unsafe {
+            self.inner.join();
+            let st = self.status.load();
+            if st == 1 {
+                throw self.own[0];
+            }
+            if st == 2 {
+                let err = self.scope.err.get();
+                throw err[0];
+            }
+            self.out[0]
         }
-        if st == 2 {
-            throw self.scope.err[0];
-        }
-        self.out[0]
     }
 }

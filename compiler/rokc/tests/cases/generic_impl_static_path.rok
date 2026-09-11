@@ -33,3 +33,5 @@ fn main() -> i32 {
     println(f"{e.v.v + 10}");
     return 0;
 }
+
+// spec: 002.10-generics

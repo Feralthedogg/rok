@@ -10,3 +10,5 @@ impl Future for MakeCell {
 }
 
 let t = task::spawn(MakeCell {});
+
+// spec: 004.12-async

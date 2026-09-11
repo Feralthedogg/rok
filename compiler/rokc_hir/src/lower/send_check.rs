@@ -83,11 +83,19 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) {
     else {
         return;
     };
+    let sync = env
+        .names
+        .all_auto()
+        .into_iter()
+        .find(|k| k.ends_with("::Sync"));
     let no_subst = HashMap::new();
     let ctx = LowerCtx::new(env, &no_subst, None);
 
     // 1. Each coroutine's own frame.
     let mut bad: HashMap<FunctionId, String> = HashMap::new();
+    // Frames that capture a `Send` but not `Sync` value: fine inside
+    // one task, not as a task of their own (the spawner keeps its copy).
+    let mut shared: HashMap<FunctionId, String> = HashMap::new();
     let mut held: HashMap<FunctionId, Vec<LocalId>> = HashMap::new();
     let mut ids: Vec<FunctionId> = all.keys().copied().collect();
     ids.sort();
@@ -96,13 +104,16 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) {
         if !(f.is_async || f.is_generator) {
             continue;
         }
-        let (why, h) = frame(&ctx, &send, f);
+        let (why, why_shared, h) = frame(&ctx, &send, sync.as_deref(), f);
         if let Some(w) = why {
             bad.insert(id, w);
         }
+        if let Some(w) = why_shared {
+            shared.insert(id, w);
+        }
         held.insert(id, h);
     }
-    if bad.is_empty() {
+    if bad.is_empty() && shared.is_empty() {
         return;
     }
 
@@ -112,6 +123,7 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) {
         send: &send,
         all: &all,
         bad: &bad,
+        shared: &shared,
         held: &held,
         nodes: HashMap::new(),
         changed: true,
@@ -135,14 +147,19 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) {
     sinks.sort_by_key(|(span, _, _)| (span.file, span.start));
     let mut seen = HashSet::new();
     for (span, sink, items) in sinks {
-        let Some(Item::Bad(c)) = items.into_iter().find(|i| matches!(i, Item::Bad(_))) else {
-            continue;
+        let why = match items
+            .iter()
+            .find(|i| matches!(i, Item::Bad(_)))
+            .or_else(|| items.iter().find(|i| matches!(i, Item::Shared(_))))
+        {
+            Some(Item::Bad(c)) => &bad[c],
+            Some(Item::Shared(c)) => &shared[c],
+            _ => continue,
         };
         if !seen.insert((span.file, span.start)) {
             continue;
         }
         let old = rokc_diagnostic::set_current_span(span);
-        let why = &bad[&c];
         ctx.emit_error(
             rokc_diagnostic::ErrorKind::Type,
             if sink == SINKS[0] {
@@ -162,9 +179,15 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) {
     }
 }
 
-/// Why coroutine `f`'s own frame is not `Send` (`None`: it is), and the
-/// locals its frame holds (captures and locals live across a suspend).
-fn frame(ctx: &LowerCtx<'_>, send: &str, f: &HirFunction) -> (Option<String>, Vec<LocalId>) {
+/// Why coroutine `f`'s own frame is not `Send` (`None`: it is), why it
+/// cannot be a task of its own (a capture is not `Sync`), and the locals
+/// its frame holds (captures and locals live across a suspend).
+fn frame(
+    ctx: &LowerCtx<'_>,
+    send: &str,
+    sync: Option<&str>,
+    f: &HirFunction,
+) -> (Option<String>, Option<String>, Vec<LocalId>) {
     let name = |l: LocalId| {
         f.locals
             .iter()
@@ -174,6 +197,8 @@ fn frame(ctx: &LowerCtx<'_>, send: &str, f: &HirFunction) -> (Option<String>, Ve
     };
     let ty_of = |l: LocalId| f.locals.iter().find(|x| x.id == l).map(|x| x.ty.clone());
     let non_send = |t: &HirTy| *t != HirTy::Unknown && !ctx.implements_trait(t, send, 0);
+    let non_sync =
+        |t: &HirTy| sync.is_some_and(|k| *t != HirTy::Unknown && !ctx.implements_trait(t, k, 0));
     let env_params: HashSet<LocalId> = f
         .params
         .iter()
@@ -182,6 +207,7 @@ fn frame(ctx: &LowerCtx<'_>, send: &str, f: &HirFunction) -> (Option<String>, Ve
         .collect();
     let mut w = Walk {
         non_send_local: &|l| ty_of(l).is_some_and(|t| non_send(&t)),
+        non_sync_local: &|l| ty_of(l).is_some_and(|t| non_sync(&t)),
         non_send_ty: &non_send,
         env_params: &env_params,
         declared: Vec::new(),
@@ -189,9 +215,10 @@ fn frame(ctx: &LowerCtx<'_>, send: &str, f: &HirFunction) -> (Option<String>, Ve
         held: env_params.clone(),
         suspends: 0,
         found: None,
+        shared: None,
     };
     let Some(body) = f.body.as_ref() else {
-        return (None, Vec::new());
+        return (None, None, Vec::new());
     };
     w.block(body);
     let mut held: Vec<LocalId> = w.held.into_iter().collect();
@@ -212,7 +239,14 @@ fn frame(ctx: &LowerCtx<'_>, send: &str, f: &HirFunction) -> (Option<String>, Ve
             ctx.ty_name(&t)
         ),
     });
-    (why, held)
+    let why_shared = w.shared.map(|l| {
+        format!(
+            "it captures `{}: {}`, which is not `Sync` (the spawner keeps its copy, spec 4.6.9)",
+            name(l),
+            ty_of(l).map(|t| ctx.ty_name(&t)).unwrap_or_default()
+        )
+    });
+    (why, why_shared, held)
 }
 
 enum Found {
@@ -223,6 +257,7 @@ enum Found {
 
 struct Walk<'a> {
     non_send_local: &'a dyn Fn(LocalId) -> bool,
+    non_sync_local: &'a dyn Fn(LocalId) -> bool,
     non_send_ty: &'a dyn Fn(&HirTy) -> bool,
     env_params: &'a HashSet<LocalId>,
     /// Locals declared so far.
@@ -236,6 +271,8 @@ struct Walk<'a> {
     suspends: u32,
     /// The first offender.
     found: Option<Found>,
+    /// The first capture that is not `Sync`.
+    shared: Option<LocalId>,
 }
 
 impl Walk<'_> {
@@ -247,6 +284,9 @@ impl Walk<'_> {
         });
         if from_env && self.found.is_none() && (self.non_send_local)(l) {
             self.found = Some(Found::Capture(l));
+        }
+        if from_env && self.shared.is_none() && (self.non_sync_local)(l) {
+            self.shared = Some(l);
         }
         self.declared.push(l);
     }
@@ -383,6 +423,9 @@ fn each_binding(p: &HirPattern, out: &mut dyn FnMut(LocalId)) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Item {
     Bad(FunctionId),
+    /// A coroutine whose capture is not `Sync` (`shared`): only the
+    /// coroutine built right there, not one held inside another frame.
+    Shared(FunctionId),
     Code(FunctionId),
 }
 
@@ -402,6 +445,7 @@ struct Flow<'a> {
     send: &'a str,
     all: &'a HashMap<FunctionId, &'a HirFunction>,
     bad: &'a HashMap<FunctionId, String>,
+    shared: &'a HashMap<FunctionId, String>,
     held: &'a HashMap<FunctionId, Vec<LocalId>>,
     nodes: HashMap<Node, Set>,
     changed: bool,
@@ -696,7 +740,7 @@ impl Flow<'_> {
                     .iter()
                     .filter_map(|i| match i {
                         Item::Code(f) => Some(*f),
-                        Item::Bad(_) => None,
+                        Item::Bad(_) | Item::Shared(_) => None,
                     })
                     .collect();
                 if codes.is_empty() {
@@ -730,13 +774,18 @@ impl Flow<'_> {
                     self.add(Node::Local(*body_fn, *p), v);
                 }
                 let mut s = Self::union(vals);
+                // The futures its frame holds are part of it.
+                for l in self.held.get(body_fn).into_iter().flatten() {
+                    s.extend(self.get(&Node::Local(*body_fn, *l)));
+                }
+                // Inside this frame they share nothing with a spawner.
+                s.retain(|i| !matches!(i, Item::Shared(_)));
                 s.insert(Item::Code(*body_fn));
                 if self.bad.contains_key(body_fn) {
                     s.insert(Item::Bad(*body_fn));
                 }
-                // The futures its frame holds are part of it.
-                for l in self.held.get(body_fn).into_iter().flatten() {
-                    s.extend(self.get(&Node::Local(*body_fn, *l)));
+                if self.shared.contains_key(body_fn) {
+                    s.insert(Item::Shared(*body_fn));
                 }
                 s
             }

@@ -55,18 +55,20 @@ static SIGNAL_HANDLERS: Mutex<Dict<i32, fn() + Send>> = Mutex::new(Dict::new());
 /// Call `handler` (on the `rok-signal` thread) each time the process
 /// receives `sig`; a later `signal` for the same `sig` replaces it.
 pub fn signal(sig: i32, handler: fn() + Send) throws (SignalError) {
-    using g = SIGNAL_HANDLERS.lock() { g.get().insert(sig, handler); }
-    let fd: GcBuf<i32> = buf_new(1);
-    let r = unsafe { rok_os_signal_install(sig, fd) };
-    if r < 0 {
-        using g = SIGNAL_HANDLERS.lock() { g.get().remove(sig); }
-        throw SignalError { sig: sig, code: -r };
-    }
-    if fd[0] >= 0 {
-        let pipe = File::from_fd(fd[0], "signal pipe");
-        let h = try thread::Builder::new().name("rok-signal").spawn(|| dispatch_signals(pipe))
-            catch e { throw SignalError { sig: sig, code: e.code }; };
-        h.detach();
+    unsafe {
+        using g = SIGNAL_HANDLERS.lock() { g.get().insert(sig, handler); }
+        let fd: GcBuf<i32> = buf_new(1);
+        let r = rok_os_signal_install(sig, fd);
+        if r < 0 {
+            using g = SIGNAL_HANDLERS.lock() { g.get().remove(sig); }
+            throw SignalError { sig: sig, code: -r };
+        }
+        if fd[0] >= 0 {
+            let pipe = File::from_fd(fd[0], "signal pipe");
+            let h = try thread::Builder::new().name("rok-signal").spawn(|| dispatch_signals(pipe))
+                catch e { throw SignalError { sig: sig, code: e.code }; };
+            h.detach();
+        }
     }
 }
 
@@ -215,52 +217,54 @@ impl Command {
     }
 
     fn start(self, out_default: Stdio, err_default: Stdio) throws (IoError) -> Child {
-        let argv = StrBuf::new();
-        argv.push_str(self.program);
-        argv.push_byte(0u8);
-        for a in self.args {
-            argv.push_str(a);
+        unsafe {
+            let argv = StrBuf::new();
+            argv.push_str(self.program);
             argv.push_byte(0u8);
-        }
-        let envs = StrBuf::new();
-        let envc: isize = -1;
-        if self.env_clear || self.envs.len() > 0 {
-            envc = 0;
-            if !self.env_clear {
-                for (k, v) in env::vars() {
-                    if !self.envs.contains_key(k) {
-                        envs.push_str(f"{k}={v}");
-                        envs.push_byte(0u8);
-                        envc += 1;
+            for a in self.args {
+                argv.push_str(a);
+                argv.push_byte(0u8);
+            }
+            let envs = StrBuf::new();
+            let envc: isize = -1;
+            if self.env_clear || self.envs.len() > 0 {
+                envc = 0;
+                if !self.env_clear {
+                    for (k, v) in env::vars() {
+                        if !self.envs.contains_key(k) {
+                            envs.push_str(f"{k}={v}");
+                            envs.push_byte(0u8);
+                            envc += 1;
+                        }
                     }
                 }
+                for (k, v) in self.envs.entries() {
+                    envs.push_str(f"{k}={v}");
+                    envs.push_byte(0u8);
+                    envc += 1;
+                }
             }
-            for (k, v) in self.envs.entries() {
-                envs.push_str(f"{k}={v}");
-                envs.push_byte(0u8);
-                envc += 1;
+            let fds: GcBuf<i32> = buf_new(3);
+            let pid = unsafe {
+                rok_os_spawn(
+                    argv.to_str(), self.args.len() + 1, envs.to_str(), envc, self.cwd ?? "",
+                    stdio_mode(self.stdin ?? Stdio::Inherit),
+                    stdio_mode(self.stdout ?? out_default),
+                    stdio_mode(self.stderr ?? err_default),
+                    self.pgid,
+                    fds,
+                )
+            };
+            try check(pid as i64, self.program);
+            let state: GcBuf<i32> = buf_new(2);
+            Child {
+                pid: pid,
+                stdin: pipe_end(fds[0], "child stdin"),
+                stdout: pipe_end(fds[1], "child stdout"),
+                stderr: pipe_end(fds[2], "child stderr"),
+                state: state,
+                kill_on_drop: self.kill_on_drop,
             }
-        }
-        let fds: GcBuf<i32> = buf_new(3);
-        let pid = unsafe {
-            rok_os_spawn(
-                argv.to_str(), self.args.len() + 1, envs.to_str(), envc, self.cwd ?? "",
-                stdio_mode(self.stdin ?? Stdio::Inherit),
-                stdio_mode(self.stdout ?? out_default),
-                stdio_mode(self.stderr ?? err_default),
-                self.pgid,
-                fds,
-            )
-        };
-        try check(pid as i64, self.program);
-        let state: GcBuf<i32> = buf_new(2);
-        Child {
-            pid: pid,
-            stdin: pipe_end(fds[0], "child stdin"),
-            stdout: pipe_end(fds[1], "child stdout"),
-            stderr: pipe_end(fds[2], "child stderr"),
-            state: state,
-            kill_on_drop: self.kill_on_drop,
         }
     }
 }
@@ -303,43 +307,51 @@ impl Child {
     pub fn kill(self) throws (IoError) { try self.signal(9); }
 
     pub fn signal(self, sig: i32) throws (IoError) {
-        if self.state[0] != 0 { return; }
-        try check(unsafe { rok_os_kill(self.pid, sig) } as i64, "kill");
+        unsafe {
+            if self.state[0] != 0 { return; }
+            try check(rok_os_kill(self.pid, sig) as i64, "kill");
+        }
     }
 
     /// Wait for the child to end. Closes our end of its stdin first, so
     /// a child reading to EOF can finish.
     pub fn wait(self) throws (IoError) -> ExitStatus {
-        let si = self.stdin;
-        if si is File { try si.close(); }
-        if self.state[0] == 0 {
-            let out: GcBuf<i32> = buf_new(1);
-            try check(unsafe { rok_os_waitpid(self.pid, 0, out) } as i64, "waitpid");
-            self.state[0] = 1;
-            self.state[1] = out[0];
+        unsafe {
+            let si = self.stdin;
+            if si is File { try si.close(); }
+            if self.state[0] == 0 {
+                let out: GcBuf<i32> = buf_new(1);
+                try check(rok_os_waitpid(self.pid, 0, out) as i64, "waitpid");
+                self.state[0] = 1;
+                self.state[1] = out[0];
+            }
+            ExitStatus { raw: self.state[1] }
         }
-        ExitStatus { raw: self.state[1] }
     }
 
     /// The status if it has ended, without blocking.
     pub fn try_wait(self) throws (IoError) -> ExitStatus | none {
-        if self.state[0] == 0 {
-            let out: GcBuf<i32> = buf_new(1);
-            let r = try check(unsafe { rok_os_waitpid(self.pid, 1, out) } as i64, "waitpid");
-            if r == 0 { return none; }
-            self.state[0] = 1;
-            self.state[1] = out[0];
+        unsafe {
+            if self.state[0] == 0 {
+                let out: GcBuf<i32> = buf_new(1);
+                let r = try check(rok_os_waitpid(self.pid, 1, out) as i64, "waitpid");
+                if r == 0 { return none; }
+                self.state[0] = 1;
+                self.state[1] = out[0];
+            }
+            ExitStatus { raw: self.state[1] }
         }
-        ExitStatus { raw: self.state[1] }
     }
 }
 
 /// `using child = ..`: kill (with `kill_on_drop`) and reap.
 impl Drop for Child {
     fn drop(ref self) {
-        if self.kill_on_drop && self.state[0] == 0 {
-            unsafe { rok_os_kill(self.pid, 9) };
-            try self.wait() catch _ { ExitStatus { raw: 0 } };
+        unsafe {
+            if self.kill_on_drop && self.state[0] == 0 {
+                rok_os_kill(self.pid, 9);
+                try self.wait() catch _ { ExitStatus { raw: 0 } };
+            }
         }
     }
 }

@@ -16,3 +16,5 @@ fn main() -> i32 {
     ];
     return pipeline(5, fns) + 12;
 }
+
+// spec: 004.05-closure

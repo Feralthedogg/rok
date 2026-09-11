@@ -22,3 +22,5 @@ fn main() -> i32 {
     println(f"{TOTAL.load()}");
     return 0;
 }
+
+// spec: 005.09-extern-block

@@ -25,3 +25,5 @@ fn main() -> i32 {
     print(f"{(7).tag()} {Box { v: 1 }.tag()} {p.tag()} {q.tag()} {(1, true).tag()}");
     return 0;
 }
+
+// spec: 002.09-impl

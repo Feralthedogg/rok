@@ -4,3 +4,5 @@
 fn main() -> Result<i32, str> {
     return Result::Ok(0);
 }
+
+// spec: 004.16-entry-point

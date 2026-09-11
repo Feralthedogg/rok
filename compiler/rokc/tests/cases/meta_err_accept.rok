@@ -12,3 +12,5 @@ struct S { a: i32; }
 fn main() -> i32 {
     return 0;
 }
+
+// spec: 006.08-meta-blocks

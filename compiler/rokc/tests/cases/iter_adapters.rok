@@ -44,3 +44,5 @@ fn main() -> i32 {
     println(f"{n * 2}");
     return 0;
 }
+
+// spec: std 207-iter

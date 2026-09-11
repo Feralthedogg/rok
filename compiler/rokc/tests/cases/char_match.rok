@@ -23,3 +23,5 @@ fn main() -> i32 {
     total += classify('m');
     return total - 4;
 }
+
+// spec: std 215-string

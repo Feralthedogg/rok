@@ -7305,6 +7305,16 @@ fn buf_access(
     value: Option<&Expr>,
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
+    // No bounds check: an index past the allocation reads / writes
+    // arbitrary memory.
+    if ctx.unsafe_depth == 0 {
+        ctx.emit_error(
+            rokc_diagnostic::ErrorKind::Type,
+            "indexing a `GcBuf` is unchecked and needs an `unsafe` block or `unsafe fn` \
+             (spec 4.15)"
+                .to_owned(),
+        );
+    }
     let usize_ty = HirTy::Prim(PrimTy::Usize);
     let i = lower_expected(ctx, idx, usize_ty.clone());
     let i = coerce(ctx, &usize_ty, i, &|| "the buffer index".to_owned());

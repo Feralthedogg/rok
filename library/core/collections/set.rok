@@ -5,6 +5,9 @@ pub struct Set<T> {
     d: Dict<T, bool>;
 }
 
+// Shares its buffer like `List` (stdlib 2.13.9).
+impl<T> !Sync for Set<T> {}
+
 impl<T: Hash> Set<T> {
     pub fn new() -> Set<T> {
         Set { d: Dict::new() }

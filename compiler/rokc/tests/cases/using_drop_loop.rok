@@ -60,3 +60,5 @@ fn main() -> i32 {
     println("after");
     return 0;
 }
+
+// spec: 003.17-using-expression

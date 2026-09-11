@@ -35,3 +35,5 @@ println(f"calls {calls}");
 let h = Holder { items: [Bx { v: 0 }] };
 h.items[0].v = 100;
 println(f"{h.items[0].v}");
+
+// spec: 003.04-assignment

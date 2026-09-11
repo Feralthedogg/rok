@@ -235,7 +235,7 @@ impl DebugInfo {
                 )
             }
             MirTy::Tuple(ps) => {
-                let fields = self.members(ps, &[]);
+                let fields = self.members(ty, ps, &[]);
                 Self::composite("tuple", size, align, &fields)
             }
             MirTy::Struct(id, ps) => {
@@ -250,7 +250,7 @@ impl DebugInfo {
                 } else {
                     Vec::new()
                 };
-                let fields = self.members(ps, &names);
+                let fields = self.members(ty, ps, &names);
                 Self::composite(&name, size, align, &fields)
             }
             MirTy::Array(..) | MirTy::Union(..) => {
@@ -274,21 +274,23 @@ impl DebugInfo {
         Some(alias)
     }
 
-    /// `(name, type, byte offset)` of each part of a C-laid-out aggregate
+    /// `(name, type, byte offset)` of each part of aggregate `agg`
     /// (`names[i]`, else `i`); `()` parts are left out.
-    fn members(&mut self, parts: &[MirTy], names: &[&str]) -> Vec<(String, String, u32)> {
+    fn members(
+        &mut self,
+        agg: &MirTy,
+        parts: &[MirTy],
+        names: &[&str],
+    ) -> Vec<(String, String, u32)> {
         let mut out = Vec::new();
-        let mut off = 0u32;
-        for (i, t) in parts.iter().enumerate() {
-            let (s, a) = self.target.size_align(t);
-            off = off.next_multiple_of(a);
+        let offsets = self.target.field_offsets(agg);
+        for (i, (t, off)) in parts.iter().zip(offsets).enumerate() {
             if let Some(ty) = self.di_type(t) {
                 let name = names
                     .get(i)
                     .map_or_else(|| i.to_string(), |n| (*n).to_owned());
                 out.push((name, ty, off));
             }
-            off += s;
         }
         out
     }

@@ -18,3 +18,5 @@ fn main() -> i32 {
     println(f"{unsafe { h.b.i }}");
     return 0;
 }
+
+// spec: 002.05-union

@@ -13,3 +13,5 @@ fn main() {
     println("start");
     println(f"{LOOP}");
 }
+
+// spec: 005.03-static

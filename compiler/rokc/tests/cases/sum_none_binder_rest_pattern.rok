@@ -45,3 +45,5 @@ fn main() {
     let last = match K::C(7, "s", 3) { K::C(.., z) => z, _ => 0i64 };
     println(f"{kind(K::C(1, "s", 2))} / {kind(K::C(2, "s", 2))} / {kind(K::B(4))} / first {first} / last {last}");
 }
+
+// spec: 002.06-sum-types

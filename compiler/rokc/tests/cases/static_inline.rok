@@ -7,3 +7,5 @@ static EXTRA: i32 = 20i32;
 fn main() -> i32 {
     return GREET + EXTRA;
 }
+
+// spec: 005.03-static

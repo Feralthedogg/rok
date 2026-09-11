@@ -11,8 +11,8 @@
 //!   passed as a pointer to a caller copy and returned through `x8`
 //!   (`sret`). Apple's variant only differs for variadic arguments
 //!   (all on the stack — LLVM does it, the call is marked variadic) and
-//!   for caller-extended small integers (`signext` / `zeroext`, which
-//!   the emitter puts on every C declaration).
+//!   for extended small integers (`signext` / `zeroext`, which the
+//!   emitter puts where the platform has them, `c_ext_attr`).
 //! - System V `x86_64`: each eightbyte is INTEGER or SSE; ≤ 16 bytes go
 //!   in registers when enough of both kinds are left (else the whole
 //!   aggregate is MEMORY), > 16 bytes are MEMORY (`byval` / `sret`).
@@ -52,16 +52,9 @@ pub struct FnAbi {
     /// C variadic (spec 8.6.10): an `llvm.func` called with `llvm.call`;
     /// arguments past `args` are its `...`.
     pub variadic: bool,
-}
-
-impl FnAbi {
-    /// Every value crosses as itself.
-    #[must_use]
-    pub fn is_trivial(&self) -> bool {
-        !self.variadic
-            && self.ret == RetAbi::Direct
-            && self.args.iter().all(|a| *a == ArgAbi::Direct)
-    }
+    /// A runtime (`extern "rok"`) call: `str` crosses as its `(ptr, len)`
+    /// pair, not as a `char*`.
+    pub rok: bool,
 }
 
 /// A by-value aggregate (as opposed to a scalar, `str` or `()`).
@@ -95,12 +88,8 @@ fn leaves(ty: &MirTy, at: u32, target: &Target, out: &mut Vec<(u32, u32, Leaf)>)
             out.push((at, target.size_align(ty).0, Leaf::Int));
         }
         MirTy::Tuple(ps) | MirTy::Struct(_, ps) => {
-            let mut off = 0u32;
-            for p in ps {
-                let (s, a) = target.size_align(p);
-                off = off.next_multiple_of(a);
+            for (p, off) in ps.iter().zip(target.field_offsets(ty)) {
                 leaves(p, at + off, target, out);
-                off += s;
             }
         }
         MirTy::Array(e, n) => {
@@ -134,6 +123,10 @@ fn hfa(ty: &MirTy, target: &Target) -> Option<String> {
 /// `None`: the target cannot pass these aggregates.
 #[must_use]
 pub fn classify(target: &Target, params: &[MirTy], ret: &MirTy, variadic: bool) -> Option<FnAbi> {
+    // A `#[repr(transparent)]` struct passes as its field.
+    let params: Vec<MirTy> = params.iter().map(|p| transparent(p, target)).collect();
+    let params = params.as_slice();
+    let ret = &transparent(ret, target);
     let (ret, args) = match target.c_abi {
         CAbi::Aarch64 => (
             aapcs_ret(ret, target),
@@ -172,7 +165,56 @@ pub fn classify(target: &Target, params: &[MirTy], ret: &MirTy, variadic: bool) 
         ret,
         args,
         variadic,
+        rok: false,
     })
+}
+
+/// A runtime (`extern "rok"`) declaration (spec 8.5): the C ABI, with
+/// `str` a by-value `(ptr, len)` C struct like `RokFn`. LLVM splits a
+/// first-class struct argument into independent scalars, which agrees
+/// with C while every integer word fits in argument registers; past
+/// that a pair could straddle the last register and the stack, where C
+/// passes it whole on the stack. `None`: a plain call does the same.
+/// No runtime runs on the other targets.
+#[must_use]
+pub fn classify_rok(target: &Target, params: &[MirTy], ret: &MirTy) -> Option<FnAbi> {
+    let regs = match target.c_abi {
+        CAbi::Aarch64 => 8,
+        CAbi::X86_64SysV => 6,
+        CAbi::X86_64Win | CAbi::Other => return None,
+    };
+    let word = target.pointer_width / 8;
+    let words: u32 = params
+        .iter()
+        .filter(|t| !matches!(t, MirTy::Prim(PrimTy::F32 | PrimTy::F64)))
+        .map(|t| target.size_align(t).0.div_ceil(word))
+        .sum();
+    if words <= regs {
+        return None;
+    }
+    let pair = |t: &MirTy| {
+        if *t == MirTy::Prim(PrimTy::Str) {
+            MirTy::Tuple(vec![MirTy::Prim(PrimTy::Usize); 2])
+        } else {
+            t.clone()
+        }
+    };
+    let params: Vec<MirTy> = params.iter().map(pair).collect();
+    let mut abi = classify(target, &params, &pair(ret), false)?;
+    abi.rok = true;
+    Some(abi)
+}
+
+/// The type a value of `ty` crosses the C boundary as: the field of a
+/// `#[repr(transparent)]` struct (recursively), else `ty`.
+#[must_use]
+pub fn transparent(ty: &MirTy, target: &Target) -> MirTy {
+    match ty {
+        MirTy::Struct(id, ps) if target.repr(*id).transparent && ps.len() == 1 => {
+            transparent(&ps[0], target)
+        }
+        _ => ty.clone(),
+    }
 }
 
 fn aapcs_arg(ty: &MirTy, target: &Target) -> ArgAbi {
@@ -249,13 +291,20 @@ fn sysv_eightbytes(ty: &MirTy, target: &Target) -> Vec<(String, bool)> {
     out
 }
 
+/// An unaligned field (`#[repr(packed)]`): System V MEMORY class.
+fn unaligned(ty: &MirTy, target: &Target) -> bool {
+    let mut ls = Vec::new();
+    leaves(ty, 0, target, &mut ls);
+    ls.iter().any(|(off, s, _)| off % s != 0)
+}
+
 fn sysv(params: &[MirTy], ret: &MirTy, target: &Target) -> (RetAbi, Vec<ArgAbi>) {
     let mut free_int = 6u32;
     let mut free_sse = 8u32;
     let ret_size = target.size_align(ret).0;
     let ret_abi = if !is_aggregate(ret) || ret_size == 0 {
         RetAbi::Direct
-    } else if ret_size > 16 {
+    } else if ret_size > 16 || unaligned(ret, target) {
         free_int -= 1;
         RetAbi::Sret
     } else {
@@ -278,6 +327,10 @@ fn sysv(params: &[MirTy], ret: &MirTy, target: &Target) -> (RetAbi, Vec<ArgAbi>)
             continue;
         }
         if size > 16 {
+            args.push(ArgAbi::Indirect { byval: true });
+            continue;
+        }
+        if unaligned(t, target) {
             args.push(ArgAbi::Indirect { byval: true });
             continue;
         }
@@ -414,6 +467,6 @@ mod tests {
         let i686 = on("i686-unknown-linux-gnu");
         assert!(classify(&i686, &[st(&[I32, I32])], &MirTy::Unit, false).is_none());
         let scalars = classify(&i686, &[MirTy::Prim(I32)], &MirTy::Unit, true).unwrap();
-        assert!(scalars.variadic && !scalars.is_trivial());
+        assert!(scalars.variadic);
     }
 }

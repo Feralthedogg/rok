@@ -18,3 +18,5 @@ fn main() -> i32 {
     // a, b, c all reachable through deep glob
     return a() + b() + c() + 14i32;  // 1+2+4+14 = 21
 }
+
+// spec: 005.05-use

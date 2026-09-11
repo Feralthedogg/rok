@@ -10,3 +10,5 @@ impl Drop for File {
 fn main() -> i32 {
     return 0;
 }
+
+// spec: 006.02-built-in-attributes

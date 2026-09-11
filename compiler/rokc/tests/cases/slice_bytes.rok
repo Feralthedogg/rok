@@ -21,3 +21,5 @@ fn main() throws (IoError) {
     println(f"wrote {n} [{try fs::read_to_str(p)}]");
     try fs::remove_file(p);
 }
+
+// spec: 003.06-indexing-and-slicing

@@ -7,3 +7,5 @@ fn main() -> i32 {
     par::for_each(xs, |x: i32| { c.set(x); });
     return c.get();
 }
+
+// spec: std 219-par

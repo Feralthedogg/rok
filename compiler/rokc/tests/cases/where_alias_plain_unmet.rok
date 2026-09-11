@@ -9,3 +9,5 @@ fn main() -> i32 {
     let a: IntBox = W { v: 1 };
     return a.v;
 }
+
+// spec: 002.10-generics

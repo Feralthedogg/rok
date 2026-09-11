@@ -1,0 +1,21 @@
+// rokc-arg: -C overflow-checks=off
+// expect-exit: 0
+// expect-stdout:
+// true true true true
+// true true true
+// true true true
+
+// spec: 3.3.5
+// Without overflow checks (release) `Duration` / `Instant` /
+// `SystemTime` arithmetic saturates instead of wrapping
+// (`std_303_duration_overflow_panics`: with them it panics).
+use rok::std::time::{Duration, Instant, SystemTime};
+
+fn main() {
+    let max = Duration::MAX;
+    let min = Duration::ns(-9223372036854775807 - 1);
+    println(f"{Duration::sec(9223372036854775807) == max} {Duration::days(-9223372036854775807) == min} {max + Duration::ns(1) == max} {min - Duration::ns(1) == min}");
+    println(f"{max * 2 == max} {max * -2 == min} {min / -1 == max}");
+    let now = Instant::now();
+    println(f"{(now + max).duration_since(now) <= max} {SystemTime::from_unix(9223372036854775807, 0) == SystemTime::from_unix(9223372036854775806, 0) + max} {(SystemTime::from_unix(0, 0) - max) < SystemTime::from_unix(0, 0)}");
+}

@@ -12,3 +12,5 @@ fn main() -> i32 {
     let b: Box<i32> = Box { value: 12 };
     return double(b) + 6;
 }
+
+// spec: 002.10-generics

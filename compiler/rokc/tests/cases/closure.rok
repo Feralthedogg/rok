@@ -9,3 +9,5 @@ fn main() -> i32 {
     let double = |x: i32| -> i32 { x * 2i32 };
     return apply(inc, 5i32) + apply(double, 3i32);
 }
+
+// spec: 004.05-closure

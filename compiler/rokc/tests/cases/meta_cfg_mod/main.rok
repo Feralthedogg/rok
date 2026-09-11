@@ -26,3 +26,5 @@ fn main() -> i32 {
     println(f"{three()}");
     0
 }
+
+// spec: 006.08-meta-blocks

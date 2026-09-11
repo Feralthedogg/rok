@@ -7,3 +7,5 @@ fn main() -> i32 {
     let b = Boxed { v: 1 };
     return b.map_to::<i32, i32>(2);
 }
+
+// spec: 003.05-member-access-and-method-call

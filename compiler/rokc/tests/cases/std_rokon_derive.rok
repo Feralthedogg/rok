@@ -172,3 +172,5 @@ Config {
     let pb = try Point::from_rokon(pd.to_rokon());
     println(f"{pb == pd}");
 }
+
+// spec: std 309-rokon

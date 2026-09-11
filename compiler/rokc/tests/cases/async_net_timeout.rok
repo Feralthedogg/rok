@@ -36,3 +36,5 @@ let (which, _) = await task::select([
     async { await task::sleep(Duration::ms(20)); 0 },
 ]);
 println(f"select: {if which == 1 { "timed out" } else { "data" }}");
+
+// spec: 004.12-async

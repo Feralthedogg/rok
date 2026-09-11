@@ -9,3 +9,5 @@ fn main() -> i32 {
     let p: Pair<i32, i32> = Pair { left: 4, right: 9 };
     return p.left + p.right;
 }
+
+// spec: 002.10-generics

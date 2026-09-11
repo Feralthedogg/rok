@@ -6,3 +6,5 @@ fn main() {
     let b: i32 = 3;
     let c = a + b;
 }
+
+// spec: std 201-numbers

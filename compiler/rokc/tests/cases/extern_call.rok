@@ -12,3 +12,5 @@ fn main() -> i32 {
     unsafe { puts("forty-two") };
     return 42;
 }
+
+// spec: 005.09-extern-block

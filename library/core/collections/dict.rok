@@ -5,7 +5,9 @@
 // order is unspecified.
 
 /// One table: per slot a key, a value and a state (0 empty, 1 full,
-/// 2 deleted).
+/// 2 deleted). `keys` / `vals` have one more slot that stays zero: a
+/// deleted slot's key and value are overwritten with it, so a tombstone
+/// keeps nothing alive.
 pub struct DictSlots<K, V> {
     keys: GcBuf<K>;
     vals: GcBuf<V>;
@@ -13,7 +15,14 @@ pub struct DictSlots<K, V> {
 }
 
 fn new_slots<K, V>(cap: usize) -> DictSlots<K, V> {
-    DictSlots { keys: buf_new(cap), vals: buf_new(cap), state: buf_new(cap) }
+    unsafe {
+        let n = cap_add(cap, 1);
+        DictSlots {
+            keys: buf_new(buf_len(n, size_of::<K>())),
+            vals: buf_new(buf_len(n, size_of::<V>())),
+            state: buf_new(buf_len(cap, 1)),
+        }
+    }
 }
 
 pub struct Dict<K, V> {
@@ -21,25 +30,33 @@ pub struct Dict<K, V> {
     slots: GcBuf<DictSlots<K, V>>;
 }
 
+// Shares its buffer like `List` (stdlib 2.13.9).
+impl<K, V> !Sync for Dict<K, V> {}
+
 impl<K: Hash, V> Dict<K, V> {
     pub fn new() -> Dict<K, V> {
         Dict::with_capacity(4)
     }
 
     pub fn with_capacity(cap: usize) -> Dict<K, V> {
-        let c = 8usize;
-        while c < cap * 2 {
-            c *= 2;
+        unsafe {
+            let c = 8usize;
+            let want = cap_mul(cap, 2);
+            while c < want {
+                c = cap_mul(c, 2);
+            }
+            let meta: GcBuf<usize> = buf_new(3);
+            meta[1] = c;
+            let slots: GcBuf<DictSlots<K, V>> = buf_new(1);
+            slots[0] = new_slots(c);
+            Dict { meta, slots }
         }
-        let meta: GcBuf<usize> = buf_new(3);
-        meta[1] = c;
-        let slots: GcBuf<DictSlots<K, V>> = buf_new(1);
-        slots[0] = new_slots(c);
-        Dict { meta, slots }
     }
 
     pub fn len(self) -> usize {
-        self.meta[0]
+        unsafe {
+            self.meta[0]
+        }
     }
 
     pub fn is_empty(self) -> bool {
@@ -48,110 +65,130 @@ impl<K: Hash, V> Dict<K, V> {
 
     /// The slot holding `k`, or the capacity when absent.
     fn find(self, k: K) -> usize {
-        let s = self.slots[0];
-        let cap = self.meta[1];
-        let i = (k.hash() % (cap as u64)) as usize;
-        for _ in 0..cap {
-            let st = s.state[i];
-            if st == 0u8 {
-                return cap;
+        unsafe {
+            let s = self.slots[0];
+            let cap = self.meta[1];
+            let i = (k.hash() % (cap as u64)) as usize;
+            for _ in 0..cap {
+                let st = s.state[i];
+                if st == 0u8 {
+                    return cap;
+                }
+                if st == 1u8 && s.keys[i] == k {
+                    return i;
+                }
+                i = (i + 1) % cap;
             }
-            if st == 1u8 && s.keys[i] == k {
-                return i;
-            }
-            i = (i + 1) % cap;
+            cap
         }
-        cap
     }
 
     /// Store into the first non-full slot of `k`'s probe run (`k` is
     /// known to be absent and the table to have room).
     fn place(self, k: K, v: V) {
-        let s = self.slots[0];
-        let cap = self.meta[1];
-        let i = (k.hash() % (cap as u64)) as usize;
-        while s.state[i] == 1u8 {
-            i = (i + 1) % cap;
+        unsafe {
+            let s = self.slots[0];
+            let cap = self.meta[1];
+            let i = (k.hash() % (cap as u64)) as usize;
+            while s.state[i] == 1u8 {
+                i = (i + 1) % cap;
+            }
+            if s.state[i] == 0u8 {
+                self.meta[2] += 1;
+            }
+            s.keys[i] = k;
+            s.vals[i] = v;
+            s.state[i] = 1u8;
+            self.meta[0] += 1;
         }
-        if s.state[i] == 0u8 {
-            self.meta[2] += 1;
-        }
-        s.keys[i] = k;
-        s.vals[i] = v;
-        s.state[i] = 1u8;
-        self.meta[0] += 1;
     }
 
     /// Rebuild into a table of `cap` slots (drops tombstones).
     fn rehash(self, cap: usize) {
-        let old = self.slots[0];
-        let old_cap = self.meta[1];
-        self.slots[0] = new_slots(cap);
-        self.meta[0] = 0;
-        self.meta[1] = cap;
-        self.meta[2] = 0;
-        for i in 0..old_cap {
-            if old.state[i] == 1u8 {
-                self.place(old.keys[i], old.vals[i]);
+        unsafe {
+            let old = self.slots[0];
+            let old_cap = self.meta[1];
+            self.slots[0] = new_slots(cap);
+            self.meta[0] = 0;
+            self.meta[1] = cap;
+            self.meta[2] = 0;
+            for i in 0..old_cap {
+                if old.state[i] == 1u8 {
+                    self.place(old.keys[i], old.vals[i]);
+                }
             }
         }
     }
 
     /// Insert or replace; the old value, or `none`.
     pub fn insert(self, k: K, v: V) -> V | none {
-        let cap = self.meta[1];
-        let at = self.find(k);
-        if at < cap {
-            let s = self.slots[0];
-            let old = s.vals[at];
-            s.vals[at] = v;
-            return old;
-        }
-        // Load factor 3/4, tombstones included.
-        if (self.meta[2] + 1) * 4 > cap * 3 {
-            let grown = cap;
-            if (self.len() + 1) * 2 > cap {
-                grown = cap * 2;
+        unsafe {
+            let cap = self.meta[1];
+            let at = self.find(k);
+            if at < cap {
+                let s = self.slots[0];
+                let old = s.vals[at];
+                s.vals[at] = v;
+                return old;
             }
-            self.rehash(grown);
+            // Load factor 3/4, tombstones included.
+            if (self.meta[2] + 1) * 4 > cap * 3 {
+                let grown = cap;
+                if (self.len() + 1) * 2 > cap {
+                    grown = cap_mul(cap, 2);
+                }
+                self.rehash(grown);
+            }
+            self.place(k, v);
+            none
         }
-        self.place(k, v);
-        none
     }
 
     pub fn get(self, k: K) -> V | none {
-        let at = self.find(k);
-        if at == self.meta[1] {
-            return none;
+        unsafe {
+            let at = self.find(k);
+            if at == self.meta[1] {
+                return none;
+            }
+            let s = self.slots[0];
+            s.vals[at]
         }
-        let s = self.slots[0];
-        s.vals[at]
     }
 
     pub fn contains_key(self, k: K) -> bool {
-        self.find(k) < self.meta[1]
+        unsafe {
+            self.find(k) < self.meta[1]
+        }
     }
 
     pub fn remove(self, k: K) -> V | none {
-        let at = self.find(k);
-        if at == self.meta[1] {
-            return none;
+        unsafe {
+            let cap = self.meta[1];
+            let at = self.find(k);
+            if at == cap {
+                return none;
+            }
+            let s = self.slots[0];
+            let v = s.vals[at];
+            s.keys[at] = s.keys[cap];
+            s.vals[at] = s.vals[cap];
+            s.state[at] = 2u8;
+            self.meta[0] -= 1;
+            v
         }
-        let s = self.slots[0];
-        s.state[at] = 2u8;
-        self.meta[0] -= 1;
-        s.vals[at]
     }
 
     /// The first full slot at or after `from`, or the capacity.
     fn next_full(self, from: usize) -> usize {
-        let s = self.slots[0];
-        let cap = self.meta[1];
-        let i = from;
-        while i < cap && s.state[i] != 1u8 {
-            i += 1;
+        unsafe {
+            let s = self.slots[0];
+            let cap = self.meta[1];
+            let i = from;
+            while i < cap && s.state[i] != 1u8 {
+                i += 1;
+            }
+            i
         }
-        i
     }
 
     /// The keys, lazily (2.9.3; order unspecified).
@@ -233,13 +270,15 @@ pub struct DictKeys<K, V> {
 impl<K: Hash, V> Iterator for DictKeys<K, V> {
     type Item = K;
     fn next(ref self) -> K | none {
-        let i = self.d.next_full(self.at);
-        if i >= self.d.meta[1] {
-            return none;
+        unsafe {
+            let i = self.d.next_full(self.at);
+            if i >= self.d.meta[1] {
+                return none;
+            }
+            self.at = i + 1;
+            let s = self.d.slots[0];
+            s.keys[i]
         }
-        self.at = i + 1;
-        let s = self.d.slots[0];
-        s.keys[i]
     }
 }
 
@@ -251,13 +290,15 @@ pub struct DictValues<K, V> {
 impl<K: Hash, V> Iterator for DictValues<K, V> {
     type Item = V;
     fn next(ref self) -> V | none {
-        let i = self.d.next_full(self.at);
-        if i >= self.d.meta[1] {
-            return none;
+        unsafe {
+            let i = self.d.next_full(self.at);
+            if i >= self.d.meta[1] {
+                return none;
+            }
+            self.at = i + 1;
+            let s = self.d.slots[0];
+            s.vals[i]
         }
-        self.at = i + 1;
-        let s = self.d.slots[0];
-        s.vals[i]
     }
 }
 
@@ -269,13 +310,15 @@ pub struct DictEntries<K, V> {
 impl<K: Hash, V> Iterator for DictEntries<K, V> {
     type Item = (K, V);
     fn next(ref self) -> (K, V) | none {
-        let i = self.d.next_full(self.at);
-        if i >= self.d.meta[1] {
-            return none;
+        unsafe {
+            let i = self.d.next_full(self.at);
+            if i >= self.d.meta[1] {
+                return none;
+            }
+            self.at = i + 1;
+            let s = self.d.slots[0];
+            (s.keys[i], s.vals[i])
         }
-        self.at = i + 1;
-        let s = self.d.slots[0];
-        (s.keys[i], s.vals[i])
     }
 }
 
@@ -308,12 +351,14 @@ impl<K: Hash, V> Index<K> for Dict<K, V> {
     type Output = V;
     #[track_caller]
     fn index(self, k: K) -> V {
-        let at = self.find(k);
-        if at == self.meta[1] {
-            return panic("Dict: key not found");
+        unsafe {
+            let at = self.find(k);
+            if at == self.meta[1] {
+                return panic("Dict: key not found");
+            }
+            let s = self.slots[0];
+            s.vals[at]
         }
-        let s = self.slots[0];
-        s.vals[at]
     }
 }
 

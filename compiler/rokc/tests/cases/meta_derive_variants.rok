@@ -97,3 +97,5 @@ fn main() -> i32 {
     println(Shape::kind());
     return 0;
 }
+
+// spec: 006.08-meta-blocks

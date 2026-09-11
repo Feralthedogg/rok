@@ -6,3 +6,5 @@
 let base = 4;
 let add = |x: i32| -> i32 { return x + base; };
 println(f"{add(3)}");
+
+// spec: 004.16-entry-point

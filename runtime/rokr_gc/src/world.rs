@@ -70,6 +70,41 @@ static WORLD: World = World {
 /// A stop-the-world pause is requested or running.
 static STOP: AtomicBool = AtomicBool::new(false);
 
+/// The process is exiting ([`halt`]): no thread runs rok code again.
+static HALT: AtomicBool = AtomicBool::new(false);
+
+/// Block the calling thread until the process exits.
+fn park_forever() -> ! {
+    loop {
+        // SAFETY: plain libc call.
+        unsafe { libc::pause() };
+    }
+}
+
+/// `rok_runtime_shutdown` (805 §8.5.2): no other thread runs rok code
+/// again.
+///
+/// The worker pool and threads still running stop for good at their
+/// next safepoint or world-lock acquisition; one inside runtime or C
+/// code finishes that first, so it releases the locks the exit path
+/// needs. The caller is done with rok code and counts as stopped.
+pub fn halt() {
+    raw_lock();
+    HALT.store(true, Ordering::SeqCst);
+    // SAFETY: registry guarded by the lock.
+    unsafe {
+        let mut m = *WORLD.threads.get();
+        while !m.is_null() {
+            if !(*m).yield_flag.is_null() {
+                (*(*m).yield_flag).store(1, Ordering::SeqCst);
+            }
+            m = (*m).next;
+        }
+    }
+    tls::mutator_state().store(MUTATOR_PARKED, Ordering::SeqCst);
+    unlock();
+}
+
 fn raw_lock() {
     // SAFETY: statically initialized mutex.
     unsafe { libc::pthread_mutex_lock(WORLD.lock.get()) };
@@ -112,35 +147,67 @@ fn cooperate() {
 /// changes). Cooperates with a pending stop first.
 pub fn lock() {
     raw_lock();
+    if HALT.load(Ordering::Relaxed) {
+        unlock();
+        park_forever();
+    }
     cooperate();
 }
 
 /// `rok_runtime_yield` (804 §8.4.3): the slow path of a safepoint poll.
 pub fn safepoint() {
-    if STOP.load(Ordering::Acquire) {
-        lock();
-        unlock();
+    if HALT.load(Ordering::Relaxed) {
+        park_forever();
     }
+    lock();
+    // Under the lock, as a stopper raises the flag: cleared outside it,
+    // a request raised just after this thread's pause would be lost and
+    // its next `enter_native` would not wake that stopper.
     tls::yield_flag().store(0, Ordering::Relaxed);
-}
-
-/// Before a call that may block (join, sleep, lock wait): this thread
-/// counts as stopped until [`leave_native`]. It must not touch GC
-/// objects in between except reading words its own frames keep alive.
-pub fn enter_native() {
-    raw_lock();
-    tls::mutator_state().store(MUTATOR_PARKED, Ordering::Release);
-    broadcast();
     unlock();
 }
 
+/// Before a call that may block: this thread counts as stopped until
+/// [`leave_native`].
+///
+/// Join, sleep, lock wait, any `extern "C"` call. It must not touch GC
+/// objects in between except reading words its own frames keep alive.
+///
+/// Lock-free unless a stop is pending: [`stop`] raises the yield flag
+/// before reading the state, we write the state before reading the
+/// flag (both `SeqCst`), so either it sees `PARKED` or we see the flag
+/// and wake it.
+pub fn enter_native() {
+    tls::mutator_state().store(MUTATOR_PARKED, Ordering::SeqCst);
+    if tls::yield_flag().load(Ordering::SeqCst) != 0 {
+        raw_lock();
+        broadcast();
+        unlock();
+    }
+}
+
 /// Back from a blocking call: wait out a running stop, then run again.
+///
+/// Lock-free unless a stop is pending (the same handshake as
+/// [`enter_native`]: a stopper that read `RUNNING` raised our flag
+/// first, one that read `PARKED` too).
 pub fn leave_native() {
+    let state = tls::mutator_state();
+    state.store(MUTATOR_RUNNING, Ordering::SeqCst);
+    if tls::yield_flag().load(Ordering::SeqCst) == 0 {
+        return;
+    }
+    state.store(MUTATOR_PARKED, Ordering::SeqCst);
     raw_lock();
+    broadcast();
     while STOP.load(Ordering::Relaxed) {
         wait();
     }
-    tls::mutator_state().store(MUTATOR_RUNNING, Ordering::Release);
+    state.store(MUTATOR_RUNNING, Ordering::Release);
+    // Halted: the next safepoint stops this thread.
+    if !HALT.load(Ordering::Relaxed) {
+        tls::yield_flag().store(0, Ordering::Relaxed);
+    }
     unlock();
 }
 
@@ -282,8 +349,9 @@ pub fn stop() {
             while !m.is_null() {
                 let s = (*m).state;
                 if !s.is_null() && s.cast::<u8>() != me {
-                    (*(*m).yield_flag).store(1, Ordering::Release);
-                    if (*s).load(Ordering::Acquire) == MUTATOR_RUNNING {
+                    // `SeqCst`: the handshake of `enter_native`.
+                    (*(*m).yield_flag).store(1, Ordering::SeqCst);
+                    if (*s).load(Ordering::SeqCst) == MUTATOR_RUNNING {
                         running = true;
                     }
                 }

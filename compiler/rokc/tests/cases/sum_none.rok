@@ -12,3 +12,5 @@ fn main() -> i32 {
     let b: i32 | none = none;
     return unwrap_or(a, 0i32) + unwrap_or(b, 7i32);
 }
+
+// spec: 002.06-sum-types

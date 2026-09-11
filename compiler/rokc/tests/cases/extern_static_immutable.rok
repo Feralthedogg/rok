@@ -7,3 +7,5 @@ fn main() -> i32 {
     optind = 3;
     return 0;
 }
+
+// spec: 005.09-extern-block

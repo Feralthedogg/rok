@@ -16,3 +16,5 @@ fn main() -> i32 {
     }
     return count + 10;
 }
+
+// spec: 003.13-loop-expressions

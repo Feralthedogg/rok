@@ -9,3 +9,5 @@ fn main() {
     println(f"{xs[i]}");
     println(f"{xs[i - 1]}");
 }
+
+// spec: 003.06-indexing-and-slicing

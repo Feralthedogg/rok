@@ -13,3 +13,5 @@ use a::{three};             // group with one element
 fn main() -> i32 {
     return one() + second() + three() + 44i32;  // 1 + 2 + 3 + 44 = 50
 }
+
+// spec: 005.05-use

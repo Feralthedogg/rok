@@ -19,3 +19,5 @@ let a = try await f(0);
 println(f"{a}");
 let b = try await f(7);
 println(f"{b}");
+
+// spec: 004.16-entry-point

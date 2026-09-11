@@ -1,0 +1,11 @@
+// expect-exit: 101
+// expect-stdout: ab
+// expect-stderr: capacity overflow
+
+// `len * n` in `str::repeat` (and the byte size of any collection
+// buffer) panics instead of wrapping, at every opt level.
+fn main() {
+    println("ab".repeat(1));
+    let s = "ab".repeat(9223372036854775809usize);
+    println(f"{s.len()}");
+}

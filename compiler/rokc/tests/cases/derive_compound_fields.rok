@@ -56,3 +56,5 @@ fn main() -> i32 {
     println(f"Mode::{m:?}");
     return 0;
 }
+
+// spec: 006.02-built-in-attributes

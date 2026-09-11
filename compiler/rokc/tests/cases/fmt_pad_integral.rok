@@ -1,0 +1,19 @@
+// expect-exit: 0
+// expect-stdout:
+// [     ff] [-ff   ] [  ff]
+
+// `Formatter::pad_integral` calls the runtime with nine argument words,
+// the last `str` past the eighth (the runtime ABI keeps it whole).
+struct Hex { neg: bool; }
+
+impl Display for Hex {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.pad_integral(!self.neg, "0x", "ff")
+    }
+}
+
+fn main() {
+    let a = Hex { neg: false };
+    let b = Hex { neg: true };
+    println(f"[{a:>7}] [{b:<6}] [{a:>4}]");
+}

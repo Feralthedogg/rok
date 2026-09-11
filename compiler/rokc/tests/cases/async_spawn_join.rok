@@ -27,3 +27,5 @@ async fn main() {
     for x in xs { println(x); }
     println(f"all done after the last deadline: {t0.elapsed().as_ms() >= 30}");
 }
+
+// spec: 004.12-async

@@ -62,3 +62,5 @@ fn main() -> i32 {
     println(f"{n}");
     return 0;
 }
+
+// spec: std 209-collections

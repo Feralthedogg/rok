@@ -84,3 +84,5 @@ await task::sleep(Duration::ms(10));
 t.cancel();
 try await t.join() catch _: CancellationError { 0 };
 using c = inner.lock() { println(f"cancel reaches the children: {c.get()}"); }
+
+// spec: 004.12-async

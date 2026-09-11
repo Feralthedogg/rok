@@ -120,3 +120,5 @@ fn main() -> i32 {
     println("ok");
     return 0;
 }
+
+// spec: std 304-thread

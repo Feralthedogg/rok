@@ -21,3 +21,5 @@ fn main() -> i32 {
     if q is i32 { println("int"); }
     return 0;
 }
+
+// spec: 002.02-any-slot

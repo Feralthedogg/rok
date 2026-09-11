@@ -50,3 +50,5 @@ fn main() throws (ParseError) -> i32 {
     let big = try "300".parse::<u8>() catch e: ParseError { println(f"{e}"); 0u8 };
     return bad + big as i32;
 }
+
+// spec: std 215-string

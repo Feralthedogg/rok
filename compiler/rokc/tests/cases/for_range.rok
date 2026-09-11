@@ -7,3 +7,5 @@ fn main() -> i32 {
     }
     return total;
 }
+
+// spec: 003.13-loop-expressions

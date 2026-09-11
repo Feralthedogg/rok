@@ -7,3 +7,5 @@ fn main() -> i32 {
     println(s[0:2]);
     return 0;
 }
+
+// spec: std 215-string

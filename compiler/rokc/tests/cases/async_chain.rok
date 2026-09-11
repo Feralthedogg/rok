@@ -13,3 +13,5 @@ async fn twice(x: i32) -> i32 {
 }
 let r = await twice(20);
 println(f"{r}");
+
+// spec: 004.12-async

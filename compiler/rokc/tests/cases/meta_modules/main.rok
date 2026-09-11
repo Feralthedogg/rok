@@ -14,3 +14,5 @@ fn main() -> i32 {
     println(f"{s.width()}");
     return 0;
 }
+
+// spec: 006.08-meta-blocks

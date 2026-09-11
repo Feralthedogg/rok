@@ -61,3 +61,5 @@ while !seen && Instant::now() < deadline {
     if !seen { thread::sleep(Duration::ms(2)); }
 }
 println(f"cancelled job finished {seen}");
+
+// spec: std 218-task

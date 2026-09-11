@@ -65,3 +65,5 @@ fn main() -> i32 {
     println(f"{if less(1.5f64, 2.0f64) && 2.add(3) == 5 { 1 } else { 0 }}");
     return 0;
 }
+
+// spec: 002.10-generics

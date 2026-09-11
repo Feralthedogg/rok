@@ -21,3 +21,5 @@ fn main() -> i32 {
     let c2 = c.inc().inc().double().inc();
     return c2.n + 5;
 }
+
+// spec: 004.09-method

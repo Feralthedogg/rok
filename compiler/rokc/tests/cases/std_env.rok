@@ -44,3 +44,5 @@ fn main() throws (IoError) {
     println("split:" + parts);
     println(f"pid: {env::pid() > 0u32 && (env::parent_pid() ?? 0u32) > 0u32}");
 }
+
+// spec: std 306-env

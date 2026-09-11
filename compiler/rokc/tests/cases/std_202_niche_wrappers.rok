@@ -60,3 +60,5 @@ fn main() {
     ys.sort();
     println(f"{ys[0]} {ys[1]} {ys[2]}");
 }
+
+// spec: std 202-non-zero

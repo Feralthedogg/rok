@@ -8,3 +8,5 @@ fn main() -> i32 {
     let h = thread::spawn(|| { c.set(2); 0 });
     return try! h.join();
 }
+
+// spec: std 304-thread

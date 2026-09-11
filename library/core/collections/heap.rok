@@ -8,6 +8,9 @@ pub struct BinaryHeap<T> {
     before: fn(T, T) -> bool;
 }
 
+// Shares its buffer like `List` (stdlib 2.13.9).
+impl<T> !Sync for BinaryHeap<T> {}
+
 impl<T: Ord> BinaryHeap<T> {
     /// A max-heap.
     pub fn new() -> BinaryHeap<T> {

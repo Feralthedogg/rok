@@ -22,3 +22,5 @@ fn main() -> i32 {
     println(f"{p.0.v} {p.1} {p.2.w}");
     return 0;
 }
+
+// spec: 002.10-generics

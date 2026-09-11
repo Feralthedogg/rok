@@ -43,3 +43,5 @@ fn main() -> i32 {
     if b.thread().id() != thread::current().id() { println("ids differ"); }
     return 0;
 }
+
+// spec: std 304-thread

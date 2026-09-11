@@ -16,3 +16,5 @@ fn main() -> i32 {
     let big = count_when(xs, |n: i32| -> bool { n > 5 });
     return evens * 3 + big * 2 + 0;
 }
+
+// spec: 004.05-closure

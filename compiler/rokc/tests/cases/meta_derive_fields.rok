@@ -91,3 +91,5 @@ fn main() -> i32 {
     println(f"{z.x == 0 && z.y == 0i64 && z.z == 0u8}");
     return 0;
 }
+
+// spec: 006.08-meta-blocks

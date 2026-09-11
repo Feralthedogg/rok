@@ -29,3 +29,5 @@ fn main() -> i32 {
     println(f"{give().unwrap_or(0)}");
     return 0;
 }
+
+// spec: 002.10-generics

@@ -96,3 +96,5 @@ fn main() -> i32 {
     println(f"{total(S { x: 1 }.ones())}");
     return 0;
 }
+
+// spec: 002.11-const-generics

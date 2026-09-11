@@ -45,3 +45,5 @@ fn main() {
     out = out + show(step(0)) + show(step(1)) + show(step(2));
     println(out + " end");
 }
+
+// spec: 002.04-enum

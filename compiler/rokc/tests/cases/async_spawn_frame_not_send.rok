@@ -28,3 +28,5 @@ let f = holds();
 let d = task::spawn(f);
 let ok = task::spawn(fine());
 let ok2 = task::spawn_local(async { c.get() });
+
+// spec: 004.12-async

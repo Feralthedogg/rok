@@ -1,0 +1,30 @@
+// Word count: 2M skewed words from an LCG joined into one text, split on
+// whitespace and counted in a `Dict<str, i64>`. Output matches
+// bench/c/word_count.c.
+fn main() -> i32 {
+    let b = StrBuf::new();
+    let x: u64 = 7;
+    for k in 0..2000000 {
+        x = x.wrapping_mul(6364136223846793005u64).wrapping_add(1442695040888963407u64);
+        let r = (x >> 33) % 50000u64;
+        // Skewed: small ids are frequent.
+        let id = r * r / 50000u64;
+        b.push_str(f"w{id}");
+        b.push_str(if k % 16 == 15 { "\n" } else { " " });
+    }
+    let text = b.to_str();
+    let counts: Dict<str, i64> = Dict::new();
+    for w in text.split_whitespace() {
+        counts[w] = (counts.get(w) ?? 0) + 1;
+    }
+    let best = "";
+    let top: i64 = 0;
+    for (w, c) in counts.entries() {
+        if c > top || c == top && w < best {
+            top = c;
+            best = w;
+        }
+    }
+    println(f"{counts.len()} {best} {top} {counts.get("w1") ?? 0}");
+    return 0;
+}

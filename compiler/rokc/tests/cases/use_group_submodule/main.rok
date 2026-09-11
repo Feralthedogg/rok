@@ -19,3 +19,5 @@ fn main() -> i32 {
     println(f"{a::get(P { x: 3 }, Q { y: 4 })} {a::kay()} {a::help()} {a::ar()} {a::dp()} {a::tr(P { x: 3 })} {a::b::get(P { x: 3 }, Q { y: 4 })} {area(GPt { v: 1 })} {a::b::dp()} {a::b::tr(P { x: 3 })}");
     return 0;
 }
+
+// spec: 005.05-use

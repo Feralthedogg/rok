@@ -10,3 +10,5 @@ fn sum_down<T>(n: T) -> T {
 fn main() -> i32 {
     return sum_down(5);
 }
+
+// spec: 002.10-generics

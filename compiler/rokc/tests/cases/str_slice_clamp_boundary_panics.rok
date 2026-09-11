@@ -8,3 +8,5 @@ fn main() {
     println(s[-10:100]);
     println(s[-3:]);
 }
+
+// spec: std 215-string

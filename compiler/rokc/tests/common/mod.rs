@@ -254,3 +254,41 @@ pub fn check_expect_error(source: &str, stderr: &str) -> Result<(), String> {
         None => Ok(()),
     }
 }
+
+/// Deterministic PRNG (splitmix64) for the fuzz and differential tests.
+pub struct Rng(pub u64);
+
+impl Rng {
+    pub fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    /// Uniform in `0..n` (`n > 0`).
+    pub fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+
+    /// True with probability `pct`%.
+    pub fn chance(&mut self, pct: u64) -> bool {
+        self.next() % 100 < pct
+    }
+
+    pub fn pick<'a, T>(&mut self, xs: &'a [T]) -> &'a T {
+        &xs[self.below(xs.len())]
+    }
+
+    /// Uniform in `lo..=hi`.
+    pub fn range(&mut self, lo: i64, hi: i64) -> i64 {
+        let span = hi.wrapping_sub(lo) as u64;
+        let r = if span == u64::MAX {
+            self.next()
+        } else {
+            self.next() % (span + 1)
+        };
+        lo.wrapping_add(r as i64)
+    }
+}

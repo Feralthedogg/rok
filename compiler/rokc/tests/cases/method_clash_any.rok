@@ -25,3 +25,5 @@ fn main() {
     let r2: any Right = B { n: 2 };
     println(f"{l2.side()} {r2.side()}");
 }
+
+// spec: 004.09-method

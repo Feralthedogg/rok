@@ -21,6 +21,16 @@ use crate::{
 
 #[must_use]
 pub fn lower(module: &HirModule, target: &Target) -> MirModule {
+    let mut with_reprs = target.clone();
+    with_reprs.reprs = std::sync::Arc::new(
+        module
+            .structs
+            .iter()
+            .filter(|s| s.repr != rokc_hir::Repr::default())
+            .map(|s| (s.id.0, s.repr))
+            .collect(),
+    );
+    let target = &with_reprs;
     let mut ret_tys: HashMap<FunctionId, MirTy> = HashMap::new();
     for f in &module.functions {
         ret_tys.insert(f.id, lower_ty(&f.ret_ty, module, target));
@@ -1112,9 +1122,14 @@ impl<'a> FnBuilder<'a> {
                 variant_index,
                 args,
             } => {
+                // A fieldless enum's tag is its `#[repr]` integer.
+                let tag_ty = match self.ty(&HirTy::Enum(*enum_id)) {
+                    MirTy::Prim(p) => p,
+                    _ => IrPrimTy::I32,
+                };
                 let tag_op = Operand::Const(ConstVal::Int {
                     value: i128::from(*variant_index),
-                    ty: IrPrimTy::I32,
+                    ty: tag_ty,
                 });
                 let Some(payload_ty) = enum_payload_ty(*enum_id, self.module, self.target) else {
                     for a in args {
@@ -1822,12 +1837,13 @@ impl<'a> FnBuilder<'a> {
                     HirPattern::SumVariant { sum_ty, .. } => sum_tag(sum_ty, *variant_index),
                     _ => *variant_index,
                 };
+                let tag_ty = variant_tag_ty(pat, scrut_ty);
                 let value = ConstVal::Int {
                     value: i128::from(stored),
-                    ty: IrPrimTy::I32,
+                    ty: tag_ty,
                 };
                 let tag = self.pattern_tag(pat, scrut_local, scrut_ty);
-                let cond = self.build_eq_op(tag, &value, IrPrimTy::I32);
+                let cond = self.build_eq_op(tag, &value, tag_ty);
                 // Refutable payload sub-patterns (`E::A(1)`) are tested
                 // after the tag.
                 let nested = match pat {
@@ -2550,5 +2566,14 @@ const fn zero_const(ty: &MirTy) -> ConstVal {
         MirTy::Prim(IrPrimTy::Bool) => ConstVal::Bool(false),
         MirTy::Prim(p) if p.is_float() => ConstVal::Float { bits: 0, ty: *p },
         _ => ConstVal::Unit,
+    }
+}
+
+/// The type of the tag a variant pattern compares: `i32`, or the
+/// `#[repr]` integer a fieldless enum is.
+const fn variant_tag_ty(pat: &HirPattern, scrut_ty: &MirTy) -> IrPrimTy {
+    match (pat, scrut_ty) {
+        (HirPattern::EnumVariant { .. }, MirTy::Prim(p)) => *p,
+        _ => IrPrimTy::I32,
     }
 }

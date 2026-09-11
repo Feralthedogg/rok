@@ -22,9 +22,11 @@ extern "C" {
 }
 
 fn boxed(w: Waker) -> GcBuf<Waker> {
-    let b: GcBuf<Waker> = buf_new(1);
-    b[0] = w;
-    b
+    unsafe {
+        let b: GcBuf<Waker> = buf_new(1);
+        b[0] = w;
+        b
+    }
 }
 
 /// Ready once the clock passes `at`.
@@ -44,7 +46,8 @@ impl Future for Slot {
     type Output = i32;
     fn poll(ref self, ref ctx: Context) -> Poll<i32> {
         unsafe { rok_coro_park(self.frame, boxed(ctx.waker())) };
-        if self.frame[0] != 0 { return Poll::Ready(self.frame[0]); }
+        let v = unsafe { self.frame[0] };
+        if v != 0 { return Poll::Ready(v); }
         Poll::Pending
     }
 }
@@ -65,10 +68,10 @@ let start = unsafe { rok_time_now_ns() };
 let ok = await Deadline { at: start + 20_000_000 };
 println(f"timer: {ok && unsafe { rok_time_now_ns() } - start >= 20_000_000}");
 
-let frame: GcBuf<i32> = buf_new(1);
+let frame: GcBuf<i32> = unsafe { buf_new(1) };
 let waiter = task::spawn(async { await Slot { frame: frame } });
 await task::sleep(Duration::ms(10));
-frame[0] = 42;
+unsafe { frame[0] = 42; }
 unsafe { rok_coro_unpark(frame) };
 println(f"coro: {await waiter}");
 
@@ -89,3 +92,5 @@ await task::sleep(Duration::ms(10));
 try! client.write_str("hello");
 println(f"io: {await reader} bytes");
 println(f"registrations left: {task::registrations()}");
+
+// spec: 004.12-async

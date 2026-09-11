@@ -1,0 +1,86 @@
+// expect-exit: 0
+// gc-stress: 1000
+// expect-stdout:
+// fast
+// read 1 x
+// slept
+// sorted 0 1 2 3
+
+// Spec 8.4.10: a thread inside a blocking `extern "C"` call counts as
+// PARKED, so collections on other threads go on without it. One thread
+// sleeps in `usleep` for 3 s while main collects; another blocks in
+// `read` on a pipe that main writes only after collecting (it used to
+// deadlock: the collector waited for the reader, the reader for main).
+// A rok callback C calls meanwhile (`qsort`) runs as a mutator again.
+use rok::bare::alloc::{Layout, alloc};
+use rok::bare::ptr::{CPtr, Ptr};
+use rok::std::thread;
+use rok::std::time::BootTime;
+
+extern "C" {
+    fn usleep(us: u32) -> i32;
+    fn pipe(fds: Ptr<i32>) -> i32;
+    fn read(fd: i32, buf: Ptr<u8>, n: usize) -> isize;
+    fn write(fd: i32, buf: Ptr<u8>, n: usize) -> isize;
+    fn rok_gc_collect();
+    fn qsort(base: Ptr<i32>, n: usize, size: usize, cmp: extern "C" fn(Ptr<i32>, Ptr<i32>) -> i32);
+}
+
+extern "C" fn by_text(a: Ptr<i32>, b: Ptr<i32>) -> i32 {
+    let (x, y) = unsafe { (a.read(), b.read()) };
+    let xs: List<str> = [f"{x}", f"{y}"];
+    if xs[0] < xs[1] { -1 } else if xs[0] > xs[1] { 1 } else { 0 }
+}
+
+fn churn(n: i64) -> i64 {
+    let t = 0i64;
+    let i = 0i64;
+    while i < n {
+        let xs: List<i64> = [i, i + 1];
+        t += xs[1] - xs[0];
+        i += 1;
+    }
+    return t;
+}
+
+fn main() throws (rok::bare::alloc::LayoutError) -> i32 {
+    let sleeper = thread::spawn(|| { unsafe { usleep(3000000u32) }; 0 });
+    unsafe { usleep(100000u32) };
+    let start = BootTime::now();
+    unsafe { rok_gc_collect() };
+    churn(5000);
+    unsafe { rok_gc_collect() };
+    let ms = start.elapsed().as_ms();
+    println(if ms < 100 { "fast" } else { f"slow {ms} ms" });
+
+    let raw: CPtr<u8> = unsafe { alloc(try Layout::array::<i32>(4usize)) };
+    let mem: Ptr<u8> = raw.as_ptr() ?? panic("alloc failed");
+    let fds = rok::bare::ptr_cast::<i32>(mem);
+    if unsafe { pipe(fds) } != 0 { return 1; }
+    let rfd = unsafe { fds.read() };
+    let wfd = unsafe { fds.add(1usize).read() };
+    let reader = thread::spawn(|| {
+        let mine: CPtr<u8> = unsafe { alloc(Layout::new::<i64>()) };
+        let b: Ptr<u8> = mine.as_ptr() ?? panic("alloc failed");
+        let n = unsafe { read(rfd, b, 1usize) };
+        f"read {n} {char::from_u32(unsafe { b.read() } as u32) ?? '?'}"
+    });
+    unsafe { usleep(100000u32) };
+    unsafe { rok_gc_collect() };
+    churn(5000);
+    let c = mem.add(12usize);
+    unsafe { c.write(120u8) };
+    unsafe { write(wfd, c, 1usize) };
+    println(try! reader.join());
+    try! sleeper.join();
+    println("slept");
+    unsafe {
+        fds.write(3);
+        fds.add(1usize).write(1);
+        fds.add(2usize).write(2);
+        fds.add(3usize).write(0);
+        qsort(fds, 4usize, 4usize, by_text);
+        println(f"sorted {fds.read()} {fds.add(1usize).read()} {fds.add(2usize).read()} {fds.add(3usize).read()}");
+    }
+    return 0;
+}

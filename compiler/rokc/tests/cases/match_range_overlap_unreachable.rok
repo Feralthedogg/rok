@@ -22,3 +22,5 @@ fn g(c: char) -> i32 {
 fn main() -> i32 {
     return f(1) + g('a');
 }
+
+// spec: 003.12-match-expression

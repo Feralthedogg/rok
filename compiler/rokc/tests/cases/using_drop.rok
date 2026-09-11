@@ -46,3 +46,5 @@ fn main() -> i32 {
     let r = try fails(1) catch _ { println("caught"); 0 };
     return r;
 }
+
+// spec: 003.17-using-expression

@@ -52,3 +52,5 @@ fn main() -> i32 {
     if "" == str::new() && "".is_empty() && "b" > "a" && "a" <= "a" { println("ok"); }
     return 0;
 }
+
+// spec: std 215-string

@@ -15,3 +15,5 @@ fn from_b() -> i32 { return B + 1; }
 fn main() {
     println(f"{A} {B} {C}");
 }
+
+// spec: 005.03-static

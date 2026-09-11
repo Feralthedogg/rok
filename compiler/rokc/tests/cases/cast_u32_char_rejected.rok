@@ -6,3 +6,5 @@ fn main() {
     let n: u32 = 0x41;
     let c = n as char;
 }
+
+// spec: 002.14-cast-and-conversion

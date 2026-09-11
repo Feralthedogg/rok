@@ -93,3 +93,5 @@ fn main() {
     println(f"{E::<i32>::mk(3):?}");
     println(f"{E::<i32>::mk(4):?}");
 }
+
+// spec: 006.08-meta-blocks

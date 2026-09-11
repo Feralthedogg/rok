@@ -119,3 +119,5 @@ using w = await rw.write_async() {
 let free = rw.try_write() is RwLockWriteGuard<i32> && m2.try_lock() is MutexGuard<i32>;
 println(f"all free: {free}");
 println(f"registrations left: {task::registrations()}");
+
+// spec: 004.12-async

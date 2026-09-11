@@ -66,3 +66,5 @@ fn main() -> i32 {
     println(f"cmp: {name(y.cmp(x))} {name(x.cmp(y2))}");
     0
 }
+
+// spec: 002.06-sum-types

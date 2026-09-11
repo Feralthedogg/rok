@@ -11,3 +11,5 @@ impl MyZero for i32 { fn zero() -> i32 { return 7; } }
 fn main() {
     println(f"{i32::zero()}");
 }
+
+// spec: 004.09-method

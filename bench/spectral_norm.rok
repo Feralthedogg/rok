@@ -1,0 +1,56 @@
+// spectral-norm (benchmarks game), n = 1000: function calls and f64
+// loops over lists. Output matches bench/c/spectral_norm.c.
+fn a(i: i64, j: i64) -> f64 {
+    1.0 / (((i + j) * (i + j + 1) / 2 + i + 1) as f64)
+}
+
+fn mul_av(v: List<f64>, out: List<f64>) {
+    let n = v.len() as i64;
+    for i in 0..n {
+        let s = 0.0;
+        for j in 0..n {
+            s += a(i, j) * v[j as usize];
+        }
+        out[i as usize] = s;
+    }
+}
+
+fn mul_atv(v: List<f64>, out: List<f64>) {
+    let n = v.len() as i64;
+    for i in 0..n {
+        let s = 0.0;
+        for j in 0..n {
+            s += a(j, i) * v[j as usize];
+        }
+        out[i as usize] = s;
+    }
+}
+
+fn mul_atav(v: List<f64>, out: List<f64>, tmp: List<f64>) {
+    mul_av(v, tmp);
+    mul_atv(tmp, out);
+}
+
+fn main() -> i32 {
+    let n: usize = 1000;
+    let u: List<f64> = [];
+    let v: List<f64> = [];
+    let tmp: List<f64> = [];
+    for _ in 0..n {
+        u.push(1.0);
+        v.push(0.0);
+        tmp.push(0.0);
+    }
+    for _ in 0..10 {
+        mul_atav(u, v, tmp);
+        mul_atav(v, u, tmp);
+    }
+    let vbv = 0.0;
+    let vv = 0.0;
+    for i in 0..n {
+        vbv += u[i] * v[i];
+        vv += v[i] * v[i];
+    }
+    println(f"{(vbv / vv).sqrt():.9}");
+    return 0;
+}

@@ -980,6 +980,7 @@ pub(super) fn visit_ty_for_enum_mono(
     });
     enum_defs.push(HirEnumDef {
         id,
+        repr: super::collect::repr_of(&def.attrs).unwrap_or_default(),
         def_id: None,
         name: mangled,
         variants,
@@ -1086,6 +1087,7 @@ pub(super) fn instantiate_generic_structs(
                 });
                 struct_defs.push(HirStructDef {
                     id,
+                    repr: super::collect::repr_of(&def.attrs).unwrap_or_default(),
                     def_id: None,
                     name: mangled,
                     fields,
@@ -1151,6 +1153,7 @@ pub(super) fn instantiate_generic_structs(
                 });
                 struct_defs.push(HirStructDef {
                     id,
+                    repr: super::collect::repr_of(&inner.attrs).unwrap_or_default(),
                     def_id: None,
                     name: mangled,
                     fields,

@@ -5,3 +5,5 @@ fn main() -> i32 {
     let b = 'F';
     return b as i32 - a as i32;
 }
+
+// spec: std 215-string

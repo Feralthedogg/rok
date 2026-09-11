@@ -1,6 +1,31 @@
 // rok::core::task::time — `Duration` / `Instant` (stdlib spec 2.18.6,
 // 3.3.2). `rok::std::time` re-exports both.
 
+// Spec 3.3.5: arithmetic overflow panics in debug builds and saturates
+// in release. The helpers below redo the overflowing op unchecked: with
+// overflow checks on (debug) that op panics; past it, saturate.
+
+fn ns_add(a: i64, b: i64) -> i64 {
+    let r = a.checked_add(b);
+    if r is i64 { return r; }
+    let _ = a + b;
+    if b < 0 { -9223372036854775807 - 1 } else { 9223372036854775807 }
+}
+
+fn ns_sub(a: i64, b: i64) -> i64 {
+    let r = a.checked_sub(b);
+    if r is i64 { return r; }
+    let _ = a - b;
+    if b > 0 { -9223372036854775807 - 1 } else { 9223372036854775807 }
+}
+
+fn ns_mul(a: i64, b: i64) -> i64 {
+    let r = a.checked_mul(b);
+    if r is i64 { return r; }
+    let _ = a * b;
+    if (a < 0) != (b < 0) { -9223372036854775807 - 1 } else { 9223372036854775807 }
+}
+
 /// A span of time: `i64` nanoseconds (about ±292 years, 3.3.1).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Duration {
@@ -9,12 +34,12 @@ pub struct Duration {
 
 impl Duration {
     pub fn ns(n: i64) -> Duration { Duration { ns: n } }
-    pub fn us(n: i64) -> Duration { Duration { ns: n * 1000 } }
-    pub fn ms(n: i64) -> Duration { Duration { ns: n * 1000000 } }
-    pub fn sec(n: i64) -> Duration { Duration { ns: n * 1000000000 } }
-    pub fn min(n: i64) -> Duration { Duration::sec(n * 60) }
-    pub fn hours(n: i64) -> Duration { Duration::sec(n * 3600) }
-    pub fn days(n: i64) -> Duration { Duration::sec(n * 86400) }
+    pub fn us(n: i64) -> Duration { Duration { ns: ns_mul(n, 1000) } }
+    pub fn ms(n: i64) -> Duration { Duration { ns: ns_mul(n, 1000000) } }
+    pub fn sec(n: i64) -> Duration { Duration { ns: ns_mul(n, 1000000000) } }
+    pub fn min(n: i64) -> Duration { Duration { ns: ns_mul(n, 60000000000) } }
+    pub fn hours(n: i64) -> Duration { Duration { ns: ns_mul(n, 3600000000000) } }
+    pub fn days(n: i64) -> Duration { Duration { ns: ns_mul(n, 86400000000000) } }
 
     pub const ZERO: Duration = Duration { ns: 0 };
     pub const MAX: Duration = Duration { ns: 9223372036854775807 };
@@ -53,12 +78,18 @@ impl Duration {
 
 impl Mul<i64> for Duration {
     type Output = Duration;
-    fn mul(self, rhs: i64) -> Duration { Duration { ns: self.ns * rhs } }
+    fn mul(self, rhs: i64) -> Duration { Duration { ns: ns_mul(self.ns, rhs) } }
 }
 
 impl Div<i64> for Duration {
     type Output = Duration;
-    fn div(self, rhs: i64) -> Duration { Duration { ns: self.ns / rhs } }
+    #[track_caller]
+    fn div(self, rhs: i64) -> Duration {
+        if rhs == 0 { panic("Duration divided by zero"); }
+        // `MIN / -1` is the one overflow.
+        if rhs == -1 { return Duration { ns: ns_sub(0, self.ns) }; }
+        Duration { ns: self.ns / rhs }
+    }
 }
 
 impl Mul<Duration> for f64 {
@@ -107,12 +138,12 @@ impl Debug for Duration {
 
 impl Add for Duration {
     type Output = Duration;
-    fn add(self, rhs: Duration) -> Duration { Duration { ns: self.ns + rhs.ns } }
+    fn add(self, rhs: Duration) -> Duration { Duration { ns: ns_add(self.ns, rhs.ns) } }
 }
 
 impl Sub for Duration {
     type Output = Duration;
-    fn sub(self, rhs: Duration) -> Duration { Duration { ns: self.ns - rhs.ns } }
+    fn sub(self, rhs: Duration) -> Duration { Duration { ns: ns_sub(self.ns, rhs.ns) } }
 }
 
 /// A point on the monotonic clock (3.3.2); only meaningful within one
@@ -127,7 +158,7 @@ impl Instant {
     pub fn now() -> Instant { Instant { ns: unsafe { rok_time_now_ns() } } }
     pub fn elapsed(self) -> Duration { Instant::now().duration_since(self) }
     pub fn duration_since(self, earlier: Instant) -> Duration {
-        Duration { ns: self.ns - earlier.ns }
+        Duration { ns: ns_sub(self.ns, earlier.ns) }
     }
     pub fn checked_duration_since(self, earlier: Instant) -> Duration | none {
         if earlier.ns > self.ns {
@@ -147,15 +178,15 @@ impl Instant {
 
 impl Add<Duration> for Instant {
     type Output = Instant;
-    fn add(self, rhs: Duration) -> Instant { Instant { ns: self.ns + rhs.ns } }
+    fn add(self, rhs: Duration) -> Instant { Instant { ns: ns_add(self.ns, rhs.ns) } }
 }
 
 impl Sub<Duration> for Instant {
     type Output = Instant;
-    fn sub(self, rhs: Duration) -> Instant { Instant { ns: self.ns - rhs.ns } }
+    fn sub(self, rhs: Duration) -> Instant { Instant { ns: ns_sub(self.ns, rhs.ns) } }
 }
 
 impl Sub<Instant> for Instant {
     type Output = Duration;
-    fn sub(self, rhs: Instant) -> Duration { Duration { ns: self.ns - rhs.ns } }
+    fn sub(self, rhs: Instant) -> Duration { Duration { ns: ns_sub(self.ns, rhs.ns) } }
 }

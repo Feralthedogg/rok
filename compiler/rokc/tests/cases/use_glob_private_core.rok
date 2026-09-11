@@ -17,3 +17,5 @@ fn pow10<T>(x: T) -> T { x }
 fn main() -> i32 {
     return radix_chunk(10i32) + digit_of(11i32) + pow10(10i32);
 }
+
+// spec: 005.05-use

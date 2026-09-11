@@ -4,15 +4,15 @@
 // 7
 
 // A capturing closure goes into a `fn() -> T + Send` slot when its
-// captures are `Send` (spec 4.4.6); the fat `{code, env}` value carries
-// them.
+// captures are `Send + Sync` (spec 4.4.6; a capture is shared with the
+// creator); the fat `{code, env}` value carries them.
 fn spawn<T: Send>(f: fn() -> T + Send) -> T { return f(); }
 
 fn main() -> i32 {
     let base = 40;
     println(f"{spawn(|| base + 2)}");
-    let xs: List<i32> = [3, 4];
-    let g: fn() -> i32 + Send = || xs[0] + xs[1];
+    let xs = (3, 4);
+    let g: fn() -> i32 + Send = || xs.0 + xs.1;
     println(f"{g()}");
     return 0;
 }

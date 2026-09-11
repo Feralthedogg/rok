@@ -1,0 +1,30 @@
+// expect-exit: 0
+// expect-stdout:
+// 400
+// 3
+
+// Sharing a collection between threads goes through a lock:
+// `Mutex<List<T>>` is `Send + Sync` (a `List` is `Send`), so a
+// spawned closure may capture it; a `[ref]` capture of a `Sync` value
+// (an `i32` cell) may cross too (spec 4.6.9).
+use rok::std::thread;
+
+fn main() {
+    let shared: Mutex<List<i32>> = Mutex::new([]);
+    let hs: List<thread::JoinHandle<()>> = [];
+    for t in 0..4 {
+        hs.push(thread::spawn(|| {
+            for i in 0..100 {
+                using g = shared.lock() { g.get().push(t * 100 + i); }
+            }
+        }));
+    }
+    for h in hs { try! h.join(); }
+    using g = shared.lock() { println(f"{g.get().len()}"); }
+    // A list made inside the thread may come back as its result.
+    let back = thread::spawn(|| { let v: List<i32> = [1, 2, 3]; v });
+    let n = 0;
+    let h = thread::spawn([ref n] || { n = 3; });
+    try! h.join();
+    println(f"{if (try! back.join()).len() == 3 { n } else { 0 }}");
+}

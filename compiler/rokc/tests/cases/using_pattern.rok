@@ -38,3 +38,5 @@ fn main() -> i32 {
     println(f"{n}");
     0
 }
+
+// spec: 003.17-using-expression

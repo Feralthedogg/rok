@@ -22,3 +22,5 @@ fn main() -> i32 {
     let c = Counter { n: 7 };
     return double(c);
 }
+
+// spec: 002.08-trait

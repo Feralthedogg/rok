@@ -15,3 +15,5 @@ fn main() -> i32 {
     println("backslash: \\");
     return 0;
 }
+
+// spec: std 215-string

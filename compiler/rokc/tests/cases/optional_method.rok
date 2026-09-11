@@ -24,3 +24,5 @@ fn main() -> i32 {
     let r2 = c2?.double();
     return (r1 ?? 0) + (r2 ?? 14) + 0;
 }
+
+// spec: 003.08-optional-chaining-and-coalescing

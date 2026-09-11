@@ -5,3 +5,5 @@ fn main() {
     let ok: float = 1e400;
     let f: f64 = 1e400;
 }
+
+// spec: std 201-numbers

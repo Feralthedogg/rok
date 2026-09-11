@@ -9,3 +9,5 @@ fn main() -> i32 {
     let p = Pair { a: Tok { v: 1 }, b: Tok { v: 2 } };
     return p.show();
 }
+
+// spec: 002.10-generics

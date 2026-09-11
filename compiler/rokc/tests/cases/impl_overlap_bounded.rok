@@ -24,3 +24,5 @@ impl<T: Shape> Wrap<T> { fn get(self) -> i32 { return 1; } }
 impl<T: Color> Wrap<T> { fn get(self) -> i32 { return 2; } }
 
 fn main() -> i32 { return 0; }
+
+// spec: 002.09-impl

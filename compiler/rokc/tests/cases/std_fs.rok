@@ -110,3 +110,5 @@ fn main() throws (IoError) {
     try fs::remove_dir_all(base);
     println(f"exists after remove: {fs::exists(base)}");
 }
+
+// spec: std 301-fs

@@ -15,3 +15,5 @@ fn main() -> i32 {
     let a: [i32; 3] = [1, 2, 3];
     return a.total();
 }
+
+// spec: 002.10-generics

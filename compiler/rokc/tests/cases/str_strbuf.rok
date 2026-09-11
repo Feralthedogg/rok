@@ -40,3 +40,5 @@ fn main() {
     let bytes: List<u8> = [104u8, 0xFFu8];
     println(try str::from_utf8(bytes) catch e { f"{e}" });
 }
+
+// spec: std 215-string

@@ -308,43 +308,47 @@ impl FromStr for SocketAddr {
 const ADDR_WORDS: usize = 20;
 
 fn words_of(a: SocketAddr) -> GcBuf<i64> {
-    let w: GcBuf<i64> = buf_new(ADDR_WORDS);
-    match a {
-        SocketAddr::V4(v) => {
-            w[0] = 4i64;
-            w[1] = v.port as i64;
-            for i in 0..4usize { w[4 + i] = v.ip.octets[i] as i64; }
-        }
-        SocketAddr::V6(v) => {
-            w[0] = 6i64;
-            w[1] = v.port as i64;
-            w[2] = v.flow_info as i64;
-            w[3] = v.scope_id as i64;
-            for i in 0..8usize {
-                let g = v.ip.segments[i] as i64;
-                w[4 + 2 * i] = g / 256i64;
-                w[5 + 2 * i] = g % 256i64;
+    unsafe {
+        let w: GcBuf<i64> = buf_new(ADDR_WORDS);
+        match a {
+            SocketAddr::V4(v) => {
+                w[0] = 4i64;
+                w[1] = v.port as i64;
+                for i in 0..4usize { w[4 + i] = v.ip.octets[i] as i64; }
+            }
+            SocketAddr::V6(v) => {
+                w[0] = 6i64;
+                w[1] = v.port as i64;
+                w[2] = v.flow_info as i64;
+                w[3] = v.scope_id as i64;
+                for i in 0..8usize {
+                    let g = v.ip.segments[i] as i64;
+                    w[4 + 2 * i] = g / 256i64;
+                    w[5 + 2 * i] = g % 256i64;
+                }
             }
         }
+        w
     }
-    w
 }
 
 fn addr_at(w: GcBuf<i64>, at: usize) -> SocketAddr {
-    let b = |i: usize| -> i64 { w[at + 4 + i] };
-    let port = w[at + 1] as u16;
-    if w[at] == 6i64 {
-        let s: List<u16> = List::new();
-        for i in 0..8usize { s.push((b(2 * i) * 256i64 + b(2 * i + 1)) as u16); }
-        let ip = Ipv6Addr::new(s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]);
-        return SocketAddr::V6(SocketAddrV6 {
-            ip: ip,
-            port: port,
-            flow_info: w[at + 2] as u32,
-            scope_id: w[at + 3] as u32,
-        });
+    unsafe {
+        let b = |i: usize| -> i64 { w[at + 4 + i] };
+        let port = w[at + 1] as u16;
+        if w[at] == 6i64 {
+            let s: List<u16> = List::new();
+            for i in 0..8usize { s.push((b(2 * i) * 256i64 + b(2 * i + 1)) as u16); }
+            let ip = Ipv6Addr::new(s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]);
+            return SocketAddr::V6(SocketAddrV6 {
+                ip: ip,
+                port: port,
+                flow_info: w[at + 2] as u32,
+                scope_id: w[at + 3] as u32,
+            });
+        }
+        SocketAddr::v4(Ipv4Addr::new(b(0) as u8, b(1) as u8, b(2) as u8, b(3) as u8), port)
     }
-    SocketAddr::v4(Ipv4Addr::new(b(0) as u8, b(1) as u8, b(2) as u8, b(3) as u8), port)
 }
 
 // ---- DNS (302.4) ----
@@ -352,12 +356,14 @@ fn addr_at(w: GcBuf<i64>, at: usize) -> SocketAddr {
 const MAX_ADDRS: usize = 32;
 
 fn resolve_raw(host: str, port: u16) throws (IoError) -> List<SocketAddr> {
-    let out: GcBuf<i64> = buf_new(ADDR_WORDS * MAX_ADDRS);
-    let n = try check(unsafe { rok_net_resolve(host, port, out, MAX_ADDRS) } as i64, host);
-    if n == 0 { throw IoError::with_kind(IoErrorKind::NotFound, host + ": no addresses"); }
-    let addrs: List<SocketAddr> = List::new();
-    for i in 0..n as usize { addrs.push(addr_at(out, i * ADDR_WORDS)); }
-    addrs
+    unsafe {
+        let out: GcBuf<i64> = buf_new(ADDR_WORDS * MAX_ADDRS);
+        let n = try check(rok_net_resolve(host, port, out, MAX_ADDRS) as i64, host);
+        if n == 0 { throw IoError::with_kind(IoErrorKind::NotFound, host + ": no addresses"); }
+        let addrs: List<SocketAddr> = List::new();
+        for i in 0..n as usize { addrs.push(addr_at(out, i * ADDR_WORDS)); }
+        addrs
+    }
 }
 
 /// Addresses of `host`: `"name:port"`, `"[v6]:port"`, a socket address,
@@ -403,12 +409,14 @@ struct Sock {
 }
 
 fn sock_of(fd: i32) -> Sock {
-    let cell: GcBuf<i32> = buf_new(1);
-    cell[0] = fd;
-    let opts: GcBuf<i64> = buf_new(3);
-    opts[1] = -1i64;
-    opts[2] = -1i64;
-    Sock { fd: cell, opts: opts }
+    unsafe {
+        let cell: GcBuf<i32> = buf_new(1);
+        cell[0] = fd;
+        let opts: GcBuf<i64> = buf_new(3);
+        opts[1] = -1i64;
+        opts[2] = -1i64;
+        Sock { fd: cell, opts: opts }
+    }
 }
 
 fn new_sock(family: i32, kind: i32) throws (IoError) -> Sock {
@@ -425,47 +433,59 @@ const CHUNK: usize = 16384;
 
 impl Sock {
     fn live(self) throws (IoError) -> i32 {
-        let fd = self.fd[0];
-        if fd < 0 { throw IoError::with_kind(IoErrorKind::InvalidInput, "socket is closed"); }
-        fd
+        unsafe {
+            let fd = self.fd[0];
+            if fd < 0 { throw IoError::with_kind(IoErrorKind::InvalidInput, "socket is closed"); }
+            fd
+        }
     }
 
     fn close(self) {
-        let fd = self.fd[0];
-        if fd >= 0 {
-            self.fd[0] = -1;
-            unsafe { rok_os_close(fd) };
+        unsafe {
+            let fd = self.fd[0];
+            if fd >= 0 {
+                self.fd[0] = -1;
+                rok_os_close(fd);
+            }
         }
     }
 
     /// After a `WouldBlock`: throw it (non-blocking mode) or wait for
     /// readiness within the timeout.
     fn block(self, write: i32, what: str) throws (IoError) {
-        if self.opts[0] != 0i64 {
-            throw IoError::with_kind(IoErrorKind::WouldBlock, what + ": operation would block");
+        unsafe {
+            if self.opts[0] != 0i64 {
+                throw IoError::with_kind(IoErrorKind::WouldBlock, what + ": operation would block");
+            }
+            let r = rok_net_wait(try self.live(), write, self.opts[1 + write as usize]);
+            if r == 0 { throw timed_out(what); }
+            try check(r as i64, what);
         }
-        let r = unsafe { rok_net_wait(try self.live(), write, self.opts[1 + write as usize]) };
-        if r == 0 { throw timed_out(what); }
-        try check(r as i64, what);
     }
 
     fn set_timeout(self, write: usize, dur: Duration | none) {
-        self.opts[1 + write] = match dur {
-            d: Duration => d.as_ns(),
-            none => -1i64,
-        };
+        unsafe {
+            self.opts[1 + write] = match dur {
+                d: Duration => d.as_ns(),
+                none => -1i64,
+            };
+        }
     }
 
     fn timeout(self, write: usize) -> Duration | none {
-        let ns = self.opts[1 + write];
-        if ns < 0i64 { return none; }
-        Duration::ns(ns)
+        unsafe {
+            let ns = self.opts[1 + write];
+            if ns < 0i64 { return none; }
+            Duration::ns(ns)
+        }
     }
 
     fn addr(self, peer: i32) throws (IoError) -> SocketAddr {
-        let out: GcBuf<i64> = buf_new(ADDR_WORDS);
-        try check(unsafe { rok_net_addr(try self.live(), out, peer) } as i64, "getsockname");
-        addr_at(out, 0)
+        unsafe {
+            let out: GcBuf<i64> = buf_new(ADDR_WORDS);
+            try check(rok_net_addr(try self.live(), out, peer) as i64, "getsockname");
+            addr_at(out, 0)
+        }
     }
 
     fn setopt(self, opt: i32, val: i64) throws (IoError) {
@@ -473,10 +493,12 @@ impl Sock {
     }
 
     fn try_clone(self) throws (IoError) -> Sock {
-        let fd = try check(unsafe { rok_os_dup(try self.live()) } as i64, "dup");
-        let s = sock_of(fd as i32);
-        for i in 0..3usize { s.opts[i] = self.opts[i]; }
-        s
+        unsafe {
+            let fd = try check(rok_os_dup(try self.live()) as i64, "dup");
+            let s = sock_of(fd as i32);
+            for i in 0..3usize { s.opts[i] = self.opts[i]; }
+            s
+        }
     }
 
     /// One read into `buf[at..at + n]`: the count, or `none` on `WouldBlock`.
@@ -664,7 +686,11 @@ impl TcpStream {
     }
 
     /// The OS socket descriptor (`-1` once closed).
-    pub fn fd(self) -> i32 { self.sock.fd[0] }
+    pub fn fd(self) -> i32 {
+        unsafe {
+            self.sock.fd[0]
+        }
+    }
 
     /// Read up to `buf.len()` bytes into `buf[0..n]`; 0 at end of stream.
     pub fn read(self, buf: List<u8>) throws (IoError) -> usize { try self.sock.read(buf) }
@@ -738,7 +764,9 @@ impl TcpStream {
 
     /// Make the blocking calls throw `WouldBlock` instead of waiting.
     pub fn set_nonblocking(self, nb: bool) throws (IoError) {
-        self.sock.opts[0] = if nb { 1i64 } else { 0i64 };
+        unsafe {
+            self.sock.opts[0] = if nb { 1i64 } else { 0i64 };
+        }
     }
 
     pub fn try_clone(self) throws (IoError) -> TcpStream {
@@ -780,11 +808,13 @@ impl TcpListener {
     }
 
     fn accept_once(self) throws (IoError) -> (TcpStream, SocketAddr) | none {
-        let out: GcBuf<i64> = buf_new(ADDR_WORDS);
-        let fd = unsafe { rok_net_accept(try self.sock.live(), out) } as i64;
-        if would_block(fd) { return none; }
-        try check(fd, "accept");
-        (TcpStream { sock: sock_of(fd as i32) }, addr_at(out, 0))
+        unsafe {
+            let out: GcBuf<i64> = buf_new(ADDR_WORDS);
+            let fd = rok_net_accept(try self.sock.live(), out) as i64;
+            if would_block(fd) { return none; }
+            try check(fd, "accept");
+            (TcpStream { sock: sock_of(fd as i32) }, addr_at(out, 0))
+        }
     }
 
     /// The next connection and its peer, blocking until one arrives.
@@ -810,14 +840,20 @@ impl TcpListener {
     }
 
     pub fn set_nonblocking(self, nb: bool) throws (IoError) {
-        self.sock.opts[0] = if nb { 1i64 } else { 0i64 };
+        unsafe {
+            self.sock.opts[0] = if nb { 1i64 } else { 0i64 };
+        }
     }
 
     /// `for c in l.incoming() { let s = try c.get(); .. }`: connections
     /// forever (each item is the stream or the error `accept` threw).
     pub fn incoming(self) -> Incoming { Incoming { listener: self } }
 
-    pub fn fd(self) -> i32 { self.sock.fd[0] }
+    pub fn fd(self) -> i32 {
+        unsafe {
+            self.sock.fd[0]
+        }
+    }
 
     pub fn close(self) { self.sock.close(); }
 }
@@ -868,11 +904,13 @@ impl UdpSocket {
     /// One datagram into `buf`: its length and sender, or `none` on
     /// `WouldBlock`.
     fn recv_from_once(self, buf: List<u8>) throws (IoError) -> (usize, SocketAddr) | none {
-        let out: GcBuf<i64> = buf_new(ADDR_WORDS);
-        let (b, at, n) = region(buf);
-        let r = unsafe { rok_net_recv_from(try self.sock.live(), b, at, n, out) } as i64;
-        if would_block(r) { return none; }
-        ((try check(r, "recv_from")) as usize, addr_at(out, 0))
+        unsafe {
+            let out: GcBuf<i64> = buf_new(ADDR_WORDS);
+            let (b, at, n) = region(buf);
+            let r = rok_net_recv_from(try self.sock.live(), b, at, n, out) as i64;
+            if would_block(r) { return none; }
+            ((try check(r, "recv_from")) as usize, addr_at(out, 0))
+        }
     }
 
     /// Send the datagram `buf` to `addr`; bytes sent.
@@ -960,14 +998,20 @@ impl UdpSocket {
     pub fn set_write_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(1, dur); }
 
     pub fn set_nonblocking(self, nb: bool) throws (IoError) {
-        self.sock.opts[0] = if nb { 1i64 } else { 0i64 };
+        unsafe {
+            self.sock.opts[0] = if nb { 1i64 } else { 0i64 };
+        }
     }
 
     pub fn try_clone(self) throws (IoError) -> UdpSocket {
         UdpSocket { sock: try self.sock.try_clone() }
     }
 
-    pub fn fd(self) -> i32 { self.sock.fd[0] }
+    pub fn fd(self) -> i32 {
+        unsafe {
+            self.sock.fd[0]
+        }
+    }
 
     pub fn close(self) { self.sock.close(); }
 }

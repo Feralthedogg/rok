@@ -10,8 +10,8 @@ use rokc_mir::gc_abi::{
     LOS_THRESHOLD, PLAIN_TYPE_ID, SUM_DESC_SHIFT, SUM_PAYLOAD, TABLE_ARRAY, USER_TYPE_BASE,
 };
 use rokc_mir::{
-    BasicBlock, GcSlot, Link, MirFunction, MirModule, MirTy, Operand, RValue, Statement, Target,
-    Terminator,
+    BasicBlock, CAbi, GcSlot, Link, MirFunction, MirModule, MirTy, Operand, RValue, Statement,
+    Target, Terminator,
 };
 
 use crate::abi::{ArgAbi, FnAbi, RetAbi};
@@ -76,7 +76,7 @@ fn runtime_decl(name: &str, pw: u32) -> Option<String> {
     };
     let sig = match name {
         "rok_tls_shadow_stack_top" => return Some(global("!llvm.ptr")),
-        "rok_tls_yield_flag" => return Some(global("i8")),
+        "rok_tls_yield_flag" | "rok_tls_mutator_state" => return Some(global("i8")),
         "rok_tls_tlab_cursor" | "rok_tls_tlab_limit" => return Some(global(&format!("i{pw}"))),
         "rok_panic_at" => format!("({s}, {s})"),
         "rok_cstr_len" => format!("(!llvm.ptr) -> i{pw}"),
@@ -88,7 +88,13 @@ fn runtime_decl(name: &str, pw: u32) -> Option<String> {
         "rok_gc_register_type" => "(i32, !llvm.ptr)".to_owned(),
         "rok_gc_add_root" | "rok_static_init_end" => "(!llvm.ptr)".to_owned(),
         "rok_static_init_begin" => "(!llvm.ptr) -> i32".to_owned(),
-        "rok_runtime_yield" | "rok_runtime_init" | "rok_runtime_shutdown" => "()".to_owned(),
+        "rok_runtime_yield"
+        | "rok_runtime_init"
+        | "rok_runtime_shutdown"
+        | "rok_enter_native"
+        | "rok_leave_native" => "()".to_owned(),
+        "rok_native_reenter" => "() -> i32".to_owned(),
+        "rok_native_resume" => "(i32)".to_owned(),
         _ => return None,
     };
     Some(format!("func.func private @{name}{sig}"))
@@ -169,6 +175,47 @@ impl Emitter {
         }
     }
 
+    /// A `#[repr(packed)]` struct is for C data (spec 6.2.2): its fields
+    /// may sit unaligned, where the collector cannot read a reference.
+    fn check_packed(&mut self, module: &MirModule) {
+        fn walk(ty: &MirTy, t: &Target, bad: &mut BTreeSet<u32>) {
+            match ty {
+                MirTy::Struct(id, ps) => {
+                    if t.repr(*id).packed && t.has_gc_ref(ty) {
+                        bad.insert(id.0);
+                    }
+                    ps.iter().for_each(|p| walk(p, t, bad));
+                }
+                MirTy::Tuple(ps) => ps.iter().for_each(|p| walk(p, t, bad)),
+                MirTy::Array(e, _) => walk(e, t, bad),
+                MirTy::Union(vs, _) => vs.iter().for_each(|(_, v)| walk(v, t, bad)),
+                _ => {}
+            }
+        }
+        if self.target.reprs.values().all(|r| !r.packed) {
+            return;
+        }
+        let mut bad = BTreeSet::new();
+        let tys = module
+            .functions
+            .iter()
+            .flat_map(|f| f.locals.iter().map(|l| &l.ty))
+            .chain(module.statics.iter().map(|s| &s.ty));
+        for ty in tys {
+            walk(ty, &self.target, &mut bad);
+        }
+        for id in bad {
+            let name = module
+                .struct_names
+                .get(&id)
+                .map_or_else(|| format!("#{id}"), |(n, _)| n.clone());
+            self.errors.push(format!(
+                "`#[repr(packed)]` struct `{name}` holds a GC reference (`str`, a \
+                 collection, a closure ..); a packed struct is for C data (spec 6.2.2)"
+            ));
+        }
+    }
+
     /// The C lowering of a signature; `None` (and an error) where this
     /// target cannot pass its aggregates.
     fn classify(
@@ -179,7 +226,24 @@ impl Emitter {
         ret: &MirTy,
         variadic: bool,
     ) -> Option<FnAbi> {
-        let abi = crate::abi::classify(target, params, ret, variadic);
+        let mut abi = crate::abi::classify(target, params, ret, variadic);
+        // A `#[repr(transparent)]` struct around a scalar crosses as the
+        // scalar: through memory, like any coerced aggregate.
+        let coerce = |t: &MirTy| {
+            let inner = crate::abi::transparent(t, target);
+            (inner != *t && !crate::abi::is_aggregate(&inner) && inner != MirTy::Unit)
+                .then(|| mlir_type(&inner, target))
+        };
+        if let Some(abi) = abi.as_mut() {
+            for (a, p) in abi.args.iter_mut().zip(params) {
+                if let (ArgAbi::Direct, Some(c)) = (&a, coerce(p)) {
+                    *a = ArgAbi::Coerce(c);
+                }
+            }
+            if let (RetAbi::Direct, Some(c)) = (&abi.ret, coerce(ret)) {
+                abi.ret = RetAbi::Coerce(c);
+            }
+        }
         if abi.is_none() {
             errors.push(format!(
                 "unsupported in codegen: {what} passes a `struct` by value across the C ABI, \
@@ -191,6 +255,7 @@ impl Emitter {
 
     pub fn emit_module(&mut self, module: &MirModule) {
         self.pkgs.link = module.link.clone();
+        self.check_packed(module);
         if let Some(di) = self.debug.as_mut() {
             di.struct_names.clone_from(&module.struct_names);
         }
@@ -230,6 +295,9 @@ impl Emitter {
                     &f.ret_ty,
                     variadic,
                 ),
+                Abi::Rok if f.facts.linkage == Linkage::Extern => {
+                    crate::abi::classify_rok(&self.target, &f.param_tys, &f.ret_ty)
+                }
                 Abi::Rok => None,
             };
             let mut sig = FnSig {
@@ -241,8 +309,9 @@ impl Emitter {
             };
             match c {
                 Some(abi) if f.facts.linkage == Linkage::Extern => sig.c = Some(abi),
-                Some(abi) if !abi.is_trivial() => {
-                    // The exported name (or `<body>.c`) is the C entry.
+                Some(abi) => {
+                    // The exported name (or `<body>.c`) is the C entry:
+                    // C's calls come back into rok through it.
                     sig.name = crate::mangle::mangled(f, &self.pkgs);
                     let entry = f
                         .facts
@@ -320,7 +389,7 @@ impl Emitter {
                 // types and roots, then run its statements.
                 let (ret, ty) = match &m.ret_ty {
                     MirTy::Unit => ("", "()".to_owned()),
-                    t => ("%0 = ", mlir_type(t, self.pw())),
+                    t => ("%0 = ", mlir_type(t, &self.target)),
                 };
                 let _ = write!(
                     self.out,
@@ -422,7 +491,7 @@ impl Emitter {
     fn emit_static_globals(&mut self, module: &MirModule) {
         let pw = self.pw();
         for s in &module.statics {
-            let ty_str = mlir_type(&s.ty, pw);
+            let ty_str = mlir_type(&s.ty, &self.target);
             let constness = if s.is_mut { "" } else { "constant " };
             let sym = self.pkgs.static_sym(&s.name);
             if s.is_extern && self.defines(&s.name) {
@@ -473,7 +542,7 @@ impl Emitter {
                 );
                 continue;
             }
-            match format_const_attr(&s.init, &s.ty, pw) {
+            match format_const_attr(&s.init, &s.ty, &self.target) {
                 Some(init) => {
                     let _ = writeln!(
                         self.out,
@@ -569,17 +638,18 @@ impl Emitter {
 
     fn emit_function(&mut self, f: &MirFunction, fns: &HashMap<FunctionId, FnSig>) {
         let sig = &fns[&f.id];
-        let pw = self.pw();
         if f.facts.linkage != Linkage::Defined {
             if let Some(abi) = &sig.c {
                 self.emit_c_decl(&sig.name, &sig.params, &sig.ret, abi);
                 return;
             }
-            let params: Vec<String> = sig.params.iter().map(|t| mlir_type(t, pw)).collect();
-            let ret = match &sig.ret {
-                MirTy::Unit => String::new(),
-                t => format!(" -> {}", mlir_type(t, pw)),
-            };
+            let params: Vec<String> = sig
+                .params
+                .iter()
+                .map(|t| mlir_type(t, &self.target) + c_ext_attr(t, &self.target))
+                .collect();
+            let ret = (sig.ret != MirTy::Unit).then(|| mlir_type(&sig.ret, &self.target));
+            let ret = c_ret_arrow(ret.as_deref(), &sig.ret, None, &self.target);
             let _ = writeln!(
                 self.out,
                 "  func.func private @{}({}){ret}",
@@ -595,20 +665,28 @@ impl Emitter {
             if i > 0 {
                 self.out.push_str(", ");
             }
-            let _ = write!(self.out, "%arg{i}: {}", mlir_type(ty, pw));
+            let _ = write!(self.out, "%arg{i}: {}", mlir_type(ty, &self.target));
         }
         self.out.push(')');
         if f.ret_ty != MirTy::Unit {
-            let _ = write!(self.out, " -> {}", mlir_type(&f.ret_ty, pw));
+            let _ = write!(self.out, " -> {}", mlir_type(&f.ret_ty, &self.target));
         }
+        let mut attrs = Vec::new();
         if private {
             // `private` is MLIR visibility only; this is the LLVM linkage.
-            self.out
-                .push_str(" attributes {llvm.linkage = #llvm.linkage<internal>}");
+            attrs.push("llvm.linkage = #llvm.linkage<internal>");
         } else if self.link().lib.is_some() && f.facts.role == FnRole::AnyDispatcher {
             // The program's own (complete) dispatcher replaces it.
-            self.out
-                .push_str(" attributes {llvm.linkage = #llvm.linkage<weak>}");
+            attrs.push("llvm.linkage = #llvm.linkage<weak>");
+        }
+        // Stack probes: a frame bigger than a page touches each page on
+        // the way down, so an overflow faults in the guard page (where
+        // the runtime reports it) instead of somewhere below it.
+        if matches!(self.target.arch.as_str(), "x86" | "x86_64" | "aarch64") {
+            attrs.push(r#"passthrough = [["probe-stack", "inline-asm"]]"#);
+        }
+        if !attrs.is_empty() {
+            let _ = write!(self.out, " attributes {{{}}}", attrs.join(", "));
         }
         self.out.push_str(" {\n");
 
@@ -669,7 +747,6 @@ impl Emitter {
     /// the result the C way. Exported under `#[export_name]`, else
     /// internal (C gets it as a function pointer).
     fn emit_c_entry(&mut self, sig: &FnSig, abi: &FnAbi, exported: bool) {
-        let pw = self.pw();
         let Some((entry, _)) = &sig.c_entry else {
             return;
         };
@@ -679,7 +756,7 @@ impl Emitter {
             .enumerate()
             .map(|(i, (t, a))| format!("%arg{i}: {t}{a}"))
             .collect();
-        let arrow = ret.as_ref().map(|r| format!(" -> {r}")).unwrap_or_default();
+        let arrow = c_ret_arrow(ret.as_deref(), &sig.ret, Some(abi), &self.target);
         let (vis, linkage) = if exported {
             ("", "")
         } else {
@@ -705,7 +782,7 @@ impl Emitter {
         let mut vals = Vec::new();
         for (i, t) in sig.params.iter().enumerate() {
             let a = format!("%arg{}", i + sret);
-            let ty = mlir_type(t, pw);
+            let ty = mlir_type(t, &self.target);
             match abi.args.get(i).unwrap_or(&ArgAbi::Direct) {
                 ArgAbi::Direct => vals.push(a),
                 ArgAbi::Coerce(c) => {
@@ -724,12 +801,22 @@ impl Emitter {
                 }
             }
         }
-        let tys: Vec<String> = sig.params.iter().map(|t| mlir_type(t, pw)).collect();
-        let rty = mlir_type(&sig.ret, pw);
+        let tys: Vec<String> = sig
+            .params
+            .iter()
+            .map(|t| mlir_type(t, &self.target))
+            .collect();
+        let rty = mlir_type(&sig.ret, &self.target);
         let unit = sig.ret == MirTy::Unit;
+        // Called from C that this thread entered from rok (`PARKED`, 804
+        // §8.4.10): run as a mutator again for the body.
+        self.needs.insert("rok_native_reenter");
+        self.needs.insert("rok_native_resume");
         let _ = writeln!(
             b,
-            "    {}func.call @{}({}) : ({}) -> {}",
+            "    %parked = func.call @rok_native_reenter() : () -> i32
+    {}func.call @{}({}) : ({}) -> {}
+    func.call @rok_native_resume(%parked) : (i32) -> ()",
             if unit { "" } else { "%r = " },
             sig.name,
             vals.join(", "),
@@ -767,9 +854,9 @@ impl Emitter {
     /// An `extern "C"` declaration under the platform C ABI (spec 8.6):
     /// aggregates per `abi::classify`, `str` as `char*`, small integers
     /// caller-extended, variadic ones as an `llvm.func` with `...`.
-    fn emit_c_decl(&mut self, symbol: &str, params: &[MirTy], ret: &MirTy, abi: &FnAbi) {
-        let (params, ret) = c_signature(params, ret, abi, &self.target);
-        let ret = ret.map(|r| format!(" -> {r}")).unwrap_or_default();
+    fn emit_c_decl(&mut self, symbol: &str, params: &[MirTy], ret_ty: &MirTy, abi: &FnAbi) {
+        let (params, ret) = c_signature(params, ret_ty, abi, &self.target);
+        let ret = c_ret_arrow(ret.as_deref(), ret_ty, Some(abi), &self.target);
         let mut params: Vec<String> = params.into_iter().map(|(t, a)| t + &a).collect();
         if abi.variadic {
             params.push("...".to_owned());
@@ -811,7 +898,7 @@ impl Emitter {
             self.out.push_str("  }\n");
             return;
         }
-        let ret = mlir_type(user_ret_ty, pw);
+        let ret = mlir_type(user_ret_ty, &self.target);
         let _ = writeln!(self.out, "    %0 = func.call @{user_main}() : () -> {ret}");
         self.out
             .push_str("    func.call @rok_runtime_shutdown() : () -> ()\n");
@@ -1182,6 +1269,41 @@ impl<'a> FnEmit<'a> {
         );
     }
 
+    /// Into (`enter`) or out of a C call (804 §8.4.10): the inline fast
+    /// path of `rok_enter_native` / `rok_leave_native`. Store the state,
+    /// then read the yield flag (both `seq_cst`: a stopper raises the
+    /// flag, then reads the state); a raised flag takes the runtime's
+    /// slow path, which wakes the stopper or waits it out.
+    fn emit_native_edge(&mut self, enter: bool) {
+        let (state, slow) = if enter {
+            (2, "rok_enter_native")
+        } else {
+            (0, "rok_leave_native")
+        };
+        self.needs.insert("rok_tls_mutator_state");
+        self.needs.insert("rok_tls_yield_flag");
+        self.needs.insert(slow);
+        let n = self.next_check;
+        self.next_check += 1;
+        let [sa, st, fa, flag, zero, set] = std::array::from_fn(|_| self.fresh_value());
+        let _ = write!(
+            self.body,
+            "    {sa} = llvm.mlir.addressof @rok_tls_mutator_state : !llvm.ptr
+    {st} = llvm.mlir.constant({state} : i8) : i8
+    llvm.store {st}, {sa} atomic seq_cst {{alignment = 1 : i64}} : i8, !llvm.ptr
+    {fa} = llvm.mlir.addressof @rok_tls_yield_flag : !llvm.ptr
+    {flag} = llvm.load {fa} atomic seq_cst {{alignment = 1 : i64}} : !llvm.ptr -> i8
+    {zero} = arith.constant 0 : i8
+    {set} = arith.cmpi ne, {flag}, {zero} : i8
+    cf.cond_br {set}, ^rok_nslow{n}, ^rok_nfast{n}
+  ^rok_nslow{n}:
+    func.call @{slow}() : () -> ()
+    cf.br ^rok_nfast{n}
+  ^rok_nfast{n}:
+"
+        );
+    }
+
     fn intern_string(&mut self, s: &str) -> String {
         if let Some(name) = self.str_globals.get(s) {
             return name.clone();
@@ -1206,11 +1328,12 @@ impl<'a> FnEmit<'a> {
             if self.is_block_param(local.id) || !is_slotted(&local.ty) {
                 continue;
             }
-            let ty = mlir_type(&local.ty, self.pw);
+            let ty = mlir_type(&local.ty, self.target);
             let slot = format!("%p{}", local.id.0);
+            let align = slot_align(&local.ty, self.target);
             let _ = writeln!(
                 self.body,
-                "    {slot} = llvm.alloca {one} x {ty} : (i32) -> !llvm.ptr"
+                "    {slot} = llvm.alloca {one} x {ty}{align} : (i32) -> !llvm.ptr"
             );
             self.slot_names[local.id.0 as usize] = Some(slot);
         }
@@ -1231,7 +1354,7 @@ impl<'a> FnEmit<'a> {
                 else {
                     continue;
                 };
-                let ty = mlir_type(union_ty, self.pw);
+                let ty = mlir_type(union_ty, self.target);
                 if self.union_scratch.contains_key(&ty) {
                     continue;
                 }
@@ -1256,7 +1379,7 @@ impl<'a> FnEmit<'a> {
             let Some(slot) = self.slot_names[p.0 as usize].clone() else {
                 continue;
             };
-            let ty = mlir_type(&self.f.locals[p.0 as usize].ty, self.pw);
+            let ty = mlir_type(&self.f.locals[p.0 as usize].ty, self.target);
             let _ = writeln!(
                 self.body,
                 "    llvm.store %arg{i}, {slot} : {ty}, !llvm.ptr"
@@ -1308,12 +1431,13 @@ impl<'a> FnEmit<'a> {
                 continue;
             }
             let id = local.id.0;
-            let ty = mlir_type(&local.ty, pw);
+            let ty = mlir_type(&local.ty, self.target);
             let slot = if self.is_block_param(local.id) {
                 let s = format!("%gp{id}");
+                let align = slot_align(&local.ty, self.target);
                 let _ = writeln!(
                     header,
-                    "    {s} = llvm.alloca {one} x {ty} : (i32) -> !llvm.ptr"
+                    "    {s} = llvm.alloca {one} x {ty}{align} : (i32) -> !llvm.ptr"
                 );
                 self.gc_param_slots.insert(id, s.clone());
                 s
@@ -1381,7 +1505,7 @@ impl<'a> FnEmit<'a> {
             Some(s) => s.clone(),
             None => self.slot_names[l.0 as usize].clone().unwrap(),
         };
-        let ty = mlir_type(&self.local_ty(l), self.pw);
+        let ty = mlir_type(&self.local_ty(l), self.target);
         let z = self.fresh_value();
         let _ = writeln!(self.body, "    {z} = llvm.mlir.zero : {ty}");
         let _ = writeln!(self.body, "    llvm.store {z}, {slot} : {ty}, !llvm.ptr");
@@ -1415,14 +1539,14 @@ impl<'a> FnEmit<'a> {
                 .unwrap_or_else(|| {
                     // Truly unknown — emit a typed zero so callers stay valid.
                     let v = self.fresh_value();
-                    let ty = mlir_type(&self.local_ty(id), self.pw);
+                    let ty = mlir_type(&self.local_ty(id), self.target);
                     let _ = writeln!(self.body, "    {v} = arith.constant 0 : {ty}");
                     v
                 });
         }
         let slot = self.slot_names[id.0 as usize].clone().unwrap();
         let v = self.fresh_value();
-        let ty = mlir_type(&self.local_ty(id), self.pw);
+        let ty = mlir_type(&self.local_ty(id), self.target);
         let _ = writeln!(self.body, "    {v} = llvm.load {slot} : !llvm.ptr -> {ty}");
         v
     }
@@ -1437,7 +1561,7 @@ impl<'a> FnEmit<'a> {
             return;
         }
         let slot = self.slot_names[id.0 as usize].clone().unwrap();
-        let ty = mlir_type(&self.local_ty(id), self.pw);
+        let ty = mlir_type(&self.local_ty(id), self.target);
         let _ = writeln!(
             self.body,
             "    llvm.store {value}, {slot} : {ty}, !llvm.ptr"
@@ -1467,7 +1591,7 @@ impl<'a> FnEmit<'a> {
             for p in &b.params {
                 let name = self.fresh_value();
                 let ty = self.local_ty(*p);
-                header_args.push(format!("{name}: {}", mlir_type(&ty, self.pw)));
+                header_args.push(format!("{name}: {}", mlir_type(&ty, self.target)));
                 self.local_names[p.0 as usize] = Some(name);
             }
             if header_args.is_empty() {
@@ -1478,7 +1602,7 @@ impl<'a> FnEmit<'a> {
             for p in &b.params {
                 if let Some(slot) = self.gc_param_slots.get(&p.0) {
                     let v = self.local_names[p.0 as usize].clone().unwrap();
-                    let ty = mlir_type(&self.local_ty(*p), self.pw);
+                    let ty = mlir_type(&self.local_ty(*p), self.target);
                     let _ = writeln!(self.body, "    llvm.store {v}, {slot} : {ty}, !llvm.ptr");
                 }
             }
@@ -1547,14 +1671,13 @@ impl<'a> FnEmit<'a> {
             }
             Statement::MlirRegion { params } => {
                 self.region_outer.push(std::mem::take(&mut self.body));
-                let pw = self.pw;
                 let args: Vec<(String, MirTy)> = params
                     .iter()
                     .map(|p| (self.fresh_value(), self.local_ty(*p)))
                     .collect();
                 let header: Vec<String> = args
                     .iter()
-                    .map(|(v, t)| format!("{v}: {}", mlir_type(t, pw)))
+                    .map(|(v, t)| format!("{v}: {}", mlir_type(t, self.target)))
                     .collect();
                 let _ = writeln!(self.body, "  ^bb0({}):", header.join(", "));
                 for (p, (v, _)) in params.iter().zip(&args) {
@@ -1575,7 +1698,7 @@ impl<'a> FnEmit<'a> {
                 if let (Some(_), Some(slot)) =
                     (&self.gc_frame, self.slot_names[l.0 as usize].clone())
                 {
-                    let ty = mlir_type(&self.local_ty(*l), self.pw);
+                    let ty = mlir_type(&self.local_ty(*l), self.target);
                     let z = self.fresh_value();
                     let _ = writeln!(self.body, "    {z} = llvm.mlir.zero : {ty}");
                     let _ = writeln!(self.body, "    llvm.store {z}, {slot} : {ty}, !llvm.ptr");
@@ -1589,7 +1712,7 @@ impl<'a> FnEmit<'a> {
             } => {
                 let p = self.raw_addr(addr);
                 let v = self.materialize_operand(value, ty);
-                let t = mlir_type(ty, self.pw);
+                let t = mlir_type(ty, self.target);
                 let vol = if *volatile { "volatile " } else { "" };
                 let _ = writeln!(self.body, "    llvm.store {vol}{v}, {p} : {t}, !llvm.ptr");
             }
@@ -1607,7 +1730,7 @@ impl<'a> FnEmit<'a> {
                     let len = self.target.size_align(elem_ty).0;
                     self.emit_write_barrier(buf, &p, len);
                 }
-                let ty = mlir_type(elem_ty, self.pw);
+                let ty = mlir_type(elem_ty, self.target);
                 let _ = writeln!(self.body, "    llvm.store {v}, {p} : {ty}, !llvm.ptr");
             }
             Statement::HeapStore {
@@ -1631,7 +1754,7 @@ impl<'a> FnEmit<'a> {
             Statement::StaticStore { name, value, ty } => {
                 self.ensure_static_init(name);
                 let val = self.materialize_operand(value, ty);
-                let ty_str = mlir_type(ty, self.pw);
+                let ty_str = mlir_type(ty, self.target);
                 let addr = self.fresh_value();
                 let sym = self.pkgs.static_sym(name);
                 let _ = writeln!(
@@ -1658,7 +1781,7 @@ impl<'a> FnEmit<'a> {
             return;
         };
         let val = self.materialize_operand(value, elem_ty);
-        let elem_str = mlir_type(elem_ty, self.pw);
+        let elem_str = mlir_type(elem_ty, self.target);
         let (idx_int, from_str) = self.checked_index(index, len);
         let ptr = self.fresh_value();
         let _ = writeln!(
@@ -1677,7 +1800,7 @@ impl<'a> FnEmit<'a> {
             return;
         };
         let len = elements.len();
-        let elem_str = mlir_type(elem_ty, self.pw);
+        let elem_str = mlir_type(elem_ty, self.target);
         for (i, e) in elements.iter().enumerate() {
             let v = self.materialize_operand(e, elem_ty);
             let ptr = self.fresh_value();
@@ -1701,7 +1824,7 @@ impl<'a> FnEmit<'a> {
             Operand::Const(c) => const_ty(c),
         };
         let v = self.materialize_operand(index, &ty);
-        let ty_str = mlir_type(&ty, self.pw);
+        let ty_str = mlir_type(&ty, self.target);
         let in_range = const_int(index).is_some_and(|c| (0..i128::from(len)).contains(&c));
         if !in_range {
             let fail = self.cmp_const("uge", &v, i128::from(len), &ty_str);
@@ -1816,7 +1939,7 @@ impl<'a> FnEmit<'a> {
             RValue::BufAlloc { elem_ty, len } => self.emit_buf_alloc(elem_ty, len),
             RValue::RawLoad { addr, ty, volatile } => {
                 let p = self.raw_addr(addr);
-                let t = mlir_type(ty, self.pw);
+                let t = mlir_type(ty, self.target);
                 let v = self.fresh_value();
                 let vol = if *volatile { "volatile " } else { "" };
                 let _ = writeln!(self.body, "    {v} = llvm.load {vol}{p} : !llvm.ptr -> {t}");
@@ -1841,7 +1964,7 @@ impl<'a> FnEmit<'a> {
                 elem_ty,
             } => {
                 let p = self.buf_elem_addr(buf, index, elem_ty);
-                let ty = mlir_type(elem_ty, self.pw);
+                let ty = mlir_type(elem_ty, self.target);
                 let v = self.fresh_value();
                 let _ = writeln!(self.body, "    {v} = llvm.load {p} : !llvm.ptr -> {ty}");
                 v
@@ -1873,7 +1996,7 @@ impl<'a> FnEmit<'a> {
                     "    {obj} = llvm.inttoptr {p} : i{pw} to !llvm.ptr\n    {addr} = llvm.getelementptr {obj}[{HEADER_SIZE}] : (!llvm.ptr) -> !llvm.ptr, i8"
                 );
                 let dst = self.fresh_value();
-                let ty_str = mlir_type(ty, pw);
+                let ty_str = mlir_type(ty, self.target);
                 let _ = writeln!(
                     self.body,
                     "    {dst} = llvm.load {addr} : !llvm.ptr -> {ty_str}"
@@ -1882,7 +2005,7 @@ impl<'a> FnEmit<'a> {
             }
             RValue::StaticLoad { name, ty } => {
                 self.ensure_static_init(name);
-                let ty_str = mlir_type(ty, self.pw);
+                let ty_str = mlir_type(ty, self.target);
                 let addr = self.fresh_value();
                 let sym = self.pkgs.static_sym(name);
                 let _ = writeln!(
@@ -1911,10 +2034,9 @@ impl<'a> FnEmit<'a> {
         ty: &MirTy,
         regions: u32,
     ) -> String {
-        let pw = self.pw;
         let (vals, tys): (Vec<String>, Vec<String>) = args
             .iter()
-            .map(|(a, t)| (self.materialize_operand(a, t), mlir_type(t, pw)))
+            .map(|(a, t)| (self.materialize_operand(a, t), mlir_type(t, self.target)))
             .unzip();
         let attrs = if attrs.is_empty() {
             String::new()
@@ -1933,7 +2055,7 @@ impl<'a> FnEmit<'a> {
         let ret = if unit {
             "()".to_owned()
         } else {
-            mlir_type(ty, pw)
+            mlir_type(ty, self.target)
         };
         let v = self.fresh_value();
         let lhs = if unit {
@@ -1962,7 +2084,7 @@ impl<'a> FnEmit<'a> {
         }
         let obj = self.emit_gc_object(ty);
         let [addr, payload] = std::array::from_fn(|_| self.fresh_value());
-        let ty_str = mlir_type(ty, pw);
+        let ty_str = mlir_type(ty, self.target);
         let _ = write!(
             self.body,
             "    {addr} = llvm.inttoptr {obj} : i{pw} to !llvm.ptr
@@ -2037,7 +2159,8 @@ impl<'a> FnEmit<'a> {
         let pw = self.pw;
         let p = self.materialize_operand(ptr, &MirTy::GcRef);
         let field = struct_field_tys(ty)[index as usize].clone();
-        let ty_str = mlir_type(ty, pw);
+        let ty_str = mlir_type(ty, self.target);
+        let index = llvm_field(ty, index as usize, self.target);
         let [obj, payload, addr] = std::array::from_fn(|_| self.fresh_value());
         let _ = write!(
             self.body,
@@ -2046,7 +2169,7 @@ impl<'a> FnEmit<'a> {
     {addr} = llvm.getelementptr {payload}[0, {index}] : (!llvm.ptr) -> !llvm.ptr, {ty_str}
 "
         );
-        (addr, mlir_type(&field, pw))
+        (addr, mlir_type(&field, self.target))
     }
 
     /// The GC type id of `ty` objects (`array`: of buffers of `ty`
@@ -2081,14 +2204,36 @@ impl<'a> FnEmit<'a> {
         };
         let (size, align) = self.target.size_align(elem_ty);
         let align = align.max(8);
-        let [sz, hd, bytes, total, align_v, tid, obj] = std::array::from_fn(|_| self.fresh_value());
+        let [
+            sz,
+            hd,
+            bytes,
+            sum,
+            max_n,
+            ovf,
+            all,
+            total,
+            align_v,
+            tid,
+            obj,
+        ] = std::array::from_fn(|_| self.fresh_value());
         self.needs.insert("rok_gc_alloc_slow");
+        // `n * size + header` overflowing asks for `usize::MAX`, which the
+        // runtime rejects as too large. Constants print as signed `i{pw}`.
+        let umax = u64::MAX >> (64 - pw);
+        let limit = (umax - HEADER_SIZE as u64) / (size.max(1) as u64);
+        let signed = |v: u64| ((v << (64 - pw)) as i64) >> (64 - pw);
+        let (limit, all_v) = (signed(limit), signed(umax));
         let _ = write!(
             self.body,
             "    {sz} = arith.constant {size} : i{pw}
     {hd} = arith.constant {HEADER_SIZE} : i{pw}
     {bytes} = arith.muli {n}, {sz} : i{pw}
-    {total} = arith.addi {bytes}, {hd} : i{pw}
+    {sum} = arith.addi {bytes}, {hd} : i{pw}
+    {max_n} = arith.constant {limit} : i{pw}
+    {ovf} = arith.cmpi ugt, {n}, {max_n} : i{pw}
+    {all} = arith.constant {all_v} : i{pw}
+    {total} = arith.select {ovf}, {all}, {sum} : i{pw}
     {align_v} = arith.constant {align} : i{pw}
     {tid} = arith.constant {type_id} : i32
     {obj} = func.call @rok_gc_alloc_slow({total}, {align_v}, {tid}) : (i{pw}, i{pw}, i32) -> i{pw}
@@ -2122,9 +2267,8 @@ impl<'a> FnEmit<'a> {
         elem_ty: &MirTy,
         order: [&str; 2],
     ) -> String {
-        let pw = self.pw;
         let p = self.buf_elem_addr(buf, index, elem_ty);
-        let ty = mlir_type(elem_ty, pw);
+        let ty = mlir_type(elem_ty, self.target);
         let is_bool = ty == "i1";
         let at = if is_bool { "i8".to_owned() } else { ty };
         let align = self.target.size_align(elem_ty).0;
@@ -2232,7 +2376,7 @@ impl<'a> FnEmit<'a> {
                 ret.unwrap_or_else(|| "()".to_owned())
             )
         } else {
-            mlir_fn_signature(args, ret, self.pw)
+            mlir_fn_signature(args, ret, self.target)
         };
         let _ = writeln!(self.body, "    {typed} = func.constant @{name} : {sig}");
         let dst = self.fresh_value();
@@ -2259,14 +2403,14 @@ impl<'a> FnEmit<'a> {
             .collect();
         let arg_ty_list = arg_tys
             .iter()
-            .map(|t| mlir_type(t, self.pw))
+            .map(|t| mlir_type(t, self.target))
             .collect::<Vec<_>>()
             .join(", ");
         let arg_list = arg_vals.join(", ");
         let ret = if matches!(ret_ty, MirTy::Unit) {
             "()".to_owned()
         } else {
-            mlir_type(ret_ty, self.pw)
+            mlir_type(ret_ty, self.target)
         };
         if matches!(ret_ty, MirTy::Unit) {
             let _ = writeln!(
@@ -2296,7 +2440,7 @@ impl<'a> FnEmit<'a> {
         let slot = self.slot_names[array.0 as usize]
             .clone()
             .unwrap_or_default();
-        let elem_str = mlir_type(elem_ty, self.pw);
+        let elem_str = mlir_type(elem_ty, self.target);
         let (idx_int, from_str) = self.checked_index(index, len);
         let [ptr, dst] = std::array::from_fn(|_| self.fresh_value());
         let _ = write!(
@@ -2321,7 +2465,8 @@ impl<'a> FnEmit<'a> {
         let field_tys = struct_field_tys(struct_ty);
         let val_ty = field_tys.get(index as usize).cloned().unwrap_or(MirTy::Any);
         let v = self.materialize_operand(value, &val_ty);
-        let ty_str = mlir_type(struct_ty, self.pw);
+        let ty_str = mlir_type(struct_ty, self.target);
+        let index = llvm_field(struct_ty, index as usize, self.target);
         let dst = self.fresh_value();
         let _ = writeln!(
             self.body,
@@ -2338,8 +2483,8 @@ impl<'a> FnEmit<'a> {
     }
 
     fn cast_value(&mut self, v: String, from_ty: &MirTy, to_ty: &MirTy) -> String {
-        let from = mlir_type(from_ty, self.pw);
-        let to = mlir_type(to_ty, self.pw);
+        let from = mlir_type(from_ty, self.target);
+        let to = mlir_type(to_ty, self.target);
         if from == to {
             return v;
         }
@@ -2415,13 +2560,17 @@ impl<'a> FnEmit<'a> {
                 }
             }
             (false, true, true, false) => {
-                // float → int.
+                // float → int saturates, NaN → 0 (spec 2.11.6); plain
+                // `fptosi` is poison out of range.
                 let mn = if tp.is_signed_int() {
-                    "arith.fptosi"
+                    "fptosi"
                 } else {
-                    "arith.fptoui"
+                    "fptoui"
                 };
-                let _ = writeln!(self.body, "    {dst} = {mn} {v} : {from} to {to}");
+                let _ = writeln!(
+                    self.body,
+                    "    {dst} = llvm.call_intrinsic \"llvm.{mn}.sat.{to}.{from}\"({v}) : ({from}) -> {to}"
+                );
             }
             (true, false, false, true) => {
                 // int → float.
@@ -2463,13 +2612,16 @@ impl<'a> FnEmit<'a> {
         // out, it is the one unit value.
         if *from_ty == MirTy::Unit || *to_ty == MirTy::Unit {
             let n = self.fresh_value();
-            let to = mlir_type(to_ty, pw);
+            let to = mlir_type(to_ty, self.target);
             let _ = writeln!(self.body, "    {n} = llvm.mlir.zero : {to}");
             return n;
         }
         let (MirTy::Prim(fp), MirTy::Prim(tp)) = (from_ty, to_ty) else {
             // Byte-array union: store as one type, load as the other.
-            let (from, to) = (mlir_type(from_ty, pw), mlir_type(to_ty, pw));
+            let (from, to) = (
+                mlir_type(from_ty, self.target),
+                mlir_type(to_ty, self.target),
+            );
             let scratch = self
                 .union_scratch
                 .get(&from)
@@ -2526,7 +2678,7 @@ impl<'a> FnEmit<'a> {
     // Build a struct value by chaining `llvm.insertvalue` from zero (not
     // `undef`: a GC reference in an unset field must read as null).
     fn emit_struct_init(&mut self, ty: &MirTy, fields: &[Operand]) -> String {
-        let ty_str = mlir_type(ty, self.pw);
+        let ty_str = mlir_type(ty, self.target);
         let acc0 = self.fresh_value();
         let _ = writeln!(self.body, "    {acc0} = llvm.mlir.zero : {ty_str}");
         let field_tys = struct_field_tys(ty);
@@ -2538,6 +2690,7 @@ impl<'a> FnEmit<'a> {
             });
             let v = self.materialize_operand(f, &f_ty);
             let next = self.fresh_value();
+            let i = llvm_field(ty, i, self.target);
             let _ = writeln!(
                 self.body,
                 "    {next} = llvm.insertvalue {v}, {acc}[{i}] : {ty_str}"
@@ -2559,7 +2712,8 @@ impl<'a> FnEmit<'a> {
             Operand::Const(c) => const_ty(c),
         };
         let target_v = self.materialize_operand(target, &target_ty);
-        let target_ty_str = mlir_type(&target_ty, self.pw);
+        let target_ty_str = mlir_type(&target_ty, self.target);
+        let index = llvm_field(&target_ty, index as usize, self.target);
         let dst = self.fresh_value();
         let _ = writeln!(
             self.body,
@@ -2585,13 +2739,16 @@ impl<'a> FnEmit<'a> {
         }
         // Each argument at the callee's parameter type, so the operand
         // list matches the declaration.
-        let pw = self.pw;
         let arg_vals: Vec<String> = args
             .iter()
             .zip(&sig.params)
             .map(|(op, ty)| self.materialize_operand(op, ty))
             .collect();
-        let arg_tys: Vec<String> = sig.params.iter().map(|t| mlir_type(t, pw)).collect();
+        let arg_tys: Vec<String> = sig
+            .params
+            .iter()
+            .map(|t| mlir_type(t, self.target))
+            .collect();
         let (name, list, tys) = (&sig.name, arg_vals.join(", "), arg_tys.join(", "));
         if sig.ret == MirTy::Unit {
             let _ = write!(
@@ -2601,7 +2758,7 @@ impl<'a> FnEmit<'a> {
 "
             );
         } else {
-            let ret = mlir_type(&sig.ret, pw);
+            let ret = mlir_type(&sig.ret, self.target);
             let _ = writeln!(
                 self.body,
                 "    {dst} = func.call @{name}({list}) : ({tys}) -> {ret}"
@@ -2630,7 +2787,7 @@ impl<'a> FnEmit<'a> {
         let mut ops: Vec<String> = Vec::new();
         let mut op_tys: Vec<String> = Vec::new();
         let mut c_strs: Vec<(String, String)> = Vec::new();
-        let ret_mlir = mlir_type(ret, pw);
+        let ret_mlir = mlir_type(ret, self.target);
         let sret = if abi.ret == RetAbi::Sret {
             let slot = self.entry_alloca(&ret_mlir, self.target.size_align(ret).1);
             ops.push(slot.clone());
@@ -2646,22 +2803,22 @@ impl<'a> FnEmit<'a> {
                 (None, Operand::Const(c)) => const_ty(c),
             };
             let mut v = self.materialize_operand(op, &t);
-            if t == str_ty {
+            if t == str_ty && !abi.rok {
                 let p = self.fresh_value();
                 let _ = writeln!(
                     self.body,
                     "    {p} = func.call @rok_str_cstr({v}) : ({}) -> !llvm.ptr",
-                    mlir_type(&t, pw)
+                    mlir_type(&t, self.target)
                 );
                 self.needs.insert("rok_str_cstr");
                 c_strs.push((v, p.clone()));
                 v = p;
             }
-            let ty = mlir_type(&t, pw);
+            let ty = mlir_type(&t, self.target);
             match abi.args.get(i).unwrap_or(&ArgAbi::Direct) {
                 ArgAbi::Direct => {
                     ops.push(v);
-                    op_tys.push(c_type(&t, pw));
+                    op_tys.push(c_type(&t, self.target));
                 }
                 ArgAbi::Coerce(c) => {
                     // Store as the aggregate, reload as the coerced type.
@@ -2685,7 +2842,7 @@ impl<'a> FnEmit<'a> {
             }
         }
         let call_ret = match &abi.ret {
-            RetAbi::Direct if *ret != MirTy::Unit => Some(c_type(ret, pw)),
+            RetAbi::Direct if *ret != MirTy::Unit => Some(c_type(ret, self.target)),
             RetAbi::Coerce(c) => Some(c.clone()),
             _ => None,
         };
@@ -2700,6 +2857,12 @@ impl<'a> FnEmit<'a> {
         let lhs = res.as_ref().map(|r| format!("{r} = ")).unwrap_or_default();
         let rty = call_ret.clone().unwrap_or_else(|| "()".to_owned());
         let (list, tlist) = (ops.join(", "), op_tys.join(", "));
+        // A C call may block: the thread counts as `PARKED` meanwhile
+        // (804 §8.4.10), its GC references rooted in its frame (the
+        // arguments' locals die after the call). Runtime calls do not.
+        if !abi.rok {
+            self.emit_native_edge(true);
+        }
         match callee {
             Callee::Symbol(name) if abi.variadic => {
                 // The fixed part of the prototype: the hidden sret
@@ -2738,7 +2901,10 @@ impl<'a> FnEmit<'a> {
                 );
             }
         }
-        let s_ty = mlir_type(&str_ty, pw);
+        if !abi.rok {
+            self.emit_native_edge(false);
+        }
+        let s_ty = mlir_type(&str_ty, self.target);
         for (v, p) in &c_strs {
             let _ = writeln!(
                 self.body,
@@ -3008,7 +3174,7 @@ impl<'a> FnEmit<'a> {
     ) {
         let lhs_v = self.materialize_operand(lhs, op_ty);
         let rhs_v = self.materialize_operand(rhs, op_ty);
-        let ty = mlir_type(op_ty, self.pw);
+        let ty = mlir_type(op_ty, self.target);
         let MirTy::Prim(prim) = op_ty else {
             self.unsupported_at(&format!("binary `{op:?}` on `{ty}`"));
             return;
@@ -3047,7 +3213,7 @@ impl<'a> FnEmit<'a> {
         operand: &Operand,
     ) {
         let v = self.materialize_operand(operand, op_ty);
-        let ty = mlir_type(op_ty, self.pw);
+        let ty = mlir_type(op_ty, self.target);
         let MirTy::Prim(prim) = op_ty else {
             let _ = dst_ty;
             self.unsupported_at(&format!("unary `{op:?}` on `{ty}`"));
@@ -3114,7 +3280,7 @@ impl<'a> FnEmit<'a> {
     }
 
     fn emit_const_assign(&mut self, dst: &str, dst_ty: &MirTy, c: &ConstVal) {
-        let ty = mlir_type(dst_ty, self.pw);
+        let ty = mlir_type(dst_ty, self.target);
         match c {
             // Numeric literals take the destination's type when it is
             // numeric (`g(3)` with an `i64` param, `let x: i64 = 3`);
@@ -3219,7 +3385,7 @@ impl<'a> FnEmit<'a> {
             Terminator::Return(Some(op)) => {
                 let val = self.materialize_operand(op, &self.f.ret_ty.clone());
                 self.emit_gc_frame_pop();
-                let ty = mlir_type(&self.f.ret_ty, self.pw);
+                let ty = mlir_type(&self.f.ret_ty, self.target);
                 let _ = writeln!(self.body, "    func.return {val} : {ty}");
             }
             Terminator::Goto { target, args } => {
@@ -3261,7 +3427,7 @@ impl<'a> FnEmit<'a> {
                     Operand::Const(c) => const_ty(c),
                 };
                 let v = self.materialize_operand(a, &ty);
-                (v, mlir_type(&ty, self.pw))
+                (v, mlir_type(&ty, self.target))
             })
             .collect();
         let vals: Vec<String> = parts.iter().map(|(v, _)| v.clone()).collect();
@@ -3286,7 +3452,7 @@ impl<'a> FnEmit<'a> {
                     Operand::Const(c) => const_ty(c),
                 };
                 let v = self.materialize_operand(a, &ty);
-                (v, mlir_type(&ty, self.pw))
+                (v, mlir_type(&ty, self.target))
             })
             .collect();
         let vals: Vec<String> = parts.iter().map(|(v, _)| v.clone()).collect();
@@ -3302,9 +3468,8 @@ impl<'a> FnEmit<'a> {
                 // (e.g. an `i32` local passed to an `i64` parameter) gets
                 // an explicit conversion rather than ill-typed IR.
                 let from = self.local_ty(*id);
-                let pw = self.pw;
                 if matches!((&from, ty), (MirTy::Prim(_), MirTy::Prim(_)))
-                    && mlir_type(&from, pw) != mlir_type(ty, pw)
+                    && mlir_type(&from, self.target) != mlir_type(ty, self.target)
                 {
                     return self.cast_value(v, &from, ty);
                 }
@@ -3330,17 +3495,36 @@ impl<'a> FnEmit<'a> {
 /// returning `()` returns nothing instead (`mlir_fn_signature`).
 const UNIT_TY: &str = "!llvm.struct<()>";
 
-fn mlir_type(ty: &MirTy, pointer_width: u32) -> String {
+fn mlir_type(ty: &MirTy, target: &Target) -> String {
+    let pointer_width = target.pointer_width;
     match ty {
         MirTy::Unit => UNIT_TY.to_owned(),
         MirTy::Prim(p) => mlir_prim(*p, pointer_width),
         MirTy::Any | MirTy::GcRef => format!("i{pointer_width}"),
         MirTy::Tuple(parts) | MirTy::Struct(_, parts) => {
-            let inner: Vec<String> = parts.iter().map(|t| mlir_type(t, pointer_width)).collect();
-            format!("!llvm.struct<({})>", inner.join(", "))
+            let inner: Vec<String> = parts.iter().map(|t| mlir_type(t, target)).collect();
+            if !target.explicit_layout(ty) {
+                return format!("!llvm.struct<({})>", inner.join(", "));
+            }
+            // A packed LLVM struct with explicit `[k x i8]` padding, so
+            // LLVM's offsets, size and array stride are ours.
+            let (offsets, size) = (target.field_offsets(ty), target.size_align(ty).0);
+            let mut items = Vec::new();
+            let mut at = 0;
+            for ((t, p), off) in inner.into_iter().zip(parts).zip(offsets) {
+                if off > at {
+                    items.push(format!("!llvm.array<{} x i8>", off - at));
+                }
+                items.push(t);
+                at = off + target.size_align(p).0;
+            }
+            if size > at {
+                items.push(format!("!llvm.array<{} x i8>", size - at));
+            }
+            format!("!llvm.struct<packed ({})>", items.join(", "))
         }
         MirTy::Array(elem, n) => {
-            format!("!llvm.array<{n} x {}>", mlir_type(elem, pointer_width))
+            format!("!llvm.array<{n} x {}>", mlir_type(elem, target))
         }
         MirTy::Union(_, n) => format!("!llvm.array<{n} x i{pointer_width}>"),
         // Function values are opaque pointers inside aggregates; each
@@ -3348,6 +3532,40 @@ fn mlir_type(ty: &MirTy, pointer_width: u32) -> String {
         MirTy::Fn(_, _) => "!llvm.ptr".to_owned(),
         MirTy::Mlir(t) => t.clone(),
     }
+}
+
+/// The alignment attribute of a stack slot of `ty`: an explicit layout
+/// is a packed LLVM struct, whose own alignment is 1.
+fn slot_align(ty: &MirTy, target: &Target) -> String {
+    if target.explicit_layout(ty) {
+        format!(" {{alignment = {} : i64}}", target.size_align(ty).1.max(8))
+    } else {
+        String::new()
+    }
+}
+
+/// LLVM field index of field `i` of struct / tuple `ty`: an explicit
+/// layout (`mlir_type`) puts padding fields in between.
+fn llvm_field(ty: &MirTy, i: usize, target: &Target) -> usize {
+    let (MirTy::Tuple(ps) | MirTy::Struct(_, ps)) = ty else {
+        return i;
+    };
+    if !target.explicit_layout(ty) {
+        return i;
+    }
+    let mut at = 0;
+    let mut k = 0;
+    for (j, (t, off)) in ps.iter().zip(target.field_offsets(ty)).enumerate() {
+        if off > at {
+            k += 1;
+        }
+        if j == i {
+            break;
+        }
+        k += 1;
+        at = off + target.size_align(t).0;
+    }
+    k
 }
 
 /// A C signature's lowered parameters `(MLIR type, attributes)` (a
@@ -3358,27 +3576,26 @@ fn c_signature(
     abi: &FnAbi,
     target: &Target,
 ) -> (Vec<(String, String)>, Option<String>) {
-    let pw = target.pointer_width;
     let mut out = Vec::new();
     if abi.ret == RetAbi::Sret {
         out.push((
             "!llvm.ptr".to_owned(),
             format!(
                 " {{llvm.sret = {}, llvm.align = {} : i64}}",
-                mlir_type(ret, pw),
+                mlir_type(ret, target),
                 target.size_align(ret).1
             ),
         ));
     }
     for (t, a) in params.iter().zip(&abi.args) {
         out.push(match a {
-            ArgAbi::Direct => (c_type(t, pw), c_ext_attr(t).to_owned()),
+            ArgAbi::Direct => (c_type(t, target), c_ext_attr(t, target).to_owned()),
             ArgAbi::Coerce(c) => (c.clone(), String::new()),
             ArgAbi::Indirect { byval: true } => (
                 "!llvm.ptr".to_owned(),
                 format!(
                     " {{llvm.byval = {}, llvm.align = {} : i64}}",
-                    mlir_type(t, pw),
+                    mlir_type(t, target),
                     target.size_align(t).1.max(8)
                 ),
             ),
@@ -3386,44 +3603,63 @@ fn c_signature(
         });
     }
     let ret = match &abi.ret {
-        RetAbi::Direct if *ret != MirTy::Unit => Some(c_type(ret, pw)),
+        RetAbi::Direct if *ret != MirTy::Unit => Some(c_type(ret, target)),
         RetAbi::Coerce(c) => Some(c.clone()),
         _ => None,
     };
     (out, ret)
 }
 
-/// Caller-side extension of a narrow integer C parameter: Apple arm64
-/// and `x86_64` callees (clang) assume it (`signext` / `zeroext`).
-/// `c_char` is taken as signed everywhere (Linux aarch64's is unsigned;
-/// only values above 127 see the difference).
-const fn c_ext_attr(ty: &MirTy) -> &'static str {
+/// Extension of a narrow integer C parameter (by the caller) or result
+/// (by the callee) where the platform ABI has it, as clang marks it:
+/// `x86_64` System V, Apple arm64 and the other targets extend `i8` /
+/// `i16` / `bool` (`c_char` signed), Windows x64 only `bool`, AAPCS64
+/// elsewhere nothing (the upper bits are unspecified).
+fn c_ext_attr(ty: &MirTy, target: &Target) -> &'static str {
+    let narrow = match target.c_abi {
+        CAbi::Aarch64 => matches!(target.os.as_str(), "macos" | "ios"),
+        CAbi::X86_64Win => false,
+        CAbi::X86_64SysV | CAbi::Other => true,
+    };
     match ty {
-        MirTy::Prim(PrimTy::I8 | PrimTy::I16 | PrimTy::CChar) => " {llvm.signext}",
-        MirTy::Prim(PrimTy::U8 | PrimTy::U16 | PrimTy::Bool) => " {llvm.zeroext}",
+        MirTy::Prim(PrimTy::I8 | PrimTy::I16 | PrimTy::CChar) if narrow => " {llvm.signext}",
+        MirTy::Prim(PrimTy::U8 | PrimTy::U16) if narrow => " {llvm.zeroext}",
+        MirTy::Prim(PrimTy::Bool) if narrow || target.c_abi == CAbi::X86_64Win => " {llvm.zeroext}",
         _ => "",
     }
 }
 
+/// ` -> T` of a C declaration / definition, with the result's extension.
+fn c_ret_arrow(ret: Option<&str>, ret_ty: &MirTy, abi: Option<&FnAbi>, target: &Target) -> String {
+    let Some(r) = ret else {
+        return String::new();
+    };
+    let direct = abi.is_none_or(|a| a.ret == RetAbi::Direct);
+    match c_ext_attr(ret_ty, target) {
+        a if direct && !a.is_empty() => format!(" -> ({r}{a})"),
+        _ => format!(" -> {r}"),
+    }
+}
+
 /// `mlir_type` as C sees it: `str` is a `char*`.
-fn c_type(ty: &MirTy, pointer_width: u32) -> String {
+fn c_type(ty: &MirTy, target: &Target) -> String {
     if *ty == MirTy::Prim(PrimTy::Str) {
         return "!llvm.ptr".to_owned();
     }
-    mlir_type(ty, pointer_width)
+    mlir_type(ty, target)
 }
 
 /// `(args) -> ret` for `func.constant` and call sites.
-fn mlir_fn_signature(args: &[MirTy], ret: &MirTy, pointer_width: u32) -> String {
+fn mlir_fn_signature(args: &[MirTy], ret: &MirTy, target: &Target) -> String {
     let arg_list = args
         .iter()
-        .map(|t| mlir_type(t, pointer_width))
+        .map(|t| mlir_type(t, target))
         .collect::<Vec<_>>()
         .join(", ");
     let ret_str = if matches!(ret, MirTy::Unit) {
         "()".to_owned()
     } else {
-        mlir_type(ret, pointer_width)
+        mlir_type(ret, target)
     };
     format!("({arg_list}) -> {ret_str}")
 }
@@ -3677,8 +3913,8 @@ fn format_float_decimal(v: f64) -> String {
 /// Render a scalar `ConstVal` as the attribute body of an
 /// `llvm.mlir.global`, typed at the static's declared type. `None` for
 /// shapes with no attribute form.
-fn format_const_attr(v: &ConstVal, ty: &MirTy, pointer_width: u32) -> Option<String> {
-    let ty_str = mlir_type(ty, pointer_width);
+fn format_const_attr(v: &ConstVal, ty: &MirTy, target: &Target) -> Option<String> {
+    let ty_str = mlir_type(ty, target);
     let MirTy::Prim(p) = ty else { return None };
     Some(match v {
         ConstVal::Int { value, .. } if p.is_int() => format!("{value} : {ty_str}"),

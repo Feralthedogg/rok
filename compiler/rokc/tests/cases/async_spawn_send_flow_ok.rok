@@ -72,3 +72,5 @@ let consumed = task::spawn(async {
 });
 
 println(f"param {await a}, field {await b}, helper {await c}, list {list}, local {await l}, nested {await nested}, consumed {await consumed}, pinned {await task::spawn_local(pinned())}");
+
+// spec: 004.12-async

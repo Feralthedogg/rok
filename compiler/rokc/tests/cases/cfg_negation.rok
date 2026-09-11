@@ -11,3 +11,5 @@ fn excluded() -> i32 { 0i32 }   // would shadow if `foo` were set
 fn main() -> i32 {
     return excluded();
 }
+
+// spec: 006.03-cfg

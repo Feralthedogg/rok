@@ -37,3 +37,5 @@ let n = Box::new(7);
 println(f"{n.twice()}");
 let pl = Plain { n: 1 };
 println(f"{pl.with(8)}");
+
+// spec: 002.10-generics

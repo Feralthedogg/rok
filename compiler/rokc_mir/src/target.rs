@@ -42,6 +42,9 @@ pub struct Target {
     /// LLVM `target datalayout`, filled by the driver when the toolchain
     /// can tell (needed only to emit LLVM IR).
     pub data_layout: Option<String>,
+    /// `#[repr(..)]` of the structs that have one, by `StructId` (MIR
+    /// lowering fills it from the HIR module).
+    pub reprs: std::sync::Arc<std::collections::BTreeMap<u32, rokc_hir::Repr>>,
 }
 
 impl Default for Target {
@@ -99,6 +102,63 @@ impl Target {
             os: os.to_owned(),
             arch: arch.to_owned(),
             data_layout: None,
+            reprs: std::sync::Arc::default(),
+        }
+    }
+
+    /// `#[repr(..)]` of struct `id` (the default without one).
+    #[must_use]
+    pub fn repr(&self, id: rokc_hir::StructId) -> rokc_hir::Repr {
+        self.reprs.get(&id.0).copied().unwrap_or_default()
+    }
+
+    /// Byte offset of each field of a struct / tuple `ps`, then its
+    /// size and alignment: C's layout, or `#[repr(packed)]` (no padding,
+    /// alignment 1) / `#[repr(align(N))]` (at least `N`) of struct `id`.
+    #[must_use]
+    pub fn fields_layout(
+        &self,
+        id: Option<rokc_hir::StructId>,
+        ps: &[MirTy],
+    ) -> (Vec<u32>, u32, u32) {
+        let repr = id.map(|id| self.repr(id)).unwrap_or_default();
+        let mut offsets = Vec::with_capacity(ps.len());
+        let (mut size, mut align) = (0u32, 1);
+        for t in ps {
+            let (s, a) = self.size_align(t);
+            let a = if repr.packed { 1 } else { a };
+            size = size.next_multiple_of(a);
+            offsets.push(size);
+            size += s;
+            align = align.max(a);
+        }
+        let align = align.max(repr.align);
+        (offsets, size.next_multiple_of(align), align)
+    }
+
+    /// `fields_layout` of a struct / tuple type; empty for others.
+    #[must_use]
+    pub fn field_offsets(&self, ty: &MirTy) -> Vec<u32> {
+        match ty {
+            MirTy::Tuple(ps) => self.fields_layout(None, ps).0,
+            MirTy::Struct(id, ps) => self.fields_layout(Some(*id), ps).0,
+            _ => Vec::new(),
+        }
+    }
+
+    /// `ty`'s layout is not the one LLVM gives its natural type (a
+    /// `packed` / `align(N)` struct, or an aggregate holding one): it is
+    /// emitted as a packed LLVM struct with explicit padding.
+    #[must_use]
+    pub fn explicit_layout(&self, ty: &MirTy) -> bool {
+        match ty {
+            MirTy::Struct(id, ps) => {
+                let r = self.repr(*id);
+                r.packed || r.align != 0 || ps.iter().any(|p| self.explicit_layout(p))
+            }
+            MirTy::Tuple(ps) => ps.iter().any(|p| self.explicit_layout(p)),
+            MirTy::Array(e, _) => self.explicit_layout(e),
+            _ => false,
         }
     }
 
@@ -131,14 +191,13 @@ impl Target {
             // one asks, and gets a word.
             MirTy::Any | MirTy::GcRef | MirTy::Fn(_, _) | MirTy::Mlir(_) => word,
             MirTy::Union(_, n) => (word.0 * n, word.1),
-            MirTy::Tuple(ps) | MirTy::Struct(_, ps) => {
-                let (mut size, mut align) = (0u32, 1);
-                for t in ps {
-                    let (s, a) = self.size_align(t);
-                    size = size.next_multiple_of(a) + s;
-                    align = align.max(a);
-                }
-                (size.next_multiple_of(align), align)
+            MirTy::Tuple(ps) => {
+                let (_, size, align) = self.fields_layout(None, ps);
+                (size, align)
+            }
+            MirTy::Struct(id, ps) => {
+                let (_, size, align) = self.fields_layout(Some(*id), ps);
+                (size, align)
             }
             MirTy::Array(t, n) => {
                 let (s, a) = self.size_align(t);
@@ -190,12 +249,8 @@ impl Target {
                 );
             }
             MirTy::Tuple(ps) | MirTy::Struct(_, ps) => {
-                let mut off = 0u32;
-                for t in ps {
-                    let (s, a) = self.size_align(t);
-                    off = off.next_multiple_of(a);
+                for (t, off) in ps.iter().zip(self.field_offsets(ty)) {
                     self.gc_offsets(t, at + off, out);
-                    off += s;
                 }
             }
             MirTy::Array(t, n) => {

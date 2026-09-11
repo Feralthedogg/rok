@@ -100,25 +100,27 @@ fn no_result(t: TaskRef) -> bool {
 
 /// Schedule `t` to be polled (`Waker::wake`); safe from any thread.
 pub fn wake_task(t: TaskRef) {
-    if t.state[3] != 0 {
-        if atomic_load(t.state, 0, SeqCst) != DONE {
-            t.up[0].wake();
-        }
-        return;
-    }
-    loop {
-        let s = atomic_load(t.state, 0, SeqCst);
-        if s == IDLE {
-            if atomic_cas(t.state, 0, IDLE, SCHEDULED, SeqCst, SeqCst) == IDLE {
-                schedule(t);
-                return;
+    unsafe {
+        if t.state[3] != 0 {
+            if atomic_load(t.state, 0, SeqCst) != DONE {
+                t.up[0].wake();
             }
-        } else if s == RUNNING {
-            if atomic_cas(t.state, 0, RUNNING, NOTIFIED, SeqCst, SeqCst) == RUNNING {
-                return;
-            }
-        } else {
             return;
+        }
+        loop {
+            let s = atomic_load(t.state, 0, SeqCst);
+            if s == IDLE {
+                if atomic_cas(t.state, 0, IDLE, SCHEDULED, SeqCst, SeqCst) == IDLE {
+                    schedule(t);
+                    return;
+                }
+            } else if s == RUNNING {
+                if atomic_cas(t.state, 0, RUNNING, NOTIFIED, SeqCst, SeqCst) == RUNNING {
+                    return;
+                }
+            } else {
+                return;
+            }
         }
     }
 }
@@ -137,30 +139,32 @@ fn join_later(t: TaskRef, waiter: Waker) -> bool {
 }
 
 fn finish(t: TaskRef) {
-    // Its parking entries go first (a cancelled task left its `await`
-    // without the wake it waited for): a joiner that sees it done sees
-    // none of them.
-    unpark_task(t);
-    let ws: List<Waker> = List::new();
-    using g = t.joiners.lock() {
-        atomic_xchg(t.state, 0, DONE, SeqCst);
-        ws = g.get();
-        g.set(List::new());
-    }
-    // The finished future (its frame) is no longer reachable from here.
-    t.poll[0] = |ctx: Context| -> bool { true };
-    // A cancelled task's timers (a done task's no longer count).
-    if is_cancelled(t) && atomic_load(t.state, 2, SeqCst) != 0 {
-        remove_timers(t);
-    }
-    for w in ws {
-        w.wake();
-    }
-    // `help_until` or the task's home worker may be waiting on it.
-    let pool = executor();
-    pool.wake_helpers();
-    if let h: Worker = t.home[0] {
-        wake_worker(h);
+    unsafe {
+        // Its parking entries go first (a cancelled task left its `await`
+        // without the wake it waited for): a joiner that sees it done sees
+        // none of them.
+        unpark_task(t);
+        let ws: List<Waker> = List::new();
+        using g = t.joiners.lock() {
+            atomic_xchg(t.state, 0, DONE, SeqCst);
+            ws = g.get();
+            g.set(List::new());
+        }
+        // The finished future (its frame) is no longer reachable from here.
+        t.poll[0] = |ctx: Context| -> bool { true };
+        // A cancelled task's timers (a done task's no longer count).
+        if is_cancelled(t) && atomic_load(t.state, 2, SeqCst) != 0 {
+            remove_timers(t);
+        }
+        for w in ws {
+            w.wake();
+        }
+        // `help_until` or the task's home worker may be waiting on it.
+        let pool = executor();
+        pool.wake_helpers();
+        if let h: Worker = t.home[0] {
+            wake_worker(h);
+        }
     }
 }
 
@@ -234,8 +238,7 @@ unsafe impl Sync for Pool {}
 /// A thread running tasks: a pool thread, or a guest (`block_on`).
 pub struct Worker {
     pool: Pool;
-    /// Its position in `pool.workers` (where its steals start); 0 for a
-    /// guest.
+    /// Its position in `pool.workers`; 0 for a guest.
     index: usize;
     /// A guest's deque is never used: its spawns go to the injector.
     guest: bool;
@@ -248,66 +251,95 @@ pub struct Worker {
     sleep: GcBuf<i32>;
     /// The task it is polling (`task::id`).
     running: GcBuf<TaskRef | none>;
+    /// xorshift state: where its steals start (spec 7.6.4).
+    seed: GcBuf<u64>;
 }
 
 fn new_worker(pool: Pool, index: usize, guest: bool) -> Worker {
-    Worker {
-        pool,
-        index,
-        guest,
-        local: queue_new(),
-        deque: unsafe { rok_deque_new() },
-        stolen: buf_new(1),
-        sleep: buf_new(1),
-        running: buf_new(1),
+    unsafe {
+        Worker {
+            pool,
+            index,
+            guest,
+            local: queue_new(),
+            deque: rok_deque_new(),
+            stolen: buf_new(1),
+            sleep: buf_new(1),
+            running: buf_new(1),
+            seed: seed_new(index),
+        }
+    }
+}
+
+fn seed_new(index: usize) -> GcBuf<u64> {
+    unsafe {
+        let s: GcBuf<u64> = buf_new(1);
+        s[0] = (index as u64 + 1).wrapping_mul(0x9E3779B97F4A7C15u64);
+        s
+    }
+}
+
+/// The next pseudo-random number of `w`'s xorshift.
+fn next_rand(w: Worker) -> u64 {
+    unsafe {
+        let x = w.seed[0];
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        w.seed[0] = x;
+        x
     }
 }
 
 // Started by the first `executor()`, not by a static initializer:
 // every static is compiled into every program, the executor only into
 // those that reach it.
-static EXEC: GcBuf<Pool> = buf_new(1);
+static EXEC: GcBuf<Pool> = unsafe { buf_new(1) };
 static EXEC_STARTED: Once = Once::new();
 
 /// The executor, started on first use.
 fn executor() -> Pool {
-    if !EXEC_STARTED.is_completed() {
-        EXEC_STARTED.call_once(|| { EXEC[0] = Pool::start(); });
+    unsafe {
+        if !EXEC_STARTED.is_completed() {
+            EXEC_STARTED.call_once(|| { EXEC[0] = Pool::start(); });
+        }
+        EXEC[0]
     }
-    EXEC[0]
 }
 
 impl Pool {
     fn start() -> Pool {
-        let pool = Pool {
-            workers: List::new(),
-            injector: queue_new(),
-            timers: Mutex::new(BinaryHeap::by(|a: Timer, b: Timer| a.at < b.at)),
-            dead: buf_new(1),
-            signal: buf_new(3),
-            no_up: buf_new(0),
-            no_home: buf_new(1),
-            driver: Once::new(),
-            blocking: BlockingPool::new(),
-        };
-        let n = unsafe { rok_cpu_count() };
-        for i in 0..n {
-            pool.workers.push(new_worker(pool, i, false));
-        }
-        unsafe { rok_task_hooks_install(hook_io, hook_timer, hook_park, hook_unpark) };
-        for w in pool.workers {
-            let me = w;
-            let body: fn() + Send = || {
-                set_current(me);
-                work(me, none);
+        unsafe {
+            let pool = Pool {
+                workers: List::new(),
+                injector: queue_new(),
+                timers: Mutex::new(BinaryHeap::by(|a: Timer, b: Timer| a.at < b.at)),
+                dead: buf_new(1),
+                signal: buf_new(3),
+                no_up: buf_new(0),
+                no_home: buf_new(1),
+                driver: Once::new(),
+                blocking: BlockingPool::new(),
             };
-            let h = unsafe { rok_thread_spawn(body, 0, rok_thread_new_id()) };
-            if h == 0 {
-                panic("task executor: cannot start a worker thread");
+            let n = rok_cpu_count();
+            for i in 0..n {
+                pool.workers.push(new_worker(pool, i, false));
             }
-            unsafe { rok_thread_detach(h) };
+            rok_task_hooks_install(hook_io, hook_timer, hook_park, hook_unpark);
+            for w in pool.workers {
+                let me = w;
+                let body: fn() + Send = || {
+                    set_current(me);
+                    work(me, none);
+                };
+                let h = unsafe { rok_thread_spawn(body, 0, rok_thread_new_id()) };
+                if h == 0 {
+                    panic("task executor: cannot start a worker thread");
+                }
+                unsafe { rok_thread_detach(h) };
+            }
+            pool
         }
-        pool
     }
 
     /// Number of pool threads.
@@ -346,10 +378,12 @@ fn wake_worker(w: Worker) -> bool {
 }
 
 fn current() -> Worker | none {
-    if unsafe { rok_task_worker_present() } == 0 {
-        return none;
+    unsafe {
+        if rok_task_worker_present() == 0 {
+            return none;
+        }
+        (rok_task_worker_get())[0]
     }
-    (unsafe { rok_task_worker_get() })[0]
 }
 
 fn current_worker() -> Worker {
@@ -357,39 +391,45 @@ fn current_worker() -> Worker {
 }
 
 fn set_current(w: Worker) {
-    let cell: GcBuf<Worker> = buf_new(1);
-    cell[0] = w;
-    unsafe { rok_task_worker_set(cell) };
+    unsafe {
+        let cell: GcBuf<Worker> = buf_new(1);
+        cell[0] = w;
+        rok_task_worker_set(cell);
+    }
 }
 
 fn schedule(t: TaskRef) {
-    let pool = executor();
-    if let h: Worker = t.home[0] {
-        push(h.local, t);
-        wake_worker(h);
-        pool.wake_helpers();
-        return;
+    unsafe {
+        let pool = executor();
+        if let h: Worker = t.home[0] {
+            push(h.local, t);
+            wake_worker(h);
+            pool.wake_helpers();
+            return;
+        }
+        match current() {
+            // Only the owner pushes to its deque.
+            w: Worker => if w.guest {
+                push(pool.injector, t);
+            } else {
+                let boxed: GcBuf<TaskRef> = buf_new(1);
+                boxed[0] = t;
+                rok_deque_push(w.deque, boxed);
+            },
+            none => push(pool.injector, t),
+        }
+        pool.notify();
     }
-    match current() {
-        // Only the owner pushes to its deque.
-        w: Worker => if w.guest {
-            push(pool.injector, t);
-        } else {
-            let boxed: GcBuf<TaskRef> = buf_new(1);
-            boxed[0] = t;
-            unsafe { rok_deque_push(w.deque, boxed) };
-        },
-        none => push(pool.injector, t),
-    }
-    pool.notify();
 }
 
 /// The oldest task of deque `d`, for `w`.
 fn steal(w: Worker, d: GcBuf<GcBuf<TaskRef>>) -> TaskRef | none {
-    if unsafe { rok_deque_steal(d, w.stolen, 0) } == 0 {
-        return none;
+    unsafe {
+        if rok_deque_steal(d, w.stolen, 0) == 0 {
+            return none;
+        }
+        w.stolen[0][0]
     }
-    w.stolen[0][0]
 }
 
 /// The next task for `w`: its local queue, its deque, the injector,
@@ -407,9 +447,12 @@ fn find_task(w: Worker) -> TaskRef | none {
     if let t: TaskRef = pop_front(pool.injector) {
         return t;
     }
+    // Victims round-robin from a random one (spec 7.6.4), so idle
+    // workers do not all hit the same deque first.
     let n = pool.workers();
+    let start = (next_rand(w) % n as u64) as usize;
     for k in 0..n {
-        let other = pool.workers[(w.index + k) % n];
+        let other = pool.workers[(start + k) % n];
         if !buf_same(other.deque, w.deque) {
             if let t: TaskRef = steal(w, other.deque) {
                 return t;
@@ -421,32 +464,34 @@ fn find_task(w: Worker) -> TaskRef | none {
 
 /// Poll `t` on `w`.
 fn run(t: TaskRef, w: Worker) {
-    if atomic_cas(t.state, 0, SCHEDULED, RUNNING, SeqCst, SeqCst) != SCHEDULED {
-        return;
-    }
-    // A cancelled task is polled once more: its `await` sees the flag
-    // and leaves the body through its cleanups. Only a poll that began
-    // after the cancel saw the flag; one cancelled while it ran (`cancel`
-    // then marks it NOTIFIED) is polled again below, else the task would
-    // finish without running its `finally` / `using` cleanups.
-    let cancelled = is_cancelled(t);
-    let poll = t.poll[0];
-    let ctx = Context::from_waker(Waker { task: t });
-    // `help_until` runs tasks inside a task's poll: restore the outer one.
-    let outer = w.running[0];
-    w.running[0] = t;
-    let ready = poll(ctx);
-    w.running[0] = outer;
-    if ready || cancelled {
-        if !ready {
-            // Ended without a result (no cancellation point reached).
-            atomic_xchg(t.state, 4, 1, SeqCst);
+    unsafe {
+        if atomic_cas(t.state, 0, SCHEDULED, RUNNING, SeqCst, SeqCst) != SCHEDULED {
+            return;
         }
-        finish(t);
-    } else if atomic_cas(t.state, 0, RUNNING, IDLE, SeqCst, SeqCst) != RUNNING {
-        // Woken while it ran.
-        atomic_xchg(t.state, 0, SCHEDULED, SeqCst);
-        schedule(t);
+        // A cancelled task is polled once more: its `await` sees the flag
+        // and leaves the body through its cleanups. Only a poll that began
+        // after the cancel saw the flag; one cancelled while it ran (`cancel`
+        // then marks it NOTIFIED) is polled again below, else the task would
+        // finish without running its `finally` / `using` cleanups.
+        let cancelled = is_cancelled(t);
+        let poll = t.poll[0];
+        let ctx = Context::from_waker(Waker { task: t });
+        // `help_until` runs tasks inside a task's poll: restore the outer one.
+        let outer = w.running[0];
+        w.running[0] = t;
+        let ready = poll(ctx);
+        w.running[0] = outer;
+        if ready || cancelled {
+            if !ready {
+                // Ended without a result (no cancellation point reached).
+                atomic_xchg(t.state, 4, 1, SeqCst);
+            }
+            finish(t);
+        } else if atomic_cas(t.state, 0, RUNNING, IDLE, SeqCst, SeqCst) != RUNNING {
+            // Woken while it ran.
+            atomic_xchg(t.state, 0, SCHEDULED, SeqCst);
+            schedule(t);
+        }
     }
 }
 
@@ -470,23 +515,27 @@ pub fn cancel_requested(ctx: Context) -> bool {
 /// hand-written future handed over (a message, a guard) is kept when the
 /// cancel lands meanwhile — the next cancellation point leaves.
 pub fn unwinding(ctx: Context) -> bool {
-    let t = ctx.waker.task;
-    if atomic_load(t.state, 4, SeqCst) != 0 {
-        return true;
+    unsafe {
+        let t = ctx.waker.task;
+        if atomic_load(t.state, 4, SeqCst) != 0 {
+            return true;
+        }
+        t.state[3] != 0 && unwinding(Context::from_waker(t.up[0]))
     }
-    t.state[3] != 0 && unwinding(Context::from_waker(t.up[0]))
 }
 
 /// The cancelled task `t` answers to: itself, or (a `select` proxy) its
 /// parent's chain.
 fn cancel_source(t: TaskRef) -> TaskRef | none {
-    if atomic_load(t.state, 1, SeqCst) != 0 {
-        return t;
+    unsafe {
+        if atomic_load(t.state, 1, SeqCst) != 0 {
+            return t;
+        }
+        if t.state[3] == 0 {
+            return none;
+        }
+        cancel_source(t.up[0].task)
     }
-    if t.state[3] == 0 {
-        return none;
-    }
-    cancel_source(t.up[0].task)
 }
 
 /// Wake every due timer; the nanoseconds to the next one (-1: none).
@@ -546,13 +595,15 @@ fn add_timer(deadline: i64, w: Waker) {
 /// half the heap, one O(heap) sweep drops every finished task's timers
 /// (amortized O(1) per cancel).
 fn remove_timers(t: TaskRef) {
-    let pool = executor();
-    using g = pool.timers.lock() {
-        let heap = g.get();
-        pool.dead[0] += 1;
-        if pool.dead[0] * 2 >= heap.len() {
-            heap.retain(|tm: Timer| !is_done(tm.who.task));
-            pool.dead[0] = 0;
+    unsafe {
+        let pool = executor();
+        using g = pool.timers.lock() {
+            let heap = g.get();
+            pool.dead[0] += 1;
+            if pool.dead[0] * 2 >= heap.len() {
+                heap.retain(|tm: Timer| !is_done(tm.who.task));
+                pool.dead[0] = 0;
+            }
         }
     }
 }
@@ -616,44 +667,48 @@ fn work(w: Worker, main: TaskRef | none) {
 }
 
 fn new_task(poll: fn(Context) -> bool, local: Worker | none) -> TaskRef {
-    let pool = executor();
-    let home = pool.no_home;
-    if let w: Worker = local {
-        home = buf_new(1);
-        home[0] = w;
+    unsafe {
+        let pool = executor();
+        let home = pool.no_home;
+        if let w: Worker = local {
+            home = buf_new(1);
+            home[0] = w;
+        }
+        let state: GcBuf<i32> = buf_new(5);
+        state[0] = SCHEDULED;
+        let p: GcBuf<fn(Context) -> bool> = buf_new(1);
+        p[0] = poll;
+        let t = TaskRef {
+            state: state,
+            poll: p,
+            joiners: Mutex::new(List::<Waker>::new()),
+            parked: List::new(),
+            home: home,
+            id: NEXT_TASK_ID.fetch_add(1),
+            up: pool.no_up,
+        };
+        schedule(t);
+        t
     }
-    let state: GcBuf<i32> = buf_new(5);
-    state[0] = SCHEDULED;
-    let p: GcBuf<fn(Context) -> bool> = buf_new(1);
-    p[0] = poll;
-    let t = TaskRef {
-        state: state,
-        poll: p,
-        joiners: Mutex::new(List::<Waker>::new()),
-        parked: List::new(),
-        home: home,
-        id: NEXT_TASK_ID.fetch_add(1),
-        up: pool.no_up,
-    };
-    schedule(t);
-    t
 }
 
 /// The poll function of a task running `fut`, storing its output in
 /// `slot`.
 fn poll_fn<F: Future>(fut: F, slot: GcBuf<F::Output>) -> fn(Context) -> bool {
-    let cell: GcBuf<F> = buf_new(1);
-    cell[0] = fut;
-    |ctx: Context| -> bool {
-        let f = cell[0];
-        let c = ctx;
-        let r = f.poll(ref c);
-        cell[0] = f;
-        if let Poll::Ready(v) = r {
-            slot[0] = v;
-            return true;
+    unsafe {
+        let cell: GcBuf<F> = buf_new(1);
+        cell[0] = fut;
+        |ctx: Context| -> bool {
+            let f = cell[0];
+            let c = ctx;
+            let r = f.poll(ref c);
+            cell[0] = f;
+            if let Poll::Ready(v) = r {
+                slot[0] = v;
+                return true;
+            }
+            false
         }
-        false
     }
 }
 
@@ -671,37 +726,41 @@ fn run_guest(main: fn(Context) -> bool) {
 
 /// Run `fut` to completion from synchronous code (2.20.6).
 pub fn block_on<F: Future>(fut: F) -> F::Output {
-    let slot: GcBuf<F::Output> = buf_new(1);
-    run_guest(poll_fn(fut, slot));
-    slot[0]
+    unsafe {
+        let slot: GcBuf<F::Output> = buf_new(1);
+        run_guest(poll_fn(fut, slot));
+        slot[0]
+    }
 }
 
 /// `block_on` for a throwing `async` body: its error is thrown here.
 pub fn block_on_try<T, E>(fut: TryAsyncFuture<T, E>) throws (E) -> T {
-    let cell: GcBuf<TryAsyncFuture<T, E>> = buf_new(1);
-    cell[0] = fut;
-    let out: GcBuf<T> = buf_new(1);
-    let err: GcBuf<E> = buf_new(1);
-    let failed: GcBuf<bool> = buf_new(1);
-    run_guest(|ctx: Context| -> bool {
-        let f = cell[0];
-        let c = ctx;
-        let r = try f.poll(ref c) catch e {
-            err[0] = e;
-            failed[0] = true;
-            return true;
-        };
-        cell[0] = f;
-        if let Poll::Ready(v) = r {
-            out[0] = v;
-            return true;
+    unsafe {
+        let cell: GcBuf<TryAsyncFuture<T, E>> = buf_new(1);
+        cell[0] = fut;
+        let out: GcBuf<T> = buf_new(1);
+        let err: GcBuf<E> = buf_new(1);
+        let failed: GcBuf<bool> = buf_new(1);
+        run_guest(|ctx: Context| -> bool {
+            let f = cell[0];
+            let c = ctx;
+            let r = try f.poll(ref c) catch e {
+                err[0] = e;
+                failed[0] = true;
+                return true;
+            };
+            cell[0] = f;
+            if let Poll::Ready(v) = r {
+                out[0] = v;
+                return true;
+            }
+            false
+        });
+        if failed[0] {
+            throw err[0];
         }
-        false
-    });
-    if failed[0] {
-        throw err[0];
+        out[0]
     }
-    out[0]
 }
 
 /// Workers of the executor this thread runs tasks on (1 outside one).
@@ -811,13 +870,15 @@ impl<T> Task<T> {
 impl<T> Future for Task<T> {
     type Output = T;
     fn poll(ref self, ref ctx: Context) -> Poll<T> {
-        if !join_later(self.task, ctx.waker) {
-            return Poll::Pending;
+        unsafe {
+            if !join_later(self.task, ctx.waker) {
+                return Poll::Pending;
+            }
+            if no_result(self.task) {
+                panic("awaited a cancelled task (use `try await t.join()`)");
+            }
+            Poll::Ready(self.slot[0])
         }
-        if no_result(self.task) {
-            panic("awaited a cancelled task (use `try await t.join()`)");
-        }
-        Poll::Ready(self.slot[0])
     }
 }
 
@@ -828,13 +889,15 @@ pub struct Join<T> {
 
 impl<T> Join<T> {
     pub fn poll(ref self, ref ctx: Context) throws (CancellationError) -> Poll<T> {
-        if !join_later(self.task.task, ctx.waker) {
-            return Poll::Pending;
+        unsafe {
+            if !join_later(self.task.task, ctx.waker) {
+                return Poll::Pending;
+            }
+            if no_result(self.task.task) {
+                throw CancellationError {};
+            }
+            Poll::Ready(self.task.slot[0])
         }
-        if no_result(self.task.task) {
-            throw CancellationError {};
-        }
-        Poll::Ready(self.task.slot[0])
     }
 }
 
@@ -878,9 +941,11 @@ pub fn id() -> TaskId {
 /// The running task's id, or `none` outside a task (sync code, a
 /// `spawn_blocking` thread).
 pub fn try_id() -> TaskId | none {
-    let w = current()?;
-    let t = w.running[0]?;
-    TaskId { id: t.id }
+    unsafe {
+        let w = current()?;
+        let t = w.running[0]?;
+        TaskId { id: t.id }
+    }
 }
 
 /// A task was cancelled (2.18.4).
@@ -900,18 +965,22 @@ impl Error for CancellationError {}
 /// spawner (2.18.1). Needs a running executor (inside `async fn main` /
 /// `block_on`).
 pub fn spawn<F: Future + Send>(fut: F) -> Task<F::Output> where F::Output: Send {
-    current_worker();
-    let slot: GcBuf<F::Output> = buf_new(1);
-    let t = new_task(poll_fn(fut, slot), none);
-    Task { task: t, slot: slot }
+    unsafe {
+        current_worker();
+        let slot: GcBuf<F::Output> = buf_new(1);
+        let t = new_task(poll_fn(fut, slot), none);
+        Task { task: t, slot: slot }
+    }
 }
 
 /// Run `fut` as a new task on this worker only (it need not be `Send`).
 pub fn spawn_local<F: Future>(fut: F) -> Task<F::Output> {
-    let w = current_worker();
-    let slot: GcBuf<F::Output> = buf_new(1);
-    let t = new_task(poll_fn(fut, slot), w);
-    Task { task: t, slot: slot }
+    unsafe {
+        let w = current_worker();
+        let slot: GcBuf<F::Output> = buf_new(1);
+        let t = new_task(poll_fn(fut, slot), w);
+        Task { task: t, slot: slot }
+    }
 }
 
 /// Every task's result, in order (2.18.1).
@@ -935,12 +1004,14 @@ pub struct Race<T> {
 impl<T> Future for Race<T> {
     type Output = T;
     fn poll(ref self, ref ctx: Context) -> Poll<T> {
-        for t in self.tasks {
-            if join_later(t.task, ctx.waker) {
-                return Poll::Ready(t.slot[0]);
+        unsafe {
+            for t in self.tasks {
+                if join_later(t.task, ctx.waker) {
+                    return Poll::Ready(t.slot[0]);
+                }
             }
+            Poll::Pending
         }
-        Poll::Pending
     }
 }
 
@@ -954,12 +1025,14 @@ impl<T> Future for Race<T> {
 /// more as cancelled (its `await` leaves through `finally` / `using`, as
 /// for `Task::cancel`) and dropped. Panics on an empty list.
 pub fn select<F: Future>(futs: List<F>) -> SelectFuture<F> {
-    if futs.len() == 0 {
-        panic("task::select of no futures");
+    unsafe {
+        if futs.len() == 0 {
+            panic("task::select of no futures");
+        }
+        let started: GcBuf<bool> = buf_new(futs.len());
+        let proxy: GcBuf<TaskRef | none> = buf_new(1);
+        SelectFuture { futs: futs, started: started, proxy: proxy }
     }
-    let started: GcBuf<bool> = buf_new(futs.len());
-    let proxy: GcBuf<TaskRef | none> = buf_new(1);
-    SelectFuture { futs: futs, started: started, proxy: proxy }
 }
 
 pub struct SelectFuture<F> {
@@ -973,27 +1046,29 @@ pub struct SelectFuture<F> {
 impl<F: Future> Future for SelectFuture<F> {
     type Output = (usize, F::Output);
     fn poll(ref self, ref ctx: Context) -> Poll<(usize, F::Output)> {
-        let p = match self.proxy[0] {
-            t: TaskRef => t,
-            none => {
-                let t = proxy_task(ctx.waker);
-                self.proxy[0] = t;
-                t
+        unsafe {
+            let p = match self.proxy[0] {
+                t: TaskRef => t,
+                none => {
+                    let t = proxy_task(ctx.waker);
+                    self.proxy[0] = t;
+                    t
+                }
+            };
+            let c = Context::from_waker(Waker { task: p });
+            let n = self.futs.len();
+            for i in 0..n {
+                let f = self.futs[i];
+                self.started[i] = true;
+                let r = f.poll(ref c);
+                self.futs[i] = f;
+                if let Poll::Ready(v) = r {
+                    self.cancel_others(i, p);
+                    return Poll::Ready((i, v));
+                }
             }
-        };
-        let c = Context::from_waker(Waker { task: p });
-        let n = self.futs.len();
-        for i in 0..n {
-            let f = self.futs[i];
-            self.started[i] = true;
-            let r = f.poll(ref c);
-            self.futs[i] = f;
-            if let Poll::Ready(v) = r {
-                self.cancel_others(i, p);
-                return Poll::Ready((i, v));
-            }
+            Poll::Pending
         }
-        Poll::Pending
     }
 }
 
@@ -1002,36 +1077,40 @@ impl<F: Future> SelectFuture<F> {
     /// losers once with it (their cancellation path), then drop all it
     /// registered.
     fn cancel_others(self, winner: usize, p: TaskRef) {
-        atomic_xchg(p.state, 0, DONE, SeqCst);
-        atomic_xchg(p.state, 1, 1, SeqCst);
-        let c = Context::from_waker(Waker { task: p });
-        for i in 0..self.futs.len() {
-            if i != winner && self.started[i] {
-                let f = self.futs[i];
-                f.poll(ref c);
+        unsafe {
+            atomic_xchg(p.state, 0, DONE, SeqCst);
+            atomic_xchg(p.state, 1, 1, SeqCst);
+            let c = Context::from_waker(Waker { task: p });
+            for i in 0..self.futs.len() {
+                if i != winner && self.started[i] {
+                    let f = self.futs[i];
+                    f.poll(ref c);
+                }
             }
+            finish_cancelled(p);
         }
-        finish_cancelled(p);
     }
 }
 
 /// A stand-in task for `select`'s children: never scheduled; its wakes
 /// go to `parent` until it is done.
 fn proxy_task(parent: Waker) -> TaskRef {
-    let state: GcBuf<i32> = buf_new(5);
-    state[3] = 1;
-    let p: GcBuf<fn(Context) -> bool> = buf_new(1);
-    p[0] = |ctx: Context| -> bool { true };
-    let up: GcBuf<Waker> = buf_new(1);
-    up[0] = parent;
-    TaskRef {
-        state: state,
-        poll: p,
-        joiners: Mutex::new(List::<Waker>::new()),
-        parked: List::new(),
-        home: parent.task.home,
-        id: 0,
-        up: up,
+    unsafe {
+        let state: GcBuf<i32> = buf_new(5);
+        state[3] = 1;
+        let p: GcBuf<fn(Context) -> bool> = buf_new(1);
+        p[0] = |ctx: Context| -> bool { true };
+        let up: GcBuf<Waker> = buf_new(1);
+        up[0] = parent;
+        TaskRef {
+            state: state,
+            poll: p,
+            joiners: Mutex::new(List::<Waker>::new()),
+            parked: List::new(),
+            home: parent.task.home,
+            id: 0,
+            up: up,
+        }
     }
 }
 
@@ -1125,14 +1204,16 @@ pub struct Timeout<T> {
 
 impl<T> Timeout<T> {
     pub fn poll(ref self, ref ctx: Context) throws (TimeoutError) -> Poll<T> {
-        if join_later(self.task.task, ctx.waker) {
-            return Poll::Ready(self.task.slot[0]);
+        unsafe {
+            if join_later(self.task.task, ctx.waker) {
+                return Poll::Ready(self.task.slot[0]);
+            }
+            if now_ns() >= self.deadline {
+                throw TimeoutError {};
+            }
+            add_timer(self.deadline, ctx.waker);
+            Poll::Pending
         }
-        if now_ns() >= self.deadline {
-            throw TimeoutError {};
-        }
-        add_timer(self.deadline, ctx.waker);
-        Poll::Pending
     }
 }
 
@@ -1283,23 +1364,25 @@ fn io_key(fd: i32, write: i32) -> usize {
 /// Start the driver thread once: it blocks in kqueue / epoll and
 /// unparks the tasks waiting on each fd that became ready.
 fn start_driver() {
-    executor().driver.call_once(|| {
-        let body: fn() + Send = || {
-            let evs: GcBuf<i64> = buf_new(128);
-            loop {
-                let n = unsafe { rok_io_poll(evs, 128) };
-                for i in 0..n {
-                    let k = evs[i as usize];
-                    unpark(io_key((k / 2) as i32, (k % 2) as i32));
+    unsafe {
+        executor().driver.call_once(|| {
+            let body: fn() + Send = || {
+                let evs: GcBuf<i64> = buf_new(128);
+                loop {
+                    let n = unsafe { rok_io_poll(evs, 128) };
+                    for i in 0..n {
+                        let k = evs[i as usize];
+                        unpark(io_key((k / 2) as i32, (k % 2) as i32));
+                    }
                 }
+            };
+            let h = unsafe { rok_thread_spawn(body, 0, rok_thread_new_id()) };
+            if h == 0 {
+                panic("task executor: cannot start the I/O driver thread");
             }
-        };
-        let h = unsafe { rok_thread_spawn(body, 0, rok_thread_new_id()) };
-        if h == 0 {
-            panic("task executor: cannot start the I/O driver thread");
-        }
-        unsafe { rok_thread_detach(h) };
-    });
+            unsafe { rok_thread_detach(h) };
+        });
+    }
 }
 
 /// Completes once `fd` may be readable (`await task::readable(fd)`
@@ -1353,29 +1436,35 @@ impl Future for IoReady {
 /// (`interest & 2`) — at once if it already is, or if the fd cannot be
 /// watched (the retried operation reports the error).
 extern "C" fn hook_io(fd: i32, interest: u32, w: GcBuf<Waker>) {
-    let waker = w[0];
-    start_driver();
-    if unsafe { rok_io_watch(fd) } < 0 {
-        waker.wake();
-        return;
-    }
-    for dir in 0..2 {
-        if (interest >> (dir as u32)) & 1u32 != 0u32 {
-            // Park first, then look (as `readable`).
-            park(io_key(fd, dir), waker);
-            if unsafe { rok_net_wait(fd, dir, 0) } != 0 {
-                waker.wake();
+    unsafe {
+        let waker = w[0];
+        start_driver();
+        if rok_io_watch(fd) < 0 {
+            waker.wake();
+            return;
+        }
+        for dir in 0..2 {
+            if (interest >> (dir as u32)) & 1u32 != 0u32 {
+                // Park first, then look (as `readable`).
+                park(io_key(fd, dir), waker);
+                if rok_net_wait(fd, dir, 0) != 0 {
+                    waker.wake();
+                }
             }
         }
     }
 }
 
 extern "C" fn hook_timer(deadline: u64, w: GcBuf<Waker>) {
-    add_timer(deadline as i64, w[0]);
+    unsafe {
+        add_timer(deadline as i64, w[0]);
+    }
 }
 
 extern "C" fn hook_park(frame: GcBuf<u8>, w: GcBuf<Waker>) {
-    park(key(frame), w[0]);
+    unsafe {
+        park(key(frame), w[0]);
+    }
 }
 
 extern "C" fn hook_unpark(frame: GcBuf<u8>) {
@@ -1390,22 +1479,27 @@ extern "C" fn hook_unpark(frame: GcBuf<u8>) {
 /// once; a cancelled awaiter leaves it to finish in the background and
 /// its result is dropped.
 pub fn spawn_blocking<T: Send>(f: fn() -> T + Send) -> Blocking<T> {
-    let slot: GcBuf<T> = buf_new(1);
-    let done: GcBuf<bool> = buf_new(1);
-    let waiter: Mutex<Waker | none> = Mutex::new(none);
-    let job: fn() + Send = || {
-        slot[0] = f();
-        let w: Waker | none = none;
-        using g = waiter.lock() {
-            done[0] = true;
-            w = g.get();
-        }
-        if let k: Waker = w {
-            k.wake();
-        }
-    };
-    executor().blocking.submit(job);
-    Blocking { slot: slot, done: done, waiter: waiter }
+    unsafe {
+        let slot: GcBuf<T> = buf_new(1);
+        let done: GcBuf<bool> = buf_new(1);
+        let waiter: Mutex<Waker | none> = Mutex::new(none);
+        // Written once on the lane, read by the awaiter after `done`.
+        let cell = Handoff::new(slot);
+        let job: fn() + Send = || {
+            let slot = cell.get();
+            slot[0] = f();
+            let w: Waker | none = none;
+            using g = waiter.lock() {
+                done[0] = true;
+                w = g.get();
+            }
+            if let k: Waker = w {
+                k.wake();
+            }
+        };
+        executor().blocking.submit(job);
+        Blocking { slot: slot, done: done, waiter: waiter }
+    }
 }
 
 /// Most lane threads at once (tokio's default); past it jobs queue.
@@ -1432,74 +1526,80 @@ unsafe impl Sync for BlockingPool {}
 
 impl BlockingPool {
     fn new() -> BlockingPool {
-        BlockingPool { lock: Mutex::new(0), jobs: Deque::new(), threads: buf_new(1), idle: List::new() }
+        unsafe {
+            BlockingPool { lock: Mutex::new(0), jobs: Deque::new(), threads: buf_new(1), idle: List::new() }
+        }
     }
 
     fn submit(self, job: fn() + Send) {
-        let spawn = false;
-        let wake: GcBuf<i32> | none = none;
-        using g = self.lock.lock() {
-            self.jobs.push_back(job);
-            // Hand the job to one sleeping thread, else start one.
-            if let w: GcBuf<i32> = self.idle.pop() {
-                w[0] = 1;
-                wake = w;
-            } else if self.threads[0] < BLOCKING_MAX_THREADS {
-                self.threads[0] += 1;
-                spawn = true;
+        unsafe {
+            let spawn = false;
+            let wake: GcBuf<i32> | none = none;
+            using g = self.lock.lock() {
+                self.jobs.push_back(job);
+                // Hand the job to one sleeping thread, else start one.
+                if let w: GcBuf<i32> = self.idle.pop() {
+                    w[0] = 1;
+                    wake = w;
+                } else if self.threads[0] < BLOCKING_MAX_THREADS {
+                    self.threads[0] += 1;
+                    spawn = true;
+                }
             }
-        }
-        if let w: GcBuf<i32> = wake {
-            unsafe { rok_sync_wake(w, 0) };
-        }
-        if spawn {
-            let lane = self;
-            let h = unsafe { rok_thread_spawn(|| lane.work(BLOCKING_KEEP_ALIVE_NS), 0, rok_thread_new_id()) };
-            if h == 0 {
-                self.work(0); // no thread to be had: drain the queue here
-            } else {
-                unsafe { rok_thread_detach(h) };
+            if let w: GcBuf<i32> = wake {
+                rok_sync_wake(w, 0);
+            }
+            if spawn {
+                let lane = self;
+                let h = rok_thread_spawn(|| lane.work(BLOCKING_KEEP_ALIVE_NS), 0, rok_thread_new_id());
+                if h == 0 {
+                    self.work(0); // no thread to be had: drain the queue here
+                } else {
+                    rok_thread_detach(h);
+                }
             }
         }
     }
 
     /// A lane thread: run queued jobs until idle for `keep_alive` ns.
     fn work(self, keep_alive: i64) {
-        let me: GcBuf<i32> = buf_new(1);
-        let idle_since = now_ns();
-        loop {
-            let job: (fn() + Send) | none = none;
-            let quit = false;
-            using g = self.lock.lock() {
-                job = self.jobs.pop_front();
-                if job is none {
-                    if now_ns() - idle_since >= keep_alive {
-                        self.threads[0] -= 1;
-                        quit = true;
-                    } else {
-                        me[0] = 0;
-                        self.idle.push(me);
+        unsafe {
+            let me: GcBuf<i32> = buf_new(1);
+            let idle_since = now_ns();
+            loop {
+                let job: (fn() + Send) | none = none;
+                let quit = false;
+                using g = self.lock.lock() {
+                    job = self.jobs.pop_front();
+                    if job is none {
+                        if now_ns() - idle_since >= keep_alive {
+                            self.threads[0] -= 1;
+                            quit = true;
+                        } else {
+                            me[0] = 0;
+                            self.idle.push(me);
+                        }
                     }
                 }
-            }
-            if quit {
-                return;
-            }
-            if let f: fn() + Send = job {
-                f();
-                idle_since = now_ns();
-                continue;
-            }
-            let left = idle_since + keep_alive - now_ns();
-            unsafe { rok_sync_wait(me, 0, 0, left) };
-            using g = self.lock.lock() {
-                // Not handed a job (a timeout or a spurious wake): leave
-                // the idle list.
-                if me[0] == 0 {
-                    for i in 0..self.idle.len() {
-                        if buf_same(self.idle[i], me) {
-                            self.idle.remove(i);
-                            break;
+                if quit {
+                    return;
+                }
+                if let f: fn() + Send = job {
+                    f();
+                    idle_since = now_ns();
+                    continue;
+                }
+                let left = idle_since + keep_alive - now_ns();
+                unsafe { rok_sync_wait(me, 0, 0, left) };
+                using g = self.lock.lock() {
+                    // Not handed a job (a timeout or a spurious wake): leave
+                    // the idle list.
+                    if me[0] == 0 {
+                        for i in 0..self.idle.len() {
+                            if buf_same(self.idle[i], me) {
+                                self.idle.remove(i);
+                                break;
+                            }
                         }
                     }
                 }
@@ -1518,16 +1618,18 @@ pub struct Blocking<T> {
 impl<T> Future for Blocking<T> {
     type Output = T;
     fn poll(ref self, ref ctx: Context) -> Poll<T> {
-        let done = false;
-        using g = self.waiter.lock() {
-            done = self.done[0];
-            if !done {
-                g.set(ctx.waker);
+        unsafe {
+            let done = false;
+            using g = self.waiter.lock() {
+                done = self.done[0];
+                if !done {
+                    g.set(ctx.waker);
+                }
             }
+            if done {
+                return Poll::Ready(self.slot[0]);
+            }
+            Poll::Pending
         }
-        if done {
-            return Poll::Ready(self.slot[0]);
-        }
-        Poll::Pending
     }
 }

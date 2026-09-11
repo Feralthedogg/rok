@@ -70,3 +70,5 @@ fn main() -> i32 {
     println(f"{Name { s: "a\nb" }:?}");
     return 0;
 }
+
+// spec: 006.02-built-in-attributes

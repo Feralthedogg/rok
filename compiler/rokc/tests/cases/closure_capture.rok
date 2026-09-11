@@ -9,3 +9,5 @@ fn main() -> i32 {
     let b = scale(0i32);
     return a + b - 80i32;
 }
+
+// spec: 004.05-closure

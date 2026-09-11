@@ -32,3 +32,5 @@ let b: any = true;
 println(f"{show(!b)}");
 println(f"{show(3i32 * v)}");
 if f < 2.0 { println(f"{9}"); }
+
+// spec: 002.02-any-slot

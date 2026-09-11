@@ -16,3 +16,5 @@ fn main() -> i32 {
     });
     return total - max;
 }
+
+// spec: 002.10-generics

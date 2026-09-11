@@ -97,10 +97,12 @@ pub struct JoinHandle<T> {
 impl<T> JoinHandle<T> {
     /// Wait for the thread and take its result.
     pub fn join(self) throws (JoinError) -> T {
-        if unsafe { rok_thread_join(self.handle) } != 0 {
-            throw JoinError { message: "pthread_join failed" };
+        unsafe {
+            if rok_thread_join(self.handle) != 0 {
+                throw JoinError { message: "pthread_join failed" };
+            }
+            self.result[0]
         }
-        self.result[0]
     }
 
     pub fn thread(self) -> Thread { self.thread }
@@ -131,20 +133,25 @@ impl Builder {
     }
 
     pub fn spawn<T: Send>(self, f: fn() -> T + Send) throws (IoError) -> JoinHandle<T> {
-        let result: GcBuf<T> = buf_new(1);
-        let id = unsafe { rok_thread_new_id() };
-        let rec = new_rec(id, self.name);
-        using g = THREADS.lock() { g.get().insert(id, rec); }
-        let run: fn() + Send = || {
-            result[0] = f();
-            using g = THREADS.lock() { g.get().remove(id); }
-        };
-        let h = unsafe { rok_thread_spawn(run, self.stack_size ?? 0usize, id) };
-        if h == 0usize {
-            using g = THREADS.lock() { g.get().remove(id); }
-            throw IoError::new("could not create an OS thread");
+        unsafe {
+            let result: GcBuf<T> = buf_new(1);
+            let id = rok_thread_new_id();
+            let rec = new_rec(id, self.name);
+            using g = THREADS.lock() { g.get().insert(id, rec); }
+            // Written once by the thread, read by `join` after it.
+            let cell = Handoff::new(result);
+            let run: fn() + Send = || {
+                let result = cell.get();
+                result[0] = f();
+                using g = THREADS.lock() { g.get().remove(id); }
+            };
+            let h = unsafe { rok_thread_spawn(run, self.stack_size ?? 0usize, id) };
+            if h == 0usize {
+                using g = THREADS.lock() { g.get().remove(id); }
+                throw IoError::new("could not create an OS thread");
+            }
+            JoinHandle { handle: h, result: result, thread: Thread { rec: rec } }
         }
-        JoinHandle { handle: h, result: result, thread: Thread { rec: rec } }
     }
 }
 

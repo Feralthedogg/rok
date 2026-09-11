@@ -25,3 +25,5 @@ fn main() -> i32 {
         .add(15);
     return c.value();
 }
+
+// spec: 004.09-method

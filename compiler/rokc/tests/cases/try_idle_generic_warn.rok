@@ -16,3 +16,5 @@ fn main() -> i32 {
     let s = keep("a");
     keep(3)
 }
+
+// spec: 003.14-error-control-flow

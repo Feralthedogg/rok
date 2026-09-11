@@ -68,3 +68,5 @@ fn main() {
     let tail = make(calls)[-2:];
     println(f"once {last} {tail:?} {calls.get() - 1}");
 }
+
+// spec: 003.06-indexing-and-slicing

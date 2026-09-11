@@ -27,3 +27,5 @@ fn main() -> i32 {
     let r = c.add(25).double().double().get();
     return r;
 }
+
+// spec: 004.09-method

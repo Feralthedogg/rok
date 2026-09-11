@@ -129,18 +129,20 @@ impl Metadata {
 
 /// `stat` through the runtime: `fd >= 0` → `fstat(fd)`.
 fn stat_at(dir: i32, path: str, follow: bool, fd: i32) throws (IoError) -> Metadata {
-    let out: GcBuf<i64> = buf_new(8);
-    let f = if follow { 1 } else { 0 };
-    try check(unsafe { rok_os_stat(dir, path, f, fd, out) } as i64, path);
-    Metadata {
-        kind: out[0],
-        len: out[1] as u64,
-        mode: out[2] as u32,
-        mtime: out[3],
-        mtime_ns: out[4],
-        atime: out[5],
-        ctime: out[6],
-        atime_ns: out[7],
+    unsafe {
+        let out: GcBuf<i64> = buf_new(8);
+        let f = if follow { 1 } else { 0 };
+        try check(rok_os_stat(dir, path, f, fd, out) as i64, path);
+        Metadata {
+            kind: out[0],
+            len: out[1] as u64,
+            mode: out[2] as u32,
+            mtime: out[3],
+            mtime_ns: out[4],
+            atime: out[5],
+            ctime: out[6],
+            atime_ns: out[7],
+        }
     }
 }
 
@@ -154,9 +156,11 @@ pub struct File {
 }
 
 fn file_of(fd: i32, path: str) -> File {
-    let cell: GcBuf<i32> = buf_new(1);
-    cell[0] = fd;
-    File { fd: cell, path: path }
+    unsafe {
+        let cell: GcBuf<i32> = buf_new(1);
+        cell[0] = fd;
+        File { fd: cell, path: path }
+    }
 }
 
 impl File {
@@ -172,20 +176,28 @@ impl File {
     pub fn from_fd(fd: i32, name: str) -> File { file_of(fd, name) }
 
     /// The OS file descriptor (`-1` once closed).
-    pub fn fd(self) -> i32 { self.fd[0] }
+    pub fn fd(self) -> i32 {
+        unsafe {
+            self.fd[0]
+        }
+    }
 
     fn live(self) throws (IoError) -> i32 {
-        let fd = self.fd[0];
-        if fd < 0 { throw IoError::with_kind(IoErrorKind::InvalidInput, f"{self.path}: file is closed"); }
-        fd
+        unsafe {
+            let fd = self.fd[0];
+            if fd < 0 { throw IoError::with_kind(IoErrorKind::InvalidInput, f"{self.path}: file is closed"); }
+            fd
+        }
     }
 
     /// Close now; later calls fail with `InvalidInput`. Closing twice is a no-op.
     pub fn close(self) throws (IoError) {
-        let fd = self.fd[0];
-        if fd < 0 { return; }
-        self.fd[0] = -1;
-        try check(unsafe { rok_os_close(fd) } as i64, self.path);
+        unsafe {
+            let fd = self.fd[0];
+            if fd < 0 { return; }
+            self.fd[0] = -1;
+            try check(rok_os_close(fd) as i64, self.path);
+        }
     }
 
     pub fn read(self, buf: List<u8>) throws (IoError) -> usize {
@@ -293,7 +305,9 @@ impl File {
     pub async fn create_async<P: AsPath>(path: P) throws (IoError) -> File { try await create_async(path) }
 
     pub async fn read_async(self, buf: List<u8>) throws (IoError) -> usize {
-        try await off(|| try self.read(buf))
+        // The caller awaits the read: one thread uses `buf` at a time.
+        let b = unsafe { Handoff::new(buf) };
+        try await off(|| try self.read(b.get()))
     }
     pub async fn read_to_end_async(self) throws (IoError) -> List<u8> {
         try await off(|| try self.read_to_end())
@@ -302,12 +316,12 @@ impl File {
         try await off(|| try self.read_to_str())
     }
     pub async fn write_async<B: AsBytes>(self, data: B) throws (IoError) -> usize {
-        let s = data.byte_slice();
-        try await off(|| try self.write(s))
+        let s = unsafe { Handoff::new(data.byte_slice()) };
+        try await off(|| try self.write(s.get()))
     }
     pub async fn write_all_async<B: AsBytes>(self, data: B) throws (IoError) {
-        let s = data.byte_slice();
-        try await off(|| try self.write_all(s));
+        let s = unsafe { Handoff::new(data.byte_slice()) };
+        try await off(|| try self.write_all(s.get()));
     }
     pub async fn write_str_async(self, s: str) throws (IoError) {
         try await off(|| try self.write_str(s));
@@ -422,40 +436,44 @@ pub struct ReadDirStream {
 impl Stream for ReadDirStream {
     type Item = Result<DirEntry, IoError>;
     fn poll_next(ref self, ref ctx: Context) -> Poll<Result<DirEntry, IoError> | none> {
-        loop {
-            if self.pos < self.batch.len() {
-                self.pos += 1;
-                return Poll::Ready(self.batch[self.pos - 1]);
-            }
-            let job = match self.pending {
-                b: Blocking<List<Result<DirEntry, IoError>>> => b,
-                none => {
-                    if self.rd.d[0] == 0 { return Poll::Ready(none); }
-                    let rd = self.rd;
-                    let lock = self.lock;
-                    task::spawn_blocking(|| {
-                        let out: List<Result<DirEntry, IoError>> = List::new();
-                        using g = lock.lock() {
-                            while out.len() < DIR_BATCH {
-                                match rd.next() {
-                                    e: Result<DirEntry, IoError> => out.push(e),
-                                    none => break,
+        unsafe {
+            loop {
+                if self.pos < self.batch.len() {
+                    self.pos += 1;
+                    return Poll::Ready(self.batch[self.pos - 1]);
+                }
+                let job = match self.pending {
+                    b: Blocking<List<Result<DirEntry, IoError>>> => b,
+                    none => {
+                        if self.rd.d[0] == 0 { return Poll::Ready(none); }
+                        // Only the refill holding `lock` touches `rd`.
+                        let shared = Handoff::new(self.rd);
+                        let lock = self.lock;
+                        task::spawn_blocking(|| {
+                            let rd = shared.get();
+                            let out: List<Result<DirEntry, IoError>> = List::new();
+                            using g = lock.lock() {
+                                while out.len() < DIR_BATCH {
+                                    match rd.next() {
+                                        e: Result<DirEntry, IoError> => out.push(e),
+                                        none => break,
+                                    }
                                 }
                             }
-                        }
-                        out
-                    })
-                }
-            };
-            match job.poll(ref ctx) {
-                Poll::Ready(b) => {
-                    self.pending = none;
-                    self.batch = b;
-                    self.pos = 0;
-                }
-                Poll::Pending => {
-                    self.pending = job;
-                    return Poll::Pending;
+                            out
+                        })
+                    }
+                };
+                match job.poll(ref ctx) {
+                    Poll::Ready(b) => {
+                        self.pending = none;
+                        self.batch = b;
+                        self.pos = 0;
+                    }
+                    Poll::Pending => {
+                        self.pending = job;
+                        return Poll::Pending;
+                    }
                 }
             }
         }
@@ -490,10 +508,12 @@ impl Seek for File {
 /// `using f = try fs::open(..) { .. }` closes `f` on the way out.
 impl Drop for File {
     fn drop(ref self) {
-        let fd = self.fd[0];
-        if fd >= 0 {
-            self.fd[0] = -1;
-            unsafe { rok_os_close(fd) };
+        unsafe {
+            let fd = self.fd[0];
+            if fd >= 0 {
+                self.fd[0] = -1;
+                rok_os_close(fd);
+            }
         }
     }
 }
@@ -508,9 +528,11 @@ pub struct Dir {
 }
 
 fn dir_of(fd: i32, path: str) -> Dir {
-    let cell: GcBuf<i32> = buf_new(1);
-    cell[0] = fd;
-    Dir { fd: cell, path: path }
+    unsafe {
+        let cell: GcBuf<i32> = buf_new(1);
+        cell[0] = fd;
+        Dir { fd: cell, path: path }
+    }
 }
 
 impl Dir {
@@ -527,7 +549,11 @@ impl Dir {
         try Dir::root().open_dir(env::temp_dir())
     }
 
-    fn fd(self) -> i32 { self.fd[0] }
+    fn fd(self) -> i32 {
+        unsafe {
+            self.fd[0]
+        }
+    }
 
     /// `p` checked against this capability; the string to pass to `*at`.
     fn rel<P: AsPath>(self, p: P) throws (IoError) -> str {
@@ -579,11 +605,13 @@ impl Dir {
     }
 
     fn list(self, p: str) throws (IoError) -> ReadDir {
-        let d = try check(unsafe { rok_os_opendir(self.fd(), p) } as i64, self.shown(p));
-        let base = if p == "." { "" } else { p };
-        let cell: GcBuf<isize> = buf_new(1);
-        cell[0] = d as isize;
-        ReadDir { d: cell, dir: self, base: base, name: byte_buf(NAME_MAX) }
+        unsafe {
+            let d = try check(rok_os_opendir(self.fd(), p) as i64, self.shown(p));
+            let base = if p == "." { "" } else { p };
+            let cell: GcBuf<isize> = buf_new(1);
+            cell[0] = d as isize;
+            ReadDir { d: cell, dir: self, base: base, name: byte_buf(NAME_MAX) }
+        }
     }
 
     /// Follows symlinks.
@@ -697,19 +725,23 @@ impl Dir {
 
     /// Release the handle (`root()` has none).
     pub fn close(self) throws (IoError) {
-        let fd = self.fd();
-        if fd < 0 { return; }
-        self.fd[0] = -1;
-        try check(unsafe { rok_os_close(fd) } as i64, self.path);
+        unsafe {
+            let fd = self.fd();
+            if fd < 0 { return; }
+            self.fd[0] = -1;
+            try check(rok_os_close(fd) as i64, self.path);
+        }
     }
 }
 
 impl Drop for Dir {
     fn drop(ref self) {
-        let fd = self.fd[0];
-        if fd >= 0 {
-            self.fd[0] = -1;
-            unsafe { rok_os_close(fd) };
+        unsafe {
+            let fd = self.fd[0];
+            if fd >= 0 {
+                self.fd[0] = -1;
+                rok_os_close(fd);
+            }
         }
     }
 }
@@ -751,22 +783,24 @@ const NAME_MAX: usize = 1024;
 impl Iterator for ReadDir {
     type Item = Result<DirEntry, IoError>;
     fn next(ref self) -> Result<DirEntry, IoError> | none {
-        let d = self.d[0];
-        if d == 0 { return none; }
-        let (buf, at, cap) = region(self.name);
-        let n = unsafe { rok_os_readdir(d, buf, at, cap) };
-        if n <= 0 {
-            close_dir(self.d);
-            if n < 0 { return Result::Err(IoError::from_os((0 - n) as i32, self.dir.shown(self.base))); }
-            return none;
+        unsafe {
+            let d = self.d[0];
+            if d == 0 { return none; }
+            let (buf, at, cap) = region(self.name);
+            let n = rok_os_readdir(d, buf, at, cap);
+            if n <= 0 {
+                close_dir(self.d);
+                if n < 0 { return Result::Err(IoError::from_os((0 - n) as i32, self.dir.shown(self.base))); }
+                return none;
+            }
+            let name = try text_of(list_of(self.name[0:n as usize])) catch e { return Result::Err(e); };
+            let path = Path::from(self.base).join(Path::from(name));
+            let meta = try stat_at(self.dir.fd(), path.as_str(), false, -1) catch e {
+                return Result::Err(IoError::from_os(e.code, self.dir.shown(path.as_str())));
+            };
+            let shown = Path::from(self.dir.shown(path.as_str()));
+            Result::Ok(DirEntry { path: shown, name: name, meta: meta })
         }
-        let name = try text_of(list_of(self.name[0:n as usize])) catch e { return Result::Err(e); };
-        let path = Path::from(self.base).join(Path::from(name));
-        let meta = try stat_at(self.dir.fd(), path.as_str(), false, -1) catch e {
-            return Result::Err(IoError::from_os(e.code, self.dir.shown(path.as_str())));
-        };
-        let shown = Path::from(self.dir.shown(path.as_str()));
-        Result::Ok(DirEntry { path: shown, name: name, meta: meta })
     }
 }
 
@@ -780,10 +814,12 @@ impl Drop for ReadDir {
 }
 
 fn close_dir(cell: GcBuf<isize>) {
-    let d = cell[0];
-    if d != 0 {
-        cell[0] = 0;
-        unsafe { rok_os_closedir(d) };
+    unsafe {
+        let d = cell[0];
+        if d != 0 {
+            cell[0] = 0;
+            rok_os_closedir(d);
+        }
     }
 }
 
@@ -945,13 +981,13 @@ pub async fn read_to_str_async<P: AsPath>(path: P) throws (IoError) -> str {
 }
 pub async fn write_async<P: AsPath, D: AsBytes>(path: P, data: D) throws (IoError) {
     let p = path.as_path();
-    let s = data.byte_slice();
-    try await off(|| try write(p, s));
+    let s = unsafe { Handoff::new(data.byte_slice()) };
+    try await off(|| try write(p, s.get()));
 }
 pub async fn write_atomic_async<P: AsPath, D: AsBytes>(path: P, data: D) throws (IoError) {
     let p = path.as_path();
-    let s = data.byte_slice();
-    try await off(|| try write_atomic(p, s));
+    let s = unsafe { Handoff::new(data.byte_slice()) };
+    try await off(|| try write_atomic(p, s.get()));
 }
 pub async fn metadata_async<P: AsPath>(path: P) throws (IoError) -> Metadata {
     let p = path.as_path();

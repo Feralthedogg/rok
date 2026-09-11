@@ -47,3 +47,5 @@ fn main() -> i32 {
     println("done");
     return 0;
 }
+
+// spec: std 304-thread

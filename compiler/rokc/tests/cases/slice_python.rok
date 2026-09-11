@@ -93,3 +93,5 @@ fn main() {
     // `Sliceable::slice` clamps when called directly too.
     println(f"method {xs.slice(2..50):?} {xs.slice(4..1):?}");
 }
+
+// spec: 003.06-indexing-and-slicing

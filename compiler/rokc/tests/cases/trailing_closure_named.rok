@@ -19,3 +19,5 @@ fn main() -> i32 {
     println(f"{a} {b} {c} {d} {e}");
     0
 }
+
+// spec: 004.08-trailing-closure

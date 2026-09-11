@@ -23,3 +23,5 @@ fn main() {
     }
     println(f"{s}");
 }
+
+// spec: 003.10-if-expression

@@ -82,3 +82,5 @@ fn main() -> i32 {
     println(Tag::type_name());
     return 0;
 }
+
+// spec: 006.08-meta-blocks

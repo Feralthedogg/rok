@@ -19,3 +19,5 @@ fn main() -> i32 {
     }
     return total;
 }
+
+// spec: 003.10-if-expression

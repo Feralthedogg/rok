@@ -21,3 +21,5 @@ fn main() -> i32 {
     println(f"p = {P { x: 1, y: 2 }} {f"{"nested"}":?}" + f"" + "|");
     return 0;
 }
+
+// spec: 001.07-string-literals

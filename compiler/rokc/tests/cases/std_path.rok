@@ -70,3 +70,5 @@ fn main() {
     for c in Path::from("./..").components() { names = names + c.as_str() + " "; }
     println(names + Component::RootDir.as_str());
 }
+
+// spec: std 308-path

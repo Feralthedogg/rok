@@ -454,9 +454,11 @@ pub fn alloc(size: usize, align: usize, type_id: u32) -> *mut u8 {
     if !align.is_power_of_two() {
         fatal(b"rok runtime: allocation align is not a power of two");
     }
-    let Some(size8) = size.checked_next_multiple_of(8) else {
-        fatal(b"rok runtime: allocation size overflow");
-    };
+    // Compiled code asks for `usize::MAX` when `len * size` overflows.
+    if size > isize::MAX as usize {
+        fatal(b"rok runtime: allocation too large");
+    }
+    let size8 = size.next_multiple_of(8);
     // Type id 0 (invalid, 801 §8.1.2) would read as free memory in a
     // block.
     if size8 >= LOS_THRESHOLD || align > HEADER_ALIGN || type_id == 0 {

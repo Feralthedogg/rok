@@ -10,3 +10,5 @@ union Repr {
 fn main() -> i32 {
     return 7;
 }
+
+// spec: 002.05-union

@@ -13,3 +13,5 @@ fn main() -> i32 {
     let m3 = max(7, 6);
     return m1 + m2 + m3;
 }
+
+// spec: 002.10-generics

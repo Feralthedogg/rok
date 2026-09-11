@@ -12,3 +12,5 @@ fn main() -> i32 {
     }
     return total - 8;
 }
+
+// spec: 003.13-loop-expressions

@@ -19,3 +19,5 @@ fn main() -> i32 {
     let b = or_default(pick(false), 12);
     return a + b;
 }
+
+// spec: 002.10-generics

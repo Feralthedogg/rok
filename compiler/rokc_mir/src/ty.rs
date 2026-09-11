@@ -74,10 +74,14 @@ pub fn lower_ty(ty: &HirTy, module: &HirModule, target: &Target) -> MirTy {
             ),
         },
         HirTy::Tuple(parts) => MirTy::Tuple(parts.iter().map(lower).collect()),
-        HirTy::Enum(id) => sum_layout(
-            &enum_payloads(&module.enums[id.0 as usize].variants, module, target),
-            target,
-        ),
+        HirTy::Enum(id) => {
+            let def = &module.enums[id.0 as usize];
+            match sum_layout(&enum_payloads(&def.variants, module, target), target) {
+                // `#[repr(u8)]` ..: a fieldless enum is its tag.
+                MirTy::Prim(PrimTy::I32) => MirTy::Prim(def.repr.int.unwrap_or(PrimTy::I32)),
+                l => l,
+            }
+        }
         HirTy::Array(elem, n) => MirTy::Array(Box::new(lower(elem)), *n),
         // Spec 4.4: every function value (named fn or closure) is
         // `{code, env}`: `code` takes the `GcRef` env first; a named fn's

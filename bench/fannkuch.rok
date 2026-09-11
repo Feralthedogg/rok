@@ -1,0 +1,70 @@
+// fannkuch-redux (benchmarks game), n = 10: permutations and prefix
+// reversals over small integer lists. Output matches bench/c/fannkuch.c.
+fn main() -> i32 {
+    let n: i64 = 10;
+    let perm: List<i64> = [];
+    let perm1: List<i64> = [];
+    let count: List<i64> = [];
+    for i in 0..n {
+        perm.push(0);
+        perm1.push(i);
+        count.push(0);
+    }
+    let max_flips: i64 = 0;
+    let checksum: i64 = 0;
+    let perm_count: i64 = 0;
+    let r = n;
+    while true {
+        while r != 1 {
+            count[(r - 1) as usize] = r;
+            r -= 1;
+        }
+        for i in 0..n {
+            perm[i as usize] = perm1[i as usize];
+        }
+        let flips: i64 = 0;
+        let k = perm[0];
+        while k != 0 {
+            let lo: i64 = 0;
+            let hi = k;
+            while lo < hi {
+                let t = perm[lo as usize];
+                perm[lo as usize] = perm[hi as usize];
+                perm[hi as usize] = t;
+                lo += 1;
+                hi -= 1;
+            }
+            flips += 1;
+            k = perm[0];
+        }
+        if flips > max_flips {
+            max_flips = flips;
+        }
+        if perm_count % 2 == 0 {
+            checksum += flips;
+        } else {
+            checksum -= flips;
+        }
+        // Next permutation.
+        let done = true;
+        while r != n {
+            let p0 = perm1[0];
+            for i in 0..r {
+                perm1[i as usize] = perm1[(i + 1) as usize];
+            }
+            perm1[r as usize] = p0;
+            count[r as usize] -= 1;
+            if count[r as usize] > 0 {
+                done = false;
+                break;
+            }
+            r += 1;
+        }
+        if done {
+            break;
+        }
+        perm_count += 1;
+    }
+    println(f"{checksum}\nPfannkuchen({n}) = {max_flips}");
+    return 0;
+}

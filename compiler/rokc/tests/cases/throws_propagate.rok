@@ -49,3 +49,5 @@ fn main() -> i32 {
     println("unit ok");
     return 0;
 }
+
+// spec: 004.14-throws

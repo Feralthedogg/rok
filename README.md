@@ -1,81 +1,83 @@
 # rok
 
-rok 언어의 구현입니다: 컴파일러 `rokc`, 패키지 / 빌드 front-end `rok`, 언어 서버 `rokls`,
-런타임 `librokr.a`, 표준 라이브러리 (`library/{core,std,bare}`). 언어 명세는
-[rok-lang/spec](https://github.com/rok-lang/spec), 소개와 시작 안내는 [rok-lang.org](https://rok-lang.org) 에
-있습니다.
+The implementation of the rok language: the compiler `rokc`, the package / build front-end `rok`, the language
+server `rokls`, the runtime `librokr.a`, and the standard library (`library/{core,std,bare}`). The language
+specification lives in [rok-lang/spec](https://github.com/rok-lang/spec); the introduction and getting-started
+guide are at [rok-lang.org](https://rok-lang.org).
 
-## 요구 사항
+## Requirements
 
-- **LLVM 21 (MLIR 포함)** — `rokc` 는 LLVM 을 링크하지 않고 `mlir-opt` / `mlir-translate` / `clang` 을 프로세스로
-  실행합니다. LLVM 21 과 22 를 지원합니다. `rokc` 는 `PATH` 를 먼저, 그다음 `/opt/homebrew/opt/llvm@21/bin`,
-  `/usr/local/opt/llvm@21/bin`, `/usr/lib/llvm-21/bin` 등을 찾으므로 보통 `PATH` 를 바꿀 필요가 없습니다.
+- **LLVM 21 (with MLIR)** — `rokc` does not link LLVM; it runs `mlir-opt` / `mlir-translate` / `clang` as
+  subprocesses. LLVM 21 and 22 are supported. `rokc` searches `PATH` first, then `/opt/homebrew/opt/llvm@21/bin`,
+  `/usr/local/opt/llvm@21/bin`, `/usr/lib/llvm-21/bin`, and so on, so `PATH` usually needs no changes.
   - macOS: `brew install llvm@21`
-  - Debian / Ubuntu: [apt.llvm.org](https://apt.llvm.org) 의 `mlir-21-tools clang-21`
-- macOS 에서 최종 링크는 Xcode (Command Line Tools) 의 clang (`xcrun clang`) 으로 합니다. Homebrew 의 clang 이
-  `PATH` 앞에 있어도 SDK 의 `.tbd` 를 못 읽는 일이 없습니다. 다른 링커 드라이버는 `ROK_CC` 로 지정합니다.
-- REPL / Jupyter 는 LLVM 의 공유 라이브러리 (`libLLVM`) 와 C API 헤더도 씁니다 (Homebrew 의 LLVM 에 들어 있음).
-- 소스에서 빌드하려면 Rust (`rust-toolchain.toml`). 외부 crate 는 쓰지 않습니다.
+  - Debian / Ubuntu: `mlir-21-tools clang-21` from [apt.llvm.org](https://apt.llvm.org)
+- On macOS the final link uses Xcode's (Command Line Tools) clang (`xcrun clang`), so a Homebrew clang earlier in
+  `PATH` cannot fail on the SDK's `.tbd` files. Set `ROK_CC` to use a different linker driver.
+- The REPL / Jupyter kernel also use LLVM's shared library (`libLLVM`) and C API headers (included in Homebrew's
+  LLVM).
+- Building from source needs Rust (`rust-toolchain.toml`). No external crates are used.
 
-## 설치
+## Install
 
 ```sh
 curl -fsSL https://rok-lang.org/install.sh | sh
 ```
 
-또는 릴리스 archive 로:
+Or from a release archive:
 
 ```sh
 sh install.sh --archive rok-0.1.0-aarch64-apple-darwin.tar.gz
-# 풀어 둔 archive 안에서는
+# from inside an unpacked archive
 rok-0.1.0-aarch64-apple-darwin/install.sh
 ```
 
-설치 뒤 `~/.rok/bin` 을 `PATH` 에 더합니다 (스크립트가 안내합니다).
+Then add `~/.rok/bin` to `PATH` (the script tells you how).
 
 ```sh
 export PATH="$HOME/.rok/bin:$PATH"      # bash / zsh
 fish_add_path ~/.rok/bin                 # fish
 ```
 
-## 설치 레이아웃
+## Install layout
 
-rustup / cargo 식입니다 (spec 9.2.19). `ROK_HOME` 의 기본값은 `~/.rok` 입니다.
+rustup / cargo style (spec 9.2.19). `ROK_HOME` defaults to `~/.rok`.
 
 ```
 $ROK_HOME/
-├── bin/{rok,rokc,rokls}              proxy: 활성 toolchain 의 같은 이름 실행 파일을 실행
-├── toolchains/<version>-<triple>/    자기 완결 toolchain
+├── bin/{rok,rokc,rokls}              proxies: run the same-named binary of the active toolchain
+├── toolchains/<version>-<triple>/    self-contained toolchain
 │   ├── bin/{rok,rokc,rokls}
 │   └── lib/librokr.a, lib/rok/{core,std,bare}/
-├── cache/                            git, registry, 스크립트 lock
-├── envs/<name>/, envs/CURRENT        이름 있는 환경
+├── cache/                            git, registry, script locks
+├── envs/<name>/, envs/CURRENT        named environments
 └── config.rokon                      Config { registry: "..", toolchain: ".." }
 ```
 
-- `rokc` 는 표준 라이브러리와 런타임을 자기 실행 파일 기준 (sysroot = `bin/..`) 에서 찾고, `ROK_HOME` 은 보지
-  않습니다. 저장소에서 빌드한 `rokc` (`target/<profile>/rokc`) 는 저장소의 `library/` 와 옆의 `librokr.a` 를 씁니다.
-- 활성 toolchain: `rok +<version> ..` > `ROK_TOOLCHAIN` > 가장 가까운 `rok.rokon` 의 `toolchain: "X"` >
+- `rokc` finds the standard library and runtime relative to its own executable (sysroot = `bin/..`) and ignores
+  `ROK_HOME`. A `rokc` built in the repository (`target/<profile>/rokc`) uses the repository's `library/` and the
+  `librokr.a` next to it.
+- Active toolchain: `rok +<version> ..` > `ROK_TOOLCHAIN` > `toolchain: "X"` in the nearest `rok.rokon` >
   `rok toolchain default`.
 
 ```sh
 rok toolchain list
-rok toolchain install 0.1.0 --from rok-0.1.0-aarch64-apple-darwin.tar.gz   # 디렉토리, archive, URL
+rok toolchain install 0.1.0 --from rok-0.1.0-aarch64-apple-darwin.tar.gz   # directory, archive, or URL
 rok toolchain default 0.1
 rok toolchain remove 0.1.0-aarch64-apple-darwin
 ```
 
-## 빠른 시작
+## Quick start
 
 ```sh
 rok new hello        # hello/{main.rok, rok.rokon, .gitignore} + git init
 cd hello
 rok run              # Hello, world!
 rok test
-rok jupyter install  # Jupyter / VS Code 의 rok 커널
+rok jupyter install  # rok kernel for Jupyter / VS Code
 ```
 
-## 소스에서 빌드
+## Building from source
 
 ```sh
 cargo build --release                 # target/release/{rok,rokc,rokls}, librokr.a
@@ -83,9 +85,9 @@ cargo build --release                 # target/release/{rok,rokc,rokls}, librokr
 sh install.sh --archive dist/rok-*.tar.gz
 ```
 
-개발 중에는 `target/debug/rok` / `rokc` 를 그대로 써도 됩니다 (저장소의 `library/` 를 찾음).
+During development you can use `target/debug/rok` / `rokc` directly (they find the repository's `library/`).
 
-### 검사
+### Checks
 
 ```sh
 cargo fmt --all --check
@@ -95,6 +97,7 @@ ROK_TEST_OPT=-O2 ROK_REQUIRE_LLVM=1 cargo test --test integration
 cargo run -p rokc -- fmt --check library
 ```
 
-## 라이선스
+## License
 
-`MIT OR Apache-2.0` ([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)). 명세 저장소는 CC-BY-4.0 입니다.
+`MIT OR Apache-2.0` ([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)). The specification repository
+is CC-BY-4.0.

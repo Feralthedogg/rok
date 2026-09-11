@@ -8,3 +8,5 @@ fn main() -> i32 {
     let r = apply(5, |x: i32| -> i32 { x * 6 });
     return r;
 }
+
+// spec: 002.10-generics

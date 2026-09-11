@@ -12,3 +12,5 @@ fn greet(name: str) -> i32 {
 fn main() {
     let _ = greet("hi from rok");
 }
+
+// spec: std 215-string

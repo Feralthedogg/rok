@@ -323,6 +323,7 @@ pub fn lower_full(
     let program = assoc_sigs.as_ref().unwrap_or(program);
     check_bound_names(program, &names, &mut pre_diags);
     check_niche_attrs(program, &mut pre_diags);
+    check_repr_attrs(program, &mut pre_diags);
 
     // Pass 1a: enums. Generic enums get stashed for lazy instantiation.
     let mut enum_table: HashMap<String, EnumId> = HashMap::new();
@@ -2363,6 +2364,7 @@ pub(super) fn lower_enum_def(
         .collect();
     HirEnumDef {
         id,
+        repr: repr_of(&e.attrs).unwrap_or_default(),
         def_id: None,
         name: e.name.clone(),
         variants,
@@ -2456,6 +2458,124 @@ pub(super) fn niche_args(attrs: &[rokc_ast::Attribute]) -> Result<Vec<NicheArg>,
         .collect()
 }
 
+/// `#[repr(..)]` arguments (spec 6.2.2), unchecked against the item.
+pub(super) fn repr_of(attrs: &[rokc_ast::Attribute]) -> Result<crate::Repr, String> {
+    use rokc_ast::{AttrArg, AttrBody, Literal};
+    let mut r = crate::Repr::default();
+    for attr in attrs.iter().filter(|a| a.name() == "repr") {
+        let AttrBody::Args(args) = &attr.body else {
+            return Err("`#[repr]` takes arguments: `#[repr(C)]`".to_owned());
+        };
+        for a in args {
+            match a {
+                AttrArg::Word(w) => match w.as_str() {
+                    "C" => r.c = true,
+                    "transparent" => r.transparent = true,
+                    "packed" => r.packed = true,
+                    w => {
+                        r.int = Some(match w {
+                            "u8" => PrimTy::U8,
+                            "i8" => PrimTy::I8,
+                            "u16" => PrimTy::U16,
+                            "i16" => PrimTy::I16,
+                            "u32" => PrimTy::U32,
+                            "i32" => PrimTy::I32,
+                            "u64" => PrimTy::U64,
+                            "i64" => PrimTy::I64,
+                            _ => return Err(format!("unknown `#[repr]` argument `{w}`")),
+                        });
+                    }
+                },
+                AttrArg::Nested { path, body } if path.as_slice() == ["align"] => {
+                    let n = match &**body {
+                        AttrBody::Args(v) => match v.as_slice() {
+                            [AttrArg::Lit(Literal::Int(t))] => super::expr::parse_int_literal(t)
+                                .and_then(|(v, _)| u32::try_from(v).ok()),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    match n {
+                        Some(n) if n.is_power_of_two() && n <= 1 << 29 => r.align = n,
+                        _ => {
+                            return Err("`align(N)` takes a power of two up to 2^29".to_owned());
+                        }
+                    }
+                }
+                _ => return Err("unknown `#[repr]` argument".to_owned()),
+            }
+        }
+    }
+    Ok(r)
+}
+
+/// `#[repr(..)]` arguments and placement (spec 6.2.2).
+fn check_repr_attrs(program: &rokc_ast::Program, diags: &mut Vec<rokc_diagnostic::RokDiagnostic>) {
+    for item in &program.items {
+        let attrs = match item {
+            Item::Struct(s) => &s.attrs,
+            Item::Enum(e) => &e.attrs,
+            Item::Union(u) => &u.attrs,
+            _ => continue,
+        };
+        let Some(attr) = attrs.iter().find(|a| a.name() == "repr") else {
+            continue;
+        };
+        rokc_diagnostic::set_current_span(attr.span);
+        let msg = match (repr_of(attrs), item) {
+            (Err(e), _) => Some(e),
+            (Ok(r), Item::Struct(s)) => {
+                let n = match &s.kind {
+                    AstStructKind::Named(fs) => fs.len(),
+                    AstStructKind::Tuple(fs) => fs.len(),
+                    AstStructKind::Unit => 0,
+                };
+                if r.int.is_some() {
+                    Some("an integer `#[repr]` goes on an enum, not a struct".to_owned())
+                } else if r.packed && r.align != 0 {
+                    Some("a struct cannot be both `packed` and `align(N)`".to_owned())
+                } else if r.transparent && (r.c || r.packed || r.align != 0) {
+                    Some("`#[repr(transparent)]` takes no other argument".to_owned())
+                } else if r.transparent && n != 1 {
+                    Some(format!(
+                        "`#[repr(transparent)]` needs exactly one field, not {n}"
+                    ))
+                } else {
+                    None
+                }
+            }
+            (Ok(r), Item::Enum(e)) => {
+                let data = e
+                    .variants
+                    .iter()
+                    .any(|v| !matches!(v.kind, AstEnumVariantKind::Unit));
+                if r.packed || r.transparent || r.align != 0 {
+                    Some("an enum takes only `C` or an integer `#[repr]`".to_owned())
+                } else if data
+                    && r.int
+                        .is_some_and(|p| !matches!(p, PrimTy::I32 | PrimTy::U32))
+                {
+                    Some(
+                        "a data-carrying enum's tag is 32 bits: only `#[repr(i32)]` / \
+                         `#[repr(u32)]`"
+                            .to_owned(),
+                    )
+                } else {
+                    None
+                }
+            }
+            (Ok(r), _) => (r.packed || r.transparent || r.align != 0 || r.int.is_some())
+                .then(|| "a union takes only `#[repr(C)]`".to_owned()),
+        };
+        if let Some(msg) = msg {
+            diags.push(rokc_diagnostic::RokDiagnostic::error(
+                rokc_diagnostic::ErrorKind::Type,
+                msg,
+            ));
+        }
+    }
+}
+
 /// `#[niche]` placement (spec 2.7.5): a single-field struct only.
 fn check_niche_attrs(program: &rokc_ast::Program, diags: &mut Vec<rokc_diagnostic::RokDiagnostic>) {
     for item in &program.items {
@@ -2528,6 +2648,7 @@ pub(super) fn lower_struct_def(
     };
     HirStructDef {
         id,
+        repr: repr_of(&s.attrs).unwrap_or_default(),
         def_id: None,
         name: s.name.clone(),
         fields,
@@ -2575,6 +2696,7 @@ pub(super) fn lower_union_def(
     };
     HirStructDef {
         id,
+        repr: repr_of(&u.attrs).unwrap_or_default(),
         def_id: None,
         name: u.name.clone(),
         fields: vec![HirField {

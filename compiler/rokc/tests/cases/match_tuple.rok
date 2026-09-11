@@ -16,3 +16,5 @@ fn main() -> i32 {
     let extra = classify((4i32, -3i32));
     return s + extra;
 }
+
+// spec: 003.12-match-expression

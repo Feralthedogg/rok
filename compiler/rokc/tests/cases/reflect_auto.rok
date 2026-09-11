@@ -53,3 +53,5 @@ let v: i32 | f64 = pick();
 println(describe(v));
 println(describe(Sq { s: 1 }));
 println(f"{Own { n: 1 }.size()}");
+
+// spec: 006.10-reflection

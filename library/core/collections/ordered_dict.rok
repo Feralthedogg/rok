@@ -12,6 +12,9 @@ pub struct OrderedDict<K, V> {
     vals: List<V>;
 }
 
+// Shares its buffer like `List` (stdlib 2.13.9).
+impl<K, V> !Sync for OrderedDict<K, V> {}
+
 impl<K: Hash, V> OrderedDict<K, V> {
     pub fn new() -> OrderedDict<K, V> {
         OrderedDict::with_capacity(4)

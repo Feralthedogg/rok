@@ -6,6 +6,9 @@ pub struct OrderedSet<T> {
     d: OrderedDict<T, bool>;
 }
 
+// Shares its buffer like `List` (stdlib 2.13.9).
+impl<T> !Sync for OrderedSet<T> {}
+
 impl<T: Hash> OrderedSet<T> {
     pub fn new() -> OrderedSet<T> {
         OrderedSet { d: OrderedDict::new() }

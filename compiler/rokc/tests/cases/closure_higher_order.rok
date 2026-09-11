@@ -13,3 +13,5 @@ fn main() -> i32 {
     let total = map_sum(xs, |x: i32| -> i32 { x * 3 });
     return total;
 }
+
+// spec: 004.05-closure

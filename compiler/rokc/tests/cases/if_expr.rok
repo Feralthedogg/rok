@@ -19,3 +19,5 @@ fn main() -> i32 {
     let d = classify(100);
     return a + b + c + d + 16;
 }
+
+// spec: 003.10-if-expression

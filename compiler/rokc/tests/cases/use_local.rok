@@ -10,3 +10,5 @@ fn main() -> i32 {
     let y = val();
     return x + y;   // 7 + 7 = 14
 }
+
+// spec: 005.05-use

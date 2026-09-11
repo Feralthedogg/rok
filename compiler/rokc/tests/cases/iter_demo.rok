@@ -24,3 +24,5 @@ fn main() -> i32 {
     let s = iter_sum(mapped);
     return s + 5;
 }
+
+// spec: std 207-iter

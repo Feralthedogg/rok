@@ -1,0 +1,33 @@
+// expect-exit: 0
+// expect-stdout:
+// 3 2
+
+// Inside one task a list may go to an `async fn` / `async` block that
+// the task itself awaits: nothing crosses to another task, so only the
+// spawned future's own captures must be `Sync`
+// (`async_spawn_capture_not_sync`).
+async fn grow(xs: List<i32>) -> usize {
+    await task::yield_now();
+    xs.push(1);
+    xs.len()
+}
+
+async fn main() {
+    let t = task::spawn(async {
+        let mine: List<i32> = [7, 8];
+        let n = await grow(mine);
+        let inner = async { mine.push(9); mine.len() };
+        await inner;
+        n
+    });
+    let shared: Mutex<List<i32>> = Mutex::new([1]);
+    let u = task::spawn(async {
+        using g = shared.lock() { g.get().push(2); }
+        await task::yield_now();
+        using g = shared.lock() { return g.get().len(); }
+        0usize
+    });
+    let a = await t;
+    let b = await u;
+    println(f"{a} {b}");
+}

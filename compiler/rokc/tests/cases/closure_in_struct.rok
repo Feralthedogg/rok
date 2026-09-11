@@ -12,3 +12,5 @@ fn main() -> i32 {
     let r = v(o.base) + v(13);
     return r;
 }
+
+// spec: 004.05-closure

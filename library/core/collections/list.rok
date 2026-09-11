@@ -1,11 +1,18 @@
 // rok::core::collections::list — `List<T>`, a growable array (stdlib
 // spec 2.9.2). `meta` holds `[len, capacity]`; `data` holds the current
-// element buffer, swapped for a bigger one on growth.
+// element buffer, swapped for a bigger one on growth. The buffer has one
+// slot past the capacity that is never written: a zero `T` that vacated
+// slots are overwritten with, so the list keeps no removed value alive.
 
 pub struct List<T> {
     meta: GcBuf<usize>;
     data: GcBuf<GcBuf<T>>;
 }
+
+// Copies of a collection handle share one mutable buffer with no lock,
+// so a collection cannot be shared between threads (stdlib 2.13.9):
+// share it through `Mutex` / `RwLock` / a channel.
+impl<T> !Sync for List<T> {}
 
 impl<T> List<T> {
     pub fn new() -> List<T> {
@@ -13,15 +20,19 @@ impl<T> List<T> {
     }
 
     pub fn with_capacity(cap: usize) -> List<T> {
-        let meta: GcBuf<usize> = buf_new(2);
-        meta[1] = cap;
-        let data: GcBuf<GcBuf<T>> = buf_new(1);
-        data[0] = buf_new(cap);
-        List { meta, data }
+        unsafe {
+            let meta: GcBuf<usize> = buf_new(2);
+            meta[1] = cap;
+            let data: GcBuf<GcBuf<T>> = buf_new(1);
+            data[0] = buf_new(buf_len(cap_add(cap, 1), size_of::<T>()));
+            List { meta, data }
+        }
     }
 
     pub fn len(self) -> usize {
-        self.meta[0]
+        unsafe {
+            self.meta[0]
+        }
     }
 
     pub fn is_empty(self) -> bool {
@@ -29,47 +40,53 @@ impl<T> List<T> {
     }
 
     pub fn capacity(self) -> usize {
-        self.meta[1]
+        unsafe {
+            self.meta[1]
+        }
     }
 
     /// The current element buffer (`Slice` views it).
     pub(pkg) fn buffer(self) -> GcBuf<T> {
-        self.data[0]
+        unsafe {
+            self.data[0]
+        }
     }
 
     /// Room for `additional` more elements (doubling).
     pub fn reserve(self, additional: usize) {
-        let n = self.len();
-        let cap = self.capacity();
-        if n + additional <= cap {
-            return;
+        unsafe {
+            let n = self.len();
+            let cap = self.capacity();
+            let need = cap_add(n, additional);
+            if need <= cap {
+                return;
+            }
+            let new_cap = cap.saturating_mul(2).max(need);
+            let old = self.data[0];
+            let store: GcBuf<T> = buf_new(buf_len(cap_add(new_cap, 1), size_of::<T>()));
+            for i in 0..n {
+                store[i] = old[i];
+            }
+            self.data[0] = store;
+            self.meta[1] = new_cap;
         }
-        let new_cap = cap * 2;
-        if new_cap < n + additional {
-            new_cap = n + additional;
-        }
-        let old = self.data[0];
-        let store: GcBuf<T> = buf_new(new_cap);
-        for i in 0..n {
-            store[i] = old[i];
-        }
-        self.data[0] = store;
-        self.meta[1] = new_cap;
     }
 
     /// Capacity cut down to the length.
     pub fn shrink_to_fit(self) {
-        let n = self.len();
-        if n == self.capacity() {
-            return;
+        unsafe {
+            let n = self.len();
+            if n == self.capacity() {
+                return;
+            }
+            let old = self.data[0];
+            let store: GcBuf<T> = buf_new(buf_len(cap_add(n, 1), size_of::<T>()));
+            for i in 0..n {
+                store[i] = old[i];
+            }
+            self.data[0] = store;
+            self.meta[1] = n;
         }
-        let old = self.data[0];
-        let store: GcBuf<T> = buf_new(n);
-        for i in 0..n {
-            store[i] = old[i];
-        }
-        self.data[0] = store;
-        self.meta[1] = n;
     }
 
     /// Push every item of `items`, in order.
@@ -80,27 +97,45 @@ impl<T> List<T> {
     }
 
     pub fn push(self, x: T) {
-        self.reserve(1);
-        let n = self.len();
-        self.data[0][n] = x;
-        self.meta[0] = n + 1;
+        unsafe {
+            // One read of the length: the slot written and the new length
+            // agree, and `reserve` made room past it.
+            let n = self.len();
+            self.reserve(1);
+            let store = self.data[0];
+            store[n] = x;
+            self.meta[0] = n + 1;
+        }
     }
 
     pub fn pop(self) -> T | none {
-        let n = self.len();
-        if n == 0 {
-            return none;
+        unsafe {
+            let n = self.len();
+            if n == 0 {
+                return none;
+            }
+            let store = self.data[0];
+            let x = store[n - 1];
+            self.vacate(store, n - 1);
+            self.meta[0] = n - 1;
+            x
         }
-        self.meta[0] = n - 1;
-        self.data[0][n - 1]
+    }
+
+    /// Overwrite slot `i` of `store` (this list's buffer) with the zero
+    /// slot past the capacity.
+    unsafe fn vacate(self, store: GcBuf<T>, i: usize) {
+        store[i] = store[self.capacity()];
     }
 
     /// Element `idx`, or `none` out of bounds.
     pub fn get(self, idx: usize) -> T | none {
-        if idx >= self.len() {
-            return none;
+        unsafe {
+            if idx >= self.len() {
+                return none;
+            }
+            self.data[0][idx]
         }
-        self.data[0][idx]
     }
 
     pub fn first(self) -> T | none {
@@ -117,43 +152,55 @@ impl<T> List<T> {
 
     #[track_caller]
     pub fn insert(self, idx: usize, x: T) {
-        let n = self.len();
-        if idx > n {
-            panic("List::insert: index out of bounds");
+        unsafe {
+            let n = self.len();
+            if idx > n {
+                panic("List::insert: index out of bounds");
+            }
+            self.reserve(1);
+            let store = self.data[0];
+            let i = n;
+            while i > idx {
+                store[i] = store[i - 1];
+                i -= 1;
+            }
+            store[idx] = x;
+            self.meta[0] = n + 1;
         }
-        self.reserve(1);
-        let store = self.data[0];
-        let i = n;
-        while i > idx {
-            store[i] = store[i - 1];
-            i -= 1;
-        }
-        store[idx] = x;
-        self.meta[0] = n + 1;
     }
 
     #[track_caller]
     pub fn remove(self, idx: usize) -> T {
-        let n = self.len();
-        if idx >= n {
-            return panic("List::remove: index out of bounds");
+        unsafe {
+            let n = self.len();
+            if idx >= n {
+                return panic("List::remove: index out of bounds");
+            }
+            let store = self.data[0];
+            let x = store[idx];
+            for i in idx + 1..n {
+                store[i - 1] = store[i];
+            }
+            self.vacate(store, n - 1);
+            self.meta[0] = n - 1;
+            x
         }
-        let store = self.data[0];
-        let x = store[idx];
-        for i in idx + 1..n {
-            store[i - 1] = store[i];
-        }
-        self.meta[0] = n - 1;
-        x
     }
 
     pub fn clear(self) {
-        self.meta[0] = 0;
+        unsafe {
+            let store = self.data[0];
+            for i in 0..self.len() {
+                self.vacate(store, i);
+            }
+            self.meta[0] = 0;
+        }
     }
 
     /// Set the length to `n` (at most the capacity) without writing
     /// elements, for a buffer filled in place: elements past the old
-    /// length hold whatever the storage held (zero when fresh).
+    /// length hold whatever the storage held (zero: vacated slots are
+    /// zeroed). Shrinking this way leaves the cut elements in place.
     #[track_caller]
     pub unsafe fn set_len(self, n: usize) {
         if n > self.capacity() {
@@ -163,9 +210,11 @@ impl<T> List<T> {
     }
 
     pub fn iter(self) -> ListIter<T> {
-        // [front index, items taken from the back]
-        let pos: GcBuf<usize> = buf_new(2);
-        ListIter { list: self, pos }
+        unsafe {
+            // [front index, items taken from the back]
+            let pos: GcBuf<usize> = buf_new(2);
+            ListIter { list: self, pos }
+        }
     }
 }
 
@@ -182,70 +231,72 @@ impl<T: Ord> List<T> {
 impl<T> List<T> {
     /// Stable bottom-up merge sort by `cmp`: O(n log n), n extra slots.
     pub fn sort_by(self, cmp: fn(T, T) -> rok::core::cmp::Ordering) {
-        let n = self.len();
-        if n < 2 {
-            return;
-        }
-        let src = self.data[0];
-        let lo: usize = 0;
-        while lo < n {
-            let hi = (lo + SORT_RUN).min(n);
-            for i in lo + 1..hi {
-                let x = src[i];
-                let j = i;
-                while j > lo && cmp(src[j - 1], x).is_gt() {
-                    src[j] = src[j - 1];
-                    j -= 1;
-                }
-                src[j] = x;
+        unsafe {
+            let n = self.len();
+            if n < 2 {
+                return;
             }
-            lo = hi;
-        }
-        if n <= SORT_RUN {
-            return;
-        }
-        let a = src;
-        let b: GcBuf<T> = buf_new(n);
-        let width = SORT_RUN;
-        while width < n {
-            let start: usize = 0;
-            while start < n {
-                let mid = (start + width).min(n);
-                let end = (start + 2 * width).min(n);
-                let i = start;
-                let j = mid;
-                let k = start;
-                while i < mid && j < end {
-                    // Ties take the left run: stable.
-                    if cmp(a[j], a[i]).is_lt() {
-                        b[k] = a[j];
-                        j += 1;
-                    } else {
+            let src = self.data[0];
+            let lo: usize = 0;
+            while lo < n {
+                let hi = (lo + SORT_RUN).min(n);
+                for i in lo + 1..hi {
+                    let x = src[i];
+                    let j = i;
+                    while j > lo && cmp(src[j - 1], x).is_gt() {
+                        src[j] = src[j - 1];
+                        j -= 1;
+                    }
+                    src[j] = x;
+                }
+                lo = hi;
+            }
+            if n <= SORT_RUN {
+                return;
+            }
+            let a = src;
+            let b: GcBuf<T> = buf_new(n);
+            let width = SORT_RUN;
+            while width < n {
+                let start: usize = 0;
+                while start < n {
+                    let mid = (start + width).min(n);
+                    let end = (start + 2 * width).min(n);
+                    let i = start;
+                    let j = mid;
+                    let k = start;
+                    while i < mid && j < end {
+                        // Ties take the left run: stable.
+                        if cmp(a[j], a[i]).is_lt() {
+                            b[k] = a[j];
+                            j += 1;
+                        } else {
+                            b[k] = a[i];
+                            i += 1;
+                        }
+                        k += 1;
+                    }
+                    while i < mid {
                         b[k] = a[i];
                         i += 1;
+                        k += 1;
                     }
-                    k += 1;
+                    while j < end {
+                        b[k] = a[j];
+                        j += 1;
+                        k += 1;
+                    }
+                    start = end;
                 }
-                while i < mid {
-                    b[k] = a[i];
-                    i += 1;
-                    k += 1;
-                }
-                while j < end {
-                    b[k] = a[j];
-                    j += 1;
-                    k += 1;
-                }
-                start = end;
+                let t = a;
+                a = b;
+                b = t;
+                width *= 2;
             }
-            let t = a;
-            a = b;
-            b = t;
-            width *= 2;
-        }
-        if !buf_same(a, src) {
-            for i in 0..n {
-                src[i] = a[i];
+            if !buf_same(a, src) {
+                for i in 0..n {
+                    src[i] = a[i];
+                }
             }
         }
     }
@@ -260,24 +311,28 @@ pub struct ListIter<T> {
 impl<T> Iterator for ListIter<T> {
     type Item = T;
     fn next(ref self) -> T | none {
-        let i = self.pos[0];
-        if i + self.pos[1] >= self.list.len() {
-            return none;
+        unsafe {
+            let i = self.pos[0];
+            if i + self.pos[1] >= self.list.len() {
+                return none;
+            }
+            self.pos[0] = i + 1;
+            self.list.get(i)
         }
-        self.pos[0] = i + 1;
-        self.list.get(i)
     }
 }
 
 impl<T> DoubleEndedIterator for ListIter<T> {
     fn next_back(ref self) -> T | none {
-        let i = self.pos[0];
-        let back = self.pos[1];
-        if i + back >= self.list.len() {
-            return none;
+        unsafe {
+            let i = self.pos[0];
+            let back = self.pos[1];
+            if i + back >= self.list.len() {
+                return none;
+            }
+            self.pos[1] = back + 1;
+            self.list.get(self.list.len() - back - 1)
         }
-        self.pos[1] = back + 1;
-        self.list.get(self.list.len() - back - 1)
     }
 }
 
@@ -309,10 +364,12 @@ impl<T> Index<usize> for List<T> {
     type Output = T;
     #[track_caller]
     fn index(self, idx: usize) -> T {
-        if idx >= self.len() {
-            return panic("List index out of bounds");
+        unsafe {
+            if idx >= self.len() {
+                return panic("List index out of bounds");
+            }
+            self.data[0][idx]
         }
-        self.data[0][idx]
     }
 }
 
@@ -321,10 +378,12 @@ impl<T> IndexSet<usize> for List<T> {
     type Value = T;
     #[track_caller]
     fn index_set(self, idx: usize, value: T) {
-        if idx >= self.len() {
-            panic("List index out of bounds");
+        unsafe {
+            if idx >= self.len() {
+                panic("List index out of bounds");
+            }
+            self.data[0][idx] = value;
         }
-        self.data[0][idx] = value;
     }
 }
 

@@ -19,3 +19,5 @@ fn main() -> i32 {
     }
     return total + 9;
 }
+
+// spec: 002.10-generics

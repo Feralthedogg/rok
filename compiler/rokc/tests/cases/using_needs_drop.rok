@@ -3,3 +3,5 @@
 fn main() -> i32 {
     using x = 42 { x }
 }
+
+// spec: 003.17-using-expression

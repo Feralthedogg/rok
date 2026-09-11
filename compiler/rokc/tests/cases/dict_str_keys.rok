@@ -36,3 +36,5 @@ fn main() -> i32 {
     println(f"{if s.contains("y") { 1 } else { 0 }}");
     return 0;
 }
+
+// spec: std 209-collections

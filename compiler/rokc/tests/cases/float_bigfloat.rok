@@ -73,3 +73,5 @@ fn main() {
     let ovf: f32 | none = big.to_f32();
     println(f"{ovf is none} {h.to_f32() is none} {(a.to_f32() ?? 0.0f32)}");
 }
+
+// spec: std 201-numbers

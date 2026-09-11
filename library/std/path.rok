@@ -190,25 +190,29 @@ impl Path {
 
     /// Component-wise prefix test.
     pub fn starts_with(self, base: Path) -> bool {
-        let a = self.component_list();
-        let b = base.component_list();
-        if b.len() > a.len() { return false; }
-        for i in 0..b.len() {
-            if a[i] != b[i] { return false; }
+        unsafe {
+            let a = self.component_list();
+            let b = base.component_list();
+            if b.len() > a.len() { return false; }
+            for i in 0..b.len() {
+                if a[i] != b[i] { return false; }
+            }
+            true
         }
-        true
     }
 
     /// Component-wise suffix test.
     pub fn ends_with(self, suffix: Path) -> bool {
-        let a = self.component_list();
-        let b = suffix.component_list();
-        if b.len() > a.len() { return false; }
-        let off = a.len() - b.len();
-        for i in 0..b.len() {
-            if a[off + i] != b[i] { return false; }
+        unsafe {
+            let a = self.component_list();
+            let b = suffix.component_list();
+            if b.len() > a.len() { return false; }
+            let off = a.len() - b.len();
+            for i in 0..b.len() {
+                if a[off + i] != b[i] { return false; }
+            }
+            true
         }
-        true
     }
 
     pub fn strip_prefix(self, base: Path) throws (StripPrefixError) -> Path {

@@ -24,9 +24,7 @@ use rok::std::env;
 use rok::std::thread;
 
 fn text(buf: List<u8>, n: usize) -> str {
-    let sb = StrBuf::new();
-    for i in 0..n { sb.push_byte(buf[i]); }
-    sb.to_str()
+    try! str::from_utf8(buf[0:n])
 }
 
 let base = env::temp_dir() / f"rok_std_fs_async_{env::pid()}";
@@ -109,3 +107,5 @@ println(f"cancelled: {gone}, then: {try! fs::read_to_str(big)}");
 
 try! await fs::remove_dir_all_async(base);
 println(f"removed: {await fs::exists_async(base)}");
+
+// spec: std 301-fs

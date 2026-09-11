@@ -28,3 +28,5 @@ fn main() -> i32 {
     let e = Box::get;
     return 0;
 }
+
+// spec: 004.09-method

@@ -11,3 +11,5 @@ fn main() -> i32 {
     let c = pick(nums, 2);
     return a + b + c;
 }
+
+// spec: 002.10-generics

@@ -10,7 +10,7 @@
 
 use core::cell::UnsafeCell;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use core::sync::atomic::{AtomicI32, Ordering};
 
 use rokr_common::object_header::HEADER_SIZE;
 use rokr_common::write_all;
@@ -84,7 +84,18 @@ impl Guard<'_> {
 
 static OUT: Buf = Buf::new();
 static IN: Buf = Buf::new();
-static AT_EXIT: AtomicBool = AtomicBool::new(false);
+/// `flush_at_exit` is registered before any byte is buffered, by the
+/// first writer (with a `swap` flag a second writer could buffer, and
+/// the process exit, before the first had registered it).
+struct Once(UnsafeCell<libc::pthread_once_t>);
+// SAFETY: only `pthread_once` touches it.
+unsafe impl Sync for Once {}
+static AT_EXIT: Once = Once(UnsafeCell::new(libc::PTHREAD_ONCE_INIT));
+
+extern "C" fn register_flush() {
+    // SAFETY: registers a plain `extern "C"` function.
+    unsafe { libc::atexit(flush_at_exit) };
+}
 /// `isatty(1)`: -1 unknown, then 0 / 1.
 static TTY: AtomicI32 = AtomicI32::new(-1);
 
@@ -122,10 +133,8 @@ extern "C" fn flush_at_exit() {
 
 /// `parts` to stdout through the buffer.
 fn out(parts: &[&[u8]]) -> i32 {
-    if !AT_EXIT.swap(true, Ordering::Relaxed) {
-        // SAFETY: registers a plain `extern "C"` function.
-        unsafe { libc::atexit(flush_at_exit) };
-    }
+    // SAFETY: a statically initialized once-control.
+    unsafe { libc::pthread_once(AT_EXIT.0.get(), Some(register_flush)) };
     let g = OUT.lock();
     let (data, len, _) = g.parts();
     let mut r = 0;

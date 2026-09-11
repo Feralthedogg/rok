@@ -20,3 +20,5 @@ fn main() -> i32 {
     let q = p.map(|x: i32| -> i32 { x * 2 + 5 });
     return q.sum() + 5;
 }
+
+// spec: 002.10-generics

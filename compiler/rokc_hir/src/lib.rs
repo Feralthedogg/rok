@@ -102,6 +102,8 @@ pub struct EnumId(pub u32);
 #[derive(Clone, Debug)]
 pub struct HirEnumDef {
     pub id: EnumId,
+    /// `#[repr(..)]` (spec 6.2.2): an integer tag type.
+    pub repr: Repr,
     pub def_id: Option<DefId>,
     pub name: String,
     pub variants: Vec<HirEnumVariant>,
@@ -130,6 +132,8 @@ pub struct StructId(pub u32);
 #[derive(Clone, Debug)]
 pub struct HirStructDef {
     pub id: StructId,
+    /// `#[repr(..)]` (spec 6.2.2).
+    pub repr: Repr,
     pub def_id: Option<DefId>,
     pub name: String,
     pub fields: Vec<HirField>,
@@ -142,6 +146,22 @@ pub struct HirStructDef {
     /// `#[niche(..)]` (spec 2.7.4): bit patterns the single field never
     /// holds. Empty without the attribute.
     pub niche: Vec<NicheArg>,
+}
+
+/// `#[repr(..)]` of a struct, enum or union (spec 6.2.2). The default
+/// layout is already C's (declaration order, natural alignment), so `C`
+/// changes nothing there.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Repr {
+    pub c: bool,
+    /// One field, passed and laid out as that field.
+    pub transparent: bool,
+    /// No padding, alignment 1.
+    pub packed: bool,
+    /// `align(N)`: at least `N`-aligned; 0 without.
+    pub align: u32,
+    /// An enum's tag type (`u8` .. `i64`).
+    pub int: Option<PrimTy>,
 }
 
 /// One `#[niche(..)]` value, read against the field's primitive type.

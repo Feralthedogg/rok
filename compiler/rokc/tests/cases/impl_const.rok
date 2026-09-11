@@ -34,3 +34,5 @@ fn main() -> i32 {
     println(f"{Grid::quad()}");
     return 0;
 }
+
+// spec: 002.09-impl

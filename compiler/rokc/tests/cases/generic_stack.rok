@@ -42,3 +42,5 @@ fn main() -> i32 {
     let p = s.peek() ?? -1;
     return s.sum() + p - 15;
 }
+
+// spec: 002.10-generics

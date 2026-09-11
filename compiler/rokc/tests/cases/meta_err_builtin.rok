@@ -10,3 +10,5 @@ pub @derive {
 fn main() -> i32 {
     return 0;
 }
+
+// spec: 006.08-meta-blocks

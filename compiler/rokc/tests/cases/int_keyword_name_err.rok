@@ -4,3 +4,5 @@
 fn main() {
     let int = 4;
 }
+
+// spec: std 201-numbers

@@ -79,18 +79,20 @@ impl FormatSpec {
     /// `text` parsed by the runtime with the parser the compiler checks
     /// static specs with; panics on a malformed spec.
     pub fn parse(text: str) -> FormatSpec {
-        let w: GcBuf<i64> = buf_new(8);
-        unsafe { rok_fmt_spec_parse(text, w) };
-        let s = FormatSpec::new();
-        s.fill = char::from_u32(w[0] as u32) ?? ' ';
-        s.align = (w[1] as u8) as char;
-        s.sign = (w[2] as u8) as char;
-        s.alt = w[3] != 0;
-        s.zero = w[4] != 0;
-        if w[5] >= 0 { s.width = w[5] as usize; }
-        if w[6] >= 0 { s.precision = w[6] as usize; }
-        s.ty = (w[7] as u8) as char;
-        s
+        unsafe {
+            let w: GcBuf<i64> = buf_new(8);
+            rok_fmt_spec_parse(text, w);
+            let s = FormatSpec::new();
+            s.fill = char::from_u32(w[0] as u32) ?? ' ';
+            s.align = (w[1] as u8) as char;
+            s.sign = (w[2] as u8) as char;
+            s.alt = w[3] != 0;
+            s.zero = w[4] != 0;
+            if w[5] >= 0 { s.width = w[5] as usize; }
+            if w[6] >= 0 { s.precision = w[6] as usize; }
+            s.ty = (w[7] as u8) as char;
+            s
+        }
     }
 }
 
@@ -159,7 +161,7 @@ impl Formatter {
     /// between the prefix and the digits.
     pub fn pad_integral(ref self, is_nonnegative: bool, prefix: str, buf: str) throws (FmtError) {
         let nonneg = if is_nonnegative { 1u32 } else { 0u32 };
-        self.t = unsafe { rok_fmt_integral(self.t, prefix, buf, self.flags, self.counts, nonneg) };
+        self.t = unsafe { rok_fmt_integral(self.t, self.flags, self.counts, nonneg, prefix, buf) };
     }
 
     pub fn fill(self) -> char { char::from_u32((self.flags & 0xFFFFFFFFu64) as u32) ?? ' ' }
@@ -224,9 +226,11 @@ pub fn fstr_num<T: Display>(t: str, v: T, flags: u64, counts: u64) -> str {
 /// A dynamic spec's packed words; panics when malformed, or when
 /// `text_only` and it has a number's type letter.
 pub fn fstr_pack(spec: str, text_only: bool) -> (u64, u64) {
-    let out: GcBuf<u64> = buf_new(2);
-    unsafe { rok_fmt_pack(spec, if text_only { 1u32 } else { 0u32 }, out) };
-    (out[0], out[1])
+    unsafe {
+        let out: GcBuf<u64> = buf_new(2);
+        rok_fmt_pack(spec, if text_only { 1u32 } else { 0u32 }, out);
+        (out[0], out[1])
+    }
 }
 
 /// A dynamic spec on a value with both: `?` picks the Debug; then cut

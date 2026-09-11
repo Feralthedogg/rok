@@ -8,3 +8,5 @@ fn main() -> i32 {
     let w = W { v: Tok { v: 1 } };
     return w.v.v;
 }
+
+// spec: 002.10-generics

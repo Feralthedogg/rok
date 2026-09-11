@@ -1,0 +1,86 @@
+// expect-exit: 0
+// expect-stdout:
+// list pop 1
+// list remove 1
+// list clear 1
+// dict remove 1
+// set remove 1
+// heap pop 1
+// deque pop 1
+// ordered remove 1
+// 0
+
+// A vacated slot (`pop`, `remove`, `clear`, a dict tombstone) holds a
+// zero, not the removed value: after a collection the removed values'
+// memory is gone although the container (and its buffer) lives on.
+extern "C" {
+    fn rok_gc_collect();
+    fn rok_gc_stats_live_bytes() -> usize;
+}
+
+const BIG: usize = 200000;
+
+fn big(k: i64) -> List<i64> {
+    let v: List<i64> = List::with_capacity(BIG);
+    v.push(k);
+    v
+}
+
+fn live() -> usize {
+    unsafe { rok_gc_collect() };
+    unsafe { rok_gc_stats_live_bytes() }
+}
+
+/// 1 when the live heap shrank by most of 8 big lists.
+fn freed(before: usize) -> i32 {
+    if live() + 8usize * BIG * 8usize / 2usize < before { 1 } else { 0 }
+}
+
+fn main() {
+    let xs: List<List<i64>> = [];
+    for k in 0..8i64 { xs.push(big(k)); }
+    let before = live();
+    for _ in 0..8 { xs.pop(); }
+    println(f"list pop {freed(before)}");
+
+    for k in 0..8i64 { xs.push(big(k)); }
+    before = live();
+    for _ in 0..8 { xs.remove(0); }
+    println(f"list remove {freed(before)}");
+
+    for k in 0..8i64 { xs.push(big(k)); }
+    before = live();
+    xs.clear();
+    println(f"list clear {freed(before)}");
+
+    let d: Dict<i64, List<i64>> = Dict::new();
+    for k in 0..8i64 { d.insert(k, big(k)); }
+    before = live();
+    for k in 0..8i64 { d.remove(k); }
+    println(f"dict remove {freed(before)}");
+
+    let s: Set<str> = Set::new();
+    for k in 0..8usize { s.insert("x".repeat(BIG * 8usize + k)); }
+    before = live();
+    for k in 0..8usize { s.remove("x".repeat(BIG * 8usize + k)); }
+    println(f"set remove {freed(before)}");
+
+    let h: BinaryHeap<List<i64>> = BinaryHeap::by(|a: List<i64>, b: List<i64>| a[0] > b[0]);
+    for k in 0..8i64 { h.push(big(k)); }
+    before = live();
+    for _ in 0..8 { h.pop(); }
+    println(f"heap pop {freed(before)}");
+
+    let q: Deque<List<i64>> = Deque::new();
+    for k in 0..8i64 { q.push_back(big(k)); }
+    before = live();
+    for _ in 0..8 { q.pop_front(); }
+    println(f"deque pop {freed(before)}");
+
+    let od: OrderedDict<i64, List<i64>> = OrderedDict::new();
+    for k in 0..8i64 { od.insert(k, big(k)); }
+    before = live();
+    for k in 0..8i64 { od.remove(k); }
+    println(f"ordered remove {freed(before)}");
+    println(f"{xs.len() + d.len() + s.len() + h.len() + q.len() + od.len()}");
+}

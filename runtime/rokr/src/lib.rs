@@ -25,6 +25,8 @@ mod bignum;
 mod deque;
 mod fmt;
 mod fmt_spec;
+#[cfg(test)]
+mod fuzz_tests;
 mod math;
 mod net;
 mod os;
@@ -187,11 +189,50 @@ pub extern "C" fn rok_runtime_init() {
     init_thread(true);
 }
 
-/// The main thread is done with rok code: from here it counts as
-/// stopped, so threads still running can collect without it.
+/// The main thread is done with rok code: every other rok thread (the
+/// executor's worker pool, threads still running) stops for good before
+/// the process exits.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_runtime_shutdown() {
+    rokr_gc::world::halt();
+}
+
+/// Into an `extern "C"` call: the thread counts as `PARKED`.
+///
+/// 804 §8.4.10: a C call that blocks does not hold up a collection; the
+/// caller's GC references are in its shadow-stack frame. Compiled code
+/// inlines the fast path (store the state, read the yield flag) and
+/// calls this, or [`rok_leave_native`], only when the flag is up.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_enter_native() {
     rokr_gc::world::enter_native();
+}
+
+/// Back from C: waits out a running collection.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_leave_native() {
+    rokr_gc::world::leave_native();
+}
+
+/// The C entry of a rok `extern "C" fn`: a call from C code that this
+/// thread entered from rok (`PARKED`) runs rok code again until
+/// [`rok_native_resume`]. Returns whether it was parked.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_native_reenter() -> u32 {
+    let parked = rokr_common::tls::mutator_state().load(core::sync::atomic::Ordering::Relaxed)
+        == rokr_common::tls::MUTATOR_PARKED;
+    if parked {
+        rokr_gc::world::leave_native();
+    }
+    u32::from(parked)
+}
+
+/// End of [`rok_native_reenter`]'s bracket: back to C.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_native_resume(parked: u32) {
+    if parked != 0 {
+        rokr_gc::world::enter_native();
+    }
 }
 
 /// Safepoint slow path (804 §8.4.3): park while another thread stops
@@ -587,6 +628,22 @@ pub unsafe extern "C" fn rok_store_i64(ptr: *mut i64, val: i64) {
     unsafe { *ptr = val }
 }
 
+/// # Safety
+/// `ptr` must be valid and aligned for an `f64` read.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rok_load_f64(ptr: *const f64) -> f64 {
+    // SAFETY: caller contract.
+    unsafe { *ptr }
+}
+
+/// # Safety
+/// `ptr` must be valid and aligned for an `f64` write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rok_store_f64(ptr: *mut f64, val: f64) {
+    // SAFETY: caller contract.
+    unsafe { *ptr = val }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -613,5 +670,6 @@ mod tests {
         str::tests::string_ops();
         fmt::tests::fmt_ops();
         fmt::tests::formatter_ops();
+        fuzz_tests::allocating();
     }
 }

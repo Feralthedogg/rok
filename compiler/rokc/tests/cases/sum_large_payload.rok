@@ -25,3 +25,5 @@ fn main() -> i32 {
     if total == 300i64 { return 64; }
     return 0;
 }
+
+// spec: 002.06-sum-types

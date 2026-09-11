@@ -26,3 +26,5 @@ fn main() -> i32 {
     if a2 != 5i64 || b != 2.5 || c != 7 || d != 3u8 || e != 9i64 { return 1; }
     return n ?? 0;
 }
+
+// spec: 003.05-member-access-and-method-call

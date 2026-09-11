@@ -23,3 +23,5 @@ fn show(v: i32) {
 fn sum(k: i32) -> i32 {
     return k;
 }
+
+// spec: 004.16-entry-point

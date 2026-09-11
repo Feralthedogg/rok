@@ -62,3 +62,5 @@ fn main() throws (IoError) {
     try fs::remove_file(p);
     try fs::remove_file(q);
 }
+
+// spec: std 305-io

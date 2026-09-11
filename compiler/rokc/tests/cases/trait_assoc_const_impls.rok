@@ -62,3 +62,5 @@ fn main() -> i32 {
     println(f"{<A as Other>::N}");
     return 0;
 }
+
+// spec: 002.08-trait

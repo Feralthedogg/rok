@@ -1,0 +1,32 @@
+// expect-exit: 0
+// expect-stdout:
+// 0 0 0 0
+// 2147483647 -2147483648 255 0
+// 127 -128 65535 0
+// 9223372036854775807 -9223372036854775808 18446744073709551615 0
+// -7 7 3
+
+// Spec 2.11.6: float → int truncates toward zero, saturates out of
+// range, NaN → 0, at every opt level. Values come through a `List` so
+// the optimizer cannot fold them.
+fn main() -> i32 {
+    let xs: List<f64> = List::new();
+    let zero = 0.0f64;
+    xs.push(zero / zero);
+    xs.push(1.0e300);
+    xs.push(-1.0e300);
+    xs.push(-7.9);
+    xs.push(7.9);
+    xs.push(3.99);
+    let nan = xs[0];
+    let big = xs[1];
+    let small = xs[2];
+    println(f"{nan as i32} {nan as u8} {nan as i64} {nan as u64}");
+    println(f"{big as i32} {small as i32} {big as u8} {small as u8}");
+    let fbig = big as f32;
+    let fsmall = small as f32;
+    println(f"{fbig as i8} {fsmall as i8} {fbig as u16} {fsmall as u16}");
+    println(f"{big as i64} {small as i64} {big as u64} {small as u64}");
+    println(f"{xs[3] as i32} {xs[4] as u32} {xs[5] as i64}");
+    return 0;
+}

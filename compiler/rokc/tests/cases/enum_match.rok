@@ -24,3 +24,5 @@ fn main() -> i32 {
     let d: Direction = turn_right(Direction::North);
     return code(d);
 }
+
+// spec: 002.04-enum

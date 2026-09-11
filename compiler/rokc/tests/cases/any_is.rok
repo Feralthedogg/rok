@@ -43,3 +43,5 @@ struct Box1 { inner: any; }
 let bx = Box1 { inner: 5 };
 println(f"{if bx.inner is i32 { 5 } else { 0 }}");
 println(f"{if bx.inner is Sq { 5 } else { 0 }}");
+
+// spec: 002.02-any-slot

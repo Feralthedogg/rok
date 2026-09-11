@@ -43,3 +43,5 @@ fn main() -> i32 {
     println(f"{i32::add(shown(small), 8)}");
     return 0;
 }
+
+// spec: 002.08-trait

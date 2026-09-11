@@ -158,7 +158,8 @@ impl Float {
         while i < n {
             let c = bs[i];
             if c >= 48u8 && c <= 57u8 {
-                digits.push_byte(c);
+                // An ASCII digit: valid UTF-8.
+                unsafe { digits.push_byte(c) };
                 any = true;
                 if seen_point { frac += 1; }
             } else if c == 46u8 && !seen_point {

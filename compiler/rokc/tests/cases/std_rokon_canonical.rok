@@ -102,3 +102,5 @@ fn main() {
     println(f"debug: {bad:?}");
     println(bad.to_string());
 }
+
+// spec: std 309-rokon

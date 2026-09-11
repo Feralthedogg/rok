@@ -46,3 +46,5 @@ fn main() -> i32 {
     let xs: [i32; sq(70000) as usize] = [0; 4];
     return xs[0];
 }
+
+// spec: 005.02-const

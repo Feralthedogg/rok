@@ -10,3 +10,5 @@ fn main() -> i32 {
     let c2 = Cell { last: 30 };
     return total + (c2.last ?? 100);
 }
+
+// spec: 002.06-sum-types

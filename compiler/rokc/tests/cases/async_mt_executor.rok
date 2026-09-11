@@ -84,3 +84,5 @@ let squares = task::spawn(async {
     t
 });
 println(f"par in a task {await squares}");
+
+// spec: 004.12-async

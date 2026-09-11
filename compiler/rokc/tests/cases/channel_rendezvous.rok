@@ -70,3 +70,5 @@ fn main() -> i32 {
     println("freed");
     return 0;
 }
+
+// spec: std 217-channel

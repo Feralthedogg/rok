@@ -18,3 +18,5 @@ fn main() -> i32 {
     let r2 = process(-1, 5) ?? 2;
     return r1 + r2 + 0;
 }
+
+// spec: 003.14-error-control-flow

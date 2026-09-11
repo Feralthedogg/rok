@@ -45,3 +45,5 @@ println(f"zip {n}");
 let c = 0;
 for await x in stream::select(nums(2, 1), nums(50, 1)) { c = c + 1; }
 println(f"select stops early {c < 10}");
+
+// spec: 004.12-async

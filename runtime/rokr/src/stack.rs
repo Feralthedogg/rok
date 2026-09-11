@@ -1,6 +1,6 @@
 //! Stack overflow report. Every rok thread records the addresses just
-//! below its stack (the guard page, and a little more: a big frame can
-//! step over a one-page guard into unmapped memory) and gets an
+//! below its stack (the guard page, and a little more for frames
+//! without stack probes, e.g. C's) and gets an
 //! alternate signal stack. A SIGSEGV / SIGBUS there flushes stdout,
 //! prints `thread '<name>' has overflowed its stack` and aborts; any
 //! other fault falls back to the default action.
@@ -19,8 +19,9 @@ static MAIN: AtomicUsize = AtomicUsize::new(0);
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 /// Alternate signal stack size (plus a guard page below it).
 const ALT_SIZE: usize = 64 << 10;
-/// How far below the stack a fault still counts as an overflow.
-// A heuristic window, not stack probes: a frame bigger than this skips it.
+/// How far below the stack a fault still counts as an overflow. rok
+/// and Rust frames probe each page, so theirs land in the guard page;
+/// this covers unprobed frames up to this size.
 const SLOP: usize = 1 << 20;
 
 /// `[lowest usable stack address, guard bytes at / above it)` of the

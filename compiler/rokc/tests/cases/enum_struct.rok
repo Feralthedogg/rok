@@ -24,3 +24,5 @@ fn main() -> i32 {
         Maybe::Nothing => 0,
     };
 }
+
+// spec: 002.04-enum

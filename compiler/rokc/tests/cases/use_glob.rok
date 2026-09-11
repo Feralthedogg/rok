@@ -11,3 +11,5 @@ use a::*;
 fn main() -> i32 {
     return x() + y() + z();   // 5+10+15 = 30
 }
+
+// spec: 005.05-use

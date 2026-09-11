@@ -5,3 +5,5 @@ fn g() -> i32 {
     await f()
 }
 println(f"{g()}");
+
+// spec: 004.12-async

@@ -44,3 +44,5 @@ fn main() -> i32 {
     println(f"[{10:${spec}}] [{255:${hex}}] [{"a":${dbg}}] [{"a":$$>3}] [{"hello world":.${5}}]");
     return 0;
 }
+
+// spec: 001.07-string-literals

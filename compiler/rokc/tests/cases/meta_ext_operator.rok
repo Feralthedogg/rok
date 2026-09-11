@@ -36,3 +36,5 @@ fn main() -> i32 {
     println(f"{p.fold_xor()}");
     0
 }
+
+// spec: 006.08-meta-blocks

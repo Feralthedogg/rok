@@ -19,3 +19,5 @@ fn main() -> i32 {
     let c = apply(twice, 2);           // 4
     return a + b + c;
 }
+
+// spec: 004.15-unsafe

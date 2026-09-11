@@ -64,3 +64,5 @@ fn main() -> i32 {
     println(f"{xs.iter().chain(small.iter()).skip(4).sum() + 8}");
     return 0;
 }
+
+// spec: std 207-iter

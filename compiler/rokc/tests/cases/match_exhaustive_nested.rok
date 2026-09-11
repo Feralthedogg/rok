@@ -40,3 +40,5 @@ fn main() -> i32 {
     println(f"{area(Shape::Box(3, 4))}");
     return 0;
 }
+
+// spec: 003.12-match-expression

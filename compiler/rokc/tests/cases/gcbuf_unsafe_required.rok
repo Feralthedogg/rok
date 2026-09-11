@@ -1,0 +1,17 @@
+// expect-error: call to unsafe function `buf_new` outside an `unsafe` block
+// expect-error: call to unsafe function `buf_get` outside an `unsafe` block
+// expect-error: call to unsafe function `buf_set` outside an `unsafe` block
+// expect-error: indexing a `GcBuf` is unchecked and needs an `unsafe` block
+
+// The raw `GcBuf` primitives index without a bounds check (and a fresh
+// buffer's zero bytes need not be a valid `T`), so safe code cannot
+// reach them: `buf_get(b, 100000000)` would read arbitrary memory.
+use rok::core::collections::raw::{GcBuf, buf_new, buf_get, buf_set};
+
+fn main() {
+    let b: GcBuf<i64> = buf_new(4);
+    buf_set(b, 0, 1i64);
+    let x = buf_get(b, 100000000);
+    let y = b[100000000];
+    println(f"{x} {y}");
+}

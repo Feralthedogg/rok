@@ -64,3 +64,5 @@ let m: Map<Countdown, i32> = Countdown { n: 3 }.map(|x| x * 1);
 let total = 0;
 for await x in m { total += x; }
 println(f"custom {total}");
+
+// spec: std 208-stream

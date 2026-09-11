@@ -15,3 +15,5 @@ fn main() -> i32 {
     };
     return result.a + result.b;
 }
+
+// spec: 003.13-loop-expressions

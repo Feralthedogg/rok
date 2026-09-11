@@ -12,3 +12,5 @@ fn main() -> i32 {
     let c = classify(5);
     return c + 2;
 }
+
+// spec: 003.12-match-expression

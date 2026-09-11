@@ -84,3 +84,5 @@ println(f"{Pair::field_names():?}");
 println(f"{p.set_field("0", 7)} {p.0}");
 println(f"{Color::field_names():?} {Color::methods().len()}");
 dump(p);
+
+// spec: 006.10-reflection

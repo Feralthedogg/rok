@@ -32,3 +32,5 @@ fn main() -> i32 {
     println(f"{total} {r}");
     return 0;
 }
+
+// spec: 002.02-any-slot

@@ -13,3 +13,5 @@ pub mod facade {
 fn main() -> i32 {
     return facade::deep() + facade::renamed() + 7i32;  // 5 + 10 + 7 = 22
 }
+
+// spec: 005.05-use

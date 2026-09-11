@@ -38,3 +38,5 @@ fn main() -> i32 {
     // tally=10, bonus=10, raw=5 → 25; +5 = 30.
     return c.tally() + c.bonus() + c.raw() + 5;
 }
+
+// spec: 002.08-trait

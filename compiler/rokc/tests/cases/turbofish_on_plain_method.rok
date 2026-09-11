@@ -5,3 +5,5 @@ fn main() -> i32 {
     let s = S { v: 1 };
     return s.get::<i32>();
 }
+
+// spec: 003.05-member-access-and-method-call

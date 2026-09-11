@@ -490,17 +490,15 @@ pub extern "C" fn rok_fmt_digits(
     w.done()
 }
 
-/// `Formatter::pad_integral`: the sign, `prefix` under `#`, `buf`. The
-/// `str`s come first: past eight argument words a split `str` would not
-/// match the caller.
+/// `Formatter::pad_integral`: the sign, `prefix` under `#`, `buf`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_fmt_integral(
     h: RokStr,
-    prefix: RokStr,
-    buf: RokStr,
     flags: u64,
     counts: u64,
     nonneg: u32,
+    prefix: RokStr,
+    buf: RokStr,
 ) -> RokStr {
     let mut w = W::of(h);
     let spec = unpack(flags, counts);

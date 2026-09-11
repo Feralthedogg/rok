@@ -100,13 +100,24 @@ fn niche_of(ty: &HirTy, module: &HirModule, target: &Target) -> Option<Niche> {
             if n == 0 || target.has_gc_ref(&layout) {
                 return None;
             }
+            let (path, leaf) = match layout {
+                MirTy::Tuple(_) => (vec![0], MirTy::Prim(PrimTy::I32)),
+                // A fieldless enum: its `#[repr]` tag, which may be full.
+                l => (Vec::new(), l),
+            };
+            let max: u64 = match leaf {
+                MirTy::Prim(PrimTy::U8) => 0xFF,
+                MirTy::Prim(PrimTy::I8) => 0x7F,
+                MirTy::Prim(PrimTy::U16) => 0xFFFF,
+                MirTy::Prim(PrimTy::I16) => 0x7FFF,
+                _ => u64::MAX,
+            };
+            if n as u64 > max {
+                return None;
+            }
             Some(Niche {
-                path: if matches!(layout, MirTy::Tuple(_)) {
-                    vec![0]
-                } else {
-                    Vec::new()
-                },
-                leaf: MirTy::Prim(PrimTy::I32),
+                path,
+                leaf,
                 bits: n as u64,
             })
         }

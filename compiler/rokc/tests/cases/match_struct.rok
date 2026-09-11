@@ -21,3 +21,5 @@ fn main() -> i32 {
     let d = classify(Point { x: 4i32, y: -2i32 });
     return a + b + c + d;
 }
+
+// spec: 003.12-match-expression

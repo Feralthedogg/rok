@@ -27,3 +27,5 @@ fn main() -> i32 {
     }
     0
 }
+
+// spec: 004.08-trailing-closure

@@ -9,12 +9,14 @@
 struct Cell { meta: GcBuf<usize>; }
 
 fn main() {
-    let b: GcBuf<usize> = buf_new(4);
-    b[0] = 5;
-    b[1] = b[0] + 1;
-    b[1] += 10;
-    println(f"{b[0]} {b[1]}");
-    let c = Cell { meta: buf_new(2) };
-    c.meta[1] = 3;
-    println(f"{c.meta[1]}");
+    unsafe {
+        let b: GcBuf<usize> = buf_new(4);
+        b[0] = 5;
+        b[1] = b[0] + 1;
+        b[1] += 10;
+        println(f"{b[0]} {b[1]}");
+        let c = Cell { meta: buf_new(2) };
+        c.meta[1] = 3;
+        println(f"{c.meta[1]}");
+    }
 }

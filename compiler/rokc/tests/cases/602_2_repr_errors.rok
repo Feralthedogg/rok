@@ -1,0 +1,23 @@
+// expect-error: `#[repr(transparent)]` needs exactly one field, not 2
+// expect-error: a struct cannot be both `packed` and `align(N)`
+// expect-error: a data-carrying enum's tag is 32 bits
+// expect-error: `align(N)` takes a power of two
+// expect-error: an integer `#[repr]` goes on an enum, not a struct
+
+// Spec 6.2.2: the `#[repr]` arguments each item kind takes.
+#[repr(transparent)]
+struct Two { a: i32; b: i32; }
+
+#[repr(packed, align(8))]
+struct Both { a: i32; }
+
+#[repr(u8)]
+enum Data { A(i64), B }
+
+#[repr(align(3))]
+struct Odd { a: i32; }
+
+#[repr(u16)]
+struct Tagged { a: i32; }
+
+fn main() {}

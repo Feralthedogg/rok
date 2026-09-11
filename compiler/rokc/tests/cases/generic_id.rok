@@ -9,3 +9,5 @@ fn main() -> i32 {
     let b = id(7);
     return a + b;
 }
+
+// spec: 002.10-generics

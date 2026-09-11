@@ -8,3 +8,5 @@ let f: any = 1.5;
 println(f"{1}");
 let b = v < f;
 println(f"{2}");
+
+// spec: 002.02-any-slot

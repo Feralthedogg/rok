@@ -31,3 +31,5 @@ async fn main() {
     println(f"{await g()}");
     println(f"{m + 1}");
 }
+
+// spec: 004.12-async

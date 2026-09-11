@@ -17,3 +17,5 @@ fn main() -> i32 {
     let c = try load(2) catch _ { 0 };
     return a + b + c;
 }
+
+// spec: 003.14-error-control-flow

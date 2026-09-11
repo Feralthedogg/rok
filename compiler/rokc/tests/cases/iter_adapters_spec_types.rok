@@ -45,3 +45,5 @@ fn main() {
     let fl: List<i32> = [0..2, 5..7].iter().flatten().collect();
     println(f"{fl.len()} {fl.iter().sum()}");
 }
+
+// spec: std 207-iter

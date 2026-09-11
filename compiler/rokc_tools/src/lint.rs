@@ -103,6 +103,10 @@ pub const LINTS: &[Lint] = &[
         "identifiers that look alike (spec 1.4.3)",
     ),
     warn("deprecated", "use of a `#[deprecated]` function"),
+    warn(
+        "unclosed_resource",
+        "a local holding a `Drop` resource (file, socket, child) that is never closed",
+    ),
 ];
 
 /// Lint groups usable wherever a lint name is (`all`: every lint).
@@ -971,6 +975,13 @@ impl<'a> Cx<'a> {
                 }
             });
         }
+        for f in hir
+            .functions
+            .iter()
+            .filter(|f| !f.name.contains("__mono__"))
+        {
+            unclosed(hir, f, &files, &mut hits);
+        }
         for (lint, span, msg) in hits {
             self.hit(lint, span, msg);
         }
@@ -1093,6 +1104,90 @@ impl<'a> Cx<'a> {
                 notes: Some(msg).filter(|m| !m.is_empty()).into_iter().collect(),
                 secondary: None,
             });
+        }
+    }
+}
+
+/// `unclosed_resource`: a named local of a type with a `Drop` impl whose
+/// every use is a call of its own non-closing methods. The GC never
+/// closes it (stdlib 2.13), so the descriptor leaks. Any other use
+/// (passed on, returned, stored, captured, `using`) counts as handled.
+fn unclosed(
+    hir: &rokc_hir::HirModule,
+    f: &rokc_hir::HirFunction,
+    files: &HashSet<u32>,
+    hits: &mut Vec<(&'static str, Span, String)>,
+) {
+    const CLOSERS: &[&str] = &["close", "drop", "wait", "wait_with_output"];
+    // The std descriptor holders; any other type whose `drop` the
+    // program reaches counts too.
+    const RESOURCES: &[&str] = &[
+        "rok::std::fs::File",
+        "rok::std::fs::Dir",
+        "rok::std::fs::ReadDir",
+        "rok::std::net::TcpStream",
+        "rok::std::net::TcpListener",
+        "rok::std::net::UdpSocket",
+        "rok::std::process::Child",
+    ];
+    let Some(body) = &f.body else { return };
+    let params: HashSet<_> = f.params.iter().map(|p| p.local).collect();
+    // Methods are named `Struct<id>__<method>`.
+    let resource = |t: &HirTy| match t {
+        HirTy::Struct(id) => {
+            let own = format!("Struct{}", id.0);
+            let drop = format!("{own}__drop");
+            hir.structs
+                .iter()
+                .find(|s| s.id == *id)
+                .map(|s| s.name.as_str())
+                .filter(|n| RESOURCES.contains(n) || hir.functions.iter().any(|g| g.name == drop))
+                .map(|n| (n, own))
+        }
+        _ => None,
+    };
+    let names: HashMap<_, &str> = hir
+        .functions
+        .iter()
+        .map(|g| (g.id, g.name.as_str()))
+        .collect();
+    for l in &f.locals {
+        let Some(name) = l.name.as_deref().filter(|n| !n.starts_with(['#', '_'])) else {
+            continue;
+        };
+        let Some((ty, own)) = resource(&l.ty).filter(|_| !params.contains(&l.id)) else {
+            continue;
+        };
+        let is_l = |e: &rokc_hir::HirExpr| matches!(e.kind, HirExprKind::Local(x) if x == l.id);
+        let (mut uses, mut kept, mut first) = (0, 0, None);
+        each_block(body, &mut |e| {
+            if is_l(e) {
+                uses += 1;
+                first = first.or(Some(e.span));
+            }
+            if let HirExprKind::Call { callee, args } = &e.kind {
+                let own = names
+                    .get(callee)
+                    .and_then(|n| n.strip_prefix(own.as_str()))
+                    .filter(|m| m.starts_with("__") || m.starts_with('.'))
+                    .and_then(|m| m.rsplit("__").next());
+                if args.first().is_some_and(is_l)
+                    && own.is_some_and(|m| !CLOSERS.contains(&m) && !m.starts_with("into_"))
+                {
+                    kept += 1;
+                }
+            }
+        });
+        if let Some(span) = first.filter(|s| uses == kept && files.contains(&s.file)) {
+            hits.push((
+                "unclosed_resource",
+                span,
+                format!(
+                    "`{name}` holds a `{}` that is never closed — bind it with `using` or \
+                     call `close()`; the GC does not close it (stdlib 2.13)",
+                    short_name(ty)
+                ),
+            ));
         }
     }
 }

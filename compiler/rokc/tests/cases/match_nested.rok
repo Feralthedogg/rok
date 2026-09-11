@@ -21,3 +21,5 @@ fn main() -> i32 {
         + classify(Pair { a: 0, b: 0 });
     return s;
 }
+
+// spec: 003.12-match-expression

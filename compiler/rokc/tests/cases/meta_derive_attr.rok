@@ -85,3 +85,5 @@ fn main() -> i32 {
     println(f"{Counted::count()}");
     return 0;
 }
+
+// spec: 006.08-meta-blocks

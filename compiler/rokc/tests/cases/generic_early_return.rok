@@ -16,3 +16,5 @@ fn main() -> i32 {
     let idx = first_match(xs, |n: i32| -> bool { n > 10 });
     return idx + 7;
 }
+
+// spec: 002.10-generics

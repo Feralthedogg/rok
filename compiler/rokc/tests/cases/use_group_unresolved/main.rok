@@ -8,3 +8,5 @@ pub struct P { pub x: i32; }
 fn main() -> i32 {
     return a::get(P { x: 3 });
 }
+
+// spec: 005.05-use

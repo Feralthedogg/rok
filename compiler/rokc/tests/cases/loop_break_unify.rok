@@ -47,3 +47,5 @@ fn main() -> i32 {
     println(f"{m}");
     return 0;
 }
+
+// spec: 003.13-loop-expressions

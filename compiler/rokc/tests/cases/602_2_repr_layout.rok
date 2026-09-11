@@ -1,0 +1,80 @@
+// expect-exit: 0
+// gc-stress: 50
+// expect-stdout:
+// C 12 4
+// packed 7 1 / 9 1
+// align 16 16 / 48 16
+// transparent 8 8
+// enums 1 1 8 4
+// 1 -2 3 | 9 7 8 | 5 6
+// 7 3 | 1 2 3 | 11 22
+// b c none
+// 0 16 4 2
+
+// Spec 6.2.2 `#[repr(..)]`: C layout, `packed` (no padding, align 1),
+// `align(N)` (raises the alignment, rounds the size, pads its users),
+// `transparent`, and an integer tag for a fieldless enum. Values of
+// each go through locals, arrays, `List` buffers and closures.
+use rok::bare::ptr::{align_of, size_of};
+
+#[repr(C)]
+struct C1 { a: u8; b: i32; c: u8; }
+
+#[repr(packed)]
+struct P { a: u8; b: i32; c: u16; }
+
+struct HasP { x: u8; p: P; y: u8; }
+
+#[repr(align(16))]
+struct A { a: u8; }
+
+struct Outer { x: u8; a: A; y: u8; }
+
+#[repr(transparent)]
+struct T(f64);
+
+#[repr(u8)]
+enum Small { A, B, C }
+
+#[repr(i64)]
+enum Wide { X, Y }
+
+enum Plain { L, M }
+
+fn name(s: Small | none) -> str {
+    match s {
+        none => "none",
+        v: Small => match v { Small::A => "a", Small::B => "b", Small::C => "c" },
+    }
+}
+
+fn main() {
+    println(f"C {size_of::<C1>()} {align_of::<C1>()}");
+    println(f"packed {size_of::<P>()} {align_of::<P>()} / {size_of::<HasP>()} {align_of::<HasP>()}");
+    println(f"align {size_of::<A>()} {align_of::<A>()} / {size_of::<Outer>()} {align_of::<Outer>()}");
+    println(f"transparent {size_of::<T>()} {align_of::<T>()}");
+    println(f"enums {size_of::<Small>()} {align_of::<Small>()} {size_of::<Wide>()} {size_of::<Plain>()}");
+
+    let p = P { a: 1, b: -2, c: 3 };
+    let h = HasP { x: 9, p: p, y: 8 };
+    let o = Outer { x: 5, a: A { a: 7 }, y: 6 };
+    println(f"{p.a} {p.b} {p.c} | {h.x} {h.p.a + 6} {h.y} | {o.x} {o.y}");
+
+    let arr = [A { a: 1 }, A { a: 2 }, A { a: 3 }];
+    let ps: List<P> = List::new();
+    let os: List<Outer> = List::new();
+    let i = 0;
+    while i < 40 {
+        ps.push(P { a: i as u8, b: i * 11, c: (i * 2) as u16 });
+        os.push(Outer { x: 1, a: A { a: (i % 7) as u8 }, y: 2 });
+        i += 1;
+    }
+    let f = || o.a.a + arr[2].a;
+    println(f"{f() - 3} {arr[2].a} | {arr[0].a} {arr[1].a} {arr[2].a} | {ps[1].b} {ps[2].b}");
+    let k: Small | none = Small::B;
+    let z: Small | none = none;
+    println(f"{name(k)} {name(Small::C)} {name(z)}");
+    let w = Wide::Y;
+    let wn = match w { Wide::X => 0, Wide::Y => 16 };
+    println(f"{os[0].a.a} {wn} {os[39].a.a} {os[5].y}");
+}

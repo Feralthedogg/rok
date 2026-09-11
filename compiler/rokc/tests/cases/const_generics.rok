@@ -49,3 +49,5 @@ fn main() -> i32 {
 }
 
 fn first_of<const N: usize>(a: [i32; N]) -> i32 { return a[0]; }
+
+// spec: 002.11-const-generics

@@ -8,3 +8,5 @@ static G: W<str> = W { v: "w" };
 fn main() {
     println(f"{L.len()} {L[1]} {G.v}");
 }
+
+// spec: 005.03-static

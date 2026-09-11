@@ -1,0 +1,13 @@
+// expect-error: mismatched types: argument 2 of `rok::core::par::for_each`
+// expect-error: the closure's captures don't meet the `fn` type's bounds
+// spec: 4.6.9
+
+// A `[ref x]` capture in a `fn() + Send` closure shares the cell
+// between threads, so `x` must be `Sync`: a list is not (spec 4.6.9's
+// example). `[ref n]` of an `i32` is fine (`send_mutex_list`).
+fn main() {
+    let xs: List<i32> = [1, 2, 3];
+    let buf: List<i32> = [];
+    par::for_each(xs, [ref buf] |x: i32| { buf.push(x); });
+    println(f"{buf.len()}");
+}

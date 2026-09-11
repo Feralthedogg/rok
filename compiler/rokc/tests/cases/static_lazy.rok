@@ -61,3 +61,5 @@ fn main() -> i32 {
     println(f"hello {NAMES[1]}");
     return 0;
 }
+
+// spec: 005.03-static

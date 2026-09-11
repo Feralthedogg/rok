@@ -1,3 +1,5 @@
 // expect-error: call to unsafe function `danger` outside an `unsafe` block
 unsafe fn danger() -> i32 { return 1; }
 fn main() -> i32 { return danger(); }
+
+// spec: 004.15-unsafe

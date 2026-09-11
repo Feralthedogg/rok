@@ -40,8 +40,16 @@ struct Chan<T> {
     not_full: Condvar;
 }
 
+// `queue` is only touched with `lock` held.
+unsafe impl<T: Send> Send for Chan<T> {}
+unsafe impl<T: Send> Sync for Chan<T> {}
+
 impl<T> Chan<T> {
-    fn get(self, i: usize) -> usize { self.meta[i] }
+    fn get(self, i: usize) -> usize {
+        unsafe {
+            self.meta[i]
+        }
+    }
 
     /// Wake tasks parked in `recv_async` (a value or a close arrived).
     fn notify_async(self) {
@@ -57,7 +65,11 @@ impl<T> Chan<T> {
     fn send_key(self) -> usize {
         key(self.meta) + 1
     }
-    fn put(self, i: usize, v: usize) { self.meta[i] = v; }
+    fn put(self, i: usize, v: usize) {
+        unsafe {
+            self.meta[i] = v;
+        }
+    }
 
     fn full(self) -> bool {
         self.get(LIMIT) > 0 && self.queue.len() >= self.get(LIMIT)
@@ -67,33 +79,39 @@ impl<T> Chan<T> {
 
     // The lock is held for the calls below.
     fn push(self, v: T) {
-        self.queue.push_back(v);
-        self.meta[PUSHED] += 1;
+        unsafe {
+            self.queue.push_back(v);
+            self.meta[PUSHED] += 1;
+        }
     }
 
     fn pop(self) -> T {
-        self.meta[POPPED] += 1;
-        self.queue.pop_front() ?? panic("channel: pop from an empty queue")
+        unsafe {
+            self.meta[POPPED] += 1;
+            self.queue.pop_front() ?? panic("channel: pop from an empty queue")
+        }
     }
 }
 
 fn make<T>(limit: usize, rendezvous: bool) -> (Sender<T>, Receiver<T>) {
-    let meta: GcBuf<usize> = buf_new(7);
-    meta[SENDERS] = 1;
-    meta[LIMIT] = limit;
-    if rendezvous {
-        meta[RENDEZVOUS] = 1;
+    unsafe {
+        let meta: GcBuf<usize> = buf_new(7);
+        meta[SENDERS] = 1;
+        meta[LIMIT] = limit;
+        if rendezvous {
+            meta[RENDEZVOUS] = 1;
+        }
+        let ch = Chan {
+            lock: Mutex::new(0),
+            meta: meta,
+            queue: Deque::new(),
+            not_empty: Condvar::new(),
+            not_full: Condvar::new(),
+        };
+        let open: GcBuf<bool> = buf_new(1);
+        open[0] = true;
+        (Sender { ch: ch, open: open }, Receiver { ch: ch })
     }
-    let ch = Chan {
-        lock: Mutex::new(0),
-        meta: meta,
-        queue: Deque::new(),
-        not_empty: Condvar::new(),
-        not_full: Condvar::new(),
-    };
-    let open: GcBuf<bool> = buf_new(1);
-    open[0] = true;
-    (Sender { ch: ch, open: open }, Receiver { ch: ch })
 }
 
 /// An unbounded channel.
@@ -123,20 +141,22 @@ impl<T> Sender<T> {
     /// rendezvous channel until it is received). Throws it back if this
     /// sender was closed.
     pub fn send(self, value: T) throws (SendError<T>) {
-        if !self.open[0] {
-            throw SendError::Closed(value);
-        }
-        using g = self.ch.lock.lock() {
-            while self.ch.full() {
-                g = self.ch.not_full.wait(g);
+        unsafe {
+            if !self.open[0] {
+                throw SendError::Closed(value);
             }
-            let ticket = self.ch.get(PUSHED);
-            self.ch.push(value);
-            self.ch.not_empty.notify_all();
-            self.ch.notify_async();
-            if self.ch.get(RENDEZVOUS) == 1 {
-                while self.ch.get(POPPED) <= ticket {
+            using g = self.ch.lock.lock() {
+                while self.ch.full() {
                     g = self.ch.not_full.wait(g);
+                }
+                let ticket = self.ch.get(PUSHED);
+                self.ch.push(value);
+                self.ch.not_empty.notify_all();
+                self.ch.notify_async();
+                if self.ch.get(RENDEZVOUS) == 1 {
+                    while self.ch.get(POPPED) <= ticket {
+                        g = self.ch.not_full.wait(g);
+                    }
                 }
             }
         }
@@ -145,26 +165,28 @@ impl<T> Sender<T> {
     /// Queue `value` without blocking: `Full` if a bounded channel is
     /// full, or if no receiver is waiting on a rendezvous channel.
     pub fn try_send(self, value: T) throws (TrySendError<T>) {
-        if !self.open[0] {
-            throw TrySendError::Closed(value);
-        }
-        let sent = false;
-        using g = self.ch.lock.lock() {
-            let ready = if self.ch.get(RENDEZVOUS) == 1 {
-                self.ch.get(WAITING) + self.ch.get(ASYNC_WAITING) > self.ch.len()
-            } else {
-                !self.ch.full()
-            };
-            if ready {
-                self.ch.push(value);
-                sent = true;
+        unsafe {
+            if !self.open[0] {
+                throw TrySendError::Closed(value);
             }
+            let sent = false;
+            using g = self.ch.lock.lock() {
+                let ready = if self.ch.get(RENDEZVOUS) == 1 {
+                    self.ch.get(WAITING) + self.ch.get(ASYNC_WAITING) > self.ch.len()
+                } else {
+                    !self.ch.full()
+                };
+                if ready {
+                    self.ch.push(value);
+                    sent = true;
+                }
+            }
+            if !sent {
+                throw TrySendError::Full(value);
+            }
+            self.ch.not_empty.notify_all();
+            self.ch.notify_async();
         }
-        if !sent {
-            throw TrySendError::Full(value);
-        }
-        self.ch.not_empty.notify_all();
-        self.ch.notify_async();
     }
 
     /// `try await tx.send_async(v)` inside async code: like `send`, but
@@ -176,26 +198,30 @@ impl<T> Sender<T> {
 
     /// Close this sender; later `send`s on it throw `Closed`.
     pub fn close(self) {
-        using g = self.ch.lock.lock() {
-            if self.open[0] {
-                self.open[0] = false;
-                self.ch.meta[SENDERS] -= 1;
+        unsafe {
+            using g = self.ch.lock.lock() {
+                if self.open[0] {
+                    self.open[0] = false;
+                    self.ch.meta[SENDERS] -= 1;
+                }
             }
+            self.ch.not_empty.notify_all();
+            self.ch.notify_async();
         }
-        self.ch.not_empty.notify_all();
-        self.ch.notify_async();
     }
 }
 
 impl<T> Clone for Sender<T> {
     /// Another open sender on the same channel.
     fn clone(self) -> Sender<T> {
-        using g = self.ch.lock.lock() {
-            self.ch.meta[SENDERS] += 1;
+        unsafe {
+            using g = self.ch.lock.lock() {
+                self.ch.meta[SENDERS] += 1;
+            }
+            let open: GcBuf<bool> = buf_new(1);
+            open[0] = true;
+            Sender { ch: self.ch, open: open }
         }
-        let open: GcBuf<bool> = buf_new(1);
-        open[0] = true;
-        Sender { ch: self.ch, open: open }
     }
 }
 
@@ -214,23 +240,25 @@ impl<T> Receiver<T> {
     /// The next value, blocking until one arrives; `none` once the queue
     /// is empty and every sender has closed.
     pub fn recv(self) -> T | none {
-        let got = false;
-        let v: T | none = none;
-        using g = self.ch.lock.lock() {
-            self.ch.meta[WAITING] += 1;
-            while self.ch.len() == 0 && self.ch.get(SENDERS) > 0 {
-                g = self.ch.not_empty.wait(g);
+        unsafe {
+            let got = false;
+            let v: T | none = none;
+            using g = self.ch.lock.lock() {
+                self.ch.meta[WAITING] += 1;
+                while self.ch.len() == 0 && self.ch.get(SENDERS) > 0 {
+                    g = self.ch.not_empty.wait(g);
+                }
+                self.ch.meta[WAITING] -= 1;
+                if self.ch.len() > 0 {
+                    v = self.ch.pop();
+                    got = true;
+                }
             }
-            self.ch.meta[WAITING] -= 1;
-            if self.ch.len() > 0 {
-                v = self.ch.pop();
-                got = true;
+            if got {
+                self.ch.notify_senders();
             }
+            v
         }
-        if got {
-            self.ch.notify_senders();
-        }
-        v
     }
 
     /// The next value if one is queued; `none` if empty or closed.
@@ -337,42 +365,44 @@ pub struct SendFuture<T> {
 
 impl<T> SendFuture<T> {
     pub fn poll(ref self, ref ctx: rok::core::future::Context) throws (SendError<T>) -> rok::core::future::Poll<()> {
-        let ch = self.tx.ch;
-        if !self.pushed {
-            if !self.tx.open[0] {
-                throw SendError::Closed(self.value);
-            }
-            // A cancelled task does not send.
-            if rok::core::task::cancel_requested(ctx) {
-                return rok::core::future::Poll::Pending;
-            }
-            // Park before looking, so a receive after the look unparks us.
-            rok::core::task::park(ch.send_key(), ctx.waker());
-            using g = ch.lock.lock() {
-                if !ch.full() {
-                    self.ticket = ch.get(PUSHED);
-                    ch.push(self.value);
-                    self.pushed = true;
+        unsafe {
+            let ch = self.tx.ch;
+            if !self.pushed {
+                if !self.tx.open[0] {
+                    throw SendError::Closed(self.value);
+                }
+                // A cancelled task does not send.
+                if rok::core::task::cancel_requested(ctx) {
+                    return rok::core::future::Poll::Pending;
+                }
+                // Park before looking, so a receive after the look unparks us.
+                rok::core::task::park(ch.send_key(), ctx.waker());
+                using g = ch.lock.lock() {
+                    if !ch.full() {
+                        self.ticket = ch.get(PUSHED);
+                        ch.push(self.value);
+                        self.pushed = true;
+                    }
+                }
+                if !self.pushed {
+                    return rok::core::future::Poll::Pending;
+                }
+                ch.not_empty.notify_all();
+                ch.notify_async();
+                if ch.get(RENDEZVOUS) == 0 {
+                    return rok::core::future::Poll::Ready(());
                 }
             }
-            if !self.pushed {
-                return rok::core::future::Poll::Pending;
+            // Rendezvous: done once a receiver took our value.
+            rok::core::task::park(ch.send_key(), ctx.waker());
+            let taken = false;
+            using g = ch.lock.lock() {
+                taken = ch.get(POPPED) > self.ticket;
             }
-            ch.not_empty.notify_all();
-            ch.notify_async();
-            if ch.get(RENDEZVOUS) == 0 {
+            if taken {
                 return rok::core::future::Poll::Ready(());
             }
+            rok::core::future::Poll::Pending
         }
-        // Rendezvous: done once a receiver took our value.
-        rok::core::task::park(ch.send_key(), ctx.waker());
-        let taken = false;
-        using g = ch.lock.lock() {
-            taken = ch.get(POPPED) > self.ticket;
-        }
-        if taken {
-            return rok::core::future::Poll::Ready(());
-        }
-        rok::core::future::Poll::Pending
     }
 }

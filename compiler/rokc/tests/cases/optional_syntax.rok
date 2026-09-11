@@ -57,3 +57,5 @@ fn main() {
     let s: str | i32 | none = "t";
     println(f"is: {k is i32?} {s is i32?}");
 }
+
+// spec: 003.08-optional-chaining-and-coalescing

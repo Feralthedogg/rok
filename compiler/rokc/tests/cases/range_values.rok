@@ -46,3 +46,5 @@ fn main() {
     let mx: List<i8> = (125i8..).collect();
     println(f"{mx.len()}");
 }
+
+// spec: 003.07-range-expressions

@@ -81,3 +81,5 @@ fn main() -> i32 {
     println(f"{Boxed { v: 5 }.twice()}");
     return 0;
 }
+
+// spec: 002.08-trait
