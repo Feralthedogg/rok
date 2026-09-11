@@ -16,7 +16,7 @@ use rokr_common::object_header::{HEADER_ALIGN, HEADER_SIZE};
 
 /// Standard-library type id of runtime strings (801 §8.1.2 reserved
 /// range); never registered, so the collector traces nothing inside.
-const STR_TYPE_ID: u32 = 1;
+const STR_TYPE_ID: u32 = rokr_common::gc_abi::PLAIN_TYPE_ID;
 
 #[repr(C)]
 #[derive(Clone, Copy)]

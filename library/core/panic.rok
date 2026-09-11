@@ -2,9 +2,12 @@
 // `unreachable_fn` (stdlib spec 2.14.5): print a message to stderr and
 // exit 101. They never return: `-> !` fits any slot.
 
-extern "C" {
+extern "rok" {
     fn rok_panic_str(msg: str) -> !;
     fn rok_oom() -> !;
+    // An error out of a throwing `main` (spec 4.16.4): its description,
+    // exit 1. Lowering calls it.
+    fn rok_uncaught_error(what: str) -> !;
 }
 
 /// Abort with `msg`.

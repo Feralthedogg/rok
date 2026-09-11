@@ -13,6 +13,6 @@ fn main() -> i32 {
         total += x.w();
         i += 1;
     }
-    rok_print_i64(total);
+    println(f"{total}");
     return 0;
 }

@@ -3,4 +3,4 @@
 // expect-error: expected `;` after top-level expression
 
 // spec 4.16.1: no tail expression at top level.
-rok_print_i32(1)
+println(f"{1}")

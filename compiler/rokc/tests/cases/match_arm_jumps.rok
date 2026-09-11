@@ -13,8 +13,8 @@ fn f(x: i32 | none) -> i32 {
     };
     return v * 10;
 }
-rok_print_i32(f(4));
-rok_print_i32(f(none));
+println(f"{f(4)}");
+println(f"{f(none)}");
 let i = 0;
 loop {
     match i {
@@ -22,7 +22,7 @@ loop {
         _ => { i = i + 1; }
     }
 }
-rok_print_i32(i);
+println(f"{i}");
 let s = 0;
 for k in 0..5 {
     match k % 2 {
@@ -30,4 +30,4 @@ for k in 0..5 {
         _ => { s = s + k; }
     }
 }
-rok_print_i32(s);
+println(f"{s}");

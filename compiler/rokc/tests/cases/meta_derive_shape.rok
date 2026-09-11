@@ -1,0 +1,95 @@
+// expect-exit: 0
+// expect-stdout:
+// 1 "s" 7
+// 1 s
+// 1
+// unit
+// Two(3)
+// B { x: 4 }
+
+// Template tokens beyond spec 6.9 (used by `#[derive(Rokon)]`):
+// `@Self.is_named` / `.is_tuple` / `.is_unit` (a struct's shape),
+// `@Self.name` (the bare name, for `Name::Variant { .. }` on a generic
+// enum), `@field.has_default` / `@field.default` (a field's `= expr`).
+trait Mk {
+    fn mk(n: i32) -> Self;
+}
+impl Mk for i32 {
+    fn mk(n: i32) -> i32 { n }
+}
+impl Mk for str {
+    fn mk(n: i32) -> str { "s" }
+}
+impl<T: Mk> Mk for T | none {
+    fn mk(n: i32) -> T | none { T::mk(n) }
+}
+fn get<T: Mk>(n: i32) -> T { T::mk(n) }
+
+#[impl_derive(Mk)]
+pub @derive {
+    @where_all(Mk)
+    impl Mk for @Self {
+        fn mk(n: i32) -> Self {
+            @if_struct {
+                @apply_if(@Self.is_named) {
+                    return @Self {
+                        @for_fields {
+                            @apply_if(@field.has_default) { @field: @field.default, }
+                            @apply_if(!@field.has_default) { @field: get::<@field.type>(n), }
+                        }
+                    };
+                }
+                @apply_if(@Self.is_tuple) {
+                    return @Self(@for_fields { get::<@field.type>(n), });
+                }
+                @apply_if(@Self.is_unit) {
+                    return @Self;
+                }
+            }
+            @if_enum {
+                @for_variants {
+                    @apply_if(@variant.is_tuple) {
+                        if n == 3 { return @Self.name::@variant.name(@for_variant_fields { get::<@field.type>(n), }); }
+                    }
+                    @apply_if(@variant.is_named) {
+                        if n == 4 {
+                            return @Self.name::@variant.name { @for_variant_fields { @field.name: get::<@field.type>(n), } };
+                        }
+                    }
+                }
+                panic("no variant");
+            }
+        }
+    }
+}
+
+#[derive(Mk)]
+struct P { a: i32; b: str | none; c: i32 = 7; }
+
+#[derive(Mk)]
+struct T2(i32, str);
+
+#[derive(Mk)]
+struct G<T> { v: T; }
+
+#[derive(Mk)]
+struct U;
+
+#[derive(Mk, Debug)]
+enum E<T> {
+    Two(T),
+    B { x: T; },
+}
+
+fn main() {
+    let p = P::mk(1);
+    println(f"{p.a} {p.b:?} {p.c}");
+    let t = T2::mk(1);
+    println(f"{t.0} {t.1}");
+    let g = G::<i32>::mk(1);
+    println(f"{g.v}");
+    let _u = U::mk(0);
+    println("unit");
+    println(f"{E::<i32>::mk(3):?}");
+    println(f"{E::<i32>::mk(4):?}");
+}

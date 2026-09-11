@@ -252,10 +252,14 @@ fn print_rvalue(out: &mut String, r: &RValue) {
             callee,
             args,
             ret_ty,
-            c_abi,
+            abi,
             ..
         } => {
-            out.push_str(if *c_abi { "call_c " } else { "call_indirect " });
+            out.push_str(if *abi == rokc_ir_common::Abi::Rok {
+                "call_indirect "
+            } else {
+                "call_c "
+            });
             print_operand(out, callee);
             let _ = write!(out, "<{}>(", ty_str(ret_ty));
             for (i, a) in args.iter().enumerate() {
@@ -435,7 +439,6 @@ fn ty_str(t: &MirTy) -> String {
         MirTy::Any => "any".to_owned(),
         MirTy::GcRef => "gcref".to_owned(),
         MirTy::Mlir(t) => format!("mlir<{t:?}>"),
-        MirTy::Sum(parts) => parts.iter().map(ty_str).collect::<Vec<_>>().join(" | "),
         MirTy::Tuple(parts) => {
             let inner = parts.iter().map(ty_str).collect::<Vec<_>>().join(", ");
             format!("({inner})")

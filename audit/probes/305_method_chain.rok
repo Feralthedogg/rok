@@ -15,6 +15,6 @@ impl V {
 fn main() -> i32 {
     let v = V { n: 5 };
     let r = v.add(3).add(6).unwrap();
-    rok_print_i32(r);
+    println(f"{r}");
     return 0;
 }

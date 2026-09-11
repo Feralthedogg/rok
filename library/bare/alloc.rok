@@ -6,7 +6,7 @@
 
 use rok::bare::ptr::{CPtr, Ptr, align_of, size_of};
 
-extern "C" {
+extern "rok" {
     fn rok_alloc_raw(size: usize, align: usize, zeroed: i32) -> usize;
     fn rok_realloc_raw(ptr: usize, old_size: usize, align: usize, new_size: usize) -> usize;
     fn rok_free(ptr: usize);

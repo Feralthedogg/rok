@@ -11,11 +11,11 @@ fn f() throws (i32) {
     try {
         throw 1;
     } finally {
-        rok_print_str("finally_ran");
+        println("finally_ran");
     };
 }
 
 fn main() -> i32 {
-    try f() catch _ { rok_print_str("propagated"); };
+    try f() catch _ { println("propagated"); };
     return 0;
 }

@@ -750,6 +750,7 @@ fn lower_coro_block<'a>(
         is_async: kind.is_async(),
         is_generator: kind.yields(),
         span,
+        facts: rokc_ir_common::FnFacts::default(),
     });
 
     let env = (!captures.is_empty()).then(|| {

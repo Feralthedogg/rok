@@ -17,6 +17,6 @@ fn main() -> i32 {
     let n = match e {
         E::A(x) | E::B(x) => x,
     };
-    rok_print_i32(n);
+    println(f"{n}");
     return 0;
 }

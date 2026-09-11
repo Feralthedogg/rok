@@ -13,11 +13,11 @@
 struct Config { host: str; port: i32; }
 
 let c = Config { host: "localhost", port: 8080 };
-rok_print_str(f"{Config::field_names():?}");
+println(f"{Config::field_names():?}");
 match c.get_field("port") {
-    v: any => rok_print_str(v.type_name_of()),
-    none => rok_print_str("none"),
+    v: any => println(v.type_name_of()),
+    none => println("none"),
 }
-rok_print_str(f"{c.set_field("port", 9090)}");
-rok_print_str(f"{c.port}");
-rok_print_str(f"{c.set_field("xxx", 1)}");
+println(f"{c.set_field("port", 9090)}");
+println(f"{c.port}");
+println(f"{c.set_field("xxx", 1)}");

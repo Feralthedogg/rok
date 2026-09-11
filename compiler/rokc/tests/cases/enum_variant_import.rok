@@ -40,18 +40,18 @@ fn code2(c: Color) -> i32 {
 
 fn main() -> i32 {
     match fetch(true) {
-        Ok(v) => rok_print_i32(v),
-        Err(_) => rok_print_i32(-1),
+        Ok(v) => println(f"{v}"),
+        Err(_) => println(f"{-1}"),
     }
-    if let Err(e) = fetch(false) { rok_print_i32(e.code); }
-    rok_print_i32(code(Color::Green));
-    rok_print_i32(code2(Color::Green));
-    rok_print_i32(code2(Color::Blue(3)));
+    if let Err(e) = fetch(false) { println(f"{e.code}"); }
+    println(f"{code(Color::Green)}");
+    println(f"{code2(Color::Green)}");
+    println(f"{code2(Color::Blue(3))}");
     // `none` and type patterns are untouched by the new names.
     let x: i32 | none = none;
     match x {
-        none => rok_print_i32(1),
-        n: i32 => rok_print_i32(n),
+        none => println(f"{1}"),
+        n: i32 => println(f"{n}"),
     }
     return 0;
 }

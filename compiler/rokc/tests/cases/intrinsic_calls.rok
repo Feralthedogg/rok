@@ -14,11 +14,11 @@
 fn twice<T: Mul>(x: T, k: T) -> T { return T::mul(x, k); }
 
 fn main() -> i32 {
-    rok_print_i32(3.add(4));
-    rok_print_i32(i32::sub(10, 4));
-    rok_print_i32(twice(10, 2));
-    rok_print_i32(if true.not() == false && 3.lt(4) { 1 } else { 0 });
-    rok_print_i32(5.bitnot());
-    rok_print_i32(if 2.5f64.ge(2.5f64) { 1 } else { 0 });
+    println(f"{3.add(4)}");
+    println(f"{i32::sub(10, 4)}");
+    println(f"{twice(10, 2)}");
+    println(f"{if true.not() == false && 3.lt(4) { 1 } else { 0 }}");
+    println(f"{5.bitnot()}");
+    println(f"{if 2.5f64.ge(2.5f64) { 1 } else { 0 }}");
     return 0;
 }

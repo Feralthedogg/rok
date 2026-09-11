@@ -8,15 +8,15 @@
 // loud()가 호출되면 "called"가 출력되어 stdout이 달라진다.
 // (현 impl은 arith.andi → eager 평가, 이 probe로 silent miscompile 노출.)
 fn loud() -> i32 {
-    rok_print_str("called");
+    println("called");
     return 1;
 }
 
 fn main() -> i32 {
     let cond = false;
     if cond && (loud() == 1) {
-        rok_print_str("then");
+        println("then");
     }
-    rok_print_str("no_call");
+    println("no_call");
     return 0;
 }

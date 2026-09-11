@@ -12,6 +12,6 @@ union BitsAndFloat {
 
 fn main() -> i32 {
     let u = BitsAndFloat { bits: 0u32 };
-    rok_print_str("done");
+    println("done");
     return 0;
 }

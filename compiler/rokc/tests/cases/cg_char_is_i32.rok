@@ -4,6 +4,6 @@
 
 fn main() -> i32 {
     let c = '가';
-    rok_print_i32(c as i32);
+    println(f"{c as i32}");
     return 0;
 }

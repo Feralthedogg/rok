@@ -19,5 +19,5 @@ impl Fault for Wrap {
     }
 }
 let e: any Fault = Wrap { c: 3, cause: Wrap { c: 2, cause: Leaf { c: 1 } } };
-rok_print_i32(e.depth());
-rok_print_i32(e.code());
+println(f"{e.depth()}");
+println(f"{e.code()}");

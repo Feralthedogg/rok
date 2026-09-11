@@ -21,16 +21,16 @@ impl<T: Display> W<T> {
 
 fn main() -> i32 {
     let w = W { v: 5 };
-    rok_print_str(w.show());
+    println(w.show());
     let e: E<i32> = E::A(3);
     match e {
-        E::A(n) => rok_print_i32(n),
-        E::B => rok_print_i32(0),
+        E::A(n) => println(f"{n}"),
+        E::B => println(f"{0}"),
     }
     let where = 7;
-    rok_print_i32(where);
+    println(f"{where}");
     let s: Shown<i32> = W { v: 9 };
     let p: Pair<i32> = (1, 2);
-    rok_print_str(s.show());
+    println(s.show());
     return 0;
 }

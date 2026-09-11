@@ -52,13 +52,13 @@ fn lucky<T: Lucky>(x: T) -> i32 { return T::N; }
 fn tag<T: Tagged>(x: T) -> i32 { return <T as Tagged>::TAG; }
 
 fn main() -> i32 {
-    rok_print_i32(bits(Box { v: 1 }));
-    rok_print_i32(bits(Box { v: 1.5 }));
-    rok_print_i32(lucky(A { x: 1 }));
-    rok_print_i32(lucky(B { x: 1 }));
-    rok_print_i32(tag(A { x: 1 }));
-    rok_print_i32(<Box<i32> as Width>::BITS);
-    rok_print_i32(tag(B { x: 1 }));
-    rok_print_i32(<A as Other>::N);
+    println(f"{bits(Box { v: 1 })}");
+    println(f"{bits(Box { v: 1.5 })}");
+    println(f"{lucky(A { x: 1 })}");
+    println(f"{lucky(B { x: 1 })}");
+    println(f"{tag(A { x: 1 })}");
+    println(f"{<Box<i32> as Width>::BITS}");
+    println(f"{tag(B { x: 1 })}");
+    println(f"{<A as Other>::N}");
     return 0;
 }

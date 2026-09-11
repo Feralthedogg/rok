@@ -29,14 +29,14 @@ impl Ord for Version {
 }
 
 fn main() -> i32 {
-    rok_print_i32(if 3.cmp(5) == Ordering::Less { 1 } else { 0 });
-    rok_print_i32(if "b".cmp("a").is_gt() && 2.cmp(2).is_eq() { 1 } else { 0 });
-    rok_print_i32(if 7.cmp(1).reverse() == Ordering::Less { 1 } else { 0 });
-    rok_print_i32(3.min(8));
-    rok_print_i32(12.clamp(0, 9));
+    println(f"{if 3.cmp(5) == Ordering::Less { 1 } else { 0 }}");
+    println(f"{if "b".cmp("a").is_gt() && 2.cmp(2).is_eq() { 1 } else { 0 }}");
+    println(f"{if 7.cmp(1).reverse() == Ordering::Less { 1 } else { 0 }}");
+    println(f"{3.min(8)}");
+    println(f"{12.clamp(0, 9)}");
     let a = Version { major: 1, minor: 5 };
     let b = Version { major: 1, minor: 2 };
-    rok_print_i32(a.max(b).minor);
-    rok_print_i32(if a.cmp(b) == Ordering::Greater { 1 } else { 0 });
+    println(f"{a.max(b).minor}");
+    println(f"{if a.cmp(b) == Ordering::Greater { 1 } else { 0 }}");
     return 0;
 }

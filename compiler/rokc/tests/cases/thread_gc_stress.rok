@@ -109,14 +109,14 @@ fn main() -> i32 {
     let mine = hold(9, 2000, peak);
     let bad: i64 = 0;
     for h in churners { bad += try! h.join(); }
-    if bad == 0 { rok_print_str("churn ok"); }
+    if bad == 0 { println("churn ok"); }
     for h in holders { bad += try! h.join(); }
     bad += mine;
-    if bad == 0 { rok_print_str("holders ok"); }
+    if bad == 0 { println("holders ok"); }
     // ~6000 rounds x 4 threads x ~3 KB of garbage = ~70 MB allocated.
     let collections = unsafe { rok_gc_stats_collections() } - before;
     if collections < 3u64 { return 2; }
     if peak.load() > 40000000usize { return 3; }
-    rok_print_str("ok");
+    println("ok");
     return 0;
 }

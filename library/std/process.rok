@@ -18,7 +18,7 @@ use rok::std::path::AsPath;
 use rok::std::env;
 use rok::std::thread;
 
-extern "C" {
+extern "rok" {
     fn rok_os_spawn(
         argv: str, argc: usize, envs: str, envc: isize, cwd: str,
         stdio_in: i32, stdio_out: i32, stdio_err: i32, pgid: i32, out: GcBuf<i32>,

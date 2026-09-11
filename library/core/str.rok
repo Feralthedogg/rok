@@ -6,7 +6,7 @@
 //
 // `str` is immutable (spec 2.15.1); `StrBuf` is the growable buffer.
 
-extern "C" {
+extern "rok" {
     fn rok_str_len(s: str) -> usize;
     fn rok_str_concat(a: str, b: str) -> str;
     fn rok_str_cmp(a: str, b: str) -> i32;

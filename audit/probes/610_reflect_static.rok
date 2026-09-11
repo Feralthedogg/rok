@@ -15,14 +15,14 @@
 // looks at the variant an `any` / sum value holds.
 fn pick() -> i32 | f64 { return 2.5; }
 
-rok_print_str(i32::type_name());
-rok_print_str(f"{i32::size()}");
-rok_print_str(f"{i32::align()}");
+println(i32::type_name());
+println(f"{i32::size()}");
+println(f"{i32::align()}");
 let x: any = 42i32;
-rok_print_str(x.type_name_of());
+println(x.type_name_of());
 let y: i32 | f64 = 42i32;
-rok_print_str(y.type_name_of());
+println(y.type_name_of());
 let v: i32 | f64 = pick();
-rok_print_str(v.type_name_of());
+println(v.type_name_of());
 let z: any = "hello";
-rok_print_str(z.type_name_of());
+println(z.type_name_of());

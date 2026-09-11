@@ -11,7 +11,7 @@ fn add(a: i32, b: i32 = 5) -> i32 {
 }
 
 fn main() -> i32 {
-    rok_print_i32(add(0));      // 0 + 5 = 5
-    rok_print_i32(add(7, 5));   // 12
+    println(f"{add(0)}");      // 0 + 5 = 5
+    println(f"{add(7, 5)}");   // 12
     return 0;
 }

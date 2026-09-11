@@ -14,20 +14,20 @@ struct Line { a: Point; b: Point; }
 
 fn main() -> i32 {
     let (a) = 5;
-    rok_print_i32(a);
+    println(f"{a}");
     let ((b), c) = (1, 2);
-    rok_print_str(f"{b} {c}");
+    println(f"{b} {c}");
     let l @ Line { a: Point { x, y }, b: _ } = Line { a: Point { x: 3, y: 4 }, b: Point { x: 7, y: 8 } };
-    rok_print_str(f"{x} {y} {l.b.x}");
+    println(f"{x} {y} {l.b.x}");
     let t @ (n, Point { x: px, y: py }) = (1, Point { x: 9, y: 10 });
-    rok_print_str(f"{n} {px} {py}");
+    println(f"{n} {px} {py}");
     let _ = t;
     let pts = [Point { x: 6, y: 6 }];
     for p @ Point { x: qx, .. } in pts {
-        rok_print_str(f"{qx} {p.y}");
+        println(f"{qx} {p.y}");
     }
     for (i, Point { y, .. }) in [(2, Point { x: 0, y: 5 })] {
-        rok_print_str(f"{i} {y}");
+        println(f"{i} {y}");
     }
     return 0;
 }

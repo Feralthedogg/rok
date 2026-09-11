@@ -34,28 +34,28 @@ fn give() -> Result<i32, str> {
 fn main() -> i32 {
     let a = wrap(3);
     let b: Result<i32, str> = a;
-    rok_print_i32(b.unwrap_or(0));
+    println(f"{b.unwrap_or(0)}");
 
     let c = wrap(4);
-    rok_print_i32(take(c));
+    println(f"{take(c)}");
 
     let m = make(1);
     let n: Box<i64> | none = m;
-    rok_print_i32(match n { none => 1, _ => 0 });
+    println(f"{match n { none => 1, _ => 0 }}");
 
     let h = make(7);
     let holder = Holder { b: h };
-    rok_print_i32(match holder.b { none => 7, _ => 0 });
+    println(f"{match holder.b { none => 7, _ => 0 }}");
 
     let xs = [];
     xs.push(1i64);
-    rok_print_i32(count(xs) + 1);
+    println(f"{count(xs) + 1}");
 
-    rok_print_i32(give().unwrap_or(0));
+    println(f"{give().unwrap_or(0)}");
 
     // A builder chain: the expected type reaches the receiver through
     // methods that return their receiver's type.
     let built: B<str> = B::new().add(10).add(20);
-    rok_print_i32(built.n);
+    println(f"{built.n}");
     return 0;
 }

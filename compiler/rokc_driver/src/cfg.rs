@@ -1,12 +1,9 @@
 //! `#[cfg(...)]` predicate evaluation and item filtering.
 //!
-//! Two responsibilities:
-//! 1. Build a `CfgEnv` from the CLI's `--cfg` flags + a few automatic
-//!    keys (`target_os`, `target_arch`, `target_pointer_width`,
-//!    `target_family`, `target_endian`).
-//! 2. Walk the parsed item list and drop any item whose `#[cfg(p)]`
-//!    predicate `p` evaluates to false. Drops are recursive — an
-//!    excluded inline `mod` removes its whole subtree.
+//! The cfg environment is the `--cfg` flags plus the target's keys
+//! (`target_os`, `target_arch`, `target_pointer_width`, `target_family`,
+//! `target_endian`); an item whose `#[cfg(p)]` is false is dropped, an
+//! excluded inline `mod` with its whole subtree.
 
 use std::collections::HashSet;
 
@@ -40,56 +37,25 @@ impl CfgEnv {
         }
     }
 
-    /// Default cfg keys derived from the host build target. The full
-    /// matrix is in spec 6.3.2; we cover the common ones.
-    pub fn populate_target_defaults(&mut self) {
-        let os = if cfg!(target_os = "macos") {
-            "macos"
-        } else if cfg!(target_os = "linux") {
-            "linux"
-        } else if cfg!(target_os = "windows") {
-            "windows"
+    /// The target's cfg keys (spec 6.3.2).
+    pub fn add_target(&mut self, target: &rokc_mir::Target) {
+        let endian = if matches!(
+            target.arch.as_str(),
+            "powerpc" | "powerpc64" | "mips" | "sparc"
+        ) {
+            "big"
         } else {
-            "unknown"
+            "little"
         };
-        self.pairs.insert(("target_os".into(), os.into()));
-
-        let arch = if cfg!(target_arch = "x86_64") {
-            "x86_64"
-        } else if cfg!(target_arch = "aarch64") {
-            "aarch64"
-        } else {
-            "unknown"
-        };
-        self.pairs.insert(("target_arch".into(), arch.into()));
-
-        let pw = if cfg!(target_pointer_width = "64") {
-            "64"
-        } else {
-            "32"
-        };
-        self.pairs
-            .insert(("target_pointer_width".into(), pw.into()));
-
-        let family = if cfg!(target_family = "windows") {
-            "windows"
-        } else if cfg!(target_family = "wasm") {
-            "wasm"
-        } else {
-            "unix"
-        };
-        self.pairs.insert(("target_family".into(), family.into()));
-
-        // Endianness — most modern targets are little-endian.
-        self.pairs.insert((
-            "target_endian".into(),
-            if cfg!(target_endian = "big") {
-                "big"
-            } else {
-                "little"
-            }
-            .into(),
-        ));
+        for (k, v) in [
+            ("target_os", target.os.as_str()),
+            ("target_arch", target.arch.as_str()),
+            ("target_pointer_width", &target.pointer_width.to_string()),
+            ("target_family", target.family()),
+            ("target_endian", endian),
+        ] {
+            self.pairs.insert((k.to_owned(), v.to_owned()));
+        }
     }
 }
 

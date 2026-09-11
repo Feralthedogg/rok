@@ -23,6 +23,6 @@ fn main() -> i32 {
         i += 1;
     }
     for s in keep { total += s.len() as i64; }
-    rok_print_i64(total);
+    println(f"{total}");
     return 0;
 }

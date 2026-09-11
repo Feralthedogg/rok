@@ -15,7 +15,7 @@ impl Source for A { type Item = i32; fn get(self) -> i32 { return self.v; } fn i
 impl Source for C { type Item = bool; fn get(self) -> bool { return self.v; } fn id(self) -> i32 { return 3; } }
 fn total<S: Source<Item = i32>>(s: S) -> i32 { return s.get() + 100; }
 let x: any Source<Item = i32> = A { v: 5 };
-rok_print_i32(x.get());
+println(f"{x.get()}");
 let y: any Source = C { v: true };
-rok_print_i32(y.id());
-rok_print_i32(total(A { v: 1 }));
+println(f"{y.id()}");
+println(f"{total(A { v: 1 })}");

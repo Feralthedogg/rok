@@ -601,6 +601,7 @@ pub(super) fn adapt_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
             is_async: false,
             is_generator: false,
             span,
+            facts: rokc_ir_common::FnFacts::default(),
         });
         ctx.env.sink.thunks.borrow_mut().insert(key, id);
         id
@@ -743,6 +744,7 @@ pub(super) fn adapt_never_fn(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
             is_async: false,
             is_generator: false,
             span,
+            facts: rokc_ir_common::FnFacts::default(),
         });
         ctx.env.sink.thunks.borrow_mut().insert(key, id);
         id
@@ -1025,18 +1027,14 @@ pub(super) fn hook_call(
             format!("internal: runtime hook `{hook}` is not declared"),
         );
     };
-    let len = i128::try_from(msg.len()).expect("message length fits i128");
     HirExpr {
         kind: HirExprKind::Call {
             callee: sig.id,
-            args: vec![
-                HirExpr {
-                    kind: HirExprKind::Const(ConstVal::Str(msg.to_owned())),
-                    ty: HirTy::Prim(PrimTy::Str),
-                    span,
-                },
-                hir_int(len, PrimTy::Usize, span),
-            ],
+            args: vec![HirExpr {
+                kind: HirExprKind::Const(ConstVal::Str(msg.to_owned())),
+                ty: HirTy::Prim(PrimTy::Str),
+                span,
+            }],
         },
         ty: HirTy::Unit,
         span,
@@ -1083,7 +1081,7 @@ pub(super) fn lower_try(
         }
         let panic = hook_call(
             ctx,
-            "rok_panic",
+            "rok_panic_str",
             "try! failed: the expression threw an error",
             span,
         );

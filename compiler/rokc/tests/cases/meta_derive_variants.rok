@@ -87,11 +87,11 @@ fn main() -> i32 {
     let a = Shape::Circle(2);
     let b = Shape::Rect { w: 3, h: 4 };
     let c = Shape::Empty;
-    rok_print_str(a.show());
-    rok_print_str(b.show());
-    rok_print_str(c.show());
-    rok_print_str(f"{a.payload()} {b.payload()} {c.payload()}");
-    rok_print_str(f"{c.shape()} {a.shape()} {b.shape()}");
-    rok_print_str(Shape::kind());
+    println(a.show());
+    println(b.show());
+    println(c.show());
+    println(f"{a.payload()} {b.payload()} {c.payload()}");
+    println(f"{c.shape()} {a.shape()} {b.shape()}");
+    println(Shape::kind());
     return 0;
 }

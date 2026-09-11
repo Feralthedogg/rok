@@ -24,9 +24,9 @@ impl Mul for N {
 fn main() -> i32 {
     // 1 ⊕ (2 * 5) = 1 ^ 10 = 11
     let r = N { v: 1 } ⊕ N { v: 2 } * N { v: 5 };
-    rok_print_i32(r.v);
+    println(f"{r.v}");
     // left-assoc: (4 ⊕ 2) ⊕ 1 = 7
     let s = N { v: 4 } ⊕ N { v: 2 } ⊕ N { v: 1 };
-    rok_print_i32(s.v);
+    println(f"{s.v}");
     return 0;
 }

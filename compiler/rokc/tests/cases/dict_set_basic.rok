@@ -20,18 +20,18 @@
 
 fn main() -> i32 {
     let d: Dict<i32, i32> = {1: 10, 2: 20, 3: 30};
-    rok_print_i32(d.len() as i32);
-    rok_print_i32(d[2]);
+    println(f"{d.len() as i32}");
+    println(f"{d[2]}");
     match d.get(7) {
-        v: i32 => rok_print_i32(v),
-        none => rok_print_i32(-1),
+        v: i32 => println(f"{v}"),
+        none => println(f"{-1}"),
     }
-    rok_print_i32(if d.contains_key(3) { 1 } else { 0 });
+    println(f"{if d.contains_key(3) { 1 } else { 0 }}");
     d[2] = 200;
-    rok_print_i32(d[2]);
+    println(f"{d[2]}");
     match d.remove(1) {
-        v: i32 => rok_print_i32(d.len() as i32),
-        none => rok_print_i32(-1),
+        v: i32 => println(f"{d.len() as i32}"),
+        none => println(f"{-1}"),
     }
     // Growth: many keys, removals, re-inserts.
     let big: Dict<i64, i32> = Dict::new();
@@ -40,26 +40,26 @@ fn main() -> i32 {
         big.insert(i as i64 * 7i64, i);
         i = i + 1;
     }
-    rok_print_i32(big.len() as i32);
+    println(f"{big.len() as i32}");
     let total = 0;
     for (k, v) in big {
         if v < 100 { total = total + v; }
     }
-    rok_print_i32(total);
+    println(f"{total}");
 
     // Inferred from the first entry: `Dict<i32, bool>` / `Set<i32>`.
     let flags = {1: true, 2: false, 3: true};
-    rok_print_i32(flags.len() as i32);
+    println(f"{flags.len() as i32}");
     let s = {1, 2, 3};
-    rok_print_i32(if s.contains(2) && !s.contains(9) { 1 } else { 0 });
+    println(f"{if s.contains(2) && !s.contains(9) { 1 } else { 0 }}");
     let t: Set<i32> = {3, 4};
-    rok_print_i32(s.union(t).len() as i32);
-    rok_print_i32(s.difference(t).len() as i32);
-    rok_print_i32(s.intersection(t).len() as i32);
+    println(f"{s.union(t).len() as i32}");
+    println(f"{s.difference(t).len() as i32}");
+    println(f"{s.intersection(t).len() as i32}");
     let n = 0;
     for x in t {
         n = n + x;
     }
-    rok_print_i32(if n == 7 && !s.insert(1) && s.insert(5) { 1 } else { 0 });
+    println(f"{if n == 7 && !s.insert(1) && s.insert(5) { 1 } else { 0 }}");
     return 0;
 }

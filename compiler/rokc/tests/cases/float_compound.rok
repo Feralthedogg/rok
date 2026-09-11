@@ -10,16 +10,16 @@
 fn main() -> i32 {
     let x = 5.0f64;
     x += 2.5f64;
-    rok_print_f64(x);    // 7.5
+    println(f"{x}");    // 7.5
 
     x -= 5.0f64;
-    rok_print_f64(x);    // 2.5
+    println(f"{x}");    // 2.5
 
     x *= 5.0f64;
-    rok_print_f64(x);    // 12.5
+    println(f"{x}");    // 12.5
 
     x /= 2.5f64;
-    rok_print_f64(x);    // 5
+    println(f"{x}");    // 5
 
     return 0;
 }

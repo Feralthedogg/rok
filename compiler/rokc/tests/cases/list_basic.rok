@@ -29,36 +29,36 @@ fn main() -> i32 {
     xs.push(1);
     xs.push(2);
     xs.push(3);
-    rok_print_i32(xs.len() as i32);
-    rok_print_i32(xs[1]);
+    println(f"{xs.len() as i32}");
+    println(f"{xs[1]}");
     xs[1] = 20;
-    rok_print_i32(sum(xs));
+    println(f"{sum(xs)}");
     let ys: List<i32> = [10, 20, 30, 40, 50, 60];
-    rok_print_i32(ys.len() as i32);
+    println(f"{ys.len() as i32}");
     match ys.pop() {
-        v: i32 => rok_print_i32(v),
-        none => rok_print_i32(-1),
+        v: i32 => println(f"{v}"),
+        none => println(f"{-1}"),
     }
-    rok_print_i32(ys.len() as i32);
+    println(f"{ys.len() as i32}");
     match ys.get(99) {
-        v: i32 => rok_print_i32(v),
-        none => rok_print_i32(-1),
+        v: i32 => println(f"{v}"),
+        none => println(f"{-1}"),
     }
     // Handles share: `zs` and `ys` are one list.
     let zs = ys;
     zs.insert(0, 5);
-    rok_print_i32(ys[0] + ys[1] - 5);
-    rok_print_i32(if ys.remove(0) == 5 && !ys.is_empty() { 1 } else { 0 });
+    println(f"{ys[0] + ys[1] - 5}");
+    println(f"{if ys.remove(0) == 5 && !ys.is_empty() { 1 } else { 0 }}");
     let empty: List<i32> = [];
     empty.push(7);
     match empty.first() {
-        v: i32 => rok_print_i32(v),
-        none => rok_print_i32(-1),
+        v: i32 => println(f"{v}"),
+        none => println(f"{-1}"),
     }
     let n = 0;
     for x in [1, 2, 3] {
         n = n + 1;
     }
-    rok_print_i32(n);
+    println(f"{n}");
     return 0;
 }

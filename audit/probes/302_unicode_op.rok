@@ -9,7 +9,7 @@
 fn main() -> i32 {
     let a = 5;
     let b = 5;
-    if a ≡ b { rok_print_str("equal"); }
-    if a ≤ 10 { rok_print_str("less"); }
+    if a ≡ b { println("equal"); }
+    if a ≤ 10 { println("less"); }
     return 0;
 }

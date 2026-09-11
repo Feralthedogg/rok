@@ -9,7 +9,7 @@
 fn main() -> i32 {
     let (first, ..rest) = (1, 2, 3, 4);
     let (..init, last) = (1, 2, 3, 4);
-    rok_print_i32(first);
-    rok_print_i32(last);
+    println(f"{first}");
+    println(f"{last}");
     return 0;
 }

@@ -21,12 +21,12 @@ fn parse(s: i32) -> Result<i32, str> {
 }
 
 fn main() -> i32 {
-    rok_print_i32(fetch(true).unwrap());
+    println(f"{fetch(true).unwrap()}");
     match fetch(false) {
-        Result::Ok(_) => rok_print_i32(0),
-        Result::Err(e) => rok_print_i32(e.code),
+        Result::Ok(_) => println(f"{0}"),
+        Result::Err(e) => println(f"{e.code}"),
     }
-    rok_print_i32(parse(7).unwrap_or(0));
-    rok_print_i32(if parse(-1).is_err() { 1 } else { 0 });
+    println(f"{parse(7).unwrap_or(0)}");
+    println(f"{if parse(-1).is_err() { 1 } else { 0 }}");
     return 0;
 }

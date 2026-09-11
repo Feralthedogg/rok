@@ -222,8 +222,7 @@ match q { x: Q => x.v, _ => 0 }
 }
 
 /// `static` items keep their state across cells (a redefinition starts
-/// it over). On macOS arm64 the host loads each cell's object itself;
-/// `ROK_REPL_DYLIB=1` loads shared libraries instead.
+/// it over); cells are JIT-compiled.
 #[test]
 fn repl_statics_persist() {
     let Some(env) = setup() else { return };
@@ -234,17 +233,14 @@ fn bump() -> i32 { return N.fetch_add(1) + 1; }
 bump()
 bump()
 N.load()
-";
-    let redefined = "\
 static N: Atomic<i32> = Atomic::new(100);
 bump()
 bump()
 ";
-    let args = ["repl", "--rokr", &rokr];
     let out = piped_env(
         ROKC,
-        &args,
-        &format!("{input}{redefined}"),
+        &["repl", "--rokr", &rokr],
+        input,
         &[("ROK_REPL_TIME", "1")],
     );
     let stderr = text(&out.stderr);
@@ -253,16 +249,52 @@ bump()
         "i32: 1\ni32: 2\ni32: 2\ni32: 101\ni32: 102\n",
         "stderr: {stderr}"
     );
-    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        assert!(stderr.contains("[repl] load + run"), "{stderr}");
-        assert!(!stderr.contains("dlopen"), "{stderr}");
-    }
-    let out = piped_env(ROKC, &args, input, &[("ROK_REPL_DYLIB", "1")]);
+    assert!(stderr.contains("[repl] jit + run"), "{stderr}");
+}
+
+/// Library code (and unchanged items) is compiled once per session: a
+/// later cell declares what an earlier one compiled. A redefinition
+/// still takes effect from the next cell, also in code compiled before
+/// it that a later cell reaches again (`g`, compiled with the old `f`).
+#[test]
+fn repl_compiles_library_code_once() {
+    let Some(env) = setup() else { return };
+    let rokr = env.rokr.display().to_string();
+    let input = "\
+let l = [1, 2, 3];
+l.len()
+fn f() -> i32 { 1 }
+fn g() -> i32 { f() + 10 }
+g()
+fn f() -> i32 { 2 }
+f()
+g()
+";
+    let out = piped_env(
+        ROKC,
+        &["repl", "--rokr", &rokr],
+        input,
+        &[("ROK_REPL_TIME", "1")],
+    );
+    let stderr = text(&out.stderr);
     assert_eq!(
         text(&out.stdout),
-        "i32: 1\ni32: 2\ni32: 2\n",
-        "stderr: {}",
-        text(&out.stderr)
+        "List<i32>: [1, 2, 3]\nusize: 3\ni32: 11\ni32: 2\ni32: 12\n",
+        "stderr: {stderr}"
+    );
+    let counts: Vec<(usize, usize)> = stderr
+        .lines()
+        .filter_map(|l| l.strip_prefix("[repl] functions: "))
+        .filter_map(|l| {
+            let (new, old) = l.split_once(" compiled, ")?;
+            Some((new.parse().ok()?, old.split(' ').next()?.parse().ok()?))
+        })
+        .collect();
+    assert_eq!(counts.len(), 5, "{stderr}");
+    // `l.len()`: `List`'s methods come from the first cell.
+    assert!(
+        counts[0].0 > 10 && counts[1].0 <= 3 && counts[1].1 > 10,
+        "{stderr}"
     );
 }
 

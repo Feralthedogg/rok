@@ -18,7 +18,7 @@ extern "C" {
 }
 
 fn main() -> i32 {
-    rok_print_i64(compute(21i64));
-    rok_print_i64(unsafe { rok_probe_905_compute(21i64) });
+    println(f"{compute(21i64)}");
+    println(f"{unsafe { rok_probe_905_compute(21i64) }}");
     return 0;
 }

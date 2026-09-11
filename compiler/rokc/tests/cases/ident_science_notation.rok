@@ -15,13 +15,13 @@ fn main() -> i32 {
     let f′ = 3;
     let v₀ = 0;
     let ∂u = x² + f′ + v₀;
-    rok_print_i32(∑(∂u, 0));
+    println(f"{∑(∂u, 0)}");
     let 🦀 = 3;
     let 👩‍💻 = 4;
-    rok_print_i32(🦀);
-    rok_print_i32(🦀 + 👩‍💻);
+    println(f"{🦀}");
+    println(f"{🦀 + 👩‍💻}");
     // `é` precomposed and `e` + U+0301 are the same name.
     let café = 1;
-    rok_print_i32(café);
+    println(f"{café}");
     return 0;
 }

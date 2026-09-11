@@ -14,6 +14,6 @@ pub use inner::Point;
 
 fn main() -> i32 {
     let p = Point { x: 7 };
-    rok_print_i32(p.x);
+    println(f"{p.x}");
     return 0;
 }

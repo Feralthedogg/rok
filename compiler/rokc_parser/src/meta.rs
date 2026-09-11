@@ -264,6 +264,8 @@ struct FieldInfo {
     is_pub: bool,
     /// `(name, argument tokens)` of each attribute on the field.
     attrs: Vec<(String, Vec<Token>)>,
+    /// The `= expr` default of a named struct field (empty: none).
+    default: Vec<Token>,
     span: Span,
 }
 
@@ -287,6 +289,8 @@ struct Target {
     kind: &'static str,
     name: String,
     generics: Vec<GenericParam>,
+    /// A struct's shape (`@Self.is_unit` / `.is_tuple` / `.is_named`).
+    shape: VariantShape,
     fields: Vec<FieldInfo>,
     variants: Vec<VariantInfo>,
     /// The item's tokens without the applied attribute.
@@ -665,7 +669,15 @@ impl Expander<'_> {
         };
         let mut j = k + 2;
         let members: &[&str] = match head.as_str() {
-            "field" => &["name", "type", "is_pub", "has_attr"],
+            "field" => &[
+                "name",
+                "type",
+                "is_pub",
+                "has_attr",
+                "has_default",
+                "default",
+            ],
+            "Self" => &["name", "is_unit", "is_tuple", "is_named"],
             "variant" => &["name", "pattern", "is_unit", "is_tuple", "is_named"],
             "item" => &["name", "params", "return_type", "body"],
             _ => &[],
@@ -729,7 +741,7 @@ impl Expander<'_> {
         // `@x.name.as_str()` — the name as a string literal.
         let as_str = matches!(
             full.as_str(),
-            "field.name" | "variant.name" | "item.name" | "Self"
+            "field.name" | "variant.name" | "item.name" | "Self" | "Self.name"
         ) && matches!(
             (
                 b.get(j).map(|t| &t.kind),
@@ -859,7 +871,7 @@ impl Expander<'_> {
                 self.where_all.push(b[args.0..args.1].to_vec());
                 Vec::new()
             }
-            "field" | "field.name" | "field.type" => {
+            "field" | "field.name" | "field.type" | "field.default" => {
                 let binding = self.binding(ctx);
                 let Some(f) = self.field(ctx) else {
                     self.err(k, format!("`@{full}` outside `@for_fields`"));
@@ -867,13 +879,26 @@ impl Expander<'_> {
                 };
                 match (full.as_str(), binding) {
                     ("field.type", _) => f.ty.clone(),
+                    ("field.default", _) if f.default.is_empty() => {
+                        let name = f.name.clone();
+                        self.err(
+                            k,
+                            format!(
+                                "field `{name}` has no default (guard with \
+                                 `@apply_if(@field.has_default)`)"
+                            ),
+                        );
+                        Vec::new()
+                    }
+                    ("field.default", _) => f.default.clone(),
                     // A variant's payload is reached through its binding.
                     ("field", Some(bn)) => vec![tok(TokenKind::Ident(bn), span)],
                     _ => vec![ident(&f.name, f.span)],
                 }
             }
-            "field.is_pub" | "field.has_attr" | "has_derive_attr" | "variant.is_unit"
-            | "variant.is_tuple" | "variant.is_named" => {
+            "field.is_pub" | "field.has_attr" | "field.has_default" | "has_derive_attr"
+            | "variant.is_unit" | "variant.is_tuple" | "variant.is_named" | "Self.is_unit"
+            | "Self.is_tuple" | "Self.is_named" => {
                 let v = self.bool_token(k, &full, args, ctx).unwrap_or(false);
                 vec![tok(
                     if v { TokenKind::True } else { TokenKind::False },
@@ -912,7 +937,8 @@ impl Expander<'_> {
                 }
             }
             "item" => self.t.item.clone(),
-            "item.name" => vec![tok(TokenKind::Ident(self.t.name.clone()), span)],
+            // `@Self.name`: the bare name (no `<T>`), `@Self.name::V { .. }`.
+            "item.name" | "Self.name" => vec![tok(TokenKind::Ident(self.t.name.clone()), span)],
             "item.params" | "item.return_type" | "item.body" => {
                 let Some((p, r, bd)) = fn_parts(&self.t.item).filter(|_| self.t.kind == "fn")
                 else {
@@ -964,12 +990,18 @@ impl Expander<'_> {
     }
 
     fn bool_token(&mut self, k: usize, full: &str, args: (usize, usize), ctx: Ctx) -> Option<bool> {
-        if let Some(rest) = full.strip_prefix("variant.is_") {
-            let Some(v) = ctx.variant else {
+        if let Some(rest) = full
+            .strip_prefix("variant.is_")
+            .or_else(|| full.strip_prefix("Self.is_"))
+        {
+            let shape = if full.starts_with("Self") {
+                self.t.shape
+            } else if let Some(v) = ctx.variant {
+                self.t.variants[v].shape
+            } else {
                 self.err(k, format!("`@{full}` outside `@for_variants`"));
                 return None;
             };
-            let shape = self.t.variants[v].shape;
             return Some(
                 (rest == "unit" && shape == VariantShape::Unit)
                     || (rest == "tuple" && shape == VariantShape::Tuple)
@@ -983,6 +1015,7 @@ impl Expander<'_> {
         };
         Some(match full {
             "field.is_pub" => f.is_pub,
+            "field.has_default" => !f.default.is_empty(),
             _ => f.attrs.iter().any(|(n, _)| *n == name),
         })
     }
@@ -1331,6 +1364,7 @@ impl Parser<'_> {
                     }
                 }
                 let mut ty = Vec::new();
+                let mut default = Vec::new();
                 if let Some(k) = find_span(toks, cursor, span) {
                     // A named field's type follows `name :`.
                     let start = if named { k + 2 } else { k };
@@ -1339,6 +1373,22 @@ impl Parser<'_> {
                     if p.parse_type().is_some() {
                         ty = toks[start..p.pos].to_vec();
                         cursor = p.pos;
+                        // `= expr` up to the field's `;` / `,` / `}`.
+                        if named && toks.get(cursor).map(|t| &t.kind) == Some(&TokenKind::Eq) {
+                            let mut end = cursor + 1;
+                            while let Some(t) = toks.get(end) {
+                                match t.kind {
+                                    TokenKind::Semi | TokenKind::Comma | TokenKind::RBrace => break,
+                                    TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
+                                        end = close_of(toks, end).unwrap_or(toks.len());
+                                    }
+                                    _ => {}
+                                }
+                                end += 1;
+                            }
+                            default = toks[cursor + 1..end.min(toks.len())].to_vec();
+                            cursor = end;
+                        }
                     }
                 }
                 FieldInfo {
@@ -1346,6 +1396,7 @@ impl Parser<'_> {
                     ty,
                     is_pub: vis != Visibility::Private,
                     attrs: fa,
+                    default,
                     span,
                 }
             };
@@ -1360,6 +1411,14 @@ impl Parser<'_> {
             fs.iter()
                 .map(|f| field(f.name.clone(), f.vis, &f.attrs, f.span, true))
                 .collect::<Vec<_>>()
+        };
+        let shape = match item {
+            Item::Struct(s) => match &s.kind {
+                StructKind::Named(_) => VariantShape::Named,
+                StructKind::Tuple(_) => VariantShape::Tuple,
+                StructKind::Unit => VariantShape::Unit,
+            },
+            _ => VariantShape::Named,
         };
         let (kind, name, generics, fields, variants) = match item {
             Item::Struct(s) => {
@@ -1433,6 +1492,7 @@ impl Parser<'_> {
             kind,
             name,
             generics,
+            shape,
             fields,
             variants,
             item: toks.to_vec(),

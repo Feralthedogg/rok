@@ -10,6 +10,6 @@ const B: i32 = 4;
 const C: i32 = A + B + 5;
 
 fn main() -> i32 {
-    rok_print_i32(C);
+    println(f"{C}");
     return 0;
 }

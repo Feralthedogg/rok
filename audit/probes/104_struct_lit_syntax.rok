@@ -17,12 +17,12 @@ struct pt { a: i32; }
 
 fn main() -> i32 {
     let b = Box { size: 3 };
-    rok_print_i32(b.size);
+    println(f"{b.size}");
     let p = 점 { x: 3, y: 4 };
     let 점 { x, y } = p;
-    rok_print_i32(x + y);
+    println(f"{x + y}");
     let q = pt { a: 4 };
     let pt { a } = q;
-    rok_print_i32(a);
+    println(f"{a}");
     return 0;
 }

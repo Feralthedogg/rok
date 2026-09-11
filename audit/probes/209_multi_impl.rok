@@ -18,7 +18,7 @@ impl V {
 
 fn main() -> i32 {
     let v = V { n: 5 };
-    rok_print_i32(v.first());
-    rok_print_i32(v.squared());
+    println(f"{v.first()}");
+    println(f"{v.squared()}");
     return 0;
 }

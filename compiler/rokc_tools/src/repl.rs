@@ -1,25 +1,31 @@
-//! `repl`: an interactive session without a JIT engine (906).
+//! `repl`: an interactive session on a JIT (906).
 //!
 //! The session is one anonymous `main.rok` (907.1: a run of cells is
 //! the implicit `main.rok` with top-level statements and items appended).
 //!
-//! Default mode: a long-lived host process (`repl_host.c`, the runtime
-//! linked in, initialized once) loads each cell's object into memory
-//! itself (a shared library where its loader cannot) and runs it once. Items (`fn`, `struct`, `impl`, ..) are recompiled into
-//! every cell; statements are not. A top-level binding lives in an
-//! exported global slot (a GC root) the defining cell owns; later cells
-//! declare it `extern "C" { static mut .. }` with its type as written
-//! and copy it into a local of the same name on entry (and back out on
-//! exit, so assignments persist). A cell that dies (panic) leaves the
-//! session as it was before it: the host forks a snapshot per cell.
+//! rokc compiles each cell to LLVM IR text (`mlir-opt | mlir-translate`;
+//! rokc links no LLVM, 0.2.4) and sends it to a long-lived host process
+//! (`repl_host.c`: the runtime linked in and initialized once, and
+//! LLVM's ORC JIT through the LLVM-C API), which JIT-compiles it and
+//! runs it once. Items (`fn`, `struct`, `impl`, ..) are in every cell's
+//! program; statements are not. A function the host already compiled
+//! with the same text (library code, unchanged items) is only declared
+//! (`ReplCell::known`), so library code is compiled once per session.
+//! A top-level binding lives in an exported global slot (a GC root) the
+//! defining cell owns; later cells declare it `extern "C" { static mut
+//! .. }` with its type as written and copy it into a local of the same
+//! name on entry (and back out on exit, so assignments persist). A cell
+//! that dies (panic) leaves the session as it was before it: the host
+//! forks a snapshot per cell.
 //!
-//! `--replay` mode: each input recompiles the whole program, links it,
-//! and runs it; the output of the new cell is what follows a marker the
-//! cell prints first. Earlier cells run again: their side effects (I/O,
-//! time, randomness) repeat. It keeps bindings whose types cannot be
-//! named in source (closures, ..), which the default mode refuses.
+//! `--replay` mode: each input recompiles the whole program and the
+//! host runs it in a throwaway child; the output of the new cell is
+//! what follows a marker the cell prints first. Earlier cells run
+//! again: their side effects (I/O, time, randomness) repeat. It keeps
+//! bindings whose types cannot be named in source (closures, ..), which
+//! the default mode refuses.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::OwnedFd;
@@ -31,7 +37,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use rokc_hir::{HirExpr, HirExprKind, HirModule, HirStaticDef, HirStmt, HirTy};
 use rokc_interface::{
-    BuildOptions, CompileResult, EmitKind, ReplCell, Session, TempDir, link_host, report,
+    BuildOptions, CompileResult, EmitKind, ReplCell, ReplFn, Session, TempDir, link_host, report,
 };
 use rokc_ir_common::{ConstVal, LocalId};
 
@@ -43,11 +49,6 @@ const VALUE: &str = "__rok_repl_v";
 /// The host's `__rok_repl_out`: a cell's shown value.
 const SHOWN: &str = "__rok_repl_out";
 const HOST_C: &str = include_str!("repl_host.c");
-const DYLIB: &str = if cfg!(target_vendor = "apple") {
-    "dylib"
-} else {
-    "so"
-};
 
 const HELP: &str = "\
   <expr>         evaluate and print `type: value`
@@ -93,6 +94,12 @@ impl Lap {
         )
     }
 
+    fn note(&self, what: &str) {
+        if self.0.is_some() {
+            eprintln!("[repl] {what}");
+        }
+    }
+
     fn mark(&mut self, what: &str) {
         if let Some(t) = &mut self.0 {
             eprintln!("[repl] {what}: {:.1}ms", t.elapsed().as_secs_f64() * 1e3);
@@ -101,15 +108,9 @@ impl Lap {
     }
 }
 
-/// The host's reply to a cell.
-enum Loaded {
-    /// It ran; its shown value.
-    Value(String),
-    /// It failed (reported); the session is as before it.
-    Failed,
-    /// The object loader cannot take it (why); nothing ran.
-    Unsupported(String),
-}
+/// The host's reply to a cell: its shown value, or `None` when it
+/// failed (reported; the session is as before it).
+type Loaded = Option<String>;
 
 #[derive(PartialEq, Eq)]
 enum Outcome {
@@ -181,13 +182,14 @@ pub struct Repl {
     /// them too (`any_seeds`), so its `any` methods know them all (the
     /// tags are the same in every cell: a hash of the type's name).
     any_types: std::collections::BTreeSet<String>,
-    /// Cells built (library and slot names).
+    /// Cells built (slot names).
     built: u32,
-    /// GC type ids earlier cells took.
-    type_offset: u32,
-    /// Cells go to the host as relocatable objects it loads itself
-    /// (macOS arm64; `ROK_REPL_DYLIB=1`: shared libraries).
-    objects: bool,
+    /// The `ScanTable`s loaded cells registered (`ReplCell::gc_tables`).
+    gc_tables: Vec<Vec<u32>>,
+    /// Functions the host has compiled: symbol → (text hash, symbols it
+    /// uses). A cell whose function has the same text declares it
+    /// instead of compiling it again (`ReplCell::known`).
+    known: HashMap<String, (u64, Vec<String>)>,
     tmp: TempDir,
     /// The host process running the current cell (0: none). `SIGINT`
     /// to it ends the cell; the session goes on as before it.
@@ -210,9 +212,8 @@ impl Repl {
             statics: HashSet::new(),
             any_types: std::collections::BTreeSet::new(),
             built: 0,
-            type_offset: 0,
-            objects: cfg!(all(target_vendor = "apple", target_arch = "aarch64"))
-                && std::env::var_os("ROK_REPL_DYLIB").is_none_or(|v| v.is_empty() || v == "0"),
+            gc_tables: Vec::new(),
+            known: HashMap::new(),
             running: Arc::default(),
         })
     }
@@ -301,14 +302,14 @@ impl Repl {
                     }
                 }
                 Cell::Stmt => {
-                    if self.run_cell(&self.state, cell, None) {
+                    if self.run_cell(&self.state.clone(), cell, None) {
                         self.state.stmts.push_str(cell);
                         self.state.stmts.push('\n');
                     }
                 }
                 Cell::Expr => {
                     let bind = format!("let {VALUE} = ({cell});");
-                    if self.run_cell(&self.state, &bind, Some(VALUE)) {
+                    if self.run_cell(&self.state.clone(), &bind, Some(VALUE)) {
                         // Later runs evaluate it again, without showing it.
                         self.state.stmts.push_str(&format!("({cell});\n"));
                     }
@@ -477,10 +478,7 @@ impl Repl {
     /// Default mode: build `cell` as a library, run it in the host, keep
     /// its top-level bindings; `type: value` of `show` (`eval`).
     fn run_once(&mut self, cell: &str, show: Option<&str>) -> Result<Option<String>, ()> {
-        if self.host.is_none() && self.starting.is_none() {
-            let (dir, opts) = (self.tmp.path().to_owned(), self.opts.clone());
-            self.starting = Some(std::thread::spawn(move || start_host(&dir, &opts)));
-        }
+        self.start_host();
         let mut lap = Lap::start();
         let mut shown = show.is_some();
         let mut r = loop {
@@ -503,44 +501,40 @@ impl Repl {
         lap.mark("bindings");
         self.built += 1;
         let mut opts = self.opts.clone();
+        // ponytail: `-g` cells compile everything (their text carries
+        // locations, which differ from cell to cell anyway).
+        let known = if opts.debug {
+            HashMap::new()
+        } else {
+            self.known
+                .iter()
+                .map(|(k, (h, _))| (k.clone(), *h))
+                .collect()
+        };
         opts.repl = Some(ReplCell {
-            type_offset: self.type_offset,
+            gc_tables: self.gc_tables.clone(),
+            known,
             define: new.iter().map(|b| b.sym.clone()).collect(),
             statics: self.statics.iter().cloned().collect(),
         });
-        // An object the host loads itself; a shared library when it
-        // cannot (or `ROK_REPL_DYLIB`).
-        let mut object = self.objects;
-        let value = loop {
-            let ext = if object { "o" } else { DYLIB };
-            let file = self.tmp.path().join(format!("cell{}.{ext}", self.built));
-            let built = if object {
-                r.compile_object(&opts, &file)
-            } else {
-                r.link_shared(&opts, &file)
-            };
-            let n = match built {
-                Ok(n) => n,
-                Err(d) => {
-                    report(&d);
-                    return Err(());
-                }
-            };
-            lap.mark(if object { "clang -c" } else { "clang -shared" });
-            let loaded = self.load(&file);
-            lap.mark(if object { "load + run" } else { "dlopen + run" });
-            match loaded {
-                Loaded::Value(v) => {
-                    self.type_offset += n;
-                    break v;
-                }
-                Loaded::Unsupported(why) if object => {
-                    eprintln!("note: {why}; this cell is loaded as a shared library");
-                    object = false;
-                }
-                Loaded::Failed | Loaded::Unsupported(_) => return Err(()),
+        let (ir, out) = match r.cell_ir(&opts) {
+            Ok(x) => x,
+            Err(d) => {
+                report(&d);
+                return Err(());
             }
         };
+        lap.mark("mlir-opt | mlir-translate");
+        lap.note(&format!(
+            "functions: {} compiled, {} from earlier cells",
+            out.fns.len(),
+            out.reused
+        ));
+        let value = self.load("cell", &ir);
+        lap.mark("jit + run");
+        let value = value.ok_or(())?;
+        self.gc_tables = out.gc_tables;
+        self.learn(out.fresh, out.fns);
         self.bindings
             .retain(|b| !new.iter().any(|n| n.name == b.name));
         self.bindings.extend(new);
@@ -701,21 +695,55 @@ impl Repl {
         Ok(new.into_iter().map(|(b, _)| b).collect())
     }
 
-    /// Run the cell `lib` (an object or a shared library) in the host
-    /// (started on first use).
-    fn load(&mut self, lib: &std::path::Path) -> Loaded {
+    /// Build and start the host in the background (the first cell
+    /// compiles meanwhile).
+    fn start_host(&mut self) {
+        if self.host.is_none() && self.starting.is_none() {
+            let (dir, opts) = (self.tmp.path().to_owned(), self.opts.clone());
+            self.starting = Some(std::thread::spawn(move || start_host(&dir, &opts)));
+        }
+    }
+
+    /// The host now has `fns`; `fresh` (symbols the cell defined anew)
+    /// replaced earlier definitions, so what was compiled against those
+    /// (and what uses that, ..) is no longer the same code.
+    fn learn(&mut self, fresh: Vec<String>, fns: Vec<ReplFn>) {
+        let mut gone: HashSet<String> = fresh.into_iter().collect();
+        loop {
+            let stale: Vec<String> = self
+                .known
+                .iter()
+                .filter(|(_, (_, refs))| refs.iter().any(|r| gone.contains(r)))
+                .map(|(k, _)| k.clone())
+                .collect();
+            if stale.is_empty() {
+                break;
+            }
+            for k in stale {
+                self.known.remove(&k);
+                gone.insert(k);
+            }
+        }
+        for f in fns {
+            self.known.insert(f.name, (f.hash, f.refs));
+        }
+    }
+
+    /// Send the host (started on first use) `<head> <len>` and the
+    /// cell's LLVM IR; its shown value.
+    fn load(&mut self, head: &str, ir: &[u8]) -> Loaded {
         if self.host.is_none() {
             self.host = match self.starting.take() {
                 Some(h) => h.join().ok().flatten(),
                 None => start_host(self.tmp.path(), &self.opts),
             };
         }
-        let Some(host) = self.host.as_mut() else {
-            return Loaded::Failed;
-        };
+        let host = self.host.as_mut()?;
         let _ = std::io::stdout().flush();
         let reply = (|| {
-            writeln!(host.ctl, "{}", lib.display())?;
+            let (word, rest) = head.split_once(' ').unwrap_or((head, ""));
+            writeln!(host.ctl, "{word} {} {rest}", ir.len())?;
+            host.ctl.write_all(ir)?;
             let mut rd = BufReader::new(&host.ctl);
             let mut line = String::new();
             // `pid <n>`: the process the cell runs in.
@@ -735,13 +763,12 @@ impl Repl {
             Ok::<_, std::io::Error>(format!("ok {}", String::from_utf8_lossy(&value)))
         })();
         match reply {
-            Ok(r) if r.starts_with("ok ") => Loaded::Value(r[3..].to_owned()),
+            Ok(r) if r.starts_with("ok ") => Some(r[3..].to_owned()),
             Ok(r) if r == "err\n" => {
-                eprintln!("error: the cell failed; the session is as it was before it");
-                Loaded::Failed
-            }
-            Ok(r) if r.starts_with("unsupported ") => {
-                Loaded::Unsupported(r["unsupported ".len()..].trim_end().to_owned())
+                if head == "cell" {
+                    eprintln!("error: the cell failed; the session is as it was before it");
+                }
+                None
             }
             _ => {
                 eprintln!("error: the session host is gone; the bindings are lost");
@@ -749,14 +776,16 @@ impl Repl {
                 self.bindings.clear();
                 self.statics.clear();
                 self.any_types.clear();
-                Loaded::Failed
+                self.gc_tables.clear();
+                self.known.clear();
+                None
             }
         }
     }
 
     /// Run `cell` after the statements of `base`, showing `type: value`
     /// of the binding `show` (without the value when it has no `Debug`).
-    fn run_cell(&self, base: &State, cell: &str, show: Option<&str>) -> bool {
+    fn run_cell(&mut self, base: &State, cell: &str, show: Option<&str>) -> bool {
         let marked = format!("println(\"{OUT_MARK}\");\neprintln(\"{OUT_MARK}\");\n{cell}");
         if let Some(n) = show {
             let src = base.program(&format!(
@@ -794,41 +823,42 @@ impl Repl {
         None
     }
 
-    /// Compile, link and run `src`; print the new cell's output and
-    /// `type: value` of `name`.
-    fn execute(&self, src: &str, name: Option<&str>, quiet: bool) -> Outcome {
+    /// Compile `src` and run it in a throwaway child of the host (its
+    /// JIT, nothing kept); print the new cell's output and `type: value`
+    /// of `name`.
+    fn execute(&mut self, src: &str, name: Option<&str>, quiet: bool) -> Outcome {
+        self.start_host();
         let Some(r) = self.compile(src, quiet) else {
             return Outcome::CompileError;
         };
-        let exe = self.tmp.path().join("repl");
-        if let Err(d) = r.link(&self.opts, &exe) {
-            report(&d);
-            return Outcome::CompileError;
-        }
-        let out = match Command::new(&exe).output() {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("error: cannot run {}: {e}", exe.display());
-                return Outcome::RunError;
+        let mut opts = self.opts.clone();
+        opts.repl = Some(ReplCell::default());
+        let ir = match r.cell_ir(&opts) {
+            Ok((ir, _)) => ir,
+            Err(d) => {
+                report(&d);
+                return Outcome::CompileError;
             }
         };
+        let (out, err) = (self.tmp.path().join("out"), self.tmp.path().join("err"));
+        let ran = self.load(&format!("once {} {}", out.display(), err.display()), &ir);
         let mark = format!("{OUT_MARK}\n");
-        let after = |b: &[u8]| {
-            let s = String::from_utf8_lossy(b).into_owned();
+        let after = |f: &std::path::Path| {
+            let s = String::from_utf8_lossy(&std::fs::read(f).unwrap_or_default()).into_owned();
             s.split_once(&mark)
                 .map_or_else(String::new, |(_, t)| t.to_owned())
         };
-        let stdout = after(&out.stdout);
+        let stdout = after(&out);
         let (printed, value) = match stdout.split_once(&format!("{VAL_MARK}\n")) {
             Some((p, v)) => (p, Some(v.trim_end_matches('\n'))),
             None => (stdout.as_str(), None),
         };
         print!("{printed}");
-        eprint!("{}", after(&out.stderr));
-        if !out.status.success() {
+        eprint!("{}", after(&err));
+        if ran.is_none() {
             // ponytail: replaying a failing cell would fail every later
             // run, so unlike 907.5 the cell is dropped.
-            eprintln!("error: the cell failed ({}); it is not kept", out.status);
+            eprintln!("error: the cell failed; it is not kept");
             return Outcome::RunError;
         }
         if let Some(ty) = name.and_then(|n| binding_ty(&r, n)) {
@@ -864,6 +894,7 @@ fn start_host(dir: &std::path::Path, opts: &BuildOptions) -> Option<Host> {
         }
     };
     match Command::new(&exe)
+        .arg(&opts.opt_level)
         .stdin(Stdio::from(OwnedFd::from(theirs)))
         .spawn()
     {

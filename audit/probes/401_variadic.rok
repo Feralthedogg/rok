@@ -15,6 +15,6 @@ fn sum(xs: ...i32) -> i32 {
 }
 
 fn main() -> i32 {
-    rok_print_i32(sum(1, 2, 3));
+    println(f"{sum(1, 2, 3)}");
     return 0;
 }

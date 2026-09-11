@@ -18,13 +18,13 @@ impl Union for S {
 
 fn main() -> i32 {
     let 🇰🇷 = 82;
-    rok_print_i32(🇰🇷);
+    println(f"{🇰🇷}");
     let union = S { v: 1 } ∪ S { v: 2 };
-    rok_print_i32(union.v);
+    println(f"{union.v}");
     let mut_n = 0;
     'café: loop {
         loop { break 'café; }
     }
-    rok_print_i32(S { v: 2 }.union(S { v: 0 }).v);
+    println(f"{S { v: 2 }.union(S { v: 0 }).v}");
     return mut_n;
 }

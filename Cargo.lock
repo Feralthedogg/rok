@@ -58,6 +58,7 @@ dependencies = [
  "rokc_core",
  "rokc_diagnostic",
  "rokc_hir",
+ "rokc_ir_common",
  "rokc_lexer",
  "rokc_mir",
  "rokc_parser",

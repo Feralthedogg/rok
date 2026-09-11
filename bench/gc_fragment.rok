@@ -49,6 +49,6 @@ fn main() -> i32 {
     }
     for b in keep { total += b.w(); }
     for s in ring { total += s.len() as i64; }
-    rok_print_i64(total);
+    println(f"{total}");
     return 0;
 }

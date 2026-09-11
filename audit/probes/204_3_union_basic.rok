@@ -10,6 +10,6 @@ union ED { ptr: usize; fd: i32; val: u64; }
 
 fn main() -> i32 {
     let x = ED { fd: 5 };
-    rok_print_i32(unsafe { x.fd });
+    println(f"{unsafe { x.fd }}");
     return 0;
 }

@@ -10,6 +10,6 @@ struct C { n: i32; }
 fn main() -> i32 {
     let c = C { n: 10 };
     c.n += 5;
-    rok_print_i32(c.n);
+    println(f"{c.n}");
     return 0;
 }

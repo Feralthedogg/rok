@@ -19,12 +19,12 @@ extern "C" {
 fn main() -> i32 {
     let p32 = unsafe { rok_alloc(4usize, 4usize) };
     unsafe { rok_store_i32(p32, 42) };
-    rok_print_i32(unsafe { rok_load_i32(p32) });
+    println(f"{unsafe { rok_load_i32(p32) }}");
     unsafe { rok_free(p32) };
 
     let p64 = unsafe { rok_alloc(8usize, 8usize) };
     unsafe { rok_store_i64(p64, 7777777777i64) };
-    rok_print_i64(unsafe { rok_load_i64(p64) });
+    println(f"{unsafe { rok_load_i64(p64) }}");
     unsafe { rok_free(p64) };
 
     return 0;

@@ -10,4 +10,4 @@ impl Sq { fn side(self) -> i32 { return self.s; } }
 impl Shape for Sq { fn area(self) -> i32 { return self.s * self.s; } }
 
 let s: any Shape = Sq { s: 3 };
-rok_print_i32(s.side());
+println(f"{s.side()}");

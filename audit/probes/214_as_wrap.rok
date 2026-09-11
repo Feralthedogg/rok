@@ -9,10 +9,10 @@
 fn main() -> i32 {
     let big: i64 = 4294967297i64;       // 2^32 + 1
     let wrapped: i32 = big as i32;      // 2^32 + 1 wrap → 1
-    rok_print_i32(wrapped);
+    println(f"{wrapped}");
 
     let neg_big: i64 = -1i64;
     let neg_wrap: i32 = neg_big as i32; // -1 비트 재해석 → -1
-    rok_print_i32(neg_wrap);
+    println(f"{neg_wrap}");
     return 0;
 }

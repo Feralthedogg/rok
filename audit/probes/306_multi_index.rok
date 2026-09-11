@@ -10,6 +10,6 @@ fn main() -> i32 {
     let row1: [i32; 2] = [1, 2];
     let row2: [i32; 2] = [3, 4];
     let m: [[i32; 2]; 2] = [row1, row2];
-    rok_print_i32(m[1, 1] + m[0, 1]);   // 4 + 2 = 6
+    println(f"{m[1, 1] + m[0, 1]}");   // 4 + 2 = 6
     return 0;
 }

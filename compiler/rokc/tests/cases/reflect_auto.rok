@@ -32,24 +32,24 @@ impl Own { fn size(self) -> i32 { 7 } }
 fn describe<T: Reflect>(x: T) -> str { f"{T::type_name()}/{x.type_name_of()}" }
 fn pick() -> i32 | f64 { return 2.5; }
 
-rok_print_str(f"{i32::type_name()} {i32::size()} {i32::align()} {u8::size()}");
-rok_print_str(f"{Config::type_name()} {List::<i64>::type_name()} {Box::<f64>::type_name()}");
+println(f"{i32::type_name()} {i32::size()} {i32::align()} {u8::size()}");
+println(f"{Config::type_name()} {List::<i64>::type_name()} {Box::<f64>::type_name()}");
 let s: any Shape = Sq { s: 2 };
-rok_print_str(s.type_name_of());
-rok_print_str(f"{s.size_of()}");
+println(s.type_name_of());
+println(f"{s.size_of()}");
 let o: i32 | none = none;
 let a: any = o;
-rok_print_str(a.type_name_of());
+println(a.type_name_of());
 let o2: i32 | none = 3;
 let a2: any = o2;
-rok_print_str(a2.type_name_of());
-rok_print_str(o.type_name_of());
+println(a2.type_name_of());
+println(o.type_name_of());
 let c = Color::Green(3);
-rok_print_str(c.type_name_of());
-rok_print_str(Reflect::type_name_of(c));
-rok_print_str((1, 2.0).type_name_of());
-rok_print_str([1, 2, 3].type_name_of());
+println(c.type_name_of());
+println(Reflect::type_name_of(c));
+println((1, 2.0).type_name_of());
+println([1, 2, 3].type_name_of());
 let v: i32 | f64 = pick();
-rok_print_str(describe(v));
-rok_print_str(describe(Sq { s: 1 }));
-rok_print_str(f"{Own { n: 1 }.size()}");
+println(describe(v));
+println(describe(Sq { s: 1 }));
+println(f"{Own { n: 1 }.size()}");

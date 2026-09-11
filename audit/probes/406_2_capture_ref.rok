@@ -10,6 +10,6 @@ fn main() -> i32 {
     let inc = [ref count] || { count = count + 1 };
     inc();
     inc();
-    rok_print_i32(count);
+    println(f"{count}");
     return 0;
 }

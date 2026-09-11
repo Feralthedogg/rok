@@ -22,36 +22,36 @@ fn main() -> i32 {
     let a = Atomic::new(5);
     a.fetch_add(3);
     a.fetch_sub(1, Relaxed);
-    rok_print_i32(a.load());
+    println(f"{a.load()}");
     let r = a.compare_exchange(7, 10, SeqCst, SeqCst);
-    match r { Result::Ok(v) => rok_print_i32(v), Result::Err(v) => rok_print_i32(0 - v), };
+    match r { Result::Ok(v) => println(f"{v}"), Result::Err(v) => println(f"{0 - v}"), };
     let r2 = a.compare_exchange(7, 11, SeqCst, SeqCst);
-    match r2 { Result::Ok(v) => rok_print_i32(v), Result::Err(v) => rok_print_i32(0 - v), };
+    match r2 { Result::Ok(v) => println(f"{v}"), Result::Err(v) => println(f"{0 - v}"), };
     let f = Atomic::new(false);
-    if !f.swap(true) { rok_print_str("was false"); }
-    if f.load() { rok_print_str("now true"); }
+    if !f.swap(true) { println("was false"); }
+    if f.load() { println("now true"); }
     let u = Atomic::new(0u64);
     u.fetch_or(6u64); u.fetch_and(3u64); u.fetch_xor(1u64);
-    rok_print_i64(u.load() as i64);
+    println(f"{u.load() as i64}");
     let o = Ordering::Less;
-    if o.is_lt() { rok_print_str("cmp ok"); }
+    if o.is_lt() { println("cmp ok"); }
 
     let m = Mutex::new(1);
     using g = m.lock() {
         g.update(|v| v + 41);
     }
-    using g = m.lock() { rok_print_i32(g.get()); }
+    using g = m.lock() { println(f"{g.get()}"); }
     let l = RwLock::new(3);
-    using r = l.read(), r2 = l.read() { rok_print_i32(r.get() + r2.get()); }
+    using r = l.read(), r2 = l.read() { println(f"{r.get() + r2.get()}"); }
     using w = l.write() { w.set(9); }
-    using r = l.read() { rok_print_i32(r.get()); }
+    using r = l.read() { println(f"{r.get()}"); }
     let once = Once::new();
     let n = Atomic::new(0);
     once.call_once(|| { n.fetch_add(1); });
     once.call_once(|| { n.fetch_add(1); });
-    rok_print_i32(n.load());
+    println(f"{n.load()}");
     let c = Cell::new(4);
     c.set(c.get() + 1);
-    rok_print_i32(c.replace(0));
+    println(f"{c.replace(0)}");
     return 0;
 }

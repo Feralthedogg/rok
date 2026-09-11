@@ -20,7 +20,7 @@ impl Error for NotFound {}
 fn inc(x: i32) -> i32 { x + 1 }
 fn half(x: i32) throws (P) -> i32 { if x % 2 == 1 { throw P::Bad; } x / 2 }
 fn find(x: i32) throws (NotFound) -> i32 { if x > 10 { throw NotFound { id: x }; } x }
-fn log(x: i32) { rok_print_i32(x); }
+fn log(x: i32) { println(f"{x}"); }
 
 fn call(f: fn(i32) throws (P) -> i32, x: i32) throws (P) -> i32 { try f(x) }
 fn call2(f: fn(i32) throws (P | Q) -> i32, x: i32) throws (P | Q) -> i32 { try f(x) }
@@ -28,16 +28,18 @@ fn run(f: fn(i32) throws (Q), x: i32) throws (Q) { try f(x); }
 
 fn main() -> i32 {
     let p: fn(i32) throws (P) -> i32 = |s: i32| s * 3;
-    rok_print_i32(try call(p, 2) catch _ { -1 });
+    println(f"{try call(p, 2) catch _ { -1 }}");
     // non-throwing → throwing
-    rok_print_i32(try call(inc, 2) catch _ { -1 });
-    rok_print_i32(try call(half, 3) catch _ { -1 });
+    println(f"{try call(inc, 2) catch _ { -1 }}");
+    println(f"{try call(half, 3) catch _ { -1 }}");
     // `throws (P)` → `throws (P | Q)`
-    rok_print_i32(try call2(half, 4) catch _ { -1 });
-    rok_print_i32(try call2(half, 5) catch e: P { -2 } catch _ { -1 });
+    println(f"{try call2(half, 4) catch _ { -1 }}");
+    let r = try call2(half, 5) catch e: P { -2 } catch _ { -1 };
+    println(f"{r}");
     // `throws (NotFound)` → untyped `throws` (`any Error`)
     let q: fn(i32) throws -> i32 = find;
-    rok_print_i32(try q(60) catch e: any Error { -3 });
+    let r2 = try q(60) catch e: any Error { -3 };
+    println(f"{r2}");
     // unit result
     try run(log, 9) catch _ {};
     return 0;

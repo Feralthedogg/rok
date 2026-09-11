@@ -3,6 +3,7 @@
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use rokc_ir_common::{Abi, FnRole, Linkage};
 
 /// Best-effort const-folding of a static initializer. Accepts integer
 /// and bool literals (with optional unary minus) plus string literals.
@@ -140,34 +141,11 @@ pub fn lower_full(
     prec: &PrecTable,
     uses: &crate::uses::UseTable,
     reexports: &[crate::uses::ReExport],
+    input: &crate::HirInput,
 ) -> HirModule {
-    resolve::set_packages(
-        program
-            .attrs
-            .iter()
-            .filter(|a| a.path == [crate::PACKAGES_ATTR])
-            .flat_map(|a| match &a.body {
-                rokc_ast::AttrBody::Args(args) => args.clone(),
-                _ => Vec::new(),
-            })
-            .filter_map(|a| match a {
-                rokc_ast::AttrArg::Word(w) => Some(w),
-                _ => None,
-            })
-            .collect(),
-    );
+    resolve::set_packages(input.packages.clone());
     // A prebuilt-library build: every body of that package is a root.
-    let lib_pkg: Option<String> = program
-        .attrs
-        .iter()
-        .find(|a| a.path == [crate::LIB_ATTR])
-        .and_then(|a| match &a.body {
-            rokc_ast::AttrBody::Args(args) => args.iter().find_map(|x| match x {
-                rokc_ast::AttrArg::Word(w) => Some(w.clone()),
-                _ => None,
-            }),
-            _ => None,
-        });
+    let lib_pkg: Option<String> = input.lib.clone();
     let augmented = with_lazy_static_inits(program);
     let program = augmented.as_ref().unwrap_or(program);
     // Diagnostics emitted during pre-body passes (impl-target validation
@@ -469,6 +447,18 @@ pub fn lower_full(
             &names,
         );
     }
+    // Plain enums whose payloads name generic instances (`Items(List<V>)`)
+    // resolve them now that the instances exist (the first lowering gave
+    // the diagnostics).
+    for (i, e) in enum_decls.iter().enumerate() {
+        let module = module_of(&e.name);
+        let sc = Scope {
+            names: &names,
+            module: &module,
+        };
+        let id = EnumId(u32::try_from(i).expect("EnumId overflow"));
+        enum_defs[i] = lower_enum_def(e, id, &struct_table, &enum_table, sc, &mut Vec::new());
+    }
 
     // Pass 1c: collect module-level `const` items. Their value
     // expressions are stored as AST and inlined at each use site.
@@ -698,6 +688,8 @@ pub fn lower_full(
     let mut ref_out: HashMap<FunctionId, RefOut> = HashMap::new();
     let mut extern_fn_ids: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
     let mut c_variadic: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
+    // `extern "rok"` declarations: the runtime's own ABI.
+    let mut rok_externs: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
     let sig_of = |fn_def: &FnDef, id: FunctionId, self_ty: Option<&HirTy>, sc: Scope<'_>| {
         let resolve = |t: &Ty| {
             let mut r = resolve_ty_with_structs(t, &struct_table, &enum_table, sc);
@@ -754,11 +746,16 @@ pub fn lower_full(
                 lib_decl.push(!package_of(&module).is_empty());
             }
             Item::Extern(blk) => {
-                // Spec 4.15.1: a C function is implicitly `unsafe` to call.
-                let safe = blk
-                    .attrs
-                    .iter()
-                    .any(|a| a.path == [crate::SAFE_EXTERN_ATTR]);
+                let rok_abi = blk.abi == "rok";
+                if !rok_abi && blk.abi != "C" {
+                    err(
+                        &mut pre_diags,
+                        format!(
+                            "unsupported ABI `\"{}\"` (`\"C\"`, or `\"rok\"` for the runtime)",
+                            blk.abi
+                        ),
+                    );
+                }
                 for ei in &blk.items {
                     let rokc_ast::ExternItem::Fn(fn_def) = ei else {
                         continue;
@@ -770,15 +767,18 @@ pub fn lower_full(
                     }
                     extern_fns.insert(fn_def.name.clone());
                     let id = FunctionId(u32::try_from(decls.len()).expect("FunctionId overflow"));
-                    if !safe {
-                        unsafe_fns.insert(id);
-                    }
+                    // Spec 4.15.1: an extern function is `unsafe` to call.
+                    unsafe_fns.insert(id);
                     let sc = Scope {
                         names: &names,
                         module: "",
                     };
                     fn_table.insert(fn_def.name.clone(), sig_of(fn_def, id, None, sc));
-                    extern_fn_ids.insert(id);
+                    if rok_abi {
+                        rok_externs.insert(id);
+                    } else {
+                        extern_fn_ids.insert(id);
+                    }
                     if fn_def
                         .attrs
                         .iter()
@@ -1429,7 +1429,7 @@ pub fn lower_full(
         infer_floor: std::cell::Cell::new(0),
     };
     let mut exports: Vec<(FunctionId, String)> = Vec::new();
-    let mut prebuilt: Vec<FunctionId> = Vec::new();
+    let mut prebuilt: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
     let mut c_defs: Vec<FunctionId> = Vec::new();
     for (i, d) in decls.iter().enumerate() {
         let (MethodOrFn::Fn(f) | MethodOrFn::Method { fn_def: f, .. }) = d;
@@ -1459,9 +1459,15 @@ pub fn lower_full(
                 ),
             );
         }
-        let prebuilt_fn = f.attrs.iter().any(|a| a.path == [crate::PREBUILT_ATTR]);
+        let module = match d {
+            MethodOrFn::Fn(f) => module_of(&f.name),
+            MethodOrFn::Method { module, .. } => module.clone(),
+        };
+        let prebuilt_fn = f.body.is_none()
+            && !(extern_fn_ids.contains(&id) || rok_externs.contains(&id))
+            && input.prebuilt.contains(&package_of(&module));
         if prebuilt_fn {
-            prebuilt.push(id);
+            prebuilt.insert(id);
         }
         if let Some(sym) = export_name(f) {
             if f.body.is_none() && !prebuilt_fn {
@@ -1506,6 +1512,10 @@ pub fn lower_full(
             e.clone_from(k);
         }
     }
+    let main = fn_table
+        .get("main")
+        .map(|s| s.id)
+        .filter(|id| !extern_fn_ids.contains(id) && !rok_externs.contains(id));
     let mut env = Env {
         impl_consts: impl_const_sets,
         fn_table,
@@ -1525,7 +1535,7 @@ pub fn lower_full(
         generic_methods,
         generic_trait_impls,
         intrinsics,
-        extern_fn_ids,
+        extern_fn_ids: extern_fn_ids.clone(),
         c_variadic: c_variadic.clone(),
         c_defs: c_defs.iter().copied().collect(),
         prec,
@@ -1609,7 +1619,7 @@ pub fn lower_full(
         env.statics.insert(static_defs[i].name.clone(), ty.clone());
         static_defs[i].ty = ty;
     }
-    let roots: Vec<bool> = decls
+    let decl_roots: Vec<bool> = decls
         .iter()
         .zip(&lib_decl)
         .enumerate()
@@ -1624,7 +1634,7 @@ pub fn lower_full(
                 || lib_pkg.as_ref().is_some_and(|p| package_of(&module) == *p)
         })
         .collect();
-    let (mut functions, unlowered) = lower_bodies(&env, &decls, &roots);
+    let (mut functions, unlowered) = lower_bodies(&env, &decls, &decl_roots);
     for (i, name) in link_names {
         functions[i].name = name;
     }
@@ -1656,23 +1666,75 @@ pub fn lower_full(
         let init = lazy_init_fn_name(&s.name);
         s.init_fn = functions.iter().find(|f| f.name == init).map(|f| f.id);
     }
+    // Per-function facts for MIR / codegen.
+    let index: HashMap<FunctionId, usize> = functions
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.id, i))
+        .collect();
+    let mut set = |id: &FunctionId, f: &dyn Fn(&mut rokc_ir_common::FnFacts)| {
+        if let Some(&i) = index.get(id) {
+            f(&mut functions[i].facts);
+        }
+    };
+    for id in &extern_fn_ids {
+        let variadic = c_variadic.contains(id);
+        set(id, &|f| {
+            f.linkage = Linkage::Extern;
+            f.abi = Abi::C { variadic };
+        });
+    }
+    for id in &rok_externs {
+        set(id, &|f| f.linkage = Linkage::Extern);
+    }
+    for id in &prebuilt {
+        set(id, &|f| f.linkage = Linkage::Prebuilt);
+    }
+    for id in &c_defs {
+        set(id, &|f| f.abi = Abi::C { variadic: false });
+    }
+    for (id, sym) in &exports {
+        set(id, &|f| f.export_name = Some(sym.clone()));
+    }
+    if let Some(id) = &main {
+        set(id, &|f| f.role = FnRole::Main);
+    }
+    let lazy_inits = static_defs.iter().filter_map(|s| s.init_fn);
+    let roots = if lib_pkg.is_some() {
+        let package = decls
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| decl_roots[i] && lib_decl[i])
+            .map(|(i, _)| FunctionId(i as u32));
+        let dispatchers = functions
+            .iter()
+            .filter(|f| f.facts.role == FnRole::AnyDispatcher)
+            .map(|f| f.id);
+        Some(
+            package
+                .chain(dispatchers)
+                .chain(exports.iter().map(|(id, _)| *id))
+                .chain(lazy_inits)
+                .collect(),
+        )
+    } else {
+        main.map(|m| {
+            std::iter::once(m)
+                .chain(exports.iter().map(|(id, _)| *id))
+                .chain(lazy_inits)
+                .collect()
+        })
+    };
     let mut module = HirModule {
         functions,
         structs,
         enums,
         statics: static_defs,
         diagnostics: pre_diags,
-        exports,
+        roots,
         unlowered,
-        prebuilt,
         any_seeds,
         any_types,
-        c_variadic: {
-            let mut v: Vec<FunctionId> = c_variadic.into_iter().collect();
-            v.sort_by_key(|f| f.0);
-            v
-        },
-        c_defs,
         type_visibility: names.visibility.clone(),
     };
     // Final pass: rewrite any leftover `HirTy::Path([alias])` nodes in

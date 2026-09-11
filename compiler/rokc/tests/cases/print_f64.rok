@@ -4,11 +4,10 @@
 // 0.001
 // 100
 
-// `rok_print_f64` is auto-injected. printf("%g") trims trailing zeros
-// and switches to scientific notation past about 1e6.
+// Float formatting through an f-string.
 fn main() -> i32 {
-    rok_print_f64(3.14159f64);
-    rok_print_f64(0.001f64);
-    rok_print_f64(100.0f64);
+    println(f"{3.14159f64}");
+    println(f"{0.001f64}");
+    println(f"{100.0f64}");
     return 0;
 }

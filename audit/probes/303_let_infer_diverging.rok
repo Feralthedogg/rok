@@ -8,4 +8,4 @@ fn f(c: bool) -> i32 {
     return 0;
 }
 
-rok_print_i32(f(true));
+println(f"{f(true)}");

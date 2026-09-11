@@ -5,4 +5,4 @@
 
 struct Plain { x: i32; }
 fn f() throws -> i32 { throw Plain { x: 1 }; }
-rok_print_i32(try f() catch _ { 0 });
+println(f"{try f() catch _ { 0 }}");

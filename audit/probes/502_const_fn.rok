@@ -12,6 +12,6 @@ const fn double(x: i32) -> i32 {
 const SIX: i32 = double(3);
 
 fn main() -> i32 {
-    rok_print_i32(SIX + double(3));
+    println(f"{SIX + double(3)}");
     return 0;
 }

@@ -3,5 +3,5 @@
 // expect-error: top-level `return` is not allowed
 
 // spec 4.16.4: no `return` in the implicit `main`.
-rok_print_i32(1);
+println(f"{1}");
 return;

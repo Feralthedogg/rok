@@ -5,4 +5,4 @@
 // the implicit `main` keeps its own `return`.
 let base = 4;
 let add = |x: i32| -> i32 { return x + base; };
-rok_print_i32(add(3));
+println(f"{add(3)}");

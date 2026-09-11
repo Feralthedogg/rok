@@ -1,0 +1,569 @@
+// rok::std::rokon::read — lexer and recursive-descent reader for the
+// RokON subset of rok literal syntax (spec 3.9.1).
+
+use rok::std::rokon::{Value, RokonError};
+use rok::std::rokon::write;
+
+const K_EOF: i32 = 0;
+const K_IDENT: i32 = 1;
+const K_INT: i32 = 2;
+const K_FLOAT: i32 = 3;
+const K_STR: i32 = 4;
+const K_CHAR: i32 = 5;
+const K_PUNCT: i32 = 6;
+
+/// A token: `text` is the decoded value of a string / char, the source
+/// of a number / identifier / punctuation. `at` is its first char index.
+struct Tok {
+    kind: i32;
+    text: str;
+    at: usize;
+}
+
+/// `msg` at char index `at` of `cs`, with its 1-based line / column.
+fn fail(cs: List<char>, at: usize, msg: str) -> RokonError {
+    let line = 1u32;
+    let col = 1u32;
+    let i = 0usize;
+    while i < at && i < cs.len() {
+        let c = cs[i];
+        if c == '\n' || (c == '\r' && (i + 1 >= cs.len() || cs[i + 1] != '\n')) {
+            line += 1u32;
+            col = 1u32;
+        } else if c != '\r' {
+            col += 1u32;
+        }
+        i += 1;
+    }
+    let e = RokonError::new(msg);
+    e.line = line;
+    e.col = col;
+    e
+}
+
+fn is_ident_start(c: char) -> bool { c == '_' || c.is_alphabetic() }
+fn is_ident_continue(c: char) -> bool { c == '_' || c.is_alphanumeric() }
+
+fn at(cs: List<char>, i: usize) -> char {
+    if i < cs.len() { cs[i] } else { '\0' }
+}
+
+fn lex(cs: List<char>) throws (RokonError) -> List<Tok> {
+    let toks: List<Tok> = List::new();
+    let n = cs.len();
+    let i = 0usize;
+    while true {
+        // Trivia: whitespace, `//` and (nesting) `/* */` comments.
+        while i < n {
+            let c = cs[i];
+            if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\x0B' || c == '\x0C' {
+                i += 1;
+            } else if c == '/' && at(cs, i + 1) == '/' {
+                while i < n && cs[i] != '\n' && cs[i] != '\r' { i += 1; }
+            } else if c == '/' && at(cs, i + 1) == '*' {
+                let start = i;
+                let depth = 0usize;
+                while true {
+                    if i >= n { throw fail(cs, start, "unterminated block comment"); }
+                    if cs[i] == '/' && at(cs, i + 1) == '*' {
+                        depth += 1;
+                        i += 2;
+                    } else if cs[i] == '*' && at(cs, i + 1) == '/' {
+                        depth -= 1;
+                        i += 2;
+                        if depth == 0 { break; }
+                    } else {
+                        i += 1;
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+        if i >= n {
+            toks.push(Tok { kind: K_EOF, text: "", at: n });
+            return toks;
+        }
+        let start = i;
+        let c = cs[i];
+        if c == 'r' && (at(cs, i + 1) == '"' || (at(cs, i + 1) == '#' && (at(cs, i + 2) == '"' || at(cs, i + 2) == '#'))) {
+            i = try raw_string(cs, i, toks);
+        } else if c == 'f' && at(cs, i + 1) == '"' {
+            throw fail(cs, start, "f-strings are not allowed in RokON");
+        } else if is_ident_start(c) {
+            while i < n && is_ident_continue(cs[i]) { i += 1; }
+            toks.push(Tok { kind: K_IDENT, text: slice(cs, start, i), at: start });
+        } else if c.is_ascii_digit() {
+            i = try number(cs, i, toks);
+        } else if c == '"' {
+            i = try string(cs, i, toks);
+        } else if c == '\'' {
+            i = try char_lit(cs, i, toks);
+        } else if c == ':' && at(cs, i + 1) == ':' {
+            toks.push(Tok { kind: K_PUNCT, text: "::", at: start });
+            i += 2;
+        } else if c == '.' && at(cs, i + 1) == '.' {
+            toks.push(Tok { kind: K_PUNCT, text: "..", at: start });
+            i += 2;
+        } else if "[]{}(),:-.+*/%=<>!&|^~?@#$;".contains(c.display()) {
+            toks.push(Tok { kind: K_PUNCT, text: c.display(), at: start });
+            i += 1;
+        } else {
+            throw fail(cs, start, f"unexpected character `{c}`");
+        }
+    }
+    toks
+}
+
+fn slice(cs: List<char>, from: usize, to: usize) -> str {
+    let b = StrBuf::new();
+    for k in from..to { b.push(cs[k]); }
+    b.to_str()
+}
+
+/// A number literal: `0x` / `0o` / `0b` integers, decimal integers and
+/// floats (`1.5`, `1.`, `2e10`), `_` between digits, no suffix.
+fn number(cs: List<char>, start: usize, toks: List<Tok>) throws (RokonError) -> usize {
+    let i = start;
+    let radix = 10u32;
+    let c1 = at(cs, i + 1);
+    if cs[i] == '0' && (c1 == 'x' || c1 == 'X') { radix = 16u32; }
+    if cs[i] == '0' && (c1 == 'o' || c1 == 'O') { radix = 8u32; }
+    if cs[i] == '0' && (c1 == 'b' || c1 == 'B') { radix = 2u32; }
+    let is_float = false;
+    if radix != 10u32 {
+        i += 2;
+        let d = i;
+        i = try digits(cs, i, radix, start);
+        if i == d { throw fail(cs, start, "missing digits after the base prefix"); }
+    } else {
+        i = try digits(cs, i, 10u32, start);
+        let nx = at(cs, i + 1);
+        if at(cs, i) == '.' && nx.is_ascii_digit() {
+            is_float = true;
+            i = try digits(cs, i + 1, 10u32, start);
+        } else if at(cs, i) == '.' && nx != '.' && !is_ident_start(nx) {
+            is_float = true;
+            i += 1;
+        }
+        if at(cs, i) == 'e' || at(cs, i) == 'E' {
+            is_float = true;
+            i += 1;
+            if at(cs, i) == '+' || at(cs, i) == '-' { i += 1; }
+            if !at(cs, i).is_ascii_digit() { throw fail(cs, start, "exponent has no digits"); }
+            i = try digits(cs, i, 10u32, start);
+        }
+    }
+    if i < cs.len() && is_ident_continue(cs[i]) {
+        throw fail(cs, start, "number suffixes are not allowed in RokON");
+    }
+    toks.push(Tok { kind: if is_float { K_FLOAT } else { K_INT }, text: slice(cs, start, i), at: start });
+    i
+}
+
+/// Digits of `radix` with single `_` between them, from `i`.
+fn digits(cs: List<char>, i: usize, radix: u32, lit: usize) throws (RokonError) -> usize {
+    let first = i;
+    while i < cs.len() && (cs[i] == '_' || cs[i].is_digit(radix)) {
+        if cs[i] == '_' && (i == first || i + 1 >= cs.len() || !cs[i + 1].is_digit(radix)) {
+            throw fail(cs, lit, "`_` must sit between digits");
+        }
+        i += 1;
+    }
+    i
+}
+
+fn string(cs: List<char>, start: usize, toks: List<Tok>) throws (RokonError) -> usize {
+    let b = StrBuf::new();
+    let i = start + 1;
+    while true {
+        if i >= cs.len() { throw fail(cs, start, "unterminated string"); }
+        let c = cs[i];
+        if c == '"' { break; }
+        if c == '\\' {
+            i = try escape(cs, i, b, true);
+        } else {
+            b.push(c);
+            i += 1;
+        }
+    }
+    toks.push(Tok { kind: K_STR, text: b.to_str(), at: start });
+    i + 1
+}
+
+/// `r"..."` / `r#"..."#`: no escapes, ends at `"` plus the same `#`s.
+fn raw_string(cs: List<char>, start: usize, toks: List<Tok>) throws (RokonError) -> usize {
+    let i = start + 1;
+    let hashes = 0usize;
+    while at(cs, i) == '#' {
+        hashes += 1;
+        i += 1;
+    }
+    if at(cs, i) != '"' { throw fail(cs, start, "expected `\"` after the raw string's `#`s"); }
+    i += 1;
+    let body = i;
+    while true {
+        if i >= cs.len() { throw fail(cs, start, "unterminated raw string"); }
+        if cs[i] == '"' {
+            let k = 0usize;
+            while k < hashes && at(cs, i + 1 + k) == '#' { k += 1; }
+            if k == hashes {
+                toks.push(Tok { kind: K_STR, text: slice(cs, body, i), at: start });
+                return i + 1 + hashes;
+            }
+        }
+        i += 1;
+    }
+    i
+}
+
+fn char_lit(cs: List<char>, start: usize, toks: List<Tok>) throws (RokonError) -> usize {
+    let b = StrBuf::new();
+    let i = start + 1;
+    let count = 0usize;
+    while true {
+        if i >= cs.len() || cs[i] == '\n' || cs[i] == '\r' { throw fail(cs, start, "unterminated char literal"); }
+        let c = cs[i];
+        if c == '\'' { break; }
+        if c == '\\' {
+            i = try escape(cs, i, b, false);
+        } else {
+            b.push(c);
+            i += 1;
+        }
+        count += 1;
+    }
+    if count != 1 { throw fail(cs, start, "a char literal holds exactly one character"); }
+    toks.push(Tok { kind: K_CHAR, text: b.to_str(), at: start });
+    i + 1
+}
+
+/// The escape at `cs[i]` (a `\`) into `b`; the index after it. rok's
+/// escapes (spec 1.7.1): `\n \r \t \\ \0 \' \"`, `\xHH` (ASCII),
+/// `\u{H..}`, and in strings `\` + newline (skips the line break and the
+/// next line's leading whitespace).
+fn escape(cs: List<char>, i: usize, b: StrBuf, in_str: bool) throws (RokonError) -> usize {
+    let e = at(cs, i + 1);
+    if e == 'n' { b.push('\n'); return i + 2; }
+    if e == 'r' { b.push('\r'); return i + 2; }
+    if e == 't' { b.push('\t'); return i + 2; }
+    if e == '\\' { b.push('\\'); return i + 2; }
+    if e == '0' { b.push('\0'); return i + 2; }
+    if e == '\'' { b.push('\''); return i + 2; }
+    if e == '"' { b.push('"'); return i + 2; }
+    if e == 'x' {
+        let h = slice(cs, i + 2, (i + 4).min(cs.len()));
+        let v = hex_value(h) ?? 0xFFu32;
+        if h.len() != 2 || v > 0x7Fu32 { throw fail(cs, i, "`\\x` escapes are ASCII (`\\x00`..`\\x7F`)"); }
+        b.push(char::from_u32(v) ?? '\0');
+        return i + 4;
+    }
+    if e == 'u' {
+        if at(cs, i + 2) != '{' { throw fail(cs, i, "`\\u` must be followed by `{`"); }
+        let k = i + 3;
+        let hex = StrBuf::new();
+        while k < cs.len() && cs[k] != '}' {
+            if cs[k] != '_' { hex.push(cs[k]); }
+            k += 1;
+        }
+        let h = hex.to_str();
+        let v = hex_value(h) ?? 0u32;
+        if k >= cs.len() || h.len() == 0 || h.len() > 6 || hex_value(h) is none { throw fail(cs, i, "malformed `\\u{...}` (1-6 hex digits)"); }
+        match char::from_u32(v) {
+            c: char => b.push(c),
+            none => throw fail(cs, i, "`\\u{..}` is not a Unicode scalar value"),
+        }
+        return k + 1;
+    }
+    if in_str && (e == '\n' || e == '\r') {
+        let k = i + 1;
+        while k < cs.len() && (cs[k] == ' ' || cs[k] == '\t' || cs[k] == '\n' || cs[k] == '\r') { k += 1; }
+        return k;
+    }
+    throw fail(cs, i, f"unknown escape `\\{e}`");
+}
+
+/// `h` as hex digits (no sign), if it is.
+fn hex_value(h: str) -> u32 | none {
+    if h.starts_with("-") || h.starts_with("+") { return none; }
+    let n = Int::from_str_radix(h, 16u32)?;
+    let v = n.to_i64()?;
+    if v > 0xFFFFFF { return none; }
+    v as u32
+}
+
+// ---- reader ----
+
+struct Reader {
+    cs: List<char>;
+    toks: List<Tok>;
+    i: usize;
+    /// `locate` mode: follow the path of each value and remember where
+    /// the value (`hit_val`) / its field name or key (`hit_key`) at
+    /// `want` starts (char index + 1; 0 = not seen).
+    locating: bool;
+    path: str;
+    want: str;
+    hit_val: usize;
+    hit_key: usize;
+}
+
+/// Read one document.
+pub fn parse(s: str) throws (RokonError) -> Value {
+    let r = try reader(s, false, "");
+    try r.document()
+}
+
+fn reader(s: str, locating: bool, want: str) throws (RokonError) -> Reader {
+    let cs: List<char> = List::new();
+    for c in s.chars() { cs.push(c); }
+    let toks = try lex(cs);
+    Reader { cs: cs, toks: toks, i: 0, locating: locating, path: "", want: want, hit_val: 0, hit_key: 0 }
+}
+
+/// `e` (from decoding `s`'s value) with the `line:col` of `e.path`.
+pub fn locate(s: str, e: RokonError) -> RokonError {
+    let r = try reader(s, true, e.path) catch _ { return e; };
+    try r.document() catch _ { return e; };
+    let hit = if e.on_key && r.hit_key > 0 { r.hit_key } else { r.hit_val };
+    if hit == 0 { return e; }
+    let p = fail(r.cs, hit - 1, e.msg);
+    p.path = e.path;
+    p.on_key = e.on_key;
+    p
+}
+
+impl Reader {
+    fn document(ref self) throws (RokonError) -> Value {
+        let v = try self.value();
+        let t = self.peek();
+        if t.kind != K_EOF { throw self.unexpected(t, "the end of the document"); }
+        v
+    }
+
+    fn peek(self) -> Tok { self.toks[self.i] }
+
+    fn peek2(self) -> Tok { self.toks[(self.i + 1).min(self.toks.len() - 1)] }
+
+    fn at_punct(self, p: str) -> bool {
+        let t = self.toks[self.i];
+        t.kind == K_PUNCT && t.text == p
+    }
+
+    fn err(self, at: usize, msg: str) -> RokonError { fail(self.cs, at, msg) }
+
+    fn expect(ref self, p: str, what: str) throws (RokonError) {
+        if !self.at_punct(p) { throw self.unexpected(self.peek(), what); }
+        self.i += 1;
+    }
+
+    /// The error for `t` where `what` was expected, naming what RokON
+    /// leaves out when that is what `t` starts.
+    fn unexpected(self, t: Tok, what: str) -> RokonError {
+        if t.kind == K_EOF { return self.err(t.at, f"unexpected end of input, expected {what}"); }
+        if t.kind == K_PUNCT {
+            if t.text == ".." { return self.err(t.at, "`..` is not allowed in RokON"); }
+            if t.text == "." {
+                let nx = self.toks[(self.i + 1).min(self.toks.len() - 1)];
+                if nx.kind == K_IDENT { return self.err(t.at, "method calls and field access are not allowed in RokON"); }
+            }
+            if "+-*/%=<>!&|^~?.".contains(t.text) {
+                return self.err(t.at, f"operator `{t.text}` is not allowed in RokON (only `-` before a number)");
+            }
+        }
+        let shown = if t.kind == K_STR { "a string" } else if t.kind == K_CHAR { "a char" } else { f"`{t.text}`" };
+        self.err(t.at, f"expected {what}, found {shown}")
+    }
+
+    /// Enter path segment `seg` (in `locate` mode); the old path.
+    fn enter(ref self, seg: str) -> str {
+        let old = self.path;
+        if self.locating { self.path = old + seg; }
+        old
+    }
+
+    fn mark_key(ref self, at: usize) {
+        if self.locating && self.hit_key == 0 && self.path == self.want { self.hit_key = at + 1; }
+    }
+
+    fn value(ref self) throws (RokonError) -> Value {
+        let t = self.peek();
+        if self.locating && self.hit_val == 0 && self.path == self.want { self.hit_val = t.at + 1; }
+        if t.kind == K_IDENT { return try self.named(); }
+        if t.kind == K_INT {
+            self.i += 1;
+            return Value::Int(Int::from_literal(t.text));
+        }
+        if t.kind == K_FLOAT {
+            self.i += 1;
+            return Value::Float(Float::from_literal(t.text));
+        }
+        if t.kind == K_STR {
+            self.i += 1;
+            return Value::Str(t.text);
+        }
+        if t.kind == K_CHAR {
+            self.i += 1;
+            return Value::Char(t.text.chars().next() ?? '\0');
+        }
+        if self.at_punct("-") {
+            self.i += 1;
+            let n = self.peek();
+            if n.kind == K_INT {
+                self.i += 1;
+                return Value::Int(-Int::from_literal(n.text));
+            }
+            if n.kind == K_FLOAT {
+                self.i += 1;
+                return Value::Float(-Float::from_literal(n.text));
+            }
+            throw self.err(t.at, "unary `-` applies only to a number literal");
+        }
+        if self.at_punct("[") {
+            self.i += 1;
+            return Value::List(try self.items("]"));
+        }
+        if self.at_punct("(") {
+            self.i += 1;
+            if self.at_punct(")") {
+                self.i += 1;
+                return Value::Tuple(List::new());
+            }
+            let old = self.enter("[0]");
+            let first = try self.value();
+            self.path = old;
+            if self.at_punct(")") {
+                // `(x)` is `x`, as in rok.
+                self.i += 1;
+                return first;
+            }
+            try self.expect(",", "`,` or `)`");
+            let rest = try self.items_from(")", 1);
+            rest.insert(0, first);
+            return Value::Tuple(rest);
+        }
+        if self.at_punct("{") { return try self.brace(); }
+        throw self.unexpected(t, "a value");
+    }
+
+    /// Items up to `close` (consumed), trailing comma allowed.
+    fn items(ref self, close: str) throws (RokonError) -> List<Value> {
+        try self.items_from(close, 0)
+    }
+
+    fn items_from(ref self, close: str, first: usize) throws (RokonError) -> List<Value> {
+        let out: List<Value> = List::new();
+        while !self.at_punct(close) {
+            let old = self.enter(f"[{first + out.len()}]");
+            out.push(try self.value());
+            self.path = old;
+            if !self.at_punct(close) { try self.expect(",", f"`,` or `{close}`"); }
+        }
+        self.i += 1;
+        out
+    }
+
+    /// `none` / `true` / `false`, or a path: `Name { .. }`, `E::V`,
+    /// `E::V(..)`, `E::V { .. }`, `Name(..)`.
+    fn named(ref self) throws (RokonError) -> Value {
+        let t = self.peek();
+        self.i += 1;
+        let path = t.text;
+        let segs = 1usize;
+        if segs == 1 && !self.at_punct("::") {
+            if path == "none" { return Value::None; }
+            if path == "true" { return Value::Bool(true); }
+            if path == "false" { return Value::Bool(false); }
+        }
+        while self.at_punct("::") {
+            self.i += 1;
+            let s = self.peek();
+            if s.kind != K_IDENT { throw self.unexpected(s, "a name after `::`"); }
+            self.i += 1;
+            path = path + "::" + s.text;
+            segs += 1;
+        }
+        if self.at_punct("{") {
+            self.i += 1;
+            let fields = try self.fields();
+            if segs == 1 { return Value::Struct { name: path, fields: fields }; }
+            return Value::Variant { path: path, args: List::new(), named: fields };
+        }
+        if self.at_punct("(") {
+            self.i += 1;
+            let args: List<Value> = List::new();
+            let named: OrderedDict<str, Value> = OrderedDict::new();
+            while !self.at_punct(")") {
+                if self.peek().kind == K_IDENT && self.peek2().kind == K_PUNCT && self.peek2().text == ":" {
+                    try self.field(named);
+                } else {
+                    if !named.is_empty() { throw self.err(self.peek().at, "a positional value cannot follow named ones"); }
+                    let old = self.enter(f"[{args.len()}]");
+                    args.push(try self.value());
+                    self.path = old;
+                }
+                if !self.at_punct(")") { try self.expect(",", "`,` or `)`"); }
+            }
+            self.i += 1;
+            return Value::Variant { path: path, args: args, named: named };
+        }
+        if segs > 1 { return Value::Variant { path: path, args: List::new(), named: OrderedDict::new() }; }
+        throw self.err(t.at, f"bare identifier `{path}` is not allowed in RokON (strings are quoted, variants are written `Enum::{path}`)");
+    }
+
+    /// `name: value` fields up to `}` (consumed).
+    fn fields(ref self) throws (RokonError) -> OrderedDict<str, Value> {
+        let out: OrderedDict<str, Value> = OrderedDict::new();
+        while !self.at_punct("}") {
+            try self.field(out);
+            if !self.at_punct("}") { try self.expect(",", "`,` or `}`"); }
+        }
+        self.i += 1;
+        out
+    }
+
+    fn field(ref self, out: OrderedDict<str, Value>) throws (RokonError) {
+        let t = self.peek();
+        if t.kind != K_IDENT { throw self.unexpected(t, "a field name"); }
+        if out.contains_key(t.text) { throw self.err(t.at, f"field `{t.text}` is given twice"); }
+        self.i += 1;
+        let old = self.enter("." + t.text);
+        self.mark_key(t.at);
+        try self.expect(":", f"`:` after field `{t.text}`");
+        out.insert(t.text, try self.value());
+        self.path = old;
+    }
+
+    /// `{ .. }`: `{}` (an empty dict), `{ name: v }` (struct fields) or
+    /// `{ key: v }` with value keys (a dict).
+    fn brace(ref self) throws (RokonError) -> Value {
+        let open = self.peek();
+        self.i += 1;
+        if self.peek().kind == K_IDENT && self.peek2().kind == K_PUNCT && self.peek2().text == ":" {
+            return Value::Struct { name: none, fields: try self.fields() };
+        }
+        let out: OrderedDict<Value, Value> = OrderedDict::new();
+        while !self.at_punct("}") {
+            let kt = self.peek();
+            let old = self.enter("#key");
+            let k = try self.value();
+            self.path = old;
+            if !self.at_punct(":") {
+                if self.at_punct(",") || self.at_punct("}") || self.at_punct(";") {
+                    throw self.err(open.at, "sets and blocks are not allowed in RokON (a dict needs `key: value`)");
+                }
+                throw self.unexpected(self.peek(), "`:` after a dict key");
+            }
+            self.i += 1;
+            if out.contains_key(k) { throw self.err(kt.at, f"duplicate key `{write::loose(k)}`"); }
+            let seg = if self.locating { "[" + write::loose(k) + "]" } else { "" };
+            let old2 = self.enter(seg);
+            self.mark_key(kt.at);
+            out.insert(k, try self.value());
+            self.path = old2;
+            if !self.at_punct("}") { try self.expect(",", "`,` or `}`"); }
+        }
+        self.i += 1;
+        Value::Dict(out)
+    }
+}

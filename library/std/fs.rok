@@ -27,7 +27,7 @@ use rok::core::future::{Context, Poll};
 use rok::core::stream::Stream;
 use rok::core::task::Blocking;
 
-extern "C" {
+extern "rok" {
     fn rok_os_open(dir: i32, path: str, flags: i32, mode: u32) -> i32;
     fn rok_os_close(fd: i32) -> i32;
     fn rok_os_read(fd: i32, max: usize, err: GcBuf<i32>) -> str;

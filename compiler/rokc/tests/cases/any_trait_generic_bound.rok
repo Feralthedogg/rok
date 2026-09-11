@@ -36,15 +36,15 @@ impl Dup for A {
 }
 
 let x: any Get<i32> = A { v: 10 };
-rok_print_i32(x.get(5));
+println(f"{x.get(5)}");
 x = B { v: 10 };
-rok_print_i32(x.get(5));
+println(f"{x.get(5)}");
 let y: any Get = C { v: 0 };
-rok_print_i32(y.n());
+println(f"{y.n()}");
 let z: any Get = x;
-rok_print_i32(z.n());
+println(f"{z.n()}");
 let w: any = x;
-if w is B { rok_print_i32(w.v); }
+if w is B { println(f"{w.v}"); }
 let d: any Dup = A { v: 3 };
-if d is A { rok_print_i32(d.dup().size()); }
-rok_print_i32(d.size());
+if d is A { println(f"{d.dup().size()}"); }
+println(f"{d.size()}");

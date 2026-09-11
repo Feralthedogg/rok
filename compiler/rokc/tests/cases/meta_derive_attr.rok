@@ -78,8 +78,8 @@ struct Counted { n: i32; a: i32; b: i32; }
 
 fn main() -> i32 {
     let u = User { name: "ada", age: 36, secret: "x" };
-    rok_print_str(u.ser());
-    rok_print_str(User::pub_fields());
-    rok_print_str(f"{Counted::count()}");
+    println(u.ser());
+    println(User::pub_fields());
+    println(f"{Counted::count()}");
     return 0;
 }

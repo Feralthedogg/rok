@@ -437,8 +437,8 @@ pub extern "C" fn rok_task_cancel(_handle: *mut u8) {
 static TASK_ABI_CODE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 static TASK_ABI_ENV: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-// A closure's code takes its arguments, then its env.
-type TaskAbiHook = unsafe extern "C" fn(i32, i64, i64, *mut u8, *mut u8);
+// A rok `fn` value's code takes its env first, then its arguments.
+type TaskAbiHook = unsafe extern "C" fn(*mut u8, i32, i64, i64, *mut u8);
 
 /// Install `rok::core::task`'s ABI hook (the first call wins; its env is
 /// pinned).
@@ -469,11 +469,11 @@ fn task_abi(op: i32, a: i64, b: i64, waker: *mut u8) {
     unsafe {
         let f: TaskAbiHook = core::mem::transmute::<usize, TaskAbiHook>(code);
         f(
+            TASK_ABI_ENV.load(Ordering::Acquire) as *mut u8,
             op,
             a,
             b,
             waker,
-            TASK_ABI_ENV.load(Ordering::Acquire) as *mut u8,
         );
     }
 }

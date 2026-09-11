@@ -6,6 +6,6 @@
 
 fn main() -> i32 {
     let x = 1;
-    rok_print_str(f"x = {x}");
+    println(f"x = {x}");
     return 0;
 }

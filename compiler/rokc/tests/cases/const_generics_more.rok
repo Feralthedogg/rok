@@ -71,28 +71,28 @@ type Grid4 = Vec2<4>;
 
 fn main() -> i32 {
     let w = [1u8; 16];
-    rok_print_i32(w[15] as i32);
+    println(f"{w[15] as i32}");
     let z: [f64; 4] = zeros();
-    rok_print_i32(z[3] as i32);
+    println(f"{z[3] as i32}");
     let r: [i32; 8] = replicate(3);
-    rok_print_i32(total(r));
-    rok_print_i32(total([2; 5]));
-    rok_print_i32(total(replicate::<i32, 3>(7)));
+    println(f"{total(r)}");
+    println(f"{total([2; 5])}");
+    println(f"{total(replicate::<i32, 3>(7))}");
 
     let c: Cells<3> = Cells::Full([1, 2, 3]);
-    rok_print_i32(count(c) as i32);
+    println(f"{count(c) as i32}");
     let v = Vec2 { xs: [5; 4] };
-    rok_print_i32(v.len() as i32);
-    rok_print_i32(v.first());
-    rok_print_i32(P { x: 1 }.dim() as i32);
+    println(f"{v.len() as i32}");
+    println(f"{v.first()}");
+    println(f"{P { x: 1 }.dim() as i32}");
     let row: Row<2> = [8, 9];
-    rok_print_i32(row[1]);
+    println(f"{row[1]}");
     let g: Grid4 = Vec2 { xs: [1, 2, 3, 4] };
-    rok_print_i32(g.len() as i32);
-    rok_print_i32(total(Q { x: 1 }.ones()));
+    println(f"{g.len() as i32}");
+    println(f"{total(Q { x: 1 }.ones())}");
     let k: Row<3> = replicate(2);
-    rok_print_i32(total(k) + 1);
-    rok_print_i32(R { x: 1 }.dim() as i32);
-    rok_print_i32(total(S { x: 1 }.ones()));
+    println(f"{total(k) + 1}");
+    println(f"{R { x: 1 }.dim() as i32}");
+    println(f"{total(S { x: 1 }.ones())}");
     return 0;
 }

@@ -12,8 +12,8 @@ unsafe fn five() -> i32 {
 }
 
 fn main() -> i32 {
-    rok_print_str(r#"C:\path\n "q""#);
+    println(r#"C:\path\n "q""#);
     let v = unsafe { five() };
-    rok_print_i32(v);
+    println(f"{v}");
     return 0;
 }

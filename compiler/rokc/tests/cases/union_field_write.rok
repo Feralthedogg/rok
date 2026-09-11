@@ -12,9 +12,9 @@ struct Holder { b: Bits; tag: i32; }
 fn main() -> i32 {
     let x = Bits { i: 5 };
     x.i = 7;
-    rok_print_i32(unsafe { x.i });
+    println(f"{unsafe { x.i }}");
     let h = Holder { b: Bits { i: 0 }, tag: 1 };
     h.b.f = 1.0f32;
-    rok_print_i32(unsafe { h.b.i });
+    println(f"{unsafe { h.b.i }}");
     return 0;
 }

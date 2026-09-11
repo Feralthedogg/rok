@@ -4,7 +4,7 @@
 
 // 맨 `any` 값에는 bound 가 없어 메서드를 바로 부를 수 없다 — 좁힌 뒤에 부른다.
 trait Show { fn show(self); }
-impl Show for i32 { fn show(self) { rok_print_i32(self); } }
+impl Show for i32 { fn show(self) { println(f"{self}"); } }
 
 let v: any = 1;
 v.show();

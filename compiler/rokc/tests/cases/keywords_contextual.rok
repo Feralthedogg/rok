@@ -24,14 +24,14 @@ const LIMIT: Num = 5;
 
 fn main() -> i32 {
     let p = Ev { type: 3, match: 4 };
-    rok_print_i32(p.type());
-    rok_print_i32(p.type);
+    println(f"{p.type()}");
+    println(f"{p.type}");
     let in = 1;
-    rok_print_i32(in);
+    println(f"{in}");
     let type = 2;
-    rok_print_i32(any(type));
-    rok_print_i32(label(where: 2, in: 6));
+    println(f"{any(type)}");
+    println(f"{label(where: 2, in: 6)}");
     let n: Num = LIMIT;
-    for i in 0..1 { rok_print_i32(i + n); }
+    for i in 0..1 { println(f"{i + n}"); }
     return 0;
 }

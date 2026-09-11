@@ -12,6 +12,6 @@ fn main() -> i32 {
         }
         i += 1;
     }
-    rok_print_i64(n + keep.len() as i64);
+    println(f"{n + keep.len() as i64}");
     return 0;
 }

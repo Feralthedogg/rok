@@ -13,6 +13,6 @@ fn main() -> i32 {
             break n;
         }
     };
-    rok_print_i32(result);
+    println(f"{result}");
     return 0;
 }

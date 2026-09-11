@@ -16,7 +16,7 @@ fn make(d: i64) -> any Tree {
 fn main() -> i32 {
     let max: i64 = 18;
     let min: i64 = 4;
-    rok_print_i64(make(max + 1).check());
+    println(f"{make(max + 1).check()}");
     let long = make(max);
     let d = min;
     while d <= max {
@@ -27,9 +27,9 @@ fn main() -> i32 {
             c += make(d).check();
             k += 1;
         }
-        rok_print_i64(c);
+        println(f"{c}");
         d += 2;
     }
-    rok_print_i64(long.check());
+    println(f"{long.check()}");
     return 0;
 }

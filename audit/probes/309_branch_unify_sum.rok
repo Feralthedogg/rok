@@ -15,8 +15,8 @@ fn pick(b: i32) -> i32 | f64 {
 fn main() -> i32 {
     let r = pick(1);
     match r {
-        n: i32 => rok_print_str("from_int"),
-        d: f64 => rok_print_str("from_float"),
+        n: i32 => println("from_int"),
+        d: f64 => println("from_float"),
     };
     return 0;
 }

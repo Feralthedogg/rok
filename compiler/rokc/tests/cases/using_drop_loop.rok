@@ -21,7 +21,7 @@ struct Res { id: i32; }
 
 impl Drop for Res {
     fn drop(ref self) {
-        rok_print_str(f"drop {self.id}");
+        println(f"drop {self.id}");
     }
 }
 
@@ -39,24 +39,24 @@ fn main() -> i32 {
     for i in 0..5 {
         using a = open(i), b = open(i + 1) {
             if i == 1 {
-                rok_print_str("skip 1");
+                println("skip 1");
                 using c = open(11) {
                     continue;
                 }
             }
             if i == 2 {
-                rok_print_str("stop 2");
+                println("stop 2");
                 using c = open(12) {
                     break;
                 }
             }
-            rok_print_str(f"body {a.id}");
+            println(f"body {a.id}");
         }
     }
     match find(5) {
-        n: i32 => rok_print_i32(n),
-        none => rok_print_str("none"),
+        n: i32 => println(f"{n}"),
+        none => println("none"),
     }
-    rok_print_str("after");
+    println("after");
     return 0;
 }

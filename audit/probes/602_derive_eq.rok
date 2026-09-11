@@ -11,6 +11,6 @@ struct Pt { x: i32; y: i32; }
 fn main() -> i32 {
     let a = Pt { x: 1, y: 2 };
     let b = Pt { x: 1, y: 2 };
-    if a == b { rok_print_str("equal"); }
+    if a == b { println("equal"); }
     return 0;
 }

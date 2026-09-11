@@ -480,15 +480,12 @@ pub(super) fn monomorphize_on(
         },
     );
 
-    let mangled_name = format!(
-        "{}__mono__{}",
-        fn_def.name,
-        subst_tys
-            .iter()
-            .map(ty_mangle)
-            .collect::<Vec<_>>()
-            .join("_")
-    );
+    let mono_args = subst_tys
+        .iter()
+        .map(ty_mangle)
+        .collect::<Vec<_>>()
+        .join("_");
+    let mangled_name = format!("{}{}{mono_args}", fn_def.name, rokc_ir_common::MONO_MARK);
 
     ctx.env
         .sink
@@ -507,6 +504,8 @@ pub(super) fn monomorphize_on(
         .sink
         .mono_depth
         .set(ctx.env.sink.mono_depth.get() - 1);
+    let mut mono_fn = mono_fn;
+    mono_fn.facts.mono_args = Some(mono_args);
 
     let ret_ty = mono_fn.ret_ty.clone();
     let mono_param_tys: Vec<HirTy> = mono_fn.params.iter().map(|p| p.ty.clone()).collect();
@@ -677,6 +676,7 @@ pub(super) fn lower_fn_inner(
         is_async: false,
         is_generator: false,
         span: fn_def.span,
+        facts: rokc_ir_common::FnFacts::default(),
     }
 }
 

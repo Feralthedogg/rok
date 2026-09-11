@@ -1,0 +1,104 @@
+// expect-exit: 101
+// expect-stderr: NaN/infinity has no RokON form
+// expect-stdout:
+// ["xxxxxxxxxxxxxxxxxxxxx", "xxxxxxxxxxxxxxxxxxxxx", "xxxxxxxxxxxxxxxxxxxxx", "xxxxxxxxxxxxxxxxxxxxx"]
+// [
+//     "xxxxxxxxxxxxxxxxxxxxxx",
+//     "xxxxxxxxxxxxxxxxxxxxxx",
+//     "xxxxxxxxxxxxxxxxxxxxxx",
+//     "xxxxxxxxxxxxxxxxxxxxxx",
+// ]
+// Config {
+//     fits: ["xxxxxxxxxxxxxxxxxxxxxxx", "xxxxxxxxxxxxxxxxxxxxxxx", "xxxxxxxxxxxxxxxxxxxxxxx"],
+//     breaks: [
+//         "xxxxxxxxxxxxxxxxxxxxxxxxxx",
+//         "xxxxxxxxxxxxxxxxxxxxxxxxxx",
+//         "xxxxxxxxxxxxxxxxxxxxxxxxxx",
+//     ],
+//     t: (
+//         ["xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"],
+//         1,
+//         ["xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"],
+//     ),
+//     v: Shape::Tagged(
+//         "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+//         label: "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+//     ),
+//     d: {
+//         "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkk": [
+//             "xxxxxxxxxxxxxxxxxxxxxxxxx",
+//             "xxxxxxxxxxxxxxxxxxxxxxxxx",
+//             "xxxxxxxxxxxxxxxxxxxxxxxxx",
+//         ],
+//         2: {},
+//     },
+// }
+// [
+//     0.1,
+//     100.0,
+//     10000000000000000.0,
+//     1.0e17,
+//     0.000015,
+//     1.5e-6,
+//     123.456,
+//     -2.5e-300,
+//     5.0e-324,
+//     1.7976931348623157e308,
+// ]
+// "quote \" back \\ nl \n tab \t nul \0 bell \u{7} é"
+// '\''
+// debug: [nan]
+
+// Spec 3.9.4: the canonical form — one line while it fits in 100
+// columns (counting the indent, the key and the trailing comma), else
+// one item per line, 4-space indent, a comma after every item; floats
+// in their shortest round-trip digits. Re-reading it gives the same
+// value. A NaN / infinity has no RokON form: `to_string` panics.
+
+use rok::std::rokon;
+use rok::std::rokon::Value;
+
+fn items(n: i32, w: i32) -> Value {
+    let xs: List<Value> = List::new();
+    for i in 0..n { xs.push(Value::Str("x".repeat(w as usize))); }
+    Value::List(xs)
+}
+
+fn check(v: Value) {
+    let s = v.to_string();
+    println(s);
+    let back = try rokon::parse(s) catch e { println(f"reparse failed: {e}"); return; };
+    if back != v { println("ROUND TRIP MISMATCH"); }
+}
+
+fn main() {
+    // 4 strings of 21 chars: `[` + 4 * 23 + 3 * 2 + `]` = 100 columns.
+    check(items(4, 21));
+    // One column more breaks the list.
+    check(items(4, 22));
+    // Inside a struct the field line counts its indent, name and comma.
+    let fs: OrderedDict<str, Value> = OrderedDict::new();
+    fs.insert("fits", items(3, 23));
+    fs.insert("breaks", items(3, 26));
+    fs.insert("t", Value::Tuple([items(2, 30), Value::Int(1), items(2, 30)]));
+    let named: OrderedDict<str, Value> = OrderedDict::new();
+    named.insert("label", Value::Str("y".repeat(60)));
+    fs.insert("v", Value::Variant { path: "Shape::Tagged", args: [Value::Str("z".repeat(40))], named: named });
+    let d: OrderedDict<Value, Value> = OrderedDict::new();
+    d.insert(Value::Str("k".repeat(30)), items(3, 25));
+    d.insert(Value::Int(2), Value::Struct { name: none, fields: OrderedDict::new() });
+    fs.insert("d", Value::Dict(d));
+    check(Value::Struct { name: "Config", fields: fs });
+
+    let floats: List<Value> = List::new();
+    for x in [0.1, 100.0, 1e16, 1e17, 1.5e-5, 1.5e-6, 123.456, -2.5e-300, 5e-324, 1.7976931348623157e308] {
+        floats.push(Value::Float(Float::from_f64(x)));
+    }
+    check(Value::List(floats));
+    check(Value::Str("quote \" back \\ nl \n tab \t nul \0 bell \x07 é"));
+    check(Value::Char('\''));
+
+    let bad = Value::List([Value::Float(Float::from_f64(f64::nan()))]);
+    println(f"debug: {bad:?}");
+    println(bad.to_string());
+}

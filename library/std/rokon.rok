@@ -1,0 +1,860 @@
+// rok::std::rokon — RokON (Rok Object Notation, `.rokon`): one value
+// written in rok literal syntax (stdlib spec 3.9).
+//
+// `parse` reads a document into a `Value`, `Value::to_string` writes the
+// canonical form, and `ToRokon` / `FromRokon` (with `#[derive(Rokon)]`)
+// map rok types to and from `Value`. The reader is a small lexer plus a
+// recursive descent over the literal subset (the compiler's parser is not
+// reachable at run time).
+//
+// Decode errors carry a `path` (`.limits["cpu"]`, `.tags[1]`); `from_str`
+// turns it into `line:col` by re-reading the document and stopping at
+// that path, so the happy path keeps no positions.
+
+pub mod read;
+pub mod write;
+
+/// A RokON value. `{ k: v }` with identifier keys is a `Struct` without
+/// a name; `{ "k": v }` (any value keys) and `{}` are a `Dict`. A path
+/// with `::` is a `Variant` (`E::V`, `E::V(a, k: b)`, `E::V { f: v }`);
+/// `Name(a, b)` (a tuple struct) is a `Variant` with a one-segment path.
+pub enum Value {
+    None,
+    Bool(bool),
+    Int(int),
+    Float(float),
+    Char(char),
+    Str(str),
+    List(List<Value>),
+    Dict(OrderedDict<Value, Value>),
+    Tuple(List<Value>),
+    Struct { name: str | none; fields: OrderedDict<str, Value>; },
+    Variant { path: str; args: List<Value>; named: OrderedDict<str, Value>; },
+}
+
+impl Value {
+    /// The canonical text (spec 3.9.4): 4-space indent, one line when it
+    /// fits in 100 columns, otherwise one element per line with a
+    /// trailing comma. Panics on a NaN / infinite float (no RokON form).
+    pub fn to_string(self) -> str { write::pretty(self, 0, 0, 0) }
+
+    /// What kind of value this is, for messages (`integer`, `struct`, ..).
+    pub fn kind(self) -> str {
+        match self {
+            Value::None => "none",
+            Value::Bool(_) => "bool",
+            Value::Int(_) => "integer",
+            Value::Float(_) => "float",
+            Value::Char(_) => "char",
+            Value::Str(_) => "string",
+            Value::List(_) => "list",
+            Value::Dict(_) => "dict",
+            Value::Tuple(_) => "tuple",
+            Value::Struct { name, fields } => "struct",
+            Value::Variant { path, args, named } => f"variant `{path}`",
+        }
+    }
+}
+
+impl Display for Value {
+    fn display(self) -> str { self.to_string() }
+}
+
+impl Debug for Value {
+    fn debug(self) -> str { write::loose(self) }
+}
+
+// ponytail: equality and hashing go through the one-line text — exact for
+// every kind (dict / field order counts), O(size) per call; a structural
+// walk if `Value` keys ever show up in a profile.
+impl PartialEq for Value {
+    fn eq(self, rhs: Value) -> bool { write::loose(self) == write::loose(rhs) }
+    fn ne(self, rhs: Value) -> bool { write::loose(self) != write::loose(rhs) }
+}
+
+impl Eq for Value {}
+
+impl Hash for Value {
+    fn hash(self) -> u64 { write::loose(self).hash() }
+}
+
+/// A read or decode error. `line` / `col` (1-based, code points) are 0
+/// when the value did not come from text (`T::from_rokon(v)` directly);
+/// `path` names the failing part (`.servers[2].port`, empty at the root).
+pub struct RokonError {
+    pub msg: str;
+    pub line: u32;
+    pub col: u32;
+    pub path: str;
+    /// The error is about a field name / dict key, not its value
+    /// (`from_str` points at the key).
+    pub(sub) on_key: bool;
+}
+
+impl RokonError {
+    pub fn new(msg: str) -> RokonError {
+        RokonError { msg: msg, line: 0u32, col: 0u32, path: "", on_key: false }
+    }
+
+    /// `self` one level down: `seg` (`.name`, `[3]`) goes in front of the path.
+    pub fn within(self, seg: str) -> RokonError {
+        RokonError { msg: self.msg, line: self.line, col: self.col, path: seg + self.path, on_key: self.on_key }
+    }
+
+    fn at_key(self) -> RokonError {
+        RokonError { msg: self.msg, line: self.line, col: self.col, path: self.path, on_key: true }
+    }
+}
+
+impl Display for RokonError {
+    fn display(self) -> str {
+        if self.line > 0u32 { return f"{self.line}:{self.col}: {self.msg}"; }
+        if self.path != "" { return f"at {self.path}: {self.msg}"; }
+        self.msg
+    }
+}
+
+impl Debug for RokonError {
+    fn debug(self) -> str { f"RokonError({self})" }
+}
+
+impl Error for RokonError {}
+
+/// A rok value as RokON.
+pub trait ToRokon {
+    fn to_rokon(self) -> Value;
+}
+
+/// A rok value from RokON; the target type decides how `v` reads.
+pub trait FromRokon {
+    fn from_rokon(v: Value) throws (RokonError) -> Self;
+
+    /// A struct field of this type that the document leaves out: an error,
+    /// except `T | none` (`none`).
+    fn from_missing() throws (RokonError) -> Self {
+        throw RokonError::new("missing");
+    }
+}
+
+/// Read one RokON document.
+pub fn parse(s: str) throws (RokonError) -> Value {
+    try read::parse(s)
+}
+
+/// `v` in canonical RokON (spec 3.9.4). Panics on a NaN / infinite float.
+pub fn to_string<T: ToRokon>(v: T) -> str {
+    v.to_rokon().to_string()
+}
+
+/// Read a document as a `T`; errors carry the `line:col` of the part that
+/// did not fit.
+pub fn from_str<T: FromRokon>(s: str) throws (RokonError) -> T {
+    let v = try read::parse(s);
+    try T::from_rokon(v) catch e { throw read::locate(s, e); }
+}
+
+/// `x` as a `Value` (`encode::<T>(x)` keeps a `T | none` field whole).
+pub fn encode<T: ToRokon>(x: T) -> Value { x.to_rokon() }
+
+/// `v` as a `T`, errors placed under `seg`.
+pub fn decode<T: FromRokon>(v: Value, seg: str) throws (RokonError) -> T {
+    try T::from_rokon(v) catch e { throw e.within(seg); }
+}
+
+fn mismatch<T>(v: Value) -> RokonError {
+    RokonError::new(f"expected {T::type_name()}, found {v.kind()}")
+}
+
+/// The last `::` segment of a path (`a::b::Point` → `Point`).
+fn last_seg(path: str) -> str {
+    match path.rfind("::") {
+        at: usize => path[at + 2:],
+        none => path,
+    }
+}
+
+// ---- derive support (used by `#[derive(Rokon)]`) ----
+
+/// The named fields read into a struct or a named variant.
+pub struct Fields {
+    vals: OrderedDict<str, Value>;
+    /// Each field's path segment (`.f`, or `[i]` when given by position).
+    segs: OrderedDict<str, str>;
+    ctx: str;
+}
+
+impl Fields {
+    /// `v` as the fields of struct `name` (`Name { .. }`, `{ .. }`,
+    /// `m::Name { .. }`, or `{}`); a field not in `names` is an error.
+    pub fn of_struct(v: Value, name: str, names: List<str>) throws (RokonError) -> Fields {
+        let given: OrderedDict<str, Value> = match v {
+            Value::Struct { name: n, fields } => {
+                if let w: str = n {
+                    if last_seg(w) != name { throw RokonError::new(f"expected {name}, found `{w} {{ .. }}`"); }
+                }
+                fields
+            },
+            Value::Variant { path, args, named } => {
+                if last_seg(path) != name || !args.is_empty() {
+                    throw RokonError::new(f"expected {name}, found {v.kind()}");
+                }
+                named
+            },
+            Value::Dict(d) => {
+                if !d.is_empty() { throw RokonError::new(f"expected {name}, found dict"); }
+                OrderedDict::new()
+            },
+            _ => throw RokonError::new(f"expected {name}, found {v.kind()}"),
+        };
+        try Fields::make(List::new(), given, name, names)
+    }
+
+    /// A named variant's values: positional ones fill the fields in
+    /// order, then the named ones (`E::V(1, b: 2)`, `E::V { a: 1, b: 2 }`).
+    pub fn of_variant(args: List<Value>, named: OrderedDict<str, Value>, ctx: str, names: List<str>) throws (RokonError) -> Fields {
+        try Fields::make(args, named, ctx, names)
+    }
+
+    fn make(args: List<Value>, named: OrderedDict<str, Value>, ctx: str, names: List<str>) throws (RokonError) -> Fields {
+        let f = Fields { vals: OrderedDict::new(), segs: OrderedDict::new(), ctx: ctx };
+        let i = 0usize;
+        for a in args {
+            if i >= names.len() {
+                throw RokonError::new(f"{ctx} takes {names.len()} values, found {args.len()}").within(f"[{i}]");
+            }
+            f.vals.insert(names[i], a);
+            f.segs.insert(names[i], f"[{i}]");
+            i += 1;
+        }
+        for (k, v) in named.entries() {
+            if !names.iter().any(|n| n == k) {
+                throw RokonError::new(f"unknown field `{k}` in {ctx}").within("." + k).at_key();
+            }
+            if f.vals.contains_key(k) {
+                throw RokonError::new(f"field `{k}` of {ctx} is given twice").within("." + k).at_key();
+            }
+            f.vals.insert(k, v);
+            f.segs.insert(k, "." + k);
+        }
+        f
+    }
+
+    pub fn has(self, name: str) -> bool { self.vals.contains_key(name) }
+
+    /// Field `name` as a `T`: its value, or `T::from_missing()` when absent.
+    pub fn get<T: FromRokon>(self, name: str) throws (RokonError) -> T {
+        if let v: Value = self.vals.get(name) {
+            let seg = self.segs.get(name) ?? "";
+            return try decode::<T>(v, seg);
+        }
+        try T::from_missing() catch _ { throw RokonError::new(f"missing field `{name}` in {self.ctx}"); }
+    }
+}
+
+/// `v` as the values of tuple struct `name` (`Name(a, b)`), `n` of them.
+pub fn struct_args(v: Value, name: str, n: usize) throws (RokonError) -> List<Value> {
+    match v {
+        Value::Variant { path, args, named } => {
+            if last_seg(path) == name && named.is_empty() {
+                return try count_args(args, name, n);
+            }
+        },
+        _ => {},
+    }
+    throw RokonError::new(f"expected {name}(..), found {v.kind()}");
+}
+
+/// `v` as a variant of enum `name`: (variant name, positional values,
+/// named values).
+pub fn variant_of(v: Value, name: str) throws (RokonError) -> (str, List<Value>, OrderedDict<str, Value>) {
+    match v {
+        Value::Variant { path, args, named } => {
+            let head = match path.rfind("::") {
+                at: usize => path[:at],
+                none => throw RokonError::new(f"expected a {name} variant (`{name}::..`), found `{path}`"),
+            };
+            if last_seg(head) != name {
+                throw RokonError::new(f"expected a {name} variant, found `{path}`");
+            }
+            (last_seg(path), args, named)
+        },
+        _ => throw RokonError::new(f"expected a {name} variant, found {v.kind()}"),
+    }
+}
+
+/// A tuple variant's (or unit variant's, `n` = 0) values.
+pub fn variant_args(args: List<Value>, named: OrderedDict<str, Value>, ctx: str, n: usize) throws (RokonError) -> List<Value> {
+    for (k, _) in named.entries() {
+        throw RokonError::new(f"{ctx} has no named fields (found `{k}`)").within("." + k).at_key();
+    }
+    try count_args(args, ctx, n)
+}
+
+fn count_args(args: List<Value>, ctx: str, n: usize) throws (RokonError) -> List<Value> {
+    if args.len() != n {
+        let s = if n == 1 { "" } else { "s" };
+        throw RokonError::new(f"{ctx} takes {n} value{s}, found {args.len()}");
+    }
+    args
+}
+
+pub fn unknown_variant(v: str, ctx: str) -> RokonError {
+    RokonError::new(f"`{ctx}::{v}` is not a variant of {ctx}")
+}
+
+/// `#[derive(Rokon)]`: `ToRokon` + `FromRokon` for a struct (named →
+/// `Name { f: v }`, tuple → `Name(a, b)`, unit → `Name {}`) or an enum
+/// (`E::V`, `E::V(a)`, `E::V { f: v }`). A missing field takes its
+/// default (`f: T = expr`), else `none` for `T | none`, else is an error.
+#[impl_derive(Rokon)]
+pub @derive {
+    @where_all(rok::std::rokon::ToRokon)
+    impl rok::std::rokon::ToRokon for @Self {
+        fn to_rokon(self) -> rok::std::rokon::Value {
+            @if_struct {
+                @apply_if(@Self.is_tuple) {
+                    return rok::std::rokon::Value::Variant {
+                        path: @Self.as_str(),
+                        args: [@for_fields { rok::std::rokon::encode::<@field.type>(self.@field), }],
+                        named: OrderedDict::new(),
+                    };
+                }
+                @apply_if(!@Self.is_tuple) {
+                    let fs: OrderedDict<str, rok::std::rokon::Value> = OrderedDict::new();
+                    @for_fields {
+                        fs.insert(@field.name.as_str(), rok::std::rokon::encode::<@field.type>(self.@field));
+                    }
+                    return rok::std::rokon::Value::Struct { name: @Self.as_str(), fields: fs };
+                }
+            }
+            @if_enum {
+                return match self {
+                    @for_variants {
+                        @variant.pattern => {
+                            let args: List<rok::std::rokon::Value> = List::new();
+                            let named: OrderedDict<str, rok::std::rokon::Value> = OrderedDict::new();
+                            @apply_if(@variant.is_tuple) {
+                                @for_variant_fields {
+                                    args.push(rok::std::rokon::encode::<@field.type>(@field));
+                                }
+                            }
+                            @apply_if(@variant.is_named) {
+                                @for_variant_fields {
+                                    named.insert(@field.name.as_str(), rok::std::rokon::encode::<@field.type>(@field));
+                                }
+                            }
+                            rok::std::rokon::Value::Variant {
+                                path: @Self.as_str() + "::" + @variant.name.as_str(),
+                                args: args,
+                                named: named,
+                            }
+                        },
+                    }
+                };
+            }
+        }
+    }
+
+    @where_all(rok::std::rokon::FromRokon)
+    impl rok::std::rokon::FromRokon for @Self {
+        fn from_rokon(v: rok::std::rokon::Value) throws (rok::std::rokon::RokonError) -> Self {
+            @if_struct {
+                @apply_if(@Self.is_tuple) {
+                    let args = try rok::std::rokon::struct_args(v, @Self.as_str(), [@for_fields { 0, }].len());
+                    return @Self(@for_fields {
+                        try rok::std::rokon::decode::<@field.type>(args[@field.name], "[" + @field.name.as_str() + "]"),
+                    });
+                }
+                @apply_if(!@Self.is_tuple) {
+                    let fs = try rok::std::rokon::Fields::of_struct(v, @Self.as_str(), [@for_fields { @field.name.as_str(), }]);
+                    @apply_if(@Self.is_unit) {
+                        return @Self;
+                    }
+                    @apply_if(@Self.is_named) {
+                        return @Self {
+                            @for_fields {
+                                @apply_if(@field.has_default) {
+                                    @field: if fs.has(@field.name.as_str()) {
+                                        try fs.get::<@field.type>(@field.name.as_str())
+                                    } else {
+                                        @field.default
+                                    },
+                                }
+                                @apply_if(!@field.has_default) {
+                                    @field: try fs.get::<@field.type>(@field.name.as_str()),
+                                }
+                            }
+                        };
+                    }
+                }
+            }
+            @if_enum {
+                let (name, args, named) = try rok::std::rokon::variant_of(v, @Self.as_str());
+                @for_variants {
+                    if name == @variant.name.as_str() {
+                        @apply_if(@variant.is_unit) {
+                            try rok::std::rokon::variant_args(args, named, @Self.as_str() + "::" + name, 0);
+                            return @Self.name::@variant.name;
+                        }
+                        @apply_if(@variant.is_tuple) {
+                            let xs = try rok::std::rokon::variant_args(
+                                args, named, @Self.as_str() + "::" + name, [@for_variant_fields { 0, }].len());
+                            return @Self.name::@variant.name(@for_variant_fields {
+                                try rok::std::rokon::decode::<@field.type>(xs[@field.name], "[" + @field.name.as_str() + "]"),
+                            });
+                        }
+                        @apply_if(@variant.is_named) {
+                            let fs = try rok::std::rokon::Fields::of_variant(
+                                args, named, @Self.as_str() + "::" + name,
+                                [@for_variant_fields { @field.name.as_str(), }]);
+                            return @Self.name::@variant.name {
+                                @for_variant_fields {
+                                    @apply_if(@field.has_default) {
+                                        @field.name: if fs.has(@field.name.as_str()) {
+                                            try fs.get::<@field.type>(@field.name.as_str())
+                                        } else {
+                                            @field.default
+                                        },
+                                    }
+                                    @apply_if(!@field.has_default) {
+                                        @field.name: try fs.get::<@field.type>(@field.name.as_str()),
+                                    }
+                                }
+                            };
+                        }
+                    }
+                }
+                throw rok::std::rokon::unknown_variant(name, @Self.as_str());
+            }
+        }
+    }
+}
+
+// ---- impls for the standard types ----
+
+impl ToRokon for Value {
+    fn to_rokon(self) -> Value { self }
+}
+
+impl FromRokon for Value {
+    fn from_rokon(v: Value) throws (RokonError) -> Value { v }
+}
+
+impl ToRokon for bool {
+    fn to_rokon(self) -> Value { Value::Bool(self) }
+}
+
+impl FromRokon for bool {
+    fn from_rokon(v: Value) throws (RokonError) -> bool {
+        match v {
+            Value::Bool(b) => b,
+            _ => throw mismatch::<bool>(v),
+        }
+    }
+}
+
+impl ToRokon for char {
+    fn to_rokon(self) -> Value { Value::Char(self) }
+}
+
+impl FromRokon for char {
+    fn from_rokon(v: Value) throws (RokonError) -> char {
+        match v {
+            Value::Char(c) => c,
+            _ => throw mismatch::<char>(v),
+        }
+    }
+}
+
+impl ToRokon for str {
+    fn to_rokon(self) -> Value { Value::Str(self) }
+}
+
+impl FromRokon for str {
+    fn from_rokon(v: Value) throws (RokonError) -> str {
+        match v {
+            Value::Str(s) => s,
+            _ => throw mismatch::<str>(v),
+        }
+    }
+}
+
+impl ToRokon for Int {
+    fn to_rokon(self) -> Value { Value::Int(self) }
+}
+
+impl FromRokon for Int {
+    fn from_rokon(v: Value) throws (RokonError) -> int { try int_of::<int>(v) }
+}
+
+fn int_of<T>(v: Value) throws (RokonError) -> int {
+    match v {
+        Value::Int(n) => n,
+        _ => throw mismatch::<T>(v),
+    }
+}
+
+fn out_of_range<T>(n: int) -> RokonError {
+    RokonError::new(f"integer {n} is out of range for {T::type_name()}")
+}
+
+impl ToRokon for i8 { fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
+impl ToRokon for i16 { fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
+impl ToRokon for i32 { fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
+impl ToRokon for i64 { fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
+impl ToRokon for isize { fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
+impl ToRokon for u8 { fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
+impl ToRokon for u16 { fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
+impl ToRokon for u32 { fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
+impl ToRokon for u64 { fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
+impl ToRokon for usize { fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
+
+impl FromRokon for i8 {
+    fn from_rokon(v: Value) throws (RokonError) -> i8 {
+        let n = try int_of::<i8>(v);
+        try i8::try_from(n) catch _ { throw out_of_range::<i8>(n); }
+    }
+}
+impl FromRokon for i16 {
+    fn from_rokon(v: Value) throws (RokonError) -> i16 {
+        let n = try int_of::<i16>(v);
+        try i16::try_from(n) catch _ { throw out_of_range::<i16>(n); }
+    }
+}
+impl FromRokon for i32 {
+    fn from_rokon(v: Value) throws (RokonError) -> i32 {
+        let n = try int_of::<i32>(v);
+        try i32::try_from(n) catch _ { throw out_of_range::<i32>(n); }
+    }
+}
+impl FromRokon for i64 {
+    fn from_rokon(v: Value) throws (RokonError) -> i64 {
+        let n = try int_of::<i64>(v);
+        try i64::try_from(n) catch _ { throw out_of_range::<i64>(n); }
+    }
+}
+impl FromRokon for isize {
+    fn from_rokon(v: Value) throws (RokonError) -> isize {
+        let n = try int_of::<isize>(v);
+        try isize::try_from(n) catch _ { throw out_of_range::<isize>(n); }
+    }
+}
+impl FromRokon for u8 {
+    fn from_rokon(v: Value) throws (RokonError) -> u8 {
+        let n = try int_of::<u8>(v);
+        try u8::try_from(n) catch _ { throw out_of_range::<u8>(n); }
+    }
+}
+impl FromRokon for u16 {
+    fn from_rokon(v: Value) throws (RokonError) -> u16 {
+        let n = try int_of::<u16>(v);
+        try u16::try_from(n) catch _ { throw out_of_range::<u16>(n); }
+    }
+}
+impl FromRokon for u32 {
+    fn from_rokon(v: Value) throws (RokonError) -> u32 {
+        let n = try int_of::<u32>(v);
+        try u32::try_from(n) catch _ { throw out_of_range::<u32>(n); }
+    }
+}
+impl FromRokon for u64 {
+    fn from_rokon(v: Value) throws (RokonError) -> u64 {
+        let n = try int_of::<u64>(v);
+        try u64::try_from(n) catch _ { throw out_of_range::<u64>(n); }
+    }
+}
+impl FromRokon for usize {
+    fn from_rokon(v: Value) throws (RokonError) -> usize {
+        let n = try int_of::<usize>(v);
+        try usize::try_from(n) catch _ { throw out_of_range::<usize>(n); }
+    }
+}
+
+impl ToRokon for Float {
+    fn to_rokon(self) -> Value { Value::Float(self) }
+}
+
+impl FromRokon for Float {
+    fn from_rokon(v: Value) throws (RokonError) -> float { try float_of::<float>(v) }
+}
+
+/// A float target takes an integer too (spec 3.9.2).
+fn float_of<T>(v: Value) throws (RokonError) -> float {
+    match v {
+        Value::Float(x) => x,
+        Value::Int(n) => Float::from_int(n),
+        _ => throw mismatch::<T>(v),
+    }
+}
+
+impl ToRokon for f64 {
+    fn to_rokon(self) -> Value { Value::Float(Float::from_f64(self)) }
+}
+
+impl FromRokon for f64 {
+    fn from_rokon(v: Value) throws (RokonError) -> f64 { (try float_of::<f64>(v)).to_f64() }
+}
+
+impl ToRokon for f32 {
+    // The shortest `f32` digits (`0.1`, not `0.10000000149011612`).
+    fn to_rokon(self) -> Value {
+        if !self.is_finite() { return Value::Float(Float::from_f32(self)); }
+        Value::Float(Float::from_literal(f"{self:e}"))
+    }
+}
+
+impl FromRokon for f32 {
+    fn from_rokon(v: Value) throws (RokonError) -> f32 { (try float_of::<f32>(v)).to_f64() as f32 }
+}
+
+impl<T: ToRokon> ToRokon for T | none {
+    fn to_rokon(self) -> Value {
+        match self {
+            none => Value::None,
+            x: T => x.to_rokon(),
+        }
+    }
+}
+
+impl<T: FromRokon> FromRokon for T | none {
+    fn from_rokon(v: Value) throws (RokonError) -> T | none {
+        match v {
+            Value::None => none,
+            _ => try T::from_rokon(v),
+        }
+    }
+
+    fn from_missing() throws (RokonError) -> T | none { none }
+}
+
+/// The items of a list (or a tuple) value.
+fn items_of<T>(v: Value) throws (RokonError) -> List<Value> {
+    match v {
+        Value::List(xs) => xs,
+        Value::Tuple(xs) => xs,
+        _ => throw mismatch::<T>(v),
+    }
+}
+
+impl<T: ToRokon> ToRokon for List<T> {
+    fn to_rokon(self) -> Value {
+        let out: List<Value> = List::with_capacity(self.len());
+        for x in self { out.push(x.to_rokon()); }
+        Value::List(out)
+    }
+}
+
+impl<T: FromRokon> FromRokon for List<T> {
+    fn from_rokon(v: Value) throws (RokonError) -> List<T> {
+        let xs = try items_of::<List<T>>(v);
+        let out: List<T> = List::with_capacity(xs.len());
+        let i = 0usize;
+        for x in xs {
+            out.push(try decode::<T>(x, f"[{i}]"));
+            i += 1;
+        }
+        out
+    }
+}
+
+impl<T: ToRokon + Hash> ToRokon for Set<T> {
+    fn to_rokon(self) -> Value {
+        let out: List<Value> = List::with_capacity(self.len());
+        for x in self { out.push(x.to_rokon()); }
+        Value::List(out)
+    }
+}
+
+impl<T: FromRokon + Hash> FromRokon for Set<T> {
+    fn from_rokon(v: Value) throws (RokonError) -> Set<T> {
+        let out: Set<T> = Set::new();
+        for x in try List::<T>::from_rokon(v) { out.insert(x); }
+        out
+    }
+}
+
+impl<T: ToRokon + Hash> ToRokon for OrderedSet<T> {
+    fn to_rokon(self) -> Value {
+        let out: List<Value> = List::with_capacity(self.len());
+        for x in self { out.push(x.to_rokon()); }
+        Value::List(out)
+    }
+}
+
+impl<T: FromRokon + Hash> FromRokon for OrderedSet<T> {
+    fn from_rokon(v: Value) throws (RokonError) -> OrderedSet<T> {
+        let out: OrderedSet<T> = OrderedSet::new();
+        for x in try List::<T>::from_rokon(v) { out.insert(x); }
+        out
+    }
+}
+
+impl<T: ToRokon, const N: usize> ToRokon for [T; N] {
+    fn to_rokon(self) -> Value {
+        let out: List<Value> = List::with_capacity(N);
+        for i in 0..N { out.push(self[i].to_rokon()); }
+        Value::List(out)
+    }
+}
+
+impl<T: FromRokon, const N: usize> FromRokon for [T; N] {
+    fn from_rokon(v: Value) throws (RokonError) -> [T; N] {
+        let xs = try List::<T>::from_rokon(v);
+        if xs.len() != N {
+            throw RokonError::new(f"expected {N} items, found {xs.len()}");
+        }
+        // ponytail: the array is seeded with its first item, so `[T; 0]`
+        // cannot be built without a `T`; a `Default` bound would fix it.
+        if N == 0 { throw RokonError::new("cannot read a zero-length array"); }
+        let out: [T; N] = [xs[0]; N];
+        for i in 1..N { out[i] = xs[i]; }
+        out
+    }
+
+    fn from_missing() throws (RokonError) -> [T; N] {
+        throw RokonError::new("missing");
+    }
+}
+
+/// The entries of a dict value.
+fn entries_of<T>(v: Value) throws (RokonError) -> OrderedDict<Value, Value> {
+    match v {
+        Value::Dict(d) => d,
+        _ => throw mismatch::<T>(v),
+    }
+}
+
+/// A dict entry's key and value as `K` / `V`.
+fn entry_of<K: FromRokon, V: FromRokon>(k: Value, v: Value) throws (RokonError) -> (K, V) {
+    let seg = "[" + write::loose(k) + "]";
+    let key = try K::from_rokon(k) catch e { throw e.within(seg).at_key(); };
+    (key, try decode::<V>(v, seg))
+}
+
+impl<K: ToRokon + Hash, V: ToRokon> ToRokon for Dict<K, V> {
+    fn to_rokon(self) -> Value {
+        let out: OrderedDict<Value, Value> = OrderedDict::new();
+        for (k, v) in self.entries() { out.insert(k.to_rokon(), v.to_rokon()); }
+        Value::Dict(out)
+    }
+}
+
+impl<K: FromRokon + Hash, V: FromRokon> FromRokon for Dict<K, V> {
+    fn from_rokon(v: Value) throws (RokonError) -> Dict<K, V> {
+        let out: Dict<K, V> = Dict::new();
+        for (k, x) in (try entries_of::<Dict<K, V>>(v)).entries() {
+            let (key, val) = try entry_of::<K, V>(k, x);
+            out.insert(key, val);
+        }
+        out
+    }
+}
+
+impl<K: ToRokon + Hash, V: ToRokon> ToRokon for OrderedDict<K, V> {
+    fn to_rokon(self) -> Value {
+        let out: OrderedDict<Value, Value> = OrderedDict::new();
+        for (k, v) in self.entries() { out.insert(k.to_rokon(), v.to_rokon()); }
+        Value::Dict(out)
+    }
+}
+
+impl<K: FromRokon + Hash, V: FromRokon> FromRokon for OrderedDict<K, V> {
+    fn from_rokon(v: Value) throws (RokonError) -> OrderedDict<K, V> {
+        let out: OrderedDict<K, V> = OrderedDict::new();
+        for (k, x) in (try entries_of::<OrderedDict<K, V>>(v)).entries() {
+            let (key, val) = try entry_of::<K, V>(k, x);
+            out.insert(key, val);
+        }
+        out
+    }
+}
+
+/// A tuple value with `n` items (a list is taken too).
+fn tuple_of<T>(v: Value, n: usize) throws (RokonError) -> List<Value> {
+    let xs = try items_of::<T>(v);
+    if xs.len() != n { throw RokonError::new(f"expected a {n}-tuple, found {xs.len()} items"); }
+    xs
+}
+
+// ponytail: tuples up to 6; core's tuple impls go to 12 if one is needed.
+impl<A: ToRokon> ToRokon for (A,) {
+    fn to_rokon(self) -> Value { Value::Tuple([self.0.to_rokon()]) }
+}
+impl<A: FromRokon> FromRokon for (A,) {
+    fn from_rokon(v: Value) throws (RokonError) -> (A,) {
+        let xs = try tuple_of::<(A,)>(v, 1);
+        (try decode::<A>(xs[0], "[0]"),)
+    }
+}
+impl<A: ToRokon, B: ToRokon> ToRokon for (A, B) {
+    fn to_rokon(self) -> Value { Value::Tuple([self.0.to_rokon(), self.1.to_rokon()]) }
+}
+impl<A: FromRokon, B: FromRokon> FromRokon for (A, B) {
+    fn from_rokon(v: Value) throws (RokonError) -> (A, B) {
+        let xs = try tuple_of::<(A, B)>(v, 2);
+        (try decode::<A>(xs[0], "[0]"), try decode::<B>(xs[1], "[1]"))
+    }
+}
+impl<A: ToRokon, B: ToRokon, C: ToRokon> ToRokon for (A, B, C) {
+    fn to_rokon(self) -> Value { Value::Tuple([self.0.to_rokon(), self.1.to_rokon(), self.2.to_rokon()]) }
+}
+impl<A: FromRokon, B: FromRokon, C: FromRokon> FromRokon for (A, B, C) {
+    fn from_rokon(v: Value) throws (RokonError) -> (A, B, C) {
+        let xs = try tuple_of::<(A, B, C)>(v, 3);
+        (try decode::<A>(xs[0], "[0]"), try decode::<B>(xs[1], "[1]"), try decode::<C>(xs[2], "[2]"))
+    }
+}
+impl<A: ToRokon, B: ToRokon, C: ToRokon, D: ToRokon> ToRokon for (A, B, C, D) {
+    fn to_rokon(self) -> Value {
+        Value::Tuple([self.0.to_rokon(), self.1.to_rokon(), self.2.to_rokon(), self.3.to_rokon()])
+    }
+}
+impl<A: FromRokon, B: FromRokon, C: FromRokon, D: FromRokon> FromRokon for (A, B, C, D) {
+    fn from_rokon(v: Value) throws (RokonError) -> (A, B, C, D) {
+        let xs = try tuple_of::<(A, B, C, D)>(v, 4);
+        (
+            try decode::<A>(xs[0], "[0]"),
+            try decode::<B>(xs[1], "[1]"),
+            try decode::<C>(xs[2], "[2]"),
+            try decode::<D>(xs[3], "[3]"),
+        )
+    }
+}
+impl<A: ToRokon, B: ToRokon, C: ToRokon, D: ToRokon, E: ToRokon> ToRokon for (A, B, C, D, E) {
+    fn to_rokon(self) -> Value {
+        Value::Tuple([self.0.to_rokon(), self.1.to_rokon(), self.2.to_rokon(), self.3.to_rokon(), self.4.to_rokon()])
+    }
+}
+impl<A: FromRokon, B: FromRokon, C: FromRokon, D: FromRokon, E: FromRokon> FromRokon for (A, B, C, D, E) {
+    fn from_rokon(v: Value) throws (RokonError) -> (A, B, C, D, E) {
+        let xs = try tuple_of::<(A, B, C, D, E)>(v, 5);
+        (
+            try decode::<A>(xs[0], "[0]"),
+            try decode::<B>(xs[1], "[1]"),
+            try decode::<C>(xs[2], "[2]"),
+            try decode::<D>(xs[3], "[3]"),
+            try decode::<E>(xs[4], "[4]"),
+        )
+    }
+}
+impl<A: ToRokon, B: ToRokon, C: ToRokon, D: ToRokon, E: ToRokon, F: ToRokon> ToRokon for (A, B, C, D, E, F) {
+    fn to_rokon(self) -> Value {
+        Value::Tuple([
+            self.0.to_rokon(), self.1.to_rokon(), self.2.to_rokon(),
+            self.3.to_rokon(), self.4.to_rokon(), self.5.to_rokon(),
+        ])
+    }
+}
+impl<A: FromRokon, B: FromRokon, C: FromRokon, D: FromRokon, E: FromRokon, F: FromRokon> FromRokon for (A, B, C, D, E, F) {
+    fn from_rokon(v: Value) throws (RokonError) -> (A, B, C, D, E, F) {
+        let xs = try tuple_of::<(A, B, C, D, E, F)>(v, 6);
+        (
+            try decode::<A>(xs[0], "[0]"),
+            try decode::<B>(xs[1], "[1]"),
+            try decode::<C>(xs[2], "[2]"),
+            try decode::<D>(xs[3], "[3]"),
+            try decode::<E>(xs[4], "[4]"),
+            try decode::<F>(xs[5], "[5]"),
+        )
+    }
+}

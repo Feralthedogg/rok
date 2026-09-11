@@ -6,7 +6,7 @@
 use rok::std::env;
 
 fn main() {
-    rok_print_i32(1);
+    println(f"{1}");
     env::exit(7);
-    rok_print_i32(2);
+    println(f"{2}");
 }

@@ -18,9 +18,9 @@ fn next(state: i32) -> i32 | none {
 fn main() -> i32 {
     let s = 0;
     while let v: i32 = next(s) {
-        rok_print_i32(v);
+        println(f"{v}");
         s = v;
     }
-    rok_print_str("done");
+    println("done");
     return 0;
 }

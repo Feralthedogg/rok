@@ -30,12 +30,12 @@ fn half(x: i32) throws (Bad) -> i32 {
 
 fn main() -> i32 {
     // Non-throwing fn and closure arguments: plain calls.
-    rok_print_i32(apply(inc, 10));
-    rok_print_i32(apply(|x: i32| x * 2, 2) + 1);
+    println(f"{apply(inc, 10)}");
+    println(f"{apply(|x: i32| x * 2, 2) + 1}");
     // Throwing arguments: `try` and the argument's error type.
-    rok_print_i32(try apply(half, 12) catch _ { 0 });
-    try apply(half, 3) catch Bad::Odd { rok_print_str("bad"); };
-    rok_print_i32(try apply(|x: i32| { if x < 0 { throw Bad::Odd; } x }, 3) catch _ { 0 });
-    rok_print_i32(twice(|x: i32| x * 2, 5));
+    println(f"{try apply(half, 12) catch _ { 0 }}");
+    try apply(half, 3) catch Bad::Odd { println("bad"); };
+    println(f"{try apply(|x: i32| { if x < 0 { throw Bad::Odd; } x }, 3) catch _ { 0 }}");
+    println(f"{twice(|x: i32| x * 2, 5)}");
     return 0;
 }

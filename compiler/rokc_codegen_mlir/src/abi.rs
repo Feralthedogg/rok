@@ -22,44 +22,7 @@
 //! Other targets reject aggregates across the C boundary.
 
 use rokc_ir_common::PrimTy;
-use rokc_mir::MirTy;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CTarget {
-    Aarch64,
-    X86_64SysV,
-    X86_64Win,
-    Other,
-}
-
-impl CTarget {
-    /// From an LLVM triple; `None` is the host rokc runs on.
-    #[must_use]
-    pub fn from_triple(triple: Option<&str>) -> Self {
-        let Some(t) = triple else {
-            return if cfg!(target_arch = "aarch64") {
-                Self::Aarch64
-            } else if cfg!(all(target_arch = "x86_64", windows)) {
-                Self::X86_64Win
-            } else if cfg!(target_arch = "x86_64") {
-                Self::X86_64SysV
-            } else {
-                Self::Other
-            };
-        };
-        if t.starts_with("aarch64") || t.starts_with("arm64") {
-            Self::Aarch64
-        } else if t.starts_with("x86_64") || t.starts_with("amd64") {
-            if t.contains("windows") || t.contains("win32") || t.contains("mingw") {
-                Self::X86_64Win
-            } else {
-                Self::X86_64SysV
-            }
-        } else {
-            Self::Other
-        }
-    }
-}
+use rokc_mir::{CAbi, MirTy, Target};
 
 /// How one parameter crosses the C boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -86,22 +49,25 @@ pub enum RetAbi {
 pub struct FnAbi {
     pub ret: RetAbi,
     pub args: Vec<ArgAbi>,
+    /// C variadic (spec 8.6.10): an `llvm.func` called with `llvm.call`;
+    /// arguments past `args` are its `...`.
+    pub variadic: bool,
 }
 
 impl FnAbi {
+    /// Every value crosses as itself.
     #[must_use]
     pub fn is_trivial(&self) -> bool {
-        self.ret == RetAbi::Direct && self.args.iter().all(|a| *a == ArgAbi::Direct)
+        !self.variadic
+            && self.ret == RetAbi::Direct
+            && self.args.iter().all(|a| *a == ArgAbi::Direct)
     }
 }
 
 /// A by-value aggregate (as opposed to a scalar, `str` or `()`).
 #[must_use]
 pub const fn is_aggregate(ty: &MirTy) -> bool {
-    matches!(
-        ty,
-        MirTy::Struct(..) | MirTy::Tuple(_) | MirTy::Array(..) | MirTy::Sum(_)
-    )
+    matches!(ty, MirTy::Struct(..) | MirTy::Tuple(_) | MirTy::Array(..))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -112,43 +78,41 @@ enum Leaf {
 }
 
 /// Scalar leaves of `ty` at their byte offsets (`str` is two words).
-fn leaves(ty: &MirTy, at: u32, pw: u32, out: &mut Vec<(u32, u32, Leaf)>) {
+fn leaves(ty: &MirTy, at: u32, target: &Target, out: &mut Vec<(u32, u32, Leaf)>) {
+    let word = target.pointer_width / 8;
     match ty {
         MirTy::Unit => {}
         MirTy::Prim(PrimTy::F32) => out.push((at, 4, Leaf::F32)),
         MirTy::Prim(PrimTy::F64) => out.push((at, 8, Leaf::F64)),
         MirTy::Prim(PrimTy::Str) => {
-            out.push((at, pw / 8, Leaf::Int));
-            out.push((at + pw / 8, pw / 8, Leaf::Int));
+            out.push((at, word, Leaf::Int));
+            out.push((at + word, word, Leaf::Int));
         }
         MirTy::Prim(_) | MirTy::Any | MirTy::GcRef | MirTy::Fn(..) | MirTy::Mlir(_) => {
-            out.push((at, size_align(ty, pw).0, Leaf::Int));
+            out.push((at, target.size_align(ty).0, Leaf::Int));
         }
-        MirTy::Sum(ps) => leaves(&rokc_mir::sum_layout(ps), at, pw, out),
         MirTy::Tuple(ps) | MirTy::Struct(_, ps) => {
             let mut off = 0u32;
-            for t in ps {
-                let (s, a) = size_align(t, pw);
+            for p in ps {
+                let (s, a) = target.size_align(p);
                 off = off.next_multiple_of(a);
-                leaves(t, at + off, pw, out);
+                leaves(p, at + off, target, out);
                 off += s;
             }
         }
-        MirTy::Array(t, n) => {
-            let s = size_align(t, pw).0;
+        MirTy::Array(e, n) => {
+            let s = target.size_align(e).0;
             for i in 0..*n {
-                leaves(t, at + i * s, pw, out);
+                leaves(e, at + i * s, target, out);
             }
         }
     }
 }
 
-use crate::emit::size_align;
-
 /// Homogeneous float aggregate: `[n x f32|f64]` for 1..=4 members.
-fn hfa(ty: &MirTy, pw: u32) -> Option<String> {
+fn hfa(ty: &MirTy, target: &Target) -> Option<String> {
     let mut ls = Vec::new();
-    leaves(ty, 0, pw, &mut ls);
+    leaves(ty, 0, target, &mut ls);
     let first = ls.first()?.2;
     if first == Leaf::Int || ls.len() > 4 || ls.iter().any(|l| l.2 != first) {
         return None;
@@ -157,54 +121,61 @@ fn hfa(ty: &MirTy, pw: u32) -> Option<String> {
     Some(format!("!llvm.array<{} x {elem}>", ls.len()))
 }
 
-/// Classify a C function's signature. `params` are the declared
-/// (fixed) parameters; variadic extras are always scalars.
+/// Classify a C function's signature on `target`. `params` are the
+/// declared (fixed) parameters; variadic extras are always scalars.
+/// `None`: the target cannot pass these aggregates.
 #[must_use]
-pub fn classify(target: CTarget, params: &[MirTy], ret: &MirTy, pw: u32) -> FnAbi {
-    match target {
-        CTarget::Aarch64 => FnAbi {
-            ret: aapcs_ret(ret, pw),
-            args: params.iter().map(|t| aapcs_arg(t, pw)).collect(),
-        },
-        CTarget::X86_64Win => FnAbi {
-            ret: if is_aggregate(ret) {
-                match size_align(ret, pw).0 {
-                    s @ (1 | 2 | 4 | 8) => RetAbi::Coerce(format!("i{}", s * 8)),
-                    _ => RetAbi::Sret,
-                }
+pub fn classify(target: &Target, params: &[MirTy], ret: &MirTy, variadic: bool) -> Option<FnAbi> {
+    let (ret, args) = match target.c_abi {
+        CAbi::Aarch64 => (
+            aapcs_ret(ret, target),
+            params.iter().map(|p| aapcs_arg(p, target)).collect(),
+        ),
+        CAbi::X86_64Win => {
+            let small = |t: &MirTy| match target.size_align(t).0 {
+                s @ (1 | 2 | 4 | 8) => Some(format!("i{}", s * 8)),
+                _ => None,
+            };
+            let ret = if is_aggregate(ret) {
+                small(ret).map_or(RetAbi::Sret, RetAbi::Coerce)
             } else {
                 RetAbi::Direct
-            },
-            args: params
+            };
+            let args = params
                 .iter()
-                .map(|t| {
-                    if !is_aggregate(t) {
+                .map(|p| {
+                    if !is_aggregate(p) {
                         return ArgAbi::Direct;
                     }
-                    match size_align(t, pw).0 {
-                        s @ (1 | 2 | 4 | 8) => ArgAbi::Coerce(format!("i{}", s * 8)),
-                        _ => ArgAbi::Indirect { byval: false },
-                    }
+                    small(p).map_or(ArgAbi::Indirect { byval: false }, ArgAbi::Coerce)
                 })
-                .collect(),
-        },
-        CTarget::X86_64SysV => sysv(params, ret, pw),
-        CTarget::Other => FnAbi {
-            ret: RetAbi::Direct,
-            args: vec![ArgAbi::Direct; params.len()],
-        },
-    }
+                .collect();
+            (ret, args)
+        }
+        CAbi::X86_64SysV => sysv(params, ret, target),
+        CAbi::Other => {
+            if params.iter().chain([ret]).any(is_aggregate) {
+                return None;
+            }
+            (RetAbi::Direct, vec![ArgAbi::Direct; params.len()])
+        }
+    };
+    Some(FnAbi {
+        ret,
+        args,
+        variadic,
+    })
 }
 
-fn aapcs_arg(ty: &MirTy, pw: u32) -> ArgAbi {
+fn aapcs_arg(ty: &MirTy, target: &Target) -> ArgAbi {
     if !is_aggregate(ty) {
         return ArgAbi::Direct;
     }
-    let size = size_align(ty, pw).0;
+    let size = target.size_align(ty).0;
     if size == 0 {
         return ArgAbi::Direct;
     }
-    if let Some(h) = hfa(ty, pw) {
+    if let Some(h) = hfa(ty, target) {
         return ArgAbi::Coerce(h);
     }
     match size {
@@ -214,15 +185,15 @@ fn aapcs_arg(ty: &MirTy, pw: u32) -> ArgAbi {
     }
 }
 
-fn aapcs_ret(ty: &MirTy, pw: u32) -> RetAbi {
+fn aapcs_ret(ty: &MirTy, target: &Target) -> RetAbi {
     if !is_aggregate(ty) {
         return RetAbi::Direct;
     }
-    let size = size_align(ty, pw).0;
+    let size = target.size_align(ty).0;
     if size == 0 {
         return RetAbi::Direct;
     }
-    if let Some(h) = hfa(ty, pw) {
+    if let Some(h) = hfa(ty, target) {
         return RetAbi::Coerce(h);
     }
     match size {
@@ -234,10 +205,10 @@ fn aapcs_ret(ty: &MirTy, pw: u32) -> RetAbi {
 
 /// System V `x86_64` eightbyte classes of a ≤ 16-byte aggregate: the MLIR
 /// type of each eightbyte and whether it is SSE.
-fn sysv_eightbytes(ty: &MirTy, pw: u32) -> Vec<(String, bool)> {
-    let size = size_align(ty, pw).0;
+fn sysv_eightbytes(ty: &MirTy, target: &Target) -> Vec<(String, bool)> {
+    let size = target.size_align(ty).0;
     let mut ls = Vec::new();
-    leaves(ty, 0, pw, &mut ls);
+    leaves(ty, 0, target, &mut ls);
     let mut out = Vec::new();
     for start in [0u32, 8] {
         if start >= size {
@@ -270,16 +241,17 @@ fn sysv_eightbytes(ty: &MirTy, pw: u32) -> Vec<(String, bool)> {
     out
 }
 
-fn sysv(params: &[MirTy], ret: &MirTy, pw: u32) -> FnAbi {
+fn sysv(params: &[MirTy], ret: &MirTy, target: &Target) -> (RetAbi, Vec<ArgAbi>) {
     let mut free_int = 6u32;
     let mut free_sse = 8u32;
-    let ret_abi = if !is_aggregate(ret) || size_align(ret, pw).0 == 0 {
+    let ret_size = target.size_align(ret).0;
+    let ret_abi = if !is_aggregate(ret) || ret_size == 0 {
         RetAbi::Direct
-    } else if size_align(ret, pw).0 > 16 {
+    } else if ret_size > 16 {
         free_int -= 1;
         RetAbi::Sret
     } else {
-        RetAbi::Coerce(join(&sysv_eightbytes(ret, pw)))
+        RetAbi::Coerce(join(&sysv_eightbytes(ret, target)))
     };
     let mut args = Vec::new();
     for t in params {
@@ -292,7 +264,7 @@ fn sysv(params: &[MirTy], ret: &MirTy, pw: u32) -> FnAbi {
             args.push(ArgAbi::Direct);
             continue;
         }
-        let size = size_align(t, pw).0;
+        let size = target.size_align(t).0;
         if size == 0 {
             args.push(ArgAbi::Direct);
             continue;
@@ -301,7 +273,7 @@ fn sysv(params: &[MirTy], ret: &MirTy, pw: u32) -> FnAbi {
             args.push(ArgAbi::Indirect { byval: true });
             continue;
         }
-        let ebs = sysv_eightbytes(t, pw);
+        let ebs = sysv_eightbytes(t, target);
         let need_sse = u32::try_from(ebs.iter().filter(|e| e.1).count()).unwrap_or(2);
         let need_int = u32::try_from(ebs.len()).unwrap_or(2) - need_sse;
         if need_int > free_int || need_sse > free_sse {
@@ -314,7 +286,7 @@ fn sysv(params: &[MirTy], ret: &MirTy, pw: u32) -> FnAbi {
         free_sse -= need_sse;
         args.push(ArgAbi::Coerce(join(&ebs)));
     }
-    FnAbi { ret: ret_abi, args }
+    (ret_abi, args)
 }
 
 fn join(ebs: &[(String, bool)]) -> String {
@@ -339,27 +311,15 @@ mod tests {
     }
     use PrimTy::{F32, F64, I8, I32, I64};
 
-    /// `struct { int; long long; double; }` as clang lays it out:
-    /// 20 / 4 on i686 Linux, 24 / 8 on i686 Windows, armv7 and wasm32.
-    #[test]
-    fn wide_alignment_follows_the_target() {
-        use crate::emit::{WIDE_ALIGN, wide_align_for_target};
-        let t = st(&[I32, I64, F64]);
-        let at = |triple: &str| {
-            WIDE_ALIGN.set(wide_align_for_target(Some(triple)));
-            size_align(&t, 32)
-        };
-        assert_eq!(at("i686-unknown-linux-gnu"), (20, 4));
-        assert_eq!(at("i686-pc-windows-msvc"), (24, 8));
-        assert_eq!(at("armv7-unknown-linux-gnueabihf"), (24, 8));
-        assert_eq!(at("wasm32-unknown-unknown"), (24, 8));
-        WIDE_ALIGN.set(8);
+    fn on(triple: &str) -> Target {
+        Target::new(Some(triple))
     }
 
     #[test]
     fn aapcs64() {
-        let a = |t: &MirTy| aapcs_arg(t, 64);
-        let r = |t: &MirTy| aapcs_ret(t, 64);
+        let t = on("aarch64-unknown-linux-gnu");
+        let a = |ty: &MirTy| aapcs_arg(ty, &t);
+        let r = |ty: &MirTy| aapcs_ret(ty, &t);
         // div_t: one x register, both ways.
         assert_eq!(r(&st(&[I32, I32])), RetAbi::Coerce("i64".into()));
         assert_eq!(a(&st(&[I32, I32])), ArgAbi::Coerce("i64".into()));
@@ -390,24 +350,25 @@ mod tests {
 
     #[test]
     fn sysv_x86_64() {
-        let f = |ps: &[MirTy], r: &MirTy| sysv(ps, r, 64);
-        assert_eq!(f(&[], &st(&[I32, I32])).ret, RetAbi::Coerce("i64".into()));
+        let t = on("x86_64-unknown-linux-gnu");
+        let f = |ps: &[MirTy], r: &MirTy| sysv(ps, r, &t);
+        assert_eq!(f(&[], &st(&[I32, I32])).0, RetAbi::Coerce("i64".into()));
         assert_eq!(
-            f(&[], &st(&[I64, F64])).ret,
+            f(&[], &st(&[I64, F64])).0,
             RetAbi::Coerce("!llvm.struct<(i64, f64)>".into())
         );
         assert_eq!(
-            f(&[], &st(&[F32, F32, F32])).ret,
+            f(&[], &st(&[F32, F32, F32])).0,
             RetAbi::Coerce("!llvm.struct<(vector<2xf32>, f32)>".into())
         );
         assert_eq!(
-            f(&[], &st(&[I64, I32])).ret,
+            f(&[], &st(&[I64, I32])).0,
             RetAbi::Coerce("!llvm.struct<(i64, i32)>".into())
         );
-        assert_eq!(f(&[], &st(&[F32, I32])).ret, RetAbi::Coerce("i64".into()));
-        assert_eq!(f(&[], &st(&[I64, I64, I64])).ret, RetAbi::Sret);
+        assert_eq!(f(&[], &st(&[F32, I32])).0, RetAbi::Coerce("i64".into()));
+        assert_eq!(f(&[], &st(&[I64, I64, I64])).0, RetAbi::Sret);
         assert_eq!(
-            f(&[st(&[I64, I64, I64])], &MirTy::Unit).args,
+            f(&[st(&[I64, I64, I64])], &MirTy::Unit).1,
             vec![ArgAbi::Indirect { byval: true }]
         );
         // Five ints use five GPRs; a two-INTEGER struct no longer fits
@@ -415,19 +376,15 @@ mod tests {
         let ints = vec![MirTy::Prim(I64); 5];
         let mut ps = ints.clone();
         ps.push(st(&[I64, I64]));
-        assert_eq!(ps.len(), 6);
-        assert_eq!(
-            f(&ps, &MirTy::Unit).args[5],
-            ArgAbi::Indirect { byval: true }
-        );
+        assert_eq!(f(&ps, &MirTy::Unit).1[5], ArgAbi::Indirect { byval: true });
         let mut ps = ints;
         ps.push(st(&[I32, I32]));
-        assert_eq!(f(&ps, &MirTy::Unit).args[5], ArgAbi::Coerce("i64".into()));
+        assert_eq!(f(&ps, &MirTy::Unit).1[5], ArgAbi::Coerce("i64".into()));
         // sret takes rdi.
         let mut ps = vec![MirTy::Prim(I64); 4];
         ps.push(st(&[I64, I64]));
         assert_eq!(
-            f(&ps, &st(&[I64, I64, I64])).args[4],
+            f(&ps, &st(&[I64, I64, I64])).1[4],
             ArgAbi::Indirect { byval: true }
         );
     }
@@ -435,37 +392,20 @@ mod tests {
     #[test]
     fn win64_and_targets() {
         let w = classify(
-            CTarget::X86_64Win,
+            &on("x86_64-pc-windows-msvc"),
             &[st(&[I32, I32]), st(&[I32, I32, I32])],
             &st(&[I8; 3]),
-            64,
-        );
+            false,
+        )
+        .unwrap();
         assert_eq!(w.args[0], ArgAbi::Coerce("i64".into()));
         assert_eq!(w.args[1], ArgAbi::Indirect { byval: false });
         assert_eq!(w.ret, RetAbi::Sret);
-        assert_eq!(
-            CTarget::from_triple(Some("arm64-apple-macosx14.0")),
-            CTarget::Aarch64
-        );
-        assert_eq!(
-            CTarget::from_triple(Some("aarch64-unknown-linux-gnu")),
-            CTarget::Aarch64
-        );
-        assert_eq!(
-            CTarget::from_triple(Some("x86_64-unknown-linux-gnu")),
-            CTarget::X86_64SysV
-        );
-        assert_eq!(
-            CTarget::from_triple(Some("x86_64-apple-darwin")),
-            CTarget::X86_64SysV
-        );
-        assert_eq!(
-            CTarget::from_triple(Some("x86_64-pc-windows-msvc")),
-            CTarget::X86_64Win
-        );
-        assert_eq!(
-            CTarget::from_triple(Some("i686-unknown-linux-gnu")),
-            CTarget::Other
-        );
+        // i686 has no aggregate classification: aggregates are refused,
+        // scalars pass as themselves.
+        let i686 = on("i686-unknown-linux-gnu");
+        assert!(classify(&i686, &[st(&[I32, I32])], &MirTy::Unit, false).is_none());
+        let scalars = classify(&i686, &[MirTy::Prim(I32)], &MirTy::Unit, true).unwrap();
+        assert!(scalars.variadic && !scalars.is_trivial());
     }
 }

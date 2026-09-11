@@ -3,7 +3,7 @@
 // exposes them). Use an f-string for anything that is not a `str`:
 // `println(f"total = {total}")`.
 
-extern "C" {
+extern "rok" {
     fn rok_write_str(s: str) -> i32;
     fn rok_ewrite_str(s: str) -> i32;
     fn rok_print_str(s: str) -> i32;

@@ -30,6 +30,6 @@ fn main() -> i32 {
     }
     let total: i64 = 0;
     for h in hs { total += try! h.join(); }
-    rok_print_i64(total);
+    println(f"{total}");
     return 0;
 }

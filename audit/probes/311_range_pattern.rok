@@ -17,8 +17,8 @@ fn classify(n: i32) -> i32 {
 }
 
 fn main() -> i32 {
-    if classify(5) == 1 { rok_print_str("digit"); }
-    if classify(77) == 2 { rok_print_str("upper"); }
-    if classify(200) == 3 { rok_print_str("other"); }
+    if classify(5) == 1 { println("digit"); }
+    if classify(77) == 2 { println("upper"); }
+    if classify(200) == 3 { println("other"); }
     return 0;
 }

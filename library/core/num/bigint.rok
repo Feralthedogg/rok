@@ -23,7 +23,7 @@
 use rok::core::collections::raw::{GcBuf, buf_new};
 
 // The quadratic inner loops are runtime kernels (`rokr/src/bignum.rs`).
-extern "C" {
+extern "rok" {
     fn rok_nat_mul(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize);
     fn rok_nat_divmod_small(q: GcBuf<u32>, a: GcBuf<u32>, n: usize, v: u32) -> u32;
     fn rok_nat_divmod(q: GcBuf<u32>, un: GcBuf<u32>, vn: GcBuf<u32>, m: usize, n: usize);
@@ -788,7 +788,7 @@ impl FromStr for Int {
 
 // ---- f-string hook (refs-lang 1.7.3, stdlib 2.10.5) ----
 
-extern "C" {
+extern "rok" {
     fn rok_fmt_spec_info(spec: str) -> u64;
     fn rok_fmt_exp_digits(digits: str, prec: i64, upper: u32) -> str;
     fn rok_fmt_num(neg: u32, prefix: str, body: str, spec: str) -> str;

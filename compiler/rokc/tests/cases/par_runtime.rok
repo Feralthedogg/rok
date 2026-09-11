@@ -13,11 +13,15 @@
 extern "C" {
     fn rok_par_for(start: i64, end: i64, step: i64, callback: fn(i64));
     fn rok_par_scope(callback: fn(usize));
-    fn rok_par_spawn(scope: usize, f: fn() + Send);
     fn rok_cpu_count() -> usize;
     fn rok_thread_id() -> u64;
     fn rok_thread_sleep_ns(ns: i64);
     fn rok_gc_collect();
+}
+
+// The runtime's own ABI: `f` is the whole `{code, env}` value.
+extern "rok" {
+    fn rok_par_spawn(scope: usize, f: fn() + Send);
 }
 
 static SUM: Atomic<i64> = Atomic::new(0);
@@ -67,13 +71,13 @@ extern "C" fn body(scope: usize) {
 fn main() -> i32 {
     MAIN.store(unsafe { rok_thread_id() });
     unsafe { rok_par_for(0i64, 64i64, 1i64, step) };
-    rok_print_i64(SUM.load());
+    println(f"{SUM.load()}");
     let parallel = OTHER.load() == 1 || unsafe { rok_cpu_count() } == 1usize;
     println(f"parallel {parallel}");
     SUM.store(0);
     unsafe { rok_par_scope(body) };
     // 5 + 10 + 15 + 20 words + 60 from the nested spawn.
-    rok_print_i64(SUM.load());
-    rok_print_str("ok");
+    println(f"{SUM.load()}");
+    println("ok");
     return 0;
 }

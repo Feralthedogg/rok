@@ -15,7 +15,7 @@ fn classify(x: i32 | f64) -> i32 {
 }
 
 fn main() -> i32 {
-    if classify(7) == 1 { rok_print_str("got_int"); }
-    if classify(3.14) == 2 { rok_print_str("got_float"); }
+    if classify(7) == 1 { println("got_int"); }
+    if classify(3.14) == 2 { println("got_float"); }
     return 0;
 }

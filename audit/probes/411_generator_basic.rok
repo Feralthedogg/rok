@@ -14,7 +14,7 @@ fn counter() -> Iterator<i32> {
 
 fn main() -> i32 {
     for x in counter() {
-        rok_print_i32(x);
+        println(f"{x}");
     }
     return 0;
 }

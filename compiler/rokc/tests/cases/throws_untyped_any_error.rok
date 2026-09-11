@@ -28,12 +28,12 @@ fn load(id: i32) throws -> i32 {
     return v;
 }
 
-rok_print_i32(try find(3) catch _ { -1 });
-rok_print_i32(try find(30) catch _ { -1 });
+println(f"{try find(3) catch _ { -1 }}");
+println(f"{try find(30) catch _ { -1 }}");
 let r = try load(40) catch e: any Error {
     match e.source() {
         c: any Error => 1,
         none => 2,
     }
 };
-rok_print_i32(r);
+println(f"{r}");

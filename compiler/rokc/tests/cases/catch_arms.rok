@@ -38,13 +38,13 @@ fn by_variant(x: i32) -> i32 {
 }
 
 fn main() -> i32 {
-    rok_print_i32(by_type(1));
-    rok_print_i32(by_type(2));
-    rok_print_i32(by_type(4));
-    try partial(2) catch IoError::Closed { rok_print_str("rethrown io"); } catch _ {};
-    rok_print_i32(try partial(1) catch _ { 0 });
-    rok_print_i32(by_variant(2));
-    rok_print_i32(by_variant(3));
-    rok_print_i32(by_variant(1));
+    println(f"{by_type(1)}");
+    println(f"{by_type(2)}");
+    println(f"{by_type(4)}");
+    try partial(2) catch IoError::Closed { println("rethrown io"); } catch _ {};
+    println(f"{try partial(1) catch _ { 0 }}");
+    println(f"{by_variant(2)}");
+    println(f"{by_variant(3)}");
+    println(f"{by_variant(1)}");
     return 0;
 }

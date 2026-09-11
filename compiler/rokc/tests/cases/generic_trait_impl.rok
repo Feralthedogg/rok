@@ -50,18 +50,18 @@ fn show_it<T: Show>(x: T) -> i32 { return x.show(); }
 
 fn main() -> i32 {
     let b: Box<bool> = Box { v: true };
-    rok_print_i32(b.show());
+    println(f"{b.show()}");
     let p: Pair<i32, Meters> = Pair { a: 1, b: Meters { m: 7 } };
-    rok_print_i32(p.show());
+    println(f"{p.show()}");
     let q: Box<i32> = Box { v: 0 };
-    rok_print_i32(show_it(q) + 37);
-    rok_print_i32(9.once());
-    rok_print_i32(7.twice());
-    rok_print_i32(Meters { m: 7 }.once());
-    rok_print_i32(Meters { m: 10 }.twice());
+    println(f"{show_it(q) + 37}");
+    println(f"{9.once()}");
+    println(f"{7.twice()}");
+    println(f"{Meters { m: 7 }.once()}");
+    println(f"{Meters { m: 10 }.twice()}");
     let v: V2<i32> = V2 { x: 1, y: 2 } + V2 { x: 20, y: 23 };
-    rok_print_i32(v.x + v.y);
-    rok_print_i32(sum3(3, 4, 5));
-    rok_print_i32(if less(1.5f64, 2.0f64) && 2.add(3) == 5 { 1 } else { 0 });
+    println(f"{v.x + v.y}");
+    println(f"{sum3(3, 4, 5)}");
+    println(f"{if less(1.5f64, 2.0f64) && 2.add(3) == 5 { 1 } else { 0 }}");
     return 0;
 }

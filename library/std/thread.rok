@@ -13,7 +13,7 @@
 use rok::std::io::IoError;
 use rok::std::time::Duration;
 
-extern "C" {
+extern "rok" {
     fn rok_thread_new_id() -> u64;
     fn rok_thread_spawn(f: fn() + Send, stack_size: usize, id: u64) -> usize;
     fn rok_thread_join(handle: usize) -> i32;

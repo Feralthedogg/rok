@@ -44,7 +44,7 @@ use rok::core::future::{Context, Future, Poll, TryAsyncFuture, Waker};
 use rok::core::collections::raw::{GcBuf, buf_new};
 use rok::core::sync::{Atomic, AtomicOrdering, Mutex};
 
-extern "C" {
+extern "rok" {
     fn rok_time_now_ns() -> i64;
     fn rok_cpu_count() -> usize;
     fn rok_task_exec_active() -> i32;

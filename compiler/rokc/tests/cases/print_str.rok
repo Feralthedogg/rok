@@ -3,10 +3,9 @@
 // hello, rok!
 // goodbye
 
-// `rok_print_str` is auto-declared by the driver alongside `rok_panic`,
-// so user code can print without writing extern blocks.
+// `println` is in the core prelude: no extern block needed.
 fn main() -> i32 {
-    rok_print_str("hello, rok!");
-    rok_print_str("goodbye");
+    println("hello, rok!");
+    println("goodbye");
     return 0;
 }

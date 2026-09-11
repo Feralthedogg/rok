@@ -5,5 +5,5 @@
 
 // stdlib spec 0.5: fixed-width overflow panics in debug builds.
 fn add(a: i32, b: i32) -> i32 { return a + b; }
-rok_print_i32(add(2147483646, 1));
-rok_print_i32(add(2147483647, 1));
+println(f"{add(2147483646, 1)}");
+println(f"{add(2147483647, 1)}");

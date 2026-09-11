@@ -28,15 +28,15 @@ fn main() throws (LayoutError) -> i32 {
         p.add(1usize).write(20i64);
         p.add(2usize).write(p.read() + p.add(1usize).read());
     }
-    rok_print_i64(unsafe { p.add(2usize).read() });
+    println(f"{unsafe { p.add(2usize).read() }}");
     if p.add(3usize).distance(p) != 3 { return 3; }
 
     // A struct through a pointer.
     let q = bytes.cast::<Pair>();
     unsafe { q.write(Pair { a: 7i64, b: 4 }); }
     let back = unsafe { q.read() };
-    rok_print_i64(back.a);
-    rok_print_i32(back.b);
+    println(f"{back.a}");
+    println(f"{back.b}");
 
     // mem: write_bytes / copy / swap; ManyPtr indexing; volatile.
     let m: ManyPtr<i64> = p.as_many();
@@ -48,7 +48,7 @@ fn main() throws (LayoutError) -> i32 {
         p.write_volatile(p.read_volatile());
     }
     let c: ConstPtr<i64> = p.as_const();
-    rok_print_i64(unsafe { c.read() });
+    println(f"{unsafe { c.read() }}");
     if unsafe { m.read(4usize) } != 0i64 { return 4; }
 
     let fallback = try Layout::from_size_align(8usize, 3usize) catch _ { Layout::new::<u8>() };

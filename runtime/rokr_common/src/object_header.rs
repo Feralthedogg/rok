@@ -33,13 +33,13 @@ pub const FLAG_IMMORTAL: u32 = 1 << 5;
 /// Implementation bit (801 §8.1.3 bits 6..). The write barrier's fast path tests
 /// only this bit; the slow path (`rok_gc_wb_slow`) clears it and logs
 /// the object.
-pub const FLAG_UNLOGGED: u32 = 1 << 6;
+pub const FLAG_UNLOGGED: u32 = crate::gc_abi::FLAG_UNLOGGED;
 /// An old large object whose reference stores mark cards.
 ///
 /// The word before the header points at its card table, one byte per
 /// `rokr_gc::CARD_SIZE` bytes of the object (from the header).
 /// Implementation bit; the barrier tests it together with `UNLOGGED`.
-pub const FLAG_CARDED: u32 = 1 << 7;
+pub const FLAG_CARDED: u32 = crate::gc_abi::FLAG_CARDED;
 /// The object's address was taken as a number (a parking key, 805
 /// `rok_task_key_*`): the collector never moves it. Implementation bit;
 /// permanent, unlike `PINNED` it does not keep the object alive.
@@ -49,15 +49,15 @@ pub const FLAG_NOMOVE: u32 = 1 << 8;
 /// the object, so this evacuation leaves it in place.
 pub const FLAG_NOEVAC: u32 = 1 << 9;
 
-pub const HEADER_SIZE: usize = 16;
+pub const HEADER_SIZE: usize = crate::gc_abi::HEADER_SIZE as usize;
 pub const HEADER_ALIGN: usize = 8;
 
 const _: () = {
     assert!(size_of::<ObjectHeader>() == HEADER_SIZE);
     assert!(align_of::<ObjectHeader>() == HEADER_ALIGN);
     assert!(offset_of!(ObjectHeader, type_id) == 0);
-    assert!(offset_of!(ObjectHeader, gc_flags) == 4);
-    assert!(offset_of!(ObjectHeader, gc_word) == 8);
+    assert!(offset_of!(ObjectHeader, gc_flags) == crate::gc_abi::GC_FLAGS_OFFSET as usize);
+    assert!(offset_of!(ObjectHeader, gc_word) == crate::gc_abi::GC_WORD_OFFSET as usize);
 };
 
 impl ObjectHeader {

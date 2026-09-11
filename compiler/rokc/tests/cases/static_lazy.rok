@@ -22,7 +22,7 @@ static NAMES: List<str> = make_names();
 static NOISY: i32 = noisy();
 
 fn noisy() -> i32 {
-    rok_print_str("noisy init");
+    println("noisy init");
     return 7;
 }
 
@@ -34,9 +34,9 @@ fn make_names() -> List<str> {
 }
 
 fn main() -> i32 {
-    rok_print_str("start");
-    rok_print_i32(NOISY);
-    rok_print_i32(NOISY);
+    println("start");
+    println(f"{NOISY}");
+    println(f"{NOISY}");
     let hs: List<thread::JoinHandle<()>> = [];
     let t = 0;
     while t < 4 {
@@ -54,10 +54,10 @@ fn main() -> i32 {
     let j = 0;
     while j < 20000 { junk.push(f"junk{j}"); j += 1; }
     unsafe { rok_gc_collect() };
-    rok_print_i64(COUNTER.load());
-    using g = LOG.lock() { rok_print_i64(g.get().len() as i64); }
-    rok_print_str(NAMES[2]);
+    println(f"{COUNTER.load()}");
+    using g = LOG.lock() { println(f"{g.get().len() as i64}"); }
+    println(NAMES[2]);
     unsafe { rok_gc_collect() };
-    rok_print_str(f"hello {NAMES[1]}");
+    println(f"hello {NAMES[1]}");
     return 0;
 }

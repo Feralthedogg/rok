@@ -3,10 +3,10 @@
 // x=42, y=3.14
 // answer: 0xff
 
-// `rok_write_*` is the no-newline counterpart to `rok_print_*` — lets
+// `rok_write_*` is the no-newline counterpart to `rok_print_str` — lets
 // programs compose multi-segment output on a single line. Without these
 // each value would land on its own line.
-extern "C" {
+extern "rok" {
     fn rok_write_str(s: str) -> i32;
     fn rok_write_i64(n: i64) -> i32;
     fn rok_write_f64(d: f64) -> i32;
@@ -18,11 +18,11 @@ fn main() -> i32 {
     unsafe { rok_write_i64(42i64) };
     unsafe { rok_write_str(", y=") };
     unsafe { rok_write_f64(3.14f64) };
-    rok_print_str("");
+    println("");
 
     unsafe { rok_write_str("answer: ") };
     unsafe { rok_write_hex(255i64) };
-    rok_print_str("");
+    println("");
 
     return 0;
 }

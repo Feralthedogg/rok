@@ -99,29 +99,29 @@ fn main() -> i32 {
     let list = build(20000);
     churn();
     unsafe { rok_gc_collect() };
-    rok_print_i64(sum(list));
-    rok_print_i64(count(build(1000)));
+    println(f"{sum(list)}");
+    println(f"{count(build(1000))}");
 
     // Through a block param (`if` value) live across a collecting call.
     let pick: any Link = if sum(list) > 0 { Cons { v: 42, rest: none } } else { 0i64 };
     churn();
-    rok_print_i64(pick.val());
+    println(f"{pick.val()}");
 
     // Array elements are roots too.
     let arr: [any Link; 2] = [Cons { v: 7, rest: none }, Cons { v: 9, rest: none }];
     churn();
     unsafe { rok_gc_collect() };
-    rok_print_i64(arr[0].val());
-    rok_print_i64(arr[1].val());
+    println(f"{arr[0].val()}");
+    println(f"{arr[1].val()}");
 
     let a: any Link = 10i64;
     let r = try fails(a) catch _ { 0i64 - 1 };
     churn();
-    rok_print_i64(r.val());
+    println(f"{r.val()}");
     let b: any Link = Cons { v: 2, rest: list };
     let r2 = try fails(b) catch _ { 0i64 - 1 };
     churn();
-    rok_print_i64(r2.val() + 1);
+    println(f"{r2.val() + 1}");
 
     // Only the union slot references the 48-byte `Cons` made in `mk`.
     unsafe { rok_gc_collect() };
@@ -131,12 +131,12 @@ fn main() -> i32 {
     churn();
     unsafe { rok_gc_collect() };
     if unsafe { rok_gc_stats_live_bytes() } - before != 48usize { return 3; }
-    rok_print_i64(slot_val(s1) + slot_val(s2) + slot_val(Slot::Empty));
+    println(f"{slot_val(s1) + slot_val(s2) + slot_val(Slot::Empty)}");
 
     if unsafe { rok_gc_stats_collections() } < 5u64 { return 1; }
     // Live: the 20000-node list plus a handful of small objects.
     unsafe { rok_gc_collect() };
     if unsafe { rok_gc_stats_live_bytes() } > 1100000usize { return 2; }
-    rok_print_str("ok");
+    println("ok");
     return 0;
 }

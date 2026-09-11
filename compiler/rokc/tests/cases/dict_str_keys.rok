@@ -18,21 +18,21 @@ extern "C" {
 
 fn main() -> i32 {
     let d: Dict<str, i32> = {"a": 1, "b": 2};
-    rok_print_i32(d["b"]);
+    println(f"{d["b"]}");
     let k = "a" + "";
-    rok_print_i32(d[k]);
+    println(f"{d[k]}");
     d["c" + ""] = 3;
     unsafe { rok_gc_collect() };
-    rok_print_i32(d["c"]);
+    println(f"{d["c"]}");
     match d.get("zz") {
-        v: i32 => rok_print_i32(v),
+        v: i32 => println(f"{v}"),
         none => println("none"),
     }
     let names: List<str> = ["a" + "b", "c"];
     unsafe { rok_gc_collect() };
     println(names[0]);
     let s: Set<str> = {"x", "y", "x" + ""};
-    rok_print_i32(s.len() as i32);
-    rok_print_i32(if s.contains("y") { 1 } else { 0 });
+    println(f"{s.len() as i32}");
+    println(f"{if s.contains("y") { 1 } else { 0 }}");
     return 0;
 }

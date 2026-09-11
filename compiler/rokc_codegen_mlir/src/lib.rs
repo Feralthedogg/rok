@@ -1,15 +1,15 @@
-//! Standard-MLIR text emission. Looks at MIR only.
-//!
-//! Output uses only upstream dialects (`func`, `arith`, `scf`, `cf`,
-//! `memref`, `index`, `math`, `llvm`). The downstream toolchain
-//! (`mlir-opt` + `mlir-translate` + `clang/lld`) does the rest.
+//! MIR → MLIR text in upstream dialects (`func`, `arith`, `cf`, `llvm`;
+//! user `__mlir_op` regions may bring more). `mlir-opt`, `mlir-translate`
+//! and `clang` do the rest.
 
 mod abi;
 mod debug;
 pub mod emit;
 mod mangle;
+mod repl;
 
 pub use mangle::{Demangled, demangle, pkg_hash};
+pub use repl::ReplFn;
 
 use rokc_diagnostic::{ErrorKind, RokDiagnostic};
 use rokc_mir::MirModule;
@@ -17,23 +17,33 @@ use rokc_mir::MirModule;
 #[derive(Clone, Debug, Default)]
 pub struct MlirOutput {
     pub text: String,
-    /// Names hinted to the linker (e.g. `rokr`, ABI shims).
-    pub runtime_libraries: Vec<String>,
-    /// Number of GC type ids used (`ReplCell::type_offset`).
+    /// Number of GC type ids used.
     pub gc_types: u32,
+    /// A REPL cell: every `ScanTable` of the session so far (the next
+    /// cell's `ReplCell::gc_tables`).
+    pub gc_tables: Vec<Vec<u32>>,
+    /// A REPL cell: the exported symbols it defines anew (`repl::reuse`).
+    pub fresh: Vec<String>,
+    /// A REPL cell: the functions it defines anew.
+    pub fns: Vec<ReplFn>,
+    /// A REPL cell: how many functions it takes from earlier cells.
+    pub reused: usize,
 }
 
 /// One REPL cell (`rokc repl`).
 ///
-/// A shared library the session host loads into a process whose
-/// runtime is already up. Instead of a C
-/// `main`, `rok_repl_cell()` registers the cell's GC types and roots
-/// and runs the user `main`.
+/// LLVM IR the session host JIT-compiles into a process whose runtime is
+/// already up. Instead of a C `main`,
+/// `rok_repl_cell()` registers the cell's GC types and roots and runs
+/// the user `main`.
 #[derive(Clone, Debug, Default)]
 pub struct ReplCell {
-    /// Added to the GC type ids: objects of earlier cells keep theirs,
-    /// so each cell takes fresh ones.
-    pub type_offset: u32,
+    /// The `ScanTable`s earlier cells registered (type id
+    /// `USER_TYPE_BASE + i`): the same type keeps its id, new ones follow.
+    pub gc_tables: Vec<Vec<u32>>,
+    /// Functions the session has (symbol → text hash, `repl::reuse`):
+    /// declared, not defined, when this cell's text is the same.
+    pub known: std::collections::HashMap<String, u64>,
     /// `extern` statics this cell defines (zeroed, exported, GC roots):
     /// the slots of the session's new bindings.
     pub define: Vec<String>,
@@ -42,26 +52,33 @@ pub struct ReplCell {
     pub statics: Vec<String>,
 }
 
-pub fn codegen(module: &MirModule) -> Result<MlirOutput, RokDiagnostic> {
-    codegen_with_target(module, None, true, false, None)
+/// How to generate code for a module (its target is `MirModule::target`).
+#[derive(Clone, Debug, Default)]
+pub struct CodegenOptions {
+    /// Panic on integer overflow (debug builds).
+    pub overflow_checks: bool,
+    /// `-g`: DWARF debug info (spec 9.9.6).
+    pub debug: bool,
+    /// Generate a REPL cell instead of a program.
+    pub repl: Option<ReplCell>,
+    /// LLVM `target datalayout` (the toolchain's), so MLIR folds `sizeof`
+    /// idioms with the real layout.
+    pub data_layout: Option<String>,
 }
 
-pub fn codegen_with_target(
-    module: &MirModule,
-    target: Option<&str>,
-    overflow_checks: bool,
-    debug: bool,
-    repl: Option<&ReplCell>,
-) -> Result<MlirOutput, RokDiagnostic> {
-    let pointer_width = pointer_width_for_target(target);
-    emit::WIDE_ALIGN.set(emit::wide_align_for_target(target));
-    let mut e = emit::Emitter::new(pointer_width);
-    e.overflow_checks = overflow_checks;
-    e.c_target = abi::CTarget::from_triple(target);
-    if debug {
-        e.debug = Some(debug::DebugInfo::new(pointer_width));
+/// The MLIR text of `module`.
+pub fn codegen(module: &MirModule, opts: &CodegenOptions) -> Result<MlirOutput, RokDiagnostic> {
+    let target = module.target.clone();
+    let mut e = emit::Emitter::new(target.clone());
+    e.overflow_checks = opts.overflow_checks;
+    e.data_layout.clone_from(&opts.data_layout);
+    if opts.debug {
+        e.debug = Some(debug::DebugInfo::new(target));
     }
-    e.repl = repl.cloned();
+    if let Some(r) = &opts.repl {
+        e.gc_types.clone_from(&r.gc_tables);
+    }
+    e.repl.clone_from(&opts.repl);
     e.emit_module(module);
     if let Some(first) = e.errors.first() {
         let mut d = RokDiagnostic::error(ErrorKind::Unsupported, first.clone());
@@ -71,22 +88,19 @@ pub fn codegen_with_target(
         return Err(d);
     }
     let gc_types = e.gc_type_count();
-    Ok(MlirOutput {
+    let gc_tables = if opts.repl.is_some() {
+        std::mem::take(&mut e.gc_types)
+    } else {
+        Vec::new()
+    };
+    let mut out = MlirOutput {
         gc_types,
+        gc_tables,
         text: e.finish(),
-        runtime_libraries: vec!["rokr".to_owned()],
-    })
-}
-
-fn pointer_width_for_target(target: Option<&str>) -> u32 {
-    // 32-bit architectures by triple prefix; everything else (x86_64,
-    // aarch64, arm64, riscv64, wasm64, …) is 64-bit.
-    const BITS32: &[&str] = &[
-        "i386", "i486", "i586", "i686", "arm-", "armv", "armeb", "thumb", "riscv32", "wasm32",
-        "mips-", "mipsel-", "powerpc-", "sparc-",
-    ];
-    match target {
-        Some(t) if BITS32.iter().any(|p| t.starts_with(p)) => 32,
-        _ => 64,
+        ..MlirOutput::default()
+    };
+    if let Some(r) = &opts.repl {
+        (out.text, out.reused, out.fresh, out.fns) = repl::reuse(&out.text, &r.known);
     }
+    Ok(out)
 }

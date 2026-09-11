@@ -39,7 +39,7 @@ fn main() -> i32 {
             let j = 0;
             while j < 1500 {
                 using w = table.write() { w.set(w.get() + 1); }
-                using r = table.read() { if r.get() < 0 { rok_print_str("bad"); } }
+                using r = table.read() { if r.get() < 0 { println("bad"); } }
                 j += 1;
             }
         }));
@@ -49,9 +49,9 @@ fn main() -> i32 {
     using g = ready.lock() { g.set(true); }
     gate.notify_all();
     for h in hs { try! h.join(); }
-    using g = counter.lock() { rok_print_i64(g.get()); }
-    rok_print_i32(arrived.load());
-    rok_print_i32(inits.load());
-    using r = table.read() { rok_print_i64(r.get()); }
+    using g = counter.lock() { println(f"{g.get()}"); }
+    println(f"{arrived.load()}");
+    println(f"{inits.load()}");
+    using r = table.read() { println(f"{r.get()}"); }
     return 0;
 }

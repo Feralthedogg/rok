@@ -44,7 +44,7 @@ struct Chan<T> {
     not_full: Condvar;
 }
 
-extern "C" {
+extern "rok" {
     fn rok_task_key_usize(meta: GcBuf<usize>) -> usize;
 }
 

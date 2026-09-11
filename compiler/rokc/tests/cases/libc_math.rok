@@ -12,8 +12,8 @@ extern "C" {
 }
 
 fn main() -> i32 {
-    rok_print_f64(unsafe { sqrt(25.0f64) });    // 5
-    rok_print_f64(unsafe { sqrt(2.0f64) });     // 1.41421
-    rok_print_f64(unsafe { exp(1.0f64) });      // 2.71828
+    println(f"{unsafe { sqrt(25.0f64) }}");    // 5
+    println(f"{unsafe { sqrt(2.0f64) }}");     // 1.41421
+    println(f"{unsafe { exp(1.0f64) }}");      // 2.71828
     return 0;
 }

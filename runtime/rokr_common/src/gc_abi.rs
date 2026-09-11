@@ -1,0 +1,42 @@
+//! GC constants the compiler and the runtime must agree on (801, 802).
+//! Plain constants only: `rokc_mir` includes this file by path.
+
+/// Object header size; the payload starts here (801 §8.1.1).
+pub const HEADER_SIZE: u32 = 16;
+/// Header offsets of `gc_flags` (u32) and `gc_word` (u64); `type_id` is
+/// at 0.
+pub const GC_FLAGS_OFFSET: u32 = 4;
+pub const GC_WORD_OFFSET: u32 = 8;
+/// `gc_flags`: an old object not yet in the remembered set.
+pub const FLAG_UNLOGGED: u32 = 1 << 6;
+/// `gc_flags`: an old large object whose reference stores mark cards.
+/// Its card table pointer is the word before the header.
+pub const FLAG_CARDED: u32 = 1 << 7;
+/// log2 of the card size of a `FLAG_CARDED` object.
+pub const CARD_SHIFT: u32 = 9;
+/// Objects this large (header included) go to the large-object space,
+/// never to a TLAB (702 §7.2.3).
+pub const LOS_THRESHOLD: u32 = 8 << 10;
+/// First type id of the compiler-assigned range (801 §8.1.2).
+pub const USER_TYPE_BASE: u32 = 0x10000;
+/// Type id of a buffer with no references (runtime strings, byte buffers).
+pub const PLAIN_TYPE_ID: u32 = 1;
+/// Type id of a buffer whose every pointer-aligned word is an ambiguous
+/// reference (runtime word buffers).
+pub const SCAN_WORDS_TYPE_ID: u32 = 2;
+
+/// `ScanTable` field kinds (802 §8.2.3).
+///
+/// A reference to an object header, a pointer into an object (`str`), an
+/// `any` (`u32` tag, then the payload word), and a word that holds a
+/// reference or other bits (an enum union word: its referent is kept
+/// alive and never moved).
+pub const STRONG_REF: u32 = 0;
+pub const INTERIOR_REF: u32 = 2;
+pub const ANY_SLOT: u32 = 3;
+pub const AMBIGUOUS: u32 = 5;
+/// `ScanTable` version bit: the table is one element of `total_size`
+/// bytes repeated over the payload (a buffer).
+pub const TABLE_ARRAY: u32 = 0x8000;
+/// `any` tag bit: the payload word is a box reference, not the value.
+pub const ANY_BOXED: u32 = 1 << 31;

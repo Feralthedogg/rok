@@ -44,18 +44,18 @@ fn main() -> i32 {
     let c = Counter { n: 0 };
     c.bump();
     c.bump();
-    rok_print_i32(c.n);
+    println(f"{c.n}");
     let p = Pair { left: Counter { n: 5 }, right: Counter { n: 0 } };
-    rok_print_i32(p.left.take());
-    rok_print_i32(p.left.n);
+    println(f"{p.left.take()}");
+    println(f"{p.left.n}");
     let up = Upto { cur: 1, end: 5 };
     for x in up {
-        rok_print_i32(x);
+        println(f"{x}");
     }
     let u = Upto { cur: 0, end: 5 };
-    rok_print_i32(u.sum());
+    println(f"{u.sum()}");
     p.right.bump();
     let it = Upto { cur: 3, end: 5 };
-    rok_print_i32(it.map(|x| x + p.right.n).fold(0, |a, x| a + x) - 2);
+    println(f"{it.map(|x| x + p.right.n).fold(0, |a, x| a + x) - 2}");
     return 0;
 }

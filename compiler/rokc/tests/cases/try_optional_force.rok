@@ -21,17 +21,17 @@ fn maybe(x: i32) throws (i32) -> i32 | none {
 
 fn main() -> i32 {
     let a = try? half(16);
-    rok_print_i32(a ?? -1);
+    println(f"{a ?? -1}");
     let b: i32 | none = try? half(3);
     match b {
-        v: i32 => rok_print_i32(v),
-        none => rok_print_str("none"),
+        v: i32 => println(f"{v}"),
+        none => println("none"),
     };
     // An optional result type does not nest; `try` covers all to its
     // right, hence the parentheses.
-    rok_print_i32((try? maybe(3)) ?? -1);
-    rok_print_i32(try! half(18));
+    println(f"{(try? maybe(3)) ?? -1}");
+    println(f"{try! half(18)}");
     try? half(1);
-    rok_print_str("dropped");
+    println("dropped");
     return 0;
 }

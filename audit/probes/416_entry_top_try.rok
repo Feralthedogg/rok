@@ -18,6 +18,6 @@ fn parse(x: i32) throws (Bad) -> i32 {
 }
 
 let a = try parse(0);
-rok_print_i32(a);
+println(f"{a}");
 let b = try parse(7);
-rok_print_i32(b);
+println(f"{b}");

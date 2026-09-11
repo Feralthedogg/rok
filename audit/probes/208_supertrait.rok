@@ -29,6 +29,6 @@ impl Ord2 for V {
 
 fn main() -> i32 {
     let v = V { n: 7 };
-    rok_print_i32(v.cmp2(0));
+    println(f"{v.cmp2(0)}");
     return 0;
 }

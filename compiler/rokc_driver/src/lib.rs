@@ -22,11 +22,12 @@ use rokc_parser::{
 };
 
 pub use cfg::CfgEnv;
-pub use rokc_codegen_mlir::ReplCell;
 pub use rokc_codegen_mlir::{Demangled, demangle};
+pub use rokc_codegen_mlir::{MlirOutput, ReplCell, ReplFn};
+pub use rokc_mir::Target;
 pub use toolchain::{
-    BuildOptions, EmitKind, TempDir, build_archive, compile_object, emit, find_mlir_plugin,
-    link_executable, link_host, link_shared, mlir_text,
+    Artifact, BuildOptions, EmitKind, TempDir, build_archive, cell_ir, emit, find_mlir_plugin,
+    finish, link_executable, link_host, lower_to_llvm, mlir_text,
 };
 
 // Independent switches, one per session setter.
@@ -65,6 +66,8 @@ pub struct CompilerConfig {
     /// library and the same user declarations that change its lexing
     /// (`#[infix]`, meta blocks, keywords): a long-lived session (REPL).
     pub cache_library: bool,
+    /// The target (`--target`): `#[cfg]`, layout and code follow it.
+    pub target: rokc_mir::Target,
 }
 
 thread_local! {
@@ -303,7 +306,6 @@ pub struct CompiledModule {
 pub struct CompiledProject {
     pub modules: Vec<CompiledModule>,
     pub warnings: Vec<RokDiagnostic>,
-    pub link_libraries: Vec<String>,
     /// `#[test]` functions of a test build (`#[bench]` functions of a
     /// bench build), `::`-qualified.
     pub tests: Vec<String>,
@@ -369,7 +371,8 @@ pub fn compile_source(
         m.archives = archives;
         let hash = m
             .mir
-            .pkg_hashes
+            .link
+            .packages
             .iter()
             .find(|(n, _)| *n == lib)
             .map(|(_, h)| h.clone())
@@ -414,7 +417,9 @@ fn compile_unit(
     // Spec 6.7.11: the user package's own `#[infix]` registrations are
     // gathered by the same pre-pass, so its extension tokens lex.
     metas.idents = Some(Vec::new());
-    for prog in user_programs(source, path, &mut metas) {
+    let mut user = Vec::new();
+    prepass_tree(path, Some(source), path.parent(), &mut metas, &mut user);
+    for prog in user {
         let (sub, mut d) = collect_prec_table(&prog);
         diags.append(&mut d);
         diags.extend(sub.entries().cloned().filter_map(|e| prec.merge(e)));
@@ -425,9 +430,8 @@ fn compile_unit(
     let user_metas = format!("{:?}", &metas.metas[lib_metas..]);
     let ext = prec.ext_ops();
     relex_metas(&mut metas, &ext);
-    // Build cfg env from CLI flags + automatic target keys.
     let mut cfg_env = CfgEnv::new();
-    cfg_env.populate_target_defaults();
+    cfg_env.add_target(&config.target);
     for f in &config.cfg_flags {
         cfg_env.add(f);
     }
@@ -507,7 +511,6 @@ fn compile_unit(
                 literals: std::sync::Arc::clone(&lib_lits),
             };
             let first = sources.len();
-            let first_item = items.len();
             let stray = collect_module_tree(
                 root,
                 None,
@@ -528,42 +531,21 @@ fn compile_unit(
             for f in &mut sources[first..] {
                 f.package.clone_from(&pkg);
             }
-            if prebuilt.iter().any(|p| p.rhir.name == pkg) {
-                mark_prebuilt(&mut items[first_item..]);
-            }
         }
         (items, uses, diags)
     });
     all_items.append(&mut items);
     all_uses.append(&mut uses);
     diags.append(&mut d);
-    // Auto-inject the runtime hooks lowering targets (`rok_panic`,
-    // `rok_uncaught_error`, `rok_print_*`, ...) so user files needn't
-    // declare the externs themselves.
     root_extern_uses(&mut all_uses, &config.externs);
-    all_items.insert(0, builtin_panic_extern());
     coro::rewrite_items(&mut all_items, &mut diags);
-    let packages = rokc_ast::Attribute {
-        path: vec![rokc_hir::PACKAGES_ATTR.to_owned()],
-        body: rokc_ast::AttrBody::Args(
-            config
-                .externs
-                .iter()
-                .map(|(n, _)| rokc_ast::AttrArg::Word(n.clone()))
-                .collect(),
-        ),
-        inner: true,
-        span: rokc_diagnostic::Span::DUMMY,
+    let input = rokc_hir::HirInput {
+        packages: config.externs.iter().map(|(n, _)| n.clone()).collect(),
+        lib: lib.map(str::to_owned),
+        prebuilt: prebuilt.iter().map(|p| p.rhir.name.clone()).collect(),
     };
-    let mut attrs = vec![packages];
-    attrs.extend(lib.map(|l| rokc_ast::Attribute {
-        path: vec![rokc_hir::LIB_ATTR.to_owned()],
-        body: rokc_ast::AttrBody::Args(vec![rokc_ast::AttrArg::Word(l.to_owned())]),
-        inner: true,
-        span: rokc_diagnostic::Span::DUMMY,
-    }));
     let program = rokc_ast::Program {
-        attrs,
+        attrs: Vec::new(),
         items: all_items,
         stmts: Vec::new(),
         expanded: Vec::new(),
@@ -588,25 +570,27 @@ fn compile_unit(
     // aliases.
     let (use_table, reexports, mut use_diags) = rokc_hir::build_use_table(&all_uses);
     diags.append(&mut use_diags);
-    let mut hir = rokc_hir::lower_full(&program, &prec, &use_table, &reexports);
+    let mut hir = rokc_hir::lower_full(&program, &prec, &use_table, &reexports, &input);
     rokc_diagnostic::set_current_span(rokc_diagnostic::Span::DUMMY);
     diags.append(&mut hir.diagnostics);
     // Warnings go out with the errors (a failed build still shows them).
     if diags.iter().any(RokDiagnostic::is_error) {
         return Err(diags);
     }
-    let mut mir = rokc_mir::lower(&hir);
-    mir.pkg_hashes = package_hashes(&root_dir, &roots);
+    let mut mir = rokc_mir::lower(&hir, &config.target);
+    mir.link.packages = package_hashes(&root_dir, &roots);
     for p in prebuilt {
-        if let Some(h) = mir.pkg_hashes.iter_mut().find(|(n, _)| *n == p.rhir.name) {
+        if let Some(h) = mir
+            .link
+            .packages
+            .iter_mut()
+            .find(|(n, _)| *n == p.rhir.name)
+        {
             h.1.clone_from(&p.rhir.hash);
         }
     }
-    if let Some(l) = lib {
-        rokc_mir::prune_library(&mut mir, l);
-    }
-    mir.link.lib = lib.map(str::to_owned);
-    mir.link.prebuilt = prebuilt.iter().map(|p| p.rhir.name.clone()).collect();
+    mir.link.lib = input.lib;
+    mir.link.prebuilt = input.prebuilt;
     mir.link.type_offset = prebuilt
         .iter()
         .map(|p| p.rhir.type_end())
@@ -627,7 +611,6 @@ fn compile_unit(
             interface: None,
         }],
         warnings: diags.into_iter().filter(|d| !d.is_error()).collect(),
-        link_libraries: Vec::new(),
         tests,
         sources,
     })
@@ -636,35 +619,9 @@ fn compile_unit(
 /// Lower MIR again after an embedder edited the HIR (the REPL's slot
 /// stores).
 pub fn relower(m: &mut CompiledModule) {
-    let hashes = std::mem::take(&mut m.mir.pkg_hashes);
-    m.mir = rokc_mir::lower(&m.hir);
-    m.mir.pkg_hashes = hashes;
-}
-
-/// A prebuilt dependency's body-less functions (cut from its interface)
-/// are declarations of its `.a`'s symbols.
-fn mark_prebuilt(items: &mut [rokc_ast::Item]) {
-    let attr = || rokc_ast::Attribute {
-        path: vec![rokc_hir::PREBUILT_ATTR.to_owned()],
-        body: rokc_ast::AttrBody::Empty,
-        inner: false,
-        span: rokc_diagnostic::Span::DUMMY,
-    };
-    for item in items {
-        match item {
-            rokc_ast::Item::Fn(f) if f.body.is_none() => f.attrs.push(attr()),
-            rokc_ast::Item::Impl(i) => {
-                for it in &mut i.items {
-                    if let rokc_ast::ImplItem::Method(m) = it {
-                        if m.body.is_none() {
-                            m.attrs.push(attr());
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
+    let link = std::mem::take(&mut m.mir.link);
+    m.mir = rokc_mir::lower(&m.hir, &m.mir.target);
+    m.mir.link = link;
 }
 
 /// Spec 0.3.3: each package's hash is the SHA-256 (first 8 hex digits)
@@ -728,11 +685,9 @@ fn build_prec_table(
 ) -> PrecTable {
     let mut table = PrecTable::new();
     for (_, root) in roots {
-        // Walk the package starting from the given root file (typically
-        // `lib.rok` or `main.rok`), following `mod x;` declarations to
-        // their files, and bind each `#[infix]` token to its trait method.
-        // Parse errors are reported by the real parse; drop them here.
-        for prog in resolve_module_tree(root, &mut Vec::new(), metas) {
+        let mut programs = Vec::new();
+        prepass_tree(root, None, root.parent(), metas, &mut programs);
+        for prog in programs {
             let (sub_table, mut collect_diags) = collect_prec_table(&prog);
             diags.append(&mut collect_diags);
             diags.extend(sub_table.entries().cloned().filter_map(|mut e| {
@@ -744,74 +699,86 @@ fn build_prec_table(
     table
 }
 
-/// The user package's modules, parsed without extension operators (the
-/// pre-pass that finds them); errors are reported by the real parse.
-fn user_programs(source: &str, path: &Path, metas: &mut PrePass) -> Vec<rokc_ast::Program> {
-    let file = path.display().to_string();
-    let tokens = prepass_tokens(source, &file, metas);
-    let (program, _) = parse_program(&tokens, file);
-    let mut out = Vec::new();
-    walk_mod_decls(
-        &program.items,
-        path.parent(),
-        &mut Vec::new(),
-        &mut out,
-        metas,
-    );
-    out.push(program);
-    out
-}
-
-/// Walk a package's module tree from `root_path` (the package root file —
-/// `lib.rok` or `main.rok`). For every `mod name;` encountered, resolves
-/// the name to a sibling `.rok` file and recurses. Inline `mod name {}`
-/// blocks have their items walked in place.
-///
-/// Returns each visited module's parsed `Program`. Errors (missing files,
-/// `mod` in a single-file leaf, etc.) are appended to `diags`.
-fn resolve_module_tree(
-    root_path: &Path,
-    diags: &mut Vec<RokDiagnostic>,
+/// The pre-pass over a package's module tree from `path` (its text
+/// `source`, else the file's): each module parsed without extension
+/// operators (they are what it finds), submodules first, gathering meta
+/// blocks, keywords and literals. Errors are left to the real parse.
+fn prepass_tree(
+    path: &Path,
+    source: Option<&str>,
+    sub_dir: Option<&Path>,
     metas: &mut PrePass,
-) -> Vec<rokc_ast::Program> {
-    let mut programs = Vec::new();
-    // Submodule directory of the package root is the directory that
-    // contains `lib.rok` / `main.rok` (per spec §5.4.4).
-    let root_dir = root_path
-        .parent()
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    parse_and_descend(root_path, Some(&root_dir), diags, &mut programs, metas);
-    programs
-}
-
-fn parse_and_descend(
-    body_path: &Path,
-    submodule_dir: Option<&Path>,
-    diags: &mut Vec<RokDiagnostic>,
     out: &mut Vec<rokc_ast::Program>,
-    metas: &mut PrePass,
 ) {
-    let source = match read_source(body_path) {
-        Ok(s) => s,
-        Err(e) => {
-            diags.push(RokDiagnostic::error(
-                rokc_diagnostic::ErrorKind::Module,
-                format!("cannot read module file {}: {e}", body_path.display()),
-            ));
-            return;
-        }
+    let Some(source) = source.map(str::to_owned).or_else(|| read_source(path).ok()) else {
+        return;
     };
-    let file = body_path.display().to_string();
+    let file = path.display().to_string();
     let tokens = prepass_tokens(&source, &file, metas);
-
-    let (program, mut parse_diags) = parse_program(&tokens, file);
-    diags.append(&mut parse_diags);
-    if !program.stmts.is_empty() {
-        diags.push(entry::stmts_outside_entry(body_path));
-    }
-
-    walk_mod_decls(&program.items, submodule_dir, diags, out, metas);
+    let (program, _) = parse_program(&tokens, file);
+    prepass_mods(&program.items, sub_dir, metas, out);
     out.push(program);
+}
+
+fn prepass_mods(
+    items: &[rokc_ast::Item],
+    sub_dir: Option<&Path>,
+    metas: &mut PrePass,
+    out: &mut Vec<rokc_ast::Program>,
+) {
+    for item in items {
+        let rokc_ast::Item::Mod(m) = item else {
+            continue;
+        };
+        let before = metas.metas.len();
+        match &m.items {
+            Some(inner) => prepass_mods(inner, sub_dir, metas, out),
+            None => {
+                if let Ok((body, next)) = mod_file(&m.name, sub_dir) {
+                    prepass_tree(&body, None, next.as_deref(), metas, out);
+                }
+            }
+        }
+        // The module's `#[cfg]` holds for the meta blocks of its files
+        // (a block is registered only when its cfgs hold).
+        let cfg = m.attrs.iter().filter(|a| a.name() == "cfg");
+        for d in &mut metas.metas[before..] {
+            d.cfg.extend(cfg.clone().cloned());
+        }
+    }
+}
+
+/// The file of `mod name;` declared in a module whose submodules live in
+/// `dir` (spec 5.4.4), and the directory of its own submodules.
+fn mod_file(name: &str, dir: Option<&Path>) -> Result<(PathBuf, Option<PathBuf>), RokDiagnostic> {
+    let Some(dir) = dir else {
+        return Err(RokDiagnostic::error(
+            rokc_diagnostic::ErrorKind::Module,
+            format!(
+                "`mod {name}` in a single-file module — declare a sibling `{name}/` folder to \
+                 host submodules (a lone file run outside any package cannot have file \
+                 submodules, spec 4.16.8; use `mod {name} {{ }}`)"
+            ),
+        ));
+    };
+    let body = dir.join(format!("{name}.rok"));
+    if !source_exists(&body) {
+        return Err(RokDiagnostic::error(
+            rokc_diagnostic::ErrorKind::Module,
+            format!("module `{name}` body not found at `{}`", body.display()),
+        ));
+    }
+    let folder = dir.join(name);
+    let next = source_dir_exists(&folder).then_some(folder);
+    Ok((body, next))
+}
+
+/// A file that defines meta blocks (`@`), keywords or literals: the
+/// pre-pass gathers them, and its interface copy is kept whole.
+pub(crate) fn defines_metas(tokens: &[rokc_lexer::Token], source: &str) -> bool {
+    tokens.iter().any(|t| t.kind == rokc_lexer::TokenKind::At)
+        || source.contains("#[keyword(")
+        || source.contains("#[literal(")
 }
 
 /// Lex a file for the pre-pass and gather its meta blocks (their
@@ -833,10 +800,7 @@ fn prepass_tokens(source: &str, file: &str, metas: &mut PrePass) -> Vec<rokc_lex
             }
         }
     }
-    if tokens.iter().any(|t| t.kind == rokc_lexer::TokenKind::At)
-        || source.contains("#[keyword(")
-        || source.contains("#[literal(")
-    {
+    if defines_metas(&tokens, source) {
         let id = rokc_diagnostic::register_file(file.to_owned(), source.to_owned());
         for t in &mut tokens {
             t.span.file = id;
@@ -939,9 +903,8 @@ static LIB_CACHE: Cached<LibParse> = std::sync::Mutex::new(None);
 /// `parse()`, or (`on`) a copy of its last result when `key` and the
 /// number of registered files before it are the same: its files are
 /// registered again, so they get the ids its spans have.
-// ponytail: one entry per parse, and the files are not checked for
-// changes on disk (`CompilerConfig::cache_library` is for a session
-// over a fixed library).
+// One entry per parse; files are not rechecked on disk
+// (`CompilerConfig::cache_library` is for a fixed library).
 fn cached<T: Clone>(slot: &Cached<T>, on: bool, key: String, parse: impl FnOnce() -> T) -> T {
     if !on {
         return parse();
@@ -1130,67 +1093,6 @@ fn literal_tables(
     (std::sync::Arc::new(lib), std::sync::Arc::new(user))
 }
 
-fn walk_mod_decls(
-    items: &[rokc_ast::Item],
-    submodule_dir: Option<&Path>,
-    diags: &mut Vec<RokDiagnostic>,
-    out: &mut Vec<rokc_ast::Program>,
-    metas: &mut PrePass,
-) {
-    for item in items {
-        let rokc_ast::Item::Mod(m) = item else {
-            continue;
-        };
-        let before = metas.metas.len();
-        match &m.items {
-            // Inline module: `mod name { ... }` — walk its items directly.
-            Some(inline_items) => walk_mod_decls(inline_items, submodule_dir, diags, out, metas),
-            // File-mapped module: resolve sibling `name.rok`.
-            None => resolve_file_mod(&m.name, submodule_dir, diags, out, metas),
-        }
-        // The module's `#[cfg]` holds for the meta blocks of its files
-        // (the pre-pass registers a block only when its cfgs hold).
-        let cfg = m.attrs.iter().filter(|a| a.name() == "cfg");
-        for d in &mut metas.metas[before..] {
-            d.cfg.extend(cfg.clone().cloned());
-        }
-    }
-}
-
-fn resolve_file_mod(
-    name: &str,
-    submodule_dir: Option<&Path>,
-    diags: &mut Vec<RokDiagnostic>,
-    out: &mut Vec<rokc_ast::Program>,
-    metas: &mut PrePass,
-) {
-    let Some(dir) = submodule_dir else {
-        diags.push(RokDiagnostic::error(
-            rokc_diagnostic::ErrorKind::Module,
-            format!(
-                "`mod {name}` in a single-file module — declare a sibling `{name}/` folder \
-                 to host submodules"
-            ),
-        ));
-        return;
-    };
-    let body = dir.join(format!("{name}.rok"));
-    let folder = dir.join(name);
-    if !source_exists(&body) {
-        diags.push(RokDiagnostic::error(
-            rokc_diagnostic::ErrorKind::Module,
-            format!("module `{name}` body not found at `{}`", body.display()),
-        ));
-        return;
-    }
-    let next_dir = if source_dir_exists(&folder) {
-        Some(folder)
-    } else {
-        None
-    };
-    parse_and_descend(&body, next_dir.as_deref(), diags, out, metas);
-}
-
 /// Walk a package's module tree starting from `body_path`, qualifying
 /// each item's name with the module path it lives under. Inline
 /// `mod foo { ... }` extends the path; file-mapped `mod foo;` recurses
@@ -1313,33 +1215,12 @@ fn flatten_module_items(
                         keep.as_deref_mut(),
                     );
                 } else {
-                    // File-mapped `mod foo;`. Resolve to `foo.rok` (and
-                    // optional sibling `foo/` for further submodules).
-                    let Some(dir) = submodule_dir else {
-                        diags.push(RokDiagnostic::error(
-                            rokc_diagnostic::ErrorKind::Module,
-                            format!(
-                                "`mod {}` in a single-file module — declare a sibling `{0}/` folder \
-                                 to host submodules (a lone file run outside any package \
-                                 cannot have file submodules, spec 4.16.8; use `mod {0} {{ }}`)",
-                                m.name
-                            ),
-                        ));
-                        continue;
-                    };
-                    let body = dir.join(format!("{}.rok", m.name));
-                    let folder = dir.join(&m.name);
-                    if !source_exists(&body) {
-                        diags.push(RokDiagnostic::error(
-                            rokc_diagnostic::ErrorKind::Module,
-                            format!("module `{}` body not found at `{}`", m.name, body.display()),
-                        ));
-                        continue;
-                    }
-                    let next_dir = if source_dir_exists(&folder) {
-                        Some(folder)
-                    } else {
-                        None
+                    let (body, next_dir) = match mod_file(&m.name, submodule_dir) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            diags.push(e);
+                            continue;
+                        }
                     };
                     let stray = collect_module_tree(
                         &body,
@@ -1435,124 +1316,6 @@ fn rename_with_prefix(item: rokc_ast::Item, module_path: &[String]) -> rokc_ast:
     }
 }
 
-/// Synthesize the runtime `extern "C"` block with the small set of
-/// always-available primitives — `rok_panic` (`try!`, runtime checks),
-/// `rok_uncaught_error` (an error escaping a throwing `main`),
-/// `rok_print_str`, `rok_print_i32`, and `rok_print_i64`. Every user
-/// source file gets these for free without writing an extern block.
-fn builtin_panic_extern() -> rokc_ast::Item {
-    use rokc_ast::{ExternBlock, ExternItem, FnDef, Generics, Param, ThrowsKind, Ty, TyKind};
-    use rokc_diagnostic::Span;
-
-    let span = Span::DUMMY;
-    let path_ty = |name: &str| Ty {
-        kind: TyKind::Path(rokc_ast::Path {
-            segments: vec![rokc_ast::PathSegment {
-                name: name.to_owned(),
-                generics: Vec::new(),
-            }],
-            span,
-        }),
-        span,
-    };
-    let make_fn = |fn_name: &str, params: Vec<(&str, Ty)>, ret: Option<Ty>| FnDef {
-        vis: rokc_core::Visibility::Pub,
-        attrs: Vec::new(),
-        name: fn_name.to_owned(),
-        generics: Generics::default(),
-        params: params
-            .into_iter()
-            .map(|(n, t)| Param {
-                name: n.to_owned(),
-                ty: Some(t),
-                by_ref: false,
-                default: None,
-                variadic: false,
-                span,
-            })
-            .collect(),
-        ret_ty: ret,
-        body: None,
-        is_async: false,
-        is_generator: false,
-        is_unsafe: false,
-        throws: ThrowsKind::None,
-        where_clause: Vec::new(),
-        span,
-    };
-    let never = Ty {
-        kind: TyKind::Never,
-        span,
-    };
-    // Spec 805: `rok_panic(msg, len) -> !` — message bytes to stderr,
-    // exit 101. Codegen-inserted runtime checks call it too.
-    let panic_fn = make_fn(
-        "rok_panic",
-        vec![("msg", path_ty("str")), ("len", path_ty("usize"))],
-        Some(never.clone()),
-    );
-    // Spec 4.16.4: an error out of a throwing `main` — the error's
-    // description (NUL-terminated `str`), exit 1.
-    let uncaught_fn = make_fn(
-        "rok_uncaught_error",
-        vec![("what", path_ty("str"))],
-        Some(never),
-    );
-    let assert_fn = make_fn(
-        "rok_assert",
-        vec![("cond", path_ty("i32"))],
-        Some(path_ty("i32")),
-    );
-    let print_str_fn = make_fn(
-        "rok_print_str",
-        vec![("s", path_ty("str"))],
-        Some(path_ty("i32")),
-    );
-    let print_i32_fn = make_fn(
-        "rok_print_i32",
-        vec![("n", path_ty("i32"))],
-        Some(path_ty("i32")),
-    );
-    let print_i64_fn = make_fn(
-        "rok_print_i64",
-        vec![("n", path_ty("i64"))],
-        Some(path_ty("i32")),
-    );
-    // ABI nit: bool/i1 doesn't have a stable C calling convention, so
-    // the extern is declared `b: i32` and callers cast `value as i32`.
-    let print_bool_fn = make_fn(
-        "rok_print_bool",
-        vec![("b", path_ty("i32"))],
-        Some(path_ty("i32")),
-    );
-    let print_f64_fn = make_fn(
-        "rok_print_f64",
-        vec![("d", path_ty("f64"))],
-        Some(path_ty("i32")),
-    );
-    rokc_ast::Item::Extern(ExternBlock {
-        // Compiler-provided hooks are safe to call (no `unsafe { }`).
-        attrs: vec![rokc_ast::Attribute {
-            path: vec![rokc_hir::SAFE_EXTERN_ATTR.to_owned()],
-            body: rokc_ast::AttrBody::Empty,
-            inner: false,
-            span,
-        }],
-        abi: "C".to_owned(),
-        items: vec![
-            ExternItem::Fn(panic_fn),
-            ExternItem::Fn(uncaught_fn),
-            ExternItem::Fn(assert_fn),
-            ExternItem::Fn(print_str_fn),
-            ExternItem::Fn(print_i32_fn),
-            ExternItem::Fn(print_i64_fn),
-            ExternItem::Fn(print_bool_fn),
-            ExternItem::Fn(print_f64_fn),
-        ],
-        span,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1563,5 +1326,83 @@ mod tests {
             ("lib.rok".to_owned(), "pub mod m;\n"),
         ];
         assert_eq!(super::hash_package(&mut files), "b0cf4718");
+    }
+
+    /// Compile `src` as an anonymous program for `triple` with the core
+    /// library.
+    fn compile(src: &str, triple: &str) -> super::CompiledModule {
+        let core =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/core/lib.rok");
+        let config = super::CompilerConfig {
+            bootstrap_files: vec![core],
+            anonymous: true,
+            target: super::Target::new(Some(triple)),
+            ..super::CompilerConfig::default()
+        };
+        let path = std::env::temp_dir().join("rokc_driver_test_main.rok");
+        let p = super::compile_source(src, &path, &config).unwrap_or_else(|d| {
+            panic!(
+                "{}",
+                d.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        });
+        p.modules.into_iter().next().expect("one module")
+    }
+
+    #[test]
+    fn cfg_follows_the_target() {
+        let src = "#[cfg(target_pointer_width = \"32\")]\nfn narrow() {}\n\
+                   #[cfg(target_os = \"windows\")]\nfn win() {}\nfn main() {}\n";
+        let has = |m: &super::CompiledModule, n: &str| m.hir.functions.iter().any(|f| f.name == n);
+        let i686 = compile(src, "i686-pc-windows-msvc");
+        assert!(has(&i686, "narrow") && has(&i686, "win"));
+        let x64 = compile(src, "x86_64-unknown-linux-gnu");
+        assert!(!has(&x64, "narrow") && !has(&x64, "win"));
+    }
+
+    #[test]
+    fn any_payload_boxing_follows_the_pointer_width() {
+        // An `i64` fits the payload word on a 64-bit target, not on a
+        // 32-bit one: there the tag carries `ANY_BOXED`.
+        let src = "fn main() { let v: any = 5i64; }\n";
+        let boxed = |m: &super::CompiledModule| {
+            m.mir
+                .functions
+                .iter()
+                .flat_map(|f| &f.blocks)
+                .flat_map(|b| &b.stmts)
+                .any(|s| {
+                    matches!(s, rokc_mir::Statement::Assign {
+                    rvalue: rokc_mir::RValue::StructInit { fields, .. }, ..
+                } if matches!(fields.first(), Some(rokc_mir::Operand::Const(
+                    rokc_ir_common::ConstVal::Int { value, .. })) if *value < 0))
+                })
+        };
+        assert!(boxed(&compile(src, "i686-unknown-linux-gnu")));
+        assert!(!boxed(&compile(src, "x86_64-unknown-linux-gnu")));
+    }
+
+    #[test]
+    fn extern_c_is_the_c_abi_whatever_the_name() {
+        // A user's `extern "C"` function gets the C ABI even when its name
+        // starts with `rok_`; `extern "rok"` is the runtime's.
+        let src = "extern \"C\" { fn rok_probe_c(s: str) -> i32; }\n\
+                   extern \"rok\" { fn rok_probe_rok(s: str) -> i32; }\n\
+                   fn main() { unsafe { rok_probe_c(\"x\"); rok_probe_rok(\"y\"); } }\n";
+        let m = compile(src, "x86_64-unknown-linux-gnu");
+        let text = super::mlir_text(&m, &super::BuildOptions::default())
+            .expect("codegen")
+            .text;
+        assert!(
+            text.contains("func.func private @rok_probe_c(%arg0: !llvm.ptr) -> i32"),
+            "{text}"
+        );
+        assert!(
+            text.contains("func.func private @rok_probe_rok(!llvm.struct<(ptr, i64)>) -> i32"),
+            "{text}"
+        );
     }
 }

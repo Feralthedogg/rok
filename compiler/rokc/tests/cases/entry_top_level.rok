@@ -17,7 +17,7 @@ if total > 0 {
 }
 
 fn show(v: i32) {
-    rok_print_i32(v);
+    println(f"{v}");
 }
 
 fn sum(k: i32) -> i32 {

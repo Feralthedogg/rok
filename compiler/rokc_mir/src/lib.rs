@@ -2,49 +2,45 @@
 //! text emission. Looks at HIR only.
 
 mod coro;
+#[path = "../../../runtime/rokr_common/src/gc_abi.rs"]
+pub mod gc_abi;
 mod liveness;
 mod lower;
 mod print;
+mod target;
 mod ty;
 
 pub use liveness::{Deaths, deaths};
-pub use lower::{lower, prune_library};
+pub use lower::lower;
 pub use print::print_mir;
-pub use ty::{ANY_BOXED, ANY_STRUCT, any_inline, any_ty, has_gc_ref, lower_ty, sum_layout};
+pub use target::{CAbi, Target};
+pub use ty::{ANY_STRUCT, any_ty};
 
 use rokc_core::DefId;
 use rokc_diagnostic::Span;
 use rokc_hir::StructId;
-use rokc_ir_common::{BlockId, ConstVal, FunctionId, LocalId, PrimOp, PrimTy};
+use rokc_ir_common::{Abi, BlockId, ConstVal, FnFacts, FunctionId, LocalId, PrimOp, PrimTy};
 
 #[derive(Clone, Debug, Default)]
 pub struct MirModule {
     pub functions: Vec<MirFunction>,
     pub statics: Vec<MirStaticDef>,
-    /// `#[export_name]` functions: id → linker symbol.
-    pub exports: Vec<(FunctionId, String)>,
-    /// C variadic `extern` declarations (spec 8.6.10): calls pass the
-    /// arguments past the declared parameters as C `...` arguments.
-    pub c_variadic: Vec<FunctionId>,
-    /// `extern "C" fn` definitions (spec 5.9.10): what C calls (a
-    /// function pointer passed to it, an `#[export_name]`) is their C
-    /// ABI entry, which converts aggregates (spec 8.6.3).
-    pub c_defs: Vec<FunctionId>,
     /// Struct name and field names by `StructId` (`-g` DWARF types).
     pub struct_names: std::collections::HashMap<u32, (String, Vec<String>)>,
-    /// Package hash per item-path prefix (`rok::core`, ..., `""` for the
-    /// user package; spec 0.3.3), longest prefix first. Filled by the
-    /// driver; empty → one hash over the printed MIR.
-    pub pkg_hashes: Vec<(String, String)>,
-    /// Separate compilation with prebuilt dependencies (spec 904).
+    pub target: Target,
+    /// The packages of the program and how they link (filled by the
+    /// driver).
     pub link: Link,
 }
 
-/// How this module links with prebuilt dependency packages (their
-/// `lib<name>.a` + `<name>.rhir`). Filled by the driver, but
-/// `prebuilt_fns` (from HIR).
+/// The packages items belong to, and how this module links with
+/// prebuilt dependencies (their `lib<name>.a` + `<name>.rhir`, 904).
 #[derive(Clone, Debug, Default)]
 pub struct Link {
+    /// Package hash per item-path prefix (`rok::core`, ..., `""` for the
+    /// user package; spec 0.3.3), longest prefix first. Empty: one hash
+    /// over the printed MIR.
+    pub packages: Vec<(String, String)>,
     /// This module is package `lib`'s prebuilt library: only that
     /// package's functions and statics are exported, the rest of the
     /// code it uses (library, instances) is a private copy.
@@ -52,11 +48,32 @@ pub struct Link {
     /// Packages loaded from RHIR: their code and statics live in their
     /// `.a`; bodies compiled here (generics, kept bodies) are private.
     pub prebuilt: Vec<String>,
-    /// Body-less declarations of prebuilt functions (rok ABI, mangled).
-    pub prebuilt_fns: Vec<FunctionId>,
     /// Added to every GC type id: the ids below belong to the prebuilt
     /// dependencies.
     pub type_offset: u32,
+}
+
+impl Link {
+    /// Item `path` belongs to package `pkg` (a `::`-path prefix).
+    #[must_use]
+    pub fn owns(pkg: &str, path: &str) -> bool {
+        path.strip_prefix(pkg).is_some_and(|r| r.starts_with("::"))
+    }
+
+    /// The hash of the package item `path` belongs to.
+    #[must_use]
+    pub fn hash_of(&self, path: &str) -> &str {
+        self.packages
+            .iter()
+            .find(|(p, _)| p.is_empty() || Self::owns(p, path))
+            .map_or("", |(_, h)| h.as_str())
+    }
+
+    /// Item `path` belongs to a prebuilt dependency.
+    #[must_use]
+    pub fn in_prebuilt(&self, path: &str) -> bool {
+        self.prebuilt.iter().any(|d| Self::owns(d, path))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -82,6 +99,15 @@ pub struct MirFunction {
     pub param_tys: Vec<MirTy>,
     pub ret_ty: MirTy,
     pub span: Span,
+    pub facts: FnFacts,
+}
+
+impl MirFunction {
+    /// Its item path (a generic instance's: the generic's).
+    #[must_use]
+    pub fn path(&self) -> &str {
+        self.facts.path(&self.name)
+    }
 }
 
 /// A lexical scope of a function (a block with its own `let`s), for
@@ -316,14 +342,14 @@ pub enum RValue {
         ty: MirTy,
         index: u32,
     },
-    // Indirect call through a function-typed operand. `c_abi`: an
-    // `extern "C" fn` pointer, called with the C ABI (spec 5.9.4).
+    // Indirect call through a function-typed operand: a rok `fn`
+    // value's code, or an `extern "C" fn` pointer (spec 5.9.4).
     CallIndirect {
         callee: Operand,
         args: Vec<Operand>,
         arg_tys: Vec<MirTy>,
         ret_ty: MirTy,
-        c_abi: bool,
+        abi: Abi,
     },
 }
 
@@ -363,8 +389,6 @@ pub enum MirTy {
     Unit,
     Prim(PrimTy),
     Any,
-    // Tagged union (sum type).
-    Sum(Vec<MirTy>),
     Tuple(Vec<MirTy>),
     // Concrete struct, fields stored in declaration order.
     Struct(StructId, Vec<MirTy>),

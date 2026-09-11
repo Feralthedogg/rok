@@ -1,0 +1,49 @@
+// expect-exit: 0
+// expect-stdout:
+// 2 1
+// 3
+// 9 2
+// 5
+
+// A plain enum whose payload names a generic instance (`List<V>`, a
+// user `G<i32>`) — including itself, recursively — and a named variant
+// with a single struct field (a one-field payload tuple).
+struct G<T> { v: T; }
+struct P { a: i64; b: i64; }
+
+enum V {
+    Nil,
+    Items(List<V>),
+    Boxed(G<i32>),
+    Named { xs: List<i32>; },
+    One { p: P; },
+}
+
+fn main() {
+    let v = V::Items([V::Nil, V::Items([V::Nil])]);
+    match v {
+        V::Items(xs) => {
+            let inner = match xs[1] {
+                V::Items(ys) => ys.len(),
+                _ => 0usize,
+            };
+            println(f"{xs.len()} {inner}");
+        },
+        _ => {},
+    }
+    let b = V::Boxed(G { v: 3 });
+    match b {
+        V::Boxed(g) => println(f"{g.v}"),
+        _ => {},
+    }
+    let n = V::Named { xs: [9, 8] };
+    match n {
+        V::Named { xs } => println(f"{xs[0]} {xs.len()}"),
+        _ => {},
+    }
+    let o = V::One { p: P { a: 5, b: 6 } };
+    match o {
+        V::One { p } => println(f"{p.a}"),
+        _ => {},
+    }
+}

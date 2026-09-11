@@ -78,14 +78,14 @@ struct W<T> { v: T; }
 fn main() -> i32 {
     let p = Point { x: 1, y: 2, z: 0u8 };
     let d = p.describe();
-    rok_print_str(d.replace(", z = 0", " }").replace("Point", "Point { "));
-    rok_print_str(f"{p.arity()}");
+    println(d.replace(", z = 0", " }").replace("Point", "Point { "));
+    println(f"{p.arity()}");
     let q = Pair(7, 8);
-    rok_print_str(q.describe().replace("Pair0 = ", "Pair(").replace(", 1 = ", ", ") + ")");
-    rok_print_str(f"{q.arity()}");
+    println(q.describe().replace("Pair0 = ", "Pair(").replace(", 1 = ", ", ") + ")");
+    println(f"{q.arity()}");
     let w = W { v: 5 };
-    rok_print_str(w.describe().replace("W", "W { ") + " }");
+    println(w.describe().replace("W", "W { ") + " }");
     let z = Point::zero();
-    rok_print_str(f"{z.x == 0 && z.y == 0i64 && z.z == 0u8}");
+    println(f"{z.x == 0 && z.y == 0i64 && z.z == 0u8}");
     return 0;
 }

@@ -27,6 +27,6 @@ fn main() -> i32 {
         i += 1;
     }
     for it in keep { total += it.v.w() + it.id; }
-    rok_print_i64(total);
+    println(f"{total}");
     return 0;
 }

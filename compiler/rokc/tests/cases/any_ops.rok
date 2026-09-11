@@ -22,13 +22,13 @@ fn show(v: any) -> i32 {
 }
 let v: any = 42i32;
 let w = v + 1i32;
-rok_print_i32(show(w));
+println(f"{show(w)}");
 let f: any = 1.5;
-rok_print_i32(show(f * 2.0));
-rok_print_i32(show(v + v));
-rok_print_i32(show(-v));
-if v == 42i32 { rok_print_i32(7); }
+println(f"{show(f * 2.0)}");
+println(f"{show(v + v)}");
+println(f"{show(-v)}");
+if v == 42i32 { println(f"{7}"); }
 let b: any = true;
-rok_print_i32(show(!b));
-rok_print_i32(show(3i32 * v));
-if f < 2.0 { rok_print_i32(9); }
+println(f"{show(!b)}");
+println(f"{show(3i32 * v)}");
+if f < 2.0 { println(f"{9}"); }

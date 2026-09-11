@@ -30,11 +30,11 @@ fn zeros<T: Dim>(x: T) -> usize {
 
 fn main() -> i32 {
     let a: [i32; Box::<i32>::N] = [1; 4];
-    rok_print_i32(len_of(a) as i32);
-    rok_print_i32(zeros(Box { v: 1.5 }) as i32);
+    println(f"{len_of(a) as i32}");
+    println(f"{zeros(Box { v: 1.5 }) as i32}");
     let t: [i32; Tri::N] = [7, 8, 9];
-    rok_print_i32(len_of(t) as i32);
+    println(f"{len_of(t) as i32}");
     let k: [i32; m::K] = [1, 2];
-    rok_print_i32(len_of(k) as i32);
+    println(f"{len_of(k) as i32}");
     return 0;
 }

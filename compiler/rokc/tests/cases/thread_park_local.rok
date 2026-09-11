@@ -27,8 +27,8 @@ fn main() -> i32 {
         }));
         t += 1;
     }
-    for h in hs { rok_print_i32(try! h.join()); }
-    rok_print_i32(counter.get());
+    for h in hs { println(f"{try! h.join()}"); }
+    println(f"{counter.get()}");
 
     let flag = Atomic::new(false);
     let sleeper = thread::spawn(|| {
@@ -38,12 +38,12 @@ fn main() -> i32 {
     thread::sleep(Duration::ms(5));
     flag.store(true, Release);
     sleeper.thread().unpark();
-    rok_print_i32(try! sleeper.join());
+    println(f"{try! sleeper.join()}");
     thread::park_timeout(Duration::ms(1));
     thread::current().unpark();
     thread::park();
     let d = thread::spawn(|| 1);
     d.detach();
-    rok_print_str("done");
+    println("done");
     return 0;
 }

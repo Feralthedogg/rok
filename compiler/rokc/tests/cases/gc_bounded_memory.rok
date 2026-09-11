@@ -31,7 +31,7 @@ fn main() -> i32 {
         if live > peak { peak = live; }
         i += 1;
     }
-    rok_print_i64(total);
+    println(f"{total}");
     unsafe { rok_gc_collect() };
     // Bounded: well under the ~96 MB a leaking heap would hold.
     if peak > 16000000usize { return 1; }
@@ -39,6 +39,6 @@ fn main() -> i32 {
     // After a full collection only `keep` (48 bytes) survives.
     if unsafe { rok_gc_stats_live_bytes() } > 1024usize { return 3; }
     if keep.w() != 3 { return 4; }
-    rok_print_str("ok");
+    println("ok");
     return 0;
 }

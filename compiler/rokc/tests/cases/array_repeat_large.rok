@@ -14,15 +14,15 @@ fn sum<const N: usize>(a: [i32; N]) -> i32 {
 
 fn main() -> i32 {
     let big = [7; 4096];
-    rok_print_str(f"{sum(big) / 7} {big[4095]}");
+    println(f"{sum(big) / 7} {big[4095]}");
     let f: [i64; 1000] = [2; 1000];
     let t = 0i64;
     for i in 0..1000 { t = t + f[i]; }
-    rok_print_i64(t);
+    println(f"{t}");
     // GC references keep the unrolled form.
     let words = ["hi"; 40];
-    rok_print_str(f"{40} {words[39]}");
+    println(f"{40} {words[39]}");
     let small = [1; 3];
-    rok_print_i32(sum(small));
+    println(f"{sum(small)}");
     return 0;
 }

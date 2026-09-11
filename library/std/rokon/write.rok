@@ -1,0 +1,196 @@
+// rok::std::rokon::write — the canonical text of a `Value` (spec 3.9.4).
+
+use rok::std::rokon::Value;
+
+const WIDTH: usize = 100;
+
+/// `v` on one line.
+pub fn flat(v: Value) -> str { text(v, true) }
+
+/// `flat`, with NaN / infinity as `nan` / `inf` / `-inf` instead of a
+/// panic (`Debug`, `==`, hashing).
+pub fn loose(v: Value) -> str { text(v, false) }
+
+fn text(v: Value, strict: bool) -> str {
+    match v {
+        Value::None => "none",
+        Value::Bool(b) => if b { "true" } else { "false" },
+        Value::Int(n) => n.display(),
+        Value::Float(x) => float_text(x, strict),
+        Value::Char(c) => quote_char(c),
+        Value::Str(s) => quote_str(s),
+        Value::List(xs) => "[" + flat_items(xs, strict) + "]",
+        Value::Tuple(xs) => {
+            if xs.len() == 1 { return "(" + text(xs[0], strict) + ",)"; }
+            "(" + flat_items(xs, strict) + ")"
+        },
+        Value::Dict(d) => {
+            if d.is_empty() { return "{}"; }
+            let parts: List<str> = List::new();
+            for (k, x) in d.entries() { parts.push(text(k, strict) + ": " + text(x, strict)); }
+            "{ " + join(parts) + " }"
+        },
+        Value::Struct { name, fields } => {
+            let head = match name {
+                n: str => n + " ",
+                none => "",
+            };
+            head + flat_fields(fields, strict)
+        },
+        Value::Variant { path, args, named } => {
+            if args.is_empty() {
+                if named.is_empty() { return path; }
+                return path + " " + flat_fields(named, strict);
+            }
+            let parts: List<str> = List::new();
+            for x in args { parts.push(text(x, strict)); }
+            for (k, x) in named.entries() { parts.push(k + ": " + text(x, strict)); }
+            path + "(" + join(parts) + ")"
+        },
+    }
+}
+
+fn flat_items(xs: List<Value>, strict: bool) -> str {
+    let parts: List<str> = List::new();
+    for x in xs { parts.push(text(x, strict)); }
+    join(parts)
+}
+
+fn flat_fields(fs: OrderedDict<str, Value>, strict: bool) -> str {
+    if fs.is_empty() { return "{}"; }
+    let parts: List<str> = List::new();
+    for (k, x) in fs.entries() { parts.push(k + ": " + text(x, strict)); }
+    "{ " + join(parts) + " }"
+}
+
+fn join(parts: List<str>) -> str {
+    let b = StrBuf::new();
+    let first = true;
+    for p in parts {
+        if !first { b.push_str(", "); }
+        b.push_str(p);
+        first = false;
+    }
+    b.to_str()
+}
+
+/// `v` starting at column `col` of a line indented `indent`, followed by
+/// `tail` more columns (a `,`): one line if it fits in `WIDTH`, else
+/// one item per line.
+pub fn pretty(v: Value, indent: usize, col: usize, tail: usize) -> str {
+    let one = flat(v);
+    if col + one.char_count() + tail <= WIDTH { return one; }
+    let inner = indent + 4;
+    let pad = " ".repeat(inner);
+    let b = StrBuf::new();
+    match v {
+        Value::List(xs) => {
+            b.push_str("[\n");
+            for x in xs { b.push_str(pad + pretty(x, inner, inner, 1) + ",\n"); }
+            b.push_str(" ".repeat(indent) + "]");
+        },
+        Value::Tuple(xs) => {
+            b.push_str("(\n");
+            for x in xs { b.push_str(pad + pretty(x, inner, inner, 1) + ",\n"); }
+            b.push_str(" ".repeat(indent) + ")");
+        },
+        Value::Dict(d) => {
+            b.push_str("{\n");
+            for (k, x) in d.entries() {
+                let key = flat(k) + ": ";
+                b.push_str(pad + key + pretty(x, inner, inner + key.char_count(), 1) + ",\n");
+            }
+            b.push_str(" ".repeat(indent) + "}");
+        },
+        Value::Struct { name, fields } => {
+            if let n: str = name { b.push_str(n + " "); }
+            b.push_str(pretty_fields(fields, indent));
+        },
+        Value::Variant { path, args, named } => {
+            b.push_str(path);
+            if args.is_empty() {
+                b.push_str(" " + pretty_fields(named, indent));
+            } else {
+                b.push_str("(\n");
+                for x in args { b.push_str(pad + pretty(x, inner, inner, 1) + ",\n"); }
+                for (k, x) in named.entries() {
+                    b.push_str(pad + k + ": " + pretty(x, inner, inner + k.char_count() + 2, 1) + ",\n");
+                }
+                b.push_str(" ".repeat(indent) + ")");
+            }
+        },
+        // A scalar (a long string) stays on its line.
+        _ => b.push_str(one),
+    }
+    b.to_str()
+}
+
+fn pretty_fields(fs: OrderedDict<str, Value>, indent: usize) -> str {
+    let inner = indent + 4;
+    let b = StrBuf::new();
+    b.push_str("{\n");
+    for (k, x) in fs.entries() {
+        b.push_str(" ".repeat(inner) + k + ": " + pretty(x, inner, inner + k.char_count() + 2, 1) + ",\n");
+    }
+    b.push_str(" ".repeat(indent) + "}");
+    b.to_str()
+}
+
+/// A float that reads back as the same float: the shortest round-trip
+/// digits, as a plain decimal for exponents -5..16, else `1.5e300`. A
+/// `float` beyond the `f64` range prints at `{:e}` precision (ponytail:
+/// not the shortest round trip). NaN / infinity have no RokON form
+/// (spec 3.9.1 has no literal for them): a panic, like an out-of-range
+/// index — check `is_finite` first when the data may hold them.
+fn float_text(x: float, strict: bool) -> str {
+    if !x.is_finite() {
+        if strict { panic("NaN/infinity has no RokON form"); }
+        if x.is_nan() { return "nan"; }
+        return if x.is_sign_negative() { "-inf" } else { "inf" };
+    }
+    let d = x.to_f64();
+    if !d.is_finite() { return f"{x:e}"; }
+    let e = f"{d:e}";
+    let (mant, exp_text) = e.split_once("e") ?? (e, "0");
+    let exp: i64 = try! exp_text.parse::<i64>();
+    let neg = mant.starts_with("-");
+    let digits = mant.replace("-", "").replace(".", "");
+    let sign = if neg { "-" } else { "" };
+    if exp < -5 || exp > 16 {
+        let m = if mant.contains(".") { mant } else { mant + ".0" };
+        return m + "e" + exp.display();
+    }
+    if exp < 0 {
+        return sign + "0." + "0".repeat((-exp - 1) as usize) + digits;
+    }
+    let point = (exp + 1) as usize;
+    if digits.len() <= point {
+        return sign + digits + "0".repeat(point - digits.len()) + ".0";
+    }
+    sign + digits[:point] + "." + digits[point:]
+}
+
+fn quote_str(s: str) -> str {
+    let b = StrBuf::new();
+    b.push('"');
+    for c in s.chars() {
+        if c == '"' { b.push_str("\\\""); } else { b.push_str(escape(c)); }
+    }
+    b.push('"');
+    b.to_str()
+}
+
+fn quote_char(c: char) -> str {
+    if c == '\'' { return "'\\''"; }
+    "'" + escape(c) + "'"
+}
+
+fn escape(c: char) -> str {
+    if c == '\\' { return "\\\\"; }
+    if c == '\n' { return "\\n"; }
+    if c == '\r' { return "\\r"; }
+    if c == '\t' { return "\\t"; }
+    if c == '\0' { return "\\0"; }
+    if c.is_control() { return f"\\u{{{c as u32:x}}}"; }
+    c.display()
+}

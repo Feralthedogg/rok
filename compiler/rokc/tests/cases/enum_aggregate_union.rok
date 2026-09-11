@@ -32,7 +32,7 @@ fn main() -> i32 {
     let shapes = [Shape::Dot(7), Shape::Line(1, 2i64), Shape::At(Point { x: 2, y: 2 }), Shape::Named("hi"), Shape::Empty];
     for s in shapes {
         let a = area(s);
-        if a < 100i64 && a > 0i64 { rok_print_i32(a as i32); }
+        if a < 100i64 && a > 0i64 { println(f"{a as i32}"); }
     }
     let total = 0i64;
     let i = 0;
@@ -41,6 +41,6 @@ fn main() -> i32 {
         total = total + area(s);
         i = i + 1;
     }
-    rok_print_i32(total as i32);
+    println(f"{total as i32}");
     return 0;
 }

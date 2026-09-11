@@ -1,6 +1,6 @@
 // rok::bare tier — base layer.
 // Owns: Ptr<T>, ConstPtr<T>, transmute, raw allocation, pin, volatile.
-// Depends only on rokr extern "C" symbols.
+// Depends only on the runtime (`extern "rok"` symbols).
 //
 // Importing this crate is a danger signal; user code must `use rok::bare::...`
 // explicitly.

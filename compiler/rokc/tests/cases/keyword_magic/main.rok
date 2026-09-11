@@ -23,9 +23,9 @@ fn twice_handler(x: i32) -> i32 {
 
 fn main() -> i32 {
     guarded(3) |n: i32| {
-        rok_print_str(f"critical {n}");
+        println(f"critical {n}");
     };
-    rok_print_str(f"twice {twice(5)}");
-    rok_print_str(f"thrice {thrice(5)}");
+    println(f"twice {twice(5)}");
+    println(f"thrice {thrice(5)}");
     return 0;
 }

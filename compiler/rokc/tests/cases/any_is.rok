@@ -26,20 +26,20 @@ fn f(v: any) -> i32 {
     return r * 1000;
 }
 
-rok_print_i32(f(41));
-rok_print_i32(f(Sq { s: 4 }));
-rok_print_i32(f(true));
-rok_print_i32(f(1.5));
-rok_print_i32(f(3i8));
+println(f"{f(41)}");
+println(f"{f(Sq { s: 4 })}");
+println(f"{f(true)}");
+println(f"{f(1.5)}");
+println(f"{f(3i8)}");
 let v: any = 41;
 let b = v is i32 && !(v is f64);
-if b { rok_print_i32(1); }
+if b { println(f"{1}"); }
 let s: any Shape = Sq { s: 2 };
-if s is Sq { rok_print_i32(s.s); }
+if s is Sq { println(f"{s.s}"); }
 let o: i32 | none = 5;
-if o is i32 { rok_print_i32(o + 1); }
+if o is i32 { println(f"{o + 1}"); }
 // `is` on a struct field (no narrowing: only a bare local narrows).
 struct Box1 { inner: any; }
 let bx = Box1 { inner: 5 };
-rok_print_i32(if bx.inner is i32 { 5 } else { 0 });
-rok_print_i32(if bx.inner is Sq { 5 } else { 0 });
+println(f"{if bx.inner is i32 { 5 } else { 0 }}");
+println(f"{if bx.inner is Sq { 5 } else { 0 }}");

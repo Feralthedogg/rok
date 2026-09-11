@@ -30,15 +30,16 @@ fn shown<T: Show>(x: T) -> i32 { return T::show(x); }
 
 fn main() -> i32 {
     let b: Box<bool> = Box { v: true };
-    rok_print_i32(Show::show(b));
-    rok_print_i32(Show::show(Meters { m: 7 }));
+    println(f"{Show::show(b)}");
+    println(f"{Show::show(Meters { m: 7 })}");
     let z: i32 = Origin::origin();
-    rok_print_i32(z);
+    println(f"{z}");
     let pair: [i32; 2] = [4, 5];
-    rok_print_i32(Show::show(pair));
-    rok_print_i32(Box::show(Box { v: 1 }) + 2);
-    rok_print_i32(origin_of() + 39);
+    println(f"{Show::show(pair)}");
+    println(f"{Box::show(Box { v: 1 }) + 2}");
+    let o: i32 = origin_of() + 39;
+    println(f"{o}");
     let small: [i32; 2] = [1, 2];
-    rok_print_i32(i32::add(shown(small), 8));
+    println(f"{i32::add(shown(small), 8)}");
     return 0;
 }

@@ -10,9 +10,9 @@
 fn main() -> i32 {
     let x = 10;
     x += 5;
-    rok_print_i32(x);
+    println(f"{x}");
 
     x -= 6;
-    rok_print_i32(x);
+    println(f"{x}");
     return 0;
 }

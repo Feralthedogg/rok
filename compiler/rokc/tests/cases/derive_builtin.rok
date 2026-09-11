@@ -46,27 +46,27 @@ fn name_of(o: Ordering) -> str {
 fn main() -> i32 {
     let p = Point { x: 1, y: 2 };
     let q = p.clone();
-    rok_print_str(f"{p:?}");
-    rok_print_str(f"{p == q} {p != q}");
+    println(f"{p:?}");
+    println(f"{p == q} {p != q}");
     let r = Point { x: 1, y: 3 };
-    rok_print_str(f"{p < r} {p <= q} {r < p}");
-    rok_print_str(f"{name_of(p.cmp(r))} {name_of(r.cmp(p))} {name_of(p.cmp(q))}");
-    rok_print_str(f"{p.hash() == q.hash()}");
+    println(f"{p < r} {p <= q} {r < p}");
+    println(f"{name_of(p.cmp(r))} {name_of(r.cmp(p))} {name_of(p.cmp(q))}");
+    println(f"{p.hash() == q.hash()}");
 
     let shapes = [Shape::Circle { r: 2 }, Shape::Rect(3, 4), Shape::Empty];
-    rok_print_str(f"{shapes[0]:?} {shapes[1]:?} {shapes[2]:?}");
-    rok_print_str(f"{shapes[1] == Shape::Rect(3, 4)} {shapes[1] == Shape::Rect(3, 5)}");
-    rok_print_str(f"{shapes[0] < shapes[1]} {Shape::Rect(3, 4) < Shape::Rect(3, 5)}");
-    rok_print_str(name_of(Shape::Empty.cmp(Shape::Rect(9, 9))));
-    rok_print_str(f"{shapes[1].clone().hash() == shapes[1].hash()}");
+    println(f"{shapes[0]:?} {shapes[1]:?} {shapes[2]:?}");
+    println(f"{shapes[1] == Shape::Rect(3, 4)} {shapes[1] == Shape::Rect(3, 5)}");
+    println(f"{shapes[0] < shapes[1]} {Shape::Rect(3, 4) < Shape::Rect(3, 5)}");
+    println(name_of(Shape::Empty.cmp(Shape::Rect(9, 9))));
+    println(f"{shapes[1].clone().hash() == shapes[1].hash()}");
 
     let w = W { v: 9 };
-    rok_print_str(f"{w.clone():?}");
+    println(f"{w.clone():?}");
 
     let b = Bag { items: [1, 2] };
     let c = b.clone();
     c.items.push(3);
-    rok_print_str(f"{b.items.len() == 2} {c.items.len()}".replace("true", "[1, 2]").replace("3", "[1, 2, 3]"));
-    rok_print_str(f"{Name { s: "a\nb" }:?}");
+    println(f"{b.items.len() == 2} {c.items.len()}".replace("true", "[1, 2]").replace("3", "[1, 2, 3]"));
+    println(f"{Name { s: "a\nb" }:?}");
     return 0;
 }

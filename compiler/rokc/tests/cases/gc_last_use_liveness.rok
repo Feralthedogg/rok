@@ -30,12 +30,12 @@ fn main() -> i32 {
     let v = t.val();
     // `t` is dead from here on: nothing of it is retained.
     if live() != base { return 1; }
-    rok_print_i64(v);
+    println(f"{v}");
 
     // A temporary (the `mk` result) dies with the call that consumes it.
     let w = mk(3, 4).val();
     if live() != base { return 2; }
-    rok_print_i64(w);
+    println(f"{w}");
 
     // Used after the loop: live through every iteration's collection.
     let kept: any Val = mk(1, 2);
@@ -44,16 +44,16 @@ fn main() -> i32 {
         if live() - base != 32usize { return 3; }
         i += 1;
     }
-    rok_print_i64(kept.val());
+    println(f"{kept.val()}");
     if live() != base { return 4; }
 
     // Used on one branch only: dead on entry to the other.
     let maybe: any Val = mk(5, 5);
     if v > 100 {
-        rok_print_i64(maybe.val());
+        println(f"{maybe.val()}");
     } else {
         if live() != base { return 5; }
     }
-    rok_print_str("ok");
+    println("ok");
     return 0;
 }

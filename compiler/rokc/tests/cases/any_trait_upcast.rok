@@ -15,6 +15,6 @@ impl Solid for Sq { fn vol(self) -> i32 { return self.s * 10; } }
 fn name(n: any Named) -> i32 { return n.id(); }
 let s: any Solid = Sq { s: 2 };
 let sh: any Shape = s;
-rok_print_i32(sh.area() / 2);
-rok_print_i32(s.vol() * 2 / 2);
-rok_print_i32(name(s));
+println(f"{sh.area() / 2}");
+println(f"{s.vol() * 2 / 2}");
+println(f"{name(s)}");

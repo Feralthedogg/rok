@@ -3,6 +3,7 @@
 
 #![no_std]
 
+pub mod gc_abi;
 pub mod object_header;
 pub mod tls;
 
@@ -15,7 +16,7 @@ pub unsafe fn write_stderr(mut msg: *const u8, mut len: usize) {
         // SAFETY: caller guarantees `msg..msg+len` is readable.
         let n = unsafe { libc::write(2, msg.cast(), len) };
         if n <= 0 {
-            break; // ponytail: no EINTR retry; stderr diagnostics are best-effort.
+            break; // No EINTR retry: stderr diagnostics are best-effort.
         }
         let n = n as usize;
         // SAFETY: `n <= len`, so the result stays inside the caller's buffer.

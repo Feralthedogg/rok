@@ -31,15 +31,15 @@ fn main() -> i32 {
     }
     let sum = 0;
     for h in hs { sum += try! h.join(); }
-    rok_print_i32(sum);
-    rok_print_i32(n.load());
+    println(f"{sum}");
+    println(f"{n.load()}");
     thread::sleep(Duration::ms(1));
     thread::yield_now();
-    let u = thread::spawn(|| { rok_print_str("unit thread"); });
+    let u = thread::spawn(|| { println("unit thread"); });
     try! u.join();
     let b = try! thread::Builder::new().name("w").stack_size(1048576).spawn(|| 5);
-    rok_print_i32(try! b.join());
-    match b.thread().name() { s: str => rok_print_str(s), none => {}, }
-    if b.thread().id() != thread::current().id() { rok_print_str("ids differ"); }
+    println(f"{try! b.join()}");
+    match b.thread().name() { s: str => println(s), none => {}, }
+    if b.thread().id() != thread::current().id() { println("ids differ"); }
     return 0;
 }

@@ -33,10 +33,10 @@ fn g(x: i32) -> i32 {
 }
 
 fn main() -> i32 {
-    rok_print_i32(f(1));
-    rok_print_i32(f(2));
-    rok_print_i32(f(3));
-    rok_print_i32(f(4));
-    rok_print_i32(g(3));
+    println(f"{f(1)}");
+    println(f"{f(2)}");
+    println(f"{f(3)}");
+    println(f"{f(4)}");
+    println(f"{g(3)}");
     return 0;
 }

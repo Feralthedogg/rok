@@ -24,12 +24,12 @@ fn main() -> i32 {
     let r1 = a?.n;
     let r2 = b?.n;
     match r1 {
-        v: i32 => rok_print_i32(v),
-        none => rok_print_str("(none)"),
+        v: i32 => println(f"{v}"),
+        none => println("(none)"),
     }
     match r2 {
-        v: i32 => rok_print_i32(v),
-        none => rok_print_str("none"),
+        v: i32 => println(f"{v}"),
+        none => println("none"),
     }
     return 0;
 }

@@ -2,10 +2,9 @@
 // expect-stdout:
 // truefalse
 
-// `rok_print_bool` is auto-injected. ABI takes i32; callers cast bool
-// values with `as i32`. The cast is now a real arith.extui (i1 → i32).
+// `print` has no trailing newline; a bool formats as `true` / `false`.
 fn main() -> i32 {
-    rok_print_bool(true as i32);
-    rok_print_bool(false as i32);
+    print(f"{true}");
+    print(f"{false}");
     return 0;
 }

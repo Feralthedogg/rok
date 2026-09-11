@@ -1,10 +1,9 @@
 // expect-exit: 0
 // expect-stdout: 42
 
-// `rok_print_i32` is auto-injected by the driver — no extern block
-// needed. Same goes for `rok_print_i64` and `rok_print_str`.
+// Integer formatting through an f-string.
 fn main() -> i32 {
     let answer = 6i32 * 7i32;
-    rok_print_i32(answer);
+    println(f"{answer}");
     return 0i32;
 }

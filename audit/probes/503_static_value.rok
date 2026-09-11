@@ -8,6 +8,6 @@
 static SHARED: i32 = 7;
 
 fn main() -> i32 {
-    rok_print_i32(SHARED);
+    println(f"{SHARED}");
     return 0;
 }

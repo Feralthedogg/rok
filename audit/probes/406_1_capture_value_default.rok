@@ -12,6 +12,6 @@ fn main() -> i32 {
     let f = || { count + 1 };
     let _ = count;  // count 사용 시도
     let r = f();
-    rok_print_i32(r);
+    println(f"{r}");
     return 0;
 }

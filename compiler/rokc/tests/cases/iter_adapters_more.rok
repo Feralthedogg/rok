@@ -21,46 +21,46 @@
 fn main() -> i32 {
     let xs: List<i32> = [4, 1, 9, 2, 7];
     let none_left: List<i32> = [];
-    rok_print_i32(none_left.iter().sum());
+    println(f"{none_left.iter().sum()}");
     let small: List<i32> = [1, 2, 3];
-    rok_print_i32(small.iter().sum());
-    rok_print_i32(xs.iter().take(2).product() + 20);
+    println(f"{small.iter().sum()}");
+    println(f"{xs.iter().take(2).product() + 20}");
     let lim = 8;
-    rok_print_i32(if xs.iter().any(|x| x > lim) && !xs.iter().all(|x| x > 1) { 1 } else { 0 });
+    println(f"{if xs.iter().any(|x| x > lim) && !xs.iter().all(|x| x > 1) { 1 } else { 0 }}");
     match xs.iter().find(|x| x > 4) {
-        v: i32 => rok_print_i32(if v == 9 { 1 } else { 0 }),
-        none => rok_print_i32(-1),
+        v: i32 => println(f"{if v == 9 { 1 } else { 0 }}"),
+        none => println(f"{-1}"),
     }
     match xs.iter().position(|x| x == 7) {
-        p: usize => rok_print_i32(p as i32),
-        none => rok_print_i32(-1),
+        p: usize => println(f"{p as i32}"),
+        none => println(f"{-1}"),
     }
     match xs.iter().min() {
-        m: i32 => rok_print_i32(m + 1),
-        none => rok_print_i32(-1),
+        m: i32 => println(f"{m + 1}"),
+        none => println(f"{-1}"),
     }
     match xs.iter().skip(1).min() {
-        m: i32 => rok_print_i32(m),
-        none => rok_print_i32(-1),
+        m: i32 => println(f"{m}"),
+        none => println(f"{-1}"),
     }
     match xs.iter().max() {
-        m: i32 => rok_print_i32(m),
-        none => rok_print_i32(-1),
+        m: i32 => println(f"{m}"),
+        none => println(f"{-1}"),
     }
     match xs.iter().last() {
-        m: i32 => rok_print_i32(m),
-        none => rok_print_i32(-1),
+        m: i32 => println(f"{m}"),
+        none => println(f"{-1}"),
     }
     let it = xs.iter();
     match it.nth(1) {
-        m: i32 => rok_print_i32(m + 2),
-        none => rok_print_i32(-1),
+        m: i32 => println(f"{m + 2}"),
+        none => println(f"{-1}"),
     }
     let weighted = 0;
     for (i, x) in xs.iter().enumerate() {
         if i < 2 { weighted = weighted + x * 2; }
     }
-    rok_print_i32(weighted + 2);
-    rok_print_i32(xs.iter().chain(small.iter()).skip(4).sum() + 8);
+    println(f"{weighted + 2}");
+    println(f"{xs.iter().chain(small.iter()).skip(4).sum() + 8}");
     return 0;
 }

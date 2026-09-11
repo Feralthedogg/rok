@@ -7,25 +7,25 @@
 
 // `rok_str_len` / `rok_str_eq` give rok code basic null-terminated
 // string introspection without a real `String` / `str` story.
-extern "C" {
+extern "rok" {
     fn rok_str_len(s: str) -> usize;
     fn rok_str_eq(a: str, b: str) -> i32;
 }
 
 fn main() -> i32 {
-    rok_print_i64(unsafe { rok_str_len("hello") } as i64);
-    rok_print_i64(unsafe { rok_str_len("") } as i64);
+    println(f"{unsafe { rok_str_len("hello") } as i64}");
+    println(f"{unsafe { rok_str_len("") } as i64}");
 
     if unsafe { rok_str_eq("foo", "foo") } != 0 {
-        rok_print_str("match");
+        println("match");
     } else {
-        rok_print_str("nope");
+        println("nope");
     }
 
     if unsafe { rok_str_eq("foo", "bar") } != 0 {
-        rok_print_str("match");
+        println("match");
     } else {
-        rok_print_str("nomatch");
+        println("nomatch");
     }
 
     return 0;

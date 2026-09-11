@@ -27,13 +27,13 @@ impl Plain {
 
 let b: Box<i32> = Box { v: 5 };
 let c: Box<bool> = Box { v: true };
-rok_print_i32(b.get());
-if c.get() { rok_print_i32(2); }
+println(f"{b.get()}");
+if c.get() { println(f"{2}"); }
 let p = b.pair(c);
-rok_print_i32(p.a);
-if p.b.get() { rok_print_i32(3); }
-rok_print_i32(Box::get(b));
+println(f"{p.a}");
+if p.b.get() { println(f"{3}"); }
+println(f"{Box::get(b)}");
 let n = Box::new(7);
-rok_print_i32(n.twice());
+println(f"{n.twice()}");
 let pl = Plain { n: 1 };
-rok_print_i32(pl.with(8));
+println(f"{pl.with(8)}");

@@ -19,9 +19,9 @@ fn main() -> i32 {
     let op = Op { f: mul };
     let g = op.f;
     println(f"{mul(3, 4)} {g(3, 4)}");
-    rok_print_f64(apply(halve, 7.0));
+    println(f"{apply(halve, 7.0)}");
     let k = 10;
     let add_k = |x: i32| x + k;
-    rok_print_i32(add_k(7));
+    println(f"{add_k(7)}");
     return 0;
 }

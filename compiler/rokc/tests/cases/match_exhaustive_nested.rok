@@ -35,8 +35,8 @@ fn area(s: Shape) -> i32 {
 }
 
 fn main() -> i32 {
-    rok_print_i32(tup(true, true));
-    rok_print_i32(st(P { a: true, b: false }));
-    rok_print_i32(area(Shape::Box(3, 4)));
+    println(f"{tup(true, true)}");
+    println(f"{st(P { a: true, b: false })}");
+    println(f"{area(Shape::Box(3, 4))}");
     return 0;
 }

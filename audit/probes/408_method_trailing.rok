@@ -16,6 +16,6 @@ impl V {
 fn main() -> i32 {
     let v = V { n: 6 };
     let r = v.apply() |x| { x * 2 };
-    rok_print_i32(r);
+    println(f"{r}");
     return 0;
 }

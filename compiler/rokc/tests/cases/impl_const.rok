@@ -27,10 +27,10 @@ mod shapes {
 }
 
 fn main() -> i32 {
-    rok_print_i32(Grid::SIDE);
-    rok_print_i32(Grid::double());
-    rok_print_i32(Grid::CELLS);
-    rok_print_i32(shapes::Sq::SIDES);
-    rok_print_i32(Grid::quad());
+    println(f"{Grid::SIDE}");
+    println(f"{Grid::double()}");
+    println(f"{Grid::CELLS}");
+    println(f"{shapes::Sq::SIDES}");
+    println(f"{Grid::quad()}");
     return 0;
 }

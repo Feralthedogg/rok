@@ -9,7 +9,7 @@ use rok::std::fs;
 use rok::std::fs::Metadata;
 use rok::std::io::IoError;
 
-extern "C" {
+extern "rok" {
     fn rok_os_realpath(path: str, err: GcBuf<i32>) -> str;
     fn rok_str_utf8_error(s: str) -> isize;
     fn rok_str_byte(s: str, i: usize) -> u8;

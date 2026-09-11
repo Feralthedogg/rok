@@ -36,6 +36,6 @@ struct Point { x: i32; y: i32; }
 
 fn main() -> i32 {
     let p = Point { x: 3, y: 4 };
-    rok_print_str(f"{p.my_hash()}");
+    println(f"{p.my_hash()}");
     return 0;
 }

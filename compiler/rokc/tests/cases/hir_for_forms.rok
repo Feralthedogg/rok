@@ -12,27 +12,27 @@
 fn mk() -> [i32; 3] { return [1, 2, 3]; }
 
 fn bound(n: i32) -> i32 {
-    rok_print_i32(n);
+    println(f"{n}");
     return n;
 }
 
 fn main() -> i32 {
     let t = 0;
     for _ in 0..4 { t = t + 1; }
-    rok_print_i32(t);
+    println(f"{t}");
 
     let s = 0;
     for v in mk() { s = s + v; }
-    rok_print_i32(s);
+    println(f"{s}");
 
     let pairs = [(1, 2), (3, 1)];
     let w = 0;
     for (a, b) in pairs { w = w + a + b; }
-    rok_print_i32(w);
+    println(f"{w}");
 
     let n = 0;
     for i in 0u8..=255u8 { n = n + 1; }
-    rok_print_i32(n);
+    println(f"{n}");
 
     let k = 0;
     for i in 0..bound(3) { k = k + 1; }

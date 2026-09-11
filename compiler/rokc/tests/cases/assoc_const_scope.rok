@@ -35,12 +35,12 @@ use shapes::Code;
 fn code<T: Code>(x: T) -> i32 { return T::CODE; }
 
 fn main() -> i32 {
-    rok_print_i32(Box::<i32>::BITS);
-    rok_print_i32(Box::<f64>::BITS);
-    rok_print_i32(Twice::<Box<f64>>::BITS);
-    rok_print_i32(shapes::Tag::CODE);
-    rok_print_i32(code(shapes::Tag { x: 1 }));
+    println(f"{Box::<i32>::BITS}");
+    println(f"{Box::<f64>::BITS}");
+    println(f"{Twice::<Box<f64>>::BITS}");
+    println(f"{shapes::Tag::CODE}");
+    println(f"{code(shapes::Tag { x: 1 })}");
     let SECRET = 6;
-    rok_print_i32(SECRET + shapes::Tag::CODE);
+    println(f"{SECRET + shapes::Tag::CODE}");
     return 0;
 }

@@ -34,7 +34,8 @@ commands:
                          functions; prints ns/iter (+/- deviation)
   check [path | -]       diagnose only, no native build (`-`: source on stdin)
   repl [--replay] [--package <path>]
-                         interactive session (:type <expr>, :reset, :quit);
+                         interactive session on LLVM's ORC JIT (needs
+                         libLLVM; :type <expr>, :reset, :quit);
                          --replay reruns every cell for each new one;
                          --package loads a library package and `use`s it
   lsp                    language server on stdio (`rok lsp` / `rokls` run it)
@@ -138,6 +139,8 @@ struct Args {
     name: Option<String>,
     target_dir: Option<PathBuf>,
     cfg: Vec<String>,
+    /// `--target`: an LLVM triple; `None` is the host.
+    target: Option<String>,
     opts: BuildOptions,
     run_args: Vec<String>,
     verbose: u8,
@@ -227,7 +230,7 @@ fn parse_args(raw: Vec<String>) -> Args {
             "--extern" => a.externs.push(parse_extern(&value(&name, inline, &mut it))),
             "--name" => a.name = Some(value(&name, inline, &mut it)),
             "--target-dir" => a.target_dir = Some(value(&name, inline, &mut it).into()),
-            "--target" => a.opts.target = Some(value(&name, inline, &mut it)),
+            "--target" => a.target = Some(value(&name, inline, &mut it)),
             "--rokr" => a.opts.rokr = value(&name, inline, &mut it),
             "--load-mlir-plugin" | "--load-mlir-pass-plugin" => {
                 let v = value(&name, inline, &mut it);
@@ -604,6 +607,7 @@ fn compile(a: &Args, pkg: &Package, mode: Mode) -> (CompileResult, Instant) {
         session.add_extern(n.clone(), p.clone());
     }
     session.set_anonymous(pkg.anonymous);
+    session.set_target(a.target.as_deref());
     // A library's `build` is a prebuilt library: `lib<name>.a` + RHIR.
     if pkg.lib && matches!(a.cmd.as_str(), "build" | "emit") {
         session.set_lib_name(Some(lib_name(a, pkg)));
@@ -676,7 +680,7 @@ fn fail_on<T>(r: Result<T, rokc_interface::RokDiagnostic>) -> T {
 /// profile `release` at `-O2` and above or `-Os`, else `debug`.
 fn out_dir(a: &Args, pkg: &Package) -> PathBuf {
     let mut dir = a.target_dir.clone().unwrap_or_else(|| pkg.target_dir());
-    if let Some(t) = &a.opts.target {
+    if let Some(t) = &a.target {
         dir.push(t);
     }
     let release = matches!(a.opts.opt_level.as_str(), "2" | "3" | "s");

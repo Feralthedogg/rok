@@ -3,7 +3,7 @@
 // hi
 // hi
 
-fn a() -> i32 { rok_print_str("hi"); return 0; }
-fn b() -> i32 { rok_print_str("hi"); return 0; }
+fn a() -> i32 { println("hi"); return 0; }
+fn b() -> i32 { println("hi"); return 0; }
 
 fn main() -> i32 { a(); b(); return 0; }

@@ -9,9 +9,9 @@
 // `decode_str_escapes` (HIR) translates `\n` `\t` `\r` `\0` `\\` `\"` `\'`
 // `\xHH`. Raw strings (`r"..."`) skip the decode.
 fn main() -> i32 {
-    rok_print_str("hello\nworld");
-    rok_print_str("\ttab");
-    rok_print_str("quote: \"x\"");
-    rok_print_str("backslash: \\");
+    println("hello\nworld");
+    println("\ttab");
+    println("quote: \"x\"");
+    println("backslash: \\");
     return 0;
 }

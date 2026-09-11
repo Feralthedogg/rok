@@ -10,6 +10,6 @@ struct NonZero(i32);
 
 fn main() -> i32 {
     let n = NonZero(5);
-    rok_print_i32(n.0);
+    println(f"{n.0}");
     return 0;
 }

@@ -1,8 +1,5 @@
-//! HIR → MIR lowering.
-//!
-//! Builds basic blocks with SSA-style locals. The current slice handles
-//! straight-line bodies (no branching); control-flow constructs (if /
-//! match / loop) extend this incrementally.
+//! HIR → MIR lowering: basic blocks over locals, block parameters at
+//! joins.
 
 use std::collections::HashMap;
 
@@ -12,26 +9,26 @@ use rokc_hir::{
 use rokc_ir_common::PrimTy as IrPrimTy;
 use rokc_ir_common::{BlockId, ConstVal, FunctionId, LocalId, PrimOp, PrimTy};
 
-use crate::ty::{
-    code_ty, enum_payload_ty, fat_fn, has_gc_ref, is_c_fn_niche, lower_ty, lower_ty_in, sum_tag,
-};
+use rokc_ir_common::{Abi, FnFacts, Linkage};
+
+use crate::ty::{code_ty, enum_payload_ty, fat_fn, is_c_fn_niche, lower_ty, sum_tag};
 use crate::{
     BasicBlock, LocalDecl, MirFunction, MirModule, MirStaticDef, MirTy, Operand, RValue, Statement,
-    Terminator,
+    Target, Terminator,
 };
 
 #[must_use]
-pub fn lower(module: &HirModule) -> MirModule {
+pub fn lower(module: &HirModule, target: &Target) -> MirModule {
     let mut ret_tys: HashMap<FunctionId, MirTy> = HashMap::new();
     for f in &module.functions {
-        ret_tys.insert(f.id, lower_ty_in(&f.ret_ty, module));
+        ret_tys.insert(f.id, lower_ty(&f.ret_ty, module, target));
     }
     let statics: Vec<MirStaticDef> = module
         .statics
         .iter()
         .map(|s| MirStaticDef {
             name: s.name.clone(),
-            ty: lower_ty_in(&s.ty, module),
+            ty: lower_ty(&s.ty, module, target),
             init: s.init.clone(),
             is_mut: s.is_mut,
             is_extern: s.is_extern,
@@ -50,21 +47,17 @@ pub fn lower(module: &HirModule) -> MirModule {
                 .max()
                 .unwrap_or(0),
         ),
-        externs: module
+        c_externs: module
             .functions
             .iter()
-            .filter(|f| {
-                f.body.is_none()
-                    && !rokc_ir_common::takes_rok_fn_values(&f.name)
-                    && !module.prebuilt.contains(&f.id)
-            })
+            .filter(|f| f.facts.linkage == Linkage::Extern && matches!(f.facts.abi, Abi::C { .. }))
             .map(|f| f.id)
             .collect(),
     };
     let mut functions: Vec<MirFunction> = module
         .functions
         .iter()
-        .map(|f| lower_fn(f, module, &ret_tys, &fnv))
+        .map(|f| lower_fn(f, module, target, &ret_tys, &fnv))
         .collect();
     // Coroutine bodies → resume functions + constructors (spec 708).
     for (i, hf) in module.functions.iter().enumerate() {
@@ -82,20 +75,12 @@ pub fn lower(module: &HirModule) -> MirModule {
     }
     finish_fn_values(&mut functions, &fnv);
     functions.retain(|f| !module.unlowered.contains(&f.id));
-    // Lazy static initializers are called from codegen's access checks.
-    let roots: Vec<FunctionId> = module
-        .exports
-        .iter()
-        .map(|(id, _)| *id)
-        .chain(statics.iter().filter_map(|s| s.init_fn))
-        .collect();
-    prune_unreachable(&mut functions, &roots);
+    if let Some(roots) = &module.roots {
+        retain_reachable(&mut functions, roots.clone());
+    }
     MirModule {
         functions,
         statics,
-        exports: module.exports.clone(),
-        c_variadic: module.c_variadic.clone(),
-        c_defs: module.c_defs.clone(),
         struct_names: module
             .structs
             .iter()
@@ -104,11 +89,8 @@ pub fn lower(module: &HirModule) -> MirModule {
                 (s.id.0, (s.name.clone(), fields))
             })
             .collect(),
-        pkg_hashes: Vec::new(),
-        link: crate::Link {
-            prebuilt_fns: module.prebuilt.clone(),
-            ..crate::Link::default()
-        },
+        target: target.clone(),
+        link: crate::Link::default(),
     }
 }
 
@@ -123,8 +105,8 @@ struct FnValues {
     next_id: std::cell::Cell<u32>,
     /// Coroutine body → its constructor (`coro::transform`).
     coro_ctors: std::cell::RefCell<std::collections::BTreeMap<FunctionId, FunctionId>>,
-    /// `extern` functions (but `rok_thread_spawn`): their `fn` parameters stay thin C pointers.
-    externs: std::collections::HashSet<FunctionId>,
+    /// C `extern` declarations: their `fn` parameters are bare C pointers.
+    c_externs: std::collections::HashSet<FunctionId>,
 }
 
 impl FnValues {
@@ -215,43 +197,10 @@ fn finish_fn_values(functions: &mut Vec<MirFunction>, fnv: &FnValues) {
             param_tys,
             ret_ty: f.ret_ty.clone(),
             span: f.span,
+            facts: FnFacts::default(),
         };
         functions.push(w);
     }
-}
-
-/// Drop functions `main` can't reach (direct calls and `fn` values).
-/// No `main` keeps everything (a prebuilt library prunes with
-/// `prune_library` once its package is known). Every defined function
-/// gets a mangled symbol, so nothing else is called from outside by
-/// name.
-fn prune_unreachable(functions: &mut Vec<MirFunction>, exports: &[FunctionId]) {
-    // Roots: `main` and `#[export_name]` items (spec 902 9.2.8).
-    let Some(main) = functions.iter().find(|f| f.name == "main").map(|f| f.id) else {
-        return;
-    };
-    let mut roots = vec![main];
-    roots.extend_from_slice(exports);
-    retain_reachable(functions, roots);
-}
-
-/// Drop what a prebuilt library of package `lib` cannot reach (9.2.8).
-///
-/// Its package's functions are all roots (users call them, and the bodies RHIR keeps
-/// call the rest), with the exports, the lazy static initializers and
-/// the `any` dispatchers (`__any_*`, weak in the library); the library
-/// code and instances only they reach are kept.
-pub fn prune_library(m: &mut MirModule, lib: &str) {
-    let owned = |n: &str| n.strip_prefix(lib).is_some_and(|r| r.starts_with("::"));
-    let roots = m
-        .functions
-        .iter()
-        .filter(|f| owned(&f.name) || f.name.starts_with("__any_"))
-        .map(|f| f.id)
-        .chain(m.exports.iter().map(|(id, _)| *id))
-        .chain(m.statics.iter().filter_map(|s| s.init_fn))
-        .collect();
-    retain_reachable(&mut m.functions, roots);
 }
 
 /// Keep the functions `roots` reach through calls and `fn` values.
@@ -286,17 +235,18 @@ fn retain_reachable(functions: &mut Vec<MirFunction>, roots: Vec<FunctionId>) {
 fn lower_fn(
     f: &HirFunction,
     module: &HirModule,
+    target: &Target,
     ret_tys: &HashMap<FunctionId, MirTy>,
     fnv: &FnValues,
 ) -> MirFunction {
-    let mut builder = FnBuilder::new(module, ret_tys, fnv);
+    let mut builder = FnBuilder::new(module, target, ret_tys, fnv);
 
     // Mirror HIR locals so HIR LocalId == MIR LocalId.
     for l in &f.locals {
         builder.locals.push(LocalDecl {
             id: l.id,
             name: l.name.clone(),
-            ty: lower_ty_in(&l.ty, module),
+            ty: builder.ty(&l.ty),
         });
     }
 
@@ -305,12 +255,12 @@ fn lower_fn(
     let param_tys: Vec<MirTy> = f
         .params
         .iter()
-        .map(|p| match (&p.ty, fnv.externs.contains(&f.id)) {
+        .map(|p| match (&p.ty, fnv.c_externs.contains(&f.id)) {
             (HirTy::Fn(args, ret, _), true) => MirTy::Fn(
-                args.iter().map(|a| lower_ty_in(a, module)).collect(),
-                Box::new(lower_ty_in(ret, module)),
+                args.iter().map(|a| builder.ty(a)).collect(),
+                Box::new(builder.ty(ret)),
             ),
-            (t, _) => lower_ty_in(t, module),
+            (t, _) => builder.ty(t),
         })
         .collect();
     let params: Vec<LocalId> = f.params.iter().map(|p| p.local).collect();
@@ -320,7 +270,7 @@ fn lower_fn(
         builder.current = entry;
         let returned = builder.lower_block(f.body.as_ref().unwrap(), true);
         if !returned {
-            let term = if matches!(lower_ty_in(&f.ret_ty, module), MirTy::Unit) {
+            let term = if matches!(builder.ty(&f.ret_ty), MirTy::Unit) {
                 Terminator::Return(None)
             } else {
                 Terminator::Unreachable
@@ -338,8 +288,9 @@ fn lower_fn(
         locals: builder.locals,
         blocks: reachable_blocks(builder.blocks),
         param_tys,
-        ret_ty: lower_ty_in(&f.ret_ty, module),
+        ret_ty: lower_ty(&f.ret_ty, module, target),
         span: f.span,
+        facts: f.facts.clone(),
     }
 }
 
@@ -386,6 +337,7 @@ struct FnBuilder<'a> {
     blocks: Vec<BasicBlock>,
     current: BlockId,
     module: &'a HirModule,
+    target: &'a Target,
     fn_ret_tys: &'a HashMap<FunctionId, MirTy>,
     fnv: &'a FnValues,
     loop_stack: Vec<LoopFrame>,
@@ -401,6 +353,7 @@ struct FnBuilder<'a> {
 impl<'a> FnBuilder<'a> {
     fn new(
         module: &'a HirModule,
+        target: &'a Target,
         fn_ret_tys: &'a HashMap<FunctionId, MirTy>,
         fnv: &'a FnValues,
     ) -> Self {
@@ -409,6 +362,7 @@ impl<'a> FnBuilder<'a> {
             blocks: Vec::new(),
             current: BlockId(0),
             module,
+            target,
             fn_ret_tys,
             fnv,
             loop_stack: Vec::new(),
@@ -416,6 +370,10 @@ impl<'a> FnBuilder<'a> {
             scope: crate::Scope::default(),
             scopes: 0,
         }
+    }
+
+    fn ty(&self, t: &HirTy) -> MirTy {
+        lower_ty(t, self.module, self.target)
     }
 
     fn new_block(&mut self) -> BlockId {
@@ -478,7 +436,7 @@ impl<'a> FnBuilder<'a> {
             let op = self.lower_expr_to_operand(t);
             // Unit-typed trailing — emit a no-args return so void-fn
             // signatures stay well-typed.
-            let term = if matches!(lower_ty_in(&t.ty, self.module), MirTy::Unit) {
+            let term = if matches!(self.ty(&t.ty), MirTy::Unit) {
                 Terminator::Return(None)
             } else {
                 Terminator::Return(Some(op))
@@ -529,7 +487,7 @@ impl<'a> FnBuilder<'a> {
         let temps = (first_temp..self.locals.len()).map(|i| self.locals[i].id);
         let mut dead: Vec<LocalId> = lets
             .chain(temps)
-            .filter(|l| has_gc_ref(&self.locals[l.0 as usize].ty))
+            .filter(|l| self.target.has_gc_ref(&self.locals[l.0 as usize].ty))
             .collect();
         dead.dedup();
         let escaping = match &value {
@@ -589,7 +547,7 @@ impl<'a> FnBuilder<'a> {
                 // routing them through a temporary would copy a memref
                 // by value, which is ill-typed.
                 if let HirExprKind::ArrayInit { elem_ty, elements } = &init.kind {
-                    let mir_elem_ty = lower_ty_in(elem_ty, self.module);
+                    let mir_elem_ty = self.ty(elem_ty);
                     let elem_ops: Vec<Operand> = elements
                         .iter()
                         .map(|e| self.lower_expr_to_operand(e))
@@ -626,7 +584,7 @@ impl<'a> FnBuilder<'a> {
             } => {
                 let idx = self.lower_expr_to_operand(index);
                 let val = self.lower_expr_to_operand(value);
-                let mir_elem_ty = lower_ty_in(elem_ty, self.module);
+                let mir_elem_ty = self.ty(elem_ty);
                 let len = match &self.locals[array_local.0 as usize].ty {
                     MirTy::Array(_, n) => *n,
                     _ => 0,
@@ -690,7 +648,7 @@ impl<'a> FnBuilder<'a> {
                 true
             }
             HirStmt::StaticAssign { name, value } => {
-                let mir_ty = lower_ty_in(&value.ty, self.module);
+                let mir_ty = self.ty(&value.ty);
                 let value_op = self.lower_expr_to_operand(value);
                 self.push_stmt(Statement::StaticStore {
                     name: name.clone(),
@@ -716,7 +674,7 @@ impl<'a> FnBuilder<'a> {
     fn lower_expr_to_rvalue(&mut self, e: &HirExpr) -> RValue {
         match &e.kind {
             HirExprKind::PrimBinOp { op, lhs, rhs } => {
-                let op_ty = lower_ty(&lhs.ty);
+                let op_ty = self.ty(&lhs.ty);
                 let lhs_op = self.lower_expr_to_operand(lhs);
                 let rhs_op = self.lower_expr_to_operand(rhs);
                 RValue::BinOp {
@@ -727,7 +685,7 @@ impl<'a> FnBuilder<'a> {
                 }
             }
             HirExprKind::PrimUnaryOp { op, operand } => {
-                let op_ty = lower_ty(&operand.ty);
+                let op_ty = self.ty(&operand.ty);
                 let v = self.lower_expr_to_operand(operand);
                 RValue::UnaryOp {
                     op: *op,
@@ -736,7 +694,7 @@ impl<'a> FnBuilder<'a> {
                 }
             }
             HirExprKind::Call { callee, args } => {
-                let c_callback = self.fnv.externs.contains(callee);
+                let c_callback = self.fnv.c_externs.contains(callee);
                 let mut arg_ops = Vec::with_capacity(args.len());
                 for a in args {
                     // A named fn passed to C: its own (thin) address.
@@ -744,8 +702,8 @@ impl<'a> FnBuilder<'a> {
                         (c_callback, &a.kind, &a.ty)
                     {
                         let fn_ty = MirTy::Fn(
-                            ps.iter().map(|t| lower_ty_in(t, self.module)).collect(),
-                            Box::new(lower_ty_in(r, self.module)),
+                            ps.iter().map(|t| self.ty(t)).collect(),
+                            Box::new(self.ty(r)),
                         );
                         let l = self.fresh_local(fn_ty.clone());
                         self.push_stmt(Statement::Assign {
@@ -768,11 +726,11 @@ impl<'a> FnBuilder<'a> {
             // (codegen picks the C entry).
             HirExprKind::FnRef(id) if e.ty.is_c_fn() => RValue::FnAddr {
                 callee: *id,
-                fn_ty: lower_ty_in(&e.ty, self.module),
+                fn_ty: self.ty(&e.ty),
             },
             // A named fn as a value: `{wrapper, null}`.
             HirExprKind::FnRef(id) => {
-                let MirTy::Tuple(parts) = lower_ty_in(&e.ty, self.module) else {
+                let MirTy::Tuple(parts) = self.ty(&e.ty) else {
                     return RValue::Use(Operand::Const(ConstVal::Unit));
                 };
                 let wrapper = *self
@@ -815,12 +773,9 @@ impl<'a> FnBuilder<'a> {
                     return RValue::CallIndirect {
                         callee: callee_op,
                         args: args.iter().map(|a| self.lower_expr_to_operand(a)).collect(),
-                        arg_tys: args
-                            .iter()
-                            .map(|a| lower_ty_in(&a.ty, self.module))
-                            .collect(),
-                        ret_ty: lower_ty_in(ret_ty, self.module),
-                        c_abi: true,
+                        arg_tys: args.iter().map(|a| self.ty(&a.ty)).collect(),
+                        ret_ty: self.ty(ret_ty),
+                        abi: Abi::C { variadic: false },
                     };
                 }
                 self.call_fn_value(callee_op, args, ret_ty)
@@ -833,8 +788,8 @@ impl<'a> FnBuilder<'a> {
                 let source = self.lower_expr_to_operand(operand);
                 RValue::Cast {
                     source,
-                    from_ty: lower_ty_in(from_ty, self.module),
-                    to_ty: lower_ty_in(to_ty, self.module),
+                    from_ty: self.ty(from_ty),
+                    to_ty: self.ty(to_ty),
                 }
             }
             // A closure value: `{body, boxed captures}`; the body takes
@@ -846,16 +801,13 @@ impl<'a> FnBuilder<'a> {
                 arg_tys,
                 ret_ty,
             } => {
-                let env_mir = lower_ty_in(env_ty, self.module);
+                let env_mir = self.ty(env_ty);
                 self.fnv
                     .closures
                     .borrow_mut()
                     .insert(*fn_id, env_mir.clone());
-                let args: Vec<MirTy> = arg_tys
-                    .iter()
-                    .map(|t| lower_ty_in(t, self.module))
-                    .collect();
-                let ret = lower_ty_in(ret_ty, self.module);
+                let args: Vec<MirTy> = arg_tys.iter().map(|t| self.ty(t)).collect();
+                let ret = self.ty(ret_ty);
                 let code_t = code_ty(args.clone(), ret.clone());
                 let env_op = self.lower_expr_to_operand(env);
                 let boxed = self.fresh_local(MirTy::GcRef);
@@ -900,7 +852,7 @@ impl<'a> FnBuilder<'a> {
                 RValue::Call {
                     callee: ctor,
                     args,
-                    ret_ty: lower_ty_in(&e.ty, self.module),
+                    ret_ty: self.ty(&e.ty),
                 }
             }
             _ => RValue::Use(self.lower_expr_to_operand(e)),
@@ -911,7 +863,7 @@ impl<'a> FnBuilder<'a> {
     /// via a join block.
     fn lower_labeled_block(&mut self, b: &HirBlock, label: String, ty: &HirTy) -> Operand {
         let exit_bb = self.new_block();
-        let result_ty = lower_ty_in(ty, self.module);
+        let result_ty = self.ty(ty);
         let break_param = if matches!(result_ty, MirTy::Unit) {
             None
         } else {
@@ -951,7 +903,7 @@ impl<'a> FnBuilder<'a> {
             HirExprKind::Const(c) => Operand::Const(c.clone()),
             HirExprKind::Local(id) => Operand::Copy(*id),
             HirExprKind::StaticRef(name) => {
-                let mir_ty = lower_ty_in(&e.ty, self.module);
+                let mir_ty = self.ty(&e.ty);
                 let dst = self.fresh_local(mir_ty.clone());
                 self.push_stmt(Statement::Assign {
                     target: dst,
@@ -997,7 +949,7 @@ impl<'a> FnBuilder<'a> {
                 Operand::Copy(dst)
             }
             HirExprKind::CallIndirect { ret_ty, .. } => {
-                let result_ty = lower_ty_in(ret_ty, self.module);
+                let result_ty = self.ty(ret_ty);
                 let dst = self.fresh_local(result_ty);
                 let rvalue = self.lower_expr_to_rvalue(e);
                 self.push_stmt(Statement::Assign {
@@ -1007,7 +959,7 @@ impl<'a> FnBuilder<'a> {
                 Operand::Copy(dst)
             }
             HirExprKind::Cast { to_ty, .. } => {
-                let result_ty = lower_ty_in(to_ty, self.module);
+                let result_ty = self.ty(to_ty);
                 let dst = self.fresh_local(result_ty);
                 let rvalue = self.lower_expr_to_rvalue(e);
                 self.push_stmt(Statement::Assign {
@@ -1022,7 +974,7 @@ impl<'a> FnBuilder<'a> {
             | HirExprKind::ClosureValue { .. }
             | HirExprKind::CoroNew { .. }
             | HirExprKind::CallClosure { .. } => {
-                let result_ty = lower_ty_in(&e.ty, self.module);
+                let result_ty = self.ty(&e.ty);
                 let dst = self.fresh_local(result_ty);
                 let rvalue = self.lower_expr_to_rvalue(e);
                 self.push_stmt(Statement::Assign {
@@ -1033,7 +985,7 @@ impl<'a> FnBuilder<'a> {
             }
             HirExprKind::Suspend { value, is_final } => {
                 let v = self.lower_expr_to_operand(value);
-                let unit = matches!(lower_ty_in(&value.ty, self.module), MirTy::Unit);
+                let unit = matches!(self.ty(&value.ty), MirTy::Unit);
                 let resume = self.new_block();
                 self.terminate(Terminator::Suspend {
                     value: (!unit).then_some(v),
@@ -1056,7 +1008,7 @@ impl<'a> FnBuilder<'a> {
             } => self.lower_loop(label.clone(), body, result_ty),
             HirExprKind::Match { scrutinee, arms } => self.lower_match(scrutinee, arms, &e.ty),
             HirExprKind::StructInit { struct_id, fields } => {
-                let result_ty = lower_ty_in(&e.ty, self.module);
+                let result_ty = self.ty(&e.ty);
                 let field_ops: Vec<Operand> = fields
                     .iter()
                     .map(|f| self.lower_expr_to_operand(f))
@@ -1077,7 +1029,7 @@ impl<'a> FnBuilder<'a> {
                 variant_index,
                 value,
             } => {
-                let mir_ty = lower_ty_in(sum_ty, self.module);
+                let mir_ty = self.ty(sum_ty);
                 // The C fn pointer null niche: the pointer, or null.
                 if is_c_fn_niche(sum_ty) {
                     if let Some(v) = value {
@@ -1094,16 +1046,16 @@ impl<'a> FnBuilder<'a> {
                     value: i128::from(sum_tag(sum_ty, *variant_index)),
                     ty: IrPrimTy::I32,
                 });
-                // `any Tr` (D4): the payload is the value itself if it
-                // fits the word, else a heap copy; the tag's `ANY_BOXED`
-                // bit says which (the collector's `ANY_SLOT`, 802 §8.2.7).
+                // `any Tr`: the payload is the value itself if it fits the
+                // word, else a heap copy; the tag's `ANY_BOXED` bit says
+                // which (the collector's `ANY_SLOT`, 802 §8.2.7).
                 if let (HirTy::AnyTrait(_), Some(v)) = (sum_ty, value) {
                     let raw = self.lower_expr_to_operand(v);
-                    let ty = lower_ty_in(&v.ty, self.module);
-                    let tag = if crate::any_inline(&ty, 64) {
+                    let ty = self.ty(&v.ty);
+                    let tag = if self.target.any_inline(&ty) {
                         *variant_index
                     } else {
-                        *variant_index | crate::ANY_BOXED
+                        *variant_index | crate::gc_abi::ANY_BOXED
                     };
                     let tag_op = Operand::Const(ConstVal::Int {
                         value: i128::from(tag as i32),
@@ -1129,14 +1081,11 @@ impl<'a> FnBuilder<'a> {
                     return tag_op;
                 };
                 let payload_ty = parts[1].clone();
-                // Spec 변경점 1019: heterogeneous sums (`i32 | f64`) reserve
-                // payload storage for the widest variant. The wrap site
-                // casts the value's MIR type to that unified payload so
-                // every variant fits into the same struct slot.
+                // Every member goes through the sum's one payload slot.
                 let payload_op = match value {
                     Some(v) => {
                         let raw = self.lower_expr_to_operand(v);
-                        let value_ty = lower_ty_in(&v.ty, self.module);
+                        let value_ty = self.ty(&v.ty);
                         self.payload_cast(raw, &value_ty, &payload_ty)
                     }
                     None => Operand::Const(zero_const(&payload_ty)),
@@ -1160,13 +1109,13 @@ impl<'a> FnBuilder<'a> {
                     value: i128::from(*variant_index),
                     ty: IrPrimTy::I32,
                 });
-                let Some(payload_ty) = enum_payload_ty(*enum_id, self.module) else {
+                let Some(payload_ty) = enum_payload_ty(*enum_id, self.module, self.target) else {
                     for a in args {
                         self.lower_expr_to_operand(a);
                     }
                     return tag_op;
                 };
-                let unit_arg = matches!(args.as_slice(), [a] if lower_ty_in(&a.ty, self.module) == MirTy::Unit);
+                let unit_arg = matches!(args.as_slice(), [a] if self.ty(&a.ty) == MirTy::Unit);
                 let payload_op = if args.is_empty() || unit_arg {
                     // A `()` payload has no bits, but its expression still
                     // runs (`Ok(f())` must call `f` and see its throw).
@@ -1174,10 +1123,16 @@ impl<'a> FnBuilder<'a> {
                         self.lower_expr_to_operand(a);
                     }
                     Operand::Const(zero_const(&payload_ty))
-                } else if args.len() == 1 {
+                } else if args.len() == 1
+                    // A one-field named variant's payload is a 1-tuple:
+                    // packed below like the multi-arg case.
+                    && self.module.enums[enum_id.0 as usize].variants[*variant_index as usize]
+                        .named_fields
+                        .is_empty()
+                {
                     let arg = &args[0];
                     let raw = self.lower_expr_to_operand(arg);
-                    self.payload_cast(raw, &lower_ty_in(&arg.ty, self.module), &payload_ty)
+                    self.payload_cast(raw, &self.ty(&arg.ty), &payload_ty)
                 } else {
                     // Multi-arg variant: pack the args into the variant's
                     // own tuple, then move it into the shared slot.
@@ -1190,7 +1145,7 @@ impl<'a> FnBuilder<'a> {
                         .zip(field_tys.iter())
                         .map(|(a, ft)| {
                             let raw = self.lower_expr_to_operand(a);
-                            self.cast_to(raw, &lower_ty_in(&a.ty, self.module), ft)
+                            self.cast_to(raw, &self.ty(&a.ty), ft)
                         })
                         .collect();
                     let tup = self.fresh_local(variant_ty.clone());
@@ -1215,7 +1170,7 @@ impl<'a> FnBuilder<'a> {
                 Operand::Copy(dst)
             }
             HirExprKind::ArrayInit { elem_ty, elements } => {
-                let mir_elem_ty = lower_ty_in(elem_ty, self.module);
+                let mir_elem_ty = self.ty(elem_ty);
                 let n = u32::try_from(elements.len()).unwrap_or(0);
                 let array_ty = MirTy::Array(Box::new(mir_elem_ty.clone()), n);
                 let elem_ops: Vec<Operand> = elements
@@ -1237,12 +1192,12 @@ impl<'a> FnBuilder<'a> {
                 value,
                 len,
             } => {
-                let elem = lower_ty_in(elem_ty, self.module);
+                let elem = self.ty(elem_ty);
                 let v = self.lower_expr_to_operand(value);
                 let dst = self.fresh_local(MirTy::Array(Box::new(elem.clone()), *len));
-                if has_gc_ref(&elem) {
-                    // ponytail: no element is left unset while a GC
-                    // could scan the slot; unrolled like `ArrayInit`.
+                if self.target.has_gc_ref(&elem) {
+                    // Unrolled: no element is unset while a collection
+                    // could scan the slot.
                     self.push_stmt(Statement::Assign {
                         target: dst,
                         rvalue: RValue::ArrayInit {
@@ -1261,7 +1216,7 @@ impl<'a> FnBuilder<'a> {
                 self.push_stmt(Statement::Assign {
                     target: dst,
                     rvalue: RValue::BufAlloc {
-                        elem_ty: lower_ty_in(elem, self.module),
+                        elem_ty: self.ty(elem),
                         len,
                     },
                 });
@@ -1269,7 +1224,7 @@ impl<'a> FnBuilder<'a> {
             }
             HirExprKind::RawRead { addr, ty, volatile } => {
                 let addr = self.lower_expr_to_operand(addr);
-                let ty = lower_ty_in(ty, self.module);
+                let ty = self.ty(ty);
                 let dst = self.fresh_local(ty.clone());
                 self.push_stmt(Statement::Assign {
                     target: dst,
@@ -1292,7 +1247,7 @@ impl<'a> FnBuilder<'a> {
                 self.push_stmt(Statement::RawStore {
                     addr,
                     value,
-                    ty: lower_ty_in(ty, self.module),
+                    ty: self.ty(ty),
                     volatile: *volatile,
                 });
                 Operand::Const(ConstVal::Unit)
@@ -1302,7 +1257,7 @@ impl<'a> FnBuilder<'a> {
                 self.push_stmt(Statement::Assign {
                     target: dst,
                     rvalue: RValue::SizeOf {
-                        ty: lower_ty_in(ty, self.module),
+                        ty: self.ty(ty),
                         align: *align,
                     },
                 });
@@ -1311,7 +1266,7 @@ impl<'a> FnBuilder<'a> {
             HirExprKind::BufGet { buf, index, elem } => {
                 let buf = self.lower_expr_to_operand(buf);
                 let index = self.lower_expr_to_operand(index);
-                let elem_ty = lower_ty_in(elem, self.module);
+                let elem_ty = self.ty(elem);
                 // A buffer of `()` stores nothing.
                 if elem_ty == MirTy::Unit {
                     return Operand::Const(ConstVal::Unit);
@@ -1338,7 +1293,7 @@ impl<'a> FnBuilder<'a> {
                 let buf = self.lower_expr_to_operand(buf);
                 let index = self.lower_expr_to_operand(index);
                 let args = args.iter().map(|a| self.lower_expr_to_operand(a)).collect();
-                let elem_ty = lower_ty_in(elem, self.module);
+                let elem_ty = self.ty(elem);
                 let dst = self.fresh_local(elem_ty.clone());
                 self.push_stmt(Statement::Assign {
                     target: dst,
@@ -1362,7 +1317,7 @@ impl<'a> FnBuilder<'a> {
                 let args = args
                     .iter()
                     .map(|a| {
-                        let t = lower_ty_in(&a.ty, self.module);
+                        let t = self.ty(&a.ty);
                         (self.lower_expr_to_operand(a), t)
                     })
                     .collect();
@@ -1381,14 +1336,13 @@ impl<'a> FnBuilder<'a> {
                     for s in stmts {
                         self.lower_stmt(s);
                     }
-                    if let Some(t) = tail.filter(|t| lower_ty_in(&t.ty, self.module) == MirTy::Unit)
-                    {
+                    if let Some(t) = tail.filter(|t| self.ty(&t.ty) == MirTy::Unit) {
                         self.push_loc(t.span);
                         self.lower_expr_to_operand(t);
                     }
                     self.push_stmt(Statement::MlirRegionEnd);
                 }
-                let ty = lower_ty_in(&e.ty, self.module);
+                let ty = self.ty(&e.ty);
                 let dst = self.fresh_local(ty.clone());
                 self.push_stmt(Statement::Assign {
                     target: dst,
@@ -1411,7 +1365,7 @@ impl<'a> FnBuilder<'a> {
                 let buf = self.lower_expr_to_operand(buf);
                 let index = self.lower_expr_to_operand(index);
                 let value = self.lower_expr_to_operand(value);
-                let elem_ty = lower_ty_in(elem, self.module);
+                let elem_ty = self.ty(elem);
                 if elem_ty != MirTy::Unit {
                     self.push_stmt(Statement::BufStore {
                         buf,
@@ -1432,7 +1386,7 @@ impl<'a> FnBuilder<'a> {
                 let Operand::Copy(arr_local) = arr_op else {
                     return Operand::Const(ConstVal::Unit);
                 };
-                let mir_elem_ty = lower_ty_in(elem_ty, self.module);
+                let mir_elem_ty = self.ty(elem_ty);
                 let len = match &self.locals[arr_local.0 as usize].ty {
                     MirTy::Array(_, n) => *n,
                     _ => 0,
@@ -1450,7 +1404,7 @@ impl<'a> FnBuilder<'a> {
                 Operand::Copy(dst)
             }
             HirExprKind::Tuple { fields } => {
-                let result_ty = lower_ty_in(&e.ty, self.module);
+                let result_ty = self.ty(&e.ty);
                 let field_ops: Vec<Operand> = fields
                     .iter()
                     .map(|f| self.lower_expr_to_operand(f))
@@ -1465,12 +1419,8 @@ impl<'a> FnBuilder<'a> {
                 });
                 Operand::Copy(dst)
             }
-            // Spec 2.x / i-want 322: `union { ... }` write/read. Both
-            // boil down to a typed cast against the synthetic `__data`
-            // slot — `cast_to` handles `WidestPrim` (int/float cast)
-            // and same-size `ByteArray` (`bitcast`). Different-size
-            // `ByteArray` cases (struct-in-union, oversize fields) are
-            // gated up front by `union_storage_strategy` diagnostics.
+            // `union` field write / read: the bits of the synthetic
+            // `__data` slot (HIR rejects sizes that do not fit).
             HirExprKind::UnionWrite {
                 from_ty,
                 storage_ty,
@@ -1478,8 +1428,8 @@ impl<'a> FnBuilder<'a> {
                 ..
             } => {
                 let raw = self.lower_expr_to_operand(value);
-                let src_ty = lower_ty_in(from_ty, self.module);
-                let dst_ty = lower_ty_in(storage_ty, self.module);
+                let src_ty = self.ty(from_ty);
+                let dst_ty = self.ty(storage_ty);
                 self.union_bits(raw, &src_ty, &dst_ty)
             }
             HirExprKind::UnionRead {
@@ -1492,7 +1442,7 @@ impl<'a> FnBuilder<'a> {
                 let Operand::Copy(target_local) = target_op else {
                     return Operand::Const(ConstVal::Unit);
                 };
-                let storage_mir_ty = lower_ty_in(storage_ty, self.module);
+                let storage_mir_ty = self.ty(storage_ty);
                 let storage_local = self.fresh_local(storage_mir_ty.clone());
                 self.push_stmt(Statement::Assign {
                     target: storage_local,
@@ -1502,7 +1452,7 @@ impl<'a> FnBuilder<'a> {
                         field_ty: storage_mir_ty.clone(),
                     },
                 });
-                let dst_ty = lower_ty_in(field_ty, self.module);
+                let dst_ty = self.ty(field_ty);
                 self.union_bits(Operand::Copy(storage_local), &storage_mir_ty, &dst_ty)
             }
             HirExprKind::TupleField {
@@ -1511,7 +1461,7 @@ impl<'a> FnBuilder<'a> {
                 field_ty,
             } => {
                 let target_op = self.lower_expr_to_operand(target);
-                let mir_field_ty = lower_ty_in(field_ty, self.module);
+                let mir_field_ty = self.ty(field_ty);
                 let dst = self.fresh_local(mir_field_ty.clone());
                 self.push_stmt(Statement::Assign {
                     target: dst,
@@ -1529,7 +1479,7 @@ impl<'a> FnBuilder<'a> {
                 value,
                 ..
             } => {
-                let struct_ty = lower_ty_in(&target.ty, self.module);
+                let struct_ty = self.ty(&target.ty);
                 let source = self.lower_expr_to_operand(target);
                 let new_value = self.lower_expr_to_operand(value);
                 let dst = self.fresh_local(struct_ty.clone());
@@ -1551,7 +1501,7 @@ impl<'a> FnBuilder<'a> {
                 ..
             } => {
                 let target_op = self.lower_expr_to_operand(target);
-                let mir_field_ty = lower_ty_in(field_ty, self.module);
+                let mir_field_ty = self.ty(field_ty);
                 let dst = self.fresh_local(mir_field_ty.clone());
                 self.push_stmt(Statement::Assign {
                     target: dst,
@@ -1575,7 +1525,7 @@ impl<'a> FnBuilder<'a> {
         // Materialize the scrutinee into a stack-slotted local so each
         // arm can compare against it without recomputing.
         let scrut_op = self.lower_expr_to_operand(scrutinee);
-        let scrut_ty = lower_ty_in(&scrutinee.ty, self.module);
+        let scrut_ty = self.ty(&scrutinee.ty);
         let scrut_local = match scrut_op {
             Operand::Copy(id) => id,
             other @ Operand::Const(_) => {
@@ -1589,7 +1539,7 @@ impl<'a> FnBuilder<'a> {
         };
 
         let merge_bb = self.new_block();
-        let mir_result_ty = lower_ty_in(result_hir_ty, self.module);
+        let mir_result_ty = self.ty(result_hir_ty);
         let value_producing = !matches!(mir_result_ty, MirTy::Unit);
         let merge_param = if value_producing {
             Some(self.add_block_param(merge_bb, mir_result_ty))
@@ -1949,7 +1899,7 @@ impl<'a> FnBuilder<'a> {
                     op_ty: i32_,
                     lhs: Operand::Copy(raw),
                     rhs: Operand::Const(ConstVal::Int {
-                        value: i128::from(!crate::ANY_BOXED),
+                        value: i128::from(!crate::gc_abi::ANY_BOXED),
                         ty: IrPrimTy::I32,
                     }),
                 },
@@ -2004,11 +1954,8 @@ impl<'a> FnBuilder<'a> {
 
     /// Call a function value `{code, env}`: `code(env, args..)`.
     fn call_fn_value(&mut self, callee: Operand, args: &[HirExpr], ret_ty: &HirTy) -> RValue {
-        let arg_tys: Vec<MirTy> = args
-            .iter()
-            .map(|a| lower_ty_in(&a.ty, self.module))
-            .collect();
-        let ret = lower_ty_in(ret_ty, self.module);
+        let arg_tys: Vec<MirTy> = args.iter().map(|a| self.ty(&a.ty)).collect();
+        let ret = self.ty(ret_ty);
         let code_t = code_ty(arg_tys.clone(), ret.clone());
         let code = self.fresh_local(code_t);
         self.push_stmt(Statement::Assign {
@@ -2037,7 +1984,7 @@ impl<'a> FnBuilder<'a> {
             args: call_args,
             arg_tys: all_tys,
             ret_ty: ret,
-            c_abi: false,
+            abi: Abi::Rok,
         }
     }
 
@@ -2122,7 +2069,7 @@ impl<'a> FnBuilder<'a> {
         self.module.enums[enum_id.0 as usize].variants[variant_index as usize]
             .payload_ty
             .as_ref()
-            .map_or(MirTy::Unit, |t| lower_ty_in(t, self.module))
+            .map_or(MirTy::Unit, |t| self.ty(t))
     }
 
     /// Spec 2.5.2: a union field write / read reinterprets bits (an
@@ -2278,10 +2225,7 @@ impl<'a> FnBuilder<'a> {
                         field_ty: payload_ty.clone(),
                     },
                 });
-                // Spec 변경점 1019: heterogeneous sums store every variant
-                // through the widest payload slot. When the binder's
-                // declared type is narrower (e.g. `v: i32` against an
-                // `i32 | f64` sum), narrow the extracted payload back.
+                // The payload slot back to the binder's member type.
                 let bind_ty = self.locals[local.0 as usize].ty.clone();
                 if matches!(sum_ty, HirTy::AnyTrait(_)) {
                     self.push_stmt(Statement::Assign {
@@ -2473,7 +2417,7 @@ impl<'a> FnBuilder<'a> {
         let body_bb = self.new_block();
         let exit_bb = self.new_block();
 
-        let mir_ty = lower_ty_in(result_ty, self.module);
+        let mir_ty = self.ty(result_ty);
         let break_param = if matches!(mir_ty, MirTy::Unit) {
             None
         } else {
@@ -2516,7 +2460,7 @@ impl<'a> FnBuilder<'a> {
         else_branch: Option<&HirExpr>,
         result_hir_ty: &HirTy,
     ) -> Operand {
-        let result_ty = lower_ty_in(result_hir_ty, self.module);
+        let result_ty = self.ty(result_hir_ty);
         let has_else = else_branch.is_some();
         let value_producing = has_else && !matches!(result_ty, MirTy::Unit);
 

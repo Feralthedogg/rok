@@ -40,12 +40,12 @@ fn check(ok: bool) throws (IoError) {
 }
 
 fn main() -> i32 {
-    rok_print_i32(try outer(5) catch _ { -1 });
-    try outer(-1) catch e: ParseError { rok_print_str("parse"); } catch e: IoError { rok_print_str("io"); };
-    try outer(60) catch e: ParseError { rok_print_str("parse"); } catch e: IoError { rok_print_str("io"); };
+    println(f"{try outer(5) catch _ { -1 }}");
+    try outer(-1) catch e: ParseError { println("parse"); } catch e: IoError { println("io"); };
+    try outer(60) catch e: ParseError { println("parse"); } catch e: IoError { println("io"); };
     // `try` covers everything to its right.
-    rok_print_i32(try parse(1) + read(5) catch _ { 0 });
-    try check(true) catch _ { rok_print_str("unit err"); };
-    rok_print_str("unit ok");
+    println(f"{try parse(1) + read(5) catch _ { 0 }}");
+    try check(true) catch _ { println("unit err"); };
+    println("unit ok");
     return 0;
 }

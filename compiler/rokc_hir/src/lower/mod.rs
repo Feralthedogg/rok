@@ -413,7 +413,13 @@ struct Scope<'b> {
 pub fn lower(program: &Program, prec: &PrecTable) -> HirModule {
     let empty_uses: crate::uses::UseTable = HashMap::new();
     let empty_reexports: Vec<crate::uses::ReExport> = Vec::new();
-    lower_full(program, prec, &empty_uses, &empty_reexports)
+    lower_full(
+        program,
+        prec,
+        &empty_uses,
+        &empty_reexports,
+        &crate::HirInput::default(),
+    )
 }
 
 #[must_use]
@@ -423,7 +429,13 @@ pub fn lower_with_uses(
     uses: &crate::uses::UseTable,
 ) -> HirModule {
     let empty_reexports: Vec<crate::uses::ReExport> = Vec::new();
-    lower_full(program, prec, uses, &empty_reexports)
+    lower_full(
+        program,
+        prec,
+        uses,
+        &empty_reexports,
+        &crate::HirInput::default(),
+    )
 }
 
 /// Per-method facts consulted at call sites: the module whose privacy

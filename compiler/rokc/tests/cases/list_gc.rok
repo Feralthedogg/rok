@@ -30,12 +30,12 @@ fn build(n: i32) -> List<List<i32>> {
 fn main() -> i32 {
     let lists = build(500);
     unsafe { rok_gc_collect() };
-    rok_print_i32(lists.len() as i32);
+    println(f"{lists.len() as i32}");
     let total = 0;
     for l in lists {
         total = total + l[0];
     }
-    rok_print_i32(total);
+    println(f"{total}");
     // Garbage from a big temporary list is reclaimed.
     let before = unsafe { rok_gc_stats_live_bytes() };
     let k = 0;
@@ -46,6 +46,6 @@ fn main() -> i32 {
     }
     unsafe { rok_gc_collect() };
     let after = unsafe { rok_gc_stats_live_bytes() };
-    rok_print_i32(if after < before + 200000usize { 1 } else { 0 });
+    println(f"{if after < before + 200000usize { 1 } else { 0 }}");
     return 0;
 }

@@ -11,24 +11,17 @@
 
 use std::fmt::Write as _;
 
-use rokc_mir::MirFunction;
-
-/// Monomorphized names carry their type arguments after this marker
-/// (`first__mono__i32`); they become the typehash.
-pub const MONO_MARK: &str = "__mono__";
+use rokc_ir_common::Linkage;
+use rokc_mir::{Link, MirFunction};
 
 /// What symbol naming needs to know about the whole program.
 #[derive(Default)]
 pub struct Pkgs {
-    /// Package hash per item-path prefix, longest prefix first (`""` =
-    /// the user package).
-    pub hashes: Vec<(String, String)>,
+    pub link: Link,
     /// `extern` statics: they keep their C name.
     pub extern_statics: std::collections::HashSet<String>,
     /// Lazily initialized statics: name → symbol of their initializer.
     pub lazy_statics: std::collections::HashMap<String, String>,
-    /// Body-less functions of a prebuilt dependency: mangled, not C names.
-    pub prebuilt: std::collections::HashSet<rokc_ir_common::FunctionId>,
 }
 
 impl Pkgs {
@@ -37,40 +30,33 @@ impl Pkgs {
         if self.extern_statics.contains(name) {
             return name.to_owned();
         }
-        item(pkg_of(&self.hashes, name), name, "")
+        item(self.link.hash_of(name), name, "")
     }
 }
 
-/// The package hash of item `qualified`.
-pub fn pkg_of<'a>(pkgs: &'a [(String, String)], qualified: &str) -> &'a str {
-    pkgs.iter()
-        .find(|(p, _)| {
-            p.is_empty()
-                || qualified
-                    .strip_prefix(p.as_str())
-                    .is_some_and(|r| r.starts_with("::"))
-        })
-        .map_or("", |(_, h)| h.as_str())
-}
-
-/// Linker symbol for a MIR function: its `#[export_name]`, its C name
+/// Linker symbol of a MIR function: its `#[export_name]`, its own name
 /// (an `extern` declaration), or the mangled path.
-pub fn symbol_for(f: &MirFunction, pkgs: &Pkgs, export: Option<&str>) -> String {
-    if let Some(sym) = export {
-        return sym.to_owned();
+pub fn symbol_for(f: &MirFunction, pkgs: &Pkgs) -> String {
+    if let Some(sym) = &f.facts.export_name {
+        return sym.clone();
     }
-    if f.blocks.is_empty() && !pkgs.prebuilt.contains(&f.id) {
+    if f.facts.linkage == Linkage::Extern {
         return f.name.clone();
     }
-    let qualified = f
-        .name
-        .split_once(MONO_MARK)
-        .map_or(f.name.as_str(), |(b, _)| b);
-    let pkg = pkg_of(&pkgs.hashes, qualified);
-    match f.name.split_once(MONO_MARK) {
-        Some((base, args)) => item(pkg, base, &hex(&sha256(args.as_bytes()))[..16]),
-        None => item(pkg, &f.name, ""),
-    }
+    mangled(f, pkgs)
+}
+
+/// The mangled symbol of a MIR function; an instance's type arguments
+/// become the typehash.
+pub fn mangled(f: &MirFunction, pkgs: &Pkgs) -> String {
+    let path = f.path();
+    let hash = f
+        .facts
+        .mono_args
+        .as_ref()
+        .map(|a| hex(&sha256(a.as_bytes()))[..16].to_owned())
+        .unwrap_or_default();
+    item(pkgs.link.hash_of(path), path, &hash)
 }
 
 /// Mangle a `::`-qualified item path. The package is the hash, so a
@@ -81,6 +67,13 @@ pub fn item(pkg: &str, qualified: &str, typehash: &str) -> String {
     let name = segs.pop().unwrap_or_default();
     let path: Vec<String> = segs.iter().map(|s| escape(s)).collect();
     format!("_Y{pkg}_{}_{}_{typehash}", path.join("_"), escape(name))
+}
+
+/// A string literal's global, named by its content: the same literal
+/// has the same name in every module, so a REPL cell's function text
+/// compares equal to an earlier cell's (`crate::repl`).
+pub fn str_global(text: &str) -> String {
+    format!("rok.str.{}", &hex(&sha256(text.as_bytes()))[..16])
 }
 
 /// 8-hex-digit package hash over the package's content.
@@ -102,8 +95,7 @@ pub struct Demangled {
 impl Demangled {
     /// `rok::std::vec::push` style. The mangled form drops the root
     /// segment, so a path starting with a library tier (`core` / `std` /
-    /// `bare`) gets `rok::` back; ponytail: a user module named `std`
-    /// is shown as `rok::std` too.
+    /// `bare`) gets `rok::` back (a user module named `std` too).
     #[must_use]
     pub fn qualified_path(&self) -> String {
         let mut segs: Vec<&str> = Vec::new();
@@ -301,13 +293,16 @@ mod tests {
         assert_ne!(item("p", "a::b_c", ""), item("p", "a_b::c", ""));
         assert_eq!(item("p", "malloc", ""), "_Yp__malloc_");
         assert_eq!(item("p", "rok::std::vec::new", ""), "_Yp_std_vec_new_");
-        let pkgs = [
-            ("rok::core".to_owned(), "c".to_owned()),
-            (String::new(), "u".to_owned()),
-        ];
-        assert_eq!(pkg_of(&pkgs, "rok::core::str::len"), "c");
-        assert_eq!(pkg_of(&pkgs, "rok::corex::f"), "u");
-        assert_eq!(pkg_of(&pkgs, "main"), "u");
+        let link = Link {
+            packages: vec![
+                ("rok::core".to_owned(), "c".to_owned()),
+                (String::new(), "u".to_owned()),
+            ],
+            ..Link::default()
+        };
+        assert_eq!(link.hash_of("rok::core::str::len"), "c");
+        assert_eq!(link.hash_of("rok::corex::f"), "u");
+        assert_eq!(link.hash_of("main"), "u");
     }
 
     #[test]

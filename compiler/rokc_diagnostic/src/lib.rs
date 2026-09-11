@@ -46,13 +46,21 @@ impl Span {
 /// and the caret line under a diagnostic.
 static FILES: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
-/// Register a source file; its id goes into the `file` of its spans.
+/// Register a source file; its id goes into the `file` of its spans. A
+/// file already registered with the same text keeps its id.
 pub fn register_file(path: String, source: String) -> u32 {
     let mut files = FILES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    files.push((path, source));
-    u32::try_from(files.len()).unwrap_or(0)
+    let i = files
+        .iter()
+        .position(|(p, s)| *p == path && *s == source)
+        .unwrap_or_else(|| {
+            files.push((path, source));
+            files.len() - 1
+        });
+    drop(files);
+    u32::try_from(i + 1).unwrap_or(0)
 }
 
 /// Forget every registered file: a long-lived embedder (LSP, REPL)

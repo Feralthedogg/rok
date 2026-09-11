@@ -60,8 +60,7 @@ fn stmt_uses(s: &Statement) -> (Vec<LocalId>, Option<LocalId>) {
             value,
             ..
         } => ops.extend([Operand::Copy(*array), index.clone(), value.clone()]),
-        // ponytail: region parameters are not tracked as definitions
-        // (MLIR values, not GC references).
+        // Region parameters are MLIR values, never GC references.
         Statement::StorageDead(_)
         | Statement::Loc(..)
         | Statement::MlirRegion { .. }
@@ -300,6 +299,7 @@ mod tests {
             id: FunctionId(0),
             def_id: None,
             name: "f".into(),
+            facts: rokc_ir_common::FnFacts::default(),
             params: vec![LocalId(1), LocalId(3)],
             locals: (0..5).map(local).collect(),
             blocks: vec![

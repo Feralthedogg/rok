@@ -10,14 +10,14 @@
 fn main() -> i32 {
     let r = 1 + 2 << 3;
     if r == 17 {
-        rok_print_str("SPEC_INTERPRETATION:17_IMPL_INTERPRETATION:24");
+        println("SPEC_INTERPRETATION:17_IMPL_INTERPRETATION:24");
     } else {
         if r == 24 {
-            rok_print_str("SPEC_INTERPRETATION:17_IMPL_INTERPRETATION:24");
+            println("SPEC_INTERPRETATION:17_IMPL_INTERPRETATION:24");
         } else {
-            rok_print_str("UNKNOWN");
+            println("UNKNOWN");
         }
     }
-    rok_print_i32(r);
+    println(f"{r}");
     return 0;
 }

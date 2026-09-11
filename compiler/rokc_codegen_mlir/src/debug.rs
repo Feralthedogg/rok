@@ -18,7 +18,7 @@ use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use rokc_ir_common::PrimTy;
-use rokc_mir::{MirFunction, MirTy, Statement};
+use rokc_mir::{MirFunction, MirTy, Statement, Target};
 
 /// Module-wide debug-info state.
 pub struct DebugInfo {
@@ -32,8 +32,7 @@ pub struct DebugInfo {
     /// DWARF type alias by `MirTy` (its `Debug` text).
     types: BTreeMap<String, String>,
     next: u32,
-    /// Target pointer width in bits.
-    pw: u32,
+    target: Target,
     /// Struct name and field names by `StructId` (`MirModule::struct_names`).
     pub struct_names: std::collections::HashMap<u32, (String, Vec<String>)>,
 }
@@ -56,15 +55,9 @@ fn escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-impl Default for DebugInfo {
-    fn default() -> Self {
-        Self::new(64)
-    }
-}
-
 impl DebugInfo {
     #[must_use]
-    pub fn new(pw: u32) -> Self {
+    pub fn new(target: Target) -> Self {
         let cwd = std::env::current_dir().unwrap_or_default();
         let paths = rokc_diagnostic::registered_files()
             .into_iter()
@@ -77,7 +70,7 @@ impl DebugInfo {
             cu: None,
             types: BTreeMap::new(),
             next: 0,
-            pw,
+            target,
             struct_names: std::collections::HashMap::new(),
         }
     }
@@ -208,8 +201,8 @@ impl DebugInfo {
         if let Some(a) = self.types.get(&key) {
             return Some(a.clone());
         }
-        let pw = self.pw;
-        let (size, align) = crate::emit::size_align(ty, pw);
+        let pw = self.target.pointer_width;
+        let (size, align) = self.target.size_align(ty);
         let def = match ty {
             MirTy::Unit => return None,
             MirTy::Prim(PrimTy::Str) => {
@@ -240,14 +233,6 @@ impl DebugInfo {
                     align,
                     &[("tag", tag, 0), ("payload", payload, pw / 8)],
                 )
-            }
-            MirTy::Sum(ps) => {
-                let layout = rokc_mir::sum_layout(ps);
-                let MirTy::Tuple(parts) = &layout else {
-                    return self.di_type(&layout);
-                };
-                let fields = self.members(parts, &["tag", "payload"]);
-                Self::composite("sum", size, align, &fields)
             }
             MirTy::Tuple(ps) => {
                 let fields = self.members(ps, &[]);
@@ -290,7 +275,7 @@ impl DebugInfo {
         let mut out = Vec::new();
         let mut off = 0u32;
         for (i, t) in parts.iter().enumerate() {
-            let (s, a) = crate::emit::size_align(t, self.pw);
+            let (s, a) = self.target.size_align(t);
             off = off.next_multiple_of(a);
             if let Some(ty) = self.di_type(t) {
                 let name = names
@@ -336,7 +321,7 @@ impl DebugInfo {
     }
 
     fn basic_type(&mut self, p: PrimTy) -> Option<String> {
-        let word = self.pw;
+        let word = self.target.pointer_width;
         let (name, bits, enc) = match p {
             PrimTy::I8 => ("i8", 8, "DW_ATE_signed"),
             PrimTy::I16 => ("i16", 16, "DW_ATE_signed"),

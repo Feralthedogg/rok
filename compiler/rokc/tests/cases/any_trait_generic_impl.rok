@@ -19,8 +19,8 @@ impl Size for i32 { fn size(self) -> i32 { return self; } }
 
 fn show(x: any Size) -> i32 { return x.size(); }
 
-rok_print_i32(show(Box { v: 1 }));
+println(f"{show(Box { v: 1 })}");
 let s: any Size = Box { v: true };
-rok_print_i32(show(Sq { s: 1 }));
-rok_print_i32(show(3));
-rok_print_i32(s.size() + 33);
+println(f"{show(Sq { s: 1 })}");
+println(f"{show(3)}");
+println(f"{s.size() + 33}");

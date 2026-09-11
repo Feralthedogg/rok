@@ -5,7 +5,7 @@
 // Unknown escapes, `\x` above 0x7F and multi-code-point char literals are
 // lexical errors (spec 1.7.1, 1.8.3), not passed through verbatim.
 fn main() -> i32 {
-    rok_print_str("\q \x80");
+    println("\q \x80");
     let c = 'ab';
     return 0;
 }

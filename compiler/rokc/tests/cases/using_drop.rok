@@ -16,7 +16,7 @@ struct Res { id: i32; }
 
 impl Drop for Res {
     fn drop(ref self) {
-        rok_print_str(f"drop {self.id}");
+        println(f"drop {self.id}");
     }
 }
 
@@ -24,7 +24,7 @@ fn open(id: i32) -> Res { return Res { id: id }; }
 
 fn early() -> i32 {
     using r = open(7) {
-        rok_print_str("early");
+        println("early");
         return 70;
     }
 }
@@ -38,11 +38,11 @@ fn fails(x: i32) throws (i32) -> i32 {
 
 fn main() -> i32 {
     let v = using a = open(1), b = open(2) {
-        rok_print_str(f"use {a.id} {b.id}");
+        println(f"use {a.id} {b.id}");
         a.id + b.id
     };
-    rok_print_i32(v);
-    rok_print_i32(early());
-    let r = try fails(1) catch _ { rok_print_str("caught"); 0 };
+    println(f"{v}");
+    println(f"{early()}");
+    let r = try fails(1) catch _ { println("caught"); 0 };
     return r;
 }

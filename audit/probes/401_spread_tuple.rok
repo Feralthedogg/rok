@@ -11,6 +11,6 @@ fn add3(a: i32, b: i32, c: i32) -> i32 {
 
 fn main() -> i32 {
     let args = (1, 2, 3);
-    rok_print_i32(add3(..args));
+    println(f"{add3(..args)}");
     return 0;
 }

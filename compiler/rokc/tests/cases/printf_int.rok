@@ -16,5 +16,5 @@ fn main() {
         total += i * i;
         i += 1;
     }
-    rok_print_i32(unsafe { abs(-total) });
+    println(f"{unsafe { abs(-total) }}");
 }

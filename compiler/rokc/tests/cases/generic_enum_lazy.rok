@@ -26,15 +26,15 @@ fn or_else<V>(r: Res<V, bool>, d: V) -> V {
 
 let x: i32 = 3;
 match wrap(x) {
-    Res::Ok(v) => { rok_print_i32(v); }
-    Res::Err(_) => { rok_print_i32(0); }
+    Res::Ok(v) => { println(f"{v}"); }
+    Res::Err(_) => { println(f"{0}"); }
 }
 match fail(x) {
-    Res::Ok(v) => { rok_print_i32(v); }
-    Res::Err(_) => { rok_print_i32(9); }
+    Res::Ok(v) => { println(f"{v}"); }
+    Res::Err(_) => { println(f"{9}"); }
 }
 let four: i32 = 4;
-rok_print_i32(or_else(fail(x), four));
+println(f"{or_else(fail(x), four)}");
 
 // A lazily instantiated struct whose field is a generic enum.
 struct W<A> { r: Res<A, bool>; }
@@ -43,4 +43,4 @@ fn mk<U>(x: U) -> W<U> {
     return W { r: r };
 }
 let six: i32 = 6;
-rok_print_i32(or_else(mk(six).r, four));
+println(f"{or_else(mk(six).r, four)}");

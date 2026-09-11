@@ -16,7 +16,7 @@ fn classify(n: i32) -> i32 {
 }
 
 fn main() -> i32 {
-    if classify(50) == 1 { rok_print_str("digit"); }
-    if classify(33) == 2 { rok_print_str("punct"); }
+    if classify(50) == 1 { println("digit"); }
+    if classify(33) == 2 { println("punct"); }
     return 0;
 }

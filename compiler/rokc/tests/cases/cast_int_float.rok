@@ -10,14 +10,14 @@
 fn main() -> i32 {
     let a: i32 = 7;
     let f = (a as f64) / 2.0f64;     // 3.5
-    rok_print_f64(f);
+    println(f"{f}");
 
     let b: f64 = 7.9f64;
     let i = b as i32;                 // 7 — truncation
-    rok_print_i32(i);
+    println(f"{i}");
 
     let c: f64 = -2.3f64;
     let j = c as i32;                 // -2 — truncation toward zero
-    rok_print_i32(j);
+    println(f"{j}");
     return 0;
 }

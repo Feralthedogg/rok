@@ -30,12 +30,12 @@ impl Add for Angle {
 
 fn main() -> i32 {
     let a = 180°;
-    rok_print_i32(a.d);
+    println(f"{a.d}");
     // Extension tokens lex inside f-string holes too; `°.d` chains.
-    rok_print_str(f"{45°.d}");
+    println(f"{45°.d}");
     // `-90°` is `-(90°)`.
-    rok_print_i32((-90°).d);
+    println(f"{(-90°).d}");
     // `90° + a` is `(90°) + a`.
-    rok_print_i32((90° + a).d);
+    println(f"{(90° + a).d}");
     return 0;
 }

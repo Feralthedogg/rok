@@ -4,4 +4,4 @@
 
 // spec 4.16.1: top-level statements and `fn main` are mutually exclusive.
 fn main() -> i32 { return 0; }
-rok_print_i32(1);
+println(f"{1}");

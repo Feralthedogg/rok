@@ -11,7 +11,7 @@ fn main() -> i32 {
         throw 7;
         0
     } catch e {
-        if e == 7 { rok_print_str("caught:7"); }
+        if e == 7 { println("caught:7"); }
         99
     };
     return result - 99;

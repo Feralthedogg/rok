@@ -15,8 +15,8 @@ fn main() -> i32 {
     let (tx, rx) = channel::<i64>();
     try! tx.send(1);
     tx.close();
-    match rx.recv() { v: i64 => rok_print_i64(v), none => rok_print_str("none"), }
-    match rx.recv() { v: i64 => rok_print_i64(v), none => rok_print_str("none"), }
+    match rx.recv() { v: i64 => println(f"{v}"), none => println("none"), }
+    match rx.recv() { v: i64 => println(f"{v}"), none => println("none"), }
 
     let (tx, rx) = channel_bounded::<i64>(4);
     let producers: List<thread::JoinHandle<()>> = [];
@@ -36,7 +36,7 @@ fn main() -> i32 {
     let count: i64 = 0;
     for v in rx { sum += v; count += 1; }
     for h in producers { try! h.join(); }
-    rok_print_i64(count);
-    rok_print_i64(sum);
+    println(f"{count}");
+    println(f"{sum}");
     return 0;
 }

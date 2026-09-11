@@ -1,0 +1,174 @@
+// expect-exit: 0
+// gc-stress: 50
+// expect-stdout:
+// geom retries=3 ratio=0.1 big=123456789012345678901234567890 on=true letter=λ
+// proxy=none mode=Slow seen=true cpu=2
+// shapes=[Dot, Circle(1, Point { x: 0.5, y: -2 }), Rect { w: 2, h: none }, Rect { w: 4, h: 5 }]
+// pair=Pair(7, "seven") corner=-1 18446744073709551615 grid=3 mark=Marker
+// wrapped=Point { x: 1, y: 2 } tree sum=6
+// Config {
+//     name: "geom",
+//     retries: 3,
+//     ratio: 0.1,
+//     big: 123456789012345678901234567890,
+//     huge: 1e400,
+//     letter: 'λ',
+//     on: true,
+//     tags: ["a", "b"],
+//     seen: [3],
+//     limits: { "cpu": 2, "mem": 512 },
+//     order: { "z": 1, "a": 2 },
+//     picked: ["q", "p"],
+//     mode: Mode::Slow,
+//     proxy: none,
+//     shapes: [
+//         Shape::Dot,
+//         Shape::Circle(1.0, Point { x: 0.5, y: -2.0 }),
+//         Shape::Rect { w: 2, h: none },
+//         Shape::Rect { w: 4, h: 5 },
+//     ],
+//     pair: Pair(7, "seven"),
+//     corner: (-1, 18446744073709551615, "c"),
+//     grid: [1, 2, 3],
+//     mark: Marker {},
+//     wrapped: Wrap { inner: [Point { x: 1.0, y: 2.0 }], tag: "w" },
+//     tree: Tree::Node { kids: [Tree::Leaf(1), Tree::Node { kids: [Tree::Leaf(2), Tree::Leaf(3)] }] },
+// }
+// round trip: true
+// value round trip: true
+// Fast none 5 2 true x
+// Wrap { inner: Mode::Fast, tag: "m" }
+// [0.1, 1.5]
+// Shape::Rect { w: 1, h: none }
+// true
+
+// Spec 3.9.2 / 3.9.5: `#[derive(Rokon)]` on structs (named / tuple /
+// unit / generic) and enums (unit / tuple / named variants) round-trips
+// through `to_string` / `from_str`, together with the standard impls
+// (primitives, `int` / `float`, `T | none`, List / Set / Dict /
+// OrderedDict / OrderedSet, tuples, arrays). Missing fields take their
+// default or `none`.
+
+use rok::std::rokon;
+use rok::std::rokon::{Value, RokonError, ToRokon, FromRokon};
+
+#[derive(Rokon, Debug, PartialEq)]
+enum Mode { Fast, Slow }
+
+#[derive(Rokon, Debug, PartialEq)]
+struct Point { x: f64; y: f64; }
+
+#[derive(Rokon, Debug, PartialEq)]
+enum Shape {
+    Dot,
+    Circle(f64, Point),
+    Rect { w: i32; h: i32 | none; },
+}
+
+#[derive(Rokon, Debug, PartialEq)]
+struct Pair(i32, str);
+
+#[derive(Rokon, Debug, PartialEq)]
+struct Marker;
+
+#[derive(Rokon)]
+struct Wrap<T> { inner: T; tag: str; }
+
+#[derive(Rokon)]
+enum Tree {
+    Leaf(i64),
+    Node { kids: List<Tree>; },
+}
+
+#[derive(Rokon)]
+struct Config {
+    name: str;
+    retries: i32 = 3;
+    ratio: f32;
+    big: int;
+    huge: float;
+    letter: char;
+    on: bool;
+    tags: List<str>;
+    seen: Set<i32>;
+    limits: Dict<str, i64>;
+    order: OrderedDict<str, u8>;
+    picked: OrderedSet<str>;
+    mode: Mode;
+    proxy: str | none;
+    shapes: List<Shape>;
+    pair: Pair;
+    corner: (i8, u64, str);
+    grid: [u16; 3];
+    mark: Marker;
+    wrapped: Wrap<List<Point>>;
+    tree: Tree;
+}
+
+fn sum(t: Tree) -> i64 {
+    match t {
+        Tree::Leaf(n) => n,
+        Tree::Node { kids } => {
+            let s = 0i64;
+            for k in kids { s += sum(k); }
+            s
+        },
+    }
+}
+
+fn main() throws (RokonError) {
+    let text = "// a config
+Config {
+    name: \"geom\",
+    ratio: 0.1,
+    big: 123456789012345678901234567890,
+    huge: 1e400,
+    letter: 'λ',
+    on: true,
+    tags: [\"a\", \"b\"],
+    seen: [3],
+    limits: { \"cpu\": 2, \"mem\": 512 },
+    order: { \"z\": 1, \"a\": 2 },
+    picked: [\"q\", \"p\"],
+    mode: Mode::Slow,
+    shapes: [
+        Shape::Dot,
+        Shape::Circle(1, Point { x: 0.5, y: -2 }),
+        Shape::Rect { w: 2 },
+        Shape::Rect(4, h: 5),
+    ],
+    pair: Pair(7, \"seven\"),
+    corner: (-1, 18446744073709551615, \"c\"),
+    grid: [1, 2, 3],
+    mark: Marker {},
+    wrapped: Wrap { inner: [{ x: 1, y: 2 }], tag: \"w\" },
+    tree: Tree::Node { kids: [Tree::Leaf(1), Tree::Node { kids: [Tree::Leaf(2), Tree::Leaf(3)] }] },
+}";
+    let c: Config = try rokon::from_str(text);
+    println(f"{c.name} retries={c.retries} ratio={c.ratio} big={c.big} on={c.on} letter={c.letter}");
+    println(f"proxy={c.proxy:?} mode={c.mode:?} seen={c.seen.contains(3)} cpu={c.limits["cpu"]}");
+    println(f"shapes={c.shapes:?}");
+    println(f"pair={c.pair:?} corner={c.corner.0} {c.corner.1} grid={c.grid[2]} mark={c.mark:?}");
+    println(f"wrapped={c.wrapped.inner[0]:?} tree sum={sum(c.tree)}");
+
+    let out = rokon::to_string(c);
+    println(out);
+    let back: Config = try rokon::from_str(out);
+    println(f"round trip: {rokon::to_string(back) == out}");
+
+    // Value round trip and the generic entry points.
+    let v = try rokon::parse(out);
+    println(f"value round trip: {try rokon::parse(v.to_string()) == v}");
+    let m: Mode = try rokon::from_str("Mode::Fast");
+    let o: i32 | none = try rokon::from_str("none");
+    let p: i32 | none = try rokon::from_str("5");
+    let f: f64 = try rokon::from_str("2");
+    let t: (bool, char) = try rokon::from_str("(true, 'x')");
+    println(f"{m:?} {o:?} {p:?} {f} {t.0} {t.1}");
+    println(rokon::to_string(Wrap { inner: Mode::Fast, tag: "m" }));
+    println(rokon::to_string([0.1f32, 1.5f32]));
+    println(rokon::to_string(Shape::Rect { w: 1, h: none }));
+    let pd = Point { x: 0.25, y: 1e-9 };
+    let pb = try Point::from_rokon(pd.to_rokon());
+    println(f"{pb == pd}");
+}

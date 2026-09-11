@@ -166,6 +166,7 @@ pub(super) fn lower_closure_expr(
         is_async: false,
         is_generator: false,
         span,
+        facts: rokc_ir_common::FnFacts::default(),
     };
     ctx.env.sink.extras.borrow_mut().push(cl_fn);
 

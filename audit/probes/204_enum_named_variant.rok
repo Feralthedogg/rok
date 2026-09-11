@@ -15,10 +15,10 @@ fn main() -> i32 {
     let c = Cmd::Move { x: 5, y: 7 };
     match c {
         Cmd::Move { x, y } => {
-            rok_print_i32(x);
-            rok_print_i32(y);
+            println(f"{x}");
+            println(f"{y}");
         }
-        Cmd::Stop => rok_print_str("stop"),
+        Cmd::Stop => println("stop"),
     };
     return 0;
 }

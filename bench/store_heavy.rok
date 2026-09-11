@@ -15,6 +15,6 @@ fn main() -> i32 {
         xs[(k & 1023) as usize] = xs[((k * 7 + 3) & 1023) as usize];
         k += 1;
     }
-    rok_print_i64(xs[5].len() as i64);
+    println(f"{xs[5].len() as i64}");
     return 0;
 }

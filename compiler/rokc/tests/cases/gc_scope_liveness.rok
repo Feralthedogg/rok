@@ -26,7 +26,7 @@ fn main() -> i32 {
     }
     unsafe { rok_gc_collect() };
     if unsafe { rok_gc_stats_live_bytes() } != base { return 1; }
-    rok_print_i64(v);
+    println(f"{v}");
 
     // Block value escapes; the block's other boxes do not.
     let kept: any Val = if v > 0 {
@@ -38,7 +38,7 @@ fn main() -> i32 {
     };
     unsafe { rok_gc_collect() };
     if unsafe { rok_gc_stats_live_bytes() } - base != 32usize { return 2; }
-    rok_print_i64(kept.val());
-    rok_print_str("ok");
+    println(f"{kept.val()}");
+    println("ok");
     return 0;
 }

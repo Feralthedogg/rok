@@ -1,0 +1,120 @@
+// expect-exit: 0
+// expect-stdout:
+// none: none
+// bool: true
+// bool: false
+// integer: 42
+// integer: -7
+// integer: 255
+// integer: 10
+// integer: 15
+// integer: 1000000
+// integer: 123456789012345678901234567890
+// integer: -9223372036854775809
+// float: 3.14
+// float: -0.0015
+// float: 20000000000.0
+// float: 1.0
+// float: 1.0e300
+// float: 0.1
+// float: -0.0
+// char: 'a'
+// char: '\n'
+// char: '\''
+// char: '가'
+// string: "text"
+// string: "tab\tquote\"back\\slash A 😀"
+// string: "raw \\n"
+// string: "has \"quotes\""
+// string: "two\nlines"
+// string: "joined here"
+// list: []
+// list: [1, 2, 3]
+// list: [[1], [], ["x"]]
+// dict: {}
+// dict: { "k": 1, 2: [true], 'c': none }
+// tuple: ()
+// tuple: (1,)
+// tuple: (1, "two", 3.0)
+// integer: 5
+// struct: Point { x: 1, y: 2 }
+// struct: { x: 1, y: -2 }
+// struct: Empty {}
+// variant `geom::Point`: geom::Point { x: 1 }
+// variant `Mode::Fast`: Mode::Fast
+// variant `Shape::Circle`: Shape::Circle(1.0, at: (0, 0))
+// variant `Shape::Rect`: Shape::Rect { w: 2, h: 3 }
+// variant `a::b::E::V`: a::b::E::V
+// variant `Pair`: Pair(7, "seven")
+// list: [1, 2]
+// equal: true false
+// { "k": 1, (1, true): none }
+
+// Spec 3.9.1: every RokON value kind, read with `rokon::parse` and
+// written back in canonical form (`Value::to_string`).
+
+use rok::std::rokon;
+use rok::std::rokon::Value;
+
+fn show(s: str) {
+    let v = try rokon::parse(s) catch e { println(f"error: {e}"); return; };
+    println(f"{v.kind()}: {v}");
+}
+
+fn main() {
+    show("none");
+    show("true");
+    show("false");
+    show("42");
+    show("-7");
+    show("0xff");
+    show("0b1010");
+    show("0o17");
+    show("1_000_000");
+    show("123456789012345678901234567890");
+    show("-0x8000_0000_0000_0001");
+    show("3.14");
+    show("-1.5e-3");
+    show("2E10");
+    show("1.");
+    show("1e300");
+    show("0.1");
+    show("-0.0");
+    show("'a'");
+    show("'\\n'");
+    show("'\\''");
+    show("'\\u{AC00}'");
+    show("\"text\"");
+    show("\"tab\\tquote\\\"back\\\\slash \\x41 \\u{1F600}\"");
+    show("r\"raw \\n\"");
+    show("r#\"has \"quotes\"\"#");
+    show("\"two\nlines\"");
+    show("\"joined \\\n      here\"");
+    show("[]");
+    show("[1, 2, 3,]");
+    show("[[1], [], [\"x\"]]");
+    show("{}");
+    show("{ \"k\": 1, 2: [true], 'c': none, }");
+    show("()");
+    show("(1,)");
+    show("(1, \"two\", 3.0)");
+    show("(5)");
+    show("Point { x: 1, y: 2 }");
+    show("{ x: 1, y: -2, }");
+    show("Empty {}");
+    show("geom::Point { x: 1 }");
+    show("Mode::Fast");
+    show("Shape::Circle(1.0, at: (0, 0))");
+    show("Shape::Rect { w: 2, h: 3 }");
+    show("a::b::E::V");
+    show("Pair(7, \"seven\")");
+    show("/* lead */ [1, // one\n 2 /* two /* nested */ */]");
+
+    let a = try! rokon::parse("{ \"k\": [1, 2.5, 'c'] }");
+    let b = try! rokon::parse("{\"k\":[1,2.5,'c',],}");
+    println(f"equal: {a == b} {a == Value::None}");
+    let d: OrderedDict<Value, Value> = OrderedDict::new();
+    d.insert(Value::Str("k"), Value::Int(1));
+    d.insert(Value::Tuple([Value::Int(1), Value::Bool(true)]), Value::None);
+    println(Value::Dict(d).to_string());
+}

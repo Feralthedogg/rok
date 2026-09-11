@@ -6,6 +6,6 @@
 // ends the process with status 1 (spec 4.16.4) — not a panic (101).
 // `Display` (core::fmt has it for `i32`) gives the message.
 fn main() throws (i32) -> i32 {
-    rok_print_str("before");
+    println("before");
     throw 7;
 }

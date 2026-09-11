@@ -17,6 +17,6 @@ impl Cell {
 fn main() -> i32 {
     let c = Cell { v: 0 };
     c.replace_with(99);
-    rok_print_i32(c.v);
+    println(f"{c.v}");
     return 0;
 }

@@ -8,7 +8,7 @@
 // Not in 2.16 but provided because the blocking APIs need them: `Once`,
 // `Condvar` (Rust-shaped).
 
-extern "C" {
+extern "rok" {
     fn rok_task_key_i32(word: GcBuf<i32>) -> usize;
     fn rok_sync_wait(word: GcBuf<i32>, index: usize, expected: i32);
     fn rok_sync_wake(word: GcBuf<i32>, index: usize);

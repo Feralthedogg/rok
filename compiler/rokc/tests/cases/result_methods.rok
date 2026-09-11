@@ -49,31 +49,31 @@ fn plus_one(x: i32 | none) throws (E) -> i32 | none {
 fn main() -> i32 {
     let a = keep(4);
     let b = keep(-1);
-    if a.is_ok() { rok_print_str("a ok"); }
-    if b.is_err() { rok_print_str("b err"); }
-    rok_print_i32(a.unwrap_or(0));
-    rok_print_i32(b.unwrap_or(-7));
-    rok_print_i32(a.ok() ?? 0);
-    rok_print_i32(a.map(double).unwrap());
-    rok_print_i32(try twice_again(5) catch _ { 0 });
-    rok_print_i32(try twice_again(0) catch E::Zero { 99 } catch _ { 0 });
+    if a.is_ok() { println("a ok"); }
+    if b.is_err() { println("b err"); }
+    println(f"{a.unwrap_or(0)}");
+    println(f"{b.unwrap_or(-7)}");
+    println(f"{a.ok() ?? 0}");
+    println(f"{a.map(double).unwrap()}");
+    println(f"{try twice_again(5) catch _ { 0 }}");
+    println(f"{try twice_again(0) catch E::Zero { 99 } catch _ { 0 }}");
     let c = Result::catching(|| try check(3));
-    rok_print_i32(c.unwrap_or(0));
+    println(f"{c.unwrap_or(0)}");
     let d: Result<i32, E> = Result::catching(|| try check(-3));
-    rok_print_i32(d.unwrap_or(-1));
+    println(f"{d.unwrap_or(-1)}");
     let five: i32 | none = 5;
-    rok_print_i32(try! plus_one(five) ?? 0);
+    println(f"{try! plus_one(five) ?? 0}");
     let nothing: i32 | none = none;
     match try! plus_one(nothing) {
-        v: i32 => rok_print_i32(v),
-        none => rok_print_str("none"),
+        v: i32 => println(f"{v}"),
+        none => println("none"),
     };
     let eight: Result<i32, E> = Result::Ok(8);
     let zero: Result<i32, E> = Result::Err(E::Zero);
-    rok_print_i32(eight.and_then(halve).and_then(halve).unwrap_or(0));
-    rok_print_i32(zero.unwrap_or_else(recover));
-    if zero.map_err(to_f).is_err() { rok_print_str("mapped err"); }
-    rok_print_i32(zero.or_else(retry).unwrap_or(0));
+    println(f"{eight.and_then(halve).and_then(halve).unwrap_or(0)}");
+    println(f"{zero.unwrap_or_else(recover)}");
+    if zero.map_err(to_f).is_err() { println("mapped err"); }
+    println(f"{zero.or_else(retry).unwrap_or(0)}");
     return 0;
 }
 

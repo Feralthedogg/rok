@@ -10,9 +10,9 @@ fn spawn<T: Send>(f: fn() -> T + Send) -> T { return f(); }
 
 fn main() -> i32 {
     let base = 40;
-    rok_print_i32(spawn(|| base + 2));
+    println(f"{spawn(|| base + 2)}");
     let xs: List<i32> = [3, 4];
     let g: fn() -> i32 + Send = || xs[0] + xs[1];
-    rok_print_i32(g());
+    println(f"{g()}");
     return 0;
 }

@@ -18,7 +18,7 @@ fn find(xs: [i32; 4], want: i32) -> i64 {
 }
 
 fn main() -> i32 {
-    rok_print_i32(find([4, 5, 6, 7], 7) as i32);
+    println(f"{find([4, 5, 6, 7], 7) as i32}");
     // Annotated: both arms coerce into the sum slot.
     let n = 0;
     let v: i32 | bool = loop {
@@ -27,15 +27,15 @@ fn main() -> i32 {
         if n == 3 { break 100; }
     };
     match v {
-        x: i32 => rok_print_i32(x),
-        b: bool => rok_print_i32(0),
+        x: i32 => println(f"{x}"),
+        b: bool => println(f"{0}"),
     }
     // Unannotated: the first break fixes the type.
     let k = 'outer: {
         if n == 3 { break 'outer 7; }
         break 'outer 8;
     };
-    rok_print_i32(k);
+    println(f"{k}");
     let m = loop {
         let j = 0;
         loop {
@@ -44,6 +44,6 @@ fn main() -> i32 {
         }
         break j;
     };
-    rok_print_i32(m);
+    println(f"{m}");
     return 0;
 }

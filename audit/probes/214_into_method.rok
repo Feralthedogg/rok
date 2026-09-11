@@ -8,6 +8,6 @@
 fn main() -> i32 {
     let big: i64 = 100i64;
     let n: i32 = big.into();
-    rok_print_i32(n);
+    println(f"{n}");
     return 0;
 }

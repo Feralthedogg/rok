@@ -13,9 +13,9 @@ extern "C" {
 fn main() -> i32 {
     let p = unsafe { rok_alloc(64usize, 8usize) };
     if p != 0usize {
-        rok_print_str("alloc ok");
+        println("alloc ok");
     } else {
-        rok_print_str("alloc fail");
+        println("alloc fail");
     }
     unsafe { rok_free(p) };
     return 0;

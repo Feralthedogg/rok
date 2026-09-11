@@ -22,15 +22,15 @@ fn run(f: fn(i32) throws (Negative | TooBig) -> i32, x: i32) -> i32 {
 
 fn main() -> i32 {
     let g: fn(i32) throws (Negative) -> i32 = check;
-    rok_print_i32(run(g, 2));
-    rok_print_i32(run(g, -5));
+    println(f"{run(g, 2)}");
+    println(f"{run(g, -5)}");
     let k = 3;
     let plain: fn(i32) -> i32 = |x| x * k;
-    rok_print_i32(run(plain, 3));
+    println(f"{run(plain, 3)}");
     let limited: fn(i32) throws (Negative | TooBig) -> i32 = |x| {
         if x > 100 { throw TooBig { v: x }; }
         return x;
     };
-    rok_print_i32(run(limited, 500));
+    println(f"{run(limited, 500)}");
     return 0;
 }

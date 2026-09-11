@@ -9,8 +9,8 @@
 // spec 3.15.4: 중첩 분해 `let ((a, b), c) = ((1, 2), 3);`.
 fn main() -> i32 {
     let ((a, b), c) = ((1, 2), 3);
-    rok_print_i32(a);
-    rok_print_i32(b);
-    rok_print_i32(c);
+    println(f"{a}");
+    println(f"{b}");
+    println(f"{c}");
     return 0;
 }

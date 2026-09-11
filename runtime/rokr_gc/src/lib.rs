@@ -106,32 +106,12 @@ use rokr_common::object_header::{
 
 pub mod world;
 
+use rokr_common::gc_abi::{AMBIGUOUS, ANY_SLOT, INTERIOR_REF, STRONG_REF, USER_TYPE_BASE};
+pub use rokr_common::gc_abi::{ANY_BOXED, SCAN_WORDS_TYPE_ID};
+
 /// Heap size below which no collection runs.
 const MIN_HEAP: usize = 4 << 20;
-/// First type id of the user range (801 §8.1.2).
-const USER_TYPE_BASE: u32 = 0x10000;
-/// `ScanTable` `field_kind`s (802 §8.2.3). `STRONG_REF` / `INTERIOR_REF`
-/// words hold a reference (to the header / into the object: a `str`)
-/// or a non-heap address; both are updated when the referent moves.
-const STRONG_REF: u32 = 0;
-const INTERIOR_REF: u32 = 2;
-/// `tag: u32` here, the payload word pointer-aligned after it: a box
-/// reference iff the tag has [`ANY_BOXED`] (802 §8.2.7).
-const ANY_SLOT: u32 = 3;
-/// Implementation kind (802 "5 ~"): a word that may hold a reference or
-/// any other bits (an enum union payload word). Its referent is kept
-/// alive and never moved.
-const AMBIGUOUS: u32 = 5;
-/// `ScanTable` `version` bit (implementation): the table describes one
-/// element of `total_size` bytes, repeated over the whole payload (a
-/// `GcBuf` / collection buffer; entry offsets are element-relative).
-const TABLE_ARRAY: u16 = 0x8000;
-/// `any` tag bit: the payload word is a box reference (else the value
-/// itself: a number / bool / char no wider than a pointer).
-pub const ANY_BOXED: u32 = 1 << 31;
-/// Reserved type id: every pointer-aligned payload word is an ambiguous
-/// reference (runtime word buffers: the work-stealing deque).
-pub const SCAN_WORDS_TYPE_ID: u32 = 2;
+const TABLE_ARRAY: u16 = rokr_common::gc_abi::TABLE_ARRAY as u16;
 
 /// Immix block / line geometry (703 §7.3.1).
 pub const BLOCK_SIZE: usize = 32 << 10;
@@ -139,11 +119,11 @@ pub const LINE_SIZE: usize = 128;
 const LINES: usize = BLOCK_SIZE / LINE_SIZE;
 const GRANULES: usize = BLOCK_SIZE / 8;
 /// Objects this large (header included) go to the LOS (702 §7.2.3).
-pub const LOS_THRESHOLD: usize = 8 << 10;
+pub const LOS_THRESHOLD: usize = rokr_common::gc_abi::LOS_THRESHOLD as usize;
 /// Card size of an old LOS object (`FLAG_CARDED`): a reference store
 /// dirties the card(s) of its slot and a minor collection scans only
 /// dirty cards, not the whole object.
-pub const CARD_SIZE: usize = 512;
+pub const CARD_SIZE: usize = 1 << rokr_common::gc_abi::CARD_SHIFT;
 /// Address space reserved for blocks (committed one block at a time).
 // ponytail: a fixed reservation caps the block heap at 64 GiB; chain
 // several reservations if a program ever needs more.

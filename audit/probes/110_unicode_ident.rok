@@ -9,6 +9,6 @@ fn main() -> i32 {
     let α: i32 = 5;
     let β: i32 = 5;
     let σ: i32 = α * β;
-    rok_print_i32(σ);
+    println(f"{σ}");
     return 0;
 }

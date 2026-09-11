@@ -5,6 +5,6 @@
 // `\x` escapes above 0x7F are rejected in string literals (spec 1.7.1).
 // 107_bad_escapes only ever reported the `\q` before it.
 fn main() -> i32 {
-    rok_print_str("\x80");
+    println("\x80");
     return 0;
 }

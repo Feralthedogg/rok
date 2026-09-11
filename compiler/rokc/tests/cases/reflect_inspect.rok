@@ -50,37 +50,37 @@ impl Color {
 fn dump<T: Inspect>(x: T) {
     for name in T::field_names() {
         if let v: any = x.get_field(name) {
-            rok_print_str(f"{name} = {v.type_name_of()}");
+            println(f"{name} = {v.type_name_of()}");
         }
     }
 }
 
 let c = Config { host: "localhost", port: 8080 };
-rok_print_str(f"{Config::field_names():?}");
+println(f"{Config::field_names():?}");
 match c.get_field("port") {
-    p: any => rok_print_str(p.type_name_of()),
-    none => rok_print_str("none"),
+    p: any => println(p.type_name_of()),
+    none => println("none"),
 }
 match c.get_field("nope") {
-    p: any => rok_print_str(p.type_name_of()),
-    none => rok_print_str("none"),
+    p: any => println(p.type_name_of()),
+    none => println("none"),
 }
-rok_print_str(f"{c.set_field("port", 9090)} {c.port}");
-rok_print_str(f"{c.set_field("xxx", 1)} {c.set_field("port", "no")}");
+println(f"{c.set_field("port", 9090)} {c.port}");
+println(f"{c.set_field("xxx", 1)} {c.set_field("port", "no")}");
 let s = Small { b: 1u8 };
-rok_print_str(f"{s.set_field("b", 200)} {s.b} {s.set_field("b", 300)} {s.b}");
-rok_print_str(f"{s.set_field("b", -1)} {s.b}");
+println(f"{s.set_field("b", 200)} {s.b} {s.set_field("b", 300)} {s.b}");
+println(f"{s.set_field("b", -1)} {s.b}");
 for m in Config::methods() {
-    rok_print_str(f"{m.name} {m.arity} {m.is_static} {m.arg_types:?} {m.return_type}");
+    println(f"{m.name} {m.arity} {m.is_static} {m.arg_types:?} {m.return_type}");
 }
 let b = Box { v: 1.5, n: 2 };
-rok_print_str(f"{b.type_name_of()} {Box::<f64>::field_names():?}");
-rok_print_str(f"{b.set_field("v", 2.5)} {b.v}");
+println(f"{b.type_name_of()} {Box::<f64>::field_names():?}");
+println(f"{b.set_field("v", 2.5)} {b.v}");
 for m in Box::<f64>::methods() {
-    rok_print_str(f"{m.name} {m.arity} {m.arg_types:?} {m.return_type}");
+    println(f"{m.name} {m.arity} {m.arg_types:?} {m.return_type}");
 }
 let p = Pair(1, "x");
-rok_print_str(f"{Pair::field_names():?}");
-rok_print_str(f"{p.set_field("0", 7)} {p.0}");
-rok_print_str(f"{Color::field_names():?} {Color::methods().len()}");
+println(f"{Pair::field_names():?}");
+println(f"{p.set_field("0", 7)} {p.0}");
+println(f"{Color::field_names():?} {Color::methods().len()}");
 dump(p);

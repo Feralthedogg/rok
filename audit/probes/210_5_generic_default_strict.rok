@@ -12,6 +12,6 @@ fn make_one<T = i32>() -> T {
 
 fn main() -> i32 {
     let n = make_one();
-    rok_print_i32(n + 4);
+    println(f"{n + 4}");
     return 0;
 }

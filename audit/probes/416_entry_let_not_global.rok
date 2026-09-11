@@ -8,5 +8,5 @@ let limit = 3;
 check();
 
 fn check() {
-    rok_print_i32(limit);
+    println(f"{limit}");
 }

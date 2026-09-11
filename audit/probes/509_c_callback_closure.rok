@@ -10,6 +10,6 @@ extern "C" {
 
 fn main() -> i32 {
     let k = 2i64;
-    unsafe { rok_par_for(0i64, 3i64, 1i64, |i| { rok_print_i64(i * k); }) };
+    unsafe { rok_par_for(0i64, 3i64, 1i64, |i| { println(f"{i * k}"); }) };
     return 0;
 }

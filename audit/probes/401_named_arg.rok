@@ -10,6 +10,6 @@ fn divmod(num: i32, den: i32) -> i32 {
 }
 
 fn main() -> i32 {
-    rok_print_i32(divmod(num: 30, den: 6));
+    println(f"{divmod(num: 30, den: 6)}");
     return 0;
 }

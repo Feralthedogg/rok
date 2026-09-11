@@ -26,21 +26,21 @@ fn big(x: i32) -> bool { return x > 4; }
 
 fn main() -> i32 {
     let xs: List<i32> = [1, 2, 3, 4, 5];
-    rok_print_i32(xs.iter().map(double).filter(big).sum());
-    rok_print_i32(xs.iter().filter(|x| x > 2).count() as i32);
-    rok_print_i32(xs.iter().fold(0, |a, x| a + x));
+    println(f"{xs.iter().map(double).filter(big).sum()}");
+    println(f"{xs.iter().filter(|x| x > 2).count() as i32}");
+    println(f"{xs.iter().fold(0, |a, x| a + x)}");
     let ys: List<i32> = xs.iter().map(|x| x * 3).collect();
-    rok_print_i32(ys[1]);
+    println(f"{ys[1]}");
     let ones: List<i32> = [1, 1, 2];
     let s: Set<i32> = ones.iter().collect();
-    rok_print_i32(s.len() as i32);
+    println(f"{s.len() as i32}");
     let c = Counter { left: [1, 2, 3, 4] };
-    rok_print_i32(c.sum());
+    println(f"{c.sum()}");
     let n = 0;
     let c2 = Counter { left: [7, 8, 9, 10] };
     for x in c2.filter(|x| x % 2 == 0) {
         n = n + 1;
     }
-    rok_print_i32(n * 2);
+    println(f"{n * 2}");
     return 0;
 }

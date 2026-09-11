@@ -21,7 +21,7 @@ use rok::std::io::{IoError, IoErrorKind, Reader, Writer, check, err_cell, check_
 use rok::std::time::Duration;
 use rok::std::fs::AsBytes;
 
-extern "C" {
+extern "rok" {
     fn rok_os_close(fd: i32) -> i32;
     fn rok_os_dup(fd: i32) -> i32;
     fn rok_os_read(fd: i32, max: usize, err: GcBuf<i32>) -> str;

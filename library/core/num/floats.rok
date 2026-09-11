@@ -4,7 +4,7 @@
 // (`runtime/rokr/src/math.rs`); `to_bits` / `from_bits` reinterpret
 // through a union. `sqrt` is the `Sqrt` trait's (num.rok).
 
-extern "C" {
+extern "rok" {
     fn rok_f64_floor(x: f64) -> f64;
     fn rok_f64_ceil(x: f64) -> f64;
     fn rok_f64_round(x: f64) -> f64;

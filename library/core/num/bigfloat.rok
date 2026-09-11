@@ -520,7 +520,7 @@ impl FromStr for Float {
     }
 }
 
-extern "C" {
+extern "rok" {
     fn rok_fmt_spec_info(spec: str) -> u64;
     fn rok_fmt_num(neg: u32, prefix: str, body: str, spec: str) -> str;
 }

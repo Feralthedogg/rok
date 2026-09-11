@@ -14,10 +14,9 @@
 //! to `;` (line breaks kept, so diagnostics keep their lines): what
 //! downstream code needs (signatures, types, traits, impls, generic and
 //! `async` / `#[inline]` bodies, trait defaults) and nothing it can link.
-// ponytail: the body section is rok source, not a HIR/AST tree (904.9-11
-// type / item / body sections): monomorphization consumes AST, and the
-// parser is the AST reader. A downstream build still parses + collects
-// the interface; a binary AST would only save the (cheap) parse.
+// The body is rok source rather than 904.9-11's type / item / body
+// sections: monomorphization consumes AST and the parser reads it; a
+// binary tree would only save the (cheap) parse.
 
 use std::path::{Path, PathBuf};
 
@@ -49,8 +48,8 @@ pub struct Rhir {
 
 /// This compiler: a RHIR from any other one is stale.
 pub fn producer() -> String {
-    // ponytail: the executable's size + mtime stand for its build; a
-    // content hash would survive `touch` but costs a read of rokc.
+    // Size and mtime stand for the build: a content hash would survive
+    // `touch` but costs a read of rokc.
     let id = std::env::current_exe()
         .and_then(std::fs::metadata)
         .map(|m| {
@@ -268,12 +267,8 @@ fn cut_spans(items: &[Item], out: &mut Vec<(rokc_diagnostic::Span, rokc_diagnost
 /// `text` with the bodies of `items` (its parse) cut to `;`.
 fn strip(text: &str, file_id: u32, items: &[Item]) -> String {
     let (tokens, _) = rokc_lexer::Lexer::new(text, String::new()).lex_all();
-    // ponytail: a file defining meta blocks / keywords / literals is
-    // kept whole — their templates could hold a `fn` we would cut.
-    if tokens.iter().any(|t| t.kind == rokc_lexer::TokenKind::At)
-        || text.contains("#[keyword(")
-        || text.contains("#[literal(")
-    {
+    // A template could hold a `fn` this would cut.
+    if crate::defines_metas(&tokens, text) {
         return text.to_owned();
     }
     let mut spans = Vec::new();
@@ -422,9 +417,8 @@ pub fn companions(path: &Path) -> (PathBuf, PathBuf) {
 /// The `pub` items of an interface file, one line each (as written, up
 /// to the body; methods as `Type::fn ..`); generic ones (with `<` before
 /// `(`, or in an `impl<..>`) apart.
-// ponytail: line-level (a `pub` line, an `impl` line at column 0 opens
-// a block until a `}` line), not a walk of the parse: enough for a
-// listing of formatted source.
+// Line-level (a `pub` line; an `impl` line at column 0 opens a block
+// until a `}` line), which suffices for formatted source.
 fn signatures(text: &str, exports: &mut Vec<String>, generic: &mut Vec<String>) {
     let mut impl_of: Option<(String, bool)> = None;
     for line in text.lines() {

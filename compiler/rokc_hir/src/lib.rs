@@ -20,14 +20,21 @@ pub use lower::type_visible;
 pub use lower::{lower, lower_full, lower_with_uses};
 pub use print::print_hir;
 
-/// Program attribute set by the driver: the dependency packages' names.
-///
-/// Its args are words, the top-level module names that are dependency
-/// packages (`--extern`). Visibility stops
-/// at a package (`pub(pkg)`, `pub(sub)`), `pkg::` in a dependency is the
-/// dependency, and a path starting with a dependency's name reaches it
-/// from any module.
-pub const PACKAGES_ATTR: &str = "#packages";
+/// What the driver tells HIR about the build besides the program.
+#[derive(Clone, Debug, Default)]
+pub struct HirInput {
+    /// The dependency packages' top-level names (`--extern`).
+    /// Visibility stops at a package (`pub(pkg)`, `pub(sub)`), `pkg::`
+    /// in a dependency is the dependency, and a path starting with a
+    /// dependency's name reaches it from any module.
+    pub packages: Vec<String>,
+    /// The dependency package this build compiles as a prebuilt library
+    /// (`lib<name>.a` + `<name>.rhir`): every body of it is lowered.
+    pub lib: Option<String>,
+    /// Packages loaded from RHIR (spec 904): their body-less functions
+    /// are declarations of the symbols in their archives.
+    pub prebuilt: Vec<String>,
+}
 
 /// Marker attribute (string argument) with the module of an `impl`
 /// block, set by the driver.
@@ -38,29 +45,13 @@ pub const IMPL_MODULE_ATTR: &str = "#impl_module";
 /// the body (spec 2.8.3).
 pub const ASSOC_TYPES_ATTR: &str = "#assoc";
 
-/// Marker attribute on the compiler-injected runtime hook block.
-///
-/// Its functions are safe to call although they are `extern "C"` (spec
-/// 4.15 makes user-declared externs implicitly `unsafe`). `#` cannot
-/// start a user attribute name.
-pub const SAFE_EXTERN_ATTR: &str = "#safe_extern";
-
-/// Marker attribute on a function of a prebuilt dependency (loaded from
-/// its RHIR, spec 904) whose body is in the dependency's `.a`: a
-/// declaration with the dependency's mangled symbol and the rok ABI.
-pub const PREBUILT_ATTR: &str = "#prebuilt";
-
-/// Program attribute (one word): the dependency package this build
-/// compiles as a prebuilt library (`lib<name>.a` + `<name>.rhir`). Every
-/// body of that package is lowered, not only the reachable ones.
-pub const LIB_ATTR: &str = "#lib";
 pub use ty::resolve_ty;
 pub use uses::{ReExport, UseEntry, UseTable, build_use_table};
 
 use rokc_core::DefId;
 use rokc_diagnostic::RokDiagnostic;
 use rokc_diagnostic::Span;
-use rokc_ir_common::{ConstVal, FunctionId, LocalId, PrimOp, PrimTy};
+use rokc_ir_common::{ConstVal, FnFacts, FunctionId, LocalId, PrimOp, PrimTy};
 
 #[derive(Clone, Debug, Default)]
 pub struct HirModule {
@@ -74,21 +65,17 @@ pub struct HirModule {
     /// glob conflicts, unresolved paths, etc. Driver appends these to
     /// its overall diagnostic list.
     pub diagnostics: Vec<RokDiagnostic>,
-    /// `#[export_name("sym")]` functions (spec 905 / 509.10): linker
-    /// symbol, and a root of unreachable-function pruning.
-    pub exports: Vec<(FunctionId, String)>,
+    /// What code generation starts from: `main`, the exports and the
+    /// lazy static initializers (a prebuilt library: also every function
+    /// of its package and the `any` dispatchers). `None`: keep every
+    /// function (a library without `main`).
+    pub roots: Option<Vec<FunctionId>>,
     /// Library functions no lowered body reaches: body-less stubs in
     /// `functions` (signatures for tools), not code to emit.
     pub unlowered: Vec<FunctionId>,
-    /// C variadic `extern` declarations (spec 8.6.10).
-    pub c_variadic: Vec<FunctionId>,
-    /// `extern "C" fn` definitions (spec 5.9.10): C code calls them.
-    pub c_defs: Vec<FunctionId>,
     /// Every type-like item (struct, enum, union, alias, trait) by full
     /// name: its visibility (`type_visible`).
     pub type_visibility: std::collections::HashMap<String, rokc_core::Visibility>,
-    /// Declarations of a prebuilt dependency's functions (`PREBUILT_ATTR`).
-    pub prebuilt: Vec<FunctionId>,
     /// A prebuilt-library build's `any` seeds for its RHIR: `(module,
     /// rok source)` (see `lower::expr::any_link`).
     pub any_seeds: Vec<(String, String)>,
@@ -218,6 +205,7 @@ pub struct HirFunction {
     pub is_async: bool,
     pub is_generator: bool,
     pub span: Span,
+    pub facts: FnFacts,
 }
 
 #[derive(Clone, Debug)]

@@ -15,7 +15,7 @@ fn find(x: i32) throws -> i32 {
 }
 
 fn main() throws -> i32 {
-    rok_print_str("before");
+    println("before");
     let v = try find(3) + try find(40);
     return v;
 }

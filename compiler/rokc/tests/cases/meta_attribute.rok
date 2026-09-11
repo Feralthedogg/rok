@@ -18,11 +18,11 @@ pub @attribute {
     @accept(fn)
     fn @item.name(@item.params) -> @item.return_type {
         let start = @attribute;
-        rok_print_str(f"[{start}] @item.name");
+        println(f"[{start}] @item.name");
         let result = {
             @item.body
         };
-        rok_print_str("@item.name done");
+        println("@item.name done");
         return result;
     }
 }
@@ -75,10 +75,10 @@ fn helper(x: i32) -> i32 {
 
 fn main() -> i32 {
     // `start` is both the template's local and the item's parameter.
-    rok_print_str(f"{scale(3)}");
-    rok_print_str(f"{seven()}");
+    println(f"{scale(3)}");
+    println(f"{seven()}");
     let _z = noop();
-    rok_print_str(f"helper {helper(9)}");
-    rok_print_str(Tag::type_name());
+    println(f"helper {helper(9)}");
+    println(Tag::type_name());
     return 0;
 }

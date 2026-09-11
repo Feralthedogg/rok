@@ -149,15 +149,72 @@ pub enum ConstVal {
     None,
 }
 
-/// Runtime extern whose `fn` parameters take whole rok function values.
-///
-/// That is `{code, env}`, so closures are allowed; every other extern's
-/// `fn` parameter is a thin C callback.
-// ponytail: decided by symbol name like `str`'s ABI; an ABI field on
-// extern declarations replaces both.
-#[must_use]
-pub fn takes_rok_fn_values(extern_name: &str) -> bool {
-    matches!(extern_name, "rok_thread_spawn" | "rok_par_spawn")
+/// Calling convention of a function.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Abi {
+    /// rok's own: `str` is `(ptr, len)` by value, a `fn` value is
+    /// `{code, env}`. Every rok function, and `extern "rok"` runtime
+    /// declarations.
+    #[default]
+    Rok,
+    /// The platform C ABI (spec 8.6): `str` is a NUL-terminated `char*`,
+    /// a `fn` parameter a bare C function pointer, aggregates classified.
+    C { variadic: bool },
+}
+
+/// Where a function's code comes from.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Linkage {
+    /// Its body is compiled here.
+    #[default]
+    Defined,
+    /// A declaration of an outside symbol, under its own name.
+    Extern,
+    /// A declaration of a prebuilt dependency's function (spec 904):
+    /// mangled, in the dependency's archive.
+    Prebuilt,
+}
+
+/// A function the back end treats specially.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FnRole {
+    #[default]
+    Plain,
+    /// The user's `main`: the C `main` wraps it.
+    Main,
+    /// An `any Tr` method dispatcher: weak in a prebuilt library, so the
+    /// program's complete one replaces it.
+    AnyDispatcher,
+}
+
+/// Per-function facts HIR decides and MIR / codegen only read.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FnFacts {
+    pub abi: Abi,
+    pub linkage: Linkage,
+    /// `#[export_name("sym")]` (spec 905.8).
+    pub export_name: Option<String>,
+    pub role: FnRole,
+    /// A generic instance: its type arguments, mangled into the symbol's
+    /// typehash (905.2). The function's name then ends in
+    /// `MONO_MARK` + these.
+    pub mono_args: Option<String>,
+}
+
+/// Separator between a generic function's path and its instance's type
+/// arguments in the instance's name.
+pub const MONO_MARK: &str = "__mono__";
+
+impl FnFacts {
+    /// The item path of a function named `name` (an instance's generic).
+    #[must_use]
+    pub fn path<'a>(&self, name: &'a str) -> &'a str {
+        self.mono_args
+            .as_ref()
+            .and_then(|a| name.strip_suffix(a.as_str()))
+            .and_then(|n| n.strip_suffix(MONO_MARK))
+            .unwrap_or(name)
+    }
 }
 
 /// Callee form after name resolution.

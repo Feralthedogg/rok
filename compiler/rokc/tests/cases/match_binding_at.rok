@@ -22,9 +22,9 @@ enum Shape { Dot(Point), Num(i32), Two(i32, i32) }
 
 fn classify(n: i32) {
     match n {
-        d @ 0..=9 => rok_print_str(f"digit {d}"),
-        b @ 10.. => rok_print_str(f"big {b}"),
-        o @ _ => rok_print_str(f"other {o}"),
+        d @ 0..=9 => println(f"digit {d}"),
+        b @ 10.. => println(f"big {b}"),
+        o @ _ => println(f"other {o}"),
     }
 }
 
@@ -35,52 +35,52 @@ fn main() -> i32 {
 
     let q = Point { x: 0, y: 5 };
     match q {
-        p @ Point { x: 0, .. } => rok_print_str(f"origin-x {p.y}"),
-        Point { x, y } => rok_print_str(f"p {x} {y}"),
+        p @ Point { x: 0, .. } => println(f"origin-x {p.y}"),
+        Point { x, y } => println(f"p {x} {y}"),
     }
     let q2 = Point { x: 1, y: 2 };
     match q2 {
-        p @ Point { x: 0, .. } => rok_print_str(f"origin-x {p.y}"),
-        Point { x, y } => rok_print_str(f"p {x} {y}"),
+        p @ Point { x: 0, .. } => println(f"origin-x {p.y}"),
+        Point { x, y } => println(f"p {x} {y}"),
     }
 
     // Nested: inside a tuple and an enum payload.
     match (3, true) {
-        (n @ 1..=5, true) => rok_print_str(f"pair {n}"),
-        _ => rok_print_str("no"),
+        (n @ 1..=5, true) => println(f"pair {n}"),
+        _ => println("no"),
     }
     match Shape::Two(10, 11) {
-        Shape::Two(a @ 10, b @ 11..=20) => rok_print_str(f"tens {a} {b}"),
-        Shape::Two(_, _) => rok_print_str("two"),
-        Shape::Num(n @ 1..=3) => rok_print_str(f"num {n}"),
-        Shape::Num(_) => rok_print_str("num"),
-        Shape::Dot(p @ Point { x: 0, .. }) => rok_print_str(f"dot {p.y}"),
-        Shape::Dot(_) => rok_print_str("dot"),
+        Shape::Two(a @ 10, b @ 11..=20) => println(f"tens {a} {b}"),
+        Shape::Two(_, _) => println("two"),
+        Shape::Num(n @ 1..=3) => println(f"num {n}"),
+        Shape::Num(_) => println("num"),
+        Shape::Dot(p @ Point { x: 0, .. }) => println(f"dot {p.y}"),
+        Shape::Dot(_) => println("dot"),
     }
 
     // A refutable payload sub-pattern falls through to the next arm.
     let shapes = [Shape::Num(7), Shape::Dot(Point { x: 0, y: 9 })];
     for sh in shapes {
         match sh {
-            Shape::Num(n @ 1..=3) => rok_print_str(f"num {n}"),
-            Shape::Num(_) => rok_print_str("num"),
-            Shape::Dot(p @ Point { x: 0, .. }) => rok_print_str(f"dot {p.y}"),
-            _ => rok_print_str("other"),
+            Shape::Num(n @ 1..=3) => println(f"num {n}"),
+            Shape::Num(_) => println("num"),
+            Shape::Dot(p @ Point { x: 0, .. }) => println(f"dot {p.y}"),
+            _ => println("other"),
         }
     }
 
     // if let / while let.
     if let a @ 4 = 2 + 2 {
-        rok_print_str(f"a {a}");
+        println(f"a {a}");
     }
     if let Shape::Num(z @ 0) = Shape::Num(0) {
-        rok_print_str("zero");
+        println("zero");
         let _ = z;
     }
     let s = Shape::Num(8);
     match s {
-        Shape::Num(g @ 5..) if g % 2 == 0 => rok_print_str(f"guard {g}"),
-        _ => rok_print_str("no guard"),
+        Shape::Num(g @ 5..) if g % 2 == 0 => println(f"guard {g}"),
+        _ => println("no guard"),
     }
     let i = 0;
     let sum = 0;
@@ -88,6 +88,6 @@ fn main() -> i32 {
         sum = sum + k;
         i = i + 1;
     }
-    rok_print_str(f"sum {sum}");
+    println(f"sum {sum}");
     return 0;
 }

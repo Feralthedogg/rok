@@ -34,19 +34,19 @@ fn main() -> i32 {
         total
     });
     try! tx.send(5);
-    rok_print_i64(got.load());
+    println(f"{got.load()}");
     // Nobody is waiting in `recv`: a rendezvous `try_send` is `Full`.
     let (lonely, _unused) = channel_bounded::<i64>(0);
     try lonely.try_send(9) catch e {
         match e {
-            TrySendError::Full(v) => rok_print_str(f"full {v}"),
-            TrySendError::Closed(_) => rok_print_str("closed"),
+            TrySendError::Full(v) => println(f"full {v}"),
+            TrySendError::Closed(_) => println("closed"),
         };
     };
     try! tx.send(6);
-    rok_print_i64(got.load());
+    println(f"{got.load()}");
     tx.close();
-    rok_print_i64(try! h.join());
+    println(f"{try! h.join()}");
 
     // Received values are not kept alive by the channel.
     let (tx2, rx2) = channel::<List<i64>>();
@@ -64,9 +64,9 @@ fn main() -> i32 {
         match rx2.recv() { xs: List<i64> => { sum += xs[999]; }, none => {}, }
         k += 1;
     }
-    rok_print_i64(sum);
+    println(f"{sum}");
     unsafe { rok_gc_collect() };
     if unsafe { rok_gc_stats_live_bytes() } > 200000usize { return 1; }
-    rok_print_str("freed");
+    println("freed");
     return 0;
 }

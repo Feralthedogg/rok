@@ -13,6 +13,6 @@ fn id<T = i32>(x: T) -> T {
 
 fn main() -> i32 {
     let n = id(5);
-    rok_print_i32(n);
+    println(f"{n}");
     return 0;
 }

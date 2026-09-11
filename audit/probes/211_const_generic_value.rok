@@ -11,6 +11,6 @@ fn first<const N: usize>(arr: [i32; N]) -> i32 {
 
 fn main() -> i32 {
     let a: [i32; 3] = [3, 7, 9];
-    rok_print_i32(first::<3>(a));
+    println(f"{first::<3>(a)}");
     return 0;
 }

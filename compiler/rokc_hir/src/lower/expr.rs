@@ -3094,12 +3094,9 @@ pub(super) fn call_sig(
         let v = super::mono::ref_unpack(ctx, call, &out, &places);
         return with_lets(lets, v);
     }
-    // `rok_thread_spawn` takes a `fn` value as the whole `{code, env}`.
-    let runtime_sym = callee
-        .rsplit("::")
-        .next()
-        .is_some_and(rokc_ir_common::takes_rok_fn_values);
-    if ctx.env.extern_fn_ids.contains(&sig.id) && !runtime_sym {
+    // A C function's `fn` parameter is a bare code pointer (an
+    // `extern "rok"` one takes the whole `{code, env}`).
+    if ctx.env.extern_fn_ids.contains(&sig.id) {
         for a in &lowered {
             // An `extern "C" fn` value is already a C function pointer.
             if matches!(a.ty, HirTy::Fn(..) | HirTy::Closure { .. })
@@ -4310,6 +4307,10 @@ fn build_dispatcher(env: &Env<'_>, d: &AnyDispatch) -> HirFunction {
         is_async: false,
         is_generator: false,
         span,
+        facts: rokc_ir_common::FnFacts {
+            role: rokc_ir_common::FnRole::AnyDispatcher,
+            ..rokc_ir_common::FnFacts::default()
+        },
     }
 }
 
@@ -6956,7 +6957,7 @@ fn dyn_op(
             kind: HirExprKind::Block(Box::new(HirBlock {
                 stmts: vec![HirStmt::Panic(super::throws::hook_call(
                     ctx,
-                    "rok_panic",
+                    "rok_panic_str",
                     &format!(
                         "operator `{op}` is not defined for the runtime type of an `any` value"
                     ),

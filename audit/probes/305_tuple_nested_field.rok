@@ -9,7 +9,7 @@
 // two tuple-field accesses.
 fn main() -> i32 {
     let t = ((1, 2), 3);
-    rok_print_i32(t.0.1);
-    rok_print_i32(t.1);
+    println(f"{t.0.1}");
+    println(f"{t.1}");
     return 0;
 }

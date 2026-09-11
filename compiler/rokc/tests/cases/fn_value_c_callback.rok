@@ -18,6 +18,6 @@ fn show(i: i64) {
 
 fn main() -> i32 {
     unsafe { rok_par_for(0i64, 3i64, 1i64, show) };
-    rok_print_i64(TOTAL.load());
+    println(f"{TOTAL.load()}");
     return 0;
 }

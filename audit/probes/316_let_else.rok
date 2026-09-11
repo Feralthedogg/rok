@@ -14,10 +14,10 @@ fn maybe(b: i32) -> i32 | none {
 
 fn unwrap_or_print(b: i32) {
     let v: i32 = maybe(b) else {
-        rok_print_str("fallback");
+        println("fallback");
         return;
     };
-    rok_print_i32(v);
+    println(f"{v}");
 }
 
 fn main() -> i32 {

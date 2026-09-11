@@ -20,11 +20,11 @@ extern "C" {
 
 fn main() -> i32 {
     unsafe {
-        rok_print_f64(pow(2.0, 10.0));
-        rok_print_f64(hypot(3.0, 4.0));
-        rok_print_f64(ldexp(1.5, 3));
-        rok_print_i64(llabs(-9000000000i64));
-        rok_print_f64(fmax(-1.0, 3.5));
+        println(f"{pow(2.0, 10.0)}");
+        println(f"{hypot(3.0, 4.0)}");
+        println(f"{ldexp(1.5, 3)}");
+        println(f"{llabs(-9000000000i64)}");
+        println(f"{fmax(-1.0, 3.5)}");
     }
     return 0;
 }

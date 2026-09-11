@@ -22,14 +22,14 @@ fn origin_of<T: Origin>() -> T { return T::origin(); }
 
 fn main() -> i32 {
     let a: Box<i32> = Origin::origin();
-    rok_print_i32(a.v);
+    println(f"{a.v}");
     let b: Box<i32> = Box::origin();
-    rok_print_i32(b.v);
+    println(f"{b.v}");
     let c: Box<i32> = origin_of();
-    rok_print_i32(c.v);
+    println(f"{c.v}");
     let d: Box<i32> = Box::make(1);
-    rok_print_i32(d.v + 5);
+    println(f"{d.v + 5}");
     let e: Box<Box<i32>> = Origin::origin();
-    rok_print_i32(e.v.v + 10);
+    println(f"{e.v.v + 10}");
     return 0;
 }

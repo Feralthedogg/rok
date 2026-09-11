@@ -19,7 +19,7 @@ pub trait Debug {
     fn debug(self) -> str;
 }
 
-extern "C" {
+extern "rok" {
     fn rok_str_from_i64(n: i64) -> str;
     fn rok_str_from_u64(n: u64) -> str;
     fn rok_str_from_f64(d: f64, prec: i32) -> str;

@@ -14,7 +14,7 @@
 pub @attribute {
     @accept(fn)
     fn @item.name(@item.params) -> @item.return_type {
-        rok_print_str("fancy");
+        println("fancy");
         @item.body
     }
 }
@@ -24,7 +24,7 @@ pub @attribute {
 pub @attribute {
     @accept(fn)
     fn @item.name(@item.params) -> @item.return_type {
-        rok_print_str("plain");
+        println("plain");
         @item.body
     }
 }
@@ -42,7 +42,7 @@ pub @attribute {
 pub @attribute {
     @accept(fn)
     fn @item.name(@item.params) -> @item.return_type {
-        rok_print_str("plain");
+        println("plain");
         @item.body
     }
 }
@@ -71,7 +71,7 @@ fn three() -> i32 {
 }
 
 fn main() -> i32 {
-    rok_print_str(f"{two()}");
-    rok_print_str(f"{three()}");
+    println(f"{two()}");
+    println(f"{three()}");
     0
 }

@@ -13,7 +13,7 @@
 // ponytail: `Stdin::lock` returns the same handle (stdio's `FILE`
 // already locks per call).
 
-extern "C" {
+extern "rok" {
     fn rok_os_errno_kind(code: i32) -> i32;
     fn rok_os_strerror(code: i32) -> str;
     fn rok_os_stdin_line(err: GcBuf<i32>) -> str;

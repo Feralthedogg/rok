@@ -20,12 +20,12 @@ fn give() -> Result<i32, str> { return wrap(4); }
 
 fn main() -> i32 {
     let r: Result<i32, str> = wrap(3);
-    rok_print_i32(r.unwrap_or(0));
+    println(f"{r.unwrap_or(0)}");
     let z: Result<i32, i64> = first([0, 5]);
-    rok_print_i32(z.unwrap_or(9));
-    rok_print_i32(take(wrap(4)));
+    println(f"{z.unwrap_or(9)}");
+    println(f"{take(wrap(4))}");
     let m: Box<i64> | none = make(1);
-    rok_print_i32(match m { none => 1, _ => 0 });
-    rok_print_i32(give().unwrap_or(0));
+    println(f"{match m { none => 1, _ => 0 }}");
+    println(f"{give().unwrap_or(0)}");
     return 0;
 }

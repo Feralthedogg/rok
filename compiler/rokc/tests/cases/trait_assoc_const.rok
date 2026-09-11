@@ -69,15 +69,15 @@ impl<T> Boxed<T> {
 }
 
 fn main() -> i32 {
-    rok_print_i32(sides::<Square>() as i32);
-    rok_print_str(name_of(Square { s: 1 }));
-    rok_print_i32(sides::<Tri>() as i32);
-    rok_print_str(name_of(Tri { s: 1 }));
-    rok_print_str(Square { s: 1 }.describe());
-    rok_print_str(Tri { s: 1 }.describe());
-    rok_print_i32(Boxed::ONE);
-    rok_print_i32(bits(1i8));
-    rok_print_i32(bits(1i16));
-    rok_print_i32(Boxed { v: 5 }.twice());
+    println(f"{sides::<Square>() as i32}");
+    println(name_of(Square { s: 1 }));
+    println(f"{sides::<Tri>() as i32}");
+    println(name_of(Tri { s: 1 }));
+    println(Square { s: 1 }.describe());
+    println(Tri { s: 1 }.describe());
+    println(f"{Boxed::ONE}");
+    println(f"{bits(1i8)}");
+    println(f"{bits(1i16)}");
+    println(f"{Boxed { v: 5 }.twice()}");
     return 0;
 }

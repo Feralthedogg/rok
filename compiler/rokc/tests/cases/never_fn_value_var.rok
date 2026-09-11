@@ -10,6 +10,6 @@ fn run(g: fn() -> i32) -> i32 { return g(); }
 fn main() -> i32 {
     let f: fn() -> ! = die;
     let g: fn() -> i32 = f;
-    rok_print_i32(1);
+    println(f"{1}");
     return run(g);
 }

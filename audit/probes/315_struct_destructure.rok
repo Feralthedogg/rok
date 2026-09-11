@@ -11,7 +11,7 @@ struct Pt { x: i32; y: i32; }
 fn main() -> i32 {
     let p = Pt { x: 5, y: 7 };
     let Pt { x, y } = p;
-    rok_print_i32(x);
-    rok_print_i32(y);
+    println(f"{x}");
+    println(f"{y}");
     return 0;
 }

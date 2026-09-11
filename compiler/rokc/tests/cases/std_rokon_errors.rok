@@ -1,0 +1,139 @@
+// expect-exit: 0
+// expect-stdout:
+// parse: 1:1: bare identifier `foo` is not allowed in RokON (strings are quoted, variants are written `Enum::foo`)
+// parse: 1:5: bare identifier `nan` is not allowed in RokON (strings are quoted, variants are written `Enum::nan`)
+// parse: 1:3: operator `+` is not allowed in RokON (only `-` before a number)
+// parse: 1:1: unary `-` applies only to a number literal
+// parse: 1:1: unary `-` applies only to a number literal
+// parse: 1:7: method calls and field access are not allowed in RokON
+// parse: 1:1: bare identifier `p` is not allowed in RokON (strings are quoted, variants are written `Enum::p`)
+// parse: 1:3: `..` is not allowed in RokON
+// parse: 1:9: `..` is not allowed in RokON
+// parse: 1:3: bare identifier `let` is not allowed in RokON (strings are quoted, variants are written `Enum::let`)
+// parse: 1:1: sets and blocks are not allowed in RokON (a dict needs `key: value`)
+// parse: 1:1: f-strings are not allowed in RokON
+// parse: 1:1: number suffixes are not allowed in RokON
+// parse: 1:1: number suffixes are not allowed in RokON
+// parse: 1:8: expected the end of the document, found `[`
+// parse: 1:4: expected `,` or `]`, found `2`
+// parse: 1:1: unterminated string
+// parse: 1:1: a char literal holds exactly one character
+// parse: 1:6: unknown escape `\q`
+// parse: 1:1: missing digits after the base prefix
+// parse: 1:1: `_` must sit between digits
+// parse: 1:1: exponent has no digits
+// parse: 1:1: unterminated block comment
+// parse: 1:11: duplicate key `"a"`
+// parse: 1:11: field `x` is given twice
+// parse: 1:12: a positional value cannot follow named ones
+// parse: 3:3: expected a value, found `$`
+// parse: 1:1: unexpected end of input, expected a value
+// decode: 1:64: unknown field `extra` in Config [.extra]
+// decode: 1:1: missing field `mode` in Config []
+// decode: 1:1: expected Config, found `Other { .. }` []
+// decode: 2:11: expected str, found integer [.name]
+// decode: 3:11: `Mode::Medium` is not a variant of Mode [.mode]
+// decode: 3:11: expected a Mode variant, found `Kind::Fast` [.mode]
+// decode: 6:35: integer 70000 is out of range for u16 [.servers[1].port]
+// decode: 1:49: missing field `port` in Server [.servers[0]]
+// decode: 1:69: expected i32, found string [.limits["cpu"]]
+// decode: 1:62: expected str, found integer [.limits[1]]
+// decode: 1:71: Shape::Circle takes 1 value, found 2 [.shape]
+// decode: 1:89: expected i32, found string [.shape.h]
+// decode: 1:91: unknown field `d` in Shape::Rect [.shape.d]
+// decode: 1:27: Mode::Fast takes 0 values, found 1 [.mode]
+// decode: 1:60: expected Dict<str, i32>, found list [.limits]
+// decode: ok
+// value: at [1]: expected i32, found string
+
+// Spec 3.9.1 / 3.9.3: what RokON leaves out, and typed-decoding errors,
+// each with its `line:col`.
+
+use rok::std::rokon;
+use rok::std::rokon::{Value, RokonError, FromRokon};
+
+#[derive(Rokon)]
+enum Mode { Fast, Slow }
+
+#[derive(Rokon)]
+enum Shape {
+    Circle(f64),
+    Rect { w: i32; h: i32; },
+}
+
+#[derive(Rokon)]
+struct Server { host: str; port: u16; }
+
+#[derive(Rokon)]
+struct Config {
+    name: str;
+    mode: Mode;
+    servers: List<Server>;
+    limits: Dict<str, i32>;
+    shape: Shape | none;
+}
+
+fn read(s: str) {
+    let _ = try rokon::parse(s) catch e { println(f"parse: {e}"); return; };
+    println("parse: ok");
+}
+
+fn decode(s: str) {
+    let _ = try rokon::from_str::<Config>(s) catch e {
+        println(f"decode: {e} [{e.path}]");
+        return;
+    };
+    println("decode: ok");
+}
+
+fn main() {
+    read("foo");
+    read("[1, nan]");
+    read("1 + 2");
+    read("-x");
+    read("--1");
+    read("[1, 2].len()");
+    read("p.x");
+    read("[0..3]");
+    read("Point { ..base }");
+    read("{ let x = 1; x }");
+    read("{ 1, 2 }");
+    read("f\"{x}\"");
+    read("5i32");
+    read("1.5f64");
+    read("[1, 2] [3]");
+    read("[1 2]");
+    read("\"open");
+    read("'ab'");
+    read("\"bad \\q escape\"");
+    read("0x");
+    read("1__0");
+    read("1e");
+    read("/* open");
+    read("{ \"a\": 1, \"a\": 2 }");
+    read("P { x: 1, x: 2 }");
+    read("E::V(a: 1, 2)");
+    read("[\n  1,\n  $\n]");
+    read("");
+
+    decode("Config { name: \"x\", mode: Mode::Fast, servers: [], limits: {}, extra: 1 }");
+    decode("Config { name: \"x\", servers: [], limits: {} }");
+    decode("Other { name: \"x\" }");
+    decode("Config {\n    name: 7,\n}");
+    decode("Config {\n    name: \"x\",\n    mode: Mode::Medium,\n    servers: [],\n    limits: {},\n}");
+    decode("Config {\n    name: \"x\",\n    mode: Kind::Fast,\n}");
+    decode("Config {\n    name: \"x\",\n    mode: Mode::Fast,\n    servers: [\n        Server { host: \"a\", port: 80 },\n        Server { host: \"b\", port: 70000 },\n    ],\n    limits: {},\n}");
+    decode("Config { name: \"x\", mode: Mode::Fast, servers: [Server { host: \"a\" }], limits: {} }");
+    decode("Config { name: \"x\", mode: Mode::Fast, servers: [], limits: { \"cpu\": \"two\" } }");
+    decode("Config { name: \"x\", mode: Mode::Fast, servers: [], limits: { 1: 2 } }");
+    decode("Config { name: \"x\", mode: Mode::Fast, servers: [], limits: {}, shape: Shape::Circle(1, 2) }");
+    decode("Config { name: \"x\", mode: Mode::Fast, servers: [], limits: {}, shape: Shape::Rect(1, h: \"t\") }");
+    decode("Config { name: \"x\", mode: Mode::Fast, servers: [], limits: {}, shape: Shape::Rect { w: 1, d: 2 } }");
+    decode("Config { name: \"x\", mode: Mode::Fast(1), servers: [], limits: {} }");
+    decode("Config { name: \"x\", mode: Mode::Fast, servers: [], limits: [] }");
+    decode("Config { name: \"x\", mode: Mode::Fast, servers: [], limits: {}, shape: Shape::Circle(1.5) }");
+
+    // Without a document there is no position, only the path.
+    let v = Value::List([Value::Int(1), Value::Str("x")]);
+    let _ = try List::<i32>::from_rokon(v) catch e { println(f"value: {e}"); return; };
+}

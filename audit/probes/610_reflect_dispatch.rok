@@ -22,8 +22,8 @@ fn classify(v: i32 | f64) -> str {
     }
 }
 
-rok_print_str(handle(1));
-rok_print_str(handle("s"));
-rok_print_str(handle(true));
-rok_print_str(classify(1));
-rok_print_str(classify(1.0));
+println(handle(1));
+println(handle("s"));
+println(handle(true));
+println(classify(1));
+println(classify(1.0));

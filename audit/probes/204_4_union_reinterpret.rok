@@ -12,6 +12,6 @@ union ED { fd: i32; val: u64; }
 fn main() -> i32 {
     let x = ED { fd: 5 };
     let v: u64 = unsafe { x.val };
-    rok_print_i64(v as i64);
+    println(f"{v as i64}");
     return 0;
 }

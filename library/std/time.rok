@@ -4,7 +4,7 @@
 
 pub use rok::core::task::time::{Duration, Instant};
 
-extern "C" {
+extern "rok" {
     fn rok_time_realtime_ns() -> i64;
     fn rok_time_boot_ns() -> i64;
 }
