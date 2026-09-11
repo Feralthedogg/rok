@@ -1227,16 +1227,19 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
                 HirTy::Struct(sid) => {
                     let def = ctx.struct_def(sid);
                     match def.fields.get(i) {
-                        Some(f) if f.name == i.to_string() => HirExpr {
-                            ty: f.ty.clone(),
-                            span,
-                            kind: HirExprKind::FieldRead {
-                                target: Box::new(target_h),
-                                struct_id: sid,
-                                field_index: *index,
-                                field_ty: f.ty.clone(),
-                            },
-                        },
+                        Some(f) if f.name == i.to_string() => {
+                            ctx.check_field_visible(sid, &f.name);
+                            HirExpr {
+                                ty: f.ty.clone(),
+                                span,
+                                kind: HirExprKind::FieldRead {
+                                    target: Box::new(target_h),
+                                    struct_id: sid,
+                                    field_index: *index,
+                                    field_ty: f.ty.clone(),
+                                },
+                            }
+                        }
                         _ => ctx.error_expr(
                             span,
                             format!("struct `{}` has no field `{index}`", def.name),
@@ -3319,10 +3322,10 @@ pub(super) const SUM_TRAITS: &[&str] = &[
 
 /// Their methods, dispatched on the variant by `sum_structural_call`.
 const SUM_METHODS: &[&str] = &[
-    "clone", "debug", "eq", "ne", "hash", "lt", "gt", "le", "ge", "cmp",
+    "clone", "fmt", "eq", "ne", "hash", "lt", "gt", "le", "ge", "cmp",
 ];
 
-/// `x.clone()` / `.debug()` / `.eq(y)` / `.ne(y)` / `.hash()` / `.lt(y)`
+/// `x.clone()` / `Debug::fmt(x, ref f)` / `.eq(y)` / `.ne(y)` / `.hash()` / `.lt(y)`
 /// (`gt` / `le` / `ge`) / `.cmp(y)` on a sum `x`: a `match` over the
 /// variants calling the variant's method (`eq` is false across variants;
 /// `none` clones to itself, shows as `none`, equals `none`, hashes to its
@@ -3366,7 +3369,7 @@ fn sum_structural_call(
     };
     let result_ty = match method {
         "clone" => sum_ty.clone(),
-        "debug" => HirTy::Prim(PrimTy::Str),
+        "fmt" => HirTy::Unit,
         "hash" => HirTy::Prim(PrimTy::U64),
         "cmp" => ordering(ctx, "Equal").ty,
         _ => HirTy::Prim(PrimTy::Bool),
@@ -3404,7 +3407,9 @@ fn sum_structural_call(
         stmts.push(HirStmt::Let { local: r, init: v });
         Some(r)
     } else {
-        discard_args(ctx, args);
+        if method != "fmt" {
+            discard_args(ctx, args);
+        }
         None
     };
     let path = |name: &str| Expr {
@@ -3452,11 +3457,46 @@ fn sum_structural_call(
                 let v = lower_expr(ctx, &call("clone", None));
                 wrap_into_sum(&sum_ty, v)
             }
-            ("debug", _) if none => HirExpr {
-                kind: HirExprKind::Const(ConstVal::Str("none".to_owned())),
-                ty: HirTy::Prim(PrimTy::Str),
-                span,
-            },
+            ("fmt", _) => {
+                // `Debug::fmt(#a, ref f)`, or `none` written.
+                let fmt_path = |names: &[&str]| Expr {
+                    kind: ExprKind::Path(AstPath {
+                        segments: names
+                            .iter()
+                            .map(|n| rokc_ast::PathSegment {
+                                name: (*n).to_owned(),
+                                generics: Vec::new(),
+                            })
+                            .collect(),
+                        span,
+                    }),
+                    span,
+                };
+                let (callee, first) = if none {
+                    let lit = Expr {
+                        kind: ExprKind::Literal(AstLit::Str("none".to_owned())),
+                        span,
+                    };
+                    (&["rok", "core", "fmt", "Formatter", "write_str"][..], lit)
+                } else {
+                    (&["rok", "core", "fmt", "Debug", "fmt"][..], path("#a"))
+                };
+                let mut call_args = args.to_vec();
+                if none {
+                    call_args.push(CallArg::Positional(first));
+                } else {
+                    call_args.insert(0, CallArg::Positional(first));
+                }
+                let c = Expr {
+                    kind: ExprKind::Call {
+                        callee: Box::new(fmt_path(callee)),
+                        args: call_args,
+                        trailing_closure: None,
+                    },
+                    span,
+                };
+                lower_expr(ctx, &c)
+            }
             ("hash", _) => {
                 let tag = hir_int(i128::try_from(i).unwrap_or(0), PrimTy::U64, span);
                 if none {
@@ -3636,7 +3676,7 @@ pub(super) fn method_call_on(
         return sum_min_max(ctx, recv_h, method, args, span);
     }
     if let HirTy::AnyTrait(bounds) = recv_h.ty.clone() {
-        return any_method_call(ctx, recv_h, &bounds, method, args, span);
+        return any_method_call(ctx, recv_h, &bounds, method, None, args, span);
     }
     let pick = match pick_method(ctx, &recv_h.ty, method, None) {
         Ok(p) => p,
@@ -3758,6 +3798,7 @@ fn any_method_call(
     recv_h: HirExpr,
     bounds: &[String],
     method: &str,
+    only: Option<&str>,
     args: &[CallArg],
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
@@ -3772,7 +3813,10 @@ fn any_method_call(
             continue;
         }
         if let Some(info) = ctx.env.trait_info.get(&base) {
-            if provider.is_none() && info.methods.iter().any(|m| m == method) {
+            if provider.is_none()
+                && only.is_none_or(|k| k == base)
+                && info.methods.iter().any(|m| m == method)
+            {
                 provider = Some((base.clone(), t.clone()));
             }
             stack.extend(info.supers.iter().cloned());
@@ -3795,6 +3839,9 @@ fn any_method_call(
             ),
         );
     };
+    if method == "fmt" && is_fmt_trait(ctx, &provider) {
+        return any_fmt(ctx, recv_h, &provider, args, span);
+    }
     // Every implementor shares one signature only if it doesn't depend
     // on the implementing type (`Self`), on trait arguments the bound
     // leaves open, or on associated types it doesn't bind.
@@ -3888,6 +3935,70 @@ fn any_method_call(
             span,
         },
     )
+}
+
+fn is_fmt_trait(ctx: &LowerCtx<'_>, key: &str) -> bool {
+    key == ctx.lang_trait("display_trait") || key == ctx.lang_trait("debug_trait")
+}
+
+/// `Display::fmt(v, ref f)` / `Debug::fmt` on an `any` value: the
+/// dispatcher renders the value's text (`build_dispatcher`), which is
+/// then written to `f`.
+fn any_fmt(
+    ctx: &mut LowerCtx<'_>,
+    recv_h: HirExpr,
+    provider: &str,
+    args: &[CallArg],
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let str_ty = HirTy::Prim(PrimTy::Str);
+    let sig = FnSig {
+        id: FunctionId(u32::MAX),
+        ret_ty: str_ty.clone(),
+        param_defaults: vec![None],
+        param_names: vec!["#0".to_owned()],
+        param_refs: Vec::new(),
+        param_tys: vec![recv_h.ty.clone()],
+        variadic: false,
+    };
+    let id = any_dispatcher(ctx, &recv_h.ty, provider, "fmt", &sig, span);
+    let text = HirExpr {
+        kind: HirExprKind::Call {
+            callee: id,
+            args: vec![recv_h],
+        },
+        ty: str_ty.clone(),
+        span,
+    };
+    ctx.push_scope();
+    let name = format!("#t{}", ctx.locals.len());
+    let local = ctx.declare(Some(name.clone()), str_ty);
+    let path = |names: &[&str]| Expr {
+        kind: ExprKind::Path(AstPath {
+            segments: names
+                .iter()
+                .map(|n| rokc_ast::PathSegment {
+                    name: (*n).to_owned(),
+                    generics: Vec::new(),
+                })
+                .collect(),
+            span,
+        }),
+        span,
+    };
+    let mut call_args = args.to_vec();
+    call_args.push(CallArg::Positional(path(&[&name])));
+    let write = Expr {
+        kind: ExprKind::Call {
+            callee: Box::new(path(&["rok", "core", "fmt", "Formatter", "write_str"])),
+            args: call_args,
+            trailing_closure: None,
+        },
+        span,
+    };
+    let write = lower_expr(ctx, &write);
+    ctx.pop_scope();
+    with_lets(vec![HirStmt::Let { local, init: text }], write)
 }
 
 /// `method`'s signature from trait `provider`'s declaration, with the
@@ -4017,7 +4128,7 @@ pub(super) fn any_dispatcher(
     let mut all = ctx.env.sink.any_dispatch.borrow_mut();
     if let Some(d) = all
         .iter()
-        .find(|d| d.recv_ty == *recv_ty && d.method == method)
+        .find(|d| d.recv_ty == *recv_ty && d.method == method && d.trait_key == trait_key)
     {
         return d.id;
     }
@@ -4126,13 +4237,22 @@ pub(super) fn any_link(
         } else {
             ("", "")
         };
+        // A `fmt` dispatcher renders text (`any_fmt`); an f-string makes it.
+        let body = if d.method == "fmt" && is_fmt_trait(&c, &d.trait_key) {
+            let q = if d.trait_key == c.lang_trait("debug_trait") {
+                ":?"
+            } else {
+                ""
+            };
+            format!("let _ = f\"{{x{q}}}\";")
+        } else {
+            format!("{try_}x.{}({});", d.method, args.join(", "))
+        };
         seeds.push((
             home(&recv),
             format!(
-                "#[export_name(\"__rok_seed_{lib}_{n}\")]\nfn __rok_seed_{n}(x: {recv}{}){throws} {{ {try_}x.{}({}); }}\n",
+                "#[export_name(\"__rok_seed_{lib}_{n}\")]\nfn __rok_seed_{n}(x: {recv}{}){throws} {{ {body} }}\n",
                 decl.concat(),
-                d.method,
-                args.join(", ")
             ),
         ));
     }
@@ -4231,9 +4351,30 @@ fn build_dispatcher(env: &Env<'_>, d: &AnyDispatch) -> HirFunction {
             continue;
         }
         c.push_scope();
-        let x = c.declare(None, t.clone());
+        let x = c.declare(Some("#x".to_owned()), t.clone());
         let recv = hir_local(x, &t, span);
-        let call = if d.trait_key == super::reflect::REFLECT {
+        let call = if d.method == "fmt" && is_fmt_trait(&c, &d.trait_key) {
+            // The text, `f"{x}"` / `f"{x:?}"` (`any_fmt`).
+            let debug = d.trait_key == c.lang_trait("debug_trait");
+            let hole = rokc_ast::FStringPart::Hole {
+                expr: Expr {
+                    kind: ExprKind::Path(AstPath {
+                        segments: vec![rokc_ast::PathSegment {
+                            name: "#x".to_owned(),
+                            generics: Vec::new(),
+                        }],
+                        span,
+                    }),
+                    span,
+                },
+                spec: if debug {
+                    vec![rokc_ast::SpecPiece::Text("?".to_owned())]
+                } else {
+                    Vec::new()
+                },
+            };
+            super::fstring::lower_fstring(&mut c, &[hole], span)
+        } else if d.trait_key == super::reflect::REFLECT {
             super::reflect::dynamic(&mut c, recv, &d.method)
         } else {
             call_impl_method(
@@ -5244,6 +5385,10 @@ pub(super) fn lower_call(
                 format!("`{display}` is not a tuple struct — use `{display} {{ field: ... }}`"),
             );
         }
+        // Spec 5.6: constructing needs every field visible here.
+        def.fields
+            .iter()
+            .for_each(|f| ctx.check_field_visible(sid, &f.name));
         let sig = FnSig {
             id: FunctionId(u32::MAX),
             ret_ty: HirTy::Struct(sid),
@@ -5667,6 +5812,34 @@ fn path_call_via_impls(
             if let Some(r) = super::reflect::trait_call(ctx, &t, recv.clone(), method, rest, span) {
                 return Some(r);
             }
+        }
+        match (&t, &recv) {
+            (HirTy::Sum(_), Some(r)) if method == "fmt" && key == ctx.lang_trait("debug_trait") => {
+                ctx.explicit_recv = None;
+                return Some(sum_structural_call(
+                    ctx,
+                    r.clone(),
+                    method,
+                    rest,
+                    None,
+                    span,
+                ));
+            }
+            // `Trait::m(v)` on an `any` value: that trait's `m`, dispatched.
+            (HirTy::AnyTrait(bounds), Some(r)) => {
+                ctx.explicit_recv = None;
+                let (bounds, r) = (bounds.clone(), r.clone());
+                return Some(any_method_call(
+                    ctx,
+                    r,
+                    &bounds,
+                    method,
+                    Some(&key),
+                    rest,
+                    span,
+                ));
+            }
+            _ => {}
         }
         let call = call_impl_method(ctx, &t, method, Some(&key), recv, rest, display, span);
         ctx.explicit_recv = None;

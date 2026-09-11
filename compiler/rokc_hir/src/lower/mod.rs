@@ -1662,6 +1662,14 @@ impl<'a> LowerCtx<'a> {
                     .all(|v| is_none_ty(v) || self.implements_trait(v, trait_key, depth + 1));
             }
         }
+        // An `any` value formats through its bound (`expr::any_fmt`).
+        if let HirTy::AnyTrait(b) = ty {
+            if trait_key == self.lang_trait("display_trait")
+                || trait_key == self.lang_trait("debug_trait")
+            {
+                return bound_covers(self, b, trait_key);
+            }
+        }
         self.impl_or_generic_impl(ty, trait_key, depth)
     }
 

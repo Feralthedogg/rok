@@ -19,12 +19,12 @@ fn main() -> i32 {
     d.push_back(2);
     d.push_front(3);
     d.push_back(4);
-    println(d.debug());
+    println(f"{d:?}");
     let f = d.pop_front() ?? 0;
     let b = d.pop_back() ?? 0;
     println(f"{f} {b} {d[1]}");
     for i in 5..22 { d.push_back(i); }
-    println(d.debug());
+    println(f"{d:?}");
 
     let h: BinaryHeap<i32> = BinaryHeap::new();
     for x in [5, 3, 9, 7, 1] { h.push(x); }
@@ -36,7 +36,7 @@ fn main() -> i32 {
     for x in [3, 1, 2] { m.push(x); }
     let firsts: List<i32> = [];
     while let x: i32 = m.pop() { firsts.push(x); }
-    println(firsts.debug());
+    println(f"{firsts:?}");
 
     let xs: List<i32> = [];
     let seed: i64 = 7;

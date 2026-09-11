@@ -12,7 +12,11 @@ impl<A: Default> Default for (A,) {
     fn default() -> (A,) { (rok::core::marker::default_of(),) }
 }
 impl<A: Debug> Debug for (A,) {
-    fn debug(self) -> str { f"({self.0:?},)" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str("(");
+        try Debug::fmt(self.0, ref f);
+        try f.write_str(",)")
+    }
 }
 impl<A: PartialEq> PartialEq for (A,) {
     fn eq(self, rhs: (A,)) -> bool { self.0.eq(rhs.0) }
@@ -36,7 +40,13 @@ impl<A: Default, B: Default> Default for (A, B) {
     fn default() -> (A, B) { (rok::core::marker::default_of(), rok::core::marker::default_of()) }
 }
 impl<A: Debug, B: Debug> Debug for (A, B) {
-    fn debug(self) -> str { f"({self.0:?}, {self.1:?})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str("(");
+        try Debug::fmt(self.0, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.1, ref f);
+        try f.write_str(")")
+    }
 }
 impl<A: PartialEq, B: PartialEq> PartialEq for (A, B) {
     fn eq(self, rhs: (A, B)) -> bool { self.0.eq(rhs.0) && self.1.eq(rhs.1) }
@@ -61,7 +71,15 @@ impl<A: Default, B: Default, C: Default> Default for (A, B, C) {
     fn default() -> (A, B, C) { (rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of()) }
 }
 impl<A: Debug, B: Debug, C: Debug> Debug for (A, B, C) {
-    fn debug(self) -> str { f"({self.0:?}, {self.1:?}, {self.2:?})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str("(");
+        try Debug::fmt(self.0, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.1, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.2, ref f);
+        try f.write_str(")")
+    }
 }
 impl<A: PartialEq, B: PartialEq, C: PartialEq> PartialEq for (A, B, C) {
     fn eq(self, rhs: (A, B, C)) -> bool { self.0.eq(rhs.0) && self.1.eq(rhs.1) && self.2.eq(rhs.2) }
@@ -87,7 +105,17 @@ impl<A: Default, B: Default, C: Default, D: Default> Default for (A, B, C, D) {
     fn default() -> (A, B, C, D) { (rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of()) }
 }
 impl<A: Debug, B: Debug, C: Debug, D: Debug> Debug for (A, B, C, D) {
-    fn debug(self) -> str { f"({self.0:?}, {self.1:?}, {self.2:?}, {self.3:?})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str("(");
+        try Debug::fmt(self.0, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.1, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.2, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.3, ref f);
+        try f.write_str(")")
+    }
 }
 impl<A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq> PartialEq for (A, B, C, D) {
     fn eq(self, rhs: (A, B, C, D)) -> bool { self.0.eq(rhs.0) && self.1.eq(rhs.1) && self.2.eq(rhs.2) && self.3.eq(rhs.3) }
@@ -114,7 +142,19 @@ impl<A: Default, B: Default, C: Default, D: Default, E: Default> Default for (A,
     fn default() -> (A, B, C, D, E) { (rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of()) }
 }
 impl<A: Debug, B: Debug, C: Debug, D: Debug, E: Debug> Debug for (A, B, C, D, E) {
-    fn debug(self) -> str { f"({self.0:?}, {self.1:?}, {self.2:?}, {self.3:?}, {self.4:?})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str("(");
+        try Debug::fmt(self.0, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.1, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.2, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.3, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.4, ref f);
+        try f.write_str(")")
+    }
 }
 impl<A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq> PartialEq for (A, B, C, D, E) {
     fn eq(self, rhs: (A, B, C, D, E)) -> bool { self.0.eq(rhs.0) && self.1.eq(rhs.1) && self.2.eq(rhs.2) && self.3.eq(rhs.3) && self.4.eq(rhs.4) }
@@ -142,7 +182,21 @@ impl<A: Default, B: Default, C: Default, D: Default, E: Default, F: Default> Def
     fn default() -> (A, B, C, D, E, F) { (rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of()) }
 }
 impl<A: Debug, B: Debug, C: Debug, D: Debug, E: Debug, F: Debug> Debug for (A, B, C, D, E, F) {
-    fn debug(self) -> str { f"({self.0:?}, {self.1:?}, {self.2:?}, {self.3:?}, {self.4:?}, {self.5:?})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str("(");
+        try Debug::fmt(self.0, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.1, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.2, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.3, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.4, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.5, ref f);
+        try f.write_str(")")
+    }
 }
 impl<A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq> PartialEq for (A, B, C, D, E, F) {
     fn eq(self, rhs: (A, B, C, D, E, F)) -> bool { self.0.eq(rhs.0) && self.1.eq(rhs.1) && self.2.eq(rhs.2) && self.3.eq(rhs.3) && self.4.eq(rhs.4) && self.5.eq(rhs.5) }
@@ -171,7 +225,23 @@ impl<A: Default, B: Default, C: Default, D: Default, E: Default, F: Default, G: 
     fn default() -> (A, B, C, D, E, F, G) { (rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of()) }
 }
 impl<A: Debug, B: Debug, C: Debug, D: Debug, E: Debug, F: Debug, G: Debug> Debug for (A, B, C, D, E, F, G) {
-    fn debug(self) -> str { f"({self.0:?}, {self.1:?}, {self.2:?}, {self.3:?}, {self.4:?}, {self.5:?}, {self.6:?})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str("(");
+        try Debug::fmt(self.0, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.1, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.2, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.3, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.4, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.5, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.6, ref f);
+        try f.write_str(")")
+    }
 }
 impl<A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq> PartialEq for (A, B, C, D, E, F, G) {
     fn eq(self, rhs: (A, B, C, D, E, F, G)) -> bool { self.0.eq(rhs.0) && self.1.eq(rhs.1) && self.2.eq(rhs.2) && self.3.eq(rhs.3) && self.4.eq(rhs.4) && self.5.eq(rhs.5) && self.6.eq(rhs.6) }
@@ -201,7 +271,25 @@ impl<A: Default, B: Default, C: Default, D: Default, E: Default, F: Default, G: 
     fn default() -> (A, B, C, D, E, F, G, H) { (rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of()) }
 }
 impl<A: Debug, B: Debug, C: Debug, D: Debug, E: Debug, F: Debug, G: Debug, H: Debug> Debug for (A, B, C, D, E, F, G, H) {
-    fn debug(self) -> str { f"({self.0:?}, {self.1:?}, {self.2:?}, {self.3:?}, {self.4:?}, {self.5:?}, {self.6:?}, {self.7:?})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str("(");
+        try Debug::fmt(self.0, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.1, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.2, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.3, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.4, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.5, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.6, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.7, ref f);
+        try f.write_str(")")
+    }
 }
 impl<A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq> PartialEq for (A, B, C, D, E, F, G, H) {
     fn eq(self, rhs: (A, B, C, D, E, F, G, H)) -> bool { self.0.eq(rhs.0) && self.1.eq(rhs.1) && self.2.eq(rhs.2) && self.3.eq(rhs.3) && self.4.eq(rhs.4) && self.5.eq(rhs.5) && self.6.eq(rhs.6) && self.7.eq(rhs.7) }
@@ -232,7 +320,27 @@ impl<A: Default, B: Default, C: Default, D: Default, E: Default, F: Default, G: 
     fn default() -> (A, B, C, D, E, F, G, H, I) { (rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of()) }
 }
 impl<A: Debug, B: Debug, C: Debug, D: Debug, E: Debug, F: Debug, G: Debug, H: Debug, I: Debug> Debug for (A, B, C, D, E, F, G, H, I) {
-    fn debug(self) -> str { f"({self.0:?}, {self.1:?}, {self.2:?}, {self.3:?}, {self.4:?}, {self.5:?}, {self.6:?}, {self.7:?}, {self.8:?})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str("(");
+        try Debug::fmt(self.0, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.1, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.2, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.3, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.4, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.5, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.6, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.7, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.8, ref f);
+        try f.write_str(")")
+    }
 }
 impl<A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq> PartialEq for (A, B, C, D, E, F, G, H, I) {
     fn eq(self, rhs: (A, B, C, D, E, F, G, H, I)) -> bool { self.0.eq(rhs.0) && self.1.eq(rhs.1) && self.2.eq(rhs.2) && self.3.eq(rhs.3) && self.4.eq(rhs.4) && self.5.eq(rhs.5) && self.6.eq(rhs.6) && self.7.eq(rhs.7) && self.8.eq(rhs.8) }
@@ -264,7 +372,29 @@ impl<A: Default, B: Default, C: Default, D: Default, E: Default, F: Default, G: 
     fn default() -> (A, B, C, D, E, F, G, H, I, J) { (rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of()) }
 }
 impl<A: Debug, B: Debug, C: Debug, D: Debug, E: Debug, F: Debug, G: Debug, H: Debug, I: Debug, J: Debug> Debug for (A, B, C, D, E, F, G, H, I, J) {
-    fn debug(self) -> str { f"({self.0:?}, {self.1:?}, {self.2:?}, {self.3:?}, {self.4:?}, {self.5:?}, {self.6:?}, {self.7:?}, {self.8:?}, {self.9:?})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str("(");
+        try Debug::fmt(self.0, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.1, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.2, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.3, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.4, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.5, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.6, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.7, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.8, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.9, ref f);
+        try f.write_str(")")
+    }
 }
 impl<A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq> PartialEq for (A, B, C, D, E, F, G, H, I, J) {
     fn eq(self, rhs: (A, B, C, D, E, F, G, H, I, J)) -> bool { self.0.eq(rhs.0) && self.1.eq(rhs.1) && self.2.eq(rhs.2) && self.3.eq(rhs.3) && self.4.eq(rhs.4) && self.5.eq(rhs.5) && self.6.eq(rhs.6) && self.7.eq(rhs.7) && self.8.eq(rhs.8) && self.9.eq(rhs.9) }
@@ -297,7 +427,31 @@ impl<A: Default, B: Default, C: Default, D: Default, E: Default, F: Default, G: 
     fn default() -> (A, B, C, D, E, F, G, H, I, J, K) { (rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of()) }
 }
 impl<A: Debug, B: Debug, C: Debug, D: Debug, E: Debug, F: Debug, G: Debug, H: Debug, I: Debug, J: Debug, K: Debug> Debug for (A, B, C, D, E, F, G, H, I, J, K) {
-    fn debug(self) -> str { f"({self.0:?}, {self.1:?}, {self.2:?}, {self.3:?}, {self.4:?}, {self.5:?}, {self.6:?}, {self.7:?}, {self.8:?}, {self.9:?}, {self.10:?})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str("(");
+        try Debug::fmt(self.0, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.1, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.2, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.3, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.4, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.5, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.6, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.7, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.8, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.9, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.10, ref f);
+        try f.write_str(")")
+    }
 }
 impl<A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq> PartialEq for (A, B, C, D, E, F, G, H, I, J, K) {
     fn eq(self, rhs: (A, B, C, D, E, F, G, H, I, J, K)) -> bool { self.0.eq(rhs.0) && self.1.eq(rhs.1) && self.2.eq(rhs.2) && self.3.eq(rhs.3) && self.4.eq(rhs.4) && self.5.eq(rhs.5) && self.6.eq(rhs.6) && self.7.eq(rhs.7) && self.8.eq(rhs.8) && self.9.eq(rhs.9) && self.10.eq(rhs.10) }
@@ -331,7 +485,33 @@ impl<A: Default, B: Default, C: Default, D: Default, E: Default, F: Default, G: 
     fn default() -> (A, B, C, D, E, F, G, H, I, J, K, L) { (rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of(), rok::core::marker::default_of()) }
 }
 impl<A: Debug, B: Debug, C: Debug, D: Debug, E: Debug, F: Debug, G: Debug, H: Debug, I: Debug, J: Debug, K: Debug, L: Debug> Debug for (A, B, C, D, E, F, G, H, I, J, K, L) {
-    fn debug(self) -> str { f"({self.0:?}, {self.1:?}, {self.2:?}, {self.3:?}, {self.4:?}, {self.5:?}, {self.6:?}, {self.7:?}, {self.8:?}, {self.9:?}, {self.10:?}, {self.11:?})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str("(");
+        try Debug::fmt(self.0, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.1, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.2, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.3, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.4, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.5, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.6, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.7, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.8, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.9, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.10, ref f);
+        try f.write_str(", ");
+        try Debug::fmt(self.11, ref f);
+        try f.write_str(")")
+    }
 }
 impl<A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq, L: PartialEq> PartialEq for (A, B, C, D, E, F, G, H, I, J, K, L) {
     fn eq(self, rhs: (A, B, C, D, E, F, G, H, I, J, K, L)) -> bool { self.0.eq(rhs.0) && self.1.eq(rhs.1) && self.2.eq(rhs.2) && self.3.eq(rhs.3) && self.4.eq(rhs.4) && self.5.eq(rhs.5) && self.6.eq(rhs.6) && self.7.eq(rhs.7) && self.8.eq(rhs.8) && self.9.eq(rhs.9) && self.10.eq(rhs.10) && self.11.eq(rhs.11) }

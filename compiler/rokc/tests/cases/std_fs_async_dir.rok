@@ -56,7 +56,7 @@ let meta = try! await sub.metadata_async("a.txt");
 println(f"sub: {first}={meta.len()} {second}");
 
 try await sub.open_async("../many/1.txt") catch e: IoError {
-    println(f"escape: {e.kind().debug()}");
+    println(f"escape: {e.kind():?}");
     a
 };
 

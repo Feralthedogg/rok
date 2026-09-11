@@ -16,8 +16,8 @@
 
 mod errs {
     pub struct EA { pub n: i32; }
-    impl Display for EA { fn display(self) -> str { f"EA{self.n}" } }
-    impl Debug for EA { fn debug(self) -> str { f"EA{self.n}" } }
+    impl Display for EA { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"EA{self.n}") } }
+    impl Debug for EA { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"EA{self.n}") } }
     impl Error for EA {}
 }
 
@@ -35,8 +35,8 @@ mod conv {
 use conv::Conv;
 
 struct EB { n: i32; }
-impl Display for EB { fn display(self) -> str { f"EB{self.n}" } }
-impl Debug for EB { fn debug(self) -> str { f"EB{self.n}" } }
+impl Display for EB { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"EB{self.n}") } }
+impl Debug for EB { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"EB{self.n}") } }
 impl Error for EB {}
 
 struct P { v: i64; }

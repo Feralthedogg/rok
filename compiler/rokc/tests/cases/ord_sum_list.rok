@@ -50,6 +50,6 @@ fn main() -> i32 {
     let opts: List<i32 | none> = [3, none, 1];
     let low = smallest(opts);
     let ls: List<List<i32>> = [y, x, z];
-    println(f"generic: {smallest(ls).len() - 1} {low.debug()}");
+    println(f"generic: {smallest(ls).len() - 1} {low:?}");
     0
 }

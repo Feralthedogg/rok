@@ -24,6 +24,6 @@ async fn main() {
     let v = try await task::timeout(Duration::sec(5), task::spawn(async { 7 })) catch e: TimeoutError { -1 };
     println(f"timeout ok {v}");
 
-    let w = try await task::timeout(Duration::ms(5), task::spawn(after(5000, "late"))) catch e: TimeoutError { e.debug() };
+    let w = try await task::timeout(Duration::ms(5), task::spawn(after(5000, "late"))) catch e: TimeoutError { f"{e:?}" };
     println(f"timeout {w}");
 }

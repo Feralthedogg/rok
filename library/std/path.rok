@@ -40,14 +40,14 @@ impl PartialEq for Component {
 }
 
 impl Debug for Component {
-    fn debug(self) -> str {
-        match self {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str(match self {
             Component::RootDir => "RootDir",
             Component::Prefix(p) => f"Prefix({p})",
             Component::CurDir => "CurDir",
             Component::ParentDir => "ParentDir",
             Component::Normal(n) => f"Normal({n})",
-        }
+        })
     }
 }
 
@@ -55,10 +55,10 @@ impl Debug for Component {
 pub struct StripPrefixError {}
 
 impl Display for StripPrefixError {
-    fn display(self) -> str { "prefix not found" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("prefix not found") }
 }
 impl Debug for StripPrefixError {
-    fn debug(self) -> str { "StripPrefixError" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("StripPrefixError") }
 }
 impl Error for StripPrefixError {}
 
@@ -323,7 +323,7 @@ impl PartialEq for RawPath {
 }
 
 impl Debug for RawPath {
-    fn debug(self) -> str { f"RawPath({self.to_path_lossy().as_str().debug()})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"RawPath({self.to_path_lossy().as_str():?})") }
 }
 
 /// `Path::try_from(raw)`: `raw` as a path; throws if it is not UTF-8
@@ -340,10 +340,10 @@ pub struct NonUtf8Error {
 }
 
 impl Display for NonUtf8Error {
-    fn display(self) -> str { f"path is not UTF-8 (valid up to byte {self.valid_up_to})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"path is not UTF-8 (valid up to byte {self.valid_up_to})") }
 }
 impl Debug for NonUtf8Error {
-    fn debug(self) -> str { f"NonUtf8Error {{ valid_up_to: {self.valid_up_to} }}" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"NonUtf8Error {{ valid_up_to: {self.valid_up_to} }}") }
 }
 impl Error for NonUtf8Error {}
 
@@ -353,11 +353,11 @@ impl PartialEq for Path {
 }
 
 impl Display for Path {
-    fn display(self) -> str { self.s }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(self.s) }
 }
 
 impl Debug for Path {
-    fn debug(self) -> str { self.s.debug() }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try Debug::fmt(self.s, ref f) }
 }
 
 pub struct Components {

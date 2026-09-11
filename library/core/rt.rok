@@ -70,15 +70,22 @@ extern "rok" {
     fn rok_char_props(c: u32) -> u32;
     fn rok_char_to_case(c: u32, upper: i32) -> u32;
 
-    // Formatting.
-    fn rok_str_from_i64(n: i64) -> str;
-    fn rok_str_from_u64(n: u64, radix: u32) -> str;
-    fn rok_str_escape(s: str, quote: u32) -> str;
+    // Formatting: a `Formatter`'s text; f-strings call these directly too. The
+    // writing ones return it, moved when it outgrew its allocation; a
+    // spec comes as two packed words (`flags`, `counts`).
+    fn rok_fmt_new(cap: usize) -> str;
+    fn rok_fmt_finish(t: str) -> str;
+    fn rok_fmt_len(t: str) -> usize;
+    fn rok_fmt_str(t: str, s: str) -> str;
+    fn rok_fmt_char(t: str, c: u32) -> str;
+    fn rok_fmt_escaped(t: str, s: str, quote: u32) -> str;
+    fn rok_fmt_int(t: str, flags: u64, counts: u64, v: i64, signed: u32, bits: u32) -> str;
+    fn rok_fmt_digits(t: str, flags: u64, counts: u64, neg: u32, digits: str) -> str;
+    fn rok_fmt_integral(t: str, prefix: str, buf: str, flags: u64, counts: u64, nonneg: u32) -> str;
+    fn rok_fmt_f64(t: str, flags: u64, counts: u64, v: f64, is_f32: u32) -> str;
+    fn rok_fmt_pad(t: str, flags: u64, counts: u64, start: usize, mid: usize, numeric: u32) -> str;
+    fn rok_fmt_pack(spec: str, text_only: u32, out: GcBuf<u64>);
     fn rok_fmt_spec_parse(spec: str, out: GcBuf<i64>);
-    fn rok_fmt_float(v: f64, is_f32: u32, ty: u32, prec: i64) -> str;
-    fn rok_fmt_exp_digits(digits: str, prec: i64, upper: u32) -> str;
-    fn rok_gc_alloc_bytes(size: usize, traced: i32) -> str;
-    fn rok_str_write_at(dst: str, off: usize, src: str);
 
     // `int` limb kernels.
     fn rok_nat_mul(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize);

@@ -83,7 +83,7 @@ fn main() throws (IoError) {
     println("env: " + text(clean.stdout));
 
     let missing = try Command::new("no-such-program-rok").status().success() catch e {
-        println("missing: " + e.kind.debug());
+        println("missing: " + f"{e.kind:?}");
         false
     };
     let sig = try Command::new("sh").args(["-c", "kill -9 $$"]).status();

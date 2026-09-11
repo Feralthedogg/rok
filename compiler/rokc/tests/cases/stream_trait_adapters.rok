@@ -59,7 +59,7 @@ task::spawn(async {
     tx.close();
 });
 let doubled: List<i32> = await rx.map(|x| x * 2).collect();
-println(f"chan {doubled.debug()}");
+println(f"chan {doubled:?}");
 let m: Map<Countdown, i32> = Countdown { n: 3 }.map(|x| x * 1);
 let total = 0;
 for await x in m { total += x; }

@@ -43,6 +43,22 @@ pub struct Lexer<'src> {
     ext_ops: Vec<String>,
     /// Doc comments seen since the last token.
     docs: Vec<DocLine>,
+    /// Open f-strings, innermost last (spec 1.7.3).
+    fstr: Vec<Frame>,
+    /// Start of the outermost f-string a hole error (backslash,
+    /// newline) was reported in: one per literal.
+    hole_reported: Option<usize>,
+}
+
+/// One level of f-string nesting. `triple`: of the f-string it is in.
+#[derive(Clone, Copy)]
+enum Frame {
+    /// Literal text of the f-string opened at `start`.
+    Text { triple: bool, start: usize },
+    /// Hole code; `depth` counts open brackets.
+    Hole { triple: bool, depth: u32 },
+    /// A hole's format spec after `:`.
+    Spec { triple: bool },
 }
 
 impl<'src> Lexer<'src> {
@@ -63,6 +79,8 @@ impl<'src> Lexer<'src> {
             any_non_ascii: false,
             ext_ops: Vec::new(),
             docs: Vec::new(),
+            fstr: Vec::new(),
+            hole_reported: None,
         }
     }
 
@@ -82,15 +100,36 @@ impl<'src> Lexer<'src> {
         self.check_bidi();
         let mut tokens = Vec::new();
         loop {
-            self.skip_trivia();
+            let from = self.pos;
+            let flat = self.in_flat_hole();
+            let piece = matches!(
+                self.fstr.last(),
+                Some(Frame::Text { .. } | Frame::Spec { .. })
+            );
+            if !piece {
+                self.skip_trivia();
+            }
             if self.pos >= self.bytes.len() {
+                self.close_fstrings(&mut tokens);
                 let mut eof = Token::new(TokenKind::Eof, self.span_here());
                 eof.docs = std::mem::take(&mut self.docs);
                 tokens.push(eof);
                 break;
             }
             // `None`: invalid input was reported and skipped.
-            if let Some(mut tok) = self.next_token() {
+            let tok = if piece {
+                self.fstr_piece()
+            } else {
+                self.next_token()
+            };
+            if let Some(nl) = self.src[from..self.pos].find(['\n', '\r']).filter(|_| flat) {
+                self.hole_error(
+                    from + nl,
+                    "newline in f-string `{...}` code; hole code spans lines only in \
+                     `f\"\"\"...\"\"\"`",
+                );
+            }
+            if let Some(mut tok) = tok {
                 tok.docs = std::mem::take(&mut self.docs);
                 self.prev_minus = tok.kind == TokenKind::Minus && !self.prev_ends_expr;
                 self.prev_ends_expr = matches!(
@@ -100,7 +139,7 @@ impl<'src> Lexer<'src> {
                         | TokenKind::FloatLit(_)
                         | TokenKind::StrLit(_)
                         | TokenKind::RawStrLit(_)
-                        | TokenKind::FStrLit(_)
+                        | TokenKind::FStrEnd(_)
                         | TokenKind::CharLit(_)
                         | TokenKind::CCharLit(_)
                         | TokenKind::RParen
@@ -183,6 +222,21 @@ impl<'src> Lexer<'src> {
 
         let b = self.bytes[start];
         let next = self.bytes.get(start + 1).copied();
+        if let Some(kind) = self.hole_punct(b, next) {
+            return Some(Token::new(
+                kind,
+                Self::make_span(start, self.pos, line, col),
+            ));
+        }
+        if b == b'\\' && matches!(self.fstr.last(), Some(Frame::Hole { .. })) {
+            self.advance(if next == Some(b'"') { 2 } else { 1 });
+            self.hole_error(
+                start,
+                "backslash in f-string `{...}` code; a hole is plain code, so write `\"` \
+                 directly: `{x ?? \"a\"}`, `{d[\"k\"]}`",
+            );
+            return None;
+        }
         let kind = match b {
             b'#' if next == Some(b'[') => {
                 self.advance(2);
@@ -218,9 +272,14 @@ impl<'src> Lexer<'src> {
             b':' => self.lex_colon(),
             b'?' => self.lex_question(),
             b'\'' => self.lex_quote_or_label(),
-            b'"' => self.lex_str_lit(false),
+            b'"' => self.lex_str_lit(),
             b'r' if next == Some(b'"') || next == Some(b'#') => self.lex_raw_str_lit(),
-            b'f' if next == Some(b'"') => self.lex_str_lit(true),
+            b'f' if next == Some(b'"') => {
+                let triple = self.src[start + 1..].starts_with("\"\"\"");
+                self.advance(if triple { 4 } else { 2 });
+                self.fstr.push(Frame::Text { triple, start });
+                TokenKind::FStrStart(triple)
+            }
             b'c' if next == Some(b'\'') => self.lex_char_lit(true),
             d if d.is_ascii_digit() => self.lex_number(),
             _ if !self.ext_ops.is_empty() && self.peek_ext_op().is_some() => {
@@ -804,20 +863,10 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    fn lex_str_lit(&mut self, f_string: bool) -> TokenKind {
+    fn lex_str_lit(&mut self) -> TokenKind {
         let lit_start = self.pos;
-        self.advance(usize::from(f_string) + 1); // optional `f`, then `"`
+        self.advance(1);
         let start = self.pos;
-        if f_string {
-            return match self.scan_fstring() {
-                Ok(end) => TokenKind::FStrLit(self.src[start..end].to_owned()),
-                Err(true) => TokenKind::FStrLit(String::new()),
-                Err(false) => {
-                    self.error_from(lit_start, "unterminated f-string literal");
-                    TokenKind::FStrLit(String::new())
-                }
-            };
-        }
         let Some(end) = self.scan_quoted(b'"') else {
             self.error_from(lit_start, "unterminated string literal");
             return TokenKind::StrLit(String::new());
@@ -829,68 +878,152 @@ impl<'src> Lexer<'src> {
         TokenKind::StrLit(body)
     }
 
-    /// Body of `f"..."`: `{{` / `}}` are literal braces, `{ expr }` may
-    /// nest braces and contain string literals. Returns the end offset;
-    /// `Err(true)` after a reported `\"` in a hole, `Err(false)` if unterminated.
-    fn scan_fstring(&mut self) -> Result<usize, bool> {
-        let mut depth = 0usize;
-        let mut poisoned = false;
-        loop {
-            match self.bytes.get(self.pos).ok_or(false)? {
-                b'"' if depth == 0 => {
-                    let end = self.pos;
-                    self.advance(1);
-                    return if poisoned { Err(true) } else { Ok(end) };
-                }
-                b'"' => {
-                    self.advance(1);
-                    self.scan_quoted(b'"').ok_or(false)?;
-                }
-                b'{' if depth == 0 && self.bytes.get(self.pos + 1) == Some(&b'{') => {
+    /// Inside a hole (spec 1.7.3): what ends or splits the hole (`}` /
+    /// `:` at bracket depth 0). `None` lexes `b` as ordinary code
+    /// (brackets counted).
+    fn hole_punct(&mut self, b: u8, next: Option<u8>) -> Option<TokenKind> {
+        let Some(Frame::Hole { triple, depth }) = self.fstr.last_mut() else {
+            return None;
+        };
+        let triple = *triple;
+        match b {
+            b'}' if *depth == 0 => {
+                self.fstr.pop();
+                self.advance(1);
+                Some(TokenKind::HoleEnd)
+            }
+            b':' if *depth == 0 && next != Some(b':') => {
+                *self.fstr.last_mut()? = Frame::Spec { triple };
+                self.advance(1);
+                Some(TokenKind::HoleSpec)
+            }
+            b'(' | b'[' | b'{' => {
+                *depth += 1;
+                None
+            }
+            b')' | b']' | b'}' => {
+                *depth = depth.saturating_sub(1);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// The next f-string text run, spec run, `{` / `${` (hole start),
+    /// spec-closing `}` or closing quote. `None` after a reported stray `}`.
+    fn fstr_piece(&mut self) -> Option<Token> {
+        let (start, line, col) = (self.pos, self.line, self.col);
+        let (triple, spec) = match *self.fstr.last()? {
+            Frame::Text { triple, .. } => (triple, false),
+            Frame::Spec { triple } => (triple, true),
+            Frame::Hole { .. } => return None,
+        };
+        let closes = |s: &Self| !triple || s.src[s.pos..].starts_with("\"\"\"");
+        let mut text = String::new();
+        while let Some(&b) = self.bytes.get(self.pos) {
+            let next = self.bytes.get(self.pos + 1).copied();
+            match b {
+                b'"' if spec || closes(self) => break,
+                b'{' | b'}' if !spec && next == Some(b) => {
+                    text.push(char::from(b));
                     self.advance(2);
                 }
-                b'}' if depth == 0 && self.bytes.get(self.pos + 1) == Some(&b'}') => {
-                    self.advance(2);
-                }
-                b'{' => {
-                    depth += 1;
-                    self.advance(1);
-                }
-                b'}' if depth == 0 => {
+                b'}' if !spec => {
                     let at = self.pos;
                     self.advance(1);
                     self.error_from(at, "single `}` in f-string (write `}}`)");
                 }
-                b'}' => {
-                    depth -= 1;
-                    self.advance(1);
-                }
-                b'\\' if depth > 0 && self.bytes.get(self.pos + 1) == Some(&b'"') => {
-                    // Spec 1.7.3: a hole holds ordinary tokens, so its
-                    // string literals use plain quotes. Keep scanning so
-                    // the literal still ends where the writer meant.
-                    let at = self.pos;
+                b'$' if spec && next == Some(b'$') => {
+                    text.push('$');
                     self.advance(2);
-                    if !poisoned {
-                        self.error_from(
-                            at,
-                            "escaped quote inside an f-string `{...}`; holes are plain \
-                             expressions, so write `{x ?? \"a\"}`, not `{x ?? \\\"a\\\"}`",
-                        );
-                    }
-                    poisoned = true;
                 }
-                b'\\' => {
-                    self.advance(1);
-                    if let Some(c) = self.peek_char() {
-                        self.advance(c.len_utf8());
-                    }
-                }
+                b'{' | b'}' => break,
+                b'$' if spec && next == Some(b'{') => break,
                 _ => {
-                    let n = self.peek_char().map_or(1, char::len_utf8);
-                    self.advance(n);
+                    let n = usize::from(b == b'\\' && !spec);
+                    let end = self.src[self.pos + n..]
+                        .chars()
+                        .next()
+                        .map_or(self.pos + n, |c| self.pos + n + c.len_utf8());
+                    text.push_str(&self.src[self.pos..end]);
+                    self.advance(end - self.pos);
                 }
             }
+        }
+        let kind = if !text.is_empty() {
+            if spec {
+                TokenKind::SpecText(text)
+            } else {
+                TokenKind::FStrText(text)
+            }
+        } else if self.pos > start || self.pos >= self.bytes.len() {
+            return None;
+        } else {
+            match self.bytes[self.pos] {
+                b'"' if spec => {
+                    self.error_from(start, "unclosed `{` in f-string (missing `}`)");
+                    self.fstr.pop();
+                    TokenKind::HoleEnd
+                }
+                b'"' => {
+                    self.advance(if triple { 3 } else { 1 });
+                    self.fstr.pop();
+                    TokenKind::FStrEnd(triple)
+                }
+                b'}' => {
+                    self.advance(1);
+                    self.fstr.pop();
+                    TokenKind::HoleEnd
+                }
+                b => {
+                    self.advance(if b == b'$' { 2 } else { 1 });
+                    self.fstr.push(Frame::Hole { triple, depth: 0 });
+                    TokenKind::HoleStart
+                }
+            }
+        };
+        Some(Token::new(
+            kind,
+            Self::make_span(start, self.pos, line, col),
+        ))
+    }
+
+    /// Inside the code of a hole of a one-line `f"..."`, at any depth.
+    fn in_flat_hole(&self) -> bool {
+        self.fstr.iter().any(|f| {
+            matches!(
+                f,
+                Frame::Hole { triple: false, .. } | Frame::Spec { triple: false }
+            )
+        })
+    }
+
+    /// One hole error per f-string literal: the rest is likely fallout.
+    fn hole_error(&mut self, at: usize, msg: &str) {
+        let outer = match self.fstr.first() {
+            Some(&Frame::Text { start, .. }) => Some(start),
+            _ => None,
+        };
+        if outer.is_none() || outer != self.hole_reported {
+            self.hole_reported = outer;
+            let (line, col) = self.line_col(at);
+            let end = at + self.src[at..].chars().next().map_or(0, char::len_utf8);
+            self.error(Self::make_span(at, end, line, col), msg);
+        }
+    }
+
+    /// At EOF: report an unterminated f-string and close its open
+    /// holes and literals so the parser sees balanced tokens.
+    fn close_fstrings(&mut self, tokens: &mut Vec<Token>) {
+        if let Some(&Frame::Text { start, .. }) = self.fstr.first() {
+            self.error_from(start, "unterminated f-string literal");
+        }
+        while let Some(f) = self.fstr.pop() {
+            let kind = match f {
+                Frame::Text { triple, .. } => TokenKind::FStrEnd(triple),
+                Frame::Hole { .. } | Frame::Spec { .. } => TokenKind::HoleEnd,
+            };
+            tokens.push(Token::new(kind, self.span_here()));
         }
     }
 
@@ -1162,15 +1295,91 @@ mod tests {
             err(bad);
         }
         assert_eq!(ok("\"a\\\n   b\"")[0], T::StrLit("a\\\n   b".into()));
+    }
+
+    #[test]
+    fn fstrings() {
+        let id = |s: &str| T::Ident(s.into());
+        let text = |s: &str| T::FStrText(s.into());
         assert_eq!(
-            ok(r#"f"{a + "}"} {{x}}""#)[0],
-            T::FStrLit(r#"{a + "}"} {{x}}"#.into())
+            ok(r#"f"a {x} {{b}}""#),
+            [
+                T::FStrStart(false),
+                text("a "),
+                T::HoleStart,
+                id("x"),
+                T::HoleEnd,
+                text(" {b}"),
+                T::FStrEnd(false),
+                T::Eof
+            ]
         );
-        err(r#"f"a } b""#);
-        // Holes hold plain tokens: `\"` there is one error at the backslash.
+        // Hole code is ordinary tokens: the enclosing quote is reused.
+        assert_eq!(
+            ok(r#"f"{a + "}"}""#)[2..5],
+            [id("a"), T::Plus, T::StrLit("}".into())]
+        );
+        assert_eq!(
+            ok(r#"f"{d["k"]}""#)[2..6],
+            [id("d"), T::LBracket, T::StrLit("k".into()), T::RBracket]
+        );
+        assert_eq!(ok(r#"f"{"a\tb"}""#)[2], T::StrLit("a\\tb".into()));
+        // Specs: text runs (`$$` folded), `${..}` / `{..}` nested holes,
+        // `::` stays a path separator.
+        assert_eq!(
+            ok(r#"f"{f"{a::b:>{w}.${p}$$}"}""#),
+            [
+                T::FStrStart(false),
+                T::HoleStart,
+                T::FStrStart(false),
+                T::HoleStart,
+                id("a"),
+                T::ColonColon,
+                id("b"),
+                T::HoleSpec,
+                T::SpecText(">".into()),
+                T::HoleStart,
+                id("w"),
+                T::HoleEnd,
+                T::SpecText(".".into()),
+                T::HoleStart,
+                id("p"),
+                T::HoleEnd,
+                T::SpecText("$".into()),
+                T::HoleEnd,
+                T::FStrEnd(false),
+                T::HoleEnd,
+                T::FStrEnd(false),
+                T::Eof
+            ]
+        );
+        // `f"""`: raw `"` in text, hole code across lines.
+        assert_eq!(
+            ok("f\"\"\"say \"{\n  x\n}\" \"\"\"")[..5],
+            [
+                T::FStrStart(true),
+                text("say \""),
+                T::HoleStart,
+                id("x"),
+                T::HoleEnd
+            ]
+        );
+        assert_eq!(ok("f\"a\nb\"")[1], text("a\nb"));
+        for bad in [
+            "f\"a } b\"",
+            "f\"{x\n}\"",
+            "f\"{f\"\n\"}\"",
+            "f\"{x",
+            "f\"{x:5\"",
+            "f\"{(}\"",
+        ] {
+            err(bad);
+        }
+        // A backslash in hole code: one error at the first one.
         let (toks, d) = Lexer::new("\n  f\"{n ?? \\\"a\\\"}\"", "t").lex_all();
-        assert_eq!(toks[0].kind, T::FStrLit(String::new()));
+        assert_eq!(toks[toks.len() - 2].kind, T::FStrEnd(false));
         assert_eq!(d.len(), 1, "{d:?}");
+        assert!(d[0].message.contains("write `\"` directly"), "{d:?}");
         let at = d[0].primary.as_ref().unwrap().span;
         assert_eq!((at.line, at.col), (2, 11));
     }
@@ -1205,10 +1414,14 @@ mod tests {
     #[test]
     fn token_text_lexes_back() {
         let src = r##"#[derive(X)] fn f<T>(x: ...T) -> i32 throws { 'l: loop { a .+= b; } }
-            let s = "q\"\n" + f"{x:>4}" + r#"a"b"# + 'c' + c'\x01';
+            let s = "q\"\n" + r#"a"b"# + 'c' + c'\x01';
             x %%= 1e-3f32 ?? y?.z .<= 0xFFu8 << 2 ∈ ws; @x; #![a] .. ..= => ::"##;
         let toks = ok(src);
         let back: Vec<String> = toks.iter().map(T::text).collect();
         assert_eq!(ok(&back.join(" ")), toks);
+        // F-string pieces carry their text exactly (no spaces between).
+        let toks = ok(r#"f"""{{a}} "{f"{x:>{w}$$}"}" """"#);
+        let back: String = toks.iter().map(T::text).collect();
+        assert_eq!(ok(&back), toks);
     }
 }

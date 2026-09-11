@@ -15,10 +15,10 @@ fn text(v: Value, strict: bool) -> str {
     match v {
         Value::None => "none",
         Value::Bool(b) => if b { "true" } else { "false" },
-        Value::Int(n) => n.display(),
+        Value::Int(n) => f"{n}",
         Value::Float(x) => float_text(x, strict),
-        Value::Char(c) => c.debug(),
-        Value::Str(s) => s.debug(),
+        Value::Char(c) => f"{c:?}",
+        Value::Str(s) => f"{s:?}",
         Value::List(xs) => "[" + flat_items(xs, strict) + "]",
         Value::Tuple(xs) => {
             if xs.len() == 1 { return "(" + text(xs[0], strict) + ",)"; }
@@ -149,7 +149,7 @@ fn float_text(x: float, strict: bool) -> str {
         return if x.is_sign_negative() { "-inf" } else { "inf" };
     }
     let a = x.abs().to_f64();
-    let t = if a != 0.0 && (a < 1e-5 || a >= 1e17) { f"{x:e}" } else { x.display() };
+    let t = if a != 0.0 && (a < 1e-5 || a >= 1e17) { f"{x:e}" } else { f"{x}" };
     if t.contains(".") { return t; }
     let (m, e) = t.split_once("e") ?? (t, "");
     if e.is_empty() { m + ".0" } else { m + ".0e" + e }

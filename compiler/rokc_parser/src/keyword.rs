@@ -167,11 +167,6 @@ pub fn apply_keywords(tokens: &mut Vec<Token>, kws: &KeywordTable, diags: &mut V
     }
     let mut out = Vec::with_capacity(tokens.len());
     for (k, t) in tokens.iter().enumerate() {
-        if let TokenKind::FStrLit(text) = &t.kind {
-            let text = fstr_keywords(text, kws);
-            out.push(Token::new(TokenKind::FStrLit(text), t.span));
-            continue;
-        }
         let TokenKind::Ident(n) = &t.kind else {
             out.push(t.clone());
             continue;
@@ -219,39 +214,4 @@ pub fn apply_keywords(tokens: &mut Vec<Token>, kws: &KeywordTable, diags: &mut V
         }
     }
     *tokens = out;
-}
-
-/// The keywords inside an f-string's `{..}` holes (re-lexed later).
-fn fstr_keywords(text: &str, kws: &KeywordTable) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let (mut out, mut depth, mut i) = (String::new(), 0u32, 0);
-    while i < chars.len() {
-        let c = chars[i];
-        if depth == 0 && c == '{' && chars.get(i + 1) == Some(&'{') {
-            out.push_str("{{");
-            i += 2;
-            continue;
-        }
-        match c {
-            '{' => depth += 1,
-            '}' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-        if depth > 0 && (c.is_alphabetic() || c == '_') {
-            let start = i;
-            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
-                i += 1;
-            }
-            let word: String = chars[start..i].iter().collect();
-            let member = start > 0 && matches!(chars[start - 1], '.' | ':');
-            match kws.iter().find(|(k, ..)| *k == word).filter(|_| !member) {
-                Some((_, path, _)) => out.push_str(&path.join("::")),
-                None => out.push_str(&word),
-            }
-            continue;
-        }
-        out.push(c);
-        i += 1;
-    }
-    out
 }

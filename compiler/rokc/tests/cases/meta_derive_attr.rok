@@ -7,6 +7,8 @@
 // Spec 6.8.4 / 6.9.5 / 6.9.6: `#[impl_derive_attribute(Trait, attr)]`,
 // `@has_derive_attr` / `@derive_attr`, `@apply_if` with `!` / `&&` /
 // `||`, `@field.has_attr`, `@field.is_pub`.
+fn fmt_show<T: Display>(v: T) -> str { f"{v}" }
+
 trait Ser {
     fn ser(self) -> str;
     fn pub_fields() -> str;
@@ -23,10 +25,10 @@ pub @derive {
                     if !first { out = out + ", "; }
                     first = false;
                     @apply_if(@has_derive_attr(rename)) {
-                        out = out + @derive_attr(rename) + ": " + self.@field.display();
+                        out = out + @derive_attr(rename) + ": " + fmt_show(self.@field);
                     }
                     @apply_if(!@has_derive_attr(rename)) {
-                        out = out + @field.name.as_str() + ": " + self.@field.display();
+                        out = out + @field.name.as_str() + ": " + fmt_show(self.@field);
                     }
                 }
             }

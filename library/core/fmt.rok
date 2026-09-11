@@ -1,23 +1,51 @@
-// rok::core::fmt — Display / Debug and f-string formatting (stdlib
-// 2.10, refs-lang 1.7.3).
+// rok::core::fmt — `Formatter`, `Display` / `Debug`, `Format` and the
+// f-string lowering targets (stdlib 2.10, refs-lang 1.7.3).
 //
-// Spec 2.10 writes `fn fmt(self, ref f: Formatter) throws (FmtError)`
-// and eight radix / exponent traits. Without `ref` parameters,
-// `display` / `debug` return a new `str` and every number type formats
-// a spec through the one `Format` trait. HIR lowers `f"..."` by each
-// hole's type to `display()` / `debug()`, `Format::format`, or
-// `fstr_str` for any other value.
+// Every rendering writes into a `Formatter`: the runtime's growing text
+// plus the spec of the value being written. HIR lowers `f"..."` to one
+// such text: literal pieces and primitive holes go to the runtime
+// directly, any other hole through `Display::fmt` / `Debug::fmt`
+// (`fstr_*` below), and `rok_fmt_finish` hands the text over as the
+// `str` without a copy.
 
 use rok::core::collections::raw::{GcBuf, buf_new};
 
-#[lang("display_trait")]
-pub trait Display {
-    fn display(self) -> str;
+/// A failed write (2.10.12). Writing to memory never fails.
+pub struct FmtError;
+
+impl Display for FmtError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("an error occurred when formatting") }
 }
 
+impl Debug for FmtError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("FmtError") }
+}
+
+/// The spec's `align`.
+pub enum Alignment {
+    Left,
+    Right,
+    Center,
+    Equal,
+}
+
+/// The spec's `sign`.
+pub enum Sign {
+    Plus,
+    Minus,
+    Space,
+}
+
+/// What `f"{x}"` writes.
+#[lang("display_trait")]
+pub trait Display {
+    fn fmt(self, ref f: Formatter) throws (FmtError);
+}
+
+/// What `f"{x:?}"` writes.
 #[lang("debug_trait")]
 pub trait Debug {
-    fn debug(self) -> str;
+    fn fmt(self, ref f: Formatter) throws (FmtError);
 }
 
 /// An f-string spec, `[[fill]align][sign][#][0][width][.precision][type]`
@@ -34,216 +62,243 @@ pub struct FormatSpec {
     pub ty: char;
 }
 
-/// A number rendered per a spec: what `f"{x:spec}"` calls for every
-/// integer and float type, `int` and `float` included.
+/// A number rendered per a spec into a new `str` (2.10.5).
 pub trait Format {
     fn format(self, spec: FormatSpec) -> str;
 }
 
-/// `-1` for an absent count (the runtime's convention).
-fn count_or_minus(v: usize | none) -> i64 {
-    match v {
-        n: usize => n as i64,
-        none => -1,
-    }
-}
-
 impl FormatSpec {
+    /// The empty spec.
+    pub fn new() -> FormatSpec {
+        FormatSpec {
+            fill: ' ', align: '\0', sign: '\0', alt: false, zero: false,
+            width: none, precision: none, ty: '\0',
+        }
+    }
+
     /// `text` parsed by the runtime with the parser the compiler checks
-    /// static specs with; panics on a malformed (dynamic) spec.
+    /// static specs with; panics on a malformed spec.
     pub fn parse(text: str) -> FormatSpec {
         let w: GcBuf<i64> = buf_new(8);
         unsafe { rok_fmt_spec_parse(text, w) };
-        let width: usize | none = none;
-        let precision: usize | none = none;
-        if w[5] >= 0 { width = w[5] as usize; }
-        if w[6] >= 0 { precision = w[6] as usize; }
-        FormatSpec {
-            fill: char::from_u32(w[0] as u32) ?? ' ',
-            align: (w[1] as u8) as char,
-            sign: (w[2] as u8) as char,
-            alt: w[3] != 0,
-            zero: w[4] != 0,
-            width: width,
-            precision: precision,
-            ty: (w[7] as u8) as char,
-        }
-    }
-
-    /// The base an integer prints in: 2, 8 or 16 for `b o x X`, else 10.
-    pub fn radix(self) -> u32 {
-        let t = self.ty;
-        if t == 'b' { return 2u32; }
-        if t == 'o' { return 8u32; }
-        if t == 'x' || t == 'X' { 16u32 } else { 10u32 }
-    }
-
-    /// `sign`, `prefix` and `body` padded to the width: the one place
-    /// fill, align and `0` apply. Numbers align right by default and
-    /// pad between the prefix and the digits for `0` / `=` (2.10.8).
-    pub fn pad(self, sign: str, prefix: str, body: str, numeric: bool) -> str {
-        let n = sign.char_count() + prefix.char_count() + body.char_count();
-        let w = self.width ?? 0;
-        if w <= n { return sign + prefix + body; }
-        let gap = w - n;
-        let fill = self.fill;
-        let align = self.align;
-        if numeric && self.zero && align == '\0' {
-            fill = '0';
-            align = '=';
-        }
-        let f = fill.display();
-        if align == '=' && numeric { return sign + prefix + f.repeat(gap) + body; }
-        if align == '<' || (align == '\0' && !numeric) { return sign + prefix + body + f.repeat(gap); }
-        if align == '^' { return f.repeat(gap / 2) + sign + prefix + body + f.repeat(gap - gap / 2); }
-        f.repeat(gap) + sign + prefix + body
-    }
-
-    /// What a number's sign shows: `-`, or what `+` / ` ` ask for.
-    pub fn sign_text(self, neg: bool) -> str {
-        if neg { return "-"; }
-        if self.sign == '+' { return "+"; }
-        if self.sign == ' ' { " " } else { "" }
-    }
-
-    /// An integer from its sign and its digits in `self.radix()`: the
-    /// `#` prefix, `X` case, `e` / `E` and `f` forms, then padding.
-    pub fn integer(self, neg: bool, digits: str) -> str {
-        let t = self.ty;
-        if self.radix() != 10u32 {
-            let prefix = "";
-            if self.alt { prefix = if t == 'b' { "0b" } else if t == 'o' { "0o" } else { "0x" }; }
-            let body = if t == 'X' { digits.to_uppercase() } else { digits };
-            return self.pad(self.sign_text(neg), prefix, body, true);
-        }
-        let body = digits;
-        if t == 'e' || t == 'E' {
-            let upper = if t == 'E' { 1u32 } else { 0u32 };
-            body = unsafe { rok_fmt_exp_digits(digits, count_or_minus(self.precision), upper) };
-        } else if t == 'f' {
-            let p = self.precision ?? 6;
-            if p > 0 { body = digits + "." + "0".repeat(p); }
-        }
-        self.pad(self.sign_text(neg), "", body, true)
-    }
-
-    /// A primitive float (`is_f32`: an `f32` widened).
-    fn primitive_float(self, v: f64, is_f32: bool) -> str {
-        if self.radix() != 10u32 { panic("invalid format spec: a float has no binary / octal / hex form"); }
-        let neg = v.is_sign_negative() && !v.is_nan();
-        let f32_flag = if is_f32 { 1u32 } else { 0u32 };
-        let body = unsafe { rok_fmt_float(v.abs(), f32_flag, self.ty as u32, count_or_minus(self.precision)) };
-        // inf / NaN pad like numbers but never with zeros.
-        self.pad(self.sign_text(neg), "", body, v.is_finite())
-    }
-
-    /// Any other value, rendered as `disp` (Display) and `dbg` (Debug,
-    /// for `?`); a precision keeps that many chars.
-    pub fn text(self, disp: str, dbg: str) -> str {
-        if self.ty != '\0' && self.ty != '?' { panic("invalid format spec: the type letter needs a number"); }
-        let t = if self.ty == '?' { dbg } else { disp };
-        let body = t;
-        if let p: usize = self.precision {
-            let i = 0usize;
-            for (at, _) in t.char_indices() {
-                if i == p {
-                    body = t[:at];
-                    break;
-                }
-                i += 1;
-            }
-        }
-        self.pad("", "", body, false)
+        let s = FormatSpec::new();
+        s.fill = char::from_u32(w[0] as u32) ?? ' ';
+        s.align = (w[1] as u8) as char;
+        s.sign = (w[2] as u8) as char;
+        s.alt = w[3] != 0;
+        s.zero = w[4] != 0;
+        if w[5] >= 0 { s.width = w[5] as usize; }
+        if w[6] >= 0 { s.precision = w[6] as usize; }
+        s.ty = (w[7] as u8) as char;
+        s
     }
 }
 
-// f-string lowering targets (HIR calls them by full path).
-
-/// A non-number hole: `spec` applied to its Display (or Debug for `?`).
-pub fn fstr_str(disp: str, dbg: str, spec: str) -> str { FormatSpec::parse(spec).text(disp, dbg) }
-
-/// The pieces of an f-string in one allocation.
-pub fn fstr_join<const N: usize>(parts: [str; N]) -> str {
-    let n = 0usize;
-    let i = 0usize;
-    while i < N {
-        n = n + parts[i].len();
-        i = i + 1;
-    }
-    let out = unsafe { rok_gc_alloc_bytes(n, 0) };
-    let at = 0usize;
-    i = 0;
-    while i < N {
-        unsafe { rok_str_write_at(out, at, parts[i]) };
-        at = at + parts[i].len();
-        i = i + 1;
-    }
-    out
+/// Where a value's text goes, with the spec it is written by (2.10.2):
+/// the runtime's growing text (`rok_fmt_*`) and the spec packed in two
+/// words — `flags`: fill (bits 0..32), align, sign, type (a byte each
+/// from bit 32), `#` (bit 56), `0` (bit 57); `counts`: width, precision
+/// (32 bits each, all ones when absent).
+pub struct Formatter {
+    pub(pkg) t: str;
+    pub(pkg) flags: u64;
+    pub(pkg) counts: u64;
 }
 
-/// A signed integer of `bits` bits: `b o x X` show its two's complement
-/// at that width (stdlib 2.10.5).
-fn format_signed(v: i64, bits: u64, spec: FormatSpec) -> str {
-    let r = spec.radix();
-    if r != 10u32 {
-        let b = v as u64;
-        if bits < 64u64 { b = b & ((1u64 << bits) - 1u64); }
-        return spec.integer(false, unsafe { rok_str_from_u64(b, r) });
+/// The packed words of no spec.
+const PLAIN_FLAGS: u64 = 32;
+const PLAIN_COUNTS: u64 = 0xFFFFFFFFFFFFFFFF;
+
+/// A packed count: all ones when absent.
+fn count_bits(v: usize | none) -> u64 {
+    match v {
+        n: usize => if n < 0xFFFFFFFF { n as u64 } else { 0xFFFFFFFEu64 },
+        none => 0xFFFFFFFFu64,
     }
-    spec.integer(v < 0, unsafe { rok_str_from_u64(v.unsigned_abs(), 10u32) })
 }
 
-fn format_unsigned(v: u64, spec: FormatSpec) -> str {
-    spec.integer(false, unsafe { rok_str_from_u64(v, spec.radix()) })
+impl Formatter {
+    pub fn new() -> Formatter { Formatter::with_capacity(16) }
+
+    /// Empty, with room for `cap` bytes.
+    pub fn with_capacity(cap: usize) -> Formatter {
+        Formatter { t: unsafe { rok_fmt_new(cap) }, flags: PLAIN_FLAGS, counts: PLAIN_COUNTS }
+    }
+
+    /// Empty, writing values per `spec`.
+    pub fn with_spec(spec: FormatSpec) -> Formatter {
+        let f = Formatter::new();
+        let ty = if spec.ty == 's' || spec.ty == 'd' || spec.ty == 'g' { '\0' } else { spec.ty };
+        let alt = if spec.alt { 1u64 } else { 0u64 };
+        let zero = if spec.zero { 1u64 } else { 0u64 };
+        f.flags = (spec.fill as u64) + ((spec.align as u64) << 32u64) + ((spec.sign as u64) << 40u64)
+            + ((ty as u64) << 48u64) + (alt << 56u64) + (zero << 57u64);
+        let p: usize | none = none;
+        if let n: usize = spec.precision { p = if n > 500 { 500 } else { n }; }
+        f.counts = count_bits(spec.width) + (count_bits(p) << 32u64);
+        f
+    }
+
+    /// The text written, as a `str` (no copy); the formatter is spent.
+    pub fn finish(self) -> str { unsafe { rok_fmt_finish(self.t) } }
+
+    pub fn write_str(ref self, s: str) throws (FmtError) { self.t = unsafe { rok_fmt_str(self.t, s) }; }
+
+    pub fn write_char(ref self, c: char) throws (FmtError) { self.t = unsafe { rok_fmt_char(self.t, c as u32) }; }
+
+    /// `s` cut to `precision` chars and padded to `width` (text aligns
+    /// left by default).
+    pub fn pad(ref self, s: str) throws (FmtError) {
+        let start = unsafe { rok_fmt_len(self.t) };
+        self.t = unsafe { rok_fmt_str(self.t, s) };
+        self.t = unsafe { rok_fmt_pad(self.t, self.flags, self.counts, start, start, 0u32) };
+    }
+
+    /// An integer: the sign, `prefix` (`"0x"` ..) under `#`, the digits
+    /// `buf`, padded to `width` — right by default; `0` and `=` fill
+    /// between the prefix and the digits.
+    pub fn pad_integral(ref self, is_nonnegative: bool, prefix: str, buf: str) throws (FmtError) {
+        let nonneg = if is_nonnegative { 1u32 } else { 0u32 };
+        self.t = unsafe { rok_fmt_integral(self.t, prefix, buf, self.flags, self.counts, nonneg) };
+    }
+
+    pub fn fill(self) -> char { char::from_u32((self.flags & 0xFFFFFFFFu64) as u32) ?? ' ' }
+
+    /// `none` when the spec names no alignment: numbers then align
+    /// right, other values left.
+    pub fn align(self) -> Alignment | none {
+        let a = self.byte(32u64);
+        if a == '<' { return Alignment::Left; }
+        if a == '>' { return Alignment::Right; }
+        if a == '^' { return Alignment::Center; }
+        if a == '=' { Alignment::Equal } else { none }
+    }
+
+    pub fn sign(self) -> Sign | none {
+        let s = self.byte(40u64);
+        if s == '+' { return Sign::Plus; }
+        if s == '-' { return Sign::Minus; }
+        if s == ' ' { Sign::Space } else { none }
+    }
+
+    pub fn alternate(self) -> bool { ((self.flags >> 56u64) & 1u64) != 0u64 }
+    pub fn pad_zero(self) -> bool { ((self.flags >> 57u64) & 1u64) != 0u64 }
+    pub fn width(self) -> usize | none { count_of(self.counts) }
+    pub fn precision(self) -> usize | none { count_of(self.counts >> 32u64) }
+
+    /// The spec's type letter (`'\0'` for none or `s d g`).
+    pub(pkg) fn ty(self) -> char { self.byte(48u64) }
+
+    fn byte(self, at: u64) -> char { (((self.flags >> at) & 0xFFu64) as u8) as char }
 }
 
-impl Format for i8 { fn format(self, spec: FormatSpec) -> str { format_signed(self as i64, 8u64, spec) } }
-impl Format for i16 { fn format(self, spec: FormatSpec) -> str { format_signed(self as i64, 16u64, spec) } }
-impl Format for i32 { fn format(self, spec: FormatSpec) -> str { format_signed(self as i64, 32u64, spec) } }
-impl Format for i64 { fn format(self, spec: FormatSpec) -> str { format_signed(self, 64u64, spec) } }
-impl Format for isize { fn format(self, spec: FormatSpec) -> str { format_signed(self as i64, 64u64, spec) } }
-impl Format for u8 { fn format(self, spec: FormatSpec) -> str { format_unsigned(self as u64, spec) } }
-impl Format for u16 { fn format(self, spec: FormatSpec) -> str { format_unsigned(self as u64, spec) } }
-impl Format for u32 { fn format(self, spec: FormatSpec) -> str { format_unsigned(self as u64, spec) } }
-impl Format for u64 { fn format(self, spec: FormatSpec) -> str { format_unsigned(self, spec) } }
-impl Format for usize { fn format(self, spec: FormatSpec) -> str { format_unsigned(self as u64, spec) } }
-impl Format for f32 { fn format(self, spec: FormatSpec) -> str { spec.primitive_float(self as f64, true) } }
-impl Format for f64 { fn format(self, spec: FormatSpec) -> str { spec.primitive_float(self, false) } }
+fn count_of(v: u64) -> usize | none {
+    let n = v & 0xFFFFFFFFu64;
+    if n == 0xFFFFFFFFu64 { none } else { n as usize }
+}
 
-impl Display for i8 { fn display(self) -> str { unsafe { rok_str_from_i64(self as i64) } } }
-impl Display for i16 { fn display(self) -> str { unsafe { rok_str_from_i64(self as i64) } } }
-impl Display for i32 { fn display(self) -> str { unsafe { rok_str_from_i64(self as i64) } } }
-impl Display for i64 { fn display(self) -> str { unsafe { rok_str_from_i64(self) } } }
-impl Display for isize { fn display(self) -> str { unsafe { rok_str_from_i64(self as i64) } } }
-impl Display for u8 { fn display(self) -> str { unsafe { rok_str_from_u64(self as u64, 10u32) } } }
-impl Display for u16 { fn display(self) -> str { unsafe { rok_str_from_u64(self as u64, 10u32) } } }
-impl Display for u32 { fn display(self) -> str { unsafe { rok_str_from_u64(self as u64, 10u32) } } }
-impl Display for u64 { fn display(self) -> str { unsafe { rok_str_from_u64(self, 10u32) } } }
-impl Display for usize { fn display(self) -> str { unsafe { rok_str_from_u64(self as u64, 10u32) } } }
+// f-string lowering targets (HIR calls them by full path, on the text
+// `t`; each returns it, maybe moved). Formatting to memory never fails.
+
+/// `{v}`.
+pub fn fstr_display<T: Display>(t: str, v: T) -> str {
+    let f = Formatter { t: t, flags: PLAIN_FLAGS, counts: PLAIN_COUNTS };
+    try! Display::fmt(v, ref f);
+    f.t
+}
+
+/// `{v:?}`.
+pub fn fstr_debug<T: Debug>(t: str, v: T) -> str {
+    let f = Formatter { t: t, flags: PLAIN_FLAGS, counts: PLAIN_COUNTS };
+    try! Debug::fmt(v, ref f);
+    f.t
+}
+
+/// A number under a spec (`flags`, `counts`).
+pub fn fstr_num<T: Display>(t: str, v: T, flags: u64, counts: u64) -> str {
+    let f = Formatter { t: t, flags: flags, counts: counts };
+    try! Display::fmt(v, ref f);
+    f.t
+}
+
+/// A dynamic spec's packed words; panics when malformed, or when
+/// `text_only` and it has a number's type letter.
+pub fn fstr_pack(spec: str, text_only: bool) -> (u64, u64) {
+    let out: GcBuf<u64> = buf_new(2);
+    unsafe { rok_fmt_pack(spec, if text_only { 1u32 } else { 0u32 }, out) };
+    (out[0], out[1])
+}
+
+/// A dynamic spec on a value with both: `?` picks the Debug; then cut
+/// and padded as text.
+pub fn fstr_text_any<T: Display + Debug>(t: str, v: T, spec: str) -> str {
+    let (flags, counts) = fstr_pack(spec, true);
+    let start = unsafe { rok_fmt_len(t) };
+    let debug = ((flags >> 48u64) & 0xFFu64) == 63u64;
+    let out = if debug { fstr_debug(t, v) } else { fstr_display(t, v) };
+    unsafe { rok_fmt_pad(out, flags, counts, start, start, 0u32) }
+}
+
+/// `Format::format` for every number: `v`'s Display under `spec`.
+pub(pkg) fn format_number<T: Display>(v: T, spec: FormatSpec) -> str {
+    let f = Formatter::with_spec(spec);
+    try! Display::fmt(v, ref f);
+    f.finish()
+}
+
+// Integers: `b o x X` show a fixed-width integer's two's complement at
+// its width (2.10.5).
+impl Display for i8 { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 1u32, 8u32) }; } }
+impl Display for i16 { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 1u32, 16u32) }; } }
+impl Display for i32 { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 1u32, 32u32) }; } }
+impl Display for i64 { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self, 1u32, 64u32) }; } }
+impl Display for isize { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 1u32, 64u32) }; } }
+impl Display for u8 { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 0u32, 8u32) }; } }
+impl Display for u16 { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 0u32, 16u32) }; } }
+impl Display for u32 { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 0u32, 32u32) }; } }
+impl Display for u64 { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 0u32, 64u32) }; } }
+impl Display for usize { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 0u32, 64u32) }; } }
 /// Shortest round-trip digits, never an exponent (`1`, `0.1`, `1e21` as
 /// `1000000000000000000000`), `inf` / `NaN`.
-impl Display for f32 { fn display(self) -> str { unsafe { rok_fmt_float(self as f64, 1u32, 0u32, -1) } } }
-impl Display for f64 { fn display(self) -> str { unsafe { rok_fmt_float(self, 0u32, 0u32, -1) } } }
+impl Display for f32 { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_f64(f.t, f.flags, f.counts, self as f64, 1u32) }; } }
+impl Display for f64 { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_f64(f.t, f.flags, f.counts, self, 0u32) }; } }
 impl Display for bool {
-    fn display(self) -> str { if self { "true" } else { "false" } }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.pad(if self { "true" } else { "false" }) }
 }
-impl Display for char { fn display(self) -> str { unsafe { rok_str_from_char(self as u32) } } }
-impl Display for str { fn display(self) -> str { self } }
+impl Display for char { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_char(self) } }
+impl Display for str { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.pad(self) } }
 
-impl Debug for i8 { fn debug(self) -> str { self.display() } }
-impl Debug for i16 { fn debug(self) -> str { self.display() } }
-impl Debug for i32 { fn debug(self) -> str { self.display() } }
-impl Debug for i64 { fn debug(self) -> str { self.display() } }
-impl Debug for isize { fn debug(self) -> str { self.display() } }
-impl Debug for u8 { fn debug(self) -> str { self.display() } }
-impl Debug for u16 { fn debug(self) -> str { self.display() } }
-impl Debug for u32 { fn debug(self) -> str { self.display() } }
-impl Debug for u64 { fn debug(self) -> str { self.display() } }
-impl Debug for usize { fn debug(self) -> str { self.display() } }
-impl Debug for f32 { fn debug(self) -> str { self.display() } }
-impl Debug for f64 { fn debug(self) -> str { self.display() } }
-impl Debug for bool { fn debug(self) -> str { self.display() } }
+impl Debug for i8 { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for i16 { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for i32 { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for i64 { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for isize { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for u8 { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for u16 { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for u32 { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for u64 { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for usize { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for f32 { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for f64 { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for bool { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+/// A rok literal: quotes, `\\`, `\n` `\r` `\t` `\0` escaped, other
+/// control and bidi chars as `\u{..}` (2.10.4).
 impl Debug for char {
-    fn debug(self) -> str { unsafe { rok_str_escape(rok_str_from_char(self as u32), '\'' as u32) } }
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        f.t = unsafe { rok_fmt_escaped(f.t, rok_str_from_char(self as u32), 39u32) };
+    }
 }
-impl Debug for str { fn debug(self) -> str { unsafe { rok_str_escape(self, '"' as u32) } } }
+impl Debug for str { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_escaped(f.t, self, 34u32) }; } }
+
+impl Format for i8 { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
+impl Format for i16 { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
+impl Format for i32 { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
+impl Format for i64 { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
+impl Format for isize { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
+impl Format for u8 { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
+impl Format for u16 { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
+impl Format for u32 { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
+impl Format for u64 { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
+impl Format for usize { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
+impl Format for f32 { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
+impl Format for f64 { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }

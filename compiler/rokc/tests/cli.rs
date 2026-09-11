@@ -417,8 +417,8 @@ fn prebuilt_dependency_is_linked_and_instantiated() {
          static COUNT: Atomic<i32> = Atomic::new(0);\n\
          pub fn bump() -> i32 { return COUNT.fetch_add(1) + 1; }\n\
          pub struct Bad { pub at: i32; }\n\
-         impl Display for Bad { fn display(self) -> str { return f\"bad {self.at}\"; } }\n\
-         impl Debug for Bad { fn debug(self) -> str { return self.display(); } }\n\
+         impl Display for Bad { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f\"bad {self.at}\"); } }\n\
+         impl Debug for Bad { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f); } }\n\
          impl Error for Bad {}\n\
          pub fn check(x: i32) throws -> i32 { if x < 0 { throw Bad { at: x }; } return x * 2; }\n\
          pub struct Stack<T> { items: List<T>; }\n\

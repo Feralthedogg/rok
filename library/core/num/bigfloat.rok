@@ -295,7 +295,7 @@ impl Float {
             p: usize => a.sig_digits((p as i64) + 1),
             none => a.shortest_digits(),
         };
-        point(d, prec is none) + (if upper { "E" } else { "e" }) + k.display()
+        point(d, prec is none) + (if upper { "E" } else { "e" }) + f"{k}"
     }
 }
 
@@ -512,39 +512,37 @@ impl One for Float {
     fn one() -> Float { Float::plain(1.0) }
 }
 
-/// `f64`'s Display in its range; a promoted value in the shortest
-/// round-trip exponent form (`1.5e400`).
-impl Display for Float {
-    fn display(self) -> str {
-        if self.e == 0 { return self.m.display(); }
-        (if self.m < 0.0 { "-" } else { "" }) + self.sci(none, false)
-    }
-}
-
-impl Debug for Float {
-    fn debug(self) -> str { self.display() }
-}
-
 /// `f64`'s formatting in its range. A promoted value prints `e` / `E`
 /// (and Display) as `d.ddde<k>`, and `f` with its exact integer digits
 /// when huge or zero when tiny.
-impl Format for Float {
-    fn format(self, spec: FormatSpec) -> str {
-        if self.e == 0 || spec.radix() != 10u32 { return self.m.format(spec); }
+impl Display for Float {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        let ty = f.ty();
+        if self.e == 0 || ty == 'b' || ty == 'o' || ty == 'x' || ty == 'X' {
+            return try Display::fmt(self.m, ref f);
+        }
         let body = "";
-        if spec.ty == 'f' {
+        if ty == 'f' {
             body = "0";
             if self.e > 0 {
                 let (mi, ei) = self.abs().mant_exp();
                 body = (mi << (ei as u32)).to_str_radix(10u32);
             }
-            let p = spec.precision ?? 6;
+            let p = f.precision() ?? 6;
             if p > 0 { body = body + "." + "0".repeat(p); }
         } else {
-            body = self.sci(spec.precision, spec.ty == 'E');
+            body = self.sci(f.precision(), ty == 'E');
         }
-        spec.pad(spec.sign_text(self.m < 0.0), "", body, true)
+        try f.pad_integral(!(self.m < 0.0), "", body)
     }
+}
+
+impl Debug for Float {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) }
+}
+
+impl Format for Float {
+    fn format(self, spec: FormatSpec) -> str { format_number(self, spec) }
 }
 
 impl FromStr for Float {

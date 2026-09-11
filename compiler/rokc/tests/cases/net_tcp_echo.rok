@@ -28,7 +28,7 @@ let any: SocketAddr = try! "127.0.0.1:0".parse::<SocketAddr>();
 let v6: SocketAddr = try! "[::1]:8080".parse::<SocketAddr>();
 let ip: Ipv4Addr = try! "10.1.2.3".parse::<Ipv4Addr>();
 let ip6: Ipv6Addr = try! "2001:db8:0:0:0:0:0:1".parse::<Ipv6Addr>();
-println(f"addr {any.display()} {v6.display()} {ip.display()} {ip6.display()}");
+println(f"addr {any} {v6} {ip} {ip6}");
 
 // ---- blocking: a thread echoes one connection ----
 let listener = try! TcpListener::bind(any);
@@ -121,7 +121,7 @@ l2.close();
 let l3 = try! net::tcp_listen("127.0.0.1:0");
 let a3 = try! l3.local_addr();
 let t3 = thread::spawn(|| {
-    let c = try! net::tcp_connect(a3.display());
+    let c = try! net::tcp_connect(f"{a3}");
     try! c.write_str("ping");
     c.close();
     0

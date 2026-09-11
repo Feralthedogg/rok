@@ -105,8 +105,8 @@ fn lex(cs: List<char>) throws (RokonError) -> List<Tok> {
         } else if c == '.' && at(cs, i + 1) == '.' {
             toks.push(Tok { kind: K_PUNCT, text: "..", at: start });
             i += 2;
-        } else if "[]{}(),:-.+*/%=<>!&|^~?@#$;".contains(c.display()) {
-            toks.push(Tok { kind: K_PUNCT, text: c.display(), at: start });
+        } else if "[]{}(),:-.+*/%=<>!&|^~?@#$;".contains(f"{c}") {
+            toks.push(Tok { kind: K_PUNCT, text: f"{c}", at: start });
             i += 1;
         } else {
             throw fail(cs, start, f"unexpected character `{c}`");

@@ -35,8 +35,8 @@ fn main() {
     for w in "  one two\tthree\n ".split_whitespace() { println(w); }
     let c: char = try! "Z".parse();
     println(f"{c}");
-    let bad = try "ab".parse::<char>() catch e { println(e.display()); 'q' };
+    let bad = try "ab".parse::<char>() catch e { println(f"{e}"); 'q' };
     println(try! str::from_utf8("héllo".as_bytes()));
     let bytes: List<u8> = [104u8, 0xFFu8];
-    println(try str::from_utf8(bytes) catch e { e.display() });
+    println(try str::from_utf8(bytes) catch e { f"{e}" });
 }

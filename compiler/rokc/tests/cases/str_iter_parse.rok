@@ -46,7 +46,7 @@ fn main() throws (ParseError) -> i32 {
     let t = try "true".parse::<bool>();
     println(f"{i} {j} {k} {f} {t}");
 
-    let bad = try "12x".parse::<i32>() catch e: ParseError { println(e.display()); 0 };
-    let big = try "300".parse::<u8>() catch e: ParseError { println(e.display()); 0u8 };
+    let bad = try "12x".parse::<i32>() catch e: ParseError { println(f"{e}"); 0 };
+    let big = try "300".parse::<u8>() catch e: ParseError { println(f"{e}"); 0u8 };
     return bad + big as i32;
 }

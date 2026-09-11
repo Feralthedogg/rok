@@ -60,10 +60,10 @@ pub struct SystemTimeError {
 }
 
 impl Display for SystemTimeError {
-    fn display(self) -> str { f"second time provided was later than self by {self.duration}" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"second time provided was later than self by {self.duration}") }
 }
 impl Debug for SystemTimeError {
-    fn debug(self) -> str { f"SystemTimeError({self.duration})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"SystemTimeError({self.duration})") }
 }
 impl Error for SystemTimeError {}
 

@@ -7,8 +7,8 @@
 // spec 4.16.4: the implicit `main` is `fn main() throws`; an error a
 // top-level `try` lets escape is printed (Display) and exits 1.
 struct Bad { n: i32; }
-impl Display for Bad { fn display(self) -> str { return f"bad {self.n}"; } }
-impl Debug for Bad { fn debug(self) -> str { return "Bad"; } }
+impl Display for Bad { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"bad {self.n}") } }
+impl Debug for Bad { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("Bad") } }
 impl Error for Bad {}
 
 fn parse(x: i32) throws (Bad) -> i32 {

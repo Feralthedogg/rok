@@ -454,9 +454,8 @@ impl Expander<'_> {
         out
     }
 
-    /// Substitute `@..` names inside a string / f-string literal, and
-    /// rename the template's locals inside f-string holes.
-    fn string_text(&self, s: &str, ctx: Ctx, fstr: bool) -> String {
+    /// Substitute `@..` names inside string / f-string text.
+    fn string_text(&self, s: &str, ctx: Ctx) -> String {
         let mut s = s.replace("@Self", &self.t.name);
         s = s.replace("@item.name", &self.t.name);
         if let Some(f) = self.field(ctx) {
@@ -465,45 +464,7 @@ impl Expander<'_> {
         if let Some(v) = ctx.variant {
             s = s.replace("@variant.name", &self.t.variants[v].name);
         }
-        if !fstr || self.bound.is_empty() {
-            return s;
-        }
-        // Inside `{..}` holes (`{{` is a literal brace), rename whole
-        // identifiers the template binds.
-        let chars: Vec<char> = s.chars().collect();
-        let mut out = String::new();
-        let mut depth = 0u32;
-        let mut i = 0;
-        while i < chars.len() {
-            let c = chars[i];
-            if depth == 0 && c == '{' && chars.get(i + 1) == Some(&'{') {
-                out.push_str("{{");
-                i += 2;
-                continue;
-            }
-            match c {
-                '{' => depth += 1,
-                '}' => depth = depth.saturating_sub(1),
-                _ => {}
-            }
-            if depth > 0 && (c.is_alphabetic() || c == '_') {
-                let start = i;
-                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
-                    i += 1;
-                }
-                let word: String = chars[start..i].iter().collect();
-                let member = start > 0 && chars[start - 1] == '.';
-                if !member && self.bound.contains(&word) {
-                    out.push_str(&hygienic(&word));
-                } else {
-                    out.push_str(&word);
-                }
-                continue;
-            }
-            out.push(c);
-            i += 1;
-        }
-        out
+        s
     }
 
     /// Hygiene pre-scan: names bound by `let` / `for` / closure params
@@ -601,8 +562,8 @@ impl Expander<'_> {
             TokenKind::Ident(n) if self.bound.contains(n) && self.renames(k) => {
                 TokenKind::Ident(hygienic(n))
             }
-            TokenKind::StrLit(s) => TokenKind::StrLit(self.string_text(s, ctx, false)),
-            TokenKind::FStrLit(s) => TokenKind::FStrLit(self.string_text(s, ctx, true)),
+            TokenKind::StrLit(s) => TokenKind::StrLit(self.string_text(s, ctx)),
+            TokenKind::FStrText(s) => TokenKind::FStrText(self.string_text(s, ctx)),
             k => k.clone(),
         };
         self.out.push(tok(kind, t.span));
@@ -1618,6 +1579,7 @@ fn render(tokens: &[Token]) -> String {
     // Open `[` / `#[` (an attribute's `]` ends its line).
     let mut brackets: Vec<bool> = Vec::new();
     let mut attr_end = false;
+    let mut fstr = 0u32;
     for t in tokens {
         let k = &t.kind;
         if *k == K::RBrace {
@@ -1636,7 +1598,15 @@ fn render(tokens: &[Token]) -> String {
                 | K::Else
                 | K::FatArrow
         ) || matches!(k, K::Ident(w) if w == "catch" || w == "finally");
+        // F-string pieces stay on one line, glued to their neighbours.
+        let in_fstr = fstr > 0;
+        match k {
+            K::FStrStart(_) => fstr += 1,
+            K::FStrEnd(_) => fstr = fstr.saturating_sub(1),
+            _ => {}
+        }
         let new_line = match prev {
+            _ if in_fstr => false,
             None | Some(K::LBrace | K::Semi) => true,
             Some(K::RBracket) if attr_end => true,
             Some(K::Comma) if brace_comma => *k != K::RParen,
@@ -1651,11 +1621,30 @@ fn render(tokens: &[Token]) -> String {
         } else {
             let glued_after = matches!(
                 prev,
-                Some(K::LParen | K::LBracket | K::Dot | K::ColonColon | K::HashLBracket | K::Bang)
+                Some(
+                    K::LParen
+                        | K::LBracket
+                        | K::Dot
+                        | K::ColonColon
+                        | K::HashLBracket
+                        | K::Bang
+                        | K::FStrStart(_)
+                        | K::FStrText(_)
+                        | K::HoleStart
+                        | K::HoleSpec
+                        | K::SpecText(_)
+                        | K::HoleEnd
+                )
             );
             let glued_before = matches!(
                 k,
-                K::RParen
+                K::FStrText(_)
+                    | K::HoleStart
+                    | K::HoleSpec
+                    | K::SpecText(_)
+                    | K::HoleEnd
+                    | K::FStrEnd(_)
+                    | K::RParen
                     | K::RBracket
                     | K::Comma
                     | K::Semi

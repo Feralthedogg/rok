@@ -835,9 +835,6 @@ fn pure_extern(name: &str, args: &[Value]) -> Option<Value> {
             Value::Int(a.as_bytes().cmp(b.as_bytes()) as i128, PrimTy::I32)
         }
         ("rok_str_concat", [Value::Str(a), Value::Str(b)]) => Value::Str(format!("{a}{b}").into()),
-        ("rok_str_from_i64" | "rok_str_from_u64", [Value::Int(i, _)]) => {
-            Value::Str(i.to_string().into())
-        }
         ("rok_str_from_char", [c]) => {
             let c = match c {
                 Value::Int(c, _) => u32::try_from(*c).ok()?,

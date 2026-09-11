@@ -1846,11 +1846,19 @@ pub(super) fn collect_field_visibility(
         rokc_diagnostic::set_current_span(item.span());
         match item {
             Item::Struct(s) => {
-                let AstStructKind::Named(fs) = &s.kind else {
-                    continue;
+                let vis: HashMap<String, Visibility> = match &s.kind {
+                    AstStructKind::Named(fs) => {
+                        fs.iter().map(|f| (f.name.clone(), f.vis)).collect()
+                    }
+                    // Positional fields are named "0", "1", ... as in `HirField`.
+                    AstStructKind::Tuple(fs) => fs
+                        .iter()
+                        .enumerate()
+                        .map(|(i, f)| (i.to_string(), f.vis))
+                        .collect(),
+                    AstStructKind::Unit => continue,
                 };
-                out.entry(s.name.clone())
-                    .or_insert_with(|| fs.iter().map(|f| (f.name.clone(), f.vis)).collect());
+                out.entry(s.name.clone()).or_insert(vis);
             }
             Item::Union(u) => {
                 out.entry(u.name.clone())

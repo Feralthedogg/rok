@@ -1245,14 +1245,42 @@ pub(super) fn main_frame(ctx: &mut LowerCtx<'_>) {
 /// Spec 4.16.4: an uncaught error prints as its `Display`, else its
 /// `Debug`, else its type name.
 fn describe_err(ctx: &mut LowerCtx<'_>, err: HirExpr, span: rokc_diagnostic::Span) -> HirExpr {
-    for method in ["display", "debug"] {
-        let seen = ctx.env.sink.diagnostics.borrow().len();
-        let m = method_call_on(ctx, err.clone(), method, &[], span);
-        let failed = ctx.env.sink.diagnostics.borrow().len() > seen;
-        ctx.env.sink.diagnostics.borrow_mut().truncate(seen);
-        if !failed && m.ty == HirTy::Prim(PrimTy::Str) {
-            return m;
-        }
+    let spec = if ctx.implements_trait(&err.ty, ctx.lang_trait("display_trait"), 0) {
+        Some(Vec::new())
+    } else if ctx.implements_trait(&err.ty, ctx.lang_trait("debug_trait"), 0) {
+        Some(vec![rokc_ast::SpecPiece::Text("?".to_owned())])
+    } else {
+        None
+    };
+    if let Some(spec) = spec {
+        // `{ let #eN = err; f"{#eN}" }` (`{#eN:?}`).
+        ctx.push_scope();
+        let name = format!("#e{}", ctx.locals.len());
+        let local = ctx.declare(Some(name.clone()), err.ty.clone());
+        let hole = rokc_ast::FStringPart::Hole {
+            expr: Expr {
+                kind: ExprKind::Path(AstPath {
+                    segments: vec![rokc_ast::PathSegment {
+                        name,
+                        generics: Vec::new(),
+                    }],
+                    span,
+                }),
+                span,
+            },
+            spec,
+        };
+        let text = super::fstring::lower_fstring(ctx, &[hole], span);
+        ctx.pop_scope();
+        return HirExpr {
+            ty: HirTy::Prim(PrimTy::Str),
+            kind: HirExprKind::Block(Box::new(HirBlock {
+                stmts: vec![HirStmt::Let { local, init: err }],
+                trailing: Some(text),
+                label: None,
+            })),
+            span,
+        };
     }
     HirExpr {
         kind: HirExprKind::Const(ConstVal::Str(ctx.ty_name(&err.ty))),

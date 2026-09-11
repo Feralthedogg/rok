@@ -16,7 +16,7 @@ type Shown<T> where T: Display = W<T>;
 type Pair<T> = (T, T) where T: Display;
 
 impl<T: Display> W<T> {
-    fn show(self) -> str { return self.v.display(); }
+    fn show(self) -> str { return f"{self.v}"; }
 }
 
 fn main() -> i32 {

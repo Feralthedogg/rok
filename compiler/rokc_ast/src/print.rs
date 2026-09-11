@@ -1431,15 +1431,30 @@ impl Printer {
                 self.expr(x);
             }
             ExprKind::FString(parts) => {
+                let open = self.out.len();
                 self.s("f\"");
                 for part in parts {
                     match part {
                         FStringPart::Lit(t) => {
-                            self.s(&t.replace('{', "{{").replace('}', "}}"));
+                            // A raw `"` (from `f"""`) is escaped.
+                            let mut esc = false;
+                            for c in t.chars() {
+                                match c {
+                                    '"' if !esc => self.s("\\\""),
+                                    '{' => self.s("{{"),
+                                    '}' => self.s("}}"),
+                                    _ => self.out.push(c),
+                                }
+                                esc = c == '\\' && !esc;
+                            }
                         }
                         FStringPart::Hole { expr, spec } => {
                             self.s("{");
+                            let at = self.out.len();
                             self.expr(expr);
+                            if self.out[at..].starts_with('{') {
+                                self.out.insert(at, ' '); // not `{{`
+                            }
                             if !spec.is_empty() {
                                 self.s(":");
                                 for piece in spec {
@@ -1456,6 +1471,11 @@ impl Printer {
                             self.s("}");
                         }
                     }
+                }
+                // Hole code printed across lines needs `f"""`.
+                if self.out[open..].contains('\n') {
+                    self.out.insert_str(open + 2, "\"\"");
+                    self.s("\"\"");
                 }
                 self.s("\"");
             }

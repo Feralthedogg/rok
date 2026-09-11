@@ -9,7 +9,7 @@
 // `debug()` for `?`), then the spec's fill / align / sign / `0` / width
 // / precision / radix apply; `{{` `}}` are literal braces.
 struct P { x: i32; y: i32; }
-impl Display for P { fn display(self) -> str { return f"({self.x}, {self.y})"; } }
+impl Display for P { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"({self.x}, {self.y})") } }
 
 fn main() -> i32 {
     let name = "rok";

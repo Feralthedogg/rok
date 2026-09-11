@@ -1,0 +1,21 @@
+// f-string-heavy: many holes per string, plain and with specs, numbers,
+// strings, floats and a derived `Debug`.
+#[derive(Debug)]
+struct P { x: i32; name: str; }
+
+fn main() -> i32 {
+    let n: i64 = 0;
+    let i = 0;
+    let name = "widget";
+    let p = P { x: 7, name: "pt" };
+    while i < 1000000 {
+        let x = i as f64 * 0.5;
+        let a = f"id={i} name={name} n={i * 3} m={i % 7}";
+        let b = f"[{i:>8}] {name:<10}|{i:#x} {i:08b}";
+        let c = f"{x} {x:.2} {p:?} {i}";
+        n += (a.len() + b.len() + c.len()) as i64;
+        i += 1;
+    }
+    rok_print_i64(n);
+    return 0;
+}

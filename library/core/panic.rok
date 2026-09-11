@@ -36,7 +36,7 @@ pub fn assert(cond: bool, msg: str = "") {
 #[track_caller]
 pub fn assert_eq<T: PartialEq + Debug>(left: T, right: T, msg: str = "") {
     if !(left == right) {
-        panic(assert_failed("==", left.debug(), right.debug(), msg));
+        panic(assert_failed("==", f"{left:?}", f"{right:?}", msg));
     }
 }
 
@@ -44,7 +44,7 @@ pub fn assert_eq<T: PartialEq + Debug>(left: T, right: T, msg: str = "") {
 #[track_caller]
 pub fn assert_ne<T: PartialEq + Debug>(left: T, right: T, msg: str = "") {
     if left == right {
-        panic(assert_failed("!=", left.debug(), right.debug(), msg));
+        panic(assert_failed("!=", f"{left:?}", f"{right:?}", msg));
     }
 }
 

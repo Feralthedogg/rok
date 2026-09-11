@@ -12,7 +12,7 @@ struct P { s: str; xs: List<i32>; }
 fn show<T: Display>(v: T | none) -> str {
     match v {
         none => "none",
-        x: T => x.display(),
+        x: T => f"{x}",
     }
 }
 

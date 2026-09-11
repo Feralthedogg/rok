@@ -7,13 +7,13 @@
 // spec 4.14: untyped `throws` = `throws (any Error)`; a cause chain
 // through `Error::source` (stdlib 2.14.3).
 struct NotFound { id: i32; }
-impl Display for NotFound { fn display(self) -> str { return "not found"; } }
-impl Debug for NotFound { fn debug(self) -> str { return "NotFound"; } }
+impl Display for NotFound { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("not found") } }
+impl Debug for NotFound { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("NotFound") } }
 impl Error for NotFound {}
 
 struct Wrapped { code: i32; cause: any Error | none; }
-impl Display for Wrapped { fn display(self) -> str { return "wrapped"; } }
-impl Debug for Wrapped { fn debug(self) -> str { return "Wrapped"; } }
+impl Display for Wrapped { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("wrapped") } }
+impl Debug for Wrapped { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("Wrapped") } }
 impl Error for Wrapped {
     fn source(self) -> any Error | none { return self.cause; }
 }

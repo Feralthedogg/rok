@@ -69,7 +69,7 @@ impl Mul<Duration> for f64 {
 /// The largest unit the span reaches, fraction without trailing zeros:
 /// `1.234s`, `5ms`, `1.5µs`, `100ns`, `0ns`, `-2s`.
 impl Display for Duration {
-    fn display(self) -> str {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
         let mag = self.ns.unsigned_abs();
         let sign = if self.ns < 0 { "-" } else { "" };
         let (unit, name, width) = if mag >= 1000000000u64 {
@@ -83,23 +83,26 @@ impl Display for Duration {
         };
         let whole = mag / unit;
         let frac = mag % unit;
+        try f.write_str(sign);
+        try Display::fmt(whole, ref f);
         if frac == 0u64 {
-            return f"{sign}{whole}{name}";
+            try f.write_str(name);
+            return;
         }
         while frac % 10u64 == 0u64 {
             frac = frac / 10u64;
             width = width - 1;
         }
+        try f.write_str(".");
         let digits = f"{frac}";
-        let s = StrBuf::new();
-        for _ in digits.len()..width { s.push_str("0"); }
-        s.push_str(digits);
-        f"{sign}{whole}.{s.to_str()}{name}"
+        for _ in digits.len()..width { try f.write_char('0'); }
+        try f.write_str(digits);
+        try f.write_str(name)
     }
 }
 
 impl Debug for Duration {
-    fn debug(self) -> str { self.display() }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) }
 }
 
 impl Add for Duration {

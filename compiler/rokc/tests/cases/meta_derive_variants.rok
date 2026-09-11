@@ -10,6 +10,8 @@
 // Spec 6.9.4: `@for_variants`, `@variant.pattern` / `.name` /
 // `.is_unit` / `.is_tuple` / `.is_named`, `@for_variant_fields`,
 // `@if_enum` / `@if_struct`.
+fn fmt_show<T: Display>(v: T) -> str { f"{v}" }
+
 trait Show {
     fn show(self) -> str;
     fn payload(self) -> i32;
@@ -28,7 +30,7 @@ pub @derive {
                         @apply_if(@variant.is_tuple) {
                             s = s + "(";
                             @for_variant_fields {
-                                s = s + @field.display();
+                                s = s + fmt_show(@field);
                             }
                             s = s + ")";
                         }
@@ -37,7 +39,7 @@ pub @derive {
                             s = s + " { ";
                             @for_variant_fields {
                                 if !first { s = s + ", "; }
-                                s = s + @field.name.as_str() + ": " + @field.display();
+                                s = s + @field.name.as_str() + ": " + fmt_show(@field);
                                 first = false;
                             }
                             s = s + " }";

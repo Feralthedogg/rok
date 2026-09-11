@@ -34,22 +34,22 @@ fn main() {
     xs[-1] = 50;
     xs[i] = 40;
     xs[-4] = 20;
-    println(f"set {xs.debug()}");
+    println(f"set {xs:?}");
 
     let a = [7, 8, 9];
     let k: i8 = -3;
     let before = f"{a[-1]} {a[k]} {a[-2]}";
     a[-1] = 90;
-    println(f"array {before} {a.debug()}");
+    println(f"array {before} {a:?}");
 
     let s = xs[1:4];
     println(f"slice {s[-1]} {s[-2]} {s[i + 1]}");
 
     let neg_one: i32 = -1;
     println(
-        f"bounds {xs[-3:].debug()} {xs[:-1].debug()} {xs[j:neg_one].debug()} {xs[i:].debug()} {xs[1:-1:-1].debug()}",
+        f"bounds {xs[-3:]:?} {xs[:-1]:?} {xs[j:neg_one]:?} {xs[i:]:?} {xs[1:-1:-1]:?}",
     );
-    println(f"array {a[-2:].debug()} str {"hello"[-3:]} {"hello"[1:-1]} {"hello"[-2..]}");
+    println(f"array {a[-2:]:?} str {"hello"[-3:]} {"hello"[1:-1]} {"hello"[-2..]}");
 
     let ps: List<P> = [P { x: 5 }, P { x: 0 }];
     ps[-1].x = 6;
@@ -66,5 +66,5 @@ fn main() {
     let calls = Cell::new(0);
     let last = make(calls)[-1];
     let tail = make(calls)[-2:];
-    println(f"once {last} {tail.debug()} {calls.get() - 1}");
+    println(f"once {last} {tail:?} {calls.get() - 1}");
 }

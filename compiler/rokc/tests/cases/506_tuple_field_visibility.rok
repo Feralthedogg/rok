@@ -1,0 +1,32 @@
+// spec: 005.06-visibility
+// expect-exit: 0
+// expect-stdout:
+// 7 9 5 6 2 3
+
+// Spec 5.6: positional fields are private by default; the defining
+// module sees all of them, `pub` ones are visible everywhere, and `_`
+// in a pattern touches nothing.
+
+mod a {
+    pub struct S(i32, pub i32);
+    pub struct P<T>(pub T, pub T);
+    pub fn mk(x: i32, y: i32) -> S {
+        let s = S(x, y);
+        let S(p, _) = s;
+        match s {
+            S(q, r) => { return S(p + q - x, r); }
+        }
+    }
+    pub fn first(s: S) -> i32 { return s.0; }
+}
+
+fn main() {
+    let s = a::mk(7, 8);
+    s.1 = 9;
+    let p = a::P(5, 6);
+    let a::P(u, v) = p;
+    let a::S(_, w) = a::mk(1, 2);
+    match a::mk(0, 3) {
+        a::S(_, z) => { println(f"{a::first(s)} {s.1} {u} {v} {w} {z}"); }
+    }
+}

@@ -112,11 +112,11 @@ pub struct ParseError {
 }
 
 impl Display for ParseError {
-    fn display(self) -> str { f"cannot parse \"{self.input}\": {self.reason}" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"cannot parse \"{self.input}\": {self.reason}") }
 }
 
 impl Debug for ParseError {
-    fn debug(self) -> str { f"ParseError({self})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"ParseError({self})") }
 }
 
 impl Error for ParseError {}
@@ -128,11 +128,11 @@ pub struct ValueError {
 }
 
 impl Display for ValueError {
-    fn display(self) -> str { self.msg }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(self.msg) }
 }
 
 impl Debug for ValueError {
-    fn debug(self) -> str { f"ValueError({self.msg.debug()})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"ValueError({self.msg:?})") }
 }
 
 impl Error for ValueError {}
@@ -147,11 +147,11 @@ pub struct OverflowError {
 }
 
 impl Display for OverflowError {
-    fn display(self) -> str { f"{self.op}: value out of range for `{self.ty}`" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"{self.op}: value out of range for `{self.ty}`") }
 }
 
 impl Debug for OverflowError {
-    fn debug(self) -> str { f"OverflowError({self})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"OverflowError({self})") }
 }
 
 impl Error for OverflowError {}
@@ -163,11 +163,11 @@ pub struct ConversionError {
 }
 
 impl Display for ConversionError {
-    fn display(self) -> str { self.msg }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(self.msg) }
 }
 
 impl Debug for ConversionError {
-    fn debug(self) -> str { f"ConversionError({self.msg.debug()})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"ConversionError({self.msg:?})") }
 }
 
 impl Error for ConversionError {}

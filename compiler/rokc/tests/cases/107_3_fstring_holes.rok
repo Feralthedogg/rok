@@ -1,0 +1,34 @@
+// spec: 001.07.3-format-string
+// expect-exit: 0
+// expect-stdout:
+// a-b-c|a=1
+// [   42] [rok  ] [  rok]
+// [**7] [007] [0042]
+// {x} $5 tab=a	b
+// sum=6 "quoted" rok!
+// line 1
+//   rest
+
+// Hole code is ordinary rok: the enclosing quote is reused inside,
+// f-strings nest at any depth, specs nest holes, and `f"""` holes
+// span lines.
+fn main() -> i32 {
+    let s = "a b c";
+    let d: Dict<str, i32> = Dict::new();
+    d["a"] = 1;
+    println(f"{s.replace(" ", "-")}|a={d["a"]}");
+    let w = 5;
+    let n = 42;
+    println(f"[{n:>{w}}] [{f"{"rok"}":<{w}}] [{f"{f"{"rok":>{w}}"}"}]");
+    println(f"[{7:*>${w - 2}}] [{7:0{3}}] [{n:0>${2 + 2}}]");
+    println(f"{{x}} $5 tab={"a\tb"}");
+    let name = "rok";
+    println(f"""sum={
+        [1, 2, 3].iter().fold(0, |a, b| a + b)
+    } "quoted" {name +
+        "!"}""");
+    print(f"""line {1}
+  rest
+""");
+    return 0;
+}

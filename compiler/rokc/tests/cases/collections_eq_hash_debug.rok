@@ -13,7 +13,7 @@ fn main() {
     let a = [1, 2, 3];
     let b = [1, 2, 3];
     let c = [3, 2, 1];
-    println(f"{a.debug()} {a == b} {a == c} {a.hash() == b.hash()}");
+    println(f"{a:?} {a == b} {a == c} {a.hash() == b.hash()}");
 
     let d1: Dict<str, i32> = Dict::new();
     d1.insert("a", 1);
@@ -26,7 +26,7 @@ fn main() {
     d3.insert("b", 3);
     let one: Dict<str, i32> = Dict::new();
     one.insert("a", 1);
-    println(f"{one.debug()} {d1 == d2} {d1 == d3} {d1.hash() == d2.hash()}");
+    println(f"{one:?} {d1 == d2} {d1 == d3} {d1.hash() == d2.hash()}");
 
     let s1: Set<str> = Set::new();
     s1.insert("x");
@@ -36,12 +36,12 @@ fn main() {
     s2.insert("x");
     let s3: Set<str> = Set::new();
     s3.insert("x");
-    println(f"{s3.debug()} {s1 == s2} {s1 == s3} {s1.hash() == s2.hash()}");
+    println(f"{s3:?} {s1 == s2} {s1 == s3} {s1.hash() == s2.hash()}");
 
     let seen: Set<List<i32>> = Set::new();
     seen.insert([1]);
     seen.insert([2, 3]);
     seen.insert([1]);
     let shown: List<List<i32>> = [[1], [2, 3]];
-    println(f"nested: {seen.len()} {shown.debug()}");
+    println(f"nested: {seen.len()} {shown:?}");
 }

@@ -40,12 +40,12 @@ impl PartialEq for Ordering {
 impl Eq for Ordering {}
 
 impl Debug for Ordering {
-    fn debug(self) -> str {
-        match self {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str(match self {
             Ordering::Less => "Less",
             Ordering::Equal => "Equal",
             Ordering::Greater => "Greater",
-        }
+        })
     }
 }
 

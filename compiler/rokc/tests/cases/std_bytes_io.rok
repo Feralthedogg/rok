@@ -51,7 +51,7 @@ fn main() throws (IoError) {
     try t.read_exact(a);
     let b = io::byte_buf(4);
     try t.read_exact(b);
-    let kind = try { t.read_exact(io::byte_buf(4)); "none" } catch e { e.kind.debug() };
+    let kind = try { t.read_exact(io::byte_buf(4)); "none" } catch e { f"{e.kind:?}" };
     println(f"exact: [{text(a)}] [{text(b)}] eof: {kind}");
 
     let src = env::temp_dir() / f"rok_bytes_io_{env::pid()}.bin";
@@ -73,7 +73,7 @@ fn main() throws (IoError) {
     println(f"chunk: {(try fs::read(src)).len()} [{try fs::read_to_str(dst)}]");
 
     let raw = RawPath::from_bytes([104u8, 0xFFu8, 105u8, 0xE2u8, 0x82u8, 33u8]);
-    println(f"raw: {raw.as_bytes().len() == 6} {raw.to_path_lossy().as_str().debug()}");
+    println(f"raw: {raw.as_bytes().len() == 6} {raw.to_path_lossy().as_str():?}");
     let e = try { raw.try_to_path(); 0usize } catch x { x.valid_up_to };
     println(f"raw err: {e}");
 

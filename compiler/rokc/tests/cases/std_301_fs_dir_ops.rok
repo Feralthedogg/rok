@@ -42,7 +42,7 @@ fn main() throws (IoError) {
 
     try fs::remove_file(base / "x.txt");
     println(f"remove_file: {fs::exists(base / "x.txt")}");
-    try fs::remove_file(base / "x.txt") catch e { println(f"remove missing: {e.kind.debug()}"); };
+    try fs::remove_file(base / "x.txt") catch e { println(f"remove missing: {e.kind:?}"); };
 
     try fs::write(base / "sub" / "z", "z");
     let failed = false;

@@ -26,9 +26,9 @@ fn main() {
     println(f"{xs.len()} {xs.is_empty()} {show(xs.first())} {show(xs.last())}");
     println(show(xs.get(100)));
     xs.insert(1, 9);
-    println(xs.debug());
+    println(f"{xs:?}");
     let r = xs.remove(1);
-    println(f"removed {r} -> {xs.debug()}");
+    println(f"removed {r} -> {xs:?}");
     let p = xs.pop();
     println(f"popped {show(p)}, len {xs.len()}");
     xs.clear();

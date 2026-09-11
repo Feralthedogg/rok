@@ -64,30 +64,6 @@ pub fn build(parts: &[&[u8]]) -> RokStr {
     RokStr { ptr: p, len }
 }
 
-/// GC allocation of `size` zeroed bytes for library buffers (strings,
-/// collection storage), returned as a `str`-shaped handle `(ptr, size)`:
-/// a `str`-typed slot roots it like a string. `traced` != 0 makes every
-/// pointer-aligned word of the buffer a candidate reference, so it may
-/// hold `str` / `any` values; otherwise nothing inside is traced.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_gc_alloc_bytes(size: usize, traced: i32) -> RokStr {
-    if traced == 0 {
-        return RokStr {
-            ptr: alloc_str(size),
-            len: size,
-        };
-    }
-    let Some(total) = size.checked_add(HEADER_SIZE) else {
-        rokr_common::fatal(b"rok runtime: allocation size overflow");
-    };
-    let obj = rokr_gc::alloc(total, HEADER_ALIGN, rokr_gc::SCAN_WORDS_TYPE_ID);
-    RokStr {
-        // SAFETY: the payload follows the header.
-        ptr: unsafe { obj.add(HEADER_SIZE) },
-        len: size,
-    }
-}
-
 /// `strlen` for a `char*` a C function returned; null → 0.
 ///
 /// # Safety
@@ -262,25 +238,11 @@ pub extern "C" fn rok_str_char_count(s: RokStr) -> usize {
     s.bytes().iter().filter(|&&b| (b & 0xC0) != 0x80).count()
 }
 
-/// `s` as a rok literal between `quote`s (`"` for `str`, `'` for `char`),
-/// escaped so the lexer reads it back: `Debug` and RokON both use it.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_str_escape(s: RokStr, quote: u32) -> RokStr {
-    let mut len = 0;
-    escape(text(&s), quote, |b| len += b.len());
-    let p = alloc_str(len);
-    let mut at = 0;
-    escape(text(&s), quote, |b| {
-        // SAFETY: the first pass counted exactly `len` bytes.
-        unsafe { ptr::copy_nonoverlapping(b.as_ptr(), p.add(at), b.len()) };
-        at += b.len();
-    });
-    RokStr { ptr: p, len }
-}
-
+/// `src` as a rok literal between `quote`s (`"` for `str`, `'` for `char`),
+/// escaped so the lexer reads it back (`Debug`).
 /// Control chars and the bidi controls the lexer rejects (refs-lang 1.1)
 /// go out as `\u{..}`.
-fn escape(src: &str, quote: u32, mut put: impl FnMut(&[u8])) {
+pub fn escape(src: &str, quote: u32, mut put: impl FnMut(&[u8])) {
     let delim = [quote as u8];
     put(&delim);
     for ch in src.chars() {
@@ -319,33 +281,6 @@ fn utf8(c: u32, buf: &mut [u8; 4]) -> &[u8] {
         .unwrap_or(char::REPLACEMENT_CHARACTER)
         .encode_utf8(buf)
         .as_bytes()
-}
-
-// Integer Display bodies (stdlib 2.10); floats are `fmt::rok_fmt_float`.
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_str_from_i64(n: i64) -> RokStr {
-    let s = rok_str_from_u64(n.unsigned_abs(), 10);
-    if n < 0 { build(&[b"-", s.bytes()]) } else { s }
-}
-
-/// The digits of `n` in base `radix` (2..=36, lowercase).
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_str_from_u64(n: u64, radix: u32) -> RokStr {
-    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
-    let r = u64::from(radix.clamp(2, 36));
-    let mut buf = [0u8; 64];
-    let mut i = buf.len();
-    let mut v = n;
-    loop {
-        i -= 1;
-        buf[i] = DIGITS[(v % r) as usize];
-        v /= r;
-        if v == 0 {
-            break;
-        }
-    }
-    build(&[&buf[i..]])
 }
 
 #[unsafe(no_mangle)]
@@ -591,18 +526,6 @@ pub mod tests {
             rok_str_replace(s(b"a-b-c"), s(b"-"), s(b"+")).bytes(),
             b"a+b+c"
         );
-        assert_eq!(
-            rok_str_escape(s("a\"'\n\u{1}\u{85}\u{202E}é".as_bytes()), u32::from('"')).bytes(),
-            "\"a\\\"'\\n\\u{1}\\u{85}\\u{202e}é\"".as_bytes()
-        );
-        assert_eq!(rok_str_escape(s(b"'"), u32::from('\'')).bytes(), b"'\\''");
-        assert_eq!(rok_str_from_i64(-120).bytes(), b"-120");
-        assert_eq!(rok_str_from_i64(i64::MIN).bytes(), b"-9223372036854775808");
-        assert_eq!(
-            rok_str_from_u64(u64::MAX, 10).bytes(),
-            b"18446744073709551615"
-        );
-        assert_eq!(rok_str_from_u64(255, 16).bytes(), b"ff");
         assert_eq!(rok_str_from_char(0xD55C).bytes(), "한".as_bytes());
         // Runtime strings stay NUL-terminated for C.
         let c = rok_str_concat(s(b"x"), s(b"y"));
@@ -611,10 +534,10 @@ pub mod tests {
         // Slices share bytes; C gets them as is when a NUL follows, else
         // a pinned copy.
         let whole = rok_str_concat(s(b"ab"), s(b"cd"));
-        let tail = rok_str_slice(whole, 2, 4);
+        let tail = rok_str_slice(whole, 2, 4, s(b""));
         assert_eq!(tail.ptr, whole.ptr.wrapping_add(2));
         assert_eq!(rok_str_cstr(tail), tail.ptr);
-        let head = rok_str_slice(whole, 0, 2);
+        let head = rok_str_slice(whole, 0, 2, s(b""));
         assert_eq!(head.ptr, whole.ptr);
         let c = rok_str_cstr(head);
         assert_ne!(c, head.ptr);
@@ -622,7 +545,7 @@ pub mod tests {
         assert_eq!(unsafe { core::slice::from_raw_parts(c, 3) }, b"ab\0");
         // SAFETY: `c` came from `rok_str_cstr(head)`.
         unsafe { rok_str_cstr_done(head, c) };
-        let empty = rok_str_slice(whole, 4, 4);
+        let empty = rok_str_slice(whole, 4, 4, s(b""));
         assert_eq!((empty.ptr, empty.len), (whole.ptr.wrapping_add(4), 0));
         assert_eq!(rok_str_bytes_buf(head).wrapping_add(HEADER_SIZE), head.ptr);
     }

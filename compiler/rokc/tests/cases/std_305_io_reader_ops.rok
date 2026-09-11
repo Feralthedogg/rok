@@ -28,7 +28,7 @@ fn main() throws (IoError) {
     let big: List<u8> = List::new();
     let i = 0;
     while i < 64 { big.push(0u8); i += 1; }
-    try f.read_exact(big) catch e { println(f"short read_exact: {e.kind.debug()}"); };
+    try f.read_exact(big) catch e { println(f"short read_exact: {e.kind:?}"); };
     try f.seek(rok::std::io::SeekFrom::Start(6u64));
     let pos = try f.stream_position();
     try f.rewind();

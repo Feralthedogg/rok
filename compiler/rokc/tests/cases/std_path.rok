@@ -31,7 +31,7 @@ fn main() {
     let parts = "";
     for c in p.components() {
         if parts != "" { parts = parts + ", "; }
-        parts = parts + c.debug();
+        parts = parts + f"{c:?}";
     }
     println("[" + parts + "]");
 
@@ -63,10 +63,10 @@ fn main() {
     println(Path::from("a/").join(Path::from("b")).as_str());
     let a = Path::from("a/b").parent() ?? Path::new();
     let top = a.parent() ?? Path::from("?");
-    println(f"{a}, {top.as_str().debug()}");
+    println(f"{a}, {top.as_str():?}");
 
     let names = "";
-    for c in Path::from("/./..").components() { names = names + c.debug() + " "; }
+    for c in Path::from("/./..").components() { names = names + f"{c:?}" + " "; }
     for c in Path::from("./..").components() { names = names + c.as_str() + " "; }
     println(names + Component::RootDir.as_str());
 }

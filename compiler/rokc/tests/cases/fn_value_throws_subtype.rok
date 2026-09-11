@@ -13,8 +13,8 @@
 enum P { Bad }
 enum Q { Other }
 struct NotFound { id: i32; }
-impl Display for NotFound { fn display(self) -> str { return "not found"; } }
-impl Debug for NotFound { fn debug(self) -> str { return "NotFound"; } }
+impl Display for NotFound { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("not found") } }
+impl Debug for NotFound { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("NotFound") } }
 impl Error for NotFound {}
 
 fn inc(x: i32) -> i32 { x + 1 }

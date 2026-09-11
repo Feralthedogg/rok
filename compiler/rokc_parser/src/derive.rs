@@ -278,24 +278,12 @@ fn struct_body(tr: &str, s: &StructDef) -> String {
                 .to_owned())
         ),
         "Debug" => {
-            let shown: Vec<String> = fields
+            let named = matches!(s.kind, StructKind::Named(_));
+            let shown: Vec<(Option<&str>, String)> = fields
                 .iter()
-                .map(|f| match &s.kind {
-                    StructKind::Named(_) => format!("\"{f}: \" + self.{f}.debug()"),
-                    _ => format!("self.{f}.debug()"),
-                })
+                .map(|f| (named.then_some(f.as_str()), format!("self.{f}")))
                 .collect();
-            let text = match &s.kind {
-                StructKind::Unit => format!("\"{name}\""),
-                StructKind::Tuple(_) => {
-                    format!("\"{name}(\" + {} + \")\"", shown.join(" + \", \" + "))
-                }
-                StructKind::Named(_) if fields.is_empty() => format!("\"{name}\""),
-                StructKind::Named(_) => {
-                    format!("\"{name} {{ \" + {} + \" }}\"", shown.join(" + \", \" + "))
-                }
-            };
-            format!("    fn debug(self) -> str {{ return {text}; }}\n")
+            debug_fn(&debug_writes(name, named, &shown, "        "))
         }
         "PartialEq" => {
             let conj: Vec<String> = pairs.iter().map(|(a, b)| format!("{a}.eq({b})")).collect();
@@ -436,26 +424,24 @@ fn enum_body(tr: &str, e: &EnumDef) -> Option<String> {
                 }
             })
         ),
-        "Debug" => format!(
-            "    fn debug(self) -> str {{\n        return match self {{\n{}        }};\n    }}\n",
+        "Debug" => debug_fn(&format!(
+            "        match self {{\n{}        }}\n",
             arms(&|v, _, names| {
-                let dbg: Vec<String> = names.iter().map(|n| format!("{n}.debug()")).collect();
-                match &v.kind {
-                    EnumVariantKind::Unit | EnumVariantKind::Value(_) => format!("\"{}\"", v.name),
-                    EnumVariantKind::Tuple(_) => {
-                        format!("\"{}(\" + {} + \")\"", v.name, dbg.join(" + \", \" + "))
-                    }
-                    EnumVariantKind::Named(fs) => {
-                        let parts: Vec<String> = fs
-                            .iter()
-                            .zip(&dbg)
-                            .map(|(f, d)| format!("\"{}: \" + {d}", f.name))
-                            .collect();
-                        format!("\"{} {{ \" + {} + \" }}\"", v.name, parts.join(" + \", \" + "))
-                    }
-                }
+                let shown: Vec<(Option<&str>, String)> = match &v.kind {
+                    EnumVariantKind::Named(fs) => fs
+                        .iter()
+                        .zip(names)
+                        .map(|(f, n)| (Some(f.name.as_str()), n.clone()))
+                        .collect(),
+                    _ => names.iter().map(|n| (None, n.clone())).collect(),
+                };
+                let named = matches!(v.kind, EnumVariantKind::Named(_));
+                format!(
+                    "{{\n{}            }}",
+                    debug_writes(&v.name, named, &shown, "                ")
+                )
             })
-        ),
+        )),
         "PartialEq" => format!(
             "    fn eq(self, rhs: Self) -> bool {{\n        match (self, rhs) {{\n{}        }}\n    }}\n    fn ne(self, rhs: Self) -> bool {{ return !self.eq(rhs); }}\n",
             pair_arms(
@@ -501,4 +487,40 @@ fn enum_body(tr: &str, e: &EnumDef) -> Option<String> {
         ),
         _ => String::new(),
     })
+}
+
+/// `Debug::fmt` with `body`.
+fn debug_fn(body: &str) -> String {
+    format!(
+        "    fn fmt(self, ref f: rok::core::fmt::Formatter) throws (rok::core::fmt::FmtError) {{\n{body}    }}\n"
+    )
+}
+
+/// The writes showing `name` with `fields` (label, value): `Name`,
+/// `Name(a, b)` or `Name { x: a, y: b }`, literal runs merged.
+fn debug_writes(name: &str, named: bool, fields: &[(Option<&str>, String)], ind: &str) -> String {
+    let mut out = String::new();
+    let mut lit = name.to_owned();
+    let flush = |lit: &mut String, out: &mut String| {
+        out.push_str(&format!("{ind}try f.write_str(\"{lit}\");\n"));
+        lit.clear();
+    };
+    if !fields.is_empty() {
+        lit.push_str(if named { " { " } else { "(" });
+        for (i, (label, value)) in fields.iter().enumerate() {
+            if i > 0 {
+                lit.push_str(", ");
+            }
+            if let Some(l) = label {
+                lit.push_str(&format!("{l}: "));
+            }
+            flush(&mut lit, &mut out);
+            out.push_str(&format!(
+                "{ind}try rok::core::fmt::Debug::fmt({value}, ref f);\n"
+            ));
+        }
+        lit.push_str(if named { " }" } else { ")" });
+    }
+    flush(&mut lit, &mut out);
+    out
 }

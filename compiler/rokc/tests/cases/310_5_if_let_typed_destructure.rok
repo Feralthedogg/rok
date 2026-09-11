@@ -1,0 +1,44 @@
+// spec: 003.10.5-if-let
+// expect-exit: 0
+// expect-stdout:
+// ab|cd
+// none
+// 1 x
+// 3
+// p 1 2
+
+// `if let` / `while let` take `pattern: T`: the value narrows to `T`,
+// then the pattern destructures it.
+struct P { x: i32; y: i32; }
+
+fn pairs(n: i32) -> (i32, str) | none {
+    return if n < 3 { (n, "x") } else { none };
+}
+
+fn main() -> i32 {
+    let s = "ab cd";
+    if let (t, d): (str, str) = s.split_once(" ") {
+        println(f"{t}|{d}");
+    }
+    if let (t, _): (str, str) = "abcd".split_once(" ") {
+        println(t);
+    } else {
+        println("none");
+    }
+    let n = 1;
+    while let (k, v): (i32, str) = pairs(n) {
+        if k == 1 {
+            println(f"{k} {v}");
+        }
+        n = n + 1;
+    }
+    println(f"{n}");
+    let q: P | none = P { x: 1, y: 2 };
+    if let P { x, y }: P = q {
+        println(f"p {x} {y}");
+    }
+    if let _: P = q {
+        return 0;
+    }
+    return 1;
+}

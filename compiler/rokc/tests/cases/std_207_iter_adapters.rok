@@ -12,16 +12,16 @@
 // spec 2.7.1 iterator adapters: map / filter / enumerate / zip / chain /
 // take / skip / step_by / rev / peekable.
 fn main() {
-    println("map/filter: " + (0..10).filter(|x: i32| x % 2 == 0).map(|x: i32| x * x).collect::<List<i32>>().debug());
+    println(f"map/filter: {(0..10).filter(|x: i32| x % 2 == 0).map(|x: i32| x * x).collect::<List<i32>>():?}");
     let s = "enumerate:";
     for (i, c) in ["a", "b", "c"].iter().enumerate() { s = s + f" {i}{c}"; }
     println(s);
     s = "zip:";
     for (n, c) in [1, 2, 3].iter().zip(["x", "y"].iter()) { s = s + f" {n}{c}"; }
     println(s);
-    println("chain/skip/take: " + (0..4).chain(7..10).skip(2).take(4).collect::<List<i32>>().debug());
-    println("step_by: " + (0..10).step_by(3).collect::<List<i32>>().debug());
-    println("rev: " + (0..5).rev().collect::<List<i32>>().debug());
+    println(f"chain/skip/take: {(0..4).chain(7..10).skip(2).take(4).collect::<List<i32>>():?}");
+    println(f"step_by: {(0..10).step_by(3).collect::<List<i32>>():?}");
+    println(f"rev: {(0..5).rev().collect::<List<i32>>():?}");
     let p = (1..4).peekable();
     let a = p.peek() ?? 0;
     let b = p.next() ?? 0;

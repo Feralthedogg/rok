@@ -48,8 +48,24 @@ pub enum TokenKind {
     StrLit(String),
     /// `r"raw"` or `r#"raw"#`.
     RawStrLit(String),
-    /// `f"x = {x}"`. Body is kept raw; format-spec parsing is later.
-    FStrLit(String),
+    // `f"x = {x:>{w}}"` (spec 1.7.3) is `FStrStart`, `FStrText` runs and
+    // holes, `FStrEnd`. A hole is `HoleStart`, its code as ordinary
+    // tokens, an optional `HoleSpec` with `SpecText` runs and nested
+    // holes, then `HoleEnd`.
+    /// `f"` or (`true`) `f"""`.
+    FStrStart(bool),
+    /// Literal text: escapes kept raw, `{{` / `}}` folded.
+    FStrText(String),
+    /// `{` opening a hole (also `${` inside a spec).
+    HoleStart,
+    /// `:` starting a hole's format spec.
+    HoleSpec,
+    /// Format spec text, `$$` folded.
+    SpecText(String),
+    /// `}` closing a hole.
+    HoleEnd,
+    /// `"` or (`true`) `"""`.
+    FStrEnd(bool),
 
     // Identifiers and contextual promotions.
     Ident(String),
@@ -215,7 +231,10 @@ impl TokenKind {
             Self::CharLit(s) => return format!("'{s}'"),
             Self::CCharLit(s) => return format!("c'{s}'"),
             Self::StrLit(s) => return format!("\"{s}\""),
-            Self::FStrLit(s) => return format!("f\"{s}\""),
+            Self::FStrStart(t) => return if *t { "f\"\"\"" } else { "f\"" }.to_owned(),
+            Self::FStrText(s) => return s.replace('{', "{{").replace('}', "}}"),
+            Self::SpecText(s) => return s.replace('$', "$$"),
+            Self::FStrEnd(t) => return if *t { "\"\"\"" } else { "\"" }.to_owned(),
             Self::RawStrLit(s) => {
                 let mut h = String::new();
                 while s.contains(&format!("\"{h}")) {
@@ -279,7 +298,7 @@ impl TokenKind {
             Self::ShrEq => ">>=",
             Self::DotDot => "..",
             Self::DotDotEq => "..=",
-            Self::Colon => ":",
+            Self::Colon | Self::HoleSpec => ":",
             Self::ColonColon => "::",
             Self::Dot => ".",
             Self::QuestionDot => "?.",
@@ -291,8 +310,8 @@ impl TokenKind {
             Self::RParen => ")",
             Self::LBracket => "[",
             Self::RBracket => "]",
-            Self::LBrace => "{",
-            Self::RBrace => "}",
+            Self::LBrace | Self::HoleStart => "{",
+            Self::RBrace | Self::HoleEnd => "}",
             Self::Comma => ",",
             Self::Semi => ";",
             Self::At => "@",

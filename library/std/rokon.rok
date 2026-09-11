@@ -57,11 +57,11 @@ impl Value {
 }
 
 impl Display for Value {
-    fn display(self) -> str { self.to_string() }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(self.to_string()) }
 }
 
 impl Debug for Value {
-    fn debug(self) -> str { write::loose(self) }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(write::loose(self)) }
 }
 
 /// Structural. Dict entries and fields compare as `OrderedDict` does
@@ -171,15 +171,20 @@ impl RokonError {
 }
 
 impl Display for RokonError {
-    fn display(self) -> str {
-        if self.line > 0u32 { return f"{self.line}:{self.col}: {self.msg}"; }
-        if self.path != "" { return f"at {self.path}: {self.msg}"; }
-        self.msg
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        let s = if self.line > 0u32 {
+            f"{self.line}:{self.col}: {self.msg}"
+        } else if self.path != "" {
+            f"at {self.path}: {self.msg}"
+        } else {
+            self.msg
+        };
+        try f.write_str(s)
     }
 }
 
 impl Debug for RokonError {
-    fn debug(self) -> str { f"RokonError({self})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"RokonError({self})") }
 }
 
 impl Error for RokonError {}

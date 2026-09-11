@@ -43,10 +43,10 @@ pub struct SignalError {
 }
 
 impl Display for SignalError {
-    fn display(self) -> str { f"cannot handle signal {self.sig} (errno {self.code})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"cannot handle signal {self.sig} (errno {self.code})") }
 }
 impl Debug for SignalError {
-    fn debug(self) -> str { f"SignalError {{ sig: {self.sig}, code: {self.code} }}" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"SignalError {{ sig: {self.sig}, code: {self.code} }}") }
 }
 impl Error for SignalError {}
 
@@ -367,9 +367,12 @@ impl ExitStatus {
 }
 
 impl Display for ExitStatus {
-    fn display(self) -> str {
-        if let c: i32 = self.code() { return f"exit status: {c}"; }
-        f"signal: {self.signal() ?? 0}"
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        if let c: i32 = self.code() {
+            try f.write_str(f"exit status: {c}");
+        } else {
+            try f.write_str(f"signal: {self.signal() ?? 0}");
+        }
     }
 }
 

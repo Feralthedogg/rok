@@ -7,8 +7,8 @@
 
 // `async fn main() throws`: an error escaping it exits 1 (4.16.4/5).
 struct Oops {}
-impl Display for Oops { fn display(self) -> str { return "oops"; } }
-impl Debug for Oops { fn debug(self) -> str { return "Oops"; } }
+impl Display for Oops { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("oops") } }
+impl Debug for Oops { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("Oops") } }
 impl Error for Oops {}
 
 async fn step(n: i32) throws (Oops) -> i32 {

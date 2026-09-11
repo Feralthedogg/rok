@@ -100,3 +100,58 @@ fn number(b: &mut &[u8]) -> Result<Option<usize>, &'static str> {
     *b = &b[n..];
     Ok(Some(v))
 }
+
+/// Precisions above this are clamped.
+pub const MAX_PREC: usize = 500;
+
+/// An absent width / precision in [`pack`]'s counts word.
+const NO_COUNT: u64 = 0xFFFF_FFFF;
+
+/// The no-spec words.
+#[allow(dead_code)] // the compiler's
+pub const PLAIN: (u64, u64) = (b' ' as u64, NO_COUNT | (NO_COUNT << 32));
+
+/// `spec` as the two words `core::fmt::Formatter` carries: flags — fill
+/// (bits 0..32), align, sign, type (a byte each from bit 32; `s d g` as
+/// none), `#` (bit 56), `0` (bit 57) — and counts — width, precision
+/// (32 bits each, all ones when absent; precision clamped).
+#[must_use]
+pub fn pack(s: &FmtSpec) -> (u64, u64) {
+    let ty = if matches!(s.ty, b's' | b'd' | b'g') {
+        0
+    } else {
+        s.ty
+    };
+    let flags = u64::from(u32::from(s.fill))
+        | (u64::from(s.align) << 32)
+        | (u64::from(s.sign) << 40)
+        | (u64::from(ty) << 48)
+        | (u64::from(s.alt) << 56)
+        | (u64::from(s.zero) << 57);
+    let count = |v: Option<usize>| {
+        v.map_or(NO_COUNT, |n| {
+            u64::try_from(n).unwrap_or(NO_COUNT).min(NO_COUNT - 1)
+        })
+    };
+    let p = s.precision.map(|p| p.min(MAX_PREC));
+    (flags, count(s.width) | (count(p) << 32))
+}
+
+/// [`pack`]'s inverse.
+#[must_use]
+#[allow(dead_code)] // the runtime's
+#[allow(clippy::cast_possible_truncation)] // fields of the packed words
+pub fn unpack(flags: u64, counts: u64) -> FmtSpec {
+    let byte = |at: u32| (flags >> at) as u8;
+    let count = |v: u64| (v & NO_COUNT != NO_COUNT).then_some((v & NO_COUNT) as usize);
+    FmtSpec {
+        fill: char::from_u32(flags as u32).unwrap_or(' '),
+        align: byte(32),
+        sign: byte(40),
+        alt: (flags >> 56) & 1 != 0,
+        zero: (flags >> 57) & 1 != 0,
+        width: count(counts),
+        precision: count(counts >> 32),
+        ty: byte(48),
+    }
+}

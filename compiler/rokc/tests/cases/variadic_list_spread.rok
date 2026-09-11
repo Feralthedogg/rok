@@ -21,7 +21,7 @@ fn sum(xs: ...i32) -> i32 {
 fn count<T>(xs: ...T) -> usize { xs.len() }
 
 fn head_rest<T: Debug>(first: T, rest: ...T) -> str {
-    f"first={first.debug()} rest={rest.debug()}"
+    f"first={first:?} rest={rest:?}"
 }
 
 fn log_all(xs: ...any) {

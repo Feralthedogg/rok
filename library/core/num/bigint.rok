@@ -734,15 +734,23 @@ impl One for Int {
     fn one() -> Int { Int::from_i64(1) }
 }
 
+/// `b o x X` show the sign and magnitude: `int` has no width for a
+/// two's complement form (`{-255:x}` is `-ff`, stdlib 2.10.5).
 impl Display for Int {
-    fn display(self) -> str {
-        if self.big is none { return self.small.display(); }
-        self.to_str_radix(10u32)
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        if self.big is none {
+            f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self.small, 1u32, 0u32) };
+        } else {
+            let t = f.ty();
+            let r = if t == 'b' { 2u32 } else if t == 'o' { 8u32 } else if t == 'x' || t == 'X' { 16u32 } else { 10u32 };
+            let digits = self.abs().to_str_radix(r);
+            f.t = unsafe { rok_fmt_digits(f.t, f.flags, f.counts, if self.is_negative() { 1u32 } else { 0u32 }, digits) };
+        }
     }
 }
 
 impl Debug for Int {
-    fn debug(self) -> str { self.display() }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) }
 }
 
 impl FromStr for Int {
@@ -755,12 +763,8 @@ impl FromStr for Int {
     }
 }
 
-/// `b o x X` show the sign and magnitude: `int` has no width for a
-/// two's complement form (`{-255:x}` is `-ff`, stdlib 2.10.5).
 impl Format for Int {
-    fn format(self, spec: FormatSpec) -> str {
-        spec.integer(self.is_negative(), self.abs().to_str_radix(spec.radix()))
-    }
+    fn format(self, spec: FormatSpec) -> str { format_number(self, spec) }
 }
 
 // ---- conversions (stdlib 2.11.8, 2.1.7) ----

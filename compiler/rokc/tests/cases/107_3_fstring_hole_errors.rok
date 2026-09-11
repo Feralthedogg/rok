@@ -1,0 +1,16 @@
+// expect-error: 11:20: backslash in f-string `{...}` code; a hole is plain code, so write `"` directly
+// expect-error: 12:19: newline in f-string `{...}` code; hole code spans lines only in `f"""..."""`
+// expect-error: 14:15: empty `{}` in f-string
+
+// Hole code is plain rok: a backslash there (outside a string literal)
+// is an error, and only `f"""` holes span lines. One error per
+// f-string literal.
+fn main() -> i32 {
+    let x = "a";
+    let ok = f"{"a\tb"}";
+    println(f"{x + \"b\" + \"c\"}");
+    println(f"{x +
+        x}");
+    println(f"{}");
+    return 0;
+}

@@ -377,6 +377,45 @@ impl<'a> Parser<'a> {
         format!("__destruct{n}")
     }
 
+    /// The pattern of `if let` / `while let`, with an optional `: T`
+    /// (spec 3.10.5). `(a, b): T` matches a `__destructN: T` and
+    /// destructures it in the body: the returned statement.
+    fn parse_let_cond_pattern(&mut self) -> Option<(Pattern, Option<Stmt>)> {
+        let pat = self.parse_pattern()?;
+        if !self.eat(&TokenKind::Colon) {
+            return Some((pat, None));
+        }
+        let ty = self.parse_type()?;
+        let span = pat.span;
+        let typed = |binder| Pattern {
+            kind: PatternKind::TypeCheck { binder, ty },
+            span,
+        };
+        if matches!(pat.kind, PatternKind::Wildcard) {
+            return Some((typed(None), None));
+        }
+        let tmp = self.fresh_destructure_temp();
+        let init = Expr {
+            span,
+            kind: ExprKind::Path(Path {
+                segments: vec![PathSegment {
+                    name: tmp.clone(),
+                    generics: Vec::new(),
+                }],
+                span,
+            }),
+        };
+        let stmt = Stmt {
+            kind: StmtKind::LetPattern {
+                pat,
+                ty: None,
+                init,
+            },
+            span,
+        };
+        Some((typed(Some(tmp)), Some(stmt)))
+    }
+
     /// Close a generic list: consume a `>`, splitting `>>`, `>=`, `>>=`
     /// and leaving the remainder pending. Emits an error and returns
     /// false when no `>` is present.
@@ -3560,10 +3599,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 ExprKind::Literal(Literal::RawStr(s))
             }
-            TokenKind::FStrLit(s) => {
-                self.bump();
-                self.parse_fstring(&s, start)
-            }
+            TokenKind::FStrStart(_) => self.parse_fstring(),
             TokenKind::Unsafe => {
                 // Spec 4.15.2 `unsafe { ... }`.
                 self.bump();
@@ -3849,10 +3885,11 @@ impl<'a> Parser<'a> {
                 // `while let pat = expr { body }` desugars to
                 // `loop { match expr { pat => body, _ => break } }`.
                 if self.eat(&TokenKind::Let) {
-                    let pat = self.parse_pattern()?;
+                    let (pat, destructure) = self.parse_let_cond_pattern()?;
                     self.expect(&TokenKind::Eq, "`=`")?;
                     let scrutinee = self.with_struct_expr(false, Self::parse_expr)?;
-                    let body_block = self.parse_block()?;
+                    let mut body_block = self.parse_block()?;
+                    body_block.stmts.splice(0..0, destructure);
                     let body_span = body_block.span;
                     let then_body = Expr {
                         span: body_span,
@@ -3929,10 +3966,11 @@ impl<'a> Parser<'a> {
                 // `if let pat = expr block else?` desugars to a `match`
                 // with the pattern's arm and a wildcard fallback.
                 if self.eat(&TokenKind::Let) {
-                    let pat = self.parse_pattern()?;
+                    let (pat, destructure) = self.parse_let_cond_pattern()?;
                     self.expect(&TokenKind::Eq, "`=`")?;
                     let scrutinee = self.with_struct_expr(false, Self::parse_expr)?;
-                    let then_block = self.parse_block()?;
+                    let mut then_block = self.parse_block()?;
+                    then_block.stmts.splice(0..0, destructure);
                     let then_span = then_block.span;
                     let then_body = Expr {
                         span: then_span,

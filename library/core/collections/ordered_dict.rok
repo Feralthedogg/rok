@@ -158,14 +158,16 @@ impl<K: Hash, V: PartialEq> PartialEq for OrderedDict<K, V> {
 
 /// `{k: v, ..}` in insertion order.
 impl<K: Hash + Debug, V: Debug> Debug for OrderedDict<K, V> {
-    fn debug(self) -> str {
-        let out = "{";
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str("{");
         let first = true;
         for (k, v) in self {
-            if !first { out += ", "; }
-            out += k.debug() + ": " + v.debug();
+            if !first { try f.write_str(", "); }
+            try Debug::fmt(k, ref f);
+            try f.write_str(": ");
+            try Debug::fmt(v, ref f);
             first = false;
         }
-        out + "}"
+        try f.write_str("}")
     }
 }

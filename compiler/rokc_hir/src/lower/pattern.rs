@@ -1105,6 +1105,10 @@ fn tuple_struct_pattern(
         .zip(&def.fields)
         .enumerate()
         .map(|(i, (p, f))| {
+            // `_` reads nothing; any other sub-pattern needs the field visible.
+            if !matches!(p.kind, AstPatternKind::Wildcard) {
+                ctx.check_field_visible(*sid, &f.name);
+            }
             (
                 u32::try_from(i).expect("field index overflow"),
                 lower_pattern(ctx, p, &f.ty),

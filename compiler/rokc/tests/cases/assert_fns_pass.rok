@@ -10,7 +10,7 @@ impl PartialEq for P {
 }
 
 impl Debug for P {
-    fn debug(self) -> str { f"P({self.x})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"P({self.x})") }
 }
 
 fn main() -> i32 {

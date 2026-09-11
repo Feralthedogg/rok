@@ -43,11 +43,11 @@ fn main() -> i32 {
     let n: i32 | none = none;
     let one: i32 | none = 1;
     let five: i32 | none = 5;
-    println(f"sum: {x.min(s).debug()} {x.max(s).debug()} {n.min(one).debug()} {n.max(one).debug()} {five.min(n).debug()}");
+    println(f"sum: {x.min(s):?} {x.max(s):?} {n.min(one):?} {n.max(one):?} {five.min(n):?}");
     let lo: i32 | none = 2;
     let hi: i32 | none = 5;
     let v: i32 | none = 4;
     let lowv: i32 | none = 0;
-    println(f"clamp: {lowv.clamp(lo, hi).debug()} {n.clamp(lo, hi).debug()} {v.clamp(lo, hi).debug()}");
+    println(f"clamp: {lowv.clamp(lo, hi):?} {n.clamp(lo, hi):?} {v.clamp(lo, hi):?}");
     0
 }

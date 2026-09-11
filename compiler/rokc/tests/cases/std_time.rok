@@ -35,7 +35,7 @@ fn main() throws (SystemTimeError | IoError) {
 
     let t = SystemTime::from_unix(1700000000, 5);
     println(f"{try t.unix_seconds()} {try t.unix_nanos()} {(try SystemTime::now().unix_seconds()) > 1700000000}");
-    println(try UNIX_EPOCH.duration_since(t).display() catch e { e.display() });
+    println(try f"{UNIX_EPOCH.duration_since(t)}" catch e { f"{e}" });
     println(f"{try t.duration_since(UNIX_EPOCH)} {(t + Duration::sec(1)) - Duration::sec(1) == t}");
 
     let bt = BootTime::now();

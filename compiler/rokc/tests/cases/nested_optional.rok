@@ -5,7 +5,7 @@
 // pop: stored none | missing
 // coalesce: none 7 1
 // is: false true
-// dot: none missing
+// dot: true false
 // try: none missing
 // dict: stored none | missing | stored 5
 // generic: stored none | missing
@@ -75,7 +75,7 @@ fn main() -> i32 {
 
     println(f"coalesce: {show(xs.get(1) ?? 7)} {show(xs.get(9) ?? 7)} {show(xs.get(0) ?? 7)}");
     println(f"is: {xs.get(1) is none} {xs.get(9) is none}");
-    println(f"dot: {xs.get(1)?.debug() ?? "missing"} {xs.get(9)?.debug() ?? "missing"}");
+    println(f"dot: {xs.get(1)?.eq(none) ?? false} {xs.get(9)?.eq(none) ?? false}");
 
     let one: List<i32 | none> = [1];
     println(f"try: {second(xs) ?? "missing"} {second(one) ?? "missing"}");

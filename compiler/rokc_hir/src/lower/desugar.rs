@@ -754,7 +754,9 @@ pub(super) fn bind_irrefutable(
                     );
                     continue;
                 };
-                ctx.check_field_visible(sid, &fname);
+                if !fpat.is_some_and(|p| matches!(p.kind, AstPatternKind::Wildcard)) {
+                    ctx.check_field_visible(sid, &fname);
+                }
                 let field_ty = def.fields[idx].ty.clone();
                 let read = HirExpr {
                     ty: field_ty.clone(),

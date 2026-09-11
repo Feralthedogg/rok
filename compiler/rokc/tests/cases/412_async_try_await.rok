@@ -9,8 +9,8 @@
 // spec 4.12.14: a throwing `async fn`'s error surfaces at the `await`,
 // covered by `try await`; `catch` / `finally` work as in sync code.
 struct Bad { n: i32; }
-impl Display for Bad { fn display(self) -> str { f"bad {self.n}" } }
-impl Debug for Bad { fn debug(self) -> str { "Bad" } }
+impl Display for Bad { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"bad {self.n}") } }
+impl Debug for Bad { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("Bad") } }
 impl Error for Bad {}
 
 async fn check(n: i32) throws (Bad) -> i32 {
@@ -26,7 +26,7 @@ async fn safe(n: i32) -> i32 {
 async fn main() {
     let a = try await check(5) catch _ { -1 };
     println(f"ok {a}");
-    let b = try await check(9) catch e: Bad { println(f"caught {e.display()}"); -1 };
+    let b = try await check(9) catch e: Bad { println(f"caught {e}"); -1 };
     let c = await safe(50);
     println(f"fallback {c}");
     let d = { try await check(1) catch _ { 0 } } finally { println("finally ran"); };

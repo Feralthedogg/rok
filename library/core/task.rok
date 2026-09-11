@@ -862,11 +862,11 @@ impl Hash for TaskId {
 }
 
 impl Display for TaskId {
-    fn display(self) -> str { self.id.display() }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self.id, ref f) }
 }
 
 impl Debug for TaskId {
-    fn debug(self) -> str { f"TaskId({self.id})" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"TaskId({self.id})") }
 }
 
 /// The running task's id; panics outside a task (`try_id`).
@@ -886,11 +886,11 @@ pub fn try_id() -> TaskId | none {
 pub struct CancellationError {}
 
 impl Display for CancellationError {
-    fn display(self) -> str { "task cancelled" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("task cancelled") }
 }
 
 impl Debug for CancellationError {
-    fn debug(self) -> str { "CancellationError" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("CancellationError") }
 }
 
 impl Error for CancellationError {}
@@ -1139,11 +1139,11 @@ impl<T> Timeout<T> {
 pub struct TimeoutError {}
 
 impl Display for TimeoutError {
-    fn display(self) -> str { "timed out" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("timed out") }
 }
 
 impl Debug for TimeoutError {
-    fn debug(self) -> str { "TimeoutError" }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("TimeoutError") }
 }
 
 impl Error for TimeoutError {}

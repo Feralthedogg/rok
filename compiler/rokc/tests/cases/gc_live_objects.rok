@@ -43,8 +43,8 @@ fn slot_val(s: Slot) -> i64 {
 fn mk() -> Slot { return Slot::Ref(Cons { v: 8, rest: none }); }
 
 struct Bad { code: i32; }
-impl Display for Bad { fn display(self) -> str { return "bad"; } }
-impl Debug for Bad { fn debug(self) -> str { return "Bad"; } }
+impl Display for Bad { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("bad") } }
+impl Debug for Bad { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("Bad") } }
 impl Error for Bad {}
 
 // Allocates ~24 MB of garbage: several automatic collections.

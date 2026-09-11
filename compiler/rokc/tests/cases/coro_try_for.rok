@@ -6,8 +6,8 @@
 
 // `try for` over a throwing generator / `try for await` over a throwing stream.
 struct Bad { at: i32; }
-impl Display for Bad { fn display(self) -> str { return f"bad {self.at}"; } }
-impl Debug for Bad { fn debug(self) -> str { return self.display(); } }
+impl Display for Bad { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"bad {self.at}") } }
+impl Debug for Bad { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
 impl Error for Bad {}
 
 yield fn checked(xs: List<i32>) throws (Bad) -> i32 {

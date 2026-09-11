@@ -104,8 +104,8 @@ impl PartialEq for IoErrorKind {
 }
 
 impl Debug for IoErrorKind {
-    fn debug(self) -> str {
-        match self {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str(match self {
             IoErrorKind::Other => "Other",
             IoErrorKind::NotFound => "NotFound",
             IoErrorKind::PermissionDenied => "PermissionDenied",
@@ -123,7 +123,7 @@ impl Debug for IoErrorKind {
             IoErrorKind::Unsupported => "Unsupported",
             IoErrorKind::UnexpectedEof => "UnexpectedEof",
             IoErrorKind::InvalidData => "InvalidData",
-        }
+        })
     }
 }
 
@@ -160,12 +160,12 @@ impl IoError {
 }
 
 impl Display for IoError {
-    fn display(self) -> str { self.message }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(self.message) }
 }
 
 impl Debug for IoError {
-    fn debug(self) -> str {
-        f"IoError({self.kind:?}, {self.code}, {self.message})"
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str(f"IoError({self.kind:?}, {self.code}, {self.message})")
     }
 }
 

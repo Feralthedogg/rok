@@ -10,6 +10,8 @@
 // Spec 6.8.2 / 6.9.2-6.9.3: a user derive generating a trait impl over
 // the fields (`@Self`, `@for_fields`, `@field`, `@field.name`,
 // `@field.type`, `.as_str()`), on named / tuple / generic structs.
+fn fmt_show<T: Display>(v: T) -> str { f"{v}" }
+
 trait Describe {
     fn describe(self) -> str;
     fn arity(self) -> i32;
@@ -37,7 +39,7 @@ pub @derive {
                 s = @Self.as_str();
             }
             @for_fields {
-                s = s + sep(first) + @field.name.as_str() + " = " + self.@field.display();
+                s = s + sep(first) + @field.name.as_str() + " = " + fmt_show(self.@field);
                 first = false;
             }
             return s;

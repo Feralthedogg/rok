@@ -13,7 +13,7 @@ fn main() {
     xs.extend([3, 4]);
     xs.extend(5..6);
     xs.shrink_to_fit();
-    println(f"{xs.debug()} cap {xs.capacity()}");
+    println(f"{xs:?} cap {xs.capacity()}");
 
     let c = Cell::new(7);
     let t = c.take();

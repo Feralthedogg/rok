@@ -57,7 +57,7 @@ fn main() throws (IoError) {
     let n = try g.read(buf);
     println(f"read {n}: {buf[0]} {buf[1]} {buf[2]}");
     try g.close();
-    println(try g.read_to_str() catch e { e.kind.debug() });
+    println(try g.read_to_str() catch e { f"{e.kind:?}" });
 
     let c = base / "a" / "b" / "c.txt";
     using pf = try File::open(f) { try pf.set_permissions(Permissions::from_mode(0o640u32)); }
@@ -91,13 +91,13 @@ fn main() throws (IoError) {
     }
     println(f"early-stopped read_dir under using: {opened}");
 
-    let missing = try fs::read_to_str(base / "nope") catch e { e.kind.debug() + " " + e.display() };
+    let missing = try fs::read_to_str(base / "nope") catch e { f"{e.kind:?}" + " " + f"{e}" };
     println(missing.replace(base.as_str(), "BASE"));
-    try fs::create_dir(base / "a") catch e { println(e.kind.debug()); };
+    try fs::create_dir(base / "a") catch e { println(f"{e.kind:?}"); };
 
     let d = try Dir::root().open_dir(base);
-    let up = try d.open("../x").fd().display() catch e { e.kind.debug() };
-    let abs = try d.open("/etc/hosts").fd().display() catch e { e.kind.debug() };
+    let up = try f"{d.open("../x").fd()}" catch e { f"{e.kind:?}" };
+    let abs = try f"{d.open("/etc/hosts").fd()}" catch e { f"{e.kind:?}" };
     println(f"escape: {up} {abs}");
     using inner = try d.open("a/hello.txt") {
         println(try inner.read_to_str());

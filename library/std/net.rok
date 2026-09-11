@@ -81,18 +81,18 @@ impl PartialEq for Ipv6Addr {
 }
 
 impl Display for Ipv4Addr {
-    fn display(self) -> str {
-        f"{self.octets[0]}.{self.octets[1]}.{self.octets[2]}.{self.octets[3]}"
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str(f"{self.octets[0]}.{self.octets[1]}.{self.octets[2]}.{self.octets[3]}")
     }
 }
 
 impl Debug for Ipv4Addr {
-    fn debug(self) -> str { self.display() }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) }
 }
 
 impl Display for Ipv6Addr {
     /// RFC 5952: lowercase hex, the longest run (2+) of zero groups as `::`.
-    fn display(self) -> str {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
         let best = -1;
         let best_len = 1;
         let i = 0;
@@ -117,12 +117,12 @@ impl Display for Ipv6Addr {
             out += hex(self.segments[k] as u64);
             k += 1;
         }
-        out
+        try f.write_str(out)
     }
 }
 
 impl Debug for Ipv6Addr {
-    fn debug(self) -> str { self.display() }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) }
 }
 
 /// Lowercase hex digits of `n`.
@@ -191,21 +191,21 @@ impl SocketAddr {
 }
 
 impl PartialEq for SocketAddr {
-    fn eq(self, rhs: SocketAddr) -> bool { self.display() == rhs.display() }
+    fn eq(self, rhs: SocketAddr) -> bool { f"{self}" == f"{rhs}" }
     fn ne(self, rhs: SocketAddr) -> bool { !self.eq(rhs) }
 }
 
 impl Display for SocketAddr {
-    fn display(self) -> str {
-        match self {
-            SocketAddr::V4(a) => f"{a.ip.display()}:{a.port}",
-            SocketAddr::V6(a) => f"[{a.ip.display()}]:{a.port}",
-        }
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str(match self {
+            SocketAddr::V4(a) => f"{a.ip}:{a.port}",
+            SocketAddr::V6(a) => f"[{a.ip}]:{a.port}",
+        })
     }
 }
 
 impl Debug for SocketAddr {
-    fn debug(self) -> str { self.display() }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) }
 }
 
 // ---- parsing ----
@@ -613,7 +613,7 @@ fn connect_start(addr: SocketAddr) throws (IoError) -> (Sock, bool) {
     let r = unsafe { rok_net_connect(try s.live(), words_of(addr)) };
     if r < 0 {
         s.close();
-        throw IoError::from_os(-r, f"connect {addr.display()}");
+        throw IoError::from_os(-r, f"connect {addr}");
     }
     (s, r == 1)
 }
@@ -622,7 +622,7 @@ fn connect_finish(s: Sock, addr: SocketAddr) throws (IoError) -> TcpStream {
     let e = unsafe { rok_net_sock_error(try s.live()) };
     if e < 0 {
         s.close();
-        throw IoError::from_os(-e, f"connect {addr.display()}");
+        throw IoError::from_os(-e, f"connect {addr}");
     }
     TcpStream { sock: s }
 }
@@ -633,8 +633,8 @@ fn connect_wait(addr: SocketAddr, limit: i64) throws (IoError) -> TcpStream {
         let r = unsafe { rok_net_wait(try s.live(), 1, limit) };
         if r <= 0 {
             s.close();
-            if r == 0 { throw timed_out(f"connect {addr.display()}"); }
-            throw IoError::from_os(-r, f"connect {addr.display()}");
+            if r == 0 { throw timed_out(f"connect {addr}"); }
+            throw IoError::from_os(-r, f"connect {addr}");
         }
     }
     try connect_finish(s, addr)
@@ -774,7 +774,7 @@ impl TcpListener {
         if r >= 0 { r = unsafe { rok_net_listen(try s.live(), 128) }; }
         if r < 0 {
             s.close();
-            throw IoError::from_os(-r, f"bind {addr.display()}");
+            throw IoError::from_os(-r, f"bind {addr}");
         }
         TcpListener { sock: s }
     }
@@ -852,7 +852,7 @@ impl UdpSocket {
         let r = unsafe { rok_net_bind(try s.live(), words_of(addr)) };
         if r < 0 {
             s.close();
-            throw IoError::from_os(-r, f"bind {addr.display()}");
+            throw IoError::from_os(-r, f"bind {addr}");
         }
         UdpSocket { sock: s }
     }
@@ -862,7 +862,7 @@ impl UdpSocket {
     fn send_to_once(self, buf: GcBuf<u8>, at: usize, n: usize, addr: SocketAddr) throws (IoError) -> usize | none {
         let r = unsafe { rok_net_send_to(try self.sock.live(), buf, at, n, words_of(addr)) } as i64;
         if would_block(r) { return none; }
-        (try check(r, f"send_to {addr.display()}")) as usize
+        (try check(r, f"send_to {addr}")) as usize
     }
 
     /// One datagram into `buf`: its length and sender, or `none` on
@@ -911,7 +911,7 @@ impl UdpSocket {
     /// Fix the peer: `send` / `recv` then talk to it only.
     pub fn connect(self, addr: SocketAddr) throws (IoError) {
         let r = unsafe { rok_net_connect(try self.sock.live(), words_of(addr)) };
-        try check(r as i64, f"connect {addr.display()}");
+        try check(r as i64, f"connect {addr}");
     }
 
     pub fn send<B: AsBytes>(self, buf: B) throws (IoError) -> usize {

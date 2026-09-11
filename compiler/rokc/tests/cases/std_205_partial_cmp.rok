@@ -19,7 +19,7 @@ impl PartialOrd for Half {
 
 fn show(o: Ordering | none) -> str {
     match o {
-        x: Ordering => x.debug(),
+        x: Ordering => f"{x:?}",
         none => "none",
     }
 }

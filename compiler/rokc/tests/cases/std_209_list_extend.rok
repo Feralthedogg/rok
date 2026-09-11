@@ -12,7 +12,7 @@ fn main() {
     println(f"cap ok {xs.capacity() >= 16}");
     xs.push(1);
     xs.extend([2, 3, 4]);
-    println(xs.debug());
+    println(f"{xs:?}");
     xs.shrink_to_fit();
     println(f"shrunk {xs.capacity() >= xs.len()}");
 }

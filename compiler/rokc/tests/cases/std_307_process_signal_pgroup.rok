@@ -34,6 +34,6 @@ fn main() throws (IoError) {
     for _ in 0..200 { if hits.load(SeqCst) >= 2 { break; } thread::sleep(Duration::ms(10)); }
     println(f"handled: {hits.load(SeqCst)}");
 
-    let e = try { process::signal(9, || {}); "ok" } catch e { e.debug() };
+    let e = try { process::signal(9, || {}); "ok" } catch e { f"{e:?}" };
     println(f"sigkill: {e}");
 }

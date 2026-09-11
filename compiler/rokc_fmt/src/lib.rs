@@ -43,12 +43,18 @@ fn format_source(src: &str) -> Result<String, String> {
         return Err(d.to_string());
     }
     // Multi-line regions whose inside must stay byte-for-byte: tokens
-    // (strings) and block comments that span a newline.
+    // (strings), whole f-strings and block comments that span a newline.
     let mut verbatim: Vec<(usize, usize)> = Vec::new();
     let mut prev_end = 0;
+    let mut fstrings = Vec::new();
     for t in &tokens {
-        let (start, end) = (t.span.start as usize, t.span.end as usize);
+        let (mut start, end) = (t.span.start as usize, t.span.end as usize);
         block_comments(src, prev_end, start, &mut verbatim);
+        match t.kind {
+            TokenKind::FStrStart(_) => fstrings.push(start),
+            TokenKind::FStrEnd(_) => start = fstrings.pop().unwrap_or(start),
+            _ => {}
+        }
         if src.get(start..end).is_some_and(|s| s.contains('\n')) {
             verbatim.push((start, end));
         }
@@ -243,6 +249,9 @@ mod tests {
     #[test]
     fn keeps_multiline_strings_and_continuations() {
         let src = "fn f() {\n    let s = \"a  \n\n  b\";\n    let y = x\n        .g();\n}\n";
+        assert_eq!(format_source(src).unwrap(), src);
+        let src =
+            "fn f() {\n    let s = f\"\"\"{g(\n  a,\n      b)}  \n\n x {d[\"k\"]}\"\"\";\n}\n";
         assert_eq!(format_source(src).unwrap(), src);
     }
 

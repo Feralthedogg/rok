@@ -38,50 +38,50 @@
 // Python's `xs[a:b:k]` for the same `xs`.
 fn main() {
     let xs: List<i32> = [1, 2, 3, 4, 5];
-    println(f"-10: {xs[-10:].debug()}");
-    println(f"5:100 {xs[5:100].debug()}");
-    println(f"3:1 {xs[3:1].debug()}");
-    println(f"2:2 {xs[2:2].debug()}");
-    println(f":-10 {xs[:-10].debug()}");
-    println(f"-2:100 {xs[-2:100].debug()}");
-    println(f"10:20 {xs[10:20].debug()}");
-    println(f"-1:0:-1 {xs[-1:0:-1].debug()}");
-    println(f"::-1 {xs[: :-1].debug()}");
-    println(f"3:1:-1 {xs[3:1:-1].debug()}");
-    println(f"1:-1:-1 {xs[1:-1:-1].debug()}");
-    println(f"1:4:-2 {xs[1:4:-2].debug()}");
-    println(f"::-2 {xs[: :-2].debug()}");
-    println(f"-1:-10:-1 {xs[-1:-10:-1].debug()}");
-    println(f"10::-1 {xs[10: :-1].debug()}");
-    println(f":2:-1 {xs[:2:-1].debug()}");
-    println(f"2::-1 {xs[2: :-1].debug()}");
-    println(f"-100::-1 {xs[-100: :-1].debug()}");
-    println(f"::2 {xs[: :2].debug()}");
-    println(f"-10:10:3 {xs[-10:10:3].debug()}");
-    println(f"4:0:-3 {xs[4:0:-3].debug()}");
-    println(f"0:5:7 {xs[0:5:7].debug()}");
-    println(f"::-7 {xs[: :-7].debug()}");
-    println(f"3:3:-1 {xs[3:3:-1].debug()}");
-    println(f"0:-1:-1 {xs[0:-1:-1].debug()}");
+    println(f"-10: {xs[-10:]:?}");
+    println(f"5:100 {xs[5:100]:?}");
+    println(f"3:1 {xs[3:1]:?}");
+    println(f"2:2 {xs[2:2]:?}");
+    println(f":-10 {xs[:-10]:?}");
+    println(f"-2:100 {xs[-2:100]:?}");
+    println(f"10:20 {xs[10:20]:?}");
+    println(f"-1:0:-1 {xs[-1:0:-1]:?}");
+    println(f"::-1 {xs[: :-1]:?}");
+    println(f"3:1:-1 {xs[3:1:-1]:?}");
+    println(f"1:-1:-1 {xs[1:-1:-1]:?}");
+    println(f"1:4:-2 {xs[1:4:-2]:?}");
+    println(f"::-2 {xs[: :-2]:?}");
+    println(f"-1:-10:-1 {xs[-1:-10:-1]:?}");
+    println(f"10::-1 {xs[10: :-1]:?}");
+    println(f":2:-1 {xs[:2:-1]:?}");
+    println(f"2::-1 {xs[2: :-1]:?}");
+    println(f"-100::-1 {xs[-100: :-1]:?}");
+    println(f"::2 {xs[: :2]:?}");
+    println(f"-10:10:3 {xs[-10:10:3]:?}");
+    println(f"4:0:-3 {xs[4:0:-3]:?}");
+    println(f"0:5:7 {xs[0:5:7]:?}");
+    println(f"::-7 {xs[: :-7]:?}");
+    println(f"3:3:-1 {xs[3:3:-1]:?}");
+    println(f"0:-1:-1 {xs[0:-1:-1]:?}");
 
     // Runtime bounds / step: the step's sign picks the defaults.
     let a: i64 = -2;
     let b: i32 = 0;
     let k: isize = -1;
     let one: isize = 1;
-    println(f"vars {xs[a:b:k].debug()} {xs[1:a + 1:one].debug()} {xs[b:a:k].debug()} {xs[: :k].debug()}");
+    println(f"vars {xs[a:b:k]:?} {xs[1:a + 1:one]:?} {xs[b:a:k]:?} {xs[: :k]:?}");
 
     // Unsigned bounds with a negative step read Python-style too.
     let hi: usize = 3;
     let lo: usize = 1;
-    println(f"usize {xs[hi:lo:-1].debug()} {xs[lo:hi:-1].debug()}");
+    println(f"usize {xs[hi:lo:-1]:?} {xs[lo:hi:-1]:?}");
 
     // A view of a view, stepped.
     let s = xs[1:4];
-    println(f"view {s[: :-1].debug()} {s[-2:-1].debug()} {s[10: :-2].debug()} {s[-10:-5].debug()}");
+    println(f"view {s[: :-1]:?} {s[-2:-1]:?} {s[10: :-2]:?} {s[-10:-5]:?}");
 
     let arr: [i32; 3] = [7, 8, 9];
-    println(f"array {arr[:-3:-1].debug()} {arr[-50:50].debug()} {arr[: :-2].debug()}");
+    println(f"array {arr[:-3:-1]:?} {arr[-50:50]:?} {arr[: :-2]:?}");
 
     // `str` / `StrBuf`: byte offsets, clamped.
     let t = "hello";
@@ -91,5 +91,5 @@ fn main() {
     println(f"buf {buf[-2:9]} {buf[-9:]}");
 
     // `Sliceable::slice` clamps when called directly too.
-    println(f"method {xs.slice(2..50).debug()} {xs.slice(4..1).debug()}");
+    println(f"method {xs.slice(2..50):?} {xs.slice(4..1):?}");
 }

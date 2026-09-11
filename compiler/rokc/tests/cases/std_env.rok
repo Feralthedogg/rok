@@ -30,7 +30,7 @@ fn main() throws (IoError) {
     }
     println(f"vars has it: {seen}");
     env::remove_var("ROK_STD_ENV_TEST");
-    println("removed: " + (try env::var("ROK_STD_ENV_TEST") catch e { e.debug() }));
+    println("removed: " + (try env::var("ROK_STD_ENV_TEST") catch e { f"{e:?}" }));
 
     let start = try env::current_dir();
     try env::set_current_dir("/");

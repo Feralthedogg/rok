@@ -22,13 +22,13 @@ impl<T: Default, const N: usize> Default for [T; N] {
 }
 
 impl<T: Debug, const N: usize> Debug for [T; N] {
-    fn debug(self) -> str {
-        let s = "[";
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str("[");
         for i in 0..N {
-            if i > 0 { s += ", "; }
-            s += self[i].debug();
+            if i > 0 { try f.write_str(", "); }
+            try Debug::fmt(self[i], ref f);
         }
-        s + "]"
+        try f.write_str("]")
     }
 }
 
