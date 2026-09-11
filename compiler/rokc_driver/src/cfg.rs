@@ -147,7 +147,7 @@ fn eval_arg(arg: &AttrArg, env: &CfgEnv) -> bool {
                 _ => true,
             }
         }
-        AttrArg::Lit(_) => false,
+        AttrArg::Lit(_) | AttrArg::Range { .. } => false,
     }
 }
 

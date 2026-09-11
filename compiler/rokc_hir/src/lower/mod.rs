@@ -16,10 +16,11 @@ use crate::ty::resolve_ty;
 use crate::{
     EnumId, HirBlock, HirEnumDef, HirEnumVariant, HirExpr, HirExprKind, HirField, HirFunction,
     HirLocal, HirMatchArm, HirModule, HirParam, HirPattern, HirStaticDef, HirStmt, HirStructDef,
-    HirTy, HirUnionKind, StructId, UnionStorage,
+    HirTy, HirUnionKind, NicheArg, NicheVal, StructId, UnionStorage,
 };
 
 mod bignum;
+mod caller;
 mod collect;
 pub mod const_eval;
 mod coro;
@@ -1247,6 +1248,8 @@ struct ClosureSink {
     infer_floor: std::cell::Cell<usize>,
     /// Every lowered function's `(const fn, standard library)`.
     fn_origin: std::cell::RefCell<HashMap<FunctionId, (bool, bool)>>,
+    /// Lowered `#[track_caller]` functions (`caller`).
+    track_caller: std::cell::RefCell<std::collections::HashSet<FunctionId>>,
     /// Declarations being lowered for a compile-time evaluation.
     const_lowering: std::cell::RefCell<std::collections::HashSet<FunctionId>>,
     /// Const items being lowered, innermost last (cycle check).
@@ -1932,6 +1935,7 @@ impl<'a> LowerCtx<'a> {
             span: rokc_diagnostic::current_span(),
             generic_args: args.clone(),
             union_kind: None,
+            niche: collect::niche_args(&def.attrs).unwrap_or_default(),
         });
         let subst = generic_subst(&def.generics, &args);
         let mut rcx = LowerCtx::new(self.env, &subst, None);

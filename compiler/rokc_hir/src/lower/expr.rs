@@ -347,7 +347,7 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
         StmtKind::Item(rokc_ast::Item::Use(u)) => {
             // Function-local `use`: visible in the current scope only.
             let mut entries = Vec::new();
-            crate::uses::flatten_tree_for_local(&u.tree, &[], &ctx.current_module, &mut entries);
+            crate::uses::flatten_tree_for_local(&u.tree, &ctx.current_module, &mut entries);
             for e in entries {
                 ctx.add_local_use(e);
             }
@@ -6115,6 +6115,8 @@ fn buf_intrinsic(def: &FnDef) -> Option<&'static str> {
             "rok.buf.new" => Some("new"),
             "rok.buf.get" => Some("get"),
             "rok.buf.set" => Some("set"),
+            "rok.buf.same" => Some("same"),
+            "rok.buf.erase" => Some("erase"),
             "rok.ptr.read" => Some("ptr_read"),
             "rok.ptr.write" => Some("ptr_write"),
             "rok.ptr.read_volatile" => Some("ptr_read_volatile"),
@@ -6622,8 +6624,8 @@ fn lower_buf_intrinsic(
         })
         .collect();
     let want = match op {
-        "new" => 1,
-        "get" => 2,
+        "new" | "erase" => 1,
+        "get" | "same" => 2,
         _ => 3,
     };
     if pos.len() != want || args.len() != want {
@@ -6670,7 +6672,49 @@ fn lower_buf_intrinsic(
             ),
         );
     };
-    buf_access(ctx, buf, *elem, pos[1], pos.get(2).copied(), span)
+    let u8_buf = HirTy::GcBuf(Box::new(HirTy::Prim(PrimTy::U8)));
+    match op {
+        "same" => buf_same(ctx, buf, pos[1], span),
+        // The same reference as `GcBuf<u8>`, the type of a runtime
+        // parameter that takes any GC object.
+        "erase" => HirExpr {
+            ty: u8_buf.clone(),
+            kind: HirExprKind::Cast {
+                from_ty: buf.ty.clone(),
+                to_ty: u8_buf,
+                operand: Box::new(buf),
+            },
+            span,
+        },
+        _ => buf_access(ctx, buf, *elem, pos[1], pos.get(2).copied(), span),
+    }
+}
+
+/// `buf_same(a, b)`: whether two buffers are one object. The addresses
+/// are compared where both are loaded, so no collection can move either
+/// in between and nothing is pinned.
+fn buf_same(ctx: &mut LowerCtx<'_>, a: HirExpr, b: &Expr, span: rokc_diagnostic::Span) -> HirExpr {
+    let b = lower_expected(ctx, b, a.ty.clone());
+    let b = coerce(ctx, &a.ty, b, &|| "the compared buffer".to_owned());
+    let usize_ty = HirTy::Prim(PrimTy::Usize);
+    let addr = |e: HirExpr| HirExpr {
+        ty: usize_ty.clone(),
+        kind: HirExprKind::Cast {
+            from_ty: e.ty.clone(),
+            to_ty: usize_ty.clone(),
+            operand: Box::new(e),
+        },
+        span,
+    };
+    HirExpr {
+        ty: HirTy::Prim(PrimTy::Bool),
+        kind: HirExprKind::PrimBinOp {
+            op: PrimOp::Eq,
+            lhs: Box::new(addr(a)),
+            rhs: Box::new(addr(b)),
+        },
+        span,
+    }
 }
 
 /// `buf[i]` (`value: None`) or `buf[i] = value` on a lowered `GcBuf<T>`:
@@ -6944,7 +6988,7 @@ fn dyn_op(
             kind: HirExprKind::Block(Box::new(HirBlock {
                 stmts: vec![HirStmt::Panic(super::throws::hook_call(
                     ctx,
-                    "rok_panic_str",
+                    "rok_panic_at",
                     &format!(
                         "operator `{op}` is not defined for the runtime type of an `any` value"
                     ),

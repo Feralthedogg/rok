@@ -1,0 +1,14 @@
+// expect-exit: 1
+// expect-stderr: error: `main` returned an uncaught error: boom
+// expect-stderr: -->
+// expect-stderr: uncaught_error_loc.rok:13:13
+
+// An error escaping a throwing `main` reports where it left `main`.
+fn fails(x: i32) throws (str) -> i32 {
+    if x > 1 { throw "boom"; }
+    x
+}
+
+let a = try fails(1);
+let b = try fails(2);
+println(f"{a + b}");

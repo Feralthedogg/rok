@@ -2,8 +2,12 @@
 //!
 //! Literals point at static NUL-terminated bytes. Every string built at
 //! run time is a GC object (type id [`STR_TYPE_ID`], no traced children)
-//! whose payload holds the bytes plus a trailing NUL, so `ptr` alone is
-//! also a C string. The collector treats `ptr` as an interior pointer.
+//! whose payload holds the bytes plus a trailing NUL. A slice shares its
+//! source's bytes (`(ptr + start, end - start)`), so `ptr` may point
+//! anywhere inside an object, or at its NUL for an empty tail: the
+//! collector treats `ptr` as an interior pointer, which keeps the whole
+//! object alive. A slice is not NUL-terminated in general; C gets
+//! [`rok_str_cstr`].
 //!
 //! `rok_*` symbols take and return `str` by value: two words, the same
 //! registers as the LLVM `{ptr, iN}` aggregate the compiler passes.
@@ -58,11 +62,6 @@ pub fn build(parts: &[&[u8]]) -> RokStr {
         at += part.len();
     }
     RokStr { ptr: p, len }
-}
-
-fn panic_msg(msg: &[u8]) -> ! {
-    // SAFETY: valid slice.
-    unsafe { crate::rok_panic(msg.as_ptr(), msg.len()) }
 }
 
 /// GC allocation of `size` zeroed bytes for library buffers (strings,
@@ -122,25 +121,82 @@ pub extern "C" fn rok_str_hash(s: RokStr) -> u64 {
     })
 }
 
-/// `s[start:end]` (byte offsets): a copy. Panics outside `0..=len`, on a
-/// reversed range, or off a UTF-8 char boundary (stdlib 2.15.3).
+/// `s[start:end]` (byte offsets): shares `s`'s bytes, O(1). Panics
+/// outside `0..=len`, on a reversed range, or off a UTF-8 char boundary
+/// (stdlib 2.15.3), reporting `at` (the caller's `path:line:col`).
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_str_slice(s: RokStr, start: usize, end: usize) -> RokStr {
+pub extern "C" fn rok_str_slice(s: RokStr, start: usize, end: usize, at: RokStr) -> RokStr {
     let b = s.bytes();
     if start > end || end > b.len() {
-        panic_msg(b"string slice out of range");
+        crate::panic_at(b"string slice out of range", Some(at.bytes()));
     }
     let boundary = |i: usize| i == b.len() || (b[i] & 0xC0) != 0x80;
     if !boundary(start) || !boundary(end) {
-        panic_msg(b"string slice is not on a char boundary");
+        crate::panic_at(b"string slice is not on a char boundary", Some(at.bytes()));
     }
-    build(&[&b[start..end]])
+    sub(&s, &b[start..end])
+}
+
+/// `part`, a subslice of `s.bytes()`, as a `str` sharing `s`'s bytes.
+pub const fn sub(s: &RokStr, part: &[u8]) -> RokStr {
+    if s.len == 0 {
+        // `bytes()` of an empty `str` may not point into it.
+        return *s;
+    }
+    RokStr {
+        ptr: part.as_ptr(),
+        len: part.len(),
+    }
+}
+
+/// `s` as a C string: `s.ptr` itself when a NUL follows the bytes
+/// (literals, whole runtime strings, tail slices), else a pinned GC copy
+/// for [`rok_str_cstr_done`] to release. Compiled code brackets each
+/// `extern "C"` call that takes a `str` with the two.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_str_cstr(s: RokStr) -> *const u8 {
+    if s.len == 0 {
+        return c"".as_ptr().cast();
+    }
+    // SAFETY: byte `len` of a `str` is readable: the next byte of its
+    // source, or the NUL after it.
+    if unsafe { *s.ptr.add(s.len) } == 0 {
+        return s.ptr;
+    }
+    let c = build(&[s.bytes()]);
+    // SAFETY: a fresh GC string; its object starts `HEADER_SIZE` before.
+    unsafe { rokr_gc::pin(c.ptr.cast_mut().sub(HEADER_SIZE)) };
+    c.ptr
+}
+
+/// Release `c`, what [`rok_str_cstr`] returned for `s`.
+///
+/// # Safety
+/// `c` must come from `rok_str_cstr(s)` and be released once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rok_str_cstr_done(s: RokStr, c: *const u8) {
+    if s.len != 0 && c != s.ptr {
+        // SAFETY: caller contract: `c` is a pinned copy's payload.
+        unsafe { rokr_gc::unpin(c.cast_mut().sub(HEADER_SIZE)) };
+    }
+}
+
+/// `s`'s bytes as a `GcBuf<u8>` whose element 0 is byte 0 of `s`. The
+/// word points `HEADER_SIZE` before the bytes: inside the object for a
+/// runtime string (an interior reference), outside the heap for a
+/// literal. Read-only: `str` is immutable, literals are in rodata.
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_str_bytes_buf(s: RokStr) -> *const u8 {
+    s.ptr.wrapping_sub(HEADER_SIZE)
 }
 
 /// Byte offset of the first `pat` in `s`, or -1.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_str_find(s: RokStr, pat: RokStr) -> isize {
     let (h, n) = (s.bytes(), pat.bytes());
+    if let [c] = n {
+        return h.iter().position(|b| b == c).map_or(-1, |i| i as isize);
+    }
     if n.is_empty() {
         return 0;
     }
@@ -206,49 +262,55 @@ pub extern "C" fn rok_str_char_count(s: RokStr) -> usize {
     s.bytes().iter().filter(|&&b| (b & 0xC0) != 0x80).count()
 }
 
-/// `Debug` of a string: double-quoted, with `\`, `"`, `\n`, `\r`, `\t`
-/// and other control bytes escaped.
+/// `s` as a rok literal between `quote`s (`"` for `str`, `'` for `char`),
+/// escaped so the lexer reads it back: `Debug` and RokON both use it.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_str_debug(s: RokStr) -> RokStr {
-    let mut len = 2;
-    for &c in s.bytes() {
-        len += match c {
-            b'\\' | b'"' | b'\n' | b'\r' | b'\t' => 2,
-            c if c < 0x20 || c == 0x7F => 6, // \u{XX}
-            _ => 1,
-        };
-    }
+pub extern "C" fn rok_str_escape(s: RokStr, quote: u32) -> RokStr {
+    let mut len = 0;
+    escape(text(&s), quote, |b| len += b.len());
     let p = alloc_str(len);
     let mut at = 0;
-    let mut put = |bytes: &[u8]| {
-        // SAFETY: exactly `len` bytes are written.
-        unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), p.add(at), bytes.len()) };
-        at += bytes.len();
-    };
-    put(b"\"");
-    for &c in s.bytes() {
-        match c {
-            b'\\' => put(b"\\\\"),
-            b'"' => put(b"\\\""),
-            b'\n' => put(b"\\n"),
-            b'\r' => put(b"\\r"),
-            b'\t' => put(b"\\t"),
-            c if c < 0x20 || c == 0x7F => {
+    escape(text(&s), quote, |b| {
+        // SAFETY: the first pass counted exactly `len` bytes.
+        unsafe { ptr::copy_nonoverlapping(b.as_ptr(), p.add(at), b.len()) };
+        at += b.len();
+    });
+    RokStr { ptr: p, len }
+}
+
+/// Control chars and the bidi controls the lexer rejects (refs-lang 1.1)
+/// go out as `\u{..}`.
+fn escape(src: &str, quote: u32, mut put: impl FnMut(&[u8])) {
+    let delim = [quote as u8];
+    put(&delim);
+    for ch in src.chars() {
+        match ch {
+            '\\' => put(b"\\\\"),
+            '\n' => put(b"\\n"),
+            '\r' => put(b"\\r"),
+            '\t' => put(b"\\t"),
+            '\0' => put(b"\\0"),
+            ch if ch as u32 == quote => put(&[b'\\', delim[0]]),
+            ch if ch.is_control()
+                || matches!(ch, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') =>
+            {
                 const HEX: &[u8; 16] = b"0123456789abcdef";
-                put(&[
-                    b'\\',
-                    b'u',
-                    b'{',
-                    HEX[usize::from(c >> 4)],
-                    HEX[usize::from(c & 15)],
-                    b'}',
-                ]);
+                let mut digits = [0u8; 6];
+                let mut start = digits.len();
+                let mut rest = ch as u32;
+                while start == digits.len() || rest != 0 {
+                    start -= 1;
+                    digits[start] = HEX[(rest & 15) as usize];
+                    rest >>= 4;
+                }
+                put(b"\\u{");
+                put(&digits[start..]);
+                put(b"}");
             }
-            c => put(&[c]),
+            ch => put(ch.encode_utf8(&mut [0; 4]).as_bytes()),
         }
     }
-    put(b"\"");
-    RokStr { ptr: p, len }
+    put(&delim);
 }
 
 /// UTF-8 encoding of `c` (U+FFFD for a non-scalar value).
@@ -259,65 +321,31 @@ fn utf8(c: u32, buf: &mut [u8; 4]) -> &[u8] {
         .as_bytes()
 }
 
-// Display bodies for primitives (stdlib 2.10). Floats use `%g`, like
-// `rok_print_f64`.
+// Integer Display bodies (stdlib 2.10); floats are `fmt::rok_fmt_float`.
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_str_from_i64(n: i64) -> RokStr {
-    let mut buf = [0u8; 24];
-    let mut i = buf.len();
-    let mut v = n.unsigned_abs();
-    loop {
-        i -= 1;
-        buf[i] = b'0' + (v % 10) as u8;
-        v /= 10;
-        if v == 0 {
-            break;
-        }
-    }
-    if n < 0 {
-        i -= 1;
-        buf[i] = b'-';
-    }
-    build(&[&buf[i..]])
+    let s = rok_str_from_u64(n.unsigned_abs(), 10);
+    if n < 0 { build(&[b"-", s.bytes()]) } else { s }
 }
 
+/// The digits of `n` in base `radix` (2..=36, lowercase).
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_str_from_u64(n: u64) -> RokStr {
-    let mut buf = [0u8; 20];
+pub extern "C" fn rok_str_from_u64(n: u64, radix: u32) -> RokStr {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let r = u64::from(radix.clamp(2, 36));
+    let mut buf = [0u8; 64];
     let mut i = buf.len();
     let mut v = n;
     loop {
         i -= 1;
-        buf[i] = b'0' + (v % 10) as u8;
-        v /= 10;
+        buf[i] = DIGITS[(v % r) as usize];
+        v /= r;
         if v == 0 {
             break;
         }
     }
     build(&[&buf[i..]])
-}
-
-/// `prec` < 0: shortest `%g`; otherwise fixed `%.{prec}f`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_str_from_f64(d: f64, prec: i32) -> RokStr {
-    let mut buf = [0u8; 512];
-    // SAFETY: bounded write into `buf`; formats match the arguments.
-    let n = unsafe {
-        if prec < 0 {
-            libc::snprintf(buf.as_mut_ptr().cast(), buf.len(), c"%g".as_ptr(), d)
-        } else {
-            libc::snprintf(
-                buf.as_mut_ptr().cast(),
-                buf.len(),
-                c"%.*f".as_ptr(),
-                prec,
-                d,
-            )
-        }
-    };
-    let n = (n.max(0) as usize).min(buf.len() - 1);
-    build(&[&buf[..n]])
 }
 
 #[unsafe(no_mangle)]
@@ -337,52 +365,149 @@ pub fn text(s: &RokStr) -> &str {
     core::str::from_utf8(s.bytes()).unwrap_or("")
 }
 
-/// Whether `s` parses as an integer of `bits` bits (`signed != 0`):
-/// 0 = ok, 1 = empty, 2 = invalid digit, 3 = out of range
-/// (`FromStr` for the integer types, stdlib 2.15.7).
+/// `s` as an integer of `bits` bits in base `radix` (2..=36), signed
+/// when `signed != 0`: an optional sign, then digits of either case. The
+/// one integer grammar (`FromStr` and `Int::parse_radix`). The value's
+/// bits go to `out[0]`; returns 0 ok, 1 empty, 2 invalid digit, 3 out of
+/// range.
+///
+/// # Safety
+/// `out` is a live `GcBuf<i64>` of at least one element.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_str_int_status(s: RokStr, signed: i32, bits: u32) -> i32 {
-    let t = text(&s);
-    let digits = t.strip_prefix(['-', '+']).unwrap_or(t);
+pub unsafe extern "C" fn rok_str_parse_int(
+    s: RokStr,
+    radix: u32,
+    signed: i32,
+    bits: u32,
+    out: *mut u8,
+) -> i32 {
+    let (neg, digits) = match s.bytes() {
+        [b'-', rest @ ..] => (true, rest),
+        [b'+', rest @ ..] => (false, rest),
+        all => (false, all),
+    };
     if digits.is_empty() {
         return 1;
     }
-    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+    if !(2..=36).contains(&radix) || !digits.iter().all(|&c| char::from(c).is_digit(radix)) {
         return 2;
     }
-    let fits = if signed != 0 {
-        t.parse::<i64>()
-            .is_ok_and(|v| bits >= 64 || (v >= -(1i64 << (bits - 1)) && v < (1i64 << (bits - 1))))
-    } else {
-        !t.starts_with('-')
-            && t.parse::<u64>()
-                .is_ok_and(|v| bits >= 64 || v < (1u64 << bits))
+    let mag = digits.iter().try_fold(0u64, |m, &c| {
+        let d = char::from(c).to_digit(radix).unwrap_or(0);
+        m.checked_mul(radix.into())?.checked_add(d.into())
+    });
+    let bits = bits.clamp(1, 64);
+    let limit = match (signed != 0, neg) {
+        (true, true) => 1u64 << (bits - 1),
+        (true, false) => (1u64 << (bits - 1)) - 1,
+        (false, false) => u64::MAX >> (64 - bits),
+        (false, true) => 0,
     };
-    if fits { 0 } else { 3 }
+    let Some(mag) = mag.filter(|&m| m <= limit && !(neg && signed == 0)) else {
+        return 3;
+    };
+    let v = if neg { mag.wrapping_neg() } else { mag };
+    // SAFETY: caller contract; elements start after the header.
+    unsafe { ptr::copy_nonoverlapping(v.to_ne_bytes().as_ptr(), out.add(HEADER_SIZE), 8) };
+    0
 }
 
-/// `s` as an `i64` (checked first by `rok_str_int_status`).
+/// `s` as an `f64` (`inf`, `NaN` and exponents included) into `out[0]`,
+/// a `GcBuf<f64>`; returns 0 ok, 2 invalid.
+///
+/// # Safety
+/// `out` is a live `GcBuf<f64>` of at least one element.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_str_to_i64(s: RokStr) -> i64 {
-    text(&s).parse().unwrap_or(0)
+pub unsafe extern "C" fn rok_str_parse_float(s: RokStr, out: *mut u8) -> i32 {
+    let Ok(v) = text(&s).parse::<f64>() else {
+        return 2;
+    };
+    // SAFETY: caller contract; elements start after the header.
+    unsafe { ptr::copy_nonoverlapping(v.to_ne_bytes().as_ptr(), out.add(HEADER_SIZE), 8) };
+    0
 }
 
-/// `s` as a `u64` (checked first by `rok_str_int_status`).
+// ---------------------------------------------------------------------
+// Byte buffers (`GcBuf<u8>` regions: `StrBuf`, byte lists, I/O)
+// ---------------------------------------------------------------------
+
+/// Byte length of `s` (stdlib 2.15 `str::len`).
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_str_to_u64(s: RokStr) -> u64 {
-    text(&s).parse().unwrap_or(0)
+pub const extern "C" fn rok_str_len(s: RokStr) -> usize {
+    s.len
 }
 
-/// Whether `s` parses as a float (`inf`, `NaN`, exponents included).
+/// 1 if `s[at..at + pat.len]` is `pat`, else 0 (`starts_with` / `ends_with`).
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_str_float_ok(s: RokStr) -> i32 {
-    i32::from(text(&s).parse::<f64>().is_ok())
+pub extern "C" fn rok_str_eq_at(s: RokStr, at: usize, pat: RokStr) -> i32 {
+    let b = s.bytes();
+    i32::from(at.checked_add(pat.len).and_then(|end| b.get(at..end)) == Some(pat.bytes()))
 }
 
-/// `s` as an `f64` (checked first by `rok_str_float_ok`).
+/// `len` bytes of the `GcBuf<u8>` `buf` from `off`, as a new `str`. No
+/// UTF-8 check: the caller vouches for the bytes (`rok_buf_utf8_error`).
+///
+/// # Safety
+/// `buf` must be a live `GcBuf<u8>` with at least `off + len` bytes.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_str_to_f64(s: RokStr) -> f64 {
-    text(&s).parse().unwrap_or(0.0)
+pub unsafe extern "C" fn rok_str_from_buf(buf: *mut u8, off: usize, len: usize) -> RokStr {
+    // SAFETY: caller contract. `build` may collect before copying; the
+    // caller's frame roots `buf`, so it stays in place.
+    build(&[unsafe { core::slice::from_raw_parts(buf.add(HEADER_SIZE + off), len) }])
+}
+
+/// Copy `s` into the `GcBuf<u8>` `buf` at `off`.
+///
+/// # Safety
+/// `buf` must be a live `GcBuf<u8>` with at least `off + s.len` bytes.
+#[unsafe(no_mangle)]
+pub const unsafe extern "C" fn rok_buf_put_str(buf: *mut u8, off: usize, s: RokStr) {
+    if s.len > 0 {
+        // SAFETY: caller contract.
+        unsafe { ptr::copy_nonoverlapping(s.ptr, buf.add(HEADER_SIZE + off), s.len) };
+    }
+}
+
+/// `c` UTF-8 encoded into the `GcBuf<u8>` `buf` at `off`; the byte count.
+///
+/// # Safety
+/// `buf` must be a live `GcBuf<u8>` with at least `off + 4` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rok_buf_put_char(buf: *mut u8, off: usize, c: u32) -> usize {
+    let mut tmp = [0u8; 4];
+    let b = utf8(c, &mut tmp);
+    // SAFETY: caller contract.
+    unsafe { ptr::copy_nonoverlapping(b.as_ptr(), buf.add(HEADER_SIZE + off), b.len()) };
+    b.len()
+}
+
+/// Copy `len` bytes from `src[soff..]` to `dst[doff..]` (may overlap).
+///
+/// # Safety
+/// Both must be live `GcBuf<u8>`s holding the ranges.
+#[unsafe(no_mangle)]
+pub const unsafe extern "C" fn rok_buf_copy(
+    dst: *mut u8,
+    doff: usize,
+    src: *mut u8,
+    soff: usize,
+    len: usize,
+) {
+    // SAFETY: caller contract.
+    let (from, to) = unsafe { (src.add(HEADER_SIZE + soff), dst.add(HEADER_SIZE + doff)) };
+    // SAFETY: as above.
+    unsafe { ptr::copy(from, to, len) };
+}
+
+/// Offset of the first invalid UTF-8 byte of `buf[off..off + len]`, or -1.
+///
+/// # Safety
+/// `buf` must be a live `GcBuf<u8>` with at least `off + len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rok_buf_utf8_error(buf: *mut u8, off: usize, len: usize) -> isize {
+    // SAFETY: caller contract.
+    let b = unsafe { core::slice::from_raw_parts(buf.add(HEADER_SIZE + off), len) };
+    core::str::from_utf8(b).map_or_else(|e| e.valid_up_to() as isize, |_| -1)
 }
 
 #[cfg(test)]
@@ -413,26 +538,39 @@ pub mod tests {
 
     #[test]
     fn parse_numbers() {
-        // FromStr status: 0 ok, 1 empty, 2 bad digit, 3 out of range.
-        let st = |v: &'static [u8], signed, bits| rok_str_int_status(s(v), signed, bits);
-        assert_eq!(st(b"-128", 1, 8), 0);
-        assert_eq!(st(b"128", 1, 8), 3);
-        assert_eq!(st(b"255", 0, 8), 0);
-        assert_eq!(st(b"256", 0, 8), 3);
-        assert_eq!(st(b"-1", 0, 32), 3);
-        assert_eq!(st(b"+7", 1, 32), 0);
-        assert_eq!(st(b"", 1, 32), 1);
-        assert_eq!(st(b"-", 1, 32), 1);
-        assert_eq!(st(b"1_000", 1, 32), 2);
-        assert_eq!(st(b" 1", 1, 32), 2);
-        assert_eq!(st(b"-9223372036854775808", 1, 64), 0);
-        assert_eq!(st(b"18446744073709551616", 0, 64), 3);
-        assert_eq!(rok_str_to_i64(s(b"-42")), -42);
-        assert_eq!(rok_str_to_u64(s(b"18446744073709551615")), u64::MAX);
-        assert_eq!(rok_str_float_ok(s(b"1e-3")), 1);
-        assert_eq!(rok_str_float_ok(s(b"inf")), 1);
-        assert_eq!(rok_str_float_ok(s(b"1.2.3")), 0);
-        assert!((rok_str_to_f64(s(b"2.5")) - 2.5).abs() < f64::EPSILON);
+        // A stand-in `GcBuf`: header bytes, then one 8-aligned element.
+        #[repr(align(16))]
+        struct Out([u8; HEADER_SIZE + 8]);
+        let mut o = Out([0; HEADER_SIZE + 8]);
+        let mut int = |v: &'static [u8], radix, signed, bits| {
+            // SAFETY: `o` holds one element.
+            let st = unsafe { rok_str_parse_int(s(v), radix, signed, bits, o.0.as_mut_ptr()) };
+            let val = i64::from_ne_bytes(o.0[HEADER_SIZE..].try_into().unwrap_or_default());
+            (st, val)
+        };
+        assert_eq!(int(b"-128", 10, 1, 8), (0, -128));
+        assert_eq!(int(b"128", 10, 1, 8).0, 3);
+        assert_eq!(int(b"255", 10, 0, 8), (0, 255));
+        assert_eq!(int(b"256", 10, 0, 8).0, 3);
+        assert_eq!(int(b"-1", 10, 0, 32).0, 3);
+        assert_eq!(int(b"+7", 10, 1, 32), (0, 7));
+        assert_eq!(int(b"", 10, 1, 32).0, 1);
+        assert_eq!(int(b"-", 10, 1, 32).0, 1);
+        assert_eq!(int(b"1_000", 10, 1, 32).0, 2);
+        assert_eq!(int(b" 1", 10, 1, 32).0, 2);
+        assert_eq!(int(b"fF", 16, 1, 32), (0, 255));
+        assert_eq!(int(b"-9223372036854775808", 10, 1, 64), (0, i64::MIN));
+        assert_eq!(int(b"18446744073709551615", 10, 0, 64), (0, -1));
+        assert_eq!(int(b"18446744073709551616", 10, 0, 64).0, 3);
+        let mut float = |v: &'static [u8]| {
+            // SAFETY: `o` holds one element.
+            let st = unsafe { rok_str_parse_float(s(v), o.0.as_mut_ptr()) };
+            let val = f64::from_ne_bytes(o.0[HEADER_SIZE..].try_into().unwrap_or_default());
+            (st, val)
+        };
+        assert_eq!(float(b"1e-3"), (0, 1e-3));
+        assert_eq!(float(b"inf"), (0, f64::INFINITY));
+        assert_eq!(float(b"1.2.3").0, 2);
     }
 
     // Run from `gc_alloc_initializes_header_and_alignment`: the GC heap is
@@ -442,7 +580,7 @@ pub mod tests {
         assert_eq!(rok_str_cmp(s(b"ab"), s(b"b")), -1);
         assert_eq!(rok_str_cmp(s(b"ab"), s(b"ab")), 0);
         assert_eq!(
-            rok_str_slice(s("a세b".as_bytes()), 1, 4).bytes(),
+            rok_str_slice(s("a세b".as_bytes()), 1, 4, s(b"")).bytes(),
             "세".as_bytes()
         );
         assert_eq!(rok_str_find(s(b"hello"), s(b"ll")), 2);
@@ -453,15 +591,39 @@ pub mod tests {
             rok_str_replace(s(b"a-b-c"), s(b"-"), s(b"+")).bytes(),
             b"a+b+c"
         );
-        assert_eq!(rok_str_debug(s(b"a\"\n")).bytes(), b"\"a\\\"\\n\"");
+        assert_eq!(
+            rok_str_escape(s("a\"'\n\u{1}\u{85}\u{202E}é".as_bytes()), u32::from('"')).bytes(),
+            "\"a\\\"'\\n\\u{1}\\u{85}\\u{202e}é\"".as_bytes()
+        );
+        assert_eq!(rok_str_escape(s(b"'"), u32::from('\'')).bytes(), b"'\\''");
         assert_eq!(rok_str_from_i64(-120).bytes(), b"-120");
-        assert_eq!(rok_str_from_u64(u64::MAX).bytes(), b"18446744073709551615");
-        assert_eq!(rok_str_from_f64(1.5, -1).bytes(), b"1.5");
-        assert_eq!(rok_str_from_f64(1.0 / 3.0, 2).bytes(), b"0.33");
+        assert_eq!(rok_str_from_i64(i64::MIN).bytes(), b"-9223372036854775808");
+        assert_eq!(
+            rok_str_from_u64(u64::MAX, 10).bytes(),
+            b"18446744073709551615"
+        );
+        assert_eq!(rok_str_from_u64(255, 16).bytes(), b"ff");
         assert_eq!(rok_str_from_char(0xD55C).bytes(), "한".as_bytes());
         // Runtime strings stay NUL-terminated for C.
         let c = rok_str_concat(s(b"x"), s(b"y"));
         // SAFETY: one byte past `len` is the terminator.
         assert_eq!(unsafe { *c.ptr.add(c.len) }, 0);
+        // Slices share bytes; C gets them as is when a NUL follows, else
+        // a pinned copy.
+        let whole = rok_str_concat(s(b"ab"), s(b"cd"));
+        let tail = rok_str_slice(whole, 2, 4);
+        assert_eq!(tail.ptr, whole.ptr.wrapping_add(2));
+        assert_eq!(rok_str_cstr(tail), tail.ptr);
+        let head = rok_str_slice(whole, 0, 2);
+        assert_eq!(head.ptr, whole.ptr);
+        let c = rok_str_cstr(head);
+        assert_ne!(c, head.ptr);
+        // SAFETY: a NUL-terminated copy of two bytes.
+        assert_eq!(unsafe { core::slice::from_raw_parts(c, 3) }, b"ab\0");
+        // SAFETY: `c` came from `rok_str_cstr(head)`.
+        unsafe { rok_str_cstr_done(head, c) };
+        let empty = rok_str_slice(whole, 4, 4);
+        assert_eq!((empty.ptr, empty.len), (whole.ptr.wrapping_add(4), 0));
+        assert_eq!(rok_str_bytes_buf(head).wrapping_add(HEADER_SIZE), head.ptr);
     }
 }

@@ -4,11 +4,11 @@
 //! `UseEntry` lists. Name resolution consults them when a bare name
 //! misses the local scopes and module ancestors.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rokc_ast::{UseTree, UseTreeKind};
 use rokc_core::Visibility;
-use rokc_diagnostic::{ErrorKind, RokDiagnostic};
+use rokc_diagnostic::{ErrorKind, RokDiagnostic, Span};
 
 /// One resolved `use` entry. Paths are fully qualified (no `pkg::` /
 /// `sup::` left), so lookup is plain concatenation.
@@ -53,7 +53,8 @@ pub fn build_use_table(
     for (module_path, vis, tree) in raw {
         let mut entries = Vec::new();
         let existing = table.entry(module_path.clone()).or_default();
-        flatten_tree(tree, &[], module_path, existing, &mut entries);
+        flatten_tree(tree, None, module_path, existing, &mut entries);
+        let entries = entries.into_iter().map(|(e, _)| e);
         // The same full path imported twice is fine (spec 5.5.11).
         let existing = table.entry(module_path.clone()).or_default();
         for entry in entries {
@@ -93,28 +94,119 @@ pub fn build_use_table(
     (table, reexports, diags)
 }
 
+/// Unresolved module-level imports, reported at the leaf's path.
+///
+/// A leaf must name an item, an enum variant, a module, or a re-export. A
+/// path rooted at a bare name (not `pkg` / `sup` / `rok`) may also start
+/// with a name the module sees through a glob (`use Result::*`), so it
+/// passes when any known path ends with it.
+#[must_use]
+pub fn check_use_targets(
+    raw: &[(String, Visibility, UseTree)],
+    items: &[rokc_ast::Item],
+    table: &UseTable,
+    reexports: &[ReExport],
+) -> Vec<RokDiagnostic> {
+    use rokc_ast::{ExternItem, ImplItem, Item};
+    let mut known: HashSet<String> = HashSet::new();
+    for item in items {
+        match item {
+            Item::Fn(f) => drop(known.insert(f.name.clone())),
+            Item::Struct(s) => drop(known.insert(s.name.clone())),
+            Item::Union(u) => drop(known.insert(u.name.clone())),
+            Item::Trait(t) => drop(known.insert(t.name.clone())),
+            Item::Const(c) => drop(known.insert(c.name.clone())),
+            Item::Static(s) => drop(known.insert(s.name.clone())),
+            Item::TypeAlias(a) => drop(known.insert(a.name.clone())),
+            Item::Enum(e) => {
+                known.insert(e.name.clone());
+                known.extend(e.variants.iter().map(|v| format!("{}::{}", e.name, v.name)));
+            }
+            // Methods carry only their module (`a::get`).
+            Item::Impl(i) => known.extend(i.items.iter().filter_map(|m| match m {
+                ImplItem::Method(f) => f.name.rsplit_once("::").map(|(m, _)| m.to_owned()),
+                _ => None,
+            })),
+            Item::Extern(b) => known.extend(b.items.iter().map(|x| match x {
+                ExternItem::Fn(f) => f.name.clone(),
+                ExternItem::Static(s) => s.name.clone(),
+            })),
+            Item::Mod(_) | Item::Use(_) => {}
+        }
+    }
+    known.extend(raw.iter().map(|(m, _, _)| m.clone()));
+    known.extend(reexports.iter().map(|r| {
+        if r.module_path.is_empty() {
+            r.short_name.clone()
+        } else {
+            format!("{}::{}", r.module_path, r.short_name)
+        }
+    }));
+    // Every ancestor of a known path is a module (or an enum).
+    let modules: Vec<String> = known
+        .iter()
+        .flat_map(|k| k.match_indices("::").map(|(i, _)| k[..i].to_owned()))
+        .collect();
+    known.extend(modules);
+    let mut diags = Vec::new();
+    for (module_path, _, tree) in raw {
+        let bare = tree
+            .prefix
+            .segments
+            .first()
+            .is_some_and(|s| !matches!(s.name.as_str(), "pkg" | "sup" | "rok"));
+        let earlier = table.get(module_path).map_or(&[][..], Vec::as_slice);
+        let mut leaves = Vec::new();
+        flatten_tree(tree, None, module_path, earlier, &mut leaves);
+        for (entry, span) in leaves {
+            let path = match &entry {
+                UseEntry::Single { full, .. } => full,
+                UseEntry::Glob { prefix } | UseEntry::GlobDeep { prefix } => prefix,
+            };
+            if path.is_empty() || known.contains(path) {
+                continue;
+            }
+            if bare {
+                let written = path
+                    .strip_prefix(module_path.as_str())
+                    .and_then(|r| r.strip_prefix("::"))
+                    .unwrap_or(path);
+                let tail = format!("::{written}");
+                if known.contains(written) || known.iter().any(|k| k.ends_with(&tail)) {
+                    continue;
+                }
+            }
+            rokc_diagnostic::set_current_span(span);
+            diags.push(RokDiagnostic::error(
+                ErrorKind::Module,
+                format!("unresolved import: `{path}` does not exist"),
+            ));
+        }
+    }
+    rokc_diagnostic::set_current_span(Span::DUMMY);
+    diags
+}
+
 /// Public alias of `flatten_tree` for the lower pass to expand a
 /// function-local `use` into entries against the function's module.
-pub fn flatten_tree_for_local(
-    tree: &UseTree,
-    accumulated: &[String],
-    module_path: &str,
-    out: &mut Vec<UseEntry>,
-) {
-    flatten_tree(tree, accumulated, module_path, &[], out);
+pub fn flatten_tree_for_local(tree: &UseTree, module_path: &str, out: &mut Vec<UseEntry>) {
+    let mut leaves = Vec::new();
+    flatten_tree(tree, None, module_path, &[], &mut leaves);
+    out.extend(leaves.into_iter().map(|(e, _)| e));
 }
 
 /// One `UseEntry` per leaf of `tree`; `module_path` resolves `pkg::` /
 /// `sup::` roots. `self::` is not a root: lookup already walks the
-/// module's ancestors.
+/// module's ancestors. `parent` is the resolved prefix of the enclosing
+/// group, `None` at the top of the tree.
 fn flatten_tree(
     tree: &UseTree,
-    accumulated: &[String],
+    parent: Option<&[String]>,
     module_path: &str,
     earlier: &[UseEntry],
-    out: &mut Vec<UseEntry>,
+    out: &mut Vec<(UseEntry, Span)>,
 ) {
-    let mut prefix_segs: Vec<String> = accumulated.to_vec();
+    let span = tree.prefix.span;
     let raw_segs: Vec<String> = tree
         .prefix
         .segments
@@ -123,12 +215,12 @@ fn flatten_tree(
         .collect();
     // Only the first segment of the whole path is a root (`pkg`, `sup`,
     // `rok`, an earlier import, or a child module); group members extend
-    // their prefix as written.
-    if accumulated.is_empty() {
-        prefix_segs.extend(resolve_root(&raw_segs, module_path, earlier));
-    } else {
-        prefix_segs.extend(raw_segs);
-    }
+    // their prefix as written. A resolved parent may be empty
+    // (`pkg::{..}` at the package root), so presence, not length, decides.
+    let prefix_segs: Vec<String> = match parent {
+        None => resolve_root(&raw_segs, module_path, earlier),
+        Some(p) => p.iter().cloned().chain(raw_segs).collect(),
+    };
 
     match &tree.kind {
         UseTreeKind::Simple(alias) => {
@@ -138,21 +230,27 @@ fn flatten_tree(
             };
             let full = prefix_segs.join("::");
             let local = alias.clone().unwrap_or(leaf);
-            out.push(UseEntry::Single { local, full });
+            out.push((UseEntry::Single { local, full }, span));
         }
         UseTreeKind::Glob => {
-            out.push(UseEntry::Glob {
-                prefix: prefix_segs.join("::"),
-            });
+            out.push((
+                UseEntry::Glob {
+                    prefix: prefix_segs.join("::"),
+                },
+                span,
+            ));
         }
         UseTreeKind::GlobRecursive => {
-            out.push(UseEntry::GlobDeep {
-                prefix: prefix_segs.join("::"),
-            });
+            out.push((
+                UseEntry::GlobDeep {
+                    prefix: prefix_segs.join("::"),
+                },
+                span,
+            ));
         }
         UseTreeKind::Group(children) => {
             for child in children {
-                flatten_tree(child, &prefix_segs, module_path, earlier, out);
+                flatten_tree(child, Some(&prefix_segs), module_path, earlier, out);
             }
         }
     }

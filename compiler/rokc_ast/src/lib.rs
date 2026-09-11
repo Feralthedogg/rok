@@ -56,6 +56,12 @@ pub enum AttrArg {
         path: Vec<String>,
         body: Box<AttrBody>,
     },
+    /// `lo..hi` / `lo..=hi`, either end optional (`#[niche(I32_MIN..=-1)]`).
+    Range {
+        lo: Option<Box<AttrArg>>,
+        hi: Option<Box<AttrArg>>,
+        inclusive: bool,
+    },
 }
 
 impl Attribute {

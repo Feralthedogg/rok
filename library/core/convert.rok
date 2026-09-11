@@ -4,7 +4,7 @@
 // `TryFrom::Error`; `OverflowError` for numbers),
 // `saturating_into`, `wrapping_into` (= `as`).
 //
-// ponytail: spec 2.11.3 / 2.11.4 / 2.11.5 write the `Into`-side traits
+// Spec 2.11.3 / 2.11.4 / 2.11.5 write the `Into`-side traits
 // as `trait Into<T> { fn into(self) -> T; }`, mirrored automatically
 // from `From`. A blanket `impl<T, U: From<T>> Into<U> for T` cannot fix
 // `U` from the receiver here, so each `*Into` trait has one generic

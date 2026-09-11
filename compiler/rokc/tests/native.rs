@@ -355,9 +355,16 @@ long run_cb(Cb c) { return c.f ? c.f(c.x) : -1; }
 Cb make_cb(int some) { Cb c = { some ? twice : NULL, 21 }; return c; }
 op slot;
 long call_slot(long x) { return slot ? slot(x) : -1; }
+int nz_or(int v, int d) { return v ? v : d; }
+int nz_make(int some) { return some ? 7 : 0; }
+long g = 77;
+long *get_g(int some) { return some ? &g : NULL; }
+long ptr_read_or(long *p, long d) { return p ? *p : d; }
 ";
 
 const NICHE_ROK: &str = r#"
+use rok::bare::ptr::Ptr;
+
 struct Cb { f: extern "C" fn(i64) -> i64 | none; x: i64; }
 
 extern "C" {
@@ -368,6 +375,10 @@ extern "C" {
     fn make_cb(some: i32) -> Cb;
     fn call_slot(x: i64) -> i64;
     static mut slot: extern "C" fn(i64) -> i64 | none;
+    fn nz_or(v: NonZero<i32> | none, d: i32) -> i32;
+    fn nz_make(some: i32) -> NonZero<i32> | none;
+    fn get_g(some: i32) -> Ptr<i64> | none;
+    fn ptr_read_or(p: Ptr<i64> | none, d: i64) -> i64;
 }
 
 extern "C" fn neg(x: i64) -> i64 { -x }
@@ -416,6 +427,13 @@ fn main() {
         println(f"{show(slot)} {call_slot(50)}");
         slot = none;
         println(f"{slot is none} {call_slot(50)}");
+        let nz: NonZero<i32> | none = NonZero::new(5);
+        let nn: NonZero<i32> | none = none;
+        let mk = nz_make(1) ?? NonZero::new(1) ?? panic("zero");
+        println(f"{nz_or(nz, 1)} {nz_or(nn, 1)} {mk} {nz_make(0) is none}");
+        let p = get_g(1);
+        let rd: i64 = match p { q: Ptr<i64> => q.read(), none => -1 };
+        println(f"{ptr_read_or(p, -1)} {ptr_read_or(get_g(0), -1)} {rd} {get_g(0) is none}");
     }
 }
 "#;
@@ -423,6 +441,8 @@ fn main() {
 /// Spec 5.9.4 null niche: `extern "C" fn(..) | none` is one pointer,
 /// null = `none`, through C arguments / results, struct fields, a
 /// `List`, a `static`, widening into a tagged sum and back, and `??`.
+/// `NonZero<i32> | none` is a C `int` (0 = `none`) and `Ptr<T> | none`
+/// a nullable `T*` (spec 2.7.2).
 #[test]
 fn c_fn_ptr_null_niche() {
     let Some(env) = setup() else { return };
@@ -430,10 +450,17 @@ fn c_fn_ptr_null_niche() {
     fs::write(dir.join("side.c"), NICHE_C).unwrap();
     fs::write(dir.join("main.rok"), NICHE_ROK).unwrap();
     let obj = dir.join("main.o");
+    let bare = env.workspace.join("library/bare/lib.rok");
     ok(&build(
         &env,
         &dir.join("main.rok"),
-        &["--emit=obj", "-o", obj.to_str().unwrap()],
+        &[
+            "--bootstrap",
+            bare.to_str().unwrap(),
+            "--emit=obj",
+            "-o",
+            obj.to_str().unwrap(),
+        ],
     ));
     let exe = dir.join("out");
     ok(&Command::new("clang")
@@ -449,7 +476,8 @@ fn c_fn_ptr_null_niche() {
     assert_eq!(
         text(&run.stdout),
         "false true 10 none\nif-let 42\nif-let none\n99 -4 8\n10,none,-5,\n\
-         -7 -1 10 21 none 42\nfn 2 none i32 3\n10\n-3 6\nnone -1\n-5 -50\ntrue -1\n"
+         -7 -1 10 21 none 42\nfn 2 none i32 3\n10\n-3 6\nnone -1\n-5 -50\ntrue -1\n\
+         5 1 7 true\n77 -1 77 true\n"
     );
 }
 

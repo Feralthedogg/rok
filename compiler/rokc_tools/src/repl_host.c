@@ -39,6 +39,7 @@
 #include <llvm-c/Transforms/PassBuilder.h>
 
 void rok_runtime_init(void);
+int rok_stdio_flush(void);
 
 // The cell's shown value (a rok `str`), which the cell sets.
 struct {
@@ -282,7 +283,7 @@ static void run_once(int ctl, const char *ir, size_t n, const char *out, const c
         signal(SIGINT, SIG_DFL);
         void (*cell)(void) = jit_cell(ir, n);
         if (cell) cell();
-        fflush(stdout);
+        rok_stdio_flush();
         fflush(stderr);
         _exit(cell ? 0 : 1);
     }
@@ -321,7 +322,7 @@ int main(int argc, char **argv) {
         if (sscanf(line, "cell %zu", &n) == 1 || sscanf(line, "once %zu %4095s %4095s", &n, out, err) == 3)
             ir = read_ir(ctl, n);
         if (!ir) return 1;
-        fflush(stdout);
+        rok_stdio_flush();
         if (line[0] == 'o') {
             run_once(ctl, ir, n, out, err);
             free(ir);
@@ -355,7 +356,7 @@ int main(int argc, char **argv) {
         __rok_repl_out.len = 0;
         cell();
         signal(SIGINT, SIG_IGN);
-        fflush(stdout);
+        rok_stdio_flush();
         if (write(verdict[1], "", 1) != 1) {}
         close(verdict[1]);
         if (snap > 0) waitpid(snap, NULL, 0);

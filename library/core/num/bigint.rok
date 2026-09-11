@@ -6,245 +6,229 @@
 //
 // Representation: a value that fits `i64` lives in `small` (`big` is
 // `none`); anything larger is a sign + magnitude (`IntMag`, base-2^32
-// limbs). The form is canonical — every result that fits `i64` drops
+// limbs). The form is canonical: every result that fits `i64` drops
 // back to `small` (spec 2.1.2 says promoted values stay big; canonical
 // form keeps `==` / `hash` a field compare and is not observable).
 // Values are immutable: a limb buffer is never written once it sits in
 // an `Int`, so copies share it (spec 2.13.3: `int` is `Copy`).
 //
 // Algorithms: schoolbook add / sub, schoolbook multiplication with
-// Karatsuba above `INT_KARATSUBA` limbs, Knuth algorithm D division (the
+// Karatsuba above `KARATSUBA` limbs, Knuth algorithm D division (the
 // multiply and divide inner loops are runtime kernels),
 // square-and-multiply `pow`, Euclid `gcd`, quadratic radix conversion.
-// ponytail: no FFT / Toom-Cook multiplication, Burnikel-Ziegler
-// division or divide-and-conquer radix conversion — add them when
-// numbers of 10^5+ digits matter.
+// Numbers of 10^5+ digits would want FFT / Toom-Cook multiplication,
+// Burnikel-Ziegler division and divide-and-conquer radix conversion.
 
 use rok::core::collections::raw::{GcBuf, buf_new};
 
-// The quadratic inner loops are runtime kernels (`rokr/src/bignum.rs`).
-extern "rok" {
-    fn rok_nat_mul(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize);
-    fn rok_nat_divmod_small(q: GcBuf<u32>, a: GcBuf<u32>, n: usize, v: u32) -> u32;
-    fn rok_nat_divmod(q: GcBuf<u32>, un: GcBuf<u32>, vn: GcBuf<u32>, m: usize, n: usize);
-    fn rok_str_from_buf(buf: GcBuf<u8>, off: usize, len: usize) -> str;
-}
-
-/// Limb count from which `nat_mul` splits (Karatsuba).
-const INT_KARATSUBA: usize = 40;
+/// Limb count from which `IntMag::mul` splits (Karatsuba).
+const KARATSUBA: usize = 40;
 
 /// A magnitude: little-endian base-2^32 limbs `d[0..n]`, no leading
-/// zero nat_limb (`n == 0` is zero). `d` may be longer than `n`.
+/// zero limb (`n == 0` is zero). `d` may be longer than `n`.
 pub(pkg) struct IntMag {
     d: GcBuf<u32>;
     n: usize;
 }
 
-fn nat_zero() -> IntMag { IntMag { d: buf_new(0), n: 0 } }
+impl IntMag {
+    fn zero() -> IntMag { IntMag { d: buf_new(0), n: 0 } }
 
-/// `d[0..n]` without its leading zero limbs (shares `d`).
-fn nat_trim(d: GcBuf<u32>, n: usize) -> IntMag {
-    let k = n;
-    while k > 0 && d[k - 1] == 0u32 { k -= 1; }
-    IntMag { d: d, n: k }
-}
-
-fn nat_u64(v: u64) -> IntMag {
-    let d: GcBuf<u32> = buf_new(2);
-    d[0] = v as u32;
-    d[1] = (v >> 32u64) as u32;
-    nat_trim(d, 2)
-}
-
-fn nat_limb(a: IntMag, i: usize) -> u64 {
-    if i < a.n { a.d[i] as u64 } else { 0u64 }
-}
-
-fn nat_cmp(a: IntMag, b: IntMag) -> i32 {
-    if a.n != b.n { return if a.n < b.n { -1 } else { 1 }; }
-    let i = a.n;
-    while i > 0 {
-        i -= 1;
-        if a.d[i] != b.d[i] { return if a.d[i] < b.d[i] { -1 } else { 1 }; }
+    /// `d[0..n]` without its leading zero limbs (shares `d`).
+    fn trim(d: GcBuf<u32>, n: usize) -> IntMag {
+        let k = n;
+        while k > 0 && d[k - 1] == 0u32 { k -= 1; }
+        IntMag { d: d, n: k }
     }
-    0
-}
 
-fn nat_add(a: IntMag, b: IntMag) -> IntMag {
-    if a.n < b.n { return nat_add(b, a); }
-    let r: GcBuf<u32> = buf_new(a.n + 1);
-    let carry = 0u64;
-    let i = 0usize;
-    while i < a.n {
-        let s = (a.d[i] as u64) + nat_limb(b, i) + carry;
-        r[i] = s as u32;
-        carry = s >> 32u64;
-        i += 1;
+    fn from_u64(v: u64) -> IntMag {
+        let d: GcBuf<u32> = buf_new(2);
+        d[0] = v as u32;
+        d[1] = (v >> 32u64) as u32;
+        IntMag::trim(d, 2)
     }
-    r[a.n] = carry as u32;
-    nat_trim(r, a.n + 1)
-}
 
-/// `a - b`, `a >= b`.
-fn nat_sub(a: IntMag, b: IntMag) -> IntMag {
-    let r: GcBuf<u32> = buf_new(a.n);
-    let borrow = 0u64;
-    let i = 0usize;
-    while i < a.n {
-        let x = a.d[i] as u64;
-        let y = nat_limb(b, i) + borrow;
-        if x >= y {
-            r[i] = (x - y) as u32;
-            borrow = 0u64;
-        } else {
-            r[i] = (x + 0x1_0000_0000u64 - y) as u32;
-            borrow = 1u64;
+    /// Limb `i`, zero past the top.
+    fn limb(self, i: usize) -> u64 {
+        if i < self.n { self.d[i] as u64 } else { 0u64 }
+    }
+
+    /// The low 64 bits.
+    fn low64(self) -> u64 { (self.limb(1) << 32u64) | self.limb(0) }
+
+    /// Number of significant bits (0 for zero).
+    fn bits(self) -> u64 {
+        if self.n == 0 { return 0u64; }
+        (self.n as u64) * 32u64 - (self.d[self.n - 1].leading_zeros() as u64)
+    }
+
+    /// `self` vs `b`: -1, 0 or 1.
+    fn cmp3(self, b: IntMag) -> i32 {
+        if self.n != b.n { return if self.n < b.n { -1 } else { 1 }; }
+        let i = self.n;
+        while i > 0 {
+            i -= 1;
+            if self.d[i] != b.d[i] { return if self.d[i] < b.d[i] { -1 } else { 1 }; }
         }
-        i += 1;
+        0
     }
-    nat_trim(r, a.n)
-}
 
-/// `r[off..] += x` (`r` has room for the carry).
-fn nat_add_at(r: GcBuf<u32>, x: IntMag, off: usize) {
-    let carry = 0u64;
-    let i = 0usize;
-    while i < x.n || carry != 0u64 {
-        let s = (r[off + i] as u64) + nat_limb(x, i) + carry;
-        r[off + i] = s as u32;
-        carry = s >> 32u64;
-        i += 1;
-    }
-}
-
-fn nat_mul_school(a: IntMag, b: IntMag) -> IntMag {
-    let n = a.n + b.n;
-    let r: GcBuf<u32> = buf_new(n);
-    unsafe { rok_nat_mul(r, a.d, a.n, b.d, b.n) };
-    nat_trim(r, n)
-}
-
-/// Limbs `lo..hi` of `a` (a copy).
-fn nat_slice(a: IntMag, lo: usize, hi: usize) -> IntMag {
-    let h = if hi < a.n { hi } else { a.n };
-    if lo >= h { return nat_zero(); }
-    let r: GcBuf<u32> = buf_new(h - lo);
-    let i = lo;
-    while i < h {
-        r[i - lo] = a.d[i];
-        i += 1;
-    }
-    nat_trim(r, h - lo)
-}
-
-fn nat_mul(a: IntMag, b: IntMag) -> IntMag {
-    if a.n < b.n { return nat_mul(b, a); }
-    if b.n == 0 { return nat_zero(); }
-    if b.n < INT_KARATSUBA { return nat_mul_school(a, b); }
-    let r: GcBuf<u32> = buf_new(a.n + b.n + 1);
-    if b.n * 2 <= a.n {
-        // Unbalanced: `b`-sized pieces of `a`, each balanced.
-        let off = 0usize;
-        while off < a.n {
-            nat_add_at(r, nat_mul(nat_slice(a, off, off + b.n), b), off);
-            off += b.n;
+    fn plus(self, b: IntMag) -> IntMag {
+        if self.n < b.n { return b.plus(self); }
+        let r: GcBuf<u32> = buf_new(self.n + 1);
+        let carry = 0u64;
+        let i = 0usize;
+        while i < self.n {
+            let s = (self.d[i] as u64) + b.limb(i) + carry;
+            r[i] = s as u32;
+            carry = s >> 32u64;
+            i += 1;
         }
-        return nat_trim(r, a.n + b.n + 1);
+        r[self.n] = carry as u32;
+        IntMag::trim(r, self.n + 1)
     }
-    // Karatsuba: a = a1 B^k + a0, b = b1 B^k + b0;
-    // ab = z2 B^2k + ((a0 + a1)(b0 + b1) - z2 - z0) B^k + z0.
-    let k = (a.n + 1) / 2;
-    let a0 = nat_slice(a, 0, k);
-    let a1 = nat_slice(a, k, a.n);
-    let b0 = nat_slice(b, 0, k);
-    let b1 = nat_slice(b, k, b.n);
-    let z0 = nat_mul(a0, b0);
-    let z2 = nat_mul(a1, b1);
-    let z1 = nat_sub(nat_sub(nat_mul(nat_add(a0, a1), nat_add(b0, b1)), z0), z2);
-    nat_add_at(r, z0, 0);
-    nat_add_at(r, z1, k);
-    nat_add_at(r, z2, 2 * k);
-    nat_trim(r, a.n + b.n + 1)
-}
 
-/// `a << s` bits.
-fn nat_shl(a: IntMag, s: u64) -> IntMag {
-    if a.n == 0 { return a; }
-    let limbs = (s / 32u64) as usize;
-    let bits = s % 32u64;
-    let r: GcBuf<u32> = buf_new(a.n + limbs + 1);
-    let carry = 0u64;
-    let i = 0usize;
-    while i < a.n {
-        let v = ((a.d[i] as u64) << bits) | carry;
-        r[i + limbs] = v as u32;
-        carry = v >> 32u64;
-        i += 1;
+    /// `self - b`, `self >= b`.
+    fn minus(self, b: IntMag) -> IntMag {
+        let r: GcBuf<u32> = buf_new(self.n);
+        let borrow = 0u64;
+        let i = 0usize;
+        while i < self.n {
+            let x = self.d[i] as u64;
+            let y = b.limb(i) + borrow;
+            if x >= y {
+                r[i] = (x - y) as u32;
+                borrow = 0u64;
+            } else {
+                r[i] = (x + 0x1_0000_0000u64 - y) as u32;
+                borrow = 1u64;
+            }
+            i += 1;
+        }
+        IntMag::trim(r, self.n)
     }
-    r[a.n + limbs] = carry as u32;
-    nat_trim(r, a.n + limbs + 1)
-}
 
-/// `a >> s` bits (floor).
-fn nat_shr(a: IntMag, s: u64) -> IntMag {
-    let limbs = s / 32u64;
-    if limbs >= a.n as u64 { return nat_zero(); }
-    let skip = limbs as usize;
-    let bits = s % 32u64;
-    let n = a.n - skip;
-    let r: GcBuf<u32> = buf_new(n);
-    let i = 0usize;
-    while i < n {
-        let v = ((nat_limb(a, i + skip + 1) << 32u64) | (a.d[i + skip] as u64)) >> bits;
-        r[i] = v as u32;
-        i += 1;
+    /// `r[off..] += self` (`r` has room for the carry).
+    fn add_to(self, r: GcBuf<u32>, off: usize) {
+        let carry = 0u64;
+        let i = 0usize;
+        while i < self.n || carry != 0u64 {
+            let s = (r[off + i] as u64) + self.limb(i) + carry;
+            r[off + i] = s as u32;
+            carry = s >> 32u64;
+            i += 1;
+        }
     }
-    nat_trim(r, n)
-}
 
-/// Number of significant bits (0 for zero).
-fn nat_bits(a: IntMag) -> u64 {
-    if a.n == 0 { return 0u64; }
-    (a.n as u64) * 32u64 - (a.d[a.n - 1].leading_zeros() as u64)
-}
-
-/// `(a / v, a % v)` for one limb `v > 0`.
-fn nat_divmod_small(a: IntMag, v: u32) -> (IntMag, u32) {
-    let q: GcBuf<u32> = buf_new(a.n);
-    let rem = unsafe { rok_nat_divmod_small(q, a.d, a.n, v) };
-    (nat_trim(q, a.n), rem)
-}
-
-/// `(a / b, a % b)`, `b != 0`: Knuth TAOCP 4.3.1 algorithm D on the
-/// operands shifted so the divisor's top bit is set.
-fn nat_divmod(a: IntMag, b: IntMag) -> (IntMag, IntMag) {
-    if nat_cmp(a, b) < 0 { return (nat_zero(), a); }
-    if b.n == 1 {
-        let (q, r) = nat_divmod_small(a, b.d[0]);
-        return (q, nat_u64(r as u64));
+    /// Limbs `lo..hi` (a copy).
+    fn slice(self, lo: usize, hi: usize) -> IntMag {
+        let h = if hi < self.n { hi } else { self.n };
+        if lo >= h { return IntMag::zero(); }
+        let r: GcBuf<u32> = buf_new(h - lo);
+        let i = lo;
+        while i < h {
+            r[i - lo] = self.d[i];
+            i += 1;
+        }
+        IntMag::trim(r, h - lo)
     }
-    let n = b.n;
-    let m = a.n - n;
-    let s = b.d[n - 1].leading_zeros() as u64;
-    let vn = nat_shl(b, s).d;
-    // `a << s` in `m + n + 1` limbs (the top one may stay zero).
-    let un: GcBuf<u32> = buf_new(a.n + 1);
-    let sh = nat_shl(a, s);
-    let i = 0usize;
-    while i < sh.n {
-        un[i] = sh.d[i];
-        i += 1;
+
+    fn times(self, b: IntMag) -> IntMag {
+        if self.n < b.n { return b.times(self); }
+        if b.n == 0 { return IntMag::zero(); }
+        if b.n < KARATSUBA {
+            let n = self.n + b.n;
+            let r: GcBuf<u32> = buf_new(n);
+            unsafe { rok_nat_mul(r, self.d, self.n, b.d, b.n) };
+            return IntMag::trim(r, n);
+        }
+        let r: GcBuf<u32> = buf_new(self.n + b.n + 1);
+        if b.n * 2 <= self.n {
+            // Unbalanced: `b`-sized pieces of `self`, each balanced.
+            let off = 0usize;
+            while off < self.n {
+                self.slice(off, off + b.n).times(b).add_to(r, off);
+                off += b.n;
+            }
+            return IntMag::trim(r, self.n + b.n + 1);
+        }
+        // Karatsuba: a = a1 B^k + a0, b = b1 B^k + b0;
+        // ab = z2 B^2k + ((a0 + a1)(b0 + b1) - z2 - z0) B^k + z0.
+        let k = (self.n + 1) / 2;
+        let a0 = self.slice(0, k);
+        let a1 = self.slice(k, self.n);
+        let b0 = b.slice(0, k);
+        let b1 = b.slice(k, b.n);
+        let z0 = a0.times(b0);
+        let z2 = a1.times(b1);
+        let z1 = a0.plus(a1).times(b0.plus(b1)).minus(z0).minus(z2);
+        z0.add_to(r, 0);
+        z1.add_to(r, k);
+        z2.add_to(r, 2 * k);
+        IntMag::trim(r, self.n + b.n + 1)
     }
-    let q: GcBuf<u32> = buf_new(m + 1);
-    unsafe { rok_nat_divmod(q, un, vn, m, n) };
-    (nat_trim(q, m + 1), nat_shr(nat_trim(un, n), s))
+
+    /// `self << s` bits.
+    fn shl(self, s: u64) -> IntMag {
+        if self.n == 0 { return self; }
+        let limbs = (s / 32u64) as usize;
+        let bits = s % 32u64;
+        let r: GcBuf<u32> = buf_new(self.n + limbs + 1);
+        let carry = 0u64;
+        let i = 0usize;
+        while i < self.n {
+            let v = ((self.d[i] as u64) << bits) | carry;
+            r[i + limbs] = v as u32;
+            carry = v >> 32u64;
+            i += 1;
+        }
+        r[self.n + limbs] = carry as u32;
+        IntMag::trim(r, self.n + limbs + 1)
+    }
+
+    /// `self >> s` bits (floor).
+    fn shr(self, s: u64) -> IntMag {
+        let limbs = s / 32u64;
+        if limbs >= self.n as u64 { return IntMag::zero(); }
+        let skip = limbs as usize;
+        let bits = s % 32u64;
+        let n = self.n - skip;
+        let r: GcBuf<u32> = buf_new(n);
+        let i = 0usize;
+        while i < n {
+            let v = ((self.limb(i + skip + 1) << 32u64) | (self.d[i + skip] as u64)) >> bits;
+            r[i] = v as u32;
+            i += 1;
+        }
+        IntMag::trim(r, n)
+    }
+
+    /// `(self / b, self % b)`, `b != 0`: Knuth TAOCP 4.3.1 algorithm D
+    /// on the operands shifted so the divisor's top bit is set.
+    fn divmod(self, b: IntMag) -> (IntMag, IntMag) {
+        if self.cmp3(b) < 0 { return (IntMag::zero(), self); }
+        if b.n == 1 {
+            let q: GcBuf<u32> = buf_new(self.n);
+            let rem = unsafe { rok_nat_divmod_small(q, self.d, self.n, b.d[0]) };
+            return (IntMag::trim(q, self.n), IntMag::from_u64(rem as u64));
+        }
+        let n = b.n;
+        let m = self.n - n;
+        let s = b.d[n - 1].leading_zeros() as u64;
+        let vn = b.shl(s).d;
+        // `self << s` in `m + n + 1` limbs (the top one may stay zero).
+        let un: GcBuf<u32> = buf_new(self.n + 1);
+        let sh = self.shl(s);
+        let i = 0usize;
+        while i < sh.n {
+            un[i] = sh.d[i];
+            i += 1;
+        }
+        let q: GcBuf<u32> = buf_new(m + 1);
+        unsafe { rok_nat_divmod(q, un, vn, m, n) };
+        (IntMag::trim(q, m + 1), IntMag::trim(un, n).shr(s))
+    }
 }
-
-/// The low 64 bits of `a`.
-fn nat_low64(a: IntMag) -> u64 { (nat_limb(a, 1) << 32u64) | nat_limb(a, 0) }
-
-/// `-(x)` in two's complement (`0 - x` wrapping).
-fn int_neg_u64(x: u64) -> u64 { 0u64.wrapping_sub(x) }
 
 /// An arbitrary-precision integer (spec 2.1.2). Write it `int`.
 #[lang("int_type")]
@@ -255,23 +239,9 @@ pub struct Int {
     big: IntMag | none;
 }
 
-fn int_small(v: i64) -> Int { Int { small: v, neg: false, big: none } }
-
-/// The canonical `int` of sign `neg` and magnitude `m`.
-fn int_make(neg: bool, m: IntMag) -> Int {
-    if m.n <= 2 {
-        let v = nat_low64(m);
-        if v <= 0x7FFF_FFFF_FFFF_FFFFu64 {
-            return int_small(if neg { -(v as i64) } else { v as i64 });
-        }
-        if neg && v == 0x8000_0000_0000_0000u64 { return int_small(v as i64); }
-    }
-    Int { small: 0, neg: neg, big: m }
-}
-
-/// `(10^9, 9)` for base 10: the largest power of `radix` below 2^32 and its
-/// digit count.
-fn int_radix_chunk(radix: u32) -> (u32, u32) {
+/// `(10^9, 9)` for base 10: the largest power of `radix` below 2^32 and
+/// its digit count.
+fn radix_chunk(radix: u32) -> (u32, u32) {
     let p = radix;
     let k = 1u32;
     while (p as u64) * (radix as u64) < 0x1_0000_0000u64 {
@@ -281,21 +251,20 @@ fn int_radix_chunk(radix: u32) -> (u32, u32) {
     (p, k)
 }
 
-/// Digit value of ASCII byte `c`, or 99.
-fn int_digit_of(c: u8) -> u32 {
+/// Digit value of an ASCII digit or letter (either case).
+fn digit_of(c: u8) -> u32 {
     let v = c as u32;
     if v >= 48u32 && v <= 57u32 { return v - 48u32; }
     if v >= 97u32 && v <= 122u32 { return v - 87u32; }
-    if v >= 65u32 && v <= 90u32 { return v - 55u32; }
-    99u32
+    v - 55u32
 }
 
 impl Int {
     /// Zero.
-    pub fn new() -> Int { int_small(0) }
-    pub fn from_i64(n: i64) -> Int { int_small(n) }
-    pub fn from_i32(n: i32) -> Int { int_small(n as i64) }
-    pub fn from_u64(n: u64) -> Int { int_make(false, nat_u64(n)) }
+    pub fn new() -> Int { Int::from_i64(0) }
+    pub fn from_i64(n: i64) -> Int { Int { small: n, neg: false, big: none } }
+    pub fn from_i32(n: i32) -> Int { Int::from_i64(n as i64) }
+    pub fn from_u64(n: u64) -> Int { Int::from_parts(false, IntMag::from_u64(n)) }
 
     /// An integer literal's digits (`_`, `0x` / `0o` / `0b` allowed):
     /// what an unsuffixed literal too big for `i64` in an `int` slot
@@ -307,44 +276,40 @@ impl Int {
         if t.starts_with("0o") || t.starts_with("0O") { radix = 8u32; }
         if t.starts_with("0b") || t.starts_with("0B") { radix = 2u32; }
         if radix != 10u32 { t = t[2:]; }
-        match Int::from_str_radix(t, radix) {
+        match Int::parse_radix(t, radix) {
             v: Int => v,
             none => panic(f"malformed integer literal `{s}`"),
         }
     }
 
-    /// `s` in base `radix` (2..=36): an optional sign, then digits
-    /// (either case). `none` on anything else (spec 2.1.2 `from_str`).
-    pub fn from_str_radix(s: str, radix: u32) -> Int | none {
-        if radix < 2u32 || radix > 36u32 { return none; }
-        let n = s.len();
+    /// `s` in base `radix` (2..=36): an optional sign, then digits of
+    /// either case; `none` otherwise. The grammar is the runtime's, the
+    /// same the primitives' `FromStr` reads.
+    pub fn parse_radix(s: str, radix: u32) -> Int | none {
+        let out: GcBuf<i64> = buf_new(1);
+        let st = unsafe { rok_str_parse_int(s, radix, 1, 64u32, out) };
+        if st == 0 { return Int::from_i64(out[0]); }
+        if st != 3 { return none; }
+        // Past `i64`: fold the checked digits into limbs, `per` at a
+        // time: acc = acc * radix^k + chunk.
         let bs = s.as_bytes();
-        let i = 0usize;
-        let neg = false;
-        if n > 0 && (bs[0] == 45u8 || bs[0] == 43u8) {
-            neg = bs[0] == 45u8;
-            i = 1;
-        }
-        if i == n { return none; }
-        let (_, per) = int_radix_chunk(radix);
-        // Limbs grow as chunks of `per` digits are folded in:
-        // acc = acc * radix^k + chunk.
-        let cap = (n - i) / (per as usize) + 2;
-        let acc: GcBuf<u32> = buf_new(cap);
+        let n = s.len();
+        let neg = bs[0] == 45u8;
+        let i = if bs[0] == 45u8 || bs[0] == 43u8 { 1usize } else { 0usize };
+        let (_, per) = radix_chunk(radix);
+        let acc: GcBuf<u32> = buf_new((n - i) / (per as usize) + 2);
         let len = 0usize;
         while i < n {
             let v = 0u64;
             let mul = 1u64;
             let k = 0u32;
             while k < per && i < n {
-                let dv = int_digit_of(bs[i]);
-                if dv >= radix { return none; }
-                v = v * (radix as u64) + (dv as u64);
+                v = v * (radix as u64) + (digit_of(bs[i]) as u64);
                 mul = mul * (radix as u64);
                 k += 1u32;
                 i += 1;
             }
-            // acc = acc * mul + v (mul <= chunk < 2^32).
+            // mul <= chunk < 2^32.
             let carry = v;
             let j = 0usize;
             while j < len {
@@ -358,11 +323,8 @@ impl Int {
                 len += 1;
             }
         }
-        int_make(neg, nat_trim(acc, len))
+        Int::from_parts(neg, IntMag::trim(acc, len))
     }
-
-    /// `from_str` of spec 2.1.2: `s` in base `radix`, or `none`.
-    pub fn from_str(s: str, radix: u32) -> Int | none { Int::from_str_radix(s, radix) }
 
     /// The digits in base `radix` (2..=36, lowercase), `-` first when
     /// negative.
@@ -370,7 +332,7 @@ impl Int {
         if radix < 2u32 || radix > 36u32 { panic(f"to_str_radix: radix {radix} out of 2..=36"); }
         let (neg, m) = self.parts();
         if m.n == 0 { return "0"; }
-        let (chunk, per) = int_radix_chunk(radix);
+        let (chunk, per) = radix_chunk(radix);
         let p = per as usize;
         // Chunks of `per` digits, least significant first, by dividing a
         // scratch copy in place.
@@ -431,7 +393,7 @@ impl Int {
         }
         let (neg, m) = self.parts();
         if neg || m.n > 2 { return none; }
-        nat_low64(m)
+        m.low64()
     }
 
     /// The nearest `f64` (ties to even; `±inf` past `f64::MAX`).
@@ -448,8 +410,8 @@ impl Int {
 
     /// `-1`, `0` or `1`.
     pub fn signum(self) -> Int {
-        if self.is_zero() { return int_small(0); }
-        if self.is_negative() { int_small(-1) } else { int_small(1) }
+        if self.is_zero() { return Int::from_i64(0); }
+        if self.is_negative() { Int::from_i64(-1) } else { Int::from_i64(1) }
     }
 
     pub fn abs(self) -> Int {
@@ -460,12 +422,12 @@ impl Int {
     /// `bit_length`).
     pub fn bit_length(self) -> u64 {
         let (_, m) = self.parts();
-        nat_bits(m)
+        m.bits()
     }
 
     /// `self^exp` (square and multiply).
     pub fn pow(self, exp: u32) -> Int {
-        let acc = int_small(1);
+        let acc = Int::from_i64(1);
         let base = self;
         let e = exp;
         while e > 0u32 {
@@ -477,8 +439,7 @@ impl Int {
     }
 
     /// The greatest common divisor, never negative (`gcd(0, 0) == 0`).
-    /// ponytail: Euclid on full divisions; Lehmer / binary GCD when
-    /// huge operands matter.
+    /// Euclid on full divisions; huge operands would want Lehmer's.
     pub fn gcd(self, other: Int) -> Int {
         let a = self.abs();
         let b = other.abs();
@@ -495,22 +456,30 @@ impl Int {
     pub fn div_rem(self, rhs: Int) -> (Int, Int) {
         if rhs.is_zero() { panic("attempt to divide an int by zero"); }
         if self.big is none && rhs.big is none && !(self.small == -9223372036854775807 - 1 && rhs.small == -1) {
-            return (int_small(self.small / rhs.small), int_small(self.small % rhs.small));
+            return (Int::from_i64(self.small / rhs.small), Int::from_i64(self.small % rhs.small));
         }
         let (an, am) = self.parts();
         let (bn, bm) = rhs.parts();
-        let (q, r) = nat_divmod(am, bm);
-        (int_make(an != bn, q), int_make(an, r))
+        let (q, r) = am.divmod(bm);
+        (Int::from_parts(an != bn, q), Int::from_parts(an, r))
     }
 
     /// Sign and magnitude.
     pub(pkg) fn parts(self) -> (bool, IntMag) {
         if let m: IntMag = self.big { return (self.neg, m); }
         let v = self.small;
-        if v < 0 { (true, nat_u64(int_neg_u64(v as u64))) } else { (false, nat_u64(v as u64)) }
+        if v < 0 { (true, IntMag::from_u64(0u64.wrapping_sub(v as u64))) } else { (false, IntMag::from_u64(v as u64)) }
     }
 
-    pub(pkg) fn from_parts(neg: bool, m: IntMag) -> Int { int_make(neg, m) }
+    /// The canonical `int` of sign `neg` and magnitude `m`.
+    pub(pkg) fn from_parts(neg: bool, m: IntMag) -> Int {
+        if m.n <= 2 {
+            let v = m.low64();
+            if v <= 0x7FFF_FFFF_FFFF_FFFFu64 { return Int::from_i64(if neg { -(v as i64) } else { v as i64 }); }
+            if neg && v == 0x8000_0000_0000_0000u64 { return Int::from_i64(v as i64); }
+        }
+        Int { small: 0, neg: neg, big: m }
+    }
 
     /// `self` vs `rhs`: -1, 0 or 1.
     fn cmp3(self, rhs: Int) -> i32 {
@@ -521,7 +490,7 @@ impl Int {
         let (an, am) = self.parts();
         let (bn, bm) = rhs.parts();
         if an != bn { return if an { -1 } else { 1 }; }
-        let c = nat_cmp(am, bm);
+        let c = am.cmp3(bm);
         if an { -c } else { c }
     }
 
@@ -532,7 +501,7 @@ impl Int {
         let i = 0usize;
         let carry = 1u64;
         while i < n {
-            let v = nat_limb(m, i);
+            let v = m.limb(i);
             if neg {
                 let t = ((~(v as u32)) as u64) + carry;
                 r[i] = t as u32;
@@ -547,7 +516,7 @@ impl Int {
 
     /// The `int` of two's complement limbs `r[0..n]` (top bit = sign).
     fn from_twos(r: GcBuf<u32>, n: usize) -> Int {
-        if r[n - 1] & 0x8000_0000u32 == 0u32 { return int_make(false, nat_trim(r, n)); }
+        if r[n - 1] & 0x8000_0000u32 == 0u32 { return Int::from_parts(false, IntMag::trim(r, n)); }
         let m: GcBuf<u32> = buf_new(n);
         let carry = 1u64;
         let i = 0usize;
@@ -557,7 +526,7 @@ impl Int {
             carry = t >> 32u64;
             i += 1;
         }
-        int_make(true, nat_trim(m, n))
+        Int::from_parts(true, IntMag::trim(m, n))
     }
 
     /// A bitwise op (`op`: 0 and, 1 or, 2 xor) on infinite two's
@@ -566,7 +535,7 @@ impl Int {
         if self.big is none && rhs.big is none {
             let a = self.small;
             let b = rhs.small;
-            return int_small(if op == 0 { a & b } else if op == 1 { a | b } else { a ^ b });
+            return Int::from_i64(if op == 0 { a & b } else if op == 1 { a | b } else { a ^ b });
         }
         let (_, am) = self.parts();
         let (_, bm) = rhs.parts();
@@ -587,30 +556,30 @@ impl Add for Int {
     type Output = Int;
     fn add(self, rhs: Int) -> Int {
         if self.big is none && rhs.big is none {
-            if let s: i64 = self.small.checked_add(rhs.small) { return int_small(s); }
+            if let s: i64 = self.small.checked_add(rhs.small) { return Int::from_i64(s); }
         }
         let (an, am) = self.parts();
         let (bn, bm) = rhs.parts();
-        int_add_signed(an, am, bn, bm)
+        add_signed(an, am, bn, bm)
     }
 }
 
-fn int_add_signed(an: bool, am: IntMag, bn: bool, bm: IntMag) -> Int {
-    if an == bn { return int_make(an, nat_add(am, bm)); }
-    let c = nat_cmp(am, bm);
-    if c == 0 { return int_small(0); }
-    if c > 0 { int_make(an, nat_sub(am, bm)) } else { int_make(bn, nat_sub(bm, am)) }
+fn add_signed(an: bool, am: IntMag, bn: bool, bm: IntMag) -> Int {
+    if an == bn { return Int::from_parts(an, am.plus(bm)); }
+    let c = am.cmp3(bm);
+    if c == 0 { return Int::from_i64(0); }
+    if c > 0 { Int::from_parts(an, am.minus(bm)) } else { Int::from_parts(bn, bm.minus(am)) }
 }
 
 impl Sub for Int {
     type Output = Int;
     fn sub(self, rhs: Int) -> Int {
         if self.big is none && rhs.big is none {
-            if let s: i64 = self.small.checked_sub(rhs.small) { return int_small(s); }
+            if let s: i64 = self.small.checked_sub(rhs.small) { return Int::from_i64(s); }
         }
         let (an, am) = self.parts();
         let (bn, bm) = rhs.parts();
-        int_add_signed(an, am, !bn, bm)
+        add_signed(an, am, !bn, bm)
     }
 }
 
@@ -618,11 +587,11 @@ impl Mul for Int {
     type Output = Int;
     fn mul(self, rhs: Int) -> Int {
         if self.big is none && rhs.big is none {
-            if let s: i64 = self.small.checked_mul(rhs.small) { return int_small(s); }
+            if let s: i64 = self.small.checked_mul(rhs.small) { return Int::from_i64(s); }
         }
         let (an, am) = self.parts();
         let (bn, bm) = rhs.parts();
-        int_make(an != bn, nat_mul(am, bm))
+        Int::from_parts(an != bn, am.times(bm))
     }
 }
 
@@ -657,10 +626,10 @@ impl Neg for Int {
     type Output = Int;
     fn neg(self) -> Int {
         if self.big is none {
-            if let s: i64 = self.small.checked_neg() { return int_small(s); }
+            if let s: i64 = self.small.checked_neg() { return Int::from_i64(s); }
         }
         let (n, m) = self.parts();
-        int_make(!n, m)
+        Int::from_parts(!n, m)
     }
 }
 
@@ -682,7 +651,7 @@ impl BitXor for Int {
 /// `~x == -x - 1`.
 impl BitNot for Int {
     type Output = Int;
-    fn bitnot(self) -> Int { -self - int_small(1) }
+    fn bitnot(self) -> Int { -self - Int::from_i64(1) }
 }
 
 /// `x << n == x * 2^n`.
@@ -690,7 +659,7 @@ impl Shl<u32> for Int {
     type Output = Int;
     fn shl(self, n: u32) -> Int {
         let (neg, m) = self.parts();
-        int_make(neg, nat_shl(m, n as u64))
+        Int::from_parts(neg, m.shl(n as u64))
     }
 }
 
@@ -699,14 +668,14 @@ impl Shr<u32> for Int {
     type Output = Int;
     fn shr(self, n: u32) -> Int {
         if self.big is none {
-            if n >= 63u32 { return int_small(if self.small < 0 { -1 } else { 0 }); }
-            return int_small(self.small >> (n as i64));
+            if n >= 63u32 { return Int::from_i64(if self.small < 0 { -1 } else { 0 }); }
+            return Int::from_i64(self.small >> (n as i64));
         }
         let (neg, m) = self.parts();
-        if !neg { return int_make(false, nat_shr(m, n as u64)); }
+        if !neg { return Int::from_parts(false, m.shr(n as u64)); }
         // floor(-m / 2^n) = -((m - 1) >> n) - 1.
-        let t = nat_shr(nat_sub(m, nat_u64(1u64)), n as u64);
-        int_make(true, nat_add(t, nat_u64(1u64)))
+        let t = m.minus(IntMag::from_u64(1u64)).shr(n as u64);
+        Int::from_parts(true, t.plus(IntMag::from_u64(1u64)))
     }
 }
 
@@ -754,15 +723,15 @@ impl Clone for Int {
 impl Copy for Int {}
 
 impl Default for Int {
-    fn default() -> Int { int_small(0) }
+    fn default() -> Int { Int::from_i64(0) }
 }
 
 impl Zero for Int {
-    fn zero() -> Int { int_small(0) }
+    fn zero() -> Int { Int::from_i64(0) }
 }
 
 impl One for Int {
-    fn one() -> Int { int_small(1) }
+    fn one() -> Int { Int::from_i64(1) }
 }
 
 impl Display for Int {
@@ -779,71 +748,41 @@ impl Debug for Int {
 impl FromStr for Int {
     type Err = ParseError;
     fn from_str(s: str) throws (ParseError) -> Int {
-        match Int::from_str_radix(s, 10u32) {
+        match Int::parse_radix(s, 10u32) {
             v: Int => v,
             none => throw ParseError { input: s, pos: 0, reason: "invalid digit" },
         }
     }
 }
 
-// ---- f-string hook (refs-lang 1.7.3, stdlib 2.10.5) ----
-
-extern "rok" {
-    fn rok_fmt_spec_info(spec: str) -> u64;
-    fn rok_fmt_exp_digits(digits: str, prec: i64, upper: u32) -> str;
-    fn rok_fmt_num(neg: u32, prefix: str, body: str, spec: str) -> str;
-}
-
-/// `f"{n:spec}"` for an `int`: `b` / `o` / `x` / `X` print the
-/// magnitude in that base after the sign (there is no fixed width for
-/// a two's complement form: `{-255:x}` is `-ff`, like Python); `e` /
-/// `E` / `f` print the exact value; the runtime pads.
-pub fn fstr_bigint(v: Int, spec: str) -> str {
-    let info = unsafe { rok_fmt_spec_info(spec) };
-    let ty = (info & 0xFFu64) as u8;
-    let alt = info & 0x100u64 != 0u64;
-    let prec = (info >> 16u64) as i64 - 1;
-    let mag = v.abs();
-    let neg = v.is_negative();
-    let prefix = "";
-    let body = "";
-    if ty == 98u8 || ty == 111u8 || ty == 120u8 || ty == 88u8 {
-        let radix = if ty == 98u8 { 2u32 } else if ty == 111u8 { 8u32 } else { 16u32 };
-        body = mag.to_str_radix(radix);
-        if ty == 88u8 { body = body.to_uppercase(); }
-        if alt { prefix = if ty == 98u8 { "0b" } else if ty == 111u8 { "0o" } else { "0x" }; }
-    } else if ty == 101u8 || ty == 69u8 {
-        body = unsafe { rok_fmt_exp_digits(mag.to_str_radix(10u32), prec, if ty == 69u8 { 1u32 } else { 0u32 }) };
-    } else if ty == 102u8 {
-        let p = if prec < 0 { 6 } else { prec };
-        body = mag.to_str_radix(10u32);
-        if p > 0 { body = body + "." + "0".repeat(p as usize); }
-    } else {
-        body = mag.to_str_radix(10u32);
+/// `b o x X` show the sign and magnitude: `int` has no width for a
+/// two's complement form (`{-255:x}` is `-ff`, stdlib 2.10.5).
+impl Format for Int {
+    fn format(self, spec: FormatSpec) -> str {
+        spec.integer(self.is_negative(), self.abs().to_str_radix(spec.radix()))
     }
-    unsafe { rok_fmt_num(if neg { 1u32 } else { 0u32 }, prefix, body, spec) }
 }
 
 // ---- conversions (stdlib 2.11.8, 2.1.7) ----
 
-fn int_overflow(ty: str) -> OverflowError { OverflowError { op: "try_from", ty: ty } }
+fn overflow(ty: str) -> OverflowError { OverflowError { op: "try_from", ty: ty } }
 
 /// The low 64 bits of the two's complement form (`wrapping_into`).
-fn int_low_bits(v: Int) -> u64 {
+fn low_bits(v: Int) -> u64 {
     if v.big is none { return v.small as u64; }
     let (neg, m) = v.parts();
-    let low = nat_low64(m);
-    if neg { int_neg_u64(low) } else { low }
+    let low = m.low64();
+    if neg { low.wrapping_neg() } else { low }
 }
 
-impl From<i8> for Int { fn from(value: i8) -> Int { int_small(value as i64) } }
-impl From<i16> for Int { fn from(value: i16) -> Int { int_small(value as i64) } }
-impl From<i32> for Int { fn from(value: i32) -> Int { int_small(value as i64) } }
-impl From<i64> for Int { fn from(value: i64) -> Int { int_small(value) } }
-impl From<isize> for Int { fn from(value: isize) -> Int { int_small(value as i64) } }
-impl From<u8> for Int { fn from(value: u8) -> Int { int_small(value as i64) } }
-impl From<u16> for Int { fn from(value: u16) -> Int { int_small(value as i64) } }
-impl From<u32> for Int { fn from(value: u32) -> Int { int_small(value as i64) } }
+impl From<i8> for Int { fn from(value: i8) -> Int { Int::from_i64(value as i64) } }
+impl From<i16> for Int { fn from(value: i16) -> Int { Int::from_i64(value as i64) } }
+impl From<i32> for Int { fn from(value: i32) -> Int { Int::from_i64(value as i64) } }
+impl From<i64> for Int { fn from(value: i64) -> Int { Int::from_i64(value) } }
+impl From<isize> for Int { fn from(value: isize) -> Int { Int::from_i64(value as i64) } }
+impl From<u8> for Int { fn from(value: u8) -> Int { Int::from_i64(value as i64) } }
+impl From<u16> for Int { fn from(value: u16) -> Int { Int::from_i64(value as i64) } }
+impl From<u32> for Int { fn from(value: u32) -> Int { Int::from_i64(value as i64) } }
 impl From<u64> for Int { fn from(value: u64) -> Int { Int::from_u64(value) } }
 impl From<usize> for Int { fn from(value: usize) -> Int { Int::from_u64(value as u64) } }
 
@@ -854,7 +793,7 @@ impl TryFrom<Int> for i8 {
     type Error = OverflowError;
     fn try_from(value: Int) throws (OverflowError) -> i8 {
         let v = value.to_i64() ?? 128;
-        if v < -128 || v > 127 { throw int_overflow("i8"); }
+        if v < -128 || v > 127 { throw overflow("i8"); }
         v as i8
     }
 }
@@ -862,7 +801,7 @@ impl TryFrom<Int> for i16 {
     type Error = OverflowError;
     fn try_from(value: Int) throws (OverflowError) -> i16 {
         let v = value.to_i64() ?? 32768;
-        if v < -32768 || v > 32767 { throw int_overflow("i16"); }
+        if v < -32768 || v > 32767 { throw overflow("i16"); }
         v as i16
     }
 }
@@ -871,7 +810,7 @@ impl TryFrom<Int> for i32 {
     fn try_from(value: Int) throws (OverflowError) -> i32 {
         match value.to_i32() {
             v: i32 => v,
-            none => throw int_overflow("i32"),
+            none => throw overflow("i32"),
         }
     }
 }
@@ -880,7 +819,7 @@ impl TryFrom<Int> for i64 {
     fn try_from(value: Int) throws (OverflowError) -> i64 {
         match value.to_i64() {
             v: i64 => v,
-            none => throw int_overflow("i64"),
+            none => throw overflow("i64"),
         }
     }
 }
@@ -889,7 +828,7 @@ impl TryFrom<Int> for isize {
     fn try_from(value: Int) throws (OverflowError) -> isize {
         match value.to_i64() {
             v: i64 => v as isize,
-            none => throw int_overflow("isize"),
+            none => throw overflow("isize"),
         }
     }
 }
@@ -897,7 +836,7 @@ impl TryFrom<Int> for u8 {
     type Error = OverflowError;
     fn try_from(value: Int) throws (OverflowError) -> u8 {
         let v = value.to_u64() ?? 256u64;
-        if v > 255u64 { throw int_overflow("u8"); }
+        if v > 255u64 { throw overflow("u8"); }
         v as u8
     }
 }
@@ -905,7 +844,7 @@ impl TryFrom<Int> for u16 {
     type Error = OverflowError;
     fn try_from(value: Int) throws (OverflowError) -> u16 {
         let v = value.to_u64() ?? 65536u64;
-        if v > 65535u64 { throw int_overflow("u16"); }
+        if v > 65535u64 { throw overflow("u16"); }
         v as u16
     }
 }
@@ -913,7 +852,7 @@ impl TryFrom<Int> for u32 {
     type Error = OverflowError;
     fn try_from(value: Int) throws (OverflowError) -> u32 {
         let v = value.to_u64() ?? 0x1_0000_0000u64;
-        if v > 0xFFFF_FFFFu64 { throw int_overflow("u32"); }
+        if v > 0xFFFF_FFFFu64 { throw overflow("u32"); }
         v as u32
     }
 }
@@ -922,7 +861,7 @@ impl TryFrom<Int> for u64 {
     fn try_from(value: Int) throws (OverflowError) -> u64 {
         match value.to_u64() {
             v: u64 => v,
-            none => throw int_overflow("u64"),
+            none => throw overflow("u64"),
         }
     }
 }
@@ -931,20 +870,20 @@ impl TryFrom<Int> for usize {
     fn try_from(value: Int) throws (OverflowError) -> usize {
         match value.to_u64() {
             v: u64 => v as usize,
-            none => throw int_overflow("usize"),
+            none => throw overflow("usize"),
         }
     }
 }
 
 /// `value` clamped to `lo..=hi` as an `i64`.
-fn int_clamp_i64(value: Int, lo: i64, hi: i64) -> i64 {
-    if value < int_small(lo) { return lo; }
-    if value > int_small(hi) { return hi; }
+fn clamp_i64(value: Int, lo: i64, hi: i64) -> i64 {
+    if value < Int::from_i64(lo) { return lo; }
+    if value > Int::from_i64(hi) { return hi; }
     value.small
 }
 
 /// `value` clamped to `0..=hi` as a `u64`.
-fn int_clamp_u64(value: Int, hi: u64) -> u64 {
+fn clamp_u64(value: Int, hi: u64) -> u64 {
     if value.is_negative() { return 0u64; }
     match value.to_u64() {
         v: u64 => if v > hi { hi } else { v },
@@ -952,39 +891,39 @@ fn int_clamp_u64(value: Int, hi: u64) -> u64 {
     }
 }
 
-impl SaturatingFrom<Int> for i8 { fn saturating_from(value: Int) -> i8 { int_clamp_i64(value, -128, 127) as i8 } }
-impl SaturatingFrom<Int> for i16 { fn saturating_from(value: Int) -> i16 { int_clamp_i64(value, -32768, 32767) as i16 } }
+impl SaturatingFrom<Int> for i8 { fn saturating_from(value: Int) -> i8 { clamp_i64(value, -128, 127) as i8 } }
+impl SaturatingFrom<Int> for i16 { fn saturating_from(value: Int) -> i16 { clamp_i64(value, -32768, 32767) as i16 } }
 impl SaturatingFrom<Int> for i32 {
-    fn saturating_from(value: Int) -> i32 { int_clamp_i64(value, -2147483648, 2147483647) as i32 }
+    fn saturating_from(value: Int) -> i32 { clamp_i64(value, -2147483648, 2147483647) as i32 }
 }
 impl SaturatingFrom<Int> for i64 {
-    fn saturating_from(value: Int) -> i64 { int_clamp_i64(value, -9223372036854775807 - 1, 9223372036854775807) }
+    fn saturating_from(value: Int) -> i64 { clamp_i64(value, -9223372036854775807 - 1, 9223372036854775807) }
 }
 impl SaturatingFrom<Int> for isize {
     fn saturating_from(value: Int) -> isize {
-        int_clamp_i64(value, -9223372036854775807 - 1, 9223372036854775807) as isize
+        clamp_i64(value, -9223372036854775807 - 1, 9223372036854775807) as isize
     }
 }
-impl SaturatingFrom<Int> for u8 { fn saturating_from(value: Int) -> u8 { int_clamp_u64(value, 255u64) as u8 } }
-impl SaturatingFrom<Int> for u16 { fn saturating_from(value: Int) -> u16 { int_clamp_u64(value, 65535u64) as u16 } }
-impl SaturatingFrom<Int> for u32 { fn saturating_from(value: Int) -> u32 { int_clamp_u64(value, 0xFFFF_FFFFu64) as u32 } }
+impl SaturatingFrom<Int> for u8 { fn saturating_from(value: Int) -> u8 { clamp_u64(value, 255u64) as u8 } }
+impl SaturatingFrom<Int> for u16 { fn saturating_from(value: Int) -> u16 { clamp_u64(value, 65535u64) as u16 } }
+impl SaturatingFrom<Int> for u32 { fn saturating_from(value: Int) -> u32 { clamp_u64(value, 0xFFFF_FFFFu64) as u32 } }
 impl SaturatingFrom<Int> for u64 {
-    fn saturating_from(value: Int) -> u64 { int_clamp_u64(value, 0xFFFF_FFFF_FFFF_FFFFu64) }
+    fn saturating_from(value: Int) -> u64 { clamp_u64(value, 0xFFFF_FFFF_FFFF_FFFFu64) }
 }
 impl SaturatingFrom<Int> for usize {
-    fn saturating_from(value: Int) -> usize { int_clamp_u64(value, 0xFFFF_FFFF_FFFF_FFFFu64) as usize }
+    fn saturating_from(value: Int) -> usize { clamp_u64(value, 0xFFFF_FFFF_FFFF_FFFFu64) as usize }
 }
 
 // `wrapping_into` / `as`: the low bits of the two's complement form.
-impl WrappingFrom<Int> for i8 { fn wrapping_from(value: Int) -> i8 { int_low_bits(value) as i8 } }
-impl WrappingFrom<Int> for i16 { fn wrapping_from(value: Int) -> i16 { int_low_bits(value) as i16 } }
-impl WrappingFrom<Int> for i32 { fn wrapping_from(value: Int) -> i32 { int_low_bits(value) as i32 } }
-impl WrappingFrom<Int> for i64 { fn wrapping_from(value: Int) -> i64 { int_low_bits(value) as i64 } }
-impl WrappingFrom<Int> for isize { fn wrapping_from(value: Int) -> isize { int_low_bits(value) as isize } }
-impl WrappingFrom<Int> for u8 { fn wrapping_from(value: Int) -> u8 { int_low_bits(value) as u8 } }
-impl WrappingFrom<Int> for u16 { fn wrapping_from(value: Int) -> u16 { int_low_bits(value) as u16 } }
-impl WrappingFrom<Int> for u32 { fn wrapping_from(value: Int) -> u32 { int_low_bits(value) as u32 } }
-impl WrappingFrom<Int> for u64 { fn wrapping_from(value: Int) -> u64 { int_low_bits(value) } }
-impl WrappingFrom<Int> for usize { fn wrapping_from(value: Int) -> usize { int_low_bits(value) as usize } }
+impl WrappingFrom<Int> for i8 { fn wrapping_from(value: Int) -> i8 { low_bits(value) as i8 } }
+impl WrappingFrom<Int> for i16 { fn wrapping_from(value: Int) -> i16 { low_bits(value) as i16 } }
+impl WrappingFrom<Int> for i32 { fn wrapping_from(value: Int) -> i32 { low_bits(value) as i32 } }
+impl WrappingFrom<Int> for i64 { fn wrapping_from(value: Int) -> i64 { low_bits(value) as i64 } }
+impl WrappingFrom<Int> for isize { fn wrapping_from(value: Int) -> isize { low_bits(value) as isize } }
+impl WrappingFrom<Int> for u8 { fn wrapping_from(value: Int) -> u8 { low_bits(value) as u8 } }
+impl WrappingFrom<Int> for u16 { fn wrapping_from(value: Int) -> u16 { low_bits(value) as u16 } }
+impl WrappingFrom<Int> for u32 { fn wrapping_from(value: Int) -> u32 { low_bits(value) as u32 } }
+impl WrappingFrom<Int> for u64 { fn wrapping_from(value: Int) -> u64 { low_bits(value) } }
+impl WrappingFrom<Int> for usize { fn wrapping_from(value: Int) -> usize { low_bits(value) as usize } }
 /// `n as f64`: rounds to nearest.
 impl WrappingFrom<Int> for f64 { fn wrapping_from(value: Int) -> f64 { value.to_f64() } }

@@ -1,0 +1,5 @@
+use sup::sup::{P, Q as Qu, Tr, geo::{deep as d}};
+
+pub fn get(p: P, q: Qu) -> i32 { p.x + q.y }
+pub fn dp() -> i32 { d() }
+pub fn tr<T: Tr>(x: T) -> i32 { x.t() }

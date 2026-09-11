@@ -13,7 +13,7 @@
 // woken together print, is up to OS scheduling.
 async fn worker(name: str, at: Instant) -> str {
     await task::sleep_until(at);
-    if Instant::now().as_nanos() >= at.as_nanos() { f"{name} woke on time" } else { f"{name} woke EARLY" }
+    if Instant::now() >= at { f"{name} woke on time" } else { f"{name} woke EARLY" }
 }
 
 async fn main() {
@@ -25,5 +25,5 @@ async fn main() {
     await task::yield_now();
     let xs = await task::join([a, b, c]);
     for x in xs { println(x); }
-    println(f"all done after the last deadline: {t0.elapsed().as_millis() >= 30}");
+    println(f"all done after the last deadline: {t0.elapsed().as_ms() >= 30}");
 }

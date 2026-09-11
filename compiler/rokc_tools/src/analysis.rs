@@ -215,6 +215,8 @@ pub fn signature(hir: &HirModule, f: &HirFunction) -> String {
     let params: Vec<String> = f
         .params
         .iter()
+        // `#caller` (`#[track_caller]`) is hidden.
+        .filter(|p| !p.name.starts_with('#'))
         .map(|p| format!("{}: {}", p.name, ty_name(hir, &p.ty)))
         .collect();
     format!(

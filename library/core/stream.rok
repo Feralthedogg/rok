@@ -109,7 +109,7 @@ impl<K: Hash, V> FromStream<(K, V)> for Dict<K, V> {
 }
 
 /// The value of an `async yield fn` call / `async yield { .. }` block.
-// ponytail: one library type per coroutine kind (refs-lang 4.1.11).
+// One library type per coroutine kind (refs-lang 4.1.11).
 pub struct AsyncStream<T> {
     resume: fn(Context) -> Poll<T | none>;
 }

@@ -2,7 +2,7 @@
 // Over the runtime's `rok_alloc_raw` / `rok_realloc_raw` / `rok_free`
 // (system malloc); failure is a null `CPtr`, never an abort.
 //
-// ponytail: the RAII `Allocation<T>` waits for `using` (3.17).
+// No RAII `Allocation<T>` (3.17) yet.
 
 use rok::bare::ptr::{CPtr, Ptr, align_of, size_of};
 

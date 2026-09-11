@@ -1,13 +1,14 @@
-// rok::core::fmt — Display / Debug and the f-string helpers (stdlib
+// rok::core::fmt — Display / Debug and f-string formatting (stdlib
 // 2.10, refs-lang 1.7.3).
 //
-// ponytail: spec 2.10 has `fn fmt(self, ref f: Formatter) throws
-// (FmtError)` writing into a `Formatter` and eight traits (Binary,
-// LowerHex, ...). Here `display` / `debug` return a new `str`; HIR
-// lowers `f"..."` by each hole's type to `display()` / `debug()` or the
-// `fstr_*` functions below, which apply the spec (fill / align / sign /
-// `#` / `0` / width / precision / type letter) in the runtime. Upgrade
-// when `ref` parameters and a growable `str` exist.
+// Spec 2.10 writes `fn fmt(self, ref f: Formatter) throws (FmtError)`
+// and eight radix / exponent traits. Without `ref` parameters,
+// `display` / `debug` return a new `str` and every number type formats
+// a spec through the one `Format` trait. HIR lowers `f"..."` by each
+// hole's type to `display()` / `debug()`, `Format::format`, or
+// `fstr_str` for any other value.
+
+use rok::core::collections::raw::{GcBuf, buf_new};
 
 #[lang("display_trait")]
 pub trait Display {
@@ -19,34 +20,147 @@ pub trait Debug {
     fn debug(self) -> str;
 }
 
-extern "rok" {
-    fn rok_str_from_i64(n: i64) -> str;
-    fn rok_str_from_u64(n: u64) -> str;
-    fn rok_str_from_f64(d: f64, prec: i32) -> str;
-    fn rok_str_from_char(c: u32) -> str;
-    fn rok_str_debug(s: str) -> str;
-    fn rok_fmt_int(v: u64, kind: u32, spec: str) -> str;
-    fn rok_fmt_float(v: f64, is_f32: u32, spec: str) -> str;
-    fn rok_fmt_str(disp: str, dbg: str, spec: str) -> str;
-    fn rok_gc_alloc_bytes(size: usize, traced: i32) -> str;
-    fn rok_str_write_at(dst: str, off: usize, src: str);
+/// An f-string spec, `[[fill]align][sign][#][0][width][.precision][type]`
+/// (refs-lang 1.7.3). An absent `align`, `sign` or `ty` is `'\0'`; the
+/// Display letters `s d g` read as absent.
+pub struct FormatSpec {
+    pub fill: char;
+    pub align: char;
+    pub sign: char;
+    pub alt: bool;
+    pub zero: bool;
+    pub width: usize | none;
+    pub precision: usize | none;
+    pub ty: char;
 }
 
-// f-string lowering targets (HIR calls them by full path; `spec` is the
-// text after `:`).
+/// A number rendered per a spec: what `f"{x:spec}"` calls for every
+/// integer and float type, `int` and `float` included.
+pub trait Format {
+    fn format(self, spec: FormatSpec) -> str;
+}
 
-/// A signed integer of `bits` bits.
-pub fn fstr_int(v: i64, bits: u32, spec: str) -> str {
-    unsafe { rok_fmt_int(v as u64, bits | 256u32, spec) }
+/// `-1` for an absent count (the runtime's convention).
+fn count_or_minus(v: usize | none) -> i64 {
+    match v {
+        n: usize => n as i64,
+        none => -1,
+    }
 }
-/// An unsigned integer of `bits` bits.
-pub fn fstr_uint(v: u64, bits: u32, spec: str) -> str { unsafe { rok_fmt_int(v, bits, spec) } }
-/// A float (`is_f32`: format as `f32`).
-pub fn fstr_float(v: f64, is_f32: bool, spec: str) -> str {
-    unsafe { rok_fmt_float(v, if is_f32 { 1u32 } else { 0u32 }, spec) }
+
+impl FormatSpec {
+    /// `text` parsed by the runtime with the parser the compiler checks
+    /// static specs with; panics on a malformed (dynamic) spec.
+    pub fn parse(text: str) -> FormatSpec {
+        let w: GcBuf<i64> = buf_new(8);
+        unsafe { rok_fmt_spec_parse(text, w) };
+        let width: usize | none = none;
+        let precision: usize | none = none;
+        if w[5] >= 0 { width = w[5] as usize; }
+        if w[6] >= 0 { precision = w[6] as usize; }
+        FormatSpec {
+            fill: char::from_u32(w[0] as u32) ?? ' ',
+            align: (w[1] as u8) as char,
+            sign: (w[2] as u8) as char,
+            alt: w[3] != 0,
+            zero: w[4] != 0,
+            width: width,
+            precision: precision,
+            ty: (w[7] as u8) as char,
+        }
+    }
+
+    /// The base an integer prints in: 2, 8 or 16 for `b o x X`, else 10.
+    pub fn radix(self) -> u32 {
+        let t = self.ty;
+        if t == 'b' { return 2u32; }
+        if t == 'o' { return 8u32; }
+        if t == 'x' || t == 'X' { 16u32 } else { 10u32 }
+    }
+
+    /// `sign`, `prefix` and `body` padded to the width: the one place
+    /// fill, align and `0` apply. Numbers align right by default and
+    /// pad between the prefix and the digits for `0` / `=` (2.10.8).
+    pub fn pad(self, sign: str, prefix: str, body: str, numeric: bool) -> str {
+        let n = sign.char_count() + prefix.char_count() + body.char_count();
+        let w = self.width ?? 0;
+        if w <= n { return sign + prefix + body; }
+        let gap = w - n;
+        let fill = self.fill;
+        let align = self.align;
+        if numeric && self.zero && align == '\0' {
+            fill = '0';
+            align = '=';
+        }
+        let f = fill.display();
+        if align == '=' && numeric { return sign + prefix + f.repeat(gap) + body; }
+        if align == '<' || (align == '\0' && !numeric) { return sign + prefix + body + f.repeat(gap); }
+        if align == '^' { return f.repeat(gap / 2) + sign + prefix + body + f.repeat(gap - gap / 2); }
+        f.repeat(gap) + sign + prefix + body
+    }
+
+    /// What a number's sign shows: `-`, or what `+` / ` ` ask for.
+    pub fn sign_text(self, neg: bool) -> str {
+        if neg { return "-"; }
+        if self.sign == '+' { return "+"; }
+        if self.sign == ' ' { " " } else { "" }
+    }
+
+    /// An integer from its sign and its digits in `self.radix()`: the
+    /// `#` prefix, `X` case, `e` / `E` and `f` forms, then padding.
+    pub fn integer(self, neg: bool, digits: str) -> str {
+        let t = self.ty;
+        if self.radix() != 10u32 {
+            let prefix = "";
+            if self.alt { prefix = if t == 'b' { "0b" } else if t == 'o' { "0o" } else { "0x" }; }
+            let body = if t == 'X' { digits.to_uppercase() } else { digits };
+            return self.pad(self.sign_text(neg), prefix, body, true);
+        }
+        let body = digits;
+        if t == 'e' || t == 'E' {
+            let upper = if t == 'E' { 1u32 } else { 0u32 };
+            body = unsafe { rok_fmt_exp_digits(digits, count_or_minus(self.precision), upper) };
+        } else if t == 'f' {
+            let p = self.precision ?? 6;
+            if p > 0 { body = digits + "." + "0".repeat(p); }
+        }
+        self.pad(self.sign_text(neg), "", body, true)
+    }
+
+    /// A primitive float (`is_f32`: an `f32` widened).
+    fn primitive_float(self, v: f64, is_f32: bool) -> str {
+        if self.radix() != 10u32 { panic("invalid format spec: a float has no binary / octal / hex form"); }
+        let neg = v.is_sign_negative() && !v.is_nan();
+        let f32_flag = if is_f32 { 1u32 } else { 0u32 };
+        let body = unsafe { rok_fmt_float(v.abs(), f32_flag, self.ty as u32, count_or_minus(self.precision)) };
+        // inf / NaN pad like numbers but never with zeros.
+        self.pad(self.sign_text(neg), "", body, v.is_finite())
+    }
+
+    /// Any other value, rendered as `disp` (Display) and `dbg` (Debug,
+    /// for `?`); a precision keeps that many chars.
+    pub fn text(self, disp: str, dbg: str) -> str {
+        if self.ty != '\0' && self.ty != '?' { panic("invalid format spec: the type letter needs a number"); }
+        let t = if self.ty == '?' { dbg } else { disp };
+        let body = t;
+        if let p: usize = self.precision {
+            let i = 0usize;
+            for (at, _) in t.char_indices() {
+                if i == p {
+                    body = t[:at];
+                    break;
+                }
+                i += 1;
+            }
+        }
+        self.pad("", "", body, false)
+    }
 }
-/// Any other value as its `display()` (or `debug()` for `?`).
-pub fn fstr_str(disp: str, dbg: str, spec: str) -> str { unsafe { rok_fmt_str(disp, dbg, spec) } }
+
+// f-string lowering targets (HIR calls them by full path).
+
+/// A non-number hole: `spec` applied to its Display (or Debug for `?`).
+pub fn fstr_str(disp: str, dbg: str, spec: str) -> str { FormatSpec::parse(spec).text(disp, dbg) }
 
 /// The pieces of an f-string in one allocation.
 pub fn fstr_join<const N: usize>(parts: [str; N]) -> str {
@@ -67,18 +181,49 @@ pub fn fstr_join<const N: usize>(parts: [str; N]) -> str {
     out
 }
 
+/// A signed integer of `bits` bits: `b o x X` show its two's complement
+/// at that width (stdlib 2.10.5).
+fn format_signed(v: i64, bits: u64, spec: FormatSpec) -> str {
+    let r = spec.radix();
+    if r != 10u32 {
+        let b = v as u64;
+        if bits < 64u64 { b = b & ((1u64 << bits) - 1u64); }
+        return spec.integer(false, unsafe { rok_str_from_u64(b, r) });
+    }
+    spec.integer(v < 0, unsafe { rok_str_from_u64(v.unsigned_abs(), 10u32) })
+}
+
+fn format_unsigned(v: u64, spec: FormatSpec) -> str {
+    spec.integer(false, unsafe { rok_str_from_u64(v, spec.radix()) })
+}
+
+impl Format for i8 { fn format(self, spec: FormatSpec) -> str { format_signed(self as i64, 8u64, spec) } }
+impl Format for i16 { fn format(self, spec: FormatSpec) -> str { format_signed(self as i64, 16u64, spec) } }
+impl Format for i32 { fn format(self, spec: FormatSpec) -> str { format_signed(self as i64, 32u64, spec) } }
+impl Format for i64 { fn format(self, spec: FormatSpec) -> str { format_signed(self, 64u64, spec) } }
+impl Format for isize { fn format(self, spec: FormatSpec) -> str { format_signed(self as i64, 64u64, spec) } }
+impl Format for u8 { fn format(self, spec: FormatSpec) -> str { format_unsigned(self as u64, spec) } }
+impl Format for u16 { fn format(self, spec: FormatSpec) -> str { format_unsigned(self as u64, spec) } }
+impl Format for u32 { fn format(self, spec: FormatSpec) -> str { format_unsigned(self as u64, spec) } }
+impl Format for u64 { fn format(self, spec: FormatSpec) -> str { format_unsigned(self, spec) } }
+impl Format for usize { fn format(self, spec: FormatSpec) -> str { format_unsigned(self as u64, spec) } }
+impl Format for f32 { fn format(self, spec: FormatSpec) -> str { spec.primitive_float(self as f64, true) } }
+impl Format for f64 { fn format(self, spec: FormatSpec) -> str { spec.primitive_float(self, false) } }
+
 impl Display for i8 { fn display(self) -> str { unsafe { rok_str_from_i64(self as i64) } } }
 impl Display for i16 { fn display(self) -> str { unsafe { rok_str_from_i64(self as i64) } } }
 impl Display for i32 { fn display(self) -> str { unsafe { rok_str_from_i64(self as i64) } } }
 impl Display for i64 { fn display(self) -> str { unsafe { rok_str_from_i64(self) } } }
 impl Display for isize { fn display(self) -> str { unsafe { rok_str_from_i64(self as i64) } } }
-impl Display for u8 { fn display(self) -> str { unsafe { rok_str_from_u64(self as u64) } } }
-impl Display for u16 { fn display(self) -> str { unsafe { rok_str_from_u64(self as u64) } } }
-impl Display for u32 { fn display(self) -> str { unsafe { rok_str_from_u64(self as u64) } } }
-impl Display for u64 { fn display(self) -> str { unsafe { rok_str_from_u64(self) } } }
-impl Display for usize { fn display(self) -> str { unsafe { rok_str_from_u64(self as u64) } } }
-impl Display for f32 { fn display(self) -> str { unsafe { rok_str_from_f64(self as f64, 0 - 1) } } }
-impl Display for f64 { fn display(self) -> str { unsafe { rok_str_from_f64(self, 0 - 1) } } }
+impl Display for u8 { fn display(self) -> str { unsafe { rok_str_from_u64(self as u64, 10u32) } } }
+impl Display for u16 { fn display(self) -> str { unsafe { rok_str_from_u64(self as u64, 10u32) } } }
+impl Display for u32 { fn display(self) -> str { unsafe { rok_str_from_u64(self as u64, 10u32) } } }
+impl Display for u64 { fn display(self) -> str { unsafe { rok_str_from_u64(self, 10u32) } } }
+impl Display for usize { fn display(self) -> str { unsafe { rok_str_from_u64(self as u64, 10u32) } } }
+/// Shortest round-trip digits, never an exponent (`1`, `0.1`, `1e21` as
+/// `1000000000000000000000`), `inf` / `NaN`.
+impl Display for f32 { fn display(self) -> str { unsafe { rok_fmt_float(self as f64, 1u32, 0u32, -1) } } }
+impl Display for f64 { fn display(self) -> str { unsafe { rok_fmt_float(self, 0u32, 0u32, -1) } } }
 impl Display for bool {
     fn display(self) -> str { if self { "true" } else { "false" } }
 }
@@ -98,8 +243,7 @@ impl Debug for usize { fn debug(self) -> str { self.display() } }
 impl Debug for f32 { fn debug(self) -> str { self.display() } }
 impl Debug for f64 { fn debug(self) -> str { self.display() } }
 impl Debug for bool { fn debug(self) -> str { self.display() } }
-// ponytail: no escaping of `'` / control chars in `char` Debug.
 impl Debug for char {
-    fn debug(self) -> str { "'" + unsafe { rok_str_from_char(self as u32) } + "'" }
+    fn debug(self) -> str { unsafe { rok_str_escape(rok_str_from_char(self as u32), '\'' as u32) } }
 }
-impl Debug for str { fn debug(self) -> str { unsafe { rok_str_debug(self) } } }
+impl Debug for str { fn debug(self) -> str { unsafe { rok_str_escape(self, '"' as u32) } } }

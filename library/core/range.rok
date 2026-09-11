@@ -115,7 +115,7 @@ impl<T: Step> Iterator for RangeFrom<T> {
 }
 
 // Step for the integer primitives (generated: one impl per type).
-// ponytail: a `count` above the type's maximum is `none` even where the
+// A `count` above the type's maximum is `none` even where the
 // step would fit (signed types walking up from below zero).
 
 impl Step for i8 {

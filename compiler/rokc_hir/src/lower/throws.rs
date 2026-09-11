@@ -43,6 +43,9 @@ pub(super) struct CatchFrame {
     errs: Vec<(HirTy, LocalId)>,
     /// Some raise reached this frame.
     hit: bool,
+    /// Throwing `main`'s frame: a `str` local each raise sets to its
+    /// position, for the uncaught-error report.
+    site: Option<LocalId>,
 }
 
 impl CatchFrame {
@@ -355,6 +358,16 @@ pub(super) fn raise(
                     span,
                 ),
             });
+            if let Some(site) = c.site {
+                out.push(HirStmt::Assign {
+                    local: site,
+                    value: HirExpr {
+                        kind: HirExprKind::Const(ConstVal::Str(rokc_diagnostic::location(span))),
+                        ty: HirTy::Prim(PrimTy::Str),
+                        span,
+                    },
+                });
+            }
         }
         if let ErrFrame::Catch(c) = &mut ctx.err_frames[i] {
             c.hit = true;
@@ -953,6 +966,7 @@ pub(super) fn catch_all_frame(ctx: &mut LowerCtx<'_>) {
         arms: None,
         errs: Vec::new(),
         hit: false,
+        site: None,
     }));
 }
 
@@ -1081,7 +1095,7 @@ pub(super) fn lower_try(
         }
         let panic = hook_call(
             ctx,
-            "rok_panic_str",
+            "rok_panic_at",
             "try! failed: the expression threw an error",
             span,
         );
@@ -1137,11 +1151,11 @@ pub(super) fn uncaught_in_main(
         span,
     };
     // `if #which == 0 { report(describe(#err0)) } ... report(describe(#errN))`
-    let Some(sig) = ctx.env.fn_table.get("rok_uncaught_error").cloned() else {
+    let Some(sig) = ctx.env.fn_table.get("rok_uncaught_error_at").cloned() else {
         return HirBlock {
             stmts: vec![HirStmt::Expr(ctx.error_expr(
                 span,
-                "internal: runtime hook `rok_uncaught_error` is not declared".to_owned(),
+                "internal: runtime hook `rok_uncaught_error_at` is not declared".to_owned(),
             ))],
             trailing: None,
             label: None,
@@ -1152,13 +1166,18 @@ pub(super) fn uncaught_in_main(
         .as_ref()
         .map(|a| a.1)
         .expect("main frame parks errors");
+    let site = hir_local(
+        frame.site.expect("main frame records sites"),
+        &HirTy::Prim(PrimTy::Str),
+        span,
+    );
     let mut report = Vec::new();
     for (k, (ety, local)) in frame.errs.iter().enumerate() {
         let msg = describe_err(ctx, hir_local(*local, ety, span), span);
         let call = HirStmt::Panic(HirExpr {
             kind: HirExprKind::Call {
                 callee: sig.id,
-                args: vec![msg],
+                args: vec![msg, site.clone()],
             },
             ty: HirTy::Unit,
             span,
@@ -1212,12 +1231,14 @@ pub(super) fn uncaught_in_main(
 /// parks it for the report.
 pub(super) fn main_frame(ctx: &mut LowerCtx<'_>) {
     let which = ctx.declare(None, HirTy::Prim(PrimTy::I32));
+    let site = ctx.declare(None, HirTy::Prim(PrimTy::Str));
     let label = fresh_label(ctx);
     ctx.err_frames.push(ErrFrame::Catch(CatchFrame {
         label,
         arms: Some((vec![None], which)),
         errs: Vec::new(),
         hit: false,
+        site: Some(site),
     }));
 }
 
@@ -1350,6 +1371,7 @@ fn lower_catch_arms(
         arms: Some((filters.clone(), which)),
         errs: Vec::new(),
         hit: false,
+        site: None,
     }));
     let body_h = lower_expected(ctx, body, expected.clone());
     let frame = pop_catch(ctx);

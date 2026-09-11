@@ -1,7 +1,14 @@
 //! Dependency resolution: from a manifest's `deps` (and `dev_deps`)
 //! through every dependency's own `rok.rokon`, to one package per name,
 //! each after its own dependencies (the order rokc builds them in). Git
-//! packages come from the lock unless `update` names them.
+//! packages and stones come from the lock unless `update` names them.
+//!
+//! A stone requirement takes the highest non-yanked version in its index
+//! that matches (the locked one while it still matches); its dependencies
+//! are the index entry's. One version per name: a later requirement the
+//! chosen version does not meet is a conflict.
+// Greedy, no backtracking: a root requirement both sides accept
+// (`rok add x@=1.2.0`) settles a conflict.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -9,13 +16,16 @@ use std::path::{Path, PathBuf};
 use crate::git::Cache;
 use crate::lock::{Lock, Locked};
 use crate::manifest::{self, Dep, Manifest, Source};
+use crate::registry;
+use crate::semver::{Req, Version};
 
 #[derive(Default)]
 pub struct Options {
     pub offline: bool,
     /// `--locked`: fail instead of changing `rok.lock`.
     pub locked: bool,
-    /// `rok update [names]`: re-resolve these git packages (empty: all).
+    /// `rok update [names]`: re-resolve these git packages and stones
+    /// (empty: all).
     pub update: Option<Vec<String>>,
     pub quiet: bool,
 }
@@ -46,6 +56,7 @@ pub struct Resolved {
 enum Id {
     Path(PathBuf),
     Git { url: String, commit: String },
+    Stone { registry: String, vers: Version },
 }
 
 impl std::fmt::Display for Id {
@@ -55,17 +66,23 @@ impl std::fmt::Display for Id {
             Self::Git { url, commit } => {
                 write!(f, "git {url} at {}", &commit[..commit.len().min(12)])
             }
+            Self::Stone { registry, vers } => write!(f, "stone {vers} from {registry}"),
         }
     }
 }
 
 struct Resolver<'a> {
     cache: Cache,
+    index: Cache,
+    /// For `Dep::version(..)` without `registry`.
+    registry: String,
     opts: &'a Options,
     old: Lock,
     new: Lock,
     fetched: Vec<String>,
-    seen: HashMap<String, (Id, String)>,
+    /// What each name resolved to, who required it, and how (a stone's
+    /// requirement).
+    seen: HashMap<String, (Id, String, String)>,
     out: Vec<Resolved>,
 }
 
@@ -80,13 +97,15 @@ pub fn resolve(home: &Path, ctx: &Context, opts: &Options) -> Result<Vec<Resolve
             .deps
             .iter()
             .chain(&ctx.manifest.dev_deps)
-            .any(|d| matches!(d.source, Source::Git { .. }));
+            .any(|d| !matches!(d.source, Source::Path(_)));
         if any_git {
             return Err("there is no rok.lock, and --locked forbids writing one".to_owned());
         }
     }
     let mut r = Resolver {
         cache: Cache::new(home),
+        index: Cache::index(home),
+        registry: registry::default_url(home)?,
         opts,
         old,
         new: Lock::default(),
@@ -150,8 +169,25 @@ impl Resolver<'_> {
         while i < queue.len() {
             let (dep, base, by) = queue[i].clone();
             i += 1;
-            let (dir, id) = self.locate(&dep, &base)?;
-            if let Some((prev, prev_by)) = self.seen.get(&dep.name) {
+            if let (
+                Some((Id::Stone { registry, vers }, prev_by, prev_req)),
+                Source::Registry { req, .. },
+            ) = (self.seen.get(&dep.name), &dep.source)
+            {
+                let url = self.registry_of(&dep.source);
+                if *registry == url && Req::parse(req)?.matches(vers) {
+                    continue;
+                }
+                return Err(format!(
+                    "conflicting requirements for stone `{}`:\n  `{prev_req}` (required by \
+                     {prev_by}) chose {vers} from {registry}\n  `{req}` (required by {by}) from \
+                     {url}\none build has one version of a stone; require a version both accept \
+                     in the root package",
+                    dep.name
+                ));
+            }
+            let (dir, id, stone_deps) = self.locate(&dep, &base)?;
+            if let Some((prev, prev_by, _)) = self.seen.get(&dep.name) {
                 if *prev == id {
                     continue;
                 }
@@ -169,14 +205,21 @@ impl Resolver<'_> {
                     dir.display()
                 ));
             }
-            let mut deps = Vec::new();
-            if let Some(m) = manifest::find(&dir) {
-                let m = manifest::load(&m)?;
-                let me = format!("`{}`", dep.name);
-                deps = m.deps.iter().map(|d| d.name.clone()).collect();
-                queue.extend(m.deps.into_iter().map(|d| (d, dir.clone(), me.clone())));
-            }
-            self.seen.insert(dep.name.clone(), (id, by));
+            let me = format!("`{}`", dep.name);
+            let next = match stone_deps {
+                Some(d) => d,
+                None => match manifest::find(&dir) {
+                    Some(m) => manifest::load(&m)?.deps,
+                    None => Vec::new(),
+                },
+            };
+            let deps = next.iter().map(|d| d.name.clone()).collect();
+            queue.extend(next.into_iter().map(|d| (d, dir.clone(), me.clone())));
+            let req = match &dep.source {
+                Source::Registry { req, .. } => req.clone(),
+                _ => String::new(),
+            };
+            self.seen.insert(dep.name.clone(), (id, by, req));
             self.out.push(Resolved {
                 name: dep.name,
                 root,
@@ -187,27 +230,48 @@ impl Resolver<'_> {
         Ok(())
     }
 
-    /// The package directory of `dep`, and its identity.
-    fn locate(&mut self, dep: &Dep, base: &Path) -> Result<(PathBuf, Id), String> {
+    fn registry_of(&self, source: &Source) -> String {
+        match source {
+            Source::Registry {
+                registry: Some(r), ..
+            } => r.clone(),
+            _ => self.registry.clone(),
+        }
+    }
+
+    fn updating(&self, name: &str) -> bool {
+        self.opts
+            .update
+            .as_ref()
+            .is_some_and(|names| names.is_empty() || names.iter().any(|n| n == name))
+    }
+
+    /// The package directory of `dep`, its identity, and for a stone its
+    /// dependencies (the index's).
+    fn locate(
+        &mut self,
+        dep: &Dep,
+        base: &Path,
+    ) -> Result<(PathBuf, Id, Option<Vec<Dep>>), String> {
         let (url, reference) = match &dep.source {
             Source::Path(p) => {
                 let dir = base.join(p);
                 let dir = std::fs::canonicalize(&dir).map_err(|e| {
                     format!("dependency `{}`: path {}: {e}", dep.name, dir.display())
                 })?;
-                return Ok((dir.clone(), Id::Path(dir)));
+                return Ok((dir.clone(), Id::Path(dir), None));
             }
             Source::Git { url, reference } => (url, reference),
+            Source::Registry { req, .. } => {
+                let url = self.registry_of(&dep.source);
+                return self.locate_stone(&dep.name, req, &url);
+            }
         };
-        let updating = self
-            .opts
-            .update
-            .as_ref()
-            .is_some_and(|names| names.is_empty() || names.contains(&dep.name));
+        let updating = self.updating(&dep.name);
         let pinned = self
             .old
             .find(&dep.name)
-            .filter(|l| !updating && l.url == *url && l.reference == *reference)
+            .filter(|l| !updating && l.vers.is_none() && l.url == *url && l.reference == *reference)
             .cloned();
         let commit = if let Some(l) = &pinned {
             if !self.cache.has_commit(url, &l.commit) {
@@ -249,6 +313,7 @@ impl Resolver<'_> {
         if !self.new.packages.iter().any(|p| p.name == dep.name) {
             self.new.packages.push(Locked {
                 name: dep.name.clone(),
+                vers: None,
                 url: url.clone(),
                 reference: reference.clone(),
                 commit: commit.clone(),
@@ -261,7 +326,131 @@ impl Resolver<'_> {
                 url: url.clone(),
                 commit,
             },
+            None,
         ))
+    }
+
+    /// Stone `name` from index `url`: the version `req` picks, checked
+    /// out and verified against the entry's `cksum`.
+    fn locate_stone(
+        &mut self,
+        name: &str,
+        req: &str,
+        url: &str,
+    ) -> Result<(PathBuf, Id, Option<Vec<Dep>>), String> {
+        let parsed = Req::parse(req).map_err(|e| format!("stone `{name}`: {e}"))?;
+        let updating = self.updating(name);
+        let pinned = self
+            .old
+            .find(name)
+            .filter(|l| !updating && l.url == url)
+            .and_then(|l| Some((l.clone(), Version::parse(l.vers.as_deref()?).ok()?)))
+            .filter(|(_, v)| parsed.matches(v));
+        if pinned.is_none() && self.opts.locked && !updating {
+            return Err(format!(
+                "`{name}` is not in rok.lock (or its requirement changed), and --locked forbids \
+                 changing it"
+            ));
+        }
+        if updating || !self.index.has(url) {
+            self.fetch_index(url, name)?;
+        }
+        let pick = |all: &[registry::Entry]| match &pinned {
+            Some((_, v)) => all.iter().find(|e| e.vers == *v).cloned(),
+            None => registry::best(all, &parsed).cloned(),
+        };
+        let mut all = registry::entries(&self.index, url, name)?;
+        let mut chosen = pick(&all);
+        if chosen.is_none() && !self.fetched.iter().any(|u| u == url) && !self.opts.offline {
+            self.fetch_index(url, name)?;
+            all = registry::entries(&self.index, url, name)?;
+            chosen = pick(&all);
+        }
+        let e = match (chosen, &pinned) {
+            (Some(e), _) => e,
+            (None, Some((_, v))) => {
+                return Err(format!(
+                    "`{name}` {v} (in rok.lock) is not in the index {url} (run `rok update {name}`)"
+                ));
+            }
+            (None, None) => return Err(registry::no_match(&all, name, req, url)),
+        };
+        if let Some((l, _)) = &pinned {
+            if l.commit != e.rev {
+                return Err(format!(
+                    "the index {url} now says {name} {} is commit {}, but rok.lock says {} \
+                     (run `rok update {name}` to accept it)",
+                    e.vers, e.rev, l.commit
+                ));
+            }
+        }
+        if !self.cache.has_commit(&e.url, &e.rev) {
+            self.fetch(&e.url, name)?;
+            if !self.cache.has_commit(&e.url, &e.rev) {
+                return Err(format!(
+                    "stone `{name}` {}: commit {} is not in {}",
+                    e.vers, e.rev, e.url
+                ));
+            }
+        }
+        let (dir, tree) = self.cache.checkout(&e.url, &e.rev)?;
+        if tree != e.cksum {
+            return Err(format!(
+                "stone `{name}` {}: commit {} has tree {tree}, but the index's cksum is {}",
+                e.vers, e.rev, e.cksum
+            ));
+        }
+        if !self.new.packages.iter().any(|p| p.name == name) {
+            self.new.packages.push(Locked {
+                name: name.to_owned(),
+                vers: Some(e.vers.to_string()),
+                url: url.to_owned(),
+                reference: crate::manifest::GitRef::Default,
+                commit: e.rev.clone(),
+                tree,
+            });
+        }
+        let deps = e
+            .deps
+            .iter()
+            .filter(|d| !d.dev)
+            .map(|d| Dep {
+                name: d.name.clone(),
+                source: Source::Registry {
+                    req: d.req.clone(),
+                    registry: Some(d.registry.clone().unwrap_or_else(|| url.to_owned())),
+                },
+            })
+            .collect();
+        Ok((
+            dir,
+            Id::Stone {
+                registry: url.to_owned(),
+                vers: e.vers,
+            },
+            Some(deps),
+        ))
+    }
+
+    /// Bring index `url` up to date, once per run.
+    fn fetch_index(&mut self, url: &str, name: &str) -> Result<(), String> {
+        if self.fetched.iter().any(|u| u == url) {
+            return Ok(());
+        }
+        if self.opts.offline {
+            if self.index.has(url) {
+                return Ok(());
+            }
+            return Err(format!(
+                "stone `{name}` needs the index {url}, but --offline is set (it is not in the cache)"
+            ));
+        }
+        if !self.opts.quiet {
+            eprintln!("    Updating index {url}");
+        }
+        self.index.fetch(url)?;
+        self.fetched.push(url.to_owned());
+        Ok(())
     }
 
     fn fetch(&mut self, url: &str, name: &str) -> Result<(), String> {

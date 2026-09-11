@@ -1,0 +1,5 @@
+pub struct Pt { pub v: i32; }
+
+pub fn area(p: Pt) -> i32 { p.v * 2 }
+
+pub fn deep() -> i32 { 9 }

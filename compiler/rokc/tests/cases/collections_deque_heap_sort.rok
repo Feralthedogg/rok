@@ -1,0 +1,60 @@
+// expect-exit: 0
+// expect-stdout:
+// [3, 1, 2, 4]
+// 3 4 2
+// [1, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+// 9 7 5 3
+// [1, 2, 3]
+// sorted true stable true
+
+// `Deque` (ring growth, both ends), `BinaryHeap` (max-heap, `by` order,
+// `retain`) and `List::sort` / `sort_by` (stable merge sort past one
+// insertion-sorted run).
+
+struct Pair { k: i32; v: i32; }
+
+fn main() -> i32 {
+    let d: Deque<i32> = Deque::with_capacity(2);
+    d.push_back(1);
+    d.push_back(2);
+    d.push_front(3);
+    d.push_back(4);
+    println(d.debug());
+    let f = d.pop_front() ?? 0;
+    let b = d.pop_back() ?? 0;
+    println(f"{f} {b} {d[1]}");
+    for i in 5..22 { d.push_back(i); }
+    println(d.debug());
+
+    let h: BinaryHeap<i32> = BinaryHeap::new();
+    for x in [5, 3, 9, 7, 1] { h.push(x); }
+    h.retain(|x: i32| x != 1);
+    let out = "";
+    while let x: i32 = h.pop() { out += f"{x} "; }
+    println(out.trim());
+    let m: BinaryHeap<i32> = BinaryHeap::by(|a: i32, b: i32| a < b);
+    for x in [3, 1, 2] { m.push(x); }
+    let firsts: List<i32> = [];
+    while let x: i32 = m.pop() { firsts.push(x); }
+    println(firsts.debug());
+
+    let xs: List<i32> = [];
+    let seed: i64 = 7;
+    for i in 0..200 {
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        xs.push((seed % 1000) as i32);
+    }
+    xs.sort();
+    let sorted = true;
+    for i in 1..xs.len() { if xs[i - 1] > xs[i] { sorted = false; } }
+    let ps: List<Pair> = [];
+    for i in 0..100 { ps.push(Pair { k: (i * 7) % 5, v: i }); }
+    ps.sort_by(|a: Pair, b: Pair| a.k.cmp(b.k));
+    let stable = true;
+    for i in 1..ps.len() {
+        if ps[i - 1].k == ps[i].k && ps[i - 1].v > ps[i].v { stable = false; }
+        if ps[i - 1].k > ps[i].k { stable = false; }
+    }
+    println(f"sorted {sorted} stable {stable}");
+    return 0;
+}

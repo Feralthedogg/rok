@@ -22,6 +22,8 @@
 // char: '\n'
 // char: '\''
 // char: '가'
+// char: '\u{7}'
+// char: '"'
 // string: "text"
 // string: "tab\tquote\"back\\slash A 😀"
 // string: "raw \\n"
@@ -48,6 +50,9 @@
 // variant `Pair`: Pair(7, "seven")
 // list: [1, 2]
 // equal: true false
+// unordered: true true false
+// floats: true true false false
+// empty: true true
 // { "k": 1, (1, true): none }
 
 // Spec 3.9.1: every RokON value kind, read with `rokon::parse` and
@@ -84,6 +89,8 @@ fn main() {
     show("'\\n'");
     show("'\\''");
     show("'\\u{AC00}'");
+    show("'\\u{7}'");
+    show("'\"'");
     show("\"text\"");
     show("\"tab\\tquote\\\"back\\\\slash \\x41 \\u{1F600}\"");
     show("r\"raw \\n\"");
@@ -113,6 +120,17 @@ fn main() {
     let a = try! rokon::parse("{ \"k\": [1, 2.5, 'c'] }");
     let b = try! rokon::parse("{\"k\":[1,2.5,'c',],}");
     println(f"equal: {a == b} {a == Value::None}");
+    let p = try! rokon::parse("P { x: 1, y: { \"a\": 1, \"b\": 2 } }");
+    let q = try! rokon::parse("P { y: { \"b\": 2, \"a\": 1 }, x: 1 }");
+    let r = try! rokon::parse("Q { y: { \"b\": 2, \"a\": 1 }, x: 1 }");
+    println(f"unordered: {p == q} {p.hash() == q.hash()} {p == r}");
+    let nan = Value::Float(Float::from_f64(f64::nan()));
+    let z = Value::Float(Float::from_f64(0.0));
+    let nz = Value::Float(Float::from_f64(-0.0));
+    println(f"floats: {nan == nan} {nan.hash() == nan.hash()} {z == nz} {Value::Int(Int::from(1)) == Value::Float(Float::from_f64(1.0))}");
+    let e = Value::Struct { name: none, fields: OrderedDict::new() };
+    let ed = Value::Dict(OrderedDict::new());
+    println(f"empty: {e == ed} {e.hash() == ed.hash()}");
     let d: OrderedDict<Value, Value> = OrderedDict::new();
     d.insert(Value::Str("k"), Value::Int(1));
     d.insert(Value::Tuple([Value::Int(1), Value::Bool(true)]), Value::None);

@@ -1,0 +1,108 @@
+// spec: 002.07-niche
+// expect-exit: 0
+// expect-stdout:
+// 1 4 4 16 16 8 8 4 4 8 4 4 8 24 24 24 8
+// true,false,none,
+// a,none,가,
+// red blue none
+// dot line 9 box 1 2 none
+// 5 none 0 3 none 0 7 none
+// 1.5 -0 none
+// a 3 true
+// 1 green,none,
+// w 2.5 | wn none | ws s
+// back 2.5 back none
+// none none none none true
+// 7 true 9
+// true 13
+
+// Niche layout (refs-lang 2.7): `T | none` keeps `T`'s size when `T`
+// has a bit pattern no value uses — `bool` (2), `char` (a surrogate),
+// payload-less / reference-free enums (an unused tag), `Ptr` and C fn
+// pointers (null), `#[niche(..)]` newtypes, and structs / tuples holding
+// one. Round trips, widening into a tagged sum and back, `??`, and
+// zeroed storage reading back as `none`.
+
+use rok::bare::mem::size_of;
+use rok::bare::ptr::Ptr;
+use rok::core::collections::raw::{buf_get, buf_new};
+
+#[niche(0)]
+struct Id(i32);
+
+#[niche(f64::NAN)]
+struct Real(f64);
+
+#[niche(I32_MIN..=-1)]
+struct Count(i32);
+
+#[niche(-1)]
+struct Fd(i32);
+
+enum Color { Red, Green, Blue }
+
+enum Shape { Dot, Line(i64), Box(i32, i32) }
+
+struct Rec { name: str; id: Id; }
+
+struct Pt { x: f64; y: f64; c: Color; }
+
+fn show_b(v: bool | none) -> str { match v { none => "none", b: bool => f"{b}" } }
+fn show_c(v: char | none) -> str { match v { none => "none", c: char => f"{c}" } }
+fn color(c: Color) -> str { match c { Color::Red => "red", Color::Green => "green", Color::Blue => "blue" } }
+fn show_col(v: Color | none) -> str { match v { none => "none", c: Color => color(c) } }
+fn show_sh(v: Shape | none) -> str {
+    match v {
+        none => "none",
+        s: Shape => match s { Shape::Dot => "dot", Shape::Line(n) => f"line {n}", Shape::Box(a, b) => f"box {a} {b}" },
+    }
+}
+fn show_id(v: Id | none) -> str { match v { none => "none", n: Id => f"{n.0}" } }
+fn show_real(v: Real | none) -> str { match v { none => "none", n: Real => f"{n.0}" } }
+fn show_count(v: Count | none) -> str { match v { none => "none", n: Count => f"{n.0}" } }
+fn show_fd(v: Fd | none) -> str { match v { none => "none", n: Fd => f"{n.0}" } }
+
+fn widen(v: Real | none) -> Real | none | str { v }
+fn widen_s(s: str) -> Real | none | str { s }
+fn show_w(v: Real | none | str) -> str { match v { n: Real => f"w {n.0}", none => "wn none", s: str => f"ws {s}" } }
+fn narrow(v: Real | none | str) -> Real | none { match v { s: str => none, r: Real | none => r } }
+
+fn main() {
+    println(f"{size_of::<bool | none>()} {size_of::<char | none>()} {size_of::<Color | none>()} {size_of::<Shape | none>()} {size_of::<Shape>()} {size_of::<Ptr<u8> | none>()} {size_of::<(extern "C" fn(i32) -> i32) | none>()} {size_of::<Id | none>()} {size_of::<Count | none>()} {size_of::<Real | none>()} {size_of::<Fd | none>()} {size_of::<Ordering | none>()} {size_of::<i32 | none>()} {size_of::<Rec | none>()} {size_of::<Rec>()} {size_of::<Pt | none>()} {size_of::<(i32, Id) | none>()}");
+    let bs: List<bool | none> = [true, false, none];
+    for b in bs { print(f"{show_b(b)},"); }
+    println("");
+    let cs: List<char | none> = ['a', none, '가'];
+    for c in cs { print(f"{show_c(c)},"); }
+    println("");
+    println(f"{show_col(Color::Red)} {show_col(Color::Blue)} {show_col(none)}");
+    println(f"{show_sh(Shape::Dot)} {show_sh(Shape::Line(9))} {show_sh(Shape::Box(1, 2))} {show_sh(none)}");
+    println(f"{show_id(Id(5))} {show_id(none)} {show_fd(Fd(0))} {show_fd(Fd(3))} {show_fd(none)} {show_count(Count(0))} {show_count(Count(7))} {show_count(none)}");
+    println(f"{show_real(Real(1.5))} {show_real(Real(-0.0))} {show_real(none)}");
+    let r: Rec | none = Rec { name: "a", id: Id(3) };
+    let rn: Rec | none = none;
+    if let x: Rec = r { println(f"{x.name} {x.id.0} {rn is none}"); }
+    let ps: List<Pt | none> = List::new();
+    ps.push(Pt { x: 1.0, y: 2.0, c: Color::Green });
+    ps.push(none);
+    for p in ps { match p { none => print("none,"), q: Pt => print(f"{q.x} {color(q.c)},") } }
+    println("");
+    println(f"{show_w(widen(Real(2.5)))} | {show_w(widen(none))} | {show_w(widen_s("s"))}");
+    println(f"back {show_real(narrow(widen(Real(2.5))))} back {show_real(narrow(widen_s("s")))}");
+    // Zeroed storage is `none` whatever the pattern.
+    let zb: GcBuf<bool | none> = buf_new(2);
+    let zr: GcBuf<Real | none> = buf_new(2);
+    let zc: GcBuf<Color | none> = buf_new(2);
+    let zf: GcBuf<Fd | none> = buf_new(2);
+    let zp: GcBuf<Pt | none> = buf_new(2);
+    println(f"{show_b(buf_get(zb, 1))} {show_real(buf_get(zr, 1))} {show_col(buf_get(zc, 1))} {show_fd(buf_get(zf, 1))} {buf_get(zp, 1) is none}");
+    let o: Ordering | none = 1.cmp(2);
+    let dflt = Fd(9);
+    let missing: Fd | none = none;
+    let present: Fd | none = Fd(7);
+    println(f"{(present ?? dflt).0} {o is Ordering} {(missing ?? dflt).0}");
+    let t: (i32, Id) | none = (13, Id(1));
+    let tn: (i32, Id) | none = none;
+    let s = match t { none => -1, p: (i32, Id) => p.0 };
+    println(f"{tn is none} {s}");
+}

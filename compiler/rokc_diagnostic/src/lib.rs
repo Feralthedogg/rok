@@ -93,6 +93,23 @@ pub fn registered_files() -> Vec<(String, String)> {
         .clone()
 }
 
+/// `path:line:col` of `span`, as a panic reports it; `<unknown>` for a
+/// span without a source position.
+#[must_use]
+pub fn location(span: Span) -> String {
+    let files = FILES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let file = usize::try_from(span.file)
+        .ok()
+        .and_then(|i| i.checked_sub(1))
+        .and_then(|i| files.get(i));
+    match file {
+        Some((p, _)) if span.line != 0 => format!("{p}:{}:{}", span.line, span.col.max(1)),
+        _ => "<unknown>".to_owned(),
+    }
+}
+
 fn file_by_id(id: u32) -> Option<(String, String)> {
     let files = FILES
         .lock()

@@ -1,0 +1,269 @@
+// rok::core::rt — the runtime ABI (`librokr`, `extern "rok"`), declared once. Extern
+// functions share one global namespace (refs-lang 5.9.4), so `core` and
+// `std` call them by name without an import; `bare`, below `core`,
+// declares its own few. The compiler intrinsics are `pub(pkg)`: `core`
+// only.
+
+use rok::core::collections::raw::GcBuf;
+use rok::core::sync::AtomicOrdering;
+use rok::core::future::Waker;
+
+extern "rok" {
+    // Threads and the wait queue.
+    fn rok_cpu_count() -> usize;
+    fn rok_thread_new_id() -> u64;
+    fn rok_thread_spawn(f: fn() + Send, stack_size: usize, id: u64) -> usize;
+    fn rok_thread_join(handle: usize) -> i32;
+    fn rok_thread_detach(handle: usize) -> i32;
+    fn rok_thread_id() -> u64;
+    fn rok_thread_sleep_ns(ns: i64);
+    fn rok_thread_yield_now();
+    fn rok_sync_wait(word: GcBuf<i32>, index: usize, expected: i32, timeout_ns: i64);
+    fn rok_sync_wake(word: GcBuf<i32>, index: usize);
+
+    // The task executor.
+    fn rok_time_now_ns() -> i64;
+    fn rok_task_worker_present() -> i32;
+    fn rok_task_worker_get() -> GcBuf<rok::core::task::Worker>;
+    fn rok_task_worker_set(w: GcBuf<rok::core::task::Worker>);
+    fn rok_task_worker_clear();
+    fn rok_task_key(obj: GcBuf<u8>) -> usize;
+    fn rok_task_hooks_install(
+        io: extern "C" fn(i32, u32, GcBuf<Waker>),
+        timer: extern "C" fn(u64, GcBuf<Waker>),
+        park: extern "C" fn(GcBuf<u8>, GcBuf<Waker>),
+        unpark: extern "C" fn(GcBuf<u8>),
+    );
+    fn rok_deque_new() -> GcBuf<GcBuf<rok::core::task::TaskRef>>;
+    fn rok_deque_push(d: GcBuf<GcBuf<rok::core::task::TaskRef>>, item: GcBuf<rok::core::task::TaskRef>);
+    fn rok_deque_steal(
+        d: GcBuf<GcBuf<rok::core::task::TaskRef>>, out: GcBuf<GcBuf<rok::core::task::TaskRef>>, index: usize,
+    ) -> i32;
+    fn rok_io_watch(fd: i32) -> i32;
+    fn rok_io_poll(out: GcBuf<i64>, max: usize) -> i32;
+    fn rok_net_wait(fd: i32, write: i32, timeout_ns: i64) -> i32;
+
+    // Strings, byte buffers, `char` properties.
+    fn rok_str_len(s: str) -> usize;
+    fn rok_str_concat(a: str, b: str) -> str;
+    fn rok_str_cmp(a: str, b: str) -> i32;
+    #[track_caller]
+    fn rok_str_slice(s: str, start: usize, end: usize) -> str;
+    fn rok_str_eq_at(s: str, at: usize, pat: str) -> i32;
+    fn rok_str_find(s: str, pat: str) -> isize;
+    fn rok_str_rfind(s: str, pat: str) -> isize;
+    fn rok_str_trim(s: str, which: i32) -> str;
+    fn rok_str_case(s: str, upper: i32) -> str;
+    fn rok_str_replace(s: str, from: str, to: str) -> str;
+    fn rok_str_char_count(s: str) -> usize;
+    fn rok_str_hash(s: str) -> u64;
+    fn rok_str_byte(s: str, i: usize) -> u8;
+    fn rok_str_bytes_buf(s: str) -> GcBuf<u8>;
+    fn rok_str_from_char(c: u32) -> str;
+    fn rok_str_parse_int(s: str, radix: u32, signed: i32, bits: u32, out: GcBuf<i64>) -> i32;
+    fn rok_str_from_buf(buf: GcBuf<u8>, off: usize, len: usize) -> str;
+    fn rok_str_parse_float(s: str, out: GcBuf<f64>) -> i32;
+    fn rok_buf_put_str(buf: GcBuf<u8>, off: usize, s: str);
+    fn rok_buf_put_char(buf: GcBuf<u8>, off: usize, c: u32) -> usize;
+    fn rok_buf_copy(dst: GcBuf<u8>, doff: usize, src: GcBuf<u8>, soff: usize, len: usize);
+    fn rok_buf_utf8_error(buf: GcBuf<u8>, off: usize, len: usize) -> isize;
+    fn rok_char_props(c: u32) -> u32;
+    fn rok_char_to_case(c: u32, upper: i32) -> u32;
+
+    // Formatting.
+    fn rok_str_from_i64(n: i64) -> str;
+    fn rok_str_from_u64(n: u64, radix: u32) -> str;
+    fn rok_str_escape(s: str, quote: u32) -> str;
+    fn rok_fmt_spec_parse(spec: str, out: GcBuf<i64>);
+    fn rok_fmt_float(v: f64, is_f32: u32, ty: u32, prec: i64) -> str;
+    fn rok_fmt_exp_digits(digits: str, prec: i64, upper: u32) -> str;
+    fn rok_gc_alloc_bytes(size: usize, traced: i32) -> str;
+    fn rok_str_write_at(dst: str, off: usize, src: str);
+
+    // `int` limb kernels.
+    fn rok_nat_mul(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize);
+    fn rok_nat_divmod_small(q: GcBuf<u32>, a: GcBuf<u32>, n: usize, v: u32) -> u32;
+    fn rok_nat_divmod(q: GcBuf<u32>, un: GcBuf<u32>, vn: GcBuf<u32>, m: usize, n: usize);
+
+    // libm (`f32` / `f64` methods).
+    fn rok_f64_floor(x: f64) -> f64;
+    fn rok_f64_ceil(x: f64) -> f64;
+    fn rok_f64_round(x: f64) -> f64;
+    fn rok_f64_trunc(x: f64) -> f64;
+    fn rok_f64_abs(x: f64) -> f64;
+    fn rok_f64_cbrt(x: f64) -> f64;
+    fn rok_f64_exp(x: f64) -> f64;
+    fn rok_f64_exp2(x: f64) -> f64;
+    fn rok_f64_exp_m1(x: f64) -> f64;
+    fn rok_f64_ln(x: f64) -> f64;
+    fn rok_f64_ln_1p(x: f64) -> f64;
+    fn rok_f64_log2(x: f64) -> f64;
+    fn rok_f64_log10(x: f64) -> f64;
+    fn rok_f64_sin(x: f64) -> f64;
+    fn rok_f64_cos(x: f64) -> f64;
+    fn rok_f64_tan(x: f64) -> f64;
+    fn rok_f64_asin(x: f64) -> f64;
+    fn rok_f64_acos(x: f64) -> f64;
+    fn rok_f64_atan(x: f64) -> f64;
+    fn rok_f64_sinh(x: f64) -> f64;
+    fn rok_f64_cosh(x: f64) -> f64;
+    fn rok_f64_tanh(x: f64) -> f64;
+    fn rok_f64_asinh(x: f64) -> f64;
+    fn rok_f64_acosh(x: f64) -> f64;
+    fn rok_f64_atanh(x: f64) -> f64;
+    fn rok_f64_pow(x: f64, y: f64) -> f64;
+    fn rok_f64_atan2(x: f64, y: f64) -> f64;
+    fn rok_f64_hypot(x: f64, y: f64) -> f64;
+    fn rok_f64_copysign(x: f64, y: f64) -> f64;
+    fn rok_f64_min(x: f64, y: f64) -> f64;
+    fn rok_f64_max(x: f64, y: f64) -> f64;
+    fn rok_f64_mul_add(x: f64, y: f64, z: f64) -> f64;
+    fn rok_f32_floor(x: f32) -> f32;
+    fn rok_f32_ceil(x: f32) -> f32;
+    fn rok_f32_round(x: f32) -> f32;
+    fn rok_f32_trunc(x: f32) -> f32;
+    fn rok_f32_abs(x: f32) -> f32;
+    fn rok_f32_cbrt(x: f32) -> f32;
+    fn rok_f32_exp(x: f32) -> f32;
+    fn rok_f32_exp2(x: f32) -> f32;
+    fn rok_f32_exp_m1(x: f32) -> f32;
+    fn rok_f32_ln(x: f32) -> f32;
+    fn rok_f32_ln_1p(x: f32) -> f32;
+    fn rok_f32_log2(x: f32) -> f32;
+    fn rok_f32_log10(x: f32) -> f32;
+    fn rok_f32_sin(x: f32) -> f32;
+    fn rok_f32_cos(x: f32) -> f32;
+    fn rok_f32_tan(x: f32) -> f32;
+    fn rok_f32_asin(x: f32) -> f32;
+    fn rok_f32_acos(x: f32) -> f32;
+    fn rok_f32_atan(x: f32) -> f32;
+    fn rok_f32_sinh(x: f32) -> f32;
+    fn rok_f32_cosh(x: f32) -> f32;
+    fn rok_f32_tanh(x: f32) -> f32;
+    fn rok_f32_asinh(x: f32) -> f32;
+    fn rok_f32_acosh(x: f32) -> f32;
+    fn rok_f32_atanh(x: f32) -> f32;
+    fn rok_f32_pow(x: f32, y: f32) -> f32;
+    fn rok_f32_atan2(x: f32, y: f32) -> f32;
+    fn rok_f32_hypot(x: f32, y: f32) -> f32;
+    fn rok_f32_copysign(x: f32, y: f32) -> f32;
+    fn rok_f32_min(x: f32, y: f32) -> f32;
+    fn rok_f32_max(x: f32, y: f32) -> f32;
+    fn rok_f32_mul_add(x: f32, y: f32, z: f32) -> f32;
+
+    // Panics. The runtime gets the caller's `path:line:col` as a last
+    // `str` argument.
+    #[track_caller]
+    fn rok_panic_at(msg: str) -> !;
+    fn rok_oom() -> !;
+    // An error out of a throwing `main` (spec 4.16.4): its description
+    // and the position it escaped at, exit 1. Lowering calls it.
+    fn rok_uncaught_error_at(what: str, at: str) -> !;
+
+    // Errors and the standard streams.
+    fn rok_os_errno_kind(code: i32) -> i32;
+    fn rok_os_strerror(code: i32) -> str;
+    fn rok_stdio_write(fd: i32, s: str, newline: i32) -> i32;
+    fn rok_stdio_write_buf(fd: i32, buf: GcBuf<u8>, off: usize, len: usize) -> i32;
+    fn rok_stdio_flush() -> i32;
+    fn rok_stdin_read(buf: GcBuf<u8>, off: usize, len: usize, delim: i32) -> isize;
+
+    // Files and directories.
+    fn rok_os_open(dir: i32, path: str, flags: i32, mode: u32) -> i32;
+    fn rok_os_close(fd: i32) -> i32;
+    fn rok_os_read(fd: i32, buf: GcBuf<u8>, off: usize, len: usize) -> isize;
+    fn rok_os_write(fd: i32, buf: GcBuf<u8>, off: usize, len: usize) -> isize;
+    fn rok_os_fsync(fd: i32, data_only: i32) -> i32;
+    fn rok_os_ftruncate(fd: i32, len: u64) -> i32;
+    fn rok_os_lseek(fd: i32, off: i64, whence: i32) -> i64;
+    fn rok_os_dup(fd: i32) -> i32;
+    fn rok_os_fchmod(fd: i32, mode: u32) -> i32;
+    fn rok_os_flock(fd: i32, op: i32) -> i32;
+    fn rok_os_copy_fd(src: i32, dst: i32) -> i64;
+    fn rok_os_stat(dir: i32, path: str, follow: i32, fd: i32, out: GcBuf<i64>) -> i32;
+    fn rok_os_clone(dir: i32, from: str, to: str) -> i32;
+    fn rok_os_mkdir(dir: i32, path: str, mode: u32) -> i32;
+    fn rok_os_unlink(dir: i32, path: str, is_dir: i32) -> i32;
+    fn rok_os_rename(dir: i32, from: str, to_dir: i32, to: str) -> i32;
+    fn rok_os_link(dir: i32, target: str, link: str, hard: i32) -> i32;
+    fn rok_os_opendir(dir: i32, path: str) -> isize;
+    fn rok_os_readdir(d: isize, buf: GcBuf<u8>, off: usize, len: usize) -> isize;
+    fn rok_os_closedir(d: isize);
+    fn rok_os_realpath(path: str, buf: GcBuf<u8>, off: usize, len: usize) -> isize;
+
+    // Environment and process state.
+    fn rok_exit(code: i32) -> !;
+    fn rok_os_argc() -> usize;
+    fn rok_os_arg(i: usize) -> str;
+    fn rok_os_env_at(i: usize) -> str;
+    fn rok_os_getenv(name: str, buf: GcBuf<u8>, off: usize, len: usize) -> isize;
+    fn rok_os_setenv(name: str, value: str, unset: i32) -> i32;
+    fn rok_os_getcwd(buf: GcBuf<u8>, off: usize, len: usize) -> isize;
+    fn rok_os_chdir(path: str) -> i32;
+    fn rok_os_getpid() -> u32;
+    fn rok_os_getppid() -> u32;
+    fn rok_os_current_exe(buf: GcBuf<u8>, off: usize, len: usize) -> isize;
+
+    // Processes and signals.
+    fn rok_os_spawn(
+        argv: str, argc: usize, envs: str, envc: isize, cwd: str,
+        stdio_in: i32, stdio_out: i32, stdio_err: i32, pgid: i32, out: GcBuf<i32>,
+    ) -> i32;
+    fn rok_os_signal_install(sig: i32, read_end: GcBuf<i32>) -> i32;
+    fn rok_os_raise(sig: i32) -> i32;
+    fn rok_os_waitpid(pid: i32, nohang: i32, out: GcBuf<i32>) -> i32;
+    fn rok_os_kill(pid: i32, sig: i32) -> i32;
+    fn rok_os_poll_read(fd1: i32, fd2: i32) -> i32;
+    fn rok_os_abort() -> !;
+
+    // Clocks.
+    fn rok_time_realtime_ns() -> i64;
+    fn rok_time_boot_ns() -> i64;
+
+    // Sockets.
+    fn rok_net_socket(family: i32, kind: i32) -> i32;
+    fn rok_net_bind(fd: i32, addr: GcBuf<i64>) -> i32;
+    fn rok_net_listen(fd: i32, backlog: i32) -> i32;
+    fn rok_net_connect(fd: i32, addr: GcBuf<i64>) -> i32;
+    fn rok_net_sock_error(fd: i32) -> i32;
+    fn rok_net_accept(fd: i32, out: GcBuf<i64>) -> i32;
+    fn rok_net_addr(fd: i32, out: GcBuf<i64>, peer: i32) -> i32;
+    fn rok_net_send(fd: i32, buf: GcBuf<u8>, off: usize, len: usize) -> isize;
+    fn rok_net_send_to(fd: i32, buf: GcBuf<u8>, off: usize, len: usize, addr: GcBuf<i64>) -> isize;
+    fn rok_net_recv_from(fd: i32, buf: GcBuf<u8>, off: usize, len: usize, out: GcBuf<i64>) -> isize;
+    fn rok_net_shutdown(fd: i32, how: i32) -> i32;
+    fn rok_net_setopt(fd: i32, opt: i32, val: i64) -> i32;
+    fn rok_net_multicast_v4(fd: i32, group: u32, iface: u32, join: i32) -> i32;
+    fn rok_net_resolve(host: str, port: u16, out: GcBuf<i64>, max: usize) -> i32;
+}
+
+// LLVM atomics on buffer element `i` (integer or `bool` elements); each
+// returns the element's previous value. The ordering arguments must be
+// literal `AtomicOrdering` variants: they pick the instruction's
+// ordering at compile time.
+#[intrinsic("rok.atomic.load")]
+pub(pkg) fn atomic_load<T>(buf: GcBuf<T>, i: usize, o: AtomicOrdering) -> T;
+#[intrinsic("rok.atomic.xchg")]
+pub(pkg) fn atomic_xchg<T>(buf: GcBuf<T>, i: usize, v: T, o: AtomicOrdering) -> T;
+#[intrinsic("rok.atomic.add")]
+pub(pkg) fn atomic_add<T>(buf: GcBuf<T>, i: usize, v: T, o: AtomicOrdering) -> T;
+#[intrinsic("rok.atomic.sub")]
+pub(pkg) fn atomic_sub<T>(buf: GcBuf<T>, i: usize, v: T, o: AtomicOrdering) -> T;
+#[intrinsic("rok.atomic.and")]
+pub(pkg) fn atomic_and<T>(buf: GcBuf<T>, i: usize, v: T, o: AtomicOrdering) -> T;
+#[intrinsic("rok.atomic.or")]
+pub(pkg) fn atomic_or<T>(buf: GcBuf<T>, i: usize, v: T, o: AtomicOrdering) -> T;
+#[intrinsic("rok.atomic.xor")]
+pub(pkg) fn atomic_xor<T>(buf: GcBuf<T>, i: usize, v: T, o: AtomicOrdering) -> T;
+/// Store `new` if the element equals `current`; the previous value
+/// either way.
+#[intrinsic("rok.atomic.cas")]
+pub(pkg) fn atomic_cas<T>(
+    buf: GcBuf<T>, i: usize, current: T, new: T, success: AtomicOrdering, failure: AtomicOrdering,
+) -> T;
+
+/// `obj`'s address as a parking key; the collector never moves it from
+/// now on. For identity tests use `buf_same`, which pins nothing.
+pub(pkg) fn key<T>(obj: GcBuf<T>) -> usize {
+    unsafe { rok_task_key(rok::core::collections::raw::buf_erase(obj)) }
+}

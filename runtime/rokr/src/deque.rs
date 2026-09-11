@@ -11,7 +11,7 @@
 //! once no thread is inside a deque operation — which a collection
 //! guarantees (these functions have no safepoint).
 //!
-//! ponytail: slots below `top` keep their stale references until
+//! Slots below `top` keep their stale references until
 //! overwritten (one ring's worth of retention at most); the ring never
 //! shrinks.
 

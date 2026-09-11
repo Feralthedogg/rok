@@ -1,9 +1,8 @@
 // rok::core::collections::ordered_dict — `OrderedDict<K, V>`, a hash map
 // that iterates in insertion order (stdlib spec 2.9.5). `index` maps a
 // key to its position in the parallel `keys` / `vals` lists. Re-inserting
-// a present key keeps its place. ponytail: `remove` shifts the lists and
-// renumbers the positions after it (O(n)); tombstones + compaction would
-// make it O(1) amortized.
+// a present key keeps its place. `remove` is O(n): it shifts the lists
+// and renumbers the positions after it.
 
 use rok::core::iter::Zip;
 

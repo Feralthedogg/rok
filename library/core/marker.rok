@@ -77,8 +77,8 @@ impl Copy for c_char {}
 impl Copy for str {}
 
 // Stdlib spec 2.13.4. `using` (refs-lang 3.17) calls `drop` on every way
-// out of its block. ponytail: no implicit scope-exit drop of plain
-// `let`s yet (2.13.4 RAII); `using` is the deterministic path.
+// out of its block. Plain `let`s get no implicit scope-exit drop
+// (2.13.4 RAII); `using` is the deterministic path.
 pub trait Drop {
     #[lang("drop_method")]
     fn drop(ref self);

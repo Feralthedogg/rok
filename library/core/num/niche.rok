@@ -1,0 +1,484 @@
+// rok::core::num::niche — wrappers that leave out values (stdlib spec
+// 2.2): `NonZero<T>` (0), `NonNan<F>` (NaN), `Finite<F>` (NaN, ±∞),
+// `Positive<T>` (negatives; refs-lang 2.7.6). Each is a `#[niche(..)]`
+// newtype, so `NonZero<i32> | none` is 4 bytes and `NonNan<f64> | none`
+// 8 (refs-lang 2.7.4). `new` checks; `new_unchecked` is `unsafe`: a
+// left-out value in one reads as `none` once it is in a sum.
+
+/// The integer types `NonZero` / `Positive` wrap.
+pub trait NicheInt: Zero + Copy + Ord + Hash + Display + Debug + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> {}
+
+impl NicheInt for i8 {}
+impl NicheInt for i16 {}
+impl NicheInt for i32 {}
+impl NicheInt for i64 {}
+impl NicheInt for isize {}
+impl NicheInt for u8 {}
+impl NicheInt for u16 {}
+impl NicheInt for u32 {}
+impl NicheInt for u64 {}
+impl NicheInt for usize {}
+
+/// The float types `NonNan` / `Finite` wrap.
+pub trait NicheFloat: Copy + PartialOrd + Display + Debug + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> {
+    fn niche_nan(self) -> bool;
+    fn niche_finite(self) -> bool;
+    /// The bits, widened, with `-0.0` as `0.0` (`Hash`).
+    fn key(self) -> u64;
+}
+
+impl NicheFloat for f32 {
+    fn niche_nan(self) -> bool { self.is_nan() }
+    fn niche_finite(self) -> bool { self.is_finite() }
+    fn key(self) -> u64 { (self + 0.0).to_bits() as u64 }
+}
+
+impl NicheFloat for f64 {
+    fn niche_nan(self) -> bool { self.is_nan() }
+    fn niche_finite(self) -> bool { self.is_finite() }
+    fn key(self) -> u64 { (self + 0.0).to_bits() }
+}
+
+/// What `NonZero::try_from(0)` throws (2.2.8).
+pub struct ZeroError;
+
+impl Display for ZeroError {
+    fn display(self) -> str { "zero is not a valid `NonZero` value" }
+}
+
+impl Debug for ZeroError {
+    fn debug(self) -> str { "ZeroError" }
+}
+
+impl Error for ZeroError {}
+
+// NonZero
+
+/// A `T` that is never 0 (2.2.2).
+#[niche(0)]
+pub struct NonZero<T>(T);
+
+impl<T: NicheInt> NonZero<T> {
+    pub fn new(value: T) -> NonZero<T> | none {
+        if value == T::zero() { none } else { NonZero(value) }
+    }
+
+    /// `value` must not be 0.
+    pub unsafe fn new_unchecked(value: T) -> NonZero<T> { NonZero(value) }
+
+    pub fn get(self) -> T { self.0 }
+}
+
+impl<T: NicheInt> Clone for NonZero<T> {
+    fn clone(self) -> NonZero<T> { self }
+}
+
+impl<T: NicheInt> Copy for NonZero<T> {}
+
+impl<T: NicheInt> PartialEq for NonZero<T> {
+    fn eq(self, rhs: NonZero<T>) -> bool { self.0 == rhs.0 }
+    fn ne(self, rhs: NonZero<T>) -> bool { self.0 != rhs.0 }
+}
+
+impl<T: NicheInt> Eq for NonZero<T> {}
+
+impl<T: NicheInt> PartialOrd for NonZero<T> {
+    fn lt(self, rhs: NonZero<T>) -> bool { self.0 < rhs.0 }
+    fn gt(self, rhs: NonZero<T>) -> bool { self.0 > rhs.0 }
+    fn le(self, rhs: NonZero<T>) -> bool { self.0 <= rhs.0 }
+    fn ge(self, rhs: NonZero<T>) -> bool { self.0 >= rhs.0 }
+}
+
+impl<T: NicheInt> Ord for NonZero<T> {
+    fn cmp(self, rhs: NonZero<T>) -> Ordering { self.0.cmp(rhs.0) }
+}
+
+impl<T: NicheInt> Hash for NonZero<T> {
+    fn hash(self) -> u64 { self.0.hash() }
+}
+
+impl<T: NicheInt> Display for NonZero<T> {
+    fn display(self) -> str { f"{self.0}" }
+}
+
+impl<T: NicheInt> Debug for NonZero<T> {
+    fn debug(self) -> str { f"NonZero({self.0.debug()})" }
+}
+
+/// Never 0: a wrapped (unchecked) product that lands on 0 panics.
+impl<T: NicheInt> Mul for NonZero<T> {
+    type Output = NonZero<T>;
+    fn mul(self, rhs: NonZero<T>) -> NonZero<T> {
+        NonZero::new(self.0 * rhs.0) ?? panic("NonZero multiplication overflowed to zero")
+    }
+}
+
+impl<T: NicheInt> Add for NonZero<T> {
+    type Output = T;
+    fn add(self, rhs: NonZero<T>) -> T { self.0 + rhs.0 }
+}
+
+impl<T: NicheInt> Sub for NonZero<T> {
+    type Output = T;
+    fn sub(self, rhs: NonZero<T>) -> T { self.0 - rhs.0 }
+}
+
+impl<T: NicheInt> Div for NonZero<T> {
+    type Output = T;
+    fn div(self, rhs: NonZero<T>) -> T { self.0 / rhs.0 }
+}
+
+impl<T: NicheInt> TryFrom<T> for NonZero<T> {
+    type Error = ZeroError;
+    fn try_from(value: T) throws (ZeroError) -> NonZero<T> {
+        let nz: NonZero<T> = NonZero::new(value) else { throw ZeroError; };
+        nz
+    }
+}
+
+// `T / NonZero<T>` never divides by zero (2.2.2); `T::from(nz)`.
+
+impl Div<NonZero<i8>> for i8 {
+    type Output = i8;
+    fn div(self, rhs: NonZero<i8>) -> i8 { self / rhs.0 }
+}
+
+impl From<NonZero<i8>> for i8 {
+    fn from(value: NonZero<i8>) -> i8 { value.0 }
+}
+
+impl Div<NonZero<i16>> for i16 {
+    type Output = i16;
+    fn div(self, rhs: NonZero<i16>) -> i16 { self / rhs.0 }
+}
+
+impl From<NonZero<i16>> for i16 {
+    fn from(value: NonZero<i16>) -> i16 { value.0 }
+}
+
+impl Div<NonZero<i32>> for i32 {
+    type Output = i32;
+    fn div(self, rhs: NonZero<i32>) -> i32 { self / rhs.0 }
+}
+
+impl From<NonZero<i32>> for i32 {
+    fn from(value: NonZero<i32>) -> i32 { value.0 }
+}
+
+impl Div<NonZero<i64>> for i64 {
+    type Output = i64;
+    fn div(self, rhs: NonZero<i64>) -> i64 { self / rhs.0 }
+}
+
+impl From<NonZero<i64>> for i64 {
+    fn from(value: NonZero<i64>) -> i64 { value.0 }
+}
+
+impl Div<NonZero<isize>> for isize {
+    type Output = isize;
+    fn div(self, rhs: NonZero<isize>) -> isize { self / rhs.0 }
+}
+
+impl From<NonZero<isize>> for isize {
+    fn from(value: NonZero<isize>) -> isize { value.0 }
+}
+
+impl Div<NonZero<u8>> for u8 {
+    type Output = u8;
+    fn div(self, rhs: NonZero<u8>) -> u8 { self / rhs.0 }
+}
+
+impl From<NonZero<u8>> for u8 {
+    fn from(value: NonZero<u8>) -> u8 { value.0 }
+}
+
+impl Div<NonZero<u16>> for u16 {
+    type Output = u16;
+    fn div(self, rhs: NonZero<u16>) -> u16 { self / rhs.0 }
+}
+
+impl From<NonZero<u16>> for u16 {
+    fn from(value: NonZero<u16>) -> u16 { value.0 }
+}
+
+impl Div<NonZero<u32>> for u32 {
+    type Output = u32;
+    fn div(self, rhs: NonZero<u32>) -> u32 { self / rhs.0 }
+}
+
+impl From<NonZero<u32>> for u32 {
+    fn from(value: NonZero<u32>) -> u32 { value.0 }
+}
+
+impl Div<NonZero<u64>> for u64 {
+    type Output = u64;
+    fn div(self, rhs: NonZero<u64>) -> u64 { self / rhs.0 }
+}
+
+impl From<NonZero<u64>> for u64 {
+    fn from(value: NonZero<u64>) -> u64 { value.0 }
+}
+
+impl Div<NonZero<usize>> for usize {
+    type Output = usize;
+    fn div(self, rhs: NonZero<usize>) -> usize { self / rhs.0 }
+}
+
+impl From<NonZero<usize>> for usize {
+    fn from(value: NonZero<usize>) -> usize { value.0 }
+}
+
+// Positive
+
+/// A `T` that is never negative (refs-lang 2.7.6). `Positive<u*>` has no
+/// negatives, so it has no niche either.
+#[niche(T::MIN..=-1)]
+pub struct Positive<T>(T);
+
+impl<T: NicheInt> Positive<T> {
+    pub fn new(value: T) -> Positive<T> | none {
+        if value < T::zero() { none } else { Positive(value) }
+    }
+
+    /// `value` must not be negative.
+    pub unsafe fn new_unchecked(value: T) -> Positive<T> { Positive(value) }
+
+    pub fn get(self) -> T { self.0 }
+}
+
+impl<T: NicheInt> Clone for Positive<T> {
+    fn clone(self) -> Positive<T> { self }
+}
+
+impl<T: NicheInt> Copy for Positive<T> {}
+
+impl<T: NicheInt> PartialEq for Positive<T> {
+    fn eq(self, rhs: Positive<T>) -> bool { self.0 == rhs.0 }
+    fn ne(self, rhs: Positive<T>) -> bool { self.0 != rhs.0 }
+}
+
+impl<T: NicheInt> Eq for Positive<T> {}
+
+impl<T: NicheInt> PartialOrd for Positive<T> {
+    fn lt(self, rhs: Positive<T>) -> bool { self.0 < rhs.0 }
+    fn gt(self, rhs: Positive<T>) -> bool { self.0 > rhs.0 }
+    fn le(self, rhs: Positive<T>) -> bool { self.0 <= rhs.0 }
+    fn ge(self, rhs: Positive<T>) -> bool { self.0 >= rhs.0 }
+}
+
+impl<T: NicheInt> Ord for Positive<T> {
+    fn cmp(self, rhs: Positive<T>) -> Ordering { self.0.cmp(rhs.0) }
+}
+
+impl<T: NicheInt> Hash for Positive<T> {
+    fn hash(self) -> u64 { self.0.hash() }
+}
+
+impl<T: NicheInt> Display for Positive<T> {
+    fn display(self) -> str { f"{self.0}" }
+}
+
+impl<T: NicheInt> Debug for Positive<T> {
+    fn debug(self) -> str { f"Positive({self.0.debug()})" }
+}
+
+// NonNan
+
+/// An `F` that is never NaN (2.2.3): totally ordered, so `Eq` / `Ord` /
+/// `Hash` (`-0.0 == 0.0`, and they hash alike).
+#[niche(F::NAN)]
+pub struct NonNan<F>(F);
+
+impl<F: NicheFloat> NonNan<F> {
+    pub fn new(value: F) -> NonNan<F> | none {
+        if value.niche_nan() { none } else { NonNan(value) }
+    }
+
+    /// `value` must not be NaN.
+    pub unsafe fn new_unchecked(value: F) -> NonNan<F> { NonNan(value) }
+
+    pub fn get(self) -> F { self.0 }
+}
+
+impl<F: NicheFloat> Clone for NonNan<F> {
+    fn clone(self) -> NonNan<F> { self }
+}
+
+impl<F: NicheFloat> Copy for NonNan<F> {}
+
+impl<F: NicheFloat> PartialEq for NonNan<F> {
+    fn eq(self, rhs: NonNan<F>) -> bool { self.0 == rhs.0 }
+    fn ne(self, rhs: NonNan<F>) -> bool { self.0 != rhs.0 }
+}
+
+impl<F: NicheFloat> Eq for NonNan<F> {}
+
+impl<F: NicheFloat> PartialOrd for NonNan<F> {
+    fn lt(self, rhs: NonNan<F>) -> bool { self.0 < rhs.0 }
+    fn gt(self, rhs: NonNan<F>) -> bool { self.0 > rhs.0 }
+    fn le(self, rhs: NonNan<F>) -> bool { self.0 <= rhs.0 }
+    fn ge(self, rhs: NonNan<F>) -> bool { self.0 >= rhs.0 }
+}
+
+impl<F: NicheFloat> Ord for NonNan<F> {
+    fn cmp(self, rhs: NonNan<F>) -> Ordering {
+        if self.0 < rhs.0 {
+            Ordering::Less
+        } else if self.0 > rhs.0 {
+            Ordering::Greater
+        } else {
+            Ordering::Equal
+        }
+    }
+}
+
+impl<F: NicheFloat> Hash for NonNan<F> {
+    fn hash(self) -> u64 { self.0.key().hash() }
+}
+
+impl<F: NicheFloat> Display for NonNan<F> {
+    fn display(self) -> str { f"{self.0}" }
+}
+
+impl<F: NicheFloat> Debug for NonNan<F> {
+    fn debug(self) -> str { f"NonNan({self.0.debug()})" }
+}
+
+/// May be NaN (`∞ - ∞`): a plain `F` (2.2.3).
+impl<F: NicheFloat> Add for NonNan<F> {
+    type Output = F;
+    fn add(self, rhs: NonNan<F>) -> F { self.0 + rhs.0 }
+}
+
+impl<F: NicheFloat> Sub for NonNan<F> {
+    type Output = F;
+    fn sub(self, rhs: NonNan<F>) -> F { self.0 - rhs.0 }
+}
+
+impl<F: NicheFloat> Mul for NonNan<F> {
+    type Output = F;
+    fn mul(self, rhs: NonNan<F>) -> F { self.0 * rhs.0 }
+}
+
+impl<F: NicheFloat> Div for NonNan<F> {
+    type Output = F;
+    fn div(self, rhs: NonNan<F>) -> F { self.0 / rhs.0 }
+}
+
+impl<F: NicheFloat> TryFrom<F> for NonNan<F> {
+    fn try_from(value: F) throws (ConversionError) -> NonNan<F> {
+        let v: NonNan<F> = NonNan::new(value) else {
+            throw ConversionError { msg: "NaN is not a valid `NonNan` value" };
+        };
+        v
+    }
+}
+
+impl From<NonNan<f32>> for f32 {
+    fn from(value: NonNan<f32>) -> f32 { value.0 }
+}
+
+impl From<NonNan<f64>> for f64 {
+    fn from(value: NonNan<f64>) -> f64 { value.0 }
+}
+
+// Finite
+
+/// An `F` that is neither NaN nor ±∞ (2.2.4).
+#[niche(F::NAN, F::INFINITY, F::NEG_INFINITY)]
+pub struct Finite<F>(F);
+
+impl<F: NicheFloat> Finite<F> {
+    pub fn new(value: F) -> Finite<F> | none {
+        if value.niche_finite() { Finite(value) } else { none }
+    }
+
+    /// `value` must be finite.
+    pub unsafe fn new_unchecked(value: F) -> Finite<F> { Finite(value) }
+
+    pub fn get(self) -> F { self.0 }
+}
+
+impl<F: NicheFloat> Clone for Finite<F> {
+    fn clone(self) -> Finite<F> { self }
+}
+
+impl<F: NicheFloat> Copy for Finite<F> {}
+
+impl<F: NicheFloat> PartialEq for Finite<F> {
+    fn eq(self, rhs: Finite<F>) -> bool { self.0 == rhs.0 }
+    fn ne(self, rhs: Finite<F>) -> bool { self.0 != rhs.0 }
+}
+
+impl<F: NicheFloat> Eq for Finite<F> {}
+
+impl<F: NicheFloat> PartialOrd for Finite<F> {
+    fn lt(self, rhs: Finite<F>) -> bool { self.0 < rhs.0 }
+    fn gt(self, rhs: Finite<F>) -> bool { self.0 > rhs.0 }
+    fn le(self, rhs: Finite<F>) -> bool { self.0 <= rhs.0 }
+    fn ge(self, rhs: Finite<F>) -> bool { self.0 >= rhs.0 }
+}
+
+impl<F: NicheFloat> Ord for Finite<F> {
+    fn cmp(self, rhs: Finite<F>) -> Ordering {
+        if self.0 < rhs.0 {
+            Ordering::Less
+        } else if self.0 > rhs.0 {
+            Ordering::Greater
+        } else {
+            Ordering::Equal
+        }
+    }
+}
+
+impl<F: NicheFloat> Hash for Finite<F> {
+    fn hash(self) -> u64 { self.0.key().hash() }
+}
+
+impl<F: NicheFloat> Display for Finite<F> {
+    fn display(self) -> str { f"{self.0}" }
+}
+
+impl<F: NicheFloat> Debug for Finite<F> {
+    fn debug(self) -> str { f"Finite({self.0.debug()})" }
+}
+
+/// Finite unless it overflows to ±∞ (2.2.4).
+impl<F: NicheFloat> Add for Finite<F> {
+    type Output = Result<Finite<F>, OverflowError>;
+    fn add(self, rhs: Finite<F>) -> Result<Finite<F>, OverflowError> { finite(self.0 + rhs.0, "add") }
+}
+
+impl<F: NicheFloat> Sub for Finite<F> {
+    type Output = Result<Finite<F>, OverflowError>;
+    fn sub(self, rhs: Finite<F>) -> Result<Finite<F>, OverflowError> { finite(self.0 - rhs.0, "sub") }
+}
+
+impl<F: NicheFloat> Mul for Finite<F> {
+    type Output = Result<Finite<F>, OverflowError>;
+    fn mul(self, rhs: Finite<F>) -> Result<Finite<F>, OverflowError> { finite(self.0 * rhs.0, "mul") }
+}
+
+fn finite<F: NicheFloat>(r: F, op: str) -> Result<Finite<F>, OverflowError> {
+    match Finite::new(r) {
+        f: Finite<F> => Result::Ok(f),
+        none => Result::Err(OverflowError { op, ty: "Finite" }),
+    }
+}
+
+impl<F: NicheFloat> TryFrom<F> for Finite<F> {
+    fn try_from(value: F) throws (ConversionError) -> Finite<F> {
+        let v: Finite<F> = Finite::new(value) else {
+            throw ConversionError { msg: "NaN / ±∞ is not a valid `Finite` value" };
+        };
+        v
+    }
+}
+
+impl From<Finite<f32>> for f32 {
+    fn from(value: Finite<f32>) -> f32 { value.0 }
+}
+
+impl From<Finite<f64>> for f64 {
+    fn from(value: Finite<f64>) -> f64 { value.0 }
+}

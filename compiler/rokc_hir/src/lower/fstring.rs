@@ -1,20 +1,21 @@
 //! `f"..."` (refs-lang 1.7.3, stdlib 2.10) by the holes' types:
 //!
 //! ```text
-//! f"a {x:>8.2} b {n:#x}"   (x: f64, n: i8)
-//!   ==>  { let #f0 = x; let #f1 = n;
-//!          rok::core::fmt::fstr_join(["a ", fstr_float(#f0, false, ">8.2"), " b ",
-//!                                     fstr_int(#f1 as i64, 8, "#x")]) }
+//! f"a {x:>8.2} b {s:^5}"   (x: f64, s: str)
+//!   ==>  { let #f0 = x; let #f1 = s;
+//!          rok::core::fmt::fstr_join(["a ",
+//!              Format::format(#f0, FormatSpec::parse(">8.2")), " b ",
+//!              fstr_str(#f1.display(), #f1.display(), "^5")]) }
 //! ```
 //!
 //! Holes (and `${..}` spec expressions) are evaluated left to right into
 //! temps, then formatted: an empty spec is `display()`, `?` alone is
-//! `debug()`; otherwise the runtime applies the spec (`fstr_int` /
-//! `fstr_uint` keep the integer's own width for `b o x X`, `fstr_float`,
-//! `fstr_str` for any other `Display` / `Debug` value). A static spec is
-//! checked here against the hole's type; a dynamic one (`${..}`, joined
-//! into the spec text at run time) is checked when formatting. The
-//! pieces are joined in one allocation.
+//! `debug()`; a number (every integer and float type, `int` / `float`
+//! included) goes through `core::fmt::Format`, any other value through
+//! `fstr_str`. A static spec is checked here against the hole's type
+//! with the runtime's own parser; a dynamic one (`${..}`, joined into the
+//! spec text at run time) is checked when formatting. The pieces are
+//! joined in one allocation.
 
 use super::bignum::Big;
 #[allow(clippy::wildcard_imports)]
@@ -174,8 +175,10 @@ fn static_piece(ctx: &LowerCtx<'_>, value: Expr, ty: &HirTy, text: &str, at: Spa
     ))
 }
 
-/// `fstr_*(value, .., spec)` by the value's type. `letter` is the spec's
-/// type letter when known (`0` otherwise).
+/// The call formatting `value` per `spec` (a `str` expression): for a
+/// number, `Format::format(value, FormatSpec::parse(spec))`; otherwise
+/// `fstr_str(display, debug, spec)`. `letter` is the spec's type letter
+/// when known (`0` otherwise).
 fn format(
     ctx: &LowerCtx<'_>,
     value: Expr,
@@ -185,60 +188,25 @@ fn format(
     dynamic: bool,
     at: Span,
 ) -> Expr {
-    let call = |name: &str, args: Vec<Expr>| {
+    let call = |names: &[&str], args: Vec<Expr>| {
         mk(
             ExprKind::Call {
-                callee: Box::new(mk(
-                    ExprKind::Path(path(&["rok", "core", "fmt", name], at)),
-                    at,
-                )),
+                callee: Box::new(mk(ExprKind::Path(path(names, at)), at)),
                 args: args.into_iter().map(CallArg::Positional).collect(),
                 trailing_closure: None,
             },
             at,
         )
     };
-    let lit = |s: String| mk(ExprKind::Literal(AstLit::Int(s)), at);
-    if let HirTy::Prim(p) = ty {
-        let bits = match p {
-            PrimTy::I8 | PrimTy::U8 => 8,
-            PrimTy::I16 | PrimTy::U16 => 16,
-            PrimTy::I32 | PrimTy::U32 | PrimTy::F32 => 32,
-            PrimTy::I64 | PrimTy::U64 | PrimTy::F64 => 64,
-            // `0`: the runtime's own pointer width.
-            _ => 0,
-        };
-        if p.is_signed_int() {
-            let v = cast(value, "i64", at);
-            return call("fstr_int", vec![v, lit(format!("{bits}u32")), spec]);
-        }
-        if p.is_int() {
-            let v = cast(value, "u64", at);
-            return call("fstr_uint", vec![v, lit(format!("{bits}u32")), spec]);
-        }
-        if p.is_float() {
-            let v = cast(value, "f64", at);
-            let f32 = mk(ExprKind::Literal(AstLit::Bool(bits == 32)), at);
-            return call("fstr_float", vec![v, f32, spec]);
-        }
-    }
-    // `int` / `float`: the library's own formatter (sign / width from
-    // the runtime, digits from the value).
-    if let Some(b) = super::bignum::big_of(ctx, ty).filter(|_| letter != b'?') {
-        let (module, name) = match b {
-            Big::Int => (super::bignum::INT, "fstr_bigint"),
-            Big::Float => (super::bignum::FLOAT, "fstr_bigfloat"),
-        };
-        let mut segs: Vec<&str> = module.split("::").collect();
-        segs.pop();
-        segs.push(name);
-        return mk(
-            ExprKind::Call {
-                callee: Box::new(mk(ExprKind::Path(path(&segs, at)), at)),
-                args: vec![CallArg::Positional(value), CallArg::Positional(spec)],
-                trailing_closure: None,
-            },
-            at,
+    let number = match ty {
+        HirTy::Prim(p) => p.is_int() || p.is_float(),
+        _ => super::bignum::big_of(ctx, ty).is_some(),
+    };
+    if number {
+        let spec = call(&["rok", "core", "fmt", "FormatSpec", "parse"], vec![spec]);
+        return call(
+            &["rok", "core", "fmt", "Format", "format"],
+            vec![value, spec],
         );
     }
     let display = ctx.lang_trait("display_trait");
@@ -259,7 +227,7 @@ fn format(
         let d = method(value, "display", at);
         (d.clone(), d)
     };
-    call("fstr_str", vec![disp, dbg, spec])
+    call(&["rok", "core", "fmt", "fstr_str"], vec![disp, dbg, spec])
 }
 
 /// The pieces as one `str`: `""`, the piece itself, `a + b`, or
@@ -327,12 +295,4 @@ fn method(recv: Expr, name: &str, span: Span) -> Expr {
         },
         span,
     )
-}
-
-fn cast(e: Expr, ty: &str, span: Span) -> Expr {
-    let ty = Ty {
-        kind: AstTyKind::Path(path(&[ty], span)),
-        span,
-    };
-    mk(ExprKind::Cast(Box::new(e), ty), span)
 }

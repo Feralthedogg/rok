@@ -3,6 +3,7 @@
 //! ```text
 //! $ROK_HOME/cache/git/db/<repo>-<hash of url>/   bare clone, one per url
 //! $ROK_HOME/cache/git/checkouts/<commit>/        a commit's files
+//! $ROK_HOME/cache/registry/db/<repo>-<hash>/     bare clone of a stone index
 //! ```
 //!
 //! Everything goes through the `git` command line.
@@ -19,6 +20,29 @@ use crate::manifest::GitRef;
 
 pub struct Cache {
     root: PathBuf,
+}
+
+/// `git -C dir args..` in a working tree (a package's, an index checkout's).
+pub fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|e| format!("cannot run `git` (is it installed?): {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "`git {}` in {} failed: {}",
+            args.join(" "),
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
 fn git(dir: &Path, args: &[&str], index: Option<&Path>) -> Result<String, String> {
@@ -51,6 +75,37 @@ impl Cache {
         Self {
             root: home.join("cache/git"),
         }
+    }
+
+    /// The cache of stone indexes (read in place, never checked out).
+    pub fn index(home: &Path) -> Self {
+        Self {
+            root: home.join("cache/registry"),
+        }
+    }
+
+    pub fn has(&self, url: &str) -> bool {
+        self.db(url).join("HEAD").is_file()
+    }
+
+    /// File `path` at the fetched HEAD of `url`, or `None` when absent.
+    pub fn show(&self, url: &str, path: &str) -> Result<Option<String>, String> {
+        let db = self.db(url);
+        let spec = format!("refs/rok/HEAD:{path}");
+        if git(&db, &["cat-file", "-e", &spec], None).is_err() {
+            return Ok(None);
+        }
+        git(&db, &["cat-file", "blob", &spec], None).map(Some)
+    }
+
+    /// Every file path at the fetched HEAD of `url`.
+    pub fn files(&self, url: &str) -> Result<Vec<String>, String> {
+        let out = git(
+            &self.db(url),
+            &["ls-tree", "-r", "--name-only", "refs/rok/HEAD"],
+            None,
+        )?;
+        Ok(out.lines().map(str::to_owned).collect())
     }
 
     fn db(&self, url: &str) -> PathBuf {

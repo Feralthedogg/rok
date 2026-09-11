@@ -71,8 +71,8 @@ pub trait IntoFuture {
 
 /// The value of an `async fn` call / `async { .. }` block: `resume` runs
 /// the body to its next pending `await` (its env is the coroutine frame).
-// ponytail: one library type per coroutine kind instead of a fresh
-// anonymous type per coroutine (refs-lang 4.1.11).
+// One library type per coroutine kind, not a fresh anonymous type per
+// coroutine (refs-lang 4.1.11).
 pub struct AsyncFuture<T> {
     resume: fn(Context) -> Poll<T>;
 }

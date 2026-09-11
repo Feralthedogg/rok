@@ -27,7 +27,7 @@ let skipped = await nums(5, 1).skip(3).collect();
 println(f"skip {skipped.len()} {skipped[0]}");
 let start = Instant::now();
 let th = await nums(3, 0).throttle(Duration::ms(5)).collect();
-println(f"throttle {th.len()} {start.elapsed().as_millis() >= 10}");
+println(f"throttle {th.len()} {start.elapsed().as_ms() >= 10}");
 let ordered = await nums(5, 0).map(|x| slow_square(x)).buffered(5).collect();
 println(f"buffered {ordered[0]} {ordered[1]} {ordered[2]} {ordered[3]} {ordered[4]}");
 let unordered = await nums(5, 0).map(|x| slow_square(x)).buffer_unordered(5).collect();

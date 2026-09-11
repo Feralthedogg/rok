@@ -28,8 +28,7 @@
 //! are parsed into them only in blocks a lookup lands in, so a block of
 //! young objects that nothing reaches is freed without being read.
 //!
-//! Generations (sticky mark bits, 703 §7.3.2, on unless
-//! `ROK_GC_GEN=0`): a survivor of any collection is old (`STICKY`). A
+//! Generations (sticky mark bits, 703 §7.3.2): a survivor of any collection is old (`STICKY`). A
 //! minor collection marks from the roots and the remembered set only,
 //! never enters an old object, and sweeps only the lines handed out
 //! since the last collection (all young objects live there). An old
@@ -61,15 +60,14 @@
 //! full collection the pages of free blocks beyond the next cycle's
 //! allocation budget go back to the OS.
 //!
-//! ponytail: no concurrent marking (705, see TODOS); block objects
-//! (< 8 KiB) are remembered whole.
+//! Limits: no concurrent marking (705); block objects (< 8 KiB) are
+//! remembered whole.
 //!
-//! Env (read once): `ROK_GC_GEN=0|1`, `ROK_GC_STRESS=N` (every object
-//! allocation through the runtime; a collection every `N` of them,
-//! every 8th one full), `ROK_GC_EVAC=always|off` (evacuate every block
-//! each full collection / never; default: when fragmented),
-//! `ROK_GC_STATS=1` (counts, pause times, blocks and bytes moved to
-//! stderr at exit).
+//! Debug knobs (env, read once): `ROK_GC_STRESS=N` (a collection every
+//! `N` object allocations through the runtime, every 8th one full),
+//! `ROK_GC_EVAC=always` (every full collection evacuates every block it
+//! may), `ROK_GC_STATS=1` (counts, pause times, blocks and bytes moved
+//! to stderr at exit).
 //!
 //! Roots (704 §7.4.1): compiled code links a frame
 //! `{ prev, count, slots[count] }` into `rok_tls_shadow_stack_top` on
@@ -125,8 +123,7 @@ pub const LOS_THRESHOLD: usize = rokr_common::gc_abi::LOS_THRESHOLD as usize;
 /// dirty cards, not the whole object.
 pub const CARD_SIZE: usize = 1 << rokr_common::gc_abi::CARD_SHIFT;
 /// Address space reserved for blocks (committed one block at a time).
-// ponytail: a fixed reservation caps the block heap at 64 GiB; chain
-// several reservations if a program ever needs more.
+// One fixed reservation: the block heap is capped at 64 GiB.
 const RESERVE: usize = 64 << 30;
 
 /// Line states.
@@ -181,9 +178,9 @@ struct Heap {
     live_bytes: usize,
     next_gc: usize,
     collections: u64,
-    /// Bytes alive after the last collection (all old when generational).
+    /// Bytes alive after the last collection (all old).
     old_bytes: usize,
-    /// Generational: the next automatic collection is full once
+    /// The next automatic collection is full once
     /// `old_bytes` reaches this.
     full_at: usize,
     minors: u64,
@@ -194,7 +191,6 @@ struct Heap {
     gc_cpu_ns: u64,
     /// `ROK_GC_*` read (first slow-path allocation or collection).
     configured: bool,
-    generational: bool,
     /// `ROK_GC_STRESS`: collect every `stress` runtime allocations (0 =
     /// off); `allocs` counts them.
     stress: u64,
@@ -220,8 +216,9 @@ struct Heap {
     /// Sorted LOS addresses, rebuilt by every collection.
     index: *mut usize,
     index_cap: usize,
-    /// `ROK_GC_EVAC`: [`EVAC_OFF`], [`EVAC_AUTO`] or [`EVAC_ALWAYS`].
-    evac_mode: u8,
+    /// `ROK_GC_EVAC=always`: every full collection evacuates every block
+    /// it may (tests); otherwise only when fragmented.
+    evac_always: bool,
     /// This (full) collection may evacuate: the mark records `pinned`.
     evacuating: bool,
     /// Block objects a root or an ambiguous word reaches (repeats
@@ -245,12 +242,6 @@ struct Heap {
     moved_bytes: u64,
 }
 
-/// `ROK_GC_EVAC` modes.
-const EVAC_OFF: u8 = 0;
-const EVAC_AUTO: u8 = 1;
-/// Every full collection evacuates every block it may (tests).
-const EVAC_ALWAYS: u8 = 2;
-
 struct Global(UnsafeCell<Heap>);
 // SAFETY: only touched with the world lock held (see module docs).
 unsafe impl Sync for Global {}
@@ -266,7 +257,6 @@ static HEAP: Global = Global(UnsafeCell::new(Heap {
     max_ns: 0,
     gc_cpu_ns: 0,
     configured: false,
-    generational: true,
     stress: 0,
     allocs: 0,
     scan_tables: ptr::null_mut(),
@@ -283,7 +273,7 @@ static HEAP: Global = Global(UnsafeCell::new(Heap {
     los_count: 0,
     index: ptr::null_mut(),
     index_cap: 0,
-    evac_mode: EVAC_AUTO,
+    evac_always: false,
     evacuating: false,
     pinned: ptr::null_mut(),
     pinned_len: 0,
@@ -417,31 +407,23 @@ fn before_alloc(want: usize) {
     h.allocs += 1;
     let stressed = h.stress != 0 && h.allocs % h.stress == 0;
     if stressed || h.live_bytes.saturating_add(want) > h.next_gc {
-        let full = !h.generational
-            || h.old_bytes >= h.full_at
-            || (stressed && (h.allocs / h.stress) % 8 == 0);
+        let full = h.old_bytes >= h.full_at || (stressed && (h.allocs / h.stress) % 8 == 0);
         collect_locked(full);
     }
 }
 
-/// Read `ROK_GC_GEN` / `ROK_GC_STRESS` / `ROK_GC_STATS` once (before
-/// the first collection, so no object is old yet).
+/// Read the `ROK_GC_*` knobs once (before the first collection).
 fn configure(h: &mut Heap) {
     if h.configured {
         return;
     }
     h.configured = true;
-    h.generational = env_num(c"ROK_GC_GEN").is_none_or(|v| v != 0);
     h.stress = env_num(c"ROK_GC_STRESS").unwrap_or(0);
     // SAFETY: `getenv` result is null or NUL-terminated.
-    h.evac_mode = match unsafe { libc::getenv(c"ROK_GC_EVAC".as_ptr()) } {
-        p if p.is_null() => EVAC_AUTO,
+    h.evac_always = match unsafe { libc::getenv(c"ROK_GC_EVAC".as_ptr()) } {
+        p if p.is_null() => false,
         // SAFETY: as above.
-        p => match unsafe { core::ffi::CStr::from_ptr(p) }.to_bytes() {
-            b"always" => EVAC_ALWAYS,
-            b"off" | b"0" => EVAC_OFF,
-            _ => EVAC_AUTO,
-        },
+        p => unsafe { core::ffi::CStr::from_ptr(p) }.to_bytes() == b"always",
     };
     if env_num(c"ROK_GC_STATS").is_some_and(|v| v != 0) {
         // SAFETY: registering a plain `extern "C" fn()`.
@@ -826,8 +808,8 @@ fn build_index() {
 /// Pinned objects (`rok_gc_pin`, `FLAG_PINNED`): roots until unpinned.
 /// A list, so a collection does not visit every header looking for the
 /// flag.
-// ponytail: spin lock + linear unpin; pins are few (deque setup, the
-// running executor, the parking registry).
+// Spin lock and linear unpin: pins are few (deque setup, executor
+// workers).
 struct Pins {
     lock: core::sync::atomic::AtomicBool,
     list: UnsafeCell<(*mut *mut u8, usize, usize)>,
@@ -1164,18 +1146,16 @@ pub fn collect() {
     world::unlock();
 }
 
-/// A minor collection if generational, else a full one
-/// (`rok_gc_collect_young`, tests).
+/// A minor collection (`rok_gc_collect_young`, tests).
 pub fn collect_young() {
     world::lock();
-    let h = heap();
-    configure(h);
-    collect_locked(!h.generational);
+    configure(heap());
+    collect_locked(false);
     world::unlock();
 }
 
 /// With the world lock held: stop every other mutator, mark from all
-/// registered threads' shadow stacks, pinned / immortal objects and
+/// registered threads' shadow stacks, pinned objects and
 /// (minor) the remembered set, sweep, resume.
 fn collect_locked(full: bool) {
     let t0 = now_ns();
@@ -1185,7 +1165,7 @@ fn collect_locked(full: bool) {
     let mut len = 0;
     build_index();
     let h = heap();
-    h.evacuating = full && h.evac_mode != EVAC_OFF;
+    h.evacuating = full;
     // SAFETY: the world is stopped: nobody is inside `pin` / `unpin`.
     let (pins, npins, _) = unsafe { *PINS.list.get() };
     for i in 0..npins {
@@ -1297,8 +1277,8 @@ fn scan_dirty_cards(len: &mut usize) {
 
 /// After marking: whether `obj` lives on (it was marked); a survivor's
 /// mark is cleared and it becomes old (`STICKY | UNLOGGED`, or
-/// `STICKY | CARDED` for a LOS object) when generational.
-fn survives(obj: *mut u8, generational: bool) -> bool {
+/// `STICKY | CARDED` for a LOS object).
+fn survives(obj: *mut u8) -> bool {
     // SAFETY: `obj` is an object header; the world is stopped.
     let flags = unsafe { &(*header(obj)).gc_flags };
     let f = flags.load(Ordering::Relaxed);
@@ -1306,9 +1286,7 @@ fn survives(obj: *mut u8, generational: bool) -> bool {
         return false;
     }
     let f = f & !(FLAG_MARK | FLAG_STICKY | FLAG_UNLOGGED | FLAG_CARDED);
-    let old = if !generational {
-        0
-    } else if f & FLAG_LARGE != 0 {
+    let old = if f & FLAG_LARGE != 0 {
         FLAG_STICKY | FLAG_CARDED
     } else {
         FLAG_STICKY | FLAG_UNLOGGED
@@ -1321,7 +1299,6 @@ fn survives(obj: *mut u8, generational: bool) -> bool {
 /// objects are): survivors keep their lines, dead objects lose their
 /// start bit. Bytes of the swept survivors.
 fn sweep_blocks(full: bool) -> usize {
-    let generational = heap().generational;
     let mut live = 0;
     for b in 0..heap().nblocks {
         let h = heap();
@@ -1348,7 +1325,7 @@ fn sweep_blocks(full: bool) -> usize {
         for_each_start(&old_lines, &starts, full, |off| {
             let obj = (block + off) as *mut u8;
             let size = obj_size(obj);
-            if survives(obj, generational) {
+            if survives(obj) {
                 live += size;
                 lines[off / LINE_SIZE..(off + size).div_ceil(LINE_SIZE)].fill(LIVE);
             } else {
@@ -1366,7 +1343,6 @@ fn sweep_blocks(full: bool) -> usize {
 /// unexamined). Bytes of the swept survivors.
 fn sweep_los(full: bool) -> usize {
     let h = heap();
-    let generational = h.generational;
     let mut live = 0;
     let mut link: *mut *mut u8 = &mut h.los;
     // SAFETY: walks the LOS list; freed objects are unlinked before their
@@ -1378,7 +1354,7 @@ fn sweep_los(full: bool) -> usize {
             let old = (*header(o)).gc_flags.load(Ordering::Relaxed) & FLAG_STICKY != 0;
             if !full && old {
                 link = &mut (*p).next;
-            } else if survives(o, generational) {
+            } else if survives(o) {
                 live += (*p).size;
                 // Clean: everything it references is old now.
                 ptr::write_bytes((*p).cards, 0, (*p).size.div_ceil(CARD_SIZE));
@@ -1399,8 +1375,7 @@ fn sweep_los(full: bool) -> usize {
 /// used blocks' lines, every block at most half occupied — if together
 /// they hold an eighth of the used lines free. `ROK_GC_EVAC=always`:
 /// every used block. Whether there is any.
-// ponytail: occupancy counts lines, not live bytes; an object-level
-// histogram (Immix's "holes") is the upgrade if this picks poorly.
+// Occupancy counts lines, not live bytes (no Immix hole histogram).
 #[allow(clippy::naive_bytecount)] // 256 bytes per block
 fn select_candidates() -> bool {
     let h = heap();
@@ -1409,7 +1384,7 @@ fn select_candidates() -> bool {
     }
     // SAFETY: `nblocks` initialized metas.
     let metas = unsafe { core::slice::from_raw_parts_mut(h.meta, h.nblocks) };
-    if h.evac_mode == EVAC_ALWAYS {
+    if h.evac_always {
         let mut any = false;
         for m in metas {
             m.evac = m.used;
@@ -1532,7 +1507,7 @@ fn evacuate() {
 /// After the copies: rewrite every precise reference word of every
 /// survivor (copies included, old copies not) that points into a moved
 /// object. Roots and ambiguous words only reach objects that stayed.
-// ponytail: a second pass over the live heap; recording the slots that
+// A second pass over the live heap: recording the slots that
 // point into candidates during the mark needs the candidates before
 // the mark, from stale line states (young objects refill the holes and
 // look live, so sparse blocks are rarely seen).
@@ -1704,7 +1679,7 @@ fn release_free_blocks() {
     }
 }
 
-/// The remembered set (generational): old objects that had a reference
+/// The remembered set: old objects that had a reference
 /// stored into them since the last collection, each logged once (its
 /// `UNLOGGED` bit cleared by the barrier). Each thread appends to its
 /// own chunk through `rok_tls_wb_log_cursor` / `_limit` (803) without
@@ -1963,7 +1938,7 @@ mod tests {
         let (ta, tr, leaf) = (USER_TYPE_BASE + 10, USER_TYPE_BASE + 11, USER_TYPE_BASE + 1);
         register_type(ta, A.as_ptr().cast());
         register_type(tr, R.as_ptr().cast());
-        heap().evac_mode = EVAC_ALWAYS;
+        heap().evac_always = true;
         let base = live_bytes();
         let a = alloc(48, 8, ta);
         let a2 = alloc(48, 8, ta);
@@ -2046,7 +2021,7 @@ mod tests {
             assert_eq!(live_bytes(), base);
             *top = ptr::null_mut();
         }
-        heap().evac_mode = EVAC_AUTO;
+        heap().evac_always = false;
     }
 
     /// Default mode: after most of a block-filling population dies, the
@@ -2055,7 +2030,7 @@ mod tests {
         static R: [u32; 4] = [8, 1 | TABLE_ARRAY as u32 | (1 << 16), 0, STRONG_REF];
         let (tr, leaf) = (USER_TYPE_BASE + 12, USER_TYPE_BASE + 1);
         register_type(tr, R.as_ptr().cast());
-        assert_eq!(heap().evac_mode, EVAC_AUTO);
+        assert!(!heap().evac_always);
         collect();
         let base = live_bytes();
         const N: usize = 4096;
@@ -2111,7 +2086,6 @@ mod tests {
     /// unreachable young objects do not.
     #[allow(clippy::cast_ptr_alignment)] // GC objects are 8-aligned
     fn minor_collection_keeps_logged_children() {
-        assert!(heap().generational);
         let base = live_bytes();
         let old = alloc(32, 8, USER_TYPE_BASE);
         // SAFETY: as above.

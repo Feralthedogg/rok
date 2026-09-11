@@ -7,7 +7,7 @@ for i in 0..20000 {
 }
 let fired = 0;
 for t in ts { fired += await t; }
-let fire_ms = start.elapsed().as_millis();
+let fire_ms = start.elapsed().as_ms();
 let mid = Instant::now();
 
 let long: List<Task<i32>> = List::new();
@@ -20,4 +20,4 @@ let cancelled = 0;
 for t in long {
     try await t.join() catch _: CancellationError { cancelled += 1; 0 };
 }
-println(f"fired {fired} in {fire_ms} ms, cancelled {cancelled} in {mid.elapsed().as_millis()} ms, left {task::registrations()}");
+println(f"fired {fired} in {fire_ms} ms, cancelled {cancelled} in {mid.elapsed().as_ms()} ms, left {task::registrations()}");

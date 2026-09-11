@@ -1,0 +1,27 @@
+// expect-exit: 0
+// expect-stdout: ok
+// `rok::core::panic::assert*`: silent when the check holds; the message
+// is an optional trailing (or named) argument.
+struct P { x: i32; }
+
+impl PartialEq for P {
+    fn eq(self, rhs: P) -> bool { self.x == rhs.x }
+    fn ne(self, rhs: P) -> bool { self.x != rhs.x }
+}
+
+impl Debug for P {
+    fn debug(self) -> str { f"P({self.x})" }
+}
+
+fn main() -> i32 {
+    assert(1 + 1 == 2);
+    assert(true, "never shown");
+    assert_eq(1i32 + 1i32, 2i32);
+    assert_eq("ab", "a" + "b", msg: "concat");
+    assert_eq([1, 2], [1, 2]);
+    assert_eq(P { x: 1 }, P { x: 1 });
+    assert_ne(1, 2, "distinct");
+    assert_ne(P { x: 1 }, P { x: 2 });
+    println("ok");
+    return 0;
+}

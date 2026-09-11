@@ -5,9 +5,9 @@
 // resolve against the working directory. A `Dir` opened from it confines
 // paths to itself: absolute paths and `..` are refused.
 //
-// ponytail: `copy` reflinks on macOS only (`clonefileat`; no Linux
-// `FICLONE` / `copy_file_range`), no `mmap`; `File` / `Dir` close through `close()` or on leaving
-// `using`; a `ReadDir` also closes when iterated to its end.
+// `copy` reflinks on macOS only (`clonefileat`; no Linux `FICLONE` /
+// `copy_file_range`); no `mmap`. `File` / `Dir` close through `close()`
+// or on leaving `using`; a `ReadDir` also closes at its end.
 //
 // Async (`*_async`, as in std::net): kqueue / epoll cannot wait on a
 // regular file, so each call runs its sync twin on its own thread
@@ -18,7 +18,7 @@
 // `Dir::read_dir_async` is a `Stream` of entries read in batches, while
 // the free `read_dir_async` lists the whole directory at once (301).
 
-use rok::std::io::{IoError, IoErrorKind, Reader, Writer, Seek, check, err_cell, check_cell, raw_of, fill, text_of};
+use rok::std::io::{IoError, IoErrorKind, Reader, Writer, Seek, AsBytes, check, region, read_all, write_region, text_of, byte_buf, list_of};
 pub use rok::std::io::SeekFrom;
 use rok::std::path::{Path, AsPath, Component};
 use rok::std::env;
@@ -26,32 +26,6 @@ use rok::std::time::SystemTime;
 use rok::core::future::{Context, Poll};
 use rok::core::stream::Stream;
 use rok::core::task::Blocking;
-
-extern "rok" {
-    fn rok_os_open(dir: i32, path: str, flags: i32, mode: u32) -> i32;
-    fn rok_os_close(fd: i32) -> i32;
-    fn rok_os_read(fd: i32, max: usize, err: GcBuf<i32>) -> str;
-    fn rok_os_read_all(fd: i32, err: GcBuf<i32>) -> str;
-    fn rok_os_write(fd: i32, s: str, off: usize) -> isize;
-    fn rok_os_write_all(fd: i32, s: str) -> i32;
-    fn rok_os_fsync(fd: i32, data_only: i32) -> i32;
-    fn rok_os_ftruncate(fd: i32, len: u64) -> i32;
-    fn rok_os_lseek(fd: i32, off: i64, whence: i32) -> i64;
-    fn rok_os_dup(fd: i32) -> i32;
-    fn rok_os_fchmod(fd: i32, mode: u32) -> i32;
-    fn rok_os_flock(fd: i32, op: i32) -> i32;
-    fn rok_os_copy_fd(src: i32, dst: i32) -> i64;
-    fn rok_os_stat(dir: i32, path: str, follow: i32, fd: i32, out: GcBuf<i64>) -> i32;
-    fn rok_os_clone(dir: i32, from: str, to: str) -> i32;
-    fn rok_os_mkdir(dir: i32, path: str, mode: u32) -> i32;
-    fn rok_os_unlink(dir: i32, path: str, is_dir: i32) -> i32;
-    fn rok_os_rename(dir: i32, from: str, to_dir: i32, to: str) -> i32;
-    fn rok_os_link(dir: i32, target: str, link: str, hard: i32) -> i32;
-    fn rok_os_opendir(dir: i32, path: str, err: GcBuf<i32>) -> usize;
-    fn rok_os_readdir(d: usize, err: GcBuf<i32>) -> str;
-    fn rok_os_closedir(d: usize);
-    fn rok_os_getpid() -> u32;
-}
 
 const O_READ: i32 = 1;
 const O_WRITE: i32 = 2;
@@ -215,40 +189,34 @@ impl File {
     }
 
     pub fn read(self, buf: List<u8>) throws (IoError) -> usize {
-        let err = err_cell();
-        let s = unsafe { rok_os_read(try self.live(), buf.len(), err) };
-        try check_cell(err, self.path);
-        fill(buf, s)
+        let (dst, at, n) = region(buf);
+        (try check(unsafe { rok_os_read(try self.live(), dst, at, n) } as i64, self.path)) as usize
     }
 
     pub fn read_to_end(self) throws (IoError) -> List<u8> {
-        (try self.read_raw()).as_bytes().to_list()
+        let fd = try self.live();
+        try read_all(|b: GcBuf<u8>, at: usize, n: usize| unsafe { rok_os_read(fd, b, at, n) }, self.path)
     }
 
     /// The rest of the file as text (`InvalidData` if not UTF-8).
     pub fn read_to_str(self) throws (IoError) -> str {
-        try text_of(try self.read_raw())
-    }
-
-    fn read_raw(self) throws (IoError) -> str {
-        let err = err_cell();
-        let s = unsafe { rok_os_read_all(try self.live(), err) };
-        try check_cell(err, self.path);
-        s
+        try text_of(try self.read_to_end())
     }
 
     /// Write some of `data` (a `str` or bytes); the count written.
     pub fn write<B: AsBytes>(self, data: B) throws (IoError) -> usize {
-        let n = unsafe { rok_os_write(try self.live(), data.raw_bytes(), 0) };
-        (try check(n as i64, self.path)) as usize
+        let (src, at, n) = region(data);
+        (try check(unsafe { rok_os_write(try self.live(), src, at, n) } as i64, self.path)) as usize
     }
 
     pub fn write_all<B: AsBytes>(self, data: B) throws (IoError) {
-        try self.write_str(data.raw_bytes());
+        let fd = try self.live();
+        let (src, at, n) = region(data);
+        try write_region(src, at, n, |b: GcBuf<u8>, o: usize, k: usize| unsafe { rok_os_write(fd, b, o, k) }, self.path);
     }
 
     pub fn write_str(self, s: str) throws (IoError) {
-        try check(unsafe { rok_os_write_all(try self.live(), s) } as i64, self.path);
+        try self.write_all(s);
     }
 
     /// Nothing to flush: writes go straight to the OS.
@@ -334,12 +302,12 @@ impl File {
         try await off(|| try self.read_to_str())
     }
     pub async fn write_async<B: AsBytes>(self, data: B) throws (IoError) -> usize {
-        let s = data.raw_bytes();
+        let s = data.byte_slice();
         try await off(|| try self.write(s))
     }
     pub async fn write_all_async<B: AsBytes>(self, data: B) throws (IoError) {
-        let s = data.raw_bytes();
-        try await off(|| try self.write_str(s));
+        let s = data.byte_slice();
+        try await off(|| try self.write_all(s));
     }
     pub async fn write_str_async(self, s: str) throws (IoError) {
         try await off(|| try self.write_str(s));
@@ -462,7 +430,7 @@ impl Stream for ReadDirStream {
             let job = match self.pending {
                 b: Blocking<List<Result<DirEntry, IoError>>> => b,
                 none => {
-                    if self.rd.d[0] == 0usize { return Poll::Ready(none); }
+                    if self.rd.d[0] == 0 { return Poll::Ready(none); }
                     let rd = self.rd;
                     let lock = self.lock;
                     task::spawn_blocking(|| {
@@ -611,13 +579,11 @@ impl Dir {
     }
 
     fn list(self, p: str) throws (IoError) -> ReadDir {
-        let err = err_cell();
-        let d = unsafe { rok_os_opendir(self.fd(), p, err) };
-        try check_cell(err, self.shown(p));
+        let d = try check(unsafe { rok_os_opendir(self.fd(), p) } as i64, self.shown(p));
         let base = if p == "." { "" } else { p };
-        let cell: GcBuf<usize> = buf_new(1);
-        cell[0] = d;
-        ReadDir { d: cell, dir: self, base: base }
+        let cell: GcBuf<isize> = buf_new(1);
+        cell[0] = d as isize;
+        ReadDir { d: cell, dir: self, base: base, name: byte_buf(NAME_MAX) }
     }
 
     /// Follows symlinks.
@@ -772,25 +738,29 @@ impl DirEntry {
 /// (`.` / `..` skipped). Each item is an entry or the error reading it.
 pub struct ReadDir {
     /// The `DIR*` (0 once closed), shared by copies of the handle.
-    d: GcBuf<usize>;
+    d: GcBuf<isize>;
     dir: Dir;
     base: str;
+    /// Room for the next entry name.
+    name: List<u8>;
 }
+
+/// Room for any entry name (macOS `d_name` holds 1024 bytes).
+const NAME_MAX: usize = 1024;
 
 impl Iterator for ReadDir {
     type Item = Result<DirEntry, IoError>;
     fn next(ref self) -> Result<DirEntry, IoError> | none {
         let d = self.d[0];
-        if d == 0usize { return none; }
-        let err = err_cell();
-        let name = unsafe { rok_os_readdir(d, err) };
-        if name.len() == 0 {
-            unsafe { rok_os_closedir(d) };
-            self.d[0] = 0usize;
-            let e = err[0];
-            if e != 0 { return Result::Err(IoError::from_os(e, self.dir.shown(self.base))); }
+        if d == 0 { return none; }
+        let (buf, at, cap) = region(self.name);
+        let n = unsafe { rok_os_readdir(d, buf, at, cap) };
+        if n <= 0 {
+            close_dir(self.d);
+            if n < 0 { return Result::Err(IoError::from_os((0 - n) as i32, self.dir.shown(self.base))); }
             return none;
         }
+        let name = try text_of(list_of(self.name[0:n as usize])) catch e { return Result::Err(e); };
         let path = Path::from(self.base).join(Path::from(name));
         let meta = try stat_at(self.dir.fd(), path.as_str(), false, -1) catch e {
             return Result::Err(IoError::from_os(e.code, self.dir.shown(path.as_str())));
@@ -809,10 +779,10 @@ impl Drop for ReadDir {
     }
 }
 
-fn close_dir(cell: GcBuf<usize>) {
+fn close_dir(cell: GcBuf<isize>) {
     let d = cell[0];
-    if d != 0usize {
-        cell[0] = 0usize;
+    if d != 0 {
+        cell[0] = 0;
         unsafe { rok_os_closedir(d) };
     }
 }
@@ -820,8 +790,8 @@ fn close_dir(cell: GcBuf<usize>) {
 /// Recursive walk, depth first, the root first and each directory's
 /// entries sorted by name (Go `filepath.WalkDir`). Symlinks are listed,
 /// not followed. Each directory is read whole when reached, so a `Walk`
-/// never holds a stream open (stopping early leaks nothing). An unreadable directory yields its error and the walk
-/// goes on.
+/// never holds a stream open (stopping early leaks nothing). An
+/// unreadable directory yields its error and the walk goes on.
 pub struct Walk {
     stack: List<DirEntry>;
     errors: List<IoError>;
@@ -844,7 +814,7 @@ impl Iterator for Walk {
                     Result::Err(x) => self.errors.push(x),
                 }
             }
-            sort_entries(kids);
+            kids.sort_by(|a: DirEntry, b: DirEntry| a.name.cmp(b.name));
             let i = kids.len();
             while i > 0 {
                 i -= 1;
@@ -852,19 +822,6 @@ impl Iterator for Walk {
             }
         }
         Result::Ok(e)
-    }
-}
-
-/// Insertion sort by name. ponytail: O(n²); `List::sort` does not exist yet.
-fn sort_entries(xs: List<DirEntry>) {
-    for i in 1..xs.len() {
-        let x = xs[i];
-        let j = i;
-        while j > 0 && xs[j - 1].name > x.name {
-            xs[j] = xs[j - 1];
-            j -= 1;
-        }
-        xs[j] = x;
     }
 }
 
@@ -890,13 +847,10 @@ pub fn read_to_str<P: AsPath>(path: P) throws (IoError) -> str {
     r
 }
 
-/// The spelling `read_to_string` (Rust's) for `read_to_str`.
-pub fn read_to_string<P: AsPath>(path: P) throws (IoError) -> str { try read_to_str(path) }
-
 /// Create or truncate `path` and write `data` (a `str` or `List<u8>`).
 pub fn write<P: AsPath, D: AsBytes>(path: P, data: D) throws (IoError) {
     let f = try create(path);
-    try f.write_str(data.raw_bytes()) catch e { try f.close() catch _ {}; throw e; };
+    try f.write_all(data) catch e { try f.close() catch _ {}; throw e; };
     try f.close();
 }
 
@@ -922,7 +876,7 @@ pub fn write_atomic<P: AsPath, D: AsBytes>(path: P, data: D) throws (IoError) {
         f = opened;
         break;
     }
-    try stage(f, data.raw_bytes(), tmp, target) catch e {
+    try stage(f, data.byte_slice(), tmp, target) catch e {
         try f.close() catch _ {};
         try remove_file(tmp) catch _ {};
         throw e;
@@ -933,33 +887,11 @@ pub fn write_atomic<P: AsPath, D: AsBytes>(path: P, data: D) throws (IoError) {
     try d.close();
 }
 
-fn stage(f: File, data: str, tmp: Path, target: Path) throws (IoError) {
-    try f.write_str(data);
+fn stage(f: File, data: Slice<u8>, tmp: Path, target: Path) throws (IoError) {
+    try f.write_all(data);
     try f.sync_all();
     try f.close();
     try rename(tmp, target);
-}
-
-/// Bytes for `write`: a `str` (its UTF-8), a `List<u8>` or a `Slice<u8>`.
-pub trait AsBytes {
-    /// As a raw byte string (not necessarily UTF-8).
-    fn raw_bytes(self) -> str;
-}
-
-impl AsBytes for str {
-    fn raw_bytes(self) -> str { self }
-}
-
-impl AsBytes for List<u8> {
-    fn raw_bytes(self) -> str { raw_of(self, self.len()) }
-}
-
-impl AsBytes for Slice<u8> {
-    fn raw_bytes(self) -> str {
-        let sb = StrBuf::with_capacity(self.len());
-        for b in self { sb.push_byte(b); }
-        sb.to_str()
-    }
 }
 
 pub fn metadata<P: AsPath>(path: P) throws (IoError) -> Metadata { try Dir::root().metadata(path) }
@@ -1011,15 +943,14 @@ pub async fn read_to_str_async<P: AsPath>(path: P) throws (IoError) -> str {
     let p = path.as_path();
     try await off(|| try read_to_str(p))
 }
-pub async fn read_to_string_async<P: AsPath>(path: P) throws (IoError) -> str { try await read_to_str_async(path) }
 pub async fn write_async<P: AsPath, D: AsBytes>(path: P, data: D) throws (IoError) {
     let p = path.as_path();
-    let s = data.raw_bytes();
+    let s = data.byte_slice();
     try await off(|| try write(p, s));
 }
 pub async fn write_atomic_async<P: AsPath, D: AsBytes>(path: P, data: D) throws (IoError) {
     let p = path.as_path();
-    let s = data.raw_bytes();
+    let s = data.byte_slice();
     try await off(|| try write_atomic(p, s));
 }
 pub async fn metadata_async<P: AsPath>(path: P) throws (IoError) -> Metadata {

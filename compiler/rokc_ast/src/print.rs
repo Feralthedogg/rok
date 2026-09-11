@@ -159,6 +159,15 @@ impl Printer {
                 self.s(&path.join("::"));
                 self.attr_body(body);
             }
+            AttrArg::Range { lo, hi, inclusive } => {
+                if let Some(lo) = lo {
+                    self.attr_arg(lo);
+                }
+                self.s(if *inclusive { "..=" } else { ".." });
+                if let Some(hi) = hi {
+                    self.attr_arg(hi);
+                }
+            }
         }
     }
 

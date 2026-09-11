@@ -1,9 +1,9 @@
 //! f-string format spec (refs-lang 1.7.3, stdlib 2.10.7):
 //! `[[fill]align][sign]['#']['0'][width]['.' precision][type]`.
 //!
-//! Shared source: the runtime parses dynamic (`${..}`) specs with it and
-//! the compiler (`rokc_hir`, through `#[path]`) checks static ones, so
-//! both read a spec the same way. `core` only.
+//! The one spec parser: the runtime parses every spec with it at format
+//! time and the compiler (`rokc_hir`, through `#[path]`) checks static
+//! ones with it. Uses `core` only, so both crates can build it.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FmtSpec {

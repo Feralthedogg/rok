@@ -1,19 +1,15 @@
-//! `librokr.a` — facade staticlib for the rok runtime.
-//!
-//! Bundles `rokr_common`, `rokr_gc`, `rokr_scheduler`, `rokr_coroutine`
-//! into one static archive so cross-crate inlining (TLAB bump, safepoint
-//! polls, write barriers) survives the codegen boundary.
+//! `librokr.a`: the rok runtime as one static archive, so cross-crate
+//! inlining (TLAB bump, safepoint polls, write barriers) survives the
+//! codegen boundary.
 //!
 //! ABI symbols follow spec 008-abi/805; the convenience symbols at the
-//! bottom are the 805 §8.5.12 appendix (no ABI stability).
-//!
-//! Not implemented yet (calls hit [`unimplemented`] → fatal, exit 101):
-//! scheduler (007-runtime/706, 707), coroutines (708). OS threads (805
-//! §8.5.4) are in `thread`. The GC (`rokr_gc`) is an Immix-style
-//! mark-region (703) with opportunistic evacuation and sticky mark-bit
-//! generations (704), without concurrent marking (705). Objects a root
-//! reaches never move, so a GC pointer a runtime function got as an
-//! argument stays valid across its allocations and blocking calls.
+//! bottom are the 805 §8.5.12 appendix (no ABI stability). The task
+//! executor itself is rok code (`rok::core::task`) on top of OS threads
+//! (`thread`). The GC (`rokr_gc`) is an Immix-style mark-region (703)
+//! with opportunistic evacuation and sticky mark-bit generations (704),
+//! without concurrent marking (705). Objects a root reaches never move,
+//! so a GC pointer a runtime function got as an argument stays valid
+//! across its allocations and blocking calls.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
@@ -23,7 +19,7 @@ use core::ptr;
 use core::sync::atomic::Ordering;
 
 use rokr_common::object_header::HEADER_ALIGN;
-use rokr_common::{fatal, tls, write_stderr};
+use rokr_common::{fatal, tls};
 
 mod bignum;
 mod deque;
@@ -32,8 +28,8 @@ mod fmt_spec;
 mod math;
 mod net;
 mod os;
-mod par;
 mod stack;
+mod stdio;
 mod str;
 mod thread;
 mod unicode;
@@ -52,7 +48,7 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     impl core::fmt::Write for Stderr {
         fn write_str(&mut self, s: &str) -> core::fmt::Result {
             // SAFETY: `s` is valid for its own length.
-            unsafe { write_stderr(s.as_ptr(), s.len()) };
+            unsafe { rokr_common::write_stderr(s.as_ptr(), s.len()) };
             Ok(())
         }
     }
@@ -66,7 +62,7 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 // linking librokr.a next to another Rust staticlib or std does not hit a
 // duplicate-symbol error (a strong `#[no_mangle]` stub did).
 //
-// TODO(symbol hygiene): the archive still exports every non-generic
+// The archive still exports every non-generic
 // `core` / `compiler_builtins` / mangled Rust symbol. Cargo cannot
 // localize them; a post-build step would: macOS
 // `ld -r -exported_symbols_list <rok_* list>`, ELF `ld -r --whole-archive`
@@ -87,45 +83,9 @@ core::arch::global_asm!(
     "ret",
 );
 
-/// Fatal "not implemented yet" for runtime entries whose subsystem does
-/// not exist. Better than returning null and letting codegen continue.
-fn unimplemented(what: &[u8]) -> ! {
-    let prefix = b"rok runtime: unimplemented: ";
-    // SAFETY: slice is valid for its own length.
-    unsafe { write_stderr(prefix.as_ptr(), prefix.len()) };
-    fatal(what)
-}
-
 // ---------------------------------------------------------------------
 // 8.5.1 GC
 // ---------------------------------------------------------------------
-
-/// malloc-backed allocation for `rok_alloc` (manual, never collected).
-/// Fatal on non-power-of-two `align`, size overflow, or OOM; never null.
-fn raw_alloc(size: usize, align: usize) -> *mut u8 {
-    if !align.is_power_of_two() {
-        fatal(b"rok runtime: allocation align is not a power of two");
-    }
-    let Some(rounded) = size.checked_add(align - 1).map(|s| s & !(align - 1)) else {
-        fatal(b"rok runtime: allocation size overflow");
-    };
-    let p = if align <= HEADER_ALIGN {
-        // SAFETY: plain malloc; malloc alignment >= 8 on supported targets.
-        unsafe { libc::malloc(rounded) }
-    } else {
-        let mut p: *mut libc::c_void = ptr::null_mut();
-        // SAFETY: valid out-pointer; `align` is a power of two > 8, hence
-        // a multiple of `size_of::<*mut c_void>()`.
-        if unsafe { libc::posix_memalign(&mut p, align, rounded) } != 0 {
-            p = ptr::null_mut();
-        }
-        p
-    };
-    if p.is_null() {
-        rokr_common::oom();
-    }
-    p.cast()
-}
 
 /// GC allocation (702 §7.2.3, 805 §8.5.1).
 ///
@@ -190,7 +150,7 @@ pub extern "C" fn rok_gc_collect() {
     rokr_gc::collect();
 }
 
-/// A minor collection (full when `ROK_GC_GEN=0`); tests, diagnostics.
+/// A minor collection (tests, diagnostics).
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_gc_collect_young() {
     rokr_gc::collect_young();
@@ -254,8 +214,7 @@ fn init_thread(main: bool) {
 /// Unregister this thread; it must not touch GC objects afterwards.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_thread_shutdown() {
-    rokr_gc::world::detach();
-    stack::thread_exit();
+    thread::thread_exit();
 }
 
 // ---------------------------------------------------------------------
@@ -268,107 +227,42 @@ pub extern "C" fn rok_coro_frame_alloc(size: usize, type_id: u32) -> *mut u8 {
     rok_gc_alloc_slow(size, HEADER_ALIGN, type_id)
 }
 
-/// Park `waker` on coroutine `frame` (its address is the parking key)
-/// until `rok_coro_unpark(frame)`.
+/// Park `waker` on coroutine `frame` (a GC object; its address is the
+/// parking key) until `rok_coro_unpark(frame)`.
+///
+/// # Safety
+/// `frame` and `waker` must be live GC objects.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_coro_park(frame: *mut u8, waker: *mut u8) {
-    task_abi(2, frame as i64, 0, waker);
+pub unsafe extern "C" fn rok_coro_park(frame: *mut u8, waker: *mut u8) {
+    // SAFETY: an installed hook; caller contract.
+    unsafe { (hooks().park)(frame, waker) };
 }
 
 /// Wake every waker parked on `frame`.
+///
+/// # Safety
+/// `frame` must be a live GC object.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_coro_unpark(frame: *mut u8) {
-    task_abi(3, frame as i64, 0, ptr::null_mut());
+pub unsafe extern "C" fn rok_coro_unpark(frame: *mut u8) {
+    // SAFETY: as above.
+    unsafe { (hooks().unpark)(frame) };
 }
 
 // ---------------------------------------------------------------------
 // 8.5.4 Scheduler
 // ---------------------------------------------------------------------
 
-/// This thread's running executor (`rok::core::task`): a GC object,
-/// pinned while installed so the collector keeps it (and every task)
-/// alive.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_task_exec_active() -> i32 {
-    i32::from(rok_task_exec_get() != 0)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_task_exec_get() -> usize {
-    // SAFETY: this thread's own slot.
-    unsafe { tls::task_exec().read() }
-}
-
-/// # Safety
-/// `exec` must be a live GC object.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rok_task_exec_set(exec: usize) {
-    rok_task_exec_clear();
-    // SAFETY: caller contract; this thread's own slot.
-    unsafe {
-        rok_gc_pin(exec as *mut u8);
-        tls::task_exec().write(exec);
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_task_exec_clear() {
-    let old = rok_task_exec_get();
-    if old != 0 {
-        // SAFETY: the slot only holds a pinned, hence live, object.
-        unsafe {
-            rok_gc_unpin(old as *mut u8);
-            tls::task_exec().write(0);
-        }
-    }
-}
-
-/// The process-wide registry of tasks parked on a key (async waits on a
-/// `Mutex` / channel, `rok::core::task::park` / `unpark`): installed
-/// once, pinned for good.
-static TASK_PARKING: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_task_parking_ready() -> i32 {
-    i32::from(TASK_PARKING.load(Ordering::Acquire) != 0)
-}
-
-/// Install `obj` unless a registry exists; the registry in use.
+/// A GC object's address as a parking key: from now on the collector
+/// never moves it, so the key stays its own. Only for keys that outlive
+/// the call (identity tests use `buf_same`, which pins nothing).
 ///
 /// # Safety
 /// `obj` must be a live GC object.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rok_task_parking_install(obj: usize) -> usize {
-    match TASK_PARKING.compare_exchange(0, obj, Ordering::AcqRel, Ordering::Acquire) {
-        Ok(_) => {
-            // SAFETY: caller contract (the caller's frame still roots it).
-            unsafe { rok_gc_pin(obj as *mut u8) };
-            obj
-        }
-        Err(cur) => cur,
-    }
-}
-
-/// A GC object's address as a parking key (`GcBuf<i32>` argument):
-/// from now on the collector never moves it, so the key stays its own.
-///
-/// # Safety
-/// `obj` must be a live GC object.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rok_task_key_i32(obj: usize) -> usize {
+pub unsafe extern "C" fn rok_task_key(obj: *mut u8) -> usize {
     // SAFETY: caller contract.
-    unsafe { rokr_gc::no_move(obj as *mut u8) };
-    obj
-}
-
-/// [`rok_task_key_i32`] for a `GcBuf<usize>`.
-///
-/// # Safety
-/// `obj` must be a live GC object.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rok_task_key_usize(obj: usize) -> usize {
-    // SAFETY: caller contract.
-    unsafe { rok_task_key_i32(obj) }
+    unsafe { rokr_gc::no_move(obj) };
+    obj as usize
 }
 
 #[allow(clippy::unnecessary_cast)] // `time_t` / `c_long` widths vary by target
@@ -407,90 +301,88 @@ pub extern "C" fn rok_time_boot_ns() -> i64 {
     clock_ns(clock)
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_task_spawn(_coro_frame: *mut u8) -> *mut u8 {
-    unimplemented(b"rok_task_spawn (scheduler, spec 007-runtime/706)")
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_task_await(_handle: *mut u8) -> *mut u8 {
-    unimplemented(b"rok_task_await (scheduler, spec 007-runtime/706)")
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_task_cancel(_handle: *mut u8) {
-    unimplemented(b"rok_task_cancel (scheduler, spec 007-runtime/706)")
-}
-
 // ---------------------------------------------------------------------
 // 8.5.5 I/O / timer
 // ---------------------------------------------------------------------
 
 // `rok_io_register` / `rok_timer_register` and 8.5.3's `rok_coro_park` /
-// `rok_coro_unpark` act on `rok::core::task`'s parking table and timers
-// (GC wakers), so they call into it: the executor installs one hook
-// `fn(op, a, b, waker)` when a pool starts (`rok_task_abi_install`).
-// Defining them in rok (`#[export_name]`) would compile the executor
-// into every program.
+// `rok_coro_unpark` act on `rok::core::task`'s parking table and timers,
+// so they call into it through hooks the executor installs when it
+// starts. Defining them in rok (`#[export_name]`) would compile the
+// executor into every program. A `waker` is a one-element `GcBuf<Waker>`.
 
-/// The hook's `{code, env}` (0 until an executor has started).
-static TASK_ABI_CODE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-static TASK_ABI_ENV: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+/// The executor's hooks (C function pointers to rok `extern "C" fn`s).
+#[derive(Clone, Copy)]
+struct Hooks {
+    io: unsafe extern "C" fn(i32, u32, *mut u8),
+    timer: unsafe extern "C" fn(u64, *mut u8),
+    park: unsafe extern "C" fn(*mut u8, *mut u8),
+    unpark: unsafe extern "C" fn(*mut u8),
+}
 
-// A rok `fn` value's code takes its env first, then its arguments.
-type TaskAbiHook = unsafe extern "C" fn(*mut u8, i32, i64, i64, *mut u8);
+static HOOKS: core::sync::atomic::AtomicPtr<Hooks> =
+    core::sync::atomic::AtomicPtr::new(ptr::null_mut());
 
-/// Install `rok::core::task`'s ABI hook (the first call wins; its env is
-/// pinned).
+/// Install `rok::core::task`'s hooks (the first call wins).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_task_hooks_install(
+    io: unsafe extern "C" fn(i32, u32, *mut u8),
+    timer: unsafe extern "C" fn(u64, *mut u8),
+    park: unsafe extern "C" fn(*mut u8, *mut u8),
+    unpark: unsafe extern "C" fn(*mut u8),
+) {
+    // SAFETY: plain allocation, never freed: the hooks live as long as
+    // the process.
+    let h = unsafe { libc::malloc(core::mem::size_of::<Hooks>()) }.cast::<Hooks>();
+    if h.is_null() {
+        rokr_common::oom();
+    }
+    // SAFETY: fresh allocation.
+    unsafe {
+        h.write(Hooks {
+            io,
+            timer,
+            park,
+            unpark,
+        });
+    }
+    if HOOKS
+        .compare_exchange(ptr::null_mut(), h, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        // SAFETY: ours, never published.
+        unsafe { libc::free(h.cast()) };
+    }
+}
+
+fn hooks() -> Hooks {
+    let h = HOOKS.load(Ordering::Acquire);
+    if h.is_null() {
+        fatal(b"rok runtime: rok_io_register / rok_timer_register / rok_coro_park outside a task");
+    }
+    // SAFETY: published once, never freed.
+    unsafe { *h }
+}
+
+/// Wake `waker` once `fd` may be readable (`interest & 1`) or writable
+/// (`interest & 2`); one-shot, edge-triggered (spurious wakes possible).
 ///
 /// # Safety
-/// `code` / `env` are a rok `fn(i32, i64, i64, GcBuf<Waker>)` value.
+/// `waker` must be a live `GcBuf<Waker>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rok_task_abi_install(code: TaskAbiHook, env: *mut u8) {
-    if TASK_ABI_CODE.load(Ordering::Acquire) != 0 {
-        return;
-    }
-    if !env.is_null() {
-        // SAFETY: caller contract (a live GC object).
-        unsafe { rok_gc_pin(env) };
-    }
-    TASK_ABI_ENV.store(env as usize, Ordering::Release);
-    let _ = TASK_ABI_CODE.compare_exchange(0, code as usize, Ordering::AcqRel, Ordering::Acquire);
-}
-
-fn task_abi(op: i32, a: i64, b: i64, waker: *mut u8) {
-    let code = TASK_ABI_CODE.load(Ordering::Acquire);
-    if code == 0 {
-        unimplemented(
-            b"rok_io_register / rok_timer_register / rok_coro_park outside a task executor",
-        )
-    }
-    // SAFETY: installed by `rok_task_abi_install` from a rok fn value.
-    unsafe {
-        let f: TaskAbiHook = core::mem::transmute::<usize, TaskAbiHook>(code);
-        f(
-            TASK_ABI_ENV.load(Ordering::Acquire) as *mut u8,
-            op,
-            a,
-            b,
-            waker,
-        );
-    }
-}
-
-/// Wake `waker` (a one-element `GcBuf<Waker>`) once `fd` may be readable
-/// (`interest & 1`) or writable (`interest & 2`); one-shot,
-/// edge-triggered (spurious wakes possible).
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_io_register(fd: i32, interest: u32, waker: *mut u8) {
-    task_abi(0, i64::from(fd), i64::from(interest), waker);
+pub unsafe extern "C" fn rok_io_register(fd: i32, interest: u32, waker: *mut u8) {
+    // SAFETY: an installed hook; caller contract.
+    unsafe { (hooks().io)(fd, interest, waker) };
 }
 
 /// Wake `waker` once `rok_time_now_ns()` reaches `deadline` (ns).
+///
+/// # Safety
+/// `waker` must be a live `GcBuf<Waker>`.
 #[unsafe(no_mangle)]
-#[allow(clippy::cast_possible_wrap)] // a monotonic ns deadline fits i64
-pub extern "C" fn rok_timer_register(deadline: u64, waker: *mut u8) {
-    task_abi(1, deadline as i64, 0, waker);
+pub unsafe extern "C" fn rok_timer_register(deadline: u64, waker: *mut u8) {
+    // SAFETY: as above.
+    unsafe { (hooks().timer)(deadline, waker) };
 }
 
 // ---------------------------------------------------------------------
@@ -504,32 +396,71 @@ pub extern "C" fn rok_timer_register(deadline: u64, waker: *mut u8) {
 /// prefix, the error's description, `\n` to stderr, then exit status 1.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_uncaught_error(what: RokStr) -> ! {
-    const PREFIX: &[u8] = b"error: `main` returned an uncaught error: ";
-    // SAFETY: `what` is a valid `str`; `exit` flushes buffered stdout.
-    unsafe {
-        write_stderr(PREFIX.as_ptr(), PREFIX.len());
-        write_stderr(what.ptr, what.len);
-        write_stderr(b"\n".as_ptr(), 1);
-        libc::exit(1)
-    }
+    uncaught(&[UNCAUGHT, what.bytes(), b"\n"])
+}
+
+const UNCAUGHT: &[u8] = b"error: `main` returned an uncaught error: ";
+
+/// `rok_uncaught_error` plus the `path:line:col` the error left `main`
+/// at, on a second line.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_uncaught_error_at(what: RokStr, at: RokStr) -> ! {
+    uncaught(&[UNCAUGHT, what.bytes(), b"\n  --> ", at.bytes(), b"\n"])
+}
+
+fn uncaught(parts: &[&[u8]]) -> ! {
+    rokr_common::write_all(2, parts);
+    // SAFETY: plain libc call; `exit` flushes buffered stdout.
+    unsafe { libc::exit(1) }
 }
 
 // ---------------------------------------------------------------------
 // 8.5.7 Diagnostics
 // ---------------------------------------------------------------------
 
-/// Unrecoverable panic: `msg` + `\n` to stderr, then exit 101.
+/// Unrecoverable panic: `thread '<name>' panicked:`, `msg` and `\n` to
+/// stderr, then exit 101.
 ///
 /// # Safety
 /// `msg` must be null or valid for reads of `msg_len` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rok_panic(msg: *const u8, msg_len: usize) -> ! {
-    if msg.is_null() {
-        fatal(b"panic");
-    }
-    // SAFETY: caller contract.
-    unsafe { write_stderr(msg, msg_len) };
-    fatal(b"")
+    let msg = RokStr {
+        ptr: msg,
+        len: if msg.is_null() { 0 } else { msg_len },
+    };
+    panic_at(msg.bytes(), None)
+}
+
+/// A panic's report, `thread '<name>' panicked at <at>:\n<msg>\n` (no
+/// ` at <at>` without a location), then exit 101.
+pub(crate) fn panic_at(msg: &[u8], at: Option<&[u8]>) -> ! {
+    let mut buf = [0u8; 64];
+    let name = stack::thread_name(&mut buf);
+    let (sep, at) = at.map_or((&b""[..], &b""[..]), |a| (&b" at "[..], a));
+    rokr_common::write_all(
+        2,
+        &[
+            b"thread '",
+            name,
+            b"' panicked",
+            sep,
+            at,
+            b":\n",
+            msg,
+            b"\n",
+        ],
+    );
+    // SAFETY: plain libc call; `exit` flushes buffered stdout.
+    unsafe { libc::exit(101) }
+}
+
+/// `rok_panic_str` with the `path:line:col` of the code that panicked
+/// (a failed runtime check, or the first caller outside a
+/// `#[track_caller]` chain).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_panic_at(msg: RokStr, at: RokStr) -> ! {
+    panic_at(msg.bytes(), Some(at.bytes()))
 }
 
 /// `rok::core::panic::oom()` (stdlib 2.14.5 `oom_fn`): out of memory,
@@ -539,26 +470,15 @@ pub extern "C" fn rok_oom() -> ! {
     rokr_common::oom()
 }
 
-/// `rok::core::panic::panic(msg)` (stdlib 2.14.5): `rok_panic` for a
-/// rok `str` value.
+/// `rok_panic` for a rok `str` value.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_panic_str(msg: RokStr) -> ! {
-    // SAFETY: a rok `str` is valid for `len` bytes.
-    unsafe { rok_panic(msg.ptr, msg.len) }
+    panic_at(msg.bytes(), None)
 }
 
 // ---------------------------------------------------------------------
 // 8.5.12 appendix: convenience symbols (no ABI stability)
 // ---------------------------------------------------------------------
-
-/// `rok_assert(cond)`: fatal (exit 101) if `cond` is zero, else 0.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_assert(cond: i32) -> i32 {
-    if cond == 0 {
-        fatal(b"assertion failed");
-    }
-    0
-}
 
 /// `rok::std::env::exit(code)` (spec 4.16.4): exit now with `code`.
 /// `finally` and `Drop` do not run; `exit` flushes buffered stdout.
@@ -568,18 +488,7 @@ pub extern "C" fn rok_exit(code: i32) -> ! {
     unsafe { libc::exit(code) }
 }
 
-/// User-facing allocator: no header, `size == 0` → null, otherwise
-/// fatal on bad `align` / OOM.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_alloc(size: usize, align: usize) -> *mut u8 {
-    if size == 0 {
-        return ptr::null_mut();
-    }
-    raw_alloc(size, align)
-}
-
-/// `rok::bare::alloc::alloc` (stdlib 1.4): like `rok_alloc`, but null on
-/// failure (`size == 0`, bad `align`, overflow, OOM) instead of
+/// `rok::bare::alloc::alloc` (stdlib 1.4): null on failure (`size == 0`, bad `align`, overflow, OOM) instead of
 /// aborting. `zeroed != 0` zero-fills. Freed with `rok_free`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_alloc_raw(size: usize, align: usize, zeroed: i32) -> *mut u8 {
@@ -634,14 +543,14 @@ pub unsafe extern "C" fn rok_realloc_raw(
 }
 
 /// # Safety
-/// `ptr` must be null or a live pointer returned by `rok_alloc`.
+/// `ptr` must be null or a live pointer returned by `rok_alloc_raw`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rok_free(ptr: *mut u8) {
     // SAFETY: caller contract; free(NULL) is a no-op.
     unsafe { libc::free(ptr.cast()) };
 }
 
-// Typed load/store. Pointers cross the FFI boundary as `usize`.
+// Typed load/store through raw pointers.
 
 /// # Safety
 /// `ptr` must be valid and aligned for an `i32` read.
@@ -673,167 +582,6 @@ pub unsafe extern "C" fn rok_load_i64(ptr: *const i64) -> i64 {
 pub unsafe extern "C" fn rok_store_i64(ptr: *mut i64, val: i64) {
     // SAFETY: caller contract.
     unsafe { *ptr = val }
-}
-
-/// # Safety
-/// `ptr` must be valid and aligned for an `f64` read.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rok_load_f64(ptr: *const f64) -> f64 {
-    // SAFETY: caller contract.
-    unsafe { *ptr }
-}
-
-/// # Safety
-/// `ptr` must be valid and aligned for an `f64` write.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rok_store_f64(ptr: *mut f64, val: f64) {
-    // SAFETY: caller contract.
-    unsafe { *ptr = val }
-}
-
-// Printers over libc `printf` (stdout). Each returns 0 so it composes
-// as an i32-returning expression.
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_print_i64(n: i64) -> i32 {
-    // SAFETY: format matches the argument.
-    unsafe { libc::printf(c"%lld\n".as_ptr(), n) };
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_print_i32(n: i32) -> i32 {
-    // SAFETY: format matches the argument.
-    unsafe { libc::printf(c"%d\n".as_ptr(), n) };
-    0
-}
-
-/// C string + `\n`. Null prints as an empty line.
-///
-/// `s` + `\n` to stdout (`println`), under the stream lock so lines
-/// printed from different threads never interleave.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_print_str(s: RokStr) -> i32 {
-    unsafe extern "C" {
-        fn flockfile(f: *mut libc::FILE);
-        fn funlockfile(f: *mut libc::FILE);
-    }
-    let out = stdout();
-    // SAFETY: `out` is libc's stdout; lock / unlock pair up.
-    unsafe {
-        flockfile(out);
-        rok_write_str(s);
-        libc::fputc(i32::from(b'\n'), out);
-        funlockfile(out);
-    }
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_print_f64(d: f64) -> i32 {
-    // SAFETY: format matches the argument.
-    unsafe { libc::printf(c"%g\n".as_ptr(), d) };
-    0
-}
-
-/// Bool passed as i32 (no stable C ABI for i1). No trailing newline.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_print_bool(b: i32) -> i32 {
-    let s = if b != 0 { c"true" } else { c"false" };
-    // SAFETY: format matches the argument.
-    unsafe { libc::printf(c"%s".as_ptr(), s.as_ptr()) };
-    0
-}
-
-// `rok_write_*`: same as `rok_print_*` without the trailing newline.
-
-/// `s` to stdout (through stdio, so it orders with `printf` output).
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_write_str(s: RokStr) -> i32 {
-    if s.len > 0 {
-        // SAFETY: `s` is valid for `len` bytes; `stdout` is libc's stream.
-        unsafe { libc::fwrite(s.ptr.cast(), 1, s.len, stdout()) };
-    }
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_write_i64(n: i64) -> i32 {
-    // SAFETY: format matches the argument.
-    unsafe { libc::printf(c"%lld".as_ptr(), n) };
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_write_f64(d: f64) -> i32 {
-    // SAFETY: format matches the argument.
-    unsafe { libc::printf(c"%g".as_ptr(), d) };
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_write_hex(n: i64) -> i32 {
-    // SAFETY: format matches the argument.
-    unsafe { libc::printf(c"0x%llx".as_ptr(), n) };
-    0
-}
-
-/// Byte length of `s` (stdlib 2.15 `str::len`).
-#[unsafe(no_mangle)]
-pub const extern "C" fn rok_str_len(s: RokStr) -> usize {
-    s.len
-}
-
-/// 1 if `a` and `b` hold the same bytes, else 0.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_str_eq(a: RokStr, b: RokStr) -> i32 {
-    i32::from(str::rok_str_cmp(a, b) == 0)
-}
-
-/// `s` to stderr (unbuffered).
-/// `s` + `\n` to stderr (`eprintln`) in one `writev`, so lines from
-/// different threads never interleave.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_eprint_str(s: RokStr) -> i32 {
-    let iov = [
-        libc::iovec {
-            iov_base: s.ptr.cast_mut().cast(),
-            iov_len: s.len,
-        },
-        libc::iovec {
-            iov_base: c"\n".as_ptr().cast_mut().cast(),
-            iov_len: 1,
-        },
-    ];
-    // SAFETY: both buffers are valid for their lengths.
-    let n = usize::try_from(unsafe { libc::writev(2, iov.as_ptr(), 2) }).unwrap_or(0);
-    // A short write (big line, full pipe): finish it piecewise.
-    if n < s.len {
-        // SAFETY: `n < len`, inside `s`.
-        unsafe { write_stderr(s.ptr.add(n), s.len - n) };
-    }
-    if n <= s.len {
-        // SAFETY: a one-byte static buffer.
-        unsafe { write_stderr(c"\n".as_ptr().cast(), 1) };
-    }
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_ewrite_str(s: RokStr) -> i32 {
-    // SAFETY: `s` is valid for `len` bytes.
-    unsafe { write_stderr(s.ptr, s.len) };
-    0
-}
-
-/// libc's `stdout` stream.
-fn stdout() -> *mut libc::FILE {
-    unsafe extern "C" {
-        #[cfg_attr(target_vendor = "apple", link_name = "__stdoutp")]
-        static mut stdout: *mut libc::FILE;
-    }
-    // SAFETY: libc initializes `stdout` before `main`.
-    unsafe { stdout }
 }
 
 #[cfg(test)]

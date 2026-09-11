@@ -1,0 +1,117 @@
+// rok::core::collections::heap — `BinaryHeap<T>`, a priority queue
+// over a `List` laid out as an implicit binary tree. `new()` pops the
+// greatest item first; `by(before)` takes the order: `before(a, b)`
+// puts `a` nearer the top.
+
+pub struct BinaryHeap<T> {
+    items: List<T>;
+    before: fn(T, T) -> bool;
+}
+
+impl<T: Ord> BinaryHeap<T> {
+    /// A max-heap.
+    pub fn new() -> BinaryHeap<T> {
+        BinaryHeap { items: List::new(), before: |a: T, b: T| a > b }
+    }
+}
+
+impl<T> BinaryHeap<T> {
+    /// A heap whose top is the item `before` ranks first.
+    pub fn by(before: fn(T, T) -> bool) -> BinaryHeap<T> {
+        BinaryHeap { items: List::new(), before }
+    }
+
+    pub fn len(self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.items.len() == 0
+    }
+
+    /// The top item.
+    pub fn peek(self) -> T | none {
+        self.items.get(0)
+    }
+
+    pub fn push(self, x: T) {
+        let xs = self.items;
+        xs.push(x);
+        let i = xs.len() - 1;
+        while i > 0 {
+            let p = (i - 1) / 2;
+            if !(self.before)(xs[i], xs[p]) {
+                break;
+            }
+            self.swap(i, p);
+            i = p;
+        }
+    }
+
+    /// Remove and return the top item.
+    pub fn pop(self) -> T | none {
+        let xs = self.items;
+        let n = xs.len();
+        if n == 0 {
+            return none;
+        }
+        self.swap(0, n - 1);
+        let top = xs.pop();
+        self.sift_down(0);
+        top
+    }
+
+    pub fn clear(self) {
+        self.items.clear();
+    }
+
+    /// Keep only the items `keep` accepts; O(n).
+    pub fn retain(self, keep: fn(T) -> bool) {
+        let xs = self.items;
+        let kept: List<T> = List::new();
+        for x in xs {
+            if keep(x) { kept.push(x); }
+        }
+        xs.clear();
+        xs.extend(kept);
+        let i = xs.len() / 2;
+        while i > 0 {
+            i -= 1;
+            self.sift_down(i);
+        }
+    }
+
+    /// Every item, in no particular order.
+    pub fn iter(self) -> ListIter<T> {
+        self.items.iter()
+    }
+
+    fn swap(self, i: usize, j: usize) {
+        let xs = self.items;
+        let t = xs[i];
+        xs[i] = xs[j];
+        xs[j] = t;
+    }
+
+    fn sift_down(self, from: usize) {
+        let xs = self.items;
+        let n = xs.len();
+        let i = from;
+        loop {
+            let l = 2 * i + 1;
+            let r = l + 1;
+            let m = i;
+            if l < n && (self.before)(xs[l], xs[m]) {
+                m = l;
+            }
+            if r < n && (self.before)(xs[r], xs[m]) {
+                m = r;
+            }
+            if m == i {
+                break;
+            }
+            self.swap(i, m);
+            i = m;
+        }
+    }
+}

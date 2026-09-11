@@ -8,7 +8,7 @@
 // (no overflow check; `llvm.intr.ctpop` ..); everything else is built
 // on them. One block per type; keep them regular.
 //
-// ponytail: spec 2.1.4 lists `fn min() -> i32` / `fn max() -> i32`; a
+// Spec 2.1.4 lists `fn min() -> i32` / `fn max() -> i32`; a
 // zero-argument inherent `min` would shadow `Ord::min(self, rhs)`, so
 // the limits are the `MIN` / `MAX` consts (refs-lang 2.13 `i32::MAX`).
 
@@ -42,8 +42,7 @@ impl i8 {
     pub fn rotate_right(self, n: u32) -> i8 { (self as u8).rotate_right(n) as i8 }
     pub fn swap_bytes(self) -> i8 { (self as u8).swap_bytes() as i8 }
 
-    // ponytail: little-endian targets only (`to_be` swaps, `to_le` is
-    // the identity).
+    // Little-endian targets only: `to_be` swaps, `to_le` is the identity.
     pub fn to_be(self) -> i8 { self.swap_bytes() }
     pub fn to_le(self) -> i8 { self }
     pub fn from_be(x: i8) -> i8 { x.swap_bytes() }
@@ -214,6 +213,7 @@ impl i8 {
         r
     }
     /// Integer square root; panics on a negative number.
+    #[track_caller]
     pub fn isqrt(self) -> i8 {
         if self < 0 { panic("isqrt of a negative number"); }
         (self as u8).isqrt() as i8
@@ -223,8 +223,11 @@ impl i8 {
         (self as u8).isqrt() as i8
     }
     /// `floor(log2(self))`; panics unless `self > 0`.
+    #[track_caller]
     pub fn ilog2(self) -> u32 { self.checked_ilog2() ?? panic("ilog2 of a non-positive number") }
+    #[track_caller]
     pub fn ilog10(self) -> u32 { self.checked_ilog10() ?? panic("ilog10 of a non-positive number") }
+    #[track_caller]
     pub fn ilog(self, base: i8) -> u32 {
         self.checked_ilog(base) ?? panic("ilog of a non-positive number or a base below 2")
     }
@@ -275,8 +278,7 @@ impl i16 {
     pub fn rotate_right(self, n: u32) -> i16 { (self as u16).rotate_right(n) as i16 }
     pub fn swap_bytes(self) -> i16 { (self as u16).swap_bytes() as i16 }
 
-    // ponytail: little-endian targets only (`to_be` swaps, `to_le` is
-    // the identity).
+    // Little-endian targets only: `to_be` swaps, `to_le` is the identity.
     pub fn to_be(self) -> i16 { self.swap_bytes() }
     pub fn to_le(self) -> i16 { self }
     pub fn from_be(x: i16) -> i16 { x.swap_bytes() }
@@ -455,6 +457,7 @@ impl i16 {
         r
     }
     /// Integer square root; panics on a negative number.
+    #[track_caller]
     pub fn isqrt(self) -> i16 {
         if self < 0 { panic("isqrt of a negative number"); }
         (self as u16).isqrt() as i16
@@ -464,8 +467,11 @@ impl i16 {
         (self as u16).isqrt() as i16
     }
     /// `floor(log2(self))`; panics unless `self > 0`.
+    #[track_caller]
     pub fn ilog2(self) -> u32 { self.checked_ilog2() ?? panic("ilog2 of a non-positive number") }
+    #[track_caller]
     pub fn ilog10(self) -> u32 { self.checked_ilog10() ?? panic("ilog10 of a non-positive number") }
+    #[track_caller]
     pub fn ilog(self, base: i16) -> u32 {
         self.checked_ilog(base) ?? panic("ilog of a non-positive number or a base below 2")
     }
@@ -516,8 +522,7 @@ impl i32 {
     pub fn rotate_right(self, n: u32) -> i32 { (self as u32).rotate_right(n) as i32 }
     pub fn swap_bytes(self) -> i32 { (self as u32).swap_bytes() as i32 }
 
-    // ponytail: little-endian targets only (`to_be` swaps, `to_le` is
-    // the identity).
+    // Little-endian targets only: `to_be` swaps, `to_le` is the identity.
     pub fn to_be(self) -> i32 { self.swap_bytes() }
     pub fn to_le(self) -> i32 { self }
     pub fn from_be(x: i32) -> i32 { x.swap_bytes() }
@@ -696,6 +701,7 @@ impl i32 {
         r
     }
     /// Integer square root; panics on a negative number.
+    #[track_caller]
     pub fn isqrt(self) -> i32 {
         if self < 0 { panic("isqrt of a negative number"); }
         (self as u32).isqrt() as i32
@@ -705,8 +711,11 @@ impl i32 {
         (self as u32).isqrt() as i32
     }
     /// `floor(log2(self))`; panics unless `self > 0`.
+    #[track_caller]
     pub fn ilog2(self) -> u32 { self.checked_ilog2() ?? panic("ilog2 of a non-positive number") }
+    #[track_caller]
     pub fn ilog10(self) -> u32 { self.checked_ilog10() ?? panic("ilog10 of a non-positive number") }
+    #[track_caller]
     pub fn ilog(self, base: i32) -> u32 {
         self.checked_ilog(base) ?? panic("ilog of a non-positive number or a base below 2")
     }
@@ -757,8 +766,7 @@ impl i64 {
     pub fn rotate_right(self, n: u32) -> i64 { (self as u64).rotate_right(n) as i64 }
     pub fn swap_bytes(self) -> i64 { (self as u64).swap_bytes() as i64 }
 
-    // ponytail: little-endian targets only (`to_be` swaps, `to_le` is
-    // the identity).
+    // Little-endian targets only: `to_be` swaps, `to_le` is the identity.
     pub fn to_be(self) -> i64 { self.swap_bytes() }
     pub fn to_le(self) -> i64 { self }
     pub fn from_be(x: i64) -> i64 { x.swap_bytes() }
@@ -937,6 +945,7 @@ impl i64 {
         r
     }
     /// Integer square root; panics on a negative number.
+    #[track_caller]
     pub fn isqrt(self) -> i64 {
         if self < 0 { panic("isqrt of a negative number"); }
         (self as u64).isqrt() as i64
@@ -946,8 +955,11 @@ impl i64 {
         (self as u64).isqrt() as i64
     }
     /// `floor(log2(self))`; panics unless `self > 0`.
+    #[track_caller]
     pub fn ilog2(self) -> u32 { self.checked_ilog2() ?? panic("ilog2 of a non-positive number") }
+    #[track_caller]
     pub fn ilog10(self) -> u32 { self.checked_ilog10() ?? panic("ilog10 of a non-positive number") }
+    #[track_caller]
     pub fn ilog(self, base: i64) -> u32 {
         self.checked_ilog(base) ?? panic("ilog of a non-positive number or a base below 2")
     }
@@ -971,7 +983,7 @@ impl i64 {
 // isize
 
 impl isize {
-    // ponytail: 64-bit targets only; 32-bit targets need their own limits.
+    // 64-bit targets only.
     pub const MIN: isize = -9223372036854775807 - 1;
     pub const MAX: isize = 9223372036854775807;
 
@@ -999,8 +1011,7 @@ impl isize {
     pub fn rotate_right(self, n: u32) -> isize { (self as usize).rotate_right(n) as isize }
     pub fn swap_bytes(self) -> isize { (self as usize).swap_bytes() as isize }
 
-    // ponytail: little-endian targets only (`to_be` swaps, `to_le` is
-    // the identity).
+    // Little-endian targets only: `to_be` swaps, `to_le` is the identity.
     pub fn to_be(self) -> isize { self.swap_bytes() }
     pub fn to_le(self) -> isize { self }
     pub fn from_be(x: isize) -> isize { x.swap_bytes() }
@@ -1179,6 +1190,7 @@ impl isize {
         r
     }
     /// Integer square root; panics on a negative number.
+    #[track_caller]
     pub fn isqrt(self) -> isize {
         if self < 0 { panic("isqrt of a negative number"); }
         (self as usize).isqrt() as isize
@@ -1188,8 +1200,11 @@ impl isize {
         (self as usize).isqrt() as isize
     }
     /// `floor(log2(self))`; panics unless `self > 0`.
+    #[track_caller]
     pub fn ilog2(self) -> u32 { self.checked_ilog2() ?? panic("ilog2 of a non-positive number") }
+    #[track_caller]
     pub fn ilog10(self) -> u32 { self.checked_ilog10() ?? panic("ilog10 of a non-positive number") }
+    #[track_caller]
     pub fn ilog(self, base: isize) -> u32 {
         self.checked_ilog(base) ?? panic("ilog of a non-positive number or a base below 2")
     }
@@ -1244,8 +1259,7 @@ impl u8 {
     pub fn rotate_right(self, n: u32) -> u8 { self.rotate_left(8 - n % 8) }
     pub fn swap_bytes(self) -> u8 { self }
 
-    // ponytail: little-endian targets only (`to_be` swaps, `to_le` is
-    // the identity).
+    // Little-endian targets only: `to_be` swaps, `to_le` is the identity.
     pub fn to_be(self) -> u8 { self.swap_bytes() }
     pub fn to_le(self) -> u8 { self }
     pub fn from_be(x: u8) -> u8 { x.swap_bytes() }
@@ -1367,6 +1381,7 @@ impl u8 {
     pub fn div_euclid(self, rhs: u8) -> u8 { self / rhs }
     pub fn rem_euclid(self, rhs: u8) -> u8 { self % rhs }
     /// Integer square root (rounded down).
+    #[track_caller]
     pub fn isqrt(self) -> u8 {
         if self < 2 { return self; }
         // A float estimate, then exact fix-up (division keeps it from
@@ -1378,6 +1393,7 @@ impl u8 {
     }
     pub fn is_power_of_two(self) -> bool { self != 0 && self & (self - 1) == 0 }
     /// The smallest power of two `>= self`; panics past `MAX`.
+    #[track_caller]
     pub fn next_power_of_two(self) -> u8 {
         self.checked_next_power_of_two() ?? panic("next_power_of_two overflowed")
     }
@@ -1389,8 +1405,11 @@ impl u8 {
         one << (p as u8)
     }
     /// `floor(log2(self))`; panics unless `self > 0`.
+    #[track_caller]
     pub fn ilog2(self) -> u32 { self.checked_ilog2() ?? panic("ilog2 of a non-positive number") }
+    #[track_caller]
     pub fn ilog10(self) -> u32 { self.checked_ilog10() ?? panic("ilog10 of a non-positive number") }
+    #[track_caller]
     pub fn ilog(self, base: u8) -> u32 {
         self.checked_ilog(base) ?? panic("ilog of a non-positive number or a base below 2")
     }
@@ -1446,8 +1465,7 @@ impl u16 {
     #[intrinsic("rok.bswap.u16")]
     pub fn swap_bytes(self) -> u16 { self.swap_bytes() }
 
-    // ponytail: little-endian targets only (`to_be` swaps, `to_le` is
-    // the identity).
+    // Little-endian targets only: `to_be` swaps, `to_le` is the identity.
     pub fn to_be(self) -> u16 { self.swap_bytes() }
     pub fn to_le(self) -> u16 { self }
     pub fn from_be(x: u16) -> u16 { x.swap_bytes() }
@@ -1577,6 +1595,7 @@ impl u16 {
     pub fn div_euclid(self, rhs: u16) -> u16 { self / rhs }
     pub fn rem_euclid(self, rhs: u16) -> u16 { self % rhs }
     /// Integer square root (rounded down).
+    #[track_caller]
     pub fn isqrt(self) -> u16 {
         if self < 2 { return self; }
         // A float estimate, then exact fix-up (division keeps it from
@@ -1588,6 +1607,7 @@ impl u16 {
     }
     pub fn is_power_of_two(self) -> bool { self != 0 && self & (self - 1) == 0 }
     /// The smallest power of two `>= self`; panics past `MAX`.
+    #[track_caller]
     pub fn next_power_of_two(self) -> u16 {
         self.checked_next_power_of_two() ?? panic("next_power_of_two overflowed")
     }
@@ -1599,8 +1619,11 @@ impl u16 {
         one << (p as u16)
     }
     /// `floor(log2(self))`; panics unless `self > 0`.
+    #[track_caller]
     pub fn ilog2(self) -> u32 { self.checked_ilog2() ?? panic("ilog2 of a non-positive number") }
+    #[track_caller]
     pub fn ilog10(self) -> u32 { self.checked_ilog10() ?? panic("ilog10 of a non-positive number") }
+    #[track_caller]
     pub fn ilog(self, base: u16) -> u32 {
         self.checked_ilog(base) ?? panic("ilog of a non-positive number or a base below 2")
     }
@@ -1656,8 +1679,7 @@ impl u32 {
     #[intrinsic("rok.bswap.u32")]
     pub fn swap_bytes(self) -> u32 { self.swap_bytes() }
 
-    // ponytail: little-endian targets only (`to_be` swaps, `to_le` is
-    // the identity).
+    // Little-endian targets only: `to_be` swaps, `to_le` is the identity.
     pub fn to_be(self) -> u32 { self.swap_bytes() }
     pub fn to_le(self) -> u32 { self }
     pub fn from_be(x: u32) -> u32 { x.swap_bytes() }
@@ -1787,6 +1809,7 @@ impl u32 {
     pub fn div_euclid(self, rhs: u32) -> u32 { self / rhs }
     pub fn rem_euclid(self, rhs: u32) -> u32 { self % rhs }
     /// Integer square root (rounded down).
+    #[track_caller]
     pub fn isqrt(self) -> u32 {
         if self < 2 { return self; }
         // A float estimate, then exact fix-up (division keeps it from
@@ -1798,6 +1821,7 @@ impl u32 {
     }
     pub fn is_power_of_two(self) -> bool { self != 0 && self & (self - 1) == 0 }
     /// The smallest power of two `>= self`; panics past `MAX`.
+    #[track_caller]
     pub fn next_power_of_two(self) -> u32 {
         self.checked_next_power_of_two() ?? panic("next_power_of_two overflowed")
     }
@@ -1809,8 +1833,11 @@ impl u32 {
         one << (p as u32)
     }
     /// `floor(log2(self))`; panics unless `self > 0`.
+    #[track_caller]
     pub fn ilog2(self) -> u32 { self.checked_ilog2() ?? panic("ilog2 of a non-positive number") }
+    #[track_caller]
     pub fn ilog10(self) -> u32 { self.checked_ilog10() ?? panic("ilog10 of a non-positive number") }
+    #[track_caller]
     pub fn ilog(self, base: u32) -> u32 {
         self.checked_ilog(base) ?? panic("ilog of a non-positive number or a base below 2")
     }
@@ -1866,8 +1893,7 @@ impl u64 {
     #[intrinsic("rok.bswap.u64")]
     pub fn swap_bytes(self) -> u64 { self.swap_bytes() }
 
-    // ponytail: little-endian targets only (`to_be` swaps, `to_le` is
-    // the identity).
+    // Little-endian targets only: `to_be` swaps, `to_le` is the identity.
     pub fn to_be(self) -> u64 { self.swap_bytes() }
     pub fn to_le(self) -> u64 { self }
     pub fn from_be(x: u64) -> u64 { x.swap_bytes() }
@@ -1997,6 +2023,7 @@ impl u64 {
     pub fn div_euclid(self, rhs: u64) -> u64 { self / rhs }
     pub fn rem_euclid(self, rhs: u64) -> u64 { self % rhs }
     /// Integer square root (rounded down).
+    #[track_caller]
     pub fn isqrt(self) -> u64 {
         if self < 2 { return self; }
         // A float estimate, then exact fix-up (division keeps it from
@@ -2008,6 +2035,7 @@ impl u64 {
     }
     pub fn is_power_of_two(self) -> bool { self != 0 && self & (self - 1) == 0 }
     /// The smallest power of two `>= self`; panics past `MAX`.
+    #[track_caller]
     pub fn next_power_of_two(self) -> u64 {
         self.checked_next_power_of_two() ?? panic("next_power_of_two overflowed")
     }
@@ -2019,8 +2047,11 @@ impl u64 {
         one << (p as u64)
     }
     /// `floor(log2(self))`; panics unless `self > 0`.
+    #[track_caller]
     pub fn ilog2(self) -> u32 { self.checked_ilog2() ?? panic("ilog2 of a non-positive number") }
+    #[track_caller]
     pub fn ilog10(self) -> u32 { self.checked_ilog10() ?? panic("ilog10 of a non-positive number") }
+    #[track_caller]
     pub fn ilog(self, base: u64) -> u32 {
         self.checked_ilog(base) ?? panic("ilog of a non-positive number or a base below 2")
     }
@@ -2044,7 +2075,7 @@ impl u64 {
 // usize
 
 impl usize {
-    // ponytail: 64-bit targets only; 32-bit targets need their own limits.
+    // 64-bit targets only.
     pub const MIN: usize = 0;
     pub const MAX: usize = 18446744073709551615;
 
@@ -2077,8 +2108,7 @@ impl usize {
     #[intrinsic("rok.bswap.usize")]
     pub fn swap_bytes(self) -> usize { self.swap_bytes() }
 
-    // ponytail: little-endian targets only (`to_be` swaps, `to_le` is
-    // the identity).
+    // Little-endian targets only: `to_be` swaps, `to_le` is the identity.
     pub fn to_be(self) -> usize { self.swap_bytes() }
     pub fn to_le(self) -> usize { self }
     pub fn from_be(x: usize) -> usize { x.swap_bytes() }
@@ -2208,6 +2238,7 @@ impl usize {
     pub fn div_euclid(self, rhs: usize) -> usize { self / rhs }
     pub fn rem_euclid(self, rhs: usize) -> usize { self % rhs }
     /// Integer square root (rounded down).
+    #[track_caller]
     pub fn isqrt(self) -> usize {
         if self < 2 { return self; }
         // A float estimate, then exact fix-up (division keeps it from
@@ -2219,6 +2250,7 @@ impl usize {
     }
     pub fn is_power_of_two(self) -> bool { self != 0 && self & (self - 1) == 0 }
     /// The smallest power of two `>= self`; panics past `MAX`.
+    #[track_caller]
     pub fn next_power_of_two(self) -> usize {
         self.checked_next_power_of_two() ?? panic("next_power_of_two overflowed")
     }
@@ -2230,8 +2262,11 @@ impl usize {
         one << (p as usize)
     }
     /// `floor(log2(self))`; panics unless `self > 0`.
+    #[track_caller]
     pub fn ilog2(self) -> u32 { self.checked_ilog2() ?? panic("ilog2 of a non-positive number") }
+    #[track_caller]
     pub fn ilog10(self) -> u32 { self.checked_ilog10() ?? panic("ilog10 of a non-positive number") }
+    #[track_caller]
     pub fn ilog(self, base: usize) -> u32 {
         self.checked_ilog(base) ?? panic("ilog of a non-positive number or a base below 2")
     }

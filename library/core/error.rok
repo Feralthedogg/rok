@@ -55,6 +55,7 @@ impl<T, E> Result<T, E> {
     }
 
     /// The value; panics on `Err`.
+    #[track_caller]
     pub fn unwrap(self) -> T {
         try! self.get()
     }

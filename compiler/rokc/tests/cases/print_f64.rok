@@ -4,7 +4,8 @@
 // 0.001
 // 100
 
-// Float formatting through an f-string.
+// A float's Display: the shortest digits that read back as the same
+// value.
 fn main() -> i32 {
     println(f"{3.14159f64}");
     println(f"{0.001f64}");

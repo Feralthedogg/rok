@@ -1,0 +1,205 @@
+// rok::core::collections::deque — `Deque<T>`, a growable ring buffer
+// with O(1) push and pop at both ends. `meta` holds `[head, len, cap]`;
+// a vacated slot is overwritten with a zeroed `T` so the deque does not
+// keep a popped value alive.
+
+pub struct Deque<T> {
+    meta: GcBuf<usize>;
+    data: GcBuf<GcBuf<T>>;
+    /// One zeroed `T`: what a vacated slot holds.
+    zero: GcBuf<T>;
+}
+
+impl<T> Deque<T> {
+    pub fn new() -> Deque<T> {
+        Deque::with_capacity(8)
+    }
+
+    pub fn with_capacity(cap: usize) -> Deque<T> {
+        let meta: GcBuf<usize> = buf_new(3);
+        let c = cap.max(1);
+        meta[2] = c;
+        let data: GcBuf<GcBuf<T>> = buf_new(1);
+        data[0] = buf_new(c);
+        Deque { meta, data, zero: buf_new(1) }
+    }
+
+    pub fn len(self) -> usize {
+        self.meta[1]
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.meta[1] == 0
+    }
+
+    pub fn capacity(self) -> usize {
+        self.meta[2]
+    }
+
+    /// Ring position of element `i`.
+    fn slot(self, i: usize) -> usize {
+        (self.meta[0] + i) % self.meta[2]
+    }
+
+    /// Double the ring when full; the elements move to `0..len`.
+    fn grow(self) {
+        let n = self.meta[1];
+        let cap = self.meta[2];
+        if n < cap {
+            return;
+        }
+        let old = self.data[0];
+        let store: GcBuf<T> = buf_new(cap * 2);
+        for i in 0..n {
+            store[i] = old[self.slot(i)];
+        }
+        self.data[0] = store;
+        self.meta[0] = 0;
+        self.meta[2] = cap * 2;
+    }
+
+    pub fn push_back(self, x: T) {
+        self.grow();
+        let n = self.meta[1];
+        self.data[0][self.slot(n)] = x;
+        self.meta[1] = n + 1;
+    }
+
+    pub fn push_front(self, x: T) {
+        self.grow();
+        let cap = self.meta[2];
+        let head = (self.meta[0] + cap - 1) % cap;
+        self.data[0][head] = x;
+        self.meta[0] = head;
+        self.meta[1] += 1;
+    }
+
+    pub fn pop_front(self) -> T | none {
+        let n = self.meta[1];
+        if n == 0 {
+            return none;
+        }
+        let head = self.meta[0];
+        let store = self.data[0];
+        let x = store[head];
+        store[head] = self.zero[0];
+        self.meta[0] = (head + 1) % self.meta[2];
+        self.meta[1] = n - 1;
+        x
+    }
+
+    pub fn pop_back(self) -> T | none {
+        let n = self.meta[1];
+        if n == 0 {
+            return none;
+        }
+        let at = self.slot(n - 1);
+        let store = self.data[0];
+        let x = store[at];
+        store[at] = self.zero[0];
+        self.meta[1] = n - 1;
+        x
+    }
+
+    /// Element `i` from the front, or `none` out of bounds.
+    pub fn get(self, i: usize) -> T | none {
+        if i >= self.meta[1] {
+            return none;
+        }
+        self.data[0][self.slot(i)]
+    }
+
+    pub fn front(self) -> T | none {
+        self.get(0)
+    }
+
+    pub fn back(self) -> T | none {
+        let n = self.meta[1];
+        if n == 0 {
+            return none;
+        }
+        self.get(n - 1)
+    }
+
+    pub fn clear(self) {
+        let store = self.data[0];
+        for i in 0..self.meta[1] {
+            store[self.slot(i)] = self.zero[0];
+        }
+        self.meta[0] = 0;
+        self.meta[1] = 0;
+    }
+
+    pub fn iter(self) -> DequeIter<T> {
+        let pos: GcBuf<usize> = buf_new(1);
+        DequeIter { deque: self, pos }
+    }
+}
+
+/// Front to back.
+pub struct DequeIter<T> {
+    deque: Deque<T>;
+    pos: GcBuf<usize>;
+}
+
+impl<T> Iterator for DequeIter<T> {
+    type Item = T;
+    fn next(ref self) -> T | none {
+        let i = self.pos[0];
+        if i >= self.deque.len() {
+            return none;
+        }
+        self.pos[0] = i + 1;
+        self.deque.get(i)
+    }
+}
+
+impl<T> IntoIterator for Deque<T> {
+    type IntoIter = DequeIter<T>;
+    type Item = T;
+    fn into_iter(self) -> DequeIter<T> {
+        self.iter()
+    }
+}
+
+impl<T> Default for Deque<T> {
+    fn default() -> Deque<T> { Deque::new() }
+}
+
+/// `d[i]`; panics out of bounds.
+impl<T> Index<usize> for Deque<T> {
+    type Output = T;
+    #[track_caller]
+    fn index(self, i: usize) -> T {
+        if i >= self.len() {
+            return panic("Deque index out of bounds");
+        }
+        self.data[0][self.slot(i)]
+    }
+}
+
+/// `d[i] = v`; panics out of bounds.
+impl<T> IndexSet<usize> for Deque<T> {
+    type Value = T;
+    #[track_caller]
+    fn index_set(self, i: usize, value: T) {
+        if i >= self.len() {
+            panic("Deque index out of bounds");
+        }
+        self.data[0][self.slot(i)] = value;
+    }
+}
+
+/// `[a, b, c]`, front to back.
+impl<T: Debug> Debug for Deque<T> {
+    fn debug(self) -> str {
+        let out = "[";
+        let first = true;
+        for x in self {
+            if !first { out += ", "; }
+            out += x.debug();
+            first = false;
+        }
+        out + "]"
+    }
+}

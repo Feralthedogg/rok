@@ -1,6 +1,6 @@
 //! `rok.lock` (RokON): the exact commit (and its content hash) of every git
-//! package the build uses. Path packages are not pinned: they are always
-//! their current content.
+//! package and stone the build uses. Path packages are not pinned: they
+//! are always their current content.
 
 use std::path::Path;
 
@@ -11,6 +11,9 @@ use crate::manifest::{GitRef, Source};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Locked {
     pub name: String,
+    /// A stone's version; `url` is then its registry index
+    /// (`Dep::registry(url)`), and `reference` is `Default`.
+    pub vers: Option<String>,
     pub url: String,
     pub reference: GitRef,
     pub commit: String,
@@ -55,20 +58,42 @@ impl Lock {
             .map_err(bad)?;
         for item in list.unwrap_or_default() {
             let p = item.record("Locked").map_err(bad)?;
-            p.only(&["name", "source", "commit", "tree"]).map_err(bad)?;
+            p.only(&["name", "vers", "source", "commit", "tree"])
+                .map_err(bad)?;
             let field = |k: &str| p.req(k).and_then(|d| d.string()).map_err(bad);
             let name = field("name")?;
             let source = p.req("source").map_err(bad)?;
-            let (url, reference) = match crate::manifest::source(source, &name).map_err(bad)? {
-                Source::Git { url, reference } => (url, reference),
-                Source::Path(_) => {
+            let vers = p.opt("vers").map(|v| v.string()).transpose().map_err(bad)?;
+            let registry = source
+                .variant("Dep")
+                .ok()
+                .filter(|v| v.name == "registry")
+                .map(|v| match v.args.as_slice() {
+                    [u] if v.fields.names().next().is_none() => u.string(),
+                    _ => Err(source.error("`Dep::registry` takes one string, the index url")),
+                })
+                .transpose()
+                .map_err(bad)?;
+            let (url, reference) = match (registry, &vers) {
+                (Some(url), Some(_)) => (url, GitRef::Default),
+                (Some(_), None) => return Err(bad(p.req("vers").unwrap_err())),
+                (None, None) => match crate::manifest::source(source).map_err(bad)? {
+                    Source::Git { url, reference } => (url, reference),
+                    _ => {
+                        return Err(bad(source.error(
+                            "a locked package comes from `Dep::git(..)` or `Dep::registry(..)`",
+                        )));
+                    }
+                },
+                (None, Some(_)) => {
                     return Err(bad(
-                        source.error("a locked package comes from `Dep::git(..)`")
+                        p.field_error("vers", "`vers` goes with `Dep::registry(..)`")
                     ));
                 }
             };
             packages.push(Locked {
                 name,
+                vers,
                 url,
                 reference,
                 commit: field("commit")?,
@@ -85,19 +110,21 @@ impl Lock {
         let packages = pkgs
             .into_iter()
             .map(|p| {
-                let source = Source::Git {
-                    url: p.url.clone(),
-                    reference: p.reference.clone(),
-                };
-                Value::record(
-                    Some("Locked"),
-                    vec![
-                        ("name", Value::str(&p.name)),
-                        ("source", source.to_value()),
-                        ("commit", Value::str(&p.commit)),
-                        ("tree", Value::str(&p.tree)),
-                    ],
-                )
+                let mut fields = vec![("name", Value::str(&p.name))];
+                if let Some(v) = &p.vers {
+                    fields.push(("vers", Value::str(v)));
+                    let src = Value::call("Dep::registry", vec![Value::str(&p.url)], Vec::new());
+                    fields.push(("source", src));
+                } else {
+                    let src = Source::Git {
+                        url: p.url.clone(),
+                        reference: p.reference.clone(),
+                    };
+                    fields.push(("source", src.to_value()));
+                }
+                fields.push(("commit", Value::str(&p.commit)));
+                fields.push(("tree", Value::str(&p.tree)));
+                Value::record(Some("Locked"), fields)
             })
             .collect();
         let lock = Value::record(
@@ -124,6 +151,7 @@ mod tests {
             packages: vec![
                 Locked {
                     name: "z".into(),
+                    vers: None,
                     url: "file:///z".into(),
                     reference: GitRef::Default,
                     commit: "c1".into(),
@@ -131,6 +159,7 @@ mod tests {
                 },
                 Locked {
                     name: "a".into(),
+                    vers: None,
                     url: "https://x/a.git".into(),
                     reference: GitRef::Branch("main".into()),
                     commit: "c2".into(),
@@ -149,6 +178,7 @@ mod tests {
         let one = Lock {
             packages: vec![Locked {
                 name: "json".into(),
+                vers: None,
                 url: "https://example.com/json.git".into(),
                 reference: GitRef::Tag("v1.2".into()),
                 commit: c.clone(),
@@ -165,6 +195,25 @@ mod tests {
                  }},\n    ],\n}}\n"
             )
         );
+        let stone = Lock {
+            packages: vec![Locked {
+                name: "geom".into(),
+                vers: Some("0.3.1".into()),
+                url: "https://github.com/o/rokstones.io-index".into(),
+                reference: GitRef::Default,
+                commit: c,
+                tree: t,
+            }],
+        };
+        let text = stone.to_text();
+        assert!(
+            text.contains(
+                "name: \"geom\",\n            vers: \"0.3.1\",\n            source: \
+                 Dep::registry(\"https://github.com/o/rokstones.io-index\"),\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(Lock::parse(&text, "rok.lock").unwrap(), stone);
         assert_eq!(
             Lock::default().to_text().lines().nth(1),
             Some("Lock { version: 1, packages: [] }")
@@ -187,7 +236,17 @@ mod tests {
             (
                 "Lock { version: 1, packages: [Locked { name: \"a\", source: Dep::path(\"p\"), \
                  commit: \"c\", tree: \"t\" }] }",
-                "a locked package comes from `Dep::git(..)`",
+                "a locked package comes from `Dep::git(..)` or `Dep::registry(..)`",
+            ),
+            (
+                "Lock { version: 1, packages: [Locked { name: \"a\", source: Dep::registry(\"u\"), \
+                 commit: \"c\", tree: \"t\" }] }",
+                "missing field `vers`",
+            ),
+            (
+                "Lock { version: 1, packages: [Locked { name: \"a\", vers: \"1.0.0\", \
+                 source: Dep::git(\"u\"), commit: \"c\", tree: \"t\" }] }",
+                "`vers` goes with",
             ),
             (
                 "Lock { version: 1, packages: [Locked { name: \"a\", source: Dep::git(\"u\") }] }",

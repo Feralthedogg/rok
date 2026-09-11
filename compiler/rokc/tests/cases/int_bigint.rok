@@ -13,7 +13,7 @@
 // [ff] [0xFF] [-ff] [0b11111111] [377] [     255] [255     ] [   255   ] [+255] [00000255] [-0000255]
 // [1.2345678901234567890123e22] [1.235e22] [1.2345678901234567890123E22] [255.00] [       12345678901234567890123] [-    255] [12345678901234567890123]
 // 123456789012345678901064827458 -817913889 -123456789012345678901882741347 987654320 -123456791 -1252000592833654354567462788044156829696 6692605942
-// 6 10 5 9223372036854775807 -987654321 79 -4362896299872285998 2770 -9.87654e+08 1.23457e+29 true -987654321
+// 6 10 5 9223372036854775807 -987654321 79 -4362896299872285998 2770 -987654321 123456789012345680000000000000 true -987654321
 // true
 // 100000000000000000000000000000000000000000000000000 1 -27 28181790 97 987654321 -1
 // 9223372036854775808 9223372036854775807 -9223372036854775808 -9223372036854775809 -9223372036854775808
@@ -75,10 +75,10 @@ fn main() {
     println(f"{huge / d} {huge % d} {huge %% d} {(huge / d) * d + huge % d == huge}");
 
     // Parse / print.
-    let h = int::from_str("-ffffffffffffffffffffffffffffffff", 16u32) ?? 0 as int;
+    let h = int::parse_radix("-ffffffffffffffffffffffffffffffff", 16u32) ?? 0 as int;
     println(f"{h} {h.to_str_radix(16u32)} {h.to_str_radix(36u32)} {h.to_str_radix(2u32).len()}");
     let parsed: int = try! "123456789012345678901234567890".parse::<int>();
-    println(f"{parsed == lit} {int::from_str("12x", 10u32) is none} {int::from_str("", 10u32) is none} {int::from_str("+z", 36u32) ?? 0 as int}");
+    println(f"{parsed == lit} {int::parse_radix("12x", 10u32) is none} {int::parse_radix("", 10u32) is none} {int::parse_radix("+z", 36u32) ?? 0 as int}");
     let hexlit: int = 0xffff_ffff_ffff_ffff_ffff;
     println(f"{hexlit} {int::from_literal("0b1_0000_0000")}");
 

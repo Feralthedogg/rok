@@ -115,6 +115,7 @@ impl<T> List<T> {
         self.get(n - 1)
     }
 
+    #[track_caller]
     pub fn insert(self, idx: usize, x: T) {
         let n = self.len();
         if idx > n {
@@ -131,6 +132,7 @@ impl<T> List<T> {
         self.meta[0] = n + 1;
     }
 
+    #[track_caller]
     pub fn remove(self, idx: usize) -> T {
         let n = self.len();
         if idx >= n {
@@ -149,10 +151,103 @@ impl<T> List<T> {
         self.meta[0] = 0;
     }
 
+    /// Set the length to `n` (at most the capacity) without writing
+    /// elements, for a buffer filled in place: elements past the old
+    /// length hold whatever the storage held (zero when fresh).
+    #[track_caller]
+    pub unsafe fn set_len(self, n: usize) {
+        if n > self.capacity() {
+            panic("List::set_len: past the capacity");
+        }
+        self.meta[0] = n;
+    }
+
     pub fn iter(self) -> ListIter<T> {
         // [front index, items taken from the back]
         let pos: GcBuf<usize> = buf_new(2);
         ListIter { list: self, pos }
+    }
+}
+
+/// Runs this short are insertion-sorted before merging.
+const SORT_RUN: usize = 16;
+
+impl<T: Ord> List<T> {
+    /// Ascending, stable.
+    pub fn sort(self) {
+        self.sort_by(|a: T, b: T| a.cmp(b));
+    }
+}
+
+impl<T> List<T> {
+    /// Stable bottom-up merge sort by `cmp`: O(n log n), n extra slots.
+    pub fn sort_by(self, cmp: fn(T, T) -> rok::core::cmp::Ordering) {
+        let n = self.len();
+        if n < 2 {
+            return;
+        }
+        let src = self.data[0];
+        let lo: usize = 0;
+        while lo < n {
+            let hi = (lo + SORT_RUN).min(n);
+            for i in lo + 1..hi {
+                let x = src[i];
+                let j = i;
+                while j > lo && cmp(src[j - 1], x).is_gt() {
+                    src[j] = src[j - 1];
+                    j -= 1;
+                }
+                src[j] = x;
+            }
+            lo = hi;
+        }
+        if n <= SORT_RUN {
+            return;
+        }
+        let a = src;
+        let b: GcBuf<T> = buf_new(n);
+        let width = SORT_RUN;
+        while width < n {
+            let start: usize = 0;
+            while start < n {
+                let mid = (start + width).min(n);
+                let end = (start + 2 * width).min(n);
+                let i = start;
+                let j = mid;
+                let k = start;
+                while i < mid && j < end {
+                    // Ties take the left run: stable.
+                    if cmp(a[j], a[i]).is_lt() {
+                        b[k] = a[j];
+                        j += 1;
+                    } else {
+                        b[k] = a[i];
+                        i += 1;
+                    }
+                    k += 1;
+                }
+                while i < mid {
+                    b[k] = a[i];
+                    i += 1;
+                    k += 1;
+                }
+                while j < end {
+                    b[k] = a[j];
+                    j += 1;
+                    k += 1;
+                }
+                start = end;
+            }
+            let t = a;
+            a = b;
+            b = t;
+            width *= 2;
+        }
+        if !buf_same(a, src) {
+            for i in 0..n {
+                src[i] = a[i];
+            }
+        }
     }
 }
 
@@ -212,6 +307,7 @@ impl<T: Clone> Clone for List<T> {
 /// `xs[i]`; panics out of bounds.
 impl<T> Index<usize> for List<T> {
     type Output = T;
+    #[track_caller]
     fn index(self, idx: usize) -> T {
         if idx >= self.len() {
             return panic("List index out of bounds");
@@ -223,6 +319,7 @@ impl<T> Index<usize> for List<T> {
 /// `xs[i] = v`; panics out of bounds.
 impl<T> IndexSet<usize> for List<T> {
     type Value = T;
+    #[track_caller]
     fn index_set(self, idx: usize, value: T) {
         if idx >= self.len() {
             panic("List index out of bounds");

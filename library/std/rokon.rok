@@ -64,18 +64,82 @@ impl Debug for Value {
     fn debug(self) -> str { write::loose(self) }
 }
 
-// ponytail: equality and hashing go through the one-line text — exact for
-// every kind (dict / field order counts), O(size) per call; a structural
-// walk if `Value` keys ever show up in a profile.
+/// Structural. Dict entries and fields compare as `OrderedDict` does
+/// (order ignored); `{}` as a struct equals `{}` as a dict. Floats compare by identity (NaN equals NaN, -0.0
+/// differs from 0.0) so `==` stays reflexive for keys.
 impl PartialEq for Value {
-    fn eq(self, rhs: Value) -> bool { write::loose(self) == write::loose(rhs) }
-    fn ne(self, rhs: Value) -> bool { write::loose(self) != write::loose(rhs) }
+    fn eq(self, rhs: Value) -> bool {
+        match (norm(self), norm(rhs)) {
+            (Value::None, Value::None) => true,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => {
+                if a.is_nan() || b.is_nan() { return a.is_nan() && b.is_nan(); }
+                a == b && a.is_sign_negative() == b.is_sign_negative()
+            },
+            (Value::Char(a), Value::Char(b)) => a == b,
+            (Value::Str(a), Value::Str(b)) => a == b,
+            (Value::List(a), Value::List(b)) => a == b,
+            (Value::Tuple(a), Value::Tuple(b)) => a == b,
+            (Value::Dict(a), Value::Dict(b)) => a == b,
+            (Value::Struct { name: n, fields: f }, Value::Struct { name: m, fields: g }) => {
+                let same = match n {
+                    a: str => match m {
+                        b: str => a == b,
+                        none => false,
+                    },
+                    none => m is none,
+                };
+                same && f == g
+            },
+            (Value::Variant { path: p, args: a, named: n }, Value::Variant { path: q, args: b, named: m }) => {
+                p == q && a == b && n == m
+            },
+            _ => false,
+        }
+    }
+    fn ne(self, rhs: Value) -> bool { !self.eq(rhs) }
 }
 
 impl Eq for Value {}
 
 impl Hash for Value {
-    fn hash(self) -> u64 { write::loose(self).hash() }
+    fn hash(self) -> u64 {
+        match norm(self) {
+            Value::None => 0u64,
+            Value::Bool(b) => mix(1u64, b.hash()),
+            Value::Int(n) => mix(2u64, n.hash()),
+            // Equal floats share an `f64`; every NaN hashes alike.
+            Value::Float(x) => mix(3u64, if x.is_nan() { 0u64 } else { x.to_f64().to_bits() }),
+            Value::Char(c) => mix(4u64, c.hash()),
+            Value::Str(s) => mix(5u64, s.hash()),
+            Value::List(xs) => mix(6u64, xs.hash()),
+            Value::Tuple(xs) => mix(7u64, xs.hash()),
+            Value::Dict(d) => mix(8u64, entries_hash(d)),
+            Value::Struct { name, fields } => mix(mix(9u64, (name ?? "").hash()), entries_hash(fields)),
+            Value::Variant { path, args, named } => mix(mix(mix(10u64, path.hash()), args.hash()), entries_hash(named)),
+        }
+    }
+}
+
+/// `{}` reads back as an empty `Dict`, so an empty unnamed `Struct` is one.
+fn norm(v: Value) -> Value {
+    if let Value::Struct { name, fields } = v {
+        if name is none && fields.is_empty() { return Value::Dict(OrderedDict::new()); }
+    }
+    v
+}
+
+fn mix(h: u64, x: u64) -> u64 { ((h << 5u64) | (h >> 59u64)) ^ x }
+
+/// Order-independent, matching `OrderedDict` equality.
+fn entries_hash<K: Hash>(d: OrderedDict<K, Value>) -> u64 {
+    let h = d.len() as u64;
+    for (k, v) in d.entries() {
+        let vh = v.hash();
+        h ^= k.hash() ^ ((vh << 17u64) | (vh >> 47u64));
+    }
+    h
 }
 
 /// A read or decode error. `line` / `col` (1-based, code points) are 0
@@ -703,8 +767,7 @@ impl<T: FromRokon, const N: usize> FromRokon for [T; N] {
         if xs.len() != N {
             throw RokonError::new(f"expected {N} items, found {xs.len()}");
         }
-        // ponytail: the array is seeded with its first item, so `[T; 0]`
-        // cannot be built without a `T`; a `Default` bound would fix it.
+        // The array is seeded with its first item: `[T; 0]` cannot be read.
         if N == 0 { throw RokonError::new("cannot read a zero-length array"); }
         let out: [T; N] = [xs[0]; N];
         for i in 1..N { out[i] = xs[i]; }
@@ -776,7 +839,7 @@ fn tuple_of<T>(v: Value, n: usize) throws (RokonError) -> List<Value> {
     xs
 }
 
-// ponytail: tuples up to 6; core's tuple impls go to 12 if one is needed.
+// Tuples up to 6 elements (spec 3.9.5).
 impl<A: ToRokon> ToRokon for (A,) {
     fn to_rokon(self) -> Value { Value::Tuple([self.0.to_rokon()]) }
 }

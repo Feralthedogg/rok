@@ -1,0 +1,34 @@
+// expect-exit: 0
+// expect-stdout: 1 2 3 4 5 6 7 8 9
+// A condition / scrutinee bans a struct literal only at its top level
+// (its `{` would open the body); inside `( )`, `[ ]` or a call's
+// arguments a struct literal is an ordinary operand.
+struct S { a: i32; }
+
+impl S {
+    fn same(self, o: S) -> bool { self.a == o.a }
+}
+
+fn f(s: S) -> bool { s.a == 1 }
+fn g(s: S) -> i32 { s.a }
+fn h(c: fn(i32) -> S) -> i32 { c(9).a }
+
+fn main() -> i32 {
+    let out = "";
+    if f(S { a: 1 }) { out = out + "1"; }
+    if (S { a: 2 }).a == 2 { out = out + " 2"; }
+    if (S { a: 3 }).same(S { a: 3 }) { out = out + " 3"; }
+    if [S { a: 4 }][0].a == 4 { out = out + " 4"; }
+    if (S { a: 5 }, 0).0.a == 5 { out = out + " 5"; }
+    let n = 0;
+    while g(S { a: n }) < 6 { n += 1; }
+    out = out + f" {n}";
+    match g(S { a: 7 }) {
+        7 => { out = out + " 7"; }
+        _ => {}
+    }
+    for x in [S { a: 8 }] { out = out + f" {x.a}"; }
+    if h(|x: i32| S { a: x }) == 9 { out = out + " 9"; }
+    println(out);
+    return 0;
+}

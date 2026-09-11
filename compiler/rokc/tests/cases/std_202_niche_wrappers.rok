@@ -1,0 +1,62 @@
+// expect-exit: 0
+// expect-stdout:
+// 4 1 2 4 8 8 8 8 4 8 4 8 8
+// 42 true false 42 NonZero(42)
+// 252 48 36 7 14 false true Greater true
+// caught zero is not a valid `NonZero` value
+// 42 5 5 5 9
+// true 1.5 3 true true Greater NonNan(1.5)
+// true true 0 2 Finite(2)
+// true false 0
+// 3,9,
+// zero one
+// -4 -0 1.5
+
+// Stdlib 2.2: `NonZero<T>` / `NonNan<F>` / `Finite<F>` / `Positive<T>`
+// — sizes of `W | none`, construction, `get`, the arithmetic table,
+// comparison / hashing, `TryFrom` (`ZeroError`), `From` back, and the
+// wrappers as `Dict` keys / sorted.
+
+use rok::bare::mem::size_of;
+
+fn main() {
+    println(f"{size_of::<NonZero<i32> | none>()} {size_of::<NonZero<u8> | none>()} {size_of::<NonZero<i16> | none>()} {size_of::<NonZero<u32> | none>()} {size_of::<NonZero<i64> | none>()} {size_of::<NonZero<usize> | none>()} {size_of::<NonNan<f64> | none>()} {size_of::<Finite<f64> | none>()} {size_of::<NonNan<f32> | none>()} {size_of::<f32 | none>()} {size_of::<Positive<i32> | none>()} {size_of::<Positive<u32> | none>()} {size_of::<i32 | none>()}");
+    let n: NonZero<i32> = NonZero::new(42) ?? panic("zero");
+    let z: NonZero<i32> | none = NonZero::new(0);
+    let m: NonZero<i32> | none = NonZero::new(7);
+    println(f"{n.get()} {z is none} {m is none} {n} {n.debug()}");
+    let b: NonZero<i32> = NonZero::new(6) ?? panic("zero");
+    println(f"{n * b} {n + b} {n - b} {n / b} {84 / b} {n == b} {n > b} {n.cmp(b).debug()} {n.hash() == 42.hash()}");
+    let e = try NonZero::<i32>::try_from(0) catch err: ZeroError { println(f"caught {err}"); n };
+    let t: NonZero<i32> = try 5.try_into() catch _ { n };
+    let v: i32 = t.into();
+    let u = unsafe { NonZero::new_unchecked(9 as u8) };
+    println(f"{e} {t} {v} {i32::from(t)} {u}");
+    let nn: NonNan<f64> | none = NonNan::new(0.0 / 0.0);
+    let one = NonNan::new(1.5) ?? panic("nan");
+    let mz = NonNan::new(-0.0) ?? panic("nan");
+    let pz = NonNan::new(0.0) ?? panic("nan");
+    println(f"{nn is none} {one} {one + one} {mz == pz} {mz.hash() == pz.hash()} {one.cmp(pz).debug()} {one.debug()}");
+    let inf: Finite<f64> | none = Finite::new(1.0 / 0.0);
+    let big = Finite::new(1.0e308) ?? panic("inf");
+    let two = Finite::new(2.0) ?? big;
+    println(f"{inf is none} {(big + big).is_err()} {(big - big).unwrap()} {two} {two.debug()}");
+    let p: Positive<i32> | none = Positive::new(-3);
+    let q: Positive<i32> | none = Positive::new(0);
+    println(f"{p is none} {q is none} {(q ?? Positive::new(5) ?? panic("neg")).get()}");
+    let xs: List<NonZero<u64> | none> = List::new();
+    xs.push(NonZero::new(3 as u64));
+    xs.push(none);
+    for x in xs {
+        let w = x ?? NonZero::new(9 as u64) ?? panic("zero");
+        print(f"{w},");
+    }
+    println("");
+    let d: Dict<NonNan<f64>, str> = Dict::new();
+    d[one] = "one";
+    d[pz] = "zero";
+    println(f"{d[mz]} {d[one]}");
+    let ys: List<NonNan<f64>> = [one, mz, NonNan::new(-4.0) ?? one];
+    ys.sort();
+    println(f"{ys[0]} {ys[1]} {ys[2]}");
+}

@@ -281,6 +281,7 @@ pub fn lower_full(
     let assoc_sigs = with_self_assoc_sigs(program);
     let program = assoc_sigs.as_ref().unwrap_or(program);
     check_bound_names(program, &names, &mut pre_diags);
+    check_niche_attrs(program, &mut pre_diags);
 
     // Pass 1a: enums. Generic enums get stashed for lazy instantiation.
     let mut enum_table: HashMap<String, EnumId> = HashMap::new();
@@ -1412,6 +1413,7 @@ pub fn lower_full(
         infer_depth: std::cell::Cell::new(0),
         infer_floor: std::cell::Cell::new(0),
         fn_origin: std::cell::RefCell::new(HashMap::new()),
+        track_caller: std::cell::RefCell::new(std::collections::HashSet::new()),
         const_lowering: std::cell::RefCell::new(std::collections::HashSet::new()),
         const_stack: std::cell::RefCell::new(Vec::new()),
     };
@@ -1704,6 +1706,7 @@ pub fn lower_full(
     if let Some(id) = &main {
         set(id, &|f| f.role = FnRole::Main);
     }
+    super::caller::lower(&mut functions, &sink.track_caller.borrow());
     let lazy_inits = static_defs.iter().filter_map(|s| s.init_fn);
     let roots = if lib_pkg.is_some() {
         let package = (0..decl_roots.len())
@@ -2145,6 +2148,130 @@ pub(super) fn lower_enum_def(
     }
 }
 
+/// `#[niche(..)]` arguments (spec 2.7.4): integer literals, `MIN` /
+/// `MAX` (`i32::MIN`, `I32_MIN`), `NAN` / `INFINITY` / `NEG_INFINITY`
+/// (`f64::NAN`, `F::NAN`) and ranges of them. Empty without the
+/// attribute; `Err` describes the first argument it cannot read.
+pub(super) fn niche_args(attrs: &[rokc_ast::Attribute]) -> Result<Vec<NicheArg>, String> {
+    use rokc_ast::{AttrArg, AttrBody, Literal};
+    let Some(attr) = attrs.iter().find(|a| a.name() == "niche") else {
+        return Ok(Vec::new());
+    };
+    let AttrBody::Args(args) = &attr.body else {
+        return Err("`#[niche]` takes arguments: `#[niche(0)]`".to_owned());
+    };
+    let val = |a: &AttrArg| -> Option<NicheVal> {
+        let name = match a {
+            AttrArg::Lit(Literal::Int(text)) => {
+                let (body, neg) = text
+                    .strip_prefix('-')
+                    .map_or((text.as_str(), false), |b| (b, true));
+                let (v, _) = super::expr::parse_int_literal(body)?;
+                return Some(NicheVal::Int(if neg { -v } else { v }));
+            }
+            AttrArg::Word(w) => w.as_str(),
+            AttrArg::Nested { path, body } if matches!(**body, AttrBody::Empty) => path.last()?,
+            _ => return None,
+        };
+        Some(match name {
+            "NAN" => NicheVal::Nan,
+            "INFINITY" => NicheVal::Inf,
+            "NEG_INFINITY" => NicheVal::NegInf,
+            "MIN" => NicheVal::Min,
+            "MAX" => NicheVal::Max,
+            _ => {
+                let (ty, end) = name.rsplit_once('_')?;
+                let bits: u32 = match ty {
+                    "ISIZE" | "USIZE" => 64,
+                    _ => ty.get(1..)?.parse().ok()?,
+                };
+                let signed = match ty.as_bytes().first()? {
+                    b'I' => true,
+                    b'U' => false,
+                    _ => return None,
+                };
+                if !matches!(bits, 8 | 16 | 32 | 64) {
+                    return None;
+                }
+                NicheVal::Int(match (signed, end) {
+                    (true, "MIN") => -(1i128 << (bits - 1)),
+                    (true, "MAX") => (1i128 << (bits - 1)) - 1,
+                    (false, "MIN") => 0,
+                    (false, "MAX") => (1i128 << bits) - 1,
+                    _ => return None,
+                })
+            }
+        })
+    };
+    args.iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let bad = || {
+                format!(
+                    "`#[niche]` argument {}: expected an integer, `MIN` / `MAX`, `NAN` / \
+                     `INFINITY` / `NEG_INFINITY`, or a range of them",
+                    i + 1
+                )
+            };
+            match a {
+                AttrArg::Range { lo, hi, inclusive } => {
+                    let lo = lo
+                        .as_deref()
+                        .map_or(Some(NicheVal::Min), val)
+                        .ok_or_else(bad)?;
+                    let hi = match (hi.as_deref().map(val), inclusive) {
+                        (None, _) => NicheVal::Max,
+                        (Some(Some(v)), true) => v,
+                        (Some(Some(NicheVal::Int(v))), false) => NicheVal::Int(v - 1),
+                        _ => return Err(bad()),
+                    };
+                    Ok(NicheArg::Range(lo, hi))
+                }
+                _ => val(a).map(NicheArg::Val).ok_or_else(bad),
+            }
+        })
+        .collect()
+}
+
+/// `#[niche]` placement (spec 2.7.5): a single-field struct only.
+fn check_niche_attrs(program: &rokc_ast::Program, diags: &mut Vec<rokc_diagnostic::RokDiagnostic>) {
+    for item in &program.items {
+        // `misplaced`: what the attribute sits on, if not one field.
+        let (attrs, misplaced) = match item {
+            Item::Struct(s) => {
+                let n = match &s.kind {
+                    AstStructKind::Named(fs) => fs.len(),
+                    AstStructKind::Tuple(fs) => fs.len(),
+                    AstStructKind::Unit => 0,
+                };
+                (
+                    &s.attrs,
+                    (n != 1).then(|| format!("a struct with {n} fields")),
+                )
+            }
+            Item::Enum(e) => (&e.attrs, Some("an enum".to_owned())),
+            Item::Union(u) => (&u.attrs, Some("a union".to_owned())),
+            _ => continue,
+        };
+        let Some(attr) = attrs.iter().find(|a| a.name() == "niche") else {
+            continue;
+        };
+        rokc_diagnostic::set_current_span(attr.span);
+        let msg = match misplaced {
+            None => niche_args(attrs).err(),
+            Some(w) => Some(format!(
+                "`#[niche]` goes on a single-field struct, not {w} (spec 2.7.5)"
+            )),
+        };
+        if let Some(msg) = msg {
+            diags.push(rokc_diagnostic::RokDiagnostic::error(
+                rokc_diagnostic::ErrorKind::Type,
+                msg,
+            ));
+        }
+    }
+}
+
 pub(super) fn lower_struct_def(
     s: &AstStructDef,
     id: StructId,
@@ -2184,6 +2311,7 @@ pub(super) fn lower_struct_def(
         span: s.span,
         generic_args: Vec::new(),
         union_kind: None,
+        niche: niche_args(&s.attrs).unwrap_or_default(),
     }
 }
 
@@ -2238,6 +2366,7 @@ pub(super) fn lower_union_def(
             aliases,
             is_repr_c,
         }),
+        niche: Vec::new(),
     }
 }
 

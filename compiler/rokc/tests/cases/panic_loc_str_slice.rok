@@ -1,0 +1,9 @@
+// expect-exit: 101
+// expect-stderr: thread 'main' panicked at
+// expect-stderr: panic_loc_str_slice.rok:9:9:
+// expect-stderr: string slice is not on a char boundary
+
+// A runtime check inside a `#[track_caller]` library helper (`str`'s
+// slice, the runtime's boundary check) reports the user's expression.
+let s = "a가";
+println(s[1:2]);

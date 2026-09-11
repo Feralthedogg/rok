@@ -1,27 +1,7 @@
-// rok::core::par — data-parallel helpers (stdlib spec 2.19).
-//
-// Everything below the "pool seam" section is written against three
-// internal functions — `fork`, `wait_forked`, `run_chunks` — so the
-// work-stealing scheduler (706) can replace the thread-per-call pool
-// without touching the public API.
-//
+// rok::core::par — data-parallel helpers (stdlib spec 2.19), on the
+// process's task executor (`rok::core::task`): from async code on the
+// worker it runs on, from sync code with the caller as a guest worker.
 // Chunks are claimed from a shared counter by one job per worker.
-
-// ---- pool seam ----
-//
-// The work runs on the task executor's work-stealing pool
-// (`rok::core::task`): inside `block_on` / async code on the running
-// pool, from plain sync code on a pool started for the call.
-
-/// Run `f` as a pool task; `wait_forked` its handle.
-fn fork(f: fn() + Send) -> Task<bool> {
-    task::fork_job(f)
-}
-
-/// Wait for a `fork`ed job, running other pool tasks meanwhile.
-fn wait_forked(h: Task<bool>) {
-    task::help_until(h);
-}
 
 /// Run `job(c)` for every `c` in `0..chunks` across the workers (this
 /// thread included); returns once all have finished.
@@ -43,11 +23,11 @@ fn run_chunks(chunks: usize, job: fn(usize) + Send) {
         };
         let helpers: List<Task<bool>> = [];
         for _ in 1..workers {
-            helpers.push(fork(work));
+            helpers.push(task::fork_job(work));
         }
         work();
         for h in helpers {
-            wait_forked(h);
+            task::help_until(h);
         }
         true
     });
@@ -72,8 +52,6 @@ fn collect_items<I: IntoIterator>(iter: I) -> List<I::Item> {
     }
     items
 }
-
-// ---- public API ----
 
 /// Call `f` on every item, in parallel (order unspecified).
 pub fn for_each<I: IntoIterator, T: Send>(iter: I, f: fn(T) + Send + Sync) {
@@ -150,9 +128,9 @@ pub fn join<T1: Send, T2: Send>(f1: fn() -> T1 + Send, f2: fn() -> T2 + Send) ->
     let first: GcBuf<T1> = buf_new(1);
     let second: GcBuf<T2> = buf_new(1);
     task::in_pool(|| {
-        let h = fork(|| { second[0] = f2(); });
+        let h = task::fork_job(|| { second[0] = f2(); });
         first[0] = f1();
-        wait_forked(h);
+        task::help_until(h);
         true
     });
     (first[0], second[0])
@@ -197,7 +175,7 @@ impl ScopeTask {
     fn finish(self) {
         let h = self.handle;
         // Every caller returns only after the one join has finished.
-        self.joined.call_once(|| { wait_forked(h); });
+        self.joined.call_once(|| { task::help_until(h); });
     }
 }
 
@@ -214,7 +192,7 @@ impl Scope {
         let result: GcBuf<T> = buf_new(1);
         let cancelled = self.cancelled;
         let task = ScopeTask {
-            handle: fork(|| {
+            handle: task::fork_job(|| {
                 if !cancelled.load() {
                     result[0] = f();
                 }

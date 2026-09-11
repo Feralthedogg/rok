@@ -2,39 +2,29 @@
 //! No ABI stability (805 §8.5.12 appendix).
 //!
 //! Conventions:
-//! - `str` arguments are rok strings; every one is NUL-terminated
-//!   (808), so `ptr` is passed to libc as a C string.
-//! - Integer results: `>= 0` success, `-errno` failure.
-//! - `str` results report failure through `err`, a one-element
-//!   `GcBuf<i32>` (header pointer): `errno`, or 0 on success.
-//! - Byte data travels as `str` values (GC byte strings); the library
-//!   validates UTF-8 where a `str` reaches user code.
+//! - `str` arguments are rok strings; libc gets them through [`cs`]
+//!   (a slice need not be NUL-terminated).
+//! - Results: `>= 0` success, `-errno` failure. Resolver failures use
+//!   codes from [`EAI_BASE`] up; only this module interprets codes.
+//! - Byte data lives in the caller's `GcBuf<u8>` (header pointer) as a
+//!   region `(buf, off, len)`; reads fill it in place. Variable-length
+//!   results (paths, names, values) are copied in up to `len` bytes and
+//!   return their full length, so the caller can retry with more room.
 //! - Calls that may block are bracketed by `enter_native` /
 //!   `leave_native` (804 §8.4.10) so a collection need not wait on them;
-//!   GC strings are allocated only after leaving.
+//!   nothing allocates GC memory while parked. The caller roots every GC
+//!   argument, so it stays in place throughout.
 
 use core::mem::size_of;
 use core::ptr;
 
+pub use rokr_common::errno;
 use rokr_common::object_header::HEADER_SIZE;
 use rokr_gc::world;
 
 use crate::str::{RokStr, build};
 
 type CStrPtr = *const libc::c_char;
-
-pub fn errno() -> i32 {
-    // SAFETY: the libc errno accessor has no preconditions.
-    #[cfg(target_vendor = "apple")]
-    unsafe {
-        *libc::__error()
-    }
-    // SAFETY: as above.
-    #[cfg(not(target_vendor = "apple"))]
-    unsafe {
-        *libc::__errno_location()
-    }
-}
 
 /// `r` (a libc `-1`-on-error result) as `>= 0` or `-errno`.
 pub fn ret(r: isize) -> isize {
@@ -50,8 +40,47 @@ pub fn native<R>(f: impl FnOnce() -> R) -> (R, i32) {
     (r, e)
 }
 
-pub const fn cs(s: RokStr) -> CStrPtr {
-    s.ptr.cast()
+/// `s` as a C string for libc: its own bytes when a NUL follows them,
+/// else a `malloc`ed copy (no GC allocation, so it works while parked)
+/// freed on drop. Keep it alive across the call: `cs(s).p()` inside the
+/// call expression.
+pub fn cs(s: RokStr) -> CArg {
+    if s.len == 0 {
+        return CArg(c"".as_ptr(), false);
+    }
+    // SAFETY: byte `len` of a `str` is readable (its source's next byte
+    // or the NUL after it).
+    if unsafe { *s.ptr.add(s.len) } == 0 {
+        return CArg(s.ptr.cast(), false);
+    }
+    // SAFETY: malloc'd `len + 1` bytes, filled and terminated.
+    unsafe {
+        let p = libc::malloc(s.len + 1).cast::<u8>();
+        if p.is_null() {
+            rokr_common::oom();
+        }
+        ptr::copy_nonoverlapping(s.ptr, p, s.len);
+        *p.add(s.len) = 0;
+        CArg(p.cast_const().cast(), true)
+    }
+}
+
+/// A NUL-terminated string from [`cs`]; `.1`: owned (malloc'd).
+pub struct CArg(CStrPtr, bool);
+
+impl CArg {
+    pub const fn p(&self) -> CStrPtr {
+        self.0
+    }
+}
+
+impl Drop for CArg {
+    fn drop(&mut self) {
+        if self.1 {
+            // SAFETY: our own malloc block.
+            unsafe { libc::free(self.0.cast_mut().cast()) };
+        }
+    }
 }
 
 /// Element `i` of the `GcBuf<i32>` `buf` (header pointer).
@@ -64,96 +93,92 @@ const unsafe fn cell(buf: *mut u8, i: usize) -> *mut i32 {
     unsafe { buf.add(HEADER_SIZE).cast::<i32>().add(i) }
 }
 
-/// Store `e` into the error cell `err` (may be null).
-pub fn set_err(err: *mut u8, e: i32) {
-    if !err.is_null() {
-        // SAFETY: the library passes a live one-element `GcBuf<i32>`.
-        unsafe { *cell(err, 0) = e };
-    }
+/// The writable region `off..off + len` of the `GcBuf<u8>` `buf`.
+///
+/// # Safety
+/// `buf` must be a live `GcBuf<u8>` with at least `off + len` bytes.
+pub const unsafe fn region(buf: *mut u8, off: usize) -> *mut u8 {
+    // SAFETY: caller contract.
+    unsafe { buf.add(HEADER_SIZE + off) }
 }
 
-/// A malloc-backed byte vector (the runtime is `no_std`).
-pub struct Bytes {
-    pub p: *mut u8,
-    pub len: usize,
-    pub cap: usize,
+/// Copy up to `len` bytes of `src` to `buf[off..]`; `src`'s full length.
+fn put(buf: *mut u8, off: usize, len: usize, src: &[u8]) -> isize {
+    // SAFETY: the library passes a live region of `len` bytes.
+    unsafe { ptr::copy_nonoverlapping(src.as_ptr(), region(buf, off), src.len().min(len)) };
+    src.len() as isize
 }
 
-impl Bytes {
-    pub const fn new() -> Self {
-        Self {
-            p: ptr::null_mut(),
-            len: 0,
-            cap: 0,
-        }
-    }
-
-    /// Room for `n` more bytes; returns the spare region.
-    pub fn reserve(&mut self, n: usize) -> *mut u8 {
-        if self.len + n > self.cap {
-            let cap = (self.cap * 2).max(self.len + n).max(4096);
-            // SAFETY: `p` is null or from malloc/realloc.
-            let q = unsafe { libc::realloc(self.p.cast(), cap) }.cast::<u8>();
-            if q.is_null() {
-                rokr_common::oom();
-            }
-            self.p = q;
-            self.cap = cap;
-        }
-        // SAFETY: `len <= cap`.
-        unsafe { self.p.add(self.len) }
-    }
-
-    pub const fn as_slice(&self) -> &[u8] {
-        if self.len == 0 {
-            return &[];
-        }
-        // SAFETY: `p` holds `len` initialized bytes.
-        unsafe { core::slice::from_raw_parts(self.p, self.len) }
-    }
-}
-
-impl Drop for Bytes {
-    fn drop(&mut self) {
-        // SAFETY: null or a malloc block.
-        unsafe { libc::free(self.p.cast()) };
-    }
+/// Bytes of the NUL-terminated `buf` before its NUL.
+fn until_nul(buf: &[u8]) -> &[u8] {
+    &buf[..buf.iter().position(|&b| b == 0).unwrap_or(buf.len())]
 }
 
 // ---------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------
 
-/// `IoErrorKind` discriminant (library/std/io.rok order) of an errno.
+/// First resolver code: `getaddrinfo` failure `e` is `EAI_BASE + |e|`.
+pub const EAI_BASE: i32 = 100_000;
+
+/// `IoErrorKind` discriminants (library/std/io.rok declares the same).
+mod kind {
+    pub const OTHER: i32 = 0;
+    pub const NOT_FOUND: i32 = 1;
+    pub const PERMISSION_DENIED: i32 = 2;
+    pub const ALREADY_EXISTS: i32 = 3;
+    pub const NOT_A_DIRECTORY: i32 = 4;
+    pub const IS_A_DIRECTORY: i32 = 5;
+    pub const DIRECTORY_NOT_EMPTY: i32 = 6;
+    pub const INVALID_INPUT: i32 = 7;
+    pub const BROKEN_PIPE: i32 = 8;
+    pub const INTERRUPTED: i32 = 9;
+    pub const WOULD_BLOCK: i32 = 10;
+    pub const TIMED_OUT: i32 = 11;
+    pub const STORAGE_FULL: i32 = 12;
+    pub const CROSSES_DEVICES: i32 = 13;
+    pub const UNSUPPORTED: i32 = 14;
+}
+
+/// The `IoErrorKind` discriminant of error code `code`.
 #[unsafe(no_mangle)]
 pub const extern "C" fn rok_os_errno_kind(code: i32) -> i32 {
     match code {
-        libc::ENOENT => 1,
-        libc::EACCES | libc::EPERM => 2,
-        libc::EEXIST => 3,
-        libc::ENOTDIR => 4,
-        libc::EISDIR => 5,
-        libc::ENOTEMPTY => 6,
-        libc::EINVAL => 7,
-        libc::EPIPE => 8,
-        libc::EINTR => 9,
-        libc::EAGAIN => 10,
-        libc::ETIMEDOUT => 11,
-        libc::ENOSPC => 12,
-        libc::EXDEV => 13,
-        libc::ENOSYS | libc::ENOTSUP => 14,
-        _ => 0,
+        libc::ENOENT | EAI_BASE.. => kind::NOT_FOUND,
+        libc::EACCES | libc::EPERM => kind::PERMISSION_DENIED,
+        libc::EEXIST => kind::ALREADY_EXISTS,
+        libc::ENOTDIR => kind::NOT_A_DIRECTORY,
+        libc::EISDIR => kind::IS_A_DIRECTORY,
+        libc::ENOTEMPTY => kind::DIRECTORY_NOT_EMPTY,
+        libc::EINVAL => kind::INVALID_INPUT,
+        libc::EPIPE => kind::BROKEN_PIPE,
+        libc::EINTR => kind::INTERRUPTED,
+        libc::EAGAIN => kind::WOULD_BLOCK,
+        libc::ETIMEDOUT => kind::TIMED_OUT,
+        libc::ENOSPC => kind::STORAGE_FULL,
+        libc::EXDEV => kind::CROSSES_DEVICES,
+        libc::ENOSYS | libc::ENOTSUP => kind::UNSUPPORTED,
+        _ => kind::OTHER,
     }
 }
 
-/// `strerror(code)` as a `str`.
+/// The message of error code `code` (`strerror` / `gai_strerror`).
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_strerror(code: i32) -> RokStr {
+    if code >= EAI_BASE {
+        // glibc numbers EAI codes negative, BSD positive.
+        #[cfg(target_os = "linux")]
+        let c = EAI_BASE - code;
+        #[cfg(not(target_os = "linux"))]
+        let c = code - EAI_BASE;
+        // SAFETY: gai_strerror returns a static C string.
+        let s = unsafe { core::ffi::CStr::from_ptr(libc::gai_strerror(c)) };
+        return build(&[s.to_bytes()]);
+    }
     let mut buf = [0u8; 256];
     // SAFETY: `buf` is writable for its length.
     unsafe { libc::strerror_r(code, buf.as_mut_ptr().cast(), buf.len()) };
-    let n = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    build(&[&buf[..n]])
+    build(&[until_nul(&buf)])
 }
 
 // ---------------------------------------------------------------------
@@ -187,7 +212,12 @@ pub extern "C" fn rok_os_open(dir: i32, path: RokStr, flags: i32, mode: u32) -> 
     }
     // SAFETY: `path` is a C string; the mode is read only with O_CREAT.
     let (r, _) = native(|| unsafe {
-        libc::openat(at(dir), cs(path), o | libc::O_CLOEXEC, mode as libc::c_uint)
+        libc::openat(
+            at(dir),
+            cs(path).p(),
+            o | libc::O_CLOEXEC,
+            mode as libc::c_uint,
+        )
     });
     ret(r as isize) as i32
 }
@@ -198,82 +228,68 @@ pub extern "C" fn rok_os_close(fd: i32) -> i32 {
     ret(unsafe { libc::close(fd) } as isize) as i32
 }
 
-/// One `read` of up to `max` bytes as a byte `str` (empty = EOF).
+/// One `read` into `buf[off..off + len]`: the count (0 = EOF) or `-errno`.
+///
+/// # Safety
+/// `buf` must be a live `GcBuf<u8>` with at least `off + len` bytes.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_os_read(fd: i32, max: usize, err: *mut u8) -> RokStr {
-    let mut b = Bytes::new();
-    let spare = b.reserve(max.max(1));
-    let (n, e) = native(|| {
+pub unsafe extern "C" fn rok_os_read(fd: i32, buf: *mut u8, off: usize, len: usize) -> isize {
+    // SAFETY: caller contract.
+    let dst = unsafe { region(buf, off) };
+    native(|| {
         loop {
-            // SAFETY: `spare` is writable for `max` bytes.
-            let n = unsafe { libc::read(fd, spare.cast(), max) };
-            if n >= 0 || errno() != libc::EINTR {
+            // SAFETY: `dst` is writable for `len` bytes.
+            let n = ret(unsafe { libc::read(fd, dst.cast(), len) });
+            if n != -(libc::EINTR as isize) {
                 break n;
             }
         }
-    });
-    if n < 0 {
-        set_err(err, e);
-        return build(&[]);
-    }
-    set_err(err, 0);
-    b.len = n as usize;
-    build(&[b.as_slice()])
+    })
+    .0
 }
 
-/// Everything up to EOF as a byte `str`.
+/// One `write` of `buf[off..off + len]`: the count or `-errno`.
+///
+/// # Safety
+/// `buf` must be a live `GcBuf<u8>` with at least `off + len` bytes.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_os_read_all(fd: i32, err: *mut u8) -> RokStr {
-    let mut b = Bytes::new();
-    let (r, e) = native(|| {
+pub unsafe extern "C" fn rok_os_write(fd: i32, buf: *mut u8, off: usize, len: usize) -> isize {
+    // SAFETY: caller contract.
+    let src = unsafe { region(buf, off) };
+    native(|| {
         loop {
-            let spare = b.reserve(16 * 1024);
-            // SAFETY: `spare` is writable for 16 KiB.
-            let n = unsafe { libc::read(fd, spare.cast(), 16 * 1024) };
-            if n > 0 {
-                b.len += n as usize;
-            } else if n == 0 {
-                return 0;
-            } else if errno() != libc::EINTR {
-                return -1;
-            }
-        }
-    });
-    set_err(err, if r < 0 { e } else { 0 });
-    build(&[b.as_slice()])
-}
-
-/// One `write` of `s[off..]`: bytes written or `-errno`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_os_write(fd: i32, s: RokStr, off: usize) -> isize {
-    let off = off.min(s.len);
-    let (n, e) = native(|| {
-        loop {
-            // SAFETY: `s` is valid for `len` bytes and kept alive by the caller.
-            let n = unsafe { libc::write(fd, s.ptr.add(off).cast(), s.len - off) };
-            if n >= 0 || errno() != libc::EINTR {
+            // SAFETY: `src` is readable for `len` bytes.
+            let n = ret(unsafe { libc::write(fd, src.cast(), len) });
+            if n != -(libc::EINTR as isize) {
                 break n;
             }
         }
-    });
-    if n < 0 { -(e as isize) } else { n }
+    })
+    .0
 }
 
-/// All of `s`: 0 or `-errno`.
+/// Wait until `fd1` or `fd2` (negative: ignored) is readable or hung
+/// up: bit 0 / bit 1 set for each ready one, or `-errno`.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_os_write_all(fd: i32, s: RokStr) -> i32 {
-    let mut off = 0;
-    while off < s.len {
-        let n = rok_os_write(fd, s, off);
-        if n < 0 {
-            return n as i32;
+pub extern "C" fn rok_os_poll_read(fd1: i32, fd2: i32) -> i32 {
+    let mut fds = [fd1, fd2].map(|fd| libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    });
+    native(|| {
+        loop {
+            // SAFETY: two entries; negative fds are ignored.
+            if unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) } >= 0 {
+                break i32::from(fds[0].revents != 0) | (i32::from(fds[1].revents != 0) << 1);
+            }
+            let e = errno();
+            if e != libc::EINTR {
+                break -e;
+            }
         }
-        if n == 0 {
-            return -libc::EIO;
-        }
-        off += n as usize;
-    }
-    0
+    })
+    .0
 }
 
 /// `fsync` (`data_only == 0`) or `fdatasync`.
@@ -395,7 +411,8 @@ pub extern "C" fn rok_os_clone(dir: i32, from: RokStr, to: RokStr) -> i32 {
     #[cfg(target_os = "macos")]
     {
         // SAFETY: both are C strings.
-        let (r, e) = native(|| unsafe { libc::clonefileat(at(dir), cs(from), at(dir), cs(to), 0) });
+        let (r, e) =
+            native(|| unsafe { libc::clonefileat(at(dir), cs(from).p(), at(dir), cs(to).p(), 0) });
         if r < 0 { -e } else { 0 }
     }
     #[cfg(not(target_os = "macos"))]
@@ -422,7 +439,7 @@ pub extern "C" fn rok_os_stat(dir: i32, path: RokStr, follow: i32, fd: i32, out:
         if fd >= 0 {
             libc::fstat(fd, &mut st)
         } else {
-            libc::fstatat(at(dir), cs(path), &mut st, flags)
+            libc::fstatat(at(dir), cs(path).p(), &mut st, flags)
         }
     });
     if r < 0 {
@@ -452,7 +469,7 @@ pub extern "C" fn rok_os_stat(dir: i32, path: RokStr, follow: i32, fd: i32, out:
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_mkdir(dir: i32, path: RokStr, mode: u32) -> i32 {
     // SAFETY: `path` is a C string.
-    let (r, e) = native(|| unsafe { libc::mkdirat(at(dir), cs(path), mode as libc::mode_t) });
+    let (r, e) = native(|| unsafe { libc::mkdirat(at(dir), cs(path).p(), mode as libc::mode_t) });
     if r < 0 { -e } else { 0 }
 }
 
@@ -461,14 +478,15 @@ pub extern "C" fn rok_os_mkdir(dir: i32, path: RokStr, mode: u32) -> i32 {
 pub extern "C" fn rok_os_unlink(dir: i32, path: RokStr, is_dir: i32) -> i32 {
     let flags = if is_dir != 0 { libc::AT_REMOVEDIR } else { 0 };
     // SAFETY: `path` is a C string.
-    let (r, e) = native(|| unsafe { libc::unlinkat(at(dir), cs(path), flags) });
+    let (r, e) = native(|| unsafe { libc::unlinkat(at(dir), cs(path).p(), flags) });
     if r < 0 { -e } else { 0 }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_rename(dir: i32, from: RokStr, to_dir: i32, to: RokStr) -> i32 {
     // SAFETY: both are C strings.
-    let (r, e) = native(|| unsafe { libc::renameat(at(dir), cs(from), at(to_dir), cs(to)) });
+    let (r, e) =
+        native(|| unsafe { libc::renameat(at(dir), cs(from).p(), at(to_dir), cs(to).p()) });
     if r < 0 { -e } else { 0 }
 }
 
@@ -478,22 +496,22 @@ pub extern "C" fn rok_os_link(dir: i32, target: RokStr, link: RokStr, hard: i32)
     // SAFETY: both are C strings.
     let (r, e) = native(|| unsafe {
         if hard != 0 {
-            libc::linkat(at(dir), cs(target), at(dir), cs(link), 0)
+            libc::linkat(at(dir), cs(target).p(), at(dir), cs(link).p(), 0)
         } else {
-            libc::symlinkat(cs(target), at(dir), cs(link))
+            libc::symlinkat(cs(target).p(), at(dir), cs(link).p())
         }
     });
     if r < 0 { -e } else { 0 }
 }
 
-/// Open `path` under `dir` for listing: a `DIR*` as `usize`, or 0.
+/// Open `path` under `dir` for listing: a `DIR*` (positive) or `-errno`.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_os_opendir(dir: i32, path: RokStr, err: *mut u8) -> usize {
+pub extern "C" fn rok_os_opendir(dir: i32, path: RokStr) -> isize {
     // SAFETY: `path` is a C string; `fdopendir` owns `fd` on success.
     let (d, e) = native(|| unsafe {
         let fd = libc::openat(
             at(dir),
-            cs(path),
+            cs(path).p(),
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
         );
         if fd < 0 {
@@ -505,33 +523,38 @@ pub extern "C" fn rok_os_opendir(dir: i32, path: RokStr, err: *mut u8) -> usize 
         }
         d
     });
-    set_err(err, if d.is_null() { e } else { 0 });
-    d as usize
+    if d.is_null() {
+        -(e as isize)
+    } else {
+        d as isize
+    }
 }
 
-/// Next entry name (skipping `.` / `..`); `""` at the end or on error.
+/// The next entry name (skipping `.` / `..`) into `buf[off..off + len]`
+/// (room for any name: 1024 bytes): its length, 0 at the end, or `-errno`.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_os_readdir(d: usize, err: *mut u8) -> RokStr {
+pub extern "C" fn rok_os_readdir(d: isize, buf: *mut u8, off: usize, len: usize) -> isize {
     loop {
         // SAFETY: errno reset distinguishes end from failure.
         unsafe { set_errno(0) };
         // SAFETY: `d` is a live `DIR*` from `rok_os_opendir`.
         let ent = unsafe { libc::readdir(d as *mut libc::DIR) };
         if ent.is_null() {
-            set_err(err, errno());
-            return build(&[]);
+            return -(errno() as isize);
         }
         // SAFETY: `d_name` is NUL-terminated.
         let name = unsafe { core::ffi::CStr::from_ptr((*ent).d_name.as_ptr()) }.to_bytes();
+        if name.len() > len {
+            return -(libc::ENAMETOOLONG as isize);
+        }
         if name != b"." && name != b".." {
-            set_err(err, 0);
-            return build(&[name]);
+            return put(buf, off, len, name);
         }
     }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_os_closedir(d: usize) {
+pub extern "C" fn rok_os_closedir(d: isize) {
     // SAFETY: `d` is a live `DIR*`.
     unsafe { libc::closedir(d as *mut libc::DIR) };
 }
@@ -549,38 +572,33 @@ unsafe fn set_errno(v: i32) {
     }
 }
 
+/// The working directory into `buf[off..off + len]`: its full length or `-errno`.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_os_getcwd(err: *mut u8) -> RokStr {
-    let mut buf = [0u8; 4096];
-    // SAFETY: `buf` is writable for its length.
-    let p = unsafe { libc::getcwd(buf.as_mut_ptr().cast(), buf.len()) };
-    if p.is_null() {
-        set_err(err, errno());
-        return build(&[]);
+pub extern "C" fn rok_os_getcwd(buf: *mut u8, off: usize, len: usize) -> isize {
+    let mut cwd = [0u8; libc::PATH_MAX as usize + 1];
+    // SAFETY: `cwd` is writable for its length.
+    if unsafe { libc::getcwd(cwd.as_mut_ptr().cast(), cwd.len()) }.is_null() {
+        return -(errno() as isize);
     }
-    set_err(err, 0);
-    let n = buf.iter().position(|&b| b == 0).unwrap_or(0);
-    build(&[&buf[..n]])
+    put(buf, off, len, until_nul(&cwd))
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_chdir(path: RokStr) -> i32 {
     // SAFETY: `path` is a C string.
-    ret(unsafe { libc::chdir(cs(path)) } as isize) as i32
+    ret(unsafe { libc::chdir(cs(path).p()) } as isize) as i32
 }
 
+/// `realpath(path)` into `buf[off..off + len]`: its full length or `-errno`.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_os_realpath(path: RokStr, err: *mut u8) -> RokStr {
-    let mut buf = [0u8; libc::PATH_MAX as usize + 1];
-    // SAFETY: `buf` has PATH_MAX bytes.
-    let (p, e) = native(|| unsafe { libc::realpath(cs(path), buf.as_mut_ptr().cast()) });
+pub extern "C" fn rok_os_realpath(path: RokStr, buf: *mut u8, off: usize, len: usize) -> isize {
+    let mut real = [0u8; libc::PATH_MAX as usize + 1];
+    // SAFETY: `real` has PATH_MAX bytes.
+    let (p, e) = native(|| unsafe { libc::realpath(cs(path).p(), real.as_mut_ptr().cast()) });
     if p.is_null() {
-        set_err(err, e);
-        return build(&[]);
+        return -(e as isize);
     }
-    set_err(err, 0);
-    let n = buf.iter().position(|&b| b == 0).unwrap_or(0);
-    build(&[&buf[..n]])
+    put(buf, off, len, until_nul(&real))
 }
 
 #[cfg(target_vendor = "apple")]
@@ -589,108 +607,39 @@ unsafe extern "C" {
     fn ns_get_executable_path(buf: *mut libc::c_char, size: *mut u32) -> i32;
 }
 
-/// Absolute path of the running executable (`env::current_exe`).
+/// Absolute path of the running executable into `buf[off..off + len]`:
+/// its full length or `-errno`.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_os_current_exe(err: *mut u8) -> RokStr {
-    let mut buf = [0u8; libc::PATH_MAX as usize + 1];
+pub extern "C" fn rok_os_current_exe(buf: *mut u8, off: usize, len: usize) -> isize {
+    let mut path = [0u8; libc::PATH_MAX as usize + 1];
     #[cfg(target_vendor = "apple")]
-    let path = {
+    {
         let mut raw = [0u8; libc::PATH_MAX as usize + 1];
         let mut size = raw.len() as u32;
         // SAFETY: `raw` is writable for `size` bytes.
         if unsafe { ns_get_executable_path(raw.as_mut_ptr().cast(), &mut size) } != 0 {
-            set_err(err, libc::ENAMETOOLONG);
-            return build(&[]);
+            return -(libc::ENAMETOOLONG as isize);
         }
-        // SAFETY: `raw` is NUL-terminated; `buf` has PATH_MAX bytes.
-        if unsafe { libc::realpath(raw.as_ptr().cast(), buf.as_mut_ptr().cast()) }.is_null() {
-            set_err(err, errno());
-            return build(&[]);
+        // SAFETY: `raw` is NUL-terminated; `path` has PATH_MAX bytes.
+        if unsafe { libc::realpath(raw.as_ptr().cast(), path.as_mut_ptr().cast()) }.is_null() {
+            return -(errno() as isize);
         }
-        let n = buf.iter().position(|&b| b == 0).unwrap_or(0);
-        &buf[..n]
-    };
+    }
     #[cfg(not(target_vendor = "apple"))]
-    let path = {
-        // SAFETY: `buf` is writable for its length.
+    {
+        // SAFETY: `path` is writable for its length minus the NUL.
         let n = unsafe {
             libc::readlink(
                 c"/proc/self/exe".as_ptr(),
-                buf.as_mut_ptr().cast(),
-                buf.len(),
+                path.as_mut_ptr().cast(),
+                path.len() - 1,
             )
         };
         if n < 0 {
-            set_err(err, errno());
-            return build(&[]);
+            return -(errno() as isize);
         }
-        &buf[..n as usize]
-    };
-    set_err(err, 0);
-    build(&[path])
-}
-
-// ---------------------------------------------------------------------
-// Standard streams (stdio `FILE`s, so they order with `print`)
-// ---------------------------------------------------------------------
-
-fn stdin_file() -> *mut libc::FILE {
-    unsafe extern "C" {
-        #[cfg_attr(target_vendor = "apple", link_name = "__stdinp")]
-        static mut stdin: *mut libc::FILE;
     }
-    // SAFETY: libc initializes `stdin` before `main`.
-    unsafe { stdin }
-}
-
-/// One line of stdin with its `\n` (`""` = EOF).
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_os_stdin_line(err: *mut u8) -> RokStr {
-    let mut line: *mut libc::c_char = ptr::null_mut();
-    let mut cap: libc::size_t = 0;
-    // SAFETY: getline allocates `line`; we free it below.
-    let (n, e) = native(|| unsafe { libc::getline(&mut line, &mut cap, stdin_file()) });
-    // SAFETY: `ferror` on a live stream.
-    let failed = n < 0 && unsafe { libc::ferror(stdin_file()) } != 0;
-    set_err(err, if failed { e } else { 0 });
-    let out = if n > 0 {
-        // SAFETY: getline wrote `n` bytes.
-        build(&[unsafe { core::slice::from_raw_parts(line.cast::<u8>(), n as usize) }])
-    } else {
-        build(&[])
-    };
-    // SAFETY: from getline (or null).
-    unsafe { libc::free(line.cast()) };
-    out
-}
-
-/// Up to `max` bytes of stdin (`""` = EOF; `max == 0` = all of it).
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_os_stdin_read(max: usize, err: *mut u8) -> RokStr {
-    let mut b = Bytes::new();
-    let (failed, e) = native(|| {
-        loop {
-            let want = if max == 0 { 16 * 1024 } else { max - b.len };
-            let spare = b.reserve(want);
-            // SAFETY: `spare` is writable for `want` bytes.
-            let n = unsafe { libc::fread(spare.cast(), 1, want, stdin_file()) };
-            b.len += n;
-            if n < want || max != 0 {
-                // SAFETY: live stream.
-                return unsafe { libc::ferror(stdin_file()) } != 0;
-            }
-        }
-    });
-    set_err(err, if failed { e } else { 0 });
-    build(&[b.as_slice()])
-}
-
-/// `fflush(stdout)`: 0 or `-errno`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_os_flush_stdout() -> i32 {
-    // SAFETY: flushing a live stream.
-    let (r, e) = native(|| unsafe { libc::fflush(crate::stdout()) });
-    if r != 0 { -e } else { 0 }
+    put(buf, off, len, until_nul(&path))
 }
 
 // ---------------------------------------------------------------------
@@ -785,24 +734,33 @@ pub extern "C" fn rok_os_env_at(i: usize) -> RokStr {
     }
 }
 
-/// `getenv`; `found` cell = 1 if set.
+/// `getenv(name)` into `buf[off..off + len]`: its full length, or
+/// `-ENOENT` when unset.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_os_getenv(name: RokStr, found: *mut u8) -> RokStr {
+pub extern "C" fn rok_os_getenv(name: RokStr, buf: *mut u8, off: usize, len: usize) -> isize {
     // SAFETY: `name` is a C string.
-    let p = unsafe { libc::getenv(cs(name)) };
-    set_err(found, i32::from(!p.is_null()));
-    from_c(p)
+    let p = unsafe { libc::getenv(cs(name).p()) };
+    if p.is_null() {
+        return -(libc::ENOENT as isize);
+    }
+    // SAFETY: a NUL-terminated string from libc.
+    put(
+        buf,
+        off,
+        len,
+        unsafe { core::ffi::CStr::from_ptr(p) }.to_bytes(),
+    )
 }
 
 /// `setenv` (`value` given) / `unsetenv`. 0 or `-errno`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_setenv(name: RokStr, value: RokStr, unset: i32) -> i32 {
-    // SAFETY: C strings. ponytail: no global env lock (spec 306.3).
+    // SAFETY: C strings. No global env lock (spec 306.3).
     let r = unsafe {
         if unset != 0 {
-            libc::unsetenv(cs(name))
+            libc::unsetenv(cs(name).p())
         } else {
-            libc::setenv(cs(name), cs(value), 1)
+            libc::setenv(cs(name).p(), cs(value).p(), 1)
         }
     };
     ret(r as isize) as i32
@@ -860,6 +818,8 @@ pub extern "C" fn rok_os_spawn(
     } else {
         ptr::null_mut()
     };
+    // Before the fork: the child must not malloc.
+    let cwd_c = cs(cwd);
     let modes = [stdio_in, stdio_out, stdio_err];
     // [child end, parent end] per stream.
     let mut ends = [[-1i32; 2]; 3];
@@ -912,7 +872,7 @@ pub extern "C" fn rok_os_spawn(
                         fail(errno());
                     }
                 }
-                if cwd.len > 0 && libc::chdir(cs(cwd)) < 0 {
+                if cwd.len > 0 && libc::chdir(cwd_c.p()) < 0 {
                     fail(errno());
                 }
                 if pgid >= 0 && libc::setpgid(0, pgid) < 0 {
@@ -961,82 +921,6 @@ pub extern "C" fn rok_os_spawn(
         unsafe { *cell(out, i) = if r < 0 { -1 } else { e[1] } };
     }
     r
-}
-
-/// Drain two pipes to EOF together (`poll`), so a child filling one
-/// while the other is unread cannot deadlock (`Command::output`).
-/// Stores the bytes as `str`s into `out[0]` / `out[1]` (a
-/// `GcBuf<str>`); `err` gets the errno, or 0.
-#[unsafe(no_mangle)]
-#[allow(clippy::cast_ptr_alignment)] // GC payloads are 8-aligned
-pub extern "C" fn rok_os_read_both(fd1: i32, fd2: i32, out: *mut u8, err: *mut u8) {
-    let mut bufs = [Bytes::new(), Bytes::new()];
-    let (r, e) = native(|| {
-        let mut fds = [
-            libc::pollfd {
-                fd: fd1,
-                events: libc::POLLIN,
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: fd2,
-                events: libc::POLLIN,
-                revents: 0,
-            },
-        ];
-        loop {
-            if fds.iter().all(|p| p.fd < 0) {
-                return 0;
-            }
-            // SAFETY: `fds` holds two entries; negative fds are ignored.
-            if unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) } < 0 {
-                if errno() == libc::EINTR {
-                    continue;
-                }
-                return -1;
-            }
-            for (p, b) in fds.iter_mut().zip(bufs.iter_mut()) {
-                if p.fd < 0 || p.revents == 0 {
-                    continue;
-                }
-                let spare = b.reserve(16 * 1024);
-                // SAFETY: `spare` is writable for 16 KiB.
-                let n = unsafe { libc::read(p.fd, spare.cast(), 16 * 1024) };
-                if n > 0 {
-                    b.len += n as usize;
-                } else if n == 0 {
-                    p.fd = -1;
-                } else if errno() != libc::EINTR && errno() != libc::EAGAIN {
-                    return -1;
-                }
-            }
-        }
-    });
-    set_err(err, if r < 0 { e } else { 0 });
-    let slots = out.wrapping_add(HEADER_SIZE).cast::<RokStr>();
-    // Store each string before allocating the next: `out` (rooted by
-    // the caller) keeps the first alive across the second allocation.
-    for (i, b) in bufs.iter().enumerate() {
-        let st = build(&[b.as_slice()]);
-        // SAFETY: the library passes a live two-element `GcBuf<str>`.
-        unsafe {
-            rokr_gc::write_barrier(out, slots.add(i).cast());
-            slots.add(i).write(st);
-        }
-    }
-}
-
-/// Bytes `start..end` of `s` as a new `str`, with no UTF-8 boundary
-/// check (raw byte buffers inside `rok::std::io`).
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_bytes_slice(s: RokStr, start: usize, end: usize) -> RokStr {
-    let end = end.min(s.len);
-    let start = start.min(end);
-    if end == start {
-        return build(&[]);
-    }
-    // SAFETY: `start..end` lies within `s`.
-    build(&[unsafe { core::slice::from_raw_parts(s.ptr.add(start), end - start) }])
 }
 
 /// `waitpid`: the pid (status in `out[0]`), 0 if `nohang` and still
@@ -1155,73 +1039,19 @@ pub extern "C" fn rok_os_abort() -> ! {
     unsafe { libc::abort() }
 }
 
-// ---------------------------------------------------------------------
-// Byte buffers (`StrBuf`, byte lists)
-// ---------------------------------------------------------------------
-
-/// `len` bytes of the `GcBuf<u8>` `buf` from `off`, as a new `str`.
-///
-/// # Safety
-/// `buf` must be a live `GcBuf<u8>` with at least `off + len` bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rok_str_from_buf(buf: *mut u8, off: usize, len: usize) -> RokStr {
-    // SAFETY: caller contract. `build` may collect before copying; the
-    // caller's frame roots `buf`, so it stays in place.
-    build(&[unsafe { core::slice::from_raw_parts(buf.add(HEADER_SIZE + off), len) }])
-}
-
-/// Copy `s` into the `GcBuf<u8>` `buf` at `off`.
-///
-/// # Safety
-/// `buf` must be a live `GcBuf<u8>` with at least `off + s.len` bytes.
-#[unsafe(no_mangle)]
-pub const unsafe extern "C" fn rok_buf_put_str(buf: *mut u8, off: usize, s: RokStr) {
-    if s.len > 0 {
-        // SAFETY: caller contract.
-        unsafe { ptr::copy_nonoverlapping(s.ptr, buf.add(HEADER_SIZE + off), s.len) };
-    }
-}
-
-/// Index of the first invalid UTF-8 byte of `s`, or -1 if valid.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_str_utf8_error(s: RokStr) -> isize {
-    let b = if s.len == 0 {
-        &[][..]
-    } else {
-        // SAFETY: a `str` is valid for `len` bytes.
-        unsafe { core::slice::from_raw_parts(s.ptr, s.len) }
-    };
-    match core::str::from_utf8(b) {
-        Ok(_) => -1,
-        Err(e) => e.valid_up_to() as isize,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn errno_kinds() {
-        assert_eq!(rok_os_errno_kind(libc::ENOENT), 1);
-        assert_eq!(rok_os_errno_kind(libc::EPERM), 2);
-        assert_eq!(rok_os_errno_kind(libc::EACCES), 2);
-        assert_eq!(rok_os_errno_kind(libc::EEXIST), 3);
-        assert_eq!(rok_os_errno_kind(libc::ENOTSUP), 14);
-        assert_eq!(rok_os_errno_kind(0), 0);
-        assert_eq!(rok_os_errno_kind(-1), 0);
-    }
-
-    #[test]
-    fn utf8_error_offset() {
-        let s = |b: &'static [u8]| RokStr {
-            ptr: b.as_ptr(),
-            len: b.len(),
-        };
-        assert_eq!(rok_str_utf8_error(s(b"")), -1);
-        assert_eq!(rok_str_utf8_error(s("a한".as_bytes())), -1);
-        assert_eq!(rok_str_utf8_error(s(b"ab\xFFc")), 2);
-        // A truncated multi-byte sequence fails at its first byte.
-        assert_eq!(rok_str_utf8_error(s(b"a\xED\x95")), 1);
+        assert_eq!(rok_os_errno_kind(libc::ENOENT), kind::NOT_FOUND);
+        assert_eq!(rok_os_errno_kind(libc::EPERM), kind::PERMISSION_DENIED);
+        assert_eq!(rok_os_errno_kind(libc::EACCES), kind::PERMISSION_DENIED);
+        assert_eq!(rok_os_errno_kind(libc::EEXIST), kind::ALREADY_EXISTS);
+        assert_eq!(rok_os_errno_kind(libc::ENOTSUP), kind::UNSUPPORTED);
+        assert_eq!(rok_os_errno_kind(EAI_BASE + 8), kind::NOT_FOUND);
+        assert_eq!(rok_os_errno_kind(0), kind::OTHER);
+        assert_eq!(rok_os_errno_kind(-1), kind::OTHER);
     }
 }

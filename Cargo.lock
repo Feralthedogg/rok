@@ -165,9 +165,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "rokr_common",
- "rokr_coroutine",
  "rokr_gc",
- "rokr_scheduler",
 ]
 
 [[package]]
@@ -178,23 +176,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "rokr_coroutine"
-version = "0.1.0"
-dependencies = [
- "rokr_common",
-]
-
-[[package]]
 name = "rokr_gc"
 version = "0.1.0"
 dependencies = [
  "libc",
- "rokr_common",
-]
-
-[[package]]
-name = "rokr_scheduler"
-version = "0.1.0"
-dependencies = [
  "rokr_common",
 ]

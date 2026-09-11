@@ -16,14 +16,13 @@
 //!
 //! Then every registered thread's shadow-stack chain is a root set.
 //!
-//! ponytail: one global lock for heap + registry; a thread allocating
-//! takes it on every object. TLABs (702) make the common path lock-free;
-//! the lock then only guards block refills and the stop protocol.
+//! TLABs (702) keep allocation off the lock: it guards block refills,
+//! the registry and the stop protocol.
 
 use core::cell::UnsafeCell;
 use core::mem::size_of;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use rokr_common::tls::{self, MUTATOR_GC_COOPERATING, MUTATOR_PARKED, MUTATOR_RUNNING};
 
@@ -47,29 +46,6 @@ pub struct Mutator {
     /// `rok_tls_worker_id` the spawner chose, written by [`attach`]
     /// (`u64::MAX`: keep the one `thread_init` allocated, then record it).
     worker_id: u64,
-    /// `thread::park` token: 1 = an `unpark` is pending.
-    pub park_token: AtomicI32,
-}
-
-/// With the world lock taken (by [`lock`]): `f` on the park token of the
-/// registered thread `worker_id` (`None`: no such thread).
-pub fn with_park_token<R>(worker_id: Option<u64>, f: impl FnOnce(Option<&AtomicI32>) -> R) -> R {
-    lock();
-    let m = match worker_id {
-        None => find_current(),
-        // SAFETY: registry guarded by the lock.
-        Some(id) => unsafe {
-            let mut m = *WORLD.threads.get();
-            while !m.is_null() && (*m).worker_id != id {
-                m = (*m).next;
-            }
-            m
-        },
-    };
-    // SAFETY: a registered record stays allocated while the lock is held.
-    let r = f(unsafe { m.as_ref() }.map(|m| &m.park_token));
-    unlock();
-    r
 }
 
 struct World {
@@ -185,7 +161,6 @@ pub fn register(root: *mut u8, worker_id: u64) -> *mut Mutator {
             wb_log: [ptr::null_mut(); 2],
             root,
             worker_id,
-            park_token: AtomicI32::new(0),
         });
         *WORLD.threads.get() = m;
     }

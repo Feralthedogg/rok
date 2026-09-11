@@ -40,4 +40,4 @@ while k < 1000 {
 }
 await task::join(busy);
 println(f"fan-out 1000 x 20 yields: {hops.load()}");
-println(f"within bound: {start.elapsed().as_millis() < 120000}");
+println(f"within bound: {start.elapsed().as_ms() < 120000}");

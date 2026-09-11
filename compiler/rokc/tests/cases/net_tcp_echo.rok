@@ -4,7 +4,7 @@
 // blocking echo: hello over tcp
 // peer is local: true
 // async echo: 3 clients ok
-// async read_all: 100000 bytes
+// async read_to_end: 100000 bytes
 // incoming: ping
 // resolve localhost: true
 // refused: true
@@ -50,7 +50,7 @@ let server = thread::spawn(|| {
 let c = try! TcpStream::connect(addr);
 try! c.write_str("hello over tcp");
 try! c.shutdown(Shutdown::Write);
-let back = try! c.read_all();
+let back = try! c.read_to_end();
 println(f"blocking echo: {text(back, back.len())}");
 let peer_port = try! server.join();
 println(f"peer is local: {(try! c.local_addr()).port() as i32 == peer_port}");
@@ -109,11 +109,11 @@ let big = task::spawn(async {
         try! s.shutdown(Shutdown::Write);
         0
     });
-    let got = try! await s.read_all_async();
+    let got = try! await s.read_to_end_async();
     await w;
     got.len()
 });
-println(f"async read_all: {await big} bytes");
+println(f"async read_to_end: {await big} bytes");
 await srv;
 l2.close();
 
@@ -128,7 +128,7 @@ let t3 = thread::spawn(|| {
 });
 for r in l3.incoming() {
     let s = try! r.get();
-    let all = try! s.read_all();
+    let all = try! s.read_to_end();
     println(f"incoming: {text(all, all.len())}");
     s.close();
     break;

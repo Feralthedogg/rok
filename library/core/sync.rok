@@ -3,44 +3,16 @@
 // Every type is a handle over GC buffers: copying it (into a closure,
 // another thread) shares the one primitive. Blocking goes through the
 // runtime's address-keyed wait queue (`rok_sync_wait` / `rok_sync_wake`,
-// futex semantics); a blocked thread counts as stopped for the GC.
+// futex semantics; `Atomic<i32>::wait` / `wake` expose it); a blocked
+// thread counts as stopped for the GC.
 //
 // Not in 2.16 but provided because the blocking APIs need them: `Once`,
 // `Condvar` (Rust-shaped).
 
-extern "rok" {
-    fn rok_task_key_i32(word: GcBuf<i32>) -> usize;
-    fn rok_sync_wait(word: GcBuf<i32>, index: usize, expected: i32);
-    fn rok_sync_wake(word: GcBuf<i32>, index: usize);
-}
-
-// Compiler intrinsics: LLVM atomics on buffer element `i` (integer or
-// `bool` elements); each returns the element's previous value. The
-// trailing ordering(s) must be literal `AtomicOrdering` variants (they
-// pick the LLVM instruction's ordering at compile time).
-#[intrinsic("rok.atomic.load")]
-fn atomic_load<T>(buf: GcBuf<T>, i: usize, o: AtomicOrdering) -> T;
-#[intrinsic("rok.atomic.xchg")]
-fn atomic_xchg<T>(buf: GcBuf<T>, i: usize, v: T, o: AtomicOrdering) -> T;
-#[intrinsic("rok.atomic.add")]
-fn atomic_add<T>(buf: GcBuf<T>, i: usize, v: T, o: AtomicOrdering) -> T;
-#[intrinsic("rok.atomic.sub")]
-fn atomic_sub<T>(buf: GcBuf<T>, i: usize, v: T, o: AtomicOrdering) -> T;
-#[intrinsic("rok.atomic.and")]
-fn atomic_and<T>(buf: GcBuf<T>, i: usize, v: T, o: AtomicOrdering) -> T;
-#[intrinsic("rok.atomic.or")]
-fn atomic_or<T>(buf: GcBuf<T>, i: usize, v: T, o: AtomicOrdering) -> T;
-#[intrinsic("rok.atomic.xor")]
-fn atomic_xor<T>(buf: GcBuf<T>, i: usize, v: T, o: AtomicOrdering) -> T;
-/// Store `new` if the element equals `current`; the previous value
-/// either way.
-#[intrinsic("rok.atomic.cas")]
-fn atomic_cas<T>(
-    buf: GcBuf<T>, i: usize, current: T, new: T, success: AtomicOrdering, failure: AtomicOrdering,
-) -> T;
+use rok::core::rt::{atomic_add, atomic_and, atomic_cas, atomic_load, atomic_or, atomic_sub, atomic_xchg, atomic_xor, key};
 
 fn wait(word: GcBuf<i32>, expected: i32) {
-    unsafe { rok_sync_wait(word, 0, expected) };
+    unsafe { rok_sync_wait(word, 0, expected, -1) };
 }
 
 fn wake(word: GcBuf<i32>) {
@@ -51,10 +23,6 @@ fn word(v: i32) -> GcBuf<i32> {
     let w: GcBuf<i32> = buf_new(1);
     w[0] = v;
     w
-}
-
-fn key(w: GcBuf<i32>) -> usize {
-    unsafe { rok_task_key_i32(w) }
 }
 
 // The async waits of `RwLock` / `Condvar` (which have no "waiters" state
@@ -221,6 +189,19 @@ impl<T: AtomicPrimitive + PartialEq> Atomic<T> {
     }
 }
 
+impl Atomic<i32> {
+    /// Block while the value is `expected`, at most `timeout` ns (< 0:
+    /// no limit), or until `wake`; may return spuriously, so re-check.
+    pub fn wait(self, expected: i32, timeout_ns: i64 = -1) {
+        unsafe { rok_sync_wait(self.cell, 0, expected, timeout_ns) };
+    }
+
+    /// Wake every thread in `wait` on this cell.
+    pub fn wake(self) {
+        wake(self.cell);
+    }
+}
+
 // `compare_exchange` per failure ordering, each choosing the success one.
 fn cas_relaxed_fail<T>(c: GcBuf<T>, cur: T, new: T, success: AtomicOrdering) -> T {
     match success {
@@ -364,8 +345,8 @@ impl<T> rok::core::future::Future for LockFuture<T> {
 }
 
 /// `(mutex key, task id)`: unlocks owed (`Mutex::owe`).
-// ponytail: one global list; it only holds cancelled `wait_async`s whose
-// guard has not dropped yet.
+// One global list: it only holds cancelled `wait_async`s whose guard
+// has not dropped yet.
 static OWED: Mutex<List<(usize, u64)>> = Mutex::new(List::new());
 
 /// Holds a `Mutex` locked until dropped (`using`).
@@ -684,8 +665,7 @@ impl<T> Cell<T> {
     pub fn get(self) -> T {
         self.value[0]
     }
-    // ponytail: spec takes `ref self`; the handle makes plain `self`
-    // share the cell.
+    // Spec takes `ref self`; the handle makes plain `self` share the cell.
     pub fn set(self, value: T) {
         self.value[0] = value;
     }

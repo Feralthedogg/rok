@@ -101,6 +101,7 @@ const BUILTIN_ATTRS: &[&str] = &[
     "prefix",
     "repr",
     "test",
+    "track_caller",
     "warn",
 ];
 

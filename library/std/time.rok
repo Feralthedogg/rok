@@ -4,11 +4,6 @@
 
 pub use rok::core::task::time::{Duration, Instant};
 
-extern "rok" {
-    fn rok_time_realtime_ns() -> i64;
-    fn rok_time_boot_ns() -> i64;
-}
-
 /// A wall-clock (UTC) point: `i64` nanoseconds from `UNIX_EPOCH`
 /// (1678..2262). It can step backwards (NTP, the user).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]

@@ -6,7 +6,7 @@
 //!   - `// expect-error: text`  — build must fail and stderr must contain `text`
 //!   - `// expect-warning: text` — (repeatable) build stderr must contain `text`
 //!   - `// forbid-warning: text` — (repeatable) build stderr must not contain `text`
-//!   - `// expect-stderr: text` — the run's stderr must contain `text`
+//!   - `// expect-stderr: text` — (repeatable) the run's stderr must contain `text`
 //!   - `// debug-only`          — skipped under `ROK_TEST_OPT` (e.g.
 //!     overflow panics, which only `-O0` checks)
 //!   - `// gc-stress: N`        — run once more with

@@ -43,7 +43,7 @@ pub const IMPL_MODULE_ATTR: &str = "#impl_module";
 pub const ASSOC_TYPES_ATTR: &str = "#assoc";
 
 pub use ty::resolve_ty;
-pub use uses::{ReExport, UseEntry, UseTable, build_use_table};
+pub use uses::{ReExport, UseEntry, UseTable, build_use_table, check_use_targets};
 
 use rokc_core::DefId;
 use rokc_diagnostic::RokDiagnostic;
@@ -139,6 +139,30 @@ pub struct HirStructDef {
     /// `Some` for a `union`: one synthetic `__data` field typed by its
     /// `UnionStorage`; declared fields live in `aliases`.
     pub union_kind: Option<HirUnionKind>,
+    /// `#[niche(..)]` (spec 2.7.4): bit patterns the single field never
+    /// holds. Empty without the attribute.
+    pub niche: Vec<NicheArg>,
+}
+
+/// One `#[niche(..)]` value, read against the field's primitive type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NicheVal {
+    Int(i128),
+    /// The field type's `MIN` / `MAX`.
+    Min,
+    Max,
+    /// The canonical quiet NaN / `±∞` of the field's float type.
+    Nan,
+    Inf,
+    NegInf,
+}
+
+/// One `#[niche(..)]` argument.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NicheArg {
+    Val(NicheVal),
+    /// Inclusive bounds; an open end is `Min` / `Max`.
+    Range(NicheVal, NicheVal),
 }
 
 /// A `union`'s storage. `#[repr(C)]` or a non-primitive field forces
@@ -243,8 +267,8 @@ pub enum HirStmt {
     Continue {
         label: Option<String>,
     },
-    /// A call to a never-returning runtime hook (`rok_panic` for a failed
-    /// `try!`, `rok_uncaught_error` for an error escaping a throwing
+    /// A call to a never-returning runtime hook (`rok_panic_at` for a failed
+    /// `try!`, `rok_uncaught_error_at` for an error escaping a throwing
     /// `main`). MIR emits the call followed by an `unreachable`
     /// terminator so the block is seen as not falling through. `throw`
     /// itself lowers to plain returns / jumps (see `lower::throws`).
@@ -868,6 +892,136 @@ pub fn each_expr<'a>(e: &'a HirExpr, f: &mut impl FnMut(&'a HirExpr)) {
         HirExprKind::MlirOp { args, regions, .. } => {
             args.iter().for_each(&mut go);
             regions.iter().for_each(|(_, b)| go(b));
+        }
+    }
+}
+
+/// Pre-order visit of every expression in `b`, mutably.
+pub fn each_block_mut(b: &mut HirBlock, f: &mut impl FnMut(&mut HirExpr)) {
+    for s in &mut b.stmts {
+        match s {
+            HirStmt::Let { init: e, .. }
+            | HirStmt::Assign { value: e, .. }
+            | HirStmt::StaticAssign { value: e, .. }
+            | HirStmt::Expr(e)
+            | HirStmt::Panic(e)
+            | HirStmt::Return(Some(e))
+            | HirStmt::Break { value: Some(e), .. } => each_expr_mut(e, f),
+            HirStmt::ArrayAssign { index, value, .. } => {
+                each_expr_mut(index, f);
+                each_expr_mut(value, f);
+            }
+            HirStmt::Return(None) | HirStmt::Break { .. } | HirStmt::Continue { .. } => {}
+        }
+    }
+    if let Some(t) = &mut b.trailing {
+        each_expr_mut(t, f);
+    }
+}
+
+/// Pre-order visit of `e` and its subexpressions, mutably.
+pub fn each_expr_mut(e: &mut HirExpr, f: &mut impl FnMut(&mut HirExpr)) {
+    f(e);
+    let mut go = |x: &mut HirExpr| each_expr_mut(x, f);
+    match &mut e.kind {
+        HirExprKind::Const(_)
+        | HirExprKind::Local(_)
+        | HirExprKind::StaticRef(_)
+        | HirExprKind::UnresolvedPath(_)
+        | HirExprKind::FnRef(_)
+        | HirExprKind::SizeOf { .. } => {}
+        HirExprKind::Block(b) => each_block_mut(b, f),
+        HirExprKind::Loop { body, .. } => each_block_mut(body, f),
+        HirExprKind::While { cond, body, .. } => {
+            go(cond);
+            each_block_mut(body, f);
+        }
+        HirExprKind::If {
+            cond,
+            then_block,
+            else_branch,
+        } => {
+            go(cond);
+            each_block_mut(then_block, f);
+            if let Some(e) = else_branch {
+                each_expr_mut(e, f);
+            }
+        }
+        HirExprKind::Match { scrutinee, arms } => {
+            go(scrutinee);
+            for a in arms {
+                if let Some(g) = &mut a.guard {
+                    each_expr_mut(g, f);
+                }
+                each_expr_mut(&mut a.body, f);
+            }
+        }
+        HirExprKind::PrimBinOp { lhs: a, rhs: b, .. }
+        | HirExprKind::WithField {
+            target: a,
+            value: b,
+            ..
+        }
+        | HirExprKind::RawWrite {
+            addr: a, value: b, ..
+        }
+        | HirExprKind::BufGet {
+            buf: a, index: b, ..
+        }
+        | HirExprKind::ArrayIndex {
+            array: a, index: b, ..
+        } => {
+            go(a);
+            go(b);
+        }
+        HirExprKind::PrimUnaryOp { operand: x, .. }
+        | HirExprKind::Cast { operand: x, .. }
+        | HirExprKind::ClosureValue { env: x, .. }
+        | HirExprKind::FieldRead { target: x, .. }
+        | HirExprKind::TupleField { target: x, .. }
+        | HirExprKind::ArrayRepeat { value: x, .. }
+        | HirExprKind::BufNew { len: x, .. }
+        | HirExprKind::RawRead { addr: x, .. }
+        | HirExprKind::UnionWrite { value: x, .. }
+        | HirExprKind::UnionRead { target: x, .. }
+        | HirExprKind::Suspend { value: x, .. } => go(x),
+        HirExprKind::SumWrap { value, .. } => {
+            if let Some(v) = value {
+                go(v);
+            }
+        }
+        HirExprKind::Call { args: xs, .. }
+        | HirExprKind::StructInit { fields: xs, .. }
+        | HirExprKind::EnumVariantInit { args: xs, .. }
+        | HirExprKind::Tuple { fields: xs }
+        | HirExprKind::ArrayInit { elements: xs, .. }
+        | HirExprKind::CoroNew { args: xs, .. } => xs.iter_mut().for_each(go),
+        HirExprKind::CallIndirect {
+            callee: c, args, ..
+        }
+        | HirExprKind::CallClosure {
+            closure: c, args, ..
+        } => {
+            go(c);
+            args.iter_mut().for_each(go);
+        }
+        HirExprKind::BufSet {
+            buf, index, value, ..
+        } => {
+            go(buf);
+            go(index);
+            go(value);
+        }
+        HirExprKind::BufAtomic {
+            buf, index, args, ..
+        } => {
+            go(buf);
+            go(index);
+            args.iter_mut().for_each(go);
+        }
+        HirExprKind::MlirOp { args, regions, .. } => {
+            args.iter_mut().for_each(&mut go);
+            regions.iter_mut().for_each(|(_, b)| go(b));
         }
     }
 }

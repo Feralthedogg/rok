@@ -1,56 +1,38 @@
 // rok::core::str — `str` methods and trait impls (stdlib 2.15).
 //
 // `str` is a `(ptr, len)` value: literals are static bytes, strings
-// built at run time are GC objects. The bodies call the runtime's
-// `rok_str_*` symbols, which take `str` by value.
+// built at run time are GC objects, and a slice shares its source's
+// bytes (so slicing, `lines`, `split*`, `trim*` and `strip_*` copy
+// nothing). The bodies call the runtime's `rok_str_*` symbols, which
+// take `str` by value.
 //
 // `str` is immutable (spec 2.15.1); `StrBuf` is the growable buffer.
-
-extern "rok" {
-    fn rok_str_len(s: str) -> usize;
-    fn rok_str_concat(a: str, b: str) -> str;
-    fn rok_str_cmp(a: str, b: str) -> i32;
-    fn rok_str_slice(s: str, start: usize, end: usize) -> str;
-    fn rok_bytes_slice(s: str, start: usize, end: usize) -> str;
-    fn rok_str_find(s: str, pat: str) -> isize;
-    fn rok_str_rfind(s: str, pat: str) -> isize;
-    fn rok_str_trim(s: str, which: i32) -> str;
-    fn rok_str_case(s: str, upper: i32) -> str;
-    fn rok_str_replace(s: str, from: str, to: str) -> str;
-    fn rok_str_char_count(s: str) -> usize;
-    fn rok_str_hash(s: str) -> u64;
-    fn rok_str_byte(s: str, i: usize) -> u8;
-    fn rok_str_int_status(s: str, signed: i32, bits: u32) -> i32;
-    fn rok_str_to_i64(s: str) -> i64;
-    fn rok_str_to_u64(s: str) -> u64;
-    fn rok_str_float_ok(s: str) -> i32;
-    fn rok_str_to_f64(s: str) -> f64;
-    fn rok_str_from_char(c: u32) -> str;
-    fn rok_str_from_buf(buf: GcBuf<u8>, off: usize, len: usize) -> str;
-    fn rok_buf_put_str(buf: GcBuf<u8>, off: usize, s: str);
-    fn rok_str_utf8_error(s: str) -> isize;
-    fn rok_char_props(c: u32) -> u32;
-    fn rok_char_to_case(c: u32, upper: i32) -> u32;
-}
 
 impl str {
     pub fn new() -> str { "" }
 
-    /// `bytes` (a `List<u8>`, `Slice<u8>`, ...) as a `str`; throws if
-    /// they are not UTF-8 (2.15.6).
-    pub fn from_utf8<B: IntoIterator<Item = u8>>(bytes: B) throws (Utf8Error) -> str {
-        let buf = StrBuf::new();
-        for b in bytes { buf.push_byte(b); }
-        try buf.to_str_checked()
+    /// `bytes` as a `str`; throws if they are not UTF-8 (2.15.6).
+    pub fn from_utf8(bytes: List<u8> | Slice<u8>) throws (Utf8Error) -> str {
+        let view = match bytes {
+            l: List<u8> => l[0:l.len()],
+            v: Slice<u8> => v,
+        };
+        let (buf, at, n) = unsafe { view.raw_parts() };
+        let bad = unsafe { rok_buf_utf8_error(buf, at, n) };
+        if bad >= 0 { throw Utf8Error { valid_up_to: bad as usize }; }
+        unsafe { rok_str_from_buf(buf, at, n) }
     }
 
-    /// The UTF-8 bytes. ponytail: a view of a copy (`GcBuf` holds a word
-    /// per element, so it cannot view the string's bytes in place).
+    /// The UTF-8 bytes as a read-only view of the string itself (no
+    /// copy, O(1)).
     pub fn as_bytes(self) -> Slice<u8> {
-        let n = self.len();
-        let buf: GcBuf<u8> = buf_new(n);
-        for i in 0..n { buf[i] = unsafe { rok_str_byte(self, i) }; }
-        Slice { buf: buf, start: 0, len: n, stride: 1 }
+        Slice { buf: unsafe { rok_str_bytes_buf(self) }, start: 0, len: self.len(), stride: 1 }
+    }
+
+    /// Byte `i`, O(1); panics if `i >= len()`.
+    pub fn byte(self, i: usize) -> u8 {
+        if i >= self.len() { panic(f"str byte index {i} out of bounds for length {self.len()}"); }
+        unsafe { rok_str_byte(self, i) }
     }
 
     /// Byte length (not the char count).
@@ -60,16 +42,11 @@ impl str {
     pub fn char_count(self) -> usize { unsafe { rok_str_char_count(self) } }
 
     pub fn contains(self, pat: str) -> bool { unsafe { rok_str_find(self, pat) } >= 0 }
-    pub fn starts_with(self, pat: str) -> bool {
-        if unsafe { rok_str_len(pat) } > unsafe { rok_str_len(self) } { return false; }
-        // Byte compare: a prefix length may fall inside a char of `self`.
-        unsafe { rok_str_cmp(rok_bytes_slice(self, 0, rok_str_len(pat)), pat) } == 0
-    }
+    pub fn starts_with(self, pat: str) -> bool { unsafe { rok_str_eq_at(self, 0, pat) } != 0 }
     pub fn ends_with(self, pat: str) -> bool {
-        let n = unsafe { rok_str_len(self) };
-        let m = unsafe { rok_str_len(pat) };
-        if m > n { return false; }
-        unsafe { rok_str_cmp(rok_bytes_slice(self, n - m, n), pat) } == 0
+        let n = self.len();
+        let m = pat.len();
+        m <= n && unsafe { rok_str_eq_at(self, n - m, pat) } != 0
     }
     pub fn find(self, pat: str) -> usize | none {
         let i = unsafe { rok_str_find(self, pat) };
@@ -98,7 +75,7 @@ impl str {
         let i = self.find(sep)?;
         (self[:i], self[i + sep.len():])
     }
-    /// `n` copies back to back. ponytail: not in spec 2.15.
+    /// `n` copies back to back.
     pub fn repeat(self, n: usize) -> str {
         let b = StrBuf::with_capacity(self.len() * n);
         for _ in 0..n { b.push_str(self); }
@@ -118,7 +95,7 @@ impl str {
     /// Unicode scalar values, in order.
     pub fn chars(self) -> CharsIter { CharsIter { s: self, pos: 0 } }
     /// UTF-8 bytes, in order.
-    pub fn bytes(self) -> BytesIter { BytesIter { s: self, pos: 0 } }
+    pub fn bytes(self) -> SliceIter<u8> { self.as_bytes().iter() }
     /// The pieces between occurrences of `sep` (all of them, empty ones
     /// included).
     pub fn split(self, sep: str) -> SplitIter { SplitIter { rest: self, sep: sep, done: false } }
@@ -129,8 +106,7 @@ impl str {
     pub fn char_indices(self) -> CharIndicesIter {
         CharIndicesIter { chars: CharsIter { s: self, pos: 0 } }
     }
-    /// The non-empty pieces between runs of whitespace.
-    // ponytail: ASCII whitespace, like `trim`.
+    /// The non-empty pieces between runs of ASCII whitespace (like `trim`).
     pub fn split_whitespace(self) -> SplitWhitespaceIter {
         SplitWhitespaceIter { s: self, pos: 0 }
     }
@@ -139,10 +115,12 @@ impl str {
     pub fn parse<T: FromStr>(self) throws (T::Err) -> T { try T::from_str(self) }
 }
 
-/// `s[a:b]` by byte offsets (2.15.3): a new `str`. The bounds clamp to
-/// the length (like Python); a clamped bound off a char boundary panics.
+/// `s[a:b]` by byte offsets (2.15.3): O(1), sharing `s`'s bytes. The
+/// bounds clamp to the length (like Python); a clamped bound off a char
+/// boundary panics.
 impl Sliceable<Range<usize>> for str {
     type Output = str;
+    #[track_caller]
     fn slice(self, r: Range<usize>) -> str {
         let r = clamp_range(r, self.len());
         unsafe { rok_str_slice(self, r.start, r.end) }
@@ -212,21 +190,6 @@ impl Iterator for CharsIter {
         }
         self.pos += n;
         unsafe { char::from_u32_unchecked(c) }
-    }
-}
-
-pub struct BytesIter {
-    s: str;
-    pos: usize;
-}
-
-impl Iterator for BytesIter {
-    type Item = u8;
-    fn next(ref self) -> u8 | none {
-        if self.pos >= self.s.len() { return none; }
-        let b = unsafe { rok_str_byte(self.s, self.pos) };
-        self.pos += 1;
-        b
     }
 }
 
@@ -343,6 +306,7 @@ impl char {
 
     /// Digit `d` in base `radix` (2..=36; lowercase letters past `9`).
     /// Panics if `d` is not a digit of that base.
+    #[track_caller]
     pub fn from_digit(d: u32, radix: u32) -> char {
         if radix < 2u32 || radix > 36u32 { panic("char::from_digit: radix must be in 2..=36"); }
         if d >= radix { panic("char::from_digit: not a digit of the radix"); }
@@ -498,31 +462,17 @@ impl StrBuf {
         if n + additional <= cap { return; }
         let new_cap = cap * 2;
         if new_cap < n + additional { new_cap = n + additional; }
-        let old = self.data[0];
         let store: GcBuf<u8> = buf_new(new_cap);
-        unsafe { rok_buf_put_str(store, 0, rok_str_from_buf(old, 0, n)) };
+        unsafe { rok_buf_copy(store, 0, self.data[0], 0, n) };
         self.data[0] = store;
         self.meta[1] = new_cap;
     }
 
     /// Append `c`, UTF-8 encoded.
     pub fn push(self, c: char) {
-        let v = c as u32;
-        if v < 0x80u32 {
-            self.push_byte(v as u8);
-        } else if v < 0x800u32 {
-            self.push_byte((0xC0u32 | (v >> 6u32)) as u8);
-            self.push_byte((0x80u32 | (v & 0x3Fu32)) as u8);
-        } else if v < 0x10000u32 {
-            self.push_byte((0xE0u32 | (v >> 12u32)) as u8);
-            self.push_byte((0x80u32 | ((v >> 6u32) & 0x3Fu32)) as u8);
-            self.push_byte((0x80u32 | (v & 0x3Fu32)) as u8);
-        } else {
-            self.push_byte((0xF0u32 | (v >> 18u32)) as u8);
-            self.push_byte((0x80u32 | ((v >> 12u32) & 0x3Fu32)) as u8);
-            self.push_byte((0x80u32 | ((v >> 6u32) & 0x3Fu32)) as u8);
-            self.push_byte((0x80u32 | (v & 0x3Fu32)) as u8);
-        }
+        self.reserve(4);
+        let n = self.len();
+        self.meta[0] = n + unsafe { rok_buf_put_char(self.data[0], n, c as u32) };
     }
 
     pub fn push_str(self, s: str) {
@@ -534,9 +484,7 @@ impl StrBuf {
         self.meta[0] = n + m;
     }
 
-    /// Append one raw byte. ponytail: not in spec 2.15; it can break
-    /// UTF-8, so `to_str` callers that push raw bytes go through
-    /// `to_str_checked` (`str::from_utf8`) instead.
+    /// Append one byte; the caller keeps the contents UTF-8.
     pub fn push_byte(self, b: u8) {
         self.reserve(1);
         let n = self.len();
@@ -548,20 +496,13 @@ impl StrBuf {
     pub fn to_str(self) -> str {
         unsafe { rok_str_from_buf(self.data[0], 0, self.len()) }
     }
-
-    /// `to_str`, throwing if raw bytes made the contents invalid UTF-8.
-    pub fn to_str_checked(self) throws (Utf8Error) -> str {
-        let s = self.to_str();
-        let at = unsafe { rok_str_utf8_error(s) };
-        if at >= 0 { throw Utf8Error { valid_up_to: at as usize }; }
-        s
-    }
 }
 
 /// `b[a:b]`: the bytes `a..b` of the current contents as a `str`, checked
-/// like `str` slicing (clamped). ponytail: copies the whole buffer first.
+/// like `str` slicing (clamped). Copies the whole buffer first.
 impl Sliceable<Range<usize>> for StrBuf {
     type Output = str;
+    #[track_caller]
     fn slice(self, r: Range<usize>) -> str {
         self.to_str()[r.start:r.end]
     }
@@ -594,29 +535,26 @@ pub trait FromStr {
     fn from_str(s: str) throws (Err) -> Self;
 }
 
-/// `s` checked as an integer of `bits` bits.
-fn int_ok(s: str, signed: i32, bits: u32) throws (ParseError) {
-    let st = unsafe { rok_str_int_status(s, signed, bits) };
+/// `s` as a decimal integer of `bits` bits (its bits as `i64`).
+fn int_of(s: str, signed: i32, bits: u32) throws (ParseError) -> i64 {
+    let out: GcBuf<i64> = buf_new(1);
+    let st = unsafe { rok_str_parse_int(s, 10u32, signed, bits, out) };
     if st == 1 { throw ParseError { input: s, pos: 0, reason: "empty string" }; }
     if st == 2 { throw ParseError { input: s, pos: 0, reason: "invalid digit" }; }
     if st == 3 { throw ParseError { input: s, pos: 0, reason: "number out of range" }; }
+    out[0]
 }
 
-fn signed_of(s: str, bits: u32) throws (ParseError) -> i64 {
-    try int_ok(s, 1, bits);
-    unsafe { rok_str_to_i64(s) }
-}
+fn signed_of(s: str, bits: u32) throws (ParseError) -> i64 { try int_of(s, 1, bits) }
 
-fn unsigned_of(s: str, bits: u32) throws (ParseError) -> u64 {
-    try int_ok(s, 0, bits);
-    unsafe { rok_str_to_u64(s) }
-}
+fn unsigned_of(s: str, bits: u32) throws (ParseError) -> u64 { (try int_of(s, 0, bits)) as u64 }
 
 fn float_of(s: str) throws (ParseError) -> f64 {
-    if unsafe { rok_str_float_ok(s) } == 0 {
+    let out: GcBuf<f64> = buf_new(1);
+    if unsafe { rok_str_parse_float(s, out) } != 0 {
         throw ParseError { input: s, pos: 0, reason: "invalid float literal" };
     }
-    unsafe { rok_str_to_f64(s) }
+    out[0]
 }
 
 impl FromStr for i8 {

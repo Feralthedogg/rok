@@ -3,10 +3,10 @@
 // thread, `recv_async` / `for await` / `send_async` suspend the task
 // (`task::park`: receivers on the `meta` address, senders one past it).
 //
-// ponytail: one `Mutex` + two `Condvar`s around a growable ring of
-// one-value boxes (spec: lock-free ring / segmented list). A popped slot
-// is pointed at a shared empty box, so a received value is not kept
-// alive by the channel.
+// One `Mutex` and two `Condvar`s around a `Deque` (the spec suggests a
+// lock-free ring or segmented list).
+
+use rok::core::rt::key;
 
 /// What `send` hands back when this sender was closed.
 pub enum SendError<T> {
@@ -19,33 +19,25 @@ pub enum TrySendError<T> {
 }
 
 // `meta` slots.
-const HEAD: usize = 0;
-const LEN: usize = 1;
-const SENDERS: usize = 2;
+const SENDERS: usize = 0;
 /// Queue limit, 0 = unbounded (a rendezvous channel has 1).
-const LIMIT: usize = 3;
-const CAP: usize = 4;
+const LIMIT: usize = 1;
 /// Values ever pushed / popped (rendezvous senders wait on `POPPED`).
-const PUSHED: usize = 5;
-const POPPED: usize = 6;
+const PUSHED: usize = 2;
+const POPPED: usize = 3;
 /// 1: `channel_bounded(0)`, a send returns once a receiver took it.
-const RENDEZVOUS: usize = 7;
+const RENDEZVOUS: usize = 4;
 /// Receivers blocked in `recv`.
-const WAITING: usize = 8;
+const WAITING: usize = 5;
 /// 1 while the receiver is suspended in `recv_async` / `for await`.
-const ASYNC_WAITING: usize = 9;
+const ASYNC_WAITING: usize = 6;
 
 struct Chan<T> {
     lock: Mutex<i32>;
     meta: GcBuf<usize>;
-    ring: GcBuf<GcBuf<GcBuf<T>>>;
-    empty: GcBuf<T>;
+    queue: Deque<T>;
     not_empty: Condvar;
     not_full: Condvar;
-}
-
-extern "rok" {
-    fn rok_task_key_usize(meta: GcBuf<usize>) -> usize;
 }
 
 impl<T> Chan<T> {
@@ -53,7 +45,7 @@ impl<T> Chan<T> {
 
     /// Wake tasks parked in `recv_async` (a value or a close arrived).
     fn notify_async(self) {
-        rok::core::task::unpark(unsafe { rok_task_key_usize(self.meta) });
+        rok::core::task::unpark(key(self.meta));
     }
 
     /// Wake tasks suspended in `send_async` (room, or a value taken).
@@ -63,68 +55,39 @@ impl<T> Chan<T> {
     }
 
     fn send_key(self) -> usize {
-        unsafe { rok_task_key_usize(self.meta) } + 1
+        key(self.meta) + 1
     }
     fn put(self, i: usize, v: usize) { self.meta[i] = v; }
 
     fn full(self) -> bool {
-        self.get(LIMIT) > 0 && self.get(LEN) >= self.get(LIMIT)
+        self.get(LIMIT) > 0 && self.queue.len() >= self.get(LIMIT)
     }
+
+    fn len(self) -> usize { self.queue.len() }
 
     // The lock is held for the calls below.
     fn push(self, v: T) {
-        let head = self.get(HEAD);
-        let len = self.get(LEN);
-        let cap = self.get(CAP);
-        let ring = self.ring[0];
-        if len == cap {
-            let bigger: GcBuf<GcBuf<T>> = buf_new(cap * 2);
-            for i in 0..len {
-                bigger[i] = ring[(head + i) % cap];
-            }
-            self.ring[0] = bigger;
-            ring = bigger;
-            head = 0;
-            cap *= 2;
-            self.put(HEAD, 0);
-            self.put(CAP, cap);
-        }
-        let cell: GcBuf<T> = buf_new(1);
-        cell[0] = v;
-        ring[(head + len) % cap] = cell;
-        self.put(LEN, len + 1);
+        self.queue.push_back(v);
         self.meta[PUSHED] += 1;
     }
 
     fn pop(self) -> T {
-        let head = self.get(HEAD);
-        let ring = self.ring[0];
-        let v = ring[head][0];
-        ring[head] = self.empty;
-        self.put(HEAD, (head + 1) % self.get(CAP));
-        self.meta[LEN] -= 1;
         self.meta[POPPED] += 1;
-        v
+        self.queue.pop_front() ?? panic("channel: pop from an empty queue")
     }
 }
 
 fn make<T>(limit: usize, rendezvous: bool) -> (Sender<T>, Receiver<T>) {
-    let meta: GcBuf<usize> = buf_new(10);
+    let meta: GcBuf<usize> = buf_new(7);
     meta[SENDERS] = 1;
     meta[LIMIT] = limit;
-    meta[CAP] = 16;
     if rendezvous {
         meta[RENDEZVOUS] = 1;
     }
-    let ring: GcBuf<GcBuf<GcBuf<T>>> = buf_new(1);
-    let store: GcBuf<GcBuf<T>> = buf_new(16);
-    ring[0] = store;
-    let empty: GcBuf<T> = buf_new(0);
     let ch = Chan {
         lock: Mutex::new(0),
         meta: meta,
-        ring: ring,
-        empty: empty,
+        queue: Deque::new(),
         not_empty: Condvar::new(),
         not_full: Condvar::new(),
     };
@@ -188,7 +151,7 @@ impl<T> Sender<T> {
         let sent = false;
         using g = self.ch.lock.lock() {
             let ready = if self.ch.get(RENDEZVOUS) == 1 {
-                self.ch.get(WAITING) + self.ch.get(ASYNC_WAITING) > self.ch.get(LEN)
+                self.ch.get(WAITING) + self.ch.get(ASYNC_WAITING) > self.ch.len()
             } else {
                 !self.ch.full()
             };
@@ -255,11 +218,11 @@ impl<T> Receiver<T> {
         let v: T | none = none;
         using g = self.ch.lock.lock() {
             self.ch.meta[WAITING] += 1;
-            while self.ch.get(LEN) == 0 && self.ch.get(SENDERS) > 0 {
+            while self.ch.len() == 0 && self.ch.get(SENDERS) > 0 {
                 g = self.ch.not_empty.wait(g);
             }
             self.ch.meta[WAITING] -= 1;
-            if self.ch.get(LEN) > 0 {
+            if self.ch.len() > 0 {
                 v = self.ch.pop();
                 got = true;
             }
@@ -275,7 +238,7 @@ impl<T> Receiver<T> {
         let got = false;
         let v: T | none = none;
         using g = self.ch.lock.lock() {
-            if self.ch.get(LEN) > 0 {
+            if self.ch.len() > 0 {
                 v = self.ch.pop();
                 got = true;
             }
@@ -339,12 +302,12 @@ impl<T> rok::core::stream::Stream for Receiver<T> {
             return rok::core::future::Poll::Pending;
         }
         // Park before looking, so a send after the look unparks us.
-        rok::core::task::park(unsafe { rok_task_key_usize(self.ch.meta) }, ctx.waker());
+        rok::core::task::park(key(self.ch.meta), ctx.waker());
         let got = false;
         let closed = false;
         let v: T | none = none;
         using g = self.ch.lock.lock() {
-            if self.ch.get(LEN) > 0 {
+            if self.ch.len() > 0 {
                 v = self.ch.pop();
                 got = true;
             } else if self.ch.get(SENDERS) == 0 {

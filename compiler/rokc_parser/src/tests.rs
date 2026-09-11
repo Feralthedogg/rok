@@ -39,6 +39,39 @@ fn attr_args_mixed() {
 }
 
 #[test]
+fn attr_ranges() {
+    let p = parse("#[niche(I32_MIN..=-1, ..5, 0.., f64::NAN)] struct S(i32);");
+    let Item::Struct(s) = &p.items[0] else {
+        panic!()
+    };
+    let AttrBody::Args(args) = &s.attrs[0].body else {
+        panic!()
+    };
+    assert!(
+        matches!(&args[0], AttrArg::Range { lo: Some(lo), hi: Some(hi), inclusive: true }
+        if matches!(&**lo, AttrArg::Word(w) if w == "I32_MIN")
+            && matches!(&**hi, AttrArg::Lit(Literal::Int(v)) if v == "-1"))
+    );
+    assert!(matches!(
+        &args[1],
+        AttrArg::Range {
+            lo: None,
+            hi: Some(_),
+            inclusive: false
+        }
+    ));
+    assert!(matches!(
+        &args[2],
+        AttrArg::Range {
+            lo: Some(_),
+            hi: None,
+            inclusive: false
+        }
+    ));
+    assert!(matches!(&args[3], AttrArg::Nested { path, .. } if path == &["f64", "NAN"]));
+}
+
+#[test]
 fn attr_value_form() {
     let p = parse(r#"#[doc = "hi"] fn f() { }"#);
     let Item::Fn(f) = &p.items[0] else { panic!() };

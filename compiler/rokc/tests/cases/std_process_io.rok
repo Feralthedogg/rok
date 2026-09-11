@@ -42,7 +42,7 @@ fn child() throws (IoError) {
     println(": 5");
     try out.flush();
     try io::stderr().write_str("to stderr");
-    process::exit(5);
+    env::exit(5);
 }
 
 fn text(bytes: List<u8>) -> str { return (try! str::from_utf8(bytes)).trim(); }

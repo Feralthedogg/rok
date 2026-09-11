@@ -19,9 +19,7 @@ members = [
     "compiler/rokc_tools",
     "runtime/rokr",
     "runtime/rokr_common",
-    "runtime/rokr_coroutine",
     "runtime/rokr_gc",
-    "runtime/rokr_scheduler",
 ]
 
 [workspace.package]
@@ -48,9 +46,7 @@ rokc_rokon = { path = "compiler/rokc_rokon" }
 rokc_tools = { path = "compiler/rokc_tools" }
 
 rokr_common = { path = "runtime/rokr_common" }
-rokr_coroutine = { path = "runtime/rokr_coroutine" }
 rokr_gc = { path = "runtime/rokr_gc" }
-rokr_scheduler = { path = "runtime/rokr_scheduler" }
 
 # Platform sys crates only (targets.md: zero external dependencies).
 libc = "0.2"

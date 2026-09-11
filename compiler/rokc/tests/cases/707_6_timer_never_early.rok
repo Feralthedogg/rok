@@ -10,10 +10,10 @@
 async fn main() {
     let t0 = Instant::now();
     await task::sleep(Duration::ms(20));
-    println(f"20ms sleep not early: {t0.elapsed().as_millis() >= 20}");
+    println(f"20ms sleep not early: {t0.elapsed().as_ms() >= 20}");
     let at = Instant::now() + Duration::ms(15);
     await task::sleep_until(at);
-    println(f"deadline sleep not early: {Instant::now().as_nanos() >= at.as_nanos()}");
+    println(f"deadline sleep not early: {Instant::now() >= at}");
     await task::sleep(Duration::ms(0));
     println("zero sleep returns: true");
 }

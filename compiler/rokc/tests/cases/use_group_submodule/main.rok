@@ -1,0 +1,21 @@
+// expect-exit: 0
+// expect-stdout: 7 100 5 2 9 3 7 2 9 3
+// Spec 5.5.2: `use p::{a, b}` equals `use p::a; use p::b;` in any module,
+// including when the prefix resolves to the package root (`pkg::{..}`,
+// `sup::{..}` from a top-level module). Types, fns, consts, traits,
+// renames, nested groups and globs inside groups.
+mod a;
+mod geo;
+
+pub struct P { pub x: i32; }
+pub struct Q { pub y: i32; }
+pub const K: i32 = 100;
+pub trait Tr { fn t(self) -> i32; }
+pub fn helper() -> i32 { 5 }
+
+use geo::{Pt as GPt, area};
+
+fn main() -> i32 {
+    println(f"{a::get(P { x: 3 }, Q { y: 4 })} {a::kay()} {a::help()} {a::ar()} {a::dp()} {a::tr(P { x: 3 })} {a::b::get(P { x: 3 }, Q { y: 4 })} {area(GPt { v: 1 })} {a::b::dp()} {a::b::tr(P { x: 3 })}");
+    return 0;
+}

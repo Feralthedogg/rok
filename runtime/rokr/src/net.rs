@@ -1,7 +1,7 @@
 //! Sockets behind `rok::std::net` (stdlib 302) and the readiness poller
 //! of the I/O driver (707): kqueue on BSD / macOS, epoll on Linux. No
 //! ABI stability (805 §8.5.12 appendix). Conventions as in `os`:
-//! integer results are `>= 0` or `-errno`.
+//! results are `>= 0` or `-errno`; byte data is a `GcBuf<u8>` region.
 //!
 //! Every socket is created non-blocking: the library's blocking calls
 //! wait for readiness with [`rok_net_wait`] (so read / write timeouts
@@ -12,12 +12,12 @@
 //! `[family (4 / 6), port, flow_info, scope_id, byte0 .. byte15]`.
 
 use core::mem::{size_of, zeroed};
-use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use core::sync::atomic::{AtomicI32, Ordering};
 
 use rokr_common::object_header::HEADER_SIZE;
 
-use crate::os::{Bytes, cs, errno, native, ret, set_err};
-use crate::str::{RokStr, build};
+use crate::os::{EAI_BASE, cs, errno, native, region, ret};
+use crate::str::RokStr;
 
 const ADDR_WORDS: usize = 20;
 
@@ -201,8 +201,8 @@ pub extern "C" fn rok_net_listen(fd: i32, backlog: i32) -> i32 {
     ret(unsafe { libc::listen(fd, backlog) } as isize) as i32
 }
 
-/// Start a connect: 0 when connected, `-EINPROGRESS` while pending
-/// (wait for writability, then [`rok_net_sock_error`]).
+/// Start a connect: 0 when connected, 1 while pending (wait for
+/// writability, then [`rok_net_sock_error`]), or `-errno`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_net_connect(fd: i32, addr: *mut u8) -> i32 {
     let (ss, len) = read_addr(addr);
@@ -212,9 +212,10 @@ pub extern "C" fn rok_net_connect(fd: i32, addr: *mut u8) -> i32 {
         if r == 0 {
             return 0;
         }
-        let e = errno();
-        if e != libc::EINTR {
-            return -e;
+        match errno() {
+            libc::EINTR => {}
+            libc::EINPROGRESS => return 1,
+            e => return -e,
         }
     }
 }
@@ -285,76 +286,75 @@ pub extern "C" fn rok_net_addr(fd: i32, out: *mut u8, peer: i32) -> i32 {
     0
 }
 
-/// One `send` of `s[off..]` (no SIGPIPE): bytes written or `-errno`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_net_send(fd: i32, s: RokStr, off: usize) -> isize {
-    let off = off.min(s.len);
+/// Retry `f` (a libc `-1`-on-error call) across `EINTR`.
+fn no_eintr(mut f: impl FnMut() -> isize) -> isize {
     loop {
-        // SAFETY: `s` is valid for `len` bytes.
-        let n = unsafe { libc::send(fd, s.ptr.add(off).cast(), s.len - off, SEND_FLAGS) };
-        if n >= 0 {
+        let n = ret(f());
+        if n != -(libc::EINTR as isize) {
             return n;
-        }
-        let e = errno();
-        if e != libc::EINTR {
-            return -(e as isize);
         }
     }
 }
 
-/// One datagram `s` to `addr`: bytes sent or `-errno`.
+/// One `send` of `buf[off..off + len]` (no SIGPIPE): the count or `-errno`.
+///
+/// # Safety
+/// `buf` must be a live `GcBuf<u8>` with at least `off + len` bytes.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_net_send_to(fd: i32, s: RokStr, addr: *mut u8) -> isize {
-    let (ss, len) = read_addr(addr);
-    loop {
-        // SAFETY: valid buffer and sockaddr.
-        let n = unsafe {
-            libc::sendto(
-                fd,
-                s.ptr.cast(),
-                s.len,
-                SEND_FLAGS,
-                (&raw const ss).cast(),
-                len,
-            )
-        };
-        if n >= 0 {
-            return n;
-        }
-        let e = errno();
-        if e != libc::EINTR {
-            return -(e as isize);
-        }
-    }
+pub unsafe extern "C" fn rok_net_send(fd: i32, buf: *mut u8, off: usize, len: usize) -> isize {
+    // SAFETY: caller contract.
+    let src = unsafe { region(buf, off) };
+    // SAFETY: `src` is readable for `len` bytes.
+    no_eintr(|| unsafe { libc::send(fd, src.cast(), len, SEND_FLAGS) })
 }
 
-/// One `recvfrom` of up to `max` bytes; the sender goes to `out` (may be
-/// null), failures to the error cell `err`.
+/// One datagram `buf[off..off + len]` to `addr`: the count or `-errno`.
+///
+/// # Safety
+/// `buf` must be a live `GcBuf<u8>` with at least `off + len` bytes.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_net_recv_from(fd: i32, max: usize, out: *mut u8, err: *mut u8) -> RokStr {
-    let mut b = Bytes::new();
-    let spare = b.reserve(max.max(1));
+pub unsafe extern "C" fn rok_net_send_to(
+    fd: i32,
+    buf: *mut u8,
+    off: usize,
+    len: usize,
+    addr: *mut u8,
+) -> isize {
+    let (ss, sl) = read_addr(addr);
+    // SAFETY: caller contract.
+    let src = unsafe { region(buf, off) };
+    // SAFETY: valid buffer and sockaddr.
+    no_eintr(|| unsafe {
+        libc::sendto(fd, src.cast(), len, SEND_FLAGS, (&raw const ss).cast(), sl)
+    })
+}
+
+/// One datagram into `buf[off..off + len]` (truncated to fit); the
+/// sender goes to `out` (may be null). The count or `-errno`.
+///
+/// # Safety
+/// `buf` must be a live `GcBuf<u8>` with at least `off + len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rok_net_recv_from(
+    fd: i32,
+    buf: *mut u8,
+    off: usize,
+    len: usize,
+    out: *mut u8,
+) -> isize {
+    // SAFETY: caller contract.
+    let dst = unsafe { region(buf, off) };
     // SAFETY: zeroed storage is a valid out-buffer.
     let mut ss: libc::sockaddr_storage = unsafe { zeroed() };
-    let mut len = size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-    let n = loop {
-        // SAFETY: `spare` is writable for `max` bytes.
-        let n =
-            unsafe { libc::recvfrom(fd, spare.cast(), max, 0, (&raw mut ss).cast(), &raw mut len) };
-        if n >= 0 || errno() != libc::EINTR {
-            break n;
-        }
-    };
-    if n < 0 {
-        set_err(err, errno());
-        return build(&[]);
-    }
-    set_err(err, 0);
-    if len > 0 {
+    let mut sl = size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    // SAFETY: `dst` is writable for `len` bytes.
+    let n = no_eintr(|| unsafe {
+        libc::recvfrom(fd, dst.cast(), len, 0, (&raw mut ss).cast(), &raw mut sl)
+    });
+    if n >= 0 && sl > 0 {
         write_addr(out, (&raw const ss).cast());
     }
-    b.len = n as usize;
-    build(&[b.as_slice()])
+    n
 }
 
 /// `shutdown`: `how` 0 read, 1 write, 2 both.
@@ -494,20 +494,22 @@ pub extern "C" fn rok_net_wait(fd: i32, write: i32, timeout_ns: i64) -> i32 {
     if r < 0 { -e } else { i32::from(r > 0) }
 }
 
-/// `EAI_*` results of [`rok_net_resolve`] are `-(EAI_BASE + code)`.
-const EAI_BASE: i32 = 100_000;
-
 /// Resolve `host` (a name or numeric address) with `port`: up to `max`
 /// addresses into `out` (`max * ADDR_WORDS` words), stream sockets only.
-/// The count, `-errno`, or `-(100000 + EAI_*)`.
+/// The count or `-code` (an errno, or a resolver code from `EAI_BASE`).
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_net_resolve(host: RokStr, port: u16, out: *mut u8, max: usize) -> i32 {
-    // SAFETY: zeroed hints are valid; `host` is NUL-terminated (808).
+    // SAFETY: zeroed hints are valid; `cs` NUL-terminates `host`.
     let mut hints: libc::addrinfo = unsafe { zeroed() };
     hints.ai_socktype = libc::SOCK_STREAM;
     let mut res: *mut libc::addrinfo = core::ptr::null_mut();
     let (r, e) = native(|| unsafe {
-        libc::getaddrinfo(cs(host), core::ptr::null(), &raw const hints, &raw mut res)
+        libc::getaddrinfo(
+            cs(host).p(),
+            core::ptr::null(),
+            &raw const hints,
+            &raw mut res,
+        )
     });
     if r != 0 {
         if r == libc::EAI_SYSTEM {
@@ -535,28 +537,11 @@ pub extern "C" fn rok_net_resolve(host: RokStr, port: u16, out: *mut u8, max: us
     n as i32
 }
 
-/// Message of a [`rok_net_resolve`] `EAI_*` code (without the base).
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_net_gai_strerror(code: i32) -> RokStr {
-    // Platforms number EAI codes negative (glibc) or positive (BSD).
-    #[cfg(target_os = "linux")]
-    let c = -code;
-    #[cfg(not(target_os = "linux"))]
-    let c = code;
-    // SAFETY: gai_strerror returns a static C string.
-    let s = unsafe { libc::gai_strerror(c) };
-    // SAFETY: as above.
-    let n = unsafe { libc::strlen(s) };
-    // SAFETY: `s` is valid for `n` bytes.
-    build(&[unsafe { core::slice::from_raw_parts(s.cast::<u8>(), n) }])
-}
-
 // ---------------------------------------------------------------------
 // The I/O driver's poller (707 §7.7.1)
 // ---------------------------------------------------------------------
 
 static POLLER: AtomicI32 = AtomicI32::new(-1);
-static CLAIMED: AtomicBool = AtomicBool::new(false);
 
 /// The process's kqueue / epoll fd, created on first use.
 #[unsafe(no_mangle)]
@@ -578,7 +563,7 @@ pub extern "C" fn rok_io_poller() -> i32 {
     #[cfg(target_os = "linux")]
     let fd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
     if fd < 0 {
-        rokr_common::fatal(b"rok: cannot create the I/O poller\n");
+        rokr_common::fatal(b"rok: cannot create the I/O poller");
     }
     match POLLER.compare_exchange(-1, fd, Ordering::AcqRel, Ordering::Acquire) {
         Ok(_) => fd,
@@ -588,12 +573,6 @@ pub extern "C" fn rok_io_poller() -> i32 {
             cur
         }
     }
-}
-
-/// 1 for the first caller only (it starts the driver thread).
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_io_driver_claim() -> i32 {
-    i32::from(!CLAIMED.swap(true, Ordering::AcqRel))
 }
 
 /// Watch `fd` for readability and writability, edge-triggered (an

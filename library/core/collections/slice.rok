@@ -10,7 +10,8 @@
 // end when negative. A view of a `List` sees later
 // writes to the list's elements but not a regrowth (the list moves to a
 // new buffer and the view keeps the old one); a view of a fixed array
-// or a `str` / `StrBuf` views a copy.
+// or a `StrBuf` views a copy, and `str::as_bytes` views the string's
+// own bytes.
 
 pub struct Slice<T> {
     pub(pkg) buf: GcBuf<T>;
@@ -59,6 +60,7 @@ impl<T> Slice<T> {
     }
 
     /// Every `k`th element (`k` != 0), back to front when `k` < 0.
+    #[track_caller]
     pub fn step(self, k: isize) -> Slice<T> {
         if k == 0 {
             panic("slice step must not be zero");
@@ -71,6 +73,16 @@ impl<T> Slice<T> {
 
     pub fn iter(self) -> SliceIter<T> {
         SliceIter { s: self, i: 0 }
+    }
+
+    /// `(buffer, start, len)` of the viewed elements as one contiguous
+    /// run, for runtime calls on a buffer region. A strided view is
+    /// copied first, so writes through its run do not reach the view.
+    pub unsafe fn raw_parts(self) -> (GcBuf<T>, usize, usize) {
+        if self.stride == 1 {
+            return (self.buf, self.start, self.len);
+        }
+        (self.to_list().buffer(), 0, self.len)
     }
 
     /// A new list holding the viewed elements.
@@ -112,6 +124,7 @@ impl<T> IntoIterator for Slice<T> {
 /// `s[i]`; panics out of bounds. Views are read-only (no `IndexSet`).
 impl<T> Index<usize> for Slice<T> {
     type Output = T;
+    #[track_caller]
     fn index(self, i: usize) -> T {
         if i >= self.len {
             return panic(f"slice index {i} out of bounds for length {self.len}");

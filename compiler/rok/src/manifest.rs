@@ -3,8 +3,8 @@
 //!
 //! The file is one RokON value (`rokc_rokon`), a `Package { .. }` struct
 //! (the name `Package` may be left out). It is data only: strings,
-//! `{ "key": value }` dicts and the `Dep::path(..)` / `Dep::git(..)`
-//! variants.
+//! `{ "key": value }` dicts and the `Dep::path(..)` / `Dep::git(..)` /
+//! `Dep::version(..)` variants.
 //!
 //! ```rokon
 //! Package {
@@ -14,6 +14,7 @@
 //!     deps: {
 //!         "json": Dep::git("https://example.com/json.git", tag: "v1.2"),
 //!         "util": Dep::path("../util"),
+//!         "geom": Dep::version("^0.3"),   // a stone; also `"geom": "^0.3"`
 //!     },
 //!     dev_deps: {},
 //!     lints: { "dead_code": "allow" },
@@ -61,6 +62,12 @@ pub enum Source {
         url: String,
         reference: GitRef,
     },
+    /// A stone: a version requirement (`crate::semver::Req` syntax) on a
+    /// registry index (`None`: the configured one).
+    Registry {
+        req: String,
+        registry: Option<String>,
+    },
 }
 
 impl Source {
@@ -75,6 +82,14 @@ impl Source {
                     .pair()
                     .map(|(k, v)| (k, Value::str(v)))
                     .into_iter()
+                    .collect(),
+            ),
+            Self::Registry { req, registry } => Value::call(
+                "Dep::version",
+                vec![Value::str(req)],
+                registry
+                    .iter()
+                    .map(|r| ("registry", Value::str(r)))
                     .collect(),
             ),
         }
@@ -201,24 +216,31 @@ fn deps(d: Decoder<'_>) -> Result<Vec<Dep>, String> {
     for (k, v) in d.dict()? {
         let name = k.string()?;
         check_name(&name).map_err(|m| k.error(&m))?;
-        let source = source(v, &name)?;
+        let source = source(v)?;
         out.push(Dep { name, source });
     }
     Ok(out)
 }
 
-/// A `Dep::path(..)` / `Dep::git(..)` value (the dependency `name`, for
-/// the hint on a registry form).
-pub fn source(d: Decoder<'_>, name: &str) -> Result<Source, String> {
+/// A requirement string, checked.
+fn req(d: Decoder<'_>) -> Result<String, String> {
+    let s = d.string()?;
+    crate::semver::Req::parse(&s).map_err(|e| d.error(&e))?;
+    Ok(s)
+}
+
+/// A `Dep::path(..)` / `Dep::git(..)` / `Dep::version(..)` value, or a
+/// requirement string (`"^1.2"`, short for `Dep::version("^1.2")`).
+pub fn source(d: Decoder<'_>) -> Result<Source, String> {
     if d.string().is_ok() {
-        return Err(d.error(&format!(
-            "registry dependencies are not supported yet; write `\"{name}\": Dep::path(\"..\")` \
-             or `\"{name}\": Dep::git(\"..\")`"
-        )));
+        return Ok(Source::Registry {
+            req: req(d)?,
+            registry: None,
+        });
     }
-    let v = d
-        .variant("Dep")
-        .map_err(|_| d.expected("`Dep::path(\"..\")` or `Dep::git(\"..\")`"))?;
+    let v = d.variant("Dep").map_err(|_| {
+        d.expected("`Dep::path(\"..\")`, `Dep::git(\"..\")` or `Dep::version(\"..\")`")
+    })?;
     let one = |what: &str| match v.args.as_slice() {
         [x] => x.string(),
         _ => Err(d.error(&format!("`Dep::{}` takes one string, the {what}", v.name))),
@@ -248,11 +270,21 @@ pub fn source(d: Decoder<'_>, name: &str) -> Result<Source, String> {
                 },
             }
         }
-        "version" | "registry" => return Err(d.error(&not_yet("registry dependencies"))),
+        "version" => {
+            v.fields.only(&["registry"])?;
+            let [r] = v.args.as_slice() else {
+                return Err(d.error("`Dep::version` takes one string, the version requirement"));
+            };
+            Source::Registry {
+                req: req(*r)?,
+                registry: v.fields.opt("registry").map(|r| r.string()).transpose()?,
+            }
+        }
         "native" => return Err(d.error(&not_yet("`native` dependencies"))),
         other => {
             return Err(d.error(&format!(
-                "unknown dependency kind `Dep::{other}` (expected Dep::path, Dep::git)"
+                "unknown dependency kind `Dep::{other}` (expected Dep::path, Dep::git, \
+                 Dep::version)"
             )));
         }
     })
@@ -354,12 +386,20 @@ mod tests {
         assert!(parse("{}", "f").unwrap().deps.is_empty());
         for (src, want) in [
             (
-                "Package { deps: { \"a\": \"1.0\" } }",
-                "registry dependencies are not supported yet",
+                "Package { deps: { \"a\": \"1.0.x.y\" } }",
+                "is not a version requirement",
             ),
             (
-                "Package { deps: { \"a\": Dep::version(\"1\") } }",
-                "not supported yet",
+                "Package { deps: { \"a\": Dep::version(\"1\", tag: \"x\") } }",
+                "unknown argument `tag`",
+            ),
+            (
+                "Package { deps: { \"a\": Dep::version() } }",
+                "takes one string, the version requirement",
+            ),
+            (
+                "Package { deps: { \"a\": Dep::registry(\"u\") } }",
+                "unknown dependency kind `Dep::registry`",
             ),
             (
                 "Package { deps: { \"a\": Dep::native(\"z\") } }",
@@ -456,6 +496,19 @@ mod tests {
             reference: GitRef::Branch("b".into()),
         };
         assert_eq!(git.to_rok(), "Dep::git(\"u\", branch: \"b\")");
+        let m = parse(
+            "{ deps: { \"a\": \"^1.2\", \"b\": Dep::version(\"~0.3\", registry: \"file:///i\") } }",
+            "f",
+        )
+        .unwrap();
+        let back: Vec<String> = m.deps.iter().map(|d| d.source.to_rok()).collect();
+        assert_eq!(
+            back,
+            [
+                "Dep::version(\"^1.2\")",
+                "Dep::version(\"~0.3\", registry: \"file:///i\")"
+            ]
+        );
     }
 
     #[test]

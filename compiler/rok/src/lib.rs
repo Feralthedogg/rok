@@ -1,5 +1,6 @@
 //! `rok`: the toolchain front (spec 901). It owns `rok.rokon` /
-//! `rok.lock`, dependency resolution and the git cache, environments,
+//! `rok.lock`, dependency resolution, stones (registry packages) and the
+//! git cache, environments,
 //! toolchains, package scaffolding and the Jupyter kernelspec, and runs
 //! the compiler `rokc` (next to itself, or a pinned toolchain's) with the
 //! resolved dependencies as `--extern name=lib.rok`; rokc prebuilds them.
@@ -8,6 +9,8 @@
 //! $ROK_HOME/bin/{rok,rokc,rokls}     the toolchain
 //! $ROK_HOME/lib/...                  runtime and standard library (rokc)
 //! $ROK_HOME/cache/git/               shared git cache (see `git`)
+//! $ROK_HOME/cache/registry/          stone index clones (see `registry`)
+//! $ROK_HOME/config.rokon             `Config { registry: "<index url>" }`
 //! $ROK_HOME/cache/scripts/<hash>/    a script's lock and prebuilt dependencies
 //! $ROK_HOME/envs/<name>/             a named environment (rok.rokon, rok.lock, target/)
 //! $ROK_HOME/envs/CURRENT             `rok env use`'s choice
@@ -18,7 +21,9 @@ mod env;
 mod git;
 mod lock;
 mod manifest;
+mod registry;
 mod resolve;
+mod semver;
 mod toolchain;
 
 use std::path::{Path, PathBuf};
@@ -38,13 +43,25 @@ usage: rok [options] <command> [args]
 packages:
   new [--lib|--bin] <name>     create a package (with rok.rokon)
   init [--lib|--bin] [dir]     make a directory a package
+  add <name>[@<req>] [--registry <url>]
+                               add a stone (default: ^ the newest version)
   add <name> --path <dir>      add a dependency (--dev: to dev_deps)
   add <name> --git <url> [--rev <r> | --tag <t> | --branch <b>]
   remove <name>                remove a dependency
-  update [name...]             re-resolve git dependencies, rewrite rok.lock
+  update [name...]             re-resolve git dependencies and stones,
+                               rewrite rok.lock
+  search <query>               stones whose name contains <query>
   deps                         print the resolved dependencies (name=lib.rok),
                                each after its own
   clean [path]                 remove target/
+
+stones (the index is a git repository; nothing is uploaded):
+  publish [--index <dir>] [--commit]
+                               the index entry for this package (its git
+                               remote `origin`, HEAD commit and tree); with
+                               --commit, committed to the index checkout <dir>
+  yank --vers <v> [--undo] --index <dir> [name]
+                               mark a version yanked (commits to <dir>)
 
 compiler commands (rokc, with the dependencies; see `rokc help`):
   build | check | run | test | bench | lint | doc | emit [path] ...
@@ -87,7 +104,9 @@ the environment is $ROK_ENV, else the one `rok env use` chose, else
 `default`. A lone script may start with a //! ```rokon block holding
 `Package { deps: {..} }`.
 
-environment: ROK_HOME (default: the parent of rok's bin/), ROK_ENV
+environment: ROK_HOME (default: the parent of rok's bin/), ROK_ENV,
+  ROK_REGISTRY (the stone index; else `registry` in $ROK_HOME/config.rokon,
+  else https://github.com/rok-lang/rokstones.io-index)
 ";
 
 #[derive(Default)]
@@ -176,6 +195,9 @@ fn run(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> i32 {
         "remove" => cmd_remove(g, post),
         "update" => cmd_update(g, post),
         "deps" => cmd_deps(g, post),
+        "search" => cmd_search(g, post),
+        "publish" => cmd_publish(g, post),
+        "yank" => cmd_yank(post),
         "env" => env::cmd(g, post),
         "toolchain" => toolchain::cmd(post),
         "jupyter" if post.first().is_some_and(|p| p == "install") => install_kernel(g, &post[1..]),
@@ -518,11 +540,13 @@ fn install_kernel(g: &Global, args: &[String]) -> Result<i32, String> {
     Ok(0)
 }
 
-/// `rok add` arguments: `<name> --path <dir> | --git <url> [--rev ..|--tag ..|--branch ..]`,
-/// plus `--dev`.
+/// `rok add` arguments (see `USAGE`), and `--dev`.
+///
+/// A stone without `@req` has an empty `req` (the caller picks one).
 pub fn parse_dep_args(args: &[String]) -> Result<(Dep, bool), String> {
     let mut name = None;
     let (mut path, mut git, mut reference, mut dev) = (None, None, GitRef::Default, false);
+    let mut registry = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let (flag, inline) = match a.split_once('=') {
@@ -545,19 +569,34 @@ pub fn parse_dep_args(args: &[String]) -> Result<(Dep, bool), String> {
             "--tag" => reference = GitRef::Tag(value()?),
             "--branch" => reference = GitRef::Branch(value()?),
             "--dev" => dev = true,
+            "--registry" => registry = Some(value()?),
             f if f.starts_with('-') => return Err(format!("unknown option `{f}`")),
             n if name.is_none() => name = Some(n.to_owned()),
             n => return Err(format!("unexpected argument `{n}`")),
         }
     }
-    let usage =
-        "usage: rok add <name> --path <dir> | --git <url> [--rev|--tag|--branch <r>] [--dev]";
+    let usage = "usage: rok add <name>[@<req>] [--registry <url>] | <name> --path <dir> | \
+                 <name> --git <url> [--rev|--tag|--branch <r>]  [--dev]";
     let name = name.ok_or(usage)?;
+    let (name, req) = match name.split_once('@') {
+        Some((n, r)) => (n.to_owned(), Some(r.to_owned())),
+        None => (name, None),
+    };
     manifest::check_name(&name)?;
     let source = match (path, git) {
+        (None, None) if reference == GitRef::Default => {
+            let req = req.unwrap_or_default();
+            if !req.is_empty() {
+                semver::Req::parse(&req)?;
+            }
+            Source::Registry { req, registry }
+        }
+        _ if req.is_some() || registry.is_some() => {
+            return Err("`@<req>` / --registry go with a stone, not --path / --git".into());
+        }
         (Some(p), None) if reference == GitRef::Default => Source::Path(p),
         (None, Some(url)) => Source::Git { url, reference },
-        (Some(_), None) => return Err("--rev / --tag / --branch go with --git".into()),
+        (_, None) => return Err("--rev / --tag / --branch go with --git".into()),
         _ => return Err(usage.into()),
     };
     Ok((Dep { name, source }, dev))
@@ -634,6 +673,21 @@ fn cmd_add(g: &Global, args: &[String]) -> Result<i32, String> {
             .map_err(|e| e.to_string())?;
         let shown = if is_env { abs } else { relative(&dir, &abs) };
         dep.source = Source::Path(shown.display().to_string().replace('\\', "/"));
+    }
+    // A stone without a requirement: `^` its newest version.
+    if let Source::Registry { req, registry } = &mut dep.source {
+        if req.is_empty() {
+            let url = match registry {
+                Some(r) => r.clone(),
+                None => registry::default_url(&home())?,
+            };
+            let index = registry::open(&home(), &url, g.offline, g.quiet)?;
+            let all = registry::entries(&index, &url, &dep.name)?;
+            let star = semver::Req::parse("*")?;
+            let e = registry::best(&all, &star)
+                .ok_or_else(|| registry::no_match(&all, &dep.name, "*", &url))?;
+            *req = format!("^{}", e.vers);
+        }
     }
     let old = std::fs::read_to_string(&path).ok();
     let section = if dev { "dev_deps" } else { "deps" };
@@ -723,5 +777,139 @@ fn cmd_deps(g: &Global, args: &[String]) -> Result<i32, String> {
     for p in deps.iter().filter(|p| dev || !p.dev) {
         println!("{}={}", p.name, p.root.display());
     }
+    Ok(0)
+}
+
+/// `rok search <query>`: `name = "newest"` for each stone of the index
+/// whose name contains the query (any case).
+fn cmd_search(g: &Global, args: &[String]) -> Result<i32, String> {
+    let [q] = args else {
+        return Err("usage: rok search <query>".into());
+    };
+    let url = registry::default_url(&home())?;
+    let index = registry::open(&home(), &url, g.offline, g.quiet)?;
+    let q = q.to_ascii_lowercase();
+    let mut names: Vec<String> = index
+        .files(&url)?
+        .into_iter()
+        .filter(|f| f.contains('/'))
+        .filter_map(|f| f.rsplit('/').next().map(str::to_owned))
+        .filter(|n| n.contains(&q))
+        .collect();
+    names.sort();
+    let star = semver::Req::parse("*")?;
+    for n in names {
+        let text = index.show(&url, &registry::path(&n))?.unwrap_or_default();
+        let all = registry::parse_file(&text, &registry::path(&n))?;
+        if let Some(e) = registry::best(&all, &star) {
+            println!("{} = \"{}\"", e.name, e.vers);
+        }
+    }
+    Ok(0)
+}
+
+/// The current package's directory and manifest.
+fn this_package() -> Result<(PathBuf, Manifest), String> {
+    let dir = package_dir(Path::new("."))
+        .filter(|d| manifest::find(d).is_some())
+        .ok_or("not inside a package with a rok.rokon")?;
+    let m = manifest::load(&dir.join(MANIFEST))?;
+    Ok((dir, m))
+}
+
+/// Options with a value (`--f v` / `--f=v`), switches given, positionals.
+type Flags = (Vec<(String, String)>, Vec<String>, Vec<String>);
+
+/// `args` split by `valued` options and `switches`; others are errors.
+fn flags(args: &[String], valued: &[&str], switches: &[&str]) -> Result<Flags, String> {
+    let (mut vals, mut sw, mut pos) = (Vec::new(), Vec::new(), Vec::new());
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let (f, inline) = match a.split_once('=') {
+            Some((f, v)) if f.starts_with("--") => (f, Some(v.to_owned())),
+            _ => (a.as_str(), None),
+        };
+        if valued.contains(&f) {
+            let v = inline
+                .or_else(|| it.next().cloned())
+                .ok_or_else(|| format!("`{f}` needs a value"))?;
+            vals.push((f.to_owned(), v));
+        } else if switches.contains(&f) {
+            sw.push(f.to_owned());
+        } else if f.starts_with('-') {
+            return Err(format!("unknown option `{f}`"));
+        } else {
+            pos.push(a.clone());
+        }
+    }
+    Ok((vals, sw, pos))
+}
+
+fn val<'a>(vals: &'a [(String, String)], f: &str) -> Option<&'a str> {
+    vals.iter()
+        .rev()
+        .find(|(k, _)| k == f)
+        .map(|(_, v)| v.as_str())
+}
+
+/// `rok publish [--index <dir>] [--commit]`: print this package's index
+/// line; with `--index`, check it against that checkout; with `--commit`,
+/// commit it there.
+fn cmd_publish(g: &Global, args: &[String]) -> Result<i32, String> {
+    let (vals, sw, pos) = flags(args, &["--index"], &["--commit"])?;
+    if let Some(p) = pos.first() {
+        return Err(format!("unexpected argument `{p}`"));
+    }
+    let write = sw.iter().any(|s| s == "--commit");
+    let (dir, m) = this_package()?;
+    let e = registry::entry_for(&dir, &m)?;
+    let line = e.to_line();
+    let Some(index) = val(&vals, "--index") else {
+        if write {
+            return Err("--commit needs --index <dir> (a checkout of the index)".into());
+        }
+        println!("{line}");
+        if !g.quiet {
+            eprintln!(
+                "note: dry run; `rok publish --index <checkout> --commit` adds it as {}",
+                registry::path(&e.name)
+            );
+        }
+        return Ok(0);
+    };
+    let file = registry::publish(Path::new(index), &e, write)?;
+    println!("{line}");
+    if !g.quiet {
+        if write {
+            eprintln!("   Published {} {} ({})", e.name, e.vers, file.display());
+        } else {
+            eprintln!(
+                "note: dry run; --commit adds it to {} and commits",
+                file.display()
+            );
+        }
+    }
+    Ok(0)
+}
+
+/// `rok yank --vers <v> [--undo] --index <dir> [name]` (default: this
+/// package's name).
+fn cmd_yank(args: &[String]) -> Result<i32, String> {
+    let (vals, sw, pos) = flags(args, &["--vers", "--index"], &["--undo"])?;
+    let usage = "usage: rok yank --vers <version> [--undo] --index <dir> [name]";
+    let (Some(vers), Some(index)) = (val(&vals, "--vers"), val(&vals, "--index")) else {
+        return Err(usage.into());
+    };
+    let name = match pos.as_slice() {
+        [n] => n.clone(),
+        [] => this_package()?.1.name.ok_or("rok.rokon has no `name`")?,
+        _ => return Err(usage.into()),
+    };
+    registry::yank(
+        Path::new(index),
+        &name,
+        vers,
+        !sw.iter().any(|s| s == "--undo"),
+    )?;
     Ok(0)
 }

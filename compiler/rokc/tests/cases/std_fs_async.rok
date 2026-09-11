@@ -39,7 +39,7 @@ println(f"bytes: {(try! await fs::read_async(f)).len()}");
 let h = try! await fs::open_with_async(f, OpenOptions::new().append(true));
 try! await h.write_all_async(" more");
 try! h.close();
-println(f"append: {try! await fs::read_to_string_async(f)}");
+println(f"append: {try! await fs::read_to_str_async(f)}");
 
 let r = try! await File::open_async(f);
 let buf: List<u8> = [0u8, 0u8, 0u8, 0u8, 0u8];

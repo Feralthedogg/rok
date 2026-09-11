@@ -7,13 +7,7 @@
 
 use rok::std::fs;
 use rok::std::fs::Metadata;
-use rok::std::io::IoError;
-
-extern "rok" {
-    fn rok_os_realpath(path: str, err: GcBuf<i32>) -> str;
-    fn rok_str_utf8_error(s: str) -> isize;
-    fn rok_str_byte(s: str, i: usize) -> u8;
-}
+use rok::std::io::{IoError, fetch, text_of, list_of, list_of_str, region};
 
 pub struct Path {
     s: str;
@@ -99,7 +93,7 @@ impl Path {
     }
 
     pub fn as_str(self) -> str { self.s }
-    pub fn to_raw(self) -> RawPath { RawPath { raw: self.s } }
+    pub fn to_raw(self) -> RawPath { RawPath { raw: list_of_str(self.s) } }
 
     pub fn is_absolute(self) -> bool { self.s.starts_with("/") }
     pub fn is_relative(self) -> bool { !self.is_absolute() }
@@ -271,10 +265,9 @@ impl Path {
 
     /// Absolute, symlinks resolved (`realpath`).
     pub fn canonicalize(self) throws (IoError) -> Path {
-        let err: GcBuf<i32> = buf_new(1);
-        let s = unsafe { rok_os_realpath(self.s, err) };
-        if err[0] != 0 { throw IoError::from_os(err[0], self.s); }
-        Path { s: s }
+        let p = self.s;
+        let real = try fetch(|b: GcBuf<u8>, at: usize, n: usize| unsafe { rok_os_realpath(p, b, at, n) }, p);
+        Path { s: try text_of(real) }
     }
 }
 
@@ -291,41 +284,35 @@ impl Div<Path> for Path {
 /// OS path bytes that need not be UTF-8 (3.8.5). Unix bytes only (no
 /// `from_wide` / `as_wide`).
 pub struct RawPath {
-    raw: str;
+    raw: List<u8>;
 }
 
 impl RawPath {
-    pub fn from_bytes(bytes: List<u8>) -> RawPath {
-        let b = StrBuf::new();
-        for x in bytes { b.push_byte(x); }
-        RawPath { raw: b.to_str() }
-    }
+    pub fn from_bytes(bytes: List<u8>) -> RawPath { RawPath { raw: list_of(bytes) } }
 
-    pub fn as_bytes(self) -> Slice<u8> { self.raw.as_bytes() }
+    pub fn as_bytes(self) -> Slice<u8> { self.raw[0:self.raw.len()] }
 
     /// The path, if the bytes are UTF-8.
     pub fn try_to_path(self) throws (NonUtf8Error) -> Path {
-        let at = unsafe { rok_str_utf8_error(self.raw) };
-        if at >= 0 { throw NonUtf8Error { valid_up_to: at as usize }; }
-        Path { s: self.raw }
+        let s = try str::from_utf8(self.raw) catch e { throw NonUtf8Error { valid_up_to: e.valid_up_to }; };
+        Path { s: s }
     }
 
     /// The path with each invalid sequence (a bad byte and the
     /// continuation bytes after it) replaced by U+FFFD.
     pub fn to_path_lossy(self) -> Path {
+        let (buf, at, n) = region(self.raw);
         let out = StrBuf::new();
-        let rest = self.raw;
+        let i = 0usize;
         loop {
-            let at = unsafe { rok_str_utf8_error(rest) };
-            if at < 0 { break; }
-            let i = at as usize;
-            out.push_str(rest[:i]);
+            let bad = unsafe { rok_buf_utf8_error(buf, at + i, n - i) };
+            let good = if bad < 0 { n - i } else { bad as usize };
+            out.push_str(unsafe { rok_str_from_buf(buf, at + i, good) });
+            if bad < 0 { break; }
             out.push_str("\u{FFFD}");
-            i += 1;
-            while i < rest.len() && (unsafe { rok_str_byte(rest, i) } & 0xC0u8) == 0x80u8 { i += 1; }
-            rest = rest[i:];
+            i += good + 1;
+            while i < n && (self.raw[i] & 0xC0u8) == 0x80u8 { i += 1; }
         }
-        out.push_str(rest);
         Path { s: out.to_str() }
     }
 }

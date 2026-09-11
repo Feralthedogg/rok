@@ -1,0 +1,10 @@
+// expect-error: `#[track_caller]` on `f`
+
+// The caller's location is a hidden parameter: not on a function with
+// a fixed C signature.
+#[track_caller]
+extern "C" fn f(x: i32) -> i32 { x }
+
+fn main() {
+    println(f"{f(1)}");
+}

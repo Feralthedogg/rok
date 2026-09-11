@@ -74,6 +74,7 @@ fn rok_cmd(home: &Path, cwd: &Path, args: &[&str]) -> Command {
     c.current_dir(cwd)
         .env("ROK_HOME", home)
         .env_remove("ROK_ENV")
+        .env_remove("ROK_REGISTRY")
         .args(args);
     c
 }
@@ -361,10 +362,10 @@ fn manifest_errors_and_reserved_forms() {
     write(&app.join("main.rok"), "println(\"x\");\n");
     write(
         &app.join("rok.rokon"),
-        "Package {\n    deps: { \"foo\": \"1.0\" },\n}\n",
+        "Package {\n    deps: { \"foo\": \"1.0.x.y\" },\n}\n",
     );
     let out = rok(&home, &app, &["deps"]);
-    fails(&out, "registry dependencies are not supported yet");
+    fails(&out, "is not a version requirement");
     assert!(
         text(&out.stderr).contains("rok.rokon:2:20"),
         "{}",
@@ -845,4 +846,259 @@ fn rokls_is_rok_lsp() {
         let stdout = ok(&out);
         assert!(stdout.contains(r#""hoverProvider":true"#), "{stdout}");
     }
+}
+
+const ONE: &str = "pub fn one() -> i32 { return 1; }\n";
+
+/// A stone's repository at `dir`: `files` plus a `rok.rokon` for `name`
+/// `vers` with `deps`, committed, with itself as remote `origin`.
+fn stone(dir: &Path, name: &str, vers: &str, deps: &str, files: &[(&str, &str)]) -> String {
+    let manifest =
+        format!("Package {{ name: \"{name}\", version: \"{vers}\", deps: {{ {deps} }} }}\n");
+    let mut all = files.to_vec();
+    all.push(("rok.rokon", &manifest));
+    let c = commit(dir, &all);
+    if git(dir, &["remote"]).is_empty() {
+        git(
+            dir,
+            &["remote", "add", "origin", &dir.display().to_string()],
+        );
+    }
+    c
+}
+
+/// `name` / `vers` pairs of the stones in `rok.lock`.
+fn locked_stones(lock: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut name = "";
+    for l in lock.lines().map(str::trim) {
+        if let Some(n) = l.strip_prefix("name: ") {
+            name = n.trim_end_matches(',');
+        } else if let Some(v) = l.strip_prefix("vers: ") {
+            out.push(format!(
+                "{}@{}",
+                name.trim_matches('"'),
+                v.trim_end_matches(',').trim_matches('"')
+            ));
+        }
+    }
+    out
+}
+
+/// Publish `num` 1.0.0, 1.1.0, 2.0.0 and `geom` 0.3.0 (needing `num`
+/// ^1.0) to the index checkout `index`, checking `publish` on the way;
+/// `num` 1.0.0's tree.
+fn publish_stones(root: &Path, home: &Path, index: &Path) -> String {
+    let reg = index.display().to_string();
+    let index_log = || git(index, &["log", "--format=%s"]);
+    let one = ONE;
+    // `num` 1.0.0: a dry run prints the line and writes nothing.
+    let num = root.join("num");
+    let c1 = stone(&num, "num", "1.0.0", "", &[("lib.rok", one)]);
+    let tree1 = git(&num, &["rev-parse", "HEAD^{tree}"]);
+    let line = format!(
+        "Stone {{ name: \"num\", vers: \"1.0.0\", deps: [], source: Dep::git(\"{}\", rev: \
+         \"{c1}\"), cksum: \"{tree1}\", yanked: false }}\n",
+        num.display()
+    );
+    assert_eq!(ok(&rok(home, &num, &["publish"])), line);
+    assert_eq!(ok(&rok(home, &num, &["publish", "--index", &reg])), line);
+    assert!(!index.join("3/n/num").exists());
+    fails(
+        &rok(home, &num, &["publish", "--commit"]),
+        "--commit needs --index",
+    );
+    ok(&rok(home, &num, &["publish", "--index", &reg, "--commit"]));
+    assert_eq!(read(&index.join("3/n/num")), line);
+    assert!(
+        index_log().starts_with("Publish num 1.0.0\n"),
+        "{}",
+        index_log()
+    );
+    fails(
+        &rok(home, &num, &["publish", "--index", &reg, "--commit"]),
+        "num 1.0.0 is already in the index",
+    );
+    write(&num.join("lib.rok"), "dirty");
+    fails(&rok(home, &num, &["publish"]), "uncommitted changes");
+
+    // More versions, and `geom` 0.3.0 needing `num` ^1.0.
+    for v in ["1.1.0", "2.0.0"] {
+        stone(&num, "num", v, "", &[("lib.rok", one)]);
+        ok(&rok(home, &num, &["publish", "--index", &reg, "--commit"]));
+    }
+    let geom = root.join("geom");
+    let two = "use num::one;\npub fn two() -> i32 { return one() + one(); }\n";
+    stone(
+        &geom,
+        "geom",
+        "0.3.0",
+        "\"num\": \"^1.0\"",
+        &[("lib.rok", two)],
+    );
+    ok(&rok(home, &geom, &["publish", "--index", &reg, "--commit"]));
+    assert!(
+        read(&index.join("ge/om/geom"))
+            .contains("deps: [{ name: \"num\", req: \"^1.0\", kind: \"normal\" }]")
+    );
+    // A path dependency cannot be published.
+    let bad = root.join("bad");
+    stone(
+        &bad,
+        "bad",
+        "0.1.0",
+        "\"x\": Dep::path(\"..\")",
+        &[("lib.rok", one)],
+    );
+    fails(
+        &rok(home, &bad, &["publish"]),
+        "dependency `x` is not a stone",
+    );
+
+    tree1
+}
+
+/// Stones end to end on a local index: publish (dry run and commit),
+/// `add` / lock / `update`, conflicts, yank, cksum checks, search.
+#[test]
+fn stones_publish_add_update_yank() {
+    let root = scratch("stones");
+    let home = root.join("home");
+    let index = root.join("index");
+    commit(
+        &index,
+        &[(
+            "config.rokon",
+            "Registry { name: \"test\", dl: \"git\", api: \"https://rokstones.io\" }\n",
+        )],
+    );
+    for kv in [
+        ["user.name", "t"],
+        ["user.email", "t@t"],
+        ["commit.gpgsign", "false"],
+    ] {
+        git(&index, &["config", kv[0], kv[1]]);
+    }
+    let reg = index.display().to_string();
+    write(
+        &home.join("config.rokon"),
+        &format!("Config {{ registry: \"{reg}\" }}\n"),
+    );
+    let num = root.join("num");
+    let tree1 = publish_stones(&root, &home, &index);
+    let index_log = || git(&index, &["log", "--format=%s"]);
+
+    // `add`: `^` the newest version; the lock pins both stones.
+    let app = root.join("app");
+    write(
+        &app.join("main.rok"),
+        "use geom::two;\nprintln(f\"{two()}\");\n",
+    );
+    write(&app.join("rok.rokon"), APP0);
+    ok(&rok(&home, &app, &["add", "geom"]));
+    assert!(read(&app.join("rok.rokon")).contains("\"geom\": Dep::version(\"^0.3.0\"),"));
+    let lock = read(&app.join("rok.lock"));
+    assert_eq!(locked_stones(&lock), ["geom@0.3.0", "num@1.1.0"]);
+    assert!(
+        lock.contains("source: Dep::registry(") && lock.contains(&format!("\"{reg}\"")),
+        "{lock}"
+    );
+    let names: Vec<String> = deps(&home, &app, &[]).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(names, ["num", "geom"]);
+    if llvm() {
+        assert_eq!(ok(&rok(&home, &app, &["-q", "run"])), "2\n");
+    }
+
+    // A root requirement the chosen version does not meet: a conflict
+    // naming both, and rok.rokon as it was.
+    let before = read(&app.join("rok.rokon"));
+    let out = rok(&home, &app, &["add", "num@2"]);
+    fails(&out, "conflicting requirements for stone `num`");
+    for want in [
+        "`2` (required by the root package)",
+        "`^1.0` (required by `geom`)",
+    ] {
+        assert!(text(&out.stderr).contains(want), "{}", text(&out.stderr));
+    }
+    assert_eq!(read(&app.join("rok.rokon")), before);
+    ok(&rok(&home, &app, &["add", "num@~1.1"]));
+    assert!(read(&app.join("rok.rokon")).contains("\"num\": Dep::version(\"~1.1\"),"));
+    fails(
+        &rok(&home, &app, &["add", "num@^9"]),
+        "no version of stone `num` matches `^9`",
+    );
+    fails(&rok(&home, &app, &["add", "nope"]), "no stone named `nope`");
+    fails(
+        &rok(&home, &app, &["add", "num@x.y"]),
+        "is not a version requirement",
+    );
+
+    // A new version: builds keep the locked one until `update`.
+    stone(&num, "num", "1.1.5", "", &[("lib.rok", ONE)]);
+    ok(&rok(&home, &num, &["publish", "--index", &reg, "--commit"]));
+    ok(&rok(&home, &app, &["--locked", "deps"]));
+    assert!(locked_stones(&read(&app.join("rok.lock"))).contains(&"num@1.1.0".to_owned()));
+    ok(&rok(&home, &app, &["update", "num"]));
+    assert!(locked_stones(&read(&app.join("rok.lock"))).contains(&"num@1.1.5".to_owned()));
+    ok(&rok(&home, &app, &["--offline", "deps"]));
+
+    // Yanked: kept while locked, skipped by `update`; `--undo` restores.
+    ok(&rok(
+        &home,
+        &num,
+        &["yank", "--vers", "1.1.5", "--index", &reg],
+    ));
+    assert!(read(&index.join("3/n/num")).contains("vers: \"1.1.5\""));
+    assert!(index_log().starts_with("Yank num 1.1.5\n"));
+    ok(&rok(&home, &app, &["deps"]));
+    assert!(locked_stones(&read(&app.join("rok.lock"))).contains(&"num@1.1.5".to_owned()));
+    ok(&rok(&home, &app, &["update"]));
+    assert!(locked_stones(&read(&app.join("rok.lock"))).contains(&"num@1.1.0".to_owned()));
+    let out = rok(&home, &app, &["add", "num@=1.1.5"]);
+    fails(&out, "1.1.5 (yanked)");
+    ok(&rok(
+        &home,
+        &num,
+        &["yank", "--undo", "--vers", "1.1.5", "--index", &reg, "num"],
+    ));
+    ok(&rok(&home, &app, &["add", "num@=1.1.5"]));
+    fails(
+        &rok(&home, &num, &["yank", "--vers", "9.9.9", "--index", &reg]),
+        "not in the index",
+    );
+
+    // An entry whose cksum is not its commit's tree is refused.
+    let entry = read(&index.join("3/n/num"))
+        .lines()
+        .next()
+        .unwrap()
+        .replace("1.0.0", "1.0.1");
+    let forged = format!("{}\n", entry.replace(&tree1, &"0".repeat(40)));
+    write(
+        &index.join("3/n/num"),
+        &(read(&index.join("3/n/num")) + &forged),
+    );
+    git(&index, &["commit", "-qam", "forged"]);
+    fails(
+        &rok(&home, &app, &["add", "num@=1.0.1"]),
+        "but the index's cksum is",
+    );
+
+    // `search`, with the index from ROK_REGISTRY in a fresh ROK_HOME.
+    let home2 = root.join("home2");
+    let out = rok_cmd(&home2, &root, &["search", "o"])
+        .env("ROK_REGISTRY", &reg)
+        .output()
+        .unwrap();
+    assert_eq!(ok(&out), "geom = \"0.3.0\"\n");
+    assert_eq!(
+        ok(&rok(&home, &root, &["search", "NU"])),
+        "num = \"2.0.0\"\n"
+    );
+
+    // A per-dependency index.
+    ok(&rok(&home, &app, &["add", "geom@0.3", "--registry", &reg]));
+    assert!(read(&app.join("rok.rokon")).contains(&format!(
+        "\"geom\": Dep::version(\"0.3\", registry: \"{reg}\"),"
+    )));
 }

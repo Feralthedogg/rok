@@ -77,8 +77,10 @@ fn runtime_decl(name: &str, pw: u32) -> Option<String> {
         "rok_tls_shadow_stack_top" => return Some(global("!llvm.ptr")),
         "rok_tls_yield_flag" => return Some(global("i8")),
         "rok_tls_tlab_cursor" | "rok_tls_tlab_limit" => return Some(global(&format!("i{pw}"))),
-        "rok_panic_str" => format!("({s})"),
+        "rok_panic_at" => format!("({s}, {s})"),
         "rok_cstr_len" => format!("(!llvm.ptr) -> i{pw}"),
+        "rok_str_cstr" => format!("({s}) -> !llvm.ptr"),
+        "rok_str_cstr_done" => format!("({s}, !llvm.ptr)"),
         "rok_str_cmp" => format!("({s}, {s}) -> i32"),
         "rok_gc_wb_slow" => format!("(i{pw})"),
         "rok_gc_alloc_slow" => format!("(i{pw}, i{pw}, i32) -> i{pw}"),
@@ -913,6 +915,8 @@ struct FnEmit<'a> {
     region_outer: Vec<String>,
     regions_closed: Vec<String>,
     region_deaths: Vec<LocalId>,
+    /// Position of the last `Statement::Loc`: a failed check reports it.
+    at: rokc_diagnostic::Span,
 }
 
 /// Blocks with an edge to a block on the current DFS path (a loop
@@ -990,6 +994,7 @@ impl<'a> FnEmit<'a> {
             region_outer: Vec::new(),
             regions_closed: Vec::new(),
             region_deaths: Vec::new(),
+            at: f.span,
             block_param_set,
             next_ssa: 0,
             fns,
@@ -1277,9 +1282,11 @@ impl<'a> FnEmit<'a> {
         let mut header = format!("    {one} = llvm.mlir.constant(1 : i32) : i32\n");
         let mut roots = Vec::new();
         let mut rooted = HashSet::new();
+        // `#[track_caller]`'s location is always a static literal.
+        let caller = self.f.params.last().filter(|_| self.f.facts.track_caller);
         for local in &self.f.locals {
             let offsets = self.target.root_offsets(&local.ty);
-            if offsets.is_empty() {
+            if offsets.is_empty() || caller == Some(&local.id) {
                 continue;
             }
             let id = local.id.0;
@@ -1508,6 +1515,7 @@ impl<'a> FnEmit<'a> {
                 self.emit_array_write(*array, index, value, elem_ty, *len);
             }
             Statement::Loc(sp, scope) => {
+                self.at = *sp;
                 if self.dbg.is_some() {
                     let _ = writeln!(
                         self.body,
@@ -2317,8 +2325,9 @@ impl<'a> FnEmit<'a> {
         if from == to {
             return v;
         }
-        // A C function pointer as an address (the null niche's test).
-        if let (MirTy::Fn(..), MirTy::Prim(_)) = (from_ty, to_ty) {
+        // A C function pointer as an address (the null niche's test), or
+        // a GC reference's (`buf_same`).
+        if let (MirTy::Fn(..) | MirTy::GcRef, MirTy::Prim(_)) = (from_ty, to_ty) {
             let pw = self.pw;
             let addr = self.fresh_value();
             let _ = writeln!(
@@ -2584,7 +2593,9 @@ impl<'a> FnEmit<'a> {
 
     /// A call under the C ABI (`abi`, from `abi::classify`): to a C
     /// declaration or through an `extern "C" fn` pointer. `str` goes as
-    /// its `char*` and comes back measured (`rok_cstr_len`); aggregates
+    /// `rok_str_cstr`'s NUL-terminated `char*` (the bytes themselves, or a
+    /// pinned copy for a slice, released by `rok_str_cstr_done` after the
+    /// call) and comes back measured (`rok_cstr_len`); aggregates
     /// go through memory as their coerced type, by pointer or `sret`;
     /// arguments past `params` are a C variadic call's `...`.
     fn emit_c_call(
@@ -2600,6 +2611,7 @@ impl<'a> FnEmit<'a> {
         let str_ty = MirTy::Prim(PrimTy::Str);
         let mut ops: Vec<String> = Vec::new();
         let mut op_tys: Vec<String> = Vec::new();
+        let mut c_strs: Vec<(String, String)> = Vec::new();
         let ret_mlir = mlir_type(ret, pw);
         let sret = if abi.ret == RetAbi::Sret {
             let slot = self.entry_alloca(&ret_mlir, self.target.size_align(ret).1);
@@ -2620,9 +2632,11 @@ impl<'a> FnEmit<'a> {
                 let p = self.fresh_value();
                 let _ = writeln!(
                     self.body,
-                    "    {p} = llvm.extractvalue {v}[0] : {}",
+                    "    {p} = func.call @rok_str_cstr({v}) : ({}) -> !llvm.ptr",
                     mlir_type(&t, pw)
                 );
+                self.needs.insert("rok_str_cstr");
+                c_strs.push((v, p.clone()));
                 v = p;
             }
             let ty = mlir_type(&t, pw);
@@ -2706,6 +2720,14 @@ impl<'a> FnEmit<'a> {
                 );
             }
         }
+        let s_ty = mlir_type(&str_ty, pw);
+        for (v, p) in &c_strs {
+            let _ = writeln!(
+                self.body,
+                "    func.call @rok_str_cstr_done({v}, {p}) : ({s_ty}, !llvm.ptr) -> ()"
+            );
+            self.needs.insert("rok_str_cstr_done");
+        }
         match (&abi.ret, res) {
             (RetAbi::Sret, _) => {
                 let slot = sret.expect("sret slot");
@@ -2773,8 +2795,10 @@ impl<'a> FnEmit<'a> {
         self.errors.push(format!("unsupported in codegen: {what}"));
     }
 
-    /// Branch to a `rok_panic_str(msg)` block when `fail` (an `i1`) is
-    /// set; emission continues in a fresh fall-through block.
+    /// Branch to a `rok_panic_at(msg, location)` block when `fail` (an
+    /// `i1`) is set; emission continues in a fresh fall-through block.
+    /// The location is the current statement's, or in a
+    /// `#[track_caller]` function the one it was passed.
     fn emit_check(&mut self, fail: &str, msg: &str) {
         let n = self.next_check;
         self.next_check += 1;
@@ -2786,14 +2810,21 @@ impl<'a> FnEmit<'a> {
         let _ = writeln!(self.body, "  ^rok_panic{n}:");
         let s = self.fresh_value();
         self.str_literal_into(&s, msg);
+        let at = if self.f.facts.track_caller {
+            format!("%arg{}", self.f.params.len() - 1)
+        } else {
+            let at = self.fresh_value();
+            self.str_literal_into(&at, &rokc_diagnostic::location(self.at));
+            at
+        };
         let str_ty = mlir_prim(PrimTy::Str, pw);
         let _ = writeln!(
             self.body,
-            "    func.call @rok_panic_str({s}) : ({str_ty}) -> ()"
+            "    func.call @rok_panic_at({s}, {at}) : ({str_ty}, {str_ty}) -> ()"
         );
         self.body.push_str("    llvm.unreachable\n");
         let _ = writeln!(self.body, "  ^rok_ok{n}:");
-        self.needs.insert("rok_panic_str");
+        self.needs.insert("rok_panic_at");
     }
 
     /// `fail = (v <pred> c)` for an integer constant `c`.
@@ -3387,8 +3418,8 @@ fn mlir_prim(p: PrimTy, pointer_width: u32) -> String {
         PrimTy::F32 => "f32".to_owned(),
         PrimTy::F64 => "f64".to_owned(),
         PrimTy::Bool => "i1".to_owned(),
-        // `(ptr, len)` (808); the bytes are followed by a NUL so the
-        // pointer alone is a C string at the FFI boundary.
+        // `(ptr, len)` (808); a C function gets `rok_str_cstr`'s
+        // NUL-terminated pointer instead.
         PrimTy::Str => format!("!llvm.struct<(ptr, i{pointer_width})>"),
     }
 }

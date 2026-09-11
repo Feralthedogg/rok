@@ -1,7 +1,7 @@
 // spec: std 201-numbers §2.1.7, 211-conversion §2.11.8 int / float
 // expect-exit: 0
 // expect-stdout:
-// -42 -42 2147483647 -1294967296 -1294967296 3e+09 -42
+// -42 -42 2147483647 -1294967296 -1294967296 3000000000 -42
 // try_from: value out of range for `i32`
 // 0 -7 -7.9
 

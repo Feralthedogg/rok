@@ -1,10 +1,6 @@
 // rok::core::task::time — `Duration` / `Instant` (stdlib spec 2.18.6,
 // 3.3.2). `rok::std::time` re-exports both.
 
-extern "rok" {
-    fn rok_time_now_ns() -> i64;
-}
-
 /// A span of time: `i64` nanoseconds (about ±292 years, 3.3.1).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Duration {
@@ -32,10 +28,6 @@ impl Duration {
     pub fn as_ms(self) -> i64 { self.ns / 1000000 }
     pub fn as_secs(self) -> i64 { self.ns / 1000000000 }
     pub fn as_secs_f64(self) -> f64 { self.ns as f64 / 1000000000.0 }
-    // ponytail: Rust-style aliases kept for existing callers (task.rok, net).
-    pub fn as_nanos(self) -> i64 { self.ns }
-    pub fn as_micros(self) -> i64 { self.ns / 1000 }
-    pub fn as_millis(self) -> i64 { self.ns / 1000000 }
 
     /// The part below one second (of the magnitude for a negative span).
     pub fn subsec_ns(self) -> u32 { (self.ns % 1000000000).abs() as u32 }
@@ -124,7 +116,8 @@ impl Sub for Duration {
 /// process.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Instant {
-    ns: i64;
+    /// Monotonic nanoseconds (the executor's clock).
+    pub(pkg) ns: i64;
 }
 
 impl Instant {
@@ -147,8 +140,6 @@ impl Instant {
     }
     pub fn checked_add(self, d: Duration) -> Instant | none { Instant { ns: self.ns.checked_add(d.ns)? } }
     pub fn checked_sub(self, d: Duration) -> Instant | none { Instant { ns: self.ns.checked_sub(d.ns)? } }
-    /// Monotonic nanoseconds (the executor's clock).
-    pub fn as_nanos(self) -> i64 { self.ns }
 }
 
 impl Add<Duration> for Instant {

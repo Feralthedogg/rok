@@ -9,21 +9,14 @@
 //
 // A handle that is neither joined nor `detach`ed keeps its OS thread
 // record (rok has no implicit drop to detach it).
+//
+// Each thread has one record (`Rec`: name, park token, thread-local
+// values) in `THREADS`, keyed by its id: a spawned thread's is made
+// before it starts and dropped when its closure returns; any other
+// thread's on its first `current()` / `park` / thread-local use.
 
 use rok::std::io::IoError;
 use rok::std::time::Duration;
-
-extern "rok" {
-    fn rok_thread_new_id() -> u64;
-    fn rok_thread_spawn(f: fn() + Send, stack_size: usize, id: u64) -> usize;
-    fn rok_thread_join(handle: usize) -> i32;
-    fn rok_thread_detach(handle: usize) -> i32;
-    fn rok_thread_id() -> u64;
-    fn rok_thread_sleep_ns(ns: i64);
-    fn rok_thread_yield_now();
-    fn rok_thread_park(timeout_ns: i64);
-    fn rok_thread_unpark(id: u64);
-}
 
 /// Identifies a thread for its lifetime (its runtime worker id).
 pub struct ThreadId {
@@ -39,18 +32,50 @@ impl PartialEq for ThreadId {
     fn ne(self, rhs: ThreadId) -> bool { self.id != rhs.id }
 }
 
+/// What the library keeps per thread.
+struct Rec {
+    id: u64;
+    name: str | none;
+    /// 1 = an `unpark` is pending.
+    park: Atomic<i32>;
+    /// `ThreadLocal` key → that local's `Cell<T>` on this thread.
+    locals: Dict<u64, any>;
+}
+
+fn new_rec(id: u64, name: str | none) -> Rec {
+    Rec { id: id, name: name, park: Atomic::new(0), locals: Dict::new() }
+}
+
+static THREADS: Mutex<Dict<u64, Rec>> = Mutex::new(Dict::new());
+
+/// The calling thread's record, made on first use.
+fn this_rec() -> Rec {
+    let id = unsafe { rok_thread_id() };
+    let found: Rec | none = none;
+    using g = THREADS.lock() { found = g.get().get(id); }
+    if let r: Rec = found {
+        return r;
+    }
+    // Only the thread itself makes its record: no race to insert.
+    let fresh = new_rec(id, none);
+    using g = THREADS.lock() { g.get().insert(id, fresh); }
+    fresh
+}
+
 /// A thread's identity (non-generic, 304.1).
 pub struct Thread {
-    id: ThreadId;
-    name: str | none;
+    rec: Rec;
 }
 
 impl Thread {
-    pub fn id(self) -> ThreadId { self.id }
-    pub fn name(self) -> str | none { self.name }
+    pub fn id(self) -> ThreadId { ThreadId { id: self.rec.id } }
+    pub fn name(self) -> str | none { self.rec.name }
     /// Wake the thread from `park` (or make its next `park` return at
     /// once). No-op once the thread has ended.
-    pub fn unpark(self) { unsafe { rok_thread_unpark(self.id.id) }; }
+    pub fn unpark(self) {
+        self.rec.park.store(1);
+        self.rec.park.wake();
+    }
 }
 
 /// The OS could not join the thread.
@@ -108,24 +133,18 @@ impl Builder {
     pub fn spawn<T: Send>(self, f: fn() -> T + Send) throws (IoError) -> JoinHandle<T> {
         let result: GcBuf<T> = buf_new(1);
         let id = unsafe { rok_thread_new_id() };
-        let run: fn() + Send = || { result[0] = f(); };
-        if let name: str = self.name {
-            // Registered before the thread starts, dropped as it ends.
-            using g = NAMES.lock() { g.get().insert(id, name); }
-            run = || {
-                result[0] = f();
-                using g = NAMES.lock() { g.get().remove(id); }
-            };
-        }
+        let rec = new_rec(id, self.name);
+        using g = THREADS.lock() { g.get().insert(id, rec); }
+        let run: fn() + Send = || {
+            result[0] = f();
+            using g = THREADS.lock() { g.get().remove(id); }
+        };
         let h = unsafe { rok_thread_spawn(run, self.stack_size ?? 0usize, id) };
         if h == 0usize {
+            using g = THREADS.lock() { g.get().remove(id); }
             throw IoError::new("could not create an OS thread");
         }
-        JoinHandle {
-            handle: h,
-            result: result,
-            thread: Thread { id: ThreadId { id: id }, name: self.name },
-        }
+        JoinHandle { handle: h, result: result, thread: Thread { rec: rec } }
     }
 }
 
@@ -134,16 +153,9 @@ pub fn spawn<T: Send>(f: fn() -> T + Send) -> JoinHandle<T> {
     try! Builder::new().spawn(f)
 }
 
-/// Names of the running threads spawned with `Builder::name`.
-// ponytail: one global lock, taken only by named threads and `current()`.
-static NAMES: Mutex<Dict<u64, str>> = Mutex::new(Dict::new());
-
 /// The calling thread.
 pub fn current() -> Thread {
-    let id = unsafe { rok_thread_id() };
-    let name: str | none = none;
-    using g = NAMES.lock() { name = g.get().get(id); }
-    Thread { id: ThreadId { id: id }, name: name }
+    Thread { rec: this_rec() }
 }
 
 /// Let the OS run another thread.
@@ -153,7 +165,7 @@ pub fn yield_now() {
 
 /// Block the calling thread for `dur`.
 pub fn sleep(dur: Duration) {
-    unsafe { rok_thread_sleep_ns(dur.as_nanos()) };
+    unsafe { rok_thread_sleep_ns(dur.as_ns()) };
 }
 
 /// Always `false`: a panic ends the process before anything can ask.
@@ -162,40 +174,48 @@ pub fn panicking() -> bool { false }
 /// Block until this thread is `unpark`ed (an earlier `unpark` makes it
 /// return at once). May also return spuriously: re-check the condition.
 pub fn park() {
-    unsafe { rok_thread_park(-1) };
+    park_ns(-1);
 }
 
 /// `park`, for at most `dur`.
 pub fn park_timeout(dur: Duration) {
-    unsafe { rok_thread_park(dur.as_nanos()) };
+    park_ns(dur.as_ns());
+}
+
+fn park_ns(timeout_ns: i64) {
+    let token = this_rec().park;
+    if token.swap(0) == 1 {
+        return;
+    }
+    token.wait(0, timeout_ns);
+    token.store(0);
 }
 
 /// A value per thread, made by `init` on each thread's first use (304.4).
-// ponytail: one `Dict` keyed by thread id behind a `Mutex`; entries of
-// finished threads stay until the `ThreadLocal` is unreachable.
+/// It lives in the thread's record and goes with it.
 pub struct ThreadLocal<T> {
     init: fn() -> T + Sync;
-    slots: Mutex<Dict<u64, Cell<T>>>;
+    key: u64;
 }
+
+static NEXT_LOCAL: Atomic<u64> = Atomic::new(1);
 
 // Each `Cell` is only reached from its own thread.
 unsafe impl<T> Send for ThreadLocal<T> {}
 unsafe impl<T> Sync for ThreadLocal<T> {}
 
 impl<T> ThreadLocal<T> {
-    /// This thread's cell.
+    /// This thread's cell; only this thread touches its `locals`.
     fn cell(self) -> Cell<T> {
-        let id = unsafe { rok_thread_id() };
-        let found: Cell<T> | none = none;
-        using g = self.slots.lock() {
-            found = g.get().get(id);
+        let locals = this_rec().locals;
+        if let v: any = locals.get(self.key) {
+            if let c: Cell<T> = rok::core::reflect::cast::<Cell<T>>(v) {
+                return c;
+            }
         }
-        if let c: Cell<T> = found { return c; }
         let init = self.init;
         let c = Cell::new(init());
-        using g = self.slots.lock() {
-            g.get().insert(id, c);
-        }
+        locals.insert(self.key, c);
         c
     }
 
@@ -215,6 +235,5 @@ impl<T> ThreadLocal<T> {
 
 /// A `ThreadLocal` whose per-thread value starts as `init()`.
 pub fn local<T>(init: fn() -> T + Sync) -> ThreadLocal<T> {
-    let slots: Dict<u64, Cell<T>> = Dict::new();
-    ThreadLocal { init: init, slots: Mutex::new(slots) }
+    ThreadLocal { init: init, key: NEXT_LOCAL.fetch_add(1) }
 }

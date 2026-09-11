@@ -1,0 +1,3 @@
+use pkg::{P, Nope};
+
+pub fn get(p: P) -> i32 { p.x }

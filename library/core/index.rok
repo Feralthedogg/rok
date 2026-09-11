@@ -34,6 +34,7 @@ pub trait Sliceable<R> {
 /// through here; an unsigned one never is. A non-negative `i` is
 /// checked by the indexed type as before; a negative one past the
 /// start panics here.
+#[track_caller]
 pub fn index_from_end(i: isize, len: usize) -> usize {
     if i >= 0 {
         return i as usize;
@@ -76,6 +77,7 @@ pub fn slice_bound(i: isize, len: usize) -> usize {
 /// this way). A missing bound is `none`: `0` / `len` when `step > 0`,
 /// the last element / before the first when `step < 0`. A step of 0
 /// panics.
+#[track_caller]
 pub fn slice_range(start: isize | none, stop: isize | none, step: isize, len: usize) -> Range<usize> {
     if step == 0 {
         panic("slice step must not be zero");

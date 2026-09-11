@@ -1,10 +1,11 @@
 // rok::bare::ptr — raw pointers (stdlib spec 1.1). A pointer is its
 // address; reading / writing through it is `unsafe` (refs-lang 4.15.2).
 //
-// ponytail: provenance is not tracked — `expose_provenance` /
-// `from_exposed_provenance` are the address itself. `map_addr`,
-// `align_offset`, `Slice<T>` extraction and the `Ptr<T> | none` null
-// niche (it is a tagged sum here) wait for a user.
+// Provenance is not tracked — `expose_provenance` /
+// `from_exposed_provenance` are the address itself. `Slice<T>`
+// extraction waits for a user. `Ptr` / `ConstPtr` / `ManyPtr` are never
+// null: `#[niche(0)]` makes `Ptr<T> | none` one address, null = `none`
+// (spec 2.7.2).
 
 // Compiler intrinsics over a pointer struct (field 0 = address); `T` is
 // the pointer's type argument.
@@ -26,6 +27,7 @@ pub fn size_of<T>() -> usize;
 pub fn align_of<T>() -> usize;
 
 /// A non-null, mutable pointer to one `T` (C `T*`).
+#[niche(0)]
 pub struct Ptr<T> {
     address: usize;
 }
@@ -87,6 +89,7 @@ impl<T> Ptr<T> {
 }
 
 /// A non-null pointer to one `T` that is only read (C `const T*`).
+#[niche(0)]
 pub struct ConstPtr<T> {
     address: usize;
 }
@@ -113,6 +116,7 @@ impl<T> ConstPtr<T> {
 }
 
 /// A pointer to a run of `T`s of unknown length (C `T*` array).
+#[niche(0)]
 pub struct ManyPtr<T> {
     address: usize;
 }

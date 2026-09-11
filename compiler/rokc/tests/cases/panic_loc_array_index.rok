@@ -1,0 +1,11 @@
+// expect-exit: 101
+// expect-stderr: panic_loc_array_index.rok:9:13:
+// expect-stderr: index out of bounds
+
+fn three() -> usize { 3 }
+
+fn main() -> i32 {
+    let a: [i32; 3] = [1, 2, 3];
+    let v = a[three()];
+    v
+}

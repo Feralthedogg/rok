@@ -1,23 +1,25 @@
 // expect-exit: 0
 // expect-stdout:
-// 3
+// 2
 
 // A named fn passed to an `extern "C"` function's `fn` parameter goes as
 // a plain C function pointer (spec 5.9.10); rok `fn` values are
-// `{code, env}` pairs everywhere else.
+// `{code, env}` pairs everywhere else. `raise` runs the handler at once
+// on this thread.
 extern "C" {
-    fn rok_par_for(start: i64, end: i64, step: i64, callback: fn(i64));
+    fn signal(sig: i32, handler: fn(i32)) -> usize;
+    fn raise(sig: i32) -> i32;
 }
 
-// `rok_par_for` runs the iterations in parallel: sum, don't print.
 static TOTAL: Atomic<i64> = Atomic::new(0);
 
-fn show(i: i64) {
-    TOTAL.fetch_add(i);
+fn show(sig: i32) {
+    TOTAL.fetch_add(sig as i64);
 }
 
 fn main() -> i32 {
-    unsafe { rok_par_for(0i64, 3i64, 1i64, show) };
+    unsafe { signal(2, show) };
+    unsafe { raise(2) };
     println(f"{TOTAL.load()}");
     return 0;
 }

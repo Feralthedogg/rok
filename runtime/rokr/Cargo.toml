@@ -15,9 +15,7 @@ crate-type = ["staticlib"]
 [dependencies]
 libc = { workspace = true }
 rokr_common = { workspace = true }
-rokr_coroutine = { workspace = true }
 rokr_gc = { workspace = true }
-rokr_scheduler = { workspace = true }
 
 [lints]
 workspace = true

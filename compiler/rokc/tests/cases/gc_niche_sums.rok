@@ -1,0 +1,76 @@
+// expect-exit: 0
+// gc-stress: 400
+// expect-stdout:
+// recs ok
+// dict ok
+// enums ok
+
+// Niche sums holding GC references (refs-lang 2.7.4 propagation): a
+// struct with `str` / `List` fields and a `NonZero` field is its own
+// size in `Rec | none`, `none` is all zero (null references), and
+// collections that move survivors keep every field intact. An enum with
+// reference payloads keeps its tag (the collector reads it).
+extern "C" {
+    fn rok_gc_collect();
+}
+
+struct Rec { name: str; id: NonZero<u32>; tags: List<str>; }
+
+enum Slot { Name(str), Num(i64) }
+
+fn junk(i: i64) -> i64 {
+    let n: i64 = 0;
+    for k in 0..10 {
+        let s = f"garbage-{i}-{k}-xxxxxxxxxxxxxxxx";
+        n += s.len() as i64;
+    }
+    n
+}
+
+fn rec(i: u32) -> Rec | none {
+    if i % 3 == 0 { return none; }
+    let id = NonZero::new(i) ?? panic("zero");
+    Rec { name: f"rec-{i}", id, tags: [f"t{i}", f"u{i}"] }
+}
+
+fn main() {
+    let recs: List<Rec | none> = [];
+    let dict: Dict<NonZero<u32>, Rec | none> = Dict::new();
+    let slots: List<Slot | none> = [];
+    let i: u32 = 1;
+    while i <= 600 {
+        recs.push(rec(i));
+        dict[NonZero::new(i) ?? panic("zero")] = rec(i);
+        slots.push(if i % 2 == 0 { Slot::Name(f"s{i}") } else if i % 5 == 0 { none } else { Slot::Num(i as i64) });
+        junk(i as i64);
+        if i % 100 == 0 { unsafe { rok_gc_collect(); } }
+        i += 1;
+    }
+    unsafe { rok_gc_collect(); }
+    let ok = true;
+    for (k, r) in recs.iter().enumerate() {
+        let i = (k + 1) as u32;
+        ok = ok && match r {
+            none => i % 3 == 0,
+            x: Rec => x.name == f"rec-{i}" && x.id.get() == i && x.tags[1] == f"u{i}",
+        };
+    }
+    println(if ok { "recs ok" } else { "recs BAD" });
+    let dok = true;
+    let j: u32 = 1;
+    while j <= 600 {
+        let r = dict[NonZero::new(j) ?? panic("zero")];
+        dok = dok && match r { none => j % 3 == 0, x: Rec => x.tags[0] == f"t{j}" };
+        j += 1;
+    }
+    println(if dok { "dict ok" } else { "dict BAD" });
+    let eok = true;
+    for (k, s) in slots.iter().enumerate() {
+        let i = k + 1;
+        eok = eok && match s {
+            none => i % 2 != 0 && i % 5 == 0,
+            v: Slot => match v { Slot::Name(n) => n == f"s{i}", Slot::Num(n) => n == i as i64 },
+        };
+    }
+    println(if eok { "enums ok" } else { "enums BAD" });
+}

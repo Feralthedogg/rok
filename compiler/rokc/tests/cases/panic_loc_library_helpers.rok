@@ -1,0 +1,14 @@
+// expect-exit: 101
+// expect-stderr: panic_loc_library_helpers.rok:13:16:
+// expect-stderr: List index out of bounds
+
+// `#[track_caller]` library helpers (`List` indexing, `assert`,
+// `Result::unwrap`) report the user's call site, not their own line.
+fn main() {
+    let xs: List<i32> = [1, 2, 3];
+    assert(xs.len() == 3);
+    let r: Result<i32, str> = Result::Ok(1);
+    println(f"{r.unwrap()}");
+    let i = xs.len();
+    println(f"{xs[i]}");
+}

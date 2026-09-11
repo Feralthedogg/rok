@@ -1,7 +1,7 @@
 // rok::bare::mem — raw memory operations (stdlib spec 1.3.4 / 1.3.6).
 //
-// ponytail: `MaybeUninit`, `Pod`, `transmute_unchecked`, `drop_in_place`
-// and `size_of_val` / `align_of_val` for unsized values wait for a user.
+// Missing: `MaybeUninit`, `Pod`, `transmute_unchecked`, `drop_in_place`,
+// and `size_of_val` / `align_of_val` for unsized values.
 
 pub use rok::bare::ptr::{align_of, size_of};
 use rok::bare::ptr::{ConstPtr, Ptr};

@@ -1,8 +1,8 @@
 // expect-exit: 0
 // expect-stdout:
 // 5
-// 1.41421
-// 2.71828
+// 1.4142135623730951
+// 2.718281828459045
 
 // User-declared `extern "C"` calls into libc math. Demonstrates the
 // FFI path beyond the auto-injected runtime hooks.
@@ -13,7 +13,7 @@ extern "C" {
 
 fn main() -> i32 {
     println(f"{unsafe { sqrt(25.0f64) }}");    // 5
-    println(f"{unsafe { sqrt(2.0f64) }}");     // 1.41421
-    println(f"{unsafe { exp(1.0f64) }}");      // 2.71828
+    println(f"{unsafe { sqrt(2.0f64) }}");     // 1.4142135623730951
+    println(f"{unsafe { exp(1.0f64) }}");      // 2.718281828459045
     return 0;
 }

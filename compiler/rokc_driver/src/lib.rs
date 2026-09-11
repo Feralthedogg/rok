@@ -573,6 +573,12 @@ fn compile_unit(
     // aliases.
     let (use_table, reexports, mut use_diags) = rokc_hir::build_use_table(&all_uses);
     diags.append(&mut use_diags);
+    diags.extend(rokc_hir::check_use_targets(
+        &all_uses,
+        &program.items,
+        &use_table,
+        &reexports,
+    ));
     let mut hir = rokc_hir::lower_full(&program, &prec, &use_table, &reexports, &input);
     rokc_diagnostic::set_current_span(rokc_diagnostic::Span::DUMMY);
     diags.append(&mut hir.diagnostics);

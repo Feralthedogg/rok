@@ -175,8 +175,8 @@ impl<K: Hash, V> Dict<K, V> {
     }
 }
 
-/// `d.entry(k)`: read or fill one key's slot. ponytail: each call
-/// looks the key up again (no cached slot index).
+/// `d.entry(k)`: read or fill one key's slot. Each call looks the key
+/// up again.
 pub struct Entry<K, V> {
     d: Dict<K, V>;
     key: K;
@@ -306,6 +306,7 @@ impl<K: Hash, V> IntoIterator for Dict<K, V> {
 /// `d[k]`; panics when the key is absent.
 impl<K: Hash, V> Index<K> for Dict<K, V> {
     type Output = V;
+    #[track_caller]
     fn index(self, k: K) -> V {
         let at = self.find(k);
         if at == self.meta[1] {

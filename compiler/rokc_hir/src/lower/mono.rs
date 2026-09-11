@@ -607,6 +607,25 @@ pub(super) fn lower_fn_inner(
         .borrow_mut()
         .insert(id, (is_const, is_std));
     let mut ctx = LowerCtx::new(env, subst, self_ty);
+    if fn_def.attrs.iter().any(|a| a.path == ["track_caller"]) {
+        let fixed_abi = fn_def
+            .attrs
+            .iter()
+            .any(|a| a.path == [rokc_ast::EXTERN_C_FN_ATTR] || a.name() == "export_name");
+        // The location is a hidden parameter: no fixed signature.
+        if fixed_abi || name == "main" {
+            ctx.emit_error(
+                rokc_diagnostic::ErrorKind::Type,
+                format!(
+                    "`#[track_caller]` on `{}`: not on `main` or a fixed-ABI \
+                     (`extern \"C\"`, `#[export_name]`) function",
+                    fn_def.name
+                ),
+            );
+        } else {
+            env.sink.track_caller.borrow_mut().insert(id);
+        }
+    }
     ctx.current_module = module;
     ctx.set_bounds(&fn_def.generics, &fn_def.where_clause);
     ctx.assoc_names = fn_def
@@ -1074,6 +1093,7 @@ pub(super) fn instantiate_generic_structs(
                     span: ty.span,
                     generic_args: args,
                     union_kind: None,
+                    niche: super::collect::niche_args(&def.attrs).unwrap_or_default(),
                 });
             });
         }
@@ -1137,6 +1157,7 @@ pub(super) fn instantiate_generic_structs(
                     span: inner.span,
                     generic_args: args,
                     union_kind: None,
+                    niche: super::collect::niche_args(&inner.attrs).unwrap_or_default(),
                 });
             }
         }

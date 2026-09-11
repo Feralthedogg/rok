@@ -25,6 +25,20 @@ pub fn buf_set<T>(buf: GcBuf<T>, i: usize, v: T) {
     buf_set(buf, i, v);
 }
 
+/// Whether `a` and `b` are one buffer (identity, not contents). Pins
+/// nothing.
+#[intrinsic("rok.buf.same")]
+pub fn buf_same<T>(a: GcBuf<T>, b: GcBuf<T>) -> bool {
+    buf_same(a, b)
+}
+
+/// `buf` typed as `GcBuf<u8>`: a runtime parameter that takes any GC
+/// object.
+#[intrinsic("rok.buf.erase")]
+pub(pkg) fn buf_erase<T>(buf: GcBuf<T>) -> GcBuf<u8> {
+    buf_erase(buf)
+}
+
 /// `b[i]`: unchecked, like `buf_get`. The compiler lowers `b[i]` on a
 /// `GcBuf` straight to `rok.buf.get`, so this body never runs.
 impl<T> Index<usize> for GcBuf<T> {

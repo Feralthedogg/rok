@@ -75,7 +75,7 @@ pub fn methods_of<T>() -> List<MethodInfo> {
     return out;
 }
 
-// ponytail: an enum has no fields here (`@for_fields` needs a variant);
+// An enum has no fields here (`@for_fields` needs a variant);
 // it still lists its methods.
 #[impl_derive(Inspect)]
 pub @derive {

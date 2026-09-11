@@ -127,11 +127,9 @@ fn check_run(
     if exit != expected {
         return Err(format!("exit={exit} (expected {expected})"));
     }
-    if let Some(want) = directive(source, "expect-stderr:") {
-        let got = String::from_utf8_lossy(&run.stderr);
-        if !got.contains(want) {
-            return Err(format!("stderr lacks {want:?}\n    stderr: {got:?}"));
-        }
+    let got = String::from_utf8_lossy(&run.stderr);
+    if let Some(want) = directives(source, "expect-stderr:").find(|w| !got.contains(w)) {
+        return Err(format!("stderr lacks {want:?}\n    stderr: {got:?}"));
     }
     if let Some(want) = parse_expect_stdout(source) {
         let got = String::from_utf8_lossy(&run.stdout);

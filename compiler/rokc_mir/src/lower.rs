@@ -11,7 +11,9 @@ use rokc_ir_common::{BlockId, ConstVal, FunctionId, LocalId, PrimOp, PrimTy};
 
 use rokc_ir_common::{Abi, FnFacts, Linkage};
 
-use crate::ty::{code_ty, enum_payload_ty, fat_fn, is_c_fn_niche, lower_ty, sum_tag};
+use crate::ty::{code_ty, enum_payload_ty, fat_fn, lower_ty, sum_tag};
+pub mod niche;
+
 use crate::{
     BasicBlock, LocalDecl, MirFunction, MirModule, MirStaticDef, MirTy, Operand, RValue, Statement,
     Target, Terminator,
@@ -677,6 +679,8 @@ impl<'a> FnBuilder<'a> {
                 let op_ty = self.ty(&lhs.ty);
                 let lhs_op = self.lower_expr_to_operand(lhs);
                 let rhs_op = self.lower_expr_to_operand(rhs);
+                // An overflow / division check reports this position.
+                self.push_loc(e.span);
                 RValue::BinOp {
                     op: *op,
                     op_ty,
@@ -687,6 +691,7 @@ impl<'a> FnBuilder<'a> {
             HirExprKind::PrimUnaryOp { op, operand } => {
                 let op_ty = self.ty(&operand.ty);
                 let v = self.lower_expr_to_operand(operand);
+                self.push_loc(e.span);
                 RValue::UnaryOp {
                     op: *op,
                     op_ty,
@@ -786,6 +791,7 @@ impl<'a> FnBuilder<'a> {
                 to_ty,
             } => {
                 let source = self.lower_expr_to_operand(operand);
+                self.push_loc(e.span);
                 RValue::Cast {
                     source,
                     from_ty: self.ty(from_ty),
@@ -1030,10 +1036,11 @@ impl<'a> FnBuilder<'a> {
                 value,
             } => {
                 let mir_ty = self.ty(sum_ty);
-                // The C fn pointer null niche: the pointer, or null.
-                if is_c_fn_niche(sum_ty) {
+                // A niche sum: the member's bits, or all zero.
+                if let Some((member, n)) = self.niche(sum_ty) {
                     if let Some(v) = value {
-                        return self.lower_expr_to_operand(v);
+                        let v = self.lower_expr_to_operand(v);
+                        return self.niche_wrap(v, &member, &n);
                     }
                     let dst = self.fresh_local(mir_ty);
                     self.push_stmt(Statement::Assign {
@@ -1386,6 +1393,7 @@ impl<'a> FnBuilder<'a> {
                 let Operand::Copy(arr_local) = arr_op else {
                     return Operand::Const(ConstVal::Unit);
                 };
+                self.push_loc(e.span);
                 let mir_elem_ty = self.ty(elem_ty);
                 let len = match &self.locals[arr_local.0 as usize].ty {
                     MirTy::Array(_, n) => *n,
@@ -1818,7 +1826,7 @@ impl<'a> FnBuilder<'a> {
                     value: i128::from(stored),
                     ty: IrPrimTy::I32,
                 };
-                let tag = self.extract_tag(scrut_local, scrut_ty);
+                let tag = self.pattern_tag(pat, scrut_local, scrut_ty);
                 let cond = self.build_eq_op(tag, &value, IrPrimTy::I32);
                 // Refutable payload sub-patterns (`E::A(1)`) are tested
                 // after the tag.
@@ -1872,6 +1880,17 @@ impl<'a> FnBuilder<'a> {
         }
     }
 
+    /// The stored tag a variant pattern tests: `extract_tag`, or a niche
+    /// sum's `niche_tag`.
+    fn pattern_tag(&mut self, pat: &HirPattern, scrut: LocalId, scrut_ty: &MirTy) -> Operand {
+        if let HirPattern::SumVariant { sum_ty, .. } = pat {
+            if let Some((_, n)) = self.niche(sum_ty) {
+                return self.niche_tag(Operand::Copy(scrut), scrut_ty, &n);
+            }
+        }
+        self.extract_tag(scrut, scrut_ty)
+    }
+
     // Read the tag from an enum scrutinee. Payload-less enums are i32
     // outright; payload-bearing enums are `(i32, payload)` tuples; an
     // `any`'s tag loses its `ANY_BOXED` bit.
@@ -1902,17 +1921,6 @@ impl<'a> FnBuilder<'a> {
             return Operand::Copy(dst);
         }
         match scrut_ty {
-            // The C fn pointer null niche (`ty::c_fn_niche`): non-null is
-            // the fn member's stored tag 1, null is `none`'s 0.
-            MirTy::Fn(..) => {
-                let set =
-                    self.cast_to(Operand::Copy(scrut), scrut_ty, &MirTy::Prim(IrPrimTy::Bool));
-                self.cast_to(
-                    set,
-                    &MirTy::Prim(IrPrimTy::Bool),
-                    &MirTy::Prim(IrPrimTy::I32),
-                )
-            }
             MirTy::Tuple(parts) if parts.len() == 2 => {
                 let dst = self.fresh_local(parts[0].clone());
                 self.push_stmt(Statement::Assign {
@@ -2190,11 +2198,11 @@ impl<'a> FnBuilder<'a> {
                     });
                     return;
                 }
-                // The C fn pointer null niche: the payload is the pointer.
-                if is_c_fn_niche(sum_ty) {
+                if let Some((member, n)) = self.niche(sum_ty) {
+                    let v = self.niche_unwrap(Operand::Copy(scrut), &member, &n);
                     self.push_stmt(Statement::Assign {
                         target: *local,
-                        rvalue: RValue::Use(Operand::Copy(scrut)),
+                        rvalue: RValue::Use(v),
                     });
                     return;
                 }

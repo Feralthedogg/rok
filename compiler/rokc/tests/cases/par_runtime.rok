@@ -5,34 +5,26 @@
 // 110
 // ok
 
-// The runtime's C-level parallel loop / scope (805 §8.5.4): `rok_par_for`
-// spreads the iterations over threads (one of them sees another thread
-// working), `rok_par_scope` waits for every thread `rok_par_spawn`
-// started on it, nested spawns included. The callbacks allocate and
-// collect: the helper threads are GC mutators.
+// `par::for_each` spreads the items over the executor's threads (one of
+// them sees another thread working); `par::scope` waits for every task
+// spawned on it, nested spawns included. The work allocates and
+// collects: the executor threads are GC mutators.
 extern "C" {
-    fn rok_par_for(start: i64, end: i64, step: i64, callback: fn(i64));
-    fn rok_par_scope(callback: fn(usize));
     fn rok_cpu_count() -> usize;
     fn rok_thread_id() -> u64;
     fn rok_thread_sleep_ns(ns: i64);
     fn rok_gc_collect();
 }
 
-// The runtime's own ABI: `f` is the whole `{code, env}` value.
-extern "rok" {
-    fn rok_par_spawn(scope: usize, f: fn() + Send);
-}
-
 static SUM: Atomic<i64> = Atomic::new(0);
 static MAIN: Atomic<u64> = Atomic::new(0);
 static OTHER: Atomic<i64> = Atomic::new(0);
 
-extern "C" fn step(i: i64) {
+fn step(i: i64) {
     if unsafe { rok_thread_id() } != MAIN.load() {
         OTHER.store(1);
     }
-    // The first iteration waits (bounded) for a helper thread to show up.
+    // The first item waits (bounded) for another thread to show up.
     if i == 0 {
         let tries = 0;
         while OTHER.load() == 0 && tries < 2000 {
@@ -49,33 +41,33 @@ extern "C" fn step(i: i64) {
     }
 }
 
-extern "C" fn body(scope: usize) {
-    let k: i64 = 1;
-    while k <= 4 {
-        let n = k;
-        unsafe { rok_par_spawn(scope, || {
-            let words: List<str> = [];
-            let j: i64 = 0;
-            while j < n * 5 { words.push(f"w{j}"); j += 1; }
-            unsafe { rok_gc_collect() };
-            SUM.fetch_add(words.len() as i64);
-            if n == 4 {
-                // A nested spawn on the same scope.
-                unsafe { rok_par_spawn(scope, || { SUM.fetch_add(60); }) };
-            }
-        }) };
-        k += 1;
-    }
-}
-
 fn main() -> i32 {
     MAIN.store(unsafe { rok_thread_id() });
-    unsafe { rok_par_for(0i64, 64i64, 1i64, step) };
+    let items: List<i64> = [];
+    for i in 0..64 { items.push(i as i64); }
+    par::for_each(items, |i: i64| step(i));
     println(f"{SUM.load()}");
     let parallel = OTHER.load() == 1 || unsafe { rok_cpu_count() } == 1usize;
     println(f"parallel {parallel}");
     SUM.store(0);
-    unsafe { rok_par_scope(body) };
+    par::scope(|s: par::Scope| {
+        let k: i64 = 1;
+        while k <= 4 {
+            let n = k;
+            s.spawn(|| {
+                let words: List<str> = [];
+                let j: i64 = 0;
+                while j < n * 5 { words.push(f"w{j}"); j += 1; }
+                unsafe { rok_gc_collect() };
+                SUM.fetch_add(words.len() as i64);
+                if n == 4 {
+                    // A nested spawn on the same scope.
+                    s.spawn(|| { SUM.fetch_add(60); });
+                }
+            });
+            k += 1;
+        }
+    });
     // 5 + 10 + 15 + 20 words + 60 from the nested spawn.
     println(f"{SUM.load()}");
     println("ok");

@@ -1,0 +1,9 @@
+// expect-exit: 101
+// expect-stderr: panic_loc_try_force.rok:8:16:
+// expect-stderr: try! failed
+
+fn fails() throws (str) -> i32 { throw "boom"; }
+
+fn main() {
+    println(f"{try! fails()}");
+}

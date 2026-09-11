@@ -20,14 +20,8 @@ static INSTALLED: AtomicBool = AtomicBool::new(false);
 /// Alternate signal stack size (plus a guard page below it).
 const ALT_SIZE: usize = 64 << 10;
 /// How far below the stack a fault still counts as an overflow.
-// ponytail: a heuristic window instead of stack probes; frames bigger
-// than this skip it (emit LLVM `probe-stack` if that shows up).
+// A heuristic window, not stack probes: a frame bigger than this skips it.
 const SLOP: usize = 1 << 20;
-
-unsafe extern "C" {
-    fn ftrylockfile(f: *mut libc::FILE) -> libc::c_int;
-    fn funlockfile(f: *mut libc::FILE);
-}
 
 /// `[lowest usable stack address, guard bytes at / above it)` of the
 /// calling thread, or `None` when the OS will not say.
@@ -138,6 +132,25 @@ unsafe fn install(action: libc::sighandler_t) {
     }
 }
 
+/// The calling thread's name in a report: `main`, its OS name (set by
+/// `thread::Builder::name`), else `<unnamed>`. Async-signal-tolerant.
+pub fn thread_name(buf: &mut [u8; 64]) -> &[u8] {
+    // SAFETY: queries about the calling thread into a local buffer.
+    unsafe {
+        let me = libc::pthread_self();
+        if me as usize == MAIN.load(Ordering::Relaxed) {
+            b"main"
+        } else if libc::pthread_getname_np(me, buf.as_mut_ptr().cast(), buf.len()) == 0
+            && buf[0] != 0
+        {
+            let n = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+            &buf[..n]
+        } else {
+            b"<unnamed>"
+        }
+    }
+}
+
 extern "C" fn handler(_sig: libc::c_int, info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
     // SAFETY: the kernel passes a valid `siginfo_t`; the TLS slot was
     // written by `thread_start` (or is zero).
@@ -149,26 +162,11 @@ extern "C" fn handler(_sig: libc::c_int, info: *mut libc::siginfo_t, _ctx: *mut 
         unsafe { install(libc::SIG_DFL) };
         return;
     }
-    // SAFETY: only async-signal-tolerant calls; stdout is flushed only
-    // when no other thread holds its lock (a held lock would deadlock).
+    crate::stdio::flush_in_signal();
+    let mut buf = [0u8; 64];
+    let name = thread_name(&mut buf);
+    // SAFETY: only async-signal-tolerant calls.
     unsafe {
-        let out = crate::stdout();
-        if ftrylockfile(out) == 0 {
-            libc::fflush(out);
-            funlockfile(out);
-        }
-        let mut buf = [0u8; 64];
-        let me = libc::pthread_self();
-        let name: &[u8] = if me as usize == MAIN.load(Ordering::Relaxed) {
-            b"main"
-        } else if libc::pthread_getname_np(me, buf.as_mut_ptr().cast(), buf.len()) == 0
-            && buf[0] != 0
-        {
-            let n = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
-            &buf[..n]
-        } else {
-            b"<unnamed>"
-        };
         for part in [
             b"\nthread '".as_slice(),
             name,

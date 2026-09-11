@@ -199,6 +199,9 @@ pub struct FnFacts {
     /// typehash (905.2). The function's name then ends in
     /// `MONO_MARK` + these.
     pub mono_args: Option<String>,
+    /// `#[track_caller]`: the last parameter is the caller's location
+    /// (`str`, `path:line:col`), which its panics report.
+    pub track_caller: bool,
 }
 
 /// Separator between a generic function's path and its instance's type

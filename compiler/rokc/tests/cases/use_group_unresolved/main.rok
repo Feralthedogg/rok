@@ -1,0 +1,10 @@
+// expect-error: a.rok:1:14: unresolved import: `Nope` does not exist
+// Spec 5.5.2: each group member must name something; a missing one is
+// reported at its own path, not later as an unknown name.
+mod a;
+
+pub struct P { pub x: i32; }
+
+fn main() -> i32 {
+    return a::get(P { x: 3 });
+}

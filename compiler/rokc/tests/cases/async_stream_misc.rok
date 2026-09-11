@@ -55,4 +55,4 @@ let r2 = try await task::timeout(Duration::ms(100), ok) catch e: TimeoutError { 
 println(f"in time {r2}");
 let start = Instant::now();
 await task::sleep(Duration::ms(20));
-println(f"slept {start.elapsed().as_millis() >= 20}");
+println(f"slept {start.elapsed().as_ms() >= 20}");

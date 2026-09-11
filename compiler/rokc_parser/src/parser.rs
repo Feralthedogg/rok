@@ -689,7 +689,32 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// One argument, or a range of two (`a..=b`, `..b`, `a..`).
     fn parse_attr_arg(&mut self) -> Option<AttrArg> {
+        let is_range = |k: &TokenKind| matches!(k, TokenKind::DotDot | TokenKind::DotDotEq);
+        let lo = if is_range(self.peek()) {
+            None
+        } else {
+            Some(self.parse_attr_atom()?)
+        };
+        if !is_range(self.peek()) {
+            return lo;
+        }
+        let inclusive = matches!(self.peek(), TokenKind::DotDotEq);
+        self.bump();
+        let hi = if matches!(self.peek(), TokenKind::Comma | TokenKind::RParen) {
+            None
+        } else {
+            Some(Box::new(self.parse_attr_atom()?))
+        };
+        Some(AttrArg::Range {
+            lo: lo.map(Box::new),
+            hi,
+            inclusive,
+        })
+    }
+
+    fn parse_attr_atom(&mut self) -> Option<AttrArg> {
         let ident_name = match self.peek().clone() {
             TokenKind::Ident(n) => Some(n),
             _ => None,
@@ -5142,7 +5167,13 @@ impl<'a> Parser<'a> {
         Some(Pattern { kind, span })
     }
 
+    /// Arguments are inside `( )`, so a condition's struct-literal
+    /// restriction does not reach them (`if f(S { a: 1 }) { .. }`).
     fn parse_call_args(&mut self) -> Option<Vec<CallArg>> {
+        self.with_struct_expr(true, Self::parse_call_args_inner)
+    }
+
+    fn parse_call_args_inner(&mut self) -> Option<Vec<CallArg>> {
         let mut args = Vec::new();
         while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
             // `name: expr` is a named argument; otherwise positional.

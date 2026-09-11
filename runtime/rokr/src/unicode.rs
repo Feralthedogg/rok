@@ -7,7 +7,7 @@
 use core::cmp::Ordering;
 use core::ptr;
 
-use crate::str::{RokStr, alloc_str, build};
+use crate::str::{RokStr, alloc_str, build, sub};
 use crate::unicode_tables as t;
 
 fn in_ranges(table: &[(u32, u32)], c: u32) -> bool {
@@ -130,6 +130,7 @@ pub extern "C" fn rok_str_case(s: RokStr, upper: i32) -> RokStr {
 }
 
 /// `which`: 0 = both ends, 1 = start, 2 = end. Unicode `White_Space`.
+/// Shares `s`'s bytes.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_str_trim(s: RokStr, which: i32) -> RokStr {
     let Ok(text) = core::str::from_utf8(s.bytes()) else {
@@ -140,14 +141,14 @@ pub extern "C" fn rok_str_trim(s: RokStr, which: i32) -> RokStr {
         while which != 1 && b.last().is_some_and(u8::is_ascii_whitespace) {
             b = &b[..b.len() - 1];
         }
-        return build(&[b]);
+        return sub(&s, b);
     };
     let text = match which {
         1 => text.trim_start_matches(is_white_space),
         2 => text.trim_end_matches(is_white_space),
         _ => text.trim_matches(is_white_space),
     };
-    build(&[text.as_bytes()])
+    sub(&s, text.as_bytes())
 }
 
 #[cfg(test)]

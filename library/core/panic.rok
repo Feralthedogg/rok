@@ -2,18 +2,12 @@
 // `unreachable_fn` (stdlib spec 2.14.5): print a message to stderr and
 // exit 101. They never return: `-> !` fits any slot.
 
-extern "rok" {
-    fn rok_panic_str(msg: str) -> !;
-    fn rok_oom() -> !;
-    // An error out of a throwing `main` (spec 4.16.4): its description,
-    // exit 1. Lowering calls it.
-    fn rok_uncaught_error(what: str) -> !;
-}
-
-/// Abort with `msg`.
+/// Abort with `msg`, reporting the first caller outside a
+/// `#[track_caller]` chain.
 #[lang("panic_fn")]
+#[track_caller]
 pub fn panic(msg: str) -> ! {
-    unsafe { rok_panic_str(msg) };
+    unsafe { rok_panic_at(msg) };
 }
 
 /// Out of memory (Fatal). The runtime's allocation failures end in the
@@ -25,6 +19,36 @@ pub fn oom() -> ! {
 
 /// Abort: code the program believed it could never reach ran.
 #[lang("unreachable_fn")]
+#[track_caller]
 pub fn unreachable() -> ! {
-    unsafe { rok_panic_str("internal error: entered unreachable code") };
+    unsafe { rok_panic_at("internal error: entered unreachable code") };
+}
+
+/// Abort unless `cond` holds.
+#[track_caller]
+pub fn assert(cond: bool, msg: str = "") {
+    if !cond {
+        panic(if msg == "" { "assertion failed" } else { f"assertion failed: {msg}" });
+    }
+}
+
+/// Abort unless `left == right`; the message shows both via `Debug`.
+#[track_caller]
+pub fn assert_eq<T: PartialEq + Debug>(left: T, right: T, msg: str = "") {
+    if !(left == right) {
+        panic(assert_failed("==", left.debug(), right.debug(), msg));
+    }
+}
+
+/// Abort if `left == right`; the message shows both via `Debug`.
+#[track_caller]
+pub fn assert_ne<T: PartialEq + Debug>(left: T, right: T, msg: str = "") {
+    if left == right {
+        panic(assert_failed("!=", left.debug(), right.debug(), msg));
+    }
+}
+
+fn assert_failed(op: str, left: str, right: str, msg: str) -> str {
+    let tail = if msg == "" { "" } else { f": {msg}" };
+    f"assertion `left {op} right` failed{tail}\n  left: {left}\n right: {right}"
 }

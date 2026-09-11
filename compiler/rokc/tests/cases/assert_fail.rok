@@ -1,0 +1,8 @@
+// expect-exit: 101
+// expect-stderr: assertion failed: x must be positive
+// A failed `assert` aborts (exit 101) with its message.
+fn main() -> i32 {
+    let x = -1;
+    assert(x > 0, "x must be positive");
+    return 0;
+}

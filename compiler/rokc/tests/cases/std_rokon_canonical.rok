@@ -42,10 +42,10 @@
 //     1.5e-6,
 //     123.456,
 //     -2.5e-300,
-//     5.0e-324,
+//     4.9406564584124654e-324,
 //     1.7976931348623157e308,
 // ]
-// "quote \" back \\ nl \n tab \t nul \0 bell \u{7} é"
+// "quote \" back \\ nl \n tab \t nul \0 bell \u{7} c1 \u{85} rlo \u{202e} é"
 // '\''
 // debug: [nan]
 
@@ -95,7 +95,7 @@ fn main() {
         floats.push(Value::Float(Float::from_f64(x)));
     }
     check(Value::List(floats));
-    check(Value::Str("quote \" back \\ nl \n tab \t nul \0 bell \x07 é"));
+    check(Value::Str("quote \" back \\ nl \n tab \t nul \0 bell \x07 c1 \u{85} rlo \u{202E} é"));
     check(Value::Char('\''));
 
     let bad = Value::List([Value::Float(Float::from_f64(f64::nan()))]);

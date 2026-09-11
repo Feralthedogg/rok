@@ -608,9 +608,8 @@ fn for_each_of<I, T>(it: I, f: fn(T)) {
 /// over what the body yields. `resume` runs the body to its next `yield`
 /// (its env is the coroutine frame, a GC object the body's state lives
 /// in, so copies of a `GenIter` share one position).
-// ponytail: one library type per coroutine kind instead of a fresh
-// anonymous type per coroutine (spec 4.1.11); it only shows in type
-// names and identity.
+// One library type per coroutine kind, not a fresh anonymous type per
+// coroutine (spec 4.1.11); it only shows in type names and identity.
 pub struct GenIter<T> {
     resume: fn() -> (T | none);
 }

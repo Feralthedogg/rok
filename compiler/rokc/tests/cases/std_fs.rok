@@ -42,7 +42,7 @@ fn main() throws (IoError) {
     try fs::write(f, "hello\nworld\n");
     print(try fs::read_to_str(f));
     try fs::write_atomic(f, "atomic!");
-    println(try fs::read_to_string(f));
+    println(try fs::read_to_str(f));
     let m = try fs::metadata(f);
     println(f"len={m.len()} file={m.is_file()} dir={m.is_dir()}");
 
