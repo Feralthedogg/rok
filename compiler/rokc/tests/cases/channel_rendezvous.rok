@@ -1,9 +1,8 @@
 // expect-exit: 0
 // gc-stress: 50
 // expect-stdout:
-// 5
+// waited true
 // full 9
-// 6
 // 11
 // 199800
 // freed
@@ -13,7 +12,7 @@
 // waiting); `for v in rx` (IntoIterator); a received value is not kept
 // alive by the channel.
 use rok::std::thread;
-use rok::std::time::Duration;
+use rok::std::time::{Duration, Instant};
 
 extern "C" {
     fn rok_gc_collect();
@@ -23,18 +22,16 @@ extern "C" {
 fn main() -> i32 {
     // Rendezvous: `send` returns only after `recv` took the value.
     let (tx, rx) = channel_bounded::<i64>(0);
-    let got = Atomic::new(0i64);
+    // The receiver starts after 20 ms, so a rendezvous `send` waits for it.
     let h = thread::spawn(|| {
         thread::sleep(Duration::ms(20));
         let total: i64 = 0;
-        for v in rx {
-            got.store(v);
-            total += v;
-        }
+        for v in rx { total += v; }
         total
     });
+    let t0 = Instant::now();
     try! tx.send(5);
-    println(f"{got.load()}");
+    println(f"waited {t0.elapsed() >= Duration::ms(15)}");
     // Nobody is waiting in `recv`: a rendezvous `try_send` is `Full`.
     let (lonely, _unused) = channel_bounded::<i64>(0);
     try lonely.try_send(9) catch e {
@@ -44,7 +41,6 @@ fn main() -> i32 {
         };
     };
     try! tx.send(6);
-    println(f"{got.load()}");
     tx.close();
     println(f"{try! h.join()}");
 

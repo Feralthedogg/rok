@@ -7,6 +7,7 @@
 fn main() {
     let n: usize = 2305843009213693952; // 2^61: `n * 8` wraps to 0
     println("before");
-    let xs: List<i64> = List::with_capacity(n);
-    println(f"after {xs.len()}");
+    // Raw buffer: collections check capacity themselves ("capacity overflow").
+    let b: GcBuf<i64> = unsafe { buf_new(n) };
+    println(f"after {unsafe { b[0] }}");
 }

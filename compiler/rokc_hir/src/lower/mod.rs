@@ -907,6 +907,10 @@ fn coerce(
     if infer::unify_value(ctx, slot, &value) {
         return value;
     }
+    // A diverging block has type `!`: it fits any slot (spec 3.9).
+    if hir_expr_diverges(&value) {
+        return value;
+    }
     let value = c_fn_value(ctx, slot, value);
     let value = adapt_never_fn(ctx, slot, value);
     let value = adapt_fn_value(ctx, slot, value);

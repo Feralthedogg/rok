@@ -2899,6 +2899,139 @@ impl<'a> Parser<'a> {
 
     /// `{ stmts }`. Inside braces a struct literal is always allowed
     /// again, even when the block itself sits in an `if`/`while` head.
+    /// `let PAT [: T] = init else { .. };` (spec 3.16.4) →
+    /// `let (b1, .., bn,) = match init { PAT => (b1, .., bn,), _ => else };`
+    /// (one binder: a plain `let`, none: an expression statement).
+    fn let_else_pattern(
+        &mut self,
+        pat: Pattern,
+        ty: Option<Ty>,
+        init: Expr,
+        else_block: Block,
+        start: Span,
+    ) -> Stmt {
+        fn binders(p: &Pattern, out: &mut Vec<String>) {
+            match &p.kind {
+                PatternKind::Binding { name, sub } => {
+                    out.push(name.clone());
+                    if let Some(s) = sub {
+                        binders(s, out);
+                    }
+                }
+                PatternKind::TypeCheck {
+                    binder: Some(n), ..
+                }
+                | PatternKind::Rest(Some(n)) => out.push(n.clone()),
+                PatternKind::Tuple(ps) | PatternKind::EnumVariant { args: ps, .. } => {
+                    ps.iter().for_each(|p| binders(p, out));
+                }
+                PatternKind::Or(ps) => {
+                    if let Some(p) = ps.first() {
+                        binders(p, out);
+                    }
+                }
+                PatternKind::Struct { fields, .. } => {
+                    for f in fields {
+                        match &f.pat {
+                            Some(p) => binders(p, out),
+                            None => out.push(f.name.clone()),
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let span = init.span;
+        let path = |name: &str| Expr {
+            kind: ExprKind::Path(Path {
+                segments: vec![PathSegment {
+                    name: name.to_string(),
+                    generics: vec![],
+                }],
+                span,
+            }),
+            span,
+        };
+        let mut names = Vec::new();
+        binders(&pat, &mut names);
+        let body = match names.as_slice() {
+            [one] => path(one),
+            _ => Expr {
+                kind: ExprKind::Tuple(names.iter().map(|n| path(n)).collect()),
+                span,
+            },
+        };
+        let scrutinee = match ty {
+            Some(ty) => Expr {
+                kind: ExprKind::Block(Block {
+                    stmts: vec![Stmt {
+                        kind: StmtKind::Let {
+                            name: "__letelse_s".to_string(),
+                            ty: Some(ty),
+                            init,
+                        },
+                        span,
+                    }],
+                    trailing: Some(Box::new(path("__letelse_s"))),
+                    span,
+                    label: None,
+                }),
+                span,
+            },
+            None => init,
+        };
+        let else_span = else_block.span;
+        let m = Expr {
+            kind: ExprKind::Match {
+                scrutinee: Box::new(scrutinee),
+                arms: vec![
+                    MatchArm {
+                        pat,
+                        guard: None,
+                        body,
+                    },
+                    MatchArm {
+                        pat: Pattern {
+                            kind: PatternKind::Wildcard,
+                            span: else_span,
+                        },
+                        guard: None,
+                        body: Expr {
+                            kind: ExprKind::Block(else_block),
+                            span: else_span,
+                        },
+                    },
+                ],
+            },
+            span,
+        };
+        let kind = match names.len() {
+            0 => StmtKind::Expr(m),
+            1 => StmtKind::Let {
+                name: names.pop().unwrap_or_default(),
+                ty: None,
+                init: m,
+            },
+            _ => {
+                self.pending_stmts.push(Stmt {
+                    kind: StmtKind::LetTuple {
+                        names,
+                        rest: None,
+                        ty: None,
+                        init: path("__letelse_t"),
+                    },
+                    span: start,
+                });
+                StmtKind::Let {
+                    name: "__letelse_t".to_string(),
+                    ty: None,
+                    init: m,
+                }
+            }
+        };
+        Stmt { kind, span: start }
+    }
+
     fn parse_block(&mut self) -> Option<Block> {
         self.nested(|p| p.with_struct_expr(true, Self::parse_block_inner))
     }
@@ -2997,6 +3130,11 @@ impl<'a> Parser<'a> {
                     };
                     self.expect(&TokenKind::Eq, "`=`")?;
                     let init = self.parse_expr()?;
+                    if self.eat(&TokenKind::Else) {
+                        let else_block = self.parse_block()?;
+                        self.expect(&TokenKind::Semi, "`;`")?;
+                        return Some((self.let_else_pattern(pat, ty, init, else_block, start), false));
+                    }
                     self.expect(&TokenKind::Semi, "`;`")?;
                     return Some((
                         Stmt {
@@ -4541,6 +4679,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::False
                 | TokenKind::Minus
                 | TokenKind::LParen
+                | TokenKind::LBracket
         ) {
             self.with_struct_expr(true, Self::parse_expr)
         } else {

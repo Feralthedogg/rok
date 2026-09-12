@@ -1,0 +1,14 @@
+// spec: 2.9.1
+// expect-exit: 0
+// A dict / set literal whose first item starts with `[` is not a block.
+
+fn main() -> i32 {
+    let d = { [1]: 2, [3, 4]: 5 };
+    if d.len() != 2 { return 1; }
+    if d[[3, 4]] != 5 { return 2; }
+    let s = { [1], [2] };
+    if s.len() != 2 { return 3; }
+    let b = { [7] };
+    if b[0] != 7 { return 4; }
+    0
+}

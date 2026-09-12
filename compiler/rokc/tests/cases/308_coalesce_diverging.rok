@@ -1,0 +1,26 @@
+// spec: 3.8.4
+// expect-exit: 0
+// A diverging `??` default (`return` / `throw` block) has type `!`.
+
+struct E {}
+impl Error for E {}
+
+fn f(x: i32 | none) -> i32 {
+    let v = x ?? { return -1; };
+    v
+}
+
+fn g(x: i32 | none) throws (E) -> i32 {
+    let v: i32 = x ?? { throw E {}; };
+    v
+}
+
+fn main() -> i32 {
+    if f(none) != -1 { return 1; }
+    if f(3) != 3 { return 2; }
+    let r = try g(none) catch _ { 9 };
+    if r != 9 { return 3; }
+    let s = try g(4) catch _ { 9 };
+    if s != 4 { return 4; }
+    0
+}

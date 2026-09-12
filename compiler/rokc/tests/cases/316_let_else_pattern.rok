@@ -1,0 +1,46 @@
+// spec: 3.16.4
+// expect-exit: 0
+// `let-else` with a refutable variant / struct pattern.
+
+enum V {
+    A(i32),
+    P(i32, i32),
+    B,
+}
+
+struct S {
+    x: i32;
+    y: i32;
+}
+
+fn one(v: V) -> i32 {
+    let V::A(n) = v else { return -1; };
+    n
+}
+
+fn two(v: V) -> i32 {
+    let V::P(a, b) = v else { return -1; };
+    a * 10 + b
+}
+
+fn none_bound(v: V) -> i32 {
+    let V::B = v else { return -1; };
+    7
+}
+
+fn fields(s: S) -> i32 {
+    let S { x: 1, y } = s else { return -1; };
+    y
+}
+
+fn main() -> i32 {
+    if one(V::A(3)) != 3 { return 1; }
+    if one(V::B) != -1 { return 2; }
+    if two(V::P(4, 5)) != 45 { return 3; }
+    if two(V::A(1)) != -1 { return 4; }
+    if none_bound(V::B) != 7 { return 5; }
+    if none_bound(V::A(0)) != -1 { return 6; }
+    if fields(S { x: 1, y: 9 }) != 9 { return 7; }
+    if fields(S { x: 2, y: 9 }) != -1 { return 8; }
+    0
+}
