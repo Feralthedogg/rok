@@ -1,0 +1,14 @@
+// spec: 3.11.1
+// expect-error: non-exhaustive match on `char | none`
+// A literal on a sum member doesn't cover the member.
+
+fn f(c: char | none) -> i32 {
+    match c {
+        'a' => 1,
+        none => 3,
+    }
+}
+
+fn main() -> i32 {
+    f('a')
+}

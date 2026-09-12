@@ -797,6 +797,12 @@ impl<'b> Interp<'b> {
                 }
                 true
             }
+            (
+                HirPattern::SumMember {
+                    variant_index, sub, ..
+                },
+                Value::Sum(idx, Some(payload)),
+            ) => *variant_index == *idx && self.pattern(sub, payload, f, span)?,
             _ => false,
         })
     }

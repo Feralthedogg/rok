@@ -362,6 +362,21 @@ pub fn finish(
             run(cmd.arg("-c").arg(&ll_path).arg("-o").arg(&obj), "clang")?;
             let mut link = linker(opts, module.mir.target.triple.as_deref())?;
             link.arg(&obj).args(&module.archives).arg(rokr_arg(opts));
+            let apple = module
+                .mir
+                .target
+                .triple
+                .as_deref()
+                .map_or(cfg!(target_vendor = "apple"), |t| t.contains("apple"));
+            for (name, stat) in &module.mir.link.native_libs {
+                // ld64 has no `-Bstatic`: it takes the first `lib<name>`
+                // on the search path.
+                if *stat && !apple {
+                    link.args(["-Wl,-Bstatic", &format!("-l{name}"), "-Wl,-Bdynamic"]);
+                } else {
+                    link.arg(format!("-l{name}"));
+                }
+            }
             // core's float methods call libm; glibc keeps it out of libc.
             link.arg("-lm").arg("-o").arg(out);
             run(&mut link, "the link")?;

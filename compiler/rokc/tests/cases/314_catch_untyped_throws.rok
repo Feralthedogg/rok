@@ -1,0 +1,42 @@
+// spec: 3.14.4
+// expect-exit: 0
+// forbid-warning: never runs
+// `catch e: T` / `catch T { f }` narrow an untyped `throws` error (`any Error`).
+
+struct Other {}
+
+impl Error for Other {}
+
+impl Display for Other {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("other") }
+}
+
+impl Debug for Other {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("other") }
+}
+
+fn bad(k: i32) throws -> i32 {
+    if k == 0 { throw ValueError { msg: "zero" }; }
+    if k == 1 { throw Other {}; }
+    k
+}
+
+fn rethrows_other(k: i32) throws -> i32 {
+    try bad(k) catch e: ValueError { -2 }
+}
+
+fn main() -> i32 {
+    let a = try bad(0) catch e: ValueError { e.msg.len() as i32 } catch _ { -1 };
+    if a != 4 { return 1; }
+    let b = try bad(1) catch e: ValueError { 100 } catch _ { -1 };
+    if b != -1 { return 2; }
+    let c = try bad(0) catch ValueError { msg } { msg.len() as i32 + 10 } catch _ { -1 };
+    if c != 14 { return 3; }
+    let d = try bad(5) catch _ { -1 };
+    if d != 5 { return 4; }
+    let e = try rethrows_other(0) catch _ { -1 };
+    if e != -2 { return 5; }
+    let f = try rethrows_other(1) catch e: Other { 7 } catch _ { -1 };
+    if f != 7 { return 6; }
+    0
+}

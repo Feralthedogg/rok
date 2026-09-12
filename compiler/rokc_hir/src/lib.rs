@@ -599,6 +599,15 @@ pub enum HirPattern {
         binder: Option<LocalId>,
         payload_ty: Option<HirTy>,
     },
+    /// A pattern on one member of a sum or `any` (`'a'` on `char | none`,
+    /// `E { msg }` on `any Error`): the tag test, then `sub` on the
+    /// member's payload.
+    SumMember {
+        sum_ty: HirTy,
+        variant_index: u32,
+        payload_ty: HirTy,
+        sub: Box<HirPattern>,
+    },
 }
 
 impl HirPattern {
@@ -614,7 +623,8 @@ impl HirPattern {
             Self::Literal { .. }
             | Self::Range { .. }
             | Self::EnumVariant { .. }
-            | Self::SumVariant { .. } => false,
+            | Self::SumVariant { .. }
+            | Self::SumMember { .. } => false,
         }
     }
 }

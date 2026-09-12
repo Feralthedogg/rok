@@ -412,6 +412,7 @@ fn each_binding(p: &HirPattern, out: &mut dyn FnMut(LocalId)) {
         HirPattern::Or(ps) | HirPattern::Tuple(ps) => ps.iter().for_each(|p| each_binding(p, out)),
         HirPattern::Struct { fields, .. } => fields.iter().for_each(|(_, p)| each_binding(p, out)),
         HirPattern::EnumVariant { args, .. } => args.iter().for_each(|p| each_binding(p, out)),
+        HirPattern::SumMember { sub, .. } => each_binding(sub, out),
         _ => {}
     }
 }

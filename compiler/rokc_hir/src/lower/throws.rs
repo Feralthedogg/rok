@@ -66,6 +66,8 @@ fn may_take(filter: Option<&HirTy>, ety: &HirTy) -> bool {
     };
     match filter {
         None | Some(HirTy::Path(_) | HirTy::Unknown) => true,
+        // An untyped `throws` error (`any Error`) may hold any type.
+        Some(_) if matches!(ety, HirTy::AnyTrait(_)) => true,
         Some(f) => {
             let ps = parts(ety);
             parts(f).iter().any(|x| ps.contains(x))
@@ -1703,7 +1705,7 @@ fn covers(ctx: &LowerCtx<'_>, arms: &[AstMatchArm], ety: &HirTy) -> bool {
 }
 
 /// The error type a catch arm's pattern names (`None`: any type).
-fn arm_filter(ctx: &LowerCtx<'_>, pat: &AstPattern) -> Option<HirTy> {
+pub(super) fn arm_filter(ctx: &LowerCtx<'_>, pat: &AstPattern) -> Option<HirTy> {
     match &pat.kind {
         AstPatternKind::TypeCheck { ty, .. } => Some(ctx.resolve_ast_ty(ty)),
         AstPatternKind::EnumVariant { path, .. } | AstPatternKind::Struct { path, .. } => {

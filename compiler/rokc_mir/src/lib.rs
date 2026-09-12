@@ -51,6 +51,9 @@ pub struct Link {
     /// Added to every GC type id: the ids below belong to the prebuilt
     /// dependencies.
     pub type_offset: u32,
+    /// `#[link(..)]` libraries of `extern` blocks (spec 6.2.3):
+    /// `(name, static)`, in first-seen order.
+    pub native_libs: Vec<(String, bool)>,
 }
 
 impl Link {

@@ -54,7 +54,7 @@ fn collect_items<I: IntoIterator>(iter: I) -> List<I::Item> {
 }
 
 /// Call `f` on every item, in parallel (order unspecified).
-pub fn for_each<I: IntoIterator, T: Send>(iter: I, f: fn(T) + Send + Sync) {
+pub fn for_each<I: IntoIterator<Item = T>, T: Send>(iter: I, f: fn(T) + Send + Sync) {
     let items: List<T> = collect_items(iter);
     let n = items.len();
     let (chunks, size) = chunking(n);
@@ -69,7 +69,7 @@ pub fn for_each<I: IntoIterator, T: Send>(iter: I, f: fn(T) + Send + Sync) {
 }
 
 /// `f` of every item, in the items' order.
-pub fn map<I: IntoIterator, T: Send, U: Send>(iter: I, f: fn(T) -> U + Send + Sync) -> List<U> {
+pub fn map<I: IntoIterator<Item = T>, T: Send, U: Send>(iter: I, f: fn(T) -> U + Send + Sync) -> List<U> {
     unsafe {
         let items: List<T> = collect_items(iter);
         let n = items.len();

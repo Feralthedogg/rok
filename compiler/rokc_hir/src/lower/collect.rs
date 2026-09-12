@@ -4658,8 +4658,10 @@ pub(super) fn subst_assoc_ty(ty: &mut Ty, assoc: &HashMap<String, Ty>) {
         }
         AstTyKind::Sum(ps) => {
             for t in ps.iter_mut() {
-                let before = matches!(&t.kind, AstTyKind::Path(p) if p.segments.len() <= 2)
-                    .then(|| format!("{:?}", t.kind));
+                // `#nest<X>` (`X?`) is already one member.
+                let before = (matches!(&t.kind, AstTyKind::Path(p) if p.segments.len() <= 2)
+                    && t.nest_inner().is_none())
+                .then(|| format!("{:?}", t.kind));
                 subst_assoc_ty(t, assoc);
                 // A replaced parameter stays one member (spec 2.6.4).
                 if before.is_some_and(|b| b != format!("{:?}", t.kind)) {

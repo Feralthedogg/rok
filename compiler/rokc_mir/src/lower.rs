@@ -1829,6 +1829,26 @@ impl<'a> FnBuilder<'a> {
                     }
                 }
             }
+            HirPattern::SumMember {
+                sum_ty,
+                variant_index,
+                payload_ty,
+                sub,
+            } => {
+                let tag_pat = HirPattern::SumVariant {
+                    sum_ty: sum_ty.clone(),
+                    variant_index: *variant_index,
+                    binder: None,
+                    payload_ty: None,
+                };
+                let tag_ok = self.new_block();
+                self.lower_pattern_test(&tag_pat, scrut_local, scrut_ty, tag_ok, next_bb);
+                self.current = tag_ok;
+                let member_ty = self.ty(payload_ty);
+                let member = self.fresh_local(member_ty.clone());
+                self.sum_payload(scrut_local, sum_ty, Some(payload_ty), member);
+                self.lower_pattern_test(sub, member, &member_ty, arm_body_bb, next_bb);
+            }
             HirPattern::EnumVariant { variant_index, .. }
             | HirPattern::SumVariant { variant_index, .. } => {
                 // Tag check; payload binding (if any) happens in
@@ -2168,6 +2188,66 @@ impl<'a> FnBuilder<'a> {
         Operand::Copy(result)
     }
 
+    /// Store the payload of sum `scrut` (member `hir_payload`) into `local`.
+    fn sum_payload(
+        &mut self,
+        scrut: LocalId,
+        sum_ty: &HirTy,
+        hir_payload: Option<&HirTy>,
+        local: LocalId,
+    ) {
+        // `n: none` holds no payload: bind the `none` value.
+        if matches!(hir_payload, Some(HirTy::Path(p)) if p.as_slice() == ["none"]) {
+            self.push_stmt(Statement::Assign {
+                target: local,
+                rvalue: RValue::Use(Operand::Const(ConstVal::None)),
+            });
+            return;
+        }
+        if let Some((member, n)) = self.niche(sum_ty) {
+            let v = self.niche_unwrap(Operand::Copy(scrut), &member, &n);
+            self.push_stmt(Statement::Assign {
+                target: local,
+                rvalue: RValue::Use(v),
+            });
+            return;
+        }
+        let scrut_ty = self.locals[scrut.0 as usize].ty.clone();
+        let (MirTy::Tuple(parts) | MirTy::Struct(_, parts)) = &scrut_ty else {
+            return;
+        };
+        if parts.len() != 2 {
+            return;
+        }
+        let payload_ty = parts[1].clone();
+        let payload = self.fresh_local(payload_ty.clone());
+        self.push_stmt(Statement::Assign {
+            target: payload,
+            rvalue: RValue::FieldRead {
+                target: Operand::Copy(scrut),
+                index: 1,
+                field_ty: payload_ty.clone(),
+            },
+        });
+        // The payload slot back to the binder's member type.
+        let bind_ty = self.locals[local.0 as usize].ty.clone();
+        if matches!(sum_ty, HirTy::AnyTrait(_)) {
+            self.push_stmt(Statement::Assign {
+                target: local,
+                rvalue: RValue::HeapLoad {
+                    ptr: Operand::Copy(payload),
+                    ty: bind_ty,
+                },
+            });
+            return;
+        }
+        let v = self.payload_cast(Operand::Copy(payload), &payload_ty, &bind_ty);
+        self.push_stmt(Statement::Assign {
+            target: local,
+            rvalue: RValue::Use(v),
+        });
+    }
+
     /// Walk a pattern that successfully matched and store the scrutinee
     /// into any binding locals.
     fn bind_pattern(&mut self, pat: &HirPattern, scrut: LocalId) {
@@ -2206,56 +2286,18 @@ impl<'a> FnBuilder<'a> {
                 ..
             } => {
                 let Some(local) = binder else { return };
-                // `n: none` holds no payload: bind the `none` value.
-                if matches!(hir_payload, Some(HirTy::Path(p)) if p.as_slice() == ["none"]) {
-                    self.push_stmt(Statement::Assign {
-                        target: *local,
-                        rvalue: RValue::Use(Operand::Const(ConstVal::None)),
-                    });
-                    return;
-                }
-                if let Some((member, n)) = self.niche(sum_ty) {
-                    let v = self.niche_unwrap(Operand::Copy(scrut), &member, &n);
-                    self.push_stmt(Statement::Assign {
-                        target: *local,
-                        rvalue: RValue::Use(v),
-                    });
-                    return;
-                }
-                let scrut_ty = self.locals[scrut.0 as usize].ty.clone();
-                let (MirTy::Tuple(parts) | MirTy::Struct(_, parts)) = &scrut_ty else {
-                    return;
-                };
-                if parts.len() != 2 {
-                    return;
-                }
-                let payload_ty = parts[1].clone();
-                let payload = self.fresh_local(payload_ty.clone());
-                self.push_stmt(Statement::Assign {
-                    target: payload,
-                    rvalue: RValue::FieldRead {
-                        target: Operand::Copy(scrut),
-                        index: 1,
-                        field_ty: payload_ty.clone(),
-                    },
-                });
-                // The payload slot back to the binder's member type.
-                let bind_ty = self.locals[local.0 as usize].ty.clone();
-                if matches!(sum_ty, HirTy::AnyTrait(_)) {
-                    self.push_stmt(Statement::Assign {
-                        target: *local,
-                        rvalue: RValue::HeapLoad {
-                            ptr: Operand::Copy(payload),
-                            ty: bind_ty,
-                        },
-                    });
-                    return;
-                }
-                let v = self.payload_cast(Operand::Copy(payload), &payload_ty, &bind_ty);
-                self.push_stmt(Statement::Assign {
-                    target: *local,
-                    rvalue: RValue::Use(v),
-                });
+                self.sum_payload(scrut, sum_ty, hir_payload.as_ref(), *local);
+            }
+            HirPattern::SumMember {
+                sum_ty,
+                payload_ty,
+                sub,
+                ..
+            } => {
+                let member_ty = self.ty(payload_ty);
+                let member = self.fresh_local(member_ty);
+                self.sum_payload(scrut, sum_ty, Some(payload_ty), member);
+                self.bind_pattern(sub, member);
             }
             HirPattern::Tuple(sub_pats) => {
                 let scrut_ty = self.locals[scrut.0 as usize].ty.clone();

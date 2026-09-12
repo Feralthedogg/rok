@@ -237,8 +237,11 @@ fn simplify(ctx: &LowerCtx<'_>, p: &HirPattern) -> Pat {
             Pat::C(Ctor::Variant(*variant_index), sub)
         }
         HirPattern::SumVariant { variant_index, .. } => {
-            Pat::C(Ctor::Variant(*variant_index), Vec::new())
+            Pat::C(Ctor::Variant(*variant_index), vec![Pat::Wild])
         }
+        HirPattern::SumMember {
+            variant_index, sub, ..
+        } => Pat::C(Ctor::Variant(*variant_index), vec![simplify(ctx, sub)]),
     }
 }
 
@@ -277,11 +280,13 @@ fn ctors_of(ctx: &LowerCtx<'_>, ty: &HirTy) -> Option<Vec<(Ctor, Vec<HirTy>)>> {
                 )
             })
             .collect(),
-        HirTy::Sum(vs) => (0..vs.len())
-            .map(|i| {
+        HirTy::Sum(vs) => vs
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
                 (
                     Ctor::Variant(u32::try_from(i).expect("variant overflow")),
-                    Vec::new(),
+                    vec![v.clone()],
                 )
             })
             .collect(),
@@ -717,6 +722,24 @@ pub(super) fn lower_pattern_inner(
         }
         HirPattern::Wildcard
     };
+    // `ValueError { msg }` / `E::A(x)` on an `any` value: narrow to that
+    // type, then match its payload (`catch` of an untyped `throws`).
+    if let (
+        HirTy::AnyTrait(bounds),
+        AstPatternKind::Struct { .. } | AstPatternKind::EnumVariant { .. },
+    ) = (scrut_ty, &pat.kind)
+    {
+        if let Some(t) = super::throws::arm_filter(ctx, pat)
+            .filter(|t| bounds.iter().all(|b| ctx.implements_trait(t, b, 0)))
+        {
+            return HirPattern::SumMember {
+                sum_ty: scrut_ty.clone(),
+                variant_index: ctx.any_tag(&t),
+                sub: Box::new(lower_pattern_inner(ctx, pat, &t)),
+                payload_ty: t,
+            };
+        }
+    }
     match &pat.kind {
         AstPatternKind::Wildcard => HirPattern::Wildcard,
         AstPatternKind::Binding { name, sub: None } if name == "_" => HirPattern::Wildcard,
@@ -771,6 +794,36 @@ pub(super) fn lower_pattern_inner(
                 }
             }
             mismatch(ctx, "a `none` pattern".to_owned())
+        }
+        // A literal / range on a sum tests the one member it can match
+        // (spec 3.11.1: `'a'` on `char | none`).
+        AstPatternKind::Literal(_) | AstPatternKind::Range { .. }
+            if matches!(scrut_ty, HirTy::Sum(_)) =>
+        {
+            let HirTy::Sum(vs) = scrut_ty else {
+                unreachable!()
+            };
+            let fits = |v: &HirTy| match &pat.kind {
+                AstPatternKind::Literal(lit) => literal_to_const(ctx, lit, v).is_some(),
+                AstPatternKind::Range { start, end, .. } => {
+                    matches!(v, HirTy::Prim(p) if p.is_int())
+                        && [start, end].iter().all(|b| {
+                            b.as_ref()
+                                .is_none_or(|l| literal_to_const(ctx, l, v).is_some())
+                        })
+                }
+                _ => false,
+            };
+            let Some(i) = vs.iter().position(fits) else {
+                return mismatch(ctx, "this literal pattern".to_owned());
+            };
+            let member = vs[i].clone();
+            HirPattern::SumMember {
+                sum_ty: scrut_ty.clone(),
+                variant_index: u32::try_from(i).expect("variant overflow"),
+                sub: Box::new(lower_pattern_inner(ctx, pat, &member)),
+                payload_ty: member,
+            }
         }
         AstPatternKind::Literal(lit) => match literal_to_const(ctx, lit, scrut_ty) {
             Some((value, prim)) => HirPattern::Literal { value, prim },

@@ -1,0 +1,38 @@
+// spec: 2.1.5a
+// expect-exit: 0
+// `Self::Item?` in a trait default method, copied into an impl.
+
+trait Src {
+    type Item;
+    fn get(self) -> Self::Item?;
+    fn first_or(self, d: Self::Item) -> Self::Item {
+        let v = self.get() ?? d;
+        v
+    }
+    fn twice(self) -> Self::Item? {
+        let v = self.get()?;
+        v
+    }
+}
+
+struct A {
+    n: i32;
+}
+
+impl Src for A {
+    type Item = i32;
+    fn get(self) -> i32? {
+        if self.n > 0 { self.n } else { none }
+    }
+}
+
+fn main() -> i32 {
+    let a = A { n: 3 };
+    if a.first_or(9) != 3 { return 1; }
+    let b = A { n: 0 };
+    if b.first_or(9) != 9 { return 2; }
+    let t = a.twice() ?? 0;
+    if t != 3 { return 3; }
+    if b.twice() != none { return 4; }
+    0
+}

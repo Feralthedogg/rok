@@ -536,6 +536,13 @@ fn print_pattern(out: &mut String, p: &HirPattern) {
             }
             let _ = write!(out, "Sum::v{}", variant_index);
         }
+        HirPattern::SumMember {
+            variant_index, sub, ..
+        } => {
+            let _ = write!(out, "Sum::v{}(", variant_index);
+            print_pattern(out, sub);
+            out.push(')');
+        }
     }
 }
 

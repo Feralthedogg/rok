@@ -921,3 +921,58 @@ fn c_abi_matches_clang() {
         assert!(apple.contains(want), "Apple arm64 lacks `{want}`:\n{apple}");
     }
 }
+
+/// `#[link(..)]` on an `extern` block puts the library on the link
+/// line (spec 6.2.3); `LIBRARY_PATH` is the C driver's search path.
+#[test]
+fn link_attribute_links_the_library() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("link_attr");
+    fs::write(dir.join("probe.c"), "int rok_link_probe(int x) { return x * 3; }\n").unwrap();
+    let obj = dir.join("probe.o");
+    ok(&Command::new("clang")
+        .args(["-c", "-o"])
+        .arg(&obj)
+        .arg(dir.join("probe.c"))
+        .output()
+        .unwrap());
+    for lib in ["roklinka", "roklinkb"] {
+        ok(&Command::new("ar")
+            .arg("rcs")
+            .arg(dir.join(format!("lib{lib}.a")))
+            .arg(&obj)
+            .output()
+            .unwrap());
+    }
+    let src = r#"
+#[link("roklinka")]
+extern "C" {
+    fn rok_link_probe(x: i32) -> i32;
+}
+
+#[link(name = "roklinkb", kind = "static")]
+extern "C" {}
+
+fn main() -> i32 {
+    unsafe { rok_link_probe(14) }
+}
+"#;
+    fs::write(dir.join("main.rok"), src).unwrap();
+    let exe = dir.join("out");
+    let out = Command::new(ROKC)
+        .arg("-q")
+        .arg("build")
+        .arg(dir.join("main.rok"))
+        .arg("--bootstrap")
+        .arg(&env.bootstrap)
+        .arg("--rokr")
+        .arg(&env.rokr)
+        .arg("-o")
+        .arg(&exe)
+        .env("LIBRARY_PATH", &dir)
+        .output()
+        .unwrap();
+    ok(&out);
+    let run = Command::new(&exe).output().unwrap();
+    assert_eq!(run.status.code(), Some(42));
+}

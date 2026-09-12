@@ -165,6 +165,60 @@ pub(super) fn bind_from_arg(
         })
         .collect();
     unify_param_ty_with(t, arg_ty, &generic_names, subst, ctx);
+    bind_assoc_bindings(ctx, fn_def, subst);
+}
+
+/// `I: IntoIterator<Item = T>` with `I` bound: `T = I::Item`, so a later
+/// closure argument `fn(T) -> U` learns its parameter type.
+fn bind_assoc_bindings(ctx: &LowerCtx<'_>, fn_def: &FnDef, subst: &mut HashMap<String, HirTy>) {
+    for gp in &fn_def.generics.params {
+        let rokc_ast::GenericParam::Type { name, bounds, .. } = gp else {
+            continue;
+        };
+        if !subst.contains_key(name) {
+            continue;
+        }
+        for b in bounds {
+            let rokc_ast::TyKind::Path(bp) = &b.kind else {
+                continue;
+            };
+            for g in bp.segments.iter().flat_map(|s| &s.generics) {
+                let Some((assoc, rokc_ast::Ty {
+                    kind: rokc_ast::TyKind::Path(tp),
+                    ..
+                })) = rokc_ast::as_assoc_binding(g)
+                else {
+                    continue;
+                };
+                let [target] = tp.segments.as_slice() else {
+                    continue;
+                };
+                let is_param = fn_def.generics.params.iter().any(
+                    |p| matches!(p, rokc_ast::GenericParam::Type { name, .. } if *name == target.name),
+                );
+                if !is_param || !target.generics.is_empty() || subst.contains_key(&target.name) {
+                    continue;
+                }
+                let seg = |n: &str| rokc_ast::PathSegment {
+                    name: n.to_owned(),
+                    generics: Vec::new(),
+                };
+                let proj = Ty {
+                    kind: rokc_ast::TyKind::Path(rokc_ast::Path {
+                        segments: vec![seg(name), seg(assoc)],
+                        span: b.span,
+                    }),
+                    span: b.span,
+                };
+                let t = resolve_in_mono(ctx, fn_def, subst, None, &proj);
+                let mut open = Vec::new();
+                collect_unknown_paths(&t, &mut open);
+                if t != HirTy::Unknown && open.is_empty() {
+                    subst.insert(target.name.clone(), t);
+                }
+            }
+        }
+    }
 }
 
 /// Resolve `ty` under the substitution of a monomorphization in

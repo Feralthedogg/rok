@@ -598,6 +598,7 @@ fn compile_unit(
             h.1.clone_from(&p.rhir.hash);
         }
     }
+    native_libs(&program.items, &mut mir.link.native_libs);
     mir.link.lib = input.lib;
     mir.link.prebuilt = input.prebuilt;
     mir.link.type_offset = prebuilt
@@ -1422,5 +1423,41 @@ mod tests {
             text.contains("func.func private @rok_probe_rok(!llvm.struct<(ptr, i64)>) -> i32"),
             "{text}"
         );
+    }
+}
+
+/// `#[link("z")]` / `#[link(name = "z", kind = "static")]` on the
+/// `extern` blocks of `items` (spec 6.2.3).
+fn native_libs(items: &[rokc_ast::Item], out: &mut Vec<(String, bool)>) {
+    use rokc_ast::{AttrArg, AttrBody, Item, Literal};
+    for item in items {
+        match item {
+            Item::Mod(m) => native_libs(m.items.as_deref().unwrap_or_default(), out),
+            Item::Extern(b) => {
+                for a in b.attrs.iter().filter(|a| a.path == ["link"]) {
+                    let AttrBody::Args(args) = &a.body else {
+                        continue;
+                    };
+                    let mut name = None;
+                    let mut stat = false;
+                    for arg in args {
+                        match arg {
+                            AttrArg::Lit(Literal::Str(n)) => name = Some(n.clone()),
+                            AttrArg::KeyValue(k, Literal::Str(v)) if k == "name" => {
+                                name = Some(v.clone());
+                            }
+                            AttrArg::KeyValue(k, Literal::Str(v)) if k == "kind" => {
+                                stat = v == "static";
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let Some(n) = name.filter(|n| !out.iter().any(|(m, _)| m == n)) {
+                        out.push((n, stat));
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
