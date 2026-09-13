@@ -1,0 +1,12 @@
+// spec: 4.16.1
+// expect-exit: 0
+// An entry file with items and no statements: an empty implicit `main`.
+
+fn helper() -> i32 {
+    println("never");
+    1
+}
+
+struct S {
+    a: i32;
+}

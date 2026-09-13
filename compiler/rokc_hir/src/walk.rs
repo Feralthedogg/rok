@@ -268,6 +268,8 @@ pub fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
     v.expr(e);
     match &e.kind {
         ExprKind::Literal(_) | ExprKind::SelfLower | ExprKind::SelfUpper => {}
+        // Another module's scope: no names of this one.
+        ExprKind::InModule(..) => {}
         ExprKind::Path(p) => walk_path_generics(v, p),
         ExprKind::Tuple(items) | ExprKind::List(items) | ExprKind::Set(items) => {
             for i in items {

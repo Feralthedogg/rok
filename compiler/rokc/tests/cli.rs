@@ -453,6 +453,38 @@ fn extern_dependency_is_a_package_boundary() {
 /// generics are instantiated by the user, `any` values (a thrown error,
 /// a trait object) cross the boundary both ways, and a lazy static is
 /// one static. `rhir-text` / `inspect` show the interface.
+/// Parameter and field defaults resolve in the package declaring them,
+/// not in the caller's (spec 4.2.3): the app's own `one` / `LIMIT` / `S`
+/// don't capture them.
+#[test]
+fn defaults_resolve_in_the_declaring_package() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("extern-defaults");
+    fs::create_dir_all(dir.join("dep")).unwrap();
+    fs::write(
+        dir.join("dep/lib.rok"),
+        "fn one() -> i32 { 1 }\n\
+         const LIMIT: i32 = 9;\n\
+         pub struct S {\n    pub n: i32 = 5;\n}\n\
+         pub struct Cfg {\n    pub f: fn() -> i32 = one;\n    pub k: i32 = LIMIT;\n}\n\
+         pub fn use_s(s: S = S {}) -> i32 { s.n }\n\
+         pub fn lim(x: i32 = LIMIT) -> i32 { x }\n\
+         pub fn via_one<T>(t: T, x: i32 = one()) -> i32 { x }\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("app")).unwrap();
+    fs::write(
+        dir.join("app/main.rok"),
+        "fn one() -> i32 { 100 }\nconst LIMIT: i32 = 200;\nstruct S {}\n\
+         let c = dep::Cfg {};\n\
+         println(f\"{(c.f)()} {c.k} {dep::use_s()} {dep::lim()} {dep::via_one(0)}\");\n",
+    )
+    .unwrap();
+    let out = rokc(Some(&env), &dir, &["run", "app", "--extern", "dep=dep"]);
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "1 9 5 9 1\n");
+}
+
 #[test]
 fn prebuilt_dependency_is_linked_and_instantiated() {
     let Some(env) = setup() else { return };

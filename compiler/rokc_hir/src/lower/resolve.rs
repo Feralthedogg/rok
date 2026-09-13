@@ -524,11 +524,11 @@ pub(super) fn resolve_ty_with_structs(
             HirTy::Path(vec![full])
         }
         AstTyKind::Array(elem, len) => {
-            let n = super::const_eval::syntactic_int(len, &|_| None)
+            let n = super::collect::const_expr_value(len, &sc.names.consts, sc.module)
                 .and_then(|n| u32::try_from(n).ok());
             let Some(n) = n else {
                 sc.names.error(
-                    "array length must be an integer literal (stage-1 limitation)".to_owned(),
+                    "array length must be a compile-time integer (spec 2.11.5)".to_owned(),
                 );
                 return HirTy::Any;
             };

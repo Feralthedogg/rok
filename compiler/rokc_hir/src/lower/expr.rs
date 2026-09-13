@@ -1440,6 +1440,14 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
         }
         ExprKind::Cast(operand, ty) => lower_cast(ctx, operand, ty, span),
         ExprKind::Await(inner) => super::coro::lower_await(ctx, inner, span),
+        ExprKind::InModule(module, inner) => {
+            let module = std::mem::replace(&mut ctx.current_module, module.clone());
+            let scopes = std::mem::replace(&mut ctx.scopes, vec![HashMap::new()]);
+            let e = lower_expr(ctx, inner);
+            ctx.scopes = scopes;
+            ctx.current_module = module;
+            e
+        }
         ExprKind::Yield(value) => super::coro::lower_yield(ctx, value.as_deref(), span),
         ExprKind::Range {
             start,
@@ -5278,7 +5286,9 @@ fn generic_positional_args(
         match (slot, &p.default) {
             (Some(a), _) => out.push(a),
             (None, _) if p.variadic => {}
-            (None, Some(d)) => out.push(CallArg::Positional(d.clone())),
+            (None, Some(d)) => {
+                out.push(CallArg::Positional(in_module(&module_of(&def.name), d.clone())));
+            }
             (None, None) => {
                 ctx.emit_error(
                     rokc_diagnostic::ErrorKind::Type,
@@ -5441,6 +5451,7 @@ fn call_generic_positional(
         .params
         .get(lowered.len())
         .and_then(|p| p.default.clone())
+        .map(|d| in_module(&module_of(&def.name), d))
     {
         let h = lower_expected(ctx, &d, HirTy::Unknown);
         bind_from_arg(ctx, def, self_ty, lowered.len(), &h.ty, &mut subst);

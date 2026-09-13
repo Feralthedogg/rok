@@ -1386,6 +1386,7 @@ impl Printer {
                 self.s("await ");
                 self.expr(x);
             }
+            ExprKind::InModule(_, x) => self.expr(x),
             ExprKind::Yield(v) => {
                 self.s("yield");
                 if let Some(v) = v {

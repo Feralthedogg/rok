@@ -398,6 +398,9 @@ pub enum ExprKind {
         is_generator: bool,
     },
     Await(Box<Expr>),
+    /// `expr` resolved in `module`'s scope with no locals: a parameter /
+    /// field default spliced into a use in another module (spec 4.2.3).
+    InModule(String, Box<Expr>),
     Yield(Option<Box<Expr>>),
     AsyncBlock(Block),
     YieldBlock(Block),

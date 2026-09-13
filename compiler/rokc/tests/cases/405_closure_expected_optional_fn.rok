@@ -1,0 +1,29 @@
+// spec: 4.5
+// expect-exit: 0
+// A closure for a slot typed `(fn(..) -> ..) | none` takes its parameter
+// types from the one function type in the sum.
+
+fn apply(s: str, f: (fn(str) -> str) | none = none) -> str {
+    match f {
+        g: fn(str) -> str => g(s),
+        none => s,
+    }
+}
+
+struct Opts {
+    map: (fn(i32) -> i32) | none = none;
+}
+
+fn main() -> i32 {
+    if apply("ab", |s| s + s) != "abab" { return 1; }
+    if apply("ab") != "ab" { return 2; }
+    let h: (fn(str) -> str) | none = |s| s + "!";
+    if apply("x", h) != "x!" { return 3; }
+    let o = Opts { map: |x| x * 3 };
+    let r = match o.map {
+        m: fn(i32) -> i32 => m(4),
+        none => 0,
+    };
+    if r != 12 { return 4; }
+    0
+}

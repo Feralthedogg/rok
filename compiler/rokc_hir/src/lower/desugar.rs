@@ -69,8 +69,22 @@ pub(super) fn lower_closure_expr(
     // Spec 4.5/4.8: in a context expecting a function type (e.g. an
     // argument to a `fn(i32) -> i32` parameter), unannotated params and
     // the return type come from the expected signature.
+    // A sum holding exactly one function type (`(fn(str) -> str) | none`)
+    // expects that one.
+    let expected = ctx.current_expected().and_then(|t| match t {
+        HirTy::Sum(vs) => {
+            let mut fns = vs
+                .iter()
+                .filter(|v| matches!(v, HirTy::Fn(..) | HirTy::Closure { .. }));
+            match (fns.next(), fns.next()) {
+                (Some(f), None) => Some(f),
+                _ => None,
+            }
+        }
+        t => Some(t),
+    });
     let (expected_param_tys, mut expected_ret): (Option<Vec<HirTy>>, Option<HirTy>) =
-        match ctx.current_expected() {
+        match expected {
             Some(HirTy::Fn(args, ret, _) | HirTy::Closure { args, ret, .. }) => {
                 (Some(args.clone()), Some((**ret).clone()))
             }

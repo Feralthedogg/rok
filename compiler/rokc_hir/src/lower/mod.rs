@@ -123,6 +123,9 @@ struct TypeNames<'a> {
     /// `canon` results without local `use`s or diagnostics, by (path,
     /// module): its glob lookups scan every type name.
     canon_memo: std::cell::RefCell<HashMap<(String, String), Option<String>>>,
+    /// Module-level `const`s by full name, for array lengths in
+    /// signatures and fields (`[i32; N]`).
+    consts: HashMap<String, (Ty, rokc_ast::Expr)>,
 }
 
 /// (alias full name, arguments, module of the use, span of the use).
@@ -1157,6 +1160,15 @@ fn box_into_any(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -> HirExpr {
     }
 }
 
+/// A default value (`x: T = e`, `f: T = e`) resolved where it is
+/// declared, not at the use that splices it in (spec 4.2.3).
+fn in_module(module: &str, e: Expr) -> Expr {
+    Expr {
+        span: e.span,
+        kind: ExprKind::InModule(module.to_owned(), Box::new(e)),
+    }
+}
+
 /// `ty_compatible`, or storable through `box_into_any`.
 fn coercible(ctx: &LowerCtx<'_>, slot: &HirTy, ty: &HirTy) -> bool {
     ty_compatible(slot, ty)
@@ -1221,7 +1233,8 @@ fn block_breaks_out(b: &HirBlock, label: Option<&str>, direct: bool) -> bool {
         | HirStmt::Assign { value: e, .. }
         | HirStmt::StaticAssign { value: e, .. }
         | HirStmt::Expr(e)
-        | HirStmt::Return(Some(e)) => in_expr(e),
+        | HirStmt::Return(Some(e))
+        | HirStmt::Panic(e) => in_expr(e),
         _ => false,
     }) || b.trailing.as_ref().is_some_and(in_expr)
 }

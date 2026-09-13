@@ -159,10 +159,14 @@ fn block_expr(stmts: Vec<HirStmt>, span: rokc_diagnostic::Span) -> HirExpr {
     }
 }
 
-/// Carrier field index of the error payload (the unit `ok` slot is left
-/// out, matching `rokc_mir`'s layout).
+/// A `()` / `!` ok side has no carrier slot (`rokc_mir`'s layout).
+pub(super) fn no_ok_slot(ok: &HirTy) -> bool {
+    matches!(ok, HirTy::Unit | HirTy::Never)
+}
+
+/// Carrier field index of the error payload.
 fn err_index(ok: &HirTy) -> u32 {
-    if *ok == HirTy::Unit { 1 } else { 2 }
+    if no_ok_slot(ok) { 1 } else { 2 }
 }
 
 /// Build a carrier: `Ok(v)` → `(false, v, _)`, `Err(e)` → `(true, _, e)`.
@@ -182,7 +186,7 @@ pub(super) fn carrier(
         ty: HirTy::Prim(PrimTy::Bool),
         span,
     }];
-    if *ok == HirTy::Unit {
+    if no_ok_slot(ok) {
         // No slot, but keep the value's side effects.
         if !matches!(ok_v.kind, HirExprKind::Const(_)) {
             lets.push(HirStmt::Expr(ok_v));
@@ -253,7 +257,7 @@ pub(super) fn unpack_call(ctx: &mut LowerCtx<'_>, call: HirExpr) -> HirExpr {
             span,
         }));
     }
-    let trailing = (*ok != HirTy::Unit).then(|| field(1, &ok));
+    let trailing = (!no_ok_slot(&ok)).then(|| field(1, &ok));
     HirExpr {
         kind: HirExprKind::Block(Box::new(HirBlock {
             stmts,
@@ -589,7 +593,7 @@ pub(super) fn adapt_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
         a.fn_ret_ty = (**ok).clone();
         a.try_depth = 1;
         let v = unpack_call(&mut a, call);
-        let mut body = if **ok == HirTy::Unit {
+        let mut body = if no_ok_slot(ok) {
             HirBlock {
                 stmts: vec![HirStmt::Expr(v)],
                 trailing: None,

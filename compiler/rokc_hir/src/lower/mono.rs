@@ -900,7 +900,10 @@ pub(super) fn generic_struct_fields(
     match &def.kind {
         AstStructKind::Named(fs) => fs
             .iter()
-            .map(|f| field(f.name.clone(), &f.ty, f.default.clone()))
+            .map(|f| {
+                let d = f.default.clone().map(|d| in_module(&module_of(&def.name), d));
+                field(f.name.clone(), &f.ty, d)
+            })
             .collect(),
         AstStructKind::Tuple(fs) => fs
             .iter()

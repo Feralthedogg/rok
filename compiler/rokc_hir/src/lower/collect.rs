@@ -315,6 +315,14 @@ pub fn lower_full(
             .collect(),
         alias_uses: std::cell::RefCell::new(Vec::new()),
         canon_memo: std::cell::RefCell::default(),
+        consts: program
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                Item::Const(c) => Some((c.name.clone(), (c.ty.clone(), c.value.clone()))),
+                _ => None,
+            })
+            .collect(),
     };
     warn_assoc_shadowing(program, &names, &mut pre_diags);
     let defaults = with_assoc_defaults(program, &names);
@@ -747,7 +755,11 @@ pub fn lower_full(
         FnSig {
             id,
             ret_ty: resolve(&sig_ret_ast(fn_def)),
-            param_defaults: fn_def.params.iter().map(|p| p.default.clone()).collect(),
+            param_defaults: fn_def
+                .params
+                .iter()
+                .map(|p| p.default.clone().map(|d| in_module(sc.module, d)))
+                .collect(),
             param_tys: fn_def
                 .params
                 .iter()
@@ -2629,7 +2641,7 @@ pub(super) fn lower_struct_def(
                 name: f.name.clone(),
                 ty: resolve_ty_with_structs(&f.ty, structs, enums, sc),
                 // A literal omitting the field fills it at the use site.
-                default: f.default.clone(),
+                default: f.default.clone().map(|d| in_module(&module_of(&s.name), d)),
             })
             .collect(),
         // Tuple struct `Foo(A, B)` — synthesize positional field names
@@ -4276,6 +4288,21 @@ fn impl_assoc_types(impl_def: &rokc_ast::ImplDef) -> HashMap<String, Ty> {
 /// (`W`, looked up from `module` then the root) or a braced const
 /// expression over those (`{ W + 1 }`).
 fn const_arg_value(t: &Ty, consts: &HashMap<String, (Ty, Expr)>, module: &str) -> Option<i128> {
+    let c = match &t.kind {
+        AstTyKind::Const(c) => c.clone(),
+        AstTyKind::Path(p) => rokc_ast::ConstExpr::Path(p.clone()),
+        _ => return None,
+    };
+    const_expr_value(&c, consts, module)
+}
+
+/// An integer const expression over literals and `const` items (looked
+/// up from `module`, then the root).
+pub(super) fn const_expr_value(
+    c: &rokc_ast::ConstExpr,
+    consts: &HashMap<String, (Ty, Expr)>,
+    module: &str,
+) -> Option<i128> {
     fn lookup(
         name: &str,
         consts: &HashMap<String, (Ty, Expr)>,
@@ -4294,13 +4321,8 @@ fn const_arg_value(t: &Ty, consts: &HashMap<String, (Ty, Expr)>, module: &str) -
         seen.borrow_mut().pop();
         v
     }
-    let c = match &t.kind {
-        AstTyKind::Const(c) => c.clone(),
-        AstTyKind::Path(p) => rokc_ast::ConstExpr::Path(p.clone()),
-        _ => return None,
-    };
     let seen = std::cell::RefCell::new(Vec::new());
-    super::const_eval::syntactic_int(&c, &|n| lookup(n, consts, module, &seen))
+    super::const_eval::syntactic_int(c, &|n| lookup(n, consts, module, &seen))
 }
 
 /// `v` as a const type argument.

@@ -37,8 +37,8 @@ pub fn resolve_entry(stmts: Vec<Stmt>, items: &mut Vec<Item>, diags: &mut Vec<Ro
                 .to_owned(),
         )),
         (Some(f), true) => check_main_signature(f, diags),
-        (None, false) => items.push(Item::Fn(implicit_main(stmts))),
-        (None, true) => {}
+        // Items only: form 2 with no statements, an empty implicit `main`.
+        (None, _) => items.push(Item::Fn(implicit_main(stmts))),
     }
 }
 

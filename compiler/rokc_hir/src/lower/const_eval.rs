@@ -198,7 +198,7 @@ pub(super) fn embed(ctx: &LowerCtx<'_>, v: &Value, ty: &HirTy, span: Span) -> Op
             let tys: Vec<HirTy> = match ty {
                 HirTy::Tuple(ts) => ts.clone(),
                 // A `throws` carrier: `(is_err, ok, err)`, no unit `ok`.
-                HirTy::Throws { ok, err } if **ok == HirTy::Unit => {
+                HirTy::Throws { ok, err } if super::throws::no_ok_slot(ok) => {
                     vec![HirTy::Prim(PrimTy::Bool), (**err).clone()]
                 }
                 HirTy::Throws { ok, err } => {
