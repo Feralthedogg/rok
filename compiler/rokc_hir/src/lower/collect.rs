@@ -73,9 +73,28 @@ fn lazy_init_fn_name(static_name: &str) -> String {
     }
 }
 
-/// `program` plus one `fn __rok_static_init_X() -> T { init }` per lazy
-/// static (`None`: there is none).
-fn with_lazy_static_inits(program: &Program) -> Option<Program> {
+/// A concrete function whose code a prebuilt library's `.a` holds (the
+/// ones an RHIR interface cuts to `;`).
+fn in_archive(f: &FnDef) -> bool {
+    f.generics.params.is_empty()
+        && !f.is_async
+        && !f.is_generator
+        && !f
+            .attrs
+            .iter()
+            .any(|a| a.name() == "inline" || a.path == [rokc_ast::EXTERN_C_FN_ATTR])
+}
+
+/// Package `pkg` is `p` or one of its tiers (`rok::core` is in `rok`,
+/// the prebuilt standard library).
+fn within(pkg: &str, p: &str) -> bool {
+    pkg.strip_prefix(p)
+        .is_some_and(|r| r.is_empty() || r.starts_with("::"))
+}
+
+/// One `fn __rok_static_init_X() -> T { init }` per lazy static, added
+/// to `program`.
+fn add_lazy_static_inits(program: &mut Program) {
     let inits: Vec<Item> = program
         .items
         .iter()
@@ -114,12 +133,7 @@ fn with_lazy_static_inits(program: &Program) -> Option<Program> {
             _ => None,
         })
         .collect();
-    if inits.is_empty() {
-        return None;
-    }
-    let mut p = program.clone();
-    p.items.extend(inits);
-    Some(p)
+    program.items.extend(inits);
 }
 
 pub(super) fn strip_int_suffix(s: &str) -> &str {
@@ -137,18 +151,20 @@ pub(super) fn strip_int_suffix(s: &str) -> &str {
 #[must_use]
 #[allow(clippy::cognitive_complexity)] // linear sequence of lowering passes; splitting adds plumbing, not clarity
 pub fn lower_full(
-    program: &Program,
+    program: Program,
     prec: &PrecTable,
     uses: &crate::uses::UseTable,
     reexports: &[crate::uses::ReExport],
     input: &crate::HirInput,
 ) -> HirModule {
     resolve::set_packages(input.packages.clone());
+    crate::clear_type_names();
     // A prebuilt-library build: every body of that package is a root.
     let lib_pkg: Option<String> = input.lib.clone();
     let check_library = input.check_library;
-    let augmented = with_lazy_static_inits(program);
-    let program = augmented.as_ref().unwrap_or(program);
+    let mut owned = program;
+    add_lazy_static_inits(&mut owned);
+    let program = &owned;
     // Diagnostics emitted during pre-body passes (impl-target validation
     // etc.) — folded into module.diagnostics once the module exists.
     let mut pre_diags: Vec<rokc_diagnostic::RokDiagnostic> = Vec::new();
@@ -314,7 +330,10 @@ pub fn lower_full(
             })
             .collect(),
         alias_uses: std::cell::RefCell::new(Vec::new()),
+        unknown_spans: std::cell::RefCell::default(),
         canon_memo: std::cell::RefCell::default(),
+        leaves: std::cell::OnceCell::new(),
+        variant_leaves: std::cell::OnceCell::new(),
         consts: program
             .items
             .iter()
@@ -325,10 +344,14 @@ pub fn lower_full(
             .collect(),
     };
     warn_assoc_shadowing(program, &names, &mut pre_diags);
-    let defaults = with_assoc_defaults(program, &names);
-    let program = defaults.as_ref().unwrap_or(program);
-    let assoc_sigs = with_self_assoc_sigs(program);
-    let program = assoc_sigs.as_ref().unwrap_or(program);
+    let defaults = assoc_defaults(program, &names);
+    for (i, added) in defaults {
+        if let Item::Impl(imp) = &mut owned.items[i] {
+            imp.items.extend(added);
+        }
+    }
+    add_self_assoc_sigs(&mut owned);
+    let program = &owned;
     check_bound_names(program, &names, &mut pre_diags);
     check_niche_attrs(program, &mut pre_diags);
     check_repr_attrs(program, &mut pre_diags);
@@ -348,6 +371,7 @@ pub fn lower_full(
                 continue;
             }
             let id = EnumId(u32::try_from(enum_decls.len()).expect("EnumId overflow"));
+            crate::name_type(true, id.0, &e.name, &[]);
             enum_table.insert(e.name.clone(), id);
             enum_decls.push(e);
         }
@@ -369,6 +393,7 @@ pub fn lower_full(
                 continue;
             }
             let id = StructId(u32::try_from(struct_decls.len()).expect("StructId overflow"));
+            crate::name_type(false, id.0, &s.name, &[]);
             struct_table.insert(s.name.clone(), id);
             struct_decls.push(s);
         }
@@ -385,6 +410,7 @@ pub fn lower_full(
             let id = StructId(
                 u32::try_from(struct_decls.len() + union_decls.len()).expect("StructId overflow"),
             );
+            crate::name_type(false, id.0, &u.name, &[]);
             struct_table.insert(u.name.clone(), id);
             union_decls.push(u);
         }
@@ -734,6 +760,8 @@ pub fn lower_full(
     let mut lib_decl: Vec<bool> = Vec::new();
     // Decl index → symbol path of a dependency's method (see below).
     let mut link_names: HashMap<usize, String> = HashMap::new();
+    let std_prebuilt = input.prebuilt.iter().any(|p| p == "rok");
+    let std_linked = std_prebuilt || input.lib.as_deref() == Some("rok");
     let mut generic_fns: HashMap<String, &FnDef> = HashMap::new();
     let mut generic_methods: HashMap<(String, String), Vec<GenericMethod>> = HashMap::new();
     let mut generic_trait_impls: Vec<GenericTraitImpl> = Vec::new();
@@ -1220,8 +1248,11 @@ pub fn lower_full(
             );
             // A dependency's method symbol must not depend on this
             // build's struct numbering (`Struct70__m`): a prebuilt
-            // dependency and its users name it alike.
-            if resolve::is_dependency(&package_of(&module)) {
+            // dependency and its users name it alike (the standard
+            // library's too, when it is prebuilt).
+            if resolve::is_dependency(&package_of(&module))
+                || (std_linked && !package_of(&module).is_empty())
+            {
                 let mut name = format!("{module}::{}.{leaf}", impl_def_display(&impl_def.self_ty));
                 if let Some(tp) = &impl_def.trait_path {
                     name.push_str("__by_");
@@ -1519,9 +1550,19 @@ pub fn lower_full(
             MethodOrFn::Fn(f) => module_of(&f.name),
             MethodOrFn::Method { module, .. } => module.clone(),
         };
-        let prebuilt_fn = f.body.is_none()
+        // The prebuilt standard library's interface keeps its bodies
+        // (compile-time evaluation runs them); its `.a` has the code of
+        // those named alike in every build (not trait defaults, named
+        // after the build's type numbering).
+        let stable = matches!(d, MethodOrFn::Fn(_)) || link_names.contains_key(&i);
+        let std_fn = std_prebuilt && within(&package_of(&module), "rok");
+        let linked = f.body.is_none() || (std_fn && stable && in_archive(f));
+        let prebuilt_fn = linked
             && !(extern_fn_ids.contains(&id) || rok_externs.contains(&id))
-            && input.prebuilt.contains(&package_of(&module));
+            && input
+                .prebuilt
+                .iter()
+                .any(|p| within(&package_of(&module), p));
         if prebuilt_fn {
             prebuilt.insert(id);
         }
@@ -1575,6 +1616,7 @@ pub fn lower_full(
     let mut env = Env {
         impl_consts: impl_const_sets,
         fn_table,
+        fn_leaves: std::cell::OnceCell::new(),
         extern_fns,
         method_table,
         key_of,
@@ -1584,6 +1626,7 @@ pub fn lower_full(
         struct_table,
         enum_table,
         consts,
+        const_leaves: std::cell::RefCell::default(),
         type_aliases,
         generic_fns,
         generic_structs,
@@ -1607,6 +1650,7 @@ pub fn lower_full(
         trait_impl_tys,
         impl_assoc,
         statics: static_tys,
+        static_leaves: std::cell::RefCell::default(),
         mut_statics: static_defs
             .iter()
             .filter(|s| s.is_mut)
@@ -1691,11 +1735,14 @@ pub fn lower_full(
             !lib || check_library
                 || exports.iter().any(|(id, _)| id.0 as usize == i)
                 || is_lazy_init_fn(&f.name)
-                || lib_pkg.as_ref().is_some_and(|p| package_of(&module) == *p)
+                || lib_pkg
+                    .as_ref()
+                    .is_some_and(|p| within(&package_of(&module), p))
         })
         .collect();
-    super::const_eval::check_user_consts(&env);
-    let (mut functions, unlowered) = lower_bodies(&env, &decl_roots);
+    rokc_diagnostic::time("hir consts", || super::const_eval::check_user_consts(&env));
+    let (mut functions, unlowered) =
+        rokc_diagnostic::time("hir bodies", || lower_bodies(&env, &decl_roots, &prebuilt));
     // Spec 5.3.1: an initializer evaluated now needs no lazy init.
     let folded_statics: HashMap<String, ConstVal> = static_defs
         .iter()
@@ -1709,7 +1756,9 @@ pub fn lower_full(
         functions[i].name = name;
     }
     check_type_bounds(&env);
-    super::send_check::check(&env, &functions);
+    rokc_diagnostic::time("hir send check", || {
+        super::send_check::check(&env, &functions);
+    });
     let (any_seeds, any_exports) = super::expr::any_link(&env, lib_pkg.as_deref());
     let any_types = super::expr::any_types(&env);
     if lib_pkg.is_some() || !prebuilt.is_empty() {
@@ -1774,7 +1823,14 @@ pub fn lower_full(
         set(id, &|f| f.role = FnRole::Main);
     }
     super::caller::lower(&mut functions, &sink.track_caller.borrow());
-    let lazy_inits = static_defs.iter().filter_map(|s| s.init_fn);
+    // A prebuilt package's statics are initialized by its `.a`.
+    let lazy_inits = static_defs
+        .iter()
+        .filter(|s| {
+            let pkg = package_of(&module_of(&s.name));
+            !input.prebuilt.iter().any(|p| within(&pkg, p))
+        })
+        .filter_map(|s| s.init_fn);
     let roots = if lib_pkg.is_some() {
         let package = (0..decl_roots.len())
             .filter(|&i| decl_roots[i] && lib_decl[i])
@@ -1828,7 +1884,7 @@ pub fn lower_full(
     module
         .diagnostics
         .extend(sink.instance_warns.into_inner().agreed());
-    check_unresolved_types(&mut module);
+    check_unresolved_types(&mut module, &names.unknown_spans.into_inner());
     check_value_types(&mut module);
     // The same root cause can be reached from several passes (e.g. a
     // type resolved once per instantiation sweep): report it once.
@@ -1925,7 +1981,10 @@ pub(super) fn collect_field_visibility(
 /// `HirTy::Path` is an unknown type name; a leftover `Unknown` /
 /// `UnresolvedPath` means some lowering path fell through silently —
 /// refuse to hand that to MIR (it would be lowered as unit / `any`).
-pub(super) fn check_unresolved_types(module: &mut HirModule) {
+pub(super) fn check_unresolved_types(
+    module: &mut HirModule,
+    spans: &HashMap<String, rokc_diagnostic::Span>,
+) {
     // Each unknown name is reported at the first item that mentions it.
     // The thread-local "current span" is whatever pass ran last (usually
     // a library item), so it must not be the default here.
@@ -1964,14 +2023,25 @@ pub(super) fn check_unresolved_types(module: &mut HirModule) {
         }
     }
     unknown_types.sort_by(|a, b| a.0.cmp(&b.0));
+    let known: Vec<String> = module
+        .structs
+        .iter()
+        .map(|s| s.name.as_str())
+        .chain(module.enums.iter().map(|e| e.name.as_str()))
+        .map(|n| leaf_name(n).split("__").next().unwrap_or(n).to_owned())
+        .chain(super::PRIM_NAMES.iter().map(|p| (*p).to_owned()))
+        .collect();
     for (t, span) in unknown_types {
+        let span = spans.get(&t).copied().unwrap_or(span);
         let old = rokc_diagnostic::set_current_span(span);
-        module
-            .diagnostics
-            .push(rokc_diagnostic::RokDiagnostic::error(
-                rokc_diagnostic::ErrorKind::Type,
-                format!("cannot find type `{t}` in this scope"),
-            ));
+        let mut d = rokc_diagnostic::RokDiagnostic::error(
+            rokc_diagnostic::ErrorKind::Resolve,
+            format!("cannot find type `{t}` in this scope"),
+        );
+        if let Some(s) = rokc_diagnostic::suggest(leaf_name(&t), known.iter().map(String::as_str)) {
+            d = d.with_help(format!("did you mean `{s}`?"));
+        }
+        module.diagnostics.push(d);
         rokc_diagnostic::set_current_span(old);
     }
     if module
@@ -2742,7 +2812,7 @@ pub(super) fn union_storage_strategy(
     if aliases.is_empty() {
         pre_diags.push(rokc_diagnostic::RokDiagnostic::error(
             rokc_diagnostic::ErrorKind::Type,
-            format!("union `{name}` declares no fields (spec 2.x)"),
+            format!("union `{name}` declares no fields"),
         ));
         return UnionStorage::WidestPrim(PrimTy::U8);
     }
@@ -2785,9 +2855,9 @@ pub(super) fn union_storage_strategy(
             pre_diags.push(rokc_diagnostic::RokDiagnostic::error(
                 rokc_diagnostic::ErrorKind::Type,
                 format!(
-                    "union `{name}` field `{fname}` has type whose size is \
-                     not yet computable in stage-1 (struct fields with \
-                     pointer/closure types — spec 2.x byte-array union)"
+                    "union `{name}` field `{fname}` has a type whose size is \
+                     not known (a struct field with a \
+                     pointer or closure type)"
                 ),
             ));
             (0, 1)
@@ -3211,7 +3281,12 @@ pub(super) fn lower_decl(env: &Env<'_>, i: usize, stub: bool) -> HirFunction {
 /// listed as unlowered (MIR drops it). `--check-library` lowers (and so
 /// checks) every library body.
 // No cache of library HIR across runs.
-fn lower_bodies(env: &Env<'_>, roots: &[bool]) -> (Vec<HirFunction>, Vec<FunctionId>) {
+/// Prebuilt functions (`linked`) keep only their signatures.
+fn lower_bodies(
+    env: &Env<'_>,
+    roots: &[bool],
+    linked: &std::collections::HashSet<FunctionId>,
+) -> (Vec<HirFunction>, Vec<FunctionId>) {
     let decls = &env.decls;
     let lower = |i: usize, stub: bool| lower_decl(env, i, stub);
     let mut done: Vec<Option<HirFunction>> = (0..decls.len()).map(|_| None).collect();
@@ -3236,7 +3311,8 @@ fn lower_bodies(env: &Env<'_>, roots: &[bool]) -> (Vec<HirFunction>, Vec<Functio
             if done.get(i).is_none_or(Option::is_some) {
                 continue; // an extra (already lowered) or a done decl
             }
-            let f = lower(i, false);
+            #[allow(clippy::cast_possible_truncation)]
+            let f = lower(i, linked.contains(&FunctionId(i as u32)));
             named(&f, &mut pending);
             done[i] = Some(f);
             let extras = env.sink.extras.borrow();
@@ -4430,18 +4506,7 @@ fn path_ty_named(name: &str, span: rokc_diagnostic::Span) -> Ty {
 /// `Self::Item | none` with `type Item = i32 | none` nests); trait and
 /// impl methods are marked `ASSOC_TYPES_ATTR` so their bodies read bare
 /// `X` as `Self::X`.
-fn with_self_assoc_sigs(program: &Program) -> Option<Program> {
-    let hit = program.items.iter().any(|it| match it {
-        Item::Impl(i) => i
-            .items
-            .iter()
-            .any(|m| matches!(m, AstImplItem::AssocType { .. })),
-        Item::Trait(t) => !trait_assoc_names(t).is_empty(),
-        _ => false,
-    });
-    if !hit {
-        return None;
-    }
+fn add_self_assoc_sigs(program: &mut Program) {
     let mark = |d: &mut FnDef, names: Vec<String>| {
         d.attrs.push(rokc_ast::Attribute {
             path: std::iter::once(crate::ASSOC_TYPES_ATTR.to_owned())
@@ -4452,8 +4517,7 @@ fn with_self_assoc_sigs(program: &Program) -> Option<Program> {
             span: d.span,
         });
     };
-    let mut p = program.clone();
-    for it in &mut p.items {
+    for it in &mut program.items {
         match it {
             Item::Impl(i) => {
                 let assoc = impl_assoc_types(i);
@@ -4491,15 +4555,14 @@ fn with_self_assoc_sigs(program: &Program) -> Option<Program> {
             _ => {}
         }
     }
-    Some(p)
 }
 
 /// Associated type defaults (`trait TryFrom<U> { type Error =
 /// ConversionError; }`): an impl that omits `type X` gets the trait's
 /// default, its names resolved in the trait's module and the trait's
 /// parameters replaced by the impl's arguments. Everything after sees
-/// an ordinary `type X = ..;` in the impl.
-fn with_assoc_defaults(program: &Program, names: &TypeNames<'_>) -> Option<Program> {
+/// an ordinary `type X = ..;` in the impl. The additions, by item index.
+fn assoc_defaults(program: &Program, names: &TypeNames<'_>) -> Vec<(usize, Vec<AstImplItem>)> {
     let traits: HashMap<&str, &rokc_ast::TraitDef> = program
         .items
         .iter()
@@ -4519,12 +4582,11 @@ fn with_assoc_defaults(program: &Program, names: &TypeNames<'_>) -> Option<Progr
             })
         })
         .collect();
+    let mut out = Vec::new();
     if traits.is_empty() {
-        return None;
+        return out;
     }
-    let mut p = program.clone();
-    let mut hit = false;
-    for it in &mut p.items {
+    for (idx, it) in program.items.iter().enumerate() {
         let Item::Impl(i) = it else { continue };
         let Some(tp) = &i.trait_path else { continue };
         let module = impl_module(i);
@@ -4555,10 +4617,11 @@ fn with_assoc_defaults(program: &Program, names: &TypeNames<'_>) -> Option<Progr
                 ty,
             });
         }
-        hit |= !added.is_empty();
-        i.items.extend(added);
+        if !added.is_empty() {
+            out.push((idx, added));
+        }
     }
-    hit.then_some(p)
+    out
 }
 
 /// Spec 2.8.3: warn when an associated type hides an outer type of the

@@ -7,7 +7,7 @@ use rokc_ast::{ImplItem, Item, TraitItem};
 use rokc_diagnostic::{RokDiagnostic, Span};
 pub use rokc_hir::each_block;
 use rokc_hir::{HirExpr, HirFunction, HirModule, HirTy};
-use rokc_interface::{BuildOptions, CompileResult, EmitKind, Session, SourceFile};
+use rokc_interface::{BuildOptions, CompileResult, Session, SourceFile};
 
 use crate::lint::{self, Level};
 
@@ -39,7 +39,7 @@ pub fn check(
     }
     let mut diags = lint::run(&result, levels);
     if let Some(opts) = codegen {
-        diags.extend(result.emit(EmitKind::Mlir, opts).err());
+        diags.extend(result.check_codegen(opts).err());
     }
     (result, diags)
 }
@@ -80,7 +80,7 @@ impl Analysis {
             .get(usize::try_from(span.file).ok()?.checked_sub(1)?)
     }
 
-    fn in_file(&self, span: Span, path: &str) -> bool {
+    pub(crate) fn in_file(&self, span: Span, path: &str) -> bool {
         self.file(span).is_some_and(|(p, _)| p == path)
     }
 
@@ -105,6 +105,33 @@ impl Analysis {
             .iter()
             .filter(|f| f.file_id == span.file)
             .find_map(|f| find(&f.items, span))
+            .map(crate::doc::doc_text)
+            .unwrap_or_default()
+    }
+
+    /// The doc comment of field `name` of the struct defined at `span`.
+    pub fn field_doc(&self, span: Span, name: &str) -> String {
+        fn find<'a>(
+            items: &'a [Item],
+            span: Span,
+            name: &str,
+        ) -> Option<&'a [rokc_ast::Attribute]> {
+            items.iter().find_map(|item| match item {
+                Item::Struct(s) if s.span == span => match &s.kind {
+                    rokc_ast::StructKind::Named(fs) => fs
+                        .iter()
+                        .find(|f| f.name == name)
+                        .map(|f| f.attrs.as_slice()),
+                    _ => None,
+                },
+                Item::Mod(m) => find(m.items.as_deref().unwrap_or_default(), span, name),
+                _ => None,
+            })
+        }
+        self.sources
+            .iter()
+            .filter(|f| f.file_id == span.file)
+            .find_map(|f| find(&f.items, span, name))
             .map(crate::doc::doc_text)
             .unwrap_or_default()
     }
@@ -221,7 +248,7 @@ pub fn signature(hir: &HirModule, f: &HirFunction) -> String {
         .collect();
     format!(
         "fn {}({}) -> {}",
-        f.name,
+        short_name(&f.name),
         params.join(", "),
         ty_name(hir, &f.ret_ty)
     )

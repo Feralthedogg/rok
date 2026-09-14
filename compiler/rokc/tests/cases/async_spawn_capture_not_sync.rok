@@ -1,4 +1,4 @@
-// expect-error: `task::spawn` needs a `Send` future: it captures `xs: rok::core::collections::list::List<i32>`, which is not `Sync`
+// expect-error: `task::spawn` needs a `Send` future: it captures `xs: List<i32>`, which is not `Sync`
 
 // An `async` block captures by copying the handle, so a spawned task
 // would share the list with the spawner. A list made inside a task,

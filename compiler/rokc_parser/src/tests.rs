@@ -676,7 +676,7 @@ fn recovery_reports_each_mistake_once() {
                fn d() { let p = P { x: 1 }; return ~p; }";
     let d = diags_of(src);
     assert_eq!(d.len(), 5, "{d:#?}");
-    assert!(d.iter().any(|m| m.contains("field name expected")));
+    assert!(d.iter().any(|m| m.contains("expected field name")));
     // No flag leaked out of the failed `if` head in `c`: the struct
     // literal in `d` still parses (no extra diagnostic for it).
 }

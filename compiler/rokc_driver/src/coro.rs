@@ -92,20 +92,22 @@ fn rewrite_fn(f: &mut FnDef, free: bool, diags: &mut Vec<RokDiagnostic>) {
         kind: TyKind::Tuple(Vec::new()),
         span,
     };
-    let val = match f.ret_ty.take() {
-        Some(t) => t,
-        None if f.is_generator => {
-            diags.push(RokDiagnostic::error(
+    let val =
+        match f.ret_ty.take() {
+            Some(t) => t,
+            None if f.is_generator => {
+                diags.push(RokDiagnostic::error(
                 ErrorKind::Type,
                 format!(
                     "`yield fn {}` needs its item type: `yield fn {}(..) -> T` (spec 4.11.12)",
                     f.name, f.name
                 ),
-            ));
-            unit
-        }
-        None => unit,
-    };
+            )
+            .with_span(f.span, ""));
+                unit
+            }
+            None => unit,
+        };
     let err = match std::mem::take(&mut f.throws) {
         ThrowsKind::Typed(errs) => match errs.as_slice() {
             [] => None,

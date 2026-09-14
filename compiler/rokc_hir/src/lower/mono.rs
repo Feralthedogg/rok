@@ -1036,6 +1036,7 @@ pub(super) fn visit_ty_for_enum_mono(
         return;
     }
     let id = EnumId(u32::try_from(enum_defs.len()).expect("EnumId overflow"));
+    crate::name_type(true, id.0, &full, &arg_tys);
     enum_table.insert(mangled.clone(), id);
     let subst = generic_subst(&def.generics, &arg_tys);
     let variants = generic_enum_variants(def, &|t| {
@@ -1143,6 +1144,7 @@ pub(super) fn instantiate_generic_structs(
                 // Reserve the id first so a self-reference inside the
                 // fields resolves to itself rather than recursing.
                 let id = StructId(u32::try_from(struct_defs.len()).expect("StructId overflow"));
+                crate::name_type(false, id.0, &full, &args);
                 struct_table.insert(mangled.clone(), id);
                 let subst = generic_subst(&def.generics, &args);
                 let fields = generic_struct_fields(def, &|t| {
@@ -1209,6 +1211,7 @@ pub(super) fn instantiate_generic_structs(
                     continue;
                 }
                 let id = StructId(u32::try_from(struct_defs.len()).expect("StructId overflow"));
+                crate::name_type(false, id.0, &full, &args);
                 struct_table.insert(mangled.clone(), id);
                 let inner_subst = generic_subst(&inner.generics, &args);
                 let fields = generic_struct_fields(inner, &|t| {

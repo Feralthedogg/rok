@@ -35,11 +35,11 @@ commands:
   check [path | -]       front end, lints and codegen, no native build
                          (`-`: source on stdin)
   lint [path]            front end and lints; exit 1 if a `deny` lint fires
-  repl [--replay] [--package <path>]
-                         interactive session on LLVM's ORC JIT (needs
-                         libLLVM; :type <expr>, :reset, :quit);
-                         --replay reruns every cell for each new one;
-                         --package loads a library package and `use`s it
+  repl [path]            interactive session on LLVM's ORC JIT (needs
+                         libLLVM; :type <expr>, :reset, :quit); a program
+                         path runs in the session first, its bindings and
+                         items staying in scope; a library is loaded and
+                         `use`d
   lsp                    language server on stdio (`rok lsp` / `rokls` run it)
   jupyter --connection-file <file>
                          Jupyter kernel (Jupyter starts it; `rok jupyter
@@ -83,6 +83,7 @@ build options:
   --release                    optimized build (same as -O2)
   -O0 | -O1 | -O2 | -O3 | -Os  optimization level (default -O0)
   -C overflow-checks[=yes|no]  integer overflow panics (default: on at -O0)
+  -C backend=native|llvm       code generator (default: native at -O0, else LLVM)
   --cfg <flag | key=value>     #[cfg] flag (repeatable)
   --load-mlir-plugin <path|name>
                                MLIR dialect plugin for mlir-opt
@@ -127,6 +128,7 @@ its library/ and the librokr.a beside rokc.
 environment:
   ROK_CC            C compiler driver for the final link (default: clang;
                     on macOS Apple's, from xcrun)
+  ROK_BACKEND       native | llvm: code generator, as -C backend
   ROKC_TARGET_DIR   target/ location (default: inside the package)
   ROKC_VERBOSE      same as --verbose
   ROKC_NUM_JOBS     default for --threads
@@ -163,16 +165,14 @@ struct Args {
     show_output: bool,
     lint_levels: Vec<(Level, String)>,
     list: bool,
-    /// `repl --replay`.
-    replay: bool,
-    /// `repl --package`: a library package to load and `use`.
-    package: Option<PathBuf>,
     /// `jupyter --connection-file`.
     connection_file: Option<PathBuf>,
     iters: Option<u64>,
     samples: Option<u64>,
     /// An `-O` level or `--release` was given.
     opt_set: bool,
+    /// The prebuilt standard library this build links (`prebuild`).
+    std_prebuilt: Option<PathBuf>,
 }
 
 /// The version, and the commit and its date when built from git.
@@ -301,11 +301,16 @@ fn parse_args(raw: Vec<String>) -> Args {
             }
             "-C" | "--codegen" => {
                 let v = value(&name, inline, &mut it);
-                a.opts.overflow_checks = Some(match v.as_str() {
-                    "overflow-checks" | "overflow-checks=yes" | "overflow-checks=on" => true,
-                    "overflow-checks=no" | "overflow-checks=off" => false,
+                match v.as_str() {
+                    "overflow-checks" | "overflow-checks=yes" | "overflow-checks=on" => {
+                        a.opts.overflow_checks = Some(true);
+                    }
+                    "overflow-checks=no" | "overflow-checks=off" => {
+                        a.opts.overflow_checks = Some(false);
+                    }
+                    "backend=native" | "backend=llvm" => a.opts.backend = Some(v[8..].to_owned()),
                     _ => usage_error(&format!("unknown codegen option `{v}`")),
-                });
+                }
             }
             "--keep" => a.opts.keep_temps = true,
             "-g" | "--debug" => a.opts.debug = true,
@@ -315,8 +320,6 @@ fn parse_args(raw: Vec<String>) -> Args {
             "--diff" => a.diff = true,
             "--show-output" => a.show_output = true,
             "--list" => a.list = true,
-            "--replay" => a.replay = true,
-            "--package" => a.package = Some(value(&name, inline, &mut it).into()),
             "--connection-file" => {
                 a.connection_file = Some(value(&name, inline, &mut it).into());
             }
@@ -572,6 +575,16 @@ fn create_dir(dir: &Path) {
 /// RHIRs; the deps directory.
 fn prebuild(a: &mut Args, pkg: Option<&Package>) -> Result<PathBuf, String> {
     let dir = out_dir(a, pkg).join("deps");
+    // A native build links the standard library prebuilt.
+    if matches!(a.cmd.as_str(), "build" | "run" | "test" | "bench") && a.emit.is_empty() {
+        a.std_prebuilt = rokc_interface::prebuilt_std(&rokc_interface::StdKey {
+            bootstrap: &a.bootstrap,
+            cfg: &a.cfg,
+            opts: &a.opts,
+            target: a.target.as_deref(),
+            test: matches!(a.cmd.as_str(), "test" | "bench"),
+        });
+    }
     let build = DepBuild {
         bootstrap: &a.bootstrap,
         cfg: &a.cfg,
@@ -579,6 +592,7 @@ fn prebuild(a: &mut Args, pkg: Option<&Package>) -> Result<PathBuf, String> {
         target: a.target.as_deref(),
         dir: &dir,
         quiet: a.quiet,
+        std: a.std_prebuilt.as_deref(),
     };
     a.externs = build.prebuild(&a.externs)?;
     Ok(dir)
@@ -608,6 +622,7 @@ fn session(a: &Args, pkg: &Package) -> Session {
     }
     session.set_anonymous(pkg.anonymous);
     session.set_target(a.target.as_deref());
+    session.set_std_prebuilt(a.std_prebuilt.clone());
     session
 }
 
@@ -864,31 +879,31 @@ fn cmd_check(mut a: Args, codegen: bool) {
 }
 
 fn cmd_repl(mut a: Args) {
-    // `--package` (901.2): the library is a dependency of the session,
-    // and its first cell is `use <name>::*;`.
-    let prelude = a.package.clone().map(|p| {
-        let pkg = rokc_interface::discover(&p).unwrap_or_else(|e| fail(&e));
-        if !pkg.lib {
-            fail(&format!(
-                "`--package {}`: not a library package (no `lib.rok`)",
-                p.display()
-            ));
-        }
-        let name = lib_name(&a, &pkg);
-        a.externs.push((name.clone(), pkg.root));
+    if a.positional.len() > 1 {
+        usage_error("usage: rokc repl [path]");
+    }
+    // `repl <path>`: a library is a dependency of the session, and its
+    // first cell is `use <name>::*;` (901.2); a program is loaded into it.
+    let pkg = a.positional.first().map(|p| discover_at(&a, p));
+    let prelude = pkg.as_ref().filter(|p| p.lib).map(|p| {
+        let name = lib_name(&a, p);
+        a.externs.push((name.clone(), p.root.clone()));
         format!("use {name}::*;")
     });
-    let pkg = rokc_interface::discover(Path::new(".")).ok();
-    let deps = prebuild(&mut a, pkg.as_ref()).unwrap_or_else(|e| fail(&e));
-    let tty = std::io::stdin().is_terminal();
+    let here = rokc_interface::discover(Path::new(".")).ok();
+    let deps = prebuild(&mut a, pkg.as_ref().or(here.as_ref())).unwrap_or_else(|e| fail(&e));
+    let program = pkg
+        .as_ref()
+        .filter(|p| !p.lib)
+        .map(|p| (p.root.as_path(), p.anonymous));
     process::exit(rokc_tools::repl::main(
         a.bootstrap,
         a.externs,
         deps,
         a.opts,
-        tty,
-        a.replay,
+        std::io::stdin().is_terminal(),
         prelude.as_deref(),
+        program,
     ));
 }
 
@@ -1075,6 +1090,11 @@ fn cmd_fmt(a: &Args) {
         };
         let formatted = match rokc_fmt::format_file(f, &src) {
             Ok(s) => s,
+            Err(e) if e.starts_with("error[") => {
+                eprintln!("{e}");
+                errors += 1;
+                continue;
+            }
             Err(e) => {
                 eprintln!("rokc: cannot format {}: {e}", f.display());
                 errors += 1;

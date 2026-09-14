@@ -4,7 +4,7 @@
 
 mod common;
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Output, Stdio};
 
 use common::{ROKC, scratch, setup, text, workspace};
@@ -61,25 +61,13 @@ panic(\"boom\");
 :quit
 1 + 1
 ";
-    // The default (one library per cell) and `--replay` modes agree.
-    let runs: Vec<_> = [&[][..], &["--replay"][..]]
-        .map(|mode| {
-            let rokr = rokr.clone();
-            std::thread::spawn(move || {
-                let args = [&["repl", "--rokr", &rokr][..], mode].concat();
-                piped(ROKC, &args, input)
-            })
-        })
-        .into_iter()
-        .collect();
-    for run in runs {
-        let out = run.join().unwrap();
-        let stdout = text(&out.stdout);
-        let stderr = text(&out.stderr);
-        assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
-        assert_eq!(
-            stdout,
-            "\
+    let out = piped(ROKC, &["repl", "--rokr", &rokr], input);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
+    assert_eq!(
+        stdout,
+        "\
 i32: 3
 i32: 40
 P: P { x: 40, y: 2 }
@@ -91,20 +79,19 @@ str: \"rebound\"
 i32: 80
 List<i32>: [1, 2, 3]
 ",
-            "stderr: {stderr}"
-        );
-        // A bad cell reports and is dropped; so is one that fails at run time.
-        assert!(stderr.contains("cannot find value `nope`"), "{stderr}");
-        assert!(stderr.contains("boom"), "{stderr}");
-        // After `:reset` nothing is bound.
-        assert!(stderr.contains("cannot find value `x`"), "{stderr}");
-    }
+        "stderr: {stderr}"
+    );
+    // A bad cell reports and is dropped; so is one that fails at run time.
+    assert!(stderr.contains("cannot find value `nope`"), "{stderr}");
+    assert!(stderr.contains("boom"), "{stderr}");
+    // After `:reset` nothing is bound.
+    assert!(stderr.contains("cannot find value `x`"), "{stderr}");
 }
 
-/// `repl --package <lib>` (901.2): the library is loaded and its items
+/// `repl <lib>` (901.2): the library is loaded and its items
 /// are in scope from the first cell, also after `:reset`.
 #[test]
-fn repl_package_loads_and_uses_a_library() {
+fn repl_loads_and_uses_a_library() {
     let Some(env) = setup() else { return };
     let rokr = env.rokr.display().to_string();
     let dir = std::env::temp_dir().join(format!("rok_repl_pkg_{}", std::process::id()));
@@ -118,21 +105,15 @@ fn repl_package_loads_and_uses_a_library() {
     let pkg = lib.display().to_string();
     let out = piped(
         ROKC,
-        &["repl", "--rokr", &rokr, "--package", &pkg],
+        &["repl", "--rokr", &rokr, &pkg],
         "twice(21)\n:reset\ntwice(2)\n",
     );
     let stdout = text(&out.stdout);
     assert_eq!(stdout, "i32: 42\ni32: 4\n", "{}", text(&out.stderr));
-    // A main package is refused.
-    std::fs::write(dir.join("main.rok"), "").unwrap();
-    let main = dir.display().to_string();
-    let out = piped(ROKC, &["repl", "--rokr", &rokr, "--package", &main], "");
-    assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stderr).contains("not a library package"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The default mode runs a cell once, in one process: its side effects
+/// A cell runs once, in one process: its side effects
 /// do not repeat, its bindings / items stay, and a cell that dies
 /// leaves the session as it was.
 #[test]
@@ -175,7 +156,7 @@ p
 }
 
 /// A binding a later cell could not use is refused in the cell that
-/// makes it (`--replay` keeps it); one a later cell can name is kept,
+/// makes it; one a later cell can name is kept,
 /// `any` values too (their methods and type tests work in later cells).
 #[test]
 fn repl_refuses_bindings_later_cells_cannot_use() {
@@ -209,7 +190,6 @@ match q { x: Q => x.v, _ => 0 }
         stderr.contains("`h: Hid` cannot be kept for later cells (`geo::Hid` is private"),
         "{stderr}"
     );
-    assert!(stderr.contains("--replay` keeps it"), "{stderr}");
 }
 
 /// `static` items keep their state across cells (a redefinition starts
@@ -287,6 +267,93 @@ g()
         counts[0].0 > 10 && counts[1].0 <= 3 && counts[1].1 > 10,
         "{stderr}"
     );
+}
+
+/// `repl <path>`: the program runs in the session, which goes on with its
+/// bindings and items. A failure keeps the bindings made before the
+/// cell (the stretch ending at a top-level `let`) that failed; panic
+/// locations and diagnostics point into the file.
+#[test]
+fn repl_path_keeps_the_programs_bindings() {
+    let Some(env) = setup() else { return };
+    let rokr = env.rokr.display().to_string();
+    let dir = scratch("run_i");
+    let prog = dir.join("prog.rok");
+    std::fs::write(
+        &prog,
+        "\
+mod geo { struct Hid { x: i32; } pub fn mk() -> Hid { Hid { x: 1 } } pub fn get(h: Hid) -> i32 { h.x } }
+#[derive(Debug)]
+struct P { x: i32; }
+let n = 1i32;
+let h = geo::mk();
+let m = geo::get(h) + n;
+fn twice(p: P) -> i32 { p.x * 2 }
+let p = P { x: m };
+let xs = [1, 2, 3];
+println(f\"ran {twice(p)}\");
+n += 100;
+let bad = xs[m + 5];
+let never = 0;
+",
+    )
+    .unwrap();
+    let path = prog.display().to_string();
+    let input = "n\n:type p\ntwice(p) + m\nxs\nnever\n";
+    let out = piped(ROKC, &["repl", "--rokr", &rokr, &path], input);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
+    // `n += 100` ran in the cell that failed: `n` is as before it.
+    assert_eq!(
+        stdout, "ran 4\ni32: 1\nP\ni32: 6\nList<i32>: [1, 2, 3]\n",
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains(&format!("{path}:12:11")), "{stderr}");
+    assert!(
+        stderr.contains("the rest of the program did not run"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("cannot find value `never`"), "{stderr}");
+    // `h`'s type is private to `geo`: not kept, and nothing after names it.
+    assert!(stderr.contains("`h: Hid` cannot be kept"), "{stderr}");
+
+    // `fn main`: it runs; the items stay, its locals do not.
+    std::fs::write(
+        &prog,
+        "fn helper(x: i32) -> i32 { x * 2 }\nfn main() {\n    let local = helper(21);\n    println(f\"main {local}\");\n}\n",
+    )
+    .unwrap();
+    let out = piped(
+        ROKC,
+        &["repl", "--rokr", &rokr, &path],
+        "helper(5)\nlocal\n",
+    );
+    let stderr = text(&out.stderr);
+    assert_eq!(text(&out.stdout), "main 42\ni32: 10\n", "stderr: {stderr}");
+    assert!(stderr.contains("cannot find value `local`"), "{stderr}");
+
+    // A program that does not compile runs nothing; its errors point
+    // into it, and the session starts empty.
+    std::fs::write(&prog, "println(\"no\");\nlet y = nope + 1;\n").unwrap();
+    let out = piped(ROKC, &["repl", "--rokr", &rokr, &path], "1 + 1\n");
+    let stderr = text(&out.stderr);
+    assert_eq!(text(&out.stdout), "i32: 2\n", "stderr: {stderr}");
+    assert!(stderr.contains(&format!("{path}:2:9")), "{stderr}");
+
+    // A package: its `mod` files resolve.
+    let pkg = dir.join("pkg");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(pkg.join("main.rok"), "mod util;\nlet k = util::three();\n").unwrap();
+    std::fs::write(pkg.join("util.rok"), "pub fn three() -> i32 { 3 }\n").unwrap();
+    let pkg_s = pkg.display().to_string();
+    let out = piped(
+        ROKC,
+        &["repl", "--rokr", &rokr, &pkg_s],
+        "k + util::three()\n",
+    );
+    assert_eq!(text(&out.stdout), "i32: 6\n", "{}", text(&out.stderr));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 fn frame(body: &str) -> String {
@@ -422,12 +489,11 @@ fn jupyter_kernel_speaks_the_wire_protocol() {
     let dir = std::env::temp_dir().join(format!("rok_jupyter_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("kernel.json");
-    // The kernel binds every socket (heartbeat last) before anything slow,
-    // but on a loaded machine its process can take long to start: poll up
-    // to 60s. A probed port can be taken again before the kernel binds it
-    // (it then exits): start over on fresh ports.
+    // The kernel says `ready` on stderr once every socket accepts. A
+    // probed port can be taken again before the kernel binds it (it then
+    // exits instead): start over on fresh ports.
     let mut attempts = 0;
-    let (kernel, ports) = loop {
+    let (kernel, ports, mut stderr) = loop {
         let listeners: Vec<_> = (0..5)
             .map(|_| TcpListener::bind("127.0.0.1:0").unwrap())
             .collect();
@@ -455,26 +521,15 @@ fn jupyter_kernel_speaks_the_wire_protocol() {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
-        let listening = loop {
-            if kernel.try_wait().unwrap().is_some() {
-                break false;
-            }
-            if TcpStream::connect(("127.0.0.1", ports[4])).is_ok() {
-                break true;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the kernel does not listen after 60s"
-            );
-            std::thread::sleep(Duration::from_millis(100));
-        };
-        if listening {
-            break (kernel, ports);
+        let mut stderr = BufReader::new(kernel.stderr.take().unwrap());
+        let mut said = String::new();
+        stderr.read_line(&mut said).unwrap();
+        if said == "rokc jupyter: ready\n" {
+            break (kernel, ports, stderr);
         }
-        let out = kernel.wait_with_output().unwrap();
+        kernel.wait().unwrap();
         attempts += 1;
-        assert!(attempts < 5, "the kernel exits: {}", text(&out.stderr));
+        assert!(attempts < 5, "the kernel exits: {said}");
     };
     let connect = |port: u16, kind: &str| {
         let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -607,6 +662,8 @@ fn jupyter_kernel_speaks_the_wire_protocol() {
     );
     assert_eq!(kind, "shutdown_reply");
     let out = kernel.wait_with_output().unwrap();
-    assert!(out.status.success(), "{}", text(&out.stderr));
+    let mut rest = String::new();
+    stderr.read_to_string(&mut rest).unwrap();
+    assert!(out.status.success(), "{rest}");
     let _ = std::fs::remove_dir_all(&dir);
 }

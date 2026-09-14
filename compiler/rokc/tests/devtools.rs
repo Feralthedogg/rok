@@ -156,7 +156,7 @@ fn lint_finds_each_kind_and_honors_levels() {
     // `-D` makes it an error (exit 1); `-A` on a group silences it.
     let (_, err) = exit(&rokc(&dir, &["lint", "-D", "unused_variables"]), 1);
     assert!(
-        err.contains("error: [lint]") && err.contains("`-D unused_variables` on the command line")
+        err.contains("error[E503]") && err.contains("`-D unused_variables` on the command line")
     );
     let (_, err) = exit(&rokc(&dir, &["lint", "-A", "all", "-W", "deprecated"]), 0);
     assert!(
@@ -176,11 +176,11 @@ fn lint_finds_each_kind_and_honors_levels() {
     fs::write(dir.join("m.rok"), "#![allow(dead_code)]\nfn hidden() {}\n").unwrap();
     let (_, err) = exit(&rokc(&dir, &["lint", "-A", "unused_variables"]), 1);
     assert!(
-        err.contains("warning: [lint] main.rok:4:10: unused variable `a`"),
+        err.contains("warning[E503]: unused variable `a`\n  --> main.rok:4:10"),
         "{err}"
     );
     assert!(
-        err.contains("error: [lint] main.rok:5:18: unused variable `b`"),
+        err.contains("error[E503]: unused variable `b`\n  --> main.rok:5:18"),
         "{err}"
     );
     assert!(
@@ -212,7 +212,7 @@ fn lint_finds_each_kind_and_honors_levels() {
     )
     .unwrap();
     let (_, err) = exit(&rokc(&dir, &["lint"]), 0);
-    assert!(!err.contains("[lint]"), "{err}");
+    assert!(!err.contains("[E503]"), "{err}");
 }
 
 #[test]

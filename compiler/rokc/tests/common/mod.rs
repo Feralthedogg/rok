@@ -21,6 +21,8 @@
 //!     failure instead of a skip (CI sets this).
 //!   - `ROK_TEST_OPT=-O2` (or `--release`, `-O3`, ...) — build every case
 //!     at that optimization level instead of the default `-O0`.
+//!   - `ROK_TEST_TARGET=<triple>` — build for that target (with a runtime
+//!     built for it), e.g. `x86_64-apple-darwin` run under Rosetta.
 #![allow(dead_code)]
 
 use std::env;
@@ -98,6 +100,7 @@ pub fn setup() -> Option<Env> {
         let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
         Command::new(cargo)
             .args(["build", "-p", "rokr"])
+            .args(test_target().map(|t| format!("--target={t}")))
             .current_dir(&workspace)
             .status()
             .expect("spawn cargo build -p rokr")
@@ -106,7 +109,9 @@ pub fn setup() -> Option<Env> {
     assert!(ok, "cargo build -p rokr failed");
     let target =
         env::var_os("CARGO_TARGET_DIR").map_or_else(|| workspace.join("target"), PathBuf::from);
-    let rokr = target.join("debug/librokr.a");
+    let rokr = target
+        .join(test_target().unwrap_or_default())
+        .join("debug/librokr.a");
     assert!(rokr.exists(), "missing {rokr:?} after cargo build -p rokr");
 
     Some(Env {
@@ -156,9 +161,15 @@ pub fn rokc_build(env: &Env, src: &Path, exe: &Path) -> std::io::Result<Output> 
         .arg("--rokr")
         .arg(&env.rokr)
         .args(env::var("ROK_TEST_OPT").ok().filter(|o| !o.is_empty()))
+        .args(test_target().map(|t| format!("--target={t}")))
         .arg("-o")
         .arg(exe)
         .output()
+}
+
+/// `ROK_TEST_TARGET`: the target to build the cases for.
+pub fn test_target() -> Option<String> {
+    env::var("ROK_TEST_TARGET").ok().filter(|t| !t.is_empty())
 }
 
 /// Run `f` over `items` on all cores; results keep input order.
@@ -241,8 +252,25 @@ pub fn parse_expect_stdout(source: &str) -> Option<String> {
     None
 }
 
+/// `stderr` plus one `path:line:col: message` line per rendered
+/// diagnostic (`error[E..]: message` over `--> path:line:col`), so an
+/// expectation can pin a message to its location.
+pub fn flatten_diagnostics(stderr: &str) -> String {
+    let mut out = stderr.to_owned();
+    let lines: Vec<&str> = stderr.lines().collect();
+    for w in lines.windows(2) {
+        let msg = w[0].split_once("]: ").map(|(_, m)| m);
+        let loc = w[1].trim_start().strip_prefix("--> ");
+        if let (Some(msg), Some(loc)) = (msg, loc) {
+            out.push_str(&format!("\n{loc}: {msg}"));
+        }
+    }
+    out
+}
+
 /// Check a failed build's stderr against every `// expect-error:`.
 pub fn check_expect_error(source: &str, stderr: &str) -> Result<(), String> {
+    let stderr = &flatten_diagnostics(stderr);
     match directives(source, "expect-error:").find(|want| !stderr.contains(want)) {
         Some(want) => Err(format!(
             "build failed but stderr lacks expect-error {want:?}\n    stderr: {:?}",

@@ -323,6 +323,29 @@ impl TokenKind {
         p.to_owned()
     }
 
+    /// The token as a diagnostic names it: ``keyword `fn` ``,
+    /// ``identifier `x` ``, `` `;` ``, `end of file`.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        if let Some(k) = keyword_str(self) {
+            return format!("keyword `{k}`");
+        }
+        match self {
+            Self::Ident(s) => format!("identifier `{s}`"),
+            Self::IntLit(s) => format!("integer literal `{s}`"),
+            Self::FloatLit(s) => format!("float literal `{s}`"),
+            Self::CharLit(_) | Self::CCharLit(_) => format!("character literal `{}`", self.text()),
+            Self::StrLit(_) | Self::RawStrLit(_) => "string literal".to_owned(),
+            Self::FStrStart(_) | Self::FStrText(_) | Self::FStrEnd(_) => "f-string".to_owned(),
+            Self::HoleStart | Self::HoleEnd | Self::HoleSpec | Self::SpecText(_) => {
+                "f-string hole".to_owned()
+            }
+            Self::Label(s) => format!("label `'{s}`"),
+            Self::Eof => "end of file".to_owned(),
+            _ => format!("`{}`", self.text()),
+        }
+    }
+
     /// Statement terminator token.
     #[must_use]
     pub const fn is_semi(&self) -> bool {

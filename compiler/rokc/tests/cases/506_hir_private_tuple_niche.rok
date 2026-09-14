@@ -1,5 +1,5 @@
 // spec: 005.06-visibility
 // `NonZero(0)` outside its module would break the niche; only `new` builds one.
-// expect-error: field `0` of `rok::core::num::niche::NonZero<i32>` is private
+// expect-error: field `0` of `NonZero<i32>` is private
 
 fn main() -> i32 { let n = NonZero(0); return n.get(); }

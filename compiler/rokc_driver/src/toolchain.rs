@@ -92,6 +92,9 @@ pub struct BuildOptions {
     /// `--mlir-pass <pass>`: extra `mlir-opt` passes, run before the
     /// lowering to the LLVM dialect (a plugin dialect's own lowering).
     pub mlir_passes: Vec<String>,
+    /// `-C backend=native|llvm` (else `ROK_BACKEND`): who generates the
+    /// machine code (`native::object`).
+    pub backend: Option<String>,
 }
 
 impl Default for BuildOptions {
@@ -106,6 +109,7 @@ impl Default for BuildOptions {
             mlir_dialect_plugins: Vec::new(),
             mlir_pass_plugins: Vec::new(),
             mlir_passes: Vec::new(),
+            backend: std::env::var("ROK_BACKEND").ok().filter(|b| !b.is_empty()),
         }
     }
 }
@@ -166,22 +170,38 @@ pub fn mlir_text(
     opts: &BuildOptions,
 ) -> Result<rokc_codegen_mlir::MlirOutput, RokDiagnostic> {
     let triple = module.mir.target.triple.as_deref();
-    rokc_codegen_mlir::codegen(
-        &module.mir,
-        &rokc_codegen_mlir::CodegenOptions {
-            overflow_checks: opts.overflow_checks.unwrap_or(opts.opt_level == "0"),
-            debug: opts.debug,
-            repl: opts.repl.clone(),
-            data_layout: data_layout(triple, opts),
-        },
-    )
+    let data_layout = rokc_diagnostic::time("data layout", || data_layout(triple, opts));
+    codegen(module, opts, data_layout)
+}
+
+/// Codegen for its errors alone (`rokc check`): no toolchain asked.
+pub fn check_codegen(module: &CompiledModule, opts: &BuildOptions) -> Result<(), RokDiagnostic> {
+    codegen(module, opts, None).map(drop)
+}
+
+fn codegen(
+    module: &CompiledModule,
+    opts: &BuildOptions,
+    data_layout: Option<String>,
+) -> Result<rokc_codegen_mlir::MlirOutput, RokDiagnostic> {
+    rokc_diagnostic::time("mlir emit", || {
+        rokc_codegen_mlir::codegen(
+            &module.mir,
+            &rokc_codegen_mlir::CodegenOptions {
+                overflow_checks: opts.overflow_checks.unwrap_or(opts.opt_level == "0"),
+                debug: opts.debug,
+                repl: opts.repl.clone(),
+                data_layout,
+            },
+        )
+    })
 }
 
 /// The `target datalayout` clang uses for `triple`, so MLIR / LLVM fold
 /// `sizeof` idioms with the real layout instead of LLVM's default one
 /// (where `i64` is 4-aligned). `None` without clang (`--emit=mlir`
 /// needs no toolchain). Asked once per target (a REPL session builds
-/// many cells).
+/// many cells), and kept on disk per clang and target.
 fn data_layout(triple: Option<&str>, opts: &BuildOptions) -> Option<String> {
     type Layouts = Vec<(Option<String>, Option<String>)>;
     static SEEN: std::sync::Mutex<Layouts> = std::sync::Mutex::new(Vec::new());
@@ -193,13 +213,19 @@ fn data_layout(triple: Option<&str>, opts: &BuildOptions) -> Option<String> {
     }
     let dl = (|| {
         let mut cmd = clang(opts, triple).ok()?;
-        cmd.args(["-S", "-emit-llvm", "-x", "c", "-", "-o", "-"])
-            .stdin(Stdio::null());
-        let text = String::from_utf8(output(&mut cmd, "clang").ok()?).ok()?;
-        let dl = text
-            .lines()
-            .find_map(|l| l.strip_prefix("target datalayout = \""))?;
-        Some(dl.trim_end_matches('"').to_owned())
+        let key = format!(
+            "layout\0{}\0{triple:?}",
+            stamp(Path::new(cmd.get_program()))
+        );
+        disk_cached(&key, || {
+            cmd.args(["-S", "-emit-llvm", "-x", "c", "-", "-o", "-"])
+                .stdin(Stdio::null());
+            let text = String::from_utf8(output(&mut cmd, "clang").ok()?).ok()?;
+            let dl = text
+                .lines()
+                .find_map(|l| l.strip_prefix("target datalayout = \""))?;
+            Some(dl.trim_end_matches('"').to_owned())
+        })
     })();
     seen.push((triple.map(str::to_owned), dl.clone()));
     dl
@@ -211,6 +237,11 @@ pub fn emit(
     kind: EmitKind,
     opts: &BuildOptions,
 ) -> Result<Vec<u8>, RokDiagnostic> {
+    if kind == EmitKind::Obj {
+        if let Some(o) = crate::native::object(module, opts)? {
+            return Ok(o.object);
+        }
+    }
     match kind {
         EmitKind::Ast => Err(RokDiagnostic::error(
             rokc_diagnostic::ErrorKind::Internal,
@@ -252,6 +283,13 @@ pub fn link_executable(
     opts: &BuildOptions,
     out: &Path,
 ) -> Result<(), RokDiagnostic> {
+    if let Some(o) = crate::native::object(module, opts)? {
+        let tmp = TempDir::new(opts.keep_temps)?;
+        let obj = tmp.path().join("module.o");
+        std::fs::write(&obj, &o.object)
+            .map_err(|e| err(format!("cannot write {}: {e}", obj.display())))?;
+        return link_object(module, &[obj], opts, out);
+    }
     let (ll, _) = lower_to_llvm(module, opts)?;
     finish(module, &ll, Artifact::Exe, opts, out)
 }
@@ -266,11 +304,20 @@ pub fn build_archive(
     opts: &BuildOptions,
     archive_out: &Path,
 ) -> Result<(), RokDiagnostic> {
-    let (ll, mlir) = lower_to_llvm(module, opts)?;
-    finish(module, &ll, Artifact::Archive, opts, archive_out)?;
+    let gc_types = if let Some(o) = crate::native::object(module, opts)? {
+        let obj = object_beside(archive_out);
+        std::fs::write(&obj, &o.object)
+            .map_err(|e| err(format!("cannot write {}: {e}", obj.display())))?;
+        archive(&obj, archive_out)?;
+        o.gc_types
+    } else {
+        let (ll, mlir) = lower_to_llvm(module, opts)?;
+        finish(module, &ll, Artifact::Archive, opts, archive_out)?;
+        mlir.gc_types
+    };
     if let Some(r) = &module.interface {
         let mut r = r.clone();
-        r.type_count = mlir.gc_types;
+        r.type_count = gc_types;
         let path = archive_out.with_file_name(format!("{}.rhir", r.name));
         std::fs::write(&path, r.encode())
             .map_err(|e| err(format!("cannot write {}: {e}", path.display())))?;
@@ -287,13 +334,15 @@ pub fn cell_ir(
     Ok((ll.into_bytes(), mlir))
 }
 
-/// MLIR → LLVM IR text through `mlir-opt | mlir-translate`, started
+/// MLIR → LLVM IR text through `mlir-opt | mlir-translate` (MLIR
+/// bytecode between them), started
 /// together (most of each one's time is its own startup).
 pub fn lower_to_llvm(
     module: &CompiledModule,
     opts: &BuildOptions,
 ) -> Result<(String, rokc_codegen_mlir::MlirOutput), RokDiagnostic> {
     let mut mlir = mlir_text(module, opts)?;
+    let t = std::time::Instant::now();
     let spawn = |cmd: &mut Command, what: &str| {
         cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -332,6 +381,12 @@ pub fn lower_to_llvm(
         }
         ir = o.stdout;
     }
+    if rokc_diagnostic::time_passes() {
+        eprintln!(
+            "time: {:>9.1}ms  mlir-opt | mlir-translate",
+            t.elapsed().as_secs_f64() * 1e3
+        );
+    }
     let ll = String::from_utf8(ir)
         .map_err(|_| err("mlir-translate printed non-UTF-8 LLVM IR".to_owned()))?;
     // JIT'd code keeps the general-dynamic TLS model.
@@ -358,52 +413,171 @@ pub fn finish(
     let mut cmd = clang(opts, module.mir.target.triple.as_deref())?;
     match what {
         Artifact::Exe => {
-            let obj = tmp.path().join("module.o");
-            run(cmd.arg("-c").arg(&ll_path).arg("-o").arg(&obj), "clang")?;
-            let mut link = linker(opts, module.mir.target.triple.as_deref())?;
-            link.arg(&obj).args(&module.archives).arg(rokr_arg(opts));
-            let apple = module
-                .mir
-                .target
-                .triple
-                .as_deref()
-                .map_or(cfg!(target_vendor = "apple"), |t| t.contains("apple"));
-            for (name, stat) in &module.mir.link.native_libs {
-                // ld64 has no `-Bstatic`: it takes the first `lib<name>`
-                // on the search path.
-                if *stat && !apple {
-                    link.args(["-Wl,-Bstatic", &format!("-l{name}"), "-Wl,-Bdynamic"]);
-                } else {
-                    link.arg(format!("-l{name}"));
-                }
-            }
-            // core's float methods call libm; glibc keeps it out of libc.
-            link.arg("-lm").arg("-o").arg(out);
-            run(&mut link, "the link")?;
-            // Mach-O keeps DWARF in the objects: gather it into a
-            // `.dSYM` while `module.o` still exists (clang does so itself
-            // only when it also compiles).
-            if opts.debug && cfg!(target_vendor = "apple") {
-                let mut d = Command::new("xcrun");
-                run(d.arg("dsymutil").arg(out), "dsymutil")?;
-            }
-            Ok(())
+            // Drop what nothing references (most of the runtime and
+            // library in a small program): per-function sections for
+            // ELF / COFF, Mach-O strips by symbol.
+            let triple = module.mir.target.triple.as_deref();
+            let apple = triple.map_or(cfg!(target_vendor = "apple"), |t| t.contains("apple"));
+            let objs = objects(module, ll.len(), &ll_path, opts, tmp.path(), !apple)?;
+            link_object(module, &objs, opts, out)
         }
         Artifact::Obj | Artifact::Asm => {
             cmd.arg(if what == Artifact::Asm { "-S" } else { "-c" });
             run(cmd.arg(&ll_path).arg("-o").arg(out), "clang")
         }
         Artifact::Archive => {
-            let stem = out.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
-            let name = stem.strip_prefix("lib").unwrap_or(stem);
-            let obj = out.with_file_name(format!("{name}.o"));
+            let obj = object_beside(out);
             run(cmd.arg("-c").arg(&ll_path).arg("-o").arg(&obj), "clang")?;
-            // `ar r` appends to an existing archive; start fresh.
-            let _ = std::fs::remove_file(out);
-            let ar = locate_tool("ar").or_else(|_| locate_tool("llvm-ar"))?;
-            run(Command::new(ar).arg("rcs").arg(out).arg(&obj), "ar")
+            archive(&obj, out)
         }
     }
+}
+
+/// `foo.o` beside `libfoo.a`.
+fn object_beside(archive: &Path) -> PathBuf {
+    let stem = archive
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("out");
+    let name = stem.strip_prefix("lib").unwrap_or(stem);
+    archive.with_file_name(format!("{name}.o"))
+}
+
+/// `ar rcs out obj`, fresh.
+fn archive(obj: &Path, out: &Path) -> Result<(), RokDiagnostic> {
+    // `ar r` appends to an existing archive; start fresh.
+    let _ = std::fs::remove_file(out);
+    let ar = locate_tool("ar").or_else(|_| locate_tool("llvm-ar"))?;
+    run(Command::new(ar).arg("rcs").arg(out).arg(obj), "ar")
+}
+
+/// Link the objects `objs` of `module` with the runtime and the
+/// dependencies into the executable `out`.
+fn link_object(
+    module: &CompiledModule,
+    objs: &[PathBuf],
+    opts: &BuildOptions,
+    out: &Path,
+) -> Result<(), RokDiagnostic> {
+    let triple = module.mir.target.triple.as_deref();
+    let mut link = linker(opts, triple)?;
+    link.args(objs).args(&module.archives).arg(rokr_arg(opts));
+    let apple = triple.map_or(cfg!(target_vendor = "apple"), |t| t.contains("apple"));
+    let windows = triple.map_or(cfg!(windows), |t| t.contains("windows"));
+    for (name, stat) in &module.mir.link.native_libs {
+        // ld64 has no `-Bstatic`: it takes the first `lib<name>`
+        // on the search path.
+        if *stat && !apple {
+            link.args(["-Wl,-Bstatic", &format!("-l{name}"), "-Wl,-Bdynamic"]);
+        } else {
+            link.arg(format!("-l{name}"));
+        }
+    }
+    if apple {
+        link.arg("-Wl,-dead_strip");
+    } else if !windows {
+        link.arg("-Wl,--gc-sections");
+    }
+    // core's float methods call libm; glibc keeps it out of libc.
+    link.arg("-lm").arg("-o").arg(out);
+    run(&mut link, "the link")?;
+    // Mach-O keeps DWARF in the objects: gather it into a `.dSYM` while
+    // the object still exists (clang does so itself only when it also
+    // compiles).
+    if opts.debug && cfg!(target_vendor = "apple") {
+        let mut d = Command::new("xcrun");
+        run(d.arg("dsymutil").arg(out), "dsymutil")?;
+    }
+    Ok(())
+}
+
+/// IR below this size compiles as one object: splitting costs more
+/// than the cores win back.
+const SPLIT_MIN: usize = 1 << 20;
+
+/// The objects of `ll_path` (`len` bytes of LLVM IR) for an executable.
+/// A big module is split (`llvm-split`, locals kept with their users)
+/// and its parts compiled on all cores; above `-O0` the whole module is
+/// optimized first, so inlining still sees every function.
+fn objects(
+    module: &CompiledModule,
+    len: usize,
+    ll_path: &Path,
+    opts: &BuildOptions,
+    dir: &Path,
+    sections: bool,
+) -> Result<Vec<PathBuf>, RokDiagnostic> {
+    let triple = module.mir.target.triple.as_deref();
+    let clang = |opts: &BuildOptions, triple: Option<&str>| {
+        let mut cmd = clang(opts, triple)?;
+        if sections {
+            cmd.args(["-ffunction-sections", "-fdata-sections"]);
+        }
+        Ok::<_, RokDiagnostic>(cmd)
+    };
+    let cores = std::thread::available_parallelism().map_or(1, usize::from);
+    let jobs = cores.min(len / (SPLIT_MIN / 4)).min(16);
+    let split = llvm_bin()?.join("llvm-split");
+    if len < SPLIT_MIN || jobs < 2 || !split.is_file() {
+        let obj = dir.join("module.o");
+        let mut cmd = clang(opts, triple)?;
+        run(cmd.arg("-c").arg(ll_path).arg("-o").arg(&obj), "clang")?;
+        return Ok(vec![obj]);
+    }
+    let input = if opts.opt_level == "0" {
+        ll_path.to_path_buf()
+    } else {
+        let bc = dir.join("module.bc");
+        let mut cmd = clang(opts, triple)?;
+        run(
+            cmd.args(["-c", "-emit-llvm"])
+                .arg(ll_path)
+                .arg("-o")
+                .arg(&bc),
+            "clang (optimize)",
+        )?;
+        bc
+    };
+    let part = dir.join("part");
+    let mut cmd = Command::new(split);
+    cmd.args(["--preserve-locals", "-j", &jobs.to_string(), "-o"])
+        .arg(&part)
+        .arg(&input);
+    run(&mut cmd, "llvm-split")?;
+    let t = std::time::Instant::now();
+    let objs: Vec<PathBuf> = (0..jobs).map(|i| dir.join(format!("part{i}.o"))).collect();
+    let children = (0..jobs)
+        .map(|i| {
+            let mut cmd = clang(opts, triple)?;
+            // Optimized already: code generation only.
+            cmd.args(["-Xclang", "-disable-llvm-optzns", "-c", "-x", "ir"])
+                .arg(dir.join(format!("part{i}")))
+                .arg("-o")
+                .arg(&objs[i])
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped());
+            cmd.spawn()
+                .map_err(|e| err(format!("cannot run clang: {e}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for c in children {
+        let o = c
+            .wait_with_output()
+            .map_err(|e| err(format!("clang: {e}")))?;
+        if failed(&o) {
+            return Err(err(format!(
+                "clang failed:\n{}",
+                String::from_utf8_lossy(&o.stderr)
+            )));
+        }
+    }
+    if rokc_diagnostic::time_passes() {
+        eprintln!(
+            "time: {:>9.1}ms  clang ({jobs} parts)",
+            t.elapsed().as_secs_f64() * 1e3
+        );
+    }
+    Ok(objs)
 }
 
 /// `--rokr`: a library path when it has an extension, else `-l<name>`.
@@ -429,8 +603,12 @@ fn opt_passes(opts: &BuildOptions) -> Vec<String> {
         v.extend(["--canonicalize".to_owned(), "--cse".to_owned()]);
     }
     if opts.debug {
-        // Keep the locations in the text mlir-translate reads.
+        // Keep the locations in the text mlir-translate reads (LLVM 21's
+        // bytecode merges distinct subprograms).
         v.push("--mlir-print-debuginfo".to_owned());
+    } else {
+        // Bytecode is quicker to write and read than text.
+        v.push("--emit-bytecode".to_owned());
     }
     v.extend(
         [
@@ -481,6 +659,15 @@ pub fn find_mlir_plugin(spec: &str) -> Result<PathBuf, String> {
 /// LLVM's ORC JIT (`libLLVM`, found by `llvm_prefix`).
 pub fn link_host(c_src: &Path, opts: &BuildOptions, out: &Path) -> Result<(), RokDiagnostic> {
     let mut cmd = linker(opts, None)?;
+    if crate::native::jit(opts) {
+        // Native cells: the host maps and links them itself.
+        cmd.arg("-DROK_NATIVE_JIT")
+            .arg(c_src)
+            .arg("-Wl,-all_load")
+            .arg(rokr_arg(opts));
+        cmd.arg("-lm").arg("-o").arg(out);
+        return run(&mut cmd, "clang");
+    }
     cmd.arg(format!("-O{}", opts.opt_level)).arg(c_src);
     let whole = rokr_arg(opts);
     if cfg!(target_vendor = "apple") {
@@ -557,7 +744,13 @@ fn clang(opts: &BuildOptions, triple: Option<&str>) -> Result<Command, RokDiagno
     } else {
         locate_tool("clang")?
     });
+    // One instruction selector for every function: arm64 at -O0 defaults
+    // to GlobalISel and falls back to SelectionDAG per function (e.g. on
+    // llvm.threadlocal.address), and the two disagree on the stack
+    // layout of an aggregate argument's i1 / i8 / i16 elements past the
+    // registers.
     cmd.arg("-Wno-override-module")
+        .arg("-fno-global-isel")
         .arg(format!("-O{}", opts.opt_level));
     if opts.debug {
         cmd.arg("-g");
@@ -664,10 +857,72 @@ fn find_llvm() -> Result<PathBuf, String> {
 
 /// The major version in `tool --version` (`.. LLVM version 21.1.8`).
 fn llvm_major(tool: &Path) -> Option<u32> {
-    let out = Command::new(tool).arg("--version").output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let v = text.split("LLVM version ").nth(1)?;
-    v.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+    let major = disk_cached(&format!("llvm-major\0{}", stamp(tool)), || {
+        let out = Command::new(tool).arg("--version").output().ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let v = text.split("LLVM version ").nth(1)?;
+        Some(v.split(|c: char| !c.is_ascii_digit()).next()?.to_owned())
+    })?;
+    major.parse().ok()
+}
+
+/// A file's identity for a cache key: its resolved path, size and
+/// modification time.
+fn stamp(path: &Path) -> String {
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let meta = std::fs::metadata(&path).ok();
+    let mtime = meta
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    format!(
+        "{}\0{}\0{mtime}",
+        path.display(),
+        meta.map_or(0, |m| m.len())
+    )
+}
+
+/// rokc's build cache: `<sysroot>/lib/rok-cache` of an installed
+/// toolchain, else `rok-cache/` beside `rokc` (a build in the
+/// repository).
+#[must_use]
+pub fn cache_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let bin = exe.parent()?;
+    let sysroot = bin.parent()?;
+    Some(if sysroot.join("lib/rok").is_dir() {
+        sysroot.join("lib/rok-cache")
+    } else {
+        bin.join("rok-cache")
+    })
+}
+
+/// A toolchain fact kept in `cache_dir()/.facts/` under a hash of `key`
+/// (which names every input it depends on); `make` computes it when it
+/// is not there.
+fn disk_cached(key: &str, make: impl FnOnce() -> Option<String>) -> Option<String> {
+    let path = cache_dir().map(|d| {
+        let hash = rokc_core::hash::hex(&rokc_core::hash::sha256(key.as_bytes()));
+        d.join(".facts").join(&hash[..32])
+    });
+    if let Some(v) = path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()) {
+        return Some(v);
+    }
+    let v = make()?;
+    if let Some(p) = path {
+        // Write, then rename: a concurrent reader never sees half a value.
+        let tmp = p.with_extension(format!("{}.tmp", std::process::id()));
+        let written = p
+            .parent()
+            .is_some_and(|d| std::fs::create_dir_all(d).is_ok())
+            && std::fs::write(&tmp, &v).is_ok();
+        if !written || std::fs::rename(&tmp, &p).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+    Some(v)
 }
 
 /// A tool failed — or `mlir-opt` could not load an MLIR plugin, which it
@@ -690,7 +945,7 @@ fn output(cmd: &mut Command, what: &str) -> Result<Vec<u8>, RokDiagnostic> {
 }
 
 fn run(cmd: &mut Command, what: &str) -> Result<(), RokDiagnostic> {
-    output(cmd, what).map(drop)
+    rokc_diagnostic::time(what, || output(cmd, what)).map(drop)
 }
 
 fn locate_tool(name: &str) -> Result<PathBuf, RokDiagnostic> {

@@ -7,6 +7,9 @@ use std::path::Path;
 use crate::lsp::serve;
 use rokc_diagnostic::Json;
 
+/// One server at a time: the diagnostic file table is process-global.
+static ONE_SERVER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn frame(msg: &Json) -> String {
     let body = msg.to_string();
     format!("Content-Length: {}\r\n\r\n{body}", body.len())
@@ -88,6 +91,9 @@ println(f\"{twice(s)}\");
 
 #[test]
 fn scripted_session() {
+    let _one = ONE_SERVER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let bootstrap = workspace.join("library/core/lib.rok");
     let dir = std::env::temp_dir().join(format!("rokc-lsp-{}", std::process::id()));
@@ -250,10 +256,154 @@ fn scripted_session() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+const MEMBERS: &str = "\
+struct P {
+    /// The x coordinate.
+    x: i32;
+    y: i32;
+}
+impl P {
+    /// Sum of the coordinates.
+    fn sum(self) -> i32 { self.x + self.y }
+}
+let p = P { x: 1, y: 2 };
+let total = p.sum() + p.x;
+let u = total * 2;
+println(f\"{u}\");
+";
+
+/// Hover and definition of fields and methods, name ranges,
+/// references and rename.
+#[test]
+fn members_references_rename() {
+    let _one = ONE_SERVER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let bootstrap = workspace.join("library/core/lib.rok");
+    let dir = std::env::temp_dir().join(format!("rokc-lsp-members-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("members.rok");
+    let uri = format!("file://{}", file.display());
+    let uri = uri.as_str();
+    let rename = |id, line, col, name: &str| {
+        let mut p = at(uri, line, col);
+        if let Json::Obj(fields) = &mut p {
+            fields.push(("newName".to_owned(), Json::str(name)));
+        }
+        request(id, "textDocument/rename", p)
+    };
+    let script = [
+        request(
+            1,
+            "initialize",
+            Json::obj([("capabilities", Json::obj([]))]),
+        ),
+        notify(
+            "textDocument/didOpen",
+            Json::obj([(
+                "textDocument",
+                Json::obj([
+                    ("uri", Json::str(uri)),
+                    ("languageId", Json::str("rok")),
+                    ("version", Json::num(1)),
+                    ("text", Json::str(MEMBERS)),
+                ]),
+            )]),
+        ),
+        // `sum` and `x` in `p.sum() + p.x`, `total` in `total * 2`.
+        request(2, "textDocument/hover", at(uri, 10, 15)),
+        request(3, "textDocument/hover", at(uri, 10, 24)),
+        request(4, "textDocument/definition", at(uri, 10, 15)),
+        request(5, "textDocument/definition", at(uri, 10, 24)),
+        request(6, "textDocument/definition", at(uri, 11, 9)),
+        request(7, "textDocument/references", at(uri, 11, 9)),
+        request(8, "textDocument/references", at(uri, 10, 24)),
+        rename(9, 11, 9, "sum2"),
+        rename(10, 11, 9, "fn"),
+        rename(11, 12, 1, "say"),
+        request(12, "shutdown", Json::Null),
+        notify("exit", Json::Null),
+    ];
+    let input: String = script.iter().map(frame).collect();
+    let mut out = Vec::new();
+    let code = serve(
+        Cursor::new(input.into_bytes()),
+        &mut out,
+        vec![bootstrap],
+        Vec::new(),
+        Vec::new(),
+    );
+    assert_eq!(code, 0);
+    let msgs = messages(&out);
+    let reply = |id: u32| {
+        msgs.iter()
+            .find(|m| m.get("id") == &Json::num(id))
+            .unwrap_or_else(|| panic!("no reply {id}"))
+            .clone()
+    };
+    let result = |id: u32| reply(id).get("result").clone();
+    let hover = |id| {
+        result(id)
+            .get("contents")
+            .get("value")
+            .as_str()
+            .unwrap_or("")
+            .to_owned()
+    };
+    let start = |r: &Json| {
+        let s = r.get("range").get("start");
+        (s.get("line").clone(), s.get("character").clone())
+    };
+    let pos = |l: u32, c: u32| (Json::num(l), Json::num(c));
+
+    assert!(hover(2).contains("fn sum(self: P) -> i32"), "{}", hover(2));
+    assert!(
+        hover(2).ends_with("Sum of the coordinates."),
+        "{}",
+        hover(2)
+    );
+    assert!(hover(3).contains("P.x: i32"), "{}", hover(3));
+    assert!(hover(3).ends_with("The x coordinate."), "{}", hover(3));
+    // Name ranges, not whole items.
+    assert_eq!(start(&result(4)), pos(7, 7));
+    assert_eq!(start(&result(5)), pos(2, 4));
+    assert_eq!(start(&result(6)), pos(10, 4));
+
+    let starts = |id| match result(id) {
+        Json::Arr(locs) => locs.iter().map(start).collect::<Vec<_>>(),
+        r => panic!("references {id}: {r}"),
+    };
+    assert_eq!(starts(7), [pos(10, 4), pos(11, 8)]);
+    // `.x` reads, the declaration and the literal's `x:`.
+    assert_eq!(starts(8), [pos(2, 4), pos(7, 31), pos(9, 12), pos(10, 24)]);
+
+    let Json::Arr(edits) = result(9).get("changes").get(uri).clone() else {
+        panic!("rename: {}", reply(9))
+    };
+    assert_eq!(edits.len(), 2);
+    assert_eq!(edits[0].get("newText").as_str(), Some("sum2"));
+    assert!(
+        matches!(reply(10).get("error"), Json::Obj(_)),
+        "{}",
+        reply(10)
+    );
+    // `println` is declared in the library.
+    assert!(
+        matches!(reply(11).get("error"), Json::Obj(_)),
+        "{}",
+        reply(11)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A `.rokon` buffer (`rok.rokon`, the package manifest) is one RokON
 /// value: only its syntax is checked, not compiled as a module.
 #[test]
 fn manifest_buffer() {
+    let _one = ONE_SERVER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let uri = "file:///nowhere/rok.rokon";
     let open = notify(
         "textDocument/didOpen",

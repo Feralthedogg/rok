@@ -478,7 +478,10 @@ impl<'a> Parser<'a> {
             TokenKind::GtEq => Some(TokenKind::Eq),
             TokenKind::ShrEq => Some(TokenKind::GtEq),
             other => {
-                let msg = format!("expected `>` to close generic arguments, found {other:?}");
+                let msg = format!(
+                    "expected `>` to close generic arguments, found {}",
+                    other.describe()
+                );
                 let span = self.peek_span();
                 self.error(span, msg);
                 return false;
@@ -532,10 +535,116 @@ impl<'a> Parser<'a> {
         if std::mem::discriminant(self.peek()) == std::mem::discriminant(kind) {
             Some(self.bump())
         } else {
-            let span = self.peek_span();
-            self.error(span, format!("expected {what}, found {:?}", self.peek()));
+            let d = self.expected(kind, what);
+            self.diagnostics.push(d);
             None
         }
+    }
+
+    /// "expected X, found Y" with hints for common slips: a missing `;`
+    /// (pointed at the end of the line), an unclosed delimiter (its
+    /// opening location), `->` / `=>` mixups.
+    fn expected(&self, kind: &TokenKind, what: &str) -> RokDiagnostic {
+        let found = self.peek();
+        let here = self.peek_span();
+        let d = RokDiagnostic::error(
+            ErrorKind::Parse,
+            format!("expected {what}, found {}", found.describe()),
+        )
+        .with_file(self.file.clone());
+        let prev = self.prev_span();
+        match kind {
+            TokenKind::Semi if prev.is_some_and(|p| p.line < here.line || here.is_dummy()) => {
+                let at = self.after_prev();
+                return d
+                    .with_span(at, "expected `;`")
+                    .with_help("add `;` at the end of the statement");
+            }
+            TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                if let Some(open) = self.unclosed_opener(kind) {
+                    return d
+                        .with_span(here, format!("expected {what}"))
+                        .with_secondary(open, "unclosed delimiter");
+                }
+            }
+            TokenKind::FatArrow if matches!(found, TokenKind::Arrow) => {
+                return d
+                    .with_span(here, "")
+                    .with_help("match arms are written `pattern => value`");
+            }
+            _ if matches!(found, TokenKind::FatArrow)
+                && self.prev_kind() == Some(&TokenKind::RParen) =>
+            {
+                return d
+                    .with_span(here, "")
+                    .with_help("a return type is written `-> Type`");
+            }
+            _ => {}
+        }
+        // `fucn main`, `retrun x`: an identifier that reads as a
+        // misspelled keyword, followed by another word.
+        if let Some(TokenKind::Ident(word)) = self.prev_kind() {
+            if matches!(found, TokenKind::Ident(_)) || keyword_alias(word).is_some() {
+                if let Some(k) = keyword_hint(word) {
+                    let at = self.prev_span().unwrap_or(here);
+                    return d
+                        .with_span(here, "")
+                        .with_secondary(at, "not a keyword")
+                        .with_help(format!("did you mean `{k}`?"));
+                }
+            }
+        }
+        d.with_span(here, "")
+    }
+
+    fn prev_span(&self) -> Option<Span> {
+        self.tokens.get(self.pos.checked_sub(1)?).map(|t| t.span)
+    }
+
+    fn prev_kind(&self) -> Option<&TokenKind> {
+        self.tokens.get(self.pos.checked_sub(1)?).map(|t| &t.kind)
+    }
+
+    /// Zero-width span just after the previous token.
+    fn after_prev(&self) -> Span {
+        let Some(t) = self.pos.checked_sub(1).and_then(|i| self.tokens.get(i)) else {
+            return self.peek_span();
+        };
+        let len = u32::try_from(t.kind.text().chars().count()).unwrap_or(1);
+        Span {
+            start: t.span.end,
+            end: t.span.end,
+            line: t.span.line,
+            col: t.span.col + len.max(1),
+            file: t.span.file,
+        }
+    }
+
+    /// The innermost delimiter still open before the current token
+    /// that `close` would close.
+    fn unclosed_opener(&self, close: &TokenKind) -> Option<Span> {
+        let mut stack: Vec<(&TokenKind, Span)> = Vec::new();
+        for t in self.tokens.get(..self.pos)? {
+            match &t.kind {
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
+                    stack.push((&t.kind, t.span));
+                }
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                    stack.pop();
+                }
+                _ => {}
+            }
+        }
+        let open = match close {
+            TokenKind::RParen => TokenKind::LParen,
+            TokenKind::RBracket => TokenKind::LBracket,
+            _ => TokenKind::LBrace,
+        };
+        stack
+            .iter()
+            .rev()
+            .find(|(k, _)| **k == open)
+            .map(|(_, s)| *s)
     }
 
     fn error(&mut self, span: Span, msg: impl Into<String>) {
@@ -549,12 +658,14 @@ impl<'a> Parser<'a> {
     pub fn parse_program(&mut self) -> Program {
         let mut items = Vec::new();
         let mut stmts = Vec::new();
+        let mut tops = Vec::new();
         let attrs = self.parse_inner_attrs();
         while !matches!(self.peek(), TokenKind::Eof) {
             let from = self.pos;
             if self.meta_block().is_some() || self.eat(&TokenKind::Semi) {
                 continue;
             }
+            tops.push((self.peek_span().start, self.at_item_start()));
             if self.at_item_start() {
                 if let Some(item) = self.parse_item() {
                     items.push(item);
@@ -580,6 +691,7 @@ impl<'a> Parser<'a> {
             items,
             stmts,
             expanded: std::mem::take(&mut self.expanded),
+            tops,
         }
     }
 
@@ -643,7 +755,8 @@ impl<'a> Parser<'a> {
                 None
             }
             StmtKind::Trailing(expr) if !ends_stmt(&expr) => {
-                self.error(span, "expected `;` after top-level expression");
+                let d = self.expected(&TokenKind::Semi, "`;` after top-level expression");
+                self.diagnostics.push(d);
                 None
             }
             StmtKind::Trailing(expr) => Some(Stmt {
@@ -734,7 +847,10 @@ impl<'a> Parser<'a> {
                 TokenKind::Ident(n) => n,
                 other => {
                     let s = self.peek_span();
-                    self.error(s, format!("attribute name expected, found {other:?}"));
+                    self.error(
+                        s,
+                        format!("expected attribute name, found {}", other.describe()),
+                    );
                     return None;
                 }
             };
@@ -839,7 +955,10 @@ impl<'a> Parser<'a> {
         let s = self.peek_span();
         self.error(
             s,
-            format!("unexpected token in attribute args: {:?}", self.peek()),
+            format!(
+                "unexpected {} in attribute arguments",
+                self.peek().describe()
+            ),
         );
         None
     }
@@ -847,7 +966,10 @@ impl<'a> Parser<'a> {
     fn parse_attr_literal(&mut self) -> Option<Literal> {
         self.try_parse_attr_literal().or_else(|| {
             let s = self.peek_span();
-            self.error(s, "literal expected");
+            self.error(
+                s,
+                format!("expected literal, found {}", self.peek().describe()),
+            );
             None
         })
     }
@@ -949,7 +1071,10 @@ impl<'a> Parser<'a> {
             return Some(());
         }
         let s = self.peek_span();
-        self.error(s, format!("expected `{w}`, found {:?}", self.peek()));
+        self.error(
+            s,
+            format!("expected `{w}`, found {}", self.peek().describe()),
+        );
         None
     }
 
@@ -1096,7 +1221,10 @@ impl<'a> Parser<'a> {
             n
         } else {
             let s = self.peek_span();
-            self.error(s, "type alias name expected");
+            self.error(
+                s,
+                format!("expected type alias name, found {}", self.peek().describe()),
+            );
             return None;
         };
         let generics = self.parse_generic_params();
@@ -1130,7 +1258,10 @@ impl<'a> Parser<'a> {
             n
         } else {
             let s = self.peek_span();
-            self.error(s, "const name expected");
+            self.error(
+                s,
+                format!("expected const name, found {}", self.peek().describe()),
+            );
             return None;
         };
         self.expect(&TokenKind::Colon, "`:`")?;
@@ -1172,7 +1303,10 @@ impl<'a> Parser<'a> {
             n
         } else {
             let s = self.peek_span();
-            self.error(s, "static name expected");
+            self.error(
+                s,
+                format!("expected static name, found {}", self.peek().describe()),
+            );
             return None;
         };
         self.expect(&TokenKind::Colon, "`:`")?;
@@ -1202,7 +1336,10 @@ impl<'a> Parser<'a> {
             n
         } else {
             let s = self.peek_span();
-            self.error(s, "struct name expected");
+            self.error(
+                s,
+                format!("expected struct name, found {}", self.peek().describe()),
+            );
             return None;
         };
         let generics = if matches!(self.peek(), TokenKind::Lt) {
@@ -1267,7 +1404,10 @@ impl<'a> Parser<'a> {
             n
         } else {
             let s = self.peek_span();
-            self.error(s, "union name expected");
+            self.error(
+                s,
+                format!("expected union name, found {}", self.peek().describe()),
+            );
             return None;
         };
         let generics = if matches!(self.peek(), TokenKind::Lt) {
@@ -1300,7 +1440,7 @@ impl<'a> Parser<'a> {
             let Some(name) = self.peek_name() else {
                 self.error(
                     span,
-                    format!("field name expected, found {:?}", self.peek()),
+                    format!("expected field name, found {}", self.peek().describe()),
                 );
                 return None;
             };
@@ -1410,7 +1550,10 @@ impl<'a> Parser<'a> {
                 }
                 _ => {
                     let s = self.peek_span();
-                    self.error(s, format!("expected impl item, found {:?}", self.peek()));
+                    self.error(
+                        s,
+                        format!("expected impl item, found {}", self.peek().describe()),
+                    );
                     let from = self.pos;
                     self.recover(from, Recover::NestedItem);
                 }
@@ -1466,7 +1609,10 @@ impl<'a> Parser<'a> {
             n
         } else {
             let s = self.peek_span();
-            self.error(s, "enum name expected");
+            self.error(
+                s,
+                format!("expected enum name, found {}", self.peek().describe()),
+            );
             return None;
         };
         let generics = if matches!(self.peek(), TokenKind::Lt) {
@@ -1496,7 +1642,10 @@ impl<'a> Parser<'a> {
                 n
             } else {
                 let s = self.peek_span();
-                self.error(s, "variant name expected");
+                self.error(
+                    s,
+                    format!("expected variant name, found {}", self.peek().describe()),
+                );
                 return None;
             };
             let kind = match self.peek() {
@@ -1610,7 +1759,10 @@ impl<'a> Parser<'a> {
                 }
                 _ => {
                     let s = self.peek_span();
-                    self.error(s, format!("expected extern item, found {:?}", self.peek()));
+                    self.error(
+                        s,
+                        format!("expected extern item, found {}", self.peek().describe()),
+                    );
                     let from = self.pos;
                     self.recover(from, Recover::NestedItem);
                 }
@@ -1633,7 +1785,10 @@ impl<'a> Parser<'a> {
             n
         } else {
             let s = self.peek_span();
-            self.error(s, "module name expected");
+            self.error(
+                s,
+                format!("expected module name, found {}", self.peek().describe()),
+            );
             return None;
         };
         let items = if matches!(self.peek(), TokenKind::LBrace) {
@@ -1764,7 +1919,13 @@ impl<'a> Parser<'a> {
                     n
                 } else {
                     let s = self.peek_span();
-                    self.error(s, "alias name expected after `as`");
+                    self.error(
+                        s,
+                        format!(
+                            "expected alias name after `as`, found {}",
+                            self.peek().describe()
+                        ),
+                    );
                     return None;
                 };
                 rokc_ast::UseTreeKind::Simple(Some(alias))
@@ -1782,7 +1943,10 @@ impl<'a> Parser<'a> {
             n
         } else {
             let s = self.peek_span();
-            self.error(s, "trait name expected");
+            self.error(
+                s,
+                format!("expected trait name, found {}", self.peek().describe()),
+            );
             return None;
         };
         let generics = self.parse_generic_params();
@@ -1838,7 +2002,13 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let TokenKind::Ident(name) = self.peek().clone() else {
                     let s = self.peek_span();
-                    self.error(s, "associated const name expected");
+                    self.error(
+                        s,
+                        format!(
+                            "expected associated const name, found {}",
+                            self.peek().describe()
+                        ),
+                    );
                     return None;
                 };
                 self.bump();
@@ -1859,7 +2029,13 @@ impl<'a> Parser<'a> {
                     n
                 } else {
                     let s = self.peek_span();
-                    self.error(s, "associated type name expected");
+                    self.error(
+                        s,
+                        format!(
+                            "expected associated type name, found {}",
+                            self.peek().describe()
+                        ),
+                    );
                     return None;
                 };
                 // Optional bounds (`: A + B`) and default (`= T`).
@@ -1883,7 +2059,10 @@ impl<'a> Parser<'a> {
             }
             _ => {
                 let s = self.peek_span();
-                self.error(s, format!("expected trait item, found {:?}", self.peek()));
+                self.error(
+                    s,
+                    format!("expected trait item, found {}", self.peek().describe()),
+                );
                 None
             }
         }
@@ -1972,7 +2151,10 @@ impl<'a> Parser<'a> {
                     n
                 } else {
                     let s = self.peek_span();
-                    self.error(s, "binding name expected");
+                    self.error(
+                        s,
+                        format!("expected binding name, found {}", self.peek().describe()),
+                    );
                     return None;
                 };
                 // `n @ (x, y)`: bind `n`, then destructure it.
@@ -2035,7 +2217,7 @@ impl<'a> Parser<'a> {
                 n
             } else {
                 let s = self.peek_span();
-                self.error(s, "field name expected");
+                self.error(s, "expected field name");
                 return None;
             };
             let bind_name = if self.eat(&TokenKind::Colon) {
@@ -2044,7 +2226,10 @@ impl<'a> Parser<'a> {
                     n
                 } else {
                     let s = self.peek_span();
-                    self.error(s, "rebind name expected");
+                    self.error(
+                        s,
+                        format!("expected rebind name, found {}", self.peek().describe()),
+                    );
                     return None;
                 }
             } else {
@@ -2092,7 +2277,10 @@ impl<'a> Parser<'a> {
     fn fn_name(&mut self) -> Option<String> {
         let TokenKind::Ident(name) = self.peek().clone() else {
             let s = self.peek_span();
-            self.error(s, "function name expected");
+            self.error(
+                s,
+                format!("expected function name, found {}", self.peek().describe()),
+            );
             return None;
         };
         self.bump();
@@ -2274,7 +2462,13 @@ impl<'a> Parser<'a> {
             } else {
                 let TokenKind::Ident(name) = self.peek().clone() else {
                     let s = self.peek_span();
-                    self.error(s, "generic param name expected");
+                    self.error(
+                        s,
+                        format!(
+                            "expected generic param name, found {}",
+                            self.peek().describe()
+                        ),
+                    );
                     break;
                 };
                 self.bump();
@@ -2398,7 +2592,10 @@ impl<'a> Parser<'a> {
             n
         } else {
             let s = self.peek_span();
-            self.error(s, "parameter name expected");
+            self.error(
+                s,
+                format!("expected parameter name, found {}", self.peek().describe()),
+            );
             return None;
         };
         // Spec 4.2.5: `xs: ...T` — `...` precedes the element type; the
@@ -2619,7 +2816,7 @@ impl<'a> Parser<'a> {
                 TyKind::Array(Box::new(elem), len)
             }
             other => {
-                self.error(start, format!("type expected, found {other:?}"));
+                self.error(start, format!("expected type, found {}", other.describe()));
                 return None;
             }
         };
@@ -2764,7 +2961,13 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::ColonColon, "`::`")?;
         let TokenKind::Ident(name) = self.peek().clone() else {
             let s = self.peek_span();
-            self.error(s, "associated item name expected after `<.. as ..>::`");
+            self.error(
+                s,
+                format!(
+                    "expected associated item name after `<.. as ..>::`, found {}",
+                    self.peek().describe()
+                ),
+            );
             return None;
         };
         self.bump();
@@ -2799,7 +3002,10 @@ impl<'a> Parser<'a> {
         loop {
             let TokenKind::Ident(name) = self.peek().clone() else {
                 let s = self.peek_span();
-                self.error(s, "path segment expected");
+                self.error(
+                    s,
+                    format!("expected path segment, found {}", self.peek().describe()),
+                );
                 return None;
             };
             self.bump();
@@ -3057,8 +3263,9 @@ impl<'a> Parser<'a> {
                 } else {
                     if let StmtKind::Trailing(e) = &stmt.kind {
                         if !ends_stmt(e) {
-                            let s = self.peek_span();
-                            self.error(s, "expected `;` after expression statement");
+                            let d =
+                                self.expected(&TokenKind::Semi, "`;` after expression statement");
+                            self.diagnostics.push(d);
                         }
                     }
                     stmts.push(stmt);
@@ -3206,7 +3413,10 @@ impl<'a> Parser<'a> {
                     n.clone()
                 } else {
                     let s = self.peek_span();
-                    self.error(s, "binding name expected");
+                    self.error(
+                        s,
+                        format!("expected binding name, found {}", self.peek().describe()),
+                    );
                     return None;
                 };
                 self.bump();
@@ -4427,7 +4637,10 @@ impl<'a> Parser<'a> {
                 ExprKind::Yield(value)
             }
             other => {
-                self.error(start, format!("expression expected, found {other:?}"));
+                self.error(
+                    start,
+                    format!("expected expression, found {}", other.describe()),
+                );
                 return None;
             }
         };
@@ -4481,7 +4694,13 @@ impl<'a> Parser<'a> {
                         }
                         _ => {
                             let s = self.peek_span();
-                            self.error(s, "field or method name expected after `.`");
+                            self.error(
+                                s,
+                                format!(
+                                    "expected field or method name after `.`, found {}",
+                                    self.peek().describe()
+                                ),
+                            );
                             return None;
                         }
                     };
@@ -4551,7 +4770,7 @@ impl<'a> Parser<'a> {
                         self.with_struct_expr(true, |p| p.expr_list(&TokenKind::RBracket))?;
                     if indices.is_empty() {
                         let s = self.peek_span();
-                        self.error(s, "index expression expected");
+                        self.error(s, "expected index expression");
                     }
                     self.expect(&TokenKind::RBracket, "`]`")?;
                     // Spec 3.6.1: `m[i, j]` is chained indexing `m[i][j]`,
@@ -4612,7 +4831,13 @@ impl<'a> Parser<'a> {
                         }
                         _ => {
                             let s = self.peek_span();
-                            self.error(s, "field or method name expected after `?.`");
+                            self.error(
+                                s,
+                                format!(
+                                    "expected field or method name after `?.`, found {}",
+                                    self.peek().describe()
+                                ),
+                            );
                             return None;
                         }
                     };
@@ -4845,7 +5070,13 @@ impl<'a> Parser<'a> {
                     n
                 } else {
                     let s = self.peek_span();
-                    self.error(s, "capture name expected after `ref`");
+                    self.error(
+                        s,
+                        format!(
+                            "expected capture name after `ref`, found {}",
+                            self.peek().describe()
+                        ),
+                    );
                     return None;
                 };
                 captures.push(rokc_ast::CaptureSpec::Ref(name));
@@ -5079,7 +5310,7 @@ impl<'a> Parser<'a> {
                 n
             } else {
                 let s = self.peek_span();
-                self.error(s, "field name expected");
+                self.error(s, "expected field name");
                 return None;
             };
             // Shorthand `Foo { x }` (using a local named `x`) is allowed
@@ -5210,7 +5441,7 @@ impl<'a> Parser<'a> {
                 n
             } else {
                 let s = self.peek_span();
-                self.error(s, "field name expected");
+                self.error(s, "expected field name");
                 return None;
             };
             // `Foo { x: pat }` or shorthand `Foo { x }` (binds `x`).
@@ -5291,7 +5522,13 @@ impl<'a> Parser<'a> {
                 }
                 _ => {
                     let s = self.peek_span();
-                    self.error(s, "literal expected after `-`");
+                    self.error(
+                        s,
+                        format!(
+                            "expected literal after `-`, found {}",
+                            self.peek().describe()
+                        ),
+                    );
                     return None;
                 }
             };
@@ -5407,7 +5644,10 @@ impl<'a> Parser<'a> {
                 }
             }
             other => {
-                self.error(span, format!("pattern expected, found {other:?}"));
+                self.error(
+                    span,
+                    format!("expected pattern, found {}", other.describe()),
+                );
                 return None;
             }
         };
@@ -5668,5 +5908,41 @@ const fn compound_assign_op(tok: &rokc_lexer::TokenKind) -> Option<&'static str>
         T::ShlEq => "<<",
         T::ShrEq => ">>",
         _ => return None,
+    })
+}
+
+/// Keywords of other languages and their rok spelling.
+fn keyword_alias(word: &str) -> Option<&'static str> {
+    Some(match word {
+        "func" | "fun" | "function" | "def" | "fucn" | "fnc" => "fn",
+        "elif" | "elsif" | "elseif" => "else if",
+        "switch" => "match",
+        "var" | "val" => "let",
+        "null" | "nil" | "None" | "NULL" => "none",
+        "class" => "struct",
+        "interface" | "protocol" => "trait",
+        "import" | "include" | "require" => "use",
+        "module" | "namespace" | "package" => "mod",
+        "raise" => "throw",
+        "except" => "catch",
+        _ => return None,
+    })
+}
+
+/// The keyword `word` most likely meant: a known alias, else the
+/// closest reserved or contextual keyword.
+pub(crate) fn keyword_hint(word: &str) -> Option<&'static str> {
+    const CONTEXTUAL: &[&str] = &[
+        "type", "any", "in", "where", "throws", "rethrows", "catch", "finally", "const", "static",
+        "extern", "mut", "union",
+    ];
+    keyword_alias(word).or_else(|| {
+        rokc_diagnostic::suggest(
+            word,
+            rokc_lexer::token::RESERVED
+                .iter()
+                .chain(CONTEXTUAL)
+                .copied(),
+        )
     })
 }

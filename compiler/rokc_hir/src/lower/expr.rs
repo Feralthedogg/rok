@@ -125,13 +125,7 @@ pub(super) fn lower_let_struct(
     let def = ctx.struct_def(sid);
     for (field_name, bind_name) in fields {
         let Some(idx) = def.fields.iter().position(|f| &f.name == field_name) else {
-            ctx.emit_error(
-                rokc_diagnostic::ErrorKind::Type,
-                format!(
-                    "struct `{}` has no field `{field_name}`",
-                    ctx.ty_name(&init_ty)
-                ),
-            );
+            ctx.no_field(sid, field_name, span);
             ctx.declare(Some(bind_name.clone()), HirTy::Unknown);
             continue;
         };
@@ -528,7 +522,7 @@ pub(super) fn lower_assign(
                 return Some(ctx.store_local(local, value));
             }
             let segs = [name.as_str()];
-            if let Some(full) = ctx.resolve_in(&segs, &ctx.env.statics) {
+            if let Some(full) = ctx.resolve_in(&segs, &ctx.env.statics, &ctx.env.static_leaves) {
                 ctx.check_item_visible(&full, "static");
                 if !ctx.env.mut_statics.contains(&full) {
                     ctx.emit_error(
@@ -726,10 +720,7 @@ pub(super) fn lower_assign(
                         .find(|(n, _)| n == name)
                         .map(|(_, t)| t.clone())
                     else {
-                        ctx.emit_error(
-                            rokc_diagnostic::ErrorKind::Type,
-                            format!("union `{}` has no field `{name}` (spec 2.5)", def.name),
-                        );
+                        ctx.no_field(sid, name, span);
                         return None;
                     };
                     if ci + 1 != chain.len() {
@@ -766,10 +757,7 @@ pub(super) fn lower_assign(
                     break;
                 }
                 let Some(idx) = def.fields.iter().position(|f| f.name == *name) else {
-                    ctx.emit_error(
-                        rokc_diagnostic::ErrorKind::Type,
-                        format!("struct `{}` has no field `{name}`", ctx.ty_name(&step_ty)),
-                    );
+                    ctx.no_field(sid, name, span);
                     return None;
                 };
                 ctx.check_field_visible(sid, name);
@@ -1791,9 +1779,11 @@ pub(super) fn lower_struct_init(
         for (_, e) in fields {
             lower_expected(ctx, e, HirTy::Unknown);
         }
-        return ctx.error_expr(
+        let help = ctx.type_help(&segs);
+        return ctx.unknown_name(
             span,
             format!("cannot find struct `{}` in this scope", segs.join("::")),
+            help,
         );
     };
     // Values lowered before the struct is known (generic inference);
@@ -1903,7 +1893,7 @@ pub(super) fn lower_struct_init(
             return ctx.error_expr(
                 span,
                 format!(
-                    "union `{}` initialiser must list exactly one field (spec 2.x — got {})",
+                    "union `{}` initializer must list exactly one field, found {}",
                     def.name,
                     fields.len()
                 ),
@@ -1916,10 +1906,7 @@ pub(super) fn lower_struct_init(
             .find(|(n, _)| n == fname)
             .map(|(_, t)| t.clone())
         else {
-            return ctx.error_expr(
-                span,
-                format!("union `{}` has no field `{fname}` (spec 2.x)", def.name),
-            );
+            return ctx.no_field(struct_id, fname, span);
         };
         ctx.check_field_visible(struct_id, fname);
         let lowered = lower_expected(ctx, value, field_ty.clone());
@@ -1950,10 +1937,7 @@ pub(super) fn lower_struct_init(
             if pre[i].is_none() {
                 lower_expected(ctx, value, HirTy::Unknown);
             }
-            ctx.emit_error(
-                rokc_diagnostic::ErrorKind::Type,
-                format!("struct `{ty_display}` has no field `{name}`"),
-            );
+            ctx.no_field(struct_id, name, span);
             continue;
         };
         ctx.check_field_visible(struct_id, name);
@@ -1982,7 +1966,7 @@ pub(super) fn lower_struct_init(
                     rokc_diagnostic::ErrorKind::Type,
                     format!(
                         "struct `{ty_display}` is missing field `{}` and no default is \
-                         declared (spec 2.x / i-want 942-950)",
+                         declared",
                         f.name
                     ),
                 );
@@ -2051,10 +2035,7 @@ pub(super) fn field_access(
             .find(|(n, _)| n == name)
             .map(|(_, t)| t.clone())
         else {
-            return ctx.error_expr(
-                span,
-                format!("union `{}` has no field `{name}` (spec 2.x)", def.name),
-            );
+            return ctx.no_field(struct_id, name, span);
         };
         ctx.check_field_visible(struct_id, name);
         return HirExpr {
@@ -2070,13 +2051,7 @@ pub(super) fn field_access(
         };
     }
     let Some(idx) = def.fields.iter().position(|f| f.name == name) else {
-        return ctx.error_expr(
-            span,
-            format!(
-                "struct `{}` has no field `{name}`",
-                ctx.ty_name(&HirTy::Struct(struct_id))
-            ),
-        );
+        return ctx.no_field(struct_id, name, span);
     };
     ctx.check_field_visible(struct_id, name);
     let field_ty = def.fields[idx].ty.clone();
@@ -2098,7 +2073,7 @@ fn is_untyped_int(e: &Expr) -> bool {
         match &e.kind {
             ExprKind::Literal(l) => !matches!(l, AstLit::Float(_)),
             ExprKind::OpPrefix { operand, .. } => no_float(operand),
-            ExprKind::OpInfix { lhs, rhs, .. } => no_float(lhs) && no_float(rhs),
+            ExprKind::OpInfix { lhs, rhs, .. } => no_float(rhs) && no_float(lhs),
             _ => true,
         }
     }
@@ -2116,7 +2091,8 @@ pub(super) fn is_untyped_literal(e: &Expr) -> bool {
         ExprKind::OpInfix { op, lhs, rhs }
             if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%") =>
         {
-            is_untyped_literal(lhs) && is_untyped_literal(rhs)
+            // The right side first: a left-leaning chain's is shallow.
+            is_untyped_literal(rhs) && is_untyped_literal(lhs)
         }
         _ => false,
     }
@@ -3308,7 +3284,9 @@ fn const_int(e: &HirExpr) -> Option<i128> {
             operand,
         } => const_int(operand)?.checked_neg()?,
         HirExprKind::PrimBinOp { op, lhs, rhs } => {
-            const_arith(*op, const_int(lhs)?, const_int(rhs)?)?
+            // The right side first: a left-leaning chain's is shallow.
+            let b = const_int(rhs)?;
+            const_arith(*op, const_int(lhs)?, b)?
         }
         _ => return None,
     };
@@ -3349,7 +3327,10 @@ fn check_const_overflow(
     {
         return;
     }
-    let (Some(a), Some(b)) = (const_int(lhs), const_int(rhs)) else {
+    let Some(b) = const_int(rhs) else {
+        return;
+    };
+    let Some(a) = const_int(lhs) else {
         return;
     };
     let msg = match const_arith(op, a, b) {
@@ -4157,14 +4138,16 @@ pub(super) fn method_call_on(
             Ok(r) => return r,
             Err(r) => r,
         };
-        return ctx.error_expr(
-            span,
+        let ty = ctx.ty_name(&recv_h.ty);
+        let e = ctx.error_expr(span, format!("no method `{method}` found for type `{ty}`"));
+        let help = ctx.method_help(&recv_h.ty, method).unwrap_or_else(|| {
             format!(
-                "no method `{method}` found for type `{}` (spec 3.5.2). Either add \
-                 `impl {{ fn {method}(...) {{...}} }}` or import a trait that provides it.",
-                ctx.ty_name(&recv_h.ty)
-            ),
-        );
+                "add `fn {method}(self, ..)` in an `impl {ty} {{ .. }}` block, or import a \
+                 trait that provides it"
+            )
+        });
+        ctx.help_last(Some(help));
+        return e;
     };
     check_method_visible(ctx, fn_id, method);
     if !type_args.is_empty() {
@@ -4237,7 +4220,7 @@ fn any_method_call(
             format!(
                 "no method `{method}` on `{}` — only methods of its trait bound(s) and their \
                  supertraits can be called on an `any` value; narrow it with a type pattern \
-                 (`match v {{ x: T => ... }}`) to reach other methods (D4)",
+                 (`match v {{ x: T => ... }}`) to reach other methods",
                 ctx.ty_name(&recv_ty)
             ),
         );
@@ -4292,7 +4275,7 @@ fn any_method_call(
             span,
             format!(
                 "cannot call `{method}` on `{}`: {why}; narrow the value with `is` or a type \
-                 pattern first (D4)",
+                 pattern first",
                 ctx.ty_name(&recv_ty)
             ),
         );
@@ -4318,7 +4301,7 @@ fn any_method_call(
             span,
             format!(
                 "cannot call `{method}` on `{}`: its signature can't be fixed from the bound \
-                 `{bound}` (D4)",
+                 `{bound}`",
                 ctx.ty_name(&recv_ty)
             ),
         );
@@ -6022,9 +6005,11 @@ pub(super) fn lower_call(
     }
 
     discard_args(ctx, args);
-    ctx.error_expr(
+    let help = ctx.value_help(&segs);
+    ctx.unknown_name(
         span,
         format!("cannot find function `{display}` in this scope"),
+        help,
     )
 }
 
@@ -8202,7 +8187,9 @@ pub(super) fn lower_path(
         }
         _ => None,
     };
-    if let Some(full) = assoc.or_else(|| ctx.resolve_in(&segs, &ctx.env.consts)) {
+    if let Some(full) =
+        assoc.or_else(|| ctx.resolve_in(&segs, &ctx.env.consts, &ctx.env.const_leaves))
+    {
         ctx.check_item_visible(&full, "const");
         let (ty, value) = ctx.env.consts[&full].clone();
         // An impl const `m::T::N` resolves its type and value in `m`.
@@ -8238,7 +8225,7 @@ pub(super) fn lower_path(
         return super::const_eval::const_item(ctx, &full, v);
     }
     // Module-level `static` — a load through the global address.
-    if let Some(full) = ctx.resolve_in(&segs, &ctx.env.statics) {
+    if let Some(full) = ctx.resolve_in(&segs, &ctx.env.statics, &ctx.env.static_leaves) {
         ctx.check_item_visible(&full, "static");
         let ty = ctx.env.statics[&full].clone();
         return HirExpr {
@@ -8377,9 +8364,11 @@ pub(super) fn lower_path(
             };
         }
     }
-    ctx.error_expr(
+    let help = ctx.value_help(&segs);
+    ctx.unknown_name(
         span,
         format!("cannot find value `{}` in this scope", segs.join("::")),
+        help,
     )
 }
 

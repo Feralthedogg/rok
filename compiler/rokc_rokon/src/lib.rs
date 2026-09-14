@@ -163,9 +163,9 @@ impl Error {
         }
     }
 
-    /// `file:line:col: error: message`, the line and a caret.
+    /// The syntax error as `rokc` prints diagnostics (spec 9.1.8).
     pub fn render(&self, text: &str, file: &str) -> String {
-        render(text, file, self.span, &self.message)
+        render(text, file, self.span, "E002", &self.message)
     }
 }
 
@@ -178,17 +178,19 @@ pub fn line_col(src: &str, offset: usize) -> (usize, usize) {
     (line, before[start..].chars().count() + 1)
 }
 
-/// A diagnostic at `span` of `src`: `file:line:col: error: message`,
-/// then the line and `^^^` under the span (its first line).
-pub fn render(src: &str, file: &str, span: Span, message: &str) -> String {
+/// An error at `span` of `src` in the diagnostic layout of spec 9.1.8:
+/// `error[code]: message`, `--> file:line:col`, then the line with
+/// `^^^` under the span (its first line).
+pub fn render(src: &str, file: &str, span: Span, code: &str, message: &str) -> String {
     let (start, end) = (span.start as usize, span.end as usize);
     let (line, col) = line_col(src, start);
     let text = src.lines().nth(line - 1).unwrap_or("");
     let width = src
         .get(start..end.max(start))
         .map_or(1, |s| s.lines().next().unwrap_or("").chars().count().max(1));
+    let pad = " ".repeat(line.to_string().len() + 1);
     format!(
-        "{file}:{line}:{col}: error: {message}\n{line:>4} | {text}\n     | {}{}",
+        "error[{code}]: {message}\n{pad}--> {file}:{line}:{col}\n{pad} |\n {line} | {text}\n{pad} | {}{}",
         " ".repeat(col - 1),
         "^".repeat(width)
     )

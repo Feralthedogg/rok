@@ -223,27 +223,37 @@ fn frame(
     w.block(body);
     let mut held: Vec<LocalId> = w.held.into_iter().collect();
     held.sort();
+    // The component that makes a type not `key` (`auto_trait_cause`).
+    let cause = |t: Option<HirTy>, key: &str| {
+        t.map(|t| ctx.auto_trait_cause(&t, key, 0))
+            .unwrap_or_default()
+    };
     let why = w.found.map(|found| match found {
         Found::Capture(l) => format!(
-            "it captures `{}: {}`, which is not `Send`",
+            "it captures `{}: {}`, which is not `Send`{}",
             name(l),
-            ty_of(l).map(|t| ctx.ty_name(&t)).unwrap_or_default()
+            ty_of(l).map(|t| ctx.ty_name(&t)).unwrap_or_default(),
+            cause(ty_of(l), send)
         ),
         Found::Held(l) => format!(
-            "it holds `{}: {}`, which is not `Send`, across an `await`",
+            "it holds `{}: {}`, which is not `Send`{}, across an `await`",
             name(l),
-            ty_of(l).map(|t| ctx.ty_name(&t)).unwrap_or_default()
+            ty_of(l).map(|t| ctx.ty_name(&t)).unwrap_or_default(),
+            cause(ty_of(l), send)
         ),
         Found::Temp(t) => format!(
-            "it holds a temporary `{}`, which is not `Send`, across an `await`",
-            ctx.ty_name(&t)
+            "it holds a temporary `{}`, which is not `Send`{}, across an `await`",
+            ctx.ty_name(&t),
+            cause(Some(t.clone()), send)
         ),
     });
     let why_shared = w.shared.map(|l| {
         format!(
-            "it captures `{}: {}`, which is not `Sync` (the spawner keeps its copy, spec 4.6.9)",
+            "it captures `{}: {}`, which is not `Sync`{} (the spawner keeps its copy, spec \
+             4.6.9)",
             name(l),
-            ty_of(l).map(|t| ctx.ty_name(&t)).unwrap_or_default()
+            ty_of(l).map(|t| ctx.ty_name(&t)).unwrap_or_default(),
+            sync.map(|k| cause(ty_of(l), k)).unwrap_or_default()
         )
     });
     (why, why_shared, held)

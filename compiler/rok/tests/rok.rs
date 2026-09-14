@@ -383,12 +383,11 @@ fn manifest_errors_and_reserved_forms() {
         &app.join("rok.rokon"),
         "Package {\n    name: env(\"X\"),\n}\n",
     );
-    fails(
-        &rok(&home, &app, &["deps"]),
-        "rok.rokon:2:11: error: calls are not allowed in RokON",
-    );
+    let out = rok(&home, &app, &["deps"]);
+    fails(&out, "error[E002]: calls are not allowed in RokON");
+    fails(&out, "rok.rokon:2:11\n");
     write(&app.join("rok.rokon"), "Package { deps: {\n");
-    fails(&rok(&home, &app, &["deps"]), "rok.rokon:2:1: error:");
+    fails(&rok(&home, &app, &["deps"]), "rok.rokon:2:1\n");
     write(&app.join("rok.rokon"), "Package {}\n");
     ok(&rok(&home, &app, &["deps"]));
     fs::remove_file(app.join("rok.rokon")).unwrap();
@@ -555,7 +554,7 @@ fn lint_and_doc_with_dependencies() {
     );
     let out = rok(&home, &app, &["lint", "-W", "unused_variables"]);
     ok(&out);
-    assert!(text(&out.stderr).contains("warning: [lint]"));
+    assert!(text(&out.stderr).contains("warning[E503]"));
     fails(
         &rok(&home, &app, &["lint", "-D", "all"]),
         "unused variable `x`",
@@ -859,6 +858,21 @@ fn build_run_and_repl_with_dependencies() {
     ));
     assert_eq!(ok(&rok(&home, &app, &["-q", "run"])), "2\n");
     assert!(app.join("target/debug/app").is_file());
+    // `repl <path>`: the session has the program's imports and dependencies.
+    let mut child = rok_cmd(&home, &root, &["-q", "repl", "app"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b":type greet()\ngreet() + 1\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(ok(&out), "2\ni32\ni32: 3\n", "{}", text(&out.stderr));
     ok(&rok(&home, &app, &["-q", "build", "--release"]));
     assert!(app.join("target/release/app").is_file());
     ok(&rok(&home, &app, &["-q", "clean"]));

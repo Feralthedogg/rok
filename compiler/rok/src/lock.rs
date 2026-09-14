@@ -228,12 +228,9 @@ mod tests {
         for (src, want) in [
             (
                 "Lock { version: 2, packages: [] }",
-                "rok.lock:1:17: error: unsupported lockfile version",
+                "unsupported lockfile version\n  --> rok.lock:1:17",
             ),
-            (
-                "version = 1",
-                "rok.lock:1:9: error: expected the end of the file",
-            ),
+            ("version = 1", "--> rok.lock:1:9\n"),
             ("Lock { packages: [] }", "missing field `version`"),
             (
                 "Lock { version: 1, packages: [Locked { name: \"a\", source: Dep::path(\"p\"), \

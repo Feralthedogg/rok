@@ -8,7 +8,8 @@
 //! (Display shortest round trip vs `repr`, literals, `parse`, `{:.N}`,
 //! arithmetic), `str` (split / trim / find / case mapping / replace /
 //! lines ...), sorting, `Dict` / `OrderedDict` / `Set` op sequences,
-//! Python slicing, RokON round trips.
+//! Python slicing, RokON round trips, sub-word arrays and structs by
+//! value through calls.
 //!
 //! Skips without the LLVM toolchain (`common::setup`) or `python3`.
 //! `ROK_DIFF_SEED` picks another case set, `ROK_DIFF_CASES` the cases
@@ -980,6 +981,81 @@ fn slice_suite(rng: &mut Rng) -> Suite {
     s
 }
 
+/// `[[T; C]; R]`, bare or in a struct, by value into a call and back:
+/// sub-word elements past the argument registers.
+fn aggregate_suite(rng: &mut Rng) -> Suite {
+    let mut s = Suite {
+        name: "aggregate",
+        ..Suite::default()
+    };
+    for i in 0..cases() / 2 {
+        let ty = *rng.pick(&["bool", "u8", "i8", "i16", "u16", "i32", "f32", "i64"]);
+        let (r, c) = (1 + rng.below(4), 1 + rng.below(24));
+        let val = |rng: &mut Rng| match ty {
+            "bool" => rng.chance(50).to_string(),
+            "f32" => format!("{}.5", rng.range(-99, 99)),
+            "u8" | "u16" => rng.range(0, 250).to_string(),
+            _ => rng.range(-120, 120).to_string(),
+        };
+        let a: Vec<Vec<String>> = (0..r).map(|_| (0..c).map(|_| val(rng)).collect()).collect();
+        let lit = |v: &String| match ty {
+            "bool" => v.clone(),
+            _ => format!("{v}{ty}"),
+        };
+        let rows: Vec<String> = a
+            .iter()
+            .map(|row| format!("[{}]", row.iter().map(lit).collect::<Vec<_>>().join(", ")))
+            .collect();
+        let arr = format!("[[{ty}; {c}]; {r}]");
+        let (y, x) = (rng.below(r), rng.below(c));
+        let last = &a[r - 1][c - 1];
+        let first = if (y, x) == (0, 0) { last } else { &a[0][0] };
+        let want = format!("{last} {first} {last}");
+        let get = |v: &str| {
+            format!(
+                "{{{v}[{y}][{x}]}} {{{v}[0][0]}} {{{v}[{}][{}]}}",
+                r - 1,
+                c - 1
+            )
+        };
+        if rng.chance(50) {
+            let _ = writeln!(
+                s.head,
+                "fn agg{i}(a: {arr}, y: usize, x: usize) -> {arr} {{ let b = a; b[y][x] = a[{}][{}]; return b; }}",
+                r - 1,
+                c - 1
+            );
+            s.line(
+                "array",
+                &format!(
+                    "        let a: {arr} = [{}];\n        let b = agg{i}(a, {y}, {x});\n",
+                    rows.join(", ")
+                ),
+                &format!("f\"{}\"", get("b")),
+                &pq(&want),
+            );
+        } else {
+            let _ = writeln!(
+                s.head,
+                "struct Agg{i} {{ pre: bool; a: {arr}; post: u8; }}\n\
+                 fn agg{i}(g: Agg{i}, y: usize, x: usize) -> Agg{i} {{ let h = g; h.a[y][x] = g.a[{}][{}]; h.post = g.post + 1u8; return h; }}",
+                r - 1,
+                c - 1
+            );
+            s.line(
+                "struct",
+                &format!(
+                    "        let g = Agg{i} {{ pre: true, a: [{}], post: 7u8 }};\n        let h = agg{i}(g, {y}, {x});\n",
+                    rows.join(", ")
+                ),
+                &format!("f\"{} {{h.pre}} {{h.post}}\"", get("h.a")),
+                &pq(&format!("{want} true 8")),
+            );
+        }
+    }
+    s
+}
+
 fn rokon_value(rng: &mut Rng, depth: u32) -> Value {
     const STRS: &[&str] = &[
         "",
@@ -1207,6 +1283,7 @@ fn differential() {
         dict_suite(&mut rng),
         slice_suite(&mut rng),
         rokon_suite(&mut rng),
+        aggregate_suite(&mut rng),
     ];
     let root = env
         .workspace

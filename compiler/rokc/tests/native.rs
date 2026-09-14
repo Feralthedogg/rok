@@ -260,8 +260,7 @@ fn main() {
 "#;
 
 /// Recursion through huge frames is reported like any overflow (stack
-/// probes). Built at -O0 whatever `ROK_TEST_OPT` says: LLVM's optimizer
-/// is very slow on the 300000-element array value.
+/// probes).
 #[test]
 fn big_frame_overflow_is_reported() {
     let Some(env) = setup() else { return };
@@ -275,7 +274,7 @@ fn big_frame_overflow_is_reported() {
         .arg(&env.bootstrap)
         .arg("--rokr")
         .arg(&env.rokr)
-        .arg("-O0")
+        .args(std::env::var("ROK_TEST_OPT").ok().filter(|o| !o.is_empty()))
         .arg("-o")
         .arg(&exe)
         .output()

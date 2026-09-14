@@ -126,7 +126,7 @@ pub(super) fn lower_fstring(ctx: &mut LowerCtx<'_>, parts: &[FStringPart], span:
                     }
                 }
                 let is_dynamic = spec.iter().any(|p| matches!(p, SpecPiece::Expr(_)));
-                let outer = rokc_diagnostic::set_current_span(at);
+                let outer = rokc_diagnostic::set_current_span(expr.span);
                 let hole = if is_dynamic {
                     let spec_text = lower_fstring(ctx, &dynamic, at);
                     let spec = Spec::Dynamic(bind_hir(ctx, &mut stmts, "#fs", spec_text, at));
@@ -388,10 +388,53 @@ fn hole(ctx: &LowerCtx<'_>, value: Expr, ty: &HirTy, spec: Spec, debug: bool) ->
     }
 }
 
+/// `{:?}` and `{}` as written in an f-string.
+const DEBUG_HOLE: &str = concat!("{", ":?}");
+const PLAIN_HOLE: &str = concat!("{", "}");
+
+/// A value the runtime does not format itself needs `Display` (`Debug`
+/// for `{:?}`); report a missing impl here, at the hole, rather than
+/// inside the library's formatting function.
+fn formattable(ctx: &LowerCtx<'_>, ty: &HirTy, debug: bool) -> bool {
+    let (slot, name) = if debug {
+        ("debug_trait", "Debug")
+    } else {
+        ("display_trait", "Display")
+    };
+    let tr = ctx.lang_trait(slot);
+    if kind_of(ctx, ty) != Kind::Other || ctx.implements_trait(ty, tr, 0) {
+        return true;
+    }
+    let shown = ctx.ty_name(ty);
+    let culprit = match ty {
+        HirTy::Sum(vs) => vs
+            .iter()
+            .find(|v| !ctx.implements_trait(v, tr, 0))
+            .map(|v| format!(": member `{}` does not implement `{name}`", ctx.ty_name(v))),
+        _ => None,
+    }
+    .unwrap_or_else(|| format!(": it does not implement `{name}`"));
+    let hole = if debug { DEBUG_HOLE } else { PLAIN_HOLE };
+    ctx.emit_error(
+        rokc_diagnostic::ErrorKind::Type,
+        format!("`{shown}` cannot be formatted with `{hole}`{culprit}"),
+    );
+    let help = if debug {
+        "add `#[derive(Debug)]` to the type, or implement `Debug` for it".to_owned()
+    } else if ctx.implements_trait(ty, ctx.lang_trait("debug_trait"), 0) {
+        format!("format it with `{DEBUG_HOLE}`, or implement `Display` for it")
+    } else {
+        format!("implement `Display` for it, or derive `Debug` and format it with `{DEBUG_HOLE}`")
+    };
+    ctx.help_last(Some(help));
+    false
+}
+
 /// A hole with a static spec: checked against the value's type here.
 fn static_hole(ctx: &LowerCtx<'_>, value: Expr, ty: &HirTy, text: &str) -> Option<Hole> {
     if text.is_empty() || text == "?" {
-        return Some(hole(ctx, value, ty, Spec::None, text == "?"));
+        return formattable(ctx, ty, text == "?")
+            .then(|| hole(ctx, value, ty, Spec::None, text == "?"));
     }
     let spec = match fmt_spec::parse(text) {
         Ok(s) => s,
@@ -437,7 +480,7 @@ fn static_hole(ctx: &LowerCtx<'_>, value: Expr, ty: &HirTy, text: &str) -> Optio
     } else {
         Spec::Static(spec)
     };
-    Some(hole(ctx, value, ty, spec, debug && !number))
+    formattable(ctx, ty, debug && !number).then(|| hole(ctx, value, ty, spec, debug && !number))
 }
 
 /// A hole with a dynamic spec: a value with only one of `Display` /

@@ -7,6 +7,7 @@
 pub mod analysis;
 pub mod doc;
 pub mod jupyter;
+mod line_edit;
 pub mod lint;
 pub mod lsp;
 pub mod repl;

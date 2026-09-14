@@ -46,6 +46,26 @@ impl Span {
     }
 }
 
+/// `ROK_TIME_PASSES=1`: each compiler pass's wall time on stderr.
+#[must_use]
+pub fn time_passes() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var_os("ROK_TIME_PASSES").is_some_and(|v| !v.is_empty() && v != "0")
+    })
+}
+
+/// Run `f` as pass `what`, timed under `ROK_TIME_PASSES`.
+pub fn time<T>(what: &str, f: impl FnOnce() -> T) -> T {
+    if !time_passes() {
+        return f();
+    }
+    let t = std::time::Instant::now();
+    let r = f();
+    eprintln!("time: {:>9.1}ms  {what}", t.elapsed().as_secs_f64() * 1e3);
+    r
+}
+
 /// Source files by id (`Span::file` - 1): path and text, for locations
 /// and the caret line under a diagnostic.
 static FILES: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
@@ -75,6 +95,10 @@ pub fn clear_files() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clear();
+    VIEWS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
 }
 
 /// How many files are registered (the next one's id is this plus 1).
@@ -93,10 +117,66 @@ pub fn registered_files() -> Vec<(String, String)> {
         .clone()
 }
 
+/// Stretches of files `location` shows as another file: a REPL cell
+/// inside its generated session source reads as `<repl>:1:1`, a program
+/// loaded into a session (`repl <path>`) as the program's own lines.
+static VIEWS: Mutex<Vec<View>> = Mutex::new(Vec::new());
+
+struct View {
+    id: u32,
+    path: String,
+    /// First line and column of the stretch in file `id`.
+    from: (u32, u32),
+    /// Its last line.
+    last: u32,
+    /// Where `from` shows; later lines keep their columns.
+    at: (u32, u32),
+}
+
+/// Make `location` show lines `from.0..=last` of file `id` as `path`.
+///
+/// `from` (line, column) shows as `at`. A span of `id` outside every
+/// such stretch shows as the first one's `path`, without a position.
+/// Lasts until `clear_files`.
+pub fn view_file(id: u32, path: String, from: (u32, u32), last: u32, at: (u32, u32)) {
+    VIEWS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(View {
+            id,
+            path,
+            from,
+            last,
+            at,
+        });
+}
+
 /// `path:line:col` of `span`, as a panic reports it; `<unknown>` for a
 /// span without a source position.
 #[must_use]
 pub fn location(span: Span) -> String {
+    let views = VIEWS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut of_file = views.iter().filter(|v| v.id == span.file).peekable();
+    if let Some(first) = of_file.peek() {
+        let path = first.path.clone();
+        let inside = |v: &&View| (v.from.0..=v.last).contains(&span.line);
+        return match of_file.find(inside) {
+            Some(v) if span.line == v.from.0 => {
+                let col = (span.col + v.at.1).saturating_sub(v.from.1).max(1);
+                format!("{}:{}:{col}", v.path, v.at.0)
+            }
+            Some(v) => format!(
+                "{}:{}:{}",
+                v.path,
+                span.line - v.from.0 + v.at.0,
+                span.col.max(1)
+            ),
+            None => path,
+        };
+    }
+    drop(views);
     let files = FILES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -312,42 +392,103 @@ impl RokDiagnostic {
         })
     }
 
-    /// `  N | <source line>` and a caret under the primary column.
-    fn snippet(&self) -> Option<String> {
-        let span = self.primary.as_ref()?.span;
-        let source = file_by_id(span.file)
-            .map(|(_, s)| s)
-            .or_else(|| source_by_path(self.file.as_deref()?))?;
-        let line = source
-            .lines()
-            .nth(usize::try_from(span.line).ok()?.checked_sub(1)?)?;
-        let n = span.line.to_string();
-        let pad = " ".repeat(n.len());
-        let col = usize::try_from(span.col).ok()?.saturating_sub(1);
-        // Keep tabs so the caret lines up under them.
-        let lead: String = line
-            .chars()
-            .take(col)
-            .map(|c| if c == '\t' { '\t' } else { ' ' })
-            .collect();
-        Some(format!("{pad} |\n{n} | {line}\n{pad} | {lead}^"))
+    /// A `help:` note, printed as `= help: ..`.
+    #[must_use]
+    pub fn with_help(self, help: impl Into<String>) -> Self {
+        self.with_note(format!("help: {}", help.into()))
     }
 }
 
 impl fmt::Display for RokDiagnostic {
+    /// One line: `error[E200]: path:line:col: message`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.path() {
-            Some(file) => {
-                let span = self.primary.as_ref().map(|l| l.span).unwrap_or_default();
-                write!(
-                    f,
-                    "{}: [{}] {}:{}:{}: {}",
-                    self.severity, self.kind, file, span.line, span.col, self.message
-                )
+        write!(f, "{}[{}]: ", self.severity, self.kind.code())?;
+        if let Some(file) = self.path() {
+            match self.primary.as_ref().map(|l| l.span) {
+                Some(s) if s.line != 0 => write!(f, "{file}:{}:{}: ", s.line, s.col.max(1))?,
+                _ => write!(f, "{file}: ")?,
             }
-            None => write!(f, "{}: [{}] {}", self.severity, self.kind, self.message),
+        }
+        f.write_str(&self.message)
+    }
+}
+
+/// Closest candidate to `name` by edit distance, for a "did you mean".
+///
+/// Within about a third of the name's length (names under three chars
+/// only match by case), ties to the first. Exact matches and internal
+/// names (`__x`, `#x`) give nothing.
+#[must_use]
+pub fn suggest<'a, I>(name: &str, candidates: I) -> Option<&'a str>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let len = name.chars().count();
+    let limit = if len < 3 { 0 } else { (len + 2) / 3 };
+    let mut best: Option<(usize, &str)> = None;
+    for c in candidates {
+        if c == name || c.is_empty() || c.starts_with("__") || c.contains('#') {
+            continue;
+        }
+        let d = edit_distance(name, c);
+        // A case-only difference is always worth naming.
+        let d = if c.eq_ignore_ascii_case(name) { 0 } else { d };
+        if d <= limit && best.is_none_or(|(b, _)| d < b) {
+            best = Some((d, c));
         }
     }
+    best.map(|(_, c)| c)
+}
+
+/// Levenshtein distance over chars, with adjacent transpositions
+/// counted as one edit.
+#[must_use]
+pub fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev2: Vec<usize> = vec![0; b.len() + 1];
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for i in 1..=a.len() {
+        let mut cur = vec![i; b.len() + 1];
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                cur[j] = cur[j].min(prev2[j - 2] + 1);
+            }
+        }
+        prev2 = std::mem::replace(&mut prev, cur);
+    }
+    prev[b.len()]
+}
+
+/// One underlined source line of a snippet.
+struct Mark<'a> {
+    line: u32,
+    text: &'a str,
+    lead: String,
+    width: usize,
+    primary: bool,
+    label: &'a str,
+}
+
+/// Underline of `span` within its source line `text`: (leading blanks,
+/// width). Tabs are kept so the marks line up under them.
+fn underline(text: &str, span: Span, source: &str) -> (String, usize) {
+    let col = usize::try_from(span.col).unwrap_or(1).saturating_sub(1);
+    let lead: String = text
+        .chars()
+        .take(col)
+        .map(|c| if c == '\t' { '\t' } else { ' ' })
+        .collect();
+    let avail = text.chars().count().saturating_sub(col).max(1);
+    let width = usize::try_from(span.start)
+        .ok()
+        .zip(usize::try_from(span.end).ok())
+        .and_then(|(s, e)| source.get(s..e))
+        .map_or(1, |s| s.split('\n').next().unwrap_or("").chars().count())
+        .clamp(1, avail);
+    (lead, width)
 }
 
 /// How `report` prints (spec 901.8 / 909.4); set once by the CLI.
@@ -457,7 +598,17 @@ pub fn print_rendered(text: &str) {
     }
 }
 
-/// `diag` as `report` prints it, newline-terminated.
+/// `diag` as `report` prints it, newline-terminated (spec 9.1.8):
+///
+/// ```text
+/// error[E100]: cannot find value `count` in this scope
+///   --> src/main.rok:5:10
+///    |
+///  5 |     let x = count + 1;
+///    |             ^^^^^ not found in this scope
+///    |
+///    = help: a local with a similar name exists: `counter`
+/// ```
 #[must_use]
 pub fn render(diag: &RokDiagnostic) -> String {
     let style = report_style();
@@ -476,31 +627,128 @@ pub fn render(diag: &RokDiagnostic) -> String {
         Severity::Warning => "1;33",
         Severity::Note => "1;36",
     };
-    let head = diag.to_string();
-    let sev = diag.severity.to_string();
-    let mut out = format!("{}{}\n", paint(color, &sev), &head[sev.len()..]);
-    if let Some(s) = diag.snippet() {
-        // The caret ends the snippet.
-        match s.strip_suffix('^') {
-            Some(body) => out.push_str(&format!("{body}{}\n", paint(color, "^"))),
-            None => out.push_str(&format!("{s}\n")),
+    let mut out = format!(
+        "{}{}\n",
+        paint(color, &format!("{}[{}]", diag.severity, diag.kind.code())),
+        paint("1", &format!(": {}", diag.message))
+    );
+    let path = diag.path();
+    let primary = diag.primary.as_deref();
+    let source = primary.and_then(|l| {
+        file_by_id(l.span.file)
+            .map(|(_, s)| s)
+            .or_else(|| source_by_path(path.as_deref()?))
+    });
+    // Labels in the primary's file go under its snippet; others are
+    // listed by location.
+    let mut marks: Vec<Mark<'_>> = Vec::new();
+    let mut elsewhere: Vec<&Label> = Vec::new();
+    let mut place = |l: &'_ Label, is_primary: bool| -> bool {
+        let (Some(p), Some(src)) = (primary, source.as_deref()) else {
+            return false;
+        };
+        if !is_primary && l.span.file != p.span.file && l.span.file != 0 {
+            return false;
+        }
+        let idx = usize::try_from(l.span.line)
+            .ok()
+            .and_then(|n| n.checked_sub(1));
+        // The line after the last one: end of file.
+        let eof = |i: usize| (i == src.lines().count()).then_some("");
+        let Some(text) = idx.and_then(|i| src.lines().nth(i).or_else(|| eof(i))) else {
+            return false;
+        };
+        let (lead, width) = underline(text, l.span, src);
+        marks.push(Mark {
+            line: l.span.line,
+            text,
+            lead,
+            width,
+            primary: is_primary,
+            label: "",
+        });
+        true
+    };
+    let mut labels: Vec<(usize, &str)> = Vec::new();
+    if let Some(p) = primary {
+        if place(p, true) {
+            labels.push((0, &p.message));
         }
     }
-    for label in &diag.secondary {
+    for l in &diag.secondary {
+        if place(l, false) {
+            labels.push((labels.len(), &l.message));
+        } else {
+            elsewhere.push(l);
+        }
+    }
+    for (i, label) in labels {
+        marks[i].label = label;
+    }
+    marks.sort_by_key(|m| (m.line, m.lead.len()));
+    let width = marks
+        .iter()
+        .map(|m| m.line)
+        .max()
+        .map_or(1, |n| n.to_string().len());
+    let pad = " ".repeat(width + 1);
+    let bar = paint("1;34", "|");
+    if let Some(file) = &path {
+        let loc = match primary.map(|l| l.span) {
+            Some(s) if s.line != 0 => format!("{file}:{}:{}", s.line, s.col.max(1)),
+            _ => file.clone(),
+        };
+        out.push_str(&format!("{pad}{} {loc}\n", paint("1;34", "-->")));
+    }
+    if !marks.is_empty() {
+        out.push_str(&format!("{pad} {bar}\n"));
+        let mut last: Option<u32> = None;
+        for m in &marks {
+            if last != Some(m.line) {
+                if last.is_some_and(|l| m.line > l + 1) {
+                    out.push_str(&format!(" {}\n", paint("1;34", "...")));
+                }
+                let n = format!("{:>width$}", m.line);
+                out.push_str(&format!(" {} {bar} {}\n", paint("1;34", &n), m.text));
+            }
+            last = Some(m.line);
+            let (ch, c) = if m.primary {
+                ('^', color)
+            } else {
+                ('-', "1;34")
+            };
+            let mut under: String = std::iter::repeat_n(ch, m.width).collect();
+            if !m.label.is_empty() {
+                under = format!("{under} {}", m.label);
+            }
+            out.push_str(&format!("{pad} {bar} {}{}\n", m.lead, paint(c, &under)));
+        }
+    }
+    for l in elsewhere {
         // A label in another file (a meta block's template) names it.
-        let path = file_by_id(label.span.file)
-            .map(|(p, _)| format!("{p}:"))
-            .unwrap_or_default();
+        let loc = match file_by_id(l.span.file) {
+            Some((p, _)) => format!("{p}:{}:{}", l.span.line, l.span.col.max(1)),
+            None => format!("{}:{}", l.span.line, l.span.col.max(1)),
+        };
         out.push_str(&format!(
-            "  {} ({path}{}:{}): {}\n",
-            paint("1;36", "note"),
-            label.span.line,
-            label.span.col,
-            label.message
+            "{pad}{} {loc}: {}\n",
+            paint("1;34", ":::"),
+            l.message
         ));
     }
+    if !diag.notes.is_empty() && !marks.is_empty() {
+        out.push_str(&format!("{pad} {bar}\n"));
+    }
     for note in &diag.notes {
-        out.push_str(&format!("  {}: {note}\n", paint("1;36", "note")));
+        let (kind, text) = match note.strip_prefix("help: ") {
+            Some(h) => ("help", h),
+            None => ("note", note.as_str()),
+        };
+        out.push_str(&format!(
+            "{pad} {} {}: {text}\n",
+            paint("1;34", "="),
+            paint("1", kind)
+        ));
     }
     out
 }

@@ -75,11 +75,11 @@ enum LookupOutcome {
     Ambiguous(Vec<String>),
 }
 
-/// A name table to resolve against: membership test plus (lazily) the
-/// full key list, needed only by `use a::**` deep globs.
+/// A name table to resolve against: membership test plus the keys
+/// ending in a given segment, needed only by `use a::**` deep globs.
 struct NameSet<'b> {
     exists: &'b dyn Fn(&str) -> bool,
-    keys: &'b dyn Fn() -> Vec<String>,
+    keys: &'b dyn Fn(&str) -> Vec<String>,
     /// Is the key visible from the module being resolved? A glob import
     /// brings in only the items it can see (spec 5.6), so a private
     /// helper of `rok::core::x` never competes through `rok::core::**`.
@@ -120,12 +120,31 @@ struct TypeNames<'a> {
     /// Every generic alias use: (alias, arguments, module, span), for
     /// its bounds check (`check_type_bounds`).
     alias_uses: std::cell::RefCell<Vec<AliasUse>>,
+    /// First use of each unresolved type path, for its "cannot find
+    /// type" location.
+    unknown_spans: std::cell::RefCell<HashMap<String, rokc_diagnostic::Span>>,
     /// `canon` results without local `use`s or diagnostics, by (path,
     /// module): its glob lookups scan every type name.
     canon_memo: std::cell::RefCell<HashMap<(String, String), Option<String>>>,
+    /// Type and variant keys by last segment, built on the first deep
+    /// glob lookup (the tables are complete by then).
+    leaves: std::cell::OnceCell<Leaves>,
+    variant_leaves: std::cell::OnceCell<Leaves>,
     /// Module-level `const`s by full name, for array lengths in
     /// signatures and fields (`[i32; N]`).
     consts: HashMap<String, (Ty, rokc_ast::Expr)>,
+}
+
+/// Keys by their last `::` segment.
+type Leaves = HashMap<String, Vec<String>>;
+
+fn leaves<'k>(keys: impl IntoIterator<Item = &'k String>) -> Leaves {
+    let mut out: Leaves = HashMap::new();
+    for k in keys {
+        let leaf = k.rsplit("::").next().unwrap_or(k);
+        out.entry(leaf.to_owned()).or_default().push(k.clone());
+    }
+    out
 }
 
 /// (alias full name, arguments, module of the use, span of the use).
@@ -265,10 +284,12 @@ impl TypeNames<'_> {
         local_uses: &[Vec<crate::uses::UseEntry>],
     ) -> Option<String> {
         let exists = |k: &str| self.names.contains(k) || self.reexports.contains_key(k);
-        let keys = || {
-            let mut v: Vec<String> = self.names.iter().cloned().collect();
-            v.extend(self.reexports.keys().cloned());
-            v
+        let keys = |leaf: &str| {
+            self.leaves
+                .get_or_init(|| leaves(self.names.iter().chain(self.reexports.keys())))
+                .get(leaf)
+                .cloned()
+                .unwrap_or_default()
         };
         let visible = |k: &str| self.visible_type(k, module);
         let set = NameSet {
@@ -333,7 +354,13 @@ impl TypeNames<'_> {
             self.variants.contains(&key).then_some(key)
         };
         let exists = |k: &str| full_key(k).is_some();
-        let keys = || self.variants.iter().cloned().collect::<Vec<_>>();
+        let keys = |leaf: &str| {
+            self.variant_leaves
+                .get_or_init(|| leaves(&self.variants))
+                .get(leaf)
+                .cloned()
+                .unwrap_or_default()
+        };
         // A variant is as visible as its enum (spec 5.6.9).
         let visible = |k: &str| self.visible_type(&module_of(k), module);
         let set = NameSet {
@@ -405,6 +432,13 @@ impl TypeNames<'_> {
                 msg,
             ));
     }
+
+    fn error_help(&self, msg: String, help: String) {
+        self.diags.borrow_mut().push(
+            rokc_diagnostic::RokDiagnostic::error(rokc_diagnostic::ErrorKind::Type, msg)
+                .with_help(help),
+        );
+    }
 }
 
 /// Where a type is being resolved: the name index plus the module the
@@ -422,7 +456,7 @@ pub fn lower(program: &Program, prec: &PrecTable) -> HirModule {
     let empty_uses: crate::uses::UseTable = HashMap::new();
     let empty_reexports: Vec<crate::uses::ReExport> = Vec::new();
     lower_full(
-        program,
+        program.clone(),
         prec,
         &empty_uses,
         &empty_reexports,
@@ -438,7 +472,7 @@ pub fn lower_with_uses(
 ) -> HirModule {
     let empty_reexports: Vec<crate::uses::ReExport> = Vec::new();
     lower_full(
-        program,
+        program.clone(),
         prec,
         uses,
         &empty_reexports,
@@ -503,6 +537,9 @@ struct Env<'a> {
     /// (`T::N`, `Self::N`, `<T as Tr>::N`).
     impl_consts: Vec<ImplConsts>,
     fn_table: HashMap<String, FnSig>,
+    /// `fn_table` and `generic_fns` keys by last segment (both are
+    /// complete before any body is lowered).
+    fn_leaves: std::cell::OnceCell<Leaves>,
     /// `extern` fns: one global C namespace, callable by bare name from
     /// every module (they are not module items, spec 5.9).
     extern_fns: std::collections::HashSet<String>,
@@ -519,6 +556,7 @@ struct Env<'a> {
     /// Module-level `const NAME: T = expr;` items. A bare `Path(NAME)`
     /// resolves to the const's value expression inlined at the use site.
     consts: HashMap<String, (Ty, Expr)>,
+    const_leaves: std::cell::RefCell<(usize, Leaves)>,
     /// Module-level type aliases. Walked over every `HirTy` produced
     /// from AST resolution so downstream code never sees `Path([alias])`.
     type_aliases: HashMap<String, HirTy>,
@@ -577,6 +615,7 @@ struct Env<'a> {
     impl_assoc: HashMap<MethodTarget, Vec<ImplAssoc>>,
     /// Module-level `static` items by name → declared type.
     statics: HashMap<String, HirTy>,
+    static_leaves: std::cell::RefCell<(usize, Leaves)>,
     /// Statics that may be assigned (`extern` `static mut`, spec 5.9.3).
     mut_statics: std::collections::HashSet<String>,
     /// `#[literal]` handlers of the built-in literal shapes (spec 6.5).
@@ -949,8 +988,15 @@ fn coerce(
     if closure_fits(&v) {
         v.ty = slot.clone();
     }
-    if !ty_compatible(slot, &v.ty)
-        || matches!(v.ty, HirTy::Closure { .. } if matches!(slot, HirTy::Fn(..)))
+    // An unknown type name is reported on its own.
+    let unknown_slot = matches!(slot, HirTy::Path(_)) && {
+        let mut names = Vec::new();
+        collect::collect_unknown_paths(slot, &mut names);
+        !names.is_empty()
+    };
+    if !unknown_slot
+        && (!ty_compatible(slot, &v.ty)
+            || matches!(v.ty, HirTy::Closure { .. } if matches!(slot, HirTy::Fn(..))))
     {
         let hint = fn_mismatch_hint(slot, &v.ty);
         ctx.emit_error(
@@ -962,6 +1008,12 @@ fn coerce(
                 ctx.ty_name(&v.ty)
             ),
         );
+        if let (Some(note), Some(d)) = (
+            ctx.closure_bound_note(&v),
+            ctx.env.sink.diagnostics.borrow_mut().last_mut(),
+        ) {
+            d.notes.push(note);
+        }
     }
     v
 }
@@ -1139,7 +1191,7 @@ fn box_into_any(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -> HirExpr {
                 return ctx.error_expr(
                     value.span,
                     format!(
-                        "`{}` does not implement {}, so it cannot be stored in an `{}` slot (D4)",
+                        "`{}` does not implement {}, so it cannot be stored in an `{}` slot",
                         ctx.ty_name(ty),
                         names.join(", "),
                         ctx.ty_name(target)
@@ -1662,6 +1714,130 @@ impl<'a> LowerCtx<'a> {
         poison(span)
     }
 
+    /// An unknown name (spec 9.9.4 `resolve`), with an optional hint.
+    fn unknown_name(
+        &self,
+        span: rokc_diagnostic::Span,
+        msg: String,
+        help: Option<String>,
+    ) -> HirExpr {
+        self.emit_error(rokc_diagnostic::ErrorKind::Resolve, msg);
+        self.help_last(help);
+        poison(span)
+    }
+
+    /// Attach `help` to the diagnostic just emitted.
+    fn help_last(&self, help: Option<String>) {
+        if let (Some(h), Some(d)) = (help, self.env.sink.diagnostics.borrow_mut().last_mut()) {
+            d.notes.push(format!("help: {h}"));
+        }
+    }
+
+    /// "struct `S` has no field `x`" plus the closest field name.
+    fn no_field(&self, sid: StructId, name: &str, span: rokc_diagnostic::Span) -> HirExpr {
+        let def = self.struct_def(sid);
+        let fields: Vec<&str> = def
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .chain(
+                def.union_kind
+                    .iter()
+                    .flat_map(|u| u.aliases.iter().map(|(n, _)| n.as_str())),
+            )
+            .filter(|n| !n.starts_with("__"))
+            .collect();
+        let kind = if def.union_kind.is_some() {
+            "union"
+        } else {
+            "struct"
+        };
+        let e = self.error_expr(
+            span,
+            format!(
+                "{kind} `{}` has no field `{name}`",
+                self.ty_name(&HirTy::Struct(sid))
+            ),
+        );
+        let help = rokc_diagnostic::suggest(name, fields.iter().copied())
+            .map(|s| format!("did you mean `{s}`?"))
+            .or_else(|| {
+                (!fields.is_empty() && fields.len() <= 8).then(|| {
+                    let list: Vec<String> = fields.iter().map(|f| format!("`{f}`")).collect();
+                    format!("available fields: {}", list.join(", "))
+                })
+            });
+        self.help_last(help);
+        e
+    }
+
+    /// "did you mean" for an unknown method of `ty`.
+    fn method_help(&self, ty: &HirTy, method: &str) -> Option<String> {
+        let target = resolve::method_target_for(ty)?;
+        let names = self
+            .env
+            .method_table
+            .keys()
+            .filter(|(t, _)| *t == target)
+            .map(|(_, m)| m.as_str());
+        rokc_diagnostic::suggest(method, names).map(|s| format!("did you mean `{s}`?"))
+    }
+
+    /// "did you mean" for an unknown type path: types of the current
+    /// module and the primitives.
+    fn type_help(&self, segs: &[&str]) -> Option<String> {
+        let name = segs.last()?;
+        let module = self.current_module.as_str();
+        let types = self
+            .env
+            .struct_table
+            .keys()
+            .chain(self.env.enum_table.keys())
+            .chain(self.env.generic_structs.keys())
+            .chain(self.env.generic_enums.keys())
+            .filter_map(|k| {
+                let (m, n) = k.rsplit_once("::").unwrap_or(("", k.as_str()));
+                (m == module).then_some(n)
+            })
+            .chain(PRIM_NAMES.iter().copied());
+        rokc_diagnostic::suggest(name, types).map(|s| format!("did you mean `{s}`?"))
+    }
+
+    /// "did you mean" for an unknown value path (one segment): locals in
+    /// scope, then functions / constants / statics of the current module.
+    fn value_help(&self, segs: &[&str]) -> Option<String> {
+        let [name] = segs else {
+            return None;
+        };
+        let name = *name;
+        if let Some(k) = match name {
+            "null" | "nil" | "None" | "NULL" => Some("none"),
+            "True" => Some("true"),
+            "False" => Some("false"),
+            _ => None,
+        } {
+            return Some(format!("use `{k}`"));
+        }
+        let module = self.current_module.as_str();
+        let in_module = |k: &'a String| {
+            let (m, n) = k.rsplit_once("::").unwrap_or(("", k.as_str()));
+            (m == module).then_some(n)
+        };
+        let locals = self
+            .scopes
+            .iter()
+            .flat_map(|s| s.keys().map(String::as_str));
+        let items = self
+            .env
+            .fn_table
+            .keys()
+            .chain(self.env.generic_fns.keys())
+            .chain(self.env.consts.keys())
+            .chain(self.env.statics.keys())
+            .filter_map(in_module);
+        rokc_diagnostic::suggest(name, locals.chain(items)).map(|s| format!("did you mean `{s}`?"))
+    }
+
     /// User-facing type name (no internal `Struct0` / mangled names).
     fn ty_name(&self, ty: &HirTy) -> String {
         if let Some((v, _)) = crate::ty::as_const(ty) {
@@ -1684,10 +1860,20 @@ impl<'a> LowerCtx<'a> {
                     _ => unreachable!("matched struct / enum"),
                 };
                 if name == bignum::INT {
-                    "int".to_owned()
-                } else if name == bignum::FLOAT {
-                    "float".to_owned()
-                } else if generic_args.is_empty() {
+                    return "int".to_owned();
+                }
+                if name == bignum::FLOAT {
+                    return "float".to_owned();
+                }
+                // A library type by its name (`List<i32>`, not
+                // `rok::core::collections::list::List<i32>`).
+                let name = if name.starts_with("rok::") {
+                    let base = name.split("__").next().unwrap_or(&name);
+                    leaf_name(base).to_owned() + &name[base.len()..]
+                } else {
+                    name
+                };
+                if generic_args.is_empty() {
                     name
                 } else {
                     let base = name.split("__").next().unwrap_or(&name).to_owned();
@@ -1856,6 +2042,102 @@ impl<'a> LowerCtx<'a> {
         };
         seen.pop();
         ok
+    }
+
+    /// Why `ty` lacks auto trait `key` (`auto_trait` is false): the
+    /// path to the component that opts out, as text to follow "`T` is
+    /// not `Sync`", e.g. " because field `accounts` has type
+    /// `List<i64>` (collections are not `Sync`; ..)".
+    fn auto_trait_cause(&self, ty: &HirTy, key: &str, depth: u32) -> String {
+        let tr = leaf_name(key);
+        let lacks = |t: &HirTy| !self.auto_trait(t, key, 0, &mut Vec::new());
+        let step = |what: String, t: &HirTy| {
+            format!(
+                " because {what} has type `{}`{}",
+                self.ty_name(t),
+                self.auto_trait_cause(t, key, depth + 1)
+            )
+        };
+        if depth > 8 {
+            return String::new();
+        }
+        match ty {
+            HirTy::Struct(id) => {
+                let def = self.struct_def(*id);
+                let base = def.name.split("__").next().unwrap_or(&def.name);
+                if base.starts_with("rok::core::collections::") {
+                    return format!(
+                        " (collections are not `{tr}`; share one through a `Mutex`, or use an \
+                         array)"
+                    );
+                }
+                if self
+                    .env
+                    .neg_auto
+                    .contains(&(base.to_owned(), key.to_owned()))
+                {
+                    return String::new();
+                }
+                def.fields
+                    .iter()
+                    .find(|f| lacks(&f.ty))
+                    .map(|f| step(format!("field `{}`", f.name), &f.ty))
+                    .unwrap_or_default()
+            }
+            HirTy::Enum(id) => self
+                .enum_def(*id)
+                .variants
+                .iter()
+                .find_map(|v| {
+                    let t = v.payload_ty.as_ref().filter(|t| lacks(t))?;
+                    Some(step(format!("variant `{}`", v.name), t))
+                })
+                .unwrap_or_default(),
+            HirTy::Tuple(ts) | HirTy::Sum(ts) => ts
+                .iter()
+                .find(|t| lacks(t))
+                .map(|t| step("a member".to_owned(), t))
+                .unwrap_or_default(),
+            HirTy::Array(e, _) | HirTy::GcBuf(e) => step("an element".to_owned(), e),
+            _ => String::new(),
+        }
+    }
+
+    /// For a closure that does not fit a `fn .. + Send` slot: which
+    /// capture is not `Send` / `Sync`, and why.
+    fn closure_bound_note(&self, value: &HirExpr) -> Option<String> {
+        let HirExprKind::ClosureValue { env, .. } = &value.kind else {
+            return None;
+        };
+        let HirExprKind::Tuple { fields } = &env.kind else {
+            return None;
+        };
+        let keys = [self.lang_trait("send_trait"), self.lang_trait("sync_trait")];
+        fields.iter().find_map(|f| {
+            let local = match &f.kind {
+                HirExprKind::Local(l) => *l,
+                HirExprKind::BufGet { buf, .. } => match buf.kind {
+                    HirExprKind::Local(l) => l,
+                    _ => return None,
+                },
+                _ => return None,
+            };
+            let key = keys
+                .iter()
+                .find(|k| !self.auto_trait(&f.ty, k, 0, &mut Vec::new()))?;
+            let name = self.locals.get(local.0 as usize)?.name.clone()?;
+            // A `[ref x]` capture is a cell of `x`'s type.
+            let shown = match &f.ty {
+                HirTy::GcBuf(t) => t,
+                t => t,
+            };
+            Some(format!(
+                "the closure captures `{name}` (type `{}`), which is not `{}`{}",
+                self.ty_name(shown),
+                leaf_name(key),
+                self.auto_trait_cause(shown, key, 0)
+            ))
+        })
     }
 
     fn impl_or_generic_impl(&self, ty: &HirTy, trait_key: &str, depth: u32) -> bool {
@@ -2053,6 +2335,7 @@ impl<'a> LowerCtx<'a> {
         let def = *self.env.generic_structs.get(base)?;
         let idx = self.env.sink.extra_structs.borrow().len();
         let id = StructId(u32::try_from(self.env.structs.len() + idx).expect("StructId overflow"));
+        crate::name_type(false, id.0, base, &args);
         self.env
             .sink
             .extra_struct_table
@@ -2118,6 +2401,7 @@ impl<'a> LowerCtx<'a> {
         let def = *self.env.generic_enums.get(base)?;
         let idx = self.env.sink.extra_enums.borrow().len();
         let id = EnumId(u32::try_from(self.env.enums.len() + idx).expect("EnumId overflow"));
+        crate::name_type(true, id.0, base, &args);
         self.env
             .sink
             .extra_enum_table
@@ -2190,9 +2474,22 @@ impl<'a> LowerCtx<'a> {
 
     /// Resolve a value-namespace path against `table` (fns, consts,
     /// statics) from this function's module and `use`s.
-    fn resolve_in<T>(&self, segments: &[&str], table: &HashMap<String, T>) -> Option<String> {
+    /// `index` caches `table`'s keys by last segment (rebuilt when the
+    /// table grows; keys are never removed).
+    fn resolve_in<T>(
+        &self,
+        segments: &[&str],
+        table: &HashMap<String, T>,
+        index: &std::cell::RefCell<(usize, Leaves)>,
+    ) -> Option<String> {
         let exists = |k: &str| table.contains_key(k);
-        let keys = || table.keys().cloned().collect::<Vec<_>>();
+        let keys = |leaf: &str| {
+            let mut index = index.borrow_mut();
+            if index.0 != table.len() {
+                *index = (table.len(), leaves(table.keys()));
+            }
+            index.1.get(leaf).cloned().unwrap_or_default()
+        };
         let visible = |k: &str| {
             let vis = self.env.item_visibility.get(k).copied();
             vis.is_none_or(|v| self.is_visible(&module_of(k), v))
@@ -2224,7 +2521,14 @@ impl<'a> LowerCtx<'a> {
     fn resolve_any_fn(&self, segments: &[&str]) -> Option<String> {
         let (fns, gens) = (&self.env.fn_table, &self.env.generic_fns);
         let exists = |k: &str| fns.contains_key(k) || gens.contains_key(k);
-        let keys = || fns.keys().chain(gens.keys()).cloned().collect::<Vec<_>>();
+        let keys = |leaf: &str| {
+            self.env
+                .fn_leaves
+                .get_or_init(|| leaves(fns.keys().chain(gens.keys())))
+                .get(leaf)
+                .cloned()
+                .unwrap_or_default()
+        };
         let visible = |k: &str| {
             let vis = self.env.item_visibility.get(k).copied();
             vis.is_none_or(|v| self.is_visible(&module_of(k), v))
@@ -2459,7 +2763,11 @@ impl<'a> LowerCtx<'a> {
                         // (`Grid<W, 3>`, spec 2.11.4).
                         if self.canon_type(&[seg.name.as_str()]).is_none()
                             && self
-                                .resolve_in(&[seg.name.as_str()], &self.env.consts)
+                                .resolve_in(
+                                    &[seg.name.as_str()],
+                                    &self.env.consts,
+                                    &self.env.const_leaves,
+                                )
                                 .is_some()
                         {
                             if let Some(v) = self.eval_const(&rokc_ast::ConstExpr::Path(p.clone()))
@@ -3065,6 +3373,12 @@ impl<'a> LowerCtx<'a> {
             .map_or(HirTy::Unknown, |l| l.ty.clone())
     }
 }
+
+/// Primitive type names, for "did you mean" hints.
+const PRIM_NAMES: &[&str] = &[
+    "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f32",
+    "f64", "bool", "char", "str", "int", "float",
+];
 
 /// Placeholder for an expression whose lowering failed (an error has
 /// been reported). Never reaches MIR: the driver stops on errors and

@@ -1,0 +1,95 @@
+// expect-exit: 0
+// expect-stdout:
+// bool true true true true
+// u8 7 9 7 9
+// i16 -300 400 -300 400
+// f32 1.5 2.5 1.5 2.5
+// grid true true 3
+// flat 43
+
+// Arrays, and structs holding them, of sub-word elements go by value
+// in and out of calls, with elements past the argument registers.
+struct Grid {
+    cells: [[bool; 10]; 8];
+    tag: u8;
+}
+
+struct Flags {
+    a: bool;
+    b: bool;
+    c: bool;
+    d: bool;
+    e: bool;
+    f: bool;
+    g: bool;
+    h: bool;
+    i: bool;
+    j: bool;
+    k: u8;
+    l: i16;
+}
+
+fn bool_at(c: [[bool; 10]; 8], x: usize, y: usize) -> bool { c[y][x] }
+fn u8_at(c: [[u8; 10]; 8], x: usize, y: usize) -> u8 { c[y][x] }
+fn i16_at(c: [[i16; 6]; 4], x: usize, y: usize) -> i16 { c[y][x] }
+fn f32_at(c: [[f32; 5]; 4], x: usize, y: usize) -> f32 { c[y][x] }
+
+fn bool_set(c: [[bool; 10]; 8], x: usize, y: usize) -> [[bool; 10]; 8] {
+    c[y][x] = true;
+    return c;
+}
+fn u8_set(c: [[u8; 10]; 8], x: usize, y: usize, v: u8) -> [[u8; 10]; 8] {
+    c[y][x] = v;
+    return c;
+}
+fn i16_set(c: [[i16; 6]; 4], x: usize, y: usize, v: i16) -> [[i16; 6]; 4] {
+    c[y][x] = v;
+    return c;
+}
+fn f32_set(c: [[f32; 5]; 4], x: usize, y: usize, v: f32) -> [[f32; 5]; 4] {
+    c[y][x] = v;
+    return c;
+}
+
+fn grid_at(g: Grid, x: usize, y: usize) -> bool { g.cells[y][x] }
+fn grid_step(g: Grid) -> Grid {
+    let n = g;
+    n.cells[7][9] = true;
+    n.tag = g.tag + 1u8;
+    return n;
+}
+fn flags_last(s: Flags) -> i64 { if s.j { s.l as i64 + s.k as i64 } else { -1 } }
+
+fn main() -> i32 {
+    let b = [[false; 10]; 8];
+    b[0][1] = true;
+    let b2 = bool_set(b, 9, 7);
+    println(f"bool {bool_at(b, 1, 0)} {bool_at(b2, 9, 7)} {b2[0][1]} {b2[7][9]}");
+
+    let u = [[0u8; 10]; 8];
+    u[0][1] = 7u8;
+    let u2 = u8_set(u, 9, 7, 9u8);
+    println(f"u8 {u8_at(u, 1, 0)} {u8_at(u2, 9, 7)} {u2[0][1]} {u2[7][9]}");
+
+    let s = [[0i16; 6]; 4];
+    s[0][1] = -300i16;
+    let s2 = i16_set(s, 5, 3, 400i16);
+    println(f"i16 {i16_at(s, 1, 0)} {i16_at(s2, 5, 3)} {s2[0][1]} {s2[3][5]}");
+
+    let f = [[0.0f32; 5]; 4];
+    f[0][1] = 1.5f32;
+    let f2 = f32_set(f, 4, 3, 2.5f32);
+    println(f"f32 {f32_at(f, 1, 0)} {f32_at(f2, 4, 3)} {f2[0][1]} {f2[3][4]}");
+
+    let g = Grid { cells: b, tag: 2u8 };
+    let g2 = grid_step(g);
+    println(f"grid {grid_at(g, 1, 0)} {grid_at(g2, 9, 7)} {g2.tag}");
+
+    let fl = Flags {
+        a: false, b: false, c: false, d: false, e: false,
+        f: false, g: false, h: false, i: false, j: true,
+        k: 3u8, l: 40i16,
+    };
+    println(f"flat {flags_last(fl)}");
+    return 0;
+}

@@ -319,12 +319,15 @@ fn strip(text: &str, file_id: u32, items: &[Item]) -> String {
 /// The interface files of package `pkg` (its `SourceFile`s, mounted at
 /// `pkg`) whose root file is in `dir`, with its `any` seeds (`(module,
 /// text)`, HIR `any_seeds`) appended to their modules' files.
+///
+/// `cut`: concrete bodies cut to `;`.
 #[must_use]
 pub fn interface(
     sources: &[SourceFile],
     pkg: &str,
     dir: &Path,
     seeds: &[(String, String)],
+    cut: bool,
 ) -> Vec<(String, String)> {
     let texts = rokc_diagnostic::registered_files();
     let mut out: Vec<(String, String)> = sources
@@ -341,7 +344,11 @@ pub fn interface(
             let mut items = f.items.clone();
             // Inline `mod`s are in `items`; file `mod`s are their own files.
             items.retain(|i| !matches!(i, Item::Mod(m) if m.items.is_none()));
-            let mut text = strip(text, f.file_id, &items);
+            let mut text = if cut {
+                strip(text, f.file_id, &items)
+            } else {
+                text.clone()
+            };
             let module = f.module.join("::");
             let root = f.module.len() <= 1;
             for (m, seed) in seeds {

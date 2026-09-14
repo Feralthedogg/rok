@@ -1,6 +1,6 @@
-// expect-error: it captures `c: rok::core::sync::Cell<i32>`, which is not `Send`
-// expect-error: it holds `local: rok::core::sync::Cell<i32>`, which is not `Send`, across an `await`
-// expect-error: it holds `kept: rok::core::sync::Cell<i32>`, which is not `Send`, across an `await`
+// expect-error: it captures `c: Cell<i32>`, which is not `Send`
+// expect-error: it holds `local: Cell<i32>`, which is not `Send`, across an `await`
+// expect-error: it holds `kept: Cell<i32>`, which is not `Send`, across an `await`
 
 // `task::spawn` checks the coroutine frame (stdlib 2.18.1): captures and
 // locals held across an `await` must be `Send`; `spawn_local` takes any.

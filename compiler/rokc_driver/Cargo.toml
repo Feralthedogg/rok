@@ -9,6 +9,7 @@ authors.workspace = true
 [dependencies]
 rokc_ast = { workspace = true }
 rokc_codegen_mlir = { workspace = true }
+rokc_codegen_native = { workspace = true }
 rokc_core = { workspace = true }
 rokc_diagnostic = { workspace = true }
 rokc_hir = { workspace = true }

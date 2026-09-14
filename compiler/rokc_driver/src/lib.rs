@@ -5,6 +5,7 @@ mod cfg;
 mod coro;
 mod entry;
 mod harness;
+pub mod native;
 pub mod rhir;
 mod toolchain;
 
@@ -26,8 +27,8 @@ pub use rokc_codegen_mlir::{Demangled, demangle};
 pub use rokc_codegen_mlir::{MlirOutput, ReplCell, ReplFn};
 pub use rokc_mir::Target;
 pub use toolchain::{
-    Artifact, BuildOptions, EmitKind, TempDir, build_archive, cell_ir, emit, find_mlir_plugin,
-    finish, link_executable, link_host, lower_to_llvm, mlir_text,
+    Artifact, BuildOptions, EmitKind, TempDir, build_archive, cache_dir, cell_ir, check_codegen,
+    emit, find_mlir_plugin, finish, link_executable, link_host, lower_to_llvm, mlir_text,
 };
 
 // Independent switches, one per session setter.
@@ -70,7 +71,17 @@ pub struct CompilerConfig {
     pub target: rokc_mir::Target,
     /// Lower every library body, not only the reachable ones.
     pub check_library: bool,
+    /// Build the bootstrap tiers as one prebuilt library, `rok`: its
+    /// RHIR covers every tier, its archive their concrete code.
+    pub std_lib: bool,
+    /// The bootstrap tiers prebuilt (`rok.rhir`, its `librok.a` beside
+    /// it): their concrete code is linked, not compiled. Ignored when
+    /// stale or not of these tiers.
+    pub std_prebuilt: Option<PathBuf>,
 }
+
+/// The prebuilt standard library's package name.
+pub const STD_PKG: &str = "rok";
 
 thread_local! {
     /// Files served instead of the disk: the interface sources of the
@@ -109,6 +120,13 @@ fn load_prebuilt(
     let mut config = config.clone();
     let mut out: Vec<Prebuilt> = Vec::new();
     OVERLAY.with(|o| o.borrow_mut().clear());
+    if let Some(r) = config
+        .std_prebuilt
+        .as_deref()
+        .and_then(|p| load_std(p, &config))
+    {
+        out.push(r);
+    }
     for (name, root) in &mut config.externs {
         if root.extension().is_none_or(|e| e != "rhir") {
             continue;
@@ -156,6 +174,30 @@ fn load_prebuilt(
         out.push(Prebuilt { rhir: r, archive });
     }
     (config, out)
+}
+
+/// The prebuilt standard library at `path` when it holds every
+/// bootstrap root of `config` (else `None`: they compile from source),
+/// its files overlaid.
+fn load_std(path: &Path, config: &CompilerConfig) -> Option<Prebuilt> {
+    let r = rhir::Rhir::load(path).ok().filter(|r| r.name == STD_PKG)?;
+    let complete = config.bootstrap_files.iter().all(|b| {
+        b.strip_prefix(&r.src_dir).is_ok_and(|rel| {
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            r.files.iter().any(|(f, _)| *f == rel)
+        })
+    });
+    if !complete {
+        return None;
+    }
+    OVERLAY.with(|o| {
+        let mut o = o.borrow_mut();
+        for (rel, text) in &r.files {
+            o.insert(r.src_dir.join(rel), text.clone());
+        }
+    });
+    let archive = rhir::companions(path).1;
+    Some(Prebuilt { rhir: r, archive })
 }
 
 /// A library root mounted beside the user package: its module path
@@ -339,6 +381,9 @@ pub fn compile_source(
         return Err(diags);
     }
     let archives: Vec<PathBuf> = prebuilt.iter().rev().map(|p| p.archive.clone()).collect();
+    if config.std_lib {
+        return compile_std(source, path, config, &prebuilt);
+    }
     let Some(lib) = config.lib_name.take() else {
         let r = compile_unit(source, path, &config, &prebuilt, None);
         OVERLAY.with(|o| o.borrow_mut().clear());
@@ -365,7 +410,7 @@ pub fn compile_source(
         .first()
         .map(|m| m.hir.any_seeds.clone())
         .unwrap_or_default();
-    let files = rhir::interface(&p.sources, &lib, src_dir, &seeds);
+    let files = rhir::interface(&p.sources, &lib, src_dir, &seeds, true);
     if !keep_ast {
         p.sources.clear();
     }
@@ -392,6 +437,90 @@ pub fn compile_source(
     Ok(p)
 }
 
+/// The bootstrap tiers as prebuilt library `rok` (`std_lib`), with
+/// `path` an empty package's root.
+fn compile_std(
+    source: &str,
+    path: &Path,
+    mut config: CompilerConfig,
+    prebuilt: &[Prebuilt],
+) -> Result<CompiledProject, Vec<RokDiagnostic>> {
+    let keep_ast = config.keep_ast;
+    config.keep_ast = true;
+    let r = compile_unit(source, path, &config, prebuilt, Some(STD_PKG));
+    OVERLAY.with(|o| o.borrow_mut().clear());
+    let mut p = r?;
+    let no_dir = || {
+        vec![RokDiagnostic::error(
+            rokc_diagnostic::ErrorKind::Module,
+            "the bootstrap tiers must be the folders of one directory".to_owned(),
+        )]
+    };
+    let tiers: Vec<(String, PathBuf)> = lib_roots(&config)
+        .into_iter()
+        .filter(|(prefix, _)| prefix.first().is_some_and(|f| f == STD_PKG))
+        .map(|(prefix, root)| {
+            (
+                prefix.join("::"),
+                root.parent().unwrap_or(&root).to_path_buf(),
+            )
+        })
+        .collect();
+    let src_dir = match tiers.first().and_then(|(_, d)| d.parent()) {
+        Some(d) if tiers.iter().all(|(_, t)| t.parent() == Some(d)) => d.to_path_buf(),
+        _ => return Err(no_dir()),
+    };
+    let Some(m) = p.modules.first_mut() else {
+        return Ok(p);
+    };
+    let mut files = Vec::new();
+    let in_tier = |module: &str, pkg: &str| {
+        module
+            .strip_prefix(pkg)
+            .is_some_and(|r| r.is_empty() || r.starts_with("::"))
+    };
+    for (i, (pkg, dir)) in tiers.iter().enumerate() {
+        // A seed homed in no tier (`rok` itself) goes to the first's root.
+        let seeds: Vec<(String, String)> = m
+            .hir
+            .any_seeds
+            .iter()
+            .filter(|(module, _)| {
+                in_tier(module, pkg) || (i == 0 && !tiers.iter().any(|(t, _)| in_tier(module, t)))
+            })
+            .cloned()
+            .collect();
+        let tier = dir
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        for (rel, text) in rhir::interface(&p.sources, pkg, dir, &seeds, false) {
+            files.push((format!("{tier}/{rel}"), text));
+        }
+    }
+    let hash = m
+        .mir
+        .link
+        .packages
+        .iter()
+        .filter(|(n, _)| rokc_mir::Link::owns(STD_PKG, n))
+        .map(|(n, h)| format!("{n}={h}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    m.interface = Some(rhir::Rhir {
+        producer: rhir::producer(),
+        hash,
+        name: STD_PKG.to_owned(),
+        src_dir,
+        type_offset: m.mir.link.type_offset,
+        type_count: 0,
+        files,
+    });
+    if !keep_ast {
+        p.sources.clear();
+    }
+    Ok(p)
+}
+
 fn compile_unit(
     source: &str,
     path: &Path,
@@ -409,10 +538,12 @@ fn compile_unit(
     // when nothing that changes them changed; never with prebuilt
     // dependencies (their sources are an overlay) or kept ASTs.
     let cache = config.cache_library && prebuilt.is_empty() && !config.keep_ast && lib.is_none();
-    let (mut prec, mut d, mut metas) = cached(&PREPASS_CACHE, cache, format!("{roots:?}"), || {
-        let (mut diags, mut metas) = (Vec::new(), PrePass::default());
-        let prec = build_prec_table(&roots, &mut diags, &mut metas);
-        (prec, diags, metas)
+    let (mut prec, mut d, mut metas) = rokc_diagnostic::time("prepass library", || {
+        cached(&PREPASS_CACHE, cache, format!("{roots:?}"), || {
+            let (mut diags, mut metas) = (Vec::new(), PrePass::default());
+            let prec = build_prec_table(&roots, &mut diags, &mut metas);
+            (prec, diags, metas)
+        })
     });
     diags.append(&mut d);
     let lib_metas = metas.metas.len();
@@ -473,19 +604,21 @@ fn compile_unit(
 
     let mut all_items: Vec<rokc_ast::Item> = Vec::new();
     let mut all_uses: Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)> = Vec::new();
-    let top_stmts = collect_module_tree(
-        path,
-        Some(source),
-        sub_dir,
-        &[],
-        &cfg_env,
-        &ext,
-        &metas,
-        &mut diags,
-        &mut all_items,
-        &mut all_uses,
-        config.keep_ast.then_some(&mut sources),
-    );
+    let top_stmts = rokc_diagnostic::time("parse package", || {
+        collect_module_tree(
+            path,
+            Some(source),
+            sub_dir,
+            &[],
+            &cfg_env,
+            &ext,
+            &metas,
+            &mut diags,
+            &mut all_items,
+            &mut all_uses,
+            config.keep_ast.then_some(&mut sources),
+        )
+    });
     let is_lib = !config.anonymous && path.file_name().is_some_and(|n| n == "lib.rok");
     let mut tests = Vec::new();
     if config.test || config.bench {
@@ -504,6 +637,7 @@ fn compile_unit(
         "{roots:?}|{:?}|{}|{}|{ext:?}|{user_metas}|{keywords:?}",
         config.cfg_flags, config.test, config.bench
     );
+    let parse_libs = rokc_diagnostic::time_passes().then(std::time::Instant::now);
     let (mut items, mut uses, mut d) = cached(&LIB_CACHE, cache, key, || {
         let (mut items, mut uses, mut diags) = (Vec::new(), Vec::new(), Vec::new());
         for (i, (prefix, root)) in roots.iter().enumerate() {
@@ -536,6 +670,12 @@ fn compile_unit(
         }
         (items, uses, diags)
     });
+    if let Some(t) = parse_libs {
+        eprintln!(
+            "time: {:>9.1}ms  parse library",
+            t.elapsed().as_secs_f64() * 1e3
+        );
+    }
     all_items.append(&mut items);
     all_uses.append(&mut uses);
     diags.append(&mut d);
@@ -552,6 +692,7 @@ fn compile_unit(
         items: all_items,
         stmts: Vec::new(),
         expanded: Vec::new(),
+        tops: Vec::new(),
     };
 
     // Spec 6.4: `#[lang(...)]` slots over library + user items; a slot
@@ -571,7 +712,8 @@ fn compile_unit(
     // entries that the HIR resolver can consult during name lookup, plus
     // a list of `pub use` re-exports the lower pass installs as fn-table
     // aliases.
-    let (use_table, reexports, mut use_diags) = rokc_hir::build_use_table(&all_uses);
+    let (use_table, reexports, mut use_diags) =
+        rokc_diagnostic::time("use table", || rokc_hir::build_use_table(&all_uses));
     diags.append(&mut use_diags);
     diags.extend(rokc_hir::check_use_targets(
         &all_uses,
@@ -579,26 +721,37 @@ fn compile_unit(
         &use_table,
         &reexports,
     ));
-    let mut hir = rokc_hir::lower_full(&program, &prec, &use_table, &reexports, &input);
+    let mut libs = Vec::new();
+    native_libs(&program.items, &mut libs);
+    let mut hir = rokc_diagnostic::time("hir", || {
+        rokc_hir::lower_full(program, &prec, &use_table, &reexports, &input)
+    });
     rokc_diagnostic::set_current_span(rokc_diagnostic::Span::DUMMY);
     diags.append(&mut hir.diagnostics);
     // Warnings go out with the errors (a failed build still shows them).
     if diags.iter().any(RokDiagnostic::is_error) {
         return Err(diags);
     }
-    let mut mir = rokc_mir::lower(&hir, &config.target);
+    let mut mir = rokc_diagnostic::time("mir", || rokc_mir::lower(&hir, &config.target));
     mir.link.packages = package_hashes(&root_dir, &roots);
     for p in prebuilt {
-        if let Some(h) = mir
-            .link
-            .packages
-            .iter_mut()
-            .find(|(n, _)| *n == p.rhir.name)
-        {
-            h.1.clone_from(&p.rhir.hash);
+        // The standard library's hash is one per tier: `pkg=hash;..`.
+        let hashes: Vec<(&str, &str)> = if p.rhir.name == STD_PKG {
+            p.rhir
+                .hash
+                .split(';')
+                .filter_map(|kv| kv.split_once('='))
+                .collect()
+        } else {
+            vec![(p.rhir.name.as_str(), p.rhir.hash.as_str())]
+        };
+        for (name, hash) in hashes {
+            if let Some(h) = mir.link.packages.iter_mut().find(|(n, _)| n == name) {
+                hash.clone_into(&mut h.1);
+            }
         }
     }
-    native_libs(&program.items, &mut mir.link.native_libs);
+    mir.link.native_libs = libs;
     mir.link.lib = input.lib;
     mir.link.prebuilt = input.prebuilt;
     mir.link.type_offset = prebuilt
@@ -795,26 +948,24 @@ pub(crate) fn defines_metas(tokens: &[rokc_lexer::Token], source: &str) -> bool 
 /// template tokens keep spans into the registered file).
 fn prepass_tokens(source: &str, file: &str, metas: &mut PrePass) -> Vec<rokc_lexer::Token> {
     let (mut tokens, _) = Lexer::new(source, file.to_owned()).lex_all();
+    // Spans point into a registered copy of the file (diagnostics on
+    // pre-pass attributes and meta templates).
+    let id = rokc_diagnostic::register_file(file.to_owned(), source.to_owned());
+    for t in &mut tokens {
+        t.span.file = id;
+    }
     if let Some(idents) = &mut metas.idents {
-        // The user package's names, first use per file (spans in a
-        // registered copy of the file).
-        let id = rokc_diagnostic::register_file(file.to_owned(), source.to_owned());
+        // The user package's names, first use per file.
         let mut seen = std::collections::HashSet::new();
         for t in &tokens {
             if let rokc_lexer::TokenKind::Ident(n) = &t.kind {
                 if seen.insert(n.as_str()) {
-                    let mut span = t.span;
-                    span.file = id;
-                    idents.push((n.clone(), span));
+                    idents.push((n.clone(), t.span));
                 }
             }
         }
     }
     if defines_metas(&tokens, source) {
-        let id = rokc_diagnostic::register_file(file.to_owned(), source.to_owned());
-        for t in &mut tokens {
-            t.span.file = id;
-        }
         let found = collect_meta_blocks(&tokens, file);
         if !found.is_empty() {
             metas

@@ -69,9 +69,9 @@ stones (the index is a git repository; nothing is uploaded):
 
 compiler commands (rokc, with the dependencies; see `rokc help`):
   build | check | run | test | bench | lint | doc | emit [path] ...
-  repl [--replay] [--package <path>]
-                               interactive session (`:add <dep>` adds to the
-                               active environment)
+  repl [path]                  interactive session (`:add <dep>` adds to the
+                               active environment); a program path runs in
+                               it first, a library is loaded and `use`d
   lsp                          language server (also `rokls`)
   jupyter --connection-file <f>  the kernel (Jupyter starts it)
   fmt [path]                   format .rok and .rokon files
@@ -323,8 +323,8 @@ fn run(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> i32 {
         if is_usage(&e) {
             return usage(&e);
         }
-        // A rendered diagnostic (`file:line:col: error: ..`) as it is.
-        if e.lines().next().is_some_and(|l| l.contains(": error: ")) {
+        // A rendered diagnostic (`error[E..]: ..`) as it is.
+        if e.starts_with("error[") {
             eprintln!("{e}");
         } else {
             eprintln!("rok: error: {e}");
@@ -489,10 +489,7 @@ fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i3
     // The manifest's `name` is the package's (spec 9.10.3).
     let named = package.as_deref().filter(|_| t.env.is_none() && !stdin);
     if let (Some(name), Some(_)) = (&t.ctx.manifest.name, named) {
-        if !matches!(
-            cmd,
-            "fmt" | "clean" | "demangle" | "repl" | "lsp" | "jupyter"
-        ) {
+        if !matches!(cmd, "fmt" | "clean" | "demangle" | "lsp" | "jupyter") {
             extra.push(format!("--name={name}"));
         }
     }

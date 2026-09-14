@@ -485,7 +485,7 @@ mod tests {
         assert_eq!(back[1].vers.to_string(), "0.4.0");
         assert_eq!(best(&back, &Req::parse("^0.3").unwrap()), Some(&back[0]));
         let e = parse_file(&format!("\n{}", line.replace("rev:", "tag:")), "f").unwrap_err();
-        assert!(e.starts_with("f (line 2):1:"), "{e}");
+        assert!(e.contains("--> f (line 2):1:"), "{e}");
         assert!(e.contains("a stone's source"), "{e}");
     }
 }

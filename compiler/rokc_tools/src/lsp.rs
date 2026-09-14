@@ -148,6 +148,8 @@ impl<W: Write> Server<W> {
                         ("textDocumentSync", Json::num(1)),
                         ("hoverProvider", Json::Bool(true)),
                         ("definitionProvider", Json::Bool(true)),
+                        ("referencesProvider", Json::Bool(true)),
+                        ("renameProvider", Json::Bool(true)),
                         ("documentSymbolProvider", Json::Bool(true)),
                         ("documentFormattingProvider", Json::Bool(true)),
                         (
@@ -201,6 +203,8 @@ impl<W: Write> Server<W> {
             | "textDocument/definition"
             | "textDocument/documentSymbol"
             | "textDocument/completion"
+            | "textDocument/references"
+            | "textDocument/rename"
             | "textDocument/formatting" => {
                 if self.docs.get(&uri).is_some_and(|d| d.dirty) {
                     self.refresh(&uri);
@@ -208,7 +212,28 @@ impl<W: Write> Server<W> {
                 let pos = params.get("position");
                 let line = pos.get("line").as_u32().unwrap_or(0);
                 let col = pos.get("character").as_u32().unwrap_or(0);
-                self.query(method, &uri, line, col).unwrap_or(Json::Null)
+                let new_name = params.get("newName").as_str();
+                if method == "textDocument/rename" {
+                    match self.rename(&uri, line, col, new_name.unwrap_or("")) {
+                        Ok(edit) => edit,
+                        Err(why) => {
+                            self.send(&Json::obj([
+                                ("jsonrpc", Json::str("2.0")),
+                                ("id", id.clone()),
+                                (
+                                    "error",
+                                    Json::obj([
+                                        ("code", Json::num(-32602)),
+                                        ("message", Json::str(why)),
+                                    ]),
+                                ),
+                            ]));
+                            return None;
+                        }
+                    }
+                } else {
+                    self.query(method, &uri, line, col).unwrap_or(Json::Null)
+                }
             }
             _ if matches!(id, Json::Null) => return None,
             _ => {
@@ -283,7 +308,7 @@ impl<W: Write> Server<W> {
                 Err(e) => {
                     let d = RokDiagnostic::error(rokc_diagnostic::ErrorKind::Parse, &e.message)
                         .with_span(e.span, "");
-                    vec![diag_json(&d, &doc.text)]
+                    vec![diag_json(&d, uri, &doc.text)]
                 }
             };
             self.docs.get_mut(uri).expect("checked above").dirty = false;
@@ -298,7 +323,7 @@ impl<W: Write> Server<W> {
             .filter(|d| a.diag_path(d).is_none_or(|p| p == key))
             .map(|d| {
                 let span = d.primary.as_ref().map(|l| l.span).unwrap_or_default();
-                diag_json(d, a.file(span).map_or("", |(_, t)| t.as_str()))
+                diag_json(d, uri, a.file(span).map_or("", |(_, t)| t.as_str()))
             })
             .collect();
         let doc = self.docs.get_mut(uri).expect("checked above");
@@ -318,6 +343,38 @@ impl<W: Write> Server<W> {
                 Json::obj([("uri", Json::str(uri)), ("diagnostics", Json::Arr(diags))]),
             ),
         ]));
+    }
+
+    /// `textDocument/rename`: every reference in the buffer (see
+    /// `references`), when the name is declared in it.
+    fn rename(&self, uri: &str, line: u32, col: u32, new_name: &str) -> Result<Json, String> {
+        let ident = new_name.starts_with(|c: char| c == '_' || c.is_alphabetic())
+            && new_name.chars().all(is_ident_char)
+            && rokc_lexer::token::keyword_kind(new_name).is_none();
+        if !ident {
+            return Err(format!("`{new_name}` is not a valid name"));
+        }
+        let doc = self.docs.get(uri).ok_or("unknown document")?;
+        let text = doc.text.as_str();
+        let key = uri_path(uri).display().to_string();
+        let off = offset(text, line, col);
+        let refs = references(doc, &key, off).ok_or("nothing to rename here")?;
+        if !defined_here(doc, &key, off) {
+            return Err("it is declared in another file; rename it there".to_owned());
+        }
+        let edits = refs
+            .into_iter()
+            .map(|(s, e)| {
+                Json::obj([
+                    ("range", range(text, s, e)),
+                    ("newText", Json::str(new_name)),
+                ])
+            })
+            .collect();
+        Ok(Json::obj([(
+            "changes",
+            Json::obj([(uri, Json::Arr(edits))]),
+        )]))
     }
 
     fn query(&self, method: &str, uri: &str, line: u32, col: u32) -> Option<Json> {
@@ -357,23 +414,34 @@ impl<W: Write> Server<W> {
                 )]))
             }
             "textDocument/definition" => {
-                let (ident, _) = ident_at(text, off)?;
-                // A local: resolve through the scopes of the buffer's AST.
-                let mut v = Locals {
-                    off,
-                    scopes: vec![Vec::new()],
-                    found: None,
-                };
-                let program = parse_doc(text, &key);
-                walk_items(&mut v, &program.items);
-                program.stmts.iter().for_each(|s| walk_stmt(&mut v, s));
-                if let Some(span) = v.found {
-                    return Some(location(uri, text, span));
+                let (ident, start) = ident_at(text, off)?;
+                let good = doc.good.as_ref();
+                if let Some(m) = good.and_then(|a| member_at(a, &key, text, ident, start)) {
+                    let (file, def_text) = good?.file(m.def_span())?;
+                    let (from, to) = m.name_range(def_text)?;
+                    return Some(location_at(&path_uri(Path::new(file)), def_text, from, to));
                 }
-                let a = doc.good.as_ref()?;
-                let span = definition(a, &key, ident, off)?;
-                let (p, t) = a.file(span)?;
-                Some(location(&path_uri(Path::new(p)), t, span))
+                // A local: resolve through the scopes of the buffer's AST.
+                let program = parse_doc(text, &key);
+                if let Some(span) = resolve_local(&program, off) {
+                    let (from, to) = name_range(text, span.start as usize, ident)
+                        .unwrap_or((span.start as usize, span.end as usize));
+                    return Some(location_at(uri, text, from, to));
+                }
+                let good = good?;
+                let span = definition(good, &key, ident, off)?;
+                let (file, def_text) = good.file(span)?;
+                let (from, to) = name_range(def_text, span.start as usize, ident)
+                    .unwrap_or((span.start as usize, span.end as usize));
+                Some(location_at(&path_uri(Path::new(file)), def_text, from, to))
+            }
+            "textDocument/references" => {
+                let refs = references(doc, &key, off)?;
+                Some(Json::Arr(
+                    refs.into_iter()
+                        .map(|(s, e)| location_at(uri, text, s, e))
+                        .collect(),
+                ))
             }
             "textDocument/completion" => Some(Json::Arr(self.complete(doc, &path, off))),
             _ => None,
@@ -521,6 +589,24 @@ fn hover(a: &Analysis, key: &str, text: &str, off: usize) -> Option<String> {
         }
     };
     let ident = ident_at(text, off).map(|(s, _)| s);
+    // `.field` / `.method`: the member, with its doc comment.
+    if let Some((name, start)) = ident_at(text, off) {
+        match member_at(a, key, text, name, start) {
+            Some(Member::Method(f)) => return Some(with_doc(f)),
+            Some(Member::Field(s, name)) => {
+                let ty = s.fields.iter().find(|f| f.name == name)?;
+                let owner = ty_name(hir, &HirTy::Struct(s.id));
+                let code = fenced(format!("{owner}.{name}: {}", ty_name(hir, &ty.ty)));
+                let doc = a.field_doc(s.span, name);
+                return Some(if doc.is_empty() {
+                    code
+                } else {
+                    format!("{code}\n\n{doc}")
+                });
+            }
+            None => {}
+        }
+    }
     if let Some(e) = a.find_expr(
         key,
         |s| (s.start as usize..s.end as usize).contains(&off),
@@ -614,6 +700,8 @@ struct Locals {
     off: usize,
     scopes: Vec<Vec<(String, Span)>>,
     found: Option<Span>,
+    /// Every binding: name and declaring span.
+    binds: Vec<(String, Span)>,
 }
 
 impl AstVisitor for Locals {
@@ -638,6 +726,7 @@ impl AstVisitor for Locals {
         if let Some(s) = self.scopes.last_mut() {
             s.push((name.to_owned(), at));
         }
+        self.binds.push((name.to_owned(), at));
     }
     fn push_scope(&mut self) {
         self.scopes.push(Vec::new());
@@ -656,20 +745,292 @@ fn walk_items(v: &mut Locals, items: &[Item]) {
     }
 }
 
+/// The scope walk of `program` for a path at `off`.
+fn locals(program: &rokc_ast::Program, off: usize) -> Locals {
+    let mut v = Locals {
+        off,
+        scopes: vec![Vec::new()],
+        found: None,
+        binds: Vec::new(),
+    };
+    walk_items(&mut v, &program.items);
+    program.stmts.iter().for_each(|s| walk_stmt(&mut v, s));
+    v
+}
+
+/// The declaring span of the local a one-segment path at `off` names.
+fn resolve_local(program: &rokc_ast::Program, off: usize) -> Option<Span> {
+    locals(program, off).found
+}
+
+/// The first whole-word `name` at or after byte `from` of `text`.
+fn name_range(text: &str, from: usize, name: &str) -> Option<(usize, usize)> {
+    let mut at = from;
+    while let Some(i) = text.get(at..)?.find(name) {
+        let (s, e) = (at + i, at + i + name.len());
+        let before = text[..s].chars().next_back().is_some_and(is_ident_char);
+        let after = text[e..].chars().next().is_some_and(is_ident_char);
+        if !before && !after {
+            return Some((s, e));
+        }
+        at = e;
+    }
+    None
+}
+
+/// What `.name` names: a struct field or a method.
+enum Member<'a> {
+    Field(&'a rokc_hir::HirStructDef, &'a str),
+    Method(&'a rokc_hir::HirFunction),
+}
+
+impl Member<'_> {
+    const fn def_span(&self) -> Span {
+        match self {
+            Self::Field(s, _) => s.span,
+            Self::Method(f) => f.span,
+        }
+    }
+
+    /// The name at the definition in its file's `text`.
+    fn name_range(&self, text: &str) -> Option<(usize, usize)> {
+        match self {
+            // The field's `name:` inside the struct's braces (not a
+            // mention in a doc comment).
+            Self::Field(s, name) => {
+                let start = s.span.start as usize;
+                let mut at = start + text.get(start..)?.find('{')?;
+                loop {
+                    let (s, e) = name_range(text, at, name)?;
+                    if text[e..].trim_start().starts_with(':') {
+                        return Some((s, e));
+                    }
+                    at = e;
+                }
+            }
+            Self::Method(f) => name_range(text, f.span.start as usize, short_name(&f.name)),
+        }
+    }
+}
+
+/// The member `name` (at byte `start` of `text`, after a `.`) of the
+/// receiver before it, from the typed expressions of `a`.
+fn member_at<'a>(
+    a: &'a Analysis,
+    key: &str,
+    text: &str,
+    name: &str,
+    start: usize,
+) -> Option<Member<'a>> {
+    let dot = start.checked_sub(1)?;
+    if text.as_bytes().get(dot) != Some(&b'.') {
+        return None;
+    }
+    let receiver = receiver_start(text, dot);
+    let hir = a.hir.as_ref()?;
+    let mut found = None;
+    for f in &hir.functions {
+        let Some(body) = &f.body else { continue };
+        crate::analysis::each_block(body, &mut |e| {
+            if found.is_some() || e.span.start as usize != receiver || !a.in_file(e.span, key) {
+                return;
+            }
+            match &e.kind {
+                HirExprKind::FieldRead {
+                    struct_id,
+                    field_index,
+                    ..
+                } => {
+                    let s = hir.structs.iter().find(|s| s.id == *struct_id);
+                    let field = s.and_then(|s| s.fields.get(*field_index as usize));
+                    if let (Some(s), Some(fd)) = (s, field) {
+                        if fd.name == name {
+                            found = Some(Member::Field(s, fd.name.as_str()));
+                        }
+                    }
+                }
+                HirExprKind::Call { callee, .. } => {
+                    found = hir
+                        .functions
+                        .iter()
+                        .find(|g| {
+                            g.id == *callee
+                                && short_name(&g.name) == name
+                                && g.params.first().is_some_and(|p| p.name == "self")
+                        })
+                        .map(Member::Method);
+                }
+                _ => {}
+            }
+        });
+        if found.is_some() {
+            break;
+        }
+    }
+    found
+}
+
+/// The `name:` of every struct literal field `name` in the buffer.
+struct FieldInits<'t> {
+    /// The struct's name as written in a literal.
+    owner: &'t str,
+    name: &'t str,
+    text: &'t str,
+    out: Vec<(usize, usize)>,
+}
+
+impl AstVisitor for FieldInits<'_> {
+    fn expr(&mut self, e: &Expr) {
+        let ExprKind::StructInit { path, fields, .. } = &e.kind else {
+            return;
+        };
+        if path.segments.last().is_none_or(|s| s.name != self.owner) {
+            return;
+        }
+        for (n, value) in fields.iter().filter(|(n, _)| n == self.name) {
+            // The name is the last one before the value (`x: v`), or the
+            // value itself (`P { x }`).
+            let end = (value.span.end as usize).min(self.text.len());
+            let head = &self.text[..end];
+            if let Some(s) = head.rfind(n.as_str()) {
+                self.out.push((s, s + n.len()));
+            }
+        }
+    }
+}
+
+/// Every reference in the buffer to what the identifier at `off`
+/// names, its declaration included, as byte ranges. A local resolves
+/// through the buffer's scopes; a `.member` matches every `.member` of
+/// that name; anything else every same-named identifier that is not a
+/// local.
+fn references(doc: &Doc, key: &str, off: usize) -> Option<Vec<(usize, usize)>> {
+    let text = doc.text.as_str();
+    let (name, start) = ident_at(text, off)?;
+    let (tokens, _) = rokc_lexer::Lexer::new(text, key.to_owned()).lex_all();
+    let words: Vec<(usize, usize)> = tokens
+        .iter()
+        .filter(|t| matches!(&t.kind, rokc_lexer::TokenKind::Ident(n) if n == name))
+        .map(|t| (t.span.start as usize, t.span.end as usize))
+        .collect();
+    let is_member = |s: usize| s > 0 && text.as_bytes()[s - 1] == b'.';
+    let program = parse_doc(text, key);
+    let walk = locals(&program, usize::MAX);
+    // A binding's name, mapped to its declaring span.
+    let binding = |s: usize| {
+        walk.binds.iter().find_map(|(n, at)| {
+            (n == name && name_range(text, at.start as usize, name).is_some_and(|r| r.0 == s))
+                .then_some(*at)
+        })
+    };
+    let resolve = |s: usize| binding(s).or_else(|| resolve_local(&program, s));
+    let mut out: Vec<(usize, usize)> = if is_member(start) {
+        let a = doc.good.as_ref()?;
+        let m = member_at(a, key, text, name, start)?;
+        // `.name` of the same field / method.
+        let same = |w: &(usize, usize)| {
+            is_member(w.0)
+                && member_at(a, key, text, name, w.0).is_some_and(|o| o.def_span() == m.def_span())
+        };
+        let mut v: Vec<_> = words.iter().copied().filter(same).collect();
+        let here = a.file(m.def_span()).is_some_and(|(p, _)| p == key);
+        if let Some(r) = m.name_range(text).filter(|_| here) {
+            v.push(r);
+        }
+        if let Member::Field(s, _) = m {
+            let mut inits = FieldInits {
+                owner: short_name(s.name.split("__").next().unwrap_or(&s.name)),
+                name,
+                text,
+                out: Vec::new(),
+            };
+            for item in &program.items {
+                walk_item(&mut inits, item);
+            }
+            program.stmts.iter().for_each(|s| walk_stmt(&mut inits, s));
+            v.extend(inits.out);
+        }
+        v
+    } else if let Some(target) = resolve(start) {
+        words
+            .iter()
+            .copied()
+            .filter(|w| resolve(w.0) == Some(target))
+            .collect()
+    } else {
+        words
+            .iter()
+            .copied()
+            .filter(|w| !is_member(w.0) && resolve(w.0).is_none())
+            .collect()
+    };
+    out.sort_unstable();
+    out.dedup();
+    (!out.is_empty()).then_some(out)
+}
+
+/// Is what the identifier at `off` names declared in this buffer?
+fn defined_here(doc: &Doc, key: &str, off: usize) -> bool {
+    let text = doc.text.as_str();
+    let Some((name, start)) = ident_at(text, off) else {
+        return false;
+    };
+    let a = doc.good.as_ref();
+    if let Some(m) = a.and_then(|a| member_at(a, key, text, name, start)) {
+        return a
+            .and_then(|a| a.file(m.def_span()))
+            .is_some_and(|(p, _)| p == key);
+    }
+    let program = parse_doc(text, key);
+    let walk = locals(&program, off);
+    if walk.found.is_some()
+        || walk.binds.iter().any(|(n, at)| {
+            n == name && name_range(text, at.start as usize, name).is_some_and(|r| r.0 == start)
+        })
+    {
+        return true;
+    }
+    a.and_then(|a| {
+        let span = definition(a, key, name, off)?;
+        Some(a.file(span)?.0 == key)
+    })
+    .unwrap_or(false)
+}
+
 /// LSP `Diagnostic` of `d`, whose span is in `text`.
-fn diag_json(d: &RokDiagnostic, text: &str) -> Json {
+fn diag_json(d: &RokDiagnostic, uri: &str, text: &str) -> Json {
     let span = d.primary.as_ref().map(|l| l.span).unwrap_or_default();
     let mut message = d.message.clone();
     for n in &d.notes {
-        message.push_str("\nnote: ");
+        message.push('\n');
+        if !n.starts_with("help: ") {
+            message.push_str("note: ");
+        }
         message.push_str(n);
     }
+    // Labels in the same file (`first defined here`, an unclosed
+    // delimiter) as related locations.
+    let related: Vec<Json> = d
+        .secondary
+        .iter()
+        .filter(|l| l.span.file == span.file && !l.span.is_dummy())
+        .map(|l| {
+            Json::obj([
+                (
+                    "location",
+                    location_at(uri, text, l.span.start as usize, l.span.end as usize),
+                ),
+                ("message", Json::str(&l.message)),
+            ])
+        })
+        .collect();
     Json::obj([
         ("range", range(text, span.start as usize, span.end as usize)),
         ("severity", Json::num(if d.is_error() { 1 } else { 2 })),
         ("code", Json::str(d.kind.code())),
         ("source", Json::str("rokc")),
         ("message", Json::str(message)),
+        ("relatedInformation", Json::Arr(related)),
     ])
 }
 
@@ -746,11 +1107,8 @@ fn sym(name: &str, kind: u32, span: Span, text: &str, children: Vec<Json>) -> Js
     ])
 }
 
-fn location(uri: &str, text: &str, span: Span) -> Json {
-    Json::obj([
-        ("uri", Json::str(uri)),
-        ("range", range(text, span.start as usize, span.end as usize)),
-    ])
+fn location_at(uri: &str, text: &str, start: usize, end: usize) -> Json {
+    Json::obj([("uri", Json::str(uri)), ("range", range(text, start, end))])
 }
 
 fn is_ident_char(c: char) -> bool {

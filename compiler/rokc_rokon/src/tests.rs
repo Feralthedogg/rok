@@ -103,7 +103,7 @@ fn every_error() {
         let r = e.render(src, "f.rokon");
         assert!(r.contains(want), "{src:?}: {r}");
         assert!(
-            r.starts_with(&format!("f.rokon:{at}: error: ")),
+            r.starts_with("error[E002]: ") && r.contains(&format!("--> f.rokon:{at}\n")),
             "{src:?}: {r}"
         );
     }
@@ -111,9 +111,8 @@ fn every_error() {
     let src = "Config {\n    name: bare,\n}";
     assert_eq!(
         parse(src).unwrap_err().render(src, "c.rokon"),
-        "c.rokon:2:11: error: bare identifier `bare` is not a RokON value (a string is quoted: \
-         `\"bare\"`; an enum variant is written with its type: `Type::bare`)\n   2 |     name: \
-         bare,\n     |           ^^^^"
+        "error[E002]: bare identifier `bare` is not a RokON value (a string is quoted: \
+         `\"bare\"`; an enum variant is written with its type: `Type::bare`)\n  --> c.rokon:2:11\n   |\n 2 |     name: bare,\n   |           ^^^^"
     );
 }
 
@@ -182,7 +181,7 @@ fn typed_decoding() {
     assert_eq!(r.req("n").unwrap().int::<u16>().unwrap(), 300);
     let e = r.req("n").unwrap().int::<u8>().unwrap_err();
     assert!(
-        e.starts_with("c.rokon:3:8: error: 300 is out of range for u8"),
+        e.starts_with("error[E200]: 300 is out of range for u8\n  --> c.rokon:3:8"),
         "{e}"
     );
     assert!((r.req("ratio").unwrap().float().unwrap() - 2.0).abs() < f64::EPSILON);
@@ -200,7 +199,7 @@ fn typed_decoding() {
     assert!(r.get("proxy").is_some());
     let e = r.req("absent").unwrap_err();
     assert!(
-        e.starts_with("c.rokon:1:1: error: missing field `absent`"),
+        e.starts_with("error[E200]: missing field `absent`\n  --> c.rokon:1:1"),
         "{e}"
     );
     let d = r.req("dep").unwrap().variant("Dep").unwrap();
@@ -266,7 +265,7 @@ fn typed_decoding() {
     for &(src, f, want) in cases {
         let e = check(src, &f).unwrap_err();
         assert!(e.contains(want), "{src:?}: {e}");
-        assert!(e.starts_with("t.rokon:1:"), "{e}");
+        assert!(e.contains("--> t.rokon:1:"), "{e}");
     }
 }
 

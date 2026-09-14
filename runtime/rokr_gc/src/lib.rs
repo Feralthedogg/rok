@@ -592,7 +592,7 @@ extern "C" fn print_stats() {
             Ok(())
         }
     }
-    world::lock();
+    world::lock_at_exit();
     let h = heap();
     let _ = writeln!(
         Stderr,

@@ -15,9 +15,11 @@ use common::*;
 fn end_to_end_cases() {
     let Some(env) = setup() else { return };
     let cases_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/cases");
-    let scratch = env
-        .workspace
-        .join(format!("target/integration_tmp{}", opt_suffix()));
+    let scratch = env.workspace.join(format!(
+        "target/integration_tmp{}{}",
+        opt_suffix(),
+        test_target().unwrap_or_default()
+    ));
 
     let mut cases: Vec<(String, PathBuf)> = fs::read_dir(&cases_dir)
         .unwrap()

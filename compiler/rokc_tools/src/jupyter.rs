@@ -1,5 +1,5 @@
 //! `rokc jupyter`: a Jupyter kernel (spec 908) on the REPL session
-//! engine (`repl::Repl::eval`, the default mode: each cell runs once).
+//! engine (`repl::Repl::eval`: each cell runs once).
 //!
 //! Wire: Jupyter messaging 5.3 over a hand-written minimal ZMTP 3.0
 //! (TCP, NULL mechanism; no external crates, targets.md). Shell, control
@@ -674,6 +674,8 @@ fn start(
         });
     }
 
+    // Every channel accepts from here on; the last line on the real stderr.
+    eprintln!("rokc jupyter: ready");
     let out = capture(1).map_err(|e| format!("stdout: {e}"))?;
     let err = capture(2).map_err(|e| format!("stderr: {e}"))?;
     let mut k = Kernel {

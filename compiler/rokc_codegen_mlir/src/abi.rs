@@ -1,5 +1,7 @@
 //! C ABI lowering of aggregate parameters / results of `extern "C"`
-//! functions (spec 8.6.3). LLVM does not classify aggregates: like
+//! functions (spec 8.6.3).
+//!
+//! LLVM does not classify aggregates: like
 //! clang, the front end rewrites a by-value `struct` into the registers
 //! / memory the platform C ABI uses, and the call site converts through
 //! memory.
@@ -170,7 +172,9 @@ pub fn classify(target: &Target, params: &[MirTy], ret: &MirTy, variadic: bool) 
 }
 
 /// A runtime (`extern "rok"`) declaration (spec 8.5): the C ABI, with
-/// `str` a by-value `(ptr, len)` C struct like `RokFn`. LLVM splits a
+/// `str` a by-value `(ptr, len)` C struct like `RokFn`.
+///
+/// LLVM splits a
 /// first-class struct argument into independent scalars, which agrees
 /// with C while every integer word fits in argument registers; past
 /// that a pair could straddle the last register and the stack, where C

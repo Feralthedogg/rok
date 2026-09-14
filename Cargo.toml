@@ -5,6 +5,7 @@ members = [
     "compiler/rokc",
     "compiler/rokc_ast",
     "compiler/rokc_codegen_mlir",
+    "compiler/rokc_codegen_native",
     "compiler/rokc_core",
     "compiler/rokc_diagnostic",
     "compiler/rokc_driver",
@@ -32,6 +33,7 @@ authors = ["Han Damin <miniex@daminstudio.net>"]
 [workspace.dependencies]
 rokc_ast = { path = "compiler/rokc_ast" }
 rokc_codegen_mlir = { path = "compiler/rokc_codegen_mlir" }
+rokc_codegen_native = { path = "compiler/rokc_codegen_native" }
 rokc_core = { path = "compiler/rokc_core" }
 rokc_diagnostic = { path = "compiler/rokc_diagnostic" }
 rokc_driver = { path = "compiler/rokc_driver" }

@@ -1,4 +1,4 @@
-// expect-error: 13:20: expression expected, found Colon
+// expect-error: 13:20: expected expression, found `:`
 
 // `using` takes the same top-level struct-literal restriction as `if` /
 // `while` / `match` / `for`: `{` after the initializer opens the body,

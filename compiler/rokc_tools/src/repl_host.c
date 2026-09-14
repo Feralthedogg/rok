@@ -4,9 +4,6 @@
 //
 //   `cell <n>\n` + n bytes of LLVM IR: JIT-compile it into the session
 //     and run its `rok_repl_cell` once. Later cells link against it.
-//   `once <n> <out> <err>\n` + n bytes of LLVM IR (`--replay`): compile
-//     and run it in a throwaway child (stdout / stderr into the files
-//     `out` / `err`); the session itself never runs anything.
 //   `lib <n>\n` + an n-byte path: link a prebuilt dependency's static
 //     library into the session (its members load as cells need them);
 //     the reply is `ok 0\n` or `err\n`.
@@ -21,6 +18,11 @@
 // renamed `<name>.r<cell>`, and later cells' references to the name are
 // renamed to the newest one: a redefinition takes effect from the next
 // cell (907) while earlier code keeps what it was linked against.
+//
+// Built with `ROK_NATIVE_JIT` (the native backend's cells, `-O0`), the
+// host links no LLVM: a cell is a Mach-O object rokc compiled, and the
+// host maps, links and runs it itself (`jit_cell` below); `lib` loads
+// every member of the archive the same way.
 #include <fcntl.h>
 #include <signal.h>
 #include <stdint.h>
@@ -30,6 +32,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#ifndef ROK_NATIVE_JIT
 #include <llvm-c/Core.h>
 #include <llvm-c/Error.h>
 #include <llvm-c/IRReader.h>
@@ -37,6 +40,7 @@
 #include <llvm-c/Orc.h>
 #include <llvm-c/Target.h>
 #include <llvm-c/Transforms/PassBuilder.h>
+#endif
 
 void rok_runtime_init(void);
 int rok_stdio_flush(void);
@@ -47,14 +51,18 @@ struct {
     size_t len;
 } __rok_repl_out;
 
+#ifndef ROK_NATIVE_JIT
 static LLVMOrcLLJITRef jit;
 static LLVMOrcJITDylibRef jd;
+#endif
 static const char *opt_level = "0";
 static unsigned cells;
 
-// Symbols the session defines: name → its newest definition's name.
+// Symbols the session defines: name → its newest definition's name
+// (and, native, a definition's address under its own name).
 struct sym {
     char *name, *now;
+    void *addr;
     struct sym *next;
 };
 static struct sym *syms[4096];
@@ -80,14 +88,6 @@ static void sym_set(const char *name, const char *now) {
     }
     free((*p)->now);
     (*p)->now = strdup(now);
-}
-
-static int report(LLVMErrorRef e) {
-    if (!e) return 0;
-    char *m = LLVMGetErrorMessage(e);
-    fprintf(stderr, "error: %s\n", m);
-    LLVMDisposeErrorMessage(m);
-    return 1;
 }
 
 #if defined(__APPLE__)
@@ -120,7 +120,18 @@ static void *host_symbol(const char *name) {
             return (void *)(nl[i].n_value + slide);
     return NULL;
 }
+#endif
 
+#ifndef ROK_NATIVE_JIT
+static int report(LLVMErrorRef e) {
+    if (!e) return 0;
+    char *m = LLVMGetErrorMessage(e);
+    fprintf(stderr, "error: %s\n", m);
+    LLVMDisposeErrorMessage(m);
+    return 1;
+}
+
+#if defined(__APPLE__)
 // The thread-locals `m` uses, defined as their descriptors in the host
 // (the process-symbol generator would find them by `dlsym`).
 static int define_thread_locals(LLVMModuleRef m) {
@@ -233,6 +244,9 @@ static void start_jit(void) {
     char *cpu = LLVMGetHostCPUName(), *features = LLVMGetHostCPUFeatures();
     LLVMTargetMachineRef tm = LLVMCreateTargetMachine(target, triple, cpu, features, level,
                                                       LLVMRelocDefault, LLVMCodeModelJITDefault);
+    // SelectionDAG only, as rokc's clang -fno-global-isel: mixing it with
+    // GlobalISel splits aggregate arguments' stack layout.
+    LLVMSetTargetMachineGlobalISel(tm, 0);
     LLVMDisposeMessage(triple);
     LLVMDisposeMessage(cpu);
     LLVMDisposeMessage(features);
@@ -247,7 +261,311 @@ static void start_jit(void) {
     LLVMOrcJITDylibAddGenerator(jd, gen);
 }
 
-// A command line: `<word> <n> [<out> <err>]`.
+// A prebuilt dependency's archive: its members load as cells need them.
+static int link_lib(const char *path) {
+    LLVMOrcDefinitionGeneratorRef lib;
+    LLVMOrcObjectLayerRef layer = LLVMOrcLLJITGetObjLinkingLayer(jit);
+    int bad = report(LLVMOrcCreateStaticLibrarySearchGeneratorForPath(&lib, layer, path));
+    if (!bad) LLVMOrcJITDylibAddGenerator(jd, lib);
+    return bad;
+}
+#else
+// The native JIT: Mach-O arm64 objects (MH_OBJECT) mapped into
+// executable memory, linked against the session and the host.
+#include <dlfcn.h>
+#include <mach-o/reloc.h>
+#include <libkern/OSCacheControl.h>
+#include <pthread.h>
+#include <sys/mman.h>
+
+static void *sym_addr(const char *now) {
+    struct sym *s = *sym_slot(now);
+    return s ? s->addr : NULL;
+}
+
+// A definition of `name` at `addr`: renamed `<name>.r<cell>` when an
+// earlier cell has one (later cells use the newest).
+static void define(const char *name, void *addr) {
+    char fresh[1024];
+    const char *as = name;
+    if (sym_now(name)) {
+        snprintf(fresh, sizeof fresh, "%s.r%u", name, cells);
+        as = fresh;
+    }
+    sym_set(name, as);
+    if (as != name) sym_set(as, as);
+    (*sym_slot(as))->addr = addr;
+}
+
+// An undefined symbol: the session's newest definition, else the host's
+// (a thread-local: its descriptor).
+static void *resolve(const char *name, int tlv) {
+    const char *now = sym_now(name);
+    void *a = now ? sym_addr(now) : NULL;
+    if (a) return a;
+    if (tlv) return host_symbol(name);
+    a = dlsym(RTLD_DEFAULT, name + 1);
+    return a ? a : host_symbol(name);
+}
+
+enum { R_UNSIGNED = 0, R_BRANCH26 = 2, R_PAGE21 = 3, R_PAGEOFF12 = 4, R_GOT21 = 5, R_GOT12 = 6,
+       R_TLV21 = 8, R_TLV12 = 9, R_ADDEND = 10 };
+
+// An object mapped, its symbols defined, not yet linked.
+struct obj {
+    const unsigned char *buf;
+    const char *what;
+    const struct section_64 *sects;
+    uint32_t nsects, nsyms;
+    const struct nlist_64 *nl;
+    const char *strs;
+    // Code (executable, `MAP_JIT`) and data (writable) mappings; GOT
+    // slots go after the data, branch stubs after the code.
+    char *code, *data, **base, **addr;
+    size_t code_cap, data_cap, stubs, slots;
+    void *entry;
+};
+
+// Map `buf` and define its exported symbols (0: failed, reported).
+static int map_object(struct obj *o, const unsigned char *buf, size_t n, const char *what) {
+    memset(o, 0, sizeof *o);
+    o->buf = buf;
+    o->what = what;
+    const struct mach_header_64 *mh = (const void *)buf;
+    if (n < sizeof *mh || mh->magic != MH_MAGIC_64 || mh->cputype != CPU_TYPE_ARM64) {
+        fprintf(stderr, "error: %s: not an arm64 Mach-O object\n", what);
+        return 0;
+    }
+    const struct symtab_command *st = NULL;
+    const struct load_command *lc = (const void *)(mh + 1);
+    for (uint32_t i = 0; i < mh->ncmds; i++, lc = (const void *)((const char *)lc + lc->cmdsize)) {
+        if (lc->cmd == LC_SEGMENT_64) {
+            o->sects = (const void *)((const struct segment_command_64 *)lc + 1);
+            o->nsects = ((const struct segment_command_64 *)lc)->nsects;
+        }
+        if (lc->cmd == LC_SYMTAB) st = (const void *)lc;
+    }
+    // What runs is mapped: not debug info, unwind tables or the like.
+    size_t code = 0, data = 0, nrel = 0, *at = calloc(o->nsects + 1, sizeof *at);
+    int *is_code = calloc(o->nsects + 1, sizeof *is_code);
+    for (uint32_t k = 0; k < o->nsects; k++) {
+        const struct section_64 *s = &o->sects[k];
+        if ((s->flags & S_ATTR_DEBUG) || !strcmp(s->segname, "__LD") || !strcmp(s->sectname, "__eh_frame"))
+            continue;
+        is_code[k] = (s->flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)) != 0;
+        size_t *end = is_code[k] ? &code : &data, a = (size_t)1 << s->align;
+        *end = (*end + a - 1) & ~(a - 1);
+        at[k] = *end + 1;
+        *end += s->size;
+        nrel += s->nreloc;
+    }
+    // Branch stubs (16 bytes) and GOT slots (8): one per relocation at
+    // most.
+    o->stubs = code = (code + 15) & ~(size_t)15;
+    o->slots = data = (data + 15) & ~(size_t)15;
+    o->code_cap = code + 16 * nrel + 16;
+    o->data_cap = data + 8 * nrel + 16;
+    // Both near each other: `adrp` reaches 4 GiB.
+    o->data = mmap(NULL, o->data_cap, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    o->code = o->data == MAP_FAILED ? MAP_FAILED
+                                    : mmap(o->data + ((o->data_cap + 0x3fff) & ~(size_t)0x3fff), o->code_cap,
+                                           PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+    if (o->code == MAP_FAILED) {
+        fprintf(stderr, "error: %s: cannot map executable memory\n", what);
+        free(at);
+        free(is_code);
+        return 0;
+    }
+    o->base = calloc(o->nsects + 1, sizeof *o->base);
+    pthread_jit_write_protect_np(0);
+    for (uint32_t k = 0; k < o->nsects; k++) {
+        if (!at[k]) continue;
+        o->base[k] = (is_code[k] ? o->code : o->data) + at[k] - 1;
+        if ((o->sects[k].flags & SECTION_TYPE) != S_ZEROFILL)
+            memcpy(o->base[k], buf + o->sects[k].offset, o->sects[k].size);
+    }
+    pthread_jit_write_protect_np(1);
+    free(at);
+    free(is_code);
+    o->nl = st ? (const void *)(buf + st->symoff) : NULL;
+    o->strs = st ? (const char *)buf + st->stroff : "";
+    o->nsyms = st ? st->nsyms : 0;
+    o->addr = calloc(o->nsyms + 1, sizeof *o->addr);
+    for (uint32_t i = 0; i < o->nsyms; i++) {
+        const struct nlist_64 *s = &o->nl[i];
+        if ((s->n_type & N_STAB) || (s->n_type & N_TYPE) != N_SECT) continue;
+        uint32_t k = s->n_sect - 1;
+        if (k >= o->nsects || !o->base[k]) continue;
+        o->addr[i] = o->base[k] + (s->n_value - o->sects[k].addr);
+        const char *name = o->strs + s->n_un.n_strx;
+        if (s->n_type & N_EXT) define(name, o->addr[i]);
+        if (!strcmp(name, "_rok_repl_cell")) o->entry = o->addr[i];
+    }
+    return 1;
+}
+
+// Apply `o`'s relocations (0: failed, reported).
+static int link_object(struct obj *o) {
+    char **got = calloc(o->nsyms + 1, sizeof *got), **stub = calloc(o->nsyms + 1, sizeof *stub);
+    int ok = 1;
+    pthread_jit_write_protect_np(0);
+    for (uint32_t k = 0; k < o->nsects && ok; k++) {
+        if (!o->base[k]) continue;
+        const struct relocation_info *rel = (const void *)(o->buf + o->sects[k].reloff);
+        int64_t addend = 0;
+        for (uint32_t r = 0; r < o->sects[k].nreloc && ok; r++, addend = 0) {
+            struct relocation_info ri = rel[r];
+            if (ri.r_type == R_ADDEND) {
+                addend = ((int64_t)ri.r_symbolnum << 40) >> 40;
+                ri = rel[++r];
+            }
+            char *p = o->base[k] + ri.r_address;
+            uint32_t i = ri.r_symbolnum, ins;
+            memcpy(&ins, p, 4);
+            uint64_t s = 0;
+            int tlv = ri.r_type == R_TLV21 || ri.r_type == R_TLV12;
+            if (ri.r_extern) {
+                s = (uint64_t)(uintptr_t)o->addr[i];
+                if (!s) {
+                    const char *name = o->strs + o->nl[i].n_un.n_strx;
+                    s = (uint64_t)(uintptr_t)resolve(name, tlv);
+                    if (!s) {
+                        fprintf(stderr, "error: %s: undefined symbol `%s`\n", o->what, name + 1);
+                        ok = 0;
+                        break;
+                    }
+                }
+            } else if (i >= 1 && i <= o->nsects && o->base[i - 1]) {
+                // Section-relative: the bytes hold the object address.
+                s = (uint64_t)(uintptr_t)o->base[i - 1] - o->sects[i - 1].addr;
+            }
+            uint64_t target = s + (uint64_t)addend;
+            switch (ri.r_type) {
+            case R_UNSIGNED:
+                if (ri.r_length == 3) {
+                    uint64_t v;
+                    memcpy(&v, p, 8);
+                    v += target;
+                    memcpy(p, &v, 8);
+                } else {
+                    uint32_t v;
+                    memcpy(&v, p, 4);
+                    v += (uint32_t)target;
+                    memcpy(p, &v, 4);
+                }
+                break;
+            case R_BRANCH26: {
+                int64_t d = (int64_t)target - (int64_t)(uintptr_t)p;
+                if (d >= (1 << 27) || d < -(1 << 27)) {
+                    // Far (the host's code): through a stub.
+                    char *t = ri.r_extern ? stub[i] : NULL;
+                    if (!t) {
+                        t = o->code + o->stubs;
+                        o->stubs += 16;
+                        uint32_t code[2] = {0x58000050, 0xd61f0200}; // ldr x16, #8; br x16
+                        memcpy(t, code, 8);
+                        memcpy(t + 8, &target, 8);
+                        if (ri.r_extern) stub[i] = t;
+                    }
+                    d = t - p;
+                }
+                ins = (ins & 0xfc000000) | ((uint32_t)(d >> 2) & 0x03ffffff);
+                memcpy(p, &ins, 4);
+                break;
+            }
+            case R_GOT21: case R_GOT12: case R_TLV21: case R_TLV12: case R_PAGE21: case R_PAGEOFF12: {
+                if (ri.r_type != R_PAGE21 && ri.r_type != R_PAGEOFF12) {
+                    // A slot holding the address (a thread-local's: its
+                    // descriptor's).
+                    char *g = ri.r_extern ? got[i] : NULL;
+                    if (!g) {
+                        g = o->data + o->slots;
+                        o->slots += 8;
+                        memcpy(g, &target, 8);
+                        if (ri.r_extern) got[i] = g;
+                    }
+                    target = (uint64_t)(uintptr_t)g;
+                }
+                if (ri.r_type == R_PAGE21 || ri.r_type == R_GOT21 || ri.r_type == R_TLV21) {
+                    int64_t pages = (int64_t)(target >> 12) - (int64_t)((uintptr_t)p >> 12);
+                    if (pages >= (1 << 20) || pages < -(1 << 20)) {
+                        fprintf(stderr, "error: %s: a page reference out of range\n", o->what);
+                        ok = 0;
+                        break;
+                    }
+                    ins = (ins & 0x9f00001f) | (((uint32_t)pages & 3) << 29) |
+                          ((((uint32_t)pages >> 2) & 0x7ffff) << 5);
+                } else {
+                    uint32_t lo = (uint32_t)(target & 0xfff);
+                    // A load / store scales its offset by the access size.
+                    if ((ins & 0x3b000000) == 0x39000000) {
+                        uint32_t scale = ins >> 30;
+                        if ((ins & 0x04800000) == 0x04800000) scale = 4; // 128-bit vector
+                        lo >>= scale;
+                    }
+                    ins = (ins & 0xffc003ff) | ((lo & 0xfff) << 10);
+                }
+                memcpy(p, &ins, 4);
+                break;
+            }
+            default:
+                fprintf(stderr, "error: %s: relocation type %u is not supported\n", o->what, ri.r_type);
+                ok = 0;
+            }
+        }
+    }
+    pthread_jit_write_protect_np(1);
+    sys_icache_invalidate(o->code, o->code_cap);
+    free(got);
+    free(stub);
+    free(o->base);
+    free(o->addr);
+    return ok;
+}
+
+// Map and link the cell; its entry point (NULL: failed, reported).
+static void (*jit_cell(const char *obj, size_t n))(void) {
+    cells++;
+    struct obj o;
+    if (!map_object(&o, (const unsigned char *)obj, n, "cell") || !link_object(&o) || !o.entry)
+        return NULL;
+    return (void (*)(void))o.entry;
+}
+
+static void start_jit(void) {}
+
+// A prebuilt dependency's archive: every member, now (mapped first, so
+// they refer to each other).
+static int link_lib(const char *path) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return 1;
+    off_t size = lseek(fd, 0, SEEK_END);
+    char *a = mmap(NULL, (size_t)size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (a == MAP_FAILED || size < 8 || memcmp(a, "!<arch>\n", 8)) return 1;
+    struct obj objs[256];
+    int n = 0;
+    cells++;
+    for (size_t off = 8; off + 60 <= (size_t)size && n < 256;) {
+        const char *h = a + off;
+        size_t len = strtoul(h + 48, NULL, 10), skip = 0;
+        if (!memcmp(h, "#1/", 3)) skip = strtoul(h + 3, NULL, 10);
+        const char *name = skip ? h + 60 : h;
+        const unsigned char *body = (const unsigned char *)h + 60 + skip;
+        if (strncmp(name, "__.SYMDEF", 9) && len > skip) {
+            if (!map_object(&objs[n], body, len - skip, path)) return 1;
+            n++;
+        }
+        off += 60 + len;
+        off += off & 1;
+    }
+    for (int i = 0; i < n; i++)
+        if (!link_object(&objs[i])) return 1;
+    return 0;
+}
+#endif
+
+// A command line: `<word> <n>`.
 static int read_command(int ctl, char *line, size_t cap) {
     size_t n = 0;
     char c;
@@ -271,28 +589,6 @@ static char *read_ir(int ctl, size_t n) {
     return ir;
 }
 
-// `--replay`: run `ir` in a child with its output in `out` / `err`.
-static void run_once(int ctl, const char *ir, size_t n, const char *out, const char *err) {
-    pid_t child = fork();
-    if (child == 0) {
-        int o = open(out, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-        int e = open(err, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-        if (o < 0 || e < 0) _exit(1);
-        dup2(o, 1);
-        dup2(e, 2);
-        signal(SIGINT, SIG_DFL);
-        void (*cell)(void) = jit_cell(ir, n);
-        if (cell) cell();
-        rok_stdio_flush();
-        fflush(stderr);
-        _exit(cell ? 0 : 1);
-    }
-    dprintf(ctl, "pid %d\n", (int)child);
-    int st = 1;
-    if (child > 0) waitpid(child, &st, 0);
-    dprintf(ctl, st == 0 ? "ok 0\n" : "err\n");
-}
-
 int main(int argc, char **argv) {
     if (argc > 1) opt_level = argv[1];
     int ctl = dup(0);
@@ -303,7 +599,7 @@ int main(int argc, char **argv) {
     start_jit();
     signal(SIGINT, SIG_IGN);
     for (;;) {
-        char line[8192], out[4096] = "", err[4096] = "", c;
+        char line[8192], c;
         size_t n = 0;
         if (!read_command(ctl, line, sizeof line)) return 0;
         char *ir = NULL;
@@ -311,23 +607,14 @@ int main(int argc, char **argv) {
             char *path = read_ir(ctl, n);
             if (!path) return 1;
             path[n] = 0;
-            LLVMOrcDefinitionGeneratorRef lib;
-            LLVMOrcObjectLayerRef layer = LLVMOrcLLJITGetObjLinkingLayer(jit);
-            int bad = report(LLVMOrcCreateStaticLibrarySearchGeneratorForPath(&lib, layer, path));
-            if (!bad) LLVMOrcJITDylibAddGenerator(jd, lib);
+            int bad = link_lib(path);
             free(path);
             dprintf(ctl, bad ? "err\n" : "ok 0\n");
             continue;
         }
-        if (sscanf(line, "cell %zu", &n) == 1 || sscanf(line, "once %zu %4095s %4095s", &n, out, err) == 3)
-            ir = read_ir(ctl, n);
+        if (sscanf(line, "cell %zu", &n) == 1) ir = read_ir(ctl, n);
         if (!ir) return 1;
         rok_stdio_flush();
-        if (line[0] == 'o') {
-            run_once(ctl, ir, n, out, err);
-            free(ir);
-            continue;
-        }
         // A copy of the session from before the cell. When the cell's
         // process dies (panic, signal, exit, a cell that does not
         // compile) the copy carries on as the session; otherwise it is

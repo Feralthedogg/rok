@@ -1,10 +1,10 @@
-// expect-error: it captures `by_param: rok::core::sync::Cell<i32>`, which is not `Send`
-// expect-error: it holds `in_field: rok::core::sync::Cell<i32>`, which is not `Send`, across an `await`
-// expect-error: it captures `from_helper: rok::core::sync::Cell<i32>`, which is not `Send`
-// expect-error: it holds a temporary `rok::core::sync::Cell<i32>`, which is not `Send`, across an `await`
-// expect-error: it holds `nested: rok::core::sync::Cell<i32>`, which is not `Send`, across an `await`
-// expect-error: it holds `to_thread: rok::core::sync::Cell<i32>`, which is not `Send`, across an `await`
-// expect-error: it captures `via_closure: rok::core::sync::Cell<i32>`, which is not `Send`
+// expect-error: it captures `by_param: Cell<i32>`, which is not `Send`
+// expect-error: it holds `in_field: Cell<i32>`, which is not `Send`, across an `await`
+// expect-error: it captures `from_helper: Cell<i32>`, which is not `Send`
+// expect-error: it holds a temporary `Cell<i32>`, which is not `Send`, across an `await`
+// expect-error: it holds `nested: Cell<i32>`, which is not `Send`, across an `await`
+// expect-error: it holds `to_thread: Cell<i32>`, which is not `Send`, across an `await`
+// expect-error: it captures `via_closure: Cell<i32>`, which is not `Send`
 
 // The `Send` check of `task::spawn` (stdlib 2.18.1) follows a future
 // with a non-`Send` frame wherever it goes: through a parameter, a

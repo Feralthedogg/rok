@@ -263,7 +263,10 @@ mod tests {
             "// cfg\nCfg {\n    tags: [\n        \"a\", // first\n    ],\n}\n"
         );
         let e = format_file(Path::new("c.rokon"), "Cfg { a: x }").unwrap_err();
-        assert!(e.starts_with("c.rokon:1:10: error: bare identifier"), "{e}");
+        assert!(
+            e.starts_with("error[E002]: bare identifier") && e.contains("--> c.rokon:1:10\n"),
+            "{e}"
+        );
     }
 
     #[test]

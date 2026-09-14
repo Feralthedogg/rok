@@ -5,12 +5,14 @@
 mod deps;
 mod fresh;
 mod package;
+mod std_cache;
 
 use std::path::{Path, PathBuf};
 
 pub use deps::DepBuild;
 pub use fresh::Fingerprint;
 pub use package::{Package, STDIN, discover, source_files};
+pub use std_cache::{StdKey, prebuilt_std};
 
 use rokc_driver::{CompiledModule, CompilerConfig, compile_file, compile_source};
 
@@ -90,6 +92,16 @@ impl Session {
     /// over a library that does not change: the REPL).
     pub const fn set_cache_library(&mut self, on: bool) {
         self.config.cache_library = on;
+    }
+
+    /// Build the bootstrap tiers as the prebuilt library `rok`.
+    pub const fn set_std_lib(&mut self, on: bool) {
+        self.config.std_lib = on;
+    }
+
+    /// Link the bootstrap tiers prebuilt (`rok.rhir`, `prebuilt_std`).
+    pub fn set_std_prebuilt(&mut self, rhir: Option<PathBuf>) {
+        self.config.std_prebuilt = rhir;
     }
 
     /// Lower (and so check) every library body, reached or not.
@@ -175,6 +187,11 @@ impl CompileResult {
         rokc_driver::emit(self.module()?, kind, opts)
     }
 
+    /// Codegen for its errors alone (`check`), without the toolchain.
+    pub fn check_codegen(&self, opts: &BuildOptions) -> Result<(), RokDiagnostic> {
+        rokc_driver::check_codegen(self.module()?, opts)
+    }
+
     /// The user package's files (of a `set_keep_ast` build) after meta
     /// expansion, as rok source, each under a `// <file> (<module>)`
     /// line (`--emit=ast`).
@@ -213,6 +230,19 @@ impl CompileResult {
         opts: &BuildOptions,
     ) -> Result<(Vec<u8>, rokc_driver::MlirOutput), RokDiagnostic> {
         rokc_driver::cell_ir(self.module()?, opts)
+    }
+
+    /// A REPL cell for the session host: a native object when the host
+    /// runs those (`native::jit`), else LLVM IR (`cell_ir`).
+    pub fn cell_code(
+        &self,
+        opts: &BuildOptions,
+    ) -> Result<(Vec<u8>, rokc_driver::MlirOutput), RokDiagnostic> {
+        if rokc_driver::native::jit(opts) {
+            rokc_driver::native::cell_object(self.module()?, opts)
+        } else {
+            self.cell_ir(opts)
+        }
     }
 
     /// Build a library package's static archive at `out` (spec 902.13).

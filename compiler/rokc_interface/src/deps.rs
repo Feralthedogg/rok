@@ -21,6 +21,8 @@ pub struct DepBuild<'a> {
     /// `target/[<triple>/]<profile>/deps`.
     pub dir: &'a Path,
     pub quiet: bool,
+    /// The prebuilt standard library the build links (`prebuilt_std`).
+    pub std: Option<&'a Path>,
 }
 
 impl DepBuild<'_> {
@@ -68,6 +70,10 @@ impl DepBuild<'_> {
         words.extend(self.cfg.iter().cloned());
         let mut inputs = vec![root.parent().unwrap_or(root).to_path_buf()];
         let mut stamped = Vec::new();
+        if let Some(std) = self.std {
+            words.push(std.display().to_string());
+            inputs.push(std.to_path_buf());
+        }
         for b in self.bootstrap {
             words.push(b.display().to_string());
             inputs.push(b.parent().unwrap_or(b).to_path_buf());
@@ -106,6 +112,7 @@ impl DepBuild<'_> {
         }
         s.set_lib_name(Some(name.to_owned()));
         s.set_target(self.target);
+        s.set_std_prebuilt(self.std.map(Path::to_path_buf));
         rokc_diagnostic::clear_files();
         let r = s.compile_file(root);
         let warnings: String = r.warnings.iter().map(render).collect();

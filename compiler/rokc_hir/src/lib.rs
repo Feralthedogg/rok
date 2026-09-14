@@ -629,6 +629,38 @@ impl HirPattern {
     }
 }
 
+thread_local! {
+    /// Each struct's and enum's build-independent name, by id
+    /// (`[structs, enums]`), for `HirTy::stable_key`.
+    static TYPE_NAMES: std::cell::RefCell<[Vec<String>; 2]> =
+        const { std::cell::RefCell::new([Vec::new(), Vec::new()]) };
+}
+
+/// Forget the type names of an earlier compile.
+pub(crate) fn clear_type_names() {
+    TYPE_NAMES.with(|n| *n.borrow_mut() = [Vec::new(), Vec::new()]);
+}
+
+/// Name struct (or `enum_`) `id`: its full path, and a generic
+/// instance's arguments by their own stable keys. Called when the id is
+/// handed out, before any type names it.
+pub(crate) fn name_type(enum_: bool, id: u32, base: &str, args: &[HirTy]) {
+    let name = if args.is_empty() {
+        base.to_owned()
+    } else {
+        let args: Vec<String> = args.iter().map(HirTy::stable_key).collect();
+        format!("{base}<{}>", args.join(", "))
+    };
+    TYPE_NAMES.with(|n| {
+        let v = &mut n.borrow_mut()[usize::from(enum_)];
+        let id = id as usize;
+        if v.len() <= id {
+            v.resize(id + 1, String::new());
+        }
+        v[id] = name;
+    });
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum HirTy {
     /// Not yet inferred.
@@ -711,9 +743,10 @@ impl HirTy {
     /// `(i32 | none) | none` is `i32 | none`. Each layer is canonical
     /// on its own.
     ///
-    /// The order (the spec fixes none): `none` last, the rest by their
-    /// structural `Debug` rendering — deterministic for one program
-    /// (struct / enum ids are program-wide), so tags agree across modules.
+    /// The order: `none` last, the rest by `stable_key` — their
+    /// structure with structs and enums by full name (and generic
+    /// arguments), so the tags agree across separately compiled
+    /// packages (a prebuilt library and its users).
     #[must_use]
     pub fn sum(parts: impl IntoIterator<Item = Self>) -> Self {
         let parts: Vec<Self> = parts.into_iter().collect();
@@ -729,13 +762,50 @@ impl HirTy {
                 t => out.push(t),
             }
         }
-        out.sort_by_cached_key(|t| (t.is_none(), format!("{t:?}")));
+        out.sort_by_cached_key(|t| (t.is_none(), t.stable_key()));
         out.dedup();
         if out.len() == 1 {
             out.pop().expect("one member")
         } else {
             Self::Sum(out)
         }
+    }
+
+    /// The structural rendering with each struct / enum id replaced by
+    /// its name (`name_type`): the same in every build.
+    #[must_use]
+    pub fn stable_key(&self) -> String {
+        let text = format!("{self:?}");
+        TYPE_NAMES.with(|names| {
+            let names = names.borrow();
+            let mut out = String::with_capacity(text.len());
+            let mut rest = text.as_str();
+            loop {
+                let next = [("Struct(StructId(", 0), ("Enum(EnumId(", 1)]
+                    .into_iter()
+                    .filter_map(|(p, k)| rest.find(p).map(|at| (at, p, k)))
+                    .min();
+                let Some((at, p, k)) = next else { break };
+                let tail = &rest[at + p.len()..];
+                let n = tail.bytes().take_while(u8::is_ascii_digit).count();
+                let name = tail[..n]
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|id| names[k].get(id))
+                    .filter(|s| !s.is_empty() && tail[n..].starts_with("))"));
+                out.push_str(&rest[..at]);
+                if let Some(name) = name {
+                    let kind = if k == 0 { "Struct" } else { "Enum" };
+                    out.push_str(&format!("{kind}({name})"));
+                    rest = &tail[n + 2..];
+                } else {
+                    out.push_str(&rest[at..at + p.len() + n]);
+                    rest = &tail[n..];
+                }
+            }
+            out.push_str(rest);
+            out
+        })
     }
 
     /// A written member of a written sum: its members join the outer set

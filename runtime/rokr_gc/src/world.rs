@@ -143,6 +143,16 @@ fn cooperate() {
     state.store(prev, Ordering::Release);
 }
 
+/// [`lock`] for an `atexit` handler: after [`halt`] it takes the lock
+/// instead of parking for good.
+pub fn lock_at_exit() {
+    if HALT.load(Ordering::SeqCst) {
+        raw_lock();
+    } else {
+        lock();
+    }
+}
+
 /// Take the world lock as a running mutator (heap access, registry
 /// changes). Cooperates with a pending stop first.
 pub fn lock() {

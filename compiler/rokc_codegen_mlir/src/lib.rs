@@ -2,10 +2,11 @@
 //! user `__mlir_op` regions may bring more). `mlir-opt`, `mlir-translate`
 //! and `clang` do the rest.
 
-mod abi;
+pub mod abi;
+mod compact;
 mod debug;
 pub mod emit;
-mod mangle;
+pub mod mangle;
 mod repl;
 
 pub use mangle::{Demangled, demangle, pkg_hash};

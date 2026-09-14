@@ -521,7 +521,7 @@ mod tests {
         ] {
             let e = parse(src, "rok.rokon").unwrap_err();
             assert!(e.contains(want), "{src:?}: {e}");
-            assert!(e.starts_with("rok.rokon:1:"), "{e}");
+            assert!(e.contains("--> rok.rokon:1:"), "{e}");
         }
         // The position is the offending token's.
         let e = parse(
@@ -530,12 +530,12 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            e.starts_with("rok.rokon:3:5: error: unknown field `edtion`"),
+            e.contains("unknown field `edtion`") && e.contains("--> rok.rokon:3:5\n"),
             "{e}"
         );
         let e = parse(APP.replace("tag", "tga").as_str(), "rok.rokon").unwrap_err();
         assert!(
-            e.starts_with("rok.rokon:7:28: error: unknown argument `tga`"),
+            e.contains("unknown argument `tga`") && e.contains("--> rok.rokon:7:28\n"),
             "{e}"
         );
     }

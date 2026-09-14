@@ -3,11 +3,13 @@
 //! The session is one anonymous `main.rok` (907.1: a run of cells is
 //! the implicit `main.rok` with top-level statements and items appended).
 //!
-//! rokc compiles each cell to LLVM IR text (`mlir-opt | mlir-translate`;
-//! rokc links no LLVM, 0.2.4) and sends it to a long-lived host process
-//! (`repl_host.c`: the runtime linked in and initialized once, and
-//! LLVM's ORC JIT through the LLVM-C API), which JIT-compiles it and
-//! runs it once. Items (`fn`, `struct`, `impl`, ..) are in every cell's
+//! rokc compiles each cell and sends it to a long-lived host process
+//! (`repl_host.c`, the runtime linked in and initialized once), which
+//! links it into the session and runs it once. At `-O0` a cell is an
+//! object of the native backend, which the host maps and links itself
+//! (no LLVM anywhere); above, it is LLVM IR text (`mlir-opt |
+//! mlir-translate`; rokc links no LLVM, 0.2.4) the host JIT-compiles
+//! with LLVM's ORC through the LLVM-C API. Items (`fn`, `struct`, `impl`, ..) are in every cell's
 //! program; statements are not. A function the host already compiled
 //! with the same text (library code, unchanged items) is only declared
 //! (`ReplCell::known`), so library code is compiled once per session.
@@ -18,12 +20,10 @@
 //! that dies (panic) leaves the session as it was before it: the host
 //! forks a snapshot per cell.
 //!
-//! `--replay` mode: each input recompiles the whole program and the
-//! host runs it in a throwaway child; the output of the new cell is
-//! what follows a marker the cell prints first. Earlier cells run
-//! again: their side effects (I/O, time, randomness) repeat. It keeps
-//! bindings whose types cannot be named in source (closures, ..), which
-//! the default mode refuses.
+//! `repl <path>` loads a program first (`load_program`): its items join the
+//! session, then its top-level statements run as cells, each ending
+//! after a top-level `let`, so a failure keeps the bindings made before
+//! it.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -35,6 +35,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use rokc_diagnostic::{Label, RokDiagnostic, Span};
 use rokc_hir::{HirExpr, HirExprKind, HirModule, HirStaticDef, HirStmt, HirTy};
 use rokc_interface::{
     BuildOptions, CompileResult, EmitKind, ReplCell, ReplFn, Session, TempDir, link_host, report,
@@ -43,8 +44,6 @@ use rokc_ir_common::{ConstVal, LocalId};
 
 use crate::analysis::{ty_name, ty_path};
 
-const OUT_MARK: &str = "@@rok-repl-out@@";
-const VAL_MARK: &str = "@@rok-repl-val@@";
 const VALUE: &str = "__rok_repl_v";
 /// The host's `__rok_repl_out`: a cell's shown value.
 const SHOWN: &str = "__rok_repl_out";
@@ -62,16 +61,36 @@ const HELP: &str = "\
   :quit          leave (also end of input)
 ";
 
-/// The cells so far, as source.
+/// The items of the session, as source.
 #[derive(Clone, Default)]
 struct State {
     /// Items with their replace key (`fn f`, `struct S`; `None` for impls).
     items: Vec<(Option<String>, String)>,
-    /// Top-level statements; a rebinding `let` opens a nested block.
-    stmts: String,
-    depth: usize,
-    /// Names `let`-bound at the innermost block.
-    names: HashSet<String>,
+}
+
+/// A program loaded into the session (`repl <path>`).
+struct Program {
+    /// The session source's path: beside the program's root file, so
+    /// its `mod` files resolve.
+    session: PathBuf,
+    anonymous: bool,
+    /// The program's path and text, where its diagnostics and panic
+    /// locations point.
+    path: String,
+    text: Arc<str>,
+    /// Its items as the session has them, with their offsets in `text`.
+    items: Vec<(String, usize)>,
+    /// The offset in `text` of the cell being built (`None`: a typed cell).
+    cell: Option<usize>,
+}
+
+/// How a cell failed.
+enum Fail {
+    /// Reported.
+    Reported,
+    /// A binding later cells could not use (not reported): its name and
+    /// why.
+    Unkept(String, String),
 }
 
 enum Cell<'a> {
@@ -112,30 +131,7 @@ impl Lap {
 /// failed (reported; the session is as before it).
 type Loaded = Option<String>;
 
-#[derive(PartialEq, Eq)]
-enum Outcome {
-    Ok,
-    CompileError,
-    RunError,
-}
-
-impl State {
-    /// The session program with `cell` appended to the statements.
-    fn program(&self, cell: &str) -> String {
-        let mut src = String::new();
-        for (_, item) in &self.items {
-            src.push_str(item);
-            src.push('\n');
-        }
-        src.push_str(&self.stmts);
-        src.push_str(cell);
-        src.push('\n');
-        src.push_str(&"}\n".repeat(self.depth));
-        src
-    }
-}
-
-/// A top-level binding (default mode).
+/// A top-level binding.
 #[derive(Clone)]
 struct Binding {
     name: String,
@@ -168,9 +164,9 @@ pub struct Repl {
     pub deps_dir: PathBuf,
     /// The dependency archives the host has linked.
     linked: HashSet<PathBuf>,
-    /// `--replay`: every cell reruns the whole session.
-    pub replay: bool,
-    /// The first cell (`repl --package`: `use <pkg>::*;`); `:reset`
+    /// The program `repl <path>` loaded.
+    program: Option<Program>,
+    /// The first cell (`repl <lib>`: `use <lib>::*;`); `:reset`
     /// runs it again.
     pub prelude: Option<String>,
     opts: BuildOptions,
@@ -195,6 +191,12 @@ pub struct Repl {
     /// instead of compiling it again (`ReplCell::known`).
     known: HashMap<String, (u64, Vec<String>)>,
     tmp: TempDir,
+    /// The text the user typed for the cell being built: diagnostics
+    /// point into it, not into the generated session source.
+    input: String,
+    /// The last compile failed only because an expression cell never
+    /// yields a value (`panic(..)`).
+    diverged: std::cell::Cell<bool>,
     /// The host process running the current cell (0: none). `SIGINT`
     /// to it ends the cell; the session goes on as before it.
     pub running: Arc<AtomicU32>,
@@ -207,7 +209,7 @@ impl Repl {
             externs: Vec::new(),
             deps_dir: PathBuf::new(),
             linked: HashSet::new(),
-            replay: false,
+            program: None,
             prelude: None,
             tmp: TempDir::new(opts.keep_temps).map_err(|d| d.message)?,
             opts,
@@ -220,6 +222,8 @@ impl Repl {
             built: 0,
             gc_tables: Vec::new(),
             known: HashMap::new(),
+            input: String::new(),
+            diverged: std::cell::Cell::new(false),
             running: Arc::default(),
         })
     }
@@ -254,8 +258,35 @@ impl Repl {
         }
     }
 
+    /// Read cells from the terminal with line editing and history
+    /// (`line_edit`) until `:quit` or end of input.
+    pub fn run_tty(&mut self) {
+        let mut ed = crate::line_edit::Editor::new();
+        let mut buf = String::new();
+        loop {
+            let prompt = if buf.is_empty() { "> " } else { "... " };
+            match ed.read_line(prompt) {
+                crate::line_edit::Input::Eof => return,
+                crate::line_edit::Input::Interrupt => buf.clear(),
+                crate::line_edit::Input::Line(line) => {
+                    ed.add(&line);
+                    buf.push_str(&line);
+                    buf.push('\n');
+                    if incomplete(&buf) {
+                        continue;
+                    }
+                    let cell = std::mem::take(&mut buf);
+                    if !self.cell(cell.trim()) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     /// One input; `false` to stop.
     pub fn cell(&mut self, cell: &str) -> bool {
+        cell.clone_into(&mut self.input);
         match cell {
             "" => {}
             ":q" | ":quit" | ":exit" => return false,
@@ -271,6 +302,7 @@ impl Repl {
             ":help" | ":h" => print!("{HELP}"),
             _ if cell.starts_with(":type ") || cell.starts_with(":t ") => {
                 let expr = cell.split_once(' ').map_or("", |(_, e)| e).trim();
+                expr.clone_into(&mut self.input);
                 let src = self.session(&self.state, &format!("let {VALUE} = ({expr});"), None);
                 if let Some(ty) = self
                     .compile(&src, false)
@@ -281,61 +313,33 @@ impl Repl {
             }
             _ if cell.starts_with(":add ") => self.add_dep(&cell[5..]),
             _ if cell.starts_with(':') => eprintln!("unknown command `{cell}` (:help lists them)"),
-            _ if !self.replay => {
+            _ => {
                 if let Ok(Some(shown)) = self.eval(cell) {
                     println!("{shown}");
                 }
             }
-            _ => match classify(cell) {
-                Cell::Item(key) => {
-                    self.item(cell, key);
-                }
-                Cell::Let(name) => {
-                    // 907.3: rebinding a name at the top level opens a
-                    // block, so the old binding is shadowed instead of
-                    // redeclared (5.1.4).
-                    let mut next = self.state.clone();
-                    if name.is_some_and(|n| next.names.contains(n)) {
-                        next.depth += 1;
-                        next.names.clear();
-                        next.stmts.push_str("{\n");
-                    }
-                    if self.run_cell(&next, cell, name) {
-                        next.stmts.push_str(cell);
-                        next.stmts.push('\n');
-                        next.names.extend(name.map(str::to_owned));
-                        self.state = next;
-                    }
-                }
-                Cell::Stmt => {
-                    if self.run_cell(&self.state.clone(), cell, None) {
-                        self.state.stmts.push_str(cell);
-                        self.state.stmts.push('\n');
-                    }
-                }
-                Cell::Expr => {
-                    let bind = format!("let {VALUE} = ({cell});");
-                    if self.run_cell(&self.state.clone(), &bind, Some(VALUE)) {
-                        // Later runs evaluate it again, without showing it.
-                        self.state.stmts.push_str(&format!("({cell});\n"));
-                    }
-                }
-            },
         }
         true
     }
 
-    /// One cell in the default mode (not `--replay`): what it shows
-    /// (`type: value`, or the type alone), or `Err` when it failed (the
-    /// errors went to stderr). Output of the cell goes to stdout / stderr.
+    /// One cell: what it shows (`type: value`, or the type alone), or
+    /// `Err` when it failed (the errors went to stderr). Output of the
+    /// cell goes to stdout / stderr.
     // The errors are reported as they happen: nothing more to carry.
     #[allow(clippy::result_unit_err)]
     pub fn eval(&mut self, cell: &str) -> Result<Option<String>, ()> {
+        cell.clone_into(&mut self.input);
         match classify(cell) {
             Cell::Item(key) => self.item(cell, key).then_some(None).ok_or(()),
             Cell::Let(name) => self.run_once(cell, name),
             Cell::Stmt => self.run_once(cell, None),
-            Cell::Expr => self.run_once(&format!("let {VALUE} = ({cell});"), Some(VALUE)),
+            Cell::Expr => {
+                let r = self.run_once(&format!("let {VALUE} = ({cell});"), Some(VALUE));
+                if r.is_err() && self.diverged.take() {
+                    return self.run_once(&format!("{cell};"), None);
+                }
+                r
+            }
         }
     }
 
@@ -390,6 +394,7 @@ impl Repl {
             target: None,
             dir: &self.deps_dir,
             quiet: true,
+            std: None,
         };
         match build.prebuild(&deps) {
             Ok(externs) => self.externs = externs,
@@ -457,14 +462,10 @@ impl Repl {
         true
     }
 
-    /// The source of a cell: the replayed session (`--replay`), or the
-    /// items, the bindings' slots, `body`, and the store of `show`'s
-    /// `Debug` text to the host. `keep` adds the stores of the bindings
-    /// back to their slots to the compiled HIR.
+    /// The source of a cell: the items, the bindings' slots, `body`, and
+    /// the store of `show`'s `Debug` text to the host. `keep` adds the
+    /// stores of the bindings back to their slots to the compiled HIR.
     fn session(&self, state: &State, body: &str, show: Option<&str>) -> String {
-        if self.replay {
-            return state.program(body);
-        }
         let mut src = String::new();
         for (_, item) in &state.items {
             src.push_str(item);
@@ -482,7 +483,11 @@ impl Repl {
         for b in &self.bindings {
             let _ = writeln!(src, "let {} = {};", b.name, b.sym);
         }
-        // Its own block: a `let` may rebind a name (907.3, 5.1.4).
+        // Its own block: a `let` may rebind a name (907.3, 5.1.4). None
+        // without a body: a loaded program's `fn main` is the entry then.
+        if body.is_empty() && show.is_none() {
+            return src;
+        }
         src.push_str("{\n");
         src.push_str(body);
         src.push('\n');
@@ -493,9 +498,25 @@ impl Repl {
         src
     }
 
-    /// Default mode: build `cell` as a library, run it in the host, keep
-    /// its top-level bindings; `type: value` of `show` (`eval`).
+    /// Build `cell` as a library, run it in the host, keep its top-level
+    /// bindings; `type: value` of `show` (`eval`).
     fn run_once(&mut self, cell: &str, show: Option<&str>) -> Result<Option<String>, ()> {
+        self.run_cell(cell, show, &[]).map_err(|f| {
+            if let Fail::Unkept(_, e) = f {
+                eprintln!("error: {e}");
+            }
+        })
+    }
+
+    /// `run_once`; a binding later cells could not use fails the cell
+    /// before it runs, unless it is one of `may_drop` (then it is left
+    /// out, noted).
+    fn run_cell(
+        &mut self,
+        cell: &str,
+        show: Option<&str>,
+        may_drop: &[String],
+    ) -> Result<Option<String>, Fail> {
         self.start_host();
         let mut lap = Lap::start();
         let mut shown = show.is_some();
@@ -505,17 +526,13 @@ impl Repl {
                 Some(r) => break r,
                 // Most likely no `Debug`; the plain build reports real errors.
                 None if shown => shown = false,
-                None => return Err(()),
+                None => return Err(Fail::Reported),
             }
         };
         lap.mark("front end");
-        let new = match self.keep(&mut r) {
-            Ok(new) => new,
-            Err(e) => {
-                eprintln!("error: {e}");
-                return Err(());
-            }
-        };
+        let new = self
+            .keep(&mut r, may_drop)
+            .map_err(|(n, e)| Fail::Unkept(n, e))?;
         lap.mark("bindings");
         self.built += 1;
         let mut opts = self.opts.clone();
@@ -535,23 +552,23 @@ impl Repl {
             define: new.iter().map(|b| b.sym.clone()).collect(),
             statics: self.statics.iter().cloned().collect(),
         });
-        let (ir, out) = match r.cell_ir(&opts) {
+        let (ir, out) = match r.cell_code(&opts) {
             Ok(x) => x,
             Err(d) => {
                 report(&d);
-                return Err(());
+                return Err(Fail::Reported);
             }
         };
-        lap.mark("mlir-opt | mlir-translate");
+        lap.mark("codegen");
         lap.note(&format!(
             "functions: {} compiled, {} from earlier cells",
             out.fns.len(),
             out.reused
         ));
         self.link_archives(&r);
-        let value = self.load("cell", &ir);
+        let value = self.load(&ir);
         lap.mark("jit + run");
-        let value = value.ok_or(())?;
+        let value = value.ok_or(Fail::Reported)?;
         self.gc_tables = out.gc_tables;
         self.learn(out.fresh, out.fns);
         self.bindings
@@ -578,7 +595,13 @@ impl Repl {
     /// `r` (`session`), the last one of each name. Adds their slots to
     /// the HIR and, at the end of the block, the stores of every
     /// binding back to its slot (a `let` can be assigned).
-    fn keep(&self, r: &mut CompileResult) -> Result<Vec<Binding>, String> {
+    /// A binding later cells could not use is an error (its name and
+    /// why), unless it is one of `may_drop`.
+    fn keep(
+        &self,
+        r: &mut CompileResult,
+        may_drop: &[String],
+    ) -> Result<Vec<Binding>, (String, String)> {
         let Some(hir) = r.modules.first_mut().map(|m| &mut m.hir) else {
             return Ok(Vec::new());
         };
@@ -626,30 +649,30 @@ impl Repl {
             let (Some(name), Some(l)) = (named(id), local(id)) else {
                 continue;
             };
-            // What the HIR printer cannot write as source
-            // (closures, unresolved types) is refused; `--replay` keeps it.
             // Full paths, so later cells name the type without a `use`.
             let ty = ty_path(hir, &l.ty);
-            if ty.contains('{') || ty.starts_with("closure") {
-                return Err(format!(
-                    "`{name}: {}` cannot be kept for later cells (its type has no name); \
-                     `rokc repl --replay` keeps it",
+            // What the HIR printer cannot write as source (closures,
+            // unresolved types) cannot be kept; nor can a type the next
+            // cell, at the top level of the session, cannot see (spec 5.6).
+            let why = if ty.contains('{') || ty.starts_with("closure") {
+                Some("its type has no name".to_owned())
+            } else {
+                ty.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'))
+                    .find(|p| !rokc_hir::type_visible(hir, p, ""))
+                    .map(|p| format!("`{p}` is private to its module"))
+            };
+            if let Some(why) = why {
+                let msg = format!(
+                    "`{name}: {}` cannot be kept for later cells ({why})",
                     ty_name(hir, &l.ty)
-                ));
+                );
+                if !may_drop.iter().any(|n| n == name) {
+                    return Err((name.to_owned(), msg));
+                }
+                eprintln!("note: {msg}");
+                continue;
             }
             let holds_any = holds_any(hir, &l.ty, &mut Vec::new());
-            // The next cell writes `ty` at the top level of the session:
-            // every type it names must be visible there (spec 5.6).
-            let hidden = ty
-                .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'))
-                .find(|p| !rokc_hir::type_visible(hir, p, ""));
-            if let Some(p) = hidden {
-                return Err(format!(
-                    "`{name}: {}` cannot be kept for later cells (`{p}` is private to its \
-                     module); `rokc repl --replay` keeps it",
-                    ty_name(hir, &l.ty)
-                ));
-            }
             new.retain(|(b, _)| b.name != name);
             let sym = format!("__rok_repl_{}_{i}", self.built + 1);
             let name = name.to_owned();
@@ -783,15 +806,14 @@ impl Repl {
         }
     }
 
-    /// Send the host (started on first use) `<head> <len>` and the
+    /// Send the host (started on first use) `cell <len>` and the
     /// cell's LLVM IR; its shown value.
-    fn load(&mut self, head: &str, ir: &[u8]) -> Loaded {
+    fn load(&mut self, ir: &[u8]) -> Loaded {
         self.host()?;
         let host = self.host.as_mut()?;
         let _ = std::io::stdout().flush();
         let reply = (|| {
-            let (word, rest) = head.split_once(' ').unwrap_or((head, ""));
-            writeln!(host.ctl, "{word} {} {rest}", ir.len())?;
+            writeln!(host.ctl, "cell {}", ir.len())?;
             host.ctl.write_all(ir)?;
             let mut rd = BufReader::new(&host.ctl);
             let mut line = String::new();
@@ -814,9 +836,7 @@ impl Repl {
         match reply {
             Ok(r) if r.starts_with("ok ") => Some(r[3..].to_owned()),
             Ok(r) if r == "err\n" => {
-                if head == "cell" {
-                    eprintln!("error: the cell failed; the session is as it was before it");
-                }
+                eprintln!("error: the cell failed; the session is as it was before it");
                 None
             }
             _ => {
@@ -833,25 +853,9 @@ impl Repl {
         }
     }
 
-    /// Run `cell` after the statements of `base`, showing `type: value`
-    /// of the binding `show` (without the value when it has no `Debug`).
-    fn run_cell(&mut self, base: &State, cell: &str, show: Option<&str>) -> bool {
-        let marked = format!("println(\"{OUT_MARK}\");\neprintln(\"{OUT_MARK}\");\n{cell}");
-        if let Some(n) = show {
-            let src = base.program(&format!(
-                "{marked}\nprintln(\"{VAL_MARK}\");\nprintln(f\"{{{n}:?}}\");"
-            ));
-            match self.execute(&src, show, true) {
-                Outcome::Ok => return true,
-                Outcome::RunError => return false,
-                // Most likely no `Debug`; the plain run reports real errors.
-                Outcome::CompileError => {}
-            }
-        }
-        self.execute(&base.program(&marked), show, false) == Outcome::Ok
-    }
-
-    /// Front end; reports errors unless `quiet`.
+    /// Front end; reports errors unless `quiet`. Locations in the user's
+    /// text read as `<repl>:line:col`, or as the loaded program's own
+    /// (diagnostics and the panic locations codegen embeds).
     fn compile(&self, src: &str, quiet: bool) -> Option<CompileResult> {
         let mut s = Session::new();
         for b in &self.bootstrap {
@@ -860,69 +864,320 @@ impl Repl {
         for (n, p) in &self.externs {
             s.add_extern(n.clone(), p.clone());
         }
-        s.set_anonymous(true);
+        let path = self
+            .program
+            .as_ref()
+            .map_or_else(|| self.tmp.path().join("repl.rok"), |p| p.session.clone());
+        s.set_anonymous(self.program.as_ref().is_none_or(|p| p.anonymous));
         s.set_cache_library(true);
         rokc_diagnostic::clear_files();
-        let r = s.compile_source(src, &self.tmp.path().join("repl.rok"));
+        // Registered first so the views are in place while HIR lowering
+        // writes caller locations (`#[track_caller]`).
+        let session = rokc_diagnostic::register_file(path.display().to_string(), src.to_owned());
+        let regions = self.regions(src);
+        for r in &regions {
+            let (line, col) = line_col(src, r.off);
+            let last =
+                line + u32::try_from(src[r.off..r.off + r.len].matches('\n').count()).ok()?;
+            let at = line_col(&r.text, r.at);
+            rokc_diagnostic::view_file(
+                session,
+                r.path.clone(),
+                (line, col + 1),
+                last,
+                (at.0, at.1 + 1),
+            );
+        }
+        let r = s.compile_source(src, &path);
         if !r.has_errors() {
             return Some(r);
         }
+        // A diverging expression cell (`panic(..)`) has no value to show:
+        // `eval` runs it again as a statement.
+        let never = format!("`{VALUE}`: the initializer never produces a value");
+        if let [d] = r.errors.as_slice() {
+            if d.message.contains(&never) {
+                self.diverged.set(true);
+                return None;
+            }
+        }
         if !quiet {
-            r.report_errors();
+            let path = path.display().to_string();
+            for d in &r.errors {
+                report(&localize(d, session, &path, &regions));
+            }
         }
         None
     }
 
-    /// Compile `src` and run it in a throwaway child of the host (its
-    /// JIT, nothing kept); print the new cell's output and `type: value`
-    /// of `name`.
-    fn execute(&mut self, src: &str, name: Option<&str>, quiet: bool) -> Outcome {
-        self.start_host();
-        let Some(r) = self.compile(src, quiet) else {
-            return Outcome::CompileError;
+    /// Where the user's text is in the session source `src`: the cell
+    /// being built, and the loaded program's items.
+    fn regions(&self, src: &str) -> Vec<Region> {
+        let program = self.program.as_ref();
+        let shown = |p: &Program, off: usize, len: usize, at: usize| Region {
+            off,
+            len,
+            file: rokc_diagnostic::register_file(p.path.clone(), p.text.to_string()),
+            path: p.path.clone(),
+            text: Arc::clone(&p.text),
+            at,
         };
-        let mut opts = self.opts.clone();
-        opts.repl = Some(ReplCell::default());
-        let ir = match r.cell_ir(&opts) {
-            Ok((ir, _)) => ir,
-            Err(d) => {
-                report(&d);
-                return Outcome::CompileError;
-            }
-        };
-        let (out, err) = (self.tmp.path().join("out"), self.tmp.path().join("err"));
-        self.link_archives(&r);
-        let ran = self.load(&format!("once {} {}", out.display(), err.display()), &ir);
-        let mark = format!("{OUT_MARK}\n");
-        let after = |f: &std::path::Path| {
-            let s = String::from_utf8_lossy(&std::fs::read(f).unwrap_or_default()).into_owned();
-            s.split_once(&mark)
-                .map_or_else(String::new, |(_, t)| t.to_owned())
-        };
-        let stdout = after(&out);
-        let (printed, value) = match stdout.split_once(&format!("{VAL_MARK}\n")) {
-            Some((p, v)) => (p, Some(v.trim_end_matches('\n'))),
-            None => (stdout.as_str(), None),
-        };
-        print!("{printed}");
-        eprint!("{}", after(&err));
-        if ran.is_none() {
-            // Replaying a failing cell would fail every later
-            // run, so unlike 907.5 the cell is dropped.
-            eprintln!("error: the cell failed; it is not kept");
-            return Outcome::RunError;
+        let mut regions = Vec::new();
+        if let Some(off) = src
+            .rfind(self.input.as_str())
+            .filter(|_| !self.input.is_empty())
+        {
+            let len = self.input.len();
+            regions.push(match program.and_then(|p| Some((p, p.cell?))) {
+                Some((p, at)) => shown(p, off, len, at),
+                None => Region {
+                    off,
+                    len,
+                    file: rokc_diagnostic::register_file(REPL_FILE.to_owned(), self.input.clone()),
+                    path: REPL_FILE.to_owned(),
+                    text: Arc::from(self.input.as_str()),
+                    at: 0,
+                },
+            });
         }
-        if let Some(ty) = name.and_then(|n| binding_ty(&r, n)) {
-            match value {
-                Some(_) if ty == "()" => {}
-                Some(v) => println!("{ty}: {v}"),
-                None if ty != "()" => println!("{ty}"),
-                None => {}
+        if let Some(p) = program {
+            for (item, at) in &p.items {
+                if let Some(off) = src.find(item.as_str()) {
+                    regions.push(shown(p, off, item.len(), *at));
+                }
             }
         }
-        let _ = std::io::stdout().flush();
-        Outcome::Ok
+        regions
     }
+
+    /// `repl <path>`: load the program whose root file is `path` (`anonymous`:
+    /// a lone file) into the session; `false` when it failed (reported).
+    /// It is front-end checked as a whole first, as `run` would. Its
+    /// items join the session; its top-level statements run as cells,
+    /// each ending after a top-level `let`, so a failure keeps the
+    /// bindings made before it (with the values they had at that `let`).
+    /// A binding later cells cannot use (its type is private, ..) is
+    /// dropped when no later statement names it; else the statements up
+    /// to the last one naming it run as one cell. A `fn main` program
+    /// runs as one cell with `main` its entry; `main` then leaves the
+    /// session (the session is its own `main`), its locals with it.
+    pub fn load_program(&mut self, path: &std::path::Path, anonymous: bool) -> bool {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("error: cannot read {}: {e}", path.display());
+                return false;
+            }
+        };
+        let shown = path.display().to_string();
+        let (tokens, _) = rokc_lexer::Lexer::new(&text, shown.clone()).lex_all();
+        let tops = rokc_parser::parse_program(&tokens, shown.clone()).0.tops;
+        let session = if anonymous {
+            self.tmp.path().join("repl.rok")
+        } else {
+            path.with_file_name("repl.rok")
+        };
+        // Top-level elements: (start, end, is_item).
+        let tops: Vec<(usize, usize, bool)> = tops
+            .iter()
+            .enumerate()
+            .map(|(i, &(start, item))| {
+                let end = tops.get(i + 1).map_or(text.len(), |t| t.0 as usize);
+                let start = start as usize;
+                (start, start + text[start..end].trim_end().len(), item)
+            })
+            .collect();
+        let mut items = Vec::new();
+        // The statements' text with the items blanked out (newlines
+        // kept): offsets in it are offsets in the file.
+        let mut body = text.clone().into_bytes();
+        for &(start, end, _) in tops.iter().filter(|t| t.2) {
+            let item = text[start..end].to_owned();
+            let key = match classify(&item) {
+                Cell::Item(k) => k,
+                _ => None,
+            };
+            items.push((key, item, start));
+            for b in &mut body[start..end] {
+                if *b != b'\n' {
+                    *b = b' ';
+                }
+            }
+        }
+        let body = String::from_utf8_lossy(&body).into_owned();
+        let stmts: Vec<(usize, usize)> = tops
+            .iter()
+            .filter(|t| !t.2)
+            .map(|&(start, end, _)| (start, end))
+            .collect();
+        // One cell per stretch ending at a `let` (or the last statement).
+        let mut cells: Vec<(usize, usize)> = Vec::new();
+        let mut from = None;
+        for (i, &(start, end)) in stmts.iter().enumerate() {
+            let from_here = *from.get_or_insert(start);
+            if matches!(classify(&text[start..end]), Cell::Let(_)) || i + 1 == stmts.len() {
+                cells.push((from_here, end));
+                from = None;
+            }
+        }
+        self.program = Some(Program {
+            session,
+            anonymous,
+            path: shown,
+            text: Arc::from(text.as_str()),
+            items: items.iter().map(|(_, t, at)| (t.clone(), *at)).collect(),
+            cell: None,
+        });
+        let mut next = self.state.clone();
+        next.items.extend(items.into_iter().map(|(k, t, _)| (k, t)));
+        let all = match (cells.first(), cells.last()) {
+            (Some(f), Some(l)) => &body[f.0..l.1],
+            _ => "",
+        };
+        self.set_cell(all, cells.first().map(|c| c.0));
+        let checked = self
+            .compile(&self.session(&next, all, None), false)
+            .is_some();
+        self.set_cell("", None);
+        if !checked {
+            if let Some(p) = &mut self.program {
+                p.items.clear();
+            }
+            return false;
+        }
+        let main = Some("fn main".to_owned());
+        if next.items.iter().any(|(k, _)| *k == main) {
+            self.state = next.clone();
+            next.items.retain(|(k, _)| *k != main);
+            let ok = self.run_cell("", None, &[]).is_ok();
+            self.state = next;
+            return ok;
+        }
+        self.state = next;
+        let mut ok = true;
+        let mut i = 0;
+        while ok && i < cells.len() {
+            // Cells `i..=j` run as one; `may_drop`: bindings in them that
+            // later cells cannot use and need not.
+            let (mut j, mut may_drop) = (i, Vec::new());
+            loop {
+                let text = &body[cells[i].0..cells[j].1];
+                self.set_cell(text, Some(cells[i].0));
+                match self.run_cell(text, None, &may_drop) {
+                    Ok(_) => break,
+                    // Merged through the last cell that names it.
+                    Err(Fail::Unkept(name, _)) => {
+                        match (j + 1..cells.len())
+                            .rev()
+                            .find(|&k| names(&body[cells[k].0..cells[k].1], &name))
+                        {
+                            Some(k) => j = k,
+                            None => may_drop.push(name),
+                        }
+                    }
+                    Err(Fail::Reported) => {
+                        ok = false;
+                        if j + 1 < cells.len() {
+                            eprintln!("note: the rest of the program did not run");
+                        }
+                        break;
+                    }
+                }
+            }
+            i = j + 1;
+        }
+        self.set_cell("", None);
+        ok
+    }
+
+    /// The cell being built is `text`, at `at` in the loaded program.
+    fn set_cell(&mut self, text: &str, at: Option<usize>) {
+        text.clone_into(&mut self.input);
+        if let Some(p) = &mut self.program {
+            p.cell = at;
+        }
+    }
+}
+
+/// The name a cell's text goes by in locations.
+const REPL_FILE: &str = "<repl>";
+
+/// Whether `text` has the identifier `name`.
+fn names(text: &str, name: &str) -> bool {
+    let (tokens, _) = rokc_lexer::Lexer::new(text, "").lex_all();
+    tokens
+        .iter()
+        .any(|t| matches!(&t.kind, rokc_lexer::TokenKind::Ident(n) if n == name))
+}
+
+/// User text inside the generated session source, and where it shows.
+struct Region {
+    /// Byte offset and length in the session source.
+    off: usize,
+    len: usize,
+    /// The file it shows in (registered id, path, text) and its offset there.
+    file: u32,
+    path: String,
+    text: Arc<str>,
+    at: usize,
+}
+
+/// 1-based line of byte `off` in `src`, and how many chars precede it
+/// on that line.
+fn line_col(src: &str, off: usize) -> (u32, u32) {
+    let before = &src[..off];
+    let start = before.rfind('\n').map_or(0, |i| i + 1);
+    (
+        u32::try_from(before.matches('\n').count() + 1).unwrap_or(0),
+        u32::try_from(before[start..].chars().count()).unwrap_or(0),
+    )
+}
+
+/// `d` as the user sees it: a location in the user's text moves to the
+/// file it shows in (`regions`); one in the generated wrapper (file
+/// `session` at `path`) is dropped.
+fn localize(d: &RokDiagnostic, session: u32, path: &str, regions: &[Region]) -> RokDiagnostic {
+    let mut d = d.clone();
+    // `None`: the span is in the wrapper. One that opens just before a
+    // region (the `(` around an expression cell) starts at it.
+    let map = |s: Span| -> Option<Span> {
+        if s.file != session {
+            return Some(s);
+        }
+        let (start, end) = (s.start as usize, (s.end as usize).max(s.start as usize));
+        let r = regions
+            .iter()
+            .find(|r| start + 1 >= r.off && start <= r.off + r.len)?;
+        let shown = |b: usize| r.at + b.saturating_sub(r.off).min(r.len);
+        let (start, end) = (shown(start), shown(end));
+        let (line, col) = line_col(&r.text, start);
+        Some(Span {
+            start: u32::try_from(start).ok()?,
+            end: u32::try_from(end).ok()?,
+            line,
+            col: col + 1,
+            file: r.file,
+        })
+    };
+    if d.file.as_deref() == Some(path) {
+        d.file = None;
+    }
+    if let Some(p) = d.primary.take() {
+        d.primary = map(p.span).map(|span| Box::new(Label { span, ..*p }));
+    }
+    d.secondary = std::mem::take(&mut d.secondary)
+        .into_iter()
+        .filter_map(|l| {
+            Some(Label {
+                span: map(l.span)?,
+                ..l
+            })
+        })
+        .collect();
+    d.message = d
+        .message
+        .replace(&format!("`let {VALUE}`"), "the expression");
+    d
 }
 
 /// Build and start the session host.
@@ -1110,26 +1365,33 @@ pub(crate) fn incomplete(src: &str) -> bool {
         || (t.starts_with("#[") && t.lines().all(|l| l.trim_start().starts_with("#[")))
 }
 
-/// `rok repl` with the stdin it was started on.
+/// `rok repl` with the stdin it was started on; `program` (its root
+/// file, whether it is a lone file): `repl <path>`, loaded first.
 pub fn main(
     bootstrap: Vec<PathBuf>,
     externs: Vec<(String, PathBuf)>,
     deps_dir: PathBuf,
     opts: BuildOptions,
     interactive: bool,
-    replay: bool,
     prelude: Option<&str>,
+    program: Option<(&std::path::Path, bool)>,
 ) -> i32 {
     match Repl::new(bootstrap, opts) {
         Ok(mut r) => {
             r.externs = externs;
             r.deps_dir = deps_dir;
-            r.replay = replay;
             if let Some(p) = prelude {
                 r.prelude = Some(p.to_owned());
                 r.cell(p);
             }
-            r.run(std::io::stdin().lock(), interactive);
+            if let Some((path, anonymous)) = program {
+                r.load_program(path, anonymous);
+            }
+            if interactive {
+                r.run_tty();
+            } else {
+                r.run(std::io::stdin().lock(), false);
+            }
             0
         }
         Err(e) => {

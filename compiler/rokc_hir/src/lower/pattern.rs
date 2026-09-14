@@ -943,14 +943,20 @@ pub(super) fn lower_pattern_inner(
             let bound_names = name_sets.first().cloned().unwrap_or_default();
             for (i, set) in name_sets.iter().enumerate().skip(1) {
                 if *set != bound_names {
-                    let missing: Vec<_> = bound_names.difference(set).cloned().collect();
-                    let extra: Vec<_> = set.difference(&bound_names).cloned().collect();
+                    let names = |v: Vec<&String>| {
+                        v.iter()
+                            .map(|n| format!("`{n}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+                    let missing = names(bound_names.difference(set).collect());
+                    let extra = names(set.difference(&bound_names).collect());
                     let mut detail = String::new();
                     if !missing.is_empty() {
-                        detail.push_str(&format!(" missing {missing:?}"));
+                        detail.push_str(&format!(" missing {missing}"));
                     }
                     if !extra.is_empty() {
-                        detail.push_str(&format!(" extra {extra:?}"));
+                        detail.push_str(&format!(" extra {extra}"));
                     }
                     ctx.emit_error(
                         rokc_diagnostic::ErrorKind::Type,
@@ -1124,9 +1130,11 @@ pub(super) fn lower_pattern_inner(
                 .canon_type(&segs)
                 .and_then(|full| ctx.lookup_struct(&full));
             let Some(struct_id) = struct_id else {
-                ctx.emit_error(
-                    rokc_diagnostic::ErrorKind::Type,
+                let help = ctx.type_help(&segs);
+                ctx.unknown_name(
+                    pat.span,
                     format!("cannot find struct `{}` in this scope", segs.join("::")),
+                    help,
                 );
                 return HirPattern::Wildcard;
             };
@@ -1137,10 +1145,7 @@ pub(super) fn lower_pattern_inner(
             let mut lowered: Vec<(u32, HirPattern)> = Vec::new();
             for fp in fields {
                 let Some(idx) = def.fields.iter().position(|f| f.name == fp.name) else {
-                    ctx.emit_error(
-                        rokc_diagnostic::ErrorKind::Type,
-                        format!("struct `{}` has no field `{}`", def.name, fp.name),
-                    );
+                    ctx.no_field(struct_id, &fp.name, pat.span);
                     continue;
                 };
                 ctx.check_field_visible(struct_id, &fp.name);

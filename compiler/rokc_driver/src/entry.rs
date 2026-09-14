@@ -30,12 +30,15 @@ pub fn resolve_entry(stmts: Vec<Stmt>, items: &mut Vec<Item>, diags: &mut Vec<Ro
         _ => None,
     });
     match (explicit, stmts.is_empty()) {
-        (Some(_), false) => diags.push(RokDiagnostic::error(
-            ErrorKind::Module,
-            "`main.rok` has both top-level statements and `fn main`; use exactly one \
-             entry point (spec 4.16.1)"
-                .to_owned(),
-        )),
+        (Some(f), false) => diags.push(
+            RokDiagnostic::error(
+                ErrorKind::Module,
+                "`main.rok` has both top-level statements and `fn main`; use exactly one \
+                 entry point (spec 4.16.1)",
+            )
+            .with_span(stmts[0].span, "a top-level statement")
+            .with_secondary(f.span, "`fn main` here"),
+        ),
         (Some(f), true) => check_main_signature(f, diags),
         // Items only: form 2 with no statements, an empty implicit `main`.
         (None, _) => items.push(Item::Fn(implicit_main(stmts))),
@@ -86,10 +89,10 @@ fn implicit_main(stmts: Vec<Stmt>) -> FnDef {
 /// A `Result` return is not an entry form.
 fn check_main_signature(f: &FnDef, diags: &mut Vec<RokDiagnostic>) {
     let mut bad = |msg: &str| {
-        diags.push(RokDiagnostic::error(
-            ErrorKind::Type,
-            format!("`fn main`: {msg} (spec 4.16.3)"),
-        ));
+        diags.push(
+            RokDiagnostic::error(ErrorKind::Type, format!("`fn main`: {msg} (spec 4.16.3)"))
+                .with_span(f.span, ""),
+        );
     };
     if !f.params.is_empty() {
         bad("takes no parameters; read arguments through `rok::std::env`");

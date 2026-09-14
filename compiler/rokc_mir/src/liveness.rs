@@ -114,6 +114,49 @@ fn successors(t: &Terminator) -> Vec<rokc_ir_common::BlockId> {
     }
 }
 
+/// Per local: it is assigned exactly once, by an `Assign`, and read
+/// only after that in the same block (so its value can stay an SSA
+/// value). Never a parameter or a block param.
+#[must_use]
+pub fn block_local(f: &MirFunction) -> Vec<bool> {
+    // Per local: (defining block, statement index), or poisoned.
+    let mut def: Vec<Option<(usize, usize)>> = vec![None; f.locals.len()];
+    let mut ok = vec![true; f.locals.len()];
+    for p in f
+        .params
+        .iter()
+        .chain(f.blocks.iter().flat_map(|b| &b.params))
+    {
+        ok[p.0 as usize] = false;
+    }
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for (si, s) in b.stmts.iter().enumerate() {
+            let (uses, d) = stmt_uses(s);
+            for u in uses {
+                let i = u.0 as usize;
+                ok[i] &= def[i].is_some_and(|(db, ds)| db == bi && ds < si);
+            }
+            match (s, d) {
+                (Statement::Assign { .. }, Some(d)) => {
+                    let i = d.0 as usize;
+                    ok[i] &= def[i].is_none();
+                    def[i] = Some((bi, si));
+                }
+                (_, Some(d)) => ok[d.0 as usize] = false,
+                _ => {}
+            }
+        }
+        for u in term_uses(&b.terminator) {
+            let i = u.0 as usize;
+            ok[i] &= def[i].is_some_and(|(db, _)| db == bi);
+        }
+    }
+    for (o, d) in ok.iter_mut().zip(&def) {
+        *o &= d.is_some();
+    }
+    ok
+}
+
 /// The tracked locals' dense indices: liveness of one local does not
 /// depend on the others, so the rest are ignored.
 struct Dense {

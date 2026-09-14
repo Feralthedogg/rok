@@ -21,6 +21,10 @@ pub struct Program {
     pub stmts: Vec<Stmt>,
     /// Source text of each meta expansion (spec 6.9.9, `--emit=expanded`).
     pub expanded: Vec<String>,
+    /// Where each top-level item / statement of the file starts (its
+    /// first token, attributes included), in order: (byte offset,
+    /// whether it is an item). A REPL session splits a program by it.
+    pub tops: Vec<(u32, bool)>,
 }
 
 /// Parsed attribute. Spec 6.1 grammar:

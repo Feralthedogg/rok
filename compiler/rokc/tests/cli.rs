@@ -223,7 +223,7 @@ fn json_and_colored_diagnostics() {
     assert!(line.contains("\"line_start\":1"), "{line}");
 
     let out = rokc(Some(&env), &dir, &["--color=always", "build", "bad.rok"]);
-    assert!(text(&out.stderr).contains("\x1b[1;31merror\x1b[0m"));
+    assert!(text(&out.stderr).contains("\x1b[1;31merror[E100]\x1b[0m"));
     let out = rokc(Some(&env), &dir, &["--color=never", "build", "bad.rok"]);
     assert!(!text(&out.stderr).contains('\x1b'));
 }
@@ -261,7 +261,8 @@ fn fmt_check_and_rewrite() {
     let out = rokc(None, &dir, &["fmt", "--check"]);
     assert_exit(&out, 1);
     assert!(
-        text(&out.stderr).contains("bad.rokon:1:17: error: bare identifier `x`"),
+        text(&out.stderr).contains("error[E002]: bare identifier `x`")
+            && text(&out.stderr).contains("bad.rokon:1:17\n"),
         "{}",
         text(&out.stderr)
     );
@@ -483,6 +484,54 @@ fn defaults_resolve_in_the_declaring_package() {
     let out = rokc(Some(&env), &dir, &["run", "app", "--extern", "dep=dep"]);
     assert_exit(&out, 0);
     assert_eq!(text(&out.stdout), "1 9 5 9 1\n");
+}
+
+/// A sum in a prebuilt dependency's signature has the same tags in the
+/// app: member order does not follow the build's type numbering (the app
+/// instantiates `Dict<str, i32>` before `List<i32>`, the library after).
+#[test]
+fn prebuilt_dependency_sums_keep_their_tags() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("prebuilt-sums");
+    fs::create_dir_all(dir.join("dep")).unwrap();
+    fs::write(
+        dir.join("dep/lib.rok"),
+        "pub struct Zebra { pub n: i32; }\n\
+         pub fn pick(b: bool) -> List<i32> | Dict<str, i32> {\n\
+             if b { let xs: List<i32> = [1, 2, 3]; return xs; }\n\
+             let d: Dict<str, i32> = Dict::new();\n\
+             d[\"k\"] = 7;\n\
+             return d;\n\
+         }\n\
+         pub fn size(x: List<i32> | Dict<str, i32> | Zebra) -> str {\n\
+             match x {\n\
+                 xs: List<i32> => f\"list {xs.len()}\",\n\
+                 d: Dict<str, i32> => f\"dict {d.len()}\",\n\
+                 z: Zebra => f\"zebra {z.n}\",\n\
+             }\n\
+         }\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("app")).unwrap();
+    fs::write(
+        dir.join("app/main.rok"),
+        "struct Mine { a: i32; }\n\
+         let early: Dict<str, i32> = Dict::new();\n\
+         let m = Mine { a: early.len() as i32 };\n\
+         println(dep::size(dep::pick(true)));\n\
+         println(dep::size(dep::pick(false)));\n\
+         println(dep::size(dep::Zebra { n: 4 + m.a }));\n\
+         let own: Dict<str, i32> = Dict::new();\n\
+         println(dep::size(own));\n",
+    )
+    .unwrap();
+    let out = rokc(Some(&env), &dir, &["build", "dep"]);
+    assert_exit(&out, 0);
+    let rhir = dir.join("dep/target/debug/dep.rhir");
+    let ext = format!("dep={}", rhir.display());
+    let out = rokc(Some(&env), &dir, &["run", "-q", "app", "--extern", &ext]);
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "list 3\ndict 1\nzebra 4\ndict 0\n");
 }
 
 #[test]

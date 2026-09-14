@@ -66,7 +66,8 @@ pub(super) fn lookup_in_use_entries_full(
                     format!("{prefix}::")
                 };
                 let suffix_with_sep = format!("::{suffix}");
-                for key in (set.keys)() {
+                let leaf = suffix.rsplit("::").next().unwrap_or(suffix);
+                for key in (set.keys)(leaf) {
                     if key.starts_with(&prefix_with_sep)
                         && key.ends_with(&suffix_with_sep)
                         && (set.visible)(&key)
@@ -466,14 +467,24 @@ pub(super) fn resolve_ty_with_structs(
             let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
             let generics = p.segments.last().map_or(&[][..], |s| s.generics.as_slice());
             let Some(full) = sc.names.canon(&segs, sc.module, &[]) else {
+                if !p.span.is_dummy() {
+                    sc.names
+                        .unknown_spans
+                        .borrow_mut()
+                        .entry(segs.join("::"))
+                        .or_insert(p.span);
+                }
                 return HirTy::Path(segs.iter().map(|s| (*s).to_owned()).collect());
             };
             if sc.names.traits.contains(&full) {
-                sc.names.error(format!(
-                    "trait `{full}` cannot be used as a type directly — use a closed \
-                     sum (`A | B`) or a generic parameter (`<T: {full}>`) instead \
-                     (i-want-this 538)"
-                ));
+                let written = segs.join("::");
+                sc.names.error_help(
+                    format!("trait `{full}` cannot be used as a type directly"),
+                    format!(
+                        "use `any {written}` for a value of any type implementing it, or a \
+                         generic parameter `<T: {written}>`"
+                    ),
+                );
                 return HirTy::Any;
             }
             if let (GC_BUF, [elem]) = (full.as_str(), generics) {
@@ -553,7 +564,7 @@ pub(super) fn resolve_ty_with_structs(
                 // `trait_key`); anything else must name a declared trait.
                 if !user_trait && !sc.names.traits.iter().any(|t| leaf_name(t) == key) {
                     sc.names.error(format!(
-                        "`{}` in `any {}` is not a trait — `any` bounds must name traits (D4)",
+                        "`{}` in `any {}` is not a trait — `any` bounds must name traits",
                         segs.join("::"),
                         segs.join("::")
                     ));

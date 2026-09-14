@@ -762,10 +762,7 @@ pub(super) fn bind_irrefutable(
             let def = ctx.struct_def(sid);
             for (fname, fpat) in parts {
                 let Some(idx) = def.fields.iter().position(|f| f.name == fname) else {
-                    ctx.emit_error(
-                        rokc_diagnostic::ErrorKind::Type,
-                        format!("struct `{}` has no field `{fname}`", def.name),
-                    );
+                    ctx.no_field(sid, &fname, span);
                     continue;
                 };
                 if !fpat.is_some_and(|p| matches!(p.kind, AstPatternKind::Wildcard)) {
