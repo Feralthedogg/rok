@@ -11,6 +11,8 @@
 //! a failed build leaves `<folder>.failed` instead.
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::{Duration, SystemTime};
 
 use rokc_core::hash::{FNV_OFFSET, fnv_add};
 
@@ -26,15 +28,20 @@ pub struct StdKey<'a> {
     pub test: bool,
 }
 
-/// A build holding the lock longer than this crashed.
-const STALE_LOCK: std::time::Duration = std::time::Duration::from_secs(600);
+/// The lock holder touches the lock this often while it builds.
+const HEARTBEAT: Duration = Duration::from_secs(2);
+
+/// A lock untouched for this long belongs to a build that died.
+const STALE_LOCK: Duration = Duration::from_secs(30);
 
 /// `rok.rhir` of the prebuilt standard library for `key`, built now if
 /// missing.
 ///
+/// A build in another process is waited for: every build of one key
+/// links the same library, so dependency fingerprints stay put.
+///
 /// `None` (compile it from source) when the options rule it out, the
-/// cache is not writable, the build fails, or another process is
-/// building it.
+/// cache is not writable, or the build fails.
 #[must_use]
 pub fn prebuilt_std(key: &StdKey<'_>) -> Option<PathBuf> {
     let o = key.opts;
@@ -79,26 +86,50 @@ pub fn prebuilt_std(key: &StdKey<'_>) -> Option<PathBuf> {
     let dir = root.join(format!("{family}{sources}"));
     let rhir = dir.join(format!("{}.rhir", rokc_driver::STD_PKG));
     let failed = dir.with_extension("failed");
+    let lock = root.join(format!("{family}lock"));
+    loop {
+        if rhir.is_file() {
+            return Some(rhir);
+        }
+        if failed.exists() {
+            return None;
+        }
+        std::fs::create_dir_all(&root).ok()?;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock)
+        {
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return None,
+        }
+        let stale = std::fs::metadata(&lock)
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > STALE_LOCK));
+        if stale {
+            let _ = std::fs::remove_file(&lock);
+        } else {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    // Finished between the check and the lock.
     if rhir.is_file() {
+        let _ = std::fs::remove_file(&lock);
         return Some(rhir);
     }
-    if failed.exists() {
-        return None;
-    }
-    std::fs::create_dir_all(&root).ok()?;
-    let lock = root.join(format!("{family}lock"));
-    let stale = std::fs::metadata(&lock)
-        .and_then(|m| m.modified())
-        .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > STALE_LOCK));
-    if stale {
-        let _ = std::fs::remove_file(&lock);
-    }
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lock)
-        .ok()?;
+    let (stop, beat) = std::sync::mpsc::channel::<()>();
+    let held = lock.clone();
+    let heartbeat = std::thread::spawn(move || {
+        while beat.recv_timeout(HEARTBEAT) == Err(RecvTimeoutError::Timeout) {
+            if let Ok(f) = std::fs::File::options().write(true).open(&held) {
+                let _ = f.set_modified(SystemTime::now());
+            }
+        }
+    });
     let built = build(key, &root, &dir);
+    drop(stop);
+    let _ = heartbeat.join();
     if !built {
         // Not tried again until the sources or the toolchain change.
         let _ = std::fs::write(&failed, "");

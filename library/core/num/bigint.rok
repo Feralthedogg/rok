@@ -805,10 +805,6 @@ impl FromStr for Int {
     }
 }
 
-impl Format for Int {
-    fn format(self, spec: FormatSpec) -> str { format_number(self, spec) }
-}
-
 // ---- conversions (stdlib 2.11.8, 2.1.7) ----
 
 fn overflow(ty: str) -> OverflowError { OverflowError { op: "try_from", ty: ty } }

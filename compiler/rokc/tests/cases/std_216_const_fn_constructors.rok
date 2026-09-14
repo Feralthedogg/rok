@@ -1,0 +1,24 @@
+// spec: std 216-sync §2.16.1
+// expect-exit: 0
+// expect-stdout:
+// once
+// 6
+
+// `Atomic::new` / `Once::new` / `Condvar::new` are `const fn`s (2.16).
+
+use rok::core::sync::{Atomic, Once, Condvar};
+
+const fn counter(n: i64) -> Atomic<i64> { Atomic::new(n) }
+
+static C: Atomic<i64> = counter(5);
+static O: Once = Once::new();
+static V: Condvar = Condvar::new();
+
+fn main() -> i32 {
+    C.fetch_add(1);
+    O.call_once(|| println("once"));
+    O.call_once(|| println("twice"));
+    V.notify_all();
+    println(f"{C.load()}");
+    return 0;
+}

@@ -1,4 +1,4 @@
-// rok::core::fmt — `Formatter`, `Display` / `Debug`, `Format` and the
+// rok::core::fmt — `Formatter`, `Display` / `Debug`, `FormatSpec` and the
 // f-string lowering targets (stdlib 2.10, refs-lang 1.7.3).
 //
 // Every rendering writes into a `Formatter`: the runtime's growing text
@@ -60,11 +60,6 @@ pub struct FormatSpec {
     pub width: usize | none;
     pub precision: usize | none;
     pub ty: char;
-}
-
-/// A number rendered per a spec into a new `str` (2.10.5).
-pub trait Format {
-    fn format(self, spec: FormatSpec) -> str;
 }
 
 impl FormatSpec {
@@ -243,13 +238,6 @@ pub fn fstr_text_any<T: Display + Debug>(t: str, v: T, spec: str) -> str {
     unsafe { rok_fmt_pad(out, flags, counts, start, start, 0u32) }
 }
 
-/// `Format::format` for every number: `v`'s Display under `spec`.
-pub(pkg) fn format_number<T: Display>(v: T, spec: FormatSpec) -> str {
-    let f = Formatter::with_spec(spec);
-    try! Display::fmt(v, ref f);
-    f.finish()
-}
-
 // Integers: `b o x X` show a fixed-width integer's two's complement at
 // its width (2.10.5).
 impl Display for i8 { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 1u32, 8u32) }; } }
@@ -293,16 +281,3 @@ impl Debug for char {
     }
 }
 impl Debug for str { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_escaped(f.t, self, 34u32) }; } }
-
-impl Format for i8 { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
-impl Format for i16 { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
-impl Format for i32 { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
-impl Format for i64 { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
-impl Format for isize { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
-impl Format for u8 { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
-impl Format for u16 { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
-impl Format for u32 { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
-impl Format for u64 { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
-impl Format for usize { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
-impl Format for f32 { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }
-impl Format for f64 { fn format(self, spec: FormatSpec) -> str { format_number(self, spec) } }

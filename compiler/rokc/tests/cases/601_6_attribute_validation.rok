@@ -1,0 +1,64 @@
+// spec: 006.01.6-unknown-attributes
+// spec: 006.02-attribute-placement
+// expect-error: unknown attribute `#[mystery]`
+// expect-error: malformed `#[inline]`
+// expect-error: `#[derive]` cannot be attached to a function
+// expect-error: `#[non_exhaustive]` cannot be attached to a function
+// expect-error: `#[inline]` cannot be attached to a field
+// expect-error: malformed `#[cold]`: expected no arguments
+// expect-error: malformed `#[deprecated]`
+// expect-error: `#[link]` cannot be attached to a function
+// expect-error: `#[derive]` on a union is a compile error
+// expect-error: unknown cfg combinator `either`
+// expect-error: `#[cfg_attr]` takes a predicate and at least one attribute
+// expect-error: `#[path]` cannot be attached to a function
+
+#[mystery]
+fn f() -> i32 { return 1; }
+
+#[inline(sometimes)]
+fn g() -> i32 { return 1; }
+
+#[derive(Debug)]
+fn h() -> i32 { return 1; }
+
+#[non_exhaustive]
+fn k() -> i32 { return 1; }
+
+struct S { #[inline] x: i32; }
+
+#[cold(1)]
+fn c() {}
+
+#[deprecated(1)]
+fn d() {}
+
+#[link("m")]
+fn l() {}
+
+#[derive(Clone)]
+union U { a: i32; }
+
+#[cfg(either(a, b))]
+fn e() {}
+
+#[cfg_attr(on)]
+fn ca() {}
+
+#[path("x.rok")]
+fn p() {}
+
+// Well-formed ones are accepted.
+#[inline(always)]
+#[must_use = "use it"]
+#[deprecated("old")]
+#[allow(dead_code, unused)]
+fn ok() -> i32 { return 0; }
+
+#[non_exhaustive]
+#[derive(Clone)]
+enum E { A }
+
+fn main() -> i32 {
+    return ok();
+}

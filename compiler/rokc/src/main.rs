@@ -35,8 +35,8 @@ commands:
   check [path | -]       front end, lints and codegen, no native build
                          (`-`: source on stdin)
   lint [path]            front end and lints; exit 1 if a `deny` lint fires
-  repl [path]            interactive session on LLVM's ORC JIT (needs
-                         libLLVM; :type <expr>, :reset, :quit); a program
+  repl [path]            interactive session, each cell compiled and run
+                         (macOS arm64; :type <expr>, :reset, :quit); a program
                          path runs in the session first, its bindings and
                          items staying in scope; a library is loaded and
                          `use`d
@@ -85,13 +85,14 @@ build options:
   -C overflow-checks[=yes|no]  integer overflow panics (default: on at -O0)
   -C backend=native|llvm       code generator (default: native at -O0, else LLVM)
   --cfg <flag | key=value>     #[cfg] flag (repeatable)
+  --print cfg                  print the active cfg (target keys, --cfg,
+                               debug_assertions below -O1) and exit
   --load-mlir-plugin <path|name>
-                               MLIR dialect plugin for mlir-opt
-                               (--load-dialect-plugin; a name is searched
+                               MLIR dialect plugin (a name is searched
                                in $ROK_MLIR_PLUGIN_PATH; repeatable)
   --load-mlir-pass-plugin <path|name>
-                               MLIR pass plugin (--load-pass-plugin)
-  --mlir-pass <pass>           extra mlir-opt pass, before the LLVM
+                               MLIR pass plugin
+  --mlir-pass <pass>           extra MLIR pass, before the LLVM
                                lowering (repeatable)
   --bootstrap <file>           library root to preload (repeatable; default:
                                <sysroot>/lib/rok/{core,std,bare}/lib.rok)
@@ -126,8 +127,8 @@ $ROK_HOME/toolchains/<version>-<triple>/); a build in the repository uses
 its library/ and the librokr.a beside rokc.
 
 environment:
-  ROK_CC            C compiler driver for the final link (default: clang;
-                    on macOS Apple's, from xcrun)
+  ROK_CC            C compiler driver for the final link (default: rokc's
+                    own lld)
   ROK_BACKEND       native | llvm: code generator, as -C backend
   ROKC_TARGET_DIR   target/ location (default: inside the package)
   ROKC_VERBOSE      same as --verbose
@@ -148,6 +149,8 @@ struct Args {
     name: Option<String>,
     target_dir: Option<PathBuf>,
     cfg: Vec<String>,
+    /// `--print <what>`: print it and exit (`cfg`).
+    print: Option<String>,
     /// `--target`: an LLVM triple; `None` is the host.
     target: Option<String>,
     opts: BuildOptions,
@@ -268,6 +271,7 @@ fn parse_args(raw: Vec<String>) -> Args {
             "-o" | "--out" | "--output" => a.output = Some(value(&name, inline, &mut it).into()),
             "--bootstrap" => a.bootstrap.push(value(&name, inline, &mut it).into()),
             "--cfg" => a.cfg.push(value(&name, inline, &mut it)),
+            "--print" => a.print = Some(value(&name, inline, &mut it)),
             "--extern" => a.externs.push(parse_extern(&value(&name, inline, &mut it))),
             "--name" => a.name = Some(value(&name, inline, &mut it)),
             "--target-dir" => a.target_dir = Some(value(&name, inline, &mut it).into()),
@@ -361,7 +365,7 @@ fn parse_args(raw: Vec<String>) -> Args {
             _ => a.positional.push(arg),
         }
     }
-    if a.cmd.is_empty() {
+    if a.cmd.is_empty() && a.print.is_none() {
         usage_error("missing command");
     }
     if std::env::var_os("ROKC_VERBOSE").is_some_and(|v| !v.is_empty() && v != "0") {
@@ -431,6 +435,23 @@ fn real_main() {
         std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
     });
     rokc_interface::set_report_style(a.json, color);
+    if let Some(what) = &a.print {
+        if what != "cfg" {
+            usage_error(&format!("`--print` takes `cfg`, not `{what}`"));
+        }
+        let mut session = Session::new();
+        for c in &a.cfg {
+            session.add_cfg(c.clone());
+        }
+        if a.opts.opt_level == "0" {
+            session.add_cfg("debug_assertions".to_owned());
+        }
+        session.set_target(a.target.as_deref());
+        for line in session.cfg_lines() {
+            println!("{line}");
+        }
+        return;
+    }
     match a.cmd.as_str() {
         "build" => cmd_build(with_defaults(a)),
         "emit" => {
@@ -515,6 +536,7 @@ fn real_main() {
             println!("rokc {}", VERSION);
             if a.verbose > 0 {
                 println!("host: {}", env!("ROK_HOST"));
+                println!("llvm: {}", rokc_interface::LLVM_VERSION.unwrap_or("none"));
             }
         }
         "help" => match a.positional.first() {
@@ -616,6 +638,9 @@ fn session(a: &Args, pkg: &Package) -> Session {
     }
     for c in &a.cfg {
         session.add_cfg(c.clone());
+    }
+    if a.opts.opt_level == "0" {
+        session.add_cfg("debug_assertions".to_owned());
     }
     for (n, p) in &a.externs {
         session.add_extern(n.clone(), p.clone());

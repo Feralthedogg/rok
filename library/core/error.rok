@@ -180,3 +180,20 @@ pub trait Error: Display + Debug {
         none
     }
 }
+
+/// `Ok(<v:?>)` / `Err(<e:?>)`.
+impl<T: Debug, E: Debug> Debug for Result<T, E> {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        match self {
+            Result::Ok(v) => {
+                try f.write_str("Ok(");
+                try Debug::fmt(v, ref f);
+            }
+            Result::Err(e) => {
+                try f.write_str("Err(");
+                try Debug::fmt(e, ref f);
+            }
+        }
+        try f.write_str(")")
+    }
+}

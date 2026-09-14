@@ -338,6 +338,55 @@ pub extern "C" fn rok_os_fchmod(fd: i32, mode: u32) -> i32 {
     ret(unsafe { libc::fchmod(fd, mode as libc::mode_t) } as isize) as i32
 }
 
+/// A read-only shared mapping of `len` bytes of `fd` at `offset`: its
+/// address, or `-errno`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_os_mmap(fd: i32, len: usize, offset: u64) -> i64 {
+    if len == 0 {
+        return -i64::from(libc::EINVAL);
+    }
+    // SAFETY: a fresh mapping; the kernel picks the address.
+    let (p, e) = native(|| unsafe {
+        libc::mmap(
+            core::ptr::null_mut(),
+            len,
+            libc::PROT_READ,
+            libc::MAP_SHARED,
+            fd,
+            offset as libc::off_t,
+        )
+    });
+    if p == libc::MAP_FAILED {
+        -i64::from(e)
+    } else {
+        p as i64
+    }
+}
+
+/// Unmap a `rok_os_mmap` region: 0 or `-errno`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_os_munmap(addr: usize, len: usize) -> i32 {
+    // SAFETY: `addr..addr + len` is a mapping from `rok_os_mmap`.
+    ret(unsafe { libc::munmap(addr as *mut libc::c_void, len) } as isize) as i32
+}
+
+/// Copy `len` bytes at `addr + at` into `buf[off..]`.
+///
+/// # Safety
+/// `addr + at .. + len` must be mapped; `buf` a live `GcBuf<u8>` with at
+/// least `off + len` bytes.
+#[unsafe(no_mangle)]
+pub const unsafe extern "C" fn rok_os_mmap_copy(
+    addr: usize,
+    at: usize,
+    buf: *mut u8,
+    off: usize,
+    len: usize,
+) {
+    // SAFETY: caller contract.
+    unsafe { core::ptr::copy_nonoverlapping((addr + at) as *const u8, region(buf, off), len) };
+}
+
 /// `flock`: `op` 1 shared, 2 exclusive, 8 unlock, | 4 non-blocking.
 /// 1 = locked, 0 = would block (non-blocking), `-errno`.
 #[unsafe(no_mangle)]

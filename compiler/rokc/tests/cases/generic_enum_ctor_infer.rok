@@ -1,0 +1,19 @@
+// expect-exit: 42
+
+// A generic enum's variant infers the instance from its arguments,
+// whether or not that instance is written anywhere in the program.
+enum Pair<A, B> { Two(A, B), One(A) }
+
+fn main() -> i32 {
+    let p = Pair::Two(40i32, "x");
+    let n = match p {
+        Pair::Two(a, _) => a,
+        Pair::One(a) => a,
+    };
+    let q = Pair::Two(2i32, true);
+    let m = match q {
+        Pair::Two(a, _) => a,
+        Pair::One(a) => a,
+    };
+    return n + m;
+}

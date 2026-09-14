@@ -45,26 +45,9 @@ pub const CONST_FN_ATTR: &str = "#const_fn";
 /// (spec 8.6.10).
 pub const C_VARIADIC_ATTR: &str = "#c_variadic";
 
-/// Bound-list marker of an `unsafe fn(..)` type (`#` cannot start a
-/// user identifier).
-pub const UNSAFE_FN_MARK: &str = "#unsafe";
-
-/// Bound-list marker of an `extern "C" fn(..)` type: a thin C function
-/// pointer called with the C ABI (spec 5.9.4).
-pub const C_FN_MARK: &str = "#extern_c";
-
 /// First path segment of a qualified path `<T as Tr>::X` (spec 2.13.4):
 /// its generics are `[T, Tr]`.
 pub const QPATH_MARK: &str = "#as";
-
-/// Sum member `#nest<X>`: a substituted generic member.
-///
-/// A generic alias's parameter or an associated type replaced by its
-/// argument `X` inside a sum (`Maybe<i32 | none>`
-/// with `type Maybe<T> = T | none`, `Self::Item | none`). Like a type
-/// parameter, `X` stays one member, so an overlap with the sum's own
-/// members keeps it a nested layer (spec 2.6.4).
-pub const NEST_MARK: &str = "#nest";
 
 /// Method name of the `using` desugar's release call (`x.#drop()`):
 /// `Drop::drop`, exempt from the direct-call ban (spec 2.13.4).
@@ -73,32 +56,11 @@ pub const USING_DROP_METHOD: &str = "#drop";
 /// Error type written for an untyped `throws` (= `throws (any Error)`).
 pub const UNTYPED_THROWS_MARK: &str = "#throws";
 
-/// An associated-type binding `Name = Ty` among a trait's generic
-/// arguments (`Iterator<Item = i32>`, spec 2.1 `trait_arg`) is carried
-/// as the path type `=Name<Ty>` (`=` cannot start an identifier).
-#[must_use]
-pub fn assoc_binding(name: &str, ty: Ty) -> Ty {
-    let span = ty.span;
-    Ty {
-        kind: TyKind::Path(Path {
-            segments: vec![PathSegment {
-                name: format!("={name}"),
-                generics: vec![ty],
-            }],
-            span,
-        }),
-        span,
-    }
-}
-
-/// `Name = Ty` if `ty` is an [`assoc_binding`].
+/// `Name = Ty` if `ty` is an associated-type binding (`TyKind::Binding`).
 #[must_use]
 pub fn as_assoc_binding(ty: &Ty) -> Option<(&str, &Ty)> {
     match &ty.kind {
-        TyKind::Path(p) => match p.segments.as_slice() {
-            [seg] => Some((seg.name.strip_prefix('=')?, seg.generics.first()?)),
-            _ => None,
-        },
+        TyKind::Binding(name, t) => Some((name, t)),
         _ => None,
     }
 }
@@ -572,17 +534,25 @@ pub struct Ty {
 }
 
 impl Ty {
-    /// `X` of a `#nest<X>` sum member (`NEST_MARK`).
+    /// `X` of a nested sum member (`TyKind::Nest`).
     #[must_use]
-    pub fn nest_inner(&self) -> Option<&Self> {
+    pub const fn nest_inner(&self) -> Option<&Self> {
         match &self.kind {
-            TyKind::Path(p) => match p.segments.as_slice() {
-                [s] if s.name == NEST_MARK => s.generics.first(),
-                _ => None,
-            },
+            TyKind::Nest(x) => Some(x),
             _ => None,
         }
     }
+}
+
+/// What a `fn` type says beyond its signature.
+#[derive(Clone, Debug, Default)]
+pub struct FnTyBounds {
+    /// `+ Send + Sync`: auto-trait bounds.
+    pub auto: Vec<Path>,
+    /// `unsafe fn(..)`.
+    pub unsafe_fn: bool,
+    /// `extern "C" fn(..)`.
+    pub c_abi: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -594,8 +564,15 @@ pub enum TyKind {
     /// Tuple `(A, B)`.
     Tuple(Vec<Ty>),
     /// Function type `fn(A, B) -> R [+ Send + Sync]`. A throwing one has
-    /// a `Throws` return type. The paths are auto-trait bounds.
-    Fn(Vec<Ty>, Box<Ty>, Vec<Path>),
+    /// a `Throws` return type.
+    Fn(Vec<Ty>, Box<Ty>, FnTyBounds),
+    /// A sum member that stays one layer (`T` of `T?` / `Maybe<T>`, an
+    /// associated type substituted into a sum): `HirTy::sum` keeps it
+    /// nested when it overlaps the other members (spec 2.6.4).
+    Nest(Box<Ty>),
+    /// An associated-type binding `Name = Ty` among a trait's generic
+    /// arguments (`Iterator<Item = i32>`, spec 2.1 `trait_arg`).
+    Binding(String, Box<Ty>),
     /// Return slot of `fn(..) throws (err) -> ok`; only appears as the
     /// return type of `Fn`.
     Throws { ok: Box<Ty>, err: Box<Ty> },

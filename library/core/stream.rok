@@ -73,13 +73,20 @@ pub trait IntoStream {
     fn into_stream(self) -> IntoStream;
 }
 
+/// Every stream is its own `IntoStream` (as `IntoIterator`, 2.7).
+impl<S: Stream> IntoStream for S {
+    type Item = S::Item;
+    type IntoStream = S;
+    fn into_stream(self) -> S { self }
+}
+
 /// `collect`'s target (2.8.6): a collection built from a stream's items.
 pub trait FromStream<T> {
-    async fn from_stream<S>(s: S) -> Self;
+    async fn from_stream<S: IntoStream<Item = T>>(s: S) -> Self;
 }
 
 impl<T> FromStream<T> for List<T> {
-    async fn from_stream<S>(s: S) -> List<T> {
+    async fn from_stream<S: IntoStream<Item = T>>(s: S) -> List<T> {
         let out: List<T> = List::new();
         for await x in s {
             out.push(x);
@@ -89,7 +96,7 @@ impl<T> FromStream<T> for List<T> {
 }
 
 impl<T: Hash> FromStream<T> for Set<T> {
-    async fn from_stream<S>(s: S) -> Set<T> {
+    async fn from_stream<S: IntoStream<Item = T>>(s: S) -> Set<T> {
         let out: Set<T> = Set::new();
         for await x in s {
             out.insert(x);
@@ -99,7 +106,7 @@ impl<T: Hash> FromStream<T> for Set<T> {
 }
 
 impl<K: Hash, V> FromStream<(K, V)> for Dict<K, V> {
-    async fn from_stream<S>(s: S) -> Dict<K, V> {
+    async fn from_stream<S: IntoStream<Item = (K, V)>>(s: S) -> Dict<K, V> {
         let out: Dict<K, V> = Dict::new();
         for await (k, v) in s {
             out.insert(k, v);

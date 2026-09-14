@@ -5,11 +5,9 @@
 //!
 //! rokc compiles each cell and sends it to a long-lived host process
 //! (`repl_host.c`, the runtime linked in and initialized once), which
-//! links it into the session and runs it once. At `-O0` a cell is an
-//! object of the native backend, which the host maps and links itself
-//! (no LLVM anywhere); above, it is LLVM IR text (`mlir-opt |
-//! mlir-translate`; rokc links no LLVM, 0.2.4) the host JIT-compiles
-//! with LLVM's ORC through the LLVM-C API. Items (`fn`, `struct`, `impl`, ..) are in every cell's
+//! links it into the session and runs it once. A cell is an object (the
+//! native backend's at `-O0`, LLVM's above), which the host maps and
+//! links itself. Items (`fn`, `struct`, `impl`, ..) are in every cell's
 //! program; statements are not. A function the host already compiled
 //! with the same text (library code, unchanged items) is only declared
 //! (`ReplCell::known`), so library code is compiled once per session.
@@ -47,7 +45,8 @@ use crate::analysis::{ty_name, ty_path};
 const VALUE: &str = "__rok_repl_v";
 /// The host's `__rok_repl_out`: a cell's shown value.
 const SHOWN: &str = "__rok_repl_out";
-const HOST_C: &str = include_str!("repl_host.c");
+/// `repl_host.c` compiled (`build.rs`); empty where no host runs.
+const HOST_OBJ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/repl_host.o"));
 
 const HELP: &str = "\
   <expr>         evaluate and print `type: value`
@@ -93,10 +92,10 @@ enum Fail {
     Unkept(String, String),
 }
 
-enum Cell<'a> {
+enum Cell {
     Item(Option<String>),
-    /// `let <name> ..;` (the name when it is a plain binding).
-    Let(Option<&'a str>),
+    /// `let ..;`.
+    Let,
     Stmt,
     Expr,
 }
@@ -331,8 +330,8 @@ impl Repl {
         cell.clone_into(&mut self.input);
         match classify(cell) {
             Cell::Item(key) => self.item(cell, key).then_some(None).ok_or(()),
-            Cell::Let(name) => self.run_once(cell, name),
-            Cell::Stmt => self.run_once(cell, None),
+            // A statement (a `let` too) shows nothing (907.1).
+            Cell::Let | Cell::Stmt => self.run_once(cell, None),
             Cell::Expr => {
                 let r = self.run_once(&format!("let {VALUE} = ({cell});"), Some(VALUE));
                 if r.is_err() && self.diverged.take() {
@@ -1015,7 +1014,7 @@ impl Repl {
         let mut from = None;
         for (i, &(start, end)) in stmts.iter().enumerate() {
             let from_here = *from.get_or_insert(start);
-            if matches!(classify(&text[start..end]), Cell::Let(_)) || i + 1 == stmts.len() {
+            if matches!(classify(&text[start..end]), Cell::Let) || i + 1 == stmts.len() {
                 cells.push((from_here, end));
                 from = None;
             }
@@ -1182,13 +1181,17 @@ fn localize(d: &RokDiagnostic, session: u32, path: &str, regions: &[Region]) -> 
 
 /// Build and start the session host.
 fn start_host(dir: &std::path::Path, opts: &BuildOptions) -> Option<Host> {
-    let src = dir.join("host.c");
-    let exe = dir.join("host");
-    if let Err(e) = std::fs::write(&src, HOST_C) {
-        eprintln!("error: cannot write {}: {e}", src.display());
+    if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        eprintln!("error: the REPL runs on macOS arm64 only so far");
         return None;
     }
-    if let Err(d) = link_host(&src, opts, &exe) {
+    let obj = dir.join("host.o");
+    let exe = dir.join("host");
+    if let Err(e) = std::fs::write(&obj, HOST_OBJ) {
+        eprintln!("error: cannot write {}: {e}", obj.display());
+        return None;
+    }
+    if let Err(d) = link_host(&obj, opts, &exe) {
         report(&d);
         return None;
     }
@@ -1200,7 +1203,6 @@ fn start_host(dir: &std::path::Path, opts: &BuildOptions) -> Option<Host> {
         }
     };
     match Command::new(&exe)
-        .arg(&opts.opt_level)
         .stdin(Stdio::from(OwnedFd::from(theirs)))
         .spawn()
     {
@@ -1256,7 +1258,7 @@ fn binding_ty(r: &CompileResult, name: &str) -> Option<String> {
     })
 }
 
-fn classify(cell: &str) -> Cell<'_> {
+fn classify(cell: &str) -> Cell {
     // Leading attributes belong to the item after them.
     let mut rest = cell;
     while rest.starts_with("#[") {
@@ -1284,15 +1286,7 @@ fn classify(cell: &str) -> Cell<'_> {
         return Cell::Item(named.map(|w| format!("{} {}", w[0], w[1])));
     }
     if first == "let" {
-        let name = match words.get(1) {
-            Some(&"mut") => words.get(2).copied(),
-            n => n.copied(),
-        };
-        // A pattern (`let (a, b) = ..`) binds no single name.
-        let plain = rest[3..]
-            .trim_start()
-            .starts_with(|c: char| c.is_alphanumeric() || c == '_');
-        return Cell::Let(name.filter(|_| plain));
+        return Cell::Let;
     }
     if cell.ends_with(';') {
         Cell::Stmt
@@ -1409,8 +1403,8 @@ mod tests {
     fn cells_classify_and_continue() {
         assert!(matches!(classify("1 + 2"), Cell::Expr));
         assert!(matches!(classify("println(\"x\");"), Cell::Stmt));
-        assert!(matches!(classify("let mut x = 1;"), Cell::Let(Some("x"))));
-        assert!(matches!(classify("let (a, b) = (1, 2);"), Cell::Let(None)));
+        assert!(matches!(classify("let mut x = 1;"), Cell::Let));
+        assert!(matches!(classify("let (a, b) = (1, 2);"), Cell::Let));
         assert!(
             matches!(classify("#[derive(Debug)]\nstruct P { x: i32; }"), Cell::Item(Some(k)) if k == "struct P")
         );

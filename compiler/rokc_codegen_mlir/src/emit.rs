@@ -116,6 +116,8 @@ pub struct Emitter {
     pub data_layout: Option<String>,
     /// `quiet_functions` of the module.
     quiet: std::rc::Rc<HashSet<FunctionId>>,
+    /// `reentrant_functions` of the module.
+    reentrant: HashSet<FunctionId>,
 }
 
 /// How a call reaches a module function.
@@ -130,6 +132,8 @@ pub(crate) struct FnSig {
     /// 8.6.3): the symbol and `(params) -> ret` type of the C ABI entry C
     /// calls (`emit_c_entry`); `name` is the rok-ABI body.
     c_entry: Option<(String, String)>,
+    /// A runtime declaration (`extern "rok"`).
+    runtime: bool,
 }
 
 /// What a C call goes through.
@@ -210,6 +214,7 @@ impl Emitter {
             repl: None,
             data_layout: None,
             quiet: std::rc::Rc::default(),
+            reentrant: HashSet::new(),
         }
     }
 
@@ -409,6 +414,7 @@ impl Emitter {
                 ret: f.ret_ty.clone(),
                 c: None,
                 c_entry: None,
+                runtime: f.facts.linkage == Linkage::Extern && f.facts.abi == Abi::Rok,
             };
             match c {
                 Some(abi) if f.facts.linkage == Linkage::Extern => sig.c = Some(abi),
@@ -448,6 +454,7 @@ impl Emitter {
             })
             .collect();
         self.quiet = std::rc::Rc::new(quiet_functions(module, &self.pkgs, &self.target));
+        self.reentrant = reentrant_functions(module);
 
         self.out.push_str("module");
         let mut attrs = Vec::new();
@@ -817,19 +824,33 @@ impl Emitter {
         let mut attrs = Vec::new();
         if private {
             // `private` is MLIR visibility only; this is the LLVM linkage.
-            attrs.push("llvm.linkage = #llvm.linkage<internal>");
+            attrs.push("llvm.linkage = #llvm.linkage<internal>".to_owned());
         } else if self.link().lib.is_some() && f.facts.role == FnRole::AnyDispatcher {
             // The program's own (complete) dispatcher replaces it.
-            attrs.push("llvm.linkage = #llvm.linkage<weak>");
+            attrs.push("llvm.linkage = #llvm.linkage<weak>".to_owned());
         }
         // Stack probes: a frame bigger than a page touches each page on
         // the way down, so an overflow faults in the guard page (where
         // the runtime reports it) instead of somewhere below it.
         // rok code never unwinds: a panic ends the process.
-        if matches!(self.target.arch.as_str(), "x86" | "x86_64" | "aarch64") {
-            attrs.push(r#"passthrough = ["nounwind", ["probe-stack", "inline-asm"]]"#);
+        // A loop-free function that never returns is a panic path: kept
+        // out of line, so the checks that call it stay small to inline.
+        let cold = if f
+            .blocks
+            .iter()
+            .all(|b| !matches!(b.terminator, Terminator::Return(_)))
+            && back_edge_blocks(f).is_empty()
+        {
+            r#", "noreturn", "noinline", "cold""#
         } else {
-            attrs.push(r#"passthrough = ["nounwind"]"#);
+            ""
+        };
+        if matches!(self.target.arch.as_str(), "x86" | "x86_64" | "aarch64") {
+            attrs.push(format!(
+                r#"passthrough = ["nounwind", ["probe-stack", "inline-asm"]{cold}]"#
+            ));
+        } else {
+            attrs.push(format!(r#"passthrough = ["nounwind"{cold}]"#));
         }
         if !attrs.is_empty() {
             let _ = write!(self.out, " attributes {{{}}}", attrs.join(", "));
@@ -839,6 +860,7 @@ impl Emitter {
         let str_globals = std::mem::take(&mut self.str_globals);
         let mut emit = FnEmit::new(f, &self.target, fns, str_globals, &self.pkgs);
         emit.quiet = self.quiet.clone();
+        emit.entry_poll = self.reentrant.contains(&f.id);
         emit.overflow_checks = self.overflow_checks;
         emit.gc_type_base = self.gc_type_base();
         emit.gc_types = std::mem::take(&mut self.gc_types);
@@ -1133,8 +1155,25 @@ struct FnEmit<'a> {
     /// Lent `Emitter::gc_type_base()`.
     gc_type_base: u32,
     /// Blocks whose terminator takes a loop back-edge: a safepoint poll
-    /// goes right before it (804 §8.4.8).
-    back_edge_blocks: HashSet<u32>,
+    /// goes right before it (804 §8.4.8). Each maps to its loop headers.
+    back_edges: HashMap<u32, HashSet<u32>>,
+    /// Loop headers entered through a `^rok_re<H>` block: every edge
+    /// but the poll's fast back edge goes there, so the yield call sits
+    /// in an outer loop and the inner loop has no call to clobber its
+    /// loop-invariant loads (LLVM hoists them into the re-entry block).
+    reentry: HashSet<u32>,
+    /// The block whose terminator is being emitted, and whether on its
+    /// poll's yield path.
+    edge_from: (u32, bool),
+    /// The GC-holding locals live across a safepoint (`emit_prelude`);
+    /// `None`: every one.
+    rooted: Option<HashSet<LocalId>>,
+    /// The root cell the frame holds for a rooted local besides its own
+    /// slot (all but arrays, without `__mlir_op` regions). Every write
+    /// goes to both; reads use the slot, which nothing else can reach,
+    /// so its loads survive calls: a collection never rewrites a root
+    /// (an object a root reaches is not moved, 704 §7.4.1).
+    root_cells: HashMap<u32, String>,
     /// Where the frame-rooted locals die (their slots are cleared there),
     /// and each block's index in `f.blocks`.
     deaths: rokc_mir::Deaths,
@@ -1157,6 +1196,8 @@ struct FnEmit<'a> {
     at: rokc_diagnostic::Span,
     /// Lent `Emitter::quiet`.
     quiet: std::rc::Rc<HashSet<FunctionId>>,
+    /// In `Emitter::reentrant`: polls on entry.
+    entry_poll: bool,
     /// This thread's address of each runtime TLS slot used
     /// (`tls_addr`), computed once in the entry block.
     tls: HashMap<&'static str, String>,
@@ -1165,6 +1206,12 @@ struct FnEmit<'a> {
 /// Blocks with an edge to a block on the current DFS path (a loop
 /// back-edge), found by an iterative DFS from the entry block.
 pub fn back_edge_blocks(f: &MirFunction) -> HashSet<u32> {
+    back_edges(f).into_keys().collect()
+}
+
+/// Each back-edge block (`back_edge_blocks`) and the loop headers its
+/// back edges go to.
+fn back_edges(f: &MirFunction) -> HashMap<u32, HashSet<u32>> {
     let succs = |b: &BasicBlock| -> Vec<u32> {
         match &b.terminator {
             Terminator::Goto { target, .. } => vec![target.0],
@@ -1181,7 +1228,7 @@ pub fn back_edge_blocks(f: &MirFunction) -> HashSet<u32> {
         .enumerate()
         .map(|(i, b)| (b.id.0, i))
         .collect();
-    let mut out = HashSet::new();
+    let mut out: HashMap<u32, HashSet<u32>> = HashMap::new();
     // 0 = unvisited, 1 = on the DFS path, 2 = done.
     let mut state = vec![0u8; f.blocks.len()];
     let mut stack: Vec<(usize, Vec<u32>)> = Vec::new();
@@ -1201,7 +1248,7 @@ pub fn back_edge_blocks(f: &MirFunction) -> HashSet<u32> {
             state[j] = 1;
             stack.push((j, succs(&f.blocks[j])));
         } else if state[j] == 1 {
-            out.insert(f.blocks[i].id.0);
+            out.entry(f.blocks[i].id.0).or_default().insert(t);
         }
     }
     out
@@ -1279,6 +1326,7 @@ fn pure_runtime(name: &str) -> bool {
         name,
         "rok_str_len"
             | "rok_str_byte"
+            | "rok_str_eq"
             | "rok_str_cmp"
             | "rok_str_eq_at"
             | "rok_str_find"
@@ -1292,6 +1340,97 @@ fn pure_runtime(name: &str) -> bool {
             | "rok_fmt_len"
     ) || name.starts_with("rok_f64_")
         || name.starts_with("rok_f32_")
+}
+
+/// Functions some cycle of calls may pass through (804 §8.4.2: every
+/// such cycle polls): members of a cycle of direct calls, and the
+/// functions that call what this module cannot see (an indirect call, a
+/// C function, an `__mlir_op`), are called from C or through a pointer
+/// (the runtime's loops run those), or dispatch `any`. The others are
+/// entered only from a caller that polls in turn.
+fn reentrant_functions(module: &MirModule) -> HashSet<FunctionId> {
+    let index: HashMap<FunctionId, usize> = module
+        .functions
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.id, i))
+        .collect();
+    let mut out = HashSet::new();
+    let mut succs: Vec<Vec<usize>> = Vec::with_capacity(module.functions.len());
+    for f in &module.functions {
+        let mut next = Vec::new();
+        let mut opaque = f.facts.abi != Abi::Rok
+            || f.facts.role == FnRole::AnyDispatcher
+            || f.facts.export_name.is_some();
+        for s in f.blocks.iter().flat_map(|b| &b.stmts) {
+            let Statement::Assign { rvalue, .. } = s else {
+                continue;
+            };
+            match rvalue {
+                RValue::Call { callee, .. } => match index.get(callee) {
+                    Some(&j) if module.functions[j].facts.abi != Abi::Rok => opaque = true,
+                    Some(&j) => next.push(j),
+                    None => opaque = true,
+                },
+                RValue::CallIndirect { .. } | RValue::MlirOp { .. } => opaque = true,
+                RValue::FnAddr { callee, .. } => {
+                    out.insert(*callee);
+                }
+                _ => {}
+            }
+        }
+        if opaque {
+            out.insert(f.id);
+        }
+        succs.push(next);
+    }
+    // Tarjan's strongly connected components, iteratively.
+    let n = succs.len();
+    let (mut idx, mut low) = (vec![usize::MAX; n], vec![0; n]);
+    let (mut on, mut stack, mut next_idx) = (vec![false; n], Vec::new(), 0);
+    for root in 0..n {
+        if idx[root] != usize::MAX {
+            continue;
+        }
+        let mut work: Vec<(usize, usize)> = vec![(root, 0)];
+        while let Some(top) = work.last_mut() {
+            let (v, k) = *top;
+            if k == 0 {
+                idx[v] = next_idx;
+                low[v] = next_idx;
+                next_idx += 1;
+                stack.push(v);
+                on[v] = true;
+            }
+            if let Some(&w) = succs[v].get(k) {
+                top.1 += 1;
+                if idx[w] == usize::MAX {
+                    work.push((w, 0));
+                } else if on[w] {
+                    low[v] = low[v].min(idx[w]);
+                }
+                continue;
+            }
+            work.pop();
+            if let Some(&(u, _)) = work.last() {
+                low[u] = low[u].min(low[v]);
+            }
+            if low[v] == idx[v] {
+                let mut scc = Vec::new();
+                while let Some(w) = stack.pop() {
+                    on[w] = false;
+                    scc.push(w);
+                    if w == v {
+                        break;
+                    }
+                }
+                if scc.len() > 1 || succs[v].contains(&v) {
+                    out.extend(scc.iter().map(|&w| module.functions[w].id));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Functions that never reach a safepoint: no loop, allocation or
@@ -1406,7 +1545,11 @@ impl<'a> FnEmit<'a> {
             pkgs,
             overflow_checks: true,
             gc_type_base: USER_TYPE_BASE,
-            back_edge_blocks: back_edge_blocks(f),
+            back_edges: back_edges(f),
+            reentry: HashSet::new(),
+            edge_from: (0, false),
+            rooted: None,
+            root_cells: HashMap::new(),
             deaths: rokc_mir::Deaths::default(),
             block_pos: f
                 .blocks
@@ -1418,6 +1561,7 @@ impl<'a> FnEmit<'a> {
             dbg: None,
             dbg_vars: Vec::new(),
             quiet: std::rc::Rc::default(),
+            entry_poll: true,
             tls: HashMap::new(),
         }
     }
@@ -1594,6 +1738,14 @@ impl<'a> FnEmit<'a> {
     /// thread's `rok_tls_yield_flag`, `rok_runtime_yield` when set.
     /// Emission continues in a fresh fall-through block.
     fn emit_poll(&mut self) {
+        let n = self.emit_poll_split();
+        let _ = writeln!(self.body, "    cf.br ^rok_run{n}\n  ^rok_run{n}:");
+    }
+
+    /// `emit_poll` whose yield block is left open for the caller's
+    /// terminator; returns `n` of the `^rok_run{n}` block the caller
+    /// opens after it.
+    fn emit_poll_split(&mut self) -> u32 {
         self.needs.insert("rok_runtime_yield");
         let a = self.tls_addr("rok_tls_yield_flag");
         let n = self.next_check;
@@ -1607,10 +1759,9 @@ impl<'a> FnEmit<'a> {
     cf.cond_br {set}, ^rok_yield{n}, ^rok_run{n}
   ^rok_yield{n}:
     func.call @rok_runtime_yield() : () -> ()
-    cf.br ^rok_run{n}
-  ^rok_run{n}:
 "
         );
+        n
     }
 
     /// Into (`enter`) or out of a C call (804 §8.4.10): the inline fast
@@ -1659,6 +1810,11 @@ impl<'a> FnEmit<'a> {
         self.block_param_set.contains(&id.0)
     }
 
+    /// Whether local `id` needs a GC root (`rooted`).
+    fn is_rooted(&self, id: LocalId) -> bool {
+        self.rooted.as_ref().is_none_or(|r| r.contains(&id))
+    }
+
     /// An `llvm.alloca` slot for every slotted local (`-g` describes
     /// them), scratch slots for union bitcasts, the shadow-stack frame,
     /// then the arguments stored into their slots. Called once at the
@@ -1680,13 +1836,36 @@ impl<'a> FnEmit<'a> {
         } else {
             rokc_mir::block_local(self.f)
         };
+        // GC-holding locals no collection can see while they hold a
+        // value (`live_across`) need no root: they may stay SSA values,
+        // and their slots do not escape into the frame. With `__mlir_op`
+        // regions, every one is rooted.
+        let rooted: Option<HashSet<LocalId>> = (!regions).then(|| {
+            let (quiet, pkgs, target) = (&*self.quiet, self.pkgs, self.target);
+            rokc_mir::live_across(
+                self.f,
+                |l| {
+                    !target
+                        .root_offsets(&self.f.locals[l.0 as usize].ty)
+                        .is_empty()
+                },
+                |s| stmt_safepoint(s, quiet, pkgs, target),
+                |b| self.back_edges.contains_key(&b.0),
+            )
+        });
+        self.rooted = rooted;
+        if !regions {
+            let entry = self.f.blocks.first().map(|b| b.id.0);
+            self.reentry = self.back_edges.values().flatten().copied().collect();
+            self.reentry.retain(|h| Some(*h) != entry);
+        }
         for local in &self.f.locals {
             if self.is_block_param(local.id) || !is_slotted(&local.ty) {
                 continue;
             }
             if ssa[local.id.0 as usize]
                 && !matches!(local.ty, MirTy::Array(..))
-                && self.target.root_offsets(&local.ty).is_empty()
+                && (self.target.root_offsets(&local.ty).is_empty() || !self.is_rooted(local.id))
                 && (self.dbg.is_none() || local.name.as_deref().is_none_or(|n| n.starts_with('#')))
             {
                 continue;
@@ -1743,15 +1922,20 @@ impl<'a> FnEmit<'a> {
                 continue;
             };
             let ty = mlir_type(&self.f.locals[p.0 as usize].ty, self.target);
-            let _ = writeln!(
-                self.body,
-                "    llvm.store %arg{i}, {slot} {{tbaa = [#rok_tbaa_slot]}} : {ty}, !llvm.ptr"
-            );
+            let cell = self.root_cells.get(&p.0);
+            for s in std::iter::once(&slot).chain(cell) {
+                let _ = writeln!(
+                    self.body,
+                    "    llvm.store %arg{i}, {s} {{tbaa = [#rok_tbaa_slot]}} : {ty}, !llvm.ptr"
+                );
+            }
         }
-        // Entry poll, once the frame roots the arguments. A function
-        // that reaches no safepoint runs for a bounded time and needs
-        // none; a recursive one always reaches one (`quiet_functions`).
-        if self.reaches_safepoint() {
+        // Entry poll, once the frame roots the arguments: only where a
+        // call cycle can come back in (`reentrant_functions`) without a
+        // loop's poll. A function that reaches no safepoint runs for a
+        // bounded time and needs none; a recursive one always reaches
+        // one (`quiet_functions`).
+        if self.entry_poll && self.reaches_safepoint() {
             self.emit_poll();
         }
     }
@@ -1769,7 +1953,7 @@ impl<'a> FnEmit<'a> {
     fn emit_gc_frame(&mut self) {
         // A loop's back-edge poll can stop this thread for a collection
         // mid-function, like a call.
-        if self.back_edge_blocks.is_empty() && !self.reaches_safepoint() {
+        if self.back_edges.is_empty() && !self.reaches_safepoint() {
             return;
         }
         let pw = self.pw;
@@ -1781,7 +1965,7 @@ impl<'a> FnEmit<'a> {
         let caller = self.f.params.last().filter(|_| self.f.facts.track_caller);
         for local in &self.f.locals {
             let offsets = self.target.root_offsets(&local.ty);
-            if offsets.is_empty() || caller == Some(&local.id) {
+            if offsets.is_empty() || caller == Some(&local.id) || !self.is_rooted(local.id) {
                 continue;
             }
             let id = local.id.0;
@@ -1796,7 +1980,18 @@ impl<'a> FnEmit<'a> {
                 self.gc_param_slots.insert(id, s.clone());
                 s
             } else if let Some(slot) = self.slot_names[id as usize].clone() {
-                slot
+                if self.rooted.is_some() && !matches!(local.ty, MirTy::Array(..)) {
+                    let cell = format!("%rc{id}");
+                    let align = slot_align(&local.ty, self.target);
+                    let _ = writeln!(
+                        header,
+                        "    {cell} = llvm.alloca {one} x {ty}{align} : (i32) -> !llvm.ptr"
+                    );
+                    self.root_cells.insert(id, cell.clone());
+                    cell
+                } else {
+                    slot
+                }
             } else {
                 continue; // unslotted: never holds a value across a call
             };
@@ -1857,9 +2052,9 @@ impl<'a> FnEmit<'a> {
 
     /// Null the root slot of dead local `l` (all its `GcRef` leaves).
     fn clear_root(&mut self, l: LocalId) {
-        let slot = match self.gc_param_slots.get(&l.0) {
-            Some(s) => s.clone(),
-            None => self.slot_names[l.0 as usize].clone().unwrap(),
+        let slot = match (self.gc_param_slots.get(&l.0), self.root_cells.get(&l.0)) {
+            (Some(s), _) | (None, Some(s)) => s.clone(),
+            (None, None) => self.slot_names[l.0 as usize].clone().unwrap(),
         };
         let ty = mlir_type(&self.local_ty(l), self.target);
         let z = self.fresh_value();
@@ -1936,6 +2131,12 @@ impl<'a> FnEmit<'a> {
             self.body,
             "    llvm.store {value}, {slot} {{tbaa = [#rok_tbaa_slot]}} : {ty}, !llvm.ptr"
         );
+        if let Some(cell) = self.root_cells.get(&id.0) {
+            let _ = writeln!(
+                self.body,
+                "    llvm.store {value}, {cell} {{tbaa = [#rok_tbaa_slot]}} : {ty}, !llvm.ptr"
+            );
+        }
     }
 
     fn finish(self) -> String {
@@ -1975,6 +2176,9 @@ impl<'a> FnEmit<'a> {
                 let ty = self.local_ty(*p);
                 header_args.push(format!("{name}: {}", mlir_type(&ty, self.target)));
                 self.local_names[p.0 as usize] = Some(name);
+            }
+            if self.reentry.contains(&b.id.0) {
+                self.emit_reentry(b);
             }
             if header_args.is_empty() {
                 let _ = writeln!(self.body, "  ^bb{}:", b.id.0);
@@ -2103,9 +2307,11 @@ impl<'a> FnEmit<'a> {
             Statement::StorageDead(l) => {
                 // Only a frame-rooted slot matters; zero it (all its
                 // `GcRef` leaves become null).
-                if let (Some(_), Some(slot)) =
-                    (&self.gc_frame, self.slot_names[l.0 as usize].clone())
-                {
+                let slot = self
+                    .root_cells
+                    .get(&l.0)
+                    .or(self.slot_names[l.0 as usize].as_ref());
+                if let (Some(_), Some(slot)) = (&self.gc_frame, slot.cloned()) {
                     let ty = mlir_type(&self.local_ty(*l), self.target);
                     let z = self.fresh_value();
                     let _ = writeln!(self.body, "    {z} = llvm.mlir.zero : {ty}");
@@ -3185,7 +3391,7 @@ impl<'a> FnEmit<'a> {
     fn emit_call(&mut self, dst: &str, callee: FunctionId, args: &[Operand]) {
         let fns = self.fns;
         let sig = &fns[&callee];
-        if sig.c.as_ref().is_some_and(|a| a.rok) && self.emit_inline_runtime(dst, &sig.name, args) {
+        if sig.runtime && self.emit_inline_runtime(dst, &sig.name, args) {
             return;
         }
         if let Some(abi) = &sig.c {
@@ -3251,9 +3457,83 @@ impl<'a> FnEmit<'a> {
 "
                 );
             }
+            // Up to 16 bytes: the first and the last `w` bytes of each
+            // side (`w` = 8, 4, 2 or 1 covers lengths `w..=2w`) instead
+            // of a call.
+            ("rok_str_eq", [lhs, rhs]) if self.region_outer.is_empty() => {
+                let sa = self.materialize_operand(lhs, &str_ty);
+                let sb = self.materialize_operand(rhs, &str_ty);
+                let k = self.next_check;
+                self.next_check += 1;
+                let c16 = self.int_const(16);
+                let [pa, la, pb, lb, same, small, no, yes, big] =
+                    std::array::from_fn(|_| self.fresh_value());
+                let _ = write!(
+                    self.body,
+                    "    {pa} = llvm.extractvalue {sa}[0] : {sty}
+    {la} = llvm.extractvalue {sa}[1] : {sty}
+    {pb} = llvm.extractvalue {sb}[0] : {sty}
+    {lb} = llvm.extractvalue {sb}[1] : {sty}
+    {no} = arith.constant 0 : i32
+    {yes} = arith.constant 1 : i32
+    {same} = arith.cmpi eq, {la}, {lb} : i{pw}
+    cf.cond_br {same}, ^rok_eqn{k}, ^rok_eqend{k}({no} : i32)
+  ^rok_eqn{k}:
+    {small} = arith.cmpi ule, {la}, {c16} : i{pw}
+    cf.cond_br {small}, ^rok_eqs8_{k}, ^rok_eqbig{k}
+  ^rok_eqbig{k}:
+    {big} = func.call @{name}({sa}, {sb}) : ({sty}, {sty}) -> i32
+    cf.br ^rok_eqend{k}({big} : i32)
+"
+                );
+                for (w, next) in [(8, "s4_"), (4, "s2_"), (2, "s1_"), (1, "z")] {
+                    let wc = self.int_const(w);
+                    let [ge, off, qa, qb, x0, y0, x1, y1, d0, d1, dx, ez, eq, ew] =
+                        std::array::from_fn(|_| self.fresh_value());
+                    let bits = w * 8;
+                    let _ = write!(
+                        self.body,
+                        "  ^rok_eqs{w}_{k}:
+    {ge} = arith.cmpi uge, {la}, {wc} : i{pw}
+    cf.cond_br {ge}, ^rok_eqw{w}_{k}, ^rok_eq{next}{k}
+  ^rok_eqw{w}_{k}:
+    {off} = arith.subi {la}, {wc} : i{pw}
+    {qa} = llvm.getelementptr {pa}[{off}] : (!llvm.ptr, i{pw}) -> !llvm.ptr, i8
+    {qb} = llvm.getelementptr {pb}[{off}] : (!llvm.ptr, i{pw}) -> !llvm.ptr, i8
+    {x0} = llvm.load {pa} {{alignment = 1 : i64}} : !llvm.ptr -> i{bits}
+    {y0} = llvm.load {pb} {{alignment = 1 : i64}} : !llvm.ptr -> i{bits}
+    {x1} = llvm.load {qa} {{alignment = 1 : i64}} : !llvm.ptr -> i{bits}
+    {y1} = llvm.load {qb} {{alignment = 1 : i64}} : !llvm.ptr -> i{bits}
+    {d0} = arith.xori {x0}, {y0} : i{bits}
+    {d1} = arith.xori {x1}, {y1} : i{bits}
+    {dx} = arith.ori {d0}, {d1} : i{bits}
+    {ez} = arith.constant 0 : i{bits}
+    {eq} = arith.cmpi eq, {dx}, {ez} : i{bits}
+    {ew} = arith.extui {eq} : i1 to i32
+    cf.br ^rok_eqend{k}({ew} : i32)
+"
+                    );
+                }
+                // Here the length is 0.
+                let _ = write!(
+                    self.body,
+                    "  ^rok_eqz{k}:
+    cf.br ^rok_eqend{k}({yes} : i32)
+  ^rok_eqend{k}({dst}: i32):
+"
+                );
+            }
             _ => return false,
         }
         true
+    }
+
+    /// A pointer-width integer constant.
+    fn int_const(&mut self, v: i64) -> String {
+        let c = self.fresh_value();
+        let pw = self.pw;
+        let _ = writeln!(self.body, "    {c} = arith.constant {v} : i{pw}");
+        c
     }
 
     /// A call under the C ABI (`abi`, from `abi::classify`): to a C
@@ -3858,10 +4138,57 @@ impl<'a> FnEmit<'a> {
         }
     }
 
+    /// `^rok_re<H>`: forwards its arguments to loop header `H`. Its
+    /// `llvm.sideeffect` (no code, no visible memory) keeps the block
+    /// from being folded away.
+    fn emit_reentry(&mut self, b: &BasicBlock) {
+        let params: Vec<(String, String)> = b
+            .params
+            .iter()
+            .map(|p| {
+                let ty = mlir_type(&self.local_ty(*p), self.target);
+                (self.fresh_value(), ty)
+            })
+            .collect();
+        let h = b.id.0;
+        if params.is_empty() {
+            let _ = writeln!(self.body, "  ^rok_re{h}:\n{KEEP}    cf.br ^bb{h}");
+            return;
+        }
+        let decl: Vec<String> = params.iter().map(|(v, t)| format!("{v}: {t}")).collect();
+        let vals: Vec<&str> = params.iter().map(|(v, _)| v.as_str()).collect();
+        let tys: Vec<&str> = params.iter().map(|(_, t)| t.as_str()).collect();
+        let _ = writeln!(
+            self.body,
+            "  ^rok_re{h}({}):\n{KEEP}    cf.br ^bb{h}({} : {})",
+            decl.join(", "),
+            vals.join(", "),
+            tys.join(", ")
+        );
+    }
+
     fn emit_terminator(&mut self, b: u32, t: &Terminator) {
-        if self.back_edge_blocks.contains(&b) {
+        self.edge_from = (b, false);
+        let polled = matches!(t, Terminator::Goto { .. } | Terminator::If { .. })
+            && self
+                .back_edges
+                .get(&b)
+                .is_some_and(|hs| hs.iter().any(|h| self.reentry.contains(h)));
+        if polled {
+            // The yield path takes its own copy of the terminator, into
+            // the re-entry blocks.
+            let n = self.emit_poll_split();
+            self.edge_from = (b, true);
+            self.emit_terminator_inner(t);
+            self.edge_from = (b, false);
+            let _ = writeln!(self.body, "  ^rok_run{n}:");
+        } else if self.back_edges.contains_key(&b) {
             self.emit_poll();
         }
+        self.emit_terminator_inner(t);
+    }
+
+    fn emit_terminator_inner(&mut self, t: &Terminator) {
         match t {
             // A generic body returning a `T = ()` value returns nothing.
             Terminator::Return(None) => {
@@ -3905,34 +4232,24 @@ impl<'a> FnEmit<'a> {
     }
 
     fn emit_branch(&mut self, op: &str, target: u32, args: &[Operand]) {
-        if args.is_empty() {
-            let _ = writeln!(self.body, "{op} ^bb{target}");
-            return;
-        }
-        let parts: Vec<(String, String)> = args
-            .iter()
-            .map(|a| {
-                let ty = match a {
-                    Operand::Copy(id) => self.local_ty(*id),
-                    Operand::Const(c) => const_ty(c),
-                };
-                let v = self.materialize_operand(a, &ty);
-                (v, mlir_type(&ty, self.target))
-            })
-            .collect();
-        let vals: Vec<String> = parts.iter().map(|(v, _)| v.clone()).collect();
-        let tys: Vec<String> = parts.iter().map(|(_, t)| t.clone()).collect();
-        let _ = writeln!(
-            self.body,
-            "{op} ^bb{target}({} : {})",
-            vals.join(", "),
-            tys.join(", ")
-        );
+        let t = self.format_block_target(target, args);
+        let _ = writeln!(self.body, "{op} {t}");
     }
 
     fn format_block_target(&mut self, target: u32, args: &[Operand]) -> String {
+        let (from, yielded) = self.edge_from;
+        let fast_back = !yielded
+            && self
+                .back_edges
+                .get(&from)
+                .is_some_and(|hs| hs.contains(&target));
+        let label = if self.reentry.contains(&target) && !fast_back {
+            format!("^rok_re{target}")
+        } else {
+            format!("^bb{target}")
+        };
         if args.is_empty() {
-            return format!("^bb{target}");
+            return label;
         }
         let parts: Vec<(String, String)> = args
             .iter()
@@ -3947,7 +4264,7 @@ impl<'a> FnEmit<'a> {
             .collect();
         let vals: Vec<String> = parts.iter().map(|(v, _)| v.clone()).collect();
         let tys: Vec<String> = parts.iter().map(|(_, t)| t.clone()).collect();
-        format!("^bb{target}({} : {})", vals.join(", "), tys.join(", "))
+        format!("{label}({} : {})", vals.join(", "), tys.join(", "))
     }
 
     fn materialize_operand(&mut self, op: &Operand, ty: &MirTy) -> String {
@@ -3980,6 +4297,10 @@ impl<'a> FnEmit<'a> {
             .map_or(MirTy::Any, |l| l.ty.clone())
     }
 }
+
+/// An op that emits no code and touches no visible memory, so a block
+/// holding it is not folded into its neighbours.
+const KEEP: &str = "    llvm.call_intrinsic \"llvm.sideeffect\"() : () -> ()\n";
 
 /// A `()` value (argument, field, element): an empty struct. A function
 /// returning `()` returns nothing instead (`mlir_fn_signature`).

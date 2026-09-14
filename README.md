@@ -7,16 +7,14 @@ guide are at [rok-lang.org](https://rok-lang.org).
 
 ## Requirements
 
-- **LLVM 21 (with MLIR)** — `rokc` does not link LLVM; it runs `mlir-opt` / `mlir-translate` / `clang` as
-  subprocesses. LLVM 21 and 22 are supported. `rokc` searches `PATH` first, then `/opt/homebrew/opt/llvm@21/bin`,
-  `/usr/local/opt/llvm@21/bin`, `/usr/lib/llvm-21/bin`, and so on, so `PATH` usually needs no changes.
-  - macOS: `brew install llvm@21`
-  - Debian / Ubuntu: `mlir-21-tools clang-21` from [apt.llvm.org](https://apt.llvm.org)
-- On macOS the final link uses Xcode's (Command Line Tools) clang (`xcrun clang`), so a Homebrew clang earlier in
-  `PATH` cannot fail on the SDK's `.tbd` files. Set `ROK_CC` to use a different linker driver.
-- The REPL / Jupyter kernel also use LLVM's shared library (`libLLVM`) and C API headers (included in Homebrew's
-  LLVM).
-- Building from source needs Rust (`rust-toolchain.toml`). No external crates are used.
+- A toolchain needs no LLVM install: `rokc` links LLVM, MLIR and lld (pinned LLVM 22.1.8) and runs the whole
+  back end in process. On macOS the link needs the SDK of Xcode's command line tools (`xcode-select --install`);
+  on Linux, the C library's development files (`crt1.o`, `libc.so`) and GCC's runtime. Set `ROK_CC` to link
+  with a C compiler driver instead.
+- The REPL and the Jupyter kernel run on macOS arm64.
+- Building from source needs Rust (`rust-toolchain.toml`; no external crates are used), and for anything above
+  `-O0` the pinned LLVM: `llvm/build.sh` builds it once into `~/.cache/rok` (cmake, ninja, about an hour; see
+  `llvm/README.md`). Without it `rokc` builds `-O0` only (the native backend), linking with the system `cc`.
 
 ## Install
 

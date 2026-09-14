@@ -21,10 +21,6 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
-/// First path segment of an inference variable (`#` cannot start a
-/// user name).
-pub(super) const VAR: &str = "#var";
-
 /// An inference variable: what it is bound to, and where.
 pub(super) struct Var {
     ty: Option<HirTy>,
@@ -44,12 +40,12 @@ pub(super) fn fresh(ctx: &LowerCtx<'_>) -> HirTy {
         fixed: rokc_diagnostic::current_span(),
         conflict: None,
     });
-    HirTy::Path(vec![VAR.to_owned(), (vars.len() - 1).to_string()])
+    HirTy::Var(u32::try_from(vars.len() - 1).expect("inference variable overflow"))
 }
 
-fn var_of(t: &HirTy) -> Option<usize> {
+const fn var_of(t: &HirTy) -> Option<usize> {
     match t {
-        HirTy::Path(p) if p.len() == 2 && p[0] == VAR => p[1].parse().ok(),
+        HirTy::Var(v) => Some(*v as usize),
         _ => None,
     }
 }
@@ -65,7 +61,7 @@ pub(super) fn active(ctx: &LowerCtx<'_>) -> bool {
 pub(super) fn has_var(ctx: &LowerCtx<'_>, t: &HirTy) -> bool {
     let rec = |t: &HirTy| has_var(ctx, t);
     match t {
-        HirTy::Path(_) => var_of(t).is_some(),
+        HirTy::Var(_) => true,
         HirTy::Struct(id) => ctx.struct_def(*id).generic_args.iter().any(rec),
         HirTy::Enum(id) => ctx.enum_def(*id).generic_args.iter().any(rec),
         HirTy::Sum(ps) | HirTy::Tuple(ps) => ps.iter().any(rec),
@@ -86,20 +82,20 @@ pub(super) fn zonk(ctx: &LowerCtx<'_>, t: &HirTy) -> HirTy {
     let rec = |t: &HirTy| zonk(ctx, t);
     let all = |ts: &[HirTy]| ts.iter().map(rec).collect::<Vec<_>>();
     match t {
-        HirTy::Path(_) => {
+        HirTy::Var(_) => {
             let bound = var_of(t).and_then(|v| ctx.env.sink.infer_vars.borrow()[v].ty.clone());
             bound.map_or_else(|| t.clone(), |b| rec(&b))
         }
         HirTy::Struct(id) => {
             let d = ctx.struct_def(*id);
             let base = d.name.split("__").next().unwrap_or_default();
-            ctx.instantiate_struct(base, all(&d.generic_args))
+            ctx.instantiate_struct(base, all(&d.generic_args), d.span)
                 .map_or_else(|| t.clone(), HirTy::Struct)
         }
         HirTy::Enum(id) => {
             let d = ctx.enum_def(*id);
             let base = d.name.split("__").next().unwrap_or_default();
-            ctx.instantiate_enum(base, all(&d.generic_args))
+            ctx.instantiate_enum(base, all(&d.generic_args), d.span)
                 .map_or_else(|| t.clone(), HirTy::Enum)
         }
         HirTy::Sum(ps) => HirTy::sum(all(ps)),
@@ -158,12 +154,8 @@ fn unify_weak(ctx: &LowerCtx<'_>, lhs: &HirTy, rhs: &HirTy, weak: bool) -> bool 
         _ if lhs == rhs => true,
         (HirTy::Unknown | HirTy::Never | HirTy::Any, _)
         | (_, HirTy::Unknown | HirTy::Never | HirTy::Any) => true,
-        (HirTy::Path(_), _) if var_of(lhs).is_some() => {
-            bind(ctx, var_of(lhs).unwrap_or(0), rhs, weak)
-        }
-        (_, HirTy::Path(_)) if var_of(rhs).is_some() => {
-            bind(ctx, var_of(rhs).unwrap_or(0), lhs, weak)
-        }
+        (HirTy::Var(_), _) => bind(ctx, var_of(lhs).unwrap_or(0), rhs, weak),
+        (_, HirTy::Var(_)) => bind(ctx, var_of(rhs).unwrap_or(0), lhs, weak),
         (HirTy::Struct(l), HirTy::Struct(r)) => {
             let (l, r) = (ctx.struct_def(*l), ctx.struct_def(*r));
             l.name.split("__").next() == r.name.split("__").next()
@@ -246,7 +238,7 @@ fn zonk_has(ctx: &LowerCtx<'_>, t: &HirTy, v: usize) -> bool {
     fn walk(ctx: &LowerCtx<'_>, t: &HirTy, v: usize) -> bool {
         let rec = |t: &HirTy| walk(ctx, t, v);
         match t {
-            HirTy::Path(_) => match var_of(t) {
+            HirTy::Var(_) => match var_of(t) {
                 Some(w) if w == v => true,
                 Some(w) => ctx.env.sink.infer_vars.borrow()[w]
                     .ty
@@ -281,7 +273,6 @@ pub(super) fn lower_let(
 ) -> Option<HirStmt> {
     let sink = &ctx.env.sink;
     let mark = ctx.probe_mark();
-    let n_locals = ctx.locals.len();
     let first = sink.infer_vars.borrow().len();
     let outer = std::mem::replace(&mut ctx.infer_vars, true);
     if sink.infer_depth.get() == 0 {
@@ -331,15 +322,7 @@ pub(super) fn lower_let(
             .map(|(at, t)| (at, t, var.fixed, var.ty.clone()))
     });
     // Undo the open attempt (its binding included).
-    ctx.rollback_all(&mark);
-    ctx.locals.truncate(n_locals);
-    for scope in &mut ctx.scopes {
-        scope.retain(|_, l| (l.0 as usize) < n_locals);
-    }
-    let kept = |l: &LocalId| (l.0 as usize) < n_locals;
-    ctx.boxed.retain(kept);
-    ctx.value_captured.retain(kept);
-    ctx.narrowed.retain(|l, _| kept(l));
+    ctx.rollback(&mark);
     let outer_span = rokc_diagnostic::set_current_span(s.span);
     let out = match solved {
         // The open variables are not in the binding's type
@@ -395,7 +378,7 @@ pub(super) fn drop_var_instances(structs: &mut [HirStructDef], enums: &mut [HirE
         fn walk(ty: &HirTy, open_s: &[bool], open_e: &[bool]) -> bool {
             let rec = |t: &HirTy| walk(t, open_s, open_e);
             match ty {
-                HirTy::Path(_) => var_of(ty).is_some(),
+                HirTy::Var(_) => true,
                 HirTy::Struct(id) => open_s.get(id.0 as usize).copied().unwrap_or(false),
                 HirTy::Enum(id) => open_e.get(id.0 as usize).copied().unwrap_or(false),
                 HirTy::Sum(ps) | HirTy::Tuple(ps) => ps.iter().any(rec),

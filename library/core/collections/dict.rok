@@ -41,6 +41,17 @@ pub struct Dict<K, V> {
 // Shares its buffer like `List` (stdlib 2.13.9).
 impl<K, V> !Sync for Dict<K, V> {}
 
+/// `pairs.collect::<Dict<K, V>>()`; a later pair's value wins.
+impl<K: Hash, V> FromIterator<(K, V)> for Dict<K, V> {
+    fn from_iter<I>(it: I) -> Dict<K, V> {
+        let out: Dict<K, V> = Dict::new();
+        for (k, v) in it {
+            out.insert(k, v);
+        }
+        out
+    }
+}
+
 impl<K: Hash, V> Dict<K, V> {
     pub fn new() -> Dict<K, V> {
         Dict::with_capacity(4)

@@ -38,7 +38,8 @@ pub struct ReExport {
 }
 
 /// Build the per-module use table plus the re-export list from
-/// `(module_path, vis, UseTree)` triples.
+/// `(module_path, vis, UseTree)` triples; `packages`: the dependencies'
+/// top-level names (`HirInput::packages`).
 ///
 /// A `pub use` single yields both a use entry (for the declaring module)
 /// and a re-export. Diagnoses one short name imported from two different
@@ -46,7 +47,9 @@ pub struct ReExport {
 #[must_use]
 pub fn build_use_table(
     raw: &[(String, Visibility, UseTree)],
+    packages: &[String],
 ) -> (UseTable, Vec<ReExport>, Vec<RokDiagnostic>) {
+    crate::lower::set_packages(packages.to_vec());
     let mut table: UseTable = HashMap::new();
     let mut reexports: Vec<ReExport> = Vec::new();
     let mut diags: Vec<RokDiagnostic> = Vec::new();
@@ -314,28 +317,13 @@ fn resolve_root(segs: &[String], module_path: &str, earlier: &[UseEntry]) -> Vec
     if segs.is_empty() {
         return Vec::new();
     }
+    let strs: Vec<&str> = segs.iter().map(String::as_str).collect();
+    if let Some(rooted) = crate::lower::root_path(&strs, module_path) {
+        return rooted;
+    }
     match segs[0].as_str() {
-        "pkg" => segs[1..].to_vec(),
-        "sup" => {
-            let mut parts: Vec<String> = if module_path.is_empty() {
-                Vec::new()
-            } else {
-                module_path.split("::").map(str::to_owned).collect()
-            };
-            // Each leading `sup` pops one ancestor.
-            let mut i = 0;
-            while i < segs.len() && segs[i] == "sup" {
-                if !parts.is_empty() {
-                    parts.pop();
-                }
-                i += 1;
-            }
-            parts.extend(segs[i..].iter().cloned());
-            parts
-        }
-        // Spec 5.7: a bare root names something in the current module
-        // (a child module); `rok::` is the virtual stdlib root.
-        "rok" => segs.to_vec(),
+        // A dependency's name is a top-level name in every module (902.3).
+        first if crate::lower::is_dependency(first) => segs.to_vec(),
         // Spec 5.5: a name an earlier `use` of this module brought in
         // (`use a::b; use b::c;`).
         first

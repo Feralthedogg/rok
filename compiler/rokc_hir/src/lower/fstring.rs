@@ -377,8 +377,8 @@ fn local_of(ctx: &LowerCtx<'_>, e: &Expr) -> LocalId {
 }
 
 fn hole(ctx: &LowerCtx<'_>, value: Expr, ty: &HirTy, spec: Spec, debug: bool) -> Hole {
-    let both = ctx.implements_trait(ty, ctx.lang_trait("display_trait"), 0)
-        && ctx.implements_trait(ty, ctx.lang_trait("debug_trait"), 0);
+    let both =
+        ctx.has_trait(ty, ctx.lang("display_trait")) && ctx.has_trait(ty, ctx.lang("debug_trait"));
     Hole {
         value,
         kind: kind_of(ctx, ty),
@@ -401,15 +401,15 @@ fn formattable(ctx: &LowerCtx<'_>, ty: &HirTy, debug: bool) -> bool {
     } else {
         ("display_trait", "Display")
     };
-    let tr = ctx.lang_trait(slot);
-    if kind_of(ctx, ty) != Kind::Other || ctx.implements_trait(ty, tr, 0) {
+    let tr = ctx.lang(slot);
+    if kind_of(ctx, ty) != Kind::Other || ctx.has_trait(ty, tr) {
         return true;
     }
     let shown = ctx.ty_name(ty);
     let culprit = match ty {
         HirTy::Sum(vs) => vs
             .iter()
-            .find(|v| !ctx.implements_trait(v, tr, 0))
+            .find(|v| !ctx.has_trait(v, tr))
             .map(|v| format!(": member `{}` does not implement `{name}`", ctx.ty_name(v))),
         _ => None,
     }
@@ -421,7 +421,7 @@ fn formattable(ctx: &LowerCtx<'_>, ty: &HirTy, debug: bool) -> bool {
     );
     let help = if debug {
         "add `#[derive(Debug)]` to the type, or implement `Debug` for it".to_owned()
-    } else if ctx.implements_trait(ty, ctx.lang_trait("debug_trait"), 0) {
+    } else if ctx.has_trait(ty, ctx.lang("debug_trait")) {
         format!("format it with `{DEBUG_HOLE}`, or implement `Display` for it")
     } else {
         format!("implement `Display` for it, or derive `Debug` and format it with `{DEBUG_HOLE}`")
@@ -488,7 +488,7 @@ fn static_hole(ctx: &LowerCtx<'_>, value: Expr, ty: &HirTy, text: &str) -> Optio
 fn dynamic_hole(ctx: &LowerCtx<'_>, value: Expr, ty: &HirTy, spec: Spec, q: bool) -> Hole {
     let mut h = hole(ctx, value, ty, spec, q);
     if !h.kind.number() && !q {
-        let display = ctx.implements_trait(ty, ctx.lang_trait("display_trait"), 0);
+        let display = ctx.has_trait(ty, ctx.lang("display_trait"));
         h.debug = !display;
         h.both &= display;
     }

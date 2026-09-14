@@ -1,7 +1,7 @@
 //! `rok` end to end: scratch `ROK_HOME`s, local git repositories made
 //! with the `git` CLI, and the `rokc` built next to `rok`. Tests that
-//! compile and run native code skip without the LLVM toolchain (unless
-//! `ROK_REQUIRE_LLVM=1`).
+//! compile and run native code skip when rokc is built without LLVM
+//! (unless `ROK_REQUIRE_LLVM=1`).
 
 // `HEAD^{tree}` is git revision syntax, not a format argument.
 #![allow(clippy::literal_string_with_formatting_args)]
@@ -35,14 +35,16 @@ fn build_rokc() {
 }
 
 fn llvm() -> bool {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let found = ["mlir-opt", "mlir-translate", "clang"]
-        .iter()
-        .all(|t| std::env::split_paths(&path).any(|d| d.join(t).is_file()));
+    build_rokc();
+    // `rokc version -v` names the LLVM it links.
+    let found = Command::new(Path::new(ROK).with_file_name("rokc"))
+        .args(["version", "-v"])
+        .output()
+        .is_ok_and(|o| !String::from_utf8_lossy(&o.stdout).contains("llvm: none"));
     if !found {
         assert!(
             std::env::var("ROK_REQUIRE_LLVM").as_deref() != Ok("1"),
-            "ROK_REQUIRE_LLVM=1 but the LLVM tools are not on PATH"
+            "ROK_REQUIRE_LLVM=1 but rokc is built without LLVM"
         );
     }
     found

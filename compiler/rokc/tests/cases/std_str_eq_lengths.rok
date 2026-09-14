@@ -1,0 +1,33 @@
+// spec: std 2.15
+// expect-exit: 0
+// `==` on strings of every length class the inline compare splits by
+// (0, 1, 2..3, 4..7, 8..16, longer), differing at either end or inside.
+
+fn main() -> i32 {
+    let xs: List<str> = ["", "a", "ab", "abc", "abcd", "abcde", "abcdefg", "abcdefgh", "abcdefghi", "abcdefghijklmno", "abcdefghijklmnop", "abcdefghijklmnopq", "abcdefghijklmnopqrstuvwxyz0123456789"];
+    let bad = 0;
+    for i in 0..xs.len() {
+        for j in 0..xs.len() {
+            let a = xs[i];
+            let b = f"{xs[j]}";
+            if (a == b) != (i == j) { bad += 1; }
+            if (a != b) != (i != j) { bad += 1; }
+        }
+        let a = xs[i];
+        let n = a.len();
+        if n > 0 {
+            // Same length; the last, first or a middle byte differs.
+            let c = f"{a[0:n - 1]}!";
+            if a == c { bad += 1; }
+            let d = f"!{a[1:n]}";
+            if a == d { bad += 1; }
+            if n > 2 {
+                let m = n / 2;
+                let e = f"{a[0:m]}#{a[m + 1:n]}";
+                if a == e { bad += 1; }
+            }
+        }
+    }
+    println(f"{bad}");
+    return bad;
+}

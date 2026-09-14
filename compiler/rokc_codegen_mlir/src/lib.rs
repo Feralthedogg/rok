@@ -1,6 +1,6 @@
 //! MIR → MLIR text in upstream dialects (`func`, `arith`, `cf`, `llvm`;
-//! user `__mlir_op` regions may bring more). `mlir-opt`, `mlir-translate`
-//! and `clang` do the rest.
+//! user `__mlir_op` regions may bring more). The MLIR passes, the translation
+//! to LLVM IR and the code generation follow (`rokc_llvm`).
 
 pub mod abi;
 mod compact;
@@ -33,7 +33,7 @@ pub struct MlirOutput {
 
 /// One REPL cell (`rokc repl`).
 ///
-/// LLVM IR the session host JIT-compiles into a process whose runtime is
+/// Code the session host links into a process whose runtime is
 /// already up. Instead of a C `main`,
 /// `rok_repl_cell()` registers the cell's GC types and roots and runs
 /// the user `main`.

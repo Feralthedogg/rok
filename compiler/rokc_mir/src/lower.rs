@@ -1128,7 +1128,8 @@ impl<'a> FnBuilder<'a> {
                     _ => IrPrimTy::I32,
                 };
                 let tag_op = Operand::Const(ConstVal::Int {
-                    value: i128::from(*variant_index),
+                    value: self.module.enums[enum_id.0 as usize].variants[*variant_index as usize]
+                        .tag,
                     ty: tag_ty,
                 });
                 let Some(payload_ty) = enum_payload_ty(*enum_id, self.module, self.target) else {
@@ -1445,19 +1446,19 @@ impl<'a> FnBuilder<'a> {
             // `union` field write / read: the bits of the synthetic
             // `__data` slot (HIR rejects sizes that do not fit).
             HirExprKind::UnionWrite {
+                struct_id,
                 from_ty,
-                storage_ty,
                 value,
                 ..
             } => {
                 let raw = self.lower_expr_to_operand(value);
                 let src_ty = self.ty(from_ty);
-                let dst_ty = self.ty(storage_ty);
+                let dst_ty = self.union_storage_ty(*struct_id);
                 self.union_bits(raw, &src_ty, &dst_ty)
             }
             HirExprKind::UnionRead {
+                struct_id,
                 target,
-                storage_ty,
                 field_ty,
                 ..
             } => {
@@ -1465,7 +1466,7 @@ impl<'a> FnBuilder<'a> {
                 let Operand::Copy(target_local) = target_op else {
                     return Operand::Const(ConstVal::Unit);
                 };
-                let storage_mir_ty = self.ty(storage_ty);
+                let storage_mir_ty = self.union_storage_ty(*struct_id);
                 let storage_local = self.fresh_local(storage_mir_ty.clone());
                 self.push_stmt(Statement::Assign {
                     target: storage_local,
@@ -1854,12 +1855,17 @@ impl<'a> FnBuilder<'a> {
                 // Tag check; payload binding (if any) happens in
                 // `bind_pattern` after the arm body block is selected.
                 let stored = match pat {
-                    HirPattern::SumVariant { sum_ty, .. } => sum_tag(sum_ty, *variant_index),
-                    _ => *variant_index,
+                    HirPattern::SumVariant { sum_ty, .. } => {
+                        i128::from(sum_tag(sum_ty, *variant_index))
+                    }
+                    HirPattern::EnumVariant { enum_id, .. } => {
+                        self.module.enums[enum_id.0 as usize].variants[*variant_index as usize].tag
+                    }
+                    _ => i128::from(*variant_index),
                 };
                 let tag_ty = variant_tag_ty(pat, scrut_ty);
                 let value = ConstVal::Int {
-                    value: i128::from(stored),
+                    value: stored,
                     ty: tag_ty,
                 };
                 let tag = self.pattern_tag(pat, scrut_local, scrut_ty);
@@ -2114,10 +2120,14 @@ impl<'a> FnBuilder<'a> {
     /// Spec 2.5.2: a union field write / read reinterprets bits (an
     /// `f32` written and read as `i32` is its IEEE bits, not `1`).
     fn union_bits(&mut self, source: Operand, from_ty: &MirTy, to_ty: &MirTy) -> Operand {
-        if matches!((from_ty, to_ty), (MirTy::Prim(_), MirTy::Prim(_))) {
-            self.payload_cast(source, from_ty, to_ty)
-        } else {
-            self.cast_to(source, from_ty, to_ty)
+        self.payload_cast(source, from_ty, to_ty)
+    }
+
+    /// The MIR type of a union's one storage field.
+    fn union_storage_ty(&self, id: rokc_hir::StructId) -> MirTy {
+        match self.ty(&HirTy::Struct(id)) {
+            MirTy::Struct(_, mut f) if f.len() == 1 => f.remove(0),
+            _ => MirTy::Unit,
         }
     }
 
@@ -2197,7 +2207,7 @@ impl<'a> FnBuilder<'a> {
         local: LocalId,
     ) {
         // `n: none` holds no payload: bind the `none` value.
-        if matches!(hir_payload, Some(HirTy::Path(p)) if p.as_slice() == ["none"]) {
+        if matches!(hir_payload, Some(HirTy::None)) {
             self.push_stmt(Statement::Assign {
                 target: local,
                 rvalue: RValue::Use(Operand::Const(ConstVal::None)),

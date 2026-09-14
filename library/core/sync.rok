@@ -83,7 +83,7 @@ pub struct Atomic<T> {
 // ordering; with a constant argument the `match` folds away once the
 // method is inlined (`-O1` and up).
 impl<T: AtomicPrimitive + PartialEq> Atomic<T> {
-    pub fn new(value: T) -> Atomic<T> {
+    pub const fn new(value: T) -> Atomic<T> {
         unsafe {
             let cell: GcBuf<T> = buf_new(1);
             cell[0] = value;
@@ -562,7 +562,7 @@ pub struct Once {
 }
 
 impl Once {
-    pub fn new() -> Once {
+    pub const fn new() -> Once {
         Once { state: word(0) }
     }
 
@@ -596,7 +596,7 @@ pub struct Condvar {
 }
 
 impl Condvar {
-    pub fn new() -> Condvar {
+    pub const fn new() -> Condvar {
         Condvar { seq: two_words() }
     }
 

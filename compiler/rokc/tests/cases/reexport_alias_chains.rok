@@ -1,0 +1,40 @@
+// expect-exit: 42
+
+// A `pub use` chain and a type alias chain of any length resolve
+// (spec 5.8, 2.12): each link names the previous one.
+mod m0 {
+    pub struct Point { pub x: i32; }
+    pub fn seven() -> i32 { 7i32 }
+}
+pub mod m1 {
+    pub use pkg::m0::Point;
+    pub use pkg::m0::seven;
+}
+pub mod m2 {
+    pub use pkg::m1::Point;
+    pub use pkg::m1::seven;
+}
+pub mod m3 {
+    pub use pkg::m2::Point;
+    pub use pkg::m2::seven;
+}
+pub mod m4 {
+    pub use pkg::m3::Point;
+    pub use pkg::m3::seven;
+}
+pub mod m5 {
+    pub use pkg::m4::Point;
+    pub use pkg::m4::seven;
+}
+
+type A1 = m5::Point;
+type A2 = A1;
+type A3 = A2;
+type A4 = A3;
+type A5 = A4;
+type A6 = A5;
+
+fn main() -> i32 {
+    let p: A6 = m5::Point { x: 35i32 };
+    return p.x + m5::seven();
+}

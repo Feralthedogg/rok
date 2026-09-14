@@ -88,6 +88,12 @@ pub extern "C" fn rok_str_cmp(a: RokStr, b: RokStr) -> i32 {
     a.bytes().cmp(b.bytes()) as i32
 }
 
+/// 1 if `a` and `b` hold the same bytes, else 0 (`str`'s `==`).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_str_eq(a: RokStr, b: RokStr) -> i32 {
+    i32::from(a.bytes() == b.bytes())
+}
+
 /// FNV-1a over the bytes: `str`'s `Hash` (stdlib 2.5.6; equal strings
 /// hash alike).
 #[unsafe(no_mangle)]

@@ -1,6 +1,7 @@
 //! Compiler driver. Threads source through lexer, parser,
 //! HIR lowering (name resolution + type checks), and MIR lowering.
 
+mod attrs;
 mod cfg;
 mod coro;
 mod entry;
@@ -26,9 +27,17 @@ pub use cfg::CfgEnv;
 pub use rokc_codegen_mlir::{Demangled, demangle};
 pub use rokc_codegen_mlir::{MlirOutput, ReplCell, ReplFn};
 pub use rokc_mir::Target;
+/// The LLVM rokc links (`None`: built without one; only the native
+/// backend's `-O0` builds work).
+pub const LLVM_VERSION: Option<&str> = if rokc_llvm::AVAILABLE {
+    Some(rokc_llvm::LLVM_VERSION)
+} else {
+    None
+};
+
 pub use toolchain::{
-    Artifact, BuildOptions, EmitKind, TempDir, build_archive, cache_dir, cell_ir, check_codegen,
-    emit, find_mlir_plugin, finish, link_executable, link_host, lower_to_llvm, mlir_text,
+    BuildOptions, EmitKind, TempDir, build_archive, cache_dir, cell_object, check_codegen, emit,
+    find_mlir_plugin, link_executable, link_host, link_object, lower_to_llvm, mlir_text,
 };
 
 // Independent switches, one per session setter.
@@ -78,6 +87,20 @@ pub struct CompilerConfig {
     /// it): their concrete code is linked, not compiled. Ignored when
     /// stale or not of these tiers.
     pub std_prebuilt: Option<PathBuf>,
+}
+
+/// The build's cfg (spec 6.3): the target's keys, `--cfg` and `test`.
+#[must_use]
+pub fn cfg_env(config: &CompilerConfig) -> CfgEnv {
+    let mut env = CfgEnv::new();
+    cfg::add_target(&mut env, &config.target);
+    for f in &config.cfg_flags {
+        env.add(f);
+    }
+    if config.test || config.bench {
+        env.add("test");
+    }
+    env
 }
 
 /// The prebuilt standard library's package name.
@@ -227,47 +250,6 @@ fn lib_roots(config: &CompilerConfig) -> Vec<LibRoot> {
             .map(|(name, root)| (vec![name.clone()], root.clone())),
     );
     out
-}
-
-/// Dependency names are top-level names (spec 5.7.x / 902.3): a `use
-/// dep::..` anywhere is rooted at `pkg::dep::..`, and a dependency's own
-/// `use pkg::..` means its root, `pkg::dep::..`. (Expression and type
-/// paths get the same treatment in HIR, from `HirInput::packages`.)
-fn root_extern_uses(
-    uses: &mut [(String, rokc_core::Visibility, rokc_ast::UseTree)],
-    externs: &[(String, PathBuf)],
-) {
-    fn fix(tree: &mut rokc_ast::UseTree, module: &str, externs: &[(String, PathBuf)]) {
-        let Some(first) = tree.prefix.segments.first().cloned() else {
-            if let rokc_ast::UseTreeKind::Group(children) = &mut tree.kind {
-                children.iter_mut().for_each(|c| fix(c, module, externs));
-            }
-            return;
-        };
-        let seg = |name: &str| rokc_ast::PathSegment {
-            name: name.to_owned(),
-            generics: Vec::new(),
-        };
-        let owner = externs.iter().find(|(n, _)| {
-            module == n
-                || module
-                    .strip_prefix(n.as_str())
-                    .is_some_and(|r| r.starts_with("::"))
-        });
-        if first.name == "pkg" {
-            if let Some((dep, _)) = owner {
-                tree.prefix.segments.insert(1, seg(dep));
-            }
-        } else if externs.iter().any(|(n, _)| *n == first.name) {
-            tree.prefix.segments.insert(0, seg("pkg"));
-        }
-    }
-    if externs.is_empty() {
-        return;
-    }
-    for (module, _, tree) in uses {
-        fix(tree, module, externs);
-    }
 }
 
 /// One parsed source file, as tools see it: after `#[cfg]` filtering,
@@ -563,14 +545,7 @@ fn compile_unit(
     let user_metas = format!("{:?}", &metas.metas[lib_metas..]);
     let ext = prec.ext_ops();
     relex_metas(&mut metas, &ext);
-    let mut cfg_env = CfgEnv::new();
-    cfg_env.add_target(&config.target);
-    for f in &config.cfg_flags {
-        cfg_env.add(f);
-    }
-    if config.test || config.bench {
-        cfg_env.add("test");
-    }
+    let cfg_env = cfg_env(config);
     let mut meta_table = MetaTable::default();
     diags.extend(
         metas
@@ -679,7 +654,6 @@ fn compile_unit(
     all_items.append(&mut items);
     all_uses.append(&mut uses);
     diags.append(&mut d);
-    root_extern_uses(&mut all_uses, &config.externs);
     coro::rewrite_items(&mut all_items, &mut diags);
     let input = rokc_hir::HirInput {
         packages: config.externs.iter().map(|(n, _)| n.clone()).collect(),
@@ -712,8 +686,9 @@ fn compile_unit(
     // entries that the HIR resolver can consult during name lookup, plus
     // a list of `pub use` re-exports the lower pass installs as fn-table
     // aliases.
-    let (use_table, reexports, mut use_diags) =
-        rokc_diagnostic::time("use table", || rokc_hir::build_use_table(&all_uses));
+    let (use_table, reexports, mut use_diags) = rokc_diagnostic::time("use table", || {
+        rokc_hir::build_use_table(&all_uses, &input.packages)
+    });
     diags.append(&mut use_diags);
     diags.extend(rokc_hir::check_use_targets(
         &all_uses,
@@ -897,7 +872,7 @@ fn prepass_mods(
         match &m.items {
             Some(inner) => prepass_mods(inner, sub_dir, metas, out),
             None => {
-                if let Ok((body, next)) = mod_file(&m.name, sub_dir) {
+                if let Ok((body, next)) = mod_file(m, sub_dir) {
                     prepass_tree(&body, None, next.as_deref(), metas, out);
                 }
             }
@@ -912,26 +887,49 @@ fn prepass_mods(
 }
 
 /// The file of `mod name;` declared in a module whose submodules live in
-/// `dir` (spec 5.4.4), and the directory of its own submodules.
-fn mod_file(name: &str, dir: Option<&Path>) -> Result<(PathBuf, Option<PathBuf>), RokDiagnostic> {
+/// `dir` (spec 5.4.4), and the directory of its own submodules. A
+/// `#[path("f.rok")]` (5.4.6) names the file relative to `dir`; its
+/// submodules are in `f/` beside it.
+fn mod_file(
+    m: &rokc_ast::ModDef,
+    dir: Option<&Path>,
+) -> Result<(PathBuf, Option<PathBuf>), RokDiagnostic> {
+    let name = &m.name;
+    let err = |msg: String| RokDiagnostic::error(rokc_diagnostic::ErrorKind::Module, msg);
+    let custom = m.attrs.iter().find(|a| a.path == ["path"]).map(|a| {
+        match &a.body {
+            rokc_ast::AttrBody::Args(args) => match args.as_slice() {
+                [rokc_ast::AttrArg::Lit(rokc_ast::Literal::Str(p))] => Ok(p.clone()),
+                _ => Err(()),
+            },
+            _ => Err(()),
+        }
+        .map_err(|()| {
+            err("`#[path]` takes one file path: `#[path(\"file.rok\")]` (spec 5.4.6)".to_owned())
+                .with_span(a.span, "")
+        })
+    });
     let Some(dir) = dir else {
-        return Err(RokDiagnostic::error(
-            rokc_diagnostic::ErrorKind::Module,
-            format!(
-                "`mod {name}` in a single-file module — declare a sibling `{name}/` folder to \
-                 host submodules (a lone file run outside any package cannot have file \
-                 submodules, spec 4.16.8; use `mod {name} {{ }}`)"
-            ),
-        ));
+        return Err(err(format!(
+            "`mod {name}` in a single-file module — declare a sibling `{name}/` folder to \
+             host submodules (a lone file run outside any package cannot have file \
+             submodules, spec 4.16.8; use `mod {name} {{ }}`)"
+        )));
     };
-    let body = dir.join(format!("{name}.rok"));
+    let (body, folder) = match custom.transpose()? {
+        Some(p) => {
+            let body = dir.join(&p);
+            let folder = body.with_extension("");
+            (body, folder)
+        }
+        None => (dir.join(format!("{name}.rok")), dir.join(name)),
+    };
     if !source_exists(&body) {
-        return Err(RokDiagnostic::error(
-            rokc_diagnostic::ErrorKind::Module,
-            format!("module `{name}` body not found at `{}`", body.display()),
-        ));
+        return Err(err(format!(
+            "module `{name}` body not found at `{}`",
+            body.display()
+        )));
     }
-    let folder = dir.join(name);
     let next = source_dir_exists(&folder).then_some(folder);
     Ok((body, next))
 }
@@ -1305,13 +1303,21 @@ fn collect_module_tree(
     diags.append(&mut lex_diags);
     apply_keywords(&mut tokens, &metas.keywords, diags);
 
-    let (program, mut parse_diags) =
-        parse_program_meta(&tokens, file, ext, &metas.table, &metas.literals);
+    let (program, mut parse_diags) = parse_program_meta(
+        &tokens,
+        file,
+        ext,
+        &metas.table,
+        &metas.literals,
+        Some(cfg_env),
+    );
     diags.append(&mut parse_diags);
 
     // Filter `#[cfg(...)]`-gated items before walking — excluded modules
     // shouldn't get their files resolved or their inline items flattened.
+    attrs::check_cfg(&program.attrs, &program.items, &metas.table, diags);
     let filtered = cfg::filter_items(program.items, cfg_env);
+    attrs::check(&program.attrs, &filtered, &metas.table, diags);
     if let Some(keep) = keep.as_deref_mut() {
         keep.push(SourceFile {
             path: body_path.to_path_buf(),
@@ -1385,7 +1391,7 @@ fn flatten_module_items(
                         keep.as_deref_mut(),
                     );
                 } else {
-                    let (body, next_dir) = match mod_file(&m.name, submodule_dir) {
+                    let (body, next_dir) = match mod_file(&m, submodule_dir) {
                         Ok(f) => f,
                         Err(e) => {
                             diags.push(e);

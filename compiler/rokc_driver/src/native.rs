@@ -34,8 +34,8 @@ pub fn chosen(opts: &BuildOptions) -> bool {
     wanted(opts)
 }
 
-/// The REPL runs the native backend's cells (`cell_object`), in a host
-/// without LLVM.
+/// The native backend builds the REPL's cells (`cell_object`); else
+/// LLVM does (`toolchain::cell_object`).
 #[must_use]
 pub fn jit(opts: &BuildOptions) -> bool {
     cfg!(all(target_os = "macos", target_arch = "aarch64")) && wanted(opts)
@@ -43,7 +43,7 @@ pub fn jit(opts: &BuildOptions) -> bool {
 
 /// A REPL cell (`opts.repl`) as a native object, compiling only the
 /// functions the session does not have (decided on the MLIR text, like
-/// `cell_ir`), and what codegen says about it.
+/// for LLVM), and what codegen says about it.
 pub fn cell_object(
     module: &CompiledModule,
     opts: &BuildOptions,

@@ -17,6 +17,8 @@
 
 use rok::std::io::IoError;
 use rok::std::time::Duration;
+use rok::core::future::IntoFuture;
+use rok::core::task::Blocking;
 
 /// Identifies a thread for its lifetime (its runtime worker id).
 pub struct ThreadId {
@@ -41,6 +43,11 @@ struct Rec {
     /// `ThreadLocal` key → that local's `Cell<T>` on this thread.
     locals: Dict<u64, any>;
 }
+
+// Every handle of a thread shares its `Rec`; `locals` is only touched by
+// that thread.
+unsafe impl Send for Rec {}
+unsafe impl Sync for Rec {}
 
 fn new_rec(id: u64, name: str | none) -> Rec {
     Rec { id: id, name: name, park: Atomic::new(0), locals: Dict::new() }
@@ -78,14 +85,19 @@ impl Thread {
     }
 }
 
-/// The OS could not join the thread.
+/// The OS could not join the thread: `pthread_join`'s error number.
+#[derive(Debug)]
 pub struct JoinError {
-    message: str;
+    pub code: i32;
 }
 
-impl JoinError {
-    pub fn message(self) -> str { self.message }
+impl Display for JoinError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str(f"thread join failed (error {self.code})")
+    }
 }
+
+impl Error for JoinError {}
 
 /// The running thread's result, once joined.
 pub struct JoinHandle<T> {
@@ -98,9 +110,8 @@ impl<T> JoinHandle<T> {
     /// Wait for the thread and take its result.
     pub fn join(self) throws (JoinError) -> T {
         unsafe {
-            if rok_thread_join(self.handle) != 0 {
-                throw JoinError { message: "pthread_join failed" };
-            }
+            let code = rok_thread_join(self.handle);
+            if code != 0 { throw JoinError { code }; }
             self.result[0]
         }
     }
@@ -111,6 +122,16 @@ impl<T> JoinHandle<T> {
     /// it ends. The handle must not be joined afterwards.
     pub fn detach(self) {
         unsafe { rok_thread_detach(self.handle) };
+    }
+}
+
+/// `await handle` (2.20.5): the join runs on the executor's blocking
+/// lane, so only the task waits; a failed OS join panics.
+impl<T: Send> IntoFuture for JoinHandle<T> {
+    type Output = T;
+    type IntoFuture = Blocking<T>;
+    fn into_future(self) -> Blocking<T> {
+        rok::core::task::spawn_blocking(|| try! self.join())
     }
 }
 
@@ -226,9 +247,9 @@ impl<T> ThreadLocal<T> {
         c
     }
 
-    /// Run `f` on this thread's value.
-    pub fn with<R>(self, f: fn(Cell<T>) -> R) -> R {
-        f(self.cell())
+    /// `f` of this thread's value.
+    pub fn with<R>(self, f: fn(T) -> R) -> R {
+        f(self.get())
     }
 
     pub fn get(self) -> T {

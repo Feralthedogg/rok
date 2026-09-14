@@ -710,6 +710,189 @@ impl TryFrom<usize> for u32 {
     }
 }
 
+// TryFrom (floating-point → integer, 2.11.4): truncates toward zero;
+// NaN, infinities and values outside the target's range throw.
+
+impl TryFrom<f32> for i8 {
+    type Error = OverflowError;
+    fn try_from(value: f32) throws (OverflowError) -> i8 {
+        let x = (value as f64).trunc();
+        if !(x >= i8::MIN as f64 && x < i8::MAX as f64 + 1.0) { throw overflow("i8"); }
+        x as i8
+    }
+}
+
+impl TryFrom<f32> for i16 {
+    type Error = OverflowError;
+    fn try_from(value: f32) throws (OverflowError) -> i16 {
+        let x = (value as f64).trunc();
+        if !(x >= i16::MIN as f64 && x < i16::MAX as f64 + 1.0) { throw overflow("i16"); }
+        x as i16
+    }
+}
+
+impl TryFrom<f32> for i32 {
+    type Error = OverflowError;
+    fn try_from(value: f32) throws (OverflowError) -> i32 {
+        let x = (value as f64).trunc();
+        if !(x >= i32::MIN as f64 && x < i32::MAX as f64 + 1.0) { throw overflow("i32"); }
+        x as i32
+    }
+}
+
+impl TryFrom<f32> for i64 {
+    type Error = OverflowError;
+    fn try_from(value: f32) throws (OverflowError) -> i64 {
+        let x = (value as f64).trunc();
+        if !(x >= i64::MIN as f64 && x < i64::MAX as f64 + 1.0) { throw overflow("i64"); }
+        x as i64
+    }
+}
+
+impl TryFrom<f32> for isize {
+    type Error = OverflowError;
+    fn try_from(value: f32) throws (OverflowError) -> isize {
+        let x = (value as f64).trunc();
+        if !(x >= isize::MIN as f64 && x < isize::MAX as f64 + 1.0) { throw overflow("isize"); }
+        x as isize
+    }
+}
+
+impl TryFrom<f32> for u8 {
+    type Error = OverflowError;
+    fn try_from(value: f32) throws (OverflowError) -> u8 {
+        let x = (value as f64).trunc();
+        if !(x >= u8::MIN as f64 && x < u8::MAX as f64 + 1.0) { throw overflow("u8"); }
+        x as u8
+    }
+}
+
+impl TryFrom<f32> for u16 {
+    type Error = OverflowError;
+    fn try_from(value: f32) throws (OverflowError) -> u16 {
+        let x = (value as f64).trunc();
+        if !(x >= u16::MIN as f64 && x < u16::MAX as f64 + 1.0) { throw overflow("u16"); }
+        x as u16
+    }
+}
+
+impl TryFrom<f32> for u32 {
+    type Error = OverflowError;
+    fn try_from(value: f32) throws (OverflowError) -> u32 {
+        let x = (value as f64).trunc();
+        if !(x >= u32::MIN as f64 && x < u32::MAX as f64 + 1.0) { throw overflow("u32"); }
+        x as u32
+    }
+}
+
+impl TryFrom<f32> for u64 {
+    type Error = OverflowError;
+    fn try_from(value: f32) throws (OverflowError) -> u64 {
+        let x = (value as f64).trunc();
+        if !(x >= u64::MIN as f64 && x < u64::MAX as f64 + 1.0) { throw overflow("u64"); }
+        x as u64
+    }
+}
+
+impl TryFrom<f32> for usize {
+    type Error = OverflowError;
+    fn try_from(value: f32) throws (OverflowError) -> usize {
+        let x = (value as f64).trunc();
+        if !(x >= usize::MIN as f64 && x < usize::MAX as f64 + 1.0) { throw overflow("usize"); }
+        x as usize
+    }
+}
+
+impl TryFrom<f64> for i8 {
+    type Error = OverflowError;
+    fn try_from(value: f64) throws (OverflowError) -> i8 {
+        let x = (value as f64).trunc();
+        if !(x >= i8::MIN as f64 && x < i8::MAX as f64 + 1.0) { throw overflow("i8"); }
+        x as i8
+    }
+}
+
+impl TryFrom<f64> for i16 {
+    type Error = OverflowError;
+    fn try_from(value: f64) throws (OverflowError) -> i16 {
+        let x = (value as f64).trunc();
+        if !(x >= i16::MIN as f64 && x < i16::MAX as f64 + 1.0) { throw overflow("i16"); }
+        x as i16
+    }
+}
+
+impl TryFrom<f64> for i32 {
+    type Error = OverflowError;
+    fn try_from(value: f64) throws (OverflowError) -> i32 {
+        let x = (value as f64).trunc();
+        if !(x >= i32::MIN as f64 && x < i32::MAX as f64 + 1.0) { throw overflow("i32"); }
+        x as i32
+    }
+}
+
+impl TryFrom<f64> for i64 {
+    type Error = OverflowError;
+    fn try_from(value: f64) throws (OverflowError) -> i64 {
+        let x = (value as f64).trunc();
+        if !(x >= i64::MIN as f64 && x < i64::MAX as f64 + 1.0) { throw overflow("i64"); }
+        x as i64
+    }
+}
+
+impl TryFrom<f64> for isize {
+    type Error = OverflowError;
+    fn try_from(value: f64) throws (OverflowError) -> isize {
+        let x = (value as f64).trunc();
+        if !(x >= isize::MIN as f64 && x < isize::MAX as f64 + 1.0) { throw overflow("isize"); }
+        x as isize
+    }
+}
+
+impl TryFrom<f64> for u8 {
+    type Error = OverflowError;
+    fn try_from(value: f64) throws (OverflowError) -> u8 {
+        let x = (value as f64).trunc();
+        if !(x >= u8::MIN as f64 && x < u8::MAX as f64 + 1.0) { throw overflow("u8"); }
+        x as u8
+    }
+}
+
+impl TryFrom<f64> for u16 {
+    type Error = OverflowError;
+    fn try_from(value: f64) throws (OverflowError) -> u16 {
+        let x = (value as f64).trunc();
+        if !(x >= u16::MIN as f64 && x < u16::MAX as f64 + 1.0) { throw overflow("u16"); }
+        x as u16
+    }
+}
+
+impl TryFrom<f64> for u32 {
+    type Error = OverflowError;
+    fn try_from(value: f64) throws (OverflowError) -> u32 {
+        let x = (value as f64).trunc();
+        if !(x >= u32::MIN as f64 && x < u32::MAX as f64 + 1.0) { throw overflow("u32"); }
+        x as u32
+    }
+}
+
+impl TryFrom<f64> for u64 {
+    type Error = OverflowError;
+    fn try_from(value: f64) throws (OverflowError) -> u64 {
+        let x = (value as f64).trunc();
+        if !(x >= u64::MIN as f64 && x < u64::MAX as f64 + 1.0) { throw overflow("u64"); }
+        x as u64
+    }
+}
+
+impl TryFrom<f64> for usize {
+    type Error = OverflowError;
+    fn try_from(value: f64) throws (OverflowError) -> usize {
+        let x = (value as f64).trunc();
+        if !(x >= usize::MIN as f64 && x < usize::MAX as f64 + 1.0) { throw overflow("usize"); }
+        x as usize
+    }
+}
+
 impl TryFrom<f64> for f32 {
     type Error = OverflowError;
     /// Throws when a finite `value` is beyond `f32`'s range.

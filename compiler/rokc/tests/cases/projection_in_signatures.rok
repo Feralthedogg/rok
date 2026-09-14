@@ -1,0 +1,26 @@
+// expect-exit: 42
+
+// A projection in a function signature or a static's type resolves:
+// signatures are resolved once every item and impl is registered.
+trait Shape {
+    type Out;
+    fn make(self) -> Out;
+}
+
+struct Sq { s: i32; }
+
+impl Shape for Sq {
+    type Out = i32;
+    fn make(self) -> i32 { self.s * self.s }
+}
+
+fn area(x: <Sq as Shape>::Out) -> <Sq as Shape>::Out {
+    x + 2i32
+}
+
+static SEED: <Sq as Shape>::Out = 0;
+
+fn main() -> i32 {
+    let q = Sq { s: 6i32 };
+    return area(q.make()) + SEED + 4i32;
+}

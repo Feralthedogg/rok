@@ -1,0 +1,37 @@
+// spec: std 301-fs §3.1.3
+// expect-exit: 0
+// expect-stdout:
+// 11 104 true
+// hello world
+// world
+// 0
+// error
+
+// `unsafe fn File::mmap` maps a file read-only; `unmap` (or `using`)
+// releases it.
+
+use rok::std::fs;
+use rok::std::fs::File;
+use rok::std::env;
+use rok::std::io::IoError;
+
+fn run() throws (IoError | Utf8Error) {
+    let path = f"{env::temp_dir()}/rok_mmap_case_{rok::std::process::id()}.txt";
+    try fs::write(path, "hello world");
+    let f = try File::open(path);
+    let m = try unsafe { f.mmap(11, 0) };
+    println(f"{m.len()} {m.get(0) ?? 0} {m.get(11) is none}");
+    println(try str::from_utf8(m.to_list()));
+    println(try str::from_utf8(m.slice(6, 100)));
+    m.unmap();
+    println(f"{m.len()}");
+    let bad = try? unsafe { f.mmap(0, 0) };
+    println(if bad is none { "error" } else { "mapped" });
+    try f.close();
+    try fs::remove_file(path);
+}
+
+fn main() -> i32 {
+    try run() catch _ { return 1; }
+    return 0;
+}

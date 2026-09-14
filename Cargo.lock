@@ -79,6 +79,7 @@ dependencies = [
  "rokc_hir",
  "rokc_ir_common",
  "rokc_lexer",
+ "rokc_llvm",
  "rokc_mir",
  "rokc_parser",
 ]
@@ -128,6 +129,10 @@ dependencies = [
  "rokc_ast",
  "rokc_diagnostic",
 ]
+
+[[package]]
+name = "rokc_llvm"
+version = "0.1.0"
 
 [[package]]
 name = "rokc_mir"

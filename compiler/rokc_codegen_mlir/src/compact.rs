@@ -2,7 +2,7 @@
 //! `insertvalue`s over constants, a string literal's `{ptr, len}`) are
 //! hoisted into the entry block once each, and identical panic blocks
 //! are merged. LLVM folds all of them to constants, so the code is the
-//! same; mlir-opt, mlir-translate and clang read less.
+//! same; the MLIR passes and LLVM read less.
 
 use std::collections::{HashMap, HashSet};
 

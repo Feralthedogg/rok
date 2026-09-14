@@ -1,0 +1,25 @@
+// spec: 005.09.4-c-fn-pointer-types
+// expect-error: `let f` expects `extern "C" fn(i32) -> i32`, found `unsafe extern "C" fn(i32) -> i32
+// expect-error: argument `f` of `apply` expects `extern "C" fn(i32) -> i32`
+// expect-error: call to unsafe function `(unsafe fn value)` outside an `unsafe` block
+
+// A C declaration's value is `unsafe extern "C" fn`: it does not fit a
+// safe position, and calling through it needs `unsafe`. A rok
+// `extern "C" fn` definition's value is safe to call.
+
+extern "C" {
+    fn abs(x: i32) -> i32;
+}
+
+extern "C" fn twice(x: i32) -> i32 { x * 2 }
+
+fn apply(f: extern "C" fn(i32) -> i32, x: i32) -> i32 { f(x) }
+
+fn main() -> i32 {
+    let f: extern "C" fn(i32) -> i32 = abs;
+    let b = apply(abs, 5);
+    let u: unsafe extern "C" fn(i32) -> i32 = abs;
+    let c = u(2);
+    let ok = apply(twice, 1);
+    return 0;
+}

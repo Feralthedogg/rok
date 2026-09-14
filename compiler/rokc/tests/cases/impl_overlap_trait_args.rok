@@ -1,0 +1,23 @@
+// expect-exit: 0
+// expect-stdout: 6 4
+
+// Spec 2.9.3: a concrete impl overlaps a generic one only when the trait
+// arguments unify too. Core's `impl<T: Mul<Output = T>> DotMul<List<T>>
+// for T` covers `M` once `M: Mul`, but `DotMul<List<M>>` is not
+// `DotMul<M>` (the default `Rhs = Self`).
+struct M { v: f64; }
+impl Mul for M {
+    type Output = M;
+    fn mul(self, rhs: M) -> M { return M { v: self.v * rhs.v }; }
+}
+impl DotMul for M {
+    type Output = M;
+    fn dot_mul(self, rhs: M) -> M { return M { v: self.v * rhs.v }; }
+}
+
+fn main() -> i32 {
+    let a = M { v: 2.0 } .* M { v: 3.0 };
+    let b = M { v: 2.0 } * M { v: 2.0 };
+    print(f"{a.v} {b.v}");
+    return 0;
+}

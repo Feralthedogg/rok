@@ -67,6 +67,9 @@ pub struct Parser<'a> {
     pending_items: Vec<Item>,
     /// User meta blocks (spec 6.8), gathered by the driver's pre-pass.
     meta: std::sync::Arc<meta::MetaTable>,
+    /// The build's cfg (spec 6.3): resolves `#[cfg_attr]` and `cfg!(..)`
+    /// before meta expansion. `None` outside a build (tools, pre-pass).
+    cfg: Option<crate::cfg::CfgEnv>,
     /// Meta expansions in progress (cycle detection, 6.8.8).
     meta_stack: Vec<String>,
     /// Source text of the meta expansions so far (`Program::expanded`).
@@ -137,6 +140,7 @@ pub fn parse_program_ext(
         ext,
         &std::sync::Arc::default(),
         &std::sync::Arc::default(),
+        None,
     )
 }
 
@@ -148,16 +152,19 @@ pub fn parse_program_meta(
     ext: &ExtOps,
     metas: &std::sync::Arc<meta::MetaTable>,
     literals: &std::sync::Arc<literal::LiteralTable>,
+    cfg: Option<&crate::cfg::CfgEnv>,
 ) -> (Program, Vec<RokDiagnostic>) {
     let file = file.into();
     let ext = ext.clone();
     let metas = std::sync::Arc::clone(metas);
     let literals = std::sync::Arc::clone(literals);
+    let cfg = cfg.cloned();
     let run = move || {
         let mut p = Parser::new(tokens, file);
         p.ext = ext;
         p.meta = metas;
         p.literals = literals;
+        p.cfg = cfg;
         let program = p.parse_program();
         (program, p.diagnostics)
     };
@@ -217,6 +224,7 @@ impl<'a> Parser<'a> {
             ext: ExtOps::default(),
             pending_items: Vec::new(),
             meta: std::sync::Arc::default(),
+            cfg: None,
             meta_stack: Vec::new(),
             expanded: Vec::new(),
             literals: std::sync::Arc::default(),
@@ -791,7 +799,10 @@ impl<'a> Parser<'a> {
                 return attrs;
             }
             if let Some(attr) = self.parse_attr(true) {
-                attrs.push(attr);
+                match &self.cfg {
+                    Some(env) => crate::cfg::expand_cfg_attr(env, attr, &mut attrs),
+                    None => attrs.push(attr),
+                }
             }
         }
     }
@@ -804,7 +815,10 @@ impl<'a> Parser<'a> {
                 return attrs;
             }
             if let Some(attr) = self.parse_attr(false) {
-                attrs.push(attr);
+                match &self.cfg {
+                    Some(env) => crate::cfg::expand_cfg_attr(env, attr, &mut attrs),
+                    None => attrs.push(attr),
+                }
             }
         }
     }
@@ -1037,13 +1051,10 @@ impl<'a> Parser<'a> {
     }
 
     /// A `fn` type behind `unsafe` (calling it needs an unsafe scope,
-    /// 4.15) and / or `extern "C"` (a C function pointer, 5.9.4). Each
-    /// prefix rides with the bounds as a marker path (`#unsafe`,
-    /// `#extern_c`).
+    /// 4.15) and / or `extern "C"` (a C function pointer, 5.9.4).
     fn parse_marked_fn_type(&mut self, start: Span) -> Option<TyKind> {
-        let mark = if self.eat(&TokenKind::Unsafe) {
-            rokc_ast::UNSAFE_FN_MARK
-        } else {
+        let unsafe_fn = self.eat(&TokenKind::Unsafe);
+        if !unsafe_fn {
             self.bump(); // `extern`
             if let TokenKind::StrLit(abi) = self.peek().clone() {
                 if abi != "C" {
@@ -1051,11 +1062,14 @@ impl<'a> Parser<'a> {
                 }
             }
             self.bump(); // ABI string
-            rokc_ast::C_FN_MARK
-        };
+        }
         let mut t = self.parse_type_atom_inner()?;
         if let TyKind::Fn(_, _, bounds) = &mut t.kind {
-            bounds.push(mark_path(mark, start));
+            if unsafe_fn {
+                bounds.unsafe_fn = true;
+            } else {
+                bounds.c_abi = true;
+            }
         }
         Some(t.kind)
     }
@@ -2795,9 +2809,9 @@ impl<'a> Parser<'a> {
                     };
                 }
                 // `fn(..) -> R + Send + Sync` — auto-trait bounds.
-                let mut bounds = Vec::new();
+                let mut bounds = rokc_ast::FnTyBounds::default();
                 while self.eat(&TokenKind::Plus) {
-                    bounds.push(self.parse_type_path()?);
+                    bounds.auto.push(self.parse_type_path()?);
                 }
                 TyKind::Fn(args, Box::new(ret), bounds)
             }
@@ -2911,7 +2925,10 @@ impl<'a> Parser<'a> {
                     break;
                 };
                 tys.push(match binding {
-                    Some(name) => rokc_ast::assoc_binding(&name, t),
+                    Some(name) => Ty {
+                        span: t.span,
+                        kind: TyKind::Binding(name, Box::new(t)),
+                    },
                     None => t,
                 });
                 if !p.eat(&TokenKind::Comma) {
@@ -4093,10 +4110,43 @@ impl<'a> Parser<'a> {
         Some((sym, tok.span))
     }
 
+    /// `cfg!(pred)` (spec 6.3.5): a `bool` literal, folded here. Without
+    /// a build's cfg (tools) it reads as the empty environment.
+    fn cfg_macro(&mut self) -> Option<Expr> {
+        let start = self.peek_span();
+        let at = |k: usize| self.tokens.get(self.pos + k).map(|t| &t.kind);
+        if self.pending.is_some()
+            || !matches!(at(0), Some(TokenKind::Ident(n)) if n == "cfg")
+            || at(1) != Some(&TokenKind::Bang)
+            || at(2) != Some(&TokenKind::LParen)
+        {
+            return None;
+        }
+        self.bump();
+        self.bump();
+        let body = self.parse_attr_body();
+        let value = match &body {
+            AttrBody::Args(args) if args.len() == 1 => {
+                if let Some(why) = crate::cfg::check_pred(&args[0]) {
+                    self.error(start, why);
+                }
+                self.cfg.as_ref().is_some_and(|env| env.eval(&args[0]))
+            }
+            _ => {
+                self.error(start, "`cfg!` takes exactly one predicate".to_owned());
+                false
+            }
+        };
+        Some(Expr {
+            kind: ExprKind::Literal(Literal::Bool(value)),
+            span: start,
+        })
+    }
+
     #[allow(clippy::cognitive_complexity)] // one arm per primary-expression token
     fn parse_primary(&mut self) -> Option<Expr> {
         let stmt_head = std::mem::take(&mut self.stmt_head);
-        if let Some(e) = self.try_magic_literal() {
+        if let Some(e) = self.try_magic_literal().or_else(|| self.cfg_macro()) {
             return Some(e);
         }
         let start = self.peek_span();
@@ -5927,33 +5977,21 @@ const fn is_block_like(e: &Expr) -> bool {
 /// `any Error`. `#` cannot start an identifier.
 use rokc_ast::UNTYPED_THROWS_MARK;
 
-/// `T?` = `#nest<T> | none`: like `Maybe<T>` (`type Maybe<T> = T |
+/// `T?` = `Nest(T) | none`: like `Maybe<T>` (`type Maybe<T> = T |
 /// none`), `T` is a generic member, so `(i32 | none)?` keeps two layers
 /// while `i32?` is `i32 | none` (spec 2.6.4).
 fn optional_ty(t: Ty) -> Ty {
     let span = t.span;
-    let mut nest = path_ty(rokc_ast::NEST_MARK, span);
-    if let TyKind::Path(p) = &mut nest.kind {
-        p.segments[0].generics.push(t);
-    }
+    let nest = Ty {
+        kind: TyKind::Nest(Box::new(t)),
+        span,
+    };
     let none = Ty {
         kind: TyKind::None,
         span,
     };
     Ty {
         kind: TyKind::Sum(vec![nest, none]),
-        span,
-    }
-}
-
-/// A one-segment marker path (`#unsafe`, `#extern_c`) for a `fn` type's
-/// bound list.
-fn mark_path(name: &str, span: Span) -> Path {
-    Path {
-        segments: vec![PathSegment {
-            name: name.to_owned(),
-            generics: Vec::new(),
-        }],
         span,
     }
 }
@@ -6012,7 +6050,9 @@ fn desugar_rethrows(params: &mut [Param], generics: &mut Generics) -> Vec<Ty> {
                 walk(ok, generics, errs);
                 walk(err, generics, errs);
             }
-            TyKind::Array(t, _) => walk(t, generics, errs),
+            TyKind::Array(t, _) | TyKind::Nest(t) | TyKind::Binding(_, t) => {
+                walk(t, generics, errs);
+            }
             TyKind::Const(_)
             | TyKind::AnyTrait(_)
             | TyKind::Any

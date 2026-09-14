@@ -69,12 +69,9 @@ panic(\"boom\");
         stdout,
         "\
 i32: 3
-i32: 40
-P: P { x: 40, y: 2 }
 sum 42
 P: P { x: 40, y: 2 }
 i32
-str: \"rebound\"
 str: \"rebound\"
 i32: 80
 List<i32>: [1, 2, 3]
@@ -147,7 +144,7 @@ p
     let stdout = text(&out.stdout);
     let stderr = text(&out.stderr);
     assert_eq!(
-        stdout, "once\ni32: 1\nP: P { x: 21 }\ni32: 2\ni32: 42\nP: P { x: 21 }\n",
+        stdout, "once\ni32: 2\ni32: 42\nP: P { x: 21 }\n",
         "stderr: {stderr}"
     );
     assert!(stderr.contains("boom"), "{stderr}");
@@ -181,9 +178,7 @@ match q { x: Q => x.v, _ => 0 }
     let any = "any rok::core::fmt::Debug";
     assert_eq!(
         stdout,
-        format!(
-            "{any}: 5\nPt\ni32: 3\n{any}: Q {{ v: 9 }}\n{any}: 5\n{any}: Q {{ v: 9 }}\ni32: 9\n"
-        ),
+        format!("i32: 3\n{any}: 5\n{any}: Q {{ v: 9 }}\ni32: 9\n"),
         "stderr: {stderr}"
     );
     assert!(
@@ -250,7 +245,7 @@ g()
     let stderr = text(&out.stderr);
     assert_eq!(
         text(&out.stdout),
-        "List<i32>: [1, 2, 3]\nusize: 3\ni32: 11\ni32: 2\ni32: 12\n",
+        "usize: 3\ni32: 11\ni32: 2\ni32: 12\n",
         "stderr: {stderr}"
     );
     let counts: Vec<(usize, usize)> = stderr

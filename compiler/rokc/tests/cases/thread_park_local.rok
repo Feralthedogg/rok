@@ -16,12 +16,12 @@ use rok::std::time::Duration;
 
 fn main() -> i32 {
     let counter = thread::local(|| 100);
-    counter.with(|c| { c.set(c.get() + 1); });
+    counter.set(counter.with(|v| v + 1));
     let hs: List<thread::JoinHandle<i32>> = [];
     let t = 0;
     while t < 3 {
         hs.push(thread::spawn(|| {
-            counter.with(|c| { c.set(c.get() + 10); });
+            counter.set(counter.with(|v| v + 10));
             counter.set(counter.get() + 1);
             counter.get()
         }));

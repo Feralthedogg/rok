@@ -11,7 +11,7 @@ use crate::HirTy;
 /// A written sum `A | B | ..` (spec 2.6.4): a member that is itself a
 /// written sum (or an alias of one) spreads into the set, so
 /// `(i32 | none) | none` is `i32 | none`. A generic member (`param`
-/// names a type parameter; `Self`, `<T as Tr>::X`, `T::X`, `#nest<X>`) stays one
+/// names a type parameter; `Self`, `<T as Tr>::X`, `T::X`, a `Nest`) stays one
 /// member, so `HirTy::sum` keeps it a nested layer when it overlaps the
 /// written members: `T | none` with `T = i32 | none` is `(i32 | none)?`.
 pub fn written_sum(
@@ -47,6 +47,9 @@ pub fn resolve_ty(ty: &Ty) -> HirTy {
     match &ty.kind {
         TyKind::Path(path) => resolve_path_ty(path),
         TyKind::Never => HirTy::Never,
+        TyKind::Nest(x) => resolve_ty(x),
+        // Only a trait argument; as a type it names nothing.
+        TyKind::Binding(name, _) => HirTy::Path(vec![format!("{name} = ..")]),
         TyKind::Sum(parts) => written_sum(parts, |_| false, resolve_ty),
         TyKind::Tuple(parts) => {
             if parts.is_empty() {
@@ -57,19 +60,16 @@ pub fn resolve_ty(ty: &Ty) -> HirTy {
         }
         // Plain `any` = `any ()`: tag + payload, no bound.
         TyKind::Any => HirTy::AnyTrait(Vec::new()),
-        TyKind::AnyTrait(bounds) => HirTy::AnyTrait(
+        TyKind::AnyTrait(bounds) => HirTy::any(
             bounds
                 .iter()
                 .map(|b| {
-                    b.segments
-                        .iter()
-                        .map(|s| s.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join("::")
+                    let segs: Vec<&str> = b.segments.iter().map(|s| s.name.as_str()).collect();
+                    crate::TraitRef::plain(&segs.join("::"))
                 })
                 .collect(),
         ),
-        TyKind::None => HirTy::Path(vec!["none".to_owned()]),
+        TyKind::None => HirTy::None,
         TyKind::SelfUpper => HirTy::Path(vec!["Self".to_owned()]),
         TyKind::Array(elem, len) => {
             let n = const_expr_to_u32(len).unwrap_or(0);
@@ -79,76 +79,24 @@ pub fn resolve_ty(ty: &Ty) -> HirTy {
         TyKind::Fn(args, ret, _) => HirTy::Fn(
             args.iter().map(resolve_ty).collect(),
             Box::new(resolve_ty(ret)),
-            Vec::new(),
+            crate::FnBounds::default(),
         ),
         TyKind::Throws { ok, err } => throws_ty(resolve_ty(ok), resolve_ty(err)),
         TyKind::Const(c) => {
-            const_expr_to_u32(c).map_or(HirTy::Unknown, |v| const_ty(v.into(), None))
+            const_expr_to_u32(c).map_or(HirTy::Unknown, |v| HirTy::Const(v.into(), None))
         }
     }
 }
 
-/// A const generic argument carried in a type substitution (spec 2.11):
-/// `Path(["#const", value, prim])` (`#` cannot start a user name; `prim`
-/// is empty until the parameter's declared type is known).
-#[must_use]
-pub fn const_ty(value: i128, prim: Option<PrimTy>) -> HirTy {
-    HirTy::Path(vec![
-        "#const".to_owned(),
-        value.to_string(),
-        prim.map_or_else(String::new, |p| p.name().to_owned()),
-    ])
-}
-
-/// The value (and declared type, if known) of a `const_ty`.
-#[must_use]
-pub fn as_const(t: &HirTy) -> Option<(i128, Option<PrimTy>)> {
-    let HirTy::Path(p) = t else { return None };
-    match p.as_slice() {
-        [tag, v, prim] if tag == "#const" => Some((v.parse().ok()?, {
-            use PrimTy as P;
-            [
-                P::I8,
-                P::I16,
-                P::I32,
-                P::I64,
-                P::Isize,
-                P::U8,
-                P::U16,
-                P::U32,
-                P::U64,
-                P::Usize,
-                P::Bool,
-                P::CChar,
-                P::Char,
-            ]
-            .into_iter()
-            .find(|q| q.name() == prim)
-        })),
-        _ => None,
-    }
-}
-
-/// What a `rethrows` error parameter binds to for a non-throwing
-/// argument (`#` cannot start a user identifier).
-pub const NOTHROW: &str = "#nothrow";
-
-pub fn nothrow_ty() -> HirTy {
-    HirTy::Path(vec![NOTHROW.to_owned()])
-}
-
 /// `throws (err) -> ok`, normalized: nested error sums are flattened and
-/// deduplicated, `NOTHROW` parts dropped — no error left means a plain
+/// deduplicated, `NoThrow` parts dropped — no error left means a plain
 /// `ok` (a `rethrows` instance with non-throwing arguments).
 pub fn throws_ty(ok: HirTy, err: HirTy) -> HirTy {
     let parts: Vec<HirTy> = match HirTy::sum([err]) {
         HirTy::Sum(ps) => ps,
         t => vec![t],
     };
-    let parts: Vec<HirTy> = parts
-        .into_iter()
-        .filter(|p| !matches!(p, HirTy::Path(p) if p.len() == 1 && p[0] == NOTHROW))
-        .collect();
+    let parts: Vec<HirTy> = parts.into_iter().filter(|p| *p != HirTy::NoThrow).collect();
     if parts.is_empty() {
         return ok;
     }

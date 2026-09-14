@@ -104,18 +104,32 @@ impl<T> Slice<T> {
 pub struct SliceIter<T> {
     s: Slice<T>;
     i: usize;
+    /// Items taken from the back (`next_back`).
+    back: usize = 0;
 }
 
 impl<T> Iterator for SliceIter<T> {
     type Item = T;
     fn next(ref self) -> T | none {
         unsafe {
-            if self.i >= self.s.len {
+            if self.i + self.back >= self.s.len {
                 return none;
             }
             self.i += 1;
             // `return`: with `T = ()` a bare tail reads as a missing value.
             return self.s.buf[self.s.at(self.i - 1)];
+        }
+    }
+}
+
+impl<T> DoubleEndedIterator for SliceIter<T> {
+    fn next_back(ref self) -> T | none {
+        unsafe {
+            if self.i + self.back >= self.s.len {
+                return none;
+            }
+            self.back += 1;
+            return self.s.buf[self.s.at(self.s.len - self.back)];
         }
     }
 }
@@ -135,7 +149,7 @@ impl<T> Index<usize> for Slice<T> {
     fn index(self, i: usize) -> T {
         unsafe {
             if i >= self.len {
-                return panic(f"slice index {i} out of bounds for length {self.len}");
+                return index_oob("slice index", i, self.len);
             }
             self.buf[self.at(i)]
         }

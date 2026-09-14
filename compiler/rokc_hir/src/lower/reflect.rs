@@ -192,40 +192,38 @@ pub(super) fn dynamic(ctx: &mut LowerCtx<'_>, recv: HirExpr, method: &str) -> Hi
     }
 }
 
-/// `rok.any_cast` / `rok.method_table` (`core/reflect.rok`); `None` for
-/// other intrinsics.
+/// `rok.method_table` (`table`) / `rok.any_cast` (`core/reflect.rok`),
+/// called as `name`.
 pub(super) fn intrinsic(
     ctx: &mut LowerCtx<'_>,
-    op: &str,
+    table: bool,
+    name: &str,
     targs: &[Ty],
     args: &[CallArg],
     span: rokc_diagnostic::Span,
-) -> Option<HirExpr> {
-    if !matches!(op, "any_cast" | "method_table") {
-        return None;
-    }
+) -> HirExpr {
     let Some(t) = targs.first().filter(|_| targs.len() == 1) else {
         discard_args(ctx, args);
-        return Some(ctx.error_expr(span, format!("`{op}` is called as `{op}::<T>(..)`")));
+        return ctx.error_expr(span, format!("`{name}` is called as `{name}::<T>(..)`"));
     };
     let t = ctx.resolve_ast_ty(t);
-    if op == "method_table" {
+    if table {
         discard_args(ctx, args);
-        return Some(str_const(method_table(ctx, &t), span));
+        return str_const(method_table(ctx, &t), span);
     }
     let [CallArg::Positional(arg)] = args else {
         discard_args(ctx, args);
-        return Some(ctx.error_expr(span, "`cast` takes one value".to_owned()));
+        return ctx.error_expr(span, format!("`{name}` takes one value"));
     };
     let any = HirTy::AnyTrait(Vec::new());
     let v = lower_expected(ctx, arg, any.clone());
-    let v = coerce(ctx, &any, v, &|| "the value of `cast`".to_owned());
-    Some(any_cast(ctx, v, &t, span))
+    let v = coerce(ctx, &any, v, &|| format!("the value of `{name}`"));
+    any_cast(ctx, v, &t, span)
 }
 
 /// `match v { x: T => x, x: I => x as T if it fits (integers), _ => none }`.
 fn any_cast(ctx: &mut LowerCtx<'_>, v: HirExpr, t: &HirTy, span: rokc_diagnostic::Span) -> HirExpr {
-    let out = HirTy::sum([t.clone(), HirTy::Path(vec!["none".to_owned()])]);
+    let out = HirTy::sum([t.clone(), HirTy::None]);
     let HirTy::Sum(members) = &out else {
         return poison(span);
     };
@@ -233,7 +231,7 @@ fn any_cast(ctx: &mut LowerCtx<'_>, v: HirExpr, t: &HirTy, span: rokc_diagnostic
         let i = members.iter().position(|m| m == want).expect("cast member");
         u32::try_from(i).expect("variant overflow")
     };
-    let (some_ix, none_ix) = (at(t), at(&HirTy::Path(vec!["none".to_owned()])));
+    let (some_ix, none_ix) = (at(t), at(&HirTy::None));
     let wrap = |value: Option<HirExpr>, index: u32| HirExpr {
         kind: HirExprKind::SumWrap {
             sum_ty: out.clone(),

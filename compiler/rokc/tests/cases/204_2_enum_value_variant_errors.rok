@@ -1,0 +1,20 @@
+// spec: 002.04.2-value-variant-errors
+// expect-error: mixes value variants
+// expect-error: have the same value 1
+// expect-error: does not fit the tag type `u8`
+// expect-error: is not a const integer expression
+
+enum Mixed { A = 1, B }
+
+enum Dup { A = 1, B = 1 }
+
+#[repr(u8)]
+enum Wide { A = 256 }
+
+fn f() -> i32 { return 3; }
+
+enum NotConst { A = f() }
+
+fn main() -> i32 {
+    return 0;
+}

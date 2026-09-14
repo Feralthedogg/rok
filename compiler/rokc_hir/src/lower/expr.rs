@@ -533,7 +533,7 @@ fn lower_receiver(ctx: &mut LowerCtx<'_>, receiver: &Expr) -> HirExpr {
     let retry = ctx.probe_mark();
     let mut probe = ctx.clone();
     let fits = lower_expected(&mut probe, receiver, expected.clone()).ty == expected
-        && ctx.env.sink.diagnostics.borrow().len() == retry.diagnostics;
+        && probe.probe_clean(&retry);
     ctx.rollback(&retry);
     if !fits {
         return recv;
@@ -547,7 +547,7 @@ fn lower_receiver(ctx: &mut LowerCtx<'_>, receiver: &Expr) -> HirExpr {
 /// never produces a value don't (empty `[]` and differing `if` / `match`
 /// branches are rejected where they are lowered).
 fn check_let_inferable(ctx: &LowerCtx<'_>, name: &str, init: &HirExpr) {
-    let why = if is_none_ty(&init.ty) {
+    let why = if init.ty.is_none() {
         format!("`none` alone has no value type — write `let {name}: T | none = none;`")
     } else if hir_expr_diverges(init) {
         "the initializer never produces a value (it always returns / breaks / loops)".to_owned()
@@ -1105,6 +1105,18 @@ fn lower_cast(
         ctx.rollback(&mark);
         return super::bignum::cast(ctx, operand, &from_ty, &to_ty, ty, span);
     }
+    // A field-less enum casts as its stored tag (a value variant's value).
+    let from_ty = match &from_ty {
+        HirTy::Enum(id) if matches!(&to_ty, HirTy::Prim(p) if p.is_int()) => {
+            let def = ctx.enum_def(*id);
+            if def.variants.iter().all(|v| v.payload_ty.is_none()) {
+                HirTy::Prim(def.repr.int.unwrap_or(PrimTy::I32))
+            } else {
+                from_ty
+            }
+        }
+        _ => from_ty,
+    };
     let castable = |t: &HirTy| matches!(t, HirTy::Prim(p) if p.is_int() || p.is_float() || matches!(p, PrimTy::Bool | PrimTy::CChar | PrimTy::Char));
     if !(from_ty == to_ty
         || matches!(from_ty, HirTy::Unknown)
@@ -1651,55 +1663,12 @@ pub(super) fn resolve_enum_variant(
     } else if let Some(eid) = ctx.lookup_enum(&full) {
         eid
     } else {
-        let insts = ctx.enum_instantiations(&full);
-        if insts.is_empty() {
+        let Some(def) = ctx.env.defs.generic_enums.get(&full).copied() else {
             return EnumRes::NotEnum;
-        }
-        let fits: Vec<EnumId> = insts
-            .into_iter()
-            .filter(|&eid| {
-                let Some(vi) = variant_of(eid) else {
-                    return false;
-                };
-                let v = &ctx.enum_def(eid).variants[vi];
-                match (arg_tys, &v.payload_ty) {
-                    (None, None) => true,
-                    (Some(args), Some(p)) => {
-                        let parts: Vec<HirTy> = match (v.arity, p) {
-                            (1, t) => vec![t.clone()],
-                            (_, HirTy::Tuple(ps)) => ps.clone(),
-                            (_, t) => vec![t.clone()],
-                        };
-                        parts.len() == args.len()
-                            && parts
-                                .iter()
-                                .zip(args)
-                                .all(|(p, a)| ty_compatible(p, a) && *a != HirTy::Unknown)
-                    }
-                    _ => false,
-                }
-            })
-            .collect();
-        match fits.as_slice() {
-            [one] => *one,
-            [] => {
-                ctx.emit_error(
-                    rokc_diagnostic::ErrorKind::Type,
-                    format!(
-                        "no instantiation of generic enum `{full}` matches `{}`",
-                        segs.join("::")
-                    ),
-                );
-                return EnumRes::Error;
-            }
-            _ => {
-                ctx.emit_uninferred(format!(
-                    "cannot infer the type arguments of `{full}` for `{}` — annotate the \
-                     binding with the concrete type",
-                    segs.join("::")
-                ));
-                return EnumRes::Error;
-            }
+        };
+        match infer_enum_instance(ctx, def, &full, &vname, arg_tys, segs) {
+            Some(eid) => eid,
+            None => return EnumRes::Error,
         }
     };
     if let Some(i) = variant_of(eid) {
@@ -1716,19 +1685,89 @@ pub(super) fn resolve_enum_variant(
     }
 }
 
+/// The instance of generic enum `def` that variant `vname` applied to
+/// `arg_tys` builds: each type argument from the payload (`Pair::Two(1,
+/// "a")` is a `Pair<i32, str>`), else the parameter's default, else an
+/// inference variable of an un-annotated `let`; `None` (reported) when
+/// one stays open.
+fn infer_enum_instance(
+    ctx: &LowerCtx<'_>,
+    def: &rokc_ast::EnumDef,
+    full: &str,
+    vname: &str,
+    arg_tys: Option<&[HirTy]>,
+    segs: &[&str],
+) -> Option<EnumId> {
+    let names: std::collections::HashSet<String> = def
+        .generics
+        .params
+        .iter()
+        .map(|gp| match gp {
+            rokc_ast::GenericParam::Type { name, .. }
+            | rokc_ast::GenericParam::Const { name, .. } => name.clone(),
+        })
+        .collect();
+    let Some(variant) = def.variants.iter().find(|v| v.name == vname) else {
+        ctx.emit_error(
+            rokc_diagnostic::ErrorKind::Type,
+            format!("enum `{full}` has no variant `{vname}`"),
+        );
+        return None;
+    };
+    let payload: Vec<&Ty> = match &variant.kind {
+        rokc_ast::EnumVariantKind::Tuple(ts) => ts.iter().collect(),
+        rokc_ast::EnumVariantKind::Named(fs) => fs.iter().map(|f| &f.ty).collect(),
+        rokc_ast::EnumVariantKind::Unit | rokc_ast::EnumVariantKind::Value(_) => Vec::new(),
+    };
+    let mut subst: HashMap<String, HirTy> = HashMap::new();
+    for (t, a) in payload.iter().zip(arg_tys.unwrap_or_default()) {
+        if *a != HirTy::Unknown {
+            unify_param_ty_with(t, a, &names, &mut subst, ctx);
+        }
+    }
+    let mut args = Vec::new();
+    for gp in &def.generics.params {
+        let arg = match gp {
+            rokc_ast::GenericParam::Type { name, default, .. } => subst
+                .get(name)
+                .cloned()
+                .filter(|t| *t != HirTy::Unknown)
+                .or_else(|| default.as_ref().map(|d| ctx.resolve_ast_ty(d))),
+            rokc_ast::GenericParam::Const { name, ty } => subst
+                .get(name)
+                .and_then(HirTy::as_const)
+                .and_then(|v| super::mono::typed_const(ctx, name, ty, v)),
+        };
+        match arg {
+            Some(t) => args.push(t),
+            None if ctx.infer_vars => args.push(super::infer::fresh(ctx)),
+            None => {
+                ctx.emit_uninferred(format!(
+                    "cannot infer the type arguments of `{full}` for `{}` — annotate the \
+                     binding with the concrete type",
+                    segs.join("::")
+                ));
+                return None;
+            }
+        }
+    }
+    ctx.instantiate_enum(full, args, rokc_diagnostic::current_span())
+}
+
 /// `segs` names an enum (or generic enum base) that has no variant of
 /// that name — so `E::f(..)` is an associated function call.
 fn enum_lacks_variant(ctx: &LowerCtx<'_>, segs: &[&str]) -> bool {
     let Some((full, vname)) = ctx.enum_path(segs) else {
         return false;
     };
-    let ids = ctx
-        .lookup_enum(&full)
-        .map_or_else(|| ctx.enum_instantiations(&full), |e| vec![e]);
-    !ids.is_empty()
-        && ids
-            .iter()
-            .all(|&e| ctx.enum_def(e).variants.iter().all(|v| v.name != vname))
+    if let Some(e) = ctx.lookup_enum(&full) {
+        return ctx.enum_def(e).variants.iter().all(|v| v.name != vname);
+    }
+    ctx.env
+        .defs
+        .generic_enums
+        .get(&full)
+        .is_some_and(|d| d.variants.iter().all(|v| v.name != vname))
 }
 
 /// Payload slot types of a variant, one per constructor argument.
@@ -1890,7 +1929,7 @@ pub(super) fn lower_struct_init(
         }
     } else if let Some(id) = ctx.lookup_struct(&full) {
         id
-    } else if let Some(def) = ctx.env.generic_structs.get(&full).copied() {
+    } else if let Some(def) = ctx.env.defs.generic_structs.get(&full).copied() {
         // `Box { v: 5 }`: the expected type picks the instantiation;
         // otherwise infer the type arguments from the field values.
         match &hint {
@@ -1924,7 +1963,7 @@ pub(super) fn lower_struct_init(
                     if let rokc_ast::GenericParam::Const { name, ty } = gp {
                         let c = subst
                             .get(name)
-                            .and_then(crate::ty::as_const)
+                            .and_then(HirTy::as_const)
                             .and_then(|v| super::mono::typed_const(ctx, name, ty, v));
                         let Some(c) = c else {
                             ctx.emit_uninferred(format!(
@@ -1956,7 +1995,7 @@ pub(super) fn lower_struct_init(
                         }
                     }
                 }
-                match ctx.instantiate_struct(&full, args) {
+                match ctx.instantiate_struct(&full, args, rokc_diagnostic::current_span()) {
                     Some(id) => id,
                     None => return poison(span),
                 }
@@ -3161,7 +3200,7 @@ pub(super) fn lower_variadic(
             trailing_closure: None,
         });
         let list_ty = ctx
-            .instantiate_struct(LIST, vec![elem])
+            .instantiate_struct(LIST, vec![elem], rokc_diagnostic::current_span())
             .map_or(HirTy::Unknown, HirTy::Struct);
         let init = lower_expected(ctx, &new, list_ty);
         let (list, _) = temp(ctx, &mut stmts, init);
@@ -3839,7 +3878,7 @@ fn ast_ty_mentions(ty: &Ty, name: &str) -> bool {
         AstTyKind::Sum(ts) | AstTyKind::Tuple(ts) => ts.iter().any(rec),
         AstTyKind::Fn(a, r, _) => a.iter().any(rec) || rec(r),
         AstTyKind::Throws { ok, err } => rec(ok) || rec(err),
-        AstTyKind::Array(e, _) => rec(e),
+        AstTyKind::Array(e, _) | AstTyKind::Nest(e) | AstTyKind::Binding(_, e) => rec(e),
         _ => false,
     }
 }
@@ -3884,7 +3923,7 @@ fn needs_drop(ctx: &LowerCtx<'_>, ty: &HirTy, depth: u32) -> bool {
     if depth > DROP_GLUE_DEPTH {
         return false;
     }
-    if ctx.implements_trait(ty, ctx.lang_trait("drop_method"), 0) {
+    if ctx.has_trait(ty, ctx.lang("drop_method")) {
         return true;
     }
     let any = |ts: &[HirTy]| ts.iter().any(|t| needs_drop(ctx, t, depth + 1));
@@ -3927,7 +3966,7 @@ fn drop_glue(
         return out;
     }
     let ty = value.ty.clone();
-    if ctx.implements_trait(&ty, ctx.lang_trait("drop_method"), 0) {
+    if ctx.has_trait(&ty, ctx.lang("drop_method")) {
         out.push(HirStmt::Expr(method_call_on(
             ctx,
             value.clone(),
@@ -4072,7 +4111,7 @@ fn is_drop_method(ctx: &LowerCtx<'_>, ty: &HirTy) -> bool {
         Ok(Some(MethodPick::Generic(gm))) => gm.info.trait_name.clone(),
         _ => None,
     };
-    trait_name.as_deref() == Some(ctx.lang_trait("drop_method"))
+    trait_name.as_deref() == Some(ctx.lang("drop_method"))
 }
 
 /// Spec 2.13.4: `Drop::drop` runs only when a `using` block exits;
@@ -4101,8 +4140,8 @@ fn check_direct_drop_path(ctx: &LowerCtx<'_>, p: &rokc_ast::Path) {
         return;
     }
     let segs: Vec<&str> = prefix.iter().map(|s| s.name.as_str()).collect();
-    let is_drop =
-        ctx.env.names.trait_key(&segs, &ctx.current_module) == ctx.lang_trait("drop_method") || {
+    let is_drop = ctx.env.names.trait_key(&segs, &ctx.current_module) == ctx.lang("drop_method")
+        || {
             let ty = ctx.resolve_ast_ty(&rokc_ast::Ty {
                 kind: rokc_ast::TyKind::Path(rokc_ast::Path {
                     segments: prefix.to_vec(),
@@ -4117,18 +4156,22 @@ fn check_direct_drop_path(ctx: &LowerCtx<'_>, p: &rokc_ast::Path) {
     }
 }
 
-/// Traits a sum type has when all its variants do (spec 2.13.6, 2.5.7,
-/// 2.10.9: `T | none` is `Clone` / `Debug` / ... when `T` is).
-pub(super) const SUM_TRAITS: &[&str] = &[
-    "rok::core::marker::Clone",
-    "rok::core::marker::Copy",
-    "rok::core::fmt::Debug",
-    "rok::core::ops::PartialEq",
-    "rok::core::cmp::Eq",
-    "rok::core::cmp::Hash",
-    "rok::core::ops::PartialOrd",
-    "rok::core::cmp::Ord",
-];
+/// Is `key` a trait a sum type has when all its variants do (spec
+/// 2.13.6, 2.5.7, 2.10.9: `T | none` is `Clone` / `Debug` / ... when `T`
+/// is)?
+pub(super) fn is_sum_trait(ctx: &LowerCtx<'_>, key: &str) -> bool {
+    [
+        "clone_trait",
+        "debug_trait",
+        "eq_trait",
+        "hash_trait",
+        "cmp_trait",
+        "ord_trait",
+    ]
+    .into_iter()
+    .any(|s| ctx.lang(s) == key)
+        || [COPY_TRAIT, EQ_TRAIT].contains(&key)
+}
 
 /// Their methods, dispatched on the variant by `sum_structural_call`.
 const SUM_METHODS: &[&str] = &[
@@ -4247,7 +4290,7 @@ fn sum_structural_call(
     };
     let arm_pat = |ctx: &mut LowerCtx<'_>, i: usize, name: &str| {
         let vt = &variants[i];
-        let none = is_none_ty(vt);
+        let none = vt.is_none();
         let binder = (!none).then(|| ctx.declare(Some(name.to_owned()), vt.clone()));
         HirPattern::SumVariant {
             sum_ty: sum_ty.clone(),
@@ -4260,7 +4303,7 @@ fn sum_structural_call(
     for (i, vt) in variants.iter().enumerate() {
         ctx.push_scope();
         let pat = arm_pat(ctx, i, "#a");
-        let none = is_none_ty(vt);
+        let none = vt.is_none();
         let body = match (method, rhs) {
             ("clone", _) if none => hir_local(s, &sum_ty, span),
             ("clone", _) => {
@@ -4282,6 +4325,8 @@ fn sum_structural_call(
                     }),
                     span,
                 };
+                let debug_fmt = format!("{}::fmt", ctx.lang("debug_trait"));
+                let debug_fmt: Vec<&str> = debug_fmt.split("::").collect();
                 let (callee, first) = if none {
                     let lit = Expr {
                         kind: ExprKind::Literal(AstLit::Str("none".to_owned())),
@@ -4289,7 +4334,7 @@ fn sum_structural_call(
                     };
                     (&["rok", "core", "fmt", "Formatter", "write_str"][..], lit)
                 } else {
-                    (&["rok", "core", "fmt", "Debug", "fmt"][..], path("#a"))
+                    (&debug_fmt[..], path("#a"))
                 };
                 let mut call_args = args.to_vec();
                 if none {
@@ -4555,10 +4600,11 @@ pub(super) fn method_call_on(
                 span,
                 format!(
                     "method `{method}` of the generic impl of `{}` does not apply to `{}`: \
-                     its bound needs `{}: {bound}`, which does not hold",
+                     its bound needs `{}: {}`, which does not hold",
                     gi.trait_key,
                     ctx.ty_name(&recv_h.ty),
-                    ctx.ty_name(&bty)
+                    ctx.ty_name(&bty),
+                    ctx.trait_name(&bound)
                 ),
             );
         }
@@ -4631,27 +4677,11 @@ fn assign_trait_call(
     let key = format!("rok::core::ops::{tr}");
     let mark = ctx.probe_mark();
     let ty = lower_expected(ctx, target, HirTy::Unknown).ty;
-    ctx.rollback_all(&mark);
+    ctx.rollback(&mark);
     if matches!(ty, HirTy::Prim(_) | HirTy::Unknown) {
         return None;
     }
-    let concrete = method_target_for(&ty)
-        .and_then(|t| ctx.env.method_table.get(&(t, method.to_owned())))
-        .is_some_and(|ids| {
-            ids.iter().any(|id| {
-                ctx.env
-                    .method_info
-                    .get(id)
-                    .and_then(|i| i.trait_name.as_deref())
-                    == Some(key.as_str())
-            })
-        });
-    let generic = ctx
-        .env
-        .generic_trait_impls
-        .iter()
-        .any(|gi| gi.trait_key == key && ctx.generic_impl_subst(gi, &ty, 0).is_some());
-    if !concrete && !generic {
+    if !ctx.has_impl(&ty, &TraitRef::plain(&key), 0) {
         return None;
     }
     // `{ let #t = a; #t.op_assign(b); a = #t; }`: `ref self` updates the
@@ -4713,13 +4743,8 @@ fn pick_by_first_arg<'e>(
             cands.push((tr, slot, MethodPick::Concrete(*id)));
         }
     }
-    for gi in &env.generic_trait_impls {
-        let Some(gm) = gi.methods.get(method) else {
-            continue;
-        };
-        let Some(subst) = ctx.generic_impl_subst(gi, ty, 0) else {
-            continue;
-        };
+    for (gi, subst) in ctx.generic_impls(ty, |gi| gi.methods.contains_key(method), 0) {
+        let gm = &gi.methods[method];
         let Some(p) = gm.def.params.get(1).and_then(|p| p.ty.as_ref()) else {
             continue;
         };
@@ -4735,9 +4760,8 @@ fn pick_by_first_arg<'e>(
     for (_, slot, pick) in cands {
         let mark = ctx.probe_mark();
         let h = lower_expected(ctx, arg, slot.clone());
-        let ok = ctx.env.sink.diagnostics.borrow().len() == mark.diagnostics
-            && coercible(ctx, &slot, &h.ty);
-        ctx.rollback_all(&mark);
+        let ok = ctx.probe_clean(&mark) && coercible(ctx, &slot, &h.ty);
+        ctx.rollback(&mark);
         if ok {
             hits.push(pick);
         }
@@ -4755,7 +4779,7 @@ fn pick_by_first_arg<'e>(
 fn any_method_call(
     ctx: &mut LowerCtx<'_>,
     recv_h: HirExpr,
-    bounds: &[String],
+    bounds: &[TraitRef],
     method: &str,
     only: Option<&str>,
     args: &[CallArg],
@@ -4765,9 +4789,9 @@ fn any_method_call(
     let mut stack = bounds.to_vec();
     // The trait declaring `method`, and the bound that named it (with
     // its arguments / bindings; a supertrait reached indirectly has none).
-    let mut provider: Option<(String, String)> = None;
+    let mut provider: Option<(String, TraitRef)> = None;
     while let Some(t) = stack.pop() {
-        let base = bound_base(&t).to_owned();
+        let base = t.path.clone();
         if seen.contains(&base) {
             continue;
         }
@@ -4778,7 +4802,7 @@ fn any_method_call(
             {
                 provider = Some((base.clone(), t.clone()));
             }
-            stack.extend(info.supers.iter().cloned());
+            stack.extend(info.supers.iter().map(|s| TraitRef::plain(s)));
         }
         seen.push(base);
     }
@@ -4804,8 +4828,7 @@ fn any_method_call(
     // Every implementor shares one signature only if it doesn't depend
     // on the implementing type (`Self`), on trait arguments the bound
     // leaves open, or on associated types it doesn't bind.
-    let fixed = bound.split_once('<').map_or("", |(_, rest)| rest);
-    let has_args = !fixed.is_empty() && !fixed.split(", ").next().unwrap_or("").contains(" = ");
+    let has_args = !bound.args.is_empty();
     let needs = ctx.env.trait_info[&provider]
         .needs
         .get(method)
@@ -4826,7 +4849,7 @@ fn any_method_call(
                         .to_owned(),
                 )
             } else if let Some(x) = n.strip_prefix("Self::") {
-                (!fixed.contains(&format!("{x} = "))).then(|| {
+                (!bound.binds.iter().any(|(n, _)| n == x)).then(|| {
                     format!(
                         "its signature uses `Self::{x}`, which the bound leaves open — bind it \
                      (`any {provider}<{x} = ..>`)"
@@ -4858,10 +4881,14 @@ fn any_method_call(
     let concrete = ctx
         .env
         .trait_impl_tys
-        .get(bound_base(&bounds[0]))
+        .get(&bounds[0].path)
         .into_iter()
         .flatten()
-        .find(|t| bounds.iter().all(|b| ctx.implements(t, b)))
+        .find(|t| {
+            bounds
+                .iter()
+                .all(|b| ctx.concrete_impls(t).iter().any(|r| r.satisfies(b)))
+        })
         .and_then(|t| match pick_method(ctx, t, method, Some(&provider)) {
             Ok(Some(MethodPick::Concrete(id))) => Some(ctx.sig_by_id(id)),
             _ => None,
@@ -4874,8 +4901,9 @@ fn any_method_call(
             span,
             format!(
                 "cannot call `{method}` on `{}`: its signature can't be fixed from the bound \
-                 `{bound}`",
-                ctx.ty_name(&recv_ty)
+                 `{}`",
+                ctx.ty_name(&recv_ty),
+                ctx.trait_name(&bound)
             ),
         );
     };
@@ -4906,7 +4934,7 @@ fn any_method_call(
 }
 
 fn is_fmt_trait(ctx: &LowerCtx<'_>, key: &str) -> bool {
-    key == ctx.lang_trait("display_trait") || key == ctx.lang_trait("debug_trait")
+    key == ctx.lang("display_trait") || key == ctx.lang("debug_trait")
 }
 
 /// `Display::fmt(v, ref f)` / `Debug::fmt` on an `any` value: the
@@ -4971,27 +4999,26 @@ fn any_fmt(
 
 /// `method`'s signature from trait `provider`'s declaration, with the
 /// trait's parameters and associated types filled in from `bound`
-/// (`Source<i32, Item = u8>`). `None` when an argument can't be read
-/// back from the bound key.
+/// (`Source<i32, Item = u8>`). `None` for more arguments than the trait
+/// has parameters.
 fn trait_decl_sig(
     ctx: &LowerCtx<'_>,
     provider: &str,
-    bound: &str,
+    bound: &TraitRef,
     method: &str,
 ) -> Option<(Vec<HirTy>, HirTy)> {
     let info = &ctx.env.trait_info[provider];
     let def = info.decls.get(method)?;
-    let mut subst: HashMap<String, HirTy> = HashMap::new();
-    if let Some((_, inner)) = bound.split_once('<') {
-        let mut positional = info.params.iter();
-        for part in inner.strip_suffix('>')?.split(", ") {
-            let (name, ty) = match part.split_once(" = ") {
-                Some((n, t)) => (n.to_owned(), t),
-                None => (positional.next()?.clone(), part),
-            };
-            subst.insert(name, bound_arg_ty(ctx, ty)?);
-        }
+    if bound.args.len() > info.params.len() {
+        return None;
     }
+    let subst: HashMap<String, HirTy> = info
+        .params
+        .iter()
+        .cloned()
+        .zip(bound.args.iter().cloned())
+        .chain(bound.binds.iter().cloned())
+        .collect();
     let mut rc = LowerCtx::new(ctx.env, &subst, None);
     rc.current_module.clone_from(&info.module);
     let resolve = |t: &Ty| {
@@ -5006,39 +5033,6 @@ fn trait_decl_sig(
         .map(|p| p.ty.as_ref().map_or(HirTy::Unknown, resolve))
         .collect();
     Some((params, resolve(&sig_ret_ast(def))))
-}
-
-/// A type named in a bound key (see `bound_key`): a primitive, a struct
-/// / enum table key, a `Struct3` / `Enum2` id, or any other type by the
-/// mangled name `bound_key` recorded.
-fn bound_arg_ty(ctx: &LowerCtx<'_>, name: &str) -> Option<HirTy> {
-    if let Some(t) = super::resolve::bound_arg(name) {
-        return Some(t);
-    }
-    let ast = Ty {
-        kind: AstTyKind::Path(AstPath {
-            segments: vec![rokc_ast::PathSegment {
-                name: name.to_owned(),
-                generics: Vec::new(),
-            }],
-            span: rokc_diagnostic::Span::default(),
-        }),
-        span: rokc_diagnostic::Span::default(),
-    };
-    if let t @ HirTy::Prim(_) = resolve_ty(&ast) {
-        return Some(t);
-    }
-    if let Some(id) = ctx.lookup_struct(name) {
-        return Some(HirTy::Struct(id));
-    }
-    if let Some(id) = ctx.lookup_enum(name) {
-        return Some(HirTy::Enum(id));
-    }
-    if let Some(n) = name.strip_prefix("Struct").and_then(|n| n.parse().ok()) {
-        return Some(HirTy::Struct(StructId(n)));
-    }
-    let n = name.strip_prefix("Enum")?.parse().ok()?;
-    Some(HirTy::Enum(EnumId(n)))
 }
 
 /// `Self::Item` → `Item` (the associated type, bound by name).
@@ -5063,7 +5057,9 @@ fn strip_self_assoc(ty: &mut Ty) {
             strip_self_assoc(ok);
             strip_self_assoc(err);
         }
-        AstTyKind::Array(elem, _) => strip_self_assoc(elem),
+        AstTyKind::Array(elem, _) | AstTyKind::Nest(elem) | AstTyKind::Binding(_, elem) => {
+            strip_self_assoc(elem);
+        }
         _ => {}
     }
 }
@@ -5207,7 +5203,7 @@ pub(super) fn any_link(
         };
         // A `fmt` dispatcher renders text (`any_fmt`); an f-string makes it.
         let body = if d.method == "fmt" && is_fmt_trait(&c, &d.trait_key) {
-            let q = if d.trait_key == c.lang_trait("debug_trait") {
+            let q = if d.trait_key == c.lang("debug_trait") {
                 ":?"
             } else {
                 ""
@@ -5323,7 +5319,7 @@ fn build_dispatcher(env: &Env<'_>, d: &AnyDispatch) -> HirFunction {
         let recv = hir_local(x, &t, span);
         let call = if d.method == "fmt" && is_fmt_trait(&c, &d.trait_key) {
             // The text, `f"{x}"` / `f"{x:?}"` (`any_fmt`).
-            let debug = d.trait_key == c.lang_trait("debug_trait");
+            let debug = d.trait_key == c.lang("debug_trait");
             let hole = rokc_ast::FStringPart::Hole {
                 expr: Expr {
                     kind: ExprKind::Path(AstPath {
@@ -5484,14 +5480,10 @@ pub(super) fn pick_method<'e>(
     for gm in generic_method_for(ctx, ty, method) {
         cands.push((gm.info.trait_name.as_deref(), MethodPick::Generic(gm)));
     }
-    for gi in &env.generic_trait_impls {
-        if let Some(gm) = gi.methods.get(method) {
-            if ctx.generic_impl_subst(gi, ty, 0).is_some() {
-                // An empty key: a generic inherent impl (`impl<..> [T; N]`).
-                let key = Some(gi.trait_key.as_str()).filter(|k| !k.is_empty());
-                cands.push((key, MethodPick::Generic(gm)));
-            }
-        }
+    for (gi, _) in ctx.generic_impls(ty, |gi| gi.methods.contains_key(method), 0) {
+        // An empty key: a generic inherent impl (`impl<..> [T; N]`).
+        let key = Some(gi.trait_key.as_str()).filter(|k| !k.is_empty());
+        cands.push((key, MethodPick::Generic(&gi.methods[method])));
     }
     if let Some(k) = trait_key {
         cands.retain(|(t, _)| *t == Some(k));
@@ -5554,12 +5546,9 @@ pub(super) fn generic_trait_method_for<'e>(
     ty: &HirTy,
     method: &str,
 ) -> Result<Option<&'e GenericMethod>, String> {
-    let env = ctx.env;
-    let hits: Vec<&'e GenericTraitImpl> = env
-        .generic_trait_impls
-        .iter()
-        .filter(|gi| gi.methods.contains_key(method))
-        .filter(|gi| ctx.generic_impl_subst(gi, ty, 0).is_some())
+    let hits: Vec<&'e GenericTraitImpl> = ctx
+        .generic_impls(ty, |gi| gi.methods.contains_key(method), 0)
+        .map(|(gi, _)| gi)
         .collect();
     match hits.as_slice() {
         [] => Ok(None),
@@ -5598,7 +5587,7 @@ pub(super) fn call_value(
 ) -> HirExpr {
     let (arg_tys, ret, env) = match callee_h.ty.clone() {
         HirTy::Fn(a, r, b) => {
-            if b.iter().any(|k| k == rokc_ast::UNSAFE_FN_MARK) {
+            if b.unsafe_fn {
                 check_unsafe_call(ctx, "(unsafe fn value)");
             }
             (a, *r, None)
@@ -6160,7 +6149,7 @@ fn generic_arg_hint(
                     rokc_ast::GenericParam::Const { name, .. } => {
                         partial
                             .entry(name.clone())
-                            .or_insert_with(|| HirTy::Path(vec![format!("#{name}")]));
+                            .or_insert_with(|| HirTy::OpenConst(name.clone()));
                     }
                 }
             }
@@ -6278,18 +6267,13 @@ pub(super) fn lower_call(
     if let Some(full) = ctx.resolve_generic_fn_name(&segs) {
         ctx.check_item_visible(&full, "function");
         let generic_def = ctx.env.generic_fns[&full];
-        if let Some(op) = buf_intrinsic(generic_def) {
+        if let Some(&op) = ctx.env.generic_intrinsics.get(&generic_def.name) {
             if generic_def.is_unsafe {
                 check_unsafe_call(ctx, &full);
             }
             let targs = p.segments.last().map_or(&[][..], |s| s.generics.as_slice());
-            if let Some(raw) = lower_raw_intrinsic(ctx, op, targs, args, span) {
-                return raw;
-            }
-            if let Some(atomic) = op.strip_prefix("atomic_") {
-                return lower_atomic_intrinsic(ctx, atomic, args, span);
-            }
-            return lower_buf_intrinsic(ctx, op, args, span);
+            let name = leaf_name(&generic_def.name).to_owned();
+            return lower_intrinsic(ctx, op, &name, targs, args, span);
         }
         let explicit = p.segments.last().map_or(&[][..], |s| s.generics.as_slice());
         if !bind_explicit_generics(ctx, generic_def, explicit, &full) {
@@ -6370,6 +6354,7 @@ pub(super) fn lower_call(
         ctx.lookup_struct(&full).is_none()
             && ctx
                 .env
+                .defs
                 .generic_structs
                 .get(&full)
                 .is_some_and(|d| matches!(d.kind, rokc_ast::StructKind::Tuple(_)))
@@ -6437,7 +6422,7 @@ pub(super) fn lower_call(
     let not_variant = enum_lacks_variant(ctx, &segs);
     let hint = ctx.current_expected().cloned();
     let is_generic_enum_base = ctx.enum_path(&segs).is_some_and(|(full, _)| {
-        ctx.lookup_enum(&full).is_none() && !ctx.enum_instantiations(&full).is_empty()
+        ctx.lookup_enum(&full).is_none() && ctx.env.defs.generic_enums.contains_key(&full)
     });
     let pre_args: Option<Vec<HirExpr>> = if !not_variant
         && is_generic_enum_base
@@ -6703,7 +6688,7 @@ fn path_method_hits(
         tys.push(HirTy::Enum(eid));
     } else {
         tys.extend(
-            LowerCtx::instantiations(&ctx.env.struct_table, full)
+            LowerCtx::instantiations(&ctx.env.defs.struct_table.borrow(), full)
                 .into_iter()
                 .map(HirTy::Struct),
         );
@@ -6749,7 +6734,7 @@ fn qpath_call(
         discard_args(ctx, args);
         return ctx.error_expr(span, format!("`{display}`: not a trait after `as`"));
     };
-    if method == "drop" && key == ctx.lang_trait("drop_method") {
+    if method == "drop" && key == ctx.lang("drop_method") {
         if let Some(e) = direct_drop_error(ctx, span) {
             discard_args(ctx, args);
             return e;
@@ -6834,7 +6819,7 @@ fn path_call_via_impls(
             }
         }
         match (&t, &recv) {
-            (HirTy::Sum(_), Some(r)) if method == "fmt" && key == ctx.lang_trait("debug_trait") => {
+            (HirTy::Sum(_), Some(r)) if method == "fmt" && key == ctx.lang("debug_trait") => {
                 ctx.explicit_recv = None;
                 return Some(sum_structural_call(
                     ctx,
@@ -6893,7 +6878,7 @@ fn path_call_via_impls(
     let t = ctx.resolve_ast_ty(&ty_ast);
     // `T::default()` for a `T | none` sum is `none` (stdlib 2.13).
     if let (HirTy::Sum(vs), "default", []) = (&t, method, args) {
-        if let Some(i) = vs.iter().position(is_none_ty) {
+        if let Some(i) = vs.iter().position(HirTy::is_none) {
             return Some(HirExpr {
                 kind: HirExprKind::SumWrap {
                     sum_ty: t.clone(),
@@ -7292,48 +7277,7 @@ fn lower_array_repeat(
 /// Longest `[v; N]` lowered element by element.
 const REPEAT_UNROLL: u32 = 16;
 
-/// `#[intrinsic("rok.buf.new" | "rok.buf.get" | "rok.buf.set")]` on a
-/// core function: the `GcBuf<T>` primitives `List` / `Dict` are built
-/// on.
-fn buf_intrinsic(def: &FnDef) -> Option<&'static str> {
-    if !def.name.starts_with("rok::") {
-        return None;
-    }
-    let attr = def.attrs.iter().find(|a| a.name() == "intrinsic")?;
-    let rokc_ast::AttrBody::Args(args) = &attr.body else {
-        return None;
-    };
-    args.iter().find_map(|a| match a {
-        rokc_ast::AttrArg::Lit(rokc_ast::Literal::Str(s)) => match s.as_str() {
-            "rok.buf.new" => Some("new"),
-            "rok.buf.get" => Some("get"),
-            "rok.buf.set" => Some("set"),
-            "rok.buf.same" => Some("same"),
-            "rok.buf.erase" => Some("erase"),
-            "rok.ptr.read" => Some("ptr_read"),
-            "rok.ptr.write" => Some("ptr_write"),
-            "rok.ptr.read_volatile" => Some("ptr_read_volatile"),
-            "rok.ptr.write_volatile" => Some("ptr_write_volatile"),
-            "rok.size_of" => Some("size_of"),
-            "rok.align_of" => Some("align_of"),
-            "rok.atomic.load" => Some("atomic_load"),
-            "rok.atomic.xchg" => Some("atomic_xchg"),
-            "rok.atomic.add" => Some("atomic_add"),
-            "rok.atomic.sub" => Some("atomic_sub"),
-            "rok.atomic.and" => Some("atomic_and"),
-            "rok.atomic.or" => Some("atomic_or"),
-            "rok.atomic.xor" => Some("atomic_xor"),
-            "rok.atomic.cas" => Some("atomic_cas"),
-            "rok.any_cast" => Some("any_cast"),
-            "rok.method_table" => Some("method_table"),
-            "rok.mlir.op" => Some("mlir_op"),
-            "rok.mlir.attr" => Some("mlir_attr"),
-            _ => None,
-        },
-        _ => None,
-    })
-}
-
+use super::collect::Intrinsic;
 use super::resolve::{str_lit_of, str_targ};
 
 /// `__mlir_attr::<"text">` (also called, `()`, or a plain string): the
@@ -7560,54 +7504,73 @@ fn lower_mlir_op(
     }
 }
 
-/// `rok::bare` raw-memory intrinsics. `size_of::<T>()` /
-/// `align_of::<T>()` take `T` from the turbofish; `ptr_read(p)`,
-/// `ptr_write(p, v)` (and `_volatile`) take a pointer struct (`Ptr<T>`,
-/// `ConstPtr<T>`, `ManyPtr<T>`: field 0 is the `usize` address) and
-/// use its `T`. `None` for other intrinsics.
-fn lower_raw_intrinsic(
+/// A call of generic `#[intrinsic]` function `op` (`targs`: its
+/// turbofish). `size_of::<T>()` / `align_of::<T>()` take `T` from the
+/// turbofish.
+fn lower_intrinsic(
     ctx: &mut LowerCtx<'_>,
-    op: &str,
+    op: Intrinsic,
+    name: &str,
     targs: &[Ty],
     args: &[CallArg],
     span: rokc_diagnostic::Span,
-) -> Option<HirExpr> {
-    if let Some(r) = super::reflect::intrinsic(ctx, op, targs, args, span) {
-        return Some(r);
-    }
-    if op == "mlir_op" {
-        return Some(lower_mlir_op(ctx, targs, args, span));
-    }
-    if op == "mlir_attr" {
-        discard_args(ctx, args);
-        return Some(
+) -> HirExpr {
+    match op {
+        Intrinsic::AnyCast | Intrinsic::MethodTable => {
+            super::reflect::intrinsic(ctx, op == Intrinsic::MethodTable, name, targs, args, span)
+        }
+        Intrinsic::MlirOp => lower_mlir_op(ctx, targs, args, span),
+        Intrinsic::MlirAttr => {
+            discard_args(ctx, args);
             ctx.error_expr(
                 span,
                 "`__mlir_attr::<\"..\">` is only an `attributes` value of `__mlir_op` (bare 1.9)"
                     .to_owned(),
-            ),
-        );
+            )
+        }
+        Intrinsic::SizeOf | Intrinsic::AlignOf => {
+            let (Some(t), true) = (targs.first(), args.is_empty() && targs.len() == 1) else {
+                discard_args(ctx, args);
+                return ctx.error_expr(span, format!("`{name}` is called as `{name}::<T>()`"));
+            };
+            HirExpr {
+                kind: HirExprKind::SizeOf {
+                    ty: ctx.resolve_ast_ty(t),
+                    align: op == Intrinsic::AlignOf,
+                },
+                ty: HirTy::Prim(PrimTy::Usize),
+                span,
+            }
+        }
+        Intrinsic::PtrRead { volatile } => {
+            lower_ptr_intrinsic(ctx, name, false, volatile, args, span)
+        }
+        Intrinsic::PtrWrite { volatile } => {
+            lower_ptr_intrinsic(ctx, name, true, volatile, args, span)
+        }
+        Intrinsic::Atomic(atomic) => lower_atomic_intrinsic(ctx, atomic, args, span),
+        // `collect::intrinsic_of` keeps primitive ops off generic functions.
+        Intrinsic::Prim(_) => poison(span),
+        Intrinsic::BufNew
+        | Intrinsic::BufGet
+        | Intrinsic::BufSet
+        | Intrinsic::BufSame
+        | Intrinsic::BufErase => lower_buf_intrinsic(ctx, op, name, args, span),
     }
+}
+
+/// `rok::bare` raw-memory intrinsics: `raw_read(p)`, `raw_write(p, v)`
+/// (and `_volatile`) take a pointer struct (`Ptr<T>`, `ConstPtr<T>`,
+/// `ManyPtr<T>`: field 0 is the `usize` address) and use its `T`.
+fn lower_ptr_intrinsic(
+    ctx: &mut LowerCtx<'_>,
+    op: &str,
+    write: bool,
+    volatile: bool,
+    args: &[CallArg],
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
     let usize_ty = HirTy::Prim(PrimTy::Usize);
-    if matches!(op, "size_of" | "align_of") {
-        let (Some(t), true) = (targs.first(), args.is_empty() && targs.len() == 1) else {
-            discard_args(ctx, args);
-            return Some(ctx.error_expr(span, format!("`{op}` is called as `{op}::<T>()`")));
-        };
-        return Some(HirExpr {
-            kind: HirExprKind::SizeOf {
-                ty: ctx.resolve_ast_ty(t),
-                align: op == "align_of",
-            },
-            ty: usize_ty,
-            span,
-        });
-    }
-    let volatile = op.ends_with("_volatile");
-    let write = op.starts_with("ptr_write");
-    if !op.starts_with("ptr_read") && !write {
-        return None;
-    }
     let pos: Vec<&Expr> = args
         .iter()
         .filter_map(|a| match a {
@@ -7618,25 +7581,25 @@ fn lower_raw_intrinsic(
     let want = if write { 2 } else { 1 };
     if pos.len() != want || args.len() != want {
         discard_args(ctx, args);
-        return Some(ctx.error_expr(span, format!("`{op}` takes {want} argument(s)")));
+        return ctx.error_expr(span, format!("`{op}` takes {want} argument(s)"));
     }
     let p = lower_expected(ctx, pos[0], HirTy::Unknown);
     let HirTy::Struct(sid) = p.ty else {
         discard_args(ctx, &args[1..]);
         if p.ty == HirTy::Unknown {
-            return Some(p);
+            return p;
         }
-        return Some(ctx.error_expr(
+        return ctx.error_expr(
             span,
             format!("`{op}` needs a `Ptr<T>`, found `{}`", ctx.ty_name(&p.ty)),
-        ));
+        );
     };
     let def = ctx.struct_def(sid);
     let (Some(ty), Some(HirTy::Prim(PrimTy::Usize))) = (
         def.generic_args.first().cloned(),
         def.fields.first().map(|f| f.ty.clone()),
     ) else {
-        return Some(ctx.error_expr(span, format!("`{op}` needs a `Ptr<T>`")));
+        return ctx.error_expr(span, format!("`{op}` needs a `Ptr<T>`"));
     };
     let addr = Box::new(HirExpr {
         kind: HirExprKind::FieldRead {
@@ -7648,7 +7611,7 @@ fn lower_raw_intrinsic(
         ty: usize_ty,
         span,
     });
-    Some(if write {
+    if write {
         let v = lower_expected(ctx, pos[1], ty.clone());
         let v = coerce(ctx, &ty, v, &|| "the stored value".to_owned());
         HirExpr {
@@ -7671,27 +7634,17 @@ fn lower_raw_intrinsic(
             ty,
             span,
         }
-    })
+    }
 }
 
 /// `atomic_OP(buf, i, operands..)` over a `GcBuf<T>` of an integer or
 /// `bool` `T`; yields the element's previous value.
 fn lower_atomic_intrinsic(
     ctx: &mut LowerCtx<'_>,
-    op: &str,
+    op: &'static str,
     args: &[CallArg],
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
-    let op: &'static str = match op {
-        "load" => "load",
-        "xchg" => "xchg",
-        "add" => "add",
-        "sub" => "sub",
-        "and" => "and",
-        "or" => "or",
-        "xor" => "xor",
-        _ => "cas",
-    };
     let pos: Vec<&Expr> = args
         .iter()
         .filter_map(|a| match a {
@@ -7804,7 +7757,8 @@ fn lower_atomic_intrinsic(
 
 fn lower_buf_intrinsic(
     ctx: &mut LowerCtx<'_>,
-    op: &str,
+    op: Intrinsic,
+    name: &str,
     args: &[CallArg],
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
@@ -7817,28 +7771,27 @@ fn lower_buf_intrinsic(
         })
         .collect();
     let want = match op {
-        "new" | "erase" => 1,
-        "get" | "same" => 2,
+        Intrinsic::BufNew | Intrinsic::BufErase => 1,
+        Intrinsic::BufGet | Intrinsic::BufSame => 2,
         _ => 3,
     };
     if pos.len() != want || args.len() != want {
         discard_args(ctx, args);
         return ctx.error_expr(
             span,
-            format!("`buf_{op}` takes {want} positional argument(s)"),
+            format!("`{name}` takes {want} positional argument(s)"),
         );
     }
     let index = |ctx: &mut LowerCtx<'_>, e: &Expr| {
         let i = lower_expected(ctx, e, usize_ty.clone());
         coerce(ctx, &usize_ty, i, &|| "the buffer index".to_owned())
     };
-    if op == "new" {
+    if op == Intrinsic::BufNew {
         let Some(HirTy::GcBuf(elem)) = ctx.current_expected().cloned() else {
             discard_args(ctx, args);
             return ctx.error_expr(
                 span,
-                "`buf_new` needs its `GcBuf<T>` type from the context — annotate the slot"
-                    .to_owned(),
+                format!("`{name}` needs its `GcBuf<T>` type from the context — annotate the slot"),
             );
         };
         let len = index(ctx, pos[0]);
@@ -7860,17 +7813,17 @@ fn lower_buf_intrinsic(
         return ctx.error_expr(
             span,
             format!(
-                "`buf_{op}` needs a `GcBuf<T>`, found `{}`",
+                "`{name}` needs a `GcBuf<T>`, found `{}`",
                 ctx.ty_name(&buf.ty)
             ),
         );
     };
     let u8_buf = HirTy::GcBuf(Box::new(HirTy::Prim(PrimTy::U8)));
     match op {
-        "same" => buf_same(ctx, buf, pos[1], span),
+        Intrinsic::BufSame => buf_same(ctx, buf, pos[1], span),
         // The same reference as `GcBuf<u8>`, the type of a runtime
         // parameter that takes any GC object.
-        "erase" => HirExpr {
+        Intrinsic::BufErase => HirExpr {
             ty: u8_buf.clone(),
             kind: HirExprKind::Cast {
                 from_ty: buf.ty.clone(),
@@ -8080,10 +8033,10 @@ pub(super) fn lower_infix(
             _ => None,
         };
         let key = match method {
-            Some("eq" | "ne") => ctx.lang_trait("eq_trait"),
-            _ => ctx.lang_trait("cmp_trait"),
+            Some("eq" | "ne") => ctx.lang("eq_trait"),
+            _ => ctx.lang("cmp_trait"),
         };
-        if let Some(m) = method.filter(|_| ctx.implements_trait(&lhs_h.ty, key, 0)) {
+        if let Some(m) = method.filter(|_| ctx.has_trait(&lhs_h.ty, key)) {
             return sum_structural_call(ctx, lhs_h, m, &[], Some(rhs_h), span);
         }
     }
@@ -8552,16 +8505,27 @@ fn generic_op_by_rhs<'e>(
     let mut exact = Vec::new();
     let mut loose = Vec::new();
     let mut lit = Vec::new();
-    for gi in &ctx.env.generic_trait_impls {
-        let Some(gm) = gi.methods.get(method) else {
-            continue;
-        };
-        let Some(subst) = ctx.generic_impl_subst(gi, lhs, 0) else {
-            continue;
-        };
+    for (gi, mut subst) in ctx.generic_impls(lhs, |gi| gi.methods.contains_key(method), 0) {
+        let gm = &gi.methods[method];
         // No written `Rhs`: the operator traits' default, `Self`.
         let want = match gi.trait_args.first() {
             Some(arg) => {
+                // Parameters only `Rhs` names (`impl<A, B, C> Compose<fn(A)
+                // -> B> for fn(B) -> C`) bind from the right operand.
+                let open: std::collections::HashSet<String> = gi
+                    .generics
+                    .params
+                    .iter()
+                    .filter_map(|gp| match gp {
+                        rokc_ast::GenericParam::Type { name, .. }
+                        | rokc_ast::GenericParam::Const { name, .. } => {
+                            (!subst.contains_key(name)).then(|| name.clone())
+                        }
+                    })
+                    .collect();
+                if !open.is_empty() {
+                    unify_param_ty_with(arg, &rhs.ty, &open, &mut subst, ctx);
+                }
                 let mut rcx = LowerCtx::new(ctx.env, &subst, None);
                 rcx.current_module.clone_from(&gi.module);
                 rcx.resolve_ast_ty(arg)
@@ -8620,7 +8584,8 @@ pub(super) fn prefix_for_prim(sym: &str, prim: PrimTy) -> Option<(PrimOp, HirTy)
     match sym {
         "-" if prim.is_signed_int() || prim.is_float() => Some((PrimOp::Neg, same_ty)),
         "!" if matches!(prim, PrimTy::Bool) => Some((PrimOp::LogicalNot, same_ty)),
-        "~" if prim.is_int() => Some((PrimOp::Not, same_ty)),
+        // On an integer `!` is the bitwise complement, as `~` (stdlib 2.3.4).
+        "~" | "!" if prim.is_int() => Some((PrimOp::Not, same_ty)),
         _ => None,
     }
 }
@@ -8698,9 +8663,7 @@ fn lower_assoc_const(
         names: &env.names,
         module: &set.target.module,
     };
-    let mut cty =
-        super::mono::resolve_ast_with_subst(cty, &env.struct_table, &env.enum_table, &subst, sc);
-    substitute_aliases(&mut cty, &env.type_aliases);
+    let cty = resolve_ty_with_structs(cty, &env.defs, Some(&subst), sc);
     // The value is the impl's: its names resolve in the impl's module,
     // with the impl's type parameters and `Self` bound for `ty`.
     let key = (std::ptr::from_ref(set) as usize, ty_mangle(ty));
@@ -8823,7 +8786,7 @@ pub(super) fn lower_path(
     }
     // Spec 2.11.10: a const generic parameter is a value.
     if let [name] = segs.as_slice() {
-        if let Some((v, Some(p))) = ctx.ty_subst.get(*name).and_then(crate::ty::as_const) {
+        if let Some((v, Some(p))) = ctx.ty_subst.get(*name).and_then(HirTy::as_const) {
             let value = match p {
                 PrimTy::Bool => ConstVal::Bool(v != 0),
                 PrimTy::Char => ConstVal::Char(u32::try_from(v).unwrap_or_default()),
@@ -8876,8 +8839,7 @@ pub(super) fn lower_path(
             names: &ctx.env.names,
             module: &module,
         };
-        let mut ty = resolve_ty_with_structs(&ty, &ctx.env.struct_table, &ctx.env.enum_table, sc);
-        substitute_aliases(&mut ty, &ctx.env.type_aliases);
+        let ty = resolve_ty_with_structs(&ty, &ctx.env.defs, None, sc);
         // The value's names (and field privacy) are the defining module's.
         let saved_module = std::mem::replace(&mut ctx.current_module, module);
         let saved_uses = std::mem::replace(&mut ctx.local_uses, vec![Vec::new()]);
@@ -8925,9 +8887,7 @@ pub(super) fn lower_path(
             ty: HirTy::Fn(sig.param_tys, Box::new(sig.ret_ty), {
                 // An `unsafe fn` / C function value keeps its unsafety.
                 let mut b = ctx.env.names.all_auto();
-                if ctx.env.unsafe_fns.contains(&sig.id) {
-                    b.insert(0, rokc_ast::UNSAFE_FN_MARK.to_owned());
-                }
+                b.unsafe_fn = ctx.env.unsafe_fns.contains(&sig.id);
                 b
             }),
             span,
@@ -9174,7 +9134,7 @@ pub(super) fn lower_literal(
             HirTy::Prim(PrimTy::Str),
         ),
         AstLit::RawStr(s) => konst(ConstVal::Str(s.clone()), HirTy::Prim(PrimTy::Str)),
-        AstLit::None => konst(ConstVal::None, none_ty()),
+        AstLit::None => konst(ConstVal::None, HirTy::None),
         AstLit::Char(s) => match parse_char_literal(s) {
             // An ASCII `'a'` flowing into a `c_char` slot takes that type.
             Some(c) if c < 0x80 && expected_prim(ctx, |p| p == PrimTy::CChar).is_some() => {

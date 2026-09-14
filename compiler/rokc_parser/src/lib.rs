@@ -4,6 +4,7 @@
 //! stdlib's `#[infix]` / `#[prefix]` / `#[postfix]` attributes only bind
 //! tokens to trait methods (`PrecTable`, consumed by HIR).
 
+pub mod cfg;
 pub mod derive;
 pub mod keyword;
 pub mod lang;
@@ -13,6 +14,7 @@ pub mod prec;
 #[cfg(test)]
 mod tests;
 
+pub use cfg::CfgEnv;
 pub use keyword::{KeywordDef, KeywordTable, apply_keywords, check_keyword, collect_keywords};
 pub use lang::{LangEntry, LangItemKind, LangTable, collect_lang_table};
 pub use parser::literal::{

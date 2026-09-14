@@ -87,15 +87,9 @@ case ":${PATH-}:" in
     ;;
 esac
 
-# rokc builds native code with MLIR / LLVM 21 (21 to 22 work).
-llvm=""
-for d in $(printf '%s' "${PATH-}" | tr ':' ' ') /opt/homebrew/opt/llvm@21/bin /usr/local/opt/llvm@21/bin \
-  /usr/lib/llvm-21/bin /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin /usr/lib/llvm-22/bin; do
-  if [ -x "$d/mlir-opt" ] && [ -x "$d/mlir-translate" ]; then llvm=$d; break; fi
-done
-if [ -z "$llvm" ]; then
+# rokc links its own LLVM and linker; on macOS the link needs the SDK of
+# Xcode's command line tools.
+if [ "$(uname -s)" = Darwin ] && ! xcrun --show-sdk-path >/dev/null 2>&1; then
   say ""
-  say "rok needs LLVM 21 with MLIR (mlir-opt, mlir-translate, clang) to build programs:"
-  say "  macOS:           brew install llvm@21"
-  say "  Debian / Ubuntu: apt install mlir-21-tools clang-21   (from https://apt.llvm.org)"
+  say "rok needs the macOS SDK to link programs: xcode-select --install"
 fi

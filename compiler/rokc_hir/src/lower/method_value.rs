@@ -73,13 +73,13 @@ pub(super) fn method_path_value(
         _ => None,
     };
     let fn_ty = match (shape.ty, expected) {
-        (Some((params, ret)), _) => HirTy::Fn(params, Box::new(ret), Vec::new()),
+        (Some((params, ret)), _) => HirTy::Fn(params, Box::new(ret), crate::FnBounds::default()),
         (None, Some(t)) => t,
         // An un-annotated `let`: the later calls fix the types (`infer`).
         (None, None) if ctx.infer_vars => HirTy::Fn(
             (0..shape.arity).map(|_| super::infer::fresh(ctx)).collect(),
             Box::new(HirTy::Unknown),
-            Vec::new(),
+            crate::FnBounds::default(),
         ),
         (None, None) => {
             return Some(ctx.error_expr(

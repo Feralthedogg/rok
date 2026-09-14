@@ -18,9 +18,6 @@ use super::*;
 use rokc_ast::{CallArg, PathSegment};
 use rokc_diagnostic::Span;
 
-pub const INT: &str = "rok::core::num::bigint::Int";
-pub const FLOAT: &str = "rok::core::num::bigfloat::Float";
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Big {
     Int,
@@ -28,10 +25,11 @@ pub(super) enum Big {
 }
 
 impl Big {
-    const fn path(self) -> &'static str {
+    /// Its lang slot (stdlib 0.4.2).
+    const fn slot(self) -> &'static str {
         match self {
-            Self::Int => INT,
-            Self::Float => FLOAT,
+            Self::Int => "int_type",
+            Self::Float => "float_type",
         }
     }
 }
@@ -39,13 +37,9 @@ impl Big {
 /// Which of `int` / `float` `ty` is.
 pub(super) fn big_of(ctx: &LowerCtx<'_>, ty: &HirTy) -> Option<Big> {
     let HirTy::Struct(id) = ty else { return None };
-    if ctx.lookup_struct(INT) == Some(*id) {
-        Some(Big::Int)
-    } else if ctx.lookup_struct(FLOAT) == Some(*id) {
-        Some(Big::Float)
-    } else {
-        None
-    }
+    [Big::Int, Big::Float]
+        .into_iter()
+        .find(|b| ctx.lookup_struct(ctx.lang(b.slot())) == Some(*id))
 }
 
 pub(super) fn path_expr(full: &str, leaf: &str, span: Span) -> Expr {
@@ -113,7 +107,7 @@ pub(super) fn literal(
         t => big_of(ctx, t)?,
     };
     let sign = if negate { "-" } else { "" };
-    let ty = big.path();
+    let ty = ctx.lang(big.slot());
     let e = match (l, big) {
         (AstLit::Int(t), _) if !has_int_suffix(t) => {
             let v = parse_int_literal(t).map(|(v, _)| if negate { -v } else { v });

@@ -1,0 +1,40 @@
+// spec: std 211-conversion §2.11.4
+// expect-exit: 0
+// expect-stdout:
+// 1 -2 255 -128
+// 9007199254740992 0
+// true 3
+// i8 u8 i32 u64 i64
+
+// Floating-point → integer `TryFrom` truncates toward zero and throws
+// `OverflowError` for NaN, infinities and out-of-range values.
+
+fn ok() throws (OverflowError) {
+    let a = try i32::try_from(1.9);
+    let b = try i64::try_from(-2.7f32);
+    let c = try u8::try_from(255.99);
+    let d = try i8::try_from(-128.5);
+    println(f"{a} {b} {c} {d}");
+    let e = try i64::try_from(9007199254740992.0);
+    let z = try u32::try_from(-0.9);
+    println(f"{e} {z}");
+    let m: i16 = try 3.5.try_into();
+    let n: i16 | none = try? i16::try_from(40000.0);
+    println(f"{n is none} {m}");
+}
+
+fn fails(f: fn() throws (OverflowError)) -> str {
+    try f() catch e: OverflowError { return e.ty; }
+    return "ok";
+}
+
+fn main() -> i32 {
+    let r1 = fails(|| { try i8::try_from(128.0); });
+    let r2 = fails(|| { try u8::try_from(-1.0); });
+    let r3 = fails(|| { try i32::try_from(0.0 / 0.0); });
+    let r4 = fails(|| { try u64::try_from(1.0 / 0.0); });
+    let r5 = fails(|| { try i64::try_from(9223372036854775808.0); });
+    try ok() catch _: OverflowError { return 1; }
+    println(f"{r1} {r2} {r3} {r4} {r5}");
+    return 0;
+}

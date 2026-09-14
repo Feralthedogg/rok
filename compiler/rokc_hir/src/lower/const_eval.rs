@@ -102,7 +102,7 @@ pub(super) struct Interp<'b> {
     depth: u32,
 }
 
-const fn int_range(p: PrimTy) -> (i128, i128) {
+pub(super) const fn int_range(p: PrimTy) -> (i128, i128) {
     let bits = p.bit_width(POINTER_WIDTH);
     if p.is_signed_int() {
         (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
@@ -1338,7 +1338,7 @@ pub(super) fn eval_scalar(ctx: &LowerCtx<'_>, e: &Expr) -> Result<(i128, Option<
     let mut cx = ctx.clone();
     // A const parameter bound without its type reads as a `usize`.
     for (n, t) in ctx.ty_subst {
-        if let Some((v, None)) = crate::ty::as_const(t) {
+        if let Some((v, None)) = t.as_const() {
             cx.splices
                 .insert(n.clone(), hir_int(v, PrimTy::Usize, e.span));
         }
@@ -1365,7 +1365,7 @@ pub(super) fn eval_scalar(ctx: &LowerCtx<'_>, e: &Expr) -> Result<(i128, Option<
             Err(_) => Err("not a constant".to_owned()),
         },
     };
-    cx.rollback_all(&mark);
+    cx.rollback(&mark);
     r
 }
 

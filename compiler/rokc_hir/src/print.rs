@@ -593,8 +593,16 @@ fn ty_str(t: &HirTy) -> String {
         HirTy::Prim(p) => p.name().to_owned(),
         HirTy::Any => "any".to_owned(),
         HirTy::AnyTrait(b) if b.is_empty() => "any".to_owned(),
-        HirTy::AnyTrait(b) => format!("any ({})", b.join(" + ")),
+        HirTy::AnyTrait(b) => {
+            let b: Vec<String> = b.iter().map(|r| r.render(&r.path, ty_str)).collect();
+            format!("any ({})", b.join(" + "))
+        }
         HirTy::Path(parts) => parts.join("::"),
+        HirTy::None => "none".to_owned(),
+        HirTy::Const(v, _) => v.to_string(),
+        HirTy::OpenConst(n) => format!("#{n}"),
+        HirTy::NoThrow => "#nothrow".to_owned(),
+        HirTy::Var(v) => format!("#var::{v}"),
         HirTy::Sum(_) => t.sum_name(ty_str),
         HirTy::Tuple(parts) => {
             let inner = parts.iter().map(ty_str).collect::<Vec<_>>().join(", ");

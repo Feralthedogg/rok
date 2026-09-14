@@ -1,0 +1,54 @@
+// spec: std 205-cmp §2.5.2
+// spec: std 205-cmp §2.5.7
+// spec: std 203-ops §2.3.4
+// spec: std 214-error §2.14.3
+// spec: std 220-future §2.20.5
+// spec: std 213-marker §2.13.2
+// expect-exit: 0
+// expect-stdout:
+// true false
+// Ok(1) Err("bad")
+// -1 250
+// true false Less true
+// true true 0..3
+// sending on a closed channel | Closed(..) | sending on a full channel
+// 42
+
+// `PartialEq::ne`'s default, `Debug for Result`, `Not` on integers, `Ord`
+// for `bool`, `Range`'s `Clone` / `PartialEq`, channel errors as `Error`,
+// and `await` on a thread's `JoinHandle`.
+
+use rok::std::thread;
+use rok::core::task;
+
+struct P { x: i32; }
+
+impl PartialEq for P {
+    fn eq(self, rhs: P) -> bool { self.x == rhs.x }
+}
+
+fn show(e: any Error) -> str { f"{e}" }
+
+fn main() -> i32 {
+    println(f"{P { x: 1 } != P { x: 2 }} {P { x: 1 } != P { x: 1 }}");
+    let a: Result<i32, str> = Ok(1);
+    let b: Result<i32, str> = Err("bad");
+    println(f"{a:?} {b:?}");
+    println(f"{!0i32} {!5u8}");
+    println(f"{false < true} {true <= false} {false.cmp(true):?} {true.max(false)}");
+    let r = 0..3;
+    let c = r.clone();
+    println(f"{r == c} {(0..3) != (0..4)} {c.start}..{c.end}");
+    let tx = channel::<i32>().0;
+    tx.close();
+    let e1 = try { tx.send(1); "sent" } catch e: SendError<i32> { show(e) };
+    let e2 = try { tx.send(1); "sent" } catch e: SendError<i32> { f"{e:?}" };
+    let (btx, _brx) = channel_bounded::<i32>(1);
+    try! btx.try_send(1);
+    let e3 = try { btx.try_send(2); "sent" } catch e: TrySendError<i32> { show(e) };
+    println(f"{e1} | {e2} | {e3}");
+    let h = thread::spawn(|| 40 + 2);
+    let v = task::block_on(async { await h });
+    println(f"{v}");
+    return 0;
+}

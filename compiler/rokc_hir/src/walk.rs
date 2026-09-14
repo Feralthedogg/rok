@@ -559,7 +559,7 @@ pub fn walk_ty(v: &mut impl AstVisitor, t: &Ty) {
                 walk_ty(v, p);
             }
         }
-        TyKind::Array(elem, _) => walk_ty(v, elem),
+        TyKind::Array(elem, _) | TyKind::Nest(elem) | TyKind::Binding(_, elem) => walk_ty(v, elem),
         TyKind::Fn(args, ret, _) => {
             for a in args {
                 walk_ty(v, a);

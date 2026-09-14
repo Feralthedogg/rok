@@ -542,13 +542,9 @@ impl Docs {
         let list =
             |ts: &[Ty], sep: &str| ts.iter().map(|x| self.ty(x)).collect::<Vec<_>>().join(sep);
         match &t.kind {
+            TyKind::Nest(inner) => self.ty(inner),
+            TyKind::Binding(n, b) => format!("{} = {}", esc(n), self.ty(b)),
             TyKind::Path(p) => {
-                if let Some(inner) = t.nest_inner() {
-                    return self.ty(inner);
-                }
-                if let Some((n, b)) = rokc_ast::as_assoc_binding(t) {
-                    return format!("{} = {}", esc(n), self.ty(b));
-                }
                 if let [seg] = p.segments.as_slice() {
                     if seg.name == rokc_ast::QPATH_MARK && seg.generics.len() == 2 {
                         return format!(

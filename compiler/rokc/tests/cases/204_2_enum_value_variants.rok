@@ -1,0 +1,46 @@
+// spec: 002.04.2-value-variant
+// expect-exit: 0
+// expect-stdout:
+// 404 500 2
+// 16 32 -1
+// eq NotFound Ok
+// 500 none
+
+// Value variants store their value as the tag: `as` reads it, `match`
+// and derives test it, and `T | none` takes a niche past the largest.
+
+#[repr(u16)]
+#[derive(PartialEq, Debug, Clone, Copy)]
+enum Status {
+    Ok = 0,
+    NotFound = 404,
+    InternalError = 500,
+}
+
+const BASE: i32 = 1 << 4;
+
+enum Flag { A = BASE, B = BASE * 2, C = -1 }
+
+fn code(s: Status) -> i32 {
+    return match s {
+        Status::Ok => 1,
+        Status::NotFound => 2,
+        Status::InternalError => 3,
+    };
+}
+
+fn pick(b: bool) -> Status | none {
+    if b { return Status::InternalError; }
+    return none;
+}
+
+fn main() -> i32 {
+    let s = Status::NotFound;
+    println(f"{s as i32} {Status::InternalError as u16} {code(s)}");
+    println(f"{Flag::A as i32} {Flag::B as i64} {Flag::C as i32}");
+    if s == Status::NotFound { println(f"eq {s:?} {Status::Ok:?}"); }
+    let a = match pick(true) { x: Status => f"{x as i32}", none => "none" };
+    let b = match pick(false) { x: Status => f"{x as i32}", none => "none" };
+    println(f"{a} {b}");
+    return 0;
+}

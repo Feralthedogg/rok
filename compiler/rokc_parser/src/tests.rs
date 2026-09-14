@@ -756,6 +756,7 @@ fn parse_meta(src: &str) -> (rokc_ast::Program, Vec<rokc_diagnostic::RokDiagnost
         &crate::ExtOps::default(),
         &std::sync::Arc::new(table),
         &std::sync::Arc::default(),
+        None,
     )
 }
 

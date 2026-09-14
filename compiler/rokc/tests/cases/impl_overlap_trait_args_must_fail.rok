@@ -1,0 +1,14 @@
+// spec: 002.09.3-impl-overlap
+// expect-error: conflicting implementations of trait
+
+// spec 2.9.3: trait arguments that unify keep a concrete impl and a
+// blanket impl overlapping.
+trait Num { fn num(self) -> i32; }
+trait Pick<R> { fn pick(self, r: R) -> i32; }
+struct W<T> { v: T; }
+
+impl Num for i32 { fn num(self) -> i32 { return self; } }
+impl<T: Num> Pick<W<T>> for T { fn pick(self, r: W<T>) -> i32 { return 1; } }
+impl Pick<W<i32>> for i32 { fn pick(self, r: W<i32>) -> i32 { return 2; } }
+
+fn main() -> i32 { return 7.pick(W { v: 1 }); }

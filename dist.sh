@@ -9,6 +9,10 @@
 #       install.sh README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE
 #
 # and its .sha256. Usage: ./dist.sh [--out <dir>]
+#
+# rokc links the pinned LLVM / MLIR / lld statically: ROK_LLVM_PREFIX,
+# else llvm/build.sh's (built here when missing). The toolchain needs no
+# LLVM install; on macOS only the SDK (Xcode's command line tools).
 set -eu
 
 cd "$(dirname "$0")"
@@ -19,11 +23,16 @@ case "${1-}" in
   *) echo "usage: ./dist.sh [--out <dir>]" >&2; exit 2 ;;
 esac
 
+[ -n "${ROK_LLVM_PREFIX-}" ] || ./llvm/build.sh
 cargo build --release --locked -p rok -p rokc -p rokr
 
 target=${CARGO_TARGET_DIR:-target}/release
 version=$("$target/rokc" --version | awk '{ print $2 }')
 triple=$("$target/rokc" --version --verbose | sed -n 's/^host: //p')
+if "$target/rokc" --version --verbose | grep -q '^llvm: none'; then
+  echo "dist.sh: rokc was built without LLVM (see llvm/README.md)" >&2
+  exit 1
+fi
 name=rok-$version-$triple
 
 # install.sh downloads this version by default.
@@ -43,10 +52,14 @@ cp "$target/librokr.a" "$stage/lib/"
 tar -C library --exclude target -cf - core std bare | tar -C "$stage/lib/rok" -xf -
 cp install.sh README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "$stage/"
 
-# The toolchain runs from its new place: its rokc finds its library.
-printf 'let x: i32 = 1;\n' > "$stage/check.rok"
-"$stage/bin/rokc" -q check "$stage/check.rok"
-rm "$stage/check.rok"
+# The toolchain runs from its new place, with no LLVM on PATH: its rokc
+# finds its library and builds with its own LLVM and lld.
+printf 'fn main() -> i32 {\n    println("ok");\n    0\n}\n' > "$stage/check.rok"
+for o in -O0 -O2; do
+  PATH=/usr/bin:/bin "$stage/bin/rokc" -q build "$stage/check.rok" $o -o "$stage/check"
+  [ "$("$stage/check")" = ok ]
+done
+rm -rf "$stage/check.rok" "$stage/check" "$stage/lib/rok-cache"
 
 tar -C "$out" -czf "$out/$name.tar.gz" "$name"
 sum=$(command -v sha256sum || echo "shasum -a 256")

@@ -1262,6 +1262,58 @@ impl PartialOrd for f64 {
     fn ge(self, rhs: f64) -> bool { self >= rhs }
 }
 
+// `!x` on an integer is its bitwise complement, as `~x` (2.3.4).
+impl Not for i8 {
+    type Output = i8;
+    #[intrinsic("rok.not.i8")]
+    fn not(self) -> i8 { ~self }
+}
+impl Not for i16 {
+    type Output = i16;
+    #[intrinsic("rok.not.i16")]
+    fn not(self) -> i16 { ~self }
+}
+impl Not for i32 {
+    type Output = i32;
+    #[intrinsic("rok.not.i32")]
+    fn not(self) -> i32 { ~self }
+}
+impl Not for i64 {
+    type Output = i64;
+    #[intrinsic("rok.not.i64")]
+    fn not(self) -> i64 { ~self }
+}
+impl Not for isize {
+    type Output = isize;
+    #[intrinsic("rok.not.isize")]
+    fn not(self) -> isize { ~self }
+}
+impl Not for u8 {
+    type Output = u8;
+    #[intrinsic("rok.not.u8")]
+    fn not(self) -> u8 { ~self }
+}
+impl Not for u16 {
+    type Output = u16;
+    #[intrinsic("rok.not.u16")]
+    fn not(self) -> u16 { ~self }
+}
+impl Not for u32 {
+    type Output = u32;
+    #[intrinsic("rok.not.u32")]
+    fn not(self) -> u32 { ~self }
+}
+impl Not for u64 {
+    type Output = u64;
+    #[intrinsic("rok.not.u64")]
+    fn not(self) -> u64 { ~self }
+}
+impl Not for usize {
+    type Output = usize;
+    #[intrinsic("rok.not.usize")]
+    fn not(self) -> usize { ~self }
+}
+
 // bool
 
 impl BitAnd for bool {
@@ -1296,6 +1348,21 @@ impl PartialEq for bool {
 }
 
 impl Eq for bool {}
+
+/// `false < true`.
+impl PartialOrd for bool {
+    fn lt(self, rhs: bool) -> bool { !self && rhs }
+    fn gt(self, rhs: bool) -> bool { self && !rhs }
+    fn le(self, rhs: bool) -> bool { !self || rhs }
+    fn ge(self, rhs: bool) -> bool { self || !rhs }
+}
+
+impl Ord for bool {
+    fn cmp(self, other: bool) -> Ordering {
+        if self == other { return Ordering::Equal; }
+        if other { Ordering::Less } else { Ordering::Greater }
+    }
+}
 
 impl Hash for bool {
     fn hash(self) -> u64 { if self { 1u64 } else { 0u64 } }

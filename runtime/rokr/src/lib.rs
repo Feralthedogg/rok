@@ -320,10 +320,16 @@ fn clock_ns(clock: libc::clockid_t) -> i64 {
     ts.tv_sec as i64 * 1_000_000_000 + ts.tv_nsec as i64
 }
 
-/// Monotonic clock in nanoseconds (707 timers).
+/// Monotonic clock in nanoseconds, stopped during suspend (`Instant`,
+/// 707 timers; 3.3.7: `CLOCK_UPTIME_RAW` on macOS, whose
+/// `CLOCK_MONOTONIC` counts sleep).
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_time_now_ns() -> i64 {
-    clock_ns(libc::CLOCK_MONOTONIC)
+    #[cfg(target_vendor = "apple")]
+    let clock = libc::CLOCK_UPTIME_RAW;
+    #[cfg(not(target_vendor = "apple"))]
+    let clock = libc::CLOCK_MONOTONIC;
+    clock_ns(clock)
 }
 
 /// Wall clock, nanoseconds since the Unix epoch (`SystemTime`, 3.3.3).
@@ -335,7 +341,7 @@ pub extern "C" fn rok_time_realtime_ns() -> i64 {
 /// Time since boot, counting suspend (`BootTime`, 3.3.4).
 ///
 /// `CLOCK_BOOTTIME` on Linux, `CLOCK_MONOTONIC` (which counts sleep) on
-/// macOS — spec 3.3.7 names `CLOCK_UPTIME_RAW`, which stops in sleep.
+/// macOS (3.3.7).
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_time_boot_ns() -> i64 {
     #[cfg(any(target_os = "linux", target_os = "android"))]

@@ -17,8 +17,8 @@
 //!   - `// spec: <section>`     — the spec section a case checks (a tag)
 //!
 //! Environment:
-//!   - `ROK_REQUIRE_LLVM=1` — missing mlir-opt / mlir-translate / clang is a
-//!     failure instead of a skip (CI sets this).
+//!   - `ROK_REQUIRE_LLVM=1` — a rokc built without LLVM is a failure
+//!     instead of a skip (CI sets this).
 //!   - `ROK_TEST_OPT=-O2` (or `--release`, `-O3`, ...) — build every case
 //!     at that optimization level instead of the default `-O0`.
 //!   - `ROK_TEST_TARGET=<triple>` — build for that target (with a runtime
@@ -76,7 +76,7 @@ pub fn setup() -> Option<Env> {
     assert!(bootstrap.exists(), "missing {bootstrap:?}");
 
     if !llvm_present() {
-        let msg = "mlir-opt / mlir-translate / clang not on PATH";
+        let msg = "rokc is built without LLVM (ROK_LLVM_PREFIX, llvm/build.sh)";
         assert!(
             env::var("ROK_REQUIRE_LLVM").as_deref() != Ok("1"),
             "ROK_REQUIRE_LLVM=1 but {msg}"
@@ -121,17 +121,13 @@ pub fn setup() -> Option<Env> {
     })
 }
 
+/// `rokc version -v` names the LLVM it links (`llvm: none`: built
+/// without one).
 fn llvm_present() -> bool {
-    ["mlir-opt", "mlir-translate", "clang"]
-        .iter()
-        .all(|t| locate(t).is_some())
-}
-
-fn locate(name: &str) -> Option<PathBuf> {
-    let path = env::var_os("PATH")?;
-    env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|c| c.is_file())
+    Command::new(ROKC)
+        .args(["version", "-v"])
+        .output()
+        .is_ok_and(|o| !String::from_utf8_lossy(&o.stdout).contains("llvm: none"))
 }
 
 /// Scratch-directory suffix, so runs at different `ROK_TEST_OPT` levels

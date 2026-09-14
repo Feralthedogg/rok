@@ -1,6 +1,6 @@
 //! CLI behavior (spec 901 / 902 / 905): spawn the built `rokc` on
 //! scratch package directories. Tests that build native code skip
-//! without the LLVM toolchain (see `common::setup`).
+//! when rokc is built without LLVM (see `common::setup`).
 
 mod common;
 
@@ -855,16 +855,80 @@ fn mlir_plugins_go_to_mlir_opt() {
         "{}",
         text(&out.stderr)
     );
-    // A file that is no plugin reaches mlir-opt (`--load-dialect-plugin`
-    // / `--load-pass-plugin`), whose refusal fails the build.
+    // A file that is no plugin is refused when loaded, which fails the
+    // build.
     let Some(env) = setup() else { return };
     for flag in ["--load-mlir-plugin", "--load-mlir-pass-plugin"] {
         let out = rokc(Some(&env), &dir, &["build", "p.rok", flag, "p.rok"]);
         assert_exit(&out, 1);
         let err = text(&out.stderr);
         assert!(
-            err.contains("mlir-opt failed") && err.contains("Failed to load"),
+            err.contains("LLVM back end failed") && err.contains("Failed to load"),
             "{err}"
         );
     }
+}
+
+/// `rokc --print cfg` (spec 6.3.11): the target's keys and `--cfg`.
+#[test]
+fn print_cfg_lists_the_active_cfg() {
+    let dir = scratch("print_cfg");
+    let out = rokc(
+        None,
+        &dir,
+        &[
+            "--print",
+            "cfg",
+            "--target=x86_64-unknown-linux-gnu",
+            "--cfg",
+            "feature=gpu",
+            "-O2",
+        ],
+    );
+    assert_exit(&out, 0);
+    assert_eq!(
+        text(&out.stdout),
+        "feature=\"gpu\"\ntarget_arch=\"x86_64\"\ntarget_endian=\"little\"\n\
+         target_env=\"gnu\"\ntarget_family=\"unix\"\ntarget_os=\"linux\"\n\
+         target_pointer_width=\"64\"\n"
+    );
+    let out = rokc(None, &dir, &["--print", "cfg"]);
+    assert!(text(&out.stdout).starts_with("debug_assertions\n"));
+    assert_exit(&rokc(None, &dir, &["--print", "sysroot"]), 2);
+}
+
+/// `#[non_exhaustive]` (spec 6.2.10): a match on the type from another
+/// package needs a `_` arm even when it names every variant; inside its
+/// own package it does not.
+#[test]
+fn non_exhaustive_needs_a_catch_all_across_packages() {
+    let dir = scratch("non-exhaustive");
+    fs::create_dir_all(dir.join("dep")).unwrap();
+    fs::write(
+        dir.join("dep/lib.rok"),
+        "#[non_exhaustive]\npub enum E { A, B }\n\
+         pub fn n(e: E) -> i32 { return match e { E::A => 1, E::B => 2 }; }\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("app")).unwrap();
+    let main = |arms: &str| {
+        fs::write(
+            dir.join("app/main.rok"),
+            format!("use dep::E;\nlet v = match E::A {{ {arms} }};\nprintln(f\"{{v}}\");\n"),
+        )
+        .unwrap();
+    };
+    main("E::A => 1, E::B => 2");
+    let out = rokc(None, &dir, &["check", "app", "--extern", "dep=dep"]);
+    assert_exit(&out, 1);
+    assert!(
+        text(&out.stderr).contains("needs a `_` arm"),
+        "{}",
+        text(&out.stderr)
+    );
+    main("E::A => 1, E::B => 2, _ => 3");
+    assert_exit(
+        &rokc(None, &dir, &["check", "app", "--extern", "dep=dep"]),
+        0,
+    );
 }

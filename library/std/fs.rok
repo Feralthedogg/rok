@@ -6,8 +6,8 @@
 // paths to itself: absolute paths and `..` are refused.
 //
 // `copy` reflinks on macOS only (`clonefileat`; no Linux `FICLONE` /
-// `copy_file_range`); no `mmap`. `File` / `Dir` close through `close()`
-// or on leaving `using`; a `ReadDir` also closes at its end.
+// `copy_file_range`). `File` / `Dir` / `Mmap` close through `close()` /
+// `unmap()` or on leaving `using`; a `ReadDir` also closes at its end.
 //
 // Async (`*_async`, as in std::net): kqueue / epoll cannot wait on a
 // regular file, so each call runs its sync twin on its own thread
@@ -290,6 +290,73 @@ impl File {
     pub fn unlock(self) throws (IoError) {
         try check(unsafe { rok_os_flock(try self.live(), 8) } as i64, self.path);
     }
+
+    /// Map `len` bytes at `offset` (a multiple of the page size) read-only
+    /// and shared. Unsafe: another writer of the file changes the bytes
+    /// under the mapping, and truncating it makes reads fault.
+    pub unsafe fn mmap(self, len: usize, offset: u64) throws (IoError) -> Mmap {
+        let addr = try check(unsafe { rok_os_mmap(try self.live(), len, offset) }, self.path);
+        unsafe {
+            let cell: GcBuf<usize> = buf_new(1);
+            cell[0] = addr as usize;
+            Mmap { addr: cell, len }
+        }
+    }
+}
+
+// ---- Mmap (301.3) ----
+
+/// A read-only shared mapping from `File::mmap`. Unmapped by `unmap` or
+/// on leaving `using`; reads after that see an empty mapping.
+pub struct Mmap {
+    addr: GcBuf<usize>;
+    len: usize;
+}
+
+impl Mmap {
+    pub fn len(self) -> usize { if self.live() { self.len } else { 0 } }
+    pub fn is_empty(self) -> bool { self.len() == 0 }
+
+    /// Byte `i`, or `none` past the end.
+    pub fn get(self, i: usize) -> u8 | none {
+        if i >= self.len() { return none; }
+        let b = byte_buf(1);
+        self.copy_into(i, b);
+        b[0]
+    }
+
+    /// The bytes `start..end` (clamped to the mapping) as a new list.
+    pub fn slice(self, start: usize, end: usize) -> List<u8> {
+        let end = end.min(self.len());
+        let start = start.min(end);
+        let out = byte_buf(end - start);
+        self.copy_into(start, out);
+        out
+    }
+
+    /// Every byte as a new list.
+    pub fn to_list(self) -> List<u8> { self.slice(0, self.len) }
+
+    pub fn unmap(self) {
+        unsafe {
+            let addr = self.addr[0];
+            if addr != 0 {
+                self.addr[0] = 0;
+                rok_os_munmap(addr, self.len);
+            }
+        }
+    }
+
+    fn live(self) -> bool { unsafe { self.addr[0] != 0 } }
+
+    fn copy_into(self, at: usize, out: List<u8>) {
+        let (dst, to, n) = region(out);
+        if n > 0 { unsafe { rok_os_mmap_copy(self.addr[0], at, dst, to, n) }; }
+    }
+}
+
+impl Drop for Mmap {
+    fn drop(ref self) { self.unmap(); }
 }
 
 // ---- async (see the top) ----

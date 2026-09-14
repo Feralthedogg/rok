@@ -1,0 +1,31 @@
+// spec: std 207-iter §2.7.5
+// spec: std 215-string §2.15.7
+// spec: std 209-collections §2.9.9
+// spec: std 306-env §3.6.1
+// expect-exit: 0
+// expect-stdout:
+// cba
+// 2 20
+// [30, 20, 10]
+// missing
+
+// `FromIterator` for `str` (chars) and `Dict`, `SliceIter::rev`,
+// `VarError::NotUnicode`.
+
+use rok::std::env;
+use rok::std::env::VarError;
+
+fn main() -> i32 {
+    let s: str = "cba".chars().collect();
+    println(s);
+    let d: Dict<str, i32> = [("x", 1), ("y", 20), ("x", 2)].into_iter().collect();
+    println(f"{d["x"]} {d["y"]}");
+    let xs = [10, 20, 30];
+    let back: List<i32> = xs[0:3].iter().rev().collect();
+    println(f"{back:?}");
+    let why = try { env::var("ROK_AUDIT_UNSET_VAR"); "set" } catch e: VarError {
+        match e { VarError::NotPresent => "missing", VarError::NotUnicode => "not utf-8" }
+    };
+    println(why);
+    return 0;
+}

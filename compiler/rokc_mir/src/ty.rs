@@ -48,26 +48,35 @@ fn carrier(ok: MirTy, err: MirTy) -> MirTy {
 pub fn lower_ty(ty: &HirTy, module: &HirModule, target: &Target) -> MirTy {
     let lower = |t: &HirTy| lower_ty(t, module, target);
     match ty {
-        HirTy::Unknown | HirTy::Path(_) | HirTy::Any => MirTy::Any,
+        HirTy::Unknown
+        | HirTy::Path(_)
+        | HirTy::Any
+        | HirTy::None
+        | HirTy::Const(..)
+        | HirTy::OpenConst(_)
+        | HirTy::NoThrow
+        | HirTy::Var(_) => MirTy::Any,
         // `!` has no values; a diverging call returns nothing.
         HirTy::Unit | HirTy::Never => MirTy::Unit,
         HirTy::Prim(p) => MirTy::Prim(*p),
         HirTy::AnyTrait(_) => any_ty(),
-        HirTy::Struct(id) => MirTy::Struct(
-            *id,
-            module.structs[id.0 as usize]
-                .fields
-                .iter()
-                .map(|f| lower(&f.ty))
-                .collect(),
-        ),
+        HirTy::Struct(id) => {
+            let def = &module.structs[id.0 as usize];
+            let fields = match &def.union_kind {
+                Some(u) if matches!(u.storage, rokc_hir::UnionStorage::ByteArray) => {
+                    vec![union_storage(&u.aliases, module, target)]
+                }
+                _ => def.fields.iter().map(|f| lower(&f.ty)).collect(),
+            };
+            MirTy::Struct(*id, fields)
+        }
         HirTy::Sum(parts) => match crate::lower::niche::sum_niche(ty, module, target) {
             Some((m, n)) => crate::lower::niche::sum_repr(m, &n, module, target),
             None => sum_layout(
                 &parts
                     .iter()
                     .enumerate()
-                    .filter(|(_, v)| !is_none(v))
+                    .filter(|(_, v)| !v.is_none())
                     .map(|(i, v)| (sum_tag(ty, i as u32), lower(v)))
                     .collect::<Vec<_>>(),
                 target,
@@ -98,10 +107,6 @@ pub fn lower_ty(ty: &HirTy, module: &HirModule, target: &Target) -> MirTy {
     }
 }
 
-fn is_none(v: &HirTy) -> bool {
-    matches!(v, HirTy::Path(p) if p.as_slice() == ["none"])
-}
-
 /// Stored tag of member `index` of `sum_ty`. A sum with `none` stores
 /// `none` as tag 0 and shifts the members before it up by one, so
 /// zeroed memory (a fresh `GcBuf` / `List` slot) reads back as `none`.
@@ -113,7 +118,7 @@ pub fn sum_tag(sum_ty: &HirTy, index: u32) -> u32 {
     let HirTy::Sum(parts) = sum_ty else {
         return index;
     };
-    match parts.iter().position(is_none).map(|k| k as u32) {
+    match parts.iter().position(HirTy::is_none).map(|k| k as u32) {
         Some(k) if index == k => 0,
         Some(k) if index < k => index + 1,
         _ => index,
@@ -173,6 +178,30 @@ pub fn unify_payload(variants: &[(u32, MirTy)], target: &Target) -> Option<MirTy
         return Some(MirTy::Union(variants.to_vec(), size.div_ceil(w)));
     }
     Some(MirTy::Array(Box::new(uint(align)), size.div_ceil(align)))
+}
+
+/// Storage of a byte-array `union`: every field overlaid at offset 0,
+/// sized and aligned for the largest. Words a field may keep a
+/// reference in are a bare [`MirTy::Union`], scanned as ambiguous.
+fn union_storage(fields: &[(String, HirTy)], module: &HirModule, target: &Target) -> MirTy {
+    let tys: Vec<(u32, MirTy)> = (0u32..)
+        .zip(fields.iter().map(|(_, t)| lower_ty(t, module, target)))
+        .collect();
+    let (size, align) = tys
+        .iter()
+        .map(|(_, t)| target.size_align(t))
+        .fold((1, 1), |(s, a), (ps, pa)| (s.max(ps), a.max(pa)));
+    if tys.iter().any(|(_, t)| target.has_gc_ref(t)) {
+        let w = target.pointer_width / 8;
+        return MirTy::Union(tys, size.div_ceil(w));
+    }
+    let word = MirTy::Prim(match align {
+        1 => PrimTy::U8,
+        2 => PrimTy::U16,
+        4 => PrimTy::U32,
+        _ => PrimTy::U64,
+    });
+    MirTy::Array(Box::new(word), size.div_ceil(align))
 }
 
 /// `(tag, payload)` of the variants that carry data (the tag is the
@@ -259,9 +288,12 @@ mod tests {
         let c_fn = HirTy::Fn(
             vec![i64_.clone()],
             Box::new(i64_.clone()),
-            vec!["#extern_c".to_owned()],
+            rokc_hir::FnBounds {
+                c_abi: true,
+                ..rokc_hir::FnBounds::default()
+            },
         );
-        let none = HirTy::Path(vec!["none".to_owned()]);
+        let none = HirTy::None;
         let thin = MirTy::Fn(vec![p(PrimTy::I64)], Box::new(p(PrimTy::I64)));
         let niche = |s: &HirTy| crate::lower::niche::sum_niche(s, &m, &t).map(|(_, n)| n);
         for parts in [
@@ -280,7 +312,7 @@ mod tests {
         assert!(niche(&wide).is_none());
         assert!(matches!(lower_ty(&wide, &m, &t), MirTy::Tuple(_)));
         // A rok `fn` value or none is no niche.
-        let rok_fn = HirTy::Fn(vec![], Box::new(HirTy::Unit), vec![]);
+        let rok_fn = HirTy::Fn(vec![], Box::new(HirTy::Unit), rokc_hir::FnBounds::default());
         assert!(niche(&HirTy::Sum(vec![rok_fn, none])).is_none());
     }
 

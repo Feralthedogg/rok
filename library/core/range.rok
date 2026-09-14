@@ -42,6 +42,19 @@ pub struct RangeToInclusive<T> {
 
 pub struct RangeFull;
 
+// Clone / Copy / PartialEq / Eq from the bounds (stdlib 2.13, 2.5.7).
+impl<T: Clone> Clone for Range<T> {
+    fn clone(self) -> Range<T> { Range { start: self.start.clone(), end: self.end.clone() } }
+}
+
+impl<T: Copy> Copy for Range<T> {}
+
+impl<T: PartialEq> PartialEq for Range<T> {
+    fn eq(self, rhs: Range<T>) -> bool { self.start == rhs.start && self.end == rhs.end }
+}
+
+impl<T: Eq> Eq for Range<T> {}
+
 impl<T: Step> Iterator for Range<T> {
     type Item = T;
     fn next(ref self) -> T | none {

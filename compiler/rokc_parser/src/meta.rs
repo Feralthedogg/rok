@@ -111,6 +111,26 @@ impl MetaTable {
         self.defs.is_empty()
     }
 
+    /// Whether a meta block defines attribute `name`: an
+    /// `#[impl_attribute(name)]`, the field attribute of an
+    /// `#[impl_derive_attribute(D, name)]`, or a field attribute a
+    /// template tests (`@field.has_attr(name)`, 6.9.3).
+    #[must_use]
+    pub fn knows_attribute(&self, name: &str) -> bool {
+        let tested = |d: &MetaDef| {
+            d.body.windows(3).any(|w| {
+                matches!(&w[0].kind, TokenKind::Ident(h) if h == "has_attr")
+                    && w[1].kind == TokenKind::LParen
+                    && matches!(&w[2].kind, TokenKind::Ident(n) if n == name)
+            })
+        };
+        self.defs.iter().any(|d| {
+            (d.kind == MetaKind::Attribute && d.name == name)
+                || d.field_attr.as_deref() == Some(name)
+                || tested(d)
+        })
+    }
+
     #[must_use]
     pub fn find(&self, kind: MetaKind, name: &str) -> Option<&MetaDef> {
         self.defs.iter().find(|d| d.kind == kind && d.name == name)

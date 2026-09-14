@@ -1,0 +1,27 @@
+// expect-exit: 42
+
+// A projection in a struct field or an enum payload resolves once the
+// impls are registered, as in a generic instance.
+trait Shape {
+    type Out;
+}
+
+struct Sq { s: i32; }
+
+impl Shape for Sq {
+    type Out = i32;
+}
+
+struct Holder { v: <Sq as Shape>::Out; }
+
+enum Box2 { One(<Sq as Shape>::Out), Zero }
+
+fn main() -> i32 {
+    let h = Holder { v: 40i32 };
+    let b = Box2::One(2i32);
+    let w = match b {
+        Box2::One(x) => x,
+        Box2::Zero => 0i32,
+    };
+    return h.v + w;
+}

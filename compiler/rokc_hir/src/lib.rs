@@ -116,7 +116,8 @@ pub struct HirEnumDef {
 #[derive(Clone, Debug)]
 pub struct HirEnumVariant {
     pub name: String,
-    pub tag: u32,
+    /// Stored tag: the variant index, or a value variant's value.
+    pub tag: i128,
     pub payload_ty: Option<HirTy>,
     /// Field names of a named-form variant (`Move { x: i32; y: i32; }`),
     /// by payload tuple index. Empty for unit and tuple-form variants.
@@ -192,9 +193,10 @@ pub enum UnionStorage {
     /// One primitive wide enough for every field, accessed by cast;
     /// stays in registers.
     WidestPrim(PrimTy),
-    /// `[u8; size]` aligned to `align`, accessed by load / store
-    /// through the storage pointer.
-    ByteArray { size: u32, align: u32 },
+    /// Bytes as large and aligned as the largest field, laid out by MIR
+    /// (`rokc_mir::ty::union_storage`); words that may hold a reference
+    /// are scanned as ambiguous.
+    ByteArray,
 }
 
 #[derive(Clone, Debug)]
@@ -661,6 +663,71 @@ pub(crate) fn name_type(enum_: bool, id: u32, base: &str, args: &[HirTy]) {
     });
 }
 
+/// A trait as a bound names it or an impl provides it, `Get<i32, Item =
+/// u8>` (spec 2.8, 2.10): the trait's full path, its positional
+/// arguments and its associated-type bindings (sorted by name).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraitRef {
+    pub path: String,
+    pub args: Vec<HirTy>,
+    pub binds: Vec<(String, HirTy)>,
+}
+
+impl TraitRef {
+    #[must_use]
+    pub fn new(path: String, args: Vec<HirTy>, mut binds: Vec<(String, HirTy)>) -> Self {
+        binds.sort_by(|a, b| a.0.cmp(&b.0));
+        Self { path, args, binds }
+    }
+
+    /// The trait alone, no arguments.
+    #[must_use]
+    pub fn plain(path: &str) -> Self {
+        Self::new(path.to_owned(), Vec::new(), Vec::new())
+    }
+
+    /// No arguments and no bindings.
+    #[must_use]
+    pub fn is_plain(&self) -> bool {
+        self.args.is_empty() && self.binds.is_empty()
+    }
+
+    /// Does an impl providing `self` (its arguments and associated types
+    /// all given) meet bound `want`? `want` may leave the arguments and
+    /// any binding out.
+    #[must_use]
+    pub fn satisfies(&self, want: &Self) -> bool {
+        self.path == want.path
+            && (want.args.is_empty() || want.args == self.args)
+            && want.binds.iter().all(|b| self.binds.contains(b))
+    }
+
+    /// `Path<A, Name = B>`, each type rendered by `name`.
+    pub fn render(&self, path: &str, name: impl Fn(&HirTy) -> String) -> String {
+        if self.is_plain() {
+            return path.to_owned();
+        }
+        let parts: Vec<String> = self
+            .args
+            .iter()
+            .map(&name)
+            .chain(self.binds.iter().map(|(n, t)| format!("{n} = {}", name(t))))
+            .collect();
+        format!("{path}<{}>", parts.join(", "))
+    }
+}
+
+/// What a `fn` type promises beyond its signature.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FnBounds {
+    /// `+ Send + Sync`: sorted auto-trait keys.
+    pub auto: Vec<String>,
+    /// `unsafe fn(..)` (spec 4.15): calling it needs an unsafe scope.
+    pub unsafe_fn: bool,
+    /// `extern "C" fn(..)` (spec 5.9.4): a thin C function pointer.
+    pub c_abi: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum HirTy {
     /// Not yet inferred.
@@ -671,13 +738,27 @@ pub enum HirTy {
     /// Untyped wildcard (error recovery, untyped parameters); compatible
     /// with everything. The user's `any` is `AnyTrait(vec![])`.
     Any,
-    /// `any` / `any Tr` / `any (A + B)`: canonical trait keys, sorted;
-    /// plain `any` has none.
+    /// `any` / `any Tr` / `any (A + B)`: the bounds in canonical order
+    /// (`HirTy::any`); plain `any` has none.
     /// Tag + heap payload; the tag numbers concrete types program-wide.
     /// Construction reuses `SumWrap` (variant index = tag) and narrowing
     /// reuses `SumVariant` with this as `sum_ty`.
-    AnyTrait(Vec<String>),
+    AnyTrait(Vec<TraitRef>),
+    /// A type name not resolved (yet): a type parameter, `Self`, or an
+    /// unknown name reported later.
     Path(Vec<String>),
+    /// The type of `none` (spec 2.13).
+    None,
+    /// A const generic argument (spec 2.11) in a type substitution: its
+    /// value, and the parameter's declared type once known.
+    Const(i128, Option<PrimTy>),
+    /// A const parameter not bound yet (argument hints before inference).
+    OpenConst(String),
+    /// What a `rethrows` error parameter binds to for a non-throwing
+    /// argument.
+    NoThrow,
+    /// An inference variable of an un-annotated `let` (`lower::infer`).
+    Var(u32),
     Sum(Vec<HirTy>),
     Tuple(Vec<HirTy>),
     // Resolved struct (Path → known def).
@@ -686,9 +767,8 @@ pub enum HirTy {
     Enum(EnumId),
     // Fixed-size array `[T; N]`.
     Array(Box<HirTy>, u32),
-    // `fn(A, B) -> R` — first-class function pointer. The third field
-    // is its auto-trait bounds (`+ Send + Sync`): sorted trait keys.
-    Fn(Vec<HirTy>, Box<HirTy>, Vec<String>),
+    // `fn(A, B) -> R` — first-class function pointer, with its bounds.
+    Fn(Vec<HirTy>, Box<HirTy>, FnBounds),
     // Closure value: function pointer paired with captured-by-value
     // environment. Stored in MIR as a 2-tuple `{fn_ptr, env}`. The env
     // type is part of the closure's type identity — closures with
@@ -722,8 +802,17 @@ impl HirTy {
     /// An `extern "C" fn(..)` type: a thin C function pointer, called
     /// with the C ABI (spec 5.9.4), rather than a `{code, env}` value.
     #[must_use]
-    pub fn is_c_fn(&self) -> bool {
-        matches!(self, Self::Fn(_, _, b) if b.iter().any(|k| k == rokc_ast::C_FN_MARK))
+    pub const fn is_c_fn(&self) -> bool {
+        matches!(self, Self::Fn(_, _, b) if b.c_abi)
+    }
+
+    /// `any (A + B)`: the bounds deduplicated in one canonical order
+    /// (by `stable_key` rendering), so `any (A + B)` is `any (B + A)`.
+    #[must_use]
+    pub fn any(mut bounds: Vec<TraitRef>) -> Self {
+        bounds.sort_by_cached_key(|b| b.render(&b.path, Self::stable_key));
+        bounds.dedup();
+        Self::AnyTrait(bounds)
     }
 
     /// Spec 2.6.4: a sum is a set — nested sums flatten, duplicates
@@ -835,8 +924,17 @@ impl HirTy {
 
     /// The `none` type.
     #[must_use]
-    pub fn is_none(&self) -> bool {
-        matches!(self, Self::Path(p) if p.as_slice() == ["none"])
+    pub const fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    /// A const argument's value and declared type.
+    #[must_use]
+    pub const fn as_const(&self) -> Option<(i128, Option<PrimTy>)> {
+        match self {
+            Self::Const(v, p) => Some((*v, *p)),
+            _ => None,
+        }
     }
 
     /// Re-establish the `sum` canon everywhere inside `self` (after

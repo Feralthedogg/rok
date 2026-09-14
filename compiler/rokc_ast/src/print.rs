@@ -650,15 +650,10 @@ impl Printer {
                 self.s(")");
             }
             TyKind::Fn(args, ret, bounds) => {
-                let mark = |m: &str| {
-                    bounds
-                        .iter()
-                        .any(|b: &Path| b.segments.len() == 1 && b.segments[0].name == m)
-                };
-                if mark(crate::UNSAFE_FN_MARK) {
+                if bounds.unsafe_fn {
                     self.s("unsafe ");
                 }
-                if mark(crate::C_FN_MARK) {
+                if bounds.c_abi {
                     self.s("extern \"C\" ");
                 }
                 self.s("fn(");
@@ -679,10 +674,7 @@ impl Printer {
                 };
                 self.s(" -> ");
                 self.ty_tight(ret);
-                for b in bounds
-                    .iter()
-                    .filter(|b| !b.segments[0].name.starts_with('#'))
-                {
+                for b in &bounds.auto {
                     self.s(" + ");
                     self.ty_path(b);
                 }
@@ -715,6 +707,12 @@ impl Printer {
             TyKind::None => self.s("none"),
             TyKind::SelfUpper => self.s("Self"),
             TyKind::Never => self.s("!"),
+            TyKind::Nest(x) => self.ty_tight(x),
+            TyKind::Binding(name, t) => {
+                self.s(name);
+                self.s(" = ");
+                self.ty(t);
+            }
             TyKind::Const(c) => match c {
                 ConstExpr::Expr(e) => {
                     self.s("{ ");
@@ -759,17 +757,6 @@ impl Printer {
                 self.s(" as ");
                 self.ty(&seg.generics[1]);
                 self.s(">");
-                continue;
-            }
-            if seg.name == crate::NEST_MARK && seg.generics.len() == 1 {
-                self.ty_tight(&seg.generics[0]);
-                continue;
-            }
-            if let Some(name) = seg.name.strip_prefix('=') {
-                // An associated-type binding `Name = Ty`.
-                self.s(name);
-                self.s(" = ");
-                self.list(&seg.generics, ", ", Self::ty);
                 continue;
             }
             self.name(&seg.name);

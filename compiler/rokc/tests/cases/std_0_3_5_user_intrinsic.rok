@@ -1,12 +1,16 @@
 // spec: std-000.03.5-user-intrinsic
-// expect-error: the intrinsic attribute is for the standard library only
+// expect-error: `#[intrinsic]` on `add`: the intrinsic attribute is for the standard library only
+// expect-error: `#[intrinsic]` on `sized`: the intrinsic attribute is for the standard library only
 
 // stdlib spec 0.3.5: `#[intrinsic]` is a compiler ↔ stdlib boundary;
-// user code can't attach it.
+// user code can't attach it, to a method or a generic function.
 struct Meters { m: i32; }
 impl Add for Meters {
     #[intrinsic("rok.add.i32")]
     fn add(self, rhs: Meters) -> Meters { return Meters { m: self.m + rhs.m }; }
 }
+
+#[intrinsic("rok.size_of")]
+fn sized<T>() -> usize { return 0; }
 
 fn main() -> i32 { return 0; }

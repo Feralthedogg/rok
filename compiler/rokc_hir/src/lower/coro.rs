@@ -95,7 +95,7 @@ pub(super) struct CoroCtx {
 impl CoroCtx {
     /// The step type: what one resume hands back (without the carrier).
     pub fn step_ty(&self, ctx: &LowerCtx<'_>, out: &HirTy) -> HirTy {
-        let opt = HirTy::sum([self.item.clone(), super::none_ty()]);
+        let opt = HirTy::sum([self.item.clone(), HirTy::None]);
         match self.kind {
             CoroKind::Gen => opt,
             CoroKind::Async => poll_ty(ctx, out.clone()),
@@ -105,7 +105,7 @@ impl CoroCtx {
 }
 
 fn poll_ty(ctx: &LowerCtx<'_>, t: HirTy) -> HirTy {
-    ctx.instantiate_enum(POLL, vec![t])
+    ctx.instantiate_enum(POLL, vec![t], rokc_diagnostic::current_span())
         .map_or(HirTy::Unknown, HirTy::Enum)
 }
 
@@ -205,7 +205,7 @@ pub(super) fn lower_yield(
             span,
         };
     }
-    let opt = HirTy::sum([coro.item.clone(), super::none_ty()]);
+    let opt = HirTy::sum([coro.item.clone(), HirTy::None]);
     let some = wrap_into_sum(&opt, v);
     let value = match coro.kind {
         CoroKind::Stream => {
@@ -232,7 +232,13 @@ pub(super) fn lower_await(
         .current_expected()
         .filter(|t| !matches!(t, HirTy::Unknown | HirTy::Unit))
         .cloned()
-        .and_then(|t| ctx.instantiate_struct(CoroKind::Async.wrapper(false), vec![t]))
+        .and_then(|t| {
+            ctx.instantiate_struct(
+                CoroKind::Async.wrapper(false),
+                vec![t],
+                rokc_diagnostic::current_span(),
+            )
+        })
         .map_or(HirTy::Unknown, HirTy::Struct);
     let fut = super::lower_expected(ctx, e, hint);
     let has_poll =
@@ -516,7 +522,7 @@ pub(super) fn closure_body(body: &Expr, is_async: bool, is_generator: bool) -> E
 
 /// A coroutine block expression.
 pub(super) fn lower_coro_expr(
-    ctx: &LowerCtx<'_>,
+    ctx: &mut LowerCtx<'_>,
     kind: &ExprKind,
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
@@ -530,7 +536,7 @@ pub(super) fn lower_coro_expr(
 
 /// `yield { .. }` / `async { .. }` / `async yield { .. }`.
 fn lower_coro_block<'a>(
-    ctx: &LowerCtx<'a>,
+    ctx: &mut LowerCtx<'a>,
     kind: CoroKind,
     body: &Block,
     span: rokc_diagnostic::Span,
@@ -612,30 +618,14 @@ fn lower_coro_block<'a>(
     // Probe pass: infer what the body yields / returns and throws.
     let needs_throws = throws.is_none() && may_throw(&body_expr);
     if val_ty == HirTy::Unknown || needs_throws {
-        let seen = ctx.env.sink.diagnostics.borrow().len();
-        let extras = ctx.env.sink.extras.borrow().len();
+        let mark = ctx.probe_mark();
         let (mut probe, ..) = make_ctx(ctx, &val_ty, &throws, true);
         if needs_throws {
             probe.throws_probe = Some(Vec::new());
         }
         let hint = probe.fn_ret_ty.clone();
         let value = lower_expected(&mut probe, &body_expr, hint);
-        probe_diags = ctx.env.sink.diagnostics.borrow_mut().split_off(seen);
-        let mut lifted = ctx.env.sink.extras.borrow_mut();
-        if lifted[extras..].iter().all(|f| {
-            ["__closure_", "__thunk_", "__coro_"]
-                .iter()
-                .any(|p| f.name.starts_with(p))
-        }) {
-            let gone: Vec<_> = lifted[extras..].iter().map(|f| f.id).collect();
-            ctx.env
-                .sink
-                .thunks
-                .borrow_mut()
-                .retain(|_, id| !gone.contains(id));
-            lifted.truncate(extras);
-        }
-        drop(lifted);
+        probe_diags = ctx.rollback(&mark);
         if val_ty == HirTy::Unknown {
             val_ty = if kind.yields() {
                 probe
@@ -711,7 +701,7 @@ fn lower_coro_block<'a>(
         ty: out.clone(),
         span,
     };
-    let opt = HirTy::sum([coro.item, super::none_ty()]);
+    let opt = HirTy::sum([coro.item, HirTy::None]);
     let none = || super::desugar::sum_none(&opt, span);
     let final_value = match kind {
         CoroKind::Gen => none(),
@@ -772,7 +762,11 @@ fn lower_coro_block<'a>(
     });
     let mut args = vec![val_ty];
     args.extend(throws.clone());
-    let Some(sid) = ctx.instantiate_struct(kind.wrapper(throws.is_some()), args) else {
+    let Some(sid) = ctx.instantiate_struct(
+        kind.wrapper(throws.is_some()),
+        args,
+        rokc_diagnostic::current_span(),
+    ) else {
         return ctx.error_expr(
             span,
             format!(

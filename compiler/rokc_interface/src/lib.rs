@@ -20,8 +20,8 @@ pub use rokc_diagnostic::{
     ErrorKind, Json, RokDiagnostic, clear_files, print_rendered, render, report, set_report_style,
 };
 pub use rokc_driver::{
-    BuildOptions, Demangled, EmitKind, ReplCell, ReplFn, SourceFile, TempDir, demangle,
-    find_mlir_plugin, link_host, rhir,
+    BuildOptions, Demangled, EmitKind, LLVM_VERSION, ReplCell, ReplFn, SourceFile, TempDir,
+    demangle, find_mlir_plugin, link_host, rhir,
 };
 
 #[derive(Default)]
@@ -52,6 +52,13 @@ impl Session {
     /// by the `#[cfg(...)]` filter pass before HIR.
     pub fn add_cfg(&mut self, flag: String) {
         self.config.cfg_flags.push(flag);
+    }
+
+    /// The active cfg, one `flag` / `key="value"` per line
+    /// (`rokc --print cfg`).
+    #[must_use]
+    pub fn cfg_lines(&self) -> Vec<String> {
+        rokc_driver::cfg_env(&self.config).lines()
     }
 
     /// `rokc test` build: keep `#[test]` functions, generate the runner
@@ -218,22 +225,14 @@ impl CompileResult {
         }
     }
 
-    /// Build an executable at `out` through mlir-opt / mlir-translate / clang.
+    /// Build an executable at `out`.
     pub fn link(&self, opts: &BuildOptions, out: &Path) -> Result<(), RokDiagnostic> {
         rokc_driver::link_executable(self.module()?, opts, out)
     }
 
-    /// A REPL cell (`opts.repl`) as LLVM IR text for the session host's
-    /// JIT, and what codegen says about it (GC tables, new symbols).
-    pub fn cell_ir(
-        &self,
-        opts: &BuildOptions,
-    ) -> Result<(Vec<u8>, rokc_driver::MlirOutput), RokDiagnostic> {
-        rokc_driver::cell_ir(self.module()?, opts)
-    }
-
-    /// A REPL cell for the session host: a native object when the host
-    /// runs those (`native::jit`), else LLVM IR (`cell_ir`).
+    /// A REPL cell (`opts.repl`) as an object for the session host, from
+    /// the native backend (`native::jit`) or LLVM, and what codegen says
+    /// about it (GC tables, new symbols).
     pub fn cell_code(
         &self,
         opts: &BuildOptions,
@@ -241,7 +240,7 @@ impl CompileResult {
         if rokc_driver::native::jit(opts) {
             rokc_driver::native::cell_object(self.module()?, opts)
         } else {
-            self.cell_ir(opts)
+            rokc_driver::cell_object(self.module()?, opts)
         }
     }
 

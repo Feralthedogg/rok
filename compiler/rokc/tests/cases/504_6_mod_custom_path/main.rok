@@ -1,0 +1,11 @@
+// spec: 005.04.6-mod-path
+// expect-exit: 0
+// expect-stdout:
+// 7 9
+
+// `#[path("..")]` maps a file module to another file; its submodules
+// live in the folder of the same name beside that file.
+#[path("gen/custom_geom.rok")]
+mod geom;
+
+println(f"{geom::seven()} {geom::inner::nine()}");

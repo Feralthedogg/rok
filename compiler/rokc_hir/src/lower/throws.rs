@@ -65,7 +65,15 @@ fn may_take(filter: Option<&HirTy>, ety: &HirTy) -> bool {
         t => vec![t.clone()],
     };
     match filter {
-        None | Some(HirTy::Path(_) | HirTy::Unknown) => true,
+        None
+        | Some(
+            HirTy::Path(_)
+            | HirTy::None
+            | HirTy::NoThrow
+            | HirTy::OpenConst(_)
+            | HirTy::Var(_)
+            | HirTy::Unknown,
+        ) => true,
         // An untyped `throws` error (`any Error`) may hold any type.
         Some(_) if matches!(ety, HirTy::AnyTrait(_)) => true,
         Some(f) => {
@@ -109,7 +117,16 @@ pub(super) fn sig_ret_ast(f: &FnDef) -> Ty {
 pub(super) fn erase_unbound_errors(ty: &mut HirTy) {
     match ty {
         HirTy::Throws { ok, err } => {
-            let unbound = |t: &HirTy| matches!(t, HirTy::Path(_));
+            let unbound = |t: &HirTy| {
+                matches!(
+                    t,
+                    HirTy::Path(_)
+                        | HirTy::None
+                        | HirTy::NoThrow
+                        | HirTy::OpenConst(_)
+                        | HirTy::Var(_)
+                )
+            };
             if unbound(err) || matches!(&**err, HirTy::Sum(vs) if vs.iter().any(unbound)) {
                 **err = HirTy::Unknown;
             }
@@ -482,6 +499,17 @@ fn err_fits(ctx: &LowerCtx<'_>, from: &HirTy, to: &HirTy) -> bool {
         }
 }
 
+/// Does a captured function value of type `ty` meet `fn` slot bounds
+/// `want` (a thunk capturing it is `Send` only if the callee is)?
+fn value_meets(ctx: &LowerCtx<'_>, ty: &HirTy, want: &crate::FnBounds) -> bool {
+    match ty {
+        HirTy::Fn(_, _, have) => {
+            want.auto.iter().all(|b| have.auto.contains(b)) && (!want.unsafe_fn || have.unsafe_fn)
+        }
+        t => !want.unsafe_fn && want.auto.iter().all(|b| ctx.has_trait(t, b)),
+    }
+}
+
 /// Spec 4.4.9: a function value that throws less than its `fn` slot
 /// (not at all, or a narrower error) goes in through an adapter
 /// `fn #thunk(args) throws (E) -> T { try f(args) }`. A named fn is
@@ -501,7 +529,7 @@ pub(super) fn adapt_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
         return value;
     };
     // An `extern "C" fn` slot takes a C function as is (no thunk).
-    if super::is_c_fn(want) {
+    if want.c_abi {
         return value;
     }
     let target = match &value.kind {
@@ -520,11 +548,7 @@ pub(super) fn adapt_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
         };
     // The thunk captures a non-static callee: it is `Send` only if that
     // callee is.
-    let bounds_ok = target.is_some()
-        || want.iter().all(|b| match &value.ty {
-            HirTy::Fn(_, _, have) => have.contains(b),
-            t => ctx.implements_trait(t, b, 0),
-        });
+    let bounds_ok = target.is_some() || value_meets(ctx, &value.ty, want);
     if !fits || !bounds_ok {
         return value;
     }
@@ -667,7 +691,7 @@ pub(super) fn adapt_never_fn(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
         return value;
     };
     // An `extern "C" fn` slot takes a C function as is (no thunk).
-    if super::is_c_fn(want) {
+    if want.c_abi {
         return value;
     }
     if **vret != HirTy::Never || **sret == HirTy::Never || args != vargs {
@@ -677,11 +701,7 @@ pub(super) fn adapt_never_fn(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
         HirExprKind::FnRef(t) => Some(*t),
         _ => None,
     };
-    let bounds_ok = target.is_some()
-        || want.iter().all(|b| match &value.ty {
-            HirTy::Fn(_, _, have) => have.contains(b),
-            t => ctx.implements_trait(t, b, 0),
-        });
+    let bounds_ok = target.is_some() || value_meets(ctx, &value.ty, want);
     if !bounds_ok {
         return value;
     }
@@ -1125,7 +1145,7 @@ pub(super) fn lower_try(
     let result_ty = if optional_parts(&body.ty).is_some() || body.ty == HirTy::Unknown {
         body.ty.clone()
     } else {
-        HirTy::sum([body.ty.clone(), none_ty()])
+        HirTy::sum([body.ty.clone(), HirTy::None])
     };
     let body = wrap_into_sum(&result_ty, body);
     if !frame.hit {
@@ -1251,9 +1271,9 @@ pub(super) fn main_frame(ctx: &mut LowerCtx<'_>) {
 /// Spec 4.16.4: an uncaught error prints as its `Display`, else its
 /// `Debug`, else its type name.
 fn describe_err(ctx: &mut LowerCtx<'_>, err: HirExpr, span: rokc_diagnostic::Span) -> HirExpr {
-    let spec = if ctx.implements_trait(&err.ty, ctx.lang_trait("display_trait"), 0) {
+    let spec = if ctx.has_trait(&err.ty, ctx.lang("display_trait")) {
         Some(Vec::new())
-    } else if ctx.implements_trait(&err.ty, ctx.lang_trait("debug_trait"), 0) {
+    } else if ctx.has_trait(&err.ty, ctx.lang("debug_trait")) {
         Some(vec![rokc_ast::SpecPiece::Text("?".to_owned())])
     } else {
         None

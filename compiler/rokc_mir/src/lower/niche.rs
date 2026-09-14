@@ -49,10 +49,6 @@ const fn uint_of(p: PrimTy, target: &Target) -> PrimTy {
     }
 }
 
-fn is_none(t: &HirTy) -> bool {
-    matches!(t, HirTy::Path(p) if p.as_slice() == ["none"])
-}
-
 /// `T | none` (either order, nothing else) where `T` has a niche: the
 /// member and the niche.
 pub fn sum_niche<'t>(
@@ -64,7 +60,7 @@ pub fn sum_niche<'t>(
         return None;
     };
     let m = match parts.as_slice() {
-        [m, n] | [n, m] if is_none(n) && !is_none(m) => m,
+        [m, n] | [n, m] if n.is_none() && !m.is_none() => m,
         _ => return None,
     };
     Some((m, niche_of(m, module, target)?))
@@ -95,7 +91,10 @@ fn niche_of(ty: &HirTy, module: &HirModule, target: &Target) -> Option<Niche> {
         // The first unused discriminant. Not when the payload holds GC
         // references: the collector reads the tag to scan it.
         HirTy::Enum(id) => {
-            let n = module.enums[id.0 as usize].variants.len();
+            let vs = &module.enums[id.0 as usize].variants;
+            let n = vs.len();
+            // One past the largest tag (value variants may skip some).
+            let next = vs.iter().map(|v| v.tag).max().unwrap_or(-1) + 1;
             let layout = lower_ty(ty, module, target);
             if n == 0 || target.has_gc_ref(&layout) {
                 return None;
@@ -110,16 +109,12 @@ fn niche_of(ty: &HirTy, module: &HirModule, target: &Target) -> Option<Niche> {
                 MirTy::Prim(PrimTy::I8) => 0x7F,
                 MirTy::Prim(PrimTy::U16) => 0xFFFF,
                 MirTy::Prim(PrimTy::I16) => 0x7FFF,
+                MirTy::Prim(PrimTy::I32) => 0x7FFF_FFFF,
+                MirTy::Prim(PrimTy::U32) => 0xFFFF_FFFF,
                 _ => u64::MAX,
             };
-            if n as u64 > max {
-                return None;
-            }
-            Some(Niche {
-                path,
-                leaf,
-                bits: n as u64,
-            })
+            let bits = u64::try_from(next).ok().filter(|b| *b <= max)?;
+            Some(Niche { path, leaf, bits })
         }
         HirTy::Struct(id) => {
             let def = &module.structs[id.0 as usize];
@@ -443,7 +438,7 @@ mod tests {
     #[test]
     fn auto_niches() {
         let (t, m) = (x64(), HirModule::default());
-        let none = HirTy::Path(vec!["none".to_owned()]);
+        let none = HirTy::None;
         let sum = |a: HirTy| HirTy::Sum(vec![a, none.clone()]);
         let of = |p: PrimTy| {
             let (_, niche) = sum_niche(&sum(HirTy::Prim(p)), &m, &t).unwrap();

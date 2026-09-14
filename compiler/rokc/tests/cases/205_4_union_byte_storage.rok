@@ -1,0 +1,38 @@
+// spec: 002.05.4-union-layout
+// expect-exit: 0
+// expect-stdout:
+// 7 9 true
+// 1065353216
+// hello
+// 1 -1 2
+// 5
+
+// Byte-array unions: struct fields, `#[repr(C)]`, a reference field
+// (ambiguous words), nested in a struct and an array.
+
+struct P { a: i32; b: i32; }
+
+union U { p: P; x: u64; }
+
+#[repr(C)]
+union C { i: i32; f: f32; }
+
+union R { s: str; n: u64; }
+
+struct Wrap { tag: u8; u: U; }
+
+fn main() -> i32 {
+    let u = U { x: 0u64 };
+    u.p = P { a: 7, b: 9 };
+    let p = unsafe { u.p };
+    println(f"{p.a} {p.b} {unsafe { u.x } == 0x0000000900000007u64}");
+    let c = C { f: 1.0f32 };
+    println(f"{unsafe { c.i }}");
+    let r = R { s: "hello" };
+    println(unsafe { r.s });
+    let w = Wrap { tag: 1u8, u: U { p: P { a: -1, b: 2 } } };
+    println(f"{w.tag} {unsafe { w.u.p.a }} {unsafe { w.u.p.b }}");
+    let xs = [U { x: 1u64 }, U { p: P { a: 4, b: 5 } }];
+    println(f"{unsafe { xs[1].p.b }}");
+    return 0;
+}

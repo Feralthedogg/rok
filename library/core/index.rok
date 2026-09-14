@@ -56,6 +56,14 @@ pub fn index_from_end(i: isize, len: usize) -> usize {
     len - 1 - back
 }
 
+/// Panics: `{what} {i} out of bounds for length {len}`. Out of line (a
+/// panic path is never inlined), so the checked accessors calling it
+/// stay small enough to inline.
+#[track_caller]
+pub fn index_oob(what: str, i: usize, len: usize) -> ! {
+    panic(f"{what} {i} out of bounds for length {len}")
+}
+
 /// `r` clamped to a length `n` the way Python clamps slice bounds: the
 /// end to `n`, the start to the end (`a >= b` is empty). Every
 /// `Sliceable<Range<usize>>` impl goes through here, so `xs[5:100]` and

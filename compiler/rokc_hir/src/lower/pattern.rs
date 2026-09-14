@@ -517,11 +517,14 @@ pub(super) fn check_match_arms(
 ) {
     let tys = [scrut_ty.clone()];
     let mut rows: Vec<Vec<Pat>> = Vec::new();
+    // The catch-all a foreign `#[non_exhaustive]` type requires is never
+    // unreachable.
+    let foreign = foreign_non_exhaustive(ctx, scrut_ty);
     for (i, a) in arms.iter().enumerate() {
         let p = simplify(ctx, &a.pat);
-        if !synthetic.get(i).copied().unwrap_or(false)
-            && !useful(ctx, &rows, std::slice::from_ref(&p), &tys)
-        {
+        let exempt = synthetic.get(i).copied().unwrap_or(false)
+            || (foreign.is_some() && hir_pattern_irrefutable(&a.pat));
+        if !exempt && !useful(ctx, &rows, std::slice::from_ref(&p), &tys) {
             ctx.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
                 format!(
@@ -534,6 +537,19 @@ pub(super) fn check_match_arms(
         if a.guard.is_none() {
             rows.push(vec![p]);
         }
+    }
+    let catch_all = arms
+        .iter()
+        .any(|a| a.guard.is_none() && hir_pattern_irrefutable(&a.pat));
+    if let Some(name) = foreign.filter(|_| !catch_all) {
+        ctx.emit_error(
+            rokc_diagnostic::ErrorKind::Type,
+            format!(
+                "match on `{name}` needs a `_` arm: it is `#[non_exhaustive]` in another \
+                 package (spec 6.2.10)"
+            ),
+        );
+        return;
     }
     if useful(ctx, &rows, &[Pat::Wild], &tys) {
         let w = witness(ctx, &rows, &tys).and_then(|mut w| w.pop());
@@ -633,6 +649,19 @@ pub(super) fn check_match_exhaustiveness(
     }
 }
 
+/// `ty`'s name when it is a `#[non_exhaustive]` struct / enum of another
+/// package.
+fn foreign_non_exhaustive(ctx: &LowerCtx<'_>, ty: &HirTy) -> Option<String> {
+    let name = match ty {
+        HirTy::Enum(id) => enum_base_name(&ctx.enum_def(*id).name).to_owned(),
+        HirTy::Struct(id) => enum_base_name(&ctx.struct_def(*id).name).to_owned(),
+        _ => return None,
+    };
+    (ctx.env.non_exhaustive.contains(&name)
+        && package_of(&module_of(&name)) != package_of(&ctx.current_module))
+    .then(|| ctx.ty_name(ty))
+}
+
 pub(super) fn lower_pattern(
     ctx: &mut LowerCtx<'_>,
     pat: &AstPattern,
@@ -682,7 +711,7 @@ fn bare_type_patterns(
             span: p.span,
         };
         let resolved = ctx.resolve_ast_ty(&ty);
-        (!matches!(resolved, HirTy::Path(_) | HirTy::Unknown)).then_some(AstPattern {
+        (!matches!(resolved, HirTy::Path(_) | HirTy::None | HirTy::Unknown)).then_some(AstPattern {
             kind: AstPatternKind::TypeCheck { binder: None, ty },
             span: p.span,
         })
@@ -784,7 +813,7 @@ pub(super) fn lower_pattern_inner(
         AstPatternKind::Literal(AstLit::None) => {
             // `none` against a sum scrutinee → match the none variant.
             if let HirTy::Sum(variants) = scrut_ty {
-                if let Some(idx) = variants.iter().position(is_none_ty) {
+                if let Some(idx) = variants.iter().position(HirTy::is_none) {
                     return HirPattern::SumVariant {
                         sum_ty: scrut_ty.clone(),
                         variant_index: u32::try_from(idx).expect("variant overflow"),

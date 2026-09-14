@@ -1,28 +1,24 @@
 // The `rokc repl` session host (repl.rs). One process, runtime up
-// once, LLVM's ORC JIT linked in (the LLVM-C API; rokc itself never
-// links LLVM, 0.2.4). Commands come on the socket rokc passes as stdin:
+// once; rokc compiles each cell to a Mach-O arm64 object (the native
+// backend at `-O0`, LLVM above) and the host maps, links and runs it
+// itself (`jit_cell`). Commands come on the socket rokc passes as stdin:
 //
-//   `cell <n>\n` + n bytes of LLVM IR: JIT-compile it into the session
-//     and run its `rok_repl_cell` once. Later cells link against it.
-//   `lib <n>\n` + an n-byte path: link a prebuilt dependency's static
-//     library into the session (its members load as cells need them);
-//     the reply is `ok 0\n` or `err\n`.
+//   `cell <n>\n` + n bytes of object: link it into the session and run
+//     its `rok_repl_cell` once. Later cells link against it.
+//   `lib <n>\n` + an n-byte path: link every member of a prebuilt
+//     dependency's static library into the session; the reply is
+//     `ok 0\n` or `err\n`.
 //
 // A cell's reply is `pid <p>\n` (the process running the cell) and then
 // `ok <n>\n<n bytes of the shown value>` or `err\n`. `SIGINT` ends a
 // running cell (the session goes on as before it) and is ignored
-// between cells. argv[1] is the opt level (`0`..`3`, `s`).
+// between cells.
 //
-// All cells share one JITDylib. A cell that defines a symbol an earlier
-// cell defined (a redefined `fn`, `static`, the user `main`, ..) gets it
-// renamed `<name>.r<cell>`, and later cells' references to the name are
-// renamed to the newest one: a redefinition takes effect from the next
-// cell (907) while earlier code keeps what it was linked against.
-//
-// Built with `ROK_NATIVE_JIT` (the native backend's cells, `-O0`), the
-// host links no LLVM: a cell is a Mach-O object rokc compiled, and the
-// host maps, links and runs it itself (`jit_cell` below); `lib` loads
-// every member of the archive the same way.
+// A cell that defines a symbol an earlier cell defined (a redefined
+// `fn`, `static`, the user `main`, ..) gets it renamed `<name>.r<cell>`,
+// and later cells' references to the name resolve to the newest one: a
+// redefinition takes effect from the next cell (907) while earlier code
+// keeps what it was linked against.
 #include <fcntl.h>
 #include <signal.h>
 #include <stdint.h>
@@ -31,16 +27,6 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
-
-#ifndef ROK_NATIVE_JIT
-#include <llvm-c/Core.h>
-#include <llvm-c/Error.h>
-#include <llvm-c/IRReader.h>
-#include <llvm-c/LLJIT.h>
-#include <llvm-c/Orc.h>
-#include <llvm-c/Target.h>
-#include <llvm-c/Transforms/PassBuilder.h>
-#endif
 
 void rok_runtime_init(void);
 int rok_stdio_flush(void);
@@ -51,11 +37,6 @@ struct {
     size_t len;
 } __rok_repl_out;
 
-#ifndef ROK_NATIVE_JIT
-static LLVMOrcLLJITRef jit;
-static LLVMOrcJITDylibRef jd;
-#endif
-static const char *opt_level = "0";
 static unsigned cells;
 
 // Symbols the session defines: name → its newest definition's name
@@ -122,154 +103,6 @@ static void *host_symbol(const char *name) {
 }
 #endif
 
-#ifndef ROK_NATIVE_JIT
-static int report(LLVMErrorRef e) {
-    if (!e) return 0;
-    char *m = LLVMGetErrorMessage(e);
-    fprintf(stderr, "error: %s\n", m);
-    LLVMDisposeErrorMessage(m);
-    return 1;
-}
-
-#if defined(__APPLE__)
-// The thread-locals `m` uses, defined as their descriptors in the host
-// (the process-symbol generator would find them by `dlsym`).
-static int define_thread_locals(LLVMModuleRef m) {
-    for (LLVMValueRef g = LLVMGetFirstGlobal(m); g; g = LLVMGetNextGlobal(g)) {
-        if (!LLVMIsDeclaration(g) || !LLVMIsThreadLocal(g)) continue;
-        size_t len;
-        const char *n = LLVMGetValueName2(g, &len);
-        char mangled[512];
-        snprintf(mangled, sizeof mangled, "%c%s", LLVMOrcLLJITGetGlobalPrefix(jit), n);
-        if (sym_now(mangled)) continue;
-        void *desc = host_symbol(mangled);
-        if (!desc) {
-            fprintf(stderr, "error: no thread-local `%s` in the session host\n", n);
-            return 1;
-        }
-        LLVMOrcCSymbolMapPair pair = {
-            LLVMOrcExecutionSessionIntern(LLVMOrcLLJITGetExecutionSession(jit), mangled),
-            {(LLVMOrcExecutorAddress)(uintptr_t)desc, {LLVMJITSymbolGenericFlagsExported, 0}},
-        };
-        if (report(LLVMOrcJITDylibDefine(jd, LLVMOrcAbsoluteSymbols(&pair, 1)))) return 1;
-        sym_set(mangled, mangled);
-    }
-    return 0;
-}
-#else
-// ELF thread-locals go through the process-symbol generator;
-// untested off macOS.
-static int define_thread_locals(LLVMModuleRef m) {
-    (void)m;
-    return 0;
-}
-#endif
-
-// Give `v` (a definition or a declaration of `m`) its session name.
-static void rename_value(LLVMValueRef v) {
-    LLVMLinkage l = LLVMGetLinkage(v);
-    if (l == LLVMInternalLinkage || l == LLVMPrivateLinkage) return;
-    size_t len;
-    const char *n = LLVMGetValueName2(v, &len);
-    if (!len || !strncmp(n, "llvm.", 5)) return;
-    char *name = strdup(n);
-    const char *now = sym_now(name);
-    if (!LLVMIsDeclaration(v)) {
-        if (now) {
-            char fresh[1024];
-            snprintf(fresh, sizeof fresh, "%s.r%u", name, cells);
-            LLVMSetValueName2(v, fresh, strlen(fresh));
-            sym_set(name, fresh);
-        } else
-            sym_set(name, name);
-    } else if (now && strcmp(now, name))
-        LLVMSetValueName2(v, now, strlen(now));
-    free(name);
-}
-
-// Parse, rename, compile the cell `ir`; its entry point (NULL: failed,
-// reported).
-static void (*jit_cell(const char *ir, size_t n))(void) {
-    cells++;
-    LLVMContextRef ctx = LLVMContextCreate();
-    LLVMMemoryBufferRef buf = LLVMCreateMemoryBufferWithMemoryRangeCopy(ir, n, "cell");
-    LLVMModuleRef m;
-    char *msg = NULL;
-    if (LLVMParseIRInContext(ctx, buf, &m, &msg)) {
-        fprintf(stderr, "error: cannot read the cell's LLVM IR: %s\n", msg);
-        LLVMDisposeMessage(msg);
-        LLVMContextDispose(ctx);
-        return NULL;
-    }
-    LLVMSetDataLayout(m, LLVMOrcLLJITGetDataLayoutStr(jit));
-    LLVMSetTarget(m, LLVMOrcLLJITGetTripleString(jit));
-    if (define_thread_locals(m)) return NULL;
-    // Definitions first: a declaration may name a symbol this very
-    // module redefines only when it is not here at all.
-    for (int defs = 1; defs >= 0; defs--) {
-        for (LLVMValueRef f = LLVMGetFirstFunction(m); f; f = LLVMGetNextFunction(f))
-            if (!LLVMIsDeclaration(f) == defs) rename_value(f);
-        for (LLVMValueRef g = LLVMGetFirstGlobal(m); g; g = LLVMGetNextGlobal(g))
-            if (!LLVMIsDeclaration(g) == defs) rename_value(g);
-    }
-    if (strcmp(opt_level, "0")) {
-        char passes[32];
-        snprintf(passes, sizeof passes, "default<O%s>", opt_level);
-        LLVMPassBuilderOptionsRef po = LLVMCreatePassBuilderOptions();
-        LLVMErrorRef e = LLVMRunPasses(m, passes, NULL, po);
-        LLVMDisposePassBuilderOptions(po);
-        if (report(e)) return NULL;
-    }
-    LLVMOrcThreadSafeContextRef ts = LLVMOrcCreateNewThreadSafeContextFromLLVMContext(ctx);
-    LLVMOrcThreadSafeModuleRef tsm = LLVMOrcCreateNewThreadSafeModule(m, ts);
-    LLVMOrcDisposeThreadSafeContext(ts);
-    if (report(LLVMOrcLLJITAddLLVMIRModule(jit, jd, tsm))) return NULL;
-    LLVMOrcExecutorAddress entry = 0;
-    if (report(LLVMOrcLLJITLookup(jit, &entry, sym_now("rok_repl_cell")))) return NULL;
-    return (void (*)(void))(uintptr_t)entry;
-}
-
-static void start_jit(void) {
-    LLVMInitializeNativeTarget();
-    LLVMInitializeNativeAsmPrinter();
-    char *triple = LLVMGetDefaultTargetTriple(), *err = NULL;
-    LLVMTargetRef target;
-    if (LLVMGetTargetFromTriple(triple, &target, &err)) {
-        fprintf(stderr, "error: %s\n", err);
-        exit(1);
-    }
-    LLVMCodeGenOptLevel level = !strcmp(opt_level, "0")   ? LLVMCodeGenLevelNone
-                                : !strcmp(opt_level, "3") ? LLVMCodeGenLevelAggressive
-                                                          : LLVMCodeGenLevelDefault;
-    char *cpu = LLVMGetHostCPUName(), *features = LLVMGetHostCPUFeatures();
-    LLVMTargetMachineRef tm = LLVMCreateTargetMachine(target, triple, cpu, features, level,
-                                                      LLVMRelocDefault, LLVMCodeModelJITDefault);
-    // SelectionDAG only, as rokc's clang -fno-global-isel: mixing it with
-    // GlobalISel splits aggregate arguments' stack layout.
-    LLVMSetTargetMachineGlobalISel(tm, 0);
-    LLVMDisposeMessage(triple);
-    LLVMDisposeMessage(cpu);
-    LLVMDisposeMessage(features);
-    LLVMOrcLLJITBuilderRef b = LLVMOrcCreateLLJITBuilder();
-    LLVMOrcLLJITBuilderSetJITTargetMachineBuilder(b, LLVMOrcJITTargetMachineBuilderCreateFromTargetMachine(tm));
-    if (report(LLVMOrcCreateLLJIT(&jit, b))) exit(1);
-    jd = LLVMOrcLLJITGetMainJITDylib(jit);
-    // The runtime (linked in whole), libc, and `__rok_repl_out`.
-    LLVMOrcDefinitionGeneratorRef gen;
-    if (report(LLVMOrcCreateDynamicLibrarySearchGeneratorForProcess(&gen, LLVMOrcLLJITGetGlobalPrefix(jit), NULL, NULL)))
-        exit(1);
-    LLVMOrcJITDylibAddGenerator(jd, gen);
-}
-
-// A prebuilt dependency's archive: its members load as cells need them.
-static int link_lib(const char *path) {
-    LLVMOrcDefinitionGeneratorRef lib;
-    LLVMOrcObjectLayerRef layer = LLVMOrcLLJITGetObjLinkingLayer(jit);
-    int bad = report(LLVMOrcCreateStaticLibrarySearchGeneratorForPath(&lib, layer, path));
-    if (!bad) LLVMOrcJITDylibAddGenerator(jd, lib);
-    return bad;
-}
-#else
 // The native JIT: Mach-O arm64 objects (MH_OBJECT) mapped into
 // executable memory, linked against the session and the host.
 #include <dlfcn.h>
@@ -563,7 +396,6 @@ static int link_lib(const char *path) {
         if (!link_object(&objs[i])) return 1;
     return 0;
 }
-#endif
 
 // A command line: `<word> <n>`.
 static int read_command(int ctl, char *line, size_t cap) {
@@ -590,7 +422,6 @@ static char *read_ir(int ctl, size_t n) {
 }
 
 int main(int argc, char **argv) {
-    if (argc > 1) opt_level = argv[1];
     int ctl = dup(0);
     int nul = open("/dev/null", O_RDONLY);
     dup2(nul, 0);  // the cells' stdin

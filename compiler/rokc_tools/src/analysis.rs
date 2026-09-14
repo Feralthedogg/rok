@@ -216,9 +216,18 @@ fn ty_text(hir: &HirModule, ty: &HirTy, full: bool) -> String {
         HirTy::Prim(p) => p.name().to_owned(),
         HirTy::Any => "any".to_owned(),
         HirTy::AnyTrait(b) if b.is_empty() => "any".to_owned(),
-        HirTy::AnyTrait(b) if b.len() == 1 => format!("any {}", b[0]),
-        HirTy::AnyTrait(b) => format!("any ({})", b.join(" + ")),
+        HirTy::AnyTrait(b) => {
+            let b: Vec<String> = b.iter().map(|r| r.render(&r.path, rec)).collect();
+            match b.as_slice() {
+                [one] => format!("any {one}"),
+                _ => format!("any ({})", b.join(" + ")),
+            }
+        }
         HirTy::Path(p) => p.join("::"),
+        HirTy::None => "none".to_owned(),
+        HirTy::Const(v, _) => v.to_string(),
+        HirTy::OpenConst(n) => n.clone(),
+        HirTy::NoThrow | HirTy::Var(_) => "_".to_owned(),
         HirTy::Sum(_) => ty.sum_name(rec),
         HirTy::Tuple(ts) => format!("({})", list(ts)),
         HirTy::Struct(id) => hir.structs.iter().find(|s| s.id == *id).map_or_else(

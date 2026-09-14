@@ -17,6 +17,7 @@ rokc_ir_common = { workspace = true }
 rokc_lexer = { workspace = true }
 rokc_mir = { workspace = true }
 rokc_parser = { workspace = true }
+rokc_llvm = { workspace = true }
 
 [lints]
 workspace = true

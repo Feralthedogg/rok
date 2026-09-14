@@ -18,6 +18,37 @@ pub enum TrySendError<T> {
     Closed(T),
 }
 
+// Errors (2.14.3) whatever `T` is: the value they carry is not shown.
+impl<T> Display for SendError<T> {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("sending on a closed channel") }
+}
+
+impl<T> Debug for SendError<T> {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("Closed(..)") }
+}
+
+impl<T> Error for SendError<T> {}
+
+impl<T> Display for TrySendError<T> {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        match self {
+            TrySendError::Full(_) => try f.write_str("sending on a full channel"),
+            TrySendError::Closed(_) => try f.write_str("sending on a closed channel"),
+        }
+    }
+}
+
+impl<T> Debug for TrySendError<T> {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        match self {
+            TrySendError::Full(_) => try f.write_str("Full(..)"),
+            TrySendError::Closed(_) => try f.write_str("Closed(..)"),
+        }
+    }
+}
+
+impl<T> Error for TrySendError<T> {}
+
 // `meta` slots.
 const SENDERS: usize = 0;
 /// Queue limit, 0 = unbounded (a rendezvous channel has 1).

@@ -542,10 +542,6 @@ impl Debug for Float {
     fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) }
 }
 
-impl Format for Float {
-    fn format(self, spec: FormatSpec) -> str { format_number(self, spec) }
-}
-
 impl FromStr for Float {
     type Err = ParseError;
     fn from_str(s: str) throws (ParseError) -> Float {

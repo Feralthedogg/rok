@@ -14,6 +14,7 @@ members = [
     "compiler/rokc_interface",
     "compiler/rokc_ir_common",
     "compiler/rokc_lexer",
+    "compiler/rokc_llvm",
     "compiler/rokc_mir",
     "compiler/rokc_parser",
     "compiler/rokc_rokon",
@@ -42,6 +43,7 @@ rokc_hir = { path = "compiler/rokc_hir" }
 rokc_interface = { path = "compiler/rokc_interface" }
 rokc_ir_common = { path = "compiler/rokc_ir_common" }
 rokc_lexer = { path = "compiler/rokc_lexer" }
+rokc_llvm = { path = "compiler/rokc_llvm" }
 rokc_mir = { path = "compiler/rokc_mir" }
 rokc_parser = { path = "compiler/rokc_parser" }
 rokc_rokon = { path = "compiler/rokc_rokon" }

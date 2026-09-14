@@ -31,7 +31,7 @@ impl str {
 
     /// Byte `i`, O(1); panics if `i >= len()`.
     pub fn byte(self, i: usize) -> u8 {
-        if i >= self.len() { panic(f"str byte index {i} out of bounds for length {self.len()}"); }
+        if i >= self.len() { index_oob("str byte index", i, self.len()); }
         unsafe { rok_str_byte(self, i) }
     }
 
@@ -134,8 +134,8 @@ impl Add for str {
 }
 
 impl PartialEq for str {
-    fn eq(self, rhs: str) -> bool { unsafe { rok_str_cmp(self, rhs) } == 0 }
-    fn ne(self, rhs: str) -> bool { unsafe { rok_str_cmp(self, rhs) } != 0 }
+    fn eq(self, rhs: str) -> bool { unsafe { rok_str_eq(self, rhs) } != 0 }
+    fn ne(self, rhs: str) -> bool { unsafe { rok_str_eq(self, rhs) } == 0 }
 }
 
 impl PartialOrd for str {
@@ -251,6 +251,23 @@ impl Iterator for CharIndicesIter {
     }
 }
 
+/// Byte length of the `White_Space` char starting at byte `pos`, 0 when
+/// it is not one (a continuation byte is not).
+fn space_at(s: str, pos: usize) -> usize {
+    let b = unsafe { rok_str_byte(s, pos) };
+    if b < 0x80u8 {
+        return if b == 32u8 || (b >= 9u8 && b <= 13u8) { 1usize } else { 0usize };
+    }
+    space_at_wide(s, pos, b)
+}
+
+fn space_at_wide(s: str, pos: usize, b: u8) -> usize {
+    if b < 0xC0u8 { return 0usize; }
+    let it = CharsIter { s: s, pos: pos };
+    let c: char = it.next() else { return 0usize; };
+    if c.is_whitespace() { it.pos - pos } else { 0usize }
+}
+
 pub struct SplitWhitespaceIter {
     s: str;
     pos: usize;
@@ -259,26 +276,25 @@ pub struct SplitWhitespaceIter {
 impl Iterator for SplitWhitespaceIter {
     type Item = str;
     fn next(ref self) -> str | none {
-        let it = CharsIter { s: self.s, pos: self.pos };
-        let start = 0usize;
-        let inside = false;
+        let s = self.s;
+        let n = s.len();
+        let pos = self.pos;
         loop {
-            let at = it.pos;
-            let c: char = it.next() else {
-                self.pos = at;
-                if inside { return self.s[start:at]; }
+            if pos >= n {
+                self.pos = pos;
                 return none;
-            };
-            if c.is_whitespace() {
-                if inside {
-                    self.pos = it.pos;
-                    return self.s[start:at];
-                }
-            } else if !inside {
-                start = at;
-                inside = true;
             }
+            let w = space_at(s, pos);
+            if w == 0usize { break; }
+            pos += w;
         }
+        let start = pos;
+        pos += 1usize;
+        while pos < n && space_at(s, pos) == 0usize {
+            pos += 1usize;
+        }
+        self.pos = pos;
+        s[start:pos]
     }
 }
 
@@ -539,6 +555,15 @@ impl Sliceable<Range<usize>> for StrBuf {
     #[track_caller]
     fn slice(self, r: Range<usize>) -> str {
         self.to_str()[r.start:r.end]
+    }
+}
+
+/// `chars.collect::<str>()` (2.15.7).
+impl FromIterator<char> for str {
+    fn from_iter<I>(it: I) -> str {
+        let b = StrBuf::new();
+        for c in it { b.push(c); }
+        b.to_str()
     }
 }
 

@@ -8,7 +8,7 @@ use super::*;
 /// capture (spec 4.6.2) shares `x`'s cell (`LowerCtx::ref_captured`).
 /// A non-capturing closure stays a plain function pointer.
 pub(super) fn lower_closure_expr(
-    ctx: &LowerCtx<'_>,
+    ctx: &mut LowerCtx<'_>,
     capture_list: &[rokc_ast::CaptureSpec],
     params: &[Param],
     ret_ty: Option<&Ty>,
@@ -364,11 +364,11 @@ pub(super) fn optional_parts(ty: &HirTy) -> Option<(usize, Vec<(usize, HirTy)>)>
     let HirTy::Sum(variants) = ty else {
         return None;
     };
-    let none_idx = variants.iter().position(is_none_ty)?;
+    let none_idx = variants.iter().position(HirTy::is_none)?;
     let some: Vec<(usize, HirTy)> = variants
         .iter()
         .enumerate()
-        .filter(|(_, v)| !is_none_ty(v))
+        .filter(|(_, v)| !v.is_none())
         .map(|(i, v)| (i, v.clone()))
         .collect();
     Some((none_idx, some))
@@ -441,7 +441,7 @@ pub(super) fn sum_none(sum_ty: &HirTy, span: rokc_diagnostic::Span) -> HirExpr {
         sum_ty,
         HirExpr {
             kind: HirExprKind::Const(ConstVal::None),
-            ty: none_ty(),
+            ty: HirTy::None,
             span,
         },
     )
@@ -499,7 +499,7 @@ pub(super) fn desugar_question_dot(
     let result_ty = if inner_optional {
         inner.ty.clone()
     } else {
-        HirTy::sum([inner.ty.clone(), none_ty()])
+        HirTy::sum([inner.ty.clone(), HirTy::None])
     };
     let some_body = if inner_optional {
         inner
@@ -1006,8 +1006,8 @@ fn for_next_loop(
         }
     };
     let (Some(none_i), Some(item_i)) = (
-        parts.iter().position(is_none_ty),
-        parts.iter().position(|p| !is_none_ty(p)),
+        parts.iter().position(HirTy::is_none),
+        parts.iter().position(|p| !p.is_none()),
     ) else {
         return ctx.error_expr(span, "`next` must return `T | none`".to_owned());
     };

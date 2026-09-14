@@ -10,7 +10,7 @@ mod print;
 mod target;
 mod ty;
 
-pub use liveness::{Deaths, block_local, deaths};
+pub use liveness::{Deaths, block_local, deaths, live_across};
 pub use lower::lower;
 pub use print::print_mir;
 pub use target::{CAbi, GcSlot, Target};

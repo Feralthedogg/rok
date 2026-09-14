@@ -102,31 +102,16 @@ pub(super) fn resolve_name(
 ) -> Result<Option<String>, Vec<String>> {
     // A lone `pkg` / `sup` / `rok` is an ordinary name (`fn sup()`); as
     // a path root it needs something after it.
-    let root = segments.first().copied().filter(|_| segments.len() > 1);
-    let absolute = matches!(root, Some("pkg" | "rok"));
-    let package = package_of(module);
-    let resolved_segs: Vec<&str> = match root {
-        // `pkg::` is the root of the package the code is in.
-        Some("pkg") if is_dependency(&package) => std::iter::once(package.as_str())
-            .chain(segments[1..].iter().copied())
-            .collect(),
-        Some("pkg") => segments[1..].to_vec(),
-        Some("sup") => {
-            let mut parts: Vec<&str> = if module.is_empty() {
-                Vec::new()
-            } else {
-                module.split("::").collect()
-            };
-            let mut i = 0;
-            while i < segments.len() && segments[i] == "sup" {
-                parts.pop();
-                i += 1;
-            }
-            parts.extend(segments[i..].iter().copied());
-            return Ok(Some(parts.join("::")).filter(|k| (set.exists)(k)));
+    let rooted = root_path(segments, module).filter(|_| segments.len() > 1);
+    if segments.first() == Some(&"sup") {
+        if let Some(p) = rooted {
+            return Ok(Some(p.join("::")).filter(|k| (set.exists)(k)));
         }
-        _ => segments.to_vec(),
-    };
+    }
+    let absolute = rooted.is_some();
+    let resolved: Vec<String> =
+        rooted.unwrap_or_else(|| segments.iter().map(|s| (*s).to_owned()).collect());
+    let resolved_segs: Vec<&str> = resolved.iter().map(String::as_str).collect();
     let segments = resolved_segs.as_slice();
     let suffix = segments.join("::");
     // Spec 5.7: no implicit ancestor walk — the current module (its items
@@ -170,10 +155,50 @@ pub(super) fn resolve_name(
     }
 }
 
+/// The absolute path a rooted path names from `module` (spec 5.7):
+/// `pkg::` starts at the package root (a dependency's own inside it),
+/// each leading `sup::` goes up one module, `rok::` is absolute. `None`
+/// for any other first segment. Shared by expression / type paths and
+/// `use` trees.
+pub fn root_path(segments: &[&str], module: &str) -> Option<Vec<String>> {
+    let owned = |s: &[&str]| s.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
+    match *segments.first()? {
+        "pkg" => {
+            let package = package_of(module);
+            let mut out = Vec::new();
+            if is_dependency(&package) {
+                out.push(package);
+            }
+            out.extend(owned(&segments[1..]));
+            Some(out)
+        }
+        "sup" => {
+            let mut parts: Vec<String> = if module.is_empty() {
+                Vec::new()
+            } else {
+                module.split("::").map(str::to_owned).collect()
+            };
+            let ups = segments.iter().take_while(|s| **s == "sup").count();
+            for _ in 0..ups {
+                parts.pop();
+            }
+            parts.extend(owned(&segments[ups..]));
+            Some(parts)
+        }
+        "rok" => Some(owned(segments)),
+        _ => None,
+    }
+}
+
 /// The compiler-known GC buffer type (`HirTy::GcBuf`), declared in core
 /// so the name resolves.
 pub const GC_BUF: &str = "rok::core::collections::raw::GcBuf";
 pub const MLIR_TYPE: &str = "rok::bare::mlir::__mlir_type";
+
+/// Core traits the compiler names that have no lang slot (stdlib 0.4).
+pub const COPY_TRAIT: &str = "rok::core::marker::Copy";
+pub const EQ_TRAIT: &str = "rok::core::cmp::Eq";
+pub const DEFAULT_TRAIT: &str = "rok::core::marker::Default";
 
 /// A string literal (`"arith.addi"`), as a const type argument or an
 /// expression.
@@ -229,11 +254,11 @@ thread_local! {
     static PACKAGES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-pub(super) fn set_packages(names: Vec<String>) {
+pub fn set_packages(names: Vec<String>) {
     PACKAGES.with(|p| *p.borrow_mut() = names);
 }
 
-pub(super) fn is_dependency(name: &str) -> bool {
+pub fn is_dependency(name: &str) -> bool {
     PACKAGES.with(|p| p.borrow().iter().any(|n| n == name))
 }
 
@@ -366,47 +391,25 @@ pub(super) fn method_target_for(ty: &HirTy) -> Option<MethodTarget> {
     }
 }
 
-/// Walk a `HirTy` substituting any unresolved `Path([alias_name])`
-/// nodes with their concrete type from `aliases`. Multi-level
-/// resolution is handled by the caller (a small fixed-iteration loop
-/// over the alias table itself). An alias of a sum spreads into a sum
-/// it is a member of (spec 2.6.4).
-pub(super) fn substitute_aliases(ty: &mut HirTy, aliases: &HashMap<String, HirTy>) {
-    substitute(ty, aliases, false);
-}
-
-/// `substitute_aliases` for generic parameters (and `Self`): a
-/// parameter bound to a sum with `none` stays one member of a sum that
-/// has its own `none` — `T | none` with `T = i32 | none` is the nested
-/// optional `(i32 | none)?` (spec 2.6.4).
+/// Replace the generic parameters (and `Self`) `params` binds in `ty`:
+/// a parameter bound to a sum with `none` stays one member of a sum
+/// that has its own `none` — `T | none` with `T = i32 | none` is the
+/// nested optional `(i32 | none)?` (spec 2.6.4).
 pub(super) fn substitute_params(ty: &mut HirTy, params: &HashMap<String, HirTy>) {
-    substitute(ty, params, true);
-}
-
-fn substitute(ty: &mut HirTy, map: &HashMap<String, HirTy>, nest: bool) {
-    let rec = |t: &mut HirTy| substitute(t, map, nest);
+    let rec = |t: &mut HirTy| substitute_params(t, params);
     match ty {
         HirTy::Path(parts) => {
             if parts.len() == 1 {
-                if let Some(replacement) = map.get(&parts[0]) {
+                if let Some(replacement) = params.get(&parts[0]) {
                     *ty = replacement.clone();
                 }
             }
         }
         HirTy::Sum(parts) => {
-            // An alias / type parameter may have become a sum (or a
-            // member already present): back to the canon.
-            let mut out = Vec::new();
-            for mut p in std::mem::take(parts) {
-                let named = matches!(&p, HirTy::Path(n) if n.len() == 1 && map.contains_key(&n[0]));
-                rec(&mut p);
-                if named && !nest {
-                    p.spread(&mut out);
-                } else {
-                    out.push(p);
-                }
-            }
-            *ty = HirTy::sum(out);
+            // A parameter may have become a sum (or a member already
+            // present): back to the canon.
+            parts.iter_mut().for_each(rec);
+            *ty = HirTy::sum(std::mem::take(parts));
         }
         HirTy::Tuple(parts) => parts.iter_mut().for_each(rec),
         HirTy::Array(elem, _) | HirTy::GcBuf(elem) => rec(elem),
@@ -430,16 +433,55 @@ thread_local! {
     static ALIAS_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
-/// `resolve_ty` plus module-aware struct / enum / alias name lookup.
-/// Unresolvable names stay `HirTy::Path` (generic params get substituted
-/// later; anything left over is reported by `check_unresolved_types`).
+/// Instance `full<args>` of a generic struct or enum (made on first use,
+/// its field types resolved under the instance's substitution in the
+/// template's module). `None` while an argument is not concrete (an
+/// unbound parameter, an unknown name).
+pub(super) fn instance(
+    defs: &TypeDefs<'_>,
+    full: &str,
+    args: Vec<HirTy>,
+    names: &TypeNames<'_>,
+    span: rokc_diagnostic::Span,
+) -> Option<HirTy> {
+    let mut open = Vec::new();
+    args.iter()
+        .for_each(|a| collect::collect_unknown_paths(a, &mut open));
+    if !open.is_empty() || args.contains(&HirTy::Unknown) {
+        return None;
+    }
+    let module = module_of(full);
+    let sc = Scope {
+        names,
+        module: &module,
+    };
+    if defs.generic_structs.contains_key(full) {
+        return defs
+            .instantiate_struct(full, args, span, |def, subst| {
+                mono::generic_struct_fields(def, &|t| {
+                    resolve_ty_with_structs(t, defs, Some(subst), sc)
+                })
+            })
+            .map(HirTy::Struct);
+    }
+    defs.instantiate_enum(full, args, span, |def, subst| {
+        mono::generic_enum_variants(def, &|t| resolve_ty_with_structs(t, defs, Some(subst), sc))
+    })
+    .map(HirTy::Enum)
+}
+
+/// `resolve_ty` plus module-aware struct / enum / alias name lookup, a
+/// generic one instantiated (spec 2.10); `params` binds generic
+/// parameters by name (a generic instance's field types). Unresolvable
+/// names stay `HirTy::Path` (reported by `check_unresolved_types` if they
+/// survive).
 pub(super) fn resolve_ty_with_structs(
     ty: &rokc_ast::Ty,
-    structs: &HashMap<String, StructId>,
-    enums: &HashMap<String, EnumId>,
+    defs: &TypeDefs<'_>,
+    params: Option<&TySubst>,
     sc: Scope<'_>,
 ) -> HirTy {
-    let rec = |t: &rokc_ast::Ty| resolve_ty_with_structs(t, structs, enums, sc);
+    let rec = |t: &rokc_ast::Ty| resolve_ty_with_structs(t, defs, params, sc);
     match &ty.kind {
         // Untyped `throws` (spec 4.14) = `throws (any Error)`.
         AstTyKind::Path(p)
@@ -457,6 +499,11 @@ pub(super) fn resolve_ty_with_structs(
             })
         }
         AstTyKind::Path(p) => {
+            if let ([seg], Some(params)) = (p.segments.as_slice(), params) {
+                if let Some(t) = params.get(&seg.name).filter(|_| seg.generics.is_empty()) {
+                    return t.clone();
+                }
+            }
             let prim = resolve_ty(ty);
             if matches!(prim, HirTy::Prim(_)) {
                 return prim;
@@ -508,34 +555,35 @@ pub(super) fn resolve_ty_with_structs(
                         module: &module,
                     };
                     ALIAS_DEPTH.set(ALIAS_DEPTH.get() + 1);
-                    let r = resolve_ty_with_structs(t, structs, enums, inner);
+                    let r = resolve_ty_with_structs(t, defs, None, inner);
                     ALIAS_DEPTH.set(ALIAS_DEPTH.get() - 1);
                     return r;
                 }
             }
             if !generics.is_empty() {
                 let args: Vec<HirTy> = generics.iter().map(rec).collect();
-                let mangled = mangle_inst(&full, &args);
-                if let Some(id) = structs.get(&mangled) {
-                    return HirTy::Struct(*id);
-                }
-                if let Some(id) = enums.get(&mangled) {
-                    return HirTy::Enum(*id);
-                }
-                return HirTy::Path(vec![full]);
+                return instance(defs, &full, args, sc.names, ty.span)
+                    .unwrap_or_else(|| HirTy::Path(vec![full]));
             }
-            if let Some(id) = structs.get(&full) {
-                return HirTy::Struct(*id);
+            if let Some(id) = defs.struct_id(&full) {
+                return HirTy::Struct(id);
             }
-            if let Some(id) = enums.get(&full) {
-                return HirTy::Enum(*id);
+            if let Some(id) = defs.enum_id(&full) {
+                return HirTy::Enum(id);
             }
             // Type alias (substituted later) or a generic base used
             // without arguments.
             HirTy::Path(vec![full])
         }
         AstTyKind::Array(elem, len) => {
-            let n = super::collect::const_expr_value(len, &sc.names.consts, sc.module)
+            // `[T; N]` / `[T; M * N]` under bound const parameters.
+            let n = params
+                .and_then(|ps| {
+                    super::const_eval::syntactic_int(len, &|name| {
+                        ps.get(name).and_then(HirTy::as_const).map(|c| c.0)
+                    })
+                })
+                .or_else(|| super::collect::const_expr_value(len, &sc.names.consts, sc.module))
                 .and_then(|n| u32::try_from(n).ok());
             let Some(n) = n else {
                 sc.names
@@ -546,7 +594,10 @@ pub(super) fn resolve_ty_with_structs(
         }
         // `T | U` — recurse so Path("Counter") resolves to Struct(id), not
         // an opaque path the MIR layer would treat as `Any`.
-        AstTyKind::Sum(parts) => crate::ty::written_sum(parts, |_| false, rec),
+        AstTyKind::Sum(parts) => {
+            crate::ty::written_sum(parts, |n| params.is_some_and(|ps| ps.contains_key(n)), rec)
+        }
+        AstTyKind::Nest(x) => rec(x),
         AstTyKind::Tuple(parts) if parts.is_empty() => HirTy::Unit,
         AstTyKind::Tuple(parts) => HirTy::Tuple(parts.iter().map(rec).collect()),
         AstTyKind::Fn(args, ret, b) => HirTy::Fn(
@@ -555,7 +606,7 @@ pub(super) fn resolve_ty_with_structs(
             sc.names.fn_bounds(b, sc.module),
         ),
         AstTyKind::AnyTrait(bounds) => {
-            let mut keys: Vec<String> = Vec::with_capacity(bounds.len());
+            let mut refs = Vec::with_capacity(bounds.len());
             for b in bounds {
                 let segs: Vec<&str> = b.segments.iter().map(|s| s.name.as_str()).collect();
                 let key = sc.names.trait_key(&segs, sc.module);
@@ -570,104 +621,32 @@ pub(super) fn resolve_ty_with_structs(
                     ));
                     return HirTy::Unknown;
                 }
-                let (args, binds) = split_trait_args(
-                    b.segments.last().map_or(&[][..], |s| s.generics.as_slice()),
-                    rec,
-                );
-                keys.push(bound_key(key, &args, &binds, structs, enums));
+                refs.push(trait_ref(sc.names, b, sc.module, rec));
             }
-            keys.sort();
-            keys.dedup();
-            HirTy::AnyTrait(keys)
+            HirTy::any(refs)
         }
         AstTyKind::Throws { ok, err } => crate::ty::throws_ty(rec(ok), rec(err)),
         _ => resolve_ty(ty),
     }
 }
 
-thread_local! {
-    /// Mangled bound-key argument → its type, for the arguments a bound
-    /// key spells by `ty_mangle` (tuples, sums, ...); `bound_arg_ty`
-    /// reads them back.
-    static BOUND_ARGS: std::cell::RefCell<HashMap<String, HirTy>> =
-        std::cell::RefCell::new(HashMap::new());
-}
-
-pub(super) fn bound_arg(mangled: &str) -> Option<HirTy> {
-    BOUND_ARGS.with(|b| b.borrow().get(mangled).cloned())
-}
-
-/// `any` bound / impl key with the trait's generic arguments
-/// (`Index<i32>`); a struct or enum argument prints by its name.
-pub(super) fn bound_key(
-    key: String,
-    args: &[HirTy],
-    binds: &[(String, HirTy)],
-    structs: &HashMap<String, StructId>,
-    enums: &HashMap<String, EnumId>,
-) -> String {
-    if args.is_empty() && binds.is_empty() {
-        return key;
-    }
-    let name = |t: &HirTy| {
-        match t {
-            HirTy::Struct(id) => structs
-                .iter()
-                .filter(|(_, v)| *v == id)
-                .map(|(k, _)| k)
-                .min(),
-            HirTy::Enum(id) => enums.iter().filter(|(_, v)| *v == id).map(|(k, _)| k).min(),
-            _ => None,
-        }
-        .map_or_else(
-            || {
-                let m = ty_mangle(t);
-                BOUND_ARGS.with(|b| b.borrow_mut().insert(m.clone(), t.clone()));
-                m
-            },
-            Clone::clone,
-        )
-    };
-    let mut binds = binds.to_vec();
-    binds.sort_by(|a, b| a.0.cmp(&b.0));
-    let parts: Vec<String> = args
-        .iter()
-        .map(name)
-        .chain(binds.iter().map(|(n, t)| format!("{n} = {}", name(t))))
-        .collect();
-    format!("{key}<{}>", parts.join(", "))
-}
-
-/// Every bound key an impl of trait `tn` with trait arguments `args`
-/// and associated types `assoc` answers: `Get`, `Get<i32>`,
-/// `Get<Item = u8>`, `Get<i32, Item = u8>`, ...
-pub(super) fn impl_bound_keys(
-    tn: &str,
-    args: &[HirTy],
-    assoc: &[(String, HirTy)],
-    structs: &HashMap<String, StructId>,
-    enums: &HashMap<String, EnumId>,
-) -> Vec<String> {
-    let mut keys = vec![tn.to_owned()];
-    // Every subset of the bindings: 2^n keys, fine for the one or two
-    // associated types a trait has.
-    for mask in 0..1u32 << assoc.len().min(8) {
-        let binds: Vec<(String, HirTy)> = assoc
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| mask & (1 << i) != 0)
-            .map(|(_, b)| b.clone())
-            .collect();
-        for a in [args, &[]] {
-            keys.push(bound_key(tn.to_owned(), a, &binds, structs, enums));
-        }
-    }
-    keys
+/// Trait path `p` as written in `module` (`Get<i32, Item = u8>`), its
+/// type arguments resolved by `rec`.
+pub(super) fn trait_ref(
+    names: &TypeNames<'_>,
+    p: &rokc_ast::Path,
+    module: &str,
+    rec: impl FnMut(&rokc_ast::Ty) -> HirTy,
+) -> TraitRef {
+    let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
+    let generics = p.segments.last().map_or(&[][..], |s| s.generics.as_slice());
+    let (args, binds) = trait_args(generics, rec);
+    TraitRef::new(names.trait_key(&segs, module), args, binds)
 }
 
 /// A trait path's generic arguments: positional ones and `Name = Ty`
 /// associated-type bindings, each resolved by `rec`.
-pub(super) fn split_trait_args(
+pub(super) fn trait_args(
     generics: &[rokc_ast::Ty],
     mut rec: impl FnMut(&rokc_ast::Ty) -> HirTy,
 ) -> (Vec<HirTy>, Vec<(String, HirTy)>) {
@@ -706,7 +685,13 @@ pub(super) fn ty_mangle(ty: &HirTy) -> String {
         HirTy::Prim(p) => p.name().to_owned(),
         HirTy::Unit => "Unit".to_owned(),
         HirTy::Any => "Any".to_owned(),
-        HirTy::AnyTrait(bounds) => format!("AnyOf{}", bounds.join("_").replace("::", "_")),
+        HirTy::AnyTrait(bounds) => {
+            let keys: Vec<String> = bounds
+                .iter()
+                .map(|b| b.render(&b.path, ty_mangle))
+                .collect();
+            format!("AnyOf{}", keys.join("_").replace("::", "_"))
+        }
         HirTy::Unknown => "Unknown".to_owned(),
         HirTy::Tuple(parts) => {
             let inner: Vec<String> = parts.iter().map(ty_mangle).collect();
@@ -726,13 +711,12 @@ pub(super) fn ty_mangle(ty: &HirTy) -> String {
                 ty_mangle(ret)
             )
         }
-        HirTy::Path(segs) if segs.first().is_some_and(|s| s == "#const") => {
-            format!(
-                "C{}",
-                segs.get(1).map_or("", |v| v.as_str()).replace('-', "m")
-            )
-        }
+        HirTy::Const(v, _) => format!("C{}", v.to_string().replace('-', "m")),
         HirTy::Path(segs) => format!("Path_{}", segs.join("_")),
+        HirTy::None => "Path_none".to_owned(),
+        HirTy::NoThrow => "Path_#nothrow".to_owned(),
+        HirTy::OpenConst(n) => format!("Path_#{n}"),
+        HirTy::Var(v) => format!("Path_#var_{v}"),
         HirTy::Closure { args, ret, env } => {
             let inner: Vec<String> = args.iter().map(ty_mangle).collect();
             format!(

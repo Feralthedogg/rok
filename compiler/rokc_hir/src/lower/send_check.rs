@@ -75,19 +75,11 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) {
     if !all.values().any(|f| sink_of(&f.name).is_some()) {
         return;
     }
-    let Some(send) = env
-        .names
-        .all_auto()
-        .into_iter()
-        .find(|k| k.ends_with("::Send"))
-    else {
+    let send = env.names.lang_item("send_trait").to_owned();
+    if send.is_empty() {
         return;
-    };
-    let sync = env
-        .names
-        .all_auto()
-        .into_iter()
-        .find(|k| k.ends_with("::Sync"));
+    }
+    let sync = Some(env.names.lang_item("sync_trait").to_owned()).filter(|s| !s.is_empty());
     let no_subst = HashMap::new();
     let ctx = LowerCtx::new(env, &no_subst, None);
 
@@ -196,9 +188,8 @@ fn frame(
             .unwrap_or_else(|| "a temporary".to_owned())
     };
     let ty_of = |l: LocalId| f.locals.iter().find(|x| x.id == l).map(|x| x.ty.clone());
-    let non_send = |t: &HirTy| *t != HirTy::Unknown && !ctx.implements_trait(t, send, 0);
-    let non_sync =
-        |t: &HirTy| sync.is_some_and(|k| *t != HirTy::Unknown && !ctx.implements_trait(t, k, 0));
+    let non_send = |t: &HirTy| *t != HirTy::Unknown && !ctx.has_trait(t, send);
+    let non_sync = |t: &HirTy| sync.is_some_and(|k| *t != HirTy::Unknown && !ctx.has_trait(t, k));
     let env_params: HashSet<LocalId> = f
         .params
         .iter()
@@ -640,7 +631,7 @@ impl Flow<'_> {
             base.strip_suffix(w)
                 .is_some_and(|rest| rest.is_empty() || rest.ends_with("::"))
         });
-        !wrapper && self.ctx.impl_or_generic_impl(ty, self.send, 0)
+        !wrapper && self.ctx.has_impl(ty, &crate::TraitRef::plain(self.send), 0)
     }
 
     fn may_hold(&mut self, ty: &HirTy) -> bool {
@@ -679,7 +670,12 @@ impl Flow<'_> {
             | HirTy::AnyTrait(_)
             | HirTy::Any
             | HirTy::Unknown
-            | HirTy::Path(_) => true,
+            | HirTy::Path(_)
+            | HirTy::None
+            | HirTy::Const(..)
+            | HirTy::OpenConst(_)
+            | HirTy::NoThrow
+            | HirTy::Var(_) => true,
         }
     }
 

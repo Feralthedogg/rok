@@ -5,9 +5,9 @@
 //! A block param is defined on block entry. An array write is a partial
 //! definition (the old elements stay), so it only uses the array.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use rokc_ir_common::LocalId;
+use rokc_ir_common::{BlockId, LocalId};
 
 use crate::{MirFunction, Operand, Statement, Terminator};
 
@@ -230,18 +230,122 @@ fn solve(succs: &[Vec<usize>], gen_kill: &[(Bits, Bits)], n: usize) -> Vec<Bits>
     live_in
 }
 
+/// The tracked locals, each block's successors (indices), its statements'
+/// uses and definitions, and its live-in set.
+struct Flow {
+    dense: Dense,
+    succs: Vec<Vec<usize>>,
+    stmts: Vec<Vec<(Vec<LocalId>, Option<LocalId>)>>,
+    live_in: Vec<Bits>,
+}
+
+impl Flow {
+    fn new(f: &MirFunction, tracked: impl Fn(LocalId) -> bool) -> Self {
+        let ids: Vec<LocalId> = f
+            .locals
+            .iter()
+            .map(|l| l.id)
+            .filter(|&l| tracked(l))
+            .collect();
+        let dense = Dense {
+            index: ids.iter().enumerate().map(|(i, &l)| (l, i)).collect(),
+            ids,
+        };
+        let pos: HashMap<_, usize> = f
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (b.id, i))
+            .collect();
+        let succs: Vec<Vec<usize>> = f
+            .blocks
+            .iter()
+            .map(|b| {
+                successors(&b.terminator)
+                    .iter()
+                    .filter_map(|s| pos.get(s).copied())
+                    .collect()
+            })
+            .collect();
+        let stmts: Vec<Vec<(Vec<LocalId>, Option<LocalId>)>> = f
+            .blocks
+            .iter()
+            .map(|b| b.stmts.iter().map(stmt_uses).collect())
+            .collect();
+        let gk: Vec<(Bits, Bits)> = f
+            .blocks
+            .iter()
+            .zip(&stmts)
+            .map(|(b, st)| gen_kill(&dense, b, st))
+            .collect();
+        let live_in = solve(&succs, &gk, dense.ids.len());
+        Self {
+            dense,
+            succs,
+            stmts,
+            live_in,
+        }
+    }
+
+    /// What block `bi` still holds at its terminator.
+    fn live_out(&self, bi: usize, b: &crate::BasicBlock) -> Bits {
+        let mut live = self.dense.bits(&term_uses(&b.terminator));
+        for &s in &self.succs[bi] {
+            live.union(&self.live_in[s]);
+        }
+        live
+    }
+}
+
+/// The locals `tracked` accepts that hold a value while a collection can
+/// run; only these need a GC root.
+///
+/// That is at the function's entry (its arguments), at the end of a
+/// block `poll` accepts (a back-edge poll, before the terminator), and
+/// during a statement `safepoint` accepts (live after it, or one of its
+/// operands: some read them after their own allocation).
+pub fn live_across(
+    f: &MirFunction,
+    tracked: impl Fn(LocalId) -> bool,
+    safepoint: impl Fn(&Statement) -> bool,
+    poll: impl Fn(BlockId) -> bool,
+) -> HashSet<LocalId> {
+    let flow = Flow::new(f, tracked);
+    let n = flow.dense.ids.len();
+    let mut out = Bits::new(n);
+    if n == 0 || f.blocks.is_empty() {
+        return HashSet::new();
+    }
+    out.union(&flow.live_in[0]);
+    for (bi, b) in f.blocks.iter().enumerate() {
+        let mut live = flow.live_out(bi, b);
+        if poll(b.id) {
+            out.union(&live);
+        }
+        for (s, (uses, def)) in b.stmts.iter().zip(&flow.stmts[bi]).rev() {
+            let def = def.and_then(|d| flow.dense.get(d));
+            if safepoint(s) {
+                let mut during = live.clone();
+                if let Some(i) = def {
+                    during.unset(i);
+                }
+                during.union(&flow.dense.bits(uses));
+                out.union(&during);
+            }
+            if let Some(i) = def {
+                live.unset(i);
+            }
+            live.union(&flow.dense.bits(uses));
+        }
+    }
+    (0..n)
+        .filter(|&i| out.has(i))
+        .map(|i| flow.dense.ids[i])
+        .collect()
+}
+
 /// Where each local `tracked` accepts dies in `f`.
 pub fn deaths(f: &MirFunction, tracked: impl Fn(LocalId) -> bool) -> Deaths {
-    let ids: Vec<LocalId> = f
-        .locals
-        .iter()
-        .map(|l| l.id)
-        .filter(|&l| tracked(l))
-        .collect();
-    let dense = Dense {
-        index: ids.iter().enumerate().map(|(i, &l)| (l, i)).collect(),
-        ids,
-    };
     let mut out = Deaths {
         on_entry: vec![Vec::new(); f.blocks.len()],
         after_stmt: f
@@ -250,43 +354,19 @@ pub fn deaths(f: &MirFunction, tracked: impl Fn(LocalId) -> bool) -> Deaths {
             .map(|b| vec![Vec::new(); b.stmts.len()])
             .collect(),
     };
+    let flow = Flow::new(f, tracked);
+    let Flow {
+        dense,
+        succs,
+        stmts,
+        live_in,
+    } = &flow;
     if dense.ids.is_empty() {
         return out;
     }
-    let pos: HashMap<_, usize> = f
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.id, i))
-        .collect();
-    let succs: Vec<Vec<usize>> = f
-        .blocks
-        .iter()
-        .map(|b| {
-            successors(&b.terminator)
-                .iter()
-                .filter_map(|s| pos.get(s).copied())
-                .collect()
-        })
-        .collect();
-    let stmts: Vec<Vec<(Vec<LocalId>, Option<LocalId>)>> = f
-        .blocks
-        .iter()
-        .map(|b| b.stmts.iter().map(stmt_uses).collect())
-        .collect();
-    let gk: Vec<(Bits, Bits)> = f
-        .blocks
-        .iter()
-        .zip(&stmts)
-        .map(|(b, st)| gen_kill(&dense, b, st))
-        .collect();
-    let live_in = solve(&succs, &gk, dense.ids.len());
     for (bi, b) in f.blocks.iter().enumerate() {
         // What this block still holds at its terminator.
-        let mut live = dense.bits(&term_uses(&b.terminator));
-        for &s in &succs[bi] {
-            live.union(&live_in[s]);
-        }
+        let mut live = flow.live_out(bi, b);
         for &s in &succs[bi] {
             for (i, &l) in dense.ids.iter().enumerate() {
                 let dies = live.has(i) && !live_in[s].has(i);
@@ -336,9 +416,8 @@ mod tests {
     /// bb0: x0 = x1; x2 = x0; if x3 -> bb1 / bb2
     /// bb1: x4 = x2; return
     /// bb2: return
-    #[test]
-    fn last_use_and_edge_deaths() {
-        let f = MirFunction {
+    fn sample() -> MirFunction {
+        MirFunction {
             id: FunctionId(0),
             def_id: None,
             name: "f".into(),
@@ -374,7 +453,12 @@ mod tests {
             param_tys: vec![],
             ret_ty: MirTy::Unit,
             span: Span::default(),
-        };
+        }
+    }
+
+    #[test]
+    fn last_use_and_edge_deaths() {
+        let f = sample();
         let d = deaths(&f, |_| true);
         // x1 dies at its only use, x0 at its last use.
         assert_eq!(d.after_stmt[0][0], vec![LocalId(1)]);
@@ -384,5 +468,30 @@ mod tests {
         assert_eq!(d.after_stmt[1][0], vec![LocalId(2), LocalId(4)]);
         assert_eq!(d.on_entry[2], vec![LocalId(2), LocalId(3)]);
         assert_eq!(d.on_entry[1], vec![LocalId(3)]);
+    }
+
+    /// With `x2 = x0` a safepoint: its operand x0 and x3 (read by the
+    /// terminator) are live across it, and the params x1 and x3 at the
+    /// entry; x2 gets its value only after it, x4 never crosses one.
+    #[test]
+    fn live_across_a_safepoint() {
+        let f = sample();
+        let s = live_across(
+            &f,
+            |_| true,
+            |s| {
+                matches!(
+                    s,
+                    Statement::Assign {
+                        target: LocalId(2),
+                        ..
+                    }
+                )
+            },
+            |_| false,
+        );
+        let mut got: Vec<u32> = s.iter().map(|l| l.0).collect();
+        got.sort_unstable();
+        assert_eq!(got, vec![0, 1, 3]);
     }
 }
