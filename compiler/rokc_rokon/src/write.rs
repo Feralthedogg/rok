@@ -125,20 +125,20 @@ fn scalar(v: &Value) -> String {
 /// The shortest digits that read back as `f`, always with a `.`: plain
 /// for magnitudes 1e-5 up to 1e17, else `1.0e17` (spec 3.9.4, as std
 /// rokon). NaN / infinity have no RokON form.
-fn float(f: f64) -> String {
-    assert!(f.is_finite(), "NaN/infinity has no RokON form");
-    let a = f.abs();
-    let t = if a != 0.0 && !(1e-5..1e17).contains(&a) {
-        format!("{f:e}")
+fn float(x: f64) -> String {
+    assert!(x.is_finite(), "NaN/infinity has no RokON form");
+    let mag = x.abs();
+    let text = if mag != 0.0 && !(1e-5..1e17).contains(&mag) {
+        format!("{x:e}")
     } else {
-        format!("{f}")
+        format!("{x}")
     };
-    if t.contains('.') {
-        return t;
+    if text.contains('.') {
+        return text;
     }
-    match t.split_once('e') {
-        Some((m, e)) => format!("{m}.0e{e}"),
-        None => format!("{t}.0"),
+    match text.split_once('e') {
+        Some((digits, exp)) => format!("{digits}.0e{exp}"),
+        None => format!("{text}.0"),
     }
 }
 

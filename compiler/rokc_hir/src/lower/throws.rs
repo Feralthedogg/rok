@@ -160,12 +160,12 @@ fn block_expr(stmts: Vec<HirStmt>, span: rokc_diagnostic::Span) -> HirExpr {
 }
 
 /// A `()` / `!` ok side has no carrier slot (`rokc_mir`'s layout).
-pub(super) fn no_ok_slot(ok: &HirTy) -> bool {
+pub(super) const fn no_ok_slot(ok: &HirTy) -> bool {
     matches!(ok, HirTy::Unit | HirTy::Never)
 }
 
 /// Carrier field index of the error payload.
-fn err_index(ok: &HirTy) -> u32 {
+const fn err_index(ok: &HirTy) -> u32 {
     if no_ok_slot(ok) { 1 } else { 2 }
 }
 

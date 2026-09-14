@@ -11,8 +11,9 @@
 //! search.js, style.css
 //! ```
 //!
-//! Documented: the user package and its `--extern` dependencies (not the
-//! standard library), their `pub` items in `pub` modules. Doc text is
+//! Documented: the user package and its `--extern` dependencies, and with
+//! `--std` the standard library tiers (`rok::core` in `rok-core/`, ..),
+//! their `pub` items in `pub` modules. Doc text is
 //! the item's `#[doc = ".."]` attributes (the parser turns `///` lines
 //! into them, and a file's leading `//!` lines into its module's). Doc
 //! text is a markdown subset: headings, fenced code blocks, inline code,
@@ -56,22 +57,41 @@ struct Module {
 /// A page key: package and module path inside it.
 type Key = (String, Vec<String>);
 
+/// Which packages `generate` documents.
+#[derive(Clone, Copy)]
+pub struct Scope {
+    /// The user package and its dependencies.
+    pub user: bool,
+    /// The standard library (`rok::..`).
+    pub std: bool,
+}
+
 /// Write the docs of `result` (built with `Session::set_keep_ast`) into
 /// `out`; `name` is the user package's. Returns `out/index.html`.
-pub fn generate(result: &CompileResult, name: &str, out: &Path) -> std::io::Result<PathBuf> {
+pub fn generate(
+    result: &CompileResult,
+    name: &str,
+    out: &Path,
+    scope: Scope,
+) -> std::io::Result<PathBuf> {
     // The user package (`""`) as `name`, then each dependency.
     let files: Vec<(String, Vec<String>, &SourceFile)> = result
         .sources
         .iter()
-        .filter(|f| f.package.is_empty() || !f.package.starts_with("rok::"))
+        .filter(|f| {
+            if f.package.starts_with("rok::") {
+                scope.std
+            } else {
+                scope.user
+            }
+        })
         .map(|f| {
             let (pkg, rel) = if f.package.is_empty() {
                 (name.to_owned(), f.module.clone())
             } else {
-                (
-                    f.package.clone(),
-                    f.module[1.min(f.module.len())..].to_vec(),
-                )
+                // The module path past the package's mount prefix.
+                let skip = f.package.split("::").count().min(f.module.len());
+                (f.package.clone(), f.module[skip..].to_vec())
             };
             (pkg, rel, f)
         })
@@ -113,7 +133,8 @@ struct Docs {
 }
 
 fn page(pkg: &str, rel: &[String]) -> String {
-    let mut p = String::from(pkg);
+    // `rok::core` is one directory, `rok-core/`.
+    let mut p = pkg.replace("::", "-");
     for r in rel {
         p.push('/');
         p.push_str(r);

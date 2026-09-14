@@ -307,6 +307,27 @@ fn doc_writes_html_with_links_and_search_index() {
     assert!(read("search.js").contains("SEARCH_INDEX"));
 }
 
+/// `rokc doc --std` (no package): the standard library tiers alone, into
+/// `./target/doc/`, one directory per tier.
+#[test]
+fn doc_std_documents_the_library() {
+    let dir = scratch("doc-std");
+    let (_, err) = exit(&rokc(&dir, &["doc", "--std"]), 0);
+    assert!(err.contains("target/doc/index.html"), "{err}");
+    let read = |p: &str| fs::read_to_string(dir.join("target/doc").join(p)).unwrap();
+    let index = read("index.html");
+    for want in [
+        "rok-core/index.html\">rok::core",
+        "rok-std/index.html\">rok::std",
+    ] {
+        assert!(index.contains(want), "missing {want:?}:\n{index}");
+    }
+    let list = read("rok-core/collections/list/index.html");
+    assert!(list.contains("id=\"struct.List\""), "{list}");
+    assert!(list.contains("href=\"../../../style.css\""), "{list}");
+    assert!(read("search-index.js").contains("rok::core::collections::list::List"));
+}
+
 #[test]
 fn bench_times_each_bench() {
     let Some(env) = setup() else { return };

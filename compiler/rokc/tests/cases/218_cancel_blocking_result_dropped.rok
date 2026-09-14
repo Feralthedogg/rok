@@ -1,0 +1,41 @@
+// spec: std 2.18.4
+// expect-exit: 0
+// expect-stdout:
+// join: cancelled
+// write landed: true
+
+// A task cancelled while it waits on `spawn_blocking` has no result, even
+// when the job finishes before the task polls again: the job's work
+// lands, its result is discarded.
+use rok::std::thread;
+
+let release = Atomic::new(0);
+let done = Atomic::new(0);
+let started = Atomic::new(0);
+let landed = Atomic::new(0);
+// Pinned to this worker: it cannot run again until this body awaits.
+let t = task::spawn_local(async {
+    let bl = task::spawn_blocking(|| {
+        while release.load() == 0 {
+            thread::sleep(Duration::ms(1));
+        }
+        landed.store(1);
+        done.store(1);
+        7
+    });
+    started.store(1);
+    await bl
+});
+while started.load() == 0 {
+    await task::yield_now();
+}
+// Let it suspend in `await bl`.
+await task::sleep(Duration::ms(5));
+t.cancel();
+release.store(1);
+while done.load() == 0 {
+    thread::sleep(Duration::ms(1));
+}
+let r = try await t.join() catch _: CancellationError { -1 };
+println(f"join: {if r == -1 { "cancelled" } else { f"finished {r}" }}");
+println(f"write landed: {landed.load() == 1}");

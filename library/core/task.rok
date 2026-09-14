@@ -1618,6 +1618,11 @@ pub struct Blocking<T> {
 impl<T> Future for Blocking<T> {
     type Output = T;
     fn poll(ref self, ref ctx: Context) -> Poll<T> {
+        // A cancelled waiter discards the result even when the job just
+        // finished (2.18.4): its `await` leaves.
+        if cancel_requested(ctx) {
+            return Poll::Pending;
+        }
         unsafe {
             let done = false;
             using g = self.waiter.lock() {

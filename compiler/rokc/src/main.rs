@@ -115,6 +115,8 @@ check options:  --check-library (check every library body, reached or not)
 test options:   --threads=N, --show-output
 bench options:  --iters=N (calls per sample; default: calibrated to ~10ms),
                 --samples=N (timed samples, default 10)
+doc options:    --std (document the standard library too; without a path,
+                only it, into ./target/doc/)
 lint options:   --list
 fmt options:    --check (exit 1 if a file would change), --diff
 
@@ -154,6 +156,8 @@ struct Args {
     color: Option<bool>,
     check: bool,
     check_library: bool,
+    /// `doc --std`: document the standard library tiers too.
+    std: bool,
     diff: bool,
     threads: Option<usize>,
     show_output: bool,
@@ -307,6 +311,7 @@ fn parse_args(raw: Vec<String>) -> Args {
             "-g" | "--debug" => a.opts.debug = true,
             "--check" => a.check = true,
             "--check-library" => a.check_library = true,
+            "--std" => a.std = true,
             "--diff" => a.diff = true,
             "--show-output" => a.show_output = true,
             "--list" => a.list = true,
@@ -1008,16 +1013,37 @@ fn cmd_bench(mut a: Args) {
 
 /// `rokc doc [path]`: HTML into `target/doc/` (see `rokc_tools::doc`).
 fn cmd_doc(mut a: Args) {
+    // `--std` alone: an empty package that only mounts the library.
+    let std_only = a.std && a.positional.is_empty();
+    let tmp = std_only.then(|| fail_on(TempDir::new(a.opts.keep_temps)));
+    if let Some(t) = &tmp {
+        let main = t.path().join("main.rok");
+        std::fs::write(&main, "")
+            .unwrap_or_else(|e| fail(&format!("cannot write {}: {e}", main.display())));
+        a.positional.push(main.display().to_string());
+        a.name.get_or_insert_with(|| "rok".to_owned());
+    }
     let pkg = discover_arg(&a);
     prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
     let (result, _, started) = compile(&a, &pkg, Mode::Doc);
     let out = a
         .target_dir
         .clone()
-        .unwrap_or_else(|| pkg.target_dir())
+        .unwrap_or_else(|| {
+            if std_only {
+                PathBuf::from("target")
+            } else {
+                pkg.target_dir()
+            }
+        })
         .join("doc");
-    let index = rokc_tools::doc::generate(&result, &pkg.name, &out)
+    let docs = rokc_tools::doc::Scope {
+        user: !std_only,
+        std: a.std,
+    };
+    let index = rokc_tools::doc::generate(&result, &pkg.name, &out, docs)
         .unwrap_or_else(|e| fail(&format!("cannot write {}: {e}", out.display())));
+    drop(tmp);
     finished(&a, started);
     if !a.quiet {
         eprintln!("   Generated {}", index.display());

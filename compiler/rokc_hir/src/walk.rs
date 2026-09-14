@@ -267,9 +267,11 @@ fn walk_fstring(v: &mut impl AstVisitor, parts: &[rokc_ast::FStringPart]) {
 pub fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
     v.expr(e);
     match &e.kind {
-        ExprKind::Literal(_) | ExprKind::SelfLower | ExprKind::SelfUpper => {}
-        // Another module's scope: no names of this one.
-        ExprKind::InModule(..) => {}
+        // `InModule`: another module's scope, no names of this one.
+        ExprKind::Literal(_)
+        | ExprKind::SelfLower
+        | ExprKind::SelfUpper
+        | ExprKind::InModule(..) => {}
         ExprKind::Path(p) => walk_path_generics(v, p),
         ExprKind::Tuple(items) | ExprKind::List(items) | ExprKind::Set(items) => {
             for i in items {

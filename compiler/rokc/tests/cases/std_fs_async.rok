@@ -80,12 +80,16 @@ for t in tasks { total += await t; }
 println(f"concurrent: {total / 3}");
 
 // Cancel a task while its blocking call runs: the call finishes in
-// the background (the write lands), the task's result is gone.
+// the background (the write lands), the task's result is gone. The call
+// waits for `release`, so it is still running when the cancel lands.
 let started = Mutex::new(false);
+let release = Atomic::new(0);
 let big = base / "big.txt";
 let cw = task::spawn(async {
     let bl = task::spawn_blocking(|| {
-        thread::sleep(Duration::ms(20));
+        while release.load() == 0 {
+            thread::sleep(Duration::ms(1));
+        }
         try! fs::write(big, "0123456789");
         1
     });
@@ -100,6 +104,7 @@ while true {
 }
 cw.cancel();
 let gone = try await cw.join() catch _: CancellationError { 0 };
+release.store(1);
 while !fs::exists(big) || (try! fs::metadata(big)).len() != 10u64 {
     await task::sleep(Duration::ms(1));
 }

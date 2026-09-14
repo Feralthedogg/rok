@@ -54,8 +54,11 @@ fn main() throws (IoError) {
     let kind = try { t.read_exact(io::byte_buf(4)); "none" } catch e { f"{e.kind:?}" };
     println(f"exact: [{text(a)}] [{text(b)}] eof: {kind}");
 
-    let src = env::temp_dir() / f"rok_bytes_io_{env::pid()}.bin";
-    let dst = env::temp_dir() / f"rok_bytes_io_{env::pid()}.out";
+    // Its own directory: other processes come and go in the temp dir.
+    let dir = env::temp_dir() / f"rok_bytes_io_{env::pid()}";
+    try fs::create_dir_all(dir);
+    let src = dir / f"rok_bytes_io_{env::pid()}.bin";
+    let dst = dir / f"rok_bytes_io_{env::pid()}.out";
     let big: List<u8> = List::new();
     for i in 0..20000 { big.push((i % 251) as u8); }
     try fs::write(src, big);
@@ -106,15 +109,14 @@ fn main() throws (IoError) {
     println(f"canonical: {real.is_absolute()} exe: {exe.is_absolute()}");
 
     let names = 0;
-    using rd = try fs::read_dir(env::temp_dir()) {
+    using rd = try fs::read_dir(dir) {
         for entry in rd {
             let name = (try entry.get()).file_name();
             if name.starts_with(f"rok_bytes_io_{env::pid()}") { names += 1; }
         }
     }
     println(f"read_dir names: {names}");
-    try fs::remove_file(src);
-    try fs::remove_file(dst);
+    try fs::remove_dir_all(dir);
 }
 
 // spec: std 305-io
