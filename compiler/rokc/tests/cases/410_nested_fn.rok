@@ -1,0 +1,88 @@
+// spec: 004.10.1-form
+// spec: 004.10.5-definition-order
+// spec: 004.10.9-multi-level-nesting
+// expect-exit: 0
+// expect-stdout:
+// 11
+// 32
+// true
+// 8
+// 1000 5
+// 6 3
+// [2, 4, 6]
+// 3
+
+fn helper() -> i32 { 1000 }
+
+fn outer(x: i32) -> i32 {
+    fn inner(y: i32) -> i32 {
+        y + 1
+    }
+    inner(x) + inner(x * 2)
+}
+
+// Hoisted: callable before the definition; a nested fn shadows a
+// module fn of the same name, and sees its block's other nested fns.
+fn hoisted(x: i32) -> i32 {
+    let f = later;
+    let r = inner(x) + later(x * 2) + f(1) + helper();
+    fn inner(y: i32) -> i32 { y + 1 }
+    fn later(z: i32) -> i32 { z + helper() }
+    fn helper() -> i32 { 7 }
+    r
+}
+
+fn parity(n: i32) -> bool {
+    fn even(n: i32) -> bool { if n == 0 { true } else { odd(n - 1) } }
+    fn odd(n: i32) -> bool { if n == 0 { false } else { even(n - 1) } }
+    even(n)
+}
+
+struct P { v: i32; }
+
+impl P {
+    fn get(self) -> i32 {
+        fn twice(a: i32) -> i32 { a * 2 }
+        twice(self.v)
+    }
+}
+
+fn levels() -> (i32, i32) {
+    fn middle() -> i32 {
+        fn inner() -> i32 { 5 }
+        inner()
+    }
+    // Only this block sees `twice`.
+    let a = {
+        fn twice(n: i32) -> i32 { n * 2 }
+        twice(3)
+    };
+    (a, middle() - 2)
+}
+
+fn generic<T>(xs: List<T>) -> List<i32> {
+    fn dbl(n: i32) -> i32 { n * 2 }
+    let out: List<i32> = [];
+    for i in 0..xs.len() {
+        out.push(dbl(i as i32 + 1));
+    }
+    out
+}
+
+fn main() -> i32 {
+    println(f"{outer(3)}");
+    println(f"{hoisted(3)}");
+    println(f"{parity(10)}");
+    println(f"{P { v: 4 }.get()}");
+    fn five() -> i32 { 5 }
+    println(f"{helper()} {five()}");
+    let (a, b) = levels();
+    println(f"{a} {b}");
+    println(f"{generic(["a", "b", "c"]):?}");
+    let c = || {
+        fn k() -> i32 { 3 }
+        k()
+    };
+    println(f"{c()}");
+    return 0;
+}

@@ -1,0 +1,16 @@
+// spec: 002.03.4-field-spread
+// The base must be a value of the same struct type, and only a struct
+// takes `..base`.
+// expect-error: 13:13: mismatched types: the `..` base expects `S`, found `T`
+// expect-error: 14:13: `..base` needs a struct; `E::V` is an enum variant
+// expect-error: 15:13: struct `S` has no field `z`
+
+struct S { a: i32; b: i32; }
+struct T { a: i32; b: i32; }
+enum E { V { a: i32 } }
+
+fn main() {
+    let s = S { a: 1, ..T { a: 1, b: 2 } };
+    let e = E::V { ..E::V { a: 1 } };
+    let z = S { z: 1, ..S { a: 1, b: 2 } };
+}

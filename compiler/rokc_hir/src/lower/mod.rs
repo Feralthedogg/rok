@@ -548,6 +548,8 @@ struct Env<'a> {
     method_table: HashMap<(MethodTarget, String), Vec<FunctionId>>,
     /// `fn_table` key of every function id (method signatures).
     key_of: HashMap<FunctionId, String>,
+    /// Declarations whose return type is inferred from the body.
+    infer_ret: std::collections::HashSet<FunctionId>,
     method_info: HashMap<FunctionId, MethodInfo>,
     structs: Vec<HirStructDef>,
     enums: Vec<HirEnumDef>,
@@ -1420,6 +1422,14 @@ struct ClosureSink {
     const_lowering: std::cell::RefCell<std::collections::HashSet<FunctionId>>,
     /// Const items being lowered, innermost last (cycle check).
     const_stack: std::cell::RefCell<Vec<String>>,
+    /// Return types inferred from bodies (spec 4.1.3), by function;
+    /// `None` while the body is being inferred.
+    inferred_ret: std::cell::RefCell<HashMap<FunctionId, Option<HirTy>>>,
+    /// Calls met of functions whose return type is being inferred.
+    recursive_ret: std::cell::RefCell<Vec<FunctionId>>,
+    /// Inferred return types that depend on a fn still being inferred:
+    /// dropped once it is done.
+    tentative_ret: std::cell::RefCell<Vec<FunctionId>>,
 }
 
 /// Per-function lowering state: scoped name → local-id map plus the
@@ -1441,6 +1451,9 @@ struct LowerCtx<'a> {
     /// Closure without a declared / expected return type: the first
     /// `return v;` fixes `fn_ret_ty`.
     infer_ret: bool,
+    /// Inferring a function's return type (spec 4.1.3): the types of
+    /// its `return` values and trailing value.
+    ret_tys: Option<Vec<HirTy>>,
     /// Lowering the implicit `main` built from top-level statements,
     /// where `return` is not allowed (spec 4.16.4). Closures get a fresh
     /// context, so a `return` inside one stays legal.
@@ -1488,6 +1501,8 @@ struct LowerCtx<'a> {
     /// `push_scope` pushes an empty Vec, `pop_scope` pops it. Resolution
     /// walks this stack top-down before consulting module-level uses.
     local_uses: Vec<Vec<crate::uses::UseEntry>>,
+    /// Per scope: nested fns (spec 4.10) by name → lifted fn key.
+    nested_fns: Vec<HashMap<String, String>>,
     /// Or-pattern shared binders. Each Or-pattern lowering pushes a map
     /// of `name → preset LocalId` so each alternative's `Binding` reuses
     /// the same local instead of allocating a fresh one. Spec 3.11.4 —
@@ -1639,6 +1654,7 @@ impl<'a> LowerCtx<'a> {
             self_ty,
             fn_ret_ty: HirTy::Unit,
             infer_ret: false,
+            ret_tys: None,
             implicit_main: false,
             ref_params: Vec::new(),
             ref_captured: std::collections::HashSet::new(),
@@ -1653,6 +1669,7 @@ impl<'a> LowerCtx<'a> {
             expected_ty_stack: Vec::new(),
             current_module: String::new(),
             local_uses: vec![Vec::new()],
+            nested_fns: vec![HashMap::new()],
             or_pattern_binders: Vec::new(),
             explicit_generics: HashMap::new(),
             method_type_args: Vec::new(),
@@ -1840,8 +1857,11 @@ impl<'a> LowerCtx<'a> {
 
     /// User-facing type name (no internal `Struct0` / mangled names).
     fn ty_name(&self, ty: &HirTy) -> String {
-        if let Some((v, _)) = crate::ty::as_const(ty) {
-            return v.to_string();
+        if let Some((v, p)) = crate::ty::as_const(ty) {
+            return match u32::try_from(v).ok().and_then(char::from_u32) {
+                Some(c) if p == Some(PrimTy::Char) => format!("{c:?}"),
+                _ => v.to_string(),
+            };
         }
         match ty {
             HirTy::GcBuf(t) => format!("GcBuf<{}>", self.ty_name(t)),
@@ -2328,6 +2348,9 @@ impl<'a> LowerCtx<'a> {
     /// Instantiate generic struct `base` with `args` on demand (struct
     /// literal inference: `Box { v: 5 }` → `Box<i32>`).
     fn instantiate_struct(&self, base: &str, args: Vec<HirTy>) -> Option<StructId> {
+        if let Some(def) = self.env.generic_structs.get(base) {
+            self.check_const_args(&def.generics, &args)?;
+        }
         let key = mangle_inst(base, &args);
         if let Some(id) = self.lookup_struct(&key) {
             return Some(id);
@@ -2394,6 +2417,9 @@ impl<'a> LowerCtx<'a> {
     /// enum types that only appear under a monomorphization
     /// substitution, which the eager AST scan cannot see.
     fn instantiate_enum(&self, base: &str, args: Vec<HirTy>) -> Option<EnumId> {
+        if let Some(def) = self.env.generic_enums.get(base) {
+            self.check_const_args(&def.generics, &args)?;
+        }
         let key = mangle_inst(base, &args);
         if let Some(id) = self.lookup_enum(&key) {
             return Some(id);
@@ -2424,6 +2450,19 @@ impl<'a> LowerCtx<'a> {
         let variants = generic_enum_variants(def, &|t| rcx.resolve_ast_ty(t));
         self.env.sink.extra_enums.borrow_mut()[idx].variants = variants;
         Some(id)
+    }
+
+    /// A `char` const parameter takes a `char` argument, any other an
+    /// integer or `bool` (spec 2.11.3).
+    fn check_const_args(&self, generics: &rokc_ast::Generics, args: &[HirTy]) -> Option<()> {
+        for (gp, arg) in generics.params.iter().zip(args) {
+            if let (rokc_ast::GenericParam::Const { name, ty }, Some(v)) =
+                (gp, crate::ty::as_const(arg))
+            {
+                mono::typed_const(self, name, ty, v)?;
+            }
+        }
+        Some(())
     }
 
     fn scope(&self) -> Scope<'_> {
@@ -2520,6 +2559,11 @@ impl<'a> LowerCtx<'a> {
     /// the module's own items, then its `use`s, then `rok::core::**`).
     fn resolve_any_fn(&self, segments: &[&str]) -> Option<String> {
         let (fns, gens) = (&self.env.fn_table, &self.env.generic_fns);
+        if let [name] = segments {
+            if let Some(k) = self.nested_fns.iter().rev().find_map(|m| m.get(*name)) {
+                return Some(k.clone());
+            }
+        }
         let exists = |k: &str| fns.contains_key(k) || gens.contains_key(k);
         let keys = |leaf: &str| {
             self.env
@@ -2695,20 +2739,33 @@ impl<'a> LowerCtx<'a> {
     }
 
     fn eval_const_msg(&self, c: &rokc_ast::ConstExpr) -> Result<i128, String> {
+        self.eval_const_arg(c).map(|(v, _)| v)
+    }
+
+    /// A const argument's value, tagged `char` when it is one (a `char`
+    /// const parameter takes only a `char`, spec 2.11.3).
+    fn eval_const_arg(&self, c: &rokc_ast::ConstExpr) -> Result<(i128, Option<PrimTy>), String> {
         let not_int = || "not an integer".to_owned();
         let e = match c {
-            rokc_ast::ConstExpr::Literal(rokc_ast::Literal::Int(s)) => {
-                return expr::parse_int_literal(s)
-                    .map(|(v, _)| v)
+            rokc_ast::ConstExpr::Literal(rokc_ast::Literal::Char(s)) => {
+                return expr::parse_char_literal(s)
+                    .map(|v| (i128::from(v), Some(PrimTy::Char)))
                     .ok_or_else(not_int);
             }
-            rokc_ast::ConstExpr::Literal(rokc_ast::Literal::Bool(b)) => return Ok(i128::from(*b)),
+            rokc_ast::ConstExpr::Literal(rokc_ast::Literal::Int(s)) => {
+                return expr::parse_int_literal(s)
+                    .map(|(v, _)| (v, None))
+                    .ok_or_else(not_int);
+            }
+            rokc_ast::ConstExpr::Literal(rokc_ast::Literal::Bool(b)) => {
+                return Ok((i128::from(*b), None));
+            }
             rokc_ast::ConstExpr::Literal(_) => return Err(not_int()),
             rokc_ast::ConstExpr::Path(p) => {
                 if let [seg] = p.segments.as_slice() {
-                    if let Some((v, _)) = self.ty_subst.get(&seg.name).and_then(crate::ty::as_const)
+                    if let Some((v, p)) = self.ty_subst.get(&seg.name).and_then(crate::ty::as_const)
                     {
-                        return Ok(v);
+                        return Ok((v, p.filter(|p| *p == PrimTy::Char)));
                     }
                 }
                 Expr {
@@ -2718,7 +2775,7 @@ impl<'a> LowerCtx<'a> {
             }
             rokc_ast::ConstExpr::Expr(e) => (**e).clone(),
         };
-        const_eval::eval_int(self, &e)
+        const_eval::eval_scalar(self, &e)
     }
 
     fn resolve_ty_inner(&self, ty: &rokc_ast::Ty) -> HirTy {
@@ -2770,9 +2827,10 @@ impl<'a> LowerCtx<'a> {
                                 )
                                 .is_some()
                         {
-                            if let Some(v) = self.eval_const(&rokc_ast::ConstExpr::Path(p.clone()))
+                            if let Ok((v, t)) =
+                                self.eval_const_arg(&rokc_ast::ConstExpr::Path(p.clone()))
                             {
-                                return crate::ty::const_ty(v, None);
+                                return crate::ty::const_ty(v, t);
                             }
                         }
                     }
@@ -2867,14 +2925,14 @@ impl<'a> LowerCtx<'a> {
                     }
                 }
             }
-            AstTyKind::Const(c) => match self.eval_const_msg(c) {
-                Ok(v) => crate::ty::const_ty(v, None),
+            AstTyKind::Const(c) => match self.eval_const_arg(c) {
+                Ok((v, p)) => crate::ty::const_ty(v, p),
                 Err(why) => {
                     self.emit_error(
                         rokc_diagnostic::ErrorKind::Type,
                         format!(
-                            "a const generic argument must be a compile-time integer or \
-                                 `bool` (spec 2.11.4): {why}"
+                            "a const generic argument must be a compile-time integer, \
+                                 `bool` or `char` (spec 2.11.4): {why}"
                         ),
                     );
                     HirTy::Unknown
@@ -3318,7 +3376,17 @@ impl<'a> LowerCtx<'a> {
 
     /// Signature of function `id` (a method's, whatever its key).
     fn sig_by_id(&self, id: FunctionId) -> FnSig {
-        self.env.fn_table[&self.env.key_of[&id]].clone()
+        self.sig_of_key(&self.env.key_of[&id])
+    }
+
+    /// `fn_table[key]`, with a return type inferred from the body when
+    /// the declaration omits it (spec 4.1.3).
+    fn sig_of_key(&self, key: &str) -> FnSig {
+        let mut sig = self.env.fn_table[key].clone();
+        if self.env.infer_ret.contains(&sig.id) {
+            sig.ret_ty = mono::decl_ret(self, sig.id, sig.ret_ty);
+        }
+        sig
     }
 
     fn into_locals(self) -> Vec<HirLocal> {
@@ -3328,11 +3396,13 @@ impl<'a> LowerCtx<'a> {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.local_uses.push(Vec::new());
+        self.nested_fns.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.local_uses.pop();
+        self.nested_fns.pop();
     }
 
     fn add_local_use(&mut self, entry: crate::uses::UseEntry) {

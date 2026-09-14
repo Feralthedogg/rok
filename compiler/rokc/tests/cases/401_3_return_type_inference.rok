@@ -1,0 +1,73 @@
+// spec: 004.01.3-omitting-the-return-type
+// spec: 004.03.4-omitting-the-return-type
+// expect-exit: 0
+// expect-stdout:
+// 6 8
+// 12
+// int 1
+// str no
+// 9 none
+// 3
+// x
+// 42
+// 8
+// 2.5
+
+fn double(x: i32) { x * 2 }
+
+// Called before it is declared, and through another inferred fn.
+fn quad(x: i32) { twice_more(x) + 1 }
+fn twice_more(x: i32) { double(double(x)) / 2 + 1 }
+
+struct P { v: i32; }
+
+impl P {
+    fn get(self) { self.v * 3 }
+}
+
+// Several paths: their sum.
+fn pick(b: bool) {
+    if b { return 1; }
+    "no"
+}
+
+fn find(xs: List<i32>, want: i32) {
+    for x in xs {
+        if x == want { return x; }
+    }
+    none
+}
+
+fn first<T>(xs: List<T>) { xs[0] }
+
+struct Bad { msg: str; }
+impl Error for Bad {}
+
+fn checked(n: i32) throws (Bad) {
+    if n < 0 { throw Bad { msg: "neg" }; }
+    n + 1
+}
+
+fn noop() { println("x") }
+
+fn main() -> i32 {
+    println(f"{double(3)} {quad(3)}");
+    println(f"{P { v: 4 }.get()}");
+    for b in [true, false] {
+        match pick(b) {
+            n: i32 => println(f"int {n}"),
+            s: str => println(f"str {s}"),
+        }
+    }
+    let f = find([7, 9], 9);
+    let g = find([7, 9], 1);
+    println(f"{f ?? 0} {g:?}");
+    println(f"{first([3, 4])}");
+    noop();
+    fn inner(a: i32) { a + 40 }
+    println(f"{inner(2)}");
+    let h = double;
+    println(f"{try! checked(h(3)) + 1}");
+    println(f"{first([2.5, 1.0])}");
+    return 0;
+}

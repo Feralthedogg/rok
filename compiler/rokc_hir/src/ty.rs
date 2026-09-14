@@ -120,6 +120,7 @@ pub fn as_const(t: &HirTy) -> Option<(i128, Option<PrimTy>)> {
                 P::Usize,
                 P::Bool,
                 P::CChar,
+                P::Char,
             ]
             .into_iter()
             .find(|q| q.name() == prim)

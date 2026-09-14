@@ -1,0 +1,34 @@
+// spec: 002.11.3-allowed-types
+// expect-exit: 0
+// expect-stdout:
+// a 97
+// x
+// -
+// true false
+// Sep<'/'>
+
+// A `char` const parameter: a value in the body, part of the type.
+struct Sep<const C: char> {}
+
+impl<const C: char> Sep<C> {
+    fn ch(self) -> char { C }
+    fn join(self, a: str, b: str) -> str { f"{a}{C}{b}" }
+}
+
+fn pick<const C: char>() -> char { C }
+
+fn same<const C: char>(a: Sep<C>, b: Sep<C>) -> bool { a.ch() == b.ch() }
+
+const DASH: char = '-';
+
+fn main() -> i32 {
+    let s = Sep::<'a'> {};
+    println(f"{s.ch()} {s.ch() as u32}");
+    println(f"{pick::<'x'>()}");
+    let d: Sep<DASH> = Sep {};
+    println(f"{d.ch()}");
+    let t: Sep<'/'> = Sep {};
+    println(f"{same(t, Sep::<'/'> {})} {s.ch() == d.ch()}");
+    println(Sep::<'/'>::type_name());
+    return 0;
+}

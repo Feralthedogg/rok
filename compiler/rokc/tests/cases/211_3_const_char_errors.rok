@@ -1,0 +1,12 @@
+// spec: 002.11.3-allowed-types
+// A `char` const parameter takes a `char`, an integer one an integer.
+// expect-error: const argument for `C: char` must be a `char`, found an integer
+// expect-error: const argument for `N: usize` must be a `usize`, found a `char`
+
+struct Sep<const C: char> {}
+struct Len<const N: usize> {}
+
+fn main() {
+    let a = Sep::<97> {};
+    let b = Len::<'a'> {};
+}

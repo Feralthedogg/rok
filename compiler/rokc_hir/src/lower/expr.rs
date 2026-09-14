@@ -5,6 +5,7 @@ use super::*;
 
 pub(super) fn lower_block(ctx: &mut LowerCtx<'_>, block: &Block) -> HirBlock {
     ctx.push_scope();
+    declare_nested_fns(ctx, block);
     let mut stmts = Vec::with_capacity(block.stmts.len());
     for (i, s) in block.stmts.iter().enumerate() {
         match &s.kind {
@@ -66,6 +67,67 @@ pub(super) fn lower_block(ctx: &mut LowerCtx<'_>, block: &Block) -> HirBlock {
         stmts,
         trailing,
         label: block.label.clone(),
+    }
+}
+
+/// The nested fns of `block` (spec 4.10), visible in the whole block
+/// (hoisted): the ones declared here over those of enclosing blocks.
+fn declare_nested_fns(ctx: &mut LowerCtx<'_>, block: &Block) {
+    let mut own: HashMap<&str, rokc_diagnostic::Span> = HashMap::new();
+    for inherited in [true, false] {
+        for s in &block.stmts {
+            let StmtKind::Item(Item::Fn(f)) = &s.kind else {
+                continue;
+            };
+            let Some((lifted, from_outer)) = rokc_ast::nested_marker_of(f) else {
+                continue;
+            };
+            if from_outer != inherited {
+                continue;
+            }
+            if !inherited && own.insert(&f.name, s.span).is_some() {
+                let old = rokc_diagnostic::set_current_span(s.span);
+                ctx.emit_error(
+                    rokc_diagnostic::ErrorKind::Type,
+                    format!(
+                        "nested function `{}` is defined twice in this block",
+                        f.name
+                    ),
+                );
+                rokc_diagnostic::set_current_span(old);
+            }
+            let full = if ctx.current_module.is_empty() {
+                lifted.to_owned()
+            } else {
+                format!("{}::{lifted}", ctx.current_module)
+            };
+            if let Some(m) = ctx.nested_fns.last_mut() {
+                m.insert(f.name.clone(), full);
+            }
+        }
+    }
+    if own.is_empty() {
+        return;
+    }
+    for s in &block.stmts {
+        let names: Vec<&str> = match &s.kind {
+            StmtKind::Let { name, .. } => vec![name.as_str()],
+            StmtKind::LetTuple { names, .. } => names.iter().map(String::as_str).collect(),
+            _ => continue,
+        };
+        for n in names {
+            if own.contains_key(n) {
+                let old = rokc_diagnostic::set_current_span(s.span);
+                ctx.emit_error(
+                    rokc_diagnostic::ErrorKind::Type,
+                    format!(
+                        "`{n}` names both a variable and a nested function in this block \
+                         (spec 4.10.8)"
+                    ),
+                );
+                rokc_diagnostic::set_current_span(old);
+            }
+        }
     }
 }
 
@@ -314,12 +376,18 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
                 if ret == HirTy::Unknown && ctx.infer_ret {
                     ctx.fn_ret_ty = lowered.ty.clone();
                     Some(lowered)
+                } else if let Some(tys) = ctx.ret_tys.as_mut() {
+                    tys.push(lowered.ty.clone());
+                    Some(lowered)
                 } else {
                     Some(coerce(ctx, &ret, lowered, &|| {
                         "the return value".to_owned()
                     }))
                 }
             } else {
+                if let Some(tys) = ctx.ret_tys.as_mut() {
+                    tys.push(HirTy::Unit);
+                }
                 if !matches!(ret, HirTy::Unit | HirTy::Unknown) {
                     ctx.emit_error(
                         rokc_diagnostic::ErrorKind::Type,
@@ -364,6 +432,7 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
             }
             None
         }
+        StmtKind::Item(Item::Fn(f)) if rokc_ast::nested_marker_of(f).is_some() => None,
         StmtKind::Item(_) => {
             ctx.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
@@ -1246,12 +1315,7 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             path,
             fields,
             spread,
-        } => {
-            if spread.is_some() {
-                return unsupported(ctx, "struct update syntax `..base`");
-            }
-            lower_struct_init(ctx, path, fields, span)
-        }
+        } => lower_struct_init(ctx, path, fields, spread.as_deref(), span),
         ExprKind::Field(target, name) => lower_field(ctx, target, name, span),
         ExprKind::Tuple(items) if items.is_empty() => HirExpr {
             kind: HirExprKind::Const(ConstVal::Unit),
@@ -1704,10 +1768,14 @@ fn struct_decl_fields(def: &AstStructDef) -> Vec<(String, &Ty)> {
     }
 }
 
+/// `S { a: v, .. }`; with `spread`, `S { a: v, ..base }` (spec 2.3.4):
+/// the fields not written are read from `base`, a value of the same
+/// struct type. The written values run first, then `base`.
 pub(super) fn lower_struct_init(
     ctx: &mut LowerCtx<'_>,
     path: &AstPath,
     fields: &[(String, Expr)],
+    spread: Option<&Expr>,
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
     let segs: Vec<&str> = path.segments.iter().map(|s| s.name.as_str()).collect();
@@ -1715,9 +1783,18 @@ pub(super) fn lower_struct_init(
     // `EnumName::Variant { x: ..., y: ... }` — enum named-form variant
     // initialiser (spec 2.4). Pack fields into the variant's tuple
     // payload according to declaration order.
-    let hint = ctx.current_expected().cloned();
+    let mut hint = ctx.current_expected().cloned();
     match resolve_enum_variant(ctx, &segs, hint.as_ref(), None) {
         EnumRes::Error => return poison(span),
+        EnumRes::Found(..) if spread.is_some() => {
+            return ctx.error_expr(
+                span,
+                format!(
+                    "`..base` needs a struct; `{}` is an enum variant (spec 2.3.4)",
+                    segs.join("::")
+                ),
+            );
+        }
         EnumRes::Found(enum_id, idx) => {
             let variant = ctx.enum_def(enum_id).variants[idx].clone();
             if variant.named_fields.is_empty() {
@@ -1775,6 +1852,19 @@ pub(super) fn lower_struct_init(
         EnumRes::NotEnum => {}
     }
 
+    // The base's type is the hint for a generic struct's arguments.
+    let base_h = spread.map(|b| {
+        let want = match &hint {
+            Some(t @ HirTy::Struct(_)) => t.clone(),
+            _ => HirTy::Unknown,
+        };
+        lower_expected(ctx, b, want)
+    });
+    if let Some(HirTy::Struct(_)) = base_h.as_ref().map(|b| &b.ty) {
+        if !matches!(hint, Some(HirTy::Struct(_))) {
+            hint = base_h.as_ref().map(|b| b.ty.clone());
+        }
+    }
     let Some(full) = ctx.canon_type(&segs) else {
         for (_, e) in fields {
             lower_expected(ctx, e, HirTy::Unknown);
@@ -1844,7 +1934,7 @@ pub(super) fn lower_struct_init(
                         let c = subst
                             .get(name)
                             .and_then(crate::ty::as_const)
-                            .and_then(|(v, _)| super::mono::typed_const(ctx, name, ty, v));
+                            .and_then(|v| super::mono::typed_const(ctx, name, ty, v));
                         let Some(c) = c else {
                             ctx.emit_uninferred(format!(
                                 "cannot infer const parameter `{name}` of `{full}` — \
@@ -1889,6 +1979,9 @@ pub(super) fn lower_struct_init(
     // `union { f: v }`: exactly one field, cast/bitcast into the
     // synthetic `__data` slot.
     if let Some(union_kind) = def.union_kind.clone() {
+        if spread.is_some() {
+            return ctx.error_expr(span, format!("`..base` cannot build union `{}`", def.name));
+        }
         if fields.len() != 1 {
             return ctx.error_expr(
                 span,
@@ -1950,6 +2043,9 @@ pub(super) fn lower_struct_init(
             format!("field `{name}`")
         }));
     }
+    if let Some(base_h) = base_h {
+        return struct_update(ctx, struct_id, ordered, base_h, span);
+    }
     // A missing field takes its declared default, else it is an error.
     let mut out = Vec::with_capacity(ordered.len());
     for (f, v) in def.fields.iter().zip(ordered) {
@@ -1982,6 +2078,53 @@ pub(super) fn lower_struct_init(
         ty: HirTy::Struct(struct_id),
         span,
     }
+}
+
+/// `{ let #f.. = written values; let #b = base; S { .., f: #b.f } }`.
+fn struct_update(
+    ctx: &mut LowerCtx<'_>,
+    struct_id: StructId,
+    written: Vec<Option<HirExpr>>,
+    base_h: HirExpr,
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let ty = HirTy::Struct(struct_id);
+    let base_h = coerce(ctx, &ty, base_h, &|| "the `..` base".to_owned());
+    let def = ctx.struct_def(struct_id);
+    let mut lets = Vec::new();
+    let mut vals = Vec::with_capacity(written.len());
+    for v in written {
+        vals.push(v.map(|v| {
+            let vty = v.ty.clone();
+            let local = ctx.declare(None, vty.clone());
+            lets.push(HirStmt::Let { local, init: v });
+            hir_local(local, &vty, span)
+        }));
+    }
+    let base = ctx.declare(None, ty.clone());
+    lets.push(HirStmt::Let {
+        local: base,
+        init: base_h,
+    });
+    let out = def
+        .fields
+        .iter()
+        .zip(vals)
+        .map(|(f, v)| {
+            v.unwrap_or_else(|| field_access(ctx, hir_local(base, &ty, span), &f.name, span))
+        })
+        .collect();
+    with_lets(
+        lets,
+        HirExpr {
+            kind: HirExprKind::StructInit {
+                struct_id,
+                fields: out,
+            },
+            ty,
+            span,
+        },
+    )
 }
 
 // `expr.field` on a struct.
@@ -4065,8 +4208,12 @@ pub(super) fn method_call_on(
     let pick = match pick_method(ctx, &recv_h.ty, method, None) {
         Ok(p) => p,
         Err(msg) => {
-            lower_args_only(ctx);
-            return ctx.error_expr(span, msg);
+            if let Some(id) = pick_by_first_arg(ctx, &recv_h.ty, method, args) {
+                Some(MethodPick::Concrete(id))
+            } else {
+                lower_args_only(ctx);
+                return ctx.error_expr(span, msg);
+            }
         }
     };
     let fn_id = match pick {
@@ -4173,6 +4320,52 @@ pub(super) fn method_call_on(
         );
     }
     call_sig(ctx, &sig, method, Some(recv_h), args, span)
+}
+
+/// One trait implemented several times with different arguments
+/// (`impl Index<usize> for G` + `impl Index<(usize, usize)> for G`):
+/// the only concrete impl whose first parameter after `self` takes the
+/// first argument (each tried in a rolled-back probe).
+fn pick_by_first_arg(
+    ctx: &mut LowerCtx<'_>,
+    ty: &HirTy,
+    method: &str,
+    args: &[CallArg],
+) -> Option<FunctionId> {
+    let Some(CallArg::Positional(arg)) = args.first() else {
+        return None;
+    };
+    let ids =
+        method_target_for(ty).and_then(|t| ctx.env.method_table.get(&(t, method.to_owned())))?;
+    let trait_of = |id: &FunctionId| {
+        ctx.env
+            .method_info
+            .get(id)
+            .and_then(|i| i.trait_name.clone())
+    };
+    let first = trait_of(ids.first()?)?;
+    if ids.len() < 2 || ids.iter().any(|id| trait_of(id).as_ref() != Some(&first)) {
+        return None;
+    }
+    let ids = ids.clone();
+    let mut hits = Vec::new();
+    for id in ids {
+        let Some(slot) = ctx.sig_by_id(id).param_tys.get(1).cloned() else {
+            continue;
+        };
+        let mark = ctx.probe_mark();
+        let h = lower_expected(ctx, arg, slot.clone());
+        let ok = ctx.env.sink.diagnostics.borrow().len() == mark.diagnostics
+            && coercible(ctx, &slot, &h.ty);
+        ctx.rollback_all(&mark);
+        if ok {
+            hits.push(id);
+        }
+    }
+    match hits[..] {
+        [id] => Some(id),
+        _ => None,
+    }
 }
 
 /// `v.m(args)` on an `any Tr` value. Only methods of the bound
@@ -5653,7 +5846,7 @@ pub(super) fn lower_call(
     // Free function / extern / re-export, module-aware.
     if let Some(full) = ctx.resolve_fn_name(&segs) {
         ctx.check_item_visible(&full, "function");
-        let sig = ctx.env.fn_table[&full].clone();
+        let sig = ctx.sig_of_key(&full);
         return call_sig(ctx, &sig, &full, None, args, span);
     }
 
@@ -5766,7 +5959,7 @@ pub(super) fn lower_call(
                 _ => None,
             })
             .collect();
-        return lower_struct_init(ctx, p, &fields, span);
+        return lower_struct_init(ctx, p, &fields, None, span);
     }
     // `Foo(arg, ...)` — tuple-struct constructor (spec 2.7.4).
     if let Some(sid) = ctx
@@ -8152,10 +8345,10 @@ pub(super) fn lower_path(
     // Spec 2.11.10: a const generic parameter is a value.
     if let [name] = segs.as_slice() {
         if let Some((v, Some(p))) = ctx.ty_subst.get(*name).and_then(crate::ty::as_const) {
-            let value = if p == PrimTy::Bool {
-                ConstVal::Bool(v != 0)
-            } else {
-                ConstVal::Int { value: v, ty: p }
+            let value = match p {
+                PrimTy::Bool => ConstVal::Bool(v != 0),
+                PrimTy::Char => ConstVal::Char(u32::try_from(v).unwrap_or_default()),
+                _ => ConstVal::Int { value: v, ty: p },
             };
             return HirExpr {
                 kind: HirExprKind::Const(value),
@@ -8237,7 +8430,7 @@ pub(super) fn lower_path(
     // A function used as a value → function pointer.
     if let Some(full) = ctx.resolve_fn_name(&segs) {
         ctx.check_item_visible(&full, "function");
-        let sig = ctx.env.fn_table[&full].clone();
+        let sig = ctx.sig_of_key(&full);
         if sig.param_refs.iter().any(|r| *r) {
             return ctx.error_expr(
                 span,
@@ -8658,7 +8851,10 @@ fn handler_ret_leaf(ctx: &LowerCtx<'_>, name: &str) -> Option<String> {
         };
         return p.segments.last().map(|s| s.name.clone());
     }
-    match &ctx.env.fn_table.get(name)?.ret_ty {
+    if !ctx.env.fn_table.contains_key(name) {
+        return None;
+    }
+    match &ctx.sig_of_key(name).ret_ty {
         HirTy::Struct(id) => Some(leaf_name(enum_base_name(&ctx.struct_def(*id).name)).to_owned()),
         HirTy::Enum(id) => Some(leaf_name(enum_base_name(&ctx.enum_def(*id).name)).to_owned()),
         _ => None,

@@ -2,13 +2,25 @@
 // expect-exit: 0
 // expect-stdout:
 // 6
+// 12
 
-// spec 3.6.1: `m[i, j]` multi-dimensional indexing via `Index<(I, J)>`,
-// here on an array of arrays.
+// spec 3.6.1: `m[i, j]` is `m[(i, j)]` — one `Index<(I, J)>` call.
+struct Grid { w: usize; cells: List<i32>; }
+
+impl Index<(usize, usize)> for Grid {
+    type Output = i32;
+    fn index(self, at: (usize, usize)) -> i32 { self.cells[at.0 * self.w + at.1] }
+}
+
+impl Index<(usize, usize, usize)> for Grid {
+    type Output = i32;
+    fn index(self, at: (usize, usize, usize)) -> i32 { (at.0 + at.1 + at.2) as i32 }
+}
+
 fn main() -> i32 {
-    let row1: [i32; 2] = [1, 2];
-    let row2: [i32; 2] = [3, 4];
-    let m: [[i32; 2]; 2] = [row1, row2];
+    let m = Grid { w: 2, cells: [1, 2, 3, 4] };
     println(f"{m[1, 1] + m[0, 1]}");   // 4 + 2 = 6
+    let t = (1usize, 0usize);
+    println(f"{m[t] + m[3, 4, 5] - m[1, 0]}");   // 3 + 12 - 3
     return 0;
 }

@@ -75,6 +75,13 @@ pub struct Parser<'a> {
     literals: std::sync::Arc<literal::LiteralTable>,
     /// The last `parse_item` consumed an item that expanded to nothing.
     vanished: bool,
+    /// Nested `fn`s (spec 4.10), lifted to module items once the
+    /// enclosing item is parsed.
+    lifted: Vec<FnDef>,
+    /// Names of the `fn`s being parsed, outermost first.
+    fn_names: Vec<String>,
+    /// Lifted names given out so far.
+    lifted_names: std::collections::HashSet<String>,
     /// The next primary starts a statement: if it is block-like, `(` / `[`
     /// after it begin a new statement (`while c {} (a, b)`), not a call.
     stmt_head: bool,
@@ -214,18 +221,26 @@ impl<'a> Parser<'a> {
             expanded: Vec::new(),
             literals: std::sync::Arc::default(),
             vanished: false,
+            lifted: Vec::new(),
+            fn_names: Vec::new(),
+            lifted_names: std::collections::HashSet::new(),
         }
     }
 
     /// Does `f` fail here? Always rewinds: position, diagnostics and
     /// queued statements are as before.
     fn backtracks<T>(&mut self, f: impl FnOnce(&mut Self) -> Option<T>) -> bool {
-        let (pos, n_diags, n_pending) =
-            (self.pos, self.diagnostics.len(), self.pending_stmts.len());
+        let (pos, n_diags, n_pending, n_lifted) = (
+            self.pos,
+            self.diagnostics.len(),
+            self.pending_stmts.len(),
+            self.lifted.len(),
+        );
         let failed = f(self).is_none();
         self.pos = pos;
         self.diagnostics.truncate(n_diags);
         self.pending_stmts.truncate(n_pending);
+        self.lifted.truncate(n_lifted);
         failed
     }
 
@@ -678,6 +693,7 @@ impl<'a> Parser<'a> {
                 while let Some(extra) = self.pending_stmts.pop() {
                     stmts.push(extra);
                 }
+                items.extend(self.lifted.drain(..).map(Item::Fn));
             } else {
                 self.pending_stmts.clear();
                 self.recover(from, Recover::Stmt);
@@ -1092,6 +1108,14 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_item(&mut self) -> Option<Item> {
+        let lifted = self.lifted.len();
+        let item = self.parse_item_lifting();
+        let nested: Vec<Item> = self.lifted.drain(lifted..).map(Item::Fn).collect();
+        self.pending_items.extend(nested);
+        item
+    }
+
+    fn parse_item_lifting(&mut self) -> Option<Item> {
         let span = self.peek_span();
         let from = self.pos;
         let item = self.parse_item_inner()?;
@@ -2366,7 +2390,10 @@ impl<'a> Parser<'a> {
         let where_clause = self.parse_where_clause();
 
         let body = if matches!(self.peek(), TokenKind::LBrace) {
-            Some(self.parse_block()?)
+            self.fn_names.push(name.clone());
+            let b = self.parse_block();
+            self.fn_names.pop();
+            Some(b?)
         } else {
             self.expect(&TokenKind::Semi, "`;` or function body")?;
             None
@@ -2842,6 +2869,7 @@ impl<'a> Parser<'a> {
                 if matches!(
                     p.peek(),
                     TokenKind::IntLit(_)
+                        | TokenKind::CharLit(_)
                         | TokenKind::StrLit(_)
                         | TokenKind::Minus
                         | TokenKind::True
@@ -2926,6 +2954,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::ColonColon
                 | TokenKind::Comma
                 | TokenKind::IntLit(_)
+                | TokenKind::CharLit(_)
                 | TokenKind::Fn
                 | TokenKind::Arrow
                 | TokenKind::None
@@ -3243,6 +3272,86 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_block_inner(&mut self) -> Option<Block> {
+        let lifted = self.lifted.len();
+        let block = self.parse_block_stmts()?;
+        // Spec 4.10.5: a nested fn is visible in its whole block — in
+        // the bodies of the fns lifted from inside it too.
+        let markers: Vec<Stmt> = block
+            .stmts
+            .iter()
+            .filter_map(|s| match &s.kind {
+                StmtKind::Item(Item::Fn(f)) => {
+                    rokc_ast::nested_marker_of(f).map(|(lifted, _)| Stmt {
+                        kind: StmtKind::Item(Item::Fn(nested_marker(f, lifted, true))),
+                        span: s.span,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        if !markers.is_empty() {
+            for f in &mut self.lifted[lifted..] {
+                if let Some(b) = &mut f.body {
+                    b.stmts.splice(0..0, markers.iter().cloned());
+                }
+            }
+        }
+        Some(block)
+    }
+
+    /// `fn name(..) { .. }` as a statement (spec 4.10): lifted to a
+    /// module item `outer#name`, leaving a marker statement.
+    fn parse_nested_fn(&mut self) -> Option<Stmt> {
+        let start = self.peek_span();
+        if self.parse_visibility() != Visibility::Private {
+            self.error(
+                start,
+                "`pub` is meaningless on a nested function: it is visible only in its block \
+                 (spec 4.10.7)",
+            );
+        }
+        let mut def = self.parse_fn(Visibility::Private, Vec::new())?;
+        let outer = if self.fn_names.is_empty() {
+            "main".to_owned()
+        } else {
+            self.fn_names.join("#")
+        };
+        let base = format!("{outer}#{}", def.name);
+        let mut lifted = base.clone();
+        let mut n = 1;
+        while !self.lifted_names.insert(lifted.clone()) {
+            n += 1;
+            lifted = format!("{base}#{n}");
+        }
+        let marker = nested_marker(&def, &lifted, false);
+        def.name = lifted;
+        self.lifted.push(def);
+        Some(Stmt {
+            kind: StmtKind::Item(Item::Fn(marker)),
+            span: start,
+        })
+    }
+
+    /// Does a nested `fn` (`pub`, `unsafe` / `async` / `yield`) start here?
+    fn at_nested_fn(&self) -> bool {
+        let mut i = self.pos;
+        let kind = |i: usize| self.tokens.get(i).map(|t| &t.kind);
+        if matches!(kind(i), Some(TokenKind::Pub)) {
+            i += 1;
+            if matches!(kind(i), Some(TokenKind::LParen)) {
+                i += 3;
+            }
+        }
+        while matches!(
+            kind(i),
+            Some(TokenKind::Unsafe | TokenKind::Async | TokenKind::Yield)
+        ) {
+            i += 1;
+        }
+        matches!(kind(i), Some(TokenKind::Fn)) && matches!(kind(i + 1), Some(TokenKind::Ident(_)))
+    }
+
+    fn parse_block_stmts(&mut self) -> Option<Block> {
         let start = self.peek_span();
         self.expect(&TokenKind::LBrace, "`{`")?;
         let mut stmts = Vec::new();
@@ -3295,6 +3404,9 @@ impl<'a> Parser<'a> {
     #[allow(clippy::cognitive_complexity)] // one arm per statement form
     fn parse_stmt(&mut self) -> Option<(Stmt, bool)> {
         let start = self.peek_span();
+        if self.at_nested_fn() {
+            return Some((self.parse_nested_fn()?, false));
+        }
         match self.peek() {
             TokenKind::Use => {
                 let vis = Visibility::Private;
@@ -4773,15 +4885,21 @@ impl<'a> Parser<'a> {
                         self.error(s, "expected index expression");
                     }
                     self.expect(&TokenKind::RBracket, "`]`")?;
-                    // Spec 3.6.1: `m[i, j]` is chained indexing `m[i][j]`,
-                    // not `Index<(I, J)>`.
+                    // Spec 3.6.1: `m[i, j]` is `m[(i, j)]` (`Index<(I, J)>`).
                     let span = expr.span;
-                    for idx in indices {
-                        expr = Expr {
-                            span,
-                            kind: ExprKind::Index(Box::new(expr), Box::new(idx)),
-                        };
-                    }
+                    let idx = if indices.len() == 1 {
+                        indices.into_iter().next()?
+                    } else {
+                        let at = indices.first().map_or(span, |e| e.span);
+                        Expr {
+                            span: at,
+                            kind: ExprKind::Tuple(indices),
+                        }
+                    };
+                    expr = Expr {
+                        span,
+                        kind: ExprKind::Index(Box::new(expr), Box::new(idx)),
+                    };
                 }
                 TokenKind::Question => {
                     self.bump();
@@ -4886,10 +5004,12 @@ impl<'a> Parser<'a> {
     /// speculatively and looking at the token after it.
     fn try_set_or_dict(&mut self) -> Option<ExprKind> {
         let (pos, pending, n_diags) = (self.pos, self.pending.clone(), self.diagnostics.len());
+        let n_lifted = self.lifted.len();
         let rewind = |p: &mut Self| {
             p.pos = pos;
             p.pending.clone_from(&pending);
             p.diagnostics.truncate(n_diags);
+            p.lifted.truncate(n_lifted);
         };
         self.bump(); // `{`
         // Only a simple-looking first item is tried, so nested blocks
@@ -4954,11 +5074,12 @@ impl<'a> Parser<'a> {
         let start = if colon(self) {
             None
         } else {
-            let saved_diags = self.diagnostics.len();
+            let (saved_diags, n_lifted) = (self.diagnostics.len(), self.lifted.len());
             let e = self.parse_expr();
             if e.is_none() || !colon(self) {
                 self.pos = save;
                 self.diagnostics.truncate(saved_diags);
+                self.lifted.truncate(n_lifted);
                 return None;
             }
             e.map(Box::new)
@@ -5945,4 +6066,32 @@ pub(crate) fn keyword_hint(word: &str) -> Option<&'static str> {
                 .copied(),
         )
     })
+}
+
+/// The marker statement's fn of a nested fn `f` lifted as `lifted`.
+fn nested_marker(f: &FnDef, lifted: &str, inherited: bool) -> FnDef {
+    let mut args = vec![rokc_ast::AttrArg::Lit(Literal::Str(lifted.to_owned()))];
+    if inherited {
+        args.push(rokc_ast::AttrArg::Lit(Literal::Bool(true)));
+    }
+    FnDef {
+        vis: Visibility::Private,
+        attrs: vec![Attribute {
+            path: vec![rokc_ast::NESTED_FN_ATTR.to_owned()],
+            body: rokc_ast::AttrBody::Args(args),
+            inner: false,
+            span: f.span,
+        }],
+        name: f.name.clone(),
+        generics: Generics::default(),
+        params: Vec::new(),
+        ret_ty: None,
+        body: None,
+        is_async: false,
+        is_generator: false,
+        is_unsafe: false,
+        throws: f.throws.clone(),
+        where_clause: Vec::new(),
+        span: f.span,
+    }
 }

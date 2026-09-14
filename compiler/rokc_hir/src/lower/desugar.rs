@@ -274,6 +274,7 @@ pub(super) fn closure_ctx<'a>(
     let mut cl_ctx = LowerCtx::new(ctx.env, ctx.ty_subst, ctx.self_ty.clone());
     cl_ctx.current_module.clone_from(&ctx.current_module);
     cl_ctx.local_uses.clone_from(&ctx.local_uses);
+    cl_ctx.nested_fns.clone_from(&ctx.nested_fns);
     cl_ctx.ref_captured.clone_from(&ctx.ref_captured);
     cl_ctx.ty_bounds.clone_from(&ctx.ty_bounds);
     cl_ctx.ty_bound_args.clone_from(&ctx.ty_bound_args);

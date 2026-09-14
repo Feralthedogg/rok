@@ -27,6 +27,16 @@ use crate::{
 #[must_use]
 pub fn print_file(attrs: &[Attribute], items: &[Item], stmts: &[Stmt]) -> String {
     let mut p = Printer::default();
+    // Lifted nested fns print where they were written.
+    let (lifted, items): (Vec<&Item>, Vec<&Item>) = items
+        .iter()
+        .partition(|i| matches!(i, Item::Fn(f) if f.name.contains('#')));
+    for i in lifted {
+        if let Item::Fn(f) = i {
+            let leaf = f.name.rsplit("::").next().unwrap_or_default();
+            p.lifted.insert(leaf.to_owned(), f.clone());
+        }
+    }
     for a in attrs {
         p.attr(a);
         p.nl();
@@ -68,6 +78,8 @@ pub fn print_ty(t: &Ty) -> String {
 struct Printer {
     out: String,
     indent: usize,
+    /// Lifted nested fns by lifted name.
+    lifted: std::collections::HashMap<String, FnDef>,
 }
 
 impl Printer {
@@ -899,6 +911,14 @@ impl Printer {
                 self.expr(value);
                 self.s(";");
             }
+            StmtKind::Item(Item::Fn(f)) if crate::nested_marker_of(f).is_some() => {
+                if let Some((lifted, false)) = crate::nested_marker_of(f) {
+                    if let Some(mut def) = self.lifted.get(lifted).cloned() {
+                        def.name.clone_from(&f.name);
+                        self.fn_def(&def);
+                    }
+                }
+            }
             StmtKind::Item(item) => self.item(item),
             StmtKind::Expr(e) => {
                 self.stmt_expr(e);
@@ -958,6 +978,7 @@ impl Printer {
         let mut p = Self {
             out: String::new(),
             indent: self.indent,
+            lifted: self.lifted.clone(),
         };
         p.expr(e);
         if p.out.contains('{') {

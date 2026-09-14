@@ -1514,6 +1514,9 @@ pub fn lower_full(
         track_caller: std::cell::RefCell::new(std::collections::HashSet::new()),
         const_lowering: std::cell::RefCell::new(std::collections::HashSet::new()),
         const_stack: std::cell::RefCell::new(Vec::new()),
+        inferred_ret: std::cell::RefCell::default(),
+        recursive_ret: std::cell::RefCell::default(),
+        tentative_ret: std::cell::RefCell::default(),
     };
     let mut exports: Vec<(FunctionId, String)> = Vec::new();
     let mut prebuilt: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
@@ -1613,8 +1616,18 @@ pub fn lower_full(
         .get("main")
         .map(|s| s.id)
         .filter(|id| !extern_fn_ids.contains(id) && !rok_externs.contains(id));
+    let infer_ret = decls
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| {
+            let (MethodOrFn::Fn(f) | MethodOrFn::Method { fn_def: f, .. }) = d;
+            mono::infers_ret(f)
+        })
+        .map(|(i, _)| FunctionId(u32::try_from(i).expect("FunctionId overflow")))
+        .collect();
     let mut env = Env {
         impl_consts: impl_const_sets,
+        infer_ret,
         fn_table,
         fn_leaves: std::cell::OnceCell::new(),
         extern_fns,

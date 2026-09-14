@@ -1333,8 +1333,8 @@ fn fold_call(ctx: &LowerCtx<'_>, h: &mut HirExpr, at: Span) {
 }
 
 /// An integer in a type position (array length, const generic argument)
-/// lowered in `ctx` and evaluated.
-pub(super) fn eval_int(ctx: &LowerCtx<'_>, e: &Expr) -> Result<i128, String> {
+/// lowered in `ctx` and evaluated; a `char` comes back tagged `char`.
+pub(super) fn eval_scalar(ctx: &LowerCtx<'_>, e: &Expr) -> Result<(i128, Option<PrimTy>), String> {
     let mut cx = ctx.clone();
     // A const parameter bound without its type reads as a `usize`.
     for (n, t) in ctx.ty_subst {
@@ -1355,8 +1355,11 @@ pub(super) fn eval_int(ctx: &LowerCtx<'_>, e: &Expr) -> Result<i128, String> {
     let r = match lowering_error {
         Some(why) => Err(why),
         None => match eval_in(&cx, &h) {
-            Ok(Value::Int(v, _)) => Ok(v),
-            Ok(Value::Bool(b)) => Ok(i128::from(b)),
+            Ok(Value::Int(v, _)) => Ok((v, None)),
+            Ok(Value::Bool(b)) => Ok((i128::from(b), None)),
+            Ok(Value::Char(c)) if h.ty == HirTy::Prim(PrimTy::Char) => {
+                Ok((i128::from(c), Some(PrimTy::Char)))
+            }
             Ok(_) => Err("not an integer".to_owned()),
             Err(Stop::Runtime(_, why) | Stop::Fail(_, why)) => Err(why),
             Err(_) => Err("not a constant".to_owned()),

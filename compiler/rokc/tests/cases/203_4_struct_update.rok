@@ -1,0 +1,40 @@
+// spec: 002.03.4-field-spread
+// expect-exit: 0
+// expect-stdout:
+// 10 2 3
+// 1 20 3
+// b a base
+// 7 hi
+// 4 1
+
+struct S { a: i32; b: i32; c: i32; }
+struct Pair<T> { x: T; y: T; }
+struct Big { n: i32; s: str; xs: List<i32>; }
+
+fn note(tag: str, v: i32) -> i32 {
+    print(f"{tag} ");
+    v
+}
+
+fn base_s() -> S {
+    println("base");
+    S { a: 0, b: 0, c: 0 }
+}
+
+fn main() -> i32 {
+    let base = S { a: 1, b: 2, c: 3 };
+    let s = S { a: 10, ..base };
+    println(f"{s.a} {s.b} {s.c}");
+    let t = S { b: 20, ..base };
+    println(f"{t.a} {t.b} {t.c}");
+    // The written values first (in field order), then the base.
+    let _u = S { c: note("a", 1), a: note("b", 2), ..base_s() };
+    let p = Pair { x: 7, y: 8 };
+    let q = Pair { y: 9, ..p };
+    let big = Big { n: 1, s: "hi", xs: [1, 2] };
+    let big2 = Big { n: q.x, ..big };
+    println(f"{big2.n} {big2.s}");
+    let all = S { ..base };
+    println(f"{all.a + all.c} {big.n}");
+    return 0;
+}

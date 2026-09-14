@@ -6,7 +6,7 @@
 use rokc_core::Visibility;
 use rokc_diagnostic::Span;
 
-use crate::{Attribute, Item, Literal};
+use crate::{AttrArg, AttrBody, Attribute, Item, Literal};
 
 #[derive(Clone, Debug)]
 pub struct FnDef {
@@ -29,6 +29,12 @@ pub struct FnDef {
 /// Marker attribute of an `extern "C" fn f(..) { .. }` definition
 /// (spec 5.9.10).
 pub const EXTERN_C_FN_ATTR: &str = "#extern_c";
+
+/// Marker attribute of a nested `fn` statement (spec 4.10): the fn is
+/// lifted to a module item named by the attribute's string (`outer#f`);
+/// a second `true` argument marks a sibling visible from an enclosing
+/// block rather than one declared here.
+pub const NESTED_FN_ATTR: &str = "#nested_fn";
 
 /// Marker attribute of a `const fn` (spec 5.2.5): callable in const
 /// contexts, evaluated at compile time there.
@@ -813,4 +819,20 @@ pub struct ExternBlock {
 pub enum ExternItem {
     Fn(FnDef),
     Static(StaticDef),
+}
+
+/// `(lifted name, inherited)` of a nested fn marker (`NESTED_FN_ATTR`).
+#[must_use]
+pub fn nested_marker_of(f: &FnDef) -> Option<(&str, bool)> {
+    let a = f
+        .attrs
+        .iter()
+        .find(|a| a.path.first().map(String::as_str) == Some(NESTED_FN_ATTR))?;
+    let AttrBody::Args(args) = &a.body else {
+        return None;
+    };
+    let AttrArg::Lit(Literal::Str(name)) = args.first()? else {
+        return None;
+    };
+    Some((name.as_str(), args.len() > 1))
 }

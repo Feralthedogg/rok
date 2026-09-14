@@ -388,7 +388,7 @@ pub(super) fn monomorphize_on(
                     ));
                     return None;
                 };
-                let c = typed_const(ctx, name, ty, v.0)?;
+                let c = typed_const(ctx, name, ty, v)?;
                 subst.insert(name.clone(), c.clone());
                 subst_tys.push(c);
             }
@@ -470,6 +470,13 @@ pub(super) fn monomorphize_on(
         subst_tys.iter().map(ty_mangle).collect::<Vec<_>>(),
     );
     if let Some(&existing_id) = ctx.env.sink.mono_cache.borrow().get(&key) {
+        if matches!(
+            ctx.env.sink.inferred_ret.borrow().get(&existing_id),
+            Some(None)
+        ) {
+            ctx.env.sink.recursive_ret.borrow_mut().push(existing_id);
+            return None;
+        }
         let ret_ty = ctx
             .env
             .sink
@@ -491,8 +498,11 @@ pub(super) fn monomorphize_on(
     let self_hir = self_hint
         .cloned()
         .or_else(|| self_ty.map(|t| resolve_in_mono(ctx, fn_def, &subst, None, t)));
-    let preview_ret_ty =
+    let mut preview_ret_ty =
         resolve_in_mono(ctx, fn_def, &subst, self_hir.clone(), &sig_ret_ast(fn_def));
+    if infers_ret(fn_def) {
+        preview_ret_ty = with_ok(preview_ret_ty, HirTy::Unknown);
+    }
     let refs: Vec<(usize, HirTy)> = fn_def
         .params
         .iter()
@@ -643,6 +653,262 @@ pub(super) fn lower_fn_inner(
     module: String,
     subst: &HashMap<String, HirTy>,
 ) -> HirFunction {
+    let ret = if env.infer_ret.contains(&id) {
+        Some(decl_ret_ok(env, id))
+    } else if infers_ret(fn_def) {
+        let (r, done) = infer_ret_of(
+            env,
+            fn_def,
+            id,
+            &name,
+            self_ty.clone(),
+            &module,
+            subst,
+            true,
+        );
+        if let Some(f) = done {
+            return f;
+        }
+        Some(r)
+    } else {
+        None
+    };
+    lower_fn_with(env, fn_def, id, name, self_ty, module, subst, ret, None)
+}
+
+/// Spec 4.1.3: no `-> T`, and the body has a value (a trailing
+/// expression or a `return v`): the return type comes from the body.
+/// Coroutine fns keep `()` (their item type is not inferred).
+pub(super) fn infers_ret(f: &FnDef) -> bool {
+    struct V {
+        depth: u32,
+        found: bool,
+    }
+    impl crate::walk::AstVisitor for V {
+        fn stmt(&mut self, s: &Stmt) {
+            if self.depth == 0 && matches!(s.kind, StmtKind::Return(Some(_))) {
+                self.found = true;
+            }
+        }
+        fn enter_body(&mut self) {
+            self.depth += 1;
+        }
+        fn leave_body(&mut self) {
+            self.depth -= 1;
+        }
+    }
+    let Some(body) = &f.body else {
+        return false;
+    };
+    if f.ret_ty.is_some() || f.is_async || f.is_generator {
+        return false;
+    }
+    if body.trailing.is_some() {
+        return true;
+    }
+    let mut v = V {
+        depth: 0,
+        found: false,
+    };
+    crate::walk::walk_block(&mut v, body);
+    v.found
+}
+
+/// The ok side of the return type of declaration `id` (in
+/// `Env::infer_ret`), inferred on first use.
+fn decl_ret_ok(env: &Env<'_>, id: FunctionId) -> HirTy {
+    let cached = env.sink.inferred_ret.borrow().get(&id).cloned();
+    match cached {
+        Some(Some(t)) => t,
+        Some(None) => {
+            env.sink.recursive_ret.borrow_mut().push(id);
+            HirTy::Unknown
+        }
+        None => match &env.decls[id.0 as usize] {
+            MethodOrFn::Fn(f) => {
+                let module = module_of(&f.name);
+                infer_ret_of(env, f, id, &f.name, None, &module, &HashMap::new(), false).0
+            }
+            MethodOrFn::Method {
+                fn_def,
+                self_ty,
+                module,
+                key,
+                subst,
+            } => {
+                let self_ty = Some(self_ty.clone());
+                infer_ret_of(env, fn_def, id, key, self_ty, module, subst, false).0
+            }
+        },
+    }
+}
+
+/// `decl_ret_ok` in the declared return type (`()`, or a `Throws`
+/// carrier around it).
+pub(super) fn decl_ret(ctx: &LowerCtx<'_>, id: FunctionId, declared: HirTy) -> HirTy {
+    with_ok(declared, decl_ret_ok(ctx.env, id))
+}
+
+fn has_unknown(t: &HirTy) -> bool {
+    match t {
+        HirTy::Unknown => true,
+        HirTy::Sum(ts) | HirTy::Tuple(ts) => ts.iter().any(has_unknown),
+        HirTy::Array(t, _) | HirTy::GcBuf(t) => has_unknown(t),
+        HirTy::Fn(ps, r, _) => ps.iter().any(has_unknown) || has_unknown(r),
+        HirTy::Closure { args, ret, env } => {
+            args.iter().any(has_unknown) || has_unknown(ret) || has_unknown(env)
+        }
+        HirTy::Throws { ok, err } => has_unknown(ok) || has_unknown(err),
+        _ => false,
+    }
+}
+
+fn with_ok(declared: HirTy, ok: HirTy) -> HirTy {
+    match declared {
+        HirTy::Throws { err, .. } => HirTy::Throws {
+            ok: Box::new(ok),
+            err,
+        },
+        _ => ok,
+    }
+}
+
+/// Lower the body once with an open return type and join the types of
+/// its `return` values and trailing value (spec 4.3.4: one path, its
+/// type; several, their sum). With `keep`, a body whose paths agree on
+/// one type (no `throws`, no `ref` parameter) is final as lowered;
+/// otherwise the lowering is rolled back.
+#[allow(clippy::too_many_arguments)]
+fn infer_ret_of(
+    env: &Env<'_>,
+    fn_def: &FnDef,
+    id: FunctionId,
+    name: &str,
+    self_ty: Option<HirTy>,
+    module: &str,
+    subst: &HashMap<String, HirTy>,
+    keep: bool,
+) -> (HirTy, Option<HirFunction>) {
+    if let Some(Some(t)) = env.sink.inferred_ret.borrow().get(&id) {
+        return (t.clone(), None);
+    }
+    env.sink.inferred_ret.borrow_mut().insert(id, None);
+    let hits = env.sink.recursive_ret.borrow().len();
+    let tentatives = env.sink.tentative_ret.borrow().len();
+    let probe = LowerCtx::new(env, subst, None);
+    let mark = probe.probe_mark();
+    let mut tys = Vec::new();
+    let mut f = lower_fn_with(
+        env,
+        fn_def,
+        id,
+        name.to_owned(),
+        self_ty,
+        module.to_owned(),
+        subst,
+        Some(HirTy::Unknown),
+        Some(&mut tys),
+    );
+    // A call of itself leaves its type open (`Unknown`); one of a fn
+    // still being inferred further out makes this result tentative.
+    let (self_hit, tentative) = {
+        let mut hit = env.sink.recursive_ret.borrow_mut();
+        let own = hit[hits..].contains(&id);
+        let mut i = hits;
+        while i < hit.len() {
+            if hit[i] == id {
+                hit.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        (own, hit.len() > hits)
+    };
+    tys.retain(|t| *t != HirTy::Never);
+    let plain = match &fn_def.throws {
+        rokc_ast::ThrowsKind::None => true,
+        rokc_ast::ThrowsKind::Typed(e) => e.is_empty(),
+        rokc_ast::ThrowsKind::Untyped => false,
+    } && !fn_def.params.iter().any(|p| p.by_ref);
+    let agreed = tys.windows(2).all(|w| w[0] == w[1]);
+    let final_as_is = keep && plain && agreed && !self_hit && !tentative;
+    if !final_as_is {
+        probe.rollback_all(&mark);
+    }
+    let unit = tys.contains(&HirTy::Unit);
+    tys.retain(|t| *t != HirTy::Unit);
+    let fail = |why: &str| {
+        let outer = rokc_diagnostic::set_current_span(fn_def.span);
+        probe.emit_error(
+            rokc_diagnostic::ErrorKind::Type,
+            format!(
+                "cannot infer the return type of `{}`: {why} — write `-> T` (spec 4.1.3)",
+                leaf_name(&fn_def.name)
+            ),
+        );
+        rokc_diagnostic::set_current_span(outer);
+        HirTy::Unknown
+    };
+    let ret = if tys.is_empty() {
+        HirTy::Unit
+    } else if unit {
+        if tentative {
+            HirTy::Unknown
+        } else {
+            fail("one path returns a value and another none")
+        }
+    } else {
+        let mut parts = Vec::new();
+        for t in tys {
+            t.spread(&mut parts);
+        }
+        HirTy::sum(parts)
+    };
+    if tentative {
+        env.sink
+            .inferred_ret
+            .borrow_mut()
+            .insert(id, Some(ret.clone()));
+        env.sink.tentative_ret.borrow_mut().push(id);
+        return (ret, None);
+    }
+    let stale: Vec<FunctionId> = env.sink.tentative_ret.borrow_mut().split_off(tentatives);
+    for t in stale {
+        env.sink.inferred_ret.borrow_mut().remove(&t);
+    }
+    let ret = if self_hit && has_unknown(&ret) {
+        fail("its body calls it again")
+    } else {
+        ret
+    };
+    env.sink
+        .inferred_ret
+        .borrow_mut()
+        .insert(id, Some(ret.clone()));
+    if let Some(r) = env.sink.ref_out.borrow_mut().get_mut(&id) {
+        r.ret = with_ok(r.ret.clone(), ret.clone());
+    }
+    if final_as_is {
+        f.ret_ty = ret.clone();
+        return (ret, Some(f));
+    }
+    (ret, None)
+}
+
+/// `lower_fn_inner` with the ok side of the return type given (`ret`;
+/// `Unknown` with `ret_tys` to collect the body's value types).
+#[allow(clippy::too_many_arguments)]
+fn lower_fn_with(
+    env: &Env<'_>,
+    fn_def: &FnDef,
+    id: FunctionId,
+    name: String,
+    self_ty: Option<HirTy>,
+    module: String,
+    subst: &HashMap<String, HirTy>,
+    ret: Option<HirTy>,
+    ret_tys: Option<&mut Vec<HirTy>>,
+) -> HirFunction {
     let outer = rokc_diagnostic::set_current_span(fn_def.span);
     // A `rethrows` instance with a non-throwing argument doesn't vote on
     // warnings (its `try`s cover nothing by construction).
@@ -717,6 +983,12 @@ pub(super) fn lower_fn_inner(
         .collect();
 
     let mut ret_ty = ctx.resolve_ast_ty(&sig_ret_ast(fn_def));
+    if let Some(r) = ret {
+        ret_ty = with_ok(ret_ty, r);
+    }
+    if ret_tys.is_some() {
+        ctx.ret_tys = Some(Vec::new());
+    }
     if let HirTy::Throws { ok, err } = &ret_ty {
         ctx.fn_ret_ty = (**ok).clone();
         // Spec 4.16.3: an error escaping a throwing `main` is reported by
@@ -736,6 +1008,9 @@ pub(super) fn lower_fn_inner(
         block.stmts.splice(0..0, prelude);
         block
     });
+    if let Some(out) = ret_tys {
+        *out = ctx.ret_tys.take().unwrap_or_default();
+    }
     rokc_diagnostic::set_current_span(outer);
     env.sink.instances.borrow_mut().pop();
     // `ref` parameters: the function hands their values back too.
@@ -853,28 +1128,46 @@ pub(super) fn generic_subst(
     subst
 }
 
-/// Spec 2.11.3: a const generic argument `v` for parameter `name: ty`,
-/// range-checked and tagged with the parameter's type (integers,
-/// `bool`, `c_char` only).
-pub(super) fn typed_const(ctx: &LowerCtx<'_>, name: &str, ty: &Ty, v: i128) -> Option<HirTy> {
+/// Spec 2.11.3: a const generic argument `v` (tagged `char` when it is
+/// one) for parameter `name: ty`, range-checked and tagged with the
+/// parameter's type (integers, `bool`, `char`, `c_char`).
+pub(super) fn typed_const(
+    ctx: &LowerCtx<'_>,
+    name: &str,
+    ty: &Ty,
+    (v, tag): (i128, Option<PrimTy>),
+) -> Option<HirTy> {
     let p = match ctx.resolve_ast_ty(ty) {
         HirTy::Prim(p) if p.is_int() || matches!(p, PrimTy::Bool | PrimTy::CChar) => p,
         other => {
             ctx.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
                 format!(
-                    "const parameter `{name}` has type `{}`; only integers, `bool` and \
-                     `c_char` may be const parameters (spec 2.11.3)",
+                    "const parameter `{name}` has type `{}`; only integers, `bool`, `char` \
+                     and `c_char` may be const parameters (spec 2.11.3)",
                     ctx.ty_name(&other)
                 ),
             );
             return None;
         }
     };
-    let fits = if p == PrimTy::Bool {
-        v == 0 || v == 1
-    } else {
-        super::pattern::int_fits(v, p)
+    let is_char = tag == Some(PrimTy::Char);
+    if is_char != (p == PrimTy::Char) {
+        let found = if is_char { "a `char`" } else { "an integer" };
+        ctx.emit_error(
+            rokc_diagnostic::ErrorKind::Type,
+            format!(
+                "const argument for `{name}: {}` must be a `{}`, found {found}",
+                p.name(),
+                p.name()
+            ),
+        );
+        return None;
+    }
+    let fits = match p {
+        PrimTy::Bool => v == 0 || v == 1,
+        PrimTy::Char => u32::try_from(v).ok().and_then(char::from_u32).is_some(),
+        _ => super::pattern::int_fits(v, p),
     };
     if !fits {
         ctx.emit_error(
@@ -1361,6 +1654,14 @@ pub(super) fn lower_fn_body(ctx: &mut LowerCtx<'_>, b: &Block, fn_name: &str) ->
 /// The value checks of `lower_fn_body`.
 fn check_fn_body(ctx: &mut LowerCtx<'_>, mut block: HirBlock, fn_name: &str) -> HirBlock {
     let ret = ctx.fn_ret_ty.clone();
+    let diverges = hir_block_diverges(&block);
+    if let Some(tys) = ctx.ret_tys.as_mut() {
+        match &block.trailing {
+            Some(t) if !hir_expr_diverges(t) => tys.push(t.ty.clone()),
+            None if !diverges => tys.push(HirTy::Unit),
+            _ => {}
+        }
+    }
     let falls_off = || {
         let name = leaf_name(fn_name);
         if ret == HirTy::Never {
