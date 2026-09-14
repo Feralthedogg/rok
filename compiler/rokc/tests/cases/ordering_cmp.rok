@@ -11,6 +11,7 @@
 // `Ord::cmp` returns `Ordering` (stdlib 2.5.4-5) with the `min` / `max`
 // / `clamp` defaults; `str` and the primitives implement it.
 
+#[derive(PartialEq, Eq)]
 struct Version { major: i32; minor: i32; }
 
 impl PartialOrd for Version {

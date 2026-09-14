@@ -447,8 +447,10 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
             write_through(ctx, a, stmt.span)
         }
         StmtKind::CompoundAssign { target, op, value } => {
-            // The parser desugars `a op= b` to `a = a op b`; keep a
-            // working path should a front end hand us the raw form.
+            if let Some(call) = assign_trait_call(ctx, target, op, value, stmt.span) {
+                return Some(HirStmt::Expr(call));
+            }
+            // Stdlib 2.4.1: without an `*Assign` impl, `a = a op b`.
             let op = op.trim_end_matches('=').to_owned();
             let combined = Expr {
                 span: stmt.span,
@@ -1478,9 +1480,9 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             let body = super::coro::closure_body(body, *is_async, *is_generator);
             lower_closure_expr(ctx, captures, params, ret_ty.as_ref(), &body, span)
         }
-        ExprKind::QuestionDot(receiver, tail) => {
+        ExprKind::QuestionDot(receiver, tails) => {
             let recv_h = lower_expected(ctx, receiver, HirTy::Unknown);
-            desugar_question_dot(ctx, recv_h, tail, span)
+            desugar_question_dot(ctx, recv_h, tails, span)
         }
         ExprKind::TryQ(inner) => {
             let inner_h = lower_expected(ctx, inner, HirTy::Unknown);
@@ -1540,6 +1542,7 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
         ExprKind::AsyncBlock(_) | ExprKind::YieldBlock(_) | ExprKind::AsyncYieldBlock(_) => {
             super::coro::lower_coro_expr(ctx, &expr.kind, span)
         }
+        ExprKind::Broadcast { callee, args } => lower_broadcast(ctx, callee, args, span),
         ExprKind::Spread(_) => unsupported(ctx, "a spread expression here"),
         ExprKind::Discard(_) => unsupported(ctx, "a discard expression"),
         ExprKind::FString(parts) => super::fstring::lower_fstring(ctx, parts, span),
@@ -1852,19 +1855,7 @@ pub(super) fn lower_struct_init(
         EnumRes::NotEnum => {}
     }
 
-    // The base's type is the hint for a generic struct's arguments.
-    let base_h = spread.map(|b| {
-        let want = match &hint {
-            Some(t @ HirTy::Struct(_)) => t.clone(),
-            _ => HirTy::Unknown,
-        };
-        lower_expected(ctx, b, want)
-    });
-    if let Some(HirTy::Struct(_)) = base_h.as_ref().map(|b| &b.ty) {
-        if !matches!(hint, Some(HirTy::Struct(_))) {
-            hint = base_h.as_ref().map(|b| b.ty.clone());
-        }
-    }
+    let base_h = spread.map(|b| lower_update_base(ctx, b, &mut hint));
     let Some(full) = ctx.canon_type(&segs) else {
         for (_, e) in fields {
             lower_expected(ctx, e, HirTy::Unknown);
@@ -2078,6 +2069,20 @@ pub(super) fn lower_struct_init(
         ty: HirTy::Struct(struct_id),
         span,
     }
+}
+
+/// The `..base` of a struct update, lowered against the expected
+/// struct; its type is the hint for a generic struct's arguments.
+fn lower_update_base(ctx: &mut LowerCtx<'_>, base: &Expr, hint: &mut Option<HirTy>) -> HirExpr {
+    let want = match hint {
+        Some(t @ HirTy::Struct(_)) => t.clone(),
+        _ => HirTy::Unknown,
+    };
+    let h = lower_expected(ctx, base, want);
+    if matches!(h.ty, HirTy::Struct(_)) && !matches!(hint, Some(HirTy::Struct(_))) {
+        *hint = Some(h.ty.clone());
+    }
+    h
 }
 
 /// `{ let #f.. = written values; let #b = base; S { .., f: #b.f } }`.
@@ -2786,11 +2791,73 @@ pub(super) fn lower_args_ref(
                         }
                     }
                     HirTy::Unknown => {}
+                    // An array fills its length's slots; a `List` /
+                    // `Slice` the slots up to the next argument (the
+                    // variadic or the end), checked at run time.
+                    ty @ HirTy::Array(..) => {
+                        let HirTy::Array(_, len) = ty else {
+                            unreachable!()
+                        };
+                        let name = format!("#spread{}", ctx.locals.len());
+                        let local = ctx.declare(Some(name.clone()), ty);
+                        lets.push(HirStmt::Let { local, init: lh });
+                        for i in 0..len {
+                            let item = spread_item(&name, i as usize, span);
+                            if next >= var_at {
+                                let v = lower_expected(ctx, &item, HirTy::Unknown);
+                                var_parts.push(VarPart::Value(v));
+                            } else if next < n {
+                                let v = lower_expected(ctx, &item, sig.param_tys[next].clone());
+                                slots[next] = Some(ArgSrc::Lowered(v));
+                            } else {
+                                extra += 1;
+                            }
+                            next += 1;
+                        }
+                    }
+                    ty if spreads_at_run_time(ctx, &ty) => {
+                        let later = args[k + 1..]
+                            .iter()
+                            .filter(|a| !matches!(a, CallArg::Named { .. }))
+                            .count();
+                        let end = if sig.variadic {
+                            var_at
+                        } else {
+                            n.saturating_sub(later)
+                        };
+                        let fill = end.saturating_sub(next);
+                        let name = format!("#spread{}", ctx.locals.len());
+                        let local = ctx.declare(Some(name.clone()), ty);
+                        lets.push(HirStmt::Let { local, init: lh });
+                        let path = super::throws::path_expr(&name, span);
+                        let len = Expr {
+                            kind: ExprKind::MethodCall {
+                                receiver: Box::new(path),
+                                method: "len".to_owned(),
+                                type_args: Vec::new(),
+                                args: Vec::new(),
+                                trailing_closure: None,
+                            },
+                            span,
+                        };
+                        let want = Expr {
+                            kind: ExprKind::Literal(AstLit::Int(format!("{fill}usize"))),
+                            span,
+                        };
+                        let check = index_fn("spread_len", vec![len, want], span);
+                        lets.push(HirStmt::Expr(lower_expected(ctx, &check, HirTy::Unit)));
+                        for i in 0..fill {
+                            let item = spread_item(&name, i, span);
+                            let v = lower_expected(ctx, &item, sig.param_tys[next].clone());
+                            slots[next] = Some(ArgSrc::Lowered(v));
+                            next += 1;
+                        }
+                    }
                     other => ctx.emit_error(
                         rokc_diagnostic::ErrorKind::Type,
                         format!(
-                            "spread `f(..x)` needs a tuple value, found `{}` (List/Dict \
-                             spread are separate milestones, spec 4.1)",
+                            "spread `f(..x)` needs a tuple, a `List`, a `Slice` or an array, \
+                             found `{}` (spec 4.2.6)",
                             ctx.ty_name(&other)
                         ),
                     ),
@@ -2906,6 +2973,45 @@ pub(super) fn lower_args_ref(
 }
 
 const LIST: &str = "rok::core::collections::list::List";
+const SLICE: &str = "rok::core::collections::slice::Slice";
+
+/// A `List` / `Slice`: what `..x` spreads with a run-time length.
+fn spreads_at_run_time(ctx: &LowerCtx<'_>, ty: &HirTy) -> bool {
+    let HirTy::Struct(id) = ty else {
+        return false;
+    };
+    let name = ctx.struct_def(*id).name;
+    matches!(enum_base_name(&name), LIST | SLICE)
+}
+
+/// An item of a `List` literal: `..x` spreads `x` when it is a tuple,
+/// an array, a `List` or a `Slice` (the literal's handler is variadic,
+/// spec 4.2.6); otherwise it is the range `..x`.
+fn list_item(ctx: &mut LowerCtx<'_>, e: &Expr) -> CallArg {
+    let ExprKind::Range {
+        start: None,
+        end: Some(x),
+        inclusive: false,
+    } = &e.kind
+    else {
+        return CallArg::Positional(e.clone());
+    };
+    let h = lower_expected(ctx, x, HirTy::Unknown);
+    let spread =
+        matches!(h.ty, HirTy::Tuple(_) | HirTy::Array(..)) || spreads_at_run_time(ctx, &h.ty);
+    let x = splice(ctx, h);
+    if spread {
+        return CallArg::Spread(x);
+    }
+    CallArg::Positional(Expr {
+        kind: ExprKind::Range {
+            start: None,
+            end: Some(Box::new(x)),
+            inclusive: false,
+        },
+        span: e.span,
+    })
+}
 
 /// One trailing argument of a variadic `...T` call (spec 4.2.5).
 pub(super) enum VarPart<'e> {
@@ -3104,6 +3210,183 @@ pub(super) fn lower_variadic(
             trailing: Some(trailing),
             label: None,
         })),
+        span,
+    }
+}
+
+/// `f.(a, s)` (spec 3.3.3 / stdlib 2.6.5), with `a` a `List` / `Slice`
+/// / array and `s` anything else:
+/// `{ let #b0 = a; let #b1 = s; let #n = #b0.len(); (every other
+/// collection's length checked against `#n`) let #out = List::new();
+/// for #i in 0..#n { #out.push(f(#b0[#i], #b1)); } #out }`.
+fn lower_broadcast(
+    ctx: &mut LowerCtx<'_>,
+    callee: &Expr,
+    args: &[CallArg],
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let ast = |kind: ExprKind| Expr { kind, span };
+    let path = |name: &str| super::throws::path_expr(name, span);
+    let tag = ctx.locals.len();
+    let mut stmts: Vec<Stmt> = Vec::new();
+    let let_of = |stmts: &mut Vec<Stmt>, name: &str, init: Expr| {
+        stmts.push(Stmt {
+            kind: StmtKind::Let {
+                name: name.to_owned(),
+                ty: None,
+                init,
+            },
+            span,
+        });
+    };
+    let f = if matches!(callee.kind, ExprKind::Path(_)) {
+        callee.clone()
+    } else {
+        let f = format!("#bf{tag}");
+        let_of(&mut stmts, &f, callee.clone());
+        path(&f)
+    };
+    let mut lists: Vec<String> = Vec::new();
+    let mut call_args = Vec::new();
+    for (k, a) in args.iter().enumerate() {
+        let (CallArg::Positional(e) | CallArg::Named { value: e, .. }) = a else {
+            return ctx.error_expr(
+                span,
+                "a broadcast `f.(..)` takes plain arguments".to_owned(),
+            );
+        };
+        let h = lower_expected(ctx, e, HirTy::Unknown);
+        let many = matches!(h.ty, HirTy::Array(..)) || spreads_at_run_time(ctx, &h.ty);
+        let name = format!("#b{tag}_{k}");
+        let_of(&mut stmts, &name, splice(ctx, h));
+        let v = if many {
+            lists.push(name.clone());
+            spread_item_at(&name, &path(&format!("#bi{tag}")), span)
+        } else {
+            path(&name)
+        };
+        call_args.push(match a {
+            CallArg::Named { name, .. } => CallArg::Named {
+                name: name.clone(),
+                value: v,
+            },
+            _ => CallArg::Positional(v),
+        });
+    }
+    let Some(first) = lists.first().cloned() else {
+        return ctx.error_expr(
+            span,
+            "a broadcast `f.(..)` needs a `List`, `Slice` or array argument (spec 3.3.3)"
+                .to_owned(),
+        );
+    };
+    let len = |name: &str| {
+        ast(ExprKind::MethodCall {
+            receiver: Box::new(path(name)),
+            method: "len".to_owned(),
+            type_args: Vec::new(),
+            args: Vec::new(),
+            trailing_closure: None,
+        })
+    };
+    let n = format!("#bn{tag}");
+    let_of(&mut stmts, &n, len(&first));
+    for other in &lists[1..] {
+        let check = Expr {
+            kind: ExprKind::Call {
+                callee: Box::new(super::bignum::path_expr(
+                    "rok::core::collections::broadcast",
+                    "check_len",
+                    span,
+                )),
+                args: vec![
+                    CallArg::Positional(len(other)),
+                    CallArg::Positional(path(&n)),
+                ],
+                trailing_closure: None,
+            },
+            span,
+        };
+        stmts.push(Stmt {
+            kind: StmtKind::Expr(check),
+            span,
+        });
+    }
+    let out = format!("#bo{tag}");
+    let new = ast(ExprKind::Call {
+        callee: Box::new(super::bignum::path_expr(LIST, "new", span)),
+        args: Vec::new(),
+        trailing_closure: None,
+    });
+    let_of(&mut stmts, &out, new);
+    let call = ast(ExprKind::Call {
+        callee: Box::new(f),
+        args: call_args,
+        trailing_closure: None,
+    });
+    let push = ast(ExprKind::MethodCall {
+        receiver: Box::new(path(&out)),
+        method: "push".to_owned(),
+        type_args: Vec::new(),
+        args: vec![CallArg::Positional(call)],
+        trailing_closure: None,
+    });
+    let range = ast(ExprKind::Range {
+        start: Some(Box::new(ast(ExprKind::Literal(AstLit::Int(
+            "0usize".to_owned(),
+        ))))),
+        end: Some(Box::new(path(&n))),
+        inclusive: false,
+    });
+    let looped = ast(ExprKind::For {
+        label: None,
+        pat: rokc_ast::Pattern {
+            kind: rokc_ast::PatternKind::Binding {
+                name: format!("#bi{tag}"),
+                sub: None,
+            },
+            span,
+        },
+        iter: Box::new(range),
+        body: Block {
+            stmts: vec![Stmt {
+                kind: StmtKind::Expr(push),
+                span,
+            }],
+            trailing: None,
+            span,
+            label: None,
+        },
+        is_await: false,
+    });
+    stmts.push(Stmt {
+        kind: StmtKind::Expr(looped),
+        span,
+    });
+    lower_expr(ctx, &block_of(stmts, path(&out), span))
+}
+
+/// `name[at]`.
+fn spread_item_at(name: &str, at: &Expr, span: rokc_diagnostic::Span) -> Expr {
+    Expr {
+        kind: ExprKind::Index(
+            Box::new(super::throws::path_expr(name, span)),
+            Box::new(at.clone()),
+        ),
+        span,
+    }
+}
+
+/// `#spread[i]` (`i: usize`).
+fn spread_item(name: &str, i: usize, span: rokc_diagnostic::Span) -> Expr {
+    Expr {
+        kind: ExprKind::Index(
+            Box::new(super::throws::path_expr(name, span)),
+            Box::new(Expr {
+                kind: ExprKind::Literal(AstLit::Int(format!("{i}usize"))),
+                span,
+            }),
+        ),
         span,
     }
 }
@@ -4208,8 +4491,8 @@ pub(super) fn method_call_on(
     let pick = match pick_method(ctx, &recv_h.ty, method, None) {
         Ok(p) => p,
         Err(msg) => {
-            if let Some(id) = pick_by_first_arg(ctx, &recv_h.ty, method, args) {
-                Some(MethodPick::Concrete(id))
+            if let Some(p) = pick_by_first_arg(ctx, &recv_h.ty, method, args) {
+                Some(p)
             } else {
                 lower_args_only(ctx);
                 return ctx.error_expr(span, msg);
@@ -4322,48 +4605,145 @@ pub(super) fn method_call_on(
     call_sig(ctx, &sig, method, Some(recv_h), args, span)
 }
 
-/// One trait implemented several times with different arguments
-/// (`impl Index<usize> for G` + `impl Index<(usize, usize)> for G`):
-/// the only concrete impl whose first parameter after `self` takes the
-/// first argument (each tried in a rolled-back probe).
-fn pick_by_first_arg(
+/// Stdlib 2.4.1: `a op= b` is `a.op_assign(b)` (`ref self`, in place)
+/// when the type of `a` implements `OpAssign` for `b`; `None` otherwise.
+fn assign_trait_call(
     ctx: &mut LowerCtx<'_>,
+    target: &Expr,
+    op: &str,
+    value: &Expr,
+    span: rokc_diagnostic::Span,
+) -> Option<HirExpr> {
+    let (tr, method) = match op {
+        "+=" => ("AddAssign", "add_assign"),
+        "-=" => ("SubAssign", "sub_assign"),
+        "*=" => ("MulAssign", "mul_assign"),
+        "/=" => ("DivAssign", "div_assign"),
+        "%=" => ("RemAssign", "rem_assign"),
+        "%%=" => ("ModuloAssign", "modulo_assign"),
+        "&=" => ("BitAndAssign", "bitand_assign"),
+        "|=" => ("BitOrAssign", "bitor_assign"),
+        "^=" => ("BitXorAssign", "bitxor_assign"),
+        "<<=" => ("ShlAssign", "shl_assign"),
+        ">>=" => ("ShrAssign", "shr_assign"),
+        _ => return None,
+    };
+    let key = format!("rok::core::ops::{tr}");
+    let mark = ctx.probe_mark();
+    let ty = lower_expected(ctx, target, HirTy::Unknown).ty;
+    ctx.rollback_all(&mark);
+    if matches!(ty, HirTy::Prim(_) | HirTy::Unknown) {
+        return None;
+    }
+    let concrete = method_target_for(&ty)
+        .and_then(|t| ctx.env.method_table.get(&(t, method.to_owned())))
+        .is_some_and(|ids| {
+            ids.iter().any(|id| {
+                ctx.env
+                    .method_info
+                    .get(id)
+                    .and_then(|i| i.trait_name.as_deref())
+                    == Some(key.as_str())
+            })
+        });
+    let generic = ctx
+        .env
+        .generic_trait_impls
+        .iter()
+        .any(|gi| gi.trait_key == key && ctx.generic_impl_subst(gi, &ty, 0).is_some());
+    if !concrete && !generic {
+        return None;
+    }
+    // `{ let #t = a; #t.op_assign(b); a = #t; }`: `ref self` updates the
+    // temp, written back to any place (`xs[i] op= b`, `s.f op= b`).
+    let t = tmp_path("oa", span);
+    let call = Expr {
+        kind: ExprKind::MethodCall {
+            receiver: Box::new(t.clone()),
+            method: method.to_owned(),
+            type_args: Vec::new(),
+            args: vec![CallArg::Positional(value.clone())],
+            trailing_closure: None,
+        },
+        span,
+    };
+    let stmts = vec![
+        let_stmt(&t, target.clone()),
+        Stmt {
+            kind: StmtKind::Expr(call),
+            span,
+        },
+        Stmt {
+            kind: StmtKind::Assign(target.clone(), t),
+            span,
+        },
+    ];
+    let block = Expr {
+        kind: ExprKind::Block(Block {
+            stmts,
+            trailing: None,
+            span,
+            label: None,
+        }),
+        span,
+    };
+    Some(lower_expected(ctx, &block, HirTy::Unit))
+}
+
+/// One trait implemented several times with different arguments
+/// (`impl Index<usize> for G` + `impl Index<(usize, usize)> for G`,
+/// `impl<T> AddAssign<T> for List<T>` + `impl<T> AddAssign<List<T>> for
+/// List<T>`): the only impl whose first parameter after `self` takes
+/// the first argument (each tried in a rolled-back probe).
+fn pick_by_first_arg<'e>(
+    ctx: &mut LowerCtx<'e>,
     ty: &HirTy,
     method: &str,
     args: &[CallArg],
-) -> Option<FunctionId> {
+) -> Option<MethodPick<'e>> {
     let Some(CallArg::Positional(arg)) = args.first() else {
         return None;
     };
-    let ids =
-        method_target_for(ty).and_then(|t| ctx.env.method_table.get(&(t, method.to_owned())))?;
-    let trait_of = |id: &FunctionId| {
-        ctx.env
-            .method_info
-            .get(id)
-            .and_then(|i| i.trait_name.clone())
-    };
-    let first = trait_of(ids.first()?)?;
-    if ids.len() < 2 || ids.iter().any(|id| trait_of(id).as_ref() != Some(&first)) {
-        return None;
+    let env = ctx.env;
+    let mut cands: Vec<(String, HirTy, MethodPick<'e>)> = Vec::new();
+    let ids = method_target_for(ty).and_then(|t| env.method_table.get(&(t, method.to_owned())));
+    for id in ids.into_iter().flatten() {
+        let tr = env.method_info.get(id).and_then(|i| i.trait_name.clone())?;
+        if let Some(slot) = ctx.sig_by_id(*id).param_tys.get(1).cloned() {
+            cands.push((tr, slot, MethodPick::Concrete(*id)));
+        }
     }
-    let ids = ids.clone();
-    let mut hits = Vec::new();
-    for id in ids {
-        let Some(slot) = ctx.sig_by_id(id).param_tys.get(1).cloned() else {
+    for gi in &env.generic_trait_impls {
+        let Some(gm) = gi.methods.get(method) else {
             continue;
         };
+        let Some(subst) = ctx.generic_impl_subst(gi, ty, 0) else {
+            continue;
+        };
+        let Some(p) = gm.def.params.get(1).and_then(|p| p.ty.as_ref()) else {
+            continue;
+        };
+        let mut rcx = LowerCtx::new(env, &subst, None);
+        rcx.current_module.clone_from(&gi.module);
+        let slot = rcx.resolve_ast_ty(p);
+        cands.push((gi.trait_key.clone(), slot, MethodPick::Generic(gm)));
+    }
+    if cands.len() < 2 || cands.iter().any(|c| c.0 != cands[0].0) {
+        return None;
+    }
+    let mut hits = Vec::new();
+    for (_, slot, pick) in cands {
         let mark = ctx.probe_mark();
         let h = lower_expected(ctx, arg, slot.clone());
         let ok = ctx.env.sink.diagnostics.borrow().len() == mark.diagnostics
             && coercible(ctx, &slot, &h.ty);
         ctx.rollback_all(&mark);
         if ok {
-            hits.push(id);
+            hits.push(pick);
         }
     }
     match hits[..] {
-        [id] => Some(id),
+        [p] => Some(p),
         _ => None,
     }
 }
@@ -5369,7 +5749,7 @@ fn generic_positional_args(
     let variadic = params.last().is_some_and(|p| p.variadic);
     let mut rest: Vec<CallArg> = Vec::new();
     let mut ok = true;
-    for a in args {
+    for (k, a) in args.iter().enumerate() {
         match a {
             CallArg::Positional(e)
                 if !variadic && n > next && slots[n - 1].is_none() && is_trailing_closure(e) =>
@@ -5414,28 +5794,72 @@ fn generic_positional_args(
             }
             CallArg::Spread(e) => {
                 let h = lower_expected(ctx, e, HirTy::Unknown);
-                let HirTy::Tuple(parts) = h.ty.clone() else {
-                    if h.ty != HirTy::Unknown {
+                let span = e.span;
+                // A tuple's fields, an array's elements, or a `List` /
+                // `Slice`'s up to the next argument (length checked at
+                // run time).
+                let count = match &h.ty {
+                    HirTy::Tuple(parts) => parts.len(),
+                    HirTy::Array(_, len) => *len as usize,
+                    t if spreads_at_run_time(ctx, t) => {
+                        let later = args[k + 1..]
+                            .iter()
+                            .filter(|a| !matches!(a, CallArg::Named { .. }))
+                            .count();
+                        let end = if variadic {
+                            n - 1
+                        } else {
+                            n.saturating_sub(later)
+                        };
+                        end.saturating_sub(next)
+                    }
+                    HirTy::Unknown => return None,
+                    other => {
                         ctx.emit_error(
                             rokc_diagnostic::ErrorKind::Type,
                             format!(
-                                "spread `f(..x)` needs a tuple value, found `{}` (spec 4.1)",
-                                ctx.ty_name(&h.ty)
+                                "spread `f(..x)` needs a tuple, a `List`, a `Slice` or an \
+                                 array, found `{}` (spec 4.2.6)",
+                                ctx.ty_name(other)
                             ),
                         );
+                        return None;
                     }
-                    return None;
                 };
+                let tuple = matches!(h.ty, HirTy::Tuple(_));
+                let run_time = spreads_at_run_time(ctx, &h.ty);
                 let name = format!("#spread{}", ctx.locals.len());
                 let local = ctx.declare(Some(name.clone()), h.ty.clone());
                 lets.push(HirStmt::Let { local, init: h });
-                for k in 0..parts.len() {
-                    let field = Expr {
-                        kind: ExprKind::TupleField(
-                            Box::new(super::throws::path_expr(&name, e.span)),
-                            u32::try_from(k).expect("tuple field overflow"),
-                        ),
-                        span: e.span,
+                if run_time {
+                    let len = Expr {
+                        kind: ExprKind::MethodCall {
+                            receiver: Box::new(super::throws::path_expr(&name, span)),
+                            method: "len".to_owned(),
+                            type_args: Vec::new(),
+                            args: Vec::new(),
+                            trailing_closure: None,
+                        },
+                        span,
+                    };
+                    let want = Expr {
+                        kind: ExprKind::Literal(AstLit::Int(format!("{count}usize"))),
+                        span,
+                    };
+                    let check = index_fn("spread_len", vec![len, want], span);
+                    lets.push(HirStmt::Expr(lower_expected(ctx, &check, HirTy::Unit)));
+                }
+                for k in 0..count {
+                    let field = if tuple {
+                        Expr {
+                            kind: ExprKind::TupleField(
+                                Box::new(super::throws::path_expr(&name, span)),
+                                u32::try_from(k).expect("tuple field overflow"),
+                            ),
+                            span,
+                        }
+                    } else {
+                        spread_item(&name, k, span)
                     };
                     match slots.get_mut(next) {
                         Some(s) => *s = Some(CallArg::Positional(field)),
@@ -8053,7 +8477,14 @@ pub(super) fn dispatch_user_op_lit(
     let Some(fn_id) = fn_id else {
         // `impl<T> Add for Pair<T>` (spec 2.9.4): monomorphize on the
         // operand types.
-        if let Ok(Some(gm)) = generic_trait_method_for(ctx, &lhs.ty, &method) {
+        let gm = if rhs.is_some() {
+            generic_op_by_rhs(ctx, &lhs.ty, rhs.as_ref(), lit_rhs, &method)
+        } else {
+            generic_trait_method_for(ctx, &lhs.ty, &method)
+                .ok()
+                .flatten()
+        };
+        if let Some(gm) = gm {
             if gm.info.trait_name.as_deref().is_some_and(is_op_trait) {
                 let mut args = vec![lhs];
                 args.extend(rhs);
@@ -8102,6 +8533,54 @@ pub(super) fn dispatch_user_op_lit(
         },
         ty: sig.ret_ty,
         span,
+    }
+}
+
+/// The generic impl of an operator's trait that covers the left operand
+/// and takes the right one (`impl<T> DotAdd<List<T>> for List<T>` and
+/// `impl<T> DotAdd<T> for List<T>`): its `Rhs`, under the left
+/// operand's binding, is the right operand's type, else one it
+/// coerces to, else (an unsuffixed literal) a primitive it fits.
+fn generic_op_by_rhs<'e>(
+    ctx: &LowerCtx<'e>,
+    lhs: &HirTy,
+    rhs: Option<&HirExpr>,
+    lit_rhs: Option<&Expr>,
+    method: &str,
+) -> Option<&'e GenericMethod> {
+    let rhs = rhs?;
+    let mut exact = Vec::new();
+    let mut loose = Vec::new();
+    let mut lit = Vec::new();
+    for gi in &ctx.env.generic_trait_impls {
+        let Some(gm) = gi.methods.get(method) else {
+            continue;
+        };
+        let Some(subst) = ctx.generic_impl_subst(gi, lhs, 0) else {
+            continue;
+        };
+        // No written `Rhs`: the operator traits' default, `Self`.
+        let want = match gi.trait_args.first() {
+            Some(arg) => {
+                let mut rcx = LowerCtx::new(ctx.env, &subst, None);
+                rcx.current_module.clone_from(&gi.module);
+                rcx.resolve_ast_ty(arg)
+            }
+            None => lhs.clone(),
+        };
+        if want == rhs.ty {
+            exact.push(gm);
+        } else if coercible(ctx, &want, &rhs.ty) {
+            loose.push(gm);
+        } else if let (HirTy::Prim(_), Some(v)) = (&want, lit_rhs.and_then(untyped_lit_value)) {
+            if literal_fits(ctx, v, &want) {
+                lit.push(gm);
+            }
+        }
+    }
+    match (exact.as_slice(), loose.as_slice(), lit.as_slice()) {
+        ([gm], ..) | ([], [gm], _) | ([], [], [gm]) => Some(*gm),
+        _ => None,
     }
 }
 
@@ -8930,7 +9409,10 @@ fn lower_magic(
         match a {
             rokc_ast::LitArg::One(e) => args.push(CallArg::Positional(e.clone())),
             rokc_ast::LitArg::Many(items) if variadic_at == Some(i) => {
-                args.extend(items.iter().cloned().map(CallArg::Positional));
+                for it in items {
+                    let a = list_item(ctx, it);
+                    args.push(a);
+                }
             }
             rokc_ast::LitArg::Many(items) => args.push(CallArg::Positional(Expr {
                 kind: ExprKind::List(items.clone()),
@@ -8978,7 +9460,7 @@ fn lower_magic(
 /// An AST stand-in (a `#sN` path) for the already lowered `h`, so a
 /// desugar can place it without lowering its source twice. Use it once:
 /// each use evaluates `h` again.
-fn splice(ctx: &mut LowerCtx<'_>, h: HirExpr) -> Expr {
+pub(super) fn splice(ctx: &mut LowerCtx<'_>, h: HirExpr) -> Expr {
     let span = h.span;
     let name = format!("#s{}", ctx.splices.len());
     ctx.splices.insert(name.clone(), h);

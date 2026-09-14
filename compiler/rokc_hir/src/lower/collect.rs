@@ -94,6 +94,54 @@ fn within(pkg: &str, p: &str) -> bool {
 
 /// One `fn __rok_static_init_X() -> T { init }` per lazy static, added
 /// to `program`.
+/// Spec 4.2.2 / 2.10.7: a parameter without a type is an implicit type
+/// parameter (`fn id(x)` is `fn id<T#x>(x: T#x)`), monomorphized per
+/// call; the body is checked per instance, and no bound is synthesized.
+/// Free fns and inherent methods with a body (a trait impl's method
+/// takes its types from the trait).
+fn implicit_generics(program: &mut Program) {
+    let fix = |f: &mut FnDef| {
+        if f.body.is_none() {
+            return;
+        }
+        for p in &mut f.params {
+            if p.ty.is_some() || p.name == "self" || p.variadic {
+                continue;
+            }
+            let name = format!("T#{}", p.name);
+            let path = rokc_ast::Path {
+                segments: vec![rokc_ast::PathSegment {
+                    name: name.clone(),
+                    generics: Vec::new(),
+                }],
+                span: p.span,
+            };
+            p.ty = Some(Ty {
+                kind: AstTyKind::Path(path),
+                span: p.span,
+            });
+            f.generics.params.push(rokc_ast::GenericParam::Type {
+                name,
+                bounds: Vec::new(),
+                default: None,
+            });
+        }
+    };
+    for item in &mut program.items {
+        match item {
+            Item::Fn(f) => fix(f),
+            Item::Impl(i) if i.trait_path.is_none() => {
+                for it in &mut i.items {
+                    if let AstImplItem::Method(f) = it {
+                        fix(f);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn add_lazy_static_inits(program: &mut Program) {
     let inits: Vec<Item> = program
         .items
@@ -164,6 +212,7 @@ pub fn lower_full(
     let check_library = input.check_library;
     let mut owned = program;
     add_lazy_static_inits(&mut owned);
+    implicit_generics(&mut owned);
     let program = &owned;
     // Diagnostics emitted during pre-body passes (impl-target validation
     // etc.) — folded into module.diagnostics once the module exists.
@@ -1003,9 +1052,10 @@ pub fn lower_full(
             continue;
         }
         // Inherent methods of a generic impl (and generic methods of a
-        // plain one) are templates keyed by the target's generic base.
+        // plain inherent or trait impl) are templates keyed by the
+        // target's generic base.
         let generic_base = match &impl_def.self_ty.kind {
-            AstTyKind::Path(p) if impl_def.trait_path.is_none() => {
+            AstTyKind::Path(p) if impl_def.trait_path.is_none() || !impl_generic => {
                 let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
                 // `impl str { fn parse<T>(..) }`: a primitive's generic
                 // methods key by the primitive's name.
@@ -1068,8 +1118,9 @@ pub fn lower_full(
                     else {
                         break;
                     };
-                    let is_self = matches!(&d.kind, AstTyKind::Path(p)
-                        if p.segments.len() == 1 && p.segments[0].name == "Self");
+                    let is_self = matches!(&d.kind, AstTyKind::SelfUpper)
+                        || matches!(&d.kind, AstTyKind::Path(p)
+                            if p.segments.len() == 1 && p.segments[0].name == "Self");
                     args.push(if is_self { target_ty.clone() } else { rty(d) });
                 }
             }
@@ -1156,20 +1207,28 @@ pub fn lower_full(
                 let slot = generic_methods
                     .entry((base.clone(), leaf.clone()))
                     .or_default();
-                if slot.iter().any(|g| g.info.trait_name.is_none()) {
+                if slot
+                    .iter()
+                    .any(|g| g.info.trait_name.is_none() || g.info.trait_name == trait_name)
+                {
                     err(
                         &mut pre_diags,
                         format!("method `{leaf}` is defined more than once for `{target_display}`"),
                     );
                     continue;
                 }
+                let vis = if trait_name.is_some() {
+                    Visibility::Pub
+                } else {
+                    m.vis
+                };
                 slot.push(GenericMethod {
                     def,
                     self_ty: impl_def.self_ty.clone(),
                     info: MethodInfo {
                         module: module.clone(),
-                        vis: m.vis,
-                        trait_name: None,
+                        vis,
+                        trait_name: trait_name.clone(),
                     },
                 });
                 continue;
@@ -1516,6 +1575,7 @@ pub fn lower_full(
         const_stack: std::cell::RefCell::new(Vec::new()),
         inferred_ret: std::cell::RefCell::default(),
         recursive_ret: std::cell::RefCell::default(),
+        call_sites: std::cell::RefCell::default(),
         tentative_ret: std::cell::RefCell::default(),
     };
     let mut exports: Vec<(FunctionId, String)> = Vec::new();
@@ -1674,6 +1734,7 @@ pub fn lower_full(
         decls,
     };
     check_impl_overlap(&env);
+    check_impl_rules(&env, program);
     check_derives(&env, program);
     // Eagerly instantiated generic structs whose fields name projections
     // (`Peekable<ListIter<i32>>`'s `peeked: I::Item | none`): resolve
@@ -3691,6 +3752,88 @@ fn check_type_bounds(env: &Env<'_>) {
 
 /// A type has at most one impl of a trait (spec 2.9.3): a concrete impl
 /// that a generic impl also covers is a duplicate (no specialization).
+/// Trait impls: the orphan rule (spec 2.9.5: the trait or the target
+/// type is the impl's package's own), and supertraits (spec 2.8.4: a
+/// type implementing a trait implements its supertraits too — checked
+/// for impls on a concrete type; a generic impl's target meets them
+/// through the trait's bounds when instantiated).
+fn check_impl_rules(env: &Env<'_>, program: &Program) {
+    let no_subst = HashMap::new();
+    for item in &program.items {
+        let Item::Impl(i) = item else {
+            continue;
+        };
+        let Some(tp) = &i.trait_path else {
+            continue;
+        };
+        let module = impl_module(i);
+        let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
+        let key = env.names.trait_key(&segs, &module);
+        let pkg = package_of(&module);
+        if package_of(&module_of(&key)) != pkg && target_package(env, i, &module) != Some(pkg) {
+            rokc_diagnostic::set_current_span(i.span);
+            env.sink
+                .diagnostics
+                .borrow_mut()
+                .push(rokc_diagnostic::RokDiagnostic::error(
+                    rokc_diagnostic::ErrorKind::Type,
+                    format!(
+                        "`impl {} for {}`: neither the trait nor the type is defined in this \
+                         package (orphan rule, spec 2.9.5)",
+                        leaf_name(&key),
+                        impl_def_display(&i.self_ty)
+                    ),
+                ));
+            continue;
+        }
+        if i.negative || !i.generics.params.is_empty() {
+            continue;
+        }
+        let Some(info) = env.trait_info.get(&key) else {
+            continue;
+        };
+        let mut ctx = LowerCtx::new(env, &no_subst, None);
+        ctx.current_module.clone_from(&module);
+        let target = ctx.resolve_ast_ty(&i.self_ty);
+        if target == HirTy::Unknown {
+            continue;
+        }
+        for sup in &info.supers {
+            if ctx.implements_trait(&target, sup, 0) {
+                continue;
+            }
+            rokc_diagnostic::set_current_span(i.span);
+            ctx.emit_error(
+                rokc_diagnostic::ErrorKind::Type,
+                format!(
+                    "`{}` implements `{}` but not its supertrait `{}` (spec 2.8.4)",
+                    ctx.ty_name(&target),
+                    leaf_name(&key),
+                    leaf_name(sup)
+                ),
+            );
+        }
+    }
+}
+
+/// The package defining an impl's target type: a struct / enum's own,
+/// `rok::core` for a built-in type, `None` for a bare type parameter.
+fn target_package(env: &Env<'_>, i: &rokc_ast::ImplDef, module: &str) -> Option<String> {
+    if let AstTyKind::Path(p) = &i.self_ty.kind {
+        let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
+        let param = i.generics.params.iter().any(
+            |gp| matches!(gp, rokc_ast::GenericParam::Type { name, .. } if segs == [name.as_str()]),
+        );
+        if param {
+            return None;
+        }
+        if let Some(full) = env.names.canon(&segs, module, &[]) {
+            return Some(package_of(&module_of(&full)));
+        }
+    }
+    Some("rok::core".to_owned())
+}
+
 fn check_impl_overlap(env: &Env<'_>) {
     let no_subst = HashMap::new();
     let ctx = LowerCtx::new(env, &no_subst, None);
@@ -4087,7 +4230,11 @@ impl Unifier {
     fn unify(&mut self, x: &CanonTy, y: &CanonTy) -> Option<()> {
         match (self.walk(x), self.walk(y)) {
             (CanonTy::Var(v), CanonTy::Var(w)) if v == w => Some(()),
+            // No cyclic binding (`T` against `List<T>`): no overlap.
             (CanonTy::Var(v), t) | (t, CanonTy::Var(v)) => {
+                if occurs(&v, &t) {
+                    return None;
+                }
                 self.sub.insert(v, t);
                 Some(())
             }
@@ -4107,6 +4254,17 @@ impl Unifier {
             }
             _ => None,
         }
+    }
+}
+
+/// Does variable `v` occur in `t` (already walked)?
+fn occurs(v: &str, t: &CanonTy) -> bool {
+    match t {
+        CanonTy::Var(w) => w == v,
+        CanonTy::Named(_, ts) | CanonTy::Tuple(ts) | CanonTy::Sum(ts) => {
+            ts.iter().any(|t| occurs(v, t))
+        }
+        CanonTy::Array(e, n) => occurs(v, e) || occurs(v, n),
     }
 }
 

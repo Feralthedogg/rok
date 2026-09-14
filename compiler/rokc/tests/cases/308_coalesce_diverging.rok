@@ -2,8 +2,12 @@
 // expect-exit: 0
 // A diverging `??` default (`return` / `throw` block) has type `!`.
 
+#[derive(Debug)]
 struct E {}
 impl Error for E {}
+impl Display for E {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("E") }
+}
 
 fn f(x: i32 | none) -> i32 {
     let v = x ?? { return -1; };

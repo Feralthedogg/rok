@@ -30,10 +30,11 @@ pub struct FnDef {
 /// (spec 5.9.10).
 pub const EXTERN_C_FN_ATTR: &str = "#extern_c";
 
-/// Marker attribute of a nested `fn` statement (spec 4.10): the fn is
-/// lifted to a module item named by the attribute's string (`outer#f`);
-/// a second `true` argument marks a sibling visible from an enclosing
-/// block rather than one declared here.
+/// Marker attribute of a nested `fn` statement (spec 4.10).
+///
+/// The fn is lifted to a module item named by the attribute's string
+/// (`outer#f`); a second `true` argument marks a sibling visible from
+/// an enclosing block rather than one declared here.
 pub const NESTED_FN_ATTR: &str = "#nested_fn";
 
 /// Marker attribute of a `const fn` (spec 5.2.5): callable in const
@@ -389,7 +390,9 @@ pub enum ExprKind {
         inclusive: bool,
     },
     /// `x?.tail` — language-level sum-type-aware access (desugars to match).
-    QuestionDot(Box<Expr>, AccessTail),
+    /// `x?.a.b(..)[i]`: the links after `?.`, all skipped when `x` is
+    /// `none` (spec 3.8.8).
+    QuestionDot(Box<Expr>, Vec<AccessTail>),
     /// `lhs ?? rhs` — language-level sum-type-aware coalesce.
     NullishCoalesce(Box<Expr>, Box<Expr>),
     /// `expr?` — postfix early-return for sum types. Yields the
@@ -415,6 +418,12 @@ pub enum ExprKind {
         path: Path,
         fields: Vec<(String, Expr)>,
         spread: Option<Box<Expr>>,
+    },
+    /// `f.(a, b)` (spec 3.3.3): `f` applied to each element of the
+    /// `List` / `Slice` / array arguments (others are passed as is).
+    Broadcast {
+        callee: Box<Expr>,
+        args: Vec<CallArg>,
     },
     /// Spread expression for `..arg` in call sites or struct init.
     Spread(Box<Expr>),

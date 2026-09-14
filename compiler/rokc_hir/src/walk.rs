@@ -403,6 +403,10 @@ pub fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
                 walk_expr(v, tc);
             }
         }
+        ExprKind::Broadcast { callee, args } => {
+            walk_expr(v, callee);
+            walk_args(v, args);
+        }
         ExprKind::Call {
             callee,
             args,
@@ -430,19 +434,21 @@ pub fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
                 walk_expr(v, x);
             }
         }
-        ExprKind::QuestionDot(t, tail) => {
+        ExprKind::QuestionDot(t, tails) => {
             walk_expr(v, t);
-            match tail {
-                AccessTail::Field(_) | AccessTail::TupleField(_) => {}
-                AccessTail::Method {
-                    type_args, args, ..
-                } => {
-                    for t in type_args {
-                        walk_ty(v, t);
+            for tail in tails {
+                match tail {
+                    AccessTail::Field(_) | AccessTail::TupleField(_) => {}
+                    AccessTail::Method {
+                        type_args, args, ..
+                    } => {
+                        for t in type_args {
+                            walk_ty(v, t);
+                        }
+                        walk_args(v, args);
                     }
-                    walk_args(v, args);
+                    AccessTail::Index(i) => walk_expr(v, i),
                 }
-                AccessTail::Index(i) => walk_expr(v, i),
             }
         }
         ExprKind::TryQ(inner)

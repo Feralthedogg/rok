@@ -150,6 +150,65 @@ pub trait LogicalOr<Rhs = Self> {
     fn logical_or(self, rhs: Rhs) -> bool;
 }
 
+// Compound assignment (stdlib 2.4): `a op= b` calls `op_assign(ref a, b)`
+// when the type implements the trait (an in-place update), else it is
+// `a = a op b`. The compiler maps each token to its trait.
+
+/// `+=`
+pub trait AddAssign<Rhs = Self> {
+    fn add_assign(ref self, rhs: Rhs);
+}
+
+/// `-=`
+pub trait SubAssign<Rhs = Self> {
+    fn sub_assign(ref self, rhs: Rhs);
+}
+
+/// `*=`
+pub trait MulAssign<Rhs = Self> {
+    fn mul_assign(ref self, rhs: Rhs);
+}
+
+/// `/=`
+pub trait DivAssign<Rhs = Self> {
+    fn div_assign(ref self, rhs: Rhs);
+}
+
+/// `%=`
+pub trait RemAssign<Rhs = Self> {
+    fn rem_assign(ref self, rhs: Rhs);
+}
+
+/// `%%=`
+pub trait ModuloAssign<Rhs = Self> {
+    fn modulo_assign(ref self, rhs: Rhs);
+}
+
+/// `&=`
+pub trait BitAndAssign<Rhs = Self> {
+    fn bitand_assign(ref self, rhs: Rhs);
+}
+
+/// `|=`
+pub trait BitOrAssign<Rhs = Self> {
+    fn bitor_assign(ref self, rhs: Rhs);
+}
+
+/// `^=`
+pub trait BitXorAssign<Rhs = Self> {
+    fn bitxor_assign(ref self, rhs: Rhs);
+}
+
+/// `<<=`
+pub trait ShlAssign<Rhs = Self> {
+    fn shl_assign(ref self, rhs: Rhs);
+}
+
+/// `>>=`
+pub trait ShrAssign<Rhs = Self> {
+    fn shr_assign(ref self, rhs: Rhs);
+}
+
 // Element-wise ("broadcast") counterparts. Same precedence as their
 // scalar siblings; the only difference is the trait method they target.
 
@@ -189,24 +248,40 @@ pub trait DotModulo<Rhs = Self> {
     fn dot_modulo(self, rhs: Rhs) -> Output;
 }
 
-pub trait DotCmp<Rhs = Self> {
+pub trait DotEq<Rhs = Self> {
+    type Output;
     #[infix(".==")]
-    fn dot_eq(self, rhs: Rhs) -> bool;
+    fn dot_eq(self, rhs: Rhs) -> Output;
+}
 
+pub trait DotNe<Rhs = Self> {
+    type Output;
     #[infix(".!=")]
-    fn dot_ne(self, rhs: Rhs) -> bool;
+    fn dot_ne(self, rhs: Rhs) -> Output;
+}
 
+pub trait DotLt<Rhs = Self> {
+    type Output;
     #[infix(".<")]
-    fn dot_lt(self, rhs: Rhs) -> bool;
+    fn dot_lt(self, rhs: Rhs) -> Output;
+}
 
+pub trait DotGt<Rhs = Self> {
+    type Output;
     #[infix(".>")]
-    fn dot_gt(self, rhs: Rhs) -> bool;
+    fn dot_gt(self, rhs: Rhs) -> Output;
+}
 
+pub trait DotLe<Rhs = Self> {
+    type Output;
     #[infix(".<=")]
-    fn dot_le(self, rhs: Rhs) -> bool;
+    fn dot_le(self, rhs: Rhs) -> Output;
+}
 
+pub trait DotGe<Rhs = Self> {
+    type Output;
     #[infix(".>=")]
-    fn dot_ge(self, rhs: Rhs) -> bool;
+    fn dot_ge(self, rhs: Rhs) -> Output;
 }
 
 /// `.&&` / `.||`: element-wise, both sides always evaluated (2.6).

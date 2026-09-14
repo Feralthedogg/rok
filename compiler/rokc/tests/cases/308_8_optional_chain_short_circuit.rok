@@ -1,0 +1,49 @@
+// spec: 003.08.8-short-circuit-evaluation-of-optional-chaining
+// spec: 003.08.2-chaining
+// expect-exit: 0
+// expect-stdout:
+// 2 none
+// called
+// 3 none
+// 20 none
+// 1 none
+// 5 2 none
+
+struct Counter { n: i32; }
+
+impl Counter {
+    fn bump(self) -> Counter {
+        println("called");
+        Counter { n: self.n + 1 }
+    }
+}
+
+struct Boss { name: str; }
+
+struct User { name: str; tags: List<str>; boss: Boss | none; }
+
+fn get(b: bool) -> str | none { if b { "  hi " } else { none } }
+
+fn counter(b: bool) -> Counter | none { if b { Counter { n: 2 } } else { none } }
+
+fn main() -> i32 {
+    // The whole chain after `?.` is skipped on `none`.
+    let a = get(true)?.trim().len();
+    let b = get(false)?.trim().len();
+    println(f"{a ?? 0} {b:?}");
+    let c = counter(true)?.bump().n;
+    let d = counter(false)?.bump().n;
+    println(f"{c ?? 0} {d:?}");
+    let xs: List<i32> | none = [10, 20];
+    let ys: List<i32> | none = none;
+    println(f"{xs?.clone()[1] ?? 0} {ys?.clone()[1]:?}");
+    let u = User { name: "ann", tags: ["x"], boss: Boss { name: "bo" } };
+    let v: User | none = u;
+    let w: User | none = none;
+    println(f"{v?.tags.len() ?? 0} {w?.tags.len():?}");
+    // A `?.` inside the chain: none at either step ends it.
+    let p: (i32, str) | none = (5, "q");
+    let boss = v?.boss?.name.len();
+    println(f"{p?.0 ?? 0} {boss ?? 0} {w?.boss?.name.len():?}");
+    return 0;
+}

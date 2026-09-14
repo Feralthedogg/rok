@@ -454,7 +454,7 @@ pub(super) fn sum_none(sum_ty: &HirTy, span: rokc_diagnostic::Span) -> HirExpr {
 pub(super) fn desugar_question_dot(
     ctx: &mut LowerCtx<'_>,
     recv: HirExpr,
-    tail: &rokc_ast::AccessTail,
+    tails: &[rokc_ast::AccessTail],
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
     if recv.ty == HirTy::Unknown {
@@ -488,9 +488,12 @@ pub(super) fn desugar_question_dot(
         ty: payload_ty.clone(),
         span,
     };
-    let inner = apply_access_tail(ctx, unwrapped, tail, span);
-    if inner.ty == HirTy::Unknown {
-        return inner;
+    let mut inner = unwrapped;
+    for tail in tails {
+        inner = apply_access_tail(ctx, inner, tail, span);
+        if inner.ty == HirTy::Unknown {
+            return inner;
+        }
     }
     let inner_optional = optional_parts(&inner.ty).is_some();
     let result_ty = if inner_optional {
@@ -570,10 +573,14 @@ pub(super) fn apply_access_tail(
             let call = method_call_on(ctx, recv, method, args, span);
             unpack_call(ctx, call)
         }
-        rokc_ast::AccessTail::Index(_) => ctx.error_expr(
-            span,
-            "`?.[index]` is not supported yet (stage-1 limitation)".to_owned(),
-        ),
+        rokc_ast::AccessTail::Index(i) => {
+            let target = super::expr::splice(ctx, recv);
+            let e = rokc_ast::Expr {
+                kind: ExprKind::Index(Box::new(target), i.clone()),
+                span,
+            };
+            lower_expr(ctx, &e)
+        }
     }
 }
 

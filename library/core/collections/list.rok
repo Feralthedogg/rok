@@ -507,3 +507,19 @@ pub fn list_literal<T>(items: ...T) -> List<T> {
     }
     return l;
 }
+
+/// `xs += x`: push (stdlib 2.4.6).
+impl<T> AddAssign<T> for List<T> {
+    fn add_assign(ref self, rhs: T) {
+        self.push(rhs);
+    }
+}
+
+/// `xs += ys`: append every element of `ys`, in place.
+impl<T> AddAssign<List<T>> for List<T> {
+    fn add_assign(ref self, rhs: List<T>) {
+        for x in rhs {
+            self.push(x);
+        }
+    }
+}

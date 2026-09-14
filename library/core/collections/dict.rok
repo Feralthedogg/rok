@@ -346,6 +346,15 @@ impl<K: Hash + Clone, V: Clone> Clone for Dict<K, V> {
     }
 }
 
+/// `d += e`: merge `e` in place; its values win (stdlib 2.4.6).
+impl<K: Hash, V> AddAssign<Dict<K, V>> for Dict<K, V> {
+    fn add_assign(ref self, rhs: Dict<K, V>) {
+        for (k, v) in rhs {
+            self.insert(k, v);
+        }
+    }
+}
+
 /// `for (k, v) in d` (2.9.9).
 impl<K: Hash, V> IntoIterator for Dict<K, V> {
     type IntoIter = DictEntries<K, V>;

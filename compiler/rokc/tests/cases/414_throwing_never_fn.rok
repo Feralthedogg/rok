@@ -3,11 +3,15 @@
 // A throwing `-> !` function: its carrier has no ok slot, and a
 // `catch` of a call to it takes the handler's type.
 
+#[derive(Debug)]
 struct E {
     code: i32;
 }
 
 impl Error for E {}
+impl Display for E {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("E") }
+}
 
 fn fail(msg: str) throws -> ! {
     throw ValueError { msg: msg };

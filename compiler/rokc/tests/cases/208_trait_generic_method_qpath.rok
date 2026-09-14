@@ -1,0 +1,50 @@
+// spec: 002.08.3-associated-types
+// spec: 002.13.4-fully-qualified-path
+// spec: 002.08.2-method-signatures
+// expect-exit: 0
+// expect-stdout:
+// 5 4 shape
+// 7 x 2
+// sq 8
+
+// A trait method with its own type parameter, implemented by a plain
+// impl; `<S as Tr>::X` on a concrete type.
+trait Shape {
+    type Unit;
+    const SIDES: u32;
+    fn conv<U>(self, u: U) -> U;
+    fn pair<U>(self, u: U) -> (U, i32) { (u, 2) }
+    fn name(self) -> str { "shape" }
+}
+
+struct Sq { s: i32; }
+
+impl Shape for Sq {
+    type Unit = i64;
+    const SIDES: u32 = 4;
+    fn conv<U>(self, u: U) -> U { u }
+}
+
+struct Named { n: str; }
+
+impl Shape for Named {
+    type Unit = str;
+    const SIDES: u32 = 8;
+    fn conv<U>(self, u: U) -> U { u }
+    fn name(self) -> str { self.n }
+}
+
+fn sides<T: Shape>(x: T) -> u32 { <T as Shape>::SIDES }
+
+fn main() -> i32 {
+    let a: <Sq as Shape>::Unit = 5;
+    let s = Sq { s: 1 };
+    println(f"{a} {<Sq as Shape>::SIDES} {<Sq as Shape>::name(s)}");
+    let k: i32 = s.conv(7);
+    let (u, two) = s.pair("x");
+    println(f"{k} {u} {two}");
+    let n = Named { n: "sq" };
+    let t: <Named as Shape>::Unit = n.conv(n.name());
+    println(f"{t} {sides(n)}");
+    return 0;
+}

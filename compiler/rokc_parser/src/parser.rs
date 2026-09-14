@@ -3765,29 +3765,24 @@ impl<'a> Parser<'a> {
                         false,
                     ));
                 }
-                // Compound assignment `target op= value;` desugars to
-                // `target = OpInfix(op, target, value);`. Spec 3.4.3: the
-                // target must be evaluated once — index / receiver
-                // sub-expressions that are not plain variables or
-                // literals are hoisted into temps first:
-                // `a[f()] += 1` → `{ let t = f(); a[t] = a[t] + 1; }`.
+                // Compound assignment `target op= value;` (HIR: the
+                // `*Assign` trait's method, else `target = target op
+                // value`). Spec 3.4.3: the target must be evaluated once —
+                // index / receiver sub-expressions that are not plain
+                // variables or literals are hoisted into temps first:
+                // `a[f()] += 1` → `{ let t = f(); a[t] += 1; }`.
                 if let Some(op) = compound_assign_op(self.peek()) {
                     self.bump();
                     let value = self.parse_expr()?;
                     self.expect(&TokenKind::Semi, "`;`")?;
                     let mut stmts = Vec::new();
                     let target = self.hoist_place(expr, &mut stmts);
-                    let span = target.span;
-                    let combined = Expr {
-                        span,
-                        kind: ExprKind::OpInfix {
-                            op: op.to_owned(),
-                            lhs: Box::new(target.clone()),
-                            rhs: Box::new(value),
-                        },
-                    };
                     let assign = Stmt {
-                        kind: StmtKind::Assign(target, combined),
+                        kind: StmtKind::CompoundAssign {
+                            target,
+                            op: format!("{op}="),
+                            value,
+                        },
                         span: start,
                     };
                     if stmts.is_empty() {
@@ -4758,8 +4753,19 @@ impl<'a> Parser<'a> {
         };
         let mut expr = Expr { kind, span: start };
 
-        // Postfix chain: calls, members, indexing, `?`, `?.`.
+        // Postfix chain: calls, members, indexing, `?`, `?.`. After a
+        // `?.`, member / index links join its tail (spec 3.8.8).
+        let mut chain_open = false;
         loop {
+            if chain_open {
+                match fold_chain(expr) {
+                    Ok(e) => expr = e,
+                    Err(e) => {
+                        expr = e;
+                        chain_open = false;
+                    }
+                }
+            }
             self.chain_link()?;
             match self.peek() {
                 TokenKind::LParen | TokenKind::LBracket if stmt_head && is_block_like(&expr) => {
@@ -4779,6 +4785,20 @@ impl<'a> Parser<'a> {
                             callee: Box::new(expr),
                             args,
                             trailing_closure,
+                        },
+                    };
+                }
+                TokenKind::Dot if self.peek_next() == Some(TokenKind::LParen) => {
+                    // `f.(xs)`: function broadcast (spec 3.3.3).
+                    self.bump();
+                    self.bump();
+                    let args = self.parse_call_args()?;
+                    self.expect(&TokenKind::RParen, "`)`")?;
+                    expr = Expr {
+                        span: expr.span,
+                        kind: ExprKind::Broadcast {
+                            callee: Box::new(expr),
+                            args,
                         },
                     };
                 }
@@ -4942,9 +4962,10 @@ impl<'a> Parser<'a> {
                                 span: expr.span,
                                 kind: ExprKind::QuestionDot(
                                     Box::new(expr),
-                                    AccessTail::TupleField(idx),
+                                    vec![AccessTail::TupleField(idx)],
                                 ),
                             };
+                            chain_open = true;
                             continue;
                         }
                         _ => {
@@ -4973,11 +4994,15 @@ impl<'a> Parser<'a> {
                     };
                     expr = Expr {
                         span: expr.span,
-                        kind: ExprKind::QuestionDot(Box::new(expr), tail),
+                        kind: ExprKind::QuestionDot(Box::new(expr), vec![tail]),
                     };
+                    chain_open = true;
                 }
                 _ => break,
             }
+        }
+        if chain_open {
+            expr = fold_chain(expr).unwrap_or_else(|e| e);
         }
         Some(expr)
     }
@@ -6094,4 +6119,48 @@ fn nested_marker(f: &FnDef, lifted: &str, inherited: bool) -> FnDef {
         where_clause: Vec::new(),
         span: f.span,
     }
+}
+
+/// `x?.a` followed by a member / index link: the link joins the `?.`
+/// tail; anything else (`Err`) ends the optional chain.
+fn fold_chain(e: Expr) -> Result<Expr, Expr> {
+    let span = e.span;
+    let (recv, tail) = match e.kind {
+        ExprKind::QuestionDot(..) => return Ok(e),
+        ExprKind::Field(r, name) if matches!(r.kind, ExprKind::QuestionDot(..)) => {
+            (r, AccessTail::Field(name))
+        }
+        ExprKind::TupleField(r, i) if matches!(r.kind, ExprKind::QuestionDot(..)) => {
+            (r, AccessTail::TupleField(i))
+        }
+        ExprKind::Index(r, i) if matches!(r.kind, ExprKind::QuestionDot(..)) => {
+            (r, AccessTail::Index(i))
+        }
+        ExprKind::MethodCall {
+            receiver,
+            method,
+            type_args,
+            mut args,
+            trailing_closure,
+        } if matches!(receiver.kind, ExprKind::QuestionDot(..)) => {
+            args.extend(trailing_closure.map(|c| CallArg::Positional(*c)));
+            (
+                receiver,
+                AccessTail::Method {
+                    method,
+                    type_args,
+                    args,
+                },
+            )
+        }
+        kind => return Err(Expr { kind, span }),
+    };
+    let ExprKind::QuestionDot(x, mut tails) = recv.kind else {
+        unreachable!("checked above")
+    };
+    tails.push(tail);
+    Ok(Expr {
+        kind: ExprKind::QuestionDot(x, tails),
+        span,
+    })
 }

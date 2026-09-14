@@ -1432,8 +1432,12 @@ impl AstVisitor for Cx<'_> {
                     }
                 }
             }
-            ExprKind::QuestionDot(_, AccessTail::Method { method, .. }) => {
-                self.file_names.insert(method.clone());
+            ExprKind::QuestionDot(_, tails) => {
+                for t in tails {
+                    if let AccessTail::Method { method, .. } = t {
+                        self.file_names.insert(method.clone());
+                    }
+                }
             }
             ExprKind::StructInit { path, .. } => {
                 self.file_names

@@ -34,6 +34,15 @@ pub trait Sliceable<R> {
 /// through here; an unsigned one never is. A non-negative `i` is
 /// checked by the indexed type as before; a negative one past the
 /// start panics here.
+/// Spec 4.2.6: a `List` / `Slice` spread `f(..xs)` into fixed
+/// parameters needs exactly as many elements as it fills.
+#[track_caller]
+pub fn spread_len(len: usize, want: usize) {
+    if len != want {
+        panic(f"spread of {len} elements into {want} parameters");
+    }
+}
+
 #[track_caller]
 pub fn index_from_end(i: isize, len: usize) -> usize {
     if i >= 0 {

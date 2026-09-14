@@ -1,0 +1,47 @@
+// spec: 004.02.2-omitting-the-type
+// spec: 002.10.7-combination-with-gradual-typing
+// expect-exit: 0
+// expect-stdout:
+// 8 5
+// 42 hi
+// 3 hi
+// 7 6
+// 12 1.5
+// 10
+// int
+
+// An untyped parameter is an implicit type parameter, monomorphized per
+// call: no `any`, and the body is checked per instance.
+fn twice(x) { x + x }
+
+fn id(x) { x }
+
+fn pair(x, y) { (x, y) }
+
+fn mixed(a: i32, b) { a + b.len() as i32 }
+
+fn typed_ret(x) -> i32 { x * 2 }
+
+struct S { v: i32; }
+
+impl S {
+    fn scale(self, k) { self.v * k }
+}
+
+fn dyn_id(x: any) -> any { x }
+
+fn main() -> i32 {
+    println(f"{twice(4)} {twice(2.5)}");
+    let s: str = id("hi");
+    println(f"{id(42)} {s}");
+    let (a, b) = pair(3, "hi");
+    println(f"{a} {b}");
+    println(f"{mixed(5, "ab")} {mixed(3, [1, 2, 3])}");
+    println(f"{S { v: 4 }.scale(3)} {id(1.5)}");
+    println(f"{typed_ret(5)}");
+    let d = dyn_id(7);
+    if d is i32 {
+        println("int");
+    }
+    return 0;
+}

@@ -300,7 +300,7 @@ pub(super) fn monomorphize_on(
     self_ty: Option<&Ty>,
     self_hint: Option<&HirTy>,
     args: &[HirExpr],
-    _span: rokc_diagnostic::Span,
+    span: rokc_diagnostic::Span,
 ) -> Option<(FunctionId, HirTy)> {
     let fn_module = module_of(&fn_def.name);
     // Unify each parameter's AST type with its argument's type; the
@@ -470,11 +470,7 @@ pub(super) fn monomorphize_on(
         subst_tys.iter().map(ty_mangle).collect::<Vec<_>>(),
     );
     if let Some(&existing_id) = ctx.env.sink.mono_cache.borrow().get(&key) {
-        if matches!(
-            ctx.env.sink.inferred_ret.borrow().get(&existing_id),
-            Some(None)
-        ) {
-            ctx.env.sink.recursive_ret.borrow_mut().push(existing_id);
+        if being_inferred(ctx.env, existing_id) {
             return None;
         }
         let ret_ty = ctx
@@ -550,14 +546,15 @@ pub(super) fn monomorphize_on(
         .sink
         .mono_depth
         .set(ctx.env.sink.mono_depth.get() + 1);
-    let mono_fn = lower_fn_inner(
-        ctx.env,
+    let mono_fn = lower_instance(
+        ctx,
         fn_def,
         new_id,
         mangled_name,
         self_hir,
         fn_module,
         &subst,
+        span,
     );
     ctx.env
         .sink
@@ -583,6 +580,43 @@ pub(super) fn monomorphize_on(
     );
     ctx.env.sink.extras.borrow_mut().push(mono_fn);
     Some((new_id, ret_ty))
+}
+
+/// Is `id`'s return type being inferred (a call of it from its own
+/// body)? Recorded for `infer_ret_of`.
+fn being_inferred(env: &Env<'_>, id: FunctionId) -> bool {
+    let open = matches!(env.sink.inferred_ret.borrow().get(&id), Some(None));
+    if open {
+        env.sink.recursive_ret.borrow_mut().push(id);
+    }
+    open
+}
+
+/// `lower_fn_inner` for an instance; one of an implicit generic
+/// (spec 4.2.2) records its call site for the body's errors.
+#[allow(clippy::too_many_arguments)]
+fn lower_instance(
+    ctx: &LowerCtx<'_>,
+    fn_def: &FnDef,
+    id: FunctionId,
+    name: String,
+    self_hir: Option<HirTy>,
+    module: String,
+    subst: &HashMap<String, HirTy>,
+    span: rokc_diagnostic::Span,
+) -> HirFunction {
+    let implicit = fn_def.generics.params.iter().any(
+        |gp| matches!(gp, rokc_ast::GenericParam::Type { name, .. } if name.starts_with("T#")),
+    );
+    if implicit {
+        let site = (fn_def.name.clone(), span);
+        ctx.env.sink.call_sites.borrow_mut().push(site);
+    }
+    let f = lower_fn_inner(ctx.env, fn_def, id, name, self_hir, module, subst);
+    if implicit {
+        ctx.env.sink.call_sites.borrow_mut().pop();
+    }
+    f
 }
 
 /// An instance over `let` inference variables (`infer`): its signature

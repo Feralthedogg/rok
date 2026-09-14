@@ -1291,6 +1291,11 @@ impl Printer {
                 self.args(args);
                 self.trailing(trailing_closure.as_deref());
             }
+            ExprKind::Broadcast { callee, args } => {
+                self.receiver(callee);
+                self.s(".");
+                self.args(args);
+            }
             ExprKind::Index(x, i) => {
                 self.receiver(x);
                 self.s("[");
@@ -1331,31 +1336,42 @@ impl Printer {
                     self.operand(e);
                 }
             }
-            ExprKind::QuestionDot(x, tail) => {
-                self.receiver(x);
-                self.s("?.");
-                match tail {
-                    AccessTail::Field(f) => self.s(f),
-                    AccessTail::TupleField(i) => {
-                        let _ = write!(self.out, "{i}");
-                    }
-                    AccessTail::Method {
-                        method,
-                        type_args,
-                        args,
-                    } => {
-                        self.s(method);
-                        if !type_args.is_empty() {
-                            self.s("::<");
-                            self.list(type_args, ", ", Self::ty);
-                            self.s(">");
+            ExprKind::QuestionDot(x, tails) => {
+                if matches!(x.kind, ExprKind::QuestionDot(..)) {
+                    self.operand(x);
+                } else {
+                    self.receiver(x);
+                }
+                for (k, tail) in tails.iter().enumerate() {
+                    let dot = if k == 0 { "?." } else { "." };
+                    match tail {
+                        AccessTail::Field(f) => {
+                            self.s(dot);
+                            self.s(f);
                         }
-                        self.args(args);
-                    }
-                    AccessTail::Index(i) => {
-                        self.s("[");
-                        self.expr(i);
-                        self.s("]");
+                        AccessTail::TupleField(i) => {
+                            self.s(dot);
+                            let _ = write!(self.out, "{i}");
+                        }
+                        AccessTail::Method {
+                            method,
+                            type_args,
+                            args,
+                        } => {
+                            self.s(dot);
+                            self.s(method);
+                            if !type_args.is_empty() {
+                                self.s("::<");
+                                self.list(type_args, ", ", Self::ty);
+                                self.s(">");
+                            }
+                            self.args(args);
+                        }
+                        AccessTail::Index(i) => {
+                            self.s("[");
+                            self.expr(i);
+                            self.s("]");
+                        }
                     }
                 }
             }
@@ -1518,10 +1534,12 @@ impl Printer {
 
     /// The left side of `.f` / `(..)` / `[..]` / `?`: a number literal
     /// is grouped too (`(1).f`).
+    /// A member / index link's receiver: a `?.` chain is grouped, or
+    /// the link would join it (spec 3.8.8).
     fn receiver(&mut self, e: &Expr) {
         if matches!(
             &e.kind,
-            ExprKind::Literal(Literal::Int(_) | Literal::Float(_))
+            ExprKind::Literal(Literal::Int(_) | Literal::Float(_)) | ExprKind::QuestionDot(..)
         ) {
             self.s("(");
             self.expr(e);
@@ -1678,6 +1696,7 @@ const fn atomic(e: &Expr) -> bool {
                 trailing_closure: None,
                 ..
             }
+            | ExprKind::Broadcast { .. }
             | ExprKind::Call {
                 trailing_closure: None,
                 ..

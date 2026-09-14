@@ -1,0 +1,65 @@
+// spec: std 204-ops-assign §2.4.1
+// spec: std 204-ops-assign §2.4.7
+// spec: std 204-ops-assign §2.4.8
+// expect-exit: 0
+// expect-stdout:
+// 7 4
+// [1, 2, 3, 4, 5] [1, 2, 3, 4, 5]
+// 1.5 2.5 3.5
+// 12
+// 30
+// 3 9 2
+
+// `a op= b`: the `*Assign` impl (in place) when there is one, else
+// `a = a op b`.
+struct V { x: i32; adds: i32; }
+
+impl AddAssign for V {
+    fn add_assign(ref self, rhs: V) {
+        self.x = self.x + rhs.x * 2;
+        self.adds = self.adds + 1;
+    }
+}
+
+impl MulAssign<i32> for V {
+    fn mul_assign(ref self, k: i32) { self.x = self.x * k; }
+}
+
+struct Vec3 { x: f64; y: f64; z: f64; }
+
+impl Add for Vec3 {
+    type Output = Vec3;
+    fn add(self, r: Vec3) -> Vec3 { Vec3 { x: self.x + r.x, y: self.y + r.y, z: self.z + r.z } }
+}
+
+fn grow<T: AddAssign<T>>(a: T, b: T) -> T {
+    let r = a;
+    r += b;
+    r
+}
+
+struct Box { items: List<V>; }
+
+fn main() -> i32 {
+    let v = V { x: 1, adds: 0 };
+    v += V { x: 3, adds: 0 };
+    v += V { x: 0, adds: 0 };
+    println(f"{v.x} {v.adds * 2}");
+    let xs: List<i32> = [1, 2];
+    let alias = xs;
+    xs += 3;
+    xs += [4, 5];
+    println(f"{xs:?} {alias:?}");
+    let p = Vec3 { x: 1.0, y: 2.0, z: 3.0 };
+    p += Vec3 { x: 0.5, y: 0.5, z: 0.5 };
+    println(f"{p.x} {p.y} {p.z}");
+    let g = grow(V { x: 2, adds: 0 }, V { x: 5, adds: 0 });
+    println(f"{g.x}");
+    let b = Box { items: [V { x: 3, adds: 0 }] };
+    b.items[0] *= 10;
+    println(f"{b.items[0].x}");
+    let d = {"a": 1, "b": 2};
+    d += {"b": 9, "c": 2};
+    println(f"{d.len()} {d["b"]} {d["c"]}");
+    return 0;
+}

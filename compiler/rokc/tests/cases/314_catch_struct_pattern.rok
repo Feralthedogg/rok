@@ -6,8 +6,12 @@
 
 // 3.14.4: `catch HttpError { code, msg } { .. }` — a struct pattern
 // when a second block follows; it covers the error type.
+#[derive(Debug)]
 struct HttpError { code: i32; msg: str; }
 impl Error for HttpError {}
+impl Display for HttpError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("HttpError") }
+}
 
 fn get(fail: bool) throws (HttpError) -> i32 {
     if fail { throw HttpError { code: 404, msg: "nf" }; }

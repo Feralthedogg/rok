@@ -1,0 +1,11 @@
+// spec: std 206-broadcast §2.6.4
+// Lists of different lengths: a run-time panic.
+// expect-exit: 101
+// expect-stderr: broadcast over lists of lengths 3 and 2
+
+fn main() -> i32 {
+    let p: List<i32> = [1, 2, 3];
+    let q: List<i32> = [1, 2];
+    let r = p .+ q;
+    r[0]
+}

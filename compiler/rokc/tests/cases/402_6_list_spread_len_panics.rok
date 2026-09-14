@@ -1,0 +1,11 @@
+// spec: 004.02.6-spread-args
+// A list spread into fixed parameters checks its length at run time.
+// expect-exit: 101
+// expect-stderr: spread of 2 elements into 3 parameters
+
+fn three(a: i32, b: i32, c: i32) -> i32 { a + b + c }
+
+fn main() -> i32 {
+    let xs: List<i32> = [1, 2];
+    three(..xs)
+}

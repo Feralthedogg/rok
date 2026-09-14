@@ -1425,6 +1425,9 @@ struct ClosureSink {
     /// Return types inferred from bodies (spec 4.1.3), by function;
     /// `None` while the body is being inferred.
     inferred_ret: std::cell::RefCell<HashMap<FunctionId, Option<HirTy>>>,
+    /// Call sites of the implicit-generic instances being lowered
+    /// (spec 4.2.2: their body errors point at the call too).
+    call_sites: std::cell::RefCell<Vec<(String, rokc_diagnostic::Span)>>,
     /// Calls met of functions whose return type is being inferred.
     recursive_ret: std::cell::RefCell<Vec<FunctionId>>,
     /// Inferred return types that depend on a fn still being inferred:
@@ -1692,11 +1695,11 @@ impl<'a> LowerCtx<'a> {
 
     /// Push a lowering-time diagnostic onto the shared sink.
     fn emit_error(&self, kind: rokc_diagnostic::ErrorKind, msg: String) {
-        self.env
-            .sink
-            .diagnostics
-            .borrow_mut()
-            .push(rokc_diagnostic::RokDiagnostic::error(kind, msg));
+        let mut d = rokc_diagnostic::RokDiagnostic::error(kind, msg);
+        if let Some((callee, at)) = self.env.sink.call_sites.borrow().first() {
+            d = d.with_secondary(*at, format!("in this call of `{}`", leaf_name(callee)));
+        }
+        self.env.sink.diagnostics.borrow_mut().push(d);
     }
 
     /// A warning. In a generic instance it is held until all lowering

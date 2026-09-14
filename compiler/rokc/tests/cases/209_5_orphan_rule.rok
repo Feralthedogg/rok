@@ -1,0 +1,15 @@
+// spec: 002.09.5-orphan-rule
+// A trait impl needs the trait or the type to be this package's own.
+// expect-error: 13:1: `impl Display for List<i32>`: neither the trait nor the type is defined in this package (orphan rule, spec 2.9.5)
+// forbid-warning: `impl Mine
+
+trait Mine { fn m(self) -> i32; }
+
+struct Local {}
+
+impl Mine for i32 { fn m(self) -> i32 { self } }
+impl Default for Local { fn default() -> Local { Local {} } }
+
+impl Display for List<i32> { fn fmt(self, ref f: Formatter) throws (FmtError) {} }
+
+fn main() {}

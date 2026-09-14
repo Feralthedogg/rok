@@ -1,0 +1,52 @@
+// spec: 003.03.1-desugaring-pattern
+// spec: 003.03.3-function-and-method-broadcast
+// spec: std 206-broadcast §2.6.4
+// spec: std 206-broadcast §2.6.5
+// expect-exit: 0
+// expect-stdout:
+// [11, 22, 33] [10, 40, 90] [9, 18, 27] [10, 10, 10]
+// [11, 12, 13] [2, 4, 6] [0, 1, 1]
+// [-1, 2, 0, 2] [2, 2, 0, 2]
+// [false, true, false] [true, false, false] [false, true, true] [true, false, true]
+// [true, false, false, false] [true, true, true, false]
+// [false, true, true, false]
+// [8, 10, 3] [14, 10, 15] [6, 0, 12] [4, 8, 16]
+// [1, 4, 9] [2, 3] [11, 22, 33]
+// [3, 6, 9] [10.5, 20.5]
+// [true, false]
+
+fn sq(x: i32) -> i32 { x * x }
+fn add(a: i32, b: i32) -> i32 { a + b }
+fn scale(x: f64, k: f64) -> f64 { x * k + 0.5 }
+
+struct P { v: i32; }
+
+fn main() -> i32 {
+    let a: List<i32> = [1, 2, 3];
+    let b: List<i32> = [10, 20, 30];
+    println(f"{a .+ b:?} {a .* b:?} {b .- a:?} {b ./ a:?}");
+    println(f"{a .+ 10:?} {2 .* a:?} {a ./ 2:?}");
+    let x: List<i32> = [-7, 5, -3, 8];
+    let y: List<i32> = [3, 3, 3, 3];
+    println(f"{x .% y:?} {x .%% y:?}");
+    let p: List<i32> = [1, 5, 3];
+    let q: List<i32> = [2, 5, 1];
+    println(f"{p .== q:?} {p .< q:?} {p .>= q:?} {p .< 4:?}");
+    let u: List<bool> = [true, false, true, false];
+    let v: List<bool> = [true, true, false, false];
+    println(f"{u .&& v:?} {u .|| v:?}");
+    let xs: List<i32> = [1, 5, 3, 8];
+    println(f"{(xs .>= 2) .&& (xs .< 6):?}");
+    let m: List<i32> = [12, 10, 3];
+    let n: List<i32> = [10, 10, 15];
+    let ns: List<i32> = [1, 2, 4];
+    println(f"{m .& n:?} {m .| n:?} {m .^ n:?} {ns .<< 2:?}");
+    // Function broadcast: each element; several lists are zipped.
+    let fs: List<f64> = [4.0, 9.0];
+    println(f"{sq.(a):?} {f64::sqrt.(fs):?} {add.(a, b):?}");
+    let k = 3;
+    println(f"{(|z: i32| z * k).(a):?} {scale.([5.0, 10.0], 2.0):?}");
+    let ps = [P { v: 1 }, P { v: 0 }];
+    println(f"{(|p: P| p.v > 0).(ps):?}");
+    return 0;
+}

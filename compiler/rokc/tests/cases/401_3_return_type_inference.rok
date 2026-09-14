@@ -40,8 +40,12 @@ fn find(xs: List<i32>, want: i32) {
 
 fn first<T>(xs: List<T>) { xs[0] }
 
+#[derive(Debug)]
 struct Bad { msg: str; }
 impl Error for Bad {}
+impl Display for Bad {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("Bad") }
+}
 
 fn checked(n: i32) throws (Bad) {
     if n < 0 { throw Bad { msg: "neg" }; }
