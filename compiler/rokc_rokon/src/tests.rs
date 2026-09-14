@@ -92,6 +92,8 @@ fn every_error() {
         ("P {\n    x,\n}", "field `x` needs a value", "2:5"),
         ("42i32", "type suffixes are not allowed", "1:1"),
         ("1.5f64", "type suffixes are not allowed", "1:1"),
+        ("[1e999]", "float `1e999` is out of range", "1:2"),
+        ("-1e999", "float `1e999` is out of range", "1:2"),
         ("c'a'", "`c'..'` literals are not allowed", "1:1"),
         ("List::<i32>::new", "generic arguments", "1:1"),
         ("\"open", "unterminated string", "1:1"),
@@ -119,7 +121,9 @@ fn every_error() {
 fn canonical_text_round_trips() {
     for src in [
         "none",
-        "[1, -2, 3.5, -0.25, 1e-7, 'q', '\\'', \"s\\\"\\n\", true]",
+        "[1, -2, 3.5, -0.25, 1.0e-7, 'q', '\\'', \"s\\\"\\n\", true]",
+        "[1.0e17, -1.5e300, 0.00001, 12345.5, 0.0, 10000000000000000.0, 1.0e-6]",
+        "\"\\u{202e}x\\u{2066}\"",
         "(1,)",
         "()",
         "{}",
@@ -129,7 +133,6 @@ fn canonical_text_round_trips() {
         "Mode::Fast",
         "Shape::Circle(1.5, at: (0, 0))",
         "Shape::Rect { w: 2, h: 3 }",
-        "E::V(k: 1)",
         "P {}",
     ] {
         let v = parse(src).unwrap();
@@ -137,6 +140,8 @@ fn canonical_text_round_trips() {
         assert_eq!(text, src, "canonical form of {src:?}");
         assert_eq!(parse(&text).unwrap(), v);
     }
+    // A variant of named values only has one form, `E::V { .. }`.
+    assert_eq!(to_string(&parse("E::V(k: 1)").unwrap()), "E::V { k: 1 }");
     // Too wide for a line: one entry per line, trailing commas, nested
     // values on one line when they fit.
     let long = "x".repeat(50);

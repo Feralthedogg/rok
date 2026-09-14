@@ -1006,8 +1006,20 @@ const ONE: &str = "pub fn one() -> i32 { return 1; }\n";
 /// A stone's repository at `dir`: `files` plus a `rok.rokon` for `name`
 /// `vers` with `deps`, committed, with itself as remote `origin`.
 fn stone(dir: &Path, name: &str, vers: &str, deps: &str, files: &[(&str, &str)]) -> String {
+    stone_meta(dir, name, vers, deps, "", files)
+}
+
+/// `stone` with manifest fields `meta` (`license: "MIT", `).
+fn stone_meta(
+    dir: &Path,
+    name: &str,
+    vers: &str,
+    deps: &str,
+    meta: &str,
+    files: &[(&str, &str)],
+) -> String {
     let manifest =
-        format!("Package {{ name: \"{name}\", version: \"{vers}\", deps: {{ {deps} }} }}\n");
+        format!("Package {{ name: \"{name}\", version: \"{vers}\", {meta}deps: {{ {deps} }} }}\n");
     let mut all = files.to_vec();
     all.push(("rok.rokon", &manifest));
     let c = commit(dir, &all);
@@ -1082,17 +1094,27 @@ fn publish_stones(root: &Path, home: &Path, index: &Path) -> String {
     }
     let geom = root.join("geom");
     let two = "use num::one;\npub fn two() -> i32 { return one() + one(); }\n";
-    stone(
+    // Manifest metadata rides along in the entry.
+    stone_meta(
         &geom,
         "geom",
         "0.3.0",
         "\"num\": \"^1.0\"",
+        "description: \"Shapes\", license: \"MIT\", repository: \"https://example.com/geom\", ",
         &[("lib.rok", two)],
     );
     ok(&rok(home, &geom, &["publish", "--index", &reg, "--commit"]));
+    let entry = read(&index.join("ge/om/geom"));
     assert!(
-        read(&index.join("ge/om/geom"))
-            .contains("deps: [{ name: \"num\", req: \"^1.0\", kind: \"normal\" }]")
+        entry.contains("deps: [{ name: \"num\", req: \"^1.0\", kind: \"normal\" }]"),
+        "{entry}"
+    );
+    assert!(
+        entry.contains(
+            "yanked: false, description: \"Shapes\", license: \"MIT\", repository: \
+             \"https://example.com/geom\" }"
+        ),
+        "{entry}"
     );
     // A path dependency cannot be published.
     let bad = root.join("bad");

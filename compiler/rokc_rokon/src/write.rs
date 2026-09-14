@@ -39,7 +39,10 @@ fn quoted(s: &str, q: char) -> String {
             '\t' => out.push_str("\\t"),
             '\r' => out.push_str("\\r"),
             '\0' => out.push_str("\\0"),
-            c if c.is_control() => {
+            // The bidi controls the lexer rejects too (refs-lang 1.1).
+            c if c.is_control()
+                || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') =>
+            {
                 let _ = write!(out, "\\u{{{:x}}}", u32::from(c));
             }
             c => out.push(c),
@@ -74,12 +77,16 @@ fn parts(v: &Value) -> Option<(String, &'static str, Vec<Entry<'_>>, &'static st
             named(fields),
             "}",
         ),
+        // Named values only: `E::V { a: 1 }` whether read as that or as
+        // `E::V(a: 1)` — std rokon's `Value` keeps no form (spec 3.9.5).
         Kind::Variant {
             path,
+            args,
             named: fs,
-            braces: true,
-            ..
-        } => (format!("{path} "), "{", named(fs), "}"),
+            braces,
+        } if *braces || (args.is_empty() && !fs.is_empty()) => {
+            (format!("{path} "), "{", named(fs), "}")
+        }
         Kind::Variant {
             path,
             args,
@@ -107,13 +114,31 @@ fn scalar(v: &Value) -> String {
         Kind::None => "none".into(),
         Kind::Bool(b) => b.to_string(),
         Kind::Int(i) => i.to_string(),
-        // `{:?}` keeps a `.0` / exponent so it reads back as a
-        // float; NaN / infinity have no RokON form.
-        Kind::Float(f) => format!("{f:?}"),
+        Kind::Float(f) => float(*f),
         Kind::Char(c) => quoted(&c.to_string(), '\''),
         Kind::Str(s) => quote(s),
         Kind::Variant { path, .. } => path.clone(),
         _ => unreachable!("bracketed values have parts"),
+    }
+}
+
+/// The shortest digits that read back as `f`, always with a `.`: plain
+/// for magnitudes 1e-5 up to 1e17, else `1.0e17` (spec 3.9.4, as std
+/// rokon). NaN / infinity have no RokON form.
+fn float(f: f64) -> String {
+    assert!(f.is_finite(), "NaN/infinity has no RokON form");
+    let a = f.abs();
+    let t = if a != 0.0 && !(1e-5..1e17).contains(&a) {
+        format!("{f:e}")
+    } else {
+        format!("{f}")
+    };
+    if t.contains('.') {
+        return t;
+    }
+    match t.split_once('e') {
+        Some((m, e)) => format!("{m}.0e{e}"),
+        None => format!("{t}.0"),
     }
 }
 

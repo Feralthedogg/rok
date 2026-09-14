@@ -183,10 +183,13 @@ fn bind_assoc_bindings(ctx: &LowerCtx<'_>, fn_def: &FnDef, subst: &mut HashMap<S
                 continue;
             };
             for g in bp.segments.iter().flat_map(|s| &s.generics) {
-                let Some((assoc, rokc_ast::Ty {
-                    kind: rokc_ast::TyKind::Path(tp),
-                    ..
-                })) = rokc_ast::as_assoc_binding(g)
+                let Some((
+                    assoc,
+                    rokc_ast::Ty {
+                        kind: rokc_ast::TyKind::Path(tp),
+                        ..
+                    },
+                )) = rokc_ast::as_assoc_binding(g)
                 else {
                     continue;
                 };
@@ -901,7 +904,10 @@ pub(super) fn generic_struct_fields(
         AstStructKind::Named(fs) => fs
             .iter()
             .map(|f| {
-                let d = f.default.clone().map(|d| in_module(&module_of(&def.name), d));
+                let d = f
+                    .default
+                    .clone()
+                    .map(|d| in_module(&module_of(&def.name), d));
                 field(f.name.clone(), &f.ty, d)
             })
             .collect(),

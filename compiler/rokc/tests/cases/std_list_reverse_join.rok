@@ -1,0 +1,24 @@
+// spec: std 2.9.2
+// expect-exit: 0
+// `List::reverse` (in place) and `List<str>::join`.
+
+fn main() -> i32 {
+    let xs = [1, 2, 3, 4, 5];
+    xs.reverse();
+    if xs != [5, 4, 3, 2, 1] { return 1; }
+    let ys = [1, 2];
+    ys.reverse();
+    if ys != [2, 1] { return 2; }
+    let e: List<i32> = [];
+    e.reverse();
+    if e.len() != 0 { return 3; }
+    let ws = ["a", "b", "c"];
+    if ws.join(", ") != "a, b, c" { return 4; }
+    if ["x"].join("-") != "x" { return 5; }
+    let none_: List<str> = [];
+    if none_.join(",") != "" { return 6; }
+    let ss = ["p", "q"];
+    ss.reverse();
+    if ss.join("") != "qp" { return 7; }
+    0
+}

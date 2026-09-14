@@ -1,0 +1,25 @@
+// spec: std 2.15
+// expect-exit: 0
+// `split_whitespace` splits on Unicode White_Space (the set `trim`
+// strips); an empty `from` in `replace` matches at every char boundary.
+
+fn words(s: str) -> List<str> {
+    let out: List<str> = [];
+    for w in s.split_whitespace() {
+        out.push(w);
+    }
+    out
+}
+
+fn main() -> i32 {
+    if words("  a b\t\nc  ") != ["a", "b", "c"] { return 1; }
+    if words("x\u{3000}y\u{a0}z\u{2029}") != ["x", "y", "z"] { return 2; }
+    if words("한 글\u{85}😀") != ["한", "글", "😀"] { return 3; }
+    if words("").len() != 0 { return 4; }
+    if words(" \u{3000} ").len() != 0 { return 5; }
+    if "ab".replace("", "-") != "-a-b-" { return 6; }
+    if "".replace("", "-") != "-" { return 7; }
+    if "한😀".replace("", "|") != "|한|😀|" { return 8; }
+    if "aXbX".replace("X", "") != "ab" { return 9; }
+    0
+}

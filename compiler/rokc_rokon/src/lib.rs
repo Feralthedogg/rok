@@ -474,6 +474,10 @@ impl Conv<'_> {
                 let f: f64 = format!("{sign}{digits}")
                     .parse()
                     .map_err(|_| self.err(e, format!("invalid float `{t}`")))?;
+                // Infinity has no RokON form (spec 3.9.1).
+                if !f.is_finite() {
+                    return Err(self.err(e, format!("float `{t}` is out of range")));
+                }
                 Kind::Float(f)
             }
             Literal::Str(s) => {

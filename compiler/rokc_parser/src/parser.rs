@@ -3133,7 +3133,10 @@ impl<'a> Parser<'a> {
                     if self.eat(&TokenKind::Else) {
                         let else_block = self.parse_block()?;
                         self.expect(&TokenKind::Semi, "`;`")?;
-                        return Some((self.let_else_pattern(pat, ty, init, else_block, start), false));
+                        return Some((
+                            self.let_else_pattern(pat, ty, init, else_block, start),
+                            false,
+                        ));
                     }
                     self.expect(&TokenKind::Semi, "`;`")?;
                     return Some((

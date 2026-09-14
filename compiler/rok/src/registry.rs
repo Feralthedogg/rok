@@ -74,11 +74,26 @@ pub struct Entry {
     /// The commit's git tree hash.
     pub cksum: String,
     pub yanked: bool,
+    /// The manifest's `description` / `license` / `repository`.
+    pub meta: Vec<(&'static str, String)>,
 }
+
+/// Manifest metadata an entry carries, in line order.
+const META: [&str; 3] = ["description", "license", "repository"];
 
 fn entry(d: Decoder<'_>) -> Result<Entry, String> {
     let r = d.record("Stone")?;
-    r.only(&["name", "vers", "deps", "source", "cksum", "yanked"])?;
+    r.only(&[
+        "name",
+        "vers",
+        "deps",
+        "source",
+        "cksum",
+        "yanked",
+        "description",
+        "license",
+        "repository",
+    ])?;
     let string = |k: &str| r.req(k).and_then(|d| d.string());
     let name = string("name")?;
     manifest::check_name(&name).map_err(|e| r.field_error("name", &e))?;
@@ -129,6 +144,10 @@ fn entry(d: Decoder<'_>) -> Result<Entry, String> {
             .map(|y| y.bool())
             .transpose()?
             .unwrap_or(false),
+        meta: META
+            .iter()
+            .filter_map(|k| Some(r.opt(k)?.string().map(|v| (*k, v))))
+            .collect::<Result<_, _>>()?,
     })
 }
 
@@ -178,7 +197,10 @@ impl Entry {
                 ("source", source.to_value()),
                 ("cksum", Value::str(&self.cksum)),
                 ("yanked", Value::new(Kind::Bool(self.yanked))),
-            ],
+            ]
+            .into_iter()
+            .chain(self.meta.iter().map(|(k, v)| (*k, Value::str(v))))
+            .collect(),
         ))
     }
 }
@@ -305,6 +327,14 @@ pub fn entry_for(dir: &Path, m: &Manifest) -> Result<Entry, String> {
         rev: git::run(dir, &["rev-parse", "HEAD"])?,
         cksum: git::run(dir, &["rev-parse", "HEAD^{tree}"])?,
         yanked: false,
+        meta: [
+            ("description", &m.description),
+            ("license", &m.license),
+            ("repository", &m.repository),
+        ]
+        .into_iter()
+        .filter_map(|(k, v)| Some((k, v.clone()?)))
+        .collect(),
     })
 }
 
@@ -436,6 +466,7 @@ mod tests {
             rev: "c".repeat(40),
             cksum: "t".repeat(40),
             yanked: false,
+            meta: vec![("license", "MIT".into())],
         };
         let line = e.to_line();
         assert_eq!(
@@ -443,7 +474,7 @@ mod tests {
             format!(
                 "Stone {{ name: \"geom\", vers: \"0.3.1\", deps: [{{ name: \"num\", req: \"^1.2\", \
                  kind: \"normal\" }}], source: Dep::git(\"https://github.com/o/geom\", rev: \
-                 \"{}\"), cksum: \"{}\", yanked: false }}",
+                 \"{}\"), cksum: \"{}\", yanked: false, license: \"MIT\" }}",
                 "c".repeat(40),
                 "t".repeat(40)
             )

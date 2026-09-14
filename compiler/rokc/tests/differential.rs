@@ -35,31 +35,7 @@ use common::{Env, Rng, par_map, rokc_build, setup};
 use rokc_rokon::{Field, Kind, Value};
 
 /// `(suite, op, why)`: mismatches that do not fail the test.
-const KNOWN: &[(&str, &str, &str)] = &[
-    // Python inserts `to` between every char; rok returns the input.
-    (
-        "str",
-        "replace-empty",
-        "`replace(\"\", to)` returns the input unchanged",
-    ),
-    // rokc_rokon writes floats with Rust `{:?}` (`1e17`); std 3.9.4's
-    // canonical form (and rok's writer) is `1.0e17`.
-    (
-        "rokon",
-        "float-exp",
-        "rokc_rokon writes `1e17`, canonical is `1.0e17`",
-    ),
-    // std rokon's Value::Variant has no braces flag: `E::V(a: 1)` (no
-    // positional arguments) writes back as `E::V { a: 1 }`.
-    (
-        "rokon",
-        "variant-named",
-        "`E::V(a: 1)` reads back as `E::V { a: 1 }`",
-    ),
-    // `split_whitespace` splits on ASCII whitespace only; `trim` and
-    // Python use Unicode White_Space (U+3000 ...).
-    ("str", "split_whitespace", "U+3000 does not split"),
-];
+const KNOWN: &[(&str, &str, &str)] = &[];
 
 fn seed() -> u64 {
     std::env::var("ROK_DIFF_SEED")
@@ -1013,6 +989,7 @@ fn rokon_value(rng: &mut Rng, depth: u32) -> Value {
         "bell \u{7} c1 \u{85}",
         "한 😀",
         "{x}",
+        "bidi \u{202e} \u{2066}",
     ];
     let kind = if depth > 2 || rng.chance(35) {
         match rng.below(7) {
@@ -1077,32 +1054,6 @@ fn rokon_value(rng: &mut Rng, depth: u32) -> Value {
     Value::new(kind)
 }
 
-/// Any node of `v` satisfies `f`.
-fn any_node(v: &Value, f: &dyn Fn(&Value) -> bool) -> bool {
-    f(v) || match &v.kind {
-        Kind::List(vs) | Kind::Tuple(vs) => vs.iter().any(|x| any_node(x, f)),
-        Kind::Dict(ps) => ps.iter().any(|(k, x)| any_node(k, f) || any_node(x, f)),
-        Kind::Struct { fields, .. } => fields.iter().any(|x| any_node(&x.value, f)),
-        Kind::Variant { args, named, .. } => {
-            args.iter().any(|x| any_node(x, f)) || named.iter().any(|x| any_node(&x.value, f))
-        }
-        _ => false,
-    }
-}
-
-/// The `KNOWN` op a RokON value would hit, else `round-trip`.
-fn rokon_op(v: &Value) -> &'static str {
-    let exp = |v: &Value| matches!(v.kind, Kind::Float(f) if format!("{f:?}").contains('e'));
-    let named = |v: &Value| matches!(&v.kind, Kind::Variant { args, named, braces: false, .. } if args.is_empty() && !named.is_empty());
-    if any_node(v, &named) {
-        "variant-named"
-    } else if any_node(v, &exp) {
-        "float-exp"
-    } else {
-        "round-trip"
-    }
-}
-
 fn rokon_suite(rng: &mut Rng) -> Suite {
     let mut s = Suite {
         name: "rokon",
@@ -1119,7 +1070,7 @@ fn rokon_suite(rng: &mut Rng) -> Suite {
         );
         s.want.push(text.clone());
         s.cases.push(Case {
-            op: rokon_op(&v),
+            op: "round-trip",
             repro: text,
             cmp: Cmp::Exact,
         });

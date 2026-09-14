@@ -928,7 +928,11 @@ fn c_abi_matches_clang() {
 fn link_attribute_links_the_library() {
     let Some(env) = setup() else { return };
     let dir = scratch("link_attr");
-    fs::write(dir.join("probe.c"), "int rok_link_probe(int x) { return x * 3; }\n").unwrap();
+    fs::write(
+        dir.join("probe.c"),
+        "int rok_link_probe(int x) { return x * 3; }\n",
+    )
+    .unwrap();
     let obj = dir.join("probe.o");
     ok(&Command::new("clang")
         .args(["-c", "-o"])

@@ -83,13 +83,13 @@ pub(super) fn lower_closure_expr(
         }
         t => Some(t),
     });
-    let (expected_param_tys, mut expected_ret): (Option<Vec<HirTy>>, Option<HirTy>) =
-        match expected {
-            Some(HirTy::Fn(args, ret, _) | HirTy::Closure { args, ret, .. }) => {
-                (Some(args.clone()), Some((**ret).clone()))
-            }
-            _ => (None, None),
-        };
+    let (expected_param_tys, mut expected_ret): (Option<Vec<HirTy>>, Option<HirTy>) = match expected
+    {
+        Some(HirTy::Fn(args, ret, _) | HirTy::Closure { args, ret, .. }) => {
+            (Some(args.clone()), Some((**ret).clone()))
+        }
+        _ => (None, None),
+    };
     // An expected `fn(..) throws (E) -> T`: the body's value is a `T`; an
     // unknown `E` (a `rethrows` parameter) is inferred like no `E`.
     let mut expected_err = None;

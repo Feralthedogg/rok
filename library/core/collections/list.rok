@@ -9,6 +9,20 @@ pub struct List<T> {
     data: GcBuf<GcBuf<T>>;
 }
 
+impl List<str> {
+    /// The items with `sep` between each two: `["a", "b"].join(", ")`.
+    pub fn join(self, sep: str) -> str {
+        let b = StrBuf::new();
+        for (i, s) in self.iter().enumerate() {
+            if i > 0 {
+                b.push_str(sep);
+            }
+            b.push_str(s);
+        }
+        b.to_str()
+    }
+}
+
 // Copies of a collection handle share one mutable buffer with no lock,
 // so a collection cannot be shared between threads (stdlib 2.13.9):
 // share it through `Mutex` / `RwLock` / a channel.
@@ -86,6 +100,19 @@ impl<T> List<T> {
             }
             self.data[0] = store;
             self.meta[1] = n;
+        }
+    }
+
+    /// The elements in reverse order, in place.
+    pub fn reverse(self) {
+        unsafe {
+            let store = self.data[0];
+            let n = self.len();
+            for i in 0..n / 2 {
+                let x = store[i];
+                store[i] = store[n - 1 - i];
+                store[n - 1 - i] = x;
+            }
         }
     }
 

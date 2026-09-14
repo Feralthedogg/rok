@@ -5287,7 +5287,10 @@ fn generic_positional_args(
             (Some(a), _) => out.push(a),
             (None, _) if p.variadic => {}
             (None, Some(d)) => {
-                out.push(CallArg::Positional(in_module(&module_of(&def.name), d.clone())));
+                out.push(CallArg::Positional(in_module(
+                    &module_of(&def.name),
+                    d.clone(),
+                )));
             }
             (None, None) => {
                 ctx.emit_error(

@@ -198,8 +198,26 @@ pub extern "C" fn rok_str_rfind(s: RokStr, pat: RokStr) -> isize {
 #[allow(clippy::many_single_char_names)] // byte-crunching locals
 pub extern "C" fn rok_str_replace(s: RokStr, from: RokStr, to: RokStr) -> RokStr {
     let (h, f, t) = (s.bytes(), from.bytes(), to.bytes());
+    // An empty `from` matches at every char boundary: "ab" → "-a-b-".
     if f.is_empty() {
-        return build(&[h]);
+        let chars = h.iter().filter(|&&b| (b & 0xC0) != 0x80).count();
+        let p = alloc_str(h.len() + (chars + 1) * t.len());
+        let mut o = 0;
+        // SAFETY: one `t` per boundary plus every byte of `h`: the length
+        // allocated above.
+        unsafe {
+            ptr::copy_nonoverlapping(t.as_ptr(), p, t.len());
+            o += t.len();
+            for (i, &b) in h.iter().enumerate() {
+                *p.add(o) = b;
+                o += 1;
+                if h.get(i + 1).is_none_or(|n| (n & 0xC0) != 0x80) {
+                    ptr::copy_nonoverlapping(t.as_ptr(), p.add(o), t.len());
+                    o += t.len();
+                }
+            }
+        }
+        return RokStr { ptr: p, len: o };
     }
     // Two passes: measure, then copy.
     let mut count = 0;

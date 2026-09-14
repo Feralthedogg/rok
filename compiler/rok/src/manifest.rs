@@ -11,6 +11,9 @@
 //!     name: "app",
 //!     version: "0.1.0",
 //!     toolchain: "0.3",
+//!     description: "A JSON app",
+//!     license: "MIT OR Apache-2.0",
+//!     repository: "https://example.com/app.git",
 //!     deps: {
 //!         "json": Dep::git("https://example.com/json.git", tag: "v1.2"),
 //!         "util": Dep::path("../util"),
@@ -32,7 +35,17 @@ pub const LOCK: &str = "rok.lock";
 /// A manifest with nothing in it, for `rok add` to fill.
 pub const EMPTY: &str = "Package {\n    deps: {},\n}\n";
 
-const FIELDS: [&str; 6] = ["name", "version", "toolchain", "deps", "dev_deps", "lints"];
+const FIELDS: [&str; 9] = [
+    "name",
+    "version",
+    "toolchain",
+    "description",
+    "license",
+    "repository",
+    "deps",
+    "dev_deps",
+    "lints",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitRef {
@@ -112,6 +125,11 @@ pub struct Manifest {
     pub name: Option<String>,
     pub version: Option<String>,
     pub toolchain: Option<String>,
+    /// Package metadata, carried into a stone's index entry.
+    pub description: Option<String>,
+    /// An SPDX license expression.
+    pub license: Option<String>,
+    pub repository: Option<String>,
     pub deps: Vec<Dep>,
     pub dev_deps: Vec<Dep>,
     /// `lints`: `"name": "allow" | "warn" | "deny"`, in file order
@@ -235,6 +253,9 @@ pub fn parse(text: &str, file: &str) -> Result<Manifest, String> {
         name: string("name")?,
         version: string("version")?,
         toolchain: string("toolchain")?,
+        description: string("description")?,
+        license: string("license")?,
+        repository: string("repository")?,
         deps: deps("deps")?,
         dev_deps: deps("dev_deps")?,
         lints,

@@ -106,7 +106,8 @@ impl str {
     pub fn char_indices(self) -> CharIndicesIter {
         CharIndicesIter { chars: CharsIter { s: self, pos: 0 } }
     }
-    /// The non-empty pieces between runs of ASCII whitespace (like `trim`).
+    /// The non-empty pieces between runs of Unicode `White_Space` (the
+    /// set `trim` strips).
     pub fn split_whitespace(self) -> SplitWhitespaceIter {
         SplitWhitespaceIter { s: self, pos: 0 }
     }
@@ -250,10 +251,6 @@ impl Iterator for CharIndicesIter {
     }
 }
 
-fn is_ascii_space(b: u8) -> bool {
-    b == 32u8 || (b >= 9u8 && b <= 13u8)
-}
-
 pub struct SplitWhitespaceIter {
     s: str;
     pos: usize;
@@ -262,16 +259,26 @@ pub struct SplitWhitespaceIter {
 impl Iterator for SplitWhitespaceIter {
     type Item = str;
     fn next(ref self) -> str | none {
-        let n = self.s.len();
-        while self.pos < n && is_ascii_space(unsafe { rok_str_byte(self.s, self.pos) }) {
-            self.pos += 1;
+        let it = CharsIter { s: self.s, pos: self.pos };
+        let start = 0usize;
+        let inside = false;
+        loop {
+            let at = it.pos;
+            let c: char = it.next() else {
+                self.pos = at;
+                if inside { return self.s[start:at]; }
+                return none;
+            };
+            if c.is_whitespace() {
+                if inside {
+                    self.pos = it.pos;
+                    return self.s[start:at];
+                }
+            } else if !inside {
+                start = at;
+                inside = true;
+            }
         }
-        if self.pos >= n { return none; }
-        let start = self.pos;
-        while self.pos < n && !is_ascii_space(unsafe { rok_str_byte(self.s, self.pos) }) {
-            self.pos += 1;
-        }
-        self.s[start:self.pos]
     }
 }
 

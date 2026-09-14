@@ -527,9 +527,8 @@ pub(super) fn resolve_ty_with_structs(
             let n = super::collect::const_expr_value(len, &sc.names.consts, sc.module)
                 .and_then(|n| u32::try_from(n).ok());
             let Some(n) = n else {
-                sc.names.error(
-                    "array length must be a compile-time integer (spec 2.11.5)".to_owned(),
-                );
+                sc.names
+                    .error("array length must be a compile-time integer (spec 2.11.5)".to_owned());
                 return HirTy::Any;
             };
             HirTy::Array(Box::new(rec(elem)), n)

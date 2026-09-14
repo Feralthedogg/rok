@@ -28,7 +28,7 @@ fn text(v: Value, strict: bool) -> str {
             if d.is_empty() { return "{}"; }
             let parts: List<str> = List::new();
             for (k, x) in d.entries() { parts.push(text(k, strict) + ": " + text(x, strict)); }
-            "{ " + join(parts) + " }"
+            "{ " + parts.join(", ") + " }"
         },
         Value::Struct { name, fields } => {
             let head = match name {
@@ -45,7 +45,7 @@ fn text(v: Value, strict: bool) -> str {
             let parts: List<str> = List::new();
             for x in args { parts.push(text(x, strict)); }
             for (k, x) in named.entries() { parts.push(k + ": " + text(x, strict)); }
-            path + "(" + join(parts) + ")"
+            path + "(" + parts.join(", ") + ")"
         },
     }
 }
@@ -53,25 +53,14 @@ fn text(v: Value, strict: bool) -> str {
 fn flat_items(xs: List<Value>, strict: bool) -> str {
     let parts: List<str> = List::new();
     for x in xs { parts.push(text(x, strict)); }
-    join(parts)
+    parts.join(", ")
 }
 
 fn flat_fields(fs: OrderedDict<str, Value>, strict: bool) -> str {
     if fs.is_empty() { return "{}"; }
     let parts: List<str> = List::new();
     for (k, x) in fs.entries() { parts.push(k + ": " + text(x, strict)); }
-    "{ " + join(parts) + " }"
-}
-
-fn join(parts: List<str>) -> str {
-    let b = StrBuf::new();
-    let first = true;
-    for p in parts {
-        if !first { b.push_str(", "); }
-        b.push_str(p);
-        first = false;
-    }
-    b.to_str()
+    "{ " + parts.join(", ") + " }"
 }
 
 /// `v` starting at column `col` of a line indented `indent`, followed by
