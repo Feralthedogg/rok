@@ -1,4 +1,7 @@
 // expect-exit: 13
+// expect-stdout:
+// 4 9
+// x true 1.5
 
 struct Pair<A, B> {
     left: A;
@@ -7,6 +10,10 @@ struct Pair<A, B> {
 
 fn main() -> i32 {
     let p: Pair<i32, i32> = Pair { left: 4, right: 9 };
+    let q: Pair<str, bool> = Pair { left: "x", right: true };
+    let r: Pair<Pair<str, bool>, f64> = Pair { left: q, right: 1.5 };
+    println(f"{p.left} {p.right}");
+    println(f"{r.left.left} {r.left.right} {r.right}");
     return p.left + p.right;
 }
 

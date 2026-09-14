@@ -1,4 +1,6 @@
 // expect-exit: 30
+// expect-stdout:
+// 21 5 6
 
 struct Pair {
     a: i32;
@@ -17,5 +19,6 @@ fn main() -> i32 {
         total += xs[i].a + xs[i].b;
         i += 1;
     }
+    println(f"{total} {xs[2].a} {xs[2].b}");
     return total + 9;
 }

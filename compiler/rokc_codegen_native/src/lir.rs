@@ -354,7 +354,38 @@ impl Func {
         self.labels - 1
     }
 
+    /// Append `i`. Integer arithmetic on two immediates, or with an
+    /// identity (`x + 0`, `x * 1`, ...), folds into a move (the store
+    /// keeps `k`'s bits).
     pub fn push(&mut self, i: Inst) {
+        if let Inst::Bin {
+            op, k, dst, a, b, ..
+        } = i
+        {
+            if !k.is_float() {
+                let src = match (op, a, b) {
+                    (Bin::Add, V::I(x), V::I(y)) => Some(V::I(x.wrapping_add(y))),
+                    (Bin::Sub, V::I(x), V::I(y)) => Some(V::I(x.wrapping_sub(y))),
+                    (Bin::Mul, V::I(x), V::I(y)) => Some(V::I(x.wrapping_mul(y))),
+                    (Bin::And, V::I(x), V::I(y)) => Some(V::I(x & y)),
+                    (Bin::Or, V::I(x), V::I(y)) => Some(V::I(x | y)),
+                    (Bin::Xor, V::I(x), V::I(y)) => Some(V::I(x ^ y)),
+                    (Bin::Add | Bin::Or | Bin::Xor, V::I(0), v)
+                    | (
+                        Bin::Add | Bin::Sub | Bin::Or | Bin::Xor | Bin::Shl | Bin::Shr,
+                        v,
+                        V::I(0),
+                    )
+                    | (Bin::Mul, V::I(1), v)
+                    | (Bin::Mul, v, V::I(1)) => Some(v),
+                    _ => None,
+                };
+                if let Some(src) = src {
+                    self.insts.push(Inst::Mov { k, dst, src });
+                    return;
+                }
+            }
+        }
         self.insts.push(i);
     }
 }

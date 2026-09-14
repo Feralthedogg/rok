@@ -1,10 +1,14 @@
 // expect-exit: 10
+// expect-stdout:
+// true false true
+
 
 fn check(n: i32, divisor: i32) -> bool {
     return divisor != 0 && n % divisor == 0;
 }
 
 fn main() -> i32 {
+    println(f"{check(10, 2)} {check(10, 0)} {check(10, 5)}");
     let total = 0;
     if check(10, 2) {
         total += 5;

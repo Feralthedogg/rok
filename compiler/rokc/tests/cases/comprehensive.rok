@@ -1,4 +1,6 @@
 // expect-exit: 100
+// expect-stdout:
+// 30 7 1 -1 -1
 
 const MULTIPLIER: i32 = 3;
 const OFFSET: i32 = 10;
@@ -42,5 +44,6 @@ fn main() -> i32 {
         total += v;
     }
     let c = Counter::new(0).advance().advance().boost();
+    println(f"{total} {c.value} {c.step} {pick_at(xs, 5) ?? -1} {pick_at(xs, -1) ?? -1}");
     return total + c.value * MULTIPLIER + OFFSET + 39;
 }

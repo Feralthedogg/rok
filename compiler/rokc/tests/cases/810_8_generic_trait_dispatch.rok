@@ -1,0 +1,42 @@
+// spec: 008.10-lowering-coroutine-generic §8.10.6 / §8.10.8 / §8.10.10
+// expect-exit: 0
+// expect-stdout:
+// point(1, 2)
+// circle r=3
+// [point(1, 2)] [circle r=3]
+// default: thing
+
+// spec 8.10.6 / 8.10.8 / 8.10.10: a generic function is specialized per
+// concrete type and calls that type's trait method directly; a trait's
+// default method is copied into each implementing type.
+trait Describe {
+    fn describe(self) -> str;
+    fn boxed(self) -> str { f"[{self.describe()}]" }
+}
+
+struct Point { x: i32; y: i32; }
+struct Circle { r: i32; }
+struct Thing {}
+
+impl Describe for Point {
+    fn describe(self) -> str { f"point({self.x}, {self.y})" }
+}
+impl Describe for Circle {
+    fn describe(self) -> str { f"circle r={self.r}" }
+}
+impl Describe for Thing {
+    fn describe(self) -> str { "thing" }
+}
+
+fn process<T: Describe>(x: T) -> str { x.describe() }
+fn wrap<T: Describe>(x: T) -> str { x.boxed() }
+
+fn main() -> i32 {
+    let p = Point { x: 1, y: 2 };
+    let c = Circle { r: 3 };
+    println(process(p));
+    println(process(c));
+    println(f"{wrap(p)} {wrap(c)}");
+    println(f"default: {process(Thing {})}");
+    return 0;
+}

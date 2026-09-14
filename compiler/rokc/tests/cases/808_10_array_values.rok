@@ -1,0 +1,25 @@
+// spec: 008.08-lowering-types §8.8.10
+// expect-exit: 0
+// expect-stdout:
+// a [1, 2, 3] b [9, 2, 3]
+// len 3 sum 6
+// grid 4
+
+// spec 8.8.10: `[T; N]` is an inline array of N elements — a value:
+// assigning it copies the elements.
+fn sum(xs: [i32; 3]) -> i32 {
+    let t = 0;
+    for x in xs { t += x; }
+    t
+}
+
+fn main() -> i32 {
+    let a: [i32; 3] = [1, 2, 3];
+    let b = a;
+    b[0] = 9;
+    println(f"a {a:?} b {b:?}");
+    println(f"len {a.len()} sum {sum(a)}");
+    let g: [[i32; 2]; 2] = [[1, 2], [3, 4]];
+    println(f"grid {g[1][1]}");
+    return 0;
+}

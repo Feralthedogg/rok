@@ -9,13 +9,12 @@
 //!
 //! Not supported: CURVE / ipc transport, topic filtering on iopub,
 //! rich display (`text/plain` only), `input_request` (cells read
-//! `/dev/null`), the debugger, `inspect` (always not found). Output
-//! is sent when the cell ends, not as it is printed.
+//! `/dev/null`), the debugger. `inspect` shows the type of the name at
+//! the cursor; `history` is this kernel's executed cells. Output is
+//! sent when the cell ends, not as it is printed.
 
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::fd::AsRawFd;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -294,14 +293,7 @@ fn serve_each(l: TcpListener, f: impl Fn(TcpStream) + Send + Sync + 'static) {
 /// Send what is written to `fd` from now on to the receiver, one string
 /// per `END` mark.
 fn capture(fd: i32) -> io::Result<mpsc::Receiver<String>> {
-    unsafe extern "C" {
-        fn dup2(old: i32, new: i32) -> i32;
-    }
-    let (mut r, w) = UnixStream::pair()?;
-    // SAFETY: plain fd duplication; `w` stays open until then.
-    if unsafe { dup2(w.as_raw_fd(), fd) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    let mut r = redirect(fd)?;
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let (mut acc, mut buf) = (Vec::new(), [0u8; 8192]);
@@ -318,6 +310,46 @@ fn capture(fd: i32) -> io::Result<mpsc::Receiver<String>> {
         }
     });
     Ok(rx)
+}
+
+/// Point `fd` (1 or 2) at a new pipe, which child processes inherit;
+/// its reading end.
+#[cfg(unix)]
+fn redirect(fd: i32) -> io::Result<std::os::unix::net::UnixStream> {
+    use std::os::fd::AsRawFd;
+    unsafe extern "C" {
+        fn dup2(old: i32, new: i32) -> i32;
+    }
+    let (r, w) = std::os::unix::net::UnixStream::pair()?;
+    // SAFETY: plain fd duplication; `w` stays open until then.
+    if unsafe { dup2(w.as_raw_fd(), fd) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(r)
+}
+
+/// Windows: the std handle of `fd` (what Rust's own stdout / stderr and
+/// spawned children use).
+#[cfg(windows)]
+fn redirect(fd: i32) -> io::Result<std::fs::File> {
+    use std::os::windows::io::FromRawHandle;
+    type Handle = *mut std::ffi::c_void;
+    unsafe extern "system" {
+        fn CreatePipe(r: *mut Handle, w: *mut Handle, security: *mut u8, size: u32) -> i32;
+        fn SetStdHandle(which: u32, h: Handle) -> i32;
+    }
+    let which = if fd == 1 { -11i32 } else { -12i32 } as u32;
+    let (mut r, mut w): (Handle, Handle) = (std::ptr::null_mut(), std::ptr::null_mut());
+    // SAFETY: out parameters; default security and size.
+    if unsafe { CreatePipe(&mut r, &mut w, std::ptr::null_mut(), 0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `r` is ours alone; `w` becomes the std handle for good.
+    let r = unsafe { std::fs::File::from_raw_handle(r) };
+    if unsafe { SetStdHandle(which, w) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(r)
 }
 
 /// The REPL cells of a Jupyter cell: lines until the input is complete
@@ -342,10 +374,24 @@ fn split_cells(code: &str) -> Vec<String> {
     cells
 }
 
+fn ident(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+/// The byte range of the identifier around the character `pos`.
+fn word_at(code: &str, pos: usize) -> (usize, usize) {
+    let at = code.char_indices().nth(pos).map_or(code.len(), |(i, _)| i);
+    let start = code[..at].trim_end_matches(ident).len();
+    let end = code.len() - code[at..].trim_start_matches(ident).len();
+    (start, end)
+}
+
 struct Kernel {
     wire: Arc<Wire>,
     repl: Repl,
     count: u32,
+    /// `(execution count, code)` of the cells stored in the history.
+    history: Vec<(u32, String)>,
     out: mpsc::Receiver<String>,
     err: mpsc::Receiver<String>,
 }
@@ -382,6 +428,7 @@ impl Kernel {
         let silent = c.get("silent") == &Json::Bool(true);
         if !silent && c.get("store_history") != &Json::Bool(false) {
             self.count += 1;
+            self.history.push((self.count, code.to_owned()));
         }
         let n = Json::num(self.count);
         let wire = self.wire.clone();
@@ -491,14 +538,14 @@ impl Kernel {
                 )
             }
             "complete_request" => {
-                // The session's names only (no members, paths).
+                // The session's names and the keywords (no members, paths).
                 let code = c.get("code").as_str().unwrap_or("");
                 let pos = c.get("cursor_pos").as_u32().unwrap_or(0) as usize;
                 let end = code.char_indices().nth(pos).map_or(code.len(), |(i, _)| i);
-                let ident = |ch: char| ch.is_alphanumeric() || ch == '_';
                 let start = code[..end].trim_end_matches(ident).len();
                 let word = &code[start..end];
-                let matches = self.repl.names();
+                let mut matches = self.repl.names();
+                matches.extend(rokc_lexer::token::RESERVED);
                 let matches = matches.iter().filter(|n| n.starts_with(word));
                 (
                     "complete_reply",
@@ -517,19 +564,44 @@ impl Kernel {
                     ]),
                 )
             }
-            "inspect_request" => (
-                "inspect_reply",
-                Json::obj([
-                    ok,
-                    ("found", Json::Bool(false)),
-                    ("data", Json::obj([])),
-                    ("metadata", Json::obj([])),
-                ]),
-            ),
-            "history_request" => (
-                "history_reply",
-                Json::obj([ok, ("history", Json::Arr(Vec::new()))]),
-            ),
+            "inspect_request" => {
+                let code = c.get("code").as_str().unwrap_or("");
+                let pos = c.get("cursor_pos").as_u32().unwrap_or(0) as usize;
+                let (start, end) = word_at(code, pos);
+                let word = &code[start..end];
+                let ty = (!word.is_empty())
+                    .then(|| self.repl.type_of(word, true))
+                    .flatten();
+                let data = ty.as_ref().map_or_else(
+                    || Json::obj([]),
+                    |t| Json::obj([("text/plain", Json::Str(format!("{word}: {t}")))]),
+                );
+                (
+                    "inspect_reply",
+                    Json::obj([
+                        ok,
+                        ("found", Json::Bool(ty.is_some())),
+                        ("data", data),
+                        ("metadata", Json::obj([])),
+                    ]),
+                )
+            }
+            "history_request" => {
+                let n = c.get("n").as_u32().map_or(usize::MAX, |n| n as usize);
+                let tail = c.get("hist_access_type").as_str() == Some("tail");
+                let skip = if tail {
+                    self.history.len().saturating_sub(n)
+                } else {
+                    0
+                };
+                let entries = self.history[skip..]
+                    .iter()
+                    .map(|(i, code)| Json::Arr(vec![Json::num(0), Json::num(*i), Json::str(code)]));
+                (
+                    "history_reply",
+                    Json::obj([ok, ("history", Json::Arr(entries.collect()))]),
+                )
+            }
             "comm_info_request" => ("comm_info_reply", Json::obj([ok, ("comms", Json::obj([]))])),
             "shutdown_request" => {
                 let restart = c.get("restart").clone();
@@ -682,6 +754,7 @@ fn start(
         wire,
         repl,
         count: 0,
+        history: Vec::new(),
         out,
         err,
     };
@@ -694,15 +767,12 @@ fn start(
     Ok(())
 }
 
-/// End the running cell, if any (`interrupt_request`): `SIGINT` to the
-/// host process running it (`repl_host.c`).
+/// End the running cell, if any (`interrupt_request`; `repl::interrupt`).
 // A cell still compiling is not interrupted.
 fn interrupt(running: &AtomicU32) {
     let pid = running.load(Ordering::Relaxed);
     if pid != 0 {
-        let _ = std::process::Command::new("kill")
-            .args(["-INT", &pid.to_string()])
-            .status();
+        crate::repl::interrupt(pid);
     }
 }
 

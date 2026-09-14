@@ -12,3 +12,4 @@ pub mod ptr;
 
 // Spec 1.2: the named casts live at the tier root.
 pub use ptr::{align_cast, const_cast, ptr_cast};
+pub use mem::{Pod, reinterpret, transmute_unchecked};

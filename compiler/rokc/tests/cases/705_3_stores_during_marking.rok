@@ -1,0 +1,33 @@
+// spec: 007.05-concurrent-collection §7.5.3
+// gc-stress: 100
+// expect-exit: 0
+// expect-stdout:
+// 0:x0-19 1:x1-19 2:x2-19
+// total 290
+
+// spec 7.5.3: while a concurrent mark runs (the gc-stress run marks
+// every full collection concurrently), overwriting a reference must not
+// lose the object it now points to (SATB barrier + incremental update).
+fn main() -> i32 {
+    let slots: List<str> = [];
+    let i = 0;
+    while i < 50 {
+        slots.push(f"x{i}-init");
+        i += 1;
+    }
+    let round = 0;
+    while round < 20 {
+        let j = 0;
+        while j < 50 {
+            slots[j as usize] = f"x{j}-{round}";
+            j += 1;
+        }
+        round += 1;
+    }
+    let total = 0usize;
+    for s in slots { total += s.len(); }
+    println(f"0:{slots[0]} 1:{slots[1]} 2:{slots[2]}");
+    // "xJ-19": 10 one-digit + 40 two-digit indices.
+    println(f"total {total}");
+    return 0;
+}

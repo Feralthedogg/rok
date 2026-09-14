@@ -1,4 +1,6 @@
 // expect-exit: 33
+// expect-stdout:
+// 10 12 10 1
 
 struct Box<T> {
     v: T;
@@ -21,5 +23,6 @@ fn main() -> i32 {
     let b: Box<i32> = Box { v: 6 };
     let c: Box<bool> = Box { v: true };
     let d: Box<bool> = Box { v: false };
+    println(f"{a.doubled()} {b.doubled()} {c.flag_value()} {d.flag_value()}");
     return a.doubled() + b.doubled() + c.flag_value() + d.flag_value();
 }

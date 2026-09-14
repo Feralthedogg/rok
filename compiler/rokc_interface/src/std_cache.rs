@@ -7,8 +7,10 @@
 //! or `rok-cache/` beside a repository build of `rokc`), one folder
 //! per `<toolchain>-<options>-<sources>` hash: written to a scratch
 //! folder and renamed into place, so a folder that exists is complete.
-//! A new folder replaces those of other toolchains and of older sources;
-//! a failed build leaves `<folder>.failed` instead.
+//! A new folder replaces those of other toolchains and of older sources,
+//! and of this toolchain only the `KEEP` option sets used last stay;
+//! nothing used within `IN_USE` goes (each use stamps the folder's
+//! `used` file). A failed build leaves `<folder>.failed` instead.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::RecvTimeoutError;
@@ -33,6 +35,25 @@ const HEARTBEAT: Duration = Duration::from_secs(2);
 
 /// A lock untouched for this long belongs to a build that died.
 const STALE_LOCK: Duration = Duration::from_secs(30);
+
+/// Option sets kept per toolchain (a folder is ~8 MB).
+const KEEP: usize = 6;
+
+/// A folder used this recently may still be linked from.
+const IN_USE: Duration = Duration::from_secs(3600);
+
+/// Mark `dir` as just used.
+fn stamp(dir: &Path) {
+    let _ = std::fs::write(dir.join("used"), "");
+}
+
+/// When `dir` was used last.
+fn last_use(dir: &Path) -> SystemTime {
+    std::fs::metadata(dir.join("used"))
+        .or_else(|_| std::fs::metadata(dir))
+        .and_then(|m| m.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH)
+}
 
 /// `rok.rhir` of the prebuilt standard library for `key`, built now if
 /// missing.
@@ -89,6 +110,7 @@ pub fn prebuilt_std(key: &StdKey<'_>) -> Option<PathBuf> {
     let lock = root.join(format!("{family}lock"));
     loop {
         if rhir.is_file() {
+            stamp(&dir);
             return Some(rhir);
         }
         if failed.exists() {
@@ -102,6 +124,10 @@ pub fn prebuilt_std(key: &StdKey<'_>) -> Option<PathBuf> {
         {
             Ok(_) => break,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            // Windows: a lock just removed while another process still
+            // has it open (the heartbeat) is pending deletion until
+            // closed; creating it meanwhile is denied.
+            Err(e) if cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied => {}
             Err(_) => return None,
         }
         let stale = std::fs::metadata(&lock)
@@ -116,6 +142,7 @@ pub fn prebuilt_std(key: &StdKey<'_>) -> Option<PathBuf> {
     // Finished between the check and the lock.
     if rhir.is_file() {
         let _ = std::fs::remove_file(&lock);
+        stamp(&dir);
         return Some(rhir);
     }
     let (stop, beat) = std::sync::mpsc::channel::<()>();
@@ -134,18 +161,41 @@ pub fn prebuilt_std(key: &StdKey<'_>) -> Option<PathBuf> {
         // Not tried again until the sources or the toolchain change.
         let _ = std::fs::write(&failed, "");
     }
-    // Other toolchains' builds, and this one's of older sources.
-    for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
-        let name = e.file_name().to_string_lossy().into_owned();
-        let p = e.path();
-        let old = !name.starts_with(&toolchain)
-            || (name.starts_with(&family) && !name.contains(&sources));
-        if old && !name.starts_with('.') {
-            let _ = std::fs::remove_dir_all(&p).or_else(|_| std::fs::remove_file(&p));
-        }
+    if built {
+        stamp(&dir);
     }
+    prune(&root, &toolchain, &family, &sources);
     let _ = std::fs::remove_file(&lock);
     built.then_some(rhir)
+}
+
+/// Remove other toolchains' builds, this one's of older sources, and
+/// all but the `KEEP` option sets used last; none used within `IN_USE`.
+fn prune(root: &Path, toolchain: &str, family: &str, sources: &str) {
+    let idle = |t: &SystemTime| t.elapsed().is_ok_and(|age| age > IN_USE);
+    let mut kept = Vec::new();
+    for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let p = e.path();
+        if name.starts_with('.') {
+            continue;
+        }
+        let used = last_use(&p);
+        let old =
+            !name.starts_with(toolchain) || (name.starts_with(family) && !name.contains(sources));
+        if old {
+            if idle(&used) {
+                let _ = std::fs::remove_dir_all(&p).or_else(|_| std::fs::remove_file(&p));
+            }
+        } else if p.is_dir() {
+            kept.push((used, p));
+        }
+    }
+    kept.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, p) in kept.into_iter().skip(KEEP).filter(|(t, _)| idle(t)) {
+        let _ = std::fs::remove_dir_all(&p);
+        let _ = std::fs::remove_file(p.with_extension("failed"));
+    }
 }
 
 /// Build into a scratch folder of `root`, then rename it to `dir`.
@@ -179,4 +229,56 @@ fn build(key: &StdKey<'_>, root: &Path, dir: &Path) -> bool {
     let _ = std::fs::remove_dir_all(&tmp);
     // Another process may have put it there first.
     dir.join(format!("{}.rhir", rokc_driver::STD_PKG)).is_file()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prune_keeps_the_option_sets_used_last() {
+        let root = std::env::temp_dir().join(format!("rokc-std-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for i in 0..KEEP + 2 {
+            let dir = root.join(format!("tc-opt{i}-src"));
+            std::fs::create_dir_all(&dir).unwrap();
+            stamp(&dir);
+            let used = std::fs::File::options()
+                .write(true)
+                .open(dir.join("used"))
+                .unwrap();
+            let secs = 1_000_000 + u64::try_from(i).unwrap();
+            used.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+                .unwrap();
+        }
+        for stale in ["other-opt0-src", "tc-opt0-stale"] {
+            let dir = root.join(stale);
+            std::fs::create_dir_all(&dir).unwrap();
+            let used = std::fs::File::create(dir.join("used")).unwrap();
+            used.set_modified(SystemTime::UNIX_EPOCH).unwrap();
+        }
+        // In use: kept though of another toolchain.
+        std::fs::create_dir_all(root.join("busy-opt0-src")).unwrap();
+        // Used just now: kept beyond `KEEP`.
+        for i in 0..2 {
+            let dir = root.join(format!("tc-now{i}-src"));
+            std::fs::create_dir_all(&dir).unwrap();
+            stamp(&dir);
+        }
+        prune(&root, "tc", "tc-opt0-", "src");
+        let mut left: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        let mut want: Vec<String> = (KEEP - 2..KEEP + 2)
+            .map(|i| format!("tc-opt{i}-src"))
+            .collect();
+        want.splice(
+            0..0,
+            ["busy-opt0-src", "tc-now0-src", "tc-now1-src"].map(str::to_owned),
+        );
+        assert_eq!(left, want);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

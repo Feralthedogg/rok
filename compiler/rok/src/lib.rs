@@ -92,7 +92,7 @@ environments:
 
 toolchains ($ROK_HOME/toolchains/<version>-<triple>/):
   toolchain list               installed toolchains
-  toolchain install <version> --from <dir | .tar[.gz] | url>
+  toolchain install <version> --from <dir | .tar[.gz] | .zip | url>
                                install one (the first becomes the default)
   toolchain default [<version>]
                                the toolchain the $ROK_HOME/bin proxies run
@@ -429,7 +429,7 @@ fn target_for(g: &Global, path: Option<&str>) -> Result<Target, String> {
             {
                 return Err(format!("{file}: a script block holds only `deps`"));
             }
-            let abs = std::fs::canonicalize(start).map_err(|e| e.to_string())?;
+            let abs = rokc_core::real_path(start).map_err(|e| e.to_string())?;
             let key = format!("{}\0{block}", abs.display());
             let cache = home()
                 .join("cache/scripts")
@@ -542,6 +542,23 @@ pub(crate) fn exec(mut c: Command, what: &Path) -> i32 {
         let e = c.exec();
         eprintln!("rok: error: cannot run {}: {e}", what.display());
         1
+    }
+    #[cfg(windows)]
+    {
+        // Ctrl-C / Ctrl-Break reach every process on the console: the
+        // child decides, this one waits for it. (A handler, unlike the
+        // `NULL` one, is not inherited.)
+        unsafe extern "system" {
+            fn SetConsoleCtrlHandler(
+                handler: Option<extern "system" fn(u32) -> i32>,
+                add: i32,
+            ) -> i32;
+        }
+        const extern "system" fn ignore(_: u32) -> i32 {
+            1
+        }
+        // SAFETY: registers a handler that only returns.
+        unsafe { SetConsoleCtrlHandler(Some(ignore), 1) };
     }
     #[cfg(not(unix))]
     match c.status() {
@@ -694,13 +711,17 @@ fn install_kernel(g: &Global, args: &[String]) -> Result<i32, String> {
         Some(e) => (format!("rok-{e}"), format!("rok ({e})")),
         None => ("rok".to_owned(), "rok".to_owned()),
     };
-    let user_home = || std::env::var_os("HOME").map(PathBuf::from);
+    let user_home = rokc_core::user_home;
     let data = std::env::var_os("JUPYTER_DATA_DIR")
         .filter(|d| !d.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
             if cfg!(target_vendor = "apple") {
                 Some(user_home()?.join("Library/Jupyter"))
+            } else if cfg!(windows) {
+                std::env::var_os("APPDATA")
+                    .filter(|d| !d.is_empty())
+                    .map(|d| PathBuf::from(d).join("jupyter"))
             } else {
                 std::env::var_os("XDG_DATA_HOME")
                     .filter(|d| !d.is_empty())
@@ -868,8 +889,8 @@ fn cmd_add(g: &Global, args: &[String]) -> Result<i32, String> {
     // Path dependencies: relative to the manifest in a project (it moves
     // with the project), absolute in an environment.
     if let Source::Path(p) = &dep.source {
-        let abs = std::fs::canonicalize(p).map_err(|e| format!("--path {p}: {e}"))?;
-        let dir = std::fs::canonicalize(path.parent().unwrap_or_else(|| Path::new(".")))
+        let abs = rokc_core::real_path(p).map_err(|e| format!("--path {p}: {e}"))?;
+        let dir = rokc_core::real_path(path.parent().unwrap_or_else(|| Path::new(".")))
             .map_err(|e| e.to_string())?;
         let shown = if is_env { abs } else { relative(&dir, &abs) };
         dep.source = Source::Path(shown.display().to_string().replace('\\', "/"));

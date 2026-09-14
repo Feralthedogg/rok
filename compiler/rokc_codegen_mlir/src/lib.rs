@@ -8,6 +8,8 @@ mod debug;
 pub mod emit;
 pub mod mangle;
 mod repl;
+#[cfg(test)]
+mod tests;
 
 pub use mangle::{Demangled, demangle, pkg_hash};
 pub use repl::ReplFn;
@@ -60,11 +62,28 @@ pub struct CodegenOptions {
     pub overflow_checks: bool,
     /// `-g`: DWARF debug info (spec 9.9.6).
     pub debug: bool,
+    /// Above `-O0`: the debug info says so.
+    pub optimized: bool,
     /// Generate a REPL cell instead of a program.
     pub repl: Option<ReplCell>,
     /// LLVM `target datalayout` (the toolchain's), so MLIR folds `sizeof`
     /// idioms with the real layout.
     pub data_layout: Option<String>,
+}
+
+/// One diagnostic for codegen's errors: the first at its function, the
+/// rest as notes.
+#[must_use]
+pub fn codegen_error(errors: &[(rokc_diagnostic::Span, String)]) -> Option<RokDiagnostic> {
+    let ((at, first), rest) = errors.split_first()?;
+    let mut d = RokDiagnostic::error(ErrorKind::Unsupported, first.clone());
+    if !at.is_dummy() {
+        d = d.with_span(*at, "");
+    }
+    for (_, more) in rest {
+        d = d.with_note(more.clone());
+    }
+    Some(d)
 }
 
 /// The MLIR text of `module`.
@@ -74,18 +93,14 @@ pub fn codegen(module: &MirModule, opts: &CodegenOptions) -> Result<MlirOutput, 
     e.overflow_checks = opts.overflow_checks;
     e.data_layout.clone_from(&opts.data_layout);
     if opts.debug {
-        e.debug = Some(debug::DebugInfo::new(target));
+        e.debug = Some(debug::DebugInfo::new(target, opts.optimized));
     }
     if let Some(r) = &opts.repl {
         e.gc_types.clone_from(&r.gc_tables);
     }
     e.repl.clone_from(&opts.repl);
     e.emit_module(module);
-    if let Some(first) = e.errors.first() {
-        let mut d = RokDiagnostic::error(ErrorKind::Unsupported, first.clone());
-        for more in e.errors.iter().skip(1) {
-            d = d.with_note(more.clone());
-        }
+    if let Some(d) = codegen_error(&e.errors) {
         return Err(d);
     }
     let gc_types = e.gc_type_count();

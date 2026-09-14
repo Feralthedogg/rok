@@ -1,4 +1,7 @@
 // expect-exit: 18
+// expect-stdout:
+// 12 2 0
+
 
 struct Box {
     w: i32;
@@ -23,6 +26,7 @@ fn main() -> i32 {
     let s1 = Shape::Boxy(Box { w: 3, h: 4 });
     let s2 = Shape::Boxy(Box { w: 2, h: 1 });
     let s3 = Shape::None;
+    println(f"{s1.area()} {s2.area()} {s3.area()}");
     let total = s1.area() + s2.area() + s3.area();
     return total + 4;
 }

@@ -1,4 +1,6 @@
 // expect-exit: 11
+// expect-stdout:
+// 4 3 true
 
 struct Pair<T> {
     a: T;
@@ -12,6 +14,7 @@ fn first<T>(p: Pair<T>) -> T {
 fn main() -> i32 {
     let p1: Pair<i32> = Pair { a: 4, b: 7 };
     let p2: Pair<i32> = Pair { a: 3, b: 2 };
+    println(f"{first(p1)} {first(p2)} {first(Pair { a: true, b: false })}");
     return first(p1) + first(p2) + 4;
 }
 

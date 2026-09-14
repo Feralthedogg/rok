@@ -3,8 +3,10 @@
 // thread, `recv_async` / `for await` / `send_async` suspend the task
 // (`task::park`: receivers on the `meta` address, senders one past it).
 //
-// One `Mutex` and two `Condvar`s around a `Deque` (the spec suggests a
-// lock-free ring or segmented list).
+// One `Mutex` and two `Condvar`s around the queue (2.17.6): a bounded
+// channel's is a fixed ring (a `Deque` made at its capacity, so it never
+// grows), an unbounded one's a list of fixed segments (it grows without
+// copying, and drained segments are dropped).
 
 use rok::core::rt::key;
 
@@ -66,7 +68,7 @@ const ASYNC_WAITING: usize = 6;
 struct Chan<T> {
     lock: Mutex<i32>;
     meta: GcBuf<usize>;
-    queue: Deque<T>;
+    queue: Deque<T> | Segments<T>;
     not_empty: Condvar;
     not_full: Condvar;
 }
@@ -103,15 +105,23 @@ impl<T> Chan<T> {
     }
 
     fn full(self) -> bool {
-        self.get(LIMIT) > 0 && self.queue.len() >= self.get(LIMIT)
+        self.get(LIMIT) > 0 && self.len() >= self.get(LIMIT)
     }
 
-    fn len(self) -> usize { self.queue.len() }
+    fn len(self) -> usize {
+        match self.queue {
+            q: Deque<T> => q.len(),
+            q: Segments<T> => q.len(),
+        }
+    }
 
     // The lock is held for the calls below.
     fn push(self, v: T) {
         unsafe {
-            self.queue.push_back(v);
+            match self.queue {
+                q: Deque<T> => q.push_back(v),
+                q: Segments<T> => q.push(v),
+            }
             self.meta[PUSHED] += 1;
         }
     }
@@ -119,7 +129,86 @@ impl<T> Chan<T> {
     fn pop(self) -> T {
         unsafe {
             self.meta[POPPED] += 1;
-            self.queue.pop_front() ?? panic("channel: pop from an empty queue")
+            match self.queue {
+                q: Deque<T> => q.pop_front() ?? panic("channel: pop from an empty queue"),
+                q: Segments<T> => q.pop(),
+            }
+        }
+    }
+}
+
+/// Slots per segment of an unbounded queue.
+const SEGMENT: usize = 32;
+
+struct Segment<T> {
+    slots: GcBuf<T>;
+    next: GcBuf<Segment<T> | none>;
+}
+
+fn segment<T>() -> Segment<T> {
+    unsafe {
+        let next: GcBuf<Segment<T> | none> = buf_new(1);
+        next[0] = none;
+        Segment { slots: buf_new(SEGMENT), next: next }
+    }
+}
+
+/// An unbounded FIFO: values enter the tail segment and leave the head
+/// one; a full tail links a new segment, a drained head is unlinked.
+struct Segments<T> {
+    /// `[head, tail]`.
+    ends: GcBuf<Segment<T>>;
+    /// `[head index, tail index, len]`.
+    at: GcBuf<usize>;
+    /// One zeroed `T`: what a vacated slot holds (so it keeps nothing alive).
+    zero: GcBuf<T>;
+}
+
+fn segments<T>() -> Segments<T> {
+    unsafe {
+        let ends: GcBuf<Segment<T>> = buf_new(2);
+        let s = segment();
+        ends[0] = s;
+        ends[1] = s;
+        Segments { ends: ends, at: buf_new(3), zero: buf_new(1) }
+    }
+}
+
+impl<T> Segments<T> {
+    fn len(self) -> usize {
+        unsafe { self.at[2] }
+    }
+
+    fn push(self, v: T) {
+        unsafe {
+            if self.at[1] == SEGMENT {
+                let s = segment();
+                self.ends[1].next[0] = s;
+                self.ends[1] = s;
+                self.at[1] = 0;
+            }
+            self.ends[1].slots[self.at[1]] = v;
+            self.at[1] += 1;
+            self.at[2] += 1;
+        }
+    }
+
+    /// The oldest value; the queue is not empty.
+    fn pop(self) -> T {
+        unsafe {
+            if self.at[2] == 0 {
+                panic("channel: pop from an empty queue");
+            }
+            if self.at[0] == SEGMENT {
+                self.ends[0] = self.ends[0].next[0] ?? panic("channel: segment list broken");
+                self.at[0] = 0;
+            }
+            let head = self.ends[0];
+            let v = head.slots[self.at[0]];
+            head.slots[self.at[0]] = self.zero[0];
+            self.at[0] += 1;
+            self.at[2] -= 1;
+            v
         }
     }
 }
@@ -135,7 +224,11 @@ fn make<T>(limit: usize, rendezvous: bool) -> (Sender<T>, Receiver<T>) {
         let ch = Chan {
             lock: Mutex::new(0),
             meta: meta,
-            queue: Deque::new(),
+            queue: if limit > 0 {
+                Deque::<T>::with_capacity(limit)
+            } else {
+                segments::<T>()
+            },
             not_empty: Condvar::new(),
             not_full: Condvar::new(),
         };

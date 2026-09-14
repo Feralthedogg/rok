@@ -1,0 +1,30 @@
+// spec: std 307-process §3.7.1
+// expect-exit: 0
+// expect-stdout:
+// out: [a b]
+// env: [v1]
+// cwd: [/]
+// err: [e] code 3
+// null ok true
+
+// 3.7.1: the `Command` builder (`arg` / `args` / `env` / `env_clear` /
+// `current_dir` / `stdout`), and `output` collecting status and pipes.
+use rok::std::path::Path;
+use rok::std::process::{Command, Stdio};
+
+fn text(b: List<u8>) -> str {
+    (try! str::from_utf8(b)).trim()
+}
+
+fn main() {
+    let o = try! Command::new(Path::from("/bin/echo")).arg("a").args(["b"]).output();
+    println(f"out: [{text(o.stdout)}]");
+    o = try! Command::new(Path::from("/bin/sh")).args(["-c", "echo $K"]).env_clear().env("K", "v1").output();
+    println(f"env: [{text(o.stdout)}]");
+    o = try! Command::new(Path::from("/bin/pwd")).current_dir(Path::from("/")).output();
+    println(f"cwd: [{text(o.stdout)}]");
+    o = try! Command::new(Path::from("/bin/sh")).args(["-c", "echo e >&2; exit 3"]).output();
+    println(f"err: [{text(o.stderr)}] code {o.status.code() ?? -1}");
+    let s = try! Command::new(Path::from("/bin/echo")).arg("hidden").stdout(Stdio::Null).status();
+    println(f"null ok {s.success()}");
+}

@@ -1,0 +1,19 @@
+// expect-exit: 0
+// spec: std 201-numbers §2.1.4
+//
+// `abs` / `copysign` / `min` / `max` of `f64` and `f32` (the runtime's
+// bit operations): signed zeros, and `min` / `max` skip a NaN operand
+// as C's `fmin` / `fmax` do.
+// expect-stdout:
+// 2.5 0 -0
+// -3 3 -1.5
+// 1 2 1 2
+// 1 1 true
+
+fn main() {
+    let nan = 0.0 / 0.0;
+    println(f"{(-2.5).abs()} {(-0.0).abs()} {(0.0).copysign(-1.0)}");
+    println(f"{(3.0).copysign(-0.0)} {(-3.0f32).abs()} {(1.5f32).copysign(-2.0f32)}");
+    println(f"{(1.0).min(2.0)} {(1.0).max(2.0)} {(1.0f32).min(2.0f32)} {(1.0f32).max(2.0f32)}");
+    println(f"{nan.min(1.0)} {(1.0).max(nan)} {nan.min(nan).is_nan()}");
+}

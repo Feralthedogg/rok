@@ -1,4 +1,7 @@
 // expect-exit: 25
+// expect-stdout:
+// 15 25 3
+// none
 
 struct Stack<T> {
     data: [T; 8];
@@ -40,6 +43,8 @@ impl Stack<i32> {
 fn main() -> i32 {
     let s = Stack::new().push(3).push(7).push(15);
     let p = s.peek() ?? -1;
+    println(f"{p} {s.sum()} {s.top}");
+    if Stack::new().peek() is none { println("none"); }
     return s.sum() + p - 15;
 }
 

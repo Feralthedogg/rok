@@ -1,0 +1,23 @@
+// spec: std 200-core/218-task §2.18.1
+// expect-exit: 0
+// expect-stdout:
+// first 1 b
+// tie 0 a
+
+// 2.18.1 `select`: the first future to finish, polled in list order
+// inside the waiting task; on a tie the lower index wins.
+async fn after(steps: i32, s: str) -> str {
+    let i = 0;
+    while i < steps {
+        await task::yield_now();
+        i = i + 1;
+    }
+    s
+}
+
+async fn main() {
+    let (i, v) = await task::select([after(5, "a"), after(1, "b"), after(3, "c")]);
+    println(f"first {i} {v}");
+    let (j, w) = await task::select([after(0, "a"), after(0, "b")]);
+    println(f"tie {j} {w}");
+}

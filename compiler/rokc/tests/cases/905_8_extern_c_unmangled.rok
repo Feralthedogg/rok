@@ -1,0 +1,25 @@
+// spec: 009.05-symbol-mangling §9.5.8
+// expect-exit: 0
+// expect-stdout:
+// strlen 5
+// abs 7
+// export 30
+
+// spec 9.5.8: functions of an `extern "C"` block link by their plain C
+// names (no rok mangling); `#[export_name]` on an ordinary `pub fn`
+// gives it that exact symbol.
+extern "C" {
+    fn strlen(s: str) -> usize;
+    fn abs(x: i32) -> i32;
+    fn rok_probe_905_sum(x: i32, y: i32) -> i32;
+}
+
+#[export_name("rok_probe_905_sum")]
+pub fn sum(x: i32, y: i32) -> i32 { x + y }
+
+fn main() -> i32 {
+    println(f"strlen {unsafe { strlen("hello") }}");
+    println(f"abs {unsafe { abs(-7) }}");
+    println(f"export {unsafe { rok_probe_905_sum(10, 20) }}");
+    return 0;
+}

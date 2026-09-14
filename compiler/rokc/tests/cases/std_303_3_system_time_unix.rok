@@ -1,0 +1,30 @@
+// spec: std 303-time §3.3.3 / §3.3.4
+// expect-exit: 0
+// expect-stdout:
+// epoch 0 0
+// from_unix 1700000000 1700000000250000000
+// plus 1700000010 minus 1699999999
+// since 10s
+// earlier errs by 10s
+// boot monotonic true
+
+// 3.3.3: `SystemTime` is ns from `UNIX_EPOCH`; `from_unix` /
+// `unix_seconds` / `unix_nanos`, `± Duration`, and `duration_since`
+// failing with the gap when `earlier` is later. 3.3.4: `BootTime`.
+use rok::std::time::{BootTime, Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
+
+fn main() {
+    println(f"epoch {try! UNIX_EPOCH.unix_seconds()} {try! UNIX_EPOCH.unix_nanos()}");
+    let t = SystemTime::from_unix(1700000000, 250000000);
+    println(f"from_unix {try! t.unix_seconds()} {try! t.unix_nanos()}");
+    let later = t + Duration::sec(10);
+    let before = t - Duration::sec(1);
+    println(f"plus {try! later.unix_seconds()} minus {try! before.unix_seconds()}");
+    println(f"since {try! later.duration_since(t)}");
+    try t.duration_since(later) catch e: SystemTimeError {
+        println(f"earlier errs by {e.duration}");
+    }
+    let b = BootTime::now();
+    let c = BootTime::now();
+    println(f"boot monotonic {c.duration_since(b) >= Duration::ZERO}");
+}

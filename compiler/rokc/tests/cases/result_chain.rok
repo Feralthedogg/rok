@@ -1,4 +1,6 @@
 // expect-exit: 50
+// expect-stdout:
+// 21 20 9
 
 enum Res<T> {
     Ok(T),
@@ -32,5 +34,6 @@ fn main() -> i32 {
     let a = parse(7).map(|x: i32| -> i32 { x * 3 }).unwrap_or(0);
     let b = parse(-1).map(|x: i32| -> i32 { x * 3 }).unwrap_or(20);
     let c = parse(3).map(|x: i32| -> i32 { x * 3 }).unwrap_or(0);
+    println(f"{a} {b} {c}");
     return a + b + c;
 }

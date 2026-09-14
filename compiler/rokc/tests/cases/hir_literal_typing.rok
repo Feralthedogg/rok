@@ -1,4 +1,6 @@
 // expect-exit: 0
+// expect-stdout:
+// 42 3000000000 5000000000 255 -128 7
 
 // Unsuffixed literals take the expected type: let annotation, parameter
 // type, the other operand, the `??` payload, struct field types.
@@ -21,5 +23,6 @@ fn main() -> i32 {
     let o: i64 | none = 7;
     let v = o ?? 9;
     if v != 7i64 { return 7; }
+    println(f"{b} {big} {s.big} {s.small} {lo} {v}");
     return 0;
 }

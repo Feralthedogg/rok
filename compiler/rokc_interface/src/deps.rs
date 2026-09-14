@@ -47,8 +47,8 @@ impl DepBuild<'_> {
                 print_rendered(&warnings);
             } else {
                 fp.clear();
-                let warnings = self.build(name, root, &archive, &out)?;
-                fp.save(&warnings);
+                let (read, warnings) = self.build(name, root, &archive, &out)?;
+                fp.save(&read, &warnings);
             }
             out.push((name.clone(), rhir));
         }
@@ -86,16 +86,17 @@ impl DepBuild<'_> {
         }
         let also = vec![rhir::companions(archive).0];
         Fingerprint::new(archive, also, &words, &inputs, &stamped)
+            .kept_in(self.dir.join(format!("{name}.fp")))
     }
 
-    /// Build one dependency; its rendered warnings.
+    /// Build one dependency; the files it read and its rendered warnings.
     fn build(
         &self,
         name: &str,
         root: &Path,
         archive: &Path,
         before: &[(String, PathBuf)],
-    ) -> Result<String, String> {
+    ) -> Result<(Vec<PathBuf>, String), String> {
         if !self.quiet {
             let dir = root.parent().unwrap_or(root);
             eprintln!("   Compiling {name} ({})", dir.display());
@@ -126,6 +127,6 @@ impl DepBuild<'_> {
             crate::report(&d);
             failed()
         })?;
-        Ok(warnings)
+        Ok((r.files, warnings))
     }
 }

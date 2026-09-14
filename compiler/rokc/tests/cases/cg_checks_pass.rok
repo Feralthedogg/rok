@@ -1,5 +1,7 @@
 // expect-exit: 0
 // Runtime checks must not fire on valid operands.
+// expect-stdout:
+// 30 -3 -1 -2147483648
 
 fn main() -> i32 {
     let a: [i32; 3] = [10, 20, 30];
@@ -7,6 +9,7 @@ fn main() -> i32 {
     let q: i32 = -7 / 2;
     let r: i32 = -7 % 2;
     let s: i32 = 1 << 31;
+    println(f"{a[i]} {q} {r} {s}");
     if a[i] != 30 { return 1; }
     if q != -3 { return 2; }
     if r != -1 { return 3; }

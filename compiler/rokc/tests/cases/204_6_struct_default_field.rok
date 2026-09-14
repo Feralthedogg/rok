@@ -1,10 +1,13 @@
 // spec: 002.x-default-field
 // expect-exit: 7
+// expect-stdout:
+// 7
 
 // spec 2.x: an omitted field takes its declared default expression.
 struct S { count: i32 = 7; }
 
 fn main() -> i32 {
     let s = S {};
+    println(f"{s.count}");
     return s.count;
 }

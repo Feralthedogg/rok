@@ -134,6 +134,10 @@ impl<T> DoubleEndedIterator for SliceIter<T> {
     }
 }
 
+impl<T> ExactSizeIterator for SliceIter<T> {
+    fn len(self) -> usize { self.s.len - self.i - self.back }
+}
+
 impl<T> IntoIterator for Slice<T> {
     type IntoIter = SliceIter<T>;
     type Item = T;

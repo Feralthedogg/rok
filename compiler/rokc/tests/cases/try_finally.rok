@@ -1,4 +1,7 @@
 // expect-exit: 11
+// expect-stdout:
+// 4 7
+
 
 // `try { body } finally { fin }`: with no throw, the body runs and then
 // `finally` still fires.
@@ -10,6 +13,7 @@ fn main() -> i32 {
     } finally {
         total += 0;
     };
+    println(f"{total} {result}");
     return total + result;   // 4 + 7 = 11
 }
 

@@ -1,5 +1,7 @@
 // spec: 005.07.3-sup-path
 // expect-exit: 11
+// expect-stdout:
+// 11
 
 // spec 5.7.3: a `sup::` path starts at the parent module, reaching sibling
 // and ancestor modules' items.
@@ -12,5 +14,6 @@ mod inner {
 }
 
 fn main() -> i32 {
+    println(f"{inner::use_helper()}");
     return inner::use_helper();
 }

@@ -2,7 +2,9 @@
 //! the crate is built without LLVM.
 
 use std::io::Write as _;
+#[cfg(target_vendor = "apple")]
 use std::path::PathBuf;
+#[cfg(target_vendor = "apple")]
 use std::process::Command;
 
 use rokc_llvm::{Compile, Emit, OptLevel, Target};
@@ -17,6 +19,7 @@ fn skip() -> bool {
     !rokc_llvm::AVAILABLE
 }
 
+#[cfg(target_vendor = "apple")]
 fn scratch(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("rokc-llvm-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
@@ -36,6 +39,7 @@ const fn opts<'a>(t: &'a Target, opt: OptLevel, emit: Emit, pipeline: &'a str) -
     }
 }
 
+#[cfg(target_vendor = "apple")]
 const HELLO_MLIR: &str = r#"
 module {
   llvm.mlir.global internal constant @msg("hello from rokc_llvm\00") : !llvm.array<21 x i8>
@@ -171,7 +175,7 @@ fn mlir_hello_links_and_runs() {
         rokc_llvm::write_archive(&host, &a, &[&o]).unwrap();
         let exe = dir.join("hello");
         let l = format!("-L{}", dir.display());
-        rokc_llvm::link_executable(&host, &[l.as_str(), "-lhello"], &exe, true).unwrap();
+        rokc_llvm::link_executable(&host, &[l.as_str(), "-lhello"], &exe, true, None).unwrap();
         let run = Command::new(&exe).output().unwrap();
         assert_eq!(
             String::from_utf8_lossy(&run.stdout),
@@ -179,7 +183,7 @@ fn mlir_hello_links_and_runs() {
         );
         assert_eq!(run.status.code(), Some(42));
     }
-    let e = rokc_llvm::link_executable(&host, &["-lno_such_lib_xyz"], &dir.join("x"), true)
+    let e = rokc_llvm::link_executable(&host, &["-lno_such_lib_xyz"], &dir.join("x"), true, None)
         .unwrap_err();
     assert!(e.contains("no_such_lib_xyz"), "{e}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -205,7 +209,7 @@ fn split_objects_link_and_dsymutil_bundles_them() {
         objs.push(path);
     }
     let exe = dir.join("split");
-    rokc_llvm::link_executable(&host, &objs, &exe, true).unwrap();
+    rokc_llvm::link_executable(&host, &objs, &exe, true, None).unwrap();
     let run = Command::new(&exe).output().unwrap();
     assert_eq!(run.status.code(), Some(42));
     rokc_llvm::dsymutil(&[exe.as_os_str()]).unwrap();

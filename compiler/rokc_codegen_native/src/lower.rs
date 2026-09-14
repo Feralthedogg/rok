@@ -49,7 +49,13 @@ pub struct Ctx<'a> {
     pub debug: bool,
     /// Statics this object defines (else through the GOT).
     pub local_statics: &'a HashSet<String>,
-    pub errors: Vec<String>,
+    /// Functions that never reach a safepoint (`quiet_functions`).
+    pub quiet: &'a HashSet<FunctionId>,
+    /// Functions a call cycle can enter: they poll on entry
+    /// (`reentrant_functions`).
+    pub reentrant: &'a HashSet<FunctionId>,
+    /// Unsupported constructs, at their function (dummy outside one).
+    pub errors: Vec<(rokc_diagnostic::Span, String)>,
 }
 
 impl Ctx<'_> {
@@ -196,10 +202,8 @@ impl<'c, 'a> FnLower<'c, 'a> {
     }
 
     fn err(&mut self, what: String) {
-        self.c.errors.push(format!(
-            "in `{}`: unsupported in codegen: {what}",
-            self.f.name
-        ));
+        let msg = format!("in `{}`: unsupported in codegen: {what}", self.f.name);
+        self.c.errors.push((self.f.span, msg));
     }
 
     fn pw(&self) -> u32 {
@@ -460,7 +464,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
                 m
             };
             let sym = self.c.sym("rok_panic_at");
-            self.call_sym(
+            self.call_runtime(
                 sym,
                 &[str_ty.clone(), str_ty.clone()],
                 &MirTy::Unit,
@@ -840,6 +844,42 @@ impl<'c, 'a> FnLower<'c, 'a> {
         self.call_rok(Callee::Sym(sym), params, ret, args, dst);
     }
 
+    /// A call to a runtime function codegen makes on its own: as
+    /// `call_sym`, but a `str` argument goes as a pointer to a copy on
+    /// Windows x64, whose C ABI passes the 16-byte struct by reference
+    /// (spec 8.6.3; `abi::classify_rok`).
+    fn call_runtime(
+        &mut self,
+        sym: SymId,
+        params: &[MirTy],
+        ret: &MirTy,
+        args: &[Val],
+        dst: Option<Mem>,
+    ) {
+        if self.c.t.c_abi != rokc_mir::CAbi::X86_64Win {
+            return self.call_sym(sym, params, ret, args, dst);
+        }
+        let str_ty = MirTy::Prim(PrimTy::Str);
+        let word = MirTy::Prim(PrimTy::Usize);
+        let mut ps = Vec::with_capacity(params.len());
+        let mut vs = Vec::with_capacity(args.len());
+        for (ty, v) in params.iter().zip(args) {
+            if *ty == str_ty {
+                let (size, align) = self.c.t.size_align(ty);
+                let m = self.tmp_bytes(size, align);
+                self.store(*v, ty, m);
+                let p = self.word_tmp();
+                self.push(Inst::Addr { dst: p, src: m });
+                ps.push(word.clone());
+                vs.push(Val::S(V::M(p), self.word()));
+            } else {
+                ps.push(ty.clone());
+                vs.push(*v);
+            }
+        }
+        self.call_sym(sym, &ps, ret, &vs, dst);
+    }
+
     fn arg_parts(&self, v: Val, ty: &MirTy, parts: &[Part], out: &mut Vec<(Part, V)>) {
         let sh = cc::shape(ty, self.c.t);
         match v {
@@ -938,8 +978,8 @@ impl<'c, 'a> FnLower<'c, 'a> {
                 let s = self.mem_of(v, &str_ty);
                 let p = self.word_tmp();
                 let sym = self.c.sym("rok_str_cstr");
-                self.call_rok(
-                    Callee::Sym(sym),
+                self.call_runtime(
+                    sym,
                     std::slice::from_ref(&str_ty),
                     &MirTy::Prim(PrimTy::Usize),
                     &[Val::M(s)],
@@ -1081,7 +1121,10 @@ impl<'c, 'a> FnLower<'c, 'a> {
                 }
             }
         }
-        if !abi.rok {
+        // Not for a `rok_*` runtime symbol declared `extern "C"` (as emit.rs).
+        let parked = !abi.rok
+            && !matches!(callee, Callee::Sym(s) if self.c.obj.syms[s as usize].name.starts_with("rok_"));
+        if parked {
             self.native_edge(true);
         }
         self.push(Inst::Call {
@@ -1091,14 +1134,14 @@ impl<'c, 'a> FnLower<'c, 'a> {
             sret,
             variadic: abi.variadic,
         });
-        if !abi.rok {
+        if parked {
             self.native_edge(false);
         }
         for (s, p) in c_strs {
             let sym = self.c.sym("rok_str_cstr_done");
             let w = MirTy::Prim(PrimTy::Usize);
-            self.call_rok(
-                Callee::Sym(sym),
+            self.call_runtime(
+                sym,
                 &[str_ty.clone(), w],
                 &MirTy::Unit,
                 &[Val::M(s), Val::S(V::M(p), self.word())],
@@ -1364,31 +1407,30 @@ impl<'c, 'a> FnLower<'c, 'a> {
 
     // ---- function body ----
 
+    /// Whether a collection can run while this function is active.
+    fn reaches_safepoint(&self) -> bool {
+        rokc_codegen_mlir::emit::body_safepoints(self.f, self.c.quiet, self.c.pkgs, self.c.t)
+    }
+
     /// The shadow-stack frame (704 §7.4.1), as the emitter's
-    /// `emit_gc_frame` decides it.
+    /// `emit_gc_frame` decides it: for a function that can stop for a
+    /// collection, rooting the locals live across such a point.
     fn gc_frame(&mut self) {
-        let calls = !self.back_edges.is_empty()
-            || self.f.blocks.iter().flat_map(|b| &b.stmts).any(|s| {
-                matches!(
-                    s,
-                    Statement::Assign {
-                        rvalue: RValue::Call { .. }
-                            | RValue::CallIndirect { .. }
-                            | RValue::HeapBox { .. }
-                            | RValue::HeapAlloc { .. }
-                            | RValue::BufAlloc { .. },
-                        ..
-                    }
-                )
-            });
-        if !calls {
+        if self.back_edges.is_empty() && !self.reaches_safepoint() {
             return;
         }
+        let (t, quiet, pkgs) = (self.c.t, self.c.quiet, self.c.pkgs);
+        let live = rokc_mir::live_across(
+            self.f,
+            |l| !t.root_offsets(&self.f.locals[l.0 as usize].ty).is_empty(),
+            |s| rokc_codegen_mlir::emit::stmt_safepoint(s, quiet, pkgs, t),
+            |b| self.back_edges.contains(&b.0),
+        );
         let caller = self.f.params.last().filter(|_| self.f.facts.track_caller);
         let mut roots: Vec<Mem> = Vec::new();
         for local in &self.f.locals {
             let offsets = self.c.t.root_offsets(&local.ty);
-            if offsets.is_empty() || caller == Some(&local.id) {
+            if offsets.is_empty() || caller == Some(&local.id) || !live.contains(&local.id) {
                 continue;
             }
             let Some(m) = self.local_mem(local.id) else {
@@ -1495,7 +1537,11 @@ impl<'c, 'a> FnLower<'c, 'a> {
         }
         let head = self.out.insts.len();
         self.gc_frame();
-        self.poll();
+        // Entry poll: only where a call cycle can come back in without
+        // a loop's poll, and a collection can run at all.
+        if self.c.reentrant.contains(&f.id) && self.reaches_safepoint() {
+            self.poll();
+        }
         for b in &f.blocks {
             self.block(b);
         }
@@ -1629,7 +1675,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
                 self.store(v, elem_ty, Mem::Ind(p, 0));
             }
             Statement::StorageDead(l) => {
-                if self.gc_frame.is_some() {
+                if self.rooted.contains(&l.0) {
                     self.clear(*l);
                 }
             }
@@ -1735,14 +1781,15 @@ impl<'c, 'a> FnLower<'c, 'a> {
             a: V::M(i64_),
             b: V::I(i64::from(size)),
         });
+        let a = self.word_tmp();
+        self.push(Inst::Addr { dst: a, src: base });
         let p = self.word_tmp();
-        self.push(Inst::Addr { dst: p, src: base });
         self.push(Inst::Bin {
             op: Bin::Add,
             k: w,
             signed: false,
             dst: p,
-            a: V::M(p),
+            a: V::M(a),
             b: V::M(off),
         });
         let Mem::Frame(ps, _) = p else { unreachable!() };
@@ -1756,22 +1803,28 @@ impl<'c, 'a> FnLower<'c, 'a> {
         let (bv, bk) = self.scalar(buf, &MirTy::GcRef);
         let bs = self.in_slot(bv, bk);
         let (iv, _) = self.scalar(index, &MirTy::Prim(PrimTy::Usize));
-        let size = self.c.t.size_align(elem_ty).0;
+        let size = i64::from(self.c.t.size_align(elem_ty).0);
+        let off = if let V::I(i) = iv {
+            V::I(i.wrapping_mul(size))
+        } else {
+            let o = self.word_tmp();
+            self.push(Inst::Bin {
+                op: Bin::Mul,
+                k: w,
+                signed: false,
+                dst: o,
+                a: iv,
+                b: V::I(size),
+            });
+            V::M(o)
+        };
         let p = self.word_tmp();
-        self.push(Inst::Bin {
-            op: Bin::Mul,
-            k: w,
-            signed: false,
-            dst: p,
-            a: iv,
-            b: V::I(i64::from(size)),
-        });
         self.push(Inst::Bin {
             op: Bin::Add,
             k: w,
             signed: false,
             dst: p,
-            a: V::M(p),
+            a: off,
             b: V::M(Mem::Frame(bs, 0)),
         });
         let Mem::Frame(ps, _) = p else { unreachable!() };
@@ -1957,8 +2010,14 @@ impl<'c, 'a> FnLower<'c, 'a> {
                         self.call_rok(Callee::Ptr(cm), arg_tys, ret_ty, &vals, dst);
                     }
                     Abi::C { variadic } => {
-                        let Some(fa) = classify(&mut self.c.errors, t, arg_tys, ret_ty, *variadic)
-                        else {
+                        let Some(fa) = classify(
+                            &mut self.c.errors,
+                            self.f.span,
+                            t,
+                            arg_tys,
+                            ret_ty,
+                            *variadic,
+                        ) else {
                             return;
                         };
                         self.call_c(Callee::Ptr(cm), arg_tys, ret_ty, &fa, args, dst);
@@ -2177,7 +2236,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
             let b = self.val(rhs, op_ty);
             let r = self.tmp_k(K::I32);
             let sym = self.c.sym("rok_str_cmp");
-            self.call_sym(
+            self.call_runtime(
                 sym,
                 &[op_ty.clone(), op_ty.clone()],
                 &MirTy::Prim(PrimTy::I32),
@@ -2438,9 +2497,8 @@ impl<'c, 'a> FnLower<'c, 'a> {
             }
             Terminator::Unreachable => self.push(Inst::Trap),
             Terminator::Suspend { .. } => {
-                self.c
-                    .errors
-                    .push("internal: a coroutine suspend point survived MIR".to_owned());
+                let msg = "internal: a coroutine suspend point survived MIR".to_owned();
+                self.c.errors.push((self.f.span, msg));
                 self.push(Inst::Trap);
             }
         }
@@ -2491,7 +2549,8 @@ impl<'c, 'a> FnLower<'c, 'a> {
 /// `abi::classify` with the emitter's `#[repr(transparent)]` scalar
 /// coercion; `None` (and an error) where the target cannot pass it.
 pub fn classify(
-    errors: &mut Vec<String>,
+    errors: &mut Vec<(rokc_diagnostic::Span, String)>,
+    at: rokc_diagnostic::Span,
     t: &Target,
     params: &[MirTy],
     ret: &MirTy,
@@ -2521,10 +2580,11 @@ pub fn classify(
         }
     }
     if fa.is_none() {
-        errors.push(
+        errors.push((
+            at,
             "unsupported in codegen: a `struct` by value across the C ABI on this target"
                 .to_owned(),
-        );
+        ));
     }
     fa
 }

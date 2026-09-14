@@ -1,4 +1,6 @@
 // expect-exit: 17
+// expect-stdout:
+// 5 6 17
 
 struct Tagged<T> {
     tag: i32;
@@ -13,6 +15,7 @@ impl Tagged<i32> {
 
 fn main() -> i32 {
     let t: Tagged<i32> = Tagged { tag: 5, value: 6 };
+    println(f"{t.tag} {t.value} {t.doubled()}");
     return t.doubled();
 }
 

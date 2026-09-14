@@ -11,7 +11,9 @@
 //!
 //! Targets: Mach-O `arm64` / `x86_64` (`__thread_vars`), ELF `x86_64`
 //! (initial-exec) / `aarch64` (local-exec: the runtime is always linked
-//! into the executable).
+//! into the executable), COFF `x86_64` / `aarch64` (`.tls$`, through
+//! `_tls_index` and the TEB's TLS array; rokc's startup object defines
+//! `_tls_index` and the TLS directory).
 
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
@@ -100,6 +102,42 @@ macro_rules! tls_slots {
             "ret\n",
         )),*);
 
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        core::arch::global_asm!($(concat!(
+            ".section .tls$,\"dw\"\n",
+            ".p2align ", $align, "\n",
+            ".globl rok_tls_", stringify!($name), "\n",
+            "rok_tls_", stringify!($name), ":\n",
+            ".zero ", $size, "\n",
+            ".text\n",
+            ".globl ", stringify!($acc), "\n",
+            ".p2align 4\n",
+            stringify!($acc), ":\n",
+            "mov eax, dword ptr [rip + _tls_index]\n",
+            "mov rcx, qword ptr gs:[0x58]\n",
+            "mov rcx, qword ptr [rcx + 8*rax]\n",
+            "lea rax, [rcx + rok_tls_", stringify!($name), "@SECREL32]\n",
+            "ret\n",
+        )),*);
+        #[cfg(all(windows, target_arch = "aarch64"))]
+        core::arch::global_asm!($(concat!(
+            ".section .tls$,\"dw\"\n",
+            ".p2align ", $align, "\n",
+            ".globl rok_tls_", stringify!($name), "\n",
+            "rok_tls_", stringify!($name), ":\n",
+            ".zero ", $size, "\n",
+            ".text\n",
+            ".globl ", stringify!($acc), "\n",
+            ".p2align 2\n",
+            stringify!($acc), ":\n",
+            "adrp x8, _tls_index\n",
+            "ldr w8, [x8, :lo12:_tls_index]\n",
+            "ldr x9, [x18, #0x58]\n",
+            "ldr x9, [x9, x8, lsl #3]\n",
+            "add x9, x9, :secrel_hi12:rok_tls_", stringify!($name), "\n",
+            "add x0, x9, :secrel_lo12:rok_tls_", stringify!($name), "\n",
+            "ret\n",
+        )),*);
         /// Address of this thread's `rok_tls_<name>` slot.
         pub mod slot {
             unsafe extern "C" {
@@ -119,7 +157,7 @@ macro_rules! tls_slots {
 #[cfg(not(any(
     target_vendor = "apple",
     all(
-        target_os = "linux",
+        any(target_os = "linux", windows),
         any(target_arch = "x86_64", target_arch = "aarch64")
     )
 )))]
@@ -139,6 +177,9 @@ tls_slots! {
     // Not an 803 slot: this thread's task-executor worker
     // (`rok::core::task`), a pinned GC object, 0 = none.
     task_worker => rokr_tls_task_worker_addr, 8, 3;
+    // Not an 803 slot: the executor lane this thread runs (`rokr::lane`),
+    // a malloc'd record, 0 = none.
+    task_lane => rokr_tls_task_lane_addr, 8, 3;
     // Not an 803 slot: `[lo, hi)`, the addresses whose fault means this
     // thread overflowed its stack (`rokr::stack`); `[0, 0)` = unknown.
     stack_guard => rokr_tls_stack_guard_addr, 16, 3;
@@ -146,6 +187,9 @@ tls_slots! {
     // marking), like the wb log pair.
     satb_cursor => rokr_tls_satb_cursor_addr, 8, 3;
     satb_limit => rokr_tls_satb_limit_addr, 8, 3;
+    // Not an 803 slot: the head of this thread's list of running static
+    // initializers (`rokr::thread`), null = none.
+    static_inits => rokr_tls_static_inits_addr, 8, 3;
 }
 
 /// Address of this thread's `rok_tls_stack_guard` (`[lo, hi)`).
@@ -192,6 +236,7 @@ pub fn thread_init() {
         slot::satb_limit().cast::<usize>().write(0);
         slot::worker_id().cast::<u64>().write(new_worker_id());
         slot::task_worker().cast::<usize>().write(0);
+        slot::task_lane().cast::<usize>().write(0);
     }
 }
 
@@ -220,6 +265,18 @@ pub fn tlab() -> [*mut usize; 2] {
 #[allow(clippy::cast_ptr_alignment)] // 8-aligned slot
 pub fn task_worker() -> *mut usize {
     slot::task_worker().cast()
+}
+
+/// Address of this thread's `rok_tls_static_inits`.
+#[allow(clippy::cast_ptr_alignment)] // 8-aligned slot
+pub fn static_inits() -> *mut usize {
+    slot::static_inits().cast()
+}
+
+/// Address of this thread's `rok_tls_task_lane`.
+#[allow(clippy::cast_ptr_alignment)] // 8-aligned slot
+pub fn task_lane() -> *mut usize {
+    slot::task_lane().cast()
 }
 
 /// Address of this thread's `rok_tls_worker_id`.

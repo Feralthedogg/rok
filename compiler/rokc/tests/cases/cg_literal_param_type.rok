@@ -1,10 +1,13 @@
 // expect-exit: 9
 // Literals take the callee's parameter / binding type (i64, usize).
+// expect-stdout:
+// 3 3 3
 
 fn g(n: i64) -> i64 { return n; }
 
 fn main() -> i32 {
     let x: i64 = 3;
     let u: usize = 3;
+    println(f"{g(3)} {g(x)} {u}");
     return g(3) as i32 + g(x) as i32 + u as i32;
 }

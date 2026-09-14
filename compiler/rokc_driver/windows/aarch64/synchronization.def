@@ -1,0 +1,21 @@
+; api-ms-win-core-synch-l1-2-0.def of mingw-w64 63ebe6cdb3ec4d5c586b7f0f0c03dd502e44c296 (COPYING.mingw-w64),
+; preprocessed for aarch64-pc-windows-msvc by gen.sh, comments dropped.
+LIBRARY api-ms-win-core-synch-l1-2-0
+EXPORTS
+DeleteSynchronizationBarrier
+EnterSynchronizationBarrier
+InitializeConditionVariable
+InitializeSynchronizationBarrier
+InitOnceBeginInitialize
+InitOnceComplete
+InitOnceExecuteOnce
+InitOnceInitialize
+SignalObjectAndWait
+Sleep
+SleepConditionVariableCS
+SleepConditionVariableSRW
+WaitOnAddress
+WakeAllConditionVariable
+WakeByAddressAll
+WakeByAddressSingle
+WakeConditionVariable

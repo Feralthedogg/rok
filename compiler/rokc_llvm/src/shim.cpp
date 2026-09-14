@@ -13,6 +13,8 @@
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Object/ArchiveWriter.h"
+#include "llvm/Object/COFFImportFile.h"
+#include "llvm/Object/COFFModuleDefinition.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
@@ -239,6 +241,16 @@ int finish(llvm::Module &m, const RokCompile &o, RokBuf *out, RokBuf *err) {
     return fail(err, error);
   m.setTargetTriple(tm->getTargetTriple());
   m.setDataLayout(tm->createDataLayout());
+  if (tm->getTargetTriple().isOSWindows()) {
+    // Windows debuggers read CodeView (lld-link writes it into a PDB).
+    if (m.getModuleFlag("Debug Info Version") && !m.getModuleFlag("CodeView"))
+      m.addModuleFlag(llvm::Module::Warning, "CodeView", 1);
+    // Every function in .pdata / .xdata: without an entry the unwinder
+    // takes a function for a leaf and cannot walk past it.
+    for (llvm::Function &f : m)
+      if (!f.isDeclaration())
+        f.setUWTableKind(llvm::UWTableKind::Async);
+  }
   {
     std::string msg;
     llvm::raw_string_ostream os(msg);
@@ -405,10 +417,10 @@ int rok_llvm_lld(const char *const *argv, size_t argc, RokBuf *log) {
   return r.retCode;
 }
 
-// An archive of the files `members` (BSD format when `darwin`, else GNU),
-// with a symbol table.
+// An archive of the files `members` with a symbol table; `kind` 0 GNU,
+// 1 BSD (Darwin), 2 COFF.
 int rok_llvm_write_archive(const char *path, const char *const *members,
-                           size_t n, int darwin, RokBuf *err) {
+                           size_t n, int kind, RokBuf *err) {
   init_llvm();
   std::vector<llvm::NewArchiveMember> ms;
   for (size_t i = 0; i < n; ++i) {
@@ -419,10 +431,28 @@ int rok_llvm_write_archive(const char *path, const char *const *members,
     m->MemberName = llvm::sys::path::filename(members[i]);
     ms.push_back(std::move(*m));
   }
-  auto kind = darwin ? llvm::object::Archive::K_DARWIN
-                     : llvm::object::Archive::K_GNU;
+  auto format = kind == 1   ? llvm::object::Archive::K_DARWIN
+                : kind == 2 ? llvm::object::Archive::K_COFF
+                            : llvm::object::Archive::K_GNU;
   if (auto e = llvm::writeArchive(path, ms, llvm::SymtabWritingMode::NormalSymtab,
-                                  kind, true, false))
+                                  format, true, false))
+    return fail(err, llvm::toString(std::move(e)));
+  return 0;
+}
+
+// The import library `path` of a module definition (`.def`, mingw-w64
+// syntax) for COFF machine `arm64` (else x86_64).
+int rok_llvm_import_lib(const char *def, size_t len, int arm64,
+                        const char *path, RokBuf *err) {
+  auto machine = arm64 ? llvm::COFF::IMAGE_FILE_MACHINE_ARM64
+                       : llvm::COFF::IMAGE_FILE_MACHINE_AMD64;
+  auto parsed = llvm::object::parseCOFFModuleDefinition(
+      llvm::MemoryBufferRef(llvm::StringRef(def, len), path), machine, true,
+      false);
+  if (!parsed)
+    return fail(err, llvm::toString(parsed.takeError()));
+  if (auto e = llvm::object::writeImportLibrary(parsed->OutputFile, path,
+                                                parsed->Exports, machine, true))
     return fail(err, llvm::toString(std::move(e)));
   return 0;
 }

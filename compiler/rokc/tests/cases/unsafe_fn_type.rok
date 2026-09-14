@@ -1,4 +1,7 @@
 // expect-exit: 9
+// expect-stdout:
+// 3 2 4
+
 // `unsafe fn(..)` types (spec 4.15): a C function or `unsafe fn` taken
 // as a value keeps its unsafety; calling it needs `unsafe`. A safe fn
 // also fits an `unsafe fn` slot.
@@ -17,6 +20,7 @@ fn main() -> i32 {
     let a = unsafe { g(-3) };          // 3
     let b = apply(neg, -2);            // 2
     let c = apply(twice, 2);           // 4
+    println(f"{a} {b} {c}");
     return a + b + c;
 }
 

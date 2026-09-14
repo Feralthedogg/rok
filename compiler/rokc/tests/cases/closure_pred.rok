@@ -1,4 +1,6 @@
 // expect-exit: 12
+// expect-stdout:
+// 2 3
 
 fn count_when(xs: [i32; 6], pred: fn(i32) -> bool) -> i32 {
     let count = 0;
@@ -14,6 +16,7 @@ fn main() -> i32 {
     let xs: [i32; 6] = [3, 7, 2, 9, 5, 12];
     let evens = count_when(xs, |n: i32| -> bool { n % 2 == 0 });
     let big = count_when(xs, |n: i32| -> bool { n > 5 });
+    println(f"{evens} {big}");
     return evens * 3 + big * 2 + 0;
 }
 

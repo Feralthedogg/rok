@@ -3,6 +3,10 @@
 
 /// Object header size; the payload starts here (801 §8.1.1).
 pub const HEADER_SIZE: u32 = 16;
+/// Smallest object, header included: every object has a payload word,
+/// so compiled code may read the first word of any buffer it holds a
+/// reference to before knowing the buffer's length (801 §8.1.1).
+pub const MIN_OBJECT_SIZE: u32 = 24;
 /// Header offsets of `gc_flags` (u32) and `gc_word` (u64); `type_id` is
 /// at 0.
 pub const GC_FLAGS_OFFSET: u32 = 4;

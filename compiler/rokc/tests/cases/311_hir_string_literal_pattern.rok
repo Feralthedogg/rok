@@ -1,8 +1,11 @@
 // spec: 003.11-literal-pattern
 // expect-exit: 2
+// expect-stdout:
+// abc
 
 // String literal patterns compare contents.
 fn main() -> i32 {
     let s = "ab" + "c";
+    println(s);
     return match s { "x" => 1, "abc" => 2, _ => 3 };
 }

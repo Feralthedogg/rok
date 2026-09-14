@@ -1,4 +1,6 @@
 // expect-exit: 100
+// expect-stdout:
+// 150 50
 
 fn fold<T>(xs: [T; 5], init: T, f: fn(T, T) -> T) -> T {
     let acc = init;
@@ -14,6 +16,7 @@ fn main() -> i32 {
     let max = fold(xs, 0, |a: i32, b: i32| -> i32 {
         if a > b { a } else { b }
     });
+    println(f"{total} {max}");
     return total - max;
 }
 

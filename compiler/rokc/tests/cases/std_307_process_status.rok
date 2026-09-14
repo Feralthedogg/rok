@@ -24,3 +24,4 @@ fn main() throws (IoError) {
     let o = try Command::new("echo").args(["a", "b"]).output();
     println("out: [" + (try! str::from_utf8(o.stdout)).trim() + "]");
 }
+// only-os: macos linux

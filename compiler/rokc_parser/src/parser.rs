@@ -122,7 +122,9 @@ pub fn variadic_slice_ty(elem: Ty) -> Ty {
         span,
     }
 }
-const PARSER_STACK: usize = 128 << 20;
+/// `MAX_DEPTH` levels need ~5 MiB (the dev profile builds the parser at
+/// opt-level 1; ~4 MiB at opt-level 3: `Expr` values are large).
+const PARSER_STACK: usize = 16 << 20;
 
 pub fn parse_program(tokens: &[Token], file: impl Into<String>) -> (Program, Vec<RokDiagnostic>) {
     parse_program_ext(tokens, file, &ExtOps::default())
@@ -189,9 +191,9 @@ pub fn parse_expr_file(
     })
 }
 
-/// Recursive descent: `MAX_DEPTH` levels of debug-build frames need more
-/// than a default 2-8 MiB stack, so parse on a dedicated thread whose
-/// stack is sized for the cap (address space only until used).
+/// Recursive descent: `MAX_DEPTH` levels need more than a default 1-2 MiB
+/// (Windows main, spawned threads) stack, so parse on a dedicated thread
+/// whose stack is sized for the cap (address space only until used).
 fn on_parser_stack<T: Send>(run: impl FnOnce() -> T + Send) -> T {
     std::thread::scope(|s| {
         std::thread::Builder::new()
@@ -622,6 +624,17 @@ impl<'a> Parser<'a> {
 
     fn prev_span(&self) -> Option<Span> {
         self.tokens.get(self.pos.checked_sub(1)?).map(|t| t.span)
+    }
+
+    /// `span` widened to the end of the previous token: a compound
+    /// expression covers all its tokens.
+    fn to_prev(&self, mut span: Span) -> Span {
+        if let Some(p) = self.prev_span() {
+            if p.file == span.file && p.end > span.end {
+                span.end = p.end;
+            }
+        }
+        span
     }
 
     fn prev_kind(&self) -> Option<&TokenKind> {
@@ -1608,6 +1621,7 @@ impl<'a> Parser<'a> {
             self_ty,
             where_clause,
             items,
+            module: String::new(),
             span: start,
         })
     }
@@ -1815,7 +1829,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_mod(&mut self, vis: Visibility, attrs: Vec<Attribute>) -> Option<ModDef> {
+    fn parse_mod(&mut self, vis: Visibility, mut attrs: Vec<Attribute>) -> Option<ModDef> {
         let start = self.peek_span();
         self.expect(&TokenKind::Mod, "`mod`")?;
         let name = if let TokenKind::Ident(n) = self.peek().clone() {
@@ -1831,6 +1845,8 @@ impl<'a> Parser<'a> {
         };
         let items = if matches!(self.peek(), TokenKind::LBrace) {
             self.bump();
+            // `#![..]` / `//!` at the body's head are the module's (6.2.8).
+            attrs.extend(self.parse_inner_attrs());
             let mut items = Vec::new();
             while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
                 let from = self.pos;
@@ -2392,7 +2408,7 @@ impl<'a> Parser<'a> {
             ThrowsKind::Typed(errs)
         } else {
             match self.parse_throws() {
-                ThrowsKind::Untyped => ThrowsKind::Typed(vec![path_ty(UNTYPED_THROWS_MARK, start)]),
+                ThrowsKind::Untyped => ThrowsKind::Typed(vec![rokc_ast::untyped_throws_ty(start)]),
                 t => t,
             }
         };
@@ -2766,7 +2782,7 @@ impl<'a> Parser<'a> {
             TokenKind::Ident(_) if self.at_c_fn_type(0) => self.parse_marked_fn_type(start)?,
             TokenKind::Ident(_) => TyKind::Path(self.parse_type_path()?),
             // `<T as Tr>::X` (spec 2.13.4).
-            TokenKind::Lt => TyKind::Path(self.parse_qpath()?),
+            TokenKind::Lt => TyKind::QPath(Box::new(self.parse_qpath()?)),
             TokenKind::Fn => {
                 self.bump();
                 self.expect(&TokenKind::LParen, "`(`")?;
@@ -2790,7 +2806,7 @@ impl<'a> Parser<'a> {
                     // reported at the end of the parse.
                     ThrowsKind::Untyped => {
                         self.untyped_throws.push(throws_span);
-                        Some(path_ty(UNTYPED_THROWS_MARK, throws_span))
+                        Some(rokc_ast::untyped_throws_ty(throws_span))
                     }
                     ThrowsKind::Typed(mut tys) if tys.len() == 1 => tys.pop(),
                     ThrowsKind::Typed(tys) => Some(Ty {
@@ -2992,14 +3008,11 @@ impl<'a> Parser<'a> {
         self.parse_path_inner(false)
     }
 
-    /// `<T as Tr>::item` (spec 2.13.4) → the path `#as<T, Tr>::item`
-    /// (`rokc_ast::QPATH_MARK`).
-    fn parse_qpath(&mut self) -> Option<Path> {
-        let start = self.peek_span();
+    /// `<T as Tr>::item` (spec 2.13.4).
+    fn parse_qpath(&mut self) -> Option<rokc_ast::QPath> {
         self.expect(&TokenKind::Lt, "`<`")?;
         let self_ty = self.with_type_sum(false, Self::parse_type_atom)?;
         self.expect(&TokenKind::As, "`as`")?;
-        let tr_start = self.peek_span();
         let tr = self.parse_type_path()?;
         if !self.expect_closing_gt() {
             return None;
@@ -3017,24 +3030,10 @@ impl<'a> Parser<'a> {
             return None;
         };
         self.bump();
-        Some(Path {
-            segments: vec![
-                PathSegment {
-                    name: rokc_ast::QPATH_MARK.to_owned(),
-                    generics: vec![
-                        self_ty,
-                        Ty {
-                            kind: TyKind::Path(tr),
-                            span: tr_start,
-                        },
-                    ],
-                },
-                PathSegment {
-                    name,
-                    generics: Vec::new(),
-                },
-            ],
-            span: start,
+        Some(rokc_ast::QPath {
+            self_ty,
+            trait_path: tr,
+            item: name,
         })
     }
 
@@ -3870,7 +3869,7 @@ impl<'a> Parser<'a> {
             self.error(s, "range operators cannot be chained (spec 3.7.3)");
         }
         Some(Expr {
-            span,
+            span: self.to_prev(span),
             kind: ExprKind::Range {
                 start,
                 end,
@@ -3913,7 +3912,7 @@ impl<'a> Parser<'a> {
             None
         };
         Some(Expr {
-            span: body.span,
+            span: self.to_prev(body.span),
             kind: ExprKind::Catch {
                 body: Box::new(body),
                 catches,
@@ -3957,7 +3956,7 @@ impl<'a> Parser<'a> {
                     op: sym,
                     operand: Box::new(rhs),
                 },
-                span,
+                span: self.to_prev(span),
             }
         } else {
             self.parse_primary()?
@@ -3992,7 +3991,10 @@ impl<'a> Parser<'a> {
                         },
                     )
                 };
-                lhs = Expr { kind, span };
+                lhs = Expr {
+                    kind,
+                    span: self.to_prev(span),
+                };
                 continue;
             }
 
@@ -4007,7 +4009,7 @@ impl<'a> Parser<'a> {
                 }
                 self.bump();
                 let rhs = self.parse_expr_bp(COALESCE_PREC)?;
-                let span = lhs.span;
+                let span = self.to_prev(lhs.span);
                 lhs = Expr {
                     kind: ExprKind::NullishCoalesce(Box::new(lhs), Box::new(rhs)),
                     span,
@@ -4038,7 +4040,7 @@ impl<'a> Parser<'a> {
             }
             self.bump();
             let rhs = self.parse_expr_bp(right_bp)?;
-            let span = lhs.span;
+            let span = self.to_prev(lhs.span);
             lhs = Expr {
                 kind: ExprKind::OpInfix {
                     op: sym,
@@ -4153,7 +4155,7 @@ impl<'a> Parser<'a> {
         let kind = match self.peek().clone() {
             // Spec 2.13.4: `<Type as Trait>::method(...)`. At the start of
             // a primary, `<` cannot begin a comparison.
-            TokenKind::Lt => ExprKind::Path(self.parse_qpath()?),
+            TokenKind::Lt => ExprKind::QPath(Box::new(self.parse_qpath()?)),
             TokenKind::IntLit(s) => {
                 self.bump();
                 ExprKind::Literal(Literal::Int(s))
@@ -4801,12 +4803,16 @@ impl<'a> Parser<'a> {
                 return None;
             }
         };
-        let mut expr = Expr { kind, span: start };
+        let mut expr = Expr {
+            kind,
+            span: self.to_prev(start),
+        };
 
         // Postfix chain: calls, members, indexing, `?`, `?.`. After a
         // `?.`, member / index links join its tail (spec 3.8.8).
         let mut chain_open = false;
         loop {
+            expr.span = self.to_prev(expr.span);
             if chain_open {
                 match fold_chain(expr) {
                     Ok(e) => expr = e,
@@ -4950,6 +4956,10 @@ impl<'a> Parser<'a> {
                     }
                     let (indices, _) =
                         self.with_struct_expr(true, |p| p.expr_list(&TokenKind::RBracket))?;
+                    if matches!(self.peek(), TokenKind::Colon | TokenKind::ColonColon) {
+                        self.mixed_index_error();
+                        return None;
+                    }
                     if indices.is_empty() {
                         let s = self.peek_span();
                         self.error(s, "expected index expression");
@@ -5054,6 +5064,7 @@ impl<'a> Parser<'a> {
         if chain_open {
             expr = fold_chain(expr).unwrap_or_else(|e| e);
         }
+        expr.span = self.to_prev(expr.span);
         Some(expr)
     }
 
@@ -5184,6 +5195,10 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        if matches!(self.peek(), TokenKind::Comma) {
+            self.mixed_index_error();
+            return Some(None);
+        }
         if self.expect(&TokenKind::RBracket, "`]`").is_none() {
             return Some(None);
         }
@@ -5198,6 +5213,16 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    /// Spec 3.6.3: one bracket either indexes (`,`) or slices (`:`).
+    fn mixed_index_error(&mut self) {
+        let s = self.peek_span();
+        self.error(
+            s,
+            "one `[..]` cannot both index with `,` and slice with `:` (spec 3.6.3); \
+             slice and index in separate brackets (`m[a:b][c]`)",
+        );
+    }
+
     /// `e, e, ...` up to (not consuming) `close`. Returns the items and
     /// whether the list ended with a trailing comma.
     fn expr_list(&mut self, close: &TokenKind) -> Option<(Vec<Expr>, bool)> {
@@ -5206,6 +5231,11 @@ impl<'a> Parser<'a> {
         while std::mem::discriminant(self.peek()) != std::mem::discriminant(close)
             && !matches!(self.peek(), TokenKind::Eof)
         {
+            if *close == TokenKind::RBracket
+                && matches!(self.peek(), TokenKind::Colon | TokenKind::ColonColon)
+            {
+                break;
+            }
             items.push(self.parse_expr()?);
             trailing_comma = self.eat(&TokenKind::Comma);
             if !trailing_comma {
@@ -5972,11 +6002,6 @@ const fn is_block_like(e: &Expr) -> bool {
     )
 }
 
-/// Placeholder error type of an untyped `throws`: `desugar_rethrows`
-/// replaces it in `rethrows` parameters, HIR reads any other as
-/// `any Error`. `#` cannot start an identifier.
-use rokc_ast::UNTYPED_THROWS_MARK;
-
 /// `T?` = `Nest(T) | none`: like `Maybe<T>` (`type Maybe<T> = T |
 /// none`), `T` is a generic member, so `(i32 | none)?` keeps two layers
 /// while `i32?` is `i32 | none` (spec 2.6.4).
@@ -6015,19 +6040,18 @@ fn path_ty(name: &str, span: Span) -> Ty {
 /// argument, whose instance then doesn't throw. Returns the error types.
 fn desugar_rethrows(params: &mut [Param], generics: &mut Generics) -> Vec<Ty> {
     fn walk(ty: &mut Ty, generics: &mut Generics, errs: &mut Vec<Ty>) {
+        if rokc_ast::is_untyped_throws(ty) {
+            let name = format!("#E{}", errs.len());
+            *ty = path_ty(&name, ty.span);
+            generics.params.push(rokc_ast::GenericParam::Type {
+                name,
+                bounds: Vec::new(),
+                default: None,
+            });
+            errs.push(ty.clone());
+            return;
+        }
         match &mut ty.kind {
-            TyKind::Path(p)
-                if p.segments.len() == 1 && p.segments[0].name == UNTYPED_THROWS_MARK =>
-            {
-                let name = format!("#E{}", errs.len());
-                p.segments[0].name.clone_from(&name);
-                generics.params.push(rokc_ast::GenericParam::Type {
-                    name,
-                    bounds: Vec::new(),
-                    default: None,
-                });
-                errs.push(ty.clone());
-            }
             TyKind::Path(p) => {
                 for seg in &mut p.segments {
                     for g in &mut seg.generics {
@@ -6035,6 +6059,7 @@ fn desugar_rethrows(params: &mut [Param], generics: &mut Generics) -> Vec<Ty> {
                     }
                 }
             }
+            TyKind::QPath(q) => walk(&mut q.self_ty, generics, errs),
             TyKind::Sum(ts) | TyKind::Tuple(ts) => {
                 for t in ts {
                     walk(t, generics, errs);

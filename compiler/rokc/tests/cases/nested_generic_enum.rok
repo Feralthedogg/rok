@@ -1,4 +1,6 @@
 // expect-exit: 17
+// expect-stdout:
+// 8 -1 3
 
 enum Box<T> {
     Some(T),
@@ -27,5 +29,7 @@ fn main() -> i32 {
     let inner: Box<i32> = Box::Some(8);
     let outer: Box<Box<i32>> = Box::Some(inner);
     let none_outer: Box<Box<i32>> = Box::None;
+    let empty: Box<i32> = Box::None;
+    println(f"{outer.flatten()} {none_outer.flatten()} {Box::Some(empty).flatten() + 3}");
     return outer.flatten() + none_outer.flatten() + 10;
 }

@@ -1,4 +1,6 @@
 // expect-exit: 125
+// expect-stdout:
+// 1 17 105 2
 
 struct Point {
     x: i32;
@@ -19,6 +21,7 @@ fn main() -> i32 {
     let b = classify(Point { x: 0i32, y: 7i32 });
     let c = classify(Point { x: 5i32, y: 0i32 });
     let d = classify(Point { x: 4i32, y: -2i32 });
+    println(f"{a} {b} {c} {d}");
     return a + b + c + d;
 }
 

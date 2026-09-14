@@ -1,4 +1,6 @@
 // expect-exit: 42
+// expect-stdout:
+// 35 7 7
 
 // A `pub use` chain and a type alias chain of any length resolve
 // (spec 5.8, 2.12): each link names the previous one.
@@ -36,5 +38,6 @@ type A6 = A5;
 
 fn main() -> i32 {
     let p: A6 = m5::Point { x: 35i32 };
+    println(f"{p.x} {m5::seven()} {m1::seven()}");
     return p.x + m5::seven();
 }

@@ -1,4 +1,6 @@
 // expect-exit: 15
+// expect-stdout:
+// 15 6
 
 // `let-else` whose else branch breaks out of a loop. The loop accumulates
 // values until a `none` arrives, then exits via the let-else.
@@ -17,5 +19,6 @@ fn main() -> i32 {
         total += v;
         i += 1;
     }
+    println(f"{total} {i}");
     return total;  // 1+2+3+4+5 = 15
 }

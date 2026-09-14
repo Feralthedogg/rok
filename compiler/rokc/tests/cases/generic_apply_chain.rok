@@ -1,4 +1,6 @@
 // expect-exit: 22
+// expect-stdout:
+// 11 8
 
 fn twice<T>(x: T, f: fn(T) -> T) -> T {
     return f(f(x));
@@ -7,6 +9,7 @@ fn twice<T>(x: T, f: fn(T) -> T) -> T {
 fn main() -> i32 {
     let r = twice(3, |n: i32| -> i32 { n + 4 });
     let s = twice(2, |n: i32| -> i32 { n * 2 });
+    println(f"{r} {s}");
     return r + s + 3;
 }
 

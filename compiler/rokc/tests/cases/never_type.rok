@@ -1,6 +1,8 @@
 // expect-exit: 10
 // `!` (never): `panic`, `env::exit` and `loop {}` without `break` have
 // type `!`, which fits any slot — no dead `return` after them.
+// expect-stdout:
+// 3 3 4
 use rok::std::env;
 
 fn pick(x: i32) -> i32 {
@@ -23,6 +25,7 @@ fn main() -> i32 {
     let c = match a { 3 => first(4), _ => spin() };
     let msg = "dyn";
     if a > 1000 { panic(msg); }
+    println(f"{a} {b} {c}");
     if a == 3 { env::exit(a + b + c); }
     return 0;
 }

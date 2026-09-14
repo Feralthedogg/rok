@@ -1,5 +1,8 @@
 // expect-exit: 0
 // `i64 | f64` keeps both payloads exact (no value conversion through f64).
+// expect-stdout:
+// 9007199254740993
+// 1.5
 
 fn f(b: bool) -> i64 | f64 {
     if b { return 1.5f64; }
@@ -9,6 +12,8 @@ fn f(b: bool) -> i64 | f64 {
 fn main() -> i32 {
     let v = f(false);
     let w = f(true);
+    match v { x: i64 => println(f"{x}"), y: f64 => println(f"{y}") }
+    match w { x: i64 => println(f"{x}"), y: f64 => println(f"{y}") }
     let a = match v { x: i64 => x == 9007199254740993i64, y: f64 => false };
     let b = match w { x: i64 => false, y: f64 => y == 1.5f64 };
     if !a { return 1; }

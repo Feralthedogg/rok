@@ -1,4 +1,6 @@
 // expect-exit: 60
+// expect-stdout:
+// 10 20 30
 
 fn pick<T>(xs: [T; 3], idx: i32) -> T {
     return xs[idx];
@@ -9,6 +11,7 @@ fn main() -> i32 {
     let a = pick(nums, 0);
     let b = pick(nums, 1);
     let c = pick(nums, 2);
+    println(f"{a} {b} {c}");
     return a + b + c;
 }
 

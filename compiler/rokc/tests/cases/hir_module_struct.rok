@@ -1,4 +1,6 @@
 // expect-exit: 54
+// expect-stdout:
+// 7 1 9 2 6 12 36
 
 // Module-qualified struct resolution: `a::P` vs `b::P` (same leaf
 // name), `use a::P`, a struct named inside its own module, and a
@@ -21,6 +23,7 @@ fn main() -> i32 {
     let q = b::P { y: 1i64, x: 9 }; // 9
     let r = P { x: 2 };             // via `use a::P`
     let s = a::mk();                // 6
+    println(f"{p.x} {q.y} {q.x} {r.x} {s.x} {r.twice()} {s.twice()}");
     // 7 + 9 + 2 + 6 + (2 * 6) + (6 * 6 / 2) = 54
     return p.x + q.x + r.x + s.x + r.twice() + s.twice() / 2;
 }

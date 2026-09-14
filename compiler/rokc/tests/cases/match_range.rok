@@ -1,4 +1,6 @@
 // expect-exit: 27
+// expect-stdout:
+// 1 5 1 9 0
 
 fn bucket(n: i32) -> i32 {
     return match n {
@@ -15,6 +17,7 @@ fn main() -> i32 {
     let c = bucket(8i32);
     let d = bucket(250i32);
     let e = bucket(8000i32);
+    println(f"{a} {b} {c} {d} {e}");
     return a + a + b + b + b + c + d + e;
 }
 

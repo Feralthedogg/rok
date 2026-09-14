@@ -1,8 +1,11 @@
 // rok::core::collections::ordered_dict — `OrderedDict<K, V>`, a hash map
 // that iterates in insertion order (stdlib spec 2.9.5). `index` maps a
-// key to its position in the parallel `keys` / `vals` lists. Re-inserting
-// a present key keeps its place. `remove` is O(n): it shifts the lists
-// and renumbers the positions after it.
+// live key to its position in the parallel `keys` / `vals` lists.
+// Re-inserting a present key keeps its place. `remove` drops the key from
+// `index` only, leaving a hole (a slot whose key `index` does not map
+// back to it): O(1). Holes are squeezed out when they outnumber the live
+// entries and before iterating, so removed values stay reachable at most
+// until then.
 
 use rok::core::iter::Zip;
 
@@ -35,11 +38,11 @@ impl<K: Hash, V> OrderedDict<K, V> {
     }
 
     pub fn len(self) -> usize {
-        self.keys.len()
+        self.index.len()
     }
 
     pub fn is_empty(self) -> bool {
-        self.keys.is_empty()
+        self.index.len() == 0
     }
 
     /// Insert or replace; the old value, or `none`.
@@ -66,10 +69,9 @@ impl<K: Hash, V> OrderedDict<K, V> {
 
     pub fn remove(self, k: K) -> V | none {
         let at = self.index.remove(k)?;
-        self.keys.remove(at);
-        let v = self.vals.remove(at);
-        for i in at..self.keys.len() {
-            self.index.insert(self.keys[i], i);
+        let v = self.vals[at];
+        if 2 * self.index.len() < self.keys.len() {
+            self.compact();
         }
         v
     }
@@ -84,17 +86,46 @@ impl<K: Hash, V> OrderedDict<K, V> {
 
     /// The keys in insertion order, lazily.
     pub fn keys(self) -> ListIter<K> {
+        self.compact();
         self.keys.iter()
     }
 
     /// The values in insertion order, lazily.
     pub fn values(self) -> ListIter<V> {
+        self.compact();
         self.vals.iter()
     }
 
     /// `(key, value)` pairs in insertion order, lazily.
     pub fn entries(self) -> Zip<ListIter<K>, ListIter<V>> {
+        self.compact();
         self.keys.iter().zip(self.vals.iter())
+    }
+
+    /// Move the live entries down over the holes, in order.
+    fn compact(self) {
+        let n = self.keys.len();
+        if self.index.len() == n {
+            return;
+        }
+        let w: usize = 0;
+        for i in 0..n {
+            let k = self.keys[i];
+            if let at: usize = self.index.get(k) {
+                if at == i {
+                    if w != i {
+                        self.keys[w] = k;
+                        self.vals[w] = self.vals[i];
+                        self.index.insert(k, w);
+                    }
+                    w += 1;
+                }
+            }
+        }
+        while self.keys.len() > w {
+            self.keys.pop();
+            self.vals.pop();
+        }
     }
 }
 

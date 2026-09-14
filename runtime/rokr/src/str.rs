@@ -390,6 +390,12 @@ pub unsafe extern "C" fn rok_str_parse_float(s: RokStr, out: *mut u8) -> i32 {
 // Byte buffers (`GcBuf<u8>` regions: `StrBuf`, byte lists, I/O)
 // ---------------------------------------------------------------------
 
+/// Address of `s`'s first byte (stdlib 2.15 `str::as_ptr`).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_str_addr(s: RokStr) -> usize {
+    s.ptr as usize
+}
+
 /// Byte length of `s` (stdlib 2.15 `str::len`).
 #[unsafe(no_mangle)]
 pub const extern "C" fn rok_str_len(s: RokStr) -> usize {

@@ -1,0 +1,22 @@
+// spec: std 215-string §2.15.1
+// spec: std 102-cast §1.2.4
+// expect-exit: 0
+// expect-stdout:
+// 5 104 111
+// true
+
+// `str::as_ptr` gives a `ConstPtr<u8>` to the bytes (FFI).
+extern "C" {
+    fn strlen(s: rok::bare::ptr::ConstPtr<u8>) -> usize;
+}
+
+fn main() {
+    let s = "hello";
+    let p = s.as_ptr();
+    let n = unsafe { strlen(p) };
+    let first = unsafe { p.read() };
+    let last = unsafe { p.add(4).read() };
+    println(f"{n} {first} {last}");
+    let t = f"{s}-{n}";
+    println(f"{t.as_ptr().addr() != 0}");
+}

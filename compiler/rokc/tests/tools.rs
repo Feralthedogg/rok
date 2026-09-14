@@ -35,6 +35,10 @@ fn piped_env(exe: &str, args: &[&str], input: &str, env: &[(&str, &str)]) -> Out
 }
 
 #[test]
+#[cfg_attr(
+    not(all(target_os = "macos", target_arch = "aarch64")),
+    ignore = "the REPL host runs on macOS arm64 only"
+)]
 fn repl_keeps_state_across_cells() {
     let Some(env) = setup() else { return };
     let rokr = env.rokr.display().to_string();
@@ -88,6 +92,10 @@ List<i32>: [1, 2, 3]
 /// `repl <lib>` (901.2): the library is loaded and its items
 /// are in scope from the first cell, also after `:reset`.
 #[test]
+#[cfg_attr(
+    not(all(target_os = "macos", target_arch = "aarch64")),
+    ignore = "the REPL host runs on macOS arm64 only"
+)]
 fn repl_loads_and_uses_a_library() {
     let Some(env) = setup() else { return };
     let rokr = env.rokr.display().to_string();
@@ -114,6 +122,10 @@ fn repl_loads_and_uses_a_library() {
 /// do not repeat, its bindings / items stay, and a cell that dies
 /// leaves the session as it was.
 #[test]
+#[cfg_attr(
+    not(all(target_os = "macos", target_arch = "aarch64")),
+    ignore = "the REPL host runs on macOS arm64 only"
+)]
 fn repl_runs_each_cell_once() {
     let Some(env) = setup() else { return };
     let rokr = env.rokr.display().to_string();
@@ -156,6 +168,10 @@ p
 /// makes it; one a later cell can name is kept,
 /// `any` values too (their methods and type tests work in later cells).
 #[test]
+#[cfg_attr(
+    not(all(target_os = "macos", target_arch = "aarch64")),
+    ignore = "the REPL host runs on macOS arm64 only"
+)]
 fn repl_refuses_bindings_later_cells_cannot_use() {
     let Some(env) = setup() else { return };
     let rokr = env.rokr.display().to_string();
@@ -190,6 +206,10 @@ match q { x: Q => x.v, _ => 0 }
 /// `static` items keep their state across cells (a redefinition starts
 /// it over); cells are JIT-compiled.
 #[test]
+#[cfg_attr(
+    not(all(target_os = "macos", target_arch = "aarch64")),
+    ignore = "the REPL host runs on macOS arm64 only"
+)]
 fn repl_statics_persist() {
     let Some(env) = setup() else { return };
     let rokr = env.rokr.display().to_string();
@@ -223,6 +243,10 @@ bump()
 /// still takes effect from the next cell, also in code compiled before
 /// it that a later cell reaches again (`g`, compiled with the old `f`).
 #[test]
+#[cfg_attr(
+    not(all(target_os = "macos", target_arch = "aarch64")),
+    ignore = "the REPL host runs on macOS arm64 only"
+)]
 fn repl_compiles_library_code_once() {
     let Some(env) = setup() else { return };
     let rokr = env.rokr.display().to_string();
@@ -269,6 +293,10 @@ g()
 /// cell (the stretch ending at a top-level `let`) that failed; panic
 /// locations and diagnostics point into the file.
 #[test]
+#[cfg_attr(
+    not(all(target_os = "macos", target_arch = "aarch64")),
+    ignore = "the REPL host runs on macOS arm64 only"
+)]
 fn repl_path_keeps_the_programs_bindings() {
     let Some(env) = setup() else { return };
     let rokr = env.rokr.display().to_string();
@@ -473,6 +501,10 @@ fn check_reads_stdin() {
 /// needed): heartbeat, `kernel_info`, cells that bind, show, print and
 /// panic, completion, and `shutdown`. Every message must be signed.
 #[test]
+#[cfg_attr(
+    not(all(target_os = "macos", target_arch = "aarch64")),
+    ignore = "the REPL host runs on macOS arm64 only"
+)]
 fn jupyter_kernel_speaks_the_wire_protocol() {
     use rokc_interface::Json;
     use rokc_tools::jupyter::{encode, handshake, parse_msg, read_msg, write_msg};
@@ -632,23 +664,7 @@ fn jupyter_kernel_speaks_the_wire_protocol() {
     let (_, _, published) = request(&mut shell, "execute_request", exec("x"));
     assert!(shows(&published, "i32: 40"), "{published:?}");
 
-    let (_, reply, _) = request(
-        &mut shell,
-        "is_complete_request",
-        Json::obj([("code", Json::str("fn f() {"))]),
-    );
-    assert_eq!(reply.get("status").as_str(), Some("incomplete"));
-    let (_, reply, _) = request(
-        &mut shell,
-        "complete_request",
-        Json::obj([("code", Json::str("1 + x")), ("cursor_pos", Json::num(5))]),
-    );
-    assert_eq!(
-        reply.get("matches"),
-        &Json::Arr(vec![Json::str("x")]),
-        "{reply}"
-    );
-    assert_eq!(reply.get("cursor_start"), &Json::num(4));
+    completion_inspect_history(&mut shell, &mut request);
 
     let (kind, _, _) = request(
         &mut control,
@@ -661,4 +677,83 @@ fn jupyter_kernel_speaks_the_wire_protocol() {
     stderr.read_to_string(&mut rest).unwrap();
     assert!(out.status.success(), "{rest}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A REPL message: (reply kind, reply content, iopub messages).
+type Reply = (
+    String,
+    rokc_interface::Json,
+    Vec<(String, rokc_interface::Json)>,
+);
+
+/// `complete` / `is_complete` / `inspect` / `history` against the
+/// session of `jupyter_kernel_speaks_the_wire_protocol` (`x: i32`, five
+/// cells run).
+fn completion_inspect_history(
+    shell: &mut std::net::TcpStream,
+    request: &mut impl FnMut(&mut std::net::TcpStream, &str, rokc_interface::Json) -> Reply,
+) {
+    use rokc_interface::Json;
+    let (_, reply, _) = request(
+        shell,
+        "is_complete_request",
+        Json::obj([("code", Json::str("fn f() {"))]),
+    );
+    assert_eq!(reply.get("status").as_str(), Some("incomplete"));
+    let (_, reply, _) = request(
+        shell,
+        "complete_request",
+        Json::obj([("code", Json::str("1 + x")), ("cursor_pos", Json::num(5))]),
+    );
+    assert_eq!(
+        reply.get("matches"),
+        &Json::Arr(vec![Json::str("x")]),
+        "{reply}"
+    );
+    assert_eq!(reply.get("cursor_start"), &Json::num(4));
+    let (_, reply, _) = request(
+        shell,
+        "complete_request",
+        Json::obj([("code", Json::str("whi")), ("cursor_pos", Json::num(3))]),
+    );
+    assert_eq!(
+        reply.get("matches"),
+        &Json::Arr(vec![Json::str("while")]),
+        "{reply}"
+    );
+    let inspect = |pos: u32| {
+        Json::obj([
+            ("code", Json::str("1 + x + nope")),
+            ("cursor_pos", Json::num(pos)),
+            ("detail_level", Json::num(0)),
+        ])
+    };
+    let (kind, reply, _) = request(shell, "inspect_request", inspect(4));
+    assert_eq!(kind, "inspect_reply");
+    assert_eq!(reply.get("found"), &Json::Bool(true), "{reply}");
+    assert_eq!(reply.get("data").get("text/plain").as_str(), Some("x: i32"));
+    let (_, reply, _) = request(shell, "inspect_request", inspect(10));
+    assert_eq!(reply.get("found"), &Json::Bool(false), "{reply}");
+    let (_, reply, _) = request(
+        shell,
+        "history_request",
+        Json::obj([
+            ("hist_access_type", Json::str("tail")),
+            ("n", Json::num(2)),
+            ("output", Json::Bool(false)),
+            ("raw", Json::Bool(true)),
+        ]),
+    );
+    assert_eq!(
+        reply.get("history"),
+        &Json::Arr(vec![
+            Json::Arr(vec![
+                Json::num(0),
+                Json::num(4),
+                Json::str("panic(\"boom\");")
+            ]),
+            Json::Arr(vec![Json::num(0), Json::num(5), Json::str("x")]),
+        ]),
+        "{reply}"
+    );
 }

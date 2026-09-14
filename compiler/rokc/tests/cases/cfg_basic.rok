@@ -1,4 +1,6 @@
 // expect-exit: 30
+// expect-stdout:
+// 30 0 0
 
 // Items gated by `#[cfg(...)]` are filtered before HIR. Without the
 // matching flag the body item never enters the program — calls to it
@@ -19,6 +21,7 @@ fn arch_check() -> i32 { 0i32 }
 fn portable_unix() -> i32 { 0i32 }
 
 fn main() -> i32 {
+    println(f"{unix_only()} {arch_check()} {portable_unix()}");
     return unix_only() + arch_check() + portable_unix();
 }
 

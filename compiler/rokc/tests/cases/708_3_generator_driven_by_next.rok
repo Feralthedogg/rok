@@ -1,0 +1,33 @@
+// spec: 007.08-coroutine §7.8.3 / §7.8.7
+// expect-exit: 0
+// expect-stdout:
+// called
+// body start
+// next 1
+// body resumed
+// next 2
+// body end
+// next none
+// next none
+
+// 7.8.3: calling a generator only makes its frame; each `next()` runs
+// the body to the following `yield`, and a finished one keeps giving
+// `none`. 7.8.7: `return` ends the state machine.
+yield fn steps() -> i32 {
+    println("body start");
+    yield 1;
+    println("body resumed");
+    yield 2;
+    println("body end");
+    return;
+}
+
+fn main() {
+    let g = steps();
+    println("called");
+    let show = |v: i32?| if let x: i32 = v { f"{x}" } else { "none" };
+    println(f"next {show(g.next())}");
+    println(f"next {show(g.next())}");
+    println(f"next {show(g.next())}");
+    println(f"next {show(g.next())}");
+}

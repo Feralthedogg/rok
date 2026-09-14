@@ -20,11 +20,11 @@ pub fn written_sum(
     rec: impl Fn(&Ty) -> HirTy,
 ) -> HirTy {
     let generic = |t: &Ty| match &t.kind {
-        TyKind::SelfUpper => true,
+        TyKind::SelfUpper | TyKind::QPath(_) => true,
         TyKind::Path(p) => p
             .segments
             .first()
-            .is_some_and(|s| s.name == "Self" || s.name == rokc_ast::QPATH_MARK || param(&s.name)),
+            .is_some_and(|s| s.name == "Self" || param(&s.name)),
         _ => false,
     };
     let mut out = Vec::new();
@@ -46,6 +46,8 @@ pub fn written_sum(
 pub fn resolve_ty(ty: &Ty) -> HirTy {
     match &ty.kind {
         TyKind::Path(path) => resolve_path_ty(path),
+        // Resolved where impls are known (`LowerCtx::resolve_ast_ty`).
+        TyKind::QPath(q) => HirTy::Path(vec!["<..>".to_owned(), q.item.clone()]),
         TyKind::Never => HirTy::Never,
         TyKind::Nest(x) => resolve_ty(x),
         // Only a trait argument; as a type it names nothing.

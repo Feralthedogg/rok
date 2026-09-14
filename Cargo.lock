@@ -26,6 +26,7 @@ dependencies = [
  "rokc_fmt",
  "rokc_interface",
  "rokc_lexer",
+ "rokc_llvm",
  "rokc_parser",
  "rokc_rokon",
  "rokc_tools",

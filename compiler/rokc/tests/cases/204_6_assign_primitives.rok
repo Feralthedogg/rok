@@ -1,0 +1,53 @@
+// spec: std 204-ops-assign §2.4.6
+// expect-exit: 0
+// expect-stdout:
+// 12 2.5 true 48 3
+// 20 ab! 7
+// 9 12 6
+// 10 5
+
+// Primitives, `int`, `float` and `str` implement the `*Assign` traits,
+// so `T: AddAssign` bounds accept them and the methods are callable.
+fn grow<T: AddAssign<T>>(a: T, b: T) -> T {
+    let r = a;
+    r += b;
+    r
+}
+
+fn scale<T: MulAssign<T> + ShlAssign<T>>(a: T, k: T, s: T) -> T {
+    let r = a;
+    r *= k;
+    r <<= s;
+    r
+}
+
+fn main() -> i32 {
+    let i = grow(5, 7);
+    let f = grow(1.0, 1.5);
+    let b = true;
+    b &= true;
+    b ^= false;
+    let u: u8 = 3;
+    u <<= 4;
+    let m = -7;
+    m %%= 5;
+    println(f"{i} {f} {b} {u} {m}");
+    let n: i64 = 4;
+    n.add_assign(16);
+    let s = grow("a", "b");
+    s += '!';
+    let big: int = 3;
+    big += 4;
+    println(f"{n} {s} {big}");
+    let xs = [1, 2, 3];
+    xs[0] += 8;
+    println(f"{xs[0]} {scale(3, 2, 1)} {scale(3u8, 1u8, 1u8)}");
+    let x: float = 2.5;
+    x *= 2.0;
+    let k = 0;
+    for j in 0..5 {
+        k += j;
+    }
+    println(f"{k} {x}");
+    return 0;
+}

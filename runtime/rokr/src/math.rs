@@ -1,7 +1,9 @@
 //! libm behind `rok_`-prefixed symbols for core's `f32` / `f64` methods
 //! (stdlib spec 2.1.4). core cannot declare `floor` / `log` itself: an
 //! extern's name is global in rok, so a user `fn log` would clash. The
-//! driver links `-lm`.
+//! driver links `-lm` (the UCRT on Windows). `abs` / `copysign` / `min`
+//! / `max` are Rust's `core` (bit operations; the UCRT does not export
+//! every `f32` form on every architecture).
 
 macro_rules! libm {
     ($($rok:ident = $c:ident($($a:ident),+) : $t:ty;)*) => {
@@ -23,7 +25,6 @@ libm! {
     rok_f64_ceil = ceil(x): f64;
     rok_f64_round = round(x): f64;
     rok_f64_trunc = trunc(x): f64;
-    rok_f64_abs = fabs(x): f64;
     rok_f64_cbrt = cbrt(x): f64;
     rok_f64_exp = exp(x): f64;
     rok_f64_exp2 = exp2(x): f64;
@@ -47,16 +48,12 @@ libm! {
     rok_f64_pow = pow(x, y): f64;
     rok_f64_atan2 = atan2(x, y): f64;
     rok_f64_hypot = hypot(x, y): f64;
-    rok_f64_copysign = copysign(x, y): f64;
-    rok_f64_min = fmin(x, y): f64;
-    rok_f64_max = fmax(x, y): f64;
     rok_f64_mul_add = fma(x, y, z): f64;
 
     rok_f32_floor = floorf(x): f32;
     rok_f32_ceil = ceilf(x): f32;
     rok_f32_round = roundf(x): f32;
     rok_f32_trunc = truncf(x): f32;
-    rok_f32_abs = fabsf(x): f32;
     rok_f32_cbrt = cbrtf(x): f32;
     rok_f32_exp = expf(x): f32;
     rok_f32_exp2 = exp2f(x): f32;
@@ -79,9 +76,46 @@ libm! {
     rok_f32_atanh = atanhf(x): f32;
     rok_f32_pow = powf(x, y): f32;
     rok_f32_atan2 = atan2f(x, y): f32;
-    rok_f32_hypot = hypotf(x, y): f32;
-    rok_f32_copysign = copysignf(x, y): f32;
-    rok_f32_min = fminf(x, y): f32;
-    rok_f32_max = fmaxf(x, y): f32;
     rok_f32_mul_add = fmaf(x, y, z): f32;
+}
+
+// Through `hypot`: exact in `f64`, so rounding it gives `hypotf`'s
+// result (the UCRT has only `_hypotf`).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_f32_hypot(x: f32, y: f32) -> f32 {
+    rok_f64_hypot(f64::from(x), f64::from(y)) as f32
+}
+
+// `min` / `max` ignore a NaN operand, as C's `fmin` / `fmax`.
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_f64_abs(x: f64) -> f64 {
+    x.abs()
+}
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_f64_copysign(x: f64, y: f64) -> f64 {
+    x.copysign(y)
+}
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_f64_min(x: f64, y: f64) -> f64 {
+    x.min(y)
+}
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_f64_max(x: f64, y: f64) -> f64 {
+    x.max(y)
+}
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_f32_abs(x: f32) -> f32 {
+    x.abs()
+}
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_f32_copysign(x: f32, y: f32) -> f32 {
+    x.copysign(y)
+}
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_f32_min(x: f32, y: f32) -> f32 {
+    x.min(y)
+}
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_f32_max(x: f32, y: f32) -> f32 {
+    x.max(y)
 }

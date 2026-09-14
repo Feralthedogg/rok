@@ -1,0 +1,21 @@
+// spec: 004.12-async §4.12.9 / §4.12.12
+// expect-exit: 0
+// expect-stdout:
+// spawned 21
+// join 1 4 9
+
+// 4.12.12: `task::spawn` runs a future as its own task and returns an
+// awaitable `Task<T>`; 4.12.9: `task::join` awaits all, in input order.
+fn compute() -> i32 { 3 * 7 }
+
+async fn sq(x: i32) -> i32 {
+    await task::yield_now();
+    x * x
+}
+
+async fn main() {
+    let handle = task::spawn(async { compute() });
+    println(f"spawned {await handle}");
+    let rs = await task::join([task::spawn(sq(1)), task::spawn(sq(2)), task::spawn(sq(3))]);
+    println(f"join {rs[0]} {rs[1]} {rs[2]}");
+}

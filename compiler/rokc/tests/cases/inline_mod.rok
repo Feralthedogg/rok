@@ -1,4 +1,6 @@
 // expect-exit: 55
+// expect-stdout:
+// 42 13
 
 mod inner {
     pub fn helper() -> i32 { 42i32 }
@@ -9,5 +11,6 @@ pub mod outer {
 }
 
 fn main() -> i32 {
+    println(f"{inner::helper()} {outer::extra()}");
     return inner::helper() + outer::extra();
 }

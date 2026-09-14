@@ -1,6 +1,8 @@
 // spec: 2.11.5
 // expect-exit: 0
 // A `const` item as an array length in a struct field and a signature.
+// expect-stdout:
+// 4 8 10 4 8
 
 const N: usize = 4;
 const M: usize = N * 2;
@@ -29,6 +31,7 @@ fn main() -> i32 {
     for x in b.data { s += x; }
     if s != 10 { return 3; }
     if len_of(b.data) != 4 { return 4; }
+    println(f"{b.data.len()} {b.more.len()} {s} {N} {M}");
     let t = inner::T { a: [7, 8, 9] };
     if t.a[2] != 9 { return 5; }
     0

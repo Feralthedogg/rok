@@ -1,6 +1,8 @@
 //! Native-code behavior checked against the platform: the C ABI (spec
 //! 8.6) against clang-compiled C, the runtime's stack-overflow report,
 //! and `-g` DWARF. Skips without the LLVM toolchain (`common::setup`).
+//! Unix only: the C side is built with `clang .. -lm`.
+#![cfg(unix)]
 
 mod common;
 
@@ -978,4 +980,301 @@ fn main() -> i32 {
     ok(&out);
     let run = Command::new(&exe).output().unwrap();
     assert_eq!(run.status.code(), Some(42));
+}
+
+/// `kind = "static"` takes `lib<name>.a` from the `-L` directories even
+/// beside a shared library of the same name (ld64 would take the
+/// `.dylib`); a missing archive is an error naming it.
+#[test]
+fn static_link_kind_takes_the_archive() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("link_static");
+    let libs = dir.join("libs");
+    fs::create_dir_all(&libs).unwrap();
+    let c = |file: &str, body: &str, args: &[&str]| {
+        let src = dir.join(format!("{file}.c"));
+        fs::write(&src, body).unwrap();
+        ok(&Command::new("clang")
+            .args(args)
+            .arg("-o")
+            .arg(dir.join(file))
+            .arg(&src)
+            .output()
+            .unwrap());
+    };
+    c(
+        "a.o",
+        "int rok_static_probe(int x) { return x * 3; }\n",
+        &["-c"],
+    );
+    ok(&Command::new("ar")
+        .arg("rcs")
+        .arg(libs.join("librokstatic.a"))
+        .arg(dir.join("a.o"))
+        .output()
+        .unwrap());
+    let shared = if cfg!(target_os = "macos") {
+        "librokstatic.dylib"
+    } else {
+        "librokstatic.so"
+    };
+    c(
+        &format!("libs/{shared}"),
+        "int rok_static_probe(int x) { return x * 5; }\n",
+        &["-shared", "-fPIC"],
+    );
+    let src = r#"
+#[link(name = "rokstatic", kind = "static")]
+extern "C" {
+    fn rok_static_probe(x: i32) -> i32;
+}
+
+#[link(name = "rokmissing", kind = "static")]
+#[cfg(missing)]
+extern "C" {}
+
+fn main() -> i32 {
+    unsafe { rok_static_probe(14) }
+}
+"#;
+    fs::write(dir.join("main.rok"), src).unwrap();
+    let exe = dir.join("out");
+    let exe_arg = exe.display().to_string();
+    let lib_arg = format!("-L{}", libs.display());
+    ok(&build(
+        &env,
+        &dir.join("main.rok"),
+        &[&lib_arg, "-o", &exe_arg],
+    ));
+    let run = Command::new(&exe).output().unwrap();
+    assert_eq!(run.status.code(), Some(42));
+    let out = build(
+        &env,
+        &dir.join("main.rok"),
+        &[
+            "-L",
+            &libs.display().to_string(),
+            "--cfg",
+            "missing",
+            "-o",
+            &exe_arg,
+        ],
+    );
+    assert!(!out.status.success());
+    assert!(
+        text(&out.stderr).contains("no librokmissing.a in the -L directories"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+/// A stand-in Windows runtime (what a hello-sized program calls) and
+/// the C side of the ABI checks, `long` widened to 64 bits.
+const WIN_C_SIDE: &str = r#"
+typedef __builtin_va_list va_list;
+#define va_start(a, b) __builtin_va_start(a, b)
+#define va_arg(a, t) __builtin_va_arg(a, t)
+#define va_end(a) __builtin_va_end(a)
+#define long long long
+typedef struct { const char *p; unsigned long n; } RokStr;
+__declspec(thread) unsigned char rok_tls_yield_flag, rok_tls_mutator_state;
+__declspec(thread) void *rok_tls_tlab_cursor, *rok_tls_tlab_limit, *rok_tls_shadow_stack_top;
+int _write(int, const void *, unsigned);
+void *calloc(unsigned long, unsigned long);
+void exit(int);
+void rok_runtime_init(void) {}
+void rok_runtime_shutdown(void) {}
+void rok_runtime_yield(void) {}
+void rok_enter_native(void) {}
+void rok_leave_native(void) {}
+int rok_native_reenter(void) { return 0; }
+void rok_native_resume(int x) { (void)x; }
+void rok_gc_add_root(const void *w) { (void)w; }
+void *rok_gc_alloc_slow(unsigned long size, unsigned long align, unsigned t) {
+    char *p = calloc(1, size + align + 16); *(unsigned *)p = t; return p;
+}
+void rok_gc_register_type(unsigned id, const void *t) { (void)id; (void)t; }
+void rok_gc_wb_slow(void *o) { (void)o; }
+void rok_panic_at(RokStr m, RokStr at) { _write(2, m.p, (unsigned)m.n); (void)at; exit(101); }
+int rok_static_init_begin(unsigned char *s) { if (*s == 0) { *s = 1; return 1; } return 0; }
+void rok_static_init_end(unsigned char *s) { *s = 2; }
+unsigned long rok_str_len(RokStr s) { return s.n; }
+int rok_str_cmp(RokStr a, RokStr b) {
+    if (a.n != b.n) return 1;
+    for (unsigned long i = 0; i < a.n; i++) if (a.p[i] != b.p[i]) return 1;
+    return 0;
+}
+int rok_str_eq(RokStr a, RokStr b) { return !rok_str_cmp(a, b); }
+int rok_stdio_write(int fd, RokStr s, int nl) {
+    _write(fd, s.p, (unsigned)s.n); if (nl) _write(fd, "\n", 1); return 0;
+}
+void show(long v) {
+    char b[32]; int n = 31; int neg = v < 0;
+    unsigned long u = neg ? -(unsigned long)v : v;
+    b[n] = '\n';
+    do { b[--n] = '0' + u % 10; u /= 10; } while (u);
+    if (neg) b[--n] = '-';
+    _write(1, b + n, 32 - n);
+}
+typedef struct { float x, y, z; } V3;
+typedef struct { long a, b, c; } Big;
+typedef struct { signed char a; short b; } Small;
+typedef struct { long a; double b; } Mix;
+typedef struct { int a, b, c; } I3;
+V3 v3_scale(V3 v, float k) { V3 r = { v.x * k, v.y * k, v.z * k }; return r; }
+Big big_make(long a) { Big b = { a, a * 2, a * 3 }; return b; }
+long big_sum(Big b) { return b.a + b.b + b.c; }
+Small small_inc(Small s) { s.a += 1; s.b += 1; return s; }
+Mix mix_twice(Mix m) { m.a *= 2; m.b *= 2; return m; }
+long many(long a, long b, long c, long d, long e, I3 s, long f) {
+    return a + b + c + d + e + s.a + s.b + s.c + f;
+}
+double fmany(double a, long b, double c, int d, float e, double f, long g) {
+    return a + b * 10 + c * 100 + d * 1000 + e * 10000 + f * 100000 + g * 1000000;
+}
+double vmix(int n, ...) {
+    va_list ap; va_start(ap, n); double t = 0;
+    for (int i = 0; i < n; i++) { t += va_arg(ap, int); t += va_arg(ap, double); }
+    va_end(ap); return t;
+}
+long cb_big(Big (*f)(Big)) { Big b = { 1, 2, 3 }; Big r = f(b); return r.a * 100 + r.b * 10 + r.c; }
+Small cb_small(Small (*f)(Small)) { Small s = { 4, 5 }; return f(s); }
+"#;
+
+const WIN_ROK_SIDE: &str = r#"
+struct V3 { x: f32; y: f32; z: f32; }
+struct Big { a: i64; b: i64; c: i64; }
+struct Small { a: i8; b: i16; }
+struct Mix { a: i64; b: f64; }
+struct I3 { a: i32; b: i32; c: i32; }
+
+extern "C" {
+    fn show(v: i64);
+    fn v3_scale(v: V3, k: f32) -> V3;
+    fn big_make(a: i64) -> Big;
+    fn big_sum(b: Big) -> i64;
+    fn small_inc(s: Small) -> Small;
+    fn mix_twice(m: Mix) -> Mix;
+    fn many(a: i64, b: i64, c: i64, d: i64, e: i64, s: I3, f: i64) -> i64;
+    fn fmany(a: f64, b: i64, c: f64, d: i32, e: f32, f: f64, g: i64) -> f64;
+    fn vmix(n: i32, ...) -> f64;
+    fn cb_big(f: fn(Big) -> Big) -> i64;
+    fn cb_small(f: fn(Small) -> Small) -> Small;
+}
+
+extern "C" fn rev_big(b: Big) -> Big { Big { a: b.c, b: b.b, c: b.a } }
+extern "C" fn neg_small(s: Small) -> Small { Small { a: -s.a, b: -s.b } }
+
+// rok to rok: arguments past the four register positions.
+fn mixed(a: i64, s: str, b: f64, t: Big, c: i32, d: f32, u: str, e: i64) -> i64 {
+    a + s.len() as i64 * 10 + (b * 100.0) as i64 + t.a * 1000 + t.c * 10000
+        + c as i64 * 100000 + (d * 1000000.0) as i64 + u.len() as i64 * 10000000
+        + e * 100000000
+}
+
+fn main() {
+    println("hello from rok");
+    unsafe {
+        let v = v3_scale(V3 { x: 1.0, y: 2.0, z: 3.0 }, 2.0);
+        show((v.x * 100.0 + v.y * 10.0 + v.z) as i64);
+        let b = big_make(5);
+        show(b.a * 100 + b.b * 10 + b.c + big_sum(b) * 1000);
+        let s = small_inc(Small { a: -3, b: 300 });
+        show(s.a as i64 * 1000 + s.b as i64);
+        let m = mix_twice(Mix { a: 21, b: 1.25 });
+        show(m.a * 100 + (m.b * 10.0) as i64);
+        show(many(1, 2, 3, 4, 5, I3 { a: 6, b: 7, c: 8 }, 9));
+        show(fmany(1.0, 2, 3.0, 4, 5.0, 6.0, 7) as i64);
+        let small: i8 = -2;
+        let half: f32 = 0.5;
+        show((vmix(2, small, half, true, 1.25) * 100.0) as i64);
+        show(cb_big(rev_big));
+        let n = cb_small(neg_small);
+        show(n.a as i64 * 1000 + n.b as i64);
+        show(mixed(1, "ab", 0.5, Big { a: 3, b: 0, c: 4 }, 5, 0.25, "xyz", 6));
+        let k = "xyz";
+        show(if k == "xyz" { 1 } else { 0 });
+    }
+}
+"#;
+
+const WIN_EXPECTED: &str =
+    "hello from rok\n246\n30615\n-1699\n4225\n45\n7654321\n75\n321\n-4005\n630793071\n1\n";
+
+/// `(machine, subsystem, unwind table present)` of a PE image.
+fn pe_header(exe: &[u8]) -> (u16, u16, bool) {
+    assert_eq!(&exe[..2], b"MZ");
+    let pe = u32::from_le_bytes(exe[0x3c..0x40].try_into().unwrap()) as usize;
+    assert_eq!(&exe[pe..pe + 4], b"PE\0\0");
+    let opt = pe + 24;
+    // The exception directory (`.pdata`): data directory 3.
+    let pdata = opt + 112 + 3 * 8 + 4;
+    (
+        u16::from_le_bytes([exe[pe + 4], exe[pe + 5]]),
+        u16::from_le_bytes([exe[opt + 68], exe[opt + 69]]),
+        u32::from_le_bytes(exe[pdata..pdata + 4].try_into().unwrap()) > 0,
+    )
+}
+
+/// Windows executables from this host, with no Windows SDK: both
+/// backends for `x86_64`, the native one for arm64, a GUI subsystem; the C
+/// side and a stand-in runtime are compiled by clang; a package builds
+/// `<name>.exe`. With `ROK_TEST_WINE=<wine>` the `x86_64` ones run and
+/// print what the C ABI (spec 8.6.3) and the rok one (8.6.6) agree on.
+#[test]
+fn windows_executables() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("windows");
+    fs::write(dir.join("side.c"), WIN_C_SIDE).unwrap();
+    let pkg = dir.join("winpkg");
+    fs::create_dir_all(&pkg).unwrap();
+    fs::write(pkg.join("main.rok"), WIN_ROK_SIDE).unwrap();
+    let wine = std::env::var_os("ROK_TEST_WINE").filter(|w| !w.is_empty());
+    for (triple, machine, builds) in [
+        ("x86_64-pc-windows-msvc", 0x8664, &["-O0", "-O2"][..]),
+        ("aarch64-pc-windows-msvc", 0xaa64, &["-O0"][..]),
+    ] {
+        let side = dir.join(format!("{triple}.obj"));
+        ok(&Command::new("clang")
+            .args(["-target", triple, "-O1", "-c", "-o"])
+            .arg(&side)
+            .arg(dir.join("side.c"))
+            .output()
+            .unwrap());
+        for (i, opt) in builds.iter().enumerate() {
+            let profile = if *opt == "-O0" { "debug" } else { "release" };
+            let exe = pkg.join(format!("target/{triple}/{profile}/winpkg.exe"));
+            let gui = i == builds.len() - 1 && triple.starts_with("aarch64");
+            let mut rokc = Command::new(ROKC);
+            rokc.args(["-q", "build"])
+                .arg(&pkg)
+                .arg("--bootstrap")
+                .arg(&env.bootstrap)
+                .arg("--rokr")
+                .arg(&side)
+                .args(["--target", triple, opt]);
+            if gui {
+                rokc.args(["-C", "subsystem=windows"]);
+            }
+            ok(&rokc.output().unwrap());
+            let sub = if gui { 2 } else { 3 };
+            assert_eq!(
+                pe_header(&fs::read(&exe).unwrap()),
+                (machine, sub, true),
+                "{triple} {opt}"
+            );
+            if let (Some(wine), false) = (&wine, triple.starts_with("aarch64")) {
+                let run = Command::new(wine)
+                    .arg(&exe)
+                    .env("WINEDEBUG", "-all")
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    text(&run.stdout).replace('\r', ""),
+                    WIN_EXPECTED,
+                    "{triple} {opt}"
+                );
+            }
+        }
+    }
 }

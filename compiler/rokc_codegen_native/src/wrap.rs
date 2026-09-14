@@ -191,8 +191,9 @@ impl FnLower<'_, '_> {
             }
             (MirTy::Unit, _) => V::I(0),
             _ => {
-                self.c.errors.push(format!(
-                    "unsupported in codegen: `main` returning `{ret:?}`"
+                self.c.errors.push((
+                    rokc_diagnostic::Span::DUMMY,
+                    format!("unsupported in codegen: `main` returning `{ret:?}`"),
                 ));
                 V::I(0)
             }

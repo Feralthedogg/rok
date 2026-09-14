@@ -1,10 +1,13 @@
 // expect-exit: 42
+// expect-stdout:
+// 200 200 200 200 44 255 -1
 
 fn main() -> i32 {
     let big: i64 = 200i64;
     let narrow = big as i32;
     let unsigned = narrow as u8;
     let widened = unsigned as i32;
+    println(f"{big} {narrow} {unsigned} {widened} {300i32 as u8} {-1i32 as u8} {255u8 as i8}");
     return widened - 158i32;
 }
 

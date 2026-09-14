@@ -1,4 +1,6 @@
 // expect-exit: 16
+// expect-stdout:
+// 4 9 9 2
 
 enum State {
     Init,
@@ -26,5 +28,6 @@ fn main() -> i32 {
     let m2 = m.step(State::Running(3));
     let m3 = m2.step(State::Running(5));
     let m4 = m3.step(State::Done);
+    println(f"{m2.counter} {m3.counter} {m4.counter} {m4.state}");
     return m4.counter + m4.state + 5;
 }

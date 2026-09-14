@@ -1,4 +1,6 @@
 // expect-exit: 42
+// expect-stdout:
+// 36 38 0
 
 // A projection in a function signature or a static's type resolves:
 // signatures are resolved once every item and impl is registered.
@@ -22,5 +24,6 @@ static SEED: <Sq as Shape>::Out = 0;
 
 fn main() -> i32 {
     let q = Sq { s: 6i32 };
+    println(f"{q.make()} {area(q.make())} {SEED}");
     return area(q.make()) + SEED + 4i32;
 }

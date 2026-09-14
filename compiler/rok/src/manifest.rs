@@ -224,9 +224,6 @@ fn not_yet(what: &str) -> String {
 pub fn parse(text: &str, file: &str) -> Result<Manifest, String> {
     let doc = Doc::parse(text, file)?;
     let pkg = doc.root().record("Package")?;
-    if pkg.get("registry").is_some() {
-        return Err(pkg.field_error("registry", &not_yet("registries")));
-    }
     if pkg.get("native").is_some() {
         return Err(pkg.field_error("native", &not_yet("`native`")));
     }
@@ -463,7 +460,7 @@ mod tests {
                 "`native` dependencies is reserved",
             ),
             ("Package { native: 1 }", "`native` is reserved"),
-            ("Package { registry: {} }", "registries is reserved"),
+            ("Package { registry: {} }", "unknown field `registry`"),
             (
                 "Package { deps: { \"My Dep\": Dep::path(\"x\") } }",
                 "try `my-dep`",

@@ -1,0 +1,36 @@
+// expect-exit: 0
+// gc-stress: 50
+// expect-stdout:
+// unbounded in order: true
+// bounded in order: true
+
+// 2.17.6: an unbounded channel queues in linked segments (here across
+// many segment boundaries, draining and refilling), a bounded one in a
+// fixed ring (wrapping around many times).
+fn main() -> i32 {
+    let (tx, rx) = channel::<str>();
+    let next = 0;
+    let ok = true;
+    for round in 0..5 {
+        for i in 0..(round * 37 + 1) {
+            try! tx.send(f"v{round}-{i}");
+        }
+        for i in 0..(round * 37 + 1) {
+            ok = ok && rx.try_recv() == f"v{round}-{i}";
+        }
+        ok = ok && rx.try_recv() is none;
+    }
+    for i in 0..1000 { try! tx.send(f"{i}"); }
+    for i in 0..1000 { ok = ok && rx.recv() == f"{i}"; }
+    println(f"unbounded in order: {ok}");
+
+    let (btx, brx) = channel_bounded::<i32>(3);
+    let good = true;
+    for i in 0..100 {
+        try! btx.send(i * 2);
+        try! btx.send(i * 2 + 1);
+        good = good && brx.recv() == i * 2 && brx.recv() == i * 2 + 1;
+    }
+    println(f"bounded in order: {good}");
+    0
+}

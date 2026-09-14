@@ -433,9 +433,14 @@ impl<T> RwLock<T> {
     }
 
     pub fn try_read(self) -> RwLockReadGuard<T> | none {
+        // Retry a CAS lost to another reader: only a writer makes it fail.
         let s = atomic_load(self.state, 0, SeqCst);
-        if s >= 0 && atomic_cas(self.state, 0, s, s + 1, SeqCst, SeqCst) == s {
-            return RwLockReadGuard { lock: self };
+        while s >= 0 {
+            let seen = atomic_cas(self.state, 0, s, s + 1, SeqCst, SeqCst);
+            if seen == s {
+                return RwLockReadGuard { lock: self };
+            }
+            s = seen;
         }
         none
     }
@@ -622,9 +627,13 @@ impl Condvar {
         guard.mutex.lock()
     }
 
-    /// Wakes every waiter (a spurious wakeup for all but one is allowed).
+    /// Wakes the longest-waiting blocked thread. Tasks in `wait_async`
+    /// are all woken (a spurious wakeup for all but one): a parked task's
+    /// entry may be stale, and waking only it could lose the notify.
     pub fn notify_one(self) {
-        self.notify_all();
+        atomic_add(self.seq, 0, 1, SeqCst);
+        unsafe { rok_sync_wake_one(self.seq, 0) };
+        unpark_parked(self.seq);
     }
 
     pub fn notify_all(self) {

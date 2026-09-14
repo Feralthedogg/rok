@@ -1,4 +1,6 @@
 // expect-exit: 40
+// expect-stdout:
+// 12 13 15
 
 struct Adder {
     base: i32;
@@ -7,6 +9,7 @@ struct Adder {
 fn main() -> i32 {
     let a = Adder { base: 10 };
     let inc = |x: i32| -> i32 { x + a.base };
+    println(f"{inc(2)} {inc(3)} {inc(5)}");
     let total = inc(2) + inc(3) + inc(5);
     return total;
 }

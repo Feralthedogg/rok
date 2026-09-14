@@ -67,7 +67,7 @@ fn find(home: &Path, pin: &str) -> Option<PathBuf> {
 fn not_installed(pin: &str, why: &str) -> String {
     format!(
         "toolchain {pin} ({why}) is not installed; install it with `rok toolchain install {pin} \
-         --from <dir | .tar.gz | url>`"
+         --from <dir | .tar.gz | .zip | url>`"
     )
 }
 
@@ -116,8 +116,7 @@ fn active(home: &Path, plus: Option<&str>) -> Result<PathBuf, String> {
 /// not a proxy, or `rok toolchain ..` (the proxy manages the toolchains
 /// itself).
 pub fn proxy(args: &[OsString]) -> Option<i32> {
-    let exe = std::env::current_exe().ok()?;
-    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let exe = rokc_core::current_exe()?;
     let h = exe.parent()?.parent()?;
     if !h.join("toolchains").is_dir() {
         return None;
@@ -200,12 +199,14 @@ fn run(c: &mut Command, what: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Unpack `from` (a directory, a `.tar[.gz]`, or an `http(s)://` URL of
-/// one) into `tmp`; the toolchain's top directory there.
+/// Unpack `from` (a directory, a `.tar[.gz]`, a `.zip` (Windows' `tar`
+/// reads it), or an `http(s)://` URL of one) into `tmp`; the
+/// toolchain's top directory there.
 fn unpack(from: &str, tmp: &Path) -> Result<PathBuf, String> {
     let mut archive = PathBuf::from(from);
     if from.starts_with("https://") || from.starts_with("http://") {
-        archive = tmp.join("download.tar.gz");
+        // `tar` tells the format by the content.
+        archive = tmp.join("download");
         run(
             Command::new("curl")
                 .args(["-fsSL", "--proto", "=https,http", "-o"])
@@ -251,8 +252,12 @@ fn verify(top: &Path, version: &str) -> Result<String, String> {
     if !rokc.is_file() {
         return Err("not a rok toolchain: no bin/rokc".to_owned());
     }
-    for need in ["bin/rok", "lib/librokr.a", "lib/rok/core/lib.rok"] {
-        if !top.join(need).exists() {
+    for need in [
+        format!("bin/{}", exe_name("rok")),
+        format!("lib/{}", rokc_core::HOST_RUNTIME_LIB),
+        "lib/rok/core/lib.rok".to_owned(),
+    ] {
+        if !top.join(&need).exists() {
             return Err(format!("incomplete toolchain: no {need}"));
         }
     }
@@ -312,9 +317,29 @@ fn write_proxies(home: &Path, toolchain: &Path) -> Result<(), String> {
         // Copy beside, then rename: a running proxy keeps its file.
         let tmp = bin.join(format!(".{t}.tmp"));
         std::fs::copy(&src, &tmp).map_err(|e| format!("{}: {e}", src.display()))?;
+        if cfg!(windows) {
+            set_aside(&bin, &dst);
+        }
         std::fs::rename(&tmp, &dst).map_err(|e| format!("{}: {e}", dst.display()))?;
     }
     Ok(())
+}
+
+/// Windows cannot replace a running executable (this proxy, when `rok
+/// toolchain default` runs through it), but can rename it: move `exe`
+/// to `.old-<n>` in `bin`, and delete earlier ones no longer running.
+fn set_aside(bin: &Path, exe: &Path) {
+    for e in std::fs::read_dir(bin).into_iter().flatten().flatten() {
+        if e.file_name().to_string_lossy().starts_with(".old-") {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    if exe.exists() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let _ = std::fs::rename(exe, bin.join(format!(".old-{nanos:x}")));
+    }
 }
 
 fn set_default(home: &Path, pin: &str) -> Result<PathBuf, String> {
@@ -326,7 +351,7 @@ fn set_default(home: &Path, pin: &str) -> Result<PathBuf, String> {
 
 pub const USAGE: &str = "\
 usage: rok toolchain list
-       rok toolchain install <version> --from <dir | .tar[.gz] | url>
+       rok toolchain install <version> --from <dir | .tar[.gz] | .zip | url>
        rok toolchain default [<version>]
        rok toolchain remove <version>";
 

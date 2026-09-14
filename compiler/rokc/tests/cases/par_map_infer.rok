@@ -1,15 +1,23 @@
 // spec: std 2.19.1
 // expect-exit: 0
+// expect-stdout:
+// [1, 4, 9, 16]
+// 45
+// [1, 2, 3]
+
 // `I: IntoIterator<Item = T>` types an untyped closure parameter.
 
 fn main() -> i32 {
     let xs = [1, 2, 3, 4];
     let ys = par::map(xs, |x| x * x);
+    println(f"{ys:?}");
     if ys != [1, 4, 9, 16] { return 1; }
     let total = Atomic::new(0);
     par::for_each(0..10, |i| { total.fetch_add(i); });
+    println(f"{total.load()}");
     if total.load() != 45 { return 2; }
     let zs = par::map(0..3, |i| i + 1);
+    println(f"{zs:?}");
     if zs != [1, 2, 3] { return 3; }
     0
 }

@@ -1,4 +1,7 @@
 // expect-exit: 14
+// expect-stdout:
+// 10 14
+
 
 fn double(x: i32) -> i32 {
     x * 2
@@ -9,5 +12,6 @@ fn add(x: i32, y: i32) -> i32 {
 }
 
 fn main() -> i32 {
+    println(f"{double(5)} {add(double(5), 4)}");
     add(double(5), 4)
 }

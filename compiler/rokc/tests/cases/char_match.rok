@@ -1,4 +1,6 @@
 // expect-exit: 24
+// expect-stdout:
+// 28 1 2 3 4
 
 fn classify(c: c_char) -> i32 {
     return match c {
@@ -21,6 +23,7 @@ fn main() -> i32 {
     total += classify('7');
     total += classify('Q');
     total += classify('m');
+    println(f"{total} {classify('u')} {classify('U')} {classify('0')} {classify(' ')}");
     return total - 4;
 }
 

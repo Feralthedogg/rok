@@ -7,6 +7,7 @@ pub mod gc_abi;
 mod liveness;
 mod lower;
 mod print;
+mod specialize;
 mod target;
 mod ty;
 

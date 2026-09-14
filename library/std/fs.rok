@@ -5,8 +5,12 @@
 // resolve against the working directory. A `Dir` opened from it confines
 // paths to itself: absolute paths and `..` are refused.
 //
-// `copy` reflinks on macOS only (`clonefileat`; no Linux `FICLONE` /
-// `copy_file_range`). `File` / `Dir` / `Mmap` close through `close()` /
+// `copy` reflinks into a new target where the OS can (macOS
+// `clonefileat`, Windows `CopyFileExW`), else copies the bytes (Linux:
+// `copy_file_range`, itself a reflink where the file system can).
+// Windows: a `Dir` is a directory handle, paths under it resolve against
+// its final path; permissions are the read-only attribute (no write bit
+// for anyone). `File` / `Dir` / `Mmap` close through `close()` /
 // `unmap()` or on leaving `using`; a `ReadDir` also closes at its end.
 //
 // Async (`*_async`, as in std::net): kqueue / epoll cannot wait on a
@@ -626,9 +630,10 @@ impl Dir {
     fn rel<P: AsPath>(self, p: P) throws (IoError) -> str {
         let path = p.as_path();
         if self.fd() >= 0 {
-            let escapes = path.is_absolute();
+            // A root or a prefix (Windows `C:`) leaves the directory too.
+            let escapes = false;
             for c in path.components() {
-                if c is Component::ParentDir { escapes = true; }
+                if c is Component::ParentDir || c is Component::RootDir || c is Component::Prefix { escapes = true; }
             }
             if escapes {
                 throw IoError::with_kind(IoErrorKind::PermissionDenied,

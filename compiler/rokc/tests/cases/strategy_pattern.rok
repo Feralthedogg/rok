@@ -1,4 +1,7 @@
 // expect-exit: 36
+// expect-stdout:
+// 10 24
+
 
 struct Op {
     f: fn(i32, i32) -> i32;
@@ -25,5 +28,6 @@ fn main() -> i32 {
     let xs: [i32; 4] = [1, 2, 3, 4];
     let s = fold_array(xs, add_op());
     let p = fold_array(xs, mul_op());
+    println(f"{s} {p}");
     return s + p + 2;
 }

@@ -132,6 +132,40 @@ fn unchanged_package_is_fresh() {
     assert!(built(&["build", "-g"]).0);
     fs::write(app.join("target/debug/app"), "").unwrap();
     assert!(built(&["build", "-g"]).0);
+    // A `#[path]` module outside the package is a source too.
+    fs::write(dir.join("shared.rok"), "pub fn v() -> i32 {\n    1\n}\n").unwrap();
+    fs::write(
+        app.join("main.rok"),
+        "#[path(\"../shared.rok\")]\nmod shared;\n\nprintln(f\"{shared::v()}\");\n",
+    )
+    .unwrap();
+    assert_eq!(built(&["run"]), (true, "1\n".to_owned()));
+    assert_eq!(built(&["run"]), (false, "1\n".to_owned()));
+    fs::write(dir.join("shared.rok"), "pub fn v() -> i32 {\n    2\n}\n").unwrap();
+    assert_eq!(built(&["run"]), (true, "2\n".to_owned()));
+}
+
+/// `-vv` (909.5): the files read and the generic instances made.
+#[test]
+fn very_verbose_lists_files_and_instances() {
+    let dir = scratch("very_verbose");
+    let app = dir.join("app");
+    fs::create_dir_all(&app).unwrap();
+    fs::write(
+        app.join("main.rok"),
+        "fn id<T>(x: T) -> T {\n    x\n}\n\nprintln(f\"{id(1)}\");\n",
+    )
+    .unwrap();
+    let out = rokc(None, &app, &["emit", "-vv", "--emit=hir"]);
+    assert_exit(&out, 0);
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("     Reading main.rok\n"), "{stderr}");
+    assert!(
+        stderr.contains(" Specialized id(x: i32) -> i32\n"),
+        "{stderr}"
+    );
+    let out = rokc(None, &app, &["emit", "-v", "--emit=hir"]);
+    assert!(!text(&out.stderr).contains("Specialized"));
 }
 
 #[test]
@@ -268,6 +302,21 @@ fn fmt_check_and_rewrite() {
     );
 }
 
+/// A file saved with CRLF (spec 1.1.3) is formatted to LF line ends;
+/// a line break inside a string literal is its value and stays.
+#[test]
+fn fmt_writes_lf_and_keeps_literal_crlf() {
+    let dir = scratch("fmt-crlf");
+    let crlf = "fn f() {\r\n    let s = \"a\r\nb\";\r\n}\r\n";
+    fs::write(dir.join("w.rok"), crlf).unwrap();
+    assert_exit(&rokc(None, &dir, &["fmt", "--check", "w.rok"]), 1);
+    assert_exit(&rokc(None, &dir, &["fmt", "w.rok"]), 0);
+    assert_eq!(
+        fs::read_to_string(dir.join("w.rok")).unwrap(),
+        "fn f() {\n    let s = \"a\r\nb\";\n}\n"
+    );
+}
+
 #[test]
 fn demangle_and_usage_errors() {
     let dir = scratch("misc");
@@ -285,6 +334,10 @@ fn demangle_and_usage_errors() {
     assert_exit(&rokc(None, &dir, &["demangle", "_ZN3foo"]), 1);
     assert_exit(&rokc(None, &dir, &["build", "--bogus"]), 2);
     assert_exit(&rokc(None, &dir, &["frobnicate"]), 2);
+    // One path (`test`: and a filter); the REPL reads cells from stdin.
+    assert_exit(&rokc(None, &dir, &["build", "a", "b"]), 2);
+    assert_exit(&rokc(None, &dir, &["test", "a", "b", "c"]), 2);
+    assert_exit(&rokc(None, &dir, &["repl", "-"]), 2);
     assert_exit(&rokc(None, &dir, &["--version"]), 0);
     let out = rokc(None, &dir, &["-V", "-v"]);
     assert!(
@@ -311,28 +364,132 @@ fn sysroot_is_beside_rokc() {
     let sys = dir.join("sys");
     fs::create_dir_all(sys.join("bin")).unwrap();
     fs::create_dir_all(sys.join("lib/rok/core")).unwrap();
-    fs::copy(ROKC, sys.join("bin/rokc")).unwrap();
+    let rokc_exe = sys
+        .join("bin")
+        .join(format!("rokc{}", std::env::consts::EXE_SUFFIX));
+    fs::copy(ROKC, &rokc_exe).unwrap();
     fs::write(sys.join("lib/rok/core/lib.rok"), "fn (\n").unwrap();
     fs::write(dir.join("x.rok"), "let x = 1;\n").unwrap();
     let run = |args: &[&str]| {
-        Command::new(sys.join("bin/rokc"))
+        Command::new(&rokc_exe)
             .current_dir(&dir)
             .env("ROK_HOME", workspace())
             .args(args)
             .output()
             .unwrap()
     };
+    // Paths as `/`-separated, whatever the platform's separator.
+    let stderr = |o: &std::process::Output| text(&o.stderr).replace('\\', "/");
     let out = run(&["check", "x.rok"]);
     assert_exit(&out, 1);
-    assert!(text(&out.stderr).contains("sys/lib/rok/core/lib.rok"));
+    assert!(stderr(&out).contains("sys/lib/rok/core/lib.rok"));
     fs::write(sys.join("lib/rok/core/lib.rok"), "").unwrap();
     let out = run(&["run", "x.rok"]);
     assert_exit(&out, 1);
-    let err = text(&out.stderr);
+    let err = stderr(&out);
+    let rt = format!("sys/lib/{}", rokc_core::HOST_RUNTIME_LIB);
     assert!(
-        err.contains("the runtime library is missing: no ") && err.contains("sys/lib/librokr.a"),
+        err.contains("the runtime library is missing: no ") && err.contains(&rt),
         "{err}"
     );
+}
+
+/// `--target` links what the sysroot ships for it
+/// (`lib/rok/targets/<triple>/`, `targets/build.sh`): Linux ELF
+/// executables (musl static, glibc PIE through the system's loader) and
+/// Mach-O for the other macOS arch, run here under Rosetta. A target it
+/// does not ship is named.
+#[test]
+fn cross_targets_link_from_the_sysroot() {
+    let dir = scratch("cross");
+    fs::write(
+        dir.join("h.rok"),
+        "fn main() -> i32 {\n    println(\"ok\");\n    0\n}\n",
+    )
+    .unwrap();
+    let out = rokc(
+        None,
+        &dir,
+        &["build", "h.rok", "--target", "riscv64gc-unknown-linux-gnu"],
+    );
+    assert_exit(&out, 1);
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("no runtime for riscv64gc-unknown-linux-gnu"),
+        "{err}"
+    );
+
+    if setup().is_none() {
+        return;
+    }
+    let targets = Path::new(ROKC).parent().unwrap().join("../lib/rok/targets");
+    if !targets.is_dir() {
+        eprintln!("skipped: no {} (targets/build.sh)", targets.display());
+        return;
+    }
+    let rosetta = cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        && Command::new("arch")
+            .args(["-x86_64", "/usr/bin/true"])
+            .status()
+            .is_ok_and(|s| s.success());
+    for t in [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl",
+        "x86_64-apple-darwin",
+    ] {
+        if !targets.join(t).is_dir() {
+            continue;
+        }
+        let x86 = t.starts_with("x86_64");
+        for o in ["-O0", "-O2"] {
+            let exe = dir.join(format!("h-{t}{o}"));
+            let exe_s = exe.display().to_string();
+            let out = rokc(
+                None,
+                &dir,
+                &["-q", "build", "h.rok", "--target", t, o, "-o", &exe_s],
+            );
+            assert_exit(&out, 0);
+            let b = fs::read(&exe).unwrap();
+            let has = |s: &[u8]| b.windows(s.len()).any(|w| w == s);
+            if t.contains("-linux") {
+                assert_eq!(&b[..4], b"\x7fELF", "{t}");
+                let machine = u16::from_le_bytes([b[18], b[19]]);
+                assert_eq!(machine, if x86 { 62 } else { 183 }, "{t}");
+                let ty = u16::from_le_bytes([b[16], b[17]]);
+                if t.ends_with("-musl") {
+                    assert_eq!(ty, 2, "{t}: a static ET_EXEC");
+                    assert!(!has(b"ld-linux"), "{t}");
+                } else {
+                    assert_eq!(ty, 3, "{t}: a PIE");
+                    let loader: &[u8] = if x86 {
+                        b"/lib64/ld-linux-x86-64.so.2"
+                    } else {
+                        b"/lib/ld-linux-aarch64.so.1"
+                    };
+                    assert!(
+                        has(loader) && has(b"libc.so.6") && has(b"GLIBC_2.34"),
+                        "{t}"
+                    );
+                }
+            } else {
+                assert_eq!(&b[..4], &0xfeed_facf_u32.to_le_bytes(), "{t}");
+                let cpu = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
+                assert_eq!(cpu, 0x0100_0007, "{t}");
+                if rosetta {
+                    let run = Command::new("arch")
+                        .arg("-x86_64")
+                        .arg(&exe)
+                        .output()
+                        .unwrap();
+                    assert_exit(&run, 0);
+                    assert_eq!(text(&run.stdout), "ok\n");
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -367,6 +524,10 @@ fn extern_dependencies_are_top_level_names() {
     let out = rokc(Some(&env), &dir, &["run", "app", "--extern", "greet=greet"]);
     assert_exit(&out, 0);
     assert_eq!(text(&out.stdout), "41 42\n");
+    // Prebuilt into deps/ with its fingerprint (902.3).
+    for f in ["libgreet.a", "greet.rhir", "greet.fp"] {
+        assert!(dir.join("app/target/debug/deps").join(f).is_file(), "{f}");
+    }
     // `--extern=name=path/lib.rok` works too; a missing prebuilt one fails.
     let out = rokc(
         Some(&env),
@@ -829,7 +990,7 @@ fn dependency_blanket_impl_overlaps_user_impl() {
 }
 
 #[test]
-fn mlir_plugins_go_to_mlir_opt() {
+fn missing_mlir_plugins_are_errors() {
     // Stdlib bare 1.10.3: a missing plugin is a clean error up front.
     let dir = scratch("mlir-plugin");
     fs::write(dir.join("p.rok"), "println(\"hi\");\n").unwrap();
@@ -869,6 +1030,65 @@ fn mlir_plugins_go_to_mlir_opt() {
     }
 }
 
+/// A dialect + pass plugin (`tests/plugin/answer.cpp`) built from the
+/// linked prefix's headers with its MLIR symbols unresolved runs on
+/// rokc's own MLIR.
+#[test]
+fn mlir_plugin_binds_to_rokcs_mlir() {
+    let Some(env) = setup() else { return };
+    let prefix = rokc_llvm::PREFIX.expect("rokc links LLVM but names no prefix");
+    let dir = scratch("mlir-plugin-run");
+    let lib = dir.join(format!("librokt.{}", std::env::consts::DLL_EXTENSION));
+    let mut cxx = Command::new("/usr/bin/c++");
+    cxx.args([
+        "-std=c++17",
+        "-O1",
+        "-fno-rtti",
+        "-fno-exceptions",
+        "-fPIC",
+        "-fvisibility-inlines-hidden",
+        "-w",
+        "-shared",
+    ])
+    .arg(format!("-I{prefix}/include"))
+    .arg(workspace().join("compiler/rokc/tests/plugin/answer.cpp"))
+    .arg("-o")
+    .arg(&lib);
+    if cfg!(target_vendor = "apple") {
+        cxx.args(["-mmacosx-version-min=11.0", "-undefined", "dynamic_lookup"]);
+    }
+    let out = cxx.output().unwrap();
+    assert_exit(&out, 0);
+
+    fs::write(
+        dir.join("p.rok"),
+        "use rok::bare::mlir::__mlir_op;\n\nfn main() -> i32 {\n    \
+         let x: i32 = unsafe { __mlir_op::<\"rokt.answer\", i32>() };\n    \
+         println(f\"{x}\");\n    0\n}\n",
+    )
+    .unwrap();
+    let lib = lib.to_str().unwrap();
+    let out = rokc(
+        Some(&env),
+        &dir,
+        &[
+            "build",
+            "p.rok",
+            "--load-mlir-plugin",
+            lib,
+            "--load-mlir-pass-plugin",
+            lib,
+            "--mlir-pass",
+            "rokt-lower",
+            "-o",
+            "p",
+        ],
+    );
+    assert_exit(&out, 0);
+    let run = Command::new(dir.join("p")).output().unwrap();
+    assert_eq!(text(&run.stdout), "42\n");
+}
+
 /// `rokc --print cfg` (spec 6.3.11): the target's keys and `--cfg`.
 #[test]
 fn print_cfg_lists_the_active_cfg() {
@@ -895,6 +1115,63 @@ fn print_cfg_lists_the_active_cfg() {
     let out = rokc(None, &dir, &["--print", "cfg"]);
     assert!(text(&out.stdout).starts_with("debug_assertions\n"));
     assert_exit(&rokc(None, &dir, &["--print", "sysroot"]), 2);
+}
+
+/// `isize` / `usize` limits follow the target's pointer width (stdlib
+/// 2.1.4): a 32-bit target folds them to 32-bit values.
+#[test]
+fn pointer_sized_limits_follow_the_target() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("pointer_width_limits");
+    fs::write(
+        dir.join("w.rok"),
+        "#[export_name(\"t_max\")]\npub fn t_max() -> i64 { usize::MAX as i64 + \
+         usize::BITS as i64 + isize::MIN as i64 }\nfn main() {}\n",
+    )
+    .unwrap();
+    for (target, want) in [
+        ("--target=i686-unknown-linux-gnu", "ret i64 2147483679"),
+        (
+            "--target=x86_64-unknown-linux-gnu",
+            "ret i64 -9223372036854775745",
+        ),
+    ] {
+        let out = rokc(
+            Some(&env),
+            &dir,
+            &[
+                "build",
+                "-O2",
+                "--emit=llvmir",
+                target,
+                "w.rok",
+                "-o",
+                "w.ll",
+            ],
+        );
+        assert_exit(&out, 0);
+        let ir = fs::read_to_string(dir.join("w.ll")).unwrap();
+        assert!(ir.contains(want), "{target}: {ir}");
+    }
+}
+
+/// `#[cfg]` on an impl member (stdlib 3.7.2 `Child::pidfd`, Linux only):
+/// the method exists for a Linux target and not for macOS.
+#[test]
+fn cfg_on_impl_members_follows_the_target() {
+    let dir = scratch("cfg_impl_member");
+    fs::write(
+        dir.join("p.rok"),
+        "use rok::std::process::Command;\nfn main() {\n    \
+         let c = try Command::new(\"true\").spawn() catch _ { return; };\n    \
+         let fd = try c.pidfd() catch _ { -1 };\n    println(f\"{fd}\");\n}\n",
+    )
+    .unwrap();
+    let check = |target: &str| rokc(None, &dir, &["check", target, "p.rok"]);
+    assert_exit(&check("--target=x86_64-unknown-linux-gnu"), 0);
+    let out = check("--target=aarch64-apple-darwin");
+    assert_exit(&out, 1);
+    assert!(text(&out.stderr).contains("no method `pidfd`"));
 }
 
 /// `#[non_exhaustive]` (spec 6.2.10): a match on the type from another

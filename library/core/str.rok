@@ -29,6 +29,15 @@ impl str {
         Slice { buf: unsafe { rok_str_bytes_buf(self) }, start: 0, len: self.len(), stride: 1 }
     }
 
+    /// The first byte's address, for FFI (`len()` bytes, no NUL
+    /// promised; an empty `str` gives a dangling pointer). Valid while
+    /// `self` stays in a live variable: the GC never moves an object a
+    /// root points to, but may move one reached only through another.
+    pub fn as_ptr(self) -> rok::bare::ptr::ConstPtr<u8> {
+        let p = rok::bare::ptr::ConstPtr::<u8>::dangling();
+        if self.is_empty() { p } else { p.with_addr(unsafe { rok_str_addr(self) }) }
+    }
+
     /// Byte `i`, O(1); panics if `i >= len()`.
     pub fn byte(self, i: usize) -> u8 {
         if i >= self.len() { index_oob("str byte index", i, self.len()); }
@@ -560,9 +569,18 @@ impl Sliceable<Range<usize>> for StrBuf {
 
 /// `chars.collect::<str>()` (2.15.7).
 impl FromIterator<char> for str {
-    fn from_iter<I>(it: I) -> str {
+    fn from_iter<I: IntoIterator<Item = char>>(it: I) -> str {
         let b = StrBuf::new();
         for c in it { b.push(c); }
+        b.to_str()
+    }
+}
+
+/// `parts.collect::<str>()`: the pieces concatenated (2.15.7).
+impl FromIterator<str> for str {
+    fn from_iter<I: IntoIterator<Item = str>>(it: I) -> str {
+        let b = StrBuf::new();
+        for s in it { b.push_str(s); }
         b.to_str()
     }
 }
@@ -638,7 +656,7 @@ impl FromStr for i64 {
 }
 impl FromStr for isize {
     type Err = ParseError;
-    fn from_str(s: str) throws (ParseError) -> isize { (try signed_of(s, 64)) as isize }
+    fn from_str(s: str) throws (ParseError) -> isize { (try signed_of(s, isize::BITS)) as isize }
 }
 impl FromStr for u8 {
     type Err = ParseError;
@@ -658,7 +676,7 @@ impl FromStr for u64 {
 }
 impl FromStr for usize {
     type Err = ParseError;
-    fn from_str(s: str) throws (ParseError) -> usize { (try unsigned_of(s, 64)) as usize }
+    fn from_str(s: str) throws (ParseError) -> usize { (try unsigned_of(s, usize::BITS)) as usize }
 }
 impl FromStr for f64 {
     type Err = ParseError;

@@ -1,0 +1,30 @@
+// spec: std 302-net §3.2.4
+// expect-exit: 0
+// expect-stdout:
+// 127.0.0.1:8080 port 8080 v4 true
+// [::1]:443 v6 true
+// with_port 127.0.0.1:9
+// loopback true unspecified true bits 2130706433
+// v6 loopback true
+// bad rejected
+
+// 3.2.4: `SocketAddr` / `Ipv4Addr` / `Ipv6Addr` parse (`FromStr`),
+// print (`Display`) and expose their parts; no lookup for a literal.
+use rok::std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+
+fn main() {
+    let a: SocketAddr = try! "127.0.0.1:8080".parse();
+    println(f"{a} port {a.port()} v4 {a.is_ipv4()}");
+    let b: SocketAddr = try! "[::1]:443".parse();
+    println(f"{b} v6 {b.is_ipv6()}");
+    println(f"with_port {a.with_port(9)}");
+    let ip = Ipv4Addr::new(127, 0, 0, 1);
+    println(f"loopback {ip.is_loopback()} unspecified {Ipv4Addr::UNSPECIFIED.is_unspecified()} bits {ip.to_bits()}");
+    let v6: Ipv6Addr = try! "::1".parse();
+    println(f"v6 loopback {v6.is_loopback()}");
+    let bad: Ipv4Addr | ParseError = try "300.1.1.1".parse::<Ipv4Addr>() catch e { e };
+    match bad {
+        _: Ipv4Addr => println("bad accepted"),
+        _ => println("bad rejected"),
+    }
+}

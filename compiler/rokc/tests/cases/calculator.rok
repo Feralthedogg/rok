@@ -1,4 +1,6 @@
 // expect-exit: 7
+// expect-stdout:
+// 7 6 6
 
 enum Op {
     Add,
@@ -18,5 +20,6 @@ fn main() -> i32 {
     let r1 = apply(3, 4, Op::Add);
     let r2 = apply(10, 4, Op::Sub);
     let r3 = apply(2, 3, Op::Mul);
+    println(f"{r1} {r2} {r3}");
     return r1 + r3 - r2;
 }

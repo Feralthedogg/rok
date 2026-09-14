@@ -10,8 +10,10 @@
 #
 # Release static libraries only: no tools, tests, examples, docs or
 # bindings; no zlib / zstd / libxml2 / terminfo, so the archives need
-# nothing beyond the platform C++ runtime. Needs cmake, ninja, curl and a
-# C++17 compiler.
+# nothing beyond the platform C++ runtime. Needs cmake, ninja, curl, xz
+# and a C++17 compiler (Linux: `apt install cmake ninja-build g++ curl
+# xz-utils`, `apk add cmake samurai g++ curl xz linux-headers`). Windows
+# hosts: llvm/build.ps1.
 set -eu
 
 VERSION=22.1.8
@@ -56,6 +58,17 @@ fi
 extra=
 case $(uname -s) in
 Darwin) extra="-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0" ;;
+# The system compiler (gcc / libstdc++, or CC / CXX); x86_64 or aarch64,
+# glibc or musl.
+Linux) ;;
+MINGW* | MSYS* | CYGWIN*)
+	echo "on Windows run llvm/build.ps1 (MSVC ABI) instead" >&2
+	exit 1
+	;;
+*)
+	echo "llvm/build.sh: unsupported host $(uname -s)" >&2
+	exit 1
+	;;
 esac
 
 # shellcheck disable=SC2086

@@ -50,7 +50,7 @@ pub(pkg) fn size_of<T>() -> usize;
 #[track_caller]
 pub(pkg) fn buf_len(len: usize, size: usize) -> usize {
     // Head room for the object header.
-    if size != 0 && len > (9223372036854775807usize - 4096) / size {
+    if size != 0 && len > (isize::MAX as usize - 4096) / size {
         panic("capacity overflow");
     }
     len

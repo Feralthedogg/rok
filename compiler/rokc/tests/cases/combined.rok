@@ -1,4 +1,6 @@
 // expect-exit: 42
+// expect-stdout:
+// 12 29 -1
 
 struct Point {
     x: i32;
@@ -33,5 +35,6 @@ fn main() -> i32 {
     } else {
         0
     };
+    println(f"{total} {bonus} {lookup(-1) ?? -1}");
     return total + bonus + 1;
 }

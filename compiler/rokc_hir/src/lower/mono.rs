@@ -313,8 +313,9 @@ pub(super) fn monomorphize_on(
         bind_from_arg(ctx, fn_def, self_ty, i, &arg.ty, &mut subst);
     }
     // A type param the arguments leave open (one that only appears in
-    // the return type) binds from the call's expected type: the `let`
-    // annotation, the parameter slot, the enclosing `return`.
+    // the return type, or only met `!`) binds from the call's expected
+    // type: the `let` annotation, the parameter slot, the enclosing
+    // `return`.
     if let Some(expected) = ctx.current_expected().filter(|t| **t != HirTy::Unknown) {
         let names: std::collections::HashSet<String> = fn_def
             .generics
@@ -323,7 +324,7 @@ pub(super) fn monomorphize_on(
             .filter_map(|gp| match gp {
                 rokc_ast::GenericParam::Type { name, .. }
                 | rokc_ast::GenericParam::Const { name, .. }
-                    if !subst.contains_key(name) =>
+                    if subst.get(name).is_none_or(|t| *t == HirTy::Never) =>
                 {
                     Some(name.clone())
                 }
@@ -486,7 +487,7 @@ pub(super) fn monomorphize_on(
         .or_else(|| self_ty.map(|t| resolve_in_mono(ctx, fn_def, &subst, None, t)));
     let mut preview_ret_ty =
         resolve_in_mono(ctx, fn_def, &subst, self_hir.clone(), &sig_ret_ast(fn_def));
-    if infers_ret(fn_def) {
+    if infers_ret(fn_def, &ctx.env.may_diverge) {
         preview_ret_ty = with_ok(preview_ret_ty, HirTy::Unknown);
     }
     let refs: Vec<(usize, HirTy)> = fn_def
@@ -681,8 +682,14 @@ pub(super) fn lower_fn_inner(
     subst: &HashMap<String, HirTy>,
 ) -> HirFunction {
     let ret = if env.infer_ret.contains(&id) {
-        Some(decl_ret_ok(env, id))
-    } else if infers_ret(fn_def) {
+        let r = decl_ret_ok(env, id);
+        if fn_def.body.is_some() {
+            if let Some((_, f)) = env.sink.inferred_fns.borrow_mut().remove(&id) {
+                return f;
+            }
+        }
+        Some(r)
+    } else if infers_ret(fn_def, &env.may_diverge) {
         let (r, done) = infer_ret_of(
             env,
             fn_def,
@@ -704,9 +711,13 @@ pub(super) fn lower_fn_inner(
 }
 
 /// Spec 4.1.3: no `-> T`, and the body has a value (a trailing
-/// expression or a `return v`): the return type comes from the body.
-/// Coroutine fns keep `()` (their item type is not inferred).
-pub(super) fn infers_ret(f: &FnDef) -> bool {
+/// expression or a `return v`) or may diverge on every path (4.3.7,
+/// `may_diverge`): the return type comes from the body. `main` keeps
+/// `()`.
+pub(super) fn infers_ret(
+    f: &FnDef,
+    may_diverge: &std::collections::HashSet<rokc_diagnostic::Span>,
+) -> bool {
     struct V {
         depth: u32,
         found: bool,
@@ -727,10 +738,10 @@ pub(super) fn infers_ret(f: &FnDef) -> bool {
     let Some(body) = &f.body else {
         return false;
     };
-    if f.ret_ty.is_some() || f.is_async || f.is_generator {
+    if f.ret_ty.is_some() || f.is_async || f.is_generator || f.name == "main" {
         return false;
     }
-    if body.trailing.is_some() {
+    if body.trailing.is_some() || may_diverge.contains(&f.span) {
         return true;
     }
     let mut v = V {
@@ -754,7 +765,12 @@ fn decl_ret_ok(env: &Env<'_>, id: FunctionId) -> HirTy {
         None => match &env.decls[id.0 as usize] {
             MethodOrFn::Fn(f) => {
                 let module = module_of(&f.name);
-                infer_ret_of(env, f, id, &f.name, None, &module, &HashMap::new(), false).0
+                let start = env.sink.next_id.get();
+                let keep = !env.sink.bodies_done.get();
+                let (t, done) =
+                    infer_ret_of(env, f, id, &f.name, None, &module, &HashMap::new(), keep);
+                keep_inferred(env, id, start, done);
+                t
             }
             MethodOrFn::Method {
                 fn_def,
@@ -764,9 +780,21 @@ fn decl_ret_ok(env: &Env<'_>, id: FunctionId) -> HirTy {
                 subst,
             } => {
                 let self_ty = Some(self_ty.clone());
-                infer_ret_of(env, fn_def, id, key, self_ty, module, subst, false).0
+                let start = env.sink.next_id.get();
+                let keep = !env.sink.bodies_done.get();
+                let (t, done) = infer_ret_of(env, fn_def, id, key, self_ty, module, subst, keep);
+                keep_inferred(env, id, start, done);
+                t
             }
         },
+    }
+}
+
+/// A declaration lowered for good while inferring its return type: the
+/// decl pass takes it (`lower_fn_inner`).
+fn keep_inferred(env: &Env<'_>, id: FunctionId, start: u32, done: Option<HirFunction>) {
+    if let Some(f) = done {
+        env.sink.inferred_fns.borrow_mut().insert(id, (start, f));
     }
 }
 
@@ -876,7 +904,10 @@ fn infer_ret_of(
         rokc_diagnostic::set_current_span(outer);
         HirTy::Unknown
     };
-    let ret = if tys.is_empty() {
+    // No path reaches the end or a `return`: `!` (spec 4.3.7).
+    let ret = if tys.is_empty() && !unit {
+        HirTy::Never
+    } else if tys.is_empty() {
         HirTy::Unit
     } else if unit {
         if tentative {
@@ -914,6 +945,11 @@ fn infer_ret_of(
         .insert(id, Some(ret.clone()));
     if let Some(r) = env.sink.ref_out.borrow_mut().get_mut(&id) {
         r.ret = with_ok(r.ret.clone(), ret.clone());
+    }
+    // An instance's preview signature: a call made while its body is
+    // lowered again (a recursive cycle through other instances) reads it.
+    if let Some(sig) = env.sink.mono_sigs.borrow_mut().get_mut(&id) {
+        sig.ret_ty = with_ok(sig.ret_ty.clone(), ret.clone());
     }
     if final_as_is {
         f.ret_ty = ret.clone();
@@ -985,8 +1021,8 @@ fn lower_fn_with(
         .flat_map(|a| a.path[1..].iter().cloned())
         .collect();
     ctx.unsafe_depth = u32::from(fn_def.is_unsafe);
-    // Marker set by the driver on the synthesized entry (spec 4.16.2).
-    ctx.implicit_main = fn_def.attrs.iter().any(|a| a.path == ["#implicit_main"]);
+    // The synthesized entry (spec 4.16.2).
+    ctx.implicit_main = env.implicit_main && name == "main" && ctx.self_ty.is_none();
 
     if let Some(b) = &fn_def.body {
         ctx.ref_captured = ref_captured_bindings(&fn_def.params, b);
@@ -1239,7 +1275,7 @@ pub(super) fn decl_sig(env: &Env<'_>, i: usize, base: &FnSig) -> FnSig {
             module,
             subst,
             ..
-        } => (*fn_def, Some(self_ty.clone()), module.clone(), subst),
+        } => (&**fn_def, Some(self_ty.clone()), module.clone(), subst),
     };
     let outer = rokc_diagnostic::set_current_span(f.span);
     let mut ctx = LowerCtx::new(env, subst, self_ty);

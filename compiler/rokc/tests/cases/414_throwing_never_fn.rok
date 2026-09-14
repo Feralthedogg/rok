@@ -2,6 +2,8 @@
 // expect-exit: 0
 // A throwing `-> !` function: its carrier has no ok slot, and a
 // `catch` of a call to it takes the handler's type.
+// expect-stdout:
+// 3 3 5 7
 
 #[derive(Debug)]
 struct E {
@@ -35,5 +37,6 @@ fn main() -> i32 {
     if c != 5 { return 3; }
     let d = try fail_typed(7) catch e { e.code };
     if d != 7 { return 4; }
+    println(f"{a} {b} {c} {d}");
     0
 }

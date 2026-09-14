@@ -8,9 +8,11 @@ use std::path::{Path, PathBuf};
 
 pub use def::{DefId, DefInfo, DefKind, DefTable, Visibility};
 
-/// The user's rok directory (spec 9.2.19): `$ROK_HOME`; else the home
-/// the running executable belongs to (`<home>/bin/rok`, a proxy, or
-/// `<home>/toolchains/<name>/bin/rok`); else `~/.rok`.
+/// The user's rok directory (spec 9.2.19).
+///
+/// `$ROK_HOME`; else the home the running executable belongs to
+/// (`<home>/bin/rok`, a proxy, or `<home>/toolchains/<name>/bin/rok`);
+/// else `~/.rok` (`%USERPROFILE%\.rok` on Windows).
 #[must_use]
 pub fn rok_home() -> Option<PathBuf> {
     if let Some(h) = std::env::var_os("ROK_HOME").filter(|h| !h.is_empty()) {
@@ -19,17 +21,65 @@ pub fn rok_home() -> Option<PathBuf> {
     if let Some(h) = std::env::current_exe().ok().and_then(|e| home_of(&e)) {
         return Some(h);
     }
-    let user = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .filter(|h| !h.is_empty())?;
-    Some(PathBuf::from(user).join(".rok"))
+    Some(user_home()?.join(".rok"))
 }
+
+/// The user's home directory: `%USERPROFILE%` on Windows, else `$HOME`.
+#[must_use]
+pub fn user_home() -> Option<PathBuf> {
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(var)
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+}
+
+/// `fs::canonicalize`, in the spelling users and tools know on Windows:
+/// `C:\..` and `\\server\share\..` rather than `\\?\C:\..` and
+/// `\\?\UNC\server\share\..`.
+pub fn real_path(p: impl AsRef<Path>) -> std::io::Result<PathBuf> {
+    let real = std::fs::canonicalize(p)?;
+    if cfg!(windows) {
+        if let Some(plain) = real.to_str().and_then(unverbatim) {
+            return Ok(PathBuf::from(plain));
+        }
+    }
+    Ok(real)
+}
+
+/// A Windows verbatim path without its `\\?\` prefix, when it has an
+/// ordinary spelling.
+fn unverbatim(s: &str) -> Option<String> {
+    if let Some(unc) = s.strip_prefix(r"\\?\UNC\") {
+        return Some(format!(r"\\{unc}"));
+    }
+    let rest = s.strip_prefix(r"\\?\")?;
+    let drive = rest.as_bytes();
+    (drive.len() >= 3 && drive[0].is_ascii_alphabetic() && &drive[1..3] == b":\\")
+        .then(|| rest.to_owned())
+}
+
+/// The running executable, through symlinks ([`real_path`]).
+#[must_use]
+pub fn current_exe() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(real_path(&exe).unwrap_or(exe))
+}
+
+/// File name of the runtime static library (`rokr`) built for a
+/// Windows (MSVC) target or another.
+#[must_use]
+pub const fn runtime_lib(windows: bool) -> &'static str {
+    if windows { "rokr.lib" } else { "librokr.a" }
+}
+
+/// [`runtime_lib`] of the machine rokc runs on (what a toolchain ships).
+pub const HOST_RUNTIME_LIB: &str = runtime_lib(cfg!(windows));
 
 /// The rok home an executable is installed in: `<home>/bin/<exe>` (a
 /// proxy: `<home>/toolchains/` exists) or `<home>/toolchains/<name>/bin/<exe>`.
 #[must_use]
 pub fn home_of(exe: &Path) -> Option<PathBuf> {
-    let exe = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+    let exe = real_path(exe).unwrap_or_else(|_| exe.to_path_buf());
     let up = exe.parent()?.parent()?;
     if up.join("toolchains").is_dir() {
         return Some(up.to_path_buf());
@@ -70,6 +120,18 @@ pub fn command_help(usage: &str, cmd: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn verbatim_windows_paths_get_their_plain_spelling() {
+        let u = super::unverbatim;
+        assert_eq!(
+            u(r"\\?\C:\Users\é\a.rok").as_deref(),
+            Some(r"C:\Users\é\a.rok")
+        );
+        assert_eq!(u(r"\\?\UNC\srv\share\x").as_deref(), Some(r"\\srv\share\x"));
+        assert_eq!(u(r"\\?\Volume{1}\x"), None);
+        assert_eq!(u(r"C:\x"), None);
+    }
+
     #[test]
     fn command_help_takes_the_entry_and_its_continuations() {
         let usage = "usage: x\n\ncmds:\n  add <n>      add\n               more\n  add <n> --p  \

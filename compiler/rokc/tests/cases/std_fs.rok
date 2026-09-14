@@ -112,3 +112,4 @@ fn main() throws (IoError) {
 }
 
 // spec: std 301-fs
+// only-os: macos linux

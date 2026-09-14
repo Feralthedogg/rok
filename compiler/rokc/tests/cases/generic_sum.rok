@@ -1,4 +1,6 @@
 // expect-exit: 19
+// expect-stdout:
+// 7 12
 
 fn or_default<T>(x: T | none, def: T) -> T {
     return match x {
@@ -17,6 +19,7 @@ fn pick(b: bool) -> i32 | none {
 fn main() -> i32 {
     let a = or_default(pick(true), 100);
     let b = or_default(pick(false), 12);
+    println(f"{a} {b}");
     return a + b;
 }
 

@@ -237,6 +237,8 @@ impl Cx<'_> {
             "test" | "bench" => (&[P::Fn], empty(a)),
             "non_exhaustive" => (&[P::Struct, P::Enum], empty(a)),
             "link" => (&[P::Extern], None),
+            // The runtime's own: its functions neither allocate nor block.
+            "no_safepoint" => (&[P::Extern], empty(a)),
             "path" => (&[P::Mod], None),
             "deprecated" => (anywhere, message(a)),
             "doc" => (

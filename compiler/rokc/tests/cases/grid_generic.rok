@@ -1,4 +1,9 @@
 // expect-exit: 38
+// expect-stdout:
+// 1 2
+// 3 8
+// 4 16
+// 6 28
 
 struct Cell<T> {
     v: T;
@@ -17,6 +22,7 @@ fn main() -> i32 {
         while i < 2 {
             if row[i].flag {
                 total += row[i].v * 2;
+                println(f"{row[i].v} {total}");
             }
             i += 1;
         }

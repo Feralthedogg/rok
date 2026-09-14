@@ -27,15 +27,21 @@ mod fmt;
 mod fmt_spec;
 #[cfg(test)]
 mod fuzz_tests;
+mod lane;
 mod math;
+#[cfg_attr(windows, path = "net_windows.rs")]
 mod net;
+#[cfg_attr(windows, path = "os_windows.rs")]
 mod os;
+#[cfg_attr(windows, path = "stack_windows.rs")]
 mod stack;
 mod stdio;
 mod str;
 mod thread;
 mod unicode;
 mod unicode_tables;
+#[cfg(any(windows, test))]
+mod winargs;
 pub use str::RokStr;
 
 /// Rust panic inside the runtime = inconsistent runtime state. Report
@@ -64,11 +70,9 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 // linking librokr.a next to another Rust staticlib or std does not hit a
 // duplicate-symbol error (a strong `#[no_mangle]` stub did).
 //
-// The archive still exports every non-generic
-// `core` / `compiler_builtins` / mangled Rust symbol. Cargo cannot
-// localize them; a post-build step would: macOS
-// `ld -r -exported_symbols_list <rok_* list>`, ELF `ld -r --whole-archive`
-// + `objcopy --keep-global-symbols`, then re-`ar` the single object.
+// Cargo's archive also exports every non-generic `core` /
+// `compiler_builtins` / mangled Rust symbol; `localize.sh` (run by
+// dist.sh) keeps only `rok_*` global in the shipped one.
 #[cfg(all(not(test), target_vendor = "apple"))]
 core::arch::global_asm!(
     ".globl _rust_eh_personality",
@@ -77,7 +81,8 @@ core::arch::global_asm!(
     "_rust_eh_personality:",
     "ret",
 );
-#[cfg(all(not(test), not(target_vendor = "apple")))]
+// MSVC targets use `__CxxFrameHandler3`, not this symbol.
+#[cfg(all(not(test), not(target_vendor = "apple"), not(windows)))]
 core::arch::global_asm!(
     ".weak rust_eh_personality",
     ".type rust_eh_personality, %function",
@@ -309,46 +314,27 @@ pub unsafe extern "C" fn rok_task_key(obj: *mut u8) -> usize {
     obj as usize
 }
 
-#[allow(clippy::unnecessary_cast)] // `time_t` / `c_long` widths vary by target
-fn clock_ns(clock: libc::clockid_t) -> i64 {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: valid out-pointer.
-    unsafe { libc::clock_gettime(clock, &mut ts) };
-    ts.tv_sec as i64 * 1_000_000_000 + ts.tv_nsec as i64
-}
-
 /// Monotonic clock in nanoseconds, stopped during suspend (`Instant`,
 /// 707 timers; 3.3.7: `CLOCK_UPTIME_RAW` on macOS, whose
-/// `CLOCK_MONOTONIC` counts sleep).
+/// `CLOCK_MONOTONIC` counts sleep; `QueryPerformanceCounter` on Windows).
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_time_now_ns() -> i64 {
-    #[cfg(target_vendor = "apple")]
-    let clock = libc::CLOCK_UPTIME_RAW;
-    #[cfg(not(target_vendor = "apple"))]
-    let clock = libc::CLOCK_MONOTONIC;
-    clock_ns(clock)
+    rokr_common::sys::monotonic_ns()
 }
 
 /// Wall clock, nanoseconds since the Unix epoch (`SystemTime`, 3.3.3).
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_time_realtime_ns() -> i64 {
-    clock_ns(libc::CLOCK_REALTIME)
+    rokr_common::sys::realtime_ns()
 }
 
 /// Time since boot, counting suspend (`BootTime`, 3.3.4).
 ///
 /// `CLOCK_BOOTTIME` on Linux, `CLOCK_MONOTONIC` (which counts sleep) on
-/// macOS (3.3.7).
+/// macOS, the `Instant` clock on Windows (3.3.7).
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_time_boot_ns() -> i64 {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    let clock = libc::CLOCK_BOOTTIME;
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    let clock = libc::CLOCK_MONOTONIC;
-    clock_ns(clock)
+    rokr_common::sys::boot_ns()
 }
 
 // ---------------------------------------------------------------------
@@ -548,22 +534,12 @@ pub extern "C" fn rok_alloc_raw(size: usize, align: usize, zeroed: i32) -> *mut 
     let Some(rounded) = size.checked_add(align - 1).map(|s| s & !(align - 1)) else {
         return ptr::null_mut();
     };
-    let p: *mut libc::c_void = if align <= HEADER_ALIGN {
-        // SAFETY: plain malloc; malloc alignment >= 8 on supported targets.
-        unsafe { libc::malloc(rounded) }
-    } else {
-        let mut p: *mut libc::c_void = ptr::null_mut();
-        // SAFETY: valid out-pointer; `align` is a power of two > 8.
-        if unsafe { libc::posix_memalign(&mut p, align, rounded) } != 0 {
-            p = ptr::null_mut();
-        }
-        p
-    };
+    let p = rokr_common::sys::alloc_aligned(rounded, align);
     if !p.is_null() && zeroed != 0 {
         // SAFETY: `p` is valid for `rounded` bytes.
-        unsafe { ptr::write_bytes(p.cast::<u8>(), 0, rounded) };
+        unsafe { ptr::write_bytes(p, 0, rounded) };
     }
-    p.cast()
+    p
 }
 
 /// `rok::bare::alloc::realloc`: a block of `new_size` bytes holding the
@@ -586,7 +562,7 @@ pub unsafe extern "C" fn rok_realloc_raw(
         // contract on `ptr`.
         unsafe {
             ptr::copy_nonoverlapping(ptr, q, old_size.min(new_size));
-            libc::free(ptr.cast());
+            rok_free(ptr);
         }
     }
     q
@@ -596,8 +572,8 @@ pub unsafe extern "C" fn rok_realloc_raw(
 /// `ptr` must be null or a live pointer returned by `rok_alloc_raw`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rok_free(ptr: *mut u8) {
-    // SAFETY: caller contract; free(NULL) is a no-op.
-    unsafe { libc::free(ptr.cast()) };
+    // SAFETY: caller contract; freeing null is a no-op.
+    unsafe { rokr_common::sys::free_aligned(ptr) };
 }
 
 // Typed load/store through raw pointers.

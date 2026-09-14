@@ -1,0 +1,26 @@
+// spec: 002.08.4-supertraits
+// A generic impl must give its target the supertraits for every
+// instance its bounds allow.
+// expect-error: `Box2<T>` implements `Pretty` but not its supertrait `Show` for every `T` the impl allows
+// expect-error: `T` implements `Plain` but not its supertrait `Show` for every `T` the impl allows
+
+trait Show { fn show(self) -> i32; }
+trait Pretty: Show { fn pretty(self) -> i32; }
+
+struct Box2<T> { v: T; }
+struct Wrap<T> { v: T; }
+
+impl<T: Show> Show for Wrap<T> { fn show(self) -> i32 { self.v.show() } }
+// OK: `Wrap<T>: Show` holds whenever `T: Show`.
+impl<T: Show> Pretty for Wrap<T> { fn pretty(self) -> i32 { self.show() + 1 } }
+// Error: no `Box2<T>: Show` impl at all.
+impl<T: Show> Pretty for Box2<T> { fn pretty(self) -> i32 { 0 } }
+
+trait Fancy: Show { fn fancy(self) -> i32; }
+// OK: the bound gives the supertrait.
+impl<T: Pretty> Fancy for T { fn fancy(self) -> i32 { self.show() } }
+// Error: `T` unbounded.
+trait Plain: Show { fn plain(self) -> i32; }
+impl<T> Plain for T { fn plain(self) -> i32 { 0 } }
+
+fn main() {}

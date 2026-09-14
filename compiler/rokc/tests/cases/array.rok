@@ -1,4 +1,6 @@
 // expect-exit: 60
+// expect-stdout:
+// 100
 
 fn main() -> i32 {
     let xs: [i32; 4] = [10i32, 20i32, 30i32, 40i32];
@@ -8,5 +10,6 @@ fn main() -> i32 {
         total += xs[i];
         i += 1i32;
     }
+    println(f"{total}");
     return total - 40i32;
 }

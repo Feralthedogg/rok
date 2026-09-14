@@ -1,0 +1,52 @@
+// expect-exit: 0
+// expect-stdout:
+// 7 10 11 0
+// [(6, 7), (5, 6), (4, 5), (3, 4), (2, 3), (1, 2), (0, 1)]
+// [(3, 12), (2, 11), (1, 10)] 3
+// [3, 2, 1] [7, 6, 5] 3 3
+// [7, 4, 1] [8, 4, 0] 3 3
+// [7, 5, 3]
+// 7 7
+// 1234567 7654321 6
+// ['a', 'b', 'c', 'd', 'e'] ['c', 'b', 'a'] 26
+// 3 3 0
+// 1
+// 4 3
+
+// Stdlib 2.7.9 / 2.7.10: ExactSizeIterator (List / Slice / Range iterators,
+// Enumerate / Zip / Take / Skip / StepBy / Rev / Map), next_back on the
+// adapters that need the length, rfold / rfind (closure types from the
+// supertrait's Item), and Step for char (surrogates skipped, 2.7.3).
+fn main() -> i32 {
+    let xs: List<i32> = [1, 2, 3, 4, 5, 6, 7];
+    println(f"{xs.iter().len()} {(0..10).len()} {(0..=10).len()} {(5..2).len()}");
+    let e: List<(usize, i32)> = xs.iter().enumerate().rev().collect();
+    println(f"{e:?}");
+    let z: List<(i32, i32)> = xs.iter().zip((10..13)).rev().collect();
+    println(f"{z:?} {xs.iter().zip(0..3).len()}");
+    let t: List<i32> = xs.iter().take(3).rev().collect();
+    let k: List<i32> = xs.iter().skip(4).rev().collect();
+    println(f"{t:?} {k:?} {xs.iter().take(3).len()} {xs.iter().skip(4).len()}");
+    let s1: List<i32> = xs.iter().step_by(3).rev().collect();
+    let s2: List<i32> = (0..10).step_by(4).rev().collect();
+    println(f"{s1:?} {s2:?} {xs.iter().step_by(3).len()} {(0..10).step_by(4).len()}");
+    let it = xs.iter().step_by(2);
+    it.next();
+    let s3: List<i32> = it.rev().collect();
+    println(f"{s3:?}");
+    println(f"{xs.iter().map(|x| x * 2).len()} {xs.iter().rev().len()}");
+    println(f"{xs.iter().fold(0, |a, x| a * 10 + x)} {xs.iter().rfold(0, |a, x| a * 10 + x)} {xs.iter().rfind(|x| x % 2 == 0):?}");
+    let cs: List<char> = ('a'..='e').collect();
+    let rs: List<char> = ('a'..'d').rev().collect();
+    println(f"{cs:?} {rs:?} {('a'..='z').len()}");
+    let c = '\u{D7FF}';
+    let after: List<char> = (c..='\u{E001}').collect();
+    println(f"{after.len()} {(c..='\u{E001}').len()} {('\u{E000}'..'\u{E000}').len()}");
+    println(f"{('\u{10FFFE}'..).count()}");
+    let sl = xs[1:5].into_iter();
+    sl.next_back();
+    println(f"{xs[1:5].into_iter().len()} {sl.len()}");
+    return 0;
+}
+
+// spec: std 207-iter §2.7.10

@@ -1,0 +1,31 @@
+// spec: 007.07-io-and-timer §7.7.9
+// expect-exit: 0
+// expect-stdout:
+// sleeping
+// finally in task
+// cancelled promptly: true
+// result: cancelled
+
+// spec 7.7.9: a task waiting in `sleep` is woken when cancelled and
+// leaves at that `await` as if by `return`; `finally` blocks it passes
+// through run, and the awaiting side sees `CancellationError`.
+async fn sleeper() -> i32 {
+    let v = {
+        println("sleeping");
+        await task::sleep(Duration::ms(10000));
+        1
+    } finally {
+        println("finally in task");
+    };
+    v
+}
+
+async fn main() {
+    let t0 = Instant::now();
+    let t = task::spawn(sleeper());
+    await task::sleep(Duration::ms(20));
+    t.cancel();
+    let r = try await t.join() catch _: CancellationError { -1 };
+    println(f"cancelled promptly: {t0.elapsed().as_ms() < 5000}");
+    println(f"result: {if r == -1 { "cancelled" } else { "finished" }}");
+}

@@ -1,4 +1,6 @@
 // expect-exit: 30
+// expect-stdout:
+// 30 3
 
 fn apply<T>(x: T, f: fn(T) -> T) -> T {
     return f(x);
@@ -6,6 +8,7 @@ fn apply<T>(x: T, f: fn(T) -> T) -> T {
 
 fn main() -> i32 {
     let r = apply(5, |x: i32| -> i32 { x * 6 });
+    println(f"{r} {apply(1.5f64, |x: f64| -> f64 { x * 2.0f64 })}");
     return r;
 }
 

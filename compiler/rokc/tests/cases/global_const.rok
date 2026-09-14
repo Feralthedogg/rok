@@ -1,4 +1,6 @@
 // expect-exit: 50
+// expect-stdout:
+// 42 4 8
 
 const ANSWER: i32 = 42;
 const STEP: i32 = 4;
@@ -8,5 +10,6 @@ fn double_step() -> i32 {
 }
 
 fn main() -> i32 {
+    println(f"{ANSWER} {STEP} {double_step()}");
     return ANSWER + double_step();
 }

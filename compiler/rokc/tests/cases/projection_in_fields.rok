@@ -1,4 +1,7 @@
 // expect-exit: 42
+// expect-stdout:
+// 40 2
+
 
 // A projection in a struct field or an enum payload resolves once the
 // impls are registered, as in a generic instance.
@@ -23,5 +26,6 @@ fn main() -> i32 {
         Box2::One(x) => x,
         Box2::Zero => 0i32,
     };
+    println(f"{h.v} {w}");
     return h.v + w;
 }

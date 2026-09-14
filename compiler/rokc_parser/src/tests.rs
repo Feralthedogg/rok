@@ -194,7 +194,7 @@ fn infix_registration_rejects_precedence() {
         let (tokens, _) = Lexer::new(src, "test").lex_all();
         let (program, diags) = parse_program(&tokens, "test");
         assert!(diags.is_empty(), "{diags:#?}");
-        collect_prec_table(&program).1
+        collect_prec_table(&program, &[]).1
     };
     let errs = reg("trait A { #[infix(\"+\", prec = 7, left)] fn add(self, r: Self) -> Self; }");
     assert!(
@@ -275,7 +275,7 @@ trait Neg {
     let (tokens, _) = lexer.lex_all();
     let (program, diags) = parse_program(&tokens, "test");
     assert!(diags.is_empty(), "{diags:#?}");
-    let (table, errs) = collect_prec_table(&program);
+    let (table, errs) = collect_prec_table(&program, &[]);
     assert!(errs.is_empty(), "{errs:#?}");
 
     let plus = table.lookup("+", Fixity::Infix).expect("`+` registered");
@@ -621,6 +621,21 @@ fn deep_nesting_is_a_diagnostic_not_a_crash() {
             ")".repeat(n)
         ),
         format!("fn f() {{ return {}1; }}", "-".repeat(n)),
+        format!("fn f() {{ {}1{} }}", "if a { ".repeat(n), " }".repeat(n)),
+        format!(
+            "fn f() {{ {}1{} }}",
+            "match a { _ => ".repeat(n),
+            " }".repeat(n)
+        ),
+        format!("fn f() {{ return {}1; }}", "|| ".repeat(n)),
+        format!("fn f() {{ return {}1{}; }}", "g(".repeat(n), ")".repeat(n)),
+        format!("fn f() {{ return {}1{}; }}", "[".repeat(n), "]".repeat(n)),
+        format!(
+            "fn f() {{ return {}1{}; }}",
+            "S { a: ".repeat(n),
+            " }".repeat(n)
+        ),
+        format!("fn f(x: {}i32{}) {{ }}", "List<".repeat(n), ">".repeat(n)),
     ] {
         assert_rejected(&src, "nesting too deep");
     }
@@ -893,4 +908,22 @@ fn expr_file() {
         d[0].message.contains("expected the end of the file"),
         "{d:?}"
     );
+}
+
+#[test]
+fn compound_expr_spans_cover_all_tokens() {
+    let src = "fn f() { let v = a.b(1, 2) + -c[3] as i64; }";
+    let p = parse(src);
+    let Item::Fn(f) = &p.items[0] else { panic!() };
+    let body = f.body.as_ref().unwrap();
+    let StmtKind::Let { init, .. } = &body.stmts[0].kind else {
+        panic!()
+    };
+    let text = |s: rokc_diagnostic::Span| &src[s.start as usize..s.end as usize];
+    assert_eq!(text(init.span), "a.b(1, 2) + -c[3] as i64");
+    let ExprKind::OpInfix { lhs, rhs, .. } = &init.kind else {
+        panic!()
+    };
+    assert_eq!(text(lhs.span), "a.b(1, 2)");
+    assert_eq!(text(rhs.span), "-c[3] as i64");
 }

@@ -2,6 +2,8 @@
 // expect-exit: 0
 // forbid-warning: never runs
 // `catch e: T` / `catch T { f }` narrow an untyped `throws` error (`any Error`).
+// expect-stdout:
+// 4 -1 14 5 -2 7
 
 struct Other {}
 
@@ -38,5 +40,6 @@ fn main() -> i32 {
     if e != -2 { return 5; }
     let f = try rethrows_other(1) catch e: Other { 7 } catch _ { -1 };
     if f != 7 { return 6; }
+    println(f"{a} {b} {c} {d} {e} {f}");
     0
 }

@@ -1,0 +1,69 @@
+// expect-exit: 0
+// gc-stress: 50
+// expect-stdout:
+// 45 10
+// 3 0 0
+// 7
+// 2 4
+// bc 98 99
+// 0
+
+// Optimized code may load a `List`'s length and element buffer ahead of
+// their use (out of a loop): they must still see every change, and
+// other buffers (a `str`'s byte view, at any byte offset) stay as they
+// are.
+fn sum(xs: List<i64>) -> i64 {
+    let s: i64 = 0;
+    for i in 0..xs.len() {
+        s += xs[i];
+    }
+    s
+}
+
+// The length grows inside the loop that reads it.
+fn grow(xs: List<i64>, until: usize) -> usize {
+    let n: usize = 0;
+    while xs.len() < until {
+        if xs.len() % 2 == 0 {
+            n += 1;
+        }
+        xs.push(xs.len() as i64);
+    }
+    n
+}
+
+// Read only on some iterations.
+fn sometimes(xs: List<i64>, k: i64) -> i64 {
+    let s: i64 = 0;
+    for i in 0..10i64 {
+        if i == k {
+            s += xs[0];
+        }
+    }
+    s
+}
+
+fn main() -> i32 {
+    let xs: List<i64> = [];
+    let n = grow(xs, 10);
+    println(f"{sum(xs)} {n * 2}");
+    // Vacated slots hold zero lists; empty lists have tiny buffers.
+    let ls: List<List<i64>> = [[1, 2], [], [3]];
+    let last = ls.pop() ?? [];
+    let empty = ls.remove(1);
+    println(f"{ls.len() + last.len() + 1} {empty.len()} {sum(empty)}");
+    println(f"{sometimes(xs, 3) + sometimes([7], 5)}");
+    let swap: List<i64> = [1];
+    let other: List<i64> = [2, 4];
+    for _ in 0..3 {
+        let t = swap;
+        swap = other;
+        other = t;
+    }
+    println(f"{swap[0]} {swap[swap.len() - 1]}");
+    let s = "abcd";
+    let b = s[1:3].as_bytes();
+    println(f"{s[1:3]} {b[0]} {b[1]}");
+    println(f"{sometimes([], 11)}");
+    return 0;
+}

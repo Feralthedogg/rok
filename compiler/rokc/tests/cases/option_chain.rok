@@ -1,4 +1,6 @@
 // expect-exit: 23
+// expect-stdout:
+// 5 13 5
 
 enum Maybe<T> {
     Some(T),
@@ -25,5 +27,6 @@ fn main() -> i32 {
     let r1 = safe_div(20, 4).unwrap_or(0);
     let r2 = safe_div(7, 0).unwrap_or(13);
     let r3 = safe_div(15, 3).unwrap_or(0);
+    println(f"{r1} {r2} {r3}");
     return r1 + r2 + r3;
 }

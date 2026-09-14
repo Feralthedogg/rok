@@ -1,4 +1,7 @@
 // expect-exit: 30
+// expect-stdout:
+// 10 10 5
+
 
 // `impl Trait for Type` registers the methods in the same method-table
 // the inherent-impl path uses, so `value.method()` dispatches by the
@@ -36,6 +39,7 @@ impl Counter {
 fn main() -> i32 {
     let c = Counter { n: 5 };
     // tally=10, bonus=10, raw=5 → 25; +5 = 30.
+    println(f"{c.tally()} {c.bonus()} {c.raw()}");
     return c.tally() + c.bonus() + c.raw() + 5;
 }
 

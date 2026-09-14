@@ -8,13 +8,15 @@ guide are at [rok-lang.org](https://rok-lang.org).
 ## Requirements
 
 - A toolchain needs no LLVM install: `rokc` links LLVM, MLIR and lld (pinned LLVM 22.1.8) and runs the whole
-  back end in process. On macOS the link needs the SDK of Xcode's command line tools (`xcode-select --install`);
-  on Linux, the C library's development files (`crt1.o`, `libc.so`) and GCC's runtime. Set `ROK_CC` to link
-  with a C compiler driver instead.
-- The REPL and the Jupyter kernel run on macOS arm64.
+  back end in process. On macOS the link needs the SDK of Xcode's command line tools (`xcode-select --install`).
+  Linux targets need nothing: the toolchain ships their runtime and C library (musl, and link stubs of glibc
+  2.36: executables need glibc 2.34 or later) in `lib/rok/targets/<triple>/`, so `--target <linux triple>` works
+  from any host, and so does the other macOS arch. Set `ROK_CC` to link with a C compiler driver instead.
+- The REPL and the Jupyter kernel run on macOS and Linux (arm64, x86_64).
 - Building from source needs Rust (`rust-toolchain.toml`; no external crates are used), and for anything above
   `-O0` the pinned LLVM: `llvm/build.sh` builds it once into `~/.cache/rok` (cmake, ninja, about an hour; see
   `llvm/README.md`). Without it `rokc` builds `-O0` only (the native backend), linking with the system `cc`.
+  `targets/build.sh` builds what `--target` links into `target/lib/rok/targets/` (rustup, curl, python3, clang).
 
 ## Install
 
@@ -28,6 +30,13 @@ Or from a release archive:
 sh install.sh --archive rok-0.1.0-aarch64-apple-darwin.tar.gz
 # from inside an unpacked archive
 rok-0.1.0-aarch64-apple-darwin/install.sh
+```
+
+On Windows (PowerShell; installs into `%USERPROFILE%\.rok` and puts its `bin` on the user's `PATH`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://rok-lang.org/install.ps1 | iex"
+powershell -ExecutionPolicy Bypass -File install.ps1 -Archive rok-0.1.0-x86_64-pc-windows-msvc.zip
 ```
 
 Then add `~/.rok/bin` to `PATH` (the script tells you how).
@@ -46,7 +55,7 @@ $ROK_HOME/
 ├── bin/{rok,rokc,rokls}              proxies: run the same-named binary of the active toolchain
 ├── toolchains/<version>-<triple>/    self-contained toolchain
 │   ├── bin/{rok,rokc,rokls}
-│   └── lib/librokr.a, lib/rok/{core,std,bare}/
+│   └── lib/librokr.a, lib/rok/{core,std,bare}/, lib/rok/targets/<triple>/
 ├── cache/                            git, registry, script locks
 ├── envs/<name>/, envs/CURRENT        named environments
 └── config.rokon                      Config { registry: "..", toolchain: ".." }

@@ -1,0 +1,10 @@
+// The harness skips a case whose `only-os` leaves out the target's OS:
+// this one runs on Windows alone (elsewhere it would print `other`).
+// only-os: windows
+// expect-exit: 0
+// expect-stdout: windows
+#[cfg(target_os = "windows")]
+fn os() -> str { "windows" }
+#[cfg(not(target_os = "windows"))]
+fn os() -> str { "other" }
+fn main() { println(os()); }

@@ -179,13 +179,16 @@ pub fn classify(target: &Target, params: &[MirTy], ret: &MirTy, variadic: bool) 
 /// with C while every integer word fits in argument registers; past
 /// that a pair could straddle the last register and the stack, where C
 /// passes it whole on the stack. `None`: a plain call does the same.
+/// Windows x64 passes and returns a 16-byte struct by reference, so a
+/// signature with a `str` (or another aggregate) is always classified.
 /// No runtime runs on the other targets.
 #[must_use]
 pub fn classify_rok(target: &Target, params: &[MirTy], ret: &MirTy) -> Option<FnAbi> {
     let regs = match target.c_abi {
         CAbi::Aarch64 => 8,
         CAbi::X86_64SysV => 6,
-        CAbi::X86_64Win | CAbi::Other => return None,
+        CAbi::X86_64Win => 0,
+        CAbi::Other => return None,
     };
     let word = target.pointer_width / 8;
     let words: u32 = params
@@ -193,7 +196,12 @@ pub fn classify_rok(target: &Target, params: &[MirTy], ret: &MirTy) -> Option<Fn
         .filter(|t| !matches!(t, MirTy::Prim(PrimTy::F32 | PrimTy::F64)))
         .map(|t| target.size_align(t).0.div_ceil(word))
         .sum();
-    if words <= regs {
+    let by_value = |t: &MirTy| is_aggregate(t) || *t == MirTy::Prim(PrimTy::Str);
+    if target.c_abi == CAbi::X86_64Win {
+        if !params.iter().chain([ret]).any(by_value) {
+            return None;
+        }
+    } else if words <= regs {
         return None;
     }
     let pair = |t: &MirTy| {
@@ -472,5 +480,20 @@ mod tests {
         assert!(classify(&i686, &[st(&[I32, I32])], &MirTy::Unit, false).is_none());
         let scalars = classify(&i686, &[MirTy::Prim(I32)], &MirTy::Unit, true).unwrap();
         assert!(scalars.variadic);
+    }
+
+    /// A runtime `str` on Windows x64 is a 16-byte C struct: by
+    /// reference, returned through `sret`; scalars alone stay plain.
+    #[test]
+    fn win64_runtime_strs_go_by_reference() {
+        let t = on("x86_64-pc-windows-msvc");
+        let s = MirTy::Prim(PrimTy::Str);
+        let r = classify_rok(&t, &[MirTy::Prim(I32), s.clone()], &s).unwrap();
+        assert_eq!(r.args[1], ArgAbi::Indirect { byval: false });
+        assert_eq!(r.ret, RetAbi::Sret);
+        assert!(r.rok);
+        assert!(classify_rok(&t, &[MirTy::Prim(I64)], &MirTy::Prim(I32)).is_none());
+        let arm = on("aarch64-pc-windows-msvc");
+        assert!(classify_rok(&arm, &[MirTy::Prim(I32), s.clone()], &s).is_none());
     }
 }

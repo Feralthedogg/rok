@@ -8,11 +8,17 @@ use crate::{BuildOptions, CompiledModule};
 
 /// The object of `module` from the native backend, when it builds this
 /// one (`None`: LLVM does).
+///
+/// A `-g` build for Windows goes through LLVM: the native backend
+/// writes DWARF, Windows debuggers read `CodeView`.
 pub fn object(
     module: &CompiledModule,
     opts: &BuildOptions,
 ) -> Result<Option<rokc_codegen_native::Output>, RokDiagnostic> {
-    if !wanted(opts) || rokc_codegen_native::unsupported(&module.mir).is_some() {
+    if !wanted(opts)
+        || rokc_codegen_native::unsupported(&module.mir).is_some()
+        || (opts.debug && module.mir.target.os == "windows")
+    {
         return Ok(None);
     }
     let o = rokc_codegen_native::compile(
@@ -38,7 +44,7 @@ pub fn chosen(opts: &BuildOptions) -> bool {
 /// LLVM does (`toolchain::cell_object`).
 #[must_use]
 pub fn jit(opts: &BuildOptions) -> bool {
-    cfg!(all(target_os = "macos", target_arch = "aarch64")) && wanted(opts)
+    crate::REPL_HOST && wanted(opts)
 }
 
 /// A REPL cell (`opts.repl`) as a native object, compiling only the

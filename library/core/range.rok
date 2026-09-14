@@ -78,6 +78,15 @@ impl<T: Step> DoubleEndedIterator for Range<T> {
     }
 }
 
+impl<T: Step> ExactSizeIterator for Range<T> {
+    fn len(self) -> usize {
+        if !(self.start < self.end) {
+            return 0;
+        }
+        T::steps_between(self.start, self.end) ?? panic("range length overflows usize")
+    }
+}
+
 impl<T: Step> Iterator for RangeInclusive<T> {
     type Item = T;
     fn next(ref self) -> T | none {
@@ -114,6 +123,16 @@ impl<T: Step> DoubleEndedIterator for RangeInclusive<T> {
             }
         }
         cur
+    }
+}
+
+impl<T: Step> ExactSizeIterator for RangeInclusive<T> {
+    fn len(self) -> usize {
+        if self.exhausted || self.start > self.end {
+            return 0;
+        }
+        let n = T::steps_between(self.start, self.end) ?? panic("range length overflows usize");
+        n.checked_add(1) ?? panic("range length overflows usize")
     }
 }
 
@@ -261,21 +280,21 @@ impl Step for i64 {
 
 impl Step for isize {
     fn forward_checked(self, count: usize) -> isize | none {
-        if count > 9223372036854775807isize as usize {
+        if count > isize::MAX as usize {
             return none;
         }
         let k = count as isize;
-        if self > 9223372036854775807isize - k {
+        if self > isize::MAX - k {
             return none;
         }
         self + k
     }
     fn backward_checked(self, count: usize) -> isize | none {
-        if count > 9223372036854775807isize as usize {
+        if count > isize::MAX as usize {
             return none;
         }
         let k = count as isize;
-        if self < (-9223372036854775807isize - 1) + k {
+        if self < isize::MIN + k {
             return none;
         }
         self - k
@@ -409,17 +428,17 @@ impl Step for u64 {
 
 impl Step for usize {
     fn forward_checked(self, count: usize) -> usize | none {
-        if count > 18446744073709551615usize as usize {
+        if count > usize::MAX {
             return none;
         }
         let k = count as usize;
-        if self > 18446744073709551615usize - k {
+        if self > usize::MAX - k {
             return none;
         }
         self + k
     }
     fn backward_checked(self, count: usize) -> usize | none {
-        if count > 18446744073709551615usize as usize {
+        if count > usize::MAX {
             return none;
         }
         let k = count as usize;
@@ -433,6 +452,33 @@ impl Step for usize {
             return none;
         }
         (end - start) as usize
+    }
+}
+
+/// By scalar value, skipping the surrogates `0xD800..=0xDFFF` (2.7.3).
+impl Step for char {
+    fn forward_checked(self, count: usize) -> char | none {
+        let n = self as u32 as usize;
+        let t = n.checked_add(count)?;
+        let u = if n < 0xD800 && t >= 0xD800 { t.checked_add(0x800)? } else { t };
+        if u > 0x10FFFF {
+            return none;
+        }
+        char::from_u32(u as u32)
+    }
+    fn backward_checked(self, count: usize) -> char | none {
+        let n = self as u32 as usize;
+        let t = n.checked_sub(count)?;
+        let u = if n >= 0xE000 && t < 0xE000 { t.checked_sub(0x800)? } else { t };
+        char::from_u32(u as u32)
+    }
+    fn steps_between(start: char, end: char) -> usize | none {
+        let (s, e) = (start as u32, end as u32);
+        if s > e {
+            return none;
+        }
+        let d = e - s;
+        (if s < 0xD800 && e >= 0xE000 { d - 0x800 } else { d }) as usize
     }
 }
 

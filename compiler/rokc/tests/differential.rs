@@ -32,7 +32,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use common::{Env, Rng, par_map, rokc_build, setup};
+use common::{Env, Rng, exe_name, par_map, rokc_build, setup};
 use rokc_rokon::{Field, Kind, Value};
 
 /// `(suite, op, why)`: mismatches that do not fail the test.
@@ -1180,13 +1180,14 @@ fn same(cmp: Cmp, got: &str, want: &str) -> bool {
     }
 }
 
+/// `python3`; Windows installs name it `python`.
 fn python() -> Option<&'static str> {
-    Command::new("python3")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| "python3")
+    ["python3", "python"].into_iter().find(|py| {
+        Command::new(py)
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success() && common::text(&o.stdout).starts_with("Python 3"))
+    })
 }
 
 fn run_suite(env: &Env, py: &str, suite: &Suite, dir: &Path) -> Result<Vec<String>, String> {
@@ -1215,7 +1216,7 @@ fn run_suite(env: &Env, py: &str, suite: &Suite, dir: &Path) -> Result<Vec<Strin
     } else {
         suite.want.clone()
     };
-    let exe = dir.join("out");
+    let exe = dir.join(exe_name("out"));
     let build = rokc_build(env, &main, &exe).map_err(|e| e.to_string())?;
     if !build.status.success() {
         let err = String::from_utf8_lossy(&build.stderr);

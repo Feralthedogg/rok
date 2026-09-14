@@ -10,18 +10,23 @@
 
 use core::cell::UnsafeCell;
 use core::ptr;
-use core::sync::atomic::{AtomicI32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use rokr_common::object_header::HEADER_SIZE;
-use rokr_common::write_all;
+use rokr_common::{sys, write_all};
 
 use crate::os::native;
 use crate::str::RokStr;
 
 const CAP: usize = 8192;
 
+#[cfg(unix)]
+const BAD_FD: i32 = libc::EBADF;
+#[cfg(windows)]
+const BAD_FD: i32 = rokr_common::win::ERROR_INVALID_HANDLE;
+
 struct Buf {
-    lock: UnsafeCell<libc::pthread_mutex_t>,
+    lock: sys::Lock,
     data: UnsafeCell<[u8; CAP]>,
     /// stdout: bytes held; stdin: `[pos, end)` of unread bytes.
     pos: UnsafeCell<usize>,
@@ -34,7 +39,7 @@ unsafe impl Sync for Buf {}
 impl Buf {
     const fn new() -> Self {
         Self {
-            lock: UnsafeCell::new(libc::PTHREAD_MUTEX_INITIALIZER),
+            lock: sys::Lock::new(),
             data: UnsafeCell::new([0; CAP]),
             pos: UnsafeCell::new(0),
             end: UnsafeCell::new(0),
@@ -43,18 +48,15 @@ impl Buf {
 
     /// Take the lock, parked if it is contended.
     fn lock(&self) -> Guard<'_> {
-        // SAFETY: a statically initialized mutex.
-        if unsafe { libc::pthread_mutex_trylock(self.lock.get()) } != 0 {
-            // SAFETY: as above.
-            native(|| unsafe { libc::pthread_mutex_lock(self.lock.get()) });
+        if !self.lock.try_lock() {
+            native(|| self.lock.lock());
         }
         Guard(self)
     }
 
     /// Take the lock without parking (no mutator needed).
     fn lock_raw(&self) -> Guard<'_> {
-        // SAFETY: a statically initialized mutex.
-        unsafe { libc::pthread_mutex_lock(self.lock.get()) };
+        self.lock.lock();
         Guard(self)
     }
 }
@@ -63,8 +65,7 @@ struct Guard<'a>(&'a Buf);
 
 impl Drop for Guard<'_> {
     fn drop(&mut self) {
-        // SAFETY: held by this guard.
-        unsafe { libc::pthread_mutex_unlock(self.0.lock.get()) };
+        self.0.lock.unlock();
     }
 }
 
@@ -84,18 +85,9 @@ impl Guard<'_> {
 
 static OUT: Buf = Buf::new();
 static IN: Buf = Buf::new();
-/// `flush_at_exit` is registered before any byte is buffered, by the
-/// first writer (with a `swap` flag a second writer could buffer, and
-/// the process exit, before the first had registered it).
-struct Once(UnsafeCell<libc::pthread_once_t>);
-// SAFETY: only `pthread_once` touches it.
-unsafe impl Sync for Once {}
-static AT_EXIT: Once = Once(UnsafeCell::new(libc::PTHREAD_ONCE_INIT));
-
-extern "C" fn register_flush() {
-    // SAFETY: registers a plain `extern "C"` function.
-    unsafe { libc::atexit(flush_at_exit) };
-}
+/// `flush_at_exit` is registered: set under `OUT`'s lock before the
+/// first byte is buffered.
+static AT_EXIT: AtomicBool = AtomicBool::new(false);
 /// `isatty(1)`: -1 unknown, then 0 / 1.
 static TTY: AtomicI32 = AtomicI32::new(-1);
 
@@ -104,10 +96,9 @@ fn tty() -> bool {
     if t >= 0 {
         return t != 0;
     }
-    // SAFETY: plain libc call.
-    let t = unsafe { libc::isatty(1) };
-    TTY.store(t, Ordering::Relaxed);
-    t != 0
+    let t = sys::is_terminal(1);
+    TTY.store(i32::from(t), Ordering::Relaxed);
+    t
 }
 
 /// Write out the held bytes (lock held). They are dropped on failure,
@@ -133,9 +124,11 @@ extern "C" fn flush_at_exit() {
 
 /// `parts` to stdout through the buffer.
 fn out(parts: &[&[u8]]) -> i32 {
-    // SAFETY: a statically initialized once-control.
-    unsafe { libc::pthread_once(AT_EXIT.0.get(), Some(register_flush)) };
     let g = OUT.lock();
+    if !AT_EXIT.load(Ordering::Relaxed) {
+        sys::atexit(flush_at_exit);
+        AT_EXIT.store(true, Ordering::Relaxed);
+    }
     let (data, len, _) = g.parts();
     let mut r = 0;
     let mut newline = false;
@@ -162,16 +155,15 @@ pub fn write(fd: i32, parts: &[&[u8]]) -> i32 {
     match fd {
         1 => out(parts),
         2 => native(|| write_all(2, parts)).0,
-        _ => -libc::EBADF,
+        _ => -BAD_FD,
     }
 }
 
 /// Flush stdout from the stack-overflow handler: only when no thread
 /// holds the lock (waiting could deadlock), never parked.
 pub fn flush_in_signal() {
-    // SAFETY: a statically initialized mutex; left locked, as the
-    // process is about to abort.
-    if unsafe { libc::pthread_mutex_trylock(OUT.lock.get()) } == 0 {
+    // Left locked: the process is about to abort.
+    if OUT.lock.try_lock() {
         // SAFETY: the lock is held.
         let (data, len) = unsafe { (&*OUT.data.get(), *OUT.pos.get()) };
         write_all(1, &[&data[..len]]);
@@ -206,18 +198,10 @@ pub extern "C" fn rok_stdio_flush() -> i32 {
     drain(data, len, true)
 }
 
-/// One `read(0)`, parked.
+/// One read of stdin, parked.
 fn read0(dst: *mut u8, len: usize) -> isize {
-    native(|| {
-        loop {
-            // SAFETY: caller passes a writable region of `len` bytes.
-            let n = unsafe { libc::read(0, dst.cast(), len) };
-            if n >= 0 || rokr_common::errno() != libc::EINTR {
-                break crate::os::ret(n);
-            }
-        }
-    })
-    .0
+    // SAFETY: caller passes a writable region of `len` bytes.
+    native(|| unsafe { sys::read_stdin(dst, len) }).0
 }
 
 /// Up to `len` bytes of stdin into the `GcBuf<u8>` `buf` at `off`,

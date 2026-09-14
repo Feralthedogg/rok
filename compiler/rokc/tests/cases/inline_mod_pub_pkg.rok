@@ -1,4 +1,6 @@
 // expect-exit: 21
+// expect-stdout:
+// 12 13 8
 
 // `pub(pkg)` items are visible package-wide. Same package = always
 // reachable.
@@ -14,5 +16,6 @@ mod b {
 }
 
 fn main() -> i32 {
+    println(f"{a::shared()} {b::use_shared()} {b::other()}");
     return b::use_shared() + b::other();  // (12+1) + 8 = 21
 }

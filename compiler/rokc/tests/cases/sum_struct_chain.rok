@@ -1,4 +1,7 @@
 // expect-exit: 32
+// expect-stdout:
+// 7 10 10 5
+
 
 struct Pos {
     x: i32;
@@ -27,6 +30,7 @@ fn main() -> i32 {
         v: Pos => v,
         none => Pos { x: 10, y: 5 },
     };
+    println(f"{s1.x} {s1.y} {s2.x} {s2.y}");
     return s1.x + s1.y + s2.x + s2.y;
 }
 

@@ -1,4 +1,6 @@
 // expect-exit: 27
+// expect-stdout:
+// 20 7 5
 
 enum Option<T> {
     Some(T),
@@ -26,5 +28,6 @@ fn main() -> i32 {
     let b: Option<i32> = Option::None;
     let s = a.map(|x: i32| -> i32 { x * 4 }).or(0);
     let t = b.map(|x: i32| -> i32 { x * 4 }).or(7);
+    println(f"{s} {t} {a.or(0)}");
     return s + t;
 }

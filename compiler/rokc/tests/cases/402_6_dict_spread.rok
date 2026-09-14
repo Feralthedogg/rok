@@ -1,0 +1,35 @@
+// spec: lang 402-parameters §4.2.6
+// expect-exit: 0
+// expect-stdout:
+// lr=0.01 epochs=100 decay=0.5
+// lr=0.2 epochs=3 decay=0.9
+// lr=0.3 epochs=7 decay=0.5
+// 2 x=1 y=2
+// x=5 y=6
+
+// A `Dict<str, V>` spread passes its entries as named arguments; a
+// parameter no key names takes its default.
+fn train(lr: f64, epochs: f64, decay: f64 = 0.5) {
+    println(f"lr={lr} epochs={epochs} decay={decay}");
+}
+
+fn show<T: Display>(n: i64, x: T, y: T) {
+    println(f"{n} x={x} y={y}");
+}
+
+struct P { x: i32; }
+
+impl P {
+    fn at(self, y: i32) { println(f"x={self.x} y={y}"); }
+}
+
+fn main() {
+    let opts = {"lr": 0.01, "epochs": 100.0};
+    train(..opts);
+    train(..{"decay": 0.9, "lr": 0.2}, epochs: 3.0);
+    let a = {"lr": 0.3};
+    let b = {"epochs": 7.0, "lr": 9.0};
+    train(..a, ..b);
+    show(2, ..{"x": 1, "y": 2});
+    P { x: 5 }.at(..{"y": 6});
+}

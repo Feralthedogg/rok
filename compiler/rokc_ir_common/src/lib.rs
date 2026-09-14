@@ -202,6 +202,9 @@ pub struct FnFacts {
     /// `#[track_caller]`: the last parameter is the caller's location
     /// (`str`, `path:line:col`), which its panics report.
     pub track_caller: bool,
+    /// Declared in a `#[no_safepoint] extern "rok"` block: neither
+    /// allocates nor blocks, so a call to it is no safepoint.
+    pub no_safepoint: bool,
 }
 
 /// Separator between a generic function's path and its instance's type

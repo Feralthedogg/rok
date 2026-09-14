@@ -1,4 +1,6 @@
 // expect-exit: 12
+// expect-stdout:
+// 12 3
 
 // `break 'outer` exits the outer loop directly from the inner loop.
 fn main() -> i32 {
@@ -14,5 +16,6 @@ fn main() -> i32 {
         }
         i += 1;
     };
+    println(f"{result} {i}");
     return result;
 }

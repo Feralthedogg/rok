@@ -1,0 +1,46 @@
+// spec: 004.03.7-divergent-functions
+// spec: 004.01.3-omitting-the-return-type
+// Without `-> T`, a body whose every path diverges gets `!` (usable in
+// any slot), and an `async fn` takes its result type from the body.
+// expect-exit: 0
+
+#[derive(Debug)]
+struct E { code: i32; }
+impl Error for E {}
+impl Display for E {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("E") }
+}
+
+fn boom(s: str) { panic(s); }
+fn spin() { loop { } }
+fn fail_always(c: i32) throws (E) { throw E { code: c }; }
+fn either(b: bool) { if b { boom("a") } else { boom("b") } }
+
+async fn answer() { 40 + 2 }
+async fn early(b: bool) { if b { return 1; } 2 }
+async fn nothing() { }
+
+fn pick(c: bool) -> i32 {
+    let x: i32 = if c { 42 } else { boom("no") };
+    x
+}
+
+fn never_called() -> str { if false { spin() } else { either(true) } }
+
+fn main() -> i32 {
+    if pick(true) != 42 { return 1; }
+    let y: i32 = try fail_always(7) catch e { e.code };
+    if y != 7 { return 2; }
+    let a = rok::core::task::block_on(answer());
+    if a != 42 { return 3; }
+    let b = rok::core::task::block_on(early(true)) + rok::core::task::block_on(early(false));
+    if b != 3 { return 4; }
+    let u: () = rok::core::task::block_on(nothing());
+    // A throwing `-> !` fn value fits a `-> R` slot with the same error.
+    let f: fn(i32) throws (E) -> i32 = fail_always;
+    let z = try f(9) catch e { e.code };
+    if z != 9 { return 5; }
+    let r: Result<str, E> = Result::catching(|| try fail_always(4));
+    if !r.is_err() { return 6; }
+    0
+}

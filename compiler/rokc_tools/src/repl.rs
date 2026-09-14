@@ -26,8 +26,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::fd::OwnedFd;
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -36,7 +34,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use rokc_diagnostic::{Label, RokDiagnostic, Span};
 use rokc_hir::{HirExpr, HirExprKind, HirModule, HirStaticDef, HirStmt, HirTy};
 use rokc_interface::{
-    BuildOptions, CompileResult, EmitKind, ReplCell, ReplFn, Session, TempDir, link_host, report,
+    BuildOptions, CompileResult, EmitKind, REPL_HOST, ReplCell, ReplFn, Session, TempDir,
+    link_host, report,
 };
 use rokc_ir_common::{ConstVal, LocalId};
 
@@ -45,7 +44,8 @@ use crate::analysis::{ty_name, ty_path};
 const VALUE: &str = "__rok_repl_v";
 /// The host's `__rok_repl_out`: a cell's shown value.
 const SHOWN: &str = "__rok_repl_out";
-/// `repl_host.c` compiled (`build.rs`); empty where no host runs.
+/// `repl_host.c` compiled (`build.rs`, which sets `cfg(rok_repl_host)`);
+/// empty where no host runs.
 const HOST_OBJ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/repl_host.o"));
 
 const HELP: &str = "\
@@ -142,16 +142,104 @@ struct Binding {
     holds_any: bool,
 }
 
-/// The session host (`repl_host.c`) and its command socket.
+/// The session host (`repl_host.c`) and its command channel. Fields
+/// drop in order: the channel closes (the host's end of input), then
+/// the host is waited for.
 struct Host {
-    child: Child,
-    ctl: UnixStream,
+    ctl: Ctl,
+    _child: Reaped,
 }
 
-impl Drop for Host {
+struct Reaped(Child);
+
+impl Drop for Reaped {
     fn drop(&mut self) {
-        let _ = self.ctl.shutdown(std::net::Shutdown::Both);
-        let _ = self.child.wait();
+        let _ = self.0.wait();
+    }
+}
+
+/// The command channel: one stream both ways, the host's end its stdin.
+/// Unix: a socket pair. Windows: a named pipe this process creates and
+/// opens both ends of (the host reads and writes its stdin handle).
+#[cfg(unix)]
+type Ctl = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+type Ctl = std::fs::File;
+
+/// Our end of a new channel, and the host's as its stdin.
+#[cfg(unix)]
+fn channel() -> std::io::Result<(Ctl, Stdio)> {
+    let (ours, theirs) = Ctl::pair()?;
+    Ok((ours, Stdio::from(std::os::fd::OwnedFd::from(theirs))))
+}
+
+#[cfg(windows)]
+fn channel() -> std::io::Result<(Ctl, Stdio)> {
+    use std::os::windows::io::FromRawHandle;
+    unsafe extern "system" {
+        fn CreateNamedPipeW(
+            name: *const u16,
+            open_mode: u32,
+            pipe_mode: u32,
+            instances: u32,
+            out_size: u32,
+            in_size: u32,
+            timeout: u32,
+            security: *mut std::ffi::c_void,
+        ) -> *mut std::ffi::c_void;
+    }
+    const PIPE_ACCESS_DUPLEX: u32 = 0x3;
+    const FILE_FLAG_FIRST_PIPE_INSTANCE: u32 = 0x0008_0000;
+    const PIPE_REJECT_REMOTE_CLIENTS: u32 = 0x8;
+    static N: AtomicU32 = AtomicU32::new(0);
+    let name = format!(
+        r"\\.\pipe\rok-repl-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    );
+    let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+    // SAFETY: a NUL-terminated name; one byte-mode instance, ours.
+    let h = unsafe {
+        CreateNamedPipeW(
+            wide.as_ptr(),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            1 << 16,
+            1 << 16,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if h as isize == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: a handle just created and owned by nothing else.
+    let ours = unsafe { std::fs::File::from_raw_handle(h) };
+    let theirs = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(&name)?;
+    Ok((ours, Stdio::from(theirs)))
+}
+
+/// End the cell running in host process `pid` (the host's `pid` reply).
+///
+/// `SIGINT`; Windows: Ctrl-Break to its process group (the host runs in
+/// its own, `CREATE_NEW_PROCESS_GROUP`, and replies with its own pid).
+pub fn interrupt(pid: u32) {
+    #[cfg(unix)]
+    let _ = Command::new("kill")
+        .args(["-INT", &pid.to_string()])
+        .status();
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            fn GenerateConsoleCtrlEvent(event: u32, group: u32) -> i32;
+        }
+        const CTRL_BREAK_EVENT: u32 = 1;
+        // SAFETY: plain call; a gone group is an error return.
+        unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) };
     }
 }
 
@@ -302,11 +390,7 @@ impl Repl {
             _ if cell.starts_with(":type ") || cell.starts_with(":t ") => {
                 let expr = cell.split_once(' ').map_or("", |(_, e)| e).trim();
                 expr.clone_into(&mut self.input);
-                let src = self.session(&self.state, &format!("let {VALUE} = ({expr});"), None);
-                if let Some(ty) = self
-                    .compile(&src, false)
-                    .and_then(|r| binding_ty(&r, VALUE))
-                {
+                if let Some(ty) = self.type_of(expr, false) {
                     println!("{ty}");
                 }
             }
@@ -340,6 +424,14 @@ impl Repl {
                 r
             }
         }
+    }
+
+    /// The type of `expr` in the session, without running it; `quiet`
+    /// keeps its errors unreported.
+    pub fn type_of(&self, expr: &str, quiet: bool) -> Option<String> {
+        let src = self.session(&self.state, &format!("let {VALUE} = ({expr});"), None);
+        self.compile(&src, quiet)
+            .and_then(|r| binding_ty(&r, VALUE))
     }
 
     /// The names the session defines: bindings, then items.
@@ -1181,12 +1273,12 @@ fn localize(d: &RokDiagnostic, session: u32, path: &str, regions: &[Region]) -> 
 
 /// Build and start the session host.
 fn start_host(dir: &std::path::Path, opts: &BuildOptions) -> Option<Host> {
-    if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        eprintln!("error: the REPL runs on macOS arm64 only so far");
+    if !REPL_HOST {
+        eprintln!("error: the REPL runs on macOS and Linux (arm64, x86_64) only");
         return None;
     }
     let obj = dir.join("host.o");
-    let exe = dir.join("host");
+    let exe = dir.join(format!("host{}", std::env::consts::EXE_SUFFIX));
     if let Err(e) = std::fs::write(&obj, HOST_OBJ) {
         eprintln!("error: cannot write {}: {e}", obj.display());
         return None;
@@ -1195,18 +1287,26 @@ fn start_host(dir: &std::path::Path, opts: &BuildOptions) -> Option<Host> {
         report(&d);
         return None;
     }
-    let (ctl, theirs) = match UnixStream::pair() {
+    let (ctl, theirs) = match channel() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("error: cannot make the host socket: {e}");
+            eprintln!("error: cannot make the host channel: {e}");
             return None;
         }
     };
-    match Command::new(&exe)
-        .stdin(Stdio::from(OwnedFd::from(theirs)))
-        .spawn()
+    let mut cmd = Command::new(&exe);
+    cmd.stdin(theirs);
+    #[cfg(windows)]
     {
-        Ok(child) => Some(Host { child, ctl }),
+        // Its own group: `interrupt`'s Ctrl-Break reaches it alone.
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x200;
+        std::os::windows::process::CommandExt::creation_flags(&mut cmd, CREATE_NEW_PROCESS_GROUP);
+    }
+    match cmd.spawn() {
+        Ok(child) => Some(Host {
+            ctl,
+            _child: Reaped(child),
+        }),
         Err(e) => {
             eprintln!("error: cannot run {}: {e}", exe.display());
             None

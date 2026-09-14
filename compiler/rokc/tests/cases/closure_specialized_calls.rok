@@ -1,0 +1,52 @@
+// expect-exit: 0
+// expect-stdout:
+// 9 5 1
+// 1 5 9
+// 45 90 3
+// 12 21
+// 7
+
+// A call passing a function value whose code is known goes to a copy of
+// the callee with that code fixed: each call keeps its own closure, its
+// captures, and what reaches the copy through recursion or reassignment.
+fn apply(xs: List<i64>, f: fn(i64) -> i64) -> i64 {
+    let s: i64 = 0;
+    for x in xs {
+        s += f(x);
+    }
+    s
+}
+
+// Recursion hands the function value down.
+fn fold(n: i64, f: fn(i64, i64) -> i64, acc: i64) -> i64 {
+    if n == 0 {
+        return acc;
+    }
+    fold(n - 1, f, f(acc, n))
+}
+
+// The parameter is replaced before the call: no fixed code.
+fn rebind(f: fn(i64) -> i64, x: i64) -> i64 {
+    let g = f;
+    if x > 10 {
+        g = |y: i64| y + 1;
+    }
+    g(x)
+}
+
+fn twice(x: i64) -> i64 { x * 2 }
+
+fn main() -> i32 {
+    let v: List<i64> = [5, 9, 1];
+    let w = v.clone();
+    v.sort_by(|a: i64, b: i64| b.cmp(a));
+    w.sort_by(|a: i64, b: i64| a.cmp(b));
+    println(f"{v[0]} {v[1]} {v[2]}");
+    println(f"{w[0]} {w[1]} {w[2]}");
+    let k: i64 = 2;
+    let xs: List<i64> = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+    println(f"{apply(xs, |x: i64| x)} {apply(xs, |x: i64| x * k)} {fold(2, |a: i64, b: i64| a + b, 0)}");
+    println(f"{rebind(twice, 6)} {rebind(twice, 20)}");
+    println(f"{apply([1, 2], twice) + 1}");
+    return 0;
+}

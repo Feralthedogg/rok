@@ -1,0 +1,16 @@
+// spec: std 215-string §2.15.7
+// spec: std 207-iter §2.7.5
+// expect-exit: 0
+// expect-stdout:
+// héllo abcde x!y! abc
+
+// `str` implements both `FromIterator<char>` and `FromIterator<str>`;
+// `collect` picks the impl whose `I: IntoIterator<Item = ..>` holds.
+fn main() {
+    let a: str = "héllo".chars().collect();
+    let parts = ["ab", "cd", "e"];
+    let b: str = parts.iter().collect();
+    let c = ["x", "y"].iter().map(|s| s + "!").collect::<str>();
+    let d = "abc".chars().collect::<str>();
+    println(f"{a} {b} {c} {d}");
+}

@@ -1,0 +1,38 @@
+// expect-exit: 0
+// expect-stdout:
+// 0x4048f5c3 3.14
+// [0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64] 1 2 3
+// (1, 2) 1
+// 100 198
+
+// Stdlib 1.2.5 / 1.2.6 / 1.4.2: Pod, reinterpret between equal-size Pod
+// types (a derived #[repr(C)] struct too), transmute_unchecked, and the
+// RAII Allocation<T>.
+use rok::bare::{reinterpret, transmute_unchecked};
+use rok::bare::alloc::Allocation;
+
+#[derive(Pod)]
+#[repr(C)]
+struct Vec3 { x: f32; y: f32; z: f32; }
+
+fn main() {
+    let f: f32 = 3.14;
+    let bits: u32 = reinterpret(f);
+    let f2: f32 = reinterpret(bits);
+    println(f"{bits:#x} {f2}");
+    let v = Vec3 { x: 1.0, y: 2.0, z: 3.0 };
+    let bytes: [u8; 12] = reinterpret(v);
+    let v2: Vec3 = reinterpret(bytes);
+    println(f"{bytes:?} {v2.x} {v2.y} {v2.z}");
+    let pair: (u16, u16) = reinterpret(0x00020001u32);
+    println(f"{pair:?} {unsafe { transmute_unchecked::<i64, f64>(4607182418800017408) }}");
+    using buf = try! Allocation::<u32>::new(100) {
+        let p = buf.as_ptr();
+        unsafe {
+            for i in 0..100usize { p.add(i).write(i as u32 * 2); }
+            println(f"{buf.len()} {p.add(99).read()}");
+        }
+    }
+}
+
+// spec: std 102-cast §1.2.5

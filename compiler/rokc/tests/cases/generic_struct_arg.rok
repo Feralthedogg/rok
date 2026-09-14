@@ -1,4 +1,6 @@
 // expect-exit: 30
+// expect-stdout:
+// 12 24
 
 struct Box<T> {
     value: T;
@@ -10,6 +12,7 @@ fn double(b: Box<i32>) -> i32 {
 
 fn main() -> i32 {
     let b: Box<i32> = Box { value: 12 };
+    println(f"{b.value} {double(b)}");
     return double(b) + 6;
 }
 

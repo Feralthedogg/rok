@@ -1,4 +1,6 @@
 // expect-exit: 24
+// expect-stdout:
+// 5 10 4 10
 
 // Trait method with a body acts as a default — `impl Trait for Type`
 // blocks that don't override it pick up the default body specialized
@@ -33,6 +35,7 @@ fn main() -> i32 {
     let b = B { n: 2 };
     // a.greet() = 5, a.greet_loudly() = 5 * 2 = 10 (default body)
     // b.greet() = 4, b.greet_loudly() = 2 * 5 = 10 (override)
+    println(f"{a.greet()} {a.greet_loudly()} {b.greet()} {b.greet_loudly()}");
     return a.greet() + a.greet_loudly() + b.greet() + b.greet_loudly() - 5;
     // 5 + 10 + 4 + 10 - 5 = 24
 }

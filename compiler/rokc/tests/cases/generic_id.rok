@@ -1,4 +1,6 @@
 // expect-exit: 12
+// expect-stdout:
+// 5 7 hi 2.5
 
 fn id<T>(x: T) -> T {
     return x;
@@ -7,6 +9,7 @@ fn id<T>(x: T) -> T {
 fn main() -> i32 {
     let a = id(5);
     let b = id(7);
+    println(f"{a} {b} {id("hi")} {id(2.5)}");
     return a + b;
 }
 

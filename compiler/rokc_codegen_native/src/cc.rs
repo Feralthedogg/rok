@@ -294,17 +294,27 @@ pub enum Conv {
     Darwin64,
     /// AAPCS64 elsewhere.
     Aapcs64,
+    /// AAPCS64 on Windows: a C variadic call passes floats in integer
+    /// registers, fixed arguments too.
+    WinArm64,
     /// System V `x86_64` (Linux, macOS).
     SysV64,
+    /// Windows x64: four register positions shared by both classes (an
+    /// argument takes the next one, integer or float), then 8-byte stack
+    /// slots past the caller's 32-byte home area.
+    Win64,
 }
 
 impl Conv {
     #[must_use]
     pub fn of(t: &Target) -> Option<Self> {
+        let windows = t.os == "windows";
         match t.arch.as_str() {
             "aarch64" if matches!(t.os.as_str(), "macos" | "ios") => Some(Self::Darwin64),
+            "aarch64" if windows => Some(Self::WinArm64),
             "aarch64" => Some(Self::Aapcs64),
-            "x86_64" if t.os != "windows" => Some(Self::SysV64),
+            "x86_64" if windows => Some(Self::Win64),
+            "x86_64" => Some(Self::SysV64),
             _ => None,
         }
     }
@@ -313,6 +323,7 @@ impl Conv {
     const fn arg_regs(self) -> (u8, u8) {
         match self {
             Self::SysV64 => (6, 8),
+            Self::Win64 => (4, 4),
             _ => (8, 8),
         }
     }
@@ -321,9 +332,13 @@ impl Conv {
     /// `xmm0 xmm1` then the x87 `st0 st1`, as LLVM returns them).
     const fn ret_regs(self) -> (usize, usize) {
         match self {
-            Self::SysV64 => (3, 4),
+            Self::SysV64 | Self::Win64 => (3, 4),
             _ => (8, 8),
         }
+    }
+
+    const fn x86(self) -> bool {
+        matches!(self, Self::SysV64 | Self::Win64)
     }
 }
 
@@ -373,9 +388,34 @@ pub fn assign(
     };
     let (gpr, fpr) = conv.arg_regs();
     // `x86_64`: the hidden result pointer is the first integer argument.
-    let mut ngrn = u8::from(conv == Conv::SysV64 && ret.is_none());
-    let (mut nsrn, mut stack) = (0u8, 0u32);
+    let mut ngrn = u8::from(conv.x86() && ret.is_none());
+    let win64 = conv == Conv::Win64;
+    let (mut nsrn, mut stack) = (0u8, if win64 { 32u32 } else { 0 });
     let darwin = conv == Conv::Darwin64;
+    let as_ints: Vec<Shape>;
+    let params = if conv == Conv::WinArm64 && variadic_from.is_some() {
+        as_ints = params
+            .iter()
+            .map(|p| Shape {
+                leaves: p
+                    .leaves
+                    .iter()
+                    .map(|l| Leaf {
+                        k: match l.k {
+                            K::F64 => K::I64,
+                            K::F32 => K::I32,
+                            k => k,
+                        },
+                        ..*l
+                    })
+                    .collect(),
+                ..p.clone()
+            })
+            .collect();
+        &as_ints
+    } else {
+        params
+    };
     // Apple packs a stack argument at its own size, an aggregate's
     // narrow leaves at 4 bytes.
     let packed = |k: K, agg: bool| match (darwin, agg) {
@@ -414,14 +454,14 @@ pub fn assign(
         }
         // AArch64: an array of one kind takes consecutive registers, or
         // the stack (and no more registers of its class).
-        let block_k =
-            p.leaves.first().map(|l| l.k).filter(|k| {
-                conv != Conv::SysV64 && p.array && matches!(k, K::I64 | K::F32 | K::F64)
-            });
+        let block_k = p
+            .leaves
+            .first()
+            .map(|l| l.k)
+            .filter(|k| !conv.x86() && p.array && matches!(k, K::I64 | K::F32 | K::F64));
         if let Some(k) = block_k {
-            let n = p.leaves.len() as u8;
             let next = if k.is_float() { &mut nsrn } else { &mut ngrn };
-            if *next + n <= 8 {
+            if usize::from(*next) + p.leaves.len() <= 8 {
                 for l in &p.leaves {
                     let loc = if k.is_float() {
                         Loc::Fp(*next)
@@ -448,7 +488,18 @@ pub fn assign(
             continue;
         }
         for l in &p.leaves {
-            let loc = if l.k.is_float() && nsrn < fpr {
+            let loc = if win64 && ngrn < gpr {
+                // `ngrn` is the register position, of either class.
+                ngrn += 1;
+                if l.k.is_float() {
+                    Loc::Fp(ngrn - 1)
+                } else {
+                    Loc::Int(ngrn - 1)
+                }
+            } else if win64 {
+                stack += 8;
+                Loc::Stack(stack - 8)
+            } else if l.k.is_float() && nsrn < fpr {
                 nsrn += 1;
                 Loc::Fp(nsrn - 1)
             } else if !l.k.is_float() && ngrn < gpr {
@@ -538,5 +589,55 @@ mod tests {
                 .ret
                 .is_none()
         );
+    }
+
+    /// Checked against `llc -mtriple=x86_64-pc-windows-msvc`: `g({ptr,
+    /// i64}, double, {ptr, i64}, i32)` takes `rcx rdx xmm2 r9`, then
+    /// `[rsp + 32]`, `[rsp + 40]`; four `i64` come back through `sret`
+    /// (in `rcx`, so the arguments start at the second position).
+    #[test]
+    fn win64_matches_llvm() {
+        let t = Target::new(Some("x86_64-pc-windows-msvc"));
+        let s = |ty: &MirTy| shape(ty, &t);
+        let str_ = s(&MirTy::Prim(PrimTy::Str));
+        let ps = [
+            str_.clone(),
+            s(&MirTy::Prim(PrimTy::F64)),
+            str_,
+            s(&MirTy::Prim(PrimTy::I32)),
+        ];
+        let l = assign(Conv::Win64, &ps, None, false, None);
+        let at: Vec<Loc> = l.params.iter().flatten().map(|p| p.loc).collect();
+        assert_eq!(
+            at,
+            [
+                Loc::Int(0),
+                Loc::Int(1),
+                Loc::Fp(2),
+                Loc::Int(3),
+                Loc::Stack(32),
+                Loc::Stack(40)
+            ]
+        );
+        let r4 = s(&MirTy::Tuple(vec![MirTy::Prim(PrimTy::I64); 4]));
+        let l = assign(Conv::Win64, &ps[1..2], Some(&r4), false, None);
+        assert!(l.ret.is_none());
+        assert_eq!(l.params[0][0].loc, Loc::Fp(1));
+    }
+
+    /// Windows arm64: a C variadic call passes every float in an integer
+    /// register (`CC_AArch64_Win64_VarArg`).
+    #[test]
+    fn win_arm64_variadic_floats_in_integer_registers() {
+        let t = Target::new(Some("aarch64-pc-windows-msvc"));
+        let ps = [
+            shape(&MirTy::Prim(PrimTy::F64), &t),
+            shape(&MirTy::Prim(PrimTy::F64), &t),
+        ];
+        let l = assign(Conv::WinArm64, &ps, None, false, Some(1));
+        let at: Vec<(Loc, K)> = l.params.iter().flatten().map(|p| (p.loc, p.k)).collect();
+        assert_eq!(at, [(Loc::Int(0), K::I64), (Loc::Int(1), K::I64)]);
+        let l = assign(Conv::WinArm64, &ps, None, false, None);
+        assert_eq!(l.params[1][0].loc, Loc::Fp(1));
     }
 }

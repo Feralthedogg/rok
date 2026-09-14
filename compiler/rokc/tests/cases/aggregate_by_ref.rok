@@ -1,0 +1,88 @@
+// expect-exit: 0
+// expect-stdout:
+// 130816 0
+// 7 511
+// 1 2 3 99
+// 36 9
+// 4950 100
+// 527
+
+// Aggregates over 64 bytes go to and from a function only its module
+// calls directly by address (other calls keep spec 8.6.6: values): a
+// copy for the callee, the result through the caller's memory. The
+// semantics stay those of values.
+struct Big { a: [i64; 8]; tag: i64; }
+
+fn sum(a: [i64; 512]) -> i64 {
+    let s: i64 = 0;
+    for i in 0..512 {
+        s += a[i];
+    }
+    s
+}
+
+// The parameter is the callee's own copy.
+fn clobber(a: [i64; 512]) -> i64 {
+    a[0] = 7;
+    a[0]
+}
+
+fn iota() -> [i64; 512] {
+    let a: [i64; 512] = [0; 512];
+    for i in 0..512 {
+        a[i] = i as i64;
+    }
+    a
+}
+
+fn swap_ends(b: Big) -> Big {
+    let r = b;
+    r.a[0] = b.a[7];
+    r.a[7] = b.a[0];
+    r.tag = b.tag + 1;
+    r
+}
+
+// Recursion keeps the calls out of line.
+fn depth(b: Big, n: i64) -> Big {
+    if n == 0 {
+        return b;
+    }
+    let c = depth(b, n - 1);
+    c.tag += 1;
+    c
+}
+
+static TABLE: [i64; 100] = make_table();
+
+fn make_table() -> [i64; 100] {
+    let t: [i64; 100] = [0; 100];
+    for i in 0..100 {
+        t[i] = i as i64;
+    }
+    t
+}
+
+fn main() -> i32 {
+    let a = iota();
+    let z: [i64; 512] = [0; 512];
+    println(f"{sum(a)} {sum(z)}");
+    println(f"{clobber(a)} {a[511]}");
+    let b = Big { a: [1, 2, 3, 4, 5, 6, 7, 99], tag: 0 };
+    let s = swap_ends(b);
+    println(f"{b.a[0]} {b.a[1]} {b.a[2]} {s.a[0]}");
+    let f = |x: Big| -> Big { depth(x, 9) };
+    let d = f(b);
+    let total: i64 = 0;
+    for i in 0..8 {
+        total += d.a[i];
+    }
+    println(f"{total - 91} {d.tag}");
+    let t: i64 = 0;
+    for i in 0..100 {
+        t += TABLE[i];
+    }
+    println(f"{t} {TABLE.len()}");
+    println(f"{sum(a) / 248 + a[0] + clobber(z) - 7}");
+    return 0;
+}

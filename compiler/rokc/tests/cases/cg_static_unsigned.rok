@@ -1,5 +1,10 @@
 // expect-exit: 5
+// expect-stdout:
+// 5
 
 static X: u32 = 5u32;
 
-fn main() -> i32 { return X as i32; }
+fn main() -> i32 {
+    println(f"{X}");
+    return X as i32;
+}

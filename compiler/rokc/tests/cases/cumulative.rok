@@ -1,4 +1,6 @@
 // expect-exit: 60
+// expect-stdout:
+// [1, 3, 6, 10, 15]
 
 fn main() -> i32 {
     let xs: [i32; 5] = [1, 2, 3, 4, 5];
@@ -10,6 +12,7 @@ fn main() -> i32 {
         prefix[i] = acc;
         i += 1;
     }
+    println(f"{prefix:?}");
     let total = 0;
     for v in prefix {
         total += v;

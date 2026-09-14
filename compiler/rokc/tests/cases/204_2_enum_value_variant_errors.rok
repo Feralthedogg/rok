@@ -2,7 +2,7 @@
 // expect-error: mixes value variants
 // expect-error: have the same value 1
 // expect-error: does not fit the tag type `u8`
-// expect-error: is not a const integer expression
+// expect-error: the value of `NotConst::A` is not a const integer: calls `f`, which is not a `const fn`
 
 enum Mixed { A = 1, B }
 

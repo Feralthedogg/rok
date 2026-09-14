@@ -1,4 +1,7 @@
 // expect-exit: 11
+// expect-stdout:
+// true false true false true false
+// true
 
 fn is_even(n: i32) -> bool {
     if n == 0 {
@@ -15,6 +18,8 @@ fn is_odd(n: i32) -> bool {
 }
 
 fn main() -> i32 {
+    println(f"{is_even(0)} {is_even(1)} {is_even(2)} {is_even(3)} {is_even(4)} {is_even(5)}");
+    println(f"{is_odd(7)}");
     let total = 0;
     for i in 0..6 {
         if is_even(i) {

@@ -1,4 +1,6 @@
 // expect-exit: 42
+// expect-stdout:
+// -1 0 14 30 999
 
 // Labeled block: early exit with a value via `break 'label value;`.
 fn classify(n: i32) -> i32 {
@@ -16,5 +18,6 @@ fn main() -> i32 {
     total += classify(0);    // 0
     total += classify(7);    // 14
     total += classify(15);   // 30
+    println(f"{classify(-5)} {classify(0)} {classify(7)} {classify(15)} {classify(101)}");
     return total - 1;        // (-1 + 0 + 14 + 30) - 1 = 42
 }

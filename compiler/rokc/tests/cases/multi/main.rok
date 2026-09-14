@@ -1,7 +1,10 @@
 // expect-exit: 30
+// expect-stdout:
+// 3 30
 
 mod helper;
 
 fn main() -> i32 {
+    println(f"{helper::triple(1)} {helper::triple(10)}");
     return helper::triple(10i32);
 }

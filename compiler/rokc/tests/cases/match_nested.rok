@@ -1,4 +1,6 @@
 // expect-exit: 13
+// expect-stdout:
+// 4 1 8 0 12
 
 struct Pair {
     a: i32;
@@ -19,6 +21,7 @@ fn main() -> i32 {
         + classify(Pair { a: 1, b: 0 })
         + classify(Pair { a: 3, b: 0 })
         + classify(Pair { a: 0, b: 0 });
+    println(f"{classify(Pair { a: 0, b: 4 })} {classify(Pair { a: 1, b: 0 })} {classify(Pair { a: 3, b: 0 })} {classify(Pair { a: 0, b: 0 })} {classify(Pair { a: 3, b: 4 })}");
     return s;
 }
 

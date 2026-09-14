@@ -92,6 +92,14 @@ fn rewrite_fn(f: &mut FnDef, free: bool, diags: &mut Vec<RokDiagnostic>) {
         kind: TyKind::Tuple(Vec::new()),
         span,
     };
+    // Spec 4.1.3: an `async fn` without `-> T` takes its result type
+    // from the body (HIR infers the fn's return type from the block).
+    let infer = f.ret_ty.is_none()
+        && f.is_async
+        && !f.is_generator
+        && body.is_some()
+        && matches!(f.throws, ThrowsKind::None)
+        && !(free && f.name == "main");
     let val =
         match f.ret_ty.take() {
             Some(t) => t,
@@ -197,7 +205,7 @@ fn rewrite_fn(f: &mut FnDef, free: bool, diags: &mut Vec<RokDiagnostic>) {
     };
     let mut args = vec![val];
     args.extend(err);
-    f.ret_ty = Some(Ty {
+    f.ret_ty = (!infer).then(|| Ty {
         kind: TyKind::Path(path(&["rok", "core", module, name], args, span)),
         span,
     });

@@ -12,6 +12,7 @@ pub mod floats;
 pub mod bigint;
 pub mod bigfloat;
 pub mod niche;
+pub mod assign;
 
 /// The additive identity — where `Iterator::sum` starts (an empty sum is
 /// `0`).

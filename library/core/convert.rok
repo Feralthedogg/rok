@@ -132,8 +132,18 @@ impl From<i32> for f64 {
     fn from(value: i32) -> f64 { value as f64 }
 }
 
+#[cfg(target_pointer_width = "64")]
 impl From<i64> for isize {
     fn from(value: i64) -> isize { value as isize }
+}
+
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<i64> for isize {
+    type Error = OverflowError;
+    fn try_from(value: i64) throws (OverflowError) -> isize {
+        if value < isize::MIN as i64 || value > isize::MAX as i64 { throw overflow("isize"); }
+        value as isize
+    }
 }
 
 impl From<isize> for i64 {
@@ -200,8 +210,18 @@ impl From<u32> for i64 {
     fn from(value: u32) -> i64 { value as i64 }
 }
 
+#[cfg(target_pointer_width = "64")]
 impl From<u64> for usize {
     fn from(value: u64) -> usize { value as usize }
+}
+
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<u64> for usize {
+    type Error = OverflowError;
+    fn try_from(value: u64) throws (OverflowError) -> usize {
+        if value > usize::MAX as u64 { throw overflow("usize"); }
+        value as usize
+    }
 }
 
 impl From<usize> for u64 {

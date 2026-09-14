@@ -1,0 +1,29 @@
+// spec: 007.02-allocation §7.2.10 / 008.08-lowering-types §8.8.1
+// gc-stress: 50
+// expect-exit: 0
+// expect-stdout:
+// 11 3 5
+// llo w
+
+// spec 7.2.10 / 8.8.1: a `str` passed to C needs a NUL after its bytes;
+// a slice has none, so it goes as a pinned copy that the collector does
+// not move while C reads it.
+extern "C" {
+    fn strlen(s: str) -> usize;
+    fn rok_gc_collect();
+}
+
+fn main() -> i32 {
+    let s = f"hello {"world"}";
+    let mid = s[2:7];
+    let i = 0;
+    while i < 200 {
+        let junk = f"junk {i}";
+        if junk.len() == 0 { return 1; }
+        i += 1;
+    }
+    unsafe { rok_gc_collect(); }
+    println(f"{unsafe { strlen(s) }} {unsafe { strlen(s[0:3]) }} {unsafe { strlen(mid) }}");
+    println(mid);
+    return 0;
+}

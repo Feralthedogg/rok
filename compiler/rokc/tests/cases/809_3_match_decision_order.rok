@@ -1,0 +1,30 @@
+// spec: 008.09-lowering-control §8.9.3
+// expect-exit: 0
+// expect-stdout:
+// (0, 0) origin
+// (0, 5) y-axis
+// (3, 3) diagonal
+// (4, -1) quadrant 4
+// (9, 9) far
+// guards evaluated: 6
+
+// spec 8.9.3: a match tests arms in order; a guard is evaluated only
+// when its pattern matched, and the first arm whose pattern and guard
+// both hold wins.
+fn main() -> i32 {
+    let guards = 0;
+    let pts = [(0, 0), (0, 5), (3, 3), (4, -1), (9, 9)];
+    for p in pts {
+        let what = match p {
+            (0, 0) => "origin",
+            (0, _) => "y-axis",
+            (x, y) if { guards += 1; x > 5 } => "far",
+            (x, y) if { guards += 1; x == y } => "diagonal",
+            (_, y) if { guards += 1; y < 0 } => "quadrant 4",
+            _ => "other",
+        };
+        println(f"({p.0}, {p.1}) {what}");
+    }
+    println(f"guards evaluated: {guards}");
+    return 0;
+}

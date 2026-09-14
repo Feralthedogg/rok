@@ -1,4 +1,7 @@
 // expect-exit: 46
+// expect-stdout:
+// 5 6 30
+// 3 true 2 7
 
 // Generic struct literals infer their type arguments from the field
 // values (`Box { v: 5 }` → `Box<i32>`), or take them from the expected
@@ -16,6 +19,8 @@ fn main() -> i32 {
     let c: Box<i64> = Box { v: 30 };   // expected type: literal is i64
     let t = make_tagged(3, true);
     let u = make_tagged(2, 7);
+    println(f"{a.v} {b.v} {c.v}");
+    println(f"{t.label} {t.value} {u.label} {u.value}");
     if t.value {
         return a.v + (b.v as i32) + (c.v as i32) + t.label + u.label;
     }

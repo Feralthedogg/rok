@@ -1,5 +1,11 @@
 // spec: 004.06.4-for-loop-per-iteration-capture
 // expect-exit: 10
+// expect-stdout:
+// 0 0
+// 1 1
+// 2 3
+// 3 6
+// 4 10
 
 // A value capture in a for loop snapshots each iteration (no special
 // per-iteration rule needed). 0 + 1 + 2 + 3 + 4 = 10.
@@ -8,6 +14,7 @@ fn main() -> i32 {
     for j in 0..5 {
         let f = || { j };
         total = total + f();
+        println(f"{j} {total}");
     }
     return total;
 }

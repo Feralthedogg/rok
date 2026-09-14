@@ -1,4 +1,6 @@
 // expect-exit: 12
+// expect-stdout:
+// true false true false
 
 extern "C" {
     fn strcmp(a: str, b: str) -> i32;
@@ -9,6 +11,7 @@ fn equal(a: str, b: str) -> bool {
 }
 
 fn main() -> i32 {
+    println(f"{equal("hello", "hello")} {equal("foo", "bar")} {equal("rok", "rok")} {equal("rok", "ro")}");
     let total = 0;
     if equal("hello", "hello") {
         total += 5;

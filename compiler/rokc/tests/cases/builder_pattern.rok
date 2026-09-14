@@ -1,4 +1,6 @@
 // expect-exit: 26
+// expect-stdout:
+// 10 3 1 13 26
 
 struct Builder {
     base: i32;
@@ -29,5 +31,7 @@ impl Builder {
 }
 
 fn main() -> i32 {
+    let b = Builder::new().with_base(10).with_add(3);
+    println(f"{b.base} {b.add} {b.mul} {b.build()} {b.with_mul(2).build()}");
     Builder::new().with_base(10).with_add(3).with_mul(2).build()
 }

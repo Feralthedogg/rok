@@ -1,8 +1,10 @@
 // expect-exit: 27
+// expect-stdout:
+// 27 at 4
+// 12 at 2
+// -1 at 5
 
-fn main() -> i32 {
-    let xs: [i32; 5] = [3, 7, 12, 20, 27];
-    let target = 27;
+fn find(xs: [i32; 5], target: i32) -> (i32, i32) {
     let i = 0;
     let result = loop {
         if i >= 5 {
@@ -13,6 +15,16 @@ fn main() -> i32 {
         }
         i += 1;
     };
+    (result, i)
+}
+
+fn main() -> i32 {
+    let xs: [i32; 5] = [3, 7, 12, 20, 27];
+    for t in [27, 12, 5] {
+        let (r, at) = find(xs, t);
+        println(f"{r} at {at}");
+    }
+    let (result, _) = find(xs, 27);
     return result;
 }
 

@@ -308,7 +308,7 @@ pub fn entry_for(dir: &Path, m: &Manifest) -> Result<Entry, String> {
         }
     }
     let top = git::run(dir, &["rev-parse", "--show-toplevel"])?;
-    let same = std::fs::canonicalize(&top).ok() == std::fs::canonicalize(dir).ok();
+    let same = rokc_core::real_path(&top).ok() == rokc_core::real_path(dir).ok();
     if !same {
         return Err(format!(
             "the package must be at the root of its git repository ({top})"

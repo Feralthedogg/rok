@@ -1,4 +1,6 @@
 // expect-exit: 9
+// expect-stdout:
+// 7 2 7 none
 
 fn pick(present: bool) -> i32 | none {
     if present {
@@ -12,6 +14,7 @@ fn main() -> i32 {
     let b: i32 | none = pick(false);
     let x = a ?? -1i32;
     let y = b ?? 2i32;
+    println(f"{x} {y} {a:?} {b:?}");
     return x + y;
 }
 

@@ -1,4 +1,8 @@
 // expect-exit: 9
+// expect-stdout:
+// i 1 j 0
+// i 3 j 0
+// 4 5
 
 // `continue 'outer` skips the rest of the inner loop AND advances the
 // outer loop. Sums i for i in 1..=4 only when i is odd (1+3 = 4),
@@ -16,8 +20,10 @@ fn main() -> i32 {
         loop {
             if j == 1 { break; }
             total += i;       // adds i once per odd
+            println(f"i {i} j {j}");
             j += 1;
         }
     }
+    println(f"{total} {i}");
     return total + 5;
 }

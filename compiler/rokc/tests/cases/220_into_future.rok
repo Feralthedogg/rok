@@ -1,0 +1,19 @@
+// spec: std 200-core/220-future §2.20.5
+// expect-exit: 0
+// expect-stdout:
+// handle 7
+// thread 12
+
+// 2.20.5: `await` goes through `IntoFuture`: a `Future` (a `Task`) is
+// its own future, and a thread's `JoinHandle` is awaited in the blocking
+// pool.
+use rok::std::thread;
+
+async fn seven() -> i32 { 7 }
+
+async fn main() {
+    let t = task::spawn(seven());
+    println(f"handle {await t}");
+    let h = thread::spawn(|| 3 * 4);
+    println(f"thread {await h}");
+}

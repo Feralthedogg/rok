@@ -1,4 +1,6 @@
 // expect-exit: 28
+// expect-stdout:
+// 9 13
 
 fn main() -> i32 {
     let base = 5;
@@ -8,5 +10,6 @@ fn main() -> i32 {
         inner(x)
     };
     let r = outer(3) + outer(7);
+    println(f"{outer(3)} {outer(7)}");
     return r + 6;
 }

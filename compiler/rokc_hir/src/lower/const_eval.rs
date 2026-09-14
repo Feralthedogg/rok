@@ -1158,7 +1158,7 @@ impl Bodies for CtxBodies<'_, '_> {
             }
             (f, origin.is_some_and(|(_, std)| std))
         } else if let Some(decl) = env.decls.get(id.0 as usize) {
-            let (MethodOrFn::Fn(def) | MethodOrFn::Method { fn_def: def, .. }) = decl;
+            let def = decl.def();
             if env.extern_fn_ids.contains(&id) || env.rok_externs.contains(&id) {
                 return Callee::Extern(def.name.clone());
             }
@@ -1299,7 +1299,7 @@ fn is_const_fn(ctx: &LowerCtx<'_>, id: FunctionId) -> bool {
         return is_const;
     }
     env.decls.get(id.0 as usize).is_some_and(|d| {
-        let (MethodOrFn::Fn(def) | MethodOrFn::Method { fn_def: def, .. }) = d;
+        let def = d.def();
         def.attrs
             .iter()
             .any(|a| a.path == [rokc_ast::CONST_FN_ATTR])
@@ -1426,6 +1426,15 @@ pub(super) fn static_init(env: &Env<'_>, init_fn: &HirFunction) -> Option<ConstV
 /// Pre-pass integer constant (item signatures, before any body is
 /// lowered): literals, names `lookup` knows, unary `-` and `+ - * / %
 /// << >> & | ^` over them, as `i64` on the same evaluator.
+/// `a::b::C` as written.
+fn path_text(p: &rokc_ast::Path) -> String {
+    p.segments
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
 pub fn syntactic_int(
     c: &rokc_ast::ConstExpr,
     lookup: &dyn Fn(&str) -> Option<i128>,
@@ -1434,9 +1443,7 @@ pub fn syntactic_int(
         let int = |v: i128| hir_int(v, PrimTy::I64, e.span);
         let kind = match &e.kind {
             ExprKind::Literal(AstLit::Int(s)) => return parse_int_literal(s).map(|(v, _)| int(v)),
-            ExprKind::Path(p) if p.segments.len() == 1 => {
-                return lookup(&p.segments[0].name).map(int);
-            }
+            ExprKind::Path(p) => return lookup(&path_text(p)).map(int),
             ExprKind::OpPrefix { op, operand } if op == "-" => HirExprKind::PrimUnaryOp {
                 op: PrimOp::Neg,
                 operand: Box::new(lower(operand, lookup)?),
@@ -1470,10 +1477,8 @@ pub fn syntactic_int(
         rokc_ast::ConstExpr::Literal(AstLit::Int(s)) => {
             return parse_int_literal(s).map(|(v, _)| v);
         }
-        rokc_ast::ConstExpr::Path(p) if p.segments.len() == 1 => {
-            return lookup(&p.segments[0].name);
-        }
-        rokc_ast::ConstExpr::Literal(_) | rokc_ast::ConstExpr::Path(_) => return None,
+        rokc_ast::ConstExpr::Path(p) => return lookup(&path_text(p)),
+        rokc_ast::ConstExpr::Literal(_) => return None,
         rokc_ast::ConstExpr::Expr(e) => lower(e, lookup)?,
     };
     match Interp::new(&mut NoBodies).eval(&h) {

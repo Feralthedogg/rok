@@ -1,0 +1,11 @@
+// expect-error: `#[no_safepoint]` is for `extern "rok"` blocks
+
+// The runtime-only marker on a C block.
+#[no_safepoint]
+extern "C" {
+    fn abs(x: i32) -> i32;
+}
+
+fn main() -> i32 {
+    unsafe { abs(-1) }
+}

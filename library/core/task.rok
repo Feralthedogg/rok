@@ -28,6 +28,17 @@
 // I/O (707): a driver thread blocks in kqueue / epoll and unparks the
 // tasks waiting on a ready fd (`readable` / `writable`).
 //
+// Blocking calls (706 §7.6.7): every pool thread runs a runtime lane
+// (`rok_lane_*`), armed while it polls a task, that the runtime marks
+// blocked for the duration of each blocking call (file / socket /
+// process syscalls, sync locks, sleep, join). A monitor thread scans the lanes once a millisecond; a lane
+// blocked across a whole scan loses its worker: a new thread takes the
+// worker over (its queues, sleep word and place in the pool), and the
+// blocked thread, once its call returns, finishes its poll as an orphan
+// guest and exits when its own `spawn_local` tasks are done. A worker
+// with live `spawn_local` tasks is never handed on (they must stay on
+// its thread). The monitor sleeps while no lane blocks.
+//
 // Cancellation (2.18.4, 707 §7.7.10): `Task::cancel` sets the flag and
 // wakes the task; every `await` checks it (`cancel_requested`) on entry
 // and after each resume, and leaves the coroutine body like a `return`,
@@ -163,6 +174,7 @@ fn finish(t: TaskRef) {
         let pool = executor();
         pool.wake_helpers();
         if let h: Worker = t.home[0] {
+            atomic_add(h.locals, 0, -1, SeqCst);
             wake_worker(h);
         }
     }
@@ -253,10 +265,26 @@ pub struct Worker {
     running: GcBuf<TaskRef | none>;
     /// xorshift state: where its steals start (spec 7.6.4).
     seed: GcBuf<u64>;
+    /// A pool thread's runtime lane (`rok_lane_new`), replaced when the
+    /// worker moves to a new thread.
+    lane: GcBuf<usize>;
+    /// The lane tick the monitor saw blocked at its last scan (-1: none).
+    seen: GcBuf<i64>;
+    /// Its live `spawn_local` tasks (atomic).
+    locals: GcBuf<i32>;
+    /// A guest left to a thread whose worker was handed on: it exits once
+    /// it has no local tasks.
+    orphan: bool;
 }
 
-fn new_worker(pool: Pool, index: usize, guest: bool) -> Worker {
+fn new_worker(pool: Pool, index: usize, guest: bool, orphan: bool) -> Worker {
     unsafe {
+        let lane: GcBuf<usize> = buf_new(1);
+        if !guest {
+            lane[0] = rok_lane_new();
+        }
+        let seen: GcBuf<i64> = buf_new(1);
+        seen[0] = -1;
         Worker {
             pool,
             index,
@@ -267,6 +295,10 @@ fn new_worker(pool: Pool, index: usize, guest: bool) -> Worker {
             sleep: buf_new(1),
             running: buf_new(1),
             seed: seed_new(index),
+            lane,
+            seen,
+            locals: buf_new(1),
+            orphan,
         }
     }
 }
@@ -323,21 +355,18 @@ impl Pool {
             };
             let n = rok_cpu_count();
             for i in 0..n {
-                pool.workers.push(new_worker(pool, i, false));
+                pool.workers.push(new_worker(pool, i, false, false));
             }
             rok_task_hooks_install(hook_io, hook_timer, hook_park, hook_unpark);
             for w in pool.workers {
-                let me = w;
-                let body: fn() + Send = || {
-                    set_current(me);
-                    work(me, none);
-                };
-                let h = unsafe { rok_thread_spawn(body, 0, rok_thread_new_id()) };
-                if h == 0 {
-                    panic("task executor: cannot start a worker thread");
-                }
-                unsafe { rok_thread_detach(h) };
+                start_worker(w);
             }
+            let watch: fn() + Send = || { monitor(pool); };
+            let h = rok_thread_spawn(watch, 0, rok_thread_new_id());
+            if h == 0 {
+                panic("task executor: cannot start the monitor thread");
+            }
+            rok_thread_detach(h);
             pool
         }
     }
@@ -365,6 +394,67 @@ impl Pool {
         if atomic_load(self.signal, HELPERS, SeqCst) > 0 {
             unsafe { rok_sync_wake(self.signal, EPOCH) };
         }
+    }
+}
+
+/// Run pool worker `w` on a new thread, on its current lane.
+fn start_worker(w: Worker) {
+    unsafe {
+        let lane = w.lane[0];
+        let body: fn() + Send = || {
+            rok_lane_attach(lane);
+            set_current(w);
+            work(w, none);
+        };
+        let h = rok_thread_spawn(body, 0, rok_thread_new_id());
+        if h == 0 {
+            panic("task executor: cannot start a worker thread");
+        }
+        rok_thread_detach(h);
+    }
+}
+
+/// The monitor (706 §7.6.7): a worker whose lane stays blocked across a
+/// scan goes to a new thread. Scans every tick while some lane blocks;
+/// after 20 quiet ones it sleeps until a lane blocks.
+fn monitor(pool: Pool) {
+    unsafe {
+        let quiet = 0;
+        loop {
+            let any = false;
+            for w in pool.workers {
+                let tick = rok_lane_blocked(w.lane[0]);
+                if tick >= 0 {
+                    any = true;
+                    if tick == w.seen[0] && atomic_load(w.locals, 0, SeqCst) == 0 {
+                        hand_on(w, tick);
+                        w.seen[0] = -1;
+                        continue;
+                    }
+                }
+                w.seen[0] = tick;
+            }
+            quiet = if any { 0 } else { quiet + 1 };
+            rok_lane_pause(if quiet >= 20 { 1 } else { 0 });
+        }
+    }
+}
+
+/// Move pool worker `w`, blocked in the call of `tick`, to a new thread;
+/// its old thread gets an orphan guest polling the same task.
+fn hand_on(w: Worker, tick: i64) {
+    unsafe {
+        let heir = new_worker(w.pool, 0, true, true);
+        // Stable: the blocked thread is inside that task's poll.
+        heir.running[0] = w.running[0];
+        let cell: GcBuf<Worker> = buf_new(1);
+        cell[0] = heir;
+        if rok_lane_take(w.lane[0], tick, cell) == 0 {
+            return;
+        }
+        w.lane[0] = rok_lane_new();
+        w.running[0] = none;
+        start_worker(w);
     }
 }
 
@@ -462,8 +552,8 @@ fn find_task(w: Worker) -> TaskRef | none {
     none
 }
 
-/// Poll `t` on `w`.
-fn run(t: TaskRef, w: Worker) {
+/// Poll `t` on this thread's worker.
+fn run(t: TaskRef) {
     unsafe {
         if atomic_cas(t.state, 0, SCHEDULED, RUNNING, SeqCst, SeqCst) != SCHEDULED {
             return;
@@ -476,11 +566,16 @@ fn run(t: TaskRef, w: Worker) {
         let cancelled = is_cancelled(t);
         let poll = t.poll[0];
         let ctx = Context::from_waker(Waker { task: t });
-        // `help_until` runs tasks inside a task's poll: restore the outer one.
+        // `help_until` runs tasks inside a task's poll: restore the outer
+        // one, on the orphan if the worker was handed on meanwhile.
+        let w = current_worker();
         let outer = w.running[0];
         w.running[0] = t;
+        // Blocking calls of the poll may hand the worker on (706 §7.6.7).
+        let armed = rok_lane_arm(1);
         let ready = poll(ctx);
-        w.running[0] = outer;
+        rok_lane_arm(armed);
+        current_worker().running[0] = outer;
         if ready || cancelled {
             if !ready {
                 // Ended without a result (no cancellation point reached).
@@ -608,18 +703,24 @@ fn remove_timers(t: TaskRef) {
     }
 }
 
-/// Run tasks on `w` until `main` is done (`none`: forever).
+/// Run tasks on `w` until `main` is done (`none`: forever, or for an
+/// orphan until its local tasks are).
 fn work(w: Worker, main: TaskRef | none) {
     let pool = w.pool;
     let ran: i64 = 0;
     loop {
+        // Handed on during a poll: go on as the orphan.
+        w = current_worker();
+        if w.orphan && atomic_load(w.locals, 0, SeqCst) == 0 {
+            return;
+        }
         if let m: TaskRef = main {
             if is_done(m) {
                 return;
             }
         }
         if let t: TaskRef = find_task(w) {
-            run(t, w);
+            run(t);
             ran = timers_while_busy(pool, ran);
             continue;
         }
@@ -639,7 +740,7 @@ fn work(w: Worker, main: TaskRef | none) {
         }
         atomic_add(pool.signal, SEARCHING, -1, SeqCst);
         if let t: TaskRef = found {
-            run(t, w);
+            run(t);
             continue;
         }
         // Raise the sleep flag, look once more (a push after this sees
@@ -647,7 +748,7 @@ fn work(w: Worker, main: TaskRef | none) {
         atomic_xchg(w.sleep, 0, 1, SeqCst);
         if let t: TaskRef = find_task(w) {
             atomic_xchg(w.sleep, 0, 0, SeqCst);
-            run(t, w);
+            run(t);
             continue;
         }
         let done = match main {
@@ -673,6 +774,7 @@ fn new_task(poll: fn(Context) -> bool, local: Worker | none) -> TaskRef {
         if let w: Worker = local {
             home = buf_new(1);
             home[0] = w;
+            atomic_add(w.locals, 0, 1, SeqCst);
         }
         let state: GcBuf<i32> = buf_new(5);
         state[0] = SCHEDULED;
@@ -718,7 +820,7 @@ fn run_guest(main: fn(Context) -> bool) {
     if current() is Worker {
         panic("task::block_on inside a running task (it would deadlock); use `await`");
     }
-    let w = new_worker(executor(), 0, true);
+    let w = new_worker(executor(), 0, true, false);
     set_current(w);
     work(w, new_task(main, w));
     unsafe { rok_task_worker_clear() };
@@ -808,14 +910,17 @@ pub(pkg) fn fork_job(f: fn() + Send) -> Task<bool> {
 /// Block this worker until `t` is done, running other tasks meanwhile
 /// (so a fork-join on a busy executor cannot deadlock).
 pub(pkg) fn help_until(t: Task<bool>) {
-    let w = current_worker();
-    let pool = w.pool;
+    let pool = current_worker().pool;
+    // Its own waits are no blocking calls of the poll it runs in.
+    let armed = unsafe { rok_lane_arm(0) };
     atomic_add(pool.signal, HELPERS, 1, SeqCst);
     let ran: i64 = 0;
     while !is_done(t.task) {
+        // Re-read: the worker may be handed on during a run.
+        let w = current_worker();
         let epoch = atomic_load(pool.signal, EPOCH, SeqCst);
         if let other: TaskRef = find_task(w) {
-            run(other, w);
+            run(other);
             ran = timers_while_busy(pool, ran);
             continue;
         }
@@ -829,6 +934,7 @@ pub(pkg) fn help_until(t: Task<bool>) {
         }
     }
     atomic_add(pool.signal, HELPERS, -1, SeqCst);
+    unsafe { rok_lane_arm(armed) };
 }
 
 // ---- spawning ----

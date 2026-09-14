@@ -1,4 +1,6 @@
 // expect-exit: 50
+// expect-stdout:
+// 25 25 50
 
 struct Vec2f {
     x: f64;
@@ -15,6 +17,7 @@ fn main() -> i32 {
     let p = Vec2f { x: 3.0f64, y: 4.0f64 };
     let q = Vec2f { x: -3.0f64, y: -4.0f64 };
     let total = p.norm_sq() + q.norm_sq();
+    println(f"{p.norm_sq()} {q.norm_sq()} {total}");
     return total as i32;
 }
 

@@ -1,4 +1,6 @@
 // expect-exit: 28
+// expect-stdout:
+// 14 true
 
 struct Counter {
     n: i32;
@@ -22,6 +24,7 @@ fn main() -> i32 {
     let c2: Counter | none = pick(false);
     let r1 = c1?.double();
     let r2 = c2?.double();
+    println(f"{r1 ?? 0} {r2 is none}");
     return (r1 ?? 0) + (r2 ?? 14) + 0;
 }
 

@@ -1,0 +1,57 @@
+// spec: 008.09-lowering-control §8.9.6 / §8.9.7 / §8.9.8
+// expect-exit: 0
+// expect-stdout:
+// ok path: finally -> 10
+// error path: caught 3 finally -> -3
+// inner finally
+// outer caught 9
+// early finally
+// return path: 1
+
+// spec 8.9.6-8.9.8: `throw` is a value-based return of the error;
+// `catch` branches on it; `finally` runs on every exit of its block
+// (value, caught error, propagated error, `return`).
+#[derive(Debug)]
+struct E { code: i32; }
+impl Error for E {}
+impl Display for E {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("E") }
+}
+
+fn step(fail: bool) throws (E) -> i32 {
+    if fail { throw E { code: 3 }; }
+    10
+}
+
+fn run(fail: bool) -> str {
+    let log = "";
+    let v = {
+        try step(fail) catch e: E {
+            log = log + f"caught {e.code} ";
+            -e.code
+        }
+    } finally {
+        log = log + "finally";
+    };
+    f"{log} -> {v}"
+}
+
+fn inner() throws (E) -> i32 {
+    let v: i32 = { throw E { code: 9 }; } finally { println("inner finally"); };
+    v
+}
+
+fn early() -> i32 {
+    let v: i32 = { return 1; } finally { println("early finally"); };
+    v + 100
+}
+
+fn main() -> i32 {
+    println(f"ok path: {run(false)}");
+    println(f"error path: {run(true)}");
+    let c = try inner() catch e: E { e.code };
+    println(f"outer caught {c}");
+    let r = early();
+    println(f"return path: {r}");
+    return 0;
+}

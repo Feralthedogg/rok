@@ -1,9 +1,12 @@
 // rok::std::path (stdlib spec 308): `Path`, a UTF-8 path value with
-// Python-style `/` joining. Unix separators only (`/`).
+// Python-style `/` joining. Separators follow the target: `/` on Unix;
+// `\` or `/` on Windows, where a path may start with a prefix (`C:`,
+// `\\server\share`, `\\?\..`, `\\.\..`), is absolute only with a prefix
+// and a root, and `join` writes `\`.
 //
 // `Path` is immutable: `/` returns a new one, `p /= q` is `p = p / q`.
-// `RawPath` holds OS bytes (Unix only; the fs layer never produces one —
-// it reports non-UTF-8 names as `InvalidData`). No Windows prefixes.
+// `RawPath` holds the OS form (Unix bytes, Windows UTF-16); the fs layer
+// never produces one — it reports non-UTF-8 names as `InvalidData`.
 
 use rok::std::fs;
 use rok::std::fs::Metadata;
@@ -11,6 +14,53 @@ use rok::std::io::{IoError, fetch, text_of, list_of, list_of_str, region};
 
 pub struct Path {
     s: str;
+}
+
+const WINDOWS: bool = cfg!(target_os = "windows");
+/// The separator `join` writes, and the root's spelling.
+#[cfg(target_os = "windows")]
+const SEP: str = "\\";
+#[cfg(not(target_os = "windows"))]
+const SEP: str = "/";
+
+/// Whether byte `i` of `s` separates components.
+fn sep_at(s: str, i: usize) -> bool {
+    let b = s.byte(i);
+    b == 47u8 || (WINDOWS && b == 92u8)
+}
+
+/// The first separator at or after byte `i` of `s` (or its length).
+fn comp_end(s: str, i: usize) -> usize {
+    let j = i;
+    while j < s.len() && !sep_at(s, j) { j += 1; }
+    j
+}
+
+/// Byte length of `s`'s Windows prefix (0 on Unix, or without one) and
+/// whether a root follows it (always, after a UNC / verbatim / device
+/// prefix).
+fn prefix_of(s: str) -> (usize, bool) {
+    let n = s.len();
+    if !WINDOWS { return (0usize, n > 0 && s.byte(0) == 47u8); }
+    if n >= 2 && sep_at(s, 0) && sep_at(s, 1) {
+        // `\\?\..` (verbatim) / `\\.\..` (device)
+        if n >= 4 && (s.byte(2) == 63u8 || s.byte(2) == 46u8) && sep_at(s, 3) {
+            if s.byte(2) == 63u8 && n > 7 && s[4:7] == "UNC" && sep_at(s, 7) {
+                let e = comp_end(s, comp_end(s, 8) + 1);
+                return (if e < n { e } else { n }, true);
+            }
+            if s.byte(2) == 63u8 && n >= 6 && s.byte(5) == 58u8 { return (6usize, true); }
+            return (comp_end(s, 4), true);
+        }
+        // `\\server\share`
+        let e = comp_end(s, comp_end(s, 2) + 1);
+        return (if e < n { e } else { n }, true);
+    }
+    let c = s.byte(0);
+    if n >= 2 && s.byte(1) == 58u8 && ((c >= 65u8 && c <= 90u8) || (c >= 97u8 && c <= 122u8)) {
+        return (2usize, n > 2 && sep_at(s, 2));
+    }
+    (0usize, n > 0 && sep_at(s, 0))
 }
 
 /// One piece of a path (`Path::components`).
@@ -25,7 +75,7 @@ pub enum Component {
 impl Component {
     pub fn as_str(self) -> str {
         match self {
-            Component::RootDir => "/",
+            Component::RootDir => SEP,
             Component::Prefix(p) => p,
             Component::CurDir => ".",
             Component::ParentDir => "..",
@@ -93,11 +143,15 @@ impl Path {
     }
 
     pub fn as_str(self) -> str { self.s }
-    pub fn to_raw(self) -> RawPath { RawPath { raw: list_of_str(self.s) } }
+    pub fn to_raw(self) -> RawPath { raw_of(self.s) }
 
-    pub fn is_absolute(self) -> bool { self.s.starts_with("/") }
+    /// Unix: rooted. Windows: a prefix and a root (`C:\x`, `\\srv\s\x`).
+    pub fn is_absolute(self) -> bool {
+        let (p, root) = prefix_of(self.s);
+        root && (p > 0 || !WINDOWS)
+    }
     pub fn is_relative(self) -> bool { !self.is_absolute() }
-    pub fn has_root(self) -> bool { self.is_absolute() }
+    pub fn has_root(self) -> bool { prefix_of(self.s).1 }
 
     /// The path without its last component; `none` for `/` and `""`.
     /// `Path::from("a").parent()` is `""` (as in Rust).
@@ -106,7 +160,7 @@ impl Path {
         let n = comps.len();
         if n == 0 { return none; }
         let last = comps[n - 1];
-        if last is Component::RootDir { return none; }
+        if last is Component::RootDir || last is Component::Prefix { return none; }
         let out = Path::new();
         for i in 0..n - 1 {
             out = out.join(Path::from(comps[i].as_str()));
@@ -152,13 +206,17 @@ impl Path {
 
     fn component_list(self) -> List<Component> {
         let out: List<Component> = List::new();
-        if self.s.starts_with("/") { out.push(Component::RootDir); }
+        let (p, root) = prefix_of(self.s);
+        if p > 0 { out.push(Component::Prefix(self.s[:p])); }
+        if root { out.push(Component::RootDir); }
+        let rest = self.s[p:];
+        if WINDOWS { rest = rest.replace("\\", "/"); }
         let first = true;
-        for part in self.s.split("/") {
+        for part in rest.split("/") {
             if part == "" {
                 // separator run or the root
             } else if part == "." {
-                if first && !self.s.starts_with("/") { out.push(Component::CurDir); }
+                if first && p == 0 && !root { out.push(Component::CurDir); }
             } else if part == ".." {
                 out.push(Component::ParentDir);
             } else {
@@ -169,12 +227,20 @@ impl Path {
         out
     }
 
-    /// `other` appended; an absolute `other` replaces `self`.
+    /// `other` appended; an absolute `other` replaces `self`. Windows:
+    /// so does one with a prefix (`D:x`), and a rooted one without
+    /// (`\x`) keeps `self`'s prefix.
     pub fn join(self, other: Path) -> Path {
         if other.is_absolute() || self.s == "" { return other; }
         if other.s == "" { return self; }
-        if self.s.ends_with("/") { return Path { s: self.s + other.s }; }
-        Path { s: self.s + "/" + other.s }
+        let (op, oroot) = prefix_of(other.s);
+        let (p, root) = prefix_of(self.s);
+        if op > 0 { return other; }
+        if oroot { return Path { s: self.s[:p] + other.s }; }
+        if sep_at(self.s, self.s.len() - 1) || (p == self.s.len() && !root) {
+            return Path { s: self.s + other.s };
+        }
+        Path { s: self.s + SEP + other.s }
     }
 
     pub fn with_file_name(self, name: str) -> Path {
@@ -285,12 +351,16 @@ impl Div<Path> for Path {
     fn div(self, rhs: Path) -> Path { self.join(rhs) }
 }
 
-/// OS path bytes that need not be UTF-8 (3.8.5). Unix bytes only (no
-/// `from_wide` / `as_wide`).
+/// OS path bytes that need not be UTF-8 (3.8.5): Unix bytes.
+#[cfg(not(target_os = "windows"))]
 pub struct RawPath {
     raw: List<u8>;
 }
 
+#[cfg(not(target_os = "windows"))]
+fn raw_of(s: str) -> RawPath { RawPath { raw: list_of_str(s) } }
+
+#[cfg(not(target_os = "windows"))]
 impl RawPath {
     pub fn from_bytes(bytes: List<u8>) -> RawPath { RawPath { raw: list_of(bytes) } }
 
@@ -321,6 +391,77 @@ impl RawPath {
     }
 }
 
+/// An OS path that need not be valid UTF-16 (3.8.5): Windows WTF-16
+/// units (lone surrogates allowed).
+#[cfg(target_os = "windows")]
+pub struct RawPath {
+    raw: List<u16>;
+}
+
+#[cfg(target_os = "windows")]
+fn raw_of(s: str) -> RawPath {
+    let out: List<u16> = List::new();
+    for c in s.chars() {
+        let u = c as u32;
+        if u >= 0x10000u32 {
+            out.push((0xD800u32 + ((u - 0x10000u32) >> 10u32)) as u16);
+            out.push((0xDC00u32 + ((u - 0x10000u32) & 0x3FFu32)) as u16);
+        } else {
+            out.push(u as u16);
+        }
+    }
+    RawPath { raw: out }
+}
+
+/// `w` as text (a lone surrogate as U+FFFD) and the index of its first
+/// lone surrogate (`w.len()` if none).
+#[cfg(target_os = "windows")]
+fn decode_wide(w: List<u16>) -> (str, usize) {
+    let out = StrBuf::new();
+    let n = w.len();
+    let bad = n;
+    let i = 0usize;
+    while i < n {
+        let u = w[i] as u32;
+        let c = u;
+        if u >= 0xD800u32 && u < 0xE000u32 {
+            let lo = if i + 1 < n { w[i + 1] as u32 } else { 0u32 };
+            if u < 0xDC00u32 && lo >= 0xDC00u32 && lo < 0xE000u32 {
+                c = 0x10000u32 + ((u - 0xD800u32) << 10u32) + (lo - 0xDC00u32);
+                i += 1;
+            } else {
+                if bad == n { bad = i; }
+                c = 0xFFFDu32;
+            }
+        }
+        out.push(char::from_u32(c) ?? '\u{FFFD}');
+        i += 1;
+    }
+    (out.to_str(), bad)
+}
+
+#[cfg(target_os = "windows")]
+impl RawPath {
+    pub fn from_wide(wide: List<u16>) -> RawPath {
+        let out: List<u16> = List::with_capacity(wide.len());
+        for u in wide { out.push(u); }
+        RawPath { raw: out }
+    }
+
+    pub fn as_wide(self) -> Slice<u16> { self.raw[0:self.raw.len()] }
+
+    /// The path, if the units are valid UTF-16; `valid_up_to` counts
+    /// UTF-16 units here.
+    pub fn try_to_path(self) throws (NonUtf8Error) -> Path {
+        let (s, bad) = decode_wide(self.raw);
+        if bad < self.raw.len() { throw NonUtf8Error { valid_up_to: bad }; }
+        Path { s: s }
+    }
+
+    /// The path with each lone surrogate replaced by U+FFFD.
+    pub fn to_path_lossy(self) -> Path { Path { s: decode_wide(self.raw).0 } }
+}
+
 impl PartialEq for RawPath {
     fn eq(self, rhs: RawPath) -> bool { self.raw == rhs.raw }
     fn ne(self, rhs: RawPath) -> bool { self.raw != rhs.raw }
@@ -337,9 +478,9 @@ impl TryFrom<RawPath> for Path {
     fn try_from(raw: RawPath) throws (NonUtf8Error) -> Path { try raw.try_to_path() }
 }
 
-/// `RawPath` bytes that are not UTF-8.
+/// `RawPath` contents that are not UTF-8 (Windows: not UTF-16).
 pub struct NonUtf8Error {
-    /// Length of the valid UTF-8 prefix.
+    /// Length of the valid prefix (bytes; Windows: UTF-16 units).
     pub valid_up_to: usize;
 }
 

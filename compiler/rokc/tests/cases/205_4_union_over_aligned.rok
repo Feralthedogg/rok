@@ -1,0 +1,33 @@
+// spec: 002.05.4-union-layout
+// expect-exit: 0
+// expect-stdout:
+// 32 16
+// 48 16
+// 1 2 3 4
+// 0
+// 9 4
+
+// A byte-array union takes its most aligned member's alignment, also
+// past 8 (`#[repr(align(16))]`), and holds all of its bytes.
+use rok::bare::ptr::{align_of, size_of};
+
+#[repr(align(16))]
+struct V { a: u64; b: u64; c: u64; d: u64; }
+
+union U { v: V; x: u64; }
+
+struct Holder { tag: u8; u: U; }
+
+fn main() -> i32 {
+    println(f"{size_of::<U>()} {align_of::<U>()}");
+    println(f"{size_of::<Holder>()} {align_of::<Holder>()}");
+    let u = U { v: V { a: 1u64, b: 2u64, c: 3u64, d: 4u64 } };
+    let v = unsafe { u.v };
+    println(f"{v.a} {v.b} {v.c} {v.d}");
+    let h = Holder { tag: 9u8, u: U { x: 0u64 } };
+    let w = unsafe { h.u.v };
+    println(f"{w.a}");
+    h.u.v = V { a: 5u64, b: 6u64, c: 7u64, d: 4u64 };
+    println(f"{h.tag} {unsafe { h.u.v.d }}");
+    return 0;
+}

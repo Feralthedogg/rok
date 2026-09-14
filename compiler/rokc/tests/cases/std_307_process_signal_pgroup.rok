@@ -37,3 +37,4 @@ fn main() throws (IoError) {
     let e = try { process::signal(9, || {}); "ok" } catch e { f"{e:?}" };
     println(f"sigkill: {e}");
 }
+// only-os: macos linux

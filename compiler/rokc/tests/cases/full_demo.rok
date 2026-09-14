@@ -1,4 +1,6 @@
 // expect-exit: 200
+// expect-stdout:
+// 100 39 4 3 99
 
 const SIZE: i32 = 5;
 
@@ -51,5 +53,6 @@ fn main() -> i32 {
     let dp = p1.dot(p2);
     let p1s = p1.swap();
     let r = sum + dp + (p1s.a + p1s.b) * SIZE;
+    println(f"{sum} {dp} {p1s.a} {p1s.b} {lookup(7) ?? 0}");
     return r + 26;
 }

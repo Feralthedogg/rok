@@ -1,4 +1,7 @@
 // expect-exit: 9
+// expect-stdout:
+// 6 3
+
 // Spec 4.15: `unsafe fn` bodies and `unsafe { }` blocks may call unsafe
 // functions; C functions are implicitly unsafe.
 extern "C" {
@@ -15,6 +18,7 @@ fn main() -> i32 {
         let f = |v: i32| -> i32 { abs(v) };   // closure inside the block
         f(-3)
     };
+    println(f"{a} {b}");
     return a + b;
 }
 

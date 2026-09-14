@@ -1,4 +1,6 @@
 // expect-exit: 14
+// expect-stdout:
+// 3 4 7
 
 struct Pos {
     x: i32;
@@ -15,5 +17,6 @@ fn main() -> i32 {
         pos: Pos { x: 3, y: 4 },
         z: 7,
     };
+    println(f"{s.pos.x} {s.pos.y} {s.z}");
     return s.pos.x + s.pos.y + s.z;
 }

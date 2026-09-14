@@ -1,4 +1,6 @@
 // expect-exit: 23
+// expect-stdout:
+// 3 10 10
 
 // `?` on a sum with several payload variants keeps the remaining sum and
 // propagates `none` out of the enclosing function.
@@ -17,5 +19,6 @@ fn main() -> i32 {
     let a = h(2) ?? 100;   // 3
     let b = h(-1) ?? 100;  // 10
     let c = h(0) ?? 10;    // none → 10
+    println(f"{a} {b} {c}");
     return a + b + c;
 }

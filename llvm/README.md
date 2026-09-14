@@ -18,6 +18,26 @@ llvm/build.sh            # → ~/.cache/rok/llvm-22.1.8 (ROK_LLVM_CACHE)
 llvm/build.sh <prefix>   # anywhere else
 ```
 
+Hosts:
+
+- macOS (arm64, x86_64): Xcode's command line tools, cmake, ninja.
+- Linux (x86_64, aarch64; glibc or musl): cmake, ninja, curl, xz and a
+  C++17 compiler (`apt install cmake ninja-build g++ curl xz-utils`;
+  Alpine: `apk add cmake samurai g++ curl xz linux-headers`). rokc_llvm
+  links the C++ runtime the archives were built against: libstdc++, or
+  libc++ when they name `std::__1`.
+- Windows (x86_64, arm64; MSVC ABI): `llvm\build.ps1 [prefix]` from a
+  Developer PowerShell for VS (the MSVC C++ build tools, cmake, ninja) →
+  `%LOCALAPPDATA%\rok\llvm-22.1.8`. The same libraries as `.lib` with
+  the dynamic CRT (`/MD`, as rustc links), no DIA SDK. rokc_llvm compiles
+  its shim with `cl` (or `CXX`, e.g. `clang-cl`) and archives it with
+  `lib`. Only building rok needs these: the toolchain links Windows
+  programs with its own lld and import libraries.
+
+`cargo check --target <another triple>` builds the stub (below) when the
+prefix is this machine's (`LLVM_HOST_TRIPLE` names another architecture
+or OS).
+
 A Release build of static libraries only: targets AArch64, X86, ARM,
 RISCV and WebAssembly; the MLIR and lld (Mach-O, ELF, COFF, MinGW, wasm)
 libraries; no tests, tools (but lld's own binary), examples, docs, bindings, zlib, zstd or

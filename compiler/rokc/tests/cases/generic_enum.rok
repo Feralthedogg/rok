@@ -1,4 +1,6 @@
 // expect-exit: 17
+// expect-stdout:
+// 7 10
 
 enum Box<T> {
     Some(T),
@@ -15,6 +17,7 @@ fn unbox(b: Box<i32>, def: i32) -> i32 {
 fn main() -> i32 {
     let a: Box<i32> = Box::Some(7);
     let b: Box<i32> = Box::Nothing;
+    println(f"{unbox(a, 0)} {unbox(b, 10)}");
     return unbox(a, 0) + unbox(b, 10);
 }
 

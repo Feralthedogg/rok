@@ -1,4 +1,6 @@
 // expect-exit: 52
+// expect-stdout:
+// 25 4 6 52
 
 struct Point {
     x: i32;
@@ -18,5 +20,6 @@ impl Point {
 fn main() -> i32 {
     let p: Point = Point { x: 3i32, y: 4i32 };
     let q: Point = p.shift(1i32, 2i32);
+    println(f"{p.norm_sq()} {q.x} {q.y} {q.norm_sq()}");
     return q.norm_sq();
 }

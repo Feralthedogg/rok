@@ -1,0 +1,41 @@
+// spec: 004.11-generators §4.11.12 / §4.11.13
+// expect-exit: 0
+// expect-stdout:
+// evens 0 2 4
+// steps 5 8 11
+
+// 4.11.13: `yield fn` as a method; 4.11.12: parameters work as in
+// ordinary functions and `-> T` is the yielded type.
+struct Range2 {
+    lo: i32;
+    hi: i32;
+}
+
+impl Range2 {
+    yield fn evens(self) -> i32 {
+        let i = self.lo;
+        while i < self.hi {
+            if i % 2 == 0 { yield i; }
+            i = i + 1;
+        }
+    }
+
+    yield fn steps(self, by: i32, n: i32) -> i32 {
+        let k = 0;
+        while k < n {
+            yield self.lo + k * by;
+            k = k + 1;
+        }
+    }
+}
+
+fn main() {
+    let r = Range2 { lo: 0, hi: 6 };
+    let s = "evens";
+    for x in r.evens() { s = s + f" {x}"; }
+    println(s);
+    let q = Range2 { lo: 5, hi: 0 };
+    let t = "steps";
+    for x in q.steps(3, 3) { t = t + f" {x}"; }
+    println(t);
+}

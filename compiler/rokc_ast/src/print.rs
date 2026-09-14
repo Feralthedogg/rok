@@ -630,6 +630,7 @@ impl Printer {
     fn ty(&mut self, t: &Ty) {
         match &t.kind {
             TyKind::Path(p) => self.ty_path(p),
+            TyKind::QPath(q) => self.qpath(q),
             TyKind::Sum(members) => {
                 // `T?` is `#nest<T> | none` (spec 2.6.5).
                 if let [inner, none] = members.as_slice() {
@@ -744,20 +745,22 @@ impl Printer {
         self.path(p, false);
     }
 
+    /// `<T as Tr>::item`.
+    fn qpath(&mut self, q: &crate::QPath) {
+        self.s("<");
+        self.ty_tight(&q.self_ty);
+        self.s(" as ");
+        self.ty_path(&q.trait_path);
+        self.s(">::");
+        self.name(&q.item);
+    }
+
     /// `a::b<T>` (types, struct literals) or `a::b::<T>` (`turbofish`,
     /// expressions).
     fn path(&mut self, p: &Path, turbofish: bool) {
         for (i, seg) in p.segments.iter().enumerate() {
             if i > 0 {
                 self.s("::");
-            }
-            if seg.name == crate::QPATH_MARK && seg.generics.len() == 2 {
-                self.s("<");
-                self.ty_tight(&seg.generics[0]);
-                self.s(" as ");
-                self.ty(&seg.generics[1]);
-                self.s(">");
-                continue;
             }
             self.name(&seg.name);
             if !seg.generics.is_empty() {
@@ -911,7 +914,13 @@ impl Printer {
                 self.stmt_expr(e);
                 self.s(";");
             }
-            StmtKind::Trailing(e) => self.stmt_expr(e),
+            StmtKind::Trailing(e) => {
+                self.stmt_expr(e);
+                // Grouped, it no longer ends at its block.
+                if matches!(&e.kind, ExprKind::Catch { .. }) {
+                    self.s(";");
+                }
+            }
             StmtKind::Return(v) => {
                 self.s("return");
                 if let Some(v) = v {
@@ -1026,6 +1035,7 @@ impl Printer {
         match &e.kind {
             ExprKind::Literal(l) => self.lit(l),
             ExprKind::Path(p) => self.path(p, true),
+            ExprKind::QPath(q) => self.qpath(q),
             ExprKind::SelfLower => self.s("self"),
             ExprKind::SelfUpper => self.s("Self"),
             ExprKind::Tuple(xs) => {
@@ -1653,9 +1663,9 @@ fn ty_name(t: &Ty) -> Option<&str> {
     }
 }
 
-/// The error of a `throws` written without a type (`#throws`).
+/// The error of a `throws` written without a type.
 fn is_untyped_err(t: &Ty) -> bool {
-    ty_name(t) == Some(crate::UNTYPED_THROWS_MARK)
+    crate::is_untyped_throws(t)
 }
 
 /// A `rethrows` error parameter (`#E0`, ..).

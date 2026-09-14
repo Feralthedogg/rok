@@ -1,4 +1,6 @@
 // expect-exit: 12
+// expect-stdout:
+// 14
 
 enum Tok {
     Num(i32),
@@ -59,5 +61,6 @@ fn main() -> i32 {
         classify('*'),
         classify('4'),
     ];
+    println(f"{evaluate(toks)}");
     return evaluate(toks) + 0 - 2;
 }

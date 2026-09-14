@@ -19,6 +19,7 @@ rokc_tools = { workspace = true }
 [dev-dependencies]
 rokc_diagnostic = { workspace = true }
 rokc_lexer = { workspace = true }
+rokc_llvm = { workspace = true }
 rokc_parser = { workspace = true }
 rokc_rokon = { workspace = true }
 

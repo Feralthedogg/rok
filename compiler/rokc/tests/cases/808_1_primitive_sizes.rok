@@ -1,0 +1,19 @@
+// spec: 008.08-lowering-types §8.8.1
+// expect-exit: 0
+// expect-stdout:
+// i8 1 i16 2 i32 4 i64 8
+// u8 1 u16 2 u32 4 u64 8
+// f32 4 f64 8 char 4 bool 1
+// usize 8 isize 8 str 16
+
+// spec 8.8.1: primitive integers / floats map to same-width machine
+// types, `char` is a 32-bit code point, `str` a (pointer, usize) pair.
+use rok::bare::mem::size_of;
+
+fn main() -> i32 {
+    println(f"i8 {size_of::<i8>()} i16 {size_of::<i16>()} i32 {size_of::<i32>()} i64 {size_of::<i64>()}");
+    println(f"u8 {size_of::<u8>()} u16 {size_of::<u16>()} u32 {size_of::<u32>()} u64 {size_of::<u64>()}");
+    println(f"f32 {size_of::<f32>()} f64 {size_of::<f64>()} char {size_of::<char>()} bool {size_of::<bool>()}");
+    println(f"usize {size_of::<usize>()} isize {size_of::<isize>()} str {size_of::<str>()}");
+    return 0;
+}

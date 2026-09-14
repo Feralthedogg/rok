@@ -21,7 +21,8 @@ for i in 0..2 {
     readers.push(task::spawn(async {
         using r = await rw.read_async() {
             let n = inside.fetch_add(1) + 1;
-            if n > most.load() { most.store(n); }
+            // The second one in sees 2 (nobody leaves before that).
+            if n == 2 { most.store(n); }
             while most.load() < 2 { await task::yield_now(); }
             inside.fetch_sub(1);
         }

@@ -1,4 +1,6 @@
 // expect-exit: 9
+// expect-stdout:
+// 2 -1
 
 fn first_match<T>(xs: [T; 5], pred: fn(T) -> bool) -> i32 {
     let i = 0;
@@ -14,6 +16,7 @@ fn first_match<T>(xs: [T; 5], pred: fn(T) -> bool) -> i32 {
 fn main() -> i32 {
     let xs: [i32; 5] = [3, 7, 12, 20, 27];
     let idx = first_match(xs, |n: i32| -> bool { n > 10 });
+    println(f"{idx} {first_match(xs, |n: i32| -> bool { n > 100 })}");
     return idx + 7;
 }
 

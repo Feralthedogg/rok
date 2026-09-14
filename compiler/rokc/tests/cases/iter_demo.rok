@@ -1,4 +1,7 @@
 // expect-exit: 35
+// expect-stdout:
+// 2 4 6 8 10
+// 30
 
 fn iter_apply<T>(xs: [T; 5], f: fn(T) -> T) -> [T; 5] {
     let result: [T; 5] = [xs[0], xs[1], xs[2], xs[3], xs[4]];
@@ -22,6 +25,8 @@ fn main() -> i32 {
     let xs: [i32; 5] = [1, 2, 3, 4, 5];
     let mapped = iter_apply(xs, |n: i32| -> i32 { n * 2 });
     let s = iter_sum(mapped);
+    println(f"{mapped[0]} {mapped[1]} {mapped[2]} {mapped[3]} {mapped[4]}");
+    println(f"{s}");
     return s + 5;
 }
 

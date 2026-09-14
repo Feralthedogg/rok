@@ -1,4 +1,6 @@
 // expect-exit: 30
+// expect-stdout:
+// 10 0
 
 fn pick(present: bool) -> i32 | none {
     if present {
@@ -15,6 +17,7 @@ fn unwrap_or_zero(present: bool) -> i32 {
 }
 
 fn main() -> i32 {
+    println(f"{unwrap_or_zero(true)} {unwrap_or_zero(false)}");
     let total = 0;
     total += unwrap_or_zero(true);   // 10
     total += unwrap_or_zero(false);  // 0

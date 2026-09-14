@@ -1,4 +1,6 @@
 // expect-exit: 50
+// expect-stdout:
+// 23 10 4
 
 const N: i32 = 4;
 
@@ -33,5 +35,6 @@ fn main() -> i32 {
     }
     let nums: [i32; 4] = [1, 2, 3, 4];
     let sum = fold(nums, 0, |a: i32, b: i32| -> i32 { a + b });
+    println(f"{total} {sum} {N}");
     return total + sum + N + 13;
 }

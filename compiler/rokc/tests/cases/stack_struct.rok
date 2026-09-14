@@ -1,4 +1,7 @@
 // expect-exit: 25
+// expect-stdout:
+// 3 25
+
 
 struct Stack {
     data: [i32; 8];
@@ -32,5 +35,6 @@ impl Stack {
 
 fn main() -> i32 {
     let s = Stack::new().push(3).push(7).push(15);
+    println(f"{s.top} {s.sum()}");
     s.sum()
 }

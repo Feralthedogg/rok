@@ -10,9 +10,10 @@
 //!   region `(buf, off, len)`; reads fill it in place. Variable-length
 //!   results (paths, names, values) are copied in up to `len` bytes and
 //!   return their full length, so the caller can retry with more room.
-//! - Calls that may block are bracketed by `enter_native` /
-//!   `leave_native` (804 §8.4.10) so a collection need not wait on them;
-//!   nothing allocates GC memory while parked. The caller roots every GC
+//! - Calls that may block are bracketed by `lane::block_begin` /
+//!   `block_end` (804 §8.4.10): a collection need not wait on them, and
+//!   a long one hands its executor worker on (706 §7.6.7). Nothing
+//!   allocates GC memory while parked. The caller roots every GC
 //!   argument, so it stays in place throughout.
 
 use core::mem::size_of;
@@ -20,7 +21,6 @@ use core::ptr;
 
 pub use rokr_common::errno;
 use rokr_common::object_header::HEADER_SIZE;
-use rokr_gc::world;
 
 use crate::str::{RokStr, build};
 
@@ -33,10 +33,10 @@ pub fn ret(r: isize) -> isize {
 
 /// Run a blocking call parked; `errno` survives the re-entry.
 pub fn native<R>(f: impl FnOnce() -> R) -> (R, i32) {
-    world::enter_native();
+    crate::lane::block_begin();
     let r = f();
     let e = errno();
-    world::leave_native();
+    crate::lane::block_end();
     (r, e)
 }
 
@@ -412,11 +412,37 @@ pub extern "C" fn rok_os_flock(fd: i32, op: i32) -> i32 {
 }
 
 /// Copy `src` → `dst` from their current offsets to EOF: bytes or `-errno`.
+/// Linux first lets the kernel copy (`copy_file_range`: in-kernel, a
+/// reflink or server-side copy where the file system can); a file system
+/// or kernel without it falls to the read / write loop.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_copy_fd(src: i32, dst: i32) -> i64 {
     let (r, e) = native(|| {
-        let mut buf = [0u8; 16 * 1024];
         let mut total: i64 = 0;
+        #[cfg(target_os = "linux")]
+        loop {
+            // SAFETY: null offsets use and advance the fds' own offsets.
+            let n = unsafe {
+                libc::copy_file_range(src, ptr::null_mut(), dst, ptr::null_mut(), 1 << 30, 0)
+            };
+            if n == 0 {
+                return total;
+            }
+            if n > 0 {
+                total += n as i64;
+                continue;
+            }
+            match errno() {
+                libc::EINTR => {}
+                libc::EXDEV | libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP | libc::EPERM
+                    if total == 0 =>
+                {
+                    break;
+                }
+                _ => return -1,
+            }
+        }
+        let mut buf = [0u8; 16 * 1024];
         loop {
             // SAFETY: `buf` is writable for its length.
             let n = unsafe { libc::read(src, buf.as_mut_ptr().cast(), buf.len()) };
@@ -454,8 +480,10 @@ pub extern "C" fn rok_os_copy_fd(src: i32, dst: i32) -> i64 {
 /// Reflink `from` (a regular file) to a new `to`, both under `dir`
 /// (macOS `clonefileat`: same-volume APFS copies share their blocks).
 /// 0, or `-errno` (`EEXIST`, cross-volume, no support) — the caller
-/// then copies the bytes. Elsewhere always `-ENOTSUP`.
+/// then copies the bytes. Elsewhere always `-ENOTSUP` (Linux reflinks
+/// through `copy_file_range` in `rok_os_copy_fd`).
 #[unsafe(no_mangle)]
+#[cfg_attr(not(target_os = "macos"), allow(clippy::missing_const_for_fn))]
 pub extern "C" fn rok_os_clone(dir: i32, from: RokStr, to: RokStr) -> i32 {
     #[cfg(target_os = "macos")]
     {
@@ -715,16 +743,45 @@ fn environ() -> *mut *const CStrPtr {
 #[cfg(not(target_vendor = "apple"))]
 static mut ARGS: (i32, *const CStrPtr) = (0, ptr::null());
 
-/// glibc passes `(argc, argv, envp)` to `.init_array` entries.
+/// Captured from the initial stack before `main`: the kernel lays out
+/// `argc, argv[0..argc], NULL, envp..`, and `environ` still points at
+/// `envp` then. glibc would also pass the three to `.init_array`
+/// entries, musl passes nothing; the walk works under both.
 #[cfg(not(target_vendor = "apple"))]
 #[used]
 #[unsafe(link_section = ".init_array")]
-static CAPTURE_ARGS: extern "C" fn(i32, *const CStrPtr, *const CStrPtr) = capture_args;
+static CAPTURE_ARGS: extern "C" fn() = capture_args;
 
 #[cfg(not(target_vendor = "apple"))]
-extern "C" fn capture_args(argc: i32, argv: *const CStrPtr, _envp: *const CStrPtr) {
-    // SAFETY: runs once, single-threaded, before `main`.
-    unsafe { ARGS = (argc, argv) };
+extern "C" fn capture_args() {
+    // SAFETY: runs once, single-threaded, before `main`, while `environ`
+    // is still the kernel's `envp`.
+    unsafe {
+        if let Some(a) = argv_before(*environ()) {
+            ARGS = a;
+        }
+    }
+}
+
+/// `(argc, argv)` laid out before `envp`: `envp - 1` is argv's NULL
+/// terminator and `argc` sits right before `argv[0]` (argv entries are
+/// addresses, never equal to their count).
+///
+/// # Safety
+/// `envp` is null or the `envp` of the process's initial stack layout.
+#[cfg_attr(target_vendor = "apple", allow(dead_code))]
+unsafe fn argv_before(envp: *const CStrPtr) -> Option<(i32, *const CStrPtr)> {
+    if envp.is_null() {
+        return None;
+    }
+    // SAFETY: the words before `envp` are argv's, then argc (caller).
+    unsafe {
+        let end = envp.sub(1);
+        (0..1usize << 20).find_map(|n| {
+            let slot = end.sub(n + 1);
+            (*slot as usize == n).then(|| (i32::try_from(n).unwrap_or(0), slot.add(1)))
+        })
+    }
 }
 
 fn args() -> (usize, *const CStrPtr) {
@@ -840,13 +897,25 @@ fn split_blob(blob: RokStr, count: usize) -> *mut CStrPtr {
     v
 }
 
-/// `fork` + `execvp`. `argv` / `envs` hold `argc` / `envc`
-/// NUL-terminated pieces (`envc < 0`: inherit the environment);
-/// `cwd` empty = inherit; `pgid >= 0` joins that process group (0: a
-/// new one led by the child). Stdio modes: `-1` inherit, `-2` null,
-/// `-3` piped, `>= 0` that fd. The pipe ends (or -1) go to
-/// `out[0..3]` (stdin write end, stdout / stderr read ends).
-/// Returns the pid or `-errno` (exec failures included).
+#[cfg(target_vendor = "apple")]
+unsafe extern "C" {
+    // libSystem since macOS 10.15; not in the `libc` crate for Apple.
+    fn posix_spawn_file_actions_addchdir_np(
+        actions: *mut libc::posix_spawn_file_actions_t,
+        path: CStrPtr,
+    ) -> libc::c_int;
+}
+#[cfg(not(target_vendor = "apple"))]
+use libc::posix_spawn_file_actions_addchdir_np;
+
+/// `posix_spawnp` (307 §3.7.4). `argv` / `envs` hold `argc` / `envc`
+/// NUL-terminated pieces (`envc < 0`: inherit the environment; the
+/// program is looked up on this process's `PATH` either way); `cwd`
+/// empty = inherit; `pgid >= 0` joins that process group (0: a new one
+/// led by the child). Stdio modes: `-1` inherit, `-2` null, `-3` piped,
+/// `>= 0` that fd. The pipe ends (or -1) go to `out[0..3]` (stdin write
+/// end, stdout / stderr read ends). Returns the pid or `-errno` (exec
+/// failures included).
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub extern "C" fn rok_os_spawn(
@@ -867,92 +936,82 @@ pub extern "C" fn rok_os_spawn(
     } else {
         ptr::null_mut()
     };
-    // Before the fork: the child must not malloc.
     let cwd_c = cs(cwd);
     let modes = [stdio_in, stdio_out, stdio_err];
     // [child end, parent end] per stream.
     let mut ends = [[-1i32; 2]; 3];
-    let mut report = [-1i32; 2];
     let r = native(|| {
-        // SAFETY: pipe/fcntl/fork/exec on locals; the child only makes
-        // async-signal-safe calls before `execvp` / `_exit`.
+        // SAFETY: pipe / fcntl / posix_spawn on locals; the actions and
+        // attributes are initialized before use and destroyed after.
         unsafe {
-            let cloexec = |fd: i32| libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
             for (i, m) in modes.iter().enumerate() {
                 if *m == -3 {
                     let mut p = [0i32; 2];
                     if libc::pipe(p.as_mut_ptr()) < 0 {
                         return -errno();
                     }
-                    cloexec(p[0]);
-                    cloexec(p[1]);
+                    // `dup2` onto 0..3 clears it on the child's copy.
+                    libc::fcntl(p[0], libc::F_SETFD, libc::FD_CLOEXEC);
+                    libc::fcntl(p[1], libc::F_SETFD, libc::FD_CLOEXEC);
                     ends[i] = if i == 0 { [p[0], p[1]] } else { [p[1], p[0]] };
                 }
             }
-            if libc::pipe(report.as_mut_ptr()) < 0 {
-                return -errno();
-            }
-            cloexec(report[0]);
-            cloexec(report[1]);
-            let pid = libc::fork();
-            if pid < 0 {
-                return -errno();
-            }
-            if pid == 0 {
-                let fail = |e: i32| -> ! {
-                    libc::write(report[1], (&raw const e).cast(), 4);
-                    libc::_exit(127)
-                };
-                for (i, m) in modes.iter().enumerate() {
-                    let src = match *m {
-                        -1 => continue,
-                        -2 => {
-                            let fl = if i == 0 {
-                                libc::O_RDONLY
-                            } else {
-                                libc::O_WRONLY
-                            };
-                            libc::open(c"/dev/null".as_ptr(), fl)
-                        }
-                        -3 => ends[i][0],
-                        fd => fd,
-                    };
-                    if src < 0 || libc::dup2(src, i as i32) < 0 {
-                        fail(errno());
+            let mut fa: libc::posix_spawn_file_actions_t = core::mem::zeroed();
+            let mut at: libc::posix_spawnattr_t = core::mem::zeroed();
+            libc::posix_spawn_file_actions_init(&mut fa);
+            libc::posix_spawnattr_init(&mut at);
+            let mut rc = 0;
+            for (i, m) in modes.iter().enumerate() {
+                let fd = i as i32;
+                rc = match *m {
+                    -1 => 0,
+                    -2 => {
+                        let fl = if i == 0 {
+                            libc::O_RDONLY
+                        } else {
+                            libc::O_WRONLY
+                        };
+                        libc::posix_spawn_file_actions_addopen(
+                            &mut fa,
+                            fd,
+                            c"/dev/null".as_ptr(),
+                            fl,
+                            0,
+                        )
                     }
+                    -3 => libc::posix_spawn_file_actions_adddup2(&mut fa, ends[i][0], fd),
+                    src => libc::posix_spawn_file_actions_adddup2(&mut fa, src, fd),
+                };
+                if rc != 0 {
+                    break;
                 }
-                if cwd.len > 0 && libc::chdir(cwd_c.p()) < 0 {
-                    fail(errno());
-                }
-                if pgid >= 0 && libc::setpgid(0, pgid) < 0 {
-                    fail(errno());
-                }
-                if !ev.is_null() {
-                    *environ() = ev.cast_const();
-                }
-                libc::execvp(*av, av.cast_const());
-                fail(errno());
             }
+            if rc == 0 && cwd.len > 0 {
+                rc = posix_spawn_file_actions_addchdir_np(&mut fa, cwd_c.p());
+            }
+            if rc == 0 && pgid >= 0 {
+                rc = libc::posix_spawnattr_setflags(&mut at, libc::POSIX_SPAWN_SETPGROUP as _);
+                if rc == 0 {
+                    rc = libc::posix_spawnattr_setpgroup(&mut at, pgid);
+                }
+            }
+            let mut pid: libc::pid_t = 0;
+            if rc == 0 {
+                let env = if ev.is_null() {
+                    *environ()
+                } else {
+                    ev.cast_const()
+                };
+                rc = libc::posix_spawnp(&mut pid, *av, &fa, &at, av.cast(), env.cast());
+            }
+            libc::posix_spawn_file_actions_destroy(&mut fa);
+            libc::posix_spawnattr_destroy(&mut at);
             for e in &ends {
                 if e[0] >= 0 {
                     libc::close(e[0]);
                 }
             }
-            libc::close(report[1]);
-            let mut code = 0i32;
-            let n = loop {
-                let n = libc::read(report[0], (&raw mut code).cast(), 4);
-                if n >= 0 || errno() != libc::EINTR {
-                    break n;
-                }
-            };
-            libc::close(report[0]);
-            if n == 4 {
-                let mut st = 0;
-                libc::waitpid(pid, &mut st, 0);
-                return -code;
-            }
-            pid
+            if rc != 0 { -rc } else { pid }
         }
     })
     .0;
@@ -1069,6 +1128,41 @@ pub extern "C" fn rok_os_kill(pid: i32, sig: i32) -> i32 {
     ret(unsafe { libc::kill(pid, sig) } as isize) as i32
 }
 
+/// `pidfd_open(pid)` (Linux 5.3+): a close-on-exec fd tracking the
+/// process, or `-errno`; `-ENOSYS` on other systems.
+#[unsafe(no_mangle)]
+#[cfg_attr(not(target_os = "linux"), allow(clippy::missing_const_for_fn))]
+pub extern "C" fn rok_os_pidfd_open(pid: i32) -> i32 {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: plain syscall.
+        ret(unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as isize) as i32
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        -libc::ENOSYS
+    }
+}
+
+/// `pidfd_send_signal(fd, sig)`: 0 or `-errno` (`-ENOSYS` off Linux).
+#[unsafe(no_mangle)]
+#[cfg_attr(not(target_os = "linux"), allow(clippy::missing_const_for_fn))]
+pub extern "C" fn rok_os_pidfd_signal(fd: i32, sig: i32) -> i32 {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: plain syscall; no siginfo.
+        let r =
+            unsafe { libc::syscall(libc::SYS_pidfd_send_signal, fd, sig, ptr::null::<u8>(), 0) };
+        ret(r as isize) as i32
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (fd, sig);
+        -libc::ENOSYS
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_getpid() -> u32 {
     // SAFETY: plain libc call.
@@ -1102,5 +1196,26 @@ mod tests {
         assert_eq!(rok_os_errno_kind(EAI_BASE + 8), kind::NOT_FOUND);
         assert_eq!(rok_os_errno_kind(0), kind::OTHER);
         assert_eq!(rok_os_errno_kind(-1), kind::OTHER);
+    }
+
+    /// The initial stack: `argc, argv.., NULL, envp.., NULL`.
+    #[test]
+    fn argv_from_the_initial_stack() {
+        let (prog, flag, var) = (c"prog".as_ptr(), c"-x".as_ptr(), c"K=V".as_ptr());
+        for (stack, envp_at, argc) in [
+            (
+                vec![2 as CStrPtr, prog, flag, ptr::null(), var, ptr::null()],
+                4,
+                2,
+            ),
+            (vec![0 as CStrPtr, ptr::null(), var, ptr::null()], 2, 0),
+        ] {
+            // SAFETY: `stack` has that layout.
+            let (count, argv) = unsafe { argv_before(stack.as_ptr().add(envp_at)) }.unwrap();
+            assert_eq!(count, argc);
+            assert_eq!(argv, stack[1..].as_ptr());
+        }
+        // SAFETY: null is allowed.
+        assert!(unsafe { argv_before(ptr::null()) }.is_none());
     }
 }

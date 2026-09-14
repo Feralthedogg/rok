@@ -1,0 +1,38 @@
+// spec: 007.03-gc-algorithm §7.3.1
+// gc-stress: 50
+// expect-exit: 0
+// expect-stdout:
+// 0 a0 [0]
+// 499 a499 [499, 998]
+// shared: 7
+
+// spec 7.3.1: evacuation leaves a forwarding pointer and rewrites every
+// precise reference (the gc-stress run evacuates on every full
+// collection): values, and two references to one list, stay intact.
+extern "C" {
+    fn rok_gc_collect();
+}
+
+struct Rec {
+    name: str;
+    xs: List<i32>;
+}
+
+fn main() -> i32 {
+    let recs: List<Rec> = [];
+    let i = 0;
+    while i < 500 {
+        let xs: List<i32> = [i];
+        if i % 2 == 1 { xs.push(i * 2); }
+        recs.push(Rec { name: f"a{i}", xs: xs });
+        i += 1;
+    }
+    let shared: List<i32> = [1];
+    let other = shared;
+    unsafe { rok_gc_collect(); rok_gc_collect(); }
+    other.push(7);
+    println(f"{0} {recs[0].name} {recs[0].xs:?}");
+    println(f"{499} {recs[499].name} {recs[499].xs:?}");
+    println(f"shared: {shared[1]}");
+    return 0;
+}

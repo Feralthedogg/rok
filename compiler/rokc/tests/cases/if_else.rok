@@ -1,4 +1,6 @@
 // expect-exit: 7
+// expect-stdout:
+// 7 0 9
 
 fn abs(x: i32) -> i32 {
     let r: i32 = if x < 0i32 { -x } else { x };
@@ -6,6 +8,7 @@ fn abs(x: i32) -> i32 {
 }
 
 fn main() -> i32 {
+    println(f"{abs(-7i32)} {abs(0i32)} {abs(9i32)}");
     return abs(-7i32);
 }
 

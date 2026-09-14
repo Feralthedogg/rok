@@ -1,8 +1,11 @@
 // spec: 004.05-closure / 002.10-generics-inference
 // expect-exit: 3
 // A closure parameter with no context is inferred from a later call in the same body (`f(2)` -> x: i32).
+// expect-stdout:
+// 3 0
 
 fn main() -> i32 {
     let f = |x| x + 1;
+    println(f"{f(2)} {f(-1)}");
     return f(2);
 }

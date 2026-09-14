@@ -1,0 +1,36 @@
+// expect-exit: 0
+// gc-stress: 50
+// expect-stdout:
+// 4 x 200: ok
+
+// A `rok_*` symbol names the runtime (805) even in an `extern "C"`
+// block: the call keeps the C ABI but is not PARKED (804 §8.4.10), so
+// collections that four threads start through it never overlap each
+// other while they allocate.
+use rok::std::thread;
+
+extern "C" {
+    fn rok_gc_collect();
+}
+
+fn main() -> i32 {
+    let hs: List<thread::JoinHandle<bool>> = [];
+    for t in 0..4 {
+        hs.push(thread::spawn(|| {
+            let ok = true;
+            for i in 0..200 {
+                let xs: List<str> = [];
+                for k in 0..20 { xs.push(f"{t}-{i}-{k}"); }
+                unsafe { rok_gc_collect() };
+                ok = ok && xs.len() == 20 && xs[19] == f"{t}-{i}-19";
+            }
+            ok
+        }));
+    }
+    let all = true;
+    for h in hs {
+        all = all && (try! h.join());
+    }
+    println(f"4 x 200: {if all { "ok" } else { "broken" }}");
+    0
+}

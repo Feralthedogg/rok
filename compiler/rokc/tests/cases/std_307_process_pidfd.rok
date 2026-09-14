@@ -1,0 +1,18 @@
+// only-os: linux
+// expect-exit: 0
+// spec: std 307-process §3.7.2 / §3.7.4
+//
+// `Child::pidfd` (Linux 5.3+): the pidfd tracking the running child.
+// expect-stdout:
+// pidfd ok
+// exit status: 0
+
+use rok::std::process::Command;
+
+fn main() {
+    let child = try Command::new("true").spawn() catch _ { panic("spawn") };
+    let fd = try child.pidfd() catch _ { -1 };
+    if fd >= 0 { println("pidfd ok"); }
+    let st = try child.wait() catch _ { panic("wait") };
+    println(f"{st}");
+}

@@ -4,10 +4,10 @@
 
 use core::mem::size_of;
 use core::ptr;
-use core::sync::atomic::{AtomicI32, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 
 use rokr_common::object_header::HEADER_SIZE;
-use rokr_common::tls;
+use rokr_common::{sys, tls};
 use rokr_gc::world;
 
 /// A rok `fn()` value: `{code, env}`; `code` takes the env first (808).
@@ -27,11 +27,23 @@ struct Start {
 /// is small.
 const DEFAULT_STACK: usize = 8 << 20;
 
+#[cfg(unix)]
 extern "C" fn thread_main(arg: *mut libc::c_void) -> *mut libc::c_void {
+    run(arg.cast());
+    ptr::null_mut()
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn thread_main(arg: *mut core::ffi::c_void) -> u32 {
+    run(arg.cast());
+    0
+}
+
+fn run(arg: *mut Start) {
     // SAFETY: `arg` is the `Start` that `rok_thread_spawn` leaked to us.
-    let s = unsafe { ptr::read(arg.cast::<Start>()) };
+    let s = unsafe { ptr::read(arg) };
     // SAFETY: allocated with `malloc` in `rok_thread_spawn`.
-    unsafe { libc::free(arg) };
+    unsafe { libc::free(arg.cast()) };
     tls::thread_init();
     crate::stack::thread_start(false);
     // SAFETY: registered for this thread by `rok_thread_spawn`.
@@ -41,7 +53,6 @@ extern "C" fn thread_main(arg: *mut libc::c_void) -> *mut libc::c_void {
         unsafe { code(s.f.env) };
     }
     thread_exit();
-    ptr::null_mut()
 }
 
 /// Leave the mutator registry; the thread must not touch GC objects
@@ -72,10 +83,24 @@ pub extern "C" fn rok_thread_spawn(f: RokFn, stack_size: usize, id: u64) -> usiz
     if start.is_null() {
         rokr_common::oom();
     }
-    // SAFETY: `start` is fresh; the attr / thread calls get valid
-    // out-pointers.
+    // SAFETY: fresh allocation.
+    unsafe { start.write(Start { me, f }) };
+    let handle = spawn_os(start, stack_size);
+    if handle == 0 {
+        // SAFETY: the thread did not start: `start` and `me` are still ours.
+        unsafe {
+            libc::free(start.cast());
+            world::unregister(me);
+        }
+    }
+    handle
+}
+
+/// An OS thread running [`run`]`(start)`: its join handle, or 0.
+#[cfg(unix)]
+fn spawn_os(start: *mut Start, stack_size: usize) -> usize {
+    // SAFETY: the attr / thread calls get valid out-pointers.
     unsafe {
-        start.write(Start { me, f });
         let mut attr: libc::pthread_attr_t = core::mem::zeroed();
         libc::pthread_attr_init(&mut attr);
         let size = if stack_size == 0 {
@@ -87,22 +112,54 @@ pub extern "C" fn rok_thread_spawn(f: RokFn, stack_size: usize, id: u64) -> usiz
         let mut tid: libc::pthread_t = core::mem::zeroed();
         let rc = libc::pthread_create(&mut tid, &attr, thread_main, start.cast());
         libc::pthread_attr_destroy(&mut attr);
-        if rc != 0 {
-            libc::free(start.cast());
-            world::unregister(me);
-            return 0;
-        }
-        tid as usize
+        if rc != 0 { 0 } else { tid as usize }
+    }
+}
+
+/// An OS thread running [`run`]`(start)`: its handle, or 0.
+#[cfg(windows)]
+fn spawn_os(start: *mut Start, stack_size: usize) -> usize {
+    use rokr_common::win;
+    let size = if stack_size == 0 {
+        DEFAULT_STACK
+    } else {
+        stack_size
+    };
+    // SAFETY: plain thread creation; `start` stays valid until `run`
+    // takes it.
+    unsafe {
+        win::CreateThread(
+            ptr::null_mut(),
+            size,
+            thread_main,
+            start.cast(),
+            win::STACK_SIZE_PARAM_IS_A_RESERVATION,
+            ptr::null_mut(),
+        ) as usize
     }
 }
 
 /// Wait for the thread behind `handle` to finish. 0 on success.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_thread_join(handle: usize) -> i32 {
-    world::enter_native();
+    crate::lane::block_begin();
     // SAFETY: `handle` came from `rok_thread_spawn`.
+    #[cfg(unix)]
     let rc = unsafe { libc::pthread_join(handle as libc::pthread_t, ptr::null_mut()) };
-    world::leave_native();
+    // SAFETY: as above; the join consumes the handle.
+    #[cfg(windows)]
+    let rc = unsafe {
+        use rokr_common::win;
+        let h = handle as win::HANDLE;
+        let r = win::WaitForSingleObject(h, win::INFINITE);
+        win::CloseHandle(h);
+        if r == win::WAIT_OBJECT_0 {
+            0
+        } else {
+            sys::errno()
+        }
+    };
+    crate::lane::block_end();
     rc
 }
 
@@ -111,15 +168,27 @@ pub extern "C" fn rok_thread_join(handle: usize) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_thread_detach(handle: usize) -> i32 {
     // SAFETY: `handle` came from `rok_thread_spawn` and was not joined.
-    unsafe { libc::pthread_detach(handle as libc::pthread_t) }
+    #[cfg(unix)]
+    unsafe {
+        libc::pthread_detach(handle as libc::pthread_t)
+    }
+    // SAFETY: as above.
+    #[cfg(windows)]
+    unsafe {
+        i32::from(rokr_common::win::CloseHandle(handle as rokr_common::win::HANDLE) == 0)
+    }
 }
 
 /// Online CPUs (at least 1): the executor's width.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_cpu_count() -> usize {
     // SAFETY: plain sysconf query.
-    let n = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
-    n.max(1) as usize
+    #[cfg(unix)]
+    let n = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as usize;
+    // SAFETY: plain query; 0xFFFF = every processor group.
+    #[cfg(windows)]
+    let n = unsafe { rokr_common::win::GetActiveProcessorCount(0xFFFF) } as usize;
+    n.max(1)
 }
 
 /// This thread's worker id (`rok_tls_worker_id`), the `ThreadId`.
@@ -132,17 +201,56 @@ pub extern "C" fn rok_thread_id() -> u64 {
 /// Block the calling thread for `ns` nanoseconds (negative = 0).
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_thread_sleep_ns(ns: i64) {
-    let mut ts = timespec(ns.max(0));
-    world::enter_native();
+    crate::lane::block_begin();
+    sleep(ns.max(0));
+    crate::lane::block_end();
+}
+
+#[cfg(unix)]
+fn sleep(ns: i64) {
+    // SAFETY: a zeroed `timespec` is valid.
+    let mut ts: libc::timespec = unsafe { core::mem::zeroed() };
+    ts.tv_sec = (ns / 1_000_000_000) as _;
+    ts.tv_nsec = (ns % 1_000_000_000) as _;
     // SAFETY: `ts` is valid for read and write (remaining time).
     while unsafe { libc::nanosleep(&ts, &mut ts) } != 0 {}
-    world::leave_native();
+}
+
+/// A high-resolution waitable timer (`Sleep` rounds to the system tick).
+#[cfg(windows)]
+fn sleep(ns: i64) {
+    use rokr_common::win;
+    // SAFETY: a private timer, waited on and closed here; a negative due
+    // time is relative, in 100 ns units.
+    unsafe {
+        let t = win::CreateWaitableTimerExW(
+            ptr::null_mut(),
+            ptr::null(),
+            win::CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+            win::TIMER_ALL_ACCESS,
+        );
+        if t == 0 {
+            rokr_common::fatal(b"rok runtime: CreateWaitableTimerExW failed");
+        }
+        let due = -((ns + 99) / 100).max(1);
+        win::SetWaitableTimer(t, &due, 0, ptr::null_mut(), ptr::null_mut(), 0);
+        win::WaitForSingleObject(t, win::INFINITE);
+        win::CloseHandle(t);
+    }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_thread_yield_now() {
     // SAFETY: no preconditions.
-    unsafe { libc::sched_yield() };
+    #[cfg(unix)]
+    unsafe {
+        libc::sched_yield();
+    }
+    // SAFETY: as above.
+    #[cfg(windows)]
+    unsafe {
+        rokr_common::win::SwitchToThread();
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -186,29 +294,88 @@ pub extern "C" fn rok_task_worker_clear() {
 }
 
 // ---------------------------------------------------------------------
-// Wait queue: futex semantics over a fixed table of pthread mutex /
-// condvar buckets keyed by address. Spurious wakeups are allowed
-// (callers re-check), so a bucket shared by unrelated words is fine.
-// A waiter counts as stopped for the GC.
+// Wait queue: futex semantics over a fixed table of buckets keyed by
+// address. Each bucket holds a list of its waiters (address + own
+// condvar), so a wake reaches only the waiters of its word, and
+// `wake_one` exactly one of them. Spurious wakeups are allowed (callers
+// re-check). A waiter counts as stopped for the GC.
 // ---------------------------------------------------------------------
 
-struct Bucket {
-    lock: core::cell::UnsafeCell<libc::pthread_mutex_t>,
-    cond: core::cell::UnsafeCell<libc::pthread_cond_t>,
+/// A thread blocked in [`wait_on`]: a node on its stack, linked into
+/// its bucket while it waits.
+struct Waiter {
+    addr: usize,
+    cond: sys::Cond,
+    /// Unlinked by a waker (under the bucket lock).
+    woken: bool,
+    next: *mut Waiter,
 }
 
-// SAFETY: pthread objects are designed for shared use.
+struct Bucket {
+    lock: sys::Lock,
+    /// Waiters, oldest first (under `lock`).
+    head: core::cell::UnsafeCell<*mut Waiter>,
+}
+
+// SAFETY: `head` is only touched under `lock`.
 unsafe impl Sync for Bucket {}
 
 static BUCKETS: [Bucket; 64] = [const {
     Bucket {
-        lock: core::cell::UnsafeCell::new(libc::PTHREAD_MUTEX_INITIALIZER),
-        cond: core::cell::UnsafeCell::new(libc::PTHREAD_COND_INITIALIZER),
+        lock: sys::Lock::new(),
+        head: core::cell::UnsafeCell::new(ptr::null_mut()),
     }
 }; 64];
 
 fn bucket(addr: usize) -> &'static Bucket {
     &BUCKETS[(addr >> 2) % BUCKETS.len()]
+}
+
+impl Bucket {
+    /// Unlink the first waiter on `addr` (`all`: every one) and signal
+    /// it.
+    ///
+    /// # Safety
+    /// The caller holds `lock`.
+    unsafe fn wake(&self, addr: usize, all: bool) {
+        // SAFETY: the list is ours under the lock; nodes stay alive
+        // until their owner sees `woken` or unlinks itself (both under
+        // the lock).
+        unsafe {
+            let mut link = self.head.get();
+            while !(*link).is_null() {
+                let w = *link;
+                if (*w).addr != addr {
+                    link = &raw mut (*w).next;
+                    continue;
+                }
+                *link = (*w).next;
+                (*w).woken = true;
+                (*w).cond.broadcast();
+                if !all {
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Unlink `me` if a waker has not.
+    ///
+    /// # Safety
+    /// The caller holds `lock`; `me` is its own node.
+    unsafe fn leave(&self, me: *mut Waiter) {
+        // SAFETY: as in `wake`.
+        unsafe {
+            if (*me).woken {
+                return;
+            }
+            let mut link = self.head.get();
+            while *link != me {
+                link = &raw mut (**link).next;
+            }
+            *link = (*me).next;
+        }
+    }
 }
 
 /// A word a thread can wait on.
@@ -228,53 +395,53 @@ impl Futex for AtomicU8 {
     }
 }
 
-#[allow(clippy::unnecessary_cast)] // `time_t` / `c_long` widths vary by target
-const fn timespec(ns: i64) -> libc::timespec {
-    libc::timespec {
-        tv_sec: (ns / 1_000_000_000) as libc::time_t,
-        tv_nsec: (ns % 1_000_000_000) as libc::c_long,
-    }
-}
-
 /// Block while `w` holds `expected`, at most `timeout_ns` (< 0: no
 /// limit); may return spuriously.
-#[allow(clippy::unnecessary_cast)] // `time_t` / `c_long` widths vary by target
 pub fn wait_on<W: Futex>(w: &W, expected: i32, timeout_ns: i64) {
-    let b = bucket(ptr::from_ref(w) as usize);
-    world::enter_native();
-    // SAFETY: statically initialized pthread objects; valid timespecs.
-    unsafe {
-        libc::pthread_mutex_lock(b.lock.get());
-        if w.value() == expected {
-            if timeout_ns < 0 {
-                libc::pthread_cond_wait(b.cond.get(), b.lock.get());
-            } else {
-                // `pthread_cond_timedwait` takes a CLOCK_REALTIME deadline.
-                let mut now: libc::timespec = core::mem::zeroed();
-                libc::clock_gettime(libc::CLOCK_REALTIME, &mut now);
-                let at = timespec(
-                    (now.tv_sec as i64)
-                        .saturating_mul(1_000_000_000)
-                        .saturating_add(now.tv_nsec as i64)
-                        .saturating_add(timeout_ns),
-                );
-                libc::pthread_cond_timedwait(b.cond.get(), b.lock.get(), &at);
+    let addr = ptr::from_ref(w) as usize;
+    let b = bucket(addr);
+    let mut me = Waiter {
+        addr,
+        cond: sys::Cond::new(),
+        woken: false,
+        next: ptr::null_mut(),
+    };
+    let me_p = &raw mut me;
+    crate::lane::block_begin();
+    b.lock.lock();
+    if w.value() == expected {
+        // SAFETY: the list is ours under the lock; `me` outlives its time
+        // in the list (unlinked before we return).
+        unsafe {
+            // Append: wakes go oldest first.
+            let mut link = b.head.get();
+            while !(*link).is_null() {
+                link = &raw mut (**link).next;
             }
+            *link = me_p;
+            if timeout_ns < 0 {
+                (*me_p).cond.wait(&b.lock);
+            } else {
+                (*me_p).cond.wait_timeout(&b.lock, timeout_ns as u64);
+            }
+            b.leave(me_p);
         }
-        libc::pthread_mutex_unlock(b.lock.get());
     }
-    world::leave_native();
+    b.lock.unlock();
+    crate::lane::block_end();
 }
 
 /// Wake every thread blocked in [`wait_on`] on `w`.
 pub fn wake<W: Futex>(w: &W) {
-    let b = bucket(ptr::from_ref(w) as usize);
-    // SAFETY: statically initialized pthread objects.
-    unsafe {
-        libc::pthread_mutex_lock(b.lock.get());
-        libc::pthread_cond_broadcast(b.cond.get());
-        libc::pthread_mutex_unlock(b.lock.get());
-    }
+    wake_waiters(ptr::from_ref(w) as usize, true);
+}
+
+fn wake_waiters(addr: usize, all: bool) {
+    let b = bucket(addr);
+    b.lock.lock();
+    // SAFETY: the lock is held around the list walk.
+    unsafe { b.wake(addr, all) };
+    b.lock.unlock();
 }
 
 /// Element `index` of the `GcBuf<i32>` `buf`.
@@ -299,54 +466,33 @@ pub extern "C" fn rok_sync_wake(buf: *mut u8, index: usize) {
     wake(word(buf, index));
 }
 
+/// Wake the longest-blocked thread in `rok_sync_wait` on that element.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_sync_wake_one(buf: *mut u8, index: usize) {
+    wake_waiters(ptr::from_ref(word(buf, index)) as usize, false);
+}
+
 // ---------------------------------------------------------------------
 // Lazily initialized statics: compiled code checks the state byte
 // (0 new, 1 running, 2 ready) and calls these around the initializer.
 // ---------------------------------------------------------------------
 
 /// This thread's running initializers, innermost first: a malloc'd
-/// list behind a pthread key (no limit on nesting or concurrency).
+/// list headed in `rok_tls_static_inits` (no limit on nesting or
+/// concurrency).
 struct Initializing {
     state: usize,
     next: *mut Initializing,
 }
 
-/// The pthread key holding each thread's `Initializing` list head.
-fn init_key() -> libc::pthread_key_t {
-    static KEY: AtomicUsize = AtomicUsize::new(usize::MAX);
-    let k = KEY.load(Ordering::Acquire);
-    if k != usize::MAX {
-        return k as libc::pthread_key_t;
-    }
-    let mut new: libc::pthread_key_t = 0;
-    // SAFETY: valid out-pointer; no destructor (a thread exits with an
-    // empty list: every `begin` that pushed is matched by an `end`).
-    if unsafe { libc::pthread_key_create(&mut new, None) } != 0 {
-        rokr_common::fatal(b"rok runtime: pthread_key_create failed");
-    }
-    match KEY.compare_exchange(
-        usize::MAX,
-        new as usize,
-        Ordering::AcqRel,
-        Ordering::Acquire,
-    ) {
-        Ok(_) => new,
-        Err(won) => {
-            // SAFETY: our unused key.
-            unsafe { libc::pthread_key_delete(new) };
-            won as libc::pthread_key_t
-        }
-    }
-}
-
 fn initializing_head() -> *mut Initializing {
-    // SAFETY: a key from `init_key`.
-    unsafe { libc::pthread_getspecific(init_key()) }.cast()
+    // SAFETY: this thread's own slot.
+    unsafe { tls::static_inits().read() as *mut Initializing }
 }
 
 fn set_initializing_head(head: *mut Initializing) {
-    // SAFETY: a key from `init_key`.
-    unsafe { libc::pthread_setspecific(init_key(), head.cast()) };
+    // SAFETY: this thread's own slot.
+    unsafe { tls::static_inits().write(head as usize) };
 }
 
 /// 1: the caller runs the initializer, then calls
@@ -466,5 +612,51 @@ mod tests {
                 wait_on(&w, 7, -1);
             }
         });
+    }
+
+    #[test]
+    fn wake_one_wakes_one() {
+        rokr_common::tls::thread_init();
+        rokr_gc::world::attach_current();
+        let w = AtomicI32::new(0);
+        let woke = AtomicI32::new(0);
+        let addr = ptr::from_ref(&w) as usize;
+        let waiting = || {
+            let b = bucket(addr);
+            b.lock.lock();
+            let mut n = 0;
+            // SAFETY: the bucket's own lock around its list.
+            unsafe {
+                let mut p = *b.head.get();
+                while !p.is_null() {
+                    n += i32::from((*p).addr == addr);
+                    p = (*p).next;
+                }
+            }
+            b.lock.unlock();
+            n
+        };
+        std::thread::scope(|s| {
+            for _ in 0..3 {
+                s.spawn(|| {
+                    rokr_common::tls::thread_init();
+                    rokr_gc::world::attach_current();
+                    wait_on(&w, 0, 5_000_000_000);
+                    woke.fetch_add(1, Ordering::SeqCst);
+                });
+            }
+            while waiting() < 3 {
+                std::thread::yield_now();
+            }
+            wake_waiters(addr, false);
+            while woke.load(Ordering::SeqCst) < 1 {
+                std::thread::yield_now();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            assert_eq!(woke.load(Ordering::SeqCst), 1);
+            assert_eq!(waiting(), 2);
+            wake(&w);
+        });
+        assert_eq!(woke.load(Ordering::SeqCst), 3);
     }
 }

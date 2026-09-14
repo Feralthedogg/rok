@@ -1,4 +1,6 @@
 // expect-exit: 17
+// expect-stdout:
+// 100 50 50 15
 
 fn classify(x: i32) -> i32 {
     return match x {
@@ -10,6 +12,7 @@ fn classify(x: i32) -> i32 {
 
 fn main() -> i32 {
     let c = classify(5);
+    println(f"{classify(0)} {classify(1)} {classify(2)} {c}");
     return c + 2;
 }
 

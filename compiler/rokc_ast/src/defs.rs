@@ -45,16 +45,36 @@ pub const CONST_FN_ATTR: &str = "#const_fn";
 /// (spec 8.6.10).
 pub const C_VARIADIC_ATTR: &str = "#c_variadic";
 
-/// First path segment of a qualified path `<T as Tr>::X` (spec 2.13.4):
-/// its generics are `[T, Tr]`.
-pub const QPATH_MARK: &str = "#as";
-
 /// Method name of the `using` desugar's release call (`x.#drop()`):
 /// `Drop::drop`, exempt from the direct-call ban (spec 2.13.4).
 pub const USING_DROP_METHOD: &str = "#drop";
 
-/// Error type written for an untyped `throws` (= `throws (any Error)`).
-pub const UNTYPED_THROWS_MARK: &str = "#throws";
+/// The error type of an untyped `throws`: `any rok::core::error::Error`
+/// (spec 4.14.3).
+#[must_use]
+pub fn untyped_throws_ty(span: Span) -> Ty {
+    let segments = UNTYPED_THROWS_TRAIT
+        .iter()
+        .map(|s| PathSegment {
+            name: (*s).to_owned(),
+            generics: Vec::new(),
+        })
+        .collect();
+    Ty {
+        kind: TyKind::AnyTrait(vec![Path { segments, span }]),
+        span,
+    }
+}
+
+/// Is `t` the error type of an untyped `throws` (`untyped_throws_ty`)?
+#[must_use]
+pub fn is_untyped_throws(t: &Ty) -> bool {
+    matches!(&t.kind, TyKind::AnyTrait(b) if matches!(b.as_slice(), [p]
+        if p.segments.iter().map(|s| s.name.as_str()).eq(UNTYPED_THROWS_TRAIT.iter().copied())
+            && p.segments.iter().all(|s| s.generics.is_empty())))
+}
+
+const UNTYPED_THROWS_TRAIT: &[&str] = &["rok", "core", "error", "Error"];
 
 /// `Name = Ty` if `ty` is an associated-type binding (`TyKind::Binding`).
 #[must_use]
@@ -73,7 +93,7 @@ pub enum ThrowsKind {
     #[default]
     None,
     /// Bare `throws` = `throws (any Error)`; the parser rewrites it to
-    /// `Typed([UNTYPED_THROWS_MARK])`.
+    /// `Typed([untyped_throws_ty(..)])`.
     Untyped,
     /// `throws (A | B)` — the listed types form the error sum.
     Typed(Vec<Ty>),
@@ -233,11 +253,22 @@ pub struct Expr {
     pub span: Span,
 }
 
+/// A qualified path `<T as Tr>::item` (spec 2.13.4): `item` of the impl
+/// of `Tr` for `T` (an associated type, method or const).
+#[derive(Clone, Debug)]
+pub struct QPath {
+    pub self_ty: Ty,
+    pub trait_path: Path,
+    pub item: String,
+}
+
 #[derive(Clone, Debug)]
 pub enum ExprKind {
     Literal(Literal),
     /// Bare identifier reference (variable or item).
     Path(Path),
+    /// `<T as Tr>::m` / `<T as Tr>::N` (spec 2.13.4).
+    QPath(Box<QPath>),
     SelfLower,
     SelfUpper,
     Tuple(Vec<Expr>),
@@ -559,6 +590,8 @@ pub struct FnTyBounds {
 pub enum TyKind {
     /// Path type (`i32`, `List<T>`, `std::time::Duration`).
     Path(Path),
+    /// `<T as Tr>::X` (spec 2.13.4).
+    QPath(Box<QPath>),
     /// Sum type `A | B | C`.
     Sum(Vec<Ty>),
     /// Tuple `(A, B)`.
@@ -719,6 +752,9 @@ pub struct ImplDef {
     pub self_ty: Ty,
     pub where_clause: Vec<WherePred>,
     pub items: Vec<ImplItem>,
+    /// The module the impl is declared in (`a::b`; empty at a package
+    /// root), set by the driver when it flattens modules.
+    pub module: String,
     pub span: Span,
 }
 

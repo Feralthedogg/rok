@@ -1,0 +1,37 @@
+// expect-exit: 0
+// expect-stdout:
+// 8 16 32 64 8 16 32 64 64 64
+// 99 99 99
+// 0x12345678 0x78563412 0x12345678
+// [120, 86, 52, 18] [18, 52, 86, 120]
+// 305419896 305419896
+// [255, 255, 255, 255, 255, 255, 255, 127] 9223372036854775807
+
+// Stdlib 2.1.4: `BITS` / `MIN` / `MAX` are inherent consts; an inherent
+// const shadows a user trait's const of the same name on the same type
+// (`i8::BITS`), and the trait's stays reachable through the trait.
+trait Bits {
+    const BITS: i32;
+}
+
+impl Bits for i8 {
+    const BITS: i32 = 99;
+}
+
+fn bits<T: Bits>() -> i32 {
+    return T::BITS;
+}
+
+fn main() -> i32 {
+    println(f"{i8::BITS} {i16::BITS} {i32::BITS} {i64::BITS} {u8::BITS} {u16::BITS} {u32::BITS} {u64::BITS} {isize::BITS} {usize::BITS}");
+    println(f"{<i8 as Bits>::BITS} {bits::<i8>()} {<i8 as Bits>::BITS}");
+    let x: u32 = 0x12345678;
+    println(f"{x.to_le():#x} {x.to_be():#x} {u32::from_be(x.to_be()):#x}");
+    println(f"{x.to_ne_bytes():?} {x.to_be_bytes():?}");
+    println(f"{u32::from_ne_bytes(x.to_ne_bytes())} {u32::from_le_bytes([120, 86, 52, 18])}");
+    let m = isize::MAX;
+    println(f"{m.to_le_bytes():?} {isize::from_ne_bytes(m.to_ne_bytes())}");
+    return 0;
+}
+
+// spec: std 201-numbers §2.1.4

@@ -24,6 +24,7 @@ use core::mem::size_of;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
+use rokr_common::sys;
 use rokr_common::tls::{self, MUTATOR_GC_COOPERATING, MUTATOR_PARKED, MUTATOR_RUNNING};
 
 /// One registered mutator thread.
@@ -52,18 +53,17 @@ pub struct Mutator {
 }
 
 struct World {
-    lock: UnsafeCell<libc::pthread_mutex_t>,
-    cond: UnsafeCell<libc::pthread_cond_t>,
+    lock: sys::Lock,
+    cond: sys::Cond,
     threads: UnsafeCell<*mut Mutator>,
 }
 
-// SAFETY: `threads` is only touched with `lock` held; the pthread
-// objects are designed for shared use.
+// SAFETY: `threads` is only touched with `lock` held.
 unsafe impl Sync for World {}
 
 static WORLD: World = World {
-    lock: UnsafeCell::new(libc::PTHREAD_MUTEX_INITIALIZER),
-    cond: UnsafeCell::new(libc::PTHREAD_COND_INITIALIZER),
+    lock: sys::Lock::new(),
+    cond: sys::Cond::new(),
     threads: UnsafeCell::new(ptr::null_mut()),
 };
 
@@ -72,14 +72,6 @@ static STOP: AtomicBool = AtomicBool::new(false);
 
 /// The process is exiting ([`halt`]): no thread runs rok code again.
 static HALT: AtomicBool = AtomicBool::new(false);
-
-/// Block the calling thread until the process exits.
-fn park_forever() -> ! {
-    loop {
-        // SAFETY: plain libc call.
-        unsafe { libc::pause() };
-    }
-}
 
 /// `rok_runtime_shutdown` (805 §8.5.2): no other thread runs rok code
 /// again.
@@ -106,24 +98,20 @@ pub fn halt() {
 }
 
 fn raw_lock() {
-    // SAFETY: statically initialized mutex.
-    unsafe { libc::pthread_mutex_lock(WORLD.lock.get()) };
+    WORLD.lock.lock();
 }
 
 /// Release the world lock.
 pub fn unlock() {
-    // SAFETY: the caller holds the lock.
-    unsafe { libc::pthread_mutex_unlock(WORLD.lock.get()) };
+    WORLD.lock.unlock();
 }
 
 fn wait() {
-    // SAFETY: the caller holds the lock.
-    unsafe { libc::pthread_cond_wait(WORLD.cond.get(), WORLD.lock.get()) };
+    WORLD.cond.wait(&WORLD.lock);
 }
 
 fn broadcast() {
-    // SAFETY: statically initialized condvar.
-    unsafe { libc::pthread_cond_broadcast(WORLD.cond.get()) };
+    WORLD.cond.broadcast();
 }
 
 /// With the lock held: if another thread is stopping the world, park
@@ -159,7 +147,7 @@ pub fn lock() {
     raw_lock();
     if HALT.load(Ordering::Relaxed) {
         unlock();
-        park_forever();
+        sys::park_forever();
     }
     cooperate();
 }
@@ -167,7 +155,7 @@ pub fn lock() {
 /// `rok_runtime_yield` (804 §8.4.3): the slow path of a safepoint poll.
 pub fn safepoint() {
     if HALT.load(Ordering::Relaxed) {
-        park_forever();
+        sys::park_forever();
     }
     lock();
     // Under the lock, as a stopper raises the flag: cleared outside it,

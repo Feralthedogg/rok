@@ -1,5 +1,8 @@
 // spec: std 2.15
 // expect-exit: 0
+// expect-stdout:
+// 0
+
 // `==` on strings of every length class the inline compare splits by
 // (0, 1, 2..3, 4..7, 8..16, longer), differing at either end or inside.
 

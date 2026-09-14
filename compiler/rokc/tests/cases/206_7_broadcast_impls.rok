@@ -1,0 +1,27 @@
+// spec: std 206-broadcast §2.6.7
+// expect-exit: 0
+// expect-stdout:
+// [11, 22] [3, 4]
+// [11, 22] [false, true]
+// [5, 7, 9] [true, false, true]
+// [2, 3]
+
+// `List`, `Slice` and `[T; N]` implement the dot traits: generic code
+// bounded by them and the method form work too.
+fn sum2<C: DotAdd<C>>(a: C, b: C) -> C::Output {
+    a .+ b
+}
+
+fn main() {
+    let a: List<i64> = [1, 2];
+    let b: List<i64> = [10, 20];
+    println(f"{sum2(a, b):?} {a.dot_add(2):?}");
+    let l: List<i64> = [1, 2, 10, 20];
+    println(f"{sum2(l[0:2], l[2:4]):?} {l[0:2].dot_gt(1):?}");
+    let x: [i32; 3] = [1, 2, 3];
+    let y: [i32; 3] = [4, 5, 6];
+    let z: [i32; 3] = sum2(x, y);
+    println(f"{z:?} {[true, true, true].dot_logical_and([true, false, true]):?}");
+    let one: i64 = 1;
+    println(f"{one.dot_add(a):?}");
+}

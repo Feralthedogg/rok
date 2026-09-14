@@ -97,3 +97,8 @@ panic = "abort"
 opt-level = 0
 debug = true
 panic = "abort"
+
+# Recursive descent at the nesting cap: ~150 KB of frames per level
+# unoptimized, ~20 KB at opt-level 1 (`PARSER_STACK`).
+[profile.dev.package.rokc_parser]
+opt-level = 1

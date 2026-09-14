@@ -19,7 +19,7 @@ use crate::{Options, wrap};
 pub struct Compiled {
     pub obj: Obj,
     pub gc_types: Vec<Vec<u32>>,
-    pub errors: Vec<String>,
+    pub errors: Vec<(rokc_diagnostic::Span, String)>,
 }
 
 pub fn compile(
@@ -52,8 +52,9 @@ pub fn compile(
             }
         }
     }
-    let mut obj = Obj::new(t.arch == "x86_64", t.os != "macos");
-    let mut errors = check_packed(module);
+    let coff = t.os == "windows";
+    let mut obj = Obj::new(t.arch == "x86_64", !coff && t.os != "macos", coff);
+    let mut errors = Vec::new();
     let defines = |name: &str| {
         opts.repl
             .as_ref()
@@ -72,7 +73,9 @@ pub fn compile(
     let mut c_entries = Vec::new();
     for f in &module.functions {
         let c = match f.facts.abi {
-            Abi::C { variadic } => classify(&mut errors, t, &f.param_tys, &f.ret_ty, variadic),
+            Abi::C { variadic } => {
+                classify(&mut errors, f.span, t, &f.param_tys, &f.ret_ty, variadic)
+            }
             Abi::Rok if f.facts.linkage == Linkage::Extern => {
                 abi::classify_rok(t, &f.param_tys, &f.ret_ty)
             }
@@ -164,6 +167,8 @@ pub fn compile(
         .map(|r| r.gc_tables.clone())
         .unwrap_or_default();
     let pre_tables = gc_types.len();
+    let quiet = rokc_codegen_mlir::emit::quiet_functions(module, &pkgs, t);
+    let reentrant = rokc_codegen_mlir::emit::reentrant_functions(module);
     let mut ctx = Ctx {
         t,
         conv,
@@ -175,6 +180,8 @@ pub fn compile(
         overflow_checks: opts.overflow_checks,
         debug: opts.debug,
         local_statics: &local_statics,
+        quiet: &quiet,
+        reentrant: &reentrant,
         errors: Vec::new(),
     };
     let mut funcs: Vec<(Func, bool, bool)> = Vec::new();
@@ -299,9 +306,9 @@ pub fn compile(
                 let sect = if s.is_mut { Sect::Data } else { Sect::Const };
                 ctx.obj.define_data(sym, sect, &bytes, align, global);
             }
-            None => errors.push(format!(
-                "unsupported in codegen: initializer of static `{}`",
-                s.name
+            None => errors.push((
+                rokc_diagnostic::Span::DUMMY,
+                format!("unsupported in codegen: initializer of static `{}`", s.name),
             )),
         }
     }
@@ -382,48 +389,4 @@ fn const_bytes(v: &ConstVal, ty: &MirTy, t: &rokc_mir::Target) -> Option<Vec<u8>
         }
         _ => None,
     }
-}
-
-/// A `#[repr(packed)]` struct is for C data (spec 6.2.2): its fields may
-/// sit unaligned, where the collector cannot read a reference.
-fn check_packed(module: &MirModule) -> Vec<String> {
-    fn walk(ty: &MirTy, t: &rokc_mir::Target, bad: &mut std::collections::BTreeSet<u32>) {
-        match ty {
-            MirTy::Struct(id, ps) => {
-                if t.repr(*id).packed && t.has_gc_ref(ty) {
-                    bad.insert(id.0);
-                }
-                ps.iter().for_each(|p| walk(p, t, bad));
-            }
-            MirTy::Tuple(ps) => ps.iter().for_each(|p| walk(p, t, bad)),
-            MirTy::Array(e, _) => walk(e, t, bad),
-            MirTy::Union(vs, _) => vs.iter().for_each(|(_, v)| walk(v, t, bad)),
-            _ => {}
-        }
-    }
-    let t = &module.target;
-    if t.reprs.values().all(|r| !r.packed) {
-        return Vec::new();
-    }
-    let mut bad = std::collections::BTreeSet::new();
-    let tys = module
-        .functions
-        .iter()
-        .flat_map(|f| f.locals.iter().map(|l| &l.ty))
-        .chain(module.statics.iter().map(|s| &s.ty));
-    for ty in tys {
-        walk(ty, t, &mut bad);
-    }
-    bad.into_iter()
-        .map(|id| {
-            let name = module
-                .struct_names
-                .get(&id)
-                .map_or_else(|| format!("#{id}"), |(n, _)| n.clone());
-            format!(
-                "`#[repr(packed)]` struct `{name}` holds a GC reference (`str`, a \
-                 collection, a closure ..); a packed struct is for C data (spec 6.2.2)"
-            )
-        })
-        .collect()
 }

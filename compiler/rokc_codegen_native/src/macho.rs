@@ -128,6 +128,9 @@ pub fn write(obj: &Obj) -> Vec<u8> {
                     RelKind::X86Pc32 => (X86_64_RELOC_SIGNED, true, 2),
                     RelKind::X86GotLoad => (X86_64_RELOC_GOT_LOAD, true, 2),
                     RelKind::X86Tls => (X86_64_RELOC_TLV, true, 2),
+                    RelKind::X86SecRel | RelKind::SecRelHi12 | RelKind::SecRelLo12 => {
+                        unreachable!("COFF relocation in a Mach-O object")
+                    }
                 };
                 (r.off, ty, pcrel, len, true, index[r.sym as usize])
             })

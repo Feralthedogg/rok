@@ -38,3 +38,4 @@ fn main() {
     env::remove_var("XDG_CACHE_HOME");
     println(f"no home: {env::cache_dir() is none}");
 }
+// only-os: macos linux

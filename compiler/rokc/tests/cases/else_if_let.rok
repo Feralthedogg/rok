@@ -1,4 +1,6 @@
 // expect-exit: 17
+// expect-stdout:
+// 6 9 100 -1
 
 fn pick(b: i32) -> i32 | none {
     if b == 1 {
@@ -21,5 +23,6 @@ fn classify(b: i32) -> i32 {
 }
 
 fn main() -> i32 {
+    println(f"{classify(1)} {classify(2)} {classify(99)} {classify(3)}");
     return classify(1) + classify(2) + classify(99) - 98;
 }

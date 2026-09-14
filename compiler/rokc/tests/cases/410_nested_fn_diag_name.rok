@@ -1,0 +1,14 @@
+// spec: 004.10.1-form
+// Diagnostics name a nested fn as written, not by its lifted name.
+// expect-error: missing argument `b` in call to `two`
+// expect-error: argument `x` of `inner` expects `i32`, found `bool`
+// forbid-error: outer#
+
+fn outer() -> i32 {
+    fn inner(x: i32) -> i32 { x + 1 }
+    fn two(a: i32, b: i32) -> i32 { a + b }
+    two(1);
+    inner(true)
+}
+
+fn main() -> i32 { outer() }

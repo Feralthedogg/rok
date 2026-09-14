@@ -72,3 +72,4 @@ fn main() {
 }
 
 // spec: std 308-path
+// only-os: macos linux

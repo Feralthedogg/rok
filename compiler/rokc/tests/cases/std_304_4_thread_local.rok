@@ -1,0 +1,27 @@
+// spec: std 304-thread §3.4.4 / §3.4.2
+// expect-exit: 0
+// expect-stdout:
+// worker 1 2
+// main 10
+// with 20
+// ids differ true
+
+// 3.4.4: `thread::local` gives each thread its own value (`init` on
+// first use per thread); 3.4.2: `ThreadLocal::with`, `Thread::id`.
+use rok::std::thread;
+
+fn main() {
+    let counter = thread::local(|| 0);
+    counter.set(10);
+    let h = thread::spawn(|| {
+        counter.set(counter.get() + 1);
+        let a = counter.get();
+        counter.set(counter.get() + 1);
+        (a, counter.get(), thread::current().id())
+    });
+    let (a, b, id) = try! h.join();
+    println(f"worker {a} {b}");
+    println(f"main {counter.get()}");
+    println(f"with {counter.with(|v| v * 2)}");
+    println(f"ids differ {id != thread::current().id()}");
+}

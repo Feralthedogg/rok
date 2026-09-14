@@ -62,7 +62,9 @@ package (the package is found by looking upward for `main.rok` / `lib.rok`),
 or a lone `.rok` file, which is built as an anonymous executable package.
 
 global options:
-  -v, --verbose, -vv           more output (stage timings)
+  -v, --verbose                stage timings
+  -vv                          also the files read and the generic
+                               instances made
   -q, --quiet                  no progress output
   --color=auto|always|never    color diagnostics (--no-color = never)
   --cwd=<path>                 change directory first
@@ -84,6 +86,8 @@ build options:
   -O0 | -O1 | -O2 | -O3 | -Os  optimization level (default -O0)
   -C overflow-checks[=yes|no]  integer overflow panics (default: on at -O0)
   -C backend=native|llvm       code generator (default: native at -O0, else LLVM)
+  -C subsystem=console|windows Windows executable subsystem (default: console;
+                               windows: a GUI program entered through WinMain)
   --cfg <flag | key=value>     #[cfg] flag (repeatable)
   --print cfg                  print the active cfg (target keys, --cfg,
                                debug_assertions below -O1) and exit
@@ -98,6 +102,8 @@ build options:
                                <sysroot>/lib/rok/{core,std,bare}/lib.rok)
   --rokr <lib>                 runtime library: path, or name for -l<name>
                                (default: <sysroot>/lib/librokr.a)
+  -L <dir>                     native library search directory, before
+                               LIBRARY_PATH (repeatable)
   --extern <name>=<path>       dependency package: its directory or `lib.rok`
                                (prebuilt into target/<profile>/deps/ first,
                                each after the ones before it), or a prebuilt
@@ -277,6 +283,8 @@ fn parse_args(raw: Vec<String>) -> Args {
             "--target-dir" => a.target_dir = Some(value(&name, inline, &mut it).into()),
             "--target" => a.target = Some(value(&name, inline, &mut it)),
             "--rokr" => a.opts.rokr = value(&name, inline, &mut it),
+            "-L" => a.opts.lib_dirs.push(value(&name, inline, &mut it).into()),
+            s if s.starts_with("-L") => a.opts.lib_dirs.push(s[2..].into()),
             "--load-mlir-plugin" | "--load-mlir-pass-plugin" => {
                 let v = value(&name, inline, &mut it);
                 let p = rokc_interface::find_mlir_plugin(&v).unwrap_or_else(|e| fail(&e));
@@ -313,7 +321,13 @@ fn parse_args(raw: Vec<String>) -> Args {
                         a.opts.overflow_checks = Some(false);
                     }
                     "backend=native" | "backend=llvm" => a.opts.backend = Some(v[8..].to_owned()),
-                    _ => usage_error(&format!("unknown codegen option `{v}`")),
+                    _ => match v
+                        .strip_prefix("subsystem=")
+                        .and_then(rokc_interface::Subsystem::parse)
+                    {
+                        Some(s) => a.opts.subsystem = s,
+                        None => usage_error(&format!("unknown codegen option `{v}`")),
+                    },
                 }
             }
             "--keep" => a.opts.keep_temps = true,
@@ -452,6 +466,18 @@ fn real_main() {
         }
         return;
     }
+    // Commands of one `[path]` (`test` / `bench`: and a filter).
+    let most = match a.cmd.as_str() {
+        "build" | "emit" | "run" | "check" | "lint" | "doc" | "clean" | "repl" => 1,
+        "test" | "bench" => 2,
+        _ => usize::MAX,
+    };
+    if let Some(extra) = a.positional.get(most) {
+        usage_error(&format!(
+            "unexpected argument `{extra}` (rokc {} --help)",
+            a.cmd
+        ));
+    }
     match a.cmd.as_str() {
         "build" => cmd_build(with_defaults(a)),
         "emit" => {
@@ -559,15 +585,40 @@ fn with_defaults(mut a: Args) -> Args {
             Err(e) => fail(&e),
         }
     }
+    a.bootstrap = rokc_interface::bootstrap_tiers(&a.bootstrap);
     let links = matches!(
         a.cmd.as_str(),
         "run" | "test" | "bench" | "repl" | "jupyter"
     ) || (a.cmd == "build" && a.emit.is_empty());
+    let host = env!("ROK_HOST");
+    let triple = a.target.clone().unwrap_or_else(|| host.to_owned());
+    let dir = sys.targets.join(&triple);
+    let missing = || {
+        format!(
+            "no runtime for {triple}: {} is missing (this toolchain does not ship the \
+             target; in the repository, run targets/build.sh {triple})",
+            dir.display()
+        )
+    };
     if a.opts.rokr == "rokr" {
-        match sys.rokr {
+        let rokr = if triple == host {
+            sys.rokr
+        } else {
+            Some(dir.join(rokc_core::runtime_lib(triple.contains("-windows"))))
+                .filter(|p| p.is_file())
+                .ok_or_else(missing)
+        };
+        match rokr {
             Ok(lib) => a.opts.rokr = lib.display().to_string(),
             Err(e) if links => fail(&e),
             Err(_) => {}
+        }
+    }
+    if triple.contains("-linux") {
+        if dir.is_dir() {
+            a.opts.libc = Some(dir.clone());
+        } else if links {
+            fail(&missing());
         }
     }
     a
@@ -641,6 +692,8 @@ fn session(a: &Args, pkg: &Package) -> Session {
     }
     if a.opts.opt_level == "0" {
         session.add_cfg("debug_assertions".to_owned());
+    } else {
+        session.set_inline_prebuilt(true);
     }
     for (n, p) in &a.externs {
         session.add_extern(n.clone(), p.clone());
@@ -692,6 +745,9 @@ fn compile(a: &Args, pkg: &Package, mode: Mode) -> (CompileResult, String, Insta
         process::exit(1);
     }
     stage(a, "front end", started);
+    if a.verbose > 1 && !a.quiet {
+        eprint!("{}", result.trace());
+    }
     (result, warnings, started)
 }
 
@@ -750,7 +806,21 @@ fn out_dir(a: &Args, pkg: Option<&Package>) -> PathBuf {
     dir.join(if release { "release" } else { "debug" })
 }
 
-/// Layout: `target/<profile>/<name>` (executable),
+/// The file name of executable `name` for the build's target: `.exe` on
+/// Windows.
+fn exe_file(a: &Args, name: &str) -> String {
+    let windows = a
+        .target
+        .as_deref()
+        .map_or(cfg!(windows), |t| t.contains("-windows"));
+    if windows {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    }
+}
+
+/// Layout: `target/<profile>/<name>` (executable, `<name>.exe` for Windows),
 /// `target/<profile>/lib<name>.a` + `<name>.rhir` (library),
 /// `target/<profile>/build/<name>.<ext>` (`--emit`).
 fn cmd_build(mut a: Args) {
@@ -786,7 +856,7 @@ fn cmd_build(mut a: Args) {
         target.join(if pkg.lib {
             format!("lib{}.a", lib_name(&a, &pkg))
         } else {
-            pkg.name.clone()
+            exe_file(&a, &pkg.name)
         })
     });
     build_fresh(&a, &pkg, &out, |a, result| {
@@ -816,7 +886,7 @@ fn build_fresh(a: &Args, pkg: &Package, out: &Path, link: impl FnOnce(&Args, &Co
     let (result, warnings, started) = compile(a, pkg, Mode::Build);
     let t = Instant::now();
     link(a, &result);
-    fp.save(&warnings);
+    fp.save(&result.files, &warnings);
     stage(a, "codegen + link", t);
     finished(a, started);
 }
@@ -904,8 +974,9 @@ fn cmd_check(mut a: Args, codegen: bool) {
 }
 
 fn cmd_repl(mut a: Args) {
-    if a.positional.len() > 1 {
-        usage_error("usage: rokc repl [path]");
+    // Standard input is the cell input (901.2).
+    if a.positional.first().is_some_and(|p| p == "-") {
+        usage_error("`rokc repl -`: standard input is the cell input; give a path or none");
     }
     // `repl <path>`: a library is a dependency of the session, and its
     // first cell is `use <name>::*;` (901.2); a program is loaded into it.
@@ -946,11 +1017,11 @@ fn cmd_run(mut a: Args) {
     let tmp = fail_on(TempDir::new(a.opts.keep_temps));
     let exe = match &a.output {
         Some(o) => o.clone(),
-        None if pkg.anonymous => tmp.path().join(&pkg.name),
+        None if pkg.anonymous => tmp.path().join(exe_file(&a, &pkg.name)),
         None => {
             let target = out_dir(&a, Some(&pkg));
             create_dir(&target);
-            target.join(&pkg.name)
+            target.join(exe_file(&a, &pkg.name))
         }
     };
     let link = |a: &Args, result: &CompileResult| fail_on(result.link(&a.opts, &exe));
@@ -998,7 +1069,7 @@ fn cmd_test(mut a: Args) {
     prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
     let (result, _, started) = compile(&a, &pkg, Mode::Test);
     let tmp = fail_on(TempDir::new(a.opts.keep_temps));
-    let exe = tmp.path().join(format!("{}-test", pkg.name));
+    let exe = tmp.path().join(exe_file(&a, &format!("{}-test", pkg.name)));
     let t = Instant::now();
     fail_on(result.link(&a.opts, &exe));
     stage(&a, "codegen + link", t);
@@ -1033,7 +1104,9 @@ fn cmd_bench(mut a: Args) {
     prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
     let (result, _, started) = compile(&a, &pkg, Mode::Bench);
     let tmp = fail_on(TempDir::new(a.opts.keep_temps));
-    let exe = tmp.path().join(format!("{}-bench", pkg.name));
+    let exe = tmp
+        .path()
+        .join(exe_file(&a, &format!("{}-bench", pkg.name)));
     let t = Instant::now();
     fail_on(result.link(&a.opts, &exe));
     stage(&a, "codegen + link", t);

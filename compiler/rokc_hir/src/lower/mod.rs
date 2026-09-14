@@ -20,6 +20,7 @@ use crate::{
 };
 
 mod bignum;
+mod broadcast;
 mod caller;
 mod collect;
 pub mod const_eval;
@@ -131,6 +132,7 @@ struct TypeNames<'a> {
     /// Module-level `const`s by full name, for array lengths in
     /// signatures and fields (`[i32; N]`).
     consts: HashMap<String, (Ty, rokc_ast::Expr)>,
+    const_leaves: std::cell::OnceCell<Leaves>,
 }
 
 /// Keys by their last `::` segment.
@@ -247,6 +249,17 @@ impl TypeNames<'_> {
             }
             AstTyKind::Sum(ts) | AstTyKind::Tuple(ts) => ts.iter_mut().for_each(rec),
             AstTyKind::Array(e, _) | AstTyKind::Nest(e) | AstTyKind::Binding(_, e) => rec(e),
+            AstTyKind::QPath(q) => {
+                rec(&mut q.self_ty);
+                let mut tp = Ty {
+                    kind: AstTyKind::Path(q.trait_path.clone()),
+                    span: ty.span,
+                };
+                rec(&mut tp);
+                if let AstTyKind::Path(p) = tp.kind {
+                    q.trait_path = p;
+                }
+            }
             AstTyKind::Fn(args, ret, _) => {
                 args.iter_mut().for_each(&mut rec);
                 rec(ret);
@@ -429,6 +442,55 @@ impl TypeNames<'_> {
             auto,
             ..crate::FnBounds::default()
         }
+    }
+
+    /// A pre-body integer constant (array lengths in signatures and
+    /// fields, const arguments of trait paths): literals and module
+    /// `const`s as `module` names them (its `use`s included), through
+    /// `const_eval::syntactic_int`.
+    fn const_int(&self, c: &rokc_ast::ConstExpr, module: &str) -> Option<i128> {
+        self.const_int_in(c, module, &std::cell::RefCell::new(Vec::new()))
+    }
+
+    fn const_int_in(
+        &self,
+        c: &rokc_ast::ConstExpr,
+        module: &str,
+        seen: &std::cell::RefCell<Vec<String>>,
+    ) -> Option<i128> {
+        const_eval::syntactic_int(c, &|path| {
+            let segs: Vec<&str> = path.split("::").collect();
+            let key = self.const_key(&segs, module)?;
+            if seen.borrow().contains(&key) {
+                return None;
+            }
+            seen.borrow_mut().push(key.clone());
+            let value = rokc_ast::ConstExpr::Expr(Box::new(self.consts[&key].1.clone()));
+            let v = self.const_int_in(&value, &module_of(&key), seen);
+            seen.borrow_mut().pop();
+            v
+        })
+    }
+
+    /// The module `const` `segments` names from `module`.
+    fn const_key(&self, segments: &[&str], module: &str) -> Option<String> {
+        let exists = |k: &str| self.consts.contains_key(k);
+        let keys = |leaf: &str| {
+            self.const_leaves
+                .get_or_init(|| leaves(self.consts.keys()))
+                .get(leaf)
+                .cloned()
+                .unwrap_or_default()
+        };
+        let visible = |_: &str| true;
+        let set = NameSet {
+            exists: &exists,
+            keys: &keys,
+            visible: &visible,
+        };
+        resolve_name(segments, module, &[], self.uses, &set)
+            .ok()
+            .flatten()
     }
 
     fn trait_key(&self, segments: &[&str], module: &str) -> String {
@@ -648,6 +710,11 @@ struct Env<'a> {
     key_of: HashMap<FunctionId, String>,
     /// Declarations whose return type is inferred from the body.
     infer_ret: std::collections::HashSet<FunctionId>,
+    /// `HirInput::implicit_main`.
+    implicit_main: bool,
+    /// Bodies without `-> T` that may diverge on every path
+    /// (`collect::may_diverge`), by span.
+    may_diverge: std::collections::HashSet<rokc_diagnostic::Span>,
     method_info: HashMap<FunctionId, MethodInfo>,
     /// Every struct / union / enum, declared or instantiated.
     defs: TypeDefs<'a>,
@@ -756,7 +823,9 @@ enum MethodOrFn<'a> {
     /// `module` is where the body's names resolve: the impl's module
     /// for explicit methods, the trait's module for default bodies.
     Method {
-        fn_def: &'a FnDef,
+        /// Borrowed from the program, or a trait default with the
+        /// impl's trait arguments substituted into its signature.
+        fn_def: std::borrow::Cow<'a, FnDef>,
         self_ty: HirTy,
         module: String,
         /// `fn_table` key, also the function's name.
@@ -765,6 +834,15 @@ enum MethodOrFn<'a> {
         /// arguments (`trait Dim<const D: usize>` + `impl Dim<3>`).
         subst: HashMap<String, HirTy>,
     },
+}
+
+impl MethodOrFn<'_> {
+    fn def(&self) -> &FnDef {
+        match self {
+            Self::Fn(f) => f,
+            Self::Method { fn_def, .. } => fn_def,
+        }
+    }
 }
 
 /// A function with `ref` parameters (spec 4.7, `ref self` included),
@@ -1400,6 +1478,9 @@ enum ArgSrc<'e> {
     Lowered(HirExpr),
     /// `ref x` (spec 4.7.3).
     Ref(&'e Expr),
+    /// A dict spread's read of this parameter (spec 4.2.6): the index of
+    /// its built expression.
+    Dict(usize),
 }
 
 /// Shared mutable sink for closures lifted into anonymous top-level
@@ -1485,6 +1566,13 @@ struct ClosureSink {
     /// Return types inferred from bodies (spec 4.1.3), by function;
     /// `None` while the body is being inferred.
     inferred_ret: std::cell::RefCell<HashMap<FunctionId, Option<HirTy>>>,
+    /// Declarations whose inference lowering was final, by id, with the
+    /// first function id it could have made (for `rollback`): the decl
+    /// pass takes them instead of lowering again.
+    inferred_fns: std::cell::RefCell<HashMap<FunctionId, (u32, HirFunction)>>,
+    /// Every reachable body is lowered: a later inference (a signature
+    /// asked for by a check) must leave no functions behind.
+    bodies_done: std::cell::Cell<bool>,
     /// Call sites of the implicit-generic instances being lowered
     /// (spec 4.2.2: their body errors point at the call too).
     call_sites: std::cell::RefCell<Vec<(String, rokc_diagnostic::Span)>>,
@@ -1673,6 +1761,9 @@ impl<'a> LowerCtx<'a> {
         sink.mono_cache.borrow_mut().retain(|_, id| old(id));
         sink.mono_sigs.borrow_mut().retain(|id, _| old(id));
         sink.ref_out.borrow_mut().retain(|id, _| old(id));
+        sink.inferred_fns
+            .borrow_mut()
+            .retain(|_, (start, _)| *start < mark.next_id);
         sink.thunks.borrow_mut().retain(|_, id| old(id));
         sink.any_dispatch.borrow_mut().retain(|d| old(&d.id));
         sink.any_tags.borrow_mut().truncate(mark.any_tags);
@@ -2964,8 +3055,32 @@ impl<'a> LowerCtx<'a> {
                 self.env.names.fn_bounds(b, &self.current_module),
             ),
             AstTyKind::Throws { ok, err } => crate::ty::throws_ty(rec(ok), rec(err)),
+            AstTyKind::QPath(q) => self.qpath_ty(q),
             _ => resolve_ty_with_structs(ty, &self.env.defs, None, self.scope()),
         }
+    }
+
+    /// `<T as Tr>::X` (spec 2.13.4): only `Tr`'s `X`.
+    fn qpath_ty(&self, q: &rokc_ast::QPath) -> HirTy {
+        let base = self.resolve_ty_inner(&q.self_ty);
+        let tp = &q.trait_path;
+        let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
+        let key = self.env.names.trait_key(&segs, &self.current_module);
+        if !self.env.names.traits.contains(&key) {
+            self.emit_error(
+                rokc_diagnostic::ErrorKind::Type,
+                format!(
+                    "`{}` in `<.. as {}>` is not a trait",
+                    segs.join("::"),
+                    segs.join("::")
+                ),
+            );
+            return HirTy::Unknown;
+        }
+        let want = resolve::trait_ref(&self.env.names, tp, &self.current_module, |t| {
+            self.resolve_ty_inner(t)
+        });
+        self.project_or_report(&base, &q.item, Some(&[key]), &[want], true)
     }
 
     /// `T::Item` / `List<i32>::IntoIter` (spec 2.1, 2.13): an associated
@@ -2977,41 +3092,6 @@ impl<'a> LowerCtx<'a> {
         let (last, prefix) = p.segments.split_last()?;
         if prefix.is_empty() || !last.generics.is_empty() {
             return None;
-        }
-        // `<T as Tr>::X` (spec 2.13.4): only `Tr`'s `X`.
-        if let [q] = prefix {
-            if q.name == rokc_ast::QPATH_MARK {
-                let [self_ty, tr] = q.generics.as_slice() else {
-                    return Some(HirTy::Unknown);
-                };
-                let base = self.resolve_ty_inner(self_ty);
-                let AstTyKind::Path(tp) = &tr.kind else {
-                    return Some(HirTy::Unknown);
-                };
-                let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
-                let key = self.env.names.trait_key(&segs, &self.current_module);
-                if !self.env.names.traits.contains(&key) {
-                    self.emit_error(
-                        rokc_diagnostic::ErrorKind::Type,
-                        format!(
-                            "`{}` in `<.. as {}>` is not a trait",
-                            segs.join("::"),
-                            segs.join("::")
-                        ),
-                    );
-                    return Some(HirTy::Unknown);
-                }
-                let want = resolve::trait_ref(&self.env.names, tp, &self.current_module, |t| {
-                    self.resolve_ty_inner(t)
-                });
-                return Some(self.project_or_report(
-                    &base,
-                    &last.name,
-                    Some(&[key]),
-                    &[want],
-                    true,
-                ));
-            }
         }
         let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
         if self.canon_type(&segs).is_some() {

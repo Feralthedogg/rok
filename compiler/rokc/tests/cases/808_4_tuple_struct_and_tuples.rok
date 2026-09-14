@@ -1,0 +1,27 @@
+// spec: 008.08-lowering-types §8.8.4 / §8.8.5
+// expect-exit: 0
+// expect-stdout:
+// rgb 10 20 30
+// pair 3 x
+// nested 1 2.5 true
+// swapped (b, 7)
+
+// spec 8.8.4 / 8.8.5: a tuple struct is a struct with fields `0`, `1`,
+// ..; a tuple is an anonymous struct of its element types.
+struct Rgb(u8, u8, u8);
+
+fn swap(t: (i32, str)) -> (str, i32) {
+    (t.1, t.0)
+}
+
+fn main() -> i32 {
+    let c = Rgb(10, 20, 30);
+    println(f"rgb {c.0} {c.1} {c.2}");
+    let p = (3, "x");
+    println(f"pair {p.0} {p.1}");
+    let n = ((1, 2.5), true);
+    println(f"nested {n.0.0} {n.0.1} {n.1}");
+    let s = swap((7, "b"));
+    println(f"swapped ({s.0}, {s.1})");
+    return 0;
+}

@@ -1,4 +1,6 @@
 // expect-exit: 65
+// expect-stdout:
+// max 25 sum 75
 
 fn main() -> i32 {
     let xs: [i32; 5] = [10, 5, 20, 15, 25];
@@ -10,5 +12,6 @@ fn main() -> i32 {
         }
         sum += v;
     }
+    println(f"max {max} sum {sum}");
     return max + sum - 35;
 }

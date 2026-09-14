@@ -1,0 +1,34 @@
+// spec: 006.07.2
+// An operator dispatches through the trait that registered it, named by
+// its full path: a same-named trait in another module with the same
+// method does not count.
+// expect-exit: 0
+// expect-stdout: 6
+
+mod ops {
+    pub trait Combine {
+        #[infix("⊕", like = "+")]
+        fn combine(self, rhs: Self) -> Self;
+    }
+}
+
+mod other {
+    pub trait Combine {
+        fn combine(self, rhs: Self) -> Self;
+    }
+}
+
+struct N { v: i32; }
+
+impl ops::Combine for N {
+    fn combine(self, rhs: N) -> N { N { v: self.v + rhs.v } }
+}
+
+impl other::Combine for N {
+    fn combine(self, rhs: N) -> N { N { v: self.v * rhs.v * 100 } }
+}
+
+fn main() {
+    let r = N { v: 2 } ⊕ N { v: 4 };
+    print(f"{r.v}");
+}

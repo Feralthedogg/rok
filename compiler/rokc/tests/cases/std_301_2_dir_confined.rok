@@ -1,0 +1,34 @@
+// spec: std 301-fs §3.1.2 / §3.1.0
+// expect-exit: 0
+// expect-stdout:
+// inside: data
+// exists true missing false
+// absolute rejected
+// parent rejected
+// renamed true copied 4
+
+// 3.1.2: a `Dir` other than `root()` works beneath itself and rejects
+// absolute paths and `..`; 3.1.0: path arguments take `str` or `Path`.
+use rok::std::env;
+use rok::std::fs::Dir;
+use rok::std::path::Path;
+
+fn main() {
+    let base = env::temp_dir() / Path::from(f"rok_dircap_{env::pid()}");
+    try? Dir::root().remove_dir_all(base);
+    try! Dir::root().create_dir_all(base / "sub");
+    let d = try! Dir::root().open_dir(base);
+    let f = try! d.create("sub/a.txt");
+    try! f.write_all("data");
+    try! f.close();
+    let g = try! d.open(Path::from("sub") / "a.txt");
+    println(f"inside: {try! g.read_to_str()}");
+    try! g.close();
+    println(f"exists {d.exists("sub/a.txt")} missing {d.exists("sub/b.txt")}");
+    try d.open("/etc/hosts") catch _ { println("absolute rejected"); }
+    try d.open("sub/../../x") catch _ { println("parent rejected"); }
+    try! d.rename("sub/a.txt", "sub/b.txt");
+    let n = try! d.copy("sub/b.txt", "c.txt");
+    println(f"renamed {d.exists("sub/b.txt")} copied {n}");
+    try! Dir::root().remove_dir_all(base);
+}

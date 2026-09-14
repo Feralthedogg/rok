@@ -1,4 +1,6 @@
 // expect-exit: 18
+// expect-stdout:
+// -1 0 1 2
 
 fn classify(n: i32) -> i32 {
     return if n < 0 {
@@ -17,6 +19,7 @@ fn main() -> i32 {
     let b = classify(0);
     let c = classify(7);
     let d = classify(100);
+    println(f"{a} {b} {c} {d}");
     return a + b + c + d + 16;
 }
 

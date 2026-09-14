@@ -1,0 +1,21 @@
+// spec: std 303-time §3.3.5
+// expect-exit: 0
+// expect-stdout:
+// 1.234s 5ms 1.5µs -20ns 2s
+// secs 3 ms 3500 subsec 500
+// sum 1.5s diff 500ms mul 3s div 250ms
+// days 86400 cmp true
+
+// 3.3.5: `Display` picks one unit by magnitude (trailing zeros dropped);
+// extraction, arithmetic and ordering.
+use rok::std::time::Duration;
+
+fn main() {
+    println(f"{Duration::ms(1234)} {Duration::ms(5)} {Duration::ns(1500)} {Duration::ns(-20)} {Duration::sec(2)}");
+    let d = Duration::ms(3500);
+    println(f"secs {d.as_secs()} ms {d.as_ms()} subsec {d.subsec_ms()}");
+    let a = Duration::sec(1);
+    let b = Duration::ms(500);
+    println(f"sum {a + b} diff {a - b} mul {a * 3} div {a / 4}");
+    println(f"days {Duration::days(1).as_secs()} cmp {b < a}");
+}

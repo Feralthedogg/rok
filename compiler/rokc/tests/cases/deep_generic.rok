@@ -1,4 +1,6 @@
 // expect-exit: 27
+// expect-stdout:
+// 5 100 7 200 15 true
 
 struct Tagged<T> {
     label: i32;
@@ -17,6 +19,7 @@ fn main() -> i32 {
     let a = make_tagged(5, 100);
     let b = make_tagged(7, 200);
     let c = make_tagged(15, true);
+    println(f"{a.label} {a.value} {b.label} {b.value} {c.label} {c.value}");
     let total = label_of(a) + label_of(b) + label_of(c);
     return total;
 }

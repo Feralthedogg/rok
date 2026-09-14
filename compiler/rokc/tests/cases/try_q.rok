@@ -1,4 +1,7 @@
 // expect-exit: 18
+// expect-stdout:
+// 16 2
+
 
 fn parse(s: i32) -> i32 | none {
     if s < 0 {
@@ -16,6 +19,7 @@ fn process(x: i32, y: i32) -> i32 | none {
 fn main() -> i32 {
     let r1 = process(3, 5) ?? 99;
     let r2 = process(-1, 5) ?? 2;
+    println(f"{r1} {r2}");
     return r1 + r2 + 0;
 }
 

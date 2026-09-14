@@ -1,4 +1,6 @@
 // expect-exit: 24
+// expect-stdout:
+// 3 7 10
 
 struct Pair<T> {
     a: T;
@@ -21,5 +23,6 @@ fn main() -> i32 {
     let inner1: Pair<i32> = Pair { a: 1, b: 2 };
     let inner2: Pair<i32> = Pair { a: 3, b: 4 };
     let outer: Pair<Pair<i32>> = Pair { a: inner1, b: inner2 };
+    println(f"{outer.a.sum()} {outer.b.sum()} {outer.flatten()}");
     return outer.flatten() + 14;
 }

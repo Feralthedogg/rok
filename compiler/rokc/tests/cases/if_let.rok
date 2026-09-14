@@ -1,4 +1,8 @@
 // expect-exit: 14
+// expect-stdout:
+// some 7
+// none
+// 14
 
 fn pick(present: bool) -> i32 | none {
     if present {
@@ -11,12 +15,16 @@ fn main() -> i32 {
     let total = 0;
     if let n: i32 = pick(true) {
         total += n;
+        println(f"some {n}");
     }
     if let n: i32 = pick(false) {
         total += 100;
+        println(f"some {n}");
     } else {
         total += 7;
+        println("none");
     }
+    println(f"{total}");
     return total;
 }
 

@@ -15,7 +15,8 @@
 //! `--std` the standard library tiers (`rok::core` in `rok-core/`, ..),
 //! their `pub` items in `pub` modules. Doc text is
 //! the item's `#[doc = ".."]` attributes (the parser turns `///` lines
-//! into them, and a file's leading `//!` lines into its module's). Doc
+//! into them, and the `//!` lines / `#![doc]` heading a file or an inline
+//! `mod` body into its module's). Doc
 //! text is a markdown subset: headings, fenced code blocks, inline code,
 //! links, `**bold**`, `-` / `*` / `1.` lists, paragraphs. Type names in
 //! signatures and inline code naming a documented item link to it.
@@ -520,8 +521,7 @@ impl Docs {
             params.join(", ")
         );
         if let ThrowsKind::Typed(tys) = &f.throws {
-            let untyped =
-                matches!(tys.as_slice(), [t] if self.ty(t) == rokc_ast::UNTYPED_THROWS_MARK);
+            let untyped = matches!(tys.as_slice(), [t] if rokc_ast::is_untyped_throws(t));
             if untyped || tys.is_empty() {
                 s.push_str(" throws");
             } else {
@@ -544,19 +544,16 @@ impl Docs {
         match &t.kind {
             TyKind::Nest(inner) => self.ty(inner),
             TyKind::Binding(n, b) => format!("{} = {}", esc(n), self.ty(b)),
+            TyKind::QPath(q) => format!(
+                "&lt;{} as {}&gt;::{}",
+                self.ty(&q.self_ty),
+                self.ty(&Ty {
+                    kind: TyKind::Path(q.trait_path.clone()),
+                    span: t.span,
+                }),
+                esc(&q.item)
+            ),
             TyKind::Path(p) => {
-                if let [seg] = p.segments.as_slice() {
-                    if seg.name == rokc_ast::QPATH_MARK && seg.generics.len() == 2 {
-                        return format!(
-                            "&lt;{} as {}&gt;",
-                            self.ty(&seg.generics[0]),
-                            self.ty(&seg.generics[1])
-                        );
-                    }
-                    if seg.name == rokc_ast::UNTYPED_THROWS_MARK {
-                        return seg.name.clone();
-                    }
-                }
                 let n = p.segments.len();
                 p.segments
                     .iter()

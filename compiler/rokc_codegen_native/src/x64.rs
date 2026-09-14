@@ -1,10 +1,12 @@
-//! LIR → `x86_64` machine code (System V).
+//! LIR → `x86_64` machine code (System V; Windows x64 in a COFF object).
 //!
 //! Frame: `rbp` pushed, `rbp` = it, then the slots, with the outgoing
 //! argument area at `rsp`. Scratch: `rax rcx rdx` (data), `r10 r11`
 //! (pointer bases), `xmm0 xmm1`; every LIR value lives in its slot, so
-//! nothing is saved and unwinding sees a plain `rbp` frame. Only
-//! baseline `x86_64` instructions (no `popcnt` / `lzcnt`).
+//! nothing is saved and unwinding sees a plain `rbp` frame (Windows:
+//! `rsi` / `rdi`, which it preserves, are kept in `xmm4` / `xmm5` around
+//! a block copy). Only baseline `x86_64` instructions (no `popcnt` /
+//! `lzcnt`).
 
 use crate::lir::{Bin, Callee, Cc, Conv, Func, Inst, K, Label, Loc, Mem, Rmw, Un, V};
 use crate::obj::{FnRange, Obj, RelKind, Reloc, Sect};
@@ -22,6 +24,8 @@ const XMM0: u32 = 0;
 const XMM1: u32 = 1;
 /// Integer argument registers.
 const ARGS: [u32; 6] = [RDI, RSI, RDX, RCX, 8, 9];
+/// Windows x64: by register position.
+const WIN_ARGS: [u32; 4] = [RCX, RDX, 8, 9];
 /// Integer result registers.
 const RETS: [u32; 3] = [RAX, RDX, RCX];
 /// Stack probe interval.
@@ -43,6 +47,18 @@ const CC_GE: u8 = 0xd;
 const CC_LE: u8 = 0xe;
 const CC_G: u8 = 0xf;
 
+/// `i` as a `k` immediate extended by `signed` (as `Em::load` does).
+const fn ext(i: i64, k: K, signed: bool) -> i64 {
+    let bits = k.bits();
+    if bits == 64 {
+        i
+    } else if signed {
+        (i << (64 - bits)) >> (64 - bits)
+    } else {
+        i & ((1i64 << bits) - 1)
+    }
+}
+
 /// A register-or-memory operand.
 #[derive(Clone, Copy)]
 enum Rm {
@@ -62,6 +78,8 @@ struct Em<'a> {
     slot_off: Vec<u32>,
     frame: u32,
     lines: Vec<(u32, u32, u32, u32)>,
+    /// A comparison left its result in the flags for the next `Br`.
+    flags: Option<u8>,
 }
 
 /// Emit `f` into `obj`'s text.
@@ -69,6 +87,10 @@ pub fn emit(obj: &mut Obj, f: &Func) {
     let mut out = 0u32;
     for i in &f.insts {
         if let Inst::Call { args, .. } = i {
+            // Windows: the callee's 32-byte home area.
+            if obj.coff {
+                out = out.max(32);
+            }
             for (p, _) in args {
                 if let Loc::Stack(o) = p.loc {
                     out = out.max(o + 8);
@@ -95,6 +117,7 @@ pub fn emit(obj: &mut Obj, f: &Func) {
         slot_off,
         frame,
         lines: Vec::new(),
+        flags: None,
     };
     e.prologue();
     for (n, i) in f.insts.iter().enumerate() {
@@ -201,6 +224,20 @@ impl Em<'_> {
                 }
             }
         }
+    }
+
+    /// The integer argument register at position `n`.
+    fn arg_reg(&self, n: u8) -> u32 {
+        if self.obj.coff {
+            WIN_ARGS[n as usize]
+        } else {
+            ARGS[n as usize]
+        }
+    }
+
+    /// The hidden result pointer's register.
+    fn sret_reg(&self) -> u32 {
+        if self.obj.coff { RCX } else { RDI }
     }
 
     /// `[rip + sym]` with relocation `kind` (the 32-bit field ends the
@@ -398,6 +435,11 @@ impl Em<'_> {
 
     fn copy(&mut self, dst: Mem, src: Mem, size: u32, zero: bool) {
         if size > 128 {
+            let win = self.obj.coff;
+            if win {
+                self.bytes(&[0x66, 0x48, 0x0f, 0x6e, 0xe6]); // movq xmm4, rsi
+                self.bytes(&[0x66, 0x48, 0x0f, 0x6e, 0xef]); // movq xmm5, rdi
+            }
             if !zero {
                 self.lea(RSI, src);
             }
@@ -407,6 +449,10 @@ impl Em<'_> {
                 self.bytes(&[0x31, 0xc0, 0xf3, 0xaa]); // xor eax, eax; rep stosb
             } else {
                 self.bytes(&[0xf3, 0xa4]); // rep movsb
+            }
+            if win {
+                self.bytes(&[0x66, 0x48, 0x0f, 0x7e, 0xe6]); // movq rsi, xmm4
+                self.bytes(&[0x66, 0x48, 0x0f, 0x7e, 0xef]); // movq rdi, xmm5
             }
             return;
         }
@@ -446,6 +492,50 @@ impl Em<'_> {
                 off += n as i32;
             }
         }
+    }
+
+    /// `rax = rax op imm` in one instruction, when `imm` encodes (a
+    /// 32-bit immediate; shifts; a multiply).
+    fn bin_imm(&mut self, op: Bin, k: K, signed: bool, imm: i64) -> bool {
+        let w = k == K::I64;
+        // 32-bit operations take any value's low half.
+        let Some(i) = (if w {
+            i32::try_from(imm).ok()
+        } else {
+            Some(imm as i32)
+        }) else {
+            return false;
+        };
+        let bits = if w { 63 } else { 31 };
+        match op {
+            Bin::Add | Bin::Or | Bin::And | Bin::Sub | Bin::Xor => {
+                let n = match op {
+                    Bin::Add => 0,
+                    Bin::Or => 1,
+                    Bin::And => 4,
+                    Bin::Sub => 5,
+                    _ => 6,
+                };
+                self.op(None, w, false, &[0x81], n, Rm::R(RAX));
+                self.d32(i);
+            }
+            // imul rax, rax, imm32
+            Bin::Mul => {
+                self.op(None, w, false, &[0x69], RAX, Rm::R(RAX));
+                self.d32(i);
+            }
+            Bin::Shl | Bin::Shr => {
+                let n = match (op, signed) {
+                    (Bin::Shl, _) => 4,
+                    (_, true) => 7,
+                    _ => 5,
+                };
+                self.op(None, w, false, &[0xc1], n, Rm::R(RAX));
+                self.b((i & bits) as u8);
+            }
+            _ => return false,
+        }
+        true
     }
 
     fn bin_int(&mut self, op: Bin, k: K, signed: bool) {
@@ -500,9 +590,14 @@ impl Em<'_> {
                     self.jmp(if *v & 0xff != 0 { *t } else { *f });
                     return;
                 }
-                self.load(RAX, *c, K::I8, false);
-                self.bytes(&[0x85, 0xc0]); // test eax, eax
-                self.jcc(CC_NE, *t);
+                if let Some(cc) = self.flags.take() {
+                    // The comparison just before: its flags.
+                    self.jcc(cc, *t);
+                } else {
+                    self.load(RAX, *c, K::I8, false);
+                    self.bytes(&[0x85, 0xc0]); // test eax, eax
+                    self.jcc(CC_NE, *t);
+                }
                 if !matches!(next, Some(Inst::Label(n)) if n == f) {
                     self.jmp(*f);
                 }
@@ -518,7 +613,9 @@ impl Em<'_> {
                 self.store(RAX, *dst, K::I64);
             }
             Inst::Sym { dst, sym, got } => {
-                if *got {
+                // COFF has no GOT: everything is in the image (a DLL's
+                // functions through import thunks).
+                if *got && !self.obj.coff {
                     self.op_rip(None, true, &[0x8b], RAX, RelKind::X86GotLoad, *sym);
                 } else {
                     self.op_rip(None, true, &[0x8d], RAX, RelKind::X86Pc32, *sym);
@@ -526,7 +623,19 @@ impl Em<'_> {
                 self.store(RAX, *dst, K::I64);
             }
             Inst::Tls { dst, sym } => {
-                if self.obj.elf {
+                if self.obj.coff {
+                    // The TEB's TLS array at `_tls_index`, plus the
+                    // offset in the TLS section.
+                    let index = self.obj.sym("_tls_index");
+                    self.op_rip(None, false, &[0x8b], RAX, RelKind::X86Pc32, index);
+                    // mov rcx, gs:[0x58]; mov rcx, [rcx + rax * 8]
+                    self.bytes(&[0x65, 0x48, 0x8b, 0x0c, 0x25, 0x58, 0, 0, 0]);
+                    self.bytes(&[0x48, 0x8b, 0x0c, 0xc1]);
+                    self.bytes(&[0x48, 0x8d, 0x81]); // lea rax, [rcx + disp32]
+                    let off = self.start + self.code.len() as u32;
+                    self.relocs.push((off, RelKind::X86SecRel, *sym));
+                    self.d32(0);
+                } else if self.obj.elf {
                     // Initial exec: the offset from the thread pointer.
                     self.op_rip(None, true, &[0x8b], RAX, RelKind::X86Tls, *sym);
                     // mov rcx, fs:[0]; add rax, rcx
@@ -567,6 +676,13 @@ impl Em<'_> {
                     self.store_fp(XMM0, *dst, *k);
                     return;
                 }
+                if let V::I(imm) = b {
+                    self.load(RAX, *a, *k, *signed);
+                    if self.bin_imm(*op, *k, *signed, *imm) {
+                        self.store(RAX, *dst, *k);
+                        return;
+                    }
+                }
                 self.load(RCX, *b, *k, *signed);
                 self.load(RAX, *a, *k, *signed);
                 self.bin_int(*op, *k, *signed);
@@ -581,12 +697,25 @@ impl Em<'_> {
                 b,
                 fail,
             } => {
-                self.load(RCX, *b, *k, *signed);
+                let imm = match (k, op, b) {
+                    (K::I64, Bin::Add | Bin::Sub, V::I(i)) => i32::try_from(*i).ok(),
+                    (K::I32, Bin::Add | Bin::Sub, V::I(i)) => Some(*i as i32),
+                    _ => None,
+                };
+                if imm.is_none() {
+                    self.load(RCX, *b, *k, *signed);
+                }
                 self.load(RAX, *a, *k, *signed);
                 match k {
                     K::I64 | K::I32 => {
                         let w = *k == K::I64;
                         match op {
+                            // add / sub rax, imm32
+                            _ if imm.is_some() => {
+                                let n = if *op == Bin::Add { 0 } else { 5 };
+                                self.op(None, w, false, &[0x81], n, Rm::R(RAX));
+                                self.d32(imm.unwrap_or(0));
+                            }
                             Bin::Add => self.alu(0x01, w, RAX, RCX),
                             Bin::Sub => self.alu(0x29, w, RAX, RCX),
                             _ if *signed => self.op(None, w, false, &[0x0f, 0xaf], RAX, Rm::R(RCX)),
@@ -645,21 +774,38 @@ impl Em<'_> {
                             self.bytes(&[comb - 1, 0xc8]); // and / or al, cl
                             self.bytes(&[0x0f, 0xb6, 0xc0]);
                         }
-                        Cc::Lt | Cc::Le => {
-                            ucomi(self, XMM1, XMM0);
-                            self.setcc(if *cc == Cc::Lt { CC_A } else { CC_AE });
-                        }
-                        Cc::Gt | Cc::Ge => {
-                            ucomi(self, XMM0, XMM1);
-                            self.setcc(if *cc == Cc::Gt { CC_A } else { CC_AE });
+                        Cc::Lt | Cc::Le | Cc::Gt | Cc::Ge => {
+                            if matches!(cc, Cc::Lt | Cc::Le) {
+                                ucomi(self, XMM1, XMM0);
+                            } else {
+                                ucomi(self, XMM0, XMM1);
+                            }
+                            let c = if matches!(cc, Cc::Lt | Cc::Gt) {
+                                CC_A
+                            } else {
+                                CC_AE
+                            };
+                            self.setcc(c);
+                            if matches!(next, Some(Inst::Br { c: V::M(m), .. }) if m == dst) {
+                                self.flags = Some(c);
+                            }
                         }
                     }
                     self.store(RAX, *dst, K::I8);
                     return;
                 }
                 self.load(RAX, *a, *k, *signed);
-                self.load(RCX, *b, *k, *signed);
-                self.alu(0x39, true, RAX, RCX);
+                match b {
+                    // cmp rax, simm32 (the immediate extended as `load` would)
+                    V::I(i) if i32::try_from(ext(*i, *k, *signed)).is_ok() => {
+                        self.op(None, true, false, &[0x81], 7, Rm::R(RAX));
+                        self.d32(ext(*i, *k, *signed) as i32);
+                    }
+                    _ => {
+                        self.load(RCX, *b, *k, *signed);
+                        self.alu(0x39, true, RAX, RCX);
+                    }
+                }
                 let c = match (cc, signed) {
                     (Cc::Eq, _) => CC_E,
                     (Cc::Ne, _) => CC_NE,
@@ -673,6 +819,10 @@ impl Em<'_> {
                     (Cc::Ge, false) => CC_AE,
                 };
                 self.setcc(c);
+                // A branch right after on it takes the flags.
+                if matches!(next, Some(Inst::Br { c: V::M(m), .. }) if m == dst) {
+                    self.flags = Some(c);
+                }
                 self.store(RAX, *dst, K::I8);
             }
             Inst::Conv {
@@ -756,14 +906,14 @@ impl Em<'_> {
                 variadic,
             } => self.call(callee, args, rets, *sret, *variadic),
             Inst::Param { part, dst } => match part.loc {
-                Loc::Int(r) => self.store(ARGS[r as usize], *dst, part.k),
+                Loc::Int(r) => self.store(self.arg_reg(r), *dst, part.k),
                 Loc::Fp(r) => self.store_fp(u32::from(r), *dst, part.k),
                 Loc::Stack(o) => {
                     let rm = Rm::M(RBP, 16 + o as i32);
                     self.op(None, true, false, &[0x8b], RAX, rm);
                     self.store(RAX, *dst, part.k);
                 }
-                Loc::Sret => self.store(RDI, *dst, K::I64),
+                Loc::Sret => self.store(self.sret_reg(), *dst, K::I64),
             },
             Inst::Ret { vals } => {
                 // x87 results: the last pushed first, so `st0` is the
@@ -847,18 +997,25 @@ impl Em<'_> {
         let mut fps = 0;
         for (p, v) in args {
             match p.loc {
-                Loc::Int(r) => self.load(ARGS[r as usize], *v, p.k, p.signed),
+                Loc::Int(r) => self.load(self.arg_reg(r), *v, p.k, p.signed),
                 Loc::Fp(r) => {
                     self.load_fp(u32::from(r), *v, p.k);
                     fps = fps.max(r + 1);
+                    // Windows: a variadic callee reads a float from the
+                    // integer register of its position.
+                    if variadic && self.obj.coff {
+                        let w = p.k == K::F64;
+                        let g = self.arg_reg(r);
+                        self.op(Some(0x66), w, false, &[0x0f, 0x7e], u32::from(r), Rm::R(g));
+                    }
                 }
                 _ => {}
             }
         }
         if let Some(m) = sret {
-            self.lea(RDI, m);
+            self.lea(self.sret_reg(), m);
         }
-        if variadic {
+        if variadic && !self.obj.coff {
             self.mov_imm(RAX, u64::from(fps));
         }
         match callee {

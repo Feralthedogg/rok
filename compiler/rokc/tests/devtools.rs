@@ -237,7 +237,9 @@ fn doc_writes_html_with_links_and_search_index() {
                  impl Point {\n    /// The origin.\n    pub fn origin() -> Point { Point { x: 0.0, secret: 0.0 } }\n}\n\n\
                  /// Kinds.\npub enum Shape {\n    /// Round.\n    Circle(f64),\n    Square,\n}\n\n\
                  /// Adds.\n///\n/// ```\n/// add(1, 2) < 4\n/// ```\npub fn add(a: i32, b: i32) -> i32 { a + b }\n\n\
-                 fn private_fn() {}\n",
+                 fn private_fn() {}\n\n\
+                 pub mod inl {\n    //! Inline docs.\n    #![doc = \"More inline.\"]\n\n    \
+                 pub fn g() {}\n}\n",
             ),
             (
                 "geo.rok",
@@ -296,6 +298,14 @@ fn doc_writes_html_with_links_and_search_index() {
     );
     assert!(geo.contains("index.html#struct.Point\">Point</a>"), "{geo}");
     assert!(read("util/index.html").contains("Says hi."));
+    let inl = read(&format!(
+        "{}/inl/index.html",
+        dir.file_name().unwrap().to_str().unwrap()
+    ));
+    assert!(
+        inl.contains("Inline docs.") && inl.contains("More inline."),
+        "{inl}"
+    );
 
     let search = read("search-index.js");
     assert!(

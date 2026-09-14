@@ -464,3 +464,68 @@ fn manifest_buffer() {
         "{published:?}"
     );
 }
+
+/// An open submodule buffer stands for its file: its unsaved text is
+/// what the package compiles with.
+#[test]
+fn unsaved_submodule_buffer() {
+    let _one = ONE_SERVER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let bootstrap = workspace.join("library/core/lib.rok");
+    let dir = std::env::temp_dir().join(format!("rokc-lsp-sub-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("main.rok"), "mod m;\n\nlet x: i32 = m::v();\n").unwrap();
+    std::fs::write(dir.join("m.rok"), "pub fn v() -> i32 {\n    1\n}\n").unwrap();
+    let uri = format!("file://{}", dir.join("m.rok").display());
+    let uri = uri.as_str();
+    let open = notify(
+        "textDocument/didOpen",
+        Json::obj([(
+            "textDocument",
+            Json::obj([
+                ("uri", Json::str(uri)),
+                ("languageId", Json::str("rok")),
+                ("version", Json::num(1)),
+                ("text", Json::str("pub fn v() -> i32 {\n    true\n}\n")),
+            ]),
+        )]),
+    );
+    let script = [
+        open,
+        request(1, "textDocument/hover", at(uri, 0, 8)),
+        change(uri, "pub fn v() -> i32 {\n    2\n}\n"),
+        request(2, "textDocument/hover", at(uri, 0, 8)),
+        request(3, "shutdown", Json::Null),
+        notify("exit", Json::Null),
+    ];
+    let input: String = script.iter().map(frame).collect();
+    let mut out = Vec::new();
+    let code = serve(
+        Cursor::new(input.into_bytes()),
+        &mut out,
+        vec![bootstrap],
+        Vec::new(),
+        Vec::new(),
+    );
+    assert_eq!(code, 0);
+    let published: Vec<Json> = messages(&out)
+        .into_iter()
+        .filter(|m| m.get("method").as_str() == Some("textDocument/publishDiagnostics"))
+        .map(|m| m.get("params").get("diagnostics").clone())
+        .collect();
+    let Json::Arr(errs) = &published[0] else {
+        panic!("{published:?}")
+    };
+    assert_eq!(errs.len(), 1, "{published:?}");
+    assert!(
+        errs[0]
+            .get("message")
+            .as_str()
+            .is_some_and(|m| m.contains("bool")),
+        "{published:?}"
+    );
+    assert_eq!(published[1], Json::Arr(Vec::new()), "{published:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

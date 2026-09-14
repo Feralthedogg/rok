@@ -1,4 +1,6 @@
 // expect-exit: 90
+// expect-stdout:
+// 90 0
 
 enum Direction { North, East, South, West }
 
@@ -22,6 +24,7 @@ fn code(d: Direction) -> i32 {
 
 fn main() -> i32 {
     let d: Direction = turn_right(Direction::North);
+    println(f"{code(d)} {code(turn_right(Direction::West))}");
     return code(d);
 }
 

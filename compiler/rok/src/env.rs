@@ -144,7 +144,7 @@ fn import(g: &Global, name: &str, from: &Path) -> Result<(), String> {
         for d in deps {
             if let Source::Path(p) = &d.source {
                 if Path::new(p).is_relative() {
-                    let abs = std::fs::canonicalize(src_dir.join(p))
+                    let abs = rokc_core::real_path(src_dir.join(p))
                         .map_err(|e| format!("dependency `{}`: {p}: {e}", d.name))?;
                     let s = Source::Path(abs.display().to_string());
                     text = manifest::set_dep(&text, &file, section, &d.name, &s.to_rok())?;
@@ -168,9 +168,15 @@ fn import(g: &Global, name: &str, from: &Path) -> Result<(), String> {
     done
 }
 
-/// `$SHELL` with `ROK_ENV=<name>` and this toolchain first on `PATH`.
+/// `$SHELL` (Windows: `%COMSPEC%`) with `ROK_ENV=<name>` and this
+/// toolchain first on `PATH`.
 fn shell(name: &str) -> Result<i32, String> {
-    let sh = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into());
+    let (var, default) = if cfg!(windows) {
+        ("COMSPEC", "cmd.exe")
+    } else {
+        ("SHELL", "/bin/sh")
+    };
+    let sh = std::env::var_os(var).unwrap_or_else(|| default.into());
     let mut path: Vec<PathBuf> = std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(Path::to_path_buf))

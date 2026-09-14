@@ -12,11 +12,17 @@
 // zero-argument inherent `min` would shadow `Ord::min(self, rhs)`, so
 // the limits are the `MIN` / `MAX` consts (refs-lang 2.13 `i32::MAX`).
 
+#[cfg(target_endian = "little")]
+const BIG_ENDIAN: bool = false;
+#[cfg(target_endian = "big")]
+const BIG_ENDIAN: bool = true;
+
 // i8
 
 impl i8 {
     pub const MIN: i8 = -127 - 1;
     pub const MAX: i8 = 127;
+    pub const BITS: u32 = 8;
 
     #[intrinsic("rok.wrapping_add.i8")]
     pub fn wrapping_add(self, rhs: i8) -> i8 { self.wrapping_add(rhs) }
@@ -42,17 +48,16 @@ impl i8 {
     pub fn rotate_right(self, n: u32) -> i8 { (self as u8).rotate_right(n) as i8 }
     pub fn swap_bytes(self) -> i8 { (self as u8).swap_bytes() as i8 }
 
-    // Little-endian targets only: `to_be` swaps, `to_le` is the identity.
-    pub fn to_be(self) -> i8 { self.swap_bytes() }
-    pub fn to_le(self) -> i8 { self }
-    pub fn from_be(x: i8) -> i8 { x.swap_bytes() }
-    pub fn from_le(x: i8) -> i8 { x }
+    pub fn to_be(self) -> i8 { if BIG_ENDIAN { self } else { self.swap_bytes() } }
+    pub fn to_le(self) -> i8 { if BIG_ENDIAN { self.swap_bytes() } else { self } }
+    pub fn from_be(x: i8) -> i8 { x.to_be() }
+    pub fn from_le(x: i8) -> i8 { x.to_le() }
     pub fn to_le_bytes(self) -> [u8; 1] { [self as u8] }
     pub fn to_be_bytes(self) -> [u8; 1] { [self as u8] }
-    pub fn to_ne_bytes(self) -> [u8; 1] { self.to_le_bytes() }
+    pub fn to_ne_bytes(self) -> [u8; 1] { if BIG_ENDIAN { self.to_be_bytes() } else { self.to_le_bytes() } }
     pub fn from_le_bytes(bytes: [u8; 1]) -> i8 { bytes[0] as i8 }
     pub fn from_be_bytes(bytes: [u8; 1]) -> i8 { bytes[0] as i8 }
-    pub fn from_ne_bytes(bytes: [u8; 1]) -> i8 { i8::from_le_bytes(bytes) }
+    pub fn from_ne_bytes(bytes: [u8; 1]) -> i8 { if BIG_ENDIAN { i8::from_be_bytes(bytes) } else { i8::from_le_bytes(bytes) } }
 
     pub fn checked_add(self, rhs: i8) -> i8 | none {
         let r = self.wrapping_add(rhs);
@@ -253,6 +258,7 @@ impl i8 {
 impl i16 {
     pub const MIN: i16 = -32767 - 1;
     pub const MAX: i16 = 32767;
+    pub const BITS: u32 = 16;
 
     #[intrinsic("rok.wrapping_add.i16")]
     pub fn wrapping_add(self, rhs: i16) -> i16 { self.wrapping_add(rhs) }
@@ -278,14 +284,13 @@ impl i16 {
     pub fn rotate_right(self, n: u32) -> i16 { (self as u16).rotate_right(n) as i16 }
     pub fn swap_bytes(self) -> i16 { (self as u16).swap_bytes() as i16 }
 
-    // Little-endian targets only: `to_be` swaps, `to_le` is the identity.
-    pub fn to_be(self) -> i16 { self.swap_bytes() }
-    pub fn to_le(self) -> i16 { self }
-    pub fn from_be(x: i16) -> i16 { x.swap_bytes() }
-    pub fn from_le(x: i16) -> i16 { x }
+    pub fn to_be(self) -> i16 { if BIG_ENDIAN { self } else { self.swap_bytes() } }
+    pub fn to_le(self) -> i16 { if BIG_ENDIAN { self.swap_bytes() } else { self } }
+    pub fn from_be(x: i16) -> i16 { x.to_be() }
+    pub fn from_le(x: i16) -> i16 { x.to_le() }
     pub fn to_le_bytes(self) -> [u8; 2] { [self as u8, (self >> 8) as u8] }
     pub fn to_be_bytes(self) -> [u8; 2] { [(self >> 8) as u8, self as u8] }
-    pub fn to_ne_bytes(self) -> [u8; 2] { self.to_le_bytes() }
+    pub fn to_ne_bytes(self) -> [u8; 2] { if BIG_ENDIAN { self.to_be_bytes() } else { self.to_le_bytes() } }
     pub fn from_le_bytes(bytes: [u8; 2]) -> i16 {
         let x: u16 = 0;
         for i in 0..2 { x = x | (bytes[i] as u16) << (8 * i as u16); }
@@ -296,7 +301,7 @@ impl i16 {
         for i in 0..2 { x = x << 8 | bytes[i] as u16; }
         x as i16
     }
-    pub fn from_ne_bytes(bytes: [u8; 2]) -> i16 { i16::from_le_bytes(bytes) }
+    pub fn from_ne_bytes(bytes: [u8; 2]) -> i16 { if BIG_ENDIAN { i16::from_be_bytes(bytes) } else { i16::from_le_bytes(bytes) } }
 
     pub fn checked_add(self, rhs: i16) -> i16 | none {
         let r = self.wrapping_add(rhs);
@@ -497,6 +502,7 @@ impl i16 {
 impl i32 {
     pub const MIN: i32 = -2147483647 - 1;
     pub const MAX: i32 = 2147483647;
+    pub const BITS: u32 = 32;
 
     #[intrinsic("rok.wrapping_add.i32")]
     pub fn wrapping_add(self, rhs: i32) -> i32 { self.wrapping_add(rhs) }
@@ -522,14 +528,13 @@ impl i32 {
     pub fn rotate_right(self, n: u32) -> i32 { (self as u32).rotate_right(n) as i32 }
     pub fn swap_bytes(self) -> i32 { (self as u32).swap_bytes() as i32 }
 
-    // Little-endian targets only: `to_be` swaps, `to_le` is the identity.
-    pub fn to_be(self) -> i32 { self.swap_bytes() }
-    pub fn to_le(self) -> i32 { self }
-    pub fn from_be(x: i32) -> i32 { x.swap_bytes() }
-    pub fn from_le(x: i32) -> i32 { x }
+    pub fn to_be(self) -> i32 { if BIG_ENDIAN { self } else { self.swap_bytes() } }
+    pub fn to_le(self) -> i32 { if BIG_ENDIAN { self.swap_bytes() } else { self } }
+    pub fn from_be(x: i32) -> i32 { x.to_be() }
+    pub fn from_le(x: i32) -> i32 { x.to_le() }
     pub fn to_le_bytes(self) -> [u8; 4] { [self as u8, (self >> 8) as u8, (self >> 16) as u8, (self >> 24) as u8] }
     pub fn to_be_bytes(self) -> [u8; 4] { [(self >> 24) as u8, (self >> 16) as u8, (self >> 8) as u8, self as u8] }
-    pub fn to_ne_bytes(self) -> [u8; 4] { self.to_le_bytes() }
+    pub fn to_ne_bytes(self) -> [u8; 4] { if BIG_ENDIAN { self.to_be_bytes() } else { self.to_le_bytes() } }
     pub fn from_le_bytes(bytes: [u8; 4]) -> i32 {
         let x: u32 = 0;
         for i in 0..4 { x = x | (bytes[i] as u32) << (8 * i as u32); }
@@ -540,7 +545,7 @@ impl i32 {
         for i in 0..4 { x = x << 8 | bytes[i] as u32; }
         x as i32
     }
-    pub fn from_ne_bytes(bytes: [u8; 4]) -> i32 { i32::from_le_bytes(bytes) }
+    pub fn from_ne_bytes(bytes: [u8; 4]) -> i32 { if BIG_ENDIAN { i32::from_be_bytes(bytes) } else { i32::from_le_bytes(bytes) } }
 
     pub fn checked_add(self, rhs: i32) -> i32 | none {
         let r = self.wrapping_add(rhs);
@@ -741,6 +746,7 @@ impl i32 {
 impl i64 {
     pub const MIN: i64 = -9223372036854775807 - 1;
     pub const MAX: i64 = 9223372036854775807;
+    pub const BITS: u32 = 64;
 
     #[intrinsic("rok.wrapping_add.i64")]
     pub fn wrapping_add(self, rhs: i64) -> i64 { self.wrapping_add(rhs) }
@@ -766,14 +772,13 @@ impl i64 {
     pub fn rotate_right(self, n: u32) -> i64 { (self as u64).rotate_right(n) as i64 }
     pub fn swap_bytes(self) -> i64 { (self as u64).swap_bytes() as i64 }
 
-    // Little-endian targets only: `to_be` swaps, `to_le` is the identity.
-    pub fn to_be(self) -> i64 { self.swap_bytes() }
-    pub fn to_le(self) -> i64 { self }
-    pub fn from_be(x: i64) -> i64 { x.swap_bytes() }
-    pub fn from_le(x: i64) -> i64 { x }
+    pub fn to_be(self) -> i64 { if BIG_ENDIAN { self } else { self.swap_bytes() } }
+    pub fn to_le(self) -> i64 { if BIG_ENDIAN { self.swap_bytes() } else { self } }
+    pub fn from_be(x: i64) -> i64 { x.to_be() }
+    pub fn from_le(x: i64) -> i64 { x.to_le() }
     pub fn to_le_bytes(self) -> [u8; 8] { [self as u8, (self >> 8) as u8, (self >> 16) as u8, (self >> 24) as u8, (self >> 32) as u8, (self >> 40) as u8, (self >> 48) as u8, (self >> 56) as u8] }
     pub fn to_be_bytes(self) -> [u8; 8] { [(self >> 56) as u8, (self >> 48) as u8, (self >> 40) as u8, (self >> 32) as u8, (self >> 24) as u8, (self >> 16) as u8, (self >> 8) as u8, self as u8] }
-    pub fn to_ne_bytes(self) -> [u8; 8] { self.to_le_bytes() }
+    pub fn to_ne_bytes(self) -> [u8; 8] { if BIG_ENDIAN { self.to_be_bytes() } else { self.to_le_bytes() } }
     pub fn from_le_bytes(bytes: [u8; 8]) -> i64 {
         let x: u64 = 0;
         for i in 0..8 { x = x | (bytes[i] as u64) << (8 * i as u64); }
@@ -784,7 +789,7 @@ impl i64 {
         for i in 0..8 { x = x << 8 | bytes[i] as u64; }
         x as i64
     }
-    pub fn from_ne_bytes(bytes: [u8; 8]) -> i64 { i64::from_le_bytes(bytes) }
+    pub fn from_ne_bytes(bytes: [u8; 8]) -> i64 { if BIG_ENDIAN { i64::from_be_bytes(bytes) } else { i64::from_le_bytes(bytes) } }
 
     pub fn checked_add(self, rhs: i64) -> i64 | none {
         let r = self.wrapping_add(rhs);
@@ -980,13 +985,65 @@ impl i64 {
     }
 }
 
-// isize
+// isize / usize: the width-dependent part per target pointer width.
 
+#[cfg(target_pointer_width = "64")]
 impl isize {
-    // 64-bit targets only.
     pub const MIN: isize = -9223372036854775807 - 1;
     pub const MAX: isize = 9223372036854775807;
+    pub const BITS: u32 = 64;
 
+    pub fn to_le_bytes(self) -> [u8; 8] { (self as i64).to_le_bytes() }
+    pub fn to_be_bytes(self) -> [u8; 8] { (self as i64).to_be_bytes() }
+    pub fn to_ne_bytes(self) -> [u8; 8] { (self as i64).to_ne_bytes() }
+    pub fn from_le_bytes(bytes: [u8; 8]) -> isize { i64::from_le_bytes(bytes) as isize }
+    pub fn from_be_bytes(bytes: [u8; 8]) -> isize { i64::from_be_bytes(bytes) as isize }
+    pub fn from_ne_bytes(bytes: [u8; 8]) -> isize { i64::from_ne_bytes(bytes) as isize }
+}
+
+#[cfg(target_pointer_width = "64")]
+impl usize {
+    pub const MIN: usize = 0;
+    pub const MAX: usize = 18446744073709551615;
+    pub const BITS: u32 = 64;
+
+    pub fn to_le_bytes(self) -> [u8; 8] { (self as u64).to_le_bytes() }
+    pub fn to_be_bytes(self) -> [u8; 8] { (self as u64).to_be_bytes() }
+    pub fn to_ne_bytes(self) -> [u8; 8] { (self as u64).to_ne_bytes() }
+    pub fn from_le_bytes(bytes: [u8; 8]) -> usize { u64::from_le_bytes(bytes) as usize }
+    pub fn from_be_bytes(bytes: [u8; 8]) -> usize { u64::from_be_bytes(bytes) as usize }
+    pub fn from_ne_bytes(bytes: [u8; 8]) -> usize { u64::from_ne_bytes(bytes) as usize }
+}
+
+#[cfg(target_pointer_width = "32")]
+impl isize {
+    pub const MIN: isize = -2147483647 - 1;
+    pub const MAX: isize = 2147483647;
+    pub const BITS: u32 = 32;
+
+    pub fn to_le_bytes(self) -> [u8; 4] { (self as i32).to_le_bytes() }
+    pub fn to_be_bytes(self) -> [u8; 4] { (self as i32).to_be_bytes() }
+    pub fn to_ne_bytes(self) -> [u8; 4] { (self as i32).to_ne_bytes() }
+    pub fn from_le_bytes(bytes: [u8; 4]) -> isize { i32::from_le_bytes(bytes) as isize }
+    pub fn from_be_bytes(bytes: [u8; 4]) -> isize { i32::from_be_bytes(bytes) as isize }
+    pub fn from_ne_bytes(bytes: [u8; 4]) -> isize { i32::from_ne_bytes(bytes) as isize }
+}
+
+#[cfg(target_pointer_width = "32")]
+impl usize {
+    pub const MIN: usize = 0;
+    pub const MAX: usize = 4294967295;
+    pub const BITS: u32 = 32;
+
+    pub fn to_le_bytes(self) -> [u8; 4] { (self as u32).to_le_bytes() }
+    pub fn to_be_bytes(self) -> [u8; 4] { (self as u32).to_be_bytes() }
+    pub fn to_ne_bytes(self) -> [u8; 4] { (self as u32).to_ne_bytes() }
+    pub fn from_le_bytes(bytes: [u8; 4]) -> usize { u32::from_le_bytes(bytes) as usize }
+    pub fn from_be_bytes(bytes: [u8; 4]) -> usize { u32::from_be_bytes(bytes) as usize }
+    pub fn from_ne_bytes(bytes: [u8; 4]) -> usize { u32::from_ne_bytes(bytes) as usize }
+}
+
+impl isize {
     #[intrinsic("rok.wrapping_add.isize")]
     pub fn wrapping_add(self, rhs: isize) -> isize { self.wrapping_add(rhs) }
     #[intrinsic("rok.wrapping_sub.isize")]
@@ -1011,25 +1068,10 @@ impl isize {
     pub fn rotate_right(self, n: u32) -> isize { (self as usize).rotate_right(n) as isize }
     pub fn swap_bytes(self) -> isize { (self as usize).swap_bytes() as isize }
 
-    // Little-endian targets only: `to_be` swaps, `to_le` is the identity.
-    pub fn to_be(self) -> isize { self.swap_bytes() }
-    pub fn to_le(self) -> isize { self }
-    pub fn from_be(x: isize) -> isize { x.swap_bytes() }
-    pub fn from_le(x: isize) -> isize { x }
-    pub fn to_le_bytes(self) -> [u8; 8] { [self as u8, (self >> 8) as u8, (self >> 16) as u8, (self >> 24) as u8, (self >> 32) as u8, (self >> 40) as u8, (self >> 48) as u8, (self >> 56) as u8] }
-    pub fn to_be_bytes(self) -> [u8; 8] { [(self >> 56) as u8, (self >> 48) as u8, (self >> 40) as u8, (self >> 32) as u8, (self >> 24) as u8, (self >> 16) as u8, (self >> 8) as u8, self as u8] }
-    pub fn to_ne_bytes(self) -> [u8; 8] { self.to_le_bytes() }
-    pub fn from_le_bytes(bytes: [u8; 8]) -> isize {
-        let x: usize = 0;
-        for i in 0..8 { x = x | (bytes[i] as usize) << (8 * i as usize); }
-        x as isize
-    }
-    pub fn from_be_bytes(bytes: [u8; 8]) -> isize {
-        let x: usize = 0;
-        for i in 0..8 { x = x << 8 | bytes[i] as usize; }
-        x as isize
-    }
-    pub fn from_ne_bytes(bytes: [u8; 8]) -> isize { isize::from_le_bytes(bytes) }
+    pub fn to_be(self) -> isize { if BIG_ENDIAN { self } else { self.swap_bytes() } }
+    pub fn to_le(self) -> isize { if BIG_ENDIAN { self.swap_bytes() } else { self } }
+    pub fn from_be(x: isize) -> isize { x.to_be() }
+    pub fn from_le(x: isize) -> isize { x.to_le() }
 
     pub fn checked_add(self, rhs: isize) -> isize | none {
         let r = self.wrapping_add(rhs);
@@ -1060,11 +1102,11 @@ impl isize {
         -self
     }
     pub fn checked_shl(self, n: u32) -> isize | none {
-        if n >= 64 { return none; }
+        if n >= usize::BITS { return none; }
         self << (n as isize)
     }
     pub fn checked_shr(self, n: u32) -> isize | none {
-        if n >= 64 { return none; }
+        if n >= usize::BITS { return none; }
         self >> (n as isize)
     }
     pub fn checked_pow(self, exp: u32) -> isize | none {
@@ -1089,8 +1131,8 @@ impl isize {
         self % rhs
     }
     pub fn wrapping_neg(self) -> isize { isize::wrapping_sub(0, self) }
-    pub fn wrapping_shl(self, n: u32) -> isize { self << ((n % 64) as isize) }
-    pub fn wrapping_shr(self, n: u32) -> isize { self >> ((n % 64) as isize) }
+    pub fn wrapping_shl(self, n: u32) -> isize { self << ((n % usize::BITS) as isize) }
+    pub fn wrapping_shr(self, n: u32) -> isize { self >> ((n % usize::BITS) as isize) }
     pub fn wrapping_pow(self, exp: u32) -> isize {
         let base = self;
         let acc: isize = 1;
@@ -1133,8 +1175,8 @@ impl isize {
         (self.wrapping_rem(rhs), self == isize::MIN && rhs == -1)
     }
     pub fn overflowing_neg(self) -> (isize, bool) { (self.wrapping_neg(), self == isize::MIN) }
-    pub fn overflowing_shl(self, n: u32) -> (isize, bool) { (self.wrapping_shl(n), n >= 64) }
-    pub fn overflowing_shr(self, n: u32) -> (isize, bool) { (self.wrapping_shr(n), n >= 64) }
+    pub fn overflowing_shl(self, n: u32) -> (isize, bool) { (self.wrapping_shl(n), n >= usize::BITS) }
+    pub fn overflowing_shr(self, n: u32) -> (isize, bool) { (self.wrapping_shr(n), n >= usize::BITS) }
     pub fn overflowing_pow(self, exp: u32) -> (isize, bool) {
         (self.wrapping_pow(exp), self.checked_pow(exp) is none)
     }
@@ -1210,7 +1252,7 @@ impl isize {
     }
     pub fn checked_ilog2(self) -> u32 | none {
         if self <= 0 { return none; }
-        63 - self.leading_zeros()
+        usize::BITS - 1 - self.leading_zeros()
     }
     pub fn checked_ilog10(self) -> u32 | none { self.checked_ilog(10) }
     pub fn checked_ilog(self, base: isize) -> u32 | none {
@@ -1230,6 +1272,7 @@ impl isize {
 impl u8 {
     pub const MIN: u8 = 0;
     pub const MAX: u8 = 255;
+    pub const BITS: u32 = 8;
 
     #[intrinsic("rok.wrapping_add.u8")]
     pub fn wrapping_add(self, rhs: u8) -> u8 { self.wrapping_add(rhs) }
@@ -1259,17 +1302,16 @@ impl u8 {
     pub fn rotate_right(self, n: u32) -> u8 { self.rotate_left(8 - n % 8) }
     pub fn swap_bytes(self) -> u8 { self }
 
-    // Little-endian targets only: `to_be` swaps, `to_le` is the identity.
-    pub fn to_be(self) -> u8 { self.swap_bytes() }
-    pub fn to_le(self) -> u8 { self }
-    pub fn from_be(x: u8) -> u8 { x.swap_bytes() }
-    pub fn from_le(x: u8) -> u8 { x }
+    pub fn to_be(self) -> u8 { if BIG_ENDIAN { self } else { self.swap_bytes() } }
+    pub fn to_le(self) -> u8 { if BIG_ENDIAN { self.swap_bytes() } else { self } }
+    pub fn from_be(x: u8) -> u8 { x.to_be() }
+    pub fn from_le(x: u8) -> u8 { x.to_le() }
     pub fn to_le_bytes(self) -> [u8; 1] { [self as u8] }
     pub fn to_be_bytes(self) -> [u8; 1] { [self as u8] }
-    pub fn to_ne_bytes(self) -> [u8; 1] { self.to_le_bytes() }
+    pub fn to_ne_bytes(self) -> [u8; 1] { if BIG_ENDIAN { self.to_be_bytes() } else { self.to_le_bytes() } }
     pub fn from_le_bytes(bytes: [u8; 1]) -> u8 { bytes[0] as u8 }
     pub fn from_be_bytes(bytes: [u8; 1]) -> u8 { bytes[0] as u8 }
-    pub fn from_ne_bytes(bytes: [u8; 1]) -> u8 { u8::from_le_bytes(bytes) }
+    pub fn from_ne_bytes(bytes: [u8; 1]) -> u8 { if BIG_ENDIAN { u8::from_be_bytes(bytes) } else { u8::from_le_bytes(bytes) } }
 
     pub fn checked_add(self, rhs: u8) -> u8 | none {
         let r = self.wrapping_add(rhs);
@@ -1435,6 +1477,7 @@ impl u8 {
 impl u16 {
     pub const MIN: u16 = 0;
     pub const MAX: u16 = 65535;
+    pub const BITS: u32 = 16;
 
     #[intrinsic("rok.wrapping_add.u16")]
     pub fn wrapping_add(self, rhs: u16) -> u16 { self.wrapping_add(rhs) }
@@ -1465,14 +1508,13 @@ impl u16 {
     #[intrinsic("rok.bswap.u16")]
     pub fn swap_bytes(self) -> u16 { self.swap_bytes() }
 
-    // Little-endian targets only: `to_be` swaps, `to_le` is the identity.
-    pub fn to_be(self) -> u16 { self.swap_bytes() }
-    pub fn to_le(self) -> u16 { self }
-    pub fn from_be(x: u16) -> u16 { x.swap_bytes() }
-    pub fn from_le(x: u16) -> u16 { x }
+    pub fn to_be(self) -> u16 { if BIG_ENDIAN { self } else { self.swap_bytes() } }
+    pub fn to_le(self) -> u16 { if BIG_ENDIAN { self.swap_bytes() } else { self } }
+    pub fn from_be(x: u16) -> u16 { x.to_be() }
+    pub fn from_le(x: u16) -> u16 { x.to_le() }
     pub fn to_le_bytes(self) -> [u8; 2] { [self as u8, (self >> 8) as u8] }
     pub fn to_be_bytes(self) -> [u8; 2] { [(self >> 8) as u8, self as u8] }
-    pub fn to_ne_bytes(self) -> [u8; 2] { self.to_le_bytes() }
+    pub fn to_ne_bytes(self) -> [u8; 2] { if BIG_ENDIAN { self.to_be_bytes() } else { self.to_le_bytes() } }
     pub fn from_le_bytes(bytes: [u8; 2]) -> u16 {
         let x: u16 = 0;
         for i in 0..2 { x = x | (bytes[i] as u16) << (8 * i as u16); }
@@ -1483,7 +1525,7 @@ impl u16 {
         for i in 0..2 { x = x << 8 | bytes[i] as u16; }
         x
     }
-    pub fn from_ne_bytes(bytes: [u8; 2]) -> u16 { u16::from_le_bytes(bytes) }
+    pub fn from_ne_bytes(bytes: [u8; 2]) -> u16 { if BIG_ENDIAN { u16::from_be_bytes(bytes) } else { u16::from_le_bytes(bytes) } }
 
     pub fn checked_add(self, rhs: u16) -> u16 | none {
         let r = self.wrapping_add(rhs);
@@ -1649,6 +1691,7 @@ impl u16 {
 impl u32 {
     pub const MIN: u32 = 0;
     pub const MAX: u32 = 4294967295;
+    pub const BITS: u32 = 32;
 
     #[intrinsic("rok.wrapping_add.u32")]
     pub fn wrapping_add(self, rhs: u32) -> u32 { self.wrapping_add(rhs) }
@@ -1679,14 +1722,13 @@ impl u32 {
     #[intrinsic("rok.bswap.u32")]
     pub fn swap_bytes(self) -> u32 { self.swap_bytes() }
 
-    // Little-endian targets only: `to_be` swaps, `to_le` is the identity.
-    pub fn to_be(self) -> u32 { self.swap_bytes() }
-    pub fn to_le(self) -> u32 { self }
-    pub fn from_be(x: u32) -> u32 { x.swap_bytes() }
-    pub fn from_le(x: u32) -> u32 { x }
+    pub fn to_be(self) -> u32 { if BIG_ENDIAN { self } else { self.swap_bytes() } }
+    pub fn to_le(self) -> u32 { if BIG_ENDIAN { self.swap_bytes() } else { self } }
+    pub fn from_be(x: u32) -> u32 { x.to_be() }
+    pub fn from_le(x: u32) -> u32 { x.to_le() }
     pub fn to_le_bytes(self) -> [u8; 4] { [self as u8, (self >> 8) as u8, (self >> 16) as u8, (self >> 24) as u8] }
     pub fn to_be_bytes(self) -> [u8; 4] { [(self >> 24) as u8, (self >> 16) as u8, (self >> 8) as u8, self as u8] }
-    pub fn to_ne_bytes(self) -> [u8; 4] { self.to_le_bytes() }
+    pub fn to_ne_bytes(self) -> [u8; 4] { if BIG_ENDIAN { self.to_be_bytes() } else { self.to_le_bytes() } }
     pub fn from_le_bytes(bytes: [u8; 4]) -> u32 {
         let x: u32 = 0;
         for i in 0..4 { x = x | (bytes[i] as u32) << (8 * i as u32); }
@@ -1697,7 +1739,7 @@ impl u32 {
         for i in 0..4 { x = x << 8 | bytes[i] as u32; }
         x
     }
-    pub fn from_ne_bytes(bytes: [u8; 4]) -> u32 { u32::from_le_bytes(bytes) }
+    pub fn from_ne_bytes(bytes: [u8; 4]) -> u32 { if BIG_ENDIAN { u32::from_be_bytes(bytes) } else { u32::from_le_bytes(bytes) } }
 
     pub fn checked_add(self, rhs: u32) -> u32 | none {
         let r = self.wrapping_add(rhs);
@@ -1863,6 +1905,7 @@ impl u32 {
 impl u64 {
     pub const MIN: u64 = 0;
     pub const MAX: u64 = 18446744073709551615;
+    pub const BITS: u32 = 64;
 
     #[intrinsic("rok.wrapping_add.u64")]
     pub fn wrapping_add(self, rhs: u64) -> u64 { self.wrapping_add(rhs) }
@@ -1893,14 +1936,13 @@ impl u64 {
     #[intrinsic("rok.bswap.u64")]
     pub fn swap_bytes(self) -> u64 { self.swap_bytes() }
 
-    // Little-endian targets only: `to_be` swaps, `to_le` is the identity.
-    pub fn to_be(self) -> u64 { self.swap_bytes() }
-    pub fn to_le(self) -> u64 { self }
-    pub fn from_be(x: u64) -> u64 { x.swap_bytes() }
-    pub fn from_le(x: u64) -> u64 { x }
+    pub fn to_be(self) -> u64 { if BIG_ENDIAN { self } else { self.swap_bytes() } }
+    pub fn to_le(self) -> u64 { if BIG_ENDIAN { self.swap_bytes() } else { self } }
+    pub fn from_be(x: u64) -> u64 { x.to_be() }
+    pub fn from_le(x: u64) -> u64 { x.to_le() }
     pub fn to_le_bytes(self) -> [u8; 8] { [self as u8, (self >> 8) as u8, (self >> 16) as u8, (self >> 24) as u8, (self >> 32) as u8, (self >> 40) as u8, (self >> 48) as u8, (self >> 56) as u8] }
     pub fn to_be_bytes(self) -> [u8; 8] { [(self >> 56) as u8, (self >> 48) as u8, (self >> 40) as u8, (self >> 32) as u8, (self >> 24) as u8, (self >> 16) as u8, (self >> 8) as u8, self as u8] }
-    pub fn to_ne_bytes(self) -> [u8; 8] { self.to_le_bytes() }
+    pub fn to_ne_bytes(self) -> [u8; 8] { if BIG_ENDIAN { self.to_be_bytes() } else { self.to_le_bytes() } }
     pub fn from_le_bytes(bytes: [u8; 8]) -> u64 {
         let x: u64 = 0;
         for i in 0..8 { x = x | (bytes[i] as u64) << (8 * i as u64); }
@@ -1911,7 +1953,7 @@ impl u64 {
         for i in 0..8 { x = x << 8 | bytes[i] as u64; }
         x
     }
-    pub fn from_ne_bytes(bytes: [u8; 8]) -> u64 { u64::from_le_bytes(bytes) }
+    pub fn from_ne_bytes(bytes: [u8; 8]) -> u64 { if BIG_ENDIAN { u64::from_be_bytes(bytes) } else { u64::from_le_bytes(bytes) } }
 
     pub fn checked_add(self, rhs: u64) -> u64 | none {
         let r = self.wrapping_add(rhs);
@@ -2075,10 +2117,6 @@ impl u64 {
 // usize
 
 impl usize {
-    // 64-bit targets only.
-    pub const MIN: usize = 0;
-    pub const MAX: usize = 18446744073709551615;
-
     #[intrinsic("rok.wrapping_add.usize")]
     pub fn wrapping_add(self, rhs: usize) -> usize { self.wrapping_add(rhs) }
     #[intrinsic("rok.wrapping_sub.usize")]
@@ -2100,33 +2138,18 @@ impl usize {
     pub fn trailing_ones(self) -> u32 { (~self).cttz() as u32 }
 
     pub fn rotate_left(self, n: u32) -> usize {
-        let k = n % 64;
+        let k = n % usize::BITS;
         if k == 0 { return self; }
-        self << (k as usize) | self >> ((64 - k) as usize)
+        self << (k as usize) | self >> ((usize::BITS - k) as usize)
     }
-    pub fn rotate_right(self, n: u32) -> usize { self.rotate_left(64 - n % 64) }
+    pub fn rotate_right(self, n: u32) -> usize { self.rotate_left(64 - n % usize::BITS) }
     #[intrinsic("rok.bswap.usize")]
     pub fn swap_bytes(self) -> usize { self.swap_bytes() }
 
-    // Little-endian targets only: `to_be` swaps, `to_le` is the identity.
-    pub fn to_be(self) -> usize { self.swap_bytes() }
-    pub fn to_le(self) -> usize { self }
-    pub fn from_be(x: usize) -> usize { x.swap_bytes() }
-    pub fn from_le(x: usize) -> usize { x }
-    pub fn to_le_bytes(self) -> [u8; 8] { [self as u8, (self >> 8) as u8, (self >> 16) as u8, (self >> 24) as u8, (self >> 32) as u8, (self >> 40) as u8, (self >> 48) as u8, (self >> 56) as u8] }
-    pub fn to_be_bytes(self) -> [u8; 8] { [(self >> 56) as u8, (self >> 48) as u8, (self >> 40) as u8, (self >> 32) as u8, (self >> 24) as u8, (self >> 16) as u8, (self >> 8) as u8, self as u8] }
-    pub fn to_ne_bytes(self) -> [u8; 8] { self.to_le_bytes() }
-    pub fn from_le_bytes(bytes: [u8; 8]) -> usize {
-        let x: usize = 0;
-        for i in 0..8 { x = x | (bytes[i] as usize) << (8 * i as usize); }
-        x
-    }
-    pub fn from_be_bytes(bytes: [u8; 8]) -> usize {
-        let x: usize = 0;
-        for i in 0..8 { x = x << 8 | bytes[i] as usize; }
-        x
-    }
-    pub fn from_ne_bytes(bytes: [u8; 8]) -> usize { usize::from_le_bytes(bytes) }
+    pub fn to_be(self) -> usize { if BIG_ENDIAN { self } else { self.swap_bytes() } }
+    pub fn to_le(self) -> usize { if BIG_ENDIAN { self.swap_bytes() } else { self } }
+    pub fn from_be(x: usize) -> usize { x.to_be() }
+    pub fn from_le(x: usize) -> usize { x.to_le() }
 
     pub fn checked_add(self, rhs: usize) -> usize | none {
         let r = self.wrapping_add(rhs);
@@ -2156,11 +2179,11 @@ impl usize {
         self
     }
     pub fn checked_shl(self, n: u32) -> usize | none {
-        if n >= 64 { return none; }
+        if n >= usize::BITS { return none; }
         self << (n as usize)
     }
     pub fn checked_shr(self, n: u32) -> usize | none {
-        if n >= 64 { return none; }
+        if n >= usize::BITS { return none; }
         self >> (n as usize)
     }
     pub fn checked_pow(self, exp: u32) -> usize | none {
@@ -2183,8 +2206,8 @@ impl usize {
         self % rhs
     }
     pub fn wrapping_neg(self) -> usize { usize::wrapping_sub(0, self) }
-    pub fn wrapping_shl(self, n: u32) -> usize { self << ((n % 64) as usize) }
-    pub fn wrapping_shr(self, n: u32) -> usize { self >> ((n % 64) as usize) }
+    pub fn wrapping_shl(self, n: u32) -> usize { self << ((n % usize::BITS) as usize) }
+    pub fn wrapping_shr(self, n: u32) -> usize { self >> ((n % usize::BITS) as usize) }
     pub fn wrapping_pow(self, exp: u32) -> usize {
         let base = self;
         let acc: usize = 1;
@@ -2214,8 +2237,8 @@ impl usize {
     pub fn overflowing_div(self, rhs: usize) -> (usize, bool) { (self / rhs, false) }
     pub fn overflowing_rem(self, rhs: usize) -> (usize, bool) { (self % rhs, false) }
     pub fn overflowing_neg(self) -> (usize, bool) { (self.wrapping_neg(), self != 0) }
-    pub fn overflowing_shl(self, n: u32) -> (usize, bool) { (self.wrapping_shl(n), n >= 64) }
-    pub fn overflowing_shr(self, n: u32) -> (usize, bool) { (self.wrapping_shr(n), n >= 64) }
+    pub fn overflowing_shl(self, n: u32) -> (usize, bool) { (self.wrapping_shl(n), n >= usize::BITS) }
+    pub fn overflowing_shr(self, n: u32) -> (usize, bool) { (self.wrapping_shr(n), n >= usize::BITS) }
     pub fn overflowing_pow(self, exp: u32) -> (usize, bool) {
         (self.wrapping_pow(exp), self.checked_pow(exp) is none)
     }
@@ -2256,8 +2279,8 @@ impl usize {
     }
     pub fn checked_next_power_of_two(self) -> usize | none {
         if self <= 1 { return 1; }
-        let p = 64 - (self - 1).leading_zeros();
-        if p >= 64 { return none; }
+        let p = usize::BITS - (self - 1).leading_zeros();
+        if p >= usize::BITS { return none; }
         let one: usize = 1;
         one << (p as usize)
     }
@@ -2272,7 +2295,7 @@ impl usize {
     }
     pub fn checked_ilog2(self) -> u32 | none {
         if self <= 0 { return none; }
-        63 - self.leading_zeros()
+        usize::BITS - 1 - self.leading_zeros()
     }
     pub fn checked_ilog10(self) -> u32 | none { self.checked_ilog(10) }
     pub fn checked_ilog(self, base: usize) -> u32 | none {

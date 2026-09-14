@@ -1,4 +1,7 @@
 // expect-exit: 9
+// expect-stdout:
+// 3 2 (3, 2)
+
 
 fn divmod(a: i32, b: i32) -> (i32, i32) {
     return (a / b, a % b);
@@ -6,5 +9,6 @@ fn divmod(a: i32, b: i32) -> (i32, i32) {
 
 fn main() -> i32 {
     let qr: (i32, i32) = divmod(17i32, 5i32);
+    println(f"{qr.0} {qr.1} {qr:?}");
     return qr.0 + qr.1 * 3i32;
 }

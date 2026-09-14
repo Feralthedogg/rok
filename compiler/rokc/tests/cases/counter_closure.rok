@@ -1,4 +1,9 @@
 // expect-exit: 30
+// expect-stdout:
+// 1 18 18
+// 2 21 39
+// 3 24 63
+// 4 27 90
 
 fn main() -> i32 {
     let base = 5;
@@ -8,6 +13,7 @@ fn main() -> i32 {
     let scale = |x: i32| -> i32 { (x + base) * multiplier };
     for v in xs {
         total += scale(v);
+        println(f"{v} {scale(v)} {total}");
     }
     return total - 60;
 }

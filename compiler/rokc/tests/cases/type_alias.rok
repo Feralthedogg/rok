@@ -1,4 +1,7 @@
 // expect-exit: 9
+// expect-stdout:
+// 5 4 true
+
 
 type Maybe = i32 | none;
 
@@ -14,5 +17,6 @@ fn main() -> i32 {
     let b: Maybe = pick(false);
     let x = a ?? -1;
     let y = b ?? 4;
+    println(f"{x} {y} {b is none}");
     return x + y;
 }

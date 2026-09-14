@@ -1,0 +1,59 @@
+// spec: refs-lang 007.06 §7.6.7
+// expect-exit: 0
+// gc-stress: 50
+// expect-stdout:
+// received 5 per worker
+// slept on every worker, ticked true
+
+// 706 §7.6.7: a task blocked in a synchronous call does not hold its
+// worker. Every worker blocks in a sync `recv` whose sender is another
+// task (behind a timer); main blocks too, so only a worker handed on
+// to a new thread can run the sender and fire the timer.
+use rok::std::thread;
+use rok::std::time::Duration;
+
+async fn run() -> i32 {
+    let n = task::workers();
+    let (tx, rx) = channel::<i32>();
+    let (dtx, drx) = channel::<i32>();
+    for i in 0..n * 5 {
+        let r = rx;
+        let d = dtx.clone();
+        task::spawn(async {
+            let v = r.recv() ?? -1;
+            try! d.send(v);
+            0
+        });
+    }
+    task::spawn(async {
+        await task::sleep(Duration::ms(20));
+        for i in 0..n * 5 { try! tx.send(1); }
+        0
+    });
+    // Blocks this (guest) thread as well.
+    let got = 0;
+    for i in 0..n * 5 { got += drx.recv() ?? 0; }
+    println(f"received {got / (n as i32)} per worker");
+
+    // Sync sleeps on every worker while another task keeps ticking.
+    let ticks = Atomic::new(0);
+    let sleepers: List<Task<i32>> = List::new();
+    for i in 0..n {
+        sleepers.push(task::spawn(async { thread::sleep(Duration::ms(200)); 0 }));
+    }
+    let ticker = task::spawn(async {
+        for k in 0..10 {
+            await task::sleep(Duration::ms(5));
+            ticks.fetch_add(1);
+        }
+        0
+    });
+    await task::join(sleepers);
+    await ticker;
+    println(f"slept on every worker, ticked {ticks.load() == 10}");
+    0
+}
+
+fn main() -> i32 {
+    task::block_on(run())
+}

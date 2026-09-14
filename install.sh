@@ -41,7 +41,15 @@ host_triple() {
   esac
   case $(uname -s) in
     Darwin) say "$arch-apple-darwin" ;;
-    Linux) say "$arch-unknown-linux-gnu" ;;
+    Linux)
+      # A musl system has its loader, /lib/ld-musl-<arch>.so.1.
+      if ls /lib/ld-musl-* >/dev/null 2>&1; then
+        say "$arch-unknown-linux-musl"
+      else
+        say "$arch-unknown-linux-gnu"
+      fi
+      ;;
+    MINGW* | MSYS* | CYGWIN*) die "on Windows use install.ps1 (PowerShell)" ;;
     *) die "no rok toolchain for $(uname -s)" ;;
   esac
 }
@@ -92,4 +100,17 @@ esac
 if [ "$(uname -s)" = Darwin ] && ! xcrun --show-sdk-path >/dev/null 2>&1; then
   say ""
   say "rok needs the macOS SDK to link programs: xcode-select --install"
+fi
+# On Linux it links against the system C library's and GCC's runtime
+# files (crt1.o, crtbeginS.o, libgcc).
+if [ "$(uname -s)" = Linux ]; then
+  found=""
+  for f in /usr/lib/gcc/*/*/crtbeginS.o /usr/lib64/gcc/*/*/crtbeginS.o; do
+    if [ -f "$f" ]; then found=1; fi
+  done
+  if [ -z "$found" ]; then
+    say ""
+    say "rok needs the C library and GCC runtime files to link programs:"
+    say "  Debian / Ubuntu: apt install gcc   Fedora: dnf install gcc   Alpine: apk add gcc musl-dev"
+  fi
 fi

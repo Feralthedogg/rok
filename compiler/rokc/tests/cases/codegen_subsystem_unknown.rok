@@ -1,0 +1,7 @@
+// rokc-arg: -C subsystem=gui
+// expect-error: unknown codegen option `subsystem=gui`
+
+// `-C subsystem=` takes `console` or `windows` (a Windows executable's
+// /SUBSYSTEM and entry point).
+
+fn main() {}

@@ -104,11 +104,11 @@ use core::mem::size_of;
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use rokr_common::fatal;
 use rokr_common::object_header::{
     FLAG_CARDED, FLAG_FORWARDED, FLAG_LARGE, FLAG_MARK, FLAG_NOEVAC, FLAG_NOMOVE, FLAG_PINNED,
     FLAG_SATB, FLAG_SCANNED, FLAG_STICKY, FLAG_UNLOGGED, HEADER_ALIGN, HEADER_SIZE, ObjectHeader,
 };
+use rokr_common::{fatal, sys};
 
 mod concurrent;
 pub mod world;
@@ -458,6 +458,7 @@ pub fn alloc(size: usize, align: usize, type_id: u32) -> *mut u8 {
     if size > isize::MAX as usize {
         fatal(b"rok runtime: allocation too large");
     }
+    let size = size.max(rokr_common::gc_abi::MIN_OBJECT_SIZE as usize);
     let size8 = size.next_multiple_of(8);
     // Type id 0 (invalid, 801 §8.1.2) would read as free memory in a
     // block.
@@ -548,8 +549,7 @@ fn configure(h: &mut Heap) {
         _ => Concurrent::Auto,
     };
     if env_num(c"ROK_GC_STATS").is_some_and(|v| v != 0) {
-        // SAFETY: registering a plain `extern "C" fn()`.
-        unsafe { libc::atexit(print_stats) };
+        sys::atexit(print_stats);
     }
 }
 
@@ -631,17 +631,7 @@ extern "C" fn print_stats() {
 }
 
 fn now_ns() -> u64 {
-    clock_ns(libc::CLOCK_MONOTONIC)
-}
-
-fn clock_ns(clock: libc::clockid_t) -> u64 {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: valid out-pointer.
-    unsafe { libc::clock_gettime(clock, &mut ts) };
-    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+    sys::monotonic_ns() as u64
 }
 
 /// With the lock held: `lines` free lines (exactly, if `exact`; else
@@ -726,57 +716,40 @@ fn end_of_run(start: usize, mut end: usize) -> usize {
 fn new_block() -> usize {
     let h = heap();
     if h.base == 0 {
-        // SAFETY: an anonymous PROT_NONE reservation; nothing is touched
-        // until `mprotect` commits it.
-        let p = unsafe {
-            libc::mmap(
-                ptr::null_mut(),
-                RESERVE + BLOCK_SIZE,
-                libc::PROT_NONE,
-                libc::MAP_PRIVATE | libc::MAP_ANON,
-                -1,
-                0,
-            )
-        };
-        if p == libc::MAP_FAILED {
+        let p = sys::reserve(RESERVE + BLOCK_SIZE);
+        if p.is_null() {
             rokr_common::oom();
         }
         h.base = (p as usize).next_multiple_of(BLOCK_SIZE);
+        // Metadata for every block of the reservation, reserved once and
+        // committed as blocks are: a concurrent mark reads it while
+        // refills commit blocks, so it never moves.
+        h.meta = sys::reserve(RESERVE / BLOCK_SIZE * size_of::<BlockMeta>()).cast();
+        if h.meta.is_null() {
+            rokr_common::oom();
+        }
     }
     if h.nblocks == RESERVE / BLOCK_SIZE {
         rokr_common::oom();
     }
     let b = h.nblocks;
-    // SAFETY: block `b` lies inside our reservation.
-    let rc = unsafe {
-        libc::mprotect(
-            (h.base + b * BLOCK_SIZE) as *mut libc::c_void,
-            BLOCK_SIZE,
-            libc::PROT_READ | libc::PROT_WRITE,
-        )
+    // Commit in 64 KiB steps (a multiple of every page size): block
+    // `b`'s metadata pages, unless block `b - 1`'s commit covered them.
+    let step = 64 << 10;
+    let (start, end) = (b * size_of::<BlockMeta>(), (b + 1) * size_of::<BlockMeta>());
+    let from = if b == 0 {
+        0
+    } else {
+        start.next_multiple_of(step)
     };
-    if rc != 0 {
+    let to = end.next_multiple_of(step);
+    // SAFETY: block `b` and its metadata lie inside our reservations.
+    let ok = unsafe {
+        sys::commit((h.base + b * BLOCK_SIZE) as *mut u8, BLOCK_SIZE)
+            && (from >= to || sys::commit(h.meta.cast::<u8>().add(from), to - from))
+    };
+    if !ok {
         rokr_common::oom();
-    }
-    if h.meta.is_null() {
-        // Metadata for every block of the reservation, reserved once (its
-        // pages fault in as blocks are used): a concurrent mark reads it
-        // while refills commit blocks.
-        // SAFETY: a fresh anonymous mapping.
-        let p = unsafe {
-            libc::mmap(
-                ptr::null_mut(),
-                RESERVE / BLOCK_SIZE * size_of::<BlockMeta>(),
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANON,
-                -1,
-                0,
-            )
-        };
-        if p == libc::MAP_FAILED {
-            rokr_common::oom();
-        }
-        h.meta = p.cast();
     }
     // SAFETY: `b` is below the reserved count.
     unsafe {
@@ -803,23 +776,12 @@ fn alloc_large(size: usize, align: usize, type_id: u32) -> *mut u8 {
     else {
         fatal(b"rok runtime: allocation size overflow");
     };
-    // SAFETY: plain allocation calls; `align` is a power of two >= 8.
-    let base = unsafe {
-        if align <= 16 {
-            libc::calloc(1, total)
-        } else {
-            let mut p: *mut libc::c_void = ptr::null_mut();
-            if libc::posix_memalign(&mut p, align, total) != 0 {
-                p = ptr::null_mut();
-            } else {
-                ptr::write_bytes(p.cast::<u8>(), 0, total);
-            }
-            p
-        }
-    };
+    let base = sys::alloc_aligned(total, align);
     if base.is_null() {
         rokr_common::oom();
     }
+    // SAFETY: a fresh block of `total` bytes.
+    unsafe { ptr::write_bytes(base, 0, total) };
     world::lock();
     // The new block is not on the list yet, so a collection here cannot
     // free it.
@@ -1474,7 +1436,7 @@ impl Pause {
     fn begin() -> Self {
         let p = Self {
             t0: now_ns(),
-            c0: clock_ns(libc::CLOCK_THREAD_CPUTIME_ID),
+            c0: sys::thread_cpu_ns() as u64,
         };
         world::stop();
         world::reset_tlabs();
@@ -1487,7 +1449,7 @@ impl Pause {
         concurrent::unlock_mark();
         let h = heap();
         let dt = now_ns() - self.t0;
-        let cpu = clock_ns(libc::CLOCK_THREAD_CPUTIME_ID) - self.c0;
+        let cpu = sys::thread_cpu_ns() as u64 - self.c0;
         h.gc_cpu_ns += cpu;
         h.gc_ns += dt;
         h.max_ns = h.max_ns.max(dt);
@@ -1703,7 +1665,7 @@ fn sweep_los(full: bool, concurrent: bool) -> usize {
             } else {
                 *link = (*p).next;
                 h.los_count -= 1;
-                libc::free(o.sub((*p).offset).cast());
+                sys::free_aligned(o.sub((*p).offset));
             }
         }
     }
@@ -2003,19 +1965,10 @@ fn release_free_blocks() {
             m.released = true;
             b += 1;
         }
-        // SAFETY: remaps whole blocks of our reservation that hold no
-        // object (fresh zero pages, same protection).
-        let p = unsafe {
-            libc::mmap(
-                (h.base + first * BLOCK_SIZE) as *mut libc::c_void,
-                (b - first) * BLOCK_SIZE,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_FIXED,
-                -1,
-                0,
-            )
-        };
-        if p == libc::MAP_FAILED {
+        // SAFETY: whole committed blocks of our reservation that hold no
+        // object.
+        let at = (h.base + first * BLOCK_SIZE) as *mut u8;
+        if !unsafe { sys::reset(at, (b - first) * BLOCK_SIZE) } {
             rokr_common::oom();
         }
     }

@@ -1,4 +1,6 @@
 // expect-exit: 40
+// expect-stdout:
+// 3 5 4 4 32
 
 struct Vec2 {
     x: i32;
@@ -18,5 +20,6 @@ fn make() -> Vec2 {
 fn main() -> i32 {
     let Vec2 { x, y } = make();
     let v = Vec2 { x: x + 1, y: y - 1 };
+    println(f"{x} {y} {v.x} {v.y} {v.norm_sq()}");
     return v.norm_sq() + (x + y);  // (4*4 + 4*4) + (3+5) = 32 + 8 = 40
 }

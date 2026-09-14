@@ -1,11 +1,21 @@
 // rok::std::process (stdlib spec 307): child processes.
 //
-// Spawning is `fork` + `execvp` in the runtime (the program is looked
-// up in `PATH` unless it contains `/`); every fd the library opens is
-// close-on-exec, and an exec failure comes back as the `IoError`.
+// Spawning is `posix_spawnp` in the runtime (the program is looked up
+// in this process's `PATH` unless it contains `/`, even when `env`
+// replaces the child's); every fd the library opens is close-on-exec,
+// and an exec failure comes back as the `IoError`.
+// Windows: `CreateProcessW` with the arguments quoted for the MSVC CRT
+// (the program is looked up in `PATH` unless it holds a separator, `.exe`
+// added without an extension); the child inherits only its three
+// standard handles; a batch file refuses arguments holding `"`, `%`
+// or a line break. `ExitStatus` holds the exit code; `kill` / `signal`
+// end the process with `TerminateProcess`; `signal` routes console
+// events: Ctrl-C (2), Ctrl-Break (21), console close (1).
 //
-// No `posix_spawn` fast path, no `pidfd`. `output()` drains stdout and
-// stderr together (`poll`). The pipe ends are `File`s.
+// On Linux each child is also tracked by a pidfd (opened right after
+// the spawn, closed once reaped), and signals go through it, so a
+// recycled pid is never hit. `output()` drains stdout and stderr
+// together (`poll`; Windows polls the pipes). The pipe ends are `File`s.
 //
 // `signal(sig, f)`: the C handler writes the signal number to a pipe;
 // one dispatcher thread (`rok-signal`, started by the first `signal`)
@@ -13,7 +23,7 @@
 // anything. A burst that fills the pipe drops signals.
 
 use rok::std::fs::File;
-use rok::std::io::{IoError, Reader, check, byte_buf, read_more};
+use rok::std::io::{IoError, RawFd, Reader, check, byte_buf, read_more};
 use rok::std::path::AsPath;
 use rok::std::env;
 use rok::std::thread;
@@ -256,7 +266,8 @@ impl Command {
                 )
             };
             try check(pid as i64, self.program);
-            let state: GcBuf<i32> = buf_new(2);
+            let state: GcBuf<i32> = buf_new(3);
+            state[2] = rok_os_pidfd_open(pid);
             Child {
                 pid: pid,
                 stdin: pipe_end(fds[0], "child stdin"),
@@ -289,13 +300,16 @@ fn pipe_end(fd: i32, name: str) -> File | none {
     File::from_fd(fd, name)
 }
 
+const WINDOWS: bool = cfg!(target_os = "windows");
+
 /// A running (or finished) child (307.2).
 pub struct Child {
     pid: i32;
     pub stdin: ChildStdin | none;
     pub stdout: ChildStdout | none;
     pub stderr: ChildStderr | none;
-    /// `[reaped, raw status]`, shared by copies of the handle.
+    /// `[reaped, raw status, pidfd or -errno]`, shared by copies of the
+    /// handle.
     state: GcBuf<i32>;
     kill_on_drop: bool;
 }
@@ -309,7 +323,28 @@ impl Child {
     pub fn signal(self, sig: i32) throws (IoError) {
         unsafe {
             if self.state[0] != 0 { return; }
-            try check(rok_os_kill(self.pid, sig) as i64, "kill");
+            let fd = self.state[2];
+            let r = if fd >= 0 { rok_os_pidfd_signal(fd, sig) } else { rok_os_kill(self.pid, sig) };
+            try check(r as i64, "kill");
+        }
+    }
+
+    /// The pidfd tracking the child (Linux 5.3+), valid until it is
+    /// reaped (`wait` / `try_wait` close it).
+    #[cfg(target_os = "linux")]
+    pub fn pidfd(self) throws (IoError) -> RawFd {
+        let fd = unsafe { self.state[2] };
+        try check(fd as i64, "pidfd");
+        fd
+    }
+
+    /// Record a reaped status; the pidfd goes with the process.
+    unsafe fn reaped(self, raw: i32) {
+        self.state[0] = 1;
+        self.state[1] = raw;
+        if self.state[2] >= 0 {
+            rok_os_close(self.state[2]);
+            self.state[2] = -9;
         }
     }
 
@@ -322,8 +357,7 @@ impl Child {
             if self.state[0] == 0 {
                 let out: GcBuf<i32> = buf_new(1);
                 try check(rok_os_waitpid(self.pid, 0, out) as i64, "waitpid");
-                self.state[0] = 1;
-                self.state[1] = out[0];
+                self.reaped(out[0]);
             }
             ExitStatus { raw: self.state[1] }
         }
@@ -336,8 +370,7 @@ impl Child {
                 let out: GcBuf<i32> = buf_new(1);
                 let r = try check(rok_os_waitpid(self.pid, 1, out) as i64, "waitpid");
                 if r == 0 { return none; }
-                self.state[0] = 1;
-                self.state[1] = out[0];
+                self.reaped(out[0]);
             }
             ExitStatus { raw: self.state[1] }
         }
@@ -356,7 +389,7 @@ impl Drop for Child {
     }
 }
 
-/// How a child ended (a raw `wait` status).
+/// How a child ended (a raw `wait` status; Windows: the exit code).
 pub struct ExitStatus {
     raw: i32;
 }
@@ -366,12 +399,14 @@ impl ExitStatus {
 
     /// The exit code; `none` if a signal ended it.
     pub fn code(self) -> i32 | none {
+        if WINDOWS { return self.raw; }
         if (self.raw & 0x7f) != 0 { return none; }
         (self.raw >> 8) & 0xff
     }
 
-    /// The signal that ended it, if any.
+    /// The signal that ended it, if any (never on Windows).
     pub fn signal(self) -> i32 | none {
+        if WINDOWS { return none; }
         let s = self.raw & 0x7f;
         if s == 0 || s == 0x7f { return none; }
         s

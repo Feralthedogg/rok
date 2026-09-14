@@ -1,4 +1,6 @@
 // expect-exit: 25
+// expect-stdout:
+// 16
 
 struct Cell {
     v: i32;
@@ -20,5 +22,6 @@ fn main() -> i32 {
             total += c.v;
         }
     }
+    println(f"{total}");
     return total + 9;
 }

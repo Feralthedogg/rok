@@ -5,7 +5,8 @@
 //!
 //! MIR → LIR (`lower`, target-independent: layouts, calling
 //! conventions, GC frames, barriers, checks) → machine code (`a64`, one
-//! module per ISA) → object (`macho`, one module per format).
+//! module per ISA) → object (`macho`, `elf`, `coff`: one module per
+//! format).
 
 // Instruction selection names registers and encodings tersely; its
 // dispatch matches are long by nature.
@@ -13,6 +14,7 @@
 
 mod a64;
 mod cc;
+mod coff;
 mod dwarf;
 mod elf;
 mod lir;
@@ -59,7 +61,7 @@ pub fn unsupported(module: &MirModule) -> Option<String> {
     let t = &module.target;
     if !matches!(
         (t.arch.as_str(), t.os.as_str()),
-        ("aarch64" | "x86_64", "macos" | "linux")
+        ("aarch64" | "x86_64", "macos" | "linux" | "windows")
     ) {
         return Some(format!("no native backend for {}-{}", t.arch, t.os));
     }
@@ -90,18 +92,18 @@ pub fn compile(module: &MirModule, opts: &Options) -> Result<Output, RokDiagnost
         a64::emit
     };
     let mut c = module::compile(module, opts, &mut { emit });
-    if opts.debug {
+    // COFF: no DWARF (Windows debuggers read CodeView; `-g` builds for
+    // Windows go through LLVM).
+    if opts.debug && !c.obj.coff {
         dwarf::write(&mut c.obj, &module.target, &module.struct_names);
     }
-    if let Some(first) = c.errors.first() {
-        let mut d = RokDiagnostic::error(ErrorKind::Unsupported, first.clone());
-        for more in c.errors.iter().skip(1) {
-            d = d.with_note(more.clone());
-        }
+    if let Some(d) = rokc_codegen_mlir::codegen_error(&c.errors) {
         return Err(d);
     }
     Ok(Output {
-        object: if c.obj.elf {
+        object: if c.obj.coff {
+            coff::write(&c.obj)
+        } else if c.obj.elf {
             elf::write(&c.obj)
         } else {
             macho::write(&c.obj)

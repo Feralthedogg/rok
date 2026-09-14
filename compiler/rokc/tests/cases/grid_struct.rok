@@ -1,4 +1,6 @@
 // expect-exit: 36
+// expect-stdout:
+// 6 21
 
 struct Cell<T> {
     v: T;
@@ -18,5 +20,6 @@ fn main() -> i32 {
             i += 1;
         }
     }
+    println(f"{grid[2][1].v} {total}");
     return total + 15;
 }

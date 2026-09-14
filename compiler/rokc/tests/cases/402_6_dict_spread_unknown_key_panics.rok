@@ -1,0 +1,11 @@
+// spec: 004.02.6-spread-args
+// Every key of a dict spread must name a parameter (checked at run time).
+// expect-exit: 101
+// expect-stderr: spread of key "z", which names no parameter left to fill
+
+fn pair(x: i32, y: i32 = 0) -> i32 { x + y }
+
+fn main() -> i32 {
+    let d = {"x": 1, "z": 2};
+    pair(..d)
+}

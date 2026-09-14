@@ -1,0 +1,24 @@
+// spec: 004.02.2-omitting-the-type
+// An untyped parameter of a trait impl method takes the trait's type
+// at that position (trait arguments and associated types substituted);
+// an untyped parameter with a default takes the default's type when
+// the call omits it.
+// expect-exit: 0
+// expect-stdout: 3 42 9 6 3 abc
+
+trait Show { fn show(self, x: i32) -> i32; }
+trait Mix<R> { fn mix(self, r: R) -> i64; }
+trait Keyed { type K; fn key(self, k: Self::K) -> Self::K; }
+
+struct A {}
+impl Show for A { fn show(self, x) -> i32 { x + 1 } }
+impl Mix<i64> for A { fn mix(self, r) -> i64 { r * 2 } }
+impl Keyed for A { type K = i32; fn key(self, k) -> i32 { k * k } }
+
+fn add(a: i32, b = 5) { a + b }
+fn word(t = "abc") { t }
+
+fn main() {
+    let a = A {};
+    print(f"{a.show(2)} {a.mix(21)} {a.key(3)} {add(1)} {add(1, 2)} {word()}");
+}

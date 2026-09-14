@@ -1,4 +1,6 @@
 // expect-exit: 30
+// expect-stdout:
+// 30 5
 
 struct Counter {
     n: i32;
@@ -23,6 +25,7 @@ fn main() -> i32 {
         .add(5)
         .add(10)
         .add(15);
+    println(f"{c.value()} {Counter::new().add(5).value()}");
     return c.value();
 }
 

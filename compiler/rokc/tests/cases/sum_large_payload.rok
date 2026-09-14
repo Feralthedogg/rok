@@ -1,4 +1,7 @@
 // expect-exit: 64
+// expect-stdout:
+// 300
+
 
 // Sum-type payload bigger than 8 bytes (struct with two i64 fields).
 // `lower_ty_in` expands `Pair | none` to `(i32 tag, struct{i64, i64} payload)`,
@@ -22,6 +25,7 @@ fn unwrap(x: Pair | none) -> i64 {
 fn main() -> i32 {
     let p = make_pair();
     let total = unwrap(p);
+    println(f"{total}");
     if total == 300i64 { return 64; }
     return 0;
 }

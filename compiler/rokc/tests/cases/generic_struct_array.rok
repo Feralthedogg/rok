@@ -1,4 +1,8 @@
 // expect-exit: 30
+// expect-stdout:
+// 3
+// 10
+// 21
 
 struct Pair<T> {
     a: T;
@@ -15,6 +19,7 @@ fn main() -> i32 {
     let i = 0;
     while i < 3 {
         total += xs[i].a + xs[i].b;
+        println(f"{total}");
         i += 1;
     }
     return total + 9;

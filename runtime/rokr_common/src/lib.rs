@@ -1,65 +1,20 @@
 //! Shared runtime primitives: object header layout, mutator TLS block,
-//! safepoint poll, the raw fd writer and the fatal-error path.
+//! the OS layer (`sys`), the raw fd writer and the fatal-error path.
 
 #![no_std]
 
 pub mod gc_abi;
 pub mod object_header;
 pub mod tls;
+#[cfg(windows)]
+pub mod win;
+pub mod wtf8;
 
-/// The calling thread's `errno`.
-pub fn errno() -> i32 {
-    // SAFETY: the libc errno accessor has no preconditions.
-    #[cfg(target_vendor = "apple")]
-    unsafe {
-        *libc::__error()
-    }
-    // SAFETY: as above.
-    #[cfg(not(target_vendor = "apple"))]
-    unsafe {
-        *libc::__errno_location()
-    }
-}
+#[cfg_attr(unix, path = "sys_unix.rs")]
+#[cfg_attr(windows, path = "sys_windows.rs")]
+pub mod sys;
 
-/// Write `parts` to `fd` back to back with `writev`, finishing short
-/// writes and retrying `EINTR`: 0 or `-errno`. At most eight parts.
-pub fn write_all(fd: i32, parts: &[&[u8]]) -> i32 {
-    let mut iov = [libc::iovec {
-        iov_base: core::ptr::null_mut(),
-        iov_len: 0,
-    }; 8];
-    let mut n = 0;
-    for p in parts.iter().filter(|p| !p.is_empty()) {
-        iov[n] = libc::iovec {
-            iov_base: p.as_ptr().cast_mut().cast(),
-            iov_len: p.len(),
-        };
-        n += 1;
-    }
-    let mut first = 0;
-    while first < n {
-        // SAFETY: `iov[first..n]` describe live caller buffers.
-        let r = unsafe { libc::writev(fd, iov[first..].as_ptr(), (n - first) as libc::c_int) };
-        if r < 0 {
-            let e = errno();
-            if e == libc::EINTR {
-                continue;
-            }
-            return -e;
-        }
-        let mut done = r as usize;
-        while first < n && done >= iov[first].iov_len {
-            done -= iov[first].iov_len;
-            first += 1;
-        }
-        if first < n {
-            // SAFETY: `done < iov_len`, inside the part.
-            iov[first].iov_base = unsafe { iov[first].iov_base.cast::<u8>().add(done) }.cast();
-            iov[first].iov_len -= done;
-        }
-    }
-    0
-}
+pub use sys::{errno, write_all};
 
 /// `len` bytes at `msg` to stderr. Diagnostics: a failure is dropped.
 ///

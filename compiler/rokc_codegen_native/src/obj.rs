@@ -42,6 +42,13 @@ pub enum RelKind {
     /// `x86_64` `mov reg, [rip + rel32]` of a thread-local: its TLV
     /// descriptor (Mach-O), its thread-pointer offset (ELF initial exec).
     X86Tls,
+    /// COFF: a thread-local's 32-bit offset in the TLS section (`x86_64`
+    /// displacement).
+    X86SecRel,
+    /// COFF arm64: `add` of bits 12..24 / 0..12 of a thread-local's TLS
+    /// section offset.
+    SecRelHi12,
+    SecRelLo12,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -104,16 +111,19 @@ pub struct Obj {
     pub extra: Vec<(&'static str, &'static str, u32, Section)>,
     /// `x86_64` code (else arm64).
     pub x86: bool,
-    /// An ELF object (else Mach-O).
+    /// An ELF object (else Mach-O, or COFF).
     pub elf: bool,
+    /// A COFF object (Windows: no GOT, TLS through `_tls_index`).
+    pub coff: bool,
 }
 
 impl Obj {
     #[must_use]
-    pub fn new(x86: bool, elf: bool) -> Self {
+    pub fn new(x86: bool, elf: bool, coff: bool) -> Self {
         let mut o = Self {
             x86,
             elf,
+            coff,
             ..Self::default()
         };
         for s in SECTS {

@@ -1,6 +1,8 @@
 // expect-exit: 5
 // `#[export_name("sym")]` (spec 905 / 509.10): the function's linker
 // symbol is `sym`, and it is emitted even when nothing calls it.
+// expect-stdout:
+// 5
 #[export_name("rok_test_add")]
 pub fn add(x: i32, y: i32) -> i32 {
     return x + y;
@@ -12,5 +14,6 @@ pub fn unused() -> i32 {
 }
 
 fn main() -> i32 {
+    println(f"{add(2, 3)}");
     return add(2, 3);
 }

@@ -256,7 +256,7 @@ impl Resolver<'_> {
         let (url, reference) = match &dep.source {
             Source::Path(p) => {
                 let dir = base.join(p);
-                let dir = std::fs::canonicalize(&dir).map_err(|e| {
+                let dir = rokc_core::real_path(&dir).map_err(|e| {
                     format!("dependency `{}`: path {}: {e}", dep.name, dir.display())
                 })?;
                 return Ok((dir.clone(), Id::Path(dir), None));

@@ -1,4 +1,6 @@
 // expect-exit: 46
+// expect-stdout:
+// 8 30 7 5 6 3 0
 
 // Closure capture analysis walks every expression form (for / ?? / ?.),
 // and `return` inside a closure returns from the closure.
@@ -15,5 +17,6 @@ fn main() -> i32 {
     let m = 5;
     let q = |x: i32| h(x)?.n ?? m;                                    // 5
     let early = |x: i32| -> i32 { if x > 0 { return 3; } return 0; }; // 3
+    println(f"{f(2)} {k(0)} {k(7)} {q(0)} {q(6)} {early(1)} {early(0)}");
     return f(2) + k(0) + q(0) + early(1);
 }

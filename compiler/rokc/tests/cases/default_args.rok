@@ -1,9 +1,12 @@
 // expect-exit: 23
+// expect-stdout:
+// 16 7 3
 
 fn add(a: i32, b: i32 = 10, c: i32 = 5) -> i32 {
     return a + b + c;
 }
 
 fn main() -> i32 {
+    println(f"{add(1)} {add(1, 1)} {add(1, 1, 1)}");
     return add(1) + add(1, 1);
 }

@@ -1,4 +1,7 @@
 // expect-exit: 38
+// expect-stdout:
+// 23 15
+
 
 struct Vec2 {
     x: i32;
@@ -23,6 +26,7 @@ fn main() -> i32 {
     let r2 = maybe_vec(false)?.sum();
     let v1 = r1 ?? 0;
     let v2 = r2 ?? 15;
+    println(f"{v1} {v2}");
     return v1 + v2;
 }
 

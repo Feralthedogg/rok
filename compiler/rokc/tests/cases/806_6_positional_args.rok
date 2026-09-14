@@ -1,0 +1,49 @@
+// expect-exit: 0
+// expect-stdout:
+// 630793071
+// 789 2468
+// 32
+// 654321
+// eq ne
+
+// rok-to-rok calls (spec 8.6.6) with arguments past every register:
+// on Windows x64 integer and float arguments share four positions, so
+// `str` halves, floats and struct leaves land in registers and stack
+// slots in an order unlike System V's; results of three or four words
+// come back in registers or through `sret`. The runtime's own `str`
+// helpers (length, equality) pass their strings by reference there.
+
+struct Big { a: i64; b: i64; c: i64; }
+struct Four { a: i64; b: i64; c: i64; d: i64; }
+
+fn mixed(a: i64, s: str, b: f64, t: Big, c: i32, d: f32, u: str, e: i64) -> i64 {
+    a + s.len() as i64 * 10 + (b * 100.0) as i64 + t.a * 1000 + t.c * 10000
+        + c as i64 * 100000 + (d * 1000000.0) as i64 + u.len() as i64 * 10000000
+        + e * 100000000
+}
+
+fn wide(n: i64) -> Big { Big { a: n, b: n + 1, c: n + 2 } }
+
+fn four(n: i64) -> Four { Four { a: n, b: n * 2, c: n * 3, d: n * 4 } }
+
+fn pick(s: str, t: str, k: i64) -> str { if k > 0 { s } else { t } }
+
+fn fsum(a: f64, b: f32, c: f64, d: f64, e: f64, f: f32) -> f64 {
+    a + b as f64 * 10.0 + c * 100.0 + d * 1000.0 + e * 10000.0 + f as f64 * 100000.0
+}
+
+fn main() {
+    println(f"{mixed(1, "ab", 0.5, Big { a: 3, b: 0, c: 4 }, 5, 0.25, "xyz", 6)}");
+    let w = wide(7);
+    let f = four(2);
+    println(f"{w.a * 100 + w.b * 10 + w.c} {f.a * 1000 + f.b * 100 + f.c * 10 + f.d}");
+    let p = pick("abc", "de", 1);
+    let q = pick("abc", "de", 0);
+    println(f"{p.len() * 10 + q.len()}");
+    println(f"{fsum(1.0, 2.0, 3.0, 4.0, 5.0, 6.0) as i64}");
+    let long_a = "a string longer than sixteen bytes";
+    let long_b = "a string longer than sixteen byte!";
+    println(f"{if p == "abc" { "eq" } else { "ne" }} {if long_a == long_b { "eq" } else { "ne" }}");
+}
+
+// spec: 008.06.6-rok-to-rok-calling-convention

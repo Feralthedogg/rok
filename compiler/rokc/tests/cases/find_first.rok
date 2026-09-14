@@ -1,4 +1,6 @@
 // expect-exit: 12
+// expect-stdout:
+// 8 100
 
 fn find_first<T>(xs: [T; 5], pred: fn(T) -> bool) -> T | none {
     for v in xs {
@@ -13,5 +15,7 @@ fn main() -> i32 {
     let xs: [i32; 5] = [1, 2, 4, 8, 16];
     let big = find_first(xs, |n: i32| -> bool { n > 5 });
     let v = big ?? 100;
+    let huge = find_first(xs, |n: i32| -> bool { n > 50 });
+    println(f"{v} {huge ?? 100}");
     return v + 4;
 }

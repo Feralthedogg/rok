@@ -4,12 +4,8 @@
 
 use std::path::Path;
 
-use rokc_ast::{AttrBody, Attribute, Block, FnDef, Generics, Item, Stmt, ThrowsKind, TyKind};
+use rokc_ast::{Block, FnDef, Generics, Item, Stmt, ThrowsKind, TyKind};
 use rokc_diagnostic::{ErrorKind, RokDiagnostic, Span};
-
-/// Marker attribute on the synthesized implicit `main`. `#` cannot start
-/// an identifier, so user code can never spell it.
-pub const IMPLICIT_MAIN_ATTR: &str = "#implicit_main";
 
 pub fn stmts_outside_entry(file: &Path) -> RokDiagnostic {
     RokDiagnostic::error(
@@ -23,25 +19,38 @@ pub fn stmts_outside_entry(file: &Path) -> RokDiagnostic {
 }
 
 /// Turn the entry file's top-level statements into the implicit `main`
-/// and validate an explicit one.
-pub fn resolve_entry(stmts: Vec<Stmt>, items: &mut Vec<Item>, diags: &mut Vec<RokDiagnostic>) {
+/// and validate an explicit one. Whether `main` is the implicit one.
+pub fn resolve_entry(
+    stmts: Vec<Stmt>,
+    items: &mut Vec<Item>,
+    diags: &mut Vec<RokDiagnostic>,
+) -> bool {
     let explicit = items.iter().find_map(|i| match i {
         Item::Fn(f) if f.name == "main" => Some(f),
         _ => None,
     });
     match (explicit, stmts.is_empty()) {
-        (Some(f), false) => diags.push(
-            RokDiagnostic::error(
-                ErrorKind::Module,
-                "`main.rok` has both top-level statements and `fn main`; use exactly one \
+        (Some(f), false) => {
+            diags.push(
+                RokDiagnostic::error(
+                    ErrorKind::Module,
+                    "`main.rok` has both top-level statements and `fn main`; use exactly one \
                  entry point (spec 4.16.1)",
-            )
-            .with_span(stmts[0].span, "a top-level statement")
-            .with_secondary(f.span, "`fn main` here"),
-        ),
-        (Some(f), true) => check_main_signature(f, diags),
+                )
+                .with_span(stmts[0].span, "a top-level statement")
+                .with_secondary(f.span, "`fn main` here"),
+            );
+            false
+        }
+        (Some(f), true) => {
+            check_main_signature(f, diags);
+            false
+        }
         // Items only: form 2 with no statements, an empty implicit `main`.
-        (None, _) => items.push(Item::Fn(implicit_main(stmts))),
+        (None, _) => {
+            items.push(Item::Fn(implicit_main(stmts)));
+            true
+        }
     }
 }
 
@@ -50,12 +59,7 @@ fn implicit_main(stmts: Vec<Stmt>) -> FnDef {
     let is_async = crate::coro::has_top_level_await(&stmts);
     FnDef {
         vis: rokc_core::Visibility::Private,
-        attrs: vec![Attribute {
-            path: vec![IMPLICIT_MAIN_ATTR.to_owned()],
-            body: AttrBody::Empty,
-            inner: false,
-            span,
-        }],
+        attrs: Vec::new(),
         name: "main".to_owned(),
         generics: Generics::default(),
         params: Vec::new(),
@@ -71,14 +75,7 @@ fn implicit_main(stmts: Vec<Stmt>) -> FnDef {
         is_generator: false,
         is_unsafe: false,
         // Spec 4.16.4: the implicit `main` is `fn main() throws` (untyped).
-        throws: ThrowsKind::Typed(vec![rokc_ast::Ty {
-            kind: TyKind::Path(crate::coro::path(
-                &[rokc_ast::UNTYPED_THROWS_MARK],
-                Vec::new(),
-                span,
-            )),
-            span,
-        }]),
+        throws: ThrowsKind::Typed(vec![rokc_ast::untyped_throws_ty(span)]),
         where_clause: Vec::new(),
         span,
     }

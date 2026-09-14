@@ -1,4 +1,7 @@
 // expect-exit: 16
+// expect-stdout:
+// 3 7
+// a b
 
 struct Pair<T> {
     first: T;
@@ -7,6 +10,9 @@ struct Pair<T> {
 
 fn main() -> i32 {
     let p: Pair<i32> = Pair { first: 3, second: 7 };
+    let s: Pair<str> = Pair { first: "a", second: "b" };
+    println(f"{p.first} {p.second}");
+    println(f"{s.first} {s.second}");
     return p.first + p.second + 6;
 }
 

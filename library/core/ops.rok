@@ -152,60 +152,71 @@ pub trait LogicalOr<Rhs = Self> {
 
 // Compound assignment (stdlib 2.4): `a op= b` calls `op_assign(ref a, b)`
 // when the type implements the trait (an in-place update), else it is
-// `a = a op b`. The compiler maps each token to its trait.
+// `a = a op b`.
 
 /// `+=`
 pub trait AddAssign<Rhs = Self> {
+    #[infix("+=")]
     fn add_assign(ref self, rhs: Rhs);
 }
 
 /// `-=`
 pub trait SubAssign<Rhs = Self> {
+    #[infix("-=")]
     fn sub_assign(ref self, rhs: Rhs);
 }
 
 /// `*=`
 pub trait MulAssign<Rhs = Self> {
+    #[infix("*=")]
     fn mul_assign(ref self, rhs: Rhs);
 }
 
 /// `/=`
 pub trait DivAssign<Rhs = Self> {
+    #[infix("/=")]
     fn div_assign(ref self, rhs: Rhs);
 }
 
 /// `%=`
 pub trait RemAssign<Rhs = Self> {
+    #[infix("%=")]
     fn rem_assign(ref self, rhs: Rhs);
 }
 
 /// `%%=`
 pub trait ModuloAssign<Rhs = Self> {
+    #[infix("%%=")]
     fn modulo_assign(ref self, rhs: Rhs);
 }
 
 /// `&=`
 pub trait BitAndAssign<Rhs = Self> {
+    #[infix("&=")]
     fn bitand_assign(ref self, rhs: Rhs);
 }
 
 /// `|=`
 pub trait BitOrAssign<Rhs = Self> {
+    #[infix("|=")]
     fn bitor_assign(ref self, rhs: Rhs);
 }
 
 /// `^=`
 pub trait BitXorAssign<Rhs = Self> {
+    #[infix("^=")]
     fn bitxor_assign(ref self, rhs: Rhs);
 }
 
 /// `<<=`
 pub trait ShlAssign<Rhs = Self> {
+    #[infix("<<=")]
     fn shl_assign(ref self, rhs: Rhs);
 }
 
 /// `>>=`
 pub trait ShrAssign<Rhs = Self> {
+    #[infix(">>=")]
     fn shr_assign(ref self, rhs: Rhs);
 }
 

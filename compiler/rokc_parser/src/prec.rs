@@ -63,22 +63,33 @@ pub fn fixed_prec(symbol: &str, fixity: Fixity) -> Option<(u32, Assoc)> {
     }
 }
 
+/// Spec 3.4.3 / stdlib 2.4: the compound assignment tokens. Their
+/// `#[infix]` binds the `*Assign` trait method; they are statements,
+/// not expression operators, so they have no binding level.
+#[must_use]
+pub fn is_assign_token(symbol: &str) -> bool {
+    matches!(
+        symbol,
+        "+=" | "-=" | "*=" | "/=" | "%=" | "%%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
+    )
+}
+
+/// The level recorded for a compound assignment token (never parsed).
+const ASSIGN_LEVEL: (u32, Assoc) = (0, Assoc::Right);
+
 #[derive(Clone, Debug)]
 pub struct OpEntry {
     pub symbol: String,
     pub fixity: Fixity,
     /// Trait method the operator dispatches to (`add` for `+`).
     pub method_name: String,
-    /// Trait declaring that method; only its impls make a type support
-    /// the operator (spec 6.4).
+    /// Trait declaring that method, by its full path (`rok::core::ops::Add`,
+    /// `m::Dot`); only its impls make a type support the operator (spec 6.4).
     pub trait_name: String,
     /// `#[infix("∈", swap)]`: `a ∈ s` calls `s.contains(a)` (spec 6.7.2).
     pub swap: bool,
     /// Binding level: the table's, or `like`'s for an extension token.
     pub level: (u32, Assoc),
-    /// Registered by a standard-library root (only `rok::…` traits
-    /// count); user registrations bind the user trait itself.
-    pub from_lib: bool,
 }
 
 /// Registered extension operator tokens: what the lexer must recognize
@@ -140,7 +151,9 @@ impl PrecTable {
             levels: self
                 .by_key
                 .values()
-                .filter(|e| fixed_prec(&e.symbol, e.fixity).is_none())
+                .filter(|e| {
+                    fixed_prec(&e.symbol, e.fixity).is_none() && !is_assign_token(&e.symbol)
+                })
                 .map(|e| ((e.symbol.clone(), e.fixity), e.level))
                 .collect(),
         }
@@ -169,23 +182,48 @@ impl PrecTable {
     }
 }
 
-/// Walk a program and collect every `#[infix]` / `#[prefix]` / `#[postfix]`
-/// attribute attached to a trait method into a `PrecTable`.
+/// Walk a program (module `module`'s file, inline modules included) and
+/// collect every `#[infix]` / `#[prefix]` / `#[postfix]` attribute
+/// attached to a trait method into a `PrecTable`.
 ///
 /// Errors: a precedence/associativity argument (spec 6.7.2), `like` on a
 /// table token, a token outside the table without `like`, aliases of one
 /// method on different levels (6.7.12), and one token bound to two
 /// different methods.
-pub fn collect_prec_table(program: &Program) -> (PrecTable, Vec<RokDiagnostic>) {
+pub fn collect_prec_table(program: &Program, module: &[String]) -> (PrecTable, Vec<RokDiagnostic>) {
     let mut table = PrecTable::new();
     let mut diags = Vec::new();
-    for item in &program.items {
+    collect_items(&program.items, module, &mut table, &mut diags);
+    (table, diags)
+}
+
+fn collect_items(
+    items: &[Item],
+    module: &[String],
+    table: &mut PrecTable,
+    diags: &mut Vec<RokDiagnostic>,
+) {
+    for item in items {
+        if let Item::Mod(m) = item {
+            if let Some(inner) = &m.items {
+                let mut sub = module.to_vec();
+                sub.push(m.name.clone());
+                collect_items(inner, &sub, table, diags);
+            }
+            continue;
+        }
         let Item::Trait(t) = item else { continue };
+        let trait_name = module
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(t.name.as_str()))
+            .collect::<Vec<_>>()
+            .join("::");
         for ti in &t.items {
             let TraitItem::Method(m) = ti else { continue };
             let mut level: Option<(u32, Assoc)> = None;
             for attr in &m.attrs {
-                let Some((fixity, symbol, lv, swap)) = collect_attr(attr, &mut diags) else {
+                let Some((fixity, symbol, lv, swap)) = collect_attr(attr, diags) else {
                     continue;
                 };
                 if level.is_some_and(|l| l != lv) {
@@ -204,9 +242,8 @@ pub fn collect_prec_table(program: &Program) -> (PrecTable, Vec<RokDiagnostic>) 
                     fixity,
                     swap,
                     level: lv,
-                    from_lib: false,
                     method_name: m.name.clone(),
-                    trait_name: t.name.clone(),
+                    trait_name: trait_name.clone(),
                 };
                 if let Some(e) = table.merge(entry) {
                     diags.push(e.with_span(attr.span, ""));
@@ -214,7 +251,6 @@ pub fn collect_prec_table(program: &Program) -> (PrecTable, Vec<RokDiagnostic>) 
             }
         }
     }
-    (table, diags)
 }
 
 /// Spec 1.10.4: a registered token is `Pattern_Syntax` code points only
@@ -305,6 +341,16 @@ fn collect_attr(
             "`?` is language syntax (error propagation), not an operator token".to_owned(),
         ));
         return None;
+    }
+    if is_assign_token(&symbol) {
+        if fixity != Fixity::Infix || like.is_some() || swap {
+            diags.push(meta_err(
+                attr,
+                format!("`{symbol}` is a compound assignment: only `#[infix(\"{symbol}\")]`"),
+            ));
+            return None;
+        }
+        return Some((fixity, symbol, ASSIGN_LEVEL, false));
     }
     let level = match (fixed_prec(&symbol, fixity), like) {
         (Some(lv), None) => lv,

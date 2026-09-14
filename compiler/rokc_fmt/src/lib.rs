@@ -33,7 +33,7 @@ fn format_source(src: &str) -> Result<String, String> {
         // spec 1.10.4): lex again with them. Operators registered in
         // other files are not seen.
         let (program, _) = rokc_parser::parse_program(&tokens, "<fmt>");
-        let ops = rokc_parser::collect_prec_table(&program)
+        let ops = rokc_parser::collect_prec_table(&program, &[])
             .0
             .ext_ops()
             .symbols();

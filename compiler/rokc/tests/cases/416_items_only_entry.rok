@@ -1,6 +1,7 @@
 // spec: 4.16.1
 // expect-exit: 0
 // An entry file with items and no statements: an empty implicit `main`.
+// expect-stdout:
 
 fn helper() -> i32 {
     println("never");

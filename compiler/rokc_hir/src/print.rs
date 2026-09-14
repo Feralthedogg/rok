@@ -18,8 +18,9 @@ pub fn print_hir(module: &HirModule) -> String {
     out
 }
 
-fn print_function(out: &mut String, f: &HirFunction) {
-    let _ = write!(out, "fn {}(", f.name);
+/// `name(params) -> ret`.
+fn header(out: &mut String, name: &str, f: &HirFunction) {
+    let _ = write!(out, "{name}(");
     for (i, p) in f.params.iter().enumerate() {
         if i > 0 {
             out.push_str(", ");
@@ -27,6 +28,21 @@ fn print_function(out: &mut String, f: &HirFunction) {
         let _ = write!(out, "{}: {}", p.name, ty_str(&p.ty));
     }
     let _ = write!(out, ") -> {}", ty_str(&f.ret_ty));
+}
+
+/// A generic instance as its item path and concrete signature
+/// (`id(x: i32) -> i32`); `None` for other functions.
+#[must_use]
+pub fn instance(f: &HirFunction) -> Option<String> {
+    f.facts.mono_args.as_ref()?;
+    let mut out = String::new();
+    header(&mut out, f.facts.path(&f.name), f);
+    Some(out)
+}
+
+fn print_function(out: &mut String, f: &HirFunction) {
+    out.push_str("fn ");
+    header(out, &f.name, f);
     if let Some(body) = &f.body {
         out.push_str(" {\n");
         print_block(out, body, 1);

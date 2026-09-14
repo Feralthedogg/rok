@@ -1,4 +1,7 @@
 // expect-exit: 15
+// expect-stdout:
+// 15 55 1
+// 4.5
 
 fn sum_down<T>(n: T) -> T {
     if n <= 1 {
@@ -8,6 +11,9 @@ fn sum_down<T>(n: T) -> T {
 }
 
 fn main() -> i32 {
+    println(f"{sum_down(5)} {sum_down(10i64)} {sum_down(1u8)}");
+    // 2.5 + 1.5 + 0.5
+    println(f"{sum_down(2.5)}");
     return sum_down(5);
 }
 

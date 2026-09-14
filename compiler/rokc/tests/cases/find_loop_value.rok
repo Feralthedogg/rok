@@ -1,4 +1,6 @@
 // expect-exit: 17
+// expect-stdout:
+// 17 3
 
 fn main() -> i32 {
     let xs: [i32; 6] = [3, 9, 11, 17, 23, 5];
@@ -13,5 +15,6 @@ fn main() -> i32 {
         }
         i += 1;
     };
+    println(f"{result} {i}");
     return result;
 }

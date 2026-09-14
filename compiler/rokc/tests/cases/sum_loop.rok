@@ -1,4 +1,12 @@
 // expect-exit: 8
+// expect-stdout:
+// 7
+// 6
+// 5
+// 4
+// 3
+// 2
+// 1
 
 fn next(n: i32) -> i32 | none {
     if n > 1 {
@@ -11,6 +19,7 @@ fn main() -> i32 {
     let cur: i32 | none = next(8);
     let last = 0;
     while let v: i32 = cur {
+        println(f"{v}");
         last = v;
         cur = next(v);
     }

@@ -1,4 +1,6 @@
 // expect-exit: 12
+// expect-stdout:
+// 7 1
 
 struct Counter {
     n: i32;
@@ -19,6 +21,7 @@ impl Counter {
 fn main() -> i32 {
     let c = Counter { n: 1 };
     let c2 = c.inc().inc().double().inc();
+    println(f"{c2.n} {c.n}");
     return c2.n + 5;
 }
 

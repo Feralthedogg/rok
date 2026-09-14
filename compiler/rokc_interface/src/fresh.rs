@@ -6,8 +6,10 @@
 //!
 //! The key covers the compiler, the report style, the build words
 //! (options, paths), every source file the build can read and the
-//! prebuilt archives it links. One key per package: any change rebuilds
-//! the package whole.
+//! prebuilt archives it links. Files the build read beyond those (a
+//! `#[path]` module outside the package) are listed in the record with
+//! their content hashes. One key per package: any change rebuilds the
+//! package whole.
 
 use std::path::{Path, PathBuf};
 
@@ -37,6 +39,15 @@ pub struct Fingerprint {
     out: PathBuf,
     /// More files that must exist (a library's RHIR).
     also: Vec<PathBuf>,
+    /// The inputs the key covers, canonical.
+    covered: Vec<PathBuf>,
+}
+
+fn content_hash(p: &Path) -> String {
+    format!(
+        "{:016x}",
+        fnv_add(FNV_OFFSET, &std::fs::read(p).unwrap_or_default())
+    )
 }
 
 impl Fingerprint {
@@ -63,6 +74,10 @@ impl Fingerprint {
             h = fnv_add(h, format!("{}\0{}\0", p.display(), identity(p)).as_bytes());
         }
         let mut files = Vec::new();
+        let covered = inputs
+            .iter()
+            .filter_map(|i| i.canonicalize().ok())
+            .collect();
         for i in inputs {
             if i.is_file() {
                 files.push(i.clone());
@@ -84,7 +99,15 @@ impl Fingerprint {
             file: out.with_file_name(format!(".{name}.fp")),
             out: out.to_path_buf(),
             also,
+            covered,
         }
+    }
+
+    /// Keep the record in `file` instead of `.<out>.fp` beside the output.
+    #[must_use]
+    pub fn kept_in(mut self, file: PathBuf) -> Self {
+        self.file = file;
+        self
     }
 
     fn head(&self) -> String {
@@ -98,7 +121,17 @@ impl Fingerprint {
             return None;
         }
         let record = std::fs::read_to_string(&self.file).ok()?;
-        record.strip_prefix(&self.head()).map(str::to_owned)
+        let rest = record.strip_prefix(&self.head())?;
+        let (n, mut rest) = rest.split_once('\n')?;
+        for _ in 0..n.parse::<usize>().ok()? {
+            let (line, tail) = rest.split_once('\n')?;
+            let (hash, path) = line.split_once(' ')?;
+            if content_hash(Path::new(path)) != hash {
+                return None;
+            }
+            rest = tail;
+        }
+        Some(rest.to_owned())
     }
 
     /// Before building: a failed build leaves no record.
@@ -106,9 +139,20 @@ impl Fingerprint {
         let _ = std::fs::remove_file(&self.file);
     }
 
-    /// After a successful build that printed `warnings`.
-    pub fn save(&self, warnings: &str) {
-        let _ = std::fs::write(&self.file, self.head() + warnings);
+    /// After a successful build that read `read` and printed `warnings`.
+    pub fn save(&self, read: &[PathBuf], warnings: &str) {
+        let mut extra: Vec<PathBuf> = read
+            .iter()
+            .filter_map(|p| p.canonicalize().ok())
+            .filter(|p| !self.covered.iter().any(|c| p.starts_with(c)))
+            .collect();
+        extra.sort();
+        extra.dedup();
+        let mut record = self.head() + &format!("{}\n", extra.len());
+        for p in &extra {
+            record += &format!("{} {}\n", content_hash(p), p.display());
+        }
+        let _ = std::fs::write(&self.file, record + warnings);
     }
 }
 
@@ -128,19 +172,27 @@ mod tests {
         let fp = |w: &str| Fingerprint::new(&out, vec![], &[w.into()], &[dir.clone()], &[]);
         assert!(fp("a").fresh().is_none());
         std::fs::write(&out, "exe").unwrap();
-        fp("a").save("warning: w\n");
+        fp("a").save(&[], "warning: w\n");
         assert_eq!(fp("a").fresh().as_deref(), Some("warning: w\n"));
         assert!(fp("b").fresh().is_none());
         std::fs::write(dir.join("target/skip.rok"), "y").unwrap();
         assert!(fp("a").fresh().is_some());
         std::fs::write(&src, "fn main() { }").unwrap();
         assert!(fp("a").fresh().is_none());
-        fp("a").save("");
+        fp("a").save(&[], "");
         std::fs::write(&out, "other exe").unwrap();
         assert!(fp("a").fresh().is_none());
-        fp("a").save("");
+        fp("a").save(&[], "");
         fp("a").clear();
         assert!(fp("a").fresh().is_none());
+        // A file read outside the inputs is checked by content.
+        let outside = std::env::temp_dir().join(format!("rokc-fresh-{}.rok", std::process::id()));
+        std::fs::write(&outside, "a").unwrap();
+        fp("a").save(&[src, outside.clone()], "");
+        assert!(fp("a").fresh().is_some());
+        std::fs::write(&outside, "b").unwrap();
+        assert!(fp("a").fresh().is_none());
+        let _ = std::fs::remove_file(&outside);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

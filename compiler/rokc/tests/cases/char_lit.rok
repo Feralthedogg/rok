@@ -1,8 +1,11 @@
 // expect-exit: 5
+// expect-stdout:
+// A F 65 70
 
 fn main() -> i32 {
     let a = 'A';
     let b = 'F';
+    println(f"{a} {b} {a as i32} {b as i32}");
     return b as i32 - a as i32;
 }
 

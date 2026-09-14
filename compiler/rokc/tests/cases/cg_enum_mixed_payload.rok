@@ -1,6 +1,8 @@
 // expect-exit: 0
 // Variants with different scalar payloads share one slot wide enough
 // for all of them; values round-trip bit-exactly.
+// expect-stdout:
+// -5 5000000000 2
 
 enum E { A(i8), B(i64), C(f64) }
 
@@ -9,6 +11,7 @@ fn get(e: E) -> i64 {
 }
 
 fn main() -> i32 {
+    println(f"{get(E::A(-5i8))} {get(E::B(5000000000i64))} {get(E::C(1.25f64))}");
     if get(E::A(-5i8)) != -5i64 { return 1; }
     if get(E::B(5000000000i64)) != 5000000000i64 { return 2; }
     if get(E::C(1.25f64)) != 2i64 { return 3; }

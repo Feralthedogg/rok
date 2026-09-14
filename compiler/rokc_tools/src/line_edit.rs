@@ -1,4 +1,5 @@
-//! Line editing for the terminal REPL: raw-mode termios, cursor keys,
+//! Line editing for the terminal REPL: raw-mode termios (Windows: console
+//! modes with VT input), cursor keys,
 //! a history kept in `$ROK_HOME/repl_history`, and the Emacs control
 //! keys (`C-a` `C-e` `C-b` `C-f` `C-k` `C-u` `C-w` `C-d` `C-p` `C-n`
 //! `C-l`). A line wider than the terminal is not re-wrapped.
@@ -242,12 +243,14 @@ fn utf8(b: u8, r: &mut impl Read) -> Option<char> {
 
 /// Raw mode on stdin while alive: no line buffering, no echo, no
 /// signal keys (`C-c` is read as a byte).
+#[cfg(unix)]
 struct Raw {
     saved: [u8; TERMIOS_SIZE],
 }
 
 /// Room for the platform's `struct termios` (72 bytes on macOS, 60 on
 /// Linux).
+#[cfg(unix)]
 const TERMIOS_SIZE: usize = 256;
 
 #[cfg(target_os = "macos")]
@@ -263,7 +266,7 @@ mod term {
     pub const VTIME: usize = 17;
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 mod term {
     pub const FLAG_BYTES: usize = 4;
     pub const LFLAG_AT: usize = 12;
@@ -276,14 +279,17 @@ mod term {
     pub const VTIME: usize = 5;
 }
 
+#[cfg(unix)]
 unsafe extern "C" {
     fn tcgetattr(fd: i32, termios: *mut u8) -> i32;
     fn tcsetattr(fd: i32, action: i32, termios: *const u8) -> i32;
 }
 
 /// `TCSANOW` (the same on macOS and Linux): keeps input typed ahead.
+#[cfg(unix)]
 const TCSANOW: i32 = 0;
 
+#[cfg(unix)]
 impl Raw {
     fn enter() -> Option<Self> {
         use std::io::IsTerminal;
@@ -309,11 +315,69 @@ impl Raw {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Raw {
     fn drop(&mut self) {
         // SAFETY: `saved` is what `tcgetattr` filled in.
         unsafe {
             tcsetattr(0, TCSANOW, self.saved.as_ptr());
+        }
+    }
+}
+
+/// Windows: the console's input without line input, echo and Ctrl-C
+/// processing, keys as VT sequences (`ESC [ A`, ..); its output
+/// interpreting them.
+#[cfg(windows)]
+struct Raw {
+    saved: [(Handle, u32); 2],
+}
+
+#[cfg(windows)]
+type Handle = *mut std::ffi::c_void;
+
+#[cfg(windows)]
+unsafe extern "system" {
+    fn GetStdHandle(which: u32) -> Handle;
+    fn GetConsoleMode(h: Handle, mode: *mut u32) -> i32;
+    fn SetConsoleMode(h: Handle, mode: u32) -> i32;
+}
+
+#[cfg(windows)]
+impl Raw {
+    fn enter() -> Option<Self> {
+        const STD_INPUT: u32 = -10i32 as u32;
+        const STD_OUTPUT: u32 = -11i32 as u32;
+        const PROCESSED_INPUT: u32 = 0x1;
+        const LINE_INPUT: u32 = 0x2;
+        const ECHO_INPUT: u32 = 0x4;
+        const VT_INPUT: u32 = 0x200;
+        const VT_PROCESSING: u32 = 0x4;
+        let mode = |which| {
+            // SAFETY: a std handle and an out parameter.
+            let h = unsafe { GetStdHandle(which) };
+            let mut m = 0;
+            (unsafe { GetConsoleMode(h, &mut m) } != 0).then_some((h, m))
+        };
+        let (input, output) = (mode(STD_INPUT)?, mode(STD_OUTPUT)?);
+        let raw = Self {
+            saved: [input, output],
+        };
+        let set = |(h, m)| {
+            // SAFETY: a console handle `GetConsoleMode` accepted.
+            unsafe { SetConsoleMode(h, m) != 0 }
+        };
+        let raw_in = (input.1 & !(PROCESSED_INPUT | LINE_INPUT | ECHO_INPUT)) | VT_INPUT;
+        (set((input.0, raw_in)) && set((output.0, output.1 | VT_PROCESSING))).then_some(raw)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Raw {
+    fn drop(&mut self) {
+        for (h, m) in self.saved {
+            // SAFETY: restores the mode `GetConsoleMode` read.
+            unsafe { SetConsoleMode(h, m) };
         }
     }
 }

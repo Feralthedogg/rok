@@ -1,4 +1,6 @@
 // expect-exit: 30
+// expect-stdout:
+// 23 11 4
 
 struct List {
     data: [i32; 8];
@@ -40,6 +42,7 @@ fn main() -> i32 {
     let max = lst.fold(0, |a: i32, b: i32| -> i32 {
         if a > b { a } else { b }
     });
+    println(f"{sum} {max} {lst.len}");
     return sum + max - 4;
 }
 

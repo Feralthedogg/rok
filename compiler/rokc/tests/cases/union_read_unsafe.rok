@@ -1,4 +1,7 @@
 // expect-exit: 42
+// expect-stdout:
+// 42
+
 // Writing a union field (its initialiser) is safe; reading one back
 // reinterprets bits and needs `unsafe` (spec 4.15.2).
 union Repr {
@@ -8,7 +11,9 @@ union Repr {
 
 fn main() -> i32 {
     let r = Repr { bits: 42i64 };
-    return unsafe { r.low };
+    let low = unsafe { r.low };
+    println(f"{low}");
+    return low;
 }
 
 // spec: 002.05-union

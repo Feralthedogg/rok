@@ -2,9 +2,9 @@
 // Over the runtime's `rok_alloc_raw` / `rok_realloc_raw` / `rok_free`
 // (system malloc); failure is a null `CPtr`, never an abort.
 //
-// No RAII `Allocation<T>` (3.17) yet.
+// `Allocation<T>` frees its block when its `using` block ends.
 
-use rok::bare::ptr::{CPtr, Ptr, align_of, size_of};
+use rok::bare::ptr::{CPtr, ManyPtr, Ptr, align_of, size_of};
 
 extern "rok" {
     fn rok_alloc_raw(size: usize, align: usize, zeroed: i32) -> usize;
@@ -81,3 +81,34 @@ pub unsafe fn alloc_array<T>(n: usize) -> CPtr<T> {
 pub unsafe fn dealloc_one<T>(ptr: Ptr<T>) { rok_free(ptr.addr()); }
 
 pub unsafe fn dealloc_array<T>(ptr: Ptr<T>, n: usize) { rok_free(ptr.addr()); }
+
+/// `n` `T`s outside the GC, freed when the `using` block holding it ends
+/// (spec 1.4.2). Copies share the block; use it only inside that block.
+pub struct Allocation<T> {
+    ptr: Ptr<T>;
+    len: usize;
+}
+
+impl<T> Allocation<T> {
+    /// Room for `n` `T`s (zeroed); `LayoutError` when the size overflows
+    /// or the system has no memory.
+    pub fn new(n: usize) throws (LayoutError) -> Allocation<T> {
+        let layout = try Layout::array::<T>(n);
+        let size = if layout.size == 0 { 1 } else { layout.size };
+        let at = unsafe { rok_alloc_raw(size, layout.align, 1) };
+        if at == 0 {
+            throw LayoutError { reason: "out of memory" };
+        }
+        Allocation { ptr: Ptr::<T>::dangling().with_addr(at), len: n }
+    }
+
+    pub fn as_ptr(self) -> Ptr<T> { self.ptr }
+    pub fn as_many(self) -> ManyPtr<T> { self.ptr.as_many() }
+    pub fn len(self) -> usize { self.len }
+}
+
+impl<T> Drop for Allocation<T> {
+    fn drop(ref self) {
+        unsafe { rok_free(self.ptr.addr()) };
+    }
+}

@@ -40,20 +40,22 @@ impl Shape {
 /// caller goes on to enum variants / unit structs / its error).
 pub(super) fn method_path_value(
     ctx: &mut LowerCtx<'_>,
-    path: &AstPath,
+    callee: &ExprKind,
     span: rokc_diagnostic::Span,
 ) -> Option<HirExpr> {
-    let shape = match shape(ctx, path, span)? {
+    let found = match callee {
+        ExprKind::Path(path) => shape(ctx, path, span),
+        ExprKind::QPath(q) => qpath_shape(ctx, q, span),
+        _ => None,
+    };
+    let shape = match found? {
         Ok(s) => s,
         Err(e) => return Some(e),
     };
-    let segs = self_path_segs(ctx, path);
-    let display = match path.segments.first() {
-        Some(s) if s.name == rokc_ast::QPATH_MARK => path
-            .segments
-            .last()
-            .map_or_else(String::new, |m| format!("<..>::{}", m.name)),
-        _ => segs.join("::"),
+    let display = match callee {
+        ExprKind::Path(path) => self_path_segs(ctx, path).join("::"),
+        ExprKind::QPath(q) => format!("<..>::{}", q.item),
+        _ => String::new(),
     };
     if shape.has_ref {
         return Some(ctx.error_expr(
@@ -97,7 +99,7 @@ pub(super) fn method_path_value(
     let mut body = Expr {
         kind: ExprKind::Call {
             callee: Box::new(Expr {
-                kind: ExprKind::Path(path.clone()),
+                kind: callee.clone(),
                 span,
             }),
             args: names
@@ -154,18 +156,6 @@ fn shape(
         return None;
     }
     let method = last.name.as_str();
-    // `<T as Tr>::m`.
-    if let [q] = ty_part {
-        if let (rokc_ast::QPATH_MARK, [self_ty, tr]) = (q.name.as_str(), q.generics.as_slice()) {
-            let t = ctx.resolve_ast_ty(self_ty);
-            let AstTyKind::Path(tp) = &tr.kind else {
-                return None;
-            };
-            let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
-            let key = ctx.env.names.trait_key(&segs, &ctx.current_module);
-            return picked(ctx, &t, method, Some(&key), &last.generics, span);
-        }
-    }
     let self_segs = self_path_segs(ctx, path);
     let ty_segs: Vec<&str> = self_segs[..self_segs.len() - 1]
         .iter()
@@ -212,6 +202,23 @@ fn shape(
         .get(&(full, method.to_owned()))?
         .first()?;
     Some(Ok(Shape::of_def(&gm.def)))
+}
+
+/// The method `<T as Tr>::m` names.
+fn qpath_shape(
+    ctx: &mut LowerCtx<'_>,
+    q: &rokc_ast::QPath,
+    span: rokc_diagnostic::Span,
+) -> Option<Result<Shape, HirExpr>> {
+    let t = ctx.resolve_ast_ty(&q.self_ty);
+    let segs: Vec<&str> = q
+        .trait_path
+        .segments
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    let key = ctx.env.names.trait_key(&segs, &ctx.current_module);
+    picked(ctx, &t, &q.item, Some(&key), &[], span)
 }
 
 /// `t`'s method `method` (of trait `key` when given).

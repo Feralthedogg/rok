@@ -4,6 +4,8 @@
 //!   - `// expect-stdout: text` — single-line stdout, or an empty value
 //!     followed by `// line` comments for a multi-line block
 //!   - `// expect-error: text`  — build must fail and stderr must contain `text`
+//!   - `// forbid-error: text`  — (repeatable) that failed build's stderr must
+//!     not contain `text`
 //!   - `// expect-warning: text` — (repeatable) build stderr must contain `text`
 //!   - `// forbid-warning: text` — (repeatable) build stderr must not contain `text`
 //!   - `// expect-stderr: text` — (repeatable) the run's stderr must contain `text`
@@ -14,6 +16,8 @@
 //!     `ROK_GC_STRESS=N ROK_GC_EVAC=always ROK_GC_CONCURRENT=always`,
 //!     same expectations
 //!   - `// rokc-arg: args`      — extra `rokc` arguments (`--cfg feat`)
+//!   - `// only-os: macos linux` — skipped unless the target's `target_os`
+//!     is listed (POSIX commands, paths, signals)
 //!   - `// spec: <section>`     — the spec section a case checks (a tag)
 //!
 //! Environment:
@@ -111,7 +115,8 @@ pub fn setup() -> Option<Env> {
         env::var_os("CARGO_TARGET_DIR").map_or_else(|| workspace.join("target"), PathBuf::from);
     let rokr = target
         .join(test_target().unwrap_or_default())
-        .join("debug/librokr.a");
+        .join("debug")
+        .join(rokc_core::runtime_lib(target_os() == "windows"));
     assert!(rokr.exists(), "missing {rokr:?} after cargo build -p rokr");
 
     Some(Env {
@@ -166,6 +171,39 @@ pub fn rokc_build(env: &Env, src: &Path, exe: &Path) -> std::io::Result<Output> 
 /// `ROK_TEST_TARGET`: the target to build the cases for.
 pub fn test_target() -> Option<String> {
     env::var("ROK_TEST_TARGET").ok().filter(|t| !t.is_empty())
+}
+
+/// The OS the cases are built for, as `target_os` names it.
+pub fn target_os() -> String {
+    let Some(t) = test_target() else {
+        return env::consts::OS.to_owned();
+    };
+    let os = if t.contains("-apple-") {
+        "macos"
+    } else {
+        ["windows", "linux", "freebsd"]
+            .into_iter()
+            .find(|os| t.contains(os))
+            .unwrap_or("")
+    };
+    os.to_owned()
+}
+
+/// A case's `// only-os: <os> ..` excludes the target's OS.
+pub fn skipped_on_target(source: &str) -> bool {
+    directive(source, "only-os:").is_some_and(|oses| {
+        let os = target_os();
+        !oses.split_whitespace().any(|o| o == os)
+    })
+}
+
+/// File name of executable `name` for the cases' target.
+pub fn exe_name(name: &str) -> String {
+    if target_os() == "windows" {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    }
 }
 
 /// Run `f` over `items` on all cores; results keep input order.
@@ -264,9 +302,13 @@ pub fn flatten_diagnostics(stderr: &str) -> String {
     out
 }
 
-/// Check a failed build's stderr against every `// expect-error:`.
+/// Check a failed build's stderr against every `// expect-error:` and
+/// `// forbid-error:`.
 pub fn check_expect_error(source: &str, stderr: &str) -> Result<(), String> {
     let stderr = &flatten_diagnostics(stderr);
+    if let Some(unwanted) = directives(source, "forbid-error:").find(|w| stderr.contains(w)) {
+        return Err(format!("build stderr has error {unwanted:?}"));
+    }
     match directives(source, "expect-error:").find(|want| !stderr.contains(want)) {
         Some(want) => Err(format!(
             "build failed but stderr lacks expect-error {want:?}\n    stderr: {:?}",

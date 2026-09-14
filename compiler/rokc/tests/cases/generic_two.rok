@@ -1,4 +1,6 @@
 // expect-exit: 13
+// expect-stdout:
+// 10 3 3.75
 
 fn pair_sum<T>(a: T, b: T) -> T {
     return a + b;
@@ -7,6 +9,7 @@ fn pair_sum<T>(a: T, b: T) -> T {
 fn main() -> i32 {
     let s = pair_sum(3, 7);
     let t = pair_sum(1, 2);
+    println(f"{s} {t} {pair_sum(1.5f64, 2.25f64)}");
     return s + t;
 }
 

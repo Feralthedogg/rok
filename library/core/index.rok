@@ -43,6 +43,17 @@ pub fn spread_len(len: usize, want: usize) {
     }
 }
 
+/// Spec 4.2.6: a `Dict` spread `f(..d)` is named arguments, so every
+/// key must name a parameter the spread may fill.
+#[track_caller]
+pub fn spread_names<V>(d: rok::core::collections::dict::Dict<str, V>, names: List<str>) {
+    for k in d.keys() {
+        if !names.contains(k) {
+            panic(f"spread of key {k:?}, which names no parameter left to fill");
+        }
+    }
+}
+
 #[track_caller]
 pub fn index_from_end(i: isize, len: usize) -> usize {
     if i >= 0 {

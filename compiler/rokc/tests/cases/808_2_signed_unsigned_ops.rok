@@ -1,0 +1,21 @@
+// spec: 008.08-lowering-types §8.8.2
+// expect-exit: 0
+// expect-stdout:
+// -7 / 2 = -3, -7 % 2 = -1
+// 249 / 2 = 124, 249 % 2 = 1
+// -1 < 1: true, 255u8 < 1u8: false
+// 7.5 / 2 = 3.75, nan < 1: false
+
+// spec 8.8.2: the operator picks the signed or unsigned operation for
+// the operand type (divsi / divui, remsi / remui, slt / ult); float
+// comparisons are ordered (false with NaN).
+fn main() -> i32 {
+    let a = -7i32;
+    let b = 249u8;
+    println(f"-7 / 2 = {a / 2}, -7 % 2 = {a % 2}");
+    println(f"249 / 2 = {b / 2u8}, 249 % 2 = {b % 2u8}");
+    println(f"-1 < 1: {-1i8 < 1i8}, 255u8 < 1u8: {255u8 < 1u8}");
+    let nan = 0.0 / 0.0;
+    println(f"7.5 / 2 = {7.5 / 2.0}, nan < 1: {nan < 1.0}");
+    return 0;
+}

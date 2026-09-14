@@ -20,6 +20,13 @@ extern "rok" {
     fn rok_thread_yield_now();
     fn rok_sync_wait(word: GcBuf<i32>, index: usize, expected: i32, timeout_ns: i64);
     fn rok_sync_wake(word: GcBuf<i32>, index: usize);
+    fn rok_sync_wake_one(word: GcBuf<i32>, index: usize);
+    fn rok_lane_new() -> usize;
+    fn rok_lane_attach(lane: usize);
+    fn rok_lane_arm(on: i32) -> i32;
+    fn rok_lane_blocked(lane: usize) -> i64;
+    fn rok_lane_take(lane: usize, tick: i64, heir: GcBuf<rok::core::task::Worker>) -> i32;
+    fn rok_lane_pause(deep: i32);
 
     // The task executor.
     fn rok_time_now_ns() -> i64;
@@ -44,39 +51,25 @@ extern "rok" {
     fn rok_net_wait(fd: i32, write: i32, timeout_ns: i64) -> i32;
 
     // Strings, byte buffers, `char` properties.
-    fn rok_str_len(s: str) -> usize;
     fn rok_str_concat(a: str, b: str) -> str;
-    fn rok_str_cmp(a: str, b: str) -> i32;
-    fn rok_str_eq(a: str, b: str) -> i32;
     #[track_caller]
     fn rok_str_slice(s: str, start: usize, end: usize) -> str;
-    fn rok_str_eq_at(s: str, at: usize, pat: str) -> i32;
-    fn rok_str_find(s: str, pat: str) -> isize;
-    fn rok_str_rfind(s: str, pat: str) -> isize;
     fn rok_str_trim(s: str, which: i32) -> str;
     fn rok_str_case(s: str, upper: i32) -> str;
     fn rok_str_replace(s: str, from: str, to: str) -> str;
-    fn rok_str_char_count(s: str) -> usize;
-    fn rok_str_hash(s: str) -> u64;
-    fn rok_str_byte(s: str, i: usize) -> u8;
-    fn rok_str_bytes_buf(s: str) -> GcBuf<u8>;
     fn rok_str_from_char(c: u32) -> str;
     fn rok_str_parse_int(s: str, radix: u32, signed: i32, bits: u32, out: GcBuf<i64>) -> i32;
     fn rok_str_from_buf(buf: GcBuf<u8>, off: usize, len: usize) -> str;
     fn rok_str_parse_float(s: str, out: GcBuf<f64>) -> i32;
     fn rok_buf_put_str(buf: GcBuf<u8>, off: usize, s: str);
     fn rok_buf_put_char(buf: GcBuf<u8>, off: usize, c: u32) -> usize;
-    fn rok_buf_copy(dst: GcBuf<u8>, doff: usize, src: GcBuf<u8>, soff: usize, len: usize);
     fn rok_buf_utf8_error(buf: GcBuf<u8>, off: usize, len: usize) -> isize;
-    fn rok_char_props(c: u32) -> u32;
-    fn rok_char_to_case(c: u32, upper: i32) -> u32;
 
     // Formatting: a `Formatter`'s text; f-strings call these directly too. The
     // writing ones return it, moved when it outgrew its allocation; a
     // spec comes as two packed words (`flags`, `counts`).
     fn rok_fmt_new(cap: usize) -> str;
     fn rok_fmt_finish(t: str) -> str;
-    fn rok_fmt_len(t: str) -> usize;
     fn rok_fmt_str(t: str, s: str) -> str;
     fn rok_fmt_char(t: str, c: u32) -> str;
     fn rok_fmt_escaped(t: str, s: str, quote: u32) -> str;
@@ -92,72 +85,6 @@ extern "rok" {
     fn rok_nat_mul(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize);
     fn rok_nat_divmod_small(q: GcBuf<u32>, a: GcBuf<u32>, n: usize, v: u32) -> u32;
     fn rok_nat_divmod(q: GcBuf<u32>, un: GcBuf<u32>, vn: GcBuf<u32>, m: usize, n: usize);
-
-    // libm (`f32` / `f64` methods).
-    fn rok_f64_floor(x: f64) -> f64;
-    fn rok_f64_ceil(x: f64) -> f64;
-    fn rok_f64_round(x: f64) -> f64;
-    fn rok_f64_trunc(x: f64) -> f64;
-    fn rok_f64_abs(x: f64) -> f64;
-    fn rok_f64_cbrt(x: f64) -> f64;
-    fn rok_f64_exp(x: f64) -> f64;
-    fn rok_f64_exp2(x: f64) -> f64;
-    fn rok_f64_exp_m1(x: f64) -> f64;
-    fn rok_f64_ln(x: f64) -> f64;
-    fn rok_f64_ln_1p(x: f64) -> f64;
-    fn rok_f64_log2(x: f64) -> f64;
-    fn rok_f64_log10(x: f64) -> f64;
-    fn rok_f64_sin(x: f64) -> f64;
-    fn rok_f64_cos(x: f64) -> f64;
-    fn rok_f64_tan(x: f64) -> f64;
-    fn rok_f64_asin(x: f64) -> f64;
-    fn rok_f64_acos(x: f64) -> f64;
-    fn rok_f64_atan(x: f64) -> f64;
-    fn rok_f64_sinh(x: f64) -> f64;
-    fn rok_f64_cosh(x: f64) -> f64;
-    fn rok_f64_tanh(x: f64) -> f64;
-    fn rok_f64_asinh(x: f64) -> f64;
-    fn rok_f64_acosh(x: f64) -> f64;
-    fn rok_f64_atanh(x: f64) -> f64;
-    fn rok_f64_pow(x: f64, y: f64) -> f64;
-    fn rok_f64_atan2(x: f64, y: f64) -> f64;
-    fn rok_f64_hypot(x: f64, y: f64) -> f64;
-    fn rok_f64_copysign(x: f64, y: f64) -> f64;
-    fn rok_f64_min(x: f64, y: f64) -> f64;
-    fn rok_f64_max(x: f64, y: f64) -> f64;
-    fn rok_f64_mul_add(x: f64, y: f64, z: f64) -> f64;
-    fn rok_f32_floor(x: f32) -> f32;
-    fn rok_f32_ceil(x: f32) -> f32;
-    fn rok_f32_round(x: f32) -> f32;
-    fn rok_f32_trunc(x: f32) -> f32;
-    fn rok_f32_abs(x: f32) -> f32;
-    fn rok_f32_cbrt(x: f32) -> f32;
-    fn rok_f32_exp(x: f32) -> f32;
-    fn rok_f32_exp2(x: f32) -> f32;
-    fn rok_f32_exp_m1(x: f32) -> f32;
-    fn rok_f32_ln(x: f32) -> f32;
-    fn rok_f32_ln_1p(x: f32) -> f32;
-    fn rok_f32_log2(x: f32) -> f32;
-    fn rok_f32_log10(x: f32) -> f32;
-    fn rok_f32_sin(x: f32) -> f32;
-    fn rok_f32_cos(x: f32) -> f32;
-    fn rok_f32_tan(x: f32) -> f32;
-    fn rok_f32_asin(x: f32) -> f32;
-    fn rok_f32_acos(x: f32) -> f32;
-    fn rok_f32_atan(x: f32) -> f32;
-    fn rok_f32_sinh(x: f32) -> f32;
-    fn rok_f32_cosh(x: f32) -> f32;
-    fn rok_f32_tanh(x: f32) -> f32;
-    fn rok_f32_asinh(x: f32) -> f32;
-    fn rok_f32_acosh(x: f32) -> f32;
-    fn rok_f32_atanh(x: f32) -> f32;
-    fn rok_f32_pow(x: f32, y: f32) -> f32;
-    fn rok_f32_atan2(x: f32, y: f32) -> f32;
-    fn rok_f32_hypot(x: f32, y: f32) -> f32;
-    fn rok_f32_copysign(x: f32, y: f32) -> f32;
-    fn rok_f32_min(x: f32, y: f32) -> f32;
-    fn rok_f32_max(x: f32, y: f32) -> f32;
-    fn rok_f32_mul_add(x: f32, y: f32, z: f32) -> f32;
 
     // Panics. The runtime gets the caller's `path:line:col` as a last
     // `str` argument.
@@ -224,6 +151,8 @@ extern "rok" {
     fn rok_os_raise(sig: i32) -> i32;
     fn rok_os_waitpid(pid: i32, nohang: i32, out: GcBuf<i32>) -> i32;
     fn rok_os_kill(pid: i32, sig: i32) -> i32;
+    fn rok_os_pidfd_open(pid: i32) -> i32;
+    fn rok_os_pidfd_signal(fd: i32, sig: i32) -> i32;
     fn rok_os_poll_read(fd1: i32, fd2: i32) -> i32;
     fn rok_os_abort() -> !;
 
@@ -246,6 +175,98 @@ extern "rok" {
     fn rok_net_setopt(fd: i32, opt: i32, val: i64) -> i32;
     fn rok_net_multicast_v4(fd: i32, group: u32, iface: u32, join: i32) -> i32;
     fn rok_net_resolve(host: str, port: u16, out: GcBuf<i64>, max: usize) -> i32;
+    fn rok_net_unix(kind: i32, path: str, op: i32) -> i32;
+    fn rok_net_unix_pair(kind: i32, out: GcBuf<i32>) -> i32;
+    fn rok_net_unix_path(fd: i32, peer: i32, buf: GcBuf<u8>, off: usize, len: usize) -> isize;
+    fn rok_net_send_fd(fd: i32, buf: GcBuf<u8>, off: usize, len: usize, pass: i32) -> isize;
+    fn rok_net_recv_fd(fd: i32, buf: GcBuf<u8>, off: usize, len: usize, out: GcBuf<i32>) -> isize;
+    fn rok_net_sendfile(sock: i32, file: i32, offset: i64, count: usize) -> isize;
+    fn rok_net_splice(sock: i32, file: i32, count: usize) -> isize;
+}
+
+// Neither allocates nor blocks: a call is no safepoint (804). The
+// compiler takes this block as the list.
+#[no_safepoint]
+extern "rok" {
+    fn rok_str_len(s: str) -> usize;
+    fn rok_str_addr(s: str) -> usize;
+    fn rok_str_cmp(a: str, b: str) -> i32;
+    fn rok_str_eq(a: str, b: str) -> i32;
+    fn rok_str_eq_at(s: str, at: usize, pat: str) -> i32;
+    fn rok_str_find(s: str, pat: str) -> isize;
+    fn rok_str_rfind(s: str, pat: str) -> isize;
+    fn rok_str_char_count(s: str) -> usize;
+    fn rok_str_hash(s: str) -> u64;
+    fn rok_str_byte(s: str, i: usize) -> u8;
+    fn rok_str_bytes_buf(s: str) -> GcBuf<u8>;
+    fn rok_buf_copy(dst: GcBuf<u8>, doff: usize, src: GcBuf<u8>, soff: usize, len: usize);
+    fn rok_char_props(c: u32) -> u32;
+    fn rok_char_to_case(c: u32, upper: i32) -> u32;
+    fn rok_fmt_len(t: str) -> usize;
+    fn rok_f64_floor(x: f64) -> f64;
+    fn rok_f64_ceil(x: f64) -> f64;
+    fn rok_f64_round(x: f64) -> f64;
+    fn rok_f64_trunc(x: f64) -> f64;
+    fn rok_f64_abs(x: f64) -> f64;
+    fn rok_f64_cbrt(x: f64) -> f64;
+    fn rok_f64_exp(x: f64) -> f64;
+    fn rok_f64_exp2(x: f64) -> f64;
+    fn rok_f64_exp_m1(x: f64) -> f64;
+    fn rok_f64_ln(x: f64) -> f64;
+    fn rok_f64_ln_1p(x: f64) -> f64;
+    fn rok_f64_log2(x: f64) -> f64;
+    fn rok_f64_log10(x: f64) -> f64;
+    fn rok_f64_sin(x: f64) -> f64;
+    fn rok_f64_cos(x: f64) -> f64;
+    fn rok_f64_tan(x: f64) -> f64;
+    fn rok_f64_asin(x: f64) -> f64;
+    fn rok_f64_acos(x: f64) -> f64;
+    fn rok_f64_atan(x: f64) -> f64;
+    fn rok_f64_sinh(x: f64) -> f64;
+    fn rok_f64_cosh(x: f64) -> f64;
+    fn rok_f64_tanh(x: f64) -> f64;
+    fn rok_f64_asinh(x: f64) -> f64;
+    fn rok_f64_acosh(x: f64) -> f64;
+    fn rok_f64_atanh(x: f64) -> f64;
+    fn rok_f64_pow(x: f64, y: f64) -> f64;
+    fn rok_f64_atan2(x: f64, y: f64) -> f64;
+    fn rok_f64_hypot(x: f64, y: f64) -> f64;
+    fn rok_f64_copysign(x: f64, y: f64) -> f64;
+    fn rok_f64_min(x: f64, y: f64) -> f64;
+    fn rok_f64_max(x: f64, y: f64) -> f64;
+    fn rok_f64_mul_add(x: f64, y: f64, z: f64) -> f64;
+    fn rok_f32_floor(x: f32) -> f32;
+    fn rok_f32_ceil(x: f32) -> f32;
+    fn rok_f32_round(x: f32) -> f32;
+    fn rok_f32_trunc(x: f32) -> f32;
+    fn rok_f32_abs(x: f32) -> f32;
+    fn rok_f32_cbrt(x: f32) -> f32;
+    fn rok_f32_exp(x: f32) -> f32;
+    fn rok_f32_exp2(x: f32) -> f32;
+    fn rok_f32_exp_m1(x: f32) -> f32;
+    fn rok_f32_ln(x: f32) -> f32;
+    fn rok_f32_ln_1p(x: f32) -> f32;
+    fn rok_f32_log2(x: f32) -> f32;
+    fn rok_f32_log10(x: f32) -> f32;
+    fn rok_f32_sin(x: f32) -> f32;
+    fn rok_f32_cos(x: f32) -> f32;
+    fn rok_f32_tan(x: f32) -> f32;
+    fn rok_f32_asin(x: f32) -> f32;
+    fn rok_f32_acos(x: f32) -> f32;
+    fn rok_f32_atan(x: f32) -> f32;
+    fn rok_f32_sinh(x: f32) -> f32;
+    fn rok_f32_cosh(x: f32) -> f32;
+    fn rok_f32_tanh(x: f32) -> f32;
+    fn rok_f32_asinh(x: f32) -> f32;
+    fn rok_f32_acosh(x: f32) -> f32;
+    fn rok_f32_atanh(x: f32) -> f32;
+    fn rok_f32_pow(x: f32, y: f32) -> f32;
+    fn rok_f32_atan2(x: f32, y: f32) -> f32;
+    fn rok_f32_hypot(x: f32, y: f32) -> f32;
+    fn rok_f32_copysign(x: f32, y: f32) -> f32;
+    fn rok_f32_min(x: f32, y: f32) -> f32;
+    fn rok_f32_max(x: f32, y: f32) -> f32;
+    fn rok_f32_mul_add(x: f32, y: f32, z: f32) -> f32;
 }
 
 // LLVM atomics on buffer element `i` (integer or `bool` elements); each

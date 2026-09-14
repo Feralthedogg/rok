@@ -1,4 +1,6 @@
 // expect-exit: 26
+// expect-stdout:
+// 10 16
 
 enum Op {
     Add(i32, i32),
@@ -15,6 +17,7 @@ fn run(op: Op) -> i32 {
 fn main() -> i32 {
     let s = run(Op::Add(3, 7));
     let p = run(Op::Mul(4, 4));
+    println(f"{s} {p}");
     return s + p;
 }
 

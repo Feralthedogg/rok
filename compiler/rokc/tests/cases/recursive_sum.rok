@@ -1,4 +1,6 @@
 // expect-exit: 15
+// expect-stdout:
+// 55 5 1 6765 none
 
 fn fib(n: i32) -> i32 | none {
     if n < 0 {
@@ -15,5 +17,6 @@ fn fib(n: i32) -> i32 | none {
 fn main() -> i32 {
     let r = fib(10) ?? -1;
     let z = fib(-3) ?? 5;
+    println(f"{r} {z} {fib(1):?} {fib(20):?} {fib(-1):?}");
     return r - 45 + z;
 }

@@ -675,8 +675,9 @@ pub(super) fn adapt_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
 
 /// Spec 4.4: a `fn(..) -> !` fits any `fn(..) -> R` slot through a
 /// thunk `fn #thunk(args) -> R { f(args) }` (the call never returns, so
-/// the thunk's body diverges). A named fn is called directly; any other
-/// function value is captured by the thunk, itself a closure.
+/// the thunk's body diverges; a throwing one returns only its error,
+/// passed on in the slot's carrier). A named fn is called directly; any
+/// other function value is captured by the thunk, itself a closure.
 pub(super) fn adapt_never_fn(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -> HirExpr {
     let (
         HirTy::Fn(args, sret, want),
@@ -694,7 +695,12 @@ pub(super) fn adapt_never_fn(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
     if want.c_abi {
         return value;
     }
-    if **vret != HirTy::Never || **sret == HirTy::Never || args != vargs {
+    let split = |t: &HirTy| match t {
+        HirTy::Throws { ok, err } => ((**ok).clone(), Some((**err).clone())),
+        t => (t.clone(), None),
+    };
+    let ((v_ok, v_err), (s_ok, s_err)) = (split(vret), split(sret));
+    if v_ok != HirTy::Never || s_ok == HirTy::Never || args != vargs || v_err != s_err {
         return value;
     }
     let target = match &value.kind {
@@ -760,10 +766,35 @@ pub(super) fn adapt_never_fn(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
             },
             (None, None) => unreachable!("env param exists without a static target"),
         };
-        let call = HirExpr {
-            kind,
-            ty: HirTy::Unit,
-            span,
+        let stmts = match &v_err {
+            None => vec![HirStmt::Panic(HirExpr {
+                kind,
+                ty: HirTy::Unit,
+                span,
+            })],
+            Some(e) => {
+                let t = a.declare(None, (**vret).clone());
+                let err = HirExpr {
+                    kind: HirExprKind::TupleField {
+                        target: Box::new(hir_local(t, vret, span)),
+                        index: err_index(&HirTy::Never),
+                        field_ty: e.clone(),
+                    },
+                    ty: e.clone(),
+                    span,
+                };
+                vec![
+                    HirStmt::Let {
+                        local: t,
+                        init: HirExpr {
+                            kind,
+                            ty: (**vret).clone(),
+                            span,
+                        },
+                    },
+                    HirStmt::Return(Some(carrier(&s_ok, e, Err(err), span))),
+                ]
+            }
         };
         let mut all_params: Vec<HirParam> = env_param.into_iter().collect();
         all_params.extend(params);
@@ -776,7 +807,7 @@ pub(super) fn adapt_never_fn(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
             locals: a.into_locals(),
             ret_ty: (**sret).clone(),
             body: Some(HirBlock {
-                stmts: vec![HirStmt::Panic(call)],
+                stmts,
                 trailing: None,
                 label: None,
             }),
@@ -825,16 +856,7 @@ pub(super) fn rethrows_value(
     for gp in &mut def.generics.params {
         match gp {
             rokc_ast::GenericParam::Type { name, default, .. } if name.starts_with('#') => {
-                *default = Some(Ty {
-                    kind: AstTyKind::Path(AstPath {
-                        segments: vec![rokc_ast::PathSegment {
-                            name: rokc_ast::UNTYPED_THROWS_MARK.to_owned(),
-                            generics: Vec::new(),
-                        }],
-                        span,
-                    }),
-                    span,
-                });
+                *default = Some(rokc_ast::untyped_throws_ty(span));
             }
             _ => return None,
         }

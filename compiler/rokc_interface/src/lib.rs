@@ -20,8 +20,8 @@ pub use rokc_diagnostic::{
     ErrorKind, Json, RokDiagnostic, clear_files, print_rendered, render, report, set_report_style,
 };
 pub use rokc_driver::{
-    BuildOptions, Demangled, EmitKind, LLVM_VERSION, ReplCell, ReplFn, SourceFile, TempDir,
-    demangle, find_mlir_plugin, link_host, rhir,
+    BuildOptions, Demangled, EmitKind, LLVM_VERSION, REPL_HOST, ReplCell, ReplFn, SourceFile,
+    Subsystem, TempDir, bootstrap_tiers, demangle, find_mlir_plugin, link_host, rhir,
 };
 
 #[derive(Default)]
@@ -111,9 +111,20 @@ impl Session {
         self.config.std_prebuilt = rhir;
     }
 
+    /// Read `path` (absolute) as `text` instead of from the disk.
+    pub fn add_buffer(&mut self, path: PathBuf, text: String) {
+        self.config.buffers.push((path, text));
+    }
+
     /// Lower (and so check) every library body, reached or not.
     pub const fn set_check_library(&mut self, on: bool) {
         self.config.check_library = on;
+    }
+
+    /// Compile the small prebuilt standard library functions reached
+    /// too, for the optimizer to inline (an optimized build).
+    pub const fn set_inline_prebuilt(&mut self, on: bool) {
+        self.config.inline_prebuilt = on;
     }
 
     pub fn compile_file(&self, path: &Path) -> CompileResult {
@@ -134,6 +145,7 @@ impl Session {
                 warnings: p.warnings,
                 tests: p.tests,
                 sources: p.sources,
+                files: p.files,
             },
             Err(errors) => CompileResult {
                 modules: Vec::new(),
@@ -141,6 +153,7 @@ impl Session {
                 warnings: Vec::new(),
                 tests: Vec::new(),
                 sources: Vec::new(),
+                files: Vec::new(),
             },
         }
     }
@@ -155,6 +168,8 @@ pub struct CompileResult {
     pub tests: Vec<String>,
     /// Parsed files of a `set_keep_ast` build (user package first).
     pub sources: Vec<SourceFile>,
+    /// The source files read from disk.
+    pub files: Vec<PathBuf>,
 }
 
 impl CompileResult {
@@ -192,6 +207,26 @@ impl CompileResult {
             return Ok(self.ast_source().into_bytes());
         }
         rokc_driver::emit(self.module()?, kind, opts)
+    }
+
+    /// `-vv` (909.5): the source files read, then the generic instances
+    /// made, one progress line each.
+    #[must_use]
+    pub fn trace(&self) -> String {
+        let files = rokc_diagnostic::registered_files()
+            .into_iter()
+            .map(|(p, _)| ("Reading", p));
+        let instances = self
+            .modules
+            .iter()
+            .flat_map(|m| &m.hir.functions)
+            .filter_map(rokc_driver::instance)
+            .map(|sig| ("Specialized", sig));
+        let mut out = String::new();
+        for (verb, what) in files.chain(instances) {
+            out.push_str(&format!("{verb:>12} {what}\n"));
+        }
+        out
     }
 
     /// Codegen for its errors alone (`check`), without the toolchain.
@@ -253,29 +288,31 @@ impl CompileResult {
 /// The standard library and the runtime of this `rokc` (spec 9.2.19).
 ///
 /// They are under its sysroot (the executable's `..`: `lib/rok/{core,std,bare}/`,
-/// `lib/librokr.a`), else, for a build in the repository, its
-/// `library/` and the `librokr.a` cargo puts beside `rokc`. `ROK_HOME`
+/// `lib/librokr.a`, `lib\rokr.lib` on Windows), else, for a build in the
+/// repository, its `library/` and the runtime cargo puts beside `rokc`. `ROK_HOME`
 /// plays no part. Each `Err` lists where it looked.
 pub struct Sysroot {
     /// The library roots to preload (`core`, then `std` / `bare`).
     pub libs: Result<Vec<PathBuf>, String>,
     pub rokr: Result<PathBuf, String>,
+    /// `lib/rok/targets/<triple>/`: what a `--target` links (`librokr.a`
+    /// for that target; Linux: its C runtime objects and C library).
+    /// The repository's is `target/lib/rok/targets/` (`targets/build.sh`).
+    pub targets: PathBuf,
 }
 
 /// The sysroot's library directory.
 pub const SYSROOT_LIBS: &str = "lib/rok";
-const SYSROOT_RT: &str = "lib/librokr.a";
 /// The repository's `library/` (a dev build).
 const DEV_LIBS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../library");
 
 #[must_use]
 pub fn sysroot() -> Sysroot {
-    let exe = std::env::current_exe().unwrap_or_default();
-    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let exe = rokc_core::current_exe().unwrap_or_default();
     let bin = exe.parent().unwrap_or_else(|| Path::new("."));
     let root = bin.parent().unwrap_or(bin);
     let dev = Path::new(DEV_LIBS);
-    let dev = std::fs::canonicalize(dev).unwrap_or_else(|_| dev.to_path_buf());
+    let dev = rokc_core::real_path(dev).unwrap_or_else(|_| dev.to_path_buf());
     let lib_dirs = [root.join(SYSROOT_LIBS), dev];
     let libs = lib_dirs
         .iter()
@@ -290,7 +327,8 @@ pub fn sysroot() -> Sysroot {
                 lib_dirs[1].join("core/lib.rok").display(),
             )
         });
-    let rt = [root.join(SYSROOT_RT), bin.join("librokr.a")];
+    let rt_lib = rokc_core::HOST_RUNTIME_LIB;
+    let rt = [root.join("lib").join(rt_lib), bin.join(rt_lib)];
     let rokr = rt.iter().find(|p| p.is_file()).cloned().ok_or_else(|| {
         format!(
             "the runtime library is missing: no {} (the sysroot of {}) nor {} (a build in the \
@@ -300,7 +338,11 @@ pub fn sysroot() -> Sysroot {
             rt[1].display(),
         )
     });
-    Sysroot { libs, rokr }
+    Sysroot {
+        libs,
+        rokr,
+        targets: root.join("lib/rok/targets"),
+    }
 }
 
 /// The library roots to preload from a library directory: `core/lib.rok`,

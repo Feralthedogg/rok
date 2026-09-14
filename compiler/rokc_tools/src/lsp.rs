@@ -267,14 +267,17 @@ impl<W: Write> Server<W> {
             s.add_extern(n.clone(), p.clone());
         }
         s.set_anonymous(anonymous);
+        // Submodule files as edited.
+        for (uri, d) in &self.docs {
+            s.add_buffer(uri_path(uri), d.text.clone());
+        }
         s
     }
 
     /// Check `text` standing for the buffer `path`: the package root
     /// (902.2) with this buffer's text when it is the root, else the
     /// root as open or on disk; a file outside any package is anonymous.
-    /// Unsaved edits of a submodule buffer are not seen (module files are
-    /// read from disk).
+    /// Every open buffer stands for its file.
     fn compile(&self, path: &Path, text: &str) -> Analysis {
         let root = rokc_interface::discover(path)
             .ok()
@@ -283,7 +286,12 @@ impl<W: Write> Server<W> {
         let levels = &self.levels;
         match root {
             Some(root) if root != path => {
-                let open = self.docs.get(&path_uri(&root)).map(|d| d.text.clone());
+                // By path: the editor's URI spelling may differ from ours.
+                let open = self
+                    .docs
+                    .iter()
+                    .find(|(uri, _)| uri_path(uri) == root)
+                    .map(|(_, d)| d.text.clone());
                 let root_text = open
                     .or_else(|| std::fs::read_to_string(&root).ok())
                     .unwrap_or_default();
@@ -607,11 +615,10 @@ fn hover(a: &Analysis, key: &str, text: &str, off: usize) -> Option<String> {
             None => {}
         }
     }
-    if let Some(e) = a.find_expr(
-        key,
-        |s| (s.start as usize..s.end as usize).contains(&off),
-        false,
-    ) {
+    // Offsets into an older compile of an edited buffer point elsewhere.
+    let fresh = a.files.iter().any(|(p, t)| p == key && t == text);
+    let at_off = |s: Span| (s.start as usize..s.end as usize).contains(&off);
+    if let Some(e) = fresh.then(|| a.find_expr(key, at_off, false)).flatten() {
         if let HirExprKind::Call { callee, .. } | HirExprKind::FnRef(callee) = &e.kind {
             let f = hir.functions.iter().find(|f| f.id == *callee)?;
             if ident == Some(short_name(&f.name)) {
@@ -1192,8 +1199,19 @@ fn range(text: &str, start: usize, end: usize) -> Json {
 }
 
 fn uri_path(uri: &str) -> PathBuf {
+    PathBuf::from(uri_to_path(uri, cfg!(windows)))
+}
+
+fn path_uri(path: &Path) -> String {
+    path_to_uri(&path.display().to_string(), cfg!(windows))
+}
+
+/// A `file://` URI's path. On Windows `file:///c%3A/a/b` is `C:\a\b`
+/// (the drive as rokc spells it: editors lowercase it) and
+/// `file://host/share/x` is `\\host\share\x`.
+fn uri_to_path(uri: &str, windows: bool) -> String {
     let Some(rest) = uri.strip_prefix("file://") else {
-        return PathBuf::from(uri);
+        return uri.to_owned();
     };
     let bytes = rest.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -1214,13 +1232,37 @@ fn uri_path(uri: &str) -> PathBuf {
             }
         }
     }
-    PathBuf::from(String::from_utf8_lossy(&out).into_owned())
+    let path = String::from_utf8_lossy(&out).into_owned();
+    if !windows {
+        return path;
+    }
+    let path = match path.as_bytes() {
+        [b'/', d, b':', ..] if d.is_ascii_alphabetic() => {
+            format!("{}{}", d.to_ascii_uppercase() as char, &path[2..])
+        }
+        [b'/', ..] => path,
+        // An authority: a UNC share.
+        _ => format!("//{path}"),
+    };
+    path.replace('/', "\\")
 }
 
-fn path_uri(path: &Path) -> String {
+/// The `file://` URI of a path (Windows: `C:\a b\x` is
+/// `file:///C:/a%20b/x`).
+fn path_to_uri(path: &str, windows: bool) -> String {
+    let path = if windows {
+        let p = path.replace('\\', "/");
+        match p.strip_prefix("//") {
+            Some(unc) => unc.to_owned(),
+            None => format!("/{p}"),
+        }
+    } else {
+        path.to_owned()
+    };
     let mut out = String::from("file://");
-    for b in path.display().to_string().bytes() {
-        if b.is_ascii_alphanumeric() || b"/-_.~".contains(&b) {
+    for (i, b) in path.bytes().enumerate() {
+        let drive_colon = windows && i == 2 && b == b':';
+        if b.is_ascii_alphanumeric() || b"/-_.~".contains(&b) || drive_colon {
             out.push(b as char);
         } else {
             out.push_str(&format!("%{b:02X}"));
@@ -1247,7 +1289,23 @@ mod tests {
         assert_eq!(ident_at("a + 12", 5), None);
         let s = "x = 1 + a.b(f(c))[0].";
         assert_eq!(receiver_start(s, s.len() - 1), s.find('a').unwrap());
-        let p = Path::new("/tmp/a b/é.rok");
-        assert_eq!(uri_path(&path_uri(p)), p);
+        let p = "/tmp/a b/é.rok";
+        assert_eq!(path_to_uri(p, false), "file:///tmp/a%20b/%C3%A9.rok");
+        assert_eq!(uri_to_path(&path_to_uri(p, false), false), p);
+    }
+
+    #[test]
+    fn windows_uris_name_drives_and_shares() {
+        let p = r"C:\Users\é x\main.rok";
+        assert_eq!(path_to_uri(p, true), "file:///C:/Users/%C3%A9%20x/main.rok");
+        assert_eq!(uri_to_path(&path_to_uri(p, true), true), p);
+        // VS Code's spelling.
+        assert_eq!(
+            uri_to_path("file:///c%3A/Users/x/main.rok", true),
+            r"C:\Users\x\main.rok"
+        );
+        let unc = r"\\srv\share\a.rok";
+        assert_eq!(path_to_uri(unc, true), "file://srv/share/a.rok");
+        assert_eq!(uri_to_path("file://srv/share/a.rok", true), unc);
     }
 }

@@ -69,6 +69,9 @@ pub struct BuildOptions {
     pub opt_level: String,
     /// Runtime library: a path when it has an extension, else `-l<name>`.
     pub rokr: String,
+    /// Linux targets: the toolchain's C runtime objects and C library
+    /// for the target (`<sysroot>/lib/rok/targets/<triple>/`).
+    pub libc: Option<PathBuf>,
     /// Keep the scratch directory instead of deleting it.
     pub keep_temps: bool,
     /// `-g`: DWARF debug info (spec 9.9.6).
@@ -87,6 +90,11 @@ pub struct BuildOptions {
     /// `-C backend=native|llvm` (else `ROK_BACKEND`): who generates the
     /// machine code (`native::object`).
     pub backend: Option<String>,
+    /// `-L <dir>`: native library search directories, before the C
+    /// driver's `LIBRARY_PATH`.
+    pub lib_dirs: Vec<PathBuf>,
+    /// `-C subsystem=console|windows`: a Windows executable's subsystem.
+    pub subsystem: crate::windows::Subsystem,
 }
 
 impl Default for BuildOptions {
@@ -94,6 +102,7 @@ impl Default for BuildOptions {
         Self {
             opt_level: "0".to_owned(),
             rokr: "rokr".to_owned(),
+            libc: None,
             keep_temps: false,
             debug: false,
             repl: None,
@@ -102,6 +111,8 @@ impl Default for BuildOptions {
             mlir_pass_plugins: Vec::new(),
             mlir_passes: Vec::new(),
             backend: std::env::var("ROK_BACKEND").ok().filter(|b| !b.is_empty()),
+            lib_dirs: Vec::new(),
+            subsystem: crate::windows::Subsystem::Console,
         }
     }
 }
@@ -122,10 +133,7 @@ impl TempDir {
             .map_or(0, |d| d.subsec_nanos());
         for attempt in 0..100u32 {
             let path = base.join(format!("rokc-{pid}-{nanos:x}-{attempt}"));
-            let mut builder = std::fs::DirBuilder::new();
-            #[cfg(unix)]
-            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-            match builder.create(&path) {
+            match private_dir(&path) {
                 Ok(()) => return Ok(Self { path, keep }),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => {
@@ -140,6 +148,16 @@ impl TempDir {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// Create `path` readable by this user alone (Windows: the user's temp
+/// directory is private already).
+fn private_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    return std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+        .create(path);
+    #[cfg(not(unix))]
+    std::fs::create_dir(path)
 }
 
 impl Drop for TempDir {
@@ -184,6 +202,7 @@ fn codegen(
             &rokc_codegen_mlir::CodegenOptions {
                 overflow_checks: opts.overflow_checks.unwrap_or(opts.opt_level == "0"),
                 debug: opts.debug,
+                optimized: opts.opt_level != "0",
                 repl: opts.repl.clone(),
                 data_layout,
             },
@@ -332,8 +351,9 @@ fn llvm(
         target: &t,
         opt,
         emit,
-        // JIT'd cells keep the general-dynamic model.
-        tls_initial_exec: opts.repl.is_none(),
+        // JIT'd Mach-O cells reach thread-locals through TLV
+        // descriptors; the ELF loader resolves initial exec.
+        tls_initial_exec: opts.repl.is_none() || !t.triple.contains("-apple-"),
         mlir_pipeline: &pipeline,
         dialect_plugins: &dialects,
         pass_plugins: &passes,
@@ -375,6 +395,9 @@ fn object_beside(archive: &Path) -> PathBuf {
 /// Link the objects `objs` of `module` with the runtime and the
 /// dependencies into the executable `out`: lld in process, or the C
 /// compiler driver `ROK_CC`.
+///
+/// A Windows executable links its C runtime and system libraries
+/// through import libraries rokc makes (`windows::link_args`).
 pub fn link_object(
     module: &CompiledModule,
     objs: &[PathBuf],
@@ -384,42 +407,79 @@ pub fn link_object(
     let triple = module.mir.target.triple.as_deref();
     let t = target(triple);
     let apple = t.triple.contains("-apple-");
-    // A rokc built without LLVM has no lld either: the system's `cc`.
-    let cc = std::env::var_os("ROK_CC")
-        .filter(|c| !c.is_empty())
-        .or_else(|| (!rokc_llvm::AVAILABLE).then(|| "cc".into()));
-    if let Some(cc) = cc {
+    let windows = module.mir.target.os == "windows";
+    let search: Vec<OsString> = opts
+        .lib_dirs
+        .iter()
+        .map(|d| {
+            let mut l = OsString::from("-L");
+            l.push(d);
+            l
+        })
+        .collect();
+    if let Some(cc) = c_compiler() {
         let mut link = Command::new(cc);
-        link.args(objs).args(&module.archives).arg(rokr_arg(opts));
+        link.args(objs)
+            .args(&module.archives)
+            .arg(rokr_arg(opts, windows));
+        link.args(&search);
         for (name, stat) in &module.mir.link.native_libs {
-            // ld64 has no `-Bstatic`: it takes the first `lib<name>` on
-            // the search path.
-            if *stat && !apple {
+            if *stat && apple {
+                link.arg(static_archive(name, opts)?);
+            } else if *stat {
                 link.args(["-Wl,-Bstatic", &format!("-l{name}"), "-Wl,-Bdynamic"]);
             } else {
                 link.arg(format!("-l{name}"));
             }
         }
-        link.arg(if apple {
-            "-Wl,-dead_strip"
-        } else {
-            "-Wl,--gc-sections"
-        });
+        if apple {
+            link.arg("-Wl,-dead_strip");
+        } else if !windows {
+            link.arg("-Wl,--gc-sections");
+        }
         if opts.debug {
             link.arg("-g");
         }
-        if let Some(t) = triple {
-            link.arg(format!("--target={t}"));
+        // Apple's clang links for the machine it runs as (not rokc's,
+        // under Rosetta) unless told.
+        if triple.is_some() || apple {
+            link.arg(format!("--target={}", t.triple));
         }
         // core's float methods call libm; glibc keeps it out of libc.
-        link.arg("-lm").arg("-o").arg(out);
+        if !windows {
+            link.arg("-lm");
+        }
+        link.arg("-o").arg(out);
         run(&mut link, "the link")?;
+    } else if windows {
+        let tmp = TempDir::new(opts.keep_temps)?;
+        let mut inputs: Vec<OsString> = objs.iter().map(|o| o.clone().into_os_string()).collect();
+        inputs.extend(module.archives.iter().map(|a| a.clone().into_os_string()));
+        inputs.push(rokr_arg(opts, true).into());
+        inputs.extend(search);
+        inputs.extend(
+            crate::windows::link_args(
+                &t,
+                &module.mir.link.native_libs,
+                opts.subsystem,
+                opts.debug,
+                tmp.path(),
+            )
+            .map_err(|e| err(format!("the link failed:\n{e}")))?,
+        );
+        rokc_diagnostic::time("link", || {
+            rokc_llvm::link_executable(&t, &inputs, out, true, None)
+        })
+        .map_err(|e| err(format!("the link failed:\n{e}")))?;
     } else {
         let mut inputs: Vec<OsString> = objs.iter().map(|o| o.clone().into_os_string()).collect();
         inputs.extend(module.archives.iter().map(|a| a.clone().into_os_string()));
-        inputs.push(rokr_arg(opts).into());
+        inputs.push(rokr_arg(opts, false).into());
+        inputs.extend(search);
         for (name, stat) in &module.mir.link.native_libs {
-            if *stat && !apple {
+            if *stat && apple {
+                inputs.push(static_archive(name, opts)?.into_os_string());
+            } else if *stat {
                 inputs.extend([
                     "-Bstatic".into(),
                     format!("-l{name}").into(),
@@ -429,9 +489,8 @@ pub fn link_object(
                 inputs.push(format!("-l{name}").into());
             }
         }
-        inputs.push("-lm".into());
         rokc_diagnostic::time("link", || {
-            rokc_llvm::link_executable(&t, &inputs, out, true)
+            rokc_llvm::link_executable(&t, &inputs, out, true, opts.libc.as_deref())
         })
         .map_err(|e| err(format!("the link failed:\n{e}")))?;
     }
@@ -444,10 +503,36 @@ pub fn link_object(
     Ok(())
 }
 
-/// `--rokr`: a library path when it has an extension, else `-l<name>`.
-fn rokr_arg(opts: &BuildOptions) -> String {
+/// `#[link(name, kind = "static")]` for ld64, which has no `-Bstatic`
+/// (it takes a `.dylib` before a `.a` in each directory): the first
+/// `lib<name>.a` in the `-L` directories, then `LIBRARY_PATH`.
+fn static_archive(name: &str, opts: &BuildOptions) -> Result<PathBuf, RokDiagnostic> {
+    let env = std::env::var_os("LIBRARY_PATH").unwrap_or_default();
+    let dirs: Vec<PathBuf> = opts
+        .lib_dirs
+        .iter()
+        .cloned()
+        .chain(std::env::split_paths(&env).filter(|d| !d.as_os_str().is_empty()))
+        .collect();
+    let file = format!("lib{name}.a");
+    dirs.iter()
+        .map(|d| d.join(&file))
+        .find(|p| p.is_file())
+        .ok_or_else(|| {
+            err(format!(
+                "`#[link(name = \"{name}\", kind = \"static\")]`: no {file} in the -L directories \
+             or LIBRARY_PATH"
+            ))
+        })
+}
+
+/// `--rokr`: a library path when it has an extension, else `-l<name>`
+/// (`<name>.lib` for Windows).
+fn rokr_arg(opts: &BuildOptions, windows: bool) -> String {
     if Path::new(&opts.rokr).extension().is_some() {
         opts.rokr.clone()
+    } else if windows {
+        format!("{}.lib", opts.rokr)
     } else {
         format!("-l{}", opts.rokr)
     }
@@ -486,15 +571,49 @@ pub fn find_mlir_plugin(spec: &str) -> Result<PathBuf, String> {
 /// rokc) with the whole runtime linked in and exported, for the cells it
 /// maps and links itself.
 pub fn link_host(host_object: &Path, opts: &BuildOptions, out: &Path) -> Result<(), RokDiagnostic> {
-    let inputs: [OsString; 4] = [
-        host_object.as_os_str().to_owned(),
-        "-all_load".into(),
-        rokr_arg(opts).into(),
-        "-lm".into(),
-    ];
-    rokc_llvm::link_executable(&rokc_llvm::Target::host(), &inputs, out, false)
+    let t = rokc_llvm::Target::host();
+    let cc = c_compiler();
+    let flag = |f: &str| -> OsString {
+        if cc.is_some() {
+            format!("-Wl,{f}").into()
+        } else {
+            f.into()
+        }
+    };
+    let obj = host_object.as_os_str().to_owned();
+    let rokr = OsString::from(rokr_arg(opts, false));
+    // ELF: the runtime in the dynamic symbol table, for `dlsym`.
+    let inputs = if t.triple.contains("-apple-") {
+        let mut v = vec![obj, flag("-all_load"), rokr];
+        if cc.is_some() {
+            v.push(format!("--target={}", t.triple).into());
+        }
+        v
+    } else {
+        vec![
+            flag("--export-dynamic"),
+            obj,
+            flag("--whole-archive"),
+            rokr,
+            flag("--no-whole-archive"),
+        ]
+    };
+    if let Some(cc) = cc {
+        let mut link = Command::new(cc);
+        link.args(&inputs).arg("-lm").arg("-o").arg(out);
+        return run(&mut link, "the REPL host link");
+    }
+    rokc_llvm::link_executable(&t, &inputs, out, false, opts.libc.as_deref())
         .map(drop)
         .map_err(|e| err(format!("cannot link the REPL host:\n{e}")))
+}
+
+/// The C compiler driver that links instead of lld: `ROK_CC`, else the
+/// system's `cc` for a rokc built without LLVM (no lld either).
+fn c_compiler() -> Option<OsString> {
+    std::env::var_os("ROK_CC")
+        .filter(|c| !c.is_empty())
+        .or_else(|| (!rokc_llvm::AVAILABLE).then(|| "cc".into()))
 }
 
 /// rokc's build cache: `<sysroot>/lib/rok-cache` of an installed
@@ -502,11 +621,10 @@ pub fn link_host(host_object: &Path, opts: &BuildOptions, out: &Path) -> Result<
 /// repository).
 #[must_use]
 pub fn cache_dir() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let exe = rokc_core::current_exe()?;
     let bin = exe.parent()?;
     let sysroot = bin.parent()?;
-    Some(if sysroot.join("lib/rok").is_dir() {
+    Some(if sysroot.join("lib/rok/core").is_dir() {
         sysroot.join("lib/rok-cache")
     } else {
         bin.join("rok-cache")

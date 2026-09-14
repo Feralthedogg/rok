@@ -30,6 +30,20 @@ pub fn lower(module: &HirModule, target: &Target) -> MirModule {
             .map(|s| (s.id.0, s.repr))
             .collect(),
     );
+    // A byte-array union is as aligned as its most aligned member.
+    let raised: Vec<(u32, rokc_hir::Repr)> = module
+        .structs
+        .iter()
+        .filter_map(|s| {
+            let a = crate::ty::union_align(s, module, &with_reprs);
+            (a > s.repr.align).then_some((s.id.0, rokc_hir::Repr { align: a, ..s.repr }))
+        })
+        .collect();
+    if !raised.is_empty() {
+        let mut reprs = (*with_reprs.reprs).clone();
+        reprs.extend(raised);
+        with_reprs.reprs = std::sync::Arc::new(reprs);
+    }
     let target = &with_reprs;
     let mut ret_tys: HashMap<FunctionId, MirTy> = HashMap::new();
     for f in &module.functions {
@@ -90,6 +104,8 @@ pub fn lower(module: &HirModule, target: &Target) -> MirModule {
     if let Some(roots) = &module.roots {
         retain_reachable(&mut functions, roots.clone());
     }
+    let next_id = functions.iter().map(|f| f.id.0 + 1).max().unwrap_or(0);
+    crate::specialize::closures(&mut functions, next_id);
     MirModule {
         functions,
         statics,

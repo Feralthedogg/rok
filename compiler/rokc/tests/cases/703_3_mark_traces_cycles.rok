@@ -1,0 +1,47 @@
+// spec: 007.03-gc-algorithm §7.3.3
+// gc-stress: 50
+// expect-exit: 0
+// expect-stdout:
+// ring of 100: 0 -> 1 -> 2
+// back to start after 100 steps: true
+
+// spec 7.3.3: marking follows every reference of a reached object, so a
+// cycle reached from a root is kept whole (no reference counting).
+extern "C" {
+    fn rok_gc_collect();
+}
+
+fn main() -> i32 {
+    // node i: [value, next index] held in lists that point at each other.
+    let nodes: List<List<any>> = [];
+    let i = 0;
+    while i < 100 {
+        let n: List<any> = [i];
+        nodes.push(n);
+        i += 1;
+    }
+    i = 0;
+    while i < 100 {
+        let next: any = nodes[((i + 1) % 100) as usize];
+        nodes[i as usize].push(next);
+        i += 1;
+    }
+    let start = nodes[0];
+    nodes = [];
+    unsafe { rok_gc_collect(); rok_gc_collect(); }
+    let cur = start;
+    let seen: List<i32> = [];
+    let steps = 0;
+    while steps < 100 {
+        if seen.len() < 3 {
+            if let v: i32 = cur[0] { seen.push(v); }
+        }
+        if let n: List<any> = cur[1] { cur = n; }
+        steps += 1;
+    }
+    println(f"ring of 100: {seen[0]} -> {seen[1]} -> {seen[2]}");
+    let back = false;
+    if let v: i32 = cur[0] { back = v == 0; }
+    println(f"back to start after 100 steps: {back}");
+    return 0;
+}

@@ -1,4 +1,10 @@
 // expect-exit: 42
+// expect-stdout:
+// 4 5 -> 18
+// 6 2 -> 16
+// 8 9 -> 34
+// 91 91 -> 0
+// total 68 mul 68 div 2
 
 const SIZE: i32 = 4;
 
@@ -59,9 +65,11 @@ fn main() -> i32 {
     for p in xs {
         let scaled = p.scale(|n: i32| -> i32 { n + 1 });
         let r = compute(scaled) ?? 0;
+        println(f"{scaled.a} {scaled.b} -> {r}");
         total += r;
     }
     let mul = safe_op(total, 1).or_default(0);
     let div = safe_op(total, 0).or_default(2);
+    println(f"total {total} mul {mul} div {div}");
     return mul + div + SIZE - 32;
 }

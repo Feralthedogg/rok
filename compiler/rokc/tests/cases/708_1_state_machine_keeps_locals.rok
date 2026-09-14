@@ -1,0 +1,29 @@
+// spec: 007.08-coroutine §7.8.1 / §7.8.3
+// gc-stress: 50
+// expect-exit: 0
+// expect-stdout:
+// a1 1
+// a1a2 3
+// a1a2a3 6
+// a1a2a3a4 10
+
+// spec 7.8.1 / 7.8.3: a generator is a state machine whose locals live
+// in its frame across suspension points, GC references included.
+yield fn running(n: i32) -> str {
+    let text = "";
+    let sum = 0;
+    let i = 1;
+    while i <= n {
+        text = text + f"a{i}";
+        sum += i;
+        yield f"{text} {sum}";
+        i += 1;
+    }
+}
+
+fn main() -> i32 {
+    for line in running(4) {
+        println(line);
+    }
+    return 0;
+}

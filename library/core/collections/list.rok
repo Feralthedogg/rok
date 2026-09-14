@@ -363,6 +363,12 @@ impl<T> DoubleEndedIterator for ListIter<T> {
     }
 }
 
+impl<T> ExactSizeIterator for ListIter<T> {
+    fn len(self) -> usize {
+        unsafe { self.list.len().saturating_sub(self.pos[0] + self.pos[1]) }
+    }
+}
+
 impl<T> IntoIterator for List<T> {
     type IntoIter = ListIter<T>;
     type Item = T;

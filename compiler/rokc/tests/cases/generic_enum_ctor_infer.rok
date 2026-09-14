@@ -1,4 +1,6 @@
 // expect-exit: 42
+// expect-stdout:
+// 40 2
 
 // A generic enum's variant infers the instance from its arguments,
 // whether or not that instance is written anywhere in the program.
@@ -15,5 +17,6 @@ fn main() -> i32 {
         Pair::Two(a, _) => a,
         Pair::One(a) => a,
     };
+    println(f"{n} {m}");
     return n + m;
 }

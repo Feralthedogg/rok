@@ -1,0 +1,25 @@
+// spec: 008.08-lowering-types §8.8.9
+// gc-stress: 50
+// expect-exit: 0
+// expect-stdout:
+// i32 7
+// str seven
+// List [7, 7]
+// other
+
+// spec 8.8.9: an `any` slot holds a type tag and the value (inline or
+// boxed); narrowing compares the tag and reads the value back.
+struct P { x: i32; }
+
+fn kind(v: any) -> str {
+    if let n: i32 = v { return f"i32 {n}"; }
+    if let s: str = v { return f"str {s}"; }
+    if let xs: List<i32> = v { return f"List {xs:?}"; }
+    "other"
+}
+
+fn main() -> i32 {
+    let vs: List<any> = [7, "seven", [7, 7], P { x: 1 }];
+    for v in vs { println(kind(v)); }
+    return 0;
+}

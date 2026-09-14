@@ -1,4 +1,6 @@
 // expect-exit: 7
+// expect-stdout:
+// true false
 
 fn main() -> i32 {
     let total = 0;
@@ -7,6 +9,7 @@ fn main() -> i32 {
         total += 4;
     }
     let combo = (3 > 5) && false;
+    println(f"{arr_check} {combo}");
     if !combo {
         total += 3;
     }

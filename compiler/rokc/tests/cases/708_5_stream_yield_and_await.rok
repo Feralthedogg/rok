@@ -1,0 +1,33 @@
+// spec: 007.08-coroutine §7.8.5 / §7.8.2
+// expect-exit: 0
+// expect-stdout:
+// 1 3 6 10
+// total 10
+
+// 7.8.5: in one stream frame `yield` produces values and `await`
+// suspends; 7.8.2: locals live across both kinds of suspend point.
+async fn plus(a: i32, b: i32) -> i32 {
+    await task::yield_now();
+    a + b
+}
+
+async yield fn running_sums(n: i32) -> i32 {
+    let acc = 0;
+    let i = 1;
+    while i <= n {
+        acc = await plus(acc, i);
+        yield acc;
+        i = i + 1;
+    }
+}
+
+async fn main() {
+    let s = "";
+    let last = 0;
+    for await v in running_sums(4) {
+        s = if s == "" { f"{v}" } else { s + f" {v}" };
+        last = v;
+    }
+    println(s);
+    println(f"total {last}");
+}

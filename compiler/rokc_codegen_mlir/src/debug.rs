@@ -33,6 +33,8 @@ pub struct DebugInfo {
     types: BTreeMap<String, String>,
     next: u32,
     target: Target,
+    /// An optimized build (the unit's `isOptimized`).
+    optimized: bool,
     /// Struct name and field names by `StructId` (`MirModule::struct_names`).
     pub struct_names: std::collections::HashMap<u32, (String, Vec<String>)>,
 }
@@ -57,7 +59,7 @@ fn escape(s: &str) -> String {
 
 impl DebugInfo {
     #[must_use]
-    pub fn new(target: Target) -> Self {
+    pub fn new(target: Target, optimized: bool) -> Self {
         let cwd = std::env::current_dir().unwrap_or_default();
         let paths = rokc_diagnostic::registered_files()
             .into_iter()
@@ -71,6 +73,7 @@ impl DebugInfo {
             types: BTreeMap::new(),
             next: 0,
             target,
+            optimized,
             struct_names: std::collections::HashMap::new(),
         }
     }
@@ -120,8 +123,9 @@ impl DebugInfo {
             let _ = writeln!(
                 self.defs,
                 "#di_cu = #llvm.di_compile_unit<id = distinct[0]<>, sourceLanguage = DW_LANG_C, \
-                 file = {file}, producer = \"rokc\", isOptimized = false, emissionKind = Full>\n\
-                 #di_fn_ty = #llvm.di_subroutine_type<callingConvention = DW_CC_normal>"
+                 file = {file}, producer = \"rokc\", isOptimized = {}, emissionKind = Full>\n\
+                 #di_fn_ty = #llvm.di_subroutine_type<callingConvention = DW_CC_normal>",
+                self.optimized
             );
             self.cu = Some("#di_cu".to_owned());
             "#di_cu".to_owned()

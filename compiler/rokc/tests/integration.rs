@@ -65,9 +65,12 @@ fn run_case(
     if optimized() && directives(&source, "debug-only").next().is_some() {
         return Ok(());
     }
+    if skipped_on_target(&source) {
+        return Ok(());
+    }
     let case_dir = scratch.join(name);
     let _ = fs::create_dir_all(&case_dir);
-    let exe = case_dir.join("out");
+    let exe = case_dir.join(exe_name("out"));
 
     let build = rokc_build(env, path, &exe).map_err(|e| format!("rokc: {e}"))?;
     let stderr = String::from_utf8_lossy(&build.stderr);

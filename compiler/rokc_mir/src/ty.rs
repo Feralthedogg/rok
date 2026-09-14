@@ -195,13 +195,34 @@ fn union_storage(fields: &[(String, HirTy)], module: &HirModule, target: &Target
         let w = target.pointer_width / 8;
         return MirTy::Union(tys, size.div_ceil(w));
     }
-    let word = MirTy::Prim(match align {
-        1 => PrimTy::U8,
-        2 => PrimTy::U16,
-        4 => PrimTy::U32,
-        _ => PrimTy::U64,
-    });
-    MirTy::Array(Box::new(word), size.div_ceil(align))
+    // Words of the alignment, up to 8; a more aligned member raises
+    // the union struct's own alignment (`union_align`).
+    let (word, w) = match align {
+        1 => (PrimTy::U8, 1),
+        2 => (PrimTy::U16, 2),
+        4 => (PrimTy::U32, 4),
+        _ => (PrimTy::U64, 8),
+    };
+    MirTy::Array(Box::new(MirTy::Prim(word)), size.div_ceil(w))
+}
+
+/// The alignment of a byte-array union's most aligned member, when past
+/// what its storage words give (8): the union struct is aligned so.
+#[must_use]
+pub fn union_align(def: &rokc_hir::HirStructDef, module: &HirModule, target: &Target) -> u32 {
+    let Some(u) = def.union_kind.as_ref() else {
+        return 0;
+    };
+    if !matches!(u.storage, rokc_hir::UnionStorage::ByteArray) {
+        return 0;
+    }
+    let align = u
+        .aliases
+        .iter()
+        .map(|(_, t)| target.size_align(&lower_ty(t, module, target)).1)
+        .max()
+        .unwrap_or(1);
+    if align > 8 { align } else { 0 }
 }
 
 /// `(tag, payload)` of the variants that carry data (the tag is the

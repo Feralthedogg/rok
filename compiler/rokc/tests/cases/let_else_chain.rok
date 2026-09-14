@@ -1,4 +1,6 @@
 // expect-exit: 36
+// expect-stdout:
+// 36 -1 -1 -1
 
 fn pick(present: bool, val: i32) -> i32 | none {
     if present {
@@ -21,6 +23,7 @@ fn sum_three(a: bool, b: bool, c: bool) -> i32 {
 }
 
 fn main() -> i32 {
+    println(f"{sum_three(true, true, true)} {sum_three(true, false, true)} {sum_three(false, true, true)} {sum_three(true, true, false)}");
     let total = 0;
     total += sum_three(true, true, true);   // 36
     total += sum_three(true, false, true);  // -1

@@ -1,4 +1,7 @@
 // expect-exit: 55
+// expect-stdout:
+// 0 1 1 2 3 5 8 13 21 34 55
+
 
 fn fib(n: i32) -> i32 {
     if n < 2 {
@@ -8,5 +11,11 @@ fn fib(n: i32) -> i32 {
 }
 
 fn main() -> i32 {
+    let s = StrBuf::new();
+    for i in 0..11 {
+        if i > 0 { s.push_str(" "); }
+        s.push_str(f"{fib(i)}");
+    }
+    println(s.to_str());
     return fib(10);
 }

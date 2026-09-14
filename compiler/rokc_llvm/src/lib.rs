@@ -14,6 +14,9 @@ pub const LLVM_VERSION: &str = "22.1.8";
 /// Whether this build links LLVM.
 pub const AVAILABLE: bool = cfg!(rok_llvm);
 
+/// The prefix this build links (its headers build MLIR plugins).
+pub const PREFIX: Option<&str> = option_env!("ROK_LLVM_LINKED_PREFIX");
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OptLevel {
     O0,
@@ -107,6 +110,19 @@ impl Target {
     fn is_apple(&self) -> bool {
         self.triple.contains("-apple-")
     }
+
+    fn is_windows(&self) -> bool {
+        self.triple.contains("-windows")
+    }
+
+    /// lld-link's `/machine:` of a Windows target.
+    fn coff_machine(&self) -> Result<&'static str, String> {
+        match self.triple.split('-').next() {
+            Some("x86_64") => Ok("x64"),
+            Some("aarch64" | "arm64") => Ok("arm64"),
+            _ => Err(format!("linking for {} is not supported yet", self.triple)),
+        }
+    }
 }
 
 /// What to compile and how.
@@ -180,21 +196,11 @@ pub fn data_layout(t: &Target) -> Result<String, String> {
 }
 
 /// The triple LLVM was configured for (`sys::getProcessTriple`); see
-/// [`Target::host`] for clang's spelling.
+/// [`Target::host`] for clang's spelling. Without LLVM, the triple
+/// rokc was compiled for.
 #[must_use]
 pub fn process_triple() -> String {
-    ffi::process_triple().unwrap_or_else(|| {
-        let arch = if cfg!(target_arch = "aarch64") {
-            "aarch64"
-        } else {
-            std::env::consts::ARCH
-        };
-        if cfg!(target_vendor = "apple") {
-            format!("{arch}-apple-darwin")
-        } else {
-            format!("{arch}-unknown-{}-gnu", std::env::consts::OS)
-        }
-    })
+    ffi::process_triple().unwrap_or_else(|| env!("ROK_LLVM_TARGET").to_owned())
 }
 
 /// Runs lld; `args[0]` names the flavor (`ld64.lld`, `ld.lld`, `lld-link`,
@@ -212,16 +218,19 @@ pub fn lld<S: AsRef<OsStr>>(args: &[S]) -> Result<String, String> {
 /// `inputs`: objects, archives, `-l<lib>`, `-L<dir>` and lld options of
 /// the target's flavor; `strip` drops what nothing references.
 ///
-/// Mach-O: the SDK is `SDKROOT`, else `xcrun --show-sdk-path`. ELF (GNU
-/// libc): the C runtime objects and libraries of `ROK_SYSROOT` (else `/`)
-/// and its GCC.
+/// Mach-O: the SDK is `SDKROOT`, else the selected developer
+/// directory's. Linux: `libc`, the toolchain's C runtime objects and C
+/// library for the target (`targets/build.sh`). COFF: no default
+/// libraries; `inputs` bring the C runtime (import libraries,
+/// [`import_library`]) and the entry point.
 pub fn link_executable<S: AsRef<OsStr>>(
     t: &Target,
     inputs: &[S],
     out: &Path,
     strip: bool,
+    libc: Option<&Path>,
 ) -> Result<String, String> {
-    // `LIBRARY_PATH` directories are searched, as by cc.
+    // `-L<dir>` inputs, then `LIBRARY_PATH` directories, as by cc.
     let search = std::env::var_os("LIBRARY_PATH").unwrap_or_default();
     let search = std::env::split_paths(&search)
         .filter(|d| !d.as_os_str().is_empty())
@@ -230,28 +239,55 @@ pub fn link_executable<S: AsRef<OsStr>>(
             l.push(d);
             l
         });
-    let inputs: Vec<OsString> = search
-        .chain(inputs.iter().map(|a| a.as_ref().to_owned()))
-        .collect();
-    let args = if t.is_apple() {
-        let mut a = macho_args(t, out)?;
-        a.extend(inputs);
-        a.push("-lSystem".into());
-        if strip {
-            a.push("-dead_strip".into());
-        }
-        a
-    } else if t.triple.contains("-linux") {
-        let (mut a, tail) = elf_args(t, out)?;
-        a.extend(inputs);
-        if strip {
-            a.push("--gc-sections".into());
-        }
-        a.extend(tail);
-        a
-    } else {
-        return Err(format!("linking for {} is not supported yet", t.triple));
-    };
+    let (dirs, rest): (Vec<OsString>, Vec<OsString>) = inputs
+        .iter()
+        .map(|a| a.as_ref().to_owned())
+        .partition(|a| a.to_str().is_some_and(|s| s.starts_with("-L")));
+    let inputs: Vec<OsString> = dirs.into_iter().chain(search).chain(rest).collect();
+    let args =
+        if t.is_apple() {
+            let mut a = macho_args(t, out)?;
+            a.extend(inputs);
+            a.push("-lSystem".into());
+            if strip {
+                a.push("-dead_strip".into());
+            }
+            a
+        } else if t.triple.contains("-linux") {
+            let libc = libc.ok_or_else(|| format!("no C library for {}", t.triple))?;
+            let (mut a, tail) = elf_args(t, out, libc)?;
+            a.extend(inputs);
+            if strip {
+                a.push("--gc-sections".into());
+            }
+            a.extend(tail);
+            a
+        } else if t.is_windows() {
+            let mut a: Vec<OsString> = [
+                "lld-link",
+                "/nologo",
+                "/nodefaultlib",
+                "/dynamicbase",
+                "/nxcompat",
+            ]
+            .map(OsString::from)
+            .into();
+            a.push(format!("/machine:{}", t.coff_machine()?).into());
+            let mut o = OsString::from("/out:");
+            o.push(out);
+            a.push(o);
+            // `-L<dir>` (LIBRARY_PATH) in lld-link's spelling.
+            a.extend(inputs.into_iter().map(
+                |i| match i.to_str().and_then(|s| s.strip_prefix("-L")) {
+                    Some(d) => format!("/libpath:{d}").into(),
+                    None => i,
+                },
+            ));
+            a.push(if strip { "/opt:ref" } else { "/opt:noref" }.into());
+            a
+        } else {
+            return Err(format!("linking for {} is not supported yet", t.triple));
+        };
     lld(&args)
 }
 
@@ -293,99 +329,46 @@ fn macho_args(t: &Target, out: &Path) -> Result<Vec<OsString>, String> {
     Ok(a)
 }
 
-/// lld's arguments before and after the inputs for a GNU/Linux
-/// executable, as gcc / clang pass them (PIE, the C runtime objects,
-/// libgcc, libc).
-fn elf_args(t: &Target, out: &Path) -> Result<(Vec<OsString>, Vec<OsString>), String> {
-    let arch = t.triple.split('-').next().unwrap_or("");
-    let (emulation, loader) = match arch {
+/// lld's arguments before and after the inputs for a Linux executable
+/// against the C library in `libc`: musl statically, glibc (link stubs)
+/// as a PIE run by the system's dynamic loader.
+fn elf_args(t: &Target, out: &Path, libc: &Path) -> Result<(Vec<OsString>, Vec<OsString>), String> {
+    let (emulation, loader) = match t.triple.split('-').next().unwrap_or("") {
         "x86_64" => ("elf_x86_64", "/lib64/ld-linux-x86-64.so.2"),
         "aarch64" => ("aarch64linux", "/lib/ld-linux-aarch64.so.1"),
-        "riscv64" => ("elf64lriscv", "/lib/ld-linux-riscv64-lp64d.so.1"),
         _ => return Err(format!("linking for {} is not supported yet", t.triple)),
     };
-    let root = std::env::var_os("ROK_SYSROOT")
-        .filter(|r| !r.is_empty())
-        .map_or_else(|| std::path::PathBuf::from("/"), Into::into);
-    let multi = format!("{arch}-linux-gnu");
-    let dirs: Vec<std::path::PathBuf> = [
-        format!("usr/lib/{multi}"),
-        format!("lib/{multi}"),
-        "usr/lib64".to_owned(),
-        "lib64".to_owned(),
-        "usr/lib".to_owned(),
-        "lib".to_owned(),
-    ]
-    .iter()
-    .map(|d| root.join(d))
-    .filter(|d| d.is_dir())
-    .collect();
-    let find = |name: &str| {
-        dirs.iter()
-            .map(|d| d.join(name))
-            .find(|p| p.is_file())
-            .ok_or_else(|| format!("no {name} under {} (install the C library's development files, or set ROK_SYSROOT)", root.display()))
-    };
-    let (crt1, crti, crtn) = (find("Scrt1.o")?, find("crti.o")?, find("crtn.o")?);
-    // The newest GCC's: crtbeginS.o, libgcc.
-    let gcc = ["usr/lib/gcc", "usr/lib64/gcc"]
-        .iter()
-        .filter_map(|g| std::fs::read_dir(root.join(g)).ok())
-        .flatten()
-        .filter_map(|e| Some(e.ok()?.path()))
-        .filter(|d| {
-            d.file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with(arch))
-        })
-        .filter_map(|d| std::fs::read_dir(d).ok())
-        .flatten()
-        .filter_map(|e| Some(e.ok()?.path()))
-        .filter(|d| d.join("crtbeginS.o").is_file())
-        .max_by_key(|d| {
-            d.file_name().and_then(|n| n.to_str()).map(|v| {
-                v.split('.')
-                    .map(|x| x.parse::<u32>().unwrap_or(0))
-                    .collect::<Vec<_>>()
-            })
-        })
-        .ok_or_else(|| format!("no GCC runtime (crtbeginS.o) under {}", root.display()))?;
-    let mut head: Vec<OsString> = [
-        "ld.lld",
-        "-m",
-        emulation,
-        "-pie",
-        "--eh-frame-hdr",
-        "--hash-style=gnu",
-        "--build-id",
-        "-dynamic-linker",
-        loader,
-    ]
-    .map(OsString::from)
-    .into();
-    head.extend(["-o".into(), out.as_os_str().to_owned()]);
-    head.extend([crt1, crti, gcc.join("crtbeginS.o")].map(std::path::PathBuf::into_os_string));
-    let mut l = OsString::from("-L");
-    l.push(&gcc);
-    head.push(l);
-    for d in &dirs {
-        let mut l = OsString::from("-L");
-        l.push(d);
-        head.push(l);
+    let musl = t.triple.contains("-musl");
+    let crt1 = if musl { "crt1.o" } else { "Scrt1.o" };
+    if !libc.join(crt1).is_file() {
+        return Err(format!(
+            "no C library for {} in {}",
+            t.triple,
+            libc.display()
+        ));
     }
-    let mut tail: Vec<OsString> = [
-        "-lgcc",
-        "--as-needed",
-        "-lgcc_s",
-        "--no-as-needed",
-        "-lc",
-        "-lgcc",
-        "--as-needed",
-        "-lgcc_s",
-        "--no-as-needed",
-    ]
-    .map(OsString::from)
-    .into();
-    tail.extend([gcc.join("crtendS.o"), crtn].map(std::path::PathBuf::into_os_string));
+    let f = |name: &str| libc.join(name).into_os_string();
+    let mut search = OsString::from("-L");
+    search.push(libc);
+    let mut head: Vec<OsString> = ["ld.lld", "-m", emulation, "--eh-frame-hdr", "--build-id"]
+        .map(OsString::from)
+        .into();
+    head.extend(["-o".into(), out.as_os_str().to_owned()]);
+    let tail = if musl {
+        head.extend(["-static".into(), f(crt1), f("crti.o"), search]);
+        vec![f("libc.a"), f("crtn.o")]
+    } else {
+        head.extend(["-pie", "--hash-style=gnu", "-dynamic-linker", loader].map(OsString::from));
+        head.extend([f(crt1), f("crti.o"), search]);
+        vec![
+            "--as-needed".into(),
+            "-lm".into(),
+            "--no-as-needed".into(),
+            "-lc".into(),
+            f("libc_nonshared.a"),
+            f("crtn.o"),
+        ]
+    };
     Ok((head, tail))
 }
 
@@ -400,13 +383,27 @@ pub fn dsymutil<S: AsRef<OsStr>>(args: &[S]) -> Result<(), String> {
 }
 
 /// An archive of `members` with a symbol table: BSD format for Apple
-/// targets, else GNU.
+/// targets, COFF for Windows, else GNU.
 pub fn write_archive(t: &Target, out: &Path, members: &[&Path]) -> Result<(), String> {
     let members = members
         .iter()
         .map(|m| cstr(m.as_os_str()))
         .collect::<Result<Vec<_>, _>>()?;
-    ffi::write_archive(&cstr(out.as_os_str())?, &members, t.is_apple())
+    let kind = if t.is_apple() {
+        1
+    } else if t.is_windows() {
+        2
+    } else {
+        0
+    };
+    ffi::write_archive(&cstr(out.as_os_str())?, &members, kind)
+}
+
+/// The import library `out` of the module definition `def` (a `.def`
+/// file's text, mingw-w64 syntax) for a Windows target.
+pub fn import_library(t: &Target, def: &str, out: &Path) -> Result<(), String> {
+    let arm64 = t.coff_machine()? == "arm64";
+    ffi::import_library(def, arm64, &cstr(out.as_os_str())?)
 }
 
 fn macos_deployment_target() -> String {
@@ -416,19 +413,32 @@ fn macos_deployment_target() -> String {
         .unwrap_or_else(|| "11.0".to_owned())
 }
 
+/// The macOS SDK as `xcrun` finds it, without running it: `SDKROOT`,
+/// else the SDK of the developer directory (`DEVELOPER_DIR`, else the
+/// one `xcode-select` chose, else the command line tools).
 fn apple_sdk() -> Result<std::path::PathBuf, String> {
     if let Some(p) = std::env::var_os("SDKROOT").filter(|p| !p.is_empty()) {
         return Ok(p.into());
     }
-    let out = std::process::Command::new("xcrun")
-        .arg("--show-sdk-path")
-        .output()
-        .map_err(|e| format!("cannot run xcrun to find the macOS SDK: {e}"))?;
-    let path = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    if !out.status.success() || path.is_empty() {
-        return Err("no macOS SDK (install the Xcode command line tools)".to_owned());
-    }
-    Ok(path.into())
+    let dev = std::env::var_os("DEVELOPER_DIR")
+        .filter(|d| !d.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::fs::read_link("/var/db/xcode_select_link").ok())
+        .unwrap_or_else(|| "/Library/Developer/CommandLineTools".into());
+    // Xcode keeps it in the platform, the command line tools at the top.
+    [
+        "Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+        "SDKs/MacOSX.sdk",
+    ]
+    .iter()
+    .map(|s| dev.join(s))
+    .find(|s| s.is_dir())
+    .ok_or_else(|| {
+        format!(
+            "no macOS SDK in {} (install the Xcode command line tools, or set SDKROOT)",
+            dev.display()
+        )
+    })
 }
 
 /// `"Version":"26.0"` of the SDK's `SDKSettings.json`.
@@ -522,7 +532,14 @@ mod ffi {
             path: *const c_char,
             members: *const *const c_char,
             n: usize,
-            darwin: c_int,
+            kind: c_int,
+            err: *mut RokBuf,
+        ) -> c_int;
+        fn rok_llvm_import_lib(
+            def: *const c_char,
+            len: usize,
+            arm64: c_int,
+            path: *const c_char,
             err: *mut RokBuf,
         ) -> c_int;
     }
@@ -652,16 +669,30 @@ mod ffi {
         if rc == 0 { Ok(log) } else { Err(log) }
     }
 
-    pub fn write_archive(out: &CString, members: &[CString], darwin: bool) -> Result<(), String> {
+    pub fn write_archive(out: &CString, members: &[CString], kind: c_int) -> Result<(), String> {
         let ptrs: Vec<*const c_char> = members.iter().map(|s| s.as_ptr()).collect();
         let mut err = RokBuf::new();
         // SAFETY: as in `lld`.
         let rc = unsafe {
-            rok_llvm_write_archive(
+            rok_llvm_write_archive(out.as_ptr(), ptrs.as_ptr(), ptrs.len(), kind, &raw mut err)
+        };
+        if rc == 0 {
+            drop(err.take());
+            Ok(())
+        } else {
+            Err(err.text())
+        }
+    }
+
+    pub fn import_library(def: &str, arm64: bool, out: &CString) -> Result<(), String> {
+        let mut err = RokBuf::new();
+        // SAFETY: as in `lld`.
+        let rc = unsafe {
+            rok_llvm_import_lib(
+                def.as_ptr().cast(),
+                def.len(),
+                c_int::from(arm64),
                 out.as_ptr(),
-                ptrs.as_ptr(),
-                ptrs.len(),
-                c_int::from(darwin),
                 &raw mut err,
             )
         };
@@ -707,7 +738,11 @@ mod ffi {
         off()
     }
 
-    pub fn write_archive(_: &CString, _: &[CString], _: bool) -> Result<(), String> {
+    pub fn write_archive(_: &CString, _: &[CString], _: i32) -> Result<(), String> {
+        off()
+    }
+
+    pub fn import_library(_: &str, _: bool, _: &CString) -> Result<(), String> {
         off()
     }
 }

@@ -1,0 +1,50 @@
+// only-os: windows
+// expect-exit: 0
+// spec: std 308-path §3.8.2 / §3.8.5
+//
+// Windows paths: `\` and `/` separate, a prefix (`C:`, `\\srv\share`)
+// comes first, `join` writes `\`, and a rooted path without a drive
+// lands on the base's drive.
+// expect-stdout:
+// true false true
+// C: | \ | a | b
+// C:\a\b
+// C:\a
+// C:\x
+// D:\y
+// C:x
+// \\srv\share | \ | f
+// \\srv\share\
+// true
+// a\b\c
+
+use rok::std::path::Path;
+
+fn show(p: Path) -> str {
+    let out = StrBuf::new();
+    let first = true;
+    for c in p.components() {
+        if !first { out.push_str(" | "); }
+        out.push_str(c.as_str());
+        first = false;
+    }
+    out.to_str()
+}
+
+fn main() {
+    let p = Path::from("C:\\a/b");
+    let r = Path::from("\\x");
+    println(f"{p.is_absolute()} {r.is_absolute()} {r.has_root()}");
+    println(show(p));
+    println((Path::from("C:\\a") / "b").as_str());
+    println((p.parent() ?? Path::new()).as_str());
+    println(Path::from("C:\\a").join(Path::from("\\x")).as_str());
+    println(Path::from("C:\\a").join(Path::from("D:\\y")).as_str());
+    println((Path::from("C:") / "x").as_str());
+    let u = Path::from("\\\\srv\\share\\f");
+    println(show(u));
+    println((u.parent() ?? Path::new()).as_str());
+    let root = Path::from("C:\\");
+    println(f"{root.parent() is none}");
+    println(Path::from("a/./b/../b/c").normalize().as_str());
+}

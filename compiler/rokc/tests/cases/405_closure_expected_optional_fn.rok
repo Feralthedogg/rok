@@ -2,6 +2,11 @@
 // expect-exit: 0
 // A closure for a slot typed `(fn(..) -> ..) | none` takes its parameter
 // types from the one function type in the sum.
+// expect-stdout:
+// abab
+// ab
+// x!
+// 12
 
 fn apply(s: str, f: (fn(str) -> str) | none = none) -> str {
     match f {
@@ -25,5 +30,9 @@ fn main() -> i32 {
         none => 0,
     };
     if r != 12 { return 4; }
+    println(apply("ab", |s| s + s));
+    println(apply("ab"));
+    println(apply("x", h));
+    println(f"{r}");
     0
 }

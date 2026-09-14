@@ -1,6 +1,9 @@
 // spec: 3.16.4
 // expect-exit: 0
 // `let-else` with a refutable variant / struct pattern.
+// expect-stdout:
+// 3 -1 45 -1
+// 7 -1 9 -1
 
 enum V {
     A(i32),
@@ -34,6 +37,8 @@ fn fields(s: S) -> i32 {
 }
 
 fn main() -> i32 {
+    println(f"{one(V::A(3))} {one(V::B)} {two(V::P(4, 5))} {two(V::A(1))}");
+    println(f"{none_bound(V::B)} {none_bound(V::A(0))} {fields(S { x: 1, y: 9 })} {fields(S { x: 2, y: 9 })}");
     if one(V::A(3)) != 3 { return 1; }
     if one(V::B) != -1 { return 2; }
     if two(V::P(4, 5)) != 45 { return 3; }

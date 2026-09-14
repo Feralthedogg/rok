@@ -1,0 +1,32 @@
+// spec: 008.06-calling-convention §8.6.12
+// expect-exit: 0
+// expect-stdout:
+// 11 12 13
+// counter 3
+// composed 14
+
+// spec 8.6.12: a closure call passes the closure's environment with the
+// arguments; a closure value works wherever a `fn` value of its type
+// does (stored, passed, returned).
+fn each(xs: List<i32>, f: fn(i32) -> i32) -> List<i32> {
+    let out: List<i32> = [];
+    for x in xs { out.push(f(x)); }
+    out
+}
+
+fn compose(f: fn(i32) -> i32, g: fn(i32) -> i32) -> fn(i32) -> i32 {
+    |x: i32| g(f(x))
+}
+
+fn main() -> i32 {
+    let base = 10;
+    let r = each([1, 2, 3], |x: i32| x + base);
+    println(f"{r[0]} {r[1]} {r[2]}");
+    let hits: List<i32> = [];
+    let note = |x: i32| { hits.push(x); x };
+    each([4, 5, 6], note);
+    println(f"counter {hits.len()}");
+    let h = compose(|x: i32| x * 2, |x: i32| x + base);
+    println(f"composed {h(2)}");
+    return 0;
+}

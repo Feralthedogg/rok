@@ -9,6 +9,7 @@ mod harness;
 pub mod native;
 pub mod rhir;
 mod toolchain;
+mod windows;
 
 use std::path::{Path, PathBuf};
 
@@ -26,7 +27,16 @@ use rokc_parser::{
 pub use cfg::CfgEnv;
 pub use rokc_codegen_mlir::{Demangled, demangle};
 pub use rokc_codegen_mlir::{MlirOutput, ReplCell, ReplFn};
+pub use rokc_hir::instance;
 pub use rokc_mir::Target;
+pub use windows::Subsystem;
+/// Whether the REPL's session host runs here: it loads Mach-O / ELF
+/// objects of arm64 / `x86_64`.
+pub const REPL_HOST: bool = cfg!(all(
+    any(target_os = "macos", target_os = "linux"),
+    any(target_arch = "aarch64", target_arch = "x86_64")
+));
+
 /// The LLVM rokc links (`None`: built without one; only the native
 /// backend's `-O0` builds work).
 pub const LLVM_VERSION: Option<&str> = if rokc_llvm::AVAILABLE {
@@ -63,6 +73,9 @@ pub struct CompilerConfig {
     /// The input is a lone file outside any package (spec 4.16.8): it is
     /// the anonymous package's `main.rok` and cannot have `mod foo;`.
     pub anonymous: bool,
+    /// Source files read from these texts instead of the disk (an
+    /// editor's unsaved buffers), by absolute path.
+    pub buffers: Vec<(PathBuf, String)>,
     /// Dependency packages (`--extern name=path`, spec 902.3): each
     /// `lib.rok` is compiled with the user package and mounted at the
     /// top-level path `name`; a `<name>.rhir` (spec 904) is a prebuilt
@@ -80,6 +93,9 @@ pub struct CompilerConfig {
     pub target: rokc_mir::Target,
     /// Lower every library body, not only the reachable ones.
     pub check_library: bool,
+    /// Lower the small prebuilt standard library functions reached, for
+    /// the optimizer to inline (`HirInput::inline_prebuilt`).
+    pub inline_prebuilt: bool,
     /// Build the bootstrap tiers as one prebuilt library, `rok`: its
     /// RHIR covers every tier, its archive their concrete code.
     pub std_lib: bool,
@@ -111,13 +127,16 @@ thread_local! {
     /// prebuilt dependencies (`rhir::Rhir::files`) at their old paths.
     static OVERLAY: std::cell::RefCell<std::collections::HashMap<PathBuf, String>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
+    /// The source files this compile read from disk.
+    static READ: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn read_source(path: &Path) -> std::io::Result<String> {
-    match OVERLAY.with(|o| o.borrow().get(path).cloned()) {
-        Some(text) => Ok(text),
-        None => std::fs::read_to_string(path),
+    if let Some(text) = OVERLAY.with(|o| o.borrow().get(path).cloned()) {
+        return Ok(text);
     }
+    READ.with(|r| r.borrow_mut().push(path.to_path_buf()));
+    std::fs::read_to_string(path)
 }
 
 fn source_exists(path: &Path) -> bool {
@@ -142,7 +161,8 @@ fn load_prebuilt(
 ) -> (CompilerConfig, Vec<Prebuilt>) {
     let mut config = config.clone();
     let mut out: Vec<Prebuilt> = Vec::new();
-    OVERLAY.with(|o| o.borrow_mut().clear());
+    OVERLAY.with(|o| *o.borrow_mut() = config.buffers.iter().cloned().collect());
+    READ.with(|r| r.borrow_mut().clear());
     if let Some(r) = config
         .std_prebuilt
         .as_deref()
@@ -204,7 +224,7 @@ fn load_prebuilt(
 /// its files overlaid.
 fn load_std(path: &Path, config: &CompilerConfig) -> Option<Prebuilt> {
     let r = rhir::Rhir::load(path).ok().filter(|r| r.name == STD_PKG)?;
-    let complete = config.bootstrap_files.iter().all(|b| {
+    let complete = bootstrap_tiers(&config.bootstrap_files).iter().all(|b| {
         b.strip_prefix(&r.src_dir).is_ok_and(|rel| {
             let rel = rel.to_string_lossy().replace('\\', "/");
             r.files.iter().any(|(f, _)| *f == rel)
@@ -227,11 +247,29 @@ fn load_std(path: &Path, config: &CompilerConfig) -> Option<Prebuilt> {
 /// prefix and root file.
 type LibRoot = (Vec<String>, PathBuf);
 
+/// The bootstrap roots `files` names, with `bare/lib.rok` beside a
+/// `core/lib.rok` added when missing: core is built on bare (stdlib 0.1).
+#[must_use]
+pub fn bootstrap_tiers(files: &[PathBuf]) -> Vec<PathBuf> {
+    let tier = |f: &PathBuf| f.parent().and_then(Path::file_name).map(ToOwned::to_owned);
+    let mut out = files.to_vec();
+    if !files.iter().any(|f| tier(f).is_some_and(|t| t == "bare")) {
+        out.extend(
+            files
+                .iter()
+                .filter(|f| tier(f).is_some_and(|t| t == "core"))
+                .filter_map(|c| Some(c.parent()?.parent()?.join("bare/lib.rok")))
+                .filter(|b| b.is_file())
+                .take(1),
+        );
+    }
+    out
+}
+
 /// Each bootstrap file as `rok::<tier>` (`library/core/lib.rok` →
 /// `rok::core`), then each `--extern` dependency under its own name.
 fn lib_roots(config: &CompilerConfig) -> Vec<LibRoot> {
-    let mut out: Vec<LibRoot> = config
-        .bootstrap_files
+    let mut out: Vec<LibRoot> = bootstrap_tiers(&config.bootstrap_files)
         .iter()
         .map(|root| {
             let tier = root
@@ -337,6 +375,9 @@ pub struct CompiledProject {
     pub tests: Vec<String>,
     /// Parsed files, when `CompilerConfig::keep_ast`.
     pub sources: Vec<SourceFile>,
+    /// The source files read from disk (`#[path]` ones outside the
+    /// package too).
+    pub files: Vec<PathBuf>,
 }
 
 pub fn compile_file(
@@ -533,9 +574,16 @@ fn compile_unit(
     // gathered by the same pre-pass, so its extension tokens lex.
     metas.idents = Some(Vec::new());
     let mut user = Vec::new();
-    prepass_tree(path, Some(source), path.parent(), &mut metas, &mut user);
-    for prog in user {
-        let (sub, mut d) = collect_prec_table(&prog);
+    prepass_tree(
+        path,
+        Some(source),
+        path.parent(),
+        &[],
+        &mut metas,
+        &mut user,
+    );
+    for (module, prog) in user {
+        let (sub, mut d) = collect_prec_table(&prog, &module);
         diags.append(&mut d);
         diags.extend(sub.entries().cloned().filter_map(|e| prec.merge(e)));
     }
@@ -596,11 +644,12 @@ fn compile_unit(
     });
     let is_lib = !config.anonymous && path.file_name().is_some_and(|n| n == "lib.rok");
     let mut tests = Vec::new();
+    let mut implicit_main = false;
     if config.test || config.bench {
         // Top-level statements are the package's own entry: dropped.
         tests = harness::install(&mut all_items, &ext, &mut diags, config.bench);
     } else if !is_lib {
-        entry::resolve_entry(top_stmts, &mut all_items, &mut diags);
+        implicit_main = entry::resolve_entry(top_stmts, &mut all_items, &mut diags);
     } else if !top_stmts.is_empty() {
         diags.push(entry::stmts_outside_entry(path));
     }
@@ -660,6 +709,8 @@ fn compile_unit(
         lib: lib.map(str::to_owned),
         prebuilt: prebuilt.iter().map(|p| p.rhir.name.clone()).collect(),
         check_library: config.check_library,
+        implicit_main,
+        inline_prebuilt: config.inline_prebuilt,
     };
     let program = rokc_ast::Program {
         attrs: Vec::new(),
@@ -751,6 +802,7 @@ fn compile_unit(
         warnings: diags.into_iter().filter(|d| !d.is_error()).collect(),
         tests,
         sources,
+        files: READ.with(std::cell::RefCell::take),
     })
 }
 
@@ -822,31 +874,30 @@ fn build_prec_table(
     metas: &mut PrePass,
 ) -> PrecTable {
     let mut table = PrecTable::new();
-    for (_, root) in roots {
+    for (pkg, root) in roots {
         let mut programs = Vec::new();
-        prepass_tree(root, None, root.parent(), metas, &mut programs);
-        for prog in programs {
-            let (sub_table, mut collect_diags) = collect_prec_table(&prog);
+        prepass_tree(root, None, root.parent(), pkg, metas, &mut programs);
+        for (module, prog) in programs {
+            let (sub_table, mut collect_diags) = collect_prec_table(&prog, &module);
             diags.append(&mut collect_diags);
-            diags.extend(sub_table.entries().cloned().filter_map(|mut e| {
-                e.from_lib = true;
-                table.merge(e)
-            }));
+            diags.extend(sub_table.entries().cloned().filter_map(|e| table.merge(e)));
         }
     }
     table
 }
 
 /// The pre-pass over a package's module tree from `path` (its text
-/// `source`, else the file's): each module parsed without extension
-/// operators (they are what it finds), submodules first, gathering meta
-/// blocks, keywords and literals. Errors are left to the real parse.
+/// `source`, else the file's), module `module`: each module parsed
+/// without extension operators (they are what it finds), submodules
+/// first, gathering meta blocks, keywords and literals. Errors are left
+/// to the real parse.
 fn prepass_tree(
     path: &Path,
     source: Option<&str>,
     sub_dir: Option<&Path>,
+    module: &[String],
     metas: &mut PrePass,
-    out: &mut Vec<rokc_ast::Program>,
+    out: &mut Vec<(Vec<String>, rokc_ast::Program)>,
 ) {
     let Some(source) = source.map(str::to_owned).or_else(|| read_source(path).ok()) else {
         return;
@@ -854,26 +905,29 @@ fn prepass_tree(
     let file = path.display().to_string();
     let tokens = prepass_tokens(&source, &file, metas);
     let (program, _) = parse_program(&tokens, file);
-    prepass_mods(&program.items, sub_dir, metas, out);
-    out.push(program);
+    prepass_mods(&program.items, sub_dir, module, metas, out);
+    out.push((module.to_vec(), program));
 }
 
 fn prepass_mods(
     items: &[rokc_ast::Item],
     sub_dir: Option<&Path>,
+    module: &[String],
     metas: &mut PrePass,
-    out: &mut Vec<rokc_ast::Program>,
+    out: &mut Vec<(Vec<String>, rokc_ast::Program)>,
 ) {
     for item in items {
         let rokc_ast::Item::Mod(m) = item else {
             continue;
         };
         let before = metas.metas.len();
+        let mut sub = module.to_vec();
+        sub.push(m.name.clone());
         match &m.items {
-            Some(inner) => prepass_mods(inner, sub_dir, metas, out),
+            Some(inner) => prepass_mods(inner, sub_dir, &sub, metas, out),
             None => {
                 if let Ok((body, next)) = mod_file(m, sub_dir) {
-                    prepass_tree(&body, None, next.as_deref(), metas, out);
+                    prepass_tree(&body, None, next.as_deref(), &sub, metas, out);
                 }
             }
         }
@@ -1474,16 +1528,7 @@ fn rename_with_prefix(item: rokc_ast::Item, module_path: &[String]) -> rokc_ast:
                     rokc_ast::ImplItem::AssocType { .. } => {}
                 }
             }
-            // An empty impl (`unsafe impl Send for S {}`) has no method
-            // to carry the module: say it with a marker attribute.
-            i.attrs.push(rokc_ast::Attribute {
-                path: vec![rokc_hir::IMPL_MODULE_ATTR.to_owned()],
-                body: rokc_ast::AttrBody::Args(vec![rokc_ast::AttrArg::Lit(
-                    rokc_ast::Literal::Str(prefix),
-                )]),
-                inner: false,
-                span: i.span,
-            });
+            i.module = prefix;
             rokc_ast::Item::Impl(i)
         }
         rokc_ast::Item::Use(_) // already extracted into `uses`

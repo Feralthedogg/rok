@@ -32,17 +32,17 @@
 //! the marker to let go through [`FINISH`]). The marker never holds the
 //! mark lock while it waits for the world lock.
 
-use core::cell::UnsafeCell;
+use core::ptr::null_mut;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
-use core::{ptr, ptr::null_mut};
 
 use super::{
     FLAG_LARGE, FLAG_SATB, FLAG_SCANNED, FLAG_UNLOGGED, LOG_FULL, LogChunk, MARKER_CPU_NS,
-    MIN_HEAP, Pause, build_index, clock_ns, drain, for_each_logged, for_each_ref, free_logs,
-    header, heap, load_word, log_word, mark, mark_roots, prefix, push, push_chunks,
-    release_free_blocks, retire_log, retire_to, select_candidates, sweep_blocks, sweep_los, world,
+    MIN_HEAP, Pause, build_index, drain, for_each_logged, for_each_ref, free_logs, header, heap,
+    load_word, log_word, mark, mark_roots, prefix, push, push_chunks, release_free_blocks,
+    retire_log, retire_to, select_candidates, sweep_blocks, sweep_los, world,
 };
 use rokr_common::object_header::{FLAG_CARDED, FLAG_MARK};
+use rokr_common::sys;
 
 /// A concurrent mark runs: the barrier slow path snapshots.
 pub static MARKING: AtomicBool = AtomicBool::new(false);
@@ -56,30 +56,18 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 static CYCLE: AtomicU64 = AtomicU64::new(0);
 static SPAWNED: AtomicBool = AtomicBool::new(false);
 
-struct Lock {
-    mutex: UnsafeCell<libc::pthread_mutex_t>,
-    cond: UnsafeCell<libc::pthread_cond_t>,
-}
-
-// SAFETY: pthread objects are designed for shared use.
-unsafe impl Sync for Lock {}
-
 /// The mark lock (guards [`super::Mark`]) and its condvar (the marker
 /// waits on it for a mark).
-static MARK_LOCK: Lock = Lock {
-    mutex: UnsafeCell::new(libc::PTHREAD_MUTEX_INITIALIZER),
-    cond: UnsafeCell::new(libc::PTHREAD_COND_INITIALIZER),
-};
+static MARK_LOCK: sys::Lock = sys::Lock::new();
+static MARK_COND: sys::Cond = sys::Cond::new();
 
 fn raw_lock() {
-    // SAFETY: statically initialized mutex.
-    unsafe { libc::pthread_mutex_lock(MARK_LOCK.mutex.get()) };
+    MARK_LOCK.lock();
 }
 
 /// Release the mark lock.
 pub fn unlock_mark() {
-    // SAFETY: the caller holds it.
-    unsafe { libc::pthread_mutex_unlock(MARK_LOCK.mutex.get()) };
+    MARK_LOCK.unlock();
 }
 
 /// Take the mark lock from the marker (a pause).
@@ -90,13 +78,11 @@ pub fn lock_mark() {
 }
 
 fn wait() {
-    // SAFETY: the caller holds the mutex.
-    unsafe { libc::pthread_cond_wait(MARK_LOCK.cond.get(), MARK_LOCK.mutex.get()) };
+    MARK_COND.wait(&MARK_LOCK);
 }
 
 fn broadcast() {
-    // SAFETY: statically initialized condvar.
-    unsafe { libc::pthread_cond_broadcast(MARK_LOCK.cond.get()) };
+    MARK_COND.broadcast();
 }
 
 /// Retire a thread's SATB chunk.
@@ -147,27 +133,22 @@ pub fn start() {
 }
 
 fn spawn_marker() {
-    // SAFETY: plain pthread calls; the thread runs for the rest of the
-    // process.
-    unsafe {
-        let mut t: libc::pthread_t = core::mem::zeroed();
-        if libc::pthread_create(&mut t, ptr::null(), marker, null_mut()) != 0 {
-            rokr_common::fatal(b"rok runtime: cannot start the GC marker thread");
-        }
-        libc::pthread_detach(t);
+    // The thread runs for the rest of the process.
+    if !sys::spawn_detached(marker) {
+        rokr_common::fatal(b"rok runtime: cannot start the GC marker thread");
     }
 }
 
 /// The marker thread: drains the mark stack and the retired SATB chunks
 /// while mutators run, then stops the world to finish.
-extern "C" fn marker(_: *mut libc::c_void) -> *mut libc::c_void {
+extern "C" fn marker() {
     raw_lock();
     loop {
         while !ACTIVE.load(Ordering::Relaxed) {
             wait();
         }
         let cycle = CYCLE.load(Ordering::Relaxed);
-        let c0 = clock_ns(libc::CLOCK_THREAD_CPUTIME_ID);
+        let c0 = sys::thread_cpu_ns() as u64;
         let done = loop {
             drain(256);
             if FINISH.load(Ordering::Relaxed) {
@@ -177,10 +158,7 @@ extern "C" fn marker(_: *mut libc::c_void) -> *mut libc::c_void {
                 break true;
             }
         };
-        MARKER_CPU_NS.fetch_add(
-            clock_ns(libc::CLOCK_THREAD_CPUTIME_ID) - c0,
-            Ordering::Relaxed,
-        );
+        MARKER_CPU_NS.fetch_add(sys::thread_cpu_ns() as u64 - c0, Ordering::Relaxed);
         if done {
             unlock_mark();
             world::lock();

@@ -353,25 +353,7 @@ pub(super) fn item_module(item: &Item) -> String {
 }
 
 pub(super) fn impl_module(i: &rokc_ast::ImplDef) -> String {
-    let marked = i
-        .attrs
-        .iter()
-        .filter(|a| a.path == [crate::IMPL_MODULE_ATTR])
-        .find_map(|a| match &a.body {
-            rokc_ast::AttrBody::Args(args) => args.iter().find_map(|x| match x {
-                rokc_ast::AttrArg::Lit(rokc_ast::Literal::Str(s)) => Some(s.clone()),
-                _ => None,
-            }),
-            _ => None,
-        });
-    marked
-        .or_else(|| {
-            i.items.iter().find_map(|it| match it {
-                AstImplItem::Method(m) => Some(module_of(&m.name)),
-                _ => None,
-            })
-        })
-        .unwrap_or_default()
+    i.module.clone()
 }
 
 /// Leaf of a driver-qualified name (`a::b::f` → `f`).
@@ -483,21 +465,6 @@ pub(super) fn resolve_ty_with_structs(
 ) -> HirTy {
     let rec = |t: &rokc_ast::Ty| resolve_ty_with_structs(t, defs, params, sc);
     match &ty.kind {
-        // Untyped `throws` (spec 4.14) = `throws (any Error)`.
-        AstTyKind::Path(p)
-            if p.segments.len() == 1 && p.segments[0].name == rokc_ast::UNTYPED_THROWS_MARK =>
-        {
-            rec(&rokc_ast::Ty {
-                kind: AstTyKind::AnyTrait(vec![rokc_ast::Path {
-                    segments: vec![rokc_ast::PathSegment {
-                        name: "Error".to_owned(),
-                        generics: Vec::new(),
-                    }],
-                    span: ty.span,
-                }]),
-                span: ty.span,
-            })
-        }
         AstTyKind::Path(p) => {
             if let ([seg], Some(params)) = (p.segments.as_slice(), params) {
                 if let Some(t) = params.get(&seg.name).filter(|_| seg.generics.is_empty()) {
@@ -583,11 +550,16 @@ pub(super) fn resolve_ty_with_structs(
                         ps.get(name).and_then(HirTy::as_const).map(|c| c.0)
                     })
                 })
-                .or_else(|| super::collect::const_expr_value(len, &sc.names.consts, sc.module))
+                .or_else(|| sc.names.const_int(len, sc.module))
                 .and_then(|n| u32::try_from(n).ok());
             let Some(n) = n else {
+                // Located at the type: field types resolve outside any item pass.
+                let old = (!ty.span.is_dummy()).then(|| rokc_diagnostic::set_current_span(ty.span));
                 sc.names
                     .error("array length must be a compile-time integer (spec 2.11.5)".to_owned());
+                if let Some(old) = old {
+                    rokc_diagnostic::set_current_span(old);
+                }
                 return HirTy::Any;
             };
             HirTy::Array(Box::new(rec(elem)), n)

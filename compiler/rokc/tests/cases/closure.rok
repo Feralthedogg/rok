@@ -1,4 +1,6 @@
 // expect-exit: 12
+// expect-stdout:
+// 6 6
 
 fn apply(f: fn(i32) -> i32, x: i32) -> i32 {
     return f(x);
@@ -7,6 +9,7 @@ fn apply(f: fn(i32) -> i32, x: i32) -> i32 {
 fn main() -> i32 {
     let inc = |x: i32| -> i32 { x + 1i32 };
     let double = |x: i32| -> i32 { x * 2i32 };
+    println(f"{apply(inc, 5i32)} {apply(double, 3i32)}");
     return apply(inc, 5i32) + apply(double, 3i32);
 }
 

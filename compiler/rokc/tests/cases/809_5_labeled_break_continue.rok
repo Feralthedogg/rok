@@ -1,0 +1,36 @@
+// spec: 008.09-lowering-control §8.9.4 / §8.9.5
+// expect-exit: 0
+// expect-stdout:
+// pairs: 1,0 2,0
+// found at 3
+// while ran 4
+
+// spec 8.9.4 / 8.9.5: `break` / `continue` jump to the exit / header of
+// the loop they name (the innermost one unlabeled); `loop` yields the
+// value its `break` carries.
+fn main() -> i32 {
+    let out = "";
+    'rows: for i in 0..4 {
+        for j in 0..3 {
+            if j == i { continue 'rows; }
+            if i == 3 { break 'rows; }
+            if i == 2 && j == 1 { break; }
+            out = out + f" {i},{j}";
+        }
+    }
+    println(f"pairs:{out}");
+    let xs = [5, 8, 2, 7, 1];
+    let k = 0;
+    let at = loop {
+        if xs[k as usize] == 7 { break k; }
+        k += 1;
+    };
+    println(f"found at {at}");
+    let n = 0;
+    while true {
+        n += 1;
+        if n == 4 { break; }
+    }
+    println(f"while ran {n}");
+    return 0;
+}

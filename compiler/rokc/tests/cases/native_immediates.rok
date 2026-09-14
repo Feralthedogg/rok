@@ -1,0 +1,2537 @@
+// expect-exit: 0
+// expect-stdout:
+// ints ok
+// floats ok
+// loops ok
+
+// The native backend's immediate operands (add / sub / logical /
+// shift / multiply / compare forms, and constants that do not encode)
+// agree with the same operations on a value from a call, in every
+// integer width; comparisons feeding a branch take the flags; values
+// stay in registers across straight-line code and through loops.
+// Generated: each check is `(x op c) != (x op id(c))`.
+
+fn id<T>(x: T) -> T {
+    return x;
+}
+
+fn check_i8() -> i64 {
+    let bad: i64 = 0;
+    let x0 = id(i8::MIN);
+    let x1 = id(127i8);
+    let x2 = id(43i8);
+    let x3 = id((-5i8));
+    if (x0 & i8::MIN) != (x0 & id(i8::MIN)) { bad += 1; }
+    if (x0 | i8::MIN) != (x0 | id(i8::MIN)) { bad += 1; }
+    if (x0 ^ i8::MIN) != (x0 ^ id(i8::MIN)) { bad += 1; }
+    if x0 == i8::MIN { if !(x0 == id(i8::MIN)) { bad += 1; } } else if x0 == id(i8::MIN) { bad += 1; }
+    if x0 != i8::MIN { if !(x0 != id(i8::MIN)) { bad += 1; } } else if x0 != id(i8::MIN) { bad += 1; }
+    if x0 < i8::MIN { if !(x0 < id(i8::MIN)) { bad += 1; } } else if x0 < id(i8::MIN) { bad += 1; }
+    if x0 <= i8::MIN { if !(x0 <= id(i8::MIN)) { bad += 1; } } else if x0 <= id(i8::MIN) { bad += 1; }
+    if x0 > i8::MIN { if !(x0 > id(i8::MIN)) { bad += 1; } } else if x0 > id(i8::MIN) { bad += 1; }
+    if x0 >= i8::MIN { if !(x0 >= id(i8::MIN)) { bad += 1; } } else if x0 >= id(i8::MIN) { bad += 1; }
+    if (x0 - i8::MIN) != (x0 - id(i8::MIN)) { bad += 1; }
+    if (x0 / i8::MIN) != (x0 / id(i8::MIN)) { bad += 1; }
+    if (x0 % i8::MIN) != (x0 % id(i8::MIN)) { bad += 1; }
+    if (x0 & (-1i8)) != (x0 & id((-1i8))) { bad += 1; }
+    if (x0 | (-1i8)) != (x0 | id((-1i8))) { bad += 1; }
+    if (x0 ^ (-1i8)) != (x0 ^ id((-1i8))) { bad += 1; }
+    if x0 == (-1i8) { if !(x0 == id((-1i8))) { bad += 1; } } else if x0 == id((-1i8)) { bad += 1; }
+    if x0 != (-1i8) { if !(x0 != id((-1i8))) { bad += 1; } } else if x0 != id((-1i8)) { bad += 1; }
+    if x0 < (-1i8) { if !(x0 < id((-1i8))) { bad += 1; } } else if x0 < id((-1i8)) { bad += 1; }
+    if x0 <= (-1i8) { if !(x0 <= id((-1i8))) { bad += 1; } } else if x0 <= id((-1i8)) { bad += 1; }
+    if x0 > (-1i8) { if !(x0 > id((-1i8))) { bad += 1; } } else if x0 > id((-1i8)) { bad += 1; }
+    if x0 >= (-1i8) { if !(x0 >= id((-1i8))) { bad += 1; } } else if x0 >= id((-1i8)) { bad += 1; }
+    if (x0 - (-1i8)) != (x0 - id((-1i8))) { bad += 1; }
+    if (x0 & 7i8) != (x0 & id(7i8)) { bad += 1; }
+    if (x0 | 7i8) != (x0 | id(7i8)) { bad += 1; }
+    if (x0 ^ 7i8) != (x0 ^ id(7i8)) { bad += 1; }
+    if x0 == 7i8 { if !(x0 == id(7i8)) { bad += 1; } } else if x0 == id(7i8) { bad += 1; }
+    if x0 != 7i8 { if !(x0 != id(7i8)) { bad += 1; } } else if x0 != id(7i8) { bad += 1; }
+    if x0 < 7i8 { if !(x0 < id(7i8)) { bad += 1; } } else if x0 < id(7i8) { bad += 1; }
+    if x0 <= 7i8 { if !(x0 <= id(7i8)) { bad += 1; } } else if x0 <= id(7i8) { bad += 1; }
+    if x0 > 7i8 { if !(x0 > id(7i8)) { bad += 1; } } else if x0 > id(7i8) { bad += 1; }
+    if x0 >= 7i8 { if !(x0 >= id(7i8)) { bad += 1; } } else if x0 >= id(7i8) { bad += 1; }
+    if (x0 + 7i8) != (x0 + id(7i8)) { bad += 1; }
+    if (x0 / 7i8) != (x0 / id(7i8)) { bad += 1; }
+    if (x0 % 7i8) != (x0 % id(7i8)) { bad += 1; }
+    if (x0 & 64i8) != (x0 & id(64i8)) { bad += 1; }
+    if (x0 | 64i8) != (x0 | id(64i8)) { bad += 1; }
+    if (x0 ^ 64i8) != (x0 ^ id(64i8)) { bad += 1; }
+    if x0 == 64i8 { if !(x0 == id(64i8)) { bad += 1; } } else if x0 == id(64i8) { bad += 1; }
+    if x0 != 64i8 { if !(x0 != id(64i8)) { bad += 1; } } else if x0 != id(64i8) { bad += 1; }
+    if x0 < 64i8 { if !(x0 < id(64i8)) { bad += 1; } } else if x0 < id(64i8) { bad += 1; }
+    if x0 <= 64i8 { if !(x0 <= id(64i8)) { bad += 1; } } else if x0 <= id(64i8) { bad += 1; }
+    if x0 > 64i8 { if !(x0 > id(64i8)) { bad += 1; } } else if x0 > id(64i8) { bad += 1; }
+    if x0 >= 64i8 { if !(x0 >= id(64i8)) { bad += 1; } } else if x0 >= id(64i8) { bad += 1; }
+    if (x0 + 64i8) != (x0 + id(64i8)) { bad += 1; }
+    if (x0 / 64i8) != (x0 / id(64i8)) { bad += 1; }
+    if (x0 % 64i8) != (x0 % id(64i8)) { bad += 1; }
+    if (x0 & 127i8) != (x0 & id(127i8)) { bad += 1; }
+    if (x0 | 127i8) != (x0 | id(127i8)) { bad += 1; }
+    if (x0 ^ 127i8) != (x0 ^ id(127i8)) { bad += 1; }
+    if x0 == 127i8 { if !(x0 == id(127i8)) { bad += 1; } } else if x0 == id(127i8) { bad += 1; }
+    if x0 != 127i8 { if !(x0 != id(127i8)) { bad += 1; } } else if x0 != id(127i8) { bad += 1; }
+    if x0 < 127i8 { if !(x0 < id(127i8)) { bad += 1; } } else if x0 < id(127i8) { bad += 1; }
+    if x0 <= 127i8 { if !(x0 <= id(127i8)) { bad += 1; } } else if x0 <= id(127i8) { bad += 1; }
+    if x0 > 127i8 { if !(x0 > id(127i8)) { bad += 1; } } else if x0 > id(127i8) { bad += 1; }
+    if x0 >= 127i8 { if !(x0 >= id(127i8)) { bad += 1; } } else if x0 >= id(127i8) { bad += 1; }
+    if (x0 + 127i8) != (x0 + id(127i8)) { bad += 1; }
+    if (x0 / 127i8) != (x0 / id(127i8)) { bad += 1; }
+    if (x0 % 127i8) != (x0 % id(127i8)) { bad += 1; }
+    if (x0 >> 0i8) != (x0 >> id(0i8)) { bad += 1; }
+    if (x0 & 127i8) << 0i8 != (x0 & 127i8) << id(0i8) { bad += 1; }
+    if (x0 >> 1i8) != (x0 >> id(1i8)) { bad += 1; }
+    if (x0 & 63i8) << 1i8 != (x0 & 63i8) << id(1i8) { bad += 1; }
+    if (x0 >> 3i8) != (x0 >> id(3i8)) { bad += 1; }
+    if (x0 & 15i8) << 3i8 != (x0 & 15i8) << id(3i8) { bad += 1; }
+    if (x0 >> 4i8) != (x0 >> id(4i8)) { bad += 1; }
+    if (x0 & 7i8) << 4i8 != (x0 & 7i8) << id(4i8) { bad += 1; }
+    if (x0 >> 7i8) != (x0 >> id(7i8)) { bad += 1; }
+    if (x0 & 0i8) << 7i8 != (x0 & 0i8) << id(7i8) { bad += 1; }
+    if (x1 & i8::MIN) != (x1 & id(i8::MIN)) { bad += 1; }
+    if (x1 | i8::MIN) != (x1 | id(i8::MIN)) { bad += 1; }
+    if (x1 ^ i8::MIN) != (x1 ^ id(i8::MIN)) { bad += 1; }
+    if x1 == i8::MIN { if !(x1 == id(i8::MIN)) { bad += 1; } } else if x1 == id(i8::MIN) { bad += 1; }
+    if x1 != i8::MIN { if !(x1 != id(i8::MIN)) { bad += 1; } } else if x1 != id(i8::MIN) { bad += 1; }
+    if x1 < i8::MIN { if !(x1 < id(i8::MIN)) { bad += 1; } } else if x1 < id(i8::MIN) { bad += 1; }
+    if x1 <= i8::MIN { if !(x1 <= id(i8::MIN)) { bad += 1; } } else if x1 <= id(i8::MIN) { bad += 1; }
+    if x1 > i8::MIN { if !(x1 > id(i8::MIN)) { bad += 1; } } else if x1 > id(i8::MIN) { bad += 1; }
+    if x1 >= i8::MIN { if !(x1 >= id(i8::MIN)) { bad += 1; } } else if x1 >= id(i8::MIN) { bad += 1; }
+    if (x1 + i8::MIN) != (x1 + id(i8::MIN)) { bad += 1; }
+    if (x1 / i8::MIN) != (x1 / id(i8::MIN)) { bad += 1; }
+    if (x1 % i8::MIN) != (x1 % id(i8::MIN)) { bad += 1; }
+    if (x1 & (-1i8)) != (x1 & id((-1i8))) { bad += 1; }
+    if (x1 | (-1i8)) != (x1 | id((-1i8))) { bad += 1; }
+    if (x1 ^ (-1i8)) != (x1 ^ id((-1i8))) { bad += 1; }
+    if x1 == (-1i8) { if !(x1 == id((-1i8))) { bad += 1; } } else if x1 == id((-1i8)) { bad += 1; }
+    if x1 != (-1i8) { if !(x1 != id((-1i8))) { bad += 1; } } else if x1 != id((-1i8)) { bad += 1; }
+    if x1 < (-1i8) { if !(x1 < id((-1i8))) { bad += 1; } } else if x1 < id((-1i8)) { bad += 1; }
+    if x1 <= (-1i8) { if !(x1 <= id((-1i8))) { bad += 1; } } else if x1 <= id((-1i8)) { bad += 1; }
+    if x1 > (-1i8) { if !(x1 > id((-1i8))) { bad += 1; } } else if x1 > id((-1i8)) { bad += 1; }
+    if x1 >= (-1i8) { if !(x1 >= id((-1i8))) { bad += 1; } } else if x1 >= id((-1i8)) { bad += 1; }
+    if (x1 + (-1i8)) != (x1 + id((-1i8))) { bad += 1; }
+    if (x1 * (-1i8)) != (x1 * id((-1i8))) { bad += 1; }
+    if (x1 / (-1i8)) != (x1 / id((-1i8))) { bad += 1; }
+    if (x1 % (-1i8)) != (x1 % id((-1i8))) { bad += 1; }
+    if (x1 & 7i8) != (x1 & id(7i8)) { bad += 1; }
+    if (x1 | 7i8) != (x1 | id(7i8)) { bad += 1; }
+    if (x1 ^ 7i8) != (x1 ^ id(7i8)) { bad += 1; }
+    if x1 == 7i8 { if !(x1 == id(7i8)) { bad += 1; } } else if x1 == id(7i8) { bad += 1; }
+    if x1 != 7i8 { if !(x1 != id(7i8)) { bad += 1; } } else if x1 != id(7i8) { bad += 1; }
+    if x1 < 7i8 { if !(x1 < id(7i8)) { bad += 1; } } else if x1 < id(7i8) { bad += 1; }
+    if x1 <= 7i8 { if !(x1 <= id(7i8)) { bad += 1; } } else if x1 <= id(7i8) { bad += 1; }
+    if x1 > 7i8 { if !(x1 > id(7i8)) { bad += 1; } } else if x1 > id(7i8) { bad += 1; }
+    if x1 >= 7i8 { if !(x1 >= id(7i8)) { bad += 1; } } else if x1 >= id(7i8) { bad += 1; }
+    if (x1 - 7i8) != (x1 - id(7i8)) { bad += 1; }
+    if (x1 / 7i8) != (x1 / id(7i8)) { bad += 1; }
+    if (x1 % 7i8) != (x1 % id(7i8)) { bad += 1; }
+    if (x1 & 64i8) != (x1 & id(64i8)) { bad += 1; }
+    if (x1 | 64i8) != (x1 | id(64i8)) { bad += 1; }
+    if (x1 ^ 64i8) != (x1 ^ id(64i8)) { bad += 1; }
+    if x1 == 64i8 { if !(x1 == id(64i8)) { bad += 1; } } else if x1 == id(64i8) { bad += 1; }
+    if x1 != 64i8 { if !(x1 != id(64i8)) { bad += 1; } } else if x1 != id(64i8) { bad += 1; }
+    if x1 < 64i8 { if !(x1 < id(64i8)) { bad += 1; } } else if x1 < id(64i8) { bad += 1; }
+    if x1 <= 64i8 { if !(x1 <= id(64i8)) { bad += 1; } } else if x1 <= id(64i8) { bad += 1; }
+    if x1 > 64i8 { if !(x1 > id(64i8)) { bad += 1; } } else if x1 > id(64i8) { bad += 1; }
+    if x1 >= 64i8 { if !(x1 >= id(64i8)) { bad += 1; } } else if x1 >= id(64i8) { bad += 1; }
+    if (x1 - 64i8) != (x1 - id(64i8)) { bad += 1; }
+    if (x1 / 64i8) != (x1 / id(64i8)) { bad += 1; }
+    if (x1 % 64i8) != (x1 % id(64i8)) { bad += 1; }
+    if (x1 & 127i8) != (x1 & id(127i8)) { bad += 1; }
+    if (x1 | 127i8) != (x1 | id(127i8)) { bad += 1; }
+    if (x1 ^ 127i8) != (x1 ^ id(127i8)) { bad += 1; }
+    if x1 == 127i8 { if !(x1 == id(127i8)) { bad += 1; } } else if x1 == id(127i8) { bad += 1; }
+    if x1 != 127i8 { if !(x1 != id(127i8)) { bad += 1; } } else if x1 != id(127i8) { bad += 1; }
+    if x1 < 127i8 { if !(x1 < id(127i8)) { bad += 1; } } else if x1 < id(127i8) { bad += 1; }
+    if x1 <= 127i8 { if !(x1 <= id(127i8)) { bad += 1; } } else if x1 <= id(127i8) { bad += 1; }
+    if x1 > 127i8 { if !(x1 > id(127i8)) { bad += 1; } } else if x1 > id(127i8) { bad += 1; }
+    if x1 >= 127i8 { if !(x1 >= id(127i8)) { bad += 1; } } else if x1 >= id(127i8) { bad += 1; }
+    if (x1 - 127i8) != (x1 - id(127i8)) { bad += 1; }
+    if (x1 / 127i8) != (x1 / id(127i8)) { bad += 1; }
+    if (x1 % 127i8) != (x1 % id(127i8)) { bad += 1; }
+    if (x1 >> 0i8) != (x1 >> id(0i8)) { bad += 1; }
+    if (x1 & 127i8) << 0i8 != (x1 & 127i8) << id(0i8) { bad += 1; }
+    if (x1 >> 1i8) != (x1 >> id(1i8)) { bad += 1; }
+    if (x1 & 63i8) << 1i8 != (x1 & 63i8) << id(1i8) { bad += 1; }
+    if (x1 >> 3i8) != (x1 >> id(3i8)) { bad += 1; }
+    if (x1 & 15i8) << 3i8 != (x1 & 15i8) << id(3i8) { bad += 1; }
+    if (x1 >> 4i8) != (x1 >> id(4i8)) { bad += 1; }
+    if (x1 & 7i8) << 4i8 != (x1 & 7i8) << id(4i8) { bad += 1; }
+    if (x1 >> 7i8) != (x1 >> id(7i8)) { bad += 1; }
+    if (x1 & 0i8) << 7i8 != (x1 & 0i8) << id(7i8) { bad += 1; }
+    if (x2 & i8::MIN) != (x2 & id(i8::MIN)) { bad += 1; }
+    if (x2 | i8::MIN) != (x2 | id(i8::MIN)) { bad += 1; }
+    if (x2 ^ i8::MIN) != (x2 ^ id(i8::MIN)) { bad += 1; }
+    if x2 == i8::MIN { if !(x2 == id(i8::MIN)) { bad += 1; } } else if x2 == id(i8::MIN) { bad += 1; }
+    if x2 != i8::MIN { if !(x2 != id(i8::MIN)) { bad += 1; } } else if x2 != id(i8::MIN) { bad += 1; }
+    if x2 < i8::MIN { if !(x2 < id(i8::MIN)) { bad += 1; } } else if x2 < id(i8::MIN) { bad += 1; }
+    if x2 <= i8::MIN { if !(x2 <= id(i8::MIN)) { bad += 1; } } else if x2 <= id(i8::MIN) { bad += 1; }
+    if x2 > i8::MIN { if !(x2 > id(i8::MIN)) { bad += 1; } } else if x2 > id(i8::MIN) { bad += 1; }
+    if x2 >= i8::MIN { if !(x2 >= id(i8::MIN)) { bad += 1; } } else if x2 >= id(i8::MIN) { bad += 1; }
+    if (x2 + i8::MIN) != (x2 + id(i8::MIN)) { bad += 1; }
+    if (x2 / i8::MIN) != (x2 / id(i8::MIN)) { bad += 1; }
+    if (x2 % i8::MIN) != (x2 % id(i8::MIN)) { bad += 1; }
+    if (x2 & (-1i8)) != (x2 & id((-1i8))) { bad += 1; }
+    if (x2 | (-1i8)) != (x2 | id((-1i8))) { bad += 1; }
+    if (x2 ^ (-1i8)) != (x2 ^ id((-1i8))) { bad += 1; }
+    if x2 == (-1i8) { if !(x2 == id((-1i8))) { bad += 1; } } else if x2 == id((-1i8)) { bad += 1; }
+    if x2 != (-1i8) { if !(x2 != id((-1i8))) { bad += 1; } } else if x2 != id((-1i8)) { bad += 1; }
+    if x2 < (-1i8) { if !(x2 < id((-1i8))) { bad += 1; } } else if x2 < id((-1i8)) { bad += 1; }
+    if x2 <= (-1i8) { if !(x2 <= id((-1i8))) { bad += 1; } } else if x2 <= id((-1i8)) { bad += 1; }
+    if x2 > (-1i8) { if !(x2 > id((-1i8))) { bad += 1; } } else if x2 > id((-1i8)) { bad += 1; }
+    if x2 >= (-1i8) { if !(x2 >= id((-1i8))) { bad += 1; } } else if x2 >= id((-1i8)) { bad += 1; }
+    if (x2 + (-1i8)) != (x2 + id((-1i8))) { bad += 1; }
+    if (x2 - (-1i8)) != (x2 - id((-1i8))) { bad += 1; }
+    if (x2 * (-1i8)) != (x2 * id((-1i8))) { bad += 1; }
+    if (x2 / (-1i8)) != (x2 / id((-1i8))) { bad += 1; }
+    if (x2 % (-1i8)) != (x2 % id((-1i8))) { bad += 1; }
+    if (x2 & 7i8) != (x2 & id(7i8)) { bad += 1; }
+    if (x2 | 7i8) != (x2 | id(7i8)) { bad += 1; }
+    if (x2 ^ 7i8) != (x2 ^ id(7i8)) { bad += 1; }
+    if x2 == 7i8 { if !(x2 == id(7i8)) { bad += 1; } } else if x2 == id(7i8) { bad += 1; }
+    if x2 != 7i8 { if !(x2 != id(7i8)) { bad += 1; } } else if x2 != id(7i8) { bad += 1; }
+    if x2 < 7i8 { if !(x2 < id(7i8)) { bad += 1; } } else if x2 < id(7i8) { bad += 1; }
+    if x2 <= 7i8 { if !(x2 <= id(7i8)) { bad += 1; } } else if x2 <= id(7i8) { bad += 1; }
+    if x2 > 7i8 { if !(x2 > id(7i8)) { bad += 1; } } else if x2 > id(7i8) { bad += 1; }
+    if x2 >= 7i8 { if !(x2 >= id(7i8)) { bad += 1; } } else if x2 >= id(7i8) { bad += 1; }
+    if (x2 + 7i8) != (x2 + id(7i8)) { bad += 1; }
+    if (x2 - 7i8) != (x2 - id(7i8)) { bad += 1; }
+    if (x2 / 7i8) != (x2 / id(7i8)) { bad += 1; }
+    if (x2 % 7i8) != (x2 % id(7i8)) { bad += 1; }
+    if (x2 & 64i8) != (x2 & id(64i8)) { bad += 1; }
+    if (x2 | 64i8) != (x2 | id(64i8)) { bad += 1; }
+    if (x2 ^ 64i8) != (x2 ^ id(64i8)) { bad += 1; }
+    if x2 == 64i8 { if !(x2 == id(64i8)) { bad += 1; } } else if x2 == id(64i8) { bad += 1; }
+    if x2 != 64i8 { if !(x2 != id(64i8)) { bad += 1; } } else if x2 != id(64i8) { bad += 1; }
+    if x2 < 64i8 { if !(x2 < id(64i8)) { bad += 1; } } else if x2 < id(64i8) { bad += 1; }
+    if x2 <= 64i8 { if !(x2 <= id(64i8)) { bad += 1; } } else if x2 <= id(64i8) { bad += 1; }
+    if x2 > 64i8 { if !(x2 > id(64i8)) { bad += 1; } } else if x2 > id(64i8) { bad += 1; }
+    if x2 >= 64i8 { if !(x2 >= id(64i8)) { bad += 1; } } else if x2 >= id(64i8) { bad += 1; }
+    if (x2 + 64i8) != (x2 + id(64i8)) { bad += 1; }
+    if (x2 - 64i8) != (x2 - id(64i8)) { bad += 1; }
+    if (x2 / 64i8) != (x2 / id(64i8)) { bad += 1; }
+    if (x2 % 64i8) != (x2 % id(64i8)) { bad += 1; }
+    if (x2 & 127i8) != (x2 & id(127i8)) { bad += 1; }
+    if (x2 | 127i8) != (x2 | id(127i8)) { bad += 1; }
+    if (x2 ^ 127i8) != (x2 ^ id(127i8)) { bad += 1; }
+    if x2 == 127i8 { if !(x2 == id(127i8)) { bad += 1; } } else if x2 == id(127i8) { bad += 1; }
+    if x2 != 127i8 { if !(x2 != id(127i8)) { bad += 1; } } else if x2 != id(127i8) { bad += 1; }
+    if x2 < 127i8 { if !(x2 < id(127i8)) { bad += 1; } } else if x2 < id(127i8) { bad += 1; }
+    if x2 <= 127i8 { if !(x2 <= id(127i8)) { bad += 1; } } else if x2 <= id(127i8) { bad += 1; }
+    if x2 > 127i8 { if !(x2 > id(127i8)) { bad += 1; } } else if x2 > id(127i8) { bad += 1; }
+    if x2 >= 127i8 { if !(x2 >= id(127i8)) { bad += 1; } } else if x2 >= id(127i8) { bad += 1; }
+    if (x2 - 127i8) != (x2 - id(127i8)) { bad += 1; }
+    if (x2 / 127i8) != (x2 / id(127i8)) { bad += 1; }
+    if (x2 % 127i8) != (x2 % id(127i8)) { bad += 1; }
+    if (x2 >> 0i8) != (x2 >> id(0i8)) { bad += 1; }
+    if (x2 & 127i8) << 0i8 != (x2 & 127i8) << id(0i8) { bad += 1; }
+    if (x2 >> 1i8) != (x2 >> id(1i8)) { bad += 1; }
+    if (x2 & 63i8) << 1i8 != (x2 & 63i8) << id(1i8) { bad += 1; }
+    if (x2 >> 3i8) != (x2 >> id(3i8)) { bad += 1; }
+    if (x2 & 15i8) << 3i8 != (x2 & 15i8) << id(3i8) { bad += 1; }
+    if (x2 >> 4i8) != (x2 >> id(4i8)) { bad += 1; }
+    if (x2 & 7i8) << 4i8 != (x2 & 7i8) << id(4i8) { bad += 1; }
+    if (x2 >> 7i8) != (x2 >> id(7i8)) { bad += 1; }
+    if (x2 & 0i8) << 7i8 != (x2 & 0i8) << id(7i8) { bad += 1; }
+    if (x3 & i8::MIN) != (x3 & id(i8::MIN)) { bad += 1; }
+    if (x3 | i8::MIN) != (x3 | id(i8::MIN)) { bad += 1; }
+    if (x3 ^ i8::MIN) != (x3 ^ id(i8::MIN)) { bad += 1; }
+    if x3 == i8::MIN { if !(x3 == id(i8::MIN)) { bad += 1; } } else if x3 == id(i8::MIN) { bad += 1; }
+    if x3 != i8::MIN { if !(x3 != id(i8::MIN)) { bad += 1; } } else if x3 != id(i8::MIN) { bad += 1; }
+    if x3 < i8::MIN { if !(x3 < id(i8::MIN)) { bad += 1; } } else if x3 < id(i8::MIN) { bad += 1; }
+    if x3 <= i8::MIN { if !(x3 <= id(i8::MIN)) { bad += 1; } } else if x3 <= id(i8::MIN) { bad += 1; }
+    if x3 > i8::MIN { if !(x3 > id(i8::MIN)) { bad += 1; } } else if x3 > id(i8::MIN) { bad += 1; }
+    if x3 >= i8::MIN { if !(x3 >= id(i8::MIN)) { bad += 1; } } else if x3 >= id(i8::MIN) { bad += 1; }
+    if (x3 - i8::MIN) != (x3 - id(i8::MIN)) { bad += 1; }
+    if (x3 / i8::MIN) != (x3 / id(i8::MIN)) { bad += 1; }
+    if (x3 % i8::MIN) != (x3 % id(i8::MIN)) { bad += 1; }
+    if (x3 & (-1i8)) != (x3 & id((-1i8))) { bad += 1; }
+    if (x3 | (-1i8)) != (x3 | id((-1i8))) { bad += 1; }
+    if (x3 ^ (-1i8)) != (x3 ^ id((-1i8))) { bad += 1; }
+    if x3 == (-1i8) { if !(x3 == id((-1i8))) { bad += 1; } } else if x3 == id((-1i8)) { bad += 1; }
+    if x3 != (-1i8) { if !(x3 != id((-1i8))) { bad += 1; } } else if x3 != id((-1i8)) { bad += 1; }
+    if x3 < (-1i8) { if !(x3 < id((-1i8))) { bad += 1; } } else if x3 < id((-1i8)) { bad += 1; }
+    if x3 <= (-1i8) { if !(x3 <= id((-1i8))) { bad += 1; } } else if x3 <= id((-1i8)) { bad += 1; }
+    if x3 > (-1i8) { if !(x3 > id((-1i8))) { bad += 1; } } else if x3 > id((-1i8)) { bad += 1; }
+    if x3 >= (-1i8) { if !(x3 >= id((-1i8))) { bad += 1; } } else if x3 >= id((-1i8)) { bad += 1; }
+    if (x3 + (-1i8)) != (x3 + id((-1i8))) { bad += 1; }
+    if (x3 - (-1i8)) != (x3 - id((-1i8))) { bad += 1; }
+    if (x3 * (-1i8)) != (x3 * id((-1i8))) { bad += 1; }
+    if (x3 / (-1i8)) != (x3 / id((-1i8))) { bad += 1; }
+    if (x3 % (-1i8)) != (x3 % id((-1i8))) { bad += 1; }
+    if (x3 & 7i8) != (x3 & id(7i8)) { bad += 1; }
+    if (x3 | 7i8) != (x3 | id(7i8)) { bad += 1; }
+    if (x3 ^ 7i8) != (x3 ^ id(7i8)) { bad += 1; }
+    if x3 == 7i8 { if !(x3 == id(7i8)) { bad += 1; } } else if x3 == id(7i8) { bad += 1; }
+    if x3 != 7i8 { if !(x3 != id(7i8)) { bad += 1; } } else if x3 != id(7i8) { bad += 1; }
+    if x3 < 7i8 { if !(x3 < id(7i8)) { bad += 1; } } else if x3 < id(7i8) { bad += 1; }
+    if x3 <= 7i8 { if !(x3 <= id(7i8)) { bad += 1; } } else if x3 <= id(7i8) { bad += 1; }
+    if x3 > 7i8 { if !(x3 > id(7i8)) { bad += 1; } } else if x3 > id(7i8) { bad += 1; }
+    if x3 >= 7i8 { if !(x3 >= id(7i8)) { bad += 1; } } else if x3 >= id(7i8) { bad += 1; }
+    if (x3 + 7i8) != (x3 + id(7i8)) { bad += 1; }
+    if (x3 - 7i8) != (x3 - id(7i8)) { bad += 1; }
+    if (x3 * 7i8) != (x3 * id(7i8)) { bad += 1; }
+    if (x3 / 7i8) != (x3 / id(7i8)) { bad += 1; }
+    if (x3 % 7i8) != (x3 % id(7i8)) { bad += 1; }
+    if (x3 & 64i8) != (x3 & id(64i8)) { bad += 1; }
+    if (x3 | 64i8) != (x3 | id(64i8)) { bad += 1; }
+    if (x3 ^ 64i8) != (x3 ^ id(64i8)) { bad += 1; }
+    if x3 == 64i8 { if !(x3 == id(64i8)) { bad += 1; } } else if x3 == id(64i8) { bad += 1; }
+    if x3 != 64i8 { if !(x3 != id(64i8)) { bad += 1; } } else if x3 != id(64i8) { bad += 1; }
+    if x3 < 64i8 { if !(x3 < id(64i8)) { bad += 1; } } else if x3 < id(64i8) { bad += 1; }
+    if x3 <= 64i8 { if !(x3 <= id(64i8)) { bad += 1; } } else if x3 <= id(64i8) { bad += 1; }
+    if x3 > 64i8 { if !(x3 > id(64i8)) { bad += 1; } } else if x3 > id(64i8) { bad += 1; }
+    if x3 >= 64i8 { if !(x3 >= id(64i8)) { bad += 1; } } else if x3 >= id(64i8) { bad += 1; }
+    if (x3 + 64i8) != (x3 + id(64i8)) { bad += 1; }
+    if (x3 - 64i8) != (x3 - id(64i8)) { bad += 1; }
+    if (x3 / 64i8) != (x3 / id(64i8)) { bad += 1; }
+    if (x3 % 64i8) != (x3 % id(64i8)) { bad += 1; }
+    if (x3 & 127i8) != (x3 & id(127i8)) { bad += 1; }
+    if (x3 | 127i8) != (x3 | id(127i8)) { bad += 1; }
+    if (x3 ^ 127i8) != (x3 ^ id(127i8)) { bad += 1; }
+    if x3 == 127i8 { if !(x3 == id(127i8)) { bad += 1; } } else if x3 == id(127i8) { bad += 1; }
+    if x3 != 127i8 { if !(x3 != id(127i8)) { bad += 1; } } else if x3 != id(127i8) { bad += 1; }
+    if x3 < 127i8 { if !(x3 < id(127i8)) { bad += 1; } } else if x3 < id(127i8) { bad += 1; }
+    if x3 <= 127i8 { if !(x3 <= id(127i8)) { bad += 1; } } else if x3 <= id(127i8) { bad += 1; }
+    if x3 > 127i8 { if !(x3 > id(127i8)) { bad += 1; } } else if x3 > id(127i8) { bad += 1; }
+    if x3 >= 127i8 { if !(x3 >= id(127i8)) { bad += 1; } } else if x3 >= id(127i8) { bad += 1; }
+    if (x3 + 127i8) != (x3 + id(127i8)) { bad += 1; }
+    if (x3 / 127i8) != (x3 / id(127i8)) { bad += 1; }
+    if (x3 % 127i8) != (x3 % id(127i8)) { bad += 1; }
+    if (x3 >> 0i8) != (x3 >> id(0i8)) { bad += 1; }
+    if (x3 & 127i8) << 0i8 != (x3 & 127i8) << id(0i8) { bad += 1; }
+    if (x3 >> 1i8) != (x3 >> id(1i8)) { bad += 1; }
+    if (x3 & 63i8) << 1i8 != (x3 & 63i8) << id(1i8) { bad += 1; }
+    if (x3 >> 3i8) != (x3 >> id(3i8)) { bad += 1; }
+    if (x3 & 15i8) << 3i8 != (x3 & 15i8) << id(3i8) { bad += 1; }
+    if (x3 >> 4i8) != (x3 >> id(4i8)) { bad += 1; }
+    if (x3 & 7i8) << 4i8 != (x3 & 7i8) << id(4i8) { bad += 1; }
+    if (x3 >> 7i8) != (x3 >> id(7i8)) { bad += 1; }
+    if (x3 & 0i8) << 7i8 != (x3 & 0i8) << id(7i8) { bad += 1; }
+    return bad;
+}
+
+fn check_u8() -> i64 {
+    let bad: i64 = 0;
+    let x0 = id(0u8);
+    let x1 = id(255u8);
+    let x2 = id(85u8);
+    if (x0 & 7u8) != (x0 & id(7u8)) { bad += 1; }
+    if (x0 | 7u8) != (x0 | id(7u8)) { bad += 1; }
+    if (x0 ^ 7u8) != (x0 ^ id(7u8)) { bad += 1; }
+    if x0 == 7u8 { if !(x0 == id(7u8)) { bad += 1; } } else if x0 == id(7u8) { bad += 1; }
+    if x0 != 7u8 { if !(x0 != id(7u8)) { bad += 1; } } else if x0 != id(7u8) { bad += 1; }
+    if x0 < 7u8 { if !(x0 < id(7u8)) { bad += 1; } } else if x0 < id(7u8) { bad += 1; }
+    if x0 <= 7u8 { if !(x0 <= id(7u8)) { bad += 1; } } else if x0 <= id(7u8) { bad += 1; }
+    if x0 > 7u8 { if !(x0 > id(7u8)) { bad += 1; } } else if x0 > id(7u8) { bad += 1; }
+    if x0 >= 7u8 { if !(x0 >= id(7u8)) { bad += 1; } } else if x0 >= id(7u8) { bad += 1; }
+    if (x0 + 7u8) != (x0 + id(7u8)) { bad += 1; }
+    if (x0 * 7u8) != (x0 * id(7u8)) { bad += 1; }
+    if (x0 / 7u8) != (x0 / id(7u8)) { bad += 1; }
+    if (x0 % 7u8) != (x0 % id(7u8)) { bad += 1; }
+    if (x0 & 64u8) != (x0 & id(64u8)) { bad += 1; }
+    if (x0 | 64u8) != (x0 | id(64u8)) { bad += 1; }
+    if (x0 ^ 64u8) != (x0 ^ id(64u8)) { bad += 1; }
+    if x0 == 64u8 { if !(x0 == id(64u8)) { bad += 1; } } else if x0 == id(64u8) { bad += 1; }
+    if x0 != 64u8 { if !(x0 != id(64u8)) { bad += 1; } } else if x0 != id(64u8) { bad += 1; }
+    if x0 < 64u8 { if !(x0 < id(64u8)) { bad += 1; } } else if x0 < id(64u8) { bad += 1; }
+    if x0 <= 64u8 { if !(x0 <= id(64u8)) { bad += 1; } } else if x0 <= id(64u8) { bad += 1; }
+    if x0 > 64u8 { if !(x0 > id(64u8)) { bad += 1; } } else if x0 > id(64u8) { bad += 1; }
+    if x0 >= 64u8 { if !(x0 >= id(64u8)) { bad += 1; } } else if x0 >= id(64u8) { bad += 1; }
+    if (x0 + 64u8) != (x0 + id(64u8)) { bad += 1; }
+    if (x0 * 64u8) != (x0 * id(64u8)) { bad += 1; }
+    if (x0 / 64u8) != (x0 / id(64u8)) { bad += 1; }
+    if (x0 % 64u8) != (x0 % id(64u8)) { bad += 1; }
+    if (x0 & 255u8) != (x0 & id(255u8)) { bad += 1; }
+    if (x0 | 255u8) != (x0 | id(255u8)) { bad += 1; }
+    if (x0 ^ 255u8) != (x0 ^ id(255u8)) { bad += 1; }
+    if x0 == 255u8 { if !(x0 == id(255u8)) { bad += 1; } } else if x0 == id(255u8) { bad += 1; }
+    if x0 != 255u8 { if !(x0 != id(255u8)) { bad += 1; } } else if x0 != id(255u8) { bad += 1; }
+    if x0 < 255u8 { if !(x0 < id(255u8)) { bad += 1; } } else if x0 < id(255u8) { bad += 1; }
+    if x0 <= 255u8 { if !(x0 <= id(255u8)) { bad += 1; } } else if x0 <= id(255u8) { bad += 1; }
+    if x0 > 255u8 { if !(x0 > id(255u8)) { bad += 1; } } else if x0 > id(255u8) { bad += 1; }
+    if x0 >= 255u8 { if !(x0 >= id(255u8)) { bad += 1; } } else if x0 >= id(255u8) { bad += 1; }
+    if (x0 + 255u8) != (x0 + id(255u8)) { bad += 1; }
+    if (x0 * 255u8) != (x0 * id(255u8)) { bad += 1; }
+    if (x0 / 255u8) != (x0 / id(255u8)) { bad += 1; }
+    if (x0 % 255u8) != (x0 % id(255u8)) { bad += 1; }
+    if (x0 >> 0u8) != (x0 >> id(0u8)) { bad += 1; }
+    if (x0 & 255u8) << 0u8 != (x0 & 255u8) << id(0u8) { bad += 1; }
+    if (x0 >> 1u8) != (x0 >> id(1u8)) { bad += 1; }
+    if (x0 & 127u8) << 1u8 != (x0 & 127u8) << id(1u8) { bad += 1; }
+    if (x0 >> 3u8) != (x0 >> id(3u8)) { bad += 1; }
+    if (x0 & 31u8) << 3u8 != (x0 & 31u8) << id(3u8) { bad += 1; }
+    if (x0 >> 4u8) != (x0 >> id(4u8)) { bad += 1; }
+    if (x0 & 15u8) << 4u8 != (x0 & 15u8) << id(4u8) { bad += 1; }
+    if (x0 >> 7u8) != (x0 >> id(7u8)) { bad += 1; }
+    if (x0 & 1u8) << 7u8 != (x0 & 1u8) << id(7u8) { bad += 1; }
+    if (x1 & 7u8) != (x1 & id(7u8)) { bad += 1; }
+    if (x1 | 7u8) != (x1 | id(7u8)) { bad += 1; }
+    if (x1 ^ 7u8) != (x1 ^ id(7u8)) { bad += 1; }
+    if x1 == 7u8 { if !(x1 == id(7u8)) { bad += 1; } } else if x1 == id(7u8) { bad += 1; }
+    if x1 != 7u8 { if !(x1 != id(7u8)) { bad += 1; } } else if x1 != id(7u8) { bad += 1; }
+    if x1 < 7u8 { if !(x1 < id(7u8)) { bad += 1; } } else if x1 < id(7u8) { bad += 1; }
+    if x1 <= 7u8 { if !(x1 <= id(7u8)) { bad += 1; } } else if x1 <= id(7u8) { bad += 1; }
+    if x1 > 7u8 { if !(x1 > id(7u8)) { bad += 1; } } else if x1 > id(7u8) { bad += 1; }
+    if x1 >= 7u8 { if !(x1 >= id(7u8)) { bad += 1; } } else if x1 >= id(7u8) { bad += 1; }
+    if (x1 - 7u8) != (x1 - id(7u8)) { bad += 1; }
+    if (x1 / 7u8) != (x1 / id(7u8)) { bad += 1; }
+    if (x1 % 7u8) != (x1 % id(7u8)) { bad += 1; }
+    if (x1 & 64u8) != (x1 & id(64u8)) { bad += 1; }
+    if (x1 | 64u8) != (x1 | id(64u8)) { bad += 1; }
+    if (x1 ^ 64u8) != (x1 ^ id(64u8)) { bad += 1; }
+    if x1 == 64u8 { if !(x1 == id(64u8)) { bad += 1; } } else if x1 == id(64u8) { bad += 1; }
+    if x1 != 64u8 { if !(x1 != id(64u8)) { bad += 1; } } else if x1 != id(64u8) { bad += 1; }
+    if x1 < 64u8 { if !(x1 < id(64u8)) { bad += 1; } } else if x1 < id(64u8) { bad += 1; }
+    if x1 <= 64u8 { if !(x1 <= id(64u8)) { bad += 1; } } else if x1 <= id(64u8) { bad += 1; }
+    if x1 > 64u8 { if !(x1 > id(64u8)) { bad += 1; } } else if x1 > id(64u8) { bad += 1; }
+    if x1 >= 64u8 { if !(x1 >= id(64u8)) { bad += 1; } } else if x1 >= id(64u8) { bad += 1; }
+    if (x1 - 64u8) != (x1 - id(64u8)) { bad += 1; }
+    if (x1 / 64u8) != (x1 / id(64u8)) { bad += 1; }
+    if (x1 % 64u8) != (x1 % id(64u8)) { bad += 1; }
+    if (x1 & 255u8) != (x1 & id(255u8)) { bad += 1; }
+    if (x1 | 255u8) != (x1 | id(255u8)) { bad += 1; }
+    if (x1 ^ 255u8) != (x1 ^ id(255u8)) { bad += 1; }
+    if x1 == 255u8 { if !(x1 == id(255u8)) { bad += 1; } } else if x1 == id(255u8) { bad += 1; }
+    if x1 != 255u8 { if !(x1 != id(255u8)) { bad += 1; } } else if x1 != id(255u8) { bad += 1; }
+    if x1 < 255u8 { if !(x1 < id(255u8)) { bad += 1; } } else if x1 < id(255u8) { bad += 1; }
+    if x1 <= 255u8 { if !(x1 <= id(255u8)) { bad += 1; } } else if x1 <= id(255u8) { bad += 1; }
+    if x1 > 255u8 { if !(x1 > id(255u8)) { bad += 1; } } else if x1 > id(255u8) { bad += 1; }
+    if x1 >= 255u8 { if !(x1 >= id(255u8)) { bad += 1; } } else if x1 >= id(255u8) { bad += 1; }
+    if (x1 - 255u8) != (x1 - id(255u8)) { bad += 1; }
+    if (x1 / 255u8) != (x1 / id(255u8)) { bad += 1; }
+    if (x1 % 255u8) != (x1 % id(255u8)) { bad += 1; }
+    if (x1 >> 0u8) != (x1 >> id(0u8)) { bad += 1; }
+    if (x1 & 255u8) << 0u8 != (x1 & 255u8) << id(0u8) { bad += 1; }
+    if (x1 >> 1u8) != (x1 >> id(1u8)) { bad += 1; }
+    if (x1 & 127u8) << 1u8 != (x1 & 127u8) << id(1u8) { bad += 1; }
+    if (x1 >> 3u8) != (x1 >> id(3u8)) { bad += 1; }
+    if (x1 & 31u8) << 3u8 != (x1 & 31u8) << id(3u8) { bad += 1; }
+    if (x1 >> 4u8) != (x1 >> id(4u8)) { bad += 1; }
+    if (x1 & 15u8) << 4u8 != (x1 & 15u8) << id(4u8) { bad += 1; }
+    if (x1 >> 7u8) != (x1 >> id(7u8)) { bad += 1; }
+    if (x1 & 1u8) << 7u8 != (x1 & 1u8) << id(7u8) { bad += 1; }
+    if (x2 & 7u8) != (x2 & id(7u8)) { bad += 1; }
+    if (x2 | 7u8) != (x2 | id(7u8)) { bad += 1; }
+    if (x2 ^ 7u8) != (x2 ^ id(7u8)) { bad += 1; }
+    if x2 == 7u8 { if !(x2 == id(7u8)) { bad += 1; } } else if x2 == id(7u8) { bad += 1; }
+    if x2 != 7u8 { if !(x2 != id(7u8)) { bad += 1; } } else if x2 != id(7u8) { bad += 1; }
+    if x2 < 7u8 { if !(x2 < id(7u8)) { bad += 1; } } else if x2 < id(7u8) { bad += 1; }
+    if x2 <= 7u8 { if !(x2 <= id(7u8)) { bad += 1; } } else if x2 <= id(7u8) { bad += 1; }
+    if x2 > 7u8 { if !(x2 > id(7u8)) { bad += 1; } } else if x2 > id(7u8) { bad += 1; }
+    if x2 >= 7u8 { if !(x2 >= id(7u8)) { bad += 1; } } else if x2 >= id(7u8) { bad += 1; }
+    if (x2 + 7u8) != (x2 + id(7u8)) { bad += 1; }
+    if (x2 - 7u8) != (x2 - id(7u8)) { bad += 1; }
+    if (x2 / 7u8) != (x2 / id(7u8)) { bad += 1; }
+    if (x2 % 7u8) != (x2 % id(7u8)) { bad += 1; }
+    if (x2 & 64u8) != (x2 & id(64u8)) { bad += 1; }
+    if (x2 | 64u8) != (x2 | id(64u8)) { bad += 1; }
+    if (x2 ^ 64u8) != (x2 ^ id(64u8)) { bad += 1; }
+    if x2 == 64u8 { if !(x2 == id(64u8)) { bad += 1; } } else if x2 == id(64u8) { bad += 1; }
+    if x2 != 64u8 { if !(x2 != id(64u8)) { bad += 1; } } else if x2 != id(64u8) { bad += 1; }
+    if x2 < 64u8 { if !(x2 < id(64u8)) { bad += 1; } } else if x2 < id(64u8) { bad += 1; }
+    if x2 <= 64u8 { if !(x2 <= id(64u8)) { bad += 1; } } else if x2 <= id(64u8) { bad += 1; }
+    if x2 > 64u8 { if !(x2 > id(64u8)) { bad += 1; } } else if x2 > id(64u8) { bad += 1; }
+    if x2 >= 64u8 { if !(x2 >= id(64u8)) { bad += 1; } } else if x2 >= id(64u8) { bad += 1; }
+    if (x2 + 64u8) != (x2 + id(64u8)) { bad += 1; }
+    if (x2 - 64u8) != (x2 - id(64u8)) { bad += 1; }
+    if (x2 / 64u8) != (x2 / id(64u8)) { bad += 1; }
+    if (x2 % 64u8) != (x2 % id(64u8)) { bad += 1; }
+    if (x2 & 255u8) != (x2 & id(255u8)) { bad += 1; }
+    if (x2 | 255u8) != (x2 | id(255u8)) { bad += 1; }
+    if (x2 ^ 255u8) != (x2 ^ id(255u8)) { bad += 1; }
+    if x2 == 255u8 { if !(x2 == id(255u8)) { bad += 1; } } else if x2 == id(255u8) { bad += 1; }
+    if x2 != 255u8 { if !(x2 != id(255u8)) { bad += 1; } } else if x2 != id(255u8) { bad += 1; }
+    if x2 < 255u8 { if !(x2 < id(255u8)) { bad += 1; } } else if x2 < id(255u8) { bad += 1; }
+    if x2 <= 255u8 { if !(x2 <= id(255u8)) { bad += 1; } } else if x2 <= id(255u8) { bad += 1; }
+    if x2 > 255u8 { if !(x2 > id(255u8)) { bad += 1; } } else if x2 > id(255u8) { bad += 1; }
+    if x2 >= 255u8 { if !(x2 >= id(255u8)) { bad += 1; } } else if x2 >= id(255u8) { bad += 1; }
+    if (x2 / 255u8) != (x2 / id(255u8)) { bad += 1; }
+    if (x2 % 255u8) != (x2 % id(255u8)) { bad += 1; }
+    if (x2 >> 0u8) != (x2 >> id(0u8)) { bad += 1; }
+    if (x2 & 255u8) << 0u8 != (x2 & 255u8) << id(0u8) { bad += 1; }
+    if (x2 >> 1u8) != (x2 >> id(1u8)) { bad += 1; }
+    if (x2 & 127u8) << 1u8 != (x2 & 127u8) << id(1u8) { bad += 1; }
+    if (x2 >> 3u8) != (x2 >> id(3u8)) { bad += 1; }
+    if (x2 & 31u8) << 3u8 != (x2 & 31u8) << id(3u8) { bad += 1; }
+    if (x2 >> 4u8) != (x2 >> id(4u8)) { bad += 1; }
+    if (x2 & 15u8) << 4u8 != (x2 & 15u8) << id(4u8) { bad += 1; }
+    if (x2 >> 7u8) != (x2 >> id(7u8)) { bad += 1; }
+    if (x2 & 1u8) << 7u8 != (x2 & 1u8) << id(7u8) { bad += 1; }
+    return bad;
+}
+
+fn check_i16() -> i64 {
+    let bad: i64 = 0;
+    let x0 = id(i16::MIN);
+    let x1 = id(32767i16);
+    let x2 = id(10923i16);
+    let x3 = id((-5i16));
+    if (x0 & i16::MIN) != (x0 & id(i16::MIN)) { bad += 1; }
+    if (x0 | i16::MIN) != (x0 | id(i16::MIN)) { bad += 1; }
+    if (x0 ^ i16::MIN) != (x0 ^ id(i16::MIN)) { bad += 1; }
+    if x0 == i16::MIN { if !(x0 == id(i16::MIN)) { bad += 1; } } else if x0 == id(i16::MIN) { bad += 1; }
+    if x0 != i16::MIN { if !(x0 != id(i16::MIN)) { bad += 1; } } else if x0 != id(i16::MIN) { bad += 1; }
+    if x0 < i16::MIN { if !(x0 < id(i16::MIN)) { bad += 1; } } else if x0 < id(i16::MIN) { bad += 1; }
+    if x0 <= i16::MIN { if !(x0 <= id(i16::MIN)) { bad += 1; } } else if x0 <= id(i16::MIN) { bad += 1; }
+    if x0 > i16::MIN { if !(x0 > id(i16::MIN)) { bad += 1; } } else if x0 > id(i16::MIN) { bad += 1; }
+    if x0 >= i16::MIN { if !(x0 >= id(i16::MIN)) { bad += 1; } } else if x0 >= id(i16::MIN) { bad += 1; }
+    if (x0 - i16::MIN) != (x0 - id(i16::MIN)) { bad += 1; }
+    if (x0 / i16::MIN) != (x0 / id(i16::MIN)) { bad += 1; }
+    if (x0 % i16::MIN) != (x0 % id(i16::MIN)) { bad += 1; }
+    if (x0 & (-4096i16)) != (x0 & id((-4096i16))) { bad += 1; }
+    if (x0 | (-4096i16)) != (x0 | id((-4096i16))) { bad += 1; }
+    if (x0 ^ (-4096i16)) != (x0 ^ id((-4096i16))) { bad += 1; }
+    if x0 == (-4096i16) { if !(x0 == id((-4096i16))) { bad += 1; } } else if x0 == id((-4096i16)) { bad += 1; }
+    if x0 != (-4096i16) { if !(x0 != id((-4096i16))) { bad += 1; } } else if x0 != id((-4096i16)) { bad += 1; }
+    if x0 < (-4096i16) { if !(x0 < id((-4096i16))) { bad += 1; } } else if x0 < id((-4096i16)) { bad += 1; }
+    if x0 <= (-4096i16) { if !(x0 <= id((-4096i16))) { bad += 1; } } else if x0 <= id((-4096i16)) { bad += 1; }
+    if x0 > (-4096i16) { if !(x0 > id((-4096i16))) { bad += 1; } } else if x0 > id((-4096i16)) { bad += 1; }
+    if x0 >= (-4096i16) { if !(x0 >= id((-4096i16))) { bad += 1; } } else if x0 >= id((-4096i16)) { bad += 1; }
+    if (x0 - (-4096i16)) != (x0 - id((-4096i16))) { bad += 1; }
+    if (x0 / (-4096i16)) != (x0 / id((-4096i16))) { bad += 1; }
+    if (x0 % (-4096i16)) != (x0 % id((-4096i16))) { bad += 1; }
+    if (x0 & (-1i16)) != (x0 & id((-1i16))) { bad += 1; }
+    if (x0 | (-1i16)) != (x0 | id((-1i16))) { bad += 1; }
+    if (x0 ^ (-1i16)) != (x0 ^ id((-1i16))) { bad += 1; }
+    if x0 == (-1i16) { if !(x0 == id((-1i16))) { bad += 1; } } else if x0 == id((-1i16)) { bad += 1; }
+    if x0 != (-1i16) { if !(x0 != id((-1i16))) { bad += 1; } } else if x0 != id((-1i16)) { bad += 1; }
+    if x0 < (-1i16) { if !(x0 < id((-1i16))) { bad += 1; } } else if x0 < id((-1i16)) { bad += 1; }
+    if x0 <= (-1i16) { if !(x0 <= id((-1i16))) { bad += 1; } } else if x0 <= id((-1i16)) { bad += 1; }
+    if x0 > (-1i16) { if !(x0 > id((-1i16))) { bad += 1; } } else if x0 > id((-1i16)) { bad += 1; }
+    if x0 >= (-1i16) { if !(x0 >= id((-1i16))) { bad += 1; } } else if x0 >= id((-1i16)) { bad += 1; }
+    if (x0 - (-1i16)) != (x0 - id((-1i16))) { bad += 1; }
+    if (x0 & 7i16) != (x0 & id(7i16)) { bad += 1; }
+    if (x0 | 7i16) != (x0 | id(7i16)) { bad += 1; }
+    if (x0 ^ 7i16) != (x0 ^ id(7i16)) { bad += 1; }
+    if x0 == 7i16 { if !(x0 == id(7i16)) { bad += 1; } } else if x0 == id(7i16) { bad += 1; }
+    if x0 != 7i16 { if !(x0 != id(7i16)) { bad += 1; } } else if x0 != id(7i16) { bad += 1; }
+    if x0 < 7i16 { if !(x0 < id(7i16)) { bad += 1; } } else if x0 < id(7i16) { bad += 1; }
+    if x0 <= 7i16 { if !(x0 <= id(7i16)) { bad += 1; } } else if x0 <= id(7i16) { bad += 1; }
+    if x0 > 7i16 { if !(x0 > id(7i16)) { bad += 1; } } else if x0 > id(7i16) { bad += 1; }
+    if x0 >= 7i16 { if !(x0 >= id(7i16)) { bad += 1; } } else if x0 >= id(7i16) { bad += 1; }
+    if (x0 + 7i16) != (x0 + id(7i16)) { bad += 1; }
+    if (x0 / 7i16) != (x0 / id(7i16)) { bad += 1; }
+    if (x0 % 7i16) != (x0 % id(7i16)) { bad += 1; }
+    if (x0 & 4095i16) != (x0 & id(4095i16)) { bad += 1; }
+    if (x0 | 4095i16) != (x0 | id(4095i16)) { bad += 1; }
+    if (x0 ^ 4095i16) != (x0 ^ id(4095i16)) { bad += 1; }
+    if x0 == 4095i16 { if !(x0 == id(4095i16)) { bad += 1; } } else if x0 == id(4095i16) { bad += 1; }
+    if x0 != 4095i16 { if !(x0 != id(4095i16)) { bad += 1; } } else if x0 != id(4095i16) { bad += 1; }
+    if x0 < 4095i16 { if !(x0 < id(4095i16)) { bad += 1; } } else if x0 < id(4095i16) { bad += 1; }
+    if x0 <= 4095i16 { if !(x0 <= id(4095i16)) { bad += 1; } } else if x0 <= id(4095i16) { bad += 1; }
+    if x0 > 4095i16 { if !(x0 > id(4095i16)) { bad += 1; } } else if x0 > id(4095i16) { bad += 1; }
+    if x0 >= 4095i16 { if !(x0 >= id(4095i16)) { bad += 1; } } else if x0 >= id(4095i16) { bad += 1; }
+    if (x0 + 4095i16) != (x0 + id(4095i16)) { bad += 1; }
+    if (x0 / 4095i16) != (x0 / id(4095i16)) { bad += 1; }
+    if (x0 % 4095i16) != (x0 % id(4095i16)) { bad += 1; }
+    if (x0 & 4097i16) != (x0 & id(4097i16)) { bad += 1; }
+    if (x0 | 4097i16) != (x0 | id(4097i16)) { bad += 1; }
+    if (x0 ^ 4097i16) != (x0 ^ id(4097i16)) { bad += 1; }
+    if x0 == 4097i16 { if !(x0 == id(4097i16)) { bad += 1; } } else if x0 == id(4097i16) { bad += 1; }
+    if x0 != 4097i16 { if !(x0 != id(4097i16)) { bad += 1; } } else if x0 != id(4097i16) { bad += 1; }
+    if x0 < 4097i16 { if !(x0 < id(4097i16)) { bad += 1; } } else if x0 < id(4097i16) { bad += 1; }
+    if x0 <= 4097i16 { if !(x0 <= id(4097i16)) { bad += 1; } } else if x0 <= id(4097i16) { bad += 1; }
+    if x0 > 4097i16 { if !(x0 > id(4097i16)) { bad += 1; } } else if x0 > id(4097i16) { bad += 1; }
+    if x0 >= 4097i16 { if !(x0 >= id(4097i16)) { bad += 1; } } else if x0 >= id(4097i16) { bad += 1; }
+    if (x0 + 4097i16) != (x0 + id(4097i16)) { bad += 1; }
+    if (x0 / 4097i16) != (x0 / id(4097i16)) { bad += 1; }
+    if (x0 % 4097i16) != (x0 % id(4097i16)) { bad += 1; }
+    if (x0 & 16384i16) != (x0 & id(16384i16)) { bad += 1; }
+    if (x0 | 16384i16) != (x0 | id(16384i16)) { bad += 1; }
+    if (x0 ^ 16384i16) != (x0 ^ id(16384i16)) { bad += 1; }
+    if x0 == 16384i16 { if !(x0 == id(16384i16)) { bad += 1; } } else if x0 == id(16384i16) { bad += 1; }
+    if x0 != 16384i16 { if !(x0 != id(16384i16)) { bad += 1; } } else if x0 != id(16384i16) { bad += 1; }
+    if x0 < 16384i16 { if !(x0 < id(16384i16)) { bad += 1; } } else if x0 < id(16384i16) { bad += 1; }
+    if x0 <= 16384i16 { if !(x0 <= id(16384i16)) { bad += 1; } } else if x0 <= id(16384i16) { bad += 1; }
+    if x0 > 16384i16 { if !(x0 > id(16384i16)) { bad += 1; } } else if x0 > id(16384i16) { bad += 1; }
+    if x0 >= 16384i16 { if !(x0 >= id(16384i16)) { bad += 1; } } else if x0 >= id(16384i16) { bad += 1; }
+    if (x0 + 16384i16) != (x0 + id(16384i16)) { bad += 1; }
+    if (x0 / 16384i16) != (x0 / id(16384i16)) { bad += 1; }
+    if (x0 % 16384i16) != (x0 % id(16384i16)) { bad += 1; }
+    if (x0 & 32767i16) != (x0 & id(32767i16)) { bad += 1; }
+    if (x0 | 32767i16) != (x0 | id(32767i16)) { bad += 1; }
+    if (x0 ^ 32767i16) != (x0 ^ id(32767i16)) { bad += 1; }
+    if x0 == 32767i16 { if !(x0 == id(32767i16)) { bad += 1; } } else if x0 == id(32767i16) { bad += 1; }
+    if x0 != 32767i16 { if !(x0 != id(32767i16)) { bad += 1; } } else if x0 != id(32767i16) { bad += 1; }
+    if x0 < 32767i16 { if !(x0 < id(32767i16)) { bad += 1; } } else if x0 < id(32767i16) { bad += 1; }
+    if x0 <= 32767i16 { if !(x0 <= id(32767i16)) { bad += 1; } } else if x0 <= id(32767i16) { bad += 1; }
+    if x0 > 32767i16 { if !(x0 > id(32767i16)) { bad += 1; } } else if x0 > id(32767i16) { bad += 1; }
+    if x0 >= 32767i16 { if !(x0 >= id(32767i16)) { bad += 1; } } else if x0 >= id(32767i16) { bad += 1; }
+    if (x0 + 32767i16) != (x0 + id(32767i16)) { bad += 1; }
+    if (x0 / 32767i16) != (x0 / id(32767i16)) { bad += 1; }
+    if (x0 % 32767i16) != (x0 % id(32767i16)) { bad += 1; }
+    if (x0 >> 0i16) != (x0 >> id(0i16)) { bad += 1; }
+    if (x0 & 32767i16) << 0i16 != (x0 & 32767i16) << id(0i16) { bad += 1; }
+    if (x0 >> 1i16) != (x0 >> id(1i16)) { bad += 1; }
+    if (x0 & 16383i16) << 1i16 != (x0 & 16383i16) << id(1i16) { bad += 1; }
+    if (x0 >> 3i16) != (x0 >> id(3i16)) { bad += 1; }
+    if (x0 & 4095i16) << 3i16 != (x0 & 4095i16) << id(3i16) { bad += 1; }
+    if (x0 >> 8i16) != (x0 >> id(8i16)) { bad += 1; }
+    if (x0 & 127i16) << 8i16 != (x0 & 127i16) << id(8i16) { bad += 1; }
+    if (x0 >> 15i16) != (x0 >> id(15i16)) { bad += 1; }
+    if (x0 & 0i16) << 15i16 != (x0 & 0i16) << id(15i16) { bad += 1; }
+    if (x1 & i16::MIN) != (x1 & id(i16::MIN)) { bad += 1; }
+    if (x1 | i16::MIN) != (x1 | id(i16::MIN)) { bad += 1; }
+    if (x1 ^ i16::MIN) != (x1 ^ id(i16::MIN)) { bad += 1; }
+    if x1 == i16::MIN { if !(x1 == id(i16::MIN)) { bad += 1; } } else if x1 == id(i16::MIN) { bad += 1; }
+    if x1 != i16::MIN { if !(x1 != id(i16::MIN)) { bad += 1; } } else if x1 != id(i16::MIN) { bad += 1; }
+    if x1 < i16::MIN { if !(x1 < id(i16::MIN)) { bad += 1; } } else if x1 < id(i16::MIN) { bad += 1; }
+    if x1 <= i16::MIN { if !(x1 <= id(i16::MIN)) { bad += 1; } } else if x1 <= id(i16::MIN) { bad += 1; }
+    if x1 > i16::MIN { if !(x1 > id(i16::MIN)) { bad += 1; } } else if x1 > id(i16::MIN) { bad += 1; }
+    if x1 >= i16::MIN { if !(x1 >= id(i16::MIN)) { bad += 1; } } else if x1 >= id(i16::MIN) { bad += 1; }
+    if (x1 + i16::MIN) != (x1 + id(i16::MIN)) { bad += 1; }
+    if (x1 / i16::MIN) != (x1 / id(i16::MIN)) { bad += 1; }
+    if (x1 % i16::MIN) != (x1 % id(i16::MIN)) { bad += 1; }
+    if (x1 & (-4096i16)) != (x1 & id((-4096i16))) { bad += 1; }
+    if (x1 | (-4096i16)) != (x1 | id((-4096i16))) { bad += 1; }
+    if (x1 ^ (-4096i16)) != (x1 ^ id((-4096i16))) { bad += 1; }
+    if x1 == (-4096i16) { if !(x1 == id((-4096i16))) { bad += 1; } } else if x1 == id((-4096i16)) { bad += 1; }
+    if x1 != (-4096i16) { if !(x1 != id((-4096i16))) { bad += 1; } } else if x1 != id((-4096i16)) { bad += 1; }
+    if x1 < (-4096i16) { if !(x1 < id((-4096i16))) { bad += 1; } } else if x1 < id((-4096i16)) { bad += 1; }
+    if x1 <= (-4096i16) { if !(x1 <= id((-4096i16))) { bad += 1; } } else if x1 <= id((-4096i16)) { bad += 1; }
+    if x1 > (-4096i16) { if !(x1 > id((-4096i16))) { bad += 1; } } else if x1 > id((-4096i16)) { bad += 1; }
+    if x1 >= (-4096i16) { if !(x1 >= id((-4096i16))) { bad += 1; } } else if x1 >= id((-4096i16)) { bad += 1; }
+    if (x1 + (-4096i16)) != (x1 + id((-4096i16))) { bad += 1; }
+    if (x1 / (-4096i16)) != (x1 / id((-4096i16))) { bad += 1; }
+    if (x1 % (-4096i16)) != (x1 % id((-4096i16))) { bad += 1; }
+    if (x1 & (-1i16)) != (x1 & id((-1i16))) { bad += 1; }
+    if (x1 | (-1i16)) != (x1 | id((-1i16))) { bad += 1; }
+    if (x1 ^ (-1i16)) != (x1 ^ id((-1i16))) { bad += 1; }
+    if x1 == (-1i16) { if !(x1 == id((-1i16))) { bad += 1; } } else if x1 == id((-1i16)) { bad += 1; }
+    if x1 != (-1i16) { if !(x1 != id((-1i16))) { bad += 1; } } else if x1 != id((-1i16)) { bad += 1; }
+    if x1 < (-1i16) { if !(x1 < id((-1i16))) { bad += 1; } } else if x1 < id((-1i16)) { bad += 1; }
+    if x1 <= (-1i16) { if !(x1 <= id((-1i16))) { bad += 1; } } else if x1 <= id((-1i16)) { bad += 1; }
+    if x1 > (-1i16) { if !(x1 > id((-1i16))) { bad += 1; } } else if x1 > id((-1i16)) { bad += 1; }
+    if x1 >= (-1i16) { if !(x1 >= id((-1i16))) { bad += 1; } } else if x1 >= id((-1i16)) { bad += 1; }
+    if (x1 + (-1i16)) != (x1 + id((-1i16))) { bad += 1; }
+    if (x1 * (-1i16)) != (x1 * id((-1i16))) { bad += 1; }
+    if (x1 / (-1i16)) != (x1 / id((-1i16))) { bad += 1; }
+    if (x1 % (-1i16)) != (x1 % id((-1i16))) { bad += 1; }
+    if (x1 & 7i16) != (x1 & id(7i16)) { bad += 1; }
+    if (x1 | 7i16) != (x1 | id(7i16)) { bad += 1; }
+    if (x1 ^ 7i16) != (x1 ^ id(7i16)) { bad += 1; }
+    if x1 == 7i16 { if !(x1 == id(7i16)) { bad += 1; } } else if x1 == id(7i16) { bad += 1; }
+    if x1 != 7i16 { if !(x1 != id(7i16)) { bad += 1; } } else if x1 != id(7i16) { bad += 1; }
+    if x1 < 7i16 { if !(x1 < id(7i16)) { bad += 1; } } else if x1 < id(7i16) { bad += 1; }
+    if x1 <= 7i16 { if !(x1 <= id(7i16)) { bad += 1; } } else if x1 <= id(7i16) { bad += 1; }
+    if x1 > 7i16 { if !(x1 > id(7i16)) { bad += 1; } } else if x1 > id(7i16) { bad += 1; }
+    if x1 >= 7i16 { if !(x1 >= id(7i16)) { bad += 1; } } else if x1 >= id(7i16) { bad += 1; }
+    if (x1 - 7i16) != (x1 - id(7i16)) { bad += 1; }
+    if (x1 / 7i16) != (x1 / id(7i16)) { bad += 1; }
+    if (x1 % 7i16) != (x1 % id(7i16)) { bad += 1; }
+    if (x1 & 4095i16) != (x1 & id(4095i16)) { bad += 1; }
+    if (x1 | 4095i16) != (x1 | id(4095i16)) { bad += 1; }
+    if (x1 ^ 4095i16) != (x1 ^ id(4095i16)) { bad += 1; }
+    if x1 == 4095i16 { if !(x1 == id(4095i16)) { bad += 1; } } else if x1 == id(4095i16) { bad += 1; }
+    if x1 != 4095i16 { if !(x1 != id(4095i16)) { bad += 1; } } else if x1 != id(4095i16) { bad += 1; }
+    if x1 < 4095i16 { if !(x1 < id(4095i16)) { bad += 1; } } else if x1 < id(4095i16) { bad += 1; }
+    if x1 <= 4095i16 { if !(x1 <= id(4095i16)) { bad += 1; } } else if x1 <= id(4095i16) { bad += 1; }
+    if x1 > 4095i16 { if !(x1 > id(4095i16)) { bad += 1; } } else if x1 > id(4095i16) { bad += 1; }
+    if x1 >= 4095i16 { if !(x1 >= id(4095i16)) { bad += 1; } } else if x1 >= id(4095i16) { bad += 1; }
+    if (x1 - 4095i16) != (x1 - id(4095i16)) { bad += 1; }
+    if (x1 / 4095i16) != (x1 / id(4095i16)) { bad += 1; }
+    if (x1 % 4095i16) != (x1 % id(4095i16)) { bad += 1; }
+    if (x1 & 4097i16) != (x1 & id(4097i16)) { bad += 1; }
+    if (x1 | 4097i16) != (x1 | id(4097i16)) { bad += 1; }
+    if (x1 ^ 4097i16) != (x1 ^ id(4097i16)) { bad += 1; }
+    if x1 == 4097i16 { if !(x1 == id(4097i16)) { bad += 1; } } else if x1 == id(4097i16) { bad += 1; }
+    if x1 != 4097i16 { if !(x1 != id(4097i16)) { bad += 1; } } else if x1 != id(4097i16) { bad += 1; }
+    if x1 < 4097i16 { if !(x1 < id(4097i16)) { bad += 1; } } else if x1 < id(4097i16) { bad += 1; }
+    if x1 <= 4097i16 { if !(x1 <= id(4097i16)) { bad += 1; } } else if x1 <= id(4097i16) { bad += 1; }
+    if x1 > 4097i16 { if !(x1 > id(4097i16)) { bad += 1; } } else if x1 > id(4097i16) { bad += 1; }
+    if x1 >= 4097i16 { if !(x1 >= id(4097i16)) { bad += 1; } } else if x1 >= id(4097i16) { bad += 1; }
+    if (x1 - 4097i16) != (x1 - id(4097i16)) { bad += 1; }
+    if (x1 / 4097i16) != (x1 / id(4097i16)) { bad += 1; }
+    if (x1 % 4097i16) != (x1 % id(4097i16)) { bad += 1; }
+    if (x1 & 16384i16) != (x1 & id(16384i16)) { bad += 1; }
+    if (x1 | 16384i16) != (x1 | id(16384i16)) { bad += 1; }
+    if (x1 ^ 16384i16) != (x1 ^ id(16384i16)) { bad += 1; }
+    if x1 == 16384i16 { if !(x1 == id(16384i16)) { bad += 1; } } else if x1 == id(16384i16) { bad += 1; }
+    if x1 != 16384i16 { if !(x1 != id(16384i16)) { bad += 1; } } else if x1 != id(16384i16) { bad += 1; }
+    if x1 < 16384i16 { if !(x1 < id(16384i16)) { bad += 1; } } else if x1 < id(16384i16) { bad += 1; }
+    if x1 <= 16384i16 { if !(x1 <= id(16384i16)) { bad += 1; } } else if x1 <= id(16384i16) { bad += 1; }
+    if x1 > 16384i16 { if !(x1 > id(16384i16)) { bad += 1; } } else if x1 > id(16384i16) { bad += 1; }
+    if x1 >= 16384i16 { if !(x1 >= id(16384i16)) { bad += 1; } } else if x1 >= id(16384i16) { bad += 1; }
+    if (x1 - 16384i16) != (x1 - id(16384i16)) { bad += 1; }
+    if (x1 / 16384i16) != (x1 / id(16384i16)) { bad += 1; }
+    if (x1 % 16384i16) != (x1 % id(16384i16)) { bad += 1; }
+    if (x1 & 32767i16) != (x1 & id(32767i16)) { bad += 1; }
+    if (x1 | 32767i16) != (x1 | id(32767i16)) { bad += 1; }
+    if (x1 ^ 32767i16) != (x1 ^ id(32767i16)) { bad += 1; }
+    if x1 == 32767i16 { if !(x1 == id(32767i16)) { bad += 1; } } else if x1 == id(32767i16) { bad += 1; }
+    if x1 != 32767i16 { if !(x1 != id(32767i16)) { bad += 1; } } else if x1 != id(32767i16) { bad += 1; }
+    if x1 < 32767i16 { if !(x1 < id(32767i16)) { bad += 1; } } else if x1 < id(32767i16) { bad += 1; }
+    if x1 <= 32767i16 { if !(x1 <= id(32767i16)) { bad += 1; } } else if x1 <= id(32767i16) { bad += 1; }
+    if x1 > 32767i16 { if !(x1 > id(32767i16)) { bad += 1; } } else if x1 > id(32767i16) { bad += 1; }
+    if x1 >= 32767i16 { if !(x1 >= id(32767i16)) { bad += 1; } } else if x1 >= id(32767i16) { bad += 1; }
+    if (x1 - 32767i16) != (x1 - id(32767i16)) { bad += 1; }
+    if (x1 / 32767i16) != (x1 / id(32767i16)) { bad += 1; }
+    if (x1 % 32767i16) != (x1 % id(32767i16)) { bad += 1; }
+    if (x1 >> 0i16) != (x1 >> id(0i16)) { bad += 1; }
+    if (x1 & 32767i16) << 0i16 != (x1 & 32767i16) << id(0i16) { bad += 1; }
+    if (x1 >> 1i16) != (x1 >> id(1i16)) { bad += 1; }
+    if (x1 & 16383i16) << 1i16 != (x1 & 16383i16) << id(1i16) { bad += 1; }
+    if (x1 >> 3i16) != (x1 >> id(3i16)) { bad += 1; }
+    if (x1 & 4095i16) << 3i16 != (x1 & 4095i16) << id(3i16) { bad += 1; }
+    if (x1 >> 8i16) != (x1 >> id(8i16)) { bad += 1; }
+    if (x1 & 127i16) << 8i16 != (x1 & 127i16) << id(8i16) { bad += 1; }
+    if (x1 >> 15i16) != (x1 >> id(15i16)) { bad += 1; }
+    if (x1 & 0i16) << 15i16 != (x1 & 0i16) << id(15i16) { bad += 1; }
+    if (x2 & i16::MIN) != (x2 & id(i16::MIN)) { bad += 1; }
+    if (x2 | i16::MIN) != (x2 | id(i16::MIN)) { bad += 1; }
+    if (x2 ^ i16::MIN) != (x2 ^ id(i16::MIN)) { bad += 1; }
+    if x2 == i16::MIN { if !(x2 == id(i16::MIN)) { bad += 1; } } else if x2 == id(i16::MIN) { bad += 1; }
+    if x2 != i16::MIN { if !(x2 != id(i16::MIN)) { bad += 1; } } else if x2 != id(i16::MIN) { bad += 1; }
+    if x2 < i16::MIN { if !(x2 < id(i16::MIN)) { bad += 1; } } else if x2 < id(i16::MIN) { bad += 1; }
+    if x2 <= i16::MIN { if !(x2 <= id(i16::MIN)) { bad += 1; } } else if x2 <= id(i16::MIN) { bad += 1; }
+    if x2 > i16::MIN { if !(x2 > id(i16::MIN)) { bad += 1; } } else if x2 > id(i16::MIN) { bad += 1; }
+    if x2 >= i16::MIN { if !(x2 >= id(i16::MIN)) { bad += 1; } } else if x2 >= id(i16::MIN) { bad += 1; }
+    if (x2 + i16::MIN) != (x2 + id(i16::MIN)) { bad += 1; }
+    if (x2 / i16::MIN) != (x2 / id(i16::MIN)) { bad += 1; }
+    if (x2 % i16::MIN) != (x2 % id(i16::MIN)) { bad += 1; }
+    if (x2 & (-4096i16)) != (x2 & id((-4096i16))) { bad += 1; }
+    if (x2 | (-4096i16)) != (x2 | id((-4096i16))) { bad += 1; }
+    if (x2 ^ (-4096i16)) != (x2 ^ id((-4096i16))) { bad += 1; }
+    if x2 == (-4096i16) { if !(x2 == id((-4096i16))) { bad += 1; } } else if x2 == id((-4096i16)) { bad += 1; }
+    if x2 != (-4096i16) { if !(x2 != id((-4096i16))) { bad += 1; } } else if x2 != id((-4096i16)) { bad += 1; }
+    if x2 < (-4096i16) { if !(x2 < id((-4096i16))) { bad += 1; } } else if x2 < id((-4096i16)) { bad += 1; }
+    if x2 <= (-4096i16) { if !(x2 <= id((-4096i16))) { bad += 1; } } else if x2 <= id((-4096i16)) { bad += 1; }
+    if x2 > (-4096i16) { if !(x2 > id((-4096i16))) { bad += 1; } } else if x2 > id((-4096i16)) { bad += 1; }
+    if x2 >= (-4096i16) { if !(x2 >= id((-4096i16))) { bad += 1; } } else if x2 >= id((-4096i16)) { bad += 1; }
+    if (x2 + (-4096i16)) != (x2 + id((-4096i16))) { bad += 1; }
+    if (x2 - (-4096i16)) != (x2 - id((-4096i16))) { bad += 1; }
+    if (x2 / (-4096i16)) != (x2 / id((-4096i16))) { bad += 1; }
+    if (x2 % (-4096i16)) != (x2 % id((-4096i16))) { bad += 1; }
+    if (x2 & (-1i16)) != (x2 & id((-1i16))) { bad += 1; }
+    if (x2 | (-1i16)) != (x2 | id((-1i16))) { bad += 1; }
+    if (x2 ^ (-1i16)) != (x2 ^ id((-1i16))) { bad += 1; }
+    if x2 == (-1i16) { if !(x2 == id((-1i16))) { bad += 1; } } else if x2 == id((-1i16)) { bad += 1; }
+    if x2 != (-1i16) { if !(x2 != id((-1i16))) { bad += 1; } } else if x2 != id((-1i16)) { bad += 1; }
+    if x2 < (-1i16) { if !(x2 < id((-1i16))) { bad += 1; } } else if x2 < id((-1i16)) { bad += 1; }
+    if x2 <= (-1i16) { if !(x2 <= id((-1i16))) { bad += 1; } } else if x2 <= id((-1i16)) { bad += 1; }
+    if x2 > (-1i16) { if !(x2 > id((-1i16))) { bad += 1; } } else if x2 > id((-1i16)) { bad += 1; }
+    if x2 >= (-1i16) { if !(x2 >= id((-1i16))) { bad += 1; } } else if x2 >= id((-1i16)) { bad += 1; }
+    if (x2 + (-1i16)) != (x2 + id((-1i16))) { bad += 1; }
+    if (x2 - (-1i16)) != (x2 - id((-1i16))) { bad += 1; }
+    if (x2 * (-1i16)) != (x2 * id((-1i16))) { bad += 1; }
+    if (x2 / (-1i16)) != (x2 / id((-1i16))) { bad += 1; }
+    if (x2 % (-1i16)) != (x2 % id((-1i16))) { bad += 1; }
+    if (x2 & 7i16) != (x2 & id(7i16)) { bad += 1; }
+    if (x2 | 7i16) != (x2 | id(7i16)) { bad += 1; }
+    if (x2 ^ 7i16) != (x2 ^ id(7i16)) { bad += 1; }
+    if x2 == 7i16 { if !(x2 == id(7i16)) { bad += 1; } } else if x2 == id(7i16) { bad += 1; }
+    if x2 != 7i16 { if !(x2 != id(7i16)) { bad += 1; } } else if x2 != id(7i16) { bad += 1; }
+    if x2 < 7i16 { if !(x2 < id(7i16)) { bad += 1; } } else if x2 < id(7i16) { bad += 1; }
+    if x2 <= 7i16 { if !(x2 <= id(7i16)) { bad += 1; } } else if x2 <= id(7i16) { bad += 1; }
+    if x2 > 7i16 { if !(x2 > id(7i16)) { bad += 1; } } else if x2 > id(7i16) { bad += 1; }
+    if x2 >= 7i16 { if !(x2 >= id(7i16)) { bad += 1; } } else if x2 >= id(7i16) { bad += 1; }
+    if (x2 + 7i16) != (x2 + id(7i16)) { bad += 1; }
+    if (x2 - 7i16) != (x2 - id(7i16)) { bad += 1; }
+    if (x2 / 7i16) != (x2 / id(7i16)) { bad += 1; }
+    if (x2 % 7i16) != (x2 % id(7i16)) { bad += 1; }
+    if (x2 & 4095i16) != (x2 & id(4095i16)) { bad += 1; }
+    if (x2 | 4095i16) != (x2 | id(4095i16)) { bad += 1; }
+    if (x2 ^ 4095i16) != (x2 ^ id(4095i16)) { bad += 1; }
+    if x2 == 4095i16 { if !(x2 == id(4095i16)) { bad += 1; } } else if x2 == id(4095i16) { bad += 1; }
+    if x2 != 4095i16 { if !(x2 != id(4095i16)) { bad += 1; } } else if x2 != id(4095i16) { bad += 1; }
+    if x2 < 4095i16 { if !(x2 < id(4095i16)) { bad += 1; } } else if x2 < id(4095i16) { bad += 1; }
+    if x2 <= 4095i16 { if !(x2 <= id(4095i16)) { bad += 1; } } else if x2 <= id(4095i16) { bad += 1; }
+    if x2 > 4095i16 { if !(x2 > id(4095i16)) { bad += 1; } } else if x2 > id(4095i16) { bad += 1; }
+    if x2 >= 4095i16 { if !(x2 >= id(4095i16)) { bad += 1; } } else if x2 >= id(4095i16) { bad += 1; }
+    if (x2 + 4095i16) != (x2 + id(4095i16)) { bad += 1; }
+    if (x2 - 4095i16) != (x2 - id(4095i16)) { bad += 1; }
+    if (x2 / 4095i16) != (x2 / id(4095i16)) { bad += 1; }
+    if (x2 % 4095i16) != (x2 % id(4095i16)) { bad += 1; }
+    if (x2 & 4097i16) != (x2 & id(4097i16)) { bad += 1; }
+    if (x2 | 4097i16) != (x2 | id(4097i16)) { bad += 1; }
+    if (x2 ^ 4097i16) != (x2 ^ id(4097i16)) { bad += 1; }
+    if x2 == 4097i16 { if !(x2 == id(4097i16)) { bad += 1; } } else if x2 == id(4097i16) { bad += 1; }
+    if x2 != 4097i16 { if !(x2 != id(4097i16)) { bad += 1; } } else if x2 != id(4097i16) { bad += 1; }
+    if x2 < 4097i16 { if !(x2 < id(4097i16)) { bad += 1; } } else if x2 < id(4097i16) { bad += 1; }
+    if x2 <= 4097i16 { if !(x2 <= id(4097i16)) { bad += 1; } } else if x2 <= id(4097i16) { bad += 1; }
+    if x2 > 4097i16 { if !(x2 > id(4097i16)) { bad += 1; } } else if x2 > id(4097i16) { bad += 1; }
+    if x2 >= 4097i16 { if !(x2 >= id(4097i16)) { bad += 1; } } else if x2 >= id(4097i16) { bad += 1; }
+    if (x2 + 4097i16) != (x2 + id(4097i16)) { bad += 1; }
+    if (x2 - 4097i16) != (x2 - id(4097i16)) { bad += 1; }
+    if (x2 / 4097i16) != (x2 / id(4097i16)) { bad += 1; }
+    if (x2 % 4097i16) != (x2 % id(4097i16)) { bad += 1; }
+    if (x2 & 16384i16) != (x2 & id(16384i16)) { bad += 1; }
+    if (x2 | 16384i16) != (x2 | id(16384i16)) { bad += 1; }
+    if (x2 ^ 16384i16) != (x2 ^ id(16384i16)) { bad += 1; }
+    if x2 == 16384i16 { if !(x2 == id(16384i16)) { bad += 1; } } else if x2 == id(16384i16) { bad += 1; }
+    if x2 != 16384i16 { if !(x2 != id(16384i16)) { bad += 1; } } else if x2 != id(16384i16) { bad += 1; }
+    if x2 < 16384i16 { if !(x2 < id(16384i16)) { bad += 1; } } else if x2 < id(16384i16) { bad += 1; }
+    if x2 <= 16384i16 { if !(x2 <= id(16384i16)) { bad += 1; } } else if x2 <= id(16384i16) { bad += 1; }
+    if x2 > 16384i16 { if !(x2 > id(16384i16)) { bad += 1; } } else if x2 > id(16384i16) { bad += 1; }
+    if x2 >= 16384i16 { if !(x2 >= id(16384i16)) { bad += 1; } } else if x2 >= id(16384i16) { bad += 1; }
+    if (x2 + 16384i16) != (x2 + id(16384i16)) { bad += 1; }
+    if (x2 - 16384i16) != (x2 - id(16384i16)) { bad += 1; }
+    if (x2 / 16384i16) != (x2 / id(16384i16)) { bad += 1; }
+    if (x2 % 16384i16) != (x2 % id(16384i16)) { bad += 1; }
+    if (x2 & 32767i16) != (x2 & id(32767i16)) { bad += 1; }
+    if (x2 | 32767i16) != (x2 | id(32767i16)) { bad += 1; }
+    if (x2 ^ 32767i16) != (x2 ^ id(32767i16)) { bad += 1; }
+    if x2 == 32767i16 { if !(x2 == id(32767i16)) { bad += 1; } } else if x2 == id(32767i16) { bad += 1; }
+    if x2 != 32767i16 { if !(x2 != id(32767i16)) { bad += 1; } } else if x2 != id(32767i16) { bad += 1; }
+    if x2 < 32767i16 { if !(x2 < id(32767i16)) { bad += 1; } } else if x2 < id(32767i16) { bad += 1; }
+    if x2 <= 32767i16 { if !(x2 <= id(32767i16)) { bad += 1; } } else if x2 <= id(32767i16) { bad += 1; }
+    if x2 > 32767i16 { if !(x2 > id(32767i16)) { bad += 1; } } else if x2 > id(32767i16) { bad += 1; }
+    if x2 >= 32767i16 { if !(x2 >= id(32767i16)) { bad += 1; } } else if x2 >= id(32767i16) { bad += 1; }
+    if (x2 - 32767i16) != (x2 - id(32767i16)) { bad += 1; }
+    if (x2 / 32767i16) != (x2 / id(32767i16)) { bad += 1; }
+    if (x2 % 32767i16) != (x2 % id(32767i16)) { bad += 1; }
+    if (x2 >> 0i16) != (x2 >> id(0i16)) { bad += 1; }
+    if (x2 & 32767i16) << 0i16 != (x2 & 32767i16) << id(0i16) { bad += 1; }
+    if (x2 >> 1i16) != (x2 >> id(1i16)) { bad += 1; }
+    if (x2 & 16383i16) << 1i16 != (x2 & 16383i16) << id(1i16) { bad += 1; }
+    if (x2 >> 3i16) != (x2 >> id(3i16)) { bad += 1; }
+    if (x2 & 4095i16) << 3i16 != (x2 & 4095i16) << id(3i16) { bad += 1; }
+    if (x2 >> 8i16) != (x2 >> id(8i16)) { bad += 1; }
+    if (x2 & 127i16) << 8i16 != (x2 & 127i16) << id(8i16) { bad += 1; }
+    if (x2 >> 15i16) != (x2 >> id(15i16)) { bad += 1; }
+    if (x2 & 0i16) << 15i16 != (x2 & 0i16) << id(15i16) { bad += 1; }
+    if (x3 & i16::MIN) != (x3 & id(i16::MIN)) { bad += 1; }
+    if (x3 | i16::MIN) != (x3 | id(i16::MIN)) { bad += 1; }
+    if (x3 ^ i16::MIN) != (x3 ^ id(i16::MIN)) { bad += 1; }
+    if x3 == i16::MIN { if !(x3 == id(i16::MIN)) { bad += 1; } } else if x3 == id(i16::MIN) { bad += 1; }
+    if x3 != i16::MIN { if !(x3 != id(i16::MIN)) { bad += 1; } } else if x3 != id(i16::MIN) { bad += 1; }
+    if x3 < i16::MIN { if !(x3 < id(i16::MIN)) { bad += 1; } } else if x3 < id(i16::MIN) { bad += 1; }
+    if x3 <= i16::MIN { if !(x3 <= id(i16::MIN)) { bad += 1; } } else if x3 <= id(i16::MIN) { bad += 1; }
+    if x3 > i16::MIN { if !(x3 > id(i16::MIN)) { bad += 1; } } else if x3 > id(i16::MIN) { bad += 1; }
+    if x3 >= i16::MIN { if !(x3 >= id(i16::MIN)) { bad += 1; } } else if x3 >= id(i16::MIN) { bad += 1; }
+    if (x3 - i16::MIN) != (x3 - id(i16::MIN)) { bad += 1; }
+    if (x3 / i16::MIN) != (x3 / id(i16::MIN)) { bad += 1; }
+    if (x3 % i16::MIN) != (x3 % id(i16::MIN)) { bad += 1; }
+    if (x3 & (-4096i16)) != (x3 & id((-4096i16))) { bad += 1; }
+    if (x3 | (-4096i16)) != (x3 | id((-4096i16))) { bad += 1; }
+    if (x3 ^ (-4096i16)) != (x3 ^ id((-4096i16))) { bad += 1; }
+    if x3 == (-4096i16) { if !(x3 == id((-4096i16))) { bad += 1; } } else if x3 == id((-4096i16)) { bad += 1; }
+    if x3 != (-4096i16) { if !(x3 != id((-4096i16))) { bad += 1; } } else if x3 != id((-4096i16)) { bad += 1; }
+    if x3 < (-4096i16) { if !(x3 < id((-4096i16))) { bad += 1; } } else if x3 < id((-4096i16)) { bad += 1; }
+    if x3 <= (-4096i16) { if !(x3 <= id((-4096i16))) { bad += 1; } } else if x3 <= id((-4096i16)) { bad += 1; }
+    if x3 > (-4096i16) { if !(x3 > id((-4096i16))) { bad += 1; } } else if x3 > id((-4096i16)) { bad += 1; }
+    if x3 >= (-4096i16) { if !(x3 >= id((-4096i16))) { bad += 1; } } else if x3 >= id((-4096i16)) { bad += 1; }
+    if (x3 + (-4096i16)) != (x3 + id((-4096i16))) { bad += 1; }
+    if (x3 - (-4096i16)) != (x3 - id((-4096i16))) { bad += 1; }
+    if (x3 * (-4096i16)) != (x3 * id((-4096i16))) { bad += 1; }
+    if (x3 / (-4096i16)) != (x3 / id((-4096i16))) { bad += 1; }
+    if (x3 % (-4096i16)) != (x3 % id((-4096i16))) { bad += 1; }
+    if (x3 & (-1i16)) != (x3 & id((-1i16))) { bad += 1; }
+    if (x3 | (-1i16)) != (x3 | id((-1i16))) { bad += 1; }
+    if (x3 ^ (-1i16)) != (x3 ^ id((-1i16))) { bad += 1; }
+    if x3 == (-1i16) { if !(x3 == id((-1i16))) { bad += 1; } } else if x3 == id((-1i16)) { bad += 1; }
+    if x3 != (-1i16) { if !(x3 != id((-1i16))) { bad += 1; } } else if x3 != id((-1i16)) { bad += 1; }
+    if x3 < (-1i16) { if !(x3 < id((-1i16))) { bad += 1; } } else if x3 < id((-1i16)) { bad += 1; }
+    if x3 <= (-1i16) { if !(x3 <= id((-1i16))) { bad += 1; } } else if x3 <= id((-1i16)) { bad += 1; }
+    if x3 > (-1i16) { if !(x3 > id((-1i16))) { bad += 1; } } else if x3 > id((-1i16)) { bad += 1; }
+    if x3 >= (-1i16) { if !(x3 >= id((-1i16))) { bad += 1; } } else if x3 >= id((-1i16)) { bad += 1; }
+    if (x3 + (-1i16)) != (x3 + id((-1i16))) { bad += 1; }
+    if (x3 - (-1i16)) != (x3 - id((-1i16))) { bad += 1; }
+    if (x3 * (-1i16)) != (x3 * id((-1i16))) { bad += 1; }
+    if (x3 / (-1i16)) != (x3 / id((-1i16))) { bad += 1; }
+    if (x3 % (-1i16)) != (x3 % id((-1i16))) { bad += 1; }
+    if (x3 & 7i16) != (x3 & id(7i16)) { bad += 1; }
+    if (x3 | 7i16) != (x3 | id(7i16)) { bad += 1; }
+    if (x3 ^ 7i16) != (x3 ^ id(7i16)) { bad += 1; }
+    if x3 == 7i16 { if !(x3 == id(7i16)) { bad += 1; } } else if x3 == id(7i16) { bad += 1; }
+    if x3 != 7i16 { if !(x3 != id(7i16)) { bad += 1; } } else if x3 != id(7i16) { bad += 1; }
+    if x3 < 7i16 { if !(x3 < id(7i16)) { bad += 1; } } else if x3 < id(7i16) { bad += 1; }
+    if x3 <= 7i16 { if !(x3 <= id(7i16)) { bad += 1; } } else if x3 <= id(7i16) { bad += 1; }
+    if x3 > 7i16 { if !(x3 > id(7i16)) { bad += 1; } } else if x3 > id(7i16) { bad += 1; }
+    if x3 >= 7i16 { if !(x3 >= id(7i16)) { bad += 1; } } else if x3 >= id(7i16) { bad += 1; }
+    if (x3 + 7i16) != (x3 + id(7i16)) { bad += 1; }
+    if (x3 - 7i16) != (x3 - id(7i16)) { bad += 1; }
+    if (x3 * 7i16) != (x3 * id(7i16)) { bad += 1; }
+    if (x3 / 7i16) != (x3 / id(7i16)) { bad += 1; }
+    if (x3 % 7i16) != (x3 % id(7i16)) { bad += 1; }
+    if (x3 & 4095i16) != (x3 & id(4095i16)) { bad += 1; }
+    if (x3 | 4095i16) != (x3 | id(4095i16)) { bad += 1; }
+    if (x3 ^ 4095i16) != (x3 ^ id(4095i16)) { bad += 1; }
+    if x3 == 4095i16 { if !(x3 == id(4095i16)) { bad += 1; } } else if x3 == id(4095i16) { bad += 1; }
+    if x3 != 4095i16 { if !(x3 != id(4095i16)) { bad += 1; } } else if x3 != id(4095i16) { bad += 1; }
+    if x3 < 4095i16 { if !(x3 < id(4095i16)) { bad += 1; } } else if x3 < id(4095i16) { bad += 1; }
+    if x3 <= 4095i16 { if !(x3 <= id(4095i16)) { bad += 1; } } else if x3 <= id(4095i16) { bad += 1; }
+    if x3 > 4095i16 { if !(x3 > id(4095i16)) { bad += 1; } } else if x3 > id(4095i16) { bad += 1; }
+    if x3 >= 4095i16 { if !(x3 >= id(4095i16)) { bad += 1; } } else if x3 >= id(4095i16) { bad += 1; }
+    if (x3 + 4095i16) != (x3 + id(4095i16)) { bad += 1; }
+    if (x3 - 4095i16) != (x3 - id(4095i16)) { bad += 1; }
+    if (x3 * 4095i16) != (x3 * id(4095i16)) { bad += 1; }
+    if (x3 / 4095i16) != (x3 / id(4095i16)) { bad += 1; }
+    if (x3 % 4095i16) != (x3 % id(4095i16)) { bad += 1; }
+    if (x3 & 4097i16) != (x3 & id(4097i16)) { bad += 1; }
+    if (x3 | 4097i16) != (x3 | id(4097i16)) { bad += 1; }
+    if (x3 ^ 4097i16) != (x3 ^ id(4097i16)) { bad += 1; }
+    if x3 == 4097i16 { if !(x3 == id(4097i16)) { bad += 1; } } else if x3 == id(4097i16) { bad += 1; }
+    if x3 != 4097i16 { if !(x3 != id(4097i16)) { bad += 1; } } else if x3 != id(4097i16) { bad += 1; }
+    if x3 < 4097i16 { if !(x3 < id(4097i16)) { bad += 1; } } else if x3 < id(4097i16) { bad += 1; }
+    if x3 <= 4097i16 { if !(x3 <= id(4097i16)) { bad += 1; } } else if x3 <= id(4097i16) { bad += 1; }
+    if x3 > 4097i16 { if !(x3 > id(4097i16)) { bad += 1; } } else if x3 > id(4097i16) { bad += 1; }
+    if x3 >= 4097i16 { if !(x3 >= id(4097i16)) { bad += 1; } } else if x3 >= id(4097i16) { bad += 1; }
+    if (x3 + 4097i16) != (x3 + id(4097i16)) { bad += 1; }
+    if (x3 - 4097i16) != (x3 - id(4097i16)) { bad += 1; }
+    if (x3 * 4097i16) != (x3 * id(4097i16)) { bad += 1; }
+    if (x3 / 4097i16) != (x3 / id(4097i16)) { bad += 1; }
+    if (x3 % 4097i16) != (x3 % id(4097i16)) { bad += 1; }
+    if (x3 & 16384i16) != (x3 & id(16384i16)) { bad += 1; }
+    if (x3 | 16384i16) != (x3 | id(16384i16)) { bad += 1; }
+    if (x3 ^ 16384i16) != (x3 ^ id(16384i16)) { bad += 1; }
+    if x3 == 16384i16 { if !(x3 == id(16384i16)) { bad += 1; } } else if x3 == id(16384i16) { bad += 1; }
+    if x3 != 16384i16 { if !(x3 != id(16384i16)) { bad += 1; } } else if x3 != id(16384i16) { bad += 1; }
+    if x3 < 16384i16 { if !(x3 < id(16384i16)) { bad += 1; } } else if x3 < id(16384i16) { bad += 1; }
+    if x3 <= 16384i16 { if !(x3 <= id(16384i16)) { bad += 1; } } else if x3 <= id(16384i16) { bad += 1; }
+    if x3 > 16384i16 { if !(x3 > id(16384i16)) { bad += 1; } } else if x3 > id(16384i16) { bad += 1; }
+    if x3 >= 16384i16 { if !(x3 >= id(16384i16)) { bad += 1; } } else if x3 >= id(16384i16) { bad += 1; }
+    if (x3 + 16384i16) != (x3 + id(16384i16)) { bad += 1; }
+    if (x3 - 16384i16) != (x3 - id(16384i16)) { bad += 1; }
+    if (x3 / 16384i16) != (x3 / id(16384i16)) { bad += 1; }
+    if (x3 % 16384i16) != (x3 % id(16384i16)) { bad += 1; }
+    if (x3 & 32767i16) != (x3 & id(32767i16)) { bad += 1; }
+    if (x3 | 32767i16) != (x3 | id(32767i16)) { bad += 1; }
+    if (x3 ^ 32767i16) != (x3 ^ id(32767i16)) { bad += 1; }
+    if x3 == 32767i16 { if !(x3 == id(32767i16)) { bad += 1; } } else if x3 == id(32767i16) { bad += 1; }
+    if x3 != 32767i16 { if !(x3 != id(32767i16)) { bad += 1; } } else if x3 != id(32767i16) { bad += 1; }
+    if x3 < 32767i16 { if !(x3 < id(32767i16)) { bad += 1; } } else if x3 < id(32767i16) { bad += 1; }
+    if x3 <= 32767i16 { if !(x3 <= id(32767i16)) { bad += 1; } } else if x3 <= id(32767i16) { bad += 1; }
+    if x3 > 32767i16 { if !(x3 > id(32767i16)) { bad += 1; } } else if x3 > id(32767i16) { bad += 1; }
+    if x3 >= 32767i16 { if !(x3 >= id(32767i16)) { bad += 1; } } else if x3 >= id(32767i16) { bad += 1; }
+    if (x3 + 32767i16) != (x3 + id(32767i16)) { bad += 1; }
+    if (x3 / 32767i16) != (x3 / id(32767i16)) { bad += 1; }
+    if (x3 % 32767i16) != (x3 % id(32767i16)) { bad += 1; }
+    if (x3 >> 0i16) != (x3 >> id(0i16)) { bad += 1; }
+    if (x3 & 32767i16) << 0i16 != (x3 & 32767i16) << id(0i16) { bad += 1; }
+    if (x3 >> 1i16) != (x3 >> id(1i16)) { bad += 1; }
+    if (x3 & 16383i16) << 1i16 != (x3 & 16383i16) << id(1i16) { bad += 1; }
+    if (x3 >> 3i16) != (x3 >> id(3i16)) { bad += 1; }
+    if (x3 & 4095i16) << 3i16 != (x3 & 4095i16) << id(3i16) { bad += 1; }
+    if (x3 >> 8i16) != (x3 >> id(8i16)) { bad += 1; }
+    if (x3 & 127i16) << 8i16 != (x3 & 127i16) << id(8i16) { bad += 1; }
+    if (x3 >> 15i16) != (x3 >> id(15i16)) { bad += 1; }
+    if (x3 & 0i16) << 15i16 != (x3 & 0i16) << id(15i16) { bad += 1; }
+    return bad;
+}
+
+fn check_u16() -> i64 {
+    let bad: i64 = 0;
+    let x0 = id(0u16);
+    let x1 = id(65535u16);
+    let x2 = id(21845u16);
+    if (x0 & 7u16) != (x0 & id(7u16)) { bad += 1; }
+    if (x0 | 7u16) != (x0 | id(7u16)) { bad += 1; }
+    if (x0 ^ 7u16) != (x0 ^ id(7u16)) { bad += 1; }
+    if x0 == 7u16 { if !(x0 == id(7u16)) { bad += 1; } } else if x0 == id(7u16) { bad += 1; }
+    if x0 != 7u16 { if !(x0 != id(7u16)) { bad += 1; } } else if x0 != id(7u16) { bad += 1; }
+    if x0 < 7u16 { if !(x0 < id(7u16)) { bad += 1; } } else if x0 < id(7u16) { bad += 1; }
+    if x0 <= 7u16 { if !(x0 <= id(7u16)) { bad += 1; } } else if x0 <= id(7u16) { bad += 1; }
+    if x0 > 7u16 { if !(x0 > id(7u16)) { bad += 1; } } else if x0 > id(7u16) { bad += 1; }
+    if x0 >= 7u16 { if !(x0 >= id(7u16)) { bad += 1; } } else if x0 >= id(7u16) { bad += 1; }
+    if (x0 + 7u16) != (x0 + id(7u16)) { bad += 1; }
+    if (x0 * 7u16) != (x0 * id(7u16)) { bad += 1; }
+    if (x0 / 7u16) != (x0 / id(7u16)) { bad += 1; }
+    if (x0 % 7u16) != (x0 % id(7u16)) { bad += 1; }
+    if (x0 & 4095u16) != (x0 & id(4095u16)) { bad += 1; }
+    if (x0 | 4095u16) != (x0 | id(4095u16)) { bad += 1; }
+    if (x0 ^ 4095u16) != (x0 ^ id(4095u16)) { bad += 1; }
+    if x0 == 4095u16 { if !(x0 == id(4095u16)) { bad += 1; } } else if x0 == id(4095u16) { bad += 1; }
+    if x0 != 4095u16 { if !(x0 != id(4095u16)) { bad += 1; } } else if x0 != id(4095u16) { bad += 1; }
+    if x0 < 4095u16 { if !(x0 < id(4095u16)) { bad += 1; } } else if x0 < id(4095u16) { bad += 1; }
+    if x0 <= 4095u16 { if !(x0 <= id(4095u16)) { bad += 1; } } else if x0 <= id(4095u16) { bad += 1; }
+    if x0 > 4095u16 { if !(x0 > id(4095u16)) { bad += 1; } } else if x0 > id(4095u16) { bad += 1; }
+    if x0 >= 4095u16 { if !(x0 >= id(4095u16)) { bad += 1; } } else if x0 >= id(4095u16) { bad += 1; }
+    if (x0 + 4095u16) != (x0 + id(4095u16)) { bad += 1; }
+    if (x0 * 4095u16) != (x0 * id(4095u16)) { bad += 1; }
+    if (x0 / 4095u16) != (x0 / id(4095u16)) { bad += 1; }
+    if (x0 % 4095u16) != (x0 % id(4095u16)) { bad += 1; }
+    if (x0 & 4097u16) != (x0 & id(4097u16)) { bad += 1; }
+    if (x0 | 4097u16) != (x0 | id(4097u16)) { bad += 1; }
+    if (x0 ^ 4097u16) != (x0 ^ id(4097u16)) { bad += 1; }
+    if x0 == 4097u16 { if !(x0 == id(4097u16)) { bad += 1; } } else if x0 == id(4097u16) { bad += 1; }
+    if x0 != 4097u16 { if !(x0 != id(4097u16)) { bad += 1; } } else if x0 != id(4097u16) { bad += 1; }
+    if x0 < 4097u16 { if !(x0 < id(4097u16)) { bad += 1; } } else if x0 < id(4097u16) { bad += 1; }
+    if x0 <= 4097u16 { if !(x0 <= id(4097u16)) { bad += 1; } } else if x0 <= id(4097u16) { bad += 1; }
+    if x0 > 4097u16 { if !(x0 > id(4097u16)) { bad += 1; } } else if x0 > id(4097u16) { bad += 1; }
+    if x0 >= 4097u16 { if !(x0 >= id(4097u16)) { bad += 1; } } else if x0 >= id(4097u16) { bad += 1; }
+    if (x0 + 4097u16) != (x0 + id(4097u16)) { bad += 1; }
+    if (x0 * 4097u16) != (x0 * id(4097u16)) { bad += 1; }
+    if (x0 / 4097u16) != (x0 / id(4097u16)) { bad += 1; }
+    if (x0 % 4097u16) != (x0 % id(4097u16)) { bad += 1; }
+    if (x0 & 16384u16) != (x0 & id(16384u16)) { bad += 1; }
+    if (x0 | 16384u16) != (x0 | id(16384u16)) { bad += 1; }
+    if (x0 ^ 16384u16) != (x0 ^ id(16384u16)) { bad += 1; }
+    if x0 == 16384u16 { if !(x0 == id(16384u16)) { bad += 1; } } else if x0 == id(16384u16) { bad += 1; }
+    if x0 != 16384u16 { if !(x0 != id(16384u16)) { bad += 1; } } else if x0 != id(16384u16) { bad += 1; }
+    if x0 < 16384u16 { if !(x0 < id(16384u16)) { bad += 1; } } else if x0 < id(16384u16) { bad += 1; }
+    if x0 <= 16384u16 { if !(x0 <= id(16384u16)) { bad += 1; } } else if x0 <= id(16384u16) { bad += 1; }
+    if x0 > 16384u16 { if !(x0 > id(16384u16)) { bad += 1; } } else if x0 > id(16384u16) { bad += 1; }
+    if x0 >= 16384u16 { if !(x0 >= id(16384u16)) { bad += 1; } } else if x0 >= id(16384u16) { bad += 1; }
+    if (x0 + 16384u16) != (x0 + id(16384u16)) { bad += 1; }
+    if (x0 * 16384u16) != (x0 * id(16384u16)) { bad += 1; }
+    if (x0 / 16384u16) != (x0 / id(16384u16)) { bad += 1; }
+    if (x0 % 16384u16) != (x0 % id(16384u16)) { bad += 1; }
+    if (x0 & 65535u16) != (x0 & id(65535u16)) { bad += 1; }
+    if (x0 | 65535u16) != (x0 | id(65535u16)) { bad += 1; }
+    if (x0 ^ 65535u16) != (x0 ^ id(65535u16)) { bad += 1; }
+    if x0 == 65535u16 { if !(x0 == id(65535u16)) { bad += 1; } } else if x0 == id(65535u16) { bad += 1; }
+    if x0 != 65535u16 { if !(x0 != id(65535u16)) { bad += 1; } } else if x0 != id(65535u16) { bad += 1; }
+    if x0 < 65535u16 { if !(x0 < id(65535u16)) { bad += 1; } } else if x0 < id(65535u16) { bad += 1; }
+    if x0 <= 65535u16 { if !(x0 <= id(65535u16)) { bad += 1; } } else if x0 <= id(65535u16) { bad += 1; }
+    if x0 > 65535u16 { if !(x0 > id(65535u16)) { bad += 1; } } else if x0 > id(65535u16) { bad += 1; }
+    if x0 >= 65535u16 { if !(x0 >= id(65535u16)) { bad += 1; } } else if x0 >= id(65535u16) { bad += 1; }
+    if (x0 + 65535u16) != (x0 + id(65535u16)) { bad += 1; }
+    if (x0 * 65535u16) != (x0 * id(65535u16)) { bad += 1; }
+    if (x0 / 65535u16) != (x0 / id(65535u16)) { bad += 1; }
+    if (x0 % 65535u16) != (x0 % id(65535u16)) { bad += 1; }
+    if (x0 >> 0u16) != (x0 >> id(0u16)) { bad += 1; }
+    if (x0 & 65535u16) << 0u16 != (x0 & 65535u16) << id(0u16) { bad += 1; }
+    if (x0 >> 1u16) != (x0 >> id(1u16)) { bad += 1; }
+    if (x0 & 32767u16) << 1u16 != (x0 & 32767u16) << id(1u16) { bad += 1; }
+    if (x0 >> 3u16) != (x0 >> id(3u16)) { bad += 1; }
+    if (x0 & 8191u16) << 3u16 != (x0 & 8191u16) << id(3u16) { bad += 1; }
+    if (x0 >> 8u16) != (x0 >> id(8u16)) { bad += 1; }
+    if (x0 & 255u16) << 8u16 != (x0 & 255u16) << id(8u16) { bad += 1; }
+    if (x0 >> 15u16) != (x0 >> id(15u16)) { bad += 1; }
+    if (x0 & 1u16) << 15u16 != (x0 & 1u16) << id(15u16) { bad += 1; }
+    if (x1 & 7u16) != (x1 & id(7u16)) { bad += 1; }
+    if (x1 | 7u16) != (x1 | id(7u16)) { bad += 1; }
+    if (x1 ^ 7u16) != (x1 ^ id(7u16)) { bad += 1; }
+    if x1 == 7u16 { if !(x1 == id(7u16)) { bad += 1; } } else if x1 == id(7u16) { bad += 1; }
+    if x1 != 7u16 { if !(x1 != id(7u16)) { bad += 1; } } else if x1 != id(7u16) { bad += 1; }
+    if x1 < 7u16 { if !(x1 < id(7u16)) { bad += 1; } } else if x1 < id(7u16) { bad += 1; }
+    if x1 <= 7u16 { if !(x1 <= id(7u16)) { bad += 1; } } else if x1 <= id(7u16) { bad += 1; }
+    if x1 > 7u16 { if !(x1 > id(7u16)) { bad += 1; } } else if x1 > id(7u16) { bad += 1; }
+    if x1 >= 7u16 { if !(x1 >= id(7u16)) { bad += 1; } } else if x1 >= id(7u16) { bad += 1; }
+    if (x1 - 7u16) != (x1 - id(7u16)) { bad += 1; }
+    if (x1 / 7u16) != (x1 / id(7u16)) { bad += 1; }
+    if (x1 % 7u16) != (x1 % id(7u16)) { bad += 1; }
+    if (x1 & 4095u16) != (x1 & id(4095u16)) { bad += 1; }
+    if (x1 | 4095u16) != (x1 | id(4095u16)) { bad += 1; }
+    if (x1 ^ 4095u16) != (x1 ^ id(4095u16)) { bad += 1; }
+    if x1 == 4095u16 { if !(x1 == id(4095u16)) { bad += 1; } } else if x1 == id(4095u16) { bad += 1; }
+    if x1 != 4095u16 { if !(x1 != id(4095u16)) { bad += 1; } } else if x1 != id(4095u16) { bad += 1; }
+    if x1 < 4095u16 { if !(x1 < id(4095u16)) { bad += 1; } } else if x1 < id(4095u16) { bad += 1; }
+    if x1 <= 4095u16 { if !(x1 <= id(4095u16)) { bad += 1; } } else if x1 <= id(4095u16) { bad += 1; }
+    if x1 > 4095u16 { if !(x1 > id(4095u16)) { bad += 1; } } else if x1 > id(4095u16) { bad += 1; }
+    if x1 >= 4095u16 { if !(x1 >= id(4095u16)) { bad += 1; } } else if x1 >= id(4095u16) { bad += 1; }
+    if (x1 - 4095u16) != (x1 - id(4095u16)) { bad += 1; }
+    if (x1 / 4095u16) != (x1 / id(4095u16)) { bad += 1; }
+    if (x1 % 4095u16) != (x1 % id(4095u16)) { bad += 1; }
+    if (x1 & 4097u16) != (x1 & id(4097u16)) { bad += 1; }
+    if (x1 | 4097u16) != (x1 | id(4097u16)) { bad += 1; }
+    if (x1 ^ 4097u16) != (x1 ^ id(4097u16)) { bad += 1; }
+    if x1 == 4097u16 { if !(x1 == id(4097u16)) { bad += 1; } } else if x1 == id(4097u16) { bad += 1; }
+    if x1 != 4097u16 { if !(x1 != id(4097u16)) { bad += 1; } } else if x1 != id(4097u16) { bad += 1; }
+    if x1 < 4097u16 { if !(x1 < id(4097u16)) { bad += 1; } } else if x1 < id(4097u16) { bad += 1; }
+    if x1 <= 4097u16 { if !(x1 <= id(4097u16)) { bad += 1; } } else if x1 <= id(4097u16) { bad += 1; }
+    if x1 > 4097u16 { if !(x1 > id(4097u16)) { bad += 1; } } else if x1 > id(4097u16) { bad += 1; }
+    if x1 >= 4097u16 { if !(x1 >= id(4097u16)) { bad += 1; } } else if x1 >= id(4097u16) { bad += 1; }
+    if (x1 - 4097u16) != (x1 - id(4097u16)) { bad += 1; }
+    if (x1 / 4097u16) != (x1 / id(4097u16)) { bad += 1; }
+    if (x1 % 4097u16) != (x1 % id(4097u16)) { bad += 1; }
+    if (x1 & 16384u16) != (x1 & id(16384u16)) { bad += 1; }
+    if (x1 | 16384u16) != (x1 | id(16384u16)) { bad += 1; }
+    if (x1 ^ 16384u16) != (x1 ^ id(16384u16)) { bad += 1; }
+    if x1 == 16384u16 { if !(x1 == id(16384u16)) { bad += 1; } } else if x1 == id(16384u16) { bad += 1; }
+    if x1 != 16384u16 { if !(x1 != id(16384u16)) { bad += 1; } } else if x1 != id(16384u16) { bad += 1; }
+    if x1 < 16384u16 { if !(x1 < id(16384u16)) { bad += 1; } } else if x1 < id(16384u16) { bad += 1; }
+    if x1 <= 16384u16 { if !(x1 <= id(16384u16)) { bad += 1; } } else if x1 <= id(16384u16) { bad += 1; }
+    if x1 > 16384u16 { if !(x1 > id(16384u16)) { bad += 1; } } else if x1 > id(16384u16) { bad += 1; }
+    if x1 >= 16384u16 { if !(x1 >= id(16384u16)) { bad += 1; } } else if x1 >= id(16384u16) { bad += 1; }
+    if (x1 - 16384u16) != (x1 - id(16384u16)) { bad += 1; }
+    if (x1 / 16384u16) != (x1 / id(16384u16)) { bad += 1; }
+    if (x1 % 16384u16) != (x1 % id(16384u16)) { bad += 1; }
+    if (x1 & 65535u16) != (x1 & id(65535u16)) { bad += 1; }
+    if (x1 | 65535u16) != (x1 | id(65535u16)) { bad += 1; }
+    if (x1 ^ 65535u16) != (x1 ^ id(65535u16)) { bad += 1; }
+    if x1 == 65535u16 { if !(x1 == id(65535u16)) { bad += 1; } } else if x1 == id(65535u16) { bad += 1; }
+    if x1 != 65535u16 { if !(x1 != id(65535u16)) { bad += 1; } } else if x1 != id(65535u16) { bad += 1; }
+    if x1 < 65535u16 { if !(x1 < id(65535u16)) { bad += 1; } } else if x1 < id(65535u16) { bad += 1; }
+    if x1 <= 65535u16 { if !(x1 <= id(65535u16)) { bad += 1; } } else if x1 <= id(65535u16) { bad += 1; }
+    if x1 > 65535u16 { if !(x1 > id(65535u16)) { bad += 1; } } else if x1 > id(65535u16) { bad += 1; }
+    if x1 >= 65535u16 { if !(x1 >= id(65535u16)) { bad += 1; } } else if x1 >= id(65535u16) { bad += 1; }
+    if (x1 - 65535u16) != (x1 - id(65535u16)) { bad += 1; }
+    if (x1 / 65535u16) != (x1 / id(65535u16)) { bad += 1; }
+    if (x1 % 65535u16) != (x1 % id(65535u16)) { bad += 1; }
+    if (x1 >> 0u16) != (x1 >> id(0u16)) { bad += 1; }
+    if (x1 & 65535u16) << 0u16 != (x1 & 65535u16) << id(0u16) { bad += 1; }
+    if (x1 >> 1u16) != (x1 >> id(1u16)) { bad += 1; }
+    if (x1 & 32767u16) << 1u16 != (x1 & 32767u16) << id(1u16) { bad += 1; }
+    if (x1 >> 3u16) != (x1 >> id(3u16)) { bad += 1; }
+    if (x1 & 8191u16) << 3u16 != (x1 & 8191u16) << id(3u16) { bad += 1; }
+    if (x1 >> 8u16) != (x1 >> id(8u16)) { bad += 1; }
+    if (x1 & 255u16) << 8u16 != (x1 & 255u16) << id(8u16) { bad += 1; }
+    if (x1 >> 15u16) != (x1 >> id(15u16)) { bad += 1; }
+    if (x1 & 1u16) << 15u16 != (x1 & 1u16) << id(15u16) { bad += 1; }
+    if (x2 & 7u16) != (x2 & id(7u16)) { bad += 1; }
+    if (x2 | 7u16) != (x2 | id(7u16)) { bad += 1; }
+    if (x2 ^ 7u16) != (x2 ^ id(7u16)) { bad += 1; }
+    if x2 == 7u16 { if !(x2 == id(7u16)) { bad += 1; } } else if x2 == id(7u16) { bad += 1; }
+    if x2 != 7u16 { if !(x2 != id(7u16)) { bad += 1; } } else if x2 != id(7u16) { bad += 1; }
+    if x2 < 7u16 { if !(x2 < id(7u16)) { bad += 1; } } else if x2 < id(7u16) { bad += 1; }
+    if x2 <= 7u16 { if !(x2 <= id(7u16)) { bad += 1; } } else if x2 <= id(7u16) { bad += 1; }
+    if x2 > 7u16 { if !(x2 > id(7u16)) { bad += 1; } } else if x2 > id(7u16) { bad += 1; }
+    if x2 >= 7u16 { if !(x2 >= id(7u16)) { bad += 1; } } else if x2 >= id(7u16) { bad += 1; }
+    if (x2 + 7u16) != (x2 + id(7u16)) { bad += 1; }
+    if (x2 - 7u16) != (x2 - id(7u16)) { bad += 1; }
+    if (x2 / 7u16) != (x2 / id(7u16)) { bad += 1; }
+    if (x2 % 7u16) != (x2 % id(7u16)) { bad += 1; }
+    if (x2 & 4095u16) != (x2 & id(4095u16)) { bad += 1; }
+    if (x2 | 4095u16) != (x2 | id(4095u16)) { bad += 1; }
+    if (x2 ^ 4095u16) != (x2 ^ id(4095u16)) { bad += 1; }
+    if x2 == 4095u16 { if !(x2 == id(4095u16)) { bad += 1; } } else if x2 == id(4095u16) { bad += 1; }
+    if x2 != 4095u16 { if !(x2 != id(4095u16)) { bad += 1; } } else if x2 != id(4095u16) { bad += 1; }
+    if x2 < 4095u16 { if !(x2 < id(4095u16)) { bad += 1; } } else if x2 < id(4095u16) { bad += 1; }
+    if x2 <= 4095u16 { if !(x2 <= id(4095u16)) { bad += 1; } } else if x2 <= id(4095u16) { bad += 1; }
+    if x2 > 4095u16 { if !(x2 > id(4095u16)) { bad += 1; } } else if x2 > id(4095u16) { bad += 1; }
+    if x2 >= 4095u16 { if !(x2 >= id(4095u16)) { bad += 1; } } else if x2 >= id(4095u16) { bad += 1; }
+    if (x2 + 4095u16) != (x2 + id(4095u16)) { bad += 1; }
+    if (x2 - 4095u16) != (x2 - id(4095u16)) { bad += 1; }
+    if (x2 / 4095u16) != (x2 / id(4095u16)) { bad += 1; }
+    if (x2 % 4095u16) != (x2 % id(4095u16)) { bad += 1; }
+    if (x2 & 4097u16) != (x2 & id(4097u16)) { bad += 1; }
+    if (x2 | 4097u16) != (x2 | id(4097u16)) { bad += 1; }
+    if (x2 ^ 4097u16) != (x2 ^ id(4097u16)) { bad += 1; }
+    if x2 == 4097u16 { if !(x2 == id(4097u16)) { bad += 1; } } else if x2 == id(4097u16) { bad += 1; }
+    if x2 != 4097u16 { if !(x2 != id(4097u16)) { bad += 1; } } else if x2 != id(4097u16) { bad += 1; }
+    if x2 < 4097u16 { if !(x2 < id(4097u16)) { bad += 1; } } else if x2 < id(4097u16) { bad += 1; }
+    if x2 <= 4097u16 { if !(x2 <= id(4097u16)) { bad += 1; } } else if x2 <= id(4097u16) { bad += 1; }
+    if x2 > 4097u16 { if !(x2 > id(4097u16)) { bad += 1; } } else if x2 > id(4097u16) { bad += 1; }
+    if x2 >= 4097u16 { if !(x2 >= id(4097u16)) { bad += 1; } } else if x2 >= id(4097u16) { bad += 1; }
+    if (x2 + 4097u16) != (x2 + id(4097u16)) { bad += 1; }
+    if (x2 - 4097u16) != (x2 - id(4097u16)) { bad += 1; }
+    if (x2 / 4097u16) != (x2 / id(4097u16)) { bad += 1; }
+    if (x2 % 4097u16) != (x2 % id(4097u16)) { bad += 1; }
+    if (x2 & 16384u16) != (x2 & id(16384u16)) { bad += 1; }
+    if (x2 | 16384u16) != (x2 | id(16384u16)) { bad += 1; }
+    if (x2 ^ 16384u16) != (x2 ^ id(16384u16)) { bad += 1; }
+    if x2 == 16384u16 { if !(x2 == id(16384u16)) { bad += 1; } } else if x2 == id(16384u16) { bad += 1; }
+    if x2 != 16384u16 { if !(x2 != id(16384u16)) { bad += 1; } } else if x2 != id(16384u16) { bad += 1; }
+    if x2 < 16384u16 { if !(x2 < id(16384u16)) { bad += 1; } } else if x2 < id(16384u16) { bad += 1; }
+    if x2 <= 16384u16 { if !(x2 <= id(16384u16)) { bad += 1; } } else if x2 <= id(16384u16) { bad += 1; }
+    if x2 > 16384u16 { if !(x2 > id(16384u16)) { bad += 1; } } else if x2 > id(16384u16) { bad += 1; }
+    if x2 >= 16384u16 { if !(x2 >= id(16384u16)) { bad += 1; } } else if x2 >= id(16384u16) { bad += 1; }
+    if (x2 + 16384u16) != (x2 + id(16384u16)) { bad += 1; }
+    if (x2 - 16384u16) != (x2 - id(16384u16)) { bad += 1; }
+    if (x2 / 16384u16) != (x2 / id(16384u16)) { bad += 1; }
+    if (x2 % 16384u16) != (x2 % id(16384u16)) { bad += 1; }
+    if (x2 & 65535u16) != (x2 & id(65535u16)) { bad += 1; }
+    if (x2 | 65535u16) != (x2 | id(65535u16)) { bad += 1; }
+    if (x2 ^ 65535u16) != (x2 ^ id(65535u16)) { bad += 1; }
+    if x2 == 65535u16 { if !(x2 == id(65535u16)) { bad += 1; } } else if x2 == id(65535u16) { bad += 1; }
+    if x2 != 65535u16 { if !(x2 != id(65535u16)) { bad += 1; } } else if x2 != id(65535u16) { bad += 1; }
+    if x2 < 65535u16 { if !(x2 < id(65535u16)) { bad += 1; } } else if x2 < id(65535u16) { bad += 1; }
+    if x2 <= 65535u16 { if !(x2 <= id(65535u16)) { bad += 1; } } else if x2 <= id(65535u16) { bad += 1; }
+    if x2 > 65535u16 { if !(x2 > id(65535u16)) { bad += 1; } } else if x2 > id(65535u16) { bad += 1; }
+    if x2 >= 65535u16 { if !(x2 >= id(65535u16)) { bad += 1; } } else if x2 >= id(65535u16) { bad += 1; }
+    if (x2 / 65535u16) != (x2 / id(65535u16)) { bad += 1; }
+    if (x2 % 65535u16) != (x2 % id(65535u16)) { bad += 1; }
+    if (x2 >> 0u16) != (x2 >> id(0u16)) { bad += 1; }
+    if (x2 & 65535u16) << 0u16 != (x2 & 65535u16) << id(0u16) { bad += 1; }
+    if (x2 >> 1u16) != (x2 >> id(1u16)) { bad += 1; }
+    if (x2 & 32767u16) << 1u16 != (x2 & 32767u16) << id(1u16) { bad += 1; }
+    if (x2 >> 3u16) != (x2 >> id(3u16)) { bad += 1; }
+    if (x2 & 8191u16) << 3u16 != (x2 & 8191u16) << id(3u16) { bad += 1; }
+    if (x2 >> 8u16) != (x2 >> id(8u16)) { bad += 1; }
+    if (x2 & 255u16) << 8u16 != (x2 & 255u16) << id(8u16) { bad += 1; }
+    if (x2 >> 15u16) != (x2 >> id(15u16)) { bad += 1; }
+    if (x2 & 1u16) << 15u16 != (x2 & 1u16) << id(15u16) { bad += 1; }
+    return bad;
+}
+
+fn check_i32() -> i64 {
+    let bad: i64 = 0;
+    let x0 = id(i32::MIN);
+    let x1 = id(2147483647i32);
+    let x2 = id(715827883i32);
+    let x3 = id((-5i32));
+    if (x0 & i32::MIN) != (x0 & id(i32::MIN)) { bad += 1; }
+    if (x0 | i32::MIN) != (x0 | id(i32::MIN)) { bad += 1; }
+    if (x0 ^ i32::MIN) != (x0 ^ id(i32::MIN)) { bad += 1; }
+    if x0 == i32::MIN { if !(x0 == id(i32::MIN)) { bad += 1; } } else if x0 == id(i32::MIN) { bad += 1; }
+    if x0 != i32::MIN { if !(x0 != id(i32::MIN)) { bad += 1; } } else if x0 != id(i32::MIN) { bad += 1; }
+    if x0 < i32::MIN { if !(x0 < id(i32::MIN)) { bad += 1; } } else if x0 < id(i32::MIN) { bad += 1; }
+    if x0 <= i32::MIN { if !(x0 <= id(i32::MIN)) { bad += 1; } } else if x0 <= id(i32::MIN) { bad += 1; }
+    if x0 > i32::MIN { if !(x0 > id(i32::MIN)) { bad += 1; } } else if x0 > id(i32::MIN) { bad += 1; }
+    if x0 >= i32::MIN { if !(x0 >= id(i32::MIN)) { bad += 1; } } else if x0 >= id(i32::MIN) { bad += 1; }
+    if (x0 - i32::MIN) != (x0 - id(i32::MIN)) { bad += 1; }
+    if (x0 / i32::MIN) != (x0 / id(i32::MIN)) { bad += 1; }
+    if (x0 % i32::MIN) != (x0 % id(i32::MIN)) { bad += 1; }
+    if (x0 & (-4096i32)) != (x0 & id((-4096i32))) { bad += 1; }
+    if (x0 | (-4096i32)) != (x0 | id((-4096i32))) { bad += 1; }
+    if (x0 ^ (-4096i32)) != (x0 ^ id((-4096i32))) { bad += 1; }
+    if x0 == (-4096i32) { if !(x0 == id((-4096i32))) { bad += 1; } } else if x0 == id((-4096i32)) { bad += 1; }
+    if x0 != (-4096i32) { if !(x0 != id((-4096i32))) { bad += 1; } } else if x0 != id((-4096i32)) { bad += 1; }
+    if x0 < (-4096i32) { if !(x0 < id((-4096i32))) { bad += 1; } } else if x0 < id((-4096i32)) { bad += 1; }
+    if x0 <= (-4096i32) { if !(x0 <= id((-4096i32))) { bad += 1; } } else if x0 <= id((-4096i32)) { bad += 1; }
+    if x0 > (-4096i32) { if !(x0 > id((-4096i32))) { bad += 1; } } else if x0 > id((-4096i32)) { bad += 1; }
+    if x0 >= (-4096i32) { if !(x0 >= id((-4096i32))) { bad += 1; } } else if x0 >= id((-4096i32)) { bad += 1; }
+    if (x0 - (-4096i32)) != (x0 - id((-4096i32))) { bad += 1; }
+    if (x0 / (-4096i32)) != (x0 / id((-4096i32))) { bad += 1; }
+    if (x0 % (-4096i32)) != (x0 % id((-4096i32))) { bad += 1; }
+    if (x0 & (-1i32)) != (x0 & id((-1i32))) { bad += 1; }
+    if (x0 | (-1i32)) != (x0 | id((-1i32))) { bad += 1; }
+    if (x0 ^ (-1i32)) != (x0 ^ id((-1i32))) { bad += 1; }
+    if x0 == (-1i32) { if !(x0 == id((-1i32))) { bad += 1; } } else if x0 == id((-1i32)) { bad += 1; }
+    if x0 != (-1i32) { if !(x0 != id((-1i32))) { bad += 1; } } else if x0 != id((-1i32)) { bad += 1; }
+    if x0 < (-1i32) { if !(x0 < id((-1i32))) { bad += 1; } } else if x0 < id((-1i32)) { bad += 1; }
+    if x0 <= (-1i32) { if !(x0 <= id((-1i32))) { bad += 1; } } else if x0 <= id((-1i32)) { bad += 1; }
+    if x0 > (-1i32) { if !(x0 > id((-1i32))) { bad += 1; } } else if x0 > id((-1i32)) { bad += 1; }
+    if x0 >= (-1i32) { if !(x0 >= id((-1i32))) { bad += 1; } } else if x0 >= id((-1i32)) { bad += 1; }
+    if (x0 - (-1i32)) != (x0 - id((-1i32))) { bad += 1; }
+    if (x0 & 7i32) != (x0 & id(7i32)) { bad += 1; }
+    if (x0 | 7i32) != (x0 | id(7i32)) { bad += 1; }
+    if (x0 ^ 7i32) != (x0 ^ id(7i32)) { bad += 1; }
+    if x0 == 7i32 { if !(x0 == id(7i32)) { bad += 1; } } else if x0 == id(7i32) { bad += 1; }
+    if x0 != 7i32 { if !(x0 != id(7i32)) { bad += 1; } } else if x0 != id(7i32) { bad += 1; }
+    if x0 < 7i32 { if !(x0 < id(7i32)) { bad += 1; } } else if x0 < id(7i32) { bad += 1; }
+    if x0 <= 7i32 { if !(x0 <= id(7i32)) { bad += 1; } } else if x0 <= id(7i32) { bad += 1; }
+    if x0 > 7i32 { if !(x0 > id(7i32)) { bad += 1; } } else if x0 > id(7i32) { bad += 1; }
+    if x0 >= 7i32 { if !(x0 >= id(7i32)) { bad += 1; } } else if x0 >= id(7i32) { bad += 1; }
+    if (x0 + 7i32) != (x0 + id(7i32)) { bad += 1; }
+    if (x0 / 7i32) != (x0 / id(7i32)) { bad += 1; }
+    if (x0 % 7i32) != (x0 % id(7i32)) { bad += 1; }
+    if (x0 & 4095i32) != (x0 & id(4095i32)) { bad += 1; }
+    if (x0 | 4095i32) != (x0 | id(4095i32)) { bad += 1; }
+    if (x0 ^ 4095i32) != (x0 ^ id(4095i32)) { bad += 1; }
+    if x0 == 4095i32 { if !(x0 == id(4095i32)) { bad += 1; } } else if x0 == id(4095i32) { bad += 1; }
+    if x0 != 4095i32 { if !(x0 != id(4095i32)) { bad += 1; } } else if x0 != id(4095i32) { bad += 1; }
+    if x0 < 4095i32 { if !(x0 < id(4095i32)) { bad += 1; } } else if x0 < id(4095i32) { bad += 1; }
+    if x0 <= 4095i32 { if !(x0 <= id(4095i32)) { bad += 1; } } else if x0 <= id(4095i32) { bad += 1; }
+    if x0 > 4095i32 { if !(x0 > id(4095i32)) { bad += 1; } } else if x0 > id(4095i32) { bad += 1; }
+    if x0 >= 4095i32 { if !(x0 >= id(4095i32)) { bad += 1; } } else if x0 >= id(4095i32) { bad += 1; }
+    if (x0 + 4095i32) != (x0 + id(4095i32)) { bad += 1; }
+    if (x0 / 4095i32) != (x0 / id(4095i32)) { bad += 1; }
+    if (x0 % 4095i32) != (x0 % id(4095i32)) { bad += 1; }
+    if (x0 & 4097i32) != (x0 & id(4097i32)) { bad += 1; }
+    if (x0 | 4097i32) != (x0 | id(4097i32)) { bad += 1; }
+    if (x0 ^ 4097i32) != (x0 ^ id(4097i32)) { bad += 1; }
+    if x0 == 4097i32 { if !(x0 == id(4097i32)) { bad += 1; } } else if x0 == id(4097i32) { bad += 1; }
+    if x0 != 4097i32 { if !(x0 != id(4097i32)) { bad += 1; } } else if x0 != id(4097i32) { bad += 1; }
+    if x0 < 4097i32 { if !(x0 < id(4097i32)) { bad += 1; } } else if x0 < id(4097i32) { bad += 1; }
+    if x0 <= 4097i32 { if !(x0 <= id(4097i32)) { bad += 1; } } else if x0 <= id(4097i32) { bad += 1; }
+    if x0 > 4097i32 { if !(x0 > id(4097i32)) { bad += 1; } } else if x0 > id(4097i32) { bad += 1; }
+    if x0 >= 4097i32 { if !(x0 >= id(4097i32)) { bad += 1; } } else if x0 >= id(4097i32) { bad += 1; }
+    if (x0 + 4097i32) != (x0 + id(4097i32)) { bad += 1; }
+    if (x0 / 4097i32) != (x0 / id(4097i32)) { bad += 1; }
+    if (x0 % 4097i32) != (x0 % id(4097i32)) { bad += 1; }
+    if (x0 & 1073741824i32) != (x0 & id(1073741824i32)) { bad += 1; }
+    if (x0 | 1073741824i32) != (x0 | id(1073741824i32)) { bad += 1; }
+    if (x0 ^ 1073741824i32) != (x0 ^ id(1073741824i32)) { bad += 1; }
+    if x0 == 1073741824i32 { if !(x0 == id(1073741824i32)) { bad += 1; } } else if x0 == id(1073741824i32) { bad += 1; }
+    if x0 != 1073741824i32 { if !(x0 != id(1073741824i32)) { bad += 1; } } else if x0 != id(1073741824i32) { bad += 1; }
+    if x0 < 1073741824i32 { if !(x0 < id(1073741824i32)) { bad += 1; } } else if x0 < id(1073741824i32) { bad += 1; }
+    if x0 <= 1073741824i32 { if !(x0 <= id(1073741824i32)) { bad += 1; } } else if x0 <= id(1073741824i32) { bad += 1; }
+    if x0 > 1073741824i32 { if !(x0 > id(1073741824i32)) { bad += 1; } } else if x0 > id(1073741824i32) { bad += 1; }
+    if x0 >= 1073741824i32 { if !(x0 >= id(1073741824i32)) { bad += 1; } } else if x0 >= id(1073741824i32) { bad += 1; }
+    if (x0 + 1073741824i32) != (x0 + id(1073741824i32)) { bad += 1; }
+    if (x0 / 1073741824i32) != (x0 / id(1073741824i32)) { bad += 1; }
+    if (x0 % 1073741824i32) != (x0 % id(1073741824i32)) { bad += 1; }
+    if (x0 & 2147483647i32) != (x0 & id(2147483647i32)) { bad += 1; }
+    if (x0 | 2147483647i32) != (x0 | id(2147483647i32)) { bad += 1; }
+    if (x0 ^ 2147483647i32) != (x0 ^ id(2147483647i32)) { bad += 1; }
+    if x0 == 2147483647i32 { if !(x0 == id(2147483647i32)) { bad += 1; } } else if x0 == id(2147483647i32) { bad += 1; }
+    if x0 != 2147483647i32 { if !(x0 != id(2147483647i32)) { bad += 1; } } else if x0 != id(2147483647i32) { bad += 1; }
+    if x0 < 2147483647i32 { if !(x0 < id(2147483647i32)) { bad += 1; } } else if x0 < id(2147483647i32) { bad += 1; }
+    if x0 <= 2147483647i32 { if !(x0 <= id(2147483647i32)) { bad += 1; } } else if x0 <= id(2147483647i32) { bad += 1; }
+    if x0 > 2147483647i32 { if !(x0 > id(2147483647i32)) { bad += 1; } } else if x0 > id(2147483647i32) { bad += 1; }
+    if x0 >= 2147483647i32 { if !(x0 >= id(2147483647i32)) { bad += 1; } } else if x0 >= id(2147483647i32) { bad += 1; }
+    if (x0 + 2147483647i32) != (x0 + id(2147483647i32)) { bad += 1; }
+    if (x0 / 2147483647i32) != (x0 / id(2147483647i32)) { bad += 1; }
+    if (x0 % 2147483647i32) != (x0 % id(2147483647i32)) { bad += 1; }
+    if (x0 >> 0i32) != (x0 >> id(0i32)) { bad += 1; }
+    if (x0 & 2147483647i32) << 0i32 != (x0 & 2147483647i32) << id(0i32) { bad += 1; }
+    if (x0 >> 1i32) != (x0 >> id(1i32)) { bad += 1; }
+    if (x0 & 1073741823i32) << 1i32 != (x0 & 1073741823i32) << id(1i32) { bad += 1; }
+    if (x0 >> 3i32) != (x0 >> id(3i32)) { bad += 1; }
+    if (x0 & 268435455i32) << 3i32 != (x0 & 268435455i32) << id(3i32) { bad += 1; }
+    if (x0 >> 16i32) != (x0 >> id(16i32)) { bad += 1; }
+    if (x0 & 32767i32) << 16i32 != (x0 & 32767i32) << id(16i32) { bad += 1; }
+    if (x0 >> 31i32) != (x0 >> id(31i32)) { bad += 1; }
+    if (x0 & 0i32) << 31i32 != (x0 & 0i32) << id(31i32) { bad += 1; }
+    if (x1 & i32::MIN) != (x1 & id(i32::MIN)) { bad += 1; }
+    if (x1 | i32::MIN) != (x1 | id(i32::MIN)) { bad += 1; }
+    if (x1 ^ i32::MIN) != (x1 ^ id(i32::MIN)) { bad += 1; }
+    if x1 == i32::MIN { if !(x1 == id(i32::MIN)) { bad += 1; } } else if x1 == id(i32::MIN) { bad += 1; }
+    if x1 != i32::MIN { if !(x1 != id(i32::MIN)) { bad += 1; } } else if x1 != id(i32::MIN) { bad += 1; }
+    if x1 < i32::MIN { if !(x1 < id(i32::MIN)) { bad += 1; } } else if x1 < id(i32::MIN) { bad += 1; }
+    if x1 <= i32::MIN { if !(x1 <= id(i32::MIN)) { bad += 1; } } else if x1 <= id(i32::MIN) { bad += 1; }
+    if x1 > i32::MIN { if !(x1 > id(i32::MIN)) { bad += 1; } } else if x1 > id(i32::MIN) { bad += 1; }
+    if x1 >= i32::MIN { if !(x1 >= id(i32::MIN)) { bad += 1; } } else if x1 >= id(i32::MIN) { bad += 1; }
+    if (x1 + i32::MIN) != (x1 + id(i32::MIN)) { bad += 1; }
+    if (x1 / i32::MIN) != (x1 / id(i32::MIN)) { bad += 1; }
+    if (x1 % i32::MIN) != (x1 % id(i32::MIN)) { bad += 1; }
+    if (x1 & (-4096i32)) != (x1 & id((-4096i32))) { bad += 1; }
+    if (x1 | (-4096i32)) != (x1 | id((-4096i32))) { bad += 1; }
+    if (x1 ^ (-4096i32)) != (x1 ^ id((-4096i32))) { bad += 1; }
+    if x1 == (-4096i32) { if !(x1 == id((-4096i32))) { bad += 1; } } else if x1 == id((-4096i32)) { bad += 1; }
+    if x1 != (-4096i32) { if !(x1 != id((-4096i32))) { bad += 1; } } else if x1 != id((-4096i32)) { bad += 1; }
+    if x1 < (-4096i32) { if !(x1 < id((-4096i32))) { bad += 1; } } else if x1 < id((-4096i32)) { bad += 1; }
+    if x1 <= (-4096i32) { if !(x1 <= id((-4096i32))) { bad += 1; } } else if x1 <= id((-4096i32)) { bad += 1; }
+    if x1 > (-4096i32) { if !(x1 > id((-4096i32))) { bad += 1; } } else if x1 > id((-4096i32)) { bad += 1; }
+    if x1 >= (-4096i32) { if !(x1 >= id((-4096i32))) { bad += 1; } } else if x1 >= id((-4096i32)) { bad += 1; }
+    if (x1 + (-4096i32)) != (x1 + id((-4096i32))) { bad += 1; }
+    if (x1 / (-4096i32)) != (x1 / id((-4096i32))) { bad += 1; }
+    if (x1 % (-4096i32)) != (x1 % id((-4096i32))) { bad += 1; }
+    if (x1 & (-1i32)) != (x1 & id((-1i32))) { bad += 1; }
+    if (x1 | (-1i32)) != (x1 | id((-1i32))) { bad += 1; }
+    if (x1 ^ (-1i32)) != (x1 ^ id((-1i32))) { bad += 1; }
+    if x1 == (-1i32) { if !(x1 == id((-1i32))) { bad += 1; } } else if x1 == id((-1i32)) { bad += 1; }
+    if x1 != (-1i32) { if !(x1 != id((-1i32))) { bad += 1; } } else if x1 != id((-1i32)) { bad += 1; }
+    if x1 < (-1i32) { if !(x1 < id((-1i32))) { bad += 1; } } else if x1 < id((-1i32)) { bad += 1; }
+    if x1 <= (-1i32) { if !(x1 <= id((-1i32))) { bad += 1; } } else if x1 <= id((-1i32)) { bad += 1; }
+    if x1 > (-1i32) { if !(x1 > id((-1i32))) { bad += 1; } } else if x1 > id((-1i32)) { bad += 1; }
+    if x1 >= (-1i32) { if !(x1 >= id((-1i32))) { bad += 1; } } else if x1 >= id((-1i32)) { bad += 1; }
+    if (x1 + (-1i32)) != (x1 + id((-1i32))) { bad += 1; }
+    if (x1 * (-1i32)) != (x1 * id((-1i32))) { bad += 1; }
+    if (x1 / (-1i32)) != (x1 / id((-1i32))) { bad += 1; }
+    if (x1 % (-1i32)) != (x1 % id((-1i32))) { bad += 1; }
+    if (x1 & 7i32) != (x1 & id(7i32)) { bad += 1; }
+    if (x1 | 7i32) != (x1 | id(7i32)) { bad += 1; }
+    if (x1 ^ 7i32) != (x1 ^ id(7i32)) { bad += 1; }
+    if x1 == 7i32 { if !(x1 == id(7i32)) { bad += 1; } } else if x1 == id(7i32) { bad += 1; }
+    if x1 != 7i32 { if !(x1 != id(7i32)) { bad += 1; } } else if x1 != id(7i32) { bad += 1; }
+    if x1 < 7i32 { if !(x1 < id(7i32)) { bad += 1; } } else if x1 < id(7i32) { bad += 1; }
+    if x1 <= 7i32 { if !(x1 <= id(7i32)) { bad += 1; } } else if x1 <= id(7i32) { bad += 1; }
+    if x1 > 7i32 { if !(x1 > id(7i32)) { bad += 1; } } else if x1 > id(7i32) { bad += 1; }
+    if x1 >= 7i32 { if !(x1 >= id(7i32)) { bad += 1; } } else if x1 >= id(7i32) { bad += 1; }
+    if (x1 - 7i32) != (x1 - id(7i32)) { bad += 1; }
+    if (x1 / 7i32) != (x1 / id(7i32)) { bad += 1; }
+    if (x1 % 7i32) != (x1 % id(7i32)) { bad += 1; }
+    if (x1 & 4095i32) != (x1 & id(4095i32)) { bad += 1; }
+    if (x1 | 4095i32) != (x1 | id(4095i32)) { bad += 1; }
+    if (x1 ^ 4095i32) != (x1 ^ id(4095i32)) { bad += 1; }
+    if x1 == 4095i32 { if !(x1 == id(4095i32)) { bad += 1; } } else if x1 == id(4095i32) { bad += 1; }
+    if x1 != 4095i32 { if !(x1 != id(4095i32)) { bad += 1; } } else if x1 != id(4095i32) { bad += 1; }
+    if x1 < 4095i32 { if !(x1 < id(4095i32)) { bad += 1; } } else if x1 < id(4095i32) { bad += 1; }
+    if x1 <= 4095i32 { if !(x1 <= id(4095i32)) { bad += 1; } } else if x1 <= id(4095i32) { bad += 1; }
+    if x1 > 4095i32 { if !(x1 > id(4095i32)) { bad += 1; } } else if x1 > id(4095i32) { bad += 1; }
+    if x1 >= 4095i32 { if !(x1 >= id(4095i32)) { bad += 1; } } else if x1 >= id(4095i32) { bad += 1; }
+    if (x1 - 4095i32) != (x1 - id(4095i32)) { bad += 1; }
+    if (x1 / 4095i32) != (x1 / id(4095i32)) { bad += 1; }
+    if (x1 % 4095i32) != (x1 % id(4095i32)) { bad += 1; }
+    if (x1 & 4097i32) != (x1 & id(4097i32)) { bad += 1; }
+    if (x1 | 4097i32) != (x1 | id(4097i32)) { bad += 1; }
+    if (x1 ^ 4097i32) != (x1 ^ id(4097i32)) { bad += 1; }
+    if x1 == 4097i32 { if !(x1 == id(4097i32)) { bad += 1; } } else if x1 == id(4097i32) { bad += 1; }
+    if x1 != 4097i32 { if !(x1 != id(4097i32)) { bad += 1; } } else if x1 != id(4097i32) { bad += 1; }
+    if x1 < 4097i32 { if !(x1 < id(4097i32)) { bad += 1; } } else if x1 < id(4097i32) { bad += 1; }
+    if x1 <= 4097i32 { if !(x1 <= id(4097i32)) { bad += 1; } } else if x1 <= id(4097i32) { bad += 1; }
+    if x1 > 4097i32 { if !(x1 > id(4097i32)) { bad += 1; } } else if x1 > id(4097i32) { bad += 1; }
+    if x1 >= 4097i32 { if !(x1 >= id(4097i32)) { bad += 1; } } else if x1 >= id(4097i32) { bad += 1; }
+    if (x1 - 4097i32) != (x1 - id(4097i32)) { bad += 1; }
+    if (x1 / 4097i32) != (x1 / id(4097i32)) { bad += 1; }
+    if (x1 % 4097i32) != (x1 % id(4097i32)) { bad += 1; }
+    if (x1 & 1073741824i32) != (x1 & id(1073741824i32)) { bad += 1; }
+    if (x1 | 1073741824i32) != (x1 | id(1073741824i32)) { bad += 1; }
+    if (x1 ^ 1073741824i32) != (x1 ^ id(1073741824i32)) { bad += 1; }
+    if x1 == 1073741824i32 { if !(x1 == id(1073741824i32)) { bad += 1; } } else if x1 == id(1073741824i32) { bad += 1; }
+    if x1 != 1073741824i32 { if !(x1 != id(1073741824i32)) { bad += 1; } } else if x1 != id(1073741824i32) { bad += 1; }
+    if x1 < 1073741824i32 { if !(x1 < id(1073741824i32)) { bad += 1; } } else if x1 < id(1073741824i32) { bad += 1; }
+    if x1 <= 1073741824i32 { if !(x1 <= id(1073741824i32)) { bad += 1; } } else if x1 <= id(1073741824i32) { bad += 1; }
+    if x1 > 1073741824i32 { if !(x1 > id(1073741824i32)) { bad += 1; } } else if x1 > id(1073741824i32) { bad += 1; }
+    if x1 >= 1073741824i32 { if !(x1 >= id(1073741824i32)) { bad += 1; } } else if x1 >= id(1073741824i32) { bad += 1; }
+    if (x1 - 1073741824i32) != (x1 - id(1073741824i32)) { bad += 1; }
+    if (x1 / 1073741824i32) != (x1 / id(1073741824i32)) { bad += 1; }
+    if (x1 % 1073741824i32) != (x1 % id(1073741824i32)) { bad += 1; }
+    if (x1 & 2147483647i32) != (x1 & id(2147483647i32)) { bad += 1; }
+    if (x1 | 2147483647i32) != (x1 | id(2147483647i32)) { bad += 1; }
+    if (x1 ^ 2147483647i32) != (x1 ^ id(2147483647i32)) { bad += 1; }
+    if x1 == 2147483647i32 { if !(x1 == id(2147483647i32)) { bad += 1; } } else if x1 == id(2147483647i32) { bad += 1; }
+    if x1 != 2147483647i32 { if !(x1 != id(2147483647i32)) { bad += 1; } } else if x1 != id(2147483647i32) { bad += 1; }
+    if x1 < 2147483647i32 { if !(x1 < id(2147483647i32)) { bad += 1; } } else if x1 < id(2147483647i32) { bad += 1; }
+    if x1 <= 2147483647i32 { if !(x1 <= id(2147483647i32)) { bad += 1; } } else if x1 <= id(2147483647i32) { bad += 1; }
+    if x1 > 2147483647i32 { if !(x1 > id(2147483647i32)) { bad += 1; } } else if x1 > id(2147483647i32) { bad += 1; }
+    if x1 >= 2147483647i32 { if !(x1 >= id(2147483647i32)) { bad += 1; } } else if x1 >= id(2147483647i32) { bad += 1; }
+    if (x1 - 2147483647i32) != (x1 - id(2147483647i32)) { bad += 1; }
+    if (x1 / 2147483647i32) != (x1 / id(2147483647i32)) { bad += 1; }
+    if (x1 % 2147483647i32) != (x1 % id(2147483647i32)) { bad += 1; }
+    if (x1 >> 0i32) != (x1 >> id(0i32)) { bad += 1; }
+    if (x1 & 2147483647i32) << 0i32 != (x1 & 2147483647i32) << id(0i32) { bad += 1; }
+    if (x1 >> 1i32) != (x1 >> id(1i32)) { bad += 1; }
+    if (x1 & 1073741823i32) << 1i32 != (x1 & 1073741823i32) << id(1i32) { bad += 1; }
+    if (x1 >> 3i32) != (x1 >> id(3i32)) { bad += 1; }
+    if (x1 & 268435455i32) << 3i32 != (x1 & 268435455i32) << id(3i32) { bad += 1; }
+    if (x1 >> 16i32) != (x1 >> id(16i32)) { bad += 1; }
+    if (x1 & 32767i32) << 16i32 != (x1 & 32767i32) << id(16i32) { bad += 1; }
+    if (x1 >> 31i32) != (x1 >> id(31i32)) { bad += 1; }
+    if (x1 & 0i32) << 31i32 != (x1 & 0i32) << id(31i32) { bad += 1; }
+    if (x2 & i32::MIN) != (x2 & id(i32::MIN)) { bad += 1; }
+    if (x2 | i32::MIN) != (x2 | id(i32::MIN)) { bad += 1; }
+    if (x2 ^ i32::MIN) != (x2 ^ id(i32::MIN)) { bad += 1; }
+    if x2 == i32::MIN { if !(x2 == id(i32::MIN)) { bad += 1; } } else if x2 == id(i32::MIN) { bad += 1; }
+    if x2 != i32::MIN { if !(x2 != id(i32::MIN)) { bad += 1; } } else if x2 != id(i32::MIN) { bad += 1; }
+    if x2 < i32::MIN { if !(x2 < id(i32::MIN)) { bad += 1; } } else if x2 < id(i32::MIN) { bad += 1; }
+    if x2 <= i32::MIN { if !(x2 <= id(i32::MIN)) { bad += 1; } } else if x2 <= id(i32::MIN) { bad += 1; }
+    if x2 > i32::MIN { if !(x2 > id(i32::MIN)) { bad += 1; } } else if x2 > id(i32::MIN) { bad += 1; }
+    if x2 >= i32::MIN { if !(x2 >= id(i32::MIN)) { bad += 1; } } else if x2 >= id(i32::MIN) { bad += 1; }
+    if (x2 + i32::MIN) != (x2 + id(i32::MIN)) { bad += 1; }
+    if (x2 / i32::MIN) != (x2 / id(i32::MIN)) { bad += 1; }
+    if (x2 % i32::MIN) != (x2 % id(i32::MIN)) { bad += 1; }
+    if (x2 & (-4096i32)) != (x2 & id((-4096i32))) { bad += 1; }
+    if (x2 | (-4096i32)) != (x2 | id((-4096i32))) { bad += 1; }
+    if (x2 ^ (-4096i32)) != (x2 ^ id((-4096i32))) { bad += 1; }
+    if x2 == (-4096i32) { if !(x2 == id((-4096i32))) { bad += 1; } } else if x2 == id((-4096i32)) { bad += 1; }
+    if x2 != (-4096i32) { if !(x2 != id((-4096i32))) { bad += 1; } } else if x2 != id((-4096i32)) { bad += 1; }
+    if x2 < (-4096i32) { if !(x2 < id((-4096i32))) { bad += 1; } } else if x2 < id((-4096i32)) { bad += 1; }
+    if x2 <= (-4096i32) { if !(x2 <= id((-4096i32))) { bad += 1; } } else if x2 <= id((-4096i32)) { bad += 1; }
+    if x2 > (-4096i32) { if !(x2 > id((-4096i32))) { bad += 1; } } else if x2 > id((-4096i32)) { bad += 1; }
+    if x2 >= (-4096i32) { if !(x2 >= id((-4096i32))) { bad += 1; } } else if x2 >= id((-4096i32)) { bad += 1; }
+    if (x2 + (-4096i32)) != (x2 + id((-4096i32))) { bad += 1; }
+    if (x2 - (-4096i32)) != (x2 - id((-4096i32))) { bad += 1; }
+    if (x2 / (-4096i32)) != (x2 / id((-4096i32))) { bad += 1; }
+    if (x2 % (-4096i32)) != (x2 % id((-4096i32))) { bad += 1; }
+    if (x2 & (-1i32)) != (x2 & id((-1i32))) { bad += 1; }
+    if (x2 | (-1i32)) != (x2 | id((-1i32))) { bad += 1; }
+    if (x2 ^ (-1i32)) != (x2 ^ id((-1i32))) { bad += 1; }
+    if x2 == (-1i32) { if !(x2 == id((-1i32))) { bad += 1; } } else if x2 == id((-1i32)) { bad += 1; }
+    if x2 != (-1i32) { if !(x2 != id((-1i32))) { bad += 1; } } else if x2 != id((-1i32)) { bad += 1; }
+    if x2 < (-1i32) { if !(x2 < id((-1i32))) { bad += 1; } } else if x2 < id((-1i32)) { bad += 1; }
+    if x2 <= (-1i32) { if !(x2 <= id((-1i32))) { bad += 1; } } else if x2 <= id((-1i32)) { bad += 1; }
+    if x2 > (-1i32) { if !(x2 > id((-1i32))) { bad += 1; } } else if x2 > id((-1i32)) { bad += 1; }
+    if x2 >= (-1i32) { if !(x2 >= id((-1i32))) { bad += 1; } } else if x2 >= id((-1i32)) { bad += 1; }
+    if (x2 + (-1i32)) != (x2 + id((-1i32))) { bad += 1; }
+    if (x2 - (-1i32)) != (x2 - id((-1i32))) { bad += 1; }
+    if (x2 * (-1i32)) != (x2 * id((-1i32))) { bad += 1; }
+    if (x2 / (-1i32)) != (x2 / id((-1i32))) { bad += 1; }
+    if (x2 % (-1i32)) != (x2 % id((-1i32))) { bad += 1; }
+    if (x2 & 7i32) != (x2 & id(7i32)) { bad += 1; }
+    if (x2 | 7i32) != (x2 | id(7i32)) { bad += 1; }
+    if (x2 ^ 7i32) != (x2 ^ id(7i32)) { bad += 1; }
+    if x2 == 7i32 { if !(x2 == id(7i32)) { bad += 1; } } else if x2 == id(7i32) { bad += 1; }
+    if x2 != 7i32 { if !(x2 != id(7i32)) { bad += 1; } } else if x2 != id(7i32) { bad += 1; }
+    if x2 < 7i32 { if !(x2 < id(7i32)) { bad += 1; } } else if x2 < id(7i32) { bad += 1; }
+    if x2 <= 7i32 { if !(x2 <= id(7i32)) { bad += 1; } } else if x2 <= id(7i32) { bad += 1; }
+    if x2 > 7i32 { if !(x2 > id(7i32)) { bad += 1; } } else if x2 > id(7i32) { bad += 1; }
+    if x2 >= 7i32 { if !(x2 >= id(7i32)) { bad += 1; } } else if x2 >= id(7i32) { bad += 1; }
+    if (x2 + 7i32) != (x2 + id(7i32)) { bad += 1; }
+    if (x2 - 7i32) != (x2 - id(7i32)) { bad += 1; }
+    if (x2 / 7i32) != (x2 / id(7i32)) { bad += 1; }
+    if (x2 % 7i32) != (x2 % id(7i32)) { bad += 1; }
+    if (x2 & 4095i32) != (x2 & id(4095i32)) { bad += 1; }
+    if (x2 | 4095i32) != (x2 | id(4095i32)) { bad += 1; }
+    if (x2 ^ 4095i32) != (x2 ^ id(4095i32)) { bad += 1; }
+    if x2 == 4095i32 { if !(x2 == id(4095i32)) { bad += 1; } } else if x2 == id(4095i32) { bad += 1; }
+    if x2 != 4095i32 { if !(x2 != id(4095i32)) { bad += 1; } } else if x2 != id(4095i32) { bad += 1; }
+    if x2 < 4095i32 { if !(x2 < id(4095i32)) { bad += 1; } } else if x2 < id(4095i32) { bad += 1; }
+    if x2 <= 4095i32 { if !(x2 <= id(4095i32)) { bad += 1; } } else if x2 <= id(4095i32) { bad += 1; }
+    if x2 > 4095i32 { if !(x2 > id(4095i32)) { bad += 1; } } else if x2 > id(4095i32) { bad += 1; }
+    if x2 >= 4095i32 { if !(x2 >= id(4095i32)) { bad += 1; } } else if x2 >= id(4095i32) { bad += 1; }
+    if (x2 + 4095i32) != (x2 + id(4095i32)) { bad += 1; }
+    if (x2 - 4095i32) != (x2 - id(4095i32)) { bad += 1; }
+    if (x2 / 4095i32) != (x2 / id(4095i32)) { bad += 1; }
+    if (x2 % 4095i32) != (x2 % id(4095i32)) { bad += 1; }
+    if (x2 & 4097i32) != (x2 & id(4097i32)) { bad += 1; }
+    if (x2 | 4097i32) != (x2 | id(4097i32)) { bad += 1; }
+    if (x2 ^ 4097i32) != (x2 ^ id(4097i32)) { bad += 1; }
+    if x2 == 4097i32 { if !(x2 == id(4097i32)) { bad += 1; } } else if x2 == id(4097i32) { bad += 1; }
+    if x2 != 4097i32 { if !(x2 != id(4097i32)) { bad += 1; } } else if x2 != id(4097i32) { bad += 1; }
+    if x2 < 4097i32 { if !(x2 < id(4097i32)) { bad += 1; } } else if x2 < id(4097i32) { bad += 1; }
+    if x2 <= 4097i32 { if !(x2 <= id(4097i32)) { bad += 1; } } else if x2 <= id(4097i32) { bad += 1; }
+    if x2 > 4097i32 { if !(x2 > id(4097i32)) { bad += 1; } } else if x2 > id(4097i32) { bad += 1; }
+    if x2 >= 4097i32 { if !(x2 >= id(4097i32)) { bad += 1; } } else if x2 >= id(4097i32) { bad += 1; }
+    if (x2 + 4097i32) != (x2 + id(4097i32)) { bad += 1; }
+    if (x2 - 4097i32) != (x2 - id(4097i32)) { bad += 1; }
+    if (x2 / 4097i32) != (x2 / id(4097i32)) { bad += 1; }
+    if (x2 % 4097i32) != (x2 % id(4097i32)) { bad += 1; }
+    if (x2 & 1073741824i32) != (x2 & id(1073741824i32)) { bad += 1; }
+    if (x2 | 1073741824i32) != (x2 | id(1073741824i32)) { bad += 1; }
+    if (x2 ^ 1073741824i32) != (x2 ^ id(1073741824i32)) { bad += 1; }
+    if x2 == 1073741824i32 { if !(x2 == id(1073741824i32)) { bad += 1; } } else if x2 == id(1073741824i32) { bad += 1; }
+    if x2 != 1073741824i32 { if !(x2 != id(1073741824i32)) { bad += 1; } } else if x2 != id(1073741824i32) { bad += 1; }
+    if x2 < 1073741824i32 { if !(x2 < id(1073741824i32)) { bad += 1; } } else if x2 < id(1073741824i32) { bad += 1; }
+    if x2 <= 1073741824i32 { if !(x2 <= id(1073741824i32)) { bad += 1; } } else if x2 <= id(1073741824i32) { bad += 1; }
+    if x2 > 1073741824i32 { if !(x2 > id(1073741824i32)) { bad += 1; } } else if x2 > id(1073741824i32) { bad += 1; }
+    if x2 >= 1073741824i32 { if !(x2 >= id(1073741824i32)) { bad += 1; } } else if x2 >= id(1073741824i32) { bad += 1; }
+    if (x2 + 1073741824i32) != (x2 + id(1073741824i32)) { bad += 1; }
+    if (x2 - 1073741824i32) != (x2 - id(1073741824i32)) { bad += 1; }
+    if (x2 / 1073741824i32) != (x2 / id(1073741824i32)) { bad += 1; }
+    if (x2 % 1073741824i32) != (x2 % id(1073741824i32)) { bad += 1; }
+    if (x2 & 2147483647i32) != (x2 & id(2147483647i32)) { bad += 1; }
+    if (x2 | 2147483647i32) != (x2 | id(2147483647i32)) { bad += 1; }
+    if (x2 ^ 2147483647i32) != (x2 ^ id(2147483647i32)) { bad += 1; }
+    if x2 == 2147483647i32 { if !(x2 == id(2147483647i32)) { bad += 1; } } else if x2 == id(2147483647i32) { bad += 1; }
+    if x2 != 2147483647i32 { if !(x2 != id(2147483647i32)) { bad += 1; } } else if x2 != id(2147483647i32) { bad += 1; }
+    if x2 < 2147483647i32 { if !(x2 < id(2147483647i32)) { bad += 1; } } else if x2 < id(2147483647i32) { bad += 1; }
+    if x2 <= 2147483647i32 { if !(x2 <= id(2147483647i32)) { bad += 1; } } else if x2 <= id(2147483647i32) { bad += 1; }
+    if x2 > 2147483647i32 { if !(x2 > id(2147483647i32)) { bad += 1; } } else if x2 > id(2147483647i32) { bad += 1; }
+    if x2 >= 2147483647i32 { if !(x2 >= id(2147483647i32)) { bad += 1; } } else if x2 >= id(2147483647i32) { bad += 1; }
+    if (x2 - 2147483647i32) != (x2 - id(2147483647i32)) { bad += 1; }
+    if (x2 / 2147483647i32) != (x2 / id(2147483647i32)) { bad += 1; }
+    if (x2 % 2147483647i32) != (x2 % id(2147483647i32)) { bad += 1; }
+    if (x2 >> 0i32) != (x2 >> id(0i32)) { bad += 1; }
+    if (x2 & 2147483647i32) << 0i32 != (x2 & 2147483647i32) << id(0i32) { bad += 1; }
+    if (x2 >> 1i32) != (x2 >> id(1i32)) { bad += 1; }
+    if (x2 & 1073741823i32) << 1i32 != (x2 & 1073741823i32) << id(1i32) { bad += 1; }
+    if (x2 >> 3i32) != (x2 >> id(3i32)) { bad += 1; }
+    if (x2 & 268435455i32) << 3i32 != (x2 & 268435455i32) << id(3i32) { bad += 1; }
+    if (x2 >> 16i32) != (x2 >> id(16i32)) { bad += 1; }
+    if (x2 & 32767i32) << 16i32 != (x2 & 32767i32) << id(16i32) { bad += 1; }
+    if (x2 >> 31i32) != (x2 >> id(31i32)) { bad += 1; }
+    if (x2 & 0i32) << 31i32 != (x2 & 0i32) << id(31i32) { bad += 1; }
+    if (x3 & i32::MIN) != (x3 & id(i32::MIN)) { bad += 1; }
+    if (x3 | i32::MIN) != (x3 | id(i32::MIN)) { bad += 1; }
+    if (x3 ^ i32::MIN) != (x3 ^ id(i32::MIN)) { bad += 1; }
+    if x3 == i32::MIN { if !(x3 == id(i32::MIN)) { bad += 1; } } else if x3 == id(i32::MIN) { bad += 1; }
+    if x3 != i32::MIN { if !(x3 != id(i32::MIN)) { bad += 1; } } else if x3 != id(i32::MIN) { bad += 1; }
+    if x3 < i32::MIN { if !(x3 < id(i32::MIN)) { bad += 1; } } else if x3 < id(i32::MIN) { bad += 1; }
+    if x3 <= i32::MIN { if !(x3 <= id(i32::MIN)) { bad += 1; } } else if x3 <= id(i32::MIN) { bad += 1; }
+    if x3 > i32::MIN { if !(x3 > id(i32::MIN)) { bad += 1; } } else if x3 > id(i32::MIN) { bad += 1; }
+    if x3 >= i32::MIN { if !(x3 >= id(i32::MIN)) { bad += 1; } } else if x3 >= id(i32::MIN) { bad += 1; }
+    if (x3 - i32::MIN) != (x3 - id(i32::MIN)) { bad += 1; }
+    if (x3 / i32::MIN) != (x3 / id(i32::MIN)) { bad += 1; }
+    if (x3 % i32::MIN) != (x3 % id(i32::MIN)) { bad += 1; }
+    if (x3 & (-4096i32)) != (x3 & id((-4096i32))) { bad += 1; }
+    if (x3 | (-4096i32)) != (x3 | id((-4096i32))) { bad += 1; }
+    if (x3 ^ (-4096i32)) != (x3 ^ id((-4096i32))) { bad += 1; }
+    if x3 == (-4096i32) { if !(x3 == id((-4096i32))) { bad += 1; } } else if x3 == id((-4096i32)) { bad += 1; }
+    if x3 != (-4096i32) { if !(x3 != id((-4096i32))) { bad += 1; } } else if x3 != id((-4096i32)) { bad += 1; }
+    if x3 < (-4096i32) { if !(x3 < id((-4096i32))) { bad += 1; } } else if x3 < id((-4096i32)) { bad += 1; }
+    if x3 <= (-4096i32) { if !(x3 <= id((-4096i32))) { bad += 1; } } else if x3 <= id((-4096i32)) { bad += 1; }
+    if x3 > (-4096i32) { if !(x3 > id((-4096i32))) { bad += 1; } } else if x3 > id((-4096i32)) { bad += 1; }
+    if x3 >= (-4096i32) { if !(x3 >= id((-4096i32))) { bad += 1; } } else if x3 >= id((-4096i32)) { bad += 1; }
+    if (x3 + (-4096i32)) != (x3 + id((-4096i32))) { bad += 1; }
+    if (x3 - (-4096i32)) != (x3 - id((-4096i32))) { bad += 1; }
+    if (x3 * (-4096i32)) != (x3 * id((-4096i32))) { bad += 1; }
+    if (x3 / (-4096i32)) != (x3 / id((-4096i32))) { bad += 1; }
+    if (x3 % (-4096i32)) != (x3 % id((-4096i32))) { bad += 1; }
+    if (x3 & (-1i32)) != (x3 & id((-1i32))) { bad += 1; }
+    if (x3 | (-1i32)) != (x3 | id((-1i32))) { bad += 1; }
+    if (x3 ^ (-1i32)) != (x3 ^ id((-1i32))) { bad += 1; }
+    if x3 == (-1i32) { if !(x3 == id((-1i32))) { bad += 1; } } else if x3 == id((-1i32)) { bad += 1; }
+    if x3 != (-1i32) { if !(x3 != id((-1i32))) { bad += 1; } } else if x3 != id((-1i32)) { bad += 1; }
+    if x3 < (-1i32) { if !(x3 < id((-1i32))) { bad += 1; } } else if x3 < id((-1i32)) { bad += 1; }
+    if x3 <= (-1i32) { if !(x3 <= id((-1i32))) { bad += 1; } } else if x3 <= id((-1i32)) { bad += 1; }
+    if x3 > (-1i32) { if !(x3 > id((-1i32))) { bad += 1; } } else if x3 > id((-1i32)) { bad += 1; }
+    if x3 >= (-1i32) { if !(x3 >= id((-1i32))) { bad += 1; } } else if x3 >= id((-1i32)) { bad += 1; }
+    if (x3 + (-1i32)) != (x3 + id((-1i32))) { bad += 1; }
+    if (x3 - (-1i32)) != (x3 - id((-1i32))) { bad += 1; }
+    if (x3 * (-1i32)) != (x3 * id((-1i32))) { bad += 1; }
+    if (x3 / (-1i32)) != (x3 / id((-1i32))) { bad += 1; }
+    if (x3 % (-1i32)) != (x3 % id((-1i32))) { bad += 1; }
+    if (x3 & 7i32) != (x3 & id(7i32)) { bad += 1; }
+    if (x3 | 7i32) != (x3 | id(7i32)) { bad += 1; }
+    if (x3 ^ 7i32) != (x3 ^ id(7i32)) { bad += 1; }
+    if x3 == 7i32 { if !(x3 == id(7i32)) { bad += 1; } } else if x3 == id(7i32) { bad += 1; }
+    if x3 != 7i32 { if !(x3 != id(7i32)) { bad += 1; } } else if x3 != id(7i32) { bad += 1; }
+    if x3 < 7i32 { if !(x3 < id(7i32)) { bad += 1; } } else if x3 < id(7i32) { bad += 1; }
+    if x3 <= 7i32 { if !(x3 <= id(7i32)) { bad += 1; } } else if x3 <= id(7i32) { bad += 1; }
+    if x3 > 7i32 { if !(x3 > id(7i32)) { bad += 1; } } else if x3 > id(7i32) { bad += 1; }
+    if x3 >= 7i32 { if !(x3 >= id(7i32)) { bad += 1; } } else if x3 >= id(7i32) { bad += 1; }
+    if (x3 + 7i32) != (x3 + id(7i32)) { bad += 1; }
+    if (x3 - 7i32) != (x3 - id(7i32)) { bad += 1; }
+    if (x3 * 7i32) != (x3 * id(7i32)) { bad += 1; }
+    if (x3 / 7i32) != (x3 / id(7i32)) { bad += 1; }
+    if (x3 % 7i32) != (x3 % id(7i32)) { bad += 1; }
+    if (x3 & 4095i32) != (x3 & id(4095i32)) { bad += 1; }
+    if (x3 | 4095i32) != (x3 | id(4095i32)) { bad += 1; }
+    if (x3 ^ 4095i32) != (x3 ^ id(4095i32)) { bad += 1; }
+    if x3 == 4095i32 { if !(x3 == id(4095i32)) { bad += 1; } } else if x3 == id(4095i32) { bad += 1; }
+    if x3 != 4095i32 { if !(x3 != id(4095i32)) { bad += 1; } } else if x3 != id(4095i32) { bad += 1; }
+    if x3 < 4095i32 { if !(x3 < id(4095i32)) { bad += 1; } } else if x3 < id(4095i32) { bad += 1; }
+    if x3 <= 4095i32 { if !(x3 <= id(4095i32)) { bad += 1; } } else if x3 <= id(4095i32) { bad += 1; }
+    if x3 > 4095i32 { if !(x3 > id(4095i32)) { bad += 1; } } else if x3 > id(4095i32) { bad += 1; }
+    if x3 >= 4095i32 { if !(x3 >= id(4095i32)) { bad += 1; } } else if x3 >= id(4095i32) { bad += 1; }
+    if (x3 + 4095i32) != (x3 + id(4095i32)) { bad += 1; }
+    if (x3 - 4095i32) != (x3 - id(4095i32)) { bad += 1; }
+    if (x3 * 4095i32) != (x3 * id(4095i32)) { bad += 1; }
+    if (x3 / 4095i32) != (x3 / id(4095i32)) { bad += 1; }
+    if (x3 % 4095i32) != (x3 % id(4095i32)) { bad += 1; }
+    if (x3 & 4097i32) != (x3 & id(4097i32)) { bad += 1; }
+    if (x3 | 4097i32) != (x3 | id(4097i32)) { bad += 1; }
+    if (x3 ^ 4097i32) != (x3 ^ id(4097i32)) { bad += 1; }
+    if x3 == 4097i32 { if !(x3 == id(4097i32)) { bad += 1; } } else if x3 == id(4097i32) { bad += 1; }
+    if x3 != 4097i32 { if !(x3 != id(4097i32)) { bad += 1; } } else if x3 != id(4097i32) { bad += 1; }
+    if x3 < 4097i32 { if !(x3 < id(4097i32)) { bad += 1; } } else if x3 < id(4097i32) { bad += 1; }
+    if x3 <= 4097i32 { if !(x3 <= id(4097i32)) { bad += 1; } } else if x3 <= id(4097i32) { bad += 1; }
+    if x3 > 4097i32 { if !(x3 > id(4097i32)) { bad += 1; } } else if x3 > id(4097i32) { bad += 1; }
+    if x3 >= 4097i32 { if !(x3 >= id(4097i32)) { bad += 1; } } else if x3 >= id(4097i32) { bad += 1; }
+    if (x3 + 4097i32) != (x3 + id(4097i32)) { bad += 1; }
+    if (x3 - 4097i32) != (x3 - id(4097i32)) { bad += 1; }
+    if (x3 * 4097i32) != (x3 * id(4097i32)) { bad += 1; }
+    if (x3 / 4097i32) != (x3 / id(4097i32)) { bad += 1; }
+    if (x3 % 4097i32) != (x3 % id(4097i32)) { bad += 1; }
+    if (x3 & 1073741824i32) != (x3 & id(1073741824i32)) { bad += 1; }
+    if (x3 | 1073741824i32) != (x3 | id(1073741824i32)) { bad += 1; }
+    if (x3 ^ 1073741824i32) != (x3 ^ id(1073741824i32)) { bad += 1; }
+    if x3 == 1073741824i32 { if !(x3 == id(1073741824i32)) { bad += 1; } } else if x3 == id(1073741824i32) { bad += 1; }
+    if x3 != 1073741824i32 { if !(x3 != id(1073741824i32)) { bad += 1; } } else if x3 != id(1073741824i32) { bad += 1; }
+    if x3 < 1073741824i32 { if !(x3 < id(1073741824i32)) { bad += 1; } } else if x3 < id(1073741824i32) { bad += 1; }
+    if x3 <= 1073741824i32 { if !(x3 <= id(1073741824i32)) { bad += 1; } } else if x3 <= id(1073741824i32) { bad += 1; }
+    if x3 > 1073741824i32 { if !(x3 > id(1073741824i32)) { bad += 1; } } else if x3 > id(1073741824i32) { bad += 1; }
+    if x3 >= 1073741824i32 { if !(x3 >= id(1073741824i32)) { bad += 1; } } else if x3 >= id(1073741824i32) { bad += 1; }
+    if (x3 + 1073741824i32) != (x3 + id(1073741824i32)) { bad += 1; }
+    if (x3 - 1073741824i32) != (x3 - id(1073741824i32)) { bad += 1; }
+    if (x3 / 1073741824i32) != (x3 / id(1073741824i32)) { bad += 1; }
+    if (x3 % 1073741824i32) != (x3 % id(1073741824i32)) { bad += 1; }
+    if (x3 & 2147483647i32) != (x3 & id(2147483647i32)) { bad += 1; }
+    if (x3 | 2147483647i32) != (x3 | id(2147483647i32)) { bad += 1; }
+    if (x3 ^ 2147483647i32) != (x3 ^ id(2147483647i32)) { bad += 1; }
+    if x3 == 2147483647i32 { if !(x3 == id(2147483647i32)) { bad += 1; } } else if x3 == id(2147483647i32) { bad += 1; }
+    if x3 != 2147483647i32 { if !(x3 != id(2147483647i32)) { bad += 1; } } else if x3 != id(2147483647i32) { bad += 1; }
+    if x3 < 2147483647i32 { if !(x3 < id(2147483647i32)) { bad += 1; } } else if x3 < id(2147483647i32) { bad += 1; }
+    if x3 <= 2147483647i32 { if !(x3 <= id(2147483647i32)) { bad += 1; } } else if x3 <= id(2147483647i32) { bad += 1; }
+    if x3 > 2147483647i32 { if !(x3 > id(2147483647i32)) { bad += 1; } } else if x3 > id(2147483647i32) { bad += 1; }
+    if x3 >= 2147483647i32 { if !(x3 >= id(2147483647i32)) { bad += 1; } } else if x3 >= id(2147483647i32) { bad += 1; }
+    if (x3 + 2147483647i32) != (x3 + id(2147483647i32)) { bad += 1; }
+    if (x3 / 2147483647i32) != (x3 / id(2147483647i32)) { bad += 1; }
+    if (x3 % 2147483647i32) != (x3 % id(2147483647i32)) { bad += 1; }
+    if (x3 >> 0i32) != (x3 >> id(0i32)) { bad += 1; }
+    if (x3 & 2147483647i32) << 0i32 != (x3 & 2147483647i32) << id(0i32) { bad += 1; }
+    if (x3 >> 1i32) != (x3 >> id(1i32)) { bad += 1; }
+    if (x3 & 1073741823i32) << 1i32 != (x3 & 1073741823i32) << id(1i32) { bad += 1; }
+    if (x3 >> 3i32) != (x3 >> id(3i32)) { bad += 1; }
+    if (x3 & 268435455i32) << 3i32 != (x3 & 268435455i32) << id(3i32) { bad += 1; }
+    if (x3 >> 16i32) != (x3 >> id(16i32)) { bad += 1; }
+    if (x3 & 32767i32) << 16i32 != (x3 & 32767i32) << id(16i32) { bad += 1; }
+    if (x3 >> 31i32) != (x3 >> id(31i32)) { bad += 1; }
+    if (x3 & 0i32) << 31i32 != (x3 & 0i32) << id(31i32) { bad += 1; }
+    return bad;
+}
+
+fn check_u32() -> i64 {
+    let bad: i64 = 0;
+    let x0 = id(0u32);
+    let x1 = id(4294967295u32);
+    let x2 = id(1431655765u32);
+    if (x0 & 7u32) != (x0 & id(7u32)) { bad += 1; }
+    if (x0 | 7u32) != (x0 | id(7u32)) { bad += 1; }
+    if (x0 ^ 7u32) != (x0 ^ id(7u32)) { bad += 1; }
+    if x0 == 7u32 { if !(x0 == id(7u32)) { bad += 1; } } else if x0 == id(7u32) { bad += 1; }
+    if x0 != 7u32 { if !(x0 != id(7u32)) { bad += 1; } } else if x0 != id(7u32) { bad += 1; }
+    if x0 < 7u32 { if !(x0 < id(7u32)) { bad += 1; } } else if x0 < id(7u32) { bad += 1; }
+    if x0 <= 7u32 { if !(x0 <= id(7u32)) { bad += 1; } } else if x0 <= id(7u32) { bad += 1; }
+    if x0 > 7u32 { if !(x0 > id(7u32)) { bad += 1; } } else if x0 > id(7u32) { bad += 1; }
+    if x0 >= 7u32 { if !(x0 >= id(7u32)) { bad += 1; } } else if x0 >= id(7u32) { bad += 1; }
+    if (x0 + 7u32) != (x0 + id(7u32)) { bad += 1; }
+    if (x0 * 7u32) != (x0 * id(7u32)) { bad += 1; }
+    if (x0 / 7u32) != (x0 / id(7u32)) { bad += 1; }
+    if (x0 % 7u32) != (x0 % id(7u32)) { bad += 1; }
+    if (x0 & 4095u32) != (x0 & id(4095u32)) { bad += 1; }
+    if (x0 | 4095u32) != (x0 | id(4095u32)) { bad += 1; }
+    if (x0 ^ 4095u32) != (x0 ^ id(4095u32)) { bad += 1; }
+    if x0 == 4095u32 { if !(x0 == id(4095u32)) { bad += 1; } } else if x0 == id(4095u32) { bad += 1; }
+    if x0 != 4095u32 { if !(x0 != id(4095u32)) { bad += 1; } } else if x0 != id(4095u32) { bad += 1; }
+    if x0 < 4095u32 { if !(x0 < id(4095u32)) { bad += 1; } } else if x0 < id(4095u32) { bad += 1; }
+    if x0 <= 4095u32 { if !(x0 <= id(4095u32)) { bad += 1; } } else if x0 <= id(4095u32) { bad += 1; }
+    if x0 > 4095u32 { if !(x0 > id(4095u32)) { bad += 1; } } else if x0 > id(4095u32) { bad += 1; }
+    if x0 >= 4095u32 { if !(x0 >= id(4095u32)) { bad += 1; } } else if x0 >= id(4095u32) { bad += 1; }
+    if (x0 + 4095u32) != (x0 + id(4095u32)) { bad += 1; }
+    if (x0 * 4095u32) != (x0 * id(4095u32)) { bad += 1; }
+    if (x0 / 4095u32) != (x0 / id(4095u32)) { bad += 1; }
+    if (x0 % 4095u32) != (x0 % id(4095u32)) { bad += 1; }
+    if (x0 & 4097u32) != (x0 & id(4097u32)) { bad += 1; }
+    if (x0 | 4097u32) != (x0 | id(4097u32)) { bad += 1; }
+    if (x0 ^ 4097u32) != (x0 ^ id(4097u32)) { bad += 1; }
+    if x0 == 4097u32 { if !(x0 == id(4097u32)) { bad += 1; } } else if x0 == id(4097u32) { bad += 1; }
+    if x0 != 4097u32 { if !(x0 != id(4097u32)) { bad += 1; } } else if x0 != id(4097u32) { bad += 1; }
+    if x0 < 4097u32 { if !(x0 < id(4097u32)) { bad += 1; } } else if x0 < id(4097u32) { bad += 1; }
+    if x0 <= 4097u32 { if !(x0 <= id(4097u32)) { bad += 1; } } else if x0 <= id(4097u32) { bad += 1; }
+    if x0 > 4097u32 { if !(x0 > id(4097u32)) { bad += 1; } } else if x0 > id(4097u32) { bad += 1; }
+    if x0 >= 4097u32 { if !(x0 >= id(4097u32)) { bad += 1; } } else if x0 >= id(4097u32) { bad += 1; }
+    if (x0 + 4097u32) != (x0 + id(4097u32)) { bad += 1; }
+    if (x0 * 4097u32) != (x0 * id(4097u32)) { bad += 1; }
+    if (x0 / 4097u32) != (x0 / id(4097u32)) { bad += 1; }
+    if (x0 % 4097u32) != (x0 % id(4097u32)) { bad += 1; }
+    if (x0 & 1073741824u32) != (x0 & id(1073741824u32)) { bad += 1; }
+    if (x0 | 1073741824u32) != (x0 | id(1073741824u32)) { bad += 1; }
+    if (x0 ^ 1073741824u32) != (x0 ^ id(1073741824u32)) { bad += 1; }
+    if x0 == 1073741824u32 { if !(x0 == id(1073741824u32)) { bad += 1; } } else if x0 == id(1073741824u32) { bad += 1; }
+    if x0 != 1073741824u32 { if !(x0 != id(1073741824u32)) { bad += 1; } } else if x0 != id(1073741824u32) { bad += 1; }
+    if x0 < 1073741824u32 { if !(x0 < id(1073741824u32)) { bad += 1; } } else if x0 < id(1073741824u32) { bad += 1; }
+    if x0 <= 1073741824u32 { if !(x0 <= id(1073741824u32)) { bad += 1; } } else if x0 <= id(1073741824u32) { bad += 1; }
+    if x0 > 1073741824u32 { if !(x0 > id(1073741824u32)) { bad += 1; } } else if x0 > id(1073741824u32) { bad += 1; }
+    if x0 >= 1073741824u32 { if !(x0 >= id(1073741824u32)) { bad += 1; } } else if x0 >= id(1073741824u32) { bad += 1; }
+    if (x0 + 1073741824u32) != (x0 + id(1073741824u32)) { bad += 1; }
+    if (x0 * 1073741824u32) != (x0 * id(1073741824u32)) { bad += 1; }
+    if (x0 / 1073741824u32) != (x0 / id(1073741824u32)) { bad += 1; }
+    if (x0 % 1073741824u32) != (x0 % id(1073741824u32)) { bad += 1; }
+    if (x0 & 4294967295u32) != (x0 & id(4294967295u32)) { bad += 1; }
+    if (x0 | 4294967295u32) != (x0 | id(4294967295u32)) { bad += 1; }
+    if (x0 ^ 4294967295u32) != (x0 ^ id(4294967295u32)) { bad += 1; }
+    if x0 == 4294967295u32 { if !(x0 == id(4294967295u32)) { bad += 1; } } else if x0 == id(4294967295u32) { bad += 1; }
+    if x0 != 4294967295u32 { if !(x0 != id(4294967295u32)) { bad += 1; } } else if x0 != id(4294967295u32) { bad += 1; }
+    if x0 < 4294967295u32 { if !(x0 < id(4294967295u32)) { bad += 1; } } else if x0 < id(4294967295u32) { bad += 1; }
+    if x0 <= 4294967295u32 { if !(x0 <= id(4294967295u32)) { bad += 1; } } else if x0 <= id(4294967295u32) { bad += 1; }
+    if x0 > 4294967295u32 { if !(x0 > id(4294967295u32)) { bad += 1; } } else if x0 > id(4294967295u32) { bad += 1; }
+    if x0 >= 4294967295u32 { if !(x0 >= id(4294967295u32)) { bad += 1; } } else if x0 >= id(4294967295u32) { bad += 1; }
+    if (x0 + 4294967295u32) != (x0 + id(4294967295u32)) { bad += 1; }
+    if (x0 * 4294967295u32) != (x0 * id(4294967295u32)) { bad += 1; }
+    if (x0 / 4294967295u32) != (x0 / id(4294967295u32)) { bad += 1; }
+    if (x0 % 4294967295u32) != (x0 % id(4294967295u32)) { bad += 1; }
+    if (x0 >> 0u32) != (x0 >> id(0u32)) { bad += 1; }
+    if (x0 & 4294967295u32) << 0u32 != (x0 & 4294967295u32) << id(0u32) { bad += 1; }
+    if (x0 >> 1u32) != (x0 >> id(1u32)) { bad += 1; }
+    if (x0 & 2147483647u32) << 1u32 != (x0 & 2147483647u32) << id(1u32) { bad += 1; }
+    if (x0 >> 3u32) != (x0 >> id(3u32)) { bad += 1; }
+    if (x0 & 536870911u32) << 3u32 != (x0 & 536870911u32) << id(3u32) { bad += 1; }
+    if (x0 >> 16u32) != (x0 >> id(16u32)) { bad += 1; }
+    if (x0 & 65535u32) << 16u32 != (x0 & 65535u32) << id(16u32) { bad += 1; }
+    if (x0 >> 31u32) != (x0 >> id(31u32)) { bad += 1; }
+    if (x0 & 1u32) << 31u32 != (x0 & 1u32) << id(31u32) { bad += 1; }
+    if (x1 & 7u32) != (x1 & id(7u32)) { bad += 1; }
+    if (x1 | 7u32) != (x1 | id(7u32)) { bad += 1; }
+    if (x1 ^ 7u32) != (x1 ^ id(7u32)) { bad += 1; }
+    if x1 == 7u32 { if !(x1 == id(7u32)) { bad += 1; } } else if x1 == id(7u32) { bad += 1; }
+    if x1 != 7u32 { if !(x1 != id(7u32)) { bad += 1; } } else if x1 != id(7u32) { bad += 1; }
+    if x1 < 7u32 { if !(x1 < id(7u32)) { bad += 1; } } else if x1 < id(7u32) { bad += 1; }
+    if x1 <= 7u32 { if !(x1 <= id(7u32)) { bad += 1; } } else if x1 <= id(7u32) { bad += 1; }
+    if x1 > 7u32 { if !(x1 > id(7u32)) { bad += 1; } } else if x1 > id(7u32) { bad += 1; }
+    if x1 >= 7u32 { if !(x1 >= id(7u32)) { bad += 1; } } else if x1 >= id(7u32) { bad += 1; }
+    if (x1 - 7u32) != (x1 - id(7u32)) { bad += 1; }
+    if (x1 / 7u32) != (x1 / id(7u32)) { bad += 1; }
+    if (x1 % 7u32) != (x1 % id(7u32)) { bad += 1; }
+    if (x1 & 4095u32) != (x1 & id(4095u32)) { bad += 1; }
+    if (x1 | 4095u32) != (x1 | id(4095u32)) { bad += 1; }
+    if (x1 ^ 4095u32) != (x1 ^ id(4095u32)) { bad += 1; }
+    if x1 == 4095u32 { if !(x1 == id(4095u32)) { bad += 1; } } else if x1 == id(4095u32) { bad += 1; }
+    if x1 != 4095u32 { if !(x1 != id(4095u32)) { bad += 1; } } else if x1 != id(4095u32) { bad += 1; }
+    if x1 < 4095u32 { if !(x1 < id(4095u32)) { bad += 1; } } else if x1 < id(4095u32) { bad += 1; }
+    if x1 <= 4095u32 { if !(x1 <= id(4095u32)) { bad += 1; } } else if x1 <= id(4095u32) { bad += 1; }
+    if x1 > 4095u32 { if !(x1 > id(4095u32)) { bad += 1; } } else if x1 > id(4095u32) { bad += 1; }
+    if x1 >= 4095u32 { if !(x1 >= id(4095u32)) { bad += 1; } } else if x1 >= id(4095u32) { bad += 1; }
+    if (x1 - 4095u32) != (x1 - id(4095u32)) { bad += 1; }
+    if (x1 / 4095u32) != (x1 / id(4095u32)) { bad += 1; }
+    if (x1 % 4095u32) != (x1 % id(4095u32)) { bad += 1; }
+    if (x1 & 4097u32) != (x1 & id(4097u32)) { bad += 1; }
+    if (x1 | 4097u32) != (x1 | id(4097u32)) { bad += 1; }
+    if (x1 ^ 4097u32) != (x1 ^ id(4097u32)) { bad += 1; }
+    if x1 == 4097u32 { if !(x1 == id(4097u32)) { bad += 1; } } else if x1 == id(4097u32) { bad += 1; }
+    if x1 != 4097u32 { if !(x1 != id(4097u32)) { bad += 1; } } else if x1 != id(4097u32) { bad += 1; }
+    if x1 < 4097u32 { if !(x1 < id(4097u32)) { bad += 1; } } else if x1 < id(4097u32) { bad += 1; }
+    if x1 <= 4097u32 { if !(x1 <= id(4097u32)) { bad += 1; } } else if x1 <= id(4097u32) { bad += 1; }
+    if x1 > 4097u32 { if !(x1 > id(4097u32)) { bad += 1; } } else if x1 > id(4097u32) { bad += 1; }
+    if x1 >= 4097u32 { if !(x1 >= id(4097u32)) { bad += 1; } } else if x1 >= id(4097u32) { bad += 1; }
+    if (x1 - 4097u32) != (x1 - id(4097u32)) { bad += 1; }
+    if (x1 / 4097u32) != (x1 / id(4097u32)) { bad += 1; }
+    if (x1 % 4097u32) != (x1 % id(4097u32)) { bad += 1; }
+    if (x1 & 1073741824u32) != (x1 & id(1073741824u32)) { bad += 1; }
+    if (x1 | 1073741824u32) != (x1 | id(1073741824u32)) { bad += 1; }
+    if (x1 ^ 1073741824u32) != (x1 ^ id(1073741824u32)) { bad += 1; }
+    if x1 == 1073741824u32 { if !(x1 == id(1073741824u32)) { bad += 1; } } else if x1 == id(1073741824u32) { bad += 1; }
+    if x1 != 1073741824u32 { if !(x1 != id(1073741824u32)) { bad += 1; } } else if x1 != id(1073741824u32) { bad += 1; }
+    if x1 < 1073741824u32 { if !(x1 < id(1073741824u32)) { bad += 1; } } else if x1 < id(1073741824u32) { bad += 1; }
+    if x1 <= 1073741824u32 { if !(x1 <= id(1073741824u32)) { bad += 1; } } else if x1 <= id(1073741824u32) { bad += 1; }
+    if x1 > 1073741824u32 { if !(x1 > id(1073741824u32)) { bad += 1; } } else if x1 > id(1073741824u32) { bad += 1; }
+    if x1 >= 1073741824u32 { if !(x1 >= id(1073741824u32)) { bad += 1; } } else if x1 >= id(1073741824u32) { bad += 1; }
+    if (x1 - 1073741824u32) != (x1 - id(1073741824u32)) { bad += 1; }
+    if (x1 / 1073741824u32) != (x1 / id(1073741824u32)) { bad += 1; }
+    if (x1 % 1073741824u32) != (x1 % id(1073741824u32)) { bad += 1; }
+    if (x1 & 4294967295u32) != (x1 & id(4294967295u32)) { bad += 1; }
+    if (x1 | 4294967295u32) != (x1 | id(4294967295u32)) { bad += 1; }
+    if (x1 ^ 4294967295u32) != (x1 ^ id(4294967295u32)) { bad += 1; }
+    if x1 == 4294967295u32 { if !(x1 == id(4294967295u32)) { bad += 1; } } else if x1 == id(4294967295u32) { bad += 1; }
+    if x1 != 4294967295u32 { if !(x1 != id(4294967295u32)) { bad += 1; } } else if x1 != id(4294967295u32) { bad += 1; }
+    if x1 < 4294967295u32 { if !(x1 < id(4294967295u32)) { bad += 1; } } else if x1 < id(4294967295u32) { bad += 1; }
+    if x1 <= 4294967295u32 { if !(x1 <= id(4294967295u32)) { bad += 1; } } else if x1 <= id(4294967295u32) { bad += 1; }
+    if x1 > 4294967295u32 { if !(x1 > id(4294967295u32)) { bad += 1; } } else if x1 > id(4294967295u32) { bad += 1; }
+    if x1 >= 4294967295u32 { if !(x1 >= id(4294967295u32)) { bad += 1; } } else if x1 >= id(4294967295u32) { bad += 1; }
+    if (x1 - 4294967295u32) != (x1 - id(4294967295u32)) { bad += 1; }
+    if (x1 / 4294967295u32) != (x1 / id(4294967295u32)) { bad += 1; }
+    if (x1 % 4294967295u32) != (x1 % id(4294967295u32)) { bad += 1; }
+    if (x1 >> 0u32) != (x1 >> id(0u32)) { bad += 1; }
+    if (x1 & 4294967295u32) << 0u32 != (x1 & 4294967295u32) << id(0u32) { bad += 1; }
+    if (x1 >> 1u32) != (x1 >> id(1u32)) { bad += 1; }
+    if (x1 & 2147483647u32) << 1u32 != (x1 & 2147483647u32) << id(1u32) { bad += 1; }
+    if (x1 >> 3u32) != (x1 >> id(3u32)) { bad += 1; }
+    if (x1 & 536870911u32) << 3u32 != (x1 & 536870911u32) << id(3u32) { bad += 1; }
+    if (x1 >> 16u32) != (x1 >> id(16u32)) { bad += 1; }
+    if (x1 & 65535u32) << 16u32 != (x1 & 65535u32) << id(16u32) { bad += 1; }
+    if (x1 >> 31u32) != (x1 >> id(31u32)) { bad += 1; }
+    if (x1 & 1u32) << 31u32 != (x1 & 1u32) << id(31u32) { bad += 1; }
+    if (x2 & 7u32) != (x2 & id(7u32)) { bad += 1; }
+    if (x2 | 7u32) != (x2 | id(7u32)) { bad += 1; }
+    if (x2 ^ 7u32) != (x2 ^ id(7u32)) { bad += 1; }
+    if x2 == 7u32 { if !(x2 == id(7u32)) { bad += 1; } } else if x2 == id(7u32) { bad += 1; }
+    if x2 != 7u32 { if !(x2 != id(7u32)) { bad += 1; } } else if x2 != id(7u32) { bad += 1; }
+    if x2 < 7u32 { if !(x2 < id(7u32)) { bad += 1; } } else if x2 < id(7u32) { bad += 1; }
+    if x2 <= 7u32 { if !(x2 <= id(7u32)) { bad += 1; } } else if x2 <= id(7u32) { bad += 1; }
+    if x2 > 7u32 { if !(x2 > id(7u32)) { bad += 1; } } else if x2 > id(7u32) { bad += 1; }
+    if x2 >= 7u32 { if !(x2 >= id(7u32)) { bad += 1; } } else if x2 >= id(7u32) { bad += 1; }
+    if (x2 + 7u32) != (x2 + id(7u32)) { bad += 1; }
+    if (x2 - 7u32) != (x2 - id(7u32)) { bad += 1; }
+    if (x2 / 7u32) != (x2 / id(7u32)) { bad += 1; }
+    if (x2 % 7u32) != (x2 % id(7u32)) { bad += 1; }
+    if (x2 & 4095u32) != (x2 & id(4095u32)) { bad += 1; }
+    if (x2 | 4095u32) != (x2 | id(4095u32)) { bad += 1; }
+    if (x2 ^ 4095u32) != (x2 ^ id(4095u32)) { bad += 1; }
+    if x2 == 4095u32 { if !(x2 == id(4095u32)) { bad += 1; } } else if x2 == id(4095u32) { bad += 1; }
+    if x2 != 4095u32 { if !(x2 != id(4095u32)) { bad += 1; } } else if x2 != id(4095u32) { bad += 1; }
+    if x2 < 4095u32 { if !(x2 < id(4095u32)) { bad += 1; } } else if x2 < id(4095u32) { bad += 1; }
+    if x2 <= 4095u32 { if !(x2 <= id(4095u32)) { bad += 1; } } else if x2 <= id(4095u32) { bad += 1; }
+    if x2 > 4095u32 { if !(x2 > id(4095u32)) { bad += 1; } } else if x2 > id(4095u32) { bad += 1; }
+    if x2 >= 4095u32 { if !(x2 >= id(4095u32)) { bad += 1; } } else if x2 >= id(4095u32) { bad += 1; }
+    if (x2 + 4095u32) != (x2 + id(4095u32)) { bad += 1; }
+    if (x2 - 4095u32) != (x2 - id(4095u32)) { bad += 1; }
+    if (x2 / 4095u32) != (x2 / id(4095u32)) { bad += 1; }
+    if (x2 % 4095u32) != (x2 % id(4095u32)) { bad += 1; }
+    if (x2 & 4097u32) != (x2 & id(4097u32)) { bad += 1; }
+    if (x2 | 4097u32) != (x2 | id(4097u32)) { bad += 1; }
+    if (x2 ^ 4097u32) != (x2 ^ id(4097u32)) { bad += 1; }
+    if x2 == 4097u32 { if !(x2 == id(4097u32)) { bad += 1; } } else if x2 == id(4097u32) { bad += 1; }
+    if x2 != 4097u32 { if !(x2 != id(4097u32)) { bad += 1; } } else if x2 != id(4097u32) { bad += 1; }
+    if x2 < 4097u32 { if !(x2 < id(4097u32)) { bad += 1; } } else if x2 < id(4097u32) { bad += 1; }
+    if x2 <= 4097u32 { if !(x2 <= id(4097u32)) { bad += 1; } } else if x2 <= id(4097u32) { bad += 1; }
+    if x2 > 4097u32 { if !(x2 > id(4097u32)) { bad += 1; } } else if x2 > id(4097u32) { bad += 1; }
+    if x2 >= 4097u32 { if !(x2 >= id(4097u32)) { bad += 1; } } else if x2 >= id(4097u32) { bad += 1; }
+    if (x2 + 4097u32) != (x2 + id(4097u32)) { bad += 1; }
+    if (x2 - 4097u32) != (x2 - id(4097u32)) { bad += 1; }
+    if (x2 / 4097u32) != (x2 / id(4097u32)) { bad += 1; }
+    if (x2 % 4097u32) != (x2 % id(4097u32)) { bad += 1; }
+    if (x2 & 1073741824u32) != (x2 & id(1073741824u32)) { bad += 1; }
+    if (x2 | 1073741824u32) != (x2 | id(1073741824u32)) { bad += 1; }
+    if (x2 ^ 1073741824u32) != (x2 ^ id(1073741824u32)) { bad += 1; }
+    if x2 == 1073741824u32 { if !(x2 == id(1073741824u32)) { bad += 1; } } else if x2 == id(1073741824u32) { bad += 1; }
+    if x2 != 1073741824u32 { if !(x2 != id(1073741824u32)) { bad += 1; } } else if x2 != id(1073741824u32) { bad += 1; }
+    if x2 < 1073741824u32 { if !(x2 < id(1073741824u32)) { bad += 1; } } else if x2 < id(1073741824u32) { bad += 1; }
+    if x2 <= 1073741824u32 { if !(x2 <= id(1073741824u32)) { bad += 1; } } else if x2 <= id(1073741824u32) { bad += 1; }
+    if x2 > 1073741824u32 { if !(x2 > id(1073741824u32)) { bad += 1; } } else if x2 > id(1073741824u32) { bad += 1; }
+    if x2 >= 1073741824u32 { if !(x2 >= id(1073741824u32)) { bad += 1; } } else if x2 >= id(1073741824u32) { bad += 1; }
+    if (x2 + 1073741824u32) != (x2 + id(1073741824u32)) { bad += 1; }
+    if (x2 - 1073741824u32) != (x2 - id(1073741824u32)) { bad += 1; }
+    if (x2 / 1073741824u32) != (x2 / id(1073741824u32)) { bad += 1; }
+    if (x2 % 1073741824u32) != (x2 % id(1073741824u32)) { bad += 1; }
+    if (x2 & 4294967295u32) != (x2 & id(4294967295u32)) { bad += 1; }
+    if (x2 | 4294967295u32) != (x2 | id(4294967295u32)) { bad += 1; }
+    if (x2 ^ 4294967295u32) != (x2 ^ id(4294967295u32)) { bad += 1; }
+    if x2 == 4294967295u32 { if !(x2 == id(4294967295u32)) { bad += 1; } } else if x2 == id(4294967295u32) { bad += 1; }
+    if x2 != 4294967295u32 { if !(x2 != id(4294967295u32)) { bad += 1; } } else if x2 != id(4294967295u32) { bad += 1; }
+    if x2 < 4294967295u32 { if !(x2 < id(4294967295u32)) { bad += 1; } } else if x2 < id(4294967295u32) { bad += 1; }
+    if x2 <= 4294967295u32 { if !(x2 <= id(4294967295u32)) { bad += 1; } } else if x2 <= id(4294967295u32) { bad += 1; }
+    if x2 > 4294967295u32 { if !(x2 > id(4294967295u32)) { bad += 1; } } else if x2 > id(4294967295u32) { bad += 1; }
+    if x2 >= 4294967295u32 { if !(x2 >= id(4294967295u32)) { bad += 1; } } else if x2 >= id(4294967295u32) { bad += 1; }
+    if (x2 / 4294967295u32) != (x2 / id(4294967295u32)) { bad += 1; }
+    if (x2 % 4294967295u32) != (x2 % id(4294967295u32)) { bad += 1; }
+    if (x2 >> 0u32) != (x2 >> id(0u32)) { bad += 1; }
+    if (x2 & 4294967295u32) << 0u32 != (x2 & 4294967295u32) << id(0u32) { bad += 1; }
+    if (x2 >> 1u32) != (x2 >> id(1u32)) { bad += 1; }
+    if (x2 & 2147483647u32) << 1u32 != (x2 & 2147483647u32) << id(1u32) { bad += 1; }
+    if (x2 >> 3u32) != (x2 >> id(3u32)) { bad += 1; }
+    if (x2 & 536870911u32) << 3u32 != (x2 & 536870911u32) << id(3u32) { bad += 1; }
+    if (x2 >> 16u32) != (x2 >> id(16u32)) { bad += 1; }
+    if (x2 & 65535u32) << 16u32 != (x2 & 65535u32) << id(16u32) { bad += 1; }
+    if (x2 >> 31u32) != (x2 >> id(31u32)) { bad += 1; }
+    if (x2 & 1u32) << 31u32 != (x2 & 1u32) << id(31u32) { bad += 1; }
+    return bad;
+}
+
+fn check_i64() -> i64 {
+    let bad: i64 = 0;
+    let x0 = id(i64::MIN);
+    let x1 = id(9223372036854775807i64);
+    let x2 = id(3074457345618258603i64);
+    let x3 = id((-5i64));
+    if (x0 & i64::MIN) != (x0 & id(i64::MIN)) { bad += 1; }
+    if (x0 | i64::MIN) != (x0 | id(i64::MIN)) { bad += 1; }
+    if (x0 ^ i64::MIN) != (x0 ^ id(i64::MIN)) { bad += 1; }
+    if x0 == i64::MIN { if !(x0 == id(i64::MIN)) { bad += 1; } } else if x0 == id(i64::MIN) { bad += 1; }
+    if x0 != i64::MIN { if !(x0 != id(i64::MIN)) { bad += 1; } } else if x0 != id(i64::MIN) { bad += 1; }
+    if x0 < i64::MIN { if !(x0 < id(i64::MIN)) { bad += 1; } } else if x0 < id(i64::MIN) { bad += 1; }
+    if x0 <= i64::MIN { if !(x0 <= id(i64::MIN)) { bad += 1; } } else if x0 <= id(i64::MIN) { bad += 1; }
+    if x0 > i64::MIN { if !(x0 > id(i64::MIN)) { bad += 1; } } else if x0 > id(i64::MIN) { bad += 1; }
+    if x0 >= i64::MIN { if !(x0 >= id(i64::MIN)) { bad += 1; } } else if x0 >= id(i64::MIN) { bad += 1; }
+    if (x0 - i64::MIN) != (x0 - id(i64::MIN)) { bad += 1; }
+    if (x0 / i64::MIN) != (x0 / id(i64::MIN)) { bad += 1; }
+    if (x0 % i64::MIN) != (x0 % id(i64::MIN)) { bad += 1; }
+    if (x0 & (-4096i64)) != (x0 & id((-4096i64))) { bad += 1; }
+    if (x0 | (-4096i64)) != (x0 | id((-4096i64))) { bad += 1; }
+    if (x0 ^ (-4096i64)) != (x0 ^ id((-4096i64))) { bad += 1; }
+    if x0 == (-4096i64) { if !(x0 == id((-4096i64))) { bad += 1; } } else if x0 == id((-4096i64)) { bad += 1; }
+    if x0 != (-4096i64) { if !(x0 != id((-4096i64))) { bad += 1; } } else if x0 != id((-4096i64)) { bad += 1; }
+    if x0 < (-4096i64) { if !(x0 < id((-4096i64))) { bad += 1; } } else if x0 < id((-4096i64)) { bad += 1; }
+    if x0 <= (-4096i64) { if !(x0 <= id((-4096i64))) { bad += 1; } } else if x0 <= id((-4096i64)) { bad += 1; }
+    if x0 > (-4096i64) { if !(x0 > id((-4096i64))) { bad += 1; } } else if x0 > id((-4096i64)) { bad += 1; }
+    if x0 >= (-4096i64) { if !(x0 >= id((-4096i64))) { bad += 1; } } else if x0 >= id((-4096i64)) { bad += 1; }
+    if (x0 - (-4096i64)) != (x0 - id((-4096i64))) { bad += 1; }
+    if (x0 / (-4096i64)) != (x0 / id((-4096i64))) { bad += 1; }
+    if (x0 % (-4096i64)) != (x0 % id((-4096i64))) { bad += 1; }
+    if (x0 & (-1i64)) != (x0 & id((-1i64))) { bad += 1; }
+    if (x0 | (-1i64)) != (x0 | id((-1i64))) { bad += 1; }
+    if (x0 ^ (-1i64)) != (x0 ^ id((-1i64))) { bad += 1; }
+    if x0 == (-1i64) { if !(x0 == id((-1i64))) { bad += 1; } } else if x0 == id((-1i64)) { bad += 1; }
+    if x0 != (-1i64) { if !(x0 != id((-1i64))) { bad += 1; } } else if x0 != id((-1i64)) { bad += 1; }
+    if x0 < (-1i64) { if !(x0 < id((-1i64))) { bad += 1; } } else if x0 < id((-1i64)) { bad += 1; }
+    if x0 <= (-1i64) { if !(x0 <= id((-1i64))) { bad += 1; } } else if x0 <= id((-1i64)) { bad += 1; }
+    if x0 > (-1i64) { if !(x0 > id((-1i64))) { bad += 1; } } else if x0 > id((-1i64)) { bad += 1; }
+    if x0 >= (-1i64) { if !(x0 >= id((-1i64))) { bad += 1; } } else if x0 >= id((-1i64)) { bad += 1; }
+    if (x0 - (-1i64)) != (x0 - id((-1i64))) { bad += 1; }
+    if (x0 & 7i64) != (x0 & id(7i64)) { bad += 1; }
+    if (x0 | 7i64) != (x0 | id(7i64)) { bad += 1; }
+    if (x0 ^ 7i64) != (x0 ^ id(7i64)) { bad += 1; }
+    if x0 == 7i64 { if !(x0 == id(7i64)) { bad += 1; } } else if x0 == id(7i64) { bad += 1; }
+    if x0 != 7i64 { if !(x0 != id(7i64)) { bad += 1; } } else if x0 != id(7i64) { bad += 1; }
+    if x0 < 7i64 { if !(x0 < id(7i64)) { bad += 1; } } else if x0 < id(7i64) { bad += 1; }
+    if x0 <= 7i64 { if !(x0 <= id(7i64)) { bad += 1; } } else if x0 <= id(7i64) { bad += 1; }
+    if x0 > 7i64 { if !(x0 > id(7i64)) { bad += 1; } } else if x0 > id(7i64) { bad += 1; }
+    if x0 >= 7i64 { if !(x0 >= id(7i64)) { bad += 1; } } else if x0 >= id(7i64) { bad += 1; }
+    if (x0 + 7i64) != (x0 + id(7i64)) { bad += 1; }
+    if (x0 / 7i64) != (x0 / id(7i64)) { bad += 1; }
+    if (x0 % 7i64) != (x0 % id(7i64)) { bad += 1; }
+    if (x0 & 4095i64) != (x0 & id(4095i64)) { bad += 1; }
+    if (x0 | 4095i64) != (x0 | id(4095i64)) { bad += 1; }
+    if (x0 ^ 4095i64) != (x0 ^ id(4095i64)) { bad += 1; }
+    if x0 == 4095i64 { if !(x0 == id(4095i64)) { bad += 1; } } else if x0 == id(4095i64) { bad += 1; }
+    if x0 != 4095i64 { if !(x0 != id(4095i64)) { bad += 1; } } else if x0 != id(4095i64) { bad += 1; }
+    if x0 < 4095i64 { if !(x0 < id(4095i64)) { bad += 1; } } else if x0 < id(4095i64) { bad += 1; }
+    if x0 <= 4095i64 { if !(x0 <= id(4095i64)) { bad += 1; } } else if x0 <= id(4095i64) { bad += 1; }
+    if x0 > 4095i64 { if !(x0 > id(4095i64)) { bad += 1; } } else if x0 > id(4095i64) { bad += 1; }
+    if x0 >= 4095i64 { if !(x0 >= id(4095i64)) { bad += 1; } } else if x0 >= id(4095i64) { bad += 1; }
+    if (x0 + 4095i64) != (x0 + id(4095i64)) { bad += 1; }
+    if (x0 / 4095i64) != (x0 / id(4095i64)) { bad += 1; }
+    if (x0 % 4095i64) != (x0 % id(4095i64)) { bad += 1; }
+    if (x0 & 4097i64) != (x0 & id(4097i64)) { bad += 1; }
+    if (x0 | 4097i64) != (x0 | id(4097i64)) { bad += 1; }
+    if (x0 ^ 4097i64) != (x0 ^ id(4097i64)) { bad += 1; }
+    if x0 == 4097i64 { if !(x0 == id(4097i64)) { bad += 1; } } else if x0 == id(4097i64) { bad += 1; }
+    if x0 != 4097i64 { if !(x0 != id(4097i64)) { bad += 1; } } else if x0 != id(4097i64) { bad += 1; }
+    if x0 < 4097i64 { if !(x0 < id(4097i64)) { bad += 1; } } else if x0 < id(4097i64) { bad += 1; }
+    if x0 <= 4097i64 { if !(x0 <= id(4097i64)) { bad += 1; } } else if x0 <= id(4097i64) { bad += 1; }
+    if x0 > 4097i64 { if !(x0 > id(4097i64)) { bad += 1; } } else if x0 > id(4097i64) { bad += 1; }
+    if x0 >= 4097i64 { if !(x0 >= id(4097i64)) { bad += 1; } } else if x0 >= id(4097i64) { bad += 1; }
+    if (x0 + 4097i64) != (x0 + id(4097i64)) { bad += 1; }
+    if (x0 / 4097i64) != (x0 / id(4097i64)) { bad += 1; }
+    if (x0 % 4097i64) != (x0 % id(4097i64)) { bad += 1; }
+    if (x0 & 4611686018427387904i64) != (x0 & id(4611686018427387904i64)) { bad += 1; }
+    if (x0 | 4611686018427387904i64) != (x0 | id(4611686018427387904i64)) { bad += 1; }
+    if (x0 ^ 4611686018427387904i64) != (x0 ^ id(4611686018427387904i64)) { bad += 1; }
+    if x0 == 4611686018427387904i64 { if !(x0 == id(4611686018427387904i64)) { bad += 1; } } else if x0 == id(4611686018427387904i64) { bad += 1; }
+    if x0 != 4611686018427387904i64 { if !(x0 != id(4611686018427387904i64)) { bad += 1; } } else if x0 != id(4611686018427387904i64) { bad += 1; }
+    if x0 < 4611686018427387904i64 { if !(x0 < id(4611686018427387904i64)) { bad += 1; } } else if x0 < id(4611686018427387904i64) { bad += 1; }
+    if x0 <= 4611686018427387904i64 { if !(x0 <= id(4611686018427387904i64)) { bad += 1; } } else if x0 <= id(4611686018427387904i64) { bad += 1; }
+    if x0 > 4611686018427387904i64 { if !(x0 > id(4611686018427387904i64)) { bad += 1; } } else if x0 > id(4611686018427387904i64) { bad += 1; }
+    if x0 >= 4611686018427387904i64 { if !(x0 >= id(4611686018427387904i64)) { bad += 1; } } else if x0 >= id(4611686018427387904i64) { bad += 1; }
+    if (x0 + 4611686018427387904i64) != (x0 + id(4611686018427387904i64)) { bad += 1; }
+    if (x0 / 4611686018427387904i64) != (x0 / id(4611686018427387904i64)) { bad += 1; }
+    if (x0 % 4611686018427387904i64) != (x0 % id(4611686018427387904i64)) { bad += 1; }
+    if (x0 & 9223372036854775807i64) != (x0 & id(9223372036854775807i64)) { bad += 1; }
+    if (x0 | 9223372036854775807i64) != (x0 | id(9223372036854775807i64)) { bad += 1; }
+    if (x0 ^ 9223372036854775807i64) != (x0 ^ id(9223372036854775807i64)) { bad += 1; }
+    if x0 == 9223372036854775807i64 { if !(x0 == id(9223372036854775807i64)) { bad += 1; } } else if x0 == id(9223372036854775807i64) { bad += 1; }
+    if x0 != 9223372036854775807i64 { if !(x0 != id(9223372036854775807i64)) { bad += 1; } } else if x0 != id(9223372036854775807i64) { bad += 1; }
+    if x0 < 9223372036854775807i64 { if !(x0 < id(9223372036854775807i64)) { bad += 1; } } else if x0 < id(9223372036854775807i64) { bad += 1; }
+    if x0 <= 9223372036854775807i64 { if !(x0 <= id(9223372036854775807i64)) { bad += 1; } } else if x0 <= id(9223372036854775807i64) { bad += 1; }
+    if x0 > 9223372036854775807i64 { if !(x0 > id(9223372036854775807i64)) { bad += 1; } } else if x0 > id(9223372036854775807i64) { bad += 1; }
+    if x0 >= 9223372036854775807i64 { if !(x0 >= id(9223372036854775807i64)) { bad += 1; } } else if x0 >= id(9223372036854775807i64) { bad += 1; }
+    if (x0 + 9223372036854775807i64) != (x0 + id(9223372036854775807i64)) { bad += 1; }
+    if (x0 / 9223372036854775807i64) != (x0 / id(9223372036854775807i64)) { bad += 1; }
+    if (x0 % 9223372036854775807i64) != (x0 % id(9223372036854775807i64)) { bad += 1; }
+    if (x0 >> 0i64) != (x0 >> id(0i64)) { bad += 1; }
+    if (x0 & 9223372036854775807i64) << 0i64 != (x0 & 9223372036854775807i64) << id(0i64) { bad += 1; }
+    if (x0 >> 1i64) != (x0 >> id(1i64)) { bad += 1; }
+    if (x0 & 4611686018427387903i64) << 1i64 != (x0 & 4611686018427387903i64) << id(1i64) { bad += 1; }
+    if (x0 >> 3i64) != (x0 >> id(3i64)) { bad += 1; }
+    if (x0 & 1152921504606846975i64) << 3i64 != (x0 & 1152921504606846975i64) << id(3i64) { bad += 1; }
+    if (x0 >> 32i64) != (x0 >> id(32i64)) { bad += 1; }
+    if (x0 & 2147483647i64) << 32i64 != (x0 & 2147483647i64) << id(32i64) { bad += 1; }
+    if (x0 >> 63i64) != (x0 >> id(63i64)) { bad += 1; }
+    if (x0 & 0i64) << 63i64 != (x0 & 0i64) << id(63i64) { bad += 1; }
+    if (x1 & i64::MIN) != (x1 & id(i64::MIN)) { bad += 1; }
+    if (x1 | i64::MIN) != (x1 | id(i64::MIN)) { bad += 1; }
+    if (x1 ^ i64::MIN) != (x1 ^ id(i64::MIN)) { bad += 1; }
+    if x1 == i64::MIN { if !(x1 == id(i64::MIN)) { bad += 1; } } else if x1 == id(i64::MIN) { bad += 1; }
+    if x1 != i64::MIN { if !(x1 != id(i64::MIN)) { bad += 1; } } else if x1 != id(i64::MIN) { bad += 1; }
+    if x1 < i64::MIN { if !(x1 < id(i64::MIN)) { bad += 1; } } else if x1 < id(i64::MIN) { bad += 1; }
+    if x1 <= i64::MIN { if !(x1 <= id(i64::MIN)) { bad += 1; } } else if x1 <= id(i64::MIN) { bad += 1; }
+    if x1 > i64::MIN { if !(x1 > id(i64::MIN)) { bad += 1; } } else if x1 > id(i64::MIN) { bad += 1; }
+    if x1 >= i64::MIN { if !(x1 >= id(i64::MIN)) { bad += 1; } } else if x1 >= id(i64::MIN) { bad += 1; }
+    if (x1 + i64::MIN) != (x1 + id(i64::MIN)) { bad += 1; }
+    if (x1 / i64::MIN) != (x1 / id(i64::MIN)) { bad += 1; }
+    if (x1 % i64::MIN) != (x1 % id(i64::MIN)) { bad += 1; }
+    if (x1 & (-4096i64)) != (x1 & id((-4096i64))) { bad += 1; }
+    if (x1 | (-4096i64)) != (x1 | id((-4096i64))) { bad += 1; }
+    if (x1 ^ (-4096i64)) != (x1 ^ id((-4096i64))) { bad += 1; }
+    if x1 == (-4096i64) { if !(x1 == id((-4096i64))) { bad += 1; } } else if x1 == id((-4096i64)) { bad += 1; }
+    if x1 != (-4096i64) { if !(x1 != id((-4096i64))) { bad += 1; } } else if x1 != id((-4096i64)) { bad += 1; }
+    if x1 < (-4096i64) { if !(x1 < id((-4096i64))) { bad += 1; } } else if x1 < id((-4096i64)) { bad += 1; }
+    if x1 <= (-4096i64) { if !(x1 <= id((-4096i64))) { bad += 1; } } else if x1 <= id((-4096i64)) { bad += 1; }
+    if x1 > (-4096i64) { if !(x1 > id((-4096i64))) { bad += 1; } } else if x1 > id((-4096i64)) { bad += 1; }
+    if x1 >= (-4096i64) { if !(x1 >= id((-4096i64))) { bad += 1; } } else if x1 >= id((-4096i64)) { bad += 1; }
+    if (x1 + (-4096i64)) != (x1 + id((-4096i64))) { bad += 1; }
+    if (x1 / (-4096i64)) != (x1 / id((-4096i64))) { bad += 1; }
+    if (x1 % (-4096i64)) != (x1 % id((-4096i64))) { bad += 1; }
+    if (x1 & (-1i64)) != (x1 & id((-1i64))) { bad += 1; }
+    if (x1 | (-1i64)) != (x1 | id((-1i64))) { bad += 1; }
+    if (x1 ^ (-1i64)) != (x1 ^ id((-1i64))) { bad += 1; }
+    if x1 == (-1i64) { if !(x1 == id((-1i64))) { bad += 1; } } else if x1 == id((-1i64)) { bad += 1; }
+    if x1 != (-1i64) { if !(x1 != id((-1i64))) { bad += 1; } } else if x1 != id((-1i64)) { bad += 1; }
+    if x1 < (-1i64) { if !(x1 < id((-1i64))) { bad += 1; } } else if x1 < id((-1i64)) { bad += 1; }
+    if x1 <= (-1i64) { if !(x1 <= id((-1i64))) { bad += 1; } } else if x1 <= id((-1i64)) { bad += 1; }
+    if x1 > (-1i64) { if !(x1 > id((-1i64))) { bad += 1; } } else if x1 > id((-1i64)) { bad += 1; }
+    if x1 >= (-1i64) { if !(x1 >= id((-1i64))) { bad += 1; } } else if x1 >= id((-1i64)) { bad += 1; }
+    if (x1 + (-1i64)) != (x1 + id((-1i64))) { bad += 1; }
+    if (x1 * (-1i64)) != (x1 * id((-1i64))) { bad += 1; }
+    if (x1 / (-1i64)) != (x1 / id((-1i64))) { bad += 1; }
+    if (x1 % (-1i64)) != (x1 % id((-1i64))) { bad += 1; }
+    if (x1 & 7i64) != (x1 & id(7i64)) { bad += 1; }
+    if (x1 | 7i64) != (x1 | id(7i64)) { bad += 1; }
+    if (x1 ^ 7i64) != (x1 ^ id(7i64)) { bad += 1; }
+    if x1 == 7i64 { if !(x1 == id(7i64)) { bad += 1; } } else if x1 == id(7i64) { bad += 1; }
+    if x1 != 7i64 { if !(x1 != id(7i64)) { bad += 1; } } else if x1 != id(7i64) { bad += 1; }
+    if x1 < 7i64 { if !(x1 < id(7i64)) { bad += 1; } } else if x1 < id(7i64) { bad += 1; }
+    if x1 <= 7i64 { if !(x1 <= id(7i64)) { bad += 1; } } else if x1 <= id(7i64) { bad += 1; }
+    if x1 > 7i64 { if !(x1 > id(7i64)) { bad += 1; } } else if x1 > id(7i64) { bad += 1; }
+    if x1 >= 7i64 { if !(x1 >= id(7i64)) { bad += 1; } } else if x1 >= id(7i64) { bad += 1; }
+    if (x1 - 7i64) != (x1 - id(7i64)) { bad += 1; }
+    if (x1 / 7i64) != (x1 / id(7i64)) { bad += 1; }
+    if (x1 % 7i64) != (x1 % id(7i64)) { bad += 1; }
+    if (x1 & 4095i64) != (x1 & id(4095i64)) { bad += 1; }
+    if (x1 | 4095i64) != (x1 | id(4095i64)) { bad += 1; }
+    if (x1 ^ 4095i64) != (x1 ^ id(4095i64)) { bad += 1; }
+    if x1 == 4095i64 { if !(x1 == id(4095i64)) { bad += 1; } } else if x1 == id(4095i64) { bad += 1; }
+    if x1 != 4095i64 { if !(x1 != id(4095i64)) { bad += 1; } } else if x1 != id(4095i64) { bad += 1; }
+    if x1 < 4095i64 { if !(x1 < id(4095i64)) { bad += 1; } } else if x1 < id(4095i64) { bad += 1; }
+    if x1 <= 4095i64 { if !(x1 <= id(4095i64)) { bad += 1; } } else if x1 <= id(4095i64) { bad += 1; }
+    if x1 > 4095i64 { if !(x1 > id(4095i64)) { bad += 1; } } else if x1 > id(4095i64) { bad += 1; }
+    if x1 >= 4095i64 { if !(x1 >= id(4095i64)) { bad += 1; } } else if x1 >= id(4095i64) { bad += 1; }
+    if (x1 - 4095i64) != (x1 - id(4095i64)) { bad += 1; }
+    if (x1 / 4095i64) != (x1 / id(4095i64)) { bad += 1; }
+    if (x1 % 4095i64) != (x1 % id(4095i64)) { bad += 1; }
+    if (x1 & 4097i64) != (x1 & id(4097i64)) { bad += 1; }
+    if (x1 | 4097i64) != (x1 | id(4097i64)) { bad += 1; }
+    if (x1 ^ 4097i64) != (x1 ^ id(4097i64)) { bad += 1; }
+    if x1 == 4097i64 { if !(x1 == id(4097i64)) { bad += 1; } } else if x1 == id(4097i64) { bad += 1; }
+    if x1 != 4097i64 { if !(x1 != id(4097i64)) { bad += 1; } } else if x1 != id(4097i64) { bad += 1; }
+    if x1 < 4097i64 { if !(x1 < id(4097i64)) { bad += 1; } } else if x1 < id(4097i64) { bad += 1; }
+    if x1 <= 4097i64 { if !(x1 <= id(4097i64)) { bad += 1; } } else if x1 <= id(4097i64) { bad += 1; }
+    if x1 > 4097i64 { if !(x1 > id(4097i64)) { bad += 1; } } else if x1 > id(4097i64) { bad += 1; }
+    if x1 >= 4097i64 { if !(x1 >= id(4097i64)) { bad += 1; } } else if x1 >= id(4097i64) { bad += 1; }
+    if (x1 - 4097i64) != (x1 - id(4097i64)) { bad += 1; }
+    if (x1 / 4097i64) != (x1 / id(4097i64)) { bad += 1; }
+    if (x1 % 4097i64) != (x1 % id(4097i64)) { bad += 1; }
+    if (x1 & 4611686018427387904i64) != (x1 & id(4611686018427387904i64)) { bad += 1; }
+    if (x1 | 4611686018427387904i64) != (x1 | id(4611686018427387904i64)) { bad += 1; }
+    if (x1 ^ 4611686018427387904i64) != (x1 ^ id(4611686018427387904i64)) { bad += 1; }
+    if x1 == 4611686018427387904i64 { if !(x1 == id(4611686018427387904i64)) { bad += 1; } } else if x1 == id(4611686018427387904i64) { bad += 1; }
+    if x1 != 4611686018427387904i64 { if !(x1 != id(4611686018427387904i64)) { bad += 1; } } else if x1 != id(4611686018427387904i64) { bad += 1; }
+    if x1 < 4611686018427387904i64 { if !(x1 < id(4611686018427387904i64)) { bad += 1; } } else if x1 < id(4611686018427387904i64) { bad += 1; }
+    if x1 <= 4611686018427387904i64 { if !(x1 <= id(4611686018427387904i64)) { bad += 1; } } else if x1 <= id(4611686018427387904i64) { bad += 1; }
+    if x1 > 4611686018427387904i64 { if !(x1 > id(4611686018427387904i64)) { bad += 1; } } else if x1 > id(4611686018427387904i64) { bad += 1; }
+    if x1 >= 4611686018427387904i64 { if !(x1 >= id(4611686018427387904i64)) { bad += 1; } } else if x1 >= id(4611686018427387904i64) { bad += 1; }
+    if (x1 - 4611686018427387904i64) != (x1 - id(4611686018427387904i64)) { bad += 1; }
+    if (x1 / 4611686018427387904i64) != (x1 / id(4611686018427387904i64)) { bad += 1; }
+    if (x1 % 4611686018427387904i64) != (x1 % id(4611686018427387904i64)) { bad += 1; }
+    if (x1 & 9223372036854775807i64) != (x1 & id(9223372036854775807i64)) { bad += 1; }
+    if (x1 | 9223372036854775807i64) != (x1 | id(9223372036854775807i64)) { bad += 1; }
+    if (x1 ^ 9223372036854775807i64) != (x1 ^ id(9223372036854775807i64)) { bad += 1; }
+    if x1 == 9223372036854775807i64 { if !(x1 == id(9223372036854775807i64)) { bad += 1; } } else if x1 == id(9223372036854775807i64) { bad += 1; }
+    if x1 != 9223372036854775807i64 { if !(x1 != id(9223372036854775807i64)) { bad += 1; } } else if x1 != id(9223372036854775807i64) { bad += 1; }
+    if x1 < 9223372036854775807i64 { if !(x1 < id(9223372036854775807i64)) { bad += 1; } } else if x1 < id(9223372036854775807i64) { bad += 1; }
+    if x1 <= 9223372036854775807i64 { if !(x1 <= id(9223372036854775807i64)) { bad += 1; } } else if x1 <= id(9223372036854775807i64) { bad += 1; }
+    if x1 > 9223372036854775807i64 { if !(x1 > id(9223372036854775807i64)) { bad += 1; } } else if x1 > id(9223372036854775807i64) { bad += 1; }
+    if x1 >= 9223372036854775807i64 { if !(x1 >= id(9223372036854775807i64)) { bad += 1; } } else if x1 >= id(9223372036854775807i64) { bad += 1; }
+    if (x1 - 9223372036854775807i64) != (x1 - id(9223372036854775807i64)) { bad += 1; }
+    if (x1 / 9223372036854775807i64) != (x1 / id(9223372036854775807i64)) { bad += 1; }
+    if (x1 % 9223372036854775807i64) != (x1 % id(9223372036854775807i64)) { bad += 1; }
+    if (x1 >> 0i64) != (x1 >> id(0i64)) { bad += 1; }
+    if (x1 & 9223372036854775807i64) << 0i64 != (x1 & 9223372036854775807i64) << id(0i64) { bad += 1; }
+    if (x1 >> 1i64) != (x1 >> id(1i64)) { bad += 1; }
+    if (x1 & 4611686018427387903i64) << 1i64 != (x1 & 4611686018427387903i64) << id(1i64) { bad += 1; }
+    if (x1 >> 3i64) != (x1 >> id(3i64)) { bad += 1; }
+    if (x1 & 1152921504606846975i64) << 3i64 != (x1 & 1152921504606846975i64) << id(3i64) { bad += 1; }
+    if (x1 >> 32i64) != (x1 >> id(32i64)) { bad += 1; }
+    if (x1 & 2147483647i64) << 32i64 != (x1 & 2147483647i64) << id(32i64) { bad += 1; }
+    if (x1 >> 63i64) != (x1 >> id(63i64)) { bad += 1; }
+    if (x1 & 0i64) << 63i64 != (x1 & 0i64) << id(63i64) { bad += 1; }
+    if (x2 & i64::MIN) != (x2 & id(i64::MIN)) { bad += 1; }
+    if (x2 | i64::MIN) != (x2 | id(i64::MIN)) { bad += 1; }
+    if (x2 ^ i64::MIN) != (x2 ^ id(i64::MIN)) { bad += 1; }
+    if x2 == i64::MIN { if !(x2 == id(i64::MIN)) { bad += 1; } } else if x2 == id(i64::MIN) { bad += 1; }
+    if x2 != i64::MIN { if !(x2 != id(i64::MIN)) { bad += 1; } } else if x2 != id(i64::MIN) { bad += 1; }
+    if x2 < i64::MIN { if !(x2 < id(i64::MIN)) { bad += 1; } } else if x2 < id(i64::MIN) { bad += 1; }
+    if x2 <= i64::MIN { if !(x2 <= id(i64::MIN)) { bad += 1; } } else if x2 <= id(i64::MIN) { bad += 1; }
+    if x2 > i64::MIN { if !(x2 > id(i64::MIN)) { bad += 1; } } else if x2 > id(i64::MIN) { bad += 1; }
+    if x2 >= i64::MIN { if !(x2 >= id(i64::MIN)) { bad += 1; } } else if x2 >= id(i64::MIN) { bad += 1; }
+    if (x2 + i64::MIN) != (x2 + id(i64::MIN)) { bad += 1; }
+    if (x2 / i64::MIN) != (x2 / id(i64::MIN)) { bad += 1; }
+    if (x2 % i64::MIN) != (x2 % id(i64::MIN)) { bad += 1; }
+    if (x2 & (-4096i64)) != (x2 & id((-4096i64))) { bad += 1; }
+    if (x2 | (-4096i64)) != (x2 | id((-4096i64))) { bad += 1; }
+    if (x2 ^ (-4096i64)) != (x2 ^ id((-4096i64))) { bad += 1; }
+    if x2 == (-4096i64) { if !(x2 == id((-4096i64))) { bad += 1; } } else if x2 == id((-4096i64)) { bad += 1; }
+    if x2 != (-4096i64) { if !(x2 != id((-4096i64))) { bad += 1; } } else if x2 != id((-4096i64)) { bad += 1; }
+    if x2 < (-4096i64) { if !(x2 < id((-4096i64))) { bad += 1; } } else if x2 < id((-4096i64)) { bad += 1; }
+    if x2 <= (-4096i64) { if !(x2 <= id((-4096i64))) { bad += 1; } } else if x2 <= id((-4096i64)) { bad += 1; }
+    if x2 > (-4096i64) { if !(x2 > id((-4096i64))) { bad += 1; } } else if x2 > id((-4096i64)) { bad += 1; }
+    if x2 >= (-4096i64) { if !(x2 >= id((-4096i64))) { bad += 1; } } else if x2 >= id((-4096i64)) { bad += 1; }
+    if (x2 + (-4096i64)) != (x2 + id((-4096i64))) { bad += 1; }
+    if (x2 - (-4096i64)) != (x2 - id((-4096i64))) { bad += 1; }
+    if (x2 / (-4096i64)) != (x2 / id((-4096i64))) { bad += 1; }
+    if (x2 % (-4096i64)) != (x2 % id((-4096i64))) { bad += 1; }
+    if (x2 & (-1i64)) != (x2 & id((-1i64))) { bad += 1; }
+    if (x2 | (-1i64)) != (x2 | id((-1i64))) { bad += 1; }
+    if (x2 ^ (-1i64)) != (x2 ^ id((-1i64))) { bad += 1; }
+    if x2 == (-1i64) { if !(x2 == id((-1i64))) { bad += 1; } } else if x2 == id((-1i64)) { bad += 1; }
+    if x2 != (-1i64) { if !(x2 != id((-1i64))) { bad += 1; } } else if x2 != id((-1i64)) { bad += 1; }
+    if x2 < (-1i64) { if !(x2 < id((-1i64))) { bad += 1; } } else if x2 < id((-1i64)) { bad += 1; }
+    if x2 <= (-1i64) { if !(x2 <= id((-1i64))) { bad += 1; } } else if x2 <= id((-1i64)) { bad += 1; }
+    if x2 > (-1i64) { if !(x2 > id((-1i64))) { bad += 1; } } else if x2 > id((-1i64)) { bad += 1; }
+    if x2 >= (-1i64) { if !(x2 >= id((-1i64))) { bad += 1; } } else if x2 >= id((-1i64)) { bad += 1; }
+    if (x2 + (-1i64)) != (x2 + id((-1i64))) { bad += 1; }
+    if (x2 - (-1i64)) != (x2 - id((-1i64))) { bad += 1; }
+    if (x2 * (-1i64)) != (x2 * id((-1i64))) { bad += 1; }
+    if (x2 / (-1i64)) != (x2 / id((-1i64))) { bad += 1; }
+    if (x2 % (-1i64)) != (x2 % id((-1i64))) { bad += 1; }
+    if (x2 & 7i64) != (x2 & id(7i64)) { bad += 1; }
+    if (x2 | 7i64) != (x2 | id(7i64)) { bad += 1; }
+    if (x2 ^ 7i64) != (x2 ^ id(7i64)) { bad += 1; }
+    if x2 == 7i64 { if !(x2 == id(7i64)) { bad += 1; } } else if x2 == id(7i64) { bad += 1; }
+    if x2 != 7i64 { if !(x2 != id(7i64)) { bad += 1; } } else if x2 != id(7i64) { bad += 1; }
+    if x2 < 7i64 { if !(x2 < id(7i64)) { bad += 1; } } else if x2 < id(7i64) { bad += 1; }
+    if x2 <= 7i64 { if !(x2 <= id(7i64)) { bad += 1; } } else if x2 <= id(7i64) { bad += 1; }
+    if x2 > 7i64 { if !(x2 > id(7i64)) { bad += 1; } } else if x2 > id(7i64) { bad += 1; }
+    if x2 >= 7i64 { if !(x2 >= id(7i64)) { bad += 1; } } else if x2 >= id(7i64) { bad += 1; }
+    if (x2 + 7i64) != (x2 + id(7i64)) { bad += 1; }
+    if (x2 - 7i64) != (x2 - id(7i64)) { bad += 1; }
+    if (x2 / 7i64) != (x2 / id(7i64)) { bad += 1; }
+    if (x2 % 7i64) != (x2 % id(7i64)) { bad += 1; }
+    if (x2 & 4095i64) != (x2 & id(4095i64)) { bad += 1; }
+    if (x2 | 4095i64) != (x2 | id(4095i64)) { bad += 1; }
+    if (x2 ^ 4095i64) != (x2 ^ id(4095i64)) { bad += 1; }
+    if x2 == 4095i64 { if !(x2 == id(4095i64)) { bad += 1; } } else if x2 == id(4095i64) { bad += 1; }
+    if x2 != 4095i64 { if !(x2 != id(4095i64)) { bad += 1; } } else if x2 != id(4095i64) { bad += 1; }
+    if x2 < 4095i64 { if !(x2 < id(4095i64)) { bad += 1; } } else if x2 < id(4095i64) { bad += 1; }
+    if x2 <= 4095i64 { if !(x2 <= id(4095i64)) { bad += 1; } } else if x2 <= id(4095i64) { bad += 1; }
+    if x2 > 4095i64 { if !(x2 > id(4095i64)) { bad += 1; } } else if x2 > id(4095i64) { bad += 1; }
+    if x2 >= 4095i64 { if !(x2 >= id(4095i64)) { bad += 1; } } else if x2 >= id(4095i64) { bad += 1; }
+    if (x2 + 4095i64) != (x2 + id(4095i64)) { bad += 1; }
+    if (x2 - 4095i64) != (x2 - id(4095i64)) { bad += 1; }
+    if (x2 / 4095i64) != (x2 / id(4095i64)) { bad += 1; }
+    if (x2 % 4095i64) != (x2 % id(4095i64)) { bad += 1; }
+    if (x2 & 4097i64) != (x2 & id(4097i64)) { bad += 1; }
+    if (x2 | 4097i64) != (x2 | id(4097i64)) { bad += 1; }
+    if (x2 ^ 4097i64) != (x2 ^ id(4097i64)) { bad += 1; }
+    if x2 == 4097i64 { if !(x2 == id(4097i64)) { bad += 1; } } else if x2 == id(4097i64) { bad += 1; }
+    if x2 != 4097i64 { if !(x2 != id(4097i64)) { bad += 1; } } else if x2 != id(4097i64) { bad += 1; }
+    if x2 < 4097i64 { if !(x2 < id(4097i64)) { bad += 1; } } else if x2 < id(4097i64) { bad += 1; }
+    if x2 <= 4097i64 { if !(x2 <= id(4097i64)) { bad += 1; } } else if x2 <= id(4097i64) { bad += 1; }
+    if x2 > 4097i64 { if !(x2 > id(4097i64)) { bad += 1; } } else if x2 > id(4097i64) { bad += 1; }
+    if x2 >= 4097i64 { if !(x2 >= id(4097i64)) { bad += 1; } } else if x2 >= id(4097i64) { bad += 1; }
+    if (x2 + 4097i64) != (x2 + id(4097i64)) { bad += 1; }
+    if (x2 - 4097i64) != (x2 - id(4097i64)) { bad += 1; }
+    if (x2 / 4097i64) != (x2 / id(4097i64)) { bad += 1; }
+    if (x2 % 4097i64) != (x2 % id(4097i64)) { bad += 1; }
+    if (x2 & 4611686018427387904i64) != (x2 & id(4611686018427387904i64)) { bad += 1; }
+    if (x2 | 4611686018427387904i64) != (x2 | id(4611686018427387904i64)) { bad += 1; }
+    if (x2 ^ 4611686018427387904i64) != (x2 ^ id(4611686018427387904i64)) { bad += 1; }
+    if x2 == 4611686018427387904i64 { if !(x2 == id(4611686018427387904i64)) { bad += 1; } } else if x2 == id(4611686018427387904i64) { bad += 1; }
+    if x2 != 4611686018427387904i64 { if !(x2 != id(4611686018427387904i64)) { bad += 1; } } else if x2 != id(4611686018427387904i64) { bad += 1; }
+    if x2 < 4611686018427387904i64 { if !(x2 < id(4611686018427387904i64)) { bad += 1; } } else if x2 < id(4611686018427387904i64) { bad += 1; }
+    if x2 <= 4611686018427387904i64 { if !(x2 <= id(4611686018427387904i64)) { bad += 1; } } else if x2 <= id(4611686018427387904i64) { bad += 1; }
+    if x2 > 4611686018427387904i64 { if !(x2 > id(4611686018427387904i64)) { bad += 1; } } else if x2 > id(4611686018427387904i64) { bad += 1; }
+    if x2 >= 4611686018427387904i64 { if !(x2 >= id(4611686018427387904i64)) { bad += 1; } } else if x2 >= id(4611686018427387904i64) { bad += 1; }
+    if (x2 + 4611686018427387904i64) != (x2 + id(4611686018427387904i64)) { bad += 1; }
+    if (x2 - 4611686018427387904i64) != (x2 - id(4611686018427387904i64)) { bad += 1; }
+    if (x2 / 4611686018427387904i64) != (x2 / id(4611686018427387904i64)) { bad += 1; }
+    if (x2 % 4611686018427387904i64) != (x2 % id(4611686018427387904i64)) { bad += 1; }
+    if (x2 & 9223372036854775807i64) != (x2 & id(9223372036854775807i64)) { bad += 1; }
+    if (x2 | 9223372036854775807i64) != (x2 | id(9223372036854775807i64)) { bad += 1; }
+    if (x2 ^ 9223372036854775807i64) != (x2 ^ id(9223372036854775807i64)) { bad += 1; }
+    if x2 == 9223372036854775807i64 { if !(x2 == id(9223372036854775807i64)) { bad += 1; } } else if x2 == id(9223372036854775807i64) { bad += 1; }
+    if x2 != 9223372036854775807i64 { if !(x2 != id(9223372036854775807i64)) { bad += 1; } } else if x2 != id(9223372036854775807i64) { bad += 1; }
+    if x2 < 9223372036854775807i64 { if !(x2 < id(9223372036854775807i64)) { bad += 1; } } else if x2 < id(9223372036854775807i64) { bad += 1; }
+    if x2 <= 9223372036854775807i64 { if !(x2 <= id(9223372036854775807i64)) { bad += 1; } } else if x2 <= id(9223372036854775807i64) { bad += 1; }
+    if x2 > 9223372036854775807i64 { if !(x2 > id(9223372036854775807i64)) { bad += 1; } } else if x2 > id(9223372036854775807i64) { bad += 1; }
+    if x2 >= 9223372036854775807i64 { if !(x2 >= id(9223372036854775807i64)) { bad += 1; } } else if x2 >= id(9223372036854775807i64) { bad += 1; }
+    if (x2 - 9223372036854775807i64) != (x2 - id(9223372036854775807i64)) { bad += 1; }
+    if (x2 / 9223372036854775807i64) != (x2 / id(9223372036854775807i64)) { bad += 1; }
+    if (x2 % 9223372036854775807i64) != (x2 % id(9223372036854775807i64)) { bad += 1; }
+    if (x2 >> 0i64) != (x2 >> id(0i64)) { bad += 1; }
+    if (x2 & 9223372036854775807i64) << 0i64 != (x2 & 9223372036854775807i64) << id(0i64) { bad += 1; }
+    if (x2 >> 1i64) != (x2 >> id(1i64)) { bad += 1; }
+    if (x2 & 4611686018427387903i64) << 1i64 != (x2 & 4611686018427387903i64) << id(1i64) { bad += 1; }
+    if (x2 >> 3i64) != (x2 >> id(3i64)) { bad += 1; }
+    if (x2 & 1152921504606846975i64) << 3i64 != (x2 & 1152921504606846975i64) << id(3i64) { bad += 1; }
+    if (x2 >> 32i64) != (x2 >> id(32i64)) { bad += 1; }
+    if (x2 & 2147483647i64) << 32i64 != (x2 & 2147483647i64) << id(32i64) { bad += 1; }
+    if (x2 >> 63i64) != (x2 >> id(63i64)) { bad += 1; }
+    if (x2 & 0i64) << 63i64 != (x2 & 0i64) << id(63i64) { bad += 1; }
+    if (x3 & i64::MIN) != (x3 & id(i64::MIN)) { bad += 1; }
+    if (x3 | i64::MIN) != (x3 | id(i64::MIN)) { bad += 1; }
+    if (x3 ^ i64::MIN) != (x3 ^ id(i64::MIN)) { bad += 1; }
+    if x3 == i64::MIN { if !(x3 == id(i64::MIN)) { bad += 1; } } else if x3 == id(i64::MIN) { bad += 1; }
+    if x3 != i64::MIN { if !(x3 != id(i64::MIN)) { bad += 1; } } else if x3 != id(i64::MIN) { bad += 1; }
+    if x3 < i64::MIN { if !(x3 < id(i64::MIN)) { bad += 1; } } else if x3 < id(i64::MIN) { bad += 1; }
+    if x3 <= i64::MIN { if !(x3 <= id(i64::MIN)) { bad += 1; } } else if x3 <= id(i64::MIN) { bad += 1; }
+    if x3 > i64::MIN { if !(x3 > id(i64::MIN)) { bad += 1; } } else if x3 > id(i64::MIN) { bad += 1; }
+    if x3 >= i64::MIN { if !(x3 >= id(i64::MIN)) { bad += 1; } } else if x3 >= id(i64::MIN) { bad += 1; }
+    if (x3 - i64::MIN) != (x3 - id(i64::MIN)) { bad += 1; }
+    if (x3 / i64::MIN) != (x3 / id(i64::MIN)) { bad += 1; }
+    if (x3 % i64::MIN) != (x3 % id(i64::MIN)) { bad += 1; }
+    if (x3 & (-4096i64)) != (x3 & id((-4096i64))) { bad += 1; }
+    if (x3 | (-4096i64)) != (x3 | id((-4096i64))) { bad += 1; }
+    if (x3 ^ (-4096i64)) != (x3 ^ id((-4096i64))) { bad += 1; }
+    if x3 == (-4096i64) { if !(x3 == id((-4096i64))) { bad += 1; } } else if x3 == id((-4096i64)) { bad += 1; }
+    if x3 != (-4096i64) { if !(x3 != id((-4096i64))) { bad += 1; } } else if x3 != id((-4096i64)) { bad += 1; }
+    if x3 < (-4096i64) { if !(x3 < id((-4096i64))) { bad += 1; } } else if x3 < id((-4096i64)) { bad += 1; }
+    if x3 <= (-4096i64) { if !(x3 <= id((-4096i64))) { bad += 1; } } else if x3 <= id((-4096i64)) { bad += 1; }
+    if x3 > (-4096i64) { if !(x3 > id((-4096i64))) { bad += 1; } } else if x3 > id((-4096i64)) { bad += 1; }
+    if x3 >= (-4096i64) { if !(x3 >= id((-4096i64))) { bad += 1; } } else if x3 >= id((-4096i64)) { bad += 1; }
+    if (x3 + (-4096i64)) != (x3 + id((-4096i64))) { bad += 1; }
+    if (x3 - (-4096i64)) != (x3 - id((-4096i64))) { bad += 1; }
+    if (x3 * (-4096i64)) != (x3 * id((-4096i64))) { bad += 1; }
+    if (x3 / (-4096i64)) != (x3 / id((-4096i64))) { bad += 1; }
+    if (x3 % (-4096i64)) != (x3 % id((-4096i64))) { bad += 1; }
+    if (x3 & (-1i64)) != (x3 & id((-1i64))) { bad += 1; }
+    if (x3 | (-1i64)) != (x3 | id((-1i64))) { bad += 1; }
+    if (x3 ^ (-1i64)) != (x3 ^ id((-1i64))) { bad += 1; }
+    if x3 == (-1i64) { if !(x3 == id((-1i64))) { bad += 1; } } else if x3 == id((-1i64)) { bad += 1; }
+    if x3 != (-1i64) { if !(x3 != id((-1i64))) { bad += 1; } } else if x3 != id((-1i64)) { bad += 1; }
+    if x3 < (-1i64) { if !(x3 < id((-1i64))) { bad += 1; } } else if x3 < id((-1i64)) { bad += 1; }
+    if x3 <= (-1i64) { if !(x3 <= id((-1i64))) { bad += 1; } } else if x3 <= id((-1i64)) { bad += 1; }
+    if x3 > (-1i64) { if !(x3 > id((-1i64))) { bad += 1; } } else if x3 > id((-1i64)) { bad += 1; }
+    if x3 >= (-1i64) { if !(x3 >= id((-1i64))) { bad += 1; } } else if x3 >= id((-1i64)) { bad += 1; }
+    if (x3 + (-1i64)) != (x3 + id((-1i64))) { bad += 1; }
+    if (x3 - (-1i64)) != (x3 - id((-1i64))) { bad += 1; }
+    if (x3 * (-1i64)) != (x3 * id((-1i64))) { bad += 1; }
+    if (x3 / (-1i64)) != (x3 / id((-1i64))) { bad += 1; }
+    if (x3 % (-1i64)) != (x3 % id((-1i64))) { bad += 1; }
+    if (x3 & 7i64) != (x3 & id(7i64)) { bad += 1; }
+    if (x3 | 7i64) != (x3 | id(7i64)) { bad += 1; }
+    if (x3 ^ 7i64) != (x3 ^ id(7i64)) { bad += 1; }
+    if x3 == 7i64 { if !(x3 == id(7i64)) { bad += 1; } } else if x3 == id(7i64) { bad += 1; }
+    if x3 != 7i64 { if !(x3 != id(7i64)) { bad += 1; } } else if x3 != id(7i64) { bad += 1; }
+    if x3 < 7i64 { if !(x3 < id(7i64)) { bad += 1; } } else if x3 < id(7i64) { bad += 1; }
+    if x3 <= 7i64 { if !(x3 <= id(7i64)) { bad += 1; } } else if x3 <= id(7i64) { bad += 1; }
+    if x3 > 7i64 { if !(x3 > id(7i64)) { bad += 1; } } else if x3 > id(7i64) { bad += 1; }
+    if x3 >= 7i64 { if !(x3 >= id(7i64)) { bad += 1; } } else if x3 >= id(7i64) { bad += 1; }
+    if (x3 + 7i64) != (x3 + id(7i64)) { bad += 1; }
+    if (x3 - 7i64) != (x3 - id(7i64)) { bad += 1; }
+    if (x3 * 7i64) != (x3 * id(7i64)) { bad += 1; }
+    if (x3 / 7i64) != (x3 / id(7i64)) { bad += 1; }
+    if (x3 % 7i64) != (x3 % id(7i64)) { bad += 1; }
+    if (x3 & 4095i64) != (x3 & id(4095i64)) { bad += 1; }
+    if (x3 | 4095i64) != (x3 | id(4095i64)) { bad += 1; }
+    if (x3 ^ 4095i64) != (x3 ^ id(4095i64)) { bad += 1; }
+    if x3 == 4095i64 { if !(x3 == id(4095i64)) { bad += 1; } } else if x3 == id(4095i64) { bad += 1; }
+    if x3 != 4095i64 { if !(x3 != id(4095i64)) { bad += 1; } } else if x3 != id(4095i64) { bad += 1; }
+    if x3 < 4095i64 { if !(x3 < id(4095i64)) { bad += 1; } } else if x3 < id(4095i64) { bad += 1; }
+    if x3 <= 4095i64 { if !(x3 <= id(4095i64)) { bad += 1; } } else if x3 <= id(4095i64) { bad += 1; }
+    if x3 > 4095i64 { if !(x3 > id(4095i64)) { bad += 1; } } else if x3 > id(4095i64) { bad += 1; }
+    if x3 >= 4095i64 { if !(x3 >= id(4095i64)) { bad += 1; } } else if x3 >= id(4095i64) { bad += 1; }
+    if (x3 + 4095i64) != (x3 + id(4095i64)) { bad += 1; }
+    if (x3 - 4095i64) != (x3 - id(4095i64)) { bad += 1; }
+    if (x3 * 4095i64) != (x3 * id(4095i64)) { bad += 1; }
+    if (x3 / 4095i64) != (x3 / id(4095i64)) { bad += 1; }
+    if (x3 % 4095i64) != (x3 % id(4095i64)) { bad += 1; }
+    if (x3 & 4097i64) != (x3 & id(4097i64)) { bad += 1; }
+    if (x3 | 4097i64) != (x3 | id(4097i64)) { bad += 1; }
+    if (x3 ^ 4097i64) != (x3 ^ id(4097i64)) { bad += 1; }
+    if x3 == 4097i64 { if !(x3 == id(4097i64)) { bad += 1; } } else if x3 == id(4097i64) { bad += 1; }
+    if x3 != 4097i64 { if !(x3 != id(4097i64)) { bad += 1; } } else if x3 != id(4097i64) { bad += 1; }
+    if x3 < 4097i64 { if !(x3 < id(4097i64)) { bad += 1; } } else if x3 < id(4097i64) { bad += 1; }
+    if x3 <= 4097i64 { if !(x3 <= id(4097i64)) { bad += 1; } } else if x3 <= id(4097i64) { bad += 1; }
+    if x3 > 4097i64 { if !(x3 > id(4097i64)) { bad += 1; } } else if x3 > id(4097i64) { bad += 1; }
+    if x3 >= 4097i64 { if !(x3 >= id(4097i64)) { bad += 1; } } else if x3 >= id(4097i64) { bad += 1; }
+    if (x3 + 4097i64) != (x3 + id(4097i64)) { bad += 1; }
+    if (x3 - 4097i64) != (x3 - id(4097i64)) { bad += 1; }
+    if (x3 * 4097i64) != (x3 * id(4097i64)) { bad += 1; }
+    if (x3 / 4097i64) != (x3 / id(4097i64)) { bad += 1; }
+    if (x3 % 4097i64) != (x3 % id(4097i64)) { bad += 1; }
+    if (x3 & 4611686018427387904i64) != (x3 & id(4611686018427387904i64)) { bad += 1; }
+    if (x3 | 4611686018427387904i64) != (x3 | id(4611686018427387904i64)) { bad += 1; }
+    if (x3 ^ 4611686018427387904i64) != (x3 ^ id(4611686018427387904i64)) { bad += 1; }
+    if x3 == 4611686018427387904i64 { if !(x3 == id(4611686018427387904i64)) { bad += 1; } } else if x3 == id(4611686018427387904i64) { bad += 1; }
+    if x3 != 4611686018427387904i64 { if !(x3 != id(4611686018427387904i64)) { bad += 1; } } else if x3 != id(4611686018427387904i64) { bad += 1; }
+    if x3 < 4611686018427387904i64 { if !(x3 < id(4611686018427387904i64)) { bad += 1; } } else if x3 < id(4611686018427387904i64) { bad += 1; }
+    if x3 <= 4611686018427387904i64 { if !(x3 <= id(4611686018427387904i64)) { bad += 1; } } else if x3 <= id(4611686018427387904i64) { bad += 1; }
+    if x3 > 4611686018427387904i64 { if !(x3 > id(4611686018427387904i64)) { bad += 1; } } else if x3 > id(4611686018427387904i64) { bad += 1; }
+    if x3 >= 4611686018427387904i64 { if !(x3 >= id(4611686018427387904i64)) { bad += 1; } } else if x3 >= id(4611686018427387904i64) { bad += 1; }
+    if (x3 + 4611686018427387904i64) != (x3 + id(4611686018427387904i64)) { bad += 1; }
+    if (x3 - 4611686018427387904i64) != (x3 - id(4611686018427387904i64)) { bad += 1; }
+    if (x3 / 4611686018427387904i64) != (x3 / id(4611686018427387904i64)) { bad += 1; }
+    if (x3 % 4611686018427387904i64) != (x3 % id(4611686018427387904i64)) { bad += 1; }
+    if (x3 & 9223372036854775807i64) != (x3 & id(9223372036854775807i64)) { bad += 1; }
+    if (x3 | 9223372036854775807i64) != (x3 | id(9223372036854775807i64)) { bad += 1; }
+    if (x3 ^ 9223372036854775807i64) != (x3 ^ id(9223372036854775807i64)) { bad += 1; }
+    if x3 == 9223372036854775807i64 { if !(x3 == id(9223372036854775807i64)) { bad += 1; } } else if x3 == id(9223372036854775807i64) { bad += 1; }
+    if x3 != 9223372036854775807i64 { if !(x3 != id(9223372036854775807i64)) { bad += 1; } } else if x3 != id(9223372036854775807i64) { bad += 1; }
+    if x3 < 9223372036854775807i64 { if !(x3 < id(9223372036854775807i64)) { bad += 1; } } else if x3 < id(9223372036854775807i64) { bad += 1; }
+    if x3 <= 9223372036854775807i64 { if !(x3 <= id(9223372036854775807i64)) { bad += 1; } } else if x3 <= id(9223372036854775807i64) { bad += 1; }
+    if x3 > 9223372036854775807i64 { if !(x3 > id(9223372036854775807i64)) { bad += 1; } } else if x3 > id(9223372036854775807i64) { bad += 1; }
+    if x3 >= 9223372036854775807i64 { if !(x3 >= id(9223372036854775807i64)) { bad += 1; } } else if x3 >= id(9223372036854775807i64) { bad += 1; }
+    if (x3 + 9223372036854775807i64) != (x3 + id(9223372036854775807i64)) { bad += 1; }
+    if (x3 / 9223372036854775807i64) != (x3 / id(9223372036854775807i64)) { bad += 1; }
+    if (x3 % 9223372036854775807i64) != (x3 % id(9223372036854775807i64)) { bad += 1; }
+    if (x3 >> 0i64) != (x3 >> id(0i64)) { bad += 1; }
+    if (x3 & 9223372036854775807i64) << 0i64 != (x3 & 9223372036854775807i64) << id(0i64) { bad += 1; }
+    if (x3 >> 1i64) != (x3 >> id(1i64)) { bad += 1; }
+    if (x3 & 4611686018427387903i64) << 1i64 != (x3 & 4611686018427387903i64) << id(1i64) { bad += 1; }
+    if (x3 >> 3i64) != (x3 >> id(3i64)) { bad += 1; }
+    if (x3 & 1152921504606846975i64) << 3i64 != (x3 & 1152921504606846975i64) << id(3i64) { bad += 1; }
+    if (x3 >> 32i64) != (x3 >> id(32i64)) { bad += 1; }
+    if (x3 & 2147483647i64) << 32i64 != (x3 & 2147483647i64) << id(32i64) { bad += 1; }
+    if (x3 >> 63i64) != (x3 >> id(63i64)) { bad += 1; }
+    if (x3 & 0i64) << 63i64 != (x3 & 0i64) << id(63i64) { bad += 1; }
+    return bad;
+}
+
+fn check_u64() -> i64 {
+    let bad: i64 = 0;
+    let x0 = id(0u64);
+    let x1 = id(18446744073709551615u64);
+    let x2 = id(6148914691236517205u64);
+    if (x0 & 7u64) != (x0 & id(7u64)) { bad += 1; }
+    if (x0 | 7u64) != (x0 | id(7u64)) { bad += 1; }
+    if (x0 ^ 7u64) != (x0 ^ id(7u64)) { bad += 1; }
+    if x0 == 7u64 { if !(x0 == id(7u64)) { bad += 1; } } else if x0 == id(7u64) { bad += 1; }
+    if x0 != 7u64 { if !(x0 != id(7u64)) { bad += 1; } } else if x0 != id(7u64) { bad += 1; }
+    if x0 < 7u64 { if !(x0 < id(7u64)) { bad += 1; } } else if x0 < id(7u64) { bad += 1; }
+    if x0 <= 7u64 { if !(x0 <= id(7u64)) { bad += 1; } } else if x0 <= id(7u64) { bad += 1; }
+    if x0 > 7u64 { if !(x0 > id(7u64)) { bad += 1; } } else if x0 > id(7u64) { bad += 1; }
+    if x0 >= 7u64 { if !(x0 >= id(7u64)) { bad += 1; } } else if x0 >= id(7u64) { bad += 1; }
+    if (x0 + 7u64) != (x0 + id(7u64)) { bad += 1; }
+    if (x0 * 7u64) != (x0 * id(7u64)) { bad += 1; }
+    if (x0 / 7u64) != (x0 / id(7u64)) { bad += 1; }
+    if (x0 % 7u64) != (x0 % id(7u64)) { bad += 1; }
+    if (x0 & 4095u64) != (x0 & id(4095u64)) { bad += 1; }
+    if (x0 | 4095u64) != (x0 | id(4095u64)) { bad += 1; }
+    if (x0 ^ 4095u64) != (x0 ^ id(4095u64)) { bad += 1; }
+    if x0 == 4095u64 { if !(x0 == id(4095u64)) { bad += 1; } } else if x0 == id(4095u64) { bad += 1; }
+    if x0 != 4095u64 { if !(x0 != id(4095u64)) { bad += 1; } } else if x0 != id(4095u64) { bad += 1; }
+    if x0 < 4095u64 { if !(x0 < id(4095u64)) { bad += 1; } } else if x0 < id(4095u64) { bad += 1; }
+    if x0 <= 4095u64 { if !(x0 <= id(4095u64)) { bad += 1; } } else if x0 <= id(4095u64) { bad += 1; }
+    if x0 > 4095u64 { if !(x0 > id(4095u64)) { bad += 1; } } else if x0 > id(4095u64) { bad += 1; }
+    if x0 >= 4095u64 { if !(x0 >= id(4095u64)) { bad += 1; } } else if x0 >= id(4095u64) { bad += 1; }
+    if (x0 + 4095u64) != (x0 + id(4095u64)) { bad += 1; }
+    if (x0 * 4095u64) != (x0 * id(4095u64)) { bad += 1; }
+    if (x0 / 4095u64) != (x0 / id(4095u64)) { bad += 1; }
+    if (x0 % 4095u64) != (x0 % id(4095u64)) { bad += 1; }
+    if (x0 & 4097u64) != (x0 & id(4097u64)) { bad += 1; }
+    if (x0 | 4097u64) != (x0 | id(4097u64)) { bad += 1; }
+    if (x0 ^ 4097u64) != (x0 ^ id(4097u64)) { bad += 1; }
+    if x0 == 4097u64 { if !(x0 == id(4097u64)) { bad += 1; } } else if x0 == id(4097u64) { bad += 1; }
+    if x0 != 4097u64 { if !(x0 != id(4097u64)) { bad += 1; } } else if x0 != id(4097u64) { bad += 1; }
+    if x0 < 4097u64 { if !(x0 < id(4097u64)) { bad += 1; } } else if x0 < id(4097u64) { bad += 1; }
+    if x0 <= 4097u64 { if !(x0 <= id(4097u64)) { bad += 1; } } else if x0 <= id(4097u64) { bad += 1; }
+    if x0 > 4097u64 { if !(x0 > id(4097u64)) { bad += 1; } } else if x0 > id(4097u64) { bad += 1; }
+    if x0 >= 4097u64 { if !(x0 >= id(4097u64)) { bad += 1; } } else if x0 >= id(4097u64) { bad += 1; }
+    if (x0 + 4097u64) != (x0 + id(4097u64)) { bad += 1; }
+    if (x0 * 4097u64) != (x0 * id(4097u64)) { bad += 1; }
+    if (x0 / 4097u64) != (x0 / id(4097u64)) { bad += 1; }
+    if (x0 % 4097u64) != (x0 % id(4097u64)) { bad += 1; }
+    if (x0 & 4611686018427387904u64) != (x0 & id(4611686018427387904u64)) { bad += 1; }
+    if (x0 | 4611686018427387904u64) != (x0 | id(4611686018427387904u64)) { bad += 1; }
+    if (x0 ^ 4611686018427387904u64) != (x0 ^ id(4611686018427387904u64)) { bad += 1; }
+    if x0 == 4611686018427387904u64 { if !(x0 == id(4611686018427387904u64)) { bad += 1; } } else if x0 == id(4611686018427387904u64) { bad += 1; }
+    if x0 != 4611686018427387904u64 { if !(x0 != id(4611686018427387904u64)) { bad += 1; } } else if x0 != id(4611686018427387904u64) { bad += 1; }
+    if x0 < 4611686018427387904u64 { if !(x0 < id(4611686018427387904u64)) { bad += 1; } } else if x0 < id(4611686018427387904u64) { bad += 1; }
+    if x0 <= 4611686018427387904u64 { if !(x0 <= id(4611686018427387904u64)) { bad += 1; } } else if x0 <= id(4611686018427387904u64) { bad += 1; }
+    if x0 > 4611686018427387904u64 { if !(x0 > id(4611686018427387904u64)) { bad += 1; } } else if x0 > id(4611686018427387904u64) { bad += 1; }
+    if x0 >= 4611686018427387904u64 { if !(x0 >= id(4611686018427387904u64)) { bad += 1; } } else if x0 >= id(4611686018427387904u64) { bad += 1; }
+    if (x0 + 4611686018427387904u64) != (x0 + id(4611686018427387904u64)) { bad += 1; }
+    if (x0 * 4611686018427387904u64) != (x0 * id(4611686018427387904u64)) { bad += 1; }
+    if (x0 / 4611686018427387904u64) != (x0 / id(4611686018427387904u64)) { bad += 1; }
+    if (x0 % 4611686018427387904u64) != (x0 % id(4611686018427387904u64)) { bad += 1; }
+    if (x0 & 18446744073709551615u64) != (x0 & id(18446744073709551615u64)) { bad += 1; }
+    if (x0 | 18446744073709551615u64) != (x0 | id(18446744073709551615u64)) { bad += 1; }
+    if (x0 ^ 18446744073709551615u64) != (x0 ^ id(18446744073709551615u64)) { bad += 1; }
+    if x0 == 18446744073709551615u64 { if !(x0 == id(18446744073709551615u64)) { bad += 1; } } else if x0 == id(18446744073709551615u64) { bad += 1; }
+    if x0 != 18446744073709551615u64 { if !(x0 != id(18446744073709551615u64)) { bad += 1; } } else if x0 != id(18446744073709551615u64) { bad += 1; }
+    if x0 < 18446744073709551615u64 { if !(x0 < id(18446744073709551615u64)) { bad += 1; } } else if x0 < id(18446744073709551615u64) { bad += 1; }
+    if x0 <= 18446744073709551615u64 { if !(x0 <= id(18446744073709551615u64)) { bad += 1; } } else if x0 <= id(18446744073709551615u64) { bad += 1; }
+    if x0 > 18446744073709551615u64 { if !(x0 > id(18446744073709551615u64)) { bad += 1; } } else if x0 > id(18446744073709551615u64) { bad += 1; }
+    if x0 >= 18446744073709551615u64 { if !(x0 >= id(18446744073709551615u64)) { bad += 1; } } else if x0 >= id(18446744073709551615u64) { bad += 1; }
+    if (x0 + 18446744073709551615u64) != (x0 + id(18446744073709551615u64)) { bad += 1; }
+    if (x0 * 18446744073709551615u64) != (x0 * id(18446744073709551615u64)) { bad += 1; }
+    if (x0 / 18446744073709551615u64) != (x0 / id(18446744073709551615u64)) { bad += 1; }
+    if (x0 % 18446744073709551615u64) != (x0 % id(18446744073709551615u64)) { bad += 1; }
+    if (x0 >> 0u64) != (x0 >> id(0u64)) { bad += 1; }
+    if (x0 & 18446744073709551615u64) << 0u64 != (x0 & 18446744073709551615u64) << id(0u64) { bad += 1; }
+    if (x0 >> 1u64) != (x0 >> id(1u64)) { bad += 1; }
+    if (x0 & 9223372036854775807u64) << 1u64 != (x0 & 9223372036854775807u64) << id(1u64) { bad += 1; }
+    if (x0 >> 3u64) != (x0 >> id(3u64)) { bad += 1; }
+    if (x0 & 2305843009213693951u64) << 3u64 != (x0 & 2305843009213693951u64) << id(3u64) { bad += 1; }
+    if (x0 >> 32u64) != (x0 >> id(32u64)) { bad += 1; }
+    if (x0 & 4294967295u64) << 32u64 != (x0 & 4294967295u64) << id(32u64) { bad += 1; }
+    if (x0 >> 63u64) != (x0 >> id(63u64)) { bad += 1; }
+    if (x0 & 1u64) << 63u64 != (x0 & 1u64) << id(63u64) { bad += 1; }
+    if (x1 & 7u64) != (x1 & id(7u64)) { bad += 1; }
+    if (x1 | 7u64) != (x1 | id(7u64)) { bad += 1; }
+    if (x1 ^ 7u64) != (x1 ^ id(7u64)) { bad += 1; }
+    if x1 == 7u64 { if !(x1 == id(7u64)) { bad += 1; } } else if x1 == id(7u64) { bad += 1; }
+    if x1 != 7u64 { if !(x1 != id(7u64)) { bad += 1; } } else if x1 != id(7u64) { bad += 1; }
+    if x1 < 7u64 { if !(x1 < id(7u64)) { bad += 1; } } else if x1 < id(7u64) { bad += 1; }
+    if x1 <= 7u64 { if !(x1 <= id(7u64)) { bad += 1; } } else if x1 <= id(7u64) { bad += 1; }
+    if x1 > 7u64 { if !(x1 > id(7u64)) { bad += 1; } } else if x1 > id(7u64) { bad += 1; }
+    if x1 >= 7u64 { if !(x1 >= id(7u64)) { bad += 1; } } else if x1 >= id(7u64) { bad += 1; }
+    if (x1 - 7u64) != (x1 - id(7u64)) { bad += 1; }
+    if (x1 / 7u64) != (x1 / id(7u64)) { bad += 1; }
+    if (x1 % 7u64) != (x1 % id(7u64)) { bad += 1; }
+    if (x1 & 4095u64) != (x1 & id(4095u64)) { bad += 1; }
+    if (x1 | 4095u64) != (x1 | id(4095u64)) { bad += 1; }
+    if (x1 ^ 4095u64) != (x1 ^ id(4095u64)) { bad += 1; }
+    if x1 == 4095u64 { if !(x1 == id(4095u64)) { bad += 1; } } else if x1 == id(4095u64) { bad += 1; }
+    if x1 != 4095u64 { if !(x1 != id(4095u64)) { bad += 1; } } else if x1 != id(4095u64) { bad += 1; }
+    if x1 < 4095u64 { if !(x1 < id(4095u64)) { bad += 1; } } else if x1 < id(4095u64) { bad += 1; }
+    if x1 <= 4095u64 { if !(x1 <= id(4095u64)) { bad += 1; } } else if x1 <= id(4095u64) { bad += 1; }
+    if x1 > 4095u64 { if !(x1 > id(4095u64)) { bad += 1; } } else if x1 > id(4095u64) { bad += 1; }
+    if x1 >= 4095u64 { if !(x1 >= id(4095u64)) { bad += 1; } } else if x1 >= id(4095u64) { bad += 1; }
+    if (x1 - 4095u64) != (x1 - id(4095u64)) { bad += 1; }
+    if (x1 / 4095u64) != (x1 / id(4095u64)) { bad += 1; }
+    if (x1 % 4095u64) != (x1 % id(4095u64)) { bad += 1; }
+    if (x1 & 4097u64) != (x1 & id(4097u64)) { bad += 1; }
+    if (x1 | 4097u64) != (x1 | id(4097u64)) { bad += 1; }
+    if (x1 ^ 4097u64) != (x1 ^ id(4097u64)) { bad += 1; }
+    if x1 == 4097u64 { if !(x1 == id(4097u64)) { bad += 1; } } else if x1 == id(4097u64) { bad += 1; }
+    if x1 != 4097u64 { if !(x1 != id(4097u64)) { bad += 1; } } else if x1 != id(4097u64) { bad += 1; }
+    if x1 < 4097u64 { if !(x1 < id(4097u64)) { bad += 1; } } else if x1 < id(4097u64) { bad += 1; }
+    if x1 <= 4097u64 { if !(x1 <= id(4097u64)) { bad += 1; } } else if x1 <= id(4097u64) { bad += 1; }
+    if x1 > 4097u64 { if !(x1 > id(4097u64)) { bad += 1; } } else if x1 > id(4097u64) { bad += 1; }
+    if x1 >= 4097u64 { if !(x1 >= id(4097u64)) { bad += 1; } } else if x1 >= id(4097u64) { bad += 1; }
+    if (x1 - 4097u64) != (x1 - id(4097u64)) { bad += 1; }
+    if (x1 / 4097u64) != (x1 / id(4097u64)) { bad += 1; }
+    if (x1 % 4097u64) != (x1 % id(4097u64)) { bad += 1; }
+    if (x1 & 4611686018427387904u64) != (x1 & id(4611686018427387904u64)) { bad += 1; }
+    if (x1 | 4611686018427387904u64) != (x1 | id(4611686018427387904u64)) { bad += 1; }
+    if (x1 ^ 4611686018427387904u64) != (x1 ^ id(4611686018427387904u64)) { bad += 1; }
+    if x1 == 4611686018427387904u64 { if !(x1 == id(4611686018427387904u64)) { bad += 1; } } else if x1 == id(4611686018427387904u64) { bad += 1; }
+    if x1 != 4611686018427387904u64 { if !(x1 != id(4611686018427387904u64)) { bad += 1; } } else if x1 != id(4611686018427387904u64) { bad += 1; }
+    if x1 < 4611686018427387904u64 { if !(x1 < id(4611686018427387904u64)) { bad += 1; } } else if x1 < id(4611686018427387904u64) { bad += 1; }
+    if x1 <= 4611686018427387904u64 { if !(x1 <= id(4611686018427387904u64)) { bad += 1; } } else if x1 <= id(4611686018427387904u64) { bad += 1; }
+    if x1 > 4611686018427387904u64 { if !(x1 > id(4611686018427387904u64)) { bad += 1; } } else if x1 > id(4611686018427387904u64) { bad += 1; }
+    if x1 >= 4611686018427387904u64 { if !(x1 >= id(4611686018427387904u64)) { bad += 1; } } else if x1 >= id(4611686018427387904u64) { bad += 1; }
+    if (x1 - 4611686018427387904u64) != (x1 - id(4611686018427387904u64)) { bad += 1; }
+    if (x1 / 4611686018427387904u64) != (x1 / id(4611686018427387904u64)) { bad += 1; }
+    if (x1 % 4611686018427387904u64) != (x1 % id(4611686018427387904u64)) { bad += 1; }
+    if (x1 & 18446744073709551615u64) != (x1 & id(18446744073709551615u64)) { bad += 1; }
+    if (x1 | 18446744073709551615u64) != (x1 | id(18446744073709551615u64)) { bad += 1; }
+    if (x1 ^ 18446744073709551615u64) != (x1 ^ id(18446744073709551615u64)) { bad += 1; }
+    if x1 == 18446744073709551615u64 { if !(x1 == id(18446744073709551615u64)) { bad += 1; } } else if x1 == id(18446744073709551615u64) { bad += 1; }
+    if x1 != 18446744073709551615u64 { if !(x1 != id(18446744073709551615u64)) { bad += 1; } } else if x1 != id(18446744073709551615u64) { bad += 1; }
+    if x1 < 18446744073709551615u64 { if !(x1 < id(18446744073709551615u64)) { bad += 1; } } else if x1 < id(18446744073709551615u64) { bad += 1; }
+    if x1 <= 18446744073709551615u64 { if !(x1 <= id(18446744073709551615u64)) { bad += 1; } } else if x1 <= id(18446744073709551615u64) { bad += 1; }
+    if x1 > 18446744073709551615u64 { if !(x1 > id(18446744073709551615u64)) { bad += 1; } } else if x1 > id(18446744073709551615u64) { bad += 1; }
+    if x1 >= 18446744073709551615u64 { if !(x1 >= id(18446744073709551615u64)) { bad += 1; } } else if x1 >= id(18446744073709551615u64) { bad += 1; }
+    if (x1 - 18446744073709551615u64) != (x1 - id(18446744073709551615u64)) { bad += 1; }
+    if (x1 / 18446744073709551615u64) != (x1 / id(18446744073709551615u64)) { bad += 1; }
+    if (x1 % 18446744073709551615u64) != (x1 % id(18446744073709551615u64)) { bad += 1; }
+    if (x1 >> 0u64) != (x1 >> id(0u64)) { bad += 1; }
+    if (x1 & 18446744073709551615u64) << 0u64 != (x1 & 18446744073709551615u64) << id(0u64) { bad += 1; }
+    if (x1 >> 1u64) != (x1 >> id(1u64)) { bad += 1; }
+    if (x1 & 9223372036854775807u64) << 1u64 != (x1 & 9223372036854775807u64) << id(1u64) { bad += 1; }
+    if (x1 >> 3u64) != (x1 >> id(3u64)) { bad += 1; }
+    if (x1 & 2305843009213693951u64) << 3u64 != (x1 & 2305843009213693951u64) << id(3u64) { bad += 1; }
+    if (x1 >> 32u64) != (x1 >> id(32u64)) { bad += 1; }
+    if (x1 & 4294967295u64) << 32u64 != (x1 & 4294967295u64) << id(32u64) { bad += 1; }
+    if (x1 >> 63u64) != (x1 >> id(63u64)) { bad += 1; }
+    if (x1 & 1u64) << 63u64 != (x1 & 1u64) << id(63u64) { bad += 1; }
+    if (x2 & 7u64) != (x2 & id(7u64)) { bad += 1; }
+    if (x2 | 7u64) != (x2 | id(7u64)) { bad += 1; }
+    if (x2 ^ 7u64) != (x2 ^ id(7u64)) { bad += 1; }
+    if x2 == 7u64 { if !(x2 == id(7u64)) { bad += 1; } } else if x2 == id(7u64) { bad += 1; }
+    if x2 != 7u64 { if !(x2 != id(7u64)) { bad += 1; } } else if x2 != id(7u64) { bad += 1; }
+    if x2 < 7u64 { if !(x2 < id(7u64)) { bad += 1; } } else if x2 < id(7u64) { bad += 1; }
+    if x2 <= 7u64 { if !(x2 <= id(7u64)) { bad += 1; } } else if x2 <= id(7u64) { bad += 1; }
+    if x2 > 7u64 { if !(x2 > id(7u64)) { bad += 1; } } else if x2 > id(7u64) { bad += 1; }
+    if x2 >= 7u64 { if !(x2 >= id(7u64)) { bad += 1; } } else if x2 >= id(7u64) { bad += 1; }
+    if (x2 + 7u64) != (x2 + id(7u64)) { bad += 1; }
+    if (x2 - 7u64) != (x2 - id(7u64)) { bad += 1; }
+    if (x2 / 7u64) != (x2 / id(7u64)) { bad += 1; }
+    if (x2 % 7u64) != (x2 % id(7u64)) { bad += 1; }
+    if (x2 & 4095u64) != (x2 & id(4095u64)) { bad += 1; }
+    if (x2 | 4095u64) != (x2 | id(4095u64)) { bad += 1; }
+    if (x2 ^ 4095u64) != (x2 ^ id(4095u64)) { bad += 1; }
+    if x2 == 4095u64 { if !(x2 == id(4095u64)) { bad += 1; } } else if x2 == id(4095u64) { bad += 1; }
+    if x2 != 4095u64 { if !(x2 != id(4095u64)) { bad += 1; } } else if x2 != id(4095u64) { bad += 1; }
+    if x2 < 4095u64 { if !(x2 < id(4095u64)) { bad += 1; } } else if x2 < id(4095u64) { bad += 1; }
+    if x2 <= 4095u64 { if !(x2 <= id(4095u64)) { bad += 1; } } else if x2 <= id(4095u64) { bad += 1; }
+    if x2 > 4095u64 { if !(x2 > id(4095u64)) { bad += 1; } } else if x2 > id(4095u64) { bad += 1; }
+    if x2 >= 4095u64 { if !(x2 >= id(4095u64)) { bad += 1; } } else if x2 >= id(4095u64) { bad += 1; }
+    if (x2 + 4095u64) != (x2 + id(4095u64)) { bad += 1; }
+    if (x2 - 4095u64) != (x2 - id(4095u64)) { bad += 1; }
+    if (x2 / 4095u64) != (x2 / id(4095u64)) { bad += 1; }
+    if (x2 % 4095u64) != (x2 % id(4095u64)) { bad += 1; }
+    if (x2 & 4097u64) != (x2 & id(4097u64)) { bad += 1; }
+    if (x2 | 4097u64) != (x2 | id(4097u64)) { bad += 1; }
+    if (x2 ^ 4097u64) != (x2 ^ id(4097u64)) { bad += 1; }
+    if x2 == 4097u64 { if !(x2 == id(4097u64)) { bad += 1; } } else if x2 == id(4097u64) { bad += 1; }
+    if x2 != 4097u64 { if !(x2 != id(4097u64)) { bad += 1; } } else if x2 != id(4097u64) { bad += 1; }
+    if x2 < 4097u64 { if !(x2 < id(4097u64)) { bad += 1; } } else if x2 < id(4097u64) { bad += 1; }
+    if x2 <= 4097u64 { if !(x2 <= id(4097u64)) { bad += 1; } } else if x2 <= id(4097u64) { bad += 1; }
+    if x2 > 4097u64 { if !(x2 > id(4097u64)) { bad += 1; } } else if x2 > id(4097u64) { bad += 1; }
+    if x2 >= 4097u64 { if !(x2 >= id(4097u64)) { bad += 1; } } else if x2 >= id(4097u64) { bad += 1; }
+    if (x2 + 4097u64) != (x2 + id(4097u64)) { bad += 1; }
+    if (x2 - 4097u64) != (x2 - id(4097u64)) { bad += 1; }
+    if (x2 / 4097u64) != (x2 / id(4097u64)) { bad += 1; }
+    if (x2 % 4097u64) != (x2 % id(4097u64)) { bad += 1; }
+    if (x2 & 4611686018427387904u64) != (x2 & id(4611686018427387904u64)) { bad += 1; }
+    if (x2 | 4611686018427387904u64) != (x2 | id(4611686018427387904u64)) { bad += 1; }
+    if (x2 ^ 4611686018427387904u64) != (x2 ^ id(4611686018427387904u64)) { bad += 1; }
+    if x2 == 4611686018427387904u64 { if !(x2 == id(4611686018427387904u64)) { bad += 1; } } else if x2 == id(4611686018427387904u64) { bad += 1; }
+    if x2 != 4611686018427387904u64 { if !(x2 != id(4611686018427387904u64)) { bad += 1; } } else if x2 != id(4611686018427387904u64) { bad += 1; }
+    if x2 < 4611686018427387904u64 { if !(x2 < id(4611686018427387904u64)) { bad += 1; } } else if x2 < id(4611686018427387904u64) { bad += 1; }
+    if x2 <= 4611686018427387904u64 { if !(x2 <= id(4611686018427387904u64)) { bad += 1; } } else if x2 <= id(4611686018427387904u64) { bad += 1; }
+    if x2 > 4611686018427387904u64 { if !(x2 > id(4611686018427387904u64)) { bad += 1; } } else if x2 > id(4611686018427387904u64) { bad += 1; }
+    if x2 >= 4611686018427387904u64 { if !(x2 >= id(4611686018427387904u64)) { bad += 1; } } else if x2 >= id(4611686018427387904u64) { bad += 1; }
+    if (x2 + 4611686018427387904u64) != (x2 + id(4611686018427387904u64)) { bad += 1; }
+    if (x2 - 4611686018427387904u64) != (x2 - id(4611686018427387904u64)) { bad += 1; }
+    if (x2 / 4611686018427387904u64) != (x2 / id(4611686018427387904u64)) { bad += 1; }
+    if (x2 % 4611686018427387904u64) != (x2 % id(4611686018427387904u64)) { bad += 1; }
+    if (x2 & 18446744073709551615u64) != (x2 & id(18446744073709551615u64)) { bad += 1; }
+    if (x2 | 18446744073709551615u64) != (x2 | id(18446744073709551615u64)) { bad += 1; }
+    if (x2 ^ 18446744073709551615u64) != (x2 ^ id(18446744073709551615u64)) { bad += 1; }
+    if x2 == 18446744073709551615u64 { if !(x2 == id(18446744073709551615u64)) { bad += 1; } } else if x2 == id(18446744073709551615u64) { bad += 1; }
+    if x2 != 18446744073709551615u64 { if !(x2 != id(18446744073709551615u64)) { bad += 1; } } else if x2 != id(18446744073709551615u64) { bad += 1; }
+    if x2 < 18446744073709551615u64 { if !(x2 < id(18446744073709551615u64)) { bad += 1; } } else if x2 < id(18446744073709551615u64) { bad += 1; }
+    if x2 <= 18446744073709551615u64 { if !(x2 <= id(18446744073709551615u64)) { bad += 1; } } else if x2 <= id(18446744073709551615u64) { bad += 1; }
+    if x2 > 18446744073709551615u64 { if !(x2 > id(18446744073709551615u64)) { bad += 1; } } else if x2 > id(18446744073709551615u64) { bad += 1; }
+    if x2 >= 18446744073709551615u64 { if !(x2 >= id(18446744073709551615u64)) { bad += 1; } } else if x2 >= id(18446744073709551615u64) { bad += 1; }
+    if (x2 / 18446744073709551615u64) != (x2 / id(18446744073709551615u64)) { bad += 1; }
+    if (x2 % 18446744073709551615u64) != (x2 % id(18446744073709551615u64)) { bad += 1; }
+    if (x2 >> 0u64) != (x2 >> id(0u64)) { bad += 1; }
+    if (x2 & 18446744073709551615u64) << 0u64 != (x2 & 18446744073709551615u64) << id(0u64) { bad += 1; }
+    if (x2 >> 1u64) != (x2 >> id(1u64)) { bad += 1; }
+    if (x2 & 9223372036854775807u64) << 1u64 != (x2 & 9223372036854775807u64) << id(1u64) { bad += 1; }
+    if (x2 >> 3u64) != (x2 >> id(3u64)) { bad += 1; }
+    if (x2 & 2305843009213693951u64) << 3u64 != (x2 & 2305843009213693951u64) << id(3u64) { bad += 1; }
+    if (x2 >> 32u64) != (x2 >> id(32u64)) { bad += 1; }
+    if (x2 & 4294967295u64) << 32u64 != (x2 & 4294967295u64) << id(32u64) { bad += 1; }
+    if (x2 >> 63u64) != (x2 >> id(63u64)) { bad += 1; }
+    if (x2 & 1u64) << 63u64 != (x2 & 1u64) << id(63u64) { bad += 1; }
+    return bad;
+}
+
+fn floats(a: f64, b: f64) -> f64 {
+    // Reused operands, chains, a square root between uses.
+    let d2 = a * a + b * b + a * b;
+    let m = 0.01 / (d2 * d2.sqrt());
+    let r = (a - b) * m - (a + b) * m * 2.0;
+    let s: f32 = (a as f32) * (b as f32) + 1.5;
+    return r + (s as f64) + (if a < b { 1.0 } else { -1.0 });
+}
+
+fn sum_to(n: i64) -> i64 {
+    // A loop: values live in registers within a block, in memory across
+    // the back edge and the branches.
+    let i: i64 = 0;
+    let t: i64 = 0;
+    while i < n {
+        let k = i * 3 + 7;
+        if k % 2 == 0 {
+            t += k >> 1;
+        } else {
+            t -= k & 0xf;
+        }
+        i += 1;
+    }
+    return t;
+}
+
+fn main() -> i32 {
+    let bad = check_i8() + check_u8() + check_i16() + check_u16()
+        + check_i32() + check_u32() + check_i64() + check_u64();
+    if bad == 0 { println("ints ok"); } else { println(f"ints: {bad} mismatches"); }
+    let f = floats(id(1.25), id(-3.5));
+    let g = floats(1.25, -3.5);
+    if f == g && f == -3.8718095180954135 {
+        println("floats ok");
+    } else {
+        println(f"floats: {f} {g}");
+    }
+    let s = sum_to(id(1000i64));
+    if s == sum_to(1000) && s == 372750 {
+        println("loops ok");
+    } else {
+        println(f"loops: {s}");
+    }
+    return 0;
+}

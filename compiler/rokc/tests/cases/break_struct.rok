@@ -1,4 +1,6 @@
 // expect-exit: 28
+// expect-stdout:
+// 5 10 18
 
 struct Pair {
     a: i32;
@@ -13,6 +15,7 @@ fn main() -> i32 {
         }
         i += 1;
     };
+    println(f"{i} {result.a} {result.b}");
     return result.a + result.b;
 }
 

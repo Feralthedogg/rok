@@ -1,4 +1,6 @@
 // expect-exit: 21
+// expect-stdout:
+// 10 21
 
 fn add(a: i32, b: i32) -> i32 {
     return a + b;
@@ -12,5 +14,6 @@ fn main() -> i32 {
         total += xs[i];
         i += 1;
     }
+    println(f"{total} {add(total, 11)}");
     return add(total, 11);
 }

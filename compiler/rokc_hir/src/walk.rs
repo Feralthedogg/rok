@@ -273,6 +273,7 @@ pub fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
         | ExprKind::SelfUpper
         | ExprKind::InModule(..) => {}
         ExprKind::Path(p) => walk_path_generics(v, p),
+        ExprKind::QPath(q) => walk_qpath(v, q),
         ExprKind::Tuple(items) | ExprKind::List(items) | ExprKind::Set(items) => {
             for i in items {
                 walk_expr(v, i);
@@ -550,10 +551,16 @@ pub fn walk_pat(v: &mut impl AstVisitor, p: &Pattern) {
     }
 }
 
+fn walk_qpath(v: &mut impl AstVisitor, q: &rokc_ast::QPath) {
+    walk_ty(v, &q.self_ty);
+    walk_path_generics(v, &q.trait_path);
+}
+
 pub fn walk_ty(v: &mut impl AstVisitor, t: &Ty) {
     v.ty(t);
     match &t.kind {
         TyKind::Path(p) => walk_path_generics(v, p),
+        TyKind::QPath(q) => walk_qpath(v, q),
         TyKind::Sum(parts) | TyKind::Tuple(parts) => {
             for p in parts {
                 walk_ty(v, p);

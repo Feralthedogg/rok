@@ -12,7 +12,7 @@ pub mod walk;
 pub use lower::FN_BLOCK_LABEL;
 pub use lower::type_visible;
 pub use lower::{lower, lower_full, lower_with_uses};
-pub use print::print_hir;
+pub use print::{instance, print_hir};
 
 /// What the driver tells HIR about the build besides the program.
 #[derive(Clone, Debug, Default)]
@@ -31,11 +31,14 @@ pub struct HirInput {
     /// Lower (and so check) every library body, reached or not
     /// (`rokc check --check-library`).
     pub check_library: bool,
+    /// The root `main` is the implicit one made from the entry file's
+    /// top-level statements (spec 4.16.2).
+    pub implicit_main: bool,
+    /// Also lower the reached small functions of the prebuilt standard
+    /// library, for the optimizer to inline: they stay the archive's
+    /// symbols (`available_externally`).
+    pub inline_prebuilt: bool,
 }
-
-/// Marker attribute (string argument) with the module of an `impl`
-/// block, set by the driver.
-pub const IMPL_MODULE_ATTR: &str = "#impl_module";
 
 /// Marker attribute on a trait / impl method, path `[ASSOC_TYPES_ATTR,
 /// X, ..]`: the associated types whose bare name `X` means `Self::X` in
