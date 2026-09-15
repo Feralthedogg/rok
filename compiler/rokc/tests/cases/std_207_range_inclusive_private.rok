@@ -1,0 +1,8 @@
+// expect-error: field `exhausted` of `RangeInclusive<i32>` is private
+
+// Stdlib 2.7.3: `RangeInclusive`'s fields other than `start` / `end`
+// are private.
+fn main() {
+    let r = 0..=3;
+    println(f"{r.start} {r.end} {r.exhausted}");
+}

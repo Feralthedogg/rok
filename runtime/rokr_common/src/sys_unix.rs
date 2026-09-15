@@ -288,6 +288,78 @@ pub unsafe fn reset(p: *mut u8, len: usize) -> bool {
     q != libc::MAP_FAILED
 }
 
+#[cfg(unix)]
+fn page_size() -> usize {
+    // SAFETY: plain sysconf query.
+    usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap_or(4096)
+}
+
+/// Pages of their own for `len` bytes aligned to `align` (a power of
+/// two), zero-filled on first touch; given back with [`unmap`]. Null on
+/// failure.
+#[cfg(unix)]
+pub fn map(len: usize, align: usize) -> *mut u8 {
+    let page = page_size();
+    let len = len.next_multiple_of(page);
+    let Some(total) = len.checked_add(align.saturating_sub(page)) else {
+        return core::ptr::null_mut();
+    };
+    // SAFETY: a fresh anonymous mapping.
+    let p = unsafe {
+        libc::mmap(
+            core::ptr::null_mut(),
+            total,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANON,
+            -1,
+            0,
+        )
+    };
+    if p == libc::MAP_FAILED {
+        return core::ptr::null_mut();
+    }
+    let p = p as usize;
+    let at = p.next_multiple_of(align);
+    let tail = p + total - (at + len);
+    // SAFETY: the unaligned head and the tail of our own mapping.
+    unsafe {
+        if at > p {
+            libc::munmap(p as *mut libc::c_void, at - p);
+        }
+        if tail > 0 {
+            libc::munmap((at + len) as *mut libc::c_void, tail);
+        }
+    }
+    at as *mut u8
+}
+
+/// # Safety
+/// `p..p + len` must be a whole [`map`] result nobody uses any more.
+#[cfg(unix)]
+pub unsafe fn unmap(p: *mut u8, len: usize) {
+    // SAFETY: caller contract.
+    unsafe { libc::munmap(p.cast(), len.next_multiple_of(page_size())) };
+}
+
+/// No pages to map: a zeroed allocation.
+#[cfg(target_os = "wasi")]
+pub fn map(len: usize, align: usize) -> *mut u8 {
+    let p = alloc_aligned(len, align);
+    if !p.is_null() {
+        // SAFETY: a fresh block of `len` bytes.
+        unsafe { core::ptr::write_bytes(p, 0, len) };
+    }
+    p
+}
+
+/// # Safety
+/// `p` must be a [`map`] result nobody uses any more.
+#[cfg(target_os = "wasi")]
+pub unsafe fn unmap(p: *mut u8, _len: usize) {
+    // SAFETY: caller contract.
+    unsafe { free_aligned(p) };
+}
+
 /// `size` bytes aligned to `align` (a power of two), freed with
 /// [`free_aligned`]: null on failure.
 pub fn alloc_aligned(size: usize, align: usize) -> *mut u8 {

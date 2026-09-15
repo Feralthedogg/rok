@@ -964,7 +964,7 @@ fn binop(op: PrimOp, l: Value, r: Value, span: Span) -> R<Value> {
                 O::Add => checked(a.checked_add(b), p, "add", span),
                 O::Sub => checked(a.checked_sub(b), p, "subtract", span),
                 O::Mul => checked(a.checked_mul(b), p, "multiply", span),
-                O::Div | O::Rem => {
+                O::Div | O::Rem | O::Mod => {
                     let div = op == O::Div;
                     if b == 0 {
                         return Err(Stop::Fail(
@@ -985,7 +985,9 @@ fn binop(op: PrimOp, l: Value, r: Value, span: Span) -> R<Value> {
                     if p.is_signed_int() && b == -1 && a == int_range(p).0 {
                         return Err(Stop::Fail(span, format!("attempt to {what} with overflow")));
                     }
-                    Ok(Value::Int(if div { a / b } else { a % b }, p))
+                    let r = if div { a / b } else { a % b };
+                    let floor = op == O::Mod && r != 0 && (r < 0) != (b < 0);
+                    Ok(Value::Int(if floor { r + b } else { r }, p))
                 }
                 O::BitAnd => Ok(Value::Int(a & b, p)),
                 O::BitOr => Ok(Value::Int(a | b, p)),
@@ -1017,6 +1019,14 @@ fn binop(op: PrimOp, l: Value, r: Value, span: Span) -> R<Value> {
                 O::Mul => a * b,
                 O::Div => a / b,
                 O::Rem => a % b,
+                O::Mod => {
+                    let r = a % b;
+                    if r != 0.0 && (r < 0.0) != (b < 0.0) {
+                        r + b
+                    } else {
+                        r
+                    }
+                }
                 _ => return Err(Stop::Poisoned),
             };
             // `f32` arithmetic on `f32`-exact operands, rounded once:
@@ -1468,6 +1478,7 @@ pub fn syntactic_int(
                     "*" => PrimOp::Mul,
                     "/" => PrimOp::Div,
                     "%" => PrimOp::Rem,
+                    "%%" => PrimOp::Mod,
                     "<<" => PrimOp::Shl,
                     ">>" => PrimOp::Shr,
                     "&" => PrimOp::BitAnd,

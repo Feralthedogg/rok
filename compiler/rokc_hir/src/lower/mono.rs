@@ -417,7 +417,13 @@ pub(super) fn monomorphize_on(
         return None;
     }
 
-    // Each `T: Bound` (or `where` predicate) needs an impl for the bound type.
+    // A known `Self` (the receiver's type) is used as is: the template's
+    // own module may not see the impl's type (a trait default method).
+    let self_hir = self_hint
+        .cloned()
+        .or_else(|| self_ty.map(|t| resolve_in_mono(ctx, fn_def, &subst, None, t)));
+    // Each `T: Bound` (or `where` predicate, `where Item: Ord` on a trait
+    // default method too) needs an impl for the bound type.
     let mut goals: Vec<(HirTy, &Vec<rokc_ast::Ty>)> = Vec::new();
     for gp in &fn_def.generics.params {
         if let rokc_ast::GenericParam::Type { name, bounds, .. } = gp {
@@ -427,7 +433,10 @@ pub(super) fn monomorphize_on(
         }
     }
     for w in &fn_def.where_clause {
-        goals.push((resolve_in_mono(ctx, fn_def, &subst, None, &w.ty), &w.bounds));
+        goals.push((
+            resolve_in_mono(ctx, fn_def, &subst, self_hir.clone(), &w.ty),
+            &w.bounds,
+        ));
     }
     for (concrete, bounds) in goals {
         let concrete = &concrete;
@@ -438,7 +447,7 @@ pub(super) fn monomorphize_on(
             // `T: Iterator<Item = i32>` also checks the impl's arguments
             // and associated types.
             let Some(want) = ctx.bound_ref(bound, &fn_module, |t| {
-                resolve_in_mono(ctx, fn_def, &subst, None, t)
+                resolve_in_mono(ctx, fn_def, &subst, self_hir.clone(), t)
             }) else {
                 continue;
             };
@@ -480,11 +489,6 @@ pub(super) fn monomorphize_on(
     // Pre-cache so a recursive call inside the body finds the in-progress mono.
     ctx.env.sink.mono_cache.borrow_mut().insert(key, new_id);
     // Resolve the return type up front for recursive calls in the body.
-    // A known `Self` (the receiver's type) is used as is: the template's
-    // own module may not see the impl's type (a trait default method).
-    let self_hir = self_hint
-        .cloned()
-        .or_else(|| self_ty.map(|t| resolve_in_mono(ctx, fn_def, &subst, None, t)));
     let mut preview_ret_ty =
         resolve_in_mono(ctx, fn_def, &subst, self_hir.clone(), &sig_ret_ast(fn_def));
     if infers_ret(fn_def, &ctx.env.may_diverge) {
@@ -1110,6 +1114,35 @@ pub(super) fn generic_subst(
         }
     }
     subst
+}
+
+/// Every parameter has a default (spec 2.10.5).
+pub(super) fn all_defaulted(generics: &rokc_ast::Generics) -> bool {
+    generics.params.iter().all(|p| {
+        matches!(
+            p,
+            rokc_ast::GenericParam::Type {
+                default: Some(_),
+                ..
+            }
+        )
+    })
+}
+
+/// Spec 2.10.5: trailing type arguments left out take their defaults,
+/// each resolved by `res` under the arguments before it.
+pub(super) fn fill_defaults(
+    generics: &rokc_ast::Generics,
+    args: &mut Vec<HirTy>,
+    res: impl Fn(&HashMap<String, HirTy>, &Ty) -> HirTy,
+) {
+    while let Some(rokc_ast::GenericParam::Type {
+        default: Some(d), ..
+    }) = generics.params.get(args.len())
+    {
+        let t = res(&generic_subst(generics, args), d);
+        args.push(t);
+    }
 }
 
 /// Spec 2.11.3: a const generic argument `v` (tagged `char` when it is

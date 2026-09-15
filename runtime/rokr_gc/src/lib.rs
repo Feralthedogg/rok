@@ -10,8 +10,9 @@
 //! code inlines the bump (809 §8.9.9) and calls [`alloc`] only when the
 //! TLAB is exhausted; the refill takes the world lock. A medium object
 //! (> one line) that does not fit the TLAB gets its own run of lines.
-//! Large objects (LOS, 702 §7.2.9) are one `malloc` each, linked through
-//! a hidden [`Prefix`] in front of the header.
+//! Large objects (LOS, 702 §7.2.9) are one allocation each (pages of
+//! their own from [`LOS_MAP_MIN`] on, unmapped when they die), linked
+//! through a hidden [`Prefix`] in front of the header.
 //!
 //! Every object's `gc_word` (801 §8.1.4) holds its size (8-rounded; its
 //! new address while an evacuation runs) and block objects have a nonzero
@@ -208,10 +209,10 @@ struct Prefix {
     next: *mut u8,
     /// Total object size, header included.
     size: usize,
-    /// Bytes from the `malloc` base to the header.
+    /// Bytes from the allocation base to the header.
     offset: usize,
     /// Card table (one byte per [`CARD_SIZE`] of the object, after its
-    /// end in the same `malloc` block). Last field: compiled code's
+    /// end in the same allocation). Last field: compiled code's
     /// barrier loads it from the word before the header.
     cards: *mut u8,
 }
@@ -871,7 +872,18 @@ fn grow_blocks(h: &mut Heap) {
     h.grown = from + STEP;
 }
 
-/// A large (or over-aligned) object: its own zeroed `malloc` block.
+/// LOS allocations from this size on (prefix and card table included)
+/// get pages of their own, zero-filled by the OS and unmapped when the
+/// object dies; smaller ones (over-aligned small objects, objects just
+/// over [`LOS_THRESHOLD`]) come from the C heap.
+const LOS_MAP_MIN: usize = 64 << 10;
+
+/// Bytes of a LOS object's allocation.
+const fn los_total(p: &Prefix) -> usize {
+    p.offset + p.size + p.size.div_ceil(CARD_SIZE)
+}
+
+/// A large (or over-aligned) object: its own zeroed allocation.
 fn alloc_large(size: usize, align: usize, type_id: u32) -> *mut u8 {
     let align = align.max(HEADER_ALIGN);
     let offset = size_of::<Prefix>().next_multiple_of(align);
@@ -881,12 +893,19 @@ fn alloc_large(size: usize, align: usize, type_id: u32) -> *mut u8 {
     else {
         fatal(b"rok runtime: allocation size overflow");
     };
-    let base = sys::alloc_aligned(total, align);
+    let base = if total >= LOS_MAP_MIN {
+        sys::map(total, align)
+    } else {
+        let base = sys::alloc_aligned(total, align);
+        if !base.is_null() {
+            // SAFETY: a fresh block of `total` bytes.
+            unsafe { ptr::write_bytes(base, 0, total) };
+        }
+        base
+    };
     if base.is_null() {
         rokr_common::oom();
     }
-    // SAFETY: a fresh block of `total` bytes.
-    unsafe { ptr::write_bytes(base, 0, total) };
     world::lock();
     // The new block is not on the list yet, so a collection here cannot
     // free it.
@@ -1791,7 +1810,12 @@ fn sweep_los(full: bool, concurrent: bool) -> usize {
             } else {
                 *link = (*p).next;
                 h.los_count -= 1;
-                sys::free_aligned(o.sub((*p).offset));
+                let (base, total) = (o.sub((*p).offset), los_total(&*p));
+                if total >= LOS_MAP_MIN {
+                    sys::unmap(base, total);
+                } else {
+                    sys::free_aligned(base);
+                }
             }
         }
     }
@@ -2819,6 +2843,19 @@ mod tests {
             collect();
             assert_eq!(live_bytes(), base);
             *top = ptr::null_mut();
+        }
+        // A big one has pages of its own, gone once it dies.
+        let big = alloc(1 << 20, 8, USER_TYPE_BASE + 1);
+        // SAFETY: the object and its prefix are live until the collection.
+        let at = unsafe { big.sub((*prefix(big)).offset) };
+        assert_eq!(at as usize % 4096, 0);
+        collect();
+        assert_eq!(live_bytes(), base);
+        #[cfg(unix)]
+        {
+            // SAFETY: msync only queries the range; ENOMEM: not mapped.
+            let rc = unsafe { libc::msync(at.cast(), 4096, libc::MS_ASYNC) };
+            assert_eq!(rc, -1);
         }
     }
 

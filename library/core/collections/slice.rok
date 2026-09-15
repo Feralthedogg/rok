@@ -126,6 +126,9 @@ impl<T> Iterator for SliceIter<T> {
             return self.s.buf[self.s.at(self.i - 1)];
         }
     }
+
+    /// `ExactSizeIterator`: O(1) (2.7.10).
+    fn count(self) -> usize { self.len() }
 }
 
 impl<T> DoubleEndedIterator for SliceIter<T> {

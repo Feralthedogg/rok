@@ -787,9 +787,24 @@ struct TypeDefs<'a> {
     /// Generic templates by full name.
     generic_structs: HashMap<String, &'a AstStructDef>,
     generic_enums: HashMap<String, &'a AstEnumDef>,
+    /// Leaf names of templates whose parameters all have defaults: their
+    /// bare name is an instance (spec 2.10.5).
+    defaulted_leaves: std::collections::HashSet<String>,
 }
 
 impl TypeDefs<'_> {
+    fn generics_of(&self, base: &str) -> Option<&rokc_ast::Generics> {
+        self.generic_structs
+            .get(base)
+            .map(|d| &d.generics)
+            .or_else(|| self.generic_enums.get(base).map(|d| &d.generics))
+    }
+
+    /// `base` written without arguments names its all-defaults instance.
+    fn bare_instance(&self, base: &str) -> bool {
+        self.generics_of(base).is_some_and(mono::all_defaulted)
+    }
+
     fn struct_id(&self, key: &str) -> Option<StructId> {
         self.struct_table.borrow().get(key).copied()
     }
@@ -2738,7 +2753,13 @@ impl<'a> LowerCtx<'a> {
         args: Vec<HirTy>,
         span: rokc_diagnostic::Span,
     ) -> Option<StructId> {
+        let mut args = args;
         if let Some(def) = self.env.defs.generic_structs.get(base) {
+            mono::fill_defaults(&def.generics, &mut args, |subst, t| {
+                let mut rcx = LowerCtx::new(self.env, subst, None, self.here());
+                rcx.current_module = module_of(base);
+                rcx.resolve_ast_ty(t)
+            });
             self.check_const_args(&def.generics, &args)?;
         }
         self.env
@@ -2771,7 +2792,13 @@ impl<'a> LowerCtx<'a> {
         args: Vec<HirTy>,
         span: rokc_diagnostic::Span,
     ) -> Option<EnumId> {
+        let mut args = args;
         if let Some(def) = self.env.defs.generic_enums.get(base) {
+            mono::fill_defaults(&def.generics, &mut args, |subst, t| {
+                let mut rcx = LowerCtx::new(self.env, subst, None, self.here());
+                rcx.current_module = module_of(base);
+                rcx.resolve_ast_ty(t)
+            });
             self.check_const_args(&def.generics, &args)?;
         }
         self.env
@@ -3200,9 +3227,16 @@ impl<'a> LowerCtx<'a> {
                     return t;
                 }
                 let generics = p.segments.last().map_or(&[][..], |s| s.generics.as_slice());
-                if !generics.is_empty() {
+                let bare = generics.is_empty()
+                    && p.segments
+                        .last()
+                        .is_some_and(|s| self.env.defs.defaulted_leaves.contains(&s.name));
+                if !generics.is_empty() || bare {
                     let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
-                    if let Some(full) = self.canon_type(&segs) {
+                    if let Some(full) = self
+                        .canon_type(&segs)
+                        .filter(|f| !bare || self.env.defs.bare_instance(f))
+                    {
                         if let (GC_BUF, [elem]) = (full.as_str(), generics) {
                             return HirTy::GcBuf(Box::new(rec(elem)));
                         }

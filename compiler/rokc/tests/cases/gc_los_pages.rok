@@ -1,0 +1,45 @@
+// only-os: macos linux
+// only-pointer-width: 64
+// expect-exit: 0
+// expect-stdout:
+// 8
+// ok
+
+// GC: a large object gets pages of its own from the OS, already zero,
+// so the pages of a big buffer that is never written are never touched.
+// Eight 64 MiB buffers, one byte written in each, keep the peak
+// resident size far below one buffer.
+use rok::bare::ptr::{Ptr, addr_of};
+
+extern "C" {
+    // `struct rusage`: two `timeval`s, then `ru_maxrss` (64-bit Linux /
+    // macOS), then 14 more longs.
+    fn getrusage(who: i32, usage: Ptr<i64>) -> i32;
+}
+
+// `ru_maxrss` is bytes on macOS, KiB on Linux.
+#[cfg(target_os = "macos")]
+const RSS_UNIT: i64 = 1;
+#[cfg(not(target_os = "macos"))]
+const RSS_UNIT: i64 = 1024;
+
+fn main() -> i32 {
+    let total: i64 = 0;
+    let r = 0;
+    while r < 8 {
+        let xs: List<u8> = List::with_capacity(64 << 20);
+        xs.push(1u8);
+        total += xs[0] as i64;
+        r += 1;
+    }
+    println(f"{total}");
+    let ru: [i64; 18] = [0; 18];
+    if unsafe { getrusage(0, addr_of(ru[0])) } != 0 { return 1; }
+    let peak = ru[4] * RSS_UNIT;
+    if peak >= 48 << 20 {
+        println(f"peak {peak >> 20} MiB");
+        return 2;
+    }
+    println("ok");
+    0
+}

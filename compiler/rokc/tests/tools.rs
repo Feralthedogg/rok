@@ -222,10 +222,9 @@ match q { x: Q => x.v, _ => 0 }
     let out = piped(ROKC, &["repl", "--rokr", &rokr], input);
     let stdout = text(&out.stdout);
     let stderr = text(&out.stderr);
-    let any = "any rok::core::fmt::Debug";
+    // An `any` shows the type it holds (6.10.3).
     assert_eq!(
-        stdout,
-        format!("i32: 3\n{any}: 5\n{any}: Q {{ v: 9 }}\ni32: 9\n"),
+        stdout, "i32: 3\ni32: 5\nQ: Q { v: 9 }\ni32: 9\n",
         "stderr: {stderr}"
     );
     assert!(

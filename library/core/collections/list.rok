@@ -371,6 +371,9 @@ impl<T> Iterator for ListIter<T> {
         self.front = i + 1;
         self.list.get(i)
     }
+
+    /// `ExactSizeIterator`: O(1) (2.7.10).
+    fn count(self) -> usize { self.len() }
 }
 
 impl<T> DoubleEndedIterator for ListIter<T> {

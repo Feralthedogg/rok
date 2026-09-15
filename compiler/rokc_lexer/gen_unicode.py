@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Generate compiler/rokc_lexer/src/unicode_tables.rs (spec 1.4).
 
-Reads the UCD files checked in under `ucd/` (from
-https://www.unicode.org/Public/UCD/latest/ucd/), so regeneration is
-offline and reproducible:
+Reads the UCD 18.0.0 files checked in under `ucd/` (from
+https://www.unicode.org/Public/18.0.0/ucd/; emoji-data.txt from its
+`emoji/`), so regeneration is offline and reproducible:
 - DerivedCoreProperties.txt: XID_Start / XID_Continue
 - PropList.txt: ID_Compat_Math_Start / ID_Compat_Math_Continue (UAX31 7.1)
 - emoji-data.txt: Extended_Pictographic

@@ -456,6 +456,9 @@ pub fn lower_full(
                     continue;
                 }
                 if !e.generics.params.is_empty() {
+                    if mono::all_defaulted(&e.generics) {
+                        defs.defaulted_leaves.insert(leaf_name(&e.name).to_owned());
+                    }
                     defs.generic_enums.insert(e.name.clone(), e);
                     continue;
                 }
@@ -471,6 +474,9 @@ pub fn lower_full(
                     continue;
                 }
                 if !s.generics.params.is_empty() {
+                    if mono::all_defaulted(&s.generics) {
+                        defs.defaulted_leaves.insert(leaf_name(&s.name).to_owned());
+                    }
                     defs.generic_structs.insert(s.name.clone(), s);
                     continue;
                 }
@@ -2217,7 +2223,7 @@ pub(super) fn impl_def_display(ty: &Ty) -> String {
             }
             _ => format!("[{}; _]", impl_def_display(e)),
         },
-        _ => "<type>".to_owned(),
+        _ => rokc_ast::print::print_ty(ty),
     }
 }
 
@@ -4238,6 +4244,14 @@ fn check_type_bounds(env: &Env<'_>) {
 /// impl's target must meet them for every instance its bounds allow).
 fn check_impl_rules(env: &Env<'_>, program: &Program) {
     let no_subst = HashMap::new();
+    let traits: HashMap<&str, &rokc_ast::TraitDef> = program
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            Item::Trait(t) => Some((t.name.as_str(), t)),
+            _ => None,
+        })
+        .collect();
     for item in &program.items {
         let Item::Impl(i) = item else {
             continue;
@@ -4274,7 +4288,8 @@ fn check_impl_rules(env: &Env<'_>, program: &Program) {
         let mut ctx = LowerCtx::new(env, &no_subst, None, i.span);
         ctx.current_module.clone_from(&module);
         if !i.generics.params.is_empty() {
-            check_generic_supers(&ctx, i, &module, &key, &info.supers);
+            let td = traits.get(key.as_str()).copied();
+            check_generic_supers(&ctx, i, &module, &key, &info.supers, td);
             continue;
         }
         let target = ctx.resolve_ast_ty(&i.self_ty);
@@ -4295,6 +4310,62 @@ fn check_impl_rules(env: &Env<'_>, program: &Program) {
                 ),
             );
         }
+        if let Some(td) = traits.get(key.as_str()) {
+            ctx.self_ty = Some(target);
+            check_assoc_bounds(&ctx, td, i);
+        }
+    }
+}
+
+/// Spec 2.8.3: the bounds a trait declares on its associated types
+/// (`type Label: Display;`), as `(name, the impl's type, bound key)`.
+fn assoc_bound_goals<'i>(
+    ctx: &LowerCtx<'_>,
+    td: &rokc_ast::TraitDef,
+    i: &'i rokc_ast::ImplDef,
+) -> Vec<(String, &'i Ty, String)> {
+    let trait_module = module_of(&td.name);
+    let mut out = Vec::new();
+    for item in &td.items {
+        let rokc_ast::TraitItem::AssocType { name, bounds, .. } = item else {
+            continue;
+        };
+        let Some(ty) = i.items.iter().find_map(|it| match it {
+            AstImplItem::AssocType { name: n, ty } if n == name => Some(ty),
+            _ => None,
+        }) else {
+            continue;
+        };
+        for b in bounds {
+            if let AstTyKind::Path(bp) = &b.kind {
+                let segs: Vec<&str> = bp.segments.iter().map(|s| s.name.as_str()).collect();
+                let key = ctx.env.names.trait_key(&segs, &trait_module, ctx.here());
+                out.push((name.clone(), ty, key));
+            }
+        }
+    }
+    out
+}
+
+fn assoc_bound_error(ctx: &LowerCtx<'_>, td: &str, name: &str, ty: &str, bound: &str, every: &str) {
+    ctx.emit_error(
+        rokc_diagnostic::ErrorKind::Type,
+        format!(
+            "associated type `{name}` = `{ty}` does not implement `{}`{every}, a bound of \
+             `{}::{name}` (spec 2.8.3)",
+            leaf_name(bound),
+            leaf_name(td)
+        ),
+    );
+}
+
+/// A concrete impl's associated types meet their bounds.
+fn check_assoc_bounds(ctx: &LowerCtx<'_>, td: &rokc_ast::TraitDef, i: &rokc_ast::ImplDef) {
+    for (name, ty, bound) in assoc_bound_goals(ctx, td, i) {
+        let t = ctx.resolve_ast_ty(ty);
+        if !matches!(t, HirTy::Unknown) && !ctx.has_trait(&t, &bound) {
+            assoc_bound_error(ctx, &td.name, &name, &ctx.ty_name(&t), &bound, "");
+        }
     }
 }
 
@@ -4308,6 +4379,7 @@ fn check_generic_supers(
     module: &str,
     key: &str,
     supers: &[String],
+    td: Option<&rokc_ast::TraitDef>,
 ) {
     let vars: HashMap<String, String> = i
         .generics
@@ -4349,6 +4421,16 @@ fn check_generic_supers(
     for w in &i.where_clause {
         add(&w.ty, &w.bounds);
     }
+    let params = i
+        .generics
+        .params
+        .iter()
+        .map(|gp| match gp {
+            rokc_ast::GenericParam::Type { name, .. }
+            | rokc_ast::GenericParam::Const { name, .. } => name.as_str(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     for sup in supers {
         if entails(ctx, &target, sup, &assume, 0) {
             continue;
@@ -4356,22 +4438,27 @@ fn check_generic_supers(
         ctx.emit_error(
             rokc_diagnostic::ErrorKind::Type,
             format!(
-                "`{}` implements `{}` but not its supertrait `{}` for every `{}` the \
+                "`{}` implements `{}` but not its supertrait `{}` for every `{params}` the \
                  impl allows (spec 2.8.4)",
                 target.to_string().replace("#r.", ""),
                 leaf_name(key),
                 leaf_name(sup),
-                i.generics
-                    .params
-                    .iter()
-                    .map(|gp| match gp {
-                        rokc_ast::GenericParam::Type { name, .. }
-                        | rokc_ast::GenericParam::Const { name, .. } => name.as_str(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ")
             ),
         );
+    }
+    for (name, ty, bound) in td
+        .map(|td| assoc_bound_goals(ctx, td, i))
+        .unwrap_or_default()
+    {
+        let Some(t) = canon_ast_ty(ctx, module, &vars, ty) else {
+            continue;
+        };
+        let t = rigid(&t);
+        if !entails(ctx, &t, &bound, &assume, 0) {
+            let every = format!(" for every `{params}` the impl allows");
+            let shown = t.to_string().replace("#r.", "");
+            assoc_bound_error(ctx, key, &name, &shown, &bound, &every);
+        }
     }
 }
 
@@ -4810,11 +4897,19 @@ fn canon_ast_ty(
                     return Some(CanonTy::Var(v.clone()));
                 }
             }
-            let name = ctx
-                .env
-                .names
-                .canon(&segs, module, &[], ctx.here())
-                .unwrap_or_else(|| segs.join("::"));
+            let names = &ctx.env.names;
+            if let Some(full) = names.plain_alias(t, module, ctx.here()) {
+                let body = names.plain_aliases.get(&full)?;
+                return canon_ast_ty(ctx, &module_of(&full), &HashMap::new(), body);
+            }
+            let full = names.canon(&segs, module, &[], ctx.here());
+            if full
+                .as_ref()
+                .is_some_and(|f| names.generic_aliases.contains_key(f))
+            {
+                return None;
+            }
+            let name = full.unwrap_or_else(|| segs.join("::"));
             let args = p
                 .segments
                 .last()
@@ -4822,9 +4917,59 @@ fn canon_ast_ty(
             CanonTy::Named(name, args)
         }
         AstTyKind::Tuple(ts) => CanonTy::Tuple(ts.iter().map(rec).collect::<Option<_>>()?),
-        AstTyKind::Sum(ts) => CanonTy::Sum(ts.iter().map(rec).collect::<Option<_>>()?),
+        AstTyKind::Sum(ts) => {
+            // Written sums flatten (2.6.4; a nested layer `Nest` stays
+            // one member); duplicates collapse.
+            let mut set: Vec<CanonTy> = Vec::new();
+            for t in ts {
+                let members = match (rec(t)?, &t.kind) {
+                    (CanonTy::Sum(inner), k) if !matches!(k, AstTyKind::Nest(_)) => inner,
+                    (one, _) => vec![one],
+                };
+                for m in members {
+                    if !set.contains(&m) {
+                        set.push(m);
+                    }
+                }
+            }
+            CanonTy::Sum(set)
+        }
         AstTyKind::Nest(x) => rec(x)?,
         AstTyKind::None => CanonTy::Named("none".to_owned(), Vec::new()),
+        AstTyKind::Never => CanonTy::Named("!".to_owned(), Vec::new()),
+        AstTyKind::Any => CanonTy::Named("any".to_owned(), Vec::new()),
+        AstTyKind::AnyTrait(bounds) => {
+            let mut keys: Vec<String> = bounds
+                .iter()
+                .map(|b| {
+                    let segs: Vec<&str> = b.segments.iter().map(|s| s.name.as_str()).collect();
+                    ctx.env.names.trait_key(&segs, module, ctx.here())
+                })
+                .collect();
+            if bounds
+                .iter()
+                .any(|b| b.segments.iter().any(|s| !s.generics.is_empty()))
+            {
+                return None;
+            }
+            keys.sort();
+            CanonTy::Named(format!("any {}", keys.join(" + ")), Vec::new())
+        }
+        // `fn(A) -> R`: the kind (`unsafe`, ABI) names the constructor;
+        // the return type, then the parameters, are its arguments. Auto
+        // bounds (`+ Send`) don't separate: such a value also fits the
+        // plain `fn` impl.
+        AstTyKind::Fn(params, ret, b) => {
+            let kind = format!("fn/{}/{}", b.unsafe_fn, b.c_abi);
+            let args = std::iter::once(&**ret)
+                .chain(params)
+                .map(rec)
+                .collect::<Option<_>>()?;
+            CanonTy::Named(kind, args)
+        }
+        AstTyKind::Throws { ok, err } => {
+            CanonTy::Named("throws".to_owned(), vec![rec(ok)?, rec(err)?])
+        }
         AstTyKind::Array(e, rokc_ast::ConstExpr::Literal(rokc_ast::Literal::Int(n))) => {
             CanonTy::Array(
                 Box::new(rec(e)?),
@@ -4883,6 +5028,17 @@ impl std::fmt::Display for CanonTy {
             |ts: &[Self], sep: &str| ts.iter().map(Self::to_string).collect::<Vec<_>>().join(sep);
         match self {
             Self::Var(v) => write!(f, "{}", v.rsplit('.').next().unwrap_or(v)),
+            Self::Named(n, args) if n.starts_with("fn/") => {
+                let ret = args.first().map_or_else(String::new, Self::to_string);
+                write!(
+                    f,
+                    "fn({}) -> {ret}",
+                    list(args.get(1..).unwrap_or_default(), ", ")
+                )
+            }
+            Self::Named(n, args) if n == "throws" && args.len() == 2 => {
+                write!(f, "throws ({}) {}", args[1], args[0])
+            }
             Self::Named(n, args) if args.is_empty() => {
                 write!(f, "{}", n.rsplit("::").next().unwrap_or(n))
             }
@@ -4951,12 +5107,28 @@ impl Unifier {
                 self.unify(&n, &m)?;
                 self.unify(&p, &q)
             }
-            // Sums only unify member-for-member in written order.
             (CanonTy::Sum(xs), CanonTy::Sum(ys)) if xs.len() == ys.len() => {
-                xs.iter().zip(&ys).try_for_each(|(p, q)| self.unify(p, q))
+                self.unify_set(&xs, &ys)
             }
             _ => None,
         }
+    }
+
+    /// Sums are sets (2.6.4): some pairing of the members unifies.
+    fn unify_set(&mut self, xs: &[CanonTy], ys: &[CanonTy]) -> Option<()> {
+        let Some((x, rest)) = xs.split_first() else {
+            return Some(());
+        };
+        for k in 0..ys.len() {
+            let saved = self.sub.clone();
+            let mut others = ys.to_vec();
+            let y = others.remove(k);
+            if self.unify(x, &y).is_some() && self.unify_set(rest, &others).is_some() {
+                return Some(());
+            }
+            self.sub = saved;
+        }
+        None
     }
 }
 
@@ -5205,6 +5377,7 @@ impl Intrinsic {
                     "mul" => PrimOp::Mul,
                     "div" => PrimOp::Div,
                     "rem" => PrimOp::Rem,
+                    "mod" => PrimOp::Mod,
                     "and" => PrimOp::BitAnd,
                     "or" => PrimOp::BitOr,
                     "xor" => PrimOp::BitXor,
@@ -5859,7 +6032,9 @@ fn subst_assoc_sig(def: &mut FnDef, assoc: &HashMap<String, Ty>) {
             }
         }
     }
+    // `where Item: Ord` names the bounded type through `assoc` as well.
     for w in &mut def.where_clause {
+        subst_assoc_ty(&mut w.ty, assoc);
         w.bounds.iter_mut().for_each(|b| subst_assoc_ty(b, assoc));
     }
 }

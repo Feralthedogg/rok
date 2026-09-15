@@ -753,6 +753,11 @@ impl<'a> FnBuilder<'a> {
 
     fn lower_expr_to_rvalue(&mut self, e: &HirExpr) -> RValue {
         match &e.kind {
+            HirExprKind::PrimBinOp {
+                op: PrimOp::Mod,
+                lhs,
+                rhs,
+            } => self.lower_floored_mod(lhs, rhs, e.span),
             HirExprKind::PrimBinOp { op, lhs, rhs } => {
                 let op_ty = self.ty(&lhs.ty);
                 let lhs_op = self.lower_expr_to_operand(lhs);
@@ -2684,6 +2689,101 @@ impl<'a> FnBuilder<'a> {
             Some(p) => Operand::Copy(p),
             None => Operand::Const(ConstVal::Unit),
         }
+    }
+
+    /// `a %% b`: `r = a % b`, plus `b` when `r` is nonzero and its sign
+    /// differs from `b`'s (unsigned: `r`).
+    fn lower_floored_mod(
+        &mut self,
+        lhs: &HirExpr,
+        rhs: &HirExpr,
+        span: rokc_diagnostic::Span,
+    ) -> RValue {
+        let op_ty = self.ty(&lhs.ty);
+        let a = self.lower_expr_to_operand(lhs);
+        let b = self.lower_expr_to_operand(rhs);
+        self.push_loc(span);
+        let rem = RValue::BinOp {
+            op: PrimOp::Rem,
+            op_ty: op_ty.clone(),
+            lhs: a,
+            rhs: b.clone(),
+        };
+        let zero = match &op_ty {
+            MirTy::Prim(p) if p.is_signed_int() => ConstVal::Int { value: 0, ty: *p },
+            MirTy::Prim(p) if p.is_float() => ConstVal::Float { bits: 0, ty: *p },
+            _ => return rem,
+        };
+        let r = self.fresh_local(op_ty.clone());
+        self.push_stmt(Statement::Assign {
+            target: r,
+            rvalue: rem,
+        });
+        let bin = |s: &mut Self, op, op_ty: MirTy, lhs, rhs, ty| {
+            let t = s.fresh_local(ty);
+            let rvalue = RValue::BinOp {
+                op,
+                op_ty,
+                lhs,
+                rhs,
+            };
+            s.push_stmt(Statement::Assign { target: t, rvalue });
+            Operand::Copy(t)
+        };
+        let bool_ty = MirTy::Prim(IrPrimTy::Bool);
+        let zero = Operand::Const(zero);
+        let r_op = Operand::Copy(r);
+        let nz = bin(
+            self,
+            PrimOp::Ne,
+            op_ty.clone(),
+            r_op.clone(),
+            zero.clone(),
+            bool_ty.clone(),
+        );
+        let r_neg = bin(
+            self,
+            PrimOp::Lt,
+            op_ty.clone(),
+            r_op.clone(),
+            zero.clone(),
+            bool_ty.clone(),
+        );
+        let b_neg = bin(
+            self,
+            PrimOp::Lt,
+            op_ty.clone(),
+            b.clone(),
+            zero,
+            bool_ty.clone(),
+        );
+        let differ = bin(
+            self,
+            PrimOp::Ne,
+            bool_ty.clone(),
+            r_neg,
+            b_neg,
+            bool_ty.clone(),
+        );
+        let adjust = bin(self, PrimOp::BitAnd, bool_ty.clone(), nz, differ, bool_ty);
+        let then_bb = self.new_block();
+        let merge_bb = self.new_block();
+        let out = self.add_block_param(merge_bb, op_ty.clone());
+        self.terminate(Terminator::If {
+            cond: adjust,
+            then_bb,
+            then_args: Vec::new(),
+            else_bb: merge_bb,
+            else_args: vec![r_op.clone()],
+        });
+        self.current = then_bb;
+        let sum = bin(self, PrimOp::Add, op_ty.clone(), r_op, b, op_ty);
+        self.terminate(Terminator::Goto {
+            target: merge_bb,
+            args: vec![sum],
+        });
+        self.current = merge_bb;
+        RValue::Use(Operand::Copy(out))
     }
 
     fn lower_if(

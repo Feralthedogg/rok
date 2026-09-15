@@ -8,12 +8,13 @@
 
 /// One step forward / back (2.7.3). Integers implement it; floats don't,
 /// so `Range<f64>` is no iterator.
-pub trait Step {
+pub trait Step: PartialOrd + Clone {
     fn forward_checked(self, count: usize) -> Self | none;
     fn backward_checked(self, count: usize) -> Self | none;
     fn steps_between(start: Self, end: Self) -> usize | none;
 }
 
+#[lang("range_type")]
 pub struct Range<T> {
     pub start: T;
     pub end: T;
@@ -23,7 +24,7 @@ pub struct RangeInclusive<T> {
     pub start: T;
     pub end: T;
     /// Set once the last item (`end`) is taken (from either side).
-    pub exhausted: bool = false;
+    exhausted: bool = false;
 }
 
 pub struct RangeFrom<T> {
@@ -65,6 +66,9 @@ impl<T: Step> Iterator for Range<T> {
         }
         none
     }
+
+    /// `ExactSizeIterator`: O(1) (2.7.10).
+    fn count(self) -> usize { self.len() }
 }
 
 impl<T: Step> DoubleEndedIterator for Range<T> {
@@ -105,6 +109,9 @@ impl<T: Step> Iterator for RangeInclusive<T> {
         }
         cur
     }
+
+    /// `ExactSizeIterator`: O(1) (2.7.10).
+    fn count(self) -> usize { self.len() }
 }
 
 impl<T: Step> DoubleEndedIterator for RangeInclusive<T> {

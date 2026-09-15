@@ -1,0 +1,16 @@
+// expect-error: `N` implements `Step` but not its supertrait `PartialOrd`
+
+// Stdlib 2.7.3: `trait Step: PartialOrd + Clone`.
+struct N(i32);
+
+impl Clone for N {
+    fn clone(self) -> N { N(self.0) }
+}
+
+impl Step for N {
+    fn forward_checked(self, count: usize) -> N | none { N(self.0 + count as i32) }
+    fn backward_checked(self, count: usize) -> N | none { N(self.0 - count as i32) }
+    fn steps_between(start: N, end: N) -> usize | none { (end.0 - start.0) as usize }
+}
+
+fn main() {}

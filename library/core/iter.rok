@@ -7,11 +7,6 @@
 //
 // `next` takes `ref self` (2.7.1): an iterator's state lives in its
 // fields, written back into the caller's binding after each call.
-//
-// The default methods' bodies don't name `Item` (only their signatures
-// get it replaced by the impl's type); they hand off to the generic
-// helpers at the bottom, whose item type comes from the arguments or
-// the expected return type.
 
 #[lang("iterator_trait")]
 pub trait Iterator {
@@ -69,12 +64,12 @@ pub trait Iterator {
     }
 
     /// The items of each item (each item is `IntoIterator`).
-    fn flatten(self) -> Flatten<Self> {
+    fn flatten(self) -> Flatten<Self> where Item: IntoIterator {
         Flatten { it: self, cur: none }
     }
 
     /// The items of each `f(item)` (an `IntoIterator`).
-    fn flat_map<U>(self, f: fn(Item) -> U) -> FlatMap<Self, U> {
+    fn flat_map<U: IntoIterator>(self, f: fn(Item) -> U) -> FlatMap<Self, U> {
         FlatMap { it: self, f: f, cur: none }
     }
 
@@ -86,64 +81,170 @@ pub trait Iterator {
     // ---- eager consumers ----
 
     fn count(self) -> usize {
-        count_of(self)
+        let n: usize = 0;
+        for _ in self {
+            n += 1;
+        }
+        n
     }
 
     /// The items added up; `0` for none.
-    fn sum(self) -> Item {
-        sum_of(self)
+    fn sum(self) -> Item where Item: Add<Output = Item> + Zero {
+        let acc = Item::zero();
+        for x in self {
+            acc += x;
+        }
+        acc
     }
 
     /// The items multiplied; `1` for none.
-    fn product(self) -> Item {
-        product_of(self)
+    fn product(self) -> Item where Item: Mul<Output = Item> + One {
+        let acc = Item::one();
+        for x in self {
+            acc *= x;
+        }
+        acc
     }
 
     fn fold<B>(self, init: B, f: fn(B, Item) -> B) -> B {
-        fold_of(self, init, f)
+        let acc = init;
+        for x in self {
+            acc = f(acc, x);
+        }
+        acc
     }
 
     /// The items combined left to right with `f`; `none` for none.
     fn reduce(self, f: fn(Item, Item) -> Item) -> Item | none {
-        reduce_of(self, f)
+        let acc: Item | none = none;
+        for x in self {
+            acc = if let a: Item = acc { f(a, x) } else { x };
+        }
+        acc
     }
 
     fn any(self, pred: fn(Item) -> bool) -> bool {
-        any_of(self, pred)
+        for x in self {
+            if pred(x) {
+                return true;
+            }
+        }
+        false
     }
 
     fn all(self, pred: fn(Item) -> bool) -> bool {
-        all_of(self, pred)
+        for x in self {
+            if !pred(x) {
+                return false;
+            }
+        }
+        true
     }
 
     fn find(self, pred: fn(Item) -> bool) -> Item | none {
-        find_of(self, pred)
+        for x in self {
+            if pred(x) {
+                return x;
+            }
+        }
+        none
     }
 
     fn position(self, pred: fn(Item) -> bool) -> usize | none {
-        position_of(self, pred)
+        let i: usize = 0;
+        for x in self {
+            if pred(x) {
+                return i;
+            }
+            i += 1;
+        }
+        none
     }
 
-    fn min(self) -> Item | none {
-        min_of(self)
+    fn min(self) -> Item | none where Item: Ord {
+        let best: Item | none = none;
+        for x in self {
+            match best {
+                b: Item => {
+                    if x.cmp(b).is_lt() {
+                        best = x;
+                    }
+                }
+                none => {
+                    best = x;
+                }
+            }
+        }
+        best
     }
 
-    fn max(self) -> Item | none {
-        max_of(self)
+    fn max(self) -> Item | none where Item: Ord {
+        let best: Item | none = none;
+        for x in self {
+            match best {
+                b: Item => {
+                    if x.cmp(b).is_gt() {
+                        best = x;
+                    }
+                }
+                none => {
+                    best = x;
+                }
+            }
+        }
+        best
     }
 
     /// The item with the smallest `key` (the first of equals).
     fn min_by_key<K: Ord>(self, key: fn(Item) -> K) -> Item | none {
-        min_by_key_of(self, key)
+        let best: Item | none = none;
+        let best_key: K | none = none;
+        for x in self {
+            let k = key(x);
+            match best_key {
+                b: K => {
+                    if k.cmp(b).is_lt() {
+                        best = x;
+                        best_key = k;
+                    }
+                }
+                none => {
+                    best = x;
+                    best_key = k;
+                }
+            }
+        }
+        best
     }
 
     /// The item with the largest `key` (the last of equals).
     fn max_by_key<K: Ord>(self, key: fn(Item) -> K) -> Item | none {
-        max_by_key_of(self, key)
+        let best: Item | none = none;
+        let best_key: K | none = none;
+        for x in self {
+            let k = key(x);
+            match best_key {
+                b: K => {
+                    if !k.cmp(b).is_lt() {
+                        best = x;
+                        best_key = k;
+                    }
+                }
+                none => {
+                    best = x;
+                    best_key = k;
+                }
+            }
+        }
+        best
     }
 
     fn last(self) -> Item | none {
-        last_of(self)
+        let last: Item | none = none;
+        for x in self {
+            last = x;
+        }
+        last
     }
 
     /// The `n`th remaining item (0-based), consuming the ones before it.
@@ -155,12 +256,14 @@ pub trait Iterator {
     }
 
     fn for_each(self, f: fn(Item)) {
-        for_each_of(self, f);
+        for x in self {
+            f(x);
+        }
     }
 
     /// Gather the items into a `FromIterator` collection (the slot's
     /// type picks it: `let v: List<i32> = it.collect();`).
-    fn collect<C>(self) -> C {
+    fn collect<C: FromIterator<Item>>(self) -> C {
         C::from_iter(self)
     }
 }
@@ -171,12 +274,12 @@ pub trait DoubleEndedIterator: Iterator {
 
     /// `fold` from the back.
     fn rfold<B>(self, init: B, f: fn(B, Self::Item) -> B) -> B {
-        fold_of(Rev { it: self }, init, f)
+        Rev { it: self }.fold(init, f)
     }
 
     /// The last item `pred` accepts, searching from the back.
     fn rfind(self, pred: fn(Self::Item) -> bool) -> Self::Item | none {
-        find_of(Rev { it: self }, pred)
+        Rev { it: self }.find(pred)
     }
 }
 
@@ -187,7 +290,7 @@ pub trait ExactSizeIterator: Iterator {
 
 #[lang("into_iterator_trait")]
 pub trait IntoIterator {
-    type IntoIter;
+    type IntoIter: Iterator<Item = Item>;
     type Item;
     fn into_iter(self) -> IntoIter;
 }
@@ -216,6 +319,9 @@ impl<I: Iterator, U> Iterator for Map<I, U> {
     fn next(ref self) -> U | none {
         (self.f)(self.it.next()?)
     }
+
+    /// As many as the inner iterator: O(1) over an `ExactSizeIterator` (2.7.10).
+    fn count(self) -> usize { self.it.count() }
 }
 
 impl<I: DoubleEndedIterator, U> DoubleEndedIterator for Map<I, U> {
@@ -269,6 +375,9 @@ impl<I: Iterator> Iterator for Enumerate<I> {
         self.i = at + 1;
         (at, x)
     }
+
+    /// As many as the inner iterator: O(1) over an `ExactSizeIterator` (2.7.10).
+    fn count(self) -> usize { self.it.count() }
 }
 
 impl<I: ExactSizeIterator> ExactSizeIterator for Enumerate<I> {
@@ -395,6 +504,9 @@ impl<I: DoubleEndedIterator> Iterator for Rev<I> {
     fn next(ref self) -> I::Item | none {
         self.it.next_back()
     }
+
+    /// As many as the inner iterator: O(1) over an `ExactSizeIterator` (2.7.10).
+    fn count(self) -> usize { self.it.count() }
 }
 
 impl<I: DoubleEndedIterator> DoubleEndedIterator for Rev<I> {
@@ -544,174 +656,6 @@ impl<I: DoubleEndedIterator + ExactSizeIterator> DoubleEndedIterator for Skip<I>
             return none;
         }
         self.it.next_back()
-    }
-}
-
-fn count_of<I>(it: I) -> usize {
-    let n: usize = 0;
-    for _ in it {
-        n += 1;
-    }
-    n
-}
-
-fn sum_of<I, T: Zero>(it: I) -> T {
-    let acc: T = T::zero();
-    for x in it {
-        acc += x;
-    }
-    acc
-}
-
-fn product_of<I, T: One>(it: I) -> T {
-    let acc: T = T::one();
-    for x in it {
-        acc *= x;
-    }
-    acc
-}
-
-fn fold_of<I, B, T>(it: I, init: B, f: fn(B, T) -> B) -> B {
-    let acc = init;
-    for x in it {
-        acc = f(acc, x);
-    }
-    acc
-}
-
-fn reduce_of<I, T>(it: I, f: fn(T, T) -> T) -> T | none {
-    let acc: T | none = none;
-    for x in it {
-        acc = if let a: T = acc { f(a, x) } else { x };
-    }
-    acc
-}
-
-fn min_by_key_of<I, T, K: Ord>(it: I, key: fn(T) -> K) -> T | none {
-    let best: T | none = none;
-    let best_key: K | none = none;
-    for x in it {
-        let k = key(x);
-        match best_key {
-            b: K => {
-                if k.cmp(b).is_lt() {
-                    best = x;
-                    best_key = k;
-                }
-            }
-            none => {
-                best = x;
-                best_key = k;
-            }
-        }
-    }
-    best
-}
-
-fn max_by_key_of<I, T, K: Ord>(it: I, key: fn(T) -> K) -> T | none {
-    let best: T | none = none;
-    let best_key: K | none = none;
-    for x in it {
-        let k = key(x);
-        match best_key {
-            b: K => {
-                if !k.cmp(b).is_lt() {
-                    best = x;
-                    best_key = k;
-                }
-            }
-            none => {
-                best = x;
-                best_key = k;
-            }
-        }
-    }
-    best
-}
-
-fn any_of<I, T>(it: I, pred: fn(T) -> bool) -> bool {
-    for x in it {
-        if pred(x) {
-            return true;
-        }
-    }
-    false
-}
-
-fn all_of<I, T>(it: I, pred: fn(T) -> bool) -> bool {
-    for x in it {
-        if !pred(x) {
-            return false;
-        }
-    }
-    true
-}
-
-fn find_of<I, T>(it: I, pred: fn(T) -> bool) -> T | none {
-    for x in it {
-        if pred(x) {
-            return x;
-        }
-    }
-    none
-}
-
-fn position_of<I, T>(it: I, pred: fn(T) -> bool) -> usize | none {
-    let i: usize = 0;
-    for x in it {
-        if pred(x) {
-            return i;
-        }
-        i += 1;
-    }
-    none
-}
-
-fn min_of<I, T: Ord>(it: I) -> T | none {
-    let best: T | none = none;
-    for x in it {
-        match best {
-            b: T => {
-                if x.cmp(b).is_lt() {
-                    best = x;
-                }
-            }
-            none => {
-                best = x;
-            }
-        }
-    }
-    best
-}
-
-fn max_of<I, T: Ord>(it: I) -> T | none {
-    let best: T | none = none;
-    for x in it {
-        match best {
-            b: T => {
-                if x.cmp(b).is_gt() {
-                    best = x;
-                }
-            }
-            none => {
-                best = x;
-            }
-        }
-    }
-    best
-}
-
-fn last_of<I, T>(it: I) -> T | none {
-    let last: T | none = none;
-    for x in it {
-        last = x;
-    }
-    last
-}
-
-fn for_each_of<I, T>(it: I, f: fn(T)) {
-    for x in it {
-        f(x);
     }
 }
 

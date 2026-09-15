@@ -2609,7 +2609,9 @@ impl<'a> Parser<'a> {
         if !self.eat(&TokenKind::Lt) {
             return Generics { params };
         }
+        let mut defaulted = false;
         while !matches!(self.peek(), TokenKind::Gt | TokenKind::Eof) {
+            let start = self.peek_span();
             if matches!(self.peek_next(), Some(TokenKind::Ident(_))) && self.eat_kw("const") {
                 let TokenKind::Ident(name) = self.peek().clone() else {
                     let s = self.peek_span();
@@ -2654,6 +2656,23 @@ impl<'a> Parser<'a> {
                     bounds,
                     default,
                 });
+            }
+            // Spec 2.10.5: defaults are trailing.
+            match params.last() {
+                Some(rokc_ast::GenericParam::Type {
+                    default: Some(_), ..
+                }) => defaulted = true,
+                Some(
+                    rokc_ast::GenericParam::Type { name, .. }
+                    | rokc_ast::GenericParam::Const { name, .. },
+                ) if defaulted => {
+                    let msg = format!(
+                        "generic parameter `{name}` has no default but follows one that does; \
+                         defaults must be trailing (spec 2.10.5)"
+                    );
+                    self.error(start, msg);
+                }
+                _ => {}
             }
             if !self.eat(&TokenKind::Comma) {
                 break;

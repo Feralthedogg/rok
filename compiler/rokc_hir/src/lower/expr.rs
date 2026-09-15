@@ -2186,6 +2186,35 @@ pub(super) fn lower_field(
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
     let target_h = lower_expected(ctx, target, HirTy::Unknown);
+    let has_field = match &target_h.ty {
+        HirTy::Struct(id) => {
+            let def = ctx.struct_def(*id);
+            def.fields.iter().any(|f| f.name == name)
+                || def
+                    .union_kind
+                    .as_ref()
+                    .is_some_and(|u| u.aliases.iter().any(|(n, _)| n == name))
+        }
+        HirTy::Unknown => true,
+        _ => false,
+    };
+    // Spec 3.5.4: `obj.method` is not a function value.
+    if !has_field && matches!(pick_method(ctx, &target_h.ty, name, None), Ok(Some(_))) {
+        let recv = rokc_ast::print::print_expr(target);
+        let r = ctx.error_expr(
+            span,
+            format!(
+                "`{recv}.{name}` names a method without calling it; `.method` is not a \
+                 function value (spec 3.5.4)"
+            ),
+        );
+        ctx.help_last(Some(format!(
+            "call it (`{recv}.{name}(..)`), wrap it in a closure (`|..| {recv}.{name}(..)`), \
+             or use the method path `{}::{name}`",
+            ctx.ty_name(&target_h.ty)
+        )));
+        return r;
+    }
     field_access(ctx, target_h, name, span)
 }
 
@@ -3740,6 +3769,10 @@ const fn const_arith(op: PrimOp, a: i128, b: i128) -> Option<i128> {
         PrimOp::Mul => a.checked_mul(b),
         PrimOp::Div => a.checked_div(b),
         PrimOp::Rem => a.checked_rem(b),
+        PrimOp::Mod => match a.checked_rem(b) {
+            Some(r) if r != 0 && (r < 0) != (b < 0) => Some(r + b),
+            r => r,
+        },
         _ => None,
     }
 }
@@ -3762,7 +3795,7 @@ fn check_const_overflow(
     if !p.is_int()
         || !matches!(
             op,
-            PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div | PrimOp::Rem
+            PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div | PrimOp::Rem | PrimOp::Mod
         )
     {
         return;
@@ -6878,23 +6911,34 @@ fn path_call_via_impls(
         }));
     }
     // Only paths the struct / enum lookup below can't take: a type
-    // parameter, a primitive, `Self`.
-    let [name] = ty_segs else {
-        return None;
-    };
-    let is_type_param = ctx.ty_subst.contains_key(*name);
-    let ty_ast = rokc_ast::Ty {
-        kind: rokc_ast::TyKind::Path(rokc_ast::Path {
-            segments: all_segs[..1].to_vec(),
-            span,
-        }),
+    // parameter, a primitive, `Self`, an associated type (`Item`,
+    // `Self::Item`, `T::Item`, 2.8.3).
+    let ty_path = rokc_ast::Path {
+        segments: all_segs[..all_segs.len() - 1].to_vec(),
         span,
     };
+    let ty_ast = rokc_ast::Ty {
+        kind: rokc_ast::TyKind::Path(ty_path.clone()),
+        span,
+    };
+    let (name, projected) = match ty_segs {
+        [name] => (*name, None),
+        _ if ctx.canon_type(ty_segs).is_none() && ty_path.segments.len() > 1 => {
+            ("", Some(ctx.projection(&ty_path)?))
+        }
+        _ => return None,
+    };
+    let is_type_param = ctx.ty_subst.contains_key(name);
     let prim = matches!(crate::ty::resolve_ty(&ty_ast), HirTy::Prim(_));
-    if !(is_type_param || prim || *name == "Self") {
+    let assoc = ctx.self_ty.is_some() && ctx.assoc_names.iter().any(|a| a == name);
+    if !(projected.is_some() || is_type_param || prim || assoc || name == "Self") {
         return None;
     }
-    let t = ctx.resolve_ast_ty(&ty_ast);
+    let t = projected.unwrap_or_else(|| ctx.resolve_ast_ty(&ty_ast));
+    if matches!(t, HirTy::Unknown) {
+        discard_args(ctx, args);
+        return Some(poison(span));
+    }
     // `T::default()` for a `T | none` sum is `none` (stdlib 2.13).
     if let (HirTy::Sum(vs), "default", []) = (&t, method, args) {
         if let Some(i) = vs.iter().position(HirTy::is_none) {
@@ -6913,7 +6957,7 @@ fn path_call_via_impls(
     // inherent one of the same name (`int::from_str(s, radix)`).
     let bound_key = ctx
         .ty_bounds
-        .get(*name)
+        .get(name)
         .filter(|_| is_type_param)
         .and_then(|bs| {
             bs.iter()
@@ -7768,6 +7812,30 @@ fn lower_addr_of(
         return ctx.error_expr(span, format!("`{name}` takes one place: `{name}(x)`"));
     };
     let place = lower_expected(ctx, e, HirTy::Unknown);
+    // `xs[i]` on a collection is an `Index::index` call returning a copy;
+    // only fixed-array elements are places.
+    let target = match &e.kind {
+        ExprKind::Index(target, _) => Some(target),
+        _ => None,
+    };
+    if let Some(target) = target.filter(|_| {
+        place.ty != HirTy::Unknown && !matches!(place.kind, HirExprKind::ArrayIndex { .. })
+    }) {
+        let target = rokc_ast::print::print_expr(target);
+        let elem = ctx.ty_name(&place.ty);
+        let r = ctx.error_expr(
+            span,
+            format!(
+                "`{name}` needs a place, but `{target}[..]` is an `Index` call that returns a \
+                 copy: only an element of a fixed array `[T; N]` is a place"
+            ),
+        );
+        ctx.help_last(Some(format!(
+            "a `[..]` literal is a `List` unless its slot is a fixed array \
+             (`let {target}: [{elem}; N] = [..];`)"
+        )));
+        return r;
+    }
     let pointee = place.ty.clone();
     addr_expr(ctx, place, def, name, pointee, span)
 }
@@ -8251,7 +8319,7 @@ pub(super) fn lower_infix(
         return dispatch_user_op_lit(ctx, op, Fixity::Infix, lhs_h, Some(rhs_h), Some(rhs), span);
     }
     // A primitive on the left of a user type (`impl Mul<Duration> for f64`),
-    // or an operator with no primitive lowering (`%%` → core's `Modulo`).
+    // or an operator with no primitive lowering.
     if let HirTy::Prim(lp) = lhs_h.ty {
         if matches!(rhs_h.ty, HirTy::Struct(_) | HirTy::Enum(_)) || infix_for_prim(op, lp).is_none()
         {
@@ -8808,6 +8876,7 @@ pub(super) fn infix_for_prim(sym: &str, prim: PrimTy) -> Option<(PrimOp, HirTy)>
         "*" if num => arith(PrimOp::Mul),
         "/" if num => arith(PrimOp::Div),
         "%" if num => arith(PrimOp::Rem),
+        "%%" if num => arith(PrimOp::Mod),
         "&" if prim.is_int() || matches!(prim, PrimTy::Bool) => arith(PrimOp::BitAnd),
         "|" if prim.is_int() || matches!(prim, PrimTy::Bool) => arith(PrimOp::BitOr),
         "^" if prim.is_int() || matches!(prim, PrimTy::Bool) => arith(PrimOp::BitXor),

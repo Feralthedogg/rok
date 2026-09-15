@@ -548,6 +548,8 @@ fn sysroot_is_beside_rokc() {
         err.contains("the runtime library is missing: no ") && err.contains(&rt),
         "{err}"
     );
+    // A copy of rokc is hundreds of MB.
+    let _ = fs::remove_dir_all(&dir);
 }
 
 /// `--target` links what the sysroot ships for it

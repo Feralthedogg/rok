@@ -421,17 +421,23 @@ pub(super) fn instance(
     sc: Scope<'_>,
     span: rokc_diagnostic::Span,
 ) -> Option<HirTy> {
+    let module = module_of(full);
+    let sc = Scope {
+        module: &module,
+        ..sc
+    };
+    let mut args = args;
+    if let Some(g) = defs.generics_of(full) {
+        mono::fill_defaults(g, &mut args, |subst, t| {
+            resolve_ty_with_structs(t, defs, Some(subst), sc)
+        });
+    }
     let mut open = Vec::new();
     args.iter()
         .for_each(|a| collect::collect_unknown_paths(a, &mut open));
     if !open.is_empty() || args.contains(&HirTy::Unknown) {
         return None;
     }
-    let module = module_of(full);
-    let sc = Scope {
-        module: &module,
-        ..sc
-    };
     if defs.generic_structs.contains_key(full) {
         return defs
             .instantiate_struct(full, args, span, |def, subst| {
@@ -524,7 +530,7 @@ pub(super) fn resolve_ty_with_structs(
                     return r;
                 }
             }
-            if !generics.is_empty() {
+            if !generics.is_empty() || defs.bare_instance(&full) {
                 let args: Vec<HirTy> = generics.iter().map(rec).collect();
                 return instance(defs, &full, args, sc, ty.span)
                     .unwrap_or_else(|| HirTy::Path(vec![full]));

@@ -1,0 +1,48 @@
+// expect-exit: 0
+// expect-stdout:
+// 0 0 0 0
+// 7
+
+// An associated function called through an associated type (2.8.3,
+// 2.13): the bare name `Elem` and `Self::Elem` inside the trait and its
+// impls, and the projection `T::Elem` of a bound parameter.
+
+use rok::core::num::Zero;
+
+trait Bag {
+    type Elem;
+    fn first(self) -> Elem;
+    fn zero_elem(self) -> Elem { Elem::zero() }
+    fn zero_elem2(self) -> Self::Elem { Self::Elem::zero() }
+}
+
+struct B { v: i32; }
+
+impl Bag for B {
+    type Elem = i32;
+    fn first(self) -> i32 { self.v + Elem::zero() }
+}
+
+struct Seven;
+
+impl Seven {
+    fn make() -> i32 { 7 }
+}
+
+struct S;
+
+impl Bag for S {
+    type Elem = Seven;
+    fn first(self) -> Seven { Seven }
+}
+
+fn z<T: Bag>(t: T) -> T::Elem { T::Elem::zero() }
+
+fn made<T: Bag>(t: T) -> i32 { T::Elem::make() }
+
+fn main() -> i32 {
+    let b = B { v: 3 };
+    println(f"{b.zero_elem()} {b.zero_elem2()} {z(b)} {b.first() - 3}");
+    println(f"{made(S)}");
+    return 0;
+}

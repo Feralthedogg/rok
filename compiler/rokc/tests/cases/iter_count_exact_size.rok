@@ -1,0 +1,27 @@
+// expect-exit: 0
+// expect-stdout:
+// 4 0
+// 1000000000000 10 2
+// 4 2
+// 3
+// 256
+
+// `count()` of an `ExactSizeIterator` is its `len()` (stdlib 2.7.10):
+// O(1) for `List` / `Slice` / range iterators and for `Map` /
+// `Enumerate` / `Rev` over them, so `map`'s function is not called.
+// Other iterators are stepped.
+
+fn main() -> i32 {
+    let xs = [1, 2, 3, 4];
+    let calls = [0];
+    let n = xs.iter().map(|x| { calls[0] = calls[0] + 1; x }).count();
+    println(f"{n} {calls[0]}");
+    println(f"{(0..1000000000000i64).count()} {(1..=10).count()} {xs[1:3].iter().count()}");
+    println(f"{xs.iter().enumerate().rev().count()} {xs.iter().filter(|x| x % 2 == 0).count()}");
+    let it = xs.iter();
+    it.next();
+    println(f"{it.count()}");
+    let r = 0u8..=255u8;
+    println(f"{r.count()}");
+    return 0;
+}

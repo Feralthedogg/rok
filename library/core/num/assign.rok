@@ -32,6 +32,7 @@ impl RemAssign for i8 {
 }
 
 impl ModuloAssign for i8 {
+    #[intrinsic("rok.mod_assign.i8")]
     fn modulo_assign(ref self, rhs: i8) { self = self %% rhs; }
 }
 
@@ -88,6 +89,7 @@ impl RemAssign for i16 {
 }
 
 impl ModuloAssign for i16 {
+    #[intrinsic("rok.mod_assign.i16")]
     fn modulo_assign(ref self, rhs: i16) { self = self %% rhs; }
 }
 
@@ -144,6 +146,7 @@ impl RemAssign for i32 {
 }
 
 impl ModuloAssign for i32 {
+    #[intrinsic("rok.mod_assign.i32")]
     fn modulo_assign(ref self, rhs: i32) { self = self %% rhs; }
 }
 
@@ -200,6 +203,7 @@ impl RemAssign for i64 {
 }
 
 impl ModuloAssign for i64 {
+    #[intrinsic("rok.mod_assign.i64")]
     fn modulo_assign(ref self, rhs: i64) { self = self %% rhs; }
 }
 
@@ -256,6 +260,7 @@ impl RemAssign for isize {
 }
 
 impl ModuloAssign for isize {
+    #[intrinsic("rok.mod_assign.isize")]
     fn modulo_assign(ref self, rhs: isize) { self = self %% rhs; }
 }
 
@@ -312,6 +317,7 @@ impl RemAssign for u8 {
 }
 
 impl ModuloAssign for u8 {
+    #[intrinsic("rok.mod_assign.u8")]
     fn modulo_assign(ref self, rhs: u8) { self = self %% rhs; }
 }
 
@@ -368,6 +374,7 @@ impl RemAssign for u16 {
 }
 
 impl ModuloAssign for u16 {
+    #[intrinsic("rok.mod_assign.u16")]
     fn modulo_assign(ref self, rhs: u16) { self = self %% rhs; }
 }
 
@@ -424,6 +431,7 @@ impl RemAssign for u32 {
 }
 
 impl ModuloAssign for u32 {
+    #[intrinsic("rok.mod_assign.u32")]
     fn modulo_assign(ref self, rhs: u32) { self = self %% rhs; }
 }
 
@@ -480,6 +488,7 @@ impl RemAssign for u64 {
 }
 
 impl ModuloAssign for u64 {
+    #[intrinsic("rok.mod_assign.u64")]
     fn modulo_assign(ref self, rhs: u64) { self = self %% rhs; }
 }
 
@@ -536,6 +545,7 @@ impl RemAssign for usize {
 }
 
 impl ModuloAssign for usize {
+    #[intrinsic("rok.mod_assign.usize")]
     fn modulo_assign(ref self, rhs: usize) { self = self %% rhs; }
 }
 
@@ -592,6 +602,7 @@ impl RemAssign for f32 {
 }
 
 impl ModuloAssign for f32 {
+    #[intrinsic("rok.mod_assign.f32")]
     fn modulo_assign(ref self, rhs: f32) { self = self %% rhs; }
 }
 
@@ -623,6 +634,7 @@ impl RemAssign for f64 {
 }
 
 impl ModuloAssign for f64 {
+    #[intrinsic("rok.mod_assign.f64")]
     fn modulo_assign(ref self, rhs: f64) { self = self %% rhs; }
 }
 

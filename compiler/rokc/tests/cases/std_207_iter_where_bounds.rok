@@ -1,0 +1,12 @@
+// expect-error: type `f64` does not satisfy trait bound `rok::core::cmp::Ord`
+// expect-error: type `str` does not satisfy trait bound `rok::core::num::Zero`
+
+// Stdlib 2.7.1: `min` / `max` need `Item: Ord`, `sum` needs
+// `Item: Add<Output = Item> + Zero` (method `where` bounds on a trait's
+// default methods).
+fn main() {
+    let xs: List<f64> = [1.5, 0.5];
+    let m = xs.into_iter().min();
+    let ss: List<str> = ["a", "b"];
+    let s = ss.into_iter().sum();
+}

@@ -106,6 +106,10 @@ pub enum PrimOp {
     Mul,
     Div,
     Rem,
+    /// Floored remainder `%%` (`rok.mod.TYPE`): the result takes the
+    /// divisor's sign. MIR lowering expands it into `Rem` and an
+    /// adjustment, so backends never see it.
+    Mod,
     Neg,
     Not,
     BitAnd,

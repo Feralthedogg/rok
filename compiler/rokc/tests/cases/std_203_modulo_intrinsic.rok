@@ -1,0 +1,43 @@
+// expect-exit: 0
+// expect-stdout:
+// 2 -2 0.5 1 1 0 0 -1 9 -0.5 2
+// 2 2 2 -2
+// 3
+// 0 1 2 0 1 2 0
+
+// `%%` on primitives is the `rok.mod.TYPE` intrinsic (stdlib 2.3.5): the
+// operator, `a.modulo(b)`, `Modulo::modulo`, `%%=`, a generic `T: Modulo`
+// instance, an `any` operand and a `const` all compute the floored
+// remainder without a call.
+
+use rok::core::ops::Modulo;
+
+const C: i32 = -7 %% 3;
+
+fn gen<T: Modulo<Output = T>>(a: T, b: T) -> T { a %% b }
+
+fn main() -> i32 {
+    let a = -7 %% 3;
+    let b = 7 %% -3;
+    let c = -7.5 %% 2.0;
+    let d = 7u32 %% 3u32;
+    let e = (-5i8) %% 3i8;
+    let f = 6 %% 3;
+    let g = -6 %% 3;
+    let h = 5.0f32 %% -3.0f32;
+    let x = -1i64;
+    x %%= 10;
+    let y = 7.5;
+    y %%= -2.0;
+    println(f"{a} {b} {c} {d} {e} {f} {g} {h} {x} {y} {C}");
+    println(f"{gen(-7, 3)} {gen(-7.0, 3.0)} {(-7).modulo(3)} {Modulo::modulo(7, -3)}");
+    let any_v: any = -9;
+    match any_v %% 4 {
+        i: i32 => println(f"{i}"),
+        _ => println("?"),
+    }
+    let xs = [-3, -2, -1, 0, 1, 2, 3];
+    let parts = xs.iter().map(|v| f"{v %% 3}").collect::<List<str>>();
+    println(parts.join(" "));
+    return 0;
+}

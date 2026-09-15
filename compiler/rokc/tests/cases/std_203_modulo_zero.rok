@@ -1,0 +1,9 @@
+// expect-exit: 101
+// expect-stderr: attempt to calculate the remainder with a divisor of zero
+
+// `%%` by zero panics like `%`.
+
+fn main() -> i32 {
+    let z = 0;
+    return 5 %% z;
+}

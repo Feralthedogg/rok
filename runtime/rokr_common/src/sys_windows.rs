@@ -356,6 +356,45 @@ pub unsafe fn reset(p: *mut u8, len: usize) -> bool {
     unsafe { win::VirtualFree(p.cast(), len, win::MEM_DECOMMIT) != 0 && commit(p, len) }
 }
 
+/// Pages of their own for `len` bytes aligned to `align` (a power of
+/// two), zero-filled; given back with [`unmap`]. Null on failure.
+pub fn map(len: usize, align: usize) -> *mut u8 {
+    // Allocations start on the 64 KiB allocation granularity.
+    if align <= 1 << 16 {
+        let kind = win::MEM_RESERVE | win::MEM_COMMIT | watch();
+        // SAFETY: a fresh allocation.
+        return unsafe { win::VirtualAlloc(ptr::null_mut(), len, kind, win::PAGE_READWRITE) }
+            .cast();
+    }
+    let Some(total) = len.checked_add(align) else {
+        return ptr::null_mut();
+    };
+    let base = reserve(total);
+    if base.is_null() {
+        return base;
+    }
+    let at = base.wrapping_add(base.align_offset(align));
+    // SAFETY: `at..at + len` lies inside the fresh reservation.
+    if unsafe { commit(at, len) } {
+        return at;
+    }
+    // SAFETY: our own reservation, released whole.
+    unsafe { win::VirtualFree(base.cast(), 0, win::MEM_RELEASE) };
+    ptr::null_mut()
+}
+
+/// # Safety
+/// `p` must be a [`map`] result nobody uses any more.
+pub unsafe fn unmap(p: *mut u8, _len: usize) {
+    // SAFETY: a zeroed out-buffer; `p` lies in its allocation.
+    let mut m: win::MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
+    // SAFETY: as above.
+    unsafe { win::VirtualQuery(p.cast(), &mut m, size_of::<win::MEMORY_BASIC_INFORMATION>()) };
+    rok_page_epoch.fetch_add(1, Ordering::Release);
+    // SAFETY: caller contract; the whole allocation `p` came from.
+    unsafe { win::VirtualFree(m.AllocationBase, 0, win::MEM_RELEASE) };
+}
+
 /// Blocks from this size on are their own write-watched allocations
 /// while writes are watched.
 const WATCHED_BLOCK: usize = 1 << 20;

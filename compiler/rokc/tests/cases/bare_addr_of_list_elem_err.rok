@@ -1,0 +1,16 @@
+// expect-error: 14:13: `many_addr_of` needs a place, but `buf[..]` is an `Index` call
+// expect-error: let buf: [i32; N] = [..];
+
+// A `[..]` literal without a `[T; N]` slot is a `List`; its `buf[i]` is
+// an `Index::index` call returning a copy, not a place (bare 1.1). A
+// fixed array's element is one.
+
+use rok::bare::ptr::many_addr_of;
+
+fn main() -> i32 {
+    let arr: [i32; 3] = [1, 2, 3];
+    let _ok = many_addr_of(arr[0]);
+    let buf = [1, 2, 3];
+    let p = many_addr_of(buf[0]);
+    return 0;
+}

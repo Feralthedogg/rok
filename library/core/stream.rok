@@ -69,7 +69,7 @@ pub trait Stream {
 
 pub trait IntoStream {
     type Item;
-    type IntoStream;
+    type IntoStream: Stream<Item = Item>;
     fn into_stream(self) -> IntoStream;
 }
 

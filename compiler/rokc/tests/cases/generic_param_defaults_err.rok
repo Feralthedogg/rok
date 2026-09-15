@@ -1,0 +1,7 @@
+// expect-error: 5:19: generic parameter `U` has no default but follows one that does; defaults must be trailing (spec 2.10.5)
+
+// Defaults must be trailing (2.10.5).
+
+struct W<T = i32, U> { v: T; u: U; }
+
+fn main() -> i32 { return 0; }

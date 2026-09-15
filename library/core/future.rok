@@ -65,8 +65,15 @@ pub trait Future {
 /// What `await` accepts besides a `Future` (2.20.5).
 pub trait IntoFuture {
     type Output;
-    type IntoFuture;
+    type IntoFuture: Future<Output = Output>;
     fn into_future(self) -> IntoFuture;
+}
+
+/// Every future is its own `IntoFuture` (2.20.5).
+impl<F: Future> IntoFuture for F {
+    type Output = F::Output;
+    type IntoFuture = F;
+    fn into_future(self) -> F { self }
 }
 
 /// The value of an `async fn` call / `async { .. }` block: `resume` runs

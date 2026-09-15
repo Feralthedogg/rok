@@ -37,10 +37,12 @@
 // (`rok_lane_*`), armed while it polls a task, that the runtime marks
 // blocked for the duration of each blocking call (file / socket /
 // process syscalls, sync locks, sleep, join). A monitor thread scans the lanes once a millisecond; a lane
-// blocked across a whole scan loses its worker: a new thread takes the
-// worker over (its queues, sleep word and place in the pool), and the
-// blocked thread, once its call returns, finishes its poll as an orphan
-// guest and exits when its own `spawn_local` tasks are done. A worker
+// blocked across a whole scan loses its worker: a spare thread, else a
+// new one, takes the worker over (its queues, sleep word and place in
+// the pool), and the blocked thread, once its call returns, finishes its
+// poll as an orphan guest; when its own `spawn_local` tasks are done it
+// waits as a spare for the next handoff (10 s, then it exits). At most
+// 512 threads beyond the workers: past that a blocked worker waits. A worker
 // with live `spawn_local` tasks is never handed on (they must stay on
 // its thread). The monitor sleeps while no lane blocks.
 //
@@ -255,6 +257,8 @@ pub struct Pool {
     /// Starts the I/O driver thread once.
     driver: Once;
     blocking: BlockingPool;
+    /// Threads left from handoffs, waiting for the next one.
+    spares: Spares;
     /// The monitor's and the I/O driver's thread ids (0: none yet).
     monitor_id: GcBuf<u64>;
     driver_id: GcBuf<u64>;
@@ -373,6 +377,7 @@ impl Pool {
                 no_home: buf_new(1),
                 driver: Once::new(),
                 blocking: BlockingPool::new(),
+                spares: Spares::new(),
                 monitor_id: buf_new(1),
                 driver_id: buf_new(1),
                 solo: rok_cpu_count() == 0,
@@ -435,19 +440,142 @@ fn start_monitor(pool: Pool) {
 /// Run pool worker `w` on a new thread, on its current lane.
 fn start_worker(w: Worker) {
     unsafe {
-        let lane = w.lane[0];
-        let body: fn() + Send = || {
-            rok_lane_attach(lane);
-            set_current(w);
-            work(w, none);
-        };
         let id = rok_thread_new_id();
         w.tid[0] = id;
-        let h = rok_thread_spawn(body, 0, id);
+        let h = rok_thread_spawn(|| { pool_thread(w, id); }, 0, id);
         if h == 0 {
             panic("task executor: cannot start a worker thread");
         }
         rok_thread_detach(h);
+    }
+}
+
+/// A pool thread (`id`): runs worker `w`; once it was handed on and has
+/// finished as the orphan, it waits as a spare for the next handoff.
+fn pool_thread(w: Worker, id: u64) {
+    let next: Worker | none = w;
+    while let k: Worker = next {
+        unsafe { rok_lane_attach(k.lane[0]) };
+        set_current(k);
+        work(k, none);
+        next = k.pool.spares.wait(id);
+    }
+}
+
+/// Most threads beyond the workers at once (handed-on blocked threads
+/// and spares); past it a blocked worker waits for its call.
+const HANDOFF_MAX_THREADS: i32 = 512;
+/// A spare idle this long exits.
+const SPARE_KEEP_ALIVE_NS: i64 = 10_000_000_000;
+
+/// One waiting spare: `word` goes 1 once `take` holds its worker.
+struct Spare {
+    word: GcBuf<i32>;
+    take: GcBuf<Worker | none>;
+    id: u64;
+}
+
+/// Pool threads beyond the workers: each handoff to a new thread adds
+/// one (the blocked thread finishes as an orphan, then waits here); an
+/// expired spare removes one.
+struct Spares {
+    lock: Mutex<i32>;
+    /// Waiting spares, the latest last (under `lock`).
+    idle: List<Spare>;
+    /// Threads beyond the workers (under `lock`).
+    extra: GcBuf<i32>;
+}
+
+unsafe impl Send for Spares {}
+unsafe impl Sync for Spares {}
+
+impl Spares {
+    fn new() -> Spares {
+        unsafe { Spares { lock: Mutex::new(0), idle: List::new(), extra: buf_new(1) } }
+    }
+
+    /// Run `w` on a spare, else on a new thread (the monitor, after
+    /// `room`; only it takes spares).
+    fn give(self, w: Worker) {
+        unsafe {
+            let spare: Spare | none = none;
+            // Handed under the lock: an expiring spare sees it there.
+            using g = self.lock.lock() {
+                spare = self.idle.pop();
+                if let s: Spare = spare {
+                    w.tid[0] = s.id;
+                    s.take[0] = w;
+                    atomic_xchg(s.word, 0, 1, SeqCst);
+                } else {
+                    self.extra[0] += 1;
+                }
+            }
+            if let s: Spare = spare {
+                rok_sync_wake(s.word, 0);
+            } else {
+                start_worker(w);
+            }
+        }
+    }
+
+    /// Whether a handoff can find a thread: a spare, or room under the
+    /// cap.
+    fn room(self) -> bool {
+        using g = self.lock.lock() {
+            return self.idle.len() > 0 || unsafe { self.extra[0] } < HANDOFF_MAX_THREADS;
+        }
+    }
+
+    /// Wait as spare `id` for a worker; `none` after the keep-alive.
+    fn wait(self, id: u64) -> Worker | none {
+        unsafe {
+            let me = Spare { word: buf_new(1), take: buf_new(1), id };
+            using g = self.lock.lock() { self.idle.push(me); }
+            let until = now_ns() + SPARE_KEEP_ALIVE_NS;
+            loop {
+                let left = until - now_ns();
+                if left > 0 {
+                    rok_sync_wait(me.word, 0, 0, left);
+                }
+                using g = self.lock.lock() {
+                    if atomic_load(me.word, 0, SeqCst) == 1 {
+                        return me.take[0];
+                    }
+                    if now_ns() >= until {
+                        self.drop_idle(me.word);
+                        self.extra[0] -= 1;
+                        return none;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Remove the idle spare waiting on `word` (under `lock`).
+    fn drop_idle(self, word: GcBuf<i32>) {
+        for i in 0..self.idle.len() {
+            if buf_same(self.idle[i].word, word) {
+                self.idle.remove(i);
+                return;
+            }
+        }
+    }
+
+    /// After a failed REPL cell (`hook_restart`): spares that are gone
+    /// no longer count.
+    fn forget_lost(self) {
+        unsafe {
+            using g = self.lock.lock() {
+                let i = self.idle.len();
+                while i > 0 {
+                    i -= 1;
+                    if rok_thread_lost(self.idle[i].id) != 0 {
+                        self.idle.remove(i);
+                        self.extra[0] -= 1;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -481,10 +609,14 @@ fn monitor(pool: Pool) {
     }
 }
 
-/// Move pool worker `w`, blocked in the call of `tick`, to a new thread;
-/// its old thread gets an orphan guest polling the same task.
+/// Move pool worker `w`, blocked in the call of `tick`, to a spare or a
+/// new thread; its old thread gets an orphan guest polling the same
+/// task. At the thread cap it stays blocked.
 fn hand_on(w: Worker, tick: i64) {
     unsafe {
+        if !w.pool.spares.room() {
+            return;
+        }
         let heir = new_worker(w.pool, 0, true, true);
         // Stable: the blocked thread is inside that task's poll.
         heir.running[0] = w.running[0];
@@ -495,7 +627,7 @@ fn hand_on(w: Worker, tick: i64) {
         }
         w.lane[0] = rok_lane_new();
         w.running[0] = none;
-        start_worker(w);
+        w.pool.spares.give(w);
     }
 }
 
@@ -1656,6 +1788,7 @@ extern "C" fn hook_restart() {
             spawn_driver(pool);
         }
         pool.blocking.forget_lost();
+        pool.spares.forget_lost();
         let p = PARKING;
         if p.used.load() {
             let keys: List<usize> = List::new();

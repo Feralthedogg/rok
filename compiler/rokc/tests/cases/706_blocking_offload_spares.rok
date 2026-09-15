@@ -1,0 +1,38 @@
+// spec: refs-lang 007.06 §7.6.7
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// 8 rounds, threads reused true
+
+// 706 §7.6.7: a thread whose worker was handed on waits as a spare and
+// takes the next handoff, so rounds of blocking calls on every worker
+// do not start new threads each round.
+use rok::std::thread;
+use rok::std::time::Duration;
+
+async fn run() -> i32 {
+    let n = task::workers();
+    let seen: Set<u64> = Set::new();
+    for round in 0..8 {
+        let sleepers: List<Task<u64>> = List::new();
+        for i in 0..n {
+            sleepers.push(task::spawn(async {
+                thread::sleep(Duration::ms(10));
+                // The orphan: the thread that blocked.
+                thread::current().id().as_u64()
+            }));
+        }
+        for id in await task::join(sleepers) {
+            seen.insert(id);
+        }
+        // The orphans finish and become spares.
+        await task::sleep(Duration::ms(5));
+    }
+    // Without reuse every round adds about n threads.
+    println(f"8 rounds, threads reused {seen.len() <= 4 * n + 2}");
+    0
+}
+
+fn main() -> i32 {
+    task::block_on(run())
+}
