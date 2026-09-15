@@ -14,7 +14,12 @@ fn unix_only() -> i32 { 30i32 }
 fn unix_only() -> i32 { 0i32 }
 
 // Compound predicates: `all`, `any`, `not`.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "x86",
+    target_arch = "arm"
+))]
 fn arch_check() -> i32 { 0i32 }
 
 #[cfg(all(target_family = "unix", not(target_os = "windows")))]

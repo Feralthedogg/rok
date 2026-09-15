@@ -4,6 +4,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write;
 
+use rokc_diagnostic::Span;
 use rokc_ir_common::{Abi, ConstVal, FnRole, FunctionId, Linkage, LocalId, PrimOp, PrimTy};
 use rokc_mir::gc_abi::{
     CARD_SHIFT, FLAG_CARDED, FLAG_UNLOGGED, GC_FLAGS_OFFSET, GC_WORD_OFFSET, HEADER_SIZE,
@@ -373,7 +374,8 @@ impl Emitter {
         if abi.is_none() {
             errors.push(format!(
                 "unsupported in codegen: {what} passes a `struct` by value across the C ABI, \
-                 which is only implemented for aarch64 and x86_64 targets"
+                 which is not implemented for {}",
+                target.triple.as_deref().unwrap_or("this target")
             ));
         }
         abi
@@ -383,6 +385,7 @@ impl Emitter {
         self.pkgs.link = module.link.clone();
         if let Some(di) = self.debug.as_mut() {
             di.struct_names.clone_from(&module.struct_names);
+            di.debug.clone_from(&module.debug);
         }
         self.pkgs.extern_statics = module
             .statics
@@ -524,7 +527,8 @@ impl Emitter {
         for (id, abi) in &c_entries {
             let f = module.functions.iter().find(|f| f.id == *id);
             let exported = f.is_some_and(|f| f.facts.export_name.is_some());
-            self.emit_c_entry(&fns[id], abi, exported);
+            let span = f.map_or(Span::DUMMY, |f| f.span);
+            self.emit_c_entry(&fns[id], abi, exported, span);
         }
         if let Some(m) = module
             .functions
@@ -539,12 +543,17 @@ impl Emitter {
                     MirTy::Unit => ("", "()".to_owned()),
                     t => ("%0 = ", mlir_type(t, &self.target)),
                 };
-                let _ = write!(
-                    self.out,
+                let text = format!(
                     "  func.func @rok_repl_cell() {{\n    func.call @rok.register_types() : () -> ()\n    {ret}func.call @{symbol}() : () -> {ty}\n    func.return\n  }}\n"
                 );
+                let text = self.described(text, "rok_repl_cell", m.span);
+                self.out.push_str(&text);
             } else {
+                let start = self.out.len();
                 self.emit_main_wrapper(&symbol, &m.ret_ty, m.span);
+                let text = self.out.split_off(start);
+                let text = self.described(text, "main", m.span);
+                self.out.push_str(&text);
             }
         }
         self.emit_gc_support(module);
@@ -634,7 +643,29 @@ impl Emitter {
             Some(lib) => format!("func.func @rok.register_types.{lib}"),
             None => "func.func private @rok.register_types".to_owned(),
         };
-        let _ = write!(self.out, "  {head}() {{\n{calls}    func.return\n  }}\n");
+        let text = format!("  {head}() {{\n{calls}    func.return\n  }}\n");
+        let text = self.described(text, "rok.register_types", Span::DUMMY);
+        self.out.push_str(&text);
+    }
+
+    /// The function text `text` (`func.func .. {` to its `}`) with a
+    /// subprogram `name` at `span` under `-g` (`DebugInfo::synthesized`).
+    fn described(&mut self, text: String, name: &str, span: Span) -> String {
+        let d = self
+            .debug
+            .as_mut()
+            .and_then(|di| di.synthesized(name, span));
+        match (d, text.strip_suffix("  }\n")) {
+            (Some(d), Some(body)) => format!(
+                "{}  }} loc(fused<{}>[\"{}\":{}:{}])\n",
+                crate::debug::locate(body, &d),
+                d.subprogram,
+                d.file,
+                d.line,
+                d.col
+            ),
+            _ => text,
+        }
     }
 
     fn emit_static_globals(&mut self, module: &MirModule) {
@@ -671,7 +702,7 @@ impl Emitter {
                     if self.link().in_prebuilt(&s.name) {
                         let _ = writeln!(self.out, "  func.func private @{sym}.init()");
                     } else {
-                        self.emit_lazy_init(&sym, &ty_str, &init, false);
+                        self.emit_lazy_init(&s.name, &sym, &ty_str, &init, false);
                     }
                 }
                 continue;
@@ -691,7 +722,7 @@ impl Emitter {
                     .lib
                     .as_deref()
                     .is_some_and(|l| Link::owns(l, &s.name));
-                self.emit_lazy_static(&sym, &ty_str, &init, linkage, export);
+                self.emit_lazy_static(&s.name, &sym, &ty_str, &init, linkage, export);
                 continue;
             }
             if let ConstVal::Str(text) = &s.init {
@@ -728,7 +759,15 @@ impl Emitter {
     /// initializer `init` exactly once across threads
     /// (`rok_static_init_begin` / `_end`). Every access first checks the
     /// state (`FnEmit::ensure_static_init`).
-    fn emit_lazy_static(&mut self, sym: &str, ty: &str, init: &str, linkage: &str, export: bool) {
+    fn emit_lazy_static(
+        &mut self,
+        name: &str,
+        sym: &str,
+        ty: &str,
+        init: &str,
+        linkage: &str,
+        export: bool,
+    ) {
         let _ = write!(
             self.out,
             "  llvm.mlir.global {linkage} @{sym}() {{addr_space = 0 : i32}} : {ty} {{
@@ -738,12 +777,13 @@ impl Emitter {
   llvm.mlir.global {linkage} @{sym}.state(0 : i8) {{addr_space = 0 : i32}} : i8
 "
         );
-        self.emit_lazy_init(sym, ty, init, export);
+        self.emit_lazy_init(name, sym, ty, init, export);
     }
 
-    /// `@sym.init`: runs initializer `init` once (see `emit_lazy_static`);
-    /// `export`ed by a prebuilt library that owns the static.
-    fn emit_lazy_init(&mut self, sym: &str, ty: &str, init: &str, export: bool) {
+    /// `@sym.init`: runs initializer `init` of static `name` once (see
+    /// `emit_lazy_static`); `export`ed by a prebuilt library that owns
+    /// the static.
+    fn emit_lazy_init(&mut self, name: &str, sym: &str, ty: &str, init: &str, export: bool) {
         self.needs.insert("rok_static_init_begin");
         self.needs.insert("rok_static_init_end");
         let head = if export {
@@ -753,8 +793,7 @@ impl Emitter {
                 "func.func private @{sym}.init() attributes {{llvm.linkage = #llvm.linkage<internal>}}"
             )
         };
-        let _ = write!(
-            self.out,
+        let text = format!(
             "  {head} {{
     %0 = llvm.mlir.addressof @{sym}.state : !llvm.ptr
     %1 = func.call @rok_static_init_begin(%0) : (!llvm.ptr) -> i32
@@ -772,6 +811,8 @@ impl Emitter {
   }}
 "
         );
+        let text = self.described(text, &format!("{name}.init"), Span::DUMMY);
+        self.out.push_str(&text);
     }
 
     fn intern_global_string(&mut self, text: &str) -> String {
@@ -930,7 +971,14 @@ impl Emitter {
                     let arg = f.params.iter().position(|p| *p == l.id).map(|i| i + 1);
                     let (line, scope) = lines.get(&l.id.0).copied().unwrap_or((d.line, 0));
                     let scope = d.scopes.get(&scope).unwrap_or(&d.subprogram);
-                    if let Some(var) = di.local(scope, f.span.file, name, &l.ty, line, arg) {
+                    let ty = di
+                        .debug
+                        .locals
+                        .get(&(f.id, l.id))
+                        .filter(|t| t.fits(&l.ty))
+                        .cloned()
+                        .unwrap_or_else(|| rokc_mir::DebugTy::Mir(l.ty.clone()));
+                    if let Some(var) = di.local(scope, f.span.file, name, &ty, line, arg) {
                         // LLVM puts a stack variable in the scope of its
                         // declare's location, not of the variable.
                         let at = format!("loc(fused<{scope}>[\"{}\":{line}:1])", d.file);
@@ -967,7 +1015,7 @@ impl Emitter {
     /// pointer, `sret`), calls the rok body with the values, returns
     /// the result the C way. Exported under `#[export_name]`, else
     /// internal (C gets it as a function pointer).
-    fn emit_c_entry(&mut self, sig: &FnSig, abi: &FnAbi, exported: bool) {
+    fn emit_c_entry(&mut self, sig: &FnSig, abi: &FnAbi, exported: bool, span: Span) {
         let Some((entry, _)) = &sig.c_entry else {
             return;
         };
@@ -993,7 +1041,7 @@ impl Emitter {
             head.join(", ")
         );
         let slot = |b: &mut String, n: &str, ty: &MirTy| {
-            let size = self.target.size_align(ty).0.max(16);
+            let size = self.target.size_align(ty).0.next_multiple_of(8).max(16);
             let _ = writeln!(
                 b,
                 "    {n} = llvm.alloca %one x !llvm.array<{size} x i8> {{alignment = 16 : i64}} : (i32) -> !llvm.ptr"
@@ -1065,6 +1113,7 @@ impl Emitter {
             }
         }
         b.push_str("  }\n");
+        let b = self.described(b, entry, span);
         self.out.push_str(&b);
     }
 
@@ -1649,7 +1698,8 @@ impl<'a> FnEmit<'a> {
     /// type: big enough for either (a coerced type is at most 16 bytes,
     /// or the HFA's own size).
     fn coerce_slot(&mut self, ty: &MirTy) -> String {
-        let size = self.target.size_align(ty).0.max(16);
+        // Room for a coerced type rounded up to whole words.
+        let size = self.target.size_align(ty).0.next_multiple_of(8).max(16);
         self.entry_alloca(&format!("!llvm.array<{size} x i8>"), 16)
     }
 
@@ -2076,6 +2126,7 @@ impl<'a> FnEmit<'a> {
         let mut header = format!("    {one} = llvm.mlir.constant(1 : i32) : i32\n");
         let mut roots = Vec::new();
         let mut rooted = HashSet::new();
+        let addressed = rokc_mir::addressed(self.f);
         // `#[track_caller]`'s location is always a static literal.
         let caller = self.f.params.last().filter(|_| self.f.facts.track_caller);
         for local in &self.f.locals {
@@ -2095,7 +2146,11 @@ impl<'a> FnEmit<'a> {
                 self.gc_param_slots.insert(id, s.clone());
                 s
             } else if let Some(slot) = self.slot_names[id as usize].clone() {
-                if self.rooted.is_some() && !matches!(local.ty, MirTy::Array(..)) {
+                // An addressed local's slot is the one pointers reach.
+                if self.rooted.is_some()
+                    && !matches!(local.ty, MirTy::Array(..))
+                    && !addressed.contains(&local.id)
+                {
                     let cell = format!("%rc{id}");
                     let align = slot_align(&local.ty, self.target);
                     let _ = writeln!(
@@ -2722,6 +2777,23 @@ impl<'a> FnEmit<'a> {
                 let v = self.fresh_value();
                 let vol = if *volatile { "volatile " } else { "" };
                 let _ = writeln!(self.body, "    {v} = llvm.load {vol}{p} : !llvm.ptr -> {t}");
+                v
+            }
+            RValue::AddrOf(l) => {
+                let pw = self.pw;
+                let v = self.fresh_value();
+                // A `()` local has no storage: any aligned address does.
+                match self.slot_of(*l) {
+                    Some(slot) => {
+                        let _ = writeln!(
+                            self.body,
+                            "    {v} = llvm.ptrtoint {slot} : !llvm.ptr to i{pw}"
+                        );
+                    }
+                    None => {
+                        let _ = writeln!(self.body, "    {v} = arith.constant 1 : i{pw}");
+                    }
+                }
                 v
             }
             RValue::SizeOf { ty, align } => {
@@ -4663,7 +4735,7 @@ fn c_signature(
                 format!(
                     " {{llvm.byval = {}, llvm.align = {} : i64}}",
                     mlir_type(t, target),
-                    target.size_align(t).1.max(8)
+                    crate::abi::byval_align(t, target)
                 ),
             ),
             ArgAbi::Indirect { byval: false } => ("!llvm.ptr".to_owned(), String::new()),
@@ -4686,7 +4758,7 @@ fn c_ext_attr(ty: &MirTy, target: &Target) -> &'static str {
     let narrow = match target.c_abi {
         CAbi::Aarch64 => matches!(target.os.as_str(), "macos" | "ios"),
         CAbi::X86_64Win => false,
-        CAbi::X86_64SysV | CAbi::Other => true,
+        CAbi::X86_64SysV | CAbi::X86SysV | CAbi::X86Win | CAbi::ArmHf | CAbi::Other => true,
     };
     match ty {
         MirTy::Prim(PrimTy::I8 | PrimTy::I16 | PrimTy::CChar) if narrow => " {llvm.signext}",

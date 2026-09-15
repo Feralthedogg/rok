@@ -462,6 +462,222 @@ fn debug_info_names_functions_lines_and_locals() {
     );
 }
 
+const DEBUGGEE_TYPES: &str = "enum Shape { Circle(f64), Rect(i32, i32), Empty }
+
+fn pick(b: bool) -> i64 | f64 {
+    if b { return 1.5f64; }
+    return 7i64;
+}
+
+fn show(s: Shape, v: i64 | f64, xs: List<i32>) -> i32 {
+    let n = xs.len() as i32;
+    return n;
+}
+
+fn main() {
+    let xs = [10, 20, 30];
+    println(f\"{show(Shape::Rect(3, 4), pick(true), xs)}\");
+}
+";
+
+/// `-g` through LLVM: a sum is its tag and a union of its variants'
+/// payloads, a `GcBuf` reference points at its object (header, then the
+/// elements), and the C `main` and `rok.register_types` have
+/// subprograms. With `lldb`, `frame variable` shows them.
+#[test]
+fn debug_info_shows_sums_and_gc_objects() {
+    let Some(env) = setup() else { return };
+    let Some(dump) = ["llvm-dwarfdump", "dwarfdump"]
+        .into_iter()
+        .find(|t| Command::new(t).arg("--version").output().is_ok())
+    else {
+        return;
+    };
+    let dir = scratch("debug_types");
+    fs::write(dir.join("main.rok"), DEBUGGEE_TYPES).unwrap();
+    let exe = dir.join("out");
+    ok(&build(
+        &env,
+        &dir.join("main.rok"),
+        &["-g", "-C", "backend=llvm", "-o", exe.to_str().unwrap()],
+    ));
+    let dsym = dir.join("out.dSYM");
+    let target = if dsym.exists() { &dsym } else { &exe };
+    let info = Command::new(dump)
+        .arg("--debug-info")
+        .arg(target)
+        .output()
+        .unwrap();
+    let info = text(&info.stdout);
+    let union = info
+        .split("DW_TAG_union_type")
+        .find(|s| s.contains("(\"Rect\")"))
+        .unwrap_or_else(|| panic!("no `Shape` payload union:\n{info}"));
+    assert!(union.contains("(\"Circle\")"), "{union}");
+    assert!(
+        info.split("DW_TAG_union_type")
+            .any(|s| s.contains("(\"f64\")") && s.contains("(\"i64\")")),
+        "no `f64 | i64` payload union:\n{info}"
+    );
+    let buf = info
+        .split("DW_TAG_structure_type")
+        .find(|s| s.contains("(\"GcBuf<i32>\")"))
+        .unwrap_or_else(|| panic!("no `GcBuf<i32>` object type:\n{info}"));
+    assert!(
+        buf.contains("(\"items\")") && buf.contains("(\"type_id\")"),
+        "{buf}"
+    );
+    for f in ["(\"rok.register_types\")", "(\"main\")"] {
+        assert!(
+            info.split("DW_TAG_subprogram")
+                .filter(|s| s.contains(f))
+                .count()
+                >= 1,
+            "no {f} subprogram:\n{info}"
+        );
+    }
+    assert!(
+        info.split("DW_TAG_subprogram")
+            .filter(|s| s.contains("(\"main\")"))
+            .count()
+            >= 2,
+        "no subprogram for the C `main`:\n{info}"
+    );
+    // A debugger that can run the program shows the values.
+    let Ok(lldb) = Command::new("lldb")
+        .args(["--batch", "-o", "b main.rok:10", "-o", "run"])
+        .args(["-o", "frame variable s v xs.data->items[0]->items[2]"])
+        .arg(&exe)
+        .output()
+    else {
+        return;
+    };
+    let out = text(&lldb.stdout);
+    if !out.contains("stop reason") {
+        return;
+    }
+    let vars = out.split("frame variable").last().unwrap_or_default();
+    assert!(vars.contains("Rect = (0 = 3, 1 = 4)"), "{out}");
+    assert!(vars.contains("f64 = 1.5"), "{out}");
+    assert!(vars.contains("= 30"), "{out}");
+
+/// `-g` ELF executables for Linux, linked by the embedded lld from
+/// several rok objects (the program, a dependency, the cached library):
+/// each unit finds its own abbreviations and line table, and lexical
+/// blocks name their code exactly (no overlapping siblings). Link only:
+/// nothing runs here.
+#[test]
+fn elf_debug_info_of_several_objects() {
+    if setup().is_none() {
+        return;
+    }
+    let targets = Path::new(ROKC).parent().unwrap().join("../lib/rok/targets");
+    let dump = "llvm-dwarfdump";
+    if !targets.is_dir() || Command::new(dump).arg("--version").output().is_err() {
+        eprintln!("skipped: no {} or no {dump}", targets.display());
+        return;
+    }
+    let dir = scratch("elf-debug");
+    fs::create_dir_all(dir.join("greet")).unwrap();
+    fs::write(
+        dir.join("greet/lib.rok"),
+        "pub fn greet(n: i32) -> i32 {\n    let s = 0;\n    for i in 0..n {\n        \
+         if i % 2 == 0 {\n            let d = i * 3;\n            s += d;\n        } else {\n            \
+         let e = i + 7;\n            s -= e;\n        }\n    }\n    return s;\n}\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("app")).unwrap();
+    fs::write(
+        dir.join("app/main.rok"),
+        "use greet::greet;\nlet k = greet(5);\nif k > 0 {\n    let w = k * 2;\n    \
+         println(f\"{w}\");\n}\nprintln(f\"{k}\");\n",
+    )
+    .unwrap();
+    for t in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl"] {
+        if !targets.join(t).is_dir() {
+            continue;
+        }
+        let exe = dir.join(format!("app-{t}"));
+        let out = Command::new(ROKC)
+            .current_dir(&dir)
+            .env("ROK_HOME", common::workspace())
+            .args(["-q", "build", "app", "--extern", "greet=greet", "-g"])
+            .args(["-O0", "--target", t, "-o"])
+            .arg(&exe)
+            .output()
+            .unwrap();
+        ok(&out);
+        let info = Command::new(dump)
+            .arg("--debug-info")
+            .arg(&exe)
+            .output()
+            .unwrap();
+        let info = text(&info.stdout);
+        let sub = info
+            .split("DW_TAG_subprogram")
+            .find(|s| s.contains("(\"greet::greet\")"))
+            .unwrap_or_else(|| panic!("{t}: no `greet` subprogram:\n{info}"));
+        assert!(sub.contains("greet/lib.rok\")"), "{t}: {sub}");
+        assert!(
+            sub.contains("(\"d\")") && sub.contains("(\"e\")"),
+            "{t}: {sub}"
+        );
+        let lines = Command::new(dump)
+            .arg("--debug-line")
+            .arg(&exe)
+            .output()
+            .unwrap();
+        let lines = text(&lines.stdout);
+        // Directories and names are separate entries.
+        for f in ["/greet\"", "/app\"", "\"lib.rok\"", "\"main.rok\""] {
+            assert!(lines.contains(f), "{t}: no line table names {f}");
+        }
+        // The runtime's and the C library's DWARF have errors of their
+        // own (sections lld dropped); rok's units have none.
+        let verify = Command::new(dump)
+            .arg("--verify")
+            .arg(&exe)
+            .output()
+            .unwrap();
+        let verify = text(&verify.stdout);
+        let rok = rok_units(&info);
+        assert!(rok.len() >= 2, "{t}: rok units {rok:?}");
+        for e in verify.split("\nerror: ").skip(1) {
+            let die = e.split_whitespace().find_map(|w| {
+                u64::from_str_radix(w.strip_prefix("0x")?.strip_suffix(':')?, 16).ok()
+            });
+            if let Some(d) = die {
+                assert!(
+                    !rok.iter().any(|r| r.contains(&d)),
+                    "{t}: error in a rok unit: {e}"
+                );
+            }
+        }
+    }
+}
+
+/// The `.debug_info` offset ranges of the units rokc produced, from
+/// `llvm-dwarfdump --debug-info`.
+fn rok_units(info: &str) -> Vec<std::ops::Range<u64>> {
+    let hex = |w: &str| {
+        u64::from_str_radix(w.trim_start_matches("0x").trim_end_matches([':', ')']), 16).ok()
+    };
+    let parts: Vec<&str> = info.split("Compile Unit:").collect();
+    parts
+        .windows(2)
+        .filter(|p| p[1].contains("DW_AT_producer\t(\"rokc\")"))
+        .filter_map(|p| {
+            let start = hex(p[0].split_whitespace().last()?)?;
+            let end = hex(p[1]
+                .split("next unit at ")
+                .nth(1)?
+                .split_whitespace()
+                .next()?)?;
+            Some(start..end)
+        })
+        .collect()
+}
+
 /// Aggregates by value both ways, HFAs, `sret`, register exhaustion,
 /// caller-extended narrow ints and variadic promotions, against clang.
 const NICHE_C: &str = r"
@@ -1075,12 +1291,13 @@ typedef __builtin_va_list va_list;
 #define va_start(a, b) __builtin_va_start(a, b)
 #define va_arg(a, t) __builtin_va_arg(a, t)
 #define va_end(a) __builtin_va_end(a)
+typedef __SIZE_TYPE__ usize;
 #define long long long
-typedef struct { const char *p; unsigned long n; } RokStr;
+typedef struct { const char *p; usize n; } RokStr;
 __declspec(thread) unsigned char rok_tls_yield_flag, rok_tls_mutator_state;
 __declspec(thread) void *rok_tls_tlab_cursor, *rok_tls_tlab_limit, *rok_tls_shadow_stack_top;
 int _write(int, const void *, unsigned);
-void *calloc(unsigned long, unsigned long);
+void *calloc(usize, usize);
 void exit(int);
 void rok_runtime_init(void) {}
 void rok_runtime_shutdown(void) {}
@@ -1090,7 +1307,7 @@ void rok_leave_native(void) {}
 int rok_native_reenter(void) { return 0; }
 void rok_native_resume(int x) { (void)x; }
 void rok_gc_add_root(const void *w) { (void)w; }
-void *rok_gc_alloc_slow(unsigned long size, unsigned long align, unsigned t) {
+void *rok_gc_alloc_slow(usize size, usize align, unsigned t) {
     char *p = calloc(1, size + align + 16); *(unsigned *)p = t; return p;
 }
 void rok_gc_register_type(unsigned id, const void *t) { (void)id; (void)t; }
@@ -1098,10 +1315,10 @@ void rok_gc_wb_slow(void *o) { (void)o; }
 void rok_panic_at(RokStr m, RokStr at) { _write(2, m.p, (unsigned)m.n); (void)at; exit(101); }
 int rok_static_init_begin(unsigned char *s) { if (*s == 0) { *s = 1; return 1; } return 0; }
 void rok_static_init_end(unsigned char *s) { *s = 2; }
-unsigned long rok_str_len(RokStr s) { return s.n; }
+usize rok_str_len(RokStr s) { return s.n; }
 int rok_str_cmp(RokStr a, RokStr b) {
     if (a.n != b.n) return 1;
-    for (unsigned long i = 0; i < a.n; i++) if (a.p[i] != b.p[i]) return 1;
+    for (usize i = 0; i < a.n; i++) if (a.p[i] != b.p[i]) return 1;
     return 0;
 }
 int rok_str_eq(RokStr a, RokStr b) { return !rok_str_cmp(a, b); }
@@ -1207,8 +1424,14 @@ fn pe_header(exe: &[u8]) -> (u16, u16, bool) {
     let pe = u32::from_le_bytes(exe[0x3c..0x40].try_into().unwrap()) as usize;
     assert_eq!(&exe[pe..pe + 4], b"PE\0\0");
     let opt = pe + 24;
-    // The exception directory (`.pdata`): data directory 3.
-    let pdata = opt + 112 + 3 * 8 + 4;
+    // The exception directory (`.pdata`): data directory 3, after a
+    // PE32+ / PE32 optional header's 112 / 96 bytes.
+    let dirs = if exe[opt] == 0x0b && exe[opt + 1] == 0x02 {
+        112
+    } else {
+        96
+    };
+    let pdata = opt + dirs + 3 * 8 + 4;
     (
         u16::from_le_bytes([exe[pe + 4], exe[pe + 5]]),
         u16::from_le_bytes([exe[opt + 68], exe[opt + 69]]),
@@ -1217,10 +1440,11 @@ fn pe_header(exe: &[u8]) -> (u16, u16, bool) {
 }
 
 /// Windows executables from this host, with no Windows SDK: both
-/// backends for `x86_64`, the native one for arm64, a GUI subsystem; the C
-/// side and a stand-in runtime are compiled by clang; a package builds
-/// `<name>.exe`. With `ROK_TEST_WINE=<wine>` the `x86_64` ones run and
-/// print what the C ABI (spec 8.6.3) and the rok one (8.6.6) agree on.
+/// backends for `x86_64`, the native one for arm64, LLVM for x86 (no
+/// unwind table there), a GUI subsystem; the C side and a stand-in
+/// runtime are compiled by clang; a package builds `<name>.exe`. With
+/// `ROK_TEST_WINE=<wine>` the `x86_64` and x86 ones run and print what
+/// the C ABI (spec 8.6.3) and the rok one (8.6.6) agree on.
 #[test]
 fn windows_executables() {
     let Some(env) = setup() else { return };
@@ -1233,6 +1457,7 @@ fn windows_executables() {
     for (triple, machine, builds) in [
         ("x86_64-pc-windows-msvc", 0x8664, &["-O0", "-O2"][..]),
         ("aarch64-pc-windows-msvc", 0xaa64, &["-O0"][..]),
+        ("i686-pc-windows-msvc", 0x14c, &["-O0", "-O2"][..]),
     ] {
         let side = dir.join(format!("{triple}.obj"));
         ok(&Command::new("clang")
@@ -1260,7 +1485,7 @@ fn windows_executables() {
             let sub = if gui { 2 } else { 3 };
             assert_eq!(
                 pe_header(&fs::read(&exe).unwrap()),
-                (machine, sub, true),
+                (machine, sub, machine != 0x14c),
                 "{triple} {opt}"
             );
             if let (Some(wine), false) = (&wine, triple.starts_with("aarch64")) {

@@ -7,7 +7,7 @@ mod common;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Output, Stdio};
 
-use common::{ROKC, scratch, setup, text, workspace};
+use common::{ROKC, scratch, setup, setup_runtime, text, workspace};
 
 /// `exe args` with `input` on stdin.
 fn piped(exe: &str, args: &[&str], input: &str) -> Output {
@@ -36,11 +36,14 @@ fn piped_env(exe: &str, args: &[&str], input: &str, env: &[(&str, &str)]) -> Out
 
 #[test]
 #[cfg_attr(
-    not(all(target_os = "macos", target_arch = "aarch64")),
-    ignore = "the REPL host runs on macOS arm64 only"
+    not(all(
+        any(target_os = "macos", target_os = "linux"),
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    )),
+    ignore = "the REPL host runs on macOS and Linux, arm64 and x86_64"
 )]
 fn repl_keeps_state_across_cells() {
-    let Some(env) = setup() else { return };
+    let env = setup_runtime();
     let rokr = env.rokr.display().to_string();
     let input = "\
 1 + 2
@@ -93,10 +96,14 @@ List<i32>: [1, 2, 3]
 /// are in scope from the first cell, also after `:reset`.
 #[test]
 #[cfg_attr(
-    not(all(target_os = "macos", target_arch = "aarch64")),
-    ignore = "the REPL host runs on macOS arm64 only"
+    not(all(
+        any(target_os = "macos", target_os = "linux"),
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    )),
+    ignore = "the REPL host runs on macOS and Linux, arm64 and x86_64"
 )]
 fn repl_loads_and_uses_a_library() {
+    // The library is archived by LLVM.
     let Some(env) = setup() else { return };
     let rokr = env.rokr.display().to_string();
     let dir = std::env::temp_dir().join(format!("rok_repl_pkg_{}", std::process::id()));
@@ -123,11 +130,14 @@ fn repl_loads_and_uses_a_library() {
 /// leaves the session as it was.
 #[test]
 #[cfg_attr(
-    not(all(target_os = "macos", target_arch = "aarch64")),
-    ignore = "the REPL host runs on macOS arm64 only"
+    not(all(
+        any(target_os = "macos", target_os = "linux"),
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    )),
+    ignore = "the REPL host runs on macOS and Linux, arm64 and x86_64"
 )]
 fn repl_runs_each_cell_once() {
-    let Some(env) = setup() else { return };
+    let env = setup_runtime();
     let rokr = env.rokr.display().to_string();
     let log = std::env::temp_dir().join(format!("rok_repl_once_{}", std::process::id()));
     let log_s = log.display().to_string();
@@ -169,11 +179,14 @@ p
 /// `any` values too (their methods and type tests work in later cells).
 #[test]
 #[cfg_attr(
-    not(all(target_os = "macos", target_arch = "aarch64")),
-    ignore = "the REPL host runs on macOS arm64 only"
+    not(all(
+        any(target_os = "macos", target_os = "linux"),
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    )),
+    ignore = "the REPL host runs on macOS and Linux, arm64 and x86_64"
 )]
 fn repl_refuses_bindings_later_cells_cannot_use() {
-    let Some(env) = setup() else { return };
+    let env = setup_runtime();
     let rokr = env.rokr.display().to_string();
     let input = "\
 mod geo { struct Hid { x: i32; } pub fn mk() -> Hid { Hid { x: 1 } } pub struct Pt { pub x: i32; } }
@@ -207,11 +220,14 @@ match q { x: Q => x.v, _ => 0 }
 /// it over); cells are JIT-compiled.
 #[test]
 #[cfg_attr(
-    not(all(target_os = "macos", target_arch = "aarch64")),
-    ignore = "the REPL host runs on macOS arm64 only"
+    not(all(
+        any(target_os = "macos", target_os = "linux"),
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    )),
+    ignore = "the REPL host runs on macOS and Linux, arm64 and x86_64"
 )]
 fn repl_statics_persist() {
-    let Some(env) = setup() else { return };
+    let env = setup_runtime();
     let rokr = env.rokr.display().to_string();
     let input = "\
 static N: Atomic<i32> = Atomic::new(0);
@@ -244,11 +260,14 @@ bump()
 /// it that a later cell reaches again (`g`, compiled with the old `f`).
 #[test]
 #[cfg_attr(
-    not(all(target_os = "macos", target_arch = "aarch64")),
-    ignore = "the REPL host runs on macOS arm64 only"
+    not(all(
+        any(target_os = "macos", target_os = "linux"),
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    )),
+    ignore = "the REPL host runs on macOS and Linux, arm64 and x86_64"
 )]
 fn repl_compiles_library_code_once() {
-    let Some(env) = setup() else { return };
+    let env = setup_runtime();
     let rokr = env.rokr.display().to_string();
     let input = "\
 let l = [1, 2, 3];
@@ -294,11 +313,14 @@ g()
 /// locations and diagnostics point into the file.
 #[test]
 #[cfg_attr(
-    not(all(target_os = "macos", target_arch = "aarch64")),
-    ignore = "the REPL host runs on macOS arm64 only"
+    not(all(
+        any(target_os = "macos", target_os = "linux"),
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    )),
+    ignore = "the REPL host runs on macOS and Linux, arm64 and x86_64"
 )]
 fn repl_path_keeps_the_programs_bindings() {
-    let Some(env) = setup() else { return };
+    let env = setup_runtime();
     let rokr = env.rokr.display().to_string();
     let dir = scratch("run_i");
     let prog = dir.join("prog.rok");
@@ -502,8 +524,11 @@ fn check_reads_stdin() {
 /// panic, completion, and `shutdown`. Every message must be signed.
 #[test]
 #[cfg_attr(
-    not(all(target_os = "macos", target_arch = "aarch64")),
-    ignore = "the REPL host runs on macOS arm64 only"
+    not(all(
+        any(target_os = "macos", target_os = "linux"),
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    )),
+    ignore = "the REPL host runs on macOS and Linux, arm64 and x86_64"
 )]
 fn jupyter_kernel_speaks_the_wire_protocol() {
     use rokc_interface::Json;
@@ -511,7 +536,7 @@ fn jupyter_kernel_speaks_the_wire_protocol() {
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
 
-    let Some(env) = setup() else { return };
+    let env = setup_runtime();
     let key = b"secret-key";
     let dir = std::env::temp_dir().join(format!("rok_jupyter_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -754,6 +779,58 @@ fn completion_inspect_history(
             ]),
             Json::Arr(vec![Json::num(0), Json::num(5), Json::str("x")]),
         ]),
+        "{reply}"
+    );
+
+    // Members, paths and doc comments (9.8.5 / 9.8.6).
+    let code = "struct P { x: i32; y: i32; }\n\
+                impl P {\n    /// Sum of the coordinates.\n    fn sum(self) -> i32 { self.x + self.y }\n}";
+    let exec = Json::obj([("code", Json::str(code)), ("silent", Json::Bool(false))]);
+    let (_, reply, _) = request(shell, "execute_request", exec);
+    assert_eq!(reply.get("status").as_str(), Some("ok"), "{reply}");
+    let complete = |code: &str| {
+        Json::obj([
+            ("code", Json::str(code)),
+            ("cursor_pos", Json::num(code.chars().count() as u32)),
+        ])
+    };
+    let (_, reply, _) = request(
+        shell,
+        "complete_request",
+        complete("let p = P { x: 1, y: 2 };\np.s"),
+    );
+    assert_eq!(
+        reply.get("matches"),
+        &Json::Arr(vec![Json::str("sum")]),
+        "{reply}"
+    );
+    assert_eq!(reply.get("cursor_start"), &Json::num(28));
+    let (_, reply, _) = request(
+        shell,
+        "complete_request",
+        complete("let p = P { x: 1, y: 2 };\np."),
+    );
+    for m in ["x", "y", "sum"] {
+        assert!(reply.get("matches").to_string().contains(m), "{reply}");
+    }
+    let (_, reply, _) = request(shell, "complete_request", complete("P::"));
+    assert!(
+        reply.get("matches").to_string().contains("\"sum\""),
+        "{reply}"
+    );
+    let code = "let p = P { x: 1, y: 2 };\np.sum()";
+    let (_, reply, _) = request(
+        shell,
+        "inspect_request",
+        Json::obj([
+            ("code", Json::str(code)),
+            ("cursor_pos", Json::num(28)),
+            ("detail_level", Json::num(0)),
+        ]),
+    );
+    assert_eq!(
+        reply.get("data").get("text/plain").as_str(),
+        Some("fn sum(self: P) -> i32\n\nSum of the coordinates."),
         "{reply}"
     );
 }

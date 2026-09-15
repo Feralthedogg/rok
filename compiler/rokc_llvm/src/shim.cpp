@@ -441,16 +441,24 @@ int rok_llvm_write_archive(const char *path, const char *const *members,
 }
 
 // The import library `path` of a module definition (`.def`, mingw-w64
-// syntax) for COFF machine `arm64` (else x86_64).
-int rok_llvm_import_lib(const char *def, size_t len, int arm64,
+// syntax) for COFF machine type `machine`. x86 names are decorated
+// (`_f`, stdcall `_f@8`) and import undecorated (llvm-dlltool -k).
+int rok_llvm_import_lib(const char *def, size_t len, uint16_t machine_type,
                         const char *path, RokBuf *err) {
-  auto machine = arm64 ? llvm::COFF::IMAGE_FILE_MACHINE_ARM64
-                       : llvm::COFF::IMAGE_FILE_MACHINE_AMD64;
+  auto machine = static_cast<llvm::COFF::MachineTypes>(machine_type);
+  bool x86 = machine == llvm::COFF::IMAGE_FILE_MACHINE_I386;
   auto parsed = llvm::object::parseCOFFModuleDefinition(
       llvm::MemoryBufferRef(llvm::StringRef(def, len), path), machine, true,
-      false);
+      x86);
   if (!parsed)
     return fail(err, llvm::toString(parsed.takeError()));
+  if (x86)
+    for (auto &e : parsed->Exports) {
+      if (!e.ImportName.empty() || (!e.Name.empty() && e.Name[0] == '?'))
+        continue;
+      e.SymbolName = e.Name;
+      e.Name = e.Name.substr(0, e.Name.find('@', 1));
+    }
   if (auto e = llvm::object::writeImportLibrary(parsed->OutputFile, path,
                                                 parsed->Exports, machine, true))
     return fail(err, llvm::toString(std::move(e)));

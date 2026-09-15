@@ -864,7 +864,7 @@ fn cmd_build(mut a: Args) {
             eprintln!("    Building {}", out.display());
         }
         if pkg.lib {
-            fail_on(result.archive(&a.opts, &out));
+            fail_on(result.archive(&a.opts, &out, true));
         } else {
             fail_on(result.link(&a.opts, &out));
         }

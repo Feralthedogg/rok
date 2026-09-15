@@ -5,8 +5,10 @@
 //! demangle, instead of the name); each op gets the `file:line:col` of
 //! the MIR `Statement::Loc` before it; named locals get an
 //! `llvm.intr.dbg.declare` of their stack slot, typed by `di_type`
-//! (primitives; structs with their field names, tuples, `str`, `any`,
-//! sums and arrays as composites; GC references and `fn` values as
+//! (primitives; structs with their field names, tuples, `str`, `any`
+//! and arrays as composites; a tagged sum as its `tag` and a union of
+//! its variants' payloads; a `GcBuf` reference as a pointer to its
+//! object, header then elements; other GC references and `fn` values as
 //! pointers).
 //!
 //! The attribute aliases are module-level text placed before `module`;
@@ -18,7 +20,8 @@ use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use rokc_ir_common::PrimTy;
-use rokc_mir::{MirFunction, MirTy, Statement, Target};
+use rokc_mir::gc_abi::HEADER_SIZE;
+use rokc_mir::{DebugTy, DebugTypes, MirFunction, MirTy, Statement, Target};
 
 /// Module-wide debug-info state.
 pub struct DebugInfo {
@@ -28,15 +31,22 @@ pub struct DebugInfo {
     pub defs: String,
     /// `#di_file` alias by file id.
     files: BTreeMap<u32, String>,
-    cu: Option<String>,
-    /// DWARF type alias by `MirTy` (its `Debug` text).
+    /// The unit's file (`#di_cu`), once a function is described.
+    cu: Option<u32>,
+    /// DWARF type alias by `MirTy` / `DebugTy` (its `Debug` text).
     types: BTreeMap<String, String>,
+    /// Names of the structs whose type is being built, by `Debug` text:
+    /// a reference back to one (a `GcBuf` field) is a declaration,
+    /// which the debugger completes by name.
+    building: BTreeMap<String, String>,
     next: u32,
     target: Target,
     /// An optimized build (the unit's `isOptimized`).
     optimized: bool,
     /// Struct name and field names by `StructId` (`MirModule::struct_names`).
     pub struct_names: std::collections::HashMap<u32, (String, Vec<String>)>,
+    /// `MirModule::debug`.
+    pub debug: DebugTypes,
 }
 
 /// What a function body needs to place its locations.
@@ -71,10 +81,12 @@ impl DebugInfo {
             files: BTreeMap::new(),
             cu: None,
             types: BTreeMap::new(),
+            building: BTreeMap::new(),
             next: 0,
             target,
             optimized,
             struct_names: std::collections::HashMap::new(),
+            debug: DebugTypes::default(),
         }
     }
 
@@ -111,42 +123,11 @@ impl DebugInfo {
     /// The subprogram of `f`, named `name`, or `None` when it has
     /// no source position (synthetic functions).
     pub fn subprogram(&mut self, f: &MirFunction, name: &str) -> Option<FnDebug> {
-        let span = f.span;
-        if span.line == 0 {
+        if f.span.line == 0 {
             return None;
         }
-        let file = self.file_alias(span.file)?;
-        let cu = if let Some(cu) = &self.cu {
-            cu.clone()
-        } else {
-            // The first described function's file names the unit.
-            let _ = writeln!(
-                self.defs,
-                "#di_cu = #llvm.di_compile_unit<id = distinct[0]<>, sourceLanguage = DW_LANG_C, \
-                 file = {file}, producer = \"rokc\", isOptimized = {}, emissionKind = Full>\n\
-                 #di_fn_ty = #llvm.di_subroutine_type<callingConvention = DW_CC_normal>",
-                self.optimized
-            );
-            self.cu = Some("#di_cu".to_owned());
-            "#di_cu".to_owned()
-        };
-        let n = self.fresh();
-        let sp = format!("#di_sp{n}");
-        let _ = writeln!(
-            self.defs,
-            "{sp} = #llvm.di_subprogram<id = distinct[{n}]<>, compileUnit = {cu}, scope = {file}, \
-             name = \"{}\", file = {file}, line = {line}, scopeLine = {line}, \
-             subprogramFlags = Definition, type = #di_fn_ty>",
-            escape(name),
-            line = span.line
-        );
-        let mut d = FnDebug {
-            file: escape(&self.path(span.file)?.to_string_lossy()),
-            line: span.line,
-            col: span.col.max(1),
-            subprogram: sp,
-            scopes: BTreeMap::new(),
-        };
+        let mut d = self.synthesized(name, f.span)?;
+        let file = self.file_alias(f.span.file)?;
         // A lexical block per nested scope, at its first position;
         // parents have smaller ids, so they come first.
         let mut first: BTreeMap<u32, (rokc_diagnostic::Span, u32)> = BTreeMap::new();
@@ -173,6 +154,45 @@ impl DebugInfo {
         Some(d)
     }
 
+    /// The subprogram `name` at `span` of a function without MIR (the C
+    /// `main`, a lazy static's guard, ..): a function without a position
+    /// is at line 0 of the unit's file; `None` before any unit.
+    pub fn synthesized(&mut self, name: &str, span: rokc_diagnostic::Span) -> Option<FnDebug> {
+        let (id, line, col) = match self.cu {
+            _ if span.line != 0 => (span.file, span.line, span.col.max(1)),
+            Some(cu) => (cu, 0, 0),
+            None => return None,
+        };
+        let file = self.file_alias(id)?;
+        if self.cu.is_none() {
+            // The first described function's file names the unit.
+            let _ = writeln!(
+                self.defs,
+                "#di_cu = #llvm.di_compile_unit<id = distinct[0]<>, sourceLanguage = DW_LANG_C, \
+                 file = {file}, producer = \"rokc\", isOptimized = {}, emissionKind = Full>\n\
+                 #di_fn_ty = #llvm.di_subroutine_type<callingConvention = DW_CC_normal>",
+                self.optimized
+            );
+            self.cu = Some(id);
+        }
+        let n = self.fresh();
+        let sp = format!("#di_sp{n}");
+        let _ = writeln!(
+            self.defs,
+            "{sp} = #llvm.di_subprogram<id = distinct[{n}]<>, compileUnit = #di_cu, scope = {file}, \
+             name = \"{}\", file = {file}, line = {line}, scopeLine = {line}, \
+             subprogramFlags = Definition, type = #di_fn_ty>",
+            escape(name),
+        );
+        Some(FnDebug {
+            file: escape(&self.path(id)?.to_string_lossy()),
+            line,
+            col,
+            subprogram: sp,
+            scopes: BTreeMap::new(),
+        })
+    }
+
     /// A `#llvm.di_local_variable` for local `name` (a `ty`) of the
     /// function `sp`, declared at `line`; `arg` is its 1-based parameter
     /// position. `None` for types without a DWARF description here.
@@ -181,11 +201,11 @@ impl DebugInfo {
         sp: &str,
         file: u32,
         name: &str,
-        ty: &MirTy,
+        ty: &DebugTy,
         line: u32,
         arg: Option<usize>,
     ) -> Option<String> {
-        let ty = self.di_type(ty)?;
+        let ty = self.di_debug(ty)?;
         let file = self.file_alias(file)?;
         let n = self.fresh();
         let alias = format!("#di_var{n}");
@@ -200,10 +220,88 @@ impl DebugInfo {
     }
 
     /// A DWARF type for `ty`, or `None` for `()`.
+    fn di_debug(&mut self, ty: &DebugTy) -> Option<String> {
+        let pw = self.target.pointer_width;
+        let def = match ty {
+            DebugTy::Mir(t) => return self.di_type(t),
+            DebugTy::Buf(name, elem) => {
+                let key = format!("{ty:?}");
+                if let Some(a) = self.types.get(&key) {
+                    return Some(a.clone());
+                }
+                // The object: its header, then the elements (as many as
+                // its size holds).
+                let u32_ = self.basic_type(PrimTy::U32)?;
+                let u64_ = self.basic_type(PrimTy::U64)?;
+                let mut members = vec![
+                    ("type_id", u32_.clone(), 0),
+                    ("gc_flags", u32_, 4),
+                    ("gc_word", u64_, 8),
+                ];
+                if let Some(e) = self.di_debug(elem) {
+                    let items =
+                        format!("#llvm.di_composite_type<tag = DW_TAG_array_type, baseType = {e}>");
+                    members.push(("items", items, HEADER_SIZE));
+                }
+                let obj = Self::composite(name, HEADER_SIZE, 8, &members);
+                let def = format!(
+                    "#llvm.di_derived_type<tag = DW_TAG_pointer_type, baseType = {obj}, sizeInBits = {pw}>"
+                );
+                return Some(self.define(key, &def));
+            }
+            DebugTy::Sum(name, mir, variants) => {
+                let (size, align) = self.target.size_align(mir);
+                let MirTy::Tuple(parts) = mir else {
+                    return self.di_type(mir);
+                };
+                let payload_size = self.target.size_align(&parts[1]).0;
+                let offset = self.target.field_offsets(mir)[1];
+                let mut arms = Vec::new();
+                for (_, v, t) in variants {
+                    if let Some(t) = self.di_debug(t) {
+                        arms.push((v.as_str(), t, 0));
+                    }
+                }
+                let union = Self::composite(name, payload_size, align, &arms).replacen(
+                    "DW_TAG_structure_type",
+                    "DW_TAG_union_type",
+                    1,
+                );
+                let tag = self.basic_type(PrimTy::I32)?;
+                Self::composite(
+                    name,
+                    size,
+                    align,
+                    &[("tag", tag, 0), ("payload", union, offset)],
+                )
+            }
+        };
+        Some(self.define(format!("{ty:?}"), &def))
+    }
+
+    /// Alias `def` as the type of `key`.
+    fn define(&mut self, key: String, def: &str) -> String {
+        if let Some(a) = self.types.get(&key) {
+            return a.clone();
+        }
+        let alias = format!("#di_ty{}", self.fresh());
+        let _ = writeln!(self.defs, "{alias} = {def}");
+        self.types.insert(key, alias.clone());
+        alias
+    }
+
+    /// A DWARF type for `ty`, or `None` for `()`.
     fn di_type(&mut self, ty: &MirTy) -> Option<String> {
         let key = format!("{ty:?}");
         if let Some(a) = self.types.get(&key) {
             return Some(a.clone());
+        }
+        if let Some(name) = self.building.get(&key) {
+            let decl = format!(
+                "#llvm.di_composite_type<tag = DW_TAG_structure_type, name = \"{}\", flags = FwdDecl>",
+                escape(name)
+            );
+            return Some(self.define(format!("decl {key}"), &decl));
         }
         let pw = self.target.pointer_width;
         let (size, align) = self.target.size_align(ty);
@@ -239,7 +337,7 @@ impl DebugInfo {
                 )
             }
             MirTy::Tuple(ps) => {
-                let fields = self.members(ty, ps, &[]);
+                let fields = self.members(ty, ps, &[], &[]);
                 Self::composite("tuple", size, align, &fields)
             }
             MirTy::Struct(id, ps) => {
@@ -254,7 +352,10 @@ impl DebugInfo {
                 } else {
                     Vec::new()
                 };
-                let fields = self.members(ty, ps, &names);
+                let dbg = self.debug.fields.get(&id.0).cloned().unwrap_or_default();
+                self.building.insert(key.clone(), name.clone());
+                let fields = self.members(ty, ps, &names, &dbg);
+                self.building.remove(&key);
                 Self::composite(&name, size, align, &fields)
             }
             MirTy::Array(..) | MirTy::Union(..) => {
@@ -272,24 +373,27 @@ impl DebugInfo {
                 )
             }
         };
-        let alias = format!("#di_ty{}", self.fresh());
-        let _ = writeln!(self.defs, "{alias} = {def}");
-        self.types.insert(key, alias.clone());
-        Some(alias)
+        Some(self.define(key, &def))
     }
 
     /// `(name, type, byte offset)` of each part of aggregate `agg`
-    /// (`names[i]`, else `i`); `()` parts are left out.
+    /// (`names[i]`, else `i`; typed `debug[i]` when given); `()` parts
+    /// are left out.
     fn members(
         &mut self,
         agg: &MirTy,
         parts: &[MirTy],
         names: &[&str],
+        debug: &[DebugTy],
     ) -> Vec<(String, String, u32)> {
         let mut out = Vec::new();
         let offsets = self.target.field_offsets(agg);
         for (i, (t, off)) in parts.iter().zip(offsets).enumerate() {
-            if let Some(ty) = self.di_type(t) {
+            let ty = match debug.get(i) {
+                Some(d) if d.fits(t) => self.di_debug(d),
+                _ => self.di_type(t),
+            };
+            if let Some(ty) = ty {
                 let name = names
                     .get(i)
                     .map_or_else(|| i.to_string(), |n| (*n).to_owned());

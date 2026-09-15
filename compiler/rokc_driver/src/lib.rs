@@ -582,8 +582,7 @@ fn compile_unit(
         &mut metas,
         &mut user,
     );
-    for (module, prog) in user {
-        let (sub, mut d) = collect_prec_table(&prog, &module);
+    for (sub, mut d) in user {
         diags.append(&mut d);
         diags.extend(sub.entries().cloned().filter_map(|e| prec.merge(e)));
     }
@@ -700,6 +699,8 @@ fn compile_unit(
             t.elapsed().as_secs_f64() * 1e3
         );
     }
+    // Pre-pass parses not taken (cached library, cfg'd-out modules).
+    PREPASSED.with(|p| p.borrow_mut().clear());
     all_items.append(&mut items);
     all_uses.append(&mut uses);
     diags.append(&mut d);
@@ -711,6 +712,7 @@ fn compile_unit(
         check_library: config.check_library,
         implicit_main,
         inline_prebuilt: config.inline_prebuilt,
+        pointer_width: config.target.pointer_width,
     };
     let program = rokc_ast::Program {
         attrs: Vec::new(),
@@ -875,10 +877,9 @@ fn build_prec_table(
 ) -> PrecTable {
     let mut table = PrecTable::new();
     for (pkg, root) in roots {
-        let mut programs = Vec::new();
-        prepass_tree(root, None, root.parent(), pkg, metas, &mut programs);
-        for (module, prog) in programs {
-            let (sub_table, mut collect_diags) = collect_prec_table(&prog, &module);
+        let mut tables = Vec::new();
+        prepass_tree(root, None, root.parent(), pkg, metas, &mut tables);
+        for (sub_table, mut collect_diags) in tables {
             diags.append(&mut collect_diags);
             diags.extend(sub_table.entries().cloned().filter_map(|e| table.merge(e)));
         }
@@ -897,16 +898,56 @@ fn prepass_tree(
     sub_dir: Option<&Path>,
     module: &[String],
     metas: &mut PrePass,
-    out: &mut Vec<(Vec<String>, rokc_ast::Program)>,
+    out: &mut Vec<(PrecTable, Vec<RokDiagnostic>)>,
 ) {
     let Some(source) = source.map(str::to_owned).or_else(|| read_source(path).ok()) else {
         return;
     };
     let file = path.display().to_string();
-    let tokens = prepass_tokens(&source, &file, metas);
-    let (program, _) = parse_program(&tokens, file);
+    let (tokens, lex_quiet) = prepass_tokens(&source, &file, metas);
+    let (program, d) = parse_program(&tokens, file);
     prepass_mods(&program.items, sub_dir, module, metas, out);
-    out.push((module.to_vec(), program));
+    out.push(collect_prec_table(&program, module));
+    PREPASSED.with(|p| {
+        p.borrow_mut().insert(
+            path.to_path_buf(),
+            Prepassed {
+                source,
+                tokens,
+                program,
+                quiet: lex_quiet && d.is_empty(),
+            },
+        );
+    });
+}
+
+/// Whether the real parse of `p` (with the build's extension operators,
+/// keywords, meta blocks, literals and cfg) would give the pre-pass's
+/// tokens and AST: the file uses none of them.
+fn reusable(p: &Prepassed, ext: &ExtOps, metas: &MetaCtx) -> bool {
+    use rokc_lexer::TokenKind as T;
+    let prefixes: Vec<&T> = metas
+        .literals
+        .rules
+        .iter()
+        .filter(|r| r.kind == PatKind::Prefix)
+        .filter_map(|r| match r.pattern.elems.first() {
+            Some(rokc_parser::PatElem::Tok(k, _)) => Some(k),
+            _ => None,
+        })
+        .collect();
+    p.quiet
+        && !ext.symbols().iter().any(|s| p.source.contains(s.as_str()))
+        && p.tokens.windows(2).all(|w| match &w[0].kind {
+            T::ExtOp(_) => false,
+            T::Ident(n) => {
+                !(n == "cfg_attr"
+                    || n == "cfg" && w[1].kind == T::Bang
+                    || metas.table.defines(n)
+                    || metas.keywords.iter().any(|(k, ..)| k == n))
+            }
+            k => !prefixes.contains(&k),
+        })
 }
 
 fn prepass_mods(
@@ -914,7 +955,7 @@ fn prepass_mods(
     sub_dir: Option<&Path>,
     module: &[String],
     metas: &mut PrePass,
-    out: &mut Vec<(Vec<String>, rokc_ast::Program)>,
+    out: &mut Vec<(PrecTable, Vec<RokDiagnostic>)>,
 ) {
     for item in items {
         let rokc_ast::Item::Mod(m) = item else {
@@ -998,8 +1039,9 @@ pub(crate) fn defines_metas(tokens: &[rokc_lexer::Token], source: &str) -> bool 
 
 /// Lex a file for the pre-pass and gather its meta blocks (their
 /// template tokens keep spans into the registered file).
-fn prepass_tokens(source: &str, file: &str, metas: &mut PrePass) -> Vec<rokc_lexer::Token> {
-    let (mut tokens, _) = Lexer::new(source, file.to_owned()).lex_all();
+/// Also whether lexing was quiet (no diagnostic).
+fn prepass_tokens(source: &str, file: &str, metas: &mut PrePass) -> (Vec<rokc_lexer::Token>, bool) {
+    let (mut tokens, d) = Lexer::new(source, file.to_owned()).lex_all();
     // Spans point into a registered copy of the file (diagnostics on
     // pre-pass attributes and meta templates).
     let id = rokc_diagnostic::register_file(file.to_owned(), source.to_owned());
@@ -1028,7 +1070,7 @@ fn prepass_tokens(source: &str, file: &str, metas: &mut PrePass) -> Vec<rokc_lex
         metas.keywords.extend(collect_keywords(&tokens, file));
         metas.literals.extend(collect_literals(&tokens, file));
     }
-    tokens
+    (tokens, d.is_empty())
 }
 
 /// Spec 1.4.2: distinct names of one package with the same confusable
@@ -1099,6 +1141,23 @@ struct PrePass {
     meta_files: Vec<(String, String, u32)>,
     keywords: Vec<KeywordDef>,
     literals: Vec<LiteralDef>,
+}
+
+/// A file the pre-pass parsed (without extension operators, keywords,
+/// meta blocks, literals or cfg), for the real parse to take when it
+/// is `reusable`.
+struct Prepassed {
+    source: String,
+    tokens: Vec<rokc_lexer::Token>,
+    program: rokc_ast::Program,
+    /// Lexed and parsed without a diagnostic.
+    quiet: bool,
+}
+
+thread_local! {
+    /// This compile's pre-pass parses by file path.
+    static PREPASSED: std::cell::RefCell<std::collections::HashMap<PathBuf, Prepassed>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
 /// One cached parse (`cached`): its key, the files it registered, its
@@ -1327,9 +1386,11 @@ fn collect_module_tree(
     uses: &mut Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)>,
     mut keep: Option<&mut Vec<SourceFile>>,
 ) -> Vec<rokc_ast::Stmt> {
-    let source = match preloaded {
-        Some(s) => s.to_owned(),
-        None => match read_source(body_path) {
+    let pre = PREPASSED.with(|p| p.borrow_mut().remove(body_path));
+    let source = match (preloaded, &pre) {
+        (Some(s), _) => s.to_owned(),
+        (None, Some(p)) => p.source.clone(),
+        (None, None) => match read_source(body_path) {
             Ok(s) => s,
             Err(e) => {
                 diags.push(RokDiagnostic::error(
@@ -1341,31 +1402,36 @@ fn collect_module_tree(
         },
     };
     let file = body_path.display().to_string();
-    let lexer = Lexer::new(&source, file.clone()).with_ext_ops(ext.symbols());
-    let (mut tokens, mut lex_diags) = lexer.lex_all();
     // Every span parsed from here on knows its file (diagnostic locations).
     let file_id = rokc_diagnostic::register_file(file.clone(), source.clone());
-    for t in &mut tokens {
-        t.span.file = file_id;
-    }
-    // The lexer's own warnings (confusables) too.
-    for d in &mut lex_diags {
-        if let Some(p) = d.primary.as_mut().filter(|p| p.span.file == 0) {
-            p.span.file = file_id;
+    let reused = pre.filter(|p| p.source == source && reusable(p, ext, metas));
+    let program = if let Some(p) = reused {
+        p.program
+    } else {
+        let lexer = Lexer::new(&source, file.clone()).with_ext_ops(ext.symbols());
+        let (mut tokens, mut lex_diags) = lexer.lex_all();
+        for t in &mut tokens {
+            t.span.file = file_id;
         }
-    }
-    diags.append(&mut lex_diags);
-    apply_keywords(&mut tokens, &metas.keywords, diags);
-
-    let (program, mut parse_diags) = parse_program_meta(
-        &tokens,
-        file,
-        ext,
-        &metas.table,
-        &metas.literals,
-        Some(cfg_env),
-    );
-    diags.append(&mut parse_diags);
+        // The lexer's own warnings (confusables) too.
+        for d in &mut lex_diags {
+            if let Some(p) = d.primary.as_mut().filter(|p| p.span.file == 0) {
+                p.span.file = file_id;
+            }
+        }
+        diags.append(&mut lex_diags);
+        apply_keywords(&mut tokens, &metas.keywords, diags);
+        let (program, mut parse_diags) = parse_program_meta(
+            &tokens,
+            file,
+            ext,
+            &metas.table,
+            &metas.literals,
+            Some(cfg_env),
+        );
+        diags.append(&mut parse_diags);
+        program
+    };
 
     // Filter `#[cfg(...)]`-gated items before walking — excluded modules
     // shouldn't get their files resolved or their inline items flattened.
@@ -1618,6 +1684,39 @@ mod tests {
         assert!(has(&i686, "narrow") && has(&i686, "win"));
         let x64 = compile(src, "x86_64-unknown-linux-gnu");
         assert!(!has(&x64, "narrow") && !has(&x64, "win"));
+    }
+
+    /// `usize` literals and constants are checked at the target's width.
+    #[test]
+    fn usize_range_follows_the_pointer_width() {
+        let src = "const BIG: usize = 4294967295 + 1;\nfn main() { let n = BIG; }\n";
+        let core =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/core/lib.rok");
+        let errs = |triple: &str| {
+            let config = super::CompilerConfig {
+                bootstrap_files: vec![core.clone()],
+                anonymous: true,
+                target: super::Target::new(Some(triple)),
+                ..super::CompilerConfig::default()
+            };
+            let path = std::env::temp_dir().join("rokc_driver_test_usize.rok");
+            super::compile_source(src, &path, &config)
+                .err()
+                .map(|d| d.iter().map(ToString::to_string).collect::<String>())
+        };
+        assert!(errs("x86_64-unknown-linux-gnu").is_none());
+        let e = errs("i686-unknown-linux-gnu").expect("an overflow on 32-bit");
+        assert!(e.contains("overflow"), "{e}");
+        assert!(
+            compile(
+                "fn main() { let n: usize = 4294967295; }\n",
+                "armv7-unknown-linux-gnueabihf"
+            )
+            .hir
+            .functions
+            .iter()
+            .any(|f| f.name == "main")
+        );
     }
 
     #[test]

@@ -81,7 +81,7 @@ fn kind_of(ctx: &LowerCtx<'_>, ty: &HirTy) -> Kind {
     match ty {
         HirTy::Prim(p) if p.is_signed_int() || p.is_unsigned_int() => Kind::Int {
             signed: p.is_signed_int(),
-            bits: p.bit_width(64),
+            bits: p.bit_width(super::const_eval::pointer_width()),
         },
         HirTy::Prim(PrimTy::F32) => Kind::Float { f32: true },
         HirTy::Prim(PrimTy::F64) => Kind::Float { f32: false },

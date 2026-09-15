@@ -168,6 +168,26 @@ fn very_verbose_lists_files_and_instances() {
     assert!(!text(&out.stderr).contains("Specialized"));
 }
 
+/// A nested fn's item (and symbol) name: the enclosing fn's (`Type.m`
+/// for a method), `/`, its own; `/2` .. for a repeated name.
+#[test]
+fn nested_fn_item_names() {
+    let dir = scratch("nested_fn_names");
+    fs::write(
+        dir.join("main.rok"),
+        "struct S {}\nimpl S {\n    fn m(self) -> i32 {\n        fn h() -> i32 { 1 }\n        h()\n    }\n}\n\
+         fn f() -> i32 {\n    let a = { fn g() -> i32 { 2 } g() };\n    let b = { fn g() -> i32 { 3 } g() };\n    a + b\n}\n\
+         fn main() {\n    println(f\"{S {}.m() + f()}\");\n}\n",
+    )
+    .unwrap();
+    let out = rokc(None, &dir, &["emit", "--emit=hir", "-o", "h.txt"]);
+    assert_exit(&out, 0);
+    let hir = fs::read_to_string(dir.join("h.txt")).unwrap();
+    for f in ["fn S.m/h()", "fn f/g()", "fn f/g/2()"] {
+        assert!(hir.contains(f), "{f}");
+    }
+}
+
 #[test]
 fn lib_package_builds_archive_and_runs_tests() {
     let Some(env) = setup() else { return };
@@ -396,9 +416,11 @@ fn sysroot_is_beside_rokc() {
 
 /// `--target` links what the sysroot ships for it
 /// (`lib/rok/targets/<triple>/`, `targets/build.sh`): Linux ELF
-/// executables (musl static, glibc PIE through the system's loader) and
-/// Mach-O for the other macOS arch, run here under Rosetta. A target it
-/// does not ship is named.
+/// executables (musl static, glibc PIE through the system's loader; the
+/// 32-bit ones ELFCLASS32), a 32-bit Windows PE (run with
+/// `ROK_TEST_WINE=<wine>`, which needs its 32-bit support) and Mach-O
+/// for the other macOS arch, run here under Rosetta. A target it does
+/// not ship is named.
 #[test]
 fn cross_targets_link_from_the_sysroot() {
     let dir = scratch("cross");
@@ -432,17 +454,20 @@ fn cross_targets_link_from_the_sysroot() {
             .args(["-x86_64", "/usr/bin/true"])
             .status()
             .is_ok_and(|s| s.success());
+    let wine = std::env::var_os("ROK_TEST_WINE").filter(|w| !w.is_empty());
     for t in [
         "x86_64-unknown-linux-gnu",
         "aarch64-unknown-linux-gnu",
         "x86_64-unknown-linux-musl",
         "aarch64-unknown-linux-musl",
         "x86_64-apple-darwin",
+        "i686-unknown-linux-gnu",
+        "armv7-unknown-linux-gnueabihf",
+        "i686-pc-windows-msvc",
     ] {
         if !targets.join(t).is_dir() {
             continue;
         }
-        let x86 = t.starts_with("x86_64");
         for o in ["-O0", "-O2"] {
             let exe = dir.join(format!("h-{t}{o}"));
             let exe_s = exe.display().to_string();
@@ -453,26 +478,18 @@ fn cross_targets_link_from_the_sysroot() {
             );
             assert_exit(&out, 0);
             let b = fs::read(&exe).unwrap();
-            let has = |s: &[u8]| b.windows(s.len()).any(|w| w == s);
             if t.contains("-linux") {
-                assert_eq!(&b[..4], b"\x7fELF", "{t}");
-                let machine = u16::from_le_bytes([b[18], b[19]]);
-                assert_eq!(machine, if x86 { 62 } else { 183 }, "{t}");
-                let ty = u16::from_le_bytes([b[16], b[17]]);
-                if t.ends_with("-musl") {
-                    assert_eq!(ty, 2, "{t}: a static ET_EXEC");
-                    assert!(!has(b"ld-linux"), "{t}");
-                } else {
-                    assert_eq!(ty, 3, "{t}: a PIE");
-                    let loader: &[u8] = if x86 {
-                        b"/lib64/ld-linux-x86-64.so.2"
-                    } else {
-                        b"/lib/ld-linux-aarch64.so.1"
-                    };
-                    assert!(
-                        has(loader) && has(b"libc.so.6") && has(b"GLIBC_2.34"),
-                        "{t}"
-                    );
+                check_linux_elf(t, &b);
+            } else if t.contains("-windows") {
+                check_x86_pe(t, &b);
+                if let Some(wine) = &wine {
+                    let run = Command::new(wine)
+                        .arg(&exe)
+                        .env("WINEDEBUG", "-all")
+                        .output()
+                        .unwrap();
+                    assert_exit(&run, 0);
+                    assert_eq!(text(&run.stdout).replace('\r', ""), "ok\n", "{t}");
                 }
             } else {
                 assert_eq!(&b[..4], &0xfeed_facf_u32.to_le_bytes(), "{t}");
@@ -490,6 +507,44 @@ fn cross_targets_link_from_the_sysroot() {
             }
         }
     }
+}
+
+/// A Linux executable for `t`: machine, class, static (musl) or a PIE
+/// with glibc's loader and versions up to 2.34.
+fn check_linux_elf(t: &str, b: &[u8]) {
+    // (ELF machine, class, dynamic loader)
+    let (machine, class, loader): (u16, u8, &[u8]) = match t.split('-').next().unwrap() {
+        "x86_64" => (62, 2, b"/lib64/ld-linux-x86-64.so.2"),
+        "aarch64" => (183, 2, b"/lib/ld-linux-aarch64.so.1"),
+        "i686" => (3, 1, b"/lib/ld-linux.so.2"),
+        _ => (40, 1, b"/lib/ld-linux-armhf.so.3"),
+    };
+    let has = |s: &[u8]| b.windows(s.len()).any(|w| w == s);
+    assert_eq!(&b[..4], b"\x7fELF", "{t}");
+    assert_eq!(b[4], class, "{t}: ELF class");
+    assert_eq!(u16::from_le_bytes([b[18], b[19]]), machine, "{t}");
+    let ty = u16::from_le_bytes([b[16], b[17]]);
+    if t.ends_with("-musl") {
+        assert_eq!(ty, 2, "{t}: a static ET_EXEC");
+        assert!(!has(b"ld-linux"), "{t}");
+    } else {
+        assert_eq!(ty, 3, "{t}: a PIE");
+        assert!(
+            has(loader) && has(b"libc.so.6") && has(b"GLIBC_2.34"),
+            "{t}"
+        );
+        assert!(!has(b"GLIBC_2.35"), "{t}: newer than glibc 2.34");
+    }
+}
+
+/// An x86 PE image, large-address-aware.
+fn check_x86_pe(t: &str, b: &[u8]) {
+    assert_eq!(&b[..2], b"MZ", "{t}");
+    let pe = u32::from_le_bytes(b[0x3c..0x40].try_into().unwrap()) as usize;
+    assert_eq!(&b[pe..pe + 4], b"PE\0\0", "{t}");
+    assert_eq!(u16::from_le_bytes([b[pe + 4], b[pe + 5]]), 0x14c, "{t}");
+    // IMAGE_FILE_LARGE_ADDRESS_AWARE
+    assert_ne!(b[pe + 22] & 0x20, 0, "{t}");
 }
 
 #[test]

@@ -41,6 +41,7 @@ const DW_AT_ENCODING: u8 = 0x3e;
 const DW_AT_FRAME_BASE: u8 = 0x40;
 const DW_AT_LOCATION: u8 = 0x02;
 const DW_AT_TYPE: u8 = 0x49;
+const DW_AT_RANGES: u8 = 0x55;
 
 const DW_FORM_ADDR: u8 = 0x01;
 const DW_FORM_DATA1: u8 = 0x0b;
@@ -162,7 +163,7 @@ fn abbrevs() -> Vec<u8> {
         A_BLOCK,
         DW_TAG_LEXICAL_BLOCK,
         true,
-        &[(DW_AT_LOW_PC, DW_FORM_ADDR), (DW_AT_HIGH_PC, DW_FORM_DATA4)],
+        &[(DW_AT_RANGES, DW_FORM_SEC_OFFSET)],
     );
     add(
         A_BASE,
@@ -250,11 +251,24 @@ struct Info<'a> {
     types: HashMap<String, u32>,
     t: &'a Target,
     names: &'a HashMap<u32, (String, Vec<String>)>,
+    /// `.debug_ranges`, entries relative to the unit's `low_pc`.
+    ranges: Vec<u8>,
+    cu_low: u32,
 }
 
 impl Info<'_> {
     fn u32(&mut self, v: u32) {
         self.b.extend_from_slice(&v.to_le_bytes());
+    }
+
+    /// Offset `v` into debug section `sect` (an index of `Obj::extra`).
+    fn sec_off(&mut self, sect: u32, v: u32) {
+        self.relocs.push(Reloc {
+            off: self.b.len() as u32,
+            kind: RelKind::SecOff32,
+            sym: sect,
+        });
+        self.u32(v);
     }
 
     /// The address `at` of function `sym`: its object address (a
@@ -430,19 +444,29 @@ impl Info<'_> {
     }
 }
 
-/// `[start, end)` of each scope of `f`: its own rows, its children's.
-fn scope_ranges(f: &FnRange) -> HashMap<u32, (u32, u32)> {
-    let mut r: HashMap<u32, (u32, u32)> = HashMap::new();
+/// The code of scope `id` of `f` and its nested scopes, as merged
+/// `[start, end)` ranges: interleaved with other scopes' code, so not
+/// one range.
+fn scope_code(id: u32, d: &crate::lir::FnDebug, f: &FnRange) -> Vec<(u32, u32)> {
+    let mut ids = vec![id];
+    let mut n = 0;
+    while n < ids.len() {
+        let p = ids[n];
+        ids.extend(d.scopes.iter().filter(|s| s.1 == p).map(|s| s.0));
+        n += 1;
+    }
+    let mut out: Vec<(u32, u32)> = Vec::new();
     for (i, &(at, _, _, sc)) in f.lines.iter().enumerate() {
         let end = f.lines.get(i + 1).map_or(f.len, |n| n.0);
-        if end <= at {
+        if end <= at || !ids.contains(&sc) {
             continue;
         }
-        let e = r.entry(sc).or_insert((at, end));
-        e.0 = e.0.min(at);
-        e.1 = e.1.max(end);
+        match out.last_mut() {
+            Some(last) if last.1 == at => last.1 = end,
+            _ => out.push((at, end)),
+        }
     }
-    r
+    out
 }
 
 /// Add the debug sections of `obj`'s functions.
@@ -464,17 +488,23 @@ pub fn write(obj: &mut Obj, t: &Target, names: &HashMap<u32, (String, Vec<String
             .map_or_else(String::new, |d| d.to_string_lossy().into_owned())
     };
 
+    // The sections this adds, by `Obj::extra` index.
+    let base = obj.extra.len() as u32;
+    let (abbrev_sect, line_sect, ranges_sect) = (base, base + 2, base + 3);
+    let first = obj.fns.iter().min_by_key(|f| f.start);
     let mut info = Info {
         b: Vec::new(),
         relocs: Vec::new(),
         types: HashMap::new(),
         t,
         names,
+        ranges: Vec::new(),
+        cu_low: first.map_or(0, |f| f.start),
     };
     // Header (length patched below), then the unit.
     info.u32(0);
     info.b.extend_from_slice(&4u16.to_le_bytes());
-    info.u32(0);
+    info.sec_off(abbrev_sect, 0);
     info.b.push(8);
     info.b.push(A_CU);
     cstr(&mut info.b, "rokc");
@@ -486,11 +516,10 @@ pub fn write(obj: &mut Obj, t: &Target, names: &HashMap<u32, (String, Vec<String
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
     );
     cstr(&mut info.b, &dir_of(&cu_path));
-    info.u32(0);
+    info.sec_off(line_sect, 0);
     // The text section is one range from its first function.
     let text_start = obj.fns.first().map_or(0, |f| f.start);
     let text_end = obj.fns.last().map_or(0, |f| f.start + f.len);
-    let first = obj.fns.iter().min_by_key(|f| f.start);
     info.addr(first.map_or(0, |f| f.sym), first.map_or(0, |f| f.start));
     info.u32(text_end - text_start);
     // Types first, so variables refer back to them.
@@ -510,7 +539,6 @@ pub fn write(obj: &mut Obj, t: &Target, names: &HashMap<u32, (String, Vec<String
         // The frame pointer: `x29` / `rbp`.
         info.b
             .extend_from_slice(&[1, if obj.x86 { DW_OP_REG6 } else { DW_OP_REG29 }]);
-        let ranges = scope_ranges(f);
         // Scopes that hold a variable (or one that does).
         let mut live: Vec<u32> = Vec::new();
         for v in &d.vars {
@@ -533,7 +561,7 @@ pub fn write(obj: &mut Obj, t: &Target, names: &HashMap<u32, (String, Vec<String
             uleb(&mut info.b, loc.len() as u64);
             info.b.extend_from_slice(&loc);
         };
-        scope(&mut info, 0, d, &live, &ranges, f, &var_die);
+        scope(&mut info, 0, d, &live, f, ranges_sect, &var_die);
         info.b.push(0);
     }
     info.b.push(0);
@@ -556,6 +584,7 @@ pub fn write(obj: &mut Obj, t: &Target, names: &HashMap<u32, (String, Vec<String
     sect("__debug_abbrev", abbrevs(), Vec::new());
     sect("__debug_info", info.b, info.relocs);
     sect("__debug_line", line.0, line.1);
+    sect("__debug_ranges", info.ranges, Vec::new());
 }
 
 /// The variables of scope `id` and its lexical blocks (those holding a
@@ -565,8 +594,8 @@ fn scope(
     id: u32,
     d: &crate::lir::FnDebug,
     live: &[u32],
-    ranges: &HashMap<u32, (u32, u32)>,
     f: &FnRange,
+    ranges_sect: u32,
     var_die: &dyn Fn(&mut Info<'_>, usize),
 ) {
     for (i, v) in d.vars.iter().enumerate() {
@@ -578,34 +607,20 @@ fn scope(
         if parent != id || !live.contains(&c) {
             continue;
         }
-        let (lo, hi) = subtree(c, d, ranges).unwrap_or((0, f.len));
         info.b.push(A_BLOCK);
-        info.relocs.push(Reloc {
-            off: info.b.len() as u32,
-            kind: RelKind::Abs64,
-            sym: f.sym,
-        });
-        info.b
-            .extend_from_slice(&u64::from(f.start + lo).to_le_bytes());
-        info.u32(hi - lo);
-        scope(info, c, d, live, ranges, f, var_die);
+        let at = info.ranges.len() as u32;
+        info.sec_off(ranges_sect, at);
+        let rel = f.start - info.cu_low;
+        for (lo, hi) in scope_code(c, d, f) {
+            info.ranges
+                .extend_from_slice(&u64::from(rel + lo).to_le_bytes());
+            info.ranges
+                .extend_from_slice(&u64::from(rel + hi).to_le_bytes());
+        }
+        info.ranges.extend_from_slice(&[0; 16]);
+        scope(info, c, d, live, f, ranges_sect, var_die);
         info.b.push(0);
     }
-}
-fn subtree(
-    id: u32,
-    d: &crate::lir::FnDebug,
-    ranges: &HashMap<u32, (u32, u32)>,
-) -> Option<(u32, u32)> {
-    let mut r = ranges.get(&id).copied();
-    for &(c, p) in &d.scopes {
-        if p == id {
-            if let Some((lo, hi)) = subtree(c, d, ranges) {
-                r = Some(r.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
-            }
-        }
-    }
-    r
 }
 
 /// `.debug_line`: one sequence per function, rows `unit`-byte aligned

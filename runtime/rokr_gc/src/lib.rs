@@ -134,9 +134,16 @@ pub const LOS_THRESHOLD: usize = rokr_common::gc_abi::LOS_THRESHOLD as usize;
 /// dirties the card(s) of its slot and a minor collection scans only
 /// dirty cards, not the whole object.
 pub const CARD_SIZE: usize = 1 << rokr_common::gc_abi::CARD_SHIFT;
-/// Address space reserved for blocks (committed one block at a time).
-// One fixed reservation: the block heap is capped at 64 GiB.
+/// Address space reserved for blocks (committed one block at a time):
+/// one reservation, the first of these sizes the OS grants. 64-bit: the
+/// block heap is capped at 64 GiB. 32-bit (spec 0.6.3, a heap of about
+/// 3.5 GB): at most 2 GiB, the rest of the address space left to LOS
+/// objects, `malloc` and the program.
+#[cfg(target_pointer_width = "64")]
 const RESERVE: usize = 64 << 30;
+#[cfg(target_pointer_width = "32")]
+const RESERVE: usize = 2 << 30;
+const RESERVE_MIN: usize = 64 << 20;
 
 /// Line states.
 const FREE: u8 = 0;
@@ -240,6 +247,8 @@ struct Heap {
     base: usize,
     nblocks: usize,
     meta: *mut BlockMeta,
+    /// Bytes reserved at `base`.
+    reserved: usize,
     /// Next line (global index `block * LINES + line`) the small / medium
     /// refill looks at; both restart at 0 after every sweep.
     small_cursor: usize,
@@ -319,6 +328,7 @@ static HEAP: Global<Heap> = Global(UnsafeCell::new(Heap {
     allocs: 0,
     base: 0,
     nblocks: 0,
+    reserved: 0,
     meta: ptr::null_mut(),
     small_cursor: 0,
     medium_cursor: 0,
@@ -361,6 +371,7 @@ struct Mark {
     base: usize,
     nblocks: usize,
     meta: *mut BlockMeta,
+    reserved: usize,
     /// Sorted LOS addresses as of this collection's start.
     index: *mut usize,
     index_cap: usize,
@@ -388,6 +399,7 @@ static MARK: Global<Mark> = Global(UnsafeCell::new(Mark {
     len: 0,
     base: 0,
     nblocks: 0,
+    reserved: 0,
     meta: ptr::null_mut(),
     index: ptr::null_mut(),
     index_cap: 0,
@@ -716,20 +728,28 @@ fn end_of_run(start: usize, mut end: usize) -> usize {
 fn new_block() -> usize {
     let h = heap();
     if h.base == 0 {
-        let p = sys::reserve(RESERVE + BLOCK_SIZE);
-        if p.is_null() {
-            rokr_common::oom();
-        }
+        let mut len = RESERVE;
+        let p = loop {
+            let p = sys::reserve(len + BLOCK_SIZE);
+            if !p.is_null() {
+                break p;
+            }
+            len /= 2;
+            if len < RESERVE_MIN {
+                rokr_common::oom();
+            }
+        };
         h.base = (p as usize).next_multiple_of(BLOCK_SIZE);
+        h.reserved = len;
         // Metadata for every block of the reservation, reserved once and
         // committed as blocks are: a concurrent mark reads it while
         // refills commit blocks, so it never moves.
-        h.meta = sys::reserve(RESERVE / BLOCK_SIZE * size_of::<BlockMeta>()).cast();
+        h.meta = sys::reserve(len / BLOCK_SIZE * size_of::<BlockMeta>()).cast();
         if h.meta.is_null() {
             rokr_common::oom();
         }
     }
-    if h.nblocks == RESERVE / BLOCK_SIZE {
+    if h.nblocks == h.reserved / BLOCK_SIZE {
         rokr_common::oom();
     }
     let b = h.nblocks;
@@ -919,7 +939,7 @@ fn for_each_start(
 /// stopped and the mark lock held.
 fn build_index() {
     let (h, m) = (heap(), mark());
-    (m.base, m.nblocks, m.meta) = (h.base, h.nblocks, h.meta);
+    (m.base, m.nblocks, m.meta, m.reserved) = (h.base, h.nblocks, h.meta, h.reserved);
     m.los_count = h.los_count;
     if h.los_count == 0 {
         return;
@@ -1091,7 +1111,7 @@ fn object_in<const MOVED: bool>(word: usize, young: bool) -> Option<*mut u8> {
             bits = starts[i];
         }
     }
-    if m.los_count == 0 || (m.base != 0 && word >= m.base && word < m.base + RESERVE) {
+    if m.los_count == 0 || (m.base != 0 && word >= m.base && word < m.base + m.reserved) {
         // No LOS object, or a block committed after the view.
         return None;
     }

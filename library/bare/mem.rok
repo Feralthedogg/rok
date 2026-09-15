@@ -6,9 +6,6 @@
 // and loaded as `B`, with nothing in between that could collect.
 // `reinterpret` checks the sizes when called (the spec's `where
 // sizeof::<A>() == sizeof::<B>()` has no compile-time form yet).
-//
-// Missing: `MaybeUninit` and `drop_in_place` (both need the address of
-// a local, which rok cannot take yet).
 
 pub use rok::bare::ptr::{align_of, size_of};
 use rok::bare::ptr::{ConstPtr, Ptr};
@@ -125,4 +122,49 @@ pub unsafe fn replace<T>(dst: Ptr<T>, value: T) -> T {
     let old = dst.read();
     dst.write(value);
     old
+}
+
+/// Run the `Drop` of the `T` at `p` (and of its fields'); the memory
+/// stays.
+#[intrinsic("rok.drop_in_place")]
+pub unsafe fn drop_in_place<T>(p: Ptr<T>);
+
+/// A `T` that may not be initialized yet (spec 1.3.2): same size and
+/// alignment as `T`, and `as_mut_ptr` points at the variable itself.
+/// Its bits start zeroed (`uninit` is `zeroed`: a GC reference in it is
+/// null until written, never garbage).
+#[repr(transparent)]
+pub struct MaybeUninit<T> {
+    value: T;
+}
+
+impl<T> MaybeUninit<T> {
+    pub fn uninit() -> MaybeUninit<T> { MaybeUninit::zeroed() }
+
+    pub fn zeroed() -> MaybeUninit<T> {
+        let size = if size_of::<T>() == 0 { 1 } else { size_of::<T>() };
+        unsafe {
+            let at = rok_alloc_raw(size, align_of::<T>(), 1);
+            if at == 0 {
+                panic("MaybeUninit::zeroed: out of memory");
+            }
+            let value = Ptr::<T>::dangling().with_addr(at).read();
+            rok_free(at);
+            MaybeUninit { value: value }
+        }
+    }
+
+    pub fn new(value: T) -> MaybeUninit<T> { MaybeUninit { value: value } }
+
+    pub fn write(ref self, value: T) { self.value = value; }
+
+    /// A pointer to this variable's `T` (the receiver must be a place).
+    #[intrinsic("rok.addr_of")]
+    pub fn as_ptr(self) -> ConstPtr<T>;
+    #[intrinsic("rok.addr_of")]
+    pub fn as_mut_ptr(ref self) -> Ptr<T>;
+
+    /// The value; UB unless it was initialized (`write`, `new`, or
+    /// through `as_mut_ptr`).
+    pub unsafe fn assume_init(self) -> T { self.value }
 }

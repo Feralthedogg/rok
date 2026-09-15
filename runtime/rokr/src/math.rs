@@ -20,6 +20,44 @@ macro_rules! libm {
     };
 }
 
+// C89's `float` forms: x86's UCRT has none (MSVC's headers widen them
+// to the `double` ones, as here).
+macro_rules! libm_f32 {
+    ($($rok:ident = $c:ident / $d:ident($($a:ident),+);)*) => {
+        #[cfg(not(all(windows, target_arch = "x86")))]
+        libm! { $($rok = $c($($a),+): f32;)* }
+        $(
+            #[cfg(all(windows, target_arch = "x86"))]
+            #[unsafe(no_mangle)]
+            pub extern "C" fn $rok($($a: f32),+) -> f32 {
+                unsafe extern "C" {
+                    fn $d($($a: f64),+) -> f64;
+                }
+                // SAFETY: as in `libm!`.
+                unsafe { $d($(f64::from($a)),+) as f32 }
+            }
+        )*
+    };
+}
+
+libm_f32! {
+    rok_f32_floor = floorf / floor(x);
+    rok_f32_ceil = ceilf / ceil(x);
+    rok_f32_exp = expf / exp(x);
+    rok_f32_ln = logf / log(x);
+    rok_f32_log10 = log10f / log10(x);
+    rok_f32_sin = sinf / sin(x);
+    rok_f32_cos = cosf / cos(x);
+    rok_f32_tan = tanf / tan(x);
+    rok_f32_asin = asinf / asin(x);
+    rok_f32_acos = acosf / acos(x);
+    rok_f32_atan = atanf / atan(x);
+    rok_f32_sinh = sinhf / sinh(x);
+    rok_f32_cosh = coshf / cosh(x);
+    rok_f32_tanh = tanhf / tanh(x);
+    rok_f32_atan2 = atan2f / atan2(x, y);
+}
+
 libm! {
     rok_f64_floor = floor(x): f64;
     rok_f64_ceil = ceil(x): f64;
@@ -50,32 +88,17 @@ libm! {
     rok_f64_hypot = hypot(x, y): f64;
     rok_f64_mul_add = fma(x, y, z): f64;
 
-    rok_f32_floor = floorf(x): f32;
-    rok_f32_ceil = ceilf(x): f32;
     rok_f32_round = roundf(x): f32;
     rok_f32_trunc = truncf(x): f32;
     rok_f32_cbrt = cbrtf(x): f32;
-    rok_f32_exp = expf(x): f32;
     rok_f32_exp2 = exp2f(x): f32;
     rok_f32_exp_m1 = expm1f(x): f32;
-    rok_f32_ln = logf(x): f32;
     rok_f32_ln_1p = log1pf(x): f32;
     rok_f32_log2 = log2f(x): f32;
-    rok_f32_log10 = log10f(x): f32;
-    rok_f32_sin = sinf(x): f32;
-    rok_f32_cos = cosf(x): f32;
-    rok_f32_tan = tanf(x): f32;
-    rok_f32_asin = asinf(x): f32;
-    rok_f32_acos = acosf(x): f32;
-    rok_f32_atan = atanf(x): f32;
-    rok_f32_sinh = sinhf(x): f32;
-    rok_f32_cosh = coshf(x): f32;
-    rok_f32_tanh = tanhf(x): f32;
     rok_f32_asinh = asinhf(x): f32;
     rok_f32_acosh = acoshf(x): f32;
     rok_f32_atanh = atanhf(x): f32;
     rok_f32_pow = powf(x, y): f32;
-    rok_f32_atan2 = atan2f(x, y): f32;
     rok_f32_mul_add = fmaf(x, y, z): f32;
 }
 

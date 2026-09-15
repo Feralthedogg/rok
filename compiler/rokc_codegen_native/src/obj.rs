@@ -49,6 +49,10 @@ pub enum RelKind {
     /// section offset.
     SecRelHi12,
     SecRelLo12,
+    /// DWARF `sec_offset`: 32 bits into the debug section `sym` (an
+    /// index of `Obj::extra`). ELF relocates it (the linker joins the
+    /// sections of all objects); Mach-O keeps the offset in the object.
+    SecOff32,
 }
 
 #[derive(Clone, Copy, Debug)]

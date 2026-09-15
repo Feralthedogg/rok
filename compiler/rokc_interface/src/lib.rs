@@ -279,9 +279,15 @@ impl CompileResult {
         }
     }
 
-    /// Build a library package's static archive at `out` (spec 902.13).
-    pub fn archive(&self, opts: &BuildOptions, out: &Path) -> Result<(), RokDiagnostic> {
-        rokc_driver::build_archive(self.module()?, opts, out)
+    /// Build a library package's static archive at `out` (spec 902.13),
+    /// with `object` its one object beside it (`build_archive`).
+    pub fn archive(
+        &self,
+        opts: &BuildOptions,
+        out: &Path,
+        object: bool,
+    ) -> Result<(), RokDiagnostic> {
+        rokc_driver::build_archive(self.module()?, opts, out, object)
     }
 }
 

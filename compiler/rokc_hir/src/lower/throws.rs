@@ -566,7 +566,7 @@ pub(super) fn adapt_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
     let id = cached.unwrap_or_else(|| {
         let id = FunctionId(ctx.env.sink.next_id.get());
         ctx.env.sink.next_id.set(id.0 + 1);
-        let mut a = LowerCtx::new(ctx.env, ctx.ty_subst, None);
+        let mut a = LowerCtx::with_subst(ctx.env, ctx.ty_subst.clone(), None);
         // The captured callee: `env.0` of a one-field env tuple.
         let env_param = target.is_none().then(|| HirParam {
             name: "#env".to_owned(),
@@ -725,7 +725,7 @@ pub(super) fn adapt_never_fn(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
     let id = cached.unwrap_or_else(|| {
         let id = FunctionId(ctx.env.sink.next_id.get());
         ctx.env.sink.next_id.set(id.0 + 1);
-        let mut a = LowerCtx::new(ctx.env, ctx.ty_subst, None);
+        let mut a = LowerCtx::with_subst(ctx.env, ctx.ty_subst.clone(), None);
         let env_param = target.is_none().then(|| HirParam {
             name: "#env".to_owned(),
             local: a.declare(None, env_ty.clone()),

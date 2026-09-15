@@ -82,12 +82,35 @@ core::arch::global_asm!(
     "ret",
 );
 // MSVC targets use `__CxxFrameHandler3`, not this symbol.
-#[cfg(all(not(test), not(target_vendor = "apple"), not(windows)))]
+#[cfg(all(
+    not(test),
+    not(target_vendor = "apple"),
+    not(windows),
+    not(target_arch = "arm")
+))]
 core::arch::global_asm!(
     ".weak rust_eh_personality",
     ".type rust_eh_personality, %function",
     "rust_eh_personality:",
     "ret",
+);
+// ARM EHABI unwind tables also name the personality routines libgcc
+// would bring; nothing here unwinds.
+#[cfg(all(not(test), target_arch = "arm"))]
+core::arch::global_asm!(
+    ".weak rust_eh_personality",
+    ".type rust_eh_personality, %function",
+    "rust_eh_personality:",
+    ".weak __aeabi_unwind_cpp_pr0",
+    ".type __aeabi_unwind_cpp_pr0, %function",
+    "__aeabi_unwind_cpp_pr0:",
+    ".weak __aeabi_unwind_cpp_pr1",
+    ".type __aeabi_unwind_cpp_pr1, %function",
+    "__aeabi_unwind_cpp_pr1:",
+    ".weak __aeabi_unwind_cpp_pr2",
+    ".type __aeabi_unwind_cpp_pr2, %function",
+    "__aeabi_unwind_cpp_pr2:",
+    "bx lr",
 );
 
 // ---------------------------------------------------------------------
@@ -581,7 +604,7 @@ pub unsafe extern "C" fn rok_free(ptr: *mut u8) {
 /// # Safety
 /// `ptr` must be valid and aligned for an `i32` read.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rok_load_i32(ptr: *const i32) -> i32 {
+pub const unsafe extern "C" fn rok_load_i32(ptr: *const i32) -> i32 {
     // SAFETY: caller contract.
     unsafe { *ptr }
 }
@@ -597,7 +620,7 @@ pub unsafe extern "C" fn rok_store_i32(ptr: *mut i32, val: i32) {
 /// # Safety
 /// `ptr` must be valid and aligned for an `i64` read.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rok_load_i64(ptr: *const i64) -> i64 {
+pub const unsafe extern "C" fn rok_load_i64(ptr: *const i64) -> i64 {
     // SAFETY: caller contract.
     unsafe { *ptr }
 }
@@ -613,7 +636,7 @@ pub unsafe extern "C" fn rok_store_i64(ptr: *mut i64, val: i64) {
 /// # Safety
 /// `ptr` must be valid and aligned for an `f64` read.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rok_load_f64(ptr: *const f64) -> f64 {
+pub const unsafe extern "C" fn rok_load_f64(ptr: *const f64) -> f64 {
     // SAFETY: caller contract.
     unsafe { *ptr }
 }

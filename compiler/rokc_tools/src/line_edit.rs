@@ -2,7 +2,8 @@
 //! modes with VT input), cursor keys,
 //! a history kept in `$ROK_HOME/repl_history`, and the Emacs control
 //! keys (`C-a` `C-e` `C-b` `C-f` `C-k` `C-u` `C-w` `C-d` `C-p` `C-n`
-//! `C-l`). A line wider than the terminal is not re-wrapped.
+//! `C-l`). A line wider than the terminal scrolls sideways to keep the
+//! cursor in view (characters count one column each).
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -136,7 +137,7 @@ impl Editor {
                     }
                 }
             }
-            st.draw(&mut out, prompt);
+            st.draw(&mut out, prompt, columns());
         }
     }
 }
@@ -187,15 +188,66 @@ impl State {
         self.pos = self.buf.len();
     }
 
-    fn draw(&self, out: &mut impl Write, prompt: &str) {
-        let line: String = self.buf.iter().collect();
-        let col = prompt.chars().count() + self.pos;
+    /// The part of the line shown after a `prompt` columns wide prompt
+    /// on a `width` columns wide terminal: the cursor stays in view.
+    fn window(&self, prompt: usize, width: usize) -> std::ops::Range<usize> {
+        // The last column stays free for the cursor at the end.
+        let room = width.saturating_sub(prompt + 1).max(1);
+        let start = (self.pos + 1).saturating_sub(room);
+        start..self.buf.len().min(start + room)
+    }
+
+    fn draw(&self, out: &mut impl Write, prompt: &str, width: usize) {
+        let prompt_cols = prompt.chars().count();
+        let shown = self.window(prompt_cols, width);
+        let col = prompt_cols + self.pos - shown.start;
+        let line: String = self.buf[shown].iter().collect();
         let _ = write!(out, "\r{prompt}{line}\x1b[K\r");
         if col > 0 {
             let _ = write!(out, "\x1b[{col}C");
         }
         let _ = out.flush();
     }
+}
+
+/// The terminal's width in columns (80 when unknown).
+#[cfg(unix)]
+fn columns() -> usize {
+    #[cfg(target_os = "macos")]
+    const TIOCGWINSZ: u64 = 0x4008_7468;
+    #[cfg(not(target_os = "macos"))]
+    const TIOCGWINSZ: u64 = 0x5413;
+    unsafe extern "C" {
+        fn ioctl(fd: i32, request: u64, ...) -> i32;
+    }
+    // `struct winsize`: rows, columns, x / y pixels.
+    let mut ws = [0u16; 4];
+    // SAFETY: `TIOCGWINSZ` fills a `struct winsize`.
+    let ok = unsafe { ioctl(1, TIOCGWINSZ, ws.as_mut_ptr()) } == 0;
+    if ok && ws[1] > 0 {
+        usize::from(ws[1])
+    } else {
+        80
+    }
+}
+
+/// The console window's width in columns (80 when unknown).
+#[cfg(windows)]
+fn columns() -> usize {
+    const STD_OUTPUT: u32 = -11i32 as u32;
+    unsafe extern "system" {
+        fn GetConsoleScreenBufferInfo(h: Handle, info: *mut i16) -> i32;
+    }
+    // `CONSOLE_SCREEN_BUFFER_INFO` as `i16`s: size, cursor, attributes,
+    // window (left, top, right, bottom), maximum size.
+    let mut info = [0i16; 11];
+    // SAFETY: a std handle and a buffer the size of the structure.
+    let ok = unsafe { GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT), info.as_mut_ptr()) };
+    let width = i32::from(info[7]) - i32::from(info[5]) + 1;
+    usize::try_from(width)
+        .ok()
+        .filter(|w| ok != 0 && *w > 0)
+        .unwrap_or(80)
 }
 
 fn byte(r: &mut impl Read) -> Option<u8> {
@@ -411,5 +463,14 @@ mod tests {
         assert_eq!(st.buf.iter().collect::<String>(), "let x = foo ");
         assert_eq!(utf8(0xc3, &mut &[0xa9u8][..]), Some('é'));
         assert_eq!(escape(&mut &b"[3~"[..]).as_deref(), Some("[3~"));
+    }
+
+    #[test]
+    fn long_lines_scroll_to_the_cursor() {
+        // `> ` and 10 columns: 7 characters fit before the cursor's column.
+        assert_eq!(state("abc", 3).window(2, 10), 0..3);
+        assert_eq!(state("abcdefghijkl", 12).window(2, 10), 6..12);
+        assert_eq!(state("abcdefghijkl", 0).window(2, 10), 0..7);
+        assert_eq!(state("abcdefghijkl", 9).window(2, 10), 3..10);
     }
 }

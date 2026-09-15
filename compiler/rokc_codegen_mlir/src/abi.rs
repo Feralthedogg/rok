@@ -20,6 +20,15 @@
 //!   aggregate is MEMORY), > 16 bytes are MEMORY (`byval` / `sret`).
 //! - Windows x64: 1 / 2 / 4 / 8-byte aggregates as `iN`, others by
 //!   reference / `sret`.
+//! - i386 System V and Windows x86 (cdecl): aggregates are copied onto
+//!   the stack (`byval`, 4-aligned); results come back through `sret`
+//!   (the System V callee pops its pointer, LLVM's job), except Windows's
+//!   1 / 2 / 4 / 8-byte ones, in `eax` / `edx:eax`.
+//! - 32-bit ARM AAPCS-VFP: an HFA goes in `s` / `d` registers as
+//!   `[n x fT]`; other aggregates up to 64 bytes as `[n x i32]` (`i64`
+//!   when 8-aligned: an even register pair) through `r0`-`r3` and the
+//!   stack, bigger ones `byval`; results ≤ 4 bytes in `r0`, HFAs in
+//!   VFP registers, others through `sret`.
 //!
 //! Other targets reject aggregates across the C boundary.
 
@@ -156,6 +165,11 @@ pub fn classify(target: &Target, params: &[MirTy], ret: &MirTy, variadic: bool) 
             (ret, args)
         }
         CAbi::X86_64SysV => sysv(params, ret, target),
+        CAbi::X86SysV | CAbi::X86Win => x86(params, ret, target),
+        CAbi::ArmHf => (
+            aapcs32_ret(ret, target),
+            params.iter().map(|p| aapcs32_arg(p, target)).collect(),
+        ),
         CAbi::Other => {
             if params.iter().chain([ret]).any(is_aggregate) {
                 return None;
@@ -181,14 +195,20 @@ pub fn classify(target: &Target, params: &[MirTy], ret: &MirTy, variadic: bool) 
 /// passes it whole on the stack. `None`: a plain call does the same.
 /// Windows x64 passes and returns a 16-byte struct by reference, so a
 /// signature with a `str` (or another aggregate) is always classified.
-/// No runtime runs on the other targets.
+/// On the 32-bit targets the scalars land where C puts the struct's
+/// words (i386: consecutive stack slots; AAPCS: core registers then the
+/// stack, a struct may straddle them), but a by-value result comes back
+/// in memory (or, on Windows x86, in `edx:eax`): such a signature is
+/// classified. No runtime runs on the other targets.
 #[must_use]
 pub fn classify_rok(target: &Target, params: &[MirTy], ret: &MirTy) -> Option<FnAbi> {
+    let by_value = |t: &MirTy| is_aggregate(t) || *t == MirTy::Prim(PrimTy::Str);
     let regs = match target.c_abi {
         CAbi::Aarch64 => 8,
         CAbi::X86_64SysV => 6,
         CAbi::X86_64Win => 0,
-        CAbi::Other => return None,
+        CAbi::X86SysV | CAbi::X86Win | CAbi::ArmHf if by_value(ret) => 0,
+        CAbi::X86SysV | CAbi::X86Win | CAbi::ArmHf | CAbi::Other => return None,
     };
     let word = target.pointer_width / 8;
     let words: u32 = params
@@ -196,8 +216,7 @@ pub fn classify_rok(target: &Target, params: &[MirTy], ret: &MirTy) -> Option<Fn
         .filter(|t| !matches!(t, MirTy::Prim(PrimTy::F32 | PrimTy::F64)))
         .map(|t| target.size_align(t).0.div_ceil(word))
         .sum();
-    let by_value = |t: &MirTy| is_aggregate(t) || *t == MirTy::Prim(PrimTy::Str);
-    if target.c_abi == CAbi::X86_64Win {
+    if regs == 0 {
         if !params.iter().chain([ret]).any(by_value) {
             return None;
         }
@@ -261,6 +280,74 @@ fn aapcs_ret(ty: &MirTy, target: &Target) -> RetAbi {
     match size {
         1..=8 => RetAbi::Coerce(format!("i{}", size * 8)),
         9..=16 => RetAbi::Coerce("!llvm.array<2 x i64>".to_owned()),
+        _ => RetAbi::Sret,
+    }
+}
+
+/// The alignment of a `byval` stack copy of `ty`.
+#[must_use]
+pub fn byval_align(ty: &MirTy, target: &Target) -> u32 {
+    let a = target.size_align(ty).1;
+    match target.c_abi {
+        CAbi::X86SysV | CAbi::X86Win => 4,
+        CAbi::ArmHf => a.clamp(4, 8),
+        _ => a.max(8),
+    }
+}
+
+fn x86(params: &[MirTy], ret: &MirTy, target: &Target) -> (RetAbi, Vec<ArgAbi>) {
+    let size = target.size_align(ret).0;
+    let ret = if !is_aggregate(ret) || size == 0 {
+        RetAbi::Direct
+    } else if target.c_abi == CAbi::X86Win && matches!(size, 1 | 2 | 4 | 8) {
+        RetAbi::Coerce(format!("i{}", size * 8))
+    } else {
+        RetAbi::Sret
+    };
+    let args = params
+        .iter()
+        .map(|p| {
+            if is_aggregate(p) && target.size_align(p).0 > 0 {
+                ArgAbi::Indirect { byval: true }
+            } else {
+                ArgAbi::Direct
+            }
+        })
+        .collect();
+    (ret, args)
+}
+
+fn aapcs32_arg(ty: &MirTy, target: &Target) -> ArgAbi {
+    let (size, align) = target.size_align(ty);
+    if !is_aggregate(ty) || size == 0 {
+        return ArgAbi::Direct;
+    }
+    if let Some(h) = hfa(ty, target) {
+        return ArgAbi::Coerce(h);
+    }
+    if size > 64 {
+        return ArgAbi::Indirect { byval: true };
+    }
+    let (n, elem) = if align <= 4 {
+        (size.div_ceil(4), "i32")
+    } else {
+        (size.div_ceil(8), "i64")
+    };
+    ArgAbi::Coerce(format!("!llvm.array<{n} x {elem}>"))
+}
+
+fn aapcs32_ret(ty: &MirTy, target: &Target) -> RetAbi {
+    let size = target.size_align(ty).0;
+    if !is_aggregate(ty) || size == 0 {
+        return RetAbi::Direct;
+    }
+    if let Some(h) = hfa(ty, target) {
+        return RetAbi::Coerce(h);
+    }
+    match size {
+        1 => RetAbi::Coerce("i8".to_owned()),
+        2 => RetAbi::Coerce("i16".to_owned()),
+        3 | 4 => RetAbi::Coerce("i32".to_owned()),
         _ => RetAbi::Sret,
     }
 }
@@ -474,12 +561,66 @@ mod tests {
         assert_eq!(w.args[0], ArgAbi::Coerce("i64".into()));
         assert_eq!(w.args[1], ArgAbi::Indirect { byval: false });
         assert_eq!(w.ret, RetAbi::Sret);
-        // i686 has no aggregate classification: aggregates are refused,
-        // scalars pass as themselves.
-        let i686 = on("i686-unknown-linux-gnu");
-        assert!(classify(&i686, &[st(&[I32, I32])], &MirTy::Unit, false).is_none());
-        let scalars = classify(&i686, &[MirTy::Prim(I32)], &MirTy::Unit, true).unwrap();
+        // riscv32 has no aggregate classification: aggregates are
+        // refused, scalars pass as themselves.
+        let rv = on("riscv32imac-unknown-none-elf");
+        assert!(classify(&rv, &[st(&[I32, I32])], &MirTy::Unit, false).is_none());
+        let scalars = classify(&rv, &[MirTy::Prim(I32)], &MirTy::Unit, true).unwrap();
         assert!(scalars.variadic);
+    }
+
+    /// i386: aggregates on the stack, results in memory but for Windows's
+    /// register-sized ones (`div_t` in `edx:eax`, a 3-byte one not).
+    #[test]
+    fn x86_cdecl() {
+        let lin = on("i686-unknown-linux-gnu");
+        let win = on("i686-pc-windows-msvc");
+        let ps = [st(&[I32, I32]), MirTy::Prim(I32)];
+        for t in [&lin, &win] {
+            let a = classify(t, &ps, &MirTy::Unit, false).unwrap();
+            assert_eq!(a.args, [ArgAbi::Indirect { byval: true }, ArgAbi::Direct]);
+            assert_eq!(byval_align(&st(&[I64, F64]), t), 4);
+        }
+        let r = |t: &Target, ty: &MirTy| classify(t, &[], ty, false).unwrap().ret;
+        assert_eq!(r(&lin, &st(&[I32, I32])), RetAbi::Sret);
+        assert_eq!(r(&win, &st(&[I32, I32])), RetAbi::Coerce("i64".into()));
+        assert_eq!(r(&win, &st(&[F32])), RetAbi::Coerce("i32".into()));
+        assert_eq!(r(&win, &st(&[I8; 3])), RetAbi::Sret);
+        assert_eq!(r(&lin, &MirTy::Prim(I64)), RetAbi::Direct);
+    }
+
+    #[test]
+    fn aapcs_vfp() {
+        let t = on("armv7-unknown-linux-gnueabihf");
+        let a = |ty: &MirTy| aapcs32_arg(ty, &t);
+        let r = |ty: &MirTy| aapcs32_ret(ty, &t);
+        assert_eq!(
+            a(&st(&[F32, F32, F32])),
+            ArgAbi::Coerce("!llvm.array<3 x f32>".into())
+        );
+        assert_eq!(
+            r(&st(&[F64, F64])),
+            RetAbi::Coerce("!llvm.array<2 x f64>".into())
+        );
+        assert_eq!(
+            a(&st(&[I32, I8])),
+            ArgAbi::Coerce("!llvm.array<2 x i32>".into())
+        );
+        // 8-aligned: whole even register pairs.
+        assert_eq!(
+            a(&st(&[I64, I32])),
+            ArgAbi::Coerce("!llvm.array<2 x i64>".into())
+        );
+        assert_eq!(a(&st(&[I32; 17])), ArgAbi::Indirect { byval: true });
+        assert_eq!(byval_align(&st(&[I64; 9]), &t), 8);
+        assert_eq!(r(&st(&[I8, I8, I8])), RetAbi::Coerce("i32".into()));
+        assert_eq!(r(&st(&[I32, I32])), RetAbi::Sret);
+        let s = MirTy::Prim(PrimTy::Str);
+        let rok = classify_rok(&t, &[s.clone()], &s).unwrap();
+        assert_eq!(rok.args[0], ArgAbi::Coerce("!llvm.array<2 x i32>".into()));
+        assert_eq!(rok.ret, RetAbi::Sret);
+        // Arguments alone split as C lays them out.
+        assert!(classify_rok(&t, &[s.clone(), s], &MirTy::Unit).is_none());
     }
 
     /// A runtime `str` on Windows x64 is a 16-byte C struct: by

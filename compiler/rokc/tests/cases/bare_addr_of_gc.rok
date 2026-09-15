@@ -1,0 +1,73 @@
+// expect-exit: 0
+// gc-stress: 50
+// spec: std 101-ptr §1.1.2
+// expect-stdout:
+// dyn 49 250
+// 4 10
+// name 120 5 1
+// a60 b
+// drop 3
+
+// A local whose address is taken stays in its stack slot and a GC root
+// until its scope ends, even when only the pointer touches it after
+// `addr_of`; roots pin, so what it holds never moves under the pointer
+// (stdlib 1.6, refs-lang 7.4.1).
+use rok::bare::mem::{MaybeUninit, drop_in_place};
+use rok::bare::ptr::addr_of;
+
+struct Holder { tag: i64; name: str; xs: List<i64>; }
+
+struct Res { id: i64; }
+impl Drop for Res {
+    fn drop(ref self) { println(f"drop {self.id}"); }
+}
+
+fn churn(n: i64) -> i64 {
+    let total: i64 = 0;
+    for i in 0..n {
+        let g: List<i64> = [i, i + 1, i + 2];
+        let s = f"garbage {i}";
+        total += g.len() as i64 + s.len() as i64;
+    }
+    total
+}
+
+fn main() -> i32 {
+    // Only the pointer writes and reads the local after `addr_of`.
+    let holder: str = "";
+    let p = addr_of(holder);
+    for i in 0..50 {
+        unsafe { p.write(f"dyn {i} {churn(20)}"); }
+        churn(200);
+        let back = unsafe { p.read() };
+        if back != f"dyn {i} {churn(20)}" { return 1; }
+    }
+    println(unsafe { p.read() });
+
+    let xs: List<i64> = [1, 2, 3];
+    let q = addr_of(xs);
+    churn(2000);
+    unsafe { q.write([7, 8, 9, 10]); }
+    churn(2000);
+    println(f"{xs.len()} {xs[3]}");
+
+    let h = Holder { tag: 1, name: "start", xs: [] };
+    let pn = addr_of(h.name);
+    let px = addr_of(h.xs);
+    unsafe {
+        pn.write(f"name {churn(10)}");
+        px.write([4, 5]);
+    }
+    churn(3000);
+    println(f"{h.name} {h.xs[1]} {h.tag}");
+
+    let slot: MaybeUninit<List<str>> = MaybeUninit::uninit();
+    unsafe { slot.as_mut_ptr().write([f"a{churn(5)}", "b"]); }
+    churn(3000);
+    let got = unsafe { slot.assume_init() };
+    println(f"{got[0]} {got[1]}");
+
+    let r = Res { id: 3 };
+    unsafe { drop_in_place(addr_of(r)); }
+    0
+}

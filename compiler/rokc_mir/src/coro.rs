@@ -467,6 +467,7 @@ pub fn rvalue_operands(r: &RValue, out: &mut Vec<Operand>) {
         RValue::ArrayIndex { array, index, .. } => {
             out.extend([Operand::Copy(*array), index.clone()]);
         }
+        RValue::AddrOf(l) => out.push(Operand::Copy(*l)),
         RValue::BufLoad { buf, index, .. } => out.extend([buf.clone(), index.clone()]),
         RValue::BufAtomic {
             buf, index, args, ..

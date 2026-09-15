@@ -2,7 +2,7 @@
 // Diagnostics name a nested fn as written, not by its lifted name.
 // expect-error: missing argument `b` in call to `two`
 // expect-error: argument `x` of `inner` expects `i32`, found `bool`
-// forbid-error: outer#
+// forbid-error: outer/
 
 fn outer() -> i32 {
     fn inner(x: i32) -> i32 { x + 1 }

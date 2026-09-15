@@ -3,7 +3,7 @@
 
     glibc_stubs.py <lib.so.N> <out.s> <out.map>
 
-Reads the exported symbols and their versions from a 64-bit
+Reads the exported symbols and their versions from a 32- or 64-bit
 little-endian ELF shared library and writes an assembly file that
 defines each one (`.symver` binds it to its version; objects keep their
 size, aliases of one object share its storage) and the version script
@@ -28,14 +28,18 @@ def cstr(b, off):
 
 def read(path):
     b = open(path, "rb").read()
-    if b[:4] != b"\x7fELF" or b[4] != 2 or b[5] != 1:
-        sys.exit(f"{path}: not a 64-bit little-endian ELF")
-    shoff, = struct.unpack_from("<Q", b, 0x28)
-    shentsize, shnum = struct.unpack_from("<HH", b, 0x3A)
-    secs = [
-        struct.unpack_from("<IIQQQQIIQQ", b, shoff + i * shentsize)
-        for i in range(shnum)
-    ]
+    if b[:4] != b"\x7fELF" or b[4] not in (1, 2) or b[5] != 1:
+        sys.exit(f"{path}: not a little-endian ELF")
+    elf64 = b[4] == 2
+    if elf64:
+        shoff, = struct.unpack_from("<Q", b, 0x28)
+        shentsize, shnum = struct.unpack_from("<HH", b, 0x3A)
+        shdr, symsize = "<IIQQQQIIQQ", 24
+    else:
+        shoff, = struct.unpack_from("<I", b, 0x20)
+        shentsize, shnum = struct.unpack_from("<HH", b, 0x2E)
+        shdr, symsize = "<IIIIIIIIII", 16
+    secs = [struct.unpack_from(shdr, b, shoff + i * shentsize) for i in range(shnum)]
     by_type = {s[1]: s for s in secs}
     dynsym, verdef, versym = (by_type[t] for t in (SHT_DYNSYM, SHT_GNU_VERDEF, SHT_GNU_VERSYM))
     strtab = secs[dynsym[6]][4]
@@ -50,8 +54,12 @@ def read(path):
         off += nxt
 
     syms = []
-    for i in range(1, dynsym[5] // 24):
-        name, info, _, shndx, value, size = struct.unpack_from("<IBBHQQ", b, dynsym[4] + i * 24)
+    for i in range(1, dynsym[5] // symsize):
+        at = dynsym[4] + i * symsize
+        if elf64:
+            name, info, _, shndx, value, size = struct.unpack_from("<IBBHQQ", b, at)
+        else:
+            name, value, size, info, _, shndx = struct.unpack_from("<IIIBBH", b, at)
         ver, = struct.unpack_from("<H", b, versym[4] + i * 2)
         bind, typ = info >> 4, info & 0xF
         vname, base = names.get(ver & 0x7FFF, (None, 1))
@@ -72,7 +80,7 @@ def main():
         s.append(f".{'weak' if bind == STB_WEAK else 'globl'} {label}")
         if typ in (STT_OBJECT, STT_TLS):
             kind = "%tls_object" if typ == STT_TLS else "%object"
-            sec = ".section .tbss,\"awT\",@nobits" if typ == STT_TLS else ".data"
+            sec = ".section .tbss,\"awT\",%nobits" if typ == STT_TLS else ".data"
             s += [f".type {label}, {kind}", f".size {label}, {size}"]
             first = storage.get((typ, value))
             if first is None:

@@ -24,6 +24,12 @@ pub enum CAbi {
     Aarch64,
     X86_64SysV,
     X86_64Win,
+    /// i386 System V (cdecl).
+    X86SysV,
+    /// Windows x86 (MSVC cdecl).
+    X86Win,
+    /// 32-bit ARM AAPCS, hard-float variant (`*eabihf`).
+    ArmHf,
     /// Aggregates cannot cross the C boundary.
     Other,
 }
@@ -88,6 +94,9 @@ impl Target {
             "aarch64" => CAbi::Aarch64,
             "x86_64" if os == "windows" => CAbi::X86_64Win,
             "x86_64" => CAbi::X86_64SysV,
+            "x86" if os == "windows" => CAbi::X86Win,
+            "x86" => CAbi::X86SysV,
+            "arm" if triple.is_some_and(|t| t.ends_with("eabihf")) => CAbi::ArmHf,
             _ => CAbi::Other,
         };
         Self {
@@ -360,9 +369,20 @@ mod tests {
         let t = Target::new(Some("i686-unknown-linux-gnu"));
         assert_eq!(
             (t.pointer_width, t.wide_align, t.c_abi),
-            (32, 4, CAbi::Other)
+            (32, 4, CAbi::X86SysV)
         );
         assert_eq!((t.os.as_str(), t.arch.as_str()), ("linux", "x86"));
+        let t = Target::new(Some("i686-pc-windows-msvc"));
+        assert_eq!(
+            (t.pointer_width, t.wide_align, t.c_abi),
+            (32, 8, CAbi::X86Win)
+        );
+        let t = Target::new(Some("armv7-unknown-linux-gnueabihf"));
+        assert_eq!(
+            (t.pointer_width, t.wide_align, t.c_abi),
+            (32, 8, CAbi::ArmHf)
+        );
+        assert_eq!(t.arch, "arm");
         let t = Target::new(Some("x86_64-pc-windows-msvc"));
         assert_eq!((t.pointer_width, t.c_abi), (64, CAbi::X86_64Win));
         assert_eq!(t.family(), "windows");

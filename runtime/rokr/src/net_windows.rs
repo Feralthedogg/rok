@@ -955,6 +955,8 @@ pub extern "C" fn rok_io_poll(out: *mut u8, max: usize) -> i32 {
     let mut n = 0;
     DRIVER.lock.lock();
     for ev in &evs[..got as usize] {
+        // An `Op` from `malloc`, aligned for it.
+        #[allow(clippy::cast_ptr_alignment)]
         let op = ev.lpOverlapped.cast::<Op>();
         // SAFETY: every completion on the port is an `Op` of ours; the
         // lock is held.

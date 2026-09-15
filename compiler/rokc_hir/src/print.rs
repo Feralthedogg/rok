@@ -296,6 +296,11 @@ fn print_expr(out: &mut String, e: &HirExpr) {
             print_expr(out, len);
             out.push(')');
         }
+        HirExprKind::AddrOf { place } => {
+            out.push_str("addr_of(");
+            print_expr(out, place);
+            out.push(')');
+        }
         HirExprKind::RawRead { addr, .. } => {
             out.push_str("ptr_read(");
             print_expr(out, addr);

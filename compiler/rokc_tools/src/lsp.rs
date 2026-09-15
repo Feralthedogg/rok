@@ -451,53 +451,72 @@ impl<W: Write> Server<W> {
                         .collect(),
                 ))
             }
-            "textDocument/completion" => Some(Json::Arr(self.complete(doc, &path, off))),
+            "textDocument/completion" => {
+                let compile = |t: &str| self.compile(&path, t);
+                let (_, found) = complete(text, &key, off, compile, doc.good.as_ref());
+                Some(Json::Arr(
+                    found
+                        .into_iter()
+                        .map(|(label, kind, detail)| {
+                            Json::obj([
+                                ("label", Json::Str(label)),
+                                ("kind", Json::num(kind)),
+                                ("detail", Json::Str(detail)),
+                            ])
+                        })
+                        .collect(),
+                ))
+            }
             _ => None,
         }
     }
+}
 
-    fn complete(&self, doc: &Doc, path: &Path, off: usize) -> Vec<Json> {
-        let text = doc.text.as_str();
-        let key = path.display().to_string();
-        let line_start = text[..off].rfind('\n').map_or(0, |i| i + 1);
-        let before = &text[line_start..off];
-        let head = before.trim_end_matches(is_ident_char);
-        let partial = &before[head.len()..];
-        let item = |label: &str, kind: u32, detail: String| {
-            Json::obj([
-                ("label", Json::str(label)),
-                ("kind", Json::num(kind)),
-                ("detail", Json::Str(detail)),
-            ])
-        };
-        let mut out: Vec<Json> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        let mut push = |label: &str, kind: u32, detail: String| {
-            if label.starts_with(partial) && seen.insert(label.to_owned()) {
-                out.push(item(label, kind, detail));
-            }
-        };
-        if head.ends_with('.') && !head.ends_with("..") {
-            // Type the receiver: recompile without `.partial` and take
-            // the outermost expression starting where the receiver does.
-            let dot = line_start + head.len() - 1;
-            let start = receiver_start(text, dot);
-            // At a line end the receiver ends a statement: close it.
-            let rest = &text[off..];
-            let at_end = rest.split('\n').next().is_some_and(|l| l.trim().is_empty());
-            let edited = format!("{}{}{rest}", &text[..dot], if at_end { ";" } else { "" });
-            let fresh = self.compile(path, &edited);
-            let starts = |s: Span| s.start as usize == start;
-            let found = fresh
-                .find_expr(&key, starts, true)
-                .map(|e| (&fresh, e.ty.clone()))
-                .or_else(|| {
-                    let a = doc.good.as_ref()?;
-                    Some((a, a.find_expr(&key, starts, true)?.ty.clone()))
-                });
-            let Some((a, ty)) = found else {
-                return out;
-            };
+/// A completion candidate: label, LSP `CompletionItemKind`, detail.
+pub(crate) type Candidate = (String, u32, String);
+
+/// Completion at byte `off` of `text` (the file `key`): after `recv.`
+/// the receiver's fields and methods, after `a::b::` the items under
+/// the path. `compile` checks an edited `text`; `good` is the last
+/// compile that type-checked. Returns where the word being completed
+/// starts and the candidates extending it.
+pub(crate) fn complete(
+    text: &str,
+    key: &str,
+    off: usize,
+    compile: impl Fn(&str) -> Analysis,
+    good: Option<&Analysis>,
+) -> (usize, Vec<Candidate>) {
+    let line_start = text[..off].rfind('\n').map_or(0, |i| i + 1);
+    let before = &text[line_start..off];
+    let head = before.trim_end_matches(is_ident_char);
+    let partial = &before[head.len()..];
+    let mut out: Vec<Candidate> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push = |label: &str, kind: u32, detail: String| {
+        if label.starts_with(partial) && seen.insert(label.to_owned()) {
+            out.push((label.to_owned(), kind, detail));
+        }
+    };
+    if head.ends_with('.') && !head.ends_with("..") {
+        // Type the receiver: recompile without `.partial` and take
+        // the outermost expression starting where the receiver does.
+        let dot = line_start + head.len() - 1;
+        let start = receiver_start(text, dot);
+        // At a line end the receiver ends a statement: close it.
+        let rest = &text[off..];
+        let at_end = rest.split('\n').next().is_some_and(|l| l.trim().is_empty());
+        let edited = format!("{}{}{rest}", &text[..dot], if at_end { ";" } else { "" });
+        let fresh = compile(&edited);
+        let starts = |s: Span| s.start as usize == start;
+        let found = fresh
+            .find_expr(key, starts, true)
+            .map(|e| (&fresh, e.ty.clone()))
+            .or_else(|| {
+                let a = good?;
+                Some((a, a.find_expr(key, starts, true)?.ty.clone()))
+            });
+        if let Some((a, ty)) = found {
             let hir = a.hir.as_ref().expect("find_expr needs HIR");
             if let HirTy::Struct(id) = &ty {
                 if let Some(s) = hir.structs.iter().find(|s| s.id == *id) {
@@ -514,20 +533,19 @@ impl<W: Write> Server<W> {
                     push(short_name(&f.name), 2, signature(hir, f));
                 }
             }
-        } else if let Some(prefix) = head.strip_suffix("::") {
-            let start = prefix
-                .rfind(|c: char| !(is_ident_char(c) || c == ':'))
-                .map_or(0, |i| i + 1);
-            let segs: Vec<&str> = prefix[start..].split("::").collect();
-            // Item names only: the last good compile has them (the
-            // buffer with a dangling `a::` does not compile).
-            let Some(hir) = doc.good.as_ref().and_then(|a| a.hir.as_ref()) else {
-                return out;
-            };
+        }
+    } else if let Some(prefix) = head.strip_suffix("::") {
+        let start = prefix
+            .rfind(|c: char| !(is_ident_char(c) || c == ':'))
+            .map_or(0, |i| i + 1);
+        let segs: Vec<&str> = prefix[start..].split("::").collect();
+        // Item names only: the last good compile has them (the
+        // buffer with a dangling `a::` does not compile).
+        if let Some(hir) = good.and_then(|a| a.hir.as_ref()) {
             path_completions(hir, &segs, &mut push);
         }
-        out
     }
+    (off - partial.len(), out)
 }
 
 /// `a::b::` → the next segments of every item path under it, plus the
@@ -584,7 +602,7 @@ fn path_completions(hir: &HirModule, segs: &[&str], push: &mut impl FnMut(&str, 
 
 /// Hover markdown: the code in a `rok` fence, then a function's doc
 /// text from its `#[doc]` attributes (spec 1.2).
-fn hover(a: &Analysis, key: &str, text: &str, off: usize) -> Option<String> {
+pub(crate) fn hover(a: &Analysis, key: &str, text: &str, off: usize) -> Option<String> {
     let hir = a.hir.as_ref()?;
     let fenced = |code: String| format!("```rok\n{code}\n```");
     let with_doc = |f: &rokc_hir::HirFunction| {
@@ -1124,7 +1142,7 @@ fn is_ident_char(c: char) -> bool {
 
 /// Where the receiver of the `.` at `dot` starts: back over a chain of
 /// identifiers, `.`, `::` and bracketed groups (`a.b(x)[0].`).
-fn receiver_start(text: &str, dot: usize) -> usize {
+pub(crate) fn receiver_start(text: &str, dot: usize) -> usize {
     let b = text.as_bytes();
     let (mut i, mut depth) = (dot, 0u32);
     while i > 0 {

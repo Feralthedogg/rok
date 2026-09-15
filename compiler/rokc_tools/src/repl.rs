@@ -39,7 +39,7 @@ use rokc_interface::{
 };
 use rokc_ir_common::{ConstVal, LocalId};
 
-use crate::analysis::{ty_name, ty_path};
+use crate::analysis::{Analysis, ty_name, ty_path};
 
 const VALUE: &str = "__rok_repl_v";
 /// The host's `__rok_repl_out`: a cell's shown value.
@@ -428,7 +428,7 @@ impl Repl {
 
     /// The type of `expr` in the session, without running it; `quiet`
     /// keeps its errors unreported.
-    pub fn type_of(&self, expr: &str, quiet: bool) -> Option<String> {
+    fn type_of(&self, expr: &str, quiet: bool) -> Option<String> {
         let src = self.session(&self.state, &format!("let {VALUE} = ({expr});"), None);
         self.compile(&src, quiet)
             .and_then(|r| binding_ty(&r, VALUE))
@@ -948,19 +948,7 @@ impl Repl {
     /// text read as `<repl>:line:col`, or as the loaded program's own
     /// (diagnostics and the panic locations codegen embeds).
     fn compile(&self, src: &str, quiet: bool) -> Option<CompileResult> {
-        let mut s = Session::new();
-        for b in &self.bootstrap {
-            s.add_bootstrap_file(b.clone());
-        }
-        for (n, p) in &self.externs {
-            s.add_extern(n.clone(), p.clone());
-        }
-        let path = self
-            .program
-            .as_ref()
-            .map_or_else(|| self.tmp.path().join("repl.rok"), |p| p.session.clone());
-        s.set_anonymous(self.program.as_ref().is_none_or(|p| p.anonymous));
-        s.set_cache_library(true);
+        let (s, path) = self.compiler();
         rokc_diagnostic::clear_files();
         // Registered first so the views are in place while HIR lowering
         // writes caller locations (`#[track_caller]`).
@@ -999,6 +987,44 @@ impl Repl {
             }
         }
         None
+    }
+
+    /// A compiler session for session sources, and the path they stand at.
+    fn compiler(&self) -> (Session, PathBuf) {
+        let mut s = Session::new();
+        for b in &self.bootstrap {
+            s.add_bootstrap_file(b.clone());
+        }
+        for (n, p) in &self.externs {
+            s.add_extern(n.clone(), p.clone());
+        }
+        let path = self
+            .program
+            .as_ref()
+            .map_or_else(|| self.tmp.path().join("repl.rok"), |p| p.session.clone());
+        s.set_anonymous(self.program.as_ref().is_none_or(|p| p.anonymous));
+        s.set_cache_library(true);
+        (s, path)
+    }
+
+    /// The session source with `body` as the cell, and where `body`
+    /// starts in it.
+    pub fn source(&self, body: &str) -> (String, usize) {
+        let src = self.session(&self.state, body, None);
+        let at = if body.is_empty() {
+            src.len()
+        } else {
+            src.len() - body.len() - "\n}\n".len()
+        };
+        (src, at)
+    }
+
+    /// Check a session source (`source`) for the tools, reporting
+    /// nothing: the analysis and the path its spans name.
+    pub fn analyze(&self, src: &str) -> (Analysis, String) {
+        let (mut s, path) = self.compiler();
+        let a = crate::analysis::analyze(&mut s, src, &path, &[]);
+        (a, path.display().to_string())
     }
 
     /// Where the user's text is in the session source `src`: the cell

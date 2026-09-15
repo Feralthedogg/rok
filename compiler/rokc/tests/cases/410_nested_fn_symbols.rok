@@ -1,0 +1,40 @@
+// spec: 004.10.9-multi-level-nesting
+// A type and a fn share the name `outer`: the fn's nested `inner` and
+// the type's method `inner` are distinct items (and symbols), as are the
+// `helper`s nested in methods of the same name on different types.
+// expect-exit: 0
+// expect-stdout:
+// 9 1 10 20 30
+
+struct outer { x: i32 }
+impl outer {
+    fn inner(self) -> i32 { 1 }
+    fn m(self) -> i32 {
+        fn helper() -> i32 { 10 }
+        helper()
+    }
+}
+struct T {}
+impl T {
+    fn m(self) -> i32 {
+        fn helper() -> i32 { 20 }
+        helper()
+    }
+}
+trait Tr {
+    fn d(self) -> i32 {
+        fn helper() -> i32 { 30 }
+        helper()
+    }
+}
+impl Tr for T {}
+fn outer() -> i32 {
+    fn inner() -> i32 { 2 }
+    let a = { fn twice() -> i32 { 3 } twice() };
+    let b = { fn twice() -> i32 { 4 } twice() };
+    inner() + a + b
+}
+fn main() {
+    let o = outer { x: 0 };
+    println(f"{outer()} {o.inner()} {o.m()} {T {}.m()} {T {}.d()}");
+}

@@ -28,9 +28,11 @@ const EM_AARCH64: u16 = 183;
 const R_X86_64_64: u32 = 1;
 const R_X86_64_PC32: u32 = 2;
 const R_X86_64_PLT32: u32 = 4;
+const R_X86_64_32: u32 = 10;
 const R_X86_64_GOTTPOFF: u32 = 22;
 const R_X86_64_REX_GOTPCRELX: u32 = 42;
 const R_AARCH64_ABS64: u32 = 257;
+const R_AARCH64_ABS32: u32 = 258;
 const R_AARCH64_PREL32: u32 = 261;
 const R_AARCH64_ADR_PREL_PG_HI21: u32 = 275;
 const R_AARCH64_ADD_ABS_LO12_NC: u32 = 277;
@@ -40,7 +42,7 @@ const R_AARCH64_LD64_GOT_LO12_NC: u32 = 312;
 const R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21: u32 = 541;
 const R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC: u32 = 542;
 
-/// `(offset, type, symbol, addend)`.
+/// `(offset, type, symbol table index, addend)`.
 type Rela = (u64, u32, usize, i64);
 
 struct Out {
@@ -125,6 +127,22 @@ pub fn write(obj: &Obj) -> Vec<u8> {
         info: 0,
         entsize: 0,
     }];
+    // Symbols: null, the section symbols (code and data, then the extra
+    // sections), locals, then globals.
+    let nsect_syms = SECTS
+        .iter()
+        .filter(|s| !obj.sects[s].data.is_empty())
+        .count()
+        + obj.extra.len();
+    let mut order: Vec<usize> = (0..obj.syms.len()).collect();
+    let local = |i: usize| obj.syms[i].def.is_some() && !obj.syms[i].global;
+    order.sort_by_key(|&i| (!local(i), i));
+    let mut index = vec![0usize; obj.syms.len()];
+    for (k, &i) in order.iter().enumerate() {
+        index[i] = 1 + nsect_syms + k;
+    }
+    // The section index of each section symbol.
+    let mut sect_syms: Vec<usize> = Vec::new();
     // The relocations of each section by its index.
     let mut relas: Vec<(usize, Vec<Rela>)> = Vec::new();
     let mut sect_index = std::collections::HashMap::new();
@@ -140,12 +158,13 @@ pub fn write(obj: &Obj) -> Vec<u8> {
             Sect::Data => (".data", SHF_ALLOC | SHF_WRITE),
         };
         sect_index.insert(s, outs.len());
+        sect_syms.push(outs.len());
         let rs = sec
             .relocs
             .iter()
             .map(|r| {
                 let (ty, addend) = reloc(r.kind, x86);
-                (u64::from(r.off), ty, r.sym as usize, addend)
+                (u64::from(r.off), ty, index[r.sym as usize], addend)
             })
             .collect();
         relas.push((outs.len(), rs));
@@ -167,7 +186,7 @@ pub fn write(obj: &Obj) -> Vec<u8> {
         relas.push((
             outs.len(),
             rs.into_iter()
-                .map(|(off, s)| (u64::from(off), ty, s as usize, 0))
+                .map(|(off, s)| (u64::from(off), ty, index[s as usize], 0))
                 .collect(),
         ));
         outs.push(Out {
@@ -181,19 +200,38 @@ pub fn write(obj: &Obj) -> Vec<u8> {
             entsize: 0,
         });
     }
-    // Debug sections: the Mach-O contents (the target's object address)
-    // become explicit addends.
+    // Debug sections: the Mach-O contents (the target's object address,
+    // an offset into a debug section) become explicit addends.
+    let extra_sym = 1 + sect_syms.len();
     for (_, name, _, sec) in &obj.extra {
         let mut data = sec.data.clone();
         let mut rs = Vec::new();
         for r in &sec.relocs {
             let at = r.off as usize;
+            if r.kind == RelKind::SecOff32 {
+                let v = u32::from_le_bytes(data[at..at + 4].try_into().unwrap_or([0; 4]));
+                data[at..at + 4].fill(0);
+                let ty = if x86 { R_X86_64_32 } else { R_AARCH64_ABS32 };
+                rs.push((
+                    u64::from(r.off),
+                    ty,
+                    extra_sym + r.sym as usize,
+                    i64::from(v),
+                ));
+                continue;
+            }
             let v = u64::from_le_bytes(data[at..at + 8].try_into().unwrap_or([0; 8]));
             let base = obj.syms[r.sym as usize].def.map_or(0, |d| u64::from(d.1));
             data[at..at + 8].fill(0);
             let ty = if x86 { R_X86_64_64 } else { R_AARCH64_ABS64 };
-            rs.push((u64::from(r.off), ty, r.sym as usize, (v - base) as i64));
+            rs.push((
+                u64::from(r.off),
+                ty,
+                index[r.sym as usize],
+                (v - base) as i64,
+            ));
         }
+        sect_syms.push(outs.len());
         relas.push((outs.len(), rs));
         outs.push(Out {
             name: format!(".{}", name.trim_start_matches('_')),
@@ -217,20 +255,9 @@ pub fn write(obj: &Obj) -> Vec<u8> {
         entsize: 0,
     });
 
-    // Symbols: null, the section symbols, locals, then globals.
-    let mut order: Vec<usize> = (0..obj.syms.len()).collect();
-    let local = |i: usize| obj.syms[i].def.is_some() && !obj.syms[i].global;
-    order.sort_by_key(|&i| (!local(i), i));
-    let nsect_syms = sect_index.len();
-    let mut index = vec![0usize; obj.syms.len()];
-    for (k, &i) in order.iter().enumerate() {
-        index[i] = 1 + nsect_syms + k;
-    }
     let mut strtab = vec![0u8];
     let mut symtab = vec![0u8; 24];
-    let mut by_sect: Vec<(Sect, usize)> = sect_index.iter().map(|(s, i)| (*s, *i)).collect();
-    by_sect.sort_by_key(|x| x.1);
-    for (_, shndx) in &by_sect {
+    for shndx in &sect_syms {
         put32(&mut symtab, 0);
         symtab.push(STT_SECTION);
         symtab.push(0);
@@ -279,7 +306,7 @@ pub fn write(obj: &Obj) -> Vec<u8> {
         let mut data = Vec::new();
         for &(off, ty, sym, addend) in rs {
             put64(&mut data, off);
-            put64(&mut data, ((index[sym] as u64) << 32) | u64::from(ty));
+            put64(&mut data, ((sym as u64) << 32) | u64::from(ty));
             put64(&mut data, addend as u64);
         }
         outs.push(Out {

@@ -38,6 +38,9 @@ pub struct HirInput {
     /// library, for the optimizer to inline: they stay the archive's
     /// symbols (`available_externally`).
     pub inline_prebuilt: bool,
+    /// Bits of `usize` / `isize` (the target's pointer width) for
+    /// literal ranges and constant evaluation; 0 means 64.
+    pub pointer_width: u32,
 }
 
 /// Marker attribute on a trait / impl method, path `[ASSOC_TYPES_ATTR,
@@ -464,6 +467,12 @@ pub enum HirExprKind {
         value: Box<HirExpr>,
         ty: HirTy,
         volatile: bool,
+    },
+    /// `addr_of(place)` (`rok::bare`): the address (`usize`) of a local,
+    /// or of a field / array element inside one; the local lives in
+    /// memory from then on.
+    AddrOf {
+        place: Box<HirExpr>,
     },
     /// `size_of::<T>()` / `align_of::<T>()` (`usize`).
     SizeOf {
@@ -1038,6 +1047,7 @@ pub fn each_expr<'a>(e: &'a HirExpr, f: &mut impl FnMut(&'a HirExpr)) {
         | HirExprKind::ArrayRepeat { value: x, .. }
         | HirExprKind::BufNew { len: x, .. }
         | HirExprKind::RawRead { addr: x, .. }
+        | HirExprKind::AddrOf { place: x }
         | HirExprKind::UnionWrite { value: x, .. }
         | HirExprKind::UnionRead { target: x, .. }
         | HirExprKind::Suspend { value: x, .. } => go(x),
@@ -1183,6 +1193,7 @@ pub fn each_expr_mut(e: &mut HirExpr, f: &mut impl FnMut(&mut HirExpr)) {
         | HirExprKind::ArrayRepeat { value: x, .. }
         | HirExprKind::BufNew { len: x, .. }
         | HirExprKind::RawRead { addr: x, .. }
+        | HirExprKind::AddrOf { place: x }
         | HirExprKind::UnionWrite { value: x, .. }
         | HirExprKind::UnionRead { target: x, .. }
         | HirExprKind::Suspend { value: x, .. } => go(x),

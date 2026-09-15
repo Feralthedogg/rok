@@ -417,7 +417,7 @@ impl fmt::Display for RokDiagnostic {
 ///
 /// Within about a third of the name's length (names under three chars
 /// only match by case), ties to the first. Exact matches and internal
-/// names (`__x`, `#x`) give nothing.
+/// names (`__x`, `#x`, a nested fn's `f/x`) give nothing.
 #[must_use]
 pub fn suggest<'a, I>(name: &str, candidates: I) -> Option<&'a str>
 where
@@ -427,7 +427,7 @@ where
     let limit = if len < 3 { 0 } else { (len + 2) / 3 };
     let mut best: Option<(usize, &str)> = None;
     for c in candidates {
-        if c == name || c.is_empty() || c.starts_with("__") || c.contains('#') {
+        if c == name || c.is_empty() || c.starts_with("__") || c.contains(['#', '/']) {
             continue;
         }
         let d = edit_distance(name, c);

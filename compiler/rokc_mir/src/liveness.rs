@@ -114,6 +114,24 @@ fn successors(t: &Terminator) -> Vec<rokc_ir_common::BlockId> {
     }
 }
 
+/// Locals whose address is taken (`RValue::AddrOf`): a pointer may read
+/// or write them anywhere in their scope, so they live in their slot,
+/// rooted until `StorageDead`, and never die early.
+#[must_use]
+pub fn addressed(f: &MirFunction) -> HashSet<LocalId> {
+    f.blocks
+        .iter()
+        .flat_map(|b| &b.stmts)
+        .filter_map(|s| match s {
+            Statement::Assign {
+                rvalue: crate::RValue::AddrOf(l),
+                ..
+            } => Some(*l),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Per local: it is assigned exactly once, by an `Assign`, and read
 /// only after that in the same block (so its value can stay an SSA
 /// value). Never a parameter or a block param.
@@ -153,6 +171,9 @@ pub fn block_local(f: &MirFunction) -> Vec<bool> {
     }
     for (o, d) in ok.iter_mut().zip(&def) {
         *o &= d.is_some();
+    }
+    for l in addressed(f) {
+        ok[l.0 as usize] = false;
     }
     ok
 }
@@ -310,11 +331,13 @@ pub fn live_across(
     safepoint: impl Fn(&Statement) -> bool,
     poll: impl Fn(BlockId) -> bool,
 ) -> HashSet<LocalId> {
+    let mut always: HashSet<LocalId> = addressed(f);
+    always.retain(|&l| tracked(l));
     let flow = Flow::new(f, tracked);
     let n = flow.dense.ids.len();
     let mut out = Bits::new(n);
     if n == 0 || f.blocks.is_empty() {
-        return HashSet::new();
+        return always;
     }
     out.union(&flow.live_in[0]);
     for (bi, b) in f.blocks.iter().enumerate() {
@@ -341,6 +364,7 @@ pub fn live_across(
     (0..n)
         .filter(|&i| out.has(i))
         .map(|i| flow.dense.ids[i])
+        .chain(always)
         .collect()
 }
 
@@ -354,7 +378,8 @@ pub fn deaths(f: &MirFunction, tracked: impl Fn(LocalId) -> bool) -> Deaths {
             .map(|b| vec![Vec::new(); b.stmts.len()])
             .collect(),
     };
-    let flow = Flow::new(f, tracked);
+    let addressed = addressed(f);
+    let flow = Flow::new(f, |l| tracked(l) && !addressed.contains(&l));
     let Flow {
         dense,
         succs,

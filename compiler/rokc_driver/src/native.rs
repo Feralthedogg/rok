@@ -1,6 +1,8 @@
-//! Which backend generates the machine code: rok's own
-//! (`rokc_codegen_native`, no LLVM) builds `-O0`, LLVM (`toolchain`)
-//! the optimized code.
+//! Which backend generates the machine code.
+//!
+//! rok's own (`rokc_codegen_native`, no LLVM) builds `-O0` where it has
+//! the arch (`aarch64`, `x86_64`); LLVM (`toolchain`) builds the optimized
+//! code, and every other target at `-O0` too (the 32-bit ones).
 
 use rokc_diagnostic::RokDiagnostic;
 

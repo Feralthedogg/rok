@@ -6,6 +6,6 @@
 // buffer) panics instead of wrapping, at every opt level.
 fn main() {
     println("ab".repeat(1));
-    let s = "ab".repeat(9223372036854775809usize);
+    let s = "ab".repeat(usize::MAX / 2 + 2);
     println(f"{s.len()}");
 }

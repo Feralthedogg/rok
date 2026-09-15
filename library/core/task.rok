@@ -1462,9 +1462,10 @@ pub fn unpark(key: usize) {
 
 // ---- the I/O driver (707) ----
 
-/// The parking key of `fd`'s read (`write == 0`) or write readiness.
+/// The parking key of `fd`'s read (`write == 0`) or write readiness:
+/// odd, so never a GC address (8-aligned) at any pointer width.
 fn io_key(fd: i32, write: i32) -> usize {
-    (1usize << 62) | ((fd as usize) * 2 + (write as usize))
+    (fd as usize) * 4 + (write as usize) * 2 + 1
 }
 
 /// Start the driver thread once: it blocks in kqueue / epoll and

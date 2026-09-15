@@ -31,7 +31,21 @@ use super::*;
 
 const STEP_LIMIT: u64 = 4_000_000;
 const DEPTH_LIMIT: u32 = 128;
-const POINTER_WIDTH: u32 = 64;
+
+thread_local! {
+    /// Bits of `usize` / `isize` in the program being lowered
+    /// (`HirInput::pointer_width`, set by `lower_full`).
+    static POINTER_WIDTH: std::cell::Cell<u32> = const { std::cell::Cell::new(64) };
+}
+
+pub(super) fn set_pointer_width(bits: u32) {
+    POINTER_WIDTH.set(if bits == 0 { 64 } else { bits });
+}
+
+/// Bits of `usize` / `isize` on the target.
+pub(super) fn pointer_width() -> u32 {
+    POINTER_WIDTH.get()
+}
 
 #[derive(Clone, Debug)]
 pub(super) enum Value {
@@ -102,8 +116,8 @@ pub(super) struct Interp<'b> {
     depth: u32,
 }
 
-pub(super) const fn int_range(p: PrimTy) -> (i128, i128) {
-    let bits = p.bit_width(POINTER_WIDTH);
+pub(super) fn int_range(p: PrimTy) -> (i128, i128) {
+    let bits = p.bit_width(pointer_width());
     if p.is_signed_int() {
         (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
     } else {
@@ -112,8 +126,8 @@ pub(super) const fn int_range(p: PrimTy) -> (i128, i128) {
 }
 
 /// Two's-complement wrap of `v` into `p`.
-const fn wrap(v: i128, p: PrimTy) -> i128 {
-    let bits = p.bit_width(POINTER_WIDTH);
+fn wrap(v: i128, p: PrimTy) -> i128 {
+    let bits = p.bit_width(pointer_width());
     let mask = (1u128 << bits) - 1;
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
     let low = (v as u128) & mask;
@@ -632,7 +646,9 @@ impl<'b> Interp<'b> {
                 Ok(Value::Unit)
             }
             K::BufAtomic { .. } => runtime("performs an atomic operation"),
-            K::RawRead { .. } | K::RawWrite { .. } => runtime("accesses raw memory"),
+            K::RawRead { .. } | K::RawWrite { .. } | K::AddrOf { .. } => {
+                runtime("accesses raw memory")
+            }
             K::SizeOf { .. } => runtime("asks for a type layout"),
             K::MlirOp { .. } => runtime("runs an MLIR operation"),
             K::UnionWrite { value, .. } => Ok(Value::Union(Box::new(self.expr(value, f)?))),
@@ -864,7 +880,7 @@ fn pure_extern(name: &str, args: &[Value]) -> Option<Value> {
 fn reinterpret(v: Value, to: &HirTy) -> Option<Value> {
     let tp = prim_of(to)?;
     let bits: u64 = match v {
-        Value::Int(i, p) => (i as u64) & (u64::MAX >> (64 - p.bit_width(POINTER_WIDTH))),
+        Value::Int(i, p) => (i as u64) & (u64::MAX >> (64 - p.bit_width(pointer_width()))),
         Value::Char(c) => u64::from(c),
         Value::Bool(b) => u64::from(b),
         Value::Float(x, PrimTy::F32) => u64::from((x as f32).to_bits()),
@@ -914,7 +930,7 @@ fn checked(v: Option<i128>, p: PrimTy, what: &str, span: Span) -> R<Value> {
 }
 
 fn shift_amount(r: i128, p: PrimTy, span: Span, dir: &str) -> R<u32> {
-    let bits = p.bit_width(POINTER_WIDTH);
+    let bits = p.bit_width(pointer_width());
     match u32::try_from(r) {
         Ok(n) if n < bits => Ok(n),
         _ => Err(Stop::Fail(
@@ -1024,7 +1040,7 @@ fn binop(op: PrimOp, l: Value, r: Value, span: Span) -> R<Value> {
 }
 
 fn unop(op: PrimOp, v: Value, span: Span) -> R<Value> {
-    let bits_of = |p: PrimTy| p.bit_width(POINTER_WIDTH);
+    let bits_of = |p: PrimTy| p.bit_width(pointer_width());
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
     let raw = |a: i128, p: PrimTy| (a as u128) & ((1u128 << bits_of(p)) - 1);
     match (op, v) {
@@ -1337,7 +1353,7 @@ fn fold_call(ctx: &LowerCtx<'_>, h: &mut HirExpr, at: Span) {
 pub(super) fn eval_scalar(ctx: &LowerCtx<'_>, e: &Expr) -> Result<(i128, Option<PrimTy>), String> {
     let mut cx = ctx.clone();
     // A const parameter bound without its type reads as a `usize`.
-    for (n, t) in ctx.ty_subst {
+    for (n, t) in ctx.ty_subst.iter() {
         if let Some((v, None)) = t.as_const() {
             cx.splices
                 .insert(n.clone(), hir_int(v, PrimTy::Usize, e.span));

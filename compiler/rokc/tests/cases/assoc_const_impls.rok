@@ -1,0 +1,35 @@
+// expect-exit: 0
+// expect-stdout:
+// 3 7 31 311
+// 3 31
+// 5
+
+// Spec 2.8.3a: associated consts come from the one impl registry, a
+// concrete impl's (inherent or trait) by its target, a generic impl's
+// by matching it; a generic impl's value sees its type parameters.
+trait Size {
+    const N: i32;
+    fn n(self) -> i32 { return Self::N; }
+}
+
+struct A {}
+impl Size for A { const N: i32 = 3; }
+impl A { const K: i32 = 7; }
+
+struct W<T> { v: T; }
+impl<T: Size> Size for W<T> {
+    const N: i32 = T::N * 10 + 1;
+}
+
+fn n_of<T: Size>(x: T) -> i32 { return T::N; }
+
+trait Dflt { const D: i32 = 5; }
+impl Dflt for (i32, bool) {}
+
+fn main() -> i32 {
+    let f = |x: i32| x + W::<W<A>>::N;
+    println(f"{A::N} {A::K} {W::<A>::N} {f(0)}");
+    println(f"{n_of(A {})} {W { v: A {} }.n()}");
+    println(f"{<(i32, bool) as Dflt>::D}");
+    return 0;
+}

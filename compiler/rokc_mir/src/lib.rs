@@ -11,7 +11,7 @@ mod specialize;
 mod target;
 mod ty;
 
-pub use liveness::{Deaths, block_local, deaths, live_across};
+pub use liveness::{Deaths, addressed, block_local, deaths, live_across};
 pub use lower::lower;
 pub use print::print_mir;
 pub use target::{CAbi, GcSlot, Target};
@@ -28,10 +28,44 @@ pub struct MirModule {
     pub statics: Vec<MirStaticDef>,
     /// Struct name and field names by `StructId` (`-g` DWARF types).
     pub struct_names: std::collections::HashMap<u32, (String, Vec<String>)>,
+    /// `-g` types the `MirTy`s do not tell.
+    pub debug: DebugTypes,
     pub target: Target,
     /// The packages of the program and how they link (filled by the
     /// driver).
     pub link: Link,
+}
+
+/// What `-g` shows of a value beyond its `MirTy`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DebugTy {
+    /// As its `MirTy` says.
+    Mir(MirTy),
+    /// A sum or enum laid out `(i32 tag, payload)` (`.1`): its name and
+    /// the variants with data, `(stored tag, name, payload)`.
+    Sum(String, MirTy, Vec<(u32, String, DebugTy)>),
+    /// A reference to a `GcBuf` object (its name) of these elements.
+    Buf(String, Box<DebugTy>),
+}
+
+impl DebugTy {
+    /// Whether it describes a `ty` value.
+    #[must_use]
+    pub fn fits(&self, ty: &MirTy) -> bool {
+        match self {
+            Self::Mir(m) | Self::Sum(_, m, _) => m == ty,
+            Self::Buf(..) => *ty == MirTy::GcRef,
+        }
+    }
+}
+
+/// The `DebugTy`s of named locals and struct fields whose `MirTy`
+/// loses something (a sum's variants, a GC reference's pointee).
+#[derive(Clone, Debug, Default)]
+pub struct DebugTypes {
+    pub locals: std::collections::HashMap<(FunctionId, LocalId), DebugTy>,
+    /// Every field's, by `StructId`.
+    pub fields: std::collections::HashMap<u32, Vec<DebugTy>>,
 }
 
 /// The packages items belong to, and how this module links with
@@ -298,6 +332,10 @@ pub enum RValue {
         ty: MirTy,
         volatile: bool,
     },
+    // The address (`usize`) of the local's stack slot. The local stays in
+    // that slot (never an SSA value), rooted for its whole scope when it
+    // holds GC references (`liveness::addressed`).
+    AddrOf(LocalId),
     // Size (or alignment) of `ty` in bytes, as `usize`.
     SizeOf {
         ty: MirTy,

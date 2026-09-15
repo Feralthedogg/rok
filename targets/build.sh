@@ -6,11 +6,12 @@
 #                        (Windows: rokr.lib; rokc carries the rest)
 #   Linux, -musl:        crt1.o crti.o crtn.o libc.a: musl, the copy the
 #                        pinned Rust toolchain ships for the target
-#   Linux, -gnu:         Scrt1.o crti.o crtn.o libc_nonshared.a and stub
+#   Linux, -gnu(eabihf): Scrt1.o crti.o crtn.o libc_nonshared.a and stub
 #                        libc.so / libm.so (sonames .so.6), made by
-#                        glibc_stubs.py from glibc 2.36 (Debian 12; the
-#                        packages are checked against pinned SHA-256s).
-#                        Executables need glibc >= 2.34.
+#                        glibc_stubs.py from glibc 2.36 (Debian 12 amd64 /
+#                        arm64 / i386 / armhf; the packages are checked
+#                        against pinned SHA-256s). Executables need
+#                        glibc >= 2.34.
 #
 #   targets/build.sh [<triple>...]
 #
@@ -21,7 +22,8 @@ set -eu
 
 TARGETS="x86_64-apple-darwin aarch64-apple-darwin x86_64-unknown-linux-gnu
 aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-musl
-x86_64-pc-windows-msvc aarch64-pc-windows-msvc"
+x86_64-pc-windows-msvc aarch64-pc-windows-msvc i686-unknown-linux-gnu
+i686-pc-windows-msvc armv7-unknown-linux-gnueabihf"
 GLIBC=2.36-9+deb12u14
 GLIBC_URL=https://snapshot.debian.org/archive/debian/20260504T025922Z/pool/main/g/glibc
 # <package>_<arch> <sha256>
@@ -29,7 +31,11 @@ GLIBC_SHA256="
 libc6_amd64 ba4f88f73dbc3ae9055f3c20f4523bfdbaf1ad13ff95e258924f77d20b4fbedf
 libc6_arm64 01f4330719fd4f65580e16ea5a0527f372fca750e8f588d26deaf09f2d3b1cf4
 libc6-dev_amd64 0218fc2befcd784c1b0c6292c0a137ce89fad054efaa579ad083bee0f2c01aae
-libc6-dev_arm64 8bc395bf2ee9939f1a6ae395f974cffdcf541d98f99adfe89ce7e4bef36d159e"
+libc6-dev_arm64 8bc395bf2ee9939f1a6ae395f974cffdcf541d98f99adfe89ce7e4bef36d159e
+libc6_i386 76b12e06be66ec3fc2c1791d7d8cf34c2b828ed210e3913feeeb8edc9688f820
+libc6-dev_i386 c02c0adacabf53b8f34364940c7c4fe5aedaf921765e915742cc31ffc7a9d1ad
+libc6_armhf 758c68b92654747025b48476a45c315bf16df1321224abdd9be672bfd120be45
+libc6-dev_armhf ca9486dc7f2dfb25c61c0c93d561c01f8abdf9866bd4c157f0ccd518295bbbb7"
 
 here=$(cd "$(dirname "$0")" && pwd)
 cd "$here/.."
@@ -75,19 +81,24 @@ for t in ${*:-$TARGETS}; do
 			cp "$sysroot/lib/rustlib/$t/lib/self-contained/$f" "$dir/"
 		done
 		;;
-	*-linux-gnu)
-		arch=${t%%-*}
-		case $arch in x86_64) deb=amd64 ;; aarch64) deb=arm64 ;; esac
+	*-linux-gnu | *-linux-gnueabihf)
+		# Debian's architecture and multiarch directory.
+		case ${t%%-*} in
+		x86_64) deb=amd64 multi=x86_64-linux-gnu ;;
+		aarch64) deb=arm64 multi=aarch64-linux-gnu ;;
+		i686) deb=i386 multi=i386-linux-gnu ;;
+		armv7) deb=armhf multi=arm-linux-gnueabihf ;;
+		esac
 		root=$cache/glibc-$GLIBC/$deb
 		deb "$root" libc6 "$deb"
 		deb "$root" libc6-dev "$deb"
 		for f in Scrt1.o crti.o crtn.o libc_nonshared.a; do
-			cp "$root/usr/lib/$arch-linux-gnu/$f" "$dir/"
+			cp "$root/usr/lib/$multi/$f" "$dir/"
 		done
 		work=$dir/stub
 		mkdir -p "$work"
 		for lib in c m; do
-			python3 "$here/glibc_stubs.py" "$root/lib/$arch-linux-gnu/lib$lib.so.6" "$work/$lib.s" "$work/$lib.map"
+			python3 "$here/glibc_stubs.py" "$root/lib/$multi/lib$lib.so.6" "$work/$lib.s" "$work/$lib.map"
 			clang --target="$t" -c "$work/$lib.s" -o "$work/$lib.o"
 			"$lld" -shared -soname "lib$lib.so.6" --version-script "$work/$lib.map" -o "$dir/lib$lib.so" "$work/$lib.o"
 		done

@@ -1345,9 +1345,9 @@ pub(super) fn literal_to_const(
     }
 }
 
-/// Does `v` fit in primitive integer type `p`? (64-bit target)
+/// Does `v` fit in primitive integer type `p` on the target?
 pub(super) fn int_fits(v: i128, p: PrimTy) -> bool {
-    let bits = p.bit_width(64);
+    let bits = p.bit_width(super::const_eval::pointer_width());
     if bits == 0 || bits >= 128 {
         return true;
     }

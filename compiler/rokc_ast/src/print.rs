@@ -30,7 +30,7 @@ pub fn print_file(attrs: &[Attribute], items: &[Item], stmts: &[Stmt]) -> String
     // Lifted nested fns print where they were written.
     let (lifted, items): (Vec<&Item>, Vec<&Item>) = items
         .iter()
-        .partition(|i| matches!(i, Item::Fn(f) if f.name.contains('#')));
+        .partition(|i| matches!(i, Item::Fn(f) if f.name.contains('/')));
     for i in lifted {
         if let Item::Fn(f) = i {
             let leaf = f.name.rsplit("::").next().unwrap_or_default();

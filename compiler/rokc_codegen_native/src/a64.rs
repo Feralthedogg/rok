@@ -10,9 +10,9 @@
 //! the register makes it dead. Branches, labels and calls see every
 //! slot in memory.
 
-use std::collections::HashMap;
-
-use crate::lir::{Bin, Callee, Cc, Conv, Func, Inst, K, Label, Loc, Mem, Rmw, Un, V};
+use crate::lir::{
+    Bin, Callee, Cc, Conv, Func, Inst, K, Label, Loc, Mem, Rmw, Un, V, Waits, scalar, waitable,
+};
 use crate::obj::{FnRange, Obj, RelKind, Reloc, Sect};
 
 /// Stack probe interval.
@@ -129,17 +129,6 @@ struct Em<'a> {
     flags: Option<u32>,
 }
 
-/// The integer kind `size` bytes make, if one does.
-const fn scalar(size: u32) -> Option<K> {
-    match size {
-        1 => Some(K::I8),
-        2 => Some(K::I16),
-        4 => Some(K::I32),
-        8 => Some(K::I64),
-        _ => None,
-    }
-}
-
 const fn sf(k: K) -> u32 {
     if matches!(k, K::I64 | K::F64) {
         1 << 31
@@ -201,192 +190,6 @@ pub fn emit(obj: &mut Obj, f: &Func) {
         (d.clone(), offs)
     });
     e.finish(f.sym, debug);
-}
-
-/// `(slot, offset)` → `(size, reads)` (`waitable`).
-type Waits = HashMap<(u32, u32), (u32, u32)>;
-
-/// How a slot is accessed.
-#[derive(Default)]
-struct Use {
-    /// Reached by address, or accessed whole (a copy).
-    opaque: bool,
-    /// `(offset, size, reads, writes)` of its scalar parts.
-    parts: Vec<(u32, u32, u32, u32)>,
-}
-
-impl Use {
-    /// The part at `off`, accessed as `size` bytes: one size per part,
-    /// else the slot is opaque.
-    fn part(&mut self, off: u32, size: u32) -> &mut (u32, u32, u32, u32) {
-        let i = self
-            .parts
-            .iter()
-            .position(|p| p.0 == off)
-            .unwrap_or_else(|| {
-                self.parts.push((off, size, 0, 0));
-                self.parts.len() - 1
-            });
-        self.opaque |= self.parts[i].1 != size;
-        &mut self.parts[i]
-    }
-}
-
-/// The scalar parts of `f`'s slots whose store may wait (`Pend`), as
-/// `(slot, offset)` → `(size, reads)`: written once and read at most
-/// once, always as those bytes, in a slot whose parts do not overlap,
-/// never reached by address, copied whole or described to the
-/// debugger. And the slots reached by address.
-fn waitable(f: &Func) -> (Waits, Vec<bool>) {
-    fn rd(u: &mut [Use], m: Mem, size: u32) {
-        match m {
-            Mem::Frame(s, o) => u[s as usize].part(o, size).2 += 1,
-            // The pointer, at offset 0.
-            Mem::Ind(s, _) => u[s as usize].part(0, 8).2 += 1,
-        }
-    }
-    fn rv(u: &mut [Use], v: V, size: u32) {
-        if let V::M(m) = v {
-            rd(u, m, size);
-        }
-    }
-    fn wr(u: &mut [Use], m: Mem, size: u32) {
-        match m {
-            Mem::Frame(s, o) => u[s as usize].part(o, size).3 += 1,
-            Mem::Ind(..) => rd(u, m, 8),
-        }
-    }
-    fn whole(u: &mut [Use], e: &mut [bool], m: Mem, escapes: bool) {
-        match m {
-            Mem::Frame(s, _) => {
-                u[s as usize].opaque = true;
-                e[s as usize] |= escapes;
-            }
-            Mem::Ind(..) => rd(u, m, 8),
-        }
-    }
-    let n = f.slots.len();
-    let mut u: Vec<Use> = (0..n).map(|_| Use::default()).collect();
-    let mut e = vec![false; n];
-    for i in &f.insts {
-        match i {
-            Inst::Label(_) | Inst::Jmp(_) | Inst::Trap | Inst::Line(..) => {}
-            Inst::Br { c, .. } => rv(&mut u, *c, 1),
-            Inst::Mov { k, dst, src } => {
-                rv(&mut u, *src, k.size());
-                wr(&mut u, *dst, k.size());
-            }
-            Inst::Copy { dst, src, size } => {
-                if scalar(*size).is_some() {
-                    rd(&mut u, *src, *size);
-                    wr(&mut u, *dst, *size);
-                } else {
-                    whole(&mut u, &mut e, *src, false);
-                    whole(&mut u, &mut e, *dst, false);
-                }
-            }
-            Inst::Zero { dst, .. } => whole(&mut u, &mut e, *dst, false),
-            Inst::Sym { dst, .. } | Inst::Tls { dst, .. } => wr(&mut u, *dst, 8),
-            Inst::Param { part, dst } => wr(&mut u, *dst, part.k.size()),
-            Inst::Addr { dst, src } => {
-                whole(&mut u, &mut e, *src, true);
-                wr(&mut u, *dst, 8);
-            }
-            Inst::Bin { k, dst, a, b, .. } | Inst::Ovf { k, dst, a, b, .. } => {
-                rv(&mut u, *a, k.size());
-                rv(&mut u, *b, k.size());
-                wr(&mut u, *dst, k.size());
-            }
-            Inst::Cmp { k, dst, a, b, .. } => {
-                rv(&mut u, *a, k.size());
-                rv(&mut u, *b, k.size());
-                wr(&mut u, *dst, 1);
-            }
-            Inst::Un { k, dst, a, .. } => {
-                rv(&mut u, *a, k.size());
-                wr(&mut u, *dst, k.size());
-            }
-            Inst::Conv {
-                from, to, dst, a, ..
-            } => {
-                rv(&mut u, *a, from.size());
-                wr(&mut u, *dst, to.size());
-            }
-            Inst::AtomicLoad { k, dst, ptr } => {
-                whole(&mut u, &mut e, *ptr, true);
-                wr(&mut u, *dst, k.size());
-            }
-            Inst::AtomicStore { k, ptr, src } => {
-                whole(&mut u, &mut e, *ptr, true);
-                rv(&mut u, *src, k.size());
-            }
-            Inst::AtomicRmw {
-                k, dst, ptr, val, ..
-            } => {
-                whole(&mut u, &mut e, *ptr, true);
-                rv(&mut u, *val, k.size());
-                wr(&mut u, *dst, k.size());
-            }
-            Inst::Cas {
-                k,
-                dst,
-                ptr,
-                expected,
-                new,
-            } => {
-                whole(&mut u, &mut e, *ptr, true);
-                rv(&mut u, *expected, k.size());
-                rv(&mut u, *new, k.size());
-                wr(&mut u, *dst, k.size());
-            }
-            Inst::Call {
-                callee,
-                args,
-                rets,
-                sret,
-                ..
-            } => {
-                if let Callee::Ptr(m) = callee {
-                    rd(&mut u, *m, 8);
-                }
-                for (p, v) in args {
-                    rv(&mut u, *v, p.k.size());
-                }
-                for (p, m) in rets {
-                    wr(&mut u, *m, p.k.size());
-                }
-                if let Some(m) = sret {
-                    whole(&mut u, &mut e, *m, true);
-                }
-            }
-            Inst::Ret { vals } => {
-                for (p, v) in vals {
-                    rv(&mut u, *v, p.k.size());
-                }
-            }
-        }
-    }
-    for v in f.debug.iter().flat_map(|d| &d.vars) {
-        u[v.slot as usize].opaque = true;
-    }
-    let mut out = HashMap::new();
-    for (s, use_) in u.iter().enumerate() {
-        let ps = &use_.parts;
-        // Every part written; no two overlapping.
-        let clean = !use_.opaque
-            && ps.iter().all(|p| p.3 > 0)
-            && ps.iter().enumerate().all(|(i, p)| {
-                ps[i + 1..]
-                    .iter()
-                    .all(|q| p.0 + p.1 <= q.0 || q.0 + q.1 <= p.0)
-            });
-        if clean {
-            for p in ps.iter().filter(|p| p.3 == 1 && p.2 <= 1) {
-                out.insert((s as u32, p.0), (p.1, p.2));
-            }
-        }
-    }
-    (out, e)
 }
 
 impl Em<'_> {

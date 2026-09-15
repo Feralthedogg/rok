@@ -9,6 +9,6 @@ fn main() {
     let xs: List<i64> = [1, 2, 3];
     xs.reserve(10);
     println("ok");
-    xs.reserve(18446744073709551615usize);
+    xs.reserve(usize::MAX);
     println("unreachable");
 }

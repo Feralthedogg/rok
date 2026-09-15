@@ -33,7 +33,7 @@ pub const EXTERN_C_FN_ATTR: &str = "#extern_c";
 /// Marker attribute of a nested `fn` statement (spec 4.10).
 ///
 /// The fn is lifted to a module item named by the attribute's string
-/// (`outer#f`); a second `true` argument marks a sibling visible from
+/// (`outer/f`); a second `true` argument marks a sibling visible from
 /// an enclosing block rather than one declared here.
 pub const NESTED_FN_ATTR: &str = "#nested_fn";
 

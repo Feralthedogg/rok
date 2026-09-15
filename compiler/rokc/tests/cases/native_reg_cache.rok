@@ -1,0 +1,94 @@
+// expect-exit: 0
+// expect-stdout:
+// swap 7 3 3 7
+// rot 1 2 3 4 5 6 7 8 9
+// shift 8 128 -1 4611686018427387901
+// narrow -1 255 -128 128 65535 -1
+// bits 4607182418800017408 1 -2 3221225472
+// div 3 1 -3 -1 13
+// field 10 20 30 60
+// mix 12.5 -7 13 true
+
+// Values the native backend keeps in registers between instructions:
+// arguments that trade places, values read as the shift amount and the
+// shifted value at once, narrow values extended both ways, float bits
+// moved between register files, division's fixed registers, fields
+// read through one pointer, calls with stack arguments.
+
+fn pair(a: i64, b: i64) -> str {
+    return f"{a} {b}";
+}
+
+fn swap() -> str {
+    let x = 3i64 + 4;
+    let y = x - 4;
+    return f"{pair(x, y)} {pair(y, x)}";
+}
+
+fn nine(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64) -> str {
+    return f"{a} {b} {c} {d} {e} {f} {g} {h} {i}";
+}
+
+fn rot(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64) -> str {
+    // Each argument register gets the value the next one held.
+    return nine(i, a, b, c, d, e, f, g, h);
+}
+
+fn shift(n: i64, m: u64) -> str {
+    let s = n << n;
+    let t = 1i64 << (n * 3 + 1);
+    let u = -(n - 1) >> 1;
+    let v = (m >> 1) - 1;
+    return f"{s} {t} {u} {v}";
+}
+
+fn narrow(b: i8, w: i16) -> str {
+    let u = b as u8;
+    let back = u as i8;
+    let lo = (b - 127) as i8;
+    let hi = (lo as u8) as i64;
+    let x = w as u16;
+    let y = x as i16;
+    return f"{back} {u} {lo} {hi} {x} {y}";
+}
+
+fn bits(x: f64, f: f32) -> str {
+    let b = x.to_bits();
+    let y = f64::from_bits(b);
+    let z = y - 2.0 * (y + 0.25) - 0.5;
+    return f"{b} {y} {z} {f.to_bits()}";
+}
+
+fn div(a: i64, b: i64) -> str {
+    let q = a / b;
+    let r = a % b;
+    let nq = (-a) / b;
+    let nr = (-a) % b;
+    let s = q * b + r + q;
+    return f"{q} {r} {nq} {nr} {s}";
+}
+
+struct P { x: i64; y: i64; z: i64; }
+
+fn field(p: P) -> str {
+    let s = p.x + p.y + p.z;
+    return f"{p.x} {p.y} {p.z} {s}";
+}
+
+fn mixed(a: i64, b: f64, c: i32, d: f64, e: i8, f: i64, g: i64, h: i64, i: bool) -> str {
+    let t = b + d * 2.0;
+    let u = (c as i64) - (e as i64) * f;
+    let w = g + h + a;
+    return f"{t} {u} {w} {i}";
+}
+
+fn main() {
+    println(f"swap {swap()}");
+    println(f"rot {rot(2, 3, 4, 5, 6, 7, 8, 9, 1)}");
+    println(f"shift {shift(2, 9223372036854775807u64 - 2)}");
+    println(f"narrow {narrow(-1, -1)}");
+    println(f"bits {bits(1.0, -2.0f32)}");
+    println(f"div {div(10, 3)}");
+    println(f"field {field(P { x: 10, y: 20, z: 30 })}");
+    println(f"mix {mixed(4, 0.5, 3, 6.0, 2, 5, 4, 5, i32::MAX > 0)}");
+}

@@ -2149,6 +2149,21 @@ impl<'c, 'a> FnLower<'c, 'a> {
                     self.store(Val::M(Mem::Ind(ps, 0)), ty, d);
                 }
             }
+            RValue::AddrOf(l) => {
+                let Some(d) = dst else { return };
+                match self.local_mem(*l) {
+                    Some(m) => self.push(Inst::Addr { dst: d, src: m }),
+                    // A `()` local has no storage: any aligned address does.
+                    None => {
+                        let w = self.word();
+                        self.push(Inst::Mov {
+                            k: w,
+                            dst: d,
+                            src: V::I(1),
+                        });
+                    }
+                }
+            }
             RValue::SizeOf { ty, align } => {
                 let (s, a) = t.size_align(ty);
                 let w = self.word();

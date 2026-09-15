@@ -790,9 +790,14 @@ pub unsafe extern "C" fn rok_net_recv_fd(
 pub extern "C" fn rok_net_sendfile(sock: i32, file: i32, offset: i64, count: usize) -> isize {
     #[cfg(target_os = "linux")]
     {
-        let mut off = offset as libc::off_t;
+        // The 64-bit offset form (32-bit glibc's plain one has 32 bits).
+        #[cfg(not(target_env = "gnu"))]
+        use libc::{off_t, sendfile};
+        #[cfg(target_env = "gnu")]
+        use libc::{off64_t as off_t, sendfile64 as sendfile};
+        let mut off = offset as off_t;
         // SAFETY: plain syscall with a valid offset pointer.
-        no_eintr(|| unsafe { libc::sendfile(sock, file, &raw mut off, count) })
+        no_eintr(|| unsafe { sendfile(sock, file, &raw mut off, count) })
     }
     #[cfg(not(target_os = "linux"))]
     {

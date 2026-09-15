@@ -81,8 +81,11 @@ pub struct Parser<'a> {
     /// Nested `fn`s (spec 4.10), lifted to module items once the
     /// enclosing item is parsed.
     lifted: Vec<FnDef>,
-    /// Names of the `fn`s being parsed, outermost first.
+    /// Names of the `fn`s being parsed, outermost first (`Type.m` for
+    /// a method).
     fn_names: Vec<String>,
+    /// The impl target's or trait's name while parsing its items.
+    fn_owner: Option<String>,
     /// Lifted names given out so far.
     lifted_names: std::collections::HashSet<String>,
     /// The next primary starts a statement: if it is block-like, `(` / `[`
@@ -233,6 +236,7 @@ impl<'a> Parser<'a> {
             vanished: false,
             lifted: Vec::new(),
             fn_names: Vec::new(),
+            fn_owner: None,
             lifted_names: std::collections::HashSet::new(),
         }
     }
@@ -514,6 +518,22 @@ impl<'a> Parser<'a> {
         };
         self.bump();
         self.pending = rest;
+        true
+    }
+
+    /// Open a generic list or `<T as Tr>`: consume a `<`, splitting `<<`
+    /// (`Tag<<A as P>::X>`) and leaving the second pending.
+    fn eat_opening_lt(&mut self) -> bool {
+        match self.peek() {
+            TokenKind::Lt => {
+                self.bump();
+            }
+            TokenKind::Shl => {
+                self.bump();
+                self.pending = Some(TokenKind::Lt);
+            }
+            _ => return false,
+        }
         true
     }
 
@@ -1544,6 +1564,31 @@ impl<'a> Parser<'a> {
         };
         let where_clause = self.parse_where_clause();
         self.expect(&TokenKind::LBrace, "`{`")?;
+        let owner = match &self_ty.kind {
+            TyKind::Path(p) => p.segments.last().map(|s| s.name.clone()),
+            _ => None,
+        };
+        let outer_owner = std::mem::replace(&mut self.fn_owner, owner);
+        let items = self.parse_impl_items();
+        self.fn_owner = outer_owner;
+        let items = items?;
+        Some(ImplDef {
+            vis,
+            attrs,
+            generics,
+            trait_path,
+            is_unsafe: false,
+            negative,
+            self_ty,
+            where_clause,
+            items,
+            module: String::new(),
+            span: start,
+        })
+    }
+
+    /// An impl's items through its `}`.
+    fn parse_impl_items(&mut self) -> Option<Vec<ImplItem>> {
         let mut items = Vec::new();
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
             let attrs_from = self.pos;
@@ -1611,19 +1656,7 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(&TokenKind::RBrace, "`}`")?;
-        Some(ImplDef {
-            vis,
-            attrs,
-            generics,
-            trait_path,
-            is_unsafe: false,
-            negative,
-            self_ty,
-            where_clause,
-            items,
-            module: String::new(),
-            span: start,
-        })
+        Some(items)
     }
 
     /// A method (impl or trait) with a user attribute (spec 6.9.5:
@@ -2012,6 +2045,7 @@ impl<'a> Parser<'a> {
         let where_clause = self.parse_where_clause();
         self.expect(&TokenKind::LBrace, "`{`")?;
         let mut items = Vec::new();
+        let outer_owner = self.fn_owner.replace(name.clone());
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
             let from = self.pos;
             if let Some(item) = self.parse_trait_item() {
@@ -2026,6 +2060,7 @@ impl<'a> Parser<'a> {
                 self.recover(from, Recover::NestedItem);
             }
         }
+        self.fn_owner = outer_owner;
         self.expect(&TokenKind::RBrace, "`}`")?;
         Some(TraitDef {
             vis,
@@ -2420,7 +2455,11 @@ impl<'a> Parser<'a> {
         let where_clause = self.parse_where_clause();
 
         let body = if matches!(self.peek(), TokenKind::LBrace) {
-            self.fn_names.push(name.clone());
+            let owned = match (&self.fn_owner, self.fn_names.is_empty()) {
+                (Some(o), true) => format!("{o}.{name}"),
+                _ => name.clone(),
+            };
+            self.fn_names.push(owned);
             let b = self.parse_block();
             self.fn_names.pop();
             Some(b?)
@@ -2782,7 +2821,7 @@ impl<'a> Parser<'a> {
             TokenKind::Ident(_) if self.at_c_fn_type(0) => self.parse_marked_fn_type(start)?,
             TokenKind::Ident(_) => TyKind::Path(self.parse_type_path()?),
             // `<T as Tr>::X` (spec 2.13.4).
-            TokenKind::Lt => TyKind::QPath(Box::new(self.parse_qpath()?)),
+            TokenKind::Lt | TokenKind::Shl => TyKind::QPath(Box::new(self.parse_qpath()?)),
             TokenKind::Fn => {
                 self.bump();
                 self.expect(&TokenKind::LParen, "`(`")?;
@@ -3010,7 +3049,9 @@ impl<'a> Parser<'a> {
 
     /// `<T as Tr>::item` (spec 2.13.4).
     fn parse_qpath(&mut self) -> Option<rokc_ast::QPath> {
-        self.expect(&TokenKind::Lt, "`<`")?;
+        if !self.eat_opening_lt() {
+            self.expect(&TokenKind::Lt, "`<`")?;
+        }
         let self_ty = self.with_type_sum(false, Self::parse_type_atom)?;
         self.expect(&TokenKind::As, "`as`")?;
         let tr = self.parse_type_path()?;
@@ -3059,10 +3100,11 @@ impl<'a> Parser<'a> {
             // is ambiguous with comparison.
             let mut generics: Vec<Ty> = Vec::new();
             if allow_generics
-                && matches!(self.peek(), TokenKind::Lt)
-                && (!self.in_cast_type || self.generic_close_ahead())
+                && (matches!(self.peek(), TokenKind::Shl) && !self.in_cast_type
+                    || matches!(self.peek(), TokenKind::Lt)
+                        && (!self.in_cast_type || self.generic_close_ahead()))
             {
-                self.bump();
+                self.eat_opening_lt();
                 generics = self.nested_type_list(TokenKind::Gt)?;
                 if !self.expect_closing_gt() {
                     return None;
@@ -3316,7 +3358,8 @@ impl<'a> Parser<'a> {
     }
 
     /// `fn name(..) { .. }` as a statement (spec 4.10): lifted to a
-    /// module item `outer#name`, leaving a marker statement.
+    /// module item `outer/name` (`outer/name/2` .. for a repeated name;
+    /// `/` is in no other item name), leaving a marker statement.
     fn parse_nested_fn(&mut self) -> Option<Stmt> {
         let start = self.peek_span();
         if self.parse_visibility() != Visibility::Private {
@@ -3330,14 +3373,14 @@ impl<'a> Parser<'a> {
         let outer = if self.fn_names.is_empty() {
             "main".to_owned()
         } else {
-            self.fn_names.join("#")
+            self.fn_names.join("/")
         };
-        let base = format!("{outer}#{}", def.name);
+        let base = format!("{outer}/{}", def.name);
         let mut lifted = base.clone();
         let mut n = 1;
         while !self.lifted_names.insert(lifted.clone()) {
             n += 1;
-            lifted = format!("{base}#{n}");
+            lifted = format!("{base}/{n}");
         }
         let marker = nested_marker(&def, &lifted, false);
         def.name = lifted;

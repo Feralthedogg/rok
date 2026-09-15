@@ -90,6 +90,12 @@ impl<T> Slice<T> {
         (self.to_list().buffer(), 0, self.len)
     }
 
+    /// The view `raw_parts` takes apart: `len` elements of `buf` from
+    /// `start`.
+    pub unsafe fn from_raw_parts(buf: GcBuf<T>, start: usize, len: usize) -> Slice<T> {
+        Slice { buf: buf, start: start, len: len, stride: 1 }
+    }
+
     /// A new list holding the viewed elements.
     pub fn to_list(self) -> List<T> {
         let out: List<T> = List::with_capacity(self.len);

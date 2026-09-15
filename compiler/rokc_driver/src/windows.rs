@@ -23,6 +23,7 @@ macro_rules! defs {
 
 const X86_64: Defs = defs!("x86_64");
 const AARCH64: Defs = defs!("aarch64");
+const I686: Defs = defs!("i686");
 
 /// `-C subsystem=console|windows` (`/SUBSYSTEM`): a console program's
 /// entry is `mainCRTStartup`, a GUI program's `WinMainCRTStartup`, which
@@ -49,6 +50,7 @@ fn defs(t: &rokc_llvm::Target) -> Result<&'static Defs, String> {
     match t.triple.split('-').next() {
         Some("x86_64") => Ok(&X86_64),
         Some("aarch64" | "arm64") => Ok(&AARCH64),
+        Some("i686") => Ok(&I686),
         _ => Err(format!("no Windows libraries for {}", t.triple)),
     }
 }
@@ -97,8 +99,10 @@ pub fn link_args(
     };
     a.push(format!("/subsystem:{sub}").into());
     a.push(format!("/entry:{entry}").into());
-    // Nothing refers to the TLS directory but the loader.
-    a.push("/include:_tls_used".into());
+    // Nothing refers to the TLS directory but the loader. (`/include`
+    // takes the symbol, C names `_`-prefixed on x86.)
+    let x86 = t.triple.starts_with("i686");
+    a.push(format!("/include:{}_tls_used", if x86 { "_" } else { "" }).into());
     if debug {
         a.push("/debug".into());
     }
@@ -109,10 +113,43 @@ pub fn link_args(
 /// entry point (UCRT setup, the program's `main` wrapper, `exit`), the
 /// TLS directory the loader reads (`_tls_used`; thread-locals are in
 /// `.tls$`), `_fltused` (referenced by code using floating point) and
-/// `__chkstk` (the stack probe LLVM calls for frames of a page or more).
+/// `__chkstk` (the stack probe LLVM calls for frames of a page or more;
+/// x86's C name `_chkstk`). Every C name is mangled by LLVM and lld-link
+/// (a leading `_` on x86).
 fn startup_ir(t: &rokc_llvm::Target, subsystem: Subsystem) -> String {
-    let arm64 = !t.triple.starts_with("x86_64");
-    let chkstk = if arm64 {
+    let chkstk = if t.triple.starts_with("i686") {
+        // eax: the frame size. Touches each page below the caller's esp,
+        // then moves esp down by eax itself (MSVC's x86 `_chkstk`, alias
+        // `_alloca_probe`); keeps every other register.
+        // `_tls_array`: the offset of the TEB's TLS array, whose address
+        // LLVM's thread-local accesses read through %fs.
+        r#"module asm ".globl __tls_array"
+module asm "__tls_array = 0x2c"
+module asm ".text"
+module asm ".globl __chkstk"
+module asm ".p2align 4"
+module asm "__chkstk:"
+module asm "  push %ecx"
+module asm "  cmp $0x1000, %eax"
+module asm "  lea 8(%esp), %ecx"
+module asm "  jb 1f"
+module asm "2:"
+module asm "  sub $0x1000, %ecx"
+module asm "  test %ecx, (%ecx)"
+module asm "  sub $0x1000, %eax"
+module asm "  cmp $0x1000, %eax"
+module asm "  ja 2b"
+module asm "1:"
+module asm "  sub %eax, %ecx"
+module asm "  test %ecx, (%ecx)"
+module asm "  lea 4(%esp), %eax"
+module asm "  mov %ecx, %esp"
+module asm "  mov -4(%eax), %ecx"
+module asm "  push (%eax)"
+module asm "  sub %esp, %eax"
+module asm "  ret"
+"#
+    } else if !t.triple.starts_with("x86_64") {
         // x15: the frame size / 16. Touches each page below sp; keeps
         // every register but x16 / x17.
         r#"module asm ".text"
@@ -196,7 +233,7 @@ define i32 @WinMain(ptr %instance, ptr %prev, ptr %cmd, i32 %show) {
 @_tls_end = global i8 0, section ".tls$ZZZ"
 @__xl_a = global ptr null, section ".CRT$XLA"
 @__xl_z = global ptr null, section ".CRT$XLZ"
-@_tls_used = constant {{ ptr, ptr, ptr, ptr, i32, i32 }} {{ ptr @_tls_start, ptr @_tls_end, ptr @_tls_index, ptr getelementptr (i8, ptr @__xl_a, i64 8), i32 0, i32 0 }}, section ".rdata$T"
+@_tls_used = constant {{ ptr, ptr, ptr, ptr, i32, i32 }} {{ ptr @_tls_start, ptr @_tls_end, ptr @_tls_index, ptr getelementptr (ptr, ptr @__xl_a, i32 1), i32 0, i32 0 }}, section ".rdata$T"
 @_fltused = global i32 39029
 
 declare void @_set_app_type(i32)
@@ -235,6 +272,7 @@ mod tests {
         for (triple, machine) in [
             ("x86_64-pc-windows-msvc", 0x8664),
             ("aarch64-pc-windows-msvc", 0xaa64),
+            ("i686-pc-windows-msvc", 0x14c),
         ] {
             let t = rokc_llvm::Target::new(triple);
             let obj = rokc_llvm::compile_llvm_ir(

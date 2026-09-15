@@ -1,0 +1,29 @@
+// only-pointer-width: 32
+// spec: 000.06-platform-targets §0.6.3
+// expect-exit: 0
+// expect-stdout:
+// usize 4 isize 4 str 8 bits 32
+// i64 8 f64 8
+// 4294967295 0
+// ok
+
+// spec 0.6.3: on a 32-bit target `usize` follows the pointer width,
+// 64-bit integers keep their size, and `usize` arithmetic wraps at 32
+// bits; GC objects still allocate and collect.
+use rok::bare::mem::size_of;
+
+fn main() -> i32 {
+    println(f"usize {size_of::<usize>()} isize {size_of::<isize>()} str {size_of::<str>()} bits {usize::BITS}");
+    println(f"i64 {size_of::<i64>()} f64 {size_of::<f64>()}");
+    let m = usize::MAX;
+    println(f"{m} {m.wrapping_add(1)}");
+    let xs: List<i64> = [];
+    for i in 0..100000 {
+        xs.push(i as i64 * 3);
+    }
+    if xs[99999] != 299997 {
+        return 1;
+    }
+    println("ok");
+    return 0;
+}

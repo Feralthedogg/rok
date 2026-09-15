@@ -123,7 +123,7 @@ impl DepBuild<'_> {
             r.report_errors();
             return Err(failed());
         }
-        r.archive(self.opts, archive).map_err(|d| {
+        r.archive(self.opts, archive, false).map_err(|d| {
             crate::report(&d);
             failed()
         })?;

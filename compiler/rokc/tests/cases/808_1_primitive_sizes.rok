@@ -1,3 +1,4 @@
+// only-pointer-width: 64
 // spec: 008.08-lowering-types §8.8.1
 // expect-exit: 0
 // expect-stdout:

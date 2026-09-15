@@ -1,0 +1,20 @@
+// expect-error: `addr_of` needs a place: a local variable, or a field or array element of one
+// expect-error: `as_mut_ptr` needs a place
+// expect-error: call to unsafe function `from_exposed_provenance` outside an `unsafe` block
+// expect-error: cannot cast `Ptr<i32>` as `usize`
+// spec: std 101-ptr §1.1.2
+// A pointer comes from a place, not a temporary; a fresh provenance is
+// `unsafe`; `as` never converts a pointer (bare 1, strict provenance).
+use rok::bare::mem::MaybeUninit;
+use rok::bare::ptr::{Ptr, addr_of, from_exposed_provenance};
+
+fn five() -> i32 { 5 }
+
+fn main() -> i32 {
+    let p = addr_of(five());
+    let m = MaybeUninit::<i32>::uninit().as_mut_ptr();
+    let q: Ptr<i32> = from_exposed_provenance(16);
+    let x = 1;
+    let n = addr_of(x) as usize;
+    0
+}

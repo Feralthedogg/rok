@@ -4548,6 +4548,17 @@ pub(super) fn method_call_on(
                     ),
                 );
             }
+            if is_addr_intrinsic(&gm.def, &gm.info.module) {
+                // `MaybeUninit<T>::as_mut_ptr`: the receiver's place, as
+                // a pointer to its type argument.
+                lower_args_only(ctx);
+                let pointee = match &recv_h.ty {
+                    HirTy::Struct(sid) => ctx.struct_def(*sid).generic_args.first().cloned(),
+                    _ => None,
+                };
+                let pointee = pointee.unwrap_or_else(|| recv_h.ty.clone());
+                return addr_expr(ctx, recv_h, &gm.def, method, pointee, span);
+            }
             match bind_explicit(ctx, &gm.def, Some(&gm.self_ty), &type_args, method) {
                 Ok(bound) => ctx.explicit_generics = bound,
                 Err(msg) => {
@@ -4568,7 +4579,7 @@ pub(super) fn method_call_on(
         lower_args_only(ctx);
         // A generic impl that would provide it but whose bound fails:
         // name the bound rather than "no method".
-        let unmet = ctx.env.generic_trait_impls.iter().find_map(|gi| {
+        let unmet = ctx.env.impls.generic().find_map(|gi| {
             if !gi.methods.contains_key(method) {
                 return None;
             }
@@ -4872,14 +4883,12 @@ fn any_method_call(
     // a concrete impl's, else the trait declaration's.
     let concrete = ctx
         .env
-        .trait_impl_tys
-        .get(&bounds[0].path)
-        .into_iter()
-        .flatten()
+        .impls
+        .tys_of(&bounds[0].path)
         .find(|t| {
             bounds
                 .iter()
-                .all(|b| ctx.concrete_impls(t).iter().any(|r| r.satisfies(b)))
+                .all(|b| ctx.concrete_impls(t).any(|r| r.satisfies(b)))
         })
         .and_then(|t| match pick_method(ctx, t, method, Some(&provider)) {
             Ok(Some(MethodPick::Concrete(id))) => Some(ctx.sig_by_id(id)),
@@ -5539,7 +5548,7 @@ pub(super) fn generic_trait_method_for<'e>(
     ty: &HirTy,
     method: &str,
 ) -> Result<Option<&'e GenericMethod>, String> {
-    let hits: Vec<&'e GenericTraitImpl> = ctx
+    let hits: Vec<&'e Impl> = ctx
         .generic_impls(ty, |gi| gi.methods.contains_key(method), 0)
         .map(|(gi, _)| gi)
         .collect();
@@ -6295,6 +6304,9 @@ pub(super) fn lower_call(
             }
             let targs = p.segments.last().map_or(&[][..], |s| s.generics.as_slice());
             let name = leaf_name(&generic_def.name).to_owned();
+            if op == Intrinsic::AddrOf {
+                return lower_addr_of(ctx, generic_def, &name, args, span);
+            }
             return lower_intrinsic(ctx, op, &name, targs, args, span);
         }
         let explicit = p.segments.last().map_or(&[][..], |s| s.generics.as_slice());
@@ -7628,8 +7640,28 @@ fn lower_intrinsic(
             lower_ptr_intrinsic(ctx, name, true, volatile, args, span)
         }
         Intrinsic::Atomic(atomic) => lower_atomic_intrinsic(ctx, atomic, args, span),
-        // `collect::intrinsic_of` keeps primitive ops off generic functions.
-        Intrinsic::Prim(_) => poison(span),
+        Intrinsic::DropInPlace => {
+            let value = lower_ptr_intrinsic(ctx, name, false, false, args, span);
+            if matches!(value.ty, HirTy::Unknown) {
+                return value;
+            }
+            let ty = value.ty.clone();
+            let local = ctx.declare(None, ty.clone());
+            let mut stmts = vec![HirStmt::Let { local, init: value }];
+            stmts.extend(drop_glue(ctx, hir_local(local, &ty, span), span, 0));
+            HirExpr {
+                kind: HirExprKind::Block(Box::new(HirBlock {
+                    stmts,
+                    trailing: None,
+                    label: None,
+                })),
+                ty: HirTy::Unit,
+                span,
+            }
+        }
+        // `collect::intrinsic_of` keeps primitive ops off generic
+        // functions; `addr_of` is lowered at the call (`lower_addr_of`).
+        Intrinsic::Prim(_) | Intrinsic::AddrOf => poison(span),
         Intrinsic::BufNew
         | Intrinsic::BufGet
         | Intrinsic::BufSet
@@ -7714,6 +7746,141 @@ fn lower_ptr_intrinsic(
             span,
         }
     }
+}
+
+/// A standard-library method marked `#[intrinsic("rok.addr_of")]`.
+fn is_addr_intrinsic(def: &FnDef, module: &str) -> bool {
+    module.starts_with("rok::")
+        && def.attrs.iter().any(|a| {
+            a.name() == "intrinsic"
+                && matches!(&a.body, rokc_ast::AttrBody::Args(args) if args.iter().any(|x|
+                    matches!(x, rokc_ast::AttrArg::Lit(rokc_ast::Literal::Str(s)) if s == "rok.addr_of")))
+        })
+}
+
+/// `addr_of(place)` / `many_addr_of(place)` (bare 1.1): a pointer to
+/// the place itself, not to a copy.
+fn lower_addr_of(
+    ctx: &mut LowerCtx<'_>,
+    def: &FnDef,
+    name: &str,
+    args: &[CallArg],
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let [CallArg::Positional(e)] = args else {
+        discard_args(ctx, args);
+        return ctx.error_expr(span, format!("`{name}` takes one place: `{name}(x)`"));
+    };
+    let place = lower_expected(ctx, e, HirTy::Unknown);
+    let pointee = place.ty.clone();
+    addr_expr(ctx, place, def, name, pointee, span)
+}
+
+/// A pointer to `place` of the struct `def` returns (`Ptr`, `ConstPtr`,
+/// `ManyPtr` of `rok::bare::ptr`) over `pointee`. The place's indices
+/// are evaluated once, before it.
+pub(super) fn addr_expr(
+    ctx: &mut LowerCtx<'_>,
+    place: HirExpr,
+    def: &FnDef,
+    name: &str,
+    pointee: HirTy,
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    if place.ty == HirTy::Unknown {
+        return place;
+    }
+    let mut lets = Vec::new();
+    let Some(place) = addr_place(ctx, place, &mut lets) else {
+        return ctx.error_expr(
+            span,
+            format!("`{name}` needs a place: a local variable, or a field or array element of one"),
+        );
+    };
+    let ptr = def.ret_ty.as_ref().and_then(|t| match &t.kind {
+        AstTyKind::Path(p) => p.segments.last().map(|s| s.name.clone()),
+        _ => None,
+    });
+    let Some(sid) = ptr
+        .and_then(|p| ctx.instantiate_struct(&format!("rok::bare::ptr::{p}"), vec![pointee], span))
+    else {
+        return ctx.error_expr(
+            span,
+            "`rok.addr_of` returns a `rok::bare::ptr` pointer".to_owned(),
+        );
+    };
+    let addr = HirExpr {
+        kind: HirExprKind::AddrOf {
+            place: Box::new(place),
+        },
+        ty: HirTy::Prim(PrimTy::Usize),
+        span,
+    };
+    with_lets(
+        lets,
+        HirExpr {
+            kind: HirExprKind::StructInit {
+                struct_id: sid,
+                fields: vec![addr],
+            },
+            ty: HirTy::Struct(sid),
+            span,
+        },
+    )
+}
+
+/// `e` as a place rooted at a local, its non-trivial indices moved into
+/// `lets`; `None` if it is not one.
+fn addr_place(ctx: &mut LowerCtx<'_>, e: HirExpr, lets: &mut Vec<HirStmt>) -> Option<HirExpr> {
+    let HirExpr { kind, ty, span } = e;
+    let kind = match kind {
+        HirExprKind::Local(_) => kind,
+        HirExprKind::FieldRead {
+            target,
+            struct_id,
+            field_index,
+            field_ty,
+        } if ctx.struct_def(struct_id).union_kind.is_none() => HirExprKind::FieldRead {
+            target: Box::new(addr_place(ctx, *target, lets)?),
+            struct_id,
+            field_index,
+            field_ty,
+        },
+        HirExprKind::TupleField {
+            target,
+            index,
+            field_ty,
+        } => HirExprKind::TupleField {
+            target: Box::new(addr_place(ctx, *target, lets)?),
+            index,
+            field_ty,
+        },
+        HirExprKind::ArrayIndex {
+            array,
+            index,
+            elem_ty,
+        } => {
+            let array = Box::new(addr_place(ctx, *array, lets)?);
+            let index = if matches!(index.kind, HirExprKind::Local(_) | HirExprKind::Const(_)) {
+                index
+            } else {
+                let ity = index.ty.clone();
+                let local = ctx.declare(None, ity.clone());
+                lets.push(HirStmt::Let {
+                    local,
+                    init: *index,
+                });
+                Box::new(hir_local(local, &ity, span))
+            };
+            HirExprKind::ArrayIndex {
+                array,
+                index,
+                elem_ty,
+            }
+        }
+        _ => return None,
+    };
+    Some(HirExpr { kind, ty, span })
 }
 
 /// `atomic_OP(buf, i, operands..)` over a `GcBuf<T>` of an integer or
@@ -8685,9 +8852,6 @@ pub(super) fn self_path_segs(ctx: &LowerCtx<'_>, p: &AstPath) -> Vec<String> {
         .collect()
 }
 
-/// Associated const `name` of concrete type `ty` (from one of `traits`
-/// when given): the one impl whose target and bounds `ty` meets; two
-/// or more is an ambiguity error.
 /// The impls (with their substitution for `ty`) that give `ty` an
 /// associated const `name`, from one of `traits` when given.
 pub(super) fn assoc_const_hits<'e>(
@@ -8695,15 +8859,22 @@ pub(super) fn assoc_const_hits<'e>(
     ty: &HirTy,
     name: &str,
     traits: Option<&[String]>,
-) -> Vec<(&'e ImplConsts, HashMap<String, HirTy>)> {
-    ctx.env
-        .impl_consts
+) -> Vec<(&'e Impl, HashMap<String, HirTy>)> {
+    let env: &'e Env<'e> = ctx.env;
+    env.impls
+        .all
         .iter()
-        .filter(|set| {
-            traits.is_none_or(|ks| ks.contains(&set.target.trait_key))
-                && set.consts.iter().any(|(n, ..)| n == name)
+        .filter(|imp| {
+            traits.is_none_or(|ks| ks.contains(&imp.trait_key))
+                && imp.consts.iter().any(|(n, ..)| n == name)
         })
-        .filter_map(|set| Some((set, ctx.generic_impl_subst(&set.target, ty, 0)?)))
+        .filter_map(|imp| {
+            let subst = match &imp.concrete {
+                Some((t, _)) => (t == ty).then(HashMap::new)?,
+                None => ctx.generic_impl_subst(imp, ty, 0)?,
+            };
+            Some((imp, subst))
+        })
         .collect()
 }
 
@@ -8716,18 +8887,17 @@ fn lower_assoc_const(
     let env = ctx.env;
     let mut hits = assoc_const_hits(ctx, ty, name, traits);
     // An inherent const shadows the trait ones (`i8::BITS`).
-    if hits.len() > 1 && traits.is_none() && hits.iter().any(|(s, _)| s.target.trait_key.is_empty())
-    {
-        hits.retain(|(s, _)| s.target.trait_key.is_empty());
+    if hits.len() > 1 && traits.is_none() && hits.iter().any(|(s, _)| s.trait_key.is_empty()) {
+        hits.retain(|(s, _)| s.trait_key.is_empty());
     }
     if hits.len() > 1 {
         let from: Vec<String> = hits
             .iter()
             .map(|(s, _)| {
-                if s.target.trait_key.is_empty() {
+                if s.trait_key.is_empty() {
                     "an inherent impl".to_owned()
                 } else {
-                    format!("`{}`", leaf_name(&s.target.trait_key))
+                    format!("`{}`", leaf_name(&s.trait_key))
                 }
             })
             .collect();
@@ -8741,24 +8911,17 @@ fn lower_assoc_const(
             ),
         ));
     }
-    let (set, subst) = hits.into_iter().next()?;
-    let (_, cty, value) = set.consts.iter().find(|(n, ..)| n == name)?;
+    let (imp, subst) = hits.into_iter().next()?;
+    let (_, cty, value) = imp.consts.iter().find(|(n, ..)| n == name)?;
     let sc = Scope {
         names: &env.names,
-        module: &set.target.module,
+        module: &imp.module,
     };
     let cty = resolve_ty_with_structs(cty, &env.defs, Some(&subst), sc);
     // The value is the impl's: its names resolve in the impl's module,
     // with the impl's type parameters and `Self` bound for `ty`.
-    let key = (std::ptr::from_ref(set) as usize, ty_mangle(ty));
-    let subst: &'static HashMap<String, HirTy> = env
-        .sink
-        .const_substs
-        .borrow_mut()
-        .entry(key)
-        .or_insert_with(|| Box::leak(Box::new(subst)));
-    let saved_subst = std::mem::replace(&mut ctx.ty_subst, subst);
-    let saved_module = std::mem::replace(&mut ctx.current_module, set.target.module.clone());
+    let saved_subst = std::mem::replace(&mut ctx.ty_subst, std::borrow::Cow::Owned(subst));
+    let saved_module = std::mem::replace(&mut ctx.current_module, imp.module.clone());
     let saved_self = std::mem::replace(&mut ctx.self_ty, Some(ty.clone()));
     let saved_uses = std::mem::replace(&mut ctx.local_uses, vec![Vec::new()]);
     let saved_scopes = std::mem::replace(&mut ctx.scopes, vec![HashMap::new()]);
@@ -8779,7 +8942,7 @@ fn lower_assoc_const(
     ))
 }
 
-/// The name a type's associated consts are keyed under (`impl_consts`).
+/// The name a type's `Type::NAME` consts are keyed under.
 fn const_owner(ctx: &LowerCtx<'_>, ty: &HirTy) -> Option<String> {
     match ty {
         HirTy::Struct(id) => Some(enum_base_name(&ctx.struct_def(*id).name).to_owned()),

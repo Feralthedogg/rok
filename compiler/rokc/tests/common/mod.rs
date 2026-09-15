@@ -18,6 +18,8 @@
 //!   - `// rokc-arg: args`      — extra `rokc` arguments (`--cfg feat`)
 //!   - `// only-os: macos linux` — skipped unless the target's `target_os`
 //!     is listed (POSIX commands, paths, signals)
+//!   - `// only-pointer-width: 64` — skipped on targets of another width
+//!     (sizes, `usize::BITS`, layouts in the expected output)
 //!   - `// spec: <section>`     — the spec section a case checks (a tag)
 //!
 //! Environment:
@@ -75,10 +77,6 @@ pub struct Env {
 /// Locate the workspace, rebuild `librokr.a`, and check the LLVM toolchain.
 /// Returns `None` when the suite should be skipped.
 pub fn setup() -> Option<Env> {
-    let workspace = std::fs::canonicalize(workspace()).unwrap();
-    let bootstrap = workspace.join("library/core/lib.rok");
-    assert!(bootstrap.exists(), "missing {bootstrap:?}");
-
     if !llvm_present() {
         let msg = "rokc is built without LLVM (ROK_LLVM_PREFIX, llvm/build.sh)";
         assert!(
@@ -93,6 +91,15 @@ pub fn setup() -> Option<Env> {
         );
         return None;
     }
+    Some(setup_runtime())
+}
+
+/// `setup` for what runs without LLVM (`-O0` through the native
+/// backend: REPL cells).
+pub fn setup_runtime() -> Env {
+    let workspace = std::fs::canonicalize(workspace()).unwrap();
+    let bootstrap = workspace.join("library/core/lib.rok");
+    assert!(bootstrap.exists(), "missing {bootstrap:?}");
 
     // `cargo test` doesn't rebuild the staticlib on its own (rokc must not
     // depend on rokr), so build it here to never link a stale runtime.
@@ -119,11 +126,11 @@ pub fn setup() -> Option<Env> {
         .join(rokc_core::runtime_lib(target_os() == "windows"));
     assert!(rokr.exists(), "missing {rokr:?} after cargo build -p rokr");
 
-    Some(Env {
+    Env {
         workspace,
         bootstrap,
         rokr,
-    })
+    }
 }
 
 /// `rokc version -v` names the LLVM it links (`llvm: none`: built
@@ -189,12 +196,28 @@ pub fn target_os() -> String {
     os.to_owned()
 }
 
-/// A case's `// only-os: <os> ..` excludes the target's OS.
+/// The pointer width of the cases' target, in bits.
+pub fn target_pointer_width() -> u32 {
+    let Some(t) = test_target() else {
+        return usize::BITS;
+    };
+    let arch = t.split('-').next().unwrap_or("");
+    let narrow = ["i386", "i586", "i686", "arm", "thumb", "wasm32", "riscv32"];
+    if narrow.iter().any(|a| arch.starts_with(a)) {
+        32
+    } else {
+        64
+    }
+}
+
+/// A case's `// only-os: <os> ..` excludes the target's OS, its
+/// `// only-pointer-width: <bits>` the target's width.
 pub fn skipped_on_target(source: &str) -> bool {
     directive(source, "only-os:").is_some_and(|oses| {
         let os = target_os();
         !oses.split_whitespace().any(|o| o == os)
-    })
+    }) || directive(source, "only-pointer-width:")
+        .is_some_and(|w| w.trim() != target_pointer_width().to_string())
 }
 
 /// File name of executable `name` for the cases' target.

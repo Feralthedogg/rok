@@ -3,7 +3,7 @@
 use rokc_hir::{HirModule, HirTy};
 use rokc_ir_common::PrimTy;
 
-use crate::{MirTy, Target};
+use crate::{DebugTy, MirTy, Target};
 
 /// Struct id marking the MIR type of an `any Tr` value, so the
 /// collector's `ScanTable` gets an `ANY_SLOT` (802 §8.2.7) for it.
@@ -104,6 +104,68 @@ pub fn lower_ty(ty: &HirTy, module: &HirModule, target: &Target) -> MirTy {
         HirTy::Throws { ok, err } => carrier(lower(ok), lower(err)),
         HirTy::GcBuf(_) => MirTy::GcRef,
         HirTy::Mlir(t) => MirTy::Mlir(t.clone()),
+    }
+}
+
+/// What `-g` shows of a `ty` value beyond its `MirTy`, or `None` when
+/// that says it all: a tagged sum's variants, a `GcBuf`'s elements.
+#[must_use]
+pub fn debug_ty(ty: &HirTy, module: &HirModule, target: &Target) -> Option<DebugTy> {
+    let of = |t: &HirTy| {
+        debug_ty(t, module, target).unwrap_or_else(|| DebugTy::Mir(lower_ty(t, module, target)))
+    };
+    let variants: Vec<(u32, String, &HirTy)> = match ty {
+        HirTy::GcBuf(t) => {
+            return Some(DebugTy::Buf(debug_name(ty, module), Box::new(of(t))));
+        }
+        HirTy::Sum(parts) => (0u32..)
+            .zip(parts)
+            .filter(|(_, v)| !v.is_none())
+            .map(|(i, v)| (sum_tag(ty, i), debug_name(v, module), v))
+            .collect(),
+        HirTy::Enum(id) => (0u32..)
+            .zip(&module.enums[id.0 as usize].variants)
+            .filter_map(|(i, v)| Some((i, v.name.clone(), v.payload_ty.as_ref()?)))
+            .collect(),
+        _ => return None,
+    };
+    // A niche sum or a bare tag has no payload slot.
+    let mir = lower_ty(ty, module, target);
+    if !matches!(&mir, MirTy::Tuple(p) if p.len() == 2 && p[0] == MirTy::Prim(PrimTy::I32)) {
+        return None;
+    }
+    let variants = variants
+        .into_iter()
+        .map(|(tag, name, t)| (tag, name, of(t)))
+        .filter(|(.., d)| *d != DebugTy::Mir(MirTy::Unit))
+        .collect();
+    Some(DebugTy::Sum(debug_name(ty, module), mir, variants))
+}
+
+/// A short name of `ty` for `-g` (`List`, `i64 | f64`, `GcBuf<u8>`).
+fn debug_name(ty: &HirTy, module: &HirModule) -> String {
+    let short = |n: &str| {
+        let n = n.rsplit("::").next().unwrap_or(n);
+        n.split("__").next().unwrap_or(n).to_owned()
+    };
+    let list = |ts: &[HirTy]| {
+        ts.iter()
+            .map(|t| debug_name(t, module))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match ty {
+        HirTy::Prim(p) => p.name().to_owned(),
+        HirTy::Unit => "()".to_owned(),
+        HirTy::None => "none".to_owned(),
+        HirTy::Struct(id) => short(&module.structs[id.0 as usize].name),
+        HirTy::Enum(id) => short(&module.enums[id.0 as usize].name),
+        HirTy::GcBuf(t) => format!("GcBuf<{}>", debug_name(t, module)),
+        HirTy::Sum(_) => ty.sum_name(|t| debug_name(t, module)),
+        HirTy::Tuple(ts) => format!("({})", list(ts)),
+        HirTy::Array(t, n) => format!("[{}; {n}]", debug_name(t, module)),
+        HirTy::Fn(..) | HirTy::Closure { .. } => "fn".to_owned(),
+        _ => "any".to_owned(),
     }
 }
 

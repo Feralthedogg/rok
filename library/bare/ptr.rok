@@ -1,11 +1,11 @@
 // rok::bare::ptr — raw pointers (stdlib spec 1.1). A pointer is its
 // address; reading / writing through it is `unsafe` (refs-lang 4.15.2).
 //
-// Provenance is not tracked — `expose_provenance` /
-// `from_exposed_provenance` are the address itself. `Slice<T>`
-// extraction waits for a user. `Ptr` / `ConstPtr` / `ManyPtr` are never
-// null: `#[niche(0)]` makes `Ptr<T> | none` one address, null = `none`
-// (spec 2.7.2).
+// Provenance is not tracked at run time: `expose_provenance` /
+// `from_exposed_provenance` are the address itself, and the latter is
+// `unsafe` (it makes a pointer out of a plain integer). `Ptr` /
+// `ConstPtr` / `ManyPtr` are never null: `#[niche(0)]` makes
+// `Ptr<T> | none` one address, null = `none` (spec 2.7.2).
 
 // Compiler intrinsics over a pointer struct (field 0 = address); `T` is
 // the pointer's type argument.
@@ -27,6 +27,7 @@ pub fn size_of<T>() -> usize;
 pub fn align_of<T>() -> usize;
 
 /// A non-null, mutable pointer to one `T` (C `T*`).
+#[repr(transparent)]
 #[niche(0)]
 pub struct Ptr<T> {
     address: usize;
@@ -89,6 +90,7 @@ impl<T> Ptr<T> {
 }
 
 /// A non-null pointer to one `T` that is only read (C `const T*`).
+#[repr(transparent)]
 #[niche(0)]
 pub struct ConstPtr<T> {
     address: usize;
@@ -116,6 +118,7 @@ impl<T> ConstPtr<T> {
 }
 
 /// A pointer to a run of `T`s of unknown length (C `T*` array).
+#[repr(transparent)]
 #[niche(0)]
 pub struct ManyPtr<T> {
     address: usize;
@@ -144,9 +147,19 @@ impl<T> ManyPtr<T> {
         let p: Ptr<T> = Ptr { address: self.address + idx * size_of::<T>() };
         raw_write(p, value);
     }
+    /// The `len` `T`s from here as a `Slice<T>`; they must stay valid
+    /// while the view is used, and the GC neither traces nor moves them
+    /// (elements holding GC references are UB here).
+    pub unsafe fn slice(self, len: usize) -> Slice<T> {
+        // A buffer reference sits `HEADER_SIZE` before element 0, like a
+        // `str` literal's bytes (`rok_str_bytes_buf`).
+        let buf: GcBuf<T> = rok::bare::mem::transmute_unchecked(self.address - 16);
+        Slice::from_raw_parts(buf, 0, len)
+    }
 }
 
 /// A C-compatible nullable pointer (`T*` that may be `NULL`).
+#[repr(transparent)]
 pub struct CPtr<T> {
     address: usize;
 }
@@ -200,4 +213,15 @@ pub unsafe fn const_cast<T>(p: ConstPtr<T>) -> Ptr<T> { Ptr { address: p.address
 pub fn expose_provenance<T>(p: Ptr<T>) -> usize { p.address }
 
 /// A pointer at `addr`, assumed to carry an exposed provenance.
-pub fn from_exposed_provenance<T>(addr: usize) -> Ptr<T> { Ptr { address: addr } }
+pub unsafe fn from_exposed_provenance<T>(addr: usize) -> Ptr<T> { Ptr { address: addr } }
+
+/// A pointer to `place` itself (a local, or a field / array element of
+/// one), valid while that local is in scope: the local lives in memory
+/// and, holding GC references, stays a GC root (whose referents never
+/// move) until its scope ends.
+#[intrinsic("rok.addr_of")]
+pub fn addr_of<T>(place: T) -> Ptr<T>;
+
+/// `addr_of` as the start of a run of `T`s (`many_addr_of(buf[0])`).
+#[intrinsic("rok.addr_of")]
+pub fn many_addr_of<T>(place: T) -> ManyPtr<T>;

@@ -1,0 +1,60 @@
+// expect-exit: 0
+// expect-stdout:
+// 3 4 5 6 7
+// 8
+
+// Spec 2.9.1: an impl target / trait argument is any type, resolved once
+// every item is registered: a projection through another impl (also one
+// whose own target is a projection, declared later), and types and
+// aliases declared after the impl.
+trait Tag<T> {
+    fn tag(self) -> i32;
+}
+
+// A trait argument that is a projection.
+impl Tag<<A as Pick>::Out> for C {
+    fn tag(self) -> i32 { 3 }
+}
+
+// A target that is a projection.
+impl Tag<i32> for <A as Pick>::Out {
+    fn tag(self) -> i32 { 4 }
+}
+
+// A target projected through an impl whose target is itself a projection.
+impl Tag<i32> for <<A as Pick>::Out as Pick>::Out {
+    fn tag(self) -> i32 { 5 }
+}
+
+// Targets named before their declarations: a generic instance, an alias.
+impl Tag<i32> for Wrap<C> {
+    fn tag(self) -> i32 { 6 }
+}
+impl Tag<i32> for Later {
+    fn tag(self) -> i32 { 7 }
+}
+
+// A default body under a projected trait argument.
+trait Get<T> {
+    fn get(self, x: T) -> T { return x; }
+}
+impl Get<<A as Pick>::Out> for C {}
+
+impl Pick for <A as Pick>::Out { type Out = D; }
+
+trait Pick { type Out; }
+struct A {}
+impl Pick for A { type Out = B; }
+
+struct B {}
+struct C {}
+struct D {}
+struct E {}
+struct Wrap<T> { v: T; }
+type Later = E;
+
+fn main() {
+    println(f"{C {}.tag()} {B {}.tag()} {D {}.tag()} {Wrap { v: C {} }.tag()} {E {}.tag()}");
+    let b: B = C {}.get(B {});
+    println(f"{b.tag() * 2}");
+}

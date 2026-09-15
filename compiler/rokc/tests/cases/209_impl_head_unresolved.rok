@@ -1,0 +1,9 @@
+// expect-error: `C` has no associated type `Out` of `Pick`
+
+trait Pick { type Out; }
+trait Tag { fn tag(self) -> i32; }
+struct C {}
+impl Tag for <C as Pick>::Out {
+    fn tag(self) -> i32 { 1 }
+}
+fn main() {}

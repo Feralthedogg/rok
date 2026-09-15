@@ -574,10 +574,14 @@ struct GenericMethod {
     info: MethodInfo,
 }
 
-/// `impl<..> Tr for Target` (`Target` = `Box<T>`, or a bare `T` for a
-/// blanket impl): applies to a type that matches `self_ty` and meets
-/// the impl's bounds.
-struct GenericTraitImpl {
+/// An associated const `(NAME, type, value)`.
+type AssocConst = (String, Ty, Expr);
+
+/// One `impl` block (spec 2.9), inherent or of a trait, concrete or
+/// generic (`impl<..> Tr for Box<T>`, or a bare `T` for a blanket impl:
+/// applies to a type that matches `self_ty` and meets the bounds).
+struct Impl {
+    /// Empty for an inherent impl.
     trait_key: String,
     /// `impl<T> Get<T> for Box<T> { type Item = T; }`: `[T]` and
     /// `[(Item, T)]`, resolved per instantiation.
@@ -587,18 +591,65 @@ struct GenericTraitImpl {
     where_clause: Vec<rokc_ast::WherePred>,
     self_ty: Ty,
     module: String,
-    /// Method name → template (trait default bodies included).
+    /// A generic trait impl's (or structural inherent impl's) method
+    /// templates by name, trait default bodies included.
     methods: HashMap<String, GenericMethod>,
+    /// Associated consts, trait defaults included (spec 2.8.3a).
+    consts: Vec<AssocConst>,
+    /// A concrete impl's resolved target, and the trait ref it provides
+    /// (arguments with defaults filled, associated types as bindings).
+    concrete: Option<(HirTy, Option<TraitRef>)>,
 }
 
-/// An impl's associated consts (trait defaults included) and the impl
-/// target they apply to (spec 2.8.3a).
-struct ImplConsts {
-    /// Generics / `where` / target of the impl; `trait_key` is empty for
-    /// an inherent impl.
-    target: GenericTraitImpl,
-    /// `(NAME, type, value)`.
-    consts: Vec<(String, Ty, Expr)>,
+impl Impl {
+    fn is_generic(&self) -> bool {
+        !self.generics.params.is_empty()
+    }
+}
+
+/// Every impl, in source order, with indexes for the concrete ones.
+#[derive(Default)]
+struct Impls {
+    all: Vec<Impl>,
+    /// Concrete trait impls by target.
+    by_target: HashMap<MethodTarget, Vec<usize>>,
+    /// Concrete trait impls by trait key, in resolution order.
+    by_trait: HashMap<String, Vec<usize>>,
+}
+
+impl Impls {
+    /// Concrete impl `i`'s target and trait ref, once resolved.
+    fn resolve(&mut self, i: usize, ty: HirTy, provides: Option<TraitRef>) {
+        if let Some(r) = &provides {
+            if let Some(t) = method_target_for(&ty) {
+                self.by_target.entry(t).or_default().push(i);
+            }
+            self.by_trait.entry(r.path.clone()).or_default().push(i);
+        }
+        self.all[i].concrete = Some((ty, provides));
+    }
+
+    fn generic(&self) -> impl Iterator<Item = &Impl> {
+        self.all.iter().filter(|i| i.is_generic())
+    }
+
+    /// The trait refs of the concrete impls on `ty`.
+    fn refs_on<'s>(&'s self, ty: &HirTy) -> impl Iterator<Item = &'s TraitRef> + use<'s> {
+        method_target_for(ty)
+            .and_then(|t| self.by_target.get(&t))
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .filter_map(|&i| self.all[i].concrete.as_ref()?.1.as_ref())
+    }
+
+    /// The targets of trait `key`'s concrete impls, in resolution order.
+    fn tys_of(&self, key: &str) -> impl Iterator<Item = &HirTy> {
+        self.by_trait
+            .get(key)
+            .into_iter()
+            .flatten()
+            .filter_map(|&i| Some(&self.all[i].concrete.as_ref()?.0))
+    }
 }
 
 /// Every struct / union and enum definition by id: the declared ones,
@@ -693,9 +744,6 @@ impl TypeDefs<'_> {
 /// Module-wide, read-only lowering environment shared by every function
 /// body (plus the interior-mutable `sink`).
 struct Env<'a> {
-    /// Every impl's associated consts, matched against a concrete type
-    /// (`T::N`, `Self::N`, `<T as Tr>::N`).
-    impl_consts: Vec<ImplConsts>,
     fn_table: HashMap<String, FnSig>,
     /// `fn_table` and `generic_fns` keys by last segment (both are
     /// complete before any body is lowered).
@@ -729,8 +777,6 @@ struct Env<'a> {
     /// `(generic base of the impl target, method name)`. Called through
     /// `monomorphize` when `method_table` has no concrete entry.
     generic_methods: HashMap<(String, String), Vec<GenericMethod>>,
-    /// Generic trait impls, in source order.
-    generic_trait_impls: Vec<GenericTraitImpl>,
     /// `#[intrinsic("rok.OP.TYPE")]` methods: calls lower to the op.
     intrinsics: HashMap<FunctionId, PrimOp>,
     /// Generic `#[intrinsic]` functions by name.
@@ -755,17 +801,14 @@ struct Env<'a> {
     /// Per-module `use` table — feeds into bare-name and unresolved
     /// path lookups. Empty when no `use` declarations were collected.
     uses: &'a crate::uses::UseTable,
-    /// Concrete trait impls by target: the trait ref each provides (its
-    /// arguments, defaults filled, and associated types as bindings).
-    impls: HashMap<MethodTarget, Vec<TraitRef>>,
+    /// Every impl (bounds, dispatch, projections, associated consts).
+    impls: Impls,
     /// `unsafe fn`s and C functions (spec 4.15): calls need an unsafe scope.
     unsafe_fns: std::collections::HashSet<FunctionId>,
     /// `impl !Send for S {}` opt-outs: `(generic base of S, trait key)`.
     neg_auto: std::collections::HashSet<(String, String)>,
     /// Trait key → declared methods + supertraits (`any Tr` calls).
     trait_info: HashMap<String, TraitInfo>,
-    /// Trait key → implementing types, in impl order (`any Tr` dispatch).
-    trait_impl_tys: HashMap<String, Vec<HirTy>>,
     /// Module-level `static` items by name → declared type.
     statics: HashMap<String, HirTy>,
     static_leaves: std::cell::RefCell<(usize, Leaves)>,
@@ -1532,10 +1575,6 @@ struct ClosureSink {
     /// `T::Item` projections being resolved (cuts `impl<I: Iterator>
     /// IntoIterator for I { type Item = I::Item; }` cycles).
     projecting: std::cell::RefCell<Vec<ProjectionGoal>>,
-    /// The impl substitution an associated const's value lowers under,
-    /// per (impl, concrete type): `ty_subst` borrows it for the life of
-    /// the run (bounded like the monomorphizations).
-    const_substs: std::cell::RefCell<HashMap<(usize, String), &'static TySubst>>,
     /// Adapter thunks (`adapt_fn_value` / `adapt_never_fn`) by
     /// `kind|callee|slot type|callee type`.
     thunks: std::cell::RefCell<HashMap<String, FunctionId>>,
@@ -1594,7 +1633,8 @@ struct LowerCtx<'a> {
     /// Per-monomorphization type-parameter substitution. Empty for
     /// non-generic functions. `T` → concrete `HirTy` overrides the
     /// alias table when both contain the same name.
-    ty_subst: &'a HashMap<String, HirTy>,
+    /// Owned while an associated const's value lowers under its impl's.
+    ty_subst: std::borrow::Cow<'a, TySubst>,
     self_ty: Option<HirTy>,
     /// Enclosing function's (or closure's) return type. `return v;`
     /// checks against it and wraps `v` into a matching sum type.
@@ -1788,6 +1828,14 @@ impl<'a> LowerCtx<'a> {
     }
 
     fn new(env: &'a Env<'a>, ty_subst: &'a HashMap<String, HirTy>, self_ty: Option<HirTy>) -> Self {
+        Self::with_subst(env, std::borrow::Cow::Borrowed(ty_subst), self_ty)
+    }
+
+    fn with_subst(
+        env: &'a Env<'a>,
+        ty_subst: std::borrow::Cow<'a, TySubst>,
+        self_ty: Option<HirTy>,
+    ) -> Self {
         Self {
             env,
             locals: Vec::new(),
@@ -2107,10 +2155,9 @@ impl<'a> LowerCtx<'a> {
     }
 
     /// The trait refs of `ty`'s concrete impls.
-    fn concrete_impls(&self, ty: &HirTy) -> &'a [TraitRef] {
-        method_target_for(ty)
-            .and_then(|t| self.env.impls.get(&t))
-            .map_or(&[], Vec::as_slice)
+    fn concrete_impls(&self, ty: &HirTy) -> impl Iterator<Item = &'a TraitRef> + use<'a> {
+        let env: &'a Env<'a> = self.env;
+        env.impls.refs_on(ty)
     }
 
     /// Does `ty` implement trait `path` (whatever its arguments)?
@@ -2333,7 +2380,7 @@ impl<'a> LowerCtx<'a> {
     /// bounds, operator and method dispatch, projections — go through
     /// here, `concrete_impls` and `generic_impls`.
     fn has_impl(&self, ty: &HirTy, want: &TraitRef, depth: u32) -> bool {
-        self.concrete_impls(ty).iter().any(|r| r.satisfies(want))
+        self.concrete_impls(ty).any(|r| r.satisfies(want))
             || self
                 .generic_impls(ty, |gi| gi.trait_key == want.path, depth)
                 .any(|(gi, subst)| {
@@ -2347,19 +2394,19 @@ impl<'a> LowerCtx<'a> {
     fn generic_impls<'s>(
         &'s self,
         ty: &'s HirTy,
-        keep: impl Fn(&GenericTraitImpl) -> bool + 's,
+        keep: impl Fn(&Impl) -> bool + 's,
         depth: u32,
-    ) -> impl Iterator<Item = (&'a GenericTraitImpl, TySubst)> + 's {
+    ) -> impl Iterator<Item = (&'a Impl, TySubst)> + 's {
         let env: &'a Env<'a> = self.env;
-        env.generic_trait_impls
-            .iter()
+        env.impls
+            .generic()
             .filter(move |gi| keep(gi))
             .filter_map(move |gi| Some((gi, self.generic_impl_subst(gi, ty, depth)?)))
     }
 
     /// The trait ref generic impl `gi` provides under `subst`: its trait
     /// arguments and associated types instantiated.
-    fn generic_impl_ref(&self, gi: &GenericTraitImpl, subst: &TySubst) -> TraitRef {
+    fn generic_impl_ref(&self, gi: &Impl, subst: &TySubst) -> TraitRef {
         let mut rcx = LowerCtx::new(self.env, subst, None);
         rcx.current_module.clone_from(&gi.module);
         rcx.set_bounds(&gi.generics, &gi.where_clause);
@@ -2389,7 +2436,7 @@ impl<'a> LowerCtx<'a> {
     /// `ty`: `ty` matches its target and meets its bounds.
     fn generic_impl_subst(
         &self,
-        gi: &GenericTraitImpl,
+        gi: &Impl,
         ty: &HirTy,
         depth: u32,
     ) -> Option<HashMap<String, HirTy>> {
@@ -2401,7 +2448,7 @@ impl<'a> LowerCtx<'a> {
     /// `Err(None)` when the target does not match.
     fn generic_impl_match(
         &self,
-        gi: &GenericTraitImpl,
+        gi: &Impl,
         ty: &HirTy,
         depth: u32,
     ) -> Result<HashMap<String, HirTy>, Option<(HirTy, TraitRef)>> {
@@ -2990,7 +3037,7 @@ impl<'a> LowerCtx<'a> {
                     }
                 }
                 let mut t = resolve_ty_with_structs(ty, &self.env.defs, None, self.scope());
-                substitute_params(&mut t, self.ty_subst);
+                substitute_params(&mut t, &self.ty_subst);
                 t
             }
             AstTyKind::Sum(parts) => crate::ty::written_sum(
@@ -3216,7 +3263,6 @@ impl<'a> LowerCtx<'a> {
         self.env.sink.projecting.borrow_mut().push(key);
         let mut hits: Vec<HirTy> = self
             .concrete_impls(base)
-            .iter()
             .filter(|r| wanted(&r.path) && args_fit(&r.path, &r.args))
             .filter_map(|r| r.binds.iter().find(|(n, _)| n == name))
             .map(|(_, t)| t.clone())

@@ -220,7 +220,7 @@ fn build(key: &StdKey<'_>, root: &Path, dir: &Path) -> bool {
     let stub = tmp.join("rok.prebuilt").join("lib.rok");
     let r = s.compile_source("// the prebuilt standard library\n", &stub);
     let archive = tmp.join(format!("lib{}.a", rokc_driver::STD_PKG));
-    let ok = !r.has_errors() && r.archive(key.opts, &archive).is_ok();
+    let ok = !r.has_errors() && r.archive(key.opts, &archive, false).is_ok();
     // Its files are not the user build's.
     rokc_diagnostic::clear_files();
     if ok && std::fs::rename(&tmp, dir).is_ok() {

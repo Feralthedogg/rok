@@ -9,8 +9,9 @@
 //!
 //! Not supported: CURVE / ipc transport, topic filtering on iopub,
 //! rich display (`text/plain` only), `input_request` (cells read
-//! `/dev/null`), the debugger. `inspect` shows the type of the name at
-//! the cursor; `history` is this kernel's executed cells. Output is
+//! `/dev/null`), the debugger. `complete` and `inspect` are the
+//! language server's completion and hover on the session source;
+//! `history` is this kernel's executed cells. Output is
 //! sent when the cell ends, not as it is printed.
 
 use std::io::{self, Read, Write};
@@ -23,6 +24,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rokc_core::hash::{hex, hmac_sha256};
 use rokc_interface::BuildOptions;
 
+use crate::analysis::Analysis;
+use crate::lsp::{complete, hover, receiver_start};
 use crate::repl::{Repl, incomplete};
 use rokc_diagnostic::Json;
 
@@ -394,6 +397,9 @@ struct Kernel {
     history: Vec<(u32, String)>,
     out: mpsc::Receiver<String>,
     err: mpsc::Receiver<String>,
+    /// The session's check without a cell (path completion), until the
+    /// next cell runs.
+    checked: Option<(Analysis, String)>,
 }
 
 impl Kernel {
@@ -402,6 +408,7 @@ impl Kernel {
     /// is shown.
     // The cells before a failing one keep their effects.
     fn run(&mut self, code: &str) -> (String, String, Result<Option<String>, ()>) {
+        self.checked = None;
         let mut result = Ok(None);
         for cell in split_cells(code) {
             result = if cell.starts_with(':') {
@@ -491,6 +498,22 @@ impl Kernel {
         self.wire.reply(conn, req, "execute_reply", &reply);
     }
 
+    /// Help for the name at `code[start..end]` (9.8.6): the language
+    /// server's hover, as plain text. The cell is checked in the
+    /// session; when it does not check, the expression ending at the
+    /// name alone (`a.b`, `m::f`).
+    fn help(&self, code: &str, start: usize, end: usize) -> Option<String> {
+        let at = |body: &str, off: usize| {
+            let (src, base) = self.repl.source(body);
+            let (a, key) = self.repl.analyze(&src);
+            hover(&a, &key, &src, base + off)
+        };
+        let from = receiver_start(code, end);
+        let md = at(code, start).or_else(|| at(&format!("{};", &code[from..end]), start - from))?;
+        let lines: Vec<&str> = md.lines().filter(|l| !l.starts_with("```")).collect();
+        Some(lines.join("\n"))
+    }
+
     /// Answer one shell / control request; `false` after `shutdown`.
     fn handle(&mut self, conn: &Conn, req: &Msg) -> bool {
         let ok = ("status", Json::str("ok"));
@@ -538,22 +561,36 @@ impl Kernel {
                 )
             }
             "complete_request" => {
-                // The session's names and the keywords (no members, paths).
                 let code = c.get("code").as_str().unwrap_or("");
                 let pos = c.get("cursor_pos").as_u32().unwrap_or(0) as usize;
                 let end = code.char_indices().nth(pos).map_or(code.len(), |(i, _)| i);
-                let start = code[..end].trim_end_matches(ident).len();
-                let word = &code[start..end];
-                let mut matches = self.repl.names();
-                matches.extend(rokc_lexer::token::RESERVED);
-                let matches = matches.iter().filter(|n| n.starts_with(word));
+                let head = code[..end].trim_end_matches(ident);
+                let (start, matches) = if head.ends_with('.') || head.ends_with("::") {
+                    // Members and paths: the language server's completion
+                    // on the session source with this cell in it.
+                    let (src, at) = self.repl.source(code);
+                    if self.checked.is_none() {
+                        self.checked = Some(self.repl.analyze(&self.repl.source("").0));
+                    }
+                    let (good, key) = self.checked.as_ref().expect("checked above");
+                    let compile = |t: &str| self.repl.analyze(t).0;
+                    let (start, found) = complete(&src, key, at + end, compile, Some(good));
+                    (start - at, found.into_iter().map(|(l, ..)| l).collect())
+                } else {
+                    // A name: the session's, or a keyword.
+                    let word = &code[head.len()..end];
+                    let mut names = self.repl.names();
+                    names.extend(rokc_lexer::token::RESERVED);
+                    let names = names.into_iter().filter(|n| n.starts_with(word));
+                    (head.len(), names.map(str::to_owned).collect::<Vec<_>>())
+                };
                 (
                     "complete_reply",
                     Json::obj([
                         ok,
                         (
                             "matches",
-                            Json::Arr(matches.map(|n| Json::str(*n)).collect()),
+                            Json::Arr(matches.into_iter().map(Json::Str).collect()),
                         ),
                         (
                             "cursor_start",
@@ -568,19 +605,16 @@ impl Kernel {
                 let code = c.get("code").as_str().unwrap_or("");
                 let pos = c.get("cursor_pos").as_u32().unwrap_or(0) as usize;
                 let (start, end) = word_at(code, pos);
-                let word = &code[start..end];
-                let ty = (!word.is_empty())
-                    .then(|| self.repl.type_of(word, true))
-                    .flatten();
-                let data = ty.as_ref().map_or_else(
+                let help = (start < end).then(|| self.help(code, start, end)).flatten();
+                let data = help.as_ref().map_or_else(
                     || Json::obj([]),
-                    |t| Json::obj([("text/plain", Json::Str(format!("{word}: {t}")))]),
+                    |t| Json::obj([("text/plain", Json::str(t))]),
                 );
                 (
                     "inspect_reply",
                     Json::obj([
                         ok,
-                        ("found", Json::Bool(ty.is_some())),
+                        ("found", Json::Bool(help.is_some())),
                         ("data", data),
                         ("metadata", Json::obj([])),
                     ]),
@@ -757,6 +791,7 @@ fn start(
         history: Vec::new(),
         out,
         err,
+        checked: None,
     };
     k.wire.status(&Json::obj([]), "starting");
     while let Ok((conn, m)) = rx.recv() {

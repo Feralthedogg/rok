@@ -4,6 +4,6 @@
 // A capacity whose byte size passes what one allocation can address
 // panics before allocating (no wrapped, too-small buffer).
 fn main() {
-    let xs: List<i64> = List::with_capacity(4611686018427387904usize);
+    let xs: List<i64> = List::with_capacity(usize::MAX / 4 + 1);
     println(f"{xs.capacity()}");
 }

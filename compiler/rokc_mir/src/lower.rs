@@ -1,7 +1,7 @@
 //! HIR → MIR lowering: basic blocks over locals, block parameters at
 //! joins.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rokc_hir::{
     HirBlock, HirExpr, HirExprKind, HirFunction, HirMatchArm, HirModule, HirPattern, HirStmt, HirTy,
@@ -11,12 +11,12 @@ use rokc_ir_common::{BlockId, ConstVal, FunctionId, LocalId, PrimOp, PrimTy};
 
 use rokc_ir_common::{Abi, FnFacts, Linkage};
 
-use crate::ty::{code_ty, enum_payload_ty, fat_fn, lower_ty, sum_tag};
+use crate::ty::{code_ty, debug_ty, enum_payload_ty, fat_fn, lower_ty, sum_tag};
 pub mod niche;
 
 use crate::{
-    BasicBlock, LocalDecl, MirFunction, MirModule, MirStaticDef, MirTy, Operand, RValue, Statement,
-    Target, Terminator,
+    BasicBlock, DebugTy, DebugTypes, LocalDecl, MirFunction, MirModule, MirStaticDef, MirTy,
+    Operand, RValue, Statement, Target, Terminator,
 };
 
 #[must_use]
@@ -106,7 +106,9 @@ pub fn lower(module: &HirModule, target: &Target) -> MirModule {
     }
     let next_id = functions.iter().map(|f| f.id.0 + 1).max().unwrap_or(0);
     crate::specialize::closures(&mut functions, next_id);
+    let debug = debug_types(module, &functions, target);
     MirModule {
+        debug,
         functions,
         statics,
         struct_names: module
@@ -120,6 +122,36 @@ pub fn lower(module: &HirModule, target: &Target) -> MirModule {
         target: target.clone(),
         link: crate::Link::default(),
     }
+}
+
+/// The `DebugTy`s of the named locals of `functions` and of struct
+/// fields, where they tell more than the `MirTy`.
+fn debug_types(module: &HirModule, functions: &[MirFunction], target: &Target) -> DebugTypes {
+    let mut out = DebugTypes::default();
+    let lowered: HashSet<FunctionId> = functions.iter().map(|f| f.id).collect();
+    for f in module.functions.iter().filter(|f| lowered.contains(&f.id)) {
+        for l in f.locals.iter().filter(|l| l.name.is_some()) {
+            if let Some(d) = debug_ty(&l.ty, module, target) {
+                out.locals.insert((f.id, l.id), d);
+            }
+        }
+    }
+    for s in module.structs.iter().filter(|s| s.union_kind.is_none()) {
+        let fields: Vec<Option<DebugTy>> = s
+            .fields
+            .iter()
+            .map(|f| debug_ty(&f.ty, module, target))
+            .collect();
+        if fields.iter().any(Option::is_some) {
+            let fields = fields
+                .into_iter()
+                .zip(&s.fields)
+                .map(|(d, f)| d.unwrap_or_else(|| DebugTy::Mir(lower_ty(&f.ty, module, target))))
+                .collect();
+            out.fields.insert(s.id.0, fields);
+        }
+    }
+    out
 }
 
 /// What lowering function values (spec 4.4: `{code, env}`) leaves to do
@@ -1291,6 +1323,12 @@ impl<'a> FnBuilder<'a> {
                 });
                 Operand::Const(ConstVal::Unit)
             }
+            HirExprKind::AddrOf { place } => {
+                // The place's reads only check its indices (they are
+                // locals or constants: `addr_place` reads them again).
+                self.lower_expr_to_operand(place);
+                self.addr_place(place)
+            }
             HirExprKind::SizeOf { ty, align } => {
                 let dst = self.fresh_local(MirTy::Prim(PrimTy::Usize));
                 self.push_stmt(Statement::Assign {
@@ -1554,6 +1592,85 @@ impl<'a> FnBuilder<'a> {
                 Operand::Copy(dst)
             }
         }
+    }
+
+    /// The address of place `p`: a local, or a field / element of one.
+    fn addr_place(&mut self, p: &HirExpr) -> Operand {
+        let usize_ty = MirTy::Prim(PrimTy::Usize);
+        let (base, off) = match &p.kind {
+            HirExprKind::Local(l) => {
+                let dst = self.fresh_local(usize_ty);
+                self.push_stmt(Statement::Assign {
+                    target: dst,
+                    rvalue: RValue::AddrOf(*l),
+                });
+                return Operand::Copy(dst);
+            }
+            HirExprKind::FieldRead {
+                target,
+                field_index: i,
+                ..
+            }
+            | HirExprKind::TupleField {
+                target, index: i, ..
+            } => {
+                let off = self.target.field_offsets(&self.ty(&target.ty))[*i as usize];
+                (
+                    target,
+                    Operand::Const(ConstVal::UInt {
+                        value: off.into(),
+                        ty: PrimTy::Usize,
+                    }),
+                )
+            }
+            HirExprKind::ArrayIndex {
+                array,
+                index,
+                elem_ty,
+            } => {
+                let size = self.target.size_align(&self.ty(elem_ty)).0;
+                let mut i = self.lower_expr_to_operand(index);
+                if index.ty != HirTy::Prim(PrimTy::Usize) {
+                    let t = self.fresh_local(usize_ty.clone());
+                    self.push_stmt(Statement::Assign {
+                        target: t,
+                        rvalue: RValue::Cast {
+                            source: i,
+                            from_ty: self.ty(&index.ty),
+                            to_ty: usize_ty.clone(),
+                        },
+                    });
+                    i = Operand::Copy(t);
+                }
+                let off = self.fresh_local(usize_ty.clone());
+                self.push_stmt(Statement::Assign {
+                    target: off,
+                    rvalue: RValue::BinOp {
+                        op: PrimOp::WrappingMul,
+                        op_ty: usize_ty.clone(),
+                        lhs: i,
+                        rhs: Operand::Const(ConstVal::UInt {
+                            value: size.into(),
+                            ty: PrimTy::Usize,
+                        }),
+                    },
+                });
+                (array, Operand::Copy(off))
+            }
+            _ => unreachable!("addr_of: not a place"),
+        };
+        let base = self.addr_place(base);
+        let dst = self.fresh_local(usize_ty.clone());
+        self.push_stmt(Statement::Assign {
+            target: dst,
+            rvalue: RValue::BinOp {
+                op: PrimOp::WrappingAdd,
+                op_ty: usize_ty,
+                lhs: base,
+                rhs: off,
+            },
+        });
+        Operand::Copy(dst)
     }
 
     fn lower_match(

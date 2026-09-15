@@ -297,6 +297,9 @@ fn print_rvalue(out: &mut String, r: &RValue) {
             let _ = write!(out, "raw_load<{}> ", ty_str(ty));
             print_operand(out, addr);
         }
+        RValue::AddrOf(l) => {
+            let _ = write!(out, "addr_of %{}", l.0);
+        }
         RValue::SizeOf { ty, align } => {
             let f = if *align { "align_of" } else { "size_of" };
             let _ = write!(out, "{f}<{}>", ty_str(ty));

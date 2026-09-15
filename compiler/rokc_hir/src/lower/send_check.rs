@@ -887,6 +887,7 @@ impl Flow<'_> {
             | K::PrimUnaryOp { .. }
             | K::BufNew { .. }
             | K::RawRead { .. }
+            | K::AddrOf { .. }
             | K::RawWrite { .. }
             | K::BufAtomic { .. }
             | K::MlirOp { .. }
@@ -948,6 +949,7 @@ fn each_child<'e>(e: &'e HirExpr, out: &mut dyn FnMut(Child<'e>)) {
         | K::ArrayRepeat { value: x, .. }
         | K::BufNew { len: x, .. }
         | K::RawRead { addr: x, .. }
+        | K::AddrOf { place: x }
         | K::UnionWrite { value: x, .. }
         | K::UnionRead { target: x, .. }
         | K::Suspend { value: x, .. }

@@ -128,8 +128,11 @@ pub fn write(obj: &Obj) -> Vec<u8> {
                     RelKind::X86Pc32 => (X86_64_RELOC_SIGNED, true, 2),
                     RelKind::X86GotLoad => (X86_64_RELOC_GOT_LOAD, true, 2),
                     RelKind::X86Tls => (X86_64_RELOC_TLV, true, 2),
-                    RelKind::X86SecRel | RelKind::SecRelHi12 | RelKind::SecRelLo12 => {
-                        unreachable!("COFF relocation in a Mach-O object")
+                    RelKind::X86SecRel
+                    | RelKind::SecRelHi12
+                    | RelKind::SecRelLo12
+                    | RelKind::SecOff32 => {
+                        unreachable!("{:?} in Mach-O code or data", r.kind)
                     }
                 };
                 (r.off, ty, pcrel, len, true, index[r.sym as usize])
@@ -190,10 +193,11 @@ pub fn write(obj: &Obj) -> Vec<u8> {
             data: sec.data.clone(),
             align: sec.align,
             // Section-relative (the bytes hold the object address), as
-            // dsymutil reads debug info.
+            // dsymutil reads debug info; offsets into debug sections stay.
             relocs: sec
                 .relocs
                 .iter()
+                .filter(|r| r.kind != RelKind::SecOff32)
                 .map(|r| {
                     let sect = obj.syms[r.sym as usize]
                         .def

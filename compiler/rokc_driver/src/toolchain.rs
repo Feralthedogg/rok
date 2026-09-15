@@ -262,7 +262,9 @@ pub fn link_executable(
     link_object(module, &paths, opts, out)
 }
 
-/// Library build (spec 902.13): `foo.o` + `libfoo.a`.
+/// Library build (spec 902.13): `libfoo.a`, with `object` the one
+/// object `foo.o` beside it, else as many members as LLVM compiles in
+/// parallel (a prebuilt dependency, the standard library cache).
 ///
 /// For a prebuilt-library build (`CompiledModule::interface`), its RHIR
 /// `foo.rhir` beside them (spec 904). The RHIR is a sibling file rather
@@ -271,20 +273,30 @@ pub fn build_archive(
     module: &CompiledModule,
     opts: &BuildOptions,
     archive_out: &Path,
+    object: bool,
 ) -> Result<(), RokDiagnostic> {
-    let (object, gc_types) = if let Some(o) = crate::native::object(module, opts)? {
-        (o.object, o.gc_types)
+    let (objects, gc_types) = if let Some(o) = crate::native::object(module, opts)? {
+        (vec![o.object], o.gc_types)
     } else {
-        let (mut objs, mlir) = llvm(module, opts, rokc_llvm::Emit::Obj, 1)?;
-        (objs.remove(0), mlir.gc_types)
+        let (objs, mlir) = llvm(module, opts, rokc_llvm::Emit::Obj, usize::from(object))?;
+        (objs, mlir.gc_types)
     };
-    let obj = object_beside(archive_out);
-    std::fs::write(&obj, object)
-        .map_err(|e| err(format!("cannot write {}: {e}", obj.display())))?;
+    let tmp = TempDir::new(opts.keep_temps)?;
+    let mut paths = Vec::new();
+    for (i, o) in objects.iter().enumerate() {
+        let p = if object {
+            object_beside(archive_out)
+        } else {
+            tmp.path().join(format!("part{i}.o"))
+        };
+        std::fs::write(&p, o).map_err(|e| err(format!("cannot write {}: {e}", p.display())))?;
+        paths.push(p);
+    }
     // A fresh archive, not members appended to an old one.
     let _ = std::fs::remove_file(archive_out);
     let t = target(module.mir.target.triple.as_deref());
-    rokc_llvm::write_archive(&t, archive_out, &[&obj])
+    let members: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+    rokc_llvm::write_archive(&t, archive_out, &members)
         .map_err(|e| err(format!("cannot write {}: {e}", archive_out.display())))?;
     if let Some(r) = &module.interface {
         let mut r = r.clone();

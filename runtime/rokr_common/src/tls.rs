@@ -10,10 +10,15 @@
 //! registry (`rokr_gc::world`).
 //!
 //! Targets: Mach-O `arm64` / `x86_64` (`__thread_vars`), ELF `x86_64`
-//! (initial-exec) / `aarch64` (local-exec: the runtime is always linked
-//! into the executable), COFF `x86_64` / `aarch64` (`.tls$`, through
-//! `_tls_index` and the TEB's TLS array; rokc's startup object defines
-//! `_tls_index` and the TLS directory).
+//! (initial-exec) / `aarch64` / `x86` (`%gs`) / `arm` (`TPIDRURO`, what
+//! `__aeabi_read_tp` reads on Linux) (local-exec: the runtime is always
+//! linked into the executable), COFF `x86_64` / `aarch64` / `x86`
+//! (`.tls$`, through `_tls_index` and the TEB's TLS array; rokc's
+//! startup object defines `_tls_index` and the TLS directory).
+//!
+//! Sizes and alignments are spliced into the assembly as text: `{p}` /
+//! `{pa}` are the pointer width and its log2 alignment (803 §8.3.5),
+//! `{p2}` two pointers.
 
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
@@ -28,6 +33,22 @@ static NEXT_WORKER_ID: AtomicU64 = AtomicU64::new(0);
 /// `pub fn <name>() -> *mut u8` returning this thread's slot address.
 macro_rules! tls_slots {
     ($($name:ident => $acc:ident, $size:literal, $align:literal;)*) => {
+        tls_slots!(@asm $($name => $acc, $size, $align;)*);
+        /// Address of this thread's `rok_tls_<name>` slot.
+        pub mod slot {
+            unsafe extern "C" {
+                $(fn $acc() -> *mut u8;)*
+            }
+            $(
+                pub fn $name() -> *mut u8 {
+                    // SAFETY: the accessor takes no arguments and only
+                    // returns the address of this thread's TLS slot.
+                    unsafe { $acc() }
+                }
+            )*
+        }
+    };
+    (@asm $($name:ident => $acc:ident, $size:literal, $align:literal;)*) => {
         #[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
         core::arch::global_asm!($(concat!(
             ".tbss _rok_tls_", stringify!($name), "$tlv$init, ", $size, ", ", $align, "\n",
@@ -47,7 +68,7 @@ macro_rules! tls_slots {
             "ldr x16, [x0]\n",
             // Tail-call the TLV thunk: it returns the address in x0.
             "br x16\n",
-        )),*);
+        )),*, p = const PTR, pa = const PTR_ALIGN, p2 = const 2 * PTR);
         #[cfg(all(target_vendor = "apple", target_arch = "x86_64"))]
         core::arch::global_asm!($(concat!(
             ".tbss _rok_tls_", stringify!($name), "$tlv$init, ", $size, ", ", $align, "\n",
@@ -63,7 +84,7 @@ macro_rules! tls_slots {
             "_", stringify!($acc), ":\n",
             "mov rdi, qword ptr [rip + _rok_tls_", stringify!($name), "@TLVP]\n",
             "jmp qword ptr [rdi]\n",
-        )),*);
+        )),*, p = const PTR, pa = const PTR_ALIGN, p2 = const 2 * PTR);
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         core::arch::global_asm!($(concat!(
             ".pushsection .tbss,\"awT\",@nobits\n",
@@ -81,7 +102,7 @@ macro_rules! tls_slots {
             "mov rax, qword ptr fs:[0]\n",
             "add rax, qword ptr [rip + rok_tls_", stringify!($name), "@GOTTPOFF]\n",
             "ret\n",
-        )),*);
+        )),*, p = const PTR, pa = const PTR_ALIGN, p2 = const 2 * PTR);
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
         core::arch::global_asm!($(concat!(
             ".pushsection .tbss,\"awT\",@nobits\n",
@@ -100,7 +121,7 @@ macro_rules! tls_slots {
             "add x0, x0, :tprel_hi12:rok_tls_", stringify!($name), "\n",
             "add x0, x0, :tprel_lo12_nc:rok_tls_", stringify!($name), "\n",
             "ret\n",
-        )),*);
+        )),*, p = const PTR, pa = const PTR_ALIGN, p2 = const 2 * PTR);
 
         #[cfg(all(windows, target_arch = "x86_64"))]
         core::arch::global_asm!($(concat!(
@@ -118,7 +139,7 @@ macro_rules! tls_slots {
             "mov rcx, qword ptr [rcx + 8*rax]\n",
             "lea rax, [rcx + rok_tls_", stringify!($name), "@SECREL32]\n",
             "ret\n",
-        )),*);
+        )),*, p = const PTR, pa = const PTR_ALIGN, p2 = const 2 * PTR);
         #[cfg(all(windows, target_arch = "aarch64"))]
         core::arch::global_asm!($(concat!(
             ".section .tls$,\"dw\"\n",
@@ -137,70 +158,117 @@ macro_rules! tls_slots {
             "add x9, x9, :secrel_hi12:rok_tls_", stringify!($name), "\n",
             "add x0, x9, :secrel_lo12:rok_tls_", stringify!($name), "\n",
             "ret\n",
-        )),*);
-        /// Address of this thread's `rok_tls_<name>` slot.
-        pub mod slot {
-            unsafe extern "C" {
-                $(fn $acc() -> *mut u8;)*
-            }
-            $(
-                pub fn $name() -> *mut u8 {
-                    // SAFETY: the accessor takes no arguments and only
-                    // returns the address of this thread's TLS slot.
-                    unsafe { $acc() }
-                }
-            )*
-        }
+        )),*, p = const PTR, pa = const PTR_ALIGN, p2 = const 2 * PTR);
+        #[cfg(all(target_os = "linux", target_arch = "x86"))]
+        core::arch::global_asm!($(concat!(
+            ".pushsection .tbss,\"awT\",@nobits\n",
+            ".p2align ", $align, "\n",
+            ".globl rok_tls_", stringify!($name), "\n",
+            ".type rok_tls_", stringify!($name), ",@object\n",
+            ".size rok_tls_", stringify!($name), ",", $size, "\n",
+            "rok_tls_", stringify!($name), ":\n",
+            ".zero ", $size, "\n",
+            ".popsection\n",
+            ".globl ", stringify!($acc), "\n",
+            ".hidden ", stringify!($acc), "\n",
+            ".type ", stringify!($acc), ",@function\n",
+            stringify!($acc), ":\n",
+            "mov eax, dword ptr gs:[0]\n",
+            "lea eax, [eax + rok_tls_", stringify!($name), "@NTPOFF]\n",
+            "ret\n",
+        )),*, p = const PTR, pa = const PTR_ALIGN, p2 = const 2 * PTR);
+        #[cfg(all(target_os = "linux", target_arch = "arm"))]
+        core::arch::global_asm!($(concat!(
+            ".pushsection .tbss,\"awT\",%nobits\n",
+            ".p2align ", $align, "\n",
+            ".globl rok_tls_", stringify!($name), "\n",
+            ".type rok_tls_", stringify!($name), ",%object\n",
+            ".size rok_tls_", stringify!($name), ",", $size, "\n",
+            "rok_tls_", stringify!($name), ":\n",
+            ".zero ", $size, "\n",
+            ".popsection\n",
+            ".globl ", stringify!($acc), "\n",
+            ".hidden ", stringify!($acc), "\n",
+            ".type ", stringify!($acc), ",%function\n",
+            ".p2align 2\n",
+            stringify!($acc), ":\n",
+            "mrc p15, 0, r0, c13, c0, 3\n",
+            "ldr r1, 1f\n",
+            "add r0, r0, r1\n",
+            "bx lr\n",
+            "1: .long rok_tls_", stringify!($name), "(TPOFF)\n",
+        )),*, p = const PTR, pa = const PTR_ALIGN, p2 = const 2 * PTR);
+        // C names carry a leading underscore on x86 COFF.
+        #[cfg(all(windows, target_arch = "x86"))]
+        core::arch::global_asm!($(concat!(
+            ".section .tls$,\"dw\"\n",
+            ".p2align ", $align, "\n",
+            ".globl _rok_tls_", stringify!($name), "\n",
+            "_rok_tls_", stringify!($name), ":\n",
+            ".zero ", $size, "\n",
+            ".text\n",
+            ".globl _", stringify!($acc), "\n",
+            ".p2align 4\n",
+            "_", stringify!($acc), ":\n",
+            "mov eax, dword ptr [__tls_index]\n",
+            "mov ecx, dword ptr fs:[0x2c]\n",
+            "mov ecx, dword ptr [ecx + 4*eax]\n",
+            "lea eax, [ecx + _rok_tls_", stringify!($name), "@SECREL32]\n",
+            "ret\n",
+        )),*, p = const PTR, pa = const PTR_ALIGN, p2 = const 2 * PTR);
     };
 }
+
+const PTR: usize = size_of::<usize>();
+const PTR_ALIGN: u32 = PTR.trailing_zeros();
 
 #[cfg(not(any(
     target_vendor = "apple",
     all(
         any(target_os = "linux", windows),
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    )
+        any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "x86")
+    ),
+    all(target_os = "linux", target_arch = "arm")
 )))]
 compile_error!("rokr: no `rok_tls_*` definitions for this target");
 
-// 803 §8.3.1. Pointer slots are 8 bytes: every supported target is
-// 64-bit (§8.3.5 makes them pointer-width).
+// 803 §8.3.1; pointer slots are pointer-width (§8.3.5).
 tls_slots! {
     yield_flag => rokr_tls_yield_flag_addr, 1, 0;
-    tlab_cursor => rokr_tls_tlab_cursor_addr, 8, 3;
-    tlab_limit => rokr_tls_tlab_limit_addr, 8, 3;
-    shadow_stack_top => rokr_tls_shadow_stack_top_addr, 8, 3;
-    wb_log_cursor => rokr_tls_wb_log_cursor_addr, 8, 3;
-    wb_log_limit => rokr_tls_wb_log_limit_addr, 8, 3;
+    tlab_cursor => rokr_tls_tlab_cursor_addr, "{p}", "{pa}";
+    tlab_limit => rokr_tls_tlab_limit_addr, "{p}", "{pa}";
+    shadow_stack_top => rokr_tls_shadow_stack_top_addr, "{p}", "{pa}";
+    wb_log_cursor => rokr_tls_wb_log_cursor_addr, "{p}", "{pa}";
+    wb_log_limit => rokr_tls_wb_log_limit_addr, "{p}", "{pa}";
     mutator_state => rokr_tls_mutator_state_addr, 1, 0;
     worker_id => rokr_tls_worker_id_addr, 8, 3;
     // Not an 803 slot: this thread's task-executor worker
     // (`rok::core::task`), a pinned GC object, 0 = none.
-    task_worker => rokr_tls_task_worker_addr, 8, 3;
+    task_worker => rokr_tls_task_worker_addr, "{p}", "{pa}";
     // Not an 803 slot: the executor lane this thread runs (`rokr::lane`),
     // a malloc'd record, 0 = none.
-    task_lane => rokr_tls_task_lane_addr, 8, 3;
+    task_lane => rokr_tls_task_lane_addr, "{p}", "{pa}";
     // Not an 803 slot: `[lo, hi)`, the addresses whose fault means this
     // thread overflowed its stack (`rokr::stack`); `[0, 0)` = unknown.
-    stack_guard => rokr_tls_stack_guard_addr, 16, 3;
+    stack_guard => rokr_tls_stack_guard_addr, "{p2}", "{pa}";
     // Not 803 slots: this thread's SATB log chunk (`rokr_gc`, concurrent
     // marking), like the wb log pair.
-    satb_cursor => rokr_tls_satb_cursor_addr, 8, 3;
-    satb_limit => rokr_tls_satb_limit_addr, 8, 3;
+    satb_cursor => rokr_tls_satb_cursor_addr, "{p}", "{pa}";
+    satb_limit => rokr_tls_satb_limit_addr, "{p}", "{pa}";
     // Not an 803 slot: the head of this thread's list of running static
     // initializers (`rokr::thread`), null = none.
-    static_inits => rokr_tls_static_inits_addr, 8, 3;
+    static_inits => rokr_tls_static_inits_addr, "{p}", "{pa}";
 }
 
 /// Address of this thread's `rok_tls_stack_guard` (`[lo, hi)`).
-#[allow(clippy::cast_ptr_alignment)] // 8-aligned slot
+#[allow(clippy::cast_ptr_alignment)] // pointer-aligned slot
 pub fn stack_guard() -> *mut [usize; 2] {
     slot::stack_guard().cast()
 }
 
 /// Address of this thread's `rok_tls_shadow_stack_top` (the head of its
 /// shadow-stack frame chain, pushed / popped by compiled code).
-#[allow(clippy::cast_ptr_alignment)] // 8-aligned slot
+#[allow(clippy::cast_ptr_alignment)] // pointer-aligned slot
 pub fn shadow_stack_top() -> *mut *mut u8 {
     slot::shadow_stack_top().cast()
 }
@@ -221,7 +289,7 @@ pub fn mutator_state() -> &'static AtomicU8 {
 /// `rok_thread_init` slot values (803 §8.3.6). The TLAB starts empty
 /// (the first allocation refills it); the write barrier logs into its
 /// own remembered-set chunk, allocated by the first logged store.
-#[allow(clippy::cast_ptr_alignment)] // 8-aligned slots
+#[allow(clippy::cast_ptr_alignment)] // pointer-aligned slots
 pub fn thread_init() {
     yield_flag().store(0, Ordering::Relaxed);
     mutator_state().store(MUTATOR_RUNNING, Ordering::Relaxed);
@@ -242,39 +310,39 @@ pub fn thread_init() {
 
 /// Addresses of this thread's `rok_tls_wb_log_cursor` and
 /// `rok_tls_wb_log_limit` (its remembered-set chunk, `rokr_gc`).
-#[allow(clippy::cast_ptr_alignment)] // 8-aligned slots
+#[allow(clippy::cast_ptr_alignment)] // pointer-aligned slots
 pub fn wb_log() -> [*mut usize; 2] {
     [slot::wb_log_cursor().cast(), slot::wb_log_limit().cast()]
 }
 
 /// Addresses of this thread's `rok_tls_satb_cursor` and
 /// `rok_tls_satb_limit` (its SATB log chunk, `rokr_gc`).
-#[allow(clippy::cast_ptr_alignment)] // 8-aligned slots
+#[allow(clippy::cast_ptr_alignment)] // pointer-aligned slots
 pub fn satb_log() -> [*mut usize; 2] {
     [slot::satb_cursor().cast(), slot::satb_limit().cast()]
 }
 
 /// Addresses of this thread's `rok_tls_tlab_cursor` and
 /// `rok_tls_tlab_limit` (the bump range compiled code allocates from).
-#[allow(clippy::cast_ptr_alignment)] // 8-aligned slots
+#[allow(clippy::cast_ptr_alignment)] // pointer-aligned slots
 pub fn tlab() -> [*mut usize; 2] {
     [slot::tlab_cursor().cast(), slot::tlab_limit().cast()]
 }
 
 /// Address of this thread's `rok_tls_task_worker`.
-#[allow(clippy::cast_ptr_alignment)] // 8-aligned slot
+#[allow(clippy::cast_ptr_alignment)] // pointer-aligned slot
 pub fn task_worker() -> *mut usize {
     slot::task_worker().cast()
 }
 
 /// Address of this thread's `rok_tls_static_inits`.
-#[allow(clippy::cast_ptr_alignment)] // 8-aligned slot
+#[allow(clippy::cast_ptr_alignment)] // pointer-aligned slot
 pub fn static_inits() -> *mut usize {
     slot::static_inits().cast()
 }
 
 /// Address of this thread's `rok_tls_task_lane`.
-#[allow(clippy::cast_ptr_alignment)] // 8-aligned slot
+#[allow(clippy::cast_ptr_alignment)] // pointer-aligned slot
 pub fn task_lane() -> *mut usize {
     slot::task_lane().cast()
 }

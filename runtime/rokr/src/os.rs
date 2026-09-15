@@ -24,6 +24,17 @@ use rokr_common::object_header::HEADER_SIZE;
 
 use crate::str::{RokStr, build};
 
+// The large-file calls: 32-bit glibc's plain ones take a 32-bit `off_t`
+// / `ino_t` and fail with EOVERFLOW past it (`readdir` on ext4 too); on
+// 64-bit glibc the `*64` ones are the same functions.
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+use libc::{fstat, fstatat, ftruncate, lseek, mmap, off_t, openat, readdir, stat};
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+use libc::{
+    fstat64 as fstat, fstatat64 as fstatat, ftruncate64 as ftruncate, lseek64 as lseek,
+    mmap64 as mmap, off64_t as off_t, openat64 as openat, readdir64 as readdir, stat64 as stat,
+};
+
 type CStrPtr = *const libc::c_char;
 
 /// `r` (a libc `-1`-on-error result) as `>= 0` or `-errno`.
@@ -212,7 +223,7 @@ pub extern "C" fn rok_os_open(dir: i32, path: RokStr, flags: i32, mode: u32) -> 
     }
     // SAFETY: `path` is a C string; the mode is read only with O_CREAT.
     let (r, _) = native(|| unsafe {
-        libc::openat(
+        openat(
             at(dir),
             cs(path).p(),
             o | libc::O_CLOEXEC,
@@ -310,7 +321,7 @@ pub extern "C" fn rok_os_fsync(fd: i32, data_only: i32) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_ftruncate(fd: i32, len: u64) -> i32 {
     // SAFETY: plain libc call.
-    ret(unsafe { libc::ftruncate(fd, len as libc::off_t) } as isize) as i32
+    ret(unsafe { ftruncate(fd, len as off_t) } as isize) as i32
 }
 
 /// `lseek`; `whence` 0 start, 1 current, 2 end. New offset or `-errno`.
@@ -322,7 +333,7 @@ pub extern "C" fn rok_os_lseek(fd: i32, off: i64, whence: i32) -> i64 {
         _ => libc::SEEK_SET,
     };
     // SAFETY: plain libc call.
-    let r = unsafe { libc::lseek(fd, off as libc::off_t, w) };
+    let r = unsafe { lseek(fd, off as off_t, w) };
     if r < 0 { -i64::from(errno()) } else { r as i64 }
 }
 
@@ -347,13 +358,13 @@ pub extern "C" fn rok_os_mmap(fd: i32, len: usize, offset: u64) -> i64 {
     }
     // SAFETY: a fresh mapping; the kernel picks the address.
     let (p, e) = native(|| unsafe {
-        libc::mmap(
+        mmap(
             core::ptr::null_mut(),
             len,
             libc::PROT_READ,
             libc::MAP_SHARED,
             fd,
-            offset as libc::off_t,
+            offset as off_t,
         )
     });
     if p == libc::MAP_FAILED {
@@ -505,7 +516,7 @@ pub extern "C" fn rok_os_clone(dir: i32, from: RokStr, to: RokStr) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_stat(dir: i32, path: RokStr, follow: i32, fd: i32, out: *mut u8) -> i32 {
     // SAFETY: zeroed `stat` is a valid out-buffer.
-    let mut st: libc::stat = unsafe { core::mem::zeroed() };
+    let mut st: stat = unsafe { core::mem::zeroed() };
     let flags = if follow != 0 {
         0
     } else {
@@ -514,9 +525,9 @@ pub extern "C" fn rok_os_stat(dir: i32, path: RokStr, follow: i32, fd: i32, out:
     // SAFETY: `path` is a C string; `st` is writable.
     let (r, e) = native(|| unsafe {
         if fd >= 0 {
-            libc::fstat(fd, &mut st)
+            fstat(fd, &mut st)
         } else {
-            libc::fstatat(at(dir), cs(path).p(), &mut st, flags)
+            fstatat(at(dir), cs(path).p(), &mut st, flags)
         }
     });
     if r < 0 {
@@ -586,7 +597,7 @@ pub extern "C" fn rok_os_link(dir: i32, target: RokStr, link: RokStr, hard: i32)
 pub extern "C" fn rok_os_opendir(dir: i32, path: RokStr) -> isize {
     // SAFETY: `path` is a C string; `fdopendir` owns `fd` on success.
     let (d, e) = native(|| unsafe {
-        let fd = libc::openat(
+        let fd = openat(
             at(dir),
             cs(path).p(),
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
@@ -615,7 +626,7 @@ pub extern "C" fn rok_os_readdir(d: isize, buf: *mut u8, off: usize, len: usize)
         // SAFETY: errno reset distinguishes end from failure.
         unsafe { set_errno(0) };
         // SAFETY: `d` is a live `DIR*` from `rok_os_opendir`.
-        let ent = unsafe { libc::readdir(d as *mut libc::DIR) };
+        let ent = unsafe { readdir(d as *mut libc::DIR) };
         if ent.is_null() {
             return -(errno() as isize);
         }

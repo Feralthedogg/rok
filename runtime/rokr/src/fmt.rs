@@ -7,7 +7,7 @@
 use core::fmt::Write as _;
 use core::ptr;
 
-use rokr_common::object_header::HEADER_SIZE;
+use rokr_common::object_header::{HEADER_SIZE, ObjectHeader};
 
 use crate::fmt_spec::parse;
 use crate::fmt_spec::{FmtSpec, MAX_PREC, pack, unpack};
@@ -165,7 +165,8 @@ fn exp_text(d: &[u8], prec: i64, upper: bool) -> Buf {
 }
 
 // A `core::fmt::Formatter`'s text: a GC string being filled, held as a
-// `str`-shaped handle `(text, len | cap << 32)`. Each writing entry takes
+// `str`-shaped handle `(text, len)`; its room is what the string object's
+// size (`gc_word`) leaves past the header and the NUL. Each writing entry takes
 // the handle and returns it: longer, and moved when the text outgrew
 // its allocation. The spec comes with each call that applies one, as
 // `fmt_spec::pack`'s two words. `rok_fmt_finish` hands the text over
@@ -179,17 +180,22 @@ struct W {
 }
 
 impl W {
-    const fn of(h: RokStr) -> Self {
+    fn of(h: RokStr) -> Self {
+        let p = h.ptr.cast_mut();
+        // SAFETY: `p` is the payload of a live GC string (`alloc_str`),
+        // which the caller roots, so it does not move.
+        let size = unsafe { (*p.sub(HEADER_SIZE).cast::<ObjectHeader>()).gc_word };
         Self {
-            p: h.ptr.cast_mut(),
-            len: h.len & 0xFFFF_FFFF,
-            cap: h.len >> 32,
+            p,
+            len: h.len,
+            #[allow(clippy::cast_possible_truncation)] // an object's size
+            cap: size as usize - HEADER_SIZE - 1,
         }
     }
     const fn done(self) -> RokStr {
         RokStr {
             ptr: self.p,
-            len: self.len | (self.cap << 32),
+            len: self.len,
         }
     }
     /// Room for `n` more bytes (doubling).
@@ -197,10 +203,7 @@ impl W {
         if self.len + n <= self.cap {
             return;
         }
-        let cap = (self.cap * 2).max(self.len + n);
-        if cap > 0xFFFF_FFFF {
-            rokr_common::fatal(b"rok runtime: formatted text too long");
-        }
+        let cap = self.cap.saturating_mul(2).max(self.len + n);
         // May collect; the caller's frame roots the old text, which stays
         // in place.
         let p = alloc_str(cap);
@@ -387,31 +390,24 @@ fn digits(w: &mut W, spec: &FmtSpec, neg: bool, d: &[u8]) {
 /// An empty formatter with room for `cap` bytes.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_fmt_new(cap: usize) -> RokStr {
-    let cap = cap.min(0xFFFF_FFFF);
-    W {
-        p: alloc_str(cap),
+    RokStr {
+        ptr: alloc_str(cap),
         len: 0,
-        cap,
     }
-    .done()
 }
 
 /// The text, as a `str` in place: NUL-terminated (the allocation has a
 /// byte past `cap`). The handle is spent.
 #[unsafe(no_mangle)]
 pub const extern "C" fn rok_fmt_finish(h: RokStr) -> RokStr {
-    let w = W::of(h);
-    // SAFETY: `len <= cap`; the allocation holds `cap + 1` bytes.
-    unsafe { w.p.add(w.len).write(0) };
-    RokStr {
-        ptr: w.p,
-        len: w.len,
-    }
+    // SAFETY: the allocation holds a byte past the room `len` is within.
+    unsafe { h.ptr.cast_mut().add(h.len).write(0) };
+    h
 }
 
 #[unsafe(no_mangle)]
 pub const extern "C" fn rok_fmt_len(h: RokStr) -> usize {
-    h.len & 0xFFFF_FFFF
+    h.len
 }
 
 #[unsafe(no_mangle)]

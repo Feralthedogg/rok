@@ -221,6 +221,7 @@ pub fn lower_full(
     input: &crate::HirInput,
 ) -> HirModule {
     resolve::set_packages(input.packages.clone());
+    super::const_eval::set_pointer_width(input.pointer_width);
     crate::clear_type_names();
     // A prebuilt-library build: every body of that package is a root.
     let lib_pkg: Option<String> = input.lib.clone();
@@ -535,9 +536,10 @@ pub fn lower_full(
     // Pass 1c: module-level `const`s, kept as AST and inlined at each
     // use; `static`s get global storage (`HirStaticDef`).
     let mut consts: HashMap<String, (Ty, Expr)> = HashMap::new();
-    let mut impl_const_sets: Vec<ImplConsts> = Vec::new();
+    // Per impl item: its associated consts, for its `Impl`.
+    let mut impl_const_lists: HashMap<usize, Vec<AssocConst>> = HashMap::new();
     let mut inherent_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for item in &program.items {
+    for (idx, item) in program.items.iter().enumerate() {
         rokc_diagnostic::set_current_span(item.span());
         // Spec 2.9.1: an impl's `const` is `Type::NAME` (`Self::NAME`
         // inside the impl); a trait impl also gets the trait's defaults
@@ -545,8 +547,8 @@ pub fn lower_full(
         let item_consts: Vec<(String, Ty, Expr)> = match item {
             Item::Const(c) => vec![(c.name.clone(), c.ty.clone(), c.value.clone())],
             Item::Impl(i) => {
-                let (keyed, set) = impl_consts(i, program, &names, &mut pre_diags);
-                impl_const_sets.extend(set);
+                let (keyed, all) = impl_consts(i, program, &names, &mut pre_diags);
+                impl_const_lists.insert(idx, all);
                 keyed
             }
             _ => Vec::new(),
@@ -707,10 +709,9 @@ pub fn lower_full(
     // call, outside `decls` / `fn_table`.
     let mut fn_table: HashMap<String, FnSig> = HashMap::new();
     let mut extern_fns = std::collections::HashSet::new();
-    let mut method_table: HashMap<(MethodTarget, String), Vec<FunctionId>> = HashMap::new();
-    let mut method_info: HashMap<FunctionId, MethodInfo> = HashMap::new();
-    // Per concrete target: the trait refs its impls provide.
-    let mut impls: HashMap<MethodTarget, Vec<TraitRef>> = HashMap::new();
+    let method_table: HashMap<(MethodTarget, String), Vec<FunctionId>> = HashMap::new();
+    let method_info: HashMap<FunctionId, MethodInfo> = HashMap::new();
+    let mut impls = Impls::default();
     let mut decls: Vec<MethodOrFn<'_>> = Vec::new();
     // Per decl: its body is library code (`rok::<tier>` / a dependency),
     // lowered only when reached (`lower_bodies`).
@@ -720,8 +721,9 @@ pub fn lower_full(
     let std_prebuilt = input.prebuilt.iter().any(|p| p == "rok");
     let std_linked = std_prebuilt || input.lib.as_deref() == Some("rok");
     let mut generic_fns: HashMap<String, &FnDef> = HashMap::new();
-    let mut generic_methods: HashMap<(String, String), Vec<GenericMethod>> = HashMap::new();
-    let mut generic_trait_impls: Vec<GenericTraitImpl> = Vec::new();
+    let generic_methods: HashMap<(String, String), Vec<GenericMethod>> = HashMap::new();
+    // Generic impls with method templates so far (names `__impl{n}_m`).
+    let mut templated = 0;
     let mut intrinsics: HashMap<FunctionId, PrimOp> = HashMap::new();
     let mut generic_intrinsics: HashMap<String, Intrinsic> = HashMap::new();
     let mut unsafe_fns: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
@@ -914,47 +916,38 @@ pub fn lower_full(
             )
         })
         .collect();
-    let mut trait_impl_tys: HashMap<String, Vec<HirTy>> = HashMap::new();
     let mut neg_auto: std::collections::HashSet<(String, String)> =
         std::collections::HashSet::new();
+    // Impls registered by their written target, resolved once every item
+    // is (`impl_heads`).
+    let mut pending: Vec<PendingImpl<'_>> = Vec::new();
 
-    for item in &program.items {
+    for (idx, item) in program.items.iter().enumerate() {
         rokc_diagnostic::set_current_span(item.span());
         let Item::Impl(impl_def) = item else { continue };
         let module = impl_module(impl_def);
-        let sc = Scope {
-            names: &names,
-            module: &module,
-        };
         if !check_auto_impl(impl_def, &names, &module, &mut neg_auto, &mut pre_diags) {
             continue;
         }
         let impl_generic = !impl_def.generics.params.is_empty();
-        if let (true, Some(tp)) = (impl_generic, &impl_def.trait_path) {
+        let consts = impl_const_lists.remove(&idx).unwrap_or_default();
+        let trait_name: Option<String> = impl_def.trait_path.as_ref().map(|tp| {
             let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
-            let trait_key = names.trait_key(&segs, &module);
-            generic_trait_impls.push(generic_trait_impl(
-                impl_def,
-                trait_key.clone(),
-                trait_defs.get(&trait_key).copied(),
-                &module,
-                generic_trait_impls.len(),
-                &mut pre_diags,
-            ));
-            continue;
-        }
-        // A generic inherent impl on a structural type (`impl<T, const N:
-        // usize> [T; N] { .. }`): matched against the receiver like a
-        // generic trait impl, with no trait (empty key).
-        if impl_generic && !matches!(impl_def.self_ty.kind, AstTyKind::Path(_)) {
-            generic_trait_impls.push(generic_trait_impl(
-                impl_def,
-                String::new(),
-                None,
-                &module,
-                generic_trait_impls.len(),
-                &mut pre_diags,
-            ));
+            names.trait_key(&segs, &module)
+        });
+        // A generic trait impl, or a generic inherent impl on a structural
+        // type (`impl<T, const N: usize> [T; N] { .. }`, no trait: empty
+        // key): matched against the receiver, its methods templates.
+        if impl_generic
+            && (trait_name.is_some() || !matches!(impl_def.self_ty.kind, AstTyKind::Path(_)))
+        {
+            let trait_key = trait_name.unwrap_or_default();
+            let td = trait_defs.get(&trait_key).copied();
+            let mut gi =
+                generic_trait_impl(impl_def, trait_key, td, &module, templated, &mut pre_diags);
+            templated += 1;
+            gi.consts = consts;
+            impls.all.push(gi);
             continue;
         }
         // Inherent methods of a generic impl (and generic methods of a
@@ -984,93 +977,187 @@ pub fn lower_full(
             );
             continue;
         }
-        // A generic impl's methods are all templates keyed by
-        // `generic_base`; resolving `Base<T, E>` here would look its type
-        // params up as (possibly same-named, visible) types.
-        let target_ty = if impl_generic {
-            HirTy::Path(vec![generic_base.clone().unwrap_or_default()])
-        } else {
-            resolve_ty_with_structs(&impl_def.self_ty, &defs, None, sc)
-        };
-        let target = method_target_for(&target_ty);
-        // Resolve the trait (a user trait resolves to its qualified name;
-        // a bootstrap trait like `core::ops::Add` keeps its last segment).
-        let trait_name: Option<String> = impl_def.trait_path.as_ref().map(|tp| {
-            let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
-            names.trait_key(&segs, &module)
+        pending.push(PendingImpl {
+            def: impl_def,
+            module: module.clone(),
+            trait_name: trait_name.clone(),
+            generic_base,
+            at: impls.all.len(),
         });
-        // `From<i32>` / `From<i8>` impls on one type keep their methods
-        // apart by the trait's arguments (`overload_args`).
-        let mut trait_args_key = String::new();
-        if let (Some(tn), Some(target_key)) = (&trait_name, target.clone()) {
-            // `impl Get<i32> for T { type Item = u8; }` also answers
-            // `Get<i32>`, `Get<Item = u8>` and `Get<i32, Item = u8>`.
-            let rty = |g: &rokc_ast::Ty| resolve_ty_with_structs(g, &defs, None, sc);
-            let args: Vec<HirTy> = impl_def
+        impls.all.push(Impl {
+            trait_key: trait_name.unwrap_or_default(),
+            trait_args: impl_def
                 .trait_path
                 .as_ref()
                 .and_then(|tp| tp.segments.last())
-                .map(|s| s.generics.iter().map(rty).collect())
-                .unwrap_or_default();
-            // Spec 2.10.5: omitted trait arguments take the parameter's
-            // default (`trait Add<Rhs = Self>`: `impl Add for V` is
-            // `impl Add<V> for V`).
-            let mut args = args;
-            if let Some(td) = trait_defs.get(tn) {
-                for gp in td.generics.params.iter().skip(args.len()) {
-                    let rokc_ast::GenericParam::Type {
-                        default: Some(d), ..
-                    } = gp
-                    else {
-                        break;
-                    };
-                    let is_self = matches!(&d.kind, AstTyKind::SelfUpper)
-                        || matches!(&d.kind, AstTyKind::Path(p)
-                            if p.segments.len() == 1 && p.segments[0].name == "Self");
-                    args.push(if is_self { target_ty.clone() } else { rty(d) });
+                .map(|s| s.generics.clone())
+                .unwrap_or_default(),
+            assoc: impl_assoc_list(impl_def),
+            generics: impl_def.generics.clone(),
+            where_clause: impl_def.where_clause.clone(),
+            self_ty: impl_def.self_ty.clone(),
+            module,
+            methods: HashMap::new(),
+            consts,
+            concrete: None,
+        });
+    }
+
+    // Install `pub use` re-exports as fn / static table aliases (types go
+    // through `TypeNames`).
+    for (alias_key, end) in &aliases {
+        if let Some(sig) = fn_table.get(end).cloned() {
+            fn_table.entry(alias_key.clone()).or_insert(sig);
+        }
+        if let Some(def) = generic_fns.get(end).copied() {
+            generic_fns.entry(alias_key.clone()).or_insert(def);
+        }
+        if let Some(ty) = static_tys.get(end).cloned() {
+            static_tys.entry(alias_key.clone()).or_insert(ty);
+        }
+    }
+
+    // Name → Visibility for every value-namespace item (fns, consts,
+    // statics) plus type items; consulted by path resolution.
+    let mut item_visibility: HashMap<String, Visibility> = HashMap::new();
+    for item in &program.items {
+        rokc_diagnostic::set_current_span(item.span());
+        match item {
+            Item::Fn(f) => {
+                item_visibility.entry(f.name.clone()).or_insert(f.vis);
+            }
+            Item::Const(c) => {
+                item_visibility.entry(c.name.clone()).or_insert(c.vis);
+            }
+            Item::Static(s) => {
+                item_visibility.entry(s.name.clone()).or_insert(s.vis);
+            }
+            _ => {}
+        }
+    }
+    let field_vis = collect_field_visibility(program);
+
+    // Pass 3: function bodies.
+    let sink = ClosureSink {
+        extras: std::cell::RefCell::new(Vec::new()),
+        next_id: std::cell::Cell::new(0),
+        mono_cache: std::cell::RefCell::new(HashMap::new()),
+        mono_sigs: std::cell::RefCell::new(HashMap::new()),
+        mono_depth: std::cell::Cell::new(0),
+        uninferred: std::cell::Cell::new(0),
+        any_tags: std::cell::RefCell::new(Vec::new()),
+        ref_out: std::cell::RefCell::new(HashMap::new()),
+        any_dispatch: std::cell::RefCell::new(Vec::new()),
+        projecting: std::cell::RefCell::new(Vec::new()),
+        thunks: std::cell::RefCell::new(HashMap::new()),
+        instances: std::cell::RefCell::new(Vec::new()),
+        instance_warns: std::cell::RefCell::new(super::InstanceWarns::default()),
+        diagnostics: std::cell::RefCell::new(Vec::new()),
+        infer_vars: std::cell::RefCell::new(Vec::new()),
+        infer_depth: std::cell::Cell::new(0),
+        infer_floor: std::cell::Cell::new(0),
+        fn_origin: std::cell::RefCell::new(HashMap::new()),
+        track_caller: std::cell::RefCell::new(std::collections::HashSet::new()),
+        const_lowering: std::cell::RefCell::new(std::collections::HashSet::new()),
+        const_stack: std::cell::RefCell::new(Vec::new()),
+        inferred_ret: std::cell::RefCell::default(),
+        inferred_fns: std::cell::RefCell::default(),
+        bodies_done: std::cell::Cell::new(false),
+        recursive_ret: std::cell::RefCell::default(),
+        call_sites: std::cell::RefCell::default(),
+        tentative_ret: std::cell::RefCell::default(),
+    };
+    let mut env = Env {
+        infer_ret: std::collections::HashSet::new(),
+        implicit_main: input.implicit_main,
+        may_diverge: may_diverge(program),
+        fn_table,
+        fn_leaves: std::cell::OnceCell::new(),
+        extern_fns,
+        method_table,
+        key_of: HashMap::new(),
+        method_info,
+        defs,
+        consts,
+        const_leaves: std::cell::RefCell::default(),
+        generic_fns,
+        generic_methods,
+        intrinsics,
+        generic_intrinsics,
+        extern_fn_ids: extern_fn_ids.clone(),
+        rok_externs: rok_externs.clone(),
+        c_variadic: c_variadic.clone(),
+        c_defs: std::collections::HashSet::new(),
+        prec,
+        sink,
+        item_visibility,
+        field_vis,
+        uses,
+        impls,
+        unsafe_fns: std::collections::HashSet::new(),
+        neg_auto,
+        trait_info,
+        statics: static_tys,
+        static_leaves: std::cell::RefCell::default(),
+        mut_statics: static_defs
+            .iter()
+            .filter(|s| s.is_mut)
+            .map(|s| s.name.clone())
+            .collect(),
+        literal_shapes: literal_handlers(program, &mut pre_diags),
+        names,
+        decls,
+        non_exhaustive: program
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Struct(s) if s.attrs.iter().any(|a| a.path == ["non_exhaustive"]) => {
+                    Some(s.name.clone())
                 }
-            }
-            let assoc: Vec<(String, HirTy)> = impl_def
-                .items
-                .iter()
-                .filter_map(|i| match i {
-                    AstImplItem::AssocType { name, ty } => Some((name.clone(), rty(ty))),
-                    _ => None,
-                })
-                .collect();
-            let provided = TraitRef::new(tn.clone(), args, assoc);
-            let target_impls = impls.entry(target_key.clone()).or_default();
-            if !provided.args.is_empty()
-                && target_impls
-                    .iter()
-                    .any(|r| r.path == provided.path && r.args == provided.args)
-            {
-                let shown = TraitRef::new(tn.clone(), provided.args.clone(), Vec::new());
-                let shown = shown.render(tn, |t| match t {
-                    HirTy::Struct(id) => defs.structs.borrow()[id.0 as usize].name.clone(),
-                    HirTy::Enum(id) => defs.enums.borrow()[id.0 as usize].name.clone(),
-                    t => ty_mangle(t),
-                });
-                err(
-                    &mut pre_diags,
-                    format!(
-                        "`{shown}` is implemented more than once for `{}`",
-                        impl_def_display(&impl_def.self_ty)
-                    ),
-                );
-                continue;
-            }
-            trait_args_key = provided
-                .args
+                Item::Enum(e) if e.attrs.iter().any(|a| a.path == ["non_exhaustive"]) => {
+                    Some(e.name.clone())
+                }
+                _ => None,
+            })
+            .collect(),
+    };
+    // Impl targets and trait arguments, now that every item is
+    // registered; then each impl's methods, keyed by them.
+    let heads = rokc_diagnostic::time("hir impls", || {
+        impl_heads(&mut env, &pending, &trait_defs, &mut pre_diags)
+    });
+    let mut fn_table = std::mem::take(&mut env.fn_table);
+    let mut decls = std::mem::take(&mut env.decls);
+    let mut method_table = std::mem::take(&mut env.method_table);
+    let mut method_info = std::mem::take(&mut env.method_info);
+    let mut intrinsics = std::mem::take(&mut env.intrinsics);
+    let mut generic_methods = std::mem::take(&mut env.generic_methods);
+    let names = &env.names;
+    let defs = &env.defs;
+    for (p, head) in pending.iter().zip(heads) {
+        // `None`: a repeated impl, reported.
+        let Some((target_ty, provides)) = head else {
+            continue;
+        };
+        let impl_def = p.def;
+        rokc_diagnostic::set_current_span(impl_def.span);
+        let module = p.module.clone();
+        let sc = Scope {
+            names,
+            module: &module,
+        };
+        let impl_generic = !impl_def.generics.params.is_empty();
+        let trait_name = p.trait_name.clone();
+        let generic_base = p.generic_base.clone();
+        let target = method_target_for(&target_ty);
+        // `From<i32>` / `From<i8>` impls on one type keep their methods
+        // apart by the trait's arguments (`overload_args`).
+        let trait_args_key: String = provides.as_ref().map_or_else(String::new, |r| {
+            r.args
                 .iter()
                 .map(|a| "_".to_owned() + &ty_mangle(a))
-                .collect();
-            target_impls.push(provided);
-            trait_impl_tys
-                .entry(tn.clone())
-                .or_default()
-                .push(target_ty.clone());
-        }
+                .collect()
+        });
         let trait_def = trait_name
             .as_ref()
             .and_then(|tn| trait_defs.get(tn).copied());
@@ -1328,7 +1415,7 @@ pub fn lower_full(
                 for gp in &trait_def.generics.params {
                     if let rokc_ast::GenericParam::Const { name, .. } = gp {
                         if let Some(t) = targs.get_mut(name) {
-                            if let Some(v) = const_arg_value(t, &names, sc.module) {
+                            if let Some(v) = const_arg_value(t, names, sc.module) {
                                 *t = const_literal_ty(v, t.span);
                             }
                         }
@@ -1338,10 +1425,11 @@ pub fn lower_full(
                     .generics
                     .params
                     .iter()
-                    .filter_map(|gp| match gp {
-                        rokc_ast::GenericParam::Type { name, .. } => targs
-                            .get(name)
-                            .map(|t| (name.clone(), resolve_ty_with_structs(t, &defs, None, sc))),
+                    .enumerate()
+                    .filter_map(|(i, gp)| match gp {
+                        rokc_ast::GenericParam::Type { name, .. } => {
+                            Some((name.clone(), provides.as_ref()?.args.get(i)?.clone()))
+                        }
                         rokc_ast::GenericParam::Const { name, ty } => {
                             let v = match &targs.get(name)?.kind {
                                 AstTyKind::Const(c) => {
@@ -1366,7 +1454,7 @@ pub fn lower_full(
                 };
                 let id = FunctionId(u32::try_from(decls.len()).expect("FunctionId overflow"));
                 let tsc = Scope {
-                    names: &names,
+                    names,
                     module: &trait_module,
                 };
                 let sig = sig_of(&tm, id, tsc);
@@ -1397,72 +1485,6 @@ pub fn lower_full(
             }
         }
     }
-
-    // Install `pub use` re-exports as fn / static table aliases (types go
-    // through `TypeNames`).
-    for (alias_key, end) in &aliases {
-        if let Some(sig) = fn_table.get(end).cloned() {
-            fn_table.entry(alias_key.clone()).or_insert(sig);
-        }
-        if let Some(def) = generic_fns.get(end).copied() {
-            generic_fns.entry(alias_key.clone()).or_insert(def);
-        }
-        if let Some(ty) = static_tys.get(end).cloned() {
-            static_tys.entry(alias_key.clone()).or_insert(ty);
-        }
-    }
-
-    // Name → Visibility for every value-namespace item (fns, consts,
-    // statics) plus type items; consulted by path resolution.
-    let mut item_visibility: HashMap<String, Visibility> = HashMap::new();
-    for item in &program.items {
-        rokc_diagnostic::set_current_span(item.span());
-        match item {
-            Item::Fn(f) => {
-                item_visibility.entry(f.name.clone()).or_insert(f.vis);
-            }
-            Item::Const(c) => {
-                item_visibility.entry(c.name.clone()).or_insert(c.vis);
-            }
-            Item::Static(s) => {
-                item_visibility.entry(s.name.clone()).or_insert(s.vis);
-            }
-            _ => {}
-        }
-    }
-    let field_vis = collect_field_visibility(program);
-
-    // Pass 3: function bodies.
-    let sink = ClosureSink {
-        extras: std::cell::RefCell::new(Vec::new()),
-        next_id: std::cell::Cell::new(u32::try_from(decls.len()).expect("FunctionId overflow")),
-        mono_cache: std::cell::RefCell::new(HashMap::new()),
-        mono_sigs: std::cell::RefCell::new(HashMap::new()),
-        mono_depth: std::cell::Cell::new(0),
-        uninferred: std::cell::Cell::new(0),
-        any_tags: std::cell::RefCell::new(Vec::new()),
-        ref_out: std::cell::RefCell::new(HashMap::new()),
-        any_dispatch: std::cell::RefCell::new(Vec::new()),
-        projecting: std::cell::RefCell::new(Vec::new()),
-        const_substs: std::cell::RefCell::new(HashMap::new()),
-        thunks: std::cell::RefCell::new(HashMap::new()),
-        instances: std::cell::RefCell::new(Vec::new()),
-        instance_warns: std::cell::RefCell::new(super::InstanceWarns::default()),
-        diagnostics: std::cell::RefCell::new(Vec::new()),
-        infer_vars: std::cell::RefCell::new(Vec::new()),
-        infer_depth: std::cell::Cell::new(0),
-        infer_floor: std::cell::Cell::new(0),
-        fn_origin: std::cell::RefCell::new(HashMap::new()),
-        track_caller: std::cell::RefCell::new(std::collections::HashSet::new()),
-        const_lowering: std::cell::RefCell::new(std::collections::HashSet::new()),
-        const_stack: std::cell::RefCell::new(Vec::new()),
-        inferred_ret: std::cell::RefCell::default(),
-        inferred_fns: std::cell::RefCell::default(),
-        bodies_done: std::cell::Cell::new(false),
-        recursive_ret: std::cell::RefCell::default(),
-        call_sites: std::cell::RefCell::default(),
-        tentative_ret: std::cell::RefCell::default(),
-    };
     let mut exports: Vec<(FunctionId, String)> = Vec::new();
     let mut prebuilt: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
     let mut inline_copies: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
@@ -1534,7 +1556,7 @@ pub fn lower_full(
             }
         }
     }
-    for f in generic_fns.values() {
+    for f in env.generic_fns.values() {
         rokc_diagnostic::set_current_span(f.span);
         if f.attrs
             .iter()
@@ -1565,70 +1587,25 @@ pub fn lower_full(
         .get("main")
         .map(|s| s.id)
         .filter(|id| !extern_fn_ids.contains(id) && !rok_externs.contains(id));
-    let may_diverge = may_diverge(program);
-    let infer_ret = decls
+    let infer_ret: std::collections::HashSet<FunctionId> = decls
         .iter()
         .enumerate()
-        .filter(|(_, d)| mono::infers_ret(d.def(), &may_diverge))
+        .filter(|(_, d)| mono::infers_ret(d.def(), &env.may_diverge))
         .map(|(i, _)| FunctionId(u32::try_from(i).expect("FunctionId overflow")))
         .collect();
-    let mut env = Env {
-        impl_consts: impl_const_sets,
-        infer_ret,
-        implicit_main: input.implicit_main,
-        may_diverge,
-        fn_table,
-        fn_leaves: std::cell::OnceCell::new(),
-        extern_fns,
-        method_table,
-        key_of,
-        method_info,
-        defs,
-        consts,
-        const_leaves: std::cell::RefCell::default(),
-        generic_fns,
-        generic_methods,
-        generic_trait_impls,
-        intrinsics,
-        generic_intrinsics,
-        extern_fn_ids: extern_fn_ids.clone(),
-        rok_externs: rok_externs.clone(),
-        c_variadic: c_variadic.clone(),
-        c_defs: c_defs.iter().copied().collect(),
-        prec,
-        sink,
-        item_visibility,
-        field_vis,
-        uses,
-        impls,
-        unsafe_fns,
-        neg_auto,
-        trait_info,
-        trait_impl_tys,
-        statics: static_tys,
-        static_leaves: std::cell::RefCell::default(),
-        mut_statics: static_defs
-            .iter()
-            .filter(|s| s.is_mut)
-            .map(|s| s.name.clone())
-            .collect(),
-        literal_shapes: literal_handlers(program, &mut pre_diags),
-        names,
-        decls,
-        non_exhaustive: program
-            .items
-            .iter()
-            .filter_map(|i| match i {
-                Item::Struct(s) if s.attrs.iter().any(|a| a.path == ["non_exhaustive"]) => {
-                    Some(s.name.clone())
-                }
-                Item::Enum(e) if e.attrs.iter().any(|a| a.path == ["non_exhaustive"]) => {
-                    Some(e.name.clone())
-                }
-                _ => None,
-            })
-            .collect(),
-    };
+    env.fn_table = fn_table;
+    env.decls = decls;
+    env.method_table = method_table;
+    env.method_info = method_info;
+    env.intrinsics = intrinsics;
+    env.generic_methods = generic_methods;
+    env.key_of = key_of;
+    env.infer_ret = infer_ret;
+    env.unsafe_fns = unsafe_fns;
+    env.c_defs = c_defs.iter().copied().collect();
+    env.sink
+        .next_id
+        .set(u32::try_from(env.decls.len()).expect("FunctionId overflow"));
     // Struct fields and enum payloads that name projections (`peeked:
     // I::Item | none`, `v: <S as Tr>::Out`) waited for the impls: resolve
     // them now, an instance's under its arguments.
@@ -1860,7 +1837,7 @@ pub fn lower_full(
 }
 
 /// Diagnostics name a nested fn (spec 4.10) as written: its lifted
-/// name `outer#inner` (`#2` .. for a repeated name) reads `inner`.
+/// name `outer/inner` (`/2` .. for a repeated name) reads `inner`.
 fn show_nested_fn_names(program: &Program, diags: &mut [rokc_diagnostic::RokDiagnostic]) {
     let mut lifted: Vec<(&str, &str)> = program
         .items
@@ -1868,12 +1845,12 @@ fn show_nested_fn_names(program: &Program, diags: &mut [rokc_diagnostic::RokDiag
         .filter_map(|it| match it {
             Item::Fn(f) => {
                 let leaf = leaf_name(&f.name);
-                let base = leaf.trim_end_matches(|c: char| c.is_ascii_digit());
-                let base = match base.strip_suffix('#') {
-                    Some(b) if b.len() + 1 < leaf.len() => b,
-                    _ => leaf,
+                let (rest, last) = leaf.rsplit_once('/')?;
+                let shown = if last.starts_with(|c: char| c.is_ascii_digit()) {
+                    rest.rsplit_once('/')?.1
+                } else {
+                    last
                 };
-                let (_, shown) = base.rsplit_once('#')?;
                 Some((leaf, shown))
             }
             _ => None,
@@ -2513,7 +2490,9 @@ pub(super) fn hir_expr_has_unknown(e: &HirExpr) -> bool {
             hir_expr_has_unknown(array) || hir_expr_has_unknown(index)
         }
         K::UnionWrite { value, .. } | K::Suspend { value, .. } => hir_expr_has_unknown(value),
-        K::BufNew { len, .. } | K::RawRead { addr: len, .. } => hir_expr_has_unknown(len),
+        K::BufNew { len, .. } | K::RawRead { addr: len, .. } | K::AddrOf { place: len } => {
+            hir_expr_has_unknown(len)
+        }
         K::RawWrite { addr, value, .. } => {
             hir_expr_has_unknown(addr) || hir_expr_has_unknown(value)
         }
@@ -3135,7 +3114,7 @@ fn generic_trait_impl(
     module: &str,
     index: usize,
     diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
-) -> GenericTraitImpl {
+) -> Impl {
     let err = |pre: &mut Vec<rokc_diagnostic::RokDiagnostic>, msg: String| {
         pre.push(rokc_diagnostic::RokDiagnostic::error(
             rokc_diagnostic::ErrorKind::Type,
@@ -3229,7 +3208,7 @@ fn generic_trait_impl(
             methods.insert(tm.name.clone(), template(&tm, &trait_module));
         }
     }
-    GenericTraitImpl {
+    Impl {
         trait_key,
         trait_args: impl_def
             .trait_path
@@ -3237,24 +3216,186 @@ fn generic_trait_impl(
             .and_then(|tp| tp.segments.last())
             .map(|s| s.generics.clone())
             .unwrap_or_default(),
-        assoc: impl_def
-            .items
-            .iter()
-            .filter_map(|i| match i {
-                AstImplItem::AssocType { name, ty } => Some((name.clone(), ty.clone())),
-                _ => None,
-            })
-            .collect(),
+        assoc: impl_assoc_list(impl_def),
         generics: impl_def.generics.clone(),
         where_clause: impl_def.where_clause.clone(),
         self_ty: impl_def.self_ty.clone(),
         module: module.to_owned(),
         methods,
+        consts: Vec::new(),
+        concrete: None,
     }
 }
 
-/// `(Type::NAME, type, value)` for an impl's consts plus, in a trait
-/// impl, the trait's defaults it leaves out. The key uses the generic
+/// An impl that is not a generic trait impl, registered by its written
+/// target (`at`: its `Impl`).
+struct PendingImpl<'p> {
+    def: &'p rokc_ast::ImplDef,
+    module: String,
+    trait_name: Option<String>,
+    /// The target's generic base / primitive name (method templates).
+    generic_base: Option<String>,
+    at: usize,
+}
+
+/// Each pending impl's target and the trait ref it provides, resolved
+/// once every item is registered (a generic inherent impl's target is
+/// its base). A projection (`impl Tr for <A as P>::Out`) resolves
+/// through the impls resolved before it, so rounds repeat while one
+/// resolves; the last round reports what is left. `None`: an impl of a
+/// trait (with the same arguments) its target already has.
+fn impl_heads(
+    env: &mut Env<'_>,
+    pending: &[PendingImpl<'_>],
+    trait_defs: &HashMap<String, &rokc_ast::TraitDef>,
+    diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
+) -> Vec<Option<(HirTy, Option<TraitRef>)>> {
+    let mut heads = vec![None; pending.len()];
+    let mut left: Vec<usize> = Vec::new();
+    for (i, p) in pending.iter().enumerate() {
+        if p.def.generics.params.is_empty() {
+            left.push(i);
+        } else {
+            let base = p.generic_base.clone().unwrap_or_default();
+            heads[i] = Some((HirTy::Path(vec![base]), None));
+        }
+    }
+    let open = |t: &HirTy| {
+        let mut paths = Vec::new();
+        collect_unknown_paths(t, &mut paths);
+        *t == HirTy::Unknown || !paths.is_empty()
+    };
+    let mut last = false;
+    let no_subst = HashMap::new();
+    while !left.is_empty() {
+        // One round's heads, against the impls resolved before it; one
+        // still open waits (its diagnostics dropped) unless it is the last.
+        let round: Vec<Option<(HirTy, Option<TraitRef>)>> = {
+            let mut rcx = LowerCtx::new(env, &no_subst, None);
+            left.iter()
+                .map(|&i| {
+                    let p = &pending[i];
+                    rokc_diagnostic::set_current_span(p.def.span);
+                    let mark = env.sink.diagnostics.borrow().len();
+                    let td = p
+                        .trait_name
+                        .as_ref()
+                        .and_then(|t| trait_defs.get(t).copied());
+                    let (ty, provides) = impl_head(&mut rcx, p, td);
+                    let unresolved = open(&ty)
+                        || provides.as_ref().is_some_and(|r| {
+                            r.args
+                                .iter()
+                                .chain(r.binds.iter().map(|(_, t)| t))
+                                .any(open)
+                        });
+                    if unresolved && !last {
+                        env.sink.diagnostics.borrow_mut().truncate(mark);
+                        return None;
+                    }
+                    Some((ty, provides))
+                })
+                .collect()
+        };
+        let mut waiting = Vec::new();
+        for (&i, head) in left.iter().zip(round) {
+            let p = &pending[i];
+            let Some((ty, provides)) = head else {
+                waiting.push(i);
+                continue;
+            };
+            rokc_diagnostic::set_current_span(p.def.span);
+            if let Some(r) = provides.as_ref().filter(|r| !r.args.is_empty()) {
+                if env
+                    .impls
+                    .refs_on(&ty)
+                    .any(|o| o.path == r.path && o.args == r.args)
+                {
+                    let shown = TraitRef::new(r.path.clone(), r.args.clone(), Vec::new());
+                    let shown = shown.render(&r.path, |t| match t {
+                        HirTy::Struct(id) => env.defs.structs.borrow()[id.0 as usize].name.clone(),
+                        HirTy::Enum(id) => env.defs.enums.borrow()[id.0 as usize].name.clone(),
+                        t => ty_mangle(t),
+                    });
+                    diags.push(rokc_diagnostic::RokDiagnostic::error(
+                        rokc_diagnostic::ErrorKind::Type,
+                        format!(
+                            "`{shown}` is implemented more than once for `{}`",
+                            impl_def_display(&p.def.self_ty)
+                        ),
+                    ));
+                    continue;
+                }
+            }
+            env.impls.resolve(p.at, ty.clone(), provides.clone());
+            heads[i] = Some((ty, provides));
+        }
+        last = waiting.len() == left.len();
+        left = waiting;
+    }
+    heads
+}
+
+/// A concrete impl's target and, for a trait impl, the trait ref it
+/// provides: `impl Get<i32> for T { type Item = u8; }` also answers
+/// `Get<i32>`, `Get<Item = u8>` and `Get<i32, Item = u8>`.
+fn impl_head(
+    rcx: &mut LowerCtx<'_>,
+    p: &PendingImpl<'_>,
+    trait_def: Option<&rokc_ast::TraitDef>,
+) -> (HirTy, Option<TraitRef>) {
+    rcx.self_ty = None;
+    rcx.current_module.clone_from(&p.module);
+    let target = rcx.resolve_ast_ty(&p.def.self_ty);
+    let Some(tn) = &p.trait_name else {
+        return (target, None);
+    };
+    if method_target_for(&target).is_none() {
+        return (target, None);
+    }
+    rcx.self_ty = Some(target.clone());
+    let mut args: Vec<HirTy> = p
+        .def
+        .trait_path
+        .as_ref()
+        .and_then(|tp| tp.segments.last())
+        .map(|s| s.generics.iter().map(|g| rcx.resolve_ast_ty(g)).collect())
+        .unwrap_or_default();
+    // Spec 2.10.5: omitted trait arguments take the parameter's default
+    // (`trait Add<Rhs = Self>`: `impl Add for V` is `impl Add<V> for V`).
+    if let Some(td) = trait_def {
+        for gp in td.generics.params.iter().skip(args.len()) {
+            let rokc_ast::GenericParam::Type {
+                default: Some(d), ..
+            } = gp
+            else {
+                break;
+            };
+            args.push(rcx.resolve_ast_ty(d));
+        }
+    }
+    let assoc = impl_assoc_list(p.def)
+        .iter()
+        .map(|(n, t)| (n.clone(), rcx.resolve_ast_ty(t)))
+        .collect();
+    (target, Some(TraitRef::new(tn.clone(), args, assoc)))
+}
+
+/// An impl's `type X = T;` items, in order.
+fn impl_assoc_list(impl_def: &rokc_ast::ImplDef) -> Vec<(String, Ty)> {
+    impl_def
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            AstImplItem::AssocType { name, ty } => Some((name.clone(), ty.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// An impl's consts plus, in a trait impl, the trait's defaults it
+/// leaves out: keyed `(Type::NAME, type, value)` where `Type::NAME`
+/// names one (see below), and all of them. The key uses the generic
 /// base (`Box::N` for `impl<T> Box<T>`) or a primitive's name.
 // One key per base type: two impls of a generic base (`Box<i32>`,
 // `Box<f64>`) can't give the same const different values.
@@ -3263,7 +3404,7 @@ fn impl_consts(
     program: &Program,
     names: &TypeNames<'_>,
     pre_diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
-) -> (Vec<(String, Ty, Expr)>, Option<ImplConsts>) {
+) -> (Vec<AssocConst>, Vec<AssocConst>) {
     let mut out: Vec<(String, Ty, Expr)> = i
         .items
         .iter()
@@ -3310,7 +3451,7 @@ fn impl_consts(
         }
     }
     if out.is_empty() {
-        return (out, None);
+        return (Vec::new(), out);
     }
     let params: Vec<&str> = i
         .generics
@@ -3346,29 +3487,12 @@ fn impl_consts(
         }
         _ => None,
     };
-    let trait_key = i.trait_path.as_ref().map_or_else(String::new, |tp| {
-        let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
-        names.trait_key(&segs, &module)
-    });
-    let set = ImplConsts {
-        target: GenericTraitImpl {
-            trait_key,
-            trait_args: Vec::new(),
-            assoc: Vec::new(),
-            generics: i.generics.clone(),
-            where_clause: i.where_clause.clone(),
-            self_ty: i.self_ty.clone(),
-            module,
-            methods: HashMap::new(),
-        },
-        consts: out.clone(),
-    };
     let keyed = keyed_target.map_or_else(Vec::new, |t| {
-        out.into_iter()
-            .map(|(n, ty, v)| (format!("{t}::{n}"), ty, v))
+        out.iter()
+            .map(|(n, ty, v)| (format!("{t}::{n}"), ty.clone(), v.clone()))
             .collect()
     });
-    (keyed, Some(set))
+    (keyed, out)
 }
 
 /// Lower declaration `i` (`stub`: its signature only).
@@ -4115,8 +4239,8 @@ fn entails(
         return true;
     }
     ctx.env
-        .generic_trait_impls
-        .iter()
+        .impls
+        .generic()
         .filter(|gi| gi.trait_key == key)
         .any(|gi| {
             let vars: HashMap<String, String> = gi
@@ -4183,8 +4307,8 @@ fn target_package(env: &Env<'_>, i: &rokc_ast::ImplDef, module: &str) -> Option<
 fn check_impl_overlap(env: &Env<'_>) {
     let no_subst = HashMap::new();
     let ctx = LowerCtx::new(env, &no_subst, None);
-    for gi in &env.generic_trait_impls {
-        for ty in env.trait_impl_tys.get(&gi.trait_key).into_iter().flatten() {
+    for gi in env.impls.generic() {
+        for ty in env.impls.tys_of(&gi.trait_key) {
             if ctx
                 .generic_impl_subst(gi, ty, 0)
                 .is_some_and(|s| trait_args_overlap(&ctx, gi, &s, ty))
@@ -4210,11 +4334,11 @@ fn check_impl_overlap(env: &Env<'_>) {
     // them (`impl<T: A> X for T` / `impl<T: B> X for T` clash even if
     // no type is `A + B` yet). Targets beyond `symbolic_overlap` fall
     // back to a witness among the types the program names.
-    let gis = &env.generic_trait_impls;
+    let gis: Vec<&Impl> = env.impls.generic().collect();
     let mut candidates: Option<Vec<HirTy>> = None;
     for (i, a) in gis.iter().enumerate() {
         // Inherent ones (empty key) clash when they share a method name.
-        let shared = |b: &GenericTraitImpl| {
+        let shared = |b: &Impl| {
             let mut m: Vec<&String> = a
                 .methods
                 .keys()
@@ -4277,7 +4401,7 @@ fn check_impl_overlap(env: &Env<'_>) {
 /// overlap.
 fn trait_args_overlap(
     ctx: &LowerCtx<'_>,
-    gi: &GenericTraitImpl,
+    gi: &Impl,
     subst: &HashMap<String, HirTy>,
     ty: &HirTy,
 ) -> bool {
@@ -4294,7 +4418,6 @@ fn trait_args_overlap(
         return true;
     }
     ctx.concrete_impls(ty)
-        .iter()
         .any(|r| r.path == want.path && r.args == want.args)
 }
 
@@ -4302,7 +4425,10 @@ fn trait_args_overlap(
 /// witnesses for impl targets `symbolic_overlap` can't read.
 fn named_types(env: &Env<'_>) -> Vec<HirTy> {
     let mut out: Vec<HirTy> = Vec::new();
-    let named = env.trait_impl_tys.values().flatten().cloned();
+    let named = env.impls.all.iter().filter_map(|i| match &i.concrete {
+        Some((t, Some(_))) => Some(t.clone()),
+        _ => None,
+    });
     let structs: Vec<HirTy> = env
         .defs
         .structs
@@ -4335,12 +4461,8 @@ fn named_types(env: &Env<'_>) -> Vec<HirTy> {
 /// `Some(Some(shown))` overlaps on `shown`, `Some(None)` is disjoint,
 /// `None` is a target this check can't read (fn types, aliases ..).
 #[allow(clippy::option_option)] // overlap / disjoint / can't tell
-fn symbolic_overlap(
-    ctx: &LowerCtx<'_>,
-    a: &GenericTraitImpl,
-    b: &GenericTraitImpl,
-) -> Option<Option<String>> {
-    let names = |gi: &GenericTraitImpl, tag: &str| -> HashMap<String, String> {
+fn symbolic_overlap(ctx: &LowerCtx<'_>, a: &Impl, b: &Impl) -> Option<Option<String>> {
+    let names = |gi: &Impl, tag: &str| -> HashMap<String, String> {
         gi.generics
             .params
             .iter()
@@ -4353,9 +4475,8 @@ fn symbolic_overlap(
             .collect()
     };
     let (va, vb) = (names(a, "#a."), names(b, "#b."));
-    let canon = |gi: &GenericTraitImpl, vars: &HashMap<String, String>, t: &Ty| {
-        canon_ast_ty(ctx, &gi.module, vars, t)
-    };
+    let canon =
+        |gi: &Impl, vars: &HashMap<String, String>, t: &Ty| canon_ast_ty(ctx, &gi.module, vars, t);
     let a_self = canon(a, &va, &a.self_ty)?;
     let b_self = canon(b, &vb, &b.self_ty)?;
     if a.trait_args.len() != b.trait_args.len() {
@@ -4417,7 +4538,7 @@ fn may_implement(ctx: &LowerCtx<'_>, subject: &CanonTy, key: &str) -> bool {
     }
     let head = canon_head(subject);
     let env = ctx.env;
-    let concrete = env.trait_impl_tys.get(key).into_iter().flatten().any(|t| {
+    let concrete = env.impls.tys_of(key).any(|t| {
         let h = match t {
             HirTy::Struct(id) => enum_base_name(&ctx.struct_def(*id).name).to_owned(),
             HirTy::Enum(id) => enum_base_name(&ctx.enum_def(*id).name).to_owned(),
@@ -4430,8 +4551,8 @@ fn may_implement(ctx: &LowerCtx<'_>, subject: &CanonTy, key: &str) -> bool {
     });
     concrete
         || env
-            .generic_trait_impls
-            .iter()
+            .impls
+            .generic()
             .filter(|gi| gi.trait_key == key)
             .any(|gi| {
                 let vars = gi
@@ -4804,6 +4925,12 @@ pub(super) enum Intrinsic {
     },
     SizeOf,
     AlignOf,
+    /// `rok.addr_of`: a pointer (the declared return type's) to the
+    /// argument's place, or to a `ref self` receiver's.
+    AddrOf,
+    /// `rok.drop_in_place`: run the drop glue of the `T` a `Ptr<T>`
+    /// points at.
+    DropInPlace,
     /// `rok.atomic.OP`: the op `HirExprKind::BufAtomic` carries.
     Atomic(&'static str),
     AnyCast,
@@ -4827,6 +4954,8 @@ impl Intrinsic {
             "ptr.write_volatile" => Self::PtrWrite { volatile: true },
             "size_of" => Self::SizeOf,
             "align_of" => Self::AlignOf,
+            "addr_of" => Self::AddrOf,
+            "drop_in_place" => Self::DropInPlace,
             "any_cast" => Self::AnyCast,
             "method_table" => Self::MethodTable,
             "mlir.op" => Self::MlirOp,

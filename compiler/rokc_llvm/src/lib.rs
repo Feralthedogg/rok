@@ -82,6 +82,10 @@ impl Target {
             "aarch64" | "arm64" => ("generic", "+neon"),
             "x86_64" if apple => ("core2", ""),
             "x86_64" => ("x86-64", ""),
+            // SSE2, NEON (spec 0.6.4); the thread pointer from TPIDRURO,
+            // not glibc's `__aeabi_read_tp` (in ld.so).
+            "i686" => ("pentium4", ""),
+            "armv7" => ("generic", "+vfp3,+d32,+neon,+read-tp-tpidruro"),
             "riscv64" => ("generic-rv64", "+m,+a,+f,+d,+c"),
             "riscv32" => ("generic-rv32", "+m,+a,+c"),
             _ => ("generic", ""),
@@ -115,11 +119,13 @@ impl Target {
         self.triple.contains("-windows")
     }
 
-    /// lld-link's `/machine:` of a Windows target.
-    fn coff_machine(&self) -> Result<&'static str, String> {
+    /// lld-link's `/machine:` of a Windows target and its COFF machine
+    /// type.
+    fn coff_machine(&self) -> Result<(&'static str, u16), String> {
         match self.triple.split('-').next() {
-            Some("x86_64") => Ok("x64"),
-            Some("aarch64" | "arm64") => Ok("arm64"),
+            Some("x86_64") => Ok(("x64", 0x8664)),
+            Some("aarch64" | "arm64") => Ok(("arm64", 0xaa64)),
+            Some("i686") => Ok(("x86", 0x14c)),
             _ => Err(format!("linking for {} is not supported yet", self.triple)),
         }
     }
@@ -272,7 +278,14 @@ pub fn link_executable<S: AsRef<OsStr>>(
             ]
             .map(OsString::from)
             .into();
-            a.push(format!("/machine:{}", t.coff_machine()?).into());
+            let machine = t.coff_machine()?.0;
+            a.push(format!("/machine:{machine}").into());
+            // x86: a 4 GiB address space under 64-bit Windows (the heap of
+            // spec 0.6.3), and no SafeSEH table: rok code raises no SEH
+            // exceptions and the runtime's handler is vectored.
+            if machine == "x86" {
+                a.extend(["/largeaddressaware".into(), "/safeseh:no".into()]);
+            }
             let mut o = OsString::from("/out:");
             o.push(out);
             a.push(o);
@@ -336,6 +349,8 @@ fn elf_args(t: &Target, out: &Path, libc: &Path) -> Result<(Vec<OsString>, Vec<O
     let (emulation, loader) = match t.triple.split('-').next().unwrap_or("") {
         "x86_64" => ("elf_x86_64", "/lib64/ld-linux-x86-64.so.2"),
         "aarch64" => ("aarch64linux", "/lib/ld-linux-aarch64.so.1"),
+        "i686" => ("elf_i386", "/lib/ld-linux.so.2"),
+        "armv7" => ("armelf_linux_eabi", "/lib/ld-linux-armhf.so.3"),
         _ => return Err(format!("linking for {} is not supported yet", t.triple)),
     };
     let musl = t.triple.contains("-musl");
@@ -402,8 +417,7 @@ pub fn write_archive(t: &Target, out: &Path, members: &[&Path]) -> Result<(), St
 /// The import library `out` of the module definition `def` (a `.def`
 /// file's text, mingw-w64 syntax) for a Windows target.
 pub fn import_library(t: &Target, def: &str, out: &Path) -> Result<(), String> {
-    let arm64 = t.coff_machine()? == "arm64";
-    ffi::import_library(def, arm64, &cstr(out.as_os_str())?)
+    ffi::import_library(def, t.coff_machine()?.1, &cstr(out.as_os_str())?)
 }
 
 fn macos_deployment_target() -> String {
@@ -538,7 +552,7 @@ mod ffi {
         fn rok_llvm_import_lib(
             def: *const c_char,
             len: usize,
-            arm64: c_int,
+            machine: u16,
             path: *const c_char,
             err: *mut RokBuf,
         ) -> c_int;
@@ -684,14 +698,14 @@ mod ffi {
         }
     }
 
-    pub fn import_library(def: &str, arm64: bool, out: &CString) -> Result<(), String> {
+    pub fn import_library(def: &str, machine: u16, out: &CString) -> Result<(), String> {
         let mut err = RokBuf::new();
         // SAFETY: as in `lld`.
         let rc = unsafe {
             rok_llvm_import_lib(
                 def.as_ptr().cast(),
                 def.len(),
-                c_int::from(arm64),
+                machine,
                 out.as_ptr(),
                 &raw mut err,
             )
@@ -742,7 +756,7 @@ mod ffi {
         off()
     }
 
-    pub fn import_library(_: &str, _: bool, _: &CString) -> Result<(), String> {
+    pub fn import_library(_: &str, _: u16, _: &CString) -> Result<(), String> {
         off()
     }
 }

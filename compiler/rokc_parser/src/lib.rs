@@ -18,7 +18,7 @@ pub use cfg::CfgEnv;
 pub use keyword::{KeywordDef, KeywordTable, apply_keywords, check_keyword, collect_keywords};
 pub use lang::{LangEntry, LangItemKind, LangTable, collect_lang_table};
 pub use parser::literal::{
-    ArgKind, LitRule, LiteralDef, LiteralTable, PatKind, Pattern, Shape, collect_literals,
+    ArgKind, LitRule, LiteralDef, LiteralTable, PatElem, PatKind, Pattern, Shape, collect_literals,
     parse_pattern,
 };
 pub use parser::meta::{MetaDef, MetaKind, MetaTable, collect_meta_blocks};

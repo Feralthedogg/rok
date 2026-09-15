@@ -111,6 +111,13 @@ impl MetaTable {
         self.defs.is_empty()
     }
 
+    /// Whether `name` is a derive or attribute a meta block registers
+    /// (what the parser expands).
+    #[must_use]
+    pub fn defines(&self, name: &str) -> bool {
+        self.defs.iter().any(|d| d.name == name)
+    }
+
     /// Whether a meta block defines attribute `name`: an
     /// `#[impl_attribute(name)]`, the field attribute of an
     /// `#[impl_derive_attribute(D, name)]`, or a field attribute a
