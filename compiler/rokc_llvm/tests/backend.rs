@@ -36,6 +36,7 @@ const fn opts<'a>(t: &'a Target, opt: OptLevel, emit: Emit, pipeline: &'a str) -
         mlir_pipeline: pipeline,
         dialect_plugins: &[],
         pass_plugins: &[],
+        profile: rokc_llvm::Profile::None,
     }
 }
 
@@ -200,7 +201,8 @@ fn split_objects_link_and_dsymutil_bundles_them() {
     let p = rokc_llvm::mlir_pipeline(true, &[]);
     let parts =
         rokc_llvm::compile_mlir_split(HELLO_MLIR, &opts(&host, OptLevel::O2, Emit::Obj, &p), 3)
-            .unwrap();
+            .unwrap()
+            .0;
     assert_eq!(parts.len(), 3);
     let mut objs = Vec::new();
     for (i, o) in parts.iter().enumerate() {

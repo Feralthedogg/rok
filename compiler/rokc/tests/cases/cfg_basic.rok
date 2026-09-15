@@ -1,3 +1,5 @@
+// only-os: macos linux
+// (the expected output is a unix target's)
 // expect-exit: 30
 // expect-stdout:
 // 30 0 0

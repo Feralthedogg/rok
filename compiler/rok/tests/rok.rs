@@ -379,7 +379,7 @@ fn manifest_errors_and_reserved_forms() {
     );
     fails(
         &rok(&home, &app, &["deps"]),
-        "reserved and not supported yet",
+        "a native package goes in the `native` field",
     );
     write(
         &app.join("rok.rokon"),
@@ -565,6 +565,86 @@ fn lint_and_doc_with_dependencies() {
     ok(&rok(&home, &app, &["-q", "doc"]));
     assert!(read(&app.join("target/doc/util/index.html")).contains("Says hi."));
     assert!(read(&app.join("target/doc/index.html")).contains("app/index.html"));
+}
+
+#[test]
+fn lints_from_and_files_in_a_package() {
+    let root = scratch("lintsfrom");
+    let home = root.join("home");
+    let base = "Package {\n    lints: { \"unused_variables\": \"deny\", \"non_snake_case\": \"deny\" },\n}\n";
+    write(&root.join("base/rok.rokon"), base);
+    write(
+        &root.join("mid/rok.rokon"),
+        "Package {\n    lints_from: \"../base\",\n    lints: { \"non_snake_case\": \"allow\" },\n}\n",
+    );
+    let app = root.join("app");
+    write(
+        &app.join("rok.rokon"),
+        "Package { lints_from: \"../mid\" }\n",
+    );
+    write(
+        &app.join("main.rok"),
+        "fn BadName() -> i32 { 1 }\nlet x = BadName();\nprintln(\"hi\");\n",
+    );
+    // base's deny reaches app through mid; mid's allow overrides base's.
+    let out = rok(&home, &app, &["lint"]);
+    fails(&out, "unused variable `x`");
+    assert!(
+        !text(&out.stderr).contains("snake"),
+        "{}",
+        text(&out.stderr)
+    );
+    // A file names the package it is in (rokc compiles that package), and
+    // a lone file in a directory with only rok.rokon is linted alone: both
+    // use the enclosing manifest's lints, from inside or outside.
+    write(&root.join("mid/t.rok"), "let y = 1;\nprintln(\"t\");\n");
+    for (cwd, path, want) in [
+        (&app, "main.rok", "unused variable `x`"),
+        (&root, "app/main.rok", "unused variable `x`"),
+        (&root.join("mid"), "t.rok", "unused variable `y`"),
+        (&root, "mid/t.rok", "unused variable `y`"),
+    ] {
+        for cmd in ["lint", "check"] {
+            fails(&rok(&home, cwd, &[cmd, path]), want);
+        }
+    }
+    // This manifest's own entry wins over the inherited one.
+    write(
+        &app.join("rok.rokon"),
+        "Package {\n    lints_from: \"../mid\",\n    lints: { \"unused_variables\": \"warn\" },\n}\n",
+    );
+    let out = rok(&home, &app, &["lint"]);
+    ok(&out);
+    assert!(text(&out.stderr).contains("unused variable `x`"));
+    // An imported environment keeps pointing at the same directory.
+    ok(&rok(&home, &root, &["env", "import", "shared", "app"]));
+    let env = read(&home.join("envs/shared/rok.rokon"));
+    assert!(
+        env.contains(&format!(
+            "lints_from: {:?}",
+            root.join("mid").display().to_string()
+        )),
+        "{env}"
+    );
+
+    // Errors: a cycle, a missing directory, a directory without a manifest.
+    write(
+        &root.join("base/rok.rokon"),
+        "Package { lints_from: \"../app\" }\n",
+    );
+    fails(&rok(&home, &app, &["lint"]), "cycle:");
+    write(&root.join("base/rok.rokon"), base);
+    write(
+        &app.join("rok.rokon"),
+        "Package { lints_from: \"../nope\" }\n",
+    );
+    fails(&rok(&home, &app, &["lint"]), "is not a directory");
+    fs::create_dir_all(root.join("empty")).unwrap();
+    write(
+        &app.join("rok.rokon"),
+        "Package { lints_from: \"../empty\" }\n",
+    );
+    fails(&rok(&home, &app, &["lint"]), "no rok.rokon in");
 }
 
 #[test]
@@ -1292,4 +1372,239 @@ fn stones_publish_add_update_yank() {
     assert!(read(&app.join("rok.rokon")).contains(&format!(
         "\"geom\": Dep::version(\"0.3\", registry: \"{reg}\"),"
     )));
+}
+
+/// `cmd` in `dir`, which must succeed.
+fn sh(dir: &Path, cmd: &str, args: &[&str]) {
+    let out = Command::new(cmd)
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{cmd} {args:?}: {}",
+        text(&out.stderr)
+    );
+}
+
+fn sha256_of(path: &Path) -> String {
+    rokc_core::hash::hex(&rokc_core::hash::sha256(&fs::read(path).unwrap()))
+}
+
+/// Native packages end to end on a local index: `yy` (a shared library)
+/// and `zz` (a static one calling into `yy`) made from C with the
+/// system `cc`, published, added, locked, linked and run; a missing
+/// target, a changed archive, the offline cache and a `Dep::native(url:)`.
+#[cfg(unix)]
+#[test]
+fn native_packages() {
+    if !llvm() || Command::new("cc").arg("--version").output().is_err() {
+        return;
+    }
+    let host = env!("ROK_HOST");
+    let apple = host.contains("-apple-");
+    let root = scratch("native");
+    let home = root.join("home");
+    let index = root.join("index");
+    commit(&index, &[("config.rokon", "Registry { name: \"t\" }\n")]);
+    for kv in [
+        ["user.name", "t"],
+        ["user.email", "t@t"],
+        ["commit.gpgsign", "false"],
+    ] {
+        git(&index, &["config", kv[0], kv[1]]);
+    }
+    let reg = index.display().to_string();
+    let config = format!("Config {{ registry: \"{reg}\" }}\n");
+    write(&home.join("config.rokon"), &config);
+
+    // The archives: `lib/` and a license, packed by `tar`.
+    let dist = root.join("dist");
+    fs::create_dir_all(&dist).unwrap();
+    let pack = |name: &str, c: &str, shared: bool| {
+        let src = root.join(name);
+        write(&src.join(format!("{name}.c")), c);
+        write(&src.join("pkg/LICENSE"), "MIT\n");
+        fs::create_dir_all(src.join("pkg/lib")).unwrap();
+        let c_file = format!("{name}.c");
+        if !shared {
+            sh(&src, "cc", &["-c", "-fPIC", &c_file, "-o", "x.o"]);
+            sh(&src, "ar", &["rcs", &format!("pkg/lib/lib{name}.a"), "x.o"]);
+        } else if apple {
+            let lib = format!("pkg/lib/lib{name}.dylib");
+            let id = format!("@rpath/lib{name}.dylib");
+            sh(
+                &src,
+                "cc",
+                &["-dynamiclib", "-install_name", &id, "-o", &lib, &c_file],
+            );
+        } else {
+            let lib = format!("pkg/lib/lib{name}.so");
+            let so = format!("-Wl,-soname,lib{name}.so");
+            sh(&src, "cc", &["-shared", "-fPIC", &so, "-o", &lib, &c_file]);
+        }
+        let tgz = dist.join(format!("{name}-1.0.0.tar.gz"));
+        let tgz_arg = tgz.display().to_string();
+        sh(&src, "tar", &["-czf", &tgz_arg, "-C", "pkg", "."]);
+        sha256_of(&tgz)
+    };
+    let yy_sum = pack("yy", "int yy_mul(int a, int b) { return a * b; }\n", true);
+    let zz_sum = pack(
+        "zz",
+        "int yy_mul(int, int);\nint zz_muladd(int a, int b, int c) { return yy_mul(a, b) + c; }\n",
+        false,
+    );
+    let ext = if apple { "dylib" } else { "so" };
+    let yy_meta = format!(
+        "Native {{ name: \"yy\", vers: \"1.0.0\", targets: {{ \"{host}\": Artifact {{ url: \
+         \"file://{}/yy-1.0.0.tar.gz\", sha256: \"{yy_sum}\", links: {{ \"yy\": \"dylib\" }}, \
+         runtime: [\"lib/libyy.{ext}\"] }} }}, license: \"MIT\" }}\n",
+        dist.display()
+    );
+    let zz_meta = format!(
+        "Native {{ name: \"zz\", vers: \"1.0.0\", deps: {{ \"yy\": \"^1.0\" }}, targets: {{ \
+         \"{host}\": Artifact {{ url: \"file://{}/zz-1.0.0.tar.gz\", sha256: \"{zz_sum}\", links: \
+         {{ \"zz\": \"static\" }} }} }} }}\n",
+        dist.display()
+    );
+    write(&root.join("yy.rokon"), &yy_meta);
+    write(&root.join("zz.rokon"), &zz_meta);
+
+    // `publish --native`: a dry run, then committed; one namespace per kind.
+    let line = ok(&rok(&home, &root, &["publish", "--native", "yy.rokon"]));
+    assert!(
+        line.starts_with("Native { name: \"yy\", vers: \"1.0.0\", deps: {}, "),
+        "{line}"
+    );
+    assert!(!index.join("native/2/yy").exists());
+    for f in ["yy.rokon", "zz.rokon"] {
+        let args = ["publish", "--native", f, "--index", &reg, "--commit"];
+        ok(&rok(&home, &root, &args));
+    }
+    assert_eq!(read(&index.join("native/2/yy")), line);
+    assert!(git(&index, &["log", "--format=%s"]).starts_with("Publish native zz 1.0.0\n"));
+    fails(
+        &rok(
+            &home,
+            &root,
+            &["publish", "--native", "yy.rokon", "--index", &reg],
+        ),
+        "native package yy 1.0.0 is already in the index",
+    );
+    assert_eq!(
+        ok(&rok(&home, &root, &["search", "--native", "y"])),
+        "yy = \"1.0.0\"\n"
+    );
+    assert_eq!(ok(&rok(&home, &root, &["search", "y"])), "");
+    // No license, no publish.
+    fs::remove_file(root.join("yy/pkg/LICENSE")).unwrap();
+    let bad = dist.join("yy-2.0.0.tar.gz");
+    let bad_arg = bad.display().to_string();
+    sh(
+        &root.join("yy"),
+        "tar",
+        &["-czf", &bad_arg, "-C", "pkg", "."],
+    );
+    let bad_meta = yy_meta
+        .replace("1.0.0", "2.0.0")
+        .replace(&yy_sum, &sha256_of(&bad));
+    write(&root.join("bad.rokon"), &bad_meta);
+    fails(
+        &rok(&home, &root, &["publish", "--native", "bad.rokon"]),
+        "the archive has no license file",
+    );
+
+    // An app calling both through `extern "C"` (no `#[link]`: the
+    // packages name their libraries).
+    let app = root.join("app");
+    ok(&rok(&home, &root, &["new", "app"]));
+    write(
+        &app.join("main.rok"),
+        "extern \"C\" {\n    fn zz_muladd(a: i32, b: i32, c: i32) -> i32;\n    fn yy_mul(a: i32, b: \
+         i32) -> i32;\n}\nlet a = unsafe { zz_muladd(6, 7, 1) };\nlet b = unsafe { yy_mul(2, 3) \
+         };\nprintln(f\"{a} {b}\");\n",
+    );
+    ok(&rok(&home, &app, &["add", "--native", "zz"]));
+    let manifest = read(&app.join("rok.rokon"));
+    assert!(
+        manifest.contains("\"zz\": Dep::native(\"^1.0.0\")"),
+        "{manifest}"
+    );
+    let lock = read(&app.join("rok.lock"));
+    for n in ["yy", "zz"] {
+        assert!(
+            lock.contains(&format!(
+                "LockedNative {{\n            name: \"{n}\",\n            vers: \"1.0.0\",\n"
+            )),
+            "{lock}"
+        );
+    }
+    assert_eq!(ok(&rok(&home, &app, &["-q", "run"])), "43 6\n");
+    // The shared library sits beside the executable, which finds it there
+    // from anywhere.
+    assert!(app.join(format!("target/debug/libyy.{ext}")).is_file());
+    let run = Command::new(app.join("target/debug/app"))
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(ok(&run), "43 6\n");
+
+    // A target the packages have no build for.
+    let other = if host == "x86_64-unknown-linux-gnu" {
+        "aarch64-unknown-linux-gnu"
+    } else {
+        "x86_64-unknown-linux-gnu"
+    };
+    fails(
+        &rok(&home, &app, &["build", "--target", other]),
+        &format!("native package `zz` 1.0.0 has no build for {other} (it has: {host})"),
+    );
+
+    // A file named by url and hash; the artifact url relative to it.
+    let vend = root.join("vend");
+    fs::create_dir_all(&vend).unwrap();
+    fs::copy(dist.join("yy-1.0.0.tar.gz"), vend.join("yy.tgz")).unwrap();
+    let from = format!("file://{}/yy-1.0.0.tar.gz", dist.display());
+    write(&vend.join("yy.rokon"), &yy_meta.replace(&from, "yy.tgz"));
+    let direct = root.join("direct");
+    write(
+        &direct.join("main.rok"),
+        "extern \"C\" { fn yy_mul(a: i32, b: i32) -> i32; }\nlet x = unsafe { yy_mul(4, 5) \
+         };\nprintln(f\"{x}\");\n",
+    );
+    let manifest = |sum: &str| {
+        format!(
+            "Package {{ native: {{ \"yy\": Dep::native(url: \"../vend/yy.rokon\", sha256: \
+             \"{sum}\") }} }}\n"
+        )
+    };
+    write(&direct.join("rok.rokon"), &manifest(&"0".repeat(64)));
+    fails(&rok(&home, &direct, &["-q", "run"]), "but 0000");
+    let sum = sha256_of(&vend.join("yy.rokon"));
+    write(&direct.join("rok.rokon"), &manifest(&sum));
+    assert_eq!(ok(&rok(&home, &direct, &["-q", "run"])), "20\n");
+
+    // Offline: what is cached builds without its sources.
+    for f in ["yy-1.0.0.tar.gz", "zz-1.0.0.tar.gz"] {
+        fs::remove_file(dist.join(f)).unwrap();
+    }
+    ok(&rok(&home, &app, &["-q", "clean"]));
+    assert_eq!(ok(&rok(&home, &app, &["--offline", "-q", "run"])), "43 6\n");
+
+    // A changed archive is refused (a fresh cache fetches it again).
+    write(&dist.join("yy-1.0.0.tar.gz"), "not the archive");
+    write(&dist.join("zz-1.0.0.tar.gz"), "not the archive");
+    let home2 = root.join("home2");
+    write(&home2.join("config.rokon"), &config);
+    let out = rok(&home2, &app, &["-q", "build"]);
+    fails(
+        &out,
+        &format!("native package `zz` 1.0.0 ({host}): file://"),
+    );
+    fails(&out, &format!("but {zz_sum} is expected"));
+
+    // `remove --native` takes it out of rok.rokon and rok.lock.
+    ok(&rok(&home, &app, &["remove", "--native", "zz"]));
+    assert!(!read(&app.join("rok.lock")).contains("LockedNative"));
 }

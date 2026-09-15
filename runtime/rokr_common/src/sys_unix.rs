@@ -1,8 +1,15 @@
-//! OS primitives shared by the runtime crates: POSIX (macOS, Linux).
+//! OS primitives shared by the runtime crates: POSIX (macOS, Linux)
+//! and WASI through wasi-libc.
+//!
+//! The heap reservation on WASI is linear memory (`memory.grow`). WASI
+//! without threads (no `atomics`: `wasm32-wasi`, the browser) has one
+//! thread: locks are no-ops and a wait nobody can end is a deadlock;
+//! `wasm32-wasi-threads` has wasi-libc's pthreads.
 
 // `static` primitives: `const fn new` is the constructor.
 #![allow(clippy::new_without_default)]
 
+#[cfg(any(unix, rok_wasi_threads))]
 use core::cell::UnsafeCell;
 
 /// The calling thread's `errno`.
@@ -91,14 +98,29 @@ pub fn atexit(f: extern "C" fn()) {
 }
 
 /// A mutex usable from a `static`.
+#[cfg(any(unix, rok_wasi_threads))]
 pub struct Lock(UnsafeCell<libc::pthread_mutex_t>);
 
 // SAFETY: pthread mutexes are designed for shared use.
+#[cfg(any(unix, rok_wasi_threads))]
 unsafe impl Sync for Lock {}
 
+/// wasi-libc's initializers are all zero (not in the `libc` crate).
+#[cfg(unix)]
+const MUTEX_INIT: libc::pthread_mutex_t = libc::PTHREAD_MUTEX_INITIALIZER;
+#[cfg(unix)]
+const COND_INIT: libc::pthread_cond_t = libc::PTHREAD_COND_INITIALIZER;
+// SAFETY: all-zero is wasi-libc's static initializer.
+#[cfg(rok_wasi_threads)]
+const MUTEX_INIT: libc::pthread_mutex_t = unsafe { core::mem::zeroed() };
+// SAFETY: as above.
+#[cfg(rok_wasi_threads)]
+const COND_INIT: libc::pthread_cond_t = unsafe { core::mem::zeroed() };
+
+#[cfg(any(unix, rok_wasi_threads))]
 impl Lock {
     pub const fn new() -> Self {
-        Self(UnsafeCell::new(libc::PTHREAD_MUTEX_INITIALIZER))
+        Self(UnsafeCell::new(MUTEX_INIT))
     }
 
     pub fn lock(&self) {
@@ -121,8 +143,10 @@ impl Lock {
 
 /// A condition variable usable from a `static` (or a stack slot that
 /// does not move while waited on).
+#[cfg(any(unix, rok_wasi_threads))]
 pub struct Cond(UnsafeCell<libc::pthread_cond_t>);
 
+#[cfg(any(unix, rok_wasi_threads))]
 impl Drop for Cond {
     fn drop(&mut self) {
         // SAFETY: nobody waits on a condvar being dropped.
@@ -131,11 +155,13 @@ impl Drop for Cond {
 }
 
 // SAFETY: pthread condvars are designed for shared use.
+#[cfg(any(unix, rok_wasi_threads))]
 unsafe impl Sync for Cond {}
 
+#[cfg(any(unix, rok_wasi_threads))]
 impl Cond {
     pub const fn new() -> Self {
-        Self(UnsafeCell::new(libc::PTHREAD_COND_INITIALIZER))
+        Self(UnsafeCell::new(COND_INIT))
     }
 
     /// Release `lock` (held by the caller), sleep until woken (or
@@ -166,10 +192,9 @@ impl Cond {
 
 #[allow(clippy::unnecessary_cast)] // `time_t` / `c_long` widths vary by target
 fn clock_ns(clock: libc::clockid_t) -> i64 {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
+    // SAFETY: a zeroed `timespec` is valid (32-bit time64 ones have
+    // padding fields).
+    let mut ts: libc::timespec = unsafe { core::mem::zeroed() };
     // SAFETY: valid out-pointer.
     unsafe { libc::clock_gettime(clock, &mut ts) };
     ts.tv_sec as i64 * 1_000_000_000 + ts.tv_nsec as i64
@@ -200,12 +225,18 @@ pub fn boot_ns() -> i64 {
     clock_ns(clock)
 }
 
-/// CPU time of the calling thread, nanoseconds.
+/// CPU time of the calling thread, nanoseconds (WASI: monotonic time,
+/// its only thread never waits for another).
 pub fn thread_cpu_ns() -> i64 {
-    clock_ns(libc::CLOCK_THREAD_CPUTIME_ID)
+    #[cfg(unix)]
+    let clock = libc::CLOCK_THREAD_CPUTIME_ID;
+    #[cfg(target_os = "wasi")]
+    let clock = libc::CLOCK_MONOTONIC;
+    clock_ns(clock)
 }
 
 /// Reserve `len` bytes of address space, inaccessible: null on failure.
+#[cfg(unix)]
 pub fn reserve(len: usize) -> *mut u8 {
     // SAFETY: an anonymous PROT_NONE mapping touches nothing.
     let p = unsafe {
@@ -230,6 +261,7 @@ pub fn reserve(len: usize) -> *mut u8 {
 ///
 /// # Safety
 /// The range must lie inside a [`reserve`]d region.
+#[cfg(unix)]
 pub unsafe fn commit(p: *mut u8, len: usize) -> bool {
     // SAFETY: caller contract.
     unsafe { libc::mprotect(p.cast(), len, libc::PROT_READ | libc::PROT_WRITE) == 0 }
@@ -240,6 +272,7 @@ pub unsafe fn commit(p: *mut u8, len: usize) -> bool {
 ///
 /// # Safety
 /// The range must be committed and hold nothing anyone still uses.
+#[cfg(unix)]
 pub unsafe fn reset(p: *mut u8, len: usize) -> bool {
     // SAFETY: caller contract; same protection, new zero pages.
     let q = unsafe {
@@ -279,6 +312,7 @@ pub unsafe fn free_aligned(p: *mut u8) {
 
 /// Start a detached OS thread running `f()` (default stack): false if
 /// it could not be created.
+#[cfg(any(unix, rok_wasi_threads))]
 pub fn spawn_detached(f: extern "C" fn()) -> bool {
     extern "C" fn start(arg: *mut libc::c_void) -> *mut libc::c_void {
         // SAFETY: `arg` is the `extern "C" fn()` passed below.
@@ -298,9 +332,120 @@ pub fn spawn_detached(f: extern "C" fn()) -> bool {
 }
 
 /// Block the calling thread until the process exits.
+#[cfg(unix)]
 pub fn park_forever() -> ! {
     loop {
         // SAFETY: plain libc call.
         unsafe { libc::pause() };
     }
+}
+
+/// Block the calling thread until the process exits (no `pause`).
+#[cfg(rok_wasi_threads)]
+pub fn park_forever() -> ! {
+    loop {
+        sleep_ns(1 << 40);
+    }
+}
+
+/// One thread: a lock is never contended.
+#[cfg(rok_solo)]
+pub struct Lock;
+
+// Not `const`, like the pthread one.
+#[cfg(rok_solo)]
+#[allow(clippy::missing_const_for_fn)]
+impl Lock {
+    pub const fn new() -> Self {
+        Self
+    }
+
+    pub fn lock(&self) {}
+
+    pub fn try_lock(&self) -> bool {
+        true
+    }
+
+    pub fn unlock(&self) {}
+}
+
+/// One thread: nobody else can signal, so an untimed wait never ends.
+#[cfg(rok_solo)]
+pub struct Cond;
+
+#[cfg(rok_solo)]
+impl Cond {
+    pub const fn new() -> Self {
+        Self
+    }
+
+    pub fn wait(&self, _lock: &Lock) {
+        crate::fatal(b"fatal error: deadlock: the only thread waits for another");
+    }
+
+    pub fn wait_timeout(&self, _lock: &Lock, ns: u64) {
+        sleep_ns(ns);
+    }
+
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn broadcast(&self) {}
+}
+
+/// Sleep `ns` nanoseconds (`poll_oneoff` on a clock).
+#[cfg(target_os = "wasi")]
+pub fn sleep_ns(ns: u64) {
+    let ns = ns.min(i64::MAX as u64);
+    let mut ts = libc::timespec {
+        tv_sec: (ns / 1_000_000_000) as _,
+        tv_nsec: (ns % 1_000_000_000) as _,
+    };
+    // SAFETY: `ts` is valid for read and write (remaining time).
+    while unsafe { libc::nanosleep(&ts, &mut ts) } != 0 && errno() == libc::EINTR {}
+}
+
+/// Grow linear memory by `len` bytes (whole 64 KiB pages): the new
+/// pages read as zero. wasm memory cannot be reserved without being
+/// accessible; engines back it lazily.
+#[cfg(target_os = "wasi")]
+pub fn reserve(len: usize) -> *mut u8 {
+    let pages = len.div_ceil(64 << 10);
+    let old = core::arch::wasm32::memory_grow(0, pages);
+    if old == usize::MAX {
+        core::ptr::null_mut()
+    } else {
+        (old * (64 << 10)) as *mut u8
+    }
+}
+
+/// Reserved memory is already accessible.
+///
+/// # Safety
+/// The range must lie inside a [`reserve`]d region.
+#[cfg(target_os = "wasi")]
+pub const unsafe fn commit(_p: *mut u8, _len: usize) -> bool {
+    true
+}
+
+/// Pages cannot be returned to the engine: zero the range.
+///
+/// # Safety
+/// The range must be committed and hold nothing anyone still uses.
+#[cfg(target_os = "wasi")]
+pub const unsafe fn reset(p: *mut u8, len: usize) -> bool {
+    // SAFETY: caller contract.
+    unsafe { core::ptr::write_bytes(p, 0, len) };
+    true
+}
+
+/// No threads.
+#[cfg(rok_solo)]
+pub const fn spawn_detached(_f: extern "C" fn()) -> bool {
+    false
+}
+
+/// Only reached by a thread the runtime has halted: on WASI, the only
+/// one, which ends the program.
+#[cfg(rok_solo)]
+pub fn park_forever() -> ! {
+    crate::fatal(b"fatal error: deadlock: the only thread waits for another")
 }

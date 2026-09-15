@@ -1,3 +1,4 @@
+// needs: process
 // expect-exit: 0
 // expect-stdout:
 // 2

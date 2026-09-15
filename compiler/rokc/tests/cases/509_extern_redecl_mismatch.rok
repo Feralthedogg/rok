@@ -1,0 +1,12 @@
+// spec: 005.09-extern-block §5.9.4
+// expect-error: extern function `labs` is declared twice with different signatures: `fn(i32) -> i32` here, `fn(i64) -> i64` elsewhere (spec 5.9.4)
+// Extern functions share one namespace: a second declaration must agree.
+extern "C" {
+    fn labs(x: i64) -> i64;
+}
+extern "C" {
+    fn labs(x: i32) -> i32;
+}
+fn main() -> i32 {
+    return unsafe { labs(-3) } as i32;
+}

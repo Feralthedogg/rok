@@ -152,6 +152,21 @@ fn import(g: &Global, name: &str, from: &Path) -> Result<(), String> {
             }
         }
     }
+    if let Some(from) = m
+        .lints_from
+        .as_deref()
+        .filter(|p| Path::new(p).is_relative())
+    {
+        let abs = rokc_core::real_path(src_dir.join(from))
+            .map_err(|e| format!("`lints_from`: {from}: {e}"))?;
+        let value = rokc_rokon::to_line(&rokc_rokon::Value::str(abs.display().to_string()));
+        text = rokc_rokon::edit::set(
+            &text,
+            &[rokc_rokon::edit::Step::Field("lints_from")],
+            &value,
+        )
+        .map_err(|e| e.render(&text, &file))?;
+    }
     let dir = create(name)?;
     let done = std::fs::write(dir.join(MANIFEST), &text)
         .map_err(|e| e.to_string())

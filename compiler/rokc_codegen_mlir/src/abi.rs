@@ -29,6 +29,10 @@
 //!   when 8-aligned: an even register pair) through `r0`-`r3` and the
 //!   stack, bigger ones `byval`; results ≤ 4 bytes in `r0`, HFAs in
 //!   VFP registers, others through `sret`.
+//! - WebAssembly: an aggregate of one scalar (no padding) as that
+//!   scalar, others as a pointer to a caller copy (clang marks it `byval`:
+//!   the same machine code, but -O2 builds passed a stale slot as a
+//!   `byval` runtime argument) / `sret`.
 //!
 //! Other targets reject aggregates across the C boundary.
 
@@ -117,6 +121,21 @@ fn leaves(ty: &MirTy, at: u32, target: &Target, out: &mut Vec<(u32, u32, Leaf)>)
     }
 }
 
+/// The scalar an aggregate made of one scalar leaf (and no padding)
+/// crosses the WebAssembly C ABI as.
+fn single_scalar(ty: &MirTy, target: &Target) -> Option<String> {
+    let mut ls = Vec::new();
+    leaves(ty, 0, target, &mut ls);
+    let [(0, size, leaf)] = ls[..] else {
+        return None;
+    };
+    (size == target.size_align(ty).0).then(|| match leaf {
+        Leaf::F32 => "f32".to_owned(),
+        Leaf::F64 => "f64".to_owned(),
+        Leaf::Int => format!("i{}", size * 8),
+    })
+}
+
 /// Homogeneous float aggregate: `[n x f32|f64]` for 1..=4 members.
 fn hfa(ty: &MirTy, target: &Target) -> Option<String> {
     let mut ls = Vec::new();
@@ -170,6 +189,24 @@ pub fn classify(target: &Target, params: &[MirTy], ret: &MirTy, variadic: bool) 
             aapcs32_ret(ret, target),
             params.iter().map(|p| aapcs32_arg(p, target)).collect(),
         ),
+        CAbi::Wasm32 => {
+            let ret = if is_aggregate(ret) {
+                single_scalar(ret, target).map_or(RetAbi::Sret, RetAbi::Coerce)
+            } else {
+                RetAbi::Direct
+            };
+            let args = params
+                .iter()
+                .map(|p| {
+                    if !is_aggregate(p) {
+                        return ArgAbi::Direct;
+                    }
+                    single_scalar(p, target)
+                        .map_or(ArgAbi::Indirect { byval: false }, ArgAbi::Coerce)
+                })
+                .collect();
+            (ret, args)
+        }
         CAbi::Other => {
             if params.iter().chain([ret]).any(is_aggregate) {
                 return None;
@@ -193,8 +230,9 @@ pub fn classify(target: &Target, params: &[MirTy], ret: &MirTy, variadic: bool) 
 /// with C while every integer word fits in argument registers; past
 /// that a pair could straddle the last register and the stack, where C
 /// passes it whole on the stack. `None`: a plain call does the same.
-/// Windows x64 passes and returns a 16-byte struct by reference, so a
-/// signature with a `str` (or another aggregate) is always classified.
+/// Windows x64 and WebAssembly pass and return a two-word struct by
+/// reference, so a signature with a `str` (or another aggregate) is
+/// always classified.
 /// On the 32-bit targets the scalars land where C puts the struct's
 /// words (i386: consecutive stack slots; AAPCS: core registers then the
 /// stack, a struct may straddle them), but a by-value result comes back
@@ -206,7 +244,7 @@ pub fn classify_rok(target: &Target, params: &[MirTy], ret: &MirTy) -> Option<Fn
     let regs = match target.c_abi {
         CAbi::Aarch64 => 8,
         CAbi::X86_64SysV => 6,
-        CAbi::X86_64Win => 0,
+        CAbi::X86_64Win | CAbi::Wasm32 => 0,
         CAbi::X86SysV | CAbi::X86Win | CAbi::ArmHf if by_value(ret) => 0,
         CAbi::X86SysV | CAbi::X86Win | CAbi::ArmHf | CAbi::Other => return None,
     };

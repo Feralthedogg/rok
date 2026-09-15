@@ -1,0 +1,65 @@
+// spec: std 302
+// spec: refs-lang 007.07
+// needs: net
+// expect-exit: 0
+// expect-stdout:
+// tcp echo: hello tasks (server read 11)
+// udp: ping from b -> pong
+// udp async: 5 datagrams, sum 10
+// inherited listeners: 0
+
+// std::net with tasks only, no threads: a TCP echo server task and
+// its client, UDP round trips, all through the I/O driver (707). On a
+// target without threads (wasm32-wasi) the one thread polls the sockets
+// itself while it has nothing to run.
+use rok::std::net::{TcpListener, UdpSocket, SocketAddr};
+use rok::std::net;
+use rok::std::io::byte_buf;
+
+fn text(buf: List<u8>, n: usize) -> str {
+    return try! str::from_utf8(buf[0:n]);
+}
+
+let any: SocketAddr = try! "127.0.0.1:0".parse::<SocketAddr>();
+let l = try! TcpListener::bind(any);
+let addr = try! l.local_addr();
+let server = task::spawn(async {
+    let (s, _) = try! await l.accept_async();
+    let buf = byte_buf(64);
+    let n = try! await s.read_async(buf);
+    try! await s.write_all_async(buf[0:n]);
+    s.close();
+    n
+});
+let c = try! await net::tcp_connect_async(f"{addr}");
+try! await c.write_all_async("hello tasks");
+let back = byte_buf(64);
+let n = try! await c.read_async(back);
+println(f"tcp echo: {text(back, n)} (server read {await server})");
+c.close();
+
+let a = try! UdpSocket::bind(any);
+let b = try! UdpSocket::bind(any);
+let a_addr = try! a.local_addr();
+try! b.send_to("ping".as_bytes(), a_addr);
+let buf = byte_buf(64);
+let (k, from) = try! a.recv_from(buf);
+let ping = text(buf, k);
+try! a.send_to("pong".as_bytes(), from);
+let (m, _) = try! b.recv_from(buf);
+println(f"udp: {ping} from {if from == (try! b.local_addr()) { "b" } else { "?" }} -> {text(buf, m)}");
+
+let rx = task::spawn(async {
+    let sum = 0;
+    let got = byte_buf(8);
+    for i in 0..5 {
+        let (j, _) = try! await a.recv_from_async(got);
+        sum += (got[0] - 48u8) as i32;
+    }
+    sum
+});
+for i in 0..5 {
+    try! await b.send_to_async(f"{i}".as_bytes(), a_addr);
+}
+println(f"udp async: 5 datagrams, sum {await rx}");
+println(f"inherited listeners: {TcpListener::inherited().len()}");

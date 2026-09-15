@@ -1,13 +1,15 @@
 //! COFF relocatable object writer (Windows), `x86_64` and arm64.
 //!
-//! Sections `.text .rdata .data`, their relocations, the unwind tables
-//! `.pdata` / `.xdata` (every function is a frame-pointer frame: the
-//! unwinder takes the stack pointer back from it), symbols and the
-//! string table. A weak definition is a weak external aliasing a local
-//! default, as LLVM writes one. No debug info (`-g` builds for Windows go
-//! through LLVM, whose `CodeView` lld-link turns into a PDB).
+//! A COMDAT section per function and data object (`.text`, `.rdata`,
+//! `.data`), so `/opt:ref` drops what nothing uses; their relocations,
+//! the unwind tables `.pdata` / `.xdata` (every function is a
+//! frame-pointer frame: the unwinder takes the stack pointer back from
+//! it) in COMDATs associated with the code, symbols and the string
+//! table; a big object (`/bigobj`) past 65279 sections. No debug info
+//! (`-g` builds for Windows go through LLVM, whose `CodeView` lld-link
+//! turns into a PDB).
 
-use crate::obj::{FnRange, Obj, RelKind, SECTS, Sect};
+use crate::obj::{FnRange, Obj, RelKind, Reloc, Sect};
 
 const MACHINE_AMD64: u16 = 0x8664;
 const MACHINE_ARM64: u16 = 0xaa64;
@@ -17,6 +19,15 @@ const SCN_MEM_EXECUTE: u32 = 0x2000_0000;
 const SCN_MEM_READ: u32 = 0x4000_0000;
 const SCN_MEM_WRITE: u32 = 0x8000_0000;
 const SCN_LNK_NRELOC_OVFL: u32 = 0x0100_0000;
+const SCN_LNK_COMDAT: u32 = 0x1000;
+const SELECT_NODUPLICATES: u8 = 1;
+const SELECT_ANY: u8 = 2;
+const SELECT_ASSOCIATIVE: u8 = 5;
+/// Sections a regular object holds; more need a big object.
+const MAX_SECTIONS16: usize = 65279;
+const BIGOBJ_CLASS_ID: [u8; 16] = [
+    0xc7, 0xa1, 0xba, 0xd1, 0xee, 0xba, 0xa9, 0x4b, 0xaf, 0x20, 0xfa, 0xf6, 0x6a, 0xa4, 0xdc, 0xb8,
+];
 const SYM_CLASS_EXTERNAL: u8 = 2;
 const SYM_CLASS_STATIC: u8 = 3;
 const SYM_CLASS_WEAK_EXTERNAL: u8 = 105;
@@ -69,17 +80,23 @@ fn put32(b: &mut Vec<u8>, v: u32) {
     b.extend_from_slice(&v.to_le_bytes());
 }
 
-/// Symbol table records and the string table of the longer names.
+/// Symbol table records and the string table of the longer names; a
+/// big object's records are 20 bytes (a 32-bit section number).
 #[derive(Default)]
 struct SymTab {
     recs: Vec<u8>,
     strs: Vec<u8>,
+    big: bool,
 }
 
 impl SymTab {
+    const fn size(&self) -> usize {
+        if self.big { 20 } else { 18 }
+    }
+
     /// A record, its name inline or in the string table; `aux`
     /// auxiliary records follow.
-    fn add(&mut self, name: &str, value: u32, sect: i16, ty: u16, class: u8, aux: u8) {
+    fn add(&mut self, name: &str, value: u32, sect: u32, ty: u16, class: u8, aux: u8) {
         let b = &mut self.recs;
         if name.len() <= 8 {
             let mut n = [0u8; 8];
@@ -92,14 +109,70 @@ impl SymTab {
             self.strs.push(0);
         }
         put32(b, value);
-        b.extend_from_slice(&sect.to_le_bytes());
+        if self.big {
+            put32(b, sect);
+        } else {
+            put16(b, sect as u16);
+        }
         put16(b, ty);
         b.push(class);
         b.push(aux);
     }
 
+    /// An auxiliary record (18 bytes, padded in a big object).
+    fn aux(&mut self, rec: [u8; 18]) {
+        self.recs.extend_from_slice(&rec);
+        if self.big {
+            self.recs.extend_from_slice(&[0, 0]);
+        }
+    }
+
+    /// A section's symbol and its definition record: `relocs`, the
+    /// COMDAT selection and the associated section (`IMAGE_COMDAT_*`).
+    fn section(&mut self, name: &str, sect: u32, o: &Out, selection: u8, assoc: u32) {
+        self.add(name, 0, sect, 0, SYM_CLASS_STATIC, 1);
+        let mut rec = [0u8; 18];
+        rec[..4].copy_from_slice(&(o.data.len() as u32).to_le_bytes());
+        let nrel = o.relocs.len().min(0xffff) as u16;
+        rec[4..6].copy_from_slice(&nrel.to_le_bytes());
+        rec[12..14].copy_from_slice(&(assoc as u16).to_le_bytes());
+        rec[14] = selection;
+        rec[16..18].copy_from_slice(&((assoc >> 16) as u16).to_le_bytes());
+        self.aux(rec);
+    }
+
     fn len(&self) -> u32 {
-        (self.recs.len() / 18) as u32
+        (self.recs.len() / self.size()) as u32
+    }
+}
+
+/// The relocation type of `r` in a section with contents `data`.
+fn rel_type(r: &Reloc, data: &[u8], x86: bool) -> u16 {
+    if x86 {
+        return match r.kind {
+            RelKind::X86Call | RelKind::X86Pc32 => REL_AMD64_REL32,
+            RelKind::X86SecRel => REL_AMD64_SECREL,
+            RelKind::Abs64 => REL_AMD64_ADDR64,
+            k => unreachable!("{k:?} in a COFF object"),
+        };
+    }
+    match r.kind {
+        RelKind::Branch26 => REL_ARM64_BRANCH26,
+        RelKind::Page21 => REL_ARM64_PAGEBASE_REL21,
+        // A load / store scales the offset; an `add` not.
+        RelKind::PageOff12 => {
+            let at = r.off as usize;
+            let ins = u32::from_le_bytes(data[at..at + 4].try_into().unwrap_or([0; 4]));
+            if ins & 0x3b00_0000 == 0x3900_0000 {
+                REL_ARM64_PAGEOFFSET_12L
+            } else {
+                REL_ARM64_PAGEOFFSET_12A
+            }
+        }
+        RelKind::SecRelHi12 => REL_ARM64_SECREL_HIGH12A,
+        RelKind::SecRelLo12 => REL_ARM64_SECREL_LOW12A,
+        RelKind::Abs64 => REL_ARM64_ADDR64,
+        k => unreachable!("{k:?} in a COFF object"),
     }
 }
 
@@ -107,121 +180,152 @@ impl SymTab {
 #[must_use]
 pub fn write(obj: &Obj) -> Vec<u8> {
     let x86 = obj.x86;
-    // Symbol table indexes: a weak definition takes three records (its
-    // local default, the weak external and its auxiliary record), the
-    // others one; `.xdata`'s label comes last.
-    let mut index = Vec::with_capacity(obj.syms.len());
-    let mut n = 0u32;
-    for s in &obj.syms {
-        let weak = s.weak && s.def.is_some();
-        index.push(if weak { n + 1 } else { n });
-        n += if weak { 3 } else { 1 };
-    }
-    let xdata_sym = n;
-
-    let mut outs: Vec<Out> = Vec::new();
-    let mut sect_index = std::collections::HashMap::new();
-    for s in SECTS {
-        let sec = &obj.sects[&s];
-        if sec.data.is_empty() {
-            continue;
-        }
-        let (name, flags) = match s {
-            Sect::Text => (".text", SCN_CNT_CODE | SCN_MEM_EXECUTE | SCN_MEM_READ),
-            Sect::Const | Sect::DataConst => (".rdata", SCN_CNT_INITIALIZED_DATA | SCN_MEM_READ),
-            Sect::Data => (
-                ".data",
-                SCN_CNT_INITIALIZED_DATA | SCN_MEM_READ | SCN_MEM_WRITE,
-            ),
-        };
-        let relocs = sec
-            .relocs
-            .iter()
-            .map(|r| {
-                let ty = if x86 {
-                    match r.kind {
-                        RelKind::X86Call | RelKind::X86Pc32 => REL_AMD64_REL32,
-                        RelKind::X86SecRel => REL_AMD64_SECREL,
-                        RelKind::Abs64 => REL_AMD64_ADDR64,
-                        k => unreachable!("{k:?} in a COFF object"),
-                    }
-                } else {
-                    match r.kind {
-                        RelKind::Branch26 => REL_ARM64_BRANCH26,
-                        RelKind::Page21 => REL_ARM64_PAGEBASE_REL21,
-                        // A load / store scales the offset; an `add` not.
-                        RelKind::PageOff12 => {
-                            let at = r.off as usize;
-                            let ins = u32::from_le_bytes(
-                                sec.data[at..at + 4].try_into().unwrap_or([0; 4]),
-                            );
-                            if ins & 0x3b00_0000 == 0x3900_0000 {
-                                REL_ARM64_PAGEOFFSET_12L
-                            } else {
-                                REL_ARM64_PAGEOFFSET_12A
-                            }
-                        }
-                        RelKind::SecRelHi12 => REL_ARM64_SECREL_HIGH12A,
-                        RelKind::SecRelLo12 => REL_ARM64_SECREL_LOW12A,
-                        RelKind::Abs64 => REL_ARM64_ADDR64,
-                        k => unreachable!("{k:?} in a COFF object"),
-                    }
-                };
-                (r.off, ty, index[r.sym as usize])
-            })
-            .collect();
-        sect_index.insert(s, outs.len() as i16 + 1);
+    let (pieces, piece_of) = obj.pieces();
+    let data_flags = SCN_CNT_INITIALIZED_DATA | SCN_MEM_READ;
+    // Sections: the pieces; x64's shared `UNWIND_INFO`; each function's
+    // unwind info (arm64 `.xdata`, then `.pdata`), associated with its
+    // code so it goes when the linker drops that.
+    let mut outs: Vec<Out> = pieces
+        .iter()
+        .map(|p| {
+            let sec = &obj.sects[&p.sect];
+            let (name, flags) = match p.sect {
+                Sect::Text => (".text", SCN_CNT_CODE | SCN_MEM_EXECUTE | SCN_MEM_READ),
+                Sect::Const | Sect::DataConst => (".rdata", data_flags),
+                Sect::Data => (".data", data_flags | SCN_MEM_WRITE),
+            };
+            Out {
+                name,
+                flags: flags | SCN_LNK_COMDAT,
+                data: sec.data[p.start as usize..p.end as usize].to_vec(),
+                align: p.align,
+                relocs: Vec::new(),
+            }
+        })
+        .collect();
+    if x86 && !obj.fns.is_empty() {
         outs.push(Out {
-            name,
-            flags,
-            data: sec.data.clone(),
-            align: sec.align.max(if s == Sect::Text { 4 } else { 0 }),
-            relocs,
+            name: ".xdata",
+            flags: data_flags,
+            data: X64_UNWIND.to_vec(),
+            align: 2,
+            relocs: Vec::new(),
         });
     }
-    let xdata_sect = outs.len() as i16 + 1;
-    if !obj.fns.is_empty() {
-        let (xdata, pdata) = if x86 {
-            x64_unwind(&obj.fns, &index, xdata_sym)
-        } else {
-            a64_unwind(obj, &index, xdata_sym)
-        };
-        for (name, (data, relocs)) in [(".xdata", xdata), (".pdata", pdata)] {
+    // Per function: its piece, its `.xdata` (arm64), its `.pdata`.
+    let mut unwind = Vec::new();
+    for f in &obj.fns {
+        let k = piece_of[f.sym as usize].expect("a defined function");
+        let at = f.start - pieces[k].start;
+        let xdata = (!x86).then(|| {
             outs.push(Out {
-                name,
-                flags: SCN_CNT_INITIALIZED_DATA | SCN_MEM_READ,
-                data,
+                name: ".xdata",
+                flags: data_flags | SCN_LNK_COMDAT,
+                data: a64_xdata(obj, f),
                 align: 2,
-                relocs,
+                relocs: Vec::new(),
             });
+            outs.len() - 1
+        });
+        let mut pdata = Vec::new();
+        put32(&mut pdata, at);
+        if x86 {
+            put32(&mut pdata, at + f.len);
         }
+        put32(&mut pdata, 0);
+        outs.push(Out {
+            name: ".pdata",
+            flags: data_flags | SCN_LNK_COMDAT,
+            data: pdata,
+            align: 2,
+            relocs: Vec::new(),
+        });
+        unwind.push((k, xdata, outs.len() - 1));
     }
 
-    // Symbols.
-    let mut syms = SymTab::default();
-    for s in &obj.syms {
-        let (sect, value, ty) = match s.def {
-            Some((sec, off, _)) => (
-                sect_index.get(&sec).copied().unwrap_or(0),
-                off,
-                if sec == Sect::Text {
-                    SYM_DTYPE_FUNCTION
-                } else {
-                    0
-                },
-            ),
-            None => (0, 0, 0),
+    // Symbols: each section's (a COMDAT's followed by its leader, the
+    // first symbol defined in it), then the rest. A weak definition is a
+    // weak external aliasing `.weak.<name>.default`, as LLVM writes one:
+    // that default leads a COMDAT any copy of which will do.
+    let mut syms = SymTab {
+        big: outs.len() > MAX_SECTIONS16,
+        ..SymTab::default()
+    };
+    let assoc: Vec<Option<usize>> = {
+        let mut a = vec![None; outs.len()];
+        for &(k, x, p) in &unwind {
+            a[p] = Some(k);
+            if let Some(x) = x {
+                a[x] = Some(k);
+            }
+        }
+        a
+    };
+    let def = |i: usize| {
+        let s = &obj.syms[i];
+        let k = piece_of[i]?;
+        let (sec, off, _) = s.def?;
+        let ty = if sec == Sect::Text {
+            SYM_DTYPE_FUNCTION
+        } else {
+            0
         };
-        if s.weak && s.def.is_some() {
-            let default = syms.len();
-            let local = format!(".weak.{}.default", s.name);
-            syms.add(&local, value, sect, ty, SYM_CLASS_STATIC, 0);
-            syms.add(&s.name, 0, 0, ty, SYM_CLASS_WEAK_EXTERNAL, 1);
-            put32(&mut syms.recs, default);
-            put32(&mut syms.recs, WEAK_EXTERN_SEARCH_ALIAS);
-            syms.recs.extend_from_slice(&[0; 10]);
+        Some((k as u32 + 1, off - pieces[k].start, ty))
+    };
+    let mut sect_sym = vec![0u32; outs.len()];
+    let mut index = vec![u32::MAX; obj.syms.len()];
+    // The record of each weak definition's default.
+    let mut defaults = vec![u32::MAX; obj.syms.len()];
+    for (k, o) in outs.iter().enumerate() {
+        sect_sym[k] = syms.len();
+        let n = k as u32 + 1;
+        if let Some(p) = assoc[k] {
+            syms.section(o.name, n, o, SELECT_ASSOCIATIVE, p as u32 + 1);
             continue;
         }
+        let Some(p) = pieces.get(k) else {
+            syms.section(o.name, n, o, 0, 0);
+            continue;
+        };
+        let lead = p.syms[0] as usize;
+        let s = &obj.syms[lead];
+        let (sect, value, ty) = def(lead).expect("a defined symbol");
+        if s.weak {
+            syms.section(o.name, n, o, SELECT_ANY, 0);
+            defaults[lead] = syms.len();
+            let name = format!(".weak.{}.default", s.name);
+            syms.add(&name, value, sect, ty, SYM_CLASS_EXTERNAL, 0);
+        } else {
+            syms.section(o.name, n, o, SELECT_NODUPLICATES, 0);
+            index[lead] = syms.len();
+            let class = if s.global {
+                SYM_CLASS_EXTERNAL
+            } else {
+                SYM_CLASS_STATIC
+            };
+            syms.add(&s.name, value, sect, ty, class, 0);
+        }
+    }
+    for (i, s) in obj.syms.iter().enumerate() {
+        if index[i] != u32::MAX {
+            continue;
+        }
+        let (sect, value, ty) = def(i).unwrap_or((0, 0, 0));
+        if s.weak && s.def.is_some() {
+            if defaults[i] == u32::MAX {
+                defaults[i] = syms.len();
+                let name = format!(".weak.{}.default", s.name);
+                syms.add(&name, value, sect, ty, SYM_CLASS_EXTERNAL, 0);
+            }
+            index[i] = syms.len();
+            syms.add(&s.name, 0, 0, ty, SYM_CLASS_WEAK_EXTERNAL, 1);
+            let mut rec = [0u8; 18];
+            rec[..4].copy_from_slice(&defaults[i].to_le_bytes());
+            rec[4..8].copy_from_slice(&WEAK_EXTERN_SEARCH_ALIAS.to_le_bytes());
+            syms.aux(rec);
+            continue;
+        }
+        index[i] = syms.len();
         let class = if s.def.is_some() && !s.global {
             SYM_CLASS_STATIC
         } else {
@@ -229,19 +333,59 @@ pub fn write(obj: &Obj) -> Vec<u8> {
         };
         syms.add(&s.name, value, sect, ty, class, 0);
     }
-    syms.add("$xdata", 0, xdata_sect, 0, SYM_CLASS_STATIC, 0);
+
+    // Relocations: the pieces' against symbols; unwind info's against
+    // section symbols, the offset in the place.
+    for (k, p) in pieces.iter().enumerate() {
+        let o = &mut outs[k];
+        o.relocs = p
+            .relocs
+            .iter()
+            .map(|r| (r.off, rel_type(r, &o.data, x86), index[r.sym as usize]))
+            .collect();
+    }
+    let rva = if x86 {
+        REL_AMD64_ADDR32NB
+    } else {
+        REL_ARM64_ADDR32NB
+    };
+    for &(k, xdata, pdata) in &unwind {
+        let code = sect_sym[k];
+        outs[pdata].relocs = if x86 {
+            let shared = sect_sym[pieces.len()];
+            vec![(0, rva, code), (4, rva, code), (8, rva, shared)]
+        } else {
+            vec![(0, rva, code), (4, rva, sect_sym[xdata.unwrap_or(0)])]
+        };
+    }
 
     // Layout: header, section headers, each section's data and
     // relocations, symbols, strings.
+    let machine = if x86 { MACHINE_AMD64 } else { MACHINE_ARM64 };
     let mut b = Vec::new();
-    put16(&mut b, if x86 { MACHINE_AMD64 } else { MACHINE_ARM64 });
-    put16(&mut b, outs.len() as u16);
-    put32(&mut b, 0);
-    let symoff_at = b.len();
-    put32(&mut b, 0);
-    put32(&mut b, syms.len());
-    put16(&mut b, 0);
-    put16(&mut b, 0);
+    let symoff_at;
+    if syms.big {
+        put16(&mut b, 0);
+        put16(&mut b, 0xffff);
+        put16(&mut b, 2);
+        put16(&mut b, machine);
+        put32(&mut b, 0);
+        b.extend_from_slice(&BIGOBJ_CLASS_ID);
+        b.extend_from_slice(&[0; 16]);
+        put32(&mut b, outs.len() as u32);
+        symoff_at = b.len();
+        put32(&mut b, 0);
+        put32(&mut b, syms.len());
+    } else {
+        put16(&mut b, machine);
+        put16(&mut b, outs.len() as u16);
+        put32(&mut b, 0);
+        symoff_at = b.len();
+        put32(&mut b, 0);
+        put32(&mut b, syms.len());
+        put16(&mut b, 0);
+        put16(&mut b, 0);
+    }
     let headers = b.len();
     b.resize(headers + 40 * outs.len(), 0);
     for (k, o) in outs.iter().enumerate() {
@@ -286,63 +430,34 @@ pub fn write(obj: &Obj) -> Vec<u8> {
     b
 }
 
-/// Section contents and relocations of `.xdata` and `.pdata`.
-type Unwind = ((Vec<u8>, Vec<Rel>), (Vec<u8>, Vec<Rel>));
-
-/// x64: one shared `UNWIND_INFO`; a `RUNTIME_FUNCTION` (begin, end,
-/// unwind info) per function.
-fn x64_unwind(fns: &[FnRange], index: &[u32], xdata: u32) -> Unwind {
-    let mut pdata = Vec::new();
-    let mut relocs = Vec::new();
-    for f in fns {
-        let at = pdata.len() as u32;
-        let s = index[f.sym as usize];
-        relocs.push((at, REL_AMD64_ADDR32NB, s));
-        relocs.push((at + 4, REL_AMD64_ADDR32NB, s));
-        relocs.push((at + 8, REL_AMD64_ADDR32NB, xdata));
-        put32(&mut pdata, 0);
-        put32(&mut pdata, f.len);
-        put32(&mut pdata, 0);
-    }
-    ((X64_UNWIND.to_vec(), Vec::new()), (pdata, relocs))
-}
-
-/// arm64: per function an `.xdata` record (its length, one epilog scope
-/// per epilog, the shared codes) and a `.pdata` entry (begin, record).
-fn a64_unwind(obj: &Obj, index: &[u32], xdata_sym: u32) -> Unwind {
+/// arm64 `.xdata` of `f`: its length, one epilog scope per epilog, the
+/// shared codes.
+fn a64_xdata(obj: &Obj, f: &FnRange) -> Vec<u8> {
     let text = &obj.sects[&Sect::Text].data;
     let word = |at: usize| u32::from_le_bytes(text[at..at + 4].try_into().unwrap_or([0; 4]));
-    let (mut xdata, mut pdata, mut relocs) = (Vec::new(), Vec::new(), Vec::new());
-    for f in &obj.fns {
-        let epilogs: Vec<u32> = (0..f.len.saturating_sub(4))
-            .step_by(4)
-            .filter(|&o| {
-                let at = (f.start + o) as usize;
-                [word(at), word(at + 4)] == A64_EPILOG
-            })
-            .collect();
-        let at = xdata.len() as u32;
-        // Function length in words (18 bits), one code word; more than
-        // 31 epilogs need the extended header.
-        let len = (f.len / 4) & 0x3_ffff;
-        let n = epilogs.len() as u32;
-        if n <= 31 {
-            put32(&mut xdata, len | (n << 22) | (1 << 27));
-        } else {
-            put32(&mut xdata, len);
-            put32(&mut xdata, n | (1 << 16));
-        }
-        for e in epilogs {
-            put32(&mut xdata, e / 4);
-        }
-        xdata.extend_from_slice(&A64_CODES);
-        let p = pdata.len() as u32;
-        relocs.push((p, REL_ARM64_ADDR32NB, index[f.sym as usize]));
-        relocs.push((p + 4, REL_ARM64_ADDR32NB, xdata_sym));
-        put32(&mut pdata, 0);
-        put32(&mut pdata, at);
+    let epilogs: Vec<u32> = (0..f.len.saturating_sub(4))
+        .step_by(4)
+        .filter(|&o| {
+            let at = (f.start + o) as usize;
+            [word(at), word(at + 4)] == A64_EPILOG
+        })
+        .collect();
+    let mut xdata = Vec::new();
+    // Function length in words (18 bits), one code word; more than 31
+    // epilogs need the extended header.
+    let len = (f.len / 4) & 0x3_ffff;
+    let n = epilogs.len() as u32;
+    if n <= 31 {
+        put32(&mut xdata, len | (n << 22) | (1 << 27));
+    } else {
+        put32(&mut xdata, len);
+        put32(&mut xdata, n | (1 << 16));
     }
-    ((xdata, Vec::new()), (pdata, relocs))
+    for e in epilogs {
+        put32(&mut xdata, e / 4);
+    }
+    xdata.extend_from_slice(&A64_CODES);
+    xdata
 }
 
 #[cfg(test)]
@@ -358,41 +473,84 @@ mod tests {
         let f = o.sym("f");
         let g = o.sym("g");
         let w = o.sym("w");
-        o.sect(Sect::Text)
-            .data
-            .extend_from_slice(&[0x55, 0x48, 0x89, 0xe5, 0xe8, 0, 0, 0, 0, 0x5d, 0xc3]);
-        o.sect(Sect::Text).relocs.push(crate::obj::Reloc {
+        let code = [0x55, 0x48, 0x89, 0xe5, 0xe8, 0, 0, 0, 0, 0x5d, 0xc3];
+        o.sect(Sect::Text).data.extend_from_slice(&code);
+        o.sect(Sect::Text).data.resize(16, 0);
+        o.sect(Sect::Text).data.extend_from_slice(&code);
+        o.sect(Sect::Text).relocs.push(Reloc {
             off: 5,
             kind: RelKind::X86Call,
             sym: g,
         });
         o.syms[f as usize].def = Some((Sect::Text, 0, 11));
-        o.syms[w as usize].def = Some((Sect::Text, 0, 11));
+        o.syms[w as usize].def = Some((Sect::Text, 16, 11));
         o.syms[w as usize].weak = true;
-        o.fns.push(FnRange {
-            sym: f,
-            start: 0,
-            len: 11,
-            lines: Vec::new(),
-            debug: None,
-        });
+        for (sym, start) in [(f, 0), (w, 16)] {
+            o.fns.push(FnRange {
+                sym,
+                start,
+                len: 11,
+                lines: Vec::new(),
+                debug: None,
+            });
+        }
         let b = write(&o);
         assert_eq!(u16::from_le_bytes([b[0], b[1]]), MACHINE_AMD64);
-        // .text, .xdata, .pdata.
-        assert_eq!(u16::from_le_bytes([b[2], b[3]]), 3);
+        // f's and w's code, the shared .xdata, a .pdata each.
+        assert_eq!(u16::from_le_bytes([b[2], b[3]]), 5);
         let symoff = u32::from_le_bytes(b[8..12].try_into().unwrap()) as usize;
-        // f, g, the weak default + external + aux, `$xdata`.
-        assert_eq!(u32::from_le_bytes(b[12..16].try_into().unwrap()), 6);
+        // Five section symbols with their definitions; f, w's default,
+        // g, the weak external w and its aux.
+        assert_eq!(u32::from_le_bytes(b[12..16].try_into().unwrap()), 15);
         let sym = |i: usize| &b[symoff + 18 * i..symoff + 18 * (i + 1)];
-        assert_eq!(&sym(0)[..8], b"f\0\0\0\0\0\0\0");
-        assert_eq!(sym(0)[16], SYM_CLASS_EXTERNAL);
-        assert_eq!(i16::from_le_bytes([sym(1)[12], sym(1)[13]]), 0);
-        assert_eq!(sym(3)[16], SYM_CLASS_WEAK_EXTERNAL);
-        // The weak external's tag: the default, record 2.
-        assert_eq!(u32::from_le_bytes(sym(4)[..4].try_into().unwrap()), 2);
-        // The call's REL32 against g (record 1).
+        let sect = |i: usize| i16::from_le_bytes([sym(i)[12], sym(i)[13]]);
+        // .text #1 (a COMDAT of no duplicates) and its leader f.
+        assert_eq!(&sym(0)[..8], b".text\0\0\0");
+        assert_eq!(sym(1)[14], SELECT_NODUPLICATES);
+        assert_eq!(&sym(2)[..8], b"f\0\0\0\0\0\0\0");
+        assert_eq!((sym(2)[16], sect(2)), (SYM_CLASS_EXTERNAL, 1));
+        // .text #2 (any copy) led by w's external default.
+        assert_eq!(sym(4)[14], SELECT_ANY);
+        assert_eq!((sym(5)[16], sect(5)), (SYM_CLASS_EXTERNAL, 2));
+        // f's .pdata (#4) goes with section 1.
+        assert_eq!(&sym(8)[..8], b".pdata\0\0");
+        assert_eq!((sym(9)[12], sym(9)[14]), (1, SELECT_ASSOCIATIVE));
+        // g undefined, then w: a weak external aliasing its default.
+        assert_eq!((&sym(12)[..8], sect(12)), (&b"g\0\0\0\0\0\0\0"[..], 0));
+        assert_eq!(sym(13)[16], SYM_CLASS_WEAK_EXTERNAL);
+        assert_eq!(u32::from_le_bytes(sym(14)[..4].try_into().unwrap()), 5);
+        // The call's REL32 against g (record 12), in f's section.
         let text = 20;
         let rel = u32::from_le_bytes(b[text + 24..text + 28].try_into().unwrap()) as usize;
-        assert_eq!(&b[rel..rel + 10], &[5, 0, 0, 0, 1, 0, 0, 0, 4, 0]);
+        assert_eq!(&b[rel..rel + 10], &[5, 0, 0, 0, 12, 0, 0, 0, 4, 0]);
+    }
+
+    /// Past 65279 sections: a big object, its symbols 20 bytes.
+    #[test]
+    fn many_sections_make_a_big_object() {
+        let mut o = Obj::new(true, false, true);
+        for i in 0..65_280u32 {
+            let s = o.sym(&format!("d{i}"));
+            o.define_data(s, Sect::Const, &[1], 1, true);
+        }
+        let b = write(&o);
+        if let Some(p) = std::env::var_os("ROK_DUMP_BIGOBJ") {
+            std::fs::write(p, &b).unwrap();
+        }
+        assert_eq!(&b[..6], &[0, 0, 0xff, 0xff, 2, 0]);
+        assert_eq!(u16::from_le_bytes([b[6], b[7]]), MACHINE_AMD64);
+        assert_eq!(u32::from_le_bytes(b[44..48].try_into().unwrap()), 65_280);
+        let symoff = u32::from_le_bytes(b[48..52].try_into().unwrap()) as usize;
+        // A section symbol, its definition, the leader: the last one's
+        // section number is 65280.
+        assert_eq!(
+            u32::from_le_bytes(b[52..56].try_into().unwrap()),
+            3 * 65_280
+        );
+        let last = symoff + 20 * (3 * 65_280 - 1);
+        assert_eq!(
+            u32::from_le_bytes(b[last + 12..last + 16].try_into().unwrap()),
+            65_280
+        );
     }
 }

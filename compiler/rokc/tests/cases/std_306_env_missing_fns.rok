@@ -1,19 +1,25 @@
 // spec: std 306-env §3.6.1
+// needs: process
 // expect-exit: 0
 // expect-stdout:
 // var_os none: true
 // current_exe absolute: true
-// join: /a:/b
+// join: true
 
 // spec 3.6.1: `var_os(name) -> RawStr | none`, `current_exe() throws
-// (IoError) -> Path`, `join_paths` joins with ":" on unix.
+// (IoError) -> Path`, `join_paths` joins with ":" (";" on Windows).
 use rok::std::env;
 use rok::std::path::Path;
+
+#[cfg(target_os = "windows")]
+const LIST: str = ";";
+#[cfg(not(target_os = "windows"))]
+const LIST: str = ":";
 
 fn main() {
     println(f"var_os none: {env::var_os("ROK_PROBE_SURELY_UNSET_9") is none}");
     let exe = try env::current_exe() catch _ { Path::from("rel") };
     println(f"current_exe absolute: {exe.is_absolute()}");
     let j = try env::join_paths([Path::from("/a"), Path::from("/b")].iter()) catch _ { "error" };
-    println(f"join: {j}");
+    println(f"join: {j == f"/a{LIST}/b"}");
 }

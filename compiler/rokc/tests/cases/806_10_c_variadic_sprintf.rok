@@ -1,0 +1,35 @@
+// spec: 008.06-calling-convention §8.6.10
+// expect-exit: 0
+// expect-stdout:
+// 10 [n=7 x=-2.5]
+// 18 [ab 42] 29
+
+// The C library's formatting entry points, variadic, on every target
+// (Windows: rokc's own over UCRT's `__stdio_common_vsprintf`):
+// `snprintf` returns the full length and truncates, `sprintf` writes it
+// all.
+use rok::bare::ptr::{Ptr, addr_of};
+
+extern "C" {
+    fn snprintf(buf: Ptr<u8>, n: usize, fmt: str, ...) -> i32;
+    fn sprintf(buf: Ptr<u8>, fmt: str, ...) -> i32;
+}
+
+fn text(b: [u8; 32]) -> str {
+    let out: List<u8> = [];
+    for c in b {
+        if c == 0u8 { break; }
+        out.push(c);
+    }
+    try! str::from_utf8(out)
+}
+
+fn main() -> i32 {
+    let buf: [u8; 32] = [0u8; 32];
+    let n = unsafe { snprintf(addr_of(buf[0]), 32usize, "n=%d x=%.1f", 7, -2.5) };
+    println(f"{n} [{text(buf)}]");
+    let m = unsafe { snprintf(addr_of(buf[0]), 6usize, "%s %d%s", "ab", 42, "-tail-is-long") };
+    let k = unsafe { sprintf(addr_of(buf[16]), "%08x|%5s", 255, "z") };
+    println(f"{m} [{text(buf)}] {m + k - 3}");
+    0
+}

@@ -36,11 +36,14 @@ fn piped_env(exe: &str, args: &[&str], input: &str, env: &[(&str, &str)]) -> Out
 
 #[test]
 #[cfg_attr(
-    not(all(
-        any(target_os = "macos", target_os = "linux"),
-        any(target_arch = "aarch64", target_arch = "x86_64")
+    not(any(
+        all(
+            any(target_os = "macos", target_os = "linux"),
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        windows
     )),
-    ignore = "the REPL host runs on macOS and Linux, arm64 and x86_64"
+    ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
 )]
 fn repl_keeps_state_across_cells() {
     let env = setup_runtime();
@@ -96,11 +99,14 @@ List<i32>: [1, 2, 3]
 /// are in scope from the first cell, also after `:reset`.
 #[test]
 #[cfg_attr(
-    not(all(
-        any(target_os = "macos", target_os = "linux"),
-        any(target_arch = "aarch64", target_arch = "x86_64")
+    not(any(
+        all(
+            any(target_os = "macos", target_os = "linux"),
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        windows
     )),
-    ignore = "the REPL host runs on macOS and Linux, arm64 and x86_64"
+    ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
 )]
 fn repl_loads_and_uses_a_library() {
     // The library is archived by LLVM.
@@ -130,17 +136,20 @@ fn repl_loads_and_uses_a_library() {
 /// leaves the session as it was.
 #[test]
 #[cfg_attr(
-    not(all(
-        any(target_os = "macos", target_os = "linux"),
-        any(target_arch = "aarch64", target_arch = "x86_64")
+    not(any(
+        all(
+            any(target_os = "macos", target_os = "linux"),
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        windows
     )),
-    ignore = "the REPL host runs on macOS and Linux, arm64 and x86_64"
+    ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
 )]
 fn repl_runs_each_cell_once() {
     let env = setup_runtime();
     let rokr = env.rokr.display().to_string();
     let log = std::env::temp_dir().join(format!("rok_repl_once_{}", std::process::id()));
-    let log_s = log.display().to_string();
+    let log_s = log.display().to_string().replace('\\', "/");
     let _ = std::fs::remove_file(&log);
     // Cell 1 appends to `log`: a rerun would append again.
     let input = format!(
@@ -179,11 +188,14 @@ p
 /// `any` values too (their methods and type tests work in later cells).
 #[test]
 #[cfg_attr(
-    not(all(
-        any(target_os = "macos", target_os = "linux"),
-        any(target_arch = "aarch64", target_arch = "x86_64")
+    not(any(
+        all(
+            any(target_os = "macos", target_os = "linux"),
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        windows
     )),
-    ignore = "the REPL host runs on macOS and Linux, arm64 and x86_64"
+    ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
 )]
 fn repl_refuses_bindings_later_cells_cannot_use() {
     let env = setup_runtime();
@@ -220,11 +232,14 @@ match q { x: Q => x.v, _ => 0 }
 /// it over); cells are JIT-compiled.
 #[test]
 #[cfg_attr(
-    not(all(
-        any(target_os = "macos", target_os = "linux"),
-        any(target_arch = "aarch64", target_arch = "x86_64")
+    not(any(
+        all(
+            any(target_os = "macos", target_os = "linux"),
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        windows
     )),
-    ignore = "the REPL host runs on macOS and Linux, arm64 and x86_64"
+    ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
 )]
 fn repl_statics_persist() {
     let env = setup_runtime();
@@ -260,11 +275,14 @@ bump()
 /// it that a later cell reaches again (`g`, compiled with the old `f`).
 #[test]
 #[cfg_attr(
-    not(all(
-        any(target_os = "macos", target_os = "linux"),
-        any(target_arch = "aarch64", target_arch = "x86_64")
+    not(any(
+        all(
+            any(target_os = "macos", target_os = "linux"),
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        windows
     )),
-    ignore = "the REPL host runs on macOS and Linux, arm64 and x86_64"
+    ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
 )]
 fn repl_compiles_library_code_once() {
     let env = setup_runtime();
@@ -313,11 +331,14 @@ g()
 /// locations and diagnostics point into the file.
 #[test]
 #[cfg_attr(
-    not(all(
-        any(target_os = "macos", target_os = "linux"),
-        any(target_arch = "aarch64", target_arch = "x86_64")
+    not(any(
+        all(
+            any(target_os = "macos", target_os = "linux"),
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        windows
     )),
-    ignore = "the REPL host runs on macOS and Linux, arm64 and x86_64"
+    ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
 )]
 fn repl_path_keeps_the_programs_bindings() {
     let env = setup_runtime();
@@ -399,6 +420,61 @@ let never = 0;
     );
     assert_eq!(text(&out.stdout), "i32: 6\n", "{}", text(&out.stderr));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A cell that faults, panics deep in calls or exits fails alone: the
+/// session goes on as it was before it. A definition the failed cell
+/// made is gone (a later cell that names `f` with its old text links the
+/// old `f`, not the failed cell's), so are its changes to an earlier
+/// binding's object and to a static, and the thread it started.
+#[test]
+#[cfg_attr(
+    not(any(all(target_os = "macos", target_arch = "aarch64"), windows)),
+    ignore = "the REPL host is tested on macOS arm64 and Windows"
+)]
+fn repl_survives_failed_cells() {
+    let Some(env) = setup() else { return };
+    let rokr = env.rokr.display().to_string();
+    let input = "\
+use rok::bare::ptr::Ptr;
+let kept = 7;
+fn peek() -> i64 { let p: Ptr<i64> = Ptr::dangling(); unsafe { p.read() } }
+peek()
+kept + 1
+fn down(n: i32) -> i32 { if n == 0 { panic(\"deep\") } else { down(n - 1) + 1 } }
+down(50)
+kept + 2
+rok::std::env::exit(3);
+fn f() -> i32 { 1 }
+f()
+fn f() -> i32 { panic(\"v2\") }
+f()
+fn f() -> i32 { 1 }
+f()
+kept + 3
+use rok::std::thread;
+static C: Atomic<i64> = Atomic::new(0);
+let xs = [1, 2, 3];
+C.store(1);
+xs.push(4); C.store(5); thread::spawn(|| { while true { C.fetch_add(1); } }); thread::sleep(Duration::ms(50)); panic(\"after\");
+xs
+C.load()
+thread::sleep(Duration::ms(200));
+C.load()
+";
+    let out = piped(ROKC, &["repl", "--rokr", &rokr], input);
+    let stderr = text(&out.stderr);
+    assert_eq!(
+        text(&out.stdout),
+        "i32: 8\ni32: 9\ni32: 1\ni32: 1\ni32: 10\nList<i32>: [1, 2, 3]\ni64: 1\ni64: 1\n",
+        "stderr: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches("error: the cell failed").count(),
+        5,
+        "{stderr}"
+    );
+    assert!(stderr.contains("deep") && stderr.contains("v2"), "{stderr}");
 }
 
 fn frame(body: &str) -> String {

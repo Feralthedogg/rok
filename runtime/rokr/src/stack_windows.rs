@@ -63,6 +63,8 @@ unsafe extern "system" fn handler(info: *mut win::EXCEPTION_POINTERS) -> i32 {
         // SAFETY: each part is valid for its length.
         unsafe { write_stderr(part.as_ptr(), part.len()) };
     }
+    // The status `abort` ends with.
+    crate::ending(3);
     // SAFETY: never returns.
     unsafe { libc::abort() }
 }

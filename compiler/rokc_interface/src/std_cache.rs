@@ -69,7 +69,9 @@ pub fn prebuilt_std(key: &StdKey<'_>) -> Option<PathBuf> {
     let plain = o.repl.is_none()
         && o.mlir_dialect_plugins.is_empty()
         && o.mlir_pass_plugins.is_empty()
-        && o.mlir_passes.is_empty();
+        && o.mlir_passes.is_empty()
+        // The standard library is profiled and optimized with the program.
+        && o.profile == crate::Profile::Off;
     // A `--cfg` or `--target` build is rare enough that a library build
     // of its own costs more than it saves.
     if !plain || key.bootstrap.is_empty() || !key.cfg.is_empty() || key.target.is_some() {

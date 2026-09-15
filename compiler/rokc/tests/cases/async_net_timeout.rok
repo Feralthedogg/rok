@@ -1,3 +1,4 @@
+// needs: net
 // expect-exit: 0
 // expect-stdout:
 // read: timed out

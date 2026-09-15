@@ -7,6 +7,10 @@
 //! that matches (the locked one while it still matches); its dependencies
 //! are the index entry's. One version per name: a later requirement the
 //! chosen version does not meet is a conflict.
+//!
+//! Native packages (`native` of every package reached, an index entry's
+//! `kind: "native"` dependencies, a native package's `deps`) are a
+//! namespace of their own, resolved the same way afterwards.
 // Greedy, no backtracking: a root requirement both sides accept
 // (`rok add x@=1.2.0`) settles a conflict.
 
@@ -14,8 +18,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::git::Cache;
-use crate::lock::{Lock, Locked};
-use crate::manifest::{self, Dep, Manifest, Source};
+use crate::lock::{Lock, Locked, LockedNative};
+use crate::manifest::{self, Dep, Manifest, NativeDep, NativeSource, Source};
+use crate::native;
 use crate::registry;
 use crate::semver::{Req, Version};
 
@@ -51,6 +56,24 @@ pub struct Resolved {
     pub deps: Vec<String>,
 }
 
+/// What a build uses: packages each after its own dependencies, native
+/// packages each before its own (the order a linker wants).
+pub struct Graph {
+    pub packages: Vec<Resolved>,
+    pub natives: Vec<native::Resolved>,
+}
+
+/// A native package's identity.
+#[derive(PartialEq, Eq)]
+enum NativeId {
+    Index { url: String, vers: Version },
+    File { sha256: String },
+}
+
+/// A native requirement: the dependency, what its relative url is
+/// relative to, who requires it, and whether only dev dependencies do.
+type NativeReq = (NativeDep, Option<String>, String, bool);
+
 /// Where a package came from: two requirements of one name must agree.
 #[derive(PartialEq, Eq)]
 enum Id {
@@ -72,6 +95,7 @@ impl std::fmt::Display for Id {
 }
 
 struct Resolver<'a> {
+    home: PathBuf,
     cache: Cache,
     index: Cache,
     /// For `Dep::version(..)` without `registry`.
@@ -84,9 +108,10 @@ struct Resolver<'a> {
     /// requirement).
     seen: HashMap<String, (Id, String, String)>,
     out: Vec<Resolved>,
+    natives: Vec<NativeReq>,
 }
 
-pub fn resolve(home: &Path, ctx: &Context, opts: &Options) -> Result<Vec<Resolved>, String> {
+pub fn resolve(home: &Path, ctx: &Context, opts: &Options) -> Result<Graph, String> {
     let old = match &ctx.lock_path {
         Some(p) => Lock::read(p)?.unwrap_or_default(),
         None => Lock::default(),
@@ -97,12 +122,18 @@ pub fn resolve(home: &Path, ctx: &Context, opts: &Options) -> Result<Vec<Resolve
             .deps
             .iter()
             .chain(&ctx.manifest.dev_deps)
-            .any(|d| !matches!(d.source, Source::Path(_)));
+            .any(|d| !matches!(d.source, Source::Path(_)))
+            || ctx
+                .manifest
+                .native
+                .iter()
+                .any(|d| matches!(d.source, NativeSource::Registry { .. }));
         if any_git {
             return Err("there is no rok.lock, and --locked forbids writing one".to_owned());
         }
     }
     let mut r = Resolver {
+        home: home.to_path_buf(),
         cache: Cache::new(home),
         index: Cache::index(home),
         registry: registry::default_url(home)?,
@@ -112,14 +143,21 @@ pub fn resolve(home: &Path, ctx: &Context, opts: &Options) -> Result<Vec<Resolve
         fetched: Vec::new(),
         seen: HashMap::new(),
         out: Vec::new(),
+        natives: Vec::new(),
     };
+    let base = ctx.base.display().to_string();
+    r.natives.extend(ctx.manifest.native.iter().map(|d| {
+        let by = "the root package".to_owned();
+        (d.clone(), Some(base.clone()), by, false)
+    }));
     // Normal dependencies first: whatever they reach is not dev-only.
     r.walk(&ctx.manifest.deps, &ctx.base, "the root package", false)?;
     r.walk(&ctx.manifest.dev_deps, &ctx.base, "the root package", true)?;
+    let natives = r.natives()?;
     if let Some(path) = &ctx.lock_path {
         let text = r.new.to_text();
         let old_text = std::fs::read_to_string(path).ok();
-        let empty = r.new.packages.is_empty();
+        let empty = r.new == Lock::default();
         if old_text.as_deref() != Some(text.as_str()) && !(empty && old_text.is_none()) {
             if opts.locked {
                 return Err(format!(
@@ -131,31 +169,49 @@ pub fn resolve(home: &Path, ctx: &Context, opts: &Options) -> Result<Vec<Resolve
                 .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         }
     }
-    Ok(order(r.out))
+    let packages = order(r.out, |p| &p.name, |p| p.deps.clone());
+    let mut natives = order(
+        natives,
+        |n| &n.name,
+        |n| n.entry.deps.iter().map(|d| d.name.clone()).collect(),
+    );
+    natives.reverse();
+    Ok(Graph { packages, natives })
 }
 
-/// Each package after its own dependencies.
-fn order(deps: Vec<Resolved>) -> Vec<Resolved> {
-    fn visit(i: usize, all: &[Resolved], state: &mut [u8], out: &mut Vec<usize>) {
-        // 0 new, 1 on the stack (a cycle is cut there), 2 placed.
+/// `items` each after the ones its `deps` name.
+fn order<T>(
+    items: Vec<T>,
+    name: impl Fn(&T) -> &String,
+    deps: impl Fn(&T) -> Vec<String>,
+) -> Vec<T> {
+    // 0 new, 1 on the stack (a cycle is cut there), 2 placed.
+    fn visit(i: usize, edges: &[Vec<usize>], state: &mut [u8], out: &mut Vec<usize>) {
         if state[i] != 0 {
             return;
         }
         state[i] = 1;
-        for n in &all[i].deps {
-            if let Some(j) = all.iter().position(|x| manifest::same(&x.name, n)) {
-                visit(j, all, state, out);
-            }
+        for &j in &edges[i] {
+            visit(j, edges, state, out);
         }
         state[i] = 2;
         out.push(i);
     }
-    let mut state = vec![0; deps.len()];
+    let edges: Vec<Vec<usize>> = items
+        .iter()
+        .map(|x| {
+            deps(x)
+                .iter()
+                .filter_map(|n| items.iter().position(|y| manifest::same(name(y), n)))
+                .collect()
+        })
+        .collect();
+    let mut state = vec![0; items.len()];
     let mut idx = Vec::new();
-    for i in 0..deps.len() {
-        visit(i, &deps, &mut state, &mut idx);
+    for i in 0..items.len() {
+        visit(i, &edges, &mut state, &mut idx);
     }
-    let mut slots: Vec<Option<Resolved>> = deps.into_iter().map(Some).collect();
+    let mut slots: Vec<Option<T>> = items.into_iter().map(Some).collect();
     idx.into_iter().filter_map(|i| slots[i].take()).collect()
 }
 
@@ -206,13 +262,22 @@ impl Resolver<'_> {
                 ));
             }
             let me = format!("`{}`", dep.name);
-            let next = match stone_deps {
+            let (next, natives) = match stone_deps {
                 Some(d) => d,
                 None => match manifest::find(&dir) {
-                    Some(m) => manifest::load(&m)?.deps,
-                    None => Vec::new(),
+                    Some(m) => {
+                        let m = manifest::load(&m)?;
+                        (m.deps, m.native)
+                    }
+                    None => (Vec::new(), Vec::new()),
                 },
             };
+            let base = dir.display().to_string();
+            self.natives.extend(
+                natives
+                    .into_iter()
+                    .map(|n| (n, Some(base.clone()), me.clone(), dev)),
+            );
             let deps = next.iter().map(|d| d.name.clone()).collect();
             queue.extend(next.into_iter().map(|d| (d, dir.clone(), me.clone())));
             let req = match &dep.source {
@@ -247,12 +312,12 @@ impl Resolver<'_> {
     }
 
     /// The package directory of `dep`, its identity, and for a stone its
-    /// dependencies (the index's).
+    /// dependencies and native packages (the index's).
     fn locate(
         &mut self,
         dep: &Dep,
         base: &Path,
-    ) -> Result<(PathBuf, Id, Option<Vec<Dep>>), String> {
+    ) -> Result<(PathBuf, Id, Option<StoneDeps>), String> {
         let (url, reference) = match &dep.source {
             Source::Path(p) => {
                 let dir = base.join(p);
@@ -342,7 +407,7 @@ impl Resolver<'_> {
         name: &str,
         req: &str,
         url: &str,
-    ) -> Result<(PathBuf, Id, Option<Vec<Dep>>), String> {
+    ) -> Result<(PathBuf, Id, Option<StoneDeps>), String> {
         let parsed = Req::parse(req).map_err(|e| format!("stone `{name}`: {e}"))?;
         let updating = self.updating(name);
         let pinned = self
@@ -420,15 +485,29 @@ impl Resolver<'_> {
                 tree,
             });
         }
+        let registry =
+            |d: &registry::IndexDep| Some(d.registry.clone().unwrap_or_else(|| url.to_owned()));
         let deps = e
             .deps
             .iter()
-            .filter(|d| !d.dev)
+            .filter(|d| !d.dev && !d.native)
             .map(|d| Dep {
                 name: d.name.clone(),
                 source: Source::Registry {
                     req: d.req.clone(),
-                    registry: Some(d.registry.clone().unwrap_or_else(|| url.to_owned())),
+                    registry: registry(d),
+                },
+            })
+            .collect();
+        let natives = e
+            .deps
+            .iter()
+            .filter(|d| d.native)
+            .map(|d| NativeDep {
+                name: d.name.clone(),
+                source: NativeSource::Registry {
+                    req: d.req.clone(),
+                    registry: registry(d),
                 },
             })
             .collect();
@@ -438,8 +517,150 @@ impl Resolver<'_> {
                 registry: url.to_owned(),
                 vers: e.vers,
             },
-            Some(deps),
+            Some((deps, natives)),
         ))
+    }
+
+    /// The native packages every requirement reaches: one per name.
+    fn natives(&mut self) -> Result<Vec<native::Resolved>, String> {
+        let mut out: Vec<native::Resolved> = Vec::new();
+        // Per name: its place in `out`, identity, requirer and requirement.
+        let mut seen: HashMap<String, (usize, NativeId, String, String)> = HashMap::new();
+        let mut i = 0;
+        while i < self.natives.len() {
+            let (dep, base, by, dev) = self.natives[i].clone();
+            i += 1;
+            let how = match &dep.source {
+                NativeSource::Registry { req, registry } => format!(
+                    "`{req}` from {}",
+                    registry.as_deref().unwrap_or(&self.registry)
+                ),
+                NativeSource::Direct { url, sha256 } => format!("{url} (sha256 {sha256})"),
+            };
+            if let Some((j, id, prev_by, prev_how)) = seen.get(&manifest::key(&dep.name)) {
+                let fits = match (&dep.source, id) {
+                    (NativeSource::Registry { req, registry }, NativeId::Index { url, vers }) => {
+                        registry.as_deref().unwrap_or(&self.registry) == url
+                            && Req::parse(req)?.matches(vers)
+                    }
+                    (NativeSource::Direct { sha256, .. }, NativeId::File { sha256: s }) => {
+                        sha256 == s
+                    }
+                    _ => false,
+                };
+                if !fits {
+                    let e = &out[*j].entry;
+                    return Err(format!(
+                        "conflicting requirements for native package `{}`:\n  {prev_how} \
+                         (required by {prev_by}) chose {}\n  {how} (required by {by})\none build \
+                         has one version of a native package",
+                        dep.name, e.vers
+                    ));
+                }
+                out[*j].dev &= dev;
+                continue;
+            }
+            let (entry, id, base, registry) = match &dep.source {
+                NativeSource::Registry { req, registry } => {
+                    let url = registry.clone().unwrap_or_else(|| self.registry.clone());
+                    let e = self.locate_native(&dep.name, req, &url)?;
+                    let id = NativeId::Index {
+                        url: url.clone(),
+                        vers: e.vers.clone(),
+                    };
+                    (e, id, None, url)
+                }
+                NativeSource::Direct { url, sha256 } => {
+                    let loc = native::locate(base.as_deref(), url)?;
+                    let e = native::direct(&self.home, &dep.name, &loc, sha256, self.opts.offline)?;
+                    let id = NativeId::File {
+                        sha256: sha256.clone(),
+                    };
+                    (e, id, Some(native::dir_of(&loc)), self.registry.clone())
+                }
+            };
+            let me = format!("native package `{}`", dep.name);
+            for d in &entry.deps {
+                let mut d = d.clone();
+                if let NativeSource::Registry {
+                    registry: r @ None, ..
+                } = &mut d.source
+                {
+                    *r = Some(registry.clone());
+                }
+                self.natives.push((d, base.clone(), me.clone(), dev));
+            }
+            seen.insert(manifest::key(&dep.name), (out.len(), id, by, how));
+            out.push(native::Resolved {
+                name: dep.name,
+                entry,
+                base,
+                dev,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Native package `name` from index `url`: the version `req` picks
+    /// (the locked one while it matches), checked against the lock.
+    fn locate_native(&mut self, name: &str, req: &str, url: &str) -> Result<native::Entry, String> {
+        let parsed = Req::parse(req).map_err(|e| format!("native package `{name}`: {e}"))?;
+        let updating = self.updating(name);
+        let pinned = self
+            .old
+            .find_native(name)
+            .filter(|l| !updating && l.url == url)
+            .and_then(|l| Some((l.clone(), Version::parse(&l.vers).ok()?)))
+            .filter(|(_, v)| parsed.matches(v));
+        if pinned.is_none() && self.opts.locked && !updating {
+            return Err(format!(
+                "native package `{name}` is not in rok.lock (or its requirement changed), and \
+                 --locked forbids changing it"
+            ));
+        }
+        if updating || !self.index.has(url) {
+            self.fetch_index(url, name)?;
+        }
+        let pick = |all: &[native::Entry]| match &pinned {
+            Some((_, v)) => all.iter().find(|e| e.vers == *v).cloned(),
+            None => native::best(all, &parsed).cloned(),
+        };
+        let mut all = native::entries(&self.index, url, name)?;
+        let mut chosen = pick(&all);
+        if chosen.is_none() && !self.fetched.iter().any(|u| u == url) && !self.opts.offline {
+            self.fetch_index(url, name)?;
+            all = native::entries(&self.index, url, name)?;
+            chosen = pick(&all);
+        }
+        let e = match (chosen, &pinned) {
+            (Some(e), _) => e,
+            (None, Some((_, v))) => {
+                return Err(format!(
+                    "native package `{name}` {v} (in rok.lock) is not in the index {url} (run \
+                     `rok update {name}`)"
+                ));
+            }
+            (None, None) => return Err(native::no_match(&all, name, req, url)),
+        };
+        let sum = e.checksum();
+        if let Some((l, _)) = &pinned {
+            if l.sha256 != sum {
+                return Err(format!(
+                    "the index {url} changed native package `{name}` {} (entry sha256 {sum}, \
+                     rok.lock says {}; run `rok update {name}` to accept it)",
+                    e.vers, l.sha256
+                ));
+            }
+        }
+        if self.new.find_native(name).is_none() {
+            self.new.natives.push(LockedNative {
+                name: name.to_owned(),
+                vers: e.vers.to_string(),
+                url: url.to_owned(),
+                sha256: sum,
+            });
+        }
+        Ok(e)
     }
 
     /// Bring index `url` up to date, once per run.
@@ -481,6 +702,9 @@ impl Resolver<'_> {
     }
 }
 
+/// A stone's dependencies and native packages.
+type StoneDeps = (Vec<Dep>, Vec<NativeDep>);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,7 +719,10 @@ mod tests {
         };
         // Breadth-first from the root: b, a, c; c needs a.
         let all = vec![r("b", &["a", "c"]), r("a", &[]), r("c", &["a"])];
-        let names: Vec<String> = order(all).into_iter().map(|d| d.name).collect();
+        let names: Vec<String> = order(all, |p| &p.name, |p| p.deps.clone())
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
         assert_eq!(names, ["a", "c", "b"]);
     }
 }

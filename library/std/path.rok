@@ -56,9 +56,11 @@ fn prefix_of(s: str) -> (usize, bool) {
         let e = comp_end(s, comp_end(s, 2) + 1);
         return (if e < n { e } else { n }, true);
     }
-    let c = s.byte(0);
-    if n >= 2 && s.byte(1) == 58u8 && ((c >= 65u8 && c <= 90u8) || (c >= 97u8 && c <= 122u8)) {
-        return (2usize, n > 2 && sep_at(s, 2));
+    if n >= 2 && s.byte(1) == 58u8 {
+        let c = s.byte(0);
+        if (c >= 65u8 && c <= 90u8) || (c >= 97u8 && c <= 122u8) {
+            return (2usize, n > 2 && sep_at(s, 2));
+        }
     }
     (0usize, n > 0 && sep_at(s, 0))
 }

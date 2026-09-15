@@ -75,7 +75,7 @@ pub fn cell_object(
 
 /// `-O0` builds (unless `-C backend=llvm` / `ROK_BACKEND=llvm`), or
 /// `-C backend=native` at any level; and nothing only LLVM does: MLIR
-/// plugins and passes.
+/// plugins and passes, profile-guided optimization.
 fn wanted(opts: &BuildOptions) -> bool {
     let native = match opts.backend.as_deref() {
         Some("native") => true,
@@ -86,4 +86,5 @@ fn wanted(opts: &BuildOptions) -> bool {
         && opts.mlir_passes.is_empty()
         && opts.mlir_dialect_plugins.is_empty()
         && opts.mlir_pass_plugins.is_empty()
+        && opts.profile == crate::Profile::Off
 }

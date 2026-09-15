@@ -1,0 +1,7 @@
+// rokc-arg: -C profile-use=no-such-profile.profdata
+// expect-error: -C profile-use: no profile
+
+// `-C profile-use=<file>` names an indexed profile (`rokc profdata
+// merge`); a missing one is an error, not an unoptimized build.
+
+fn main() {}

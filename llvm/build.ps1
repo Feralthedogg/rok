@@ -13,7 +13,9 @@
 # ninja and the MSVC C++ build tools (run from a "Developer PowerShell
 # for VS" / "x64 Native Tools" prompt; ARM64 hosts: the arm64 one).
 # CC / CXX pick another compiler (clang-cl). Only building rok needs
-# these: the toolchain it makes needs no MSVC or Windows SDK.
+# these: the toolchain it makes needs no MSVC or Windows SDK. No PGO
+# (build.sh's rok.profdata.xz): cl reads no clang profile, and the
+# profile names functions by their Itanium, not MSVC, mangling.
 param([string]$Prefix)
 $ErrorActionPreference = 'Stop'
 

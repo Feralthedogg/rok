@@ -420,6 +420,23 @@ pub unsafe extern "C" fn rok_net_send(fd: i32, buf: *mut u8, off: usize, len: us
     send(sock(fd), unsafe { region(buf, off) }, len)
 }
 
+/// Listening sockets the host handed in: none on Windows.
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_net_listeners(_out: *mut u8, _max: usize) -> i32 {
+    0
+}
+
+/// One `recv` into `buf[off..off + len]`: the count (0 at the end) or
+/// `-error`.
+///
+/// # Safety
+/// `buf` must be a live `GcBuf<u8>` with at least `off + len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rok_net_recv(fd: i32, buf: *mut u8, off: usize, len: usize) -> isize {
+    // SAFETY: caller contract.
+    recv(sock(fd), unsafe { region(buf, off) }, len)
+}
+
 /// One datagram `buf[off..off + len]` to `addr`: the count or `-error`.
 ///
 /// # Safety
@@ -854,7 +871,7 @@ fn arm(r: *mut Rec) -> i32 {
 /// per readiness after each watch, so a waiter re-checks after it
 /// parks). Watching again re-arms. 0 or `-error`.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_io_watch(fd: i32) -> i32 {
+pub extern "C" fn rok_io_watch(fd: i32, _interest: u32) -> i32 {
     rok_io_poller();
     let Some(s) = sock_of(fd) else {
         return -win::WSAENOTSOCK;

@@ -1,3 +1,4 @@
+// needs: net threads
 // expect-exit: 0
 // expect-stdout:
 // addr 127.0.0.1:0 [::1]:8080 10.1.2.3 2001:db8::1

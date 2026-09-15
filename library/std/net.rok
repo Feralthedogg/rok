@@ -508,7 +508,7 @@ impl Sock {
 
     /// One read into `buf[at..at + n]`: the count, or `none` on `WouldBlock`.
     fn read_once(self, buf: GcBuf<u8>, at: usize, n: usize) throws (IoError) -> usize | none {
-        let r = unsafe { rok_os_read(try self.live(), buf, at, n) } as i64;
+        let r = unsafe { rok_net_recv(try self.live(), buf, at, n) } as i64;
         if would_block(r) { return none; }
         (try check(r, "read")) as usize
     }
@@ -810,6 +810,23 @@ impl TcpListener {
             throw IoError::from_os(-r, f"bind {addr}");
         }
         TcpListener { sock: s }
+    }
+
+    /// The listening sockets the host handed this program, in order:
+    /// WASI's pre-opened sockets (wasmtime `-S tcplisten=ADDR`, preview 1:
+    /// `wasm32-wasi-threads`), systemd socket activation (`LISTEN_FDS`) on
+    /// Unix; none on Windows. Where a program cannot bind sockets
+    /// itself, these are how it serves.
+    pub fn inherited() -> List<TcpListener> {
+        unsafe {
+            let fds: GcBuf<i32> = buf_new(64);
+            let n = rok_net_listeners(fds, 64);
+            let out: List<TcpListener> = List::new();
+            for i in 0..n as usize {
+                out.push(TcpListener { sock: sock_of(fds[i]) });
+            }
+            out
+        }
     }
 
     fn accept_once(self) throws (IoError) -> (TcpStream, SocketAddr) | none {

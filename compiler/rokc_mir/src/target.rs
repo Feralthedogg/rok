@@ -30,8 +30,20 @@ pub enum CAbi {
     X86Win,
     /// 32-bit ARM AAPCS, hard-float variant (`*eabihf`).
     ArmHf,
+    /// The WebAssembly C ABI (clang's): a one-scalar aggregate as that
+    /// scalar, others by reference / `sret`.
+    Wasm32,
     /// Aggregates cannot cross the C boundary.
     Other,
+}
+
+impl CAbi {
+    /// A by-value C struct of two words (a rok `str`) goes by reference
+    /// and comes back through `sret`.
+    #[must_use]
+    pub const fn pair_by_ref(self) -> bool {
+        matches!(self, Self::X86_64Win | Self::Wasm32)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -97,6 +109,7 @@ impl Target {
             "x86" if os == "windows" => CAbi::X86Win,
             "x86" => CAbi::X86SysV,
             "arm" if triple.is_some_and(|t| t.ends_with("eabihf")) => CAbi::ArmHf,
+            "wasm32" => CAbi::Wasm32,
             _ => CAbi::Other,
         };
         Self {
@@ -352,7 +365,9 @@ fn os_of(triple: &str) -> &'static str {
     } else if has("wasi") {
         "wasi"
     } else {
-        "unknown"
+        // Spec 6.3.2: no operating system (`wasm32-unknown-unknown`, bare
+        // metal).
+        "none"
     }
 }
 
@@ -394,6 +409,9 @@ mod tests {
         );
         let t = Target::new(Some("wasm32-unknown-unknown"));
         assert_eq!((t.pointer_width, t.family()), (32, "wasm"));
+        assert_eq!((t.c_abi, t.os.as_str()), (CAbi::Wasm32, "none"));
+        let t = Target::new(Some("wasm32-wasi"));
+        assert_eq!((t.os.as_str(), t.arch.as_str()), ("wasi", "wasm32"));
     }
 
     /// `struct { int; long long; double; }` as clang lays it out:

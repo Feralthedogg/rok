@@ -20,8 +20,9 @@ pub use rokc_diagnostic::{
     ErrorKind, Json, RokDiagnostic, clear_files, print_rendered, render, report, set_report_style,
 };
 pub use rokc_driver::{
-    BuildOptions, Demangled, EmitKind, LLVM_VERSION, REPL_HOST, ReplCell, ReplFn, SourceFile,
-    Subsystem, TempDir, bootstrap_tiers, demangle, find_mlir_plugin, link_host, rhir,
+    AS_WASM_LD, BuildOptions, Demangled, EmitKind, LLVM_VERSION, Profile, REPL_HOST, ReplCell,
+    ReplFn, SourceFile, Subsystem, TempDir, bootstrap_tiers, demangle, find_mlir_plugin, link_host,
+    profdata_merge, rhir, wasm_ld_main,
 };
 
 #[derive(Default)]

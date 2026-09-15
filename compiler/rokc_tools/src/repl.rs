@@ -16,7 +16,8 @@
 //! .. }` with its type as written and copy it into a local of the same
 //! name on entry (and back out on exit, so assignments persist). A cell
 //! that dies (panic) leaves the session as it was before it: the host
-//! forks a snapshot per cell.
+//! forks a snapshot per cell (Windows: it saves its memory and puts it
+//! back).
 //!
 //! `repl <path>` loads a program first (`load_program`): its items join the
 //! session, then its top-level statements run as cells, each ending
@@ -243,6 +244,35 @@ pub fn interrupt(pid: u32) {
     }
 }
 
+/// Windows terminal: the console sends Ctrl-C to rokc (the host's own
+/// group ignores it), which passes it on to a running cell as
+/// `interrupt`, and otherwise ignores it.
+#[cfg(windows)]
+fn forward_ctrl_c(running: Arc<AtomicU32>) {
+    static RUNNING: std::sync::OnceLock<Arc<AtomicU32>> = std::sync::OnceLock::new();
+    unsafe extern "system" fn handler(event: u32) -> i32 {
+        const CTRL_C_EVENT: u32 = 0;
+        if event != CTRL_C_EVENT {
+            return 0;
+        }
+        let pid = RUNNING.get().map_or(0, |r| r.load(Ordering::Relaxed));
+        if pid != 0 {
+            interrupt(pid);
+        }
+        1
+    }
+    unsafe extern "system" {
+        fn SetConsoleCtrlHandler(
+            handler: Option<unsafe extern "system" fn(u32) -> i32>,
+            add: i32,
+        ) -> i32;
+    }
+    if RUNNING.set(running).is_ok() {
+        // SAFETY: a handler for the process's lifetime.
+        unsafe { SetConsoleCtrlHandler(Some(handler), 1) };
+    }
+}
+
 pub struct Repl {
     bootstrap: Vec<PathBuf>,
     /// Dependencies (`--extern name=<name>.rhir`).
@@ -348,6 +378,8 @@ impl Repl {
     /// Read cells from the terminal with line editing and history
     /// (`line_edit`) until `:quit` or end of input.
     pub fn run_tty(&mut self) {
+        #[cfg(windows)]
+        forward_ctrl_c(self.running.clone());
         let mut ed = crate::line_edit::Editor::new();
         let mut buf = String::new();
         loop {
@@ -1300,7 +1332,7 @@ fn localize(d: &RokDiagnostic, session: u32, path: &str, regions: &[Region]) -> 
 /// Build and start the session host.
 fn start_host(dir: &std::path::Path, opts: &BuildOptions) -> Option<Host> {
     if !REPL_HOST {
-        eprintln!("error: the REPL runs on macOS and Linux (arm64, x86_64) only");
+        eprintln!("error: the REPL runs on macOS, Linux and Windows (arm64, x86_64) only");
         return None;
     }
     let obj = dir.join("host.o");

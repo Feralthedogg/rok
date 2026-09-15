@@ -1,3 +1,5 @@
+// only-os: macos linux
+// (POSIX environ / optind)
 // expect-exit: 7
 // Spec 5.9.3: `extern "C" { static .. }` names a C global; `static mut`
 // can be written. `environ` and `optind` are libc globals.

@@ -743,13 +743,21 @@ impl Dir {
     /// A directory and everything under it (symlinks are removed, not followed).
     pub fn remove_dir_all<P: AsPath>(self, path: P) throws (IoError) {
         let p = try self.rel(path);
-        let rd = try self.list(p);
-        for entry in rd {
-            let e = try entry.get();
+        // The whole listing first: removing entries while reading the
+        // directory may skip some (WASI's `fd_readdir` cookies are
+        // positions).
+        let entries: List<DirEntry> = List::new();
+        for entry in try self.list(p) {
+            entries.push(try entry.get());
+        }
+        for e in entries {
+            // Under `self`, not `e.path` (the shown path, absolute when
+            // `self` was opened by one).
+            let sub = Path::from(p).join(Path::from(e.name)).as_str();
             if e.meta.is_dir() {
-                try self.remove_dir_all(e.path);
+                try self.remove_dir_all(sub);
             } else {
-                try check(unsafe { rok_os_unlink(self.fd(), e.path.as_str(), 0) } as i64, self.shown(e.path.as_str()));
+                try check(unsafe { rok_os_unlink(self.fd(), sub, 0) } as i64, self.shown(sub));
             }
         }
         try check(unsafe { rok_os_unlink(self.fd(), p, 1) } as i64, self.shown(p));

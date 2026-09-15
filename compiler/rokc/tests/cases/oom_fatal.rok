@@ -1,8 +1,9 @@
-// expect-exit: 101
-// A failed GC allocation ends in the `oom_fn` path (Fatal, exit 101),
-// the same one `rok::core::panic::oom()` takes.
+// expect-error: extern function `rok_gc_alloc_slow` is declared twice with different signatures: `fn(usize, usize, u32) -> usize` here, `fn(usize, usize, u32) -> GcBuf<u8>` elsewhere
+// Spec 5.9.4 / 8.5: `rok_*` symbols are the runtime's, declared by the
+// toolchain; one with other types is an error, not a second declaration
+// of one symbol in the module.
 extern "C" {
-    fn rok_gc_alloc_slow(size: usize, align: usize, type_id: u32) -> GcBuf<u8>;
+    fn rok_gc_alloc_slow(size: usize, align: usize, type_id: u32) -> usize;
 }
 fn main() -> i32 {
     let p = unsafe { rok_gc_alloc_slow(usize::MAX / 2 + 1, 8usize, 0u32) };

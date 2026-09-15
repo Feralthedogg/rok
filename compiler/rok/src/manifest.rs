@@ -20,7 +20,12 @@
 //!         "geom": Dep::version("^0.3"),   // a stone; also `"geom": "^0.3"`
 //!     },
 //!     dev_deps: {},
+//!     lints_from: "..",                 // ../rok.rokon's lints first
 //!     lints: { "dead_code": "allow" },
+//!     native: {                              // prebuilt C libraries (`native`)
+//!         "zlib": "^1.3",                    // = Dep::native("^1.3")
+//!         "png": Dep::native(url: "vendor/png.rokon", sha256: "<hex>"),
+//!     },
 //! }
 //! ```
 
@@ -35,7 +40,7 @@ pub const LOCK: &str = "rok.lock";
 /// A manifest with nothing in it, for `rok add` to fill.
 pub const EMPTY: &str = "Package {\n    deps: {},\n}\n";
 
-const FIELDS: [&str; 9] = [
+const FIELDS: [&str; 11] = [
     "name",
     "version",
     "toolchain",
@@ -45,6 +50,8 @@ const FIELDS: [&str; 9] = [
     "deps",
     "dev_deps",
     "lints",
+    "lints_from",
+    "native",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -135,6 +142,51 @@ pub struct Manifest {
     /// `lints`: `"name": "allow" | "warn" | "deny"`, in file order
     /// (lint names are checked by `rokc lint`).
     pub lints: Vec<(String, Level)>,
+    /// `lints_from`: a directory (relative to this manifest's) whose
+    /// manifest's lints come before `lints` (`inherit_lints`).
+    pub lints_from: Option<String>,
+    /// `native`: prebuilt C libraries (a namespace of their own).
+    pub native: Vec<NativeDep>,
+}
+
+/// Where a native package comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeSource {
+    /// `Dep::native("req"[, registry: "url"])` or `"req"`: the index's
+    /// `native/` files.
+    Registry {
+        req: String,
+        registry: Option<String>,
+    },
+    /// `Dep::native(url: "..", sha256: "..")`: a `Native { .. }` file (a
+    /// url, or a path relative to the file naming it) with that SHA-256.
+    Direct { url: String, sha256: String },
+}
+
+impl NativeSource {
+    pub fn to_value(&self) -> Value {
+        match self {
+            Self::Registry { req, registry } => Value::call(
+                "Dep::native",
+                vec![Value::str(req)],
+                registry
+                    .iter()
+                    .map(|r| ("registry", Value::str(r)))
+                    .collect(),
+            ),
+            Self::Direct { url, sha256 } => Value::call(
+                "Dep::native",
+                Vec::new(),
+                vec![("url", Value::str(url)), ("sha256", Value::str(sha256))],
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeDep {
+    pub name: String,
+    pub source: NativeSource,
 }
 
 /// A package (and dependency) name: `[a-z][a-z0-9_-]*`. Code names it
@@ -216,17 +268,10 @@ pub fn load(path: &Path) -> Result<Manifest, String> {
     parse(&text, &path.display().to_string())
 }
 
-fn not_yet(what: &str) -> String {
-    format!("{what} is reserved and not supported yet")
-}
-
 /// Parse manifest text; `file` names it in errors.
 pub fn parse(text: &str, file: &str) -> Result<Manifest, String> {
     let doc = Doc::parse(text, file)?;
     let pkg = doc.root().record("Package")?;
-    if pkg.get("native").is_some() {
-        return Err(pkg.field_error("native", &not_yet("`native`")));
-    }
     pkg.only(&FIELDS)?;
     let string = |f: &str| pkg.opt(f).map(|d| d.string()).transpose();
     let deps = |f: &str| pkg.opt(f).map_or(Ok(Vec::new()), deps);
@@ -256,7 +301,100 @@ pub fn parse(text: &str, file: &str) -> Result<Manifest, String> {
         deps: deps("deps")?,
         dev_deps: deps("dev_deps")?,
         lints,
+        lints_from: string("lints_from")?,
+        native: pkg.opt("native").map_or(Ok(Vec::new()), natives)?,
     })
+}
+
+/// `m.lints` (of the manifest at `path`) after those of its `lints_from`
+/// chain, outermost first: later entries win, as `-A/-W/-D` do.
+pub fn inherit_lints(m: &Manifest, path: &Path) -> Result<Vec<(String, Level)>, String> {
+    let real = rokc_core::real_path(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    chain_lints(m, path, &mut vec![real])
+}
+
+fn chain_lints(
+    m: &Manifest,
+    path: &Path,
+    seen: &mut Vec<PathBuf>,
+) -> Result<Vec<(String, Level)>, String> {
+    let mut out = Vec::new();
+    if let Some(from) = &m.lints_from {
+        let err = |what: String| format!("{}: `lints_from: {from:?}`: {what}", path.display());
+        let dir = path.parent().unwrap_or_else(|| Path::new(".")).join(from);
+        if !dir.is_dir() {
+            return Err(err(format!("{} is not a directory", dir.display())));
+        }
+        let next = find(&dir).ok_or_else(|| err(format!("no {MANIFEST} in {}", dir.display())))?;
+        let real = rokc_core::real_path(&next).map_err(|e| err(e.to_string()))?;
+        if seen.contains(&real) {
+            let names: Vec<String> = seen
+                .iter()
+                .chain([&real])
+                .map(|p| p.display().to_string())
+                .collect();
+            return Err(err(format!("cycle: {}", names.join(" -> "))));
+        }
+        seen.push(real);
+        out = chain_lints(&load(&next)?, &next, seen)?;
+    }
+    out.extend(m.lints.iter().cloned());
+    Ok(out)
+}
+
+/// A `native` dict: name -> `Dep::native(..)` or a requirement string.
+pub fn natives(d: Decoder<'_>) -> Result<Vec<NativeDep>, String> {
+    let mut out: Vec<NativeDep> = Vec::new();
+    for (k, v) in d.dict()? {
+        let name = k.string()?;
+        check_name(&name).map_err(|m| k.error(&m))?;
+        if let Some(o) = out.iter().find(|o| same(&o.name, &name)) {
+            return Err(k.error(&format!(
+                "`{name}` and `{}` are the same native package (`-` and `_` are one)",
+                o.name
+            )));
+        }
+        let source = if v.string().is_ok() {
+            NativeSource::Registry {
+                req: req(v)?,
+                registry: None,
+            }
+        } else {
+            let n = v
+                .variant("Dep")
+                .ok()
+                .filter(|n| n.name == "native")
+                .ok_or_else(|| v.expected("`Dep::native(..)` or a version requirement"))?;
+            match n.args.as_slice() {
+                [r] => {
+                    n.fields.only(&["registry"])?;
+                    NativeSource::Registry {
+                        req: req(*r)?,
+                        registry: n.fields.opt("registry").map(|r| r.string()).transpose()?,
+                    }
+                }
+                [] => {
+                    n.fields.only(&["url", "sha256"])?;
+                    let sha = n.fields.req("sha256")?;
+                    let sha256 = sha.string()?;
+                    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        return Err(sha.error("`sha256` is 64 hex digits"));
+                    }
+                    NativeSource::Direct {
+                        url: n.fields.req("url")?.string()?,
+                        sha256: sha256.to_ascii_lowercase(),
+                    }
+                }
+                _ => {
+                    return Err(v.error(
+                        "`Dep::native` takes a version requirement, or `url:` and `sha256:`",
+                    ));
+                }
+            }
+        };
+        out.push(NativeDep { name, source });
+    }
+    Ok(out)
 }
 
 fn deps(d: Decoder<'_>) -> Result<Vec<Dep>, String> {
@@ -334,7 +472,11 @@ pub fn source(d: Decoder<'_>) -> Result<Source, String> {
                 registry: v.fields.opt("registry").map(|r| r.string()).transpose()?,
             }
         }
-        "native" => return Err(d.error(&not_yet("`native` dependencies"))),
+        "native" => {
+            return Err(
+                d.error("a native package goes in the `native` field, not in `deps` / `dev_deps`")
+            );
+        }
         other => {
             return Err(d.error(&format!(
                 "unknown dependency kind `Dep::{other}` (expected Dep::path, Dep::git, \
@@ -457,9 +599,25 @@ mod tests {
             ),
             (
                 "Package { deps: { \"a\": Dep::native(\"z\") } }",
-                "`native` dependencies is reserved",
+                "goes in the `native` field",
             ),
-            ("Package { native: 1 }", "`native` is reserved"),
+            ("Package { native: 1 }", "`native` must be a dict"),
+            (
+                "Package { native: { \"z\": Dep::path(\"x\") } }",
+                "expected `Dep::native(..)`",
+            ),
+            (
+                "Package { native: { \"z\": Dep::native(url: \"u\", sha256: \"ab\") } }",
+                "64 hex digits",
+            ),
+            (
+                "Package { native: { \"z\": Dep::native(url: \"u\") } }",
+                "missing argument `sha256`",
+            ),
+            (
+                "Package { native: { \"z\": Dep::native(\"1\", url: \"u\") } }",
+                "unknown argument `url`",
+            ),
             ("Package { registry: {} }", "unknown field `registry`"),
             (
                 "Package { deps: { \"My Dep\": Dep::path(\"x\") } }",

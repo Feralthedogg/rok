@@ -460,7 +460,7 @@ pub unsafe extern "C" fn rok_os_write(fd: i32, buf: *mut u8, off: usize, len: us
 /// Anonymous pipes have no readiness wait, so this polls
 /// `PeekNamedPipe`, backing off from 1 ms to 16 ms. A handle that is not
 /// a pipe counts as ready.
-// ponytail: polling, latency up to one system tick; overlapped pipe
+// Polling, latency up to one system tick; overlapped pipe
 // reads (completion port) if `output()` latency matters.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_poll_read(fd1: i32, fd2: i32) -> i32 {

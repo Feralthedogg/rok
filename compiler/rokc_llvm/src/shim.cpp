@@ -6,6 +6,8 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
+#include "llvm/IR/DiagnosticInfo.h"
+#include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
@@ -16,7 +18,12 @@
 #include "llvm/Object/COFFImportFile.h"
 #include "llvm/Object/COFFModuleDefinition.h"
 #include "llvm/Passes/PassBuilder.h"
+#include "llvm/ProfileData/InstrProfReader.h"
+#include "llvm/ProfileData/InstrProfWriter.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/PGOOptions.h"
+#include "llvm/Support/VirtualFileSystem.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/TargetSelect.h"
@@ -83,6 +90,10 @@ struct RokCompile {
   // Objects to split the optimized module into, compiled in parallel
   // (`out` holds this many); 1 for one object, an IR text or assembly.
   size_t parts;
+  // IR PGO: instrument, the raw profile written to this file name
+  // pattern; or optimize with this indexed profile. "" for neither.
+  const char *profile_generate;
+  const char *profile_use;
 };
 
 void rok_llvm_free(RokBuf *b) {
@@ -167,7 +178,8 @@ target_machine(const RokCompile &o, std::string &error) {
 
 // What clang -O<n> runs on an IR input (shouldEnableVectorizerAtOLevel,
 // -funroll-loops).
-void optimize(llvm::Module &m, llvm::TargetMachine &tm, int opt) {
+void optimize(llvm::Module &m, llvm::TargetMachine &tm, const RokCompile &o) {
+  int opt = o.opt;
   llvm::PipelineTuningOptions pto;
   bool vec = opt >= 2 || opt == 's';
   pto.LoopVectorization = vec;
@@ -178,7 +190,12 @@ void optimize(llvm::Module &m, llvm::TargetMachine &tm, int opt) {
   llvm::FunctionAnalysisManager fam;
   llvm::CGSCCAnalysisManager cgam;
   llvm::ModuleAnalysisManager mam;
-  llvm::PassBuilder pb(&tm, pto);
+  std::optional<llvm::PGOOptions> pgo;
+  if (*o.profile_generate)
+    pgo.emplace(o.profile_generate, "", "", "", llvm::PGOOptions::IRInstr);
+  else if (*o.profile_use)
+    pgo.emplace(o.profile_use, "", "", "", llvm::PGOOptions::IRUse);
+  llvm::PassBuilder pb(&tm, pto, pgo);
   pb.registerModuleAnalyses(mam);
   pb.registerCGSCCAnalyses(cgam);
   pb.registerFunctionAnalyses(fam);
@@ -220,9 +237,40 @@ int codegen(llvm::Module &m, llvm::TargetMachine &tm,
   return 0;
 }
 
+// What LLVM reports while optimizing: errors fail the compile, warnings
+// go back to rokc. Functions whose control flow changed since the
+// profile was recorded are counted, not listed.
+struct Diags {
+  std::string errors, warnings;
+  unsigned stale = 0;
+};
+
+void on_diag(const llvm::DiagnosticInfo *d, void *ctx) {
+  auto *s = static_cast<Diags *>(ctx);
+  auto sev = d->getSeverity();
+  if (sev != llvm::DS_Error && sev != llvm::DS_Warning)
+    return;
+  std::string msg;
+  llvm::raw_string_ostream os(msg);
+  if (auto *p = llvm::dyn_cast<llvm::DiagnosticInfoPGOProfile>(d)) {
+    if (sev == llvm::DS_Warning && p->getMsg().str().find("hash mismatch") !=
+                                       std::string::npos) {
+      ++s->stale;
+      return;
+    }
+    os << p->getMsg();
+  } else {
+    llvm::DiagnosticPrinterRawOStream printer(os);
+    d->print(printer);
+  }
+  (sev == llvm::DS_Error ? s->errors : s->warnings) += msg + "\n";
+}
+
 // The module's target is the requested one (as clang -target overrides
-// the triple of an IR input), then the requested output.
-int finish(llvm::Module &m, const RokCompile &o, RokBuf *out, RokBuf *err) {
+// the triple of an IR input), then the requested output; LLVM's
+// warnings in `warn`.
+int finish(llvm::Module &m, const RokCompile &o, RokBuf *out, RokBuf *err,
+           RokBuf *warn) {
   if (o.tls_initial_exec) {
     for (llvm::GlobalVariable &g : m.globals())
       if (g.isThreadLocal() && g.getName().starts_with("rok_tls_"))
@@ -257,7 +305,18 @@ int finish(llvm::Module &m, const RokCompile &o, RokBuf *out, RokBuf *err) {
     if (llvm::verifyModule(m, &os))
       return fail(err, "invalid LLVM IR:\n" + msg);
   }
-  optimize(m, *tm, o.opt);
+  Diags diags;
+  m.getContext().setDiagnosticHandlerCallBack(on_diag, &diags);
+  optimize(m, *tm, o);
+  if (!diags.errors.empty())
+    return fail(err, diags.errors);
+  if (diags.stale)
+    diags.warnings += "the profile is out of date for " +
+                      std::to_string(diags.stale) +
+                      " function(s) whose control flow changed since it was "
+                      "recorded; they are optimized without it\n";
+  if (!diags.warnings.empty())
+    put(warn, diags.warnings);
   auto kind = o.emit == 1 ? llvm::CodeGenFileType::AssemblyFile
                           : llvm::CodeGenFileType::ObjectFile;
   if (o.parts <= 1 || o.emit != 2)
@@ -307,7 +366,7 @@ extern "C" {
 // The MLIR module `src` (standard dialects) through `o.mlir_pipeline`
 // into LLVM IR, then `finish`.
 int rok_llvm_compile_mlir(const char *src, size_t len, const RokCompile *o,
-                          RokBuf *out, RokBuf *err) {
+                          RokBuf *out, RokBuf *err, RokBuf *warn) {
   mlir::DialectRegistry registry;
   mlir::registerAllDialects(registry);
   mlir::registerAllExtensions(registry);
@@ -356,12 +415,12 @@ int rok_llvm_compile_mlir(const char *src, size_t len, const RokCompile *o,
   auto m = mlir::translateModuleToLLVMIR(*module, llctx);
   if (!m)
     return fail(err, diag.empty() ? "cannot translate MLIR to LLVM IR" : diag);
-  return finish(*m, *o, out, err);
+  return finish(*m, *o, out, err, warn);
 }
 
 // LLVM IR text `src` through `finish`.
 int rok_llvm_compile_ir(const char *src, size_t len, const RokCompile *o,
-                        RokBuf *out, RokBuf *err) {
+                        RokBuf *out, RokBuf *err, RokBuf *warn) {
   llvm::LLVMContext ctx;
   llvm::SMDiagnostic d;
   // The IR lexer reads up to a NUL.
@@ -374,7 +433,7 @@ int rok_llvm_compile_ir(const char *src, size_t len, const RokCompile *o,
     d.print("rokc", os, false);
     return fail(err, msg);
   }
-  return finish(*m, *o, out, err);
+  return finish(*m, *o, out, err, warn);
 }
 
 // The data layout LLVM uses for o->triple / o->cpu.
@@ -436,6 +495,50 @@ int rok_llvm_write_archive(const char *path, const char *const *members,
                             : llvm::object::Archive::K_GNU;
   if (auto e = llvm::writeArchive(path, ms, llvm::SymtabWritingMode::NormalSymtab,
                                   format, true, false))
+    return fail(err, llvm::toString(std::move(e)));
+  return 0;
+}
+
+// The raw or indexed IR profiles `inputs` merged into the indexed profile
+// `path` (llvm-profdata merge). An empty raw profile (a run that ended
+// before writing counts) is skipped.
+int rok_llvm_profdata_merge(const char *const *inputs, size_t n,
+                            const char *path, RokBuf *err) {
+  auto fs = llvm::vfs::getRealFileSystem();
+  llvm::InstrProfWriter writer;
+  std::string errors;
+  auto report = [&](llvm::Error e, llvm::StringRef file) {
+    errors += file.str() + ": " + llvm::toString(std::move(e)) + "\n";
+  };
+  for (size_t i = 0; i < n; ++i) {
+    auto reader = llvm::InstrProfReader::create(inputs[i], *fs);
+    if (!reader) {
+      auto [code, msg] = llvm::InstrProfError::take(reader.takeError());
+      if (code != llvm::instrprof_error::empty_raw_profile)
+        report(llvm::make_error<llvm::InstrProfError>(code, msg), inputs[i]);
+      continue;
+    }
+    if (auto e = writer.mergeProfileKind((*reader)->getProfileKind())) {
+      report(std::move(e), inputs[i]);
+      continue;
+    }
+    for (auto &r : **reader) {
+      std::string name = r.Name.str();
+      writer.addRecord(std::move(r), 1, [&](llvm::Error e) {
+        report(std::move(e), std::string(inputs[i]) + ": " + name);
+      });
+    }
+    if ((*reader)->hasError())
+      if (auto e = (*reader)->getError())
+        report(std::move(e), inputs[i]);
+  }
+  if (!errors.empty())
+    return fail(err, errors);
+  std::error_code ec;
+  llvm::raw_fd_ostream os(path, ec, llvm::sys::fs::OF_None);
+  if (ec)
+    return fail(err, std::string(path) + ": " + ec.message());
+  if (auto e = writer.write(os))
     return fail(err, llvm::toString(std::move(e)));
   return 0;
 }

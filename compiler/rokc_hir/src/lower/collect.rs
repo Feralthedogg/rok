@@ -709,6 +709,9 @@ pub fn lower_full(
     // call, outside `decls` / `fn_table`.
     let mut fn_table: HashMap<String, FnSig> = HashMap::new();
     let mut extern_fns = std::collections::HashSet::new();
+    // Later extern declarations of a name already declared: whether
+    // `extern "rok"`, the first one's id.
+    let mut extern_redecls: Vec<(&FnDef, bool, FunctionId)> = Vec::new();
     let method_table: HashMap<(MethodTarget, String), Vec<FunctionId>> = HashMap::new();
     let method_info: HashMap<FunctionId, MethodInfo> = HashMap::new();
     let mut impls = Impls::default();
@@ -801,9 +804,12 @@ pub fn lower_full(
                     let rokc_ast::ExternItem::Fn(fn_def) = ei else {
                         continue;
                     };
-                    // A repeated extern declaration names the same symbol;
-                    // keep the first.
-                    if fn_table.contains_key(&fn_def.name) {
+                    // A repeated extern declaration names the same symbol:
+                    // keep the first, check the signatures agree below.
+                    if let Some(first) = fn_table.get(&fn_def.name) {
+                        if extern_fns.contains(&fn_def.name) {
+                            extern_redecls.push((fn_def, rok_abi, first.id));
+                        }
                         continue;
                     }
                     extern_fns.insert(fn_def.name.clone());
@@ -1623,6 +1629,58 @@ pub fn lower_full(
         if let Some(s) = sigs.get(&sig.id) {
             sig.clone_from(s);
         }
+    }
+    // Spec 5.9.4: extern functions share one namespace; declaring one
+    // twice with different signatures is an error. The toolchain's
+    // runtime declarations (`rok::core::rt`, `extern "rok"`, 8.5) are the
+    // reference: the error is at the other one.
+    let no_subst = HashMap::new();
+    for (f, rok_abi, first) in &extern_redecls {
+        let (params, ret) = mono::sig_tys(&env, f, None, module_of(&f.name), &no_subst);
+        let s = &sigs[first];
+        let c_var = |f: &FnDef| {
+            f.attrs
+                .iter()
+                .any(|a| a.path == [rokc_ast::C_VARIADIC_ATTR])
+        };
+        let MethodOrFn::Fn(first_def) = env.decls[first.0 as usize] else {
+            continue;
+        };
+        if params == s.param_tys
+            && ret == s.ret_ty
+            && c_var(f) == c_var(first_def)
+            && f.params.last().is_some_and(|p| p.variadic) == s.variadic
+        {
+            continue;
+        }
+        let cx = LowerCtx::new(&env, &no_subst, None);
+        let show = |ps: &[HirTy], r: &HirTy| {
+            let ps: Vec<String> = ps.iter().map(|t| cx.ty_name(t)).collect();
+            format!("fn({}) -> {}", ps.join(", "), cx.ty_name(r))
+        };
+        let (here, other, at) = if *rok_abi && !rok_externs.contains(first) {
+            (
+                show(&s.param_tys, &s.ret_ty),
+                show(&params, &ret),
+                first_def.span,
+            )
+        } else {
+            (show(&params, &ret), show(&s.param_tys, &s.ret_ty), f.span)
+        };
+        rokc_diagnostic::set_current_span(at);
+        err(
+            &mut pre_diags,
+            format!(
+                "extern function `{}` is declared twice with different signatures: `{here}` \
+                 here, `{other}` elsewhere{} (spec 5.9.4)",
+                f.name,
+                if f.name.starts_with("rok_") {
+                    "; `rok_*` symbols are the runtime's, with the signatures of spec 8.5"
+                } else {
+                    ""
+                }
+            ),
+        );
     }
     let mut ref_out: Vec<(FunctionId, RefOut)> = sigs
         .values()

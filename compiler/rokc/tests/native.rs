@@ -560,6 +560,7 @@ fn debug_info_shows_sums_and_gc_objects() {
     assert!(vars.contains("Rect = (0 = 3, 1 = 4)"), "{out}");
     assert!(vars.contains("f64 = 1.5"), "{out}");
     assert!(vars.contains("= 30"), "{out}");
+}
 
 /// `-g` ELF executables for Linux, linked by the embedded lld from
 /// several rok objects (the program, a dependency, the cached library):
@@ -653,6 +654,60 @@ fn elf_debug_info_of_several_objects() {
                 );
             }
         }
+    }
+}
+
+/// `-O0` objects put each function and data object in a section of its
+/// own (Mach-O: subsections), so the linker drops a prebuilt
+/// dependency's code nothing calls: each function's string constant is
+/// in the executable only while the function is. Link only for the
+/// targets other than the host's.
+#[test]
+fn unused_dependency_code_is_dropped() {
+    if setup().is_none() {
+        return;
+    }
+    let targets = Path::new(ROKC).parent().unwrap().join("../lib/rok/targets");
+    let dir = scratch("gc-sections");
+    fs::create_dir_all(dir.join("dep")).unwrap();
+    fs::write(
+        dir.join("dep/lib.rok"),
+        "pub fn used() -> str {\n    return \"marker-of-used-code\";\n}\n\n\
+         pub fn unused() -> str {\n    return \"marker-of-unused-code\";\n}\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("app")).unwrap();
+    fs::write(
+        dir.join("app/main.rok"),
+        "use dep::used;\nprintln(used());\n",
+    )
+    .unwrap();
+    let has = |b: &[u8], s: &str| b.windows(s.len()).any(|w| w == s.as_bytes());
+    for t in [
+        None,
+        Some("x86_64-unknown-linux-gnu"),
+        Some("aarch64-unknown-linux-gnu"),
+        Some("x86_64-unknown-linux-musl"),
+        Some("aarch64-unknown-linux-musl"),
+        Some("x86_64-pc-windows-msvc"),
+        Some("aarch64-pc-windows-msvc"),
+    ] {
+        if t.is_some_and(|t| !targets.join(t).is_dir()) {
+            continue;
+        }
+        let exe = dir.join(format!("app-{}", t.unwrap_or("host")));
+        let mut rokc = Command::new(ROKC);
+        rokc.current_dir(&dir)
+            .env("ROK_HOME", common::workspace())
+            .args(["-q", "build", "app", "--extern", "dep=dep", "-O0", "-o"])
+            .arg(&exe);
+        if let Some(t) = t {
+            rokc.args(["--target", t]);
+        }
+        ok(&rokc.output().unwrap());
+        let b = fs::read(&exe).unwrap();
+        assert!(has(&b, "marker-of-used-code"), "{t:?}");
+        assert!(!has(&b, "marker-of-unused-code"), "{t:?}");
     }
 }
 
@@ -1279,6 +1334,60 @@ fn main() -> i32 {
     assert!(!out.status.success());
     assert!(
         text(&out.stderr).contains("no librokmissing.a in the -L directories"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+/// `-l` links a library the source does not name; `--native-runtime`
+/// copies a shared library beside the executable, which then loads it
+/// from its own directory (rpath `@loader_path` / `$ORIGIN`).
+#[cfg(unix)]
+#[test]
+fn link_flags_and_runtime_files() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("link_runtime");
+    let libs = dir.join("libs");
+    fs::create_dir_all(&libs).unwrap();
+    let (shared, id) = if cfg!(target_os = "macos") {
+        ("librokrt.dylib", "-Wl,-install_name,@rpath/librokrt.dylib")
+    } else {
+        ("librokrt.so", "-Wl,-soname,librokrt.so")
+    };
+    fs::write(
+        dir.join("rt.c"),
+        "int rok_rt_probe(int x) { return x * 3; }\n",
+    )
+    .unwrap();
+    ok(&Command::new("clang")
+        .args(["-shared", "-fPIC", id, "-o"])
+        .arg(libs.join(shared))
+        .arg(dir.join("rt.c"))
+        .output()
+        .unwrap());
+    let src = "extern \"C\" {\n    fn rok_rt_probe(x: i32) -> i32;\n}\n\nfn main() -> i32 {\n    \
+               unsafe { rok_rt_probe(14) }\n}\n";
+    fs::write(dir.join("main.rok"), src).unwrap();
+    let out_dir = dir.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+    let exe = out_dir.join("app");
+    let lib_dir = format!("-L{}", libs.display());
+    let runtime = format!("--native-runtime={}", libs.join(shared).display());
+    let exe_arg = exe.display().to_string();
+    ok(&build(
+        &env,
+        &dir.join("main.rok"),
+        &[&lib_dir, "-l", "dylib=rokrt", &runtime, "-o", &exe_arg],
+    ));
+    assert!(out_dir.join(shared).is_file());
+    // The library's own directory is gone: only the copy can be loaded.
+    fs::remove_dir_all(&libs).unwrap();
+    let run = Command::new(&exe).current_dir(&dir).output().unwrap();
+    assert_eq!(run.status.code(), Some(42), "{}", text(&run.stderr));
+    let out = build(&env, &dir.join("main.rok"), &["-l", "shared=x"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        text(&out.stderr).contains("expected [static=|dylib=]<name>"),
         "{}",
         text(&out.stderr)
     );

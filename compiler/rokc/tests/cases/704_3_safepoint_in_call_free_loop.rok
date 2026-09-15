@@ -1,4 +1,5 @@
 // spec: 007.04-barriers-and-roots §7.4.3 / 008.04-safepoint §8.4.8
+// needs: threads
 // expect-exit: 0
 // expect-stdout:
 // collected while spinning: true

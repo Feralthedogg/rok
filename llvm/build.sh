@@ -56,8 +56,20 @@ if [ ! -d "$src" ]; then
 fi
 
 extra=
+# PGO: Apple clang optimizes LLVM with rok.profdata.xz, a profile of
+# rokc's own builds made by train-pgo.sh with Xcode's clang. Other
+# compilers skip it (gcc reads no clang profile, and a clang older than
+# its indexed format cannot). ROK_LLVM_INSTRUMENT=1 builds the
+# instrumented libraries train-pgo.sh profiles instead.
+here=$(cd "$(dirname "$0")" && pwd)
+if [ -n "${ROK_LLVM_INSTRUMENT-}" ]; then
+	extra="-DLLVM_BUILD_INSTRUMENTED=IR"
+elif ${CXX:-c++} --version 2>/dev/null | grep -q '^Apple clang'; then
+	xz -dc "$here/rok.profdata.xz" >"$work/rok.profdata"
+	extra="-DLLVM_PROFDATA_FILE=$work/rok.profdata"
+fi
 case $(uname -s) in
-Darwin) extra="-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0" ;;
+Darwin) extra="$extra -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0" ;;
 # The system compiler (gcc / libstdc++, or CC / CXX); x86_64 or aarch64,
 # glibc or musl.
 Linux) ;;

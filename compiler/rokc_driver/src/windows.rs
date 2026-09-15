@@ -79,6 +79,7 @@ pub fn link_args(
             mlir_pipeline: "",
             dialect_plugins: &[],
             pass_plugins: &[],
+            profile: rokc_llvm::Profile::None,
         },
     )?;
     std::fs::write(&startup, obj).map_err(|e| format!("{}: {e}", startup.display()))?;
@@ -99,6 +100,10 @@ pub fn link_args(
     };
     a.push(format!("/subsystem:{sub}").into());
     a.push(format!("/entry:{entry}").into());
+    // The main thread reserves 8 MiB, as Linux's default rlimit and
+    // macOS give theirs and the runtime gives the threads it starts
+    // (nested `await` runs on it, 7.8.10); Windows' default is 1 MiB.
+    a.push("/stack:8388608".into());
     // Nothing refers to the TLS directory but the loader. (`/include`
     // takes the symbol, C names `_`-prefixed on x86.)
     let x86 = t.triple.starts_with("i686");
@@ -110,12 +115,13 @@ pub fn link_args(
 }
 
 /// rok's C runtime startup, in place of the MSVC CRT's static parts: the
-/// entry point (UCRT setup, the program's `main` wrapper, `exit`), the
-/// TLS directory the loader reads (`_tls_used`; thread-locals are in
-/// `.tls$`), `_fltused` (referenced by code using floating point) and
-/// `__chkstk` (the stack probe LLVM calls for frames of a page or more;
-/// x86's C name `_chkstk`). Every C name is mangled by LLVM and lld-link
-/// (a leading `_` on x86).
+/// entry point (UCRT setup, the C initializers in `.CRT$XCA`..`$XCZ`,
+/// the program's `main` wrapper, `exit`), the TLS directory the loader
+/// reads (`_tls_used`; thread-locals are in `.tls$`), `_fltused`
+/// (referenced by code using floating point) and `__chkstk` (the stack
+/// probe LLVM calls for frames of a page or more; x86's C name
+/// `_chkstk`). Every C name is mangled by LLVM and lld-link (a leading
+/// `_` on x86).
 fn startup_ir(t: &rokc_llvm::Target, subsystem: Subsystem) -> String {
     let chkstk = if t.triple.starts_with("i686") {
         // eax: the frame size. Touches each page below the caller's esp,
@@ -198,6 +204,7 @@ module asm "  ret"
   call void @_set_app_type(i32 1)
   %a = call i32 @_configure_narrow_argv(i32 1)
   %e = call i32 @_initialize_narrow_environment()
+  call void @_initterm(ptr @__xc_a, ptr @__xc_z)
   %r = call i32 @main()
   call void @exit(i32 %r)
   unreachable
@@ -214,6 +221,7 @@ define void @WinMainCRTStartup() {
   call void @_set_app_type(i32 2)
   %a = call i32 @_configure_narrow_argv(i32 1)
   %e = call i32 @_initialize_narrow_environment()
+  call void @_initterm(ptr @__xc_a, ptr @__xc_z)
   %r = call i32 @WinMain(ptr @__ImageBase, ptr null, ptr @empty, i32 10)
   call void @exit(i32 %r)
   unreachable
@@ -235,15 +243,87 @@ define i32 @WinMain(ptr %instance, ptr %prev, ptr %cmd, i32 %show) {
 @__xl_z = global ptr null, section ".CRT$XLZ"
 @_tls_used = constant {{ ptr, ptr, ptr, ptr, i32, i32 }} {{ ptr @_tls_start, ptr @_tls_end, ptr @_tls_index, ptr getelementptr (ptr, ptr @__xl_a, i32 1), i32 0, i32 0 }}, section ".rdata$T"
 @_fltused = global i32 39029
+@__xc_a = constant ptr null, section ".CRT$XCA"
+@__xc_z = constant ptr null, section ".CRT$XCZ"
 
 declare void @_set_app_type(i32)
 declare i32 @_configure_narrow_argv(i32)
 declare i32 @_initialize_narrow_environment()
+declare void @_initterm(ptr, ptr)
 declare void @exit(i32) noreturn
 declare i32 @main()
 
-{entry}"#
+{entry}
+{}"#,
+        stdio_ir(t)
     )
+}
+
+/// `printf` / `fprintf` / `sprintf` / `snprintf`: UCRT exports none of
+/// them (its headers define them inline over `__stdio_common_v*printf`),
+/// so C variadic calls (spec 8.6.10) reach these, which do the same. A
+/// Windows `va_list` is a pointer on every arch. Options as the headers'
+/// defaults.
+fn stdio_ir(t: &rokc_llvm::Target) -> String {
+    let n = if t.triple.starts_with("i686") {
+        "i32"
+    } else {
+        "i64"
+    };
+    // (signature, setup, call) per function; `%va` is the va_list.
+    let fns = [
+        (
+            "printf(ptr %fmt, ...)",
+            "  %f = call ptr @__acrt_iob_func(i32 1)\n",
+            "call i32 @__stdio_common_vfprintf(i64 0, ptr %f, ptr %fmt, ptr null, ptr %va)",
+        ),
+        (
+            "fprintf(ptr %f, ptr %fmt, ...)",
+            "",
+            "call i32 @__stdio_common_vfprintf(i64 0, ptr %f, ptr %fmt, ptr null, ptr %va)",
+        ),
+        // _CRT_INTERNAL_PRINTF_LEGACY_VSPRINTF_NULL_TERMINATION
+        (
+            "sprintf(ptr %b, ptr %fmt, ...)",
+            "",
+            &format!(
+                "call i32 @__stdio_common_vsprintf(i64 1, ptr %b, {n} -1, ptr %fmt, ptr null, ptr %va)"
+            ),
+        ),
+        // _CRT_INTERNAL_PRINTF_STANDARD_SNPRINTF_BEHAVIOR
+        (
+            &format!("snprintf(ptr %b, {n} %n, ptr %fmt, ...)"),
+            "",
+            &format!(
+                "call i32 @__stdio_common_vsprintf(i64 2, ptr %b, {n} %n, ptr %fmt, ptr null, ptr %va)"
+            ),
+        ),
+    ];
+    let mut s = format!(
+        "declare ptr @__acrt_iob_func(i32)
+declare i32 @__stdio_common_vfprintf(i64, ptr, ptr, ptr, ptr)
+declare i32 @__stdio_common_vsprintf(i64, ptr, {n}, ptr, ptr, ptr)
+declare void @llvm.va_start.p0(ptr)
+declare void @llvm.va_end.p0(ptr)
+"
+    );
+    for (sig, setup, call) in fns {
+        s += &format!(
+            "
+define i32 @{sig} {{
+  %ap = alloca ptr
+  call void @llvm.va_start.p0(ptr %ap)
+  %va = load ptr, ptr %ap
+{setup}  %r = {call}
+  call void @llvm.va_end.p0(ptr %ap)
+  %neg = icmp slt i32 %r, 0
+  %out = select i1 %neg, i32 -1, i32 %r
+  ret i32 %out
+}}
+"
+        );
+    }
+    s
 }
 
 #[cfg(test)]
@@ -285,6 +365,7 @@ mod tests {
                     mlir_pipeline: "",
                     dialect_plugins: &[],
                     pass_plugins: &[],
+                    profile: rokc_llvm::Profile::None,
                 },
             )
             .unwrap();

@@ -11,6 +11,7 @@
 //!                                    a toolchain: bin/{rok,rokc,rokls}, lib/
 //! $ROK_HOME/cache/git/               shared git cache (see `git`)
 //! $ROK_HOME/cache/registry/          stone index clones (see `registry`)
+//! $ROK_HOME/cache/native/            native packages, by SHA-256 (see `native`)
 //! $ROK_HOME/config.rokon             `Config { registry: "<index url>", toolchain: "<default>" }`
 //! $ROK_HOME/cache/scripts/<hash>/    a script's lock and prebuilt dependencies
 //! $ROK_HOME/envs/<name>/             a named environment (rok.rokon, rok.lock, target/)
@@ -21,6 +22,7 @@ mod env;
 mod git;
 mod lock;
 mod manifest;
+mod native;
 mod registry;
 mod resolve;
 mod semver;
@@ -31,7 +33,7 @@ pub use toolchain::proxy;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use manifest::{Dep, GitRef, MANIFEST, Manifest, Source};
+use manifest::{Dep, GitRef, MANIFEST, Manifest, NativeSource, Source};
 use resolve::{Context, Options, Resolved};
 use rokc_diagnostic::Json;
 use rokc_rokon::{Kind, Value};
@@ -51,10 +53,13 @@ packages:
                                add a stone (default: ^ the newest version)
   add <name> --path <dir>      add a dependency (--dev: to dev_deps)
   add <name> --git <url> [--rev <r> | --tag <t> | --branch <b>]
-  remove <name>                remove a dependency
+  add --native <name>[@<req>] [--registry <url>]
+                               add a native package (prebuilt C library)
+  remove [--native] <name>     remove a dependency
   update [name...]             re-resolve git dependencies and stones,
                                rewrite rok.lock
-  search <query>               stones whose name contains <query>
+  search [--native] <query>    stones (native packages) whose name contains
+                               <query>
   deps                         print the resolved dependencies (name=lib.rok),
                                each after its own
   clean [path]                 remove target/
@@ -64,6 +69,10 @@ stones (the index is a git repository; nothing is uploaded):
                                the index entry for this package (its git
                                remote `origin`, HEAD commit and tree); with
                                --commit, committed to the index checkout <dir>
+  publish --native <file> [--index <dir>] [--commit]
+                               the index entry of the native package
+                               `Native { .. }` in <file>, each build fetched
+                               and checked
   yank --vers <v> [--undo] --index <dir> [name]
                                mark a version yanked (commits to <dir>)
 
@@ -77,7 +86,9 @@ compiler commands (rokc, with the dependencies; see `rokc help`):
   fmt [path]                   format .rok and .rokon files
 
   The path, if any, comes first after the command; it picks the project
-  (or script) whose dependencies and `lints` apply.
+  (or script) whose dependencies and `lints` apply. A .rok file inside a
+  project (the nearest directory above it with main.rok, lib.rok or
+  rok.rokon) uses that project's.
 
 jupyter:
   jupyter install              install the `rok` Jupyter kernel (with --env:
@@ -113,6 +124,10 @@ A directory with rok.rokon is a project (its own environment). Outside one,
 the environment is $ROK_ENV, else the one `rok env use` chose, else
 `default`. A lone script may start with a //! ```rokon block holding
 `Package { deps: {..} }`.
+
+Shared lint levels: `lints_from: \"<dir>\"` in rok.rokon starts from the
+`lints` of <dir>/rok.rokon (and its own `lints_from`, recursively); this
+manifest's `lints` then override per lint.
 
 `rok <command> --help` (or `rok help <command>`) shows one command.
 
@@ -247,9 +262,9 @@ pub fn main_with(args: Vec<String>) -> i32 {
 }
 
 /// The commands `rok` passes to `rokc`.
-const DELEGATED: [&str; 14] = [
+const DELEGATED: [&str; 15] = [
     "build", "check", "run", "test", "repl", "lsp", "fmt", "clean", "demangle", "emit", "bench",
-    "doc", "lint", "jupyter",
+    "doc", "lint", "jupyter", "profdata",
 ];
 
 /// `rok <cmd> --help` / `rok help <cmd>`: rok's own entry, or rokc's
@@ -379,7 +394,11 @@ fn ambient_env() -> String {
 
 fn load_dir(dir: &Path) -> Result<Context, String> {
     let manifest = match manifest::find(dir) {
-        Some(p) => manifest::load(&p)?,
+        Some(p) => {
+            let mut m = manifest::load(&p)?;
+            m.lints = manifest::inherit_lints(&m, &p)?;
+            m
+        }
         None => Manifest::default(),
     };
     Ok(Context {
@@ -423,6 +442,7 @@ fn target_for(g: &Global, path: Option<&str>) -> Result<Target, String> {
         if let Some(block) = manifest::script_block(&src) {
             let manifest = manifest::parse(&block, &file)?;
             if manifest.dev_deps.len() + manifest.lints.len() > 0
+                || manifest.lints_from.is_some()
                 || manifest.toolchain.is_some()
                 || manifest.name.is_some()
                 || manifest.version.is_some()
@@ -489,28 +509,49 @@ fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i3
     // The manifest's `name` is the package's (spec 9.10.3).
     let named = package.as_deref().filter(|_| t.env.is_none() && !stdin);
     if let (Some(name), Some(_)) = (&t.ctx.manifest.name, named) {
-        if !matches!(cmd, "fmt" | "clean" | "demangle" | "lsp" | "jupyter") {
+        if !matches!(
+            cmd,
+            "fmt" | "clean" | "demangle" | "profdata" | "lsp" | "jupyter"
+        ) {
             extra.push(format!("--name={name}"));
         }
     }
-    if !matches!(cmd, "fmt" | "clean" | "demangle") {
-        let deps = match resolve::resolve(&home(), &t.ctx, &options(g)) {
+    if !matches!(cmd, "fmt" | "clean" | "demangle" | "profdata") {
+        let graph = match resolve::resolve(&home(), &t.ctx, &options(g)) {
             Ok(r) => r,
             // The language server still starts (without dependencies).
             Err(e) if cmd == "lsp" => {
                 eprintln!("rok: warning: {e}");
-                Vec::new()
+                resolve::Graph {
+                    packages: Vec::new(),
+                    natives: Vec::new(),
+                }
             }
             Err(e) => return Err(e),
         };
         let dev_too = matches!(cmd, "test" | "bench");
-        for p in deps.iter().filter(|p| dev_too || !p.dev) {
+        for p in graph.packages.iter().filter(|p| dev_too || !p.dev) {
             extra.push("--extern".to_owned());
             extra.push(format!(
                 "{}={}",
                 manifest::code_name(&p.name),
                 p.root.display()
             ));
+        }
+        // Native packages: what a link needs, for the build's target.
+        if matches!(cmd, "build" | "run" | "test" | "bench") {
+            let natives: Vec<&native::Resolved> =
+                graph.natives.iter().filter(|n| dev_too || !n.dev).collect();
+            if !natives.is_empty() {
+                let triple = target_arg(post).unwrap_or(toolchain::HOST);
+                extra.extend(native::rokc_args(
+                    &home(),
+                    &natives,
+                    triple,
+                    g.offline,
+                    g.quiet,
+                )?);
+            }
         }
         // `lints` go first: the command line's own `-A/-W/-D` win.
         for (name, level) in &t.ctx.manifest.lints {
@@ -532,6 +573,20 @@ fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i3
         c.env("ROK_ENV", e);
     }
     Ok(exec(c, &rokc))
+}
+
+/// `--target <t>` / `--target=<t>` among rokc's arguments.
+fn target_arg(post: &[String]) -> Option<&str> {
+    let mut it = post.iter().take_while(|a| *a != "--");
+    while let Some(a) = it.next() {
+        if a == "--target" {
+            return it.next().map(String::as_str);
+        }
+        if let Some(t) = a.strip_prefix("--target=") {
+            return Some(t);
+        }
+    }
+    None
 }
 
 /// Replace this process with `c` (unix), else wait for it.
@@ -883,7 +938,50 @@ fn write_and_resolve(g: &Global, path: &Path, old: Option<&str>, text: &str) -> 
     Ok(())
 }
 
+/// `rok add --native <name>[@<req>] [--registry <url>]`.
+fn cmd_add_native(g: &Global, args: &[String]) -> Result<i32, String> {
+    let (vals, _, pos) = flags(args, &["--registry"], &["--native"])?;
+    let [spec] = pos.as_slice() else {
+        return Err("usage: rok add --native <name>[@<req>] [--registry <url>]".into());
+    };
+    let (name, req) = spec.split_once('@').unwrap_or((spec, ""));
+    manifest::check_name(name)?;
+    let registry = val(&vals, "--registry").map(str::to_owned);
+    let req = if req.is_empty() {
+        let url = match &registry {
+            Some(r) => r.clone(),
+            None => registry::default_url(&home())?,
+        };
+        let index = registry::open(&home(), &url, g.offline, g.quiet)?;
+        let all = native::entries(&index, &url, name)?;
+        let e = native::best(&all, &semver::Req::parse("*")?)
+            .ok_or_else(|| native::no_match(&all, name, "*", &url))?;
+        format!("^{}", e.vers)
+    } else {
+        semver::Req::parse(req)?;
+        req.to_owned()
+    };
+    let (path, _) = manifest_to_edit(g)?;
+    let old = std::fs::read_to_string(&path).ok();
+    let source = NativeSource::Registry { req, registry };
+    let text = manifest::set_dep(
+        old.as_deref().unwrap_or(manifest::EMPTY),
+        &path.display().to_string(),
+        "native",
+        name,
+        &rokc_rokon::to_line(&source.to_value()),
+    )?;
+    write_and_resolve(g, &path, old.as_deref(), &text)?;
+    if !g.quiet {
+        eprintln!("       Added {name} to native of {}", path.display());
+    }
+    Ok(0)
+}
+
 fn cmd_add(g: &Global, args: &[String]) -> Result<i32, String> {
+    if args.iter().any(|a| a == "--native") {
+        return cmd_add_native(g, args);
+    }
     let (mut dep, dev) = parse_dep_args(args)?;
     let (path, is_env) = manifest_to_edit(g)?;
     // Path dependencies: relative to the manifest in a project (it moves
@@ -931,14 +1029,16 @@ fn cmd_add(g: &Global, args: &[String]) -> Result<i32, String> {
 }
 
 fn cmd_remove(g: &Global, args: &[String]) -> Result<i32, String> {
-    let [name] = args else {
-        return Err("usage: rok remove <name>".into());
+    let (sections, name) = match args {
+        [name] => (&["deps", "dev_deps"][..], name),
+        [f, name] if f == "--native" => (&["native"][..], name),
+        _ => return Err("usage: rok remove [--native] <name>".into()),
     };
     let (path, _) = manifest_to_edit(g)?;
     let old = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let file = path.display().to_string();
     let mut text: Option<String> = None;
-    for section in ["deps", "dev_deps"] {
+    for section in sections {
         let now = text.as_deref().unwrap_or(&old);
         if let Some(t) = manifest::remove_dep(now, &file, section, name)? {
             text = Some(t);
@@ -963,13 +1063,17 @@ fn cmd_update(g: &Global, names: &[String]) -> Result<i32, String> {
             .iter()
             .chain(&manifest.dev_deps)
             .any(|d| manifest::same(&d.name, n))
+            && !manifest.native.iter().any(|d| manifest::same(&d.name, n))
         {
             let lock = t
                 .ctx
                 .lock_path
                 .as_deref()
                 .and_then(|p| lock::Lock::read(p).ok().flatten());
-            if lock.as_ref().and_then(|l| l.find(n)).is_none() {
+            if lock
+                .as_ref()
+                .is_none_or(|l| l.find(n).is_none() && l.find_native(n).is_none())
+            {
                 return Err(format!("`{n}` is not a dependency"));
             }
         }
@@ -979,8 +1083,9 @@ fn cmd_update(g: &Global, names: &[String]) -> Result<i32, String> {
     let r = resolve::resolve(&home(), &t.ctx, &opts)?;
     if !g.quiet {
         if let Some(p) = &t.ctx.lock_path {
-            let s = if r.len() == 1 { "" } else { "s" };
-            eprintln!("     Updated {} ({} package{s})", p.display(), r.len());
+            let count = r.packages.len() + r.natives.len();
+            let s = if count == 1 { "" } else { "s" };
+            eprintln!("     Updated {} ({count} package{s})", p.display());
         }
     }
     Ok(0)
@@ -995,18 +1100,20 @@ fn cmd_deps(g: &Global, args: &[String]) -> Result<i32, String> {
         .map(String::as_str);
     let t = target_for(g, path)?;
     let dev = args.iter().any(|a| a == "--dev");
-    let deps: Vec<Resolved> = resolve::resolve(&home(), &t.ctx, &options(g))?;
+    let deps: Vec<Resolved> = resolve::resolve(&home(), &t.ctx, &options(g))?.packages;
     for p in deps.iter().filter(|p| dev || !p.dev) {
         println!("{}={}", manifest::code_name(&p.name), p.root.display());
     }
     Ok(0)
 }
 
-/// `rok search <query>`: `name = "newest"` for each stone of the index
-/// whose name contains the query (any case).
+/// `rok search [--native] <query>`: `name = "newest"` for each stone (or
+/// native package) of the index whose name contains the query (any case).
 fn cmd_search(g: &Global, args: &[String]) -> Result<i32, String> {
-    let [q] = args else {
-        return Err("usage: rok search <query>".into());
+    let (q, native) = match args {
+        [q] if !q.starts_with('-') => (q, false),
+        [f, q] if f == "--native" => (q, true),
+        _ => return Err("usage: rok search [--native] <query>".into()),
     };
     let url = registry::default_url(&home())?;
     let index = registry::open(&home(), &url, g.offline, g.quiet)?;
@@ -1014,17 +1121,22 @@ fn cmd_search(g: &Global, args: &[String]) -> Result<i32, String> {
     let mut names: Vec<String> = index
         .files(&url)?
         .into_iter()
-        .filter(|f| f.contains('/'))
+        .filter(|f| f.contains('/') && f.starts_with("native/") == native)
         .filter_map(|f| f.rsplit('/').next().map(str::to_owned))
         .filter(|n| n.contains(&q))
         .collect();
     names.sort();
     let star = semver::Req::parse("*")?;
     for n in names {
-        let text = index.show(&url, &registry::path(&n))?.unwrap_or_default();
-        let all = registry::parse_file(&text, &registry::path(&n))?;
-        if let Some(e) = registry::best(&all, &star) {
-            println!("{} = \"{}\"", e.name, e.vers);
+        let newest = if native {
+            native::best(&native::entries(&index, &url, &n)?, &star)
+                .map(|e| (e.name.clone(), e.vers.clone()))
+        } else {
+            registry::best(&registry::entries(&index, &url, &n)?, &star)
+                .map(|e| (e.name.clone(), e.vers.clone()))
+        };
+        if let Some((name, vers)) = newest {
+            println!("{name} = \"{vers}\"");
         }
     }
     Ok(0)
@@ -1078,18 +1190,41 @@ fn val<'a>(vals: &'a [(String, String)], f: &str) -> Option<&'a str> {
 /// line; with `--index`, check it against that checkout; with `--commit`,
 /// commit it there.
 fn cmd_publish(g: &Global, args: &[String]) -> Result<i32, String> {
-    let (vals, sw, pos) = flags(args, &["--index"], &["--commit"])?;
+    let (vals, sw, pos) = flags(args, &["--index", "--native"], &["--commit"])?;
     if let Some(p) = pos.first() {
         return Err(format!("unexpected argument `{p}`"));
     }
     let write = sw.iter().any(|s| s == "--commit");
+    if write && val(&vals, "--index").is_none() {
+        return Err("--commit needs --index <dir> (a checkout of the index)".into());
+    }
+    if let Some(file) = val(&vals, "--native") {
+        let index = val(&vals, "--index").map(Path::new);
+        let (e, at) = native::publish(&home(), Path::new(file), index, write)?;
+        println!("{}", e.to_line());
+        if !g.quiet {
+            match (at, write) {
+                (Some(f), true) => {
+                    eprintln!(
+                        "   Published native {} {} ({})",
+                        e.name,
+                        e.vers,
+                        f.display()
+                    );
+                }
+                _ => eprintln!(
+                    "note: dry run; `rok publish --native {file} --index <checkout> --commit` adds \
+                     it as {}",
+                    native::path(&e.name)
+                ),
+            }
+        }
+        return Ok(0);
+    }
     let (dir, m) = this_package()?;
     let e = registry::entry_for(&dir, &m)?;
     let line = e.to_line();
     let Some(index) = val(&vals, "--index") else {
-        if write {
-            return Err("--commit needs --index <dir> (a checkout of the index)".into());
-        }
         println!("{line}");
         if !g.quiet {
             eprintln!(

@@ -6,6 +6,7 @@
 //! ```text
 //! config.rokon     Registry { name: "rokstones.io", dl: "git", api: "https://rokstones.io" }
 //! 1/a  2/ab  3/a/abc  ab/cd/abcd..      a stone's file (by its lowercased name)
+//! native/1/a  native/ab/cd/abcd..       a native package's (see `native`)
 //! ```
 //!
 //! ```rokon
@@ -58,6 +59,8 @@ pub struct IndexDep {
     pub req: String,
     /// `kind: "dev"`: for the stone's own tests, not followed.
     pub dev: bool,
+    /// `kind: "native"`: a native package (`crate::native`).
+    pub native: bool,
     /// Another index (`None`: the stone's own).
     pub registry: Option<String>,
 }
@@ -111,16 +114,20 @@ fn entry(d: Decoder<'_>) -> Result<Entry, String> {
         manifest::check_name(&name).map_err(|e| q.field_error("name", &e))?;
         let req = q.req("req")?.string()?;
         Req::parse(&req).map_err(|e| q.field_error("req", &e))?;
-        let dev = match q.opt("kind").map(|k| k.string()).transpose()?.as_deref() {
-            None | Some("normal") => false,
-            Some("dev") => true,
-            Some(_) => return Err(q.field_error("kind", "`kind` is \"normal\" or \"dev\"")),
+        let (dev, native) = match q.opt("kind").map(|k| k.string()).transpose()?.as_deref() {
+            None | Some("normal") => (false, false),
+            Some("dev") => (true, false),
+            Some("native") => (false, true),
+            Some(_) => {
+                return Err(q.field_error("kind", "`kind` is \"normal\", \"dev\" or \"native\""));
+            }
         };
         let registry = q.opt("registry").map(|r| r.string()).transpose()?;
         deps.push(IndexDep {
             name,
             req,
             dev,
+            native,
             registry,
         });
     }
@@ -172,7 +179,11 @@ impl Entry {
             .deps
             .iter()
             .map(|d| {
-                let kind = if d.dev { "dev" } else { "normal" };
+                let kind = match (d.dev, d.native) {
+                    (true, _) => "dev",
+                    (_, true) => "native",
+                    _ => "normal",
+                };
                 let mut f = vec![
                     ("name", Value::str(&d.name)),
                     ("req", Value::str(&d.req)),
@@ -205,24 +216,32 @@ impl Entry {
     }
 }
 
-/// The versions of stone `name` in the cached index `url` (none when it
-/// has no such stone).
-pub fn entries(cache: &Cache, url: &str, name: &str) -> Result<Vec<Entry>, String> {
-    // `a_b` finds stone `a-b` (and back): one name, two spellings.
-    let mut text = None;
-    let mut file = path(name);
+/// The file of `name` under `prefix` (`""` / `"native/"`) in the cached
+/// index `url`, and its text, if any. `a_b` finds `a-b` (and back): one
+/// name, two spellings.
+pub fn index_file(
+    cache: &Cache,
+    url: &str,
+    prefix: &str,
+    name: &str,
+) -> Result<Option<(String, String)>, String> {
     for n in [
         name.to_owned(),
         name.replace('_', "-"),
         name.replace('-', "_"),
     ] {
-        file = path(&n);
-        text = cache.show(url, &file)?;
-        if text.is_some() {
-            break;
+        let file = format!("{prefix}{}", path(&n));
+        if let Some(text) = cache.show(url, &file)? {
+            return Ok(Some((file, text)));
         }
     }
-    let Some(text) = text else {
+    Ok(None)
+}
+
+/// The versions of stone `name` in the cached index `url` (none when it
+/// has no such stone).
+pub fn entries(cache: &Cache, url: &str, name: &str) -> Result<Vec<Entry>, String> {
+    let Some((file, text)) = index_file(cache, url, "", name)? else {
         return Ok(Vec::new());
     };
     let mut all = parse_file(&text, &format!("{url}: {file}"))?;
@@ -283,6 +302,22 @@ pub fn entry_for(dir: &Path, m: &Manifest) -> Result<Entry, String> {
         return Err(format!("`{name}` is not a library package (no lib.rok)"));
     }
     let mut deps = Vec::new();
+    for d in &m.native {
+        let manifest::NativeSource::Registry { req, registry } = &d.source else {
+            return Err(format!(
+                "native dependency `{}` is not in an index: a stone's native packages are \
+                 `Dep::native(\"<req>\")`",
+                d.name
+            ));
+        };
+        deps.push(IndexDep {
+            name: d.name.clone(),
+            req: req.clone(),
+            dev: false,
+            native: true,
+            registry: registry.clone(),
+        });
+    }
     for (d, dev) in m
         .deps
         .iter()
@@ -294,6 +329,7 @@ pub fn entry_for(dir: &Path, m: &Manifest) -> Result<Entry, String> {
                 name: d.name.clone(),
                 req: req.clone(),
                 dev,
+                native: false,
                 registry: registry.clone(),
             }),
             // A stone's users never build its tests.
@@ -338,15 +374,15 @@ pub fn entry_for(dir: &Path, m: &Manifest) -> Result<Entry, String> {
     })
 }
 
-/// A local checkout of an index: the stone's file there, and its text.
-fn local(index: &Path, name: &str) -> Result<(PathBuf, String), String> {
+/// A local checkout of an index: file `rel` there, and its text.
+pub fn local(index: &Path, rel: &str) -> Result<(PathBuf, String), String> {
     if !index.join(".git").exists() {
         return Err(format!(
             "{} is not a git checkout of an index",
             index.display()
         ));
     }
-    let file = index.join(path(name));
+    let file = index.join(rel);
     let text = match std::fs::read_to_string(&file) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -355,7 +391,7 @@ fn local(index: &Path, name: &str) -> Result<(PathBuf, String), String> {
     Ok((file, text))
 }
 
-fn commit(index: &Path, file: &Path, text: &str, msg: &str) -> Result<(), String> {
+pub fn commit(index: &Path, file: &Path, text: &str, msg: &str) -> Result<(), String> {
     std::fs::create_dir_all(file.parent().unwrap_or(index))
         .and_then(|()| std::fs::write(file, text))
         .map_err(|e| format!("{}: {e}", file.display()))?;
@@ -371,22 +407,10 @@ fn commit(index: &Path, file: &Path, text: &str, msg: &str) -> Result<(), String
 /// Add `e` to the index checkout `index` (checked against what is there);
 /// with `write`, as a new commit. The file it goes to.
 pub fn publish(index: &Path, e: &Entry, write: bool) -> Result<PathBuf, String> {
-    let (file, text) = local(index, &e.name)?;
+    let (file, text) = local(index, &path(&e.name))?;
     let have = parse_file(&text, &file.display().to_string())?;
-    // `a-b` and `a_b` (or another case) are one stone; the other spelling
-    // has its own file.
-    let files = git::run(index, &["ls-files"])?;
-    let other = files
-        .lines()
-        .filter_map(|f| f.rsplit('/').next())
-        .chain(have.iter().map(|o| o.name.as_str()))
-        .find(|n| *n != e.name && manifest::same(n, &e.name));
-    if let Some(o) = other {
-        return Err(format!(
-            "the index has stone `{o}`; `{}` is the same name (`-` / `_` and case are one)",
-            e.name
-        ));
-    }
+    let names = have.iter().map(|o| o.name.clone());
+    taken(index, "", &e.name, names)?;
     if have.iter().any(|o| o.vers == e.vers) {
         return Err(format!("{} {} is already in the index", e.name, e.vers));
     }
@@ -407,11 +431,41 @@ pub fn publish(index: &Path, e: &Entry, write: bool) -> Result<PathBuf, String> 
     Ok(file)
 }
 
+/// Fail when the index checkout `index` has a name under `prefix` (or
+/// in `have`, the target file's) that is `name` spelled otherwise: `a-b`
+/// and `a_b` (or another case) are one package, but each spelling has
+/// its own file.
+pub fn taken(
+    index: &Path,
+    prefix: &str,
+    name: &str,
+    have: impl Iterator<Item = String>,
+) -> Result<(), String> {
+    let files = git::run(index, &["ls-files"])?;
+    let other = files
+        .lines()
+        .filter(|f| f.starts_with("native/") == (prefix == "native/"))
+        .filter_map(|f| f.rsplit('/').next().map(str::to_owned))
+        .chain(have)
+        .find(|n| n != name && manifest::same(n, name));
+    match other {
+        Some(o) => Err(format!(
+            "the index has {}`{o}`; `{name}` is the same name (`-` / `_` and case are one)",
+            if prefix.is_empty() {
+                "stone "
+            } else {
+                "native package "
+            }
+        )),
+        None => Ok(()),
+    }
+}
+
 /// Set `yanked` of `name`'s version `vers` in the index checkout `index`,
 /// as a new commit.
 pub fn yank(index: &Path, name: &str, vers: &str, yanked: bool) -> Result<(), String> {
     let vers = Version::parse(vers)?;
-    let (file, text) = local(index, name)?;
+    let (file, text) = local(index, &path(name))?;
     let shown = file.display().to_string();
     let mut found = false;
     let mut out = String::new();
@@ -460,6 +514,7 @@ mod tests {
                 name: "num".into(),
                 req: "^1.2".into(),
                 dev: false,
+                native: false,
                 registry: None,
             }],
             url: "https://github.com/o/geom".into(),

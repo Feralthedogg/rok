@@ -93,8 +93,34 @@ pub struct BuildOptions {
     /// `-L <dir>`: native library search directories, before the C
     /// driver's `LIBRARY_PATH`.
     pub lib_dirs: Vec<PathBuf>,
+    /// `-l [static=|dylib=]<name>`: native libraries linked as if named by
+    /// `#[link]` (`true`: static).
+    pub libs: Vec<(String, bool)>,
+    /// `--native-runtime <file>`: shared libraries an executable loads at
+    /// run time, copied beside it; the executable then searches its own
+    /// directory (rpath `@loader_path` / `$ORIGIN`; Windows always does).
+    pub runtime_files: Vec<PathBuf>,
     /// `-C subsystem=console|windows`: a Windows executable's subsystem.
     pub subsystem: crate::windows::Subsystem,
+    /// `-C profile-generate` / `-C profile-use`: IR profile-guided
+    /// optimization, by LLVM at every level.
+    pub profile: Profile,
+    /// The profile runtime an instrumented executable links
+    /// (`<sysroot>/lib/rok/targets/<triple>/`).
+    pub profile_rt: Option<PathBuf>,
+}
+
+/// IR profile-guided optimization of the program and its source
+/// dependencies.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum Profile {
+    #[default]
+    Off,
+    /// Instrumented: the program writes its raw profile to this file
+    /// name pattern (`LLVM_PROFILE_FILE` overrides it at run time).
+    Generate(PathBuf),
+    /// Optimized with this indexed profile (`rokc profdata merge`).
+    Use(PathBuf),
 }
 
 impl Default for BuildOptions {
@@ -112,7 +138,11 @@ impl Default for BuildOptions {
             mlir_passes: Vec::new(),
             backend: std::env::var("ROK_BACKEND").ok().filter(|b| !b.is_empty()),
             lib_dirs: Vec::new(),
+            libs: Vec::new(),
+            runtime_files: Vec::new(),
             subsystem: crate::windows::Subsystem::Console,
+            profile: Profile::Off,
+            profile_rt: None,
         }
     }
 }
@@ -369,6 +399,11 @@ fn llvm(
         mlir_pipeline: &pipeline,
         dialect_plugins: &dialects,
         pass_plugins: &passes,
+        profile: match &opts.profile {
+            Profile::Off => rokc_llvm::Profile::None,
+            Profile::Generate(p) => rokc_llvm::Profile::Generate(p),
+            Profile::Use(p) => rokc_llvm::Profile::Use(p),
+        },
     };
     let parts = if parts == 0 {
         let cores = std::thread::available_parallelism().map_or(1, usize::from);
@@ -382,14 +417,12 @@ fn llvm(
         parts
     };
     let text = std::mem::take(&mut mlir.text);
-    let out = rokc_diagnostic::time("llvm", || {
-        if parts > 1 {
-            rokc_llvm::compile_mlir_split(&text, &c, parts)
-        } else {
-            rokc_llvm::compile_mlir(&text, &c).map(|o| vec![o])
-        }
-    })
-    .map_err(|e| err(format!("LLVM back end failed:\n{e}")))?;
+    let (out, warnings) =
+        rokc_diagnostic::time("llvm", || rokc_llvm::compile_mlir_split(&text, &c, parts))
+            .map_err(|e| err(format!("LLVM back end failed:\n{e}")))?;
+    for w in warnings.lines() {
+        rokc_diagnostic::report(&RokDiagnostic::warning(ErrorKind::Linkage, w));
+    }
     mlir.text = text;
     Ok((out, mlir))
 }
@@ -429,13 +462,31 @@ pub fn link_object(
             l
         })
         .collect();
+    let mut libs = module.mir.link.native_libs.clone();
+    for l in &opts.libs {
+        if !libs.iter().any(|(n, _)| *n == l.0) {
+            libs.push(l.clone());
+        }
+    }
+    // The loader looks beside the executable for the shared libraries
+    // copied there.
+    let origin = if opts.runtime_files.is_empty() || windows {
+        None
+    } else if apple {
+        Some("@loader_path")
+    } else {
+        Some("$ORIGIN")
+    };
     if let Some(cc) = c_compiler() {
         let mut link = Command::new(cc);
         link.args(objs)
             .args(&module.archives)
             .arg(rokr_arg(opts, windows));
         link.args(&search);
-        for (name, stat) in &module.mir.link.native_libs {
+        if let Some((rt, sym)) = profile_runtime(&t, opts) {
+            link.arg(rt).arg(format!("-Wl,-u,{sym}"));
+        }
+        for (name, stat) in &libs {
             if *stat && apple {
                 link.arg(static_archive(name, opts)?);
             } else if *stat {
@@ -448,6 +499,9 @@ pub fn link_object(
             link.arg("-Wl,-dead_strip");
         } else if !windows {
             link.arg("-Wl,--gc-sections");
+        }
+        if let Some(o) = origin {
+            link.arg(format!("-Wl,-rpath,{o}"));
         }
         if opts.debug {
             link.arg("-g");
@@ -468,43 +522,51 @@ pub fn link_object(
         let mut inputs: Vec<OsString> = objs.iter().map(|o| o.clone().into_os_string()).collect();
         inputs.extend(module.archives.iter().map(|a| a.clone().into_os_string()));
         inputs.push(rokr_arg(opts, true).into());
+        if let Some((rt, sym)) = profile_runtime(&t, opts) {
+            inputs.extend([rt.into(), format!("/include:{sym}").into()]);
+        }
         inputs.extend(search);
         inputs.extend(
-            crate::windows::link_args(
-                &t,
-                &module.mir.link.native_libs,
-                opts.subsystem,
-                opts.debug,
-                tmp.path(),
-            )
-            .map_err(|e| err(format!("the link failed:\n{e}")))?,
+            crate::windows::link_args(&t, &libs, opts.subsystem, opts.debug, tmp.path())
+                .map_err(|e| err(format!("the link failed:\n{e}")))?,
         );
         rokc_diagnostic::time("link", || {
             rokc_llvm::link_executable(&t, &inputs, out, true, None)
         })
         .map_err(|e| err(format!("the link failed:\n{e}")))?;
     } else {
+        let tmp = TempDir::new(opts.keep_temps)?;
         let mut inputs: Vec<OsString> = objs.iter().map(|o| o.clone().into_os_string()).collect();
+        if t.triple == "wasm32-wasi-threads" {
+            inputs.push(wasm_tls_object(&t, tmp.path())?.into_os_string());
+        }
         inputs.extend(module.archives.iter().map(|a| a.clone().into_os_string()));
         inputs.push(rokr_arg(opts, false).into());
+        if let Some((rt, sym)) = profile_runtime(&t, opts) {
+            inputs.extend([rt.into(), "-u".into(), sym.into()]);
+        }
         inputs.extend(search);
-        for (name, stat) in &module.mir.link.native_libs {
-            if *stat && apple {
-                inputs.push(static_archive(name, opts)?.into_os_string());
-            } else if *stat {
-                inputs.extend([
-                    "-Bstatic".into(),
-                    format!("-l{name}").into(),
-                    "-Bdynamic".into(),
-                ]);
-            } else {
-                inputs.push(format!("-l{name}").into());
-            }
+        inputs.extend(native_lib_args(&libs, apple, opts)?);
+        if let Some(o) = origin {
+            inputs.extend(["-rpath".into(), o.into()]);
         }
         rokc_diagnostic::time("link", || {
             rokc_llvm::link_executable(&t, &inputs, out, true, opts.libc.as_deref())
         })
         .map_err(|e| err(format!("the link failed:\n{e}")))?;
+    }
+    let dir = out.parent().unwrap_or_else(|| Path::new("."));
+    for f in &opts.runtime_files {
+        let to = dir.join(f.file_name().unwrap_or_default());
+        // A new file: one a running program maps stays intact.
+        let _ = std::fs::remove_file(&to);
+        std::fs::copy(f, &to).map_err(|e| {
+            err(format!(
+                "cannot copy {} to {}: {e}",
+                f.display(),
+                to.display()
+            ))
+        })?;
     }
     // Mach-O keeps DWARF in the objects: gather it into a `.dSYM` while
     // they still exist.
@@ -513,6 +575,97 @@ pub fn link_object(
             .map_err(|e| err(format!("{}: {e}", out.display())))?;
     }
     Ok(())
+}
+
+/// An instrumented executable's profile runtime (compiler-rt's) and the
+/// symbol that pulls in its registration, which writes the profile at
+/// exit.
+fn profile_runtime(t: &rokc_llvm::Target, opts: &BuildOptions) -> Option<(PathBuf, String)> {
+    if !matches!(opts.profile, Profile::Generate(_)) {
+        return None;
+    }
+    let rt = opts.profile_rt.clone()?;
+    // C symbols carry a `_` on Apple targets and 32-bit Windows.
+    let us = t.triple.contains("-apple-") || t.triple.starts_with("i686-pc-windows");
+    Some((
+        rt,
+        format!("{}__llvm_profile_runtime", if us { "_" } else { "" }),
+    ))
+}
+
+/// lld's arguments for the `#[link]` libraries `libs` (name, static).
+fn native_lib_args(
+    libs: &[(String, bool)],
+    apple: bool,
+    opts: &BuildOptions,
+) -> Result<Vec<OsString>, RokDiagnostic> {
+    let mut a: Vec<OsString> = Vec::new();
+    for (name, stat) in libs {
+        if *stat && apple {
+            a.push(static_archive(name, opts)?.into_os_string());
+        } else if *stat {
+            a.extend([
+                "-Bstatic".into(),
+                format!("-l{name}").into(),
+                "-Bdynamic".into(),
+            ]);
+        } else {
+            a.push(format!("-l{name}").into());
+        }
+    }
+    Ok(a)
+}
+
+/// The runtime's TLS slots (803 §8.3.1) for `wasm32-wasi-threads`, in
+/// wasm TLS (`__tls_base` + offset), each with the accessor the runtime
+/// reaches its own thread's copy through (`rokr_common::tls`, which
+/// stable Rust cannot define there). Name, size, alignment: the table
+/// in `rokr_common::tls`, at wasm32's pointer width.
+const WASM_TLS_SLOTS: [(&str, u32, u32); 14] = [
+    ("yield_flag", 1, 1),
+    ("tlab_cursor", 4, 4),
+    ("tlab_limit", 4, 4),
+    ("shadow_stack_top", 4, 4),
+    ("wb_log_cursor", 4, 4),
+    ("wb_log_limit", 4, 4),
+    ("mutator_state", 1, 1),
+    ("worker_id", 8, 8),
+    ("task_worker", 4, 4),
+    ("task_lane", 4, 4),
+    ("stack_guard", 8, 4),
+    ("satb_cursor", 4, 4),
+    ("satb_limit", 4, 4),
+    ("static_inits", 4, 4),
+];
+
+/// The object of [`WASM_TLS_SLOTS`], in `dir`.
+fn wasm_tls_object(t: &rokc_llvm::Target, dir: &Path) -> Result<PathBuf, RokDiagnostic> {
+    let mut ir = String::from("declare ptr @llvm.threadlocal.address.p0(ptr)\n");
+    for (name, size, align) in WASM_TLS_SLOTS {
+        ir.push_str(&format!(
+            "@rok_tls_{name} = thread_local global [{size} x i8] zeroinitializer, align {align}\n\
+             define hidden ptr @rokr_tls_{name}_addr() nounwind {{\n\
+             \x20 %p = call ptr @llvm.threadlocal.address.p0(ptr @rok_tls_{name})\n\
+             \x20 ret ptr %p\n}}\n"
+        ));
+    }
+    let obj = rokc_llvm::compile_llvm_ir(
+        &ir,
+        &rokc_llvm::Compile {
+            target: t,
+            opt: rokc_llvm::OptLevel::O2,
+            emit: rokc_llvm::Emit::Obj,
+            tls_initial_exec: false,
+            mlir_pipeline: "",
+            dialect_plugins: &[],
+            pass_plugins: &[],
+            profile: rokc_llvm::Profile::None,
+        },
+    )
+    .map_err(|e| err(format!("the TLS object: {e}")))?;
+    let path = dir.join("rok_tls.o");
+    std::fs::write(&path, obj).map_err(|e| err(format!("cannot write {}: {e}", path.display())))?;
+    Ok(path)
 }
 
 /// `#[link(name, kind = "static")]` for ld64, which has no `-Bstatic`
@@ -584,6 +737,9 @@ pub fn find_mlir_plugin(spec: &str) -> Result<PathBuf, String> {
 /// maps and links itself.
 pub fn link_host(host_object: &Path, opts: &BuildOptions, out: &Path) -> Result<(), RokDiagnostic> {
     let t = rokc_llvm::Target::host();
+    if t.triple.contains("-windows") {
+        return link_windows_host(&t, host_object, opts, out);
+    }
     let cc = c_compiler();
     let flag = |f: &str| -> OsString {
         if cc.is_some() {
@@ -618,6 +774,33 @@ pub fn link_host(host_object: &Path, opts: &BuildOptions, out: &Path) -> Result<
     rokc_llvm::link_executable(&t, &inputs, out, false, opts.libc.as_deref())
         .map(drop)
         .map_err(|e| err(format!("cannot link the REPL host:\n{e}")))
+}
+
+/// The Windows session host: every runtime member, every symbol
+/// exported (the host finds them with `GetProcAddress`), linked like a
+/// program (`windows::link_args`).
+fn link_windows_host(
+    t: &rokc_llvm::Target,
+    host_object: &Path,
+    opts: &BuildOptions,
+    out: &Path,
+) -> Result<(), RokDiagnostic> {
+    let tmp = TempDir::new(opts.keep_temps)?;
+    let mut inputs: Vec<OsString> = vec![
+        host_object.into(),
+        format!("/wholearchive:{}", rokr_arg(opts, true)).into(),
+        // lld-link honors it in its MinGW mode only.
+        "-lldmingw".into(),
+        "/export-all-symbols".into(),
+    ];
+    let fail = |e: String| err(format!("cannot link the REPL host:\n{e}"));
+    inputs.extend(
+        crate::windows::link_args(t, &[], crate::Subsystem::Console, false, tmp.path())
+            .map_err(fail)?,
+    );
+    rokc_llvm::link_executable(t, &inputs, out, false, None)
+        .map(drop)
+        .map_err(fail)
 }
 
 /// The C compiler driver that links instead of lld: `ROK_CC`, else the

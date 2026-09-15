@@ -1,8 +1,9 @@
 // The `rokc repl` session host (repl.rs). One process, runtime up
 // once; rokc compiles each cell to an object of the host's format
-// (Mach-O on Apple platforms, else ELF; arm64 / x86_64; the native
-// backend at `-O0`, LLVM above) and the host maps, links and runs it
-// itself (`jit_cell`). Commands come on the socket rokc passes as stdin:
+// (Mach-O on Apple platforms, COFF on Windows, else ELF; arm64 /
+// x86_64; the native backend at `-O0`, LLVM above) and the host maps,
+// links and runs it itself (`jit_cell`). Commands come on the channel
+// rokc passes as stdin (a socket; Windows: a named pipe):
 //
 //   `cell <n>\n` + n bytes of object: link it into the session and run
 //     its `rok_repl_cell` once. Later cells link against it.
@@ -11,9 +12,18 @@
 //     `ok 0\n` or `err\n`.
 //
 // A cell's reply is `pid <p>\n` (the process running the cell) and then
-// `ok <n>\n<n bytes of the shown value>` or `err\n`. `SIGINT` ends a
-// running cell (the session goes on as before it) and is ignored
-// between cells.
+// `ok <n>\n<n bytes of the shown value>` or `err\n`. `SIGINT` (Windows:
+// Ctrl-Break to the host's process group) ends a running cell and is
+// ignored between cells.
+//
+// A cell that fails leaves the session as it was before it. POSIX: the
+// cell runs in the host process while a forked copy from before it
+// waits, and takes over when the cell's process dies (panic, signal,
+// exit). Windows has no fork: the host saves the session's memory
+// before the cell (`checkpoint`) and runs it on its main thread from a
+// recovery point; when the cell panics, exits, faults or is interrupted,
+// its threads end, the memory is put back (`rollback`) and the main
+// thread returns to the recovery point (`run_cell`).
 //
 // A cell that defines a symbol an earlier cell defined (a redefined
 // `fn`, `static`, the user `main`, ..) gets it renamed `<name>.r<cell>`,
@@ -23,9 +33,15 @@
 //
 // The loader is one linker over generic sections, symbols and
 // relocation kinds (`struct obj`, `fix`); a format reader (`map_object`,
-// `link_object`) turns Mach-O or ELF into them. Thread-locals are the
-// host's: a Mach-O cell reaches one through its TLV descriptor, an ELF
-// cell (initial exec) through its thread-pointer offset.
+// `link_object`) turns Mach-O, COFF or ELF into them. Thread-locals are
+// the host's: a Mach-O cell reaches one through its TLV descriptor, an
+// ELF cell (initial exec) through its thread-pointer offset, a COFF cell
+// through its offset in the TLS block (`_tls_index`, SECREL).
+#if defined(_WIN32)
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdint.h>
+#else
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -38,9 +54,92 @@
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 #if !defined(__aarch64__) && !defined(__x86_64__)
 #error "the REPL host loads arm64 and x86_64 objects only"
+#endif
+
+#if defined(_WIN32)
+// No Windows SDK or MSVC headers: what the host calls of the UCRT and
+// kernel32, declared here (rokc's import libraries resolve them).
+typedef void *HANDLE;
+typedef uint32_t DWORD;
+typedef int BOOL;
+typedef long long ssize_t;
+typedef struct FILE FILE;
+
+void *malloc(size_t);
+void *calloc(size_t, size_t);
+void free(void *);
+char *strdup(const char *);
+int strcmp(const char *, const char *);
+int strncmp(const char *, const char *, size_t);
+int memcmp(const void *, const void *, size_t);
+void *memcpy(void *, const void *, size_t);
+void *memset(void *, int, size_t);
+unsigned long strtoul(const char *, char **, int);
+void qsort(void *, size_t, size_t, int (*)(const void *, const void *));
+FILE *fopen(const char *, const char *);
+size_t fread(void *, size_t, size_t, FILE *);
+int fseek(FILE *, long, int);
+long ftell(FILE *);
+int fclose(FILE *);
+int _resetstkoflw(void);
+FILE *__acrt_iob_func(unsigned);
+int __stdio_common_vfprintf(uint64_t, FILE *, const char *, void *, va_list);
+int __stdio_common_vsprintf(uint64_t, char *, size_t, const char *, void *, va_list);
+int __stdio_common_vsscanf(uint64_t, const char *, size_t, const char *, void *, va_list);
+
+HANDLE GetStdHandle(DWORD);
+BOOL SetStdHandle(DWORD, HANDLE);
+HANDLE CreateFileA(const char *, DWORD, DWORD, void *, DWORD, DWORD, HANDLE);
+BOOL ReadFile(HANDLE, void *, DWORD, DWORD *, void *);
+BOOL WriteFile(HANDLE, const void *, DWORD, DWORD *, void *);
+DWORD GetCurrentProcessId(void);
+DWORD GetCurrentThreadId(void);
+HANDLE GetCurrentProcess(void);
+HANDLE GetModuleHandleA(const char *);
+HANDLE LoadLibraryA(const char *);
+void *GetProcAddress(HANDLE, const char *);
+void *VirtualAlloc(void *, size_t, DWORD, DWORD);
+BOOL FlushInstructionCache(HANDLE, const void *, size_t);
+unsigned char RtlAddFunctionTable(void *, DWORD, uint64_t);
+BOOL SetConsoleCtrlHandler(BOOL (*)(DWORD), BOOL);
+void *SetUnhandledExceptionFilter(long (*)(void *));
+void *AddVectoredExceptionHandler(uint32_t, long (*)(void *));
+__attribute__((returns_twice)) void RtlCaptureContext(void *);
+void RtlRestoreContext(void *, void *);
+
+#define SEEK_SET 0
+#define SEEK_END 2
+#define stderr __acrt_iob_func(2)
+
+// The UCRT's `printf` family is inline in its headers, over these.
+static int fprintf(FILE *f, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = __stdio_common_vfprintf(0, f, fmt, NULL, ap);
+    va_end(ap);
+    return n;
+}
+
+static int snprintf(char *buf, size_t cap, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    // 2: C99 `snprintf` (truncates, terminates, returns the full length).
+    int n = __stdio_common_vsprintf(2, buf, cap, fmt, NULL, ap);
+    va_end(ap);
+    return n;
+}
+
+static int sscanf(const char *s, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = __stdio_common_vsscanf(0, s, (size_t)-1, fmt, NULL, ap);
+    va_end(ap);
+    return n;
+}
 #endif
 
 void rok_runtime_init(void);
@@ -107,6 +206,24 @@ static void define(const char *name, void *addr) {
 
 // Executable memory: Apple arm64 toggles a `MAP_JIT` mapping between
 // writable and executable per thread; elsewhere it is mapped RWX.
+// `map_near`: `size` bytes at `at` (rounded up to what the system maps)
+// if that is free, else anywhere; NULL: none.
+#if defined(_WIN32)
+#define jit_writable(on) ((void)0)
+#define flush_code(p, n) FlushInstructionCache(GetCurrentProcess(), p, n)
+
+static char *map_near(char *at, size_t size, int code) {
+    // `VirtualAlloc` takes an address, not a hint: the first free 64 KiB
+    // boundary from `at` on, within 1 GiB.
+    const DWORD commit_reserve = 0x3000, rwx = 0x40, rw = 0x04;
+    uintptr_t a = ((uintptr_t)at + 0xffff) & ~(uintptr_t)0xffff;
+    for (uintptr_t end = a + ((uintptr_t)1 << 30); a < end; a += 0x10000) {
+        char *p = VirtualAlloc((void *)a, size, commit_reserve, code ? rwx : rw);
+        if (p) return p;
+    }
+    return VirtualAlloc(NULL, size, commit_reserve, code ? rwx : rw);
+}
+#else
 #if defined(__APPLE__) && defined(__aarch64__)
 #include <libkern/OSCacheControl.h>
 #define MAP_CODE MAP_JIT
@@ -131,6 +248,14 @@ static void flush_code(char *p, size_t n) {
     (void)p;
     (void)n;
 #endif
+}
+#endif
+
+static char *map_near(char *at, size_t size, int code) {
+    at = (char *)(((uintptr_t)at + 0x3fff) & ~(uintptr_t)0x3fff);
+    char *p = mmap(at, size, PROT_READ | PROT_WRITE | (code ? PROT_EXEC : 0),
+                   MAP_PRIVATE | MAP_ANON | (code ? MAP_CODE : 0), -1, 0);
+    return p == MAP_FAILED ? NULL : p;
 }
 #endif
 
@@ -173,6 +298,46 @@ static void *host_symbol(const char *name) {
 
 // A thread-local's value for a cell: its TLV descriptor.
 static void *host_tls(const char *name) { return host_symbol(name); }
+#elif defined(_WIN32)
+#define SYM_PREFIX 0
+
+static void host_yield(void), host_leave_native(void);
+
+// The modules a Windows program links (rokc's import libraries), the
+// UCRT first as there: `ntdll` repeats some C functions.
+static const char *const modules[] = {
+    "ucrtbase.dll", "kernel32.dll", "api-ms-win-core-synch-l1-2-0.dll", "ws2_32.dll", "advapi32.dll",
+    "bcrypt.dll",   "userenv.dll",  "shell32.dll", "ole32.dll", "user32.dll", "ntdll.dll",
+};
+
+// The host's exports (rokc links it exporting everything), else those
+// of the modules. Cells reach the safepoint slow path and the way back
+// from a blocking call through the host, which ends an interrupted cell
+// there (`host_yield`).
+static void *host_symbol(const char *name) {
+    if (!strcmp(name, "rok_runtime_yield")) return (void *)host_yield;
+    if (!strcmp(name, "rok_leave_native")) return (void *)host_leave_native;
+    void *a = GetProcAddress(GetModuleHandleA(NULL), name);
+    for (size_t i = 0; !a && i < sizeof modules / sizeof *modules; i++) {
+        HANDLE m = LoadLibraryA(modules[i]);
+        if (m) a = GetProcAddress(m, name);
+    }
+    return a;
+}
+
+// The TLS directory rokc's startup object defines.
+extern const struct {
+    char *start, *end;
+    void *index, *callbacks;
+    uint32_t zero_fill, flags;
+} _tls_used;
+
+// A thread-local's value for a cell: its offset in the thread's TLS
+// block (what SECREL gives), the same in every thread.
+static void *host_tls(const char *name) {
+    char *a = host_symbol(name);
+    return a ? (void *)(a - _tls_used.start) : NULL;
+}
 #else
 #include <elf.h>
 
@@ -206,8 +371,12 @@ static void *resolve(const char *name, int tls) {
     void *a = now ? sym_addr(now) : NULL;
     if (a) return a;
     if (tls) return host_tls(name);
+#if defined(_WIN32)
+    return host_symbol(name);
+#else
     a = dlsym(RTLD_DEFAULT, name + SYM_PREFIX);
     return a ? a : host_symbol(name);
+#endif
 }
 
 // Relocation kinds, by what they compute (S symbol, A addend, P the
@@ -226,6 +395,8 @@ enum kind {
     K_GOT_LO12,
     K_TLS_PAGE21, // ... of T + A
     K_TLS_LO12,
+    K_RVA32,      // S + A - the object's data mapping, 32 bits: far through a stub
+    K_HI12,       // arm64 `add` of bits 12-23 of S + A
 };
 
 // An object mapped, its symbols defined, not yet linked.
@@ -274,14 +445,14 @@ static int map_sections(struct obj *o, const struct place *p, size_t nrel) {
     // runtime's data directly): `adrp` reaches 4 GiB, a rip-relative
     // 2 GiB. A hint only: elsewhere when taken, and then a reference
     // too far is reported.
+    // The code after the data: COFF's image-relative references count
+    // from the data.
     static char *near;
     if (!near) near = (char *)(((uintptr_t)&cells + ((size_t)1 << 29)) & ~(uintptr_t)0xffff);
-    o->data = mmap(near, o->data_cap, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (o->data != MAP_FAILED) near = o->data + ((o->data_cap + o->code_cap + 0x7fff) & ~(size_t)0x3fff);
-    o->code = o->data == MAP_FAILED ? MAP_FAILED
-                                    : mmap(o->data + ((o->data_cap + 0x3fff) & ~(size_t)0x3fff), o->code_cap,
-                                           PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON | MAP_CODE, -1, 0);
-    if (o->code == MAP_FAILED) {
+    o->data = map_near(near, o->data_cap, 0);
+    o->code = o->data ? map_near(o->data + o->data_cap, o->code_cap, 1) : NULL;
+    if (o->code) near = o->code + o->code_cap;
+    if (!o->code) {
         fprintf(stderr, "error: %s: cannot map executable memory\n", o->what);
         free(off);
         return 0;
@@ -374,6 +545,19 @@ static int fix(struct obj *o, char *p, enum kind k, int64_t sym, uint64_t s, int
         memcpy(p, &v, 4);
         return 1;
     }
+    case K_RVA32: {
+        // An unwind handler in the host's code: through a stub.
+        if (target - (uint64_t)(uintptr_t)o->data > UINT32_MAX && sym >= 0)
+            target = (uint64_t)(uintptr_t)stub(o, sym, target);
+        uint64_t v = target - (uint64_t)(uintptr_t)o->data;
+        if (v > UINT32_MAX) {
+            fprintf(stderr, "error: %s: an image-relative reference out of range\n", o->what);
+            return 0;
+        }
+        uint32_t w = (uint32_t)v;
+        memcpy(p, &w, 4);
+        return 1;
+    }
     case K_CALL32: case K_PC32: case K_GOT_PC32: case K_TLS_PC32: {
         int64_t d = (int64_t)(target - pc);
         if ((d > INT32_MAX || d < INT32_MIN) && k == K_CALL32) {
@@ -410,6 +594,9 @@ static int fix(struct obj *o, char *p, enum kind k, int64_t sym, uint64_t s, int
         ins = (ins & 0x9f00001f) | (((uint32_t)pages & 3) << 29) | ((((uint32_t)pages >> 2) & 0x7ffff) << 5);
         break;
     }
+    case K_HI12:
+        ins = (ins & 0xffc003ff) | ((uint32_t)((target >> 12) & 0xfff) << 10);
+        break;
     case K_LO12: case K_GOT_LO12: case K_TLS_LO12: {
         uint32_t lo = (uint32_t)(target & 0xfff);
         // A load / store scales its offset by the access size.
@@ -598,6 +785,241 @@ static int link_object(struct obj *o) {
     flush_code(o->code, o->code_cap);
     return ok;
 }
+#elif defined(_WIN32)
+// COFF (not big-object): sections with their relocations, addends in
+// the place; symbols with auxiliary records (indices count them).
+#if defined(__x86_64__)
+#define COFF_MACHINE 0x8664
+#define PDATA_ENTRY 12
+#else
+#define COFF_MACHINE 0xaa64
+#define PDATA_ENTRY 8
+#endif
+
+struct coff_header {
+    uint16_t machine, nsects;
+    uint32_t time, symoff, nsyms;
+    uint16_t optsize, flags;
+};
+
+struct coff_section {
+    char name[8];
+    uint32_t vsize, vaddr, size, off, reloff, lineoff;
+    uint16_t nrel, nline;
+    uint32_t flags;
+};
+
+struct __attribute__((packed)) coff_symbol {
+    char name[8];
+    uint32_t value;
+    int16_t sect;
+    uint16_t type;
+    uint8_t class, naux;
+};
+
+struct __attribute__((packed)) coff_reloc {
+    uint32_t at, sym;
+    uint16_t type;
+};
+
+enum {
+    SCN_CODE = 0x20,
+    SCN_BSS = 0x80,
+    SCN_INFO = 0x200,
+    SCN_REMOVE = 0x800,
+    SCN_NRELOC_OVFL = 0x01000000,
+    SCN_DISCARDABLE = 0x02000000,
+    SCN_EXECUTE = 0x20000000,
+    SYM_EXTERNAL = 2,
+    SYM_WEAK = 105,
+};
+
+static const struct coff_header *coff_header(const struct obj *o) { return (const void *)o->buf; }
+
+static const struct coff_section *coff_section(const struct obj *o, uint32_t k) {
+    return (const struct coff_section *)(o->buf + sizeof(struct coff_header)) + k;
+}
+
+static const struct coff_symbol *coff_symbol(const struct obj *o, uint32_t i) {
+    return (const struct coff_symbol *)(o->buf + coff_header(o)->symoff) + i;
+}
+
+static const char *coff_strings(const struct obj *o) { return (const char *)coff_symbol(o, coff_header(o)->nsyms); }
+
+// A symbol's or section's name: inline (up to 8 bytes) or in the string
+// table (symbols: 4 zero bytes and an offset; sections: `/<offset>`).
+static const char *coff_name(const struct obj *o, const char raw[8], int section, char buf[9]) {
+    uint32_t zero, off;
+    memcpy(&zero, raw, 4);
+    memcpy(&off, raw + 4, 4);
+    if (!section && !zero) return coff_strings(o) + off;
+    memcpy(buf, raw, 8);
+    buf[8] = 0;
+    if (section && buf[0] == '/') return coff_strings(o) + strtoul(buf + 1, NULL, 10);
+    return buf;
+}
+
+static const struct coff_reloc *coff_relocs(const struct obj *o, uint32_t k, uint32_t *n) {
+    const struct coff_section *s = coff_section(o, k);
+    const struct coff_reloc *r = (const void *)(o->buf + s->reloff);
+    *n = s->nrel;
+    // More than 0xffff: the count (this entry included) in the first.
+    if ((s->flags & SCN_NRELOC_OVFL) && s->nrel == 0xffff) {
+        *n = r->at - 1;
+        r++;
+    }
+    return r;
+}
+
+static int map_object(struct obj *o, const unsigned char *buf, size_t n, const char *what) {
+    memset(o, 0, sizeof *o);
+    o->buf = buf;
+    o->what = what;
+    const struct coff_header *h = (const void *)buf;
+    if (n < sizeof *h || h->machine != COFF_MACHINE || h->optsize) {
+        fprintf(stderr, "error: %s: not a COFF object of this machine\n", what);
+        return 0;
+    }
+    o->nsects = h->nsects;
+    struct place *p = calloc(o->nsects + 1, sizeof *p);
+    o->at = calloc(o->nsects + 1, sizeof *o->at);
+    size_t nrel = 0;
+    for (uint32_t k = 0; k < o->nsects; k++) {
+        const struct coff_section *s = coff_section(o, k);
+        uint32_t r;
+        coff_relocs(o, k, &r);
+        nrel += r;
+        // What runs is mapped: not debug info or linker directives, nor
+        // thread-locals (a cell uses the host's).
+        if ((s->flags & (SCN_INFO | SCN_REMOVE | SCN_DISCARDABLE)) || !strncmp(s->name, ".tls", 4)) continue;
+        uint32_t align = (s->flags >> 20) & 15;
+        p[k].size = s->size;
+        p[k].align = align ? (uint64_t)1 << (align - 1) : 16;
+        p[k].code = (s->flags & (SCN_CODE | SCN_EXECUTE)) != 0;
+        p[k].src = (s->flags & SCN_BSS) ? NULL : buf + s->off;
+    }
+    int ok = map_sections(o, p, nrel);
+    free(p);
+    if (!ok) return 0;
+    alloc_syms(o, h->nsyms);
+    char name[9];
+    for (uint32_t i = 0; i < o->nsyms; i += 1 + coff_symbol(o, i)->naux) {
+        const struct coff_symbol *s = coff_symbol(o, i);
+        if (s->sect <= 0 || (uint32_t)s->sect > o->nsects || !o->base[s->sect - 1]) continue;
+        def_sym(o, i, coff_name(o, s->name, 0, name), o->base[s->sect - 1] + s->value, s->class == SYM_EXTERNAL);
+    }
+    // A weak definition: a weak external whose default (its auxiliary
+    // record's first word) is defined here.
+    for (uint32_t i = 0; i < o->nsyms; i += 1 + coff_symbol(o, i)->naux) {
+        const struct coff_symbol *s = coff_symbol(o, i);
+        uint32_t tag;
+        if (s->class != SYM_WEAK || !s->naux) continue;
+        memcpy(&tag, s + 1, 4);
+        if (tag < o->nsyms && o->addr[tag]) def_sym(o, i, coff_name(o, s->name, 0, name), o->addr[tag], 1);
+    }
+    return 1;
+}
+
+static int by_start(const void *a, const void *b) {
+    uint32_t x, y;
+    memcpy(&x, a, 4);
+    memcpy(&y, b, 4);
+    return (x > y) - (x < y);
+}
+
+static int link_object(struct obj *o) {
+    int ok = 1;
+    char name[9];
+    jit_writable(1);
+    for (uint32_t k = 0; k < o->nsects && ok; k++) {
+        if (!o->base[k]) continue;
+        uint32_t nrel;
+        const struct coff_reloc *rel = coff_relocs(o, k, &nrel);
+        for (uint32_t r = 0; r < nrel && ok; r++) {
+            char *p = o->base[k] + rel[r].at;
+            enum kind kind;
+            int tls = 0;
+            int32_t field;
+            memcpy(&field, p, 4);
+            int64_t a = field;
+#if defined(__x86_64__)
+            switch (rel[r].type) {
+            case 0: continue; // ABSOLUTE
+            case 1: kind = K_ABS64; memcpy(&a, p, 8); break;
+            case 2: kind = K_ABS32; a = (uint32_t)field; break;
+            case 3: kind = K_RVA32; a = (uint32_t)field; break;
+            case 4: case 5: case 6: case 7: case 8: case 9: {
+                // REL32_<n>: n bytes of immediate after the field; a
+                // `call` / `jmp` reaches far through a stub.
+                int extra = rel[r].type - 4;
+                int branch = !extra && rel[r].at && ((unsigned char)p[-1] == 0xe8 || (unsigned char)p[-1] == 0xe9);
+                kind = branch ? K_CALL32 : K_PC32;
+                a = (int64_t)field - 4 - extra;
+                break;
+            }
+            case 0xb: kind = K_ABS32; tls = 1; break; // SECREL
+            default: kind = (enum kind)-1;
+            }
+#else
+            uint32_t ins = (uint32_t)field;
+            // A load / store scales its offset by the access size.
+            uint32_t scale = (ins & 0x04800000) == 0x04800000 ? 4 : ins >> 30;
+            switch (rel[r].type) {
+            case 0: continue; // ABSOLUTE
+            case 1: kind = K_ABS32; a = (uint32_t)field; break;
+            case 2: kind = K_RVA32; a = (uint32_t)field; break;
+            case 3: kind = K_B26; a = (int64_t)((int32_t)(ins << 6) >> 6) * 4; break;
+            case 4: // PAGEBASE_REL21
+                kind = K_PAGE21;
+                a = ((int64_t)(((ins >> 29) & 3) | ((ins >> 3) & 0x1ffffc)) << 43) >> 43;
+                break;
+            case 6: kind = K_LO12; a = (ins >> 10) & 0xfff; break;           // PAGEOFFSET_12A
+            case 7: kind = K_LO12; a = ((ins >> 10) & 0xfff) << scale; break; // PAGEOFFSET_12L
+            case 8: kind = K_ABS32; a = (uint32_t)field; tls = 1; break;     // SECREL
+            case 9: kind = K_LO12; a = (ins >> 10) & 0xfff; tls = 1; break;  // SECREL_LOW12A
+            case 0xa: kind = K_HI12; a = (int64_t)((ins >> 10) & 0xfff) << 12; tls = 1; break;
+            case 0xb: kind = K_LO12; a = ((ins >> 10) & 0xfff) << scale; tls = 1; break;
+            case 0xe: kind = K_ABS64; memcpy(&a, p, 8); break;
+            case 0x11: kind = K_PC32; a = (int64_t)field - 4; break; // REL32: from the next byte
+            default: kind = (enum kind)-1;
+            }
+#endif
+            if (kind == (enum kind)-1) {
+                fprintf(stderr, "error: %s: relocation type %u is not supported\n", o->what, rel[r].type);
+                ok = 0;
+                break;
+            }
+            uint32_t i = rel[r].sym;
+            const struct coff_symbol *s = coff_symbol(o, i);
+            uint64_t v;
+            int64_t sym = -1;
+            if (s->class == SYM_EXTERNAL || s->class == SYM_WEAK) {
+                sym = i;
+                v = sym_value(o, i, coff_name(o, s->name, 0, name), tls);
+                if (!v) {
+                    ok = 0;
+                    break;
+                }
+            } else {
+                // A section or local symbol of this object.
+                if (!o->addr[i]) continue;
+                v = (uint64_t)(uintptr_t)o->addr[i];
+            }
+            ok = fix(o, p, kind, sym, v, a);
+        }
+    }
+    // Unwind tables, for exceptions to pass through the cell's frames:
+    // image-relative to the data mapping, sorted by function start.
+    for (uint32_t k = 0; k < o->nsects && ok; k++) {
+        const struct coff_section *s = coff_section(o, k);
+        if (!o->base[k] || strncmp(coff_name(o, s->name, 1, name), ".pdata", 6)) continue;
+        qsort(o->base[k], s->size / PDATA_ENTRY, PDATA_ENTRY, by_start);
+        RtlAddFunctionTable(o->base[k], s->size / PDATA_ENTRY, (uint64_t)(uintptr_t)o->data);
+    }
+    jit_writable(0);
+    flush_code(o->code, o->code_cap);
+    return ok;
+}
 #else
 // ELF (ET_REL, 64-bit little-endian): allocated sections; RELA sections
 // name the section they apply to.
@@ -746,58 +1168,83 @@ static void (*jit_cell(const char *obj, size_t n))(void) {
     return ok ? (void (*)(void))entry : NULL;
 }
 
-// A prebuilt dependency's archive (BSD or GNU `ar`): every member, now
-// (mapped first, so they refer to each other).
+// A prebuilt dependency's archive (BSD, GNU or COFF `ar`): every member,
+// now (mapped first, so they refer to each other).
 static int link_lib(const char *path) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return 1;
-    off_t size = lseek(fd, 0, SEEK_END);
-    char *a = mmap(NULL, (size_t)size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (a == MAP_FAILED || size < 8 || memcmp(a, "!<arch>\n", 8)) return 1;
+    FILE *f = fopen(path, "rb");
+    if (!f) return 1;
+    fseek(f, 0, SEEK_END);
+    size_t size = (size_t)ftell(f);
+    char *a = malloc(size + 1);
+    fseek(f, 0, SEEK_SET);
+    int whole = a && fread(a, 1, size, f) == size;
+    fclose(f);
+    if (!whole || size < 8 || memcmp(a, "!<arch>\n", 8)) {
+        free(a);
+        return 1;
+    }
     struct obj objs[256];
-    int n = 0;
+    int n = 0, bad = 0;
     cells++;
-    for (size_t off = 8; off + 60 <= (size_t)size && n < 256;) {
+    for (size_t off = 8; off + 60 <= size && n < 256 && !bad;) {
         const char *h = a + off;
         size_t len = strtoul(h + 48, NULL, 10), skip = 0;
         if (!memcmp(h, "#1/", 3)) skip = strtoul(h + 3, NULL, 10);
         const char *name = skip ? h + 60 : h;
         const unsigned char *body = (const unsigned char *)h + 60 + skip;
-        // Not the symbol table (BSD `__.SYMDEF`, GNU `/` and `/SYM64/`) nor
-        // GNU's long-name table `//`.
+        // Not the symbol table (BSD `__.SYMDEF`, GNU and COFF `/`,
+        // `/SYM64/`) nor the long-name table `//`.
         int index = !strncmp(name, "__.SYMDEF", 9) || (name[0] == '/' && (name[1] == ' ' || name[1] == '/')) ||
                     !strncmp(name, "/SYM64/", 7);
         if (!index && len > skip) {
-            if (!map_object(&objs[n], body, len - skip, path)) return 1;
-            n++;
+            if (map_object(&objs[n], body, len - skip, path)) n++;
+            else bad = 1;
         }
         off += 60 + len;
         off += off & 1;
     }
-    int bad = 0;
     for (int i = 0; i < n; i++) {
         if (!bad && !link_object(&objs[i])) bad = 1;
         free_obj(&objs[i]);
     }
+    free(a);
     return bad;
 }
 
+// The command channel: our stdin.
+#if defined(_WIN32)
+static HANDLE ctl;
+
+static ssize_t ctl_read(void *buf, size_t n) {
+    DWORD got;
+    return ReadFile(ctl, buf, (DWORD)n, &got, NULL) ? (ssize_t)got : -1;
+}
+
+static void ctl_write(const void *buf, size_t n) {
+    DWORD put;
+    WriteFile(ctl, buf, (DWORD)n, &put, NULL);
+}
+#else
+static int ctl;
+
+static ssize_t ctl_read(void *buf, size_t n) { return read(ctl, buf, n); }
+#endif
+
 // A command line: `<word> <n>`.
-static int read_command(int ctl, char *line, size_t cap) {
+static int read_command(char *line, size_t cap) {
     size_t n = 0;
     char c;
-    while (read(ctl, &c, 1) == 1 && c != '\n')
+    while (ctl_read(&c, 1) == 1 && c != '\n')
         if (n < cap - 1) line[n++] = c;
     line[n] = 0;
     return n > 0;
 }
 
-static char *read_ir(int ctl, size_t n) {
+static char *read_ir(size_t n) {
     char *ir = malloc(n + 1);
     size_t got = 0;
     while (ir && got < n) {
-        ssize_t r = read(ctl, ir + got, n - got);
+        ssize_t r = ctl_read(ir + got, n - got);
         if (r <= 0) {
             free(ir);
             return NULL;
@@ -807,10 +1254,438 @@ static char *read_ir(int ctl, size_t n) {
     return ir;
 }
 
+#if defined(_WIN32)
+void rok_runtime_yield(void);
+void rok_leave_native(void);
+void rok_set_exit_hook(void (*)(int));
+extern __declspec(thread) unsigned char rok_tls_yield_flag;
+
+// A failed cell leaves the session as it was before it, like a forked
+// snapshot: before the cell, with every other thread suspended, the
+// session's writable memory is copied (private and image read / write
+// pages: the GC heap, malloc heaps, statics, thread-local blocks, runtime
+// and loader state); when the cell fails, the threads started since are
+// terminated, the copy is put back, memory committed since is
+// decommitted (or released with its allocation when that is new), and
+// the main thread resumes at its recovery point. Not saved: thread stacks
+// and TEBs (the main thread's frames above the recovery point stay as
+// they are; other threads keep theirs), cell code (written only when
+// linked) and this bookkeeping.
+//
+// An eager copy, not copy-on-write by page protection: the kernel writes
+// into buffers (ReadFile, recv, ..) without faulting, so a protected page
+// would fail those calls instead of being saved.
+// Each cell copies all writable memory (linear in the session's
+// heap); dirty tracking (MEM_WRITE_WATCH on the GC reservation, a copy
+// kept in step) when big heaps make cells slow.
+
+typedef struct {
+    char *base, *alloc;
+    DWORD alloc_protect;
+    uint16_t partition;
+    size_t size;
+    DWORD state, protect, type;
+} MEMORY_BASIC_INFORMATION;
+
+size_t VirtualQuery(const void *, MEMORY_BASIC_INFORMATION *, size_t);
+BOOL VirtualProtect(void *, size_t, DWORD, DWORD *);
+BOOL VirtualFree(void *, size_t, DWORD);
+int32_t NtGetNextThread(HANDLE, HANDLE, DWORD, DWORD, DWORD, HANDLE *);
+int32_t NtQueryInformationThread(HANDLE, int, void *, DWORD, DWORD *);
+DWORD GetThreadId(HANDLE);
+DWORD SuspendThread(HANDLE);
+DWORD ResumeThread(HANDLE);
+BOOL TerminateThread(HANDLE, DWORD);
+BOOL GetThreadContext(HANDLE, void *);
+DWORD WaitForSingleObject(HANDLE, DWORD);
+BOOL CloseHandle(HANDLE);
+void ExitProcess(unsigned);
+int _putenv_s(const char *, const char *);
+
+enum {
+    MEM_COMMIT = 0x1000,
+    MEM_RESERVE = 0x2000,
+    MEM_DECOMMIT = 0x4000,
+    MEM_RELEASE = 0x8000,
+    MEM_FREE = 0x10000,
+    MEM_PRIVATE = 0x20000,
+    MEM_IMAGE = 0x1000000,
+    PAGE_NOACCESS = 1,
+    PAGE_READWRITE = 4,
+    PAGE_WRITECOPY = 8,
+    PAGE_GUARD = 0x100,
+    THREADS = 1024,
+    PAGE = 4096,
+};
+
+// A region of the address space at the checkpoint; `copy`: where its
+// bytes are saved (SIZE_MAX: not saved).
+struct region {
+    char *base, *alloc;
+    size_t size, copy;
+    DWORD state, type, protect;
+};
+
+// Bookkeeping that outlives a rollback: its own allocation, not saved.
+static struct book {
+    // The recovery point (a CONTEXT: x64 1232 bytes, arm64 912), and a
+    // CONTEXT to read suspended threads into.
+    _Alignas(16) unsigned char recover[1232], probe[1232];
+    volatile int running, ended, overflowed;
+    // The threads stopped now, and those there were before the cell.
+    HANDLE handle[THREADS];
+    DWORD id[THREADS], before[THREADS];
+    size_t nthreads, nbefore;
+    // Allocations not saved or freed: stacks, TEBs, the bookkeeping.
+    char *excl[2 * THREADS + 4];
+    size_t nexcl;
+    char *copy;
+    size_t copy_cap, nregions, cap;
+    struct region regions[];
+} *book;
+
+enum { BOOK_SIZE = 16 << 20 };
+
+static DWORD main_thread;
+// The main thread's yield flag, and the bit of it that interrupts the
+// cell (the runtime raises and clears only bit 0).
+static unsigned char *main_yield;
+enum { INTERRUPT = 2 };
+
+static int listed(const DWORD *ids, size_t n, DWORD id) {
+    for (size_t i = 0; i < n; i++)
+        if (ids[i] == id) return 1;
+    return 0;
+}
+
+// Suspend every other thread, also those started meanwhile, into
+// `book->handle` / `id`. Nothing here takes a lock a stopped thread may
+// hold (no heap, no stdio).
+static void stop_others(void) {
+    book->nthreads = 0;
+    for (int more = 1; more;) {
+        more = 0;
+        HANDLE cur = NULL, next;
+        int kept = 0;
+        while (!NtGetNextThread((HANDLE)-1, cur, 0x1fffff, 0, 0, &next)) {
+            if (cur && !kept) CloseHandle(cur);
+            cur = next;
+            kept = 0;
+            DWORD id = GetThreadId(cur);
+            if (id == main_thread || listed(book->id, book->nthreads, id) || book->nthreads == THREADS) continue;
+            if (WaitForSingleObject(cur, 0) == 0) continue; // it has ended
+            SuspendThread(cur);
+            // Suspension completes by the time a context can be read.
+#if defined(__x86_64__)
+            *(DWORD *)(book->probe + 0x30) = 0x100001; // CONTEXT_CONTROL
+#else
+            *(DWORD *)book->probe = 0x400001;
+#endif
+            GetThreadContext(cur, book->probe);
+            book->handle[book->nthreads] = cur;
+            book->id[book->nthreads++] = id;
+            kept = more = 1;
+        }
+        if (cur && !kept) CloseHandle(cur);
+    }
+}
+
+static void resume_others(void) {
+    for (size_t i = 0; i < book->nthreads; i++) {
+        if (!book->handle[i]) continue;
+        ResumeThread(book->handle[i]);
+        CloseHandle(book->handle[i]);
+    }
+    book->nthreads = 0;
+}
+
+static void exclude(const void *at) {
+    MEMORY_BASIC_INFORMATION m;
+    if (at && VirtualQuery(at, &m, sizeof m) == sizeof m) book->excl[book->nexcl++] = m.alloc;
+}
+
+static int excluded(const char *alloc) {
+    for (size_t i = 0; i < book->nexcl; i++)
+        if (book->excl[i] == alloc) return 1;
+    return 0;
+}
+
+// A thread's TEB and stack (its NT_TIB's StackLimit).
+static void exclude_thread(HANDLE h) {
+    struct {
+        int32_t status;
+        char *teb;
+        void *rest[4];
+    } basic;
+    if (NtQueryInformationThread(h, 0, &basic, sizeof basic, NULL) || !basic.teb) return;
+    exclude(basic.teb);
+    exclude(*(char **)(basic.teb + 0x10));
+}
+
+static void exclusions(void) {
+    book->nexcl = 0;
+    exclude(book);
+    exclude(book->copy);
+    exclude_thread((HANDLE)-2);
+    for (size_t i = 0; i < book->nthreads; i++)
+        if (book->handle[i]) exclude_thread(book->handle[i]);
+}
+
+static int saved(const MEMORY_BASIC_INFORMATION *m) {
+    DWORD p = m->protect & 0xff;
+    return m->state == MEM_COMMIT && (m->type == MEM_PRIVATE || m->type == MEM_IMAGE) &&
+           (p == PAGE_READWRITE || p == PAGE_WRITECOPY) && !(m->protect & PAGE_GUARD) && !excluded(m->alloc);
+}
+
+// Save the session (the cell has not started). 0: no room; nothing to
+// roll back to, so the cell does not run.
+static int checkpoint(void) {
+    stop_others();
+    book->nbefore = book->nthreads;
+    memcpy(book->before, book->id, book->nthreads * sizeof *book->id);
+    exclusions();
+    MEMORY_BASIC_INFORMATION m;
+    size_t n = 0, total = 0;
+    int ok = 1;
+    for (char *a = NULL; ok && VirtualQuery(a, &m, sizeof m) == sizeof m; a = m.base + m.size) {
+        if (m.state == MEM_FREE) continue;
+        if (n == book->cap) ok = 0;
+        else {
+            int keep = saved(&m);
+            book->regions[n++] = (struct region){m.base, m.alloc, m.size, keep ? total : SIZE_MAX, m.state, m.type,
+                                                 m.protect};
+            if (keep) total += m.size;
+        }
+    }
+    book->nregions = n;
+    if (ok && total > book->copy_cap) {
+        if (book->copy) VirtualFree(book->copy, 0, MEM_RELEASE);
+        book->copy_cap = total + total / 4;
+        book->copy = VirtualAlloc(NULL, book->copy_cap, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (!book->copy) book->copy_cap = 0, ok = 0;
+    }
+    for (size_t i = 0; ok && i < n; i++) {
+        struct region *r = &book->regions[i];
+        if (r->copy != SIZE_MAX) memcpy(book->copy + r->copy, r->base, r->size);
+    }
+    resume_others();
+    return ok;
+}
+
+// The checkpoint's region holding `p` (NULL: none, it was free).
+static struct region *region_at(const char *p) {
+    size_t lo = 0, hi = book->nregions;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        struct region *r = &book->regions[mid];
+        if (p < r->base) hi = mid;
+        else if (p >= r->base + r->size) lo = mid + 1;
+        else return r;
+    }
+    return NULL;
+}
+
+static void lost(void) {
+    static const char msg[] = "error: the session cannot be restored\n";
+    DWORD put;
+    WriteFile(GetStdHandle((DWORD)-12), msg, sizeof msg - 1, &put, NULL);
+    ExitProcess(1);
+}
+
+// A saved region as it was: committed again (its allocation reserved
+// again if it was released), its protection, its bytes.
+static void put_back(const struct region *r) {
+    if (r->type == MEM_PRIVATE && !VirtualAlloc(r->base, r->size, MEM_COMMIT, PAGE_READWRITE)) {
+        size_t extent = 0;
+        for (size_t i = 0; i < book->nregions; i++) {
+            const struct region *q = &book->regions[i];
+            if (q->alloc == r->alloc && (size_t)(q->base + q->size - r->alloc) > extent)
+                extent = (size_t)(q->base + q->size - r->alloc);
+        }
+        VirtualAlloc(r->alloc, extent, MEM_RESERVE, PAGE_NOACCESS);
+        if (!VirtualAlloc(r->base, r->size, MEM_COMMIT, PAGE_READWRITE)) lost();
+    }
+    DWORD old;
+    if (!VirtualProtect(r->base, r->size, r->protect, &old)) lost();
+    // Pages the cell did not change are left alone (an image's stay
+    // shared).
+    const char *from = book->copy + r->copy;
+    for (size_t off = 0; off < r->size; off += PAGE)
+        if (memcmp(r->base + off, from + off, PAGE)) memcpy(r->base + off, from + off, PAGE);
+}
+
+// Private memory committed since the checkpoint: decommitted, or
+// released with its allocation when that is new.
+static void free_new(void) {
+    MEMORY_BASIC_INFORMATION m;
+    for (char *a = NULL; VirtualQuery(a, &m, sizeof m) == sizeof m; a = m.base + m.size) {
+        if (m.state != MEM_COMMIT || m.type != MEM_PRIVATE || excluded(m.alloc)) continue;
+        const struct region *first = region_at(m.alloc);
+        if (!first || first->alloc != m.alloc) {
+            VirtualFree(m.alloc, 0, MEM_RELEASE);
+            continue;
+        }
+        for (char *p = m.base, *end = m.base + m.size; p < end;) {
+            const struct region *r = region_at(p);
+            char *to = r && r->base + r->size < end ? r->base + r->size : end;
+            if (!r || r->state != MEM_COMMIT) VirtualFree(p, (size_t)(to - p), MEM_DECOMMIT);
+            p = to;
+        }
+    }
+}
+
+// Back to the checkpoint: the threads started since end, and memory is
+// as it was then.
+static void rollback(void) {
+    stop_others();
+    for (size_t i = 0; i < book->nthreads; i++) {
+        if (listed(book->before, book->nbefore, book->id[i])) continue;
+        TerminateThread(book->handle[i], 1);
+        WaitForSingleObject(book->handle[i], 5000);
+        CloseHandle(book->handle[i]);
+        book->handle[i] = NULL;
+    }
+    exclusions();
+    // New memory first: what was released since may have been reused.
+    free_new();
+    for (size_t i = 0; i < book->nregions; i++)
+        if (book->regions[i].copy != SIZE_MAX) put_back(&book->regions[i]);
+    resume_others();
+}
+
+// End the running cell: the session as before it, then back to the
+// recovery point (`run_cell`).
+static void fail_cell(void) {
+    book->running = 0;
+    book->ended = 1;
+    rollback();
+    RtlRestoreContext(book->recover, NULL);
+}
+
+// The runtime is about to end the process (panic, uncaught error,
+// `exit`, stack overflow): on the cell's thread it ends only the cell,
+// after the stdout flush `exit` would do (a stack overflow's report did
+// it).
+static void on_exit_hook(int status) {
+    (void)status;
+    if (!book->running || GetCurrentThreadId() != main_thread) return;
+    if (!book->overflowed) rok_stdio_flush();
+    fail_cell();
+}
+
+// A stack overflow on the cell's thread, noted before the runtime's
+// handler reports it (and ends the cell through `on_exit_hook`).
+static long on_overflow(void *pointers) {
+    if (book->running && GetCurrentThreadId() == main_thread && **(DWORD **)pointers == 0xc00000fd)
+        book->overflowed = 1;
+    return 0; // EXCEPTION_CONTINUE_SEARCH
+}
+
+// A fault nothing handled (unwinding through the cell's frames by its
+// unwind tables): on the cell's thread it ends the cell.
+static long on_fault(void *pointers) {
+    if (!book->running || GetCurrentThreadId() != main_thread) return 0; // EXCEPTION_CONTINUE_SEARCH
+    // EXCEPTION_POINTERS: the record first, its code first.
+    DWORD code = **(DWORD **)pointers;
+    fprintf(stderr, "error: the cell raised exception 0x%08x\n", (unsigned)code);
+    fail_cell();
+    return 0;
+}
+
+// The safepoint slow path and the way back from a blocking call that
+// cells call: the runtime's, then the end of an interrupted cell.
+static void host_yield(void) {
+    rok_runtime_yield();
+    if ((*main_yield & INTERRUPT) && GetCurrentThreadId() == main_thread) fail_cell();
+}
+
+static void host_leave_native(void) {
+    rok_leave_native();
+    if ((*main_yield & INTERRUPT) && GetCurrentThreadId() == main_thread) fail_cell();
+}
+
+// Ctrl-Break (Ctrl-C) on its own thread: the running cell ends at its
+// next safepoint poll or return from a blocking call, both of which see
+// the raised yield flag.
+static BOOL on_break(DWORD event) {
+    if (event > 1) return 0; // not CTRL_C_EVENT / CTRL_BREAK_EVENT
+    if (book->running) __atomic_fetch_or(main_yield, INTERRUPT, __ATOMIC_SEQ_CST);
+    return 1;
+}
+
+// Link and run the cell from a recovery point; 0: it failed (`fail_cell`
+// came back here).
+static int run_cell(const char *obj, size_t n) {
+    book->ended = 0;
+    RtlCaptureContext(book->recover);
+    if (book->ended) return 0;
+    void (*cell)(void) = jit_cell(obj, n);
+    if (!cell) fail_cell();
+    book->running = 1;
+    cell();
+    book->running = 0;
+    return 1;
+}
+
+int main(void) {
+    const DWORD std_input = (DWORD)-10;
+    ctl = GetStdHandle(std_input);
+    // The cells' stdin: NUL (GENERIC_READ, shared, OPEN_EXISTING).
+    SetStdHandle(std_input, CreateFileA("NUL", 0x80000000u, 3, NULL, 3, 0, NULL));
+    // No concurrent marking: its marker thread would live on across a
+    // rollback with its own idea of the heap.
+    _putenv_s("ROK_GC_CONCURRENT", "off");
+    rok_runtime_init();
+    book = VirtualAlloc(NULL, BOOK_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!book) return 1;
+    book->cap = (BOOK_SIZE - sizeof *book) / sizeof *book->regions;
+    main_thread = GetCurrentThreadId();
+    main_yield = &rok_tls_yield_flag;
+    rok_set_exit_hook(on_exit_hook);
+    SetUnhandledExceptionFilter(on_fault);
+    AddVectoredExceptionHandler(1, on_overflow);
+    SetConsoleCtrlHandler(on_break, 1);
+    for (;;) {
+        char line[8192], out[64];
+        size_t n = 0;
+        if (!read_command(line, sizeof line)) return 0;
+        char *ir = NULL;
+        if (sscanf(line, "lib %zu", &n) == 1) {
+            char *path = read_ir(n);
+            if (!path) return 1;
+            path[n] = 0;
+            int bad = link_lib(path);
+            free(path);
+            ctl_write(bad ? "err\n" : "ok 0\n", bad ? 4 : 5);
+            continue;
+        }
+        if (sscanf(line, "cell %zu", &n) == 1) ir = read_ir(n);
+        if (!ir) return 1;
+        rok_stdio_flush();
+        ctl_write(out, (size_t)snprintf(out, sizeof out, "pid %u\n", (unsigned)GetCurrentProcessId()));
+        __atomic_fetch_and(main_yield, ~INTERRUPT, __ATOMIC_SEQ_CST);
+        __rok_repl_out.len = 0;
+        int ok = checkpoint();
+        if (!ok) fprintf(stderr, "error: no room to save the session before the cell\n");
+        ok = ok && run_cell(ir, n);
+        free(ir);
+        if (!ok) {
+            // The stack's guard page again, after an overflow.
+            if (book->overflowed) _resetstkoflw();
+            book->overflowed = 0;
+            ctl_write("err\n", 4);
+            continue;
+        }
+        rok_stdio_flush();
+        ctl_write(out, (size_t)snprintf(out, sizeof out, "ok %zu\n", __rok_repl_out.len));
+        ctl_write(__rok_repl_out.ptr, __rok_repl_out.len);
+    }
+}
+#else
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
-    int ctl = dup(0);
+    ctl = dup(0);
     int nul = open("/dev/null", O_RDONLY);
     dup2(nul, 0);  // the cells' stdin
     close(nul);
@@ -819,10 +1694,10 @@ int main(int argc, char **argv) {
     for (;;) {
         char line[8192], c;
         size_t n = 0;
-        if (!read_command(ctl, line, sizeof line)) return 0;
+        if (!read_command(line, sizeof line)) return 0;
         char *ir = NULL;
         if (sscanf(line, "lib %zu", &n) == 1) {
-            char *path = read_ir(ctl, n);
+            char *path = read_ir(n);
             if (!path) return 1;
             path[n] = 0;
             int bad = link_lib(path);
@@ -830,7 +1705,7 @@ int main(int argc, char **argv) {
             dprintf(ctl, bad ? "err\n" : "ok 0\n");
             continue;
         }
-        if (sscanf(line, "cell %zu", &n) == 1) ir = read_ir(ctl, n);
+        if (sscanf(line, "cell %zu", &n) == 1) ir = read_ir(n);
         if (!ir) return 1;
         rok_stdio_flush();
         // A copy of the session from before the cell. When the cell's
@@ -869,3 +1744,4 @@ int main(int argc, char **argv) {
         if (write(ctl, __rok_repl_out.ptr, __rok_repl_out.len) < 0) return 1;
     }
 }
+#endif

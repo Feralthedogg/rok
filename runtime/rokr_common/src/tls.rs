@@ -14,7 +14,9 @@
 //! `__aeabi_read_tp` reads on Linux) (local-exec: the runtime is always
 //! linked into the executable), COFF `x86_64` / `aarch64` / `x86`
 //! (`.tls$`, through `_tls_index` and the TEB's TLS array; rokc's
-//! startup object defines `_tls_index` and the TLS directory).
+//! startup object defines `_tls_index` and the TLS directory). wasm32
+//! without threads: plain globals; `wasm32-wasi-threads`: rokc's startup
+//! object defines them (and their accessors) in wasm TLS (`__tls_base`).
 //!
 //! Sizes and alignments are spliced into the assembly as text: `{p}` /
 //! `{pa}` are the pointer width and its log2 alignment (803 §8.3.5),
@@ -34,7 +36,10 @@ static NEXT_WORKER_ID: AtomicU64 = AtomicU64::new(0);
 macro_rules! tls_slots {
     ($($name:ident => $acc:ident, $size:literal, $align:literal;)*) => {
         tls_slots!(@asm $($name => $acc, $size, $align;)*);
-        /// Address of this thread's `rok_tls_<name>` slot.
+        /// Address of this thread's `rok_tls_<name>` slot (on
+        /// `wasm32-wasi-threads` rokc's startup object defines the slots
+        /// and accessors: stable Rust cannot define wasm TLS).
+        #[cfg(not(rok_solo))]
         pub mod slot {
             unsafe extern "C" {
                 $(fn $acc() -> *mut u8;)*
@@ -44,6 +49,26 @@ macro_rules! tls_slots {
                     // SAFETY: the accessor takes no arguments and only
                     // returns the address of this thread's TLS slot.
                     unsafe { $acc() }
+                }
+            )*
+        }
+        /// One thread: each slot is a plain global (what LLVM makes of
+        /// compiled code's `thread_local` globals without the atomics
+        /// feature), 16 bytes, room for the largest (`{p2}`).
+        #[cfg(rok_solo)]
+        pub mod slot {
+            #[repr(C, align(8))]
+            struct Slot(core::cell::UnsafeCell<[u8; 16]>);
+            // SAFETY: one thread.
+            unsafe impl Sync for Slot {}
+            $(
+                #[unsafe(export_name = concat!("rok_tls_", stringify!($name)))]
+                #[allow(non_upper_case_globals)]
+                static $acc: Slot = Slot(core::cell::UnsafeCell::new([0; 16]));
+                // Not `const`: the other targets' accessors cannot be.
+                #[allow(clippy::missing_const_for_fn)]
+                pub fn $name() -> *mut u8 {
+                    $acc.0.get().cast()
                 }
             )*
         }
@@ -219,11 +244,15 @@ macro_rules! tls_slots {
     };
 }
 
+// The assembly's `{p}` / `{pa}` (wasm32 has no assembly).
+#[cfg(not(target_family = "wasm"))]
 const PTR: usize = size_of::<usize>();
+#[cfg(not(target_family = "wasm"))]
 const PTR_ALIGN: u32 = PTR.trailing_zeros();
 
 #[cfg(not(any(
     target_vendor = "apple",
+    target_family = "wasm",
     all(
         any(target_os = "linux", windows),
         any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "x86")
@@ -232,7 +261,9 @@ const PTR_ALIGN: u32 = PTR.trailing_zeros();
 )))]
 compile_error!("rokr: no `rok_tls_*` definitions for this target");
 
-// 803 §8.3.1; pointer slots are pointer-width (§8.3.5).
+// 803 §8.3.1; pointer slots are pointer-width (§8.3.5). `wasm32-wasi-threads`
+// gets them from rokc (`WASM_TLS_SLOTS`, rokc_driver toolchain.rs): keep
+// both in step.
 tls_slots! {
     yield_flag => rokr_tls_yield_flag_addr, 1, 0;
     tlab_cursor => rokr_tls_tlab_cursor_addr, "{p}", "{pa}";
@@ -272,6 +303,14 @@ pub fn stack_guard() -> *mut [usize; 2] {
 pub fn shadow_stack_top() -> *mut *mut u8 {
     slot::shadow_stack_top().cast()
 }
+
+/// The `rok_tls_yield_flag` bit of a stop (the runtime raises and clears
+/// it).
+///
+/// Other bits are the embedder's: the Windows REPL host raises one to
+/// end a running cell. Compiled code's polls take the slow path for any
+/// nonzero flag.
+pub const YIELD_STOP: u8 = 1;
 
 /// This thread's `rok_tls_yield_flag` (set by a collecting thread).
 pub fn yield_flag() -> &'static AtomicU8 {

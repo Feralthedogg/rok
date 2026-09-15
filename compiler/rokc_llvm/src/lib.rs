@@ -88,6 +88,12 @@ impl Target {
             "armv7" => ("generic", "+vfp3,+d32,+neon,+read-tp-tpidruro"),
             "riscv64" => ("generic-rv64", "+m,+a,+f,+d,+c"),
             "riscv32" => ("generic-rv32", "+m,+a,+c"),
+            // Spec 0.6.4: SIMD128 on by default; wasi-threads needs
+            // shared memory (atomics, bulk memory).
+            "wasm32" if triple.ends_with("-threads") => {
+                ("generic", "+simd128,+atomics,+bulk-memory,+mutable-globals")
+            }
+            "wasm32" => ("generic", "+simd128"),
             _ => ("generic", ""),
         };
         Self {
@@ -144,6 +150,18 @@ pub struct Compile<'a> {
     pub mlir_pipeline: &'a str,
     pub dialect_plugins: &'a [&'a Path],
     pub pass_plugins: &'a [&'a Path],
+    pub profile: Profile<'a>,
+}
+
+/// IR profile-guided optimization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Profile<'a> {
+    None,
+    /// Instrument: the program writes its raw profile to this file name
+    /// pattern (`%m`, `%p`; `LLVM_PROFILE_FILE` overrides it at run time).
+    Generate(&'a Path),
+    /// Optimize with this indexed profile.
+    Use(&'a Path),
 }
 
 /// The MLIR passes rokc runs before the translation to LLVM IR:
@@ -169,31 +187,32 @@ pub fn mlir_pipeline(optimize: bool, extra: &[String]) -> String {
 
 /// MLIR text in the standard dialects → `c.emit`.
 pub fn compile_mlir(src: &str, c: &Compile<'_>) -> Result<Vec<u8>, String> {
-    ffi::compile(true, src, c, 1).map(|mut v| v.remove(0))
+    ffi::compile(true, src, c, 1).map(|(mut v, _)| v.remove(0))
 }
 
-/// MLIR text → `c.opt`-optimized code split into `parts` objects,
-/// compiled in parallel (fewer when the module has fewer functions are
-/// not guaranteed: some objects may be empty).
+/// MLIR text → `c.emit`; an object split into `parts` objects compiled
+/// in parallel (some may be empty). Also what LLVM warned about.
 pub fn compile_mlir_split(
     src: &str,
     c: &Compile<'_>,
     parts: usize,
-) -> Result<Vec<Vec<u8>>, String> {
-    ffi::compile(
-        true,
-        src,
-        &Compile {
-            emit: Emit::Obj,
-            ..c.clone()
-        },
-        parts.max(1),
-    )
+) -> Result<(Vec<Vec<u8>>, String), String> {
+    ffi::compile(true, src, c, parts.max(1))
 }
 
 /// LLVM IR text → `c.emit` (`LlvmIr` only applies the TLS model).
 pub fn compile_llvm_ir(src: &str, c: &Compile<'_>) -> Result<Vec<u8>, String> {
-    ffi::compile(false, src, c, 1).map(|mut v| v.remove(0))
+    ffi::compile(false, src, c, 1).map(|(mut v, _)| v.remove(0))
+}
+
+/// The raw (`.profraw`) or indexed IR profiles `inputs` merged into the
+/// indexed profile `out`, as `llvm-profdata merge` does.
+pub fn profdata_merge(inputs: &[&Path], out: &Path) -> Result<(), String> {
+    let inputs = inputs
+        .iter()
+        .map(|p| cstr(p.as_os_str()))
+        .collect::<Result<Vec<_>, _>>()?;
+    ffi::profdata_merge(&inputs, &cstr(out.as_os_str())?)
 }
 
 /// The data layout LLVM gives `t` (what clang writes as `target datalayout`).
@@ -225,8 +244,8 @@ pub fn lld<S: AsRef<OsStr>>(args: &[S]) -> Result<String, String> {
 /// the target's flavor; `strip` drops what nothing references.
 ///
 /// Mach-O: the SDK is `SDKROOT`, else the selected developer
-/// directory's. Linux: `libc`, the toolchain's C runtime objects and C
-/// library for the target (`targets/build.sh`). COFF: no default
+/// directory's. Linux and wasm32: `libc`, the toolchain's C runtime
+/// objects and C library for the target (`targets/build.sh`). COFF: no default
 /// libraries; `inputs` bring the C runtime (import libraries,
 /// [`import_library`]) and the entry point.
 pub fn link_executable<S: AsRef<OsStr>>(
@@ -297,6 +316,15 @@ pub fn link_executable<S: AsRef<OsStr>>(
                 },
             ));
             a.push(if strip { "/opt:ref" } else { "/opt:noref" }.into());
+            a
+        } else if t.triple.starts_with("wasm32") {
+            let libc = libc.ok_or_else(|| format!("no C library for {}", t.triple))?;
+            let mut a = wasm_args(out, libc, t.triple.ends_with("-threads"))?;
+            a.extend(inputs);
+            a.push(libc.join("libc.a").into_os_string());
+            if t.triple == "wasm32-wasi" {
+                return link_component(&a, libc);
+            }
             a
         } else {
             return Err(format!("linking for {} is not supported yet", t.triple));
@@ -387,6 +415,90 @@ fn elf_args(t: &Target, out: &Path, libc: &Path) -> Result<(Vec<OsString>, Vec<O
     Ok((head, tail))
 }
 
+/// Set in the environment of `wasm-component-ld`, which runs rokc as its
+/// `wasm-ld`: rokc then only links ([`wasm_ld_main`]).
+pub const AS_WASM_LD: &str = "ROK_AS_WASM_LD";
+
+/// rokc run as `wasm-ld` ([`AS_WASM_LD`]): lld's wasm flavor over the
+/// arguments. The exit code.
+#[must_use]
+pub fn wasm_ld_main() -> i32 {
+    let mut args: Vec<OsString> = vec!["wasm-ld".into()];
+    args.extend(std::env::args_os().skip(1));
+    match lld(&args) {
+        Ok(text) => {
+            eprint!("{text}");
+            0
+        }
+        Err(text) => {
+            eprint!("{text}");
+            1
+        }
+    }
+}
+
+/// `wasm32-wasi` is a WASI preview 2 component: the toolchain's
+/// `wasm-component-ld` (the Rust toolchain's, shipped beside wasi-libc)
+/// links with rokc as its `wasm-ld` (`args` past the flavor), then wraps
+/// the module, adapting its preview 1 imports with the adapter it
+/// embeds. What it printed; an error carries it.
+fn link_component(args: &[OsString], libc: &Path) -> Result<String, String> {
+    let rokc = std::env::current_exe().map_err(|e| format!("cannot find rokc: {e}"))?;
+    let tool = libc.join(format!("wasm-component-ld{}", std::env::consts::EXE_SUFFIX));
+    let run = std::process::Command::new(&tool)
+        .arg("--wasm-ld-path")
+        .arg(&rokc)
+        .args(&args[1..])
+        .env(AS_WASM_LD, "1")
+        .output()
+        .map_err(|e| format!("{}: {e}", tool.display()))?;
+    let text =
+        String::from_utf8_lossy(&run.stderr).into_owned() + &String::from_utf8_lossy(&run.stdout);
+    if run.status.success() {
+        Ok(text)
+    } else {
+        Err(text)
+    }
+}
+
+/// wasm-ld's arguments before the inputs for a wasm32 command module
+/// against wasi-libc in `libc`: `_start` (its `crt1-command.o`) calls
+/// `__main_void`. The 8 MiB stack (rok's thread stack) comes first in
+/// linear memory, so an overflow runs off address 0 and traps. wasm-ld
+/// drops unreferenced sections by default. With `threads`
+/// (wasi-threads): a shared memory the host provides, up to wasm32's
+/// 4 GiB, and `wasi_thread_start`, where each new thread begins.
+fn wasm_args(out: &Path, libc: &Path, threads: bool) -> Result<Vec<OsString>, String> {
+    let crt1 = libc.join("crt1-command.o");
+    if !crt1.is_file() {
+        return Err(format!("no C library in {}", libc.display()));
+    }
+    let mut search = OsString::from("-L");
+    search.push(libc);
+    let mut a: Vec<OsString> = ["wasm-ld", "--stack-first", "-z", "stack-size=8388608"]
+        .map(OsString::from)
+        .into();
+    if threads {
+        a.extend(
+            [
+                "--shared-memory",
+                "--import-memory",
+                "--export-memory",
+                "--max-memory=4294967296",
+                "--export=wasi_thread_start",
+            ]
+            .map(OsString::from),
+        );
+    }
+    a.extend([
+        "-o".into(),
+        out.as_os_str().to_owned(),
+        crt1.into_os_string(),
+        search,
+    ]);
+    Ok(a)
+}
+
 /// `dsymutil <args>`: the DWARF of a Mach-O executable's objects into a
 /// `.dSYM` bundle. It reports on stderr.
 pub fn dsymutil<S: AsRef<OsStr>>(args: &[S]) -> Result<(), String> {
@@ -473,7 +585,7 @@ mod ffi {
     use std::ffi::{CString, c_char, c_int};
     use std::path::Path;
 
-    use super::{Compile, Emit, Target};
+    use super::{Compile, Emit, Profile, Target};
 
     #[repr(C)]
     struct RokBuf {
@@ -520,6 +632,8 @@ mod ffi {
         pass_plugins: *const *const c_char,
         n_pass_plugins: usize,
         parts: usize,
+        profile_generate: *const c_char,
+        profile_use: *const c_char,
     }
 
     unsafe extern "C" {
@@ -530,6 +644,7 @@ mod ffi {
             o: *const RokCompile,
             out: *mut RokBuf,
             err: *mut RokBuf,
+            warn: *mut RokBuf,
         ) -> c_int;
         fn rok_llvm_compile_ir(
             src: *const c_char,
@@ -537,6 +652,7 @@ mod ffi {
             o: *const RokCompile,
             out: *mut RokBuf,
             err: *mut RokBuf,
+            warn: *mut RokBuf,
         ) -> c_int;
         fn rok_llvm_data_layout(o: *const RokCompile, out: *mut RokBuf, err: *mut RokBuf) -> c_int;
         fn rok_llvm_process_triple(out: *mut RokBuf);
@@ -547,6 +663,12 @@ mod ffi {
             members: *const *const c_char,
             n: usize,
             kind: c_int,
+            err: *mut RokBuf,
+        ) -> c_int;
+        fn rok_llvm_profdata_merge(
+            inputs: *const *const c_char,
+            n: usize,
+            path: *const c_char,
             err: *mut RokBuf,
         ) -> c_int;
         fn rok_llvm_import_lib(
@@ -571,7 +693,7 @@ mod ffi {
         src: &str,
         o: &Compile<'_>,
         parts: usize,
-    ) -> Result<Vec<Vec<u8>>, String> {
+    ) -> Result<(Vec<Vec<u8>>, String), String> {
         let (triple, cpu, features) = (
             c(&o.target.triple)?,
             c(&o.target.cpu)?,
@@ -582,6 +704,13 @@ mod ffi {
         let passes = paths(o.pass_plugins)?;
         let dialect_ptrs: Vec<*const c_char> = dialects.iter().map(|s| s.as_ptr()).collect();
         let pass_ptrs: Vec<*const c_char> = passes.iter().map(|s| s.as_ptr()).collect();
+        let (generate, used) = match o.profile {
+            Profile::None => (None, None),
+            Profile::Generate(p) => (Some(p), None),
+            Profile::Use(p) => (None, Some(p)),
+        };
+        let path = |p: Option<&Path>| p.map_or_else(|| c(""), |p| super::cstr(p.as_os_str()));
+        let (generate, used) = (path(generate)?, path(used)?);
         let opts = RokCompile {
             triple: triple.as_ptr(),
             cpu: cpu.as_ptr(),
@@ -599,9 +728,11 @@ mod ffi {
             pass_plugins: pass_ptrs.as_ptr(),
             n_pass_plugins: pass_ptrs.len(),
             parts,
+            profile_generate: generate.as_ptr(),
+            profile_use: used.as_ptr(),
         };
         let mut out: Vec<RokBuf> = (0..parts).map(|_| RokBuf::new()).collect();
-        let mut err = RokBuf::new();
+        let (mut err, mut warn) = (RokBuf::new(), RokBuf::new());
         let f = if mlir {
             rok_llvm_compile_mlir
         } else {
@@ -615,12 +746,14 @@ mod ffi {
                 &raw const opts,
                 out.as_mut_ptr(),
                 &raw mut err,
+                &raw mut warn,
             )
         };
         let out: Vec<Vec<u8>> = out.into_iter().map(RokBuf::take).collect();
+        let warn = warn.text();
         if rc == 0 {
             drop(err.take());
-            Ok(out)
+            Ok((out, warn))
         } else {
             Err(err.text())
         }
@@ -641,6 +774,8 @@ mod ffi {
             pass_plugins: std::ptr::null(),
             n_pass_plugins: 0,
             parts: 1,
+            profile_generate: none.as_ptr(),
+            profile_use: none.as_ptr(),
         };
         let (mut out, mut err) = (RokBuf::new(), RokBuf::new());
         // SAFETY: as in `compile`.
@@ -698,6 +833,21 @@ mod ffi {
         }
     }
 
+    pub fn profdata_merge(inputs: &[CString], out: &CString) -> Result<(), String> {
+        let ptrs: Vec<*const c_char> = inputs.iter().map(|s| s.as_ptr()).collect();
+        let mut err = RokBuf::new();
+        // SAFETY: as in `lld`.
+        let rc = unsafe {
+            rok_llvm_profdata_merge(ptrs.as_ptr(), ptrs.len(), out.as_ptr(), &raw mut err)
+        };
+        if rc == 0 {
+            drop(err.take());
+            Ok(())
+        } else {
+            Err(err.text())
+        }
+    }
+
     pub fn import_library(def: &str, machine: u16, out: &CString) -> Result<(), String> {
         let mut err = RokBuf::new();
         // SAFETY: as in `lld`.
@@ -732,7 +882,16 @@ mod ffi {
         ))
     }
 
-    pub fn compile(_: bool, _: &str, _: &Compile<'_>, _: usize) -> Result<Vec<Vec<u8>>, String> {
+    pub fn compile(
+        _: bool,
+        _: &str,
+        _: &Compile<'_>,
+        _: usize,
+    ) -> Result<(Vec<Vec<u8>>, String), String> {
+        off()
+    }
+
+    pub fn profdata_merge(_: &[CString], _: &CString) -> Result<(), String> {
         off()
     }
 

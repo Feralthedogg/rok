@@ -138,11 +138,15 @@ pub const CARD_SIZE: usize = 1 << rokr_common::gc_abi::CARD_SHIFT;
 /// one reservation, the first of these sizes the OS grants. 64-bit: the
 /// block heap is capped at 64 GiB. 32-bit (spec 0.6.3, a heap of about
 /// 3.5 GB): at most 2 GiB, the rest of the address space left to LOS
-/// objects, `malloc` and the program.
+/// objects, `malloc` and the program. wasm32: at most 1 GiB, linear
+/// memory grown up front (`sys::reserve`), so a smaller engine limit
+/// gets a smaller heap.
 #[cfg(target_pointer_width = "64")]
 const RESERVE: usize = 64 << 30;
-#[cfg(target_pointer_width = "32")]
+#[cfg(all(target_pointer_width = "32", not(target_family = "wasm")))]
 const RESERVE: usize = 2 << 30;
+#[cfg(target_family = "wasm")]
+const RESERVE: usize = 1 << 30;
 const RESERVE_MIN: usize = 64 << 20;
 
 /// Line states.
@@ -560,6 +564,10 @@ fn configure(h: &mut Heap) {
         b"off" => Concurrent::Off,
         _ => Concurrent::Auto,
     };
+    // One thread: no marker thread to run beside the mutator.
+    if cfg!(rok_solo) {
+        h.concurrent = Concurrent::Off;
+    }
     if env_num(c"ROK_GC_STATS").is_some_and(|v| v != 0) {
         sys::atexit(print_stats);
     }
@@ -1294,11 +1302,13 @@ fn for_each_ref(o: *mut u8, lo: usize, hi: usize, mut f: impl FnMut(usize, bool)
     unsafe {
         let hd = &*header(o);
         if hd.type_id == SCAN_WORDS_TYPE_ID {
-            let hi = hi.min(obj_size(o)) & !7;
-            let mut off = lo.max(HEADER_SIZE).next_multiple_of(8);
+            // Pointer-size words: 4 bytes on 32-bit targets.
+            const W: usize = size_of::<usize>();
+            let hi = hi.min(obj_size(o)) & !(W - 1);
+            let mut off = lo.max(HEADER_SIZE).next_multiple_of(W);
             while off < hi {
                 f(off, false);
-                off += 8;
+                off += W;
             }
             return;
         }

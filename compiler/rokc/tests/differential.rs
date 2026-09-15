@@ -32,7 +32,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use common::{Env, Rng, exe_name, par_map, rokc_build, setup};
+use common::{Env, Rng, exe_name, par_map, rokc_build, run_command, setup};
 use rokc_rokon::{Field, Kind, Value};
 
 /// `(suite, op, why)`: mismatches that do not fail the test.
@@ -1226,7 +1226,7 @@ fn run_suite(env: &Env, py: &str, suite: &Suite, dir: &Path) -> Result<Vec<Strin
             err.lines().take(12).collect::<Vec<_>>().join("\n")
         ));
     }
-    let run = Command::new(&exe).output().map_err(|e| e.to_string())?;
+    let run = run_command(&exe).output().map_err(|e| e.to_string())?;
     let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
     if !run.status.success() {
         return Err(format!(

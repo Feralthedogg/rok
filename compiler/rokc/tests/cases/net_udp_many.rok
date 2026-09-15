@@ -1,3 +1,4 @@
+// needs: net threads
 // expect-exit: 0
 // expect-stdout:
 // udp blocking: ping from b -> pong

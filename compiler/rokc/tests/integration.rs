@@ -134,12 +134,12 @@ fn check_run(
     expected: i32,
     env: &[(&str, &str)],
 ) -> Result<(), String> {
-    let run = std::process::Command::new(exe)
+    let run = run_command(exe)
         .envs(env.iter().copied())
         .output()
         .map_err(|e| format!("exec: {e}"))?;
     let exit = run.status.code().ok_or("no exit code")?;
-    if exit != expected {
+    if !exit_matches(exit, expected) {
         return Err(format!("exit={exit} (expected {expected})"));
     }
     let got = String::from_utf8_lossy(&run.stderr);

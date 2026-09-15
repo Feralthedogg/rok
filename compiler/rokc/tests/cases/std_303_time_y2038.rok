@@ -1,0 +1,42 @@
+// spec: std 303-time §3.3 / refs-lang 0.0.6
+// only-os: macos linux
+// only-pointer-width: 64
+// expect-exit: 0
+// expect-stdout:
+// 4102444800 4102444800.000000007s
+// 366d true
+// 1954961153.000000007s true
+// utimes 0 mtime 4102444800 true
+
+// `SystemTime` is `i64` nanoseconds since the epoch: no 2038 limit, on
+// 32-bit targets too (`time64`). A file's mtime set to 2100 through C's
+// `utimes` reads back exactly.
+use rok::bare::ptr::{Ptr, addr_of};
+use rok::std::fs;
+use rok::std::io::IoError;
+use rok::std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
+
+extern "C" {
+    // `struct timeval times[2]`, each `{ tv_sec, tv_usec }` in 16 bytes
+    // (64-bit Linux / macOS; the latter's `int` usec is zero either way).
+    fn utimes(path: str, times: Ptr<i64>) -> i32;
+}
+
+fn main() throws (SystemTimeError | IoError) -> i32 {
+    // 2100-01-01T00:00:00Z.
+    let t = SystemTime::from_unix(4102444800, 7);
+    println(f"{try t.unix_seconds()} {try t.duration_since(UNIX_EPOCH)}");
+    let later = t + Duration::sec(86400 * 366);
+    println(f"{(try later.duration_since(t)).as_secs() / 86400}d {later > t}");
+    let y2038 = SystemTime::from_unix(2147483647, 0);
+    println(f"{try t.duration_since(y2038)} {y2038 < t}");
+
+    let path = "target_std_303_y2038.txt";
+    try fs::write(path, "x");
+    let times: [i64; 4] = [4102444800, 0, 4102444800, 0];
+    let r = unsafe { utimes(path, addr_of(times[0])) };
+    let m = try (try fs::metadata(path)).modified();
+    println(f"utimes {r} mtime {try m.unix_seconds()} {m == SystemTime::from_unix(4102444800, 0)}");
+    try fs::remove_file(path);
+    0
+}

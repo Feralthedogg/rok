@@ -104,6 +104,21 @@ pub struct FnRange {
     pub debug: Option<(crate::lir::FnDebug, Vec<i32>)>,
 }
 
+/// A section's bytes from one symbol definition to the next: what an ELF
+/// or COFF object puts in a section of its own, so the linker drops the
+/// unused ones (function / data sections).
+pub struct Piece {
+    pub sect: Sect,
+    pub start: u32,
+    pub end: u32,
+    /// log2 of the alignment.
+    pub align: u32,
+    /// The symbols defined at `start`, the first one names the piece.
+    pub syms: Vec<SymId>,
+    /// Relocations, offsets from `start`.
+    pub relocs: Vec<Reloc>,
+}
+
 #[derive(Default)]
 pub struct Obj {
     pub syms: Vec<Sym>,
@@ -150,6 +165,59 @@ impl Obj {
         let id = self.syms.len() as SymId - 1;
         self.by_name.insert(name.to_owned(), id);
         id
+    }
+
+    /// Every non-empty section split at its symbol definitions, and the
+    /// piece of each defined symbol.
+    #[must_use]
+    pub fn pieces(&self) -> (Vec<Piece>, Vec<Option<usize>>) {
+        let mut pieces: Vec<Piece> = Vec::new();
+        let mut of = vec![None; self.syms.len()];
+        for s in SECTS {
+            let sec = &self.sects[&s];
+            if sec.data.is_empty() {
+                continue;
+            }
+            let mut defs: Vec<(u32, SymId)> = self
+                .syms
+                .iter()
+                .enumerate()
+                .filter_map(|(i, y)| y.def.filter(|d| d.0 == s).map(|d| (d.1, i as SymId)))
+                .collect();
+            defs.sort_unstable();
+            let first = pieces.len();
+            let mut prev = None;
+            for (off, sym) in defs {
+                if prev == Some(off) {
+                    pieces.last_mut().expect("a piece").syms.push(sym);
+                } else {
+                    pieces.push(Piece {
+                        sect: s,
+                        // Bytes before the first definition go with it.
+                        start: if prev.is_none() { 0 } else { off },
+                        end: 0,
+                        align: 0,
+                        syms: vec![sym],
+                        relocs: Vec::new(),
+                    });
+                }
+                prev = Some(off);
+                of[sym as usize] = Some(pieces.len() - 1);
+            }
+            let ps = &mut pieces[first..];
+            for k in 0..ps.len() {
+                ps[k].end = ps.get(k + 1).map_or(sec.data.len() as u32, |n| n.start);
+                ps[k].align = sec.align.min(ps[k].start.trailing_zeros());
+            }
+            for r in &sec.relocs {
+                let k = ps.partition_point(|p| p.start <= r.off) - 1;
+                ps[k].relocs.push(Reloc {
+                    off: r.off - ps[k].start,
+                    ..*r
+                });
+            }
+        }
+        (pieces, of)
     }
 
     pub fn sect(&mut self, s: Sect) -> &mut Section {

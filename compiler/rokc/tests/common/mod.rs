@@ -20,6 +20,14 @@
 //!     is listed (POSIX commands, paths, signals)
 //!   - `// only-pointer-width: 64` — skipped on targets of another width
 //!     (sizes, `usize::BITS`, layouts in the expected output)
+//!   - `// needs: threads net process fs posix-fs exit8` — skipped on a
+//!     target without one of them: threads only on `wasm32-wasi-threads`
+//!     among the wasm32 targets, sockets only on `wasm32-wasi`, no
+//!     processes or signals on wasm32 (stdlib 0.1.4, 3.x availability;
+//!     `process` also covers POSIX C calls), a browser no file system
+//!     (`fs`), WASI no `dup` / `flock` / `mmap` (`posix-fs`); `exit8` is
+//!     an exit code above 125 (wasmtime takes those from a WASI preview 1
+//!     module as traps)
 //!   - `// spec: <section>`     — the spec section a case checks (a tag)
 //!
 //! Environment:
@@ -29,6 +37,11 @@
 //!     at that optimization level instead of the default `-O0`.
 //!   - `ROK_TEST_TARGET=<triple>` — build for that target (with a runtime
 //!     built for it), e.g. `x86_64-apple-darwin` run under Rosetta.
+//!     `wasm32-wasi` and `wasm32-wasi-threads` run each module with
+//!     `ROK_TEST_WASM_RUNNER` (a `wasmtime` that still has wasi-threads:
+//!     46.0.3, the last);
+//!     `wasm32-unknown-unknown` with `node` and the toolchain's `rok.mjs`
+//!     host (all need `targets/build.sh <triple>` for the C library).
 #![allow(dead_code)]
 
 use std::env;
@@ -111,7 +124,7 @@ pub fn setup_runtime() -> Env {
         let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
         Command::new(cargo)
             .args(["build", "-p", "rokr"])
-            .args(test_target().map(|t| format!("--target={t}")))
+            .args(rust_target().map(|t| format!("--target={t}")))
             .current_dir(&workspace)
             .status()
             .expect("spawn cargo build -p rokr")
@@ -121,7 +134,7 @@ pub fn setup_runtime() -> Env {
     let target =
         env::var_os("CARGO_TARGET_DIR").map_or_else(|| workspace.join("target"), PathBuf::from);
     let rokr = target
-        .join(test_target().unwrap_or_default())
+        .join(rust_target().unwrap_or_default())
         .join("debug")
         .join(rokc_core::runtime_lib(target_os() == "windows"));
     assert!(rokr.exists(), "missing {rokr:?} after cargo build -p rokr");
@@ -180,6 +193,26 @@ pub fn test_target() -> Option<String> {
     env::var("ROK_TEST_TARGET").ok().filter(|t| !t.is_empty())
 }
 
+/// The Rust target the runtime is built for: WASI preview 2 for
+/// `wasm32-wasi`, preview 1 with threads for `wasm32-wasi-threads`,
+/// preview 1 for the browser.
+pub fn rust_target() -> Option<String> {
+    test_target().map(|t| {
+        match t.as_str() {
+            "wasm32-wasi" => "wasm32-wasip2",
+            "wasm32-wasi-threads" => "wasm32-wasip1-threads",
+            "wasm32-unknown-unknown" => "wasm32-wasip1",
+            _ => return t,
+        }
+        .to_owned()
+    })
+}
+
+/// The cases are built for wasm32.
+pub fn wasm() -> bool {
+    test_target().is_some_and(|t| t.starts_with("wasm32-"))
+}
+
 /// The OS the cases are built for, as `target_os` names it.
 pub fn target_os() -> String {
     let Some(t) = test_target() else {
@@ -187,8 +220,10 @@ pub fn target_os() -> String {
     };
     let os = if t.contains("-apple-") {
         "macos"
+    } else if t == "wasm32-unknown-unknown" {
+        "none"
     } else {
-        ["windows", "linux", "freebsd"]
+        ["windows", "linux", "freebsd", "wasi"]
             .into_iter()
             .find(|os| t.contains(os))
             .unwrap_or("")
@@ -211,21 +246,106 @@ pub fn target_pointer_width() -> u32 {
 }
 
 /// A case's `// only-os: <os> ..` excludes the target's OS, its
-/// `// only-pointer-width: <bits>` the target's width.
+/// `// only-pointer-width: <bits>` the target's width, its `// needs:`
+/// something the target lacks.
 pub fn skipped_on_target(source: &str) -> bool {
     directive(source, "only-os:").is_some_and(|oses| {
         let os = target_os();
         !oses.split_whitespace().any(|o| o == os)
     }) || directive(source, "only-pointer-width:")
         .is_some_and(|w| w.trim() != target_pointer_width().to_string())
+        || directive(source, "needs:").is_some_and(|needs| needs.split_whitespace().any(lacks))
+}
+
+/// The cases' target lacks `// needs:` capability `need`.
+fn lacks(need: &str) -> bool {
+    let t = test_target().unwrap_or_default();
+    match need {
+        "threads" => wasm() && t != "wasm32-wasi-threads",
+        "process" | "posix-fs" => wasm(),
+        "net" => wasm() && t != "wasm32-wasi",
+        "fs" => t == "wasm32-unknown-unknown",
+        "exit8" => t == "wasm32-wasi-threads",
+        _ => panic!("unknown `// needs: {need}`"),
+    }
+}
+
+/// A run's exit code `got` is the expected one. A `wasm32-wasi`
+/// component exits through `wasi:cli/exit`, which carries only success
+/// or failure (1).
+pub fn exit_matches(got: i32, expected: i32) -> bool {
+    if test_target().as_deref() == Some("wasm32-wasi") {
+        got == i32::from(expected != 0)
+    } else {
+        got == expected
+    }
 }
 
 /// File name of executable `name` for the cases' target.
 pub fn exe_name(name: &str) -> String {
     if target_os() == "windows" {
         format!("{name}.exe")
+    } else if wasm() {
+        format!("{name}.wasm")
     } else {
         name.to_owned()
+    }
+}
+
+/// A command running the built program `exe`: itself, or a wasm module
+/// under `wasmtime` (`ROK_TEST_WASM_RUNNER`; the host's environment and
+/// file system, the engine stack as deep as a native main thread's) or
+/// `node` with the toolchain's `rok.mjs`.
+pub fn run_command(exe: &Path) -> Command {
+    match test_target().as_deref() {
+        Some("wasm32-wasi") => {
+            let runner = env::var_os("ROK_TEST_WASM_RUNNER")
+                .expect("ROK_TEST_TARGET=wasm32-wasi needs ROK_TEST_WASM_RUNNER (wasmtime)");
+            let mut c = Command::new(runner);
+            c.args([
+                "run",
+                "-S",
+                "inherit-env",
+                "-S",
+                "inherit-network",
+                "-S",
+                "allow-ip-name-lookup",
+                "-W",
+                "max-wasm-stack=8388608",
+                "--dir",
+                "/::/",
+            ])
+            .arg(exe);
+            c
+        }
+        Some("wasm32-wasi-threads") => {
+            let runner = env::var_os("ROK_TEST_WASM_RUNNER").expect(
+                "ROK_TEST_TARGET=wasm32-wasi-threads needs ROK_TEST_WASM_RUNNER (wasmtime)",
+            );
+            let mut c = Command::new(runner);
+            c.args([
+                "run",
+                "-W",
+                "threads=y,shared-memory=y",
+                "-S",
+                "threads=y",
+                "-S",
+                "inherit-env",
+                "-W",
+                "max-wasm-stack=8388608",
+                "--dir",
+                "/::/",
+            ])
+            .arg(exe);
+            c
+        }
+        Some("wasm32-unknown-unknown") => {
+            let host = workspace().join("targets/rok.mjs");
+            let mut c = Command::new("node");
+            c.arg("--stack-size=8000").arg(host).arg(exe);
+            c
+        }
+        _ => Command::new(exe),
     }
 }
 

@@ -20,7 +20,7 @@ use crate::str::RokStr;
 
 const CAP: usize = 8192;
 
-#[cfg(unix)]
+#[cfg(any(unix, target_family = "wasm"))]
 const BAD_FD: i32 = libc::EBADF;
 #[cfg(windows)]
 const BAD_FD: i32 = rokr_common::win::ERROR_INVALID_HANDLE;
@@ -161,6 +161,7 @@ pub fn write(fd: i32, parts: &[&[u8]]) -> i32 {
 
 /// Flush stdout from the stack-overflow handler: only when no thread
 /// holds the lock (waiting could deadlock), never parked.
+#[cfg(not(target_family = "wasm"))]
 pub fn flush_in_signal() {
     // Left locked: the process is about to abort.
     if OUT.lock.try_lock() {

@@ -14,8 +14,8 @@ use std::process::{self, Command};
 use std::time::Instant;
 
 use rokc_interface::{
-    BuildOptions, CompileResult, DepBuild, EmitKind, Fingerprint, Package, Session, TempDir,
-    print_rendered, render, report,
+    BuildOptions, CompileResult, DepBuild, EmitKind, Fingerprint, Package, Profile, Session,
+    TempDir, print_rendered, render, report,
 };
 use rokc_tools::lint::Level;
 
@@ -54,6 +54,10 @@ commands:
   inspect <file>         a prebuilt library's package, exports, generic
                          items and archive members
   emit [path]            write an intermediate artifact (see --emit)
+  profdata merge [-o <file>] <file | dir>...
+                         merge the .profraw / .profdata files (a directory:
+                         those in it) into one profile (default:
+                         default.profdata) for -C profile-use
   version                print the version
   help                   print this help
 
@@ -88,6 +92,11 @@ build options:
   -C backend=native|llvm       code generator (default: native at -O0, else LLVM)
   -C subsystem=console|windows Windows executable subsystem (default: console;
                                windows: a GUI program entered through WinMain)
+  -C profile-generate[=<dir>]  instrument for profile-guided optimization: runs
+                               write <dir>/default_%m.profraw (default dir: the
+                               current one; LLVM_PROFILE_FILE overrides)
+  -C profile-use=<file>        optimize with a profile from `rokc profdata merge`
+                               (both select the LLVM backend at every level)
   --cfg <flag | key=value>     #[cfg] flag (repeatable)
   --print cfg                  print the active cfg (target keys, --cfg,
                                debug_assertions below -O1) and exit
@@ -104,6 +113,11 @@ build options:
                                (default: <sysroot>/lib/librokr.a)
   -L <dir>                     native library search directory, before
                                LIBRARY_PATH (repeatable)
+  -l [static=|dylib=]<name>    link a native library, as `#[link]` does
+                               (repeatable)
+  --native-runtime <file>      a shared library the executable loads:
+                               copied beside it, and the executable looks
+                               in its own directory (repeatable)
   --extern <name>=<path>       dependency package: its directory or `lib.rok`
                                (prebuilt into target/<profile>/deps/ first,
                                each after the ones before it), or a prebuilt
@@ -285,6 +299,12 @@ fn parse_args(raw: Vec<String>) -> Args {
             "--rokr" => a.opts.rokr = value(&name, inline, &mut it),
             "-L" => a.opts.lib_dirs.push(value(&name, inline, &mut it).into()),
             s if s.starts_with("-L") => a.opts.lib_dirs.push(s[2..].into()),
+            "-l" => a.opts.libs.push(parse_lib(&value(&name, inline, &mut it))),
+            s if s.starts_with("-l") => a.opts.libs.push(parse_lib(&s[2..])),
+            "--native-runtime" => a
+                .opts
+                .runtime_files
+                .push(value(&name, inline, &mut it).into()),
             "--load-mlir-plugin" | "--load-mlir-pass-plugin" => {
                 let v = value(&name, inline, &mut it);
                 let p = rokc_interface::find_mlir_plugin(&v).unwrap_or_else(|e| fail(&e));
@@ -321,6 +341,17 @@ fn parse_args(raw: Vec<String>) -> Args {
                         a.opts.overflow_checks = Some(false);
                     }
                     "backend=native" | "backend=llvm" => a.opts.backend = Some(v[8..].to_owned()),
+                    // clang's file name: `%m` merges the runs of one binary.
+                    "profile-generate" => {
+                        a.opts.profile = Profile::Generate("default_%m.profraw".into());
+                    }
+                    _ if v.starts_with("profile-generate=") => {
+                        a.opts.profile =
+                            Profile::Generate(Path::new(&v[17..]).join("default_%m.profraw"));
+                    }
+                    _ if v.starts_with("profile-use=") => {
+                        a.opts.profile = Profile::Use(v[12..].into());
+                    }
                     _ => match v
                         .strip_prefix("subsystem=")
                         .and_then(rokc_interface::Subsystem::parse)
@@ -388,6 +419,15 @@ fn parse_args(raw: Vec<String>) -> Args {
     a
 }
 
+/// `-l [static=|dylib=]<name>`: `(name, static)`.
+fn parse_lib(v: &str) -> (String, bool) {
+    let (kind, name) = v.split_once('=').unwrap_or(("dylib", v));
+    if name.is_empty() || !matches!(kind, "static" | "dylib") {
+        usage_error(&format!("`-l {v}`: expected [static=|dylib=]<name>"));
+    }
+    (name.to_owned(), kind == "static")
+}
+
 /// `--extern name=path` (spec 902.3). The path is the dependency's
 /// package directory or its `lib.rok`, or a prebuilt `<name>.rhir` /
 /// `lib<name>.a` (spec 904).
@@ -427,6 +467,10 @@ fn parse_extern(v: &str) -> (String, PathBuf) {
 const COMPILER_STACK: usize = 1 << 30;
 
 fn main() {
+    // `wasm-component-ld` runs rokc as its `wasm-ld` (a `wasm32-wasi` link).
+    if std::env::var_os(rokc_interface::AS_WASM_LD).is_some() {
+        process::exit(rokc_interface::wasm_ld_main());
+    }
     // Spec 901.6: an internal error (rokc panic) exits 101.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -542,6 +586,7 @@ fn real_main() {
             }
         }
         "demangle" => cmd_demangle(&a),
+        "profdata" => cmd_profdata(&a),
         "rhir-text" | "inspect" => {
             let [file] = a.positional.as_slice() else {
                 usage_error(&format!("usage: rokc {} <file.rhir | lib<name>.a>", a.cmd));
@@ -614,12 +659,47 @@ fn with_defaults(mut a: Args) -> Args {
             Err(_) => {}
         }
     }
-    if triple.contains("-linux") {
+    if triple.contains("-linux") || triple.starts_with("wasm32") {
         if dir.is_dir() {
             a.opts.libc = Some(dir.clone());
         } else if links {
             fail(&missing());
         }
+    }
+    match &a.opts.profile {
+        Profile::Off => {}
+        _ if matches!(a.cmd.as_str(), "repl" | "jupyter") => fail(
+            "-C profile-generate / -C profile-use: the REPL does not support profile-guided \
+             optimization; build the program with `rokc build`",
+        ),
+        _ if a.opts.backend.as_deref() == Some("native") => usage_error(
+            "-C profile-generate / -C profile-use need the LLVM backend, not the native one \
+             (-C backend=native or ROK_BACKEND=native)",
+        ),
+        Profile::Use(p) if !p.is_file() => {
+            fail(&format!("-C profile-use: no profile {}", p.display()));
+        }
+        Profile::Generate(_) if links && triple.starts_with("wasm32") => fail(&format!(
+            "-C profile-generate is not supported for {triple}: there is no profile runtime \
+             for WebAssembly"
+        )),
+        Profile::Generate(_) if links => {
+            let rt = dir.join(if triple.contains("-windows") {
+                "clang_rt.profile.lib"
+            } else {
+                "libclang_rt.profile.a"
+            });
+            if !rt.is_file() {
+                fail(&format!(
+                    "-C profile-generate: no profile runtime for {triple}: {} is missing (this \
+                     toolchain does not ship it; in the repository, run targets/build.sh \
+                     {triple})",
+                    rt.display()
+                ));
+            }
+            a.opts.profile_rt = Some(rt);
+        }
+        _ => {}
     }
     a
 }
@@ -807,20 +887,20 @@ fn out_dir(a: &Args, pkg: Option<&Package>) -> PathBuf {
 }
 
 /// The file name of executable `name` for the build's target: `.exe` on
-/// Windows.
+/// Windows, `.wasm` for wasm32.
 fn exe_file(a: &Args, name: &str) -> String {
-    let windows = a
-        .target
-        .as_deref()
-        .map_or(cfg!(windows), |t| t.contains("-windows"));
-    if windows {
+    let t = a.target.as_deref().unwrap_or("");
+    if t.contains("-windows") || (t.is_empty() && cfg!(windows)) {
         format!("{name}.exe")
+    } else if t.starts_with("wasm32-") {
+        format!("{name}.wasm")
     } else {
         name.to_owned()
     }
 }
 
-/// Layout: `target/<profile>/<name>` (executable, `<name>.exe` for Windows),
+/// Layout: `target/<profile>/<name>` (executable, `<name>.exe` for Windows,
+/// `<name>.wasm` for wasm32),
 /// `target/<profile>/lib<name>.a` + `<name>.rhir` (library),
 /// `target/<profile>/build/<name>.<ext>` (`--emit`).
 fn cmd_build(mut a: Args) {
@@ -908,6 +988,10 @@ fn fingerprint(a: &Args, pkg: &Package, out: &Path) -> Fingerprint {
         pkg.dir.clone()
     }];
     let mut stamped = vec![PathBuf::from(&a.opts.rokr)];
+    stamped.extend(a.opts.profile_rt.clone());
+    if let Profile::Use(p) = &a.opts.profile {
+        stamped.push(p.clone());
+    }
     stamped.extend(a.opts.mlir_dialect_plugins.iter().cloned());
     stamped.extend(a.opts.mlir_pass_plugins.iter().cloned());
     for b in &a.bootstrap {
@@ -1220,6 +1304,58 @@ fn cmd_fmt(a: &Args) {
     }
     if errors > 0 || (a.check && changed > 0) {
         process::exit(1);
+    }
+}
+
+/// `rokc profdata merge [-o <file>] <file | dir>...`: the raw profiles of
+/// instrumented runs (and indexed profiles) into one indexed profile for
+/// `-C profile-use`; a directory stands for its `.profraw` / `.profdata`.
+fn cmd_profdata(a: &Args) {
+    let usage = "usage: rokc profdata merge [-o <file>] <file | dir>...";
+    let [sub, inputs @ ..] = a.positional.as_slice() else {
+        usage_error(usage);
+    };
+    if sub != "merge" || inputs.is_empty() {
+        usage_error(usage);
+    }
+    let mut files = Vec::new();
+    for i in inputs {
+        let p = Path::new(i);
+        if !p.is_dir() {
+            files.push(p.to_path_buf());
+            continue;
+        }
+        let entries = std::fs::read_dir(p).unwrap_or_else(|e| fail(&format!("{i}: {e}")));
+        let mut found: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|f| {
+                f.extension()
+                    .is_some_and(|x| x == "profraw" || x == "profdata")
+            })
+            .collect();
+        if found.is_empty() {
+            fail(&format!(
+                "profdata merge: no .profraw or .profdata file in {i}"
+            ));
+        }
+        found.sort();
+        files.extend(found);
+    }
+    let out = a
+        .output
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("default.profdata"));
+    let refs: Vec<&Path> = files.iter().map(PathBuf::as_path).collect();
+    rokc_interface::profdata_merge(&refs, &out)
+        .unwrap_or_else(|e| fail(&format!("profdata merge: {}", e.trim_end())));
+    if !a.quiet {
+        eprintln!(
+            "       Wrote {} ({} input{})",
+            out.display(),
+            files.len(),
+            if files.len() == 1 { "" } else { "s" }
+        );
     }
 }
 

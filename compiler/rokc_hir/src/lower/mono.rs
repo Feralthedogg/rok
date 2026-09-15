@@ -1277,6 +1277,22 @@ pub(super) fn decl_sig(env: &Env<'_>, i: usize, base: &FnSig) -> FnSig {
             ..
         } => (&**fn_def, Some(self_ty.clone()), module.clone(), subst),
     };
+    let (param_tys, ret_ty) = sig_tys(env, f, self_ty, module, subst);
+    FnSig {
+        ret_ty,
+        param_tys,
+        ..base.clone()
+    }
+}
+
+/// `f`'s parameter and result types, resolved in `module`.
+pub(super) fn sig_tys(
+    env: &Env<'_>,
+    f: &FnDef,
+    self_ty: Option<HirTy>,
+    module: String,
+    subst: &HashMap<String, HirTy>,
+) -> (Vec<HirTy>, HirTy) {
     let outer = rokc_diagnostic::set_current_span(f.span);
     let mut ctx = LowerCtx::new(env, subst, self_ty);
     ctx.current_module = module;
@@ -1298,11 +1314,7 @@ pub(super) fn decl_sig(env: &Env<'_>, i: usize, base: &FnSig) -> FnSig {
         .collect();
     let ret_ty = ctx.resolve_ast_ty(&super::throws::sig_ret_ast(f));
     rokc_diagnostic::set_current_span(outer);
-    FnSig {
-        ret_ty,
-        param_tys,
-        ..base.clone()
-    }
+    (param_tys, ret_ty)
 }
 
 pub(super) fn lower_param(ctx: &mut LowerCtx<'_>, p: &Param) -> HirParam {

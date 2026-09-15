@@ -1,5 +1,7 @@
 //! POSIX helpers behind `rok::std` (stdlib 300: fs, io, env, process).
-//! No ABI stability (805 §8.5.12 appendix).
+//! No ABI stability (805 §8.5.12 appendix). WASI through wasi-libc:
+//! what preview 1 lacks (processes, signals, `mmap`, locks, `dup`)
+//! fails with `-ENOSYS`.
 //!
 //! Conventions:
 //! - `str` arguments are rok strings; libc gets them through [`cs`]
@@ -24,18 +26,15 @@ use rokr_common::object_header::HEADER_SIZE;
 
 use crate::str::{RokStr, build};
 
-// The large-file calls: 32-bit glibc's plain ones take a 32-bit `off_t`
-// / `ino_t` and fail with EOVERFLOW past it (`readdir` on ext4 too); on
-// 64-bit glibc the `*64` ones are the same functions.
-#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-use libc::{fstat, fstatat, ftruncate, lseek, mmap, off_t, openat, readdir, stat};
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-use libc::{
-    fstat64 as fstat, fstatat64 as fstatat, ftruncate64 as ftruncate, lseek64 as lseek,
-    mmap64 as mmap, off64_t as off_t, openat64 as openat, readdir64 as readdir, stat64 as stat,
-};
-
 type CStrPtr = *const libc::c_char;
+
+#[cfg(unix)]
+const PATH_MAX: usize = libc::PATH_MAX as usize;
+#[cfg(target_os = "wasi")]
+const PATH_MAX: usize = 4096;
+
+#[cfg(target_os = "wasi")]
+const UNSUPPORTED: i32 = -libc::ENOSYS;
 
 /// `r` (a libc `-1`-on-error result) as `>= 0` or `-errno`.
 pub fn ret(r: isize) -> isize {
@@ -176,11 +175,12 @@ pub const extern "C" fn rok_os_errno_kind(code: i32) -> i32 {
 /// The message of error code `code` (`strerror` / `gai_strerror`).
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_strerror(code: i32) -> RokStr {
+    #[cfg(any(unix, target_env = "p2"))]
     if code >= EAI_BASE {
-        // glibc numbers EAI codes negative, BSD positive.
-        #[cfg(target_os = "linux")]
+        // glibc and wasi-libc number EAI codes negative, BSD positive.
+        #[cfg(any(target_os = "linux", target_os = "wasi"))]
         let c = EAI_BASE - code;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "wasi")))]
         let c = code - EAI_BASE;
         // SAFETY: gai_strerror returns a static C string.
         let s = unsafe { core::ffi::CStr::from_ptr(libc::gai_strerror(c)) };
@@ -223,7 +223,7 @@ pub extern "C" fn rok_os_open(dir: i32, path: RokStr, flags: i32, mode: u32) -> 
     }
     // SAFETY: `path` is a C string; the mode is read only with O_CREAT.
     let (r, _) = native(|| unsafe {
-        openat(
+        libc::openat(
             at(dir),
             cs(path).p(),
             o | libc::O_CLOEXEC,
@@ -321,7 +321,7 @@ pub extern "C" fn rok_os_fsync(fd: i32, data_only: i32) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_ftruncate(fd: i32, len: u64) -> i32 {
     // SAFETY: plain libc call.
-    ret(unsafe { ftruncate(fd, len as off_t) } as isize) as i32
+    ret(unsafe { libc::ftruncate(fd, len as libc::off_t) } as isize) as i32
 }
 
 /// `lseek`; `whence` 0 start, 1 current, 2 end. New offset or `-errno`.
@@ -333,24 +333,41 @@ pub extern "C" fn rok_os_lseek(fd: i32, off: i64, whence: i32) -> i64 {
         _ => libc::SEEK_SET,
     };
     // SAFETY: plain libc call.
-    let r = unsafe { lseek(fd, off as off_t, w) };
+    let r = unsafe { libc::lseek(fd, off as libc::off_t, w) };
     if r < 0 { -i64::from(errno()) } else { r as i64 }
 }
 
+#[cfg(unix)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_dup(fd: i32) -> i32 {
     // SAFETY: plain libc call.
     ret(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) } as isize) as i32
 }
 
+#[cfg(target_os = "wasi")]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_os_dup(_fd: i32) -> i32 {
+    UNSUPPORTED
+}
+
+#[cfg(unix)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_fchmod(fd: i32, mode: u32) -> i32 {
     // SAFETY: plain libc call.
     ret(unsafe { libc::fchmod(fd, mode as libc::mode_t) } as isize) as i32
 }
 
+/// WASI files have no permission bits (wasi-libc makes `st_mode` up):
+/// nothing to set.
+#[cfg(target_os = "wasi")]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_os_fchmod(_fd: i32, _mode: u32) -> i32 {
+    0
+}
+
 /// A read-only shared mapping of `len` bytes of `fd` at `offset`: its
 /// address, or `-errno`.
+#[cfg(unix)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_mmap(fd: i32, len: usize, offset: u64) -> i64 {
     if len == 0 {
@@ -358,13 +375,13 @@ pub extern "C" fn rok_os_mmap(fd: i32, len: usize, offset: u64) -> i64 {
     }
     // SAFETY: a fresh mapping; the kernel picks the address.
     let (p, e) = native(|| unsafe {
-        mmap(
+        libc::mmap(
             core::ptr::null_mut(),
             len,
             libc::PROT_READ,
             libc::MAP_SHARED,
             fd,
-            offset as off_t,
+            offset as libc::off_t,
         )
     });
     if p == libc::MAP_FAILED {
@@ -374,11 +391,24 @@ pub extern "C" fn rok_os_mmap(fd: i32, len: usize, offset: u64) -> i64 {
     }
 }
 
+#[cfg(target_os = "wasi")]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_os_mmap(_fd: i32, _len: usize, _offset: u64) -> i64 {
+    UNSUPPORTED as i64
+}
+
 /// Unmap a `rok_os_mmap` region: 0 or `-errno`.
+#[cfg(unix)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_munmap(addr: usize, len: usize) -> i32 {
     // SAFETY: `addr..addr + len` is a mapping from `rok_os_mmap`.
     ret(unsafe { libc::munmap(addr as *mut libc::c_void, len) } as isize) as i32
+}
+
+#[cfg(target_os = "wasi")]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_os_munmap(_addr: usize, _len: usize) -> i32 {
+    UNSUPPORTED
 }
 
 /// Copy `len` bytes at `addr + at` into `buf[off..]`.
@@ -400,6 +430,7 @@ pub const unsafe extern "C" fn rok_os_mmap_copy(
 
 /// `flock`: `op` 1 shared, 2 exclusive, 8 unlock, | 4 non-blocking.
 /// 1 = locked, 0 = would block (non-blocking), `-errno`.
+#[cfg(unix)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_flock(fd: i32, op: i32) -> i32 {
     let mut o = 0;
@@ -420,6 +451,12 @@ pub extern "C" fn rok_os_flock(fd: i32, op: i32) -> i32 {
         (_, libc::EWOULDBLOCK) if op & 4 != 0 => 0,
         _ => -e,
     }
+}
+
+#[cfg(target_os = "wasi")]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_os_flock(_fd: i32, _op: i32) -> i32 {
+    UNSUPPORTED
 }
 
 /// Copy `src` → `dst` from their current offsets to EOF: bytes or `-errno`.
@@ -516,7 +553,7 @@ pub extern "C" fn rok_os_clone(dir: i32, from: RokStr, to: RokStr) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_stat(dir: i32, path: RokStr, follow: i32, fd: i32, out: *mut u8) -> i32 {
     // SAFETY: zeroed `stat` is a valid out-buffer.
-    let mut st: stat = unsafe { core::mem::zeroed() };
+    let mut st: libc::stat = unsafe { core::mem::zeroed() };
     let flags = if follow != 0 {
         0
     } else {
@@ -525,9 +562,9 @@ pub extern "C" fn rok_os_stat(dir: i32, path: RokStr, follow: i32, fd: i32, out:
     // SAFETY: `path` is a C string; `st` is writable.
     let (r, e) = native(|| unsafe {
         if fd >= 0 {
-            fstat(fd, &mut st)
+            libc::fstat(fd, &mut st)
         } else {
-            fstatat(at(dir), cs(path).p(), &mut st, flags)
+            libc::fstatat(at(dir), cs(path).p(), &mut st, flags)
         }
     });
     if r < 0 {
@@ -539,6 +576,7 @@ pub extern "C" fn rok_os_stat(dir: i32, path: RokStr, follow: i32, fd: i32, out:
         libc::S_IFLNK => 3,
         _ => 0,
     };
+    #[cfg(unix)]
     let vals = [
         kind,
         st.st_size as i64,
@@ -548,6 +586,17 @@ pub extern "C" fn rok_os_stat(dir: i32, path: RokStr, follow: i32, fd: i32, out:
         st.st_atime as i64,
         st.st_ctime as i64,
         st.st_atime_nsec as i64,
+    ];
+    #[cfg(target_os = "wasi")]
+    let vals = [
+        kind,
+        st.st_size as i64,
+        i64::from(st.st_mode & 0o7777),
+        st.st_mtim.tv_sec,
+        st.st_mtim.tv_nsec as i64,
+        st.st_atim.tv_sec,
+        st.st_ctim.tv_sec,
+        st.st_atim.tv_nsec as i64,
     ];
     // SAFETY: the library passes a live `GcBuf<i64>` of 8 elements.
     unsafe { ptr::copy_nonoverlapping(vals.as_ptr(), out.add(HEADER_SIZE).cast(), vals.len()) };
@@ -597,7 +646,7 @@ pub extern "C" fn rok_os_link(dir: i32, target: RokStr, link: RokStr, hard: i32)
 pub extern "C" fn rok_os_opendir(dir: i32, path: RokStr) -> isize {
     // SAFETY: `path` is a C string; `fdopendir` owns `fd` on success.
     let (d, e) = native(|| unsafe {
-        let fd = openat(
+        let fd = libc::openat(
             at(dir),
             cs(path).p(),
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
@@ -626,7 +675,7 @@ pub extern "C" fn rok_os_readdir(d: isize, buf: *mut u8, off: usize, len: usize)
         // SAFETY: errno reset distinguishes end from failure.
         unsafe { set_errno(0) };
         // SAFETY: `d` is a live `DIR*` from `rok_os_opendir`.
-        let ent = unsafe { readdir(d as *mut libc::DIR) };
+        let ent = unsafe { libc::readdir(d as *mut libc::DIR) };
         if ent.is_null() {
             return -(errno() as isize);
         }
@@ -663,7 +712,7 @@ unsafe fn set_errno(v: i32) {
 /// The working directory into `buf[off..off + len]`: its full length or `-errno`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_getcwd(buf: *mut u8, off: usize, len: usize) -> isize {
-    let mut cwd = [0u8; libc::PATH_MAX as usize + 1];
+    let mut cwd = [0u8; PATH_MAX + 1];
     // SAFETY: `cwd` is writable for its length.
     if unsafe { libc::getcwd(cwd.as_mut_ptr().cast(), cwd.len()) }.is_null() {
         return -(errno() as isize);
@@ -680,7 +729,7 @@ pub extern "C" fn rok_os_chdir(path: RokStr) -> i32 {
 /// `realpath(path)` into `buf[off..off + len]`: its full length or `-errno`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_realpath(path: RokStr, buf: *mut u8, off: usize, len: usize) -> isize {
-    let mut real = [0u8; libc::PATH_MAX as usize + 1];
+    let mut real = [0u8; PATH_MAX + 1];
     // SAFETY: `real` has PATH_MAX bytes.
     let (p, e) = native(|| unsafe { libc::realpath(cs(path).p(), real.as_mut_ptr().cast()) });
     if p.is_null() {
@@ -697,12 +746,13 @@ unsafe extern "C" {
 
 /// Absolute path of the running executable into `buf[off..off + len]`:
 /// its full length or `-errno`.
+#[cfg(unix)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_current_exe(buf: *mut u8, off: usize, len: usize) -> isize {
-    let mut path = [0u8; libc::PATH_MAX as usize + 1];
+    let mut path = [0u8; PATH_MAX + 1];
     #[cfg(target_vendor = "apple")]
     {
-        let mut raw = [0u8; libc::PATH_MAX as usize + 1];
+        let mut raw = [0u8; PATH_MAX + 1];
         let mut size = raw.len() as u32;
         // SAFETY: `raw` is writable for `size` bytes.
         if unsafe { ns_get_executable_path(raw.as_mut_ptr().cast(), &mut size) } != 0 {
@@ -730,40 +780,57 @@ pub extern "C" fn rok_os_current_exe(buf: *mut u8, off: usize, len: usize) -> is
     put(buf, off, len, until_nul(&path))
 }
 
+#[cfg(target_os = "wasi")]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_os_current_exe(_buf: *mut u8, _off: usize, _len: usize) -> isize {
+    UNSUPPORTED as isize
+}
+
 // ---------------------------------------------------------------------
 // Environment
 // ---------------------------------------------------------------------
 
-/// `environ` (Apple: through `_NSGetEnviron`, as executables only see it there).
+/// `environ` (Apple: through `_NSGetEnviron`, as executables only see it
+/// there; WASI: wasi-libc's, filled on first use).
 fn environ() -> *mut *const CStrPtr {
     #[cfg(target_vendor = "apple")]
     {
         // SAFETY: always valid in a running process.
         unsafe { libc::_NSGetEnviron().cast() }
     }
-    #[cfg(not(target_vendor = "apple"))]
+    #[cfg(all(unix, not(target_vendor = "apple")))]
     {
         unsafe extern "C" {
             static mut environ: *const CStrPtr;
         }
         &raw mut environ
     }
+    #[cfg(target_os = "wasi")]
+    {
+        unsafe extern "C" {
+            static mut __wasilibc_environ: *const CStrPtr;
+            fn __wasilibc_ensure_environ();
+        }
+        // SAFETY: fills `__wasilibc_environ` once.
+        unsafe { __wasilibc_ensure_environ() };
+        &raw mut __wasilibc_environ
+    }
 }
 
 /// The C `main`'s argc / argv, captured before `main` runs.
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(all(unix, not(target_vendor = "apple")))]
 static mut ARGS: (i32, *const CStrPtr) = (0, ptr::null());
 
 /// Captured from the initial stack before `main`: the kernel lays out
 /// `argc, argv[0..argc], NULL, envp..`, and `environ` still points at
 /// `envp` then. glibc would also pass the three to `.init_array`
 /// entries, musl passes nothing; the walk works under both.
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(all(unix, not(target_vendor = "apple")))]
 #[used]
 #[unsafe(link_section = ".init_array")]
 static CAPTURE_ARGS: extern "C" fn() = capture_args;
 
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(all(unix, not(target_vendor = "apple")))]
 extern "C" fn capture_args() {
     // SAFETY: runs once, single-threaded, before `main`, while `environ`
     // is still the kernel's `envp`.
@@ -780,6 +847,7 @@ extern "C" fn capture_args() {
 ///
 /// # Safety
 /// `envp` is null or the `envp` of the process's initial stack layout.
+#[cfg(unix)]
 #[cfg_attr(target_vendor = "apple", allow(dead_code))]
 unsafe fn argv_before(envp: *const CStrPtr) -> Option<(i32, *const CStrPtr)> {
     if envp.is_null() {
@@ -801,11 +869,45 @@ fn args() -> (usize, *const CStrPtr) {
         // SAFETY: set by dyld before `main`.
         unsafe { (*libc::_NSGetArgc() as usize, (*libc::_NSGetArgv()).cast()) }
     }
-    #[cfg(not(target_vendor = "apple"))]
+    #[cfg(all(unix, not(target_vendor = "apple")))]
     {
         // SAFETY: written once before `main`.
         let (c, v) = unsafe { ARGS };
         (c.max(0) as usize, v)
+    }
+    #[cfg(target_os = "wasi")]
+    wasi_args()
+}
+
+#[cfg(target_os = "wasi")]
+#[link(wasm_import_module = "wasi_snapshot_preview1")]
+unsafe extern "C" {
+    fn args_sizes_get(argc: *mut usize, size: *mut usize) -> u16;
+    fn args_get(argv: *mut CStrPtr, buf: *mut u8) -> u16;
+}
+
+/// `args_get` once into a malloc block (never freed).
+#[cfg(target_os = "wasi")]
+fn wasi_args() -> (usize, *const CStrPtr) {
+    static mut ARGS: (usize, *const CStrPtr) = (0, ptr::null());
+    // SAFETY: one thread; the block holds `argc` pointers, then the
+    // strings they point into.
+    unsafe {
+        if ARGS.1.is_null() {
+            let (mut n, mut size) = (0, 0);
+            if args_sizes_get(&mut n, &mut size) != 0 {
+                return (0, ptr::null());
+            }
+            let v = libc::malloc((n + 1) * size_of::<CStrPtr>() + size).cast::<CStrPtr>();
+            if v.is_null() {
+                rokr_common::oom();
+            }
+            if args_get(v, v.add(n + 1).cast()) != 0 {
+                return (0, ptr::null());
+            }
+            ARGS = (n, v);
+        }
+        ARGS
     }
 }
 
@@ -889,6 +991,7 @@ pub extern "C" fn rok_os_setenv(name: RokStr, value: RokStr, unset: i32) -> i32 
 
 /// Pointers to the NUL-separated pieces of `blob` (`count` of them),
 /// null-terminated, in a malloc block.
+#[cfg(unix)]
 fn split_blob(blob: RokStr, count: usize) -> *mut CStrPtr {
     // SAFETY: malloc of `count + 1` pointers.
     let v = unsafe { libc::malloc((count + 1) * size_of::<CStrPtr>()) }.cast::<CStrPtr>();
@@ -916,7 +1019,7 @@ unsafe extern "C" {
         path: CStrPtr,
     ) -> libc::c_int;
 }
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(all(unix, not(target_vendor = "apple")))]
 use libc::posix_spawn_file_actions_addchdir_np;
 
 /// `posix_spawnp` (307 §3.7.4). `argv` / `envs` hold `argc` / `envc`
@@ -927,6 +1030,7 @@ use libc::posix_spawn_file_actions_addchdir_np;
 /// `>= 0` that fd. The pipe ends (or -1) go to `out[0..3]` (stdin write
 /// end, stdout / stderr read ends). Returns the pid or `-errno` (exec
 /// failures included).
+#[cfg(unix)]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub extern "C" fn rok_os_spawn(
@@ -1042,8 +1146,31 @@ pub extern "C" fn rok_os_spawn(
     r
 }
 
+#[cfg(target_os = "wasi")]
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn rok_os_spawn(
+    _argv: RokStr,
+    _argc: usize,
+    _envs: RokStr,
+    _envc: isize,
+    _cwd: RokStr,
+    _stdio_in: i32,
+    _stdio_out: i32,
+    _stdio_err: i32,
+    _pgid: i32,
+    out: *mut u8,
+) -> i32 {
+    for i in 0..3 {
+        // SAFETY: the library passes a live `GcBuf<i32>` of 3 elements.
+        unsafe { *cell(out, i) = -1 };
+    }
+    UNSUPPORTED
+}
+
 /// `waitpid`: the pid (status in `out[0]`), 0 if `nohang` and still
 /// running, or `-errno`.
+#[cfg(unix)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_waitpid(pid: i32, nohang: i32, out: *mut u8) -> i32 {
     let mut st = 0;
@@ -1065,11 +1192,19 @@ pub extern "C" fn rok_os_waitpid(pid: i32, nohang: i32, out: *mut u8) -> i32 {
     r
 }
 
+#[cfg(target_os = "wasi")]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_os_waitpid(_pid: i32, _nohang: i32, _out: *mut u8) -> i32 {
+    UNSUPPORTED
+}
+
 /// Write end of the signal pipe (`rok_os_signal_install`), or -1.
+#[cfg(unix)]
 static SIGNAL_PIPE: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(-1);
 
 /// The C handler: the signal number as one byte down the pipe. Only
 /// async-signal-safe calls; a full pipe drops the signal.
+#[cfg(unix)]
 extern "C" fn on_signal(sig: libc::c_int) {
     let fd = SIGNAL_PIPE.load(core::sync::atomic::Ordering::Relaxed);
     if fd >= 0 {
@@ -1087,6 +1222,7 @@ extern "C" fn on_signal(sig: libc::c_int) {
 /// call creates the pipe; `*read_end` gets its read end (blocking,
 /// close-on-exec) on that call, -1 after. 0 or `-errno` (`EINVAL` for
 /// `SIGKILL` / `SIGSTOP` / a bad number).
+#[cfg(unix)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_signal_install(sig: i32, read_end: *mut u8) -> i32 {
     // SAFETY: the library passes a live `GcBuf<i32>` of 1 element.
@@ -1123,6 +1259,15 @@ pub extern "C" fn rok_os_signal_install(sig: i32, read_end: *mut u8) -> i32 {
     0
 }
 
+#[cfg(target_os = "wasi")]
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_os_signal_install(_sig: i32, read_end: *mut u8) -> i32 {
+    // SAFETY: the library passes a live `GcBuf<i32>` of 1 element.
+    unsafe { *cell(read_end, 0) = -1 };
+    UNSUPPORTED
+}
+
+#[cfg(unix)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_raise(sig: i32) -> i32 {
     // SAFETY: plain libc call.
@@ -1133,10 +1278,23 @@ pub extern "C" fn rok_os_raise(sig: i32) -> i32 {
     }
 }
 
+#[cfg(target_os = "wasi")]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_os_raise(_sig: i32) -> i32 {
+    UNSUPPORTED
+}
+
+#[cfg(unix)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_kill(pid: i32, sig: i32) -> i32 {
     // SAFETY: plain libc call.
     ret(unsafe { libc::kill(pid, sig) } as isize) as i32
+}
+
+#[cfg(target_os = "wasi")]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_os_kill(_pid: i32, _sig: i32) -> i32 {
+    UNSUPPORTED
 }
 
 /// `pidfd_open(pid)` (Linux 5.3+): a close-on-exec fd tracking the
@@ -1174,16 +1332,30 @@ pub extern "C" fn rok_os_pidfd_signal(fd: i32, sig: i32) -> i32 {
     }
 }
 
+#[cfg(unix)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_getpid() -> u32 {
     // SAFETY: plain libc call.
     unsafe { libc::getpid() as u32 }
 }
 
+#[cfg(target_os = "wasi")]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_os_getpid() -> u32 {
+    0
+}
+
+#[cfg(unix)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_getppid() -> u32 {
     // SAFETY: plain libc call.
     unsafe { libc::getppid() as u32 }
+}
+
+#[cfg(target_os = "wasi")]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_os_getppid() -> u32 {
+    0
 }
 
 /// Abnormal termination (`SIGABRT`), no cleanup.

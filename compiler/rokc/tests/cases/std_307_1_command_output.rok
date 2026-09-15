@@ -1,4 +1,7 @@
 // spec: std 307-process §3.7.1
+// only-os: macos linux
+// (/bin/echo, /bin/sh, /bin/pwd)
+// needs: process
 // expect-exit: 0
 // expect-stdout:
 // out: [a b]

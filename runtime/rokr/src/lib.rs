@@ -34,6 +34,7 @@ mod net;
 #[cfg_attr(windows, path = "os_windows.rs")]
 mod os;
 #[cfg_attr(windows, path = "stack_windows.rs")]
+#[cfg_attr(target_family = "wasm", path = "stack_wasm.rs")]
 mod stack;
 mod stdio;
 mod str;
@@ -86,7 +87,8 @@ core::arch::global_asm!(
     not(test),
     not(target_vendor = "apple"),
     not(windows),
-    not(target_arch = "arm")
+    not(target_arch = "arm"),
+    not(target_family = "wasm")
 ))]
 core::arch::global_asm!(
     ".weak rust_eh_personality",
@@ -469,8 +471,7 @@ pub extern "C" fn rok_uncaught_error_at(what: RokStr, at: RokStr) -> ! {
 
 fn uncaught(parts: &[&[u8]]) -> ! {
     rokr_common::write_all(2, parts);
-    // SAFETY: plain libc call; `exit` flushes buffered stdout.
-    unsafe { libc::exit(1) }
+    exit(1)
 }
 
 // ---------------------------------------------------------------------
@@ -510,8 +511,7 @@ pub(crate) fn panic_at(msg: &[u8], at: Option<&[u8]>) -> ! {
             b"\n",
         ],
     );
-    // SAFETY: plain libc call; `exit` flushes buffered stdout.
-    unsafe { libc::exit(101) }
+    exit(101)
 }
 
 /// `rok_panic_str` with the `path:line:col` of the code that panicked
@@ -543,6 +543,41 @@ pub extern "C" fn rok_panic_str(msg: RokStr) -> ! {
 /// `finally` and `Drop` do not run; `exit` flushes buffered stdout.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_exit(code: i32) -> ! {
+    exit(code)
+}
+
+/// The hook `rok_set_exit_hook` sets (null: none).
+static EXIT_HOOK: core::sync::atomic::AtomicPtr<()> =
+    core::sync::atomic::AtomicPtr::new(ptr::null_mut());
+
+/// The hook a panic, an uncaught error, `exit` or (Windows) a stack
+/// overflow calls before ending the process; null: none.
+///
+/// It gets the exit status, on the thread ending the process, which
+/// ends when it returns. The Windows REPL host ends just the running
+/// cell instead (it does not return).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_set_exit_hook(hook: Option<extern "C" fn(i32)>) {
+    EXIT_HOOK.store(
+        hook.map_or(ptr::null_mut(), |h| h as *mut ()),
+        Ordering::Release,
+    );
+}
+
+/// Run the exit hook, if any, for status `code`.
+pub(crate) fn ending(code: i32) {
+    let h = EXIT_HOOK.load(Ordering::Acquire);
+    if !h.is_null() {
+        // SAFETY: only `rok_set_exit_hook` stores, a function of this type.
+        let hook = unsafe { core::mem::transmute::<*mut (), extern "C" fn(i32)>(h) };
+        hook(code);
+    }
+}
+
+/// The exit hook, then end the process with `code`; `exit` flushes
+/// buffered stdout.
+fn exit(code: i32) -> ! {
+    ending(code);
     // SAFETY: plain libc call.
     unsafe { libc::exit(code) }
 }

@@ -1,0 +1,20 @@
+// spec: std 308-path §3.8.2
+// expect-exit: 0
+// expect-stdout:
+// [sub/inner] [sub] []
+// none 0
+
+// A relative path's ancestors end with the empty path, whose parent is
+// none and which has no components (on Windows too, where the prefix
+// check used to read byte 0 of it).
+use rok::std::path::Path;
+
+fn main() {
+    let line = "";
+    for a in Path::from("sub/inner").ancestors() {
+        line = line + f"[{a.as_str()}] ";
+    }
+    println(line.trim());
+    let e = Path::new();
+    println(f"{if e.parent() == none { "none" } else { "some" }} {e.components().count()}");
+}

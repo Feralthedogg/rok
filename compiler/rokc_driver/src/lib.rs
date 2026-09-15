@@ -28,14 +28,17 @@ pub use cfg::CfgEnv;
 pub use rokc_codegen_mlir::{Demangled, demangle};
 pub use rokc_codegen_mlir::{MlirOutput, ReplCell, ReplFn};
 pub use rokc_hir::instance;
+pub use rokc_llvm::profdata_merge;
 pub use rokc_mir::Target;
 pub use windows::Subsystem;
-/// Whether the REPL's session host runs here: it loads Mach-O / ELF
-/// objects of arm64 / `x86_64`.
+/// Whether the REPL's session host runs here: it loads Mach-O / ELF /
+/// COFF objects of arm64 / `x86_64`.
 pub const REPL_HOST: bool = cfg!(all(
-    any(target_os = "macos", target_os = "linux"),
+    any(target_os = "macos", target_os = "linux", windows),
     any(target_arch = "aarch64", target_arch = "x86_64")
 ));
+
+pub use rokc_llvm::{AS_WASM_LD, wasm_ld_main};
 
 /// The LLVM rokc links (`None`: built without one; only the native
 /// backend's `-O0` builds work).
@@ -46,8 +49,8 @@ pub const LLVM_VERSION: Option<&str> = if rokc_llvm::AVAILABLE {
 };
 
 pub use toolchain::{
-    BuildOptions, EmitKind, TempDir, build_archive, cache_dir, cell_object, check_codegen, emit,
-    find_mlir_plugin, link_executable, link_host, link_object, lower_to_llvm, mlir_text,
+    BuildOptions, EmitKind, Profile, TempDir, build_archive, cache_dir, cell_object, check_codegen,
+    emit, find_mlir_plugin, link_executable, link_host, link_object, lower_to_llvm, mlir_text,
 };
 
 // Independent switches, one per session setter.

@@ -1,16 +1,22 @@
 //! ELF64 relocatable object (`ET_REL`) writer, `x86_64` and arm64.
 //!
-//! Sections `.text .rodata .data.rel.ro .data`, their `.rela.*`, an
-//! `.eh_frame` with one FDE per function (a frame-pointer frame) so
-//! unwinders and debuggers walk through it, the debug sections when
-//! present, a non-executable stack note; symbols local first.
+//! A section per function and data object (`.text.<sym>`, `.rodata.`,
+//! `.data.rel.ro.`, `.data.`, `.bss.`), so `--gc-sections` drops what
+//! nothing uses; their `.rela.*`, an `.eh_frame` with one FDE per
+//! function (a frame-pointer frame) so unwinders and debuggers walk
+//! through it, the debug sections when present, a non-executable stack
+//! note; symbols local first.
 
-use crate::obj::{FnRange, Obj, RelKind, SECTS, Sect};
+use crate::obj::{FnRange, Obj, RelKind, Sect};
 
 const SHT_PROGBITS: u32 = 1;
 const SHT_SYMTAB: u32 = 2;
 const SHT_STRTAB: u32 = 3;
 const SHT_RELA: u32 = 4;
+const SHT_NOBITS: u32 = 8;
+const SHT_SYMTAB_SHNDX: u32 = 18;
+const SHN_LORESERVE: usize = 0xff00;
+const SHN_XINDEX: u16 = 0xffff;
 const SHF_WRITE: u64 = 1;
 const SHF_ALLOC: u64 = 2;
 const SHF_EXECINSTR: u64 = 4;
@@ -69,8 +75,8 @@ fn put64(b: &mut Vec<u8>, v: u64) {
 }
 
 /// `.eh_frame`: a CIE and one FDE per function; the relocations of the
-/// FDEs' `pc_begin` (`(offset, symbol)`).
-fn eh_frame(fns: &[FnRange], x86: bool) -> (Vec<u8>, Vec<(u32, u32)>) {
+/// FDEs' `pc_begin` (`(offset, function index)`).
+fn eh_frame(fns: &[FnRange], x86: bool) -> (Vec<u8>, Vec<(u32, usize)>) {
     let mut b = Vec::new();
     let mut relocs = Vec::new();
     // CIE: "zR", code align 1, data align -8, pc-relative sdata4 FDEs.
@@ -88,11 +94,11 @@ fn eh_frame(fns: &[FnRange], x86: bool) -> (Vec<u8>, Vec<(u32, u32)>) {
     }
     put32(&mut b, cie.len() as u32);
     b.extend_from_slice(&cie);
-    for f in fns {
+    for (i, f) in fns.iter().enumerate() {
         let start = b.len();
         let mut fde = Vec::new();
         put32(&mut fde, start as u32 + 4); // CIE pointer: back to offset 0
-        relocs.push(((start + 8) as u32, f.sym));
+        relocs.push(((start + 8) as u32, i));
         put32(&mut fde, 0); // pc_begin
         put32(&mut fde, f.len);
         fde.push(0); // augmentation data
@@ -117,6 +123,7 @@ fn eh_frame(fns: &[FnRange], x86: bool) -> (Vec<u8>, Vec<(u32, u32)>) {
 #[must_use]
 pub fn write(obj: &Obj) -> Vec<u8> {
     let x86 = obj.x86;
+    let (pieces, piece_of) = obj.pieces();
     let mut outs: Vec<Out> = vec![Out {
         name: String::new(),
         ty: 0,
@@ -127,13 +134,10 @@ pub fn write(obj: &Obj) -> Vec<u8> {
         info: 0,
         entsize: 0,
     }];
-    // Symbols: null, the section symbols (code and data, then the extra
-    // sections), locals, then globals.
-    let nsect_syms = SECTS
-        .iter()
-        .filter(|s| !obj.sects[s].data.is_empty())
-        .count()
-        + obj.extra.len();
+    // Symbols: null, the section symbols (the pieces, then the extra
+    // sections), locals, then globals. Unwind and debug info refer to
+    // code by its section symbol, so they go with a dropped section.
+    let nsect_syms = pieces.len() + obj.extra.len();
     let mut order: Vec<usize> = (0..obj.syms.len()).collect();
     let local = |i: usize| obj.syms[i].def.is_some() && !obj.syms[i].global;
     order.sort_by_key(|&i| (!local(i), i));
@@ -141,25 +145,28 @@ pub fn write(obj: &Obj) -> Vec<u8> {
     for (k, &i) in order.iter().enumerate() {
         index[i] = 1 + nsect_syms + k;
     }
+    // The section symbol of `sym`'s piece and the object address `at`
+    // as an offset in it.
+    let in_piece = |sym: u32, at: u64| match piece_of.get(sym as usize).copied().flatten() {
+        Some(k) => (1 + k, at - u64::from(pieces[k].start)),
+        None => (index[sym as usize], at),
+    };
     // The section index of each section symbol.
     let mut sect_syms: Vec<usize> = Vec::new();
     // The relocations of each section by its index.
     let mut relas: Vec<(usize, Vec<Rela>)> = Vec::new();
-    let mut sect_index = std::collections::HashMap::new();
-    for s in SECTS {
-        let sec = &obj.sects[&s];
-        if sec.data.is_empty() {
-            continue;
-        }
-        let (name, flags) = match s {
+    for p in &pieces {
+        let data = &obj.sects[&p.sect].data[p.start as usize..p.end as usize];
+        let bss = p.sect == Sect::Data && p.relocs.is_empty() && data.iter().all(|&b| b == 0);
+        let (prefix, flags) = match p.sect {
             Sect::Text => (".text", SHF_ALLOC | SHF_EXECINSTR),
             Sect::Const => (".rodata", SHF_ALLOC),
             Sect::DataConst => (".data.rel.ro", SHF_ALLOC | SHF_WRITE),
+            Sect::Data if bss => (".bss", SHF_ALLOC | SHF_WRITE),
             Sect::Data => (".data", SHF_ALLOC | SHF_WRITE),
         };
-        sect_index.insert(s, outs.len());
         sect_syms.push(outs.len());
-        let rs = sec
+        let rs = p
             .relocs
             .iter()
             .map(|r| {
@@ -169,11 +176,11 @@ pub fn write(obj: &Obj) -> Vec<u8> {
             .collect();
         relas.push((outs.len(), rs));
         outs.push(Out {
-            name: name.to_owned(),
-            ty: SHT_PROGBITS,
+            name: format!("{prefix}.{}", obj.syms[p.syms[0] as usize].name),
+            ty: if bss { SHT_NOBITS } else { SHT_PROGBITS },
             flags,
-            data: sec.data.clone(),
-            align: 1 << sec.align.max(if s == Sect::Text { 4 } else { 0 }),
+            data: data.to_vec(),
+            align: 1 << p.align,
             link: 0,
             info: 0,
             entsize: 0,
@@ -186,7 +193,11 @@ pub fn write(obj: &Obj) -> Vec<u8> {
         relas.push((
             outs.len(),
             rs.into_iter()
-                .map(|(off, s)| (u64::from(off), ty, index[s as usize], 0))
+                .map(|(off, f)| {
+                    let f = &obj.fns[f];
+                    let (s, at) = in_piece(f.sym, u64::from(f.start));
+                    (u64::from(off), ty, s, at as i64)
+                })
                 .collect(),
         ));
         outs.push(Out {
@@ -202,7 +213,7 @@ pub fn write(obj: &Obj) -> Vec<u8> {
     }
     // Debug sections: the Mach-O contents (the target's object address,
     // an offset into a debug section) become explicit addends.
-    let extra_sym = 1 + sect_syms.len();
+    let extra_sym = 1 + pieces.len();
     for (_, name, _, sec) in &obj.extra {
         let mut data = sec.data.clone();
         let mut rs = Vec::new();
@@ -221,15 +232,10 @@ pub fn write(obj: &Obj) -> Vec<u8> {
                 continue;
             }
             let v = u64::from_le_bytes(data[at..at + 8].try_into().unwrap_or([0; 8]));
-            let base = obj.syms[r.sym as usize].def.map_or(0, |d| u64::from(d.1));
             data[at..at + 8].fill(0);
             let ty = if x86 { R_X86_64_64 } else { R_AARCH64_ABS64 };
-            rs.push((
-                u64::from(r.off),
-                ty,
-                index[r.sym as usize],
-                (v - base) as i64,
-            ));
+            let (s, addend) = in_piece(r.sym, v);
+            rs.push((u64::from(r.off), ty, s, addend as i64));
         }
         sect_syms.push(outs.len());
         relas.push((outs.len(), rs));
@@ -255,15 +261,34 @@ pub fn write(obj: &Obj) -> Vec<u8> {
         entsize: 0,
     });
 
+    // Section indexes from `SHN_LORESERVE` on are in `.symtab_shndx`.
+    let xindex = outs.len() > SHN_LORESERVE;
+    let mut shndx_tab = Vec::new();
+    if xindex {
+        put32(&mut shndx_tab, 0);
+    }
     let mut strtab = vec![0u8];
     let mut symtab = vec![0u8; 24];
-    for shndx in &sect_syms {
-        put32(&mut symtab, 0);
-        symtab.push(STT_SECTION);
+    let mut entry = |symtab: &mut Vec<u8>, name: u32, info: u8, shndx: usize, value, size| {
+        put32(symtab, name);
+        symtab.push(info);
         symtab.push(0);
-        put16(&mut symtab, *shndx as u16);
-        put64(&mut symtab, 0);
-        put64(&mut symtab, 0);
+        put16(
+            symtab,
+            if shndx >= SHN_LORESERVE {
+                SHN_XINDEX
+            } else {
+                shndx as u16
+            },
+        );
+        put64(symtab, value);
+        put64(symtab, size);
+        if xindex {
+            put32(&mut shndx_tab, shndx as u32);
+        }
+    };
+    for shndx in &sect_syms {
+        entry(&mut symtab, 0, STT_SECTION, *shndx, 0, 0);
     }
     let first_global = 1 + nsect_syms + order.iter().filter(|&&i| local(i)).count();
     for &i in &order {
@@ -271,10 +296,10 @@ pub fn write(obj: &Obj) -> Vec<u8> {
         let name = strtab.len() as u32;
         strtab.extend_from_slice(s.name.as_bytes());
         strtab.push(0);
-        let (shndx, value, size, ty) = match s.def {
-            Some((sec, off, size)) => (
-                sect_index.get(&sec).copied().unwrap_or(0) as u16,
-                u64::from(off),
+        let (shndx, value, size, ty) = match (s.def, piece_of[i]) {
+            (Some((sec, off, size)), Some(k)) => (
+                sect_syms[k],
+                u64::from(off - pieces[k].start),
                 u64::from(size),
                 if sec == Sect::Text {
                     STT_FUNC
@@ -282,7 +307,7 @@ pub fn write(obj: &Obj) -> Vec<u8> {
                     STT_OBJECT
                 },
             ),
-            None => (0, 0, 0, STT_NOTYPE),
+            _ => (0, 0, 0, STT_NOTYPE),
         };
         let bind = if local(i) {
             STB_LOCAL
@@ -291,12 +316,7 @@ pub fn write(obj: &Obj) -> Vec<u8> {
         } else {
             STB_GLOBAL
         };
-        put32(&mut symtab, name);
-        symtab.push((bind << 4) | ty);
-        symtab.push(0);
-        put16(&mut symtab, shndx);
-        put64(&mut symtab, value);
-        put64(&mut symtab, size);
+        entry(&mut symtab, name, (bind << 4) | ty, shndx, value, size);
     }
     let symtab_index = outs.len() + relas.iter().filter(|r| !r.1.is_empty()).count();
     for (target, rs) in &relas {
@@ -320,7 +340,7 @@ pub fn write(obj: &Obj) -> Vec<u8> {
             entsize: 24,
         });
     }
-    let strtab_index = symtab_index + 1;
+    let strtab_index = symtab_index + 1 + usize::from(xindex);
     outs.push(Out {
         name: ".symtab".to_owned(),
         ty: SHT_SYMTAB,
@@ -331,6 +351,18 @@ pub fn write(obj: &Obj) -> Vec<u8> {
         info: first_global as u32,
         entsize: 24,
     });
+    if xindex {
+        outs.push(Out {
+            name: ".symtab_shndx".to_owned(),
+            ty: SHT_SYMTAB_SHNDX,
+            flags: 0,
+            data: shndx_tab,
+            align: 4,
+            link: symtab_index as u32,
+            info: 0,
+            entsize: 4,
+        });
+    }
     outs.push(Out {
         name: ".strtab".to_owned(),
         ty: SHT_STRTAB,
@@ -360,6 +392,11 @@ pub fn write(obj: &Obj) -> Vec<u8> {
         info: 0,
         entsize: 0,
     });
+    // A count or index from `SHN_LORESERVE` on is in section 0's header.
+    let (n, shstrndx) = (outs.len(), outs.len() - 1);
+    if shstrndx >= SHN_LORESERVE {
+        outs[0].link = shstrndx as u32;
+    }
 
     // Layout: header, section contents, section headers.
     let mut b = vec![0u8; 64];
@@ -368,7 +405,9 @@ pub fn write(obj: &Obj) -> Vec<u8> {
         let a = o.align.max(1) as usize;
         b.resize(b.len().next_multiple_of(a), 0);
         offs.push(b.len() as u64);
-        b.extend_from_slice(&o.data);
+        if o.ty != SHT_NOBITS {
+            b.extend_from_slice(&o.data);
+        }
     }
     b.resize(b.len().next_multiple_of(8), 0);
     let shoff = b.len() as u64;
@@ -378,7 +417,12 @@ pub fn write(obj: &Obj) -> Vec<u8> {
         put64(&mut b, o.flags);
         put64(&mut b, 0);
         put64(&mut b, if k == 0 { 0 } else { offs[k] });
-        put64(&mut b, o.data.len() as u64);
+        let size = if k == 0 && n >= SHN_LORESERVE {
+            n
+        } else {
+            o.data.len()
+        };
+        put64(&mut b, size as u64);
         put32(&mut b, o.link);
         put32(&mut b, o.info);
         put64(&mut b, o.align);
@@ -398,8 +442,15 @@ pub fn write(obj: &Obj) -> Vec<u8> {
     put16(&mut h, 0);
     put16(&mut h, 0);
     put16(&mut h, 64);
-    put16(&mut h, outs.len() as u16);
-    put16(&mut h, (outs.len() - 1) as u16);
+    put16(&mut h, if n >= SHN_LORESERVE { 0 } else { n as u16 });
+    put16(
+        &mut h,
+        if shstrndx >= SHN_LORESERVE {
+            SHN_XINDEX
+        } else {
+            shstrndx as u16
+        },
+    );
     b[..64].copy_from_slice(&h);
     b
 }
@@ -425,5 +476,37 @@ const fn reloc(kind: RelKind, x86: bool) -> (u32, i64) {
             RelKind::TlvPageOff12 => (R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC, 0),
             _ => (R_AARCH64_ABS64, 0),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Past `SHN_LORESERVE` sections: the counts in section 0, the
+    /// symbols' section indexes in `.symtab_shndx`.
+    #[test]
+    fn many_sections_use_extended_numbering() {
+        let mut o = Obj::new(true, true, false);
+        for i in 0..0xff00u32 {
+            let s = o.sym(&format!("d{i}"));
+            o.define_data(s, Sect::Const, &[1], 1, true);
+        }
+        let b = write(&o);
+        if let Some(p) = std::env::var_os("ROK_DUMP_XINDEX") {
+            std::fs::write(p, &b).unwrap();
+        }
+        let u16_at = |at: usize| u16::from_le_bytes([b[at], b[at + 1]]);
+        let shoff = u64::from_le_bytes(b[40..48].try_into().unwrap()) as usize;
+        assert_eq!((u16_at(60), u16_at(62)), (0, SHN_XINDEX));
+        let n = u64::from_le_bytes(b[shoff + 32..shoff + 40].try_into().unwrap());
+        let shstrndx = u32::from_le_bytes(b[shoff + 40..shoff + 44].try_into().unwrap());
+        // The pieces, the stack note, symtab, its indexes, strtab, shstrtab.
+        assert_eq!((n, shstrndx), (0xff00 + 6, 0xff00 + 5));
+        let shndx = shoff + 64 * (0xff00 + 3);
+        assert_eq!(
+            u32::from_le_bytes(b[shndx + 4..shndx + 8].try_into().unwrap()),
+            SHT_SYMTAB_SHNDX
+        );
     }
 }

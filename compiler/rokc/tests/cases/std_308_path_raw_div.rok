@@ -1,4 +1,6 @@
 // spec: std 308-path §3.8.3 §3.8.4 §3.8.5
+// only-os: macos linux
+// (RawPath::from_bytes is unix-only, std 3.8.5)
 // expect-exit: 0
 // expect-stdout:
 // /etc/nginx/nginx.conf

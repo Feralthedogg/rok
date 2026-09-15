@@ -46,7 +46,24 @@ option table are kept in `share/rok/dsymutil` and compiled into rokc. The
 source tarball is checked against a pinned SHA-256; the source and build
 trees are deleted after the install.
 
-On a 10-core Apple Silicon machine: about 50 minutes; 717 MB installed.
+On a 10-core Apple Silicon machine: about 50 minutes; 700 MB installed.
+
+### PGO
+
+With Apple clang, `build.sh` optimizes LLVM with `rok.profdata.xz`: an
+IR profile (sparse, xz) of rokc's own `-O2` builds. Other compilers
+build without it: gcc reads no clang profile, a clang older than its
+indexed format cannot read it, and MSVC / clang-cl key functions by
+MSVC-mangled names, which the profile does not have (Windows builds
+skip PGO).
+
+`llvm/train-pgo.sh` regenerates the profile (macOS, Xcode's clang): an
+instrumented LLVM (`ROK_LLVM_INSTRUMENT=1 build.sh`), a release rokc
+against it, linked with the profile runtime, then three quarters of
+`compiler/rokc/tests/cases` built with it at `-O2` (a third of them as
+x86_64 Linux objects, so the X86 back end is profiled too). Regenerate
+after a change of the pinned LLVM or a large change of what rokc asks
+LLVM to do; a stale profile still builds, with less benefit.
 
 ## Using it
 

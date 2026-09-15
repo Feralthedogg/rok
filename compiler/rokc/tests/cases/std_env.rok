@@ -1,3 +1,4 @@
+// needs: process
 // expect-exit: 0
 // expect-stdout:
 // args: 1 true
@@ -11,11 +12,18 @@
 // pid: true
 
 // Spec 306: args (argv saved by the runtime), var / vars / set_var /
-// remove_var, current_dir / set_current_dir, temp_dir, split_paths.
+// remove_var, current_dir / set_current_dir, temp_dir, split_paths
+// (`;` between paths on Windows), parent_pid (none when unknown: a
+// Windows process a non-Windows one started, as under Wine).
 
 use rok::std::env;
 use rok::std::io::IoError;
 use rok::std::path::Path;
+
+#[cfg(target_os = "windows")]
+const LIST: str = ";";
+#[cfg(not(target_os = "windows"))]
+const LIST: str = ":";
 
 fn main() throws (IoError) {
     let args = env::args();
@@ -33,16 +41,17 @@ fn main() throws (IoError) {
     println("removed: " + (try env::var("ROK_STD_ENV_TEST") catch e { f"{e:?}" }));
 
     let start = try env::current_dir();
-    try env::set_current_dir("/");
-    println(f"cwd moved: {(try env::current_dir()).as_str() == "/"}");
+    let up = start.parent() ?? start;
+    try env::set_current_dir("..");
+    println(f"cwd moved: {(try env::current_dir()) == up}");
     try env::set_current_dir(start);
     println(f"cwd back: {(try env::current_dir()) == start}");
 
     println(f"temp absolute: {env::temp_dir().is_absolute()}");
     let parts = "";
-    for p in env::split_paths("/a::/b:/c") { parts = parts + " " + p.as_str(); }
+    for p in env::split_paths(f"/a{LIST}{LIST}/b{LIST}/c") { parts = parts + " " + p.as_str(); }
     println("split:" + parts);
-    println(f"pid: {env::pid() > 0u32 && (env::parent_pid() ?? 0u32) > 0u32}");
+    println(f"pid: {env::pid() > 0u32 && (env::parent_pid() ?? 1u32) > 0u32}");
 }
 
 // spec: std 306-env

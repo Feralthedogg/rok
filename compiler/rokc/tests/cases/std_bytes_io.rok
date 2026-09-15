@@ -1,3 +1,6 @@
+// only-os: macos linux
+// (RawPath::from_bytes is unix-only, std 3.8.5)
+// needs: process
 // expect-exit: 0
 // expect-stdout:
 // exact: [abcd] [efgh] eof: UnexpectedEof

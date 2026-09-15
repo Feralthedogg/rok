@@ -1,6 +1,8 @@
 //! The REPL's session host (`src/repl_host.c`) as an object, linked
 //! with the runtime when a session starts. Empty where the host does not
-//! run (it loads Mach-O / ELF objects of arm64 / `x86_64`: `REPL_HOST`).
+//! run (it loads Mach-O / ELF / COFF objects of arm64 / `x86_64`:
+//! `REPL_HOST`). Windows: compiled by clang (`CC`) without the Windows
+//! SDK or MSVC headers.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -17,12 +19,24 @@ fn main() {
         ("macos", "x86_64") => &["-arch", "x86_64", "-mmacosx-version-min=11.0"],
         // Linked into a PIE.
         ("linux", "aarch64" | "x86_64") => &["-fPIC"],
+        // No C++ thread-local initialization guards (no MSVC CRT).
+        ("windows", "aarch64") => &[
+            "--target=aarch64-pc-windows-msvc",
+            "-ffreestanding",
+            "-fno-ms-tls-guards",
+        ],
+        ("windows", "x86_64") => &[
+            "--target=x86_64-pc-windows-msvc",
+            "-ffreestanding",
+            "-fno-ms-tls-guards",
+        ],
         _ => {
             std::fs::write(&out, []).unwrap();
             return;
         }
     };
-    let cc = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
+    let cc = std::env::var_os("CC")
+        .unwrap_or_else(|| if os == "windows" { "clang" } else { "cc" }.into());
     let status = Command::new(&cc)
         .args(flags)
         .args(["-O2", "-c", "src/repl_host.c", "-o"])

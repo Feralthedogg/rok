@@ -1,7 +1,13 @@
 //! Sockets behind `rok::std::net` (stdlib 302) and the readiness poller
-//! of the I/O driver (707): kqueue on BSD / macOS, epoll on Linux. No
-//! ABI stability (805 §8.5.12 appendix). Conventions as in `os`:
-//! results are `>= 0` or `-errno`; byte data is a `GcBuf<u8>` region.
+//! of the I/O driver (707): kqueue on BSD / macOS, epoll on Linux, `poll`
+//! (`poll_oneoff` / `wasi:io/poll`) on WASI. No ABI stability (805
+//! §8.5.12 appendix). Conventions as in `os`: results are `>= 0` or
+//! `-errno`; byte data is a `GcBuf<u8>` region.
+//!
+//! WASI preview 2 (`wasm32-wasi`) has the whole BSD API through
+//! wasi-libc (`wasi:sockets`). Preview 1 (`wasm32-wasi-threads`, the
+//! browser) only uses sockets the host hands in ([`rok_net_listeners`]):
+//! accept, send, recv, shutdown; the rest fails with `ENOSYS`.
 //!
 //! Every socket is created non-blocking: the library's blocking calls
 //! wait for readiness with [`rok_net_wait`] (so read / write timeouts
@@ -11,14 +17,19 @@
 //! Addresses cross as a `GcBuf<i64>` of [`ADDR_WORDS`] words:
 //! `[family (4 / 6), port, flow_info, scope_id, byte0 .. byte15]`.
 
+#[cfg(any(unix, target_env = "p2"))]
 use core::mem::{size_of, zeroed};
 #[cfg(target_os = "linux")]
 use core::ptr;
+#[cfg(not(target_os = "wasi"))]
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use rokr_common::object_header::HEADER_SIZE;
 
-use crate::os::{EAI_BASE, cs, errno, native, region, ret};
+#[cfg(any(unix, target_env = "p2"))]
+use crate::os::{EAI_BASE, cs};
+use crate::os::{errno, native, region, ret};
+#[cfg(any(unix, target_env = "p2"))]
 use crate::str::RokStr;
 
 const ADDR_WORDS: usize = 20;
@@ -33,6 +44,7 @@ const unsafe fn word(buf: *mut u8, i: usize) -> *mut i64 {
     unsafe { buf.add(HEADER_SIZE).cast::<i64>().add(i) }
 }
 
+#[cfg(any(unix, target_env = "p2"))]
 /// The address in `buf` as a `sockaddr_storage` and its length.
 fn read_addr(buf: *mut u8) -> (libc::sockaddr_storage, libc::socklen_t) {
     // SAFETY: the library passes a live `ADDR_WORDS` buffer; the storage
@@ -64,6 +76,7 @@ fn read_addr(buf: *mut u8) -> (libc::sockaddr_storage, libc::socklen_t) {
     }
 }
 
+#[cfg(any(unix, target_env = "p2"))]
 /// BSD sockaddrs carry their length.
 #[allow(clippy::missing_const_for_fn)]
 unsafe fn set_len(ss: *mut libc::sockaddr_storage, n: usize) {
@@ -75,6 +88,7 @@ unsafe fn set_len(ss: *mut libc::sockaddr_storage, n: usize) {
     let _ = (ss, n);
 }
 
+#[cfg(any(unix, target_env = "p2"))]
 /// Store the address at `sa` into `buf` (no-op for a null `buf`).
 #[allow(clippy::cast_ptr_alignment)] // a sockaddr of its own family
 fn write_addr(buf: *mut u8, sa: *const libc::sockaddr) {
@@ -116,6 +130,7 @@ fn prepare(fd: i32) -> i32 {
         if fl < 0 || libc::fcntl(fd, libc::F_SETFL, fl | libc::O_NONBLOCK) < 0 {
             return -errno();
         }
+        #[cfg(unix)]
         if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
             return -errno();
         }
@@ -135,11 +150,12 @@ fn prepare(fd: i32) -> i32 {
 }
 
 /// `send` flags: no SIGPIPE where the flag exists.
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(not(any(target_vendor = "apple", target_os = "wasi")))]
 const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
-#[cfg(target_vendor = "apple")]
+#[cfg(any(target_vendor = "apple", target_os = "wasi"))]
 const SEND_FLAGS: libc::c_int = 0;
 
+#[cfg(any(unix, target_env = "p2"))]
 /// A new non-blocking socket: `family` 4 / 6, `kind` 1 stream / 2
 /// datagram. The fd or `-errno`.
 #[unsafe(no_mangle)]
@@ -154,20 +170,28 @@ pub extern "C" fn rok_net_socket(family: i32, kind: i32) -> i32 {
     } else {
         libc::SOCK_STREAM
     };
+    // wasi-libc's preview 2 sockets take no `fcntl`: non-blocking from
+    // the start.
+    #[cfg(target_env = "p2")]
+    let ty = ty | libc::SOCK_NONBLOCK;
     // SAFETY: plain libc call.
     let fd = unsafe { libc::socket(af, ty, 0) };
     if fd < 0 {
         return -errno();
     }
-    let r = prepare(fd);
-    if r < 0 {
-        // SAFETY: our fd.
-        unsafe { libc::close(fd) };
-        return r;
+    #[cfg(unix)]
+    {
+        let r = prepare(fd);
+        if r < 0 {
+            // SAFETY: our fd.
+            unsafe { libc::close(fd) };
+            return r;
+        }
     }
     fd
 }
 
+#[cfg(any(unix, target_env = "p2"))]
 /// `bind` (stream sockets get `SO_REUSEADDR` first).
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_net_bind(fd: i32, addr: *mut u8) -> i32 {
@@ -197,12 +221,14 @@ pub extern "C" fn rok_net_bind(fd: i32, addr: *mut u8) -> i32 {
     }
 }
 
+#[cfg(any(unix, target_env = "p2"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_net_listen(fd: i32, backlog: i32) -> i32 {
     // SAFETY: plain libc call.
     ret(unsafe { libc::listen(fd, backlog) } as isize) as i32
 }
 
+#[cfg(any(unix, target_env = "p2"))]
 /// Start a connect: 0 when connected, 1 while pending (wait for
 /// writability, then [`rok_net_sock_error`]), or `-errno`.
 #[unsafe(no_mangle)]
@@ -222,6 +248,7 @@ pub extern "C" fn rok_net_connect(fd: i32, addr: *mut u8) -> i32 {
     }
 }
 
+#[cfg(any(unix, target_env = "p2"))]
 /// The pending error of `fd` (`SO_ERROR`): 0 or `-errno`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_net_sock_error(fd: i32) -> i32 {
@@ -240,6 +267,7 @@ pub extern "C" fn rok_net_sock_error(fd: i32) -> i32 {
     if r < 0 { -errno() } else { -e }
 }
 
+#[cfg(any(unix, target_env = "p2"))]
 /// Accept one connection (non-blocking: `-EAGAIN` if none is queued);
 /// its peer goes to `out`.
 #[unsafe(no_mangle)]
@@ -249,7 +277,12 @@ pub extern "C" fn rok_net_accept(fd: i32, out: *mut u8) -> i32 {
     let mut len = size_of::<libc::sockaddr_storage>() as libc::socklen_t;
     let c = loop {
         // SAFETY: valid out-pointers.
+        #[cfg(unix)]
         let c = unsafe { libc::accept(fd, (&raw mut ss).cast(), &raw mut len) };
+        // SAFETY: as above; no `fcntl` on preview 2 sockets.
+        #[cfg(target_env = "p2")]
+        let c =
+            unsafe { libc::accept4(fd, (&raw mut ss).cast(), &raw mut len, libc::SOCK_NONBLOCK) };
         if c >= 0 || errno() != libc::EINTR {
             break c;
         }
@@ -257,6 +290,9 @@ pub extern "C" fn rok_net_accept(fd: i32, out: *mut u8) -> i32 {
     if c < 0 {
         return -errno();
     }
+    #[cfg(target_env = "p2")]
+    let r = 0;
+    #[cfg(unix)]
     let r = prepare(c);
     if r < 0 {
         // SAFETY: our fd.
@@ -267,6 +303,7 @@ pub extern "C" fn rok_net_accept(fd: i32, out: *mut u8) -> i32 {
     c
 }
 
+#[cfg(any(unix, target_env = "p2"))]
 /// The local (`peer == 0`) or peer address of `fd` into `out`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_net_addr(fd: i32, out: *mut u8, peer: i32) -> i32 {
@@ -286,6 +323,126 @@ pub extern "C" fn rok_net_addr(fd: i32, out: *mut u8, peer: i32) -> i32 {
     }
     write_addr(out, (&raw const ss).cast());
     0
+}
+
+/// The calls preview 1 has no socket API for.
+#[cfg(all(target_os = "wasi", not(target_env = "p2")))]
+mod p1 {
+    use crate::str::RokStr;
+
+    const UNSUPPORTED: i32 = -libc::ENOSYS;
+
+    macro_rules! unsupported {
+        ($($name:ident($($t:ty),*) -> $r:ty;)*) => {$(
+            #[unsafe(no_mangle)]
+            pub const extern "C" fn $name($(_: $t),*) -> $r {
+                UNSUPPORTED as $r
+            }
+        )*};
+    }
+
+    unsupported! {
+        rok_net_socket(i32, i32) -> i32;
+        rok_net_bind(i32, *mut u8) -> i32;
+        rok_net_listen(i32, i32) -> i32;
+        rok_net_connect(i32, *mut u8) -> i32;
+        rok_net_sock_error(i32) -> i32;
+        rok_net_addr(i32, *mut u8, i32) -> i32;
+        rok_net_send_to(i32, *mut u8, usize, usize, *mut u8) -> isize;
+        rok_net_recv_from(i32, *mut u8, usize, usize, *mut u8) -> isize;
+        rok_net_setopt(i32, i32, i64) -> i32;
+        rok_net_multicast_v4(i32, u32, u32, i32) -> i32;
+        rok_net_resolve(RokStr, u16, *mut u8, usize) -> i32;
+    }
+}
+
+/// Accept one connection (non-blocking: `-EAGAIN` if none is queued).
+/// Preview 1 cannot tell the peer: `out` gets `0.0.0.0:0`.
+#[cfg(all(target_os = "wasi", not(target_env = "p2")))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_net_accept(fd: i32, out: *mut u8) -> i32 {
+    // Not in the `libc` crate for preview 1; wasi-libc has it.
+    unsafe extern "C" {
+        fn accept(fd: i32, addr: *mut u8, len: *mut u32) -> i32;
+    }
+    // SAFETY: the peer is not asked for.
+    let c = unsafe { accept(fd, core::ptr::null_mut(), core::ptr::null_mut()) };
+    if c < 0 {
+        return -errno();
+    }
+    let r = prepare(c);
+    if r < 0 {
+        // SAFETY: our fd.
+        unsafe { libc::close(c) };
+        return r;
+    }
+    if !out.is_null() {
+        for i in 0..ADDR_WORDS {
+            // SAFETY: a live `ADDR_WORDS` buffer.
+            unsafe { *word(out, i) = 0 };
+        }
+        // SAFETY: as above.
+        unsafe { *word(out, 0) = 4 };
+    }
+    c
+}
+
+/// Listening sockets the host handed in, into the `GcBuf<i32>` `out`
+/// (up to `max`): WASI's pre-opened sockets (wasmtime `-S tcplisten=`),
+/// systemd's socket activation (`LISTEN_FDS` for this `LISTEN_PID`,
+/// from fd 3) on Unix. Each is made non-blocking. The count.
+#[unsafe(no_mangle)]
+#[allow(clippy::cast_ptr_alignment)] // GC payloads are 8-aligned
+pub extern "C" fn rok_net_listeners(out: *mut u8, max: usize) -> i32 {
+    let mut n = 0;
+    let mut fd = 3;
+    while n < max {
+        if !inherited(fd) {
+            break;
+        }
+        if prepare(fd) == 0 {
+            // SAFETY: the library passes a live `GcBuf<i32>` of `max`.
+            unsafe { *out.add(HEADER_SIZE).cast::<i32>().add(n) = fd };
+            n += 1;
+        }
+        fd += 1;
+    }
+    n as i32
+}
+
+/// WASI: pre-opens run from fd 3 without gaps; the sockets among them.
+#[cfg(target_os = "wasi")]
+fn inherited(fd: i32) -> bool {
+    #[link(wasm_import_module = "wasi_snapshot_preview1")]
+    unsafe extern "C" {
+        fn fd_fdstat_get(fd: i32, out: *mut [u64; 3]) -> u16;
+    }
+    const SOCKET_STREAM: u8 = 6;
+    let mut st = [0u64; 3];
+    // SAFETY: a 24-byte, 8-aligned `fdstat`.
+    let e = unsafe { fd_fdstat_get(fd, &raw mut st) };
+    e == 0 && st[0] as u8 == SOCKET_STREAM
+}
+
+/// Unix: systemd's `LISTEN_PID` / `LISTEN_FDS`.
+#[cfg(unix)]
+fn inherited(fd: i32) -> bool {
+    let num = |name: &core::ffi::CStr| -> i64 {
+        // SAFETY: getenv's result is null or NUL-terminated.
+        let p = unsafe { libc::getenv(name.as_ptr()) };
+        if p.is_null() {
+            return -1;
+        }
+        // SAFETY: as above.
+        let s = unsafe { core::ffi::CStr::from_ptr(p) }.to_bytes();
+        core::str::from_utf8(s)
+            .ok()
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(-1)
+    };
+    // SAFETY: plain libc call.
+    let me = i64::from(unsafe { libc::getpid() });
+    num(c"LISTEN_PID") == me && i64::from(fd) < 3 + num(c"LISTEN_FDS")
 }
 
 /// Retry `f` (a libc `-1`-on-error call) across `EINTR`.
@@ -310,6 +467,23 @@ pub unsafe extern "C" fn rok_net_send(fd: i32, buf: *mut u8, off: usize, len: us
     no_eintr(|| unsafe { libc::send(fd, src.cast(), len, SEND_FLAGS) })
 }
 
+/// One `recv` into `buf[off..off + len]`: the count (0 at the end) or
+/// `-errno`. (WASI's preview 2 sockets are no files for `read`.)
+///
+/// # Safety
+/// `buf` must be a live `GcBuf<u8>` with at least `off + len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rok_net_recv(fd: i32, buf: *mut u8, off: usize, len: usize) -> isize {
+    // SAFETY: caller contract.
+    let dst = unsafe { region(buf, off) };
+    let (n, _) = native(|| {
+        // SAFETY: `dst` is writable for `len` bytes.
+        no_eintr(|| unsafe { libc::recv(fd, dst.cast(), len, 0) })
+    });
+    n
+}
+
+#[cfg(any(unix, target_env = "p2"))]
 /// One datagram `buf[off..off + len]` to `addr`: the count or `-errno`.
 ///
 /// # Safety
@@ -331,6 +505,7 @@ pub unsafe extern "C" fn rok_net_send_to(
     })
 }
 
+#[cfg(any(unix, target_env = "p2"))]
 /// One datagram into `buf[off..off + len]` (truncated to fit); the
 /// sender goes to `out` (may be null). The count or `-errno`.
 ///
@@ -362,6 +537,14 @@ pub unsafe extern "C" fn rok_net_recv_from(
 /// `shutdown`: `how` 0 read, 1 write, 2 both.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_net_shutdown(fd: i32, how: i32) -> i32 {
+    // wasi-libc's values; preview 1's are not in the `libc` crate.
+    #[cfg(all(target_os = "wasi", not(target_env = "p2")))]
+    let h = match how {
+        0 => 1,
+        1 => 2,
+        _ => 3,
+    };
+    #[cfg(any(unix, target_env = "p2"))]
     let h = match how {
         0 => libc::SHUT_RD,
         1 => libc::SHUT_WR,
@@ -371,6 +554,7 @@ pub extern "C" fn rok_net_shutdown(fd: i32, how: i32) -> i32 {
     ret(unsafe { libc::shutdown(fd, h) } as isize) as i32
 }
 
+#[cfg(any(unix, target_env = "p2"))]
 fn setopt(fd: i32, level: libc::c_int, name: libc::c_int, v: libc::c_int) -> i32 {
     // SAFETY: valid option pointer.
     let r = unsafe {
@@ -385,6 +569,7 @@ fn setopt(fd: i32, level: libc::c_int, name: libc::c_int, v: libc::c_int) -> i32
     ret(r as isize) as i32
 }
 
+#[cfg(any(unix, target_env = "p2"))]
 /// Socket options by library code: 1 `TCP_NODELAY`, 2 keepalive (`val`
 /// idle seconds, < 0 off), 3 `SO_BROADCAST`, 4 `IP_MULTICAST_LOOP`, 5
 /// `IP_MULTICAST_TTL`, 6 `UDP_SEGMENT` (Linux only).
@@ -428,6 +613,7 @@ pub extern "C" fn rok_net_setopt(fd: i32, opt: i32, val: i64) -> i32 {
     }
 }
 
+#[cfg(any(unix, target_env = "p2"))]
 /// Join (`join != 0`) or leave IPv4 multicast `group` on `iface` (both
 /// as `a.b.c.d` octets in a big-endian `u32`).
 #[unsafe(no_mangle)]
@@ -496,6 +682,7 @@ pub extern "C" fn rok_net_wait(fd: i32, write: i32, timeout_ns: i64) -> i32 {
     if r < 0 { -e } else { i32::from(r > 0) }
 }
 
+#[cfg(any(unix, target_env = "p2"))]
 /// Resolve `host` (a name or numeric address) with `port`: up to `max`
 /// addresses into `out` (`max * ADDR_WORDS` words), stream sockets only.
 /// The count or `-code` (an errno, or a resolver code from `EAI_BASE`).
@@ -545,6 +732,7 @@ pub extern "C" fn rok_net_resolve(host: RokStr, port: u16, out: *mut u8, max: us
 
 /// `path` as a `sockaddr_un` and its length; `None` when it does not fit
 /// `sun_path` (with its NUL).
+#[cfg(unix)]
 #[allow(clippy::unnecessary_cast)] // `c_char` signedness varies by target
 fn unix_addr(path: &[u8]) -> Option<(libc::sockaddr_un, libc::socklen_t)> {
     // SAFETY: zeroed is a valid `sockaddr_un`.
@@ -568,6 +756,7 @@ fn unix_addr(path: &[u8]) -> Option<(libc::sockaddr_un, libc::socklen_t)> {
 /// it unbound, 1 binds it (and listens, backlog 128, for a stream), 2
 /// connects it (blocking, before it turns non-blocking). The fd or
 /// `-errno` (`-ENAMETOOLONG` for a path `sun_path` cannot hold).
+#[cfg(unix)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_net_unix(kind: i32, path: RokStr, op: i32) -> i32 {
     let ty = if kind == 2 {
@@ -613,6 +802,7 @@ pub extern "C" fn rok_net_unix(kind: i32, path: RokStr, op: i32) -> i32 {
 
 /// `socketpair(AF_UNIX, kind)`, both ends non-blocking + close-on-exec,
 /// into the `GcBuf<i32>` `out`: 0 or `-errno`.
+#[cfg(unix)]
 #[unsafe(no_mangle)]
 #[allow(clippy::cast_ptr_alignment)] // GC payloads are 8-aligned
 pub extern "C" fn rok_net_unix_pair(kind: i32, out: *mut u8) -> i32 {
@@ -647,6 +837,7 @@ pub extern "C" fn rok_net_unix_pair(kind: i32, out: *mut u8) -> i32 {
 ///
 /// # Safety
 /// `buf` must be a live `GcBuf<u8>` with at least `off + len` bytes.
+#[cfg(unix)]
 #[unsafe(no_mangle)]
 #[allow(clippy::unnecessary_cast)] // `c_char` signedness varies by target
 pub unsafe extern "C" fn rok_net_unix_path(
@@ -689,6 +880,7 @@ pub unsafe extern "C" fn rok_net_unix_path(
 }
 
 /// Room for one fd in a control message.
+#[cfg(unix)]
 #[repr(C)]
 union FdCmsg {
     buf: [u8; 64],
@@ -700,6 +892,7 @@ union FdCmsg {
 ///
 /// # Safety
 /// `buf` must be a live `GcBuf<u8>` with at least `off + len` bytes.
+#[cfg(unix)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rok_net_send_fd(
     fd: i32,
@@ -736,6 +929,7 @@ pub unsafe extern "C" fn rok_net_send_fd(
 /// # Safety
 /// `buf` must be a live `GcBuf<u8>` with at least `off + len` bytes and
 /// `out` a live one-element `GcBuf<i32>`.
+#[cfg(unix)]
 #[unsafe(no_mangle)]
 #[allow(clippy::cast_ptr_alignment)] // GC payloads are 8-aligned
 pub unsafe extern "C" fn rok_net_recv_fd(
@@ -790,14 +984,9 @@ pub unsafe extern "C" fn rok_net_recv_fd(
 pub extern "C" fn rok_net_sendfile(sock: i32, file: i32, offset: i64, count: usize) -> isize {
     #[cfg(target_os = "linux")]
     {
-        // The 64-bit offset form (32-bit glibc's plain one has 32 bits).
-        #[cfg(not(target_env = "gnu"))]
-        use libc::{off_t, sendfile};
-        #[cfg(target_env = "gnu")]
-        use libc::{off64_t as off_t, sendfile64 as sendfile};
-        let mut off = offset as off_t;
+        let mut off = offset as libc::off_t;
         // SAFETY: plain syscall with a valid offset pointer.
-        no_eintr(|| unsafe { sendfile(sock, file, &raw mut off, count) })
+        no_eintr(|| unsafe { libc::sendfile(sock, file, &raw mut off, count) })
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -871,9 +1060,11 @@ pub extern "C" fn rok_net_splice(sock: i32, file: i32, count: usize) -> isize {
 // The I/O driver's poller (707 §7.7.1)
 // ---------------------------------------------------------------------
 
+#[cfg(not(target_os = "wasi"))]
 static POLLER: AtomicI32 = AtomicI32::new(-1);
 
 /// The process's kqueue / epoll fd, created on first use.
+#[cfg(not(target_os = "wasi"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_io_poller() -> i32 {
     let p = POLLER.load(Ordering::Acquire);
@@ -905,11 +1096,13 @@ pub extern "C" fn rok_io_poller() -> i32 {
     }
 }
 
+#[cfg(not(target_os = "wasi"))]
 /// Watch `fd` for readability and writability, edge-triggered (an
 /// event per change, so a waiter must re-check after it parks). Watching
-/// a watched fd again is harmless. 0 or `-errno`.
+/// a watched fd again is harmless. `interest` (1 read, 2 write): what the
+/// caller waits for; kqueue / epoll watch both. 0 or `-errno`.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_io_watch(fd: i32) -> i32 {
+pub extern "C" fn rok_io_watch(fd: i32, _interest: u32) -> i32 {
     let p = rok_io_poller();
     #[cfg(any(target_vendor = "apple", target_os = "freebsd"))]
     {
@@ -948,6 +1141,7 @@ pub extern "C" fn rok_io_watch(fd: i32) -> i32 {
     }
 }
 
+#[cfg(not(target_os = "wasi"))]
 /// Block (parked for the GC) until watched fds change; up to `max`
 /// events go to the `GcBuf<i64>` `out` as `fd * 2 + (0 read | 1 write)`.
 /// The count, or `-errno`.
@@ -1016,4 +1210,157 @@ pub extern "C" fn rok_io_poll(out: *mut u8, max: usize) -> i32 {
         unsafe { *word(out, i) = *k };
     }
     n as i32
+}
+
+/// WASI: no kqueue / epoll. The watched fds and the directions still
+/// armed (bit 0 read, 1 write); `poll` (`poll_oneoff`) over them reports
+/// each armed direction once, like `EPOLLET`, until `rok_io_watch`
+/// re-arms it.
+#[cfg(target_os = "wasi")]
+mod watch {
+    use core::cell::UnsafeCell;
+
+    use rokr_common::sys::Lock;
+
+    /// Highest watchable fd + 1.
+    pub const MAX: usize = 1024;
+
+    pub struct Set {
+        pub lock: Lock,
+        pub armed: UnsafeCell<[u8; MAX]>,
+    }
+
+    // SAFETY: `armed` only under `lock`.
+    unsafe impl Sync for Set {}
+
+    pub static SET: Set = Set {
+        lock: Lock::new(),
+        armed: UnsafeCell::new([0; MAX]),
+    };
+}
+
+/// No poller fd on WASI: the watch set is the runtime's.
+#[cfg(target_os = "wasi")]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_io_poller() -> i32 {
+    0
+}
+
+/// Arm `fd` for the directions of `interest` (1 read, 2 write; only
+/// those: wasi-libc rejects a `poll` for writing on a listening socket).
+/// 0 or `-errno` (`-EMFILE` past the set).
+#[cfg(target_os = "wasi")]
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_io_watch(fd: i32, interest: u32) -> i32 {
+    let Ok(i) = usize::try_from(fd) else {
+        return -libc::EBADF;
+    };
+    if i >= watch::MAX {
+        return -libc::EMFILE;
+    }
+    watch::SET.lock.lock();
+    // SAFETY: under the lock.
+    unsafe { (*watch::SET.armed.get())[i] |= interest as u8 & 3 };
+    watch::SET.lock.unlock();
+    0
+}
+
+/// One `poll` of the armed fds, at most `ms` (< 0: no limit): their
+/// events (disarmed) into `out` as in [`rok_io_poll`]. `None`: nothing
+/// is armed.
+#[cfg(target_os = "wasi")]
+fn poll_armed(out: *mut u8, max: usize, ms: i32) -> Option<i32> {
+    const N: usize = 64;
+    let mut fds = [libc::pollfd {
+        fd: -1,
+        events: 0,
+        revents: 0,
+    }; N];
+    let mut k = 0;
+    watch::SET.lock.lock();
+    // SAFETY: under the lock.
+    let armed = unsafe { &*watch::SET.armed.get() };
+    for (fd, a) in armed.iter().enumerate() {
+        if *a != 0 && k < N {
+            let mut ev = 0;
+            if a & 1 != 0 {
+                ev |= libc::POLLIN;
+            }
+            if a & 2 != 0 {
+                ev |= libc::POLLOUT;
+            }
+            fds[k] = libc::pollfd {
+                fd: fd as i32,
+                events: ev,
+                revents: 0,
+            };
+            k += 1;
+        }
+    }
+    watch::SET.lock.unlock();
+    if k == 0 {
+        return None;
+    }
+    // SAFETY: `k` valid pollfds.
+    let (r, e) = native(|| unsafe { libc::poll(fds.as_mut_ptr(), k as libc::nfds_t, ms) });
+    if r < 0 && e == libc::EINTR {
+        return Some(0);
+    }
+    let mut n = 0;
+    watch::SET.lock.lock();
+    for p in &fds[..k] {
+        // A failed `poll` wakes every waiter: its retried call reports
+        // what is wrong with its socket.
+        let hup = r < 0 || p.revents & (libc::POLLERR | libc::POLLHUP) != 0;
+        for (dir, bit) in [(0, libc::POLLIN), (1, libc::POLLOUT)] {
+            if n < max && p.events & bit != 0 && (p.revents & bit != 0 || hup) {
+                // SAFETY: under the lock; the library passes `max` words.
+                unsafe {
+                    (*watch::SET.armed.get())[p.fd as usize] &= !(1 << dir);
+                    *word(out, n) = i64::from(p.fd) * 2 + dir;
+                }
+                n += 1;
+            }
+        }
+    }
+    watch::SET.lock.unlock();
+    Some(n as i32)
+}
+
+/// [`rok_io_poll`] for the driver thread (`wasm32-wasi-threads`): a
+/// watch armed meanwhile is seen within a 10 ms slice.
+#[cfg(target_os = "wasi")]
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_io_poll(out: *mut u8, max: usize) -> i32 {
+    loop {
+        match poll_armed(out, max, 10) {
+            Some(0) => {}
+            Some(n) => return n,
+            None => rokr_common::sys::sleep_ns(10_000_000),
+        }
+    }
+}
+
+/// The one-thread executor's wait: the watched fds' events (as
+/// [`rok_io_poll`]) or `timeout_ns` (< 0: no limit), whichever comes
+/// first; the count (0: timed out). Nothing watched and no limit is a
+/// deadlock: nothing could ever wake the thread.
+#[cfg(target_os = "wasi")]
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_io_wait(out: *mut u8, max: usize, timeout_ns: i64) -> i32 {
+    let ms = if timeout_ns < 0 {
+        -1
+    } else {
+        (timeout_ns.saturating_add(999_999) / 1_000_000).min(i64::from(i32::MAX)) as i32
+    };
+    match poll_armed(out, max, ms) {
+        Some(n) => n,
+        None if timeout_ns < 0 => {
+            rokr_common::fatal(b"fatal error: deadlock: the only thread waits for another")
+        }
+        None => {
+            rokr_common::sys::sleep_ns(timeout_ns as u64);
+            0
+        }
+    }
 }

@@ -7,6 +7,11 @@
 // `par::*` entry points attach the calling thread as a guest worker
 // until their future is done; nothing is started per call.
 //
+// Without threads (`rok_cpu_count() == 0`: wasm32-wasi, the browser) the
+// pool is solo: no pool, monitor or driver thread; the guest runs every
+// task, waits for I/O and timers itself (`rok_io_wait`), and runs
+// `spawn_blocking` jobs inline.
+//
 // Each worker has a local queue (`spawn_local` tasks, never stolen) and
 // a Chase-Lev deque (`rok_deque_*`, of boxed `TaskRef`s); a guest has no
 // deque, and its spawns and other threads' wakes go to the shared
@@ -242,6 +247,8 @@ pub struct Pool {
     /// Starts the I/O driver thread once.
     driver: Once;
     blocking: BlockingPool;
+    /// No threads: the guest is the whole executor.
+    solo: bool;
 }
 
 unsafe impl Send for Pool {}
@@ -352,6 +359,7 @@ impl Pool {
                 no_home: buf_new(1),
                 driver: Once::new(),
                 blocking: BlockingPool::new(),
+                solo: rok_cpu_count() == 0,
             };
             let n = rok_cpu_count();
             for i in 0..n {
@@ -360,6 +368,9 @@ impl Pool {
             rok_task_hooks_install(hook_io, hook_timer, hook_park, hook_unpark);
             for w in pool.workers {
                 start_worker(w);
+            }
+            if pool.solo {
+                return pool;
             }
             let watch: fn() + Send = || { monitor(pool); };
             let h = rok_thread_spawn(watch, 0, rok_thread_new_id());
@@ -525,6 +536,14 @@ fn steal(w: Worker, d: GcBuf<GcBuf<TaskRef>>) -> TaskRef | none {
 /// The next task for `w`: its local queue, its deque, the injector,
 /// then the pool threads' deques.
 fn find_task(w: Worker) -> TaskRef | none {
+    // Solo: the guest is the only worker; half the time the injector goes
+    // first, so tasks looping on `yield_now` in one queue do not starve
+    // the other.
+    if w.pool.solo && next_rand(w) % 2u64 == 0u64 {
+        if let t: TaskRef = pop_front(w.pool.injector) {
+            return t;
+        }
+    }
     if let t: TaskRef = pop_front(w.local) {
         return t;
     }
@@ -540,6 +559,9 @@ fn find_task(w: Worker) -> TaskRef | none {
     // Victims round-robin from a random one (spec 7.6.4), so idle
     // workers do not all hit the same deque first.
     let n = pool.workers();
+    if n == 0 {
+        return none;
+    }
     let start = (next_rand(w) % n as u64) as usize;
     for k in 0..n {
         let other = pool.workers[(start + k) % n];
@@ -762,7 +784,11 @@ fn work(w: Worker, main: TaskRef | none) {
             atomic_xchg(w.sleep, 0, 0, SeqCst);
             continue;
         }
-        unsafe { rok_sync_wait(w.sleep, 0, 1, next) };
+        if pool.solo {
+            solo_wait(next);
+        } else {
+            unsafe { rok_sync_wait(w.sleep, 0, 1, next) };
+        }
         atomic_xchg(w.sleep, 0, 0, SeqCst);
     }
 }
@@ -865,9 +891,10 @@ pub fn block_on_try<T, E>(fut: TryAsyncFuture<T, E>) throws (E) -> T {
     }
 }
 
-/// Workers of the executor this thread runs tasks on (1 outside one).
+/// Workers of the executor this thread runs tasks on (1 outside one,
+/// and without threads, where the one thread runs every task).
 pub fn workers() -> usize {
-    if current() is none {
+    if current() is none || executor().solo {
         return 1;
     }
     executor().workers()
@@ -875,7 +902,7 @@ pub fn workers() -> usize {
 
 /// Online CPUs: the executor's pool threads.
 pub fn cpu_count() -> usize {
-    unsafe { rok_cpu_count() }
+    unsafe { rok_cpu_count() }.max(1)
 }
 
 // ---- sync jobs on the executor (`par`) ----
@@ -1471,6 +1498,10 @@ fn io_key(fd: i32, write: i32) -> usize {
 /// Start the driver thread once: it blocks in kqueue / epoll and
 /// unparks the tasks waiting on each fd that became ready.
 fn start_driver() {
+    // Solo: the guest polls (`solo_wait`).
+    if executor().solo {
+        return;
+    }
     unsafe {
         executor().driver.call_once(|| {
             let body: fn() + Send = || {
@@ -1490,6 +1521,26 @@ fn start_driver() {
             unsafe { rok_thread_detach(h) };
         });
     }
+}
+
+/// Solo (WASI: `rok_cpu_count() == 0`): wait for the watched fds or `next`
+/// ns (< 0: no limit) and unpark the ready ones.
+#[cfg(target_os = "wasi")]
+fn solo_wait(next: i64) {
+    unsafe {
+        let evs: GcBuf<i64> = buf_new(128);
+        let n = rok_io_wait(evs, 128, next);
+        for i in 0..n {
+            let k = evs[i as usize];
+            unpark(io_key((k / 2) as i32, (k % 2) as i32));
+        }
+    }
+}
+
+/// Only WASI targets run solo.
+#[cfg(not(target_os = "wasi"))]
+fn solo_wait(next: i64) {
+    unsafe { rok_thread_sleep_ns(next) };
 }
 
 /// Completes once `fd` may be readable (`await task::readable(fd)`
@@ -1517,7 +1568,7 @@ impl Future for IoReady {
             return Poll::Ready(());
         }
         start_driver();
-        if unsafe { rok_io_watch(self.fd) } < 0 {
+        if unsafe { rok_io_watch(self.fd, 1u32 << (self.write as u32)) } < 0 {
             // Not pollable: let the operation report the error.
             return Poll::Ready(());
         }
@@ -1546,7 +1597,7 @@ extern "C" fn hook_io(fd: i32, interest: u32, w: GcBuf<Waker>) {
     unsafe {
         let waker = w[0];
         start_driver();
-        if rok_io_watch(fd) < 0 {
+        if rok_io_watch(fd, interest) < 0 {
             waker.wake();
             return;
         }
@@ -1660,7 +1711,14 @@ impl BlockingPool {
                 let lane = self;
                 let h = rok_thread_spawn(|| lane.work(BLOCKING_KEEP_ALIVE_NS), 0, rok_thread_new_id());
                 if h == 0 {
-                    self.work(0); // no thread to be had: drain the queue here
+                    // No thread to be had (always without threads): drain
+                    // the queue here, outside any task.
+                    let w = current();
+                    rok_task_worker_clear();
+                    self.work(0);
+                    if let k: Worker = w {
+                        set_current(k);
+                    }
                 } else {
                     rok_thread_detach(h);
                 }

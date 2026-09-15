@@ -1,4 +1,6 @@
 // spec: std 308-path §3.8.2 / §3.8.3 / §3.8.6
+// only-os: macos linux
+// (the expected output spells unix separators)
 // expect-exit: 0
 // expect-stdout:
 // /etc/nginx/nginx.conf

@@ -1,3 +1,4 @@
+// needs: exit8
 // expect-exit: 128
 // expect-stdout:
 // 128 12

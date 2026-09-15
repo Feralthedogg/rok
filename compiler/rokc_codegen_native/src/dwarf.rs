@@ -111,7 +111,15 @@ fn cstr(b: &mut Vec<u8>, s: &str) {
     b.push(0);
 }
 
-fn abbrevs() -> Vec<u8> {
+/// `split`: code in a section per function (ELF). The unit lists each
+/// function's range; a function's end is an address, so the code of one
+/// the linker dropped is an empty range (both ends 0).
+fn abbrevs(split: bool) -> Vec<u8> {
+    let cu_end = if split {
+        (DW_AT_RANGES, DW_FORM_SEC_OFFSET)
+    } else {
+        (DW_AT_HIGH_PC, DW_FORM_DATA4)
+    };
     let mut b = Vec::new();
     let mut add = |code: u8, tag: u8, children: bool, attrs: &[(u8, u8)]| {
         b.push(code);
@@ -134,7 +142,7 @@ fn abbrevs() -> Vec<u8> {
             (DW_AT_COMP_DIR, DW_FORM_STRING),
             (DW_AT_STMT_LIST, DW_FORM_SEC_OFFSET),
             (DW_AT_LOW_PC, DW_FORM_ADDR),
-            (DW_AT_HIGH_PC, DW_FORM_DATA4),
+            cu_end,
         ],
     );
     add(
@@ -146,7 +154,10 @@ fn abbrevs() -> Vec<u8> {
             (DW_AT_DECL_FILE, DW_FORM_UDATA),
             (DW_AT_DECL_LINE, DW_FORM_UDATA),
             (DW_AT_LOW_PC, DW_FORM_ADDR),
-            (DW_AT_HIGH_PC, DW_FORM_DATA4),
+            (
+                DW_AT_HIGH_PC,
+                if split { DW_FORM_ADDR } else { DW_FORM_DATA4 },
+            ),
             (DW_AT_FRAME_BASE, DW_FORM_EXPRLOC),
         ],
     );
@@ -253,7 +264,11 @@ struct Info<'a> {
     names: &'a HashMap<u32, (String, Vec<String>)>,
     /// `.debug_ranges`, entries relative to the unit's `low_pc`.
     ranges: Vec<u8>,
+    ranges_relocs: Vec<Reloc>,
     cu_low: u32,
+    /// The functions' code is in sections of their own (ELF): ranges
+    /// are relocated addresses, the unit's `low_pc` 0.
+    split: bool,
 }
 
 impl Info<'_> {
@@ -280,6 +295,21 @@ impl Info<'_> {
             sym,
         });
         self.b.extend_from_slice(&u64::from(at).to_le_bytes());
+    }
+
+    /// A `.debug_ranges` entry: `[lo, hi)` of function `f`'s code.
+    fn range(&mut self, f: &FnRange, lo: u32, hi: u32) {
+        for at in [lo, hi] {
+            if self.split {
+                self.ranges_relocs.push(Reloc {
+                    off: self.ranges.len() as u32,
+                    kind: RelKind::Abs64,
+                    sym: f.sym,
+                });
+            }
+            let v = f.start + at - self.cu_low;
+            self.ranges.extend_from_slice(&u64::from(v).to_le_bytes());
+        }
     }
 
     fn base(&mut self, p: PrimTy) -> Option<u32> {
@@ -499,7 +529,13 @@ pub fn write(obj: &mut Obj, t: &Target, names: &HashMap<u32, (String, Vec<String
         t,
         names,
         ranges: Vec::new(),
-        cu_low: first.map_or(0, |f| f.start),
+        ranges_relocs: Vec::new(),
+        cu_low: if obj.elf {
+            0
+        } else {
+            first.map_or(0, |f| f.start)
+        },
+        split: obj.elf,
     };
     // Header (length patched below), then the unit.
     info.u32(0);
@@ -517,11 +553,20 @@ pub fn write(obj: &mut Obj, t: &Target, names: &HashMap<u32, (String, Vec<String
     );
     cstr(&mut info.b, &dir_of(&cu_path));
     info.sec_off(line_sect, 0);
-    // The text section is one range from its first function.
-    let text_start = obj.fns.first().map_or(0, |f| f.start);
-    let text_end = obj.fns.last().map_or(0, |f| f.start + f.len);
-    info.addr(first.map_or(0, |f| f.sym), first.map_or(0, |f| f.start));
-    info.u32(text_end - text_start);
+    if info.split {
+        info.b.extend_from_slice(&[0; 8]);
+        info.sec_off(ranges_sect, 0);
+        for f in &obj.fns {
+            info.range(f, 0, f.len);
+        }
+        info.ranges.extend_from_slice(&[0; 16]);
+    } else {
+        // The text section is one range from its first function.
+        let text_start = obj.fns.first().map_or(0, |f| f.start);
+        let text_end = obj.fns.last().map_or(0, |f| f.start + f.len);
+        info.addr(first.map_or(0, |f| f.sym), first.map_or(0, |f| f.start));
+        info.u32(text_end - text_start);
+    }
     // Types first, so variables refer back to them.
     for f in &fns {
         for v in &f.debug.as_ref().expect("debug").0.vars {
@@ -535,7 +580,11 @@ pub fn write(obj: &mut Obj, t: &Target, names: &HashMap<u32, (String, Vec<String
         uleb(&mut info.b, u64::from(d.file));
         uleb(&mut info.b, u64::from(d.line));
         info.addr(f.sym, f.start);
-        info.u32(f.len);
+        if info.split {
+            info.addr(f.sym, f.start + f.len);
+        } else {
+            info.u32(f.len);
+        }
         // The frame pointer: `x29` / `rbp`.
         info.b
             .extend_from_slice(&[1, if obj.x86 { DW_OP_REG6 } else { DW_OP_REG29 }]);
@@ -581,10 +630,10 @@ pub fn write(obj: &mut Obj, t: &Target, names: &HashMap<u32, (String, Vec<String
             },
         ));
     };
-    sect("__debug_abbrev", abbrevs(), Vec::new());
+    sect("__debug_abbrev", abbrevs(obj.elf), Vec::new());
     sect("__debug_info", info.b, info.relocs);
     sect("__debug_line", line.0, line.1);
-    sect("__debug_ranges", info.ranges, Vec::new());
+    sect("__debug_ranges", info.ranges, info.ranges_relocs);
 }
 
 /// The variables of scope `id` and its lexical blocks (those holding a
@@ -610,12 +659,8 @@ fn scope(
         info.b.push(A_BLOCK);
         let at = info.ranges.len() as u32;
         info.sec_off(ranges_sect, at);
-        let rel = f.start - info.cu_low;
         for (lo, hi) in scope_code(c, d, f) {
-            info.ranges
-                .extend_from_slice(&u64::from(rel + lo).to_le_bytes());
-            info.ranges
-                .extend_from_slice(&u64::from(rel + hi).to_le_bytes());
+            info.range(f, lo, hi);
         }
         info.ranges.extend_from_slice(&[0; 16]);
         scope(info, c, d, live, f, ranges_sect, var_die);

@@ -1,3 +1,4 @@
+// needs: fs
 // expect-exit: 0
 // expect-stdout:
 // 1.234s 1.234s 5ms 100ns 0ns 1.5µs -2s
@@ -18,6 +19,7 @@
 // `Metadata::modified` (301 + 3.3.3).
 use rok::std::time::{Duration, Instant, SystemTime, SystemTimeError, BootTime, UNIX_EPOCH};
 use rok::std::fs;
+use rok::std::env;
 use rok::std::io::IoError;
 
 fn main() throws (SystemTimeError | IoError) {
@@ -41,7 +43,7 @@ fn main() throws (SystemTimeError | IoError) {
     let bt = BootTime::now();
     println(f"boot {bt.elapsed() >= Duration::ZERO}");
 
-    let path = "target_std_time_probe.txt";
+    let path = env::temp_dir() / f"rok_std_time_probe_{env::pid()}.txt";
     try fs::write(path, "x");
     let m = try (try fs::metadata(path)).modified();
     let age = try SystemTime::now().duration_since(m) catch e { Duration::ZERO };

@@ -1,4 +1,5 @@
 // spec: 007.06-scheduler §7.6.6 / 008.05 §8.5.4 rok_cpu_count
+// needs: threads
 // expect-exit: 0
 // expect-stdout:
 // cpus >= 1: true

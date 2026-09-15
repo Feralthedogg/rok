@@ -40,7 +40,11 @@ struct Ring {
 }
 
 fn new_ring(cap: usize) -> *mut Ring {
-    let obj = rokr_gc::alloc(HEADER_SIZE + 8 * (cap + 1), 8, SCAN_WORDS_TYPE_ID);
+    let obj = rokr_gc::alloc(
+        HEADER_SIZE + size_of::<usize>() * (cap + 1),
+        8,
+        SCAN_WORDS_TYPE_ID,
+    );
     // SAFETY: a fresh zeroed object with room for the mask and slots.
     unsafe {
         let r = obj.add(HEADER_SIZE).cast::<Ring>();

@@ -1,6 +1,7 @@
 //! OS threads (706 §7.6.6, 805 §8.5.4) and the one address-keyed wait
 //! queue every blocking wait in the runtime and in `rok::core::sync`
-//! goes through.
+//! goes through. wasm32 has one thread (stdlib 0.1.4): no spawn, and a
+//! wait that only another thread could end is a deadlock.
 
 use core::mem::size_of;
 use core::ptr;
@@ -18,16 +19,25 @@ pub struct RokFn {
     env: *mut u8,
 }
 
+#[cfg(not(rok_solo))]
 struct Start {
     me: *mut world::Mutator,
     f: RokFn,
 }
 
+/// The smallest stack `pthread_attr_setstacksize` takes (wasi-libc's is
+/// not in the `libc` crate).
+#[cfg(unix)]
+const STACK_MIN: usize = libc::PTHREAD_STACK_MIN;
+#[cfg(rok_wasi_threads)]
+const STACK_MIN: usize = 2048;
+
 /// Rok frames are large in debug builds and the macOS default (512 KiB)
 /// is small.
+#[cfg(not(rok_solo))]
 const DEFAULT_STACK: usize = 8 << 20;
 
-#[cfg(unix)]
+#[cfg(any(unix, rok_wasi_threads))]
 extern "C" fn thread_main(arg: *mut libc::c_void) -> *mut libc::c_void {
     run(arg.cast());
     ptr::null_mut()
@@ -39,6 +49,7 @@ unsafe extern "system" fn thread_main(arg: *mut core::ffi::c_void) -> u32 {
     0
 }
 
+#[cfg(not(rok_solo))]
 fn run(arg: *mut Start) {
     // SAFETY: `arg` is the `Start` that `rok_thread_spawn` leaked to us.
     let s = unsafe { ptr::read(arg) };
@@ -75,6 +86,7 @@ pub extern "C" fn rok_thread_new_id() -> u64 {
 /// thread could not be created. `f`'s environment stays a GC root until
 /// the thread ends. 805 has `rok_thread_spawn(closure: Ptr<u8>)`; a rok
 /// closure crosses as its `{code, env}` pair.
+#[cfg(not(rok_solo))]
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_thread_spawn(f: RokFn, stack_size: usize, id: u64) -> usize {
     let me = world::register(f.env, id);
@@ -96,8 +108,15 @@ pub extern "C" fn rok_thread_spawn(f: RokFn, stack_size: usize, id: u64) -> usiz
     handle
 }
 
+/// No threads on wasm32: the spawn fails.
+#[cfg(rok_solo)]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_thread_spawn(_f: RokFn, _stack_size: usize, _id: u64) -> usize {
+    0
+}
+
 /// An OS thread running [`run`]`(start)`: its join handle, or 0.
-#[cfg(unix)]
+#[cfg(any(unix, rok_wasi_threads))]
 fn spawn_os(start: *mut Start, stack_size: usize) -> usize {
     // SAFETY: the attr / thread calls get valid out-pointers.
     unsafe {
@@ -106,7 +125,7 @@ fn spawn_os(start: *mut Start, stack_size: usize) -> usize {
         let size = if stack_size == 0 {
             DEFAULT_STACK
         } else {
-            stack_size.max(libc::PTHREAD_STACK_MIN)
+            stack_size.max(STACK_MIN)
         };
         libc::pthread_attr_setstacksize(&mut attr, size);
         let mut tid: libc::pthread_t = core::mem::zeroed();
@@ -144,7 +163,7 @@ fn spawn_os(start: *mut Start, stack_size: usize) -> usize {
 pub extern "C" fn rok_thread_join(handle: usize) -> i32 {
     crate::lane::block_begin();
     // SAFETY: `handle` came from `rok_thread_spawn`.
-    #[cfg(unix)]
+    #[cfg(any(unix, rok_wasi_threads))]
     let rc = unsafe { libc::pthread_join(handle as libc::pthread_t, ptr::null_mut()) };
     // SAFETY: as above; the join consumes the handle.
     #[cfg(windows)]
@@ -159,6 +178,12 @@ pub extern "C" fn rok_thread_join(handle: usize) -> i32 {
             sys::errno()
         }
     };
+    // No handle exists to join.
+    #[cfg(rok_solo)]
+    let rc = {
+        let _ = handle;
+        libc::ESRCH
+    };
     crate::lane::block_end();
     rc
 }
@@ -166,9 +191,10 @@ pub extern "C" fn rok_thread_join(handle: usize) -> i32 {
 /// Let the thread behind `handle` release its OS resources when it ends;
 /// the handle is no longer joinable. 0 on success.
 #[unsafe(no_mangle)]
+#[cfg_attr(rok_solo, allow(clippy::missing_const_for_fn))]
 pub extern "C" fn rok_thread_detach(handle: usize) -> i32 {
     // SAFETY: `handle` came from `rok_thread_spawn` and was not joined.
-    #[cfg(unix)]
+    #[cfg(any(unix, rok_wasi_threads))]
     unsafe {
         libc::pthread_detach(handle as libc::pthread_t)
     }
@@ -177,18 +203,31 @@ pub extern "C" fn rok_thread_detach(handle: usize) -> i32 {
     unsafe {
         i32::from(rokr_common::win::CloseHandle(handle as rokr_common::win::HANDLE) == 0)
     }
+    #[cfg(rok_solo)]
+    {
+        let _ = handle;
+        libc::ESRCH
+    }
 }
 
-/// Online CPUs (at least 1): the executor's width.
+/// Online CPUs (at least 1): the executor's width. 0: no thread can be
+/// started (wasm32 without threads), the executor runs solo.
 #[unsafe(no_mangle)]
+#[cfg_attr(rok_solo, allow(clippy::missing_const_for_fn))]
 pub extern "C" fn rok_cpu_count() -> usize {
     // SAFETY: plain sysconf query.
     #[cfg(unix)]
     let n = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as usize;
+    // WASI cannot tell how many cores run its threads.
+    #[cfg(rok_wasi_threads)]
+    let n = 4;
     // SAFETY: plain query; 0xFFFF = every processor group.
     #[cfg(windows)]
     let n = unsafe { rokr_common::win::GetActiveProcessorCount(0xFFFF) } as usize;
-    n.max(1)
+    #[cfg(not(rok_solo))]
+    return n.max(1);
+    #[cfg(rok_solo)]
+    0
 }
 
 /// This thread's worker id (`rok_tls_worker_id`), the `ThreadId`.
@@ -206,7 +245,12 @@ pub extern "C" fn rok_thread_sleep_ns(ns: i64) {
     crate::lane::block_end();
 }
 
-#[cfg(unix)]
+#[cfg(rok_solo)]
+fn sleep(ns: i64) {
+    sys::sleep_ns(ns as u64);
+}
+
+#[cfg(any(unix, rok_wasi_threads))]
 fn sleep(ns: i64) {
     // SAFETY: a zeroed `timespec` is valid.
     let mut ts: libc::timespec = unsafe { core::mem::zeroed() };
@@ -242,7 +286,7 @@ fn sleep(ns: i64) {
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_thread_yield_now() {
     // SAFETY: no preconditions.
-    #[cfg(unix)]
+    #[cfg(any(unix, target_os = "wasi"))]
     unsafe {
         libc::sched_yield();
     }
@@ -303,6 +347,7 @@ pub extern "C" fn rok_task_worker_clear() {
 
 /// A thread blocked in [`wait_on`]: a node on its stack, linked into
 /// its bucket while it waits.
+#[cfg(not(rok_solo))]
 struct Waiter {
     addr: usize,
     cond: sys::Cond,
@@ -311,6 +356,7 @@ struct Waiter {
     next: *mut Waiter,
 }
 
+#[cfg(not(rok_solo))]
 struct Bucket {
     lock: sys::Lock,
     /// Waiters, oldest first (under `lock`).
@@ -318,8 +364,10 @@ struct Bucket {
 }
 
 // SAFETY: `head` is only touched under `lock`.
+#[cfg(not(rok_solo))]
 unsafe impl Sync for Bucket {}
 
+#[cfg(not(rok_solo))]
 static BUCKETS: [Bucket; 64] = [const {
     Bucket {
         lock: sys::Lock::new(),
@@ -327,10 +375,12 @@ static BUCKETS: [Bucket; 64] = [const {
     }
 }; 64];
 
+#[cfg(not(rok_solo))]
 fn bucket(addr: usize) -> &'static Bucket {
     &BUCKETS[(addr >> 2) % BUCKETS.len()]
 }
 
+#[cfg(not(rok_solo))]
 impl Bucket {
     /// Unlink the first waiter on `addr` (`all`: every one) and signal
     /// it.
@@ -397,6 +447,22 @@ impl Futex for AtomicU8 {
 
 /// Block while `w` holds `expected`, at most `timeout_ns` (< 0: no
 /// limit); may return spuriously.
+#[cfg(rok_solo)]
+pub fn wait_on<W: Futex>(w: &W, expected: i32, timeout_ns: i64) {
+    if w.value() != expected {
+        return;
+    }
+    if timeout_ns < 0 {
+        rokr_common::fatal(b"fatal error: deadlock: the only thread waits for another");
+    }
+    crate::lane::block_begin();
+    sys::sleep_ns(timeout_ns as u64);
+    crate::lane::block_end();
+}
+
+/// Block while `w` holds `expected`, at most `timeout_ns` (< 0: no
+/// limit); may return spuriously.
+#[cfg(not(rok_solo))]
 pub fn wait_on<W: Futex>(w: &W, expected: i32, timeout_ns: i64) {
     let addr = ptr::from_ref(w) as usize;
     let b = bucket(addr);
@@ -436,6 +502,11 @@ pub fn wake<W: Futex>(w: &W) {
     wake_waiters(ptr::from_ref(w) as usize, true);
 }
 
+/// One thread: nobody waits.
+#[cfg(rok_solo)]
+const fn wake_waiters(_addr: usize, _all: bool) {}
+
+#[cfg(not(rok_solo))]
 fn wake_waiters(addr: usize, all: bool) {
     let b = bucket(addr);
     b.lock.lock();

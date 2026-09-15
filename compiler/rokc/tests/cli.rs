@@ -418,9 +418,11 @@ fn sysroot_is_beside_rokc() {
 /// (`lib/rok/targets/<triple>/`, `targets/build.sh`): Linux ELF
 /// executables (musl static, glibc PIE through the system's loader; the
 /// 32-bit ones ELFCLASS32), a 32-bit Windows PE (run with
-/// `ROK_TEST_WINE=<wine>`, which needs its 32-bit support) and Mach-O
-/// for the other macOS arch, run here under Rosetta. A target it does
-/// not ship is named.
+/// `ROK_TEST_WINE=<wine>`, which needs its 32-bit support), Mach-O for
+/// the other macOS arch, run here under Rosetta, and wasm32 modules (a
+/// WASI preview 2 component, preview 1 command modules), run by `node`
+/// with the shipped `rok.mjs` host and by `ROK_TEST_WASM_RUNNER`
+/// (wasmtime) when there. A target it does not ship is named.
 #[test]
 fn cross_targets_link_from_the_sysroot() {
     let dir = scratch("cross");
@@ -464,9 +466,19 @@ fn cross_targets_link_from_the_sysroot() {
         "i686-unknown-linux-gnu",
         "armv7-unknown-linux-gnueabihf",
         "i686-pc-windows-msvc",
+        "wasm32-wasi",
+        "wasm32-wasi-threads",
+        "wasm32-unknown-unknown",
     ] {
         if !targets.join(t).is_dir() {
             continue;
+        }
+        if t.starts_with("wasm32-") {
+            wasm_target_runs(&dir, &targets, t);
+            continue;
+        }
+        if t.ends_with("-gnu") || t.ends_with("-gnueabihf") {
+            check_glibc_runtime(t, &fs::read(targets.join(t).join("librokr.a")).unwrap());
         }
         for o in ["-O0", "-O2"] {
             let exe = dir.join(format!("h-{t}{o}"));
@@ -509,6 +521,51 @@ fn cross_targets_link_from_the_sysroot() {
     }
 }
 
+/// `h.rok` built for wasm32 target `t` at -O0 / -O2: a module that
+/// exports `_start` and imports WASI preview 1, printing `ok` under the
+/// target's host when one is there.
+fn wasm_target_runs(dir: &Path, targets: &Path, t: &str) {
+    for o in ["-O0", "-O2"] {
+        let exe = dir.join(format!("h-{t}{o}.wasm"));
+        let exe_s = exe.display().to_string();
+        let out = rokc(
+            None,
+            dir,
+            &["-q", "build", "h.rok", "--target", t, o, "-o", &exe_s],
+        );
+        assert_exit(&out, 0);
+        let b = fs::read(&exe).unwrap();
+        let has = |s: &[u8]| b.windows(s.len()).any(|w| w == s);
+        assert_eq!(&b[..4], b"\0asm", "{t}");
+        assert!(has(b"_start") && has(b"wasi_snapshot_preview1"), "{t}");
+        let threads: &[&str] = if t == "wasm32-wasi-threads" {
+            &["-W", "threads=y,shared-memory=y", "-S", "threads=y"]
+        } else {
+            &[]
+        };
+        let run = if t.starts_with("wasm32-wasi") {
+            std::env::var_os("ROK_TEST_WASM_RUNNER").map(|r| {
+                Command::new(r)
+                    .arg("run")
+                    .args(threads)
+                    .arg(&exe)
+                    .output()
+                    .unwrap()
+            })
+        } else {
+            Command::new("node")
+                .arg(targets.join(t).join("rok.mjs"))
+                .arg(&exe)
+                .output()
+                .ok()
+        };
+        if let Some(run) = run {
+            assert_exit(&run, 0);
+            assert_eq!(text(&run.stdout), "ok\n", "{t}");
+        }
+    }
+}
+
 /// A Linux executable for `t`: machine, class, static (musl) or a PIE
 /// with glibc's loader and versions up to 2.34.
 fn check_linux_elf(t: &str, b: &[u8]) {
@@ -537,7 +594,63 @@ fn check_linux_elf(t: &str, b: &[u8]) {
     }
 }
 
-/// An x86 PE image, large-address-aware.
+/// A glibc runtime archive: on 32-bit targets it calls the 64-bit time
+/// and file-offset interfaces (glibc 2.34+), none of the 32-bit `time_t`
+/// / `off_t` ones (stdlib spec 3.3: no 2038 limit).
+fn check_glibc_runtime(t: &str, a: &[u8]) {
+    if t.starts_with("x86_64") || t.starts_with("aarch64") {
+        return;
+    }
+    // A symbol name in an object's string table.
+    let has = |s: &str| {
+        let n = s.len();
+        a.windows(n + 2)
+            .any(|w| w[0] == 0 && w[n + 1] == 0 && &w[1..=n] == s.as_bytes())
+    };
+    for old in [
+        "clock_gettime",
+        "clock_getres",
+        "clock_nanosleep",
+        "nanosleep",
+        "gettimeofday",
+        "fstat",
+        "fstatat",
+        "fstat64",
+        "fstatat64",
+        "lstat",
+        "lstat64",
+        "pthread_cond_timedwait",
+        "setsockopt",
+        "getsockopt",
+        "sendmsg",
+        "recvmsg",
+        "fcntl",
+        "futimens",
+        "utimensat",
+        "ppoll",
+        "pselect",
+        "timerfd_settime",
+        "timerfd_gettime",
+        "lseek",
+        "readdir",
+        "mmap",
+        "openat",
+        "ftruncate",
+        "sendfile",
+    ] {
+        assert!(!has(old), "{t}: the runtime calls the 32-bit `{old}`");
+    }
+    for new in [
+        "__clock_gettime64",
+        "__nanosleep64",
+        "__fstat64_time64",
+        "lseek64",
+    ] {
+        assert!(has(new), "{t}: the runtime does not call `{new}`");
+    }
+}
+
+/// An x86 PE image, large-address-aware, with an 8 MiB main stack.
 fn check_x86_pe(t: &str, b: &[u8]) {
     assert_eq!(&b[..2], b"MZ", "{t}");
     let pe = u32::from_le_bytes(b[0x3c..0x40].try_into().unwrap()) as usize;
@@ -545,6 +658,13 @@ fn check_x86_pe(t: &str, b: &[u8]) {
     assert_eq!(u16::from_le_bytes([b[pe + 4], b[pe + 5]]), 0x14c, "{t}");
     // IMAGE_FILE_LARGE_ADDRESS_AWARE
     assert_ne!(b[pe + 22] & 0x20, 0, "{t}");
+    // SizeOfStackReserve (PE32)
+    let at = pe + 24 + 72;
+    assert_eq!(
+        u32::from_le_bytes(b[at..at + 4].try_into().unwrap()),
+        8 << 20,
+        "{t}"
+    );
 }
 
 #[test]
@@ -1263,4 +1383,127 @@ fn non_exhaustive_needs_a_catch_all_across_packages() {
         &rokc(None, &dir, &["check", "app", "--extern", "dep=dep"]),
         0,
     );
+}
+
+/// Profile-guided optimization: `-C profile-generate[=<dir>]` instruments
+/// (LLVM at every level, so `-O0` too), the run writes a raw profile
+/// (`LLVM_PROFILE_FILE` overrides where), `rokc profdata merge` indexes
+/// it, and `-C profile-use` optimizes with it; a profile older than the
+/// code is a warning. The REPL, `-C backend=native` and wasm32 refuse it.
+#[test]
+fn profile_guided_optimization_round_trip() {
+    let dir = scratch("pgo");
+    let main = |extra: &str| {
+        let src = format!(
+            "fn classify(n: i64) -> i64 {{\n    if n % 7 == 0 {{ 3 }} else if n % 3 == 0 {{ 2 }} else {{ 1 }}\n}}\n\n\
+             fn main() {{\n    let s: i64 = 0;\n    for i in 0i64..100000i64 {{\n        s += classify(i);{extra}\n    }}\n    \
+             println(f\"{{s}}\");\n}}\n"
+        );
+        fs::write(dir.join("main.rok"), src).unwrap();
+    };
+    main("");
+    let refused = |args: &[&str], code: i32, msg: &str| {
+        let out = rokc(None, &dir, args);
+        assert_exit(&out, code);
+        assert!(text(&out.stderr).contains(msg), "{}", text(&out.stderr));
+    };
+    refused(
+        &["build", "-C", "profile-use=missing.profdata"],
+        1,
+        "-C profile-use: no profile",
+    );
+    refused(
+        &["build", "-C", "backend=native", "-C", "profile-generate"],
+        2,
+        "need the LLVM backend",
+    );
+    refused(
+        &["repl", "-C", "profile-generate"],
+        1,
+        "the REPL does not support",
+    );
+    refused(&["profdata", "merge"], 2, "usage: rokc profdata merge");
+
+    let Some(env) = setup() else { return };
+    let targets = Path::new(ROKC).parent().unwrap().join("../lib/rok/targets");
+    let rt = targets.join(env!("ROK_HOST")).join(if cfg!(windows) {
+        "clang_rt.profile.lib"
+    } else {
+        "libclang_rt.profile.a"
+    });
+    if !rt.is_file() {
+        eprintln!("skipped: no {} (targets/build.sh)", rt.display());
+        return;
+    }
+    if targets.join("wasm32-wasi").is_dir() {
+        refused(
+            &["build", "--target", "wasm32-wasi", "-C", "profile-generate"],
+            1,
+            "not supported for wasm32-wasi",
+        );
+    }
+    let build = |args: &[&str]| {
+        let out = rokc(Some(&env), &dir, &[&["-q", "build"], args].concat());
+        assert_exit(&out, 0);
+        text(&out.stderr)
+    };
+    let run = |exe: &str, profile: Option<&Path>| {
+        let mut cmd = Command::new(dir.join(exe));
+        cmd.current_dir(&dir).env_remove("LLVM_PROFILE_FILE");
+        if let Some(p) = profile {
+            cmd.env("LLVM_PROFILE_FILE", p);
+        }
+        let out = cmd.output().unwrap();
+        assert_exit(&out, 0);
+        assert_eq!(text(&out.stdout), "157144\n");
+    };
+    let raw = dir.join("raw");
+    let raw_s = raw.display().to_string();
+    let count = |d: &Path| fs::read_dir(d).map_or(0, Iterator::count);
+    build(&["-C", &format!("profile-generate={raw_s}"), "-o", "instr0"]);
+    run("instr0", None);
+    assert_eq!(count(&raw), 1);
+    fs::remove_dir_all(&raw).unwrap();
+    build(&[
+        "-O2",
+        "-C",
+        &format!("profile-generate={raw_s}"),
+        "-o",
+        "instr",
+    ]);
+    run("instr", None);
+    run("instr", Some(&dir.join("env.profraw")));
+    assert_eq!(count(&raw), 1);
+    let merge = [
+        "-q",
+        "profdata",
+        "merge",
+        "-o",
+        "p.profdata",
+        &raw_s,
+        "env.profraw",
+    ];
+    assert_exit(&rokc(None, &dir, &merge), 0);
+
+    let err = build(&["-O2", "-C", "profile-use=p.profdata", "-o", "pgo"]);
+    assert!(!err.contains("out of date"), "{err}");
+    run("pgo", None);
+    // The profile reaches the code: it lays out the branches otherwise.
+    build(&["-O2", "--emit=asm", "-o", "plain.s"]);
+    build(&[
+        "-O2",
+        "-C",
+        "profile-use=p.profdata",
+        "--emit=asm",
+        "-o",
+        "pgo.s",
+    ]);
+    assert_ne!(
+        fs::read(dir.join("plain.s")).unwrap(),
+        fs::read(dir.join("pgo.s")).unwrap()
+    );
+    // Code changed since the profile: a warning, still a build.
+    main("\n        if s % 1000 == 999 {\n            println(\"x\");\n        }");
+    let err = build(&["-O2", "-C", "profile-use=p.profdata", "-o", "stale"]);
+    assert!(err.contains("the profile is out of date for"), "{err}");
 }

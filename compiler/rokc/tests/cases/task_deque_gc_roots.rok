@@ -1,0 +1,47 @@
+// spec: refs-lang 007.06
+// expect-exit: 0
+// gc-stress: 30
+// expect-stdout:
+// spawned 640, sum 20448000
+
+// Tasks queued in a worker's work-stealing deque are reachable only
+// through its ring (a runtime word buffer the collector scans word by
+// word): collections, evacuating ones too, run while hundreds of them
+// wait there. On a 32-bit target a scan that stepped 8 bytes saw every
+// other pointer-size slot only.
+extern "C" {
+    fn rok_gc_collect();
+}
+
+async fn leaf(i: i64) -> i64 {
+    let parts: List<str> = [];
+    for k in 0..20 {
+        parts.push(f"{i}:{k}");
+    }
+    i + parts.len() as i64 - 20
+}
+
+// Each spawner runs on a worker and pushes its children to that
+// worker's deque, then collects before awaiting them.
+async fn spawner(base: i64) -> i64 {
+    let kids: List<Task<i64>> = [];
+    for i in 0..64 {
+        kids.push(task::spawn(leaf(base + i as i64)));
+    }
+    unsafe { rok_gc_collect() };
+    let s: i64 = 0;
+    for k in kids {
+        s += await k;
+    }
+    s
+}
+
+let roots: List<Task<i64>> = [];
+for j in 0..10 {
+    roots.push(task::spawn(spawner(j as i64 * 64)));
+}
+let total: i64 = 0;
+for r in roots {
+    total += await r;
+}
+println(f"spawned 640, sum {total * 100}");

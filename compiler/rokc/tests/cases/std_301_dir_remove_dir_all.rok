@@ -1,0 +1,35 @@
+// spec: std 301-fs
+// needs: fs
+// expect-exit: 0
+// expect-stdout:
+// before: true 3
+// after: false
+// base gone: false
+
+// `Dir::remove_dir_all` removes the entries under its own directory:
+// with a `Dir` opened by a relative path (and on Windows by any path)
+// the entries' shown paths are not relative to it.
+use rok::std::fs;
+use rok::std::fs::Dir;
+use rok::std::env;
+
+// A relative base, under the temp directory.
+try! env::set_current_dir(env::temp_dir());
+let base = f"rok_std_301_rm_{env::pid()}";
+try! fs::create_dir_all(base);
+let d = try! Dir::root().open_dir(base);
+try! d.create_dir_all("many/deep");
+for i in 0..3 {
+    try! fs::write(f"{base}/many/{i}.txt", f"{i}");
+}
+try! fs::write(f"{base}/many/deep/x.txt", "x");
+let n = 0;
+for e in try! fs::read_dir(f"{base}/many") {
+    if (try! e.get()).file_name().ends_with(".txt") { n += 1; }
+}
+println(f"before: {d.exists("many/deep/x.txt")} {n}");
+try! d.remove_dir_all("many");
+println(f"after: {d.exists("many")}");
+try! d.close();
+try! fs::remove_dir_all(base);
+println(f"base gone: {fs::exists(base)}");

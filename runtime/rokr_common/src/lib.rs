@@ -10,7 +10,7 @@ pub mod tls;
 pub mod win;
 pub mod wtf8;
 
-#[cfg_attr(unix, path = "sys_unix.rs")]
+#[cfg_attr(any(unix, target_os = "wasi"), path = "sys_unix.rs")]
 #[cfg_attr(windows, path = "sys_windows.rs")]
 pub mod sys;
 

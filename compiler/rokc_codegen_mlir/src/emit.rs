@@ -157,10 +157,10 @@ enum Callee<'s> {
 
 /// The declaration of runtime symbol `name` (805) codegen calls on its
 /// own; `None` for a name not in the table. A `str` parameter is a
-/// pointer to it on Windows x64 (`FnEmit::runtime_str`).
+/// pointer to it on Windows x64 and wasm32 (`FnEmit::runtime_str`).
 fn runtime_decl(name: &str, target: &Target) -> Option<String> {
     let pw = target.pointer_width;
-    let s = if target.c_abi == CAbi::X86_64Win {
+    let s = if target.c_abi.pair_by_ref() {
         "!llvm.ptr".to_owned()
     } else {
         mlir_prim(PrimTy::Str, pw)
@@ -1152,6 +1152,8 @@ impl Emitter {
 
     /// The C `main` (spec 905.9): runtime init, type registration, the
     /// user's `main`, runtime shutdown; its result as the exit code.
+    /// wasm32: `__main_void`, what wasi-libc's `_start` calls (clang's
+    /// name for a `main` without parameters there).
     fn emit_main_wrapper(
         &mut self,
         user_main: &str,
@@ -1161,7 +1163,12 @@ impl Emitter {
         let pw = self.pw();
         self.needs.insert("rok_runtime_init");
         self.needs.insert("rok_runtime_shutdown");
-        self.out.push_str("  func.func @main() -> i32 {\n");
+        let entry = if self.target.family() == "wasm" {
+            "__main_void"
+        } else {
+            "main"
+        };
+        let _ = writeln!(self.out, "  func.func @{entry}() -> i32 {{");
         self.out.push_str(
             "    func.call @rok_runtime_init() : () -> ()\n    func.call @rok.register_types() : () -> ()\n",
         );
@@ -1748,11 +1755,12 @@ impl<'a> FnEmit<'a> {
 
     /// A stack slot of type `ty` allocated once in the entry block.
     /// A `str` argument `v` of a runtime function codegen calls on its
-    /// own (`runtime_decl`), and its type: Windows x64 passes the 16-byte
-    /// C struct by reference (spec 8.6.3), so a pointer to a copy there.
+    /// own (`runtime_decl`), and its type: Windows x64 and WebAssembly
+    /// pass the two-word C struct by reference (spec 8.6.3), so a pointer
+    /// to a copy there.
     fn runtime_str(&mut self, v: &str) -> (String, String) {
         let ty = mlir_prim(PrimTy::Str, self.target.pointer_width);
-        if self.target.c_abi != CAbi::X86_64Win {
+        if !self.target.c_abi.pair_by_ref() {
             return (v.to_owned(), ty);
         }
         let slot = self.entry_alloca(&ty, self.target.pointer_width / 8);
@@ -4758,7 +4766,12 @@ fn c_ext_attr(ty: &MirTy, target: &Target) -> &'static str {
     let narrow = match target.c_abi {
         CAbi::Aarch64 => matches!(target.os.as_str(), "macos" | "ios"),
         CAbi::X86_64Win => false,
-        CAbi::X86_64SysV | CAbi::X86SysV | CAbi::X86Win | CAbi::ArmHf | CAbi::Other => true,
+        CAbi::X86_64SysV
+        | CAbi::X86SysV
+        | CAbi::X86Win
+        | CAbi::ArmHf
+        | CAbi::Wasm32
+        | CAbi::Other => true,
     };
     match ty {
         MirTy::Prim(PrimTy::I8 | PrimTy::I16 | PrimTy::CChar) if narrow => " {llvm.signext}",

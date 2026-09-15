@@ -1,3 +1,7 @@
+// only-os: macos linux
+// (Unix domain sockets are unix-only, std 3.2.3)
+// needs: net
+// only-os: macos linux
 // expect-exit: 0
 // expect-stdout:
 // pair 4 ping

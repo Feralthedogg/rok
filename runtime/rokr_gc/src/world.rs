@@ -88,7 +88,7 @@ pub fn halt() {
         let mut m = *WORLD.threads.get();
         while !m.is_null() {
             if !(*m).yield_flag.is_null() {
-                (*(*m).yield_flag).store(1, Ordering::SeqCst);
+                (*(*m).yield_flag).fetch_or(tls::YIELD_STOP, Ordering::SeqCst);
             }
             m = (*m).next;
         }
@@ -161,7 +161,7 @@ pub fn safepoint() {
     // Under the lock, as a stopper raises the flag: cleared outside it,
     // a request raised just after this thread's pause would be lost and
     // its next `enter_native` would not wake that stopper.
-    tls::yield_flag().store(0, Ordering::Relaxed);
+    tls::yield_flag().fetch_and(!tls::YIELD_STOP, Ordering::Relaxed);
     unlock();
 }
 
@@ -204,7 +204,7 @@ pub fn leave_native() {
     state.store(MUTATOR_RUNNING, Ordering::Release);
     // Halted: the next safepoint stops this thread.
     if !HALT.load(Ordering::Relaxed) {
-        tls::yield_flag().store(0, Ordering::Relaxed);
+        tls::yield_flag().fetch_and(!tls::YIELD_STOP, Ordering::Relaxed);
     }
     unlock();
 }
@@ -348,7 +348,7 @@ pub fn stop() {
                 let s = (*m).state;
                 if !s.is_null() && s.cast::<u8>() != me {
                     // `SeqCst`: the handshake of `enter_native`.
-                    (*(*m).yield_flag).store(1, Ordering::SeqCst);
+                    (*(*m).yield_flag).fetch_or(tls::YIELD_STOP, Ordering::SeqCst);
                     if (*s).load(Ordering::SeqCst) == MUTATOR_RUNNING {
                         running = true;
                     }
@@ -425,7 +425,7 @@ pub fn resume() {
         let mut m = *WORLD.threads.get();
         while !m.is_null() {
             if !(*m).yield_flag.is_null() {
-                (*(*m).yield_flag).store(0, Ordering::Relaxed);
+                (*(*m).yield_flag).fetch_and(!tls::YIELD_STOP, Ordering::Relaxed);
             }
             m = (*m).next;
         }

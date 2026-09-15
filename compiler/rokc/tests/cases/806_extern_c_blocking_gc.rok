@@ -1,3 +1,6 @@
+// only-os: macos linux
+// (POSIX usleep / pipe / read / write)
+// needs: process
 // expect-exit: 0
 // gc-stress: 1000
 // expect-stdout:
