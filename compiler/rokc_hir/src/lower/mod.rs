@@ -1786,8 +1786,6 @@ struct LowerCtx<'a> {
     /// Sub-sum type-pattern binders (`v: A | B` against `A | B | C`):
     /// `(binder, whole-scrutinee local)`, converted by `take_cells`.
     pending_resums: Vec<(LocalId, LocalId)>,
-    /// Locals stored in such a cell (declared type `GcBuf<T>`).
-    boxed: std::collections::HashSet<LocalId>,
     /// In a closure: locals holding a value capture (assigning one is an
     /// error, spec 4.6.4).
     value_captured: std::collections::HashSet<LocalId>,
@@ -1917,7 +1915,6 @@ impl<'a> LowerCtx<'a> {
         for scope in &mut self.scopes {
             scope.retain(|_, l| kept(l));
         }
-        self.boxed.retain(kept);
         self.value_captured.retain(kept);
         self.narrowed.retain(|l, _| kept(l));
         let sink = &self.env.sink;
@@ -1985,7 +1982,6 @@ impl<'a> LowerCtx<'a> {
             ref_captured: std::collections::HashSet::new(),
             pending_cells: Vec::new(),
             pending_resums: Vec::new(),
-            boxed: std::collections::HashSet::new(),
             value_captured: std::collections::HashSet::new(),
             unsafe_depth: 0,
             explicit_recv: None,
@@ -3566,7 +3562,7 @@ impl<'a> LowerCtx<'a> {
     /// element type).
     fn var_ty(&self, id: LocalId) -> HirTy {
         match self.local_ty(id) {
-            HirTy::GcBuf(t) if self.boxed.contains(&id) => *t,
+            HirTy::GcBuf(t) if self.is_boxed(id) => *t,
             t => t,
         }
     }
@@ -3577,7 +3573,7 @@ impl<'a> LowerCtx<'a> {
         let HirTy::GcBuf(elem) = &ty else {
             return hir_local(id, &ty, span);
         };
-        if !self.boxed.contains(&id) {
+        if !self.is_boxed(id) {
             return hir_local(id, &ty, span);
         }
         HirExpr {
@@ -3593,7 +3589,7 @@ impl<'a> LowerCtx<'a> {
 
     /// `id = value` (into its cell when `[ref]`-captured).
     fn store_local(&self, id: LocalId, value: HirExpr) -> HirStmt {
-        if !self.boxed.contains(&id) {
+        if !self.is_boxed(id) {
             return HirStmt::Assign { local: id, value };
         }
         let span = value.span;
@@ -3687,7 +3683,7 @@ impl<'a> LowerCtx<'a> {
         let cell_ty = HirTy::GcBuf(Box::new(ty.clone()));
         let tmp = self.declare(None, cell_ty.clone());
         let local = self.declare(Some(name.to_owned()), cell_ty.clone());
-        self.boxed.insert(local);
+        self.locals[local.0 as usize].boxed = true;
         let cell = HirExprKind::BufNew {
             elem: ty,
             len: Box::new(hir_int(1, PrimTy::Usize, span)),
@@ -3760,8 +3756,18 @@ impl<'a> LowerCtx<'a> {
                 scope.insert(n.clone(), id);
             }
         }
-        self.locals.push(HirLocal { id, name, ty });
+        self.locals.push(HirLocal {
+            id,
+            name,
+            ty,
+            boxed: false,
+        });
         id
+    }
+
+    /// Whether `id` is a `[ref]`-captured variable's cell.
+    fn is_boxed(&self, id: LocalId) -> bool {
+        self.locals[id.0 as usize].boxed
     }
 
     fn lookup(&self, name: &str) -> Option<LocalId> {

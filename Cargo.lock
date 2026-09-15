@@ -15,6 +15,7 @@ dependencies = [
  "rokc_core",
  "rokc_diagnostic",
  "rokc_rokon",
+ "rokc_target",
 ]
 
 [[package]]
@@ -29,6 +30,7 @@ dependencies = [
  "rokc_llvm",
  "rokc_parser",
  "rokc_rokon",
+ "rokc_target",
  "rokc_tools",
 ]
 
@@ -83,6 +85,7 @@ dependencies = [
  "rokc_llvm",
  "rokc_mir",
  "rokc_parser",
+ "rokc_target",
  "rokc_wit",
 ]
 
@@ -115,6 +118,7 @@ dependencies = [
  "rokc_core",
  "rokc_diagnostic",
  "rokc_driver",
+ "rokc_target",
 ]
 
 [[package]]
@@ -135,6 +139,9 @@ dependencies = [
 [[package]]
 name = "rokc_llvm"
 version = "0.1.0"
+dependencies = [
+ "rokc_target",
+]
 
 [[package]]
 name = "rokc_mir"
@@ -144,6 +151,7 @@ dependencies = [
  "rokc_diagnostic",
  "rokc_hir",
  "rokc_ir_common",
+ "rokc_target",
 ]
 
 [[package]]
@@ -164,6 +172,14 @@ dependencies = [
  "rokc_diagnostic",
  "rokc_lexer",
  "rokc_parser",
+]
+
+[[package]]
+name = "rokc_target"
+version = "0.1.0"
+dependencies = [
+ "rokc_core",
+ "rokc_rokon",
 ]
 
 [[package]]

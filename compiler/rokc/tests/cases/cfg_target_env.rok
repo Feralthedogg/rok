@@ -1,0 +1,31 @@
+// expect-exit: 0
+// expect-stdout:
+// env ok
+
+// `target_env` (spec 6.3.2) comes from the target's spec: gnu or musl on
+// Linux, msvc on Windows, absent on macOS and WebAssembly.
+#[cfg(any(
+    all(target_os = "linux", any(target_env = "gnu", target_env = "musl")),
+    all(target_os = "windows", target_env = "msvc"),
+    all(
+        any(target_os = "macos", target_os = "wasi", target_os = "none"),
+        not(any(target_env = "gnu", target_env = "musl", target_env = "msvc"))
+    )
+))]
+fn env() -> str { "env ok" }
+
+#[cfg(not(any(
+    all(target_os = "linux", any(target_env = "gnu", target_env = "musl")),
+    all(target_os = "windows", target_env = "msvc"),
+    all(
+        any(target_os = "macos", target_os = "wasi", target_os = "none"),
+        not(any(target_env = "gnu", target_env = "musl", target_env = "msvc"))
+    )
+)))]
+fn env() -> str { "env wrong" }
+
+fn main() {
+    println(env());
+}
+
+// spec: 006.03-cfg

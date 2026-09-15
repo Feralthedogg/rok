@@ -510,7 +510,7 @@ mod tests {
     use PrimTy::{F32, F64, I8, I32, I64};
 
     fn on(triple: &str) -> Target {
-        Target::new(Some(triple))
+        Target::builtin(triple)
     }
 
     #[test]
@@ -601,7 +601,7 @@ mod tests {
         assert_eq!(w.ret, RetAbi::Sret);
         // riscv32 has no aggregate classification: aggregates are
         // refused, scalars pass as themselves.
-        let rv = on("riscv32imac-unknown-none-elf");
+        let rv = on("riscv32imac-unknown-none");
         assert!(classify(&rv, &[st(&[I32, I32])], &MirTy::Unit, false).is_none());
         let scalars = classify(&rv, &[MirTy::Prim(I32)], &MirTy::Unit, true).unwrap();
         assert!(scalars.variadic);

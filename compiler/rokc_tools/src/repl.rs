@@ -35,8 +35,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use rokc_diagnostic::{Label, RokDiagnostic, Span};
 use rokc_hir::{HirExpr, HirExprKind, HirModule, HirStaticDef, HirStmt, HirTy};
 use rokc_interface::{
-    BuildOptions, CompileResult, EmitKind, REPL_HOST, ReplCell, ReplFn, Session, TempDir,
-    link_host, report,
+    BuildOptions, CompileResult, EmitKind, ReplCell, ReplFn, Session, TempDir, link_host, report,
 };
 use rokc_ir_common::{ConstVal, LocalId};
 
@@ -275,7 +274,7 @@ fn forward_ctrl_c(running: Arc<AtomicU32>) {
 
 pub struct Repl {
     bootstrap: Vec<PathBuf>,
-    /// Dependencies (`--extern name=<name>.rhir`).
+    /// Dependencies (`--extern name=<name>.rokhir`).
     pub externs: Vec<(String, PathBuf)>,
     /// Where `:add` prebuilds dependencies.
     pub deps_dir: PathBuf,
@@ -527,7 +526,7 @@ impl Repl {
             bootstrap: &self.bootstrap,
             cfg: &[],
             opts: &self.opts,
-            target: None,
+            target: rokc_interface::TargetSpec::host(),
             dir: &self.deps_dir,
             quiet: true,
             std: None,
@@ -1395,7 +1394,7 @@ fn push_new<T: PartialEq>(to: &mut Vec<T>, x: T) {
 
 /// Build and start the session host.
 fn start_host(dir: &std::path::Path, opts: &BuildOptions) -> Option<Host> {
-    if !REPL_HOST {
+    if !rokc_interface::repl_host() {
         eprintln!("error: the REPL runs on macOS, Linux and Windows (arm64, x86_64) only");
         return None;
     }

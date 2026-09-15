@@ -530,6 +530,63 @@ task::block_on(async { let ts = [task::spawn(async { 1 }), task::spawn(async { 2
     );
 }
 
+/// A failed cell loses nothing that ran on the session's threads: the
+/// session is saved once no task is mid-poll and no blocking job mid-run
+/// (each one started before the cell finishes first, so its effect
+/// survives a cell that fails at once), and the locks of a thread that
+/// is gone afterwards (it held them while blocked) are released: a
+/// `Mutex`, an `RwLock` read lock and a running `Once`.
+#[test]
+#[cfg_attr(
+    not(any(
+        all(
+            any(target_os = "macos", target_os = "linux"),
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        windows
+    )),
+    ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
+)]
+fn repl_failed_cell_loses_no_work_and_no_lock() {
+    let Some(env) = setup() else { return };
+    let rokr = env.rokr.display().to_string();
+    let input = "\
+use rok::core::task;
+use rok::core::task::time::Instant;
+use rok::std::thread;
+static POLLED: Atomic<i64> = Atomic::new(0);
+static JOB: Atomic<i64> = Atomic::new(0);
+fn spin(ms: i64) { let t = Instant::now(); while t.elapsed().as_ms() < ms {} }
+let t = task::block_on(async { task::spawn(async { spin(1500); POLLED.store(1); 1 }) }); let b = task::block_on(async { task::spawn_blocking(|| { spin(1500); JOB.store(1); 2 }) });
+panic(\"at once\");
+(POLLED.load(), JOB.load())
+task::block_on(async { (await t) + (await b) })
+let m = Mutex::new(5); let rw = RwLock::new(6); let once = Once::new();
+thread::spawn(|| { using g = m.lock() { using r = rw.read() { once.call_once(|| { thread::sleep(Duration::ms(3000)); }); } } });
+thread::sleep(Duration::ms(100));
+panic(\"holder gone\");
+using g = m.lock() { g.get() }
+using w = rw.write() { w.get() }
+once.call_once(|| { println(\"ran again\"); });
+";
+    let out = piped(ROKC, &["repl", "--rokr", &rokr], input);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+    // Windows keeps the holder (back where it was: asleep), which goes
+    // on to finish the `Once`; a fork host's copy has no such thread.
+    let again = if cfg!(windows) { "" } else { "ran again\n" };
+    assert_eq!(
+        stdout,
+        format!("(i64, i64): (1, 1)\ni32: 3\ni32: 5\ni32: 6\n{again}"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches("error: the cell failed").count(),
+        2,
+        "{stderr}"
+    );
+}
+
 fn frame(body: &str) -> String {
     format!("Content-Length: {}\r\n\r\n{body}", body.len())
 }
@@ -561,7 +618,7 @@ fn rokc_lsp_answers_over_stdio() {
     assert_eq!(out.status.code(), Some(1));
 }
 
-/// The server builds its dependencies first and answers from their RHIR:
+/// The server builds its dependencies first and answers from their ROKHIR:
 /// hover shows a dependency function's doc comment, definition goes to
 /// its source.
 #[test]
@@ -612,7 +669,7 @@ fn lsp_sees_prebuilt_dependencies() {
         .unwrap();
     let out = child.wait_with_output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert!(app.join("target/debug/deps/util.rhir").is_file());
+    assert!(app.join("target/debug/deps/util.rokhir").is_file());
     let stdout = text(&out.stdout);
     let reply = |id: u32| {
         let at = stdout

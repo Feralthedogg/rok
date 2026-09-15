@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use rokc_llvm::{Compile, Emit, OptLevel, Target};
+use rokc_target::ObjectFormat;
 
 fn skip() -> bool {
     if !rokc_llvm::AVAILABLE {
@@ -61,32 +62,33 @@ module {
 
 const ADD_LL: &str = "define i32 @add(i32 %a, i32 %b) {\n  %r = add i32 %a, %b\n  ret i32 %r\n}\n";
 
+/// Every built-in target compiles to an object of its format, and its
+/// spec's data layout is LLVM's. (This LLVM builds no `powerpc64` / `s390x` code.)
 #[test]
 fn llvm_ir_to_objects_for_every_target() {
     if skip() {
         return;
     }
-    let magic: &[(&str, &[u8])] = &[
-        ("arm64-apple-macosx11.0", &[0xcf, 0xfa, 0xed, 0xfe]),
-        ("x86_64-apple-macosx11.0", &[0xcf, 0xfa, 0xed, 0xfe]),
-        ("x86_64-unknown-linux-gnu", b"\x7fELF"),
-        ("aarch64-unknown-linux-gnu", b"\x7fELF"),
-        ("armv7-unknown-linux-gnueabihf", b"\x7fELF"),
-        ("riscv64-unknown-linux-gnu", b"\x7fELF"),
-        ("wasm32-unknown-unknown", b"\0asm"),
-        ("x86_64-pc-windows-msvc", &[0x64, 0x86]),
-    ];
-    for (triple, m) in magic {
-        let t = Target::new(triple);
+    for name in rokc_target::BUILTIN {
+        let t = Target::builtin(name).unwrap();
+        if matches!(t.arch.as_str(), "powerpc64" | "s390x") {
+            continue;
+        }
+        let magic: &[u8] = match t.object_format {
+            ObjectFormat::MachO => &[0xcf, 0xfa, 0xed, 0xfe],
+            ObjectFormat::Elf => b"\x7fELF",
+            ObjectFormat::Wasm => b"\0asm",
+            ObjectFormat::Coff => &t.coff_machine().unwrap().to_le_bytes(),
+        };
         for opt in [OptLevel::O0, OptLevel::O2] {
             let obj = rokc_llvm::compile_llvm_ir(ADD_LL, &opts(&t, opt, Emit::Obj, ""))
-                .unwrap_or_else(|e| panic!("{triple}: {e}"));
-            assert!(obj.starts_with(m), "{triple}: not an object");
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(obj.starts_with(magic), "{name}: not an object");
         }
         let asm =
             rokc_llvm::compile_llvm_ir(ADD_LL, &opts(&t, OptLevel::O2, Emit::Asm, "")).unwrap();
-        assert!(String::from_utf8(asm).unwrap().contains("add"), "{triple}");
-        assert!(!rokc_llvm::data_layout(&t).unwrap().is_empty(), "{triple}");
+        assert!(String::from_utf8(asm).unwrap().contains("add"), "{name}");
+        assert_eq!(rokc_llvm::data_layout(&t).unwrap(), t.data_layout, "{name}");
     }
 }
 
@@ -111,7 +113,7 @@ module {
   }
 }
 ";
-    let t = Target::new("x86_64-unknown-linux-gnu");
+    let t = Target::builtin("x86_64-unknown-linux-gnu").unwrap();
     let p = rokc_llvm::mlir_pipeline(true, &[]);
     let parts = rokc_llvm::compile_mlir_split(src, &opts(&t, OptLevel::O2, Emit::Obj, &p), 2)
         .unwrap()
@@ -132,12 +134,12 @@ fn data_layout_is_clangs() {
     if skip() {
         return;
     }
-    let t = Target::new("arm64-apple-macosx11.0");
+    let t = Target::builtin("aarch64-apple-darwin").unwrap();
     assert_eq!(
         rokc_llvm::data_layout(&t).unwrap(),
         "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
     );
-    let t = Target::new("x86_64-unknown-linux-gnu");
+    let t = Target::builtin("x86_64-unknown-linux-gnu").unwrap();
     assert_eq!(
         rokc_llvm::data_layout(&t).unwrap(),
         "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
@@ -151,7 +153,7 @@ fn mlir_lowers_to_llvm_ir_with_initial_exec_tls() {
     }
     let src = "module {\n  llvm.mlir.global external thread_local @rok_tls_flag() : i8\n  \
                llvm.mlir.global external thread_local @other() : i8\n}\n";
-    let t = Target::host();
+    let t = Target::host().clone();
     let p = rokc_llvm::mlir_pipeline(false, &[]);
     let ll = rokc_llvm::compile_mlir(src, &opts(&t, OptLevel::O0, Emit::LlvmIr, &p)).unwrap();
     let ll = String::from_utf8(ll).unwrap();
@@ -171,7 +173,7 @@ fn mlir_errors_are_reported() {
     if skip() {
         return;
     }
-    let t = Target::host();
+    let t = Target::host().clone();
     let p = rokc_llvm::mlir_pipeline(true, &[]);
     let e = rokc_llvm::compile_mlir(
         "module { func.func @f() -> i32 { return } }",
@@ -197,7 +199,7 @@ fn mlir_hello_links_and_runs() {
         return;
     }
     let dir = scratch("hello");
-    let host = Target::host();
+    let host = Target::host().clone();
     for (opt, optimize) in [
         (OptLevel::O0, false),
         (OptLevel::O2, true),
@@ -234,7 +236,7 @@ fn split_objects_link_and_dsymutil_bundles_them() {
         return;
     }
     let dir = scratch("split");
-    let host = Target::host();
+    let host = Target::host().clone();
     let p = rokc_llvm::mlir_pipeline(true, &[]);
     let parts =
         rokc_llvm::compile_mlir_split(HELLO_MLIR, &opts(&host, OptLevel::O2, Emit::Obj, &p), 3)

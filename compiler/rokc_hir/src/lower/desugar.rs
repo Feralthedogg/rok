@@ -26,7 +26,7 @@ pub(super) fn lower_closure_expr(
         .collect();
     for n in &by_ref {
         match ctx.lookup(n) {
-            Some(l) if ctx.boxed.contains(&l) => {}
+            Some(l) if ctx.is_boxed(l) => {}
             Some(_) => ctx.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
                 format!(
@@ -43,7 +43,7 @@ pub(super) fn lower_closure_expr(
         .into_iter()
         .filter_map(|name| {
             let local = ctx.lookup(&name)?;
-            let by_ref = by_ref.contains(&name.as_str()) && ctx.boxed.contains(&local);
+            let by_ref = by_ref.contains(&name.as_str()) && ctx.is_boxed(local);
             let ty = if by_ref {
                 ctx.local_ty(local)
             } else {
@@ -303,7 +303,7 @@ pub(super) fn closure_ctx<'a>(
         for (i, (cap_name, _, cap_ty, by_ref)) in captures.iter().enumerate() {
             let inner_local = cl_ctx.declare(Some(cap_name.clone()), cap_ty.clone());
             if *by_ref {
-                cl_ctx.boxed.insert(inner_local);
+                cl_ctx.locals[inner_local.0 as usize].boxed = true;
             } else {
                 cl_ctx.value_captured.insert(inner_local);
             }

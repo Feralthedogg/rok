@@ -1,6 +1,6 @@
 //! The standard library prebuilt once per toolchain, options and
 //! target: its bootstrap tiers as one prebuilt library `rok`
-//! (`librok.a` + `rok.rhir`), which builds link instead of compiling
+//! (`librok.a` + `rok.rokhir`), which builds link instead of compiling
 //! the library's concrete code each time.
 //!
 //! Kept in `rokc_driver::cache_dir()` (the sysroot's `lib/rok-cache/`,
@@ -18,14 +18,14 @@ use std::time::{Duration, SystemTime};
 
 use rokc_core::hash::{FNV_OFFSET, fnv_add};
 
-use crate::{BuildOptions, Session, rhir, source_files};
+use crate::{BuildOptions, Session, TargetSpec, rokhir, source_files};
 
 /// What the library build depends on besides its sources.
 pub struct StdKey<'a> {
     pub bootstrap: &'a [PathBuf],
     pub cfg: &'a [String],
     pub opts: &'a BuildOptions,
-    pub target: Option<&'a str>,
+    pub target: &'a TargetSpec,
     /// `cfg(test)` (a test or bench build).
     pub test: bool,
 }
@@ -55,7 +55,7 @@ fn last_use(dir: &Path) -> SystemTime {
         .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
-/// `rok.rhir` of the prebuilt standard library for `key`, built now if
+/// `rok.rokhir` of the prebuilt standard library for `key`, built now if
 /// missing.
 ///
 /// A build in another process is waited for: every build of one key
@@ -74,9 +74,10 @@ pub fn prebuilt_std(key: &StdKey<'_>) -> Option<PathBuf> {
         // the program.
         && o.profile == crate::Profile::Off
         && o.opt_level != "3";
-    // A `--cfg` or `--target` build is rare enough that a library build
-    // of its own costs more than it saves.
-    if !plain || key.bootstrap.is_empty() || !key.cfg.is_empty() || key.target.is_some() {
+    // A `--cfg` or cross build is rare enough that a library build of
+    // its own costs more than it saves.
+    if !plain || key.bootstrap.is_empty() || !key.cfg.is_empty() || key.target != TargetSpec::host()
+    {
         return None;
     }
     let root = rokc_driver::cache_dir()?;
@@ -86,10 +87,16 @@ pub fn prebuilt_std(key: &StdKey<'_>) -> Option<PathBuf> {
             .fold(FNV_OFFSET, |h, w| fnv_add(fnv_add(h, w), b"\0"));
         format!("{h:016x}")
     };
-    let toolchain = hash(&[rhir::producer().as_bytes()]);
+    let toolchain = hash(&[rokhir::producer().as_bytes()]);
     let options = hash(&[
         o.opt_level.as_bytes(),
-        format!("{} {:?} {:?}", o.debug, o.overflow_checks, key.target).as_bytes(),
+        format!(
+            "{} {:?} {:016x}",
+            o.debug,
+            o.overflow_checks,
+            key.target.hash()
+        )
+        .as_bytes(),
         // Either backend's objects link with the other's, but a cached
         // library is the backend's own build.
         if rokc_driver::native::chosen(o) {
@@ -109,13 +116,13 @@ pub fn prebuilt_std(key: &StdKey<'_>) -> Option<PathBuf> {
     let sources = hash(&sources.iter().map(Vec::as_slice).collect::<Vec<_>>());
     let family = format!("{toolchain}-{options}-");
     let dir = root.join(format!("{family}{sources}"));
-    let rhir = dir.join(format!("{}.rhir", rokc_driver::STD_PKG));
+    let rokhir = dir.join(format!("{}.rokhir", rokc_driver::STD_PKG));
     let failed = dir.with_extension("failed");
     let lock = root.join(format!("{family}lock"));
     loop {
-        if rhir.is_file() {
+        if rokhir.is_file() {
             stamp(&dir);
-            return Some(rhir);
+            return Some(rokhir);
         }
         if failed.exists() {
             return None;
@@ -144,10 +151,10 @@ pub fn prebuilt_std(key: &StdKey<'_>) -> Option<PathBuf> {
         }
     }
     // Finished between the check and the lock.
-    if rhir.is_file() {
+    if rokhir.is_file() {
         let _ = std::fs::remove_file(&lock);
         stamp(&dir);
-        return Some(rhir);
+        return Some(rokhir);
     }
     let (stop, beat) = std::sync::mpsc::channel::<()>();
     let held = lock.clone();
@@ -170,7 +177,7 @@ pub fn prebuilt_std(key: &StdKey<'_>) -> Option<PathBuf> {
     }
     prune(&root, &toolchain, &family, &sources);
     let _ = std::fs::remove_file(&lock);
-    built.then_some(rhir)
+    built.then_some(rokhir)
 }
 
 /// Remove other toolchains' builds, this one's of older sources, and
@@ -232,7 +239,8 @@ fn build(key: &StdKey<'_>, root: &Path, dir: &Path) -> bool {
     }
     let _ = std::fs::remove_dir_all(&tmp);
     // Another process may have put it there first.
-    dir.join(format!("{}.rhir", rokc_driver::STD_PKG)).is_file()
+    dir.join(format!("{}.rokhir", rokc_driver::STD_PKG))
+        .is_file()
 }
 
 #[cfg(test)]

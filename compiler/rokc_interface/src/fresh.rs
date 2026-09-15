@@ -37,7 +37,7 @@ pub struct Fingerprint {
     key: String,
     file: PathBuf,
     out: PathBuf,
-    /// More files that must exist (a library's RHIR).
+    /// More files that must exist (a library's ROKHIR).
     also: Vec<PathBuf>,
     /// The inputs the key covers, canonical.
     covered: Vec<PathBuf>,
@@ -64,7 +64,7 @@ impl Fingerprint {
     ) -> Self {
         let mut h = FNV_OFFSET;
         let own = [
-            rokc_driver::rhir::producer(),
+            rokc_driver::rokhir::producer(),
             rokc_diagnostic::report_style().to_string(),
         ];
         for w in own.iter().chain(words) {

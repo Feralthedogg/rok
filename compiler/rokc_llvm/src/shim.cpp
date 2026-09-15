@@ -853,10 +853,6 @@ int rok_llvm_data_layout(const RokCompile *o, RokBuf *out, RokBuf *err) {
 }
 
 // The triple LLVM was configured to run on.
-void rok_llvm_process_triple(RokBuf *out) {
-  put(out, llvm::sys::getProcessTriple());
-}
-
 // dsymutil's command line (argv[0] is "dsymutil"); it reports on stderr.
 int rok_llvm_dsymutil(const char *const *argv, size_t argc) {
   static std::mutex lock;

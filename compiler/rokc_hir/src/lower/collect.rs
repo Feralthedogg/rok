@@ -74,7 +74,7 @@ fn lazy_init_fn_name(static_name: &str) -> String {
 }
 
 /// A concrete function whose code a prebuilt library's `.a` holds (the
-/// ones an RHIR interface cuts to `;`).
+/// ones an ROKHIR interface cuts to `;`).
 fn in_archive(f: &FnDef) -> bool {
     f.generics.params.is_empty()
         && !f.is_async
@@ -1932,6 +1932,7 @@ pub fn lower_full(
         unlowered,
         any_seeds,
         any_types,
+        any_tags: sink.any_tags.take(),
         type_visibility: names.visibility.clone(),
     };
     module.diagnostics.extend(names.diags.into_inner());
@@ -3829,6 +3830,7 @@ fn sig_stub(env: &Env<'_>, i: usize) -> HirFunction {
             id: local,
             name: Some(p.name.clone()),
             ty: ty.clone(),
+            boxed: false,
         });
         params.push(HirParam {
             name: p.name.clone(),

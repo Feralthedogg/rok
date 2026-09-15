@@ -51,6 +51,14 @@
 //
 // Timers are one binary heap behind a `Mutex` (707 §7.7.5 allows a heap;
 // a timing wheel would make insertion O(1)).
+//
+// A REPL session host saves the session between cells at a quiet moment
+// (`rok_session_hold`): every executor thread (worker, guest, blocking
+// lane, monitor, driver) counts as busy from `rok_session_enter` to
+// `rok_session_leave` except while it sleeps, and waits at
+// `rok_session_pass` (between two tasks, jobs or scans, holding no lock)
+// while a hold is requested. So no task is mid-poll and no job mid-run
+// in a saved session, and its threads can start again from it.
 
 pub mod time;
 
@@ -449,7 +457,9 @@ fn start_worker(w: Worker) {
 fn monitor(pool: Pool) {
     unsafe {
         let quiet = 0;
+        rok_session_enter();
         loop {
+            rok_session_pass();
             let any = false;
             for w in pool.workers {
                 let tick = rok_lane_blocked(w.lane[0]);
@@ -464,7 +474,9 @@ fn monitor(pool: Pool) {
                 w.seen[0] = tick;
             }
             quiet = if any { 0 } else { quiet + 1 };
+            rok_session_leave();
             rok_lane_pause(if quiet >= 20 { 1 } else { 0 });
+            rok_session_enter();
         }
     }
 }
@@ -748,14 +760,18 @@ fn remove_timers(t: TaskRef) {
 fn work(w: Worker, main: TaskRef | none) {
     let pool = w.pool;
     let ran: i64 = 0;
+    unsafe { rok_session_enter() };
     loop {
+        unsafe { rok_session_pass() };
         // Handed on during a poll: go on as the orphan.
         w = current_worker();
         if w.orphan && atomic_load(w.locals, 0, SeqCst) == 0 {
+            unsafe { rok_session_leave() };
             return;
         }
         if let m: TaskRef = main {
             if is_done(m) {
+                unsafe { rok_session_leave() };
                 return;
             }
         }
@@ -802,11 +818,13 @@ fn work(w: Worker, main: TaskRef | none) {
             atomic_xchg(w.sleep, 0, 0, SeqCst);
             continue;
         }
+        unsafe { rok_session_leave() };
         if pool.solo {
             solo_wait(next);
         } else {
             unsafe { rok_sync_wait(w.sleep, 0, 1, next) };
         }
+        unsafe { rok_session_enter() };
         atomic_xchg(w.sleep, 0, 0, SeqCst);
     }
 }
@@ -1530,10 +1548,12 @@ fn spawn_driver(pool: Pool) {
             let evs: GcBuf<i64> = buf_new(128);
             loop {
                 let n = unsafe { rok_io_poll(evs, 128) };
+                unsafe { rok_session_enter() };
                 for i in 0..n {
                     let k = evs[i as usize];
                     unpark(io_key((k / 2) as i32, (k % 2) as i32));
                 }
+                unsafe { rok_session_leave() };
             }
         };
         let id = rok_thread_new_id();
@@ -1548,8 +1568,10 @@ fn spawn_driver(pool: Pool) {
 
 /// After a failed REPL cell put the session back as it was before it
 /// (`rok_session_restored`): pool threads that are gone start again on
-/// their workers (a task one was polling then is lost), and tasks waiting
-/// on a socket watch it again (the runtime dropped its poller's state).
+/// their workers (none was polling a task then), and parked tasks look
+/// again: one waiting on a socket watches it again (the runtime dropped
+/// its poller's state), one waiting on a lock a gone thread held finds
+/// it released.
 extern "C" fn hook_restart() {
     unsafe {
         let pool = EXEC[0];
@@ -1578,7 +1600,7 @@ extern "C" fn hook_restart() {
             let keys: List<usize> = List::new();
             using g = p.lock.lock() {
                 for k in p.waiting.keys() {
-                    if k % 2 == 1 { keys.push(k); }
+                    keys.push(k);
                 }
             }
             for k in keys { unpark(k); }
@@ -1815,7 +1837,8 @@ impl BlockingPool {
     }
 
     /// After a failed REPL cell (`hook_restart`): threads that are gone
-    /// no longer count (a job one was running is lost).
+    /// no longer count (none was running a job then: their jobs are still
+    /// queued).
     fn forget_lost(self) {
         unsafe {
             using g = self.lock.lock() {
@@ -1839,13 +1862,21 @@ impl BlockingPool {
         }
     }
 
-    /// A lane thread (`id`; 0: the caller, drained in place): run queued
-    /// jobs until idle for `keep_alive` ns.
+    /// A lane thread (`id`; 0: the caller, drained in place inside a
+    /// poll, which is busy already): run queued jobs until idle for
+    /// `keep_alive` ns.
     fn work(self, keep_alive: i64, id: u64) {
         unsafe {
             let me: GcBuf<i32> = buf_new(1);
             let idle_since = now_ns();
+            let gated = id != 0;
+            if gated {
+                rok_session_enter();
+            }
             loop {
+                if gated {
+                    rok_session_pass();
+                }
                 let job: (fn() + Send) | none = none;
                 let quit = false;
                 using g = self.lock.lock() {
@@ -1863,6 +1894,9 @@ impl BlockingPool {
                     }
                 }
                 if quit {
+                    if gated {
+                        rok_session_leave();
+                    }
                     return;
                 }
                 if let f: fn() + Send = job {
@@ -1871,7 +1905,13 @@ impl BlockingPool {
                     continue;
                 }
                 let left = idle_since + keep_alive - now_ns();
+                if gated {
+                    rok_session_leave();
+                }
                 unsafe { rok_sync_wait(me, 0, 0, left) };
+                if gated {
+                    rok_session_enter();
+                }
                 using g = self.lock.lock() {
                     // Not handed a job (a timeout or a spurious wake): leave
                     // the idle list.

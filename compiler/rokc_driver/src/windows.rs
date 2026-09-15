@@ -47,11 +47,11 @@ impl Subsystem {
 }
 
 fn defs(t: &rokc_llvm::Target) -> Result<&'static Defs, String> {
-    match t.triple.split('-').next() {
-        Some("x86_64") => Ok(&X86_64),
-        Some("aarch64" | "arm64") => Ok(&AARCH64),
-        Some("i686") => Ok(&I686),
-        _ => Err(format!("no Windows libraries for {}", t.triple)),
+    match t.arch.as_str() {
+        "x86_64" => Ok(&X86_64),
+        "aarch64" => Ok(&AARCH64),
+        "x86" => Ok(&I686),
+        _ => Err(format!("no Windows libraries for {}", t.name)),
     }
 }
 
@@ -103,11 +103,10 @@ pub fn link_args(
     // The main thread reserves 8 MiB, as Linux's default rlimit and
     // macOS give theirs and the runtime gives the threads it starts
     // (nested `await` runs on it, 7.8.10); Windows' default is 1 MiB.
-    a.push("/stack:8388608".into());
+    a.push(format!("/stack:{}", t.stack_size).into());
     // Nothing refers to the TLS directory but the loader. (`/include`
     // takes the symbol, C names `_`-prefixed on x86.)
-    let x86 = t.triple.starts_with("i686");
-    a.push(format!("/include:{}_tls_used", if x86 { "_" } else { "" }).into());
+    a.push(format!("/include:{}_tls_used", t.c_symbol_prefix).into());
     if debug {
         a.push("/debug".into());
     }
@@ -123,7 +122,7 @@ pub fn link_args(
 /// `_chkstk`). Every C name is mangled by LLVM and lld-link (a leading
 /// `_` on x86).
 fn startup_ir(t: &rokc_llvm::Target, subsystem: Subsystem) -> String {
-    let chkstk = if t.triple.starts_with("i686") {
+    let chkstk = if t.arch == "x86" {
         // eax: the frame size. Touches each page below the caller's esp,
         // then moves esp down by eax itself (MSVC's x86 `_chkstk`, alias
         // `_alloca_probe`); keeps every other register.
@@ -155,7 +154,7 @@ module asm "  push (%eax)"
 module asm "  sub %esp, %eax"
 module asm "  ret"
 "#
-    } else if !t.triple.starts_with("x86_64") {
+    } else if t.arch == "aarch64" {
         // x15: the frame size / 16. Touches each page below sp; keeps
         // every register but x16 / x17.
         r#"module asm ".text"
@@ -265,11 +264,7 @@ declare i32 @main()
 /// Windows `va_list` is a pointer on every arch. Options as the headers'
 /// defaults.
 fn stdio_ir(t: &rokc_llvm::Target) -> String {
-    let n = if t.triple.starts_with("i686") {
-        "i32"
-    } else {
-        "i64"
-    };
+    let n = format!("i{}", t.pointer_width);
     // (signature, setup, call) per function; `%va` is the va_list.
     let fns = [
         (
@@ -354,7 +349,7 @@ mod tests {
             ("aarch64-pc-windows-msvc", 0xaa64),
             ("i686-pc-windows-msvc", 0x14c),
         ] {
-            let t = rokc_llvm::Target::new(triple);
+            let t = rokc_llvm::Target::builtin(triple).unwrap();
             let obj = rokc_llvm::compile_llvm_ir(
                 "define i32 @main() {\n  ret i32 0\n}\n",
                 &rokc_llvm::Compile {

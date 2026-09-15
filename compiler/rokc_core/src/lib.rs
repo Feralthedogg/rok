@@ -65,16 +65,6 @@ pub fn current_exe() -> Option<PathBuf> {
     Some(real_path(&exe).unwrap_or(exe))
 }
 
-/// File name of the runtime static library (`rokr`) built for a
-/// Windows (MSVC) target or another.
-#[must_use]
-pub const fn runtime_lib(windows: bool) -> &'static str {
-    if windows { "rokr.lib" } else { "librokr.a" }
-}
-
-/// [`runtime_lib`] of the machine rokc runs on (what a toolchain ships).
-pub const HOST_RUNTIME_LIB: &str = runtime_lib(cfg!(windows));
-
 /// The rok home an executable is installed in: `<home>/bin/<exe>` (a
 /// proxy: `<home>/toolchains/` exists) or `<home>/toolchains/<name>/bin/<exe>`.
 #[must_use]

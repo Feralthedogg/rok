@@ -11,6 +11,22 @@
 
 use rok::core::rt::{atomic_add, atomic_and, atomic_cas, atomic_load, atomic_or, atomic_sub, atomic_xchg, atomic_xor, key};
 
+/// Whether guards note their locks (`rok_lock_note`): this is a REPL
+/// session host. Asked before a lock is taken, so nothing runs between
+/// taking it and the note but the note.
+fn lock_notes() -> bool {
+    let n = LOCK_NOTES.load();
+    if n < 0 {
+        n = unsafe { rok_lock_notes() };
+        LOCK_NOTES.store(n);
+    }
+    n != 0
+}
+
+/// `lock_notes`, once asked (-1: not yet; the runtime call is not in a
+/// static initializer: those are in every program).
+static LOCK_NOTES: Atomic<i32> = Atomic::new(-1);
+
 fn wait(word: GcBuf<i32>, expected: i32) {
     unsafe { rok_sync_wait(word, 0, expected, -1) };
 }
@@ -259,22 +275,30 @@ impl<T> Mutex<T> {
 
     /// Block until the lock is ours. Bind the guard with `using`.
     pub fn lock(self) -> MutexGuard<T> {
+        let notes = lock_notes();
         if atomic_cas(self.state, 0, 0, 1, SeqCst, SeqCst) != 0 {
             while atomic_xchg(self.state, 0, 2, SeqCst) != 0 {
                 wait(self.state, 2);
             }
         }
-        MutexGuard { mutex: self }
+        MutexGuard { mutex: self, noted: notes && unsafe { rok_lock_note(self.state, 0) } != 0 }
     }
 
     pub fn try_lock(self) -> MutexGuard<T> | none {
+        let notes = lock_notes();
         if atomic_cas(self.state, 0, 0, 1, SeqCst, SeqCst) == 0 {
-            return MutexGuard { mutex: self };
+            return MutexGuard { mutex: self, noted: notes && unsafe { rok_lock_note(self.state, 0) } != 0 };
         }
         none
     }
 
-    fn unlock(self) {
+    /// `noted`: the guard's lock note goes too, right before the lock
+    /// (no safepoint between: a thread that holds a lock unnoted, or a
+    /// note of a lock it no longer holds, never stops there).
+    fn unlock(self, noted: bool) {
+        if noted {
+            unsafe { rok_lock_drop(self.state) };
+        }
         if atomic_load(self.state, 1, SeqCst) != 0 && self.forgive() {
             return;
         }
@@ -339,14 +363,15 @@ impl<T> rok::core::future::Future for LockFuture<T> {
         if rok::core::task::cancel_requested(ctx) {
             return rok::core::future::Poll::Pending;
         }
+        // A task's locks are not noted: it outlives the thread it runs on.
         if atomic_cas(m.state, 0, 0, 1, SeqCst, SeqCst) == 0 {
-            return rok::core::future::Poll::Ready(MutexGuard { mutex: m });
+            return rok::core::future::Poll::Ready(MutexGuard { mutex: m, noted: false });
         }
         // Park first, then mark "waiters" (2): an unlock after this sees
         // the 2 and unparks us.
         rok::core::task::park(key(m.state), ctx.waker());
         if atomic_xchg(m.state, 0, 2, SeqCst) == 0 {
-            return rok::core::future::Poll::Ready(MutexGuard { mutex: m });
+            return rok::core::future::Poll::Ready(MutexGuard { mutex: m, noted: false });
         }
         rok::core::future::Poll::Pending
     }
@@ -360,6 +385,10 @@ static OWED: Mutex<List<(usize, u64)>> = Mutex::new(List::new());
 /// Holds a `Mutex` locked until dropped (`using`).
 pub struct MutexGuard<T> {
     mutex: Mutex<T>;
+    /// Taken outside a task while a REPL session host keeps lock notes
+    /// (`rok_lock_note`): released if its thread is gone after a failed
+    /// cell.
+    noted: bool;
 }
 
 impl<T> MutexGuard<T> {
@@ -386,7 +415,7 @@ impl<T> MutexGuard<T> {
 
 impl<T> Drop for MutexGuard<T> {
     fn drop(ref self) {
-        self.mutex.unlock();
+        self.mutex.unlock(self.noted);
     }
 }
 
@@ -410,11 +439,12 @@ impl<T> RwLock<T> {
     }
 
     pub fn read(self) -> RwLockReadGuard<T> {
+        let notes = lock_notes();
         loop {
             let s = atomic_load(self.state, 0, SeqCst);
             if s >= 0 {
                 if atomic_cas(self.state, 0, s, s + 1, SeqCst, SeqCst) == s {
-                    return RwLockReadGuard { lock: self };
+                    return RwLockReadGuard { lock: self, noted: notes && unsafe { rok_lock_note(self.state, 1) } != 0 };
                 }
             } else {
                 wait(self.state, s);
@@ -423,22 +453,24 @@ impl<T> RwLock<T> {
     }
 
     pub fn write(self) -> RwLockWriteGuard<T> {
+        let notes = lock_notes();
         loop {
             let s = atomic_cas(self.state, 0, 0, -1, SeqCst, SeqCst);
             if s == 0 {
-                return RwLockWriteGuard { lock: self };
+                return RwLockWriteGuard { lock: self, noted: notes && unsafe { rok_lock_note(self.state, 2) } != 0 };
             }
             wait(self.state, s);
         }
     }
 
     pub fn try_read(self) -> RwLockReadGuard<T> | none {
+        let notes = lock_notes();
         // Retry a CAS lost to another reader: only a writer makes it fail.
         let s = atomic_load(self.state, 0, SeqCst);
         while s >= 0 {
             let seen = atomic_cas(self.state, 0, s, s + 1, SeqCst, SeqCst);
             if seen == s {
-                return RwLockReadGuard { lock: self };
+                return RwLockReadGuard { lock: self, noted: notes && unsafe { rok_lock_note(self.state, 1) } != 0 };
             }
             s = seen;
         }
@@ -446,8 +478,9 @@ impl<T> RwLock<T> {
     }
 
     pub fn try_write(self) -> RwLockWriteGuard<T> | none {
+        let notes = lock_notes();
         if atomic_cas(self.state, 0, 0, -1, SeqCst, SeqCst) == 0 {
-            return RwLockWriteGuard { lock: self };
+            return RwLockWriteGuard { lock: self, noted: notes && unsafe { rok_lock_note(self.state, 2) } != 0 };
         }
         none
     }
@@ -511,6 +544,8 @@ impl<T> rok::core::future::Future for WriteFuture<T> {
 
 pub struct RwLockReadGuard<T> {
     lock: RwLock<T>;
+    /// As `MutexGuard::noted`.
+    noted: bool;
 }
 
 impl<T> RwLockReadGuard<T> {
@@ -523,6 +558,9 @@ impl<T> RwLockReadGuard<T> {
 
 impl<T> Drop for RwLockReadGuard<T> {
     fn drop(ref self) {
+        if self.noted {
+            unsafe { rok_lock_drop(self.lock.state) };
+        }
         if atomic_sub(self.lock.state, 0, 1, SeqCst) == 1 {
             wake(self.lock.state);
             unpark_parked(self.lock.state);
@@ -532,6 +570,8 @@ impl<T> Drop for RwLockReadGuard<T> {
 
 pub struct RwLockWriteGuard<T> {
     lock: RwLock<T>;
+    /// As `MutexGuard::noted`.
+    noted: bool;
 }
 
 impl<T> RwLockWriteGuard<T> {
@@ -554,6 +594,9 @@ impl<T> RwLockWriteGuard<T> {
 
 impl<T> Drop for RwLockWriteGuard<T> {
     fn drop(ref self) {
+        if self.noted {
+            unsafe { rok_lock_drop(self.lock.state) };
+        }
         atomic_xchg(self.lock.state, 0, 0, SeqCst);
         wake(self.lock.state);
         unpark_parked(self.lock.state);
@@ -573,10 +616,16 @@ impl Once {
 
     /// Run `f` if no call has; every caller returns after it finished.
     pub fn call_once(self, f: fn()) {
+        let notes = lock_notes();
         loop {
             let s = atomic_cas(self.state, 0, 0, 1, SeqCst, SeqCst);
             if s == 0 {
+                // A thread gone mid-`f` leaves it to the next caller.
+                let noted = notes && unsafe { rok_lock_note(self.state, 3) } != 0;
                 f();
+                if noted {
+                    unsafe { rok_lock_drop(self.state) };
+                }
                 atomic_xchg(self.state, 0, 2, SeqCst);
                 wake(self.state);
                 return;
@@ -614,7 +663,7 @@ impl Condvar {
     pub fn wait_async<T>(self, guard: MutexGuard<T>) -> CondvarWait<T> {
         unsafe {
             let st: GcBuf<i32> = buf_new(2);
-            CondvarWait { cv: self, mutex: guard.mutex, st: st }
+            CondvarWait { cv: self, mutex: guard.mutex, noted: guard.noted, st: st }
         }
     }
 
@@ -622,7 +671,7 @@ impl Condvar {
     /// lock it again. Re-check the condition in a loop.
     pub fn wait<T>(self, guard: MutexGuard<T>) -> MutexGuard<T> {
         let s = atomic_load(self.seq, 0, SeqCst);
-        guard.mutex.unlock();
+        guard.mutex.unlock(guard.noted);
         wait(self.seq, s);
         guard.mutex.lock()
     }
@@ -647,6 +696,8 @@ impl Condvar {
 pub struct CondvarWait<T> {
     cv: Condvar;
     mutex: Mutex<T>;
+    /// The guard's (`MutexGuard::noted`).
+    noted: bool;
     /// `[phase, seen]`: phase 0 not started, 1 waiting for a notify after
     /// `seen`, 2 locking again.
     st: GcBuf<i32>;
@@ -664,7 +715,7 @@ impl<T> rok::core::future::Future for CondvarWait<T> {
             if st[0] == 0 {
                 st[1] = atomic_load(self.cv.seq, 0, SeqCst);
                 st[0] = 1;
-                m.unlock();
+                m.unlock(self.noted);
                 m.owe(rok::core::task::id().as_u64());
             }
             if rok::core::task::cancel_requested(ctx) {
@@ -674,7 +725,7 @@ impl<T> rok::core::future::Future for CondvarWait<T> {
                 if m.try_lock() is MutexGuard<T> {
                     m.forgive();
                 }
-                return rok::core::future::Poll::Ready(MutexGuard { mutex: m });
+                return rok::core::future::Poll::Ready(MutexGuard { mutex: m, noted: false });
             }
             if st[0] == 1 {
                 park_on(self.cv.seq, ctx);

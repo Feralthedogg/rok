@@ -285,7 +285,7 @@ impl Emitter {
         }
     }
 
-    const fn pw(&self) -> u32 {
+    fn pw(&self) -> u32 {
         self.target.pointer_width
     }
 
@@ -424,7 +424,7 @@ impl Emitter {
             errors.push(format!(
                 "unsupported in codegen: {what} passes a `struct` by value across the C ABI, \
                  which is not implemented for {}",
-                target.triple.as_deref().unwrap_or("this target")
+                target.name
             ));
         }
         abi
@@ -549,9 +549,10 @@ impl Emitter {
 
         self.out.push_str("module");
         let mut attrs = Vec::new();
-        if let Some(t) = &self.target.triple {
-            attrs.push(format!("llvm.target_triple = \"{t}\""));
-        }
+        attrs.push(format!(
+            "llvm.target_triple = \"{}\"",
+            self.target.llvm_triple()
+        ));
         if let Some(dl) = &self.data_layout {
             attrs.push(format!("llvm.data_layout = \"{dl}\""));
         }
@@ -1004,9 +1005,7 @@ impl Emitter {
         };
         // Windows probes through `__chkstk` instead (LLVM would take
         // "inline-asm" there for the probe function's name).
-        if matches!(self.target.arch.as_str(), "x86" | "x86_64" | "aarch64")
-            && self.target.os != "windows"
-        {
+        if self.target.stack_probes == rokc_mir::StackProbes::Inline {
             attrs.push(format!(
                 r#"passthrough = ["nounwind", ["probe-stack", "inline-asm"]{cold}]"#
             ));
@@ -1152,7 +1151,7 @@ impl Emitter {
         let unit = sig.ret == MirTy::Unit;
         // wasm32: the host may call an export before `_start` (or
         // without it): the runtime starts on the first call.
-        if exported && self.target.family() == "wasm" {
+        if exported && self.target.family == "wasm" {
             self.needs.insert("rok_init_once");
             b.push_str("    func.call @rok_init_once() : () -> ()\n");
         }
@@ -1240,7 +1239,7 @@ impl Emitter {
             .map(|(i, p)| format!("%arg{i}: {p}"))
             .collect();
         let attrs = match wasm_import {
-            Some((module, name)) if self.target.family() == "wasm" => format!(
+            Some((module, name)) if self.target.family == "wasm" => format!(
                 " attributes {{passthrough = [[\"wasm-import-module\", {module:?}], [\"wasm-import-name\", {name:?}]]}}"
             ),
             _ if abi.rok => runtime_fn_attrs(symbol).to_owned(),
@@ -1255,7 +1254,7 @@ impl Emitter {
 
     /// A browser module (`wasm32-unknown-unknown`): a wasm reactor.
     fn reactor(&self) -> bool {
-        self.target.family() == "wasm" && self.target.os == "none"
+        self.target.reactor()
     }
 
     /// The C `main` (spec 905.9): runtime init, type registration, the
@@ -1272,7 +1271,7 @@ impl Emitter {
         let pw = self.pw();
         self.needs.insert("rok_runtime_init");
         self.needs.insert("rok_runtime_shutdown");
-        let entry = if self.target.family() == "wasm" {
+        let entry = if self.target.family == "wasm" {
             "__main_void"
         } else {
             "main"
@@ -1283,7 +1282,7 @@ impl Emitter {
             ""
         };
         let shutdown = "    func.call @rok_runtime_shutdown() : () -> ()\n";
-        if self.target.family() == "wasm" {
+        if self.target.family == "wasm" {
             // Once, by `_start` or the first export called (an export
             // of a component may run without `_start`).
             self.out.push_str(

@@ -29,6 +29,7 @@ pub(super) fn lower(functions: &mut Vec<HirFunction>, tracked: &HashSet<Function
             id: local,
             name: Some(PARAM.to_owned()),
             ty: str_ty.clone(),
+            boxed: false,
         });
         f.params.push(HirParam {
             name: PARAM.to_owned(),
@@ -94,6 +95,7 @@ fn shim_fn(
             id: LocalId(u32::try_from(i).expect("LocalId overflow")),
             name: Some(p.name.clone()),
             ty: p.ty.clone(),
+            boxed: false,
         })
         .collect();
     let mut args: Vec<HirExpr> = locals

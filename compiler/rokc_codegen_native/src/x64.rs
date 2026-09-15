@@ -756,26 +756,28 @@ impl Em<'_> {
 
     fn copy(&mut self, dst: Mem, src: Mem, size: u32, zero: bool) {
         if size > 128 {
+            // A qword loop, not `rep movsb` / `rep stosb`: Rosetta runs
+            // those a byte at a time.
             self.scratch();
-            let win = self.obj.coff;
-            if win {
-                self.bytes(&[0x66, 0x48, 0x0f, 0x6e, 0xe6]); // movq xmm4, rsi
-                self.bytes(&[0x66, 0x48, 0x0f, 0x6e, 0xef]); // movq xmm5, rdi
-            }
             if !zero {
-                self.lea(RSI, src);
+                self.lea(R10, src);
             }
-            self.lea(RDI, dst);
-            self.mov_imm(RCX, u64::from(size));
+            self.lea(R11, dst);
+            self.mov_imm(RCX, u64::from(size / 8));
             if zero {
-                self.bytes(&[0x31, 0xc0, 0xf3, 0xaa]); // xor eax, eax; rep stosb
-            } else {
-                self.bytes(&[0xf3, 0xa4]); // rep movsb
+                self.bytes(&[0x31, 0xc0]); // xor eax, eax
             }
-            if win {
-                self.bytes(&[0x66, 0x48, 0x0f, 0x7e, 0xe6]); // movq rsi, xmm4
-                self.bytes(&[0x66, 0x48, 0x0f, 0x7e, 0xef]); // movq rdi, xmm5
+            let top = self.code.len();
+            if !zero {
+                self.op(None, true, false, &[0x8b], RAX, Rm::M(R10, 0));
+                self.bytes(&[0x49, 0x83, 0xc2, 0x08]); // add r10, 8
             }
+            self.op(None, true, false, &[0x89], RAX, Rm::M(R11, 0));
+            self.bytes(&[0x49, 0x83, 0xc3, 0x08]); // add r11, 8
+            self.bytes(&[0xff, 0xc9, 0x0f, 0x85]); // dec ecx; jnz top
+            let d = top as i32 - (self.code.len() as i32 + 4);
+            self.d32(d);
+            self.copy_words(size % 8, zero);
             return;
         }
         if !zero {

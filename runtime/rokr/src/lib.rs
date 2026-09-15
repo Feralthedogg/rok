@@ -42,6 +42,35 @@ mod session;
 pub const extern "C" fn rok_thread_lost(_id: u64) -> i32 {
     0
 }
+
+/// No REPL session on wasm32: no gates, no lock notes.
+#[cfg(target_family = "wasm")]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_session_enter() {}
+
+#[cfg(target_family = "wasm")]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_session_leave() {}
+
+#[cfg(target_family = "wasm")]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_session_pass() {}
+
+#[cfg(target_family = "wasm")]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_lock_note(_buf: *mut u8, _kind: i32) -> i32 {
+    0
+}
+
+#[cfg(target_family = "wasm")]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_lock_drop(_buf: *mut u8) {}
+
+#[cfg(target_family = "wasm")]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_lock_notes() -> i32 {
+    0
+}
 #[cfg_attr(windows, path = "stack_windows.rs")]
 #[cfg_attr(target_family = "wasm", path = "stack_wasm.rs")]
 mod stack;

@@ -32,7 +32,7 @@ impl Niche {
     /// A `bool` / float scalar storing a non-zero pattern is XOR-ed as an
     /// unsigned int; it only sits behind single-field wrappers, and the
     /// whole sum is that int.
-    const fn uint_repr(&self, target: &Target) -> Option<PrimTy> {
+    fn uint_repr(&self, target: &Target) -> Option<PrimTy> {
         match self.leaf {
             MirTy::Prim(p) if self.bits != 0 && !p.is_int() => Some(uint_of(p, target)),
             _ => None,
@@ -40,7 +40,7 @@ impl Niche {
     }
 }
 
-const fn uint_of(p: PrimTy, target: &Target) -> PrimTy {
+fn uint_of(p: PrimTy, target: &Target) -> PrimTy {
     match p.bit_width(target.pointer_width) {
         8 => PrimTy::U8,
         16 => PrimTy::U16,
@@ -390,7 +390,7 @@ mod tests {
     use super::*;
 
     fn x64() -> Target {
-        Target::new(Some("x86_64-unknown-linux-gnu"))
+        Target::builtin("x86_64-unknown-linux-gnu")
     }
 
     #[test]

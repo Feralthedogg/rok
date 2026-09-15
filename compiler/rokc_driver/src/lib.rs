@@ -7,7 +7,7 @@ mod coro;
 mod entry;
 mod harness;
 pub mod native;
-pub mod rhir;
+pub mod rokhir;
 mod toolchain;
 mod windows;
 mod wit;
@@ -29,14 +29,14 @@ pub use rokc_codegen_mlir::{Demangled, demangle};
 pub use rokc_codegen_mlir::{MlirOutput, ReplCell, ReplFn};
 pub use rokc_hir::instance;
 pub use rokc_llvm::{profdata_merge, profdata_show};
-pub use rokc_mir::Target;
+pub use rokc_mir::{Target, TargetSpec};
 pub use windows::Subsystem;
 /// Whether the REPL's session host runs here: it loads Mach-O / ELF /
 /// COFF objects of arm64 / `x86_64`.
-pub const REPL_HOST: bool = cfg!(all(
-    any(target_os = "macos", target_os = "linux", windows),
-    any(target_arch = "aarch64", target_arch = "x86_64")
-));
+#[must_use]
+pub fn repl_host() -> bool {
+    rokc_mir::TargetSpec::host().repl
+}
 
 pub use rokc_llvm::{AS_WASM_LD, wasm_ld_main};
 
@@ -81,12 +81,12 @@ pub struct CompilerConfig {
     pub buffers: Vec<(PathBuf, String)>,
     /// Dependency packages (`--extern name=path`, spec 902.3): each
     /// `lib.rok` is compiled with the user package and mounted at the
-    /// top-level path `name`; a `<name>.rhir` (spec 904) is a prebuilt
+    /// top-level path `name`; a `<name>.rokhir` (spec 904) is a prebuilt
     /// one, linked from the `lib<name>.a` beside it.
     pub externs: Vec<(String, PathBuf)>,
     /// Build the library package as prebuilt dependency `name`: it is
     /// mounted as `name` (as its users will see it), every body is
-    /// compiled, and `CompiledModule::interface` holds its RHIR.
+    /// compiled, and `CompiledModule::interface` holds its ROKHIR.
     pub lib_name: Option<String>,
     /// Keep the library's parse for the next build with the same
     /// library and the same user declarations that change its lexing
@@ -100,9 +100,9 @@ pub struct CompilerConfig {
     /// the optimizer to inline (`HirInput::inline_prebuilt`).
     pub inline_prebuilt: bool,
     /// Build the bootstrap tiers as one prebuilt library, `rok`: its
-    /// RHIR covers every tier, its archive their concrete code.
+    /// ROKHIR covers every tier, its archive their concrete code.
     pub std_lib: bool,
-    /// The bootstrap tiers prebuilt (`rok.rhir`, its `librok.a` beside
+    /// The bootstrap tiers prebuilt (`rok.rokhir`, its `librok.a` beside
     /// it): their concrete code is linked, not compiled. Ignored when
     /// stale or not of these tiers.
     pub std_prebuilt: Option<PathBuf>,
@@ -127,7 +127,7 @@ pub const STD_PKG: &str = "rok";
 
 thread_local! {
     /// Files served instead of the disk: the interface sources of the
-    /// prebuilt dependencies (`rhir::Rhir::files`) at their old paths.
+    /// prebuilt dependencies (`rokhir::Rokhir::files`) at their old paths.
     static OVERLAY: std::cell::RefCell<std::collections::HashMap<PathBuf, String>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
     /// The source files this compile read from disk.
@@ -150,13 +150,13 @@ fn source_dir_exists(dir: &Path) -> bool {
     OVERLAY.with(|o| o.borrow().keys().any(|p| p.starts_with(dir) && p != dir)) || dir.is_dir()
 }
 
-/// A prebuilt dependency of this build (`--extern name=x.rhir`).
+/// A prebuilt dependency of this build (`--extern name=x.rokhir`).
 struct Prebuilt {
-    rhir: rhir::Rhir,
+    rokhir: rokhir::Rokhir,
     archive: PathBuf,
 }
 
-/// Load the `.rhir` externs into the overlay; `config` with each one's
+/// Load the `.rokhir` externs into the overlay; `config` with each one's
 /// root replaced by its (overlaid) `lib.rok`.
 fn load_prebuilt(
     config: &CompilerConfig,
@@ -174,10 +174,10 @@ fn load_prebuilt(
         out.push(r);
     }
     for (name, root) in &mut config.externs {
-        if root.extension().is_none_or(|e| e != "rhir") {
+        if root.extension().is_none_or(|e| e != "rokhir") {
             continue;
         }
-        let r = match rhir::Rhir::load(root) {
+        let r = match rokhir::Rokhir::load(root) {
             Ok(r) if r.name == *name => r,
             Ok(r) => {
                 diags.push(RokDiagnostic::error(
@@ -203,7 +203,7 @@ fn load_prebuilt(
         };
         if let Some(p) = out
             .iter()
-            .find(|p| r.type_offset < p.rhir.type_end() && p.rhir.type_offset < r.type_end())
+            .find(|p| r.type_offset < p.rokhir.type_end() && p.rokhir.type_offset < r.type_end())
         {
             diags.push(RokDiagnostic::error(
                 rokc_diagnostic::ErrorKind::Module,
@@ -211,7 +211,7 @@ fn load_prebuilt(
                 format!(
                     "prebuilt `{}` and `{}` use the same GC type ids — build each dependency \
                      with the ones before it as `--extern` (`rok build` does)",
-                    p.rhir.name, r.name
+                    p.rokhir.name, r.name
                 ),
             ));
         }
@@ -221,9 +221,9 @@ fn load_prebuilt(
                 o.insert(r.src_dir.join(rel), text.clone());
             }
         });
-        let archive = rhir::companions(root).1;
+        let archive = rokhir::companions(root).1;
         *root = r.src_dir.join("lib.rok");
-        out.push(Prebuilt { rhir: r, archive });
+        out.push(Prebuilt { rokhir: r, archive });
     }
     (config, out)
 }
@@ -232,7 +232,9 @@ fn load_prebuilt(
 /// bootstrap root of `config` (else `None`: they compile from source),
 /// its files overlaid.
 fn load_std(path: &Path, config: &CompilerConfig) -> Option<Prebuilt> {
-    let r = rhir::Rhir::load(path).ok().filter(|r| r.name == STD_PKG)?;
+    let r = rokhir::Rokhir::load(path)
+        .ok()
+        .filter(|r| r.name == STD_PKG)?;
     let complete = bootstrap_tiers(&config.bootstrap_files).iter().all(|b| {
         b.strip_prefix(&r.src_dir).is_ok_and(|rel| {
             let rel = rel.to_string_lossy().replace('\\', "/");
@@ -248,8 +250,8 @@ fn load_std(path: &Path, config: &CompilerConfig) -> Option<Prebuilt> {
             o.insert(r.src_dir.join(rel), text.clone());
         }
     });
-    let archive = rhir::companions(path).1;
-    Some(Prebuilt { rhir: r, archive })
+    let archive = rokhir::companions(path).1;
+    Some(Prebuilt { rokhir: r, archive })
 }
 
 /// A library root mounted beside the user package: its module path
@@ -372,9 +374,9 @@ pub struct CompiledModule {
     pub mir: MirModule,
     /// Prebuilt dependencies' archives, in link order.
     pub archives: Vec<PathBuf>,
-    /// A `CompilerConfig::lib_name` build: its RHIR, but the GC type
+    /// A `CompilerConfig::lib_name` build: its ROKHIR, but the GC type
     /// count (known after codegen).
-    pub interface: Option<rhir::Rhir>,
+    pub interface: Option<rokhir::Rokhir>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -445,7 +447,7 @@ pub fn compile_source(
         .first()
         .map(|m| m.hir.any_seeds.clone())
         .unwrap_or_default();
-    let files = rhir::interface(&p.sources, &lib, src_dir, &seeds, true);
+    let files = rokhir::interface(&p.sources, &lib, src_dir, &seeds, true);
     if !keep_ast {
         p.sources.clear();
     }
@@ -459,8 +461,8 @@ pub fn compile_source(
             .find(|(n, _)| *n == lib)
             .map(|(_, h)| h.clone())
             .unwrap_or_default();
-        m.interface = Some(rhir::Rhir {
-            producer: rhir::producer(),
+        m.interface = Some(rokhir::Rokhir {
+            producer: rokhir::producer(),
             hash,
             name: lib,
             src_dir: dir,
@@ -529,7 +531,7 @@ fn compile_std(
         let tier = dir
             .file_name()
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-        for (rel, text) in rhir::interface(&p.sources, pkg, dir, &seeds, false) {
+        for (rel, text) in rokhir::interface(&p.sources, pkg, dir, &seeds, false) {
             files.push((format!("{tier}/{rel}"), text));
         }
     }
@@ -542,8 +544,8 @@ fn compile_std(
         .map(|(n, h)| format!("{n}={h}"))
         .collect::<Vec<_>>()
         .join(";");
-    m.interface = Some(rhir::Rhir {
-        producer: rhir::producer(),
+    m.interface = Some(rokhir::Rokhir {
+        producer: rokhir::producer(),
         hash,
         name: STD_PKG.to_owned(),
         src_dir,
@@ -656,7 +658,7 @@ fn compile_unit(
     let wit_link = wit::expand(
         &mut all_items,
         &mut all_uses,
-        config.target.triple.as_deref(),
+        &config.target,
         &cfg_env,
         &ext,
         &metas,
@@ -733,7 +735,7 @@ fn compile_unit(
     let input = rokc_hir::HirInput {
         packages: config.externs.iter().map(|(n, _)| n.clone()).collect(),
         lib: lib.map(str::to_owned),
-        prebuilt: prebuilt.iter().map(|p| p.rhir.name.clone()).collect(),
+        prebuilt: prebuilt.iter().map(|p| p.rokhir.name.clone()).collect(),
         check_library: config.check_library,
         root_main,
         inline_prebuilt: config.inline_prebuilt,
@@ -777,14 +779,14 @@ fn compile_unit(
     mir.link.packages = package_hashes(&root_dir, &roots);
     for p in prebuilt {
         // The standard library's hash is one per tier: `pkg=hash;..`.
-        let hashes: Vec<(&str, &str)> = if p.rhir.name == STD_PKG {
-            p.rhir
+        let hashes: Vec<(&str, &str)> = if p.rokhir.name == STD_PKG {
+            p.rokhir
                 .hash
                 .split(';')
                 .filter_map(|kv| kv.split_once('='))
                 .collect()
         } else {
-            vec![(p.rhir.name.as_str(), p.rhir.hash.as_str())]
+            vec![(p.rokhir.name.as_str(), p.rokhir.hash.as_str())]
         };
         for (name, hash) in hashes {
             if let Some(h) = mir.link.packages.iter_mut().find(|(n, _)| n == name) {
@@ -798,7 +800,7 @@ fn compile_unit(
     mir.link.prebuilt = input.prebuilt;
     mir.link.type_offset = prebuilt
         .iter()
-        .map(|p| p.rhir.type_end())
+        .map(|p| p.rokhir.type_end())
         .max()
         .unwrap_or(0);
 
@@ -1689,7 +1691,7 @@ mod tests {
         let config = super::CompilerConfig {
             bootstrap_files: vec![core],
             anonymous: true,
-            target: super::Target::new(Some(triple)),
+            target: super::Target::builtin(triple),
             ..super::CompilerConfig::default()
         };
         let path = std::env::temp_dir().join("rokc_driver_test_main.rok");
@@ -1726,7 +1728,7 @@ mod tests {
             let config = super::CompilerConfig {
                 bootstrap_files: vec![core.clone()],
                 anonymous: true,
-                target: super::Target::new(Some(triple)),
+                target: super::Target::builtin(triple),
                 ..super::CompilerConfig::default()
             };
             let path = std::env::temp_dir().join("rokc_driver_test_usize.rok");

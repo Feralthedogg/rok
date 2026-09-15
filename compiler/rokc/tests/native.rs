@@ -477,14 +477,24 @@ fn show(s: Shape, v: i64 | f64, xs: List<i32>) -> i32 {
 fn main() {
     let xs = [10, 20, 30];
     println(f\"{show(Shape::Rect(3, 4), pick(true), xs)}\");
+    println(f\"{held(7i64)}\");
+}
+
+fn held(a: any) -> i32 {
+    let total = 5;
+    let f = [ref total] |k: i32| { total += k; return total; };
+    let r = f(3);
+    return r + total;
 }
 ";
 
 /// `-g`, both back ends: a sum is a DWARF variant part (each variant a
-/// struct over the whole value, selected by its stored tag), a `GcBuf`
-/// reference points at its object (header, then the elements), and the C
-/// `main` and `rok.register_types` have subprograms. With `lldb`, `frame
-/// variable` shows them.
+/// struct over the whole value, selected by its stored tag), and so is an
+/// `any` (over the types stored into one, by their tags), a `GcBuf`
+/// reference points at its object (header, then the elements), a
+/// `[ref]`-captured variable is its value, and the C `main` and
+/// `rok.register_types` have subprograms. With `lldb`, `frame variable`
+/// shows them.
 #[test]
 fn debug_info_shows_sums_and_gc_objects() {
     let Some(env) = setup() else { return };
@@ -527,6 +537,11 @@ fn debug_info_shows_sums_and_gc_objects() {
                 .any(|s| s.contains("(\"f64\")") && s.contains("(\"i64\")")),
             "{backend}: no `f64 | i64` variant part:\n{info}"
         );
+        assert!(
+            info.split("DW_TAG_variant_part")
+                .any(|s| s.contains("(\"any::i64\")")),
+            "{backend}: no `any` variant part:\n{info}"
+        );
         let buf = info
             .split("DW_TAG_structure_type")
             .find(|s| s.contains("(\"GcBuf<i32>\")"))
@@ -564,6 +579,8 @@ fn debug_info_shows_sums_and_gc_objects() {
         let Ok(mut lldb) = Command::new("lldb")
             .args(["--batch", "-o", "b main.rok:10", "-o", "run"])
             .args(["-o", "frame variable s v xs.h->items[0].buf->items[2]"])
+            .args(["-o", "b main.rok:23", "-o", "c"])
+            .args(["-o", "frame variable a total"])
             .args(["-o", "kill"])
             .arg(&exe)
             .stdout(std::process::Stdio::piped())
@@ -586,11 +603,14 @@ fn debug_info_shows_sums_and_gc_objects() {
         if !out.contains("stop reason") {
             return;
         }
-        let vars = out.split("frame variable").last().unwrap_or_default();
+        let vars = out.split("frame variable").nth(1).unwrap_or_default();
         assert!(vars.contains("value = (0 = 3, 1 = 4)"), "{backend}: {out}");
         assert!(vars.contains("value = (0 = 1.5)"), "{backend}: {out}");
         assert!(vars.contains("$discr$ = 1"), "{backend}: {out}");
         assert!(vars.contains("= 30"), "{backend}: {out}");
+        let held = out.split("frame variable").nth(2).unwrap_or_default();
+        assert!(held.contains("value = (0 = 7)"), "{backend}: {out}");
+        assert!(held.contains("total = 8"), "{backend}: {out}");
     }
 }
 
@@ -1211,7 +1231,7 @@ fn c_abi_matches_clang() {
     ] {
         assert!(a64.contains(want), "aarch64 lacks `{want}`:\n{a64}");
     }
-    let apple = decls("arm64-apple-macosx14.0.0");
+    let apple = decls("aarch64-apple-darwin");
     for want in [
         "declare i32 @sx(i8 signext, i16 zeroext)",
         "declare signext i8 @neg8(i8 signext)",
@@ -1605,7 +1625,7 @@ fn windows_executables() {
         for (i, opt) in builds.iter().enumerate() {
             let profile = if *opt == "-O0" { "debug" } else { "release" };
             let exe = pkg.join(format!("target/{triple}/{profile}/winpkg.exe"));
-            let gui = i == builds.len() - 1 && triple.starts_with("aarch64");
+            let gui = i == builds.len() - 1 && machine == 0xaa64;
             let mut rokc = Command::new(ROKC);
             rokc.args(["-q", "build"])
                 .arg(&pkg)
@@ -1624,7 +1644,7 @@ fn windows_executables() {
                 (machine, sub, machine != 0x14c),
                 "{triple} {opt}"
             );
-            if let (Some(wine), false) = (&wine, triple.starts_with("aarch64")) {
+            if let (Some(wine), false) = (&wine, machine == 0xaa64) {
                 let run = Command::new(wine)
                     .arg(&exe)
                     .env("WINEDEBUG", "-all")

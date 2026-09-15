@@ -145,9 +145,37 @@ static int sscanf(const char *s, const char *fmt, ...) {
 
 void rok_runtime_init(void);
 int rok_stdio_flush(void);
-void rok_world_stop(void);
-void rok_world_resume(void);
+int rok_session_hold(int64_t);
+void rok_session_unhold(void);
+void rok_session_resume(void);
 void rok_session_restored(const uint64_t *, size_t);
+
+// Set by Ctrl-C (SIGINT, Ctrl-Break) while `quiesce` waits.
+static volatile int quiesce_cancel;
+static volatile int quiescing;
+
+// Stop the world at a quiet moment before the cell (`rok_session_hold`:
+// no task mid-poll, no blocking job mid-run, no thread inside a lock's
+// critical section), so a session put back after a failed cell loses
+// nothing that ran on its threads. That waits for them; 0: Ctrl-C
+// cancelled the wait (and the cell).
+static int quiesce(void) {
+    quiesce_cancel = 0;
+    quiescing = 1;
+    int ok = 1;
+    for (int tries = 0; !rok_session_hold(100000000); tries++) {
+        if (quiesce_cancel) {
+            rok_session_unhold();
+            ok = 0;
+            break;
+        }
+        if (tries == 10)
+            fprintf(stderr, "note: waiting for running tasks, blocking jobs and lock holders to reach a safe point "
+                            "before the cell (Ctrl-C cancels it)\n");
+    }
+    quiescing = 0;
+    return ok;
+}
 
 // The cell's shown value (a rok `str`), which the cell sets.
 struct {
@@ -1343,8 +1371,8 @@ extern __declspec(thread) unsigned char rok_tls_yield_flag;
 
 // A failed cell leaves the session as it was before it, like a forked
 // snapshot: before the cell, with the runtime's other threads stopped at
-// safepoints (none holds a runtime lock) and every other thread
-// suspended, the session's writable memory is copied (private and image
+// a quiet moment (`quiesce`) and every other thread suspended, the
+// session's writable memory is copied (private and image
 // read / write pages: the GC heap, malloc heaps, statics, thread-local
 // blocks, runtime and loader state), and so are the other threads'
 // registers and stacks. When the cell fails, the threads started since
@@ -1681,10 +1709,11 @@ static int save_watched(void) {
     return 1;
 }
 
-// Save the session (the cell has not started). 0: no room; nothing to
-// roll back to, so the cell does not run.
+// Save the session (the cell has not started). 0: no room, -1: Ctrl-C
+// while waiting for a quiet moment; nothing to roll back to, so the cell
+// does not run.
 static int checkpoint(void) {
-    rok_world_stop();
+    if (!quiesce()) return -1;
     book->nrok = rok_world_threads(book->rok, THREADS);
     stop_others();
     book->nbefore = book->nthreads;
@@ -1735,7 +1764,7 @@ static int checkpoint(void) {
     }
     ok = ok && save_watched();
     resume_others();
-    rok_world_resume();
+    rok_session_resume();
     return ok;
 }
 
@@ -1942,6 +1971,7 @@ static void host_leave_native(void) {
 // the raised yield flag.
 static BOOL on_break(DWORD event) {
     if (event > 1) return 0; // not CTRL_C_EVENT / CTRL_BREAK_EVENT
+    if (quiescing) quiesce_cancel = 1;
     if (book->running) __atomic_fetch_or(main_yield, INTERRUPT, __ATOMIC_SEQ_CST);
     return 1;
 }
@@ -2001,15 +2031,16 @@ int main(void) {
         __rok_repl_out.len = 0;
         int saved = checkpoint();
         if (!saved) fprintf(stderr, "error: no room to save the session before the cell\n");
-        int ok = saved && run_cell(ir, n);
+        if (saved < 0) fprintf(stderr, "error: interrupted before the cell ran\n");
+        int ok = saved > 0 && run_cell(ir, n);
         free(ir);
         if (!ok) {
             // The stack's guard page again, after an overflow.
             if (book->overflowed) _resetstkoflw();
             book->overflowed = 0;
             // Memory is as it was at the checkpoint: the world stopped.
-            if (saved) {
-                rok_world_resume();
+            if (saved > 0) {
+                rok_session_resume();
                 rok_session_restored(book->lost, book->nlost);
             }
             ctl_write("err\n", 4);
@@ -2021,6 +2052,11 @@ int main(void) {
     }
 }
 #else
+static void on_sigint(int sig) {
+    (void)sig;
+    quiesce_cancel = 1;
+}
+
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
@@ -2054,14 +2090,25 @@ int main(int argc, char **argv) {
         // compile) the copy carries on as the session; otherwise it is
         // told to go. The JIT has no threads of its own (in-place
         // compilation). Other threads are not in the copy: they are
-        // stopped at safepoints while it is made (none holds a runtime
-        // lock), and the copy forgets them when it takes over (the task
-        // executor starts its own again).
+        // stopped at a quiet moment while it is made (`quiesce`), and
+        // the copy forgets them when it takes over (the task executor
+        // starts its own again, the locks they held are released).
         int verdict[2];
         if (pipe(verdict) != 0) return 1;
-        rok_world_stop();
+        dprintf(ctl, "pid %d\n", (int)getpid());
+        signal(SIGINT, on_sigint);
+        int quiet = quiesce();
+        signal(SIGINT, SIG_IGN);
+        if (!quiet) {
+            free(ir);
+            close(verdict[0]);
+            close(verdict[1]);
+            fprintf(stderr, "error: interrupted before the cell ran\n");
+            dprintf(ctl, "err\n");
+            continue;
+        }
         pid_t snap = fork();
-        rok_world_resume();
+        rok_session_resume();
         if (snap == 0) {
             close(verdict[1]);
             ssize_t r;
@@ -2074,7 +2121,6 @@ int main(int argc, char **argv) {
             continue;
         }
         close(verdict[0]);
-        dprintf(ctl, "pid %d\n", (int)getpid());
         signal(SIGINT, SIG_DFL);
         void (*cell)(void) = jit_cell(ir, n);
         free(ir);

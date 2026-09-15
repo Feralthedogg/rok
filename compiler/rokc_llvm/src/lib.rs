@@ -63,79 +63,8 @@ pub enum Emit {
     Obj,
 }
 
-/// A code generation target: clang's `-target`, `-mcpu`, features.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Target {
-    pub triple: String,
-    pub cpu: String,
-    pub features: String,
-}
-
-impl Target {
-    /// `triple` with the CPU and features clang picks for it by default.
-    #[must_use]
-    pub fn new(triple: &str) -> Self {
-        let arch = triple.split('-').next().unwrap_or("");
-        let apple = triple.contains("-apple-");
-        let (cpu, features) = match arch {
-            "arm64" | "arm64e" | "aarch64" if apple => ("apple-m1", ""),
-            "aarch64" | "arm64" => ("generic", "+neon"),
-            "x86_64" if apple => ("core2", ""),
-            "x86_64" => ("x86-64", ""),
-            // SSE2, NEON (spec 0.6.4); the thread pointer from TPIDRURO,
-            // not glibc's `__aeabi_read_tp` (in ld.so).
-            "i686" => ("pentium4", ""),
-            "armv7" => ("generic", "+vfp3,+d32,+neon,+read-tp-tpidruro"),
-            "riscv64" => ("generic-rv64", "+m,+a,+f,+d,+c"),
-            "riscv32" => ("generic-rv32", "+m,+a,+c"),
-            // Spec 0.6.4: SIMD128 on by default; wasi-threads needs
-            // shared memory (atomics, bulk memory).
-            "wasm32" if triple.ends_with("-threads") => {
-                ("generic", "+simd128,+atomics,+bulk-memory,+mutable-globals")
-            }
-            "wasm32" => ("generic", "+simd128"),
-            _ => ("generic", ""),
-        };
-        Self {
-            triple: triple.to_owned(),
-            cpu: cpu.to_owned(),
-            features: features.to_owned(),
-        }
-    }
-
-    /// The machine rokc runs on, as clang names it: on Apple platforms
-    /// `<arch>-apple-macosx<deployment target>` (`MACOSX_DEPLOYMENT_TARGET`,
-    /// else 11.0, what the runtime library is built for).
-    #[must_use]
-    pub fn host() -> Self {
-        let process = process_triple();
-        let arch = process.split('-').next().unwrap_or("");
-        if process.contains("-apple-") {
-            Self::new(&format!("{arch}-apple-macosx{}", macos_deployment_target()))
-        } else {
-            Self::new(&process)
-        }
-    }
-
-    fn is_apple(&self) -> bool {
-        self.triple.contains("-apple-")
-    }
-
-    fn is_windows(&self) -> bool {
-        self.triple.contains("-windows")
-    }
-
-    /// lld-link's `/machine:` of a Windows target and its COFF machine
-    /// type.
-    fn coff_machine(&self) -> Result<(&'static str, u16), String> {
-        match self.triple.split('-').next() {
-            Some("x86_64") => Ok(("x64", 0x8664)),
-            Some("aarch64" | "arm64") => Ok(("arm64", 0xaa64)),
-            Some("i686") => Ok(("x86", 0x14c)),
-            _ => Err(format!("linking for {} is not supported yet", self.triple)),
-        }
-    }
-}
+pub use rokc_target::TargetSpec as Target;
+use rokc_target::{Linker, ObjectFormat};
 
 /// What to compile and how.
 #[derive(Clone, Debug)]
@@ -229,17 +158,10 @@ pub fn profdata_show(file: &Path, all: bool, topn: usize) -> Result<String, Stri
     ffi::profdata_show(&cstr(file.as_os_str())?, all, topn)
 }
 
-/// The data layout LLVM gives `t` (what clang writes as `target datalayout`).
+/// The data layout LLVM gives `t` (what clang writes as `target
+/// datalayout`), to check a spec's against.
 pub fn data_layout(t: &Target) -> Result<String, String> {
     ffi::data_layout(t)
-}
-
-/// The triple LLVM was configured for (`sys::getProcessTriple`); see
-/// [`Target::host`] for clang's spelling. Without LLVM, the triple
-/// rokc was compiled for.
-#[must_use]
-pub fn process_triple() -> String {
-    ffi::process_triple().unwrap_or_else(|| env!("ROK_LLVM_TARGET").to_owned())
 }
 
 /// Runs lld; `args[0]` names the flavor (`ld64.lld`, `ld.lld`, `lld-link`,
@@ -258,10 +180,10 @@ pub fn lld<S: AsRef<OsStr>>(args: &[S]) -> Result<String, String> {
 /// the target's flavor; `strip` drops what nothing references.
 ///
 /// Mach-O: the SDK is `SDKROOT`, else the selected developer
-/// directory's. Linux and wasm32: `libc`, the toolchain's C runtime
-/// objects and C library for the target (`targets/build.sh`). COFF: no default
-/// libraries; `inputs` bring the C runtime (import libraries,
-/// [`import_library`]) and the entry point.
+/// directory's. A shipped C library (`Libc::shipped`): `libc`, the
+/// toolchain's C runtime objects and C library for the target
+/// (`targets/build.sh`). COFF: no default libraries; `inputs` bring the
+/// C runtime (import libraries, [`import_library`]) and the entry point.
 pub fn link_executable<S: AsRef<OsStr>>(
     t: &Target,
     inputs: &[S],
@@ -283,42 +205,50 @@ pub fn link_executable<S: AsRef<OsStr>>(
         .map(|a| a.as_ref().to_owned())
         .partition(|a| a.to_str().is_some_and(|s| s.starts_with("-L")));
     let inputs: Vec<OsString> = dirs.into_iter().chain(search).chain(rest).collect();
-    let args =
-        if t.is_apple() {
-            let mut a = macho_args(t, out)?;
-            a.extend(inputs);
-            a.push("-lSystem".into());
-            if strip {
-                a.push("-dead_strip".into());
+    let libc = if t.libc.shipped() {
+        let dir = libc.ok_or_else(|| format!("no C library for {}", t.name))?;
+        if t.crt_objects.iter().any(|o| !dir.join(o).is_file()) {
+            return Err(format!("no C library for {} in {}", t.name, dir.display()));
+        }
+        Some(dir)
+    } else {
+        None
+    };
+    // A file of the target's directory, or an argument.
+    let late = |a: &String| -> OsString {
+        match libc {
+            Some(dir) if !a.starts_with('-') => dir.join(a).into_os_string(),
+            _ => a.into(),
+        }
+    };
+    let mut a: Vec<OsString> = vec![t.linker.flavor().into()];
+    match t.object_format {
+        ObjectFormat::MachO => a.extend(macho_args(t)?),
+        ObjectFormat::Elf => {
+            // Debug info of code `--gc-sections` dropped points at the
+            // DWARF tombstone (all ones: no address), not at 0, where it
+            // would claim the start of the address space.
+            a.extend(t.pre_link_args.iter().map(OsString::from));
+            a.extend(
+                [
+                    "--eh-frame-hdr",
+                    "--build-id",
+                    "-z",
+                    "dead-reloc-in-nonalloc=.debug_info=0xffffffffffffffff",
+                ]
+                .map(OsString::from),
+            );
+            // A dynamic executable is a PIE run by the system's loader.
+            if t.dynamic_linking {
+                a.extend(["-pie", "--hash-style=gnu", "-dynamic-linker"].map(OsString::from));
+                a.push((&t.dynamic_loader).into());
+            } else {
+                a.push("-static".into());
             }
-            a
-        } else if t.triple.contains("-linux") {
-            let libc = libc.ok_or_else(|| format!("no C library for {}", t.triple))?;
-            let (mut a, tail) = elf_args(t, out, libc)?;
-            a.extend(inputs);
-            if strip {
-                a.push("--gc-sections".into());
-            }
-            a.extend(tail);
-            a
-        } else if t.is_windows() {
-            let mut a: Vec<OsString> = [
-                "lld-link",
-                "/nologo",
-                "/nodefaultlib",
-                "/dynamicbase",
-                "/nxcompat",
-            ]
-            .map(OsString::from)
-            .into();
-            let machine = t.coff_machine()?.0;
-            a.push(format!("/machine:{machine}").into());
-            // x86: a 4 GiB address space under 64-bit Windows (the heap of
-            // spec 0.6.3), and no SafeSEH table: rok code raises no SEH
-            // exceptions and the runtime's handler is vectored.
-            if machine == "x86" {
-                a.extend(["/largeaddressaware".into(), "/safeseh:no".into()]);
-            }
+        }
+        ObjectFormat::Coff => {
+            a.extend(["/nologo", "/nodefaultlib", "/dynamicbase", "/nxcompat"].map(OsString::from));
+            a.extend(t.pre_link_args.iter().map(OsString::from));
             let mut o = OsString::from("/out:");
             o.push(out);
             a.push(o);
@@ -330,114 +260,56 @@ pub fn link_executable<S: AsRef<OsStr>>(
                 },
             ));
             a.push(if strip { "/opt:ref" } else { "/opt:noref" }.into());
-            a
-        } else if t.triple.starts_with("wasm32") {
-            let libc = libc.ok_or_else(|| format!("no C library for {}", t.triple))?;
-            let mut a = wasm_args(out, libc, &t.triple)?;
-            a.extend(inputs);
-            a.push(libc.join("libc.a").into_os_string());
-            if t.triple == "wasm32-wasi" {
-                return link_component(&a, libc);
-            }
-            a
-        } else {
-            return Err(format!("linking for {} is not supported yet", t.triple));
-        };
-    lld(&args)
+            a.extend(t.late_link_args.iter().map(late));
+            return lld(&a);
+        }
+        // The stack first: one that overflows runs off address 0 and
+        // wraps to the top of the address space, which memory never
+        // reaches (its last 64 KiB page is never grown), so a store
+        // there traps. wasm-ld drops unreferenced sections by default.
+        ObjectFormat::Wasm => {
+            a.extend(["--stack-first", "-z"].map(OsString::from));
+            a.push(format!("stack-size={}", t.stack_size).into());
+            a.push("--max-memory=4294901760".into());
+            a.extend(t.pre_link_args.iter().map(OsString::from));
+        }
+    }
+    a.extend(["-o".into(), out.as_os_str().to_owned()]);
+    if let Some(dir) = libc {
+        a.extend(t.crt_objects.iter().map(|o| dir.join(o).into_os_string()));
+        let mut l = OsString::from("-L");
+        l.push(dir);
+        a.push(l);
+    }
+    a.extend(inputs);
+    if strip {
+        match t.object_format {
+            ObjectFormat::MachO => a.push("-dead_strip".into()),
+            ObjectFormat::Elf => a.push("--gc-sections".into()),
+            _ => {}
+        }
+    }
+    a.extend(t.late_link_args.iter().map(late));
+    match (t.linker, libc) {
+        (Linker::WasmComponentLd, Some(dir)) => link_component(&a, dir),
+        _ => lld(&a),
+    }
 }
 
-fn macho_args(t: &Target, out: &Path) -> Result<Vec<OsString>, String> {
+/// ld64's arguments before the output: the target's, the platform
+/// version (`deployment_target`) and the SDK.
+fn macho_args(t: &Target) -> Result<Vec<OsString>, String> {
     let sdk = apple_sdk()?;
-    let arch = match t.triple.split('-').next() {
-        Some("aarch64" | "arm64") => "arm64",
-        Some(a) => a,
-        None => "",
-    };
-    let min = t
-        .triple
-        .split('-')
-        .nth(2)
-        .and_then(|os| {
-            os.strip_prefix("macosx")
-                .or_else(|| os.strip_prefix("macos"))
-        })
-        .filter(|v| !v.is_empty())
-        .map_or_else(macos_deployment_target, str::to_owned);
+    let min = &t.deployment_target;
     let sdk_version = sdk_version(&sdk).unwrap_or_else(|| min.clone());
-    let mut a: Vec<OsString> = [
-        "ld64.lld",
-        "-arch",
-        arch,
-        "-platform_version",
-        "macos",
-        &min,
-        &sdk_version,
-    ]
-    .map(OsString::from)
-    .into();
+    let mut a: Vec<OsString> = t.pre_link_args.iter().map(OsString::from).collect();
+    a.extend(["-platform_version", &t.os, min, &sdk_version].map(OsString::from));
     a.extend(["-syslibroot".into(), sdk.into_os_string()]);
     // ld64 also searches the real /usr/local/lib.
     if Path::new("/usr/local/lib").is_dir() {
         a.push("-L/usr/local/lib".into());
     }
-    a.extend(["-o".into(), out.as_os_str().to_owned()]);
     Ok(a)
-}
-
-/// lld's arguments before and after the inputs for a Linux executable
-/// against the C library in `libc`: musl statically, glibc (link stubs)
-/// as a PIE run by the system's dynamic loader.
-fn elf_args(t: &Target, out: &Path, libc: &Path) -> Result<(Vec<OsString>, Vec<OsString>), String> {
-    let (emulation, loader) = match t.triple.split('-').next().unwrap_or("") {
-        "x86_64" => ("elf_x86_64", "/lib64/ld-linux-x86-64.so.2"),
-        "aarch64" => ("aarch64linux", "/lib/ld-linux-aarch64.so.1"),
-        "i686" => ("elf_i386", "/lib/ld-linux.so.2"),
-        "armv7" => ("armelf_linux_eabi", "/lib/ld-linux-armhf.so.3"),
-        _ => return Err(format!("linking for {} is not supported yet", t.triple)),
-    };
-    let musl = t.triple.contains("-musl");
-    let crt1 = if musl { "crt1.o" } else { "Scrt1.o" };
-    if !libc.join(crt1).is_file() {
-        return Err(format!(
-            "no C library for {} in {}",
-            t.triple,
-            libc.display()
-        ));
-    }
-    let f = |name: &str| libc.join(name).into_os_string();
-    let mut search = OsString::from("-L");
-    search.push(libc);
-    // Debug info of code `--gc-sections` dropped points at the DWARF
-    // tombstone (all ones: no address), not at 0, where it would claim
-    // the start of the address space (lld writes 0 by default).
-    let mut head: Vec<OsString> = [
-        "ld.lld",
-        "-m",
-        emulation,
-        "--eh-frame-hdr",
-        "--build-id",
-        "-z",
-        "dead-reloc-in-nonalloc=.debug_info=0xffffffffffffffff",
-    ]
-    .map(OsString::from)
-    .into();
-    head.extend(["-o".into(), out.as_os_str().to_owned()]);
-    let tail = if musl {
-        head.extend(["-static".into(), f(crt1), f("crti.o"), search]);
-        vec![f("libc.a"), f("crtn.o")]
-    } else {
-        head.extend(["-pie", "--hash-style=gnu", "-dynamic-linker", loader].map(OsString::from));
-        head.extend([f(crt1), f("crti.o"), search]);
-        vec![
-            "--as-needed".into(),
-            "-lm".into(),
-            "--no-as-needed".into(),
-            "-lc".into(),
-            f("libc_nonshared.a"),
-            f("crtn.o"),
-        ]
-    };
-    Ok((head, tail))
 }
 
 /// Set in the environment of `wasm-component-ld`, which runs rokc as its
@@ -486,72 +358,6 @@ fn link_component(args: &[OsString], libc: &Path) -> Result<String, String> {
     }
 }
 
-/// wasm-ld's arguments before the inputs for a wasm32 module of
-/// `triple` against wasi-libc in `libc`. A command module: `_start` (its
-/// `crt1-command.o`) calls `__main_void`. The browser's is a reactor
-/// (`crt1-reactor.o`): the host calls `_initialize`, then the exports
-/// (`main` and the `#[export_name]` functions). The 8 MiB stack (rok's
-/// thread stack) comes first in linear memory, so an overflow runs off
-/// address 0 and traps. wasm-ld drops unreferenced sections by default.
-/// wasi-threads: a shared memory the host provides and
-/// `wasi_thread_start`, where each new thread begins.
-fn wasm_args(out: &Path, libc: &Path, triple: &str) -> Result<Vec<OsString>, String> {
-    let threads = triple.ends_with("-threads");
-    let reactor = triple == "wasm32-unknown-unknown";
-    let crt1 = libc.join(if reactor {
-        "crt1-reactor.o"
-    } else {
-        "crt1-command.o"
-    });
-    if !crt1.is_file() {
-        return Err(format!("no C library in {}", libc.display()));
-    }
-    let mut search = OsString::from("-L");
-    search.push(libc);
-    // The stack first: one that overflows runs off address 0 and wraps
-    // to the top of the address space, which memory never reaches (its
-    // last 64 KiB page is never grown), so a store there traps.
-    let mut a: Vec<OsString> = [
-        "wasm-ld",
-        "--stack-first",
-        "-z",
-        "stack-size=8388608",
-        "--max-memory=4294901760",
-    ]
-    .map(OsString::from)
-    .into();
-    if reactor {
-        // The host flushes stdout (rok's buffer, and C's when the
-        // program uses it) after each export: no `exit` does.
-        a.extend(
-            [
-                "--no-entry",
-                "--export-if-defined=rok_stdio_flush",
-                "--export-if-defined=fflush",
-            ]
-            .map(OsString::from),
-        );
-    }
-    if threads {
-        a.extend(
-            [
-                "--shared-memory",
-                "--import-memory",
-                "--export-memory",
-                "--export=wasi_thread_start",
-            ]
-            .map(OsString::from),
-        );
-    }
-    a.extend([
-        "-o".into(),
-        out.as_os_str().to_owned(),
-        crt1.into_os_string(),
-        search,
-    ]);
-    Ok(a)
-}
-
 /// `dsymutil <args>`: the DWARF of a Mach-O executable's objects into a
 /// `.dSYM` bundle. It reports on stderr.
 pub fn dsymutil<S: AsRef<OsStr>>(args: &[S]) -> Result<(), String> {
@@ -569,12 +375,10 @@ pub fn write_archive(t: &Target, out: &Path, members: &[&Path]) -> Result<(), St
         .iter()
         .map(|m| cstr(m.as_os_str()))
         .collect::<Result<Vec<_>, _>>()?;
-    let kind = if t.is_apple() {
-        1
-    } else if t.is_windows() {
-        2
-    } else {
-        0
+    let kind = match t.object_format {
+        ObjectFormat::MachO => 1,
+        ObjectFormat::Coff => 2,
+        _ => 0,
     };
     ffi::write_archive(&cstr(out.as_os_str())?, &members, kind)
 }
@@ -582,14 +386,10 @@ pub fn write_archive(t: &Target, out: &Path, members: &[&Path]) -> Result<(), St
 /// The import library `out` of the module definition `def` (a `.def`
 /// file's text, mingw-w64 syntax) for a Windows target.
 pub fn import_library(t: &Target, def: &str, out: &Path) -> Result<(), String> {
-    ffi::import_library(def, t.coff_machine()?.1, &cstr(out.as_os_str())?)
-}
-
-fn macos_deployment_target() -> String {
-    std::env::var("MACOSX_DEPLOYMENT_TARGET")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "11.0".to_owned())
+    let machine = t
+        .coff_machine()
+        .ok_or_else(|| format!("{} has no COFF machine type", t.name))?;
+    ffi::import_library(def, machine, &cstr(out.as_os_str())?)
 }
 
 /// The macOS SDK as `xcrun` finds it, without running it: `SDKROOT`,
@@ -708,7 +508,6 @@ mod ffi {
             warn: *mut RokBuf,
         ) -> c_int;
         fn rok_llvm_data_layout(o: *const RokCompile, out: *mut RokBuf, err: *mut RokBuf) -> c_int;
-        fn rok_llvm_process_triple(out: *mut RokBuf);
         fn rok_llvm_dsymutil(argv: *const *const c_char, argc: usize) -> c_int;
         fn rok_llvm_lld(argv: *const *const c_char, argc: usize, log: *mut RokBuf) -> c_int;
         fn rok_llvm_write_archive(
@@ -756,7 +555,7 @@ mod ffi {
         parts: usize,
     ) -> Result<(Vec<Vec<u8>>, String), String> {
         let (triple, cpu, features) = (
-            c(&o.target.triple)?,
+            c(&o.target.llvm_triple())?,
             c(&o.target.cpu)?,
             c(&o.target.features)?,
         );
@@ -822,7 +621,8 @@ mod ffi {
     }
 
     pub fn data_layout(t: &Target) -> Result<String, String> {
-        let (triple, cpu, features, none) = (c(&t.triple)?, c(&t.cpu)?, c(&t.features)?, c("")?);
+        let (triple, cpu, features, none) =
+            (c(&t.llvm_triple())?, c(&t.cpu)?, c(&t.features)?, c("")?);
         let opts = RokCompile {
             triple: triple.as_ptr(),
             cpu: cpu.as_ptr(),
@@ -849,15 +649,6 @@ mod ffi {
             drop(out.take());
             Err(err.text())
         }
-    }
-
-    // The stub's signature.
-    #[allow(clippy::unnecessary_wraps)]
-    pub fn process_triple() -> Option<String> {
-        let mut out = RokBuf::new();
-        // SAFETY: the shim fills `out`.
-        unsafe { rok_llvm_process_triple(&raw mut out) };
-        Some(out.text())
     }
 
     pub fn dsymutil(args: &[CString]) -> Result<(), String> {
@@ -991,10 +782,6 @@ mod ffi {
 
     pub fn data_layout(_: &Target) -> Result<String, String> {
         off()
-    }
-
-    pub const fn process_triple() -> Option<String> {
-        None
     }
 
     pub fn lld(_: &[CString]) -> Result<String, String> {

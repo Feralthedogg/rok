@@ -1,27 +1,200 @@
 //! For the REPL's session host (`rokc_tools/src/repl_host.c`): the world
-//! stopped while it saves the session before a cell, and the runtime put
-//! back together after a failed cell when the session is as it was
-//! before it but some threads are gone (POSIX: a forked copy has only
-//! the host's main thread; Windows: threads the host ended because they
-//! no longer match the restored memory).
+//! stopped at a quiet moment while it saves the session before a cell,
+//! and the runtime put back together after a failed cell when the
+//! session is as it was before it but some threads are gone (POSIX: a
+//! forked copy has only the host's main thread; Windows: threads the
+//! host ended because they no longer match the restored memory).
+//!
+//! Quiet: no executor thread is inside a task's poll, a blocking job or
+//! its own bookkeeping (each passes a gate between them, `rok_session_*`
+//! below), and no other thread is stopped inside a lock's critical
+//! section. So whatever ran on a thread that is gone afterwards was
+//! between steps whose state is all in memory: the executor's threads
+//! start again where they were, and the locks a gone thread held (only
+//! while blocked in a call) are released.
 
-use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicUsize, Ordering};
 
+use rokr_common::object_header::HEADER_SIZE;
+use rokr_common::{sys, tls};
 use rokr_gc::world;
 
-/// Stop every other mutator (at a safepoint or parked in a blocking
-/// call): none holds a runtime lock while the session is saved.
+/// A hold is requested: executor threads wait at their gates.
+static HOLD: AtomicBool = AtomicBool::new(false);
+/// Executor threads between their gates.
+static BUSY: AtomicUsize = AtomicUsize::new(0);
+/// Lock notes are kept: a session host saves sessions.
+static NOTES: AtomicBool = AtomicBool::new(false);
+
+/// Whether locks are to be noted (`rok_lock_note`): 1 in a session host
+/// (it is, from before its first cell). `rok::core::sync` reads it once
+/// per process (a lazy static), so other programs pay a load per lock.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_world_stop() {
-    world::lock();
-    world::stop();
+pub extern "C" fn rok_lock_notes() -> i32 {
+    i32::from(NOTES.load(Ordering::SeqCst))
 }
 
-/// End [`rok_world_stop`]'s pause.
+struct Gate {
+    lock: sys::Lock,
+    cond: sys::Cond,
+}
+
+// SAFETY: the OS primitives are thread-safe.
+unsafe impl Sync for Gate {}
+
+static GATE: Gate = Gate {
+    lock: sys::Lock::new(),
+    cond: sys::Cond::new(),
+};
+
+fn gate_broadcast() {
+    GATE.lock.lock();
+    GATE.cond.broadcast();
+    GATE.lock.unlock();
+}
+
+/// Wait out a hold, parked for the collector.
+fn gate_wait() {
+    world::enter_native();
+    GATE.lock.lock();
+    while HOLD.load(Ordering::SeqCst) {
+        GATE.cond.wait(&GATE.lock);
+    }
+    GATE.lock.unlock();
+    world::leave_native();
+}
+
+/// An executor thread starts work (a loop of polls, jobs, scans): it
+/// counts as busy until [`rok_session_leave`]; waits out a hold first.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_world_resume() {
+pub extern "C" fn rok_session_enter() {
+    loop {
+        BUSY.fetch_add(1, Ordering::SeqCst);
+        if !HOLD.load(Ordering::SeqCst) {
+            return;
+        }
+        rok_session_leave();
+        gate_wait();
+    }
+}
+
+/// An executor thread stops working (it sleeps, blocks for its next
+/// work, or ends).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_session_leave() {
+    if BUSY.fetch_sub(1, Ordering::SeqCst) == 1 && HOLD.load(Ordering::SeqCst) {
+        gate_broadcast();
+    }
+}
+
+/// A busy executor thread between two steps (it holds no lock and runs
+/// no poll or job): wait here while a hold is requested.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_session_pass() {
+    if HOLD.load(Ordering::SeqCst) {
+        rok_session_leave();
+        rok_session_enter();
+    }
+}
+
+/// Bring the session to a quiet moment and stop every other mutator
+/// there: 1 once stopped (end it with [`rok_session_resume`]); 0 if that
+/// took longer than `timeout_ns` (the hold stays requested: call again,
+/// or give up with [`rok_session_unhold`]).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_session_hold(timeout_ns: i64) -> i32 {
+    NOTES.store(true, Ordering::SeqCst);
+    HOLD.store(true, Ordering::SeqCst);
+    let deadline = sys::monotonic_ns().saturating_add(timeout_ns);
+    loop {
+        if BUSY.load(Ordering::SeqCst) == 0 {
+            world::lock();
+            world::stop();
+            if world::quiet() {
+                return 1;
+            }
+            world::resume();
+            world::unlock();
+        }
+        let left = deadline - sys::monotonic_ns();
+        if left <= 0 {
+            return 0;
+        }
+        // Woken when the last busy thread passes its gate; a lock holder
+        // is looked at again each millisecond.
+        world::enter_native();
+        GATE.lock.lock();
+        GATE.cond
+            .wait_timeout(&GATE.lock, left.min(1_000_000) as u64);
+        GATE.lock.unlock();
+        world::leave_native();
+    }
+}
+
+/// End a hold: the session was saved (or [`rok_session_hold`] gave up).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_session_unhold() {
+    HOLD.store(false, Ordering::SeqCst);
+    gate_broadcast();
+}
+
+/// End [`rok_session_hold`]'s stop and the hold.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_session_resume() {
     world::resume();
     world::unlock();
+    rok_session_unhold();
+}
+
+/// Lock kinds of [`rok_lock_note`].
+const MUTEX: usize = 0;
+const READ: usize = 1;
+const WRITE: usize = 2;
+const ONCE: usize = 3;
+
+/// The calling thread took the lock whose state word is element 0 of
+/// the `GcBuf<i32>` `buf` (`kind`: 0 `Mutex`, 1 `RwLock` read, 2 write,
+/// 3 a running `Once`). Noted (1) only in a session host and outside
+/// the task executor (a task outlives its threads); the guard passes
+/// the 1 to [`rok_lock_drop`].
+///
+/// # Safety
+/// `buf` must be a live `GcBuf<i32>`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rok_lock_note(buf: *mut u8, kind: i32) -> i32 {
+    // SAFETY: this thread's own slot.
+    if !NOTES.load(Ordering::Relaxed) || unsafe { tls::task_worker().read() } != 0 {
+        return 0;
+    }
+    // Released by address after a failed cell: it must stay put.
+    // SAFETY: caller contract.
+    unsafe { rokr_gc::no_move(buf) };
+    world::note_lock(buf as usize, kind as usize);
+    1
+}
+
+/// The lock [`rok_lock_note`] noted is released.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_lock_drop(buf: *mut u8) {
+    world::drop_lock(buf as usize);
+}
+
+/// Release a lock a gone thread held, as its guard's drop would.
+#[allow(clippy::cast_ptr_alignment)] // i32 buffer elements are 4-aligned
+fn release((buf, kind): (usize, usize)) {
+    // SAFETY: the lock's buffer is alive (the gone thread's frames were
+    // roots until now) and was kept in place (`rok_lock_note`).
+    let w = unsafe { &*(buf as *mut u8).add(HEADER_SIZE).cast::<AtomicI32>() };
+    match kind {
+        MUTEX | WRITE => w.store(0, Ordering::SeqCst),
+        READ => {
+            w.fetch_sub(1, Ordering::SeqCst);
+        }
+        ONCE => {
+            let _ = w.compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst);
+        }
+        _ => {}
+    }
 }
 
 /// With the world stopped: the OS ids of the other mutator threads into
@@ -60,8 +233,9 @@ fn note_lost(id: u64) {
 
 /// The session was put back as it was before a failed cell, the world
 /// resumed: forget the threads that are gone (`n == usize::MAX`: every
-/// other one; else the OS ids at `lost`), drop the I/O poller's state
-/// and let the task executor restart what ran on them.
+/// other one; else the OS ids at `lost`) and release the locks they
+/// held, drop the I/O poller's state and let the task executor restart
+/// its threads.
 ///
 /// # Safety
 /// `lost` must be readable for `n` ids unless `n` is `usize::MAX`.
@@ -70,8 +244,15 @@ pub unsafe extern "C" fn rok_session_restored(lost: *const u64, n: usize) {
     let lost = (n != usize::MAX)
         // SAFETY: caller contract.
         .then(|| unsafe { core::slice::from_raw_parts(lost, n) });
-    world::forget(lost, note_lost);
+    world::forget(lost, |id, held| {
+        note_lost(id);
+        held.iter().copied().for_each(release);
+    });
     crate::thread::forget_waiters(|id| rok_thread_lost(id) != 0);
+    // Threads waiting on a lock released above (and any other: a wait
+    // may end spuriously) look again; tasks are unparked by the
+    // executor's restart.
+    crate::thread::wake_all_waiters();
     crate::net::reset_poller();
     crate::restart_executor();
 }

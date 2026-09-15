@@ -2489,7 +2489,7 @@ fn narrowings(ctx: &LowerCtx<'_>, cond: &Expr) -> Vec<(String, rokc_ast::Ty)> {
                 if p.segments.len() == 1
                     && ctx.lookup(&p.segments[0].name).is_some_and(|l| {
                         // An enum's `x is E::V` is a variant test: no narrowing.
-                        !ctx.boxed.contains(&l) && !matches!(ctx.local_ty(l), HirTy::Enum(_))
+                        !ctx.is_boxed(l) && !matches!(ctx.local_ty(l), HirTy::Enum(_))
                     }) =>
             {
                 vec![(p.segments[0].name.clone(), ty.clone())]
@@ -5112,7 +5112,7 @@ pub(super) fn any_dispatcher(
 /// closed-world, so (1) each one gets a stable symbol `rok.any.<hash>`
 /// (weak in a prebuilt library, strong in its user, which wins), and
 /// (2) a prebuilt library `lib` describes its stored types and its
-/// dispatchers as rok source `seeds` for its RHIR: compiled by its user,
+/// dispatchers as rok source `seeds` for its ROKHIR: compiled by its user,
 /// they put the library's types into the user's dispatchers and make
 /// the user build every dispatcher the library calls.
 /// Returns `(seeds as (module, text), dispatcher exports)`.

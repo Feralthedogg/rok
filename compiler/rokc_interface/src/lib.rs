@@ -21,10 +21,11 @@ pub use rokc_diagnostic::{
     set_report_style,
 };
 pub use rokc_driver::{
-    AS_WASM_LD, BuildOptions, Demangled, EmitKind, LLVM_VERSION, Profile, REPL_HOST, ReplCell,
-    ReplFn, SourceFile, Subsystem, TempDir, bootstrap_tiers, demangle, find_mlir_plugin, link_host,
-    profdata_merge, profdata_show, rhir, wasm_ld_main,
+    AS_WASM_LD, BuildOptions, Demangled, EmitKind, LLVM_VERSION, Profile, ReplCell, ReplFn,
+    SourceFile, Subsystem, TargetSpec, TempDir, bootstrap_tiers, demangle, find_mlir_plugin,
+    link_host, profdata_merge, profdata_show, repl_host, rokhir, wasm_ld_main,
 };
+pub use rokc_target::BUILTIN as BUILTIN_TARGETS;
 
 #[derive(Default)]
 pub struct Session {
@@ -82,7 +83,7 @@ impl Session {
     }
 
     /// Build the library package as prebuilt dependency `name`
-    /// (`archive` then also writes `<name>.rhir`, spec 904).
+    /// (`archive` then also writes `<name>.rokhir`, spec 904).
     pub fn set_lib_name(&mut self, name: Option<String>) {
         self.config.lib_name = name;
     }
@@ -92,9 +93,9 @@ impl Session {
         self.config.anonymous = on;
     }
 
-    /// Compile for LLVM target `triple` (`--target`); `None` is the host.
-    pub fn set_target(&mut self, triple: Option<&str>) {
-        self.config.target = rokc_driver::Target::new(triple);
+    /// Compile for `target` (`--target`; the host by default).
+    pub fn set_target(&mut self, target: &TargetSpec) {
+        self.config.target = rokc_driver::Target::new(target.clone());
     }
 
     /// Keep the library's parse across compiles (a long-lived session
@@ -108,9 +109,9 @@ impl Session {
         self.config.std_lib = on;
     }
 
-    /// Link the bootstrap tiers prebuilt (`rok.rhir`, `prebuilt_std`).
-    pub fn set_std_prebuilt(&mut self, rhir: Option<PathBuf>) {
-        self.config.std_prebuilt = rhir;
+    /// Link the bootstrap tiers prebuilt (`rok.rokhir`, `prebuilt_std`).
+    pub fn set_std_prebuilt(&mut self, rokhir: Option<PathBuf>) {
+        self.config.std_prebuilt = rokhir;
     }
 
     /// Read `path` (absolute) as `text` instead of from the disk.
@@ -307,7 +308,7 @@ pub struct Sysroot {
     /// The library roots to preload (`core`, then `std` / `bare`).
     pub libs: Result<Vec<PathBuf>, String>,
     pub rokr: Result<PathBuf, String>,
-    /// `lib/rok/targets/<triple>/`: what a `--target` links (`librokr.a`
+    /// `lib/rok/targets/<target>/`: what a `--target` links (`librokr.a`
     /// for that target; Linux: its C runtime objects and C library).
     /// The repository's is `target/lib/rok/targets/` (`targets/build.sh`).
     pub targets: PathBuf,
@@ -339,8 +340,8 @@ pub fn sysroot() -> Sysroot {
                 lib_dirs[1].join("core/lib.rok").display(),
             )
         });
-    let rt_lib = rokc_core::HOST_RUNTIME_LIB;
-    let rt = [root.join("lib").join(rt_lib), bin.join(rt_lib)];
+    let rt_lib = TargetSpec::host().runtime_lib();
+    let rt = [root.join("lib").join(&rt_lib), bin.join(&rt_lib)];
     let rokr = rt.iter().find(|p| p.is_file()).cloned().ok_or_else(|| {
         format!(
             "the runtime library is missing: no {} (the sysroot of {}) nor {} (a build in the \

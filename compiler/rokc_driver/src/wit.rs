@@ -12,16 +12,13 @@ use rokc_parser::{ExtOps, apply_keywords, parse_program_meta};
 
 use crate::{CfgEnv, MetaCtx, ModItem, UseEntry, flatten_module_items};
 
-/// The target WIT bindings are built for: a WASI preview 2 component.
-const COMPONENT_TARGET: &str = "wasm32-wasi";
-
 /// Replace the `ffi::wit` items of `items` (the package's, by module)
 /// with their bindings; the component's link data when there are any.
 #[allow(clippy::too_many_arguments)] // the parse context of the package
 pub fn expand(
     items: &mut Vec<ModItem>,
     uses: &mut Vec<UseEntry>,
-    triple: Option<&str>,
+    target: &rokc_mir::TargetSpec,
     cfg_env: &CfgEnv,
     ext: &ExtOps,
     metas: &MetaCtx,
@@ -81,13 +78,16 @@ pub fn expand(
                 continue;
             }
         };
-        // The WIT is checked for any target; only a component has the
-        // core imports and exports the bindings stand for.
-        if triple != Some(COMPONENT_TARGET) {
+        // The WIT is checked for any target; only a component (a WASI
+        // preview 2 target) has the core imports and exports the
+        // bindings stand for.
+        if target.linker != rokc_target::Linker::WasmComponentLd {
             fail(
                 diags,
                 format!(
-                    "`ffi::wit` builds a WebAssembly component: it needs `--target {COMPONENT_TARGET}` (stdlib 1.8)"
+                    "`ffi::wit` builds a WebAssembly component: it needs a component target such as \
+                     `--target wasm32-wasi`, not {} (stdlib 1.8)",
+                    target.name
                 ),
             );
             continue;

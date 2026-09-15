@@ -990,7 +990,7 @@ fn build_run_and_repl_with_dependencies() {
 }
 
 /// `rok build` builds each dependency once into `target/<profile>/deps`
-/// (`lib<name>.a` + `<name>.rhir`), reuses it while nothing it depends
+/// (`lib<name>.a` + `<name>.rokhir`), reuses it while nothing it depends
 /// on changes, and rebuilds it (and the ones after it) when its source
 /// does. A dependency of a dependency is built first.
 #[test]
@@ -1033,7 +1033,7 @@ fn prebuilt_dependencies_are_reused_and_rebuilt() {
         text(&out.stderr)
     );
     let deps = app.join("target/debug/deps");
-    for f in ["libbase.a", "base.rhir", "libmid.a", "mid.rhir"] {
+    for f in ["libbase.a", "base.rokhir", "libmid.a", "mid.rokhir"] {
         assert!(deps.join(f).is_file(), "{f}");
     }
     // Nothing changed: both reused.
@@ -1060,7 +1060,7 @@ fn prebuilt_dependencies_are_reused_and_rebuilt() {
     let out = rok(&home, &app, &["build", "--release"]);
     ok(&out);
     assert!(built(&out, "mid"), "{}", text(&out.stderr));
-    assert!(app.join("target/release/deps/mid.rhir").is_file());
+    assert!(app.join("target/release/deps/mid.rokhir").is_file());
 }
 
 #[test]
@@ -1403,7 +1403,7 @@ fn native_packages() {
         return;
     }
     let host = env!("ROK_HOST");
-    let apple = host.contains("-apple-");
+    let apple = rokc_target::TargetSpec::host().object_format == rokc_target::ObjectFormat::MachO;
     let root = scratch("native");
     let home = root.join("home");
     let index = root.join("index");

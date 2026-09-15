@@ -289,6 +289,10 @@ tls_slots! {
     // Not an 803 slot: the head of this thread's list of running static
     // initializers (`rokr::thread`), null = none.
     static_inits => rokr_tls_static_inits_addr, "{p}", "{pa}";
+    // Not an 803 slot: the locks this thread holds outside the task
+    // executor (`rokr_gc::world::note_lock`), a malloc'd record, null =
+    // none yet.
+    held_locks => rokr_tls_held_locks_addr, "{p}", "{pa}";
 }
 
 /// Address of this thread's `rok_tls_stack_guard` (`[lo, hi)`).
@@ -344,6 +348,7 @@ pub fn thread_init() {
         slot::worker_id().cast::<u64>().write(new_worker_id());
         slot::task_worker().cast::<usize>().write(0);
         slot::task_lane().cast::<usize>().write(0);
+        slot::held_locks().cast::<usize>().write(0);
     }
 }
 
@@ -378,6 +383,12 @@ pub fn task_worker() -> *mut usize {
 #[allow(clippy::cast_ptr_alignment)] // pointer-aligned slot
 pub fn static_inits() -> *mut usize {
     slot::static_inits().cast()
+}
+
+/// Address of this thread's `rok_tls_held_locks`.
+#[allow(clippy::cast_ptr_alignment)] // pointer-aligned slot
+pub fn held_locks() -> *mut usize {
+    slot::held_locks().cast()
 }
 
 /// Address of this thread's `rok_tls_task_lane`.

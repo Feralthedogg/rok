@@ -11,6 +11,7 @@ rokc_core = { workspace = true }
 rokc_diagnostic = { workspace = true }
 rokc_hir = { workspace = true }
 rokc_ir_common = { workspace = true }
+rokc_target = { workspace = true }
 
 [lints]
 workspace = true

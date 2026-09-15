@@ -59,11 +59,8 @@ pub struct Output {
 #[must_use]
 pub fn unsupported(module: &MirModule) -> Option<String> {
     let t = &module.target;
-    if !matches!(
-        (t.arch.as_str(), t.os.as_str()),
-        ("aarch64" | "x86_64", "macos" | "linux" | "windows")
-    ) {
-        return Some(format!("no native backend for {}-{}", t.arch, t.os));
+    if !t.native_backend {
+        return Some(format!("no native backend for {}", t.name));
     }
     let mlir = module.functions.iter().any(|f| {
         f.locals.iter().any(|l| matches!(l.ty, MirTy::Mlir(_)))

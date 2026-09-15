@@ -22,6 +22,7 @@ rokc_lexer = { workspace = true }
 rokc_llvm = { workspace = true }
 rokc_parser = { workspace = true }
 rokc_rokon = { workspace = true }
+rokc_target = { workspace = true }
 
 [lints]
 workspace = true

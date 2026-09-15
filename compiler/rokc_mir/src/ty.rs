@@ -111,8 +111,39 @@ pub fn lower_ty(ty: &HirTy, module: &HirModule, target: &Target) -> MirTy {
 /// that says it all: a tagged sum's variants, a `GcBuf`'s elements.
 #[must_use]
 pub fn debug_ty(ty: &HirTy, module: &HirModule, target: &Target) -> Option<DebugTy> {
+    describe(ty, module, target, true)
+}
+
+/// The variants of [`DebugTy::Any`]: each type stored into an `any` by
+/// its stored tag. The `any`s inside them are plain words (a variant
+/// part over itself would never end).
+#[must_use]
+pub fn any_variants(module: &HirModule, target: &Target) -> Vec<(u32, String, DebugTy)> {
+    module
+        .any_tags
+        .iter()
+        .filter(|(t, _)| !matches!(t, HirTy::AnyTrait(_)))
+        .map(|(t, tag)| {
+            let mir = lower_ty(t, module, target);
+            let d = describe(t, module, target, false).unwrap_or_else(|| DebugTy::Mir(mir.clone()));
+            if target.any_inline(&mir) {
+                (*tag, debug_name(t, module), d)
+            } else {
+                (
+                    tag | crate::gc_abi::ANY_BOXED,
+                    debug_name(t, module),
+                    DebugTy::Boxed(Box::new(d)),
+                )
+            }
+        })
+        .collect()
+}
+
+/// [`debug_ty`]; `any`: an `any` is [`DebugTy::Any`].
+fn describe(ty: &HirTy, module: &HirModule, target: &Target, any: bool) -> Option<DebugTy> {
     let of = |t: &HirTy| {
-        debug_ty(t, module, target).unwrap_or_else(|| DebugTy::Mir(lower_ty(t, module, target)))
+        describe(t, module, target, any)
+            .unwrap_or_else(|| DebugTy::Mir(lower_ty(t, module, target)))
     };
     // Every variant, those without data too (their payload `()`), so a
     // debugger names each value's case.
@@ -120,6 +151,7 @@ pub fn debug_ty(ty: &HirTy, module: &HirModule, target: &Target) -> Option<Debug
         HirTy::GcBuf(t) => {
             return Some(DebugTy::Buf(debug_name(ty, module), Box::new(of(t))));
         }
+        HirTy::AnyTrait(_) if any => return Some(DebugTy::Any),
         HirTy::Sum(parts) => (0u32..)
             .zip(parts)
             .map(|(i, v)| (sum_tag(ty, i), debug_name(v, module), Some(v)))
@@ -337,7 +369,7 @@ mod tests {
     }
 
     fn x64() -> Target {
-        Target::new(Some("x86_64-unknown-linux-gnu"))
+        Target::builtin("x86_64-unknown-linux-gnu")
     }
 
     #[test]
@@ -421,7 +453,7 @@ mod tests {
     #[test]
     fn unions_follow_the_pointer_width() {
         // `str | i64` on a 32-bit target: an 8-byte `str`, 4-aligned.
-        let t = Target::new(Some("i686-unknown-linux-gnu"));
+        let t = Target::builtin("i686-unknown-linux-gnu");
         let vs = tagged(&[p(PrimTy::Str), p(PrimTy::I64)]);
         assert_eq!(unify_payload(&vs, &t), Some(MirTy::Union(vs, 2)));
     }

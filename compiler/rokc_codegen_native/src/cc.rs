@@ -57,7 +57,7 @@ pub const fn prim_k(p: PrimTy, pw: u32) -> K {
 /// The scalar kind of `ty` when it is one (`None`: an aggregate, `str`,
 /// `()`).
 #[must_use]
-pub const fn scalar_k(ty: &MirTy, t: &Target) -> Option<K> {
+pub fn scalar_k(ty: &MirTy, t: &Target) -> Option<K> {
     let word = if t.pointer_width == 32 {
         K::I32
     } else {
@@ -523,7 +523,7 @@ mod tests {
     use super::*;
 
     fn t() -> Target {
-        Target::new(Some("arm64-apple-macosx"))
+        Target::builtin("aarch64-apple-darwin")
     }
 
     /// Checked against `llc -global-isel=0 -mtriple=arm64-apple-macosx`
@@ -597,7 +597,7 @@ mod tests {
     /// (in `rcx`, so the arguments start at the second position).
     #[test]
     fn win64_matches_llvm() {
-        let t = Target::new(Some("x86_64-pc-windows-msvc"));
+        let t = Target::builtin("x86_64-pc-windows-msvc");
         let s = |ty: &MirTy| shape(ty, &t);
         let str_ = s(&MirTy::Prim(PrimTy::Str));
         let ps = [
@@ -629,7 +629,7 @@ mod tests {
     /// register (`CC_AArch64_Win64_VarArg`).
     #[test]
     fn win_arm64_variadic_floats_in_integer_registers() {
-        let t = Target::new(Some("aarch64-pc-windows-msvc"));
+        let t = Target::builtin("aarch64-pc-windows-msvc");
         let ps = [
             shape(&MirTy::Prim(PrimTy::F64), &t),
             shape(&MirTy::Prim(PrimTy::F64), &t),

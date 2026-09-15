@@ -21,6 +21,7 @@ path = "src/bin/rokls.rs"
 rokc_core = { workspace = true }
 rokc_diagnostic = { workspace = true }
 rokc_rokon = { workspace = true }
+rokc_target = { workspace = true }
 
 [lints]
 workspace = true

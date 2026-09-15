@@ -37,9 +37,9 @@ pub struct HirInput {
     /// dependency's name reaches it from any module.
     pub packages: Vec<String>,
     /// The dependency package this build compiles as a prebuilt library
-    /// (`lib<name>.a` + `<name>.rhir`): every body of it is lowered.
+    /// (`lib<name>.a` + `<name>.rokhir`): every body of it is lowered.
     pub lib: Option<String>,
-    /// Packages loaded from RHIR (spec 904): their body-less functions
+    /// Packages loaded from ROKHIR (spec 904): their body-less functions
     /// are declarations of the symbols in their archives.
     pub prebuilt: Vec<String>,
     /// Lower (and so check) every library body, reached or not
@@ -96,12 +96,15 @@ pub struct HirModule {
     /// Every type-like item (struct, enum, union, alias, trait) by full
     /// name: its visibility (`type_visible`).
     pub type_visibility: std::collections::HashMap<String, rokc_core::Visibility>,
-    /// A prebuilt-library build's `any` seeds for its RHIR: `(module,
+    /// A prebuilt-library build's `any` seeds for its ROKHIR: `(module,
     /// rok source)` (see `lower::expr::any_link`).
     pub any_seeds: Vec<(String, String)>,
     /// The types this program stores into `any` slots that source can
     /// name, as written (the REPL seeds later cells with them).
     pub any_types: Vec<String>,
+    /// Every concrete type stored into an `any` slot, with its type tag
+    /// (`-g` describes an `any` by them).
+    pub any_tags: Vec<(HirTy, u32)>,
 }
 
 #[derive(Clone, Debug)]
@@ -268,6 +271,9 @@ pub struct HirLocal {
     pub id: LocalId,
     pub name: Option<String>,
     pub ty: HirTy,
+    /// A `[ref]`-captured variable: the local holds its one-element
+    /// `GcBuf` cell (`ty`), shared with the closures.
+    pub boxed: bool,
 }
 
 #[derive(Clone, Debug)]

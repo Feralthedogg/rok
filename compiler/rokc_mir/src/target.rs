@@ -18,48 +18,12 @@ pub enum GcSlot {
     Sum(u32, Vec<(u32, Vec<GcSlot>)>),
 }
 
-/// Platform C calling convention for aggregates (spec 8.6.3).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CAbi {
-    Aarch64,
-    X86_64SysV,
-    X86_64Win,
-    /// i386 System V (cdecl).
-    X86SysV,
-    /// Windows x86 (MSVC cdecl).
-    X86Win,
-    /// 32-bit ARM AAPCS, hard-float variant (`*eabihf`).
-    ArmHf,
-    /// The WebAssembly C ABI (clang's): a one-scalar aggregate as that
-    /// scalar, others by reference / `sret`.
-    Wasm32,
-    /// Aggregates cannot cross the C boundary.
-    Other,
-}
+pub use rokc_target::{CAbi, StackProbes, TargetSpec};
 
-impl CAbi {
-    /// A by-value C struct of two words (a rok `str`) goes by reference
-    /// and comes back through `sret`.
-    #[must_use]
-    pub const fn pair_by_ref(self) -> bool {
-        matches!(self, Self::X86_64Win | Self::Wasm32)
-    }
-}
-
+/// The target (its spec) and what layout needs of the program.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Target {
-    /// LLVM triple from `--target`; `None` is the host.
-    pub triple: Option<String>,
-    pub pointer_width: u32,
-    /// ABI alignment of `i64` / `u64` / `f64`: 4 under the i386 System V ABI.
-    pub wide_align: u32,
-    pub c_abi: CAbi,
-    /// `target_os` / `target_arch` cfg values (spec 6.3.2).
-    pub os: String,
-    pub arch: String,
-    /// LLVM `target datalayout`, filled by the driver when the toolchain
-    /// can tell (needed only to emit LLVM IR).
-    pub data_layout: Option<String>,
+    pub spec: std::sync::Arc<TargetSpec>,
     /// `#[repr(..)]` of the structs that have one, by `StructId` (MIR
     /// lowering fills it from the HIR module).
     pub reprs: std::sync::Arc<std::collections::BTreeMap<u32, rokc_hir::Repr>>,
@@ -67,65 +31,30 @@ pub struct Target {
 
 impl Default for Target {
     fn default() -> Self {
-        Self::new(None)
+        Self::new(TargetSpec::host().clone())
+    }
+}
+
+impl std::ops::Deref for Target {
+    type Target = TargetSpec;
+    fn deref(&self) -> &TargetSpec {
+        &self.spec
     }
 }
 
 impl Target {
-    /// The target of an LLVM triple; `None` is the host rokc runs on.
     #[must_use]
-    pub fn new(triple: Option<&str>) -> Self {
-        let host_arch = if cfg!(target_arch = "aarch64") {
-            "aarch64"
-        } else if cfg!(target_arch = "x86_64") {
-            "x86_64"
-        } else if cfg!(target_arch = "x86") {
-            "x86"
-        } else {
-            "unknown"
-        };
-        let host_os = if cfg!(target_os = "macos") {
-            "macos"
-        } else if cfg!(target_os = "linux") {
-            "linux"
-        } else if cfg!(windows) {
-            "windows"
-        } else {
-            "unknown"
-        };
-        let (arch, os) = triple.map_or((host_arch, host_os), |t| (arch_of(t), os_of(t)));
-        let pointer_width = if matches!(
-            arch,
-            "x86" | "arm" | "riscv32" | "wasm32" | "mips" | "powerpc" | "sparc"
-        ) {
-            32
-        } else {
-            64
-        };
-        let c_abi = match arch {
-            "aarch64" => CAbi::Aarch64,
-            "x86_64" if os == "windows" => CAbi::X86_64Win,
-            "x86_64" => CAbi::X86_64SysV,
-            "x86" if os == "windows" => CAbi::X86Win,
-            "x86" => CAbi::X86SysV,
-            "arm" if triple.is_some_and(|t| t.ends_with("eabihf")) => CAbi::ArmHf,
-            "wasm32" => CAbi::Wasm32,
-            _ => CAbi::Other,
-        };
+    pub fn new(spec: TargetSpec) -> Self {
         Self {
-            triple: triple.map(str::to_owned),
-            pointer_width,
-            wide_align: if arch == "x86" && os != "windows" {
-                4
-            } else {
-                8
-            },
-            c_abi,
-            os: os.to_owned(),
-            arch: arch.to_owned(),
-            data_layout: None,
+            spec: std::sync::Arc::new(spec),
             reprs: std::sync::Arc::default(),
         }
+    }
+
+    /// Built-in target `name` (tests).
+    #[must_use]
+    pub fn builtin(name: &str) -> Self {
+        Self::new(TargetSpec::builtin(name).unwrap_or_else(|| panic!("no target {name}")))
     }
 
     /// `#[repr(..)]` of struct `id` (the default without one).
@@ -181,16 +110,6 @@ impl Target {
             MirTy::Tuple(ps) => ps.iter().any(|p| self.explicit_layout(p)),
             MirTy::Array(e, _) => self.explicit_layout(e),
             _ => false,
-        }
-    }
-
-    /// `target_family` cfg value.
-    #[must_use]
-    pub fn family(&self) -> &'static str {
-        match (self.os.as_str(), self.arch.as_str()) {
-            ("windows", _) => "windows",
-            (_, "wasm32" | "wasm64") => "wasm",
-            _ => "unix",
         }
     }
 
@@ -331,46 +250,6 @@ impl Target {
     }
 }
 
-fn arch_of(triple: &str) -> &'static str {
-    let a = triple.split('-').next().unwrap_or("");
-    match a {
-        "x86_64" | "amd64" => "x86_64",
-        "aarch64" | "arm64" => "aarch64",
-        "i386" | "i486" | "i586" | "i686" => "x86",
-        "riscv64" | "riscv64gc" => "riscv64",
-        "riscv32" | "riscv32imac" | "riscv32imc" => "riscv32",
-        "wasm32" => "wasm32",
-        "wasm64" => "wasm64",
-        "mips" | "mipsel" => "mips",
-        "powerpc" => "powerpc",
-        "powerpc64" | "powerpc64le" => "powerpc64",
-        "sparc" => "sparc",
-        _ if a.starts_with("arm") || a.starts_with("thumb") => "arm",
-        _ => "unknown",
-    }
-}
-
-fn os_of(triple: &str) -> &'static str {
-    let has = |s: &str| triple.split('-').any(|p| p.starts_with(s));
-    if has("darwin") || has("macos") {
-        "macos"
-    } else if has("ios") {
-        "ios"
-    } else if has("linux") {
-        "linux"
-    } else if has("windows") || has("win32") || has("mingw") {
-        "windows"
-    } else if has("freebsd") {
-        "freebsd"
-    } else if has("wasi") {
-        "wasi"
-    } else {
-        // Spec 6.3.2: no operating system (`wasm32-unknown-unknown`, bare
-        // metal).
-        "none"
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,47 +258,12 @@ mod tests {
         MirTy::Prim(t)
     }
 
-    #[test]
-    fn triples() {
-        let t = Target::new(Some("i686-unknown-linux-gnu"));
-        assert_eq!(
-            (t.pointer_width, t.wide_align, t.c_abi),
-            (32, 4, CAbi::X86SysV)
-        );
-        assert_eq!((t.os.as_str(), t.arch.as_str()), ("linux", "x86"));
-        let t = Target::new(Some("i686-pc-windows-msvc"));
-        assert_eq!(
-            (t.pointer_width, t.wide_align, t.c_abi),
-            (32, 8, CAbi::X86Win)
-        );
-        let t = Target::new(Some("armv7-unknown-linux-gnueabihf"));
-        assert_eq!(
-            (t.pointer_width, t.wide_align, t.c_abi),
-            (32, 8, CAbi::ArmHf)
-        );
-        assert_eq!(t.arch, "arm");
-        let t = Target::new(Some("x86_64-pc-windows-msvc"));
-        assert_eq!((t.pointer_width, t.c_abi), (64, CAbi::X86_64Win));
-        assert_eq!(t.family(), "windows");
-        let t = Target::new(Some("arm64-apple-macosx14.0"));
-        assert_eq!((t.os.as_str(), t.c_abi), ("macos", CAbi::Aarch64));
-        assert_eq!(
-            Target::new(Some("x86_64-apple-darwin")).c_abi,
-            CAbi::X86_64SysV
-        );
-        let t = Target::new(Some("wasm32-unknown-unknown"));
-        assert_eq!((t.pointer_width, t.family()), (32, "wasm"));
-        assert_eq!((t.c_abi, t.os.as_str()), (CAbi::Wasm32, "none"));
-        let t = Target::new(Some("wasm32-wasi"));
-        assert_eq!((t.os.as_str(), t.arch.as_str()), ("wasi", "wasm32"));
-    }
-
     /// `struct { int; long long; double; }` as clang lays it out:
     /// 20 / 4 on i686 Linux, 24 / 8 on i686 Windows, armv7 and wasm32.
     #[test]
     fn wide_alignment_follows_the_target() {
         let t = MirTy::Tuple(vec![p(PrimTy::I32), p(PrimTy::I64), p(PrimTy::F64)]);
-        let at = |triple| Target::new(Some(triple)).size_align(&t);
+        let at = |triple| Target::builtin(triple).size_align(&t);
         assert_eq!(at("i686-unknown-linux-gnu"), (20, 4));
         assert_eq!(at("i686-pc-windows-msvc"), (24, 8));
         assert_eq!(at("armv7-unknown-linux-gnueabihf"), (24, 8));
@@ -428,7 +272,7 @@ mod tests {
 
     #[test]
     fn c_layout_sizes() {
-        let t = Target::new(Some("x86_64-unknown-linux-gnu"));
+        let t = Target::builtin("x86_64-unknown-linux-gnu");
         assert_eq!(t.size_align(&MirTy::Unit), (0, 1));
         assert_eq!(t.size_align(&p(PrimTy::Bool)), (1, 1));
         assert_eq!(t.size_align(&p(PrimTy::Str)), (16, 8));
@@ -439,21 +283,21 @@ mod tests {
             t.size_align(&MirTy::Array(Box::new(p(PrimTy::U16)), 3)),
             (6, 2)
         );
-        let w32 = Target::new(Some("wasm32-unknown-unknown"));
+        let w32 = Target::builtin("wasm32-unknown-unknown");
         assert_eq!(w32.size_align(&p(PrimTy::Str)), (8, 4));
     }
 
     #[test]
     fn any_inline_follows_the_pointer_width() {
         let i64_ = p(PrimTy::I64);
-        assert!(Target::new(Some("x86_64-unknown-linux-gnu")).any_inline(&i64_));
-        assert!(!Target::new(Some("i686-unknown-linux-gnu")).any_inline(&i64_));
-        assert!(Target::new(Some("i686-unknown-linux-gnu")).any_inline(&p(PrimTy::I32)));
+        assert!(Target::builtin("x86_64-unknown-linux-gnu").any_inline(&i64_));
+        assert!(!Target::builtin("i686-unknown-linux-gnu").any_inline(&i64_));
+        assert!(Target::builtin("i686-unknown-linux-gnu").any_inline(&p(PrimTy::I32)));
     }
 
     #[test]
     fn roots_cover_the_any_payload_word() {
-        let t = Target::new(Some("x86_64-unknown-linux-gnu"));
+        let t = Target::builtin("x86_64-unknown-linux-gnu");
         let ty = MirTy::Tuple(vec![p(PrimTy::Str), crate::any_ty()]);
         let mut words = Vec::new();
         t.gc_offsets(&ty, 0, &mut words);
@@ -469,7 +313,7 @@ mod tests {
     /// union; a bare union is ambiguous words.
     #[test]
     fn sums_scan_by_variant() {
-        let t = Target::new(Some("x86_64-unknown-linux-gnu"));
+        let t = Target::builtin("x86_64-unknown-linux-gnu");
         let pair = MirTy::Tuple(vec![p(PrimTy::I64), MirTy::GcRef]);
         let vs = vec![(0, p(PrimTy::Str)), (1, pair), (2, p(PrimTy::I64))];
         let union = MirTy::Union(vs, 2);

@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use rokc_interface::{
     BuildOptions, CompileResult, DepBuild, EmitKind, Fingerprint, Package, Profile, Session,
-    TempDir, print_rendered, render, report,
+    TargetSpec, TempDir, print_rendered, render, report,
 };
 use rokc_tools::lint::Level;
 
@@ -24,9 +24,9 @@ usage: rokc [global options] <command> [options] [args]
 
 commands:
   build [path]           build the package (executable target/<profile>/<name>,
-                         or target/<profile>/lib<name>.a + <name>.rhir for a
+                         or target/<profile>/lib<name>.a + <name>.rokhir for a
                          `lib.rok` package; <profile> is debug, or release at
-                         -O2+ / -Os; a --target build goes under target/<triple>/)
+                         -O2+ / -Os; a --target build goes under target/<target>/)
   run [path] [-- args]   build, then run; args after `--` are forwarded
   test [path] [filter]   build and run the `#[test]` functions (filter: regex
                          with ^ $ . * + ?, or a substring)
@@ -49,7 +49,7 @@ commands:
                          dependencies) in target/doc/
   clean [path]           remove the package's target/
   demangle <symbol>...   decode `_Y` symbols
-  rhir-text <file>       dump a prebuilt library's RHIR (<name>.rhir or
+  rokhir-text <file>       dump a prebuilt library's ROKHIR (<name>.rokhir or
                          the lib<name>.a beside it)
   inspect <file>         a prebuilt library's package, exports, generic
                          items and archive members
@@ -88,7 +88,8 @@ build options:
                                expanded: each meta expansion's output)
                                (written to target/<profile>/build/<name>.<ext>
                                unless -o)
-  --target=<triple>            LLVM target triple
+  --target=<target>            a built-in target (--print target-list) or
+                               a custom one's <name>.rokon file
   --release                    optimized build (same as -O2)
   -O0 | -O1 | -O2 | -O3 | -Os  optimization level (default -O0)
   -C overflow-checks[=yes|no]  integer overflow panics (default: on at -O0)
@@ -107,6 +108,8 @@ build options:
   --cfg <flag | key=value>     #[cfg] flag (repeatable)
   --print cfg                  print the active cfg (target keys, --cfg,
                                debug_assertions below -O1) and exit
+  --print target-list          print the built-in targets and exit
+  --print target-spec          print the --target's spec as ROKON and exit
   --load-mlir-plugin <path|name>
                                MLIR dialect plugin (a name is searched
                                in $ROK_MLIR_PLUGIN_PATH; repeatable)
@@ -128,7 +131,7 @@ build options:
   --extern <name>=<path>       dependency package: its directory or `lib.rok`
                                (prebuilt into target/<profile>/deps/ first,
                                each after the ones before it), or a prebuilt
-                               <name>.rhir / lib<name>.a; importable as
+                               <name>.rokhir / lib<name>.a; importable as
                                `use name::..` (repeatable; `rok` passes these)
   --name <name>                the package name (default: its directory's;
                                `rok` passes rok.rokon's `name`); a
@@ -176,10 +179,14 @@ struct Args {
     name: Option<String>,
     target_dir: Option<PathBuf>,
     cfg: Vec<String>,
-    /// `--print <what>`: print it and exit (`cfg`).
+    /// `--print <what>`: print it and exit (`cfg`, `target-list`,
+    /// `target-spec`).
     print: Option<String>,
-    /// `--target`: an LLVM triple; `None` is the host.
+    /// `--target`: a built-in target or a `<name>.rokon` file; `None`
+    /// is the host.
     target: Option<String>,
+    /// The target `--target` names (set once the arguments are read).
+    spec: Option<TargetSpec>,
     opts: BuildOptions,
     run_args: Vec<String>,
     verbose: u8,
@@ -209,6 +216,14 @@ struct Args {
     opt_set: bool,
     /// The prebuilt standard library this build links (`prebuild`).
     std_prebuilt: Option<PathBuf>,
+}
+
+impl Args {
+    const fn spec(&self) -> &TargetSpec {
+        self.spec
+            .as_ref()
+            .expect("the target is resolved with the arguments")
+    }
 }
 
 /// The version, and the commit and its date when built from git.
@@ -437,6 +452,7 @@ fn parse_args(raw: Vec<String>) -> Args {
     if a.cmd.is_empty() && a.print.is_none() {
         usage_error("missing command");
     }
+    a.spec = Some(TargetSpec::resolve(a.target.as_deref()).unwrap_or_else(|e| fail(&e)));
     if let Some(g) = a.cs_generate.take() {
         let Profile::Use(p) = &a.opts.profile else {
             usage_error("-C cs-profile-generate needs -C profile-use=<first stage's profile>");
@@ -459,7 +475,7 @@ fn parse_lib(v: &str) -> (String, bool) {
 }
 
 /// `--extern name=path` (spec 902.3). The path is the dependency's
-/// package directory or its `lib.rok`, or a prebuilt `<name>.rhir` /
+/// package directory or its `lib.rok`, or a prebuilt `<name>.rokhir` /
 /// `lib<name>.a` (spec 904).
 fn parse_extern(v: &str) -> (String, PathBuf) {
     let Some((name, path)) = v.split_once('=') else {
@@ -477,9 +493,9 @@ fn parse_extern(v: &str) -> (String, PathBuf) {
         usage_error(&format!("`--extern`: `{name}` is not a package name"));
     }
     let path = PathBuf::from(path);
-    let prebuilt = path.extension().is_some_and(|e| e == "a" || e == "rhir");
+    let prebuilt = path.extension().is_some_and(|e| e == "a" || e == "rokhir");
     let root = if prebuilt {
-        rokc_interface::rhir::companions(&path).0
+        rokc_interface::rokhir::companions(&path).0
     } else if path.is_dir() {
         path.join("lib.rok")
     } else {
@@ -523,10 +539,23 @@ fn real_main() {
         std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
     });
     rokc_interface::set_report_style(a.json, color);
-    if let Some(what) = &a.print {
-        if what != "cfg" {
-            usage_error(&format!("`--print` takes `cfg`, not `{what}`"));
+    match a.print.as_deref() {
+        None | Some("cfg") => {}
+        Some("target-list") => {
+            for t in rokc_interface::BUILTIN_TARGETS {
+                println!("{t}");
+            }
+            return;
         }
+        Some("target-spec") => {
+            println!("{}", a.spec().to_rokon());
+            return;
+        }
+        Some(what) => usage_error(&format!(
+            "`--print` takes `cfg`, `target-list` or `target-spec`, not `{what}`"
+        )),
+    }
+    if a.print.is_some() {
         let mut session = Session::new();
         for c in &a.cfg {
             session.add_cfg(c.clone());
@@ -534,7 +563,7 @@ fn real_main() {
         if a.opts.opt_level == "0" {
             session.add_cfg("debug_assertions".to_owned());
         }
-        session.set_target(a.target.as_deref());
+        session.set_target(a.spec());
         for line in session.cfg_lines() {
             println!("{line}");
         }
@@ -617,18 +646,21 @@ fn real_main() {
         }
         "demangle" => cmd_demangle(&a),
         "profdata" => cmd_profdata(&a),
-        "rhir-text" | "inspect" => {
+        "rokhir-text" | "inspect" => {
             let [file] = a.positional.as_slice() else {
-                usage_error(&format!("usage: rokc {} <file.rhir | lib<name>.a>", a.cmd));
+                usage_error(&format!(
+                    "usage: rokc {} <file.rokhir | lib<name>.a>",
+                    a.cmd
+                ));
             };
             let path = Path::new(file);
             let out = if a.cmd == "inspect" {
-                rokc_interface::rhir::inspect(path)
+                rokc_interface::rokhir::inspect(path)
             } else {
-                let rhir = rokc_interface::rhir::companions(path).0;
-                std::fs::read(&rhir)
-                    .map_err(|e| format!("{}: {e}", rhir.display()))
-                    .and_then(|b| rokc_interface::rhir::Rhir::decode(&b))
+                let rokhir = rokc_interface::rokhir::companions(path).0;
+                std::fs::read(&rokhir)
+                    .map_err(|e| format!("{}: {e}", rokhir.display()))
+                    .and_then(|b| rokc_interface::rokhir::Rokhir::decode(&b))
                     .map(|r| r.text())
             };
             print!("{}", out.unwrap_or_else(|e| fail(&e)));
@@ -665,21 +697,23 @@ fn with_defaults(mut a: Args) -> Args {
         a.cmd.as_str(),
         "run" | "test" | "bench" | "repl" | "jupyter"
     ) || (a.cmd == "build" && a.emit.is_empty());
-    let host = env!("ROK_HOST");
-    let triple = a.target.clone().unwrap_or_else(|| host.to_owned());
-    let dir = sys.targets.join(&triple);
+    let t = a.spec().clone();
+    let name = &t.name;
+    // The host's runtime is the sysroot's own; another target's (and its
+    // C library, when the toolchain ships one) is in its directory.
+    let dir = sys.targets.join(name);
     let missing = || {
         format!(
-            "no runtime for {triple}: {} is missing (this toolchain does not ship the \
-             target; in the repository, run targets/build.sh {triple})",
+            "no runtime for {name}: {} is missing (this toolchain does not ship the \
+             target; in the repository, run targets/build.sh {name})",
             dir.display()
         )
     };
     if a.opts.rokr == "rokr" {
-        let rokr = if triple == host {
+        let rokr = if t == *TargetSpec::host() {
             sys.rokr
         } else {
-            Some(dir.join(rokc_core::runtime_lib(triple.contains("-windows"))))
+            Some(dir.join(t.runtime_lib()))
                 .filter(|p| p.is_file())
                 .ok_or_else(missing)
         };
@@ -689,7 +723,7 @@ fn with_defaults(mut a: Args) -> Args {
             Err(_) => {}
         }
     }
-    if triple.contains("-linux") || triple.starts_with("wasm32") {
+    if t.libc.shipped() {
         if dir.is_dir() {
             a.opts.libc = Some(dir.clone());
         } else if links {
@@ -712,21 +746,16 @@ fn with_defaults(mut a: Args) -> Args {
                 p.used().unwrap_or_else(|| Path::new("")).display()
             ));
         }
-        p if p.generates() && links && triple == "wasm32-unknown-unknown" => fail(&format!(
-            "-C profile-generate is not supported for {triple}: a program has no file system \
-             to write its profile to (build for wasm32-wasi)"
+        p if p.generates() && links && t.profile_runtime.is_empty() => fail(&format!(
+            "-C profile-generate is not supported for {name}: the target has no profile runtime"
         )),
         p if p.generates() && links => {
-            let rt = dir.join(if triple.contains("-windows") {
-                "clang_rt.profile.lib"
-            } else {
-                "libclang_rt.profile.a"
-            });
+            let rt = dir.join(&t.profile_runtime);
             if !rt.is_file() {
                 fail(&format!(
-                    "-C profile-generate: no profile runtime for {triple}: {} is missing (this \
+                    "-C profile-generate: no profile runtime for {name}: {} is missing (this \
                      toolchain does not ship it; in the repository, run targets/build.sh \
-                     {triple})",
+                     {name})",
                     rt.display()
                 ));
             }
@@ -758,7 +787,7 @@ fn create_dir(dir: &Path) {
 }
 
 /// Prebuild the source `--extern`s into `<out dir>/deps` and use their
-/// RHIRs; the deps directory.
+/// ROKHIRs; the deps directory.
 fn prebuild(a: &mut Args, pkg: Option<&Package>) -> Result<PathBuf, String> {
     let dir = out_dir(a, pkg).join("deps");
     // A native build links the standard library prebuilt.
@@ -767,7 +796,7 @@ fn prebuild(a: &mut Args, pkg: Option<&Package>) -> Result<PathBuf, String> {
             bootstrap: &a.bootstrap,
             cfg: &a.cfg,
             opts: &a.opts,
-            target: a.target.as_deref(),
+            target: a.spec(),
             test: matches!(a.cmd.as_str(), "test" | "bench"),
         });
         if a.verbose > 0 && !a.quiet {
@@ -781,7 +810,7 @@ fn prebuild(a: &mut Args, pkg: Option<&Package>) -> Result<PathBuf, String> {
         bootstrap: &a.bootstrap,
         cfg: &a.cfg,
         opts: &a.opts,
-        target: a.target.as_deref(),
+        target: a.spec(),
         dir: &dir,
         quiet: a.quiet,
         std: a.std_prebuilt.as_deref(),
@@ -818,7 +847,7 @@ fn session(a: &Args, pkg: &Package) -> Session {
         session.add_extern(n.clone(), p.clone());
     }
     session.set_anonymous(pkg.anonymous);
-    session.set_target(a.target.as_deref());
+    session.set_target(a.spec());
     session.set_std_prebuilt(a.std_prebuilt.clone());
     session
 }
@@ -844,7 +873,7 @@ fn compile(a: &Args, pkg: &Package, mode: Mode) -> (CompileResult, String, Insta
         pkg,
     );
     let mut session = session(a, pkg);
-    // A library's `build` is a prebuilt library: `lib<name>.a` + RHIR.
+    // A library's `build` is a prebuilt library: `lib<name>.a` + ROKHIR.
     if pkg.lib && matches!(a.cmd.as_str(), "build" | "emit") {
         session.set_lib_name(Some(lib_name(a, pkg)));
     }
@@ -908,7 +937,7 @@ fn fail_on<T>(r: Result<T, rokc_interface::RokDiagnostic>) -> T {
     })
 }
 
-/// Cargo-like output directory: `<target>/[<triple>/]<profile>/`, the
+/// Cargo-like output directory: `<target>/[<target name>/]<profile>/`, the
 /// profile `release` at `-O2` and above or `-Os`, else `debug`. Without a
 /// package, `<target>` is the system temp directory's `rokc-target/`.
 fn out_dir(a: &Args, pkg: Option<&Package>) -> PathBuf {
@@ -918,29 +947,21 @@ fn out_dir(a: &Args, pkg: Option<&Package>) -> PathBuf {
         .or_else(|| pkg.map(Package::target_dir))
         .or_else(|| std::env::var_os("ROKC_TARGET_DIR").map(PathBuf::from))
         .unwrap_or_else(|| std::env::temp_dir().join("rokc-target"));
-    if let Some(t) = &a.target {
-        dir.push(t);
+    if a.target.is_some() {
+        dir.push(&a.spec().name);
     }
     let release = matches!(a.opts.opt_level.as_str(), "2" | "3" | "s");
     dir.join(if release { "release" } else { "debug" })
 }
 
-/// The file name of executable `name` for the build's target: `.exe` on
-/// Windows, `.wasm` for wasm32.
+/// The file name of executable `name` for the build's target.
 fn exe_file(a: &Args, name: &str) -> String {
-    let t = a.target.as_deref().unwrap_or("");
-    if t.contains("-windows") || (t.is_empty() && cfg!(windows)) {
-        format!("{name}.exe")
-    } else if t.starts_with("wasm32-") {
-        format!("{name}.wasm")
-    } else {
-        name.to_owned()
-    }
+    format!("{name}{}", a.spec().exe_suffix)
 }
 
 /// Layout: `target/<profile>/<name>` (executable, `<name>.exe` for Windows,
 /// `<name>.wasm` for wasm32),
-/// `target/<profile>/lib<name>.a` + `<name>.rhir` (library),
+/// `target/<profile>/lib<name>.a` + `<name>.rokhir` (library),
 /// `target/<profile>/build/<name>.<ext>` (`--emit`).
 fn cmd_build(mut a: Args) {
     let pkg = discover_arg(&a);
@@ -1015,6 +1036,7 @@ fn build_fresh(a: &Args, pkg: &Package, out: &Path, link: impl FnOnce(&Args, &Co
 fn fingerprint(a: &Args, pkg: &Package, out: &Path) -> Fingerprint {
     let mut words = vec![
         format!("{:?}", a.opts),
+        format!("target {:016x}", a.spec().hash()),
         out.display().to_string(),
         pkg.root.display().to_string(),
         std::env::var("PATH").unwrap_or_default(),
@@ -1038,15 +1060,15 @@ fn fingerprint(a: &Args, pkg: &Package, out: &Path) -> Fingerprint {
     }
     for (n, p) in &a.externs {
         words.push(format!("{n}={}", p.display()));
-        let (rhir, archive) = rokc_interface::rhir::companions(p);
-        inputs.push(rhir);
+        let (rokhir, archive) = rokc_interface::rokhir::companions(p);
+        inputs.push(rokhir);
         stamped.push(archive);
     }
     // An executable's shared libraries are copied beside it: a missing
     // copy rebuilds.
     stamped.extend(a.opts.runtime_files.iter().cloned());
     let also = if pkg.lib {
-        vec![rokc_interface::rhir::companions(out).0]
+        vec![rokc_interface::rokhir::companions(out).0]
     } else {
         let dir = out.parent().unwrap_or_else(|| Path::new("."));
         a.opts

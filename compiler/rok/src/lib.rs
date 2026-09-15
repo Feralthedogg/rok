@@ -547,11 +547,11 @@ fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i3
             let natives: Vec<&native::Resolved> =
                 graph.natives.iter().filter(|n| dev_too || !n.dev).collect();
             if !natives.is_empty() {
-                let triple = target_arg(post).unwrap_or(toolchain::HOST);
+                let target = rokc_target::TargetSpec::resolve(target_arg(post))?;
                 extra.extend(native::rokc_args(
                     &home(),
                     &natives,
-                    triple,
+                    &target,
                     g.offline,
                     g.quiet,
                 )?);
@@ -1113,7 +1113,13 @@ fn cmd_deps(g: &Global, args: &[String]) -> Result<i32, String> {
     }
     for n in graph.natives.iter().filter(|n| dev || !n.dev) {
         println!("# native {} {}", n.entry.name, n.entry.vers);
-        for a in native::rokc_args(&home(), &[n], toolchain::HOST, g.offline, g.quiet)? {
+        for a in native::rokc_args(
+            &home(),
+            &[n],
+            rokc_target::TargetSpec::host(),
+            g.offline,
+            g.quiet,
+        )? {
             println!("{a}");
         }
     }

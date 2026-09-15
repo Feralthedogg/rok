@@ -1,6 +1,6 @@
 //! Prebuilt dependencies (spec 902.3 / 904): each source `--extern` is
-//! built once into `<deps dir>/lib<name>.a` + `<name>.rhir` and the build
-//! goes on with the RHIR. A dependency is rebuilt when its fingerprint
+//! built once into `<deps dir>/lib<name>.a` + `<name>.rokhir` and the build
+//! goes on with the ROKHIR. A dependency is rebuilt when its fingerprint
 //! changes; it sees the dependencies before it (its own, and the GC type
 //! ids to start after), so `externs` come dependencies first.
 
@@ -9,16 +9,15 @@ use std::path::{Path, PathBuf};
 use rokc_diagnostic::{print_rendered, render};
 
 use crate::fresh::Fingerprint;
-use crate::{BuildOptions, Session, rhir};
+use crate::{BuildOptions, Session, TargetSpec, rokhir};
 
 /// What dependency builds share with the build that needs them.
 pub struct DepBuild<'a> {
     pub bootstrap: &'a [PathBuf],
     pub cfg: &'a [String],
     pub opts: &'a BuildOptions,
-    /// `--target`: an LLVM triple; `None` is the host.
-    pub target: Option<&'a str>,
-    /// `target/[<triple>/]<profile>/deps`.
+    pub target: &'a TargetSpec,
+    /// `target/[<target>/]<profile>/deps`.
     pub dir: &'a Path,
     pub quiet: bool,
     /// The prebuilt standard library the build links (`prebuilt_std`).
@@ -27,21 +26,21 @@ pub struct DepBuild<'a> {
 
 impl DepBuild<'_> {
     /// `externs` with every source dependency (a `lib.rok`) replaced by
-    /// its prebuilt `<name>.rhir`; dependency errors are reported.
+    /// its prebuilt `<name>.rokhir`; dependency errors are reported.
     pub fn prebuild(
         &self,
         externs: &[(String, PathBuf)],
     ) -> Result<Vec<(String, PathBuf)>, String> {
         let mut out: Vec<(String, PathBuf)> = Vec::new();
         for (name, root) in externs {
-            if root.extension().is_some_and(|e| e == "rhir") {
+            if root.extension().is_some_and(|e| e == "rokhir") {
                 out.push((name.clone(), root.clone()));
                 continue;
             }
             std::fs::create_dir_all(self.dir)
                 .map_err(|e| format!("cannot create {}: {e}", self.dir.display()))?;
             let archive = self.dir.join(format!("lib{name}.a"));
-            let rhir = rhir::companions(&archive).0;
+            let rokhir = rokhir::companions(&archive).0;
             let fp = self.fingerprint(name, root, &archive, &out);
             if let Some(warnings) = fp.fresh() {
                 print_rendered(&warnings);
@@ -50,7 +49,7 @@ impl DepBuild<'_> {
                 let (read, warnings) = self.build(name, root, &archive, &out)?;
                 fp.save(&read, &warnings);
             }
-            out.push((name.clone(), rhir));
+            out.push((name.clone(), rokhir));
         }
         Ok(out)
     }
@@ -64,7 +63,7 @@ impl DepBuild<'_> {
     ) -> Fingerprint {
         let mut words = vec![
             format!("{:?}", self.opts),
-            format!("{:?}", self.target),
+            format!("target {:016x}", self.target.hash()),
             name.to_owned(),
         ];
         words.extend(self.cfg.iter().cloned());
@@ -81,11 +80,11 @@ impl DepBuild<'_> {
         }
         for (n, p) in before {
             words.push(format!("{n}={}", p.display()));
-            let (rhir, a) = rhir::companions(p);
-            inputs.push(rhir);
+            let (rokhir, a) = rokhir::companions(p);
+            inputs.push(rokhir);
             stamped.push(a);
         }
-        let also = vec![rhir::companions(archive).0];
+        let also = vec![rokhir::companions(archive).0];
         Fingerprint::new(archive, also, &words, &inputs, &stamped)
             .kept_in(self.dir.join(format!("{name}.fp")))
     }

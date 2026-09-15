@@ -19,11 +19,6 @@ const LLVM_VERSION: &str = "22.1.8";
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(rok_llvm)");
     println!("cargo:rerun-if-changed=src/shim.cpp");
-    // `process_triple` of the stub.
-    println!(
-        "cargo:rustc-env=ROK_LLVM_TARGET={}",
-        env::var("TARGET").unwrap_or_default()
-    );
     for v in [
         "ROK_LLVM_PREFIX",
         "ROK_LLVM_CACHE",

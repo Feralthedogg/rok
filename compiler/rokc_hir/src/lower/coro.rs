@@ -566,7 +566,7 @@ fn lower_coro_block<'a>(
             .into_iter()
             .filter_map(|name| {
                 let local = ctx.lookup(&name)?;
-                if from_closure && ctx.boxed.contains(&local) {
+                if from_closure && ctx.is_boxed(local) {
                     return Some((name, local, ctx.local_ty(local), true));
                 }
                 let ty = ctx.var_ty(local);

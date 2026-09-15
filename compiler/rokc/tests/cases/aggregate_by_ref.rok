@@ -6,6 +6,7 @@
 // 36 9
 // 4950 100
 // 527
+// 8779 133 41 132 40
 
 // Aggregates over 64 bytes go to and from a function only its module
 // calls directly by address (other calls keep spec 8.6.6: values): a
@@ -53,6 +54,16 @@ fn depth(b: Big, n: i64) -> Big {
     c
 }
 
+// Over 128 bytes, not a multiple of 8 (148): the copy's tail.
+struct Odd { b: [u8; 133]; c: [i32; 3]; }
+
+fn bump(o: Odd) -> Odd {
+    let r = o;
+    r.b[132] += 1;
+    r.c[2] += 1;
+    r
+}
+
 static TABLE: [i64; 100] = make_table();
 
 fn make_table() -> [i64; 100] {
@@ -84,5 +95,16 @@ fn main() -> i32 {
     }
     println(f"{t} {TABLE.len()}");
     println(f"{sum(a) / 248 + a[0] + clobber(z) - 7}");
+    let o = Odd { b: [0u8; 133], c: [0; 3] };
+    for i in 0..133 {
+        o.b[i] = i as u8;
+    }
+    o.c[2] = 40;
+    let q = bump(o);
+    let n = 0;
+    for i in 0..133 {
+        n += q.b[i] as i32;
+    }
+    println(f"{n} {q.b[132]} {q.c[2]} {o.b[132]} {o.c[2]}");
     return 0;
 }

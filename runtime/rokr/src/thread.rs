@@ -527,6 +527,23 @@ pub fn forget_waiters(gone: impl Fn(u64) -> bool) {
     }
 }
 
+/// Wake every thread blocked in [`wait_on`] (a wait may end spuriously:
+/// each checks its word again). After a failed REPL cell, for threads
+/// waiting on a lock the restore released.
+#[cfg(not(target_family = "wasm"))]
+pub fn wake_all_waiters() {
+    for b in &BUCKETS {
+        b.lock.lock();
+        // SAFETY: the list is ours under the lock.
+        unsafe {
+            while !(*b.head.get()).is_null() {
+                b.wake((**b.head.get()).addr, true);
+            }
+        }
+        b.lock.unlock();
+    }
+}
+
 /// Wake every thread blocked in [`wait_on`] on `w`.
 pub fn wake<W: Futex>(w: &W) {
     wake_waiters(ptr::from_ref(w) as usize, true);

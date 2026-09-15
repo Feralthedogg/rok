@@ -18,7 +18,7 @@ pub use lower::lower;
 pub use part_store::{PartStore, part_stores};
 pub use print::print_mir;
 pub use rotate::back_edges;
-pub use target::{CAbi, GcSlot, Target};
+pub use target::{CAbi, GcSlot, StackProbes, Target, TargetSpec};
 pub use ty::{ANY_STRUCT, any_ty};
 
 use rokc_core::DefId;
@@ -50,16 +50,31 @@ pub enum DebugTy {
     Sum(String, MirTy, Vec<(u32, String, DebugTy)>),
     /// A reference to a `GcBuf` object (its name) of these elements.
     Buf(String, Box<DebugTy>),
+    /// `any Tr` (`any_ty`): a variant part over [`DebugTypes::any`].
+    Any,
+    /// A reference to a GC object holding one value after its header (an
+    /// `any`'s boxed copy).
+    Boxed(Box<DebugTy>),
+    /// A `[ref]`-captured variable's cell (a local only): shown as the
+    /// value in it.
+    Cell(Box<DebugTy>),
 }
 
 impl DebugTy {
+    /// The `MirTy` of the values it describes.
+    #[must_use]
+    pub fn mir(&self) -> MirTy {
+        match self {
+            Self::Mir(m) | Self::Sum(_, m, _) => m.clone(),
+            Self::Buf(..) | Self::Boxed(_) | Self::Cell(_) => MirTy::GcRef,
+            Self::Any => crate::any_ty(),
+        }
+    }
+
     /// Whether it describes a `ty` value.
     #[must_use]
     pub fn fits(&self, ty: &MirTy) -> bool {
-        match self {
-            Self::Mir(m) | Self::Sum(_, m, _) => m == ty,
-            Self::Buf(..) => *ty == MirTy::GcRef,
-        }
+        self.mir() == *ty
     }
 }
 
@@ -70,10 +85,14 @@ pub struct DebugTypes {
     pub locals: std::collections::HashMap<(FunctionId, LocalId), DebugTy>,
     /// Every field's, by `StructId`.
     pub fields: std::collections::HashMap<u32, Vec<DebugTy>>,
+    /// The types stored into `any` slots, `(stored tag, name, payload)`:
+    /// the payload word is the value, or [`DebugTy::Boxed`] (the tag's
+    /// `ANY_BOXED` bit set).
+    pub any: Vec<(u32, String, DebugTy)>,
 }
 
 /// The packages items belong to, and how this module links with
-/// prebuilt dependencies (their `lib<name>.a` + `<name>.rhir`, 904).
+/// prebuilt dependencies (their `lib<name>.a` + `<name>.rokhir`, 904).
 #[derive(Clone, Debug, Default)]
 pub struct Link {
     /// Package hash per item-path prefix (`rok::core`, ..., `""` for the
@@ -84,7 +103,7 @@ pub struct Link {
     /// package's functions and statics are exported, the rest of the
     /// code it uses (library, instances) is a private copy.
     pub lib: Option<String>,
-    /// Packages loaded from RHIR: their code and statics live in their
+    /// Packages loaded from ROKHIR: their code and statics live in their
     /// `.a`; bodies compiled here (generics, kept bodies) are private.
     pub prebuilt: Vec<String>,
     /// Added to every GC type id: the ids below belong to the prebuilt

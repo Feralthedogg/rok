@@ -134,11 +134,19 @@ fn debug_types(module: &HirModule, functions: &[MirFunction], target: &Target) -
     let lowered: HashSet<FunctionId> = functions.iter().map(|f| f.id).collect();
     for f in module.functions.iter().filter(|f| lowered.contains(&f.id)) {
         for l in f.locals.iter().filter(|l| l.name.is_some()) {
-            if let Some(d) = debug_ty(&l.ty, module, target) {
+            let d = match &l.ty {
+                HirTy::GcBuf(t) if l.boxed => Some(DebugTy::Cell(Box::new(
+                    debug_ty(t, module, target)
+                        .unwrap_or_else(|| DebugTy::Mir(lower_ty(t, module, target))),
+                ))),
+                t => debug_ty(t, module, target),
+            };
+            if let Some(d) = d {
                 out.locals.insert((f.id, l.id), d);
             }
         }
     }
+    out.any = crate::ty::any_variants(module, target);
     for s in module.structs.iter().filter(|s| s.union_kind.is_none()) {
         let fields: Vec<Option<DebugTy>> = s
             .fields

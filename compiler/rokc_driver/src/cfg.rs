@@ -2,44 +2,27 @@
 //!
 //! The cfg environment is the `--cfg` flags plus the target's keys
 //! (`target_os`, `target_arch`, `target_pointer_width`, `target_family`,
-//! `target_endian`); an item (or impl member) whose `#[cfg(p)]` is false
+//! `target_endian`, `target_env`); an item (or impl member) whose `#[cfg(p)]` is false
 //! is dropped, an excluded inline `mod` with its whole subtree.
 
 use rokc_ast::{Attribute, Item};
 
 pub use rokc_parser::CfgEnv;
 
-/// The target's cfg keys (spec 6.3.2).
+/// The target's cfg keys (spec 6.3.2); `target_family` / `target_env`
+/// only when the target has one.
 pub fn add_target(env: &mut CfgEnv, target: &rokc_mir::Target) {
-    let endian = if matches!(
-        target.arch.as_str(),
-        "powerpc" | "powerpc64" | "mips" | "sparc"
-    ) {
-        "big"
-    } else {
-        "little"
-    };
     env.add_pair("target_os", &target.os);
     env.add_pair("target_arch", &target.arch);
     env.add_pair("target_pointer_width", &target.pointer_width.to_string());
-    env.add_pair("target_family", target.family());
-    env.add_pair("target_endian", endian);
-    // The host's environment when no triple names one.
-    let host = match target.os.as_str() {
-        "linux" if cfg!(target_env = "musl") => "musl",
-        "linux" => "gnu",
-        "windows" => "msvc",
-        _ => "",
-    };
-    let last = target
-        .triple
-        .as_deref()
-        .map_or(host, |t| t.rsplit('-').next().unwrap_or(""));
-    if let Some(e) = ["gnu", "musl", "msvc"]
-        .iter()
-        .find(|k| last.starts_with(*k))
-    {
-        env.add_pair("target_env", e);
+    env.add_pair("target_endian", &target.endian);
+    for (k, v) in [
+        ("target_family", &target.family),
+        ("target_env", &target.env),
+    ] {
+        if !v.is_empty() {
+            env.add_pair(k, v);
+        }
     }
 }
 

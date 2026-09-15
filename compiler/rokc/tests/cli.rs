@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use common::{Env, ROKC, assert_exit, scratch, setup, text, workspace};
+use rokc_target::{Libc, ObjectFormat, TargetSpec};
 
 /// `rokc <args>` in `cwd`, with the repo's library and (when given) the
 /// freshly built runtime.
@@ -446,7 +447,7 @@ fn sysroot_is_beside_rokc() {
     let out = run(&["run", "x.rok"]);
     assert_exit(&out, 1);
     let err = stderr(&out);
-    let rt = format!("sys/lib/{}", rokc_core::HOST_RUNTIME_LIB);
+    let rt = format!("sys/lib/{}", rokc_target::TargetSpec::host().runtime_lib());
     assert!(
         err.contains("the runtime library is missing: no ") && err.contains(&rt),
         "{err}"
@@ -512,12 +513,13 @@ fn cross_targets_link_from_the_sysroot() {
         if !targets.join(t).is_dir() {
             continue;
         }
-        if t.starts_with("wasm32-") {
-            wasm_target_runs(&dir, &targets, t);
+        let spec = TargetSpec::builtin(t).unwrap();
+        if spec.object_format == ObjectFormat::Wasm {
+            wasm_target_runs(&dir, &targets, &spec);
             continue;
         }
-        if t.ends_with("-gnu") || t.ends_with("-gnueabihf") {
-            check_glibc_runtime(t, &fs::read(targets.join(t).join("librokr.a")).unwrap());
+        if spec.libc == Libc::Glibc {
+            check_glibc_runtime(&spec, &fs::read(targets.join(t).join("librokr.a")).unwrap());
         }
         for o in ["-O0", "-O2"] {
             let exe = dir.join(format!("h-{t}{o}"));
@@ -529,9 +531,9 @@ fn cross_targets_link_from_the_sysroot() {
             );
             assert_exit(&out, 0);
             let b = fs::read(&exe).unwrap();
-            if t.contains("-linux") {
-                check_linux_elf(t, &b);
-            } else if t.contains("-windows") {
+            if spec.object_format == ObjectFormat::Elf {
+                check_linux_elf(&spec, &b);
+            } else if spec.object_format == ObjectFormat::Coff {
                 check_x86_pe(t, &b);
                 if let Some(wine) = &wine {
                     let run = Command::new(wine)
@@ -564,7 +566,8 @@ fn cross_targets_link_from_the_sysroot() {
 /// exports `_start` (the browser's, a reactor: `_initialize`) and
 /// imports WASI preview 1, printing `ok` under the target's host when
 /// one is there.
-fn wasm_target_runs(dir: &Path, targets: &Path, t: &str) {
+fn wasm_target_runs(dir: &Path, targets: &Path, spec: &TargetSpec) {
+    let t = spec.name.as_str();
     for o in ["-O0", "-O2"] {
         let exe = dir.join(format!("h-{t}{o}.wasm"));
         let exe_s = exe.display().to_string();
@@ -578,18 +581,24 @@ fn wasm_target_runs(dir: &Path, targets: &Path, t: &str) {
         let has = |s: &[u8]| b.windows(s.len()).any(|w| w == s);
         assert_eq!(&b[..4], b"\0asm", "{t}");
         // The browser's is a reactor.
-        let entry: &[u8] = if t == "wasm32-unknown-unknown" {
+        let entry: &[u8] = if spec.reactor() {
             b"_initialize"
         } else {
             b"_start"
         };
         assert!(has(entry) && has(b"wasi_snapshot_preview1"), "{t}");
-        let threads: &[&str] = if t == "wasm32-wasi-threads" {
+        let threads: &[&str] = if spec.threads {
             &["-W", "threads=y,shared-memory=y", "-S", "threads=y"]
         } else {
             &[]
         };
-        let run = if t.starts_with("wasm32-wasi") {
+        let run = if spec.reactor() {
+            Command::new("node")
+                .arg(targets.join(t).join("rok.mjs"))
+                .arg(&exe)
+                .output()
+                .ok()
+        } else {
             std::env::var_os("ROK_TEST_WASM_RUNNER").map(|r| {
                 Command::new(r)
                     .arg("run")
@@ -598,12 +607,6 @@ fn wasm_target_runs(dir: &Path, targets: &Path, t: &str) {
                     .output()
                     .unwrap()
             })
-        } else {
-            Command::new("node")
-                .arg(targets.join(t).join("rok.mjs"))
-                .arg(&exe)
-                .output()
-                .ok()
         };
         if let Some(run) = run {
             assert_exit(&run, 0);
@@ -700,39 +703,42 @@ fn browser_module_exports_to_js() {
 
 /// A Linux executable for `t`: machine, class, static (musl) or a PIE
 /// with glibc's loader and versions up to 2.34.
-fn check_linux_elf(t: &str, b: &[u8]) {
-    // (ELF machine, class, dynamic loader)
-    let (machine, class, loader): (u16, u8, &[u8]) = match t.split('-').next().unwrap() {
-        "x86_64" => (62, 2, b"/lib64/ld-linux-x86-64.so.2"),
-        "aarch64" => (183, 2, b"/lib/ld-linux-aarch64.so.1"),
-        "i686" => (3, 1, b"/lib/ld-linux.so.2"),
-        _ => (40, 1, b"/lib/ld-linux-armhf.so.3"),
+fn check_linux_elf(spec: &TargetSpec, b: &[u8]) {
+    let t = spec.name.as_str();
+    let machine: u16 = match spec.arch.as_str() {
+        "x86_64" => 62,
+        "aarch64" => 183,
+        "x86" => 3,
+        _ => 40,
     };
+    let class = if spec.pointer_width == 64 { 2 } else { 1 };
+    let loader = spec.dynamic_loader.as_bytes();
     let has = |s: &[u8]| b.windows(s.len()).any(|w| w == s);
     assert_eq!(&b[..4], b"\x7fELF", "{t}");
     assert_eq!(b[4], class, "{t}: ELF class");
     assert_eq!(u16::from_le_bytes([b[18], b[19]]), machine, "{t}");
     let ty = u16::from_le_bytes([b[16], b[17]]);
-    if t.ends_with("-musl") {
-        assert_eq!(ty, 2, "{t}: a static ET_EXEC");
-        assert!(!has(b"ld-linux"), "{t}");
-    } else {
+    if spec.dynamic_linking {
         assert_eq!(ty, 3, "{t}: a PIE");
         assert!(
             has(loader) && has(b"libc.so.6") && has(b"GLIBC_2.34"),
             "{t}"
         );
         assert!(!has(b"GLIBC_2.35"), "{t}: newer than glibc 2.34");
+    } else {
+        assert_eq!(ty, 2, "{t}: a static ET_EXEC");
+        assert!(!has(b"ld-linux"), "{t}");
     }
 }
 
 /// A glibc runtime archive: on 32-bit targets it calls the 64-bit time
 /// and file-offset interfaces (glibc 2.34+), none of the 32-bit `time_t`
 /// / `off_t` ones (stdlib spec 3.3: no 2038 limit).
-fn check_glibc_runtime(t: &str, a: &[u8]) {
-    if t.starts_with("x86_64") || t.starts_with("aarch64") {
+fn check_glibc_runtime(spec: &TargetSpec, a: &[u8]) {
+    if spec.pointer_width == 64 {
         return;
     }
+    let t = spec.name.as_str();
     // A symbol name in an object's string table.
     let has = |s: &str| {
         let n = s.len();
@@ -832,7 +838,7 @@ fn extern_dependencies_are_top_level_names() {
     assert_exit(&out, 0);
     assert_eq!(text(&out.stdout), "41 42\n");
     // Prebuilt into deps/ with its fingerprint (902.3).
-    for f in ["libgreet.a", "greet.rhir", "greet.fp"] {
+    for f in ["libgreet.a", "greet.rokhir", "greet.fp"] {
         assert!(dir.join("app/target/debug/deps").join(f).is_file(), "{f}");
     }
     // `--extern=name=path/lib.rok` works too; a missing prebuilt one fails.
@@ -917,11 +923,11 @@ fn extern_dependency_is_a_package_boundary() {
     );
 }
 
-/// A library built once (`lib<name>.a` + `<name>.rhir`, spec 904) and
+/// A library built once (`lib<name>.a` + `<name>.rokhir`, spec 904) and
 /// linked prebuilt: its concrete code comes from the archive, its
 /// generics are instantiated by the user, `any` values (a thrown error,
 /// a trait object) cross the boundary both ways, and a lazy static is
-/// one static. `rhir-text` / `inspect` show the interface.
+/// one static. `rokhir-text` / `inspect` show the interface.
 /// Parameter and field defaults resolve in the package declaring them,
 /// not in the caller's (spec 4.2.3): the app's own `one` / `LIMIT` / `S`
 /// don't capture them.
@@ -995,8 +1001,8 @@ fn prebuilt_dependency_sums_keep_their_tags() {
     .unwrap();
     let out = rokc(Some(&env), &dir, &["build", "dep"]);
     assert_exit(&out, 0);
-    let rhir = dir.join("dep/target/debug/dep.rhir");
-    let ext = format!("dep={}", rhir.display());
+    let rokhir = dir.join("dep/target/debug/dep.rokhir");
+    let ext = format!("dep={}", rokhir.display());
     let out = rokc(Some(&env), &dir, &["run", "-q", "app", "--extern", &ext]);
     assert_exit(&out, 0);
     assert_eq!(text(&out.stdout), "list 3\ndict 1\nzebra 4\ndict 0\n");
@@ -1056,8 +1062,8 @@ fn prebuilt_dependency_is_linked_and_instantiated() {
     .unwrap();
     let out = rokc(Some(&env), &dir, &["build", "geo"]);
     assert_exit(&out, 0);
-    let rhir = dir.join("geo/target/debug/geo.rhir");
-    assert!(rhir.is_file() && dir.join("geo/target/debug/libgeo.a").is_file());
+    let rokhir = dir.join("geo/target/debug/geo.rokhir");
+    assert!(rokhir.is_file() && dir.join("geo/target/debug/libgeo.a").is_file());
     let out = rokc(
         Some(&env),
         &dir,
@@ -1066,7 +1072,7 @@ fn prebuilt_dependency_is_linked_and_instantiated() {
             "-q",
             "app",
             "--extern",
-            &format!("geo={}", rhir.display()),
+            &format!("geo={}", rokhir.display()),
         ],
     );
     assert_exit(&out, 0);
@@ -1088,7 +1094,7 @@ fn prebuilt_dependency_is_linked_and_instantiated() {
     assert_eq!(text(&out.stdout), "1 2\ncaught bad -3\n18\n");
 
     // The interface: concrete bodies cut, generic ones kept.
-    let out = rokc(None, &dir, &["rhir-text", "geo/target/debug/geo.rhir"]);
+    let out = rokc(None, &dir, &["rokhir-text", "geo/target/debug/geo.rokhir"]);
     assert_exit(&out, 0);
     let dump = text(&out.stdout);
     assert!(dump.contains("package: geo (hash: "), "{dump}");
@@ -1102,22 +1108,22 @@ fn prebuilt_dependency_is_linked_and_instantiated() {
     let info = text(&out.stdout);
     for want in [
         "Package: geo\n",
-        "RHIR version: 1\n",
+        "ROKHIR version: 1\n",
         "Exports:\n",
         "  pub fn check(x: i32) throws -> i32\n",
-        "Generic items (RHIR):\n  pub struct Stack<T>\n",
+        "Generic items (ROKHIR):\n  pub struct Stack<T>\n",
         "Concrete .o files:\n  geo.o (",
     ] {
         assert!(info.contains(want), "{want:?} in\n{info}");
     }
 }
 
-/// A RHIR from another format version or compiler, or built under
+/// A ROKHIR from another format version or compiler, or built under
 /// another name, is refused with a "rebuild" message.
 #[test]
-fn stale_rhir_is_rejected() {
+fn stale_rokhir_is_rejected() {
     let Some(env) = setup() else { return };
-    let dir = scratch("stale-rhir");
+    let dir = scratch("stale-rokhir");
     fs::create_dir_all(dir.join("dep")).unwrap();
     fs::write(
         dir.join("dep/lib.rok"),
@@ -1127,13 +1133,13 @@ fn stale_rhir_is_rejected() {
     fs::create_dir_all(dir.join("app")).unwrap();
     fs::write(dir.join("app/main.rok"), "println(f\"{dep::one()}\");\n").unwrap();
     assert_exit(&rokc(Some(&env), &dir, &["build", "dep"]), 0);
-    let rhir = dir.join("dep/target/debug/dep.rhir");
-    let ext = format!("dep={}", rhir.display());
+    let rokhir = dir.join("dep/target/debug/dep.rokhir");
+    let ext = format!("dep={}", rokhir.display());
     let out = rokc(Some(&env), &dir, &["run", "-q", "app", "--extern", &ext]);
     assert_exit(&out, 0);
     assert_eq!(text(&out.stdout), "1\n");
 
-    let other = format!("other={}", rhir.display());
+    let other = format!("other={}", rokhir.display());
     let out = rokc(Some(&env), &dir, &["check", "app", "--extern", &other]);
     assert_exit(&out, 1);
     assert!(
@@ -1142,15 +1148,15 @@ fn stale_rhir_is_rejected() {
         text(&out.stderr)
     );
 
-    let good = fs::read(&rhir).unwrap();
+    let good = fs::read(&rokhir).unwrap();
     let mut bad = good.clone();
     bad[4] = 99; // format version
-    fs::write(&rhir, &bad).unwrap();
+    fs::write(&rokhir, &bad).unwrap();
     let out = rokc(Some(&env), &dir, &["check", "app", "--extern", &ext]);
     assert_exit(&out, 1);
     let err = text(&out.stderr);
     assert!(
-        err.contains("RHIR format version 99") && err.contains("rebuild"),
+        err.contains("ROKHIR format version 99") && err.contains("rebuild"),
         "{err}"
     );
 
@@ -1158,7 +1164,7 @@ fn stale_rhir_is_rejected() {
     // header and its length byte) differs.
     let mut bad = good;
     bad[17 + 5] ^= 1; // inside "rokc 0.."
-    fs::write(&rhir, &bad).unwrap();
+    fs::write(&rokhir, &bad).unwrap();
     let out = rokc(Some(&env), &dir, &["check", "app", "--extern", &ext]);
     assert_exit(&out, 1);
     let err = text(&out.stderr);
@@ -1424,6 +1430,99 @@ fn print_cfg_lists_the_active_cfg() {
     assert_exit(&rokc(None, &dir, &["--print", "sysroot"]), 2);
 }
 
+/// `--print target-list` names every built-in target; `--print
+/// target-spec` prints one as ROKON, which reads back as the same spec.
+#[test]
+fn print_target_list_and_spec() {
+    let dir = scratch("print_target");
+    let out = rokc(None, &dir, &["--print", "target-list"]);
+    assert_exit(&out, 0);
+    let list = text(&out.stdout);
+    assert_eq!(list.lines().collect::<Vec<_>>(), rokc_target::BUILTIN);
+    for t in rokc_target::BUILTIN {
+        let out = rokc(None, &dir, &["--print", "target-spec", "--target", t]);
+        assert_exit(&out, 0);
+        let spec = TargetSpec::from_rokon(&text(&out.stdout), "out", t).unwrap();
+        assert_eq!(spec, TargetSpec::resolve(Some(t)).unwrap(), "{t}");
+    }
+    let out = rokc(None, &dir, &["--print", "target-spec"]);
+    assert_exit(&out, 0);
+    assert_eq!(
+        text(&out.stdout),
+        format!("{}\n", TargetSpec::host().to_rokon())
+    );
+    let out = rokc(None, &dir, &["--print", "target-spec", "--target", "nope"]);
+    assert_exit(&out, 1);
+    assert!(text(&out.stderr).contains("unknown target `nope`"));
+}
+
+/// A custom target (`--target <name>.rokon`): a copy of the host's spec
+/// builds the same code under its own name; its runtime is looked up in
+/// `lib/rok/targets/<name>/`; a bad field is an error at its line.
+#[test]
+fn custom_target_file() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("custom_target");
+    fs::write(
+        dir.join("h.rok"),
+        "fn main() -> i32 {\n    println(\"ok\");\n    0\n}\n",
+    )
+    .unwrap();
+    fs::write(dir.join("mine.rokon"), TargetSpec::host().to_rokon()).unwrap();
+    for kind in ["llvm-ir", "obj"] {
+        let emit = |extra: &[&str], out: &str| {
+            let mut args = vec!["-q", "emit", "h.rok", "--emit", kind, "-o", out];
+            args.extend(extra);
+            assert_exit(&rokc(Some(&env), &dir, &args), 0);
+            fs::read(dir.join(out)).unwrap()
+        };
+        let host = emit(&[], "host.out");
+        let mine = emit(&["--target", "mine.rokon"], "mine.out");
+        assert!(host == mine, "{kind} differs");
+    }
+    let out = rokc(
+        Some(&env),
+        &dir,
+        &[
+            "-q",
+            "build",
+            "h.rok",
+            "--target",
+            "mine.rokon",
+            "-o",
+            "mine",
+        ],
+    );
+    assert_exit(&out, 0);
+    let run = Command::new(dir.join("mine")).output().unwrap();
+    assert_exit(&run, 0);
+    assert_eq!(text(&run.stdout), "ok\n");
+    // Without --rokr: the runtime of target `mine`.
+    let out = rokc(None, &dir, &["build", "h.rok", "--target", "mine.rokon"]);
+    assert_exit(&out, 1);
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("no runtime for mine:") && err.contains("targets/mine"),
+        "{err}"
+    );
+    let bad =
+        TargetSpec::host()
+            .to_rokon()
+            .replacen("TargetSpec {", "TargetSpec {\n    tier: 1,", 1);
+    fs::write(dir.join("bad.rokon"), bad).unwrap();
+    let out = rokc(
+        None,
+        &dir,
+        &["--print", "target-spec", "--target", "bad.rokon"],
+    );
+    assert_exit(&out, 1);
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("unknown field `tier`") && err.contains("bad.rokon:2:5"),
+        "{err}"
+    );
+}
+
 /// `isize` / `usize` limits follow the target's pointer width (stdlib
 /// 2.1.4): a 32-bit target folds them to 32-bit values.
 #[test]
@@ -1597,7 +1696,7 @@ fn profile_guided_optimization_round_trip() {
                 "profile-generate",
             ],
             1,
-            "no file system to write its profile to",
+            "the target has no profile runtime",
         );
     }
     let build = |args: &[&str]| {

@@ -19,7 +19,7 @@ pub fn object(
 ) -> Result<Option<rokc_codegen_native::Output>, RokDiagnostic> {
     if !wanted(opts)
         || rokc_codegen_native::unsupported(&module.mir).is_some()
-        || (opts.debug && module.mir.target.os == "windows")
+        || (opts.debug && module.mir.target.object_format == rokc_target::ObjectFormat::Coff)
     {
         return Ok(None);
     }
@@ -46,7 +46,7 @@ pub fn chosen(opts: &BuildOptions) -> bool {
 /// LLVM does (`toolchain::cell_object`).
 #[must_use]
 pub fn jit(opts: &BuildOptions) -> bool {
-    crate::REPL_HOST && wanted(opts)
+    crate::repl_host() && wanted(opts)
 }
 
 /// A REPL cell (`opts.repl`) as a native object, compiling only the

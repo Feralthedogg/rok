@@ -1,8 +1,8 @@
-//! RHIR (spec 904): the interface of a prebuilt library package,
-//! `<name>.rhir` next to its `lib<name>.a`.
+//! ROKHIR (spec 904): the interface of a prebuilt library package,
+//! `<name>.rokhir` next to its `lib<name>.a`.
 //!
 //! ```text
-//! header   "RHIR" | version u32 | flags u32 | body_offset u32   (LE)
+//! header   "ROKHIR" | version u32 | flags u32 | body_offset u32   (LE)
 //! producer str                      "rokc <version> (<compiler id>)"
 //! meta     str name | str hash | str source dir
 //!          varint gc type offset | varint gc type count
@@ -26,10 +26,10 @@ use crate::SourceFile;
 
 /// Bumped on any change to the layout or to what the body holds.
 pub const VERSION: u32 = 1;
-const MAGIC: &[u8; 4] = b"RHIR";
+const MAGIC: &[u8; 4] = b"ROKH";
 
 #[derive(Clone, Debug, Default)]
-pub struct Rhir {
+pub struct Rokhir {
     pub producer: String,
     /// The package's mount name (`--extern <name>=`): it is in symbols.
     pub name: String,
@@ -46,7 +46,7 @@ pub struct Rhir {
     pub files: Vec<(String, String)>,
 }
 
-/// This compiler: a RHIR from any other one is stale.
+/// This compiler: a ROKHIR from any other one is stale.
 pub fn producer() -> String {
     // Size and mtime stand for the build: a content hash would survive
     // `touch` but costs a read of rokc.
@@ -95,7 +95,7 @@ struct Reader<'a> {
 
 impl Reader<'_> {
     fn byte(&mut self) -> Result<u8, String> {
-        let v = *self.b.get(self.pos).ok_or("truncated RHIR")?;
+        let v = *self.b.get(self.pos).ok_or("truncated ROKHIR")?;
         self.pos += 1;
         Ok(v)
     }
@@ -115,11 +115,11 @@ impl Reader<'_> {
     }
 
     fn str(&mut self) -> Result<String, String> {
-        let n = usize::try_from(self.varint()?).map_err(|_| "bad RHIR length")?;
+        let n = usize::try_from(self.varint()?).map_err(|_| "bad ROKHIR length")?;
         let end = self.pos.checked_add(n).filter(|&e| e <= self.b.len());
-        let s = &self.b[self.pos..end.ok_or("truncated RHIR")?];
+        let s = &self.b[self.pos..end.ok_or("truncated ROKHIR")?];
         self.pos += n;
-        String::from_utf8(s.to_vec()).map_err(|_| "RHIR string is not UTF-8".to_owned())
+        String::from_utf8(s.to_vec()).map_err(|_| "ROKHIR string is not UTF-8".to_owned())
     }
 
     fn u32(&mut self) -> Result<u32, String> {
@@ -131,7 +131,7 @@ impl Reader<'_> {
     }
 }
 
-impl Rhir {
+impl Rokhir {
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let mut meta = Vec::new();
@@ -157,13 +157,13 @@ impl Rhir {
     /// Parse; a wrong magic or format version is an error.
     pub fn decode(b: &[u8]) -> Result<Self, String> {
         if !b.starts_with(MAGIC) {
-            return Err("not a RHIR file".to_owned());
+            return Err("not a ROKHIR file".to_owned());
         }
         let mut r = Reader { b, pos: 4 };
         let version = r.u32()?;
         if version != VERSION {
             return Err(format!(
-                "RHIR format version {version}, this rokc reads version {VERSION}"
+                "ROKHIR format version {version}, this rokc reads version {VERSION}"
             ));
         }
         let _flags = r.u32()?;
@@ -210,11 +210,11 @@ impl Rhir {
         self.type_offset + self.type_count
     }
 
-    /// `rokc rhir-text` (904.14): header fields, then every file.
+    /// `rokc rokhir-text` (904.14): header fields, then every file.
     #[must_use]
     pub fn text(&self) -> String {
         let mut s = format!(
-            "rhir {VERSION}\nproducer: {}\npackage: {} (hash: {})\nsource: {}\ngc types: {}..{}\n",
+            "rokhir {VERSION}\nproducer: {}\npackage: {} (hash: {})\nsource: {}\ngc types: {}..{}\n",
             self.producer,
             self.name,
             self.hash,
@@ -371,15 +371,15 @@ pub fn interface(
     out
 }
 
-/// `rokc inspect` (909 §9.9.14) of a `.rhir` (or the `lib<name>.a`
+/// `rokc inspect` (909 §9.9.14) of a `.rokhir` (or the `lib<name>.a`
 /// beside it): build meta, exports, generic items, archive members.
 pub fn inspect(path: &Path) -> Result<String, String> {
-    let (rhir_path, archive) = companions(path);
-    let r = Rhir::decode(
-        &std::fs::read(&rhir_path).map_err(|e| format!("{}: {e}", rhir_path.display()))?,
+    let (rokhir_path, archive) = companions(path);
+    let r = Rokhir::decode(
+        &std::fs::read(&rokhir_path).map_err(|e| format!("{}: {e}", rokhir_path.display()))?,
     )?;
     let mut s = format!(
-        "Package: {}\nHash: {}\nrokc version: {}\nRHIR version: {VERSION}\nGC type ids: {}..{}\n",
+        "Package: {}\nHash: {}\nrokc version: {}\nROKHIR version: {VERSION}\nGC type ids: {}..{}\n",
         r.name,
         r.hash,
         r.producer,
@@ -392,7 +392,7 @@ pub fn inspect(path: &Path) -> Result<String, String> {
     }
     s.push_str("\nExports:\n");
     exports.iter().for_each(|e| s.push_str(&format!("  {e}\n")));
-    s.push_str("\nGeneric items (RHIR):\n");
+    s.push_str("\nGeneric items (ROKHIR):\n");
     generic.iter().for_each(|e| s.push_str(&format!("  {e}\n")));
     s.push_str("\nConcrete .o files:\n");
     match std::fs::read(&archive) {
@@ -406,7 +406,7 @@ pub fn inspect(path: &Path) -> Result<String, String> {
     Ok(s)
 }
 
-/// `(x.rhir, libx.a)` from either of them.
+/// `(x.rokhir, libx.a)` from either of them.
 #[must_use]
 pub fn companions(path: &Path) -> (PathBuf, PathBuf) {
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
@@ -416,7 +416,7 @@ pub fn companions(path: &Path) -> (PathBuf, PathBuf) {
         stem
     };
     (
-        path.with_file_name(format!("{name}.rhir")),
+        path.with_file_name(format!("{name}.rokhir")),
         path.with_file_name(format!("lib{name}.a")),
     )
 }
@@ -512,8 +512,8 @@ mod tests {
     }
 
     #[test]
-    fn rhir_round_trips_and_rejects_other_versions() {
-        let r = Rhir {
+    fn rokhir_round_trips_and_rejects_other_versions() {
+        let r = Rokhir {
             producer: "p".into(),
             name: "dep".into(),
             hash: "0123abcd".into(),
@@ -523,9 +523,9 @@ mod tests {
             files: vec![("lib.rok".into(), "pub fn f() -> i32;\n".into())],
         };
         let mut b = r.encode();
-        let back = Rhir::decode(&b).unwrap();
+        let back = Rokhir::decode(&b).unwrap();
         assert_eq!(back.text(), r.text());
         b[4] = 99;
-        assert!(Rhir::decode(&b).unwrap_err().contains("version 99"));
+        assert!(Rokhir::decode(&b).unwrap_err().contains("version 99"));
     }
 }

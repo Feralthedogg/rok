@@ -6,8 +6,10 @@
 //! the MIR `Statement::Loc` before it; named locals get an
 //! `llvm.intr.dbg.declare` of their stack slot, typed by `di_type`
 //! (primitives; structs with their field names, tuples, `str`, `any`
-//! and arrays as composites; a tagged sum as a variant part; a `GcBuf`
-//! reference as a pointer to its object, header then elements; other GC
+//! and arrays as composites; a tagged sum as a variant part, and an
+//! `any` as one over the types stored into one, by their tags; a `GcBuf`
+//! reference as a pointer to its object, header then elements; a
+//! `[ref]`-captured variable as its value, through its cell; other GC
 //! references and `fn` values as pointers). The unit's language is Rust:
 //! debuggers read variant parts in it (lldb only there).
 //!
@@ -195,7 +197,8 @@ impl DebugInfo {
 
     /// A `#llvm.di_local_variable` for local `name` (a `ty`) of the
     /// function `sp`, declared at `line`; `arg` is its 1-based parameter
-    /// position. `None` for types without a DWARF description here.
+    /// position. `None` for types without a DWARF description here. A
+    /// cell's comes with the expression that reaches its value.
     pub fn local(
         &mut self,
         sp: &str,
@@ -205,6 +208,7 @@ impl DebugInfo {
         line: u32,
         arg: Option<usize>,
     ) -> Option<String> {
+        let ty_of = ty;
         let ty = self.di_debug(ty)?;
         let file = self.file_alias(file)?;
         let n = self.fresh();
@@ -216,6 +220,11 @@ impl DebugInfo {
              line = {line}, {arg}type = {ty}>",
             escape(name)
         );
+        if matches!(ty_of, DebugTy::Cell(_)) {
+            return Some(format!(
+                "{alias} #llvm.di_expression<[DW_OP_deref, DW_OP_plus_uconst({HEADER_SIZE})]>"
+            ));
+        }
         Some(alias)
     }
 
@@ -224,6 +233,9 @@ impl DebugInfo {
         let pw = self.target.pointer_width;
         let def = match ty {
             DebugTy::Mir(t) => return self.di_type(t),
+            // Shown as the value; the variable's expression goes through
+            // the reference.
+            DebugTy::Cell(elem) => return self.di_debug(elem),
             DebugTy::Buf(name, elem) => {
                 let key = format!("{ty:?}");
                 if let Some(a) = self.types.get(&key) {
@@ -231,13 +243,7 @@ impl DebugInfo {
                 }
                 // The object: its header, then the elements (as many as
                 // its size holds).
-                let u32_ = self.basic_type(PrimTy::U32)?;
-                let u64_ = self.basic_type(PrimTy::U64)?;
-                let mut members = vec![
-                    ("type_id", u32_.clone(), 0),
-                    ("gc_flags", u32_, 4),
-                    ("gc_word", u64_, 8),
-                ];
+                let mut members = self.header()?;
                 if let Some(e) = self.di_debug(elem) {
                     let items =
                         format!("#llvm.di_composite_type<tag = DW_TAG_array_type, baseType = {e}>");
@@ -249,54 +255,93 @@ impl DebugInfo {
                 );
                 return Some(self.define(key, &def));
             }
-            // A variant part: each variant a struct over the whole sum
-            // (as Rust describes enums), its payload's parts at their
-            // offsets. The discriminant comes first and each variant's
-            // stored tag rides a `di_subrange` (rokc_llvm's
-            // `variant_parts` makes them DWARF variants).
-            DebugTy::Sum(name, mir, variants) => {
-                if !matches!(mir, MirTy::Tuple(_)) {
-                    return self.di_type(mir);
+            // The object: its header, then the value.
+            DebugTy::Boxed(value) => {
+                let key = format!("{ty:?}");
+                if let Some(a) = self.types.get(&key) {
+                    return Some(a.clone());
                 }
-                let (size, align) = self.target.size_align(mir);
-                let at = self.target.field_offsets(mir)[1];
-                let tag = self.basic_type(PrimTy::U32)?;
-                let mut parts = vec![format!(
-                    "#llvm.di_derived_type<tag = DW_TAG_member, baseType = {tag}, sizeInBits = 32>"
-                )];
-                for (t, v, p) in variants {
-                    let fields: Vec<(String, String, u32)> = match p {
-                        DebugTy::Mir(ty @ MirTy::Tuple(ps)) => self
-                            .members(ty, ps, &[], &[])
-                            .into_iter()
-                            .map(|(n, ty, o)| (n, ty, at + o))
-                            .collect(),
-                        p => self
-                            .di_debug(p)
-                            .map(|ty| ("0".to_owned(), ty, at))
-                            .into_iter()
-                            .collect(),
-                    };
-                    let arm = Self::composite(&format!("{name}::{v}"), size, align, &fields);
-                    parts.push(format!(
-                        "#llvm.di_derived_type<tag = DW_TAG_member, name = \"{}\", baseType = {arm}, \
-                         sizeInBits = {}, extraData = #llvm.di_subrange<count = {t} : i64>>",
-                        escape(v),
-                        size * 8
-                    ));
+                let mut members = self.header()?;
+                let mut size = HEADER_SIZE;
+                if let Some(v) = self.di_debug(value) {
+                    members.push(("value", v, HEADER_SIZE));
+                    size += self.target.size_align(&value.mir()).0;
                 }
-                format!(
-                    "#llvm.di_composite_type<tag = DW_TAG_structure_type, name = \"{}\", \
-                     sizeInBits = {}, alignInBits = {}, elements = \
-                     #llvm.di_composite_type<tag = DW_TAG_variant_part, elements = {}>>",
-                    escape(name),
-                    size * 8,
-                    align * 8,
-                    parts.join(", ")
-                )
+                let obj = Self::composite("box", size, 8, &members);
+                let def = format!(
+                    "#llvm.di_derived_type<tag = DW_TAG_pointer_type, baseType = {obj}, sizeInBits = {pw}>"
+                );
+                return Some(self.define(key, &def));
             }
+            DebugTy::Any => {
+                let variants = self.debug.any.clone();
+                self.variant_part("any", &rokc_mir::any_ty(), &variants)?
+            }
+            DebugTy::Sum(name, mir, variants) => self.variant_part(name, mir, variants)?,
         };
         Some(self.define(format!("{ty:?}"), &def))
+    }
+
+    /// A GC object header's members.
+    fn header(&mut self) -> Option<Vec<(&'static str, String, u32)>> {
+        let u32_ = self.basic_type(PrimTy::U32)?;
+        let u64_ = self.basic_type(PrimTy::U64)?;
+        Some(vec![
+            ("type_id", u32_.clone(), 0),
+            ("gc_flags", u32_, 4),
+            ("gc_word", u64_, 8),
+        ])
+    }
+
+    /// A value laid out `(i32 tag, payload)` (a tuple, or `any`'s
+    /// struct) whose payload `variants` (`(stored tag, name, payload)`)
+    /// tells apart: a variant part, each variant a struct over the whole
+    /// value (as Rust describes enums), its payload's parts at their
+    /// offsets. The discriminant comes first and each variant's stored
+    /// tag rides a `di_subrange` (`rokc_llvm`'s `variant_parts` makes them
+    /// DWARF variants). Else the plain type.
+    fn variant_part(
+        &mut self,
+        name: &str,
+        mir: &MirTy,
+        variants: &[(u32, String, DebugTy)],
+    ) -> Option<String> {
+        let (size, align) = self.target.size_align(mir);
+        let at = self.target.field_offsets(mir)[1];
+        let tag = self.basic_type(PrimTy::U32)?;
+        let mut parts = vec![format!(
+            "#llvm.di_derived_type<tag = DW_TAG_member, baseType = {tag}, sizeInBits = 32>"
+        )];
+        for (t, v, p) in variants {
+            let fields: Vec<(String, String, u32)> = match p {
+                DebugTy::Mir(ty @ MirTy::Tuple(ps)) => self
+                    .members(ty, ps, &[], &[])
+                    .into_iter()
+                    .map(|(n, ty, o)| (n, ty, at + o))
+                    .collect(),
+                p => self
+                    .di_debug(p)
+                    .map(|ty| ("0".to_owned(), ty, at))
+                    .into_iter()
+                    .collect(),
+            };
+            let arm = Self::composite(&format!("{name}::{v}"), size, align, &fields);
+            parts.push(format!(
+                "#llvm.di_derived_type<tag = DW_TAG_member, name = \"{}\", baseType = {arm}, \
+                         sizeInBits = {}, extraData = #llvm.di_subrange<count = {t} : i64>>",
+                escape(v),
+                size * 8
+            ));
+        }
+        Some(format!(
+            "#llvm.di_composite_type<tag = DW_TAG_structure_type, name = \"{}\", \
+                     sizeInBits = {}, alignInBits = {}, elements = \
+                     #llvm.di_composite_type<tag = DW_TAG_variant_part, elements = {}>>",
+            escape(name),
+            size * 8,
+            align * 8,
+            parts.join(", ")
+        ))
     }
 
     /// Alias `def` as the type of `key`.

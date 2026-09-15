@@ -1,0 +1,15 @@
+[package]
+name = "rokc_target"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+build = "build.rs"
+
+[dependencies]
+rokc_core = { workspace = true }
+rokc_rokon = { workspace = true }
+
+[lints]
+workspace = true

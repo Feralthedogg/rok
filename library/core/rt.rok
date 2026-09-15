@@ -43,6 +43,12 @@ extern "rok" {
         restart: extern "C" fn(),
     );
     fn rok_thread_lost(id: u64) -> i32;
+    fn rok_session_enter();
+    fn rok_session_leave();
+    fn rok_session_pass();
+    fn rok_lock_note(word: GcBuf<i32>, kind: i32) -> i32;
+    fn rok_lock_drop(word: GcBuf<i32>);
+    fn rok_lock_notes() -> i32;
     fn rok_deque_new() -> GcBuf<GcBuf<rok::core::task::TaskRef>>;
     fn rok_deque_push(d: GcBuf<GcBuf<rok::core::task::TaskRef>>, item: GcBuf<rok::core::task::TaskRef>);
     fn rok_deque_steal(

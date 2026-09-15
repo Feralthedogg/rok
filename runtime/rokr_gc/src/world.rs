@@ -53,6 +53,132 @@ pub struct Mutator {
     /// The OS thread id, written by [`attach`] (0 before).
     #[cfg(windows)]
     os_id: u64,
+    /// The owner's `rok_tls_held_locks` slot (null before [`attach`]).
+    held: *mut usize,
+}
+
+/// The locks a thread holds outside the task executor ([`note_lock`]):
+/// `(lock word buffer, kind)` pairs. A thread that is gone after a
+/// failed REPL cell has its locks released ([`forget`]).
+#[repr(C)]
+pub struct Held {
+    len: usize,
+    cap: usize,
+    items: *mut (usize, usize),
+}
+
+impl Held {
+    /// The locks, oldest first.
+    pub const fn items(&self) -> &[(usize, usize)] {
+        if self.len == 0 {
+            return &[];
+        }
+        // SAFETY: `len` initialized pairs.
+        unsafe { core::slice::from_raw_parts(self.items, self.len) }
+    }
+
+    /// Drop the newest entry of `buf`; whether there was one.
+    fn remove(&mut self, buf: usize) -> bool {
+        let Some(i) = self.items().iter().rposition(|e| e.0 == buf) else {
+            return false;
+        };
+        // SAFETY: `i < len`; the tail moves down by one.
+        unsafe { ptr::copy(self.items.add(i + 1), self.items.add(i), self.len - i - 1) };
+        self.len -= 1;
+        true
+    }
+}
+
+/// The record a `rok_tls_held_locks` slot points at (null: none yet).
+///
+/// # Safety
+/// `slot` must be a live thread's slot.
+const unsafe fn held_at(slot: *const usize) -> *mut Held {
+    // SAFETY: caller contract.
+    unsafe { slot.read() as *mut Held }
+}
+
+/// The calling thread now holds the lock whose words are GC buffer
+/// `buf` (`kind` is the caller's).
+pub fn note_lock(buf: usize, kind: usize) {
+    let slot = tls::held_locks();
+    // SAFETY: this thread's own slot.
+    let mut h = unsafe { held_at(slot) };
+    if h.is_null() {
+        // SAFETY: plain allocation; published in our own slot.
+        unsafe {
+            h = libc::calloc(1, size_of::<Held>()).cast::<Held>();
+            if h.is_null() {
+                rokr_common::oom();
+            }
+            slot.write(h as usize);
+        }
+    }
+    // SAFETY: our own record; only its owner grows it.
+    unsafe {
+        if (*h).len == (*h).cap {
+            let cap = ((*h).cap * 2).max(4);
+            let p = libc::realloc((*h).items.cast(), cap * size_of::<(usize, usize)>());
+            if p.is_null() {
+                rokr_common::oom();
+            }
+            (*h).items = p.cast();
+            (*h).cap = cap;
+        }
+        (*h).items.add((*h).len).write((buf, kind));
+        (*h).len += 1;
+    }
+}
+
+/// A lock [`note_lock`] recorded is released: by its holder, or (a
+/// guard handed on) by another thread.
+pub fn drop_lock(buf: usize) {
+    // SAFETY: this thread's own slot and record.
+    unsafe {
+        let h = held_at(tls::held_locks());
+        if !h.is_null() && (*h).remove(buf) {
+            return;
+        }
+    }
+    lock();
+    // SAFETY: registry guarded by the lock; records stay while their
+    // thread is registered, and only the lock's holder edits another's.
+    unsafe {
+        let mut m = *WORLD.threads.get();
+        while !m.is_null() {
+            if !(*m).held.is_null() {
+                let other = held_at((*m).held);
+                if !other.is_null() && (*other).remove(buf) {
+                    break;
+                }
+            }
+            m = (*m).next;
+        }
+    }
+    unlock();
+}
+
+/// With the world stopped by the caller: whether no other thread is
+/// stopped at a safepoint while it holds a lock (inside its critical
+/// section). One blocked in a call while it holds one counts as quiet.
+pub fn quiet() -> bool {
+    let me = tls::mutator_state().as_ptr().cast_const();
+    // SAFETY: the caller holds the lock (it stopped the world); TLS slots
+    // and records stay valid while their thread is registered.
+    unsafe {
+        let mut m = *WORLD.threads.get();
+        while !m.is_null() {
+            let s = (*m).state;
+            if !s.is_null() && s.cast::<u8>() != me && !(*m).held.is_null() {
+                let h = held_at((*m).held);
+                if !h.is_null() && (*h).len > 0 && (*s).load(Ordering::SeqCst) != MUTATOR_PARKED {
+                    return false;
+                }
+            }
+            m = (*m).next;
+        }
+    }
+    true
 }
 
 struct World {
@@ -235,6 +361,7 @@ pub fn register(root: *mut u8, worker_id: u64) -> *mut Mutator {
             worker_id,
             #[cfg(windows)]
             os_id: 0,
+            held: ptr::null_mut(),
         });
         *WORLD.threads.get() = m;
     }
@@ -262,6 +389,7 @@ pub unsafe fn attach(m: *mut Mutator) {
         (*m).tlab = tls::tlab();
         (*m).wb_log = tls::wb_log();
         (*m).satb = tls::satb_log();
+        (*m).held = tls::held_locks();
         #[cfg(windows)]
         {
             (*m).os_id = u64::from(rokr_common::win::GetCurrentThreadId());
@@ -319,6 +447,16 @@ pub fn detach() {
         }
     }
     unlock();
+    // SAFETY: our own slot and record, no longer reachable by others
+    // (empty: guards drop before a thread ends).
+    unsafe {
+        let h = held_at(tls::held_locks());
+        if !h.is_null() {
+            tls::held_locks().write(0);
+            libc::free((*h).items.cast());
+            libc::free(h.cast());
+        }
+    }
 }
 
 /// With the world stopped by the caller: the OS ids of the other
@@ -343,10 +481,12 @@ pub fn other_thread_ids(out: &mut [u64]) -> usize {
     n
 }
 
-/// Drop the records of threads that no longer run: every other one
-/// (`lost` none: a forked copy has only the caller), or those whose OS
-/// ids `lost` lists. `gone` gets each dropped thread's worker id.
-pub fn forget(lost: Option<&[u64]>, mut gone: impl FnMut(u64)) {
+/// Drop the records of threads that no longer run.
+///
+/// Every other one (`lost` none: a forked copy has only the caller), or
+/// those whose OS ids `lost` lists. `gone` gets each dropped thread's
+/// worker id and the locks it held.
+pub fn forget(lost: Option<&[u64]>, mut gone: impl FnMut(u64, &[(usize, usize)])) {
     let _ = &lost;
     lock();
     let me = find_current();
@@ -361,7 +501,16 @@ pub fn forget(lost: Option<&[u64]>, mut gone: impl FnMut(u64)) {
             let dead = m != me;
             if dead {
                 *link = (*m).next;
-                gone((*m).worker_id);
+                let h = if (*m).held.is_null() {
+                    ptr::null_mut()
+                } else {
+                    held_at((*m).held)
+                };
+                gone((*m).worker_id, if h.is_null() { &[] } else { (*h).items() });
+                if !h.is_null() {
+                    libc::free((*h).items.cast());
+                    libc::free(h.cast());
+                }
                 libc::free(m.cast());
             } else {
                 link = &raw mut (*m).next;

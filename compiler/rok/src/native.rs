@@ -24,6 +24,7 @@ use std::process::Command;
 
 use rokc_core::hash::{hex, sha256};
 use rokc_rokon::{Decoder, Doc, Kind, Value};
+use rokc_target::{ObjectFormat, TargetSpec};
 
 use crate::manifest::{self, NativeDep, NativeSource};
 use crate::registry;
@@ -385,19 +386,20 @@ pub fn direct(
     Ok(e)
 }
 
-/// The files of `name`'s build for `triple`: unpacked in the cache (once;
+/// The files of `name`'s build for target `t`: unpacked in the cache (once;
 /// never fetched again), after its SHA-256 matched and its contents were
 /// checked.
 pub fn unpack(
     home: &Path,
     n: &Resolved,
-    triple: &str,
+    t: &TargetSpec,
     offline: bool,
     quiet: bool,
 ) -> Result<(PathBuf, Artifact), String> {
+    let triple = &t.name;
     let e = &n.entry;
-    let Some((_, a)) = e.targets.iter().find(|(t, _)| t == triple) else {
-        let have: Vec<&str> = e.targets.iter().map(|(t, _)| t.as_str()).collect();
+    let Some((_, a)) = e.targets.iter().find(|(name, _)| name == triple) else {
+        let have: Vec<&str> = e.targets.iter().map(|(name, _)| name.as_str()).collect();
         return Err(format!(
             "native package `{}` {} has no build for {triple} (it has: {})",
             e.name,
@@ -433,7 +435,7 @@ pub fn unpack(
         std::fs::write(&archive, &bytes).map_err(|e| format!("{}: {e}", archive.display()))?;
         let files = tmp.join("files");
         extract(&archive, &files).map_err(|m| format!("{what}: {m}"))?;
-        check(&files, a, triple).map_err(|m| format!("{what}: {m}"))?;
+        check(&files, a, t).map_err(|m| format!("{what}: {m}"))?;
         // Another process may have won the race: theirs is as good.
         if std::fs::rename(&files, &dir).is_err() && !dir.is_dir() {
             return Err(format!("cannot create {}", dir.display()));
@@ -480,21 +482,18 @@ fn extract(archive: &Path, to: &Path) -> Result<(), String> {
     .map(drop)
 }
 
-/// The library file a link of kind `stat` needs, for `triple`.
-fn lib_file(name: &str, stat: bool, triple: &str) -> String {
-    if triple.contains("-windows") {
-        format!("lib/{name}.lib")
-    } else if stat {
-        format!("lib/lib{name}.a")
-    } else if triple.contains("-apple-") {
-        format!("lib/lib{name}.dylib")
+/// The library file a link of kind `stat` needs, for target `t`
+/// (COFF links a shared library through its import library).
+fn lib_file(name: &str, stat: bool, t: &TargetSpec) -> String {
+    if stat || t.object_format == ObjectFormat::Coff {
+        format!("lib/{}", t.staticlib(name))
     } else {
-        format!("lib/lib{name}.so")
+        format!("lib/{}", t.dylib(name))
     }
 }
 
 /// An unpacked archive has what `a` names, and no link leaves it.
-fn check(files: &Path, a: &Artifact, triple: &str) -> Result<(), String> {
+fn check(files: &Path, a: &Artifact, t: &TargetSpec) -> Result<(), String> {
     fn walk(dir: &Path, depth: usize, root: &Path) -> Result<(), String> {
         for e in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
             let p = e.map_err(|e| e.to_string())?.path();
@@ -527,7 +526,7 @@ fn check(files: &Path, a: &Artifact, triple: &str) -> Result<(), String> {
     }
     walk(files, 0, files)?;
     for (name, stat) in &a.links {
-        let f = lib_file(name, *stat, triple);
+        let f = lib_file(name, *stat, t);
         if !files.join(&f).is_file() {
             return Err(format!("link `{name}` needs {f}, which the archive lacks"));
         }
@@ -543,7 +542,7 @@ fn check(files: &Path, a: &Artifact, triple: &str) -> Result<(), String> {
             .to_string_lossy();
         // ELF: executables name the library by its soname, and look for
         // that file beside themselves.
-        if !triple.contains("-apple-") && !triple.contains("-windows") && file.contains(".so") {
+        if t.object_format == ObjectFormat::Elf && file.contains(".so") {
             let bytes = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
             match soname(&bytes) {
                 Some(n) if n == file => {}
@@ -556,7 +555,7 @@ fn check(files: &Path, a: &Artifact, triple: &str) -> Result<(), String> {
                 }
             }
         }
-        if triple.contains("-apple-") && p.extension().is_some_and(|x| x == "dylib") {
+        if t.object_format == ObjectFormat::MachO && p.extension().is_some_and(|x| x == "dylib") {
             let bytes = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
             match install_name(&bytes) {
                 Some(n) if n.starts_with("@rpath/") => {}
@@ -661,29 +660,29 @@ fn install_name(b: &[u8]) -> Option<String> {
 }
 
 /// rokc's arguments for linking `natives` (dependents first) for
-/// `triple`: `-L <lib>`, `-l kind=name`, `--native-runtime <file>`.
+/// target `t`: `-L <lib>`, `-l kind=name`, `--native-runtime <file>`.
 pub fn rokc_args(
     home: &Path,
     natives: &[&Resolved],
-    triple: &str,
+    t: &TargetSpec,
     offline: bool,
     quiet: bool,
 ) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     for n in natives {
-        // musl executables are static: no shared library to load.
-        if triple.contains("-musl") {
-            if let Some((_, a)) = n.entry.targets.iter().find(|(t, _)| t == triple) {
+        // Static executables load no shared library.
+        if !t.dynamic_linking {
+            if let Some((_, a)) = n.entry.targets.iter().find(|(name, _)| *name == t.name) {
                 if let Some((l, _)) = a.links.iter().find(|(_, stat)| !stat) {
                     return Err(format!(
-                        "native package `{}` {} links `{l}` as a shared library, but {triple} \
-                         executables are static (a musl build needs \"static\" links)",
-                        n.entry.name, n.entry.vers
+                        "native package `{}` {} links `{l}` as a shared library, but {} \
+                         executables are static (it needs \"static\" links)",
+                        n.entry.name, n.entry.vers, t.name
                     ));
                 }
             }
         }
-        let (dir, a) = unpack(home, n, triple, offline, quiet)?;
+        let (dir, a) = unpack(home, n, t, offline, quiet)?;
         out.push(format!("-L{}", dir.join("lib").display()));
         for (name, stat) in &a.links {
             out.push(format!(
@@ -736,7 +735,8 @@ pub fn publish(
             base: None,
             dev: false,
         };
-        let (dir, _) = unpack(home, &n, t, false, true)?;
+        let spec = TargetSpec::builtin(t).ok_or_else(|| format!("{t}: not a built-in target"))?;
+        let (dir, _) = unpack(home, &n, &spec, false, true)?;
         let license = std::fs::read_dir(&dir)
             .map_err(|e| e.to_string())?
             .flatten()
@@ -830,12 +830,23 @@ mod tests {
         assert!(locate(None, "z.tgz").is_err());
         assert_eq!(dir_of("https://h/a/m.rokon"), "https://h/a");
         assert_eq!(dir_of("/v/m.rokon"), "/v");
-        assert_eq!(lib_file("z", false, "x86_64-pc-windows-msvc"), "lib/z.lib");
+        let t = |n| TargetSpec::builtin(n).unwrap();
         assert_eq!(
-            lib_file("z", false, "x86_64-unknown-linux-gnu"),
+            lib_file("z", false, &t("x86_64-pc-windows-msvc")),
+            "lib/z.lib"
+        );
+        assert_eq!(
+            lib_file("z", false, &t("x86_64-unknown-linux-gnu")),
             "lib/libz.so"
         );
-        assert_eq!(lib_file("z", true, "aarch64-apple-darwin"), "lib/libz.a");
+        assert_eq!(
+            lib_file("z", true, &t("aarch64-apple-darwin")),
+            "lib/libz.a"
+        );
+        assert_eq!(
+            lib_file("z", false, &t("aarch64-apple-darwin")),
+            "lib/libz.dylib"
+        );
         // A minimal 64-bit Mach-O with LC_ID_DYLIB `@rpath/libz.dylib`.
         let name = b"@rpath/libz.dylib\0\0\0\0\0\0\0";
         let mut m = Vec::new();
@@ -890,7 +901,8 @@ mod tests {
             dev: false,
         };
         let home = Path::new("/nonexistent-rok-home");
-        let e = rokc_args(home, &[&n], t, true, true).unwrap_err();
+        let spec = TargetSpec::builtin(t).unwrap();
+        let e = rokc_args(home, &[&n], &spec, true, true).unwrap_err();
         assert!(e.contains("links `zz` as a shared library"), "{e}");
     }
 }

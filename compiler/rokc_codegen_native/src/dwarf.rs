@@ -64,6 +64,8 @@ const DW_FORM_EXPRLOC: u8 = 0x18;
 const DW_FORM_FLAG_PRESENT: u8 = 0x19;
 
 const DW_OP_FBREG: u8 = 0x91;
+const DW_OP_DEREF: u8 = 0x06;
+const DW_OP_PLUS_UCONST: u8 = 0x23;
 /// `DW_OP_reg29` (arm64 `x29`) / `DW_OP_reg6` (`x86_64` `rbp`).
 const DW_OP_REG29: u8 = 0x6d;
 const DW_OP_REG6: u8 = 0x56;
@@ -449,16 +451,13 @@ impl Info<'_> {
         }
         let off = match d {
             DebugTy::Mir(t) => return self.ty(t),
+            // Shown as the value; the variable's location goes through
+            // the reference.
+            DebugTy::Cell(elem) => return self.debug_ty(elem),
             // A pointer to the object: its header, then the elements (as
             // many as its size holds).
             DebugTy::Buf(name, elem) => {
-                let u32_ = self.base(PrimTy::U32)?;
-                let u64_ = self.base(PrimTy::U64)?;
-                let mut m = vec![
-                    ("type_id".to_owned(), u32_, 0),
-                    ("gc_flags".to_owned(), u32_, 4),
-                    ("gc_word".to_owned(), u64_, 8),
-                ];
+                let mut m = self.header()?;
                 if let Some(e) = self.debug_ty(elem) {
                     let items = self.b.len() as u32;
                     self.b.push(A_ARRAY_OPEN);
@@ -468,58 +467,91 @@ impl Info<'_> {
                 let obj = self.structure(name, HEADER_SIZE, &m);
                 self.pointer_to(obj)
             }
-            DebugTy::Sum(name, mir, variants) => {
-                if !matches!(mir, MirTy::Tuple(_)) {
-                    return self.ty(mir);
+            // A pointer to the object: its header, then the value.
+            DebugTy::Boxed(value) => {
+                let mut m = self.header()?;
+                let mut size = HEADER_SIZE;
+                if let Some(v) = self.debug_ty(value) {
+                    m.push(("value".to_owned(), v, HEADER_SIZE));
+                    size += self.t.size_align(&value.mir()).0;
                 }
-                let size = self.t.size_align(mir).0;
-                let at = self.t.field_offsets(mir)[1];
-                // Each variant a struct over the whole sum (as Rust
-                // describes enums), its payload's parts at their offsets.
-                let mut arms = Vec::new();
-                for (tag, v, p) in variants {
-                    let fields: Vec<_> = match p {
-                        DebugTy::Mir(t @ MirTy::Tuple(ps)) => self
-                            .members(t, ps, &[], &[])
-                            .into_iter()
-                            .map(|(n, ty, o)| (n, ty, at + o))
-                            .collect(),
-                        p => self
-                            .debug_ty(p)
-                            .map(|ty| ("0".to_owned(), ty, at))
-                            .into_iter()
-                            .collect(),
-                    };
-                    arms.push((
-                        *tag,
-                        v,
-                        self.structure(&format!("{name}::{v}"), size, &fields),
-                    ));
-                }
-                let tag = self.base(PrimTy::U32)?;
-                let off = self.b.len() as u32;
-                self.b.push(A_STRUCT);
-                cstr(&mut self.b, name);
-                uleb(&mut self.b, u64::from(size));
-                // The discriminant member follows the variant part's
-                // abbreviation code and reference.
-                let discr = self.b.len() as u32 + 5;
-                self.b.push(A_VARIANT_PART);
-                self.u32(discr);
-                self.b.push(A_DISCR);
-                self.u32(tag);
-                self.b.push(0);
-                for (t, v, ty) in arms {
-                    self.b.push(A_VARIANT);
-                    uleb(&mut self.b, u64::from(t));
-                    self.member(v, ty, 0);
-                    self.b.push(0);
-                }
-                self.b.extend_from_slice(&[0, 0]);
-                off
+                let obj = self.structure("box", size, &m);
+                self.pointer_to(obj)
             }
+            DebugTy::Any => {
+                let m = self.m;
+                self.variant_part("any", &rokc_mir::any_ty(), &m.debug.any)?
+            }
+            DebugTy::Sum(name, mir, variants) => self.variant_part(name, mir, variants)?,
         };
         self.types.insert(key, off);
+        Some(off)
+    }
+
+    /// A GC object header's members.
+    fn header(&mut self) -> Option<Vec<(String, u32, u32)>> {
+        let u32_ = self.base(PrimTy::U32)?;
+        let u64_ = self.base(PrimTy::U64)?;
+        Some(vec![
+            ("type_id".to_owned(), u32_, 0),
+            ("gc_flags".to_owned(), u32_, 4),
+            ("gc_word".to_owned(), u64_, 8),
+        ])
+    }
+
+    /// A value laid out `(i32 tag, payload)` (a tuple, or `any`'s
+    /// struct) whose payload `variants` (`(stored tag, name, payload)`)
+    /// tells apart: a variant part.
+    fn variant_part(
+        &mut self,
+        name: &str,
+        mir: &MirTy,
+        variants: &[(u32, String, DebugTy)],
+    ) -> Option<u32> {
+        let size = self.t.size_align(mir).0;
+        let at = self.t.field_offsets(mir)[1];
+        // Each variant a struct over the whole sum (as Rust
+        // describes enums), its payload's parts at their offsets.
+        let mut arms = Vec::new();
+        for (tag, v, p) in variants {
+            let fields: Vec<_> = match p {
+                DebugTy::Mir(t @ MirTy::Tuple(ps)) => self
+                    .members(t, ps, &[], &[])
+                    .into_iter()
+                    .map(|(n, ty, o)| (n, ty, at + o))
+                    .collect(),
+                p => self
+                    .debug_ty(p)
+                    .map(|ty| ("0".to_owned(), ty, at))
+                    .into_iter()
+                    .collect(),
+            };
+            arms.push((
+                *tag,
+                v,
+                self.structure(&format!("{name}::{v}"), size, &fields),
+            ));
+        }
+        let tag = self.base(PrimTy::U32)?;
+        let off = self.b.len() as u32;
+        self.b.push(A_STRUCT);
+        cstr(&mut self.b, name);
+        uleb(&mut self.b, u64::from(size));
+        // The discriminant member follows the variant part's
+        // abbreviation code and reference.
+        let discr = self.b.len() as u32 + 5;
+        self.b.push(A_VARIANT_PART);
+        self.u32(discr);
+        self.b.push(A_DISCR);
+        self.u32(tag);
+        self.b.push(0);
+        for (t, v, ty) in arms {
+            self.b.push(A_VARIANT);
+            uleb(&mut self.b, u64::from(t));
+            self.member(v, ty, 0);
+            self.b.push(0);
+        }
+        self.b.extend_from_slice(&[0, 0]);
         Some(off)
     }
 
@@ -789,6 +821,10 @@ pub fn write(obj: &mut Obj, m: &MirModule) {
             info.u32(ty);
             let mut loc = vec![DW_OP_FBREG];
             sleb(&mut loc, i64::from(offs[i]));
+            if matches!(v.ty, DebugTy::Cell(_)) {
+                loc.extend([DW_OP_DEREF, DW_OP_PLUS_UCONST]);
+                uleb(&mut loc, u64::from(HEADER_SIZE));
+            }
             uleb(&mut info.b, loc.len() as u64);
             info.b.extend_from_slice(&loc);
         };
