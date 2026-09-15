@@ -146,6 +146,102 @@ fn unchanged_package_is_fresh() {
     assert_eq!(built(&["run"]), (true, "2\n".to_owned()));
 }
 
+/// 902.16: a package builds by codegen units (one per module); an edit
+/// recompiles the units it changed, those of a function's callers when
+/// its signature changes, and the executable is the one a clean build
+/// makes, byte for byte.
+#[test]
+fn edited_module_recompiles_its_unit_alone() {
+    let Some(env) = setup() else { return };
+    for opt in ["-O0", "-O2"] {
+        let dir = scratch(&format!("units{opt}"));
+        let app = dir.join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("main.rok"),
+            "mod a;\nmod b;\n\nfn main() -> i32 {\n    let xs: List<i64> = [b::three(), 4];\n    \
+             println(f\"{a::twice(xs[0])} {b::greet()} {xs.len()}\");\n    return 0;\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            app.join("a.rok"),
+            "pub fn twice(x: i64) -> i64 {\n    x * 2\n}\n",
+        )
+        .unwrap();
+        // A struct's method and a closure: their names must not move
+        // when `a` gains some.
+        let b = "struct B { v: i64; }\n\nimpl B {\n    fn get(self) -> i64 { self.v }\n}\n\n\
+                 pub fn three() -> i64 {\n    B { v: 3 }.get()\n}\n\n\
+                 pub fn greet() -> str {\n    let f = |s: str| s;\n    f(\"hi\")\n}\n";
+        fs::write(app.join("b.rok"), b).unwrap();
+        // The units compiled, and what the program prints.
+        let build = || {
+            let out = rokc(Some(&env), &app, &["build", "-vv", opt]);
+            assert_exit(&out, 0);
+            let stderr = text(&out.stderr);
+            let mut units: Vec<String> = stderr
+                .lines()
+                .filter_map(|l| l.trim().strip_prefix("Compiled unit "))
+                .map(str::to_owned)
+                .collect();
+            units.sort();
+            let run = rokc(Some(&env), &app, &["run", "-q", opt]);
+            assert_exit(&run, 0);
+            (units, text(&run.stdout))
+        };
+        let (units, out) = build();
+        assert!(
+            units.iter().any(|u| u == "a") && units.len() > 3,
+            "{units:?}"
+        );
+        assert_eq!(out, "6 hi 2\n");
+        // A body, and a new struct, method and closure (lowered before
+        // `b`'s).
+        fs::write(
+            app.join("a.rok"),
+            "struct A { v: i64; }\n\nimpl A {\n    fn one(self) -> i64 { self.v }\n}\n\n\
+             pub fn extra() -> i64 {\n    let f = |y: i64| y * 2;\n    f(A { v: 1 }.one())\n}\n\n\
+             pub fn twice(x: i64) -> i64 {\n    x * 2 + 1\n}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            build(),
+            (vec!["a".to_owned()], "7 hi 2\n".to_owned()),
+            "{opt}"
+        );
+        // A signature: its callers' unit too.
+        fs::write(
+            app.join("b.rok"),
+            b.replace("three() -> i64", "three(k: i64) -> i64")
+                .replace("B { v: 3 }.get()", "B { v: 3 }.get() * k"),
+        )
+        .unwrap();
+        let main = fs::read_to_string(app.join("main.rok")).unwrap();
+        fs::write(
+            app.join("main.rok"),
+            main.replace("b::three()", "b::three(1)"),
+        )
+        .unwrap();
+        let (units, out) = build();
+        assert_eq!(units, ["<root>", "b"], "{opt}");
+        assert_eq!(out, "7 hi 2\n");
+        // The same executable as a clean build's.
+        let exe = |name: &str| {
+            let profile = if opt == "-O2" { "release" } else { "debug" };
+            fs::read(app.join("target").join(profile).join(name)).unwrap()
+        };
+        let name = if cfg!(windows) { "app.exe" } else { "app" };
+        let incremental = exe(name);
+        fs::remove_dir_all(app.join("target")).unwrap();
+        let (units, _) = build();
+        assert!(units.len() > 3, "{units:?}");
+        assert!(
+            incremental == exe(name),
+            "{opt}: not the clean build's executable"
+        );
+    }
+}
+
 /// `-vv` (909.5): the files read and the generic instances made.
 #[test]
 fn very_verbose_lists_files_and_instances() {
@@ -1916,4 +2012,69 @@ fn profile_guided_optimization_on_wasm32_wasi() {
     let merge = ["-q", "profdata", "merge", "-o", "p.profdata", "raw"];
     assert_exit(&rokc(None, &dir, &merge), 0);
     build(&["-C", "profile-use=p.profdata", "-o", "pgo.wasm"]);
+}
+
+/// `ROK_CC` links a `wasm32-wasi` component with its WIT (stdlib 1.8):
+/// the driver gets the component type and the exports through `-Wl,`,
+/// clang's name of the target and, for a component without `main`, the
+/// reactor exec model. A stand-in driver records its arguments.
+#[cfg(unix)]
+#[test]
+fn rok_cc_links_wit_components() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(_env) = setup() else { return };
+    let rt = workspace().join("target/lib/rok/targets/wasm32-wasi/librokr.a");
+    if !rt.is_file() {
+        eprintln!("skipped: no wasm32-wasi runtime (targets/build.sh wasm32-wasi)");
+        return;
+    }
+    let dir = scratch("rok-cc-wit");
+    fs::write(
+        dir.join("calc.wit"),
+        "package test:calc;\n\nworld calc {\n    export add: func(a: s32, b: s32) -> s32;\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("main.rok"),
+        "ffi::wit::export { \"calc.wit\" }\n\n#[wit::export]\nfn add(a: i32, b: i32) -> i32 { a + b }\n",
+    )
+    .unwrap();
+    let cc = dir.join("cc.sh");
+    let args = dir.join("args");
+    fs::write(
+        &cc,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexit 1\n",
+            args.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&cc, fs::Permissions::from_mode(0o755)).unwrap();
+    let out = Command::new(ROKC)
+        .current_dir(&dir)
+        .env("ROK_HOME", workspace())
+        .env("ROK_CC", &cc)
+        .args([
+            "build",
+            "main.rok",
+            "--target=wasm32-wasi",
+            "-o",
+            "out.wasm",
+        ])
+        .output()
+        .unwrap();
+    assert_exit(&out, 1);
+    let args = fs::read_to_string(&args).unwrap();
+    for want in [
+        "--target=wasm32-wasip2",
+        "-Wl,--export=add",
+        "-Wl,--export=cabi_realloc",
+        "-mexec-model=reactor",
+    ] {
+        assert!(args.lines().any(|l| l == want), "{want}:\n{args}");
+    }
+    assert!(
+        args.lines().any(|l| l.starts_with("-Wl,--component-type,")),
+        "{args}"
+    );
 }

@@ -37,6 +37,10 @@ fn end_to_end_cases() {
         })
         .collect();
     cases.sort();
+    if let Some(f) = std::env::var_os("ROK_TEST_FILTER") {
+        let f = f.to_string_lossy().into_owned();
+        cases.retain(|(name, _)| name.contains(&f));
+    }
 
     let results = par_map(&cases, |(name, path)| {
         let r = run_case(&env, name, path, &scratch);
@@ -139,7 +143,11 @@ fn run_case(
         }
     }
 
-    check_run(&source, &exe, expected, &[])?;
+    // A reactor has no `run`: only its exports are called.
+    let reactor = directives(&source, "wasm-reactor").next().is_some();
+    if !reactor {
+        check_run(&source, &exe, expected, &[])?;
+    }
     for inv in directives(&source, "wasm-invoke:") {
         let (call, want) = inv
             .split_once(" => ")

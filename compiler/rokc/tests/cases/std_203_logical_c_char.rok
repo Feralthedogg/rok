@@ -1,0 +1,35 @@
+// expect-exit: 0
+// expect-stdout:
+// false true
+// false true
+// 0
+// false true true true
+// 2 A
+
+// Stdlib 2.3.9: `LogicalAnd` / `LogicalOr` are implemented for `bool`;
+// `&&` / `||` on two bools still short-circuit. Stdlib 2.5: `c_char`
+// is `Eq` / `Ord` / `Hash`.
+static CALLS: Atomic<i32> = Atomic::new(0);
+
+fn side(b: bool) -> bool {
+    CALLS.fetch_add(1);
+    b
+}
+
+fn same<T: Eq + Ord + Hash>(a: T, b: T) -> bool {
+    a == b && a.cmp(b) == Ordering::Equal && a.hash() == b.hash()
+}
+
+fn main() {
+    println(f"{true.logical_and(false)} {false.logical_or(true)}");
+    println(f"{false && side(true)} {true || side(false)}");
+    println(f"{CALLS.load()}");
+    let a = 65u8 as c_char;
+    let b = 66u8 as c_char;
+    println(f"{a == b} {a < b} {same(a, a)} {a.cmp(b) == Ordering::Less}");
+    let s: Set<c_char> = Set::new();
+    s.insert(a);
+    s.insert(b);
+    s.insert(a);
+    println(f"{s.len()} {(a as u8) as char}");
+}

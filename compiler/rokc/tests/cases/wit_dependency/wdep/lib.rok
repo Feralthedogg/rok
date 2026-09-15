@@ -1,0 +1,8 @@
+// A dependency with WIT of its own: bindings of WASI's `random` in its
+// module `sys`, and an export at its root.
+pub mod sys;
+
+ffi::wit::export { "wit/calc.wit" }
+
+#[wit::export]
+pub fn add(a: i32, b: i32) -> i32 { a + b + sys::bias() }

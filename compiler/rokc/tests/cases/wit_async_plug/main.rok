@@ -1,0 +1,93 @@
+// only-target: wasm32-wasi
+// wasm-plug: plug/main.rok
+// expect-exit: 0
+// expect-stdout:
+// slow-add 5
+// bump 13 23
+// rejected bad start -1
+// count [1, 2, 3, 4, 5]
+// sum 4950
+// later hi!
+// fail 0 then error [boom]
+// flip [4, 3, 2, 1]
+// grid [[0, -1], [1, 0], [2, 1]]
+// many 20 2 2
+// maybe some(some(0)) none some(none) some(some(8))
+// drops 1
+// raw 7
+
+// Stdlib 1.8: the component model's async ABI between two components
+// (WASI preview 3, joined by `wac plug`). `plug/main.rok` is a reactor
+// exporting `svc`; this command exports `wasi:cli/run@0.3.0` as an
+// `async fn` and awaits `svc`'s async functions: an async method of a
+// resource from a fallible constructor (`throws`), a stream each way
+// (a channel `Receiver`), a future (`AsyncFuture`), an `error-context`
+// error. Also a fixed-size list (`[u8; 4]`), a nested option (`u32??`),
+// the exporter's `Drop` run by the resource's destructor, and a raw
+// import through `#[link(wasm_import_module)]` / `#[link_name]`.
+ffi::wit::import { "wit/consumer.wit" }
+
+use test::aio::svc;
+use test::aio::svc::Counter;
+use rok::core::channel::channel;
+
+#[link(wasm_import_module = "test:aio/svc")]
+extern "C" {
+    #[link_name = "get"]
+    fn raw_get() -> i32;
+}
+
+fn show(x: u32??) -> str {
+    match x {
+        none => "none",
+        v: u32? => match v {
+            none => "some(none)",
+            n: u32 => f"some(some({n}))",
+        },
+    }
+}
+
+#[wit::export]
+async fn run() -> Result<(), ()> {
+    println(f"slow-add {await svc::slow_add(2u32, 3u32)}");
+    let c = try! Counter::new(10);
+    let a = await c.bump(3u32);
+    let b = await c.bump(10u32);
+    println(f"bump {a} {b}");
+    try Counter::new(-1) catch e { println(f"rejected {e}"); };
+    let counted: List<u32> = List::new();
+    for await x in await svc::count_to(5u32) {
+        counted.push(x);
+    }
+    println(f"count {counted:?}");
+    let (tx, rx) = channel::<u32>();
+    let total = svc::sum(rx);
+    for i in 0..100u32 {
+        try! tx.send(i);
+    }
+    tx.close();
+    println(f"sum {await total}");
+    let f = await svc::later("hi");
+    println(f"later {await f}");
+    let ok = try! await svc::fail("");
+    let failed = "value";
+    try await svc::fail("boom") catch e {
+        failed = f"error [{e.debug_message()}]";
+    };
+    println(f"fail {ok} then {failed}");
+    println(f"flip {svc::flip([1u8, 2u8, 3u8, 4u8]):?}");
+    println(f"grid {svc::grid():?}");
+    let m = svc::many([1u8; 20]);
+    println(f"many {m.len()} {m[0]} {m[19]}");
+    let inner_none: u32? = none;
+    let some_none: u32?? = inner_none;
+    let seven: u32? = 7u32;
+    let some_seven: u32?? = seven;
+    println(f"maybe {show(svc::maybe(none))} {show(svc::maybe(some_none))} {show(svc::maybe(0u32))} {show(svc::maybe(some_seven))}");
+    using d = try! Counter::new(1) {
+        await d.bump(1u32);
+    }
+    println(f"drops {svc::drops()}");
+    println(f"raw {unsafe { raw_get() }}");
+    Result::Ok(())
+}

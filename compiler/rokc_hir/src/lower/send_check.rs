@@ -398,7 +398,7 @@ impl Walk<'_> {
     }
 }
 
-fn each_binding(p: &HirPattern, out: &mut dyn FnMut(LocalId)) {
+pub(super) fn each_binding(p: &HirPattern, out: &mut dyn FnMut(LocalId)) {
     match p {
         HirPattern::Binding { local, .. }
         | HirPattern::SumVariant {
@@ -911,7 +911,7 @@ impl Flow<'_> {
 }
 
 /// The local a place expression reads from (`x`, `x.f`, `x[i]` ..).
-fn root(e: &HirExpr) -> Option<LocalId> {
+pub(super) fn root(e: &HirExpr) -> Option<LocalId> {
     match &e.kind {
         HirExprKind::Local(l) => Some(*l),
         HirExprKind::FieldRead { target: x, .. }
@@ -926,14 +926,14 @@ fn root(e: &HirExpr) -> Option<LocalId> {
 }
 
 #[derive(Clone, Copy)]
-enum Child<'e> {
+pub(super) enum Child<'e> {
     E(&'e HirExpr),
     B(&'e HirBlock),
 }
 
 /// The direct sub-expressions and sub-blocks of `e` in evaluation order
 /// (not `Match`: callers handle its patterns).
-fn each_child<'e>(e: &'e HirExpr, out: &mut dyn FnMut(Child<'e>)) {
+pub(super) fn each_child<'e>(e: &'e HirExpr, out: &mut dyn FnMut(Child<'e>)) {
     use HirExprKind as K;
     match &e.kind {
         K::Block(b) => out(Child::B(b)),

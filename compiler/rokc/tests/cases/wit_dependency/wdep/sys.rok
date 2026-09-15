@@ -1,0 +1,8 @@
+ffi::wit::import { "wit/rand.wit" }
+
+/// Bytes from the host's random source.
+pub fn noise(n: u64) -> List<u8> {
+    pkg::sys::wasi::random::random::get_random_bytes(n)
+}
+
+pub fn bias() -> i32 { 0 }

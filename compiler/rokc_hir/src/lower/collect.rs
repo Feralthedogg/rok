@@ -220,6 +220,7 @@ pub fn lower_full(
     uses: &crate::uses::UseTable,
     reexports: &[crate::uses::ReExport],
     input: &crate::HirInput,
+    sources: &rokc_diagnostic::SourceMap,
 ) -> HirModule {
     resolve::set_packages(input.packages.clone());
     super::const_eval::set_pointer_width(input.pointer_width);
@@ -760,8 +761,10 @@ pub fn lower_full(
     let std_linked = std_prebuilt || input.lib.as_deref() == Some("rok");
     let mut generic_fns: HashMap<String, &FnDef> = HashMap::new();
     let generic_methods: HashMap<(String, String), Vec<GenericMethod>> = HashMap::new();
-    // Generic impls with method templates so far (names `__impl{n}_m`).
-    let mut templated = 0;
+    // Generic impls with method templates (names `__impl{tag}_m`): the
+    // tag hashes the impl's module, trait and target, so it stays when
+    // another impl comes or goes; a repeat gets a count.
+    let mut templated: HashMap<String, usize> = HashMap::new();
     let mut intrinsics: HashMap<FunctionId, PrimOp> = HashMap::new();
     let mut generic_intrinsics: HashMap<String, Intrinsic> = HashMap::new();
     let mut unsafe_fns: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
@@ -769,6 +772,7 @@ pub fn lower_full(
     let mut c_variadic: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
     let mut no_safepoint: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
     let mut wasm_imports: HashMap<FunctionId, (String, String)> = HashMap::new();
+    let mut extern_symbols: HashMap<FunctionId, String> = HashMap::new();
     // `extern "rok"` declarations: the runtime's own ABI.
     let mut rok_externs: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
     // A declaration's signature: its types are resolved once every item
@@ -821,16 +825,6 @@ pub fn lower_full(
                 lib_decl.push(!package_of(&module).is_empty());
             }
             Item::Extern(blk) => {
-                // The driver expands those of the program's package.
-                if blk.wit.is_some() {
-                    err(
-                        &mut pre_diags,
-                        here,
-                        "`ffi::wit` is for the program's own package, not a dependency (stdlib 1.8)"
-                            .to_owned(),
-                    );
-                    continue;
-                }
                 let rok_abi = blk.abi == "rok";
                 let quiet = blk.attrs.iter().any(|a| a.path == ["no_safepoint"]);
                 if quiet && !rok_abi {
@@ -850,6 +844,7 @@ pub fn lower_full(
                         ),
                     );
                 }
+                let import_module = wasm_import_module(&blk.attrs);
                 for ei in &blk.items {
                     let rokc_ast::ExternItem::Fn(fn_def) = ei else {
                         continue;
@@ -887,8 +882,12 @@ pub fn lower_full(
                     {
                         c_variadic.insert(id);
                     }
-                    if let Some(w) = wasm_import_of(fn_def) {
-                        wasm_imports.insert(id, w);
+                    let link_name = link_name_of(fn_def);
+                    if let Some(m) = &import_module {
+                        let name = link_name.unwrap_or_else(|| fn_def.name.clone());
+                        wasm_imports.insert(id, (m.clone(), name));
+                    } else if let Some(n) = link_name {
+                        extern_symbols.insert(id, n);
                     }
                     decls.push(MethodOrFn::Fn(fn_def));
                     lib_decl.push(false);
@@ -1002,9 +1001,17 @@ pub fn lower_full(
         {
             let trait_key = trait_name.unwrap_or_default();
             let td = trait_defs.get(&trait_key).copied();
-            let mut gi =
-                generic_trait_impl(impl_def, trait_key, td, &module, templated, &mut pre_diags);
-            templated += 1;
+            let id = format!(
+                "{module}|{trait_key}|{}",
+                impl_def_display(&impl_def.self_ty)
+            );
+            let mut tag = format!("{:08x}", rokc_core::hash::fnv(id.as_bytes()) as u32);
+            let seen = templated.entry(tag.clone()).or_insert(0);
+            if *seen > 0 {
+                tag = format!("{tag}_{seen}");
+            }
+            *seen += 1;
+            let mut gi = generic_trait_impl(impl_def, trait_key, td, &module, &tag, &mut pre_diags);
             gi.consts = consts;
             impls.all.push(gi);
             continue;
@@ -1127,6 +1134,7 @@ pub fn lower_full(
         tentative_ret: std::cell::RefCell::default(),
     };
     let mut env = Env {
+        sources,
         infer_ret: std::collections::HashSet::new(),
         implicit_main: input.root_main == crate::RootMain::Implicit,
         harness_main: input.root_main == crate::RootMain::Harness,
@@ -1829,6 +1837,7 @@ pub fn lower_full(
     rokc_diagnostic::time("hir send check", || {
         super::send_check::check(&env, &functions);
     });
+    super::frame_ptr::check(&env, &functions);
     let (any_seeds, any_exports) = super::expr::any_link(&env, lib_pkg.as_deref());
     let any_types = super::expr::any_types(&env);
     if lib_pkg.is_some() || !prebuilt.is_empty() {
@@ -1878,6 +1887,9 @@ pub fn lower_full(
     for (id, w) in &wasm_imports {
         set(id, &|f| f.wasm_import = Some(w.clone()));
     }
+    for (id, n) in &extern_symbols {
+        set(id, &|f| f.link_name = Some(n.clone()));
+    }
     for id in &prebuilt {
         set(id, &|f| f.linkage = Linkage::Prebuilt);
     }
@@ -1890,7 +1902,7 @@ pub fn lower_full(
     if let Some(id) = &main {
         set(id, &|f| f.role = FnRole::Main);
     }
-    super::caller::lower(&mut functions, &sink.track_caller.borrow());
+    super::caller::lower(&mut functions, &sink.track_caller.borrow(), sources);
     // A prebuilt package's statics are initialized by its `.a`.
     let lazy_inits = static_defs
         .iter()
@@ -3294,7 +3306,7 @@ fn generic_trait_impl(
     trait_key: String,
     trait_def: Option<&rokc_ast::TraitDef>,
     module: &str,
-    index: usize,
+    tag: &str,
     diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
 ) -> Impl {
     let err = |pre: &mut Vec<rokc_diagnostic::RokDiagnostic>, msg: String| {
@@ -3310,12 +3322,12 @@ fn generic_trait_impl(
         let mut def = m.clone();
         subst_assoc_sig(&mut def, &assoc);
         let leaf = leaf_name(&m.name);
-        // `__impl3_show` is both the mono cache key and the name
+        // `__impl1f2e3d4c_show` is both the mono cache key and the name
         // diagnostics print.
         def.name = if def_module.is_empty() {
-            format!("__impl{index}_{leaf}")
+            format!("__impl{tag}_{leaf}")
         } else {
-            format!("{def_module}::__impl{index}_{leaf}")
+            format!("{def_module}::__impl{tag}_{leaf}")
         };
         // The method's own (assoc-substituted) generics after the impl's.
         def.generics.params = [&impl_def.generics.params, &def.generics.params]
@@ -5082,20 +5094,31 @@ fn check_extern_c_fn(f: &FnDef, diags: &mut Vec<rokc_diagnostic::RokDiagnostic>)
     }
 }
 
-/// `#wasm_import("module", "name")` of a WIT binding's extern function.
-fn wasm_import_of(f: &FnDef) -> Option<(String, String)> {
-    let a = f
-        .attrs
+/// `#[link(wasm_import_module = "m")]` on an `extern` block (spec
+/// 6.2.3): the core module its functions are imported from on wasm32.
+fn wasm_import_module(attrs: &[rokc_ast::Attribute]) -> Option<String> {
+    attrs
         .iter()
-        .find(|a| a.path == [rokc_ast::WASM_IMPORT_ATTR])?;
-    let rokc_ast::AttrBody::Args(args) = &a.body else {
-        return None;
-    };
-    match args.as_slice() {
-        [
-            rokc_ast::AttrArg::Lit(rokc_ast::Literal::Str(m)),
-            rokc_ast::AttrArg::Lit(rokc_ast::Literal::Str(n)),
-        ] => Some((m.clone(), n.clone())),
+        .filter(|a| a.path == ["link"])
+        .find_map(|a| match &a.body {
+            rokc_ast::AttrBody::Args(args) => args.iter().find_map(|x| match x {
+                rokc_ast::AttrArg::KeyValue(k, rokc_ast::Literal::Str(m))
+                    if k == "wasm_import_module" =>
+                {
+                    Some(m.clone())
+                }
+                _ => None,
+            }),
+            _ => None,
+        })
+}
+
+/// `#[link_name = "sym"]` on an extern function (spec 5.9.9): the symbol
+/// it links to; in a `wasm_import_module` block, its import name.
+fn link_name_of(f: &FnDef) -> Option<String> {
+    let a = f.attrs.iter().find(|a| a.path == ["link_name"])?;
+    match &a.body {
+        rokc_ast::AttrBody::Value(rokc_ast::Literal::Str(s)) => Some(s.clone()),
         _ => None,
     }
 }

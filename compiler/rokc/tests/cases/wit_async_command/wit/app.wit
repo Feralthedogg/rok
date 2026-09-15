@@ -1,0 +1,13 @@
+package test:aio;
+
+world app {
+    import wasi:clocks/monotonic-clock@0.3.0;
+    import wasi:cli/stdout@0.3.0;
+    import wasi:cli/stdin@0.3.0;
+    export wasi:cli/run@0.3.0;
+    export ops: interface {
+        delayed-add: async func(a: u32, b: u32, ms: u64) -> u32;
+        check: async func(x: s32) -> result<s32, string>;
+        echo: async func(s: string, n: u32) -> list<string>;
+    }
+}

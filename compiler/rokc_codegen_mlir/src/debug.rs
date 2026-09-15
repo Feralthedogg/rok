@@ -71,12 +71,9 @@ fn escape(s: &str) -> String {
 
 impl DebugInfo {
     #[must_use]
-    pub fn new(target: Target, optimized: bool) -> Self {
+    pub fn new(target: Target, optimized: bool, sources: &rokc_diagnostic::SourceMap) -> Self {
         let cwd = std::env::current_dir().unwrap_or_default();
-        let paths = rokc_diagnostic::registered_files()
-            .into_iter()
-            .map(|(p, _)| cwd.join(p))
-            .collect();
+        let paths = sources.files().iter().map(|(p, _)| cwd.join(p)).collect();
         Self {
             paths,
             defs: String::new(),

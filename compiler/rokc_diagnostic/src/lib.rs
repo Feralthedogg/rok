@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Source location as byte offsets plus 1-based line/column. `file` is
-/// a `register_file` id (0 = unknown).
+/// a `SourceMap` id (0 = unknown).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub struct Span {
     pub start: u32,
@@ -65,62 +65,19 @@ pub fn time<T>(what: &str, f: impl FnOnce() -> T) -> T {
     r
 }
 
-/// Source files by id (`Span::file` - 1): path and text, for locations
-/// and the caret line under a diagnostic.
-static FILES: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
-
-/// Register a source file; its id goes into the `file` of its spans. A
-/// file already registered with the same text keeps its id.
-pub fn register_file(path: String, source: String) -> u32 {
-    let mut files = FILES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let i = files
-        .iter()
-        .position(|(p, s)| *p == path && *s == source)
-        .unwrap_or_else(|| {
-            files.push((path, source));
-            files.len() - 1
-        });
-    drop(files);
-    u32::try_from(i + 1).unwrap_or(0)
+/// The source files of one compile, by id (`Span::file` - 1): path and
+/// text, for locations and the caret line under a diagnostic. The
+/// driver fills it; whoever renders the compile's diagnostics reads it.
+#[derive(Clone, Debug, Default)]
+pub struct SourceMap {
+    files: Vec<(String, String)>,
+    views: Vec<View>,
 }
 
-/// Forget every registered file: a long-lived embedder (LSP, REPL)
-/// calls it before each recompile so the table does not grow without
-/// bound. Spans from earlier compiles no longer resolve.
-pub fn clear_files() {
-    FILES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clear();
-    VIEWS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clear();
-}
-
-/// How many files are registered (the next one's id is this plus 1).
-pub fn registered_count() -> usize {
-    FILES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .len()
-}
-
-/// Every registered source file `(path, text)`, in registration order.
-pub fn registered_files() -> Vec<(String, String)> {
-    FILES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
-}
-
-/// Stretches of files `location` shows as another file: a REPL cell
+/// A stretch of a file `location` shows as another file: a REPL cell
 /// inside its generated session source reads as `<repl>:1:1`, a program
 /// loaded into a session (`repl <path>`) as the program's own lines.
-static VIEWS: Mutex<Vec<View>> = Mutex::new(Vec::new());
-
+#[derive(Clone, Debug)]
 struct View {
     id: u32,
     path: String,
@@ -132,85 +89,114 @@ struct View {
     at: (u32, u32),
 }
 
-/// Make `location` show lines `from.0..=last` of file `id` as `path`.
-///
-/// `from` (line, column) shows as `at`. A span of `id` outside every
-/// such stretch shows as the first one's `path`, without a position.
-/// Lasts until `clear_files`.
-pub fn view_file(id: u32, path: String, from: (u32, u32), last: u32, at: (u32, u32)) {
-    VIEWS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .push(View {
+impl SourceMap {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            files: Vec::new(),
+            views: Vec::new(),
+        }
+    }
+
+    /// Add a source file; its id goes into the `file` of its spans. A
+    /// file already added with the same text keeps its id.
+    pub fn add(&mut self, path: String, source: String) -> u32 {
+        let i = self
+            .files
+            .iter()
+            .position(|(p, s)| *p == path && *s == source)
+            .unwrap_or_else(|| {
+                self.files.push((path, source));
+                self.files.len() - 1
+            });
+        u32::try_from(i + 1).unwrap_or(0)
+    }
+
+    /// How many files there are (the next one's id is this plus 1).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    /// Every file `(path, text)`, by id.
+    #[must_use]
+    pub fn files(&self) -> &[(String, String)] {
+        &self.files
+    }
+
+    /// Path and text of file `id` (a span's `file`).
+    #[must_use]
+    pub fn file(&self, id: u32) -> Option<&(String, String)> {
+        self.files.get(usize::try_from(id).ok()?.checked_sub(1)?)
+    }
+
+    /// The path of file `id`.
+    #[must_use]
+    pub fn path(&self, id: u32) -> Option<&str> {
+        self.file(id).map(|(p, _)| p.as_str())
+    }
+
+    fn source_by_path(&self, path: &str) -> Option<&str> {
+        self.files
+            .iter()
+            .find(|(p, _)| p == path)
+            .map(|(_, s)| s.as_str())
+    }
+
+    /// Make `location` show lines `from.0..=last` of file `id` as `path`.
+    ///
+    /// `from` (line, column) shows as `at`. A span of `id` outside every
+    /// such stretch shows as the first one's `path`, without a position.
+    pub fn view(&mut self, id: u32, path: String, from: (u32, u32), last: u32, at: (u32, u32)) {
+        self.views.push(View {
             id,
             path,
             from,
             last,
             at,
         });
-}
-
-/// `path:line:col` of `span`, as a panic reports it; `<unknown>` for a
-/// span without a source position.
-#[must_use]
-pub fn location(span: Span) -> String {
-    let views = VIEWS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut of_file = views.iter().filter(|v| v.id == span.file).peekable();
-    if let Some(first) = of_file.peek() {
-        let path = first.path.clone();
-        let inside = |v: &&View| (v.from.0..=v.last).contains(&span.line);
-        return match of_file.find(inside) {
-            Some(v) if span.line == v.from.0 => {
-                let col = (span.col + v.at.1).saturating_sub(v.from.1).max(1);
-                format!("{}:{}:{col}", v.path, v.at.0)
-            }
-            Some(v) => format!(
-                "{}:{}:{}",
-                v.path,
-                span.line - v.from.0 + v.at.0,
-                span.col.max(1)
-            ),
-            None => path,
-        };
     }
-    drop(views);
-    let files = FILES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let file = usize::try_from(span.file)
-        .ok()
-        .and_then(|i| i.checked_sub(1))
-        .and_then(|i| files.get(i));
-    match file {
-        Some((p, _)) if span.line != 0 => format!("{p}:{}:{}", span.line, span.col.max(1)),
-        _ => "<unknown>".to_owned(),
+
+    /// `path:line:col` of `span`, as a panic reports it; `<unknown>` for
+    /// a span without a source position.
+    #[must_use]
+    pub fn location(&self, span: Span) -> String {
+        let mut of_file = self.views.iter().filter(|v| v.id == span.file).peekable();
+        if let Some(first) = of_file.peek() {
+            let path = first.path.clone();
+            let inside = |v: &&View| (v.from.0..=v.last).contains(&span.line);
+            return match of_file.find(inside) {
+                Some(v) if span.line == v.from.0 => {
+                    let col = (span.col + v.at.1).saturating_sub(v.from.1).max(1);
+                    format!("{}:{}:{col}", v.path, v.at.0)
+                }
+                Some(v) => format!(
+                    "{}:{}:{}",
+                    v.path,
+                    span.line - v.from.0 + v.at.0,
+                    span.col.max(1)
+                ),
+                None => path,
+            };
+        }
+        match self.path(span.file) {
+            Some(p) if span.line != 0 => format!("{p}:{}:{}", span.line, span.col.max(1)),
+            _ => "<unknown>".to_owned(),
+        }
     }
-}
 
-/// The path of registered file `id` (a span's `file`).
-pub fn file_path(id: u32) -> Option<String> {
-    file_by_id(id).map(|(p, _)| p)
-}
-
-fn file_by_id(id: u32) -> Option<(String, String)> {
-    let files = FILES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    files
-        .get(usize::try_from(id).ok()?.checked_sub(1)?)
-        .cloned()
-}
-
-fn source_by_path(path: &str) -> Option<String> {
-    let files = FILES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    files
-        .iter()
-        .find(|(p, _)| p == path)
-        .map(|(_, s)| s.clone())
+    /// The file path of `diag`: explicit, else its primary span's file.
+    fn diag_path(&self, diag: &RokDiagnostic) -> Option<String> {
+        diag.file.clone().or_else(|| {
+            let span = diag.primary.as_ref()?.span;
+            Some(self.path(span.file)?.to_owned())
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -371,14 +357,6 @@ impl RokDiagnostic {
 }
 
 impl RokDiagnostic {
-    /// The file path: explicit, else from the primary span's file id.
-    fn path(&self) -> Option<String> {
-        self.file.clone().or_else(|| {
-            let span = self.primary.as_ref()?.span;
-            Some(file_by_id(span.file)?.0)
-        })
-    }
-
     /// A `help:` note, printed as `= help: ..`.
     #[must_use]
     pub fn with_help(self, help: impl Into<String>) -> Self {
@@ -386,17 +364,21 @@ impl RokDiagnostic {
     }
 }
 
-impl fmt::Display for RokDiagnostic {
-    /// One line: `error[E200]: path:line:col: message`.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}[{}]: ", self.severity, self.kind.code())?;
-        if let Some(file) = self.path() {
-            match self.primary.as_ref().map(|l| l.span) {
-                Some(s) if s.line != 0 => write!(f, "{file}:{}:{}: ", s.line, s.col.max(1))?,
-                _ => write!(f, "{file}: ")?,
+impl SourceMap {
+    /// `diag` on one line: `error[E200]: path:line:col: message`.
+    #[must_use]
+    pub fn line(&self, diag: &RokDiagnostic) -> String {
+        let mut out = format!("{}[{}]: ", diag.severity, diag.kind.code());
+        if let Some(file) = self.diag_path(diag) {
+            match diag.primary.as_ref().map(|l| l.span) {
+                Some(s) if s.line != 0 => {
+                    out.push_str(&format!("{file}:{}:{}: ", s.line, s.col.max(1)));
+                }
+                _ => out.push_str(&format!("{file}: ")),
             }
         }
-        f.write_str(&self.message)
+        out.push_str(&diag.message);
+        out
     }
 }
 
@@ -521,13 +503,13 @@ impl ErrorKind {
     }
 }
 
-impl RokDiagnostic {
-    /// One-line JSON (spec 909.4):
+impl SourceMap {
+    /// `diag` as one-line JSON (spec 909.4):
     /// `{"type","code","kind","message","spans":[..],"notes":[..]}`.
     #[must_use]
-    pub fn to_json(&self) -> String {
+    pub fn json(&self, diag: &RokDiagnostic) -> String {
         let span_json = |l: &Label, primary: bool, file: Option<String>| {
-            let file = file.or_else(|| Some(file_by_id(l.span.file)?.0));
+            let file = file.or_else(|| Some(self.path(l.span.file)?.to_owned()));
             Json::obj([
                 ("file_name", file.map_or(Json::Null, Json::Str)),
                 ("line_start", Json::num(l.span.line)),
@@ -539,24 +521,24 @@ impl RokDiagnostic {
             ])
         };
         let mut spans = Vec::new();
-        if let Some(p) = &self.primary {
-            spans.push(span_json(p, true, self.path()));
-        } else if let Some(file) = self.path() {
+        if let Some(p) = &diag.primary {
+            spans.push(span_json(p, true, self.diag_path(diag)));
+        } else if let Some(file) = self.diag_path(diag) {
             spans.push(Json::obj([
                 ("file_name", Json::Str(file)),
                 ("is_primary", Json::Bool(true)),
             ]));
         }
-        spans.extend(self.secondary.iter().map(|l| span_json(l, false, None)));
+        spans.extend(diag.secondary.iter().map(|l| span_json(l, false, None)));
         Json::obj([
-            ("type", Json::str(self.severity.to_string())),
-            ("code", Json::str(self.kind.code())),
-            ("kind", Json::str(self.kind.to_string())),
-            ("message", Json::str(&self.message)),
+            ("type", Json::str(diag.severity.to_string())),
+            ("code", Json::str(diag.kind.code())),
+            ("kind", Json::str(diag.kind.to_string())),
+            ("message", Json::str(&diag.message)),
             ("spans", Json::Arr(spans)),
             (
                 "notes",
-                Json::Arr(self.notes.iter().map(Json::str).collect()),
+                Json::Arr(diag.notes.iter().map(Json::str).collect()),
             ),
         ])
         .to_string()
@@ -573,20 +555,22 @@ pub fn report_style() -> u8 {
 /// Warnings `report`ed inside `capture_warnings`, rendered.
 static CAPTURED: Mutex<Option<String>> = Mutex::new(None);
 
-/// Print one diagnostic: human text on stderr, or a JSON line on stdout
-/// (see `set_report_style`).
-pub fn report(diag: &RokDiagnostic) {
-    let text = render(diag);
-    if !diag.is_error() {
-        if let Some(c) = CAPTURED
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_mut()
-        {
-            c.push_str(&text);
+impl SourceMap {
+    /// Print one diagnostic: human text on stderr, or a JSON line on
+    /// stdout (see `set_report_style`).
+    pub fn report(&self, diag: &RokDiagnostic) {
+        let text = self.render(diag);
+        if !diag.is_error() {
+            if let Some(c) = CAPTURED
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_mut()
+            {
+                c.push_str(&text);
+            }
         }
+        print_rendered(&text);
     }
-    print_rendered(&text);
 }
 
 /// Run `f`; also what it reported as warnings (on any thread), rendered,
@@ -613,159 +597,161 @@ pub fn print_rendered(text: &str) {
     }
 }
 
-/// `diag` as `report` prints it, newline-terminated (spec 9.1.8):
-///
-/// ```text
-/// error[E100]: cannot find value `count` in this scope
-///   --> src/main.rok:5:10
-///    |
-///  5 |     let x = count + 1;
-///    |             ^^^^^ not found in this scope
-///    |
-///    = help: a local with a similar name exists: `counter`
-/// ```
-#[must_use]
-pub fn render(diag: &RokDiagnostic) -> String {
-    let style = report_style();
-    if style == STYLE_JSON {
-        return format!("{}\n", diag.to_json());
-    }
-    let paint = |code: &str, text: &str| {
-        if style == STYLE_COLOR {
-            format!("\x1b[{code}m{text}\x1b[0m")
-        } else {
-            text.to_owned()
+impl SourceMap {
+    /// `diag` as `report` prints it, newline-terminated (spec 9.1.8):
+    ///
+    /// ```text
+    /// error[E100]: cannot find value `count` in this scope
+    ///   --> src/main.rok:5:10
+    ///    |
+    ///  5 |     let x = count + 1;
+    ///    |             ^^^^^ not found in this scope
+    ///    |
+    ///    = help: a local with a similar name exists: `counter`
+    /// ```
+    #[must_use]
+    pub fn render(&self, diag: &RokDiagnostic) -> String {
+        let style = report_style();
+        if style == STYLE_JSON {
+            return format!("{}\n", self.json(diag));
         }
-    };
-    let color = match diag.severity {
-        Severity::Error | Severity::Fatal => "1;31",
-        Severity::Warning => "1;33",
-        Severity::Note => "1;36",
-    };
-    let mut out = format!(
-        "{}{}\n",
-        paint(color, &format!("{}[{}]", diag.severity, diag.kind.code())),
-        paint("1", &format!(": {}", diag.message))
-    );
-    let path = diag.path();
-    let primary = diag.primary.as_deref();
-    let source = primary.and_then(|l| {
-        file_by_id(l.span.file)
-            .map(|(_, s)| s)
-            .or_else(|| source_by_path(path.as_deref()?))
-    });
-    // Labels in the primary's file go under its snippet; others are
-    // listed by location.
-    let mut marks: Vec<Mark<'_>> = Vec::new();
-    let mut elsewhere: Vec<&Label> = Vec::new();
-    let mut place = |l: &'_ Label, is_primary: bool| -> bool {
-        let (Some(p), Some(src)) = (primary, source.as_deref()) else {
-            return false;
-        };
-        if !is_primary && l.span.file != p.span.file && l.span.file != 0 {
-            return false;
-        }
-        let idx = usize::try_from(l.span.line)
-            .ok()
-            .and_then(|n| n.checked_sub(1));
-        // The line after the last one: end of file.
-        let eof = |i: usize| (i == src.lines().count()).then_some("");
-        let Some(text) = idx.and_then(|i| src.lines().nth(i).or_else(|| eof(i))) else {
-            return false;
-        };
-        let (lead, width) = underline(text, l.span, src);
-        marks.push(Mark {
-            line: l.span.line,
-            text,
-            lead,
-            width,
-            primary: is_primary,
-            label: "",
-        });
-        true
-    };
-    let mut labels: Vec<(usize, &str)> = Vec::new();
-    if let Some(p) = primary {
-        if place(p, true) {
-            labels.push((0, &p.message));
-        }
-    }
-    for l in &diag.secondary {
-        if place(l, false) {
-            labels.push((labels.len(), &l.message));
-        } else {
-            elsewhere.push(l);
-        }
-    }
-    for (i, label) in labels {
-        marks[i].label = label;
-    }
-    marks.sort_by_key(|m| (m.line, m.lead.len()));
-    let width = marks
-        .iter()
-        .map(|m| m.line)
-        .max()
-        .map_or(1, |n| n.to_string().len());
-    let pad = " ".repeat(width + 1);
-    let bar = paint("1;34", "|");
-    if let Some(file) = &path {
-        let loc = match primary.map(|l| l.span) {
-            Some(s) if s.line != 0 => format!("{file}:{}:{}", s.line, s.col.max(1)),
-            _ => file.clone(),
-        };
-        out.push_str(&format!("{pad}{} {loc}\n", paint("1;34", "-->")));
-    }
-    if !marks.is_empty() {
-        out.push_str(&format!("{pad} {bar}\n"));
-        let mut last: Option<u32> = None;
-        for m in &marks {
-            if last != Some(m.line) {
-                if last.is_some_and(|l| m.line > l + 1) {
-                    out.push_str(&format!(" {}\n", paint("1;34", "...")));
-                }
-                let n = format!("{:>width$}", m.line);
-                out.push_str(&format!(" {} {bar} {}\n", paint("1;34", &n), m.text));
-            }
-            last = Some(m.line);
-            let (ch, c) = if m.primary {
-                ('^', color)
+        let paint = |code: &str, text: &str| {
+            if style == STYLE_COLOR {
+                format!("\x1b[{code}m{text}\x1b[0m")
             } else {
-                ('-', "1;34")
-            };
-            let mut under: String = std::iter::repeat_n(ch, m.width).collect();
-            if !m.label.is_empty() {
-                under = format!("{under} {}", m.label);
+                text.to_owned()
             }
-            out.push_str(&format!("{pad} {bar} {}{}\n", m.lead, paint(c, &under)));
+        };
+        let color = match diag.severity {
+            Severity::Error | Severity::Fatal => "1;31",
+            Severity::Warning => "1;33",
+            Severity::Note => "1;36",
+        };
+        let mut out = format!(
+            "{}{}\n",
+            paint(color, &format!("{}[{}]", diag.severity, diag.kind.code())),
+            paint("1", &format!(": {}", diag.message))
+        );
+        let path = self.diag_path(diag);
+        let primary = diag.primary.as_deref();
+        let source = primary.and_then(|l| {
+            self.file(l.span.file)
+                .map(|(_, s)| s.as_str())
+                .or_else(|| self.source_by_path(path.as_deref()?))
+        });
+        // Labels in the primary's file go under its snippet; others are
+        // listed by location.
+        let mut marks: Vec<Mark<'_>> = Vec::new();
+        let mut elsewhere: Vec<&Label> = Vec::new();
+        let mut place = |l: &'_ Label, is_primary: bool| -> bool {
+            let (Some(p), Some(src)) = (primary, source) else {
+                return false;
+            };
+            if !is_primary && l.span.file != p.span.file && l.span.file != 0 {
+                return false;
+            }
+            let idx = usize::try_from(l.span.line)
+                .ok()
+                .and_then(|n| n.checked_sub(1));
+            // The line after the last one: end of file.
+            let eof = |i: usize| (i == src.lines().count()).then_some("");
+            let Some(text) = idx.and_then(|i| src.lines().nth(i).or_else(|| eof(i))) else {
+                return false;
+            };
+            let (lead, width) = underline(text, l.span, src);
+            marks.push(Mark {
+                line: l.span.line,
+                text,
+                lead,
+                width,
+                primary: is_primary,
+                label: "",
+            });
+            true
+        };
+        let mut labels: Vec<(usize, &str)> = Vec::new();
+        if let Some(p) = primary {
+            if place(p, true) {
+                labels.push((0, &p.message));
+            }
         }
+        for l in &diag.secondary {
+            if place(l, false) {
+                labels.push((labels.len(), &l.message));
+            } else {
+                elsewhere.push(l);
+            }
+        }
+        for (i, label) in labels {
+            marks[i].label = label;
+        }
+        marks.sort_by_key(|m| (m.line, m.lead.len()));
+        let width = marks
+            .iter()
+            .map(|m| m.line)
+            .max()
+            .map_or(1, |n| n.to_string().len());
+        let pad = " ".repeat(width + 1);
+        let bar = paint("1;34", "|");
+        if let Some(file) = &path {
+            let loc = match primary.map(|l| l.span) {
+                Some(s) if s.line != 0 => format!("{file}:{}:{}", s.line, s.col.max(1)),
+                _ => file.clone(),
+            };
+            out.push_str(&format!("{pad}{} {loc}\n", paint("1;34", "-->")));
+        }
+        if !marks.is_empty() {
+            out.push_str(&format!("{pad} {bar}\n"));
+            let mut last: Option<u32> = None;
+            for m in &marks {
+                if last != Some(m.line) {
+                    if last.is_some_and(|l| m.line > l + 1) {
+                        out.push_str(&format!(" {}\n", paint("1;34", "...")));
+                    }
+                    let n = format!("{:>width$}", m.line);
+                    out.push_str(&format!(" {} {bar} {}\n", paint("1;34", &n), m.text));
+                }
+                last = Some(m.line);
+                let (ch, c) = if m.primary {
+                    ('^', color)
+                } else {
+                    ('-', "1;34")
+                };
+                let mut under: String = std::iter::repeat_n(ch, m.width).collect();
+                if !m.label.is_empty() {
+                    under = format!("{under} {}", m.label);
+                }
+                out.push_str(&format!("{pad} {bar} {}{}\n", m.lead, paint(c, &under)));
+            }
+        }
+        for l in elsewhere {
+            // A label in another file (a meta block's template) names it.
+            let loc = match self.path(l.span.file) {
+                Some(p) => format!("{p}:{}:{}", l.span.line, l.span.col.max(1)),
+                None => format!("{}:{}", l.span.line, l.span.col.max(1)),
+            };
+            out.push_str(&format!(
+                "{pad}{} {loc}: {}\n",
+                paint("1;34", ":::"),
+                l.message
+            ));
+        }
+        if !diag.notes.is_empty() && !marks.is_empty() {
+            out.push_str(&format!("{pad} {bar}\n"));
+        }
+        for note in &diag.notes {
+            let (kind, text) = match note.strip_prefix("help: ") {
+                Some(h) => ("help", h),
+                None => ("note", note.as_str()),
+            };
+            out.push_str(&format!(
+                "{pad} {} {}: {text}\n",
+                paint("1;34", "="),
+                paint("1", kind)
+            ));
+        }
+        out
     }
-    for l in elsewhere {
-        // A label in another file (a meta block's template) names it.
-        let loc = match file_by_id(l.span.file) {
-            Some((p, _)) => format!("{p}:{}:{}", l.span.line, l.span.col.max(1)),
-            None => format!("{}:{}", l.span.line, l.span.col.max(1)),
-        };
-        out.push_str(&format!(
-            "{pad}{} {loc}: {}\n",
-            paint("1;34", ":::"),
-            l.message
-        ));
-    }
-    if !diag.notes.is_empty() && !marks.is_empty() {
-        out.push_str(&format!("{pad} {bar}\n"));
-    }
-    for note in &diag.notes {
-        let (kind, text) = match note.strip_prefix("help: ") {
-            Some(h) => ("help", h),
-            None => ("note", note.as_str()),
-        };
-        out.push_str(&format!(
-            "{pad} {} {}: {text}\n",
-            paint("1;34", "="),
-            paint("1", kind)
-        ));
-    }
-    out
 }
 
 #[cfg(test)]
@@ -778,7 +764,7 @@ mod tests {
             .with_file("a.rok")
             .with_note("n");
         assert_eq!(
-            d.to_json(),
+            SourceMap::new().json(&d),
             r#"{"type":"error","code":"E200","kind":"type","message":"bad \"x\"\n","spans":[{"file_name":"a.rok","is_primary":true}],"notes":["n"]}"#
         );
     }

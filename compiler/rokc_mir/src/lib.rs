@@ -10,6 +10,7 @@ mod part_store;
 mod print;
 mod rotate;
 mod specialize;
+mod stable_names;
 mod target;
 mod ty;
 
@@ -32,6 +33,9 @@ pub struct MirModule {
     pub statics: Vec<MirStaticDef>,
     /// Struct name and field names by `StructId` (`-g` DWARF types).
     pub struct_names: std::collections::HashMap<u32, (String, Vec<String>)>,
+    /// Each struct's build-independent name by `StructId` (the ids are
+    /// handed out in lowering order): what incremental keys name it by.
+    pub struct_keys: std::collections::HashMap<u32, String>,
     /// `-g` types the `MirTy`s do not tell.
     pub debug: DebugTypes,
     pub target: Target,
@@ -127,6 +131,8 @@ pub struct WitLink {
     /// Symbols the core module exports (functions, post-returns,
     /// destructors, `cabi_realloc`).
     pub exports: Vec<String>,
+    /// A reactor: no `main`, so no `wasi:cli/run` (only the exports).
+    pub reactor: bool,
 }
 
 impl Link {

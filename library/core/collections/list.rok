@@ -180,6 +180,17 @@ impl<T> List<T> {
         }
     }
 
+    /// Overwrite element `idx`; throws out of bounds (`xs[idx] = x`
+    /// panics instead).
+    pub fn set(self, idx: usize, x: T) throws (IndexError) {
+        unsafe {
+            if idx >= self.len() {
+                throw IndexError { index: idx as i64, len: self.len() };
+            }
+            self.h[0].buf[idx] = x;
+        }
+    }
+
     pub fn first(self) -> T | none {
         self.get(0)
     }

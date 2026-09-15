@@ -66,6 +66,10 @@ fn add(p: P) -> i32 { p.x * p.y }
 add(p)
 panic(\"boom\");
 [1, 2, 3]
+let s: i32 | f64 = 7i32;
+s
+let a: any = 1.5;
+a
 :reset
 :type x
 :quit
@@ -85,6 +89,8 @@ i32
 str: \"rebound\"
 i32: 80
 List<i32>: [1, 2, 3]
+i32: 7
+f64
 ",
         "stderr: {stderr}"
     );
@@ -561,18 +567,22 @@ let t = task::block_on(async { task::spawn(async { spin(1500); POLLED.store(1); 
 panic(\"at once\");
 (POLLED.load(), JOB.load())
 task::block_on(async { (await t) + (await b) })
+static IN: Atomic<i64> = Atomic::new(0);
+static GO: Atomic<i64> = Atomic::new(0);
 let m = Mutex::new(5); let rw = RwLock::new(6); let once = Once::new();
-thread::spawn(|| { using g = m.lock() { using r = rw.read() { once.call_once(|| { thread::sleep(Duration::ms(3000)); }); } } });
-thread::sleep(Duration::ms(100));
+thread::spawn(|| { using g = m.lock() { using r = rw.read() { once.call_once(|| { IN.store(1); while GO.load() == 0 { thread::sleep(Duration::ms(5)); } }); } } });
+while IN.load() == 0 { thread::sleep(Duration::ms(5)); }
 panic(\"holder gone\");
 using g = m.lock() { g.get() }
 using w = rw.write() { w.get() }
+GO.store(1);
 once.call_once(|| { println(\"ran again\"); });
 ";
     let out = piped(ROKC, &["repl", "--rokr", &rokr], input);
     let stdout = text(&out.stdout);
     let stderr = text(&out.stderr);
-    // Windows keeps the holder (back where it was: asleep), which goes
+    // The holder sits in `call_once` until `GO`, however slow the cells
+    // are. Windows keeps it (back where it was: waiting), and it goes
     // on to finish the `Once`; a fork host's copy has no such thread.
     let again = if cfg!(windows) { "" } else { "ran again\n" };
     assert_eq!(

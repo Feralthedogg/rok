@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use rokc_ast::{FnDef, ImplItem, Item};
 
 use crate::SourceFile;
+use rokc_diagnostic::SourceMap;
 
 /// Bumped on any change to the layout or to what the body holds.
 pub const VERSION: u32 = 1;
@@ -324,12 +325,13 @@ fn strip(text: &str, file_id: u32, items: &[Item]) -> String {
 #[must_use]
 pub fn interface(
     sources: &[SourceFile],
+    files: &SourceMap,
     pkg: &str,
     dir: &Path,
     seeds: &[(String, String)],
     cut: bool,
 ) -> Vec<(String, String)> {
-    let texts = rokc_diagnostic::registered_files();
+    let texts = files.files();
     let mut out: Vec<(String, String)> = sources
         .iter()
         .filter(|f| f.package == pkg)

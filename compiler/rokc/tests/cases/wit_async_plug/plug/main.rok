@@ -1,0 +1,124 @@
+// The component `../main.rok` imports: a reactor (no `main`, so no
+// `wasi:cli/run`) exporting `svc`, async functions among them.
+ffi::wit::export { "../wit/svc.wit" }
+
+use wasi::clocks::monotonic_clock;
+use rok::bare::ffi::wit::ErrorContext;
+use rok::core::channel::{Receiver, channel};
+use rok::core::future::AsyncFuture;
+
+static DROPS: List<u32> = [0u32];
+
+#[wit::export]
+pub struct Counter {
+    n: List<u32>;
+}
+
+impl Counter {
+    pub fn new(start: i32) throws (str) -> Counter {
+        if start < 0 {
+            throw f"bad start {start}";
+        }
+        Counter { n: [start as u32] }
+    }
+
+    pub async fn bump(self, by: u32) -> u32 {
+        await monotonic_clock::wait_for(1000000u64);
+        self.n[0] = self.n[0] + by;
+        self.n[0]
+    }
+}
+
+impl rok::core::marker::Drop for Counter {
+    fn drop(ref self) {
+        DROPS[0] = DROPS[0] + 1u32;
+    }
+}
+
+#[wit::export]
+async fn slow_add(a: u32, b: u32) -> u32 {
+    await monotonic_clock::wait_for(2000000u64);
+    a + b
+}
+
+#[wit::export]
+async fn count_to(n: u32) -> Receiver<u32> {
+    let (tx, rx) = channel::<u32>();
+    for i in 1..n + 1 {
+        try! tx.send(i);
+    }
+    tx.close();
+    rx
+}
+
+#[wit::export]
+async fn sum(xs: Receiver<u32>) -> u64 {
+    let s = 0u64;
+    for await x in xs {
+        s += x as u64;
+    }
+    s
+}
+
+#[wit::export]
+async fn later(v: str) -> AsyncFuture<str> {
+    async {
+        await monotonic_clock::wait_for(1000000u64);
+        f"{v}!"
+    }
+}
+
+#[wit::export]
+async fn fail(msg: str) throws (ErrorContext) -> u32 {
+    if msg == "" {
+        return 0u32;
+    }
+    throw ErrorContext::new(msg);
+}
+
+#[wit::export]
+fn flip(x: [u8; 4]) -> [u8; 4] { [x[3], x[2], x[1], x[0]] }
+
+#[wit::export]
+fn grid() -> [[i8; 2]; 3] {
+    let g: [[i8; 2]; 3] = [[0i8, 0i8]; 3];
+    for i in 0..3 {
+        g[i] = [i as i8, i as i8 - 1i8];
+    }
+    g
+}
+
+#[wit::export]
+fn many(x: [u8; 20]) -> [u8; 20] {
+    for i in 0..20 {
+        x[i] = x[i] * 2u8;
+    }
+    x
+}
+
+#[wit::export]
+fn maybe(x: u32??) -> u32?? {
+    let inner_none: u32? = none;
+    match x {
+        none => {
+            return 0u32;
+        }
+        v: u32? => match v {
+            none => {
+                return none;
+            }
+            n: u32 => {
+                if n == 0u32 {
+                    return inner_none;
+                }
+                return n + 1u32;
+            }
+        },
+    }
+}
+
+#[wit::export]
+fn drops() -> u32 { DROPS[0] }
+
+#[wit::export]
+fn get() -> i32 { 7 }

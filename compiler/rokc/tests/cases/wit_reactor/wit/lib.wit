@@ -1,0 +1,6 @@
+package test:lib;
+
+// A library world, only exports, one renamed on the way in.
+world lib {
+    include base with { greet as hello }
+}

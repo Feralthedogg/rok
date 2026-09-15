@@ -1,0 +1,18 @@
+package test:lend;
+
+interface res {
+    resource thing {
+        constructor(n: u32);
+        get: func() -> u32;
+    }
+}
+
+interface inspect {
+    use res.{thing};
+    look: func(t: borrow<thing>) -> u32;
+}
+
+world w {
+    export res;
+    import inspect;
+}

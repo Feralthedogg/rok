@@ -1,0 +1,5 @@
+package test:dep;
+
+world calc {
+    export add: func(a: s32, b: s32) -> s32;
+}

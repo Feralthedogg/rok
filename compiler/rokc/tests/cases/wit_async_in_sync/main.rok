@@ -1,0 +1,19 @@
+// only-target: wasm32-wasi
+// expect-exit: 101
+// expect-stdout: zero wait done
+// expect-stderr: blocked outside an async export
+
+// Stdlib 1.8: a synchronous task (`main` of a preview 2 command) cannot
+// wait for the component model (it would trap): an async import that
+// returns at once works, one that blocks is a panic naming the rule.
+ffi::wit::import { "wit" }
+
+use wasi::clocks::monotonic_clock;
+use rok::core::task;
+
+fn main() {
+    task::block_on(monotonic_clock::wait_for(0u64));
+    println("zero wait done");
+    task::block_on(monotonic_clock::wait_for(50000000u64));
+    println("not reached");
+}

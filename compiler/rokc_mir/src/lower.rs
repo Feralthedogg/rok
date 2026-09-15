@@ -109,6 +109,7 @@ pub fn lower(module: &HirModule, target: &Target) -> MirModule {
     for f in &mut functions {
         crate::rotate::rotate(f);
     }
+    crate::stable_names::stable_names(&mut functions, &rokc_hir::type_name);
     let debug = debug_types(module, &functions, target);
     MirModule {
         debug,
@@ -120,6 +121,14 @@ pub fn lower(module: &HirModule, target: &Target) -> MirModule {
             .map(|s| {
                 let fields = s.fields.iter().map(|f| f.name.clone()).collect();
                 (s.id.0, (s.name.clone(), fields))
+            })
+            .collect(),
+        struct_keys: module
+            .structs
+            .iter()
+            .map(|s| {
+                let key = rokc_hir::type_name(false, s.id.0).unwrap_or_else(|| s.name.clone());
+                (s.id.0, key)
             })
             .collect(),
         target: target.clone(),

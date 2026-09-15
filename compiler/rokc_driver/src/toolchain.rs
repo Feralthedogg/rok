@@ -4,13 +4,14 @@
 //! LLVM / MLIR / lld rokc links statically (`rokc_llvm`). `ROK_CC`, when
 //! set, links instead.
 
+use std::borrow::Cow;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rokc_diagnostic::{ErrorKind, RokDiagnostic};
+use rokc_diagnostic::{ErrorKind, RokDiagnostic, SourceMap};
 use rokc_mir::TargetSpec;
-use rokc_target::ObjectFormat;
+use rokc_target::{Linker, ObjectFormat};
 
 use crate::CompiledModule;
 
@@ -110,6 +111,10 @@ pub struct BuildOptions {
     /// The profile runtime an instrumented executable links
     /// (`<sysroot>/lib/rok/targets/<target>/`).
     pub profile_rt: Option<PathBuf>,
+    /// An executable builds by codegen units, reusing from this
+    /// directory the objects of the units that did not change (spec
+    /// 9.2.16, `units`).
+    pub incremental: Option<PathBuf>,
 }
 
 /// IR profile-guided optimization of the program and its source
@@ -166,6 +171,7 @@ impl Default for BuildOptions {
             subsystem: crate::windows::Subsystem::Console,
             profile: Profile::Off,
             profile_rt: None,
+            incremental: None,
         }
     }
 }
@@ -230,43 +236,60 @@ fn err(msg: String) -> RokDiagnostic {
 /// Codegen a module to MLIR text for its target.
 pub fn mlir_text(
     module: &CompiledModule,
+    sources: &SourceMap,
     opts: &BuildOptions,
 ) -> Result<rokc_codegen_mlir::MlirOutput, RokDiagnostic> {
-    codegen(module, opts, Some(module.mir.target.data_layout.clone()))
+    codegen(
+        module,
+        sources,
+        opts,
+        Some(module.mir.target.data_layout.clone()),
+    )
 }
 
 /// Codegen for its errors alone (`rokc check`).
-pub fn check_codegen(module: &CompiledModule, opts: &BuildOptions) -> Result<(), RokDiagnostic> {
-    codegen(module, opts, None).map(drop)
+pub fn check_codegen(
+    module: &CompiledModule,
+    sources: &SourceMap,
+    opts: &BuildOptions,
+) -> Result<(), RokDiagnostic> {
+    codegen(module, sources, opts, None).map(drop)
 }
 
 fn codegen(
     module: &CompiledModule,
+    sources: &SourceMap,
     opts: &BuildOptions,
     data_layout: Option<String>,
 ) -> Result<rokc_codegen_mlir::MlirOutput, RokDiagnostic> {
     rokc_diagnostic::time("mlir emit", || {
-        rokc_codegen_mlir::codegen(
-            &module.mir,
-            &rokc_codegen_mlir::CodegenOptions {
-                overflow_checks: opts.overflow_checks.unwrap_or(opts.opt_level == "0"),
-                debug: opts.debug,
-                optimized: opts.opt_level != "0",
-                repl: opts.repl.clone(),
-                data_layout,
-            },
-        )
+        rokc_codegen_mlir::codegen(&module.mir, &codegen_options(opts, data_layout), sources)
     })
+}
+
+/// The MLIR emitter's options of a build.
+pub fn codegen_options(
+    opts: &BuildOptions,
+    data_layout: Option<String>,
+) -> rokc_codegen_mlir::CodegenOptions {
+    rokc_codegen_mlir::CodegenOptions {
+        overflow_checks: opts.overflow_checks.unwrap_or(opts.opt_level == "0"),
+        debug: opts.debug,
+        optimized: opts.opt_level != "0",
+        repl: opts.repl.clone(),
+        data_layout,
+    }
 }
 
 /// Produce one artifact's bytes.
 pub fn emit(
     module: &CompiledModule,
+    sources: &SourceMap,
     kind: EmitKind,
     opts: &BuildOptions,
 ) -> Result<Vec<u8>, RokDiagnostic> {
     if kind == EmitKind::Obj {
-        if let Some(o) = crate::native::object(module, opts)? {
+        if let Some(o) = crate::native::object(module, sources, opts)? {
             return Ok(o.object);
         }
     }
@@ -279,23 +302,39 @@ pub fn emit(
         EmitKind::Hir => Ok(rokc_hir::print_hir(&module.hir).into_bytes()),
         EmitKind::Mir => Ok(rokc_mir::print_mir(&module.mir).into_bytes()),
         EmitKind::Expanded => Err(err("`--emit=expanded` needs the parsed sources".to_owned())),
-        EmitKind::Mlir => Ok(mlir_text(module, opts)?.text.into_bytes()),
-        EmitKind::LlvmIr => Ok(lower_to_llvm(module, opts)?.0.into_bytes()),
-        EmitKind::Asm => Ok(llvm(module, opts, rokc_llvm::Emit::Asm, 1)?.0.remove(0)),
-        EmitKind::Obj => Ok(llvm(module, opts, rokc_llvm::Emit::Obj, 1)?.0.remove(0)),
+        EmitKind::Mlir => Ok(mlir_text(module, sources, opts)?.text.into_bytes()),
+        EmitKind::LlvmIr => Ok(lower_to_llvm(module, sources, opts)?.0.into_bytes()),
+        EmitKind::Asm => Ok(llvm(module, sources, opts, rokc_llvm::Emit::Asm, 1)?
+            .0
+            .remove(0)),
+        EmitKind::Obj => Ok(llvm(module, sources, opts, rokc_llvm::Emit::Obj, 1)?
+            .0
+            .remove(0)),
     }
 }
 
-/// Full build: an executable at `out`.
+/// Full build: an executable at `out`; by codegen units with
+/// `opts.incremental` (`units::applies`), and then how many it
+/// compiled.
 pub fn link_executable(
     module: &CompiledModule,
+    sources: &SourceMap,
     opts: &BuildOptions,
     out: &Path,
-) -> Result<(), RokDiagnostic> {
-    let objects = if let Some(o) = crate::native::object(module, opts)? {
+) -> Result<Option<crate::units::UnitCounts>, RokDiagnostic> {
+    let mut counts = None;
+    let objects = if let Some(dir) = opts
+        .incremental
+        .as_deref()
+        .filter(|_| crate::units::applies(module, opts))
+    {
+        let (objects, c) = crate::units::objects(module, sources, opts, dir)?;
+        counts = Some(c);
+        objects
+    } else if let Some(o) = crate::native::object(module, sources, opts)? {
         vec![o.object]
     } else {
-        llvm(module, opts, rokc_llvm::Emit::Obj, 0)?.0
+        llvm(module, sources, opts, rokc_llvm::Emit::Obj, 0)?.0
     };
     let tmp = TempDir::new(opts.keep_temps)?;
     let mut paths = Vec::new();
@@ -304,7 +343,8 @@ pub fn link_executable(
         std::fs::write(&p, o).map_err(|e| err(format!("cannot write {}: {e}", p.display())))?;
         paths.push(p);
     }
-    link_object(module, &paths, opts, out)
+    link_object(module, &paths, opts, out)?;
+    Ok(counts)
 }
 
 /// Library build (spec 902.13): `libfoo.a`, with `object` the one
@@ -316,14 +356,16 @@ pub fn link_executable(
 /// than an archive member (903): no object-section reader is needed.
 pub fn build_archive(
     module: &CompiledModule,
+    sources: &SourceMap,
     opts: &BuildOptions,
     archive_out: &Path,
     object: bool,
 ) -> Result<(), RokDiagnostic> {
-    let (objects, gc_types) = if let Some(o) = crate::native::object(module, opts)? {
+    let (objects, gc_types) = if let Some(o) = crate::native::object(module, sources, opts)? {
         (vec![o.object], o.gc_types)
     } else {
-        let (objs, mlir) = llvm(module, opts, rokc_llvm::Emit::Obj, usize::from(object))?;
+        let parts = usize::from(object);
+        let (objs, mlir) = llvm(module, sources, opts, rokc_llvm::Emit::Obj, parts)?;
         (objs, mlir.gc_types)
     };
     let tmp = TempDir::new(opts.keep_temps)?;
@@ -357,18 +399,20 @@ pub fn build_archive(
 /// LLVM, and what codegen says about it.
 pub fn cell_object(
     module: &CompiledModule,
+    sources: &SourceMap,
     opts: &BuildOptions,
 ) -> Result<(Vec<u8>, rokc_codegen_mlir::MlirOutput), RokDiagnostic> {
-    let (mut objs, mlir) = llvm(module, opts, rokc_llvm::Emit::Obj, 1)?;
+    let (mut objs, mlir) = llvm(module, sources, opts, rokc_llvm::Emit::Obj, 1)?;
     Ok((objs.remove(0), mlir))
 }
 
 /// The module's LLVM IR, as translated from MLIR (`--emit=llvm-ir`).
 pub fn lower_to_llvm(
     module: &CompiledModule,
+    sources: &SourceMap,
     opts: &BuildOptions,
 ) -> Result<(String, rokc_codegen_mlir::MlirOutput), RokDiagnostic> {
-    let (mut ir, mlir) = llvm(module, opts, rokc_llvm::Emit::LlvmIr, 1)?;
+    let (mut ir, mlir) = llvm(module, sources, opts, rokc_llvm::Emit::LlvmIr, 1)?;
     let ir =
         String::from_utf8(ir.remove(0)).map_err(|_| err("LLVM printed non-UTF-8 IR".to_owned()))?;
     Ok((ir, mlir))
@@ -385,11 +429,12 @@ const SPLIT_MIN: usize = 1 << 20;
 /// every function).
 fn llvm(
     module: &CompiledModule,
+    sources: &SourceMap,
     opts: &BuildOptions,
     emit: rokc_llvm::Emit,
     parts: usize,
 ) -> Result<(Vec<Vec<u8>>, rokc_codegen_mlir::MlirOutput), RokDiagnostic> {
-    let mut mlir = mlir_text(module, opts)?;
+    let mut mlir = mlir_text(module, sources, opts)?;
     let t = &module.mir.target.spec;
     let opt = rokc_llvm::OptLevel::parse(&opts.opt_level)
         .ok_or_else(|| err(format!("unknown optimization level `{}`", opts.opt_level)))?;
@@ -437,7 +482,7 @@ fn llvm(
         rokc_diagnostic::time("llvm", || rokc_llvm::compile_mlir_split(&text, &c, parts))
             .map_err(|e| err(format!("LLVM back end failed:\n{e}")))?;
     for w in warnings.lines() {
-        rokc_diagnostic::report(&RokDiagnostic::warning(
+        SourceMap::new().report(&RokDiagnostic::warning(
             ErrorKind::Linkage,
             rokc_diagnostic::Span::DUMMY,
             w,
@@ -496,12 +541,15 @@ pub fn link_object(
     } else {
         Some("$ORIGIN")
     };
+    let wit = module.mir.link.wit.as_ref();
     if let Some(cc) = c_compiler() {
+        let tmp = TempDir::new(opts.keep_temps)?;
         let mut link = Command::new(cc);
         link.args(objs)
             .args(&module.archives)
             .arg(rokr_arg(opts, t));
         link.args(&search);
+        link.args(cc_wit_args(wit, tmp.path())?);
         if let Some((rt, sym)) = profile_runtime(t, opts) {
             link.arg(rt).arg(format!("-Wl,-u,{sym}"));
         }
@@ -528,7 +576,7 @@ pub fn link_object(
         // Apple's clang links for the machine it runs as (not rokc's,
         // under Rosetta) unless told.
         if t != TargetSpec::host() || apple {
-            link.arg(format!("--target={}", t.llvm_triple()));
+            link.arg(format!("--target={}", cc_target(t)));
         }
         // core's float methods call libm; glibc keeps it out of libc.
         if !windows {
@@ -559,7 +607,7 @@ pub fn link_object(
         if t.object_format == ObjectFormat::Wasm && t.threads {
             inputs.push(wasm_tls_object(t, tmp.path())?.into_os_string());
         }
-        if let Some(w) = &module.mir.link.wit {
+        if let Some(w) = wit {
             inputs.extend(wit_link_args(w, tmp.path())?);
         }
         inputs.extend(module.archives.iter().map(|a| a.clone().into_os_string()));
@@ -578,6 +626,7 @@ pub fn link_object(
         if let Some(o) = origin {
             inputs.extend(["-rpath".into(), o.into()]);
         }
+        let t = &*entry_model(t, wit);
         rokc_diagnostic::time("link", || {
             rokc_llvm::link_executable(t, &inputs, out, true, opts.libc.as_deref())
         })
@@ -636,6 +685,55 @@ fn wit_link_args(w: &rokc_mir::WitLink, tmp: &Path) -> Result<Vec<OsString>, Rok
     let mut a: Vec<OsString> = vec!["--component-type".into(), dir.into_os_string()];
     a.extend(w.exports.iter().map(|s| format!("--export={s}").into()));
     Ok(a)
+}
+
+/// The target `t` links a program for: a component without `main` is a
+/// reactor (wasi-libc's `crt1-reactor.o`, no entry; the host calls
+/// `_initialize`, then the exports).
+fn entry_model<'t>(t: &'t TargetSpec, wit: Option<&rokc_mir::WitLink>) -> Cow<'t, TargetSpec> {
+    if wit.is_some_and(|w| w.reactor) {
+        Cow::Owned(TargetSpec {
+            crt_objects: vec!["crt1-reactor.o".to_owned()],
+            pre_link_args: [&t.pre_link_args[..], &["--no-entry".to_owned()]].concat(),
+            ..t.clone()
+        })
+    } else {
+        Cow::Borrowed(t)
+    }
+}
+
+/// The C compiler driver's name of target `t`: clang calls a WASI
+/// preview 2 component by its Rust name (`wasm32-wasip2`).
+fn cc_target(t: &TargetSpec) -> String {
+    if t.linker == Linker::WasmComponentLd {
+        t.rust_target.clone()
+    } else {
+        t.llvm_triple()
+    }
+}
+
+/// `wit_link_args` for the C compiler driver (`ROK_CC`), which hands
+/// them to `wasm-component-ld`; a reactor's exec model.
+fn cc_wit_args(w: Option<&rokc_mir::WitLink>, tmp: &Path) -> Result<Vec<OsString>, RokDiagnostic> {
+    let Some(w) = w else {
+        return Ok(Vec::new());
+    };
+    let args = wit_link_args(w, tmp)?;
+    let mut out = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut wl = OsString::from("-Wl,");
+        wl.push(a);
+        if a == "--component-type" {
+            wl.push(",");
+            wl.push(it.next().map_or_else(OsString::new, Clone::clone));
+        }
+        out.push(wl);
+    }
+    if w.reactor {
+        out.push("-mexec-model=reactor".into());
+    }
+    Ok(out)
 }
 
 /// An instrumented executable's profile runtime (compiler-rt's) and the

@@ -1,0 +1,6 @@
+package test:aio;
+
+world consumer {
+    import svc;
+    export wasi:cli/run@0.3.0;
+}

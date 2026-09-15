@@ -40,7 +40,7 @@ fn format_source(src: &str) -> Result<String, String> {
         (tokens, diags) = Lexer::new(src, "<fmt>").with_ext_ops(ops).lex_all();
     }
     if let Some(d) = diags.iter().find(|d| d.is_error()) {
-        return Err(d.to_string());
+        return Err(rokc_diagnostic::SourceMap::new().line(d));
     }
     // Multi-line regions whose inside must stay byte-for-byte: tokens
     // (strings), whole f-strings and block comments that span a newline.

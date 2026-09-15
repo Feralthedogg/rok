@@ -114,6 +114,8 @@ pub enum FuncKind {
 pub struct Func {
     pub name: String,
     pub kind: FuncKind,
+    /// `async func` (WASI preview 3).
+    pub is_async: bool,
     pub params: Vec<(String, Ty)>,
     pub result: Option<Ty>,
     pub pos: Pos,
@@ -140,12 +142,17 @@ pub enum Prim {
 pub enum Ty {
     Prim(Prim),
     List(Box<Ty>),
+    /// `list<T, N>`.
+    FixedList(Box<Ty>, u32),
     Option(Box<Ty>),
     Result(Option<Box<Ty>>, Option<Box<Ty>>),
     Tuple(Vec<Ty>),
     Own(String, Pos),
     Borrow(String, Pos),
     Named(String, Pos),
+    Future(Option<Box<Ty>>),
+    Stream(Option<Box<Ty>>),
+    ErrorContext,
 }
 
 #[derive(Clone, Debug)]
@@ -179,7 +186,8 @@ pub enum WorldItem {
     Export(Extern),
     Use(Use),
     Type(TypeDecl),
-    Include(UsePath, Pos),
+    /// `include path with { a as b, .. }`.
+    Include(UsePath, Vec<(String, String)>, Pos),
 }
 
 #[derive(Clone, Debug)]
@@ -685,9 +693,7 @@ impl Parser<'_> {
 
     /// `func(params) -> result` after `name:`.
     fn func_type(&mut self, name: String, kind: FuncKind, pos: Pos) -> PResult<Func> {
-        if self.is_kw("async") {
-            return self.err("`async` functions (WASI preview 3) are not supported");
-        }
+        let is_async = self.eat_kw("async");
         self.expect_kw("func")?;
         let params = self.params()?;
         let result = if self.eat("->") {
@@ -698,6 +704,7 @@ impl Parser<'_> {
         Ok(Func {
             name,
             kind,
+            is_async,
             params,
             result,
             pos,
@@ -825,16 +832,19 @@ impl Parser<'_> {
         let pos = self.pos();
         if self.eat_kw("constructor") {
             let params = self.params()?;
-            if self.eat("->") {
-                return self
-                    .err("fallible constructors (`constructor(..) -> result`) are not supported");
-            }
+            // A fallible one: `-> result<r, E>`.
+            let result = if self.eat("->") {
+                Some(self.ty()?)
+            } else {
+                None
+            };
             self.expect(";")?;
             return Ok(Func {
                 name: String::new(),
                 kind: FuncKind::Constructor,
+                is_async: false,
                 params,
-                result: None,
+                result,
                 pos,
             });
         }
@@ -893,7 +903,16 @@ impl Parser<'_> {
                 self.expect("<")?;
                 let t = self.ty()?;
                 if self.eat(",") {
-                    return self.err("fixed-length lists (`list<T, N>`) are not supported");
+                    let n = match self.peek().clone() {
+                        Tok::Num(n) => n.parse::<u32>().ok().filter(|&n| n > 0),
+                        _ => None,
+                    };
+                    let Some(n) = n else {
+                        return self.err("expected a length (an integer above 0) in `list<T, N>`");
+                    };
+                    self.bump();
+                    self.expect(">")?;
+                    return Ok(Ty::FixedList(Box::new(t), n));
                 }
                 self.expect(">")?;
                 Ok(Ty::List(Box::new(t)))
@@ -951,8 +970,22 @@ impl Parser<'_> {
                     Ty::Borrow(n, p)
                 })
             }
-            "future" | "stream" | "error-context" => {
-                self.err(format!("`{word}` (WASI preview 3) is not supported"))
+            "future" | "stream" => {
+                self.bump();
+                let t = if self.is_punct("<") {
+                    Some(Box::new(self.angle_one()?))
+                } else {
+                    None
+                };
+                Ok(if word == "future" {
+                    Ty::Future(t)
+                } else {
+                    Ty::Stream(t)
+                })
+            }
+            "error-context" => {
+                self.bump();
+                Ok(Ty::ErrorContext)
             }
             _ => Ok(Ty::Named(self.id()?, pos)),
         }
@@ -978,11 +1011,18 @@ impl Parser<'_> {
                 let p = self.pos();
                 self.bump();
                 let path = self.use_path()?;
-                if self.is_kw("with") {
-                    return self.err("`include .. with { .. }` is not supported");
-                }
-                self.expect(";")?;
-                WorldItem::Include(path, p)
+                // `include w;` or `include w with { a as b }` (no `;`).
+                let renames = if self.eat_kw("with") {
+                    self.comma_list(|p| {
+                        let from = p.id()?;
+                        p.expect_kw("as")?;
+                        Ok((from, p.id()?))
+                    })?
+                } else {
+                    self.expect(";")?;
+                    Vec::new()
+                };
+                WorldItem::Include(path, renames, p)
             } else if let Some(t) = self.typedef()? {
                 WorldItem::Type(t)
             } else {

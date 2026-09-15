@@ -1,0 +1,25 @@
+package test:aio;
+
+interface svc {
+    resource counter {
+        constructor(start: s32) -> result<counter, string>;
+        bump: async func(by: u32) -> u32;
+    }
+
+    slow-add: async func(a: u32, b: u32) -> u32;
+    count-to: async func(n: u32) -> stream<u32>;
+    sum: async func(xs: stream<u32>) -> u64;
+    later: async func(v: string) -> future<string>;
+    fail: async func(msg: string) -> result<u32, error-context>;
+    flip: func(x: list<u8, 4>) -> list<u8, 4>;
+    grid: func() -> list<list<s8, 2>, 3>;
+    many: func(x: list<u8, 20>) -> list<u8, 20>;
+    maybe: func(x: option<option<u32>>) -> option<option<u32>>;
+    drops: func() -> u32;
+    get: func() -> s32;
+}
+
+world provider {
+    import wasi:clocks/monotonic-clock@0.3.0;
+    export svc;
+}

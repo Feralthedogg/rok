@@ -9,10 +9,13 @@
 
 use rok::bare::ptr::{ConstPtr, Ptr, from_exposed_provenance};
 use rok::bare::mem::reinterpret;
+use rok::core::future::{AsyncFuture, Context, Future, Poll, TryAsyncFuture, Waker};
+use rok::core::channel::{Receiver, channel};
 
 extern "rok" {
     fn rok_alloc_raw(size: usize, align: usize, zeroed: i32) -> usize;
     fn rok_free(ptr: usize);
+    fn rok_stdio_flush() -> i32;
 }
 
 fn at<T>(a: i32) -> Ptr<T> { unsafe { from_exposed_provenance::<T>(a as u32 as usize) } }
@@ -165,7 +168,7 @@ impl Handle {
 /// handle the host holds keeps its value alive here until the host
 /// drops it (`[dtor]`).
 pub struct Table<T> {
-    slots: List<T | none>;
+    slots: List<T?>;
     free: List<i32>;
 }
 
@@ -192,8 +195,420 @@ impl<T> Table<T> {
         }
     }
 
-    pub fn remove(self, rep: i32) {
-        self.slots[rep as u32 as usize] = none;
-        self.free.push(rep);
+    /// The value of `rep`, its slot freed; `none` if it was taken already
+    /// (a `[dtor]` after the value came back through an owned handle).
+    pub fn take(self, rep: i32) -> T? {
+        let v = self.slots[rep as u32 as usize];
+        if v is T {
+            self.slots[rep as u32 as usize] = none;
+            self.free.push(rep);
+        }
+        v
+    }
+}
+
+// ---- the component model's async ABI (WASI preview 3) ----
+//
+// Async imports return a subtask; stream and future copies may block.
+// What blocks joins the component's one waitable set and its task waits
+// on it (`wait`). An async export runs as rok tasks on the host's event
+// loop: its call and each event the host delivers run every runnable
+// task (`task::host_run`); with nothing left to run the export returns
+// WAIT (the host calls back with the next event), or EXIT once it has
+// returned its result and nothing waits. One async export call runs at a
+// time (backpressure): the tasks running on the loop are its own. A
+// synchronous task (`main`, a sync export) cannot block (the component
+// model traps), so a wait outside an async export is an error.
+//
+// `future<T>` is an `AsyncFuture<T>`, `stream<T>` a channel `Receiver<T>`:
+// a task copies between the component model's value and the rok one.
+
+#[cfg(target_os = "wasi")]
+#[link(wasm_import_module = "$root")]
+extern "C" {
+    #[link_name = "[waitable-set-new]"]
+    fn rok_wit_set_new() -> i32;
+    #[link_name = "[waitable-join]"]
+    fn rok_wit_join(w: i32, set: i32);
+    #[link_name = "[subtask-drop]"]
+    fn rok_wit_subtask_drop(h: i32);
+    #[link_name = "[backpressure-inc]"]
+    fn rok_wit_backpressure_inc();
+    #[link_name = "[backpressure-dec]"]
+    fn rok_wit_backpressure_dec();
+    #[link_name = "[error-context-new-utf8]"]
+    fn rok_wit_ec_new(p: i32, n: i32) -> i32;
+    #[link_name = "[error-context-debug-message-utf8]"]
+    fn rok_wit_ec_message(h: i32, ret: i32);
+    #[link_name = "[error-context-drop]"]
+    fn rok_wit_ec_drop(h: i32);
+}
+
+#[cfg(target_os = "wasi")]
+#[link(wasm_import_module = "[export]$root")]
+extern "C" {
+    #[link_name = "[task-cancel]"]
+    fn rok_wit_task_cancel();
+}
+
+/// A copy or call that did not finish at once.
+pub const BLOCKED: i32 = -1;
+/// A subtask's state: it returned.
+const RETURNED: i32 = 2;
+/// Event codes.
+const EVENT_SUBTASK: i32 = 1;
+const EVENT_TASK_CANCELLED: i32 = 6;
+/// A copy's result: the other end was dropped.
+pub const DROPPED: i32 = 1;
+
+/// The event loop's state.
+#[cfg(target_os = "wasi")]
+struct Loop {
+    /// The waitable set (0: none yet).
+    set: List<i32>;
+    /// What waits, by waitable.
+    waiting: Dict<i32, Waiting>;
+    /// Inside an async export's turn.
+    active: List<bool>;
+    /// The async export call in flight, and whether it returned.
+    call: List<rok::core::task::Task<bool>?>;
+    returned: List<bool>;
+}
+
+#[cfg(target_os = "wasi")]
+static LOOP: Loop = Loop {
+    set: [0],
+    waiting: Dict::new(),
+    active: [false],
+    call: [none],
+    returned: [false],
+};
+
+/// An operation the host completes later: its event's payload.
+pub struct Waiting {
+    /// `[done, payload]`.
+    cell: List<i32>;
+    waker: List<Waker?>;
+}
+
+impl Future for Waiting {
+    type Output = i32;
+    fn poll(ref self, ref ctx: Context) -> Poll<i32> {
+        if self.cell[0] != 0 {
+            return Poll::Ready(self.cell[1]);
+        }
+        self.waker[0] = ctx.waker();
+        Poll::Pending
+    }
+}
+
+/// Wait for waitable `h`'s next event (an operation on it blocked).
+#[cfg(target_os = "wasi")]
+pub fn wait(h: i32) -> Waiting {
+    check_loop();
+    let l = LOOP;
+    if l.set[0] == 0 {
+        l.set[0] = unsafe { rok_wit_set_new() };
+    }
+    unsafe { rok_wit_join(h, l.set[0]) };
+    let p = Waiting { cell: [0, 0], waker: [none] };
+    l.waiting.insert(h, p);
+    p
+}
+
+/// What may wait runs inside an async export.
+#[cfg(target_os = "wasi")]
+fn check_loop() {
+    if !LOOP.active[0] {
+        panic("wit: an async import, stream or future blocked outside an async export (a synchronous task cannot wait); call it from an `async` export");
+    }
+}
+
+/// The host's event for waitable `h`.
+#[cfg(target_os = "wasi")]
+fn deliver(code: i32, h: i32, payload: i32) {
+    let l = LOOP;
+    let p = match l.waiting.get(h) {
+        p: Waiting => p,
+        none => return,
+    };
+    // A subtask reports its start too; it is done once it returned (or
+    // was cancelled).
+    if code == EVENT_SUBTASK && payload < RETURNED {
+        return;
+    }
+    l.waiting.remove(h);
+    if code == EVENT_SUBTASK {
+        unsafe { rok_wit_subtask_drop(h) };
+    }
+    p.cell[0] = 1;
+    p.cell[1] = payload;
+    if let w: Waker = p.waker[0] {
+        w.wake();
+    }
+}
+
+/// An async import's call: `status` is its subtask (state and handle);
+/// done once it returned.
+#[cfg(target_os = "wasi")]
+pub async fn subtask(status: i32) {
+    if status & 15 == RETURNED {
+        return;
+    }
+    await wait(status >> 4);
+}
+
+/// An async export's call: `ret` returns the result of `f` (the
+/// component model's `task.return`). The status for the host.
+#[cfg(target_os = "wasi")]
+pub fn async_start<T>(f: AsyncFuture<T>, ret: fn(T)) -> i32 {
+    let l = LOOP;
+    unsafe { rok_wit_backpressure_inc() };
+    l.returned[0] = false;
+    l.call[0] = rok::core::task::spawn_local(async {
+        let v = await f;
+        ret(v);
+        l.returned[0] = true;
+        true
+    });
+    turn()
+}
+
+/// Entering an async export (its call or callback).
+#[cfg(target_os = "wasi")]
+pub fn async_enter() {
+    rok::core::task::host_enter();
+    LOOP.active[0] = true;
+}
+
+/// The host's event for the async export in flight (its callback).
+#[cfg(target_os = "wasi")]
+pub fn async_event(code: i32, h: i32, payload: i32) -> i32 {
+    async_enter();
+    if code == EVENT_TASK_CANCELLED {
+        if let t: rok::core::task::Task<bool> = LOOP.call[0] {
+            t.cancel();
+        }
+    } else if code != 0 {
+        deliver(code, h, payload);
+    }
+    turn()
+}
+
+/// Run what is runnable; what the host is to do next: EXIT (0), YIELD
+/// (1, a timer is due meanwhile) or WAIT (2) on the set.
+#[cfg(target_os = "wasi")]
+fn turn() -> i32 {
+    let l = LOOP;
+    let next = rok::core::task::host_run(|| LOOP.waiting.is_empty());
+    l.active[0] = false;
+    rok::core::task::host_leave();
+    // What it printed, as a command's exit would.
+    unsafe { rok_stdio_flush() };
+    if !l.waiting.is_empty() {
+        return if next < 0 { 2 | (l.set[0] << 4) } else { 1 };
+    }
+    let call = l.call[0];
+    l.call[0] = none;
+    if !l.returned[0] {
+        let cancelled = match call {
+            t: rok::core::task::Task<bool> => t.is_finished(),
+            none => false,
+        };
+        if !cancelled {
+            panic("wit: an async export cannot finish: it waits for what nothing will deliver");
+        }
+        unsafe { rok_wit_task_cancel() };
+    }
+    unsafe { rok_wit_backpressure_dec() };
+    0
+}
+
+/// A throwing async export's future, its error in the result.
+pub async fn catching_async<T, E>(f: TryAsyncFuture<T, E>) -> Result<T, E> {
+    let v = try await f catch e { return Result::Err(e); };
+    Result::Ok(v)
+}
+
+/// What one future type's values need: the component model's built-ins
+/// for it and its values' layout.
+pub struct FutureOps<T> {
+    pub new: fn() -> i64;
+    pub read: fn(i32, i32) -> i32;
+    pub write: fn(i32, i32) -> i32;
+    pub drop_readable: fn(i32);
+    pub drop_writable: fn(i32);
+    pub size: i32;
+    pub align: i32;
+    /// The value at an address (freeing what it points to).
+    pub lift: fn(i32) -> T;
+    /// The value stored at an address, into blocks.
+    pub lower: fn(T, i32, Blocks);
+}
+
+/// `stream<T>`'s: as `FutureOps`, copies of many values.
+pub struct StreamOps<T> {
+    pub new: fn() -> i64;
+    pub read: fn(i32, i32, i32) -> i32;
+    pub write: fn(i32, i32, i32) -> i32;
+    pub drop_readable: fn(i32);
+    pub drop_writable: fn(i32);
+    pub size: i32;
+    pub align: i32;
+    pub lift: fn(i32) -> T;
+    pub lower: fn(T, i32, Blocks);
+}
+
+/// The readable end of future `h` as a rok future.
+#[cfg(target_os = "wasi")]
+pub async fn future_in<T>(ops: FutureOps<T>, h: i32) -> T {
+    let b = Blocks::new();
+    let a = b.alloc(ops.size, ops.align);
+    let r = (ops.read)(h, a);
+    if r == BLOCKED {
+        r = await wait(h);
+    }
+    (ops.drop_readable)(h);
+    if r != 0 {
+        panic("wit: a future's writer was dropped before it wrote");
+    }
+    let v = (ops.lift)(a);
+    b.free();
+    v
+}
+
+/// A new future whose value `f`'s is: its readable end.
+#[cfg(target_os = "wasi")]
+pub fn future_out<T>(ops: FutureOps<T>, f: AsyncFuture<T>) -> i32 {
+    check_loop();
+    let ends = (ops.new)();
+    let w = (ends >> 32) as i32;
+    rok::core::task::spawn_local(async {
+        let v = await f;
+        let b = Blocks::new();
+        let a = b.alloc(ops.size, ops.align);
+        (ops.lower)(v, a, b);
+        if (ops.write)(w, a) == BLOCKED {
+            await wait(w);
+        }
+        (ops.drop_writable)(w);
+        b.free();
+    });
+    ends as i32
+}
+
+/// Values read at once.
+const CHUNK: i32 = 64;
+
+/// The readable end of stream `h` as a channel, until its writer drops.
+#[cfg(target_os = "wasi")]
+pub fn stream_in<T: Send>(ops: StreamOps<T>, h: i32) -> Receiver<T> {
+    check_loop();
+    let (tx, rx) = channel::<T>();
+    rok::core::task::spawn_local(async {
+        let b = Blocks::new();
+        let a = b.alloc(ops.size * CHUNK, ops.align);
+        loop {
+            let r = (ops.read)(h, a, CHUNK);
+            if r == BLOCKED {
+                r = await wait(h);
+            }
+            let n = (r as u32 >> 4) as i32;
+            for i in 0..n {
+                try! tx.send((ops.lift)(a + i * ops.size));
+            }
+            if r & 15 == DROPPED {
+                break;
+            }
+        }
+        (ops.drop_readable)(h);
+        tx.close();
+        b.free();
+    });
+    rx
+}
+
+/// A new stream of `rx`'s values (until its senders close): its
+/// readable end.
+#[cfg(target_os = "wasi")]
+pub fn stream_out<T>(ops: StreamOps<T>, rx: Receiver<T>) -> i32 {
+    check_loop();
+    let ends = (ops.new)();
+    let w = (ends >> 32) as i32;
+    rok::core::task::spawn_local(async {
+        let gone = false;
+        while !gone {
+            let first = match await rx.recv_async() {
+                v: T => v,
+                none => break,
+            };
+            let vals: List<T> = [first];
+            while vals.len() < CHUNK as usize {
+                match rx.try_recv() {
+                    v: T => vals.push(v),
+                    none => break,
+                }
+            }
+            let b = Blocks::new();
+            let n = vals.len() as i32;
+            let a = b.alloc(ops.size * n, ops.align);
+            for i in 0..vals.len() {
+                (ops.lower)(vals[i], a + i as i32 * ops.size, b);
+            }
+            let done = 0;
+            while done < n {
+                let r = (ops.write)(w, a + done * ops.size, n - done);
+                if r == BLOCKED {
+                    r = await wait(w);
+                }
+                done += (r as u32 >> 4) as i32;
+                if r & 15 == DROPPED {
+                    gone = true;
+                    break;
+                }
+            }
+            b.free();
+        }
+        (ops.drop_writable)(w);
+    });
+    ends as i32
+}
+
+/// The component model's `error-context`: a message for debugging,
+/// passed between components.
+pub struct ErrorContext {
+    handle: i32;
+}
+
+#[cfg(target_os = "wasi")]
+impl ErrorContext {
+    pub fn new(msg: str) -> ErrorContext {
+        let b = Blocks::new();
+        let (p, n) = b.str(msg);
+        let h = unsafe { rok_wit_ec_new(p, n) };
+        b.free();
+        ErrorContext { handle: h }
+    }
+
+    /// Its debug message (the host may give an empty one).
+    pub fn debug_message(self) -> str {
+        let b = Blocks::new();
+        let a = b.alloc(8, 4);
+        unsafe { rok_wit_ec_message(self.handle, a) };
+        let s = unsafe { str_take(load_i32(a), load_i32(a + 4)) };
+        b.free();
+        s
+    }
+
+    /// Its handle, for the generated bindings.
+    pub fn raw(self) -> i32 { self.handle }
+
+    pub fn from_raw(h: i32) -> ErrorContext { ErrorContext { handle: h } }
+}
+
+#[cfg(target_os = "wasi")]
+impl rok::core::marker::Drop for ErrorContext {
+    fn drop(ref self) {
+        unsafe { rok_wit_ec_drop(self.handle) };
     }
 }

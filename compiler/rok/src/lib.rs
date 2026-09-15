@@ -67,16 +67,24 @@ packages:
   clean [path]                 remove target/
 
 stones (the index is a git repository; nothing is uploaded):
+  login [<token>]              keep a GitHub token (read from stdin if not
+                               given) in $ROK_HOME/credentials.rokon, after
+                               checking it can push to the index
+  logout                       remove it
   publish [--index <dir>] [--commit]
                                the index entry for this package (its git
-                               remote `origin`, HEAD commit and tree); with
-                               --commit, committed to the index checkout <dir>
+                               remote `origin`, HEAD commit and tree); a dry
+                               run, checked against the index checkout <dir>
+                               if given. --commit: commit it to <dir>, or
+                               without --index, to the index and push (needs
+                               `rok login`)
   publish --native <file> [--index <dir>] [--commit]
                                the index entry of the native package
                                `Native { .. }` in <file>, each build fetched
                                and checked
-  yank [--native] --vers <v> [--undo] --index <dir> [name]
-                               mark a version yanked (commits to <dir>);
+  yank [--native] --vers <v> [--undo] [--index <dir>] [name]
+                               mark a version yanked: committed to <dir>, or
+                               to the index and pushed (needs `rok login`);
                                --native: a native package's (named)
 
 compiler commands (rokc, with the dependencies; see `rokc help`):
@@ -136,7 +144,8 @@ manifest's `lints` then override per lint.
 
 environment: ROK_HOME (default: ~/.rok), ROK_ENV, ROK_TOOLCHAIN,
   ROK_REGISTRY (the stone index; else `registry` in $ROK_HOME/config.rokon,
-  else https://github.com/rok-lang/rokstones.io-index)
+  else https://github.com/rok-lang/rokstones.io-index),
+  ROK_REGISTRY_TOKEN (instead of `rok login`'s token)
 ";
 
 #[derive(Default)]
@@ -330,7 +339,9 @@ fn run(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> i32 {
         "deps" => cmd_deps(g, post),
         "search" => cmd_search(g, post),
         "publish" => cmd_publish(g, post),
-        "yank" => cmd_yank(post),
+        "yank" => cmd_yank(g, post),
+        "login" => cmd_login(g, post),
+        "logout" => cmd_logout(g, post),
         "env" => env::cmd(g, post),
         "toolchain" => toolchain::cmd(post, g.quiet),
         "jupyter" if post.first().is_some_and(|p| p == "install") => install_kernel(g, &post[1..]),
@@ -1136,13 +1147,14 @@ fn cmd_search(g: &Global, args: &[String]) -> Result<i32, String> {
     };
     let url = registry::default_url(&home())?;
     let index = registry::open(&home(), &url, g.offline, g.quiet)?;
-    let q = q.to_ascii_lowercase();
+    // `-` and `_` are one (9.10.3); file names are lowercase.
+    let q = q.to_ascii_lowercase().replace('_', "-");
     let mut names: Vec<String> = index
         .files(&url)?
         .into_iter()
         .filter(|f| f.contains('/') && f.starts_with("native/") == native)
         .filter_map(|f| f.rsplit('/').next().map(str::to_owned))
-        .filter(|n| n.contains(&q))
+        .filter(|n| n.replace('_', "-").contains(&q))
         .collect();
     names.sort();
     let star = semver::Req::parse("*")?;
@@ -1205,75 +1217,72 @@ fn val<'a>(vals: &'a [(String, String)], f: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
-/// `rok publish [--index <dir>] [--commit]`: print this package's index
-/// line; with `--index`, check it against that checkout; with `--commit`,
-/// commit it there.
+/// Run `f` on the index checkout `index`, or without one, on a clone of
+/// the configured index, pushing what `f` commits (with `rok login`'s
+/// token); also the index's name for messages.
+fn on_index<T>(
+    index: Option<&str>,
+    f: impl FnOnce(&Path) -> Result<T, String>,
+) -> Result<(T, String), String> {
+    if let Some(i) = index {
+        return Ok((f(Path::new(i))?, i.to_owned()));
+    }
+    let home = home();
+    let url = registry::default_url(&home)?;
+    let token = registry::token(&home)?;
+    Ok((registry::with_remote(&home, &url, &token, f)?, url))
+}
+
+/// `rok publish [--native <file>] [--index <dir>] [--commit]`: print the
+/// index line; with `--index`, check it against that checkout. With
+/// `--commit`, commit it there, or without `--index`, to the configured
+/// index, pushed.
 fn cmd_publish(g: &Global, args: &[String]) -> Result<i32, String> {
     let (vals, sw, pos) = flags(args, &["--index", "--native"], &["--commit"])?;
     if let Some(p) = pos.first() {
         return Err(format!("unexpected argument `{p}`"));
     }
     let write = sw.iter().any(|s| s == "--commit");
-    if write && val(&vals, "--index").is_none() {
-        return Err("--commit needs --index <dir> (a checkout of the index)".into());
-    }
-    if let Some(file) = val(&vals, "--native") {
-        let index = val(&vals, "--index").map(Path::new);
-        let (e, at) = native::publish(&home(), Path::new(file), index, write)?;
-        println!("{}", e.to_line());
-        if !g.quiet {
-            match (at, write) {
-                (Some(f), true) => {
-                    eprintln!(
-                        "   Published native {} {} ({})",
-                        e.name,
-                        e.vers,
-                        f.display()
-                    );
-                }
-                _ => eprintln!(
-                    "note: dry run; `rok publish --native {file} --index <checkout> --commit` adds \
-                     it as {}",
-                    native::path(&e.name)
-                ),
-            }
+    let index = val(&vals, "--index");
+    let (line, name, vers, rel, what) = if let Some(file) = val(&vals, "--native") {
+        let check = |i: Option<&Path>| native::publish(&home(), Path::new(file), i, write);
+        let e = if index.is_some() || write {
+            on_index(index, |i| check(Some(i)))?.0.0
+        } else {
+            check(None)?.0
+        };
+        let rel = native::path(&e.name);
+        (e.to_line(), e.name, e.vers, rel, "native ")
+    } else {
+        let (dir, m) = this_package()?;
+        let e = registry::entry_for(&dir, &m)?;
+        if index.is_some() || write {
+            on_index(index, |i| registry::publish(i, &e, write))?;
         }
-        return Ok(0);
-    }
-    let (dir, m) = this_package()?;
-    let e = registry::entry_for(&dir, &m)?;
-    let line = e.to_line();
-    let Some(index) = val(&vals, "--index") else {
-        println!("{line}");
-        if !g.quiet {
-            eprintln!(
-                "note: dry run; `rok publish --index <checkout> --commit` adds it as {}",
-                registry::path(&e.name)
-            );
-        }
-        return Ok(0);
+        let rel = registry::path(&e.name);
+        (e.to_line(), e.name, e.vers, rel, "")
     };
-    let file = registry::publish(Path::new(index), &e, write)?;
     println!("{line}");
     if !g.quiet {
+        let to = match index {
+            Some(i) => i.to_owned(),
+            None => registry::default_url(&home())?,
+        };
         if write {
-            eprintln!("   Published {} {} ({})", e.name, e.vers, file.display());
+            eprintln!("   Published {what}{name} {vers} to {to}");
         } else {
-            eprintln!(
-                "note: dry run; --commit adds it to {} and commits",
-                file.display()
-            );
+            eprintln!("note: dry run; --commit adds it to {to} as {rel}");
         }
     }
     Ok(0)
 }
 
-/// `rok yank [--native] --vers <v> [--undo] --index <dir> [name]`
+/// `rok yank [--native] --vers <v> [--undo] [--index <dir>] [name]`
 /// (default: this package's name; a native package is named).
-fn cmd_yank(args: &[String]) -> Result<i32, String> {
+fn cmd_yank(g: &Global, args: &[String]) -> Result<i32, String> {
     let (vals, sw, pos) = flags(args, &["--vers", "--index"], &["--undo", "--native"])?;
-    let usage = "usage: rok yank [--native] --vers <version> [--undo] --index <dir> [name]";
-    let (Some(vers), Some(index)) = (val(&vals, "--vers"), val(&vals, "--index")) else {
+    let usage = "usage: rok yank [--native] --vers <version> [--undo] [--index <dir>] [name]";
+    let Some(vers) = val(&vals, "--vers") else {
         return Err(usage.into());
     };
     let native = sw.iter().any(|s| s == "--native");
@@ -1282,12 +1291,102 @@ fn cmd_yank(args: &[String]) -> Result<i32, String> {
         [] if !native => this_package()?.1.name.ok_or("rok.rokon has no `name`")?,
         _ => return Err(usage.into()),
     };
-    registry::yank(
-        Path::new(index),
-        &name,
-        vers,
-        !sw.iter().any(|s| s == "--undo"),
-        native,
-    )?;
+    let yanked = !sw.iter().any(|s| s == "--undo");
+    let ((), to) = on_index(val(&vals, "--index"), |i| {
+        registry::yank(i, &name, vers, yanked, native)
+    })?;
+    if !g.quiet {
+        let verb = if yanked { "Yanked" } else { "Unyanked" };
+        eprintln!("   {verb} {name} {vers} in {to}");
+    }
     Ok(0)
+}
+
+/// `rok login [<token>]`: keep a token that can push to the index.
+fn cmd_login(g: &Global, args: &[String]) -> Result<i32, String> {
+    let (_, _, pos) = flags(args, &[], &[])?;
+    let home = home();
+    let url = registry::default_url(&home)?;
+    let token = match pos.as_slice() {
+        [t] => t.clone(),
+        [] => read_secret(&format!(
+            "a GitHub token with push access to {url} (not shown): "
+        ))?,
+        _ => return Err("usage: rok login [<token>]".into()),
+    };
+    registry::check_token(&token)?;
+    registry::check_push(&home, &url, &token)?;
+    let file = registry::save_token(&home, &token)?;
+    if !g.quiet {
+        eprintln!("   Logged in to {url} (token in {})", file.display());
+    }
+    Ok(0)
+}
+
+/// `rok logout`: remove `rok login`'s token.
+fn cmd_logout(g: &Global, args: &[String]) -> Result<i32, String> {
+    if let Some(a) = args.first() {
+        return Err(format!("unexpected argument `{a}`"));
+    }
+    let had = registry::logout(&home())?;
+    if !g.quiet {
+        eprintln!(
+            "{}",
+            if had {
+                "   Logged out"
+            } else {
+                "note: not logged in"
+            }
+        );
+    }
+    Ok(0)
+}
+
+/// A line of stdin, trimmed; not echoed when stdin is a terminal.
+fn read_secret(prompt: &str) -> Result<String, String> {
+    use std::io::IsTerminal;
+    let tty = std::io::stdin().is_terminal();
+    if tty {
+        eprint!("{prompt}");
+        echo(false);
+    }
+    let mut line = String::new();
+    let r = std::io::stdin().read_line(&mut line);
+    if tty {
+        echo(true);
+        eprintln!();
+    }
+    r.map_err(|e| format!("cannot read stdin: {e}"))?;
+    Ok(line.trim().to_owned())
+}
+
+/// Turn the terminal's echo of stdin on or off.
+fn echo(on: bool) {
+    #[cfg(unix)]
+    let _ = Command::new("stty")
+        .arg(if on { "echo" } else { "-echo" })
+        .status();
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            fn GetStdHandle(which: u32) -> isize;
+            fn GetConsoleMode(h: isize, mode: *mut u32) -> i32;
+            fn SetConsoleMode(h: isize, mode: u32) -> i32;
+        }
+        const STD_INPUT_HANDLE: u32 = 0xFFFF_FFF6;
+        const ENABLE_ECHO_INPUT: u32 = 4;
+        // SAFETY: the console input handle and a local out-parameter.
+        unsafe {
+            let h = GetStdHandle(STD_INPUT_HANDLE);
+            let mut m = 0;
+            if GetConsoleMode(h, &mut m) != 0 {
+                let m = if on {
+                    m | ENABLE_ECHO_INPUT
+                } else {
+                    m & !ENABLE_ECHO_INPUT
+                };
+                SetConsoleMode(h, m);
+            }
+        }
+    }
 }

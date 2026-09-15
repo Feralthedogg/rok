@@ -93,6 +93,7 @@ const BUILTIN_ATTRS: &[&str] = &[
     "keyword",
     "lang",
     "link",
+    "link_name",
     "literal",
     "must_use",
     "no_mangle",

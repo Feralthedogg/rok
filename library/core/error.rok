@@ -172,6 +172,82 @@ impl Debug for ConversionError {
 
 impl Error for ConversionError {}
 
+/// A value of the wrong type (stdlib spec 2.14.4).
+pub struct TypeError {
+    pub expected: str;
+    pub actual: str;
+}
+
+impl Display for TypeError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"expected `{self.expected}`, found `{self.actual}`") }
+}
+
+impl Debug for TypeError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str(f"TypeError {{ expected: {self.expected:?}, actual: {self.actual:?} }}")
+    }
+}
+
+impl Error for TypeError {}
+
+/// An index out of range in a throwing API (stdlib spec 2.14.4;
+/// `List::set`). `xs[i]` out of range panics instead.
+pub struct IndexError {
+    pub index: i64;
+    pub len: usize;
+}
+
+impl Display for IndexError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"index {self.index} out of bounds (len {self.len})") }
+}
+
+impl Debug for IndexError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str(f"IndexError {{ index: {self.index}, len: {self.len} }}")
+    }
+}
+
+impl Error for IndexError {}
+
+// Fatal errors (stdlib spec 2.14.4): never thrown; the runtime reports
+// these conditions and exits with 101.
+
+pub struct StackOverflowError;
+
+impl Display for StackOverflowError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("stack overflow") }
+}
+
+impl Debug for StackOverflowError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("StackOverflowError") }
+}
+
+impl Error for StackOverflowError {}
+
+pub struct OutOfMemoryError;
+
+impl Display for OutOfMemoryError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("out of memory") }
+}
+
+impl Debug for OutOfMemoryError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("OutOfMemoryError") }
+}
+
+impl Error for OutOfMemoryError {}
+
+pub struct InternalError;
+
+impl Display for InternalError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("internal compiler error") }
+}
+
+impl Debug for InternalError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("InternalError") }
+}
+
+impl Error for InternalError {}
+
 /// Every error type's surface (stdlib spec 2.14.3). Untyped `throws`
 /// means `throws (any Error)`.
 pub trait Error: Display + Debug {

@@ -30,7 +30,6 @@ use crate::semver::{Req, Version};
 
 /// The index used when neither `ROK_REGISTRY` nor `$ROK_HOME/config.rokon`
 /// names one.
-// Placeholder organization until the index is hosted.
 pub const DEFAULT: &str = "https://github.com/rok-lang/rokstones.io-index";
 
 /// The configured index: `$ROK_REGISTRY`, else `registry` of
@@ -517,9 +516,223 @@ pub fn yank(
     commit(index, &file, &out, &format!("{verb} {what}{name} {vers}"))
 }
 
+/// `rok login`'s file: `Credentials { token: ".." }`.
+fn credentials(home: &Path) -> PathBuf {
+    home.join("credentials.rokon")
+}
+
+/// A token goes into an HTTP header: printable ASCII, no spaces.
+pub fn check_token(token: &str) -> Result<(), String> {
+    if token.is_empty() || !token.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err("a token is printable ASCII without spaces".into());
+    }
+    Ok(())
+}
+
+/// The token for pushing to the index: `$ROK_REGISTRY_TOKEN`, else
+/// `rok login`'s.
+pub fn token(home: &Path) -> Result<String, String> {
+    pick_token(std::env::var("ROK_REGISTRY_TOKEN").ok(), home)
+}
+
+fn pick_token(env: Option<String>, home: &Path) -> Result<String, String> {
+    if let Some(t) = env.filter(|t| !t.is_empty()) {
+        check_token(&t).map_err(|e| format!("ROK_REGISTRY_TOKEN: {e}"))?;
+        return Ok(t);
+    }
+    let path = credentials(home);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err("publishing needs a token: run `rok login` first".into());
+        }
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    // Parse errors would quote the line holding the token.
+    let bad = |_| format!("{} is malformed; run `rok login` again", path.display());
+    let doc = Doc::parse(&text, "credentials").map_err(bad)?;
+    let r = doc.root().record("Credentials").map_err(bad)?;
+    r.only(&["token"]).map_err(bad)?;
+    let t = r.req("token").and_then(|t| t.string()).map_err(bad)?;
+    check_token(&t).map_err(bad)?;
+    Ok(t)
+}
+
+/// Keep `token` in `$ROK_HOME/credentials.rokon` (mode 0600 on Unix);
+/// the file.
+pub fn save_token(home: &Path, token: &str) -> Result<PathBuf, String> {
+    use std::io::Write;
+    let path = credentials(home);
+    std::fs::create_dir_all(home).map_err(|e| format!("{}: {e}", home.display()))?;
+    let text = rokc_rokon::to_string(&Value::record(
+        Some("Credentials"),
+        vec![("token", Value::str(token))],
+    )) + "\n";
+    // Created anew, so the mode applies.
+    let _ = std::fs::remove_file(&path);
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    o.open(&path)
+        .and_then(|mut f| f.write_all(text.as_bytes()))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(path)
+}
+
+/// Remove `rok login`'s token; whether there was one.
+pub fn logout(home: &Path) -> Result<bool, String> {
+    let path = credentials(home);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("cannot remove {}: {e}", path.display())),
+    }
+}
+
+fn base64(data: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in data.chunks(3) {
+        let n = c
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, &b)| n | (u32::from(b) << (16 - 8 * i)));
+        for i in 0..4 {
+            out.push(if i <= c.len() {
+                A[((n >> (18 - 6 * i)) & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+    }
+    out
+}
+
+/// `git args..` in `dir` against a remote with `token` as the HTTPS
+/// credential. It travels as `http.extraHeader` in git's environment
+/// config (`GIT_CONFIG_COUNT`, after any already there): on no command
+/// line, in no file, and stripped from errors. Credential helpers are
+/// off, so only the token is tried.
+fn remote(dir: &Path, args: &[&str], token: &str) -> Result<String, String> {
+    let n: usize = std::env::var("GIT_CONFIG_COUNT")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    let secret = base64(format!("x-access-token:{token}").as_bytes());
+    let kv = [
+        ("credential.helper", String::new()),
+        ("http.extraHeader", format!("Authorization: Basic {secret}")),
+    ];
+    let mut env = vec![("GIT_CONFIG_COUNT".to_owned(), (n + kv.len()).to_string())];
+    for (i, (k, v)) in kv.into_iter().enumerate() {
+        env.push((format!("GIT_CONFIG_KEY_{}", n + i), k.to_owned()));
+        env.push((format!("GIT_CONFIG_VALUE_{}", n + i), v));
+    }
+    git::run_env(dir, args, &env).map_err(|e| e.replace(token, "***").replace(&secret, "***"))
+}
+
+/// An empty scratch path `$ROK_HOME/cache/registry/.<what>-<pid>`.
+fn scratch(home: &Path, what: &str) -> Result<PathBuf, String> {
+    let root = home.join("cache/registry");
+    std::fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
+    let dir = root.join(format!(".{what}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(dir)
+}
+
+/// Fail unless `token` may push to the index `url`: a dry-run push of a
+/// new branch makes git ask the index's receive-pack (which needs write
+/// access); nothing is sent.
+pub fn check_push(home: &Path, url: &str, token: &str) -> Result<(), String> {
+    let dir = scratch(home, "login")?;
+    // Local failures (`?`) apart from the push's.
+    let r = (|| -> Result<_, String> {
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        git::run(&dir, &["init", "--quiet"])?;
+        let tree = git::run(&dir, &["write-tree"])?;
+        let who = ["AUTHOR", "COMMITTER"].into_iter().flat_map(|r| {
+            [
+                (format!("GIT_{r}_NAME"), "rok".to_owned()),
+                (format!("GIT_{r}_EMAIL"), "rok@localhost".to_owned()),
+            ]
+        });
+        let c = git::run_env(
+            &dir,
+            &["commit-tree", "--no-gpg-sign", &tree, "-m", "rok login"],
+            &who.collect::<Vec<_>>(),
+        )?;
+        let spec = format!("{c}:refs/heads/rok-login-check");
+        Ok(
+            remote(&dir, &["push", "--dry-run", "--quiet", url, &spec], token).map_err(|e| {
+                format!(
+                    "this token cannot publish to {url}: publishing is limited to the index's \
+                 maintainers\n({e})"
+                )
+            }),
+        )
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    r?.map(drop)
+}
+
+/// Run `f` on a fresh clone of the index `url`, then push what it
+/// committed, with `token`. Errors name `url` for the clone.
+pub fn with_remote<T>(
+    home: &Path,
+    url: &str,
+    token: &str,
+    f: impl FnOnce(&Path) -> Result<T, String>,
+) -> Result<T, String> {
+    let dir = scratch(home, "push")?;
+    let shown = dir.display().to_string();
+    let parent = dir.parent().unwrap_or(&dir);
+    let r = remote(
+        parent,
+        &["clone", "--quiet", "--depth", "1", url, &shown],
+        token,
+    )
+    .and_then(|_| f(&dir))
+    .and_then(|v| remote(&dir, &["push", "--quiet", "origin", "HEAD"], token).map(|_| v));
+    let _ = std::fs::remove_dir_all(&dir);
+    r.map_err(|e| e.replace(&shown, url))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tokens() {
+        assert_eq!(base64(b"x-access-token:ab"), "eC1hY2Nlc3MtdG9rZW46YWI=");
+        assert_eq!(base64(b"abc"), "YWJj");
+        assert_eq!(base64(b"a"), "YQ==");
+        let home = std::env::temp_dir().join(format!("rok-token-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let e = pick_token(None, &home).unwrap_err();
+        assert!(e.contains("run `rok login` first"), "{e}");
+        let file = save_token(&home, "ghp_file").unwrap();
+        assert_eq!(pick_token(None, &home).unwrap(), "ghp_file");
+        // The environment wins over the file.
+        assert_eq!(
+            pick_token(Some("ghp_env".into()), &home).unwrap(),
+            "ghp_env"
+        );
+        assert_eq!(pick_token(Some(String::new()), &home).unwrap(), "ghp_file");
+        assert!(pick_token(Some("a b".into()), &home).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        std::fs::write(&file, "Credentials { token: \"ghp_secret\", x: 1 }").unwrap();
+        let e = pick_token(None, &home).unwrap_err();
+        assert!(e.contains("malformed") && !e.contains("ghp_secret"), "{e}");
+        assert!(logout(&home).unwrap());
+        assert!(!logout(&home).unwrap());
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     #[test]
     fn paths_and_lines() {

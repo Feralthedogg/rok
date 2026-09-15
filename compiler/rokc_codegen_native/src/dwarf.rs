@@ -702,7 +702,7 @@ fn scope_code(id: u32, d: &crate::lir::FnDebug, f: &FnRange) -> Vec<(u32, u32)> 
 }
 
 /// Add the debug sections of `obj`'s functions.
-pub fn write(obj: &mut Obj, m: &MirModule) {
+pub fn write(obj: &mut Obj, m: &MirModule, sources: &rokc_diagnostic::SourceMap) {
     let t = &m.target;
     let fns: Vec<&FnRange> = obj.fns.iter().filter(|f| f.debug.is_some()).collect();
     // The unit is named by its first function with a position; generated
@@ -715,10 +715,7 @@ pub fn write(obj: &mut Obj, m: &MirModule) {
         return;
     };
     let cwd = std::env::current_dir().unwrap_or_default();
-    let files: Vec<PathBuf> = rokc_diagnostic::registered_files()
-        .into_iter()
-        .map(|(p, _)| cwd.join(p))
-        .collect();
+    let files: Vec<PathBuf> = sources.files().iter().map(|(p, _)| cwd.join(p)).collect();
     let cu_path = files
         .get(first_file as usize - 1)
         .cloned()

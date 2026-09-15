@@ -127,13 +127,13 @@ impl Debug for IoErrorKind {
     }
 }
 
-/// An I/O failure (305 names it everywhere but leaves its shape open):
+/// An I/O failure (std 3.5.0):
 /// its kind, the OS error code (`0` when the library raised it) and a
 /// readable message.
 pub struct IoError {
     pub kind: IoErrorKind;
     pub code: i32;
-    message: str;
+    pub message: str;
 }
 
 impl IoError {

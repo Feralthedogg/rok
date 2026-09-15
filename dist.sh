@@ -93,7 +93,7 @@ for o in -O0 -O2; do
     PATH=/usr/bin:/bin "$stage/bin/rokc$exe" -q build "$stage/check.rok" $o --target "$t" -o "$stage/check$exe"
   done
 done
-rm -rf "$stage/check.rok" "$stage/check$exe" "$stage/check.pdb" "$stage/lib/rok-cache"
+rm -rf "$stage/check.rok" "$stage/check$exe" "$stage/.check$exe.fp" "$stage/check.pdb" "$stage/lib/rok-cache"
 
 case $ext in
   # cmake (needed for LLVM anyway) writes zip; Git Bash's tar does not.

@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rokc_diagnostic::{print_rendered, render};
+use rokc_diagnostic::print_rendered;
 
 use crate::fresh::Fingerprint;
 use crate::{BuildOptions, Session, TargetSpec, rokhir};
@@ -114,9 +114,8 @@ impl DepBuild<'_> {
         s.set_lib_name(Some(name.to_owned()));
         s.set_target(self.target);
         s.set_std_prebuilt(self.std.map(Path::to_path_buf));
-        rokc_diagnostic::clear_files();
         let r = s.compile_file(root);
-        let warnings: String = r.warnings.iter().map(render).collect();
+        let warnings: String = r.warnings.iter().map(|w| r.render(w)).collect();
         print_rendered(&warnings);
         let failed = || format!("could not build dependency `{name}`");
         if r.has_errors() {
@@ -124,7 +123,7 @@ impl DepBuild<'_> {
             return Err(failed());
         }
         r.archive(self.opts, archive, false).map_err(|d| {
-            crate::report(&d);
+            r.report(&d);
             failed()
         })?;
         Ok((r.files, warnings))

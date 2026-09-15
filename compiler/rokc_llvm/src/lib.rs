@@ -136,6 +136,45 @@ pub fn compile_mlir_split(
     ffi::compile(true, src, c, parts.max(1))
 }
 
+/// One codegen unit of [`compile_units`].
+pub enum UnitInput<'a> {
+    /// MLIR text to compile.
+    Mlir(&'a str),
+    /// Its `ThinLTO` bitcode from an earlier build
+    /// (`UnitsOutput::bitcode`).
+    Bitcode(&'a [u8]),
+}
+
+/// What [`compile_units`] made.
+pub struct UnitsOutput {
+    /// An object per unit.
+    pub objects: Vec<Vec<u8>>,
+    /// The `ThinLTO` bitcode of each unit given as MLIR.
+    pub bitcode: Vec<Option<Vec<u8>>>,
+    /// How many objects the cache had.
+    pub cached: usize,
+    /// What LLVM warned about.
+    pub warnings: String,
+}
+
+/// A program's codegen units (`(name, input)`, the names stable across
+/// builds) optimized at `c.opt` (above 0) to an object each.
+///
+/// In-process `ThinLTO`: each unit given as MLIR through the pre-link
+/// pipeline, then the thin link, which imports across units what
+/// inlining wants and reuses from the `cache` directory the object of a
+/// unit whose inputs are unchanged. `alloc`: the MLIR module of
+/// `rok.alloc`, linked into each unit at the end. The program's own
+/// symbols (`_Y`) may be internalized.
+pub fn compile_units(
+    units: &[(&str, UnitInput<'_>)],
+    alloc: &str,
+    c: &Compile<'_>,
+    cache: &Path,
+) -> Result<UnitsOutput, String> {
+    ffi::compile_units(units, alloc, c, cache)
+}
+
 /// LLVM IR text → `c.emit` (`LlvmIr` only applies the TLS model).
 pub fn compile_llvm_ir(src: &str, c: &Compile<'_>) -> Result<Vec<u8>, String> {
     ffi::compile(false, src, c, 1).map(|(mut v, _)| v.remove(0))
@@ -438,7 +477,7 @@ mod ffi {
     use std::ffi::{CString, c_char, c_int};
     use std::path::Path;
 
-    use super::{Compile, Emit, Profile, Target};
+    use super::{Compile, Emit, Profile, Target, UnitInput, UnitsOutput};
 
     #[repr(C)]
     struct RokBuf {
@@ -507,6 +546,19 @@ mod ffi {
             err: *mut RokBuf,
             warn: *mut RokBuf,
         ) -> c_int;
+        fn rok_llvm_compile_units(
+            units: *const RokUnit,
+            n: usize,
+            alloc: *const c_char,
+            alloc_len: usize,
+            o: *const RokCompile,
+            cache: *const c_char,
+            objects: *mut RokBuf,
+            bitcode: *mut RokBuf,
+            hits: *mut usize,
+            err: *mut RokBuf,
+            warn: *mut RokBuf,
+        ) -> c_int;
         fn rok_llvm_data_layout(o: *const RokCompile, out: *mut RokBuf, err: *mut RokBuf) -> c_int;
         fn rok_llvm_dsymutil(argv: *const *const c_char, argc: usize) -> c_int;
         fn rok_llvm_lld(argv: *const *const c_char, argc: usize, log: *mut RokBuf) -> c_int;
@@ -548,12 +600,12 @@ mod ffi {
         ps.iter().map(|p| super::cstr(p.as_os_str())).collect()
     }
 
-    pub fn compile(
-        mlir: bool,
-        src: &str,
+    /// `f` of the shim's form of `o`.
+    fn with_opts<R>(
         o: &Compile<'_>,
         parts: usize,
-    ) -> Result<(Vec<Vec<u8>>, String), String> {
+        f: impl FnOnce(&RokCompile) -> R,
+    ) -> Result<R, String> {
         let (triple, cpu, features) = (
             c(&o.target.llvm_triple())?,
             c(&o.target.cpu)?,
@@ -592,6 +644,15 @@ mod ffi {
             profile_generate: generate.as_ptr(),
             profile_use: used.as_ptr(),
         };
+        Ok(f(&opts))
+    }
+
+    pub fn compile(
+        mlir: bool,
+        src: &str,
+        o: &Compile<'_>,
+        parts: usize,
+    ) -> Result<(Vec<Vec<u8>>, String), String> {
         let mut out: Vec<RokBuf> = (0..parts).map(|_| RokBuf::new()).collect();
         let (mut err, mut warn) = (RokBuf::new(), RokBuf::new());
         let f = if mlir {
@@ -600,21 +661,99 @@ mod ffi {
             rok_llvm_compile_ir
         };
         // SAFETY: every pointer outlives the call; the shim fills the buffers.
-        let rc = unsafe {
+        let rc = with_opts(o, parts, |opts| unsafe {
             f(
                 src.as_ptr().cast(),
                 src.len(),
-                &raw const opts,
+                opts,
                 out.as_mut_ptr(),
                 &raw mut err,
                 &raw mut warn,
             )
-        };
+        })?;
         let out: Vec<Vec<u8>> = out.into_iter().map(RokBuf::take).collect();
         let warn = warn.text();
         if rc == 0 {
             drop(err.take());
             Ok((out, warn))
+        } else {
+            Err(err.text())
+        }
+    }
+
+    #[repr(C)]
+    struct RokUnit {
+        name: *const c_char,
+        src: *const c_char,
+        len: usize,
+        bitcode: c_int,
+    }
+
+    pub fn compile_units(
+        units: &[(&str, UnitInput<'_>)],
+        alloc: &str,
+        o: &Compile<'_>,
+        cache: &Path,
+    ) -> Result<UnitsOutput, String> {
+        let names = units
+            .iter()
+            .map(|(n, _)| c(n))
+            .collect::<Result<Vec<_>, _>>()?;
+        let raw: Vec<RokUnit> = units
+            .iter()
+            .zip(&names)
+            .map(|((_, u), name)| {
+                let (src, bitcode): (&[u8], bool) = match u {
+                    UnitInput::Mlir(t) => (t.as_bytes(), false),
+                    UnitInput::Bitcode(b) => (b, true),
+                };
+                RokUnit {
+                    name: name.as_ptr(),
+                    src: src.as_ptr().cast(),
+                    len: src.len(),
+                    bitcode: c_int::from(bitcode),
+                }
+            })
+            .collect();
+        let cache = super::cstr(cache.as_os_str())?;
+        let n = units.len();
+        let mut objects: Vec<RokBuf> = (0..n).map(|_| RokBuf::new()).collect();
+        let mut bitcode: Vec<RokBuf> = (0..n).map(|_| RokBuf::new()).collect();
+        let (mut err, mut warn, mut hits) = (RokBuf::new(), RokBuf::new(), 0usize);
+        // SAFETY: every pointer outlives the call; the shim fills the buffers.
+        let rc = with_opts(o, 1, |opts| unsafe {
+            rok_llvm_compile_units(
+                raw.as_ptr(),
+                n,
+                alloc.as_ptr().cast(),
+                alloc.len(),
+                opts,
+                cache.as_ptr(),
+                objects.as_mut_ptr(),
+                bitcode.as_mut_ptr(),
+                &raw mut hits,
+                &raw mut err,
+                &raw mut warn,
+            )
+        })?;
+        let objects: Vec<Vec<u8>> = objects.into_iter().map(RokBuf::take).collect();
+        let bitcode: Vec<Option<Vec<u8>>> = bitcode
+            .into_iter()
+            .zip(units)
+            .map(|(b, (_, u))| {
+                let b = b.take();
+                matches!(u, UnitInput::Mlir(_)).then_some(b)
+            })
+            .collect();
+        let warnings = warn.text();
+        if rc == 0 {
+            drop(err.take());
+            Ok(UnitsOutput {
+                objects,
+                bitcode,
+                cached: hits,
+                warnings,
+            })
         } else {
             Err(err.text())
         }
@@ -769,6 +908,15 @@ mod ffi {
         _: &Compile<'_>,
         _: usize,
     ) -> Result<(Vec<Vec<u8>>, String), String> {
+        off()
+    }
+
+    pub fn compile_units(
+        _: &[(&str, super::UnitInput<'_>)],
+        _: &str,
+        _: &Compile<'_>,
+        _: &std::path::Path,
+    ) -> Result<super::UnitsOutput, String> {
         off()
     }
 

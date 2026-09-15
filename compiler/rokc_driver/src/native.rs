@@ -4,7 +4,7 @@
 //! the arch (`aarch64`, `x86_64`); LLVM (`toolchain`) builds the optimized
 //! code, and every other target at `-O0` too (the 32-bit ones).
 
-use rokc_diagnostic::RokDiagnostic;
+use rokc_diagnostic::{RokDiagnostic, SourceMap};
 
 use crate::{BuildOptions, CompiledModule};
 
@@ -15,24 +15,31 @@ use crate::{BuildOptions, CompiledModule};
 /// writes DWARF, Windows debuggers read `CodeView`.
 pub fn object(
     module: &CompiledModule,
+    sources: &SourceMap,
     opts: &BuildOptions,
 ) -> Result<Option<rokc_codegen_native::Output>, RokDiagnostic> {
-    if !wanted(opts)
-        || rokc_codegen_native::unsupported(&module.mir).is_some()
-        || (opts.debug && module.mir.target.object_format == rokc_target::ObjectFormat::Coff)
-    {
+    if !chosen_for(module, opts) {
         return Ok(None);
     }
-    let o = rokc_codegen_native::compile(
-        &module.mir,
-        &rokc_codegen_native::Options {
-            overflow_checks: opts.overflow_checks.unwrap_or(opts.opt_level == "0"),
-            debug: opts.debug,
-            repl: opts.repl.clone(),
-            fresh_fns: None,
-        },
-    )?;
+    let o = rokc_codegen_native::compile(&module.mir, &options(opts), sources)?;
     Ok(Some(o))
+}
+
+/// The native backend builds `module`'s code (else LLVM).
+pub(crate) fn chosen_for(module: &CompiledModule, opts: &BuildOptions) -> bool {
+    wanted(opts)
+        && rokc_codegen_native::unsupported(&module.mir).is_none()
+        && !(opts.debug && module.mir.target.object_format == rokc_target::ObjectFormat::Coff)
+}
+
+/// The native backend's options of a program build.
+pub(crate) fn options(opts: &BuildOptions) -> rokc_codegen_native::Options {
+    rokc_codegen_native::Options {
+        overflow_checks: opts.overflow_checks.unwrap_or(opts.opt_level == "0"),
+        debug: opts.debug,
+        repl: opts.repl.clone(),
+        fresh_fns: None,
+    }
 }
 
 /// The native backend generates `opts`' code (when the target and the
@@ -54,9 +61,10 @@ pub fn jit(opts: &BuildOptions) -> bool {
 /// for LLVM), and what codegen says about it.
 pub fn cell_object(
     module: &CompiledModule,
+    sources: &SourceMap,
     opts: &BuildOptions,
 ) -> Result<(Vec<u8>, rokc_codegen_mlir::MlirOutput), RokDiagnostic> {
-    let mut out = crate::mlir_text(module, opts)?;
+    let mut out = crate::mlir_text(module, sources, opts)?;
     let fresh = out.fns.iter().map(|f| f.name.clone()).collect();
     let o = rokc_codegen_native::compile(
         &module.mir,
@@ -66,6 +74,7 @@ pub fn cell_object(
             repl: opts.repl.clone(),
             fresh_fns: Some(fresh),
         },
+        sources,
     )?;
     out.text.clear();
     out.gc_types = o.gc_types;

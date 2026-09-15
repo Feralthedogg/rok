@@ -1,0 +1,73 @@
+// only-target: wasm32-wasi
+// expect-exit: 0
+// wasm-invoke: delayed-add(1, 2, 5) => 3
+// wasm-invoke: check(21) => ok(42)
+// wasm-invoke: check(-1) => err("negative")
+// wasm-invoke: echo("x", 3) => ["x0", "x1", "x2"]
+// expect-stdout:
+// through a stream
+// written true
+// waited true
+// stdin 0 bytes, done true
+
+// Stdlib 1.8: a WASI preview 3 command. Without `main` the component
+// exports only what its world says: `wasi:cli/run@0.3.0`'s `run`, an
+// `async func`, is the `#[wit::export] async fn run`, which the host
+// runs on its event loop. It awaits the host's async imports (a
+// subtask: `monotonic-clock.wait-for`), writes stdout through a
+// `stream<u8>` (a channel `Receiver<u8>`), awaits the `future` the host
+// answers with (an `AsyncFuture`), and reads stdin's stream to its end.
+// The other async exports are called by the host (`--invoke`): one
+// throwing (`result<s32, string>`), one returning a list.
+ffi::wit::import { "wit" }
+
+use wasi::clocks::monotonic_clock;
+use wasi::cli::{stdin, stdout};
+use rok::core::channel::channel;
+
+#[wit::export]
+async fn run() -> Result<(), ()> {
+    let (tx, rx) = channel::<u8>();
+    let done = stdout::write_via_stream(rx);
+    for b in "through a stream\n".bytes() {
+        try! tx.send(b);
+    }
+    tx.close();
+    let r = await done;
+    println(f"written {r is Result::Ok}");
+    let t0 = monotonic_clock::now();
+    await monotonic_clock::wait_for(10000000u64);
+    println(f"waited {monotonic_clock::now() - t0 >= 10000000u64}");
+    let (input, status) = stdin::read_via_stream();
+    let n = 0;
+    for await b in input {
+        n += 1;
+    }
+    println(f"stdin {n} bytes, done {(await status) is Result::Ok}");
+    Result::Ok(())
+}
+
+#[wit::export]
+async fn delayed_add(a: u32, b: u32, ms: u64) -> u32 {
+    await monotonic_clock::wait_for(ms * 1000000u64);
+    a + b
+}
+
+#[wit::export]
+async fn check(x: i32) throws (str) -> i32 {
+    await monotonic_clock::wait_for(1000000u64);
+    if x < 0 {
+        throw "negative";
+    }
+    x * 2
+}
+
+#[wit::export]
+async fn echo(s: str, n: u32) -> List<str> {
+    let out: List<str> = List::new();
+    for i in 0..n {
+        await monotonic_clock::wait_for(100000u64);
+        out.push(f"{s}{i}");
+    }
+    out
+}

@@ -3,7 +3,9 @@
 # <cargo target dir>/lib/rok/targets/<triple>/ (a toolchain's lib/rok/targets/):
 #
 #   librokr.a            the runtime, by cargo for that target
-#                        (Windows: rokr.lib; rokc carries the rest)
+#                        (Windows: rokr.lib; rokc carries the rest);
+#                        ELF / Mach-O: localized
+#                        (runtime/rokr/localize.sh)
 #   Linux, -musl:        crt1.o crti.o crtn.o libc.a: musl, the copy the
 #                        pinned Rust toolchain ships for the target
 #   Linux, -gnu(eabihf): Scrt1.o crti.o crtn.o libc_nonshared.a and stub
@@ -13,12 +15,13 @@
 #                        against pinned SHA-256s). Executables need
 #                        glibc >= 2.34 (the 32-bit runtimes call its
 #                        time64 symbols, .cargo/config.toml).
-#   wasm32-*:            crt1-command.o (the browser's: crt1-reactor.o)
-#                        libc.a: wasi-libc, the copy the
+#   wasm32-*:            crt1-command.o (the browser's: crt1-reactor.o;
+#                        wasm32-wasi has both, a reactor component links
+#                        the latter) libc.a: wasi-libc, the copy the
 #                        pinned Rust toolchain ships for the Rust target
 #                        the runtime is built for: wasm32-wasip2 for
-#                        wasm32-wasi (plus that toolchain's
-#                        wasm-component-ld, which makes the component),
+#                        wasm32-wasi (plus wasm-component-ld, which makes
+#                        the component: a pinned release, SHA-256 checked),
 #                        wasm32-wasip1-threads for wasm32-wasi-threads,
 #                        wasm32-wasip1 for wasm32-unknown-unknown (plus
 #                        rok.mjs, the JS host that gives a browser or node
@@ -107,6 +110,39 @@ fetch() {
 		echo "checksum mismatch for $file: $got" >&2
 		exit 1
 	fi
+}
+
+# wasm-component-ld into $1: the release matching the component model
+# (preview 3 async, fixed-size lists) of the wasmtime the tests run under
+# (targets/test-wasm.sh), not the Rust toolchain's older copy.
+WCL=v0.5.24
+component_ld() {
+	case $(uname -m) in
+	arm64 | aarch64) a=aarch64 ;;
+	*) a=x86_64 ;;
+	esac
+	case $(uname -s) in
+	Darwin) o=macos x=tar.gz ;;
+	Linux) o=linux x=tar.gz ;;
+	*) o=windows x=zip ;;
+	esac
+	n=wasm-component-ld-$WCL-$a-$o
+	case $n in
+	*-aarch64-linux) s=e2e533389aa894765ff1ec618668239b7b11c5e9fb5cd51a4d9f21583db8aef2 ;;
+	*-aarch64-macos) s=374cb68f28aa52ff53a38f8c1ef41eac611feeb9ac6c40aed4fdfb2960d1b027 ;;
+	*-aarch64-windows) s=b6814f368ead947ed49a6ffbca695a0cbfdd3f3d43347fc4f6550ca824055a1a ;;
+	*-x86_64-linux) s=6e5fe349f59c21a4613dce49d043843e00a6ff37d6e5f830e2dc1c72e629bdf7 ;;
+	*-x86_64-macos) s=62f6ae99752114fb2d0e6cc32bec90ff347b9add55ca6b55451d401edb5ae630 ;;
+	*-x86_64-windows) s=de82098388b7c1e079ed2964e913e156ffe46ad6407a8e7d21c6e58e50d06106 ;;
+	esac
+	fetch "$n.$x" "https://github.com/bytecodealliance/wasm-component-ld/releases/download/$WCL/$n.$x" "$s"
+	if [ ! -d "$cache/$n" ]; then
+		case $x in
+		zip) (cd "$cache" && unzip -q "$n.$x") ;;
+		*) tar -xzf "$cache/$n.$x" -C "$cache" ;;
+		esac
+	fi
+	cp "$cache/$n/wasm-component-ld$(exe)" "$1/"
 }
 
 # A Debian package's data.tar.xz, verified, unpacked under $1.
@@ -268,18 +304,24 @@ for t in ${*:-$TARGETS}; do
 	rm -rf "$dir"
 	mkdir -p "$dir"
 	case $t in *-windows-*) rt=rokr.lib ;; *) rt=librokr.a ;; esac
-	cp "${CARGO_TARGET_DIR:-target}/$rust/release/$rt" "$dir/"
+	built=${CARGO_TARGET_DIR:-target}/$rust/release/$rt
+	case $t in
+	# Localized, as the host's lib/librokr.a (dist.sh).
+	*-linux-* | *-apple-*) runtime/rokr/localize.sh "$built" "$dir/$rt" ;;
+	*) cp "$built" "$dir/" ;;
+	esac
 	case $t in
 	wasm32-*)
 		case $t in
 		wasm32-unknown-unknown) crt1=crt1-reactor.o ;;
+		wasm32-wasi) crt1="crt1-command.o crt1-reactor.o" ;;
 		*) crt1=crt1-command.o ;;
 		esac
 		for f in $crt1 libc.a; do
 			cp "$sysroot/lib/rustlib/$rust/lib/self-contained/$f" "$dir/"
 		done
 		case $t in
-		wasm32-wasi) cp "$sysroot/lib/rustlib/$host/bin/wasm-component-ld$(exe)" "$dir/" ;;
+		wasm32-wasi) component_ld "$dir" ;;
 		wasm32-unknown-unknown) cp "$here/rok.mjs" "$dir/" ;;
 		esac
 		;;

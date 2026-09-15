@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use rokc_codegen_mlir::abi;
 use rokc_codegen_mlir::mangle::{self, Pkgs};
+use rokc_codegen_mlir::units::{self, Core};
 use rokc_ir_common::{Abi, ConstVal, FnRole, FunctionId, Linkage, PrimTy};
 use rokc_mir::{Link, MirModule, MirTy};
 
@@ -22,9 +23,20 @@ pub struct Compiled {
     pub errors: Vec<(rokc_diagnostic::Span, String)>,
 }
 
+/// One codegen unit of a plan (`rokc_codegen_mlir::units`).
+pub struct UnitArgs<'a> {
+    pub core: &'a Core,
+    pub u: usize,
+    pub glue: bool,
+    /// The plan's GC types.
+    pub tables: &'a [Vec<u32>],
+}
+
 pub fn compile(
     module: &MirModule,
     opts: &Options,
+    sources: &rokc_diagnostic::SourceMap,
+    unit: Option<&UnitArgs<'_>>,
     emit: &mut dyn FnMut(&mut Obj, &Func),
 ) -> Compiled {
     let t = &module.target;
@@ -33,6 +45,17 @@ pub fn compile(
         link: module.link.clone(),
         ..Pkgs::default()
     };
+    if let Some(a) = unit {
+        a.core.hide_hash(&mut pkgs.link);
+    }
+    let glue = unit.is_none_or(|a| a.glue);
+    let in_unit = |f: FunctionId| unit.is_none_or(|a| a.core.defines(a.u, f));
+    let shared = |f: FunctionId| unit.is_some_and(|a| a.core.shared.contains(&f));
+    let renamed = unit.map(|a| a.core.renamed.clone()).unwrap_or_default();
+    let view: Vec<&rokc_mir::MirFunction> = unit.map_or_else(
+        || module.functions.iter().collect(),
+        |a| a.core.view(module, a.u),
+    );
     pkgs.extern_statics = module
         .statics
         .iter()
@@ -61,7 +84,8 @@ pub fn compile(
             .is_some_and(|r| r.define.iter().any(|d| d == name))
     };
     let prebuilt_static = |name: &str| {
-        pkgs.link.in_prebuilt(name)
+        !glue
+            || pkgs.link.in_prebuilt(name)
             || opts
                 .repl
                 .as_ref()
@@ -71,7 +95,7 @@ pub fn compile(
     // Signatures.
     let mut fns: HashMap<FunctionId, Sig> = HashMap::new();
     let mut c_entries = Vec::new();
-    for f in &module.functions {
+    for &f in &view {
         let c = match f.facts.abi {
             Abi::C { variadic } => {
                 classify(&mut errors, f.span, t, &f.param_tys, &f.ret_ty, variadic)
@@ -81,20 +105,24 @@ pub fn compile(
             }
             Abi::Rok => None,
         };
-        let mut name = mangle::symbol_for(f, &pkgs);
+        let mut name = units::symbol(f, &pkgs, renamed.contains(&f.id));
         let mut sig_c = None;
         let mut c_entry = None;
         match c {
             Some(a) if f.facts.linkage == Linkage::Extern => sig_c = Some(a),
             Some(a) => {
-                name = mangle::mangled(f, &pkgs);
+                name = units::body_symbol(f, &pkgs, renamed.contains(&f.id));
                 let entry = f
                     .facts
                     .export_name
                     .clone()
                     .unwrap_or_else(|| format!("{name}.c"));
                 c_entry = Some(obj.sym(&entry));
-                c_entries.push((f.id, a, f.facts.export_name.is_some(), f.span));
+                if in_unit(f.id) {
+                    // Another unit may take its address.
+                    let global = f.facts.export_name.is_some() || shared(f.id);
+                    c_entries.push((f.id, a, global, f.span));
+                }
             }
             None => {}
         }
@@ -121,6 +149,7 @@ pub fn compile(
         .iter()
         .filter(|f| {
             f.facts.linkage == Linkage::Defined
+                && in_unit(f.id)
                 && (private_copy(f)
                     || opts
                         .fresh_fns
@@ -129,47 +158,70 @@ pub fn compile(
         })
         .map(|f| f.id)
         .collect();
-    // Defined here: reached directly, not through the GOT.
-    let defined: HashSet<SymId> = module
-        .functions
+    // Defined here (a unit: in the program): reached directly, not
+    // through the GOT.
+    let defined: HashSet<SymId> = view
         .iter()
-        .filter(|f| compiled.contains(&f.id))
+        .filter(|f| match unit {
+            None => compiled.contains(&f.id),
+            Some(_) => f.facts.linkage == Linkage::Defined,
+        })
         .flat_map(|f| [Some(fns[&f.id].sym), fns[&f.id].c_entry])
         .flatten()
         .collect();
     for s in fns.values_mut() {
         s.local = defined.contains(&s.sym);
     }
-    pkgs.lazy_statics = module
-        .statics
-        .iter()
-        .filter_map(|s| {
-            let init = s
-                .init_fn
-                .and_then(|i| fns.get(&i))
-                .map(|f| obj.syms[f.sym as usize].name.clone());
-            // A prebuilt library's static is initialized by its `.a`.
-            let init = init.or_else(|| pkgs.link.in_prebuilt(&s.name).then(String::new));
-            Some((s.name.clone(), init?))
-        })
-        .collect();
+    let (quiet, reentrant);
+    if let Some(a) = unit {
+        pkgs.lazy_statics.clone_from(&a.core.lazy_statics);
+        quiet = std::sync::Arc::clone(&a.core.quiet);
+        reentrant = std::sync::Arc::clone(&a.core.reentrant);
+    } else {
+        pkgs.lazy_statics = module
+            .statics
+            .iter()
+            .filter_map(|s| {
+                let init = s
+                    .init_fn
+                    .and_then(|i| fns.get(&i))
+                    .map(|f| obj.syms[f.sym as usize].name.clone());
+                // A prebuilt library's static is initialized by its `.a`.
+                let init = init.or_else(|| pkgs.link.in_prebuilt(&s.name).then(String::new));
+                Some((s.name.clone(), init?))
+            })
+            .collect();
+        quiet = std::sync::Arc::new(rokc_codegen_mlir::emit::quiet_functions(module, &pkgs, t));
+        reentrant = std::sync::Arc::new(rokc_codegen_mlir::emit::reentrant_functions(module));
+    }
+    // A unit's statics are the glue's, in the same executable.
     let local_statics: HashSet<String> = module
         .statics
         .iter()
-        .filter(|s| (!s.is_extern || defines(&s.name)) && !prebuilt_static(&s.name))
+        .filter(|s| {
+            (!s.is_extern || defines(&s.name))
+                && (unit.is_some() || !prebuilt_static(&s.name))
+                && !pkgs.link.in_prebuilt(&s.name)
+        })
         .map(|s| s.name.clone())
         .collect();
 
     let gc_type_base = rokc_mir::gc_abi::USER_TYPE_BASE + pkgs.link.type_offset;
-    let mut gc_types: Vec<Vec<u32>> = opts
-        .repl
-        .as_ref()
-        .map(|r| r.gc_tables.clone())
-        .unwrap_or_default();
-    let pre_tables = gc_types.len();
-    let quiet = rokc_codegen_mlir::emit::quiet_functions(module, &pkgs, t);
-    let reentrant = rokc_codegen_mlir::emit::reentrant_functions(module);
+    let mut gc_types: Vec<Vec<u32>> = match unit {
+        Some(a) => a.tables.to_vec(),
+        None => opts
+            .repl
+            .as_ref()
+            .map(|r| r.gc_tables.clone())
+            .unwrap_or_default(),
+    };
+    let pre_tables = if glue && unit.is_some() {
+        0
+    } else {
+        gc_types.len()
+    };
     let mut ctx = Ctx {
+        sources,
         t,
         conv,
         obj: &mut obj,
@@ -196,7 +248,7 @@ pub fn compile(
         let private = match &pkgs.link.lib {
             Some(lib) => !Link::owns(lib, f.path()) && f.facts.role != FnRole::AnyDispatcher,
             None => pkgs.link.in_prebuilt(f.path()),
-        };
+        } && !shared(f.id);
         funcs.push((func, !private, weak));
     }
     for (id, a, exported, span) in &c_entries {
@@ -206,6 +258,63 @@ pub fn compile(
         let func = wrap::generated(&mut ctx, &name, entry, *span, |l| l.c_entry(sig, a));
         funcs.push((func, *exported, false));
     }
+    if glue {
+        glue_code(
+            module,
+            opts,
+            unit.is_some(),
+            &fns,
+            &mut ctx,
+            &mut funcs,
+            &mut errors,
+            pre_tables,
+        );
+    }
+    errors.append(&mut ctx.errors);
+    drop(ctx);
+
+    for (f, global, weak) in &funcs {
+        emit(&mut obj, f);
+        let s = &mut obj.syms[f.sym as usize];
+        s.global = *global;
+        s.weak = *weak;
+    }
+    Compiled {
+        obj,
+        gc_types,
+        errors,
+    }
+}
+
+/// What the program has once: the C `main`, the statics,
+/// `rok.register_types` with the GC types from `pre_tables` on and the
+/// static roots. A unit build's glue exports its statics (`units`).
+#[allow(clippy::too_many_arguments)]
+fn glue_code(
+    module: &MirModule,
+    opts: &Options,
+    units: bool,
+    fns: &HashMap<FunctionId, Sig>,
+    ctx: &mut Ctx<'_>,
+    funcs: &mut Vec<(Func, bool, bool)>,
+    errors: &mut Vec<(rokc_diagnostic::Span, String)>,
+    pre_tables: usize,
+) {
+    let t = &module.target;
+    let pkgs = ctx.pkgs;
+    let defines = |name: &str| {
+        opts.repl
+            .as_ref()
+            .is_some_and(|r| r.define.iter().any(|d| d == name))
+    };
+    let prebuilt_static = |name: &str| {
+        pkgs.link.in_prebuilt(name)
+            || opts
+                .repl
+                .as_ref()
+                .is_some_and(|r| r.statics.iter().any(|s| s == name))
+    };
+    let gc_type_base = ctx.gc_type_base;
     // `rok.register_types` (the dependencies' first), called from `main`.
     let register_name = match &pkgs.link.lib {
         Some(lib) => format!("rok.register_types.{lib}"),
@@ -220,13 +329,13 @@ pub fn compile(
         let user = fns[&m.id].sym;
         if opts.repl.is_some() {
             let s = ctx.sym("rok_repl_cell");
-            let func = wrap::generated(&mut ctx, "rok_repl_cell", s, m.span, |l| {
+            let func = wrap::generated(ctx, "rok_repl_cell", s, m.span, |l| {
                 l.repl_cell(user, &m.ret_ty, register)
             });
             funcs.push((func, true, false));
         } else {
             let s = ctx.sym("main");
-            let func = wrap::generated(&mut ctx, "main", s, m.span, |l| {
+            let func = wrap::generated(ctx, "main", s, m.span, |l| {
                 l.main_wrapper(user, &m.ret_ty, register)
             });
             funcs.push((func, true, false));
@@ -251,10 +360,9 @@ pub fn compile(
                 let init = ctx.sym(&init);
                 let f_sym = ctx.sym(&format!("{name}.init"));
                 let iname = format!("{name}.init");
-                let func =
-                    wrap::generated(&mut ctx, &iname, f_sym, rokc_diagnostic::Span::DUMMY, |l| {
-                        l.lazy_init(state, sym, true, init, &s.ty)
-                    });
+                let func = wrap::generated(ctx, &iname, f_sym, rokc_diagnostic::Span::DUMMY, |l| {
+                    l.lazy_init(state, sym, true, init, &s.ty)
+                });
                 funcs.push((func, false, false));
             }
             continue;
@@ -263,6 +371,7 @@ pub fn compile(
             continue;
         }
         let global = opts.repl.is_some()
+            || units
             || pkgs
                 .link
                 .lib
@@ -276,16 +385,17 @@ pub fn compile(
             let init = ctx.sym(&init);
             let f_sym = ctx.sym(&format!("{name}.init"));
             let iname = format!("{name}.init");
-            let func =
-                wrap::generated(&mut ctx, &iname, f_sym, rokc_diagnostic::Span::DUMMY, |l| {
-                    l.lazy_init(state, sym, false, init, &s.ty)
-                });
-            // Exported by a prebuilt library that owns the static.
-            let export = pkgs
-                .link
-                .lib
-                .as_deref()
-                .is_some_and(|l| Link::owns(l, &s.name));
+            let func = wrap::generated(ctx, &iname, f_sym, rokc_diagnostic::Span::DUMMY, |l| {
+                l.lazy_init(state, sym, false, init, &s.ty)
+            });
+            // Exported by a prebuilt library that owns the static (and to
+            // the other units).
+            let export = units
+                || pkgs
+                    .link
+                    .lib
+                    .as_deref()
+                    .is_some_and(|l| Link::owns(l, &s.name));
             funcs.push((func, export, false));
             continue;
         }
@@ -340,27 +450,13 @@ pub fn compile(
         .map(|d| ctx.sym(&format!("rok.register_types.{d}")))
         .collect();
     let func = wrap::generated(
-        &mut ctx,
+        ctx,
         &register_name,
         register,
         rokc_diagnostic::Span::DUMMY,
         |l| l.register_types(&tables, &roots, &deps),
     );
     funcs.push((func, pkgs.link.lib.is_some(), false));
-    errors.append(&mut ctx.errors);
-    drop(ctx);
-
-    for (f, global, weak) in &funcs {
-        emit(&mut obj, f);
-        let s = &mut obj.syms[f.sym as usize];
-        s.global = *global;
-        s.weak = *weak;
-    }
-    Compiled {
-        obj,
-        gc_types,
-        errors,
-    }
 }
 
 /// A scalar static's initial bytes (the emitter's `format_const_attr`).

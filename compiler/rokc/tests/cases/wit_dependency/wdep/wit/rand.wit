@@ -1,0 +1,5 @@
+package test:dep;
+
+world rand {
+    import wasi:random/random@0.2.9;
+}

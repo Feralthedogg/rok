@@ -33,14 +33,15 @@ impl Pkgs {
     }
 }
 
-/// Linker symbol of a MIR function: its `#[export_name]`, its own name
-/// (an `extern` declaration), or the mangled path.
+/// Linker symbol of a MIR function: its `#[export_name]`, its
+/// `#[link_name]` or own name (an `extern` declaration), or the mangled
+/// path.
 pub fn symbol_for(f: &MirFunction, pkgs: &Pkgs) -> String {
     if let Some(sym) = &f.facts.export_name {
         return sym.clone();
     }
     if f.facts.linkage == Linkage::Extern {
-        return f.name.clone();
+        return f.facts.link_name.clone().unwrap_or_else(|| f.name.clone());
     }
     mangled(f, pkgs)
 }

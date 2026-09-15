@@ -1,0 +1,39 @@
+// only-target: wasm32-wasi
+// wasm-reactor
+// expect-exit: 0
+// wasm-invoke: hello("you") => "hello, you"
+// wasm-invoke: deep(none) => some(some("none"))
+// wasm-invoke: deep(some(none)) => some(none)
+// wasm-invoke: deep(some(some("a"))) => none
+// wasm-invoke: deep(some(some("b"))) => some(some("bb"))
+
+// Stdlib 1.8: a library world, only exports: without `main` the
+// component is a reactor (no `wasi:cli/run`; the host only calls its
+// exports). `include base with { greet as hello }` renames an export of
+// the included world. A nested option keeps both layers
+// (`option<option<string>>` is `str??`).
+ffi::wit::export { "wit/lib.wit" }
+
+#[wit::export]
+fn hello(who: str) -> str { f"hello, {who}" }
+
+#[wit::export]
+fn deep(x: str??) -> str?? {
+    let inner_none: str? = none;
+    match x {
+        none => {
+            return "none";
+        }
+        v: str? => match v {
+            none => {
+                return inner_none;
+            }
+            s: str => {
+                if s == "a" {
+                    return none;
+                }
+                return f"{s}{s}";
+            }
+        },
+    }
+}

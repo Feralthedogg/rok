@@ -7,9 +7,6 @@ use std::path::Path;
 use crate::lsp::serve;
 use rokc_diagnostic::Json;
 
-/// One server at a time: the diagnostic file table is process-global.
-static ONE_SERVER: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 fn frame(msg: &Json) -> String {
     let body = msg.to_string();
     format!("Content-Length: {}\r\n\r\n{body}", body.len())
@@ -91,9 +88,6 @@ println(f\"{twice(s)}\");
 
 #[test]
 fn scripted_session() {
-    let _one = ONE_SERVER
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let bootstrap = workspace.join("library/core/lib.rok");
     let dir = std::env::temp_dir().join(format!("rokc-lsp-{}", std::process::id()));
@@ -276,9 +270,6 @@ println(f\"{u}\");
 /// references and rename.
 #[test]
 fn members_references_rename() {
-    let _one = ONE_SERVER
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let bootstrap = workspace.join("library/core/lib.rok");
     let dir = std::env::temp_dir().join(format!("rokc-lsp-members-{}", std::process::id()));
@@ -401,9 +392,6 @@ fn members_references_rename() {
 /// value: only its syntax is checked, not compiled as a module.
 #[test]
 fn manifest_buffer() {
-    let _one = ONE_SERVER
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let uri = "file:///nowhere/rok.rokon";
     let open = notify(
         "textDocument/didOpen",
@@ -469,9 +457,6 @@ fn manifest_buffer() {
 /// what the package compiles with.
 #[test]
 fn unsaved_submodule_buffer() {
-    let _one = ONE_SERVER
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let bootstrap = workspace.join("library/core/lib.rok");
     let dir = std::env::temp_dir().join(format!("rokc-lsp-sub-{}", std::process::id()));

@@ -25,7 +25,7 @@ pub fn check(
 ) -> (CompileResult, Vec<RokDiagnostic>) {
     session.set_keep_ast(true);
     let result = match source {
-        Some(s) => session.compile_source(s, path),
+        Some(s) => session.compile_source(s, path, rokc_interface::SourceMap::new()),
         None => session.compile_file(path),
     };
     if result.has_errors() {
@@ -47,8 +47,8 @@ pub fn check(
 /// One check of a buffer.
 pub struct Analysis {
     pub diags: Vec<RokDiagnostic>,
-    /// The registered files of this compile, `Span::file - 1` indexed.
-    pub files: Vec<(String, String)>,
+    /// The source files of this compile.
+    pub source_map: rokc_interface::SourceMap,
     /// Present when the program type-checked.
     pub hir: Option<HirModule>,
     pub sources: Vec<SourceFile>,
@@ -61,13 +61,10 @@ pub fn analyze(
     path: &Path,
     levels: &[(Level, String)],
 ) -> Analysis {
-    // The file table is global: cleared per compile so a long-lived
-    // server does not grow it forever.
-    rokc_diagnostic::clear_files();
     let (r, diags) = check(session, Some(source), path, levels, None);
     Analysis {
         diags,
-        files: rokc_diagnostic::registered_files(),
+        source_map: r.source_map,
         hir: r.modules.into_iter().next().map(|m| m.hir),
         sources: r.sources,
     }
@@ -76,8 +73,7 @@ pub fn analyze(
 impl Analysis {
     /// Path and text of a span's file.
     pub fn file(&self, span: Span) -> Option<&(String, String)> {
-        self.files
-            .get(usize::try_from(span.file).ok()?.checked_sub(1)?)
+        self.source_map.file(span.file)
     }
 
     pub(crate) fn in_file(&self, span: Span, path: &str) -> bool {

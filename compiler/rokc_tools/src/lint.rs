@@ -210,13 +210,13 @@ pub fn run(result: &CompileResult, cli: &[(Level, String)]) -> Vec<RokDiagnostic
         }
     }
 
-    let texts = rokc_diagnostic::registered_files();
+    let texts = result.source_map.files();
     let user: Vec<&SourceFile> = result
         .sources
         .iter()
         .filter(|f| f.package.is_empty())
         .collect();
-    let mut cx = Cx::new(&result.sources, &texts);
+    let mut cx = Cx::new(&result.sources, texts);
     let mut regions = Vec::new();
     for f in &user {
         regions.extend(file_regions(f, &user, &mut out));
@@ -245,7 +245,7 @@ pub fn run(result: &CompileResult, cli: &[(Level, String)]) -> Vec<RokDiagnostic
     findings.sort_by_key(|f| (f.span.file, f.span.start, f.lint));
     findings.dedup_by(|a, b| a.lint == b.lint && a.span == b.span);
     for f in findings {
-        let generated = text_at(&texts, f.span).is_some_and(|t| t.starts_with('#'));
+        let generated = text_at(texts, f.span).is_some_and(|t| t.starts_with('#'));
         if generated {
             continue;
         }

@@ -1,0 +1,7 @@
+// expect-error: const `C` cannot be evaluated at compile time: panicked: zero
+
+// Stdlib 2.2.7: `NonZero::new(0) ?? panic(..)` in const position is a
+// compile error.
+const C: NonZero<i32> = NonZero::new(0) ?? panic("zero");
+
+fn main() { println(f"{C}"); }

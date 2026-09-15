@@ -85,7 +85,9 @@ fn mlir(functions: Vec<MirFunction>, overflow_checks: bool) -> String {
         overflow_checks,
         ..CodegenOptions::default()
     };
-    codegen(&module, &opts).expect("codegen").text
+    codegen(&module, &opts, &rokc_diagnostic::SourceMap::new())
+        .expect("codegen")
+        .text
 }
 
 /// The body of function `name` (symbol `_Y<hash>__<name>_`).
@@ -197,7 +199,8 @@ fn symbols_are_stable_across_ids() {
 /// a unit that says whether the build is optimized.
 #[test]
 fn debug_info_describes_the_function() {
-    let file = rokc_diagnostic::register_file("dbg.rok".into(), "\nfn f() {}\n".into());
+    let mut sources = rokc_diagnostic::SourceMap::new();
+    let file = sources.add("dbg.rok".into(), "\nfn f() {}\n".into());
     let mut f = binary(PrimOp::Add, &I32);
     f.span = Span {
         file,
@@ -215,7 +218,7 @@ fn debug_info_describes_the_function() {
             optimized,
             ..CodegenOptions::default()
         };
-        codegen(&module, &opts).expect("codegen").text
+        codegen(&module, &opts, &sources).expect("codegen").text
     };
     let plain = text(false);
     assert!(plain.contains("isOptimized = false"), "{plain}");

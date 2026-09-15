@@ -1,0 +1,15 @@
+// only-target: wasm32-wasi
+// rokc-arg: --extern wdep=tests/cases/wit_dependency/wdep
+// expect-exit: 0
+// expect-stdout: noise 8 via bindings 4
+// wasm-invoke: add(2, 3) => 5
+
+// Stdlib 1.8: `ffi::wit` in a dependency (prebuilt from source by
+// `--extern`): its bindings are in the dependency's module
+// (`wdep::sys::wasi::..`), and its export (`add`, the dependency's
+// `#[wit::export]`) is the component's.
+fn main() {
+    let n = wdep::sys::noise(8u64);
+    let m = wdep::sys::wasi::random::random::get_random_bytes(4u64);
+    println(f"noise {n.len()} via bindings {m.len()}");
+}

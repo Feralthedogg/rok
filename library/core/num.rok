@@ -1384,6 +1384,41 @@ impl Hash for char {
     fn hash(self) -> u64 { self as u64 }
 }
 
+// c_char (stdlib 2.5): compared and hashed as its byte.
+
+impl PartialEq for c_char {
+    fn eq(self, rhs: c_char) -> bool { (self as u8) == (rhs as u8) }
+    fn ne(self, rhs: c_char) -> bool { (self as u8) != (rhs as u8) }
+}
+
+impl Eq for c_char {}
+
+impl PartialOrd for c_char {
+    fn lt(self, rhs: c_char) -> bool { (self as u8) < (rhs as u8) }
+    fn gt(self, rhs: c_char) -> bool { (self as u8) > (rhs as u8) }
+    fn le(self, rhs: c_char) -> bool { (self as u8) <= (rhs as u8) }
+    fn ge(self, rhs: c_char) -> bool { (self as u8) >= (rhs as u8) }
+}
+
+impl Ord for c_char {
+    fn cmp(self, other: c_char) -> Ordering { (self as u8).cmp(other as u8) }
+}
+
+impl Hash for c_char {
+    fn hash(self) -> u64 { self as u64 }
+}
+
+// `&&` / `||` (stdlib 2.3.9): on two `bool`s the compiler short-circuits
+// without calling these.
+
+impl LogicalAnd for bool {
+    fn logical_and(self, rhs: bool) -> bool { self && rhs }
+}
+
+impl LogicalOr for bool {
+    fn logical_or(self, rhs: bool) -> bool { self || rhs }
+}
+
 // √ (stdlib spec 2.3.10): `llvm.intr.sqrt`. The body's `self.sqrt()`
 // is itself the intrinsic (a call of an intrinsic method is the op).
 

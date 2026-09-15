@@ -4,8 +4,8 @@
 
 use std::path::Path;
 
-use rokc_ast::{AttrArg, AttrBody, Attribute, ExternItem, Item, Literal};
-use rokc_diagnostic::{ErrorKind, RokDiagnostic, Span};
+use rokc_ast::Item;
+use rokc_diagnostic::{ErrorKind, RokDiagnostic, SourceMap, Span};
 use rokc_lexer::Lexer;
 use rokc_mir::WitLink;
 use rokc_parser::{ExtOps, apply_keywords, parse_program_meta};
@@ -18,19 +18,23 @@ use crate::{CfgEnv, MetaCtx, ModItem, UseEntry, flatten_module_items};
 pub fn expand(
     items: &mut Vec<ModItem>,
     uses: &mut Vec<UseEntry>,
+    packages: &[String],
+    prebuilt: &[String],
     target: &rokc_mir::TargetSpec,
     cfg_env: &CfgEnv,
     ext: &ExtOps,
     metas: &MetaCtx,
     diags: &mut Vec<RokDiagnostic>,
+    files: &mut SourceMap,
 ) -> Option<WitLink> {
     // The `ffi::wit` items by module, in order.
     let mut groups: Vec<(String, Vec<(rokc_wit::Request, Span)>)> = Vec::new();
     items.retain(|(module, item)| {
         let Item::Extern(b) = item else { return true };
         let Some(w) = &b.wit else { return true };
-        let dir = rokc_diagnostic::file_path(b.span.file)
-            .and_then(|p| Path::new(&p).parent().map(Path::to_path_buf))
+        let dir = files
+            .path(b.span.file)
+            .and_then(|p| Path::new(p).parent().map(Path::to_path_buf))
             .unwrap_or_default();
         let req = rokc_wit::Request {
             export: w.export,
@@ -66,12 +70,27 @@ pub fn expand(
             r.borrow_mut()
                 .extend(loaded.resolve.files.iter().map(|(p, _)| p.clone()));
         });
-        let base = if module.is_empty() {
+        // `pkg::` paths within the package the module is in (a
+        // dependency's mount name is its first segment).
+        let rel = packages
+            .iter()
+            .filter(|p| !p.is_empty())
+            .filter_map(|p| {
+                if module == *p {
+                    Some("")
+                } else {
+                    module.strip_prefix(p.as_str())?.strip_prefix("::")
+                }
+            })
+            .min_by_key(|r| r.len())
+            .unwrap_or(&module);
+        let base = if rel.is_empty() {
             "pkg".to_owned()
         } else {
-            format!("pkg::{module}")
+            format!("pkg::{rel}")
         };
-        let b = match rokc_wit::bind(&loaded, &requests, &base) {
+        let drops = drop_impls(items, &module);
+        let b = match rokc_wit::bind(&loaded, &requests, &base, &drops) {
             Ok(b) => b,
             Err(e) => {
                 fail(diags, format!("WIT: {e}"));
@@ -85,15 +104,15 @@ pub fn expand(
             fail(
                 diags,
                 format!(
-                    "`ffi::wit` builds a WebAssembly component: it needs a component target such as \
-                     `--target wasm32-wasi`, not {} (stdlib 1.8)",
+                    "`ffi::wit` builds a WebAssembly component: it needs `--target wasm32-wasi` \
+                     (or another component target), not {} (stdlib 1.8)",
                     target.name
                 ),
             );
             continue;
         }
         let name = format!("<WIT bindings of `{base}`>");
-        let file_id = rokc_diagnostic::register_file(name.clone(), b.source.clone());
+        let file_id = files.add(name.clone(), b.source.clone());
         let (mut tokens, lex) = Lexer::new(&b.source, name.clone())
             .with_ext_ops(ext.symbols())
             .lex_all();
@@ -112,14 +131,19 @@ pub fn expand(
         );
         diags.extend(parse_diags);
         let mut generated = program.items;
-        mark_imports(&mut generated, &b.imports);
+        // A prebuilt dependency's archive has the component's entry
+        // points: the bindings here only declare.
+        let pkg = module.split("::").next().unwrap_or_default();
+        if prebuilt.iter().any(|p| p == pkg) {
+            drop_entries(&mut generated);
+        }
         let path: Vec<String> = if module.is_empty() {
             Vec::new()
         } else {
             module.split("::").map(str::to_owned).collect()
         };
         flatten_module_items(
-            generated, &path, None, cfg_env, ext, metas, diags, items, uses, None,
+            generated, &path, None, cfg_env, ext, metas, diags, items, uses, None, files,
         );
         any = true;
         world.push_str(&b.world);
@@ -141,28 +165,32 @@ pub fn expand(
     Some(link)
 }
 
-/// `#wasm_import(module, name)` on each generated extern function.
-fn mark_imports(items: &mut [Item], imports: &[(String, String, String)]) {
-    for item in items {
-        match item {
-            Item::Mod(m) => mark_imports(m.items.as_deref_mut().unwrap_or_default(), imports),
-            Item::Extern(b) => {
-                for ei in &mut b.items {
-                    let ExternItem::Fn(f) = ei else { continue };
-                    if let Some((_, module, name)) = imports.iter().find(|(n, ..)| *n == f.name) {
-                        f.attrs.push(Attribute {
-                            path: vec![rokc_ast::WASM_IMPORT_ATTR.to_owned()],
-                            body: AttrBody::Args(vec![
-                                AttrArg::Lit(Literal::Str(module.clone())),
-                                AttrArg::Lit(Literal::Str(name.clone())),
-                            ]),
-                            inner: false,
-                            span: f.span,
-                        });
-                    }
-                }
+/// The types of `module` with an `impl Drop`: an exported resource's
+/// `[dtor]` runs it.
+fn drop_impls(items: &[ModItem], module: &str) -> std::collections::BTreeSet<String> {
+    items
+        .iter()
+        .filter(|(m, _)| m == module)
+        .filter_map(|(_, item)| {
+            let Item::Impl(i) = item else { return None };
+            let tr = i.trait_path.as_ref()?.segments.last()?;
+            let rokc_ast::TyKind::Path(p) = &i.self_ty.kind else {
+                return None;
+            };
+            (tr.name == "Drop").then(|| p.segments.last().map(|s| s.name.clone()))?
+        })
+        .collect()
+}
+
+/// `items` without their `#[export_name]` functions.
+fn drop_entries(items: &mut Vec<Item>) {
+    items
+        .retain(|i| !matches!(i, Item::Fn(f) if f.attrs.iter().any(|a| a.name() == "export_name")));
+    for i in items {
+        if let Item::Mod(m) = i {
+            if let Some(items) = m.items.as_mut() {
+                drop_entries(items);
             }
-            _ => {}
         }
     }
 }

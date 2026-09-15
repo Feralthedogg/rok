@@ -698,6 +698,18 @@ pub(crate) fn name_type(enum_: bool, id: u32, base: &str, args: &[HirTy]) {
     });
 }
 
+/// The build-independent name of struct (or `enum_`) `id` (`name_type`),
+/// while its compile's types are named.
+#[must_use]
+pub fn type_name(enum_: bool, id: u32) -> Option<String> {
+    TYPE_NAMES.with(|n| {
+        n.borrow()[usize::from(enum_)]
+            .get(id as usize)
+            .filter(|s| !s.is_empty())
+            .cloned()
+    })
+}
+
 /// A trait as a bound names it or an impl provides it, `Get<i32, Item =
 /// u8>` (spec 2.8, 2.10): the trait's full path, its positional
 /// arguments and its associated-type bindings (sorted by name).

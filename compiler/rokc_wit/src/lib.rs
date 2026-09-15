@@ -120,6 +120,7 @@ pub fn load(requests: &[Request]) -> Result<Loaded, Error> {
                 p.clone()
             } else {
                 p.parent()
+                    .filter(|d| !d.as_os_str().is_empty())
                     .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
             };
             let mut ids = add(&dir, &mut files, &mut units)?;

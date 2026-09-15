@@ -634,7 +634,11 @@ pub(crate) fn hover(a: &Analysis, key: &str, text: &str, off: usize) -> Option<S
         }
     }
     // Offsets into an older compile of an edited buffer point elsewhere.
-    let fresh = a.files.iter().any(|(p, t)| p == key && t == text);
+    let fresh = a
+        .source_map
+        .files()
+        .iter()
+        .any(|(p, t)| p == key && t == text);
     let at_off = |s: Span| (s.start as usize..s.end as usize).contains(&off);
     if let Some(e) = fresh.then(|| a.find_expr(key, at_off, false)).flatten() {
         if let HirExprKind::Call { callee, .. } | HirExprKind::FnRef(callee) = &e.kind {

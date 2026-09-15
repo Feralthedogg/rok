@@ -111,7 +111,13 @@ pub fn align(r: &Resolve, t: &Type) -> u32 {
             Prim::U32 | Prim::S32 | Prim::F32 | Prim::Char | Prim::String => 4,
             Prim::U64 | Prim::S64 | Prim::F64 => 8,
         },
-        Type::List(_) | Type::Own(_) | Type::Borrow(_) => 4,
+        Type::List(_)
+        | Type::Own(_)
+        | Type::Borrow(_)
+        | Type::Future(_)
+        | Type::Stream(_)
+        | Type::ErrorContext => 4,
+        Type::FixedList(e, _) => align(r, e),
         _ => {
             if let Some(fs) = fields(r, t) {
                 return fs.iter().map(|f| align(r, f)).max().unwrap_or(1);
@@ -142,7 +148,10 @@ pub fn size(r: &Resolve, t: &Type) -> u32 {
             Prim::U64 | Prim::S64 | Prim::F64 | Prim::String => 8,
         },
         Type::List(_) => 8,
-        Type::Own(_) | Type::Borrow(_) => 4,
+        Type::Own(_) | Type::Borrow(_) | Type::Future(_) | Type::Stream(_) | Type::ErrorContext => {
+            4
+        }
+        Type::FixedList(e, n) => size(r, e) * n,
         _ => {
             if let Some(fs) = fields(r, t) {
                 let mut s = 0;
@@ -199,7 +208,15 @@ pub fn flatten(r: &Resolve, t: &Type) -> Vec<Flat> {
             _ => Flat::I32,
         }],
         Type::List(_) => vec![Flat::I32, Flat::I32],
-        Type::Own(_) | Type::Borrow(_) => vec![Flat::I32],
+        Type::Own(_) | Type::Borrow(_) | Type::Future(_) | Type::Stream(_) | Type::ErrorContext => {
+            vec![Flat::I32]
+        }
+        Type::FixedList(e, n) => {
+            let one = flatten(r, e);
+            // Past the limit the count only has to be "too many".
+            let n = (*n as usize).min(MAX_FLAT_PARAMS + 1);
+            one.iter().copied().cycle().take(one.len() * n).collect()
+        }
         _ => {
             if let Some(fs) = fields(r, t) {
                 return fs.iter().flat_map(|f| flatten(r, f)).collect();

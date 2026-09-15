@@ -111,7 +111,8 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 //
 // Cargo's archive also exports every non-generic `core` /
 // `compiler_builtins` / mangled Rust symbol; `localize.sh` (run by
-// dist.sh) keeps only `rok_*` global in the shipped one.
+// dist.sh, targets/build.sh) keeps only `rok_*` global in the shipped
+// one (ELF: and the weakened `__*` intrinsics).
 #[cfg(all(not(test), target_vendor = "apple"))]
 core::arch::global_asm!(
     ".globl _rust_eh_personality",

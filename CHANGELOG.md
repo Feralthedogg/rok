@@ -4,7 +4,7 @@
 
 First release.
 
-- Compiler `rokc` (AOT via MLIR / LLVM 21, REPL, Jupyter kernel, language server, `fmt`, `lint`, `doc`, `test`,
+- Compiler `rokc` (AOT via MLIR / LLVM 22, REPL, Jupyter kernel, language server, `fmt`, `lint`, `doc`, `test`,
   `bench`), package / build front-end `rok` (`rok.rokon` / `rok.lock`, path / git dependencies, stones,
   environments, toolchains), runtime `librokr.a`, standard library `core` / `std` / `bare`.
 - Install: rustup-style layout (`~/.rok/bin` proxies, `~/.rok/toolchains/<version>-<triple>/`), `install.sh`, and

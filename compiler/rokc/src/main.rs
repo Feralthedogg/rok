@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use rokc_interface::{
     BuildOptions, CompileResult, DepBuild, EmitKind, Fingerprint, Package, Profile, Session,
-    TargetSpec, TempDir, print_rendered, render, report,
+    SourceMap, TargetSpec, TempDir, print_rendered,
 };
 use rokc_tools::lint::Level;
 
@@ -884,9 +884,8 @@ fn compile(a: &Args, pkg: &Package, mode: Mode) -> (CompileResult, String, Insta
             || a.emit.contains(&EmitKind::Expanded)
             || a.emit.contains(&EmitKind::Ast),
     );
-    rokc_interface::clear_files();
     let result = session.compile_file(&pkg.root);
-    let warnings: String = result.warnings.iter().map(render).collect();
+    let warnings: String = result.warnings.iter().map(|w| result.render(w)).collect();
     print_rendered(&warnings);
     if result.has_errors() {
         result.report_errors();
@@ -930,9 +929,11 @@ fn finished(a: &Args, started: Instant) {
     }
 }
 
-fn fail_on<T>(r: Result<T, rokc_interface::RokDiagnostic>) -> T {
+/// `r`'s value, or exit 1 reporting its error, whose spans `sources`
+/// has.
+fn fail_on<T>(r: Result<T, rokc_interface::RokDiagnostic>, sources: &SourceMap) -> T {
     r.unwrap_or_else(|d| {
-        report(&d);
+        sources.report(&d);
         process::exit(1)
     })
 }
@@ -974,7 +975,7 @@ fn cmd_build(mut a: Args) {
         }
         for &kind in &a.emit {
             let t = Instant::now();
-            let bytes = fail_on(result.emit(kind, &a.opts));
+            let bytes = fail_on(result.emit(kind, &a.opts), &result.source_map);
             let out = a.output.clone().unwrap_or_else(|| {
                 let build = target.join("build");
                 create_dir(&build);
@@ -1004,9 +1005,9 @@ fn cmd_build(mut a: Args) {
             eprintln!("    Building {}", out.display());
         }
         if pkg.lib {
-            fail_on(result.archive(&a.opts, &out, true));
+            fail_on(result.archive(&a.opts, &out, true), &result.source_map);
         } else {
-            fail_on(result.link(&a.opts, &out));
+            link_exe(a, &pkg, result, &out, &pkg.name);
         }
     });
 }
@@ -1030,6 +1031,34 @@ fn build_fresh(a: &Args, pkg: &Package, out: &Path, link: impl FnOnce(&Args, &Co
     fp.save(&result.files, &(warnings + &more));
     stage(a, "codegen + link", t);
     finished(a, started);
+}
+
+/// Link `result`'s executable at `out`. A package's builds by codegen
+/// units, reusing the unchanged ones' objects from
+/// `target/<profile>/incremental/<unit>/` (902.16); `-v` says how many
+/// it compiled.
+fn link_exe(a: &Args, pkg: &Package, result: &CompileResult, out: &Path, unit: &str) {
+    let mut opts = a.opts.clone();
+    if !pkg.anonymous {
+        opts.incremental = Some(out_dir(a, Some(pkg)).join("incremental").join(unit));
+    }
+    let counts = fail_on(result.link(&opts, out), &result.source_map);
+    if let Some(c) = counts.filter(|_| a.verbose > 0 && !a.quiet) {
+        let all = c.compiled.len() + c.reused;
+        let cached = c.cached.map_or_else(String::new, |k| {
+            format!(" ({k} of {all} optimized objects cached)")
+        });
+        eprintln!(
+            "       Units {} reused, {} compiled{cached}",
+            c.reused,
+            c.compiled.len()
+        );
+        if a.verbose > 1 {
+            for u in &c.compiled {
+                eprintln!("    Compiled unit {u}");
+            }
+        }
+    }
 }
 
 /// The incremental-build key of `pkg` built into `out` (see `Fingerprint`).
@@ -1102,15 +1131,14 @@ fn cmd_check(mut a: Args, codegen: bool) {
     });
     let mut session = session(&a, &pkg);
     session.set_check_library(a.check_library);
-    rokc_interface::clear_files();
-    let (_, diags) = rokc_tools::analysis::check(
+    let (result, diags) = rokc_tools::analysis::check(
         &mut session,
         source.as_deref(),
         &pkg.root,
         &a.lint_levels,
         codegen.then_some(&a.opts),
     );
-    diags.iter().for_each(report);
+    diags.iter().for_each(|d| result.report(d));
     let errors = diags.iter().filter(|d| d.is_error()).count();
     let warnings = diags.len() - errors;
     if !a.quiet && !a.json {
@@ -1166,7 +1194,7 @@ fn cmd_run(mut a: Args) {
     prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
     // An anonymous file builds in a scratch directory (no `target/` next
     // to a loose script); a package builds into its `target/`.
-    let tmp = fail_on(TempDir::new(a.opts.keep_temps));
+    let tmp = fail_on(TempDir::new(a.opts.keep_temps), &SourceMap::new());
     let exe = match &a.output {
         Some(o) => o.clone(),
         None if pkg.anonymous => tmp.path().join(exe_file(&a, &pkg.name)),
@@ -1176,7 +1204,7 @@ fn cmd_run(mut a: Args) {
             target.join(exe_file(&a, &pkg.name))
         }
     };
-    let link = |a: &Args, result: &CompileResult| fail_on(result.link(&a.opts, &exe));
+    let link = |a: &Args, result: &CompileResult| link_exe(a, &pkg, result, &exe, &pkg.name);
     if a.output.is_some() || !pkg.anonymous {
         build_fresh(&a, &pkg, &exe, link);
     } else {
@@ -1220,10 +1248,10 @@ fn cmd_test(mut a: Args) {
     let pkg = discover_at(&a, path);
     prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
     let (result, _, started) = compile(&a, &pkg, Mode::Test);
-    let tmp = fail_on(TempDir::new(a.opts.keep_temps));
+    let tmp = fail_on(TempDir::new(a.opts.keep_temps), &SourceMap::new());
     let exe = tmp.path().join(exe_file(&a, &format!("{}-test", pkg.name)));
     let t = Instant::now();
-    fail_on(result.link(&a.opts, &exe));
+    link_exe(&a, &pkg, &result, &exe, &format!("{}-test", pkg.name));
     stage(&a, "codegen + link", t);
     finished(&a, started);
     let threads = a
@@ -1255,12 +1283,12 @@ fn cmd_bench(mut a: Args) {
     let pkg = discover_at(&a, path);
     prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
     let (result, _, started) = compile(&a, &pkg, Mode::Bench);
-    let tmp = fail_on(TempDir::new(a.opts.keep_temps));
+    let tmp = fail_on(TempDir::new(a.opts.keep_temps), &SourceMap::new());
     let exe = tmp
         .path()
         .join(exe_file(&a, &format!("{}-bench", pkg.name)));
     let t = Instant::now();
-    fail_on(result.link(&a.opts, &exe));
+    link_exe(&a, &pkg, &result, &exe, &format!("{}-bench", pkg.name));
     stage(&a, "codegen + link", t);
     finished(&a, started);
     let ok = bench_runner::run(
@@ -1280,7 +1308,7 @@ fn cmd_bench(mut a: Args) {
 fn cmd_doc(mut a: Args) {
     // `--std` alone: an empty package that only mounts the library.
     let std_only = a.std && a.positional.is_empty();
-    let tmp = std_only.then(|| fail_on(TempDir::new(a.opts.keep_temps)));
+    let tmp = std_only.then(|| fail_on(TempDir::new(a.opts.keep_temps), &SourceMap::new()));
     if let Some(t) = &tmp {
         let main = t.path().join("main.rok");
         std::fs::write(&main, "")

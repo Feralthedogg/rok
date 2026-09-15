@@ -17,9 +17,9 @@ pub use std_cache::{StdKey, prebuilt_std};
 use rokc_driver::{CompiledModule, CompilerConfig, compile_file, compile_source};
 
 pub use rokc_diagnostic::{
-    ErrorKind, Json, RokDiagnostic, capture_warnings, clear_files, print_rendered, render, report,
-    set_report_style,
+    ErrorKind, Json, RokDiagnostic, SourceMap, capture_warnings, print_rendered, set_report_style,
 };
+pub use rokc_driver::units::UnitCounts;
 pub use rokc_driver::{
     AS_WASM_LD, BuildOptions, Demangled, EmitKind, LLVM_VERSION, Profile, ReplCell, ReplFn,
     SourceFile, Subsystem, TargetSpec, TempDir, bootstrap_tiers, demangle, find_mlir_plugin,
@@ -131,16 +131,23 @@ impl Session {
     }
 
     pub fn compile_file(&self, path: &Path) -> CompileResult {
-        Self::result(compile_file(path, &self.config))
+        let mut map = SourceMap::new();
+        let r = compile_file(path, &self.config, &mut map);
+        Self::result(r, map)
     }
 
     /// `compile_file` with the root file's text given (stdin, an editor
     /// buffer, a REPL session); `path` still locates `mod foo;` files.
-    pub fn compile_source(&self, source: &str, path: &Path) -> CompileResult {
-        Self::result(compile_source(source, path, &self.config))
+    /// `map` holds what is known before the compile (a REPL's views).
+    pub fn compile_source(&self, source: &str, path: &Path, mut map: SourceMap) -> CompileResult {
+        let r = compile_source(source, path, &self.config, &mut map);
+        Self::result(r, map)
     }
 
-    fn result(r: Result<rokc_driver::CompiledProject, Vec<RokDiagnostic>>) -> CompileResult {
+    fn result(
+        r: Result<rokc_driver::CompiledProject, Vec<RokDiagnostic>>,
+        source_map: SourceMap,
+    ) -> CompileResult {
         match r {
             Ok(p) => CompileResult {
                 modules: p.modules,
@@ -149,6 +156,7 @@ impl Session {
                 tests: p.tests,
                 sources: p.sources,
                 files: p.files,
+                source_map,
             },
             Err(errors) => CompileResult {
                 modules: Vec::new(),
@@ -157,6 +165,7 @@ impl Session {
                 tests: Vec::new(),
                 sources: Vec::new(),
                 files: Vec::new(),
+                source_map,
             },
         }
     }
@@ -173,6 +182,9 @@ pub struct CompileResult {
     pub sources: Vec<SourceFile>,
     /// The source files read from disk.
     pub files: Vec<PathBuf>,
+    /// The compile's source files by span id: what its diagnostics and
+    /// codegen's locations name.
+    pub source_map: SourceMap,
 }
 
 impl CompileResult {
@@ -183,8 +195,19 @@ impl CompileResult {
 
     pub fn report_errors(&self) {
         for d in &self.errors {
-            report(d);
+            self.source_map.report(d);
         }
+    }
+
+    /// Print a diagnostic of this compile (`SourceMap::report`).
+    pub fn report(&self, d: &RokDiagnostic) {
+        self.source_map.report(d);
+    }
+
+    /// A diagnostic of this compile as `report` prints it.
+    #[must_use]
+    pub fn render(&self, d: &RokDiagnostic) -> String {
+        self.source_map.render(d)
     }
 
     fn module(&self) -> Result<&CompiledModule, RokDiagnostic> {
@@ -213,16 +236,18 @@ impl CompileResult {
         if kind == EmitKind::Ast && !self.sources.is_empty() {
             return Ok(self.ast_source().into_bytes());
         }
-        rokc_driver::emit(self.module()?, kind, opts)
+        rokc_driver::emit(self.module()?, &self.source_map, kind, opts)
     }
 
     /// `-vv` (909.5): the source files read, then the generic instances
     /// made, one progress line each.
     #[must_use]
     pub fn trace(&self) -> String {
-        let files = rokc_diagnostic::registered_files()
-            .into_iter()
-            .map(|(p, _)| ("Reading", p));
+        let files = self
+            .source_map
+            .files()
+            .iter()
+            .map(|(p, _)| ("Reading", p.clone()));
         let instances = self
             .modules
             .iter()
@@ -238,7 +263,7 @@ impl CompileResult {
 
     /// Codegen for its errors alone (`check`), without the toolchain.
     pub fn check_codegen(&self, opts: &BuildOptions) -> Result<(), RokDiagnostic> {
-        rokc_driver::check_codegen(self.module()?, opts)
+        rokc_driver::check_codegen(self.module()?, &self.source_map, opts)
     }
 
     /// The user package's files (of a `set_keep_ast` build) after meta
@@ -267,9 +292,14 @@ impl CompileResult {
         }
     }
 
-    /// Build an executable at `out`.
-    pub fn link(&self, opts: &BuildOptions, out: &Path) -> Result<(), RokDiagnostic> {
-        rokc_driver::link_executable(self.module()?, opts, out)
+    /// Build an executable at `out`; by codegen units with
+    /// `opts.incremental`, and then how many it compiled.
+    pub fn link(
+        &self,
+        opts: &BuildOptions,
+        out: &Path,
+    ) -> Result<Option<UnitCounts>, RokDiagnostic> {
+        rokc_driver::link_executable(self.module()?, &self.source_map, opts, out)
     }
 
     /// A REPL cell (`opts.repl`) as an object for the session host, from
@@ -280,9 +310,9 @@ impl CompileResult {
         opts: &BuildOptions,
     ) -> Result<(Vec<u8>, rokc_driver::MlirOutput), RokDiagnostic> {
         if rokc_driver::native::jit(opts) {
-            rokc_driver::native::cell_object(self.module()?, opts)
+            rokc_driver::native::cell_object(self.module()?, &self.source_map, opts)
         } else {
-            rokc_driver::cell_object(self.module()?, opts)
+            rokc_driver::cell_object(self.module()?, &self.source_map, opts)
         }
     }
 
@@ -294,7 +324,7 @@ impl CompileResult {
         out: &Path,
         object: bool,
     ) -> Result<(), RokDiagnostic> {
-        rokc_driver::build_archive(self.module()?, opts, out, object)
+        rokc_driver::build_archive(self.module()?, &self.source_map, opts, out, object)
     }
 }
 

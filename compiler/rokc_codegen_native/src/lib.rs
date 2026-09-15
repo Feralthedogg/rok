@@ -79,7 +79,11 @@ pub fn unsupported(module: &MirModule) -> Option<String> {
 }
 
 /// Compile `module` to an object file.
-pub fn compile(module: &MirModule, opts: &Options) -> Result<Output, RokDiagnostic> {
+pub fn compile(
+    module: &MirModule,
+    opts: &Options,
+    sources: &rokc_diagnostic::SourceMap,
+) -> Result<Output, RokDiagnostic> {
     if let Some(why) = unsupported(module) {
         return Err(RokDiagnostic::error(
             ErrorKind::Unsupported,
@@ -87,16 +91,54 @@ pub fn compile(module: &MirModule, opts: &Options) -> Result<Output, RokDiagnost
             why,
         ));
     }
+    finish(module, opts, sources, None)
+}
+
+/// Compile unit `u` of `plan` (`rokc_codegen_mlir::units`) to an object
+/// file (the module must be one `unsupported` accepts).
+pub fn compile_unit(
+    module: &MirModule,
+    opts: &Options,
+    sources: &rokc_diagnostic::SourceMap,
+    plan: &rokc_codegen_mlir::units::Plan,
+    u: usize,
+) -> Result<Output, RokDiagnostic> {
+    let unit = module::UnitArgs {
+        core: &plan.core,
+        u,
+        glue: plan.units[u].glue,
+        tables: &plan.gc_tables,
+    };
+    let o = finish(module, opts, sources, Some(&unit))?;
+    if o.gc_tables.len() != plan.gc_tables.len() {
+        return Err(RokDiagnostic::error(
+            ErrorKind::Internal,
+            rokc_diagnostic::Span::DUMMY,
+            format!(
+                "unit `{}` made a GC type its plan lacks",
+                plan.units[u].name
+            ),
+        ));
+    }
+    Ok(o)
+}
+
+fn finish(
+    module: &MirModule,
+    opts: &Options,
+    sources: &rokc_diagnostic::SourceMap,
+    unit: Option<&module::UnitArgs<'_>>,
+) -> Result<Output, RokDiagnostic> {
     let emit = if module.target.arch == "x86_64" {
         x64::emit
     } else {
         a64::emit
     };
-    let mut c = module::compile(module, opts, &mut { emit });
+    let mut c = module::compile(module, opts, sources, unit, &mut { emit });
     // COFF: no DWARF (Windows debuggers read CodeView; `-g` builds for
     // Windows go through LLVM).
     if opts.debug && !c.obj.coff {
-        dwarf::write(&mut c.obj, module);
+        dwarf::write(&mut c.obj, module, sources);
     }
     if let Some(d) = rokc_codegen_mlir::codegen_error(&c.errors) {
         return Err(d);

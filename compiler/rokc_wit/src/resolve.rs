@@ -71,12 +71,39 @@ pub enum TypeKind {
 pub enum Type {
     Prim(Prim),
     List(Box<Type>),
+    FixedList(Box<Type>, u32),
     Option(Box<Type>),
     Result(Option<Box<Type>>, Option<Box<Type>>),
     Tuple(Vec<Type>),
     Own(TypeId),
     Borrow(TypeId),
     Id(TypeId),
+    Future(Option<Box<Type>>),
+    Stream(Option<Box<Type>>),
+    ErrorContext,
+}
+
+impl Type {
+    /// `self` with every type id `map` names replaced.
+    #[must_use]
+    pub fn remap(&self, map: &HashMap<TypeId, TypeId>) -> Self {
+        let id = |t: &TypeId| *map.get(t).unwrap_or(t);
+        let bx = |t: &Self| Box::new(t.remap(map));
+        let opt = |t: &Option<Box<Self>>| t.as_deref().map(bx);
+        match self {
+            Self::Prim(_) | Self::ErrorContext => self.clone(),
+            Self::List(t) => Self::List(bx(t)),
+            Self::FixedList(t, n) => Self::FixedList(bx(t), *n),
+            Self::Option(t) => Self::Option(bx(t)),
+            Self::Result(a, b) => Self::Result(opt(a), opt(b)),
+            Self::Tuple(ts) => Self::Tuple(ts.iter().map(|t| t.remap(map)).collect()),
+            Self::Own(t) => Self::Own(id(t)),
+            Self::Borrow(t) => Self::Borrow(id(t)),
+            Self::Id(t) => Self::Id(id(t)),
+            Self::Future(t) => Self::Future(opt(t)),
+            Self::Stream(t) => Self::Stream(opt(t)),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,6 +119,8 @@ pub struct Function {
     /// The WIT name (`read`; empty for a constructor).
     pub name: String,
     pub kind: FnKind,
+    /// `async func`.
+    pub is_async: bool,
     pub params: Vec<(String, Type)>,
     pub result: Option<Type>,
 }
@@ -569,7 +598,7 @@ impl Cx {
                             func.params.insert(0, ("self".into(), Type::Borrow(id)));
                         }
                         if let FnKind::Constructor(_) = kind {
-                            func.result = Some(Type::Own(id));
+                            func.result = Some(constructor_result(r, file, &f, id, func.result)?);
                         }
                         r.interfaces[i].funcs.push(func);
                     }
@@ -633,6 +662,7 @@ impl Cx {
         Ok(Function {
             name: f.name.clone(),
             kind,
+            is_async: f.is_async,
             params,
             result,
         })
@@ -670,6 +700,10 @@ impl Cx {
         Ok(match t {
             Ty::Prim(p) => Type::Prim(*p),
             Ty::List(t) => Type::List(go(t)?),
+            Ty::FixedList(t, n) => Type::FixedList(go(t)?, *n),
+            Ty::Future(t) => Type::Future(opt(t.as_deref())?),
+            Ty::Stream(t) => Type::Stream(opt(t.as_deref())?),
+            Ty::ErrorContext => Type::ErrorContext,
             Ty::Option(t) => Type::Option(go(t)?),
             Ty::Result(a, b) => Type::Result(opt(a.as_deref())?, opt(b.as_deref())?),
             Ty::Tuple(ts) => Type::Tuple(
@@ -706,16 +740,27 @@ impl Cx {
             let (import, e) = match item {
                 WorldItem::Import(e) => (true, e),
                 WorldItem::Export(e) => (false, e),
-                WorldItem::Include(path, pos) => {
+                WorldItem::Include(path, renames, pos) => {
                     let inc = Self::lookup_world(r, pkg, file, &path, pos)?;
                     self.resolve_world(r, inc)?;
                     let (imports, exports) =
                         (r.worlds[inc].imports.clone(), r.worlds[inc].exports.clone());
-                    for e in imports {
-                        add_entry(r, w, true, e);
+                    let mut used = vec![false; renames.len()];
+                    for (import, list) in [(true, imports), (false, exports)] {
+                        for e in list {
+                            let e = rename_entry(r, w, e, &renames, &mut used);
+                            add_entry(r, w, import, e);
+                        }
                     }
-                    for e in exports {
-                        add_entry(r, w, false, e);
+                    if let Some(i) = used.iter().position(|u| !u) {
+                        return Err(r.err(
+                            file,
+                            pos,
+                            format!(
+                                "`include .. with`: the world has no import or export named `{}` to rename",
+                                renames[i].0
+                            ),
+                        ));
                     }
                     continue;
                 }
@@ -761,6 +806,127 @@ impl Cx {
             .map(|(_, id)| *id)
             .ok_or_else(|| r.err(file, pos, format!("no world `{name}`")))
     }
+}
+
+/// The declared result of a constructor: its resource, or `result<r,
+/// E>` (a fallible one).
+fn constructor_result(
+    r: &Resolve,
+    file: usize,
+    f: &parse::Func,
+    res: TypeId,
+    written: Option<Type>,
+) -> Result<Type, Error> {
+    let Some(t) = written else {
+        return Ok(Type::Own(res));
+    };
+    let is_res = |t: &Type| matches!(t, Type::Id(i) | Type::Own(i) if r.dealias(*i) == res);
+    match t {
+        Type::Result(Some(ok), err) if is_res(&ok) => {
+            Ok(Type::Result(Some(Box::new(Type::Own(res))), err))
+        }
+        _ => Err(r.err(
+            file,
+            f.pos,
+            format!(
+                "a fallible constructor returns `result<{}, ..>`",
+                r.types[res].name
+            ),
+        )),
+    }
+}
+
+/// `e` of an included world under `include .. with { from as to }`: a
+/// function or inline interface by a plain name takes its new name (an
+/// interface as a copy, so the including world's may differ).
+fn rename_entry(
+    r: &mut Resolve,
+    w: WorldId,
+    e: WorldEntry,
+    renames: &[(String, String)],
+    used: &mut [bool],
+) -> WorldEntry {
+    let name = match &e {
+        WorldEntry::Func(f) => f.name.clone(),
+        WorldEntry::Iface(i) if r.interfaces[*i].inline.is_some() => r.interfaces[*i].name.clone(),
+        WorldEntry::Iface(_) => return e,
+    };
+    let Some(k) = renames.iter().position(|(from, _)| *from == name) else {
+        return e;
+    };
+    used[k] = true;
+    let to = renames[k].1.clone();
+    match e {
+        WorldEntry::Func(mut f) => {
+            f.name = to;
+            WorldEntry::Func(f)
+        }
+        WorldEntry::Iface(i) => WorldEntry::Iface(copy_iface(r, i, to, w)),
+    }
+}
+
+/// A copy of inline interface `i` named `name` in world `w`, with its
+/// own types.
+fn copy_iface(r: &mut Resolve, i: IfaceId, name: String, w: WorldId) -> IfaceId {
+    let id = r.interfaces.len();
+    let src = r.interfaces[i].clone();
+    let mut map = HashMap::new();
+    for (_, t) in &src.types {
+        map.insert(*t, r.types.len() + map.len());
+    }
+    let mut types = Vec::new();
+    for (n, t) in &src.types {
+        let old = &r.types[*t];
+        let kind = match &old.kind {
+            TypeKind::Alias(a) => TypeKind::Alias(a.remap(&map)),
+            TypeKind::Record(fs) => {
+                TypeKind::Record(fs.iter().map(|(n, t)| (n.clone(), t.remap(&map))).collect())
+            }
+            TypeKind::Variant(cs) => TypeKind::Variant(
+                cs.iter()
+                    .map(|(n, t)| (n.clone(), t.as_ref().map(|t| t.remap(&map))))
+                    .collect(),
+            ),
+            k => k.clone(),
+        };
+        types.push(TypeDef {
+            name: old.name.clone(),
+            owner: Owner::Iface(id),
+            kind,
+        });
+        let _ = n;
+    }
+    r.types.extend(types);
+    let remap_kind = |k: FnKind| match k {
+        FnKind::Free => FnKind::Free,
+        FnKind::Method(t) => FnKind::Method(*map.get(&t).unwrap_or(&t)),
+        FnKind::Static(t) => FnKind::Static(*map.get(&t).unwrap_or(&t)),
+        FnKind::Constructor(t) => FnKind::Constructor(*map.get(&t).unwrap_or(&t)),
+    };
+    let funcs = src
+        .funcs
+        .iter()
+        .map(|f| Function {
+            name: f.name.clone(),
+            kind: remap_kind(f.kind),
+            is_async: f.is_async,
+            params: f
+                .params
+                .iter()
+                .map(|(n, t)| (n.clone(), t.remap(&map)))
+                .collect(),
+            result: f.result.as_ref().map(|t| t.remap(&map)),
+        })
+        .collect();
+    r.interfaces.push(Iface {
+        name,
+        pkg: r.worlds[w].pkg,
+        inline: Some(w),
+        types: src.types.iter().map(|(n, t)| (n.clone(), map[t])).collect(),
+        funcs,
+        file: src.file,
+    });
+    id
 }
 
 fn add_entry(r: &mut Resolve, w: WorldId, import: bool, e: WorldEntry) {

@@ -1,0 +1,58 @@
+// spec: 009.02-aot-pipeline §9.2.16
+// expect-exit: 0
+// expect-stdout:
+// 3 4
+// 6 hi!
+// 10 11 12
+// p 7
+// q 9
+// 5 5
+
+// spec 9.2.16 / 9.5.7: symbols do not depend on the order things are
+// lowered in. A closure is named after the function that makes it (a
+// generic instance's after the instance), a nested one after its outer
+// closure; a method of a non-generic type after the type; a generic
+// trait impl's methods after the impl. Each is still one function.
+struct P { v: i64; }
+struct Q { v: i64; }
+
+trait Show { fn show(self) -> str; }
+
+impl<T> Show for List<T> {
+    fn show(self) -> str { f"{self.len()}" }
+}
+
+impl P {
+    fn get(self) -> i64 { self.v }
+}
+
+impl Q {
+    fn get(self) -> i64 { self.v + 2 }
+}
+
+fn apply<T>(x: T, f: fn(T) -> T) -> T {
+    let g = |y: T| f(y);
+    g(x)
+}
+
+fn adder(n: i64) -> fn(i64) -> i64 {
+    |x: i64| {
+        let inner = |y: i64| y + n;
+        inner(x) + 1
+    }
+}
+
+fn main() -> i32 {
+    println(f"{apply(2, |x: i32| x + 1)} {apply(3, |x: i32| x + 1)}");
+    println(f"{apply(5, |x: i32| x + 1)} {apply("hi", |s: str| f"{s}!")}");
+    let a = adder(9);
+    println(f"{a(0)} {a(1)} {a(2)}");
+    let p = P { v: 7 };
+    let q = Q { v: 7 };
+    println(f"p {p.get()}");
+    println(f"q {q.get()}");
+    let xs: List<i64> = [1, 2, 3, 4, 5];
+    let ys: List<str> = ["a", "b", "c", "d", "e"];
+    println(f"{xs.show()} {ys.show()}");
+    return 0;
+}

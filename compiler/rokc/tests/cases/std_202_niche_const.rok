@@ -1,0 +1,13 @@
+// expect-exit: 0
+// expect-stdout:
+// true false 5
+
+// Stdlib 2.2.7: `NonZero::new` in const position is evaluated at
+// compile time (`none` for 0).
+const A: NonZero<i32> | none = NonZero::new(0);
+const B: NonZero<i32> | none = NonZero::new(5);
+const C: NonZero<i32> = NonZero::new(5) ?? panic("zero");
+
+fn main() {
+    println(f"{A is none} {B is none} {C}");
+}

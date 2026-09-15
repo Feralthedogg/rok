@@ -32,6 +32,8 @@
 //!   - `// wasm-invoke: f(1, "a") => 2` — (repeatable) after the run, the
 //!     component's export `f` called through `wasmtime run --invoke`
 //!     (WAVE syntax) prints the value after `=>`
+//!   - `// wasm-reactor` — a component without `wasi:cli/run`: not run,
+//!     only its `wasm-invoke`s
 //!   - `// wasm-plug: dir/main.rok` — that program is built too and
 //!     `wac plug` (`ROK_TEST_WAC`; the case is skipped without it)
 //!     satisfies the case's imports with its exports; the composition
@@ -43,6 +45,8 @@
 //!     instead of a skip (CI sets this).
 //!   - `ROK_TEST_OPT=-O2` (or `--release`, `-O3`, ...) — build every case
 //!     at that optimization level instead of the default `-O0`.
+//!   - `ROK_TEST_FILTER=text` — only the integration cases whose name
+//!     contains `text`.
 //!   - `ROK_TEST_TARGET=<triple>` — build for that target (with a runtime
 //!     built for it), e.g. `x86_64-apple-darwin` run under Rosetta.
 //!     `wasm32-wasi` and `wasm32-wasi-threads` run each module with
@@ -193,6 +197,9 @@ pub fn rokc_build(env: &Env, src: &Path, exe: &Path) -> std::io::Result<Output> 
         .arg(&env.rokr)
         .args(env::var("ROK_TEST_OPT").ok().filter(|o| !o.is_empty()))
         .args(test_target().map(|t| format!("--target={t}")))
+        // Prebuilt `--extern`s go beside the case's output.
+        .arg("--target-dir")
+        .arg(exe.with_file_name("target"))
         .arg("-o")
         .arg(exe)
         .output()
@@ -299,6 +306,8 @@ pub fn run_command(exe: &Path) -> Command {
                 "allow-ip-name-lookup",
                 "-W",
                 "max-wasm-stack=8388608",
+                "-W",
+                COMPONENT_FEATURES,
                 "--dir",
                 "/::/",
             ])
@@ -342,9 +351,15 @@ pub fn invoke_command(exe: &Path, call: &str) -> Command {
     let runner = env::var_os("ROK_TEST_WASM_RUNNER")
         .expect("`// wasm-invoke:` needs ROK_TEST_WASM_RUNNER (wasmtime)");
     let mut c = Command::new(runner);
-    c.args(["run", "--invoke", call]).arg(exe);
+    c.args(["run", "-W", COMPONENT_FEATURES, "--invoke", call])
+        .arg(exe);
     c
 }
+
+/// The component model features `wasm32-wasi` components may use beyond
+/// what wasmtime enables by default (async is on).
+const COMPONENT_FEATURES: &str =
+    "component-model-fixed-length-lists=y,component-model-error-context=y";
 
 /// Run `f` over `items` on all cores; results keep input order.
 pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {

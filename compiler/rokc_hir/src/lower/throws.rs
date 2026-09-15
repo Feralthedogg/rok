@@ -385,7 +385,7 @@ pub(super) fn raise(
                 out.push(HirStmt::Assign {
                     local: site,
                     value: HirExpr {
-                        kind: HirExprKind::Const(ConstVal::Str(rokc_diagnostic::location(span))),
+                        kind: HirExprKind::Const(ConstVal::Str(ctx.env.sources.location(span))),
                         ty: HirTy::Prim(PrimTy::Str),
                         span,
                     },

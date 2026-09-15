@@ -1,0 +1,48 @@
+// expect-error: 14:20: `p` points to a local of this coroutine and is used after a suspension point
+// expect-error: 21:14: `q` points to a local of this coroutine and is used after a suspension point
+// expect-error: 31:22: `r` points to a local of this coroutine and is used after a suspension point
+// expect-error: 42:18: `s` points to a local of this coroutine and is used after a suspension point
+// spec: std 101-ptr §1.1.2
+// In a coroutine body a pointer to a local is valid only until the next
+// suspension point: each resume reloads the frame into new slots.
+use rok::bare::ptr::{addr_of, many_addr_of};
+
+yield fn gen() -> i32 {
+    let x = 1;
+    let p = addr_of(x);
+    yield 0;
+    yield unsafe { p.read() };
+}
+
+async fn task_body() -> i32 {
+    let x = 2;
+    let q = addr_of(x).add(0);
+    await task::sleep(Duration::ms(0));
+    unsafe { q.read() }
+}
+
+yield fn looped() -> i32 {
+    let buf: [i32; 3] = [1, 2, 3];
+    let r = many_addr_of(buf[0]);
+    let i = 0usize;
+    while i < 3 {
+        // The back edge carries `r` across the `yield` below.
+        let v = 0;
+        unsafe { v = r.read(i); }
+        yield v;
+        i = i + 1;
+    }
+}
+
+async fn main() {
+    let b = async {
+        let y = 3;
+        let s = addr_of(y);
+        await task::sleep(Duration::ms(0));
+        unsafe { s.read() }
+    };
+    println(f"{await b}");
+    for v in gen() { println(f"{v}"); }
+    for v in looped() { println(f"{v}"); }
+    println(f"{await task_body()}");
+}

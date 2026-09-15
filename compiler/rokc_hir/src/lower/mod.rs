@@ -28,6 +28,7 @@ pub mod const_eval;
 mod coro;
 mod desugar;
 mod expr;
+mod frame_ptr;
 mod fstring;
 mod infer;
 mod method_value;
@@ -655,6 +656,7 @@ pub fn lower(program: &Program, prec: &PrecTable) -> HirModule {
         &empty_uses,
         &empty_reexports,
         &crate::HirInput::default(),
+        &rokc_diagnostic::SourceMap::new(),
     )
 }
 
@@ -672,6 +674,7 @@ pub fn lower_with_uses(
         uses,
         &empty_reexports,
         &crate::HirInput::default(),
+        &rokc_diagnostic::SourceMap::new(),
     )
 }
 
@@ -864,6 +867,8 @@ impl TypeDefs<'_> {
 /// Module-wide, read-only lowering environment shared by every function
 /// body (plus the interior-mutable `sink`).
 struct Env<'a> {
+    /// The compile's source files (`#[track_caller]` / `throw` sites).
+    sources: &'a rokc_diagnostic::SourceMap,
     fn_table: HashMap<String, FnSig>,
     /// `fn_table` and `generic_fns` keys by last segment (both are
     /// complete before any body is lowered).

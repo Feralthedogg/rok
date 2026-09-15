@@ -1,0 +1,6 @@
+package test:lib;
+
+world base {
+    export greet: func(who: string) -> string;
+    export deep: func(x: option<option<string>>) -> option<option<string>>;
+}

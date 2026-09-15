@@ -10,6 +10,7 @@ pub mod mangle;
 mod repl;
 #[cfg(test)]
 mod tests;
+pub mod units;
 
 pub use mangle::{Demangled, demangle, pkg_hash};
 pub use repl::ReplFn;
@@ -84,19 +85,23 @@ pub fn codegen_error(errors: &[(rokc_diagnostic::Span, String)]) -> Option<RokDi
 }
 
 /// The MLIR text of `module`.
-pub fn codegen(module: &MirModule, opts: &CodegenOptions) -> Result<MlirOutput, RokDiagnostic> {
+pub fn codegen(
+    module: &MirModule,
+    opts: &CodegenOptions,
+    sources: &rokc_diagnostic::SourceMap,
+) -> Result<MlirOutput, RokDiagnostic> {
     let target = module.target.clone();
     let mut e = emit::Emitter::new(target.clone());
     e.overflow_checks = opts.overflow_checks;
     e.data_layout.clone_from(&opts.data_layout);
     if opts.debug {
-        e.debug = Some(debug::DebugInfo::new(target, opts.optimized));
+        e.debug = Some(debug::DebugInfo::new(target, opts.optimized, sources));
     }
     if let Some(r) = &opts.repl {
         e.gc_types.clone_from(&r.gc_tables);
     }
     e.repl.clone_from(&opts.repl);
-    e.emit_module(module);
+    e.emit_module(module, sources);
     if let Some(d) = codegen_error(&e.errors) {
         return Err(d);
     }
@@ -116,4 +121,45 @@ pub fn codegen(module: &MirModule, opts: &CodegenOptions) -> Result<MlirOutput, 
         (out.text, out.reused, out.fresh, out.fns) = repl::reuse(&out.text, &r.known);
     }
     Ok(out)
+}
+
+/// The MLIR text of unit `u` of `plan` (a program's, `units::plan`).
+pub fn codegen_unit(
+    module: &MirModule,
+    opts: &CodegenOptions,
+    sources: &rokc_diagnostic::SourceMap,
+    plan: &units::Plan,
+    u: usize,
+) -> Result<String, RokDiagnostic> {
+    let target = module.target.clone();
+    let mut e = emit::Emitter::new(target.clone());
+    e.overflow_checks = opts.overflow_checks;
+    e.data_layout.clone_from(&opts.data_layout);
+    if opts.debug {
+        e.debug = Some(debug::DebugInfo::new(target, opts.optimized, sources));
+    }
+    e.gc_types.clone_from(&plan.gc_tables);
+    e.unit = Some((std::sync::Arc::clone(&plan.core), u));
+    e.glue = plan.units[u].glue;
+    e.emit_module(module, sources);
+    if e.gc_types.len() != plan.gc_tables.len() {
+        e.errors.push((
+            rokc_diagnostic::Span::DUMMY,
+            format!(
+                "internal: unit `{}` made a GC type its plan lacks",
+                plan.units[u].name
+            ),
+        ));
+    }
+    if let Some(d) = codegen_error(&e.errors) {
+        return Err(d);
+    }
+    Ok(e.finish())
+}
+
+/// A module of `rok.alloc` alone (what `units` builds link into each
+/// optimized part, as the LLVM shim does for a split module).
+#[must_use]
+pub fn alloc_module(target: &rokc_mir::Target) -> String {
+    emit::alloc_module(target)
 }

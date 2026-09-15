@@ -90,7 +90,7 @@ pub fn thread_start(main: bool) {
         };
         libc::sigaltstack(&ss, ptr::null_mut());
         if !INSTALLED.swap(true, Ordering::AcqRel) {
-            install(handler as libc::sighandler_t);
+            install(handler as *const () as libc::sighandler_t);
         }
     }
 }

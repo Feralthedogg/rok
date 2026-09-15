@@ -64,6 +64,8 @@
 #include "mlir/Tools/Plugins/PassPlugin.h"
 
 #include <algorithm>
+#include <atomic>
+#include <functional>
 #include <cinttypes>
 #include <cstdlib>
 #include <cstring>
@@ -478,11 +480,17 @@ std::vector<llvm::SmallString<0>> split(llvm::Module &m, size_t n) {
   return parts;
 }
 
-// Runs `job(i)` for i < n, each on a thread of its own.
+// Runs `job(i)` for i < n on up to a thread per core.
 template <typename F> void in_parallel(size_t n, F job) {
+  std::atomic<size_t> next{0};
+  auto work = [&] {
+    for (size_t i; (i = next++) < n;)
+      job(i);
+  };
+  size_t k = std::min<size_t>(n, std::max(1u, std::thread::hardware_concurrency()));
   std::vector<std::thread> threads;
-  for (size_t i = 0; i < n; ++i)
-    threads.emplace_back(job, i);
+  for (size_t t = 0; t < k; ++t)
+    threads.emplace_back(work);
   for (auto &t : threads)
     t.join();
 }
@@ -500,19 +508,9 @@ int report(Diags &d, RokBuf *err, RokBuf *warn) {
   return 0;
 }
 
-// An optimized object in `o.parts` parts, compiled as in-process ThinLTO:
-// each part through the pre-link pipeline on a thread of its own; then
-// the thin link imports into each part what it would inline from the
-// others and optimizes and compiles the parts in parallel. Symbols keep
-// the linkage a whole-module compile gives them: linkonce definitions
-// nothing refers to go, the others stay visible.
-//
-// The parts see `rok.alloc` as a declaration (its allocation attributes
-// are all escape elision needs, and code imported from another part
-// calls the same one); after each part's backend pipeline its body is
-// linked in and `inline_alloc` inlines it.
-int thin(llvm::Module &m, const RokCompile &o, RokBuf *out, RokBuf *err,
-         RokBuf *warn) {
+// `rok.alloc`'s body out of `m` (left a declaration), as a module of its
+// own in bitcode; empty when `m` has none.
+llvm::SmallString<0> take_alloc(llvm::Module &m) {
   llvm::SmallString<0> alloc;
   if (llvm::Function *f = m.getFunction(ALLOC); f && !f->isDeclaration()) {
     llvm::ValueToValueMapTy map;
@@ -524,37 +522,26 @@ int thin(llvm::Module &m, const RokCompile &o, RokBuf *out, RokBuf *err,
     llvm::WriteBitcodeToFile(*body, os);
     f->deleteBody();
   }
-  llvm::StringSet<> droppable;
-  for (llvm::GlobalValue &g : m.global_values())
-    if (g.hasLinkOnceLinkage())
-      droppable.insert(g.getName());
-  std::vector<llvm::SmallString<0>> parts = split(m, o.parts);
-  size_t n = parts.size();
-  Diags diags;
-  std::vector<std::string> errors(n);
-  in_parallel(n, [&](size_t i) {
-    llvm::LLVMContext ctx;
-    ctx.setDiagnosticHandlerCallBack(on_diag, &diags);
-    auto part =
-        llvm::parseBitcodeFile(llvm::MemoryBufferRef(parts[i], "part"), ctx);
-    if (!part) {
-      errors[i] = llvm::toString(part.takeError());
-      return;
-    }
-    auto tm = target_machine(o, errors[i]);
-    if (!tm)
-      return;
-    llvm::SmallString<0> summary;
-    llvm::raw_svector_ostream os(summary);
-    optimize(**part, *tm, o, &os);
-    parts[i] = std::move(summary);
-  });
-  for (auto &e : errors)
-    if (!e.empty())
-      return fail(err, e);
-  if (!diags.errors.empty())
-    return fail(err, diags.errors);
+  return alloc;
+}
 
+// The thin link of `parts` (ThinLTO bitcode with summaries, module ids
+// `names`) into objects: it imports into each part what it would inline
+// from the others, then optimizes and compiles the parts in parallel.
+// A defined symbol stays visible outside unless `internal` says so.
+// After each part's backend pipeline `alloc` (`take_alloc`) is linked in
+// and `inline_alloc` inlines it.
+//
+// With a `cache` directory, a part whose inputs (its module, what it
+// imports, the options) are unchanged reuses its object from there
+// (`hits` counts them); entries this link did not use are deleted.
+int thin_link(const std::vector<llvm::SmallString<0>> &parts,
+              const std::vector<std::string> &names, llvm::StringRef alloc,
+              const std::function<bool(llvm::StringRef)> &internal,
+              const RokCompile &o, const char *cache, size_t *hits,
+              std::vector<llvm::SmallString<0>> &out, Diags &diags,
+              RokBuf *err) {
+  size_t n = parts.size();
   llvm::Triple triple(o.triple);
   llvm::lto::Config conf;
   conf.CPU = o.cpu;
@@ -598,11 +585,10 @@ int thin(llvm::Module &m, const RokCompile &o, RokBuf *out, RokBuf *err,
     inline_alloc(part, *tm, o.opt);
     return true;
   };
-  llvm::lto::LTO lto(std::move(conf), llvm::lto::createInProcessThinBackend(
-                                          llvm::heavyweight_hardware_concurrency(n)));
-  std::vector<std::string> names(n);
+  llvm::lto::LTO lto(std::move(conf),
+                     llvm::lto::createInProcessThinBackend(
+                         llvm::heavyweight_hardware_concurrency(n)));
   for (size_t i = 0; i < n; ++i) {
-    names[i] = "part" + std::to_string(i);
     auto input = llvm::lto::InputFile::create(
         llvm::MemoryBufferRef(parts[i], names[i]));
     if (!input)
@@ -611,8 +597,7 @@ int thin(llvm::Module &m, const RokCompile &o, RokBuf *out, RokBuf *err,
     for (const auto &sym : (*input)->symbols()) {
       llvm::lto::SymbolResolution r;
       r.Prevailing = !sym.isUndefined();
-      r.VisibleToRegularObj =
-          r.Prevailing && !droppable.contains(sym.getIRName());
+      r.VisibleToRegularObj = r.Prevailing && !internal(sym.getIRName());
       res.push_back(r);
     }
     if (auto e = lto.add(std::move(*input), res))
@@ -625,36 +610,129 @@ int thin(llvm::Module &m, const RokCompile &o, RokBuf *out, RokBuf *err,
     return std::make_unique<llvm::CachedFileStream>(
         std::make_unique<llvm::raw_svector_ostream>(objects[task]));
   };
-  if (auto e = lto.run(add))
-    return fail(err, llvm::toString(std::move(e)));
-  if (report(diags, err, warn))
-    return 1;
+  if (!*cache) {
+    if (auto e = lto.run(add))
+      return fail(err, llvm::toString(std::move(e)));
+  } else {
+    auto local = llvm::localCache(
+        "ThinLTO", "rok-thin", cache,
+        [&](unsigned task, const llvm::Twine &,
+            std::unique_ptr<llvm::MemoryBuffer> mb) {
+          objects[task] = mb->getBuffer();
+        });
+    if (!local)
+      return fail(err, llvm::toString(local.takeError()));
+    std::mutex lock;
+    llvm::StringSet<> used;
+    llvm::FileCache counted(
+        [&](unsigned task, llvm::StringRef key, const llvm::Twine &name)
+            -> llvm::Expected<llvm::AddStreamFn> {
+          {
+            std::lock_guard<std::mutex> guard(lock);
+            used.insert("llvmcache-" + key.str());
+          }
+          auto stream = (*local)(task, key, name);
+          if (stream && !*stream) {
+            std::lock_guard<std::mutex> guard(lock);
+            ++*hits;
+          }
+          return stream;
+        },
+        local->getCacheDirectoryPath());
+    if (auto e = lto.run(add, counted))
+      return fail(err, llvm::toString(std::move(e)));
+    std::error_code ec;
+    for (llvm::sys::fs::directory_iterator it(cache, ec), end; it != end && !ec;
+         it.increment(ec)) {
+      llvm::StringRef file = llvm::sys::path::filename(it->path());
+      if (file.starts_with("llvmcache-") && !used.contains(file))
+        llvm::sys::fs::remove(it->path());
+    }
+  }
   for (size_t i = 0; i < n; ++i)
-    put(&out[i], objects[i + 1].str());
+    out.push_back(std::move(objects[i + 1]));
   return 0;
 }
 
-// The module's target is the requested one (as clang -target overrides
-// the triple of an IR input), then the requested output; LLVM's
-// warnings in `warn`.
-int finish(llvm::Module &m, const RokCompile &o, RokBuf *out, RokBuf *err,
-           RokBuf *warn) {
+// An optimized object in `o.parts` parts, compiled as in-process ThinLTO:
+// each part through the pre-link pipeline on a thread of its own, then
+// `thin_link`. Symbols keep the linkage a whole-module compile gives
+// them: linkonce definitions nothing refers to go, the others stay
+// visible.
+//
+// The parts see `rok.alloc` as a declaration (its allocation attributes
+// are all escape elision needs, and code imported from another part
+// calls the same one).
+int thin(llvm::Module &m, const RokCompile &o, RokBuf *out, RokBuf *err,
+         RokBuf *warn) {
+  llvm::SmallString<0> alloc = take_alloc(m);
+  llvm::StringSet<> droppable;
+  for (llvm::GlobalValue &g : m.global_values())
+    if (g.hasLinkOnceLinkage())
+      droppable.insert(g.getName());
+  std::vector<llvm::SmallString<0>> parts = split(m, o.parts);
+  size_t n = parts.size();
+  Diags diags;
+  std::vector<std::string> errors(n);
+  in_parallel(n, [&](size_t i) {
+    llvm::LLVMContext ctx;
+    ctx.setDiagnosticHandlerCallBack(on_diag, &diags);
+    auto part =
+        llvm::parseBitcodeFile(llvm::MemoryBufferRef(parts[i], "part"), ctx);
+    if (!part) {
+      errors[i] = llvm::toString(part.takeError());
+      return;
+    }
+    auto tm = target_machine(o, errors[i]);
+    if (!tm)
+      return;
+    llvm::SmallString<0> summary;
+    llvm::raw_svector_ostream os(summary);
+    optimize(**part, *tm, o, &os);
+    parts[i] = std::move(summary);
+  });
+  for (auto &e : errors)
+    if (!e.empty())
+      return fail(err, e);
+  if (!diags.errors.empty())
+    return fail(err, diags.errors);
+  std::vector<std::string> names(n);
+  for (size_t i = 0; i < n; ++i)
+    names[i] = "part" + std::to_string(i);
+  std::vector<llvm::SmallString<0>> objects;
+  size_t hits = 0;
+  if (thin_link(
+          parts, names, alloc,
+          [&](llvm::StringRef s) { return droppable.contains(s); }, o, "",
+          &hits, objects, diags, err))
+    return 1;
+  if (report(diags, err, warn))
+    return 1;
+  for (size_t i = 0; i < n; ++i)
+    put(&out[i], objects[i].str());
+  return 0;
+}
+
+void tls_model(llvm::Module &m, const RokCompile &o) {
   if (o.tls_initial_exec) {
     for (llvm::GlobalVariable &g : m.globals())
       if (g.isThreadLocal() && g.getName().starts_with("rok_tls_"))
         g.setThreadLocalMode(llvm::GlobalValue::InitialExecTLSModel);
   }
-  if (o.emit == 0) {
-    std::string text;
-    llvm::raw_string_ostream os(text);
-    m.print(os, nullptr);
-    put(out, text);
-    return 0;
-  }
+}
+
+// The module for the requested target (as clang -target overrides the
+// triple of an IR input), verified; its target machine.
+std::unique_ptr<llvm::TargetMachine> prepare(llvm::Module &m,
+                                             const RokCompile &o,
+                                             RokBuf *err) {
+  tls_model(m, o);
   std::string error;
   auto tm = target_machine(o, error);
-  if (!tm)
-    return fail(err, error);
+  if (!tm) {
+    fail(err, error);
+    return nullptr;
+  }
   m.setTargetTriple(tm->getTargetTriple());
   m.setDataLayout(tm->createDataLayout());
   if (tm->getTargetTriple().isOSWindows()) {
@@ -667,12 +745,29 @@ int finish(llvm::Module &m, const RokCompile &o, RokBuf *out, RokBuf *err,
       if (!f.isDeclaration())
         f.setUWTableKind(llvm::UWTableKind::Async);
   }
-  {
-    std::string msg;
-    llvm::raw_string_ostream os(msg);
-    if (llvm::verifyModule(m, &os))
-      return fail(err, "invalid LLVM IR:\n" + msg);
+  std::string msg;
+  llvm::raw_string_ostream os(msg);
+  if (llvm::verifyModule(m, &os)) {
+    fail(err, "invalid LLVM IR:\n" + msg);
+    return nullptr;
   }
+  return tm;
+}
+
+// The module in the requested output; LLVM's warnings in `warn`.
+int finish(llvm::Module &m, const RokCompile &o, RokBuf *out, RokBuf *err,
+           RokBuf *warn) {
+  if (o.emit == 0) {
+    tls_model(m, o);
+    std::string text;
+    llvm::raw_string_ostream os(text);
+    m.print(os, nullptr);
+    put(out, text);
+    return 0;
+  }
+  auto tm = prepare(m, o, err);
+  if (!tm)
+    return 1;
   bool parts = o.parts > 1 && o.emit == 2;
   // IR PGO instruments and reads profiles in the whole-module pipeline:
   // a profile build optimizes whole and splits only code generation.
@@ -758,35 +853,37 @@ void variant_parts(llvm::Module &m) {
   }
 }
 
-} // namespace
-
-extern "C" {
-
 // The MLIR module `src` (standard dialects) through `o.mlir_pipeline`
-// into LLVM IR, then `finish`.
-int rok_llvm_compile_mlir(const char *src, size_t len, const RokCompile *o,
-                          RokBuf *out, RokBuf *err, RokBuf *warn) {
+// into LLVM IR in `llctx`; null and the reason in `err` if it fails.
+std::unique_ptr<llvm::Module> translate(llvm::StringRef src,
+                                        const RokCompile &o,
+                                        llvm::LLVMContext &llctx,
+                                        RokBuf *err) {
   mlir::DialectRegistry registry;
   mlir::registerAllDialects(registry);
   mlir::registerAllExtensions(registry);
   mlir::registerAllToLLVMIRTranslations(registry);
-  for (size_t i = 0; i < o->n_dialect_plugins; ++i) {
-    auto p = mlir::DialectPlugin::load(o->dialect_plugins[i]);
-    if (!p)
-      return fail(err, "Failed to load dialect plugin " +
-                           std::string(o->dialect_plugins[i]) + ": " +
-                           llvm::toString(p.takeError()));
+  for (size_t i = 0; i < o.n_dialect_plugins; ++i) {
+    auto p = mlir::DialectPlugin::load(o.dialect_plugins[i]);
+    if (!p) {
+      fail(err, "Failed to load dialect plugin " +
+                    std::string(o.dialect_plugins[i]) + ": " +
+                    llvm::toString(p.takeError()));
+      return nullptr;
+    }
     p->registerDialectRegistryCallbacks(registry);
   }
   init_passes();
   {
     std::lock_guard<std::mutex> lock(pass_registry_lock);
-    for (size_t i = 0; i < o->n_pass_plugins; ++i) {
-      auto p = mlir::PassPlugin::load(o->pass_plugins[i]);
-      if (!p)
-        return fail(err, "Failed to load pass plugin " +
-                             std::string(o->pass_plugins[i]) + ": " +
-                             llvm::toString(p.takeError()));
+    for (size_t i = 0; i < o.n_pass_plugins; ++i) {
+      auto p = mlir::PassPlugin::load(o.pass_plugins[i]);
+      if (!p) {
+        fail(err, "Failed to load pass plugin " +
+                      std::string(o.pass_plugins[i]) + ": " +
+                      llvm::toString(p.takeError()));
+        return nullptr;
+      }
       p->registerPassRegistryCallbacks();
     }
   }
@@ -799,29 +896,115 @@ int rok_llvm_compile_mlir(const char *src, size_t len, const RokCompile *o,
   std::string diag;
   llvm::raw_string_ostream diag_os(diag);
   llvm::SourceMgr sm;
-  sm.AddNewSourceBuffer(
-      llvm::MemoryBuffer::getMemBufferCopy(llvm::StringRef(src, len), "<stdin>"),
-      llvm::SMLoc());
+  sm.AddNewSourceBuffer(llvm::MemoryBuffer::getMemBufferCopy(src, "<stdin>"),
+                        llvm::SMLoc());
   mlir::SourceMgrDiagnosticHandler handler(sm, &ctx, diag_os);
 
   mlir::OwningOpRef<mlir::ModuleOp> module =
       mlir::parseSourceFile<mlir::ModuleOp>(sm, &ctx);
-  if (!module)
-    return fail(err, diag);
   mlir::PassManager pm(&ctx, mlir::ModuleOp::getOperationName());
-  if (mlir::failed(mlir::parsePassPipeline(o->mlir_pipeline, pm, diag_os)))
-    return fail(err, diag);
-  if (mlir::failed(pm.run(*module)))
-    return fail(err, diag);
-
-  llvm::LLVMContext llctx;
-  // Verified by `finish`, after `variant_parts`.
+  if (!module || mlir::failed(mlir::parsePassPipeline(o.mlir_pipeline, pm, diag_os)) ||
+      mlir::failed(pm.run(*module))) {
+    fail(err, diag);
+    return nullptr;
+  }
+  // Verified later, after `variant_parts`.
   auto m = mlir::translateModuleToLLVMIR(*module, llctx, "LLVMDialectModule",
                                          /*disableVerification=*/true);
-  if (!m)
-    return fail(err, diag.empty() ? "cannot translate MLIR to LLVM IR" : diag);
+  if (!m) {
+    fail(err, diag.empty() ? "cannot translate MLIR to LLVM IR" : diag);
+    return nullptr;
+  }
   variant_parts(*m);
+  return m;
+}
+
+} // namespace
+
+extern "C" {
+
+// The MLIR module `src` through `translate`, then `finish`.
+int rok_llvm_compile_mlir(const char *src, size_t len, const RokCompile *o,
+                          RokBuf *out, RokBuf *err, RokBuf *warn) {
+  llvm::LLVMContext llctx;
+  auto m = translate(llvm::StringRef(src, len), *o, llctx, err);
+  if (!m)
+    return 1;
   return finish(*m, *o, out, err, warn);
+}
+
+// One codegen unit of a program: MLIR text to compile, or (`bitcode`) its
+// ThinLTO bitcode from an earlier build.
+struct RokUnit {
+  const char *name;
+  const char *src;
+  size_t len;
+  int bitcode;
+};
+
+// An optimized object per unit, compiled as in-process ThinLTO: each unit
+// given as MLIR through `translate` and the pre-link pipeline (in
+// parallel; its bitcode goes to `bitcode[i]` for the next build), then
+// `thin_link` of every unit, reusing objects from `cache`. `alloc` is an
+// MLIR module defining `rok.alloc`, which every unit only declares.
+// Symbols with rok's mangling (`_Y`) are the program's own: nothing
+// outside the units refers to them, so the link may internalize them.
+// `hits` counts the objects the cache had.
+int rok_llvm_compile_units(const RokUnit *units, size_t n, const char *alloc,
+                           size_t alloc_len, const RokCompile *o,
+                           const char *cache, RokBuf *objects,
+                           RokBuf *bitcode, size_t *hits, RokBuf *err,
+                           RokBuf *warn) {
+  llvm::SmallString<0> body;
+  {
+    llvm::LLVMContext ctx;
+    auto m = translate(llvm::StringRef(alloc, alloc_len), *o, ctx, err);
+    if (!m || !prepare(*m, *o, err))
+      return 1;
+    body = take_alloc(*m);
+  }
+  std::vector<llvm::SmallString<0>> parts(n);
+  std::vector<std::string> names(n), errors(n);
+  Diags diags;
+  in_parallel(n, [&](size_t i) {
+    names[i] = units[i].name;
+    if (units[i].bitcode) {
+      parts[i] = llvm::StringRef(units[i].src, units[i].len);
+      return;
+    }
+    llvm::LLVMContext ctx;
+    ctx.setDiagnosticHandlerCallBack(on_diag, &diags);
+    RokBuf e{nullptr, 0};
+    auto m = translate(llvm::StringRef(units[i].src, units[i].len), *o, ctx, &e);
+    auto tm = m ? prepare(*m, *o, &e) : nullptr;
+    if (!tm) {
+      errors[i] = std::string(e.ptr, e.len);
+      rok_llvm_free(&e);
+      return;
+    }
+    take_alloc(*m);
+    llvm::raw_svector_ostream os(parts[i]);
+    optimize(*m, *tm, *o, &os);
+  });
+  for (auto &e : errors)
+    if (!e.empty())
+      return fail(err, e);
+  if (!diags.errors.empty())
+    return fail(err, diags.errors);
+  for (size_t i = 0; i < n; ++i)
+    if (!units[i].bitcode)
+      put(&bitcode[i], parts[i].str());
+  std::vector<llvm::SmallString<0>> out;
+  if (thin_link(
+          parts, names, body,
+          [](llvm::StringRef s) { return s.starts_with("_Y"); }, *o, cache,
+          hits, out, diags, err))
+    return 1;
+  if (report(diags, err, warn))
+    return 1;
+  for (size_t i = 0; i < n; ++i)
+    put(&objects[i], out[i].str());
+  return 0;
 }
 
 // LLVM IR text `src` through `finish`.

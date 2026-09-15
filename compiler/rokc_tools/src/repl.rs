@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use rokc_diagnostic::{Label, RokDiagnostic, Span};
 use rokc_hir::{HirExpr, HirExprKind, HirModule, HirStaticDef, HirStmt, HirTy};
 use rokc_interface::{
-    BuildOptions, CompileResult, EmitKind, ReplCell, ReplFn, Session, TempDir, link_host, report,
+    BuildOptions, CompileResult, EmitKind, ReplCell, ReplFn, Session, SourceMap, TempDir, link_host,
 };
 use rokc_ir_common::{ConstVal, LocalId};
 
@@ -547,7 +547,7 @@ impl Repl {
         };
         // Codegen too, like `check`: it rejects what cannot be lowered.
         if let Err(d) = r.emit(EmitKind::Mlir, &self.opts) {
-            report(&d);
+            r.report(&d);
             return false;
         }
         // A binding of a redefined type would be read with the new
@@ -598,7 +598,7 @@ impl Repl {
     }
 
     /// The source of a cell: the items, the bindings' slots, `body`, and
-    /// the store of `show`'s `Debug` text to the host. `keep` adds the
+    /// the store of the `str` expression `show` to the host. `keep` adds the
     /// stores of the bindings back to their slots to the compiled HIR.
     fn session(&self, state: &State, body: &str, show: Option<&str>) -> String {
         let mut src = String::new();
@@ -626,8 +626,8 @@ impl Repl {
         src.push_str("{\n");
         src.push_str(body);
         src.push('\n');
-        if let Some(n) = show {
-            let _ = writeln!(src, "{SHOWN} = f\"{{{n}:?}}\";");
+        if let Some(text) = show {
+            let _ = writeln!(src, "{SHOWN} = {text};");
         }
         src.push_str("}\n");
         src
@@ -654,13 +654,23 @@ impl Repl {
     ) -> Result<Option<String>, Fail> {
         self.start_host();
         let mut lap = Lap::start();
-        let mut shown = show.is_some();
-        let mut r = loop {
-            let src = self.session(&self.state, cell, show.filter(|_| shown));
-            match self.compile(&src, shown) {
-                Some(r) => break r,
-                // Most likely no `Debug`; the plain build reports real errors.
-                None if shown => shown = false,
+        // 6.10.3: `{type_name_of}: {Debug}`, the type name alone without
+        // `Debug`; the plain build reports real errors.
+        let texts: Vec<String> = show
+            .map(|n| {
+                vec![
+                    format!("f\"{{{n}.type_name_of()}}: {{{n}:?}}\""),
+                    format!("{n}.type_name_of()"),
+                ]
+            })
+            .unwrap_or_default();
+        let mut tries = texts.iter().map(Some).chain([None]);
+        let (mut r, shown) = loop {
+            let text = tries.next().flatten();
+            let src = self.session(&self.state, cell, text.map(String::as_str));
+            match self.compile(&src, text.is_some()) {
+                Some(r) => break (r, text.is_some()),
+                None if text.is_some() => {}
                 None => return Err(Fail::Reported),
             }
         };
@@ -690,7 +700,7 @@ impl Repl {
         let (ir, out) = match r.cell_code(&opts) {
             Ok(x) => x,
             Err(d) => {
-                report(&d);
+                r.report(&d);
                 return Err(Fail::Reported);
             }
         };
@@ -723,7 +733,7 @@ impl Repl {
         Ok(show
             .and_then(|n| binding_ty(&r, n))
             .filter(|ty| ty != "()")
-            .map(|ty| if shown { format!("{ty}: {value}") } else { ty }))
+            .map(|ty| if shown { value } else { ty }))
     }
 
     /// The cell's new bindings: the `let`s at the top of its block in
@@ -1000,17 +1010,17 @@ impl Repl {
     /// (diagnostics and the panic locations codegen embeds).
     fn compile(&self, src: &str, quiet: bool) -> Option<CompileResult> {
         let (s, path) = self.compiler();
-        rokc_diagnostic::clear_files();
-        // Registered first so the views are in place while HIR lowering
+        // Added first so the views are in place while HIR lowering
         // writes caller locations (`#[track_caller]`).
-        let session = rokc_diagnostic::register_file(path.display().to_string(), src.to_owned());
-        let regions = self.regions(src);
+        let mut map = SourceMap::new();
+        let session = map.add(path.display().to_string(), src.to_owned());
+        let regions = self.regions(src, &mut map);
         for r in &regions {
             let (line, col) = line_col(src, r.off);
             let last =
                 line + u32::try_from(src[r.off..r.off + r.len].matches('\n').count()).ok()?;
             let at = line_col(&r.text, r.at);
-            rokc_diagnostic::view_file(
+            map.view(
                 session,
                 r.path.clone(),
                 (line, col + 1),
@@ -1018,7 +1028,7 @@ impl Repl {
                 (at.0, at.1 + 1),
             );
         }
-        let r = s.compile_source(src, &path);
+        let r = s.compile_source(src, &path, map);
         if !r.has_errors() {
             return Some(r);
         }
@@ -1034,7 +1044,7 @@ impl Repl {
         if !quiet {
             let path = path.display().to_string();
             for d in &r.errors {
-                report(&localize(d, session, &path, &regions));
+                r.report(&localize(d, session, &path, &regions));
             }
         }
         None
@@ -1080,12 +1090,12 @@ impl Repl {
 
     /// Where the user's text is in the session source `src`: the cell
     /// being built, and the loaded program's items.
-    fn regions(&self, src: &str) -> Vec<Region> {
+    fn regions(&self, src: &str, map: &mut SourceMap) -> Vec<Region> {
         let program = self.program.as_ref();
-        let shown = |p: &Program, off: usize, len: usize, at: usize| Region {
+        let shown = |map: &mut SourceMap, p: &Program, off: usize, len: usize, at: usize| Region {
             off,
             len,
-            file: rokc_diagnostic::register_file(p.path.clone(), p.text.to_string()),
+            file: map.add(p.path.clone(), p.text.to_string()),
             path: p.path.clone(),
             text: Arc::clone(&p.text),
             at,
@@ -1097,11 +1107,11 @@ impl Repl {
         {
             let len = self.input.len();
             regions.push(match program.and_then(|p| Some((p, p.cell?))) {
-                Some((p, at)) => shown(p, off, len, at),
+                Some((p, at)) => shown(map, p, off, len, at),
                 None => Region {
                     off,
                     len,
-                    file: rokc_diagnostic::register_file(REPL_FILE.to_owned(), self.input.clone()),
+                    file: map.add(REPL_FILE.to_owned(), self.input.clone()),
                     path: REPL_FILE.to_owned(),
                     text: Arc::from(self.input.as_str()),
                     at: 0,
@@ -1111,7 +1121,7 @@ impl Repl {
         if let Some(p) = program {
             for (item, at) in &p.items {
                 if let Some(off) = src.find(item.as_str()) {
-                    regions.push(shown(p, off, item.len(), *at));
+                    regions.push(shown(map, p, off, item.len(), *at));
                 }
             }
         }
@@ -1405,7 +1415,7 @@ fn start_host(dir: &std::path::Path, opts: &BuildOptions) -> Option<Host> {
         return None;
     }
     if let Err(d) = link_host(&obj, opts, &exe) {
-        report(&d);
+        SourceMap::new().report(&d);
         return None;
     }
     let (ctl, theirs) = match channel() {

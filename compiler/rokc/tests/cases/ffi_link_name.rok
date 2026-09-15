@@ -1,0 +1,16 @@
+// expect-exit: 0
+// expect-stdout: 5 7
+// spec: 5.9.9
+
+// `#[link_name = "sym"]` links an extern function to a symbol other
+// than its name: two rok names for C's `abs`.
+extern "C" {
+    #[link_name = "abs"]
+    fn c_abs(x: i32) -> i32;
+    #[link_name = "abs"]
+    fn magnitude(x: i32) -> i32;
+}
+
+fn main() {
+    println(f"{unsafe { c_abs(-5) }} {unsafe { magnitude(7) }}");
+}

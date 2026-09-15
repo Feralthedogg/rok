@@ -237,6 +237,11 @@ impl Cx<'_> {
             "test" | "bench" => (&[P::Fn], empty(a)),
             "non_exhaustive" => (&[P::Struct, P::Enum], empty(a)),
             "link" => (&[P::Extern], None),
+            "link_name" => (
+                &[P::ExternFn],
+                (!matches!(&a.body, AttrBody::Value(Literal::Str(_))))
+                    .then_some("`#[link_name = \"symbol\"]`"),
+            ),
             // The runtime's own: its functions neither allocate nor block.
             "no_safepoint" => (&[P::Extern], empty(a)),
             "path" => (&[P::Mod], None),

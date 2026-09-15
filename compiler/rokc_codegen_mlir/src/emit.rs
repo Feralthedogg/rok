@@ -4,7 +4,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write;
 
-use rokc_diagnostic::Span;
+use rokc_diagnostic::{SourceMap, Span};
 use rokc_ir_common::{Abi, ConstVal, FnRole, FunctionId, Linkage, LocalId, PrimOp, PrimTy};
 use rokc_mir::gc_abi::{
     CARD_SHIFT, FLAG_CARDED, FLAG_UNLOGGED, GC_FLAGS_OFFSET, GC_WORD_OFFSET, HEADER_SIZE,
@@ -125,14 +125,18 @@ pub struct Emitter {
     /// LLVM `target datalayout`, when the toolchain told.
     pub data_layout: Option<String>,
     /// `quiet_functions` of the module.
-    quiet: std::rc::Rc<HashSet<FunctionId>>,
+    quiet: std::sync::Arc<HashSet<FunctionId>>,
     /// The `List` instances (`buf_ref_facts`).
-    lists: std::rc::Rc<HashSet<u32>>,
+    lists: std::sync::Arc<HashSet<u32>>,
     /// Functions only this module calls, and only directly: they take
     /// and return large aggregates by address (`rok_fn_types`).
-    local_abi: std::rc::Rc<HashSet<FunctionId>>,
+    local_abi: std::sync::Arc<HashSet<FunctionId>>,
     /// `reentrant_functions` of the module.
-    reentrant: HashSet<FunctionId>,
+    reentrant: std::sync::Arc<HashSet<FunctionId>>,
+    /// Emit codegen unit `.1` of a plan (`crate::units`), not the module.
+    pub(crate) unit: Option<(std::sync::Arc<crate::units::Core>, usize)>,
+    /// The unit holds the program's glue (statics, `main`, types).
+    pub(crate) glue: bool,
 }
 
 /// How a call reaches a module function.
@@ -245,6 +249,15 @@ fn alloc_fn(pw: u32) -> String {
     )
 }
 
+/// A module of `rok.alloc` (and what it calls) alone.
+pub fn alloc_module(target: &Target) -> String {
+    let decl = runtime_decl("rok_gc_alloc_slow", target).unwrap_or_default();
+    format!(
+        "{TBAA_DEFS}module {{\n  {}\n  {decl}\n}}\n",
+        alloc_fn(target.pointer_width)
+    )
+}
+
 /// LLVM attributes of runtime function `name`'s declaration: none
 /// unwinds (a Rust panic there aborts); the ones that end the process
 /// never return.
@@ -278,10 +291,12 @@ impl Emitter {
             debug: None,
             repl: None,
             data_layout: None,
-            quiet: std::rc::Rc::default(),
-            local_abi: std::rc::Rc::default(),
-            lists: std::rc::Rc::default(),
-            reentrant: HashSet::new(),
+            quiet: std::sync::Arc::default(),
+            local_abi: std::sync::Arc::default(),
+            lists: std::sync::Arc::default(),
+            reentrant: std::sync::Arc::default(),
+            unit: None,
+            glue: true,
         }
     }
 
@@ -310,8 +325,16 @@ impl Emitter {
     /// prebuilt dependencies, the copies of their code compiled here. In
     /// a program, everything not exported by name (a REPL cell's
     /// functions stay visible to later cells; the program's dispatcher
-    /// replaces a prebuilt library's weak one).
+    /// replaces a prebuilt library's weak one). A unit's function another
+    /// unit uses is not.
     fn private_copy(&self, f: &MirFunction) -> bool {
+        if self
+            .unit
+            .as_ref()
+            .is_some_and(|(c, _)| c.shared.contains(&f.id))
+        {
+            return false;
+        }
         match &self.link().lib {
             Some(lib) => !Link::owns(lib, f.path()) && f.facts.role != FnRole::AnyDispatcher,
             None => {
@@ -324,9 +347,11 @@ impl Emitter {
     }
 
     /// A static whose storage a prebuilt dependency's `.a` defines, or
-    /// (a REPL cell) an earlier cell (`ReplCell::statics`).
+    /// (a REPL cell) an earlier cell (`ReplCell::statics`), or (a unit)
+    /// the glue unit.
     fn prebuilt_static(&self, name: &str) -> bool {
-        self.link().in_prebuilt(name)
+        !self.glue
+            || self.link().in_prebuilt(name)
             || self
                 .repl
                 .as_ref()
@@ -335,9 +360,11 @@ impl Emitter {
 
     /// Linkage of a static this object defines: a prebuilt library
     /// exports its package's statics (its users declare them), a REPL
-    /// cell all of them (later cells use them).
+    /// cell all of them (later cells use them), the glue unit all of
+    /// them (the other units use them).
     fn static_linkage(&self, name: &str) -> &'static str {
         if self.repl.is_some()
+            || self.unit.is_some()
             || self
                 .link()
                 .lib
@@ -430,7 +457,7 @@ impl Emitter {
         abi
     }
 
-    pub fn emit_module(&mut self, module: &MirModule) {
+    pub fn emit_module(&mut self, module: &MirModule, sources: &SourceMap) {
         self.pkgs.link = module.link.clone();
         if let Some(di) = self.debug.as_mut() {
             di.struct_names.clone_from(&module.struct_names);
@@ -460,9 +487,21 @@ impl Emitter {
             }
         }
 
+        let unit = self.unit.clone();
+        if let Some((core, _)) = &unit {
+            core.hide_hash(&mut self.pkgs.link);
+        }
+        let view: Vec<&MirFunction> = unit.as_ref().map_or_else(
+            || module.functions.iter().collect(),
+            |(core, u)| core.view(module, *u),
+        );
+        let renamed = unit
+            .as_ref()
+            .map(|(c, _)| c.renamed.clone())
+            .unwrap_or_default();
         let mut fns: HashMap<FunctionId, FnSig> = HashMap::new();
         let mut c_entries: Vec<(FunctionId, FnAbi)> = Vec::new();
-        for f in &module.functions {
+        for &f in &view {
             let c = match f.facts.abi {
                 Abi::C { variadic } => {
                     let mut errs = Vec::new();
@@ -483,7 +522,7 @@ impl Emitter {
                 Abi::Rok => None,
             };
             let mut sig = FnSig {
-                name: crate::mangle::symbol_for(f, &self.pkgs),
+                name: crate::units::symbol(f, &self.pkgs, renamed.contains(&f.id)),
                 params: f.param_tys.clone(),
                 ret: f.ret_ty.clone(),
                 c: None,
@@ -495,7 +534,7 @@ impl Emitter {
                 Some(abi) => {
                     // The exported name (or `<body>.c`) is the C entry:
                     // C's calls come back into rok through it.
-                    sig.name = crate::mangle::mangled(f, &self.pkgs);
+                    sig.name = crate::units::body_symbol(f, &self.pkgs, renamed.contains(&f.id));
                     // A WIT export's name (`ns:pkg/iface#f`) is quoted.
                     let entry = f.facts.export_name.as_ref().map_or_else(
                         || format!("{}.c", sig.name),
@@ -517,26 +556,16 @@ impl Emitter {
                         ret.unwrap_or_else(|| "()".to_owned())
                     );
                     sig.c_entry = Some((entry, ty));
-                    c_entries.push((f.id, abi));
+                    if unit.as_ref().is_none_or(|(c, u)| c.defines(*u, f.id)) {
+                        c_entries.push((f.id, abi));
+                    }
                 }
                 _ => {}
             }
             fns.insert(f.id, sig);
         }
 
-        // A prebuilt library's static is initialized by its `.a`: the
-        // initializer need not be here.
-        self.pkgs.lazy_statics = module
-            .statics
-            .iter()
-            .filter_map(|s| {
-                let init = fns.get(&s.init_fn?).map(|f| f.name.clone());
-                let init = init.or_else(|| self.pkgs.link.in_prebuilt(&s.name).then(String::new));
-                Some((s.name.clone(), init?))
-            })
-            .collect();
-        self.quiet = std::rc::Rc::new(quiet_functions(module, &self.pkgs, &self.target));
-        self.lists = std::rc::Rc::new(
+        self.lists = std::sync::Arc::new(
             module
                 .struct_names
                 .iter()
@@ -544,8 +573,29 @@ impl Emitter {
                 .map(|(id, _)| *id)
                 .collect(),
         );
-        self.reentrant = reentrant_functions(module);
-        self.local_abi = std::rc::Rc::new(self.local_abi_functions(module, &fns));
+        if let Some((core, _)) = &unit {
+            // The plan's whole-program analyses.
+            self.pkgs.lazy_statics.clone_from(&core.lazy_statics);
+            self.quiet = core.quiet.clone();
+            self.reentrant = core.reentrant.clone();
+            self.local_abi = core.local_abi.clone();
+        } else {
+            // A prebuilt library's static is initialized by its `.a`: the
+            // initializer need not be here.
+            self.pkgs.lazy_statics = module
+                .statics
+                .iter()
+                .filter_map(|s| {
+                    let init = fns.get(&s.init_fn?).map(|f| f.name.clone());
+                    let init =
+                        init.or_else(|| self.pkgs.link.in_prebuilt(&s.name).then(String::new));
+                    Some((s.name.clone(), init?))
+                })
+                .collect();
+            self.quiet = std::sync::Arc::new(quiet_functions(module, &self.pkgs, &self.target));
+            self.reentrant = std::sync::Arc::new(reentrant_functions(module));
+            self.local_abi = std::sync::Arc::new(self.local_abi_functions(module, &fns));
+        }
 
         self.out.push_str("module");
         let mut attrs = Vec::new();
@@ -560,11 +610,25 @@ impl Emitter {
             let _ = write!(self.out, " attributes {{{}}}", attrs.join(", "));
         }
         self.out.push_str(" {\n");
+        self.emit_functions(module, sources, &view, &fns, &c_entries);
+        self.emit_rest(module, &view, &fns);
+    }
+
+    /// The functions of `view` (a unit's other functions declared) and
+    /// the C entries.
+    fn emit_functions(
+        &mut self,
+        module: &MirModule,
+        sources: &SourceMap,
+        view: &[&MirFunction],
+        fns: &HashMap<FunctionId, FnSig>,
+        c_entries: &[(FunctionId, FnAbi)],
+    ) {
+        let unit = self.unit.clone();
         // An `extern "C"` declaration of a symbol this module defines
         // (`#[export_name]`, spec 9.5.8) is the same function: no second
         // `func.func`.
-        let defined: HashSet<&str> = module
-            .functions
+        let defined: HashSet<&str> = view
             .iter()
             .filter(|f| f.facts.linkage == Linkage::Defined)
             .flat_map(|f| {
@@ -576,22 +640,49 @@ impl Emitter {
             })
             .flatten()
             .collect();
-        for f in &module.functions {
-            if f.facts.linkage != Linkage::Defined && defined.contains(fns[&f.id].name.as_str()) {
+        // One declaration per symbol: extern functions may share one
+        // (`#[link_name]`).
+        let mut declared: HashSet<&str> = HashSet::new();
+        for &f in view {
+            let sym = fns[&f.id].name.as_str();
+            if f.facts.linkage != Linkage::Defined
+                && (defined.contains(sym)
+                    || (f.facts.linkage == Linkage::Extern && !declared.insert(sym)))
+            {
                 continue;
             }
-            self.emit_function(f, &fns);
+            match &unit {
+                Some((core, u))
+                    if !core.defines(*u, f.id) && f.facts.linkage == Linkage::Defined =>
+                {
+                    self.declare_unit_function(&fns[&f.id]);
+                }
+                _ => self.emit_function(f, fns, sources),
+            }
         }
-        for (id, abi) in &c_entries {
+        for (id, abi) in c_entries {
             let f = module.functions.iter().find(|f| f.id == *id);
             let exported = f.is_some_and(|f| f.facts.export_name.is_some());
+            // Another unit may take its address.
+            let shared = unit.as_ref().is_some_and(|(c, _)| c.shared.contains(id));
             let span = f.map_or(Span::DUMMY, |f| f.span);
-            self.emit_c_entry(&fns[id], abi, exported, span);
+            self.emit_c_entry(&fns[id], abi, exported, shared, span);
         }
+    }
+
+    /// `main`'s wrapper, the GC registration and the statics (a unit's
+    /// glue), the runtime declarations and the string literals.
+    fn emit_rest(
+        &mut self,
+        module: &MirModule,
+        view: &[&MirFunction],
+        fns: &HashMap<FunctionId, FnSig>,
+    ) {
         if let Some(m) = module
             .functions
             .iter()
             .find(|f| f.facts.role == FnRole::Main)
+            .filter(|_| self.glue)
         {
             let symbol = fns[&m.id].name.clone();
             if self.repl.is_some() {
@@ -614,18 +705,20 @@ impl Emitter {
                 self.out.push_str(&text);
             }
         }
-        self.emit_gc_support(module);
+        if self.glue {
+            self.emit_gc_support(module);
+        }
         self.emit_static_globals(module);
         // One declaration per runtime symbol, unless the program declares
         // it itself.
-        let declared: HashSet<&str> = module
-            .functions
+        let declared: HashSet<&str> = view
             .iter()
             .filter(|f| f.facts.linkage == Linkage::Extern)
             .map(|f| f.name.as_str())
             .collect();
         // wasm32 defines `rok_init_once` beside the main wrapper.
         let main_here = self.repl.is_none()
+            && self.glue
             && module
                 .functions
                 .iter()
@@ -734,7 +827,14 @@ impl Emitter {
 
     fn emit_static_globals(&mut self, module: &MirModule) {
         let pw = self.pw();
+        let unit = self.unit.clone();
         for s in &module.statics {
+            // A unit declares the statics it uses (the glue defines them).
+            if let Some((core, u)) = &unit {
+                if !self.glue && !core.statics[*u].contains(&s.name) {
+                    continue;
+                }
+            }
             let ty_str = mlir_type(&s.ty, &self.target);
             let constness = if s.is_mut { "" } else { "constant " };
             let sym = self.pkgs.static_sym(&s.name);
@@ -763,7 +863,7 @@ impl Emitter {
                         self.out,
                         "  llvm.mlir.global external @{sym}.state() {{addr_space = 0 : i32}} : i8"
                     );
-                    if self.link().in_prebuilt(&s.name) {
+                    if self.link().in_prebuilt(&s.name) || !self.glue {
                         let _ = writeln!(self.out, "  func.func private @{sym}.init()");
                     } else {
                         self.emit_lazy_init(&s.name, &sym, &ty_str, &init, false);
@@ -781,11 +881,12 @@ impl Emitter {
             }
             let linkage = self.static_linkage(&s.name);
             if let Some(init) = self.pkgs.lazy_statics.get(&s.name).cloned() {
-                let export = self
-                    .link()
-                    .lib
-                    .as_deref()
-                    .is_some_and(|l| Link::owns(l, &s.name));
+                let export = unit.is_some()
+                    || self
+                        .link()
+                        .lib
+                        .as_deref()
+                        .is_some_and(|l| Link::owns(l, &s.name));
                 self.emit_lazy_static(&s.name, &sym, &ty_str, &init, linkage, export);
                 continue;
             }
@@ -917,7 +1018,12 @@ impl Emitter {
         }
     }
 
-    fn emit_function(&mut self, f: &MirFunction, fns: &HashMap<FunctionId, FnSig>) {
+    fn emit_function(
+        &mut self,
+        f: &MirFunction,
+        fns: &HashMap<FunctionId, FnSig>,
+        sources: &SourceMap,
+    ) {
         let sig = &fns[&f.id];
         // A prebuilt function with its body here is a copy for the
         // optimizer to inline (`HirInput::inline_prebuilt`).
@@ -1018,7 +1124,7 @@ impl Emitter {
         self.out.push_str(" {\n");
 
         let str_globals = std::mem::take(&mut self.str_globals);
-        let mut emit = FnEmit::new(f, &self.target, fns, str_globals, &self.pkgs);
+        let mut emit = FnEmit::new(f, &self.target, fns, str_globals, &self.pkgs, sources);
         emit.quiet = self.quiet.clone();
         emit.lists = self.lists.clone();
         emit.local_fns = self.local_abi.clone();
@@ -1080,12 +1186,36 @@ impl Emitter {
         self.out.push('\n');
     }
 
+    /// A function another unit defines: its rok body (spec 8.6.6's
+    /// convention: a function units share is never local), and its C
+    /// entry, which a function value may take.
+    fn declare_unit_function(&mut self, sig: &FnSig) {
+        let (params, ret) = rok_fn_types(&sig.params, &sig.ret, &self.target, false);
+        let ret = ret.map_or_else(String::new, |r| format!(" -> {r}"));
+        let _ = writeln!(
+            self.out,
+            "  func.func private @{}({}){ret}",
+            sig.name,
+            params.join(", ")
+        );
+        if let Some((entry, ty)) = &sig.c_entry {
+            let (params, ret) = ty.split_once(" -> ").unwrap_or((ty, "()"));
+            let ret = if ret == "()" {
+                String::new()
+            } else {
+                format!(" -> {ret}")
+            };
+            let _ = writeln!(self.out, "  func.func private @{entry}{params}{ret}");
+        }
+    }
+
     /// The C ABI entry of an `extern "C" fn` definition `sig` (spec
     /// 8.6.3): takes the arguments as C passes them (coerced, by
     /// pointer, `sret`), calls the rok body with the values, returns
     /// the result the C way. Exported under `#[export_name]`, else
-    /// internal (C gets it as a function pointer).
-    fn emit_c_entry(&mut self, sig: &FnSig, abi: &FnAbi, exported: bool, span: Span) {
+    /// internal (C gets it as a function pointer) unless `shared` with
+    /// another unit.
+    fn emit_c_entry(&mut self, sig: &FnSig, abi: &FnAbi, exported: bool, shared: bool, span: Span) {
         let Some((entry, _)) = &sig.c_entry else {
             return;
         };
@@ -1102,7 +1232,7 @@ impl Emitter {
                 "",
                 format!(r#" attributes {{passthrough = [["wasm-export-name", "{entry}"]]}}"#),
             )
-        } else if exported {
+        } else if exported || shared {
             ("", String::new())
         } else {
             (
@@ -1370,6 +1500,8 @@ impl Emitter {
 
 struct FnEmit<'a> {
     f: &'a MirFunction,
+    /// The compile's source files (panic locations).
+    sources: &'a SourceMap,
     target: &'a Target,
     /// `target.pointer_width`.
     pw: u32,
@@ -1447,11 +1579,11 @@ struct FnEmit<'a> {
     /// Position of the last `Statement::Loc`: a failed check reports it.
     at: rokc_diagnostic::Span,
     /// Lent `Emitter::quiet`.
-    quiet: std::rc::Rc<HashSet<FunctionId>>,
+    quiet: std::sync::Arc<HashSet<FunctionId>>,
     /// Lent `Emitter::lists`.
-    lists: std::rc::Rc<HashSet<u32>>,
+    lists: std::sync::Arc<HashSet<u32>>,
     /// Lent `Emitter::local_abi`.
-    local_fns: std::rc::Rc<HashSet<FunctionId>>,
+    local_fns: std::sync::Arc<HashSet<FunctionId>>,
     /// This function is in `local_fns`.
     local_abi: bool,
     /// In `Emitter::reentrant`: polls on entry.
@@ -1705,6 +1837,7 @@ impl<'a> FnEmit<'a> {
         fns: &'a HashMap<FunctionId, FnSig>,
         str_globals: std::collections::BTreeMap<String, String>,
         pkgs: &'a crate::mangle::Pkgs,
+        sources: &'a SourceMap,
     ) -> Self {
         // Block params are SSA values; everything else gets a stack slot.
         let mut block_param_set: HashSet<u32> = HashSet::new();
@@ -1740,6 +1873,7 @@ impl<'a> FnEmit<'a> {
             gc_param_slots: HashMap::new(),
             next_check: 0,
             pkgs,
+            sources,
             overflow_checks: true,
             gc_type_base: USER_TYPE_BASE,
             back_edges: rokc_mir::back_edges(f),
@@ -1758,10 +1892,10 @@ impl<'a> FnEmit<'a> {
             entry_allocas: String::new(),
             dbg: None,
             dbg_vars: Vec::new(),
-            quiet: std::rc::Rc::default(),
-            local_fns: std::rc::Rc::default(),
+            quiet: std::sync::Arc::default(),
+            local_fns: std::sync::Arc::default(),
             local_abi: false,
-            lists: std::rc::Rc::default(),
+            lists: std::sync::Arc::default(),
             entry_poll: true,
             tls: HashMap::new(),
         }
@@ -4260,7 +4394,7 @@ impl<'a> FnEmit<'a> {
             format!("%arg{}", self.f.params.len() - 1 + first)
         } else {
             let at = self.fresh_value();
-            self.str_literal_into(&at, &rokc_diagnostic::location(self.at));
+            self.str_literal_into(&at, &self.sources.location(self.at));
             at
         };
         let (s, s_ty) = self.runtime_str(&s);

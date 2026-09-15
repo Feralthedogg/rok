@@ -927,6 +927,67 @@ pub fn block_on_try<T, E>(fut: TryAsyncFuture<T, E>) throws (E) -> T {
     }
 }
 
+// ---- a host-driven event loop ----
+
+// A WebAssembly component's async exports (stdlib 1.8) run on the host's
+// event loop: each export call and event enters, runs what is runnable
+// and returns to the host, which calls back with the next event. The
+// thread works as one guest worker for all of them, kept between turns.
+
+static HOST: GcBuf<Worker | none> = unsafe { buf_new(1) };
+
+/// This thread works as the host loop's guest worker (`host_leave`
+/// ends it): tasks spawned with `spawn_local` belong to that worker.
+pub fn host_enter() {
+    unsafe {
+        let pool = executor();
+        if !pool.solo {
+            panic("task::host_enter: only a solo executor (no threads) runs on a host's loop");
+        }
+        let w = match HOST[0] {
+            w: Worker => w,
+            none => {
+                let w = new_worker(pool, 0, true, false);
+                HOST[0] = w;
+                w
+            }
+        };
+        set_current(w);
+    }
+}
+
+pub fn host_leave() {
+    unsafe { rok_task_worker_clear() };
+}
+
+/// One turn of the host's loop (inside `host_enter`): every runnable
+/// task and due timer, until none is left, sleeping until the next timer
+/// while `may_sleep()`; then the nanoseconds to that timer (-1: none).
+pub fn host_run(may_sleep: fn() -> bool) -> i64 {
+    let w = current_worker();
+    let pool = w.pool;
+    loop {
+        if let t: TaskRef = find_task(w) {
+            run(t);
+            continue;
+        }
+        // Ready sockets, without waiting.
+        solo_wait(0);
+        if let t: TaskRef = find_task(w) {
+            run(t);
+            continue;
+        }
+        let next = fire_timers(pool);
+        if next == 0 {
+            continue;
+        }
+        if next < 0 || !may_sleep() {
+            return next;
+        }
+        solo_wait(next);
+    }
+}
+
 /// Workers of the executor this thread runs tasks on (1 outside one,
 /// and without threads, where the one thread runs every task).
 pub fn workers() -> usize {

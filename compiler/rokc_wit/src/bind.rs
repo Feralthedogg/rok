@@ -6,12 +6,16 @@
 //! what the result was lowered into).
 //!
 //! Mapping: `record` → `struct`, `variant` / `enum` → `enum`, `flags` →
-//! a `struct` of `bool`s, `option<T>` → `T | none`, `result<T, E>` →
+//! a `struct` of `bool`s, `option<T>` → `T?`, `result<T, E>` →
 //! `Result<T, E>` (a function returning one `throws (E) -> T`),
-//! `tuple` → tuple, `list<T>` → `List<T>`, `string` → `str`, `sN` /
-//! `uN` → `iN` / `uN`. An imported resource is a struct over its handle
-//! (`Drop` drops it); an exported one is the user's struct, kept in a
-//! table while the host holds a handle to it.
+//! `tuple` → tuple, `list<T>` → `List<T>`, `list<T, N>` → `[T; N]`,
+//! `string` → `str`, `sN` / `uN` → `iN` / `uN`, `future<T>` →
+//! `AsyncFuture<T>`, `stream<T>` → a channel `Receiver<T>`,
+//! `error-context` → `ErrorContext`. An imported resource is a struct
+//! over its handle (`Drop` drops it); an exported one is the user's
+//! struct, kept in a table while the host holds a handle to it. An
+//! `async func` is an `async fn` both ways (the async canonical ABI:
+//! imports lowered async, exports lifted with a callback).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -27,15 +31,17 @@ use crate::{Loaded, Request};
 const W: &str = "rok::bare::ffi::wit";
 const LIST: &str = "rok::core::collections::list::List";
 const RESULT: &str = "rok::core::error::Result";
+const FUTURE: &str = "rok::core::future::AsyncFuture";
+const RECEIVER: &str = "rok::core::channel::Receiver";
+
+/// Most flat parameters of an async-lowered import.
+const MAX_FLAT_ASYNC_PARAMS: usize = 4;
 
 /// What [`bind`] makes of the `ffi::wit` items of one module.
 #[derive(Clone, Debug, Default)]
 pub struct Bindings {
     /// rok items to add to the module the `ffi::wit` items are in.
     pub source: String,
-    /// The core imports the generated `extern "C"` functions stand for:
-    /// `(rok name, module, name)`.
-    pub imports: Vec<(String, String, String)>,
     /// Symbols the core module must export.
     pub exports: Vec<String>,
     /// The component world's `import` / `export` / `include` lines.
@@ -48,6 +54,10 @@ enum View {
     Option(Type),
     Result(Option<Type>, Option<Type>),
     Tuple(Vec<Type>),
+    FixedList(Type, u32),
+    Future,
+    Stream,
+    ErrorContext,
     Record(TypeId, Vec<(String, Type)>),
     Variant(TypeId, Vec<(String, Option<Type>)>),
     Enum(TypeId, usize),
@@ -63,10 +73,28 @@ struct Gen<'a> {
     exported: BTreeSet<IfaceId>,
     /// Generated items by module path (below `base`).
     mods: BTreeMap<Vec<String>, String>,
-    /// `extern "C"` declarations by module path.
-    externs: BTreeMap<Vec<String>, BTreeSet<String>>,
-    imports: Vec<(String, String, String)>,
+    /// `extern "C"` declarations by module path and core module.
+    externs: Externs,
     exports: Vec<String>,
+    /// The function being bound: what its futures' and streams' built-ins
+    /// are named after.
+    cur: Option<FnCtx>,
+    /// Payload ops functions made.
+    ops: BTreeSet<String>,
+    /// The user's exported resource types (by rok name) that implement
+    /// `Drop`.
+    drops: BTreeSet<String>,
+}
+
+/// The function whose built-ins a future or stream type uses.
+#[derive(Clone)]
+struct FnCtx {
+    /// The core module (`[export]` prefixed for an export's).
+    module: String,
+    /// The function's name in the canonical ABI.
+    name: String,
+    /// Its futures and streams, in `wit-parser`'s order.
+    payloads: Vec<Type>,
 }
 
 /// rok name of a WIT identifier: `snake_case`, a keyword escaped with
@@ -156,6 +184,10 @@ impl Gen<'_> {
             Type::Option(e) => View::Option((**e).clone()),
             Type::Result(a, b) => View::Result(a.as_deref().cloned(), b.as_deref().cloned()),
             Type::Tuple(ts) => View::Tuple(ts.clone()),
+            Type::FixedList(e, n) => View::FixedList((**e).clone(), *n),
+            Type::Future(_) => View::Future,
+            Type::Stream(_) => View::Stream,
+            Type::ErrorContext => View::ErrorContext,
             Type::Own(id) => View::Own(self.r.dealias(*id)),
             Type::Borrow(id) => View::Borrow(self.r.dealias(*id)),
             Type::Id(id) => {
@@ -234,15 +266,12 @@ impl Gen<'_> {
             }
             .to_owned(),
             Type::List(e) => format!("{LIST}<{}>", self.rty(e)?),
-            Type::Option(e) => {
-                if matches!(self.view(e), View::Option(_)) {
-                    return Err(
-                        "`option<option<T>>` has no rok type (`T | none | none` is `T | none`)"
-                            .into(),
-                    );
-                }
-                format!("{} | none", self.rty(e)?)
-            }
+            // `T?` keeps a layer for a `T` that is optional itself.
+            Type::Option(e) => format!("{}?", self.rty(e)?),
+            Type::FixedList(e, n) => format!("[{}; {n}]", self.rty(e)?),
+            Type::Future(e) => format!("{FUTURE}<{}>", self.payload_ty(e.as_deref())?),
+            Type::Stream(e) => format!("{RECEIVER}<{}>", self.payload_ty(e.as_deref())?),
+            Type::ErrorContext => format!("{W}::ErrorContext"),
             Type::Result(a, b) => format!(
                 "{RESULT}<{}, {}>",
                 a.as_deref()
@@ -265,6 +294,11 @@ impl Gen<'_> {
         })
     }
 
+    /// A future's or stream's value type (`()` without one).
+    fn payload_ty(&self, t: Option<&Type>) -> Result<String, String> {
+        t.map_or_else(|| Ok("()".into()), |t| self.rty(t))
+    }
+
     /// `t` holds a resource (no derives then: the user's types need not
     /// have them).
     fn has_resource(&self, t: &Type, depth: usize) -> bool {
@@ -272,9 +306,14 @@ impl Gen<'_> {
             return false;
         }
         match self.view(t) {
-            View::Own(_) | View::Borrow(_) => true,
+            // No derives either for what holds a future or stream.
+            View::Own(_) | View::Borrow(_) | View::Future | View::Stream | View::ErrorContext => {
+                true
+            }
             View::Prim(_) | View::Enum(..) | View::Flags(..) => false,
-            View::List(e) | View::Option(e) => self.has_resource(&e, depth + 1),
+            View::List(e) | View::Option(e) | View::FixedList(e, _) => {
+                self.has_resource(&e, depth + 1)
+            }
             View::Result(a, b) => [a, b]
                 .iter()
                 .flatten()
@@ -293,10 +332,15 @@ impl Gen<'_> {
     fn has_heap(&self, t: &Type) -> bool {
         match self.view(t) {
             View::Prim(Prim::String) | View::List(_) => true,
-            View::Prim(_) | View::Enum(..) | View::Flags(..) | View::Own(_) | View::Borrow(_) => {
-                false
-            }
-            View::Option(e) => self.has_heap(&e),
+            View::Prim(_)
+            | View::Enum(..)
+            | View::Flags(..)
+            | View::Own(_)
+            | View::Borrow(_)
+            | View::Future
+            | View::Stream
+            | View::ErrorContext => false,
+            View::Option(e) | View::FixedList(e, _) => self.has_heap(&e),
             View::Result(a, b) => [a, b].iter().flatten().any(|t| self.has_heap(t)),
             View::Tuple(ts) => ts.iter().any(|t| self.has_heap(t)),
             View::Record(_, fs) => fs.iter().any(|(_, t)| self.has_heap(t)),
@@ -330,11 +374,12 @@ impl Gen<'_> {
         self.externs
             .entry(m.to_vec())
             .or_default()
-            .insert(format!("    fn {id}({}){ret};\n", ps.join(", ")));
-        if !self.imports.iter().any(|(n, _, _)| *n == id) {
-            self.imports
-                .push((id.clone(), module.to_owned(), name.to_owned()));
-        }
+            .entry(module.to_owned())
+            .or_default()
+            .insert(format!(
+                "    #[link_name = \"{name}\"]\n    fn {id}({}){ret};\n",
+                ps.join(", ")
+            ));
         id
     }
 
@@ -446,7 +491,7 @@ impl Gen<'_> {
                 )
             }
             TypeKind::Resource => {
-                let (.., drop) = self.resource_fns(id);
+                let (_, _, drop, _) = self.resource_fns(id);
                 format!(
                     "pub struct {name} {{\n    pub(pkg) handle: {W}::Handle;\n}}\n\
                      impl rok::core::marker::Drop for {name} {{\n    fn drop(ref self) {{\n        \
@@ -526,6 +571,24 @@ impl Fx<'_, '_> {
                 }
                 out
             }
+            View::FixedList(e, n) => {
+                let mut out = Vec::new();
+                for i in 0..n {
+                    let x = self.let_(&self.g.rty(&e)?, &format!("{v}[{i}]"));
+                    out.extend(self.lower(&e, &x)?);
+                }
+                out
+            }
+            View::Future | View::Stream => {
+                let ops = self.g.ops_fn(t)?;
+                let f = if matches!(t, Type::Future(_)) {
+                    "future_out"
+                } else {
+                    "stream_out"
+                };
+                vec![self.let_("i32", &format!("{W}::{f}({ops}(), {v})"))]
+            }
+            View::ErrorContext => vec![self.let_("i32", &format!("{v}.raw()"))],
             View::Flags(_, names) => vec![self.flag_bits(&names, v)],
             View::Enum(..) => vec![self.let_("i32", &format!("{v} as i32"))],
             View::Option(_) | View::Result(..) | View::Variant(..) => self.lower_variant(t, v)?,
@@ -538,6 +601,8 @@ impl Fx<'_, '_> {
                 }
             }
             View::Borrow(res) => {
+                // An import's types are imports: its `borrow<r>` is never
+                // the component's own exported `r`.
                 if self.g.ours(res) {
                     return Err(format!(
                         "a `borrow<{}>` of a resource this component exports cannot be passed to an import",
@@ -547,6 +612,31 @@ impl Fx<'_, '_> {
                 vec![self.let_("i32", &format!("{v}.handle.get()"))]
             }
         })
+    }
+
+    /// The values of `f`'s parameters an export receives: core
+    /// parameters `names`, or a block at `a0` (freed).
+    fn lift_params(
+        &mut self,
+        f: &Function,
+        pmem: bool,
+        names: Vec<String>,
+    ) -> Result<Vec<String>, String> {
+        let r = self.g.r;
+        let mut vals = Vec::new();
+        if pmem {
+            let types: Vec<Type> = f.params.iter().map(|(_, t)| t.clone()).collect();
+            for (t, off) in types.iter().zip(abi::field_offsets(r, &types)) {
+                vals.push(self.load(t, &format!("a0 + {off}i32"))?);
+            }
+            self.line(&format!("{W}::free(a0);"));
+        } else {
+            let mut it = names.into_iter();
+            for (_, t) in &f.params {
+                vals.push(self.lift(t, &mut it)?);
+            }
+        }
+        Ok(vals)
     }
 
     fn flag_bits(&mut self, names: &[String], v: &str) -> String {
@@ -687,6 +777,30 @@ impl Fx<'_, '_> {
                     &format!("{} {{ {} }}", self.g.type_path(id), parts.join(", ")),
                 )
             }
+            View::FixedList(e, n) => {
+                let mut parts = Vec::new();
+                for _ in 0..n {
+                    parts.push(self.lift(&e, vals)?);
+                }
+                self.let_(&self.g.rty(t)?, &format!("[{}]", parts.join(", ")))
+            }
+            View::Future | View::Stream => {
+                let h = next();
+                let ops = self.g.ops_fn(t)?;
+                let f = if matches!(t, Type::Future(_)) {
+                    "future_in"
+                } else {
+                    "stream_in"
+                };
+                self.let_(&self.g.rty(t)?, &format!("{W}::{f}({ops}(), {h})"))
+            }
+            View::ErrorContext => {
+                let h = next();
+                self.let_(
+                    &self.g.rty(t)?,
+                    &format!("{W}::ErrorContext::from_raw({h})"),
+                )
+            }
             View::Flags(id, names) => {
                 let x = next();
                 self.flags_value(id, &names, &x)
@@ -745,7 +859,10 @@ impl Fx<'_, '_> {
             let (_, rep, drop, table) = self.g.resource_fns(res);
             if own {
                 let r = self.let_("i32", &format!("{rep}({h})"));
+                // Out of the table first: the handle's drop runs the
+                // `[dtor]`, which then finds no value to drop.
                 let v = self.let_(&ty, &format!("{table}.get({r})"));
+                self.line(&format!("{table}.take({r});"));
                 self.line(&format!("{drop}({h});"));
                 v
             } else {
@@ -879,6 +996,18 @@ impl Fx<'_, '_> {
                     self.store(ft, &f, &format!("{a} + {off}i32"))?;
                 }
             }
+            View::FixedList(e, n) => {
+                let size = abi::size(self.g.r, &e);
+                let i = self.tmp();
+                self.line(&format!("for {i} in 0..{n}usize {{"));
+                let x = self.let_(&self.g.rty(&e)?, &format!("{v}[{i}]"));
+                self.store(&e, &x, &format!("{a} + ({i} as i32) * {size}i32"))?;
+                self.line("}");
+            }
+            View::Future | View::Stream | View::ErrorContext => {
+                let h = self.lower(t, v)?.remove(0);
+                self.line(&format!("{W}::store_i32({a}, {h});"));
+            }
             View::Flags(_, names) => {
                 let x = self.flag_bits(&names, v);
                 match abi::flags_size(names.len()) {
@@ -961,6 +1090,21 @@ impl Fx<'_, '_> {
                     &self.g.rty(t)?,
                     &format!("{} {{ {} }}", self.g.type_path(id), parts.join(", ")),
                 )
+            }
+            View::FixedList(e, n) => {
+                let size = abi::size(self.g.r, &e);
+                let first = self.load(&e, a)?;
+                let arr = self.let_(&self.g.rty(t)?, &format!("[{first}; {n}]"));
+                let i = self.tmp();
+                self.line(&format!("for {i} in 1..{n}usize {{"));
+                let x = self.load(&e, &format!("{a} + ({i} as i32) * {size}i32"))?;
+                self.line(&format!("{arr}[{i}] = {x};"));
+                self.line("}");
+                arr
+            }
+            View::Future | View::Stream | View::ErrorContext => {
+                let h = self.let_("i32", &format!("{W}::load_i32({a})"));
+                self.lift(t, &mut vec![h].into_iter())?
             }
             View::Flags(id, names) => {
                 let x = match abi::flags_size(names.len()) {
@@ -1052,8 +1196,30 @@ impl Fx<'_, '_> {
                 self.line("_ => {}");
                 self.line("}");
             }
-            View::Enum(..) | View::Flags(..) | View::Own(_) | View::Borrow(_) => {}
+            View::FixedList(e, n) => {
+                let size = abi::size(self.g.r, &e);
+                let i = self.tmp();
+                self.line(&format!("for {i} in 0..{n}i32 {{"));
+                self.free_mem(&e, &format!("{a} + {i} * {size}i32"));
+                self.line("}");
+            }
+            View::Enum(..)
+            | View::Flags(..)
+            | View::Own(_)
+            | View::Borrow(_)
+            | View::Future
+            | View::Stream
+            | View::ErrorContext => {}
         }
+    }
+}
+
+/// The call of the user's function `call` with `vals` (a method's
+/// first value its receiver).
+fn user_call(f: &Function, call: &str, vals: &[String]) -> String {
+    match f.kind {
+        FnKind::Method(_) => format!("{}.{call}({})", vals[0], vals[1..].join(", ")),
+        _ => format!("{call}({})", vals.join(", ")),
     }
 }
 
@@ -1084,16 +1250,227 @@ fn throwing(t: Option<&Type>) -> Option<(Option<Type>, Type)> {
 }
 
 impl Gen<'_> {
+    /// The futures and streams in `t`, in `wit-parser`'s order (each one
+    /// after those of its value type), through aliases.
+    fn payloads(&self, t: &Type, out: &mut Vec<Type>, depth: usize) {
+        if depth > 64 {
+            return;
+        }
+        match t {
+            Type::Prim(_) | Type::Own(_) | Type::Borrow(_) | Type::ErrorContext => {}
+            Type::List(e) | Type::Option(e) | Type::FixedList(e, _) => {
+                self.payloads(e, out, depth + 1);
+            }
+            Type::Result(a, b) => {
+                for x in [a, b].into_iter().flatten() {
+                    self.payloads(x, out, depth + 1);
+                }
+            }
+            Type::Tuple(ts) => {
+                for x in ts {
+                    self.payloads(x, out, depth + 1);
+                }
+            }
+            Type::Future(e) | Type::Stream(e) => {
+                if let Some(e) = e {
+                    self.payloads(e, out, depth + 1);
+                }
+                out.push(t.clone());
+            }
+            Type::Id(id) => match &self.r.types[*id].kind {
+                TypeKind::Alias(a) => self.payloads(a, out, depth + 1),
+                TypeKind::Record(fs) => {
+                    for (_, x) in fs {
+                        self.payloads(x, out, depth + 1);
+                    }
+                }
+                TypeKind::Variant(cs) => {
+                    for x in cs.iter().filter_map(|(_, t)| t.as_ref()) {
+                        self.payloads(x, out, depth + 1);
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+
+    /// `t` through its aliases.
+    fn unalias(&self, t: &Type) -> Type {
+        let mut t = t.clone();
+        loop {
+            let Type::Id(id) = &t else { return t };
+            match &self.r.types[*id].kind {
+                TypeKind::Alias(a) => t = a.clone(),
+                _ => return t,
+            }
+        }
+    }
+
+    /// Bind `f`, whose built-ins live in core module `module`, next.
+    fn set_ctx(&mut self, module: &str, f: &Function) {
+        let mut payloads = Vec::new();
+        for (_, t) in &f.params {
+            self.payloads(t, &mut payloads, 0);
+        }
+        if let Some(t) = &f.result {
+            self.payloads(t, &mut payloads, 0);
+        }
+        let payloads = payloads.iter().map(|t| self.unalias(t)).collect();
+        self.cur = Some(FnCtx {
+            module: module.to_owned(),
+            name: f.wit_name(self.r),
+            payloads,
+        });
+    }
+
+    /// The function giving the ops (`FutureOps` / `StreamOps`) of future
+    /// or stream type `t` of the function being bound: its path. The
+    /// built-ins are named after that function and `t`'s place in it.
+    fn ops_fn(&mut self, t: &Type) -> Result<String, String> {
+        let t = self.unalias(t);
+        let ctx = self
+            .cur
+            .clone()
+            .ok_or("a future or stream outside a function")?;
+        let idx = ctx
+            .payloads
+            .iter()
+            .position(|p| *p == t)
+            .ok_or("a future or stream not in its function's type")?;
+        let (kind, elem) = match &t {
+            Type::Future(e) => ("future", e.as_deref().cloned()),
+            Type::Stream(e) => ("stream", e.as_deref().cloned()),
+            _ => unreachable!("future or stream"),
+        };
+        let fname = &ctx.name;
+        let id = ident("wit_ops", &ctx.module, &format!("{kind}{idx}{fname}"));
+        let path = format!("{}::{id}", self.base);
+        if !self.ops.insert(id.clone()) {
+            return Ok(path);
+        }
+        let module = &ctx.module;
+        let new = self.extern_fn(
+            &[],
+            module,
+            &format!("[{kind}-new-{idx}]{fname}"),
+            &[],
+            Some(Flat::I64),
+        );
+        let future = kind == "future";
+        let rw: &[Flat] = if future {
+            &[Flat::I32; 2]
+        } else {
+            &[Flat::I32; 3]
+        };
+        let [read, write] = ["read", "write"].map(|op| {
+            self.extern_fn(
+                &[],
+                module,
+                &format!("[async-lower][{kind}-{op}-{idx}]{fname}"),
+                rw,
+                Some(Flat::I32),
+            )
+        });
+        let [dr, dw] = ["readable", "writable"].map(|end| {
+            self.extern_fn(
+                &[],
+                module,
+                &format!("[{kind}-drop-{end}-{idx}]{fname}"),
+                &[Flat::I32],
+                None,
+            )
+        });
+        let (ty, size, align, lift, lower) = match &elem {
+            None => (
+                "()".to_owned(),
+                0,
+                1,
+                "        ()\n".to_owned(),
+                String::new(),
+            ),
+            Some(e) => {
+                let ty = self.rty(e)?;
+                let mut fx = Fx {
+                    g: self,
+                    out: String::new(),
+                    n: 0,
+                };
+                let v = fx.load(e, "a")?;
+                let lift = format!("{}        {v}\n", fx.out);
+                let mut fx = Fx {
+                    g: self,
+                    out: String::new(),
+                    n: 0,
+                };
+                fx.store(e, "v", "a")?;
+                let lower = fx.out;
+                (ty, abi::size(self.r, e), abi::align(self.r, e), lift, lower)
+            }
+        };
+        let ops = if future { "FutureOps" } else { "StreamOps" };
+        let (rp, ra) = if future {
+            ("h: i32, a: i32", "h, a")
+        } else {
+            ("h: i32, a: i32, n: i32", "h, a, n")
+        };
+        let text = format!(
+            "pub(pkg) fn {id}() -> {W}::{ops}<{ty}> {{
+    {W}::{ops} {{
+        new: || -> i64 {{ unsafe {{ {new}() }} }},
+        read: |{rp}| -> i32 {{ unsafe {{ {read}({ra}) }} }},
+        write: |{rp}| -> i32 {{ unsafe {{ {write}({ra}) }} }},
+        drop_readable: |h: i32| {{ unsafe {{ {dr}(h); }} }},
+        drop_writable: |h: i32| {{ unsafe {{ {dw}(h); }} }},
+        size: {size}i32,
+        align: {align}i32,
+        lift: |a: i32| -> {ty} {{
+    unsafe {{
+{lift}    }}
+        }},
+        lower: |v: {ty}, a: i32, w_b: {W}::Blocks| {{
+    unsafe {{
+{lower}    }}
+        }},
+    }}
+}}
+"
+        );
+        self.push(&[], &text);
+        Ok(path)
+    }
+
     /// The rok function calling import `f` (`module` names its instance).
+    /// An `async func` is lowered async: the call starts a subtask the
+    /// function's future awaits; its arguments and result stay in memory
+    /// until it returned.
     fn import_fn(&mut self, m: &[String], module: &str, f: &Function) -> Result<String, String> {
         let r = self.r;
-        let (pflat, rflat, pmem, rmem) = core_sig(r, f);
+        self.set_ctx(module, f);
+        let (pflat, rflat, ..) = core_sig(r, f);
+        let max = if f.is_async {
+            MAX_FLAT_ASYNC_PARAMS
+        } else {
+            MAX_FLAT_PARAMS
+        };
+        let pmem = pflat.len() > max;
+        let rmem = (f.is_async && f.result.is_some()) || rflat.len() > MAX_FLAT_RESULTS;
         let mut cparams = if pmem { vec![Flat::I32] } else { pflat };
         if rmem {
             cparams.push(Flat::I32);
         }
-        let cret = if rmem { None } else { rflat.first().copied() };
-        let ext = self.extern_fn(m, module, &f.wit_name(r), &cparams, cret);
+        let cret = if f.is_async {
+            Some(Flat::I32)
+        } else if rmem {
+            None
+        } else {
+            rflat.first().copied()
+        };
+        let core = if f.is_async {
+            format!("[async-lower]{}", f.wit_name(r))
+        } else {
+            f.wit_name(r)
+        };
+        let ext = self.extern_fn(m, module, &core, &cparams, cret);
         let throws = throwing(f.result.as_ref());
         let ret = match (&throws, &f.result) {
             (Some((ok, err)), _) => {
@@ -1122,12 +1499,21 @@ impl Gen<'_> {
             FnKind::Constructor(_) => "new".to_owned(),
             _ => snake(&f.name),
         };
+        let rt = f.result.clone().unwrap_or(Type::Tuple(Vec::new()));
+        let mut pre = format!("        let w_b = {W}::Blocks::new();\n");
+        if rmem {
+            let _ = writeln!(
+                pre,
+                "        let w_ra: i32 = w_b.alloc({}i32, {}i32);",
+                abi::size(r, &rt),
+                abi::align(r, &rt)
+            );
+        }
         let mut fx = Fx {
             g: self,
             out: String::new(),
             n: 0,
         };
-        fx.line(&format!("let w_b = {W}::Blocks::new();"));
         let mut args = Vec::new();
         if pmem {
             let types: Vec<Type> = f.params.iter().map(|(_, t)| t.clone()).collect();
@@ -1149,26 +1535,28 @@ impl Gen<'_> {
                 args.extend(fx.lower(t, v)?);
             }
         }
-        let rt = f.result.clone();
-        let mut value = None;
         if rmem {
-            let rt = rt.as_ref().unwrap_or(&Type::Tuple(Vec::new())).clone();
-            let ra = fx.let_(
-                "i32",
-                &format!(
-                    "w_b.alloc({}i32, {}i32)",
-                    abi::size(r, &rt),
-                    abi::align(r, &rt)
-                ),
-            );
-            args.push(ra.clone());
-            fx.line(&format!("{ext}({});", args.join(", ")));
-            value = Some(fx.load(&rt, &ra)?);
-        } else if let (Some(rt), Some(cf)) = (&rt, cret) {
-            let x = fx.let_(cf.rok(), &format!("{ext}({})", args.join(", ")));
-            value = Some(fx.lift(rt, &mut vec![x].into_iter())?);
+            args.push("w_ra".to_owned());
+        }
+        let call = format!("{ext}({})", args.join(", "));
+        // The call's lines; then the result's.
+        let mut value = None;
+        let lowering = if f.is_async {
+            fx.line(&call);
+            std::mem::take(&mut fx.out)
         } else {
-            fx.line(&format!("{ext}({});", args.join(", ")));
+            if rmem {
+                fx.line(&format!("{call};"));
+            } else if let (Some(rt), Some(cf)) = (&f.result, cret) {
+                let x = fx.let_(cf.rok(), &call);
+                value = Some(fx.lift(rt, &mut vec![x].into_iter())?);
+            } else {
+                fx.line(&format!("{call};"));
+            }
+            String::new()
+        };
+        if rmem && f.result.is_some() {
+            value = Some(fx.load(&rt, "w_ra")?);
         }
         fx.line("w_b.free();");
         match (&throws, value) {
@@ -1182,16 +1570,33 @@ impl Gen<'_> {
             (_, Some(v)) => fx.line(&v),
             _ => {}
         }
-        let body = fx.out;
-        Ok(format!(
-            "    pub fn {name}({}){ret} {{\n    unsafe {{\n{body}    }}\n    }}\n",
-            params.join(", ")
-        ))
+        let lifting = fx.out;
+        let ps = params.join(", ");
+        Ok(if f.is_async {
+            format!(
+                "    pub async fn {name}({ps}){ret} {{\n{pre}        let w_st: i32 = unsafe {{\n{lowering}        }};\n        await {W}::subtask(w_st);\n        unsafe {{\n{lifting}        }}\n    }}\n"
+            )
+        } else {
+            format!(
+                "    pub fn {name}({ps}){ret} {{\n    unsafe {{\n{pre}{lifting}    }}\n    }}\n"
+            )
+        })
     }
 
-    /// The core export `name` running `f` through `call` (a path; for a
-    /// method, the method's name).
-    fn export_fn(&mut self, export: &str, f: &Function, call: &str) -> Result<(), String> {
+    /// The core export `export` running `f` through `call` (a path; for
+    /// a method, the method's name); its built-ins live in core module
+    /// `module` (`[export]..`).
+    fn export_fn(
+        &mut self,
+        export: &str,
+        module: &str,
+        f: &Function,
+        call: &str,
+    ) -> Result<(), String> {
+        self.set_ctx(module, f);
+        if f.is_async {
+            return self.export_async(export, module, f, call);
+        }
         let r = self.r;
         let (pflat, rflat, pmem, rmem) = core_sig(r, f);
         let cparams = if pmem { vec![Flat::I32] } else { pflat };
@@ -1208,23 +1613,8 @@ impl Gen<'_> {
         };
         fx.line(&format!("let w_b = {W}::Blocks::new();"));
         let names: Vec<String> = (0..cparams.len()).map(|i| format!("a{i}")).collect();
-        let mut vals = Vec::new();
-        if pmem {
-            let types: Vec<Type> = f.params.iter().map(|(_, t)| t.clone()).collect();
-            for (t, off) in types.iter().zip(abi::field_offsets(r, &types)) {
-                vals.push(fx.load(t, &format!("a0 + {off}i32"))?);
-            }
-            fx.line(&format!("{W}::free(a0);"));
-        } else {
-            let mut it = names.clone().into_iter();
-            for (_, t) in &f.params {
-                vals.push(fx.lift(t, &mut it)?);
-            }
-        }
-        let call = match f.kind {
-            FnKind::Method(_) => format!("{}.{call}({})", vals[0], vals[1..].join(", ")),
-            _ => format!("{call}({})", vals.join(", ")),
-        };
+        let vals = fx.lift_params(f, pmem, names.clone())?;
+        let call = user_call(f, call, &vals);
         let result = f.result.clone();
         let v = match (&result, throwing(result.as_ref())) {
             (Some(rt), Some(_)) => Some(fx.let_(
@@ -1287,6 +1677,102 @@ impl Gen<'_> {
         Ok(())
     }
 
+    /// An `async func` export, lifted with a callback: the call starts
+    /// the user's future on the host's event loop; the result goes back
+    /// through `task.return`.
+    fn export_async(
+        &mut self,
+        export: &str,
+        module: &str,
+        f: &Function,
+        call: &str,
+    ) -> Result<(), String> {
+        let r = self.r;
+        let (pflat, rflat, pmem, _) = core_sig(r, f);
+        let cparams = if pmem { vec![Flat::I32] } else { pflat };
+        let rmem = rflat.len() > MAX_FLAT_PARAMS;
+        let task_return = self.extern_fn(
+            &[],
+            module,
+            &format!("[task-return]{}", f.wit_name(r)),
+            &if rmem { vec![Flat::I32] } else { rflat },
+            None,
+        );
+        let id = ident("export", export, "");
+        let mut fx = Fx {
+            g: self,
+            out: String::new(),
+            n: 0,
+        };
+        fx.line(&format!("{W}::async_enter();"));
+        let names: Vec<String> = (0..cparams.len()).map(|i| format!("a{i}")).collect();
+        let vals = fx.lift_params(f, pmem, names.clone())?;
+        let mut fut = user_call(f, call, &vals);
+        if throwing(f.result.as_ref()).is_some() {
+            fut = format!("{W}::catching_async({fut})");
+        }
+        let body = fx.out;
+        let mut gx = Fx {
+            g: self,
+            out: String::new(),
+            n: 0,
+        };
+        gx.line(&format!("let w_b = {W}::Blocks::new();"));
+        let mut args = Vec::new();
+        let rty = match &f.result {
+            Some(rt) if rmem => {
+                let ra = gx.let_(
+                    "i32",
+                    &format!(
+                        "w_b.alloc({}i32, {}i32)",
+                        abi::size(r, rt),
+                        abi::align(r, rt)
+                    ),
+                );
+                gx.store(rt, "w_r", &ra)?;
+                args.push(ra);
+                gx.g.rty(rt)?
+            }
+            Some(rt) => {
+                args = gx.lower(rt, "w_r")?;
+                gx.g.rty(rt)?
+            }
+            None => "()".to_owned(),
+        };
+        gx.line(&format!("{task_return}({});", args.join(", ")));
+        gx.line("w_b.free();");
+        let ret_body = gx.out;
+        let ps: Vec<String> = names
+            .iter()
+            .zip(&cparams)
+            .map(|(n, f)| format!("{n}: {}", f.rok()))
+            .collect();
+        let lift = format!("[async-lift]{export}");
+        let callback = format!("[callback][async-lift]{export}");
+        let cid = ident("callback", export, "");
+        let text = format!(
+            "#[export_name(\"{lift}\")]
+extern \"C\" fn {id}({}) -> i32 {{
+    unsafe {{
+{body}        {W}::async_start({fut}, |w_r: {rty}| {{
+    unsafe {{
+{ret_body}    }}
+        }})
+    }}
+}}
+#[export_name(\"{callback}\")]
+extern \"C\" fn {cid}(a0: i32, a1: i32, a2: i32) -> i32 {{
+    {W}::async_event(a0, a1, a2)
+}}
+",
+            ps.join(", ")
+        );
+        self.push(&[], &text);
+        self.exports.push(lift);
+        self.exports.push(callback);
+        Ok(())
+    }
+
     /// Generated code calling the user's exported function `f`: its
     /// path (or method name).
     fn user_fn(&self, f: &Function) -> String {
@@ -1334,9 +1820,10 @@ impl Gen<'_> {
     fn export_iface(&mut self, i: IfaceId) -> Result<(), String> {
         let m = self.owner_mod(Owner::Iface(i));
         let key = self.r.iface_key(i);
+        let module = format!("[export]{key}");
         for f in self.r.interfaces[i].funcs.clone() {
             let call = self.user_fn(&f);
-            self.export_fn(&format!("{key}#{}", f.wit_name(self.r)), &f, &call)?;
+            self.export_fn(&format!("{key}#{}", f.wit_name(self.r)), &module, &f, &call)?;
         }
         for (_, t) in self.r.interfaces[i].types.clone() {
             if matches!(self.r.types[t].kind, TypeKind::Resource) {
@@ -1344,9 +1831,21 @@ impl Gen<'_> {
                 let name = &self.r.types[t].name;
                 let export = format!("{key}#[dtor]{name}");
                 let id = ident("dtor", &export, "");
+                // The value leaves the table; the user's `Drop` runs.
+                let body = if self.drops.contains(&pascal(name)) {
+                    format!(
+                        "    if let w_v: {}::{} = {table}.take(a0) {{\n        using w_u = w_v {{}}\n    }}\n",
+                        self.base,
+                        pascal(name)
+                    )
+                } else {
+                    format!("    {table}.take(a0);\n")
+                };
                 self.push(
                     &m,
-                    &format!("#[export_name(\"{export}\")]\nextern \"C\" fn {id}(a0: i32) {{\n    {table}.remove(a0);\n}}\n"),
+                    &format!(
+                        "#[export_name(\"{export}\")]\nextern \"C\" fn {id}(a0: i32) {{\n{body}}}\n"
+                    ),
                 );
                 self.exports.push(export);
             }
@@ -1357,8 +1856,13 @@ impl Gen<'_> {
     /// Every type `t` refers to, added to `out`.
     fn reach(&self, t: &Type, out: &mut BTreeSet<TypeId>) {
         match t {
-            Type::Prim(_) => {}
-            Type::List(e) | Type::Option(e) => self.reach(e, out),
+            Type::Prim(_) | Type::ErrorContext => {}
+            Type::List(e) | Type::Option(e) | Type::FixedList(e, _) => self.reach(e, out),
+            Type::Future(e) | Type::Stream(e) => {
+                if let Some(e) = e {
+                    self.reach(e, out);
+                }
+            }
             Type::Result(a, b) => {
                 for x in [a, b].into_iter().flatten() {
                     self.reach(x, out);
@@ -1383,9 +1887,17 @@ impl Gen<'_> {
     }
 }
 
-/// The bindings of `requests` (in the order `load` read them, so
-/// `loaded.roots` lines up) for the module whose rok path is `base`.
-pub fn bind(loaded: &Loaded, requests: &[Request], base: &str) -> Result<Bindings, String> {
+/// The bindings of `requests` for the module whose rok path is `base`.
+///
+/// `requests` are in the order `load` read them, so `loaded.roots`
+/// lines up; `drops` are the user's exported resource types (rok names)
+/// that implement `Drop`.
+pub fn bind(
+    loaded: &Loaded,
+    requests: &[Request],
+    base: &str,
+    drops: &BTreeSet<String>,
+) -> Result<Bindings, String> {
     let r = &loaded.resolve;
     let (imports, exports, funcs, includes) = targets(loaded, requests)?;
     let mut g = Gen {
@@ -1394,8 +1906,10 @@ pub fn bind(loaded: &Loaded, requests: &[Request], base: &str) -> Result<Binding
         exported: exports.clone(),
         mods: BTreeMap::new(),
         externs: BTreeMap::new(),
-        imports: Vec::new(),
         exports: Vec::new(),
+        cur: None,
+        ops: BTreeSet::new(),
+        drops: drops.clone(),
     };
     generate(&mut g, &imports, &exports, &funcs)?;
     Ok(finish(g, &imports, &exports, includes))
@@ -1464,6 +1978,13 @@ fn targets(loaded: &Loaded, requests: &[Request]) -> Result<Targets, String> {
         for (_, t) in &r.interfaces[i].types {
             if let TypeKind::Alias(Type::Id(target)) = r.types[*t].kind {
                 if let Owner::Iface(dep) = r.types[target].owner {
+                    if dep != i && exports.contains(&dep) && imports.contains(&i) {
+                        return Err(format!(
+                            "imported interface `{}` uses types of `{}`, which this component exports: an import cannot name the component's own exported types (component model)",
+                            r.iface_key(i),
+                            r.iface_key(dep)
+                        ));
+                    }
                     if dep != i && !exports.contains(&dep) && imports.insert(dep) {
                         todo.push(dep);
                     }
@@ -1527,7 +2048,7 @@ fn generate(
             g.push(&m, &text);
         } else {
             let call = g.user_fn(f);
-            g.export_fn(&f.name, f, &call)?;
+            g.export_fn(&f.name, "[export]$root", f, &call)?;
         }
     }
     Ok(())
@@ -1570,18 +2091,15 @@ fn finish(
     exports.push("cabi_realloc".into());
     Bindings {
         source,
-        imports: g.imports,
         exports,
         world,
     }
 }
 
+type Externs = BTreeMap<Vec<String>, BTreeMap<String, BTreeSet<String>>>;
+
 /// The modules as nested `pub mod` items.
-fn print_mods(
-    mods: &BTreeMap<Vec<String>, String>,
-    externs: &BTreeMap<Vec<String>, BTreeSet<String>>,
-    out: &mut String,
-) {
+fn print_mods(mods: &BTreeMap<Vec<String>, String>, externs: &Externs, out: &mut String) {
     let mut paths: BTreeSet<Vec<String>> = mods.keys().cloned().collect();
     paths.extend(externs.keys().cloned());
     // Every prefix is a module too.
@@ -1598,15 +2116,18 @@ fn print_mod(
     at: &[String],
     paths: &BTreeSet<Vec<String>>,
     mods: &BTreeMap<Vec<String>, String>,
-    externs: &BTreeMap<Vec<String>, BTreeSet<String>>,
+    externs: &Externs,
     out: &mut String,
 ) {
     if let Some(name) = at.last() {
         let _ = writeln!(out, "pub mod {name} {{");
     }
-    if let Some(e) = externs.get(at) {
-        out.push_str("extern \"C\" {\n");
-        for d in e {
+    for (module, decls) in externs.get(at).into_iter().flatten() {
+        let _ = writeln!(
+            out,
+            "#[link(wasm_import_module = \"{module}\")]\nextern \"C\" {{"
+        );
+        for d in decls {
             out.push_str(d);
         }
         out.push_str("}\n");

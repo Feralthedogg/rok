@@ -141,3 +141,82 @@ fn errors_name_the_place() {
     let e = Resolve::new(vec![(f, src.to_owned())]).unwrap_err();
     assert!(e.msg.contains("no type `nope`"), "{}", e.msg);
 }
+
+const P3: &str = r"
+package my:p3;
+
+interface io {
+    resource conn {
+        constructor(addr: string) -> result<conn, string>;
+        recv: async func() -> stream<u8>;
+    }
+    fetch: async func(url: string) -> future<result<list<u8>, error-context>>;
+    ticks: func() -> stream;
+    ip: func() -> list<u8, 4>;
+    deep: func(x: option<option<u32>>) -> list<list<s8, 2>, 3>;
+}
+
+world base {
+    export greet: func() -> string;
+    export ping: func();
+}
+
+world renamed {
+    include base with { greet as hello }
+}
+";
+
+#[test]
+fn parses_preview_3_and_fixed_lists() {
+    let r = resolve(P3);
+    let io = &r.interfaces[0];
+    let f = |n: &str| io.funcs.iter().find(|f| f.wit_name(&r) == n).unwrap();
+    assert!(f("fetch").is_async && f("[method]conn.recv").is_async && !f("ip").is_async);
+    let conn = r.types.iter().position(|t| t.name == "conn").unwrap();
+    assert!(matches!(
+        &f("[constructor]conn").result,
+        Some(Type::Result(Some(ok), Some(_))) if **ok == Type::Own(conn)
+    ));
+    assert!(matches!(&f("ticks").result, Some(Type::Stream(None))));
+    let ip = f("ip").result.clone().unwrap();
+    assert_eq!(ip, Type::FixedList(Box::new(Type::Prim(Prim::U8)), 4));
+    assert_eq!((abi::size(&r, &ip), abi::align(&r, &ip)), (4, 1));
+    assert_eq!(abi::flatten(&r, &ip), vec![Flat::I32; 4]);
+    let grid = f("deep").result.clone().unwrap();
+    assert_eq!(abi::size(&r, &grid), 6);
+    // Futures and streams are handles: one `i32`.
+    let fetch = f("fetch").result.clone().unwrap();
+    assert_eq!(abi::flatten(&r, &fetch), vec![Flat::I32]);
+    // `include .. with` renames.
+    let w = r.worlds.iter().find(|w| w.name == "renamed").unwrap();
+    let names: Vec<&str> = w
+        .exports
+        .iter()
+        .filter_map(|e| match e {
+            crate::resolve::WorldEntry::Func(f) => Some(f.name.as_str()),
+            crate::resolve::WorldEntry::Iface(_) => None,
+        })
+        .collect();
+    assert_eq!(names, ["hello", "ping"]);
+}
+
+#[test]
+fn rejects_bad_preview_3_forms() {
+    let err = |src: &str| {
+        let f = match parse_file(Path::new("x.wit"), src) {
+            Ok(f) => f,
+            Err(e) => return e.msg,
+        };
+        Resolve::new(vec![(f, src.to_owned())]).unwrap_err().msg
+    };
+    let m = err("package a:b;\ninterface i { f: func() -> list<u8, 0>; }\n");
+    assert!(m.contains("list<T, N>"), "{m}");
+    let m = err("package a:b;\ninterface i { resource r { constructor() -> result<u32>; } }\n");
+    assert!(
+        m.contains("fallible constructor returns `result<r, ..>`"),
+        "{m}"
+    );
+    let m =
+        err("package a:b;\nworld w { export f: func(); }\nworld v { include w with { g as h } }\n");
+    assert!(m.contains("no import or export named `g`"), "{m}");
+}

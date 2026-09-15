@@ -1,0 +1,53 @@
+// expect-exit: 0
+// spec: std 101-ptr §1.1.2
+// expect-stdout:
+// 10
+// 11
+// 7
+// 12
+// 13
+// 5 true
+
+// A pointer to a coroutine local is fine between suspension points; one
+// taken again after a suspension point is a new pointer; a pointer to a
+// `static` stays valid; an address (`usize`) is only a number.
+use rok::bare::ptr::addr_of;
+
+static TOTAL: i32 = 7;
+
+yield fn gen(flag: bool) -> i32 {
+    let x = 10;
+    let p = addr_of(x);
+    yield unsafe { p.read() };
+    p = addr_of(x);
+    unsafe { p.write(11); }
+    yield x;
+    let s = addr_of(TOTAL);
+    yield 0;
+    yield unsafe { s.read() };
+    let q = addr_of(x);
+    if flag {
+        yield 12;
+    } else {
+        yield unsafe { q.read() };
+    }
+    q = addr_of(x);
+    unsafe { q.write(13); }
+    yield x;
+}
+
+async fn body() -> str {
+    let x = 5;
+    let p = addr_of(x);
+    let a = p.addr();
+    let v = unsafe { p.read() };
+    await task::sleep(Duration::ms(0));
+    f"{v} {a != 0}"
+}
+
+async fn main() {
+    for v in gen(true) {
+        if v != 0 { println(f"{v}"); }
+    }
+    println(await body());
+}

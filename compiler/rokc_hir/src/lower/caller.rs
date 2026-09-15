@@ -16,7 +16,11 @@ use crate::{
 
 const PARAM: &str = "#caller";
 
-pub(super) fn lower(functions: &mut Vec<HirFunction>, tracked: &HashSet<FunctionId>) {
+pub(super) fn lower(
+    functions: &mut Vec<HirFunction>,
+    tracked: &HashSet<FunctionId>,
+    sources: &rokc_diagnostic::SourceMap,
+) {
     if tracked.is_empty() {
         return;
     }
@@ -50,9 +54,7 @@ pub(super) fn lower(functions: &mut Vec<HirFunction>, tracked: &HashSet<Function
         });
         let here = |span| {
             own.clone().unwrap_or_else(|| {
-                HirExprKind::Const(rokc_ir_common::ConstVal::Str(rokc_diagnostic::location(
-                    span,
-                )))
+                HirExprKind::Const(rokc_ir_common::ConstVal::Str(sources.location(span)))
             })
         };
         each_block_mut(body, &mut |e| match &mut e.kind {
@@ -64,7 +66,7 @@ pub(super) fn lower(functions: &mut Vec<HirFunction>, tracked: &HashSet<Function
                 });
             }
             HirExprKind::FnRef(id) if sigs.contains_key(id) => {
-                let at = rokc_diagnostic::location(e.span);
+                let at = sources.location(e.span);
                 *id = *shims.entry((*id, at.clone())).or_insert_with(|| {
                     let shim = FunctionId(next_id);
                     next_id += 1;

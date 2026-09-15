@@ -37,6 +37,8 @@ pub struct Sig {
 /// Module-wide state the functions share.
 pub struct Ctx<'a> {
     pub t: &'a Target,
+    /// The compile's source files (panic locations).
+    pub sources: &'a rokc_diagnostic::SourceMap,
     pub conv: cc::Conv,
     pub obj: &'a mut Obj,
     pub fns: &'a HashMap<FunctionId, Sig>,
@@ -398,7 +400,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
         let at = if self.f.facts.track_caller {
             "#caller".to_owned()
         } else {
-            rokc_diagnostic::location(self.at)
+            self.c.sources.location(self.at)
         };
         let p = Panic { msg, at };
         if let Some((_, l)) = self.panics.iter().find(|(q, _)| *q == p) {

@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime};
 
 use rokc_core::hash::{FNV_OFFSET, fnv_add};
 
-use crate::{BuildOptions, Session, TargetSpec, rokhir, source_files};
+use crate::{BuildOptions, Session, SourceMap, TargetSpec, rokhir, source_files};
 
 /// What the library build depends on besides its sources.
 pub struct StdKey<'a> {
@@ -229,11 +229,13 @@ fn build(key: &StdKey<'_>, root: &Path, dir: &Path) -> bool {
     s.set_target(key.target);
     s.set_std_lib(true);
     let stub = tmp.join("rok.prebuilt").join("lib.rok");
-    let r = s.compile_source("// the prebuilt standard library\n", &stub);
+    let r = s.compile_source(
+        "// the prebuilt standard library\n",
+        &stub,
+        SourceMap::new(),
+    );
     let archive = tmp.join(format!("lib{}.a", rokc_driver::STD_PKG));
     let ok = !r.has_errors() && r.archive(key.opts, &archive, false).is_ok();
-    // Its files are not the user build's.
-    rokc_diagnostic::clear_files();
     if ok && std::fs::rename(&tmp, dir).is_ok() {
         return true;
     }
