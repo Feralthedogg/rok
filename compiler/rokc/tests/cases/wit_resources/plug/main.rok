@@ -1,0 +1,48 @@
+// The component `../main.rok` imports: it exports `counters`, whose
+// resource `counter` is `Counter` here.
+ffi::wit::export { "counters.wit" }
+
+use test::res::counters::Tagged;
+
+#[wit::export]
+pub struct Counter {
+    n: List<u32>;
+}
+
+impl Counter {
+    pub fn new(start: u32) -> Counter { Counter { n: [start] } }
+
+    pub fn inc(self, by: u32) -> u32 {
+        self.n[0] = self.n[0] + by;
+        self.n[0]
+    }
+
+    pub fn get(self) -> u32 { self.n[0] }
+
+    pub fn merge(a: Counter, b: Counter) -> Counter { Counter::new(a.get() + b.get()) }
+}
+
+#[wit::export]
+fn make(start: u32) -> Counter { Counter::new(start) }
+
+#[wit::export]
+fn read(c: Counter) -> u32 { c.get() }
+
+#[wit::export]
+fn take(c: Counter) -> u32 { c.inc(100) }
+
+#[wit::export]
+fn pair(a: u32, b: u32) -> List<Counter> { [Counter::new(a), Counter::new(b)] }
+
+#[wit::export]
+fn tag(name: str, c: Counter) -> Tagged { Tagged { name: f"#{name}", c } }
+
+#[wit::export]
+fn untag(t: Tagged) throws (str) -> Counter {
+    if t.name == "#bad" {
+        throw f"rejected {t.c.get()}";
+    }
+    t.c
+}
+
+fn main() {}

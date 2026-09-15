@@ -1,0 +1,16 @@
+[package]
+name = "rokc_wit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# WIT (WebAssembly Interface Types, stdlib spec 1.8): `.wit` files
+# parsed and resolved, and the rok bindings of `ffi::wit::import` /
+# `ffi::wit::export` generated from them.
+[dependencies]
+rokc_lexer = { workspace = true }
+
+[lints]
+workspace = true

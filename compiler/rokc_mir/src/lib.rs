@@ -93,6 +93,21 @@ pub struct Link {
     /// `#[link(..)]` libraries of `extern` blocks (spec 6.2.3):
     /// `(name, static)`, in first-seen order.
     pub native_libs: Vec<(String, bool)>,
+    /// `ffi::wit` (stdlib 1.8): what the component's link needs.
+    pub wit: Option<WitLink>,
+}
+
+/// The WIT of a component (`wasm32-wasi`): the linker gets a directory
+/// holding `world` and, under `deps/`, the WIT sources it refers to.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WitLink {
+    /// A WIT package with the one world the component has.
+    pub world: String,
+    /// The package sources: `.wit` files or directories.
+    pub sources: Vec<std::path::PathBuf>,
+    /// Symbols the core module exports (functions, post-returns,
+    /// destructors, `cabi_realloc`).
+    pub exports: Vec<String>,
 }
 
 impl Link {

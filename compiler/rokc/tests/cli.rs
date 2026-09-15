@@ -561,8 +561,9 @@ fn cross_targets_link_from_the_sysroot() {
 }
 
 /// `h.rok` built for wasm32 target `t` at -O0 / -O2: a module that
-/// exports `_start` and imports WASI preview 1, printing `ok` under the
-/// target's host when one is there.
+/// exports `_start` (the browser's, a reactor: `_initialize`) and
+/// imports WASI preview 1, printing `ok` under the target's host when
+/// one is there.
 fn wasm_target_runs(dir: &Path, targets: &Path, t: &str) {
     for o in ["-O0", "-O2"] {
         let exe = dir.join(format!("h-{t}{o}.wasm"));
@@ -576,7 +577,13 @@ fn wasm_target_runs(dir: &Path, targets: &Path, t: &str) {
         let b = fs::read(&exe).unwrap();
         let has = |s: &[u8]| b.windows(s.len()).any(|w| w == s);
         assert_eq!(&b[..4], b"\0asm", "{t}");
-        assert!(has(b"_start") && has(b"wasi_snapshot_preview1"), "{t}");
+        // The browser's is a reactor.
+        let entry: &[u8] = if t == "wasm32-unknown-unknown" {
+            b"_initialize"
+        } else {
+            b"_start"
+        };
+        assert!(has(entry) && has(b"wasi_snapshot_preview1"), "{t}");
         let threads: &[&str] = if t == "wasm32-wasi-threads" {
             &["-W", "threads=y,shared-memory=y", "-S", "threads=y"]
         } else {
@@ -602,6 +609,92 @@ fn wasm_target_runs(dir: &Path, targets: &Path, t: &str) {
             assert_exit(&run, 0);
             assert_eq!(text(&run.stdout), "ok\n", "{t}");
         }
+    }
+}
+
+/// A browser module (wasm32-unknown-unknown) is a reactor: `rok.mjs`'s
+/// `load` initializes it, `main` runs the program, and its
+/// `#[export_name]` functions stay callable from JS afterwards,
+/// allocating and collecting, their output flushed after each call.
+#[test]
+fn browser_module_exports_to_js() {
+    let dir = scratch("browser-exports");
+    if setup().is_none() {
+        return;
+    }
+    let t = Path::new(ROKC)
+        .parent()
+        .unwrap()
+        .join("../lib/rok/targets/wasm32-unknown-unknown");
+    if !t.is_dir() {
+        eprintln!("skipped: no {} (targets/build.sh)", t.display());
+        return;
+    }
+    fs::write(
+        dir.join("app.rok"),
+        "extern \"C\" { fn rok_gc_collect(); }\n\
+         \n\
+         #[export_name(\"add\")]\n\
+         extern \"C\" fn add(a: i32, b: i32) -> i32 { a + b }\n\
+         \n\
+         #[export_name(\"strings\")]\n\
+         extern \"C\" fn strings(n: i32) -> i64 {\n\
+         \x20   let xs: List<str> = List::new();\n\
+         \x20   let i = 0;\n\
+         \x20   while i < n {\n\
+         \x20       xs.push(f\"s{i}\");\n\
+         \x20       if i % 1000 == 0 { unsafe { rok_gc_collect() }; }\n\
+         \x20       i += 1;\n\
+         \x20   }\n\
+         \x20   println(f\"{xs.len()} strings, last {xs[xs.len() - 1]}\");\n\
+         \x20   let total: i64 = 0;\n\
+         \x20   for s in xs { total += s.len() as i64; }\n\
+         \x20   total\n\
+         }\n\
+         \n\
+         fn main() -> i32 {\n\
+         \x20   println(\"main\");\n\
+         \x20   3\n\
+         }\n",
+    )
+    .unwrap();
+    let script = format!(
+        "import {{ load }} from {:?}; import {{ readFileSync }} from 'node:fs'; \
+         const app = await load(readFileSync(process.argv[1])); \
+         console.log('code', app.main()); console.log('add', app.exports.add(2, 3)); \
+         console.log('total', app.exports.strings(20000) === 108890n);",
+        t.join("rok.mjs").display().to_string()
+    );
+    for o in ["-O0", "-O2"] {
+        let out = rokc(
+            None,
+            &dir,
+            &[
+                "-q",
+                "build",
+                "app.rok",
+                "--target",
+                "wasm32-unknown-unknown",
+                o,
+                "-o",
+                "app.wasm",
+            ],
+        );
+        assert_exit(&out, 0);
+        let Ok(run) = Command::new("node")
+            .args(["--input-type=module", "-e", &script, "app.wasm"])
+            .current_dir(&dir)
+            .output()
+        else {
+            eprintln!("skipped: no node");
+            return;
+        };
+        assert_exit(&run, 0);
+        assert_eq!(
+            text(&run.stdout),
+            "main\ncode 3\nadd 5\n20000 strings, last s19999\ntotal true\n",
+            "{o}"
+        );
     }
 }
 
@@ -1687,8 +1780,8 @@ fn profdata_show_merge_warnings_and_context_sensitive_pgo() {
 }
 
 /// PGO for wasm32-wasi: the profile runtime (with wasi-libc's emulated
-/// mmap) writes through WASI; run by `node`'s WASI with the directory
-/// preopened.
+/// mmap) writes through WASI; the component run by
+/// `ROK_TEST_WASM_RUNNER` (wasmtime) with the directory preopened.
 #[test]
 fn profile_guided_optimization_on_wasm32_wasi() {
     let dir = scratch("pgo-wasm");
@@ -1710,19 +1803,15 @@ fn profile_guided_optimization_on_wasm32_wasi() {
         assert_exit(&out, 0);
     };
     build(&["-C", "profile-generate=raw", "-o", "instr.wasm"]);
-    let script = "import { readFileSync } from 'node:fs'; import { WASI } from 'node:wasi'; \
-                  const w = new WASI({ version: 'preview1', args: ['m'], preopens: { '.': '.' } \
-                  }); const m = await WebAssembly.compile(readFileSync('instr.wasm')); \
-                  process.exitCode = w.start(await WebAssembly.instantiate(m, \
-                  w.getImportObject()));";
-    let Ok(run) = Command::new("node")
-        .args(["--no-warnings", "--input-type=module", "-e", script])
-        .current_dir(&dir)
-        .output()
-    else {
-        eprintln!("skipped: no node to run wasm32-wasi");
+    let Some(runner) = std::env::var_os("ROK_TEST_WASM_RUNNER") else {
+        eprintln!("skipped: no ROK_TEST_WASM_RUNNER to run wasm32-wasi");
         return;
     };
+    let run = Command::new(runner)
+        .args(["run", "--dir", ".", "instr.wasm"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
     assert_exit(&run, 0);
     assert_eq!(text(&run.stdout), "157144\n");
     let merge = ["-q", "profdata", "merge", "-o", "p.profdata", "raw"];

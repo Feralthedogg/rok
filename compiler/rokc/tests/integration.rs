@@ -70,7 +70,12 @@ fn run_case(
     }
     let case_dir = scratch.join(name);
     let _ = fs::create_dir_all(&case_dir);
-    let exe = case_dir.join(exe_name("out"));
+    let plug = directive(&source, "wasm-plug:").map(str::trim);
+    let wac = std::env::var_os("ROK_TEST_WAC").filter(|w| !w.is_empty());
+    if plug.is_some() && wac.is_none() {
+        return Ok(());
+    }
+    let mut exe = case_dir.join(exe_name("out"));
 
     let build = rokc_build(env, path, &exe).map_err(|e| format!("rokc: {e}"))?;
     let stderr = String::from_utf8_lossy(&build.stderr);
@@ -90,6 +95,34 @@ fn run_case(
             .unwrap_or("");
         return Err(format!("rokc build failed: {first}"));
     }
+    if let (Some(plug), Some(wac)) = (plug, wac) {
+        let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let plugged = case_dir.join(exe_name("plug"));
+        let b = rokc_build(env, &dir.join(plug), &plugged).map_err(|e| format!("rokc: {e}"))?;
+        if !b.status.success() {
+            return Err(format!(
+                "plug build failed: {}",
+                String::from_utf8_lossy(&b.stderr)
+            ));
+        }
+        let composed = case_dir.join(exe_name("composed"));
+        let c = std::process::Command::new(wac)
+            .arg("plug")
+            .arg(&exe)
+            .arg("--plug")
+            .arg(&plugged)
+            .arg("-o")
+            .arg(&composed)
+            .output()
+            .map_err(|e| format!("wac: {e}"))?;
+        if !c.status.success() {
+            return Err(format!(
+                "wac plug failed: {}",
+                String::from_utf8_lossy(&c.stderr)
+            ));
+        }
+        exe = composed;
+    }
     for want in directives(&source, "expect-warning:") {
         if !stderr.contains(want) {
             return Err(format!(
@@ -107,6 +140,22 @@ fn run_case(
     }
 
     check_run(&source, &exe, expected, &[])?;
+    for inv in directives(&source, "wasm-invoke:") {
+        let (call, want) = inv
+            .split_once(" => ")
+            .ok_or("`// wasm-invoke: call => value`")?;
+        let run = invoke_command(&exe, call.trim())
+            .output()
+            .map_err(|e| format!("exec: {e}"))?;
+        let got = String::from_utf8_lossy(&run.stdout);
+        if !run.status.success() || got.trim_end() != want.trim() {
+            return Err(format!(
+                "--invoke {call}: want {want:?}, got {got:?} ({})\n    stderr: {}",
+                run.status,
+                String::from_utf8_lossy(&run.stderr)
+            ));
+        }
+    }
     // `// gc-stress: N`: again with a collection every N allocations and
     // every full one evacuating all it may (objects move all the time),
     // then once more with every automatic full collection marking

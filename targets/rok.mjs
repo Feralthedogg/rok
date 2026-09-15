@@ -5,8 +5,17 @@
 // to `crypto.getRandomValues`; every other import fails with ENOSYS, so
 // files, sockets and the rest are `IoErrorKind::Unsupported`.
 //
-//   import { run } from "./rok.mjs";
+// The module is a reactor: `main` runs the program, and the runtime
+// stays up after it for the module's other exports, its
+// `#[export_name("x")] extern "C" fn`s (numbers in and out, 64-bit
+// integers as BigInt; other values through linear memory).
+//
+//   import { run, load } from "./rok.mjs";
 //   const code = await run(fetch("app.wasm"), { args: ["app"] });
+//
+//   const app = await load(fetch("app.wasm"));
+//   const code = app.main();
+//   app.exports.add(2, 3);
 //
 //   node rok.mjs app.wasm [args..]     (the environment is node's)
 
@@ -44,8 +53,15 @@ function sleep(ms) {
 }
 
 /// Instantiate `wasm` (bytes, a `WebAssembly.Module`, or a `Response` /
-/// promise of one) and run its `_start`: the exit code.
-export async function run(wasm, { args = ["main"], env = {}, write = consoleWriter() } = {}) {
+/// promise of one) and run its `main`: the exit code.
+export async function run(wasm, opts) {
+  return (await load(wasm, opts)).main();
+}
+
+/// Instantiate `wasm` and initialize it: `{ exports, main }`. `main()`
+/// runs the program: its exit code (an exit or a failure included). An
+/// export that exits or traps throws.
+export async function load(wasm, { args = ["main"], env = {}, write = consoleWriter() } = {}) {
   const enc = new TextEncoder();
   const argv = args.map((a) => enc.encode(a + "\0"));
   const envv = Object.entries(env).map(([k, v]) => enc.encode(`${k}=${v}\0`));
@@ -167,18 +183,37 @@ export async function run(wasm, { args = ["main"], env = {}, write = consoleWrit
     write(2, enc.encode(msg));
     return 134;
   };
-  try {
-    instance.exports._start();
-    return 0;
-  } catch (err) {
-    if (err instanceof Exit) return err.code;
-    // The engine's call stack (spec 7, runtime error: stack overflow).
-    if (err instanceof RangeError) {
-      return fail("\nthread 'main' has overflowed its stack\nfatal runtime error: stack overflow, aborting\n");
-    }
-    if (err instanceof WebAssembly.RuntimeError) return fail(`wasm trap: ${err.message}\n`);
-    throw err;
+  // stdout is the runtime's buffer (and C's, when the program uses
+  // it), flushed after each call into the module.
+  const flushed =
+    (f) =>
+    (...args) => {
+      try {
+        return f(...args);
+      } finally {
+        instance.exports.rok_stdio_flush?.();
+        instance.exports.fflush?.(0);
+      }
+    };
+  const exports = {};
+  for (const [name, v] of Object.entries(instance.exports)) {
+    exports[name] = typeof v === "function" ? flushed(v) : v;
   }
+  const main = () => {
+    try {
+      return exports.main();
+    } catch (err) {
+      if (err instanceof Exit) return err.code;
+      // The engine's call stack (spec 7, runtime error: stack overflow).
+      if (err instanceof RangeError) {
+        return fail("\nthread 'main' has overflowed its stack\nfatal runtime error: stack overflow, aborting\n");
+      }
+      if (err instanceof WebAssembly.RuntimeError) return fail(`wasm trap: ${err.message}\n`);
+      throw err;
+    }
+  };
+  instance.exports._initialize();
+  return { exports, main };
 }
 
 if (typeof process !== "undefined" && process.argv?.[1]) {

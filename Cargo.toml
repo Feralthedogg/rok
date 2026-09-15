@@ -19,6 +19,7 @@ members = [
     "compiler/rokc_parser",
     "compiler/rokc_rokon",
     "compiler/rokc_tools",
+    "compiler/rokc_wit",
     "runtime/rokr",
     "runtime/rokr_common",
     "runtime/rokr_gc",
@@ -48,6 +49,7 @@ rokc_mir = { path = "compiler/rokc_mir" }
 rokc_parser = { path = "compiler/rokc_parser" }
 rokc_rokon = { path = "compiler/rokc_rokon" }
 rokc_tools = { path = "compiler/rokc_tools" }
+rokc_wit = { path = "compiler/rokc_wit" }
 
 rokr_common = { path = "runtime/rokr_common" }
 rokr_gc = { path = "runtime/rokr_gc" }

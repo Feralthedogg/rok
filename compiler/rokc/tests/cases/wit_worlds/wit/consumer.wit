@@ -1,0 +1,10 @@
+package test:w;
+
+world consumer {
+    use shared.{pair};
+    import answer: func(p: pair) -> string;
+    import tools: interface {
+        use shared.{pair};
+        double: func(x: u32) -> pair;
+    }
+}

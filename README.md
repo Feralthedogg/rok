@@ -108,6 +108,13 @@ ROK_TEST_OPT=-O2 ROK_REQUIRE_LLVM=1 cargo test --test integration
 cargo run -p rokc -- fmt --check library
 ```
 
+The WebAssembly targets have their own corpus run (not in CI): `targets/test-wasm.sh [<target>..]` builds the
+runtimes of `wasm32-wasi`, `wasm32-wasi-threads` and `wasm32-unknown-unknown`, fetches the pinned wasmtime
+(v46.0.3, the last release with wasi-threads), and runs every integration and differential case for each at
+`-O0` and `-O2`: the WASI targets under wasmtime, the browser target under node with `rok.mjs`. Cases that need
+what a target lacks (`// needs:`) are skipped there; others assert its `Unsupported` errors (`// only-target:`).
+Set `CC` to a clang with a WebAssembly backend to include `wasm32-wasi`'s profile-guided-optimization test.
+
 ## License
 
 `MIT OR Apache-2.0` ([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)). The specification repository

@@ -231,10 +231,17 @@ pub extern "C" fn rok_runtime_init() {
 /// The main thread is done with rok code: every other rok thread (the
 /// executor's worker pool, threads still running) stops for good before
 /// the process exits.
+#[cfg(not(all(rok_solo, target_env = "p1")))]
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_runtime_shutdown() {
     rokr_gc::world::halt();
 }
+
+/// The browser's module (a reactor, one thread) stays up after `main`
+/// for its exports.
+#[cfg(all(rok_solo, target_env = "p1"))]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_runtime_shutdown() {}
 
 /// Into an `extern "C"` call: the thread counts as `PARKED`.
 ///

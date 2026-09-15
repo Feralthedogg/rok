@@ -189,6 +189,11 @@ pub fn location(span: Span) -> String {
     }
 }
 
+/// The path of registered file `id` (a span's `file`).
+pub fn file_path(id: u32) -> Option<String> {
+    file_by_id(id).map(|(p, _)| p)
+}
+
 fn file_by_id(id: u32) -> Option<(String, String)> {
     let files = FILES
         .lock()

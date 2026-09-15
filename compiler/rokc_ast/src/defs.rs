@@ -45,6 +45,10 @@ pub const CONST_FN_ATTR: &str = "#const_fn";
 /// (spec 8.6.10).
 pub const C_VARIADIC_ATTR: &str = "#c_variadic";
 
+/// Marks a WIT binding's `extern "C"` function: `#wasm_import("module",
+/// "name")`, the core import it stands for (stdlib 1.8).
+pub const WASM_IMPORT_ATTR: &str = "#wasm_import";
+
 /// Method name of the `using` desugar's release call (`x.#drop()`):
 /// `Drop::drop`, exempt from the direct-call ban (spec 2.13.4).
 pub const USING_DROP_METHOD: &str = "#drop";
@@ -835,6 +839,16 @@ pub struct ExternBlock {
     pub abi: String,
     pub items: Vec<ExternItem>,
     pub span: Span,
+    /// `ffi::wit::import { "a.wit", .. }` / `ffi::wit::export { .. }`
+    /// (stdlib 1.8): no items; the driver adds the bindings.
+    pub wit: Option<WitRef>,
+}
+
+/// The `.wit` paths of an `ffi::wit::import` / `ffi::wit::export`.
+#[derive(Clone, Debug)]
+pub struct WitRef {
+    pub export: bool,
+    pub paths: Vec<String>,
 }
 
 #[derive(Clone, Debug)]

@@ -1,0 +1,48 @@
+// only-target: wasm32-wasi
+// wasm-plug: plug/main.rok
+// expect-exit: 0
+// expect-stdout:
+// inc 8
+// merged 18 read 18
+// take 118
+// pair 1 2
+// tagged #t 7
+// untagged 7
+// rejected 9
+// moved
+// done
+
+// Stdlib 1.8: a resource across components. `plug/main.rok` exports
+// `counters` (its `Counter` kept in a table while this component holds
+// a handle); this one imports it, `wac plug` joins the two. Owned
+// handles from constructors, results, lists and records; borrowed ones
+// to methods and statics; owned ones handed back (`take`), so the value
+// here no longer has one; `using` drops one (the exporter's destructor).
+ffi::wit::import { "plug/counters.wit" }
+
+use test::res::counters;
+use test::res::counters::Counter;
+
+fn main() {
+    let c = Counter::new(5);
+    println(f"inc {c.inc(3)}");
+    let d = counters::make(10);
+    let m = Counter::merge(c, d);
+    println(f"merged {m.get()} read {counters::read(m)}");
+    println(f"take {counters::take(m)}");
+    let p = counters::pair(1, 2);
+    println(f"pair {p[0].get()} {p[1].get()}");
+    let t = counters::tag("t", counters::make(7));
+    println(f"tagged {t.name} {t.c.get()}");
+    let back = try! counters::untag(t);
+    println(f"untagged {back.get()}");
+    let bad = counters::tag("bad", counters::make(9));
+    try counters::untag(bad) catch e { println(e); };
+    let moved = Counter::new(1);
+    counters::take(moved);
+    println(if moved.handle.release() is none { "moved" } else { "kept" });
+    using x = counters::make(3) {
+        x.inc(1);
+    }
+    println("done");
+}

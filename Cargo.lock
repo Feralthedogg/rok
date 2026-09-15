@@ -83,6 +83,7 @@ dependencies = [
  "rokc_llvm",
  "rokc_mir",
  "rokc_parser",
+ "rokc_wit",
 ]
 
 [[package]]
@@ -179,6 +180,13 @@ dependencies = [
  "rokc_lexer",
  "rokc_parser",
  "rokc_rokon",
+]
+
+[[package]]
+name = "rokc_wit"
+version = "0.1.0"
+dependencies = [
+ "rokc_lexer",
 ]
 
 [[package]]

@@ -333,7 +333,7 @@ pub fn link_executable<S: AsRef<OsStr>>(
             a
         } else if t.triple.starts_with("wasm32") {
             let libc = libc.ok_or_else(|| format!("no C library for {}", t.triple))?;
-            let mut a = wasm_args(out, libc, t.triple.ends_with("-threads"))?;
+            let mut a = wasm_args(out, libc, &t.triple)?;
             a.extend(inputs);
             a.push(libc.join("libc.a").into_os_string());
             if t.triple == "wasm32-wasi" {
@@ -407,9 +407,20 @@ fn elf_args(t: &Target, out: &Path, libc: &Path) -> Result<(Vec<OsString>, Vec<O
     let f = |name: &str| libc.join(name).into_os_string();
     let mut search = OsString::from("-L");
     search.push(libc);
-    let mut head: Vec<OsString> = ["ld.lld", "-m", emulation, "--eh-frame-hdr", "--build-id"]
-        .map(OsString::from)
-        .into();
+    // Debug info of code `--gc-sections` dropped points at the DWARF
+    // tombstone (all ones: no address), not at 0, where it would claim
+    // the start of the address space (lld writes 0 by default).
+    let mut head: Vec<OsString> = [
+        "ld.lld",
+        "-m",
+        emulation,
+        "--eh-frame-hdr",
+        "--build-id",
+        "-z",
+        "dead-reloc-in-nonalloc=.debug_info=0xffffffffffffffff",
+    ]
+    .map(OsString::from)
+    .into();
     head.extend(["-o".into(), out.as_os_str().to_owned()]);
     let tail = if musl {
         head.extend(["-static".into(), f(crt1), f("crti.o"), search]);
@@ -475,15 +486,23 @@ fn link_component(args: &[OsString], libc: &Path) -> Result<String, String> {
     }
 }
 
-/// wasm-ld's arguments before the inputs for a wasm32 command module
-/// against wasi-libc in `libc`: `_start` (its `crt1-command.o`) calls
-/// `__main_void`. The 8 MiB stack (rok's thread stack) comes first in
-/// linear memory, so an overflow runs off address 0 and traps. wasm-ld
-/// drops unreferenced sections by default. With `threads`
-/// (wasi-threads): a shared memory the host provides, up to wasm32's
-/// 4 GiB, and `wasi_thread_start`, where each new thread begins.
-fn wasm_args(out: &Path, libc: &Path, threads: bool) -> Result<Vec<OsString>, String> {
-    let crt1 = libc.join("crt1-command.o");
+/// wasm-ld's arguments before the inputs for a wasm32 module of
+/// `triple` against wasi-libc in `libc`. A command module: `_start` (its
+/// `crt1-command.o`) calls `__main_void`. The browser's is a reactor
+/// (`crt1-reactor.o`): the host calls `_initialize`, then the exports
+/// (`main` and the `#[export_name]` functions). The 8 MiB stack (rok's
+/// thread stack) comes first in linear memory, so an overflow runs off
+/// address 0 and traps. wasm-ld drops unreferenced sections by default.
+/// wasi-threads: a shared memory the host provides and
+/// `wasi_thread_start`, where each new thread begins.
+fn wasm_args(out: &Path, libc: &Path, triple: &str) -> Result<Vec<OsString>, String> {
+    let threads = triple.ends_with("-threads");
+    let reactor = triple == "wasm32-unknown-unknown";
+    let crt1 = libc.join(if reactor {
+        "crt1-reactor.o"
+    } else {
+        "crt1-command.o"
+    });
     if !crt1.is_file() {
         return Err(format!("no C library in {}", libc.display()));
     }
@@ -501,6 +520,18 @@ fn wasm_args(out: &Path, libc: &Path, threads: bool) -> Result<Vec<OsString>, St
     ]
     .map(OsString::from)
     .into();
+    if reactor {
+        // The host flushes stdout (rok's buffer, and C's when the
+        // program uses it) after each export: no `exit` does.
+        a.extend(
+            [
+                "--no-entry",
+                "--export-if-defined=rok_stdio_flush",
+                "--export-if-defined=fflush",
+            ]
+            .map(OsString::from),
+        );
+    }
     if threads {
         a.extend(
             [

@@ -1,0 +1,149 @@
+// only-target: wasm32-wasi
+// expect-exit: 0
+// expect-stdout: main
+// wasm-invoke: echo-point({x: 1, y: -2, label: "a"}) => {x: -2, y: 1, label: "<a>"}
+// wasm-invoke: area(circle(2.0)) => 12
+// wasm-invoke: area(rect((3, 4))) => 12
+// wasm-invoke: area(empty) => 0
+// wasm-invoke: describe(named("hi")) => "Named(\"hi\")"
+// wasm-invoke: next-color(blue) => red
+// wasm-invoke: toggle({read, exec}) => {write}
+// wasm-invoke: find(["a", "b", "c"], "c") => some(2)
+// wasm-invoke: find([], "z") => none
+// wasm-invoke: parse("42") => ok(42)
+// wasm-invoke: parse("x") => err("bad number: x")
+// wasm-invoke: swap((7, 'x', true)) => (true, 'x', 7)
+// wasm-invoke: points(3) => [{x: 0, y: 0, label: "p0"}, {x: 1, y: -1, label: "p1"}, {x: 2, y: -2, label: "p2"}]
+// wasm-invoke: sum17(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17) => 153
+// wasm-invoke: nested([["a"], [], ["b", "c"]]) => [some(1), none, some(2)]
+// wasm-invoke: maybe-shape(true) => some(named("yes"))
+// wasm-invoke: maybe-shape(false) => none
+// wasm-invoke: bits(1.5, 7, true) => ok(3)
+// wasm-invoke: bits(1.5, 7, false) => err(8)
+
+// Stdlib 1.8: `ffi::wit::export` of an interface with every kind of
+// type, each export called by the host (`wasmtime run --invoke`):
+// records, variants with payloads, enums, flags, options, results (a
+// throwing function), tuples, lists of records and of lists, chars,
+// floats, 17 parameters (passed in memory), joined variant slots
+// (`result<f32, u64>`). `Counter` is an exported resource: `--invoke`
+// cannot pass one, so its methods are only built and linked here.
+ffi::wit::export { "kinds.wit" }
+
+use test::kinds::kinds::{Color, Perms, Point, Shape};
+
+#[wit::export]
+pub struct Counter {
+    n: List<u32>;
+}
+
+impl Counter {
+    pub fn new(start: u32) -> Counter { Counter { n: [start] } }
+    pub fn inc(self, by: u32) -> u32 {
+        self.n[0] = self.n[0] + by;
+        self.n[0]
+    }
+    pub fn get(self) -> u32 { self.n[0] }
+    pub fn merge(a: Counter, b: Counter) -> Counter { Counter::new(a.get() + b.get()) }
+}
+
+#[wit::export]
+fn echo_point(p: Point) -> Point { Point { x: p.y, y: p.x, label: f"<{p.label}>" } }
+
+#[wit::export]
+fn area(s: Shape) -> f64 {
+    match s {
+        Shape::Circle(r) => 3.0 * (r as f64) * (r as f64),
+        Shape::Rect((w, h)) => (w * h) as f64,
+        Shape::Named(_) => -1.0,
+        Shape::Empty => 0.0,
+    }
+}
+
+#[wit::export]
+fn describe(s: Shape) -> str { f"{s:?}" }
+
+#[wit::export]
+fn next_color(c: Color) -> Color {
+    match c {
+        Color::Red => Color::Green,
+        Color::Green => Color::Blue,
+        Color::Blue => Color::Red,
+    }
+}
+
+#[wit::export]
+fn toggle(p: Perms) -> Perms { Perms { read: !p.read, write: !p.write, exec: !p.exec } }
+
+#[wit::export]
+fn find(xs: List<str>, x: str) -> u32 | none {
+    for (i, s) in xs.iter().enumerate() {
+        if s == x {
+            return i as u32;
+        }
+    }
+    none
+}
+
+#[wit::export]
+fn parse(s: str) throws (str) -> i64 {
+    try s.parse::<i64>() catch _ { throw f"bad number: {s}"; }
+}
+
+#[wit::export]
+fn swap(t: (u8, char, bool)) -> (bool, char, u8) { (t.2, t.1, t.0) }
+
+#[wit::export]
+fn points(n: u32) -> List<Point> {
+    let out: List<Point> = List::new();
+    for i in 0..n {
+        out.push(Point { x: i as i32, y: -(i as i32), label: f"p{i}" });
+    }
+    out
+}
+
+#[wit::export]
+fn sum17(a: u8, b: u8, c: u8, d: u8, e: u8, f: u8, g: u8, h: u8, i: u8, j: u8, k: u8, l: u8, m: u8, n: u8, o: u8, p: u8, q: u8) -> u32 {
+    let all = [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q];
+    let s = 0u32;
+    for x in all.iter() {
+        s = s + x as u32;
+    }
+    s
+}
+
+#[wit::export]
+fn nested(x: List<List<str>>) -> List<i8 | none> {
+    let out: List<i8 | none> = List::new();
+    for l in x.iter() {
+        if l.is_empty() {
+            out.push(none);
+        } else {
+            out.push(l.len() as i8);
+        }
+    }
+    out
+}
+
+#[wit::export]
+fn maybe_shape(b: bool) -> Shape | none {
+    if b { Shape::Named("yes") } else { none }
+}
+
+#[wit::export]
+fn bits(x: f32, y: u64, ok: bool) throws (u64) -> f32 {
+    if ok { x * 2.0 } else { throw y + 1u64; }
+}
+
+#[wit::export]
+fn make_counter(start: u32) -> Counter { Counter::new(start) }
+
+#[wit::export]
+fn read_counter(c: Counter) -> u32 { c.get() }
+
+#[wit::export]
+fn take_counter(c: Counter) -> u32 { c.inc(100) }
+
+fn main() {
+    println("main");
+}

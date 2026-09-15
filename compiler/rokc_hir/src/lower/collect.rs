@@ -768,6 +768,7 @@ pub fn lower_full(
     let mut extern_fn_ids: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
     let mut c_variadic: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
     let mut no_safepoint: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
+    let mut wasm_imports: HashMap<FunctionId, (String, String)> = HashMap::new();
     // `extern "rok"` declarations: the runtime's own ABI.
     let mut rok_externs: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
     // A declaration's signature: its types are resolved once every item
@@ -820,6 +821,16 @@ pub fn lower_full(
                 lib_decl.push(!package_of(&module).is_empty());
             }
             Item::Extern(blk) => {
+                // The driver expands those of the program's package.
+                if blk.wit.is_some() {
+                    err(
+                        &mut pre_diags,
+                        here,
+                        "`ffi::wit` is for the program's own package, not a dependency (stdlib 1.8)"
+                            .to_owned(),
+                    );
+                    continue;
+                }
                 let rok_abi = blk.abi == "rok";
                 let quiet = blk.attrs.iter().any(|a| a.path == ["no_safepoint"]);
                 if quiet && !rok_abi {
@@ -875,6 +886,9 @@ pub fn lower_full(
                         .any(|a| a.path == [rokc_ast::C_VARIADIC_ATTR])
                     {
                         c_variadic.insert(id);
+                    }
+                    if let Some(w) = wasm_import_of(fn_def) {
+                        wasm_imports.insert(id, w);
                     }
                     decls.push(MethodOrFn::Fn(fn_def));
                     lib_decl.push(false);
@@ -1860,6 +1874,9 @@ pub fn lower_full(
     }
     for id in &no_safepoint {
         set(id, &|f| f.no_safepoint = true);
+    }
+    for (id, w) in &wasm_imports {
+        set(id, &|f| f.wasm_import = Some(w.clone()));
     }
     for id in &prebuilt {
         set(id, &|f| f.linkage = Linkage::Prebuilt);
@@ -5060,6 +5077,24 @@ fn check_extern_c_fn(f: &FnDef, diags: &mut Vec<rokc_diagnostic::RokDiagnostic>)
         .any(is_str)
     {
         bad("`str` is not an FFI type; pass a `Ptr<u8>` and a length".to_owned());
+    }
+}
+
+/// `#wasm_import("module", "name")` of a WIT binding's extern function.
+fn wasm_import_of(f: &FnDef) -> Option<(String, String)> {
+    let a = f
+        .attrs
+        .iter()
+        .find(|a| a.path == [rokc_ast::WASM_IMPORT_ATTR])?;
+    let rokc_ast::AttrBody::Args(args) = &a.body else {
+        return None;
+    };
+    match args.as_slice() {
+        [
+            rokc_ast::AttrArg::Lit(rokc_ast::Literal::Str(m)),
+            rokc_ast::AttrArg::Lit(rokc_ast::Literal::Str(n)),
+        ] => Some((m.clone(), n.clone())),
+        _ => None,
     }
 }
 

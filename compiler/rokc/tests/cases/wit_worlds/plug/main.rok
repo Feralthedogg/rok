@@ -1,0 +1,13 @@
+// The component `../main.rok` imports: world `provider`, its exports
+// a world-level function and an interface declared inline.
+ffi::wit::export { "../wit/provider.wit" }
+
+use test::w::shared::Pair;
+
+#[wit::export]
+fn answer(p: Pair) -> str { f"{p.b}={p.a}" }
+
+#[wit::export]
+fn double(x: u32) -> Pair { Pair { a: x * 2, b: "twice" } }
+
+fn main() {}

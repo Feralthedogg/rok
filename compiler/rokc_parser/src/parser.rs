@@ -765,7 +765,7 @@ impl<'a> Parser<'a> {
                         | TokenKind::Yield
                 )
             ),
-            _ if self.at_union_item() || self.at_ctx_item() => true,
+            _ if self.at_union_item() || self.at_ctx_item() || self.at_wit_item() => true,
             k => starts_item(k),
         }
     }
@@ -1217,6 +1217,9 @@ impl<'a> Parser<'a> {
         }
         // Contextual item keywords: `extern "C"`, `const NAME` /
         // `const fn`, `static [mut] NAME`, `type Name`.
+        if self.at_wit_item() {
+            return self.parse_wit_item(attrs).map(Item::Extern);
+        }
         if self.at_kw("extern") {
             // `extern "C" fn f(..) { .. }` (spec 5.9.10): a rok function
             // with the C ABI, marked for HIR's checks.
@@ -1874,6 +1877,58 @@ impl<'a> Parser<'a> {
             abi,
             items,
             span: start,
+            wit: None,
+        })
+    }
+
+    /// `ffi::wit::import` / `ffi::wit::export` then `{` (stdlib 1.8).
+    fn at_wit_item(&self) -> bool {
+        let k = |n: usize| self.tokens.get(self.pos + n).map(|t| &t.kind);
+        let word = |n: usize, w: &str| matches!(k(n), Some(TokenKind::Ident(x)) if x == w);
+        word(0, "ffi")
+            && k(1) == Some(&TokenKind::ColonColon)
+            && word(2, "wit")
+            && k(3) == Some(&TokenKind::ColonColon)
+            && (word(4, "import") || word(4, "export"))
+            && k(5) == Some(&TokenKind::LBrace)
+    }
+
+    /// `ffi::wit::import { "a.wit", "dir" }`: string paths, commas
+    /// between.
+    fn parse_wit_item(&mut self, attrs: Vec<Attribute>) -> Option<ExternBlock> {
+        let start = self.peek_span();
+        for _ in 0..4 {
+            self.bump();
+        }
+        let export = matches!(self.peek(), TokenKind::Ident(w) if w == "export");
+        self.bump();
+        self.expect(&TokenKind::LBrace, "`{`")?;
+        let mut paths = Vec::new();
+        while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
+            let TokenKind::StrLit(p) = self.peek().clone() else {
+                let s = self.peek_span();
+                self.error(
+                    s,
+                    format!(
+                        "expected a `.wit` path string, found {}",
+                        self.peek().describe()
+                    ),
+                );
+                return None;
+            };
+            self.bump();
+            paths.push(p);
+            if !matches!(self.peek(), TokenKind::RBrace) {
+                self.expect(&TokenKind::Comma, "`,`")?;
+            }
+        }
+        self.expect(&TokenKind::RBrace, "`}`")?;
+        Some(ExternBlock {
+            attrs,
+            abi: "C".to_owned(),
+            items: Vec::new(),
+            span: start,
+            wit: Some(rokc_ast::WitRef { export, paths }),
         })
     }
 

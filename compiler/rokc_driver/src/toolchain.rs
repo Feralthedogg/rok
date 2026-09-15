@@ -567,10 +567,19 @@ pub fn link_object(
         if t.triple == "wasm32-wasi-threads" {
             inputs.push(wasm_tls_object(&t, tmp.path())?.into_os_string());
         }
+        if let Some(w) = &module.mir.link.wit {
+            inputs.extend(wit_link_args(w, tmp.path())?);
+        }
         inputs.extend(module.archives.iter().map(|a| a.clone().into_os_string()));
         inputs.push(rokr_arg(opts, false).into());
         if let Some((rt, sym)) = profile_runtime(&t, opts) {
-            inputs.extend([rt.into(), "-u".into(), sym.into()]);
+            // wasm-component-ld forwards only the long form.
+            let u = if t.triple.starts_with("wasm32") {
+                "--undefined"
+            } else {
+                "-u"
+            };
+            inputs.extend([rt.into(), u.into(), sym.into()]);
         }
         inputs.extend(search);
         inputs.extend(native_lib_args(&libs, apple, opts)?);
@@ -602,6 +611,39 @@ pub fn link_object(
             .map_err(|e| err(format!("{}: {e}", out.display())))?;
     }
     Ok(())
+}
+
+/// `wasm-component-ld`'s arguments for the WIT of `ffi::wit` (stdlib
+/// 1.8): the component's world in a directory under `tmp`, its sources
+/// under `deps/` (as `wit-parser` reads a package directory), and the
+/// core exports the world's functions are.
+fn wit_link_args(w: &rokc_mir::WitLink, tmp: &Path) -> Result<Vec<OsString>, RokDiagnostic> {
+    let io = |p: &Path, e: std::io::Error| err(format!("cannot write {}: {e}", p.display()));
+    let dir = tmp.join("wit");
+    let deps = dir.join("deps");
+    std::fs::create_dir_all(&deps).map_err(|e| io(&deps, e))?;
+    let world = dir.join("component.wit");
+    std::fs::write(&world, &w.world).map_err(|e| io(&world, e))?;
+    for (i, src) in w.sources.iter().enumerate() {
+        let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("wit");
+        if src.is_dir() {
+            let to = deps.join(format!("{i}-{stem}"));
+            std::fs::create_dir_all(&to).map_err(|e| io(&to, e))?;
+            let files = std::fs::read_dir(src).map_err(|e| io(src, e))?;
+            for f in files.filter_map(Result::ok).map(|e| e.path()) {
+                if f.is_file() && f.extension().is_some_and(|x| x == "wit") {
+                    let dst = to.join(f.file_name().unwrap_or_default());
+                    std::fs::copy(&f, &dst).map_err(|e| io(&dst, e))?;
+                }
+            }
+        } else {
+            let dst = deps.join(format!("{i}-{stem}.wit"));
+            std::fs::copy(src, &dst).map_err(|e| io(&dst, e))?;
+        }
+    }
+    let mut a: Vec<OsString> = vec!["--component-type".into(), dir.into_os_string()];
+    a.extend(w.exports.iter().map(|s| format!("--export={s}").into()));
+    Ok(a)
 }
 
 /// An instrumented executable's profile runtime (compiler-rt's) and the

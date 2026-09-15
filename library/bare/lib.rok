@@ -6,6 +6,7 @@
 // explicitly.
 
 pub mod alloc;
+pub mod ffi;
 pub mod mem;
 pub mod mlir;
 pub mod ptr;

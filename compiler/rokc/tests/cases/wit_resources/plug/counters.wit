@@ -1,0 +1,18 @@
+package test:res;
+
+interface counters {
+    resource counter {
+        constructor(start: u32);
+        inc: func(by: u32) -> u32;
+        get: func() -> u32;
+        merge: static func(a: borrow<counter>, b: borrow<counter>) -> counter;
+    }
+    record tagged { name: string, c: counter }
+
+    make: func(start: u32) -> counter;
+    read: func(c: borrow<counter>) -> u32;
+    take: func(c: counter) -> u32;
+    pair: func(a: u32, b: u32) -> list<counter>;
+    tag: func(name: string, c: counter) -> tagged;
+    untag: func(t: tagged) -> result<counter, string>;
+}

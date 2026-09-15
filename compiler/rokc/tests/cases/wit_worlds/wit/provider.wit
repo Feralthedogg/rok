@@ -1,0 +1,10 @@
+package test:w;
+
+world provider {
+    use shared.{pair};
+    export answer: func(p: pair) -> string;
+    export tools: interface {
+        use shared.{pair};
+        double: func(x: u32) -> pair;
+    }
+}

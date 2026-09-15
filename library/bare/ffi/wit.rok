@@ -1,0 +1,199 @@
+// rok::bare::ffi::wit — what the bindings `ffi::wit::import` /
+// `ffi::wit::export` generate (stdlib spec 1.8) run on: linear memory
+// reads and writes at canonical ABI addresses (`i32`), the blocks the
+// canonical ABI lowers strings and lists into, and resource handles.
+//
+// Blocks come from the C allocator, as do the ones the host fills
+// through `cabi_realloc` (wasi-libc's): a lifted string or list frees
+// its block once copied into GC memory.
+
+use rok::bare::ptr::{ConstPtr, Ptr, from_exposed_provenance};
+use rok::bare::mem::reinterpret;
+
+extern "rok" {
+    fn rok_alloc_raw(size: usize, align: usize, zeroed: i32) -> usize;
+    fn rok_free(ptr: usize);
+}
+
+fn at<T>(a: i32) -> Ptr<T> { unsafe { from_exposed_provenance::<T>(a as u32 as usize) } }
+
+pub unsafe fn load_u8(a: i32) -> u8 { at::<u8>(a).read() }
+pub unsafe fn load_u16(a: i32) -> u16 { at::<u16>(a).read() }
+pub unsafe fn load_i32(a: i32) -> i32 { at::<i32>(a).read() }
+pub unsafe fn load_i64(a: i32) -> i64 { at::<i64>(a).read() }
+pub unsafe fn load_f32(a: i32) -> f32 { at::<f32>(a).read() }
+pub unsafe fn load_f64(a: i32) -> f64 { at::<f64>(a).read() }
+pub unsafe fn store_u8(a: i32, v: u8) { at::<u8>(a).write(v); }
+pub unsafe fn store_u16(a: i32, v: u16) { at::<u16>(a).write(v); }
+pub unsafe fn store_i32(a: i32, v: i32) { at::<i32>(a).write(v); }
+pub unsafe fn store_i64(a: i32, v: i64) { at::<i64>(a).write(v); }
+pub unsafe fn store_f32(a: i32, v: f32) { at::<f32>(a).write(v); }
+pub unsafe fn store_f64(a: i32, v: f64) { at::<f64>(a).write(v); }
+
+// Joined flat slots of a variant (canonical ABI `join`).
+pub fn f32_bits(x: f32) -> i32 { reinterpret(x) }
+pub fn f32_from(x: i32) -> f32 { reinterpret(x) }
+pub fn f64_bits(x: f64) -> i64 { reinterpret(x) }
+pub fn f64_from(x: i64) -> f64 { reinterpret(x) }
+
+pub fn char_from(x: i32) -> char {
+    match char::from_u32(x as u32) {
+        c: char => c,
+        none => panic("wit: not a char"),
+    }
+}
+
+/// A discriminant out of range.
+pub fn bad_case() -> ! { panic("wit: invalid variant case") }
+
+/// A block freed by `free`.
+pub unsafe fn free(a: i32) { rok_free(a as u32 as usize); }
+
+/// The `n` UTF-8 bytes at `p` as a `str`; frees the block.
+pub unsafe fn str_take(p: i32, n: i32) -> str {
+    if n == 0 {
+        return "";
+    }
+    let bytes = at::<u8>(p).as_many().slice(n as u32 as usize);
+    let s = try! str::from_utf8(bytes);
+    free(p);
+    s
+}
+
+/// The `n` bytes at `p`; frees the block.
+pub unsafe fn bytes_take(p: i32, n: i32) -> List<u8> {
+    if n == 0 {
+        return List::new();
+    }
+    let l = at::<u8>(p).as_many().slice(n as u32 as usize).to_list();
+    free(p);
+    l
+}
+
+/// The blocks values were lowered into: freed together after an import
+/// call; an export's are freed by its post-return function instead.
+pub struct Blocks {
+    list: List<i32>;
+}
+
+impl Blocks {
+    pub fn new() -> Blocks { Blocks { list: List::new() } }
+
+    /// `size` bytes aligned to `align`; an empty block is the address
+    /// `align` (the canonical ABI checks only its alignment).
+    pub fn alloc(self, size: i32, align: i32) -> i32 {
+        if size == 0 {
+            return align;
+        }
+        let a = unsafe { rok_alloc_raw(size as u32 as usize, align as u32 as usize, 0) };
+        if a == 0 {
+            panic("wit: out of memory");
+        }
+        self.list.push(a as i32);
+        a as i32
+    }
+
+    /// `s` copied into a block: `(address, length)`.
+    pub fn str(self, s: str) -> (i32, i32) {
+        let n = s.len() as i32;
+        let p = self.alloc(n, 1);
+        if n > 0 {
+            unsafe { rok::bare::mem::copy_nonoverlapping(s.as_ptr(), at::<u8>(p), s.len()) };
+        }
+        (p, n)
+    }
+
+    /// `l` copied into a block: `(address, length)`.
+    pub fn bytes(self, l: List<u8>) -> (i32, i32) {
+        let n = l.len() as i32;
+        let p = self.alloc(n, 1);
+        for i in 0..l.len() {
+            unsafe { store_u8(p + i as i32, l[i]) };
+        }
+        (p, n)
+    }
+
+    pub fn free(self) {
+        for a in self.list.iter() {
+            unsafe { free(a) };
+        }
+        self.list.clear();
+    }
+}
+
+/// The handle of an imported resource, shared by every copy of its
+/// value: passing an `own` on or dropping it empties them all.
+pub struct Handle {
+    cell: List<i32>;
+    owned: bool;
+}
+
+impl Handle {
+    pub fn own(h: i32) -> Handle { Handle { cell: [h], owned: true } }
+    pub fn borrowed(h: i32) -> Handle { Handle { cell: [h], owned: false } }
+
+    pub fn get(self) -> i32 {
+        let h = self.cell[0];
+        if h < 0 {
+            panic("wit: resource used after it was dropped or passed on");
+        }
+        h
+    }
+
+    /// The handle, given away (an `own` parameter).
+    pub fn take(self) -> i32 {
+        if !self.owned {
+            panic("wit: a borrowed resource cannot be passed as `own`");
+        }
+        let h = self.get();
+        self.cell[0] = -1;
+        h
+    }
+
+    /// The handle to drop, if this value still owns one.
+    pub fn release(self) -> i32 | none {
+        let h = self.cell[0];
+        if !self.owned || h < 0 {
+            return none;
+        }
+        self.cell[0] = -1;
+        h
+    }
+}
+
+/// The values of an exported resource, by representation (`rep`): a
+/// handle the host holds keeps its value alive here until the host
+/// drops it (`[dtor]`).
+pub struct Table<T> {
+    slots: List<T | none>;
+    free: List<i32>;
+}
+
+impl<T> Table<T> {
+    pub fn new() -> Table<T> { Table { slots: List::new(), free: List::new() } }
+
+    pub fn insert(self, v: T) -> i32 {
+        match self.free.pop() {
+            rep: i32 => {
+                self.slots[rep as u32 as usize] = v;
+                rep
+            }
+            none => {
+                self.slots.push(v);
+                (self.slots.len() - 1) as i32
+            }
+        }
+    }
+
+    pub fn get(self, rep: i32) -> T {
+        match self.slots[rep as u32 as usize] {
+            v: T => v,
+            none => panic("wit: resource used after it was dropped"),
+        }
+    }
+
+    pub fn remove(self, rep: i32) {
+        self.slots[rep as u32 as usize] = none;
+        self.free.push(rep);
+    }
+}

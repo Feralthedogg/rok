@@ -1,0 +1,6 @@
+package a:b;
+
+interface i {
+    use x:y/z.{t};
+    f: func(v: t);
+}

@@ -1,0 +1,5 @@
+package test:w;
+
+interface shared {
+    record pair { a: u32, b: string }
+}

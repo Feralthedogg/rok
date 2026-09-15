@@ -10,6 +10,7 @@ pub mod native;
 pub mod rhir;
 mod toolchain;
 mod windows;
+mod wit;
 
 use std::path::{Path, PathBuf};
 
@@ -652,6 +653,15 @@ fn compile_unit(
             config.keep_ast.then_some(&mut sources),
         )
     });
+    let wit_link = wit::expand(
+        &mut all_items,
+        &mut all_uses,
+        config.target.triple.as_deref(),
+        &cfg_env,
+        &ext,
+        &metas,
+        &mut diags,
+    );
     let is_lib = !config.anonymous && path.file_name().is_some_and(|n| n == "lib.rok");
     let mut tests = Vec::new();
     let mut root_main = rokc_hir::RootMain::Declared;
@@ -783,6 +793,7 @@ fn compile_unit(
         }
     }
     mir.link.native_libs = libs;
+    mir.link.wit = wit_link;
     mir.link.lib = input.lib;
     mir.link.prebuilt = input.prebuilt;
     mir.link.type_offset = prebuilt
@@ -1240,6 +1251,7 @@ thread_local! {
 
 /// An item and the module path (`a::b`, `""` at the root) it is in.
 type ModItem = (String, rokc_ast::Item);
+type UseEntry = (String, rokc_core::Visibility, rokc_ast::UseTree);
 
 /// One cached parse (`cached`): its key, the files it registered, its
 /// result.

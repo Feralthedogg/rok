@@ -1,0 +1,11 @@
+// only-os: macos linux windows
+// expect-error: `ffi::wit` builds a WebAssembly component: it needs `--target wasm32-wasi`
+
+// Stdlib 1.8: WIT bindings are for a component (`wasm32-wasi`); the WIT
+// itself is still checked.
+ffi::wit::export { "calc.wit" }
+
+#[wit::export]
+fn add(a: i32, b: i32) -> i32 { a + b }
+
+fn main() {}

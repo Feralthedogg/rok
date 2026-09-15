@@ -1,0 +1,57 @@
+// only-target: wasm32-wasi
+// expect-exit: 0
+// expect-stdout:
+// random bytes: 16
+// after 2020: true true
+// preopen /
+// wrote 3
+// size 3 file true
+// read [104, 105, 33]
+// stream [105, 33]
+// missing true
+// stat error NoEntry true
+// dropped true
+
+// Stdlib 1.8: a world of WASI imports through `ffi::wit::import`, the
+// host's own implementations. Records (`datetime`, `descriptor-stat`
+// with `option<datetime>`), enums (`descriptor-type`, `error-code`),
+// flags, `result` (thrown and caught), tuples, lists, strings, and
+// resources: owned ones from a list (`get-directories`) and a result
+// (`open-at`, `read-via-stream`), borrowed by methods, dropped by
+// `using`.
+ffi::wit::import { "wit" }
+
+use wasi::random::random;
+use wasi::clocks::wall_clock;
+use wasi::filesystem::preopens;
+use wasi::filesystem::types::{DescriptorFlags, DescriptorType, ErrorCode, OpenFlags, PathFlags};
+
+fn main() {
+    let bytes = random::get_random_bytes(16u64);
+    println(f"random bytes: {bytes.len()}");
+    let now = wall_clock::now();
+    println(f"after 2020: {now.seconds > 1577836800u64} {now.nanoseconds < 1000000000u32}");
+
+    let dirs = preopens::get_directories();
+    let (root, name) = dirs[0];
+    println(f"preopen {name}");
+    let path = f"tmp/rok-wit-{random::get_random_u64()}.txt";
+    let rw = DescriptorFlags { read: true, write: true, ..DescriptorFlags::default() };
+    let create = OpenFlags { create: true, ..OpenFlags::default() };
+    using f = try! root.open_at(PathFlags::default(), path, create, rw) {
+        println(f"wrote {try! f.write([104u8, 105u8, 33u8], 0u64)}");
+        let st = try! f.stat();
+        println(f"size {st.size} file {st.type_ == DescriptorType::RegularFile}");
+        let (data, _) = try! f.read(100u64, 0u64);
+        println(f"read {data:?}");
+        let s = try! f.read_via_stream(1u64);
+        println(f"stream {try! s.blocking_read(10u64):?}");
+    }
+    let e = try? root.open_at(PathFlags::default(), "tmp/no/such/file", OpenFlags::default(), rw);
+    println(f"missing {e is none}");
+    try root.stat_at(PathFlags::default(), "tmp/no/such/file") catch err {
+        println(f"stat error {err:?} {err == ErrorCode::NoEntry}");
+    };
+    try! root.unlink_file_at(path);
+    println(f"dropped {(try? root.stat_at(PathFlags::default(), path)) is none}");
+}

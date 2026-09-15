@@ -20,17 +20,22 @@
 //!     is listed (POSIX commands, paths, signals)
 //!   - `// only-pointer-width: 64` — skipped on targets of another width
 //!     (sizes, `usize::BITS`, layouts in the expected output)
-//!   - `// needs: threads net process fs posix-fs exit8` — skipped on a
+//!   - `// needs: threads net process fs posix-fs` — skipped on a
 //!     target without one of them: threads only on `wasm32-wasi-threads`
 //!     among the wasm32 targets, sockets only on `wasm32-wasi`, no
 //!     processes or signals on wasm32 (stdlib 0.1.4, 3.x availability;
 //!     `process` also covers POSIX C calls), a browser no file system
-//!     (`fs`), WASI no `dup` / `flock` / `mmap` (`posix-fs`); `exit8` is
-//!     an exit code above 125 (wasmtime takes those from a WASI preview 1
-//!     module as traps)
+//!     (`fs`), WASI no `dup` / `flock` / `mmap` (`posix-fs`)
 //!   - `// only-target: wasm32-wasi ..` — run only on the listed
 //!     `ROK_TEST_TARGET`s (what one target reports that the others do
 //!     not, e.g. its `Unsupported` APIs)
+//!   - `// wasm-invoke: f(1, "a") => 2` — (repeatable) after the run, the
+//!     component's export `f` called through `wasmtime run --invoke`
+//!     (WAVE syntax) prints the value after `=>`
+//!   - `// wasm-plug: dir/main.rok` — that program is built too and
+//!     `wac plug` (`ROK_TEST_WAC`; the case is skipped without it)
+//!     satisfies the case's imports with its exports; the composition
+//!     runs
 //!   - `// spec: <section>`     — the spec section a case checks (a tag)
 //!
 //! Environment:
@@ -272,19 +277,19 @@ fn lacks(need: &str) -> bool {
         "process" | "posix-fs" => wasm(),
         "net" => wasm() && t != "wasm32-wasi",
         "fs" => t == "wasm32-unknown-unknown",
-        "exit8" => t == "wasm32-wasi-threads",
         _ => panic!("unknown `// needs: {need}`"),
     }
 }
 
 /// A run's exit code `got` is the expected one. A `wasm32-wasi`
 /// component exits through `wasi:cli/exit`, which carries only success
-/// or failure (1).
+/// or failure (1); wasmtime fails (1) a preview 1 module's exit with a
+/// code of 126 or more (a trap, such as `abort`'s, still gives 134).
 pub fn exit_matches(got: i32, expected: i32) -> bool {
-    if test_target().as_deref() == Some("wasm32-wasi") {
-        got == i32::from(expected != 0)
-    } else {
-        got == expected
+    match test_target().as_deref() {
+        Some("wasm32-wasi") => got == i32::from(expected != 0),
+        Some("wasm32-wasi-threads") => got == expected || (expected >= 126 && got == 1),
+        _ => got == expected,
     }
 }
 
@@ -354,6 +359,16 @@ pub fn run_command(exe: &Path) -> Command {
         }
         _ => Command::new(exe),
     }
+}
+
+/// `wasmtime run --invoke <call> <exe>`: export `call` of the component
+/// `exe` (`ROK_TEST_WASM_RUNNER`), without running `main`.
+pub fn invoke_command(exe: &Path, call: &str) -> Command {
+    let runner = env::var_os("ROK_TEST_WASM_RUNNER")
+        .expect("`// wasm-invoke:` needs ROK_TEST_WASM_RUNNER (wasmtime)");
+    let mut c = Command::new(runner);
+    c.args(["run", "--invoke", call]).arg(exe);
+    c
 }
 
 /// Run `f` over `items` on all cores; results keep input order.

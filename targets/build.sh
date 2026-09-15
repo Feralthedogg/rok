@@ -13,7 +13,8 @@
 #                        against pinned SHA-256s). Executables need
 #                        glibc >= 2.34 (the 32-bit runtimes call its
 #                        time64 symbols, .cargo/config.toml).
-#   wasm32-*:            crt1-command.o libc.a: wasi-libc, the copy the
+#   wasm32-*:            crt1-command.o (the browser's: crt1-reactor.o)
+#                        libc.a: wasi-libc, the copy the
 #                        pinned Rust toolchain ships for the Rust target
 #                        the runtime is built for: wasm32-wasip2 for
 #                        wasm32-wasi (plus that toolchain's
@@ -270,7 +271,11 @@ for t in ${*:-$TARGETS}; do
 	cp "${CARGO_TARGET_DIR:-target}/$rust/release/$rt" "$dir/"
 	case $t in
 	wasm32-*)
-		for f in crt1-command.o libc.a; do
+		case $t in
+		wasm32-unknown-unknown) crt1=crt1-reactor.o ;;
+		*) crt1=crt1-command.o ;;
+		esac
+		for f in $crt1 libc.a; do
 			cp "$sysroot/lib/rustlib/$rust/lib/self-contained/$f" "$dir/"
 		done
 		case $t in

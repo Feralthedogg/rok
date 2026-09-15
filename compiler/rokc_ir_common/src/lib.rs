@@ -194,6 +194,9 @@ pub struct FnFacts {
     pub linkage: Linkage,
     /// `#[export_name("sym")]` (spec 905.8).
     pub export_name: Option<String>,
+    /// An `extern "C"` WIT binding's core import `(module, name)` on
+    /// wasm32 (`rokc_ast::WASM_IMPORT_ATTR`).
+    pub wasm_import: Option<(String, String)>,
     pub role: FnRole,
     /// A generic instance: its type arguments, mangled into the symbol's
     /// typehash (905.2). The function's name then ends in

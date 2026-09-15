@@ -438,6 +438,12 @@ impl Printer {
             }
             Item::Extern(e) => {
                 self.attrs(&e.attrs);
+                if let Some(w) = &e.wit {
+                    let kind = if w.export { "export" } else { "import" };
+                    let paths: Vec<String> = w.paths.iter().map(|p| format!("{p:?}")).collect();
+                    let _ = write!(self.out, "ffi::wit::{kind} {{ {} }}", paths.join(", "));
+                    return;
+                }
                 let _ = write!(self.out, "extern \"{}\" ", e.abi);
                 self.braced(&e.items, |p, it| match it {
                     ExternItem::Fn(f) => p.fn_def(f),

@@ -1,0 +1,4 @@
+// rok::bare::ffi — foreign interfaces. `wit`: what the WIT bindings of
+// `ffi::wit::import` / `ffi::wit::export` (stdlib spec 1.8) run on.
+
+pub mod wit;

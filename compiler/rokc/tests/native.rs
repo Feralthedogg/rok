@@ -595,10 +595,11 @@ fn debug_info_shows_sums_and_gc_objects() {
 }
 
 /// `-g` ELF executables for Linux, linked by the embedded lld from
-/// several rok objects (the program, a dependency, the cached library):
-/// each unit finds its own abbreviations and line table, and lexical
-/// blocks name their code exactly (no overlapping siblings). Link only:
-/// nothing runs here.
+/// several rok objects (the program, a dependency, the cached library)
+/// by both back ends: each unit finds its own abbreviations and line
+/// table, lexical blocks name their code exactly (no overlapping
+/// siblings), and code `--gc-sections` dropped leaves no bad ranges.
+/// Link only: nothing runs here.
 #[test]
 fn elf_debug_info_of_several_objects() {
     if setup().is_none() {
@@ -616,7 +617,8 @@ fn elf_debug_info_of_several_objects() {
         dir.join("greet/lib.rok"),
         "pub fn greet(n: i32) -> i32 {\n    let s = 0;\n    for i in 0..n {\n        \
          if i % 2 == 0 {\n            let d = i * 3;\n            s += d;\n        } else {\n            \
-         let e = i + 7;\n            s -= e;\n        }\n    }\n    return s;\n}\n",
+         let e = i + 7;\n            s -= e;\n        }\n    }\n    return s;\n}\n\
+         pub fn unused(n: i32) -> i32 { return n * 9; }\n",
     )
     .unwrap();
     fs::create_dir_all(dir.join("app")).unwrap();
@@ -630,16 +632,19 @@ fn elf_debug_info_of_several_objects() {
          println(f\"{w}\");\n}\nprintln(f\"{k} {kids(k)}\");\n",
     )
     .unwrap();
-    for t in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl"] {
+    let builds = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl"]
+        .into_iter()
+        .flat_map(|t| [(t, "-O0"), (t, "-O1")]);
+    for (t, opt) in builds {
         if !targets.join(t).is_dir() {
             continue;
         }
-        let exe = dir.join(format!("app-{t}"));
+        let exe = dir.join(format!("app-{t}{opt}"));
         let out = Command::new(ROKC)
             .current_dir(&dir)
             .env("ROK_HOME", common::workspace())
             .args(["-q", "build", "app", "--extern", "greet=greet", "-g"])
-            .args(["-O0", "--target", t, "-o"])
+            .args([opt, "--target", t, "-o"])
             .arg(&exe)
             .output()
             .unwrap();
@@ -653,23 +658,27 @@ fn elf_debug_info_of_several_objects() {
         let sub = info
             .split("DW_TAG_subprogram")
             .find(|s| s.contains("(\"greet::greet\")"))
-            .unwrap_or_else(|| panic!("{t}: no `greet` subprogram:\n{info}"));
-        assert!(sub.contains("greet/lib.rok\")"), "{t}: {sub}");
+            .unwrap_or_else(|| panic!("{t} {opt}: no `greet` subprogram:\n{info}"));
+        assert!(sub.contains("greet/lib.rok\")"), "{t} {opt}: {sub}");
+        // Optimized code keeps no dead locals (nor their types).
+        let o0 = opt == "-O0";
         assert!(
-            sub.contains("(\"d\")") && sub.contains("(\"e\")"),
-            "{t}: {sub}"
+            !o0 || sub.contains("(\"d\")") && sub.contains("(\"e\")"),
+            "{t} {opt}: {sub}"
         );
         // Sums are variant parts; a struct reached again through a
         // `GcBuf` field is a declaration.
         assert!(
-            info.split("DW_TAG_variant_part")
+            !o0 || info
+                .split("DW_TAG_variant_part")
                 .any(|s| s.contains("\"Shape::Rect\")") && s.contains("DW_AT_discr_value")),
-            "{t}: no `Shape` variant part:\n{info}"
+            "{t} {opt}: no `Shape` variant part:\n{info}"
         );
         assert!(
-            info.split("DW_TAG_structure_type")
+            !o0 || info
+                .split("DW_TAG_structure_type")
                 .any(|s| s.contains("(\"Node\")") && s.contains("DW_AT_declaration")),
-            "{t}: no `Node` declaration:\n{info}"
+            "{t} {opt}: no `Node` declaration:\n{info}"
         );
         let lines = Command::new(dump)
             .arg("--debug-line")
@@ -677,31 +686,23 @@ fn elf_debug_info_of_several_objects() {
             .output()
             .unwrap();
         let lines = text(&lines.stdout);
-        // Directories and names are separate entries.
+        // Directories and names are separate entries (LLVM's DWARF 4
+        // leaves the unit's own directory implicit).
         for f in ["/greet\"", "/app\"", "\"lib.rok\"", "\"main.rok\""] {
-            assert!(lines.contains(f), "{t}: no line table names {f}");
+            assert!(
+                !o0 && f == "/app\"" || lines.contains(f),
+                "{t} {opt}: no line table names {f}"
+            );
         }
-        // The runtime's and the C library's DWARF have errors of their
-        // own (sections lld dropped); rok's units have none.
+        // Dropped code's DWARF addresses are the tombstone, so no unit
+        // (rok's, the runtime's, the C library's) has an error.
         let verify = Command::new(dump)
             .arg("--verify")
             .arg(&exe)
             .output()
             .unwrap();
         let verify = text(&verify.stdout);
-        let rok = rok_units(&info);
-        assert!(rok.len() >= 2, "{t}: rok units {rok:?}");
-        for e in verify.split("\nerror: ").skip(1) {
-            let die = e.split_whitespace().find_map(|w| {
-                u64::from_str_radix(w.strip_prefix("0x")?.strip_suffix(':')?, 16).ok()
-            });
-            if let Some(d) = die {
-                assert!(
-                    !rok.iter().any(|r| r.contains(&d)),
-                    "{t}: error in a rok unit: {e}"
-                );
-            }
-        }
+        assert!(!verify.contains("error:"), "{t} {opt}: {verify}");
     }
 }
 
@@ -757,28 +758,6 @@ fn unused_dependency_code_is_dropped() {
         assert!(has(&b, "marker-of-used-code"), "{t:?}");
         assert!(!has(&b, "marker-of-unused-code"), "{t:?}");
     }
-}
-
-/// The `.debug_info` offset ranges of the units rokc produced, from
-/// `llvm-dwarfdump --debug-info`.
-fn rok_units(info: &str) -> Vec<std::ops::Range<u64>> {
-    let hex = |w: &str| {
-        u64::from_str_radix(w.trim_start_matches("0x").trim_end_matches([':', ')']), 16).ok()
-    };
-    let parts: Vec<&str> = info.split("Compile Unit:").collect();
-    parts
-        .windows(2)
-        .filter(|p| p[1].contains("DW_AT_producer\t(\"rokc\")"))
-        .filter_map(|p| {
-            let start = hex(p[0].split_whitespace().last()?)?;
-            let end = hex(p[1]
-                .split("next unit at ")
-                .nth(1)?
-                .split_whitespace()
-                .next()?)?;
-            Some(start..end)
-        })
-        .collect()
 }
 
 /// Aggregates by value both ways, HFAs, `sret`, register exhaustion,

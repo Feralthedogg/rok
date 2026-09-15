@@ -189,6 +189,7 @@ fn runtime_decl(name: &str, target: &Target) -> Option<String> {
         "rok_gc_wb_slow" | "rok_gc_add_root" | "rok_static_init_end" => "(!llvm.ptr)".to_owned(),
         "rok_static_init_begin" => "(!llvm.ptr) -> i32".to_owned(),
         "rok_runtime_yield"
+        | "rok_init_once"
         | "rok_runtime_init"
         | "rok_runtime_shutdown"
         | "rok_enter_native"
@@ -495,11 +496,19 @@ impl Emitter {
                     // The exported name (or `<body>.c`) is the C entry:
                     // C's calls come back into rok through it.
                     sig.name = crate::mangle::mangled(f, &self.pkgs);
-                    let entry = f
-                        .facts
-                        .export_name
-                        .clone()
-                        .unwrap_or_else(|| format!("{}.c", sig.name));
+                    // A WIT export's name (`ns:pkg/iface#f`) is quoted.
+                    let entry = f.facts.export_name.as_ref().map_or_else(
+                        || format!("{}.c", sig.name),
+                        |n| {
+                            if n.chars()
+                                .all(|c| c.is_ascii_alphanumeric() || "_$.".contains(c))
+                            {
+                                n.clone()
+                            } else {
+                                format!("{n:?}")
+                            }
+                        },
+                    );
                     let (params, ret) = c_signature(&sig.params, &sig.ret, &abi, &self.target);
                     let params: Vec<String> = params.into_iter().map(|(t, _)| t).collect();
                     let ty = format!(
@@ -614,8 +623,14 @@ impl Emitter {
             .filter(|f| f.facts.linkage == Linkage::Extern)
             .map(|f| f.name.as_str())
             .collect();
+        // wasm32 defines `rok_init_once` beside the main wrapper.
+        let main_here = self.repl.is_none()
+            && module
+                .functions
+                .iter()
+                .any(|f| f.facts.role == FnRole::Main);
         for name in std::mem::take(&mut self.needs) {
-            if declared.contains(name) {
+            if declared.contains(name) || (name == "rok_init_once" && main_here) {
                 continue;
             }
             match runtime_decl(name, &self.target) {
@@ -908,7 +923,13 @@ impl Emitter {
         let inline_copy = f.facts.linkage == Linkage::Prebuilt && !f.blocks.is_empty();
         if f.facts.linkage != Linkage::Defined && !inline_copy {
             if let Some(abi) = &sig.c {
-                self.emit_c_decl(&sig.name, &sig.params, &sig.ret, abi);
+                self.emit_c_decl(
+                    &sig.name,
+                    &sig.params,
+                    &sig.ret,
+                    abi,
+                    f.facts.wasm_import.as_ref(),
+                );
                 return;
             }
             // The runtime's (`extern "rok"`) are C functions; a prebuilt
@@ -1076,12 +1097,18 @@ impl Emitter {
             .map(|(i, (t, a))| format!("%arg{i}: {t}{a}"))
             .collect();
         let arrow = c_ret_arrow(ret.as_deref(), &sig.ret, Some(abi), &self.target);
-        let (vis, linkage) = if exported {
-            ("", "")
+        let (vis, linkage) = if exported && self.reactor() {
+            // A browser module exports it to JS under the same name.
+            (
+                "",
+                format!(r#" attributes {{passthrough = [["wasm-export-name", "{entry}"]]}}"#),
+            )
+        } else if exported {
+            ("", String::new())
         } else {
             (
                 "private ",
-                " attributes {llvm.linkage = #llvm.linkage<internal>}",
+                " attributes {llvm.linkage = #llvm.linkage<internal>}".to_owned(),
             )
         };
         let mut b = format!(
@@ -1123,6 +1150,12 @@ impl Emitter {
         let (tys, _) = rok_fn_types(&sig.params, &sig.ret, &self.target, false);
         let rty = mlir_type(&sig.ret, &self.target);
         let unit = sig.ret == MirTy::Unit;
+        // wasm32: the host may call an export before `_start` (or
+        // without it): the runtime starts on the first call.
+        if exported && self.target.family() == "wasm" {
+            self.needs.insert("rok_init_once");
+            b.push_str("    func.call @rok_init_once() : () -> ()\n");
+        }
         // Called from C that this thread entered from rok (`PARKED`, 804
         // §8.4.10): run as a mutator again for the body.
         self.needs.insert("rok_native_reenter");
@@ -1170,7 +1203,16 @@ impl Emitter {
     /// An `extern "C"` declaration under the platform C ABI (spec 8.6):
     /// aggregates per `abi::classify`, `str` as `char*`, small integers
     /// caller-extended, variadic ones as an `llvm.func` with `...`.
-    fn emit_c_decl(&mut self, symbol: &str, params: &[MirTy], ret_ty: &MirTy, abi: &FnAbi) {
+    ///
+    /// `wasm_import`: the core import `(module, name)` it is on wasm32.
+    fn emit_c_decl(
+        &mut self,
+        symbol: &str,
+        params: &[MirTy],
+        ret_ty: &MirTy,
+        abi: &FnAbi,
+        wasm_import: Option<&(String, String)>,
+    ) {
         let (params, ret) = c_signature(params, ret_ty, abi, &self.target);
         let ret = c_ret_arrow(ret.as_deref(), ret_ty, Some(abi), &self.target);
         let mut params: Vec<String> = params.into_iter().map(|(t, a)| t + &a).collect();
@@ -1197,10 +1239,12 @@ impl Emitter {
             .enumerate()
             .map(|(i, p)| format!("%arg{i}: {p}"))
             .collect();
-        let attrs = if abi.rok {
-            runtime_fn_attrs(symbol)
-        } else {
-            ""
+        let attrs = match wasm_import {
+            Some((module, name)) if self.target.family() == "wasm" => format!(
+                " attributes {{passthrough = [[\"wasm-import-module\", {module:?}], [\"wasm-import-name\", {name:?}]]}}"
+            ),
+            _ if abi.rok => runtime_fn_attrs(symbol).to_owned(),
+            _ => String::new(),
         };
         let _ = writeln!(
             self.out,
@@ -1209,10 +1253,16 @@ impl Emitter {
         );
     }
 
+    /// A browser module (`wasm32-unknown-unknown`): a wasm reactor.
+    fn reactor(&self) -> bool {
+        self.target.family() == "wasm" && self.target.os == "none"
+    }
+
     /// The C `main` (spec 905.9): runtime init, type registration, the
     /// user's `main`, runtime shutdown; its result as the exit code.
     /// wasm32: `__main_void`, what wasi-libc's `_start` calls (clang's
-    /// name for a `main` without parameters there).
+    /// name for a `main` without parameters there). In a browser module
+    /// (a reactor, no `_start`) it is the export `main`.
     fn emit_main_wrapper(
         &mut self,
         user_main: &str,
@@ -1227,14 +1277,46 @@ impl Emitter {
         } else {
             "main"
         };
-        let _ = writeln!(self.out, "  func.func @{entry}() -> i32 {{");
-        self.out.push_str(
-            "    func.call @rok_runtime_init() : () -> ()\n    func.call @rok.register_types() : () -> ()\n",
-        );
+        let attrs = if self.reactor() {
+            r#" attributes {passthrough = [["wasm-export-name", "main"]]}"#
+        } else {
+            ""
+        };
+        let shutdown = "    func.call @rok_runtime_shutdown() : () -> ()\n";
+        if self.target.family() == "wasm" {
+            // Once, by `_start` or the first export called (an export
+            // of a component may run without `_start`).
+            self.out.push_str(
+                "  llvm.mlir.global internal @rok.inited(0 : i8) {addr_space = 0 : i32} : i8
+  func.func @rok_init_once() {
+    %a = llvm.mlir.addressof @rok.inited : !llvm.ptr
+    %v = llvm.load %a : !llvm.ptr -> i8
+    %z = arith.constant 0 : i8
+    %c = arith.cmpi eq, %v, %z : i8
+    cf.cond_br %c, ^init, ^done
+  ^init:
+    %one = arith.constant 1 : i8
+    llvm.store %one, %a : i8, !llvm.ptr
+    func.call @rok_runtime_init() : () -> ()
+    func.call @rok.register_types() : () -> ()
+    cf.br ^done
+  ^done:
+    func.return
+  }
+",
+            );
+            let _ = writeln!(self.out, "  func.func @{entry}() -> i32{attrs} {{");
+            self.out
+                .push_str("    func.call @rok_init_once() : () -> ()\n");
+        } else {
+            let _ = writeln!(self.out, "  func.func @{entry}() -> i32 {{");
+            self.out.push_str(
+                "    func.call @rok_runtime_init() : () -> ()\n    func.call @rok.register_types() : () -> ()\n",
+            );
+        }
         if matches!(user_ret_ty, MirTy::Unit) {
             let _ = writeln!(self.out, "    func.call @{user_main}() : () -> ()");
-            self.out
-                .push_str("    func.call @rok_runtime_shutdown() : () -> ()\n");
+            self.out.push_str(shutdown);
             self.out.push_str("    %0 = arith.constant 0 : i32\n");
             self.out.push_str("    func.return %0 : i32\n");
             self.out.push_str("  }\n");
@@ -1242,8 +1324,7 @@ impl Emitter {
         }
         let ret = mlir_type(user_ret_ty, &self.target);
         let _ = writeln!(self.out, "    %0 = func.call @{user_main}() : () -> {ret}");
-        self.out
-            .push_str("    func.call @rok_runtime_shutdown() : () -> ()\n");
+        self.out.push_str(shutdown);
         // The OS wants an `i32` exit code.
         let conv = match user_ret_ty {
             MirTy::Prim(p) if p.is_int() || *p == PrimTy::Bool => {

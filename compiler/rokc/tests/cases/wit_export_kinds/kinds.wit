@@ -1,0 +1,31 @@
+package test:kinds;
+
+interface kinds {
+    record point { x: s32, y: s32, label: string }
+    variant shape { circle(f32), rect(tuple<u32, u32>), named(string), empty }
+    enum color { red, green, blue }
+    flags perms { read, write, exec }
+    resource counter {
+        constructor(start: u32);
+        inc: func(by: u32) -> u32;
+        get: func() -> u32;
+        merge: static func(a: borrow<counter>, b: borrow<counter>) -> counter;
+    }
+
+    echo-point: func(p: point) -> point;
+    area: func(s: shape) -> f64;
+    describe: func(s: shape) -> string;
+    next-color: func(c: color) -> color;
+    toggle: func(p: perms) -> perms;
+    find: func(xs: list<string>, x: string) -> option<u32>;
+    parse: func(s: string) -> result<s64, string>;
+    swap: func(t: tuple<u8, char, bool>) -> tuple<bool, char, u8>;
+    points: func(n: u32) -> list<point>;
+    sum17: func(a: u8, b: u8, c: u8, d: u8, e: u8, f: u8, g: u8, h: u8, i: u8, j: u8, k: u8, l: u8, m: u8, n: u8, o: u8, p: u8, q: u8) -> u32;
+    nested: func(x: list<list<string>>) -> list<option<s8>>;
+    maybe-shape: func(b: bool) -> option<shape>;
+    bits: func(x: f32, y: u64, ok: bool) -> result<f32, u64>;
+    make-counter: func(start: u32) -> counter;
+    read-counter: func(c: borrow<counter>) -> u32;
+    take-counter: func(c: counter) -> u32;
+}
