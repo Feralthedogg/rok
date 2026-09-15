@@ -146,8 +146,7 @@ impl MetaTable {
     /// Register `def`; a second block for the same name, or one taking a
     /// built-in derive / attribute name, is an error.
     pub fn add(&mut self, def: MetaDef) -> Option<RokDiagnostic> {
-        let clash =
-            |msg: String| RokDiagnostic::error(ErrorKind::Meta, msg).with_span(def.span, "");
+        let clash = |msg: String| RokDiagnostic::error(ErrorKind::Meta, def.span, msg);
         if let Some(old) = self.find(def.kind, &def.name) {
             if old.span == def.span && old.file == def.file {
                 return None;
@@ -231,7 +230,7 @@ fn attr_words(a: &Attribute) -> Vec<String> {
 }
 
 fn meta_err(span: Span, msg: impl Into<String>) -> RokDiagnostic {
-    RokDiagnostic::error(ErrorKind::Meta, msg).with_span(span, "")
+    RokDiagnostic::error(ErrorKind::Meta, span, msg)
 }
 
 /// Index of the token closing the group opened at `open`.

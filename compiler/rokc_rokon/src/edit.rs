@@ -22,7 +22,7 @@ pub enum Step<'a> {
     Index(usize),
 }
 
-/// `text` with the entry at `path` set to `value` (RokON text): replaced
+/// `text` with the entry at `path` set to `value` (ROKON text): replaced
 /// in place, or added at the end of its container. Missing containers on
 /// the way are added as `{}` (a field or string key only).
 pub fn set(text: &str, path: &[Step<'_>], value: &str) -> Result<String, Error> {

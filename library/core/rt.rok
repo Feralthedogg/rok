@@ -40,7 +40,9 @@ extern "rok" {
         timer: extern "C" fn(u64, GcBuf<Waker>),
         park: extern "C" fn(GcBuf<u8>, GcBuf<Waker>),
         unpark: extern "C" fn(GcBuf<u8>),
+        restart: extern "C" fn(),
     );
+    fn rok_thread_lost(id: u64) -> i32;
     fn rok_deque_new() -> GcBuf<GcBuf<rok::core::task::TaskRef>>;
     fn rok_deque_push(d: GcBuf<GcBuf<rok::core::task::TaskRef>>, item: GcBuf<rok::core::task::TaskRef>);
     fn rok_deque_steal(
@@ -62,8 +64,6 @@ extern "rok" {
     fn rok_str_parse_int(s: str, radix: u32, signed: i32, bits: u32, out: GcBuf<i64>) -> i32;
     fn rok_str_from_buf(buf: GcBuf<u8>, off: usize, len: usize) -> str;
     fn rok_str_parse_float(s: str, out: GcBuf<f64>) -> i32;
-    fn rok_buf_put_str(buf: GcBuf<u8>, off: usize, s: str);
-    fn rok_buf_put_char(buf: GcBuf<u8>, off: usize, c: u32) -> usize;
     fn rok_buf_utf8_error(buf: GcBuf<u8>, off: usize, len: usize) -> isize;
 
     // Formatting: a `Formatter`'s text; f-strings call these directly too. The
@@ -193,6 +193,8 @@ extern "rok" {
 // compiler takes this block as the list.
 #[no_safepoint]
 extern "rok" {
+    fn rok_buf_put_str(buf: GcBuf<u8>, off: usize, s: str);
+    fn rok_buf_put_char(buf: GcBuf<u8>, off: usize, c: u32) -> usize;
     fn rok_str_len(s: str) -> usize;
     fn rok_str_addr(s: str) -> usize;
     fn rok_str_cmp(a: str, b: str) -> i32;

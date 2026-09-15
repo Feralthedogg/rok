@@ -131,7 +131,7 @@ pub(crate) fn handler_at(tokens: &[Token], attr: usize, after: usize) -> String 
 /// a name that is not an identifier.
 #[must_use]
 pub fn check_keyword(def: &KeywordDef) -> Option<RokDiagnostic> {
-    let err = |m: String| Some(RokDiagnostic::error(ErrorKind::Meta, m).with_span(def.span, ""));
+    let err = |m: String| Some(RokDiagnostic::error(ErrorKind::Meta, def.span, m));
     let n = def.name.as_str();
     if RESERVED.contains(&n) || keyword_kind(n).is_some() || CONTEXTUAL.contains(&n) {
         return err(format!(
@@ -196,12 +196,11 @@ pub fn apply_keywords(tokens: &mut Vec<Token>, kws: &KeywordTable, diags: &mut V
         if names {
             diags.push(
                 RokDiagnostic::error(
-                    ErrorKind::Parse,
+                    ErrorKind::Parse, t.span,
                     format!(
                         "`{n}` is a keyword registered with `#[keyword(\"{n}\")]` and can't be used as a name (spec 6.6.3)"
                     ),
-                )
-                .with_span(t.span, ""),
+                ),
             );
             out.push(t.clone());
             continue;

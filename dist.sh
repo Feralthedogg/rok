@@ -37,7 +37,10 @@ case $(uname -s) in
 esac
 
 [ -n "${ROK_LLVM_PREFIX-}" ] || $build_llvm
-cargo build --release --locked -p rok -p rokc -p rokr
+cargo build --release --locked -p rok -p rokc
+# The runtime as one object (fat LTO): only its exports stay global
+# (runtime/rokr/localize.sh).
+CARGO_PROFILE_RELEASE_LTO=fat cargo build --release --locked -p rokr
 ./targets/build.sh
 
 target=${CARGO_TARGET_DIR:-target}/release

@@ -126,7 +126,7 @@ pub(super) fn lower_fstring(ctx: &mut LowerCtx<'_>, parts: &[FStringPart], span:
                     }
                 }
                 let is_dynamic = spec.iter().any(|p| matches!(p, SpecPiece::Expr(_)));
-                let outer = rokc_diagnostic::set_current_span(expr.span);
+                let outer = ctx.at.replace(expr.span);
                 let hole = if is_dynamic {
                     let spec_text = lower_fstring(ctx, &dynamic, at);
                     let spec = Spec::Dynamic(bind_hir(ctx, &mut stmts, "#fs", spec_text, at));
@@ -134,7 +134,7 @@ pub(super) fn lower_fstring(ctx: &mut LowerCtx<'_>, parts: &[FStringPart], span:
                 } else {
                     static_hole(ctx, value, &ty, &text)
                 };
-                rokc_diagnostic::set_current_span(outer);
+                ctx.at.set(outer);
                 if let Some(h) = hole {
                     pieces.push(Ok(h));
                 }

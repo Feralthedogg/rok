@@ -480,10 +480,11 @@ fn main() {
 }
 ";
 
-/// `-g` through LLVM: a sum is its tag and a union of its variants'
-/// payloads, a `GcBuf` reference points at its object (header, then the
-/// elements), and the C `main` and `rok.register_types` have
-/// subprograms. With `lldb`, `frame variable` shows them.
+/// `-g`, both back ends: a sum is a DWARF variant part (each variant a
+/// struct over the whole value, selected by its stored tag), a `GcBuf`
+/// reference points at its object (header, then the elements), and the C
+/// `main` and `rok.register_types` have subprograms. With `lldb`, `frame
+/// variable` shows them.
 #[test]
 fn debug_info_shows_sums_and_gc_objects() {
     let Some(env) = setup() else { return };
@@ -493,73 +494,104 @@ fn debug_info_shows_sums_and_gc_objects() {
     else {
         return;
     };
-    let dir = scratch("debug_types");
-    fs::write(dir.join("main.rok"), DEBUGGEE_TYPES).unwrap();
-    let exe = dir.join("out");
-    ok(&build(
-        &env,
-        &dir.join("main.rok"),
-        &["-g", "-C", "backend=llvm", "-o", exe.to_str().unwrap()],
-    ));
-    let dsym = dir.join("out.dSYM");
-    let target = if dsym.exists() { &dsym } else { &exe };
-    let info = Command::new(dump)
-        .arg("--debug-info")
-        .arg(target)
-        .output()
-        .unwrap();
-    let info = text(&info.stdout);
-    let union = info
-        .split("DW_TAG_union_type")
-        .find(|s| s.contains("(\"Rect\")"))
-        .unwrap_or_else(|| panic!("no `Shape` payload union:\n{info}"));
-    assert!(union.contains("(\"Circle\")"), "{union}");
-    assert!(
-        info.split("DW_TAG_union_type")
-            .any(|s| s.contains("(\"f64\")") && s.contains("(\"i64\")")),
-        "no `f64 | i64` payload union:\n{info}"
-    );
-    let buf = info
-        .split("DW_TAG_structure_type")
-        .find(|s| s.contains("(\"GcBuf<i32>\")"))
-        .unwrap_or_else(|| panic!("no `GcBuf<i32>` object type:\n{info}"));
-    assert!(
-        buf.contains("(\"items\")") && buf.contains("(\"type_id\")"),
-        "{buf}"
-    );
-    for f in ["(\"rok.register_types\")", "(\"main\")"] {
+    for backend in ["llvm", "native"] {
+        let dir = scratch(&format!("debug_types_{backend}"));
+        fs::write(dir.join("main.rok"), DEBUGGEE_TYPES).unwrap();
+        let exe = dir.join("out");
+        let be = format!("backend={backend}");
+        ok(&build(
+            &env,
+            &dir.join("main.rok"),
+            &["-g", "-C", &be, "-o", exe.to_str().unwrap()],
+        ));
+        let dsym = dir.join("out.dSYM");
+        let target = if dsym.exists() { &dsym } else { &exe };
+        let info = Command::new(dump)
+            .arg("--debug-info")
+            .arg(target)
+            .output()
+            .unwrap();
+        let info = text(&info.stdout);
+        let part = info
+            .split("DW_TAG_variant_part")
+            .find(|s| s.contains("(\"Rect\")"))
+            .unwrap_or_else(|| panic!("{backend}: no `Shape` variant part:\n{info}"));
+        assert!(
+            part.contains("(\"Circle\")")
+                && part.contains("DW_AT_discr_value")
+                && part.contains("\"Shape::Rect\""),
+            "{backend}: {part}"
+        );
+        assert!(
+            info.split("DW_TAG_variant_part")
+                .any(|s| s.contains("(\"f64\")") && s.contains("(\"i64\")")),
+            "{backend}: no `f64 | i64` variant part:\n{info}"
+        );
+        let buf = info
+            .split("DW_TAG_structure_type")
+            .find(|s| s.contains("(\"GcBuf<i32>\")"))
+            .unwrap_or_else(|| panic!("{backend}: no `GcBuf<i32>` object type:\n{info}"));
+        assert!(
+            buf.contains("(\"items\")") && buf.contains("(\"type_id\")"),
+            "{backend}: {buf}"
+        );
+        // Parameters have variables, used or not.
+        let show = info
+            .split("DW_TAG_subprogram")
+            .find(|s| s.contains("(\"show\")"))
+            .unwrap_or_else(|| panic!("{backend}: no `show` subprogram:\n{info}"));
+        for p in ["s", "v", "xs"] {
+            assert!(
+                show.split("DW_TAG_formal_parameter")
+                    .any(|d| d.contains(&format!("(\"{p}\")")) && d.contains("DW_AT_location")),
+                "{backend}: no parameter `{p}`:\n{show}"
+            );
+        }
         assert!(
             info.split("DW_TAG_subprogram")
-                .filter(|s| s.contains(f))
-                .count()
-                >= 1,
-            "no {f} subprogram:\n{info}"
+                .any(|s| s.contains("(\"rok.register_types\")")),
+            "{backend}: no `rok.register_types` subprogram:\n{info}"
         );
+        assert!(
+            info.split("DW_TAG_subprogram")
+                .filter(|s| s.contains("(\"main\")"))
+                .count()
+                >= 2,
+            "{backend}: no subprogram for the C `main`:\n{info}"
+        );
+        // A debugger that can run the program shows the values (within a
+        // minute: a wedged debug service makes `run` hang).
+        let Ok(mut lldb) = Command::new("lldb")
+            .args(["--batch", "-o", "b main.rok:10", "-o", "run"])
+            .args(["-o", "frame variable s v xs.h->items[0].buf->items[2]"])
+            .args(["-o", "kill"])
+            .arg(&exe)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        else {
+            return;
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while lldb.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() > deadline {
+                let _ = lldb.kill();
+                let _ = lldb.wait();
+                eprintln!("skipped: lldb did not finish");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let out = text(&lldb.wait_with_output().unwrap().stdout);
+        if !out.contains("stop reason") {
+            return;
+        }
+        let vars = out.split("frame variable").last().unwrap_or_default();
+        assert!(vars.contains("value = (0 = 3, 1 = 4)"), "{backend}: {out}");
+        assert!(vars.contains("value = (0 = 1.5)"), "{backend}: {out}");
+        assert!(vars.contains("$discr$ = 1"), "{backend}: {out}");
+        assert!(vars.contains("= 30"), "{backend}: {out}");
     }
-    assert!(
-        info.split("DW_TAG_subprogram")
-            .filter(|s| s.contains("(\"main\")"))
-            .count()
-            >= 2,
-        "no subprogram for the C `main`:\n{info}"
-    );
-    // A debugger that can run the program shows the values.
-    let Ok(lldb) = Command::new("lldb")
-        .args(["--batch", "-o", "b main.rok:10", "-o", "run"])
-        .args(["-o", "frame variable s v xs.data->items[0]->items[2]"])
-        .arg(&exe)
-        .output()
-    else {
-        return;
-    };
-    let out = text(&lldb.stdout);
-    if !out.contains("stop reason") {
-        return;
-    }
-    let vars = out.split("frame variable").last().unwrap_or_default();
-    assert!(vars.contains("Rect = (0 = 3, 1 = 4)"), "{out}");
-    assert!(vars.contains("f64 = 1.5"), "{out}");
-    assert!(vars.contains("= 30"), "{out}");
 }
 
 /// `-g` ELF executables for Linux, linked by the embedded lld from
@@ -590,8 +622,12 @@ fn elf_debug_info_of_several_objects() {
     fs::create_dir_all(dir.join("app")).unwrap();
     fs::write(
         dir.join("app/main.rok"),
-        "use greet::greet;\nlet k = greet(5);\nif k > 0 {\n    let w = k * 2;\n    \
-         println(f\"{w}\");\n}\nprintln(f\"{k}\");\n",
+        "use greet::greet;\nstruct Node { id: i32; kids: List<Node>; }\n\
+         enum Shape { Circle(f64), Rect(i32, i32), Empty }\n\
+         fn kids(k: i32) -> i64 {\n    let n = Node { id: k, kids: [] };\n    \
+         let s = Shape::Rect(k, 2);\n    return n.kids.len() as i64;\n}\n\
+         let k = greet(5);\nif k > 0 {\n    let w = k * 2;\n    \
+         println(f\"{w}\");\n}\nprintln(f\"{k} {kids(k)}\");\n",
     )
     .unwrap();
     for t in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl"] {
@@ -622,6 +658,18 @@ fn elf_debug_info_of_several_objects() {
         assert!(
             sub.contains("(\"d\")") && sub.contains("(\"e\")"),
             "{t}: {sub}"
+        );
+        // Sums are variant parts; a struct reached again through a
+        // `GcBuf` field is a declaration.
+        assert!(
+            info.split("DW_TAG_variant_part")
+                .any(|s| s.contains("\"Shape::Rect\")") && s.contains("DW_AT_discr_value")),
+            "{t}: no `Shape` variant part:\n{info}"
+        );
+        assert!(
+            info.split("DW_TAG_structure_type")
+                .any(|s| s.contains("(\"Node\")") && s.contains("DW_AT_declaration")),
+            "{t}: no `Node` declaration:\n{info}"
         );
         let lines = Command::new(dump)
             .arg("--debug-line")

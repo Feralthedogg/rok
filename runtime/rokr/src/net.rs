@@ -1096,6 +1096,18 @@ pub extern "C" fn rok_io_poller() -> i32 {
     }
 }
 
+/// After a failed REPL cell (`session`): a new poller on next use (a
+/// forked copy has no kqueue; an epoll set would be shared with the
+/// process that died). Waiters watch their fds again when woken.
+#[cfg(not(target_os = "wasi"))]
+pub fn reset_poller() {
+    let p = POLLER.swap(-1, Ordering::AcqRel);
+    if p >= 0 {
+        // SAFETY: our own fd, no longer published.
+        unsafe { libc::close(p) };
+    }
+}
+
 #[cfg(not(target_os = "wasi"))]
 /// Watch `fd` for readability and writability, edge-triggered (an
 /// event per change, so a waiter must re-check after it parks). Watching

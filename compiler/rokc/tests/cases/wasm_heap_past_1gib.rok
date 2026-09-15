@@ -1,0 +1,28 @@
+// spec: 0.6.1
+// only-target: wasm32-wasi wasm32-wasi-threads wasm32-unknown-unknown
+// expect-exit: 0
+// expect-stdout:
+// live 1200 MB in 300000 strings + 18750 large
+// ends: true true
+
+// wasm32's heap grows linear memory as it needs it, up to the 4 GiB
+// address space (no fixed reservation): 1.2 GB of live 4000-byte
+// strings in GC blocks, with a 16 KiB `malloc`'d (LOS) string every
+// 16 between them, whose growth the blocks skip.
+let small: List<str> = List::new();
+let large: List<str> = List::new();
+let i = 0usize;
+while i < 300000 {
+    let c = if i == 0 { "a" } else if i == 299999 { "z" } else { "m" };
+    small.push(c.repeat(4000));
+    if i % 16 == 0 {
+        large.push("L".repeat(16384));
+    }
+    i += 1;
+}
+let total = 0usize;
+for s in small {
+    total += s.len();
+}
+println(f"live {total / 1000000} MB in {small.len()} strings + {large.len()} large");
+println(f"ends: {small[0].starts_with("a")} {small[299999].starts_with("z")}");

@@ -50,6 +50,9 @@ pub struct Mutator {
     /// `rok_tls_worker_id` the spawner chose, written by [`attach`]
     /// (`u64::MAX`: keep the one `thread_init` allocated, then record it).
     worker_id: u64,
+    /// The OS thread id, written by [`attach`] (0 before).
+    #[cfg(windows)]
+    os_id: u64,
 }
 
 struct World {
@@ -230,6 +233,8 @@ pub fn register(root: *mut u8, worker_id: u64) -> *mut Mutator {
             satb: [ptr::null_mut(); 2],
             root,
             worker_id,
+            #[cfg(windows)]
+            os_id: 0,
         });
         *WORLD.threads.get() = m;
     }
@@ -257,6 +262,10 @@ pub unsafe fn attach(m: *mut Mutator) {
         (*m).tlab = tls::tlab();
         (*m).wb_log = tls::wb_log();
         (*m).satb = tls::satb_log();
+        #[cfg(windows)]
+        {
+            (*m).os_id = u64::from(rokr_common::win::GetCurrentThreadId());
+        }
         if (*m).worker_id == u64::MAX {
             (*m).worker_id = tls::worker_id().read();
         } else {
@@ -307,6 +316,56 @@ pub fn detach() {
                 break;
             }
             link = &raw mut (**link).next;
+        }
+    }
+    unlock();
+}
+
+/// With the world stopped by the caller: the OS ids of the other
+/// attached threads into `out` (as many as fit); how many there are.
+#[cfg(windows)]
+pub fn other_thread_ids(out: &mut [u64]) -> usize {
+    let me = tls::shadow_stack_top().cast_const();
+    let mut n = 0;
+    // SAFETY: the caller holds the lock (it stopped the world).
+    unsafe {
+        let mut m = *WORLD.threads.get();
+        while !m.is_null() {
+            if (*m).os_id != 0 && (*m).stack_top != me {
+                if let Some(o) = out.get_mut(n) {
+                    *o = (*m).os_id;
+                }
+                n += 1;
+            }
+            m = (*m).next;
+        }
+    }
+    n
+}
+
+/// Drop the records of threads that no longer run: every other one
+/// (`lost` none: a forked copy has only the caller), or those whose OS
+/// ids `lost` lists. `gone` gets each dropped thread's worker id.
+pub fn forget(lost: Option<&[u64]>, mut gone: impl FnMut(u64)) {
+    let _ = &lost;
+    lock();
+    let me = find_current();
+    // SAFETY: registry guarded by the lock; records came from `register`.
+    unsafe {
+        let mut link: *mut *mut Mutator = WORLD.threads.get();
+        while !(*link).is_null() {
+            let m = *link;
+            #[cfg(windows)]
+            let dead = m != me && lost.is_none_or(|l| l.contains(&(*m).os_id));
+            #[cfg(not(windows))]
+            let dead = m != me;
+            if dead {
+                *link = (*m).next;
+                gone((*m).worker_id);
+                libc::free(m.cast());
+            } else {
+                link = &raw mut (*m).next;
+            }
         }
     }
     unlock();

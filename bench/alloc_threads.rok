@@ -8,13 +8,19 @@ impl Weigh for Blob { fn w(self) -> i64 { return self.a + self.d; } }
 fn make(i: i64) -> any Weigh { return Blob { a: i, b: i, c: i, d: 1 }; }
 
 fn churn(n: i64) -> i64 {
+    // Every 16th box stays reachable from a ring, so none is elided.
+    let ring: List<any Weigh> = [];
     let total: i64 = 0;
     let i: i64 = 0;
     while i < n {
         let x = make(i);
         total += x.w();
+        if i & 15 == 0 {
+            if ring.len() < 1024 { ring.push(x); } else { ring[((i >> 4) & 1023) as usize] = x; }
+        }
         i += 1;
     }
+    for x in ring { total += x.w(); }
     return total;
 }
 

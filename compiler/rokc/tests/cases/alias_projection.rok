@@ -1,0 +1,51 @@
+// expect-exit: 0
+// expect-stdout:
+// 42 4
+// 9 10
+// 7
+// 3
+
+// A non-generic alias naming a projection (`type B = <A as P>::Out;`,
+// `type C = A::Out;`) resolves once impls are registered, in signatures,
+// `let` annotations, fields and generic arguments, from any module.
+
+trait P {
+    type Out;
+    fn make(self) -> Out;
+}
+
+struct A { v: i32; }
+
+impl P for A {
+    type Out = i64;
+    fn make(self) -> i64 { return self.v as i64 * 3; }
+}
+
+type B = <A as P>::Out;
+type C = A::Out;
+type D = List<B>;
+
+struct Holder { b: B; }
+
+mod geo {
+    pub struct Byte { n: i32; }
+    impl super::P for Byte {
+        type Out = u8;
+        fn make(self) -> u8 { return self.n as u8; }
+    }
+    pub type Small = Byte::Out;
+}
+
+fn twice(x: B) -> B { return x * 2; }
+
+fn main() {
+    let b: B = A { v: 7 }.make();
+    let c: C = 4;
+    println(f"{twice(b)} {c}");
+    let d: D = [9, 10];
+    println(f"{d[0]} {d[1]}");
+    let h = Holder { b: 7 };
+    println(f"{h.b}");
+    let s: geo::Small = 3;
+    println(f"{s}");
+}

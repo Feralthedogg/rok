@@ -45,8 +45,8 @@ pub struct Ctx<'a> {
     pub gc_types: &'a mut Vec<Vec<u32>>,
     pub gc_type_base: u32,
     pub overflow_checks: bool,
-    /// `-g`: describe functions and their locals.
-    pub debug: bool,
+    /// `-g`: describe functions and their locals (`MirModule::debug`).
+    pub debug: Option<&'a rokc_mir::DebugTypes>,
     /// Statics this object defines (else through the GOT).
     pub local_statics: &'a HashSet<String>,
     /// Functions that never reach a safepoint (`quiet_functions`).
@@ -1423,8 +1423,9 @@ impl<'c, 'a> FnLower<'c, 'a> {
         let live = rokc_mir::live_across(
             self.f,
             |l| !t.root_offsets(&self.f.locals[l.0 as usize].ty).is_empty(),
-            |s| rokc_codegen_mlir::emit::stmt_safepoint(s, quiet, pkgs, t),
+            |s| rokc_codegen_mlir::emit::stmt_safepoint(s, quiet, pkgs, t).then_some(true),
             |b| self.back_edges.contains(&b.0),
+            true,
         );
         let caller = self.f.params.last().filter(|_| self.f.facts.track_caller);
         let mut roots: Vec<Mem> = Vec::new();
@@ -1556,7 +1557,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
             })
             .collect();
         self.out.insts.splice(head..head, tls);
-        if self.c.debug && f.span.line != 0 {
+        if self.c.debug.is_some() && f.span.line != 0 {
             self.out.debug = Some(self.debug_facts());
         }
         self.out
@@ -1602,10 +1603,17 @@ impl<'c, 'a> FnLower<'c, 'a> {
                 };
                 let arg = f.params.iter().position(|p| *p == l.id).map(|i| i + 1);
                 let (line, scope) = decl.get(&l.id.0).copied().unwrap_or((f.span.line, 0));
+                let ty = self
+                    .c
+                    .debug
+                    .and_then(|d| d.locals.get(&(f.id, l.id)))
+                    .filter(|t| t.fits(&l.ty))
+                    .cloned()
+                    .unwrap_or_else(|| rokc_mir::DebugTy::Mir(l.ty.clone()));
                 Some(crate::lir::DebugVar {
                     name: name.to_owned(),
                     slot,
-                    ty: l.ty.clone(),
+                    ty,
                     line,
                     scope,
                     arg,
@@ -2147,6 +2155,18 @@ impl<'c, 'a> FnLower<'c, 'a> {
                 let ps = self.in_slot(a, k);
                 if let Some(d) = dst {
                     self.store(Val::M(Mem::Ind(ps, 0)), ty, d);
+                }
+            }
+            RValue::StaticAddr(name) => {
+                self.ensure_static_init(name);
+                let p = self.static_addr(name);
+                if let Some(d) = dst {
+                    let w = self.word();
+                    self.push(Inst::Mov {
+                        k: w,
+                        dst: d,
+                        src: V::M(Mem::Frame(p, 0)),
+                    });
                 }
             }
             RValue::AddrOf(l) => {

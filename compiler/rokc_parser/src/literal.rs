@@ -517,9 +517,12 @@ impl Parser<'_> {
             ]),
             Err((span, m)) => {
                 self.diagnostics.push(
-                    RokDiagnostic::error(ErrorKind::Meta, format!("invalid `#[literal]`: {m}"))
-                        .with_file(self.file.clone())
-                        .with_span(span, ""),
+                    RokDiagnostic::error(
+                        ErrorKind::Meta,
+                        span,
+                        format!("invalid `#[literal]`: {m}"),
+                    )
+                    .with_file(self.file.clone()),
                 );
                 rokc_ast::AttrBody::Empty
             }

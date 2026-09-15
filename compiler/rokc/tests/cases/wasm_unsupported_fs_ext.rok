@@ -1,0 +1,28 @@
+// spec: std 301
+// only-target: wasm32-wasi wasm32-wasi-threads
+// expect-exit: 0
+// expect-stdout:
+// wrote: abc
+// try_clone: Unsupported
+// lock_exclusive: Unsupported
+// lock_shared: Unsupported
+// mmap: Unsupported
+
+// WASI files work, but preview 1 / 2 have no `dup`, `flock` or `mmap`
+// (stdlib 301's table: mmap ✗, locks partial on wasi): those report
+// `IoErrorKind::Unsupported` at run time.
+use rok::std::fs;
+use rok::std::fs::File;
+use rok::std::io::{IoError, IoErrorKind};
+use rok::std::env;
+
+let p = env::temp_dir() / "rok_wasm_unsupported_fs_ext.txt";
+try! fs::write(p, "abc");
+println(f"wrote: {try! fs::read_to_str(p)}");
+let f = try! File::open(p);
+try f.try_clone() catch e: IoError { println(f"try_clone: {e.kind():?}"); };
+try f.lock_exclusive() catch e: IoError { println(f"lock_exclusive: {e.kind():?}"); };
+try f.lock_shared() catch e: IoError { println(f"lock_shared: {e.kind():?}"); };
+try unsafe { f.mmap(3usize, 0u64) } catch e: IoError { println(f"mmap: {e.kind():?}"); };
+try! f.close();
+try! fs::remove_file(p);

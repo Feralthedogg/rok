@@ -4,7 +4,6 @@ mod json;
 
 pub use json::Json;
 
-use std::cell::Cell;
 use std::fmt;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -209,23 +208,6 @@ fn source_by_path(path: &str) -> Option<String> {
         .map(|(_, s)| s.clone())
 }
 
-thread_local! {
-    static CURRENT_SPAN: Cell<Span> = const { Cell::new(Span::DUMMY) };
-}
-
-/// The location new diagnostics default to.
-#[must_use]
-pub fn current_span() -> Span {
-    CURRENT_SPAN.with(Cell::get)
-}
-
-/// Set the location new diagnostics default to (what a later pass is
-/// working on, e.g. the expression HIR is lowering); returns the old
-/// one to restore.
-pub fn set_current_span(span: Span) -> Span {
-    CURRENT_SPAN.with(|c| c.replace(span))
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Severity {
     /// Compile fails but later passes still collect diagnostics.
@@ -312,9 +294,9 @@ pub struct RokDiagnostic {
 }
 
 impl RokDiagnostic {
+    /// An error at `here` (`Span::DUMMY`: no location).
     #[must_use]
-    pub fn error(kind: ErrorKind, message: impl Into<String>) -> Self {
-        let here = CURRENT_SPAN.with(Cell::get);
+    pub fn error(kind: ErrorKind, here: Span, message: impl Into<String>) -> Self {
         Self {
             severity: Severity::Error,
             kind,
@@ -332,18 +314,18 @@ impl RokDiagnostic {
     }
 
     #[must_use]
-    pub fn fatal(kind: ErrorKind, message: impl Into<String>) -> Self {
+    pub fn fatal(kind: ErrorKind, here: Span, message: impl Into<String>) -> Self {
         Self {
             severity: Severity::Fatal,
-            ..Self::error(kind, message)
+            ..Self::error(kind, here, message)
         }
     }
 
     #[must_use]
-    pub fn warning(kind: ErrorKind, message: impl Into<String>) -> Self {
+    pub fn warning(kind: ErrorKind, here: Span, message: impl Into<String>) -> Self {
         Self {
             severity: Severity::Warning,
-            ..Self::error(kind, message)
+            ..Self::error(kind, here, message)
         }
     }
 
@@ -583,10 +565,38 @@ pub fn report_style() -> u8 {
     STYLE.load(Ordering::Relaxed)
 }
 
+/// Warnings `report`ed inside `capture_warnings`, rendered.
+static CAPTURED: Mutex<Option<String>> = Mutex::new(None);
+
 /// Print one diagnostic: human text on stderr, or a JSON line on stdout
 /// (see `set_report_style`).
 pub fn report(diag: &RokDiagnostic) {
-    print_rendered(&render(diag));
+    let text = render(diag);
+    if !diag.is_error() {
+        if let Some(c) = CAPTURED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
+            c.push_str(&text);
+        }
+    }
+    print_rendered(&text);
+}
+
+/// Run `f`; also what it reported as warnings (on any thread), rendered,
+/// for a build record to replay.
+pub fn capture_warnings<T>(f: impl FnOnce() -> T) -> (T, String) {
+    *CAPTURED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(String::new());
+    let r = f();
+    let text = CAPTURED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .unwrap_or_default();
+    (r, text)
 }
 
 /// Print text from `render` where `report` would.
@@ -759,7 +769,7 @@ mod tests {
 
     #[test]
     fn json_line_escapes_and_codes() {
-        let d = RokDiagnostic::error(ErrorKind::Type, "bad \"x\"\n")
+        let d = RokDiagnostic::error(ErrorKind::Type, Span::DUMMY, "bad \"x\"\n")
             .with_file("a.rok")
             .with_note("n");
         assert_eq!(

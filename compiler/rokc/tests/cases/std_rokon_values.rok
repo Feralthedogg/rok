@@ -55,7 +55,7 @@
 // empty: true true
 // { "k": 1, (1, true): none }
 
-// Spec 3.9.1: every RokON value kind, read with `rokon::parse` and
+// Spec 3.9.1: every ROKON value kind, read with `rokon::parse` and
 // written back in canonical form (`Value::to_string`).
 
 use rok::std::rokon;

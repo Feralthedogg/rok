@@ -341,14 +341,25 @@ impl FnLower<'_, '_> {
     }
 }
 
-/// Lower generated function `name` with `build`.
+/// Lower generated function `name` with `build`; under `-g` a
+/// subprogram at `span` (a dummy one: line 0 of the unit's file).
 pub fn generated(
     c: &mut Ctx<'_>,
     name: &str,
     sym: SymId,
+    span: rokc_diagnostic::Span,
     build: impl FnOnce(FnLower<'_, '_>) -> Func,
 ) -> Func {
     let shell = shell(name);
-    let l = FnLower::new(c, &shell, sym);
-    build(l)
+    let mut f = build(FnLower::new(c, &shell, sym));
+    if c.debug.is_some() {
+        f.debug = Some(crate::lir::FnDebug {
+            name: name.to_owned(),
+            file: if span.line == 0 { 0 } else { span.file },
+            line: span.line,
+            scopes: Vec::new(),
+            vars: Vec::new(),
+        });
+    }
+    f
 }

@@ -325,7 +325,8 @@ pub struct Func {
 pub struct FnDebug {
     /// The rok path.
     pub name: String,
-    /// `Span::file` (1-based) and line of its declaration.
+    /// `Span::file` (1-based; 0: the unit's file) and line of its
+    /// declaration.
     pub file: u32,
     pub line: u32,
     /// Lexical scopes other than the body (0): `(id, parent)`.
@@ -338,7 +339,7 @@ pub struct FnDebug {
 pub struct DebugVar {
     pub name: String,
     pub slot: Slot,
-    pub ty: rokc_mir::MirTy,
+    pub ty: rokc_mir::DebugTy,
     pub line: u32,
     pub scope: u32,
     /// 1-based parameter position.

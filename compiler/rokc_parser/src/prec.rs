@@ -166,6 +166,7 @@ impl PrecTable {
             if e.trait_name != entry.trait_name || e.method_name != entry.method_name {
                 return Some(RokDiagnostic::error(
                     ErrorKind::Meta,
+                    rokc_diagnostic::Span::DUMMY,
                     format!(
                         "operator `{}` is bound twice (`{}::{}` and `{}::{}`)",
                         entry.symbol,
@@ -285,7 +286,7 @@ const fn is_pattern_syntax(c: char) -> bool {
 }
 
 fn meta_err(attr: &Attribute, msg: String) -> RokDiagnostic {
-    RokDiagnostic::error(ErrorKind::Meta, msg).with_span(attr.span, "")
+    RokDiagnostic::error(ErrorKind::Meta, attr.span, msg)
 }
 
 fn collect_attr(

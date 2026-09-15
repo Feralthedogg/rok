@@ -204,6 +204,7 @@ pub fn run(result: &CompileResult, cli: &[(Level, String)]) -> Vec<RokDiagnostic
             }
             None => out.push(RokDiagnostic::warning(
                 ErrorKind::Lint,
+                Span::DUMMY,
                 format!("unknown lint `{name}` on the command line"),
             )),
         }
@@ -265,11 +266,10 @@ pub fn run(result: &CompileResult, cli: &[(Level, String)]) -> Vec<RokDiagnostic
             continue;
         }
         let mut d = if level == Level::Deny {
-            RokDiagnostic::error(ErrorKind::Lint, f.msg)
+            RokDiagnostic::error(ErrorKind::Lint, f.span, f.msg)
         } else {
-            RokDiagnostic::warning(ErrorKind::Lint, f.msg)
-        }
-        .with_span(f.span, "");
+            RokDiagnostic::warning(ErrorKind::Lint, f.span, f.msg)
+        };
         if let Some((span, msg)) = f.secondary {
             d = d.with_secondary(span, msg);
         }
@@ -317,10 +317,11 @@ fn levels_of(
             };
             match expand(name) {
                 Some(ls) => levels.extend(ls.into_iter().map(|l| (lvl, l, a.span))),
-                None => out.push(
-                    RokDiagnostic::warning(ErrorKind::Lint, format!("unknown lint `{name}`"))
-                        .with_span(a.span, ""),
-                ),
+                None => out.push(RokDiagnostic::warning(
+                    ErrorKind::Lint,
+                    a.span,
+                    format!("unknown lint `{name}`"),
+                )),
             }
         }
     }

@@ -1,4 +1,4 @@
-//! Seeded fuzzing of the RokON reader / writer: random value trees must
+//! Seeded fuzzing of the ROKON reader / writer: random value trees must
 //! survive `to_string` -> `parse` -> `to_string` (and the one-line form),
 //! and mutations of their text must parse or fail, never panic or hang.
 //! Budget `ROK_FUZZ_SECS` (default 2), seed `ROK_FUZZ_SEED`.
@@ -32,7 +32,7 @@ const KNOWN: &[&str] = &[
     // control (U+202A..U+202E, U+2066..U+2069) in a string.
     "bidirectional control character",
     // `1e999` reads as an infinite float, which writes as `inf`: the
-    // reader should reject it (NaN / infinity have no RokON form).
+    // reader should reject it (NaN / infinity have no ROKON form).
     "float literal out of range reads as infinity",
 ];
 

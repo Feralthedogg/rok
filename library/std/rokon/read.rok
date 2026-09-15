@@ -1,5 +1,5 @@
 // rok::std::rokon::read — lexer and recursive-descent reader for the
-// RokON subset of rok literal syntax (spec 3.9.1).
+// ROKON subset of rok literal syntax (spec 3.9.1).
 
 use rok::std::rokon::{Value, RokonError};
 use rok::std::rokon::write;
@@ -89,7 +89,7 @@ fn lex(cs: List<char>) throws (RokonError) -> List<Tok> {
         if c == 'r' && (at(cs, i + 1) == '"' || (at(cs, i + 1) == '#' && (at(cs, i + 2) == '"' || at(cs, i + 2) == '#'))) {
             i = try raw_string(cs, i, toks);
         } else if c == 'f' && at(cs, i + 1) == '"' {
-            throw fail(cs, start, "f-strings are not allowed in RokON");
+            throw fail(cs, start, "f-strings are not allowed in ROKON");
         } else if is_ident_start(c) {
             while i < n && is_ident_continue(cs[i]) { i += 1; }
             toks.push(Tok { kind: K_IDENT, text: slice(cs, start, i), at: start });
@@ -155,7 +155,7 @@ fn number(cs: List<char>, start: usize, toks: List<Tok>) throws (RokonError) -> 
         }
     }
     if i < cs.len() && is_ident_continue(cs[i]) {
-        throw fail(cs, start, "number suffixes are not allowed in RokON");
+        throw fail(cs, start, "number suffixes are not allowed in ROKON");
     }
     toks.push(Tok { kind: if is_float { K_FLOAT } else { K_INT }, text: slice(cs, start, i), at: start });
     i
@@ -357,18 +357,18 @@ impl Reader {
         self.i += 1;
     }
 
-    /// The error for `t` where `what` was expected, naming what RokON
+    /// The error for `t` where `what` was expected, naming what ROKON
     /// leaves out when that is what `t` starts.
     fn unexpected(self, t: Tok, what: str) -> RokonError {
         if t.kind == K_EOF { return self.err(t.at, f"unexpected end of input, expected {what}"); }
         if t.kind == K_PUNCT {
-            if t.text == ".." { return self.err(t.at, "`..` is not allowed in RokON"); }
+            if t.text == ".." { return self.err(t.at, "`..` is not allowed in ROKON"); }
             if t.text == "." {
                 let nx = self.toks[(self.i + 1).min(self.toks.len() - 1)];
-                if nx.kind == K_IDENT { return self.err(t.at, "method calls and field access are not allowed in RokON"); }
+                if nx.kind == K_IDENT { return self.err(t.at, "method calls and field access are not allowed in ROKON"); }
             }
             if "+-*/%=<>!&|^~?.".contains(t.text) {
-                return self.err(t.at, f"operator `{t.text}` is not allowed in RokON (only `-` before a number)");
+                return self.err(t.at, f"operator `{t.text}` is not allowed in ROKON (only `-` before a number)");
             }
         }
         let shown = if t.kind == K_STR { "a string" } else if t.kind == K_CHAR { "a char" } else { f"`{t.text}`" };
@@ -508,7 +508,7 @@ impl Reader {
             return Value::Variant { path: path, args: args, named: named };
         }
         if segs > 1 { return Value::Variant { path: path, args: List::new(), named: OrderedDict::new() }; }
-        throw self.err(t.at, f"bare identifier `{path}` is not allowed in RokON (strings are quoted, variants are written `Enum::{path}`)");
+        throw self.err(t.at, f"bare identifier `{path}` is not allowed in ROKON (strings are quoted, variants are written `Enum::{path}`)");
     }
 
     /// `name: value` fields up to `}` (consumed).
@@ -550,7 +550,7 @@ impl Reader {
             self.path = old;
             if !self.at_punct(":") {
                 if self.at_punct(",") || self.at_punct("}") || self.at_punct(";") {
-                    throw self.err(open.at, "sets and blocks are not allowed in RokON (a dict needs `key: value`)");
+                    throw self.err(open.at, "sets and blocks are not allowed in ROKON (a dict needs `key: value`)");
                 }
                 throw self.unexpected(self.peek(), "`:` after a dict key");
             }

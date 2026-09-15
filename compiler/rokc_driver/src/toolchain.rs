@@ -121,6 +121,27 @@ pub enum Profile {
     Generate(PathBuf),
     /// Optimized with this indexed profile (`rokc profdata merge`).
     Use(PathBuf),
+    /// `-C cs-profile-generate`: optimized with this profile, then
+    /// instrumented again after inlining (context-sensitive), writing to
+    /// this pattern; merged with the first, it is a profile to use.
+    CsGenerate(PathBuf, PathBuf),
+}
+
+impl Profile {
+    /// The profile the build optimizes with.
+    #[must_use]
+    pub fn used(&self) -> Option<&Path> {
+        match self {
+            Self::Use(p) | Self::CsGenerate(p, _) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// The build is instrumented (links the profile runtime).
+    #[must_use]
+    pub const fn generates(&self) -> bool {
+        matches!(self, Self::Generate(_) | Self::CsGenerate(..))
+    }
 }
 
 impl Default for BuildOptions {
@@ -201,7 +222,7 @@ impl Drop for TempDir {
 }
 
 fn err(msg: String) -> RokDiagnostic {
-    RokDiagnostic::error(ErrorKind::Linkage, msg)
+    RokDiagnostic::error(ErrorKind::Linkage, rokc_diagnostic::Span::DUMMY, msg)
 }
 
 /// Codegen a module to MLIR text for its target.
@@ -259,6 +280,7 @@ pub fn emit(
     match kind {
         EmitKind::Ast => Err(RokDiagnostic::error(
             rokc_diagnostic::ErrorKind::Internal,
+            rokc_diagnostic::Span::DUMMY,
             "--emit=ast needs the parsed files (keep_ast)",
         )),
         EmitKind::Hir => Ok(rokc_hir::print_hir(&module.hir).into_bytes()),
@@ -366,7 +388,7 @@ const SPLIT_MIN: usize = 1 << 20;
 /// The module through LLVM in process: the MLIR passes (plugins' first),
 /// the translation to LLVM IR, `-O<level>` and code generation. `parts`
 /// 0: as many objects as the module's size makes worth compiling in
-/// parallel (the whole module optimized first, so inlining still sees
+/// parallel (in-process `ThinLTO` above -O0, so inlining still sees
 /// every function).
 fn llvm(
     module: &CompiledModule,
@@ -403,6 +425,7 @@ fn llvm(
             Profile::Off => rokc_llvm::Profile::None,
             Profile::Generate(p) => rokc_llvm::Profile::Generate(p),
             Profile::Use(p) => rokc_llvm::Profile::Use(p),
+            Profile::CsGenerate(u, g) => rokc_llvm::Profile::CsGenerate(u, g),
         },
     };
     let parts = if parts == 0 {
@@ -421,7 +444,11 @@ fn llvm(
         rokc_diagnostic::time("llvm", || rokc_llvm::compile_mlir_split(&text, &c, parts))
             .map_err(|e| err(format!("LLVM back end failed:\n{e}")))?;
     for w in warnings.lines() {
-        rokc_diagnostic::report(&RokDiagnostic::warning(ErrorKind::Linkage, w));
+        rokc_diagnostic::report(&RokDiagnostic::warning(
+            ErrorKind::Linkage,
+            rokc_diagnostic::Span::DUMMY,
+            w,
+        ));
     }
     mlir.text = text;
     Ok((out, mlir))
@@ -581,7 +608,7 @@ pub fn link_object(
 /// symbol that pulls in its registration, which writes the profile at
 /// exit.
 fn profile_runtime(t: &rokc_llvm::Target, opts: &BuildOptions) -> Option<(PathBuf, String)> {
-    if !matches!(opts.profile, Profile::Generate(_)) {
+    if !opts.profile.generates() {
         return None;
     }
     let rt = opts.profile_rt.clone()?;

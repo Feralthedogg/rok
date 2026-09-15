@@ -1,6 +1,6 @@
 //! Stones: packages published to a registry index, a git repository laid
 //! out like crates.io-index (`rokstones.io-index`). One file per stone,
-//! one `Stone { .. }` RokON value per line, one line per version, oldest
+//! one `Stone { .. }` ROKON value per line, one line per version, oldest
 //! first:
 //!
 //! ```text
@@ -173,7 +173,7 @@ pub fn parse_file(text: &str, file: &str) -> Result<Vec<Entry>, String> {
 }
 
 impl Entry {
-    /// The index line (canonical RokON on one line).
+    /// The index line (canonical ROKON on one line).
     pub fn to_line(&self) -> String {
         let deps = self
             .deps
@@ -462,31 +462,51 @@ pub fn taken(
 }
 
 /// Set `yanked` of `name`'s version `vers` in the index checkout `index`,
-/// as a new commit.
-pub fn yank(index: &Path, name: &str, vers: &str, yanked: bool) -> Result<(), String> {
+/// as a new commit: a stone's, or with `native`, a native package's.
+pub fn yank(
+    index: &Path,
+    name: &str,
+    vers: &str,
+    yanked: bool,
+    native: bool,
+) -> Result<(), String> {
     let vers = Version::parse(vers)?;
-    let (file, text) = local(index, &path(name))?;
+    let rel = if native {
+        crate::native::path(name)
+    } else {
+        path(name)
+    };
+    let (file, text) = local(index, &rel)?;
     let shown = file.display().to_string();
     let mut found = false;
     let mut out = String::new();
     for (i, line) in text.lines().enumerate() {
         let at = format!("{shown} (line {})", i + 1);
-        let mut e = (!line.trim().is_empty())
-            .then(|| Doc::parse(line, &at).and_then(|d| entry(d.root())))
-            .transpose()?;
-        match &mut e {
-            Some(e) if manifest::same(&e.name, name) && e.vers == vers => {
+        // The line's name and version, and the line with `yanked` set.
+        let e = if line.trim().is_empty() {
+            None
+        } else if native {
+            let mut e = crate::native::parse_one(line, &at)?;
+            e.yanked = yanked;
+            Some((e.name.clone(), e.vers.clone(), e.to_line()))
+        } else {
+            let mut e = entry(Doc::parse(line, &at)?.root())?;
+            e.yanked = yanked;
+            Some((e.name.clone(), e.vers.clone(), e.to_line()))
+        };
+        match e {
+            Some((n, v, l)) if manifest::same(&n, name) && v == vers => {
                 found = true;
-                e.yanked = yanked;
-                out.push_str(&e.to_line());
+                out.push_str(&l);
             }
             _ => out.push_str(line),
         }
         out.push('\n');
     }
+    let what = if native { "native " } else { "" };
     if !found {
         return Err(format!(
-            "{name} {vers} is not in the index {}",
+            "{what}{name} {vers} is not in the index {}",
             index.display()
         ));
     }
@@ -494,7 +514,7 @@ pub fn yank(index: &Path, name: &str, vers: &str, yanked: bool) -> Result<(), St
         return Ok(());
     }
     let verb = if yanked { "Yank" } else { "Unyank" };
-    commit(index, &file, &out, &format!("{verb} {name} {vers}"))
+    commit(index, &file, &out, &format!("{verb} {what}{name} {vers}"))
 }
 
 #[cfg(test)]

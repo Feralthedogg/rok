@@ -594,6 +594,7 @@ impl<'a> Parser<'a> {
         let here = self.peek_span();
         let d = RokDiagnostic::error(
             ErrorKind::Parse,
+            Span::DUMMY,
             format!("expected {what}, found {}", found.describe()),
         )
         .with_file(self.file.clone());
@@ -704,11 +705,8 @@ impl<'a> Parser<'a> {
     }
 
     fn error(&mut self, span: Span, msg: impl Into<String>) {
-        self.diagnostics.push(
-            RokDiagnostic::error(ErrorKind::Parse, msg)
-                .with_file(self.file.clone())
-                .with_span(span, ""),
-        );
+        self.diagnostics
+            .push(RokDiagnostic::error(ErrorKind::Parse, span, msg).with_file(self.file.clone()));
     }
 
     pub fn parse_program(&mut self) -> Program {
@@ -1543,7 +1541,24 @@ impl<'a> Parser<'a> {
     fn parse_impl(&mut self, vis: Visibility, attrs: Vec<Attribute>) -> Option<ImplDef> {
         let start = self.peek_span();
         self.expect(&TokenKind::Impl, "`impl`")?;
-        let generics = self.parse_generic_params();
+        // `<` opens generics only before a parameter (`<>`, `<T>`, `<T:`,
+        // `<T,`, `<T =`, `<const N`); otherwise it starts a projection
+        // target (`impl <A as P>::Out { .. }`, spec 2.9.1).
+        let tok = |i: usize| self.tokens.get(self.pos + i).map(|t| &t.kind);
+        let params = match (tok(1), tok(2)) {
+            (Some(TokenKind::Gt), _)
+            | (
+                Some(TokenKind::Ident(_)),
+                Some(TokenKind::Colon | TokenKind::Comma | TokenKind::Gt | TokenKind::Eq),
+            ) => true,
+            (Some(TokenKind::Ident(k)), Some(TokenKind::Ident(_))) => k == "const",
+            _ => false,
+        };
+        let generics = if matches!(self.peek(), TokenKind::Lt) && !params {
+            Generics::default()
+        } else {
+            self.parse_generic_params()
+        };
         // `impl !Send for T {}` — auto-trait opt-out.
         let negative = self.eat(&TokenKind::Bang);
         let first_ty = self.parse_type()?;

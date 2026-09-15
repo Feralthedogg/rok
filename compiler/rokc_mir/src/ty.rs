@@ -114,18 +114,19 @@ pub fn debug_ty(ty: &HirTy, module: &HirModule, target: &Target) -> Option<Debug
     let of = |t: &HirTy| {
         debug_ty(t, module, target).unwrap_or_else(|| DebugTy::Mir(lower_ty(t, module, target)))
     };
-    let variants: Vec<(u32, String, &HirTy)> = match ty {
+    // Every variant, those without data too (their payload `()`), so a
+    // debugger names each value's case.
+    let variants: Vec<(u32, String, Option<&HirTy>)> = match ty {
         HirTy::GcBuf(t) => {
             return Some(DebugTy::Buf(debug_name(ty, module), Box::new(of(t))));
         }
         HirTy::Sum(parts) => (0u32..)
             .zip(parts)
-            .filter(|(_, v)| !v.is_none())
-            .map(|(i, v)| (sum_tag(ty, i), debug_name(v, module), v))
+            .map(|(i, v)| (sum_tag(ty, i), debug_name(v, module), Some(v)))
             .collect(),
         HirTy::Enum(id) => (0u32..)
             .zip(&module.enums[id.0 as usize].variants)
-            .filter_map(|(i, v)| Some((i, v.name.clone(), v.payload_ty.as_ref()?)))
+            .map(|(i, v)| (i, v.name.clone(), v.payload_ty.as_ref()))
             .collect(),
         _ => return None,
     };
@@ -136,8 +137,7 @@ pub fn debug_ty(ty: &HirTy, module: &HirModule, target: &Target) -> Option<Debug
     }
     let variants = variants
         .into_iter()
-        .map(|(tag, name, t)| (tag, name, of(t)))
-        .filter(|(.., d)| *d != DebugTy::Mir(MirTy::Unit))
+        .map(|(tag, name, t)| (tag, name, t.map_or(DebugTy::Mir(MirTy::Unit), of)))
         .collect();
     Some(DebugTy::Sum(debug_name(ty, module), mir, variants))
 }

@@ -397,7 +397,7 @@ fn members_references_rename() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A `.rokon` buffer (`rok.rokon`, the package manifest) is one RokON
+/// A `.rokon` buffer (`rok.rokon`, the package manifest) is one ROKON
 /// value: only its syntax is checked, not compiled as a module.
 #[test]
 fn manifest_buffer() {
@@ -425,7 +425,7 @@ fn manifest_buffer() {
         request(1, "textDocument/hover", at(uri, 0, 1)),
         change(uri, "Package {\n    name: \"a\"\n    version: \"1\",\n}\n"),
         request(2, "textDocument/hover", at(uri, 0, 1)),
-        // Valid rok, but not RokON data.
+        // Valid rok, but not ROKON data.
         change(uri, "Package {\n    name: bare,\n}\n"),
         request(4, "textDocument/hover", at(uri, 0, 1)),
         request(3, "shutdown", Json::Null),

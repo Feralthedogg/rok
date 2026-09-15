@@ -56,17 +56,25 @@ if [ ! -d "$src" ]; then
 fi
 
 extra=
-# PGO: Apple clang optimizes LLVM with rok.profdata.xz, a profile of
-# rokc's own builds made by train-pgo.sh with Xcode's clang. Other
-# compilers skip it (gcc reads no clang profile, and a clang older than
-# its indexed format cannot). ROK_LLVM_INSTRUMENT=1 builds the
-# instrumented libraries train-pgo.sh profiles instead.
+# PGO: a clang that reads rok.profdata.xz (a profile of rokc's own
+# builds, made by train-pgo.sh) optimizes LLVM with it. Its names are
+# Itanium-mangled, so the clang of any Unix host matches them. gcc reads
+# no clang profile, and a clang older than the profile's indexed format
+# cannot: those build without it (said here). ROK_LLVM_INSTRUMENT=1
+# builds the instrumented libraries train-pgo.sh profiles instead.
 here=$(cd "$(dirname "$0")" && pwd)
 if [ -n "${ROK_LLVM_INSTRUMENT-}" ]; then
 	extra="-DLLVM_BUILD_INSTRUMENTED=IR"
-elif ${CXX:-c++} --version 2>/dev/null | grep -q '^Apple clang'; then
+else
 	xz -dc "$here/rok.profdata.xz" >"$work/rok.profdata"
-	extra="-DLLVM_PROFDATA_FILE=$work/rok.profdata"
+	# clang reads the profile even for an empty unit.
+	if echo 'int x;' | ${CXX:-c++} -x c++ -fprofile-instr-use="$work/rok.profdata" \
+		-c -o /dev/null - 2>/dev/null; then
+		extra="-DLLVM_PROFDATA_FILE=$work/rok.profdata"
+	else
+		echo "llvm/build.sh: ${CXX:-c++} cannot read llvm/rok.profdata.xz (gcc, or a clang" \
+			"older than its format): building LLVM without PGO" >&2
+	fi
 fi
 case $(uname -s) in
 Darwin) extra="$extra -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0" ;;

@@ -26,38 +26,39 @@ pub fn has_attr(attrs: &[rokc_ast::Attribute], name: &str) -> bool {
 /// program over the `#[bench]` functions); returns the test / bench names
 /// (`::`-qualified, in source order).
 pub fn install(
-    items: &mut Vec<Item>,
+    items: &mut Vec<(String, Item)>,
     ext: &ExtOps,
     diags: &mut Vec<RokDiagnostic>,
     bench: bool,
 ) -> Vec<String> {
     let attr = if bench { "bench" } else { "test" };
     let mut tests = Vec::new();
-    for item in items.iter_mut() {
+    for (module, item) in items.iter() {
         let Item::Fn(f) = item else { continue };
         if !has_attr(&f.attrs, attr) {
             continue;
         }
         if !f.params.is_empty() || !f.generics.params.is_empty() {
-            diags.push(
-                RokDiagnostic::error(
-                    ErrorKind::Type,
-                    format!(
-                        "`#[{attr}] fn {}` must take no parameters or generics",
-                        f.name
-                    ),
-                )
-                .with_span(f.span, ""),
-            );
+            diags.push(RokDiagnostic::error(
+                ErrorKind::Type,
+                f.span,
+                format!(
+                    "`#[{attr}] fn {}` must take no parameters or generics",
+                    f.name
+                ),
+            ));
             continue;
         }
-        // The generated `main` calls it from the root module.
-        f.vis = rokc_core::Visibility::Pub;
-        tests.push((f.name.clone(), !matches!(f.throws, ThrowsKind::None)));
+        let name = if module.is_empty() {
+            f.name.clone()
+        } else {
+            format!("{module}::{}", f.name)
+        };
+        tests.push((name, !matches!(f.throws, ThrowsKind::None)));
     }
     // The package's own entry point is replaced (top-level statements
     // were already dropped by the caller).
-    items.retain(|i| !matches!(i, Item::Fn(f) if f.name == "main"));
+    items.retain(|(m, i)| !(m.is_empty() && matches!(i, Item::Fn(f) if f.name == "main")));
 
     let src = if bench {
         bench_main(&tests)
@@ -68,7 +69,7 @@ pub fn install(
     diags.append(&mut d);
     let (program, mut d) = parse_program_ext(&tokens, "<test harness>", ext);
     diags.append(&mut d);
-    items.extend(program.items);
+    items.extend(program.items.into_iter().map(|i| (String::new(), i)));
     tests.into_iter().map(|(n, _)| n).collect()
 }
 

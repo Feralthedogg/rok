@@ -6,14 +6,18 @@ mod coro;
 pub mod gc_abi;
 mod liveness;
 mod lower;
+mod part_store;
 mod print;
+mod rotate;
 mod specialize;
 mod target;
 mod ty;
 
 pub use liveness::{Deaths, addressed, block_local, deaths, live_across};
 pub use lower::lower;
+pub use part_store::{PartStore, part_stores};
 pub use print::print_mir;
+pub use rotate::back_edges;
 pub use target::{CAbi, GcSlot, Target};
 pub use ty::{ANY_STRUCT, any_ty};
 
@@ -42,7 +46,7 @@ pub enum DebugTy {
     /// As its `MirTy` says.
     Mir(MirTy),
     /// A sum or enum laid out `(i32 tag, payload)` (`.1`): its name and
-    /// the variants with data, `(stored tag, name, payload)`.
+    /// its variants, `(stored tag, name, payload)` (`()`: no data).
     Sum(String, MirTy, Vec<(u32, String, DebugTy)>),
     /// A reference to a `GcBuf` object (its name) of these elements.
     Buf(String, Box<DebugTy>),
@@ -336,6 +340,8 @@ pub enum RValue {
     // that slot (never an SSA value), rooted for its whole scope when it
     // holds GC references (`liveness::addressed`).
     AddrOf(LocalId),
+    // The address (`usize`) of `static` `name` (initialized first if lazy).
+    StaticAddr(String),
     // Size (or alignment) of `ty` in bytes, as `usize`.
     SizeOf {
         ty: MirTy,

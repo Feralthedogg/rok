@@ -138,16 +138,19 @@ pub const CARD_SIZE: usize = 1 << rokr_common::gc_abi::CARD_SHIFT;
 /// one reservation, the first of these sizes the OS grants. 64-bit: the
 /// block heap is capped at 64 GiB. 32-bit (spec 0.6.3, a heap of about
 /// 3.5 GB): at most 2 GiB, the rest of the address space left to LOS
-/// objects, `malloc` and the program. wasm32: at most 1 GiB, linear
-/// memory grown up front (`sys::reserve`), so a smaller engine limit
-/// gets a smaller heap.
+/// objects, `malloc` and the program. wasm32 reserves nothing: see
+/// [`grow_blocks`].
 #[cfg(target_pointer_width = "64")]
 const RESERVE: usize = 64 << 30;
 #[cfg(all(target_pointer_width = "32", not(target_family = "wasm")))]
 const RESERVE: usize = 2 << 30;
-#[cfg(target_family = "wasm")]
-const RESERVE: usize = 1 << 30;
+#[cfg(not(target_family = "wasm"))]
 const RESERVE_MIN: usize = 64 << 20;
+
+/// Line state of a wasm32 block that `malloc` took (see [`grow_blocks`]):
+/// never handed out, swept or moved.
+#[cfg(target_family = "wasm")]
+const FOREIGN: u8 = 4;
 
 /// Line states.
 const FREE: u8 = 0;
@@ -253,6 +256,9 @@ struct Heap {
     meta: *mut BlockMeta,
     /// Bytes reserved at `base`.
     reserved: usize,
+    /// wasm32: the end of the linear memory the heap grew for its blocks.
+    #[cfg(target_family = "wasm")]
+    grown: usize,
     /// Next line (global index `block * LINES + line`) the small / medium
     /// refill looks at; both restart at 0 after every sweep.
     small_cursor: usize,
@@ -333,6 +339,8 @@ static HEAP: Global<Heap> = Global(UnsafeCell::new(Heap {
     base: 0,
     nblocks: 0,
     reserved: 0,
+    #[cfg(target_family = "wasm")]
+    grown: 0,
     meta: ptr::null_mut(),
     small_cursor: 0,
     medium_cursor: 0,
@@ -736,27 +744,10 @@ fn end_of_run(start: usize, mut end: usize) -> usize {
 fn new_block() -> usize {
     let h = heap();
     if h.base == 0 {
-        let mut len = RESERVE;
-        let p = loop {
-            let p = sys::reserve(len + BLOCK_SIZE);
-            if !p.is_null() {
-                break p;
-            }
-            len /= 2;
-            if len < RESERVE_MIN {
-                rokr_common::oom();
-            }
-        };
-        h.base = (p as usize).next_multiple_of(BLOCK_SIZE);
-        h.reserved = len;
-        // Metadata for every block of the reservation, reserved once and
-        // committed as blocks are: a concurrent mark reads it while
-        // refills commit blocks, so it never moves.
-        h.meta = sys::reserve(len / BLOCK_SIZE * size_of::<BlockMeta>()).cast();
-        if h.meta.is_null() {
-            rokr_common::oom();
-        }
+        reserve_blocks(h);
     }
+    #[cfg(target_family = "wasm")]
+    grow_blocks(h);
     if h.nblocks == h.reserved / BLOCK_SIZE {
         rokr_common::oom();
     }
@@ -792,6 +783,92 @@ fn new_block() -> usize {
     }
     h.nblocks += 1;
     b
+}
+
+/// The block reservation: the first of the sizes from [`RESERVE`] down
+/// the OS grants. Metadata for every block of it is reserved once and
+/// committed as blocks are: a concurrent mark reads it while refills
+/// commit blocks, so it never moves.
+#[cfg(not(target_family = "wasm"))]
+fn reserve_blocks(h: &mut Heap) {
+    let mut len = RESERVE;
+    let p = loop {
+        let p = sys::reserve(len + BLOCK_SIZE);
+        if !p.is_null() {
+            break p;
+        }
+        len /= 2;
+        if len < RESERVE_MIN {
+            rokr_common::oom();
+        }
+    };
+    h.base = (p as usize).next_multiple_of(BLOCK_SIZE);
+    h.reserved = len;
+    h.meta = sys::reserve(len / BLOCK_SIZE * size_of::<BlockMeta>()).cast();
+    if h.meta.is_null() {
+        rokr_common::oom();
+    }
+}
+
+/// wasm32 memory cannot be reserved without being grown: the blocks
+/// span the address space above the end of linear memory, grown by
+/// [`grow_blocks`] as they are needed. Their metadata is grown first
+/// (about 2.4% of the blocks' size), for the rest of the 4 GiB address
+/// space or, under a lower engine limit, the first of its halves it
+/// grants.
+#[cfg(target_family = "wasm")]
+fn reserve_blocks(h: &mut Heap) {
+    let end = core::arch::wasm32::memory_size(0) * WASM_PAGE;
+    let mut len = usize::MAX - end;
+    loop {
+        h.meta = sys::reserve(len / BLOCK_SIZE * size_of::<BlockMeta>()).cast();
+        if !h.meta.is_null() {
+            break;
+        }
+        len /= 2;
+        if len < 64 << 20 {
+            rokr_common::oom();
+        }
+    }
+    h.base = core::arch::wasm32::memory_size(0) * WASM_PAGE;
+    h.grown = h.base;
+    // Whole blocks: `base + reserved` stays below 4 GiB.
+    h.reserved = len.min(usize::MAX - h.base) / BLOCK_SIZE * BLOCK_SIZE;
+}
+
+#[cfg(target_family = "wasm")]
+const WASM_PAGE: usize = 64 << 10;
+
+/// wasm32, before block `nblocks` is used: grow linear memory for it
+/// (1 MiB at a time) unless an earlier growth covers it. `malloc` grows
+/// the same memory: the blocks over what it took since are skipped,
+/// [`FOREIGN`].
+#[cfg(target_family = "wasm")]
+fn grow_blocks(h: &mut Heap) {
+    const STEP: usize = 1 << 20;
+    if h.base + (h.nblocks + 1) * BLOCK_SIZE <= h.grown {
+        return;
+    }
+    let old = core::arch::wasm32::memory_grow(0, STEP / WASM_PAGE);
+    if old == usize::MAX {
+        rokr_common::oom();
+    }
+    let from = old * WASM_PAGE;
+    while h.base + h.nblocks * BLOCK_SIZE < from && h.nblocks < h.reserved / BLOCK_SIZE {
+        // SAFETY: metadata of a block of the reservation (grown up front).
+        unsafe {
+            h.meta.add(h.nblocks).write(BlockMeta {
+                lines: [FOREIGN; LINES],
+                starts: [0; GRANULES / 64],
+                used: false,
+                parsed: false,
+                evac: false,
+                released: true,
+            });
+        }
+        h.nblocks += 1;
+    }
+    h.grown = from + STEP;
 }
 
 /// A large (or over-aligned) object: its own zeroed `malloc` block.
@@ -1081,7 +1158,7 @@ fn object_containing(word: usize, young: bool) -> Option<*mut u8> {
 fn object_in<const MOVED: bool>(word: usize, young: bool) -> Option<*mut u8> {
     let size_of = |o: *mut u8| if MOVED { moved_size(o) } else { obj_size(o) };
     let m = mark();
-    if word >= m.base && word < m.base + m.nblocks * BLOCK_SIZE {
+    if word >= m.base && word < m.base + m.nblocks * BLOCK_SIZE && !foreign(m, word) {
         let blk = (word - m.base) / BLOCK_SIZE;
         // SAFETY: `blk < nblocks`.
         let meta = unsafe { m.meta.add(blk) };
@@ -1119,8 +1196,14 @@ fn object_in<const MOVED: bool>(word: usize, young: bool) -> Option<*mut u8> {
             bits = starts[i];
         }
     }
-    if m.los_count == 0 || (m.base != 0 && word >= m.base && word < m.base + m.reserved) {
-        // No LOS object, or a block committed after the view.
+    // No LOS object, or a block committed after the view (wasm32:
+    // `malloc`'s memory lies among the blocks).
+    if m.los_count == 0
+        || (!cfg!(target_family = "wasm")
+            && m.base != 0
+            && word >= m.base
+            && word < m.base + m.reserved)
+    {
         return None;
     }
     // SAFETY: `build_index` filled `los_count` entries.
@@ -1132,6 +1215,19 @@ fn object_in<const MOVED: bool>(word: usize, young: bool) -> Option<*mut u8> {
     };
     let start = index[i];
     (word < start + size_of(start as *mut u8)).then_some(start as *mut u8)
+}
+
+/// Whether `word`, in one of the view's blocks, is in a [`FOREIGN`] one
+/// (`malloc`'s, holding LOS objects).
+#[cfg(target_family = "wasm")]
+fn foreign(m: &Mark, word: usize) -> bool {
+    // SAFETY: the block is below the view's `nblocks`.
+    line(unsafe { m.meta.add((word - m.base) / BLOCK_SIZE) }, 0) == FOREIGN
+}
+
+#[cfg(not(target_family = "wasm"))]
+const fn foreign(_m: &Mark, _word: usize) -> bool {
+    false
 }
 
 /// The word at `p` (8-aligned): an atomic load, as a concurrent mark

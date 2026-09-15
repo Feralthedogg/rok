@@ -1,6 +1,6 @@
 //! Differential testing: random (seeded) cases run as one rok program
-//! per suite and checked against Python 3 (or, for RokON, against the
-//! compiler's own RokON writer). Each case prints one line; the oracle
+//! per suite and checked against Python 3 (or, for ROKON, against the
+//! compiler's own ROKON writer). Each case prints one line; the oracle
 //! prints the line it expects.
 //!
 //! Suites: fixed-width integers (wrapping / checked / saturating, `/`
@@ -8,7 +8,7 @@
 //! (Display shortest round trip vs `repr`, literals, `parse`, `{:.N}`,
 //! arithmetic), `str` (split / trim / find / case mapping / replace /
 //! lines ...), sorting, `Dict` / `OrderedDict` / `Set` op sequences,
-//! Python slicing, RokON round trips, sub-word arrays and structs by
+//! Python slicing, ROKON round trips, sub-word arrays and structs by
 //! value through calls.
 //!
 //! Skips without the LLVM toolchain (`common::setup`) or `python3`.

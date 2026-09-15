@@ -81,7 +81,7 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) {
     }
     let sync = Some(env.names.lang_item("sync_trait").to_owned()).filter(|s| !s.is_empty());
     let no_subst = HashMap::new();
-    let ctx = LowerCtx::new(env, &no_subst, None);
+    let ctx = LowerCtx::new(env, &no_subst, None, rokc_diagnostic::Span::DUMMY);
 
     // 1. Each coroutine's own frame.
     let mut bad: HashMap<FunctionId, String> = HashMap::new();
@@ -151,9 +151,9 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) {
         if !seen.insert((span.file, span.start)) {
             continue;
         }
-        let old = rokc_diagnostic::set_current_span(span);
-        ctx.emit_error(
+        ctx.emit_error_at(
             rokc_diagnostic::ErrorKind::Type,
+            span,
             if sink == SINKS[0] {
                 format!(
                     "`task::spawn` needs a `Send` future: {why}, and the task may resume on \
@@ -167,7 +167,6 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) {
                 format!("`{short}` would move a future to another thread: {why} (spec 2.18.1)")
             },
         );
-        rokc_diagnostic::set_current_span(old);
     }
 }
 

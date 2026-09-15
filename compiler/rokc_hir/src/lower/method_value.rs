@@ -217,7 +217,10 @@ fn qpath_shape(
         .iter()
         .map(|s| s.name.as_str())
         .collect();
-    let key = ctx.env.names.trait_key(&segs, &ctx.current_module);
+    let key = ctx
+        .env
+        .names
+        .trait_key(&segs, &ctx.current_module, ctx.here());
     picked(ctx, &t, &q.item, Some(&key), &[], span)
 }
 

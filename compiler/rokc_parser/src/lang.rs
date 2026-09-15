@@ -175,13 +175,11 @@ fn collect_attr(
         return;
     }
     let AttrBody::Args(args) = &attr.body else {
-        diags.push(
-            RokDiagnostic::error(
-                ErrorKind::Meta,
-                "`#[lang(...)]` requires a single string-literal slot name (spec 6.4.2)".to_owned(),
-            )
-            .with_span(attr.span, ""),
-        );
+        diags.push(RokDiagnostic::error(
+            ErrorKind::Meta,
+            attr.span,
+            "`#[lang(...)]` requires a single string-literal slot name (spec 6.4.2)".to_owned(),
+        ));
         return;
     };
     let mut slot: Option<String> = None;
@@ -192,39 +190,33 @@ fn collect_attr(
         }
     }
     let Some(slot) = slot else {
-        diags.push(
-            RokDiagnostic::error(
-                ErrorKind::Meta,
-                "`#[lang(...)]` requires a single string-literal slot name (spec 6.4.2)".to_owned(),
-            )
-            .with_span(attr.span, ""),
-        );
+        diags.push(RokDiagnostic::error(
+            ErrorKind::Meta,
+            attr.span,
+            "`#[lang(...)]` requires a single string-literal slot name (spec 6.4.2)".to_owned(),
+        ));
         return;
     };
     // Spec 6.4.8: unknown slot name → error.
     if !KNOWN_SLOTS.contains(&slot.as_str()) {
-        diags.push(
-            RokDiagnostic::error(
-                ErrorKind::Meta,
-                format!("unknown lang slot `{slot}` on `{item_name}` (spec 6.4.8)"),
-            )
-            .with_span(attr.span, ""),
-        );
+        diags.push(RokDiagnostic::error(
+            ErrorKind::Meta,
+            attr.span,
+            format!("unknown lang slot `{slot}` on `{item_name}` (spec 6.4.8)"),
+        ));
         return;
     }
     // Spec 6.4.6: same slot on two items → error.
     if let Some(prev) = table.by_slot.get(&slot) {
-        diags.push(
-            RokDiagnostic::error(
-                ErrorKind::Meta,
-                format!(
-                    "lang slot `{slot}` is already bound to `{}` — cannot also bind to \
+        diags.push(RokDiagnostic::error(
+            ErrorKind::Meta,
+            item_span,
+            format!(
+                "lang slot `{slot}` is already bound to `{}` — cannot also bind to \
                      `{item_name}` (spec 6.4.6)",
-                    prev.item_name
-                ),
-            )
-            .with_span(item_span, ""),
-        );
+                prev.item_name
+            ),
+        ));
         return;
     }
     table.by_slot.insert(

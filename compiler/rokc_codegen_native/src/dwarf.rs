@@ -3,13 +3,16 @@
 //! one subprogram per function with a source position, named by its rok
 //! path; its parameters and named locals in their stack slots (`fp`
 //! relative), in lexical blocks; their types (primitives, structs with
-//! field names, tuples, `str`, `any`, arrays); a line table.
+//! field names, tuples, `str`, `any`, arrays, tagged sums as variant
+//! parts, `GcBuf` references as pointers to their objects); a line
+//! table. Generated functions (the C `main`, ..) get a subprogram too.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use rokc_ir_common::PrimTy;
-use rokc_mir::{MirTy, Target};
+use rokc_mir::gc_abi::HEADER_SIZE;
+use rokc_mir::{DebugTy, MirModule, MirTy, Target};
 
 use crate::obj::{FnRange, Obj, RelKind, Reloc, Section};
 
@@ -20,7 +23,9 @@ const DW_TAG_MEMBER: u8 = 0x0d;
 const DW_TAG_POINTER_TYPE: u8 = 0x0f;
 const DW_TAG_COMPILE_UNIT: u8 = 0x11;
 const DW_TAG_STRUCTURE_TYPE: u8 = 0x13;
+const DW_TAG_VARIANT: u8 = 0x19;
 const DW_TAG_SUBRANGE_TYPE: u8 = 0x21;
+const DW_TAG_VARIANT_PART: u8 = 0x33;
 const DW_TAG_BASE_TYPE: u8 = 0x24;
 const DW_TAG_SUBPROGRAM: u8 = 0x2e;
 const DW_TAG_VARIABLE: u8 = 0x34;
@@ -33,9 +38,13 @@ const DW_AT_HIGH_PC: u8 = 0x12;
 const DW_AT_LANGUAGE: u8 = 0x13;
 const DW_AT_COMP_DIR: u8 = 0x1b;
 const DW_AT_PRODUCER: u8 = 0x25;
+const DW_AT_DISCR: u8 = 0x15;
+const DW_AT_DISCR_VALUE: u8 = 0x16;
 const DW_AT_COUNT: u8 = 0x37;
 const DW_AT_DATA_MEMBER_LOCATION: u8 = 0x38;
 const DW_AT_DECL_FILE: u8 = 0x3a;
+const DW_AT_DECLARATION: u8 = 0x3c;
+const DW_AT_ARTIFICIAL: u8 = 0x34;
 const DW_AT_DECL_LINE: u8 = 0x3b;
 const DW_AT_ENCODING: u8 = 0x3e;
 const DW_AT_FRAME_BASE: u8 = 0x40;
@@ -52,18 +61,21 @@ const DW_FORM_UDATA: u8 = 0x0f;
 const DW_FORM_REF4: u8 = 0x13;
 const DW_FORM_SEC_OFFSET: u8 = 0x17;
 const DW_FORM_EXPRLOC: u8 = 0x18;
+const DW_FORM_FLAG_PRESENT: u8 = 0x19;
 
 const DW_OP_FBREG: u8 = 0x91;
 /// `DW_OP_reg29` (arm64 `x29`) / `DW_OP_reg6` (`x86_64` `rbp`).
 const DW_OP_REG29: u8 = 0x6d;
 const DW_OP_REG6: u8 = 0x56;
-const DW_LANG_C: u16 = 0x0c;
+/// Rust: the language debuggers read variant parts in (lldb only
+/// there); rok's types are C-like otherwise.
+const DW_LANG_RUST: u16 = 0x1c;
 
 const DW_ATE_BOOLEAN: u8 = 0x02;
 const DW_ATE_FLOAT: u8 = 0x04;
 const DW_ATE_SIGNED: u8 = 0x05;
 const DW_ATE_SIGNED_CHAR: u8 = 0x06;
-const DW_ATE_UNSIGNED: u8 = 0x08;
+const DW_ATE_UNSIGNED: u8 = 0x07;
 const DW_ATE_UTF: u8 = 0x10;
 
 // Abbreviation codes.
@@ -81,6 +93,11 @@ const A_ARRAY: u8 = 11;
 const A_SUBRANGE: u8 = 12;
 const A_STRUCT_EMPTY: u8 = 13;
 const A_MEMBER4: u8 = 14;
+const A_STRUCT_DECL: u8 = 15;
+const A_ARRAY_OPEN: u8 = 16;
+const A_VARIANT_PART: u8 = 17;
+const A_VARIANT: u8 = 18;
+const A_DISCR: u8 = 19;
 
 fn uleb(b: &mut Vec<u8>, mut v: u64) {
     loop {
@@ -251,6 +268,43 @@ fn abbrevs(split: bool) -> Vec<u8> {
             (DW_AT_DATA_MEMBER_LOCATION, DW_FORM_DATA4),
         ],
     );
+    add(
+        A_STRUCT_DECL,
+        DW_TAG_STRUCTURE_TYPE,
+        false,
+        &[
+            (DW_AT_NAME, DW_FORM_STRING),
+            (DW_AT_DECLARATION, DW_FORM_FLAG_PRESENT),
+        ],
+    );
+    add(
+        A_ARRAY_OPEN,
+        DW_TAG_ARRAY_TYPE,
+        false,
+        &[(DW_AT_TYPE, DW_FORM_REF4)],
+    );
+    add(
+        A_VARIANT_PART,
+        DW_TAG_VARIANT_PART,
+        true,
+        &[(DW_AT_DISCR, DW_FORM_REF4)],
+    );
+    add(
+        A_VARIANT,
+        DW_TAG_VARIANT,
+        true,
+        &[(DW_AT_DISCR_VALUE, DW_FORM_UDATA)],
+    );
+    add(
+        A_DISCR,
+        DW_TAG_MEMBER,
+        false,
+        &[
+            (DW_AT_TYPE, DW_FORM_REF4),
+            (DW_AT_DATA_MEMBER_LOCATION, DW_FORM_DATA1),
+            (DW_AT_ARTIFICIAL, DW_FORM_FLAG_PRESENT),
+        ],
+    );
     b.push(0);
     b
 }
@@ -261,7 +315,10 @@ struct Info<'a> {
     relocs: Vec<Reloc>,
     types: HashMap<String, u32>,
     t: &'a Target,
-    names: &'a HashMap<u32, (String, Vec<String>)>,
+    m: &'a MirModule,
+    /// Structs being described, by key: a reference back to one (a
+    /// `GcBuf` field) is a declaration, completed by name.
+    building: HashMap<String, String>,
     /// `.debug_ranges`, entries relative to the unit's `low_pc`.
     ranges: Vec<u8>,
     ranges_relocs: Vec<Reloc>,
@@ -356,20 +413,114 @@ impl Info<'_> {
         cstr(&mut self.b, name);
         uleb(&mut self.b, u64::from(size));
         for (n, ty, at) in members {
-            if *at < 256 {
-                self.b.push(A_MEMBER1);
-                cstr(&mut self.b, n);
-                self.u32(*ty);
-                self.b.push(*at as u8);
-            } else {
-                self.b.push(A_MEMBER4);
-                cstr(&mut self.b, n);
-                self.u32(*ty);
-                self.u32(*at);
-            }
+            self.member(n, *ty, *at);
         }
         self.b.push(0);
         off
+    }
+
+    fn member(&mut self, name: &str, ty: u32, at: u32) {
+        if at < 256 {
+            self.b.push(A_MEMBER1);
+            cstr(&mut self.b, name);
+            self.u32(ty);
+            self.b.push(at as u8);
+        } else {
+            self.b.push(A_MEMBER4);
+            cstr(&mut self.b, name);
+            self.u32(ty);
+            self.u32(at);
+        }
+    }
+
+    fn pointer_to(&mut self, ty: u32) -> u32 {
+        let o = self.b.len() as u32;
+        self.b.push(A_PTR_TO);
+        self.u32(ty);
+        uleb(&mut self.b, u64::from(self.t.pointer_width / 8));
+        o
+    }
+
+    /// The type DIE of `d`, written on first use; `None` for `()`.
+    fn debug_ty(&mut self, d: &DebugTy) -> Option<u32> {
+        let key = format!("{d:?}");
+        if let Some(o) = self.types.get(&key) {
+            return Some(*o);
+        }
+        let off = match d {
+            DebugTy::Mir(t) => return self.ty(t),
+            // A pointer to the object: its header, then the elements (as
+            // many as its size holds).
+            DebugTy::Buf(name, elem) => {
+                let u32_ = self.base(PrimTy::U32)?;
+                let u64_ = self.base(PrimTy::U64)?;
+                let mut m = vec![
+                    ("type_id".to_owned(), u32_, 0),
+                    ("gc_flags".to_owned(), u32_, 4),
+                    ("gc_word".to_owned(), u64_, 8),
+                ];
+                if let Some(e) = self.debug_ty(elem) {
+                    let items = self.b.len() as u32;
+                    self.b.push(A_ARRAY_OPEN);
+                    self.u32(e);
+                    m.push(("items".to_owned(), items, HEADER_SIZE));
+                }
+                let obj = self.structure(name, HEADER_SIZE, &m);
+                self.pointer_to(obj)
+            }
+            DebugTy::Sum(name, mir, variants) => {
+                if !matches!(mir, MirTy::Tuple(_)) {
+                    return self.ty(mir);
+                }
+                let size = self.t.size_align(mir).0;
+                let at = self.t.field_offsets(mir)[1];
+                // Each variant a struct over the whole sum (as Rust
+                // describes enums), its payload's parts at their offsets.
+                let mut arms = Vec::new();
+                for (tag, v, p) in variants {
+                    let fields: Vec<_> = match p {
+                        DebugTy::Mir(t @ MirTy::Tuple(ps)) => self
+                            .members(t, ps, &[], &[])
+                            .into_iter()
+                            .map(|(n, ty, o)| (n, ty, at + o))
+                            .collect(),
+                        p => self
+                            .debug_ty(p)
+                            .map(|ty| ("0".to_owned(), ty, at))
+                            .into_iter()
+                            .collect(),
+                    };
+                    arms.push((
+                        *tag,
+                        v,
+                        self.structure(&format!("{name}::{v}"), size, &fields),
+                    ));
+                }
+                let tag = self.base(PrimTy::U32)?;
+                let off = self.b.len() as u32;
+                self.b.push(A_STRUCT);
+                cstr(&mut self.b, name);
+                uleb(&mut self.b, u64::from(size));
+                // The discriminant member follows the variant part's
+                // abbreviation code and reference.
+                let discr = self.b.len() as u32 + 5;
+                self.b.push(A_VARIANT_PART);
+                self.u32(discr);
+                self.b.push(A_DISCR);
+                self.u32(tag);
+                self.b.push(0);
+                for (t, v, ty) in arms {
+                    self.b.push(A_VARIANT);
+                    uleb(&mut self.b, u64::from(t));
+                    self.member(v, ty, 0);
+                    self.b.push(0);
+                }
+                self.b.extend_from_slice(&[0, 0]);
+                off
+            }
+        };
+        self.types.insert(key, off);
+        Some(off)
     }
 
     /// The type DIE of `ty`, written on first use; `None` for `()`.
@@ -378,6 +529,17 @@ impl Info<'_> {
         if let Some(o) = self.types.get(&key) {
             return Some(*o);
         }
+        if let Some(name) = self.building.get(&key).cloned() {
+            let decl = format!("decl {key}");
+            if let Some(o) = self.types.get(&decl) {
+                return Some(*o);
+            }
+            let o = self.b.len() as u32;
+            self.b.push(A_STRUCT_DECL);
+            cstr(&mut self.b, &name);
+            self.types.insert(decl, o);
+            return Some(o);
+        }
         let t = self.t;
         let w = t.pointer_width / 8;
         let size = t.size_align(ty).0;
@@ -385,10 +547,7 @@ impl Info<'_> {
             MirTy::Unit => return None,
             MirTy::Prim(PrimTy::Str) => {
                 let u8_ = self.base(PrimTy::U8)?;
-                let ptr = self.b.len() as u32;
-                self.b.push(A_PTR_TO);
-                self.u32(u8_);
-                uleb(&mut self.b, u64::from(w));
+                let ptr = self.pointer_to(u8_);
                 let len = self.base(PrimTy::Usize)?;
                 self.structure(
                     "str",
@@ -419,12 +578,13 @@ impl Info<'_> {
                 )
             }
             MirTy::Tuple(ps) => {
-                let m = self.members(ty, ps, &[]);
+                let m = self.members(ty, ps, &[], &[]);
                 self.structure("tuple", size, &m)
             }
             MirTy::Struct(id, ps) => {
-                let (name, names) = self
-                    .names
+                let m = self.m;
+                let (name, names) = m
+                    .struct_names
                     .get(&id.0)
                     .cloned()
                     .unwrap_or_else(|| (format!("Struct#{}", id.0), Vec::new()));
@@ -433,8 +593,11 @@ impl Info<'_> {
                 } else {
                     Vec::new()
                 };
-                let m = self.members(ty, ps, &names);
-                self.structure(&name, size, &m)
+                let dbg = m.debug.fields.get(&id.0).map_or(&[][..], Vec::as_slice);
+                self.building.insert(key.clone(), name.clone());
+                let fields = self.members(ty, ps, &names, dbg);
+                self.building.remove(&key);
+                self.structure(&name, size, &fields)
             }
             MirTy::Array(..) | MirTy::Union(..) => {
                 let (elem, n) = match ty {
@@ -456,16 +619,23 @@ impl Info<'_> {
         Some(off)
     }
 
+    /// `(name, type, offset)` of each part of `agg` (`names[i]`, else
+    /// `i`; typed `debug[i]` when given); `()` parts are left out.
     fn members(
         &mut self,
         agg: &MirTy,
         parts: &[MirTy],
         names: &[String],
+        debug: &[DebugTy],
     ) -> Vec<(String, u32, u32)> {
         let offs = self.t.field_offsets(agg);
         let mut out = Vec::new();
         for (i, (p, off)) in parts.iter().zip(offs).enumerate() {
-            if let Some(ty) = self.ty(p) {
+            let ty = match debug.get(i) {
+                Some(d) if d.fits(p) => self.debug_ty(d),
+                _ => self.ty(p),
+            };
+            if let Some(ty) = ty {
                 let n = names.get(i).cloned().unwrap_or_else(|| i.to_string());
                 out.push((n, ty, off));
             }
@@ -500,15 +670,23 @@ fn scope_code(id: u32, d: &crate::lir::FnDebug, f: &FnRange) -> Vec<(u32, u32)> 
 }
 
 /// Add the debug sections of `obj`'s functions.
-pub fn write(obj: &mut Obj, t: &Target, names: &HashMap<u32, (String, Vec<String>)>) {
+pub fn write(obj: &mut Obj, m: &MirModule) {
+    let t = &m.target;
     let fns: Vec<&FnRange> = obj.fns.iter().filter(|f| f.debug.is_some()).collect();
-    let Some(first) = fns.first() else { return };
+    // The unit is named by its first function with a position; generated
+    // functions without one are at line 0 of its file.
+    let Some(first_file) = fns
+        .iter()
+        .filter_map(|f| f.debug.as_ref().map(|d| d.0.file))
+        .find(|&f| f != 0)
+    else {
+        return;
+    };
     let cwd = std::env::current_dir().unwrap_or_default();
     let files: Vec<PathBuf> = rokc_diagnostic::registered_files()
         .into_iter()
         .map(|(p, _)| cwd.join(p))
         .collect();
-    let first_file = first.debug.as_ref().map_or(1, |d| d.0.file);
     let cu_path = files
         .get(first_file as usize - 1)
         .cloned()
@@ -527,7 +705,8 @@ pub fn write(obj: &mut Obj, t: &Target, names: &HashMap<u32, (String, Vec<String
         relocs: Vec::new(),
         types: HashMap::new(),
         t,
-        names,
+        m,
+        building: HashMap::new(),
         ranges: Vec::new(),
         ranges_relocs: Vec::new(),
         cu_low: if obj.elf {
@@ -544,7 +723,7 @@ pub fn write(obj: &mut Obj, t: &Target, names: &HashMap<u32, (String, Vec<String
     info.b.push(8);
     info.b.push(A_CU);
     cstr(&mut info.b, "rokc");
-    info.b.extend_from_slice(&DW_LANG_C.to_le_bytes());
+    info.b.extend_from_slice(&DW_LANG_RUST.to_le_bytes());
     cstr(
         &mut info.b,
         &cu_path
@@ -570,14 +749,15 @@ pub fn write(obj: &mut Obj, t: &Target, names: &HashMap<u32, (String, Vec<String
     // Types first, so variables refer back to them.
     for f in &fns {
         for v in &f.debug.as_ref().expect("debug").0.vars {
-            info.ty(&v.ty);
+            info.debug_ty(&v.ty);
         }
     }
     for f in &fns {
         let (d, offs) = f.debug.as_ref().expect("debug");
+        let file = if d.file == 0 { first_file } else { d.file };
         info.b.push(A_SUB);
         cstr(&mut info.b, &d.name);
-        uleb(&mut info.b, u64::from(d.file));
+        uleb(&mut info.b, u64::from(file));
         uleb(&mut info.b, u64::from(d.line));
         info.addr(f.sym, f.start);
         if info.split {
@@ -599,7 +779,9 @@ pub fn write(obj: &mut Obj, t: &Target, names: &HashMap<u32, (String, Vec<String
         }
         let var_die = |info: &mut Info<'_>, i: usize| {
             let v = &d.vars[i];
-            let Some(ty) = info.ty(&v.ty) else { return };
+            let Some(ty) = info.debug_ty(&v.ty) else {
+                return;
+            };
             info.b.push(if v.arg.is_some() { A_PARAM } else { A_VAR });
             cstr(&mut info.b, &v.name);
             uleb(&mut info.b, u64::from(d.file));
@@ -617,7 +799,13 @@ pub fn write(obj: &mut Obj, t: &Target, names: &HashMap<u32, (String, Vec<String
     let len = info.b.len() as u32 - 4;
     info.b[..4].copy_from_slice(&len.to_le_bytes());
 
-    let line = line_program(&fns, &files, &dir_of, if obj.x86 { 1 } else { 4 });
+    let line = line_program(
+        &fns,
+        &files,
+        &dir_of,
+        first_file,
+        if obj.x86 { 1 } else { 4 },
+    );
     let mut sect = |name: &'static str, data: Vec<u8>, relocs: Vec<Reloc>| {
         obj.extra.push((
             "__DWARF",
@@ -674,6 +862,7 @@ fn line_program(
     fns: &[&FnRange],
     files: &[PathBuf],
     dir_of: &dyn Fn(&Path) -> String,
+    cu_file: u32,
     unit: u32,
 ) -> (Vec<u8>, Vec<Reloc>) {
     let mut b = Vec::new();
@@ -726,7 +915,10 @@ fn line_program(
         b.extend_from_slice(&u64::from(f.start).to_le_bytes());
         // DW_LNS_set_file
         b.push(4);
-        uleb(&mut b, u64::from(d.file));
+        uleb(
+            &mut b,
+            u64::from(if d.file == 0 { cu_file } else { d.file }),
+        );
         let (mut addr, mut line) = (0u32, 1i64);
         let mut rows = vec![(0u32, d.line, 1u32)];
         rows.extend(f.lines.iter().map(|&(a, l, c, _)| (a, l, c)));

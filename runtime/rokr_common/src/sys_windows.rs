@@ -14,7 +14,7 @@
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 use crate::win::{self, BOOL, DWORD, HANDLE};
 pub use crate::wtf8::*;
@@ -297,10 +297,42 @@ pub fn thread_cpu_ns() -> i64 {
     (filetime_ticks(t[2]) + filetime_ticks(t[3])) * 100
 }
 
+/// Set by `rok_watch_writes`: the heap's own memory is write-watched
+/// (`MEM_WRITE_WATCH`), so the REPL host saves only what changed.
+static WATCH: AtomicBool = AtomicBool::new(false);
+
+/// Bumped when write-watched pages change without a write (a reset) or
+/// a watched block is released (its address may come back as another).
+#[unsafe(no_mangle)]
+pub static rok_page_epoch: AtomicU64 = AtomicU64::new(0);
+
+/// Before the runtime starts (the REPL host): reservations and large
+/// blocks are write-watched from now on.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_watch_writes() {
+    WATCH.store(true, Ordering::Relaxed);
+}
+
+fn watch() -> DWORD {
+    if WATCH.load(Ordering::Relaxed) {
+        win::MEM_WRITE_WATCH
+    } else {
+        0
+    }
+}
+
 /// Reserve `len` bytes of address space, inaccessible: null on failure.
 pub fn reserve(len: usize) -> *mut u8 {
     // SAFETY: a fresh reservation; nothing is touched.
-    unsafe { win::VirtualAlloc(ptr::null_mut(), len, win::MEM_RESERVE, win::PAGE_NOACCESS) }.cast()
+    unsafe {
+        win::VirtualAlloc(
+            ptr::null_mut(),
+            len,
+            win::MEM_RESERVE | watch(),
+            win::PAGE_NOACCESS,
+        )
+    }
+    .cast()
 }
 
 /// Commit the page-aligned range `p..p + len` of a reservation, read /
@@ -319,13 +351,24 @@ pub unsafe fn commit(p: *mut u8, len: usize) -> bool {
 /// # Safety
 /// The range must be committed and hold nothing anyone still uses.
 pub unsafe fn reset(p: *mut u8, len: usize) -> bool {
+    rok_page_epoch.fetch_add(1, Ordering::Release);
     // SAFETY: caller contract.
     unsafe { win::VirtualFree(p.cast(), len, win::MEM_DECOMMIT) != 0 && commit(p, len) }
 }
 
+/// Blocks from this size on are their own write-watched allocations
+/// while writes are watched.
+const WATCHED_BLOCK: usize = 1 << 20;
+
 /// `size` bytes aligned to `align` (a power of two), freed with
 /// [`free_aligned`]: null on failure.
 pub fn alloc_aligned(size: usize, align: usize) -> *mut u8 {
+    if watch() != 0 && size >= WATCHED_BLOCK && align <= 1 << 16 {
+        let kind = win::MEM_RESERVE | win::MEM_COMMIT | win::MEM_WRITE_WATCH;
+        // SAFETY: a fresh allocation (64 KiB-aligned).
+        return unsafe { win::VirtualAlloc(ptr::null_mut(), size, kind, win::PAGE_READWRITE) }
+            .cast();
+    }
     // SAFETY: plain UCRT call.
     unsafe { libc::aligned_malloc(size, align.max(16)) }.cast()
 }
@@ -333,6 +376,21 @@ pub fn alloc_aligned(size: usize, align: usize) -> *mut u8 {
 /// # Safety
 /// `p` must be null or from [`alloc_aligned`].
 pub unsafe fn free_aligned(p: *mut u8) {
+    // A block of its own starts its allocation; a UCRT block never does
+    // (its heap header comes first).
+    // SAFETY: a zeroed out-buffer; any address may be queried.
+    let mut m: win::MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
+    let own = !p.is_null()
+        && (p as usize).trailing_zeros() >= 16
+        // SAFETY: as above.
+        && unsafe { win::VirtualQuery(p.cast(), &mut m, size_of::<win::MEMORY_BASIC_INFORMATION>()) } != 0
+        && m.AllocationBase == p.cast();
+    if own {
+        rok_page_epoch.fetch_add(1, Ordering::Release);
+        // SAFETY: our own allocation, released whole.
+        unsafe { win::VirtualFree(p.cast(), 0, win::MEM_RELEASE) };
+        return;
+    }
     // SAFETY: caller contract.
     unsafe { libc::aligned_free(p.cast()) };
 }

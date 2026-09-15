@@ -1,6 +1,6 @@
-// expect-error: `Loose` cannot be `Pod`: it needs `#[repr(C)]` or `#[repr(transparent)]`
-// expect-error: `Named` cannot be `Pod`: `name` has type `str`, which is not `Pod`
-// expect-error: `Held` cannot be `Pod`: it implements `Drop`
+// expect-error: 8:1: `Loose` cannot be `Pod`: it needs `#[repr(C)]` or `#[repr(transparent)]`
+// expect-error: 12:1: `Named` cannot be `Pod`: `name` has type `str`, which is not `Pod`
+// expect-error: 16:1: `Held` cannot be `Pod`: it implements `Drop`
 
 // Stdlib 1.3.3: `#[derive(Pod)]` needs a fixed layout, `Pod` fields and
 // no `Drop`.

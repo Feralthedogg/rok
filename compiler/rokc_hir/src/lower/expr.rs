@@ -86,15 +86,14 @@ fn declare_nested_fns(ctx: &mut LowerCtx<'_>, block: &Block) {
                 continue;
             }
             if !inherited && own.insert(&f.name, s.span).is_some() {
-                let old = rokc_diagnostic::set_current_span(s.span);
-                ctx.emit_error(
+                ctx.emit_error_at(
                     rokc_diagnostic::ErrorKind::Type,
+                    s.span,
                     format!(
                         "nested function `{}` is defined twice in this block",
                         f.name
                     ),
                 );
-                rokc_diagnostic::set_current_span(old);
             }
             let full = if ctx.current_module.is_empty() {
                 lifted.to_owned()
@@ -117,15 +116,14 @@ fn declare_nested_fns(ctx: &mut LowerCtx<'_>, block: &Block) {
         };
         for n in names {
             if own.contains_key(n) {
-                let old = rokc_diagnostic::set_current_span(s.span);
-                ctx.emit_error(
+                ctx.emit_error_at(
                     rokc_diagnostic::ErrorKind::Type,
+                    s.span,
                     format!(
                         "`{n}` names both a variable and a nested function in this block \
                          (spec 4.10.8)"
                     ),
                 );
-                rokc_diagnostic::set_current_span(old);
             }
         }
     }
@@ -324,10 +322,7 @@ pub(super) fn lower_let_tuple(
 
 pub(super) fn lower_stmt(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
     // Diagnostics raised while lowering default to this location.
-    let outer = rokc_diagnostic::set_current_span(stmt.span);
-    let s = lower_stmt_inner(ctx, stmt);
-    rokc_diagnostic::set_current_span(outer);
-    s
+    ctx.at_span(stmt.span, |ctx| lower_stmt_inner(ctx, stmt))
 }
 
 fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
@@ -409,9 +404,9 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
         StmtKind::Trailing(expr) => {
             let h = lower_expected(ctx, expr, HirTy::Unit);
             if let Some(t) = arm_value_ty(&h) {
-                let old = rokc_diagnostic::set_current_span(stmt.span);
-                ctx.emit_error(
+                ctx.emit_error_at(
                     rokc_diagnostic::ErrorKind::Type,
+                    stmt.span,
                     format!(
                         "this block-like statement leaves a value of type `{}` without `;`: a \
                          statement must be `()` (add `;` to discard it, or make it the \
@@ -419,7 +414,6 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
                         ctx.ty_name(&t)
                     ),
                 );
-                rokc_diagnostic::set_current_span(old);
             }
             Some(HirStmt::Expr(h))
         }
@@ -1072,9 +1066,7 @@ pub(super) fn check_index_ty(ctx: &LowerCtx<'_>, idx: &HirExpr) {
 }
 
 pub(super) fn lower_expr(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
-    let outer = rokc_diagnostic::set_current_span(expr.span);
-    let e = lower_expr_inner(ctx, expr);
-    rokc_diagnostic::set_current_span(outer);
+    let e = ctx.at_span(expr.span, |ctx| lower_expr_inner(ctx, expr));
     if e.ty != HirTy::Never || hir_expr_diverges(&e) {
         return e;
     }
@@ -1766,7 +1758,7 @@ fn infer_enum_instance(
             }
         }
     }
-    ctx.instantiate_enum(full, args, rokc_diagnostic::current_span())
+    ctx.instantiate_enum(full, args, ctx.here())
 }
 
 /// `segs` names an enum (or generic enum base) that has no variant of
@@ -2010,7 +2002,7 @@ pub(super) fn lower_struct_init(
                         }
                     }
                 }
-                match ctx.instantiate_struct(&full, args, rokc_diagnostic::current_span()) {
+                match ctx.instantiate_struct(&full, args, ctx.here()) {
                     Some(id) => id,
                     None => return poison(span),
                 }
@@ -3014,14 +3006,16 @@ pub(super) fn lower_args_ref(
             }
         };
         // A mismatch points at the argument, not the whole call.
-        let at = (v.span != rokc_diagnostic::Span::DUMMY)
-            .then(|| rokc_diagnostic::set_current_span(v.span));
+        let at = if v.span.is_dummy() {
+            ctx.here()
+        } else {
+            v.span
+        };
+        let outer = ctx.at.replace(at);
         out.push(coerce(ctx, &pty, v, &|| {
             format!("argument `{pname}` of `{callee}`")
         }));
-        if let Some(old) = at {
-            rokc_diagnostic::set_current_span(old);
-        }
+        ctx.at.set(outer);
     }
     check_ref_exclusive(ctx, callee, &out, &places, &reads, has_receiver);
     // Spec 4.2.8: arguments run in written order. Named ones out of
@@ -3317,7 +3311,7 @@ pub(super) fn lower_variadic(
             trailing_closure: None,
         });
         let list_ty = ctx
-            .instantiate_struct(LIST, vec![elem], rokc_diagnostic::current_span())
+            .instantiate_struct(LIST, vec![elem], ctx.here())
             .map_or(HirTy::Unknown, HirTy::Struct);
         let init = lower_expected(ctx, &new, list_ty);
         let (list, _) = temp(ctx, &mut stmts, init);
@@ -3788,9 +3782,7 @@ fn check_const_overflow(
         ),
         None => format!("constant expression overflows `{}`", p.name()),
     };
-    let old = rokc_diagnostic::set_current_span(span);
-    ctx.emit_error(rokc_diagnostic::ErrorKind::Type, msg);
-    rokc_diagnostic::set_current_span(old);
+    ctx.emit_error_at(rokc_diagnostic::ErrorKind::Type, span, msg);
 }
 
 /// `{ lets; e }` — temporaries a spread argument introduced, so the
@@ -4122,7 +4114,11 @@ fn check_direct_drop_path(ctx: &LowerCtx<'_>, p: &rokc_ast::Path) {
         return;
     }
     let segs: Vec<&str> = prefix.iter().map(|s| s.name.as_str()).collect();
-    let is_drop = ctx.env.names.trait_key(&segs, &ctx.current_module) == ctx.lang("drop_method")
+    let is_drop = ctx
+        .env
+        .names
+        .trait_key(&segs, &ctx.current_module, ctx.here())
+        == ctx.lang("drop_method")
         || {
             let ty = ctx.resolve_ast_ty(&rokc_ast::Ty {
                 kind: rokc_ast::TyKind::Path(rokc_ast::Path {
@@ -4747,7 +4743,7 @@ fn pick_by_first_arg<'e>(
         // A slot naming a parameter the receiver leaves open (`[T; N]`
         // of `impl<T, const N: usize> Tr<[T; N]> for T`) is no candidate.
         let mark = ctx.probe_mark();
-        let mut rcx = LowerCtx::new(env, &subst, None);
+        let mut rcx = LowerCtx::new(env, &subst, None, ctx.here());
         rcx.current_module.clone_from(&gi.module);
         let slot = rcx.resolve_ast_ty(p);
         if !ctx.probe_clean(&mark) {
@@ -5020,7 +5016,7 @@ fn trait_decl_sig(
         .zip(bound.args.iter().cloned())
         .chain(bound.binds.iter().cloned())
         .collect();
-    let mut rc = LowerCtx::new(ctx.env, &subst, None);
+    let mut rc = LowerCtx::new(ctx.env, &subst, None, ctx.here());
     rc.current_module.clone_from(&info.module);
     let resolve = |t: &Ty| {
         let mut t = t.clone();
@@ -5129,7 +5125,7 @@ pub(super) fn any_link(
     lib: Option<&str>,
 ) -> (Vec<(String, String)>, Vec<(FunctionId, String)>) {
     let empty = HashMap::new();
-    let c = LowerCtx::new(env, &empty, None);
+    let c = LowerCtx::new(env, &empty, None, rokc_diagnostic::Span::DUMMY);
     let dispatch = env.sink.any_dispatch.borrow().clone();
     let names = |tys: &[HirTy]| tys.iter().map(|t| c.ty_name(t)).collect::<Vec<_>>();
     let exports = dispatch
@@ -5229,7 +5225,7 @@ pub(super) fn any_link(
 /// name (`HirModule::any_types`), as `ty_name` prints it.
 pub(super) fn any_types(env: &Env<'_>) -> Vec<String> {
     let empty = HashMap::new();
-    let c = LowerCtx::new(env, &empty, None);
+    let c = LowerCtx::new(env, &empty, None, rokc_diagnostic::Span::DUMMY);
     let stored: Vec<HirTy> = env
         .sink
         .any_tags
@@ -5271,7 +5267,7 @@ pub(super) fn build_any_dispatchers(env: &Env<'_>) {
 fn build_dispatcher(env: &Env<'_>, d: &AnyDispatch) -> HirFunction {
     let span = d.span;
     let empty = HashMap::new();
-    let mut c = LowerCtx::new(env, &empty, None);
+    let mut c = LowerCtx::new(env, &empty, None, span);
     let HirTy::AnyTrait(bounds) = &d.recv_ty else {
         unreachable!("dispatcher on a non-`any` type")
     };
@@ -7794,7 +7790,10 @@ pub(super) fn addr_expr(
     let Some(place) = addr_place(ctx, place, &mut lets) else {
         return ctx.error_expr(
             span,
-            format!("`{name}` needs a place: a local variable, or a field or array element of one"),
+            format!(
+                "`{name}` needs a place: a local variable or `static`, or a field or array \
+                 element of one"
+            ),
         );
     };
     let ptr = def.ret_ty.as_ref().and_then(|t| match &t.kind {
@@ -7829,12 +7828,12 @@ pub(super) fn addr_expr(
     )
 }
 
-/// `e` as a place rooted at a local, its non-trivial indices moved into
-/// `lets`; `None` if it is not one.
+/// `e` as a place rooted at a local or `static`, its non-trivial indices
+/// moved into `lets`; `None` if it is not one.
 fn addr_place(ctx: &mut LowerCtx<'_>, e: HirExpr, lets: &mut Vec<HirStmt>) -> Option<HirExpr> {
     let HirExpr { kind, ty, span } = e;
     let kind = match kind {
-        HirExprKind::Local(_) => kind,
+        HirExprKind::Local(_) | HirExprKind::StaticRef(_) => kind,
         HirExprKind::FieldRead {
             target,
             struct_id,
@@ -8772,7 +8771,7 @@ fn generic_op_by_rhs<'e>(
                 if !open.is_empty() {
                     unify_param_ty_with(arg, &rhs.ty, &open, &mut subst, ctx);
                 }
-                let mut rcx = LowerCtx::new(ctx.env, &subst, None);
+                let mut rcx = LowerCtx::new(ctx.env, &subst, None, ctx.here());
                 rcx.current_module.clone_from(&gi.module);
                 rcx.resolve_ast_ty(arg)
             }
@@ -8902,7 +8901,7 @@ fn lower_assoc_const(
             })
             .collect();
         return Some(ctx.error_expr(
-            rokc_diagnostic::current_span(),
+            ctx.here(),
             format!(
                 "associated const `{name}` of `{}` is ambiguous: {} define it — name the \
                  trait (`<T as Tr>::{name}`) (spec 2.8.3a)",
@@ -8916,6 +8915,7 @@ fn lower_assoc_const(
     let sc = Scope {
         names: &env.names,
         module: &imp.module,
+        at: ctx.here(),
     };
     let cty = resolve_ty_with_structs(cty, &env.defs, Some(&subst), sc);
     // The value is the impl's: its names resolve in the impl's module,
@@ -8926,7 +8926,7 @@ fn lower_assoc_const(
     let saved_uses = std::mem::replace(&mut ctx.local_uses, vec![Vec::new()]);
     let saved_scopes = std::mem::replace(&mut ctx.scopes, vec![HashMap::new()]);
     let key = format!("{}::{name}", ctx.ty_name(ty));
-    let span = rokc_diagnostic::current_span();
+    let span = ctx.here();
     let v = super::const_eval::guard(ctx, &key, span, |ctx| {
         let v = lower_expected(ctx, value, cty.clone());
         coerce(ctx, &cty, v, &|| format!("associated const `{name}`"))
@@ -8960,8 +8960,12 @@ fn qpath_trait(ctx: &LowerCtx<'_>, q: &rokc_ast::QPath) -> Option<String> {
         .iter()
         .map(|s| s.name.as_str())
         .collect();
-    Some(ctx.env.names.trait_key(&segs, &ctx.current_module))
-        .filter(|k| ctx.env.names.traits.contains(k))
+    Some(
+        ctx.env
+            .names
+            .trait_key(&segs, &ctx.current_module, ctx.here()),
+    )
+    .filter(|k| ctx.env.names.traits.contains(k))
 }
 
 /// `<T as Tr>::N` (an associated const) or `<T as Tr>::m` (a method
@@ -9122,6 +9126,7 @@ pub(super) fn lower_path(
         let sc = Scope {
             names: &ctx.env.names,
             module: &module,
+            at: ctx.here(),
         };
         let ty = resolve_ty_with_structs(&ty, &ctx.env.defs, None, sc);
         // The value's names (and field privacy) are the defining module's.
@@ -9617,13 +9622,13 @@ fn lower_magic(
             .collect();
         let mut d = rokc_diagnostic::RokDiagnostic::error(
             rokc_diagnostic::ErrorKind::Type,
+            span,
             format!(
                 "ambiguous literal: handlers {} all match (spec 6.5.5) — give the slot a type \
                  or a handler `priority = N`",
                 names.join(", ")
             ),
-        )
-        .with_span(span, "");
+        );
         for c in &live {
             d = d.with_secondary(c.reg, "registered here");
         }

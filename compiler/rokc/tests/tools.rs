@@ -429,8 +429,14 @@ let never = 0;
 /// binding's object and to a static, and the thread it started.
 #[test]
 #[cfg_attr(
-    not(any(all(target_os = "macos", target_arch = "aarch64"), windows)),
-    ignore = "the REPL host is tested on macOS arm64 and Windows"
+    not(any(
+        all(
+            any(target_os = "macos", target_os = "linux"),
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        windows
+    )),
+    ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
 )]
 fn repl_survives_failed_cells() {
     let Some(env) = setup() else { return };
@@ -475,6 +481,53 @@ C.load()
         "{stderr}"
     );
     assert!(stderr.contains("deep") && stderr.contains("v2"), "{stderr}");
+}
+
+/// Threads from earlier cells and a failed cell: the task executor's
+/// threads (started by earlier cells, some of them running the failed
+/// cell's tasks) serve later cells, and a thread that was running while
+/// the cell failed is gone (its join says so).
+#[test]
+#[cfg_attr(
+    not(any(
+        all(
+            any(target_os = "macos", target_os = "linux"),
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        windows
+    )),
+    ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
+)]
+fn repl_threads_after_a_failed_cell() {
+    let Some(env) = setup() else { return };
+    let rokr = env.rokr.display().to_string();
+    let input = "\
+use rok::core::task;
+use rok::std::thread;
+task::block_on(async { let t = task::spawn(async { 20 + 1 }); await t })
+task::block_on(async { await task::spawn_blocking(|| 7) })
+task::block_on(async { let t = task::spawn(async { 5 }); await t }); panic(\"in the middle\");
+task::block_on(async { let t = task::spawn(async { 40 + 2 }); await t })
+task::block_on(async { await task::spawn_blocking(|| 8) })
+let h = thread::spawn(|| { let n: i64 = 0; while n >= 0 { n += 1; } n });
+thread::sleep(Duration::ms(100)); panic(\"busy\");
+let j = try h.join() catch e { println(f\"{e}\"); -1i64 };
+j
+task::block_on(async { let ts = [task::spawn(async { 1 }), task::spawn(async { 2 })]; let s = 0; for t in ts { s += await t; } s })
+";
+    let out = piped(ROKC, &["repl", "--rokr", &rokr], input);
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+    assert_eq!(
+        stdout,
+        "i32: 21\ni32: 7\ni32: 42\ni32: 8\nthread join failed: the thread ended with a failed REPL cell\ni64: -1\ni32: 3\n",
+        "stderr: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches("error: the cell failed").count(),
+        2,
+        "{stderr}"
+    );
 }
 
 fn frame(body: &str) -> String {

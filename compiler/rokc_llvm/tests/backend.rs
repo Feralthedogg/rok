@@ -90,6 +90,43 @@ fn llvm_ir_to_objects_for_every_target() {
     }
 }
 
+/// A split -O2 compile still inlines across its parts: `helper` and
+/// `entry` land in different parts, and `entry`'s does not call it.
+#[test]
+fn split_objects_inline_across_parts() {
+    if skip() {
+        return;
+    }
+    let src = r"
+module {
+  func.func @helper(%x: i32) -> i32 {
+    %r = arith.muli %x, %x : i32
+    return %r : i32
+  }
+  func.func @entry(%x: i32) -> i32 {
+    %r = call @helper(%x) : (i32) -> i32
+    %c = arith.constant 1 : i32
+    %s = arith.addi %r, %c : i32
+    return %s : i32
+  }
+}
+";
+    let t = Target::new("x86_64-unknown-linux-gnu");
+    let p = rokc_llvm::mlir_pipeline(true, &[]);
+    let parts = rokc_llvm::compile_mlir_split(src, &opts(&t, OptLevel::O2, Emit::Obj, &p), 2)
+        .unwrap()
+        .0;
+    let names = |s: &[u8]| -> Vec<usize> {
+        (0..parts.len())
+            .filter(|&i| parts[i].windows(s.len()).any(|w| w == s))
+            .collect()
+    };
+    let (helper, entry) = (names(b"helper"), names(b"entry"));
+    assert_eq!(helper.len(), 1, "{helper:?}");
+    assert_eq!(entry.len(), 1, "{entry:?}");
+    assert_ne!(helper, entry);
+}
+
 #[test]
 fn data_layout_is_clangs() {
     if skip() {

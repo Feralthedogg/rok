@@ -61,7 +61,9 @@ packages:
   search [--native] <query>    stones (native packages) whose name contains
                                <query>
   deps                         print the resolved dependencies (name=lib.rok),
-                               each after its own
+                               each after its own; native packages as
+                               `# native <name> <vers>` and their rokc
+                               arguments, one per line
   clean [path]                 remove target/
 
 stones (the index is a git repository; nothing is uploaded):
@@ -73,8 +75,9 @@ stones (the index is a git repository; nothing is uploaded):
                                the index entry of the native package
                                `Native { .. }` in <file>, each build fetched
                                and checked
-  yank --vers <v> [--undo] --index <dir> [name]
-                               mark a version yanked (commits to <dir>)
+  yank [--native] --vers <v> [--undo] --index <dir> [name]
+                               mark a version yanked (commits to <dir>);
+                               --native: a native package's (named)
 
 compiler commands (rokc, with the dependencies; see `rokc help`):
   build | check | run | test | bench | lint | doc | emit [path] ...
@@ -181,7 +184,7 @@ fn set_config(home: &Path, field: &str, value: &str) -> Result<(), String> {
         .map_err(|e| format!("cannot write {file}: {e}"))
 }
 
-/// `new`, an edit of RokON text `old`: in canonical form (spec 3.9.4)
+/// `new`, an edit of ROKON text `old`: in canonical form (spec 3.9.4)
 /// when `old` was, else as edited (comments and layout kept).
 fn canonical_edit(old: &str, new: &str) -> String {
     let canon = |t: &str| rokc_rokon::parse(t).ok().map(|v| rokc_rokon::to_string(&v));
@@ -538,8 +541,9 @@ fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i3
                 p.root.display()
             ));
         }
-        // Native packages: what a link needs, for the build's target.
-        if matches!(cmd, "build" | "run" | "test" | "bench") {
+        // Native packages: what a link (or the REPL's session) needs, for
+        // the build's target. Checks link nothing.
+        if matches!(cmd, "build" | "run" | "test" | "bench" | "repl" | "jupyter") {
             let natives: Vec<&native::Resolved> =
                 graph.natives.iter().filter(|n| dev_too || !n.dev).collect();
             if !natives.is_empty() {
@@ -1092,7 +1096,9 @@ fn cmd_update(g: &Global, names: &[String]) -> Result<i32, String> {
 }
 
 /// `rok deps [path] [--dev]`: `name=<lib.rok>` per dependency, each after
-/// its own (the REPL's `:add` reads it).
+/// its own; then per native package (for the host, dependents first) a
+/// `# native <name> <vers>` line and its rokc arguments, one per line
+/// (the REPL's `:add` reads it all).
 fn cmd_deps(g: &Global, args: &[String]) -> Result<i32, String> {
     let path = args
         .iter()
@@ -1100,9 +1106,16 @@ fn cmd_deps(g: &Global, args: &[String]) -> Result<i32, String> {
         .map(String::as_str);
     let t = target_for(g, path)?;
     let dev = args.iter().any(|a| a == "--dev");
-    let deps: Vec<Resolved> = resolve::resolve(&home(), &t.ctx, &options(g))?.packages;
+    let graph = resolve::resolve(&home(), &t.ctx, &options(g))?;
+    let deps: &[Resolved] = &graph.packages;
     for p in deps.iter().filter(|p| dev || !p.dev) {
         println!("{}={}", manifest::code_name(&p.name), p.root.display());
+    }
+    for n in graph.natives.iter().filter(|n| dev || !n.dev) {
+        println!("# native {} {}", n.entry.name, n.entry.vers);
+        for a in native::rokc_args(&home(), &[n], toolchain::HOST, g.offline, g.quiet)? {
+            println!("{a}");
+        }
     }
     Ok(0)
 }
@@ -1249,17 +1262,18 @@ fn cmd_publish(g: &Global, args: &[String]) -> Result<i32, String> {
     Ok(0)
 }
 
-/// `rok yank --vers <v> [--undo] --index <dir> [name]` (default: this
-/// package's name).
+/// `rok yank [--native] --vers <v> [--undo] --index <dir> [name]`
+/// (default: this package's name; a native package is named).
 fn cmd_yank(args: &[String]) -> Result<i32, String> {
-    let (vals, sw, pos) = flags(args, &["--vers", "--index"], &["--undo"])?;
-    let usage = "usage: rok yank --vers <version> [--undo] --index <dir> [name]";
+    let (vals, sw, pos) = flags(args, &["--vers", "--index"], &["--undo", "--native"])?;
+    let usage = "usage: rok yank [--native] --vers <version> [--undo] --index <dir> [name]";
     let (Some(vers), Some(index)) = (val(&vals, "--vers"), val(&vals, "--index")) else {
         return Err(usage.into());
     };
+    let native = sw.iter().any(|s| s == "--native");
     let name = match pos.as_slice() {
         [n] => n.clone(),
-        [] => this_package()?.1.name.ok_or("rok.rokon has no `name`")?,
+        [] if !native => this_package()?.1.name.ok_or("rok.rokon has no `name`")?,
         _ => return Err(usage.into()),
     };
     registry::yank(
@@ -1267,6 +1281,7 @@ fn cmd_yank(args: &[String]) -> Result<i32, String> {
         &name,
         vers,
         !sw.iter().any(|s| s == "--undo"),
+        native,
     )?;
     Ok(0)
 }

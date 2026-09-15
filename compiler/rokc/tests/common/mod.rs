@@ -28,6 +28,9 @@
 //!     (`fs`), WASI no `dup` / `flock` / `mmap` (`posix-fs`); `exit8` is
 //!     an exit code above 125 (wasmtime takes those from a WASI preview 1
 //!     module as traps)
+//!   - `// only-target: wasm32-wasi ..` — run only on the listed
+//!     `ROK_TEST_TARGET`s (what one target reports that the others do
+//!     not, e.g. its `Unsupported` APIs)
 //!   - `// spec: <section>`     — the spec section a case checks (a tag)
 //!
 //! Environment:
@@ -255,6 +258,10 @@ pub fn skipped_on_target(source: &str) -> bool {
     }) || directive(source, "only-pointer-width:")
         .is_some_and(|w| w.trim() != target_pointer_width().to_string())
         || directive(source, "needs:").is_some_and(|needs| needs.split_whitespace().any(lacks))
+        || directive(source, "only-target:").is_some_and(|ts| {
+            let t = test_target().unwrap_or_default();
+            !ts.split_whitespace().any(|x| x == t)
+        })
 }
 
 /// The cases' target lacks `// needs:` capability `need`.

@@ -350,6 +350,10 @@ pub extern "C" fn rok_task_worker_clear() {
 #[cfg(not(rok_solo))]
 struct Waiter {
     addr: usize,
+    /// The waiting thread's worker id (`rok_tls_worker_id`), for
+    /// `forget_waiters` (the REPL; no REPL on wasm32).
+    #[cfg(not(target_family = "wasm"))]
+    owner: u64,
     cond: sys::Cond,
     /// Unlinked by a waker (under the bucket lock).
     woken: bool,
@@ -468,6 +472,9 @@ pub fn wait_on<W: Futex>(w: &W, expected: i32, timeout_ns: i64) {
     let b = bucket(addr);
     let mut me = Waiter {
         addr,
+        // SAFETY: this thread's own slot.
+        #[cfg(not(target_family = "wasm"))]
+        owner: unsafe { tls::worker_id().read() },
         cond: sys::Cond::new(),
         woken: false,
         next: ptr::null_mut(),
@@ -495,6 +502,29 @@ pub fn wait_on<W: Futex>(w: &W, expected: i32, timeout_ns: i64) {
     }
     b.lock.unlock();
     crate::lane::block_end();
+}
+
+/// Unlink the waiters of threads that are gone (`gone(worker id)`): a
+/// failed REPL cell's session restored with their entries, which live on
+/// those threads' stacks.
+#[cfg(not(target_family = "wasm"))]
+pub fn forget_waiters(gone: impl Fn(u64) -> bool) {
+    for b in &BUCKETS {
+        b.lock.lock();
+        // SAFETY: the list is ours under the lock; a gone thread's node is
+        // never touched again.
+        unsafe {
+            let mut link = b.head.get();
+            while !(*link).is_null() {
+                if gone((**link).owner) {
+                    *link = (**link).next;
+                } else {
+                    link = &raw mut (**link).next;
+                }
+            }
+        }
+        b.lock.unlock();
+    }
 }
 
 /// Wake every thread blocked in [`wait_on`] on `w`.

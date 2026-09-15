@@ -6,10 +6,10 @@
 //! the MIR `Statement::Loc` before it; named locals get an
 //! `llvm.intr.dbg.declare` of their stack slot, typed by `di_type`
 //! (primitives; structs with their field names, tuples, `str`, `any`
-//! and arrays as composites; a tagged sum as its `tag` and a union of
-//! its variants' payloads; a `GcBuf` reference as a pointer to its
-//! object, header then elements; other GC references and `fn` values as
-//! pointers).
+//! and arrays as composites; a tagged sum as a variant part; a `GcBuf`
+//! reference as a pointer to its object, header then elements; other GC
+//! references and `fn` values as pointers). The unit's language is Rust:
+//! debuggers read variant parts in it (lldb only there).
 //!
 //! The attribute aliases are module-level text placed before `module`;
 //! op locations are appended to the op lines of a finished function
@@ -168,7 +168,7 @@ impl DebugInfo {
             // The first described function's file names the unit.
             let _ = writeln!(
                 self.defs,
-                "#di_cu = #llvm.di_compile_unit<id = distinct[0]<>, sourceLanguage = DW_LANG_C, \
+                "#di_cu = #llvm.di_compile_unit<id = distinct[0]<>, sourceLanguage = DW_LANG_Rust, \
                  file = {file}, producer = \"rokc\", isOptimized = {}, emissionKind = Full>\n\
                  #di_fn_ty = #llvm.di_subroutine_type<callingConvention = DW_CC_normal>",
                 self.optimized
@@ -249,30 +249,50 @@ impl DebugInfo {
                 );
                 return Some(self.define(key, &def));
             }
+            // A variant part: each variant a struct over the whole sum
+            // (as Rust describes enums), its payload's parts at their
+            // offsets. The discriminant comes first and each variant's
+            // stored tag rides a `di_subrange` (rokc_llvm's
+            // `variant_parts` makes them DWARF variants).
             DebugTy::Sum(name, mir, variants) => {
-                let (size, align) = self.target.size_align(mir);
-                let MirTy::Tuple(parts) = mir else {
+                if !matches!(mir, MirTy::Tuple(_)) {
                     return self.di_type(mir);
-                };
-                let payload_size = self.target.size_align(&parts[1]).0;
-                let offset = self.target.field_offsets(mir)[1];
-                let mut arms = Vec::new();
-                for (_, v, t) in variants {
-                    if let Some(t) = self.di_debug(t) {
-                        arms.push((v.as_str(), t, 0));
-                    }
                 }
-                let union = Self::composite(name, payload_size, align, &arms).replacen(
-                    "DW_TAG_structure_type",
-                    "DW_TAG_union_type",
-                    1,
-                );
-                let tag = self.basic_type(PrimTy::I32)?;
-                Self::composite(
-                    name,
-                    size,
-                    align,
-                    &[("tag", tag, 0), ("payload", union, offset)],
+                let (size, align) = self.target.size_align(mir);
+                let at = self.target.field_offsets(mir)[1];
+                let tag = self.basic_type(PrimTy::U32)?;
+                let mut parts = vec![format!(
+                    "#llvm.di_derived_type<tag = DW_TAG_member, baseType = {tag}, sizeInBits = 32>"
+                )];
+                for (t, v, p) in variants {
+                    let fields: Vec<(String, String, u32)> = match p {
+                        DebugTy::Mir(ty @ MirTy::Tuple(ps)) => self
+                            .members(ty, ps, &[], &[])
+                            .into_iter()
+                            .map(|(n, ty, o)| (n, ty, at + o))
+                            .collect(),
+                        p => self
+                            .di_debug(p)
+                            .map(|ty| ("0".to_owned(), ty, at))
+                            .into_iter()
+                            .collect(),
+                    };
+                    let arm = Self::composite(&format!("{name}::{v}"), size, align, &fields);
+                    parts.push(format!(
+                        "#llvm.di_derived_type<tag = DW_TAG_member, name = \"{}\", baseType = {arm}, \
+                         sizeInBits = {}, extraData = #llvm.di_subrange<count = {t} : i64>>",
+                        escape(v),
+                        size * 8
+                    ));
+                }
+                format!(
+                    "#llvm.di_composite_type<tag = DW_TAG_structure_type, name = \"{}\", \
+                     sizeInBits = {}, alignInBits = {}, elements = \
+                     #llvm.di_composite_type<tag = DW_TAG_variant_part, elements = {}>>",
+                    escape(name),
+                    size * 8,
+                    align * 8,
+                    parts.join(", ")
                 )
             }
         };

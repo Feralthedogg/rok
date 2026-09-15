@@ -58,6 +58,9 @@ commands:
                          merge the .profraw / .profdata files (a directory:
                          those in it) into one profile (default:
                          default.profdata) for -C profile-use
+  profdata show [--all-functions] [--topn N] <file>
+                         summarize a profile (with every function; with
+                         the N hottest)
   version                print the version
   help                   print this help
 
@@ -97,6 +100,10 @@ build options:
                                current one; LLVM_PROFILE_FILE overrides)
   -C profile-use=<file>        optimize with a profile from `rokc profdata merge`
                                (both select the LLVM backend at every level)
+  -C cs-profile-generate[=<dir>]
+                               with -C profile-use: instrument again after
+                               inlining (context-sensitive); merge its runs
+                               with that profile for the next -C profile-use
   --cfg <flag | key=value>     #[cfg] flag (repeatable)
   --print cfg                  print the active cfg (target keys, --cfg,
                                debug_assertions below -O1) and exit
@@ -188,6 +195,12 @@ struct Args {
     show_output: bool,
     lint_levels: Vec<(Level, String)>,
     list: bool,
+    /// `profdata show --all-functions`.
+    all_functions: bool,
+    /// `profdata show --topn N`.
+    topn: usize,
+    /// `-C cs-profile-generate`: the raw profile pattern.
+    cs_generate: Option<PathBuf>,
     /// `jupyter --connection-file`.
     connection_file: Option<PathBuf>,
     iters: Option<u64>,
@@ -352,6 +365,10 @@ fn parse_args(raw: Vec<String>) -> Args {
                     _ if v.starts_with("profile-use=") => {
                         a.opts.profile = Profile::Use(v[12..].into());
                     }
+                    "cs-profile-generate" => a.cs_generate = Some("default_%m.profraw".into()),
+                    _ if v.starts_with("cs-profile-generate=") => {
+                        a.cs_generate = Some(Path::new(&v[20..]).join("default_%m.profraw"));
+                    }
                     _ => match v
                         .strip_prefix("subsystem=")
                         .and_then(rokc_interface::Subsystem::parse)
@@ -369,6 +386,13 @@ fn parse_args(raw: Vec<String>) -> Args {
             "--diff" => a.diff = true,
             "--show-output" => a.show_output = true,
             "--list" => a.list = true,
+            "--all-functions" => a.all_functions = true,
+            "--topn" => {
+                let n = value(&name, inline, &mut it);
+                a.topn = n
+                    .parse()
+                    .unwrap_or_else(|_| usage_error(&format!("bad --topn `{n}`")));
+            }
             "--connection-file" => {
                 a.connection_file = Some(value(&name, inline, &mut it).into());
             }
@@ -412,6 +436,12 @@ fn parse_args(raw: Vec<String>) -> Args {
     }
     if a.cmd.is_empty() && a.print.is_none() {
         usage_error("missing command");
+    }
+    if let Some(g) = a.cs_generate.take() {
+        let Profile::Use(p) = &a.opts.profile else {
+            usage_error("-C cs-profile-generate needs -C profile-use=<first stage's profile>");
+        };
+        a.opts.profile = Profile::CsGenerate(p.clone(), g);
     }
     if std::env::var_os("ROKC_VERBOSE").is_some_and(|v| !v.is_empty() && v != "0") {
         a.verbose = a.verbose.max(1);
@@ -676,14 +706,17 @@ fn with_defaults(mut a: Args) -> Args {
             "-C profile-generate / -C profile-use need the LLVM backend, not the native one \
              (-C backend=native or ROK_BACKEND=native)",
         ),
-        Profile::Use(p) if !p.is_file() => {
-            fail(&format!("-C profile-use: no profile {}", p.display()));
+        p if p.used().is_some_and(|p| !p.is_file()) => {
+            fail(&format!(
+                "-C profile-use: no profile {}",
+                p.used().unwrap_or_else(|| Path::new("")).display()
+            ));
         }
-        Profile::Generate(_) if links && triple.starts_with("wasm32") => fail(&format!(
-            "-C profile-generate is not supported for {triple}: there is no profile runtime \
-             for WebAssembly"
+        p if p.generates() && links && triple == "wasm32-unknown-unknown" => fail(&format!(
+            "-C profile-generate is not supported for {triple}: a program has no file system \
+             to write its profile to (build for wasm32-wasi)"
         )),
-        Profile::Generate(_) if links => {
+        p if p.generates() && links => {
             let rt = dir.join(if triple.contains("-windows") {
                 "clang_rt.profile.lib"
             } else {
@@ -737,6 +770,12 @@ fn prebuild(a: &mut Args, pkg: Option<&Package>) -> Result<PathBuf, String> {
             target: a.target.as_deref(),
             test: matches!(a.cmd.as_str(), "test" | "bench"),
         });
+        if a.verbose > 0 && !a.quiet {
+            match &a.std_prebuilt {
+                Some(p) => eprintln!("         Std prebuilt ({})", p.display()),
+                None => eprintln!("         Std from source"),
+            }
+        }
     }
     let build = DepBuild {
         bootstrap: &a.bootstrap,
@@ -965,8 +1004,9 @@ fn build_fresh(a: &Args, pkg: &Package, out: &Path, link: impl FnOnce(&Args, &Co
     fp.clear();
     let (result, warnings, started) = compile(a, pkg, Mode::Build);
     let t = Instant::now();
-    link(a, &result);
-    fp.save(&result.files, &warnings);
+    // The back end's warnings (a stale profile) are replayed too.
+    let ((), more) = rokc_interface::capture_warnings(|| link(a, &result));
+    fp.save(&result.files, &(warnings + &more));
     stage(a, "codegen + link", t);
     finished(a, started);
 }
@@ -989,9 +1029,7 @@ fn fingerprint(a: &Args, pkg: &Package, out: &Path) -> Fingerprint {
     }];
     let mut stamped = vec![PathBuf::from(&a.opts.rokr)];
     stamped.extend(a.opts.profile_rt.clone());
-    if let Profile::Use(p) = &a.opts.profile {
-        stamped.push(p.clone());
-    }
+    stamped.extend(a.opts.profile.used().map(Path::to_path_buf));
     stamped.extend(a.opts.mlir_dialect_plugins.iter().cloned());
     stamped.extend(a.opts.mlir_pass_plugins.iter().cloned());
     for b in &a.bootstrap {
@@ -1004,10 +1042,18 @@ fn fingerprint(a: &Args, pkg: &Package, out: &Path) -> Fingerprint {
         inputs.push(rhir);
         stamped.push(archive);
     }
+    // An executable's shared libraries are copied beside it: a missing
+    // copy rebuilds.
+    stamped.extend(a.opts.runtime_files.iter().cloned());
     let also = if pkg.lib {
         vec![rokc_interface::rhir::companions(out).0]
     } else {
-        Vec::new()
+        let dir = out.parent().unwrap_or_else(|| Path::new("."));
+        a.opts
+            .runtime_files
+            .iter()
+            .map(|f| dir.join(f.file_name().unwrap_or_default()))
+            .collect()
     };
     Fingerprint::new(out, also, &words, &inputs, &stamped)
 }
@@ -1311,10 +1357,18 @@ fn cmd_fmt(a: &Args) {
 /// instrumented runs (and indexed profiles) into one indexed profile for
 /// `-C profile-use`; a directory stands for its `.profraw` / `.profdata`.
 fn cmd_profdata(a: &Args) {
-    let usage = "usage: rokc profdata merge [-o <file>] <file | dir>...";
+    let usage = "usage: rokc profdata merge [-o <file>] <file | dir>... | profdata show \
+                 [--all-functions] [--topn N] <file>";
     let [sub, inputs @ ..] = a.positional.as_slice() else {
         usage_error(usage);
     };
+    if sub == "show" {
+        let [file] = inputs else { usage_error(usage) };
+        let text = rokc_interface::profdata_show(Path::new(file), a.all_functions, a.topn)
+            .unwrap_or_else(|e| fail(&format!("profdata show: {}", e.trim_end())));
+        print!("{text}");
+        return;
+    }
     if sub != "merge" || inputs.is_empty() {
         usage_error(usage);
     }
@@ -1347,8 +1401,11 @@ fn cmd_profdata(a: &Args) {
         .clone()
         .unwrap_or_else(|| PathBuf::from("default.profdata"));
     let refs: Vec<&Path> = files.iter().map(PathBuf::as_path).collect();
-    rokc_interface::profdata_merge(&refs, &out)
+    let warnings = rokc_interface::profdata_merge(&refs, &out)
         .unwrap_or_else(|e| fail(&format!("profdata merge: {}", e.trim_end())));
+    for w in warnings.lines() {
+        eprintln!("rokc: warning: profdata merge: {w}");
+    }
     if !a.quiet {
         eprintln!(
             "       Wrote {} ({} input{})",

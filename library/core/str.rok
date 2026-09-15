@@ -464,10 +464,16 @@ impl TryFrom<u32> for char {
 // ---- StrBuf (stdlib 2.15.2) ----
 
 /// A growable UTF-8 buffer. A handle like the collections: copies
-/// share the buffer. `meta` = `[len, capacity]`, `data[0]` = bytes.
+/// share the buffer, one object holding the length, the capacity and
+/// the bytes.
 pub struct StrBuf {
-    meta: GcBuf<usize>;
-    data: GcBuf<GcBuf<u8>>;
+    h: GcBuf<StrBufHead>;
+}
+
+struct StrBufHead {
+    len: usize;
+    cap: usize;
+    bytes: GcBuf<u8>;
 }
 
 // Shares its buffer like `List` (stdlib 2.13.9).
@@ -478,29 +484,27 @@ impl StrBuf {
 
     pub fn with_capacity(cap: usize) -> StrBuf {
         unsafe {
-            let meta: GcBuf<usize> = buf_new(2);
-            meta[1] = cap;
-            let data: GcBuf<GcBuf<u8>> = buf_new(1);
-            data[0] = buf_new(buf_len(cap, 1));
-            StrBuf { meta: meta, data: data }
+            let h: GcBuf<StrBufHead> = buf_new(1);
+            h[0] = StrBufHead { len: 0, cap, bytes: buf_new(buf_len(cap, 1)) };
+            StrBuf { h }
         }
     }
 
     /// Byte length.
     pub fn len(self) -> usize {
         unsafe {
-            self.meta[0]
+            self.h[0].len
         }
     }
     pub fn is_empty(self) -> bool { self.len() == 0 }
     pub fn capacity(self) -> usize {
         unsafe {
-            self.meta[1]
+            self.h[0].cap
         }
     }
     pub fn clear(self) {
         unsafe {
-            self.meta[0] = 0;
+            self.h[0].len = 0;
         }
     }
 
@@ -513,29 +517,53 @@ impl StrBuf {
             if need <= cap { return; }
             let new_cap = cap.saturating_mul(2).max(need);
             let store: GcBuf<u8> = buf_new(buf_len(new_cap, 1));
-            rok_buf_copy(store, 0, self.data[0], 0, n);
-            self.data[0] = store;
-            self.meta[1] = new_cap;
+            rok_buf_copy(store, 0, self.h[0].bytes, 0, n);
+            self.h[0].bytes = store;
+            self.h[0].cap = new_cap;
         }
     }
+
+    // The appends grow the buffer out of line (`*_grown`): an append
+    // that fits reaches no safepoint, so it keeps no frame.
 
     /// Append `c`, UTF-8 encoded.
     pub fn push(self, c: char) {
         unsafe {
+            let n = self.len();
+            if self.capacity() - n < 4 {
+                return self.push_grown(c);
+            }
+            self.h[0].len = n + rok_buf_put_char(self.h[0].bytes, n, c as u32);
+        }
+    }
+
+    fn push_grown(self, c: char) {
+        unsafe {
             self.reserve(4);
             let n = self.len();
-            self.meta[0] = n + rok_buf_put_char(self.data[0], n, c as u32);
+            self.h[0].len = n + rok_buf_put_char(self.h[0].bytes, n, c as u32);
         }
     }
 
     pub fn push_str(self, s: str) {
         unsafe {
             let m = s.len();
-            if m == 0 { return; }
+            let n = self.len();
+            if self.capacity() - n < m {
+                return self.push_str_grown(s);
+            }
+            rok_buf_put_str(self.h[0].bytes, n, s);
+            self.h[0].len = n + m;
+        }
+    }
+
+    fn push_str_grown(self, s: str) {
+        unsafe {
+            let m = s.len();
             self.reserve(m);
             let n = self.len();
-            rok_buf_put_str(self.data[0], n, s);
-            self.meta[0] = n + m;
+            rok_buf_put_str(self.h[0].bytes, n, s);
+            self.h[0].len = n + m;
         }
     }
 
@@ -545,15 +573,23 @@ impl StrBuf {
     /// `str::from_utf8`.
     pub unsafe fn push_byte(self, b: u8) {
         let n = self.len();
+        if n == self.capacity() {
+            return self.push_byte_grown(b);
+        }
+        self.h[0].bytes[n] = b;
+        self.h[0].len = n + 1;
+    }
+
+    unsafe fn push_byte_grown(self, b: u8) {
+        let n = self.len();
         self.reserve(1);
-        let store = self.data[0];
-        store[n] = b;
-        self.meta[0] = n + 1;
+        self.h[0].bytes[n] = b;
+        self.h[0].len = n + 1;
     }
 
     /// The current contents as an immutable `str` (a copy).
     pub fn to_str(self) -> str {
-        unsafe { rok_str_from_buf(self.data[0], 0, self.len()) }
+        unsafe { rok_str_from_buf(self.h[0].bytes, 0, self.len()) }
     }
 }
 

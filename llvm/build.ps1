@@ -13,9 +13,13 @@
 # ninja and the MSVC C++ build tools (run from a "Developer PowerShell
 # for VS" / "x64 Native Tools" prompt; ARM64 hosts: the arm64 one).
 # CC / CXX pick another compiler (clang-cl). Only building rok needs
-# these: the toolchain it makes needs no MSVC or Windows SDK. No PGO
-# (build.sh's rok.profdata.xz): cl reads no clang profile, and the
-# profile names functions by their Itanium, not MSVC, mangling.
+# these: the toolchain it makes needs no MSVC or Windows SDK.
+#
+# PGO: build.sh's rok.profdata.xz names functions by their Itanium
+# mangling, which an MSVC-ABI build does not have; rok-msvc.profdata.tar.xz
+# (made by train-pgo.ps1) is the profile for it. clang-cl uses it when it
+# can read it; cl reads no clang profile. ROK_LLVM_INSTRUMENT=1 builds the
+# instrumented libraries train-pgo.ps1 profiles instead (clang-cl).
 param([string]$Prefix)
 $ErrorActionPreference = 'Stop'
 
@@ -71,6 +75,28 @@ function Run {
     if ($LASTEXITCODE) { throw "$($args -join ' ') failed" }
 }
 
+$extra = @()
+$pgo = Join-Path $PSScriptRoot 'rok-msvc.profdata.tar.xz'
+if ($env:ROK_LLVM_INSTRUMENT) {
+    $extra = @('-DLLVM_BUILD_INSTRUMENTED=IR')
+} elseif (Test-Path $pgo) {
+    Push-Location $work
+    try { Run cmake -E tar xf $pgo } finally { Pop-Location }
+    $data = "$work\rok-msvc.profdata"
+    # clang-cl reads the profile even for an empty unit. (Its errors on
+    # stderr must not stop the script.)
+    Set-Content -Path "$work\probe.cpp" -Value 'int x;'
+    $ErrorActionPreference = 'Continue'
+    & $cxx /nologo /c "/Fo$work\probe.obj" "-fprofile-instr-use=$data" "$work\probe.cpp" 2>$null | Out-Null
+    $failed = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    if ($failed) {
+        Write-Warning "$cxx cannot read $pgo (cl, or a clang-cl older than its format): building LLVM without PGO"
+    } else {
+        $extra = @("-DLLVM_PROFDATA_FILE=$data")
+    }
+}
+
 Run cmake -G Ninja -S "$src\llvm" -B "$work\build" `
     -DCMAKE_BUILD_TYPE=Release `
     "-DCMAKE_INSTALL_PREFIX=$Prefix" `
@@ -97,7 +123,8 @@ Run cmake -G Ninja -S "$src\llvm" -B "$work\build" `
     -DLLVM_ENABLE_TERMINFO=OFF `
     -DLLVM_ENABLE_Z3_SOLVER=OFF `
     -DLLVM_ENABLE_CURL=OFF `
-    -DLLVM_ENABLE_HTTPLIB=OFF
+    -DLLVM_ENABLE_HTTPLIB=OFF `
+    @extra
 if (-not (Built)) {
     Run cmake --build "$work\build" --target install -j $jobs
 }

@@ -1,19 +1,19 @@
 // expect-exit: 0
 // expect-stdout:
-// parse: 1:1: bare identifier `foo` is not allowed in RokON (strings are quoted, variants are written `Enum::foo`)
-// parse: 1:5: bare identifier `nan` is not allowed in RokON (strings are quoted, variants are written `Enum::nan`)
-// parse: 1:3: operator `+` is not allowed in RokON (only `-` before a number)
+// parse: 1:1: bare identifier `foo` is not allowed in ROKON (strings are quoted, variants are written `Enum::foo`)
+// parse: 1:5: bare identifier `nan` is not allowed in ROKON (strings are quoted, variants are written `Enum::nan`)
+// parse: 1:3: operator `+` is not allowed in ROKON (only `-` before a number)
 // parse: 1:1: unary `-` applies only to a number literal
 // parse: 1:1: unary `-` applies only to a number literal
-// parse: 1:7: method calls and field access are not allowed in RokON
-// parse: 1:1: bare identifier `p` is not allowed in RokON (strings are quoted, variants are written `Enum::p`)
-// parse: 1:3: `..` is not allowed in RokON
-// parse: 1:9: `..` is not allowed in RokON
-// parse: 1:3: bare identifier `let` is not allowed in RokON (strings are quoted, variants are written `Enum::let`)
-// parse: 1:1: sets and blocks are not allowed in RokON (a dict needs `key: value`)
-// parse: 1:1: f-strings are not allowed in RokON
-// parse: 1:1: number suffixes are not allowed in RokON
-// parse: 1:1: number suffixes are not allowed in RokON
+// parse: 1:7: method calls and field access are not allowed in ROKON
+// parse: 1:1: bare identifier `p` is not allowed in ROKON (strings are quoted, variants are written `Enum::p`)
+// parse: 1:3: `..` is not allowed in ROKON
+// parse: 1:9: `..` is not allowed in ROKON
+// parse: 1:3: bare identifier `let` is not allowed in ROKON (strings are quoted, variants are written `Enum::let`)
+// parse: 1:1: sets and blocks are not allowed in ROKON (a dict needs `key: value`)
+// parse: 1:1: f-strings are not allowed in ROKON
+// parse: 1:1: number suffixes are not allowed in ROKON
+// parse: 1:1: number suffixes are not allowed in ROKON
 // parse: 1:8: expected the end of the document, found `[`
 // parse: 1:4: expected `,` or `]`, found `2`
 // parse: 1:1: unterminated string
@@ -46,7 +46,7 @@
 // decode: ok
 // value: at [1]: expected i32, found string
 
-// Spec 3.9.1 / 3.9.3: what RokON leaves out, and typed-decoding errors,
+// Spec 3.9.1 / 3.9.3: what ROKON leaves out, and typed-decoding errors,
 // each with its `line:col`.
 
 use rok::std::rokon;

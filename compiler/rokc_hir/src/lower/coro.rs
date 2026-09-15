@@ -105,7 +105,7 @@ impl CoroCtx {
 }
 
 fn poll_ty(ctx: &LowerCtx<'_>, t: HirTy) -> HirTy {
-    ctx.instantiate_enum(POLL, vec![t], rokc_diagnostic::current_span())
+    ctx.instantiate_enum(POLL, vec![t], ctx.here())
         .map_or(HirTy::Unknown, HirTy::Enum)
 }
 
@@ -232,13 +232,7 @@ pub(super) fn lower_await(
         .current_expected()
         .filter(|t| !matches!(t, HirTy::Unknown | HirTy::Unit))
         .cloned()
-        .and_then(|t| {
-            ctx.instantiate_struct(
-                CoroKind::Async.wrapper(false),
-                vec![t],
-                rokc_diagnostic::current_span(),
-            )
-        })
+        .and_then(|t| ctx.instantiate_struct(CoroKind::Async.wrapper(false), vec![t], ctx.here()))
         .map_or(HirTy::Unknown, HirTy::Struct);
     let fut = super::lower_expected(ctx, e, hint);
     let has_poll =
@@ -762,11 +756,7 @@ fn lower_coro_block<'a>(
     });
     let mut args = vec![val_ty];
     args.extend(throws.clone());
-    let Some(sid) = ctx.instantiate_struct(
-        kind.wrapper(throws.is_some()),
-        args,
-        rokc_diagnostic::current_span(),
-    ) else {
+    let Some(sid) = ctx.instantiate_struct(kind.wrapper(throws.is_some()), args, ctx.here()) else {
         return ctx.error_expr(
             span,
             format!(

@@ -309,13 +309,13 @@ impl<W: Write> Server<W> {
         };
         let path = uri_path(uri);
         // A `.rokon` data file (`rok.rokon`, the package manifest) is one
-        // RokON value, not a module: only its syntax is checked here.
+        // ROKON value, not a module: only its syntax is checked here.
         if path.extension().is_some_and(|x| x == "rokon") {
             let diags = match rokc_rokon::parse(&doc.text) {
                 Ok(_) => Vec::new(),
                 Err(e) => {
-                    let d = RokDiagnostic::error(rokc_diagnostic::ErrorKind::Parse, &e.message)
-                        .with_span(e.span, "");
+                    let d =
+                        RokDiagnostic::error(rokc_diagnostic::ErrorKind::Parse, e.span, &e.message);
                     vec![diag_json(&d, uri, &doc.text)]
                 }
             };

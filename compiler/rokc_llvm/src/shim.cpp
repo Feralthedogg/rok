@@ -3,9 +3,14 @@
 // are malloc'd and released with rok_llvm_free.
 
 #include "lld/Common/Driver.h"
+#include "llvm/ADT/EquivalenceClasses.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/StringSet.h"
+#include "llvm/Analysis/ModuleSummaryAnalysis.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
+#include "llvm/IR/DIBuilder.h"
+#include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/LLVMContext.h"
@@ -13,6 +18,8 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/IRReader/IRReader.h"
+#include "llvm/LTO/LTO.h"
+#include "llvm/Linker/Linker.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Object/ArchiveWriter.h"
 #include "llvm/Object/COFFImportFile.h"
@@ -20,6 +27,9 @@
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/ProfileData/InstrProfReader.h"
 #include "llvm/ProfileData/InstrProfWriter.h"
+#include "llvm/Support/Caching.h"
+#include "llvm/ProfileData/ProfileCommon.h"
+#include "llvm/Support/Format.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/PGOOptions.h"
@@ -27,12 +37,17 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/ThreadPool.h"
+#include "llvm/Support/Threading.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/TargetParser/Host.h"
 #include "llvm/TargetParser/Triple.h"
-#include "llvm/Transforms/Utils/SplitModule.h"
+#include "llvm/Transforms/IPO/AlwaysInliner.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar/SimplifyCFG.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Support/LLVMDriver.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
@@ -48,6 +63,8 @@
 #include "mlir/Tools/Plugins/DialectPlugin.h"
 #include "mlir/Tools/Plugins/PassPlugin.h"
 
+#include <algorithm>
+#include <cinttypes>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -87,7 +104,7 @@ struct RokCompile {
   size_t n_dialect_plugins;
   const char *const *pass_plugins;
   size_t n_pass_plugins;
-  // Objects to split the optimized module into, compiled in parallel
+  // Objects to split the module into, optimized and compiled in parallel
   // (`out` holds this many); 1 for one object, an IR text or assembly.
   size_t parts;
   // IR PGO: instrument, the raw profile written to this file name
@@ -137,6 +154,28 @@ void init_passes() {
   std::call_once(once, [] { mlir::registerAllPasses(); });
 }
 
+llvm::TargetOptions target_options(const llvm::Triple &triple) {
+  llvm::TargetOptions opts;
+  opts.UseInitArray = true;
+  opts.EmulatedTLS = triple.hasDefaultEmulatedTLS();
+  // Lets the link drop what nothing references; Mach-O strips by symbol.
+  opts.FunctionSections = opts.DataSections = !triple.isOSBinFormatMachO();
+  return opts;
+}
+
+llvm::CodeGenOptLevel codegen_level(int opt) {
+  switch (opt) {
+  case 0:
+    return llvm::CodeGenOptLevel::None;
+  case 1:
+    return llvm::CodeGenOptLevel::Less;
+  case 3:
+    return llvm::CodeGenOptLevel::Aggressive;
+  default:
+    return llvm::CodeGenOptLevel::Default;
+  }
+}
+
 std::unique_ptr<llvm::TargetMachine>
 target_machine(const RokCompile &o, std::string &error) {
   init_llvm();
@@ -144,27 +183,9 @@ target_machine(const RokCompile &o, std::string &error) {
   const llvm::Target *t = llvm::TargetRegistry::lookupTarget(triple, error);
   if (!t)
     return nullptr;
-  llvm::TargetOptions opts;
-  opts.UseInitArray = true;
-  opts.EmulatedTLS = triple.hasDefaultEmulatedTLS();
-  // Lets the link drop what nothing references; Mach-O strips by symbol.
-  opts.FunctionSections = opts.DataSections = !triple.isOSBinFormatMachO();
-  llvm::CodeGenOptLevel cg;
-  switch (o.opt) {
-  case 0:
-    cg = llvm::CodeGenOptLevel::None;
-    break;
-  case 1:
-    cg = llvm::CodeGenOptLevel::Less;
-    break;
-  case 3:
-    cg = llvm::CodeGenOptLevel::Aggressive;
-    break;
-  default:
-    cg = llvm::CodeGenOptLevel::Default;
-  }
   std::unique_ptr<llvm::TargetMachine> tm(t->createTargetMachine(
-      triple, o.cpu, o.features, opts, llvm::Reloc::PIC_, std::nullopt, cg));
+      triple, o.cpu, o.features, target_options(triple), llvm::Reloc::PIC_,
+      std::nullopt, codegen_level(o.opt)));
   if (!tm) {
     error = "cannot create a target machine for " + triple.str();
     return nullptr;
@@ -176,53 +197,132 @@ target_machine(const RokCompile &o, std::string &error) {
   return tm;
 }
 
-// What clang -O<n> runs on an IR input (shouldEnableVectorizerAtOLevel,
-// -funroll-loops).
-void optimize(llvm::Module &m, llvm::TargetMachine &tm, const RokCompile &o) {
-  int opt = o.opt;
+// The indexed profile `path` has context-sensitive records (as clang
+// checks for -fprofile-use).
+bool has_cs_profile(const char *path) {
+  auto fs = llvm::vfs::getRealFileSystem();
+  auto r = llvm::IndexedInstrProfReader::create(path, *fs);
+  if (!r) {
+    llvm::consumeError(r.takeError());
+    return false;
+  }
+  return (*r)->hasCSIRLevelProfile();
+}
+
+// `rok.alloc`, the GC allocation the code generator calls, is an
+// allocation function to the optimizer (a fresh, zeroed object no other
+// pointer reaches), so an object that never escapes is deleted with its
+// stores. At the end of the pipeline it is inlined: the bump allocation
+// is inline code again.
+const char *const ALLOC = "rok.alloc";
+
+struct InlineAlloc : llvm::PassInfoMixin<InlineAlloc> {
+  llvm::PreservedAnalyses run(llvm::Module &m, llvm::ModuleAnalysisManager &) {
+    llvm::Function *f = m.getFunction(ALLOC);
+    if (!f)
+      return llvm::PreservedAnalyses::all();
+    f->removeFnAttr(llvm::Attribute::NoInline);
+    f->removeFnAttr(llvm::Attribute::AllocKind);
+    f->addFnAttr(llvm::Attribute::AlwaysInline);
+    return llvm::PreservedAnalyses::none();
+  }
+};
+
+// What clang -O<n> sets up for an IR input
+// (shouldEnableVectorizerAtOLevel, -funroll-loops).
+llvm::PipelineTuningOptions tuning(int opt) {
   llvm::PipelineTuningOptions pto;
   bool vec = opt >= 2 || opt == 's';
   pto.LoopVectorization = vec;
   pto.SLPVectorization = vec || opt == 'z';
   pto.LoopUnrolling = opt >= 2 || opt == 's';
   pto.LoopInterleaving = pto.LoopUnrolling;
+  return pto;
+}
+
+// -O<level>: 0..3, s or z.
+char level_name(int opt) { return opt <= 3 ? '0' + opt : opt; }
+
+// The end of a module's last optimization (`optimize`'s, or a ThinLTO
+// part's after its backend pipeline): `rok.alloc` inlined, then above
+// -O0 the cleanup of the inlined code. Not at -O0: InstCombine deletes
+// stack slots that are only stored, and with them `-g`'s view of unused
+// parameters.
+void inline_alloc(llvm::Module &m, llvm::TargetMachine &tm, int opt) {
+  if (!m.getFunction(ALLOC))
+    return;
   llvm::LoopAnalysisManager lam;
   llvm::FunctionAnalysisManager fam;
   llvm::CGSCCAnalysisManager cgam;
   llvm::ModuleAnalysisManager mam;
-  std::optional<llvm::PGOOptions> pgo;
-  if (*o.profile_generate)
-    pgo.emplace(o.profile_generate, "", "", "", llvm::PGOOptions::IRInstr);
-  else if (*o.profile_use)
-    pgo.emplace(o.profile_use, "", "", "", llvm::PGOOptions::IRUse);
-  llvm::PassBuilder pb(&tm, pto, pgo);
+  llvm::PassBuilder pb(&tm, tuning(opt));
   pb.registerModuleAnalyses(mam);
   pb.registerCGSCCAnalyses(cgam);
   pb.registerFunctionAnalyses(fam);
   pb.registerLoopAnalyses(lam);
   pb.crossRegisterProxies(lam, fam, cgam, mam);
-  llvm::OptimizationLevel level = llvm::OptimizationLevel::O2;
-  switch (opt) {
-  case 0:
-    level = llvm::OptimizationLevel::O0;
-    break;
-  case 1:
-    level = llvm::OptimizationLevel::O1;
-    break;
-  case 3:
-    level = llvm::OptimizationLevel::O3;
-    break;
-  case 's':
-    level = llvm::OptimizationLevel::Os;
-    break;
-  case 'z':
-    level = llvm::OptimizationLevel::Oz;
-    break;
+  llvm::ModulePassManager mpm;
+  mpm.addPass(InlineAlloc());
+  mpm.addPass(llvm::AlwaysInlinerPass());
+  if (opt != 0) {
+    llvm::FunctionPassManager fpm;
+    fpm.addPass(llvm::InstCombinePass());
+    fpm.addPass(llvm::SimplifyCFGPass());
+    fpm.addPass(llvm::InstCombinePass());
+    mpm.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(fpm)));
   }
-  llvm::ModulePassManager mpm = opt == 0
-                                    ? pb.buildO0DefaultPipeline(level)
-                                    : pb.buildPerModuleDefaultPipeline(level);
   mpm.run(m, mam);
+}
+
+// `m` through clang -O<n>'s pipeline, then `inline_alloc`; with `thin`,
+// through its ThinLTO pre-link pipeline instead (`rok.alloc` is inlined
+// after the part's backend pipeline), then written to `thin` as bitcode
+// with a summary.
+void optimize(llvm::Module &m, llvm::TargetMachine &tm, const RokCompile &o,
+              llvm::raw_ostream *thin) {
+  if (llvm::Function *f = m.getFunction(ALLOC)) {
+    f->addFnAttr(llvm::Attribute::get(
+        m.getContext(), llvm::Attribute::AllocKind,
+        uint64_t(llvm::AllocFnKind::Alloc | llvm::AllocFnKind::Zeroed)));
+    f->addRetAttr(llvm::Attribute::NoAlias);
+  }
+  llvm::LoopAnalysisManager lam;
+  llvm::FunctionAnalysisManager fam;
+  llvm::CGSCCAnalysisManager cgam;
+  llvm::ModuleAnalysisManager mam;
+  std::optional<llvm::PGOOptions> pgo;
+  bool generate = *o.profile_generate, use = *o.profile_use;
+  if (generate && use)
+    // Context-sensitive: optimized with the first stage's profile, then
+    // instrumented again after inlining.
+    pgo.emplace(o.profile_use, o.profile_generate, "", "",
+                llvm::PGOOptions::IRUse, llvm::PGOOptions::CSIRInstr);
+  else if (generate)
+    pgo.emplace(o.profile_generate, "", "", "", llvm::PGOOptions::IRInstr);
+  else if (use)
+    pgo.emplace(o.profile_use, "", "", "", llvm::PGOOptions::IRUse,
+                has_cs_profile(o.profile_use) ? llvm::PGOOptions::CSIRUse
+                                              : llvm::PGOOptions::NoCSAction);
+  llvm::PassBuilder pb(&tm, tuning(o.opt), pgo);
+  pb.registerModuleAnalyses(mam);
+  pb.registerCGSCCAnalyses(cgam);
+  pb.registerFunctionAnalyses(fam);
+  pb.registerLoopAnalyses(lam);
+  pb.crossRegisterProxies(lam, fam, cgam, mam);
+  llvm::ModulePassManager mpm;
+  std::string level = std::string("O") + level_name(o.opt);
+  std::string pipeline = o.opt == 0 ? "default<O0>"
+                         : thin     ? "thinlto-pre-link<" + level + ">"
+                                    : "default<" + level + ">";
+  if (auto e = pb.parsePassPipeline(mpm, pipeline))
+    llvm::report_fatal_error(std::move(e));
+  mpm.run(m, mam);
+  if (thin)
+    llvm::WriteBitcodeToFile(
+        m, *thin, false, &mam.getResult<llvm::ModuleSummaryIndexAnalysis>(m),
+        true);
+  else
+    inline_alloc(m, tm, o.opt);
 }
 
 int codegen(llvm::Module &m, llvm::TargetMachine &tm,
@@ -243,6 +343,7 @@ int codegen(llvm::Module &m, llvm::TargetMachine &tm,
 struct Diags {
   std::string errors, warnings;
   unsigned stale = 0;
+  std::mutex lock;
 };
 
 void on_diag(const llvm::DiagnosticInfo *d, void *ctx) {
@@ -252,6 +353,7 @@ void on_diag(const llvm::DiagnosticInfo *d, void *ctx) {
     return;
   std::string msg;
   llvm::raw_string_ostream os(msg);
+  std::lock_guard<std::mutex> guard(s->lock);
   if (auto *p = llvm::dyn_cast<llvm::DiagnosticInfoPGOProfile>(d)) {
     if (sev == llvm::DS_Warning && p->getMsg().str().find("hash mismatch") !=
                                        std::string::npos) {
@@ -264,6 +366,272 @@ void on_diag(const llvm::DiagnosticInfo *d, void *ctx) {
     d->print(printer);
   }
   (sev == llvm::DS_Error ? s->errors : s->warnings) += msg + "\n";
+}
+
+// Pure data: a copy is as good as the original.
+bool copyable(const llvm::GlobalValue *g) {
+  auto *v = llvm::dyn_cast<llvm::GlobalVariable>(g);
+  return v && v->hasLocalLinkage() && v->isConstant() &&
+         v->hasGlobalUnnamedAddr() && !v->isThreadLocal() &&
+         llvm::isa<llvm::ConstantData>(v->getInitializer());
+}
+
+// `m` cut into `n` modules of about equal size, as bitcode (modules of
+// one context cannot be compiled in parallel). As in llvm::SplitModule,
+// a local stays with everything that refers to it, but a local constant
+// of pure data (a string literal) is copied into each part that uses it:
+// shared literals would otherwise glue most of the module into one part.
+std::vector<llvm::SmallString<0>> split(llvm::Module &m, size_t n) {
+  using GV = const llvm::GlobalValue *;
+  llvm::EquivalenceClasses<GV> together;
+  llvm::DenseMap<const llvm::Comdat *, GV> comdats;
+  llvm::DenseMap<GV, size_t> order;
+  // Everything `g` is used by, through constant expressions.
+  auto users = [&](GV g, const llvm::Value *v) {
+    llvm::SmallVector<const llvm::User *, 8> work(v->user_begin(),
+                                                  v->user_end());
+    while (!work.empty()) {
+      const llvm::User *u = work.pop_back_val();
+      if (auto *i = llvm::dyn_cast<llvm::Instruction>(u))
+        together.unionSets(g, i->getFunction());
+      else if (auto *gu = llvm::dyn_cast<llvm::GlobalValue>(u))
+        together.unionSets(g, gu);
+      else
+        work.append(u->user_begin(), u->user_end());
+    }
+  };
+  auto record = [&](llvm::GlobalValue &g) {
+    if (g.isDeclaration() || copyable(&g))
+      return;
+    order[&g] = order.size();
+    together.insert(&g);
+    if (const llvm::Comdat *c = g.getComdat()) {
+      auto [it, fresh] = comdats.try_emplace(c, &g);
+      if (!fresh)
+        together.unionSets(it->second, &g);
+    }
+    if (const llvm::GlobalObject *root = g.getAliaseeObject()) {
+      if (auto *ifunc = llvm::dyn_cast<llvm::GlobalIFunc>(root))
+        root = ifunc->getResolverFunction();
+      if (root != &g)
+        together.unionSets(&g, root);
+    }
+    if (auto *f = llvm::dyn_cast<llvm::Function>(&g))
+      for (const llvm::BasicBlock &bb : *f)
+        if (auto *ba = llvm::BlockAddress::lookup(&bb))
+          users(f, ba);
+    if (g.hasLocalLinkage())
+      users(&g, &g);
+  };
+  for (auto &g : m.global_values())
+    record(g);
+
+  // Largest cluster first, onto the lightest part.
+  struct Cluster {
+    GV leader;
+    size_t first, size;
+  };
+  std::vector<Cluster> clusters;
+  for (const auto &c : together) {
+    if (!c->isLeader())
+      continue;
+    Cluster k{c->getData(), SIZE_MAX, 0};
+    for (auto i = together.member_begin(*c); i != together.member_end(); ++i) {
+      k.first = std::min(k.first, order[*i]);
+      auto *f = llvm::dyn_cast<llvm::Function>(*i);
+      k.size += f ? f->getInstructionCount() + 1 : 1;
+    }
+    clusters.push_back(k);
+  }
+  std::sort(clusters.begin(), clusters.end(), [](auto &a, auto &b) {
+    return a.size != b.size ? a.size > b.size : a.first < b.first;
+  });
+  std::vector<size_t> load(n);
+  llvm::DenseMap<GV, size_t> part_of;
+  for (const Cluster &k : clusters) {
+    size_t p = std::min_element(load.begin(), load.end()) - load.begin();
+    load[p] += k.size;
+    for (auto i = together.findLeader(k.leader); i != together.member_end();
+         ++i)
+      part_of[*i] = p;
+  }
+
+  std::vector<llvm::SmallString<0>> parts(n);
+  for (size_t p = 0; p < n; ++p) {
+    llvm::ValueToValueMapTy map;
+    std::unique_ptr<llvm::Module> part =
+        llvm::CloneModule(m, map, [&](GV g) {
+          auto it = part_of.find(g);
+          return it != part_of.end() ? it->second == p : copyable(g);
+        });
+    if (p)
+      part->setModuleInlineAsm("");
+    for (llvm::GlobalVariable &v : llvm::make_early_inc_range(part->globals()))
+      if (copyable(&v)) {
+        v.removeDeadConstantUsers();
+        if (v.use_empty())
+          v.eraseFromParent();
+      }
+    llvm::raw_svector_ostream os(parts[p]);
+    llvm::WriteBitcodeToFile(*part, os);
+  }
+  return parts;
+}
+
+// Runs `job(i)` for i < n, each on a thread of its own.
+template <typename F> void in_parallel(size_t n, F job) {
+  std::vector<std::thread> threads;
+  for (size_t i = 0; i < n; ++i)
+    threads.emplace_back(job, i);
+  for (auto &t : threads)
+    t.join();
+}
+
+// Errors of `d` into `err`; warnings into `warn`.
+int report(Diags &d, RokBuf *err, RokBuf *warn) {
+  if (!d.errors.empty())
+    return fail(err, d.errors);
+  if (d.stale)
+    d.warnings += "the profile is out of date for " + std::to_string(d.stale) +
+                  " function(s) whose control flow changed since it was "
+                  "recorded; they are optimized without it\n";
+  if (!d.warnings.empty())
+    put(warn, d.warnings);
+  return 0;
+}
+
+// An optimized object in `o.parts` parts, compiled as in-process ThinLTO:
+// each part through the pre-link pipeline on a thread of its own; then
+// the thin link imports into each part what it would inline from the
+// others and optimizes and compiles the parts in parallel. Symbols keep
+// the linkage a whole-module compile gives them: linkonce definitions
+// nothing refers to go, the others stay visible.
+//
+// The parts see `rok.alloc` as a declaration (its allocation attributes
+// are all escape elision needs, and code imported from another part
+// calls the same one); after each part's backend pipeline its body is
+// linked in and `inline_alloc` inlines it.
+int thin(llvm::Module &m, const RokCompile &o, RokBuf *out, RokBuf *err,
+         RokBuf *warn) {
+  llvm::SmallString<0> alloc;
+  if (llvm::Function *f = m.getFunction(ALLOC); f && !f->isDeclaration()) {
+    llvm::ValueToValueMapTy map;
+    auto body = llvm::CloneModule(m, map, [](const llvm::GlobalValue *g) {
+      return g->getName() == ALLOC;
+    });
+    body->getFunction(ALLOC)->setLinkage(llvm::GlobalValue::ExternalLinkage);
+    llvm::raw_svector_ostream os(alloc);
+    llvm::WriteBitcodeToFile(*body, os);
+    f->deleteBody();
+  }
+  llvm::StringSet<> droppable;
+  for (llvm::GlobalValue &g : m.global_values())
+    if (g.hasLinkOnceLinkage())
+      droppable.insert(g.getName());
+  std::vector<llvm::SmallString<0>> parts = split(m, o.parts);
+  size_t n = parts.size();
+  Diags diags;
+  std::vector<std::string> errors(n);
+  in_parallel(n, [&](size_t i) {
+    llvm::LLVMContext ctx;
+    ctx.setDiagnosticHandlerCallBack(on_diag, &diags);
+    auto part =
+        llvm::parseBitcodeFile(llvm::MemoryBufferRef(parts[i], "part"), ctx);
+    if (!part) {
+      errors[i] = llvm::toString(part.takeError());
+      return;
+    }
+    auto tm = target_machine(o, errors[i]);
+    if (!tm)
+      return;
+    llvm::SmallString<0> summary;
+    llvm::raw_svector_ostream os(summary);
+    optimize(**part, *tm, o, &os);
+    parts[i] = std::move(summary);
+  });
+  for (auto &e : errors)
+    if (!e.empty())
+      return fail(err, e);
+  if (!diags.errors.empty())
+    return fail(err, diags.errors);
+
+  llvm::Triple triple(o.triple);
+  llvm::lto::Config conf;
+  conf.CPU = o.cpu;
+  for (llvm::StringRef f = o.features; !f.empty();) {
+    auto [first, rest] = f.split(',');
+    conf.MAttrs.push_back(first.str());
+    f = rest;
+  }
+  conf.Options = target_options(triple);
+  conf.CGOptLevel = codegen_level(o.opt);
+  conf.OptPipeline = std::string("thinlto<O") + level_name(o.opt) + ">";
+  conf.PTO = tuning(o.opt);
+  conf.DisableVerify = true;
+  conf.DiagHandler = [&](const llvm::DiagnosticInfo &d) {
+    on_diag(&d, &diags);
+  };
+  // Every module is a ThinLTO part: no regular LTO object.
+  conf.PreOptModuleHook = [](unsigned task, const llvm::Module &) {
+    return task != 0;
+  };
+  // The hook is handed the module it may still change before codegen.
+  conf.PostOptModuleHook = [&](unsigned, const llvm::Module &cpart) {
+    auto &part = const_cast<llvm::Module &>(cpart);
+    llvm::Function *f = part.getFunction(ALLOC);
+    if (!f || alloc.empty())
+      return true;
+    auto body = llvm::parseBitcodeFile(llvm::MemoryBufferRef(alloc, ALLOC),
+                                       part.getContext());
+    std::string error;
+    auto tm = target_machine(o, error);
+    if (!body || !tm ||
+        llvm::Linker::linkModules(part, std::move(*body),
+                                  llvm::Linker::LinkOnlyNeeded)) {
+      std::lock_guard<std::mutex> guard(diags.lock);
+      diags.errors += body ? error.empty() ? "cannot link `rok.alloc`\n"
+                                           : error + "\n"
+                           : llvm::toString(body.takeError()) + "\n";
+      return false;
+    }
+    part.getFunction(ALLOC)->setLinkage(llvm::GlobalValue::InternalLinkage);
+    inline_alloc(part, *tm, o.opt);
+    return true;
+  };
+  llvm::lto::LTO lto(std::move(conf), llvm::lto::createInProcessThinBackend(
+                                          llvm::heavyweight_hardware_concurrency(n)));
+  std::vector<std::string> names(n);
+  for (size_t i = 0; i < n; ++i) {
+    names[i] = "part" + std::to_string(i);
+    auto input = llvm::lto::InputFile::create(
+        llvm::MemoryBufferRef(parts[i], names[i]));
+    if (!input)
+      return fail(err, llvm::toString(input.takeError()));
+    std::vector<llvm::lto::SymbolResolution> res;
+    for (const auto &sym : (*input)->symbols()) {
+      llvm::lto::SymbolResolution r;
+      r.Prevailing = !sym.isUndefined();
+      r.VisibleToRegularObj =
+          r.Prevailing && !droppable.contains(sym.getIRName());
+      res.push_back(r);
+    }
+    if (auto e = lto.add(std::move(*input), res))
+      return fail(err, llvm::toString(std::move(e)));
+  }
+  // Task 0 is the regular LTO object; part i is task i + 1.
+  std::vector<llvm::SmallString<0>> objects(lto.getMaxTasks());
+  auto add = [&](unsigned task, const llvm::Twine &)
+      -> llvm::Expected<std::unique_ptr<llvm::CachedFileStream>> {
+    return std::make_unique<llvm::CachedFileStream>(
+        std::make_unique<llvm::raw_svector_ostream>(objects[task]));
+  };
+  if (auto e = lto.run(add))
+    return fail(err, llvm::toString(std::move(e)));
+  if (report(diags, err, warn))
+    return 1;
+  for (size_t i = 0; i < n; ++i)
+    put(&out[i], objects[i + 1].str());
+  return 0;
 }
 
 // The module's target is the requested one (as clang -target overrides
@@ -305,58 +673,89 @@ int finish(llvm::Module &m, const RokCompile &o, RokBuf *out, RokBuf *err,
     if (llvm::verifyModule(m, &os))
       return fail(err, "invalid LLVM IR:\n" + msg);
   }
+  bool parts = o.parts > 1 && o.emit == 2;
+  // IR PGO instruments and reads profiles in the whole-module pipeline:
+  // a profile build optimizes whole and splits only code generation.
+  if (parts && o.opt != 0 && !*o.profile_generate && !*o.profile_use)
+    return thin(m, o, out, err, warn);
   Diags diags;
   m.getContext().setDiagnosticHandlerCallBack(on_diag, &diags);
-  optimize(m, *tm, o);
-  if (!diags.errors.empty())
-    return fail(err, diags.errors);
-  if (diags.stale)
-    diags.warnings += "the profile is out of date for " +
-                      std::to_string(diags.stale) +
-                      " function(s) whose control flow changed since it was "
-                      "recorded; they are optimized without it\n";
-  if (!diags.warnings.empty())
-    put(warn, diags.warnings);
+  optimize(m, *tm, o, nullptr);
+  if (report(diags, err, warn))
+    return 1;
   auto kind = o.emit == 1 ? llvm::CodeGenFileType::AssemblyFile
                           : llvm::CodeGenFileType::ObjectFile;
-  if (o.parts <= 1 || o.emit != 2)
+  if (!parts)
     return codegen(m, *tm, kind, out, err);
-  // Each part travels as bitcode into a context of its own: modules of
-  // one context cannot be compiled in parallel.
-  std::vector<llvm::SmallString<0>> bitcode;
-  llvm::SplitModule(
-      m, o.parts,
-      [&](std::unique_ptr<llvm::Module> part) {
-        llvm::SmallString<0> bc;
-        llvm::raw_svector_ostream os(bc);
-        llvm::WriteBitcodeToFile(*part, os);
-        bitcode.push_back(std::move(bc));
-      },
-      true);
+  // Optimized whole (-O0 or a profile build): each part is compiled on
+  // a thread.
+  std::vector<llvm::SmallString<0>> bitcode = split(m, o.parts);
   std::vector<int> rc(bitcode.size());
-  std::vector<std::thread> threads;
-  for (size_t i = 0; i < bitcode.size(); ++i)
-    threads.emplace_back([&, i] {
-      llvm::LLVMContext ctx;
-      auto part = llvm::parseBitcodeFile(
-          llvm::MemoryBufferRef(bitcode[i].str(), "part"), ctx);
-      if (!part) {
-        rc[i] = fail(&out[i], llvm::toString(part.takeError()));
-        return;
-      }
-      std::string error;
-      auto ptm = target_machine(o, error);
-      rc[i] = ptm ? codegen(**part, *ptm, kind, &out[i], &out[i])
-                  : fail(&out[i], error);
-    });
-  for (auto &t : threads)
-    t.join();
+  in_parallel(bitcode.size(), [&](size_t i) {
+    llvm::LLVMContext ctx;
+    auto part = llvm::parseBitcodeFile(
+        llvm::MemoryBufferRef(bitcode[i].str(), "part"), ctx);
+    if (!part) {
+      rc[i] = fail(&out[i], llvm::toString(part.takeError()));
+      return;
+    }
+    std::string error;
+    auto ptm = target_machine(o, error);
+    rc[i] = ptm ? codegen(**part, *ptm, kind, &out[i], &out[i])
+                : fail(&out[i], error);
+  });
   for (size_t i = 0; i < rc.size(); ++i)
     if (rc[i]) {
       put(err, llvm::StringRef(out[i].ptr, out[i].len));
       return 1;
     }
   return 0;
+}
+
+// MLIR's di_composite_type has no discriminator, and a member's extraData
+// is a node, not a constant. So rokc writes a variant part as its
+// discriminant member first, then a member per variant with the stored
+// tag as the count of a di_subrange in extraData; this makes them DWARF
+// variants (DW_TAG_variant_part / DW_TAG_variant / DW_AT_discr_value).
+void variant_parts(llvm::Module &m) {
+  llvm::DebugInfoFinder finder;
+  finder.processModule(m);
+  llvm::DIBuilder b(m, false);
+  auto *i32 = llvm::Type::getInt32Ty(m.getContext());
+  std::vector<llvm::DICompositeType *> parents;
+  for (llvm::DIType *t : finder.types())
+    if (auto *p = llvm::dyn_cast<llvm::DICompositeType>(t))
+      parents.push_back(p);
+  for (llvm::DICompositeType *p : parents) {
+    auto *els = llvm::dyn_cast_or_null<llvm::MDTuple>(p->getRawElements());
+    for (unsigned i = 0; els && i < els->getNumOperands(); ++i) {
+      auto *vp = llvm::dyn_cast_or_null<llvm::DICompositeType>(els->getOperand(i));
+      if (!vp || vp->getTag() != llvm::dwarf::DW_TAG_variant_part ||
+          vp->getDiscriminator() || vp->getElements().empty())
+        continue;
+      auto parts = vp->getElements();
+      auto *d = llvm::cast<llvm::DIDerivedType>(parts[0]);
+      auto *discr = b.createMemberType(p, "", nullptr, 0, d->getSizeInBits(),
+                                       0, d->getOffsetInBits(),
+                                       llvm::DINode::FlagArtificial,
+                                       d->getBaseType());
+      std::vector<llvm::Metadata *> variants;
+      for (unsigned k = 1; k < parts.size(); ++k) {
+        auto *v = llvm::cast<llvm::DIDerivedType>(parts[k]);
+        auto *range = llvm::cast<llvm::DISubrange>(v->getExtraData());
+        auto *tag = llvm::cast<llvm::ConstantInt *>(range->getCount());
+        variants.push_back(b.createVariantMemberType(
+            p, v->getName(), nullptr, 0, v->getSizeInBits(), 0,
+            v->getOffsetInBits(),
+            llvm::ConstantInt::get(i32, tag->getZExtValue()),
+            llvm::DINode::FlagZero, v->getBaseType()));
+      }
+      els->replaceOperandWith(
+          i, b.createVariantPart(p, "", nullptr, 0, 0, 0,
+                                 llvm::DINode::FlagZero, discr,
+                                 b.getOrCreateArray(variants)));
+    }
+  }
 }
 
 } // namespace
@@ -391,7 +790,11 @@ int rok_llvm_compile_mlir(const char *src, size_t len, const RokCompile *o,
       p->registerPassRegistryCallbacks();
     }
   }
+  // Nested passes run on one pool shared by every compile in the process,
+  // not a pool per context.
+  static llvm::DefaultThreadPool threads;
   mlir::MLIRContext ctx(registry, mlir::MLIRContext::Threading::DISABLED);
+  ctx.setThreadPool(threads);
 
   std::string diag;
   llvm::raw_string_ostream diag_os(diag);
@@ -412,9 +815,12 @@ int rok_llvm_compile_mlir(const char *src, size_t len, const RokCompile *o,
     return fail(err, diag);
 
   llvm::LLVMContext llctx;
-  auto m = mlir::translateModuleToLLVMIR(*module, llctx);
+  // Verified by `finish`, after `variant_parts`.
+  auto m = mlir::translateModuleToLLVMIR(*module, llctx, "LLVMDialectModule",
+                                         /*disableVerification=*/true);
   if (!m)
     return fail(err, diag.empty() ? "cannot translate MLIR to LLVM IR" : diag);
+  variant_parts(*m);
   return finish(*m, *o, out, err, warn);
 }
 
@@ -501,12 +907,13 @@ int rok_llvm_write_archive(const char *path, const char *const *members,
 
 // The raw or indexed IR profiles `inputs` merged into the indexed profile
 // `path` (llvm-profdata merge). An empty raw profile (a run that ended
-// before writing counts) is skipped.
+// before writing counts) is skipped. What merging a record reports
+// (counter overflow, mismatched counters) is a warning, as there.
 int rok_llvm_profdata_merge(const char *const *inputs, size_t n,
-                            const char *path, RokBuf *err) {
+                            const char *path, RokBuf *warn, RokBuf *err) {
   auto fs = llvm::vfs::getRealFileSystem();
   llvm::InstrProfWriter writer;
-  std::string errors;
+  std::string errors, warnings;
   auto report = [&](llvm::Error e, llvm::StringRef file) {
     errors += file.str() + ": " + llvm::toString(std::move(e)) + "\n";
   };
@@ -525,7 +932,8 @@ int rok_llvm_profdata_merge(const char *const *inputs, size_t n,
     for (auto &r : **reader) {
       std::string name = r.Name.str();
       writer.addRecord(std::move(r), 1, [&](llvm::Error e) {
-        report(std::move(e), std::string(inputs[i]) + ": " + name);
+        warnings += std::string(inputs[i]) + ": " + name + ": " +
+                    llvm::toString(std::move(e)) + "\n";
       });
     }
     if ((*reader)->hasError())
@@ -540,6 +948,74 @@ int rok_llvm_profdata_merge(const char *const *inputs, size_t n,
     return fail(err, std::string(path) + ": " + ec.message());
   if (auto e = writer.write(os))
     return fail(err, llvm::toString(std::move(e)));
+  put(warn, warnings);
+  return 0;
+}
+
+// A summary of the IR profile `path` (llvm-profdata show): with `all`,
+// each function's hash and counter count; with `topn`, the functions
+// with the largest internal counts. Context-sensitive records (a second
+// instrumented stage) are summed apart.
+int rok_llvm_profdata_show(const char *path, int all, size_t topn,
+                           RokBuf *out, RokBuf *err) {
+  auto fs = llvm::vfs::getRealFileSystem();
+  auto reader = llvm::InstrProfReader::create(path, *fs);
+  if (!reader)
+    return fail(err, std::string(path) + ": " +
+                         llvm::toString(reader.takeError()));
+  auto &r = **reader;
+  std::string text;
+  llvm::raw_string_ostream os(text);
+  llvm::InstrProfSummaryBuilder builder(llvm::ProfileSummaryBuilder::DefaultCutoffs);
+  std::vector<std::pair<uint64_t, std::string>> top;
+  size_t shown = 0, cs = 0;
+  for (const auto &f : r) {
+    if (llvm::NamedInstrProfRecord::hasCSFlagInHash(f.Hash)) {
+      ++cs;
+      continue;
+    }
+    builder.addRecord(f);
+    uint64_t max = 0;
+    for (uint64_t c : f.Counts)
+      if (c != uint64_t(-1))
+        max = std::max(max, c);
+    if (topn) {
+      top.emplace_back(max, f.Name.str());
+      std::sort(top.begin(), top.end(), [](auto &a, auto &b) {
+        return a.first > b.first || (a.first == b.first && a.second < b.second);
+      });
+      if (top.size() > topn)
+        top.pop_back();
+    }
+    if (all) {
+      if (!shown++)
+        os << "Counters:\n";
+      os << "  " << f.Name << ":\n"
+         << "    Hash: " << llvm::format("0x%016" PRIx64, f.Hash) << "\n"
+         << "    Counters: " << f.Counts.size() << "\n";
+    }
+  }
+  if (r.hasError())
+    return fail(err, std::string(path) + ": " + llvm::toString(r.getError()));
+  auto summary = builder.getSummary();
+  os << "Instrumentation level: " << (r.isIRLevelProfile() ? "IR" : "Front-end");
+  if (r.isIRLevelProfile())
+    os << "  entry_first = " << r.instrEntryBBEnabled();
+  os << "\n";
+  if (all)
+    os << "Functions shown: " << shown << "\n";
+  os << "Total functions: " << summary->getNumFunctions() << "\n";
+  if (cs)
+    os << "Context-sensitive records: " << cs << "\n";
+  os << "Maximum function count: " << summary->getMaxFunctionCount() << "\n"
+     << "Maximum internal block count: " << summary->getMaxInternalCount()
+     << "\n";
+  if (topn) {
+    os << "Top " << topn << " functions with the largest internal block counts:\n";
+    for (auto &[count, name] : top)
+      os << "  " << name << ", max count = " << count << "\n";
+  }
+  put(out, text);
   return 0;
 }
 

@@ -46,6 +46,114 @@ fn fail() -> i32 {
     -errno()
 }
 
+/// Whether `hd` was opened for overlapped I/O (the parent's end of a
+/// child's output pipe, [`output_pipe`]).
+fn overlapped(hd: HANDLE) -> bool {
+    // FILE_SYNCHRONOUS_IO_ALERT | _NONALERT.
+    const SYNCHRONOUS: u32 = 0x30;
+    let mut mode = 0u32;
+    // SAFETY: zeroed status block; a 4-byte FileModeInformation (16).
+    let s = unsafe {
+        let mut iosb: win::IO_STATUS_BLOCK = core::mem::zeroed();
+        win::NtQueryInformationFile(hd, &mut iosb, (&raw mut mode).cast(), 4, 16)
+    };
+    s >= 0 && mode & SYNCHRONOUS == 0
+}
+
+/// `ReadFile` of `want` bytes into `dst` (0: until data is there or the
+/// writer closed), which waits for its own request on an overlapped
+/// handle. The last error is the read's.
+///
+/// # Safety
+/// `dst` must be writable for `want` bytes.
+unsafe fn read_handle(hd: HANDLE, dst: *mut u8, want: DWORD, n: &mut DWORD) -> win::BOOL {
+    if !overlapped(hd) {
+        // SAFETY: caller contract.
+        return unsafe { win::ReadFile(hd, dst.cast(), want, n, ptr::null_mut()) };
+    }
+    // SAFETY: a fresh event and request, both done with before returning.
+    unsafe {
+        let mut ov: win::OVERLAPPED = core::mem::zeroed();
+        ov.hEvent = win::CreateEventW(ptr::null_mut(), 1, 0, ptr::null());
+        let mut ok = win::ReadFile(hd, dst.cast(), want, n, &mut ov);
+        if ok == 0 && errno() == win::ERROR_IO_PENDING {
+            ok = win::GetOverlappedResult(hd, &mut ov, n, 1);
+        }
+        let e = win::GetLastError();
+        win::CloseHandle(ov.hEvent);
+        win::SetLastError(e);
+        ok
+    }
+}
+
+/// A pipe for a child's output: (our read end, overlapped, so
+/// [`rok_os_poll_read`] waits on two at once; the child's write end).
+fn output_pipe() -> Result<(HANDLE, HANDLE), i32> {
+    static N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    // `\\.\pipe\rok-<pid>-<n>`, NUL-terminated.
+    let mut name = [0u16; 48];
+    let prefix = ascii_w(br"\\.\pipe\rok-");
+    name[..prefix.len()].copy_from_slice(&prefix);
+    let mut at = prefix.len();
+    // SAFETY: plain call.
+    let pid = unsafe { win::GetCurrentProcessId() };
+    for (j, v) in [pid, N.fetch_add(1, Ordering::Relaxed)]
+        .into_iter()
+        .enumerate()
+    {
+        if j > 0 {
+            name[at] = u16::from(b'-');
+            at += 1;
+        }
+        let mut digits = [0u16; 10];
+        let mut i = digits.len();
+        let mut v = v;
+        loop {
+            i -= 1;
+            digits[i] = u16::from(b'0') + (v % 10) as u16;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        name[at..at + digits.len() - i].copy_from_slice(&digits[i..]);
+        at += digits.len() - i;
+    }
+    // SAFETY: a NUL-terminated name; one inbound byte-mode instance.
+    unsafe {
+        let ours = win::CreateNamedPipeW(
+            name.as_ptr(),
+            win::PIPE_ACCESS_INBOUND
+                | win::FILE_FLAG_OVERLAPPED
+                | win::FILE_FLAG_FIRST_PIPE_INSTANCE,
+            win::PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            1 << 16,
+            1 << 16,
+            0,
+            ptr::null_mut(),
+        );
+        if ours == win::INVALID_HANDLE_VALUE {
+            return Err(fail());
+        }
+        let child = win::CreateFileW(
+            name.as_ptr(),
+            win::GENERIC_WRITE,
+            0,
+            ptr::null_mut(),
+            win::OPEN_EXISTING,
+            0,
+            0,
+        );
+        if child == win::INVALID_HANDLE_VALUE {
+            let e = fail();
+            win::CloseHandle(ours);
+            return Err(e);
+        }
+        Ok((ours, child))
+    }
+}
+
 /// The writable region `off..off + len` of the `GcBuf<u8>` `buf`.
 ///
 /// # Safety
@@ -419,8 +527,7 @@ pub unsafe extern "C" fn rok_os_read(fd: i32, buf: *mut u8, off: usize, len: usi
     let mut n = 0;
     let want = len.min(1 << 30) as DWORD;
     // SAFETY: `dst` is writable for `want` bytes.
-    let (ok, e) =
-        native(|| unsafe { win::ReadFile(h(fd), dst.cast(), want, &mut n, ptr::null_mut()) });
+    let (ok, e) = native(|| unsafe { read_handle(h(fd), dst, want, &mut n) });
     match (ok, e) {
         (0, win::ERROR_BROKEN_PIPE) => 0,
         (0, e) => -(e as isize),
@@ -457,13 +564,14 @@ pub unsafe extern "C" fn rok_os_write(fd: i32, buf: *mut u8, off: usize, len: us
 /// Wait until pipe `fd1` or `fd2` (negative: ignored) has data or its
 /// writer closed: bit 0 / bit 1 set for each ready one, or `-error`.
 ///
-/// Anonymous pipes have no readiness wait, so this polls
-/// `PeekNamedPipe`, backing off from 1 ms to 16 ms. A handle that is not
-/// a pipe counts as ready.
-// Polling, latency up to one system tick; overlapped pipe
-// reads (completion port) if `output()` latency matters.
+/// A child's output pipes are overlapped ([`output_pipe`]): a zero-byte
+/// read on each completes when data arrives or the writer closes, and
+/// the wait takes whichever comes first. A handle that is not an
+/// overlapped pipe counts as ready (a read just blocks).
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_poll_read(fd1: i32, fd2: i32) -> i32 {
+    let fds = [fd1, fd2];
+    // Data or the writer gone, or a handle this cannot wait on.
     let ready = |fd: i32| {
         if fd < 0 {
             return false;
@@ -480,18 +588,51 @@ pub extern "C" fn rok_os_poll_read(fd1: i32, fd2: i32) -> i32 {
                 ptr::null_mut(),
             )
         };
-        ok == 0 || avail > 0
+        ok == 0 || avail > 0 || !overlapped(h(fd))
     };
     native(|| {
-        let mut ms = 1;
         loop {
             let r = i32::from(ready(fd1)) | (i32::from(ready(fd2)) << 1);
             if r != 0 || (fd1 < 0 && fd2 < 0) {
                 break r;
             }
-            // SAFETY: plain sleep.
-            unsafe { win::Sleep(ms) };
-            ms = (ms * 2).min(16);
+            // SAFETY: zeroed requests; each is finished (waited for or
+            // cancelled and waited for) before its event closes.
+            unsafe {
+                let mut ovs: [win::OVERLAPPED; 2] = core::mem::zeroed();
+                let mut events = [0 as HANDLE; 2];
+                let mut pending = [false; 2];
+                let mut k = 0;
+                let mut dummy = 0u8;
+                for (i, &fd) in fds.iter().enumerate() {
+                    if fd < 0 {
+                        continue;
+                    }
+                    ovs[i].hEvent = win::CreateEventW(ptr::null_mut(), 1, 0, ptr::null());
+                    let mut n = 0;
+                    let ok = win::ReadFile(h(fd), (&raw mut dummy).cast(), 0, &mut n, &mut ovs[i]);
+                    if ok == 0 && errno() == win::ERROR_IO_PENDING {
+                        pending[i] = true;
+                        events[k] = ovs[i].hEvent;
+                        k += 1;
+                    }
+                }
+                if pending.iter().filter(|&&p| p).count() == fds.iter().filter(|&&f| f >= 0).count()
+                {
+                    win::WaitForMultipleObjects(k as DWORD, events.as_ptr(), 0, win::INFINITE);
+                }
+                for (i, &fd) in fds.iter().enumerate() {
+                    if fd < 0 {
+                        continue;
+                    }
+                    if pending[i] {
+                        let mut n = 0;
+                        win::CancelIoEx(h(fd), &mut ovs[i]);
+                        win::GetOverlappedResult(h(fd), &mut ovs[i], &mut n, 1);
+                    }
+                    win::CloseHandle(ovs[i].hEvent);
+                }
+            }
         }
     })
     .0
@@ -712,15 +853,7 @@ pub extern "C" fn rok_os_copy_fd(src: i32, dst: i32) -> i64 {
         loop {
             let mut n = 0;
             // SAFETY: `buf` is writable for its length.
-            let ok = unsafe {
-                win::ReadFile(
-                    h(src),
-                    buf.as_mut_ptr().cast(),
-                    buf.len() as DWORD,
-                    &mut n,
-                    ptr::null_mut(),
-                )
-            };
+            let ok = unsafe { read_handle(h(src), buf.as_mut_ptr(), buf.len() as DWORD, &mut n) };
             if ok == 0 && errno() != win::ERROR_BROKEN_PIPE {
                 return -1;
             }
@@ -1418,12 +1551,17 @@ fn setup_stdio(modes: [i32; 3], ends: &mut [[HANDLE; 2]; 3]) -> Result<(), i32> 
                 hd
             }
             -3 => {
-                let (mut r, mut w) = (0, 0);
-                // SAFETY: valid out-pointers; neither end is inheritable.
-                if unsafe { win::CreatePipe(&mut r, &mut w, ptr::null_mut(), 0) } == 0 {
-                    return Err(fail());
-                }
-                let (child, parent) = if i == 0 { (r, w) } else { (w, r) };
+                let (child, parent) = if i == 0 {
+                    let (mut r, mut w) = (0, 0);
+                    // SAFETY: valid out-pointers; neither end is inheritable.
+                    if unsafe { win::CreatePipe(&mut r, &mut w, ptr::null_mut(), 0) } == 0 {
+                        return Err(fail());
+                    }
+                    (r, w)
+                } else {
+                    let (ours, theirs) = output_pipe()?;
+                    (theirs, ours)
+                };
                 ends[i][1] = parent;
                 let c = inheritable(child);
                 // SAFETY: ours; `c` is the inheritable copy.

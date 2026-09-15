@@ -1,0 +1,21 @@
+// only-os: windows
+// expect-exit: 0
+// spec: std 307 §3.7.1
+//
+// `output()` reads a child's stdout and stderr together (overlapped pipe
+// reads, whichever has data first): both arrive whole, in order, also
+// when the child writes to one, waits, then writes to the other.
+// expect-stdout:
+// out a|out b|
+// err a|err b|
+
+use rok::std::process::Command;
+
+fn main() {
+    let script = "echo out a& (echo err a)1>&2& ping -n 2 127.0.0.1 >nul& (echo err b)1>&2& echo out b";
+    let out = try Command::new("cmd").args(["/c", script]).output() catch _ { panic("spawn") };
+    let o = try str::from_utf8(out.stdout) catch _ { "" };
+    let e = try str::from_utf8(out.stderr) catch _ { "" };
+    println(o.replace("\r\n", "|"));
+    println(e.replace("\r\n", "|"));
+}

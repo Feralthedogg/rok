@@ -50,20 +50,34 @@ On a 10-core Apple Silicon machine: about 50 minutes; 700 MB installed.
 
 ### PGO
 
-With Apple clang, `build.sh` optimizes LLVM with `rok.profdata.xz`: an
-IR profile (sparse, xz) of rokc's own `-O2` builds. Other compilers
-build without it: gcc reads no clang profile, a clang older than its
-indexed format cannot read it, and MSVC / clang-cl key functions by
-MSVC-mangled names, which the profile does not have (Windows builds
-skip PGO).
+`build.sh` optimizes LLVM with `rok.profdata.xz`, an IR profile
+(sparse, xz) of rokc's own `-O2` builds, whenever the C++ compiler can
+read it: it tries (`-fprofile-instr-use` on an empty unit) and says when
+it builds without. Its function names are Itanium-mangled, so it serves
+macOS (Xcode's clang) and Linux (a clang at least as new as the
+profile's indexed format: version 12 now, written by Xcode's
+llvm-profdata) alike. gcc reads no clang profile: a Linux build with gcc
+(the default `c++` on most distributions) has no PGO; `CXX=clang++
+CC=clang` gives it. Nothing extra is fetched either way.
 
-`llvm/train-pgo.sh` regenerates the profile (macOS, Xcode's clang): an
-instrumented LLVM (`ROK_LLVM_INSTRUMENT=1 build.sh`), a release rokc
-against it, linked with the profile runtime, then three quarters of
-`compiler/rokc/tests/cases` built with it at `-O2` (a third of them as
-x86_64 Linux objects, so the X86 back end is profiled too). Regenerate
-after a change of the pinned LLVM or a large change of what rokc asks
-LLVM to do; a stale profile still builds, with less benefit.
+An MSVC-ABI build names functions by MSVC mangling, which that profile
+does not have. `build.ps1` uses `rok-msvc.profdata.tar.xz` instead,
+with clang-cl (`CXX=clang-cl`) when it can read it; cl reads no clang
+profile. That profile is not in the repository yet: `train-pgo.ps1`
+makes it on a Windows host (below), and until then Windows builds have
+no PGO.
+
+`llvm/train-pgo.sh` regenerates `rok.profdata.xz` (macOS, Xcode's
+clang): an instrumented LLVM (`ROK_LLVM_INSTRUMENT=1 build.sh`), a
+release rokc against it, linked with the profile runtime, then three
+quarters of `compiler/rokc/tests/cases` built with it at `-O2` (a third
+of them as x86_64 Linux objects, so the X86 back end is profiled too).
+`llvm\train-pgo.ps1` does the same on Windows with clang-cl and the
+llvm-profdata of its installation (the third as objects for the other
+Windows architecture) into `rok-msvc.profdata.tar.xz`. Both need
+~25 GB of scratch space. Regenerate after a change of the pinned LLVM or
+a large change of what rokc asks LLVM to do; a stale profile still
+builds, with less benefit.
 
 ## Using it
 

@@ -1,4 +1,4 @@
-// rok::std::rokon — RokON (Rok Object Notation, `.rokon`): one value
+// rok::std::rokon — ROKON (Rok Object Notation, `.rokon`): one value
 // written in rok literal syntax (stdlib spec 3.9).
 //
 // `parse` reads a document into a `Value`, `Value::to_string` writes the
@@ -14,7 +14,7 @@
 pub mod read;
 pub mod write;
 
-/// A RokON value. `{ k: v }` with identifier keys is a `Struct` without
+/// A ROKON value. `{ k: v }` with identifier keys is a `Struct` without
 /// a name; `{ "k": v }` (any value keys) and `{}` are a `Dict`. A path
 /// with `::` is a `Variant` (`E::V`, `E::V(a, k: b)`, `E::V { f: v }`);
 /// `Name(a, b)` (a tuple struct) is a `Variant` with a one-segment path.
@@ -35,7 +35,7 @@ pub enum Value {
 impl Value {
     /// The canonical text (spec 3.9.4): 4-space indent, one line when it
     /// fits in 100 columns, otherwise one element per line with a
-    /// trailing comma. Panics on a NaN / infinite float (no RokON form).
+    /// trailing comma. Panics on a NaN / infinite float (no ROKON form).
     pub fn to_string(self) -> str { write::pretty(self, 0, 0, 0) }
 
     /// What kind of value this is, for messages (`integer`, `struct`, ..).
@@ -189,12 +189,12 @@ impl Debug for RokonError {
 
 impl Error for RokonError {}
 
-/// A rok value as RokON.
+/// A rok value as ROKON.
 pub trait ToRokon {
     fn to_rokon(self) -> Value;
 }
 
-/// A rok value from RokON; the target type decides how `v` reads.
+/// A rok value from ROKON; the target type decides how `v` reads.
 pub trait FromRokon {
     fn from_rokon(v: Value) throws (RokonError) -> Self;
 
@@ -205,12 +205,12 @@ pub trait FromRokon {
     }
 }
 
-/// Read one RokON document.
+/// Read one ROKON document.
 pub fn parse(s: str) throws (RokonError) -> Value {
     try read::parse(s)
 }
 
-/// `v` in canonical RokON (spec 3.9.4). Panics on a NaN / infinite float.
+/// `v` in canonical ROKON (spec 3.9.4). Panics on a NaN / infinite float.
 pub fn to_string<T: ToRokon>(v: T) -> str {
     v.to_rokon().to_string()
 }

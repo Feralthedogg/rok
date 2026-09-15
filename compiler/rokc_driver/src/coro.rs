@@ -20,10 +20,11 @@ use rokc_ast::{
 };
 use rokc_diagnostic::{ErrorKind, RokDiagnostic, Span};
 
-pub fn rewrite_items(items: &mut [Item], diags: &mut Vec<RokDiagnostic>) {
-    for item in items {
+/// The flattened items; a root `main` is the entry (spec 4.16.5).
+pub fn rewrite_items(items: &mut [(String, Item)], diags: &mut Vec<RokDiagnostic>) {
+    for (module, item) in items {
         match item {
-            Item::Fn(f) => rewrite_fn(f, true, diags),
+            Item::Fn(f) => rewrite_fn(f, module.is_empty(), diags),
             Item::Impl(i) => {
                 for it in &mut i.items {
                     if let ImplItem::Method(f) = it {
@@ -36,11 +37,6 @@ pub fn rewrite_items(items: &mut [Item], diags: &mut Vec<RokDiagnostic>) {
                     if let rokc_ast::TraitItem::Method(f) = it {
                         rewrite_fn(f, false, diags);
                     }
-                }
-            }
-            Item::Mod(m) => {
-                if let Some(items) = &mut m.items {
-                    rewrite_items(items, diags);
                 }
             }
             _ => {}
@@ -67,7 +63,8 @@ pub fn path(segs: &[&str], generics: Vec<Ty>, span: Span) -> Path {
     }
 }
 
-fn rewrite_fn(f: &mut FnDef, free: bool, diags: &mut Vec<RokDiagnostic>) {
+/// `root`: a free function of the root module (`main` is the entry).
+fn rewrite_fn(f: &mut FnDef, root: bool, diags: &mut Vec<RokDiagnostic>) {
     if !(f.is_async || f.is_generator)
         || f.attrs
             .iter()
@@ -81,6 +78,7 @@ fn rewrite_fn(f: &mut FnDef, free: bool, diags: &mut Vec<RokDiagnostic>) {
     if f.params.iter().any(|p| p.by_ref) {
         diags.push(RokDiagnostic::error(
             ErrorKind::Type,
+            span,
             format!(
                 "`{}`: a coroutine (`async` / `yield`) fn cannot take `ref` parameters — \
                  its body runs after the call returns",
@@ -99,23 +97,22 @@ fn rewrite_fn(f: &mut FnDef, free: bool, diags: &mut Vec<RokDiagnostic>) {
         && !f.is_generator
         && body.is_some()
         && matches!(f.throws, ThrowsKind::None)
-        && !(free && f.name == "main");
-    let val =
-        match f.ret_ty.take() {
-            Some(t) => t,
-            None if f.is_generator => {
-                diags.push(RokDiagnostic::error(
+        && !(root && f.name == "main");
+    let val = match f.ret_ty.take() {
+        Some(t) => t,
+        None if f.is_generator => {
+            diags.push(RokDiagnostic::error(
                 ErrorKind::Type,
+                f.span,
                 format!(
                     "`yield fn {}` needs its item type: `yield fn {}(..) -> T` (spec 4.11.12)",
                     f.name, f.name
                 ),
-            )
-            .with_span(f.span, ""));
-                unit
-            }
-            None => unit,
-        };
+            ));
+            unit
+        }
+        None => unit,
+    };
     let err = match std::mem::take(&mut f.throws) {
         ThrowsKind::Typed(errs) => match errs.as_slice() {
             [] => None,
@@ -142,7 +139,7 @@ fn rewrite_fn(f: &mut FnDef, free: bool, diags: &mut Vec<RokDiagnostic>) {
             span,
         }
     });
-    let is_main = free && f.name == "main" && f.is_async && !f.is_generator;
+    let is_main = root && f.name == "main" && f.is_async && !f.is_generator;
     let (is_async, is_gen) = (f.is_async, f.is_generator);
     f.is_async = false;
     f.is_generator = false;

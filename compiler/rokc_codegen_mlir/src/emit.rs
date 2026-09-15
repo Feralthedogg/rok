@@ -25,8 +25,10 @@ const LIST: &str = "rok::core::collections::list::List";
 /// GC object memory; GC object memory read and written as different
 /// scalar types (a `GcBuf<f64>`'s elements, a `GcBuf<usize>` length)
 /// never overlaps: a buffer is only ever accessed as its element type.
-/// Other accesses (raw addresses, scratch, aggregates' parts) carry no
-/// tag and may alias anything.
+/// A root (`gcroot`, what the shadow-stack frame points to) counts as a
+/// reference: the collector reads it (`REF_ONLY_CALLS`). Other accesses
+/// (raw addresses, scratch, the runtime's words) carry no tag and may
+/// alias anything.
 const TBAA_DEFS: &str = r#"#rok_tbaa_root = #llvm.tbaa_root<id = "rok">
 #rok_tbaa_slot_t = #llvm.tbaa_type_desc<id = "rok.slot", members = {<#rok_tbaa_root, 0>}>
 #rok_tbaa_heap_t = #llvm.tbaa_type_desc<id = "rok.heap", members = {<#rok_tbaa_root, 0>}>
@@ -64,6 +66,8 @@ const TBAA_DEFS: &str = r#"#rok_tbaa_root = #llvm.tbaa_root<id = "rok">
 #rok_tbaa_cchar = #llvm.tbaa_tag<base_type = #rok_tbaa_cchar_t, access_type = #rok_tbaa_cchar_t, offset = 0>
 #rok_tbaa_ref_t = #llvm.tbaa_type_desc<id = "rok.heap.ref", members = {<#rok_tbaa_heap_t, 0>}>
 #rok_tbaa_ref = #llvm.tbaa_tag<base_type = #rok_tbaa_ref_t, access_type = #rok_tbaa_ref_t, offset = 0>
+#rok_tbaa_gcroot_t = #llvm.tbaa_type_desc<id = "rok.gcroot", members = {<#rok_tbaa_ref_t, 0>}>
+#rok_tbaa_gcroot = #llvm.tbaa_tag<base_type = #rok_tbaa_gcroot_t, access_type = #rok_tbaa_gcroot_t, offset = 0>
 "#;
 
 /// The TBAA tag (`TBAA_DEFS`) of a GC buffer element of type `ty`.
@@ -160,6 +164,9 @@ enum Callee<'s> {
 /// pointer to it on Windows x64 and wasm32 (`FnEmit::runtime_str`).
 fn runtime_decl(name: &str, target: &Target) -> Option<String> {
     let pw = target.pointer_width;
+    if name == "rok.alloc" {
+        return Some(alloc_fn(pw));
+    }
     let s = if target.c_abi.pair_by_ref() {
         "!llvm.ptr".to_owned()
     } else {
@@ -190,10 +197,51 @@ fn runtime_decl(name: &str, target: &Target) -> Option<String> {
         "rok_native_resume" => "(i32)".to_owned(),
         _ => return None,
     };
+    if REF_ONLY_CALLS.contains(&name) {
+        return Some(format!("llvm.func @{name}{sig}{}", runtime_fn_attrs(name)));
+    }
     Some(format!(
         "func.func private @{name}{sig}{}",
         runtime_fn_attrs(name)
     ))
+}
+
+/// Runtime functions that write no GC object memory but references (a
+/// collection moves objects and rewrites the references to them) and
+/// object headers (untagged). Called with the `ref` TBAA tag, so other
+/// heap loads (a length, a buffer's numbers) stay valid across them;
+/// declared as `llvm.func`, as only an `llvm.call` carries the tag.
+const REF_ONLY_CALLS: [&str; 3] = ["rok_runtime_yield", "rok_gc_alloc_slow", "rok_gc_wb_slow"];
+
+/// `rok.alloc(cursor, limit, size8, size, align, type_id, ok)`: bump-
+/// allocate `size8` bytes (a multiple of 8, below `LOS_THRESHOLD`) from
+/// this thread's TLAB (`cursor` / `limit`: its TLS slots) when they fit
+/// and `ok` holds, writing the header (`type_id`; `gc_word` = size; the
+/// flags are already 0); else `rok_gc_alloc_slow(size, align, type_id)`.
+/// The optimizer sees an allocation function and inlines it last (the
+/// LLVM shim's `InlineAlloc`).
+fn alloc_fn(pw: u32) -> String {
+    format!(
+        "llvm.func internal @rok.alloc(%cp: !llvm.ptr, %lp: !llvm.ptr, %size8: i{pw}, %size: i{pw}, %align: i{pw}, %tid: i32, %ok: i1) -> !llvm.ptr attributes {{passthrough = [\"noinline\", \"nounwind\"]}} {{
+    %cur = llvm.load %cp : !llvm.ptr -> i{pw}
+    %lim = llvm.load %lp : !llvm.ptr -> i{pw}
+    %room = llvm.sub %lim, %cur : i{pw}
+    %room_ok = llvm.icmp \"ule\" %size8, %room : i{pw}
+    %fits = llvm.and %room_ok, %ok : i1
+    llvm.cond_br %fits, ^fast, ^slow
+  ^fast:
+    %next = llvm.add %cur, %size8 : i{pw}
+    llvm.store %next, %cp : i{pw}, !llvm.ptr
+    %hp = llvm.inttoptr %cur : i{pw} to !llvm.ptr
+    llvm.store %tid, %hp : i32, !llvm.ptr
+    %wp = llvm.getelementptr %hp[{GC_WORD_OFFSET}] : (!llvm.ptr) -> !llvm.ptr, i8
+    llvm.store %size8, %wp : i{pw}, !llvm.ptr
+    llvm.return %hp : !llvm.ptr
+  ^slow:
+    %obj = llvm.call @rok_gc_alloc_slow(%size, %align, %tid) {{tbaa = [#rok_tbaa_ref]}} : (i{pw}, i{pw}, i32) -> !llvm.ptr
+    llvm.return %obj : !llvm.ptr
+  }}"
+    )
 }
 
 /// LLVM attributes of runtime function `name`'s declaration: none
@@ -822,8 +870,10 @@ impl Emitter {
             .clone()
     }
 
-    /// One `internal constant` byte array per interned string literal,
-    /// NUL-terminated so the pointer alone is a C string.
+    /// One `internal unnamed_addr constant` byte array per interned string
+    /// literal, NUL-terminated so the pointer alone is a C string. Its
+    /// address is not significant: a split compile copies it into each
+    /// part that uses it.
     fn emit_string_globals(&mut self) {
         let entries: Vec<(String, String)> = self
             .str_globals
@@ -846,7 +896,7 @@ impl Emitter {
             let len = bytes.len() + 1;
             let _ = writeln!(
                 self.out,
-                "  llvm.mlir.global internal constant @{sym}(\"{escaped}\\00\") {{addr_space = 0 : i32}} : !llvm.array<{len} x i8>"
+                "  llvm.mlir.global internal unnamed_addr constant @{sym}(\"{escaped}\\00\") {{addr_space = 0 : i32}} : !llvm.array<{len} x i8>"
             );
         }
     }
@@ -1124,6 +1174,15 @@ impl Emitter {
         let (params, ret) = c_signature(params, ret_ty, abi, &self.target);
         let ret = c_ret_arrow(ret.as_deref(), ret_ty, Some(abi), &self.target);
         let mut params: Vec<String> = params.into_iter().map(|(t, a)| t + &a).collect();
+        if REF_ONLY_CALLS.contains(&symbol) {
+            let _ = writeln!(
+                self.out,
+                "  llvm.func @{symbol}({}){ret}{}",
+                params.join(", "),
+                runtime_fn_attrs(symbol)
+            );
+            return;
+        }
         if abi.variadic {
             params.push("...".to_owned());
             let _ = writeln!(
@@ -1285,6 +1344,8 @@ struct FnEmit<'a> {
     /// so its loads survive calls: a collection never rewrites a root
     /// (an object a root reaches is not moved, 704 §7.4.1).
     root_cells: HashMap<u32, String>,
+    /// Rooted locals whose own slot is the root (no root cell).
+    root_slots: HashSet<u32>,
     /// Where the frame-rooted locals die (their slots are cleared there),
     /// and each block's index in `f.blocks`.
     deaths: rokc_mir::Deaths,
@@ -1323,52 +1384,7 @@ struct FnEmit<'a> {
 /// Blocks with an edge to a block on the current DFS path (a loop
 /// back-edge), found by an iterative DFS from the entry block.
 pub fn back_edge_blocks(f: &MirFunction) -> HashSet<u32> {
-    back_edges(f).into_keys().collect()
-}
-
-/// Each back-edge block (`back_edge_blocks`) and the loop headers its
-/// back edges go to.
-fn back_edges(f: &MirFunction) -> HashMap<u32, HashSet<u32>> {
-    let succs = |b: &BasicBlock| -> Vec<u32> {
-        match &b.terminator {
-            Terminator::Goto { target, .. } => vec![target.0],
-            Terminator::If {
-                then_bb, else_bb, ..
-            } => vec![then_bb.0, else_bb.0],
-            Terminator::Suspend { resume, .. } => vec![resume.0],
-            Terminator::Return(_) | Terminator::Unreachable => Vec::new(),
-        }
-    };
-    let index: HashMap<u32, usize> = f
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.id.0, i))
-        .collect();
-    let mut out: HashMap<u32, HashSet<u32>> = HashMap::new();
-    // 0 = unvisited, 1 = on the DFS path, 2 = done.
-    let mut state = vec![0u8; f.blocks.len()];
-    let mut stack: Vec<(usize, Vec<u32>)> = Vec::new();
-    if let Some(b) = f.blocks.first() {
-        state[0] = 1;
-        stack.push((0, succs(b)));
-    }
-    while let Some((i, rest)) = stack.last_mut() {
-        let i = *i;
-        let Some(t) = rest.pop() else {
-            state[i] = 2;
-            stack.pop();
-            continue;
-        };
-        let Some(&j) = index.get(&t) else { continue };
-        if state[j] == 0 {
-            state[j] = 1;
-            stack.push((j, succs(&f.blocks[j])));
-        } else if state[j] == 1 {
-            out.entry(f.blocks[i].id.0).or_default().insert(t);
-        }
-    }
-    out
+    rokc_mir::back_edges(f).into_keys().collect()
 }
 
 /// Whether statement `s` can reach a safepoint (a collection can run
@@ -1385,7 +1401,9 @@ pub fn stmt_safepoint(
         Statement::Assign { rvalue, .. } => match rvalue {
             RValue::Call { callee, .. } => !quiet.contains(callee),
             RValue::HeapBox { ty, .. } => !target.any_inline(ty),
-            RValue::StaticLoad { name, .. } => pkgs.lazy_statics.contains_key(name),
+            RValue::StaticLoad { name, .. } | RValue::StaticAddr(name) => {
+                pkgs.lazy_statics.contains_key(name)
+            }
             RValue::CallIndirect { .. }
             | RValue::HeapAlloc { .. }
             | RValue::BufAlloc { .. }
@@ -1644,11 +1662,12 @@ impl<'a> FnEmit<'a> {
             pkgs,
             overflow_checks: true,
             gc_type_base: USER_TYPE_BASE,
-            back_edges: back_edges(f),
+            back_edges: rokc_mir::back_edges(f),
             reentry: HashSet::new(),
             edge_from: (0, false),
             rooted: None,
             root_cells: HashMap::new(),
+            root_slots: HashSet::new(),
             deaths: rokc_mir::Deaths::default(),
             block_pos: f
                 .blocks
@@ -1866,7 +1885,7 @@ impl<'a> FnEmit<'a> {
     {unlogged} = arith.cmpi ne, {umask}, {zero} : i32
     cf.cond_br {unlogged}, ^rok_wbslow{n}, ^rok_wbcq{n}
   ^rok_wbslow{n}:
-    func.call @rok_gc_wb_slow({obj_v}) : (!llvm.ptr) -> ()
+    llvm.call @rok_gc_wb_slow({obj_v}) {{tbaa = [#rok_tbaa_ref]}} : (!llvm.ptr) -> ()
     cf.br ^rok_wbcq{n}
   ^rok_wbcq{n}:
     {cbit} = arith.constant {FLAG_CARDED} : i32
@@ -1919,7 +1938,7 @@ impl<'a> FnEmit<'a> {
     {set} = arith.cmpi ne, {flag}, {zero} : i8
     cf.cond_br {set}, ^rok_yield{n}, ^rok_run{n}
   ^rok_yield{n}:
-    func.call @rok_runtime_yield() : () -> ()
+    llvm.call @rok_runtime_yield() {{tbaa = [#rok_tbaa_ref]}} : () -> ()
 "
         );
         n
@@ -2010,8 +2029,22 @@ impl<'a> FnEmit<'a> {
                         .root_offsets(&self.f.locals[l.0 as usize].ty)
                         .is_empty()
                 },
-                |s| stmt_safepoint(s, quiet, pkgs, target),
+                |s| {
+                    stmt_safepoint(s, quiet, pkgs, target).then(|| match s {
+                        // A rok function roots the arguments it uses
+                        // after a collection itself.
+                        Statement::Assign {
+                            rvalue: RValue::Call { callee, .. },
+                            ..
+                        } => self
+                            .fns
+                            .get(callee)
+                            .is_none_or(|g| g.runtime || g.c.is_some()),
+                        _ => true,
+                    })
+                },
                 |b| self.back_edges.contains_key(&b.0),
+                self.entry_poll,
             )
         });
         self.rooted = rooted;
@@ -2095,11 +2128,15 @@ impl<'a> FnEmit<'a> {
                 continue;
             };
             let ty = mlir_type(&local_ty, self.target);
-            let cell = self.root_cells.get(&p.0);
-            for s in std::iter::once(&slot).chain(cell) {
+            let tag = self.slot_tag(*p);
+            let _ = writeln!(
+                self.body,
+                "    llvm.store {arg}, {slot} {{tbaa = [{tag}]}} : {ty}, !llvm.ptr"
+            );
+            if let Some(cell) = self.root_cells.get(&p.0) {
                 let _ = writeln!(
                     self.body,
-                    "    llvm.store {arg}, {s} {{tbaa = [#rok_tbaa_slot]}} : {ty}, !llvm.ptr"
+                    "    llvm.store {arg}, {cell} {{tbaa = [#rok_tbaa_gcroot]}} : {ty}, !llvm.ptr"
                 );
             }
         }
@@ -2168,6 +2205,7 @@ impl<'a> FnEmit<'a> {
                     self.root_cells.insert(id, cell.clone());
                     cell
                 } else {
+                    self.root_slots.insert(id);
                     slot
                 }
             } else {
@@ -2178,7 +2216,7 @@ impl<'a> FnEmit<'a> {
             let _ = writeln!(header, "    {zero} = llvm.mlir.zero : {ty}");
             let _ = writeln!(
                 header,
-                "    llvm.store {zero}, {slot} {{tbaa = [#rok_tbaa_slot]}} : {ty}, !llvm.ptr"
+                "    llvm.store {zero}, {slot} {{tbaa = [#rok_tbaa_gcroot]}} : {ty}, !llvm.ptr"
             );
             for off in offsets {
                 if off == 0 {
@@ -2239,7 +2277,7 @@ impl<'a> FnEmit<'a> {
         let _ = writeln!(self.body, "    {z} = llvm.mlir.zero : {ty}");
         let _ = writeln!(
             self.body,
-            "    llvm.store {z}, {slot} {{tbaa = [#rok_tbaa_slot]}} : {ty}, !llvm.ptr"
+            "    llvm.store {z}, {slot} {{tbaa = [#rok_tbaa_gcroot]}} : {ty}, !llvm.ptr"
         );
     }
 
@@ -2287,11 +2325,21 @@ impl<'a> FnEmit<'a> {
         let slot = self.slot_names[id.0 as usize].clone().unwrap();
         let v = self.fresh_value();
         let ty = mlir_type(&self.local_ty(id), self.target);
+        let tag = self.slot_tag(id);
         let _ = writeln!(
             self.body,
-            "    {v} = llvm.load {slot} {{tbaa = [#rok_tbaa_slot]}} : !llvm.ptr -> {ty}"
+            "    {v} = llvm.load {slot} {{tbaa = [{tag}]}} : !llvm.ptr -> {ty}"
         );
         v
+    }
+
+    /// The TBAA tag of local `id`'s slot: `gcroot` where it is the root.
+    fn slot_tag(&self, id: LocalId) -> &'static str {
+        if self.root_slots.contains(&id.0) {
+            "#rok_tbaa_gcroot"
+        } else {
+            "#rok_tbaa_slot"
+        }
     }
 
     fn write_local(&mut self, id: LocalId, value: &str) {
@@ -2305,26 +2353,27 @@ impl<'a> FnEmit<'a> {
         }
         let slot = self.slot_names[id.0 as usize].clone().unwrap();
         let ty = mlir_type(&self.local_ty(id), self.target);
+        let tag = self.slot_tag(id);
         let _ = writeln!(
             self.body,
-            "    llvm.store {value}, {slot} {{tbaa = [#rok_tbaa_slot]}} : {ty}, !llvm.ptr"
+            "    llvm.store {value}, {slot} {{tbaa = [{tag}]}} : {ty}, !llvm.ptr"
         );
         if let Some(cell) = self.root_cells.get(&id.0) {
             let _ = writeln!(
                 self.body,
-                "    llvm.store {value}, {cell} {{tbaa = [#rok_tbaa_slot]}} : {ty}, !llvm.ptr"
+                "    llvm.store {value}, {cell} {{tbaa = [#rok_tbaa_gcroot]}} : {ty}, !llvm.ptr"
             );
         }
     }
 
     /// `v`, a `ty` value fresh from outside this function (an argument,
-    /// a call's result), with the buffers of the `List`s in it known to
-    /// LLVM: a `List`'s two buffers are always allocated (`buf_new`),
-    /// objects of at least `MIN_OBJECT_SIZE` bytes, so its length and
-    /// element buffer pointer may be loaded ahead of their use (out of a
-    /// loop). Each goes through a `ptrmask` keeping every bit of an
-    /// 8-aligned address, whose result carries the facts. (Other
-    /// `GcBuf`s may be null or a `str`'s bytes, `rok_str_bytes_buf`.)
+    /// a call's result), with the object of the `List`s in it known to
+    /// LLVM: a `List`'s object is always allocated (`buf_new`), and holds
+    /// its length, capacity and element buffer (three words), so these
+    /// may be loaded ahead of their use (out of a loop). Each goes
+    /// through a `ptrmask` keeping every bit of an 8-aligned address,
+    /// whose result carries the facts. (Other `GcBuf`s may be null or a
+    /// `str`'s bytes, `rok_str_bytes_buf`.)
     fn buf_ref_facts(&mut self, v: String, ty: &MirTy) -> String {
         let mut paths = Vec::new();
         buf_ref_paths(ty, self.target, &self.lists, &mut Vec::new(), &mut paths);
@@ -2332,6 +2381,7 @@ impl<'a> FnEmit<'a> {
             return v;
         }
         let pw = self.pw;
+        let deref = HEADER_SIZE + 3 * pw / 8;
         let ty_str = mlir_type(ty, self.target);
         let mask = self.fresh_value();
         let _ = writeln!(self.body, "    {mask} = arith.constant -8 : i{pw}");
@@ -2346,7 +2396,7 @@ impl<'a> FnEmit<'a> {
             let _ = write!(
                 self.body,
                 "    {p} = llvm.extractvalue {v}[{at}] : {ty_str}
-    {q} = llvm.call_intrinsic \"llvm.ptrmask\"({p}, {mask}) : (!llvm.ptr, i{pw}) -> (!llvm.ptr {{llvm.nonnull, llvm.dereferenceable = {MIN_OBJECT_SIZE} : i64, llvm.align = 8 : i64}})
+    {q} = llvm.call_intrinsic \"llvm.ptrmask\"({p}, {mask}) : (!llvm.ptr, i{pw}) -> (!llvm.ptr {{llvm.nonnull, llvm.dereferenceable = {deref} : i64, llvm.align = 8 : i64}})
     {out} = llvm.insertvalue {q}, {v}[{at}] : {ty_str}
 "
             );
@@ -2407,7 +2457,7 @@ impl<'a> FnEmit<'a> {
                     let ty = mlir_type(&self.local_ty(*p), self.target);
                     let _ = writeln!(
                         self.body,
-                        "    llvm.store {v}, {slot} {{tbaa = [#rok_tbaa_slot]}} : {ty}, !llvm.ptr"
+                        "    llvm.store {v}, {slot} {{tbaa = [#rok_tbaa_gcroot]}} : {ty}, !llvm.ptr"
                     );
                 }
             }
@@ -2416,8 +2466,12 @@ impl<'a> FnEmit<'a> {
         for l in self.deaths.on_entry.get(pos).cloned().unwrap_or_default() {
             self.clear_root(l);
         }
+        let parts = rokc_mir::part_stores(b);
         for (i, s) in b.stmts.iter().enumerate() {
-            self.emit_stmt(s);
+            match parts.get(&i) {
+                Some(part) => self.emit_part_store(s, part),
+                None => self.emit_stmt(s),
+            }
             let dead = self
                 .deaths
                 .after_stmt
@@ -2432,6 +2486,39 @@ impl<'a> FnEmit<'a> {
             }
         }
         self.emit_terminator(b.id.0, &b.terminator);
+    }
+
+    /// A `BufStore` that writes one field of the element (`part_stores`).
+    fn emit_part_store(&mut self, s: &Statement, part: &rokc_mir::PartStore) {
+        let Statement::BufStore {
+            buf,
+            index,
+            elem_ty,
+            ..
+        } = s
+        else {
+            unreachable!("a part store is a `BufStore`")
+        };
+        let (MirTy::Struct(_, fields) | MirTy::Tuple(fields)) = elem_ty else {
+            unreachable!("a part store writes a field")
+        };
+        if self.target.explicit_layout(elem_ty) {
+            return self.emit_stmt(s);
+        }
+        let field_ty = fields[part.field as usize].clone();
+        let off = self.target.field_offsets(elem_ty)[part.field as usize];
+        let p = self.buf_elem_addr(buf, index, elem_ty);
+        let q = self.fresh_value();
+        let _ = writeln!(
+            self.body,
+            "    {q} = llvm.getelementptr {p}[{off}] : (!llvm.ptr) -> !llvm.ptr, i8"
+        );
+        let v = self.materialize_operand(&part.value, &field_ty);
+        if self.target.has_gc_ref(&field_ty) {
+            let len = self.target.size_align(&field_ty).0;
+            self.emit_write_barrier(buf, &q, len);
+        }
+        self.heap_store(&q, &v, &field_ty);
     }
 
     fn emit_stmt(&mut self, s: &Statement) {
@@ -2529,11 +2616,16 @@ impl<'a> FnEmit<'a> {
                     .or(self.slot_names[l.0 as usize].as_ref());
                 if let (Some(_), Some(slot)) = (&self.gc_frame, slot.cloned()) {
                     let ty = mlir_type(&self.local_ty(*l), self.target);
+                    let tag = if self.root_cells.contains_key(&l.0) {
+                        "#rok_tbaa_gcroot"
+                    } else {
+                        self.slot_tag(*l)
+                    };
                     let z = self.fresh_value();
                     let _ = writeln!(self.body, "    {z} = llvm.mlir.zero : {ty}");
                     let _ = writeln!(
                         self.body,
-                        "    llvm.store {z}, {slot} {{tbaa = [#rok_tbaa_slot]}} : {ty}, !llvm.ptr"
+                        "    llvm.store {z}, {slot} {{tbaa = [{tag}]}} : {ty}, !llvm.ptr"
                     );
                 }
             }
@@ -2563,12 +2655,7 @@ impl<'a> FnEmit<'a> {
                     let len = self.target.size_align(elem_ty).0;
                     self.emit_write_barrier(buf, &p, len);
                 }
-                let ty = mlir_type(elem_ty, self.target);
-                let tag = heap_tbaa(elem_ty);
-                let _ = writeln!(
-                    self.body,
-                    "    llvm.store {v}, {p} {{tbaa = [{tag}]}} : {ty}, !llvm.ptr"
-                );
+                self.heap_store(&p, &v, elem_ty);
             }
             Statement::HeapStore {
                 ptr,
@@ -2578,15 +2665,12 @@ impl<'a> FnEmit<'a> {
             } => {
                 let field = struct_field_tys(ty)[*index as usize].clone();
                 let v = self.materialize_operand(value, &field);
-                let (addr, field_ty) = self.heap_field_addr(ptr, ty, *index);
+                let addr = self.heap_field_addr(ptr, ty, *index);
                 if self.target.has_gc_ref(&field) {
                     let len = self.target.size_align(&field).0;
                     self.emit_write_barrier(ptr, &addr, len);
                 }
-                let _ = writeln!(
-                    self.body,
-                    "    llvm.store {v}, {addr} {{tbaa = [#rok_tbaa_heap]}} : {field_ty}, !llvm.ptr"
-                );
+                self.heap_store(&addr, &v, &field);
             }
             Statement::StaticStore { name, value, ty } => {
                 self.ensure_static_init(name);
@@ -2770,13 +2854,9 @@ impl<'a> FnEmit<'a> {
             RValue::HeapBox { value, ty } => self.emit_heap_box(value, ty),
             RValue::HeapAlloc { ty } => self.emit_gc_object(ty),
             RValue::HeapField { ptr, ty, index } => {
-                let (addr, field_ty) = self.heap_field_addr(ptr, ty, *index);
-                let v = self.fresh_value();
-                let _ = writeln!(
-                    self.body,
-                    "    {v} = llvm.load {addr} {{tbaa = [#rok_tbaa_heap]}} : !llvm.ptr -> {field_ty}"
-                );
-                v
+                let addr = self.heap_field_addr(ptr, ty, *index);
+                let field = struct_field_tys(ty)[*index as usize].clone();
+                self.heap_load(&addr, &field)
             }
             RValue::BufAlloc { elem_ty, len } => self.emit_buf_alloc(elem_ty, len),
             RValue::RawLoad { addr, ty, volatile } => {
@@ -2785,6 +2865,17 @@ impl<'a> FnEmit<'a> {
                 let v = self.fresh_value();
                 let vol = if *volatile { "volatile " } else { "" };
                 let _ = writeln!(self.body, "    {v} = llvm.load {vol}{p} : !llvm.ptr -> {t}");
+                v
+            }
+            RValue::StaticAddr(name) => {
+                self.ensure_static_init(name);
+                let sym = self.pkgs.static_sym(name);
+                let (addr, pw, v) = (self.fresh_value(), self.pw, self.fresh_value());
+                let _ = writeln!(
+                    self.body,
+                    "    {addr} = llvm.mlir.addressof @{sym} : !llvm.ptr\n    \
+                     {v} = llvm.ptrtoint {addr} : !llvm.ptr to i{pw}"
+                );
                 v
             }
             RValue::AddrOf(l) => {
@@ -2823,14 +2914,7 @@ impl<'a> FnEmit<'a> {
                 elem_ty,
             } => {
                 let p = self.buf_elem_addr(buf, index, elem_ty);
-                let ty = mlir_type(elem_ty, self.target);
-                let tag = heap_tbaa(elem_ty);
-                let v = self.fresh_value();
-                let _ = writeln!(
-                    self.body,
-                    "    {v} = llvm.load {p} {{tbaa = [{tag}]}} : !llvm.ptr -> {ty}"
-                );
-                v
+                self.heap_load(&p, elem_ty)
             }
             RValue::BufAtomic {
                 op,
@@ -2857,13 +2941,7 @@ impl<'a> FnEmit<'a> {
                     self.body,
                     "    {addr} = llvm.getelementptr {p}[{HEADER_SIZE}] : (!llvm.ptr) -> !llvm.ptr, i8"
                 );
-                let dst = self.fresh_value();
-                let ty_str = mlir_type(ty, self.target);
-                let _ = writeln!(
-                    self.body,
-                    "    {dst} = llvm.load {addr} {{tbaa = [#rok_tbaa_heap]}} : !llvm.ptr -> {ty_str}"
-                );
-                dst
+                self.heap_load(&addr, ty)
             }
             RValue::StaticLoad { name, ty } => {
                 self.ensure_static_init(name);
@@ -2945,13 +3023,11 @@ impl<'a> FnEmit<'a> {
         }
         let obj = self.emit_gc_object(ty);
         let payload = self.fresh_value();
-        let ty_str = mlir_type(ty, self.target);
-        let _ = write!(
+        let _ = writeln!(
             self.body,
-            "    {payload} = llvm.getelementptr {obj}[{HEADER_SIZE}] : (!llvm.ptr) -> !llvm.ptr, i8
-    llvm.store {v}, {payload} : {ty_str}, !llvm.ptr
-"
+            "    {payload} = llvm.getelementptr {obj}[{HEADER_SIZE}] : (!llvm.ptr) -> !llvm.ptr, i8"
         );
+        self.heap_store(&payload, &v, ty);
         obj
     }
 
@@ -2978,18 +3054,15 @@ impl<'a> FnEmit<'a> {
             let obj = self.fresh_value();
             let _ = writeln!(
                 self.body,
-                "    {obj} = func.call @rok_gc_alloc_slow({total}, {align_v}, {tid}) : (i{pw}, i{pw}, i32) -> !llvm.ptr"
+                "    {obj} = llvm.call @rok_gc_alloc_slow({total}, {align_v}, {tid}) {{tbaa = [#rok_tbaa_ref]}} : (i{pw}, i{pw}, i32) -> !llvm.ptr"
             );
             return obj;
         }
         self.emit_tlab_alloc(&total, &total, None, &align_v, &tid)
     }
 
-    /// Bump-allocate `size8` bytes (a multiple of 8, below
-    /// `LOS_THRESHOLD`) from this thread's TLAB when they fit (and `ok`
-    /// holds), writing the header (`type_id`; `gc_word` = size; the flags
-    /// are already 0); else `rok_gc_alloc_slow(size, align, tid)`. The
-    /// object's `GcRef`.
+    /// A small object from this thread's TLAB when it fits (and `ok`
+    /// holds), else from the runtime (`alloc_fn`). The object's `GcRef`.
     fn emit_tlab_alloc(
         &mut self,
         size8: &str,
@@ -3001,50 +3074,27 @@ impl<'a> FnEmit<'a> {
         let pw = self.pw;
         let cp = self.tls_addr("rok_tls_tlab_cursor");
         let lp = self.tls_addr("rok_tls_tlab_limit");
-        let n = self.next_check;
-        self.next_check += 1;
-        let [cur, lim, room, room_ok, fits, next, hp, wp, slow, obj] =
-            std::array::from_fn(|_| self.fresh_value());
-        let _ = write!(
-            self.body,
-            "    {cur} = llvm.load {cp} : !llvm.ptr -> i{pw}
-    {lim} = llvm.load {lp} : !llvm.ptr -> i{pw}
-    {room} = arith.subi {lim}, {cur} : i{pw}
-    {room_ok} = arith.cmpi ule, {size8}, {room} : i{pw}
-"
+        self.needs.insert("rok.alloc");
+        let ok = ok.map_or_else(
+            || {
+                let t = self.fresh_value();
+                let _ = writeln!(self.body, "    {t} = arith.constant true");
+                t
+            },
+            ToOwned::to_owned,
         );
-        let fits = match ok {
-            Some(ok) => {
-                let _ = writeln!(self.body, "    {fits} = arith.andi {room_ok}, {ok} : i1");
-                fits
-            }
-            None => room_ok,
-        };
-        let _ = write!(
+        let obj = self.fresh_value();
+        let _ = writeln!(
             self.body,
-            "    cf.cond_br {fits}, ^rok_afast{n}, ^rok_aslow{n}
-  ^rok_afast{n}:
-    {next} = arith.addi {cur}, {size8} : i{pw}
-    llvm.store {next}, {cp} : i{pw}, !llvm.ptr
-    {hp} = llvm.inttoptr {cur} : i{pw} to !llvm.ptr
-    llvm.store {tid}, {hp} : i32, !llvm.ptr
-    {wp} = llvm.getelementptr {hp}[{GC_WORD_OFFSET}] : (!llvm.ptr) -> !llvm.ptr, i8
-    llvm.store {size8}, {wp} : i{pw}, !llvm.ptr
-    cf.br ^rok_aobj{n}({hp} : !llvm.ptr)
-  ^rok_aslow{n}:
-    {slow} = func.call @rok_gc_alloc_slow({size}, {align_v}, {tid}) : (i{pw}, i{pw}, i32) -> !llvm.ptr
-    cf.br ^rok_aobj{n}({slow} : !llvm.ptr)
-  ^rok_aobj{n}({obj}: !llvm.ptr):
-"
+            "    {obj} = llvm.call @rok.alloc({cp}, {lp}, {size8}, {size}, {align_v}, {tid}, {ok}) {{tbaa = [#rok_tbaa_ref]}} : (!llvm.ptr, !llvm.ptr, i{pw}, i{pw}, i{pw}, i32, i1) -> !llvm.ptr"
         );
         obj
     }
 
     /// Address of field `index` of the `ty` (tuple) payload of GC object
-    /// `ptr`, and the field's MLIR type.
-    fn heap_field_addr(&mut self, ptr: &Operand, ty: &MirTy, index: u32) -> (String, String) {
+    /// `ptr`.
+    fn heap_field_addr(&mut self, ptr: &Operand, ty: &MirTy, index: u32) -> String {
         let p = self.materialize_operand(ptr, &MirTy::GcRef);
-        let field = struct_field_tys(ty)[index as usize].clone();
         let ty_str = mlir_type(ty, self.target);
         let index = llvm_field(ty, index as usize, self.target);
         let [payload, addr] = std::array::from_fn(|_| self.fresh_value());
@@ -3054,7 +3104,7 @@ impl<'a> FnEmit<'a> {
     {addr} = llvm.getelementptr {payload}[0, {index}] : (!llvm.ptr) -> !llvm.ptr, {ty_str}
 "
         );
-        (addr, mlir_type(&field, self.target))
+        addr
     }
 
     /// The GC type id of `ty` objects (`array`: of buffers of `ty`
@@ -3116,7 +3166,7 @@ impl<'a> FnEmit<'a> {
             let obj = self.fresh_value();
             let _ = writeln!(
                 self.body,
-                "    {obj} = func.call @rok_gc_alloc_slow({total}, {align_v}, {tid}) : (i{pw}, i{pw}, i32) -> !llvm.ptr"
+                "    {obj} = llvm.call @rok_gc_alloc_slow({total}, {align_v}, {tid}) {{tbaa = [#rok_tbaa_ref]}} : (i{pw}, i{pw}, i32) -> !llvm.ptr"
             );
             return obj;
         }
@@ -3140,7 +3190,22 @@ impl<'a> FnEmit<'a> {
         );
         let ok = self.fresh_value();
         let _ = writeln!(self.body, "    {ok} = arith.andi {small}, {inline} : i1");
-        self.emit_tlab_alloc(&size8, &total, Some(&ok), &align_v, &tid)
+        let obj = self.emit_tlab_alloc(&size8, &total, Some(&ok), &align_v, &tid);
+        // An unused buffer is deleted with its allocation (`alloc_fn`);
+        // its size still has to be one the runtime takes.
+        let k = self.next_check;
+        self.next_check += 1;
+        let big = self.fresh_value();
+        let _ = write!(
+            self.body,
+            "    cf.cond_br {ovf}, ^rok_abig{k}, ^rok_afit{k}
+  ^rok_abig{k}:
+    {big} = llvm.call @rok_gc_alloc_slow({all}, {align_v}, {tid}) {{tbaa = [#rok_tbaa_ref]}} : (i{pw}, i{pw}, i32) -> !llvm.ptr
+    llvm.unreachable
+  ^rok_afit{k}:
+"
+        );
+        obj
     }
 
     /// Address of element `index` of buffer `buf` (header + index * size).
@@ -3239,6 +3304,65 @@ impl<'a> FnEmit<'a> {
 "
         );
         p
+    }
+
+    /// Load a `ty` from GC object memory at `p`: an aggregate one scalar
+    /// at a time, each with its type's TBAA tag, so a field load is not
+    /// clobbered by a store of another type.
+    fn heap_load(&mut self, p: &str, ty: &MirTy) -> String {
+        let ty_s = mlir_type(ty, self.target);
+        let Some(leaves) = heap_leaves(ty, self.target) else {
+            let tag = heap_tbaa(ty);
+            let v = self.fresh_value();
+            let _ = writeln!(
+                self.body,
+                "    {v} = llvm.load {p} {{tbaa = [{tag}]}} : !llvm.ptr -> {ty_s}"
+            );
+            return v;
+        };
+        let mut acc = self.fresh_value();
+        let _ = writeln!(self.body, "    {acc} = llvm.mlir.undef : {ty_s}");
+        for (path, off, leaf) in leaves {
+            let [field, leaf_v, next] = std::array::from_fn(|_| self.fresh_value());
+            let lt = mlir_type(&leaf, self.target);
+            let at = join_path(&path);
+            let _ = write!(
+                self.body,
+                "    {field} = llvm.getelementptr {p}[{off}] : (!llvm.ptr) -> !llvm.ptr, i8
+    {leaf_v} = llvm.load {field} {{tbaa = [{}]}} : !llvm.ptr -> {lt}
+    {next} = llvm.insertvalue {leaf_v}, {acc}[{at}] : {ty_s}
+",
+                heap_tbaa(&leaf)
+            );
+            acc = next;
+        }
+        acc
+    }
+
+    /// Store `v` (a `ty`) to GC object memory at `p` (`heap_load`).
+    fn heap_store(&mut self, p: &str, v: &str, ty: &MirTy) {
+        let ty_s = mlir_type(ty, self.target);
+        let Some(leaves) = heap_leaves(ty, self.target) else {
+            let tag = heap_tbaa(ty);
+            let _ = writeln!(
+                self.body,
+                "    llvm.store {v}, {p} {{tbaa = [{tag}]}} : {ty_s}, !llvm.ptr"
+            );
+            return;
+        };
+        for (path, off, leaf) in leaves {
+            let [field, leaf_v] = std::array::from_fn(|_| self.fresh_value());
+            let lt = mlir_type(&leaf, self.target);
+            let at = join_path(&path);
+            let _ = write!(
+                self.body,
+                "    {leaf_v} = llvm.extractvalue {v}[{at}] : {ty_s}
+    {field} = llvm.getelementptr {p}[{off}] : (!llvm.ptr) -> !llvm.ptr, i8
+    llvm.store {leaf_v}, {field} {{tbaa = [{}]}} : {lt}, !llvm.ptr
+",
+                heap_tbaa(&leaf)
+            );
+        }
     }
 
     fn emit_fn_addr(&mut self, callee: FunctionId, fn_ty: &MirTy) -> String {
@@ -3929,6 +4053,12 @@ impl<'a> FnEmit<'a> {
                     proto.join(", ")
                 );
             }
+            Callee::Symbol(name) if REF_ONLY_CALLS.contains(&name) => {
+                let _ = writeln!(
+                    self.body,
+                    "    {lhs}llvm.call @{name}({list}) {{tbaa = [#rok_tbaa_ref]}} : ({tlist}) -> {rty}"
+                );
+            }
             Callee::Symbol(name) => {
                 let _ = writeln!(
                     self.body,
@@ -4468,6 +4598,42 @@ impl<'a> FnEmit<'a> {
                 .back_edges
                 .get(&b)
                 .is_some_and(|hs| hs.iter().any(|h| self.reentry.contains(h)));
+        if let Terminator::If {
+            cond,
+            then_bb,
+            then_args,
+            else_bb,
+            else_args,
+        } = t
+        {
+            // One edge goes back (a rotated loop's latch): test, then
+            // poll on that edge only.
+            let back = self.back_edges.get(&b);
+            let to_then = back.is_some_and(|hs| hs.contains(&then_bb.0));
+            let to_else = back.is_some_and(|hs| hs.contains(&else_bb.0));
+            if polled && to_then != to_else {
+                let v = self.materialize_operand(cond, &MirTy::Prim(PrimTy::Bool));
+                let n = self.next_check;
+                self.next_check += 1;
+                let (edge, other, other_args) = if to_then {
+                    ((then_bb, then_args), else_bb, else_args)
+                } else {
+                    ((else_bb, else_args), then_bb, then_args)
+                };
+                let out = self.format_block_target(other.0, other_args);
+                let parts = if to_then {
+                    format!("^rok_pe{n}, {out}")
+                } else {
+                    format!("{out}, ^rok_pe{n}")
+                };
+                let _ = writeln!(self.body, "    cf.cond_br {v}, {parts}\n  ^rok_pe{n}:");
+                let goto = Terminator::Goto {
+                    target: *edge.0,
+                    args: edge.1.clone(),
+                };
+                return self.emit_terminator(b, &goto);
+            }
+        }
         if polled {
             // The yield path takes its own copy of the terminator, into
             // the re-entry blocks.
@@ -4688,6 +4854,52 @@ fn llvm_field(ty: &MirTy, i: usize, target: &Target) -> usize {
         at = off + target.size_align(t).0;
     }
     k
+}
+
+/// The scalars of aggregate `ty` as `(LLVM field path, byte offset,
+/// type)`, nested aggregates flattened; `None` for a scalar, or an
+/// aggregate with an explicit layout (its fields may be misaligned) or
+/// a part that is not a scalar.
+fn heap_leaves(ty: &MirTy, target: &Target) -> Option<Vec<(Vec<usize>, u32, MirTy)>> {
+    fn go(
+        ty: &MirTy,
+        target: &Target,
+        path: &mut Vec<usize>,
+        base: u32,
+        out: &mut Vec<(Vec<usize>, u32, MirTy)>,
+    ) -> bool {
+        let (MirTy::Tuple(ps) | MirTy::Struct(_, ps)) = ty else {
+            return false;
+        };
+        for (i, (p, off)) in ps.iter().zip(target.field_offsets(ty)).enumerate() {
+            path.push(i);
+            let ok = match p {
+                MirTy::Prim(_) | MirTy::GcRef | MirTy::Any | MirTy::Fn(..) => {
+                    out.push((path.clone(), base + off, p.clone()));
+                    true
+                }
+                MirTy::Tuple(_) | MirTy::Struct(..) => go(p, target, path, base + off, out),
+                _ => false,
+            };
+            path.pop();
+            if !ok {
+                return false;
+            }
+        }
+        true
+    }
+    if target.explicit_layout(ty) {
+        return None;
+    }
+    let mut out = Vec::new();
+    go(ty, target, &mut Vec::new(), 0, &mut out).then_some(out)
+}
+
+fn join_path(path: &[usize]) -> String {
+    path.iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// LLVM field paths of the `List` buffers in `ty` (`buf_ref_facts`),

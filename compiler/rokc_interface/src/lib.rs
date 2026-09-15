@@ -17,12 +17,13 @@ pub use std_cache::{StdKey, prebuilt_std};
 use rokc_driver::{CompiledModule, CompilerConfig, compile_file, compile_source};
 
 pub use rokc_diagnostic::{
-    ErrorKind, Json, RokDiagnostic, clear_files, print_rendered, render, report, set_report_style,
+    ErrorKind, Json, RokDiagnostic, capture_warnings, clear_files, print_rendered, render, report,
+    set_report_style,
 };
 pub use rokc_driver::{
     AS_WASM_LD, BuildOptions, Demangled, EmitKind, LLVM_VERSION, Profile, REPL_HOST, ReplCell,
     ReplFn, SourceFile, Subsystem, TempDir, bootstrap_tiers, demangle, find_mlir_plugin, link_host,
-    profdata_merge, rhir, wasm_ld_main,
+    profdata_merge, profdata_show, rhir, wasm_ld_main,
 };
 
 #[derive(Default)]
@@ -186,9 +187,13 @@ impl CompileResult {
     }
 
     fn module(&self) -> Result<&CompiledModule, RokDiagnostic> {
-        self.modules
-            .first()
-            .ok_or_else(|| RokDiagnostic::error(ErrorKind::Internal, "no module produced"))
+        self.modules.first().ok_or_else(|| {
+            RokDiagnostic::error(
+                ErrorKind::Internal,
+                rokc_diagnostic::Span::DUMMY,
+                "no module produced",
+            )
+        })
     }
 
     /// One intermediate artifact (`--emit=<kind>`).

@@ -162,25 +162,32 @@ pub enum Profile<'a> {
     Generate(&'a Path),
     /// Optimize with this indexed profile.
     Use(&'a Path),
+    /// Context-sensitive: optimize with this indexed profile, then
+    /// instrument again after inlining, writing to this pattern.
+    CsGenerate(&'a Path, &'a Path),
 }
 
 /// The MLIR passes rokc runs before the translation to LLVM IR:
 /// `extra` (plugin dialects' own lowerings) first, the cleanup when
 /// optimizing, then the conversion to the LLVM dialect.
+///
+/// Passes that work on any op run nested (`any(..)`) on each function
+/// and global, in parallel.
 #[must_use]
 pub fn mlir_pipeline(optimize: bool, extra: &[String]) -> String {
     let mut v: Vec<&str> = extra.iter().map(String::as_str).collect();
-    if optimize {
-        v.extend(["canonicalize", "cse"]);
-    }
+    // `scf` / `memref` ops written with `__mlir_op` (bare 1.9).
     v.extend([
-        // `scf` / `memref` ops written with `__mlir_op` (bare 1.9).
-        "convert-scf-to-cf",
+        if optimize {
+            "any(canonicalize,cse,convert-scf-to-cf)"
+        } else {
+            "any(convert-scf-to-cf)"
+        },
         "convert-func-to-llvm",
-        "convert-arith-to-llvm",
+        "any(convert-arith-to-llvm)",
         "convert-cf-to-llvm",
         "finalize-memref-to-llvm",
-        "reconcile-unrealized-casts",
+        "any(reconcile-unrealized-casts)",
     ]);
     v.join(",")
 }
@@ -205,14 +212,21 @@ pub fn compile_llvm_ir(src: &str, c: &Compile<'_>) -> Result<Vec<u8>, String> {
     ffi::compile(false, src, c, 1).map(|(mut v, _)| v.remove(0))
 }
 
-/// The raw (`.profraw`) or indexed IR profiles `inputs` merged into the
-/// indexed profile `out`, as `llvm-profdata merge` does.
-pub fn profdata_merge(inputs: &[&Path], out: &Path) -> Result<(), String> {
+/// The raw (`.profraw`), indexed or text IR profiles `inputs` merged into
+/// the indexed profile `out`, as `llvm-profdata merge` does; its warnings
+/// (counter overflow, mismatched counters), one per line.
+pub fn profdata_merge(inputs: &[&Path], out: &Path) -> Result<String, String> {
     let inputs = inputs
         .iter()
         .map(|p| cstr(p.as_os_str()))
         .collect::<Result<Vec<_>, _>>()?;
     ffi::profdata_merge(&inputs, &cstr(out.as_os_str())?)
+}
+
+/// `llvm-profdata show` of the IR profile `file`: a summary; with `all`,
+/// every function; with `topn`, the hottest ones.
+pub fn profdata_show(file: &Path, all: bool, topn: usize) -> Result<String, String> {
+    ffi::profdata_show(&cstr(file.as_os_str())?, all, topn)
 }
 
 /// The data layout LLVM gives `t` (what clang writes as `target datalayout`).
@@ -475,16 +489,24 @@ fn wasm_args(out: &Path, libc: &Path, threads: bool) -> Result<Vec<OsString>, St
     }
     let mut search = OsString::from("-L");
     search.push(libc);
-    let mut a: Vec<OsString> = ["wasm-ld", "--stack-first", "-z", "stack-size=8388608"]
-        .map(OsString::from)
-        .into();
+    // The stack first: one that overflows runs off address 0 and wraps
+    // to the top of the address space, which memory never reaches (its
+    // last 64 KiB page is never grown), so a store there traps.
+    let mut a: Vec<OsString> = [
+        "wasm-ld",
+        "--stack-first",
+        "-z",
+        "stack-size=8388608",
+        "--max-memory=4294901760",
+    ]
+    .map(OsString::from)
+    .into();
     if threads {
         a.extend(
             [
                 "--shared-memory",
                 "--import-memory",
                 "--export-memory",
-                "--max-memory=4294967296",
                 "--export=wasi_thread_start",
             ]
             .map(OsString::from),
@@ -669,6 +691,14 @@ mod ffi {
             inputs: *const *const c_char,
             n: usize,
             path: *const c_char,
+            warn: *mut RokBuf,
+            err: *mut RokBuf,
+        ) -> c_int;
+        fn rok_llvm_profdata_show(
+            path: *const c_char,
+            all: c_int,
+            topn: usize,
+            out: *mut RokBuf,
             err: *mut RokBuf,
         ) -> c_int;
         fn rok_llvm_import_lib(
@@ -708,6 +738,7 @@ mod ffi {
             Profile::None => (None, None),
             Profile::Generate(p) => (Some(p), None),
             Profile::Use(p) => (None, Some(p)),
+            Profile::CsGenerate(u, g) => (Some(g), Some(u)),
         };
         let path = |p: Option<&Path>| p.map_or_else(|| c(""), |p| super::cstr(p.as_os_str()));
         let (generate, used) = (path(generate)?, path(used)?);
@@ -833,17 +864,45 @@ mod ffi {
         }
     }
 
-    pub fn profdata_merge(inputs: &[CString], out: &CString) -> Result<(), String> {
+    pub fn profdata_merge(inputs: &[CString], out: &CString) -> Result<String, String> {
         let ptrs: Vec<*const c_char> = inputs.iter().map(|s| s.as_ptr()).collect();
-        let mut err = RokBuf::new();
+        let (mut warn, mut err) = (RokBuf::new(), RokBuf::new());
         // SAFETY: as in `lld`.
         let rc = unsafe {
-            rok_llvm_profdata_merge(ptrs.as_ptr(), ptrs.len(), out.as_ptr(), &raw mut err)
+            rok_llvm_profdata_merge(
+                ptrs.as_ptr(),
+                ptrs.len(),
+                out.as_ptr(),
+                &raw mut warn,
+                &raw mut err,
+            )
         };
         if rc == 0 {
             drop(err.take());
-            Ok(())
+            Ok(warn.text())
         } else {
+            drop(warn.take());
+            Err(err.text())
+        }
+    }
+
+    pub fn profdata_show(file: &CString, all: bool, topn: usize) -> Result<String, String> {
+        let (mut out, mut err) = (RokBuf::new(), RokBuf::new());
+        // SAFETY: as in `lld`.
+        let rc = unsafe {
+            rok_llvm_profdata_show(
+                file.as_ptr(),
+                c_int::from(all),
+                topn,
+                &raw mut out,
+                &raw mut err,
+            )
+        };
+        if rc == 0 {
+            drop(err.take());
+            Ok(out.text())
+        } else {
+            drop(out.take());
             Err(err.text())
         }
     }
@@ -891,7 +950,11 @@ mod ffi {
         off()
     }
 
-    pub fn profdata_merge(_: &[CString], _: &CString) -> Result<(), String> {
+    pub fn profdata_merge(_: &[CString], _: &CString) -> Result<String, String> {
+        off()
+    }
+
+    pub fn profdata_show(_: &CString, _: bool, _: usize) -> Result<String, String> {
         off()
     }
 

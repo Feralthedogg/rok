@@ -216,6 +216,7 @@ pub(super) fn strip_int_suffix(s: &str) -> &str {
 pub fn lower_full(
     program: Program,
     prec: &PrecTable,
+    raw_uses: &[(String, Visibility, rokc_ast::UseTree)],
     uses: &crate::uses::UseTable,
     reexports: &[crate::uses::ReExport],
     input: &crate::HirInput,
@@ -227,15 +228,39 @@ pub fn lower_full(
     let lib_pkg: Option<String> = input.lib.clone();
     let check_library = input.check_library;
     let mut owned = program;
-    add_lazy_static_inits(&mut owned);
-    implicit_generics(&mut owned);
-    let program = &owned;
+    for (item, module) in owned.items.iter_mut().zip(&input.item_modules) {
+        qualify(item, module);
+    }
+    // Spec 6.4: `#[lang(...)]` slots over library + user items; a slot
+    // bound twice (6.4.6) stops lowering.
+    let (_, lang_diags) = rokc_parser::collect_lang_table(&owned);
+    if lang_diags
+        .iter()
+        .any(rokc_diagnostic::RokDiagnostic::is_error)
+    {
+        return HirModule {
+            diagnostics: lang_diags,
+            ..HirModule::default()
+        };
+    }
+    // Ahead of lowering's own diagnostics and not merged with them.
+    let mut early = lang_diags;
+    early.extend(crate::uses::check_use_targets(
+        raw_uses,
+        &owned.items,
+        uses,
+        reexports,
+    ));
     // Diagnostics emitted during pre-body passes (impl-target validation
     // etc.) — folded into module.diagnostics once the module exists.
     let mut pre_diags: Vec<rokc_diagnostic::RokDiagnostic> = Vec::new();
-    let err = |pre: &mut Vec<rokc_diagnostic::RokDiagnostic>, msg: String| {
+    add_lazy_static_inits(&mut owned);
+    implicit_generics(&mut owned);
+    let program = &owned;
+    let err = |pre: &mut Vec<rokc_diagnostic::RokDiagnostic>, at: Span, msg: String| {
         pre.push(rokc_diagnostic::RokDiagnostic::error(
             rokc_diagnostic::ErrorKind::Type,
+            at,
             msg,
         ));
     };
@@ -245,9 +270,9 @@ pub fn lower_full(
     for item in &program.items {
         if let Item::Union(u) = item {
             if let Some((_, at)) = rokc_parser::derive::derive_names(&u.attrs).first() {
-                rokc_diagnostic::set_current_span(*at);
                 err(
                     &mut pre_diags,
+                    *at,
                     format!("cannot derive traits for union `{}` (spec 6.2.1)", u.name),
                 );
             }
@@ -282,9 +307,9 @@ pub fn lower_full(
         };
         for (i, (n, at)) in names.iter().enumerate() {
             if names[..i].iter().any(|(m, _)| m == n) {
-                rokc_diagnostic::set_current_span(*at);
                 err(
                     &mut pre_diags,
+                    *at,
                     format!(
                         "{kind} `{n}` is declared more than once in `{}`",
                         leaf_name(owner)
@@ -295,14 +320,13 @@ pub fn lower_full(
     }
 
     // Pass 0: the type namespace. Every type-like item name (already
-    // module-qualified by the driver) goes into one index; a second
+    // module-qualified by `qualify`) goes into one index; a second
     // definition of the same name is an error (and is skipped below so
     // ids stay consistent).
     let mut type_set: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut traits: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut type_vis: HashMap<String, Visibility> = HashMap::new();
     for item in &program.items {
-        rokc_diagnostic::set_current_span(item.span());
         let (name, vis) = match item {
             Item::Struct(s) => (&s.name, s.vis),
             Item::Enum(e) => (&e.name, e.vis),
@@ -319,6 +343,7 @@ pub fn lower_full(
         } else {
             err(
                 &mut pre_diags,
+                item.span(),
                 format!("type `{name}` is defined more than once"),
             );
         }
@@ -341,7 +366,7 @@ pub fn lower_full(
         })
         .flat_map(|e| e.variants.iter().map(|v| format!("{}::{}", e.name, v.name)))
         .collect();
-    // Spec 6.4: the lang slots (the driver reports their errors).
+    // Spec 6.4: the lang slots (their errors are reported above).
     let (lang, _) = rokc_parser::collect_lang_table(program);
     // Structural auto traits: a type has them unless a component lacks them.
     let auto_traits = ["send_trait", "sync_trait"]
@@ -382,6 +407,8 @@ pub fn lower_full(
                 _ => None,
             })
             .collect(),
+        alias_depth: std::cell::Cell::new(0),
+        broken_aliases: std::cell::RefCell::default(),
         alias_uses: std::cell::RefCell::new(Vec::new()),
         unknown_spans: std::cell::RefCell::default(),
         canon_memo: std::cell::RefCell::default(),
@@ -420,7 +447,6 @@ pub fn lower_full(
     let mut struct_decls: Vec<&AstStructDef> = Vec::new();
     let mut union_decls: Vec<&rokc_ast::UnionDef> = Vec::new();
     for item in &program.items {
-        rokc_diagnostic::set_current_span(item.span());
         match item {
             Item::Enum(e) => {
                 if defs.enum_table.borrow().contains_key(&e.name)
@@ -456,7 +482,6 @@ pub fn lower_full(
         }
     }
     for item in &program.items {
-        rokc_diagnostic::set_current_span(item.span());
         if let Item::Union(u) = item {
             if defs.struct_table.borrow().contains_key(&u.name)
                 || defs.generic_structs.contains_key(&u.name)
@@ -507,6 +532,7 @@ pub fn lower_full(
         let sc = Scope {
             names: &names,
             module: &module,
+            at: e.span,
         };
         let def = lower_enum_def(e, id, &defs, sc);
         defs.enums.borrow_mut()[i] = def;
@@ -517,6 +543,7 @@ pub fn lower_full(
         let sc = Scope {
             names: &names,
             module: &module,
+            at: s.span,
         };
         let def = lower_struct_def(s, id, &defs, sc);
         defs.structs.borrow_mut()[i] = def;
@@ -528,6 +555,7 @@ pub fn lower_full(
         let sc = Scope {
             names: &names,
             module: &module,
+            at: u.span,
         };
         let def = lower_union_def(u, id, &defs, sc, &mut pre_diags);
         defs.structs.borrow_mut()[i] = def;
@@ -540,7 +568,6 @@ pub fn lower_full(
     let mut impl_const_lists: HashMap<usize, Vec<AssocConst>> = HashMap::new();
     let mut inherent_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (idx, item) in program.items.iter().enumerate() {
-        rokc_diagnostic::set_current_span(item.span());
         // Spec 2.9.1: an impl's `const` is `Type::NAME` (`Self::NAME`
         // inside the impl); a trait impl also gets the trait's defaults
         // (spec 2.8.3a).
@@ -567,6 +594,7 @@ pub fn lower_full(
             } else {
                 err(
                     &mut pre_diags,
+                    item.span(),
                     format!("const `{key}` is defined more than once"),
                 );
             }
@@ -576,11 +604,12 @@ pub fn lower_full(
     let mut static_asts: Vec<(&Ty, String, Option<&Expr>)> = Vec::new();
     let mut static_tys: HashMap<String, HirTy> = HashMap::new();
     for item in &program.items {
-        rokc_diagnostic::set_current_span(item.span());
+        let here = item.span();
         if let Item::Static(s) = item {
             if static_tys.contains_key(&s.name) {
                 err(
                     &mut pre_diags,
+                    here,
                     format!("static `{}` is defined more than once", s.name),
                 );
                 continue;
@@ -609,6 +638,7 @@ pub fn lower_full(
                 if static_tys.contains_key(&s.name) {
                     err(
                         &mut pre_diags,
+                        here,
                         format!("static `{}` is defined more than once", s.name),
                     );
                     continue;
@@ -630,7 +660,6 @@ pub fn lower_full(
     // Pass 1d: each plain type alias resolved once, for its diagnostics
     // (a use expands the alias where it is resolved).
     for item in &program.items {
-        rokc_diagnostic::set_current_span(item.span());
         if let Item::TypeAlias(a) = item {
             if !a.generics.params.is_empty() {
                 continue;
@@ -639,6 +668,7 @@ pub fn lower_full(
             let sc = Scope {
                 names: &names,
                 module: &module,
+                at: item.span(),
             };
             resolve_ty_with_structs(&a.ty, &defs, None, sc);
         }
@@ -658,8 +688,9 @@ pub fn lower_full(
             struct Names(Vec<String>);
             impl crate::walk::AstVisitor for Names {
                 fn ty(&mut self, t: &rokc_ast::Ty) {
+                    // `B` and `B::Out`'s base `B`.
                     if let rokc_ast::TyKind::Path(p) = &t.kind {
-                        if let [s] = p.segments.as_slice() {
+                        if let [s] | [s, _] = p.segments.as_slice() {
                             self.0.push(s.name.clone());
                         }
                     }
@@ -698,8 +729,12 @@ pub fn lower_full(
             .collect();
         cyclic.sort_by(|a, b| a.name.cmp(&b.name));
         for a in cyclic {
-            rokc_diagnostic::set_current_span(a.span);
-            err(&mut pre_diags, format!("type alias `{}` is cyclic", a.name));
+            names.broken_aliases.borrow_mut().insert(a.name.clone());
+            err(
+                &mut pre_diags,
+                a.span,
+                format!("type alias `{}` is cyclic", a.name),
+            );
         }
     }
 
@@ -751,12 +786,13 @@ pub fn lower_full(
         variadic: fn_def.params.last().is_some_and(|p| p.variadic),
     };
     for item in &program.items {
-        rokc_diagnostic::set_current_span(item.span());
+        let here = item.span();
         match item {
             Item::Fn(fn_def) => {
                 if fn_table.contains_key(&fn_def.name) || generic_fns.contains_key(&fn_def.name) {
                     err(
                         &mut pre_diags,
+                        here,
                         format!("function `{}` is defined more than once", fn_def.name),
                     );
                     continue;
@@ -776,6 +812,7 @@ pub fn lower_full(
                 let sc = Scope {
                     names: &names,
                     module: &module,
+                    at: here,
                 };
                 let sig = sig_of(fn_def, id, sc);
                 fn_table.insert(fn_def.name.clone(), sig);
@@ -788,12 +825,14 @@ pub fn lower_full(
                 if quiet && !rok_abi {
                     err(
                         &mut pre_diags,
+                        here,
                         "`#[no_safepoint]` is for `extern \"rok\"` blocks".to_owned(),
                     );
                 }
                 if !rok_abi && blk.abi != "C" {
                     err(
                         &mut pre_diags,
+                        here,
                         format!(
                             "unsupported ABI `\"{}\"` (`\"C\"`, or `\"rok\"` for the runtime)",
                             blk.abi
@@ -819,6 +858,7 @@ pub fn lower_full(
                     let sc = Scope {
                         names: &names,
                         module: "",
+                        at: here,
                     };
                     fn_table.insert(fn_def.name.clone(), sig_of(fn_def, id, sc));
                     if rok_abi {
@@ -847,7 +887,6 @@ pub fn lower_full(
     // can pick up default method bodies.
     let mut trait_defs: HashMap<String, &rokc_ast::TraitDef> = HashMap::new();
     for item in &program.items {
-        rokc_diagnostic::set_current_span(item.span());
         if let Item::Trait(t) = item {
             trait_defs.entry(t.name.clone()).or_insert(t);
         }
@@ -864,7 +903,7 @@ pub fn lower_full(
                 .filter_map(|st| match &st.kind {
                     AstTyKind::Path(p) => {
                         let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
-                        Some(names.trait_key(&segs, &module))
+                        Some(names.trait_key(&segs, &module, t.span))
                     }
                     _ => None,
                 })
@@ -929,7 +968,7 @@ pub fn lower_full(
     let mut pending: Vec<PendingImpl<'_>> = Vec::new();
 
     for (idx, item) in program.items.iter().enumerate() {
-        rokc_diagnostic::set_current_span(item.span());
+        let here = item.span();
         let Item::Impl(impl_def) = item else { continue };
         let module = impl_module(impl_def);
         if !check_auto_impl(impl_def, &names, &module, &mut neg_auto, &mut pre_diags) {
@@ -939,7 +978,7 @@ pub fn lower_full(
         let consts = impl_const_lists.remove(&idx).unwrap_or_default();
         let trait_name: Option<String> = impl_def.trait_path.as_ref().map(|tp| {
             let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
-            names.trait_key(&segs, &module)
+            names.trait_key(&segs, &module, here)
         });
         // A generic trait impl, or a generic inherent impl on a structural
         // type (`impl<T, const N: usize> [T; N] { .. }`, no trait: empty
@@ -964,7 +1003,7 @@ pub fn lower_full(
                 let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
                 // `impl str { fn parse<T>(..) }`: a primitive's generic
                 // methods key by the primitive's name.
-                names.canon(&segs, &module, &[]).or_else(|| {
+                names.canon(&segs, &module, &[], here).or_else(|| {
                     match crate::ty::resolve_ty(&impl_def.self_ty) {
                         HirTy::Prim(prim) => Some(prim.name().to_owned()),
                         _ => None,
@@ -976,6 +1015,7 @@ pub fn lower_full(
         if impl_generic && generic_base.is_none() {
             err(
                 &mut pre_diags,
+                here,
                 format!(
                     "generic impl target `{}` must be a struct or enum (stage-1 limitation)",
                     impl_def_display(&impl_def.self_ty)
@@ -1027,7 +1067,6 @@ pub fn lower_full(
     // statics) plus type items; consulted by path resolution.
     let mut item_visibility: HashMap<String, Visibility> = HashMap::new();
     for item in &program.items {
-        rokc_diagnostic::set_current_span(item.span());
         match item {
             Item::Fn(f) => {
                 item_visibility.entry(f.name.clone()).or_insert(f.vis);
@@ -1075,7 +1114,8 @@ pub fn lower_full(
     };
     let mut env = Env {
         infer_ret: std::collections::HashSet::new(),
-        implicit_main: input.implicit_main,
+        implicit_main: input.root_main == crate::RootMain::Implicit,
+        harness_main: input.root_main == crate::RootMain::Harness,
         may_diverge: may_diverge(program),
         fn_table,
         fn_leaves: std::cell::OnceCell::new(),
@@ -1146,11 +1186,12 @@ pub fn lower_full(
             continue;
         };
         let impl_def = p.def;
-        rokc_diagnostic::set_current_span(impl_def.span);
+        let here = impl_def.span;
         let module = p.module.clone();
         let sc = Scope {
             names,
             module: &module,
+            at: here,
         };
         let impl_generic = !impl_def.generics.params.is_empty();
         let trait_name = p.trait_name.clone();
@@ -1180,6 +1221,7 @@ pub fn lower_full(
             if !explicit_methods.insert(leaf.clone()) {
                 err(
                     &mut pre_diags,
+                    here,
                     format!("method `{leaf}` is defined more than once for `{target_display}`"),
                 );
                 continue;
@@ -1217,6 +1259,7 @@ pub fn lower_full(
                 {
                     err(
                         &mut pre_diags,
+                        here,
                         format!("method `{leaf}` is defined more than once for `{target_display}`"),
                     );
                     continue;
@@ -1246,6 +1289,7 @@ pub fn lower_full(
                 match tm {
                     None => err(
                         &mut pre_diags,
+                        here,
                         format!("method `{leaf}` is not a member of trait `{}`", td.name),
                     ),
                     // Spec 4.4.9: a throwing fn can't fill a non-throwing
@@ -1253,6 +1297,7 @@ pub fn lower_full(
                     Some(tm) if is_throwing(&m.throws) && !is_throwing(&tm.throws) => {
                         err(
                             &mut pre_diags,
+                            here,
                             format!(
                                 "`{leaf}` throws but `{}::{leaf}` is declared without \
                                  `throws`, so an impl can't add one (spec 4.4.9){}",
@@ -1279,6 +1324,7 @@ pub fn lower_full(
             ) else {
                 err(
                     &mut pre_diags,
+                    here,
                     format!("method `{leaf}` is defined more than once for `{target_display}`"),
                 );
                 continue;
@@ -1348,6 +1394,7 @@ pub fn lower_full(
                 if tm.body.is_none() {
                     err(
                         &mut pre_diags,
+                        here,
                         format!(
                             "impl of trait `{}` for `{target_display}` is missing method `{}`",
                             trait_def.name, tm.name
@@ -1365,6 +1412,7 @@ pub fn lower_full(
                 ) else {
                     err(
                         &mut pre_diags,
+                        here,
                         format!(
                             "method `{}` is defined more than once for `{target_display}`",
                             tm.name
@@ -1462,6 +1510,7 @@ pub fn lower_full(
                 let tsc = Scope {
                     names,
                     module: &trait_module,
+                    at: here,
                 };
                 let sig = sig_of(&tm, id, tsc);
                 fn_table.insert(key.clone(), sig);
@@ -1497,7 +1546,7 @@ pub fn lower_full(
     let mut c_defs: Vec<FunctionId> = Vec::new();
     for (i, d) in decls.iter().enumerate() {
         let f = d.def();
-        rokc_diagnostic::set_current_span(f.span);
+        let here = f.span;
         let id = FunctionId(u32::try_from(i).expect("FunctionId overflow"));
         if f.is_unsafe {
             unsafe_fns.insert(id);
@@ -1516,6 +1565,7 @@ pub fn lower_full(
         {
             err(
                 &mut pre_diags,
+                here,
                 format!(
                     "`{}`: a C variadic `...` parameter is only allowed on a declaration in an \
                      `extern \"C\" {{ .. }}` block (spec 8.6.10)",
@@ -1550,11 +1600,13 @@ pub fn lower_full(
             if f.body.is_none() && !prebuilt_fn {
                 err(
                     &mut pre_diags,
+                    here,
                     format!("`#[export_name]` on `{}` needs a function body", f.name),
                 );
             } else if exports.iter().any(|(_, s)| *s == sym) {
                 err(
                     &mut pre_diags,
+                    here,
                     format!("symbol `{sym}` is exported twice (`#[export_name]`)"),
                 );
             } else {
@@ -1563,7 +1615,6 @@ pub fn lower_full(
         }
     }
     for f in env.generic_fns.values() {
-        rokc_diagnostic::set_current_span(f.span);
         if f.attrs
             .iter()
             .any(|a| a.path == [rokc_ast::EXTERN_C_FN_ATTR])
@@ -1573,6 +1624,7 @@ pub fn lower_full(
         if export_name(f).is_some() {
             err(
                 &mut pre_diags,
+                f.span,
                 format!(
                     "`#[export_name]` on generic function `{}`: only a concrete function \
                      has one symbol",
@@ -1615,6 +1667,7 @@ pub fn lower_full(
     // Struct fields and enum payloads that name projections (`peeked:
     // I::Item | none`, `v: <S as Tr>::Out`) waited for the impls: resolve
     // them now, an instance's under its arguments.
+    resolve_projection_aliases(&env);
     resolve_open_members(&env, &struct_decls, &enum_decls);
     // Every declaration's signature types, now that every item and impl
     // is registered (a projection in a signature resolves too).
@@ -1653,7 +1706,7 @@ pub fn lower_full(
         {
             continue;
         }
-        let cx = LowerCtx::new(&env, &no_subst, None);
+        let cx = LowerCtx::new(&env, &no_subst, None, f.span);
         let show = |ps: &[HirTy], r: &HirTy| {
             let ps: Vec<String> = ps.iter().map(|t| cx.ty_name(t)).collect();
             format!("fn({}) -> {}", ps.join(", "), cx.ty_name(r))
@@ -1667,9 +1720,9 @@ pub fn lower_full(
         } else {
             (show(&params, &ret), show(&s.param_tys, &s.ret_ty), f.span)
         };
-        rokc_diagnostic::set_current_span(at);
         err(
             &mut pre_diags,
+            at,
             format!(
                 "extern function `{}` is declared twice with different signatures: `{here}` \
                  here, `{other}` elsewhere{} (spec 5.9.4)",
@@ -1697,12 +1750,9 @@ pub fn lower_full(
         .iter()
         .zip(&static_asts)
         .map(|(d, (ast, module, _))| {
-            let mut rcx = LowerCtx::new(&env, &no_subst, None);
+            let mut rcx = LowerCtx::new(&env, &no_subst, None, d.span);
             rcx.current_module.clone_from(module);
-            let old = rokc_diagnostic::set_current_span(d.span);
-            let ty = rcx.resolve_ast_ty(ast);
-            rokc_diagnostic::set_current_span(old);
-            ty
+            rcx.resolve_ast_ty(ast)
         })
         .collect();
     for ((d, ty), (_, _, value)) in static_defs.iter_mut().zip(static_types).zip(&static_asts) {
@@ -1710,9 +1760,9 @@ pub fn lower_full(
         // A non-lazy initializer must const-fold to a literal.
         if let Some(v) = value.filter(|v| !is_lazy_static_init(v)) {
             d.init = literal_to_const_val(v, &ty).unwrap_or_else(|| {
-                rokc_diagnostic::set_current_span(d.span);
                 err(
                     &mut pre_diags,
+                    d.span,
                     format!(
                         "static `{}` initializer must be a literal constant (stage-1 \
                          limitation)",
@@ -1891,6 +1941,7 @@ pub fn lower_full(
                 .is_some_and(|l| failed_derives.contains(&l.span))
     });
     show_nested_fn_names(program, &mut module.diagnostics);
+    module.diagnostics.splice(0..0, early);
     module
 }
 
@@ -1962,7 +2013,7 @@ fn resolve_open_members(env: &Env<'_>, structs: &[&AstStructDef], enums: &[&AstE
         .collect();
     for (i, def, args) in struct_open {
         let subst = generic_subst(&def.generics, &args);
-        let mut rcx = LowerCtx::new(env, &subst, None);
+        let mut rcx = LowerCtx::new(env, &subst, None, def.span);
         rcx.current_module = module_of(enum_base_name(&def.name));
         let fields = generic_struct_fields(def, &|t| rcx.resolve_ast_ty(t));
         env.defs.structs.borrow_mut()[i].fields = fields;
@@ -1988,7 +2039,7 @@ fn resolve_open_members(env: &Env<'_>, structs: &[&AstStructDef], enums: &[&AstE
         .collect();
     for (i, def, args) in enum_open {
         let subst = generic_subst(&def.generics, &args);
-        let mut rcx = LowerCtx::new(env, &subst, None);
+        let mut rcx = LowerCtx::new(env, &subst, None, def.span);
         rcx.current_module = module_of(enum_base_name(&def.name));
         let payloads = generic_enum_variants(def, &|t| rcx.resolve_ast_ty(t));
         let mut all = env.defs.enums.borrow_mut();
@@ -2003,6 +2054,66 @@ pub(super) fn reexport_key(re: &crate::uses::ReExport) -> String {
         re.short_name.clone()
     } else {
         format!("{}::{}", re.module_path, re.short_name)
+    }
+}
+
+/// Prepend `module::` to the name of an item that has one (an impl's
+/// methods and consts: HIR resolves the impl target and the bodies in
+/// that module, then strips it back to the leaf). Item keys are
+/// module-qualified from here on.
+fn qualify(item: &mut Item, module: &str) {
+    if module.is_empty() {
+        return;
+    }
+    let q = |name: &mut String| *name = format!("{module}::{name}");
+    match item {
+        Item::Fn(f) => q(&mut f.name),
+        Item::Struct(s) => q(&mut s.name),
+        Item::Enum(e) => q(&mut e.name),
+        Item::Const(c) => q(&mut c.name),
+        Item::Static(s) => q(&mut s.name),
+        Item::TypeAlias(a) => q(&mut a.name),
+        Item::Trait(t) => q(&mut t.name),
+        Item::Union(u) => q(&mut u.name),
+        Item::Mod(m) => q(&mut m.name),
+        Item::Impl(i) => {
+            for it in &mut i.items {
+                match it {
+                    rokc_ast::ImplItem::Method(m) => q(&mut m.name),
+                    rokc_ast::ImplItem::Const(c) => q(&mut c.name),
+                    rokc_ast::ImplItem::AssocType { .. } => {}
+                }
+            }
+            module.clone_into(&mut i.module);
+        }
+        Item::Use(_) | Item::Extern(_) => {}
+    }
+}
+
+/// Each plain alias naming a projection (`type B = <A as P>::Out;`),
+/// resolved once impls are registered and reported at its body; a broken
+/// one is `{unknown}` where used.
+fn resolve_projection_aliases(env: &Env<'_>) {
+    let names = &env.names;
+    let mut aliases: Vec<(&String, &Ty)> = names
+        .plain_aliases
+        .iter()
+        .filter(|(full, body)| {
+            !names.broken_aliases.borrow().contains(*full)
+                && names.names_projection(body, &module_of(full), body.span)
+        })
+        .collect();
+    aliases.sort_by_key(|(full, _)| *full);
+    let no_subst = HashMap::new();
+    for (full, body) in aliases {
+        let count = || names.diags.borrow().len() + env.sink.diagnostics.borrow().len();
+        let before = count();
+        let mut rcx = LowerCtx::new(env, &no_subst, None, body.span);
+        rcx.current_module = module_of(full);
+        rcx.resolve_ast_ty(body);
+        if count() != before {
+            names.broken_aliases.borrow_mut().insert(full.clone());
+        }
     }
 }
 
@@ -2086,7 +2197,6 @@ pub(super) fn collect_field_visibility(
 ) -> HashMap<String, HashMap<String, Visibility>> {
     let mut out: HashMap<String, HashMap<String, Visibility>> = HashMap::new();
     for item in &program.items {
-        rokc_diagnostic::set_current_span(item.span());
         match item {
             Item::Struct(s) => {
                 let vis: HashMap<String, Visibility> = match &s.kind {
@@ -2170,16 +2280,15 @@ pub(super) fn check_unresolved_types(
         .collect();
     for (t, span) in unknown_types {
         let span = spans.get(&t).copied().unwrap_or(span);
-        let old = rokc_diagnostic::set_current_span(span);
         let mut d = rokc_diagnostic::RokDiagnostic::error(
             rokc_diagnostic::ErrorKind::Resolve,
+            span,
             format!("cannot find type `{t}` in this scope"),
         );
         if let Some(s) = rokc_diagnostic::suggest(leaf_name(&t), known.iter().map(String::as_str)) {
             d = d.with_help(format!("did you mean `{s}`?"));
         }
         module.diagnostics.push(d);
-        rokc_diagnostic::set_current_span(old);
     }
     if module
         .diagnostics
@@ -2194,18 +2303,17 @@ pub(super) fn check_unresolved_types(
             || f.body.as_ref().is_some_and(hir_block_has_unknown)
     });
     if let Some(f) = bad {
-        let old = rokc_diagnostic::set_current_span(f.span);
         module
             .diagnostics
             .push(rokc_diagnostic::RokDiagnostic::error(
                 rokc_diagnostic::ErrorKind::Type,
+                f.span,
                 format!(
                     "internal compiler error: an expression in `{}` has no resolved type \
                  (lowering fell through without a diagnostic) — please report",
                     f.name
                 ),
             ));
-        rokc_diagnostic::set_current_span(old);
     }
 }
 
@@ -2376,14 +2484,13 @@ fn check_value_types(module: &mut HirModule) {
         }
     }
     for (span, msg) in errs {
-        let old = rokc_diagnostic::set_current_span(span);
         module
             .diagnostics
             .push(rokc_diagnostic::RokDiagnostic::error(
                 rokc_diagnostic::ErrorKind::Type,
+                span,
                 msg,
             ));
-        rokc_diagnostic::set_current_span(old);
     }
 }
 
@@ -2433,17 +2540,17 @@ fn check_packed(module: &mut HirModule) {
         })
         .collect();
     for (span, name) in bad {
-        module.diagnostics.push(
-            rokc_diagnostic::RokDiagnostic::error(
+        module
+            .diagnostics
+            .push(rokc_diagnostic::RokDiagnostic::error(
                 rokc_diagnostic::ErrorKind::Type,
+                span,
                 format!(
                     "`#[repr(packed)]` struct `{}` holds a GC reference (`str`, a collection, \
                      a closure ..); a packed struct is for C data (spec 6.2.2)",
                     leaf_name(&name)
                 ),
-            )
-            .with_span(span, ""),
-        );
+            ));
     }
 }
 
@@ -2789,7 +2896,6 @@ fn check_repr_attrs(program: &rokc_ast::Program, diags: &mut Vec<rokc_diagnostic
         let Some(attr) = attrs.iter().find(|a| a.name() == "repr") else {
             continue;
         };
-        rokc_diagnostic::set_current_span(attr.span);
         let msg = match (repr_of(attrs), item) {
             (Err(e), _) => Some(e),
             (Ok(r), Item::Struct(s)) => {
@@ -2840,6 +2946,7 @@ fn check_repr_attrs(program: &rokc_ast::Program, diags: &mut Vec<rokc_diagnostic
         if let Some(msg) = msg {
             diags.push(rokc_diagnostic::RokDiagnostic::error(
                 rokc_diagnostic::ErrorKind::Type,
+                attr.span,
                 msg,
             ));
         }
@@ -2860,10 +2967,9 @@ fn assign_discriminants(env: &Env<'_>, decls: &[&AstEnumDef]) {
         if values == 0 {
             continue;
         }
-        let mut ctx = LowerCtx::new(env, &no_subst, None);
+        let mut ctx = LowerCtx::new(env, &no_subst, None, decl.span);
         ctx.current_module = module_of(&decl.name);
         let err = |msg: String| {
-            rokc_diagnostic::set_current_span(decl.span);
             ctx.emit_error(rokc_diagnostic::ErrorKind::Type, msg);
         };
         if values != decl.variants.len() {
@@ -2945,7 +3051,6 @@ fn check_niche_attrs(program: &rokc_ast::Program, diags: &mut Vec<rokc_diagnosti
         let Some(attr) = attrs.iter().find(|a| a.name() == "niche") else {
             continue;
         };
-        rokc_diagnostic::set_current_span(attr.span);
         let msg = match misplaced {
             None => niche_args(attrs).err(),
             Some(w) => Some(format!(
@@ -2955,6 +3060,7 @@ fn check_niche_attrs(program: &rokc_ast::Program, diags: &mut Vec<rokc_diagnosti
         if let Some(msg) = msg {
             diags.push(rokc_diagnostic::RokDiagnostic::error(
                 rokc_diagnostic::ErrorKind::Type,
+                attr.span,
                 msg,
             ));
         }
@@ -3069,10 +3175,10 @@ pub(super) fn union_storage_strategy(
     span: rokc_diagnostic::Span,
     pre_diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
 ) -> UnionStorage {
-    let _ = span;
     if aliases.is_empty() {
         pre_diags.push(rokc_diagnostic::RokDiagnostic::error(
             rokc_diagnostic::ErrorKind::Type,
+            span,
             format!("union `{name}` declares no fields"),
         ));
         return UnionStorage::WidestPrim(PrimTy::U8);
@@ -3176,6 +3282,7 @@ fn generic_trait_impl(
     let err = |pre: &mut Vec<rokc_diagnostic::RokDiagnostic>, msg: String| {
         pre.push(rokc_diagnostic::RokDiagnostic::error(
             rokc_diagnostic::ErrorKind::Type,
+            impl_def.span,
             msg,
         ));
     };
@@ -3329,11 +3436,11 @@ fn impl_heads(
         // One round's heads, against the impls resolved before it; one
         // still open waits (its diagnostics dropped) unless it is the last.
         let round: Vec<Option<(HirTy, Option<TraitRef>)>> = {
-            let mut rcx = LowerCtx::new(env, &no_subst, None);
+            let mut rcx = LowerCtx::new(env, &no_subst, None, Span::DUMMY);
             left.iter()
                 .map(|&i| {
                     let p = &pending[i];
-                    rokc_diagnostic::set_current_span(p.def.span);
+                    rcx.at.set(p.def.span);
                     let mark = env.sink.diagnostics.borrow().len();
                     let td = p
                         .trait_name
@@ -3362,7 +3469,6 @@ fn impl_heads(
                 waiting.push(i);
                 continue;
             };
-            rokc_diagnostic::set_current_span(p.def.span);
             if let Some(r) = provides.as_ref().filter(|r| !r.args.is_empty()) {
                 if env
                     .impls
@@ -3377,6 +3483,7 @@ fn impl_heads(
                     });
                     diags.push(rokc_diagnostic::RokDiagnostic::error(
                         rokc_diagnostic::ErrorKind::Type,
+                        p.def.span,
                         format!(
                             "`{shown}` is implemented more than once for `{}`",
                             impl_def_display(&p.def.self_ty)
@@ -3476,7 +3583,7 @@ fn impl_consts(
     let module = impl_module(i);
     let trait_def = i.trait_path.as_ref().and_then(|tp| {
         let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
-        let key = names.trait_key(&segs, &module);
+        let key = names.trait_key(&segs, &module, i.span);
         program.items.iter().find_map(|it| match it {
             Item::Trait(t)
                 if t.name == key || (!key.contains("::") && leaf_name(&t.name) == key) =>
@@ -3498,6 +3605,7 @@ fn impl_consts(
                 Some(v) => out.push((name.clone(), ty.clone(), v.clone())),
                 None => pre_diags.push(rokc_diagnostic::RokDiagnostic::error(
                     rokc_diagnostic::ErrorKind::Type,
+                    i.span,
                     format!(
                         "impl of `{}` for `{}` is missing associated const `{name}` \
                          (spec 2.8.3a)",
@@ -3538,7 +3646,7 @@ fn impl_consts(
                 || (i.trait_path.is_none() && !args.is_empty() && all_params)
             {
                 let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
-                names.canon(&segs, &module, &[])
+                names.canon(&segs, &module, &[], i.span)
             } else {
                 None
             }
@@ -3734,7 +3842,7 @@ fn sig_stub(env: &Env<'_>, i: usize) -> HirFunction {
 fn check_derives(env: &Env<'_>, program: &Program) -> Vec<rokc_diagnostic::Span> {
     let mut failed = Vec::new();
     let no_subst = HashMap::new();
-    let ctx = LowerCtx::new(env, &no_subst, None);
+    let ctx = LowerCtx::new(env, &no_subst, None, Span::DUMMY);
     for item in &program.items {
         let (attrs, name, generic, fields): (_, _, _, Vec<(String, HirTy)>) = match item {
             Item::Struct(s) => (
@@ -3775,12 +3883,13 @@ fn check_derives(env: &Env<'_>, program: &Program) -> Vec<rokc_diagnostic::Span>
             Item::Enum(e) => env.defs.enum_id(&e.name).map(HirTy::Enum),
             _ => None,
         };
+        ctx.at.set(item.span());
         check_pod(&ctx, attrs, name, self_ty.as_ref(), &fields);
         for (tr, at) in rokc_parser::derive::derive_names(attrs) {
             let Some(key) = rokc_parser::derive::derivable(&tr) else {
                 continue;
             };
-            rokc_diagnostic::set_current_span(at);
+            ctx.at.set(at);
             for (field, ty) in &fields {
                 if !ctx.has_trait(ty, key) {
                     failed.push(at);
@@ -3869,14 +3978,14 @@ fn check_bound_names(
             return;
         };
         let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
-        let key = names.trait_key(&segs, module);
+        let key = names.trait_key(&segs, module, b.span);
         // A bootstrap trait keys by its leaf (see `trait_key`).
         if names.traits.contains(&key) || names.traits.iter().any(|t| leaf_name(t) == key) {
             return;
         }
-        rokc_diagnostic::set_current_span(b.span);
         pre_diags.push(rokc_diagnostic::RokDiagnostic::error(
             rokc_diagnostic::ErrorKind::Resolve,
+            b.span,
             format!("cannot find trait `{}` (named in a bound)", segs.join("::")),
         ));
     };
@@ -3957,7 +4066,7 @@ fn check_type_bounds(env: &Env<'_>) {
         rokc_diagnostic::Span,
     );
     let no_subst = HashMap::new();
-    let ctx = LowerCtx::new(env, &no_subst, None);
+    let ctx = LowerCtx::new(env, &no_subst, None, Span::DUMMY);
     let n_structs = env.defs.structs.borrow().len();
     let n_enums = env.defs.enums.borrow().len();
     let mut insts: Vec<Inst<'_>> = Vec::new();
@@ -4023,8 +4132,9 @@ fn check_type_bounds(env: &Env<'_>) {
         let sc = Scope {
             names: &env.names,
             module: &module,
+            at: span,
         };
-        let mut rcx = LowerCtx::new(env, &no_subst, None);
+        let mut rcx = LowerCtx::new(env, &no_subst, None, span);
         rcx.current_module.clone_from(&module);
         let args: Vec<HirTy> = def
             .generics
@@ -4050,7 +4160,7 @@ fn check_type_bounds(env: &Env<'_>) {
     }
     for (shown, module, args, generics, where_clause, span) in insts {
         let subst = generic_subst(generics, &args);
-        let mut rcx = LowerCtx::new(env, &subst, None);
+        let mut rcx = LowerCtx::new(env, &subst, None, span);
         rcx.current_module = module;
         let mut goals: Vec<(HirTy, &Vec<Ty>)> = Vec::new();
         for gp in &generics.params {
@@ -4073,9 +4183,9 @@ fn check_type_bounds(env: &Env<'_>) {
                     continue;
                 };
                 if !rcx.implements_trait(&ty, &want, 0) {
-                    let old = rokc_diagnostic::set_current_span(span);
-                    rcx.emit_error(
+                    rcx.emit_error_at(
                         rokc_diagnostic::ErrorKind::Type,
+                        span,
                         format!(
                             "type `{}` does not satisfy trait bound `{}` required by `{shown}` \
                              (spec 2.10.4)",
@@ -4083,7 +4193,6 @@ fn check_type_bounds(env: &Env<'_>) {
                             rcx.trait_name(&want),
                         ),
                     );
-                    rokc_diagnostic::set_current_span(old);
                 }
             }
         }
@@ -4107,15 +4216,15 @@ fn check_impl_rules(env: &Env<'_>, program: &Program) {
         };
         let module = impl_module(i);
         let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
-        let key = env.names.trait_key(&segs, &module);
+        let key = env.names.trait_key(&segs, &module, i.span);
         let pkg = package_of(&module);
         if package_of(&module_of(&key)) != pkg && target_package(env, i, &module) != Some(pkg) {
-            rokc_diagnostic::set_current_span(i.span);
             env.sink
                 .diagnostics
                 .borrow_mut()
                 .push(rokc_diagnostic::RokDiagnostic::error(
                     rokc_diagnostic::ErrorKind::Type,
+                    i.span,
                     format!(
                         "`impl {} for {}`: neither the trait nor the type is defined in this \
                          package (orphan rule, spec 2.9.5)",
@@ -4131,7 +4240,7 @@ fn check_impl_rules(env: &Env<'_>, program: &Program) {
         let Some(info) = env.trait_info.get(&key) else {
             continue;
         };
-        let mut ctx = LowerCtx::new(env, &no_subst, None);
+        let mut ctx = LowerCtx::new(env, &no_subst, None, i.span);
         ctx.current_module.clone_from(&module);
         if !i.generics.params.is_empty() {
             check_generic_supers(&ctx, i, &module, &key, &info.supers);
@@ -4145,7 +4254,6 @@ fn check_impl_rules(env: &Env<'_>, program: &Program) {
             if ctx.has_trait(&target, sup) {
                 continue;
             }
-            rokc_diagnostic::set_current_span(i.span);
             ctx.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
                 format!(
@@ -4198,7 +4306,7 @@ fn check_generic_supers(
         for b in bounds {
             if let AstTyKind::Path(bp) = &b.kind {
                 let segs: Vec<&str> = bp.segments.iter().map(|s| s.name.as_str()).collect();
-                have.push(ctx.env.names.trait_key(&segs, module));
+                have.push(ctx.env.names.trait_key(&segs, module, ctx.here()));
             }
         }
     };
@@ -4214,7 +4322,6 @@ fn check_generic_supers(
         if entails(ctx, &target, sup, &assume, 0) {
             continue;
         }
-        rokc_diagnostic::set_current_span(i.span);
         ctx.emit_error(
             rokc_diagnostic::ErrorKind::Type,
             format!(
@@ -4337,7 +4444,7 @@ fn entails(
                         return true;
                     };
                     let segs: Vec<&str> = bp.segments.iter().map(|s| s.name.as_str()).collect();
-                    let k = ctx.env.names.trait_key(&segs, &gi.module);
+                    let k = ctx.env.names.trait_key(&segs, &gi.module, ctx.here());
                     entails(ctx, t, &k, assume, depth + 1)
                 })
             })
@@ -4355,7 +4462,7 @@ fn target_package(env: &Env<'_>, i: &rokc_ast::ImplDef, module: &str) -> Option<
         if param {
             return None;
         }
-        if let Some(full) = env.names.canon(&segs, module, &[]) {
+        if let Some(full) = env.names.canon(&segs, module, &[], i.span) {
             return Some(package_of(&module_of(&full)));
         }
     }
@@ -4364,16 +4471,17 @@ fn target_package(env: &Env<'_>, i: &rokc_ast::ImplDef, module: &str) -> Option<
 
 fn check_impl_overlap(env: &Env<'_>) {
     let no_subst = HashMap::new();
-    let ctx = LowerCtx::new(env, &no_subst, None);
+    let ctx = LowerCtx::new(env, &no_subst, None, Span::DUMMY);
     for gi in env.impls.generic() {
+        ctx.at.set(gi.self_ty.span);
         for ty in env.impls.tys_of(&gi.trait_key) {
             if ctx
                 .generic_impl_subst(gi, ty, 0)
                 .is_some_and(|s| trait_args_overlap(&ctx, gi, &s, ty))
             {
-                rokc_diagnostic::set_current_span(gi.self_ty.span);
-                ctx.emit_error(
+                ctx.emit_error_at(
                     rokc_diagnostic::ErrorKind::Type,
+                    gi.self_ty.span,
                     format!(
                         "conflicting implementations of trait `{}` for `{}`: the concrete \
                          impl overlaps `impl<..> {} for {}` (spec 2.9.3 — one impl per \
@@ -4408,6 +4516,7 @@ fn check_impl_overlap(env: &Env<'_>) {
         for b in gis.iter().skip(i + 1).filter(|b| {
             b.trait_key == a.trait_key && (!a.trait_key.is_empty() || shared(b).is_some())
         }) {
+            ctx.at.set(b.self_ty.span);
             let witness = symbolic_overlap(&ctx, a, b).unwrap_or_else(|| {
                 let cands = candidates.get_or_insert_with(|| named_types(env));
                 cands
@@ -4422,9 +4531,9 @@ fn check_impl_overlap(env: &Env<'_>) {
                 &witness,
                 a.trait_key.is_empty().then(|| shared(b)).flatten(),
             ) {
-                rokc_diagnostic::set_current_span(b.self_ty.span);
-                ctx.emit_error(
+                ctx.emit_error_at(
                     rokc_diagnostic::ErrorKind::Type,
+                    b.self_ty.span,
                     format!(
                         "duplicate method `{m}`: `impl<..> {}` and `impl<..> {}` both define it \
                          for `{t}` (bounds don't make impls disjoint)",
@@ -4433,9 +4542,9 @@ fn check_impl_overlap(env: &Env<'_>) {
                     ),
                 );
             } else if let Some(t) = witness {
-                rokc_diagnostic::set_current_span(b.self_ty.span);
-                ctx.emit_error(
+                ctx.emit_error_at(
                     rokc_diagnostic::ErrorKind::Type,
+                    b.self_ty.span,
                     format!(
                         "conflicting implementations of trait `{}`: `impl<..> {} for {}` and \
                          `impl<..> {} for {}` overlap on `{t}` — bounds don't make impls \
@@ -4576,7 +4685,7 @@ fn symbolic_overlap(ctx: &LowerCtx<'_>, a: &Impl, b: &Impl) -> Option<Option<Str
                     continue;
                 }
                 let segs: Vec<&str> = bp.segments.iter().map(|s| s.name.as_str()).collect();
-                let key = ctx.env.names.trait_key(&segs, &gi.module);
+                let key = ctx.env.names.trait_key(&segs, &gi.module, ctx.here());
                 if !may_implement(ctx, &subject, &key) {
                     return Some(None);
                 }
@@ -4673,7 +4782,7 @@ fn canon_ast_ty(
             let name = ctx
                 .env
                 .names
-                .canon(&segs, module, &[])
+                .canon(&segs, module, &[], ctx.here())
                 .unwrap_or_else(|| segs.join("::"));
             let args = p
                 .segments
@@ -4846,6 +4955,7 @@ fn check_auto_impl(
     let err = |d: &mut Vec<rokc_diagnostic::RokDiagnostic>, msg: String| {
         d.push(rokc_diagnostic::RokDiagnostic::error(
             rokc_diagnostic::ErrorKind::Type,
+            impl_def.span,
             msg,
         ));
     };
@@ -4856,7 +4966,7 @@ fn check_auto_impl(
         return true;
     };
     let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
-    let key = names.trait_key(&segs, module);
+    let key = names.trait_key(&segs, module, impl_def.span);
     let target = impl_def_display(&impl_def.self_ty);
     let tr = segs.join("::");
     if key == super::reflect::REFLECT {
@@ -4886,7 +4996,7 @@ fn check_auto_impl(
         let base = match &impl_def.self_ty.kind {
             AstTyKind::Path(p) => {
                 let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
-                names.canon(&segs, module, &[])
+                names.canon(&segs, module, &[], impl_def.span)
             }
             _ => None,
         };
@@ -4926,6 +5036,7 @@ fn check_extern_c_fn(f: &FnDef, diags: &mut Vec<rokc_diagnostic::RokDiagnostic>)
     let mut bad = |msg: String| {
         diags.push(rokc_diagnostic::RokDiagnostic::error(
             rokc_diagnostic::ErrorKind::Type,
+            f.span,
             format!(
                 "`extern \"C\" fn {}`: {msg} (spec 5.9.10)",
                 leaf_name(&f.name)
@@ -5075,6 +5186,7 @@ pub(super) fn intrinsic_of(
     let mut err = |msg: String| {
         diags.push(rokc_diagnostic::RokDiagnostic::error(
             rokc_diagnostic::ErrorKind::Meta,
+            m.span,
             msg,
         ));
         None
@@ -5399,7 +5511,7 @@ fn assoc_defaults(program: &Program, names: &TypeNames<'_>) -> Vec<(usize, Vec<A
         let Some(tp) = &i.trait_path else { continue };
         let module = impl_module(i);
         let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
-        let Some(td) = traits.get(names.trait_key(&segs, &module).as_str()) else {
+        let Some(td) = traits.get(names.trait_key(&segs, &module, i.span).as_str()) else {
             continue;
         };
         let have = impl_assoc_types(i);
@@ -5418,7 +5530,7 @@ fn assoc_defaults(program: &Program, names: &TypeNames<'_>) -> Vec<(usize, Vec<A
                 continue;
             }
             let mut ty = d.clone();
-            names.absolutize(&mut ty, &module_of(&td.name), &module, &params);
+            names.absolutize(&mut ty, &module_of(&td.name), &module, &params, i.span);
             subst_assoc_ty(&mut ty, &params);
             added.push(AstImplItem::AssocType {
                 name: name.clone(),
@@ -5568,7 +5680,7 @@ fn impl_param_types(program: &mut Program, names: &TypeNames<'_>) {
         }
         let module = impl_module(i);
         let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
-        let Some(td) = traits.get(names.trait_key(&segs, &module).as_str()) else {
+        let Some(td) = traits.get(names.trait_key(&segs, &module, i.span).as_str()) else {
             continue;
         };
         let params = trait_param_args(td, i);
@@ -5593,7 +5705,7 @@ fn impl_param_types(program: &mut Program, names: &TypeNames<'_>) {
                     continue;
                 };
                 let mut ty = t.clone();
-                names.absolutize(&mut ty, &module_of(&td.name), &module, &own);
+                names.absolutize(&mut ty, &module_of(&td.name), &module, &own, i.span);
                 subst_assoc_ty(&mut ty, &params);
                 fills.push((ii, mi, pi, ty));
             }
@@ -5643,12 +5755,12 @@ fn warn_assoc_shadowing(
             // A trait of that name is not a type (`trait IntoFuture { type
             // IntoFuture; }`).
             let outer = names
-                .canon(&[a.as_str()], &module, &[])
+                .canon(&[a.as_str()], &module, &[], it.span())
                 .filter(|full| !names.traits.contains(full));
             if prim || outer.is_some() {
-                rokc_diagnostic::set_current_span(it.span());
                 diags.push(rokc_diagnostic::RokDiagnostic::warning(
                     rokc_diagnostic::ErrorKind::Type,
+                    it.span(),
                     format!(
                         "associated type `{a}` shadows the outer type `{a}` inside the {owner}; \
                          there `{a}` and `Self::{a}` both mean the associated type (spec 2.8.3)"
@@ -5882,6 +5994,7 @@ fn literal_handlers(
             diags.push(
                 rokc_diagnostic::RokDiagnostic::error(
                     rokc_diagnostic::ErrorKind::Meta,
+                    attr.span,
                     format!(
                         "`#[literal({text})]` handler `{}` must take {} parameter(s): {} \
                          (spec 6.5.4)",
@@ -5894,7 +6007,6 @@ fn literal_handlers(
                         }
                     ),
                 )
-                .with_span(attr.span, "")
                 .with_secondary(f.span, "handler declared here"),
             );
             continue;
@@ -5908,13 +6020,13 @@ fn literal_handlers(
             diags.push(
                 rokc_diagnostic::RokDiagnostic::error(
                     rokc_diagnostic::ErrorKind::Meta,
+                    attr.span,
                     format!(
                         "`#[literal({text})]` is already registered by `{first}` with the same \
                          priority and return type: every use would be ambiguous — drop one, or \
                          give one a `priority = N` (spec 6.5.5)"
                     ),
                 )
-                .with_span(attr.span, "")
                 .with_secondary(*first_span, "first registered here"),
             );
             continue;

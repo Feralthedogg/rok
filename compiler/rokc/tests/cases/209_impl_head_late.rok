@@ -1,7 +1,7 @@
 // expect-exit: 0
 // expect-stdout:
 // 3 4 5 6 7
-// 8
+// 8 9 10 11
 
 // Spec 2.9.1: an impl target / trait argument is any type, resolved once
 // every item is registered: a projection through another impl (also one
@@ -42,6 +42,22 @@ impl Get<<A as Pick>::Out> for C {}
 
 impl Pick for <A as Pick>::Out { type Out = D; }
 
+// An inherent impl on a projection: `<` opens generics only before a
+// parameter (`<T>`, `<T:`, `<const N`, ..).
+impl <A as Pick>::Out {
+    fn nine(self) -> i32 { 9 }
+}
+
+// Through a plain alias naming a projection.
+type PickOut = <A as Pick>::Out;
+impl PickOut {
+    fn ten(self) -> i32 { 10 }
+}
+trait Eleven { fn eleven(self) -> i32; }
+impl Eleven for PickOut {
+    fn eleven(self) -> i32 { 11 }
+}
+
 trait Pick { type Out; }
 struct A {}
 impl Pick for A { type Out = B; }
@@ -56,5 +72,5 @@ type Later = E;
 fn main() {
     println(f"{C {}.tag()} {B {}.tag()} {D {}.tag()} {Wrap { v: C {} }.tag()} {E {}.tag()}");
     let b: B = C {}.get(B {});
-    println(f"{b.tag() * 2}");
+    println(f"{b.tag() * 2} {b.nine()} {b.ten()} {b.eleven()}");
 }

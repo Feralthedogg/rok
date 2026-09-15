@@ -48,16 +48,19 @@ impl Display for Bad { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.
 impl Debug for Bad { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("Bad") } }
 impl Error for Bad {}
 
-// Allocates ~24 MB of garbage: several automatic collections.
+// Allocates ~24 MB of garbage: several automatic collections. Every
+// object may outlive its iteration (`last`), so none is optimized away.
 fn churn() -> i64 {
     let s: i64 = 0;
     let i: i64 = 0;
+    let last: any Link = 0i64;
     while i < 500000 {
         let g: any Link = Cons { v: i, rest: none };
         s += g.val();
+        if i % 100000 == 0 { last = g; }
         i += 1;
     }
-    return s;
+    return s + last.val();
 }
 
 fn build(n: i64) -> any Link | none {

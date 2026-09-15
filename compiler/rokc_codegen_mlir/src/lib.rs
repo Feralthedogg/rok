@@ -76,10 +76,7 @@ pub struct CodegenOptions {
 #[must_use]
 pub fn codegen_error(errors: &[(rokc_diagnostic::Span, String)]) -> Option<RokDiagnostic> {
     let ((at, first), rest) = errors.split_first()?;
-    let mut d = RokDiagnostic::error(ErrorKind::Unsupported, first.clone());
-    if !at.is_dummy() {
-        d = d.with_span(*at, "");
-    }
+    let mut d = RokDiagnostic::error(ErrorKind::Unsupported, *at, first.clone());
     for (_, more) in rest {
         d = d.with_note(more.clone());
     }

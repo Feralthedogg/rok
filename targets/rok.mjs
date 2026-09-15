@@ -109,8 +109,19 @@ export async function run(wasm, { args = ["main"], env = {}, write = consoleWrit
       view().setUint32(read, 0, true);
       return 0;
     },
-    // No preopened directories.
-    fd_prestat_get: () => EBADF,
+    // One pre-opened directory, `/`, whose every call fails with ENOSYS:
+    // file system calls report Unsupported rather than "no such file".
+    fd_prestat_get(fd, buf) {
+      if (fd !== 3) return EBADF;
+      view().setUint8(buf, 0);
+      view().setUint32(buf + 4, 1, true);
+      return 0;
+    },
+    fd_prestat_dir_name(fd, path, len) {
+      if (fd !== 3 || len < 1) return EBADF;
+      view().setUint8(path, 0x2f);
+      return 0;
+    },
     proc_exit(code) {
       throw new Exit(code);
     },

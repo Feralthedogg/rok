@@ -94,7 +94,7 @@ pub fn compile(
                     .clone()
                     .unwrap_or_else(|| format!("{name}.c"));
                 c_entry = Some(obj.sym(&entry));
-                c_entries.push((f.id, a, f.facts.export_name.is_some()));
+                c_entries.push((f.id, a, f.facts.export_name.is_some(), f.span));
             }
             None => {}
         }
@@ -178,7 +178,7 @@ pub fn compile(
         gc_types: &mut gc_types,
         gc_type_base,
         overflow_checks: opts.overflow_checks,
-        debug: opts.debug,
+        debug: opts.debug.then_some(&module.debug),
         local_statics: &local_statics,
         quiet: &quiet,
         reentrant: &reentrant,
@@ -199,11 +199,11 @@ pub fn compile(
         };
         funcs.push((func, !private, weak));
     }
-    for (id, a, exported) in &c_entries {
+    for (id, a, exported, span) in &c_entries {
         let sig = &fns[id];
         let Some(entry) = sig.c_entry else { continue };
         let name = ctx.obj.syms[entry as usize].name.clone();
-        let func = wrap::generated(&mut ctx, &name, entry, |l| l.c_entry(sig, a));
+        let func = wrap::generated(&mut ctx, &name, entry, *span, |l| l.c_entry(sig, a));
         funcs.push((func, *exported, false));
     }
     // `rok.register_types` (the dependencies' first), called from `main`.
@@ -220,13 +220,13 @@ pub fn compile(
         let user = fns[&m.id].sym;
         if opts.repl.is_some() {
             let s = ctx.sym("rok_repl_cell");
-            let func = wrap::generated(&mut ctx, "rok_repl_cell", s, |l| {
+            let func = wrap::generated(&mut ctx, "rok_repl_cell", s, m.span, |l| {
                 l.repl_cell(user, &m.ret_ty, register)
             });
             funcs.push((func, true, false));
         } else {
             let s = ctx.sym("main");
-            let func = wrap::generated(&mut ctx, "main", s, |l| {
+            let func = wrap::generated(&mut ctx, "main", s, m.span, |l| {
                 l.main_wrapper(user, &m.ret_ty, register)
             });
             funcs.push((func, true, false));
@@ -251,9 +251,10 @@ pub fn compile(
                 let init = ctx.sym(&init);
                 let f_sym = ctx.sym(&format!("{name}.init"));
                 let iname = format!("{name}.init");
-                let func = wrap::generated(&mut ctx, &iname, f_sym, |l| {
-                    l.lazy_init(state, sym, true, init, &s.ty)
-                });
+                let func =
+                    wrap::generated(&mut ctx, &iname, f_sym, rokc_diagnostic::Span::DUMMY, |l| {
+                        l.lazy_init(state, sym, true, init, &s.ty)
+                    });
                 funcs.push((func, false, false));
             }
             continue;
@@ -275,9 +276,10 @@ pub fn compile(
             let init = ctx.sym(&init);
             let f_sym = ctx.sym(&format!("{name}.init"));
             let iname = format!("{name}.init");
-            let func = wrap::generated(&mut ctx, &iname, f_sym, |l| {
-                l.lazy_init(state, sym, false, init, &s.ty)
-            });
+            let func =
+                wrap::generated(&mut ctx, &iname, f_sym, rokc_diagnostic::Span::DUMMY, |l| {
+                    l.lazy_init(state, sym, false, init, &s.ty)
+                });
             // Exported by a prebuilt library that owns the static.
             let export = pkgs
                 .link
@@ -337,9 +339,13 @@ pub fn compile(
         .iter()
         .map(|d| ctx.sym(&format!("rok.register_types.{d}")))
         .collect();
-    let func = wrap::generated(&mut ctx, &register_name, register, |l| {
-        l.register_types(&tables, &roots, &deps)
-    });
+    let func = wrap::generated(
+        &mut ctx,
+        &register_name,
+        register,
+        rokc_diagnostic::Span::DUMMY,
+        |l| l.register_types(&tables, &roots, &deps),
+    );
     funcs.push((func, pkgs.link.lib.is_some(), false));
     errors.append(&mut ctx.errors);
     drop(ctx);

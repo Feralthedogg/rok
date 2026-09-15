@@ -106,6 +106,9 @@ pub fn lower(module: &HirModule, target: &Target) -> MirModule {
     }
     let next_id = functions.iter().map(|f| f.id.0 + 1).max().unwrap_or(0);
     crate::specialize::closures(&mut functions, next_id);
+    for f in &mut functions {
+        crate::rotate::rotate(f);
+    }
     let debug = debug_types(module, &functions, target);
     MirModule {
         debug,
@@ -1594,7 +1597,8 @@ impl<'a> FnBuilder<'a> {
         }
     }
 
-    /// The address of place `p`: a local, or a field / element of one.
+    /// The address of place `p`: a local or static, or a field / element
+    /// of one.
     fn addr_place(&mut self, p: &HirExpr) -> Operand {
         let usize_ty = MirTy::Prim(PrimTy::Usize);
         let (base, off) = match &p.kind {
@@ -1603,6 +1607,14 @@ impl<'a> FnBuilder<'a> {
                 self.push_stmt(Statement::Assign {
                     target: dst,
                     rvalue: RValue::AddrOf(*l),
+                });
+                return Operand::Copy(dst);
+            }
+            HirExprKind::StaticRef(name) => {
+                let dst = self.fresh_local(usize_ty);
+                self.push_stmt(Statement::Assign {
+                    target: dst,
+                    rvalue: RValue::StaticAddr(name.clone()),
                 });
                 return Operand::Copy(dst);
             }

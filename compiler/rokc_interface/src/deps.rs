@@ -70,9 +70,7 @@ impl DepBuild<'_> {
         words.extend(self.cfg.iter().cloned());
         let mut inputs = vec![root.parent().unwrap_or(root).to_path_buf()];
         let mut stamped = Vec::new();
-        if let crate::Profile::Use(p) = &self.opts.profile {
-            stamped.push(p.clone());
-        }
+        stamped.extend(self.opts.profile.used().map(Path::to_path_buf));
         if let Some(std) = self.std {
             words.push(std.display().to_string());
             inputs.push(std.to_path_buf());

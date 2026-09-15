@@ -51,6 +51,9 @@ pub const ERROR_DIRECTORY: i32 = 267;
 pub const ERROR_DIRECTORY_NOT_SUPPORTED: i32 = 336;
 pub const ERROR_OPERATION_ABORTED: i32 = 995;
 pub const ERROR_IO_PENDING: i32 = 997;
+pub const PIPE_ACCESS_INBOUND: DWORD = 0x1;
+pub const FILE_FLAG_FIRST_PIPE_INSTANCE: DWORD = 0x0008_0000;
+pub const PIPE_REJECT_REMOTE_CLIENTS: DWORD = 0x8;
 pub const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
 pub const ERROR_TIMEOUT: i32 = 1460;
 pub const ERROR_CANT_RESOLVE_FILENAME: i32 = 1921;
@@ -217,10 +220,25 @@ pub const STD_ERROR_HANDLE: DWORD = -12i32 as DWORD;
 pub const MEM_COMMIT: DWORD = 0x1000;
 pub const MEM_RESERVE: DWORD = 0x2000;
 pub const MEM_DECOMMIT: DWORD = 0x4000;
+pub const MEM_RELEASE: DWORD = 0x8000;
+pub const MEM_WRITE_WATCH: DWORD = 0x0020_0000;
 pub const PAGE_NOACCESS: DWORD = 0x01;
 pub const PAGE_READONLY: DWORD = 0x02;
 pub const PAGE_READWRITE: DWORD = 0x04;
 pub const FILE_MAP_READ: DWORD = 0x4;
+
+#[repr(C)]
+#[allow(non_snake_case)]
+pub struct MEMORY_BASIC_INFORMATION {
+    pub BaseAddress: *mut c_void,
+    pub AllocationBase: *mut c_void,
+    pub AllocationProtect: DWORD,
+    pub PartitionId: u16,
+    pub RegionSize: usize,
+    pub State: DWORD,
+    pub Protect: DWORD,
+    pub Type: DWORD,
+}
 
 pub const STACK_SIZE_PARAM_IS_A_RESERVATION: DWORD = 0x0001_0000;
 pub const WAIT_OBJECT_0: DWORD = 0;
@@ -388,6 +406,11 @@ unsafe extern "system" {
     pub fn VirtualAlloc(addr: *mut c_void, size: usize, kind: DWORD, protect: DWORD)
     -> *mut c_void;
     pub fn VirtualFree(addr: *mut c_void, size: usize, kind: DWORD) -> BOOL;
+    pub fn VirtualQuery(
+        addr: *const c_void,
+        info: *mut MEMORY_BASIC_INFORMATION,
+        len: usize,
+    ) -> usize;
     pub fn GetSystemInfo(info: *mut SYSTEM_INFO);
     pub fn GetActiveProcessorCount(group: u16) -> DWORD;
 
@@ -582,6 +605,18 @@ unsafe extern "system" {
         alertable: BOOL,
     ) -> BOOL;
     pub fn CancelIoEx(h: HANDLE, ov: *mut OVERLAPPED) -> BOOL;
+    pub fn GetOverlappedResult(h: HANDLE, ov: *mut OVERLAPPED, n: *mut DWORD, wait: BOOL) -> BOOL;
+    pub fn CreateEventW(sa: *mut c_void, manual: BOOL, initial: BOOL, name: *const u16) -> HANDLE;
+    pub fn CreateNamedPipeW(
+        name: *const u16,
+        open_mode: DWORD,
+        pipe_mode: DWORD,
+        instances: DWORD,
+        out_size: DWORD,
+        in_size: DWORD,
+        timeout: DWORD,
+        sa: *mut c_void,
+    ) -> HANDLE;
 }
 
 unsafe extern "system" {
@@ -618,6 +653,13 @@ unsafe extern "system" {
         ret: *mut u32,
     ) -> NTSTATUS;
     pub fn NtSetTimerResolution(want: u32, set: u8, actual: *mut u32) -> NTSTATUS;
+    pub fn NtQueryInformationFile(
+        h: HANDLE,
+        iosb: *mut IO_STATUS_BLOCK,
+        info: *mut c_void,
+        n: u32,
+        class: u32,
+    ) -> NTSTATUS;
     pub fn RtlNtStatusToDosError(s: NTSTATUS) -> u32;
 }
 

@@ -62,9 +62,16 @@ pub fn index_from_end(i: isize, len: usize) -> usize {
     // `-(i + 1)`: no overflow at `isize::MIN`.
     let back = (-(i + 1)) as usize;
     if back >= len {
-        panic(f"index {i} out of bounds for length {len}");
+        index_neg_oob(i, len);
     }
     len - 1 - back
+}
+
+/// Out of line, as `index_oob`: `index_from_end` inlined into a loop
+/// keeps no frame for the message's formatting.
+#[track_caller]
+fn index_neg_oob(i: isize, len: usize) -> ! {
+    panic(f"index {i} out of bounds for length {len}")
 }
 
 /// Panics: `{what} {i} out of bounds for length {len}`. Out of line (a

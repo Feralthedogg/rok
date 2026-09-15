@@ -2,7 +2,8 @@
 # Rewrite the archive <in> as <out>: one relocatable object in which only
 # the `rok_*` symbols stay global. The `core` / `compiler_builtins` /
 # mangled Rust symbols cargo leaves exported become local, so librokr.a
-# links next to another Rust staticlib.
+# links next to another Rust staticlib. <in> is built with fat LTO
+# (dist.sh): its Rust code is one object exporting only `rok_*`.
 #
 # Usage: runtime/rokr/localize.sh <in.a> <out.a>   (or <in.lib> <out.lib>)
 set -eu
@@ -14,9 +15,9 @@ trap 'rm -rf "$tmp"' EXIT
 
 case $in in
   *.lib)
-    # COFF has no relocatable link (lld-link has no -r), so a member
-    # cannot see another's symbols once they are local: rokr.lib ships
-    # as cargo built it.
+    # COFF has no relocatable link (lld-link has no -r): fat LTO's one
+    # object is the localization. compiler_builtins' members stay as
+    # rustc leaves them in any MSVC staticlib.
     cp "$in" "$out"
     exit 0
     ;;

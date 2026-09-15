@@ -74,9 +74,9 @@ fn every_error() {
     for (src, want, at) in [
         ("", "expected a value, found the end of the file", "1:1"),
         ("// only a comment\n", "expected a value", "2:1"),
-        ("1 2", "a RokON file holds one value", "1:3"),
-        ("{ a: 1 } { b: 2 }", "a RokON file holds one value", "1:10"),
-        ("[x]", "bare identifier `x` is not a RokON value", "1:2"),
+        ("1 2", "a ROKON file holds one value", "1:3"),
+        ("{ a: 1 } { b: 2 }", "a ROKON file holds one value", "1:10"),
+        ("[x]", "bare identifier `x` is not a ROKON value", "1:2"),
         ("[1 + 2]", "operator `+` is not allowed", "1:4"),
         ("[!true]", "operator `!` is not allowed", "1:2"),
         ("-x", "`-` goes only before a number", "1:1"),
@@ -86,7 +86,7 @@ fn every_error() {
         ("1..2", "ranges (`..`) are not allowed", "1:1"),
         ("{ let x = 1; x }", "blocks are not allowed", "1:1"),
         ("[f\"{1}\"]", "f-strings are not allowed", "1:2"),
-        ("{ 1, 2 }", "sets are not RokON values", "1:1"),
+        ("{ 1, 2 }", "sets are not ROKON values", "1:1"),
         ("{ a: 1, \"b\": 2 }", "either fields", "1:9"),
         ("{ \"b\": 2, a: 1 }", "either fields", "1:11"),
         ("P {\n    x,\n}", "field `x` needs a value", "2:5"),
@@ -111,7 +111,7 @@ fn every_error() {
     let src = "Config {\n    name: bare,\n}";
     assert_eq!(
         parse(src).unwrap_err().render(src, "c.rokon"),
-        "error[E002]: bare identifier `bare` is not a RokON value (a string is quoted: \
+        "error[E002]: bare identifier `bare` is not a ROKON value (a string is quoted: \
          `\"bare\"`; an enum variant is written with its type: `Type::bare`)\n  --> c.rokon:2:11\n   |\n 2 |     name: bare,\n   |           ^^^^"
     );
 }

@@ -1,7 +1,7 @@
 //! `rok.rokon`: the package manifest (also an environment's), and the
 //! `//! ```rokon` block of a single-file script.
 //!
-//! The file is one RokON value (`rokc_rokon`), a `Package { .. }` struct
+//! The file is one ROKON value (`rokc_rokon`), a `Package { .. }` struct
 //! (the name `Package` may be left out). It is data only: strings,
 //! `{ "key": value }` dicts and the `Dep::path(..)` / `Dep::git(..)` /
 //! `Dep::version(..)` variants.
@@ -487,7 +487,7 @@ pub fn source(d: Decoder<'_>) -> Result<Source, String> {
 }
 
 /// `text` with `field` (`deps` / `dev_deps`) entry `key` set to the
-/// RokON text `value`; the rest of the text (comments too) as it was.
+/// ROKON text `value`; the rest of the text (comments too) as it was.
 pub fn set_dep(
     text: &str,
     file: &str,

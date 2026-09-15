@@ -29,16 +29,19 @@
 #                        only; glibc: Debian 12's, with linux-libc-dev
 #                        6.1; musl: musl 1.2.5's; Windows:
 #                        clang_rt.profile.lib, against mingw-w64's
-#                        headers, with profile_windows.c). Every target
-#                        but wasm32, which it does not support.
+#                        headers, with profile_windows.c; wasm32-wasi:
+#                        wasi-libc's headers, with its emulated mmap and
+#                        getpid in the archive). Every target but
+#                        wasm32-unknown-unknown (no file system).
 #
 #   targets/build.sh [<triple>...]
 #
 # Default: every shipped target (an Apple host's runtime is lib/librokr.a:
 # only its profile runtime is built here). Needs rustup (and its
-# llvm-tools component's llvm-ar), curl, make, python3, clang (as the
-# assembler and C compiler) and the pinned LLVM's ld.lld (ROK_LLVM_PREFIX,
-# else llvm/build.sh's).
+# llvm-tools component's llvm-ar), curl, make, python3, bash, clang (as
+# the assembler and C compiler; CC names another: wasm32-wasi's profile
+# runtime needs one with the WebAssembly target, which Apple's lacks) and
+# the pinned LLVM's ld.lld (ROK_LLVM_PREFIX, else llvm/build.sh's).
 set -eu
 
 TARGETS="x86_64-apple-darwin aarch64-apple-darwin x86_64-unknown-linux-gnu
@@ -66,6 +69,11 @@ linux-libc-dev_i386 72e870c8b56344008990a7939edd44f71ae728152b5473c0fcc95a191a04
 linux-libc-dev_armhf 536d83afebd9a89e35dd104a4f3529b34833fd5fe279c4df18f2c6e9174f0e47"
 MUSL=1.2.5
 MUSL_SHA256=a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
+# The wasi-libc of wasi-sdk 25, whose libc.a the pinned Rust ships for
+# wasm32-wasip1 (its headers; its emulated mmap and getpid, which Rust
+# does not ship).
+WASI_LIBC=574b88da481569b65a237cb80daf9a2d5aeaf82d
+WASI_LIBC_SHA256=7d11a801570972e7f32639eed3f8f7d0e997f276b3c85b7aa03283e1265e4b8e
 # The commit of the module definitions rokc carries (gen.sh).
 MINGW_SHA256=94469ea48f974f9a4f7d8b7050cb7eceaa92c1f941ed3b6b8137591ba19491de
 
@@ -74,6 +82,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 exe() { case $(uname -s) in MINGW* | MSYS* | CYGWIN*) echo .exe ;; esac; }
 cd "$here/.."
 cache=${ROK_LLVM_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rok}
+cc=${CC:-clang}
 lld=${ROK_LLVM_PREFIX:-$cache/llvm-22.1.8}/bin/ld.lld
 out=${CARGO_TARGET_DIR:-target}/lib/rok/targets
 host=$(rustc -vV | sed -n 's/^host: //p')
@@ -194,6 +203,31 @@ profile() {
 		lib=clang_rt.profile.lib format=coff
 		extra=$here/profile_windows.c
 		;;
+	wasm32-wasi)
+		if ! "$cc" --print-targets | grep -q wasm32; then
+			echo "$t: no profile runtime ($cc has no WebAssembly target; set CC)" >&2
+			return
+		fi
+		w=$cache/wasi-libc-$WASI_LIBC
+		if [ ! -d "$w" ]; then
+			fetch "wasi-libc-$WASI_LIBC.tar.gz" "https://github.com/WebAssembly/wasi-libc/archive/$WASI_LIBC.tar.gz" \
+				"$WASI_LIBC_SHA256"
+			rm -rf "$w.tmp"
+			mkdir -p "$w.tmp"
+			tar -xzf "$cache/wasi-libc-$WASI_LIBC.tar.gz" -C "$w.tmp"
+			src_w=$w.tmp/wasi-libc-$WASI_LIBC
+			SYSROOT_INC=$w.tmp/include TARGET_TRIPLE=wasm32-wasi CP=cp RM=rm \
+				bash "$src_w/scripts/install-include-headers.sh" >/dev/null 2>&1
+			mkdir -p "$w.tmp/src"
+			cp "$src_w/libc-bottom-half/mman/mman.c" "$src_w/libc-bottom-half/getpid/getpid.c" \
+				"$src_w/LICENSE" "$w.tmp/src/"
+			rm -rf "$src_w"
+			mv "$w.tmp" "$w"
+		fi
+		flags="--target=wasm32-wasip1 -nostdlibinc -isystem $w/include -D_WASI_EMULATED_MMAN \
+			-D_WASI_EMULATED_GETPID"
+		extra="$w/src/mman.c $w/src/getpid.c"
+		;;
 	*)
 		return
 		;;
@@ -204,7 +238,7 @@ profile() {
 		# profile_windows.c registers the runtime instead.
 		case $t,${f##*/} in *-windows-*,InstrProfilingRuntime.cpp) continue ;; esac
 		# shellcheck disable=SC2086
-		clang $flags -O2 -fno-exceptions -fno-rtti -nostdinc++ -w -DCOMPILER_RT_HAS_ATOMICS=1 \
+		"$cc" $flags -O2 -fno-exceptions -fno-rtti -nostdinc++ -w -DCOMPILER_RT_HAS_ATOMICS=1 \
 			-I"$src/lib" -I"$src/include" -c "$f" -o "$work/${f##*/}.o"
 	done
 	rm -f "$dir/$lib"
@@ -228,7 +262,8 @@ for t in ${*:-$TARGETS}; do
 	*) rust=$t ;;
 	esac
 	rustup target add "$rust" >/dev/null
-	cargo build --release --locked -p rokr --target "$rust"
+	# One object (fat LTO), as dist.sh builds the host's runtime.
+	CARGO_PROFILE_RELEASE_LTO=fat cargo build --release --locked -p rokr --target "$rust"
 	rm -rf "$dir"
 	mkdir -p "$dir"
 	case $t in *-windows-*) rt=rokr.lib ;; *) rt=librokr.a ;; esac
@@ -259,7 +294,7 @@ for t in ${*:-$TARGETS}; do
 		mkdir -p "$work"
 		for lib in c m; do
 			python3 "$here/glibc_stubs.py" "$root/lib/$multi/lib$lib.so.6" "$work/$lib.s" "$work/$lib.map"
-			clang --target="$t" -c "$work/$lib.s" -o "$work/$lib.o"
+			"$cc" --target="$t" -c "$work/$lib.s" -o "$work/$lib.o"
 			"$lld" -shared -soname "lib$lib.so.6" --version-script "$work/$lib.map" -o "$dir/lib$lib.so" "$work/$lib.o"
 		done
 		rm -rf "$work"

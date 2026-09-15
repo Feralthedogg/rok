@@ -1233,9 +1233,9 @@ pub(super) fn eval_in(ctx: &LowerCtx<'_>, e: &HirExpr) -> R<Value> {
 fn report(ctx: &LowerCtx<'_>, at: Span, what: &str, op: Span, why: &str) {
     let mut d = rokc_diagnostic::RokDiagnostic::error(
         rokc_diagnostic::ErrorKind::Type,
+        at,
         format!("{what} cannot be evaluated at compile time: {why}"),
-    )
-    .with_span(at, "");
+    );
     if op != at && !op.is_dummy() {
         d = d.with_secondary(op, "here");
     }
@@ -1254,9 +1254,9 @@ pub(super) fn guard(
     if stack.borrow().iter().any(|n| n == name) {
         let d = rokc_diagnostic::RokDiagnostic::error(
             rokc_diagnostic::ErrorKind::Type,
+            span,
             format!("const `{}` is defined in terms of itself", leaf_name(name)),
-        )
-        .with_span(span, "");
+        );
         ctx.env.sink.diagnostics.borrow_mut().push(d);
         return None;
     }
@@ -1397,13 +1397,11 @@ pub(super) fn check_user_consts(env: &Env<'_>) {
     keys.sort();
     for key in keys {
         let span = env.consts[key].1.span;
-        let outer = rokc_diagnostic::set_current_span(span);
-        let mut ctx = LowerCtx::new(env, &no_subst, None);
+        let mut ctx = LowerCtx::new(env, &no_subst, None, span);
         let module = module_of(key);
         // Impl consts (`S::N`) are checked where they are read.
         let segs: Vec<&str> = module.split("::").collect();
         if !module.is_empty() && ctx.canon_type(&segs).as_deref() == Some(module.as_str()) {
-            rokc_diagnostic::set_current_span(outer);
             continue;
         }
         ctx.current_module = module;
@@ -1415,7 +1413,6 @@ pub(super) fn check_user_consts(env: &Env<'_>) {
             span,
         };
         super::expr::lower_path(&mut ctx, &path, span);
-        rokc_diagnostic::set_current_span(outer);
     }
 }
 
@@ -1423,7 +1420,7 @@ pub(super) fn check_user_consts(env: &Env<'_>) {
 /// when it is a primitive constant; `None` keeps the lazy initializer.
 pub(super) fn static_init(env: &Env<'_>, init_fn: &HirFunction) -> Option<ConstVal> {
     let no_subst = HashMap::new();
-    let ctx = LowerCtx::new(env, &no_subst, None);
+    let ctx = LowerCtx::new(env, &no_subst, None, init_fn.span);
     let body = init_fn.body.as_ref()?;
     if super::collect::hir_block_has_unknown(body) {
         return None;

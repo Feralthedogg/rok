@@ -1,5 +1,5 @@
 #!/bin/sh
-# Regenerates llvm/rok.profdata.gz, the profile build.sh optimizes LLVM
+# Regenerates llvm/rok.profdata.xz, the profile build.sh optimizes LLVM
 # with.
 #
 #   llvm/train-pgo.sh [workdir]

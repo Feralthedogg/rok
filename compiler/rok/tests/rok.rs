@@ -386,7 +386,7 @@ fn manifest_errors_and_reserved_forms() {
         "Package {\n    name: env(\"X\"),\n}\n",
     );
     let out = rok(&home, &app, &["deps"]);
-    fails(&out, "error[E002]: calls are not allowed in RokON");
+    fails(&out, "error[E002]: calls are not allowed in ROKON");
     fails(&out, "rok.rokon:2:11\n");
     write(&app.join("rok.rokon"), "Package { deps: {\n");
     fails(&rok(&home, &app, &["deps"]), "rok.rokon:2:1\n");
@@ -1497,6 +1497,7 @@ fn native_packages() {
         "yy = \"1.0.0\"\n"
     );
     assert_eq!(ok(&rok(&home, &root, &["search", "y"])), "");
+    native_yank(&home, &root, &index, &line);
     // No license, no publish.
     fs::remove_file(root.join("yy/pkg/LICENSE")).unwrap();
     let bad = dist.join("yy-2.0.0.tar.gz");
@@ -1549,6 +1550,7 @@ fn native_packages() {
         .output()
         .unwrap();
     assert_eq!(ok(&run), "43 6\n");
+    native_in_tools(&home, &root, &app, ext);
 
     // A target the packages have no build for.
     let other = if host == "x86_64-unknown-linux-gnu" {
@@ -1560,7 +1562,6 @@ fn native_packages() {
         &rok(&home, &app, &["build", "--target", other]),
         &format!("native package `zz` 1.0.0 has no build for {other} (it has: {host})"),
     );
-
     // A file named by url and hash; the artifact url relative to it.
     let vend = root.join("vend");
     fs::create_dir_all(&vend).unwrap();
@@ -1607,4 +1608,68 @@ fn native_packages() {
     // `remove --native` takes it out of rok.rokon and rok.lock.
     ok(&rok(&home, &app, &["remove", "--native", "zz"]));
     assert!(!read(&app.join("rok.lock")).contains("LockedNative"));
+}
+
+/// `native_packages`' app beyond `run`: a deleted runtime copy, `deps`,
+/// checks and the REPL.
+fn native_in_tools(home: &Path, root: &Path, app: &Path, ext: &str) {
+    // A deleted copy comes back on the next build.
+    let copy = app.join(format!("target/debug/libyy.{ext}"));
+    fs::remove_file(&copy).unwrap();
+    ok(&rok(home, app, &["-q", "build"]));
+    assert!(copy.is_file());
+
+    // `deps` lists them: rokc's arguments under a `# native` line each.
+    let deps = ok(&rok(home, app, &["deps"]));
+    for want in [
+        "# native zz 1.0.0\n-L",
+        "-lstatic=zz\n# native yy 1.0.0\n-L",
+        "-ldylib=yy\n--native-runtime=",
+    ] {
+        assert!(deps.contains(want), "{want:?} in {deps}");
+    }
+    // Checks link nothing.
+    for c in ["check", "lint", "doc"] {
+        ok(&rok(home, app, &["-q", c]));
+    }
+    // The REPL loads both: the shared library, then the static one. In
+    // an environment, `:add --native` adds them to a running session.
+    let repl = |args: &[&str], input: &str| {
+        let mut child = rok_cmd(home, app, args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(input.as_bytes()).unwrap();
+        drop(stdin);
+        let out = child.wait_with_output().unwrap();
+        let stdout = ok(&out);
+        assert!(
+            stdout.contains("i32: 43\ni32: 6\n"),
+            "{stdout}\n{}",
+            text(&out.stderr)
+        );
+    };
+    let cells = "extern \"C\" {\n    fn zz_muladd(a: i32, b: i32, c: i32) -> i32;\n    fn \
+                 yy_mul(a: i32, b: i32) -> i32;\n}\nunsafe { zz_muladd(6, 7, 1) }\nunsafe { \
+                 yy_mul(2, 3) }\n";
+    repl(&["-q", "repl"], cells);
+    ok(&rok(home, root, &["env", "create", "n"]));
+    repl(&["--env", "n"], &format!(":add --native zz\n{cells}"));
+}
+
+/// `yank --native` hides a version from resolution; `--undo` brings it
+/// back (to `line`).
+fn native_yank(home: &Path, root: &Path, index: &Path, line: &str) {
+    let reg = index.display().to_string();
+    let yank = ["yank", "--native", "--vers", "1.0.0", "--index", &reg, "yy"];
+    ok(&rok(home, root, &yank));
+    assert!(read(&index.join("native/2/yy")).contains("yanked: true"));
+    assert!(git(index, &["log", "--format=%s"]).starts_with("Yank native yy 1.0.0\n"));
+    assert_eq!(ok(&rok(home, root, &["search", "--native", "y"])), "");
+    ok(&rok(home, root, &[&yank[..], &["--undo"]].concat()));
+    assert_eq!(read(&index.join("native/2/yy")), line);
+    fails(&rok(home, root, &yank[..6]), "usage: rok yank");
 }

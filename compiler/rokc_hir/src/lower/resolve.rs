@@ -278,7 +278,7 @@ pub(super) const fn module_display(m: &str) -> &str {
     if m.is_empty() { "<root>" } else { m }
 }
 
-/// Module path → visibility of its `mod`, from the driver's flattened
+/// Module path → visibility of its `mod`, from the flattened
 /// module stubs (`Item::Mod` named by its full path).
 pub fn module_visibility(items: &[Item]) -> HashMap<String, Visibility> {
     items
@@ -410,20 +410,15 @@ pub(super) fn substitute_params(ty: &mut HirTy, params: &HashMap<String, HirTy>)
     }
 }
 
-thread_local! {
-    /// Plain-alias expansion depth (a cyclic alias stops at the cap).
-    static ALIAS_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
 /// Instance `full<args>` of a generic struct or enum (made on first use,
 /// its field types resolved under the instance's substitution in the
-/// template's module). `None` while an argument is not concrete (an
-/// unbound parameter, an unknown name).
+/// template's module, their errors at `sc.at`). `None` while an argument
+/// is not concrete (an unbound parameter, an unknown name).
 pub(super) fn instance(
     defs: &TypeDefs<'_>,
     full: &str,
     args: Vec<HirTy>,
-    names: &TypeNames<'_>,
+    sc: Scope<'_>,
     span: rokc_diagnostic::Span,
 ) -> Option<HirTy> {
     let mut open = Vec::new();
@@ -434,8 +429,8 @@ pub(super) fn instance(
     }
     let module = module_of(full);
     let sc = Scope {
-        names,
         module: &module,
+        ..sc
     };
     if defs.generic_structs.contains_key(full) {
         return defs
@@ -475,12 +470,12 @@ pub(super) fn resolve_ty_with_structs(
             if matches!(prim, HirTy::Prim(_)) {
                 return prim;
             }
-            if let Some(t) = sc.names.expand_alias(ty, sc.module) {
+            if let Some(t) = sc.names.expand_alias(ty, sc.module, sc.at) {
                 return rec(&t);
             }
             let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
             let generics = p.segments.last().map_or(&[][..], |s| s.generics.as_slice());
-            let Some(full) = sc.names.canon(&segs, sc.module, &[]) else {
+            let Some(full) = sc.names.canon(&segs, sc.module, &[], sc.at) else {
                 if !p.span.is_dummy() {
                     sc.names
                         .unknown_spans
@@ -493,6 +488,7 @@ pub(super) fn resolve_ty_with_structs(
             if sc.names.traits.contains(&full) {
                 let written = segs.join("::");
                 sc.names.error_help(
+                    sc.at,
                     format!("trait `{full}` cannot be used as a type directly"),
                     format!(
                         "use `any {written}` for a value of any type implementing it, or a \
@@ -514,22 +510,23 @@ pub(super) fn resolve_ty_with_structs(
                     .names
                     .plain_aliases
                     .get(&full)
-                    .filter(|_| ALIAS_DEPTH.get() < 32)
+                    .filter(|_| sc.names.alias_depth.get() < 32)
                 {
                     let module = module_of(&full);
                     let inner = Scope {
-                        names: sc.names,
                         module: &module,
+                        ..sc
                     };
-                    ALIAS_DEPTH.set(ALIAS_DEPTH.get() + 1);
+                    let depth = &sc.names.alias_depth;
+                    depth.set(depth.get() + 1);
                     let r = resolve_ty_with_structs(t, defs, None, inner);
-                    ALIAS_DEPTH.set(ALIAS_DEPTH.get() - 1);
+                    depth.set(depth.get() - 1);
                     return r;
                 }
             }
             if !generics.is_empty() {
                 let args: Vec<HirTy> = generics.iter().map(rec).collect();
-                return instance(defs, &full, args, sc.names, ty.span)
+                return instance(defs, &full, args, sc, ty.span)
                     .unwrap_or_else(|| HirTy::Path(vec![full]));
             }
             if let Some(id) = defs.struct_id(&full) {
@@ -554,12 +551,11 @@ pub(super) fn resolve_ty_with_structs(
                 .and_then(|n| u32::try_from(n).ok());
             let Some(n) = n else {
                 // Located at the type: field types resolve outside any item pass.
-                let old = (!ty.span.is_dummy()).then(|| rokc_diagnostic::set_current_span(ty.span));
-                sc.names
-                    .error("array length must be a compile-time integer (spec 2.11.5)".to_owned());
-                if let Some(old) = old {
-                    rokc_diagnostic::set_current_span(old);
-                }
+                let at = if ty.span.is_dummy() { sc.at } else { ty.span };
+                sc.names.error(
+                    at,
+                    "array length must be a compile-time integer (spec 2.11.5)".to_owned(),
+                );
                 return HirTy::Any;
             };
             HirTy::Array(Box::new(rec(elem)), n)
@@ -575,25 +571,28 @@ pub(super) fn resolve_ty_with_structs(
         AstTyKind::Fn(args, ret, b) => HirTy::Fn(
             args.iter().map(rec).collect(),
             Box::new(rec(ret)),
-            sc.names.fn_bounds(b, sc.module),
+            sc.names.fn_bounds(b, sc.module, sc.at),
         ),
         AstTyKind::AnyTrait(bounds) => {
             let mut refs = Vec::with_capacity(bounds.len());
             for b in bounds {
                 let segs: Vec<&str> = b.segments.iter().map(|s| s.name.as_str()).collect();
-                let key = sc.names.trait_key(&segs, sc.module);
+                let key = sc.names.trait_key(&segs, sc.module, sc.at);
                 let user_trait = sc.names.traits.contains(&key);
                 // Bootstrap traits key by their last segment (see
                 // `trait_key`); anything else must name a declared trait.
                 if !user_trait && !sc.names.traits.iter().any(|t| leaf_name(t) == key) {
-                    sc.names.error(format!(
-                        "`{}` in `any {}` is not a trait — `any` bounds must name traits",
-                        segs.join("::"),
-                        segs.join("::")
-                    ));
+                    sc.names.error(
+                        sc.at,
+                        format!(
+                            "`{}` in `any {}` is not a trait — `any` bounds must name traits",
+                            segs.join("::"),
+                            segs.join("::")
+                        ),
+                    );
                     return HirTy::Unknown;
                 }
-                refs.push(trait_ref(sc.names, b, sc.module, rec));
+                refs.push(trait_ref(sc.names, b, sc.module, sc.at, rec));
             }
             HirTy::any(refs)
         }
@@ -603,17 +602,18 @@ pub(super) fn resolve_ty_with_structs(
 }
 
 /// Trait path `p` as written in `module` (`Get<i32, Item = u8>`), its
-/// type arguments resolved by `rec`.
+/// type arguments resolved by `rec`; its errors go to `at`.
 pub(super) fn trait_ref(
     names: &TypeNames<'_>,
     p: &rokc_ast::Path,
     module: &str,
+    at: rokc_diagnostic::Span,
     rec: impl FnMut(&rokc_ast::Ty) -> HirTy,
 ) -> TraitRef {
     let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
     let generics = p.segments.last().map_or(&[][..], |s| s.generics.as_slice());
     let (args, binds) = trait_args(generics, rec);
-    TraitRef::new(names.trait_key(&segs, module), args, binds)
+    TraitRef::new(names.trait_key(&segs, module, at), args, binds)
 }
 
 /// A trait path's generic arguments: positional ones and `Name = Ty`

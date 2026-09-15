@@ -200,7 +200,7 @@ impl Cx<'_> {
         for a in attrs {
             if let Some(msg) = self.problem(a, pos) {
                 self.diags
-                    .push(RokDiagnostic::error(ErrorKind::Meta, msg).with_span(a.span, ""));
+                    .push(RokDiagnostic::error(ErrorKind::Meta, a.span, msg));
             }
         }
     }

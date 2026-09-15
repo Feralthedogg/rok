@@ -1,0 +1,70 @@
+// expect-exit: 0
+// gc-stress: 50
+// spec: std 101-ptr §1.1.2
+// expect-stdout:
+// 30 40 true
+// 2 9
+// 3 b c
+// 6 6
+// 1 5 5
+
+// `addr_of` of a `static` (stdlib 1.1.2): statics live in data sections,
+// so the pointer is valid for the whole run; a lazy one is initialized
+// first. A static holding GC references is a root already. Writes
+// through a pointer to a non-`mut` static are undefined.
+use rok::bare::ptr::{Ptr, addr_of, many_addr_of};
+
+struct Pt { x: i64; y: i64; }
+
+static TABLE: [i32; 4] = [10, 20, 30, 40];
+static ORIGIN: Pt = Pt { x: 2, y: 9 };
+static NAMES: List<str> = make_names();
+static SIX: i64 = six();
+
+extern "C" {
+    // getopt(3)'s next index; 1 before any call.
+    static mut optind: i32;
+}
+
+fn make_names() -> List<str> {
+    return [f"{churn(3)}", "b", "c"];
+}
+
+fn six() -> i64 { return 6; }
+
+fn churn(n: i64) -> i64 {
+    let total: i64 = 0;
+    for i in 0..n {
+        let g: List<i64> = [i, i + 1];
+        total += g.len() as i64;
+    }
+    total / 2
+}
+
+fn main() -> i32 {
+    let p = addr_of(TABLE[2]);
+    let m = many_addr_of(TABLE[0]);
+    let same = addr_of(TABLE[2]).addr() == p.addr();
+    println(f"{unsafe { p.read() }} {unsafe { m.read(3) }} {same}");
+
+    let px = addr_of(ORIGIN.x);
+    let py = addr_of(ORIGIN.y);
+    println(f"{unsafe { px.read() }} {unsafe { py.read() }}");
+
+    // Lazy: the pointer comes after initialization; the list stays rooted.
+    let pn: Ptr<List<str>> = addr_of(NAMES);
+    churn(3000);
+    let names = unsafe { pn.read() };
+    churn(3000);
+    println(f"{names[0]} {names[1]} {NAMES[2]}");
+
+    let ps = addr_of(SIX);
+    println(f"{unsafe { ps.read() }} {SIX}");
+
+    let po = addr_of(optind);
+    let before = unsafe { optind };
+    unsafe { po.write(5); }
+    println(f"{before} {unsafe { optind }} {unsafe { po.read() }}");
+    unsafe { po.write(before); }
+    0
+}

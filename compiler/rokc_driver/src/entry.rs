@@ -10,6 +10,7 @@ use rokc_diagnostic::{ErrorKind, RokDiagnostic, Span};
 pub fn stmts_outside_entry(file: &Path) -> RokDiagnostic {
     RokDiagnostic::error(
         ErrorKind::Module,
+        Span::DUMMY,
         format!(
             "{}: top-level statements are only allowed in the entry file `main.rok`; \
              modules are definitions-only (spec 4.16.6)",
@@ -22,11 +23,11 @@ pub fn stmts_outside_entry(file: &Path) -> RokDiagnostic {
 /// and validate an explicit one. Whether `main` is the implicit one.
 pub fn resolve_entry(
     stmts: Vec<Stmt>,
-    items: &mut Vec<Item>,
+    items: &mut Vec<(String, Item)>,
     diags: &mut Vec<RokDiagnostic>,
 ) -> bool {
-    let explicit = items.iter().find_map(|i| match i {
-        Item::Fn(f) if f.name == "main" => Some(f),
+    let explicit = items.iter().find_map(|(m, i)| match i {
+        Item::Fn(f) if m.is_empty() && f.name == "main" => Some(f),
         _ => None,
     });
     match (explicit, stmts.is_empty()) {
@@ -34,6 +35,7 @@ pub fn resolve_entry(
             diags.push(
                 RokDiagnostic::error(
                     ErrorKind::Module,
+                    Span::DUMMY,
                     "`main.rok` has both top-level statements and `fn main`; use exactly one \
                  entry point (spec 4.16.1)",
                 )
@@ -48,7 +50,7 @@ pub fn resolve_entry(
         }
         // Items only: form 2 with no statements, an empty implicit `main`.
         (None, _) => {
-            items.push(Item::Fn(implicit_main(stmts)));
+            items.push((String::new(), Item::Fn(implicit_main(stmts))));
             true
         }
     }
@@ -86,10 +88,11 @@ fn implicit_main(stmts: Vec<Stmt>) -> FnDef {
 /// A `Result` return is not an entry form.
 fn check_main_signature(f: &FnDef, diags: &mut Vec<RokDiagnostic>) {
     let mut bad = |msg: &str| {
-        diags.push(
-            RokDiagnostic::error(ErrorKind::Type, format!("`fn main`: {msg} (spec 4.16.3)"))
-                .with_span(f.span, ""),
-        );
+        diags.push(RokDiagnostic::error(
+            ErrorKind::Type,
+            f.span,
+            format!("`fn main`: {msg} (spec 4.16.3)"),
+        ));
     };
     if !f.params.is_empty() {
         bad("takes no parameters; read arguments through `rok::std::env`");

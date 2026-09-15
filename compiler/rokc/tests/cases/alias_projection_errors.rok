@@ -1,0 +1,26 @@
+// A plain alias naming a projection is checked once, at its body, after
+// impls are registered; its uses add no errors. A cyclic one is
+// reported at its declaration.
+// expect-error: 14:10: `A` has no associated type `Nope` of `P`
+// expect-error: 15:10: `A` has no associated type `Nope` (no trait impl
+// expect-error: 16:1: type alias `E` is cyclic
+// expect-error: 17:1: type alias `F` is cyclic
+// expect-error: 18:10: `i32` has no associated type `Out` of `P`
+// forbid-error: errors.rok:2
+
+trait P { type Out; }
+struct A { v: i32; }
+impl P for A { type Out = i64; }
+type B = <A as P>::Nope;
+type C = A::Nope;
+type E = <E as P>::Out;
+type F = F::Out;
+type G = <i32 as P>::Out;
+
+fn main() {
+    let b: B = 1;
+    let c: C = 1;
+    let e: E = 1;
+    let f: F = 1;
+    let g: G = 1;
+}

@@ -1,12 +1,17 @@
 // rok::core::collections::list — `List<T>`, a growable array (stdlib
-// spec 2.9.2). `meta` holds `[len, capacity]`; `data` holds the current
-// element buffer, swapped for a bigger one on growth. The buffer has one
+// spec 2.9.2): one object holding the length, the capacity and the
+// current element buffer, swapped for a bigger one on growth. The buffer has one
 // slot past the capacity that is never written: a zero `T` that vacated
 // slots are overwritten with, so the list keeps no removed value alive.
 
 pub struct List<T> {
-    meta: GcBuf<usize>;
-    data: GcBuf<GcBuf<T>>;
+    h: GcBuf<ListHead<T>>;
+}
+
+struct ListHead<T> {
+    len: usize;
+    cap: usize;
+    buf: GcBuf<T>;
 }
 
 impl List<str> {
@@ -35,17 +40,15 @@ impl<T> List<T> {
 
     pub fn with_capacity(cap: usize) -> List<T> {
         unsafe {
-            let meta: GcBuf<usize> = buf_new(2);
-            meta[1] = cap;
-            let data: GcBuf<GcBuf<T>> = buf_new(1);
-            data[0] = buf_new(buf_len(cap_add(cap, 1), size_of::<T>()));
-            List { meta, data }
+            let h: GcBuf<ListHead<T>> = buf_new(1);
+            h[0] = ListHead { len: 0, cap, buf: buf_new(buf_len(cap_add(cap, 1), size_of::<T>())) };
+            List { h }
         }
     }
 
     pub fn len(self) -> usize {
         unsafe {
-            self.meta[0]
+            self.h[0].len
         }
     }
 
@@ -55,14 +58,14 @@ impl<T> List<T> {
 
     pub fn capacity(self) -> usize {
         unsafe {
-            self.meta[1]
+            self.h[0].cap
         }
     }
 
     /// The current element buffer (`Slice` views it).
     pub(pkg) fn buffer(self) -> GcBuf<T> {
         unsafe {
-            self.data[0]
+            self.h[0].buf
         }
     }
 
@@ -76,13 +79,13 @@ impl<T> List<T> {
                 return;
             }
             let new_cap = cap.saturating_mul(2).max(need);
-            let old = self.data[0];
+            let old = self.h[0].buf;
             let store: GcBuf<T> = buf_new(buf_len(cap_add(new_cap, 1), size_of::<T>()));
             for i in 0..n {
                 store[i] = old[i];
             }
-            self.data[0] = store;
-            self.meta[1] = new_cap;
+            self.h[0].buf = store;
+            self.h[0].cap = new_cap;
         }
     }
 
@@ -93,20 +96,20 @@ impl<T> List<T> {
             if n == self.capacity() {
                 return;
             }
-            let old = self.data[0];
+            let old = self.h[0].buf;
             let store: GcBuf<T> = buf_new(buf_len(cap_add(n, 1), size_of::<T>()));
             for i in 0..n {
                 store[i] = old[i];
             }
-            self.data[0] = store;
-            self.meta[1] = n;
+            self.h[0].buf = store;
+            self.h[0].cap = n;
         }
     }
 
     /// The elements in reverse order, in place.
     pub fn reverse(self) {
         unsafe {
-            let store = self.data[0];
+            let store = self.h[0].buf;
             let n = self.len();
             for i in 0..n / 2 {
                 let x = store[i];
@@ -125,13 +128,25 @@ impl<T> List<T> {
 
     pub fn push(self, x: T) {
         unsafe {
+            let n = self.len();
+            if n == self.capacity() {
+                return self.push_grown(x);
+            }
+            self.h[0].buf[n] = x;
+            self.h[0].len = n + 1;
+        }
+    }
+
+    /// `push` into a full list, out of line: a `push` that fits reaches
+    /// no safepoint, so it keeps no frame.
+    fn push_grown(self, x: T) {
+        unsafe {
             // One read of the length: the slot written and the new length
             // agree, and `reserve` made room past it.
             let n = self.len();
             self.reserve(1);
-            let store = self.data[0];
-            store[n] = x;
-            self.meta[0] = n + 1;
+            self.h[0].buf[n] = x;
+            self.h[0].len = n + 1;
         }
     }
 
@@ -141,10 +156,10 @@ impl<T> List<T> {
             if n == 0 {
                 return none;
             }
-            let store = self.data[0];
+            let store = self.h[0].buf;
             let x = store[n - 1];
             self.vacate(store, n - 1);
-            self.meta[0] = n - 1;
+            self.h[0].len = n - 1;
             x
         }
     }
@@ -161,7 +176,7 @@ impl<T> List<T> {
             if idx >= self.len() {
                 return none;
             }
-            self.data[0][idx]
+            self.h[0].buf[idx]
         }
     }
 
@@ -185,14 +200,14 @@ impl<T> List<T> {
                 panic("List::insert: index out of bounds");
             }
             self.reserve(1);
-            let store = self.data[0];
+            let store = self.h[0].buf;
             let i = n;
             while i > idx {
                 store[i] = store[i - 1];
                 i -= 1;
             }
             store[idx] = x;
-            self.meta[0] = n + 1;
+            self.h[0].len = n + 1;
         }
     }
 
@@ -203,24 +218,24 @@ impl<T> List<T> {
             if idx >= n {
                 return panic("List::remove: index out of bounds");
             }
-            let store = self.data[0];
+            let store = self.h[0].buf;
             let x = store[idx];
             for i in idx + 1..n {
                 store[i - 1] = store[i];
             }
             self.vacate(store, n - 1);
-            self.meta[0] = n - 1;
+            self.h[0].len = n - 1;
             x
         }
     }
 
     pub fn clear(self) {
         unsafe {
-            let store = self.data[0];
+            let store = self.h[0].buf;
             for i in 0..self.len() {
                 self.vacate(store, i);
             }
-            self.meta[0] = 0;
+            self.h[0].len = 0;
         }
     }
 
@@ -233,15 +248,11 @@ impl<T> List<T> {
         if n > self.capacity() {
             panic("List::set_len: past the capacity");
         }
-        self.meta[0] = n;
+        self.h[0].len = n;
     }
 
     pub fn iter(self) -> ListIter<T> {
-        unsafe {
-            // [front index, items taken from the back]
-            let pos: GcBuf<usize> = buf_new(2);
-            ListIter { list: self, pos }
-        }
+        ListIter { list: self, front: 0, back: 0 }
     }
 }
 
@@ -263,7 +274,7 @@ impl<T> List<T> {
             if n < 2 {
                 return;
             }
-            let src = self.data[0];
+            let src = self.h[0].buf;
             let lo: usize = 0;
             while lo < n {
                 let hi = (lo + SORT_RUN).min(n);
@@ -329,43 +340,42 @@ impl<T> List<T> {
     }
 }
 
-/// `xs.iter()` / `for x in xs`: walks a list front to back.
+/// `xs.iter()` / `for x in xs`: walks a list front to back. Its state
+/// is its own (`next(ref self)`, 2.7.1): a copy walks on its own.
 pub struct ListIter<T> {
     list: List<T>;
-    pos: GcBuf<usize>;
+    /// The next index from the front.
+    front: usize;
+    /// Items taken from the back.
+    back: usize;
 }
 
 impl<T> Iterator for ListIter<T> {
     type Item = T;
     fn next(ref self) -> T | none {
-        unsafe {
-            let i = self.pos[0];
-            if i + self.pos[1] >= self.list.len() {
-                return none;
-            }
-            self.pos[0] = i + 1;
-            self.list.get(i)
+        let i = self.front;
+        if i + self.back >= self.list.len() {
+            return none;
         }
+        self.front = i + 1;
+        self.list.get(i)
     }
 }
 
 impl<T> DoubleEndedIterator for ListIter<T> {
     fn next_back(ref self) -> T | none {
-        unsafe {
-            let i = self.pos[0];
-            let back = self.pos[1];
-            if i + back >= self.list.len() {
-                return none;
-            }
-            self.pos[1] = back + 1;
-            self.list.get(self.list.len() - back - 1)
+        let back = self.back;
+        if self.front + back >= self.list.len() {
+            return none;
         }
+        self.back = back + 1;
+        self.list.get(self.list.len() - back - 1)
     }
 }
 
 impl<T> ExactSizeIterator for ListIter<T> {
     fn len(self) -> usize {
-        unsafe { self.list.len().saturating_sub(self.pos[0] + self.pos[1]) }
+        self.list.len().saturating_sub(self.front + self.back)
     }
 }
 
@@ -401,7 +411,7 @@ impl<T> Index<usize> for List<T> {
             if idx >= self.len() {
                 return panic("List index out of bounds");
             }
-            self.data[0][idx]
+            self.h[0].buf[idx]
         }
     }
 }
@@ -415,7 +425,7 @@ impl<T> IndexSet<usize> for List<T> {
             if idx >= self.len() {
                 panic("List index out of bounds");
             }
-            self.data[0][idx] = value;
+            self.h[0].buf[idx] = value;
         }
     }
 }

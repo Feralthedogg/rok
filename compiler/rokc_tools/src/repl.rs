@@ -505,11 +505,24 @@ impl Repl {
             return;
         }
         let Some(out) = run("deps", &[]) else { return };
-        let deps: Vec<(String, PathBuf)> = String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter_map(|l| l.split_once('='))
-            .map(|(n, p)| (n.to_owned(), PathBuf::from(p)))
-            .collect();
+        // `name=<lib.rok>` lines, then native packages' rokc arguments
+        // (`-L<dir>`, `-l<kind>=<name>`, `--native-runtime=<file>`), each
+        // under a `# native ..` line. New ones join the session's.
+        let text = String::from_utf8_lossy(&out.stdout);
+        let o = &mut self.opts;
+        let mut deps: Vec<(String, PathBuf)> = Vec::new();
+        for l in text.lines().filter(|l| !l.starts_with('#')) {
+            if let Some(d) = l.strip_prefix("-L") {
+                push_new(&mut o.lib_dirs, PathBuf::from(d));
+            } else if let Some(f) = l.strip_prefix("--native-runtime=") {
+                push_new(&mut o.runtime_files, PathBuf::from(f));
+            } else if let Some((kind, name)) = l.strip_prefix("-l").and_then(|k| k.split_once('='))
+            {
+                push_new(&mut o.libs, (name.to_owned(), kind == "static"));
+            } else if let Some((n, p)) = l.split_once('=') {
+                deps.push((n.to_owned(), PathBuf::from(p)));
+            }
+        }
         let build = rokc_interface::DepBuild {
             bootstrap: &self.bootstrap,
             cfg: &[],
@@ -905,10 +918,17 @@ impl Repl {
         self.host.as_mut()
     }
 
-    /// Link the prebuilt dependencies `r` uses into the host, once each.
+    /// Link the native packages' libraries, then the prebuilt
+    /// dependencies `r` uses, into the host, once each.
     fn link_archives(&mut self, r: &CompileResult) {
-        let archives = r.modules.first().map_or(&[][..], |m| &m.archives[..]);
-        for a in archives {
+        let mut files = native_files(&self.opts);
+        files.extend(
+            r.modules
+                .first()
+                .into_iter()
+                .flat_map(|m| m.archives.clone()),
+        );
+        for a in &files {
             if self.linked.contains(a) {
                 continue;
             }
@@ -1327,6 +1347,50 @@ fn localize(d: &RokDiagnostic, session: u32, path: &str, regions: &[Region]) -> 
         .message
         .replace(&format!("`let {VALUE}`"), "the expression");
     d
+}
+
+/// The native libraries the host loads (`-l`, `--native-runtime`), in
+/// order: shared ones first (the runtime files; off Windows, also the
+/// `dylib` links found in the `-L` directories), then the static ones,
+/// each after those it uses (`-l` lists dependents first).
+fn native_files(opts: &BuildOptions) -> Vec<PathBuf> {
+    let find = |f: String| {
+        opts.lib_dirs
+            .iter()
+            .map(|d| d.join(&f))
+            .find(|p| p.is_file())
+    };
+    let dylib = |n: &str| {
+        let ext = if cfg!(target_vendor = "apple") {
+            "dylib"
+        } else {
+            "so"
+        };
+        (!cfg!(windows)).then(|| format!("lib{n}.{ext}"))
+    };
+    let archive = |n: &str| {
+        Some(if cfg!(windows) {
+            format!("{n}.lib")
+        } else {
+            format!("lib{n}.a")
+        })
+    };
+    let mut out: Vec<PathBuf> = opts.runtime_files.iter().rev().cloned().collect();
+    for want_static in [false, true] {
+        for (n, _) in opts.libs.iter().rev().filter(|l| l.1 == want_static) {
+            let file = if want_static { archive(n) } else { dylib(n) };
+            if let Some(p) = file.and_then(find) {
+                push_new(&mut out, p);
+            }
+        }
+    }
+    out
+}
+
+fn push_new<T: PartialEq>(to: &mut Vec<T>, x: T) {
+    if !to.contains(&x) {
+        to.push(x);
+    }
 }
 
 /// Build and start the session host.

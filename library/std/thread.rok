@@ -85,15 +85,24 @@ impl Thread {
     }
 }
 
-/// The OS could not join the thread: `pthread_join`'s error number.
+/// The OS could not join the thread: `pthread_join`'s error number, or
+/// [`JOIN_LOST`].
 #[derive(Debug)]
 pub struct JoinError {
     pub code: i32;
 }
 
+/// `JoinError::code` of a thread a failed REPL cell's rollback ended
+/// (the session went back to before the cell; the thread is gone).
+pub const JOIN_LOST: i32 = -1;
+
 impl Display for JoinError {
     fn fmt(self, ref f: Formatter) throws (FmtError) {
-        try f.write_str(f"thread join failed (error {self.code})")
+        if self.code == JOIN_LOST {
+            try f.write_str("thread join failed: the thread ended with a failed REPL cell")
+        } else {
+            try f.write_str(f"thread join failed (error {self.code})")
+        }
     }
 }
 
@@ -110,6 +119,9 @@ impl<T> JoinHandle<T> {
     /// Wait for the thread and take its result.
     pub fn join(self) throws (JoinError) -> T {
         unsafe {
+            if rok_thread_lost(self.thread.rec.id) != 0 {
+                throw JoinError { code: JOIN_LOST };
+            }
             let code = rok_thread_join(self.handle);
             if code != 0 { throw JoinError { code }; }
             self.result[0]

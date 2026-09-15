@@ -1164,18 +1164,13 @@ impl<'src> Lexer<'src> {
 
     fn warning(&mut self, span: Span, msg: impl Into<String>) {
         self.diagnostics.push(
-            RokDiagnostic::warning(ErrorKind::Lexical, msg)
-                .with_file(self.file.clone())
-                .with_span(span, ""),
+            RokDiagnostic::warning(ErrorKind::Lexical, span, msg).with_file(self.file.clone()),
         );
     }
 
     fn error(&mut self, span: Span, msg: impl Into<String>) {
-        self.diagnostics.push(
-            RokDiagnostic::error(ErrorKind::Lexical, msg)
-                .with_file(self.file.clone())
-                .with_span(span, ""),
-        );
+        self.diagnostics
+            .push(RokDiagnostic::error(ErrorKind::Lexical, span, msg).with_file(self.file.clone()));
     }
 }
 

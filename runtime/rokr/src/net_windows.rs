@@ -919,6 +919,50 @@ pub extern "C" fn rok_io_watch(fd: i32, _interest: u32) -> i32 {
     r
 }
 
+/// For a REPL host about to put back the memory of before a failed cell,
+/// every other thread suspended: cancel the requests in flight and take
+/// their completions, which would otherwise land in memory the restored
+/// session does not own. No lock: a suspended thread may hold it.
+pub fn quiesce() {
+    let (port, afd) = (PORT.load(Ordering::Acquire), AFD.load(Ordering::Acquire));
+    if port == 0 {
+        return;
+    }
+    // SAFETY: our handles; a cancel of nothing is harmless.
+    unsafe { win::CancelIoEx(afd, ptr::null_mut()) };
+    // SAFETY: zeroed entries are a valid out-buffer.
+    let mut evs: [win::OVERLAPPED_ENTRY; 64] = unsafe { zeroed() };
+    let mut got = 0u32;
+    // A cancelled request completes promptly: drain until the port stays
+    // empty for a while.
+    // SAFETY: valid buffer and out-pointer.
+    while unsafe { win::GetQueuedCompletionStatusEx(port, evs.as_mut_ptr(), 64, &mut got, 50, 0) }
+        != 0
+        && got > 0
+    {}
+}
+
+/// After [`quiesce`] and the restore: the records' requests are gone
+/// (waiters watch their sockets again when woken).
+pub fn reset_poller() {
+    if PORT.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    DRIVER.lock.lock();
+    // SAFETY: the lock is held; records are ours.
+    unsafe {
+        for head in &*DRIVER.table.get() {
+            let mut r = *head;
+            while !r.is_null() {
+                (*r).op = ptr::null_mut();
+                (*r).armed = 0;
+                r = (*r).next;
+            }
+        }
+    }
+    DRIVER.lock.unlock();
+}
+
 /// Drop `fd`'s record (its socket is closing). A request in flight
 /// completes later and is dropped.
 fn forget(fd: i32) {

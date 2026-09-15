@@ -14,6 +14,20 @@ pub use lower::type_visible;
 pub use lower::{lower, lower_full, lower_with_uses};
 pub use print::{instance, print_hir};
 
+/// Origin of the root `main`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RootMain {
+    /// Declared by the program (or none, for a library).
+    #[default]
+    Declared,
+    /// Made from the entry file's top-level statements (spec 4.16.2).
+    Implicit,
+    /// The `rokc test` / `rokc bench` harness: it reaches every test, so
+    /// item and module visibility do not apply to the paths in its body
+    /// (spec 9.1, 6.2.5).
+    Harness,
+}
+
 /// What the driver tells HIR about the build besides the program.
 #[derive(Clone, Debug, Default)]
 pub struct HirInput {
@@ -31,9 +45,8 @@ pub struct HirInput {
     /// Lower (and so check) every library body, reached or not
     /// (`rokc check --check-library`).
     pub check_library: bool,
-    /// The root `main` is the implicit one made from the entry file's
-    /// top-level statements (spec 4.16.2).
-    pub implicit_main: bool,
+    /// Where the root `main` comes from.
+    pub root_main: RootMain,
     /// Also lower the reached small functions of the prebuilt standard
     /// library, for the optimizer to inline: they stay the archive's
     /// symbols (`available_externally`).
@@ -41,6 +54,10 @@ pub struct HirInput {
     /// Bits of `usize` / `isize` (the target's pointer width) for
     /// literal ranges and constant evaluation; 0 means 64.
     pub pointer_width: u32,
+    /// The module path (`a::b`, `""` at the root) of each item of the
+    /// program, by index; missing ones are at the root. HIR qualifies
+    /// the item names with it.
+    pub item_modules: Vec<String>,
 }
 
 /// Marker attribute on a trait / impl method, path `[ASSOC_TYPES_ATTR,

@@ -482,6 +482,7 @@ pub fn rvalue_operands(r: &RValue, out: &mut Vec<Operand>) {
         RValue::MlirOp { args, .. } => out.extend(args.iter().map(|(a, _)| a.clone())),
         RValue::FnAddr { .. }
         | RValue::StaticLoad { .. }
+        | RValue::StaticAddr(_)
         | RValue::SizeOf { .. }
         | RValue::HeapAlloc { .. } => {}
     }

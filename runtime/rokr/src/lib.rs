@@ -33,6 +33,15 @@ mod math;
 mod net;
 #[cfg_attr(windows, path = "os_windows.rs")]
 mod os;
+#[cfg(not(target_family = "wasm"))]
+mod session;
+
+/// No REPL session on wasm32: no thread is ever found gone.
+#[cfg(target_family = "wasm")]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_thread_lost(_id: u64) -> i32 {
+    0
+}
 #[cfg_attr(windows, path = "stack_windows.rs")]
 #[cfg_attr(target_family = "wasm", path = "stack_wasm.rs")]
 mod stack;
@@ -379,6 +388,10 @@ struct Hooks {
     timer: unsafe extern "C" fn(u64, *mut u8),
     park: unsafe extern "C" fn(*mut u8, *mut u8),
     unpark: unsafe extern "C" fn(*mut u8),
+    /// After a failed REPL cell (`session`): start again what ran on
+    /// threads that are gone.
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    restart: unsafe extern "C" fn(),
 }
 
 static HOOKS: core::sync::atomic::AtomicPtr<Hooks> =
@@ -391,6 +404,7 @@ pub extern "C" fn rok_task_hooks_install(
     timer: unsafe extern "C" fn(u64, *mut u8),
     park: unsafe extern "C" fn(*mut u8, *mut u8),
     unpark: unsafe extern "C" fn(*mut u8),
+    restart: unsafe extern "C" fn(),
 ) {
     // SAFETY: plain allocation, never freed: the hooks live as long as
     // the process.
@@ -405,6 +419,7 @@ pub extern "C" fn rok_task_hooks_install(
             timer,
             park,
             unpark,
+            restart,
         });
     }
     if HOOKS
@@ -413,6 +428,16 @@ pub extern "C" fn rok_task_hooks_install(
     {
         // SAFETY: ours, never published.
         unsafe { libc::free(h.cast()) };
+    }
+}
+
+/// The executor's restart hook, if it started (`session`).
+#[cfg(not(target_family = "wasm"))]
+fn restart_executor() {
+    let h = HOOKS.load(Ordering::Acquire);
+    if !h.is_null() {
+        // SAFETY: published once, never freed; a rok `extern "C" fn`.
+        unsafe { ((*h).restart)() };
     }
 }
 

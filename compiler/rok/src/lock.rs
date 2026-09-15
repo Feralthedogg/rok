@@ -1,4 +1,4 @@
-//! `rok.lock` (RokON): the exact commit (and its content hash) of every git
+//! `rok.lock` (ROKON): the exact commit (and its content hash) of every git
 //! package and stone the build uses, and the version and entry hash of
 //! every native package from an index. Path packages are not pinned:
 //! they are always their current content; `Dep::native(url:, sha256:)`

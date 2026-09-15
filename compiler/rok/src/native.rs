@@ -176,7 +176,7 @@ pub fn parse_one(text: &str, file: &str) -> Result<Entry, String> {
 }
 
 impl Entry {
-    /// The index line (canonical RokON on one line).
+    /// The index line (canonical ROKON on one line).
     pub fn to_line(&self) -> String {
         let deps = self
             .deps
@@ -537,6 +537,25 @@ fn check(files: &Path, a: &Artifact, triple: &str) -> Result<(), String> {
         if !p.is_file() {
             return Err(format!("runtime file {r} is not in the archive"));
         }
+        let file = Path::new(r)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        // ELF: executables name the library by its soname, and look for
+        // that file beside themselves.
+        if !triple.contains("-apple-") && !triple.contains("-windows") && file.contains(".so") {
+            let bytes = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            match soname(&bytes) {
+                Some(n) if n == file => {}
+                n => {
+                    return Err(format!(
+                        "{r}'s soname is {}; a shared library beside the executable needs its own \
+                         file name (link it with `-Wl,-soname,{file}`)",
+                        n.map_or_else(|| "missing".to_owned(), |n| format!("`{n}`")),
+                    ));
+                }
+            }
+        }
         if triple.contains("-apple-") && p.extension().is_some_and(|x| x == "dylib") {
             let bytes = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
             match install_name(&bytes) {
@@ -544,18 +563,67 @@ fn check(files: &Path, a: &Artifact, triple: &str) -> Result<(), String> {
                 n => {
                     return Err(format!(
                         "{r}'s install name is {}; a shared library beside the executable needs \
-                         `@rpath/<file>` (link it with `-install_name @rpath/{}`)",
+                         `@rpath/<file>` (link it with `-install_name @rpath/{file}`)",
                         n.map_or_else(|| "missing".to_owned(), |n| format!("`{n}`")),
-                        Path::new(r)
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
                     ));
                 }
             }
         }
     }
     Ok(())
+}
+
+/// A little-endian ELF shared library's `DT_SONAME` (through the section
+/// headers: `SHT_DYNAMIC` and the string table it links).
+fn soname(b: &[u8]) -> Option<String> {
+    let n = |o: usize, w: usize| -> Option<usize> {
+        let mut v = 0u64;
+        for (i, x) in b.get(o..o + w)?.iter().enumerate() {
+            v |= u64::from(*x) << (8 * i);
+        }
+        usize::try_from(v).ok()
+    };
+    if !b.starts_with(b"\x7fELF") || b.get(5) != Some(&1) {
+        return None;
+    }
+    // Word size, and section header field offsets: offset, size, link.
+    let (w, sh) = match b.get(4)? {
+        1 => (4, [0x10, 0x14, 0x18]),
+        2 => (8, [0x18, 0x20, 0x28]),
+        _ => return None,
+    };
+    let (shoff, shentsize, shnum) = if w == 4 {
+        (n(0x20, 4)?, n(0x2e, 2)?, n(0x30, 2)?)
+    } else {
+        (n(0x28, 8)?, n(0x3a, 2)?, n(0x3c, 2)?)
+    };
+    let section = |i: usize| -> Option<(u32, usize, usize, usize)> {
+        let h = shoff + i * shentsize;
+        let ty = u32::try_from(n(h + 4, 4)?).ok()?;
+        Some((ty, n(h + sh[0], w)?, n(h + sh[1], w)?, n(h + sh[2], 4)?))
+    };
+    for i in 0..shnum {
+        let (ty, off, size, link) = section(i)?;
+        // SHT_DYNAMIC
+        if ty != 6 {
+            continue;
+        }
+        let (_, strs, strs_size, _) = section(link)?;
+        for e in (off..off + size).step_by(2 * w) {
+            match n(e, w)? {
+                0 => break,
+                // DT_SONAME
+                14 => {
+                    let at = n(e + w, w)?;
+                    let s = b.get(strs + at..strs + strs_size)?;
+                    let s = s.split(|c| *c == 0).next()?;
+                    return Some(String::from_utf8_lossy(s).into_owned());
+                }
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 /// A Mach-O dylib's `LC_ID_DYLIB` name (a fat file's first slice).
@@ -603,6 +671,18 @@ pub fn rokc_args(
 ) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     for n in natives {
+        // musl executables are static: no shared library to load.
+        if triple.contains("-musl") {
+            if let Some((_, a)) = n.entry.targets.iter().find(|(t, _)| t == triple) {
+                if let Some((l, _)) = a.links.iter().find(|(_, stat)| !stat) {
+                    return Err(format!(
+                        "native package `{}` {} links `{l}` as a shared library, but {triple} \
+                         executables are static (a musl build needs \"static\" links)",
+                        n.entry.name, n.entry.vers
+                    ));
+                }
+            }
+        }
         let (dir, a) = unpack(home, n, triple, offline, quiet)?;
         out.push(format!("-L{}", dir.join("lib").display()));
         for (name, stat) in &a.links {
@@ -768,5 +848,49 @@ mod tests {
         m.extend(name);
         assert_eq!(install_name(&m).as_deref(), Some("@rpath/libz.dylib"));
         assert_eq!(install_name(b"\x7fELF"), None);
+        // A minimal ELF64: sections null, `.dynamic` (DT_SONAME 1),
+        // `.dynstr` ("\0libz.so\0").
+        let mut e = vec![0u8; 304];
+        let put = |e: &mut Vec<u8>, at: usize, v: u64, w: usize| {
+            e[at..at + w].copy_from_slice(&v.to_le_bytes()[..w]);
+        };
+        e[..6].copy_from_slice(b"\x7fELF\x02\x01");
+        put(&mut e, 0x28, 64, 8);
+        put(&mut e, 0x3a, 64, 2);
+        put(&mut e, 0x3c, 3, 2);
+        for (i, ty, off, size, link) in [(1, 6, 272, 32, 2), (2, 3, 256, 9, 0)] {
+            let h = 64 + i * 64;
+            put(&mut e, h + 4, ty, 4);
+            put(&mut e, h + 0x18, off, 8);
+            put(&mut e, h + 0x20, size, 8);
+            put(&mut e, h + 0x28, link, 4);
+        }
+        e[257..264].copy_from_slice(b"libz.so");
+        put(&mut e, 272, 14, 8);
+        put(&mut e, 280, 1, 8);
+        assert_eq!(soname(&e).as_deref(), Some("libz.so"));
+        put(&mut e, 272, 1, 8);
+        assert_eq!(soname(&e), None);
+        assert_eq!(soname(&m), None);
+    }
+
+    #[test]
+    fn musl_refuses_shared_links_before_fetching() {
+        let t = "x86_64-unknown-linux-musl";
+        let line = format!(
+            "Native {{ name: \"zz\", vers: \"1.0.0\", targets: {{ \"{t}\": Artifact {{ url: \
+             \"https://nowhere.invalid/zz.tgz\", sha256: \"{}\", links: {{ \"zz\": \"dylib\" }} \
+             }} }} }}",
+            "ab".repeat(32)
+        );
+        let n = Resolved {
+            name: "zz".into(),
+            entry: parse_one(&line, "f").unwrap(),
+            base: None,
+            dev: false,
+        };
+        let home = Path::new("/nonexistent-rok-home");
+        let e = rokc_args(home, &[&n], t, true, true).unwrap_err();
+        assert!(e.contains("links `zz` as a shared library"), "{e}");
     }
 }

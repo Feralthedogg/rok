@@ -321,15 +321,19 @@ impl Flow {
 /// The locals `tracked` accepts that hold a value while a collection can
 /// run; only these need a GC root.
 ///
-/// That is at the function's entry (its arguments), at the end of a
+/// That is at the function's entry when `entry` (its arguments; an
+/// entry poll), at the end of a
 /// block `poll` accepts (a back-edge poll, before the terminator), and
-/// during a statement `safepoint` accepts (live after it, or one of its
-/// operands: some read them after their own allocation).
+/// during a statement `safepoint` takes for one (live after it, or one
+/// of its operands when `safepoint` says the statement reads them after
+/// its own allocation: a runtime function does, a rok function roots
+/// what it still needs itself).
 pub fn live_across(
     f: &MirFunction,
     tracked: impl Fn(LocalId) -> bool,
-    safepoint: impl Fn(&Statement) -> bool,
+    safepoint: impl Fn(&Statement) -> Option<bool>,
     poll: impl Fn(BlockId) -> bool,
+    entry: bool,
 ) -> HashSet<LocalId> {
     let mut always: HashSet<LocalId> = addressed(f);
     always.retain(|&l| tracked(l));
@@ -339,7 +343,9 @@ pub fn live_across(
     if n == 0 || f.blocks.is_empty() {
         return always;
     }
-    out.union(&flow.live_in[0]);
+    if entry {
+        out.union(&flow.live_in[0]);
+    }
     for (bi, b) in f.blocks.iter().enumerate() {
         let mut live = flow.live_out(bi, b);
         if poll(b.id) {
@@ -347,12 +353,14 @@ pub fn live_across(
         }
         for (s, (uses, def)) in b.stmts.iter().zip(&flow.stmts[bi]).rev() {
             let def = def.and_then(|d| flow.dense.get(d));
-            if safepoint(s) {
+            if let Some(reads) = safepoint(s) {
                 let mut during = live.clone();
                 if let Some(i) = def {
                     during.unset(i);
                 }
-                during.union(&flow.dense.bits(uses));
+                if reads {
+                    during.union(&flow.dense.bits(uses));
+                }
                 out.union(&during);
             }
             if let Some(i) = def {
@@ -512,8 +520,10 @@ mod tests {
                         ..
                     }
                 )
+                .then_some(true)
             },
             |_| false,
+            true,
         );
         let mut got: Vec<u32> = s.iter().map(|l| l.0).collect();
         got.sort_unstable();

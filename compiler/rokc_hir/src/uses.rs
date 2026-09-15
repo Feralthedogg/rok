@@ -57,10 +57,9 @@ pub fn build_use_table(
         let mut entries = Vec::new();
         let existing = table.entry(module_path.clone()).or_default();
         flatten_tree(tree, None, module_path, existing, &mut entries);
-        let entries = entries.into_iter().map(|(e, _)| e);
         // The same full path imported twice is fine (spec 5.5.11).
         let existing = table.entry(module_path.clone()).or_default();
-        for entry in entries {
+        for (entry, span) in entries {
             if let UseEntry::Single { local, full } = &entry {
                 if let Some(prev) = existing.iter().find_map(|e| match e {
                     UseEntry::Single { local: l, full: f } if l == local => Some(f.clone()),
@@ -69,6 +68,7 @@ pub fn build_use_table(
                     if &prev != full {
                         diags.push(RokDiagnostic::error(
                             ErrorKind::Module,
+                            span,
                             format!(
                                 "name `{local}` imported twice with different targets: \
                                  `{prev}` and `{full}` in module `{}`",
@@ -183,10 +183,10 @@ pub fn check_use_targets(
                 UseEntry::Glob { prefix } | UseEntry::GlobDeep { prefix } => prefix,
             };
             if let UseEntry::Single { full, .. } = &entry {
-                rokc_diagnostic::set_current_span(span);
                 if let Some(m) = crate::lower::hidden_module(&mod_vis, module_path, full) {
                     diags.push(RokDiagnostic::error(
                         ErrorKind::Module,
+                        span,
                         crate::lower::hidden_module_msg(full, &m, module_path),
                     ));
                     continue;
@@ -198,6 +198,7 @@ pub fn check_use_targets(
                     if *use_vis != Visibility::Private && rank(*use_vis) > rank(vis) {
                         diags.push(RokDiagnostic::error(
                             ErrorKind::Module,
+                            span,
                             format!(
                                 "`{full}` is {} but re-exported as {} — a re-export can't \
                                  be wider than its item (spec 5.8.4)",
@@ -222,14 +223,13 @@ pub fn check_use_targets(
                     continue;
                 }
             }
-            rokc_diagnostic::set_current_span(span);
             diags.push(RokDiagnostic::error(
                 ErrorKind::Module,
+                span,
                 format!("unresolved import: `{path}` does not exist"),
             ));
         }
     }
-    rokc_diagnostic::set_current_span(Span::DUMMY);
     diags
 }
 

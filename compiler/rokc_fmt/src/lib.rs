@@ -17,7 +17,7 @@ use rokc_lexer::{Lexer, TokenKind};
 const INDENT: usize = 4;
 
 /// Format the file `path` whose text is `src`: a `.rokon` file must be
-/// one RokON value. `Err` is the rendered error; the file is left alone.
+/// one ROKON value. `Err` is the rendered error; the file is left alone.
 pub fn format_file(path: &Path, src: &str) -> Result<String, String> {
     if path.extension().is_some_and(|x| x == "rokon") {
         rokc_rokon::parse(src).map_err(|e| e.render(src, &path.display().to_string()))?;

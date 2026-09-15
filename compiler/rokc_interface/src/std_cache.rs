@@ -70,8 +70,10 @@ pub fn prebuilt_std(key: &StdKey<'_>) -> Option<PathBuf> {
         && o.mlir_dialect_plugins.is_empty()
         && o.mlir_pass_plugins.is_empty()
         && o.mlir_passes.is_empty()
-        // The standard library is profiled and optimized with the program.
-        && o.profile == crate::Profile::Off;
+        // The standard library is profiled, or at -O3 optimized, with
+        // the program.
+        && o.profile == crate::Profile::Off
+        && o.opt_level != "3";
     // A `--cfg` or `--target` build is rare enough that a library build
     // of its own costs more than it saves.
     if !plain || key.bootstrap.is_empty() || !key.cfg.is_empty() || key.target.is_some() {

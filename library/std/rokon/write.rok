@@ -128,12 +128,12 @@ fn pretty_fields(fs: OrderedDict<str, Value>, indent: usize) -> str {
 /// A float that reads back as the same float: the shortest round-trip
 /// digits (Display / `{:e}`), always with a `.`, as a plain decimal for
 /// magnitudes 1e-5 up to 1e17, else `1.5e300`. NaN / infinity have no
-/// RokON form (spec 3.9.1 has no literal for them): a panic, like an
+/// ROKON form (spec 3.9.1 has no literal for them): a panic, like an
 /// out-of-range index; check `is_finite` first when the data may hold
 /// them.
 fn float_text(x: float, strict: bool) -> str {
     if !x.is_finite() {
-        if strict { panic("NaN/infinity has no RokON form"); }
+        if strict { panic("NaN/infinity has no ROKON form"); }
         if x.is_nan() { return "nan"; }
         return if x.is_sign_negative() { "-inf" } else { "inf" };
     }

@@ -1,0 +1,56 @@
+// expect-exit: 0
+// gc-stress: 5
+// expect-stdout:
+// 0 0
+// 45 25
+// 10
+// 6 7
+// 3 a0a1a2
+
+// Counted loops are rotated (the test moves to the bottom, behind a
+// copy at the top): empty ranges never enter, `continue` and `break`
+// leave from anywhere in the body, nested loops keep their own counters,
+// and the back-edge poll still lets a collection in (objects move).
+fn main() {
+    let n: usize = 0;
+    let s: usize = 0;
+    for i in 0..n {
+        s += i;
+    }
+    println(f"{n} {s}");
+    let odd: usize = 0;
+    s = 0;
+    for i in 0..10usize {
+        s += i;
+        if i % 2 == 0 {
+            continue;
+        }
+        odd += i;
+    }
+    println(f"{s} {odd}");
+    let i: usize = 0;
+    let lim: usize = 10;
+    while i < lim {
+        i += 1;
+    }
+    println(f"{i}");
+    let pairs = 0;
+    let firsts = 0;
+    for a in 0..4 {
+        if a == 3 {
+            break;
+        }
+        for b in a + 1..4 {
+            pairs += 1;
+            firsts += a;
+        }
+    }
+    println(f"{pairs} {firsts + 3}");
+    let parts: List<str> = [];
+    let k: usize = 0;
+    while k < 3 {
+        parts.push(f"a{k}");
+        k += 1;
+    }
+    println(f"{parts.len()} {parts.join("")}");
+}

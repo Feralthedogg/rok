@@ -1,0 +1,33 @@
+// expect-exit: 0
+// gc-stress: 3
+// expect-stdout:
+// 1 2
+// 1 2
+// 4 1
+// 10 s0s1s2
+
+// A `ListIter` holds its own position (`next(ref self)`, stdlib 2.7.1):
+// a copy goes on from where it was copied, on its own. Walking a list
+// while the collector moves its objects.
+fn main() {
+    let xs: List<i64> = [1, 2, 3, 4];
+    let a = xs.iter();
+    let first = a.next() ?? 0;
+    let b = a;
+    println(f"{first} {a.next() ?? 0}");
+    println(f"{first} {b.next() ?? 0}");
+    println(f"{a.next_back() ?? 0} {a.len()}");
+    let sum: i64 = 0;
+    for x in xs {
+        sum += x;
+    }
+    let parts: List<str> = [];
+    for i in 0..3 {
+        parts.push(f"s{i}");
+    }
+    let joined = "";
+    for p in parts {
+        joined = joined + p;
+    }
+    println(f"{sum} {joined}");
+}

@@ -9,6 +9,7 @@ use rokc_ast::{
     StructDef as AstStructDef, StructKind as AstStructKind, Ty, TyKind as AstTyKind,
 };
 use rokc_core::Visibility;
+use rokc_diagnostic::Span;
 use rokc_ir_common::{ConstVal, FunctionId, LocalId, PrimOp, PrimTy};
 use rokc_parser::{Fixity, PrecTable};
 
@@ -116,6 +117,10 @@ struct TypeNames<'a> {
     /// instance's argument can name one (`List<Item>`) during
     /// instantiation, before the alias table proper exists.
     plain_aliases: HashMap<String, Ty>,
+    /// Plain aliases being expanded (caps a cycle).
+    alias_depth: std::cell::Cell<u32>,
+    /// Plain aliases that are cyclic or name a projection that fails.
+    broken_aliases: std::cell::RefCell<std::collections::HashSet<String>>,
     /// Every generic alias use: (alias, arguments, module, span), for
     /// its bounds check (`check_type_bounds`).
     alias_uses: std::cell::RefCell<Vec<AliasUse>>,
@@ -175,7 +180,7 @@ impl TypeNames<'_> {
     /// `Row<3>` → `[i32; 3]` when `ty` names a generic alias. The
     /// alias body's own names are resolved in the alias's module and
     /// written absolute, so the expansion means the same at the use site.
-    fn expand_alias(&self, ty: &Ty, module: &str) -> Option<Ty> {
+    fn expand_alias(&self, ty: &Ty, module: &str, at: Span) -> Option<Ty> {
         let AstTyKind::Path(p) = &ty.kind else {
             return None;
         };
@@ -184,7 +189,7 @@ impl TypeNames<'_> {
             return None;
         }
         let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
-        let full = self.canon(&segs, module, &[])?;
+        let full = self.canon(&segs, module, &[], at)?;
         let alias = self
             .generic_aliases
             .get(&full)
@@ -200,7 +205,7 @@ impl TypeNames<'_> {
             .zip(args.iter().cloned())
             .collect();
         let mut out = alias.ty.clone();
-        self.absolutize(&mut out, &module_of(&full), module, &map);
+        self.absolutize(&mut out, &module_of(&full), module, &map, at);
         collect::subst_assoc_ty(&mut out, &map);
         self.alias_uses
             .borrow_mut()
@@ -208,21 +213,114 @@ impl TypeNames<'_> {
         Some(out)
     }
 
+    /// The non-generic alias `ty` names in `module`.
+    fn plain_alias(&self, ty: &Ty, module: &str, at: Span) -> Option<String> {
+        let AstTyKind::Path(p) = &ty.kind else {
+            return None;
+        };
+        if !p.segments.last()?.generics.is_empty() {
+            return None;
+        }
+        let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
+        self.canon(&segs, module, &[], at)
+            .filter(|full| self.plain_aliases.contains_key(full))
+    }
+
+    /// `B` → `<A as P>::Out` when plain alias `full`'s body names a
+    /// projection: expanded in body context (after impl registration),
+    /// the body written absolute for `module`.
+    fn projection_alias(&self, full: &str, module: &str, at: Span) -> Option<Ty> {
+        let body = self.plain_aliases.get(full)?;
+        let from = module_of(full);
+        if !self.names_projection(body, &from, at) {
+            return None;
+        }
+        let mut out = body.clone();
+        self.absolutize(&mut out, &from, module, &HashMap::new(), at);
+        Some(out)
+    }
+
+    /// Does `ty` (written in `module`) name a projection: `<T as Tr>::X`,
+    /// or `A::X` with `A` a type?
+    fn names_projection(&self, ty: &Ty, module: &str, at: Span) -> bool {
+        struct Find<'x, 'n> {
+            names: &'x TypeNames<'n>,
+            module: &'x str,
+            at: Span,
+            found: bool,
+        }
+        impl crate::walk::AstVisitor for Find<'_, '_> {
+            fn ty(&mut self, t: &Ty) {
+                match &t.kind {
+                    AstTyKind::QPath(_) => self.found = true,
+                    AstTyKind::Path(p) => {
+                        let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
+                        let n = self.names;
+                        match n.canon(&segs, self.module, &[], self.at) {
+                            // Through another alias (`type D = List<B>;`).
+                            Some(full) if n.alias_depth.get() < 32 => {
+                                if let Some(body) = n.plain_aliases.get(&full) {
+                                    n.alias_depth.set(n.alias_depth.get() + 1);
+                                    self.found |=
+                                        n.names_projection(body, &module_of(&full), self.at);
+                                    n.alias_depth.set(n.alias_depth.get() - 1);
+                                }
+                            }
+                            Some(_) => {}
+                            None => {
+                                self.found |= segs.len() > 1
+                                    && n.canon(&segs[..segs.len() - 1], self.module, &[], self.at)
+                                        .is_some();
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut f = Find {
+            names: self,
+            module,
+            at,
+            found: false,
+        };
+        crate::walk::walk_ty(&mut f, ty);
+        f.found
+    }
+
     /// Rewrite the type names in `ty` (outside `params`) that resolve in
     /// module `from` to absolute paths valid in module `to`.
-    fn absolutize(&self, ty: &mut Ty, from: &str, to: &str, params: &HashMap<String, Ty>) {
-        let mut rec = |t: &mut Ty| self.absolutize(t, from, to, params);
+    fn absolutize(
+        &self,
+        ty: &mut Ty,
+        from: &str,
+        to: &str,
+        params: &HashMap<String, Ty>,
+        at: Span,
+    ) {
+        let mut rec = |t: &mut Ty| self.absolutize(t, from, to, params, at);
         match &mut ty.kind {
             AstTyKind::Path(p) => {
                 for s in &mut p.segments {
                     s.generics.iter_mut().for_each(&mut rec);
                 }
-                let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
+                let mut segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
                 if params.contains_key(segs[0]) || matches!(segs[0], "pkg" | "rok" | "Self") {
                     return;
                 }
-                let Some(full) = self.canon(&segs, from, &[]) else {
-                    return;
+                // `A::Out`: a projection keeps its last segment.
+                let mut tail = None;
+                let full = match self.canon(&segs, from, &[], at) {
+                    Some(full) => full,
+                    None if segs.len() > 1 => {
+                        segs.pop();
+                        let Some(full) = self.canon(&segs, from, &[], at) else {
+                            return;
+                        };
+                        tail = p.segments.pop();
+                        full
+                    }
+                    None => return,
                 };
                 let pkg = resolve::package_of(&full);
                 let abs: Vec<String> = if full.starts_with("rok::") {
@@ -246,6 +344,7 @@ impl TypeNames<'_> {
                         generics: if i + 1 == n { last.clone() } else { Vec::new() },
                     })
                     .collect();
+                p.segments.extend(tail);
             }
             AstTyKind::Sum(ts) | AstTyKind::Tuple(ts) => ts.iter_mut().for_each(rec),
             AstTyKind::Array(e, _) | AstTyKind::Nest(e) | AstTyKind::Binding(_, e) => rec(e),
@@ -272,21 +371,24 @@ impl TypeNames<'_> {
         }
     }
 
+    /// The type key `segments` names from `module`; its errors
+    /// (ambiguity, visibility) are reported at `at`.
     fn canon(
         &self,
         segments: &[&str],
         module: &str,
         local_uses: &[Vec<crate::uses::UseEntry>],
+        at: Span,
     ) -> Option<String> {
         if !local_uses.iter().all(Vec::is_empty) {
-            return self.canon_uncached(segments, module, local_uses);
+            return self.canon_uncached(segments, module, local_uses, at);
         }
         let key = (segments.join("::"), module.to_owned());
         if let Some(hit) = self.canon_memo.borrow().get(&key) {
             return hit.clone();
         }
         let errors = self.diags.borrow().len();
-        let out = self.canon_uncached(segments, module, local_uses);
+        let out = self.canon_uncached(segments, module, local_uses, at);
         if self.diags.borrow().len() == errors {
             self.canon_memo.borrow_mut().insert(key, out.clone());
         }
@@ -305,6 +407,7 @@ impl TypeNames<'_> {
         segments: &[&str],
         module: &str,
         local_uses: &[Vec<crate::uses::UseEntry>],
+        at: Span,
     ) -> Option<String> {
         let exists = |k: &str| self.names.contains(k) || self.reexports.contains_key(k);
         let keys = |leaf: &str| {
@@ -323,20 +426,23 @@ impl TypeNames<'_> {
         let mut full = match resolve_name(segments, module, local_uses, self.uses, &set) {
             Ok(r) => r?,
             Err(hits) => {
-                self.error(format!(
-                    "type name `{}` is ambiguous in module `{}` — multiple glob imports \
+                self.error(
+                    at,
+                    format!(
+                        "type name `{}` is ambiguous in module `{}` — multiple glob imports \
                      resolve it: {}",
-                    segments.join("::"),
-                    module_display(module),
-                    hits.join(", ")
-                ));
+                        segments.join("::"),
+                        module_display(module),
+                        hits.join(", ")
+                    ),
+                );
                 hits.into_iter().next()?
             }
         };
         // Spec 5.6.13: every module on the path as written (a re-export
         // key, before following it) must be visible too.
         if let Some(m) = resolve::hidden_module(&self.mod_vis, module, &full) {
-            self.error(resolve::hidden_module_msg(&full, &m, module));
+            self.error(at, resolve::hidden_module_msg(&full, &m, module));
         }
         if let Some(t) = self.reexports.get(&full) {
             full.clone_from(t);
@@ -344,12 +450,15 @@ impl TypeNames<'_> {
         if let Some(&vis) = self.visibility.get(&full) {
             let def_module = module_of(&full);
             if !visible_from(module, &def_module, vis) {
-                self.error(format!(
-                    "type `{full}` is private to module `{}` and cannot be used from \
+                self.error(
+                    at,
+                    format!(
+                        "type `{full}` is private to module `{}` and cannot be used from \
                      `{}` (spec 5.6 — add `pub` to expose it)",
-                    module_display(&def_module),
-                    module_display(module)
-                ));
+                        module_display(&def_module),
+                        module_display(module)
+                    ),
+                );
             }
         }
         Some(full)
@@ -362,6 +471,7 @@ impl TypeNames<'_> {
         segments: &[&str],
         module: &str,
         local_uses: &[Vec<crate::uses::UseEntry>],
+        at: Span,
     ) -> Option<String> {
         let full_key = |k: &str| -> Option<String> {
             if self.variants.contains(k) {
@@ -369,7 +479,7 @@ impl TypeNames<'_> {
             }
             let (ty, v) = k.rsplit_once("::")?;
             let segs: Vec<&str> = ty.split("::").collect();
-            let e = self.canon(&segs, module, local_uses)?;
+            let e = self.canon(&segs, module, local_uses, at)?;
             let key = format!("{e}::{v}");
             self.variants.contains(&key).then_some(key)
         };
@@ -391,13 +501,16 @@ impl TypeNames<'_> {
         match resolve_name(segments, module, local_uses, self.uses, &set) {
             Ok(r) => full_key(&r?),
             Err(hits) => {
-                self.error(format!(
-                    "variant name `{}` is ambiguous in module `{}` — multiple glob imports \
+                self.error(
+                    at,
+                    format!(
+                        "variant name `{}` is ambiguous in module `{}` — multiple glob imports \
                      resolve it: {}",
-                    segments.join("::"),
-                    module_display(module),
-                    hits.join(", ")
-                ));
+                        segments.join("::"),
+                        module_display(module),
+                        hits.join(", ")
+                    ),
+                );
                 full_key(hits.first()?)
             }
         }
@@ -405,21 +518,24 @@ impl TypeNames<'_> {
 
     /// A `fn` type's bounds: `+ Send + Sync` (sorted auto-trait keys),
     /// `unsafe`, `extern "C"`.
-    fn fn_bounds(&self, bounds: &rokc_ast::FnTyBounds, module: &str) -> crate::FnBounds {
+    fn fn_bounds(&self, bounds: &rokc_ast::FnTyBounds, module: &str, at: Span) -> crate::FnBounds {
         let mut keys: Vec<String> = bounds
             .auto
             .iter()
             .filter_map(|b| {
                 let segs: Vec<&str> = b.segments.iter().map(|s| s.name.as_str()).collect();
-                let key = self.trait_key(&segs, module);
+                let key = self.trait_key(&segs, module, at);
                 if self.auto_traits.contains(&key) {
                     Some(key)
                 } else {
-                    self.error(format!(
-                        "`{}` in a `fn` type bound is not an auto trait — only `Send` / \
+                    self.error(
+                        at,
+                        format!(
+                            "`{}` in a `fn` type bound is not an auto trait — only `Send` / \
                          `Sync` can bound a `fn` type",
-                        segs.join("::")
-                    ));
+                            segs.join("::")
+                        ),
+                    );
                     None
                 }
             })
@@ -493,35 +609,37 @@ impl TypeNames<'_> {
             .flatten()
     }
 
-    fn trait_key(&self, segments: &[&str], module: &str) -> String {
-        self.canon(segments, module, &[])
+    fn trait_key(&self, segments: &[&str], module: &str, at: Span) -> String {
+        self.canon(segments, module, &[], at)
             .filter(|full| self.traits.contains(full))
             .unwrap_or_else(|| segments.last().copied().unwrap_or_default().to_owned())
     }
 
-    fn error(&self, msg: String) {
+    fn error(&self, at: Span, msg: String) {
         self.diags
             .borrow_mut()
             .push(rokc_diagnostic::RokDiagnostic::error(
                 rokc_diagnostic::ErrorKind::Type,
+                at,
                 msg,
             ));
     }
 
-    fn error_help(&self, msg: String, help: String) {
+    fn error_help(&self, at: Span, msg: String, help: String) {
         self.diags.borrow_mut().push(
-            rokc_diagnostic::RokDiagnostic::error(rokc_diagnostic::ErrorKind::Type, msg)
+            rokc_diagnostic::RokDiagnostic::error(rokc_diagnostic::ErrorKind::Type, at, msg)
                 .with_help(help),
         );
     }
 }
 
-/// Where a type is being resolved: the name index plus the module the
-/// referencing item lives in.
+/// Where a type is being resolved: the name index, the module the
+/// referencing item lives in, and the location its errors go to.
 #[derive(Clone, Copy)]
 struct Scope<'b> {
     names: &'b TypeNames<'b>,
     module: &'b str,
+    at: Span,
 }
 
 // AST → HIR. Three passes: register struct names, then function
@@ -533,6 +651,7 @@ pub fn lower(program: &Program, prec: &PrecTable) -> HirModule {
     lower_full(
         program.clone(),
         prec,
+        &[],
         &empty_uses,
         &empty_reexports,
         &crate::HirInput::default(),
@@ -549,6 +668,7 @@ pub fn lower_with_uses(
     lower_full(
         program.clone(),
         prec,
+        &[],
         uses,
         &empty_reexports,
         &crate::HirInput::default(),
@@ -758,8 +878,10 @@ struct Env<'a> {
     key_of: HashMap<FunctionId, String>,
     /// Declarations whose return type is inferred from the body.
     infer_ret: std::collections::HashSet<FunctionId>,
-    /// `HirInput::implicit_main`.
+    /// `RootMain::Implicit`.
     implicit_main: bool,
+    /// `RootMain::Harness`.
+    harness_main: bool,
     /// Bodies without `-> T` that may diverge on every path
     /// (`collect::may_diverge`), by span.
     may_diverge: std::collections::HashSet<rokc_diagnostic::Span>,
@@ -1649,6 +1771,8 @@ struct LowerCtx<'a> {
     /// where `return` is not allowed (spec 4.16.4). Closures get a fresh
     /// context, so a `return` inside one stays legal.
     implicit_main: bool,
+    /// Lowering the test harness `main` (`RootMain::Harness`).
+    harness_main: bool,
     /// The `ref` parameters' locals and types (`ref self` included);
     /// every return also hands their values back (copy-out).
     ref_params: Vec<(LocalId, HirTy)>,
@@ -1749,6 +1873,9 @@ struct LowerCtx<'a> {
     /// Already lowered expressions an AST desugar refers to by a `#sN`
     /// path (`expr::splice`).
     splices: HashMap<String, HirExpr>,
+    /// What is being lowered (the expression, statement or item): where
+    /// diagnostics without a location of their own go.
+    at: std::cell::Cell<Span>,
 }
 
 /// Where a speculative lowering started (`probe_mark`); `rollback`
@@ -1827,14 +1954,21 @@ impl<'a> LowerCtx<'a> {
         );
     }
 
-    fn new(env: &'a Env<'a>, ty_subst: &'a HashMap<String, HirTy>, self_ty: Option<HirTy>) -> Self {
-        Self::with_subst(env, std::borrow::Cow::Borrowed(ty_subst), self_ty)
+    /// A context lowering at `at` (see `LowerCtx::at`).
+    fn new(
+        env: &'a Env<'a>,
+        ty_subst: &'a HashMap<String, HirTy>,
+        self_ty: Option<HirTy>,
+        at: Span,
+    ) -> Self {
+        Self::with_subst(env, std::borrow::Cow::Borrowed(ty_subst), self_ty, at)
     }
 
     fn with_subst(
         env: &'a Env<'a>,
         ty_subst: std::borrow::Cow<'a, TySubst>,
         self_ty: Option<HirTy>,
+        at: Span,
     ) -> Self {
         Self {
             env,
@@ -1846,6 +1980,7 @@ impl<'a> LowerCtx<'a> {
             infer_ret: false,
             ret_tys: None,
             implicit_main: false,
+            harness_main: false,
             ref_params: Vec::new(),
             ref_captured: std::collections::HashSet::new(),
             pending_cells: Vec::new(),
@@ -1877,12 +2012,32 @@ impl<'a> LowerCtx<'a> {
             assoc_names: Vec::new(),
             infer_vars: false,
             splices: HashMap::new(),
+            at: std::cell::Cell::new(at),
         }
+    }
+
+    /// The location being lowered.
+    fn here(&self) -> Span {
+        self.at.get()
+    }
+
+    /// Lower at `span`: `f`'s diagnostics without a location of their
+    /// own go there.
+    fn at_span<R>(&mut self, span: Span, f: impl FnOnce(&mut Self) -> R) -> R {
+        let outer = self.at.replace(span);
+        let r = f(self);
+        self.at.set(outer);
+        r
     }
 
     /// Push a lowering-time diagnostic onto the shared sink.
     fn emit_error(&self, kind: rokc_diagnostic::ErrorKind, msg: String) {
-        let mut d = rokc_diagnostic::RokDiagnostic::error(kind, msg);
+        self.emit_error_at(kind, self.here(), msg);
+    }
+
+    /// An error at `at`.
+    fn emit_error_at(&self, kind: rokc_diagnostic::ErrorKind, at: Span, msg: String) {
+        let mut d = rokc_diagnostic::RokDiagnostic::error(kind, at, msg);
         if let Some((callee, at)) = self.env.sink.call_sites.borrow().first() {
             d = d.with_secondary(*at, format!("in this call of `{}`", leaf_name(callee)));
         }
@@ -1894,7 +2049,11 @@ impl<'a> LowerCtx<'a> {
     /// raised it: a `rethrows` instance with a non-throwing argument
     /// would otherwise flag every `try` in its body.
     fn emit_warning(&self, msg: String) {
-        let d = rokc_diagnostic::RokDiagnostic::warning(rokc_diagnostic::ErrorKind::Type, msg);
+        let d = rokc_diagnostic::RokDiagnostic::warning(
+            rokc_diagnostic::ErrorKind::Type,
+            self.here(),
+            msg,
+        );
         if self.ty_subst.is_empty() {
             self.env.sink.diagnostics.borrow_mut().push(d);
             return;
@@ -2407,7 +2566,7 @@ impl<'a> LowerCtx<'a> {
     /// The trait ref generic impl `gi` provides under `subst`: its trait
     /// arguments and associated types instantiated.
     fn generic_impl_ref(&self, gi: &Impl, subst: &TySubst) -> TraitRef {
-        let mut rcx = LowerCtx::new(self.env, subst, None);
+        let mut rcx = LowerCtx::new(self.env, subst, None, self.here());
         rcx.current_module.clone_from(&gi.module);
         rcx.set_bounds(&gi.generics, &gi.where_clause);
         TraitRef::new(
@@ -2429,7 +2588,13 @@ impl<'a> LowerCtx<'a> {
         let AstTyKind::Path(p) = &b.kind else {
             return None;
         };
-        Some(resolve::trait_ref(&self.env.names, p, module, rec))
+        Some(resolve::trait_ref(
+            &self.env.names,
+            p,
+            module,
+            self.here(),
+            rec,
+        ))
     }
 
     /// The impl's type-parameter bindings when generic impl `gi` covers
@@ -2489,7 +2654,7 @@ impl<'a> LowerCtx<'a> {
                 }
             }
         }
-        let mut rcx = LowerCtx::new(self.env, &subst, None);
+        let mut rcx = LowerCtx::new(self.env, &subst, None, self.here());
         rcx.current_module.clone_from(&gi.module);
         rcx.set_bounds(&gi.generics, &gi.where_clause);
         // Another generic struct's arguments (`List<i32>` against
@@ -2578,7 +2743,7 @@ impl<'a> LowerCtx<'a> {
         self.env
             .defs
             .instantiate_struct(base, args, span, |def, subst| {
-                let mut rcx = LowerCtx::new(self.env, subst, None);
+                let mut rcx = LowerCtx::new(self.env, subst, None, self.here());
                 rcx.current_module = module_of(base);
                 generic_struct_fields(def, &|t| rcx.resolve_ast_ty(t))
             })
@@ -2611,7 +2776,7 @@ impl<'a> LowerCtx<'a> {
         self.env
             .defs
             .instantiate_enum(base, args, span, |def, subst| {
-                let mut rcx = LowerCtx::new(self.env, subst, None);
+                let mut rcx = LowerCtx::new(self.env, subst, None, self.here());
                 rcx.current_module = module_of(base);
                 generic_enum_variants(def, &|t| rcx.resolve_ast_ty(t))
             })
@@ -2632,6 +2797,7 @@ impl<'a> LowerCtx<'a> {
         Scope {
             names: &self.env.names,
             module: &self.current_module,
+            at: self.here(),
         }
     }
 
@@ -2639,9 +2805,12 @@ impl<'a> LowerCtx<'a> {
     /// trait, generic bases included), resolved from this function's
     /// module and `use`s.
     fn canon_type(&self, segments: &[&str]) -> Option<String> {
-        self.env
-            .names
-            .canon(segments, &self.current_module, &self.local_uses)
+        self.env.names.canon(
+            segments,
+            &self.current_module,
+            &self.local_uses,
+            self.here(),
+        )
     }
 
     /// Split `a::E::V` into (`a::E` enum, `V`) when the prefix names an
@@ -2651,10 +2820,12 @@ impl<'a> LowerCtx<'a> {
     fn enum_path(&self, segments: &[&str]) -> Option<(String, String)> {
         let (variant, ty) = segments.split_last()?;
         if ty.is_empty() {
-            let key =
-                self.env
-                    .names
-                    .canon_variant(segments, &self.current_module, &self.local_uses)?;
+            let key = self.env.names.canon_variant(
+                segments,
+                &self.current_module,
+                &self.local_uses,
+                self.here(),
+            )?;
             let (e, v) = key.rsplit_once("::")?;
             return Some((e.to_owned(), v.to_owned()));
         }
@@ -2798,6 +2969,9 @@ impl<'a> LowerCtx<'a> {
 
     /// Report use of a private value item (fn / const / static).
     fn check_item_visible(&self, full: &str, what: &str) -> bool {
+        if self.harness_main {
+            return true;
+        }
         let vis = self
             .env
             .item_visibility
@@ -2951,13 +3125,38 @@ impl<'a> LowerCtx<'a> {
                 if self
                     .env
                     .names
-                    .expand_alias(ty, &self.current_module)
+                    .expand_alias(ty, &self.current_module, self.here())
                     .is_some() =>
             {
-                let t = self.env.names.expand_alias(ty, &self.current_module);
+                let t = self
+                    .env
+                    .names
+                    .expand_alias(ty, &self.current_module, self.here());
                 t.map_or(HirTy::Unknown, |t| rec(&t))
             }
             AstTyKind::Path(p) => {
+                // Depth-capped: a cyclic alias is reported by the alias pass.
+                let param =
+                    matches!(p.segments.as_slice(), [s] if self.ty_subst.contains_key(&s.name));
+                let names = &self.env.names;
+                let alias = (!param && names.alias_depth.get() < 32)
+                    .then(|| names.plain_alias(ty, &self.current_module, self.here()))
+                    .flatten();
+                if let Some(full) = alias {
+                    // Reported at the alias.
+                    if names.broken_aliases.borrow().contains(&full) {
+                        return HirTy::Unknown;
+                    }
+                    if let Some(t) =
+                        names.projection_alias(&full, &self.current_module, self.here())
+                    {
+                        let depth = &names.alias_depth;
+                        depth.set(depth.get() + 1);
+                        let r = rec(&t);
+                        depth.set(depth.get() - 1);
+                        return r;
+                    }
+                }
                 if let [seg] = p.segments.as_slice() {
                     if seg.generics.is_empty() {
                         if let Some(t) = self.ty_subst.get(&seg.name) {
@@ -3013,7 +3212,7 @@ impl<'a> LowerCtx<'a> {
                         // A new instance's bound errors point at this type.
                         let at = Some(ty.span)
                             .filter(|s| !s.is_dummy())
-                            .unwrap_or_else(rokc_diagnostic::current_span);
+                            .unwrap_or_else(|| self.here());
                         let mut leftover = Vec::new();
                         args.iter()
                             .for_each(|a| collect_unknown_paths(a, &mut leftover));
@@ -3099,7 +3298,9 @@ impl<'a> LowerCtx<'a> {
             AstTyKind::Fn(args, ret, b) => HirTy::Fn(
                 args.iter().map(rec).collect(),
                 Box::new(rec(ret)),
-                self.env.names.fn_bounds(b, &self.current_module),
+                self.env
+                    .names
+                    .fn_bounds(b, &self.current_module, self.here()),
             ),
             AstTyKind::Throws { ok, err } => crate::ty::throws_ty(rec(ok), rec(err)),
             AstTyKind::QPath(q) => self.qpath_ty(q),
@@ -3112,7 +3313,10 @@ impl<'a> LowerCtx<'a> {
         let base = self.resolve_ty_inner(&q.self_ty);
         let tp = &q.trait_path;
         let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
-        let key = self.env.names.trait_key(&segs, &self.current_module);
+        let key = self
+            .env
+            .names
+            .trait_key(&segs, &self.current_module, self.here());
         if !self.env.names.traits.contains(&key) {
             self.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
@@ -3124,9 +3328,13 @@ impl<'a> LowerCtx<'a> {
             );
             return HirTy::Unknown;
         }
-        let want = resolve::trait_ref(&self.env.names, tp, &self.current_module, |t| {
-            self.resolve_ty_inner(t)
-        });
+        let want = resolve::trait_ref(
+            &self.env.names,
+            tp,
+            &self.current_module,
+            self.here(),
+            |t| self.resolve_ty_inner(t),
+        );
         self.project_or_report(&base, &q.item, Some(&[key]), &[want], true)
     }
 
@@ -3185,7 +3393,7 @@ impl<'a> LowerCtx<'a> {
                 .into_iter()
                 .flatten()
                 .map(|p| {
-                    resolve::trait_ref(&self.env.names, p, &self.current_module, |t| {
+                    resolve::trait_ref(&self.env.names, p, &self.current_module, self.here(), |t| {
                         self.resolve_ty_inner(t)
                     })
                 })
@@ -3276,7 +3484,7 @@ impl<'a> LowerCtx<'a> {
             let Some((_, ty)) = gi.assoc.iter().find(|(n, _)| n == name) else {
                 continue;
             };
-            let mut rcx = LowerCtx::new(self.env, &subst, None);
+            let mut rcx = LowerCtx::new(self.env, &subst, None, self.here());
             rcx.current_module.clone_from(&gi.module);
             rcx.set_bounds(&gi.generics, &gi.where_clause);
             let have = resolve::trait_args(&gi.trait_args, |t| rcx.resolve_ast_ty(t)).0;
@@ -3319,7 +3527,10 @@ impl<'a> LowerCtx<'a> {
                     continue;
                 };
                 let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
-                let key = self.env.names.trait_key(&segs, &self.current_module);
+                let key = self
+                    .env
+                    .names
+                    .trait_key(&segs, &self.current_module, self.here());
                 self.ty_bound_args
                     .entry(name.to_owned())
                     .or_default()

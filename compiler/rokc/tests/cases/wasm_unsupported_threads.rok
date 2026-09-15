@@ -1,0 +1,35 @@
+// spec: std 304
+// spec: refs-lang 007.06
+// only-target: wasm32-wasi wasm32-unknown-unknown
+// expect-exit: 0
+// expect-stdout:
+// spawn: Unsupported
+// named spawn: Unsupported
+// current name: none
+// local: 7
+// park after unpark returns
+// cpus 1, workers 1
+// tasks: 6
+
+// One thread (stdlib 0.1.4, 304's table: wasm32-wasi and the browser):
+// spawning reports `IoErrorKind::Unsupported`; the one thread (unnamed),
+// its thread-locals and park / unpark work, and the executor runs every
+// task on it.
+use rok::std::thread;
+use rok::std::io::{IoError, IoErrorKind};
+
+try thread::Builder::new().spawn(|| 1) catch e: IoError { println(f"spawn: {e.kind():?}"); };
+try thread::Builder::new().name("w").spawn(|| 1) catch e: IoError {
+    println(f"named spawn: {e.kind():?}");
+};
+println(f"current name: {thread::current().name() ?? "none"}");
+let slot = thread::local(|| 0);
+slot.set(7);
+println(f"local: {slot.get()}");
+thread::current().unpark();
+thread::park();
+println("park after unpark returns");
+println(f"cpus {task::cpu_count()}, workers {task::workers()}");
+let a = task::spawn(async { 1 + 2 });
+let b = task::spawn(async { await task::sleep(Duration::ms(2)); 3 });
+println(f"tasks: {(await a) + (await b)}");

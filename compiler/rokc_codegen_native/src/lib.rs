@@ -84,7 +84,11 @@ pub fn unsupported(module: &MirModule) -> Option<String> {
 /// Compile `module` to an object file.
 pub fn compile(module: &MirModule, opts: &Options) -> Result<Output, RokDiagnostic> {
     if let Some(why) = unsupported(module) {
-        return Err(RokDiagnostic::error(ErrorKind::Unsupported, why));
+        return Err(RokDiagnostic::error(
+            ErrorKind::Unsupported,
+            rokc_diagnostic::Span::DUMMY,
+            why,
+        ));
     }
     let emit = if module.target.arch == "x86_64" {
         x64::emit
@@ -95,7 +99,7 @@ pub fn compile(module: &MirModule, opts: &Options) -> Result<Output, RokDiagnost
     // COFF: no DWARF (Windows debuggers read CodeView; `-g` builds for
     // Windows go through LLVM).
     if opts.debug && !c.obj.coff {
-        dwarf::write(&mut c.obj, &module.target, &module.struct_names);
+        dwarf::write(&mut c.obj, module);
     }
     if let Some(d) = rokc_codegen_mlir::codegen_error(&c.errors) {
         return Err(d);

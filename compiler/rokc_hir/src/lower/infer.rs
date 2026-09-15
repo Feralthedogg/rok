@@ -37,7 +37,7 @@ pub(super) fn fresh(ctx: &LowerCtx<'_>) -> HirTy {
     vars.push(Var {
         ty: None,
         weak: false,
-        fixed: rokc_diagnostic::current_span(),
+        fixed: ctx.here(),
         conflict: None,
     });
     HirTy::Var(u32::try_from(vars.len() - 1).expect("inference variable overflow"))
@@ -189,7 +189,7 @@ fn unify_weak(ctx: &LowerCtx<'_>, lhs: &HirTy, rhs: &HirTy, weak: bool) -> bool 
 }
 
 fn bind(ctx: &LowerCtx<'_>, v: usize, t: &HirTy, weak: bool) -> bool {
-    let here = rokc_diagnostic::current_span();
+    let here = ctx.here();
     let bound = ctx.env.sink.infer_vars.borrow()[v].ty.clone();
     let ok = match bound {
         None => {
@@ -323,7 +323,7 @@ pub(super) fn lower_let(
     });
     // Undo the open attempt (its binding included).
     ctx.rollback(&mark);
-    let outer_span = rokc_diagnostic::set_current_span(s.span);
+    let outer_span = ctx.at.replace(s.span);
     let out = match solved {
         // The open variables are not in the binding's type
         // (`List::new().len()`): lowered again, they are errors.
@@ -332,6 +332,7 @@ pub(super) fn lower_let(
             if let Some((at, used, fixed, Some(have))) = conflict {
                 let d = rokc_diagnostic::RokDiagnostic::error(
                     rokc_diagnostic::ErrorKind::Type,
+                    at,
                     format!(
                         "conflicting uses of `{name}` (`{}`): `{}` here, but `{}` fixed at {}:{}",
                         ctx.ty_name(&open),
@@ -341,7 +342,6 @@ pub(super) fn lower_let(
                         fixed.col
                     ),
                 )
-                .with_span(at, "")
                 .with_secondary(fixed, format!("`{name}`'s type fixed here"));
                 ctx.env.sink.diagnostics.borrow_mut().push(d);
             }
@@ -367,7 +367,7 @@ pub(super) fn lower_let(
             }
         }
     };
-    rokc_diagnostic::set_current_span(outer_span);
+    ctx.at.set(outer_span);
     out
 }
 

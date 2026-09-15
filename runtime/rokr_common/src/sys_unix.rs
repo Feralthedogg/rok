@@ -405,7 +405,7 @@ pub fn sleep_ns(ns: u64) {
 
 /// Grow linear memory by `len` bytes (whole 64 KiB pages): the new
 /// pages read as zero. wasm memory cannot be reserved without being
-/// accessible; engines back it lazily.
+/// accessible; engines back it lazily. Null past the engine's limit.
 #[cfg(target_os = "wasi")]
 pub fn reserve(len: usize) -> *mut u8 {
     let pages = len.div_ceil(64 << 10);

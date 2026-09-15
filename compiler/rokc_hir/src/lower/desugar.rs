@@ -271,7 +271,12 @@ pub(super) fn closure_ctx<'a>(
     expected_param_tys: Option<&Vec<HirTy>>,
     span: rokc_diagnostic::Span,
 ) -> (LowerCtx<'a>, Vec<HirParam>, Vec<HirStmt>, Vec<HirTy>) {
-    let mut cl_ctx = LowerCtx::with_subst(ctx.env, ctx.ty_subst.clone(), ctx.self_ty.clone());
+    let mut cl_ctx = LowerCtx::with_subst(
+        ctx.env,
+        ctx.ty_subst.clone(),
+        ctx.self_ty.clone(),
+        ctx.here(),
+    );
     cl_ctx.current_module.clone_from(&ctx.current_module);
     cl_ctx.local_uses.clone_from(&ctx.local_uses);
     cl_ctx.nested_fns.clone_from(&ctx.nested_fns);

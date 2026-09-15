@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 
-# RokON (Rok Object Notation): `.rokon` data files (`rok.rokon`,
+# ROKON (Rok Object Notation): `.rokon` data files (`rok.rokon`,
 # `rok.lock`), read with the rok lexer / parser.
 [dependencies]
 rokc_ast = { workspace = true }

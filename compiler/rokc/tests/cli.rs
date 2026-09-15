@@ -229,6 +229,45 @@ fn lib_package_builds_archive_and_runs_tests() {
 }
 
 #[test]
+fn tests_in_private_modules_run() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("privtests");
+    let lib = new_package(&dir, "privlib", true);
+    let mut src = fs::read_to_string(lib.join("lib.rok")).unwrap();
+    src.push_str(
+        "mod util;\nmod inner {\n    mod deeper {\n        #[test]\n        fn f() {}\n    }\n\
+         \x20   #[test]\n    fn g() {\n        panic(\"g\");\n    }\n}\n",
+    );
+    fs::write(lib.join("lib.rok"), src).unwrap();
+    fs::write(
+        lib.join("util.rok"),
+        "mod checks {\n    #[test]\n    fn h() {}\n}\n",
+    )
+    .unwrap();
+    let out = rokc(Some(&env), &lib, &["test"]);
+    assert_exit(&out, 1);
+    let stdout = text(&out.stdout);
+    for line in [
+        "test inner::deeper::f ... ok",
+        "test inner::g ... FAILED",
+        "test util::checks::h ... ok",
+        "3 passed; 1 failed",
+    ] {
+        assert!(stdout.contains(line), "{line}\n{stdout}");
+    }
+
+    // User code in a test build keeps the visibility rules.
+    fs::write(
+        lib.join("util.rok"),
+        "mod checks {\n    #[test]\n    fn h() {}\n}\npub fn leak() { checks::h(); }\n",
+    )
+    .unwrap();
+    let out = rokc(Some(&env), &lib, &["test"]);
+    assert_exit(&out, 1);
+    assert!(text(&out.stderr).contains("`util::checks::h` is private"));
+}
+
+#[test]
 fn lone_file_is_an_anonymous_package() {
     let Some(env) = setup() else { return };
     let dir = scratch("anon");
@@ -304,7 +343,7 @@ fn fmt_check_and_rewrite() {
     );
     assert_exit(&rokc(None, &dir, &["fmt", "--check", "a.rok"]), 0);
 
-    // `.rokon` data files too: re-indented, and checked to be RokON.
+    // `.rokon` data files too: re-indented, and checked to be ROKON.
     fs::write(dir.join("rok.rokon"), "Package {\n  deps: {}, // none\n}\n").unwrap();
     assert_exit(&rokc(None, &dir, &["fmt"]), 0);
     assert_eq!(
@@ -1385,11 +1424,31 @@ fn non_exhaustive_needs_a_catch_all_across_packages() {
     );
 }
 
+/// A native build links the prebuilt standard library, except at `-O3`,
+/// where it is compiled with the program (9.2.16).
+#[test]
+fn o3_compiles_std_from_source() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("o3-std");
+    fs::write(dir.join("main.rok"), "println(\"hi\");\n").unwrap();
+    for (opt, std) in [("-O2", "Std prebuilt ("), ("-O3", "Std from source")] {
+        let out = rokc(Some(&env), &dir, &["run", opt, "-v", "main.rok"]);
+        assert_exit(&out, 0);
+        assert_eq!(text(&out.stdout), "hi\n");
+        assert!(
+            text(&out.stderr).contains(std),
+            "{opt}: {}",
+            text(&out.stderr)
+        );
+    }
+}
+
 /// Profile-guided optimization: `-C profile-generate[=<dir>]` instruments
 /// (LLVM at every level, so `-O0` too), the run writes a raw profile
 /// (`LLVM_PROFILE_FILE` overrides where), `rokc profdata merge` indexes
 /// it, and `-C profile-use` optimizes with it; a profile older than the
-/// code is a warning. The REPL, `-C backend=native` and wasm32 refuse it.
+/// code is a warning (again when the build is Fresh). The REPL,
+/// `-C backend=native` and wasm32-unknown-unknown refuse it.
 #[test]
 fn profile_guided_optimization_round_trip() {
     let dir = scratch("pgo");
@@ -1435,11 +1494,17 @@ fn profile_guided_optimization_round_trip() {
         eprintln!("skipped: no {} (targets/build.sh)", rt.display());
         return;
     }
-    if targets.join("wasm32-wasi").is_dir() {
+    if targets.join("wasm32-unknown-unknown").is_dir() {
         refused(
-            &["build", "--target", "wasm32-wasi", "-C", "profile-generate"],
+            &[
+                "build",
+                "--target",
+                "wasm32-unknown-unknown",
+                "-C",
+                "profile-generate",
+            ],
             1,
-            "not supported for wasm32-wasi",
+            "no file system to write its profile to",
         );
     }
     let build = |args: &[&str]| {
@@ -1506,4 +1571,161 @@ fn profile_guided_optimization_round_trip() {
     main("\n        if s % 1000 == 999 {\n            println(\"x\");\n        }");
     let err = build(&["-O2", "-C", "profile-use=p.profdata", "-o", "stale"]);
     assert!(err.contains("the profile is out of date for"), "{err}");
+    // A Fresh build says so again.
+    let err = build(&["-O2", "-C", "profile-use=p.profdata", "-o", "stale"]);
+    assert!(err.contains("the profile is out of date for"), "{err}");
+}
+
+const PGO_MAIN: &str = "fn classify(n: i64) -> i64 {\n    if n % 7 == 0 { 3 } else if n % 3 == 0 { \
+                        2 } else { 1 }\n}\n\nfn main() {\n    let s: i64 = 0;\n    for i in \
+                        0i64..100000i64 {\n        s += classify(i);\n    }\n    \
+                        println(f\"{s}\");\n}\n";
+
+/// `rokc profdata show` summarizes a profile (`--all-functions`,
+/// `--topn`); a merge that overflows a counter warns and still writes
+/// the profile; context-sensitive PGO: `-C cs-profile-generate` on top of
+/// `-C profile-use`, its runs merged with the first profile, used again.
+#[test]
+fn profdata_show_merge_warnings_and_context_sensitive_pgo() {
+    let dir = scratch("pgo-cs");
+    let max = 1u64 << 63;
+    fs::write(
+        dir.join("big.proftext"),
+        format!("# IR level Instrumentation Flag\n:ir\nhot\n1\n2\n{max}\n5\n\ncold\n2\n1\n7\n"),
+    )
+    .unwrap();
+    let Some(env) = setup() else { return };
+    let ok = |args: &[&str]| {
+        let out = rokc(None, &dir, args);
+        assert_exit(&out, 0);
+        (text(&out.stdout), text(&out.stderr))
+    };
+    let (_, err) = ok(&[
+        "profdata",
+        "merge",
+        "-o",
+        "big.profdata",
+        "big.proftext",
+        "big.proftext",
+    ]);
+    assert!(
+        err.contains("warning: profdata merge: big.proftext: hot: counter overflow"),
+        "{err}"
+    );
+    let (show, _) = ok(&[
+        "profdata",
+        "show",
+        "--all-functions",
+        "--topn",
+        "1",
+        "big.profdata",
+    ]);
+    for want in [
+        "Counters:\n  cold:\n    Hash: 0x0000000000000002\n    Counters: 1\n",
+        "Instrumentation level: IR  entry_first = 0\nFunctions shown: 2\nTotal functions: 2\n",
+        "Top 1 functions with the largest internal block counts:\n  hot, max count = ",
+    ] {
+        assert!(show.contains(want), "{want:?} in\n{show}");
+    }
+
+    let rt = Path::new(ROKC)
+        .parent()
+        .unwrap()
+        .join("../lib/rok/targets")
+        .join(env!("ROK_HOST"))
+        .join(if cfg!(windows) {
+            "clang_rt.profile.lib"
+        } else {
+            "libclang_rt.profile.a"
+        });
+    if !rt.is_file() {
+        eprintln!("skipped: no {} (targets/build.sh)", rt.display());
+        return;
+    }
+    fs::write(dir.join("main.rok"), PGO_MAIN).unwrap();
+    let build = |args: &[&str]| {
+        let out = rokc(Some(&env), &dir, &[&["-q", "build", "-O2"], args].concat());
+        assert_exit(&out, 0);
+    };
+    let run = |exe: &str| {
+        let out = Command::new(dir.join(exe))
+            .current_dir(&dir)
+            .env_remove("LLVM_PROFILE_FILE")
+            .output()
+            .unwrap();
+        assert_exit(&out, 0);
+        assert_eq!(text(&out.stdout), "157144\n");
+    };
+    build(&["-C", "profile-generate=one", "-o", "i1"]);
+    run("i1");
+    ok(&["-q", "profdata", "merge", "-o", "p1.profdata", "one"]);
+    build(&[
+        "-C",
+        "profile-use=p1.profdata",
+        "-C",
+        "cs-profile-generate=two",
+        "-o",
+        "i2",
+    ]);
+    run("i2");
+    ok(&[
+        "-q",
+        "profdata",
+        "merge",
+        "-o",
+        "p2.profdata",
+        "two",
+        "p1.profdata",
+    ]);
+    let (show, _) = ok(&["profdata", "show", "p2.profdata"]);
+    assert!(show.contains("Context-sensitive records: "), "{show}");
+    build(&["-C", "profile-use=p2.profdata", "-o", "pgo"]);
+    run("pgo");
+    let out = rokc(None, &dir, &["build", "-C", "cs-profile-generate"]);
+    assert_exit(&out, 2);
+    assert!(text(&out.stderr).contains("needs -C profile-use"));
+}
+
+/// PGO for wasm32-wasi: the profile runtime (with wasi-libc's emulated
+/// mmap) writes through WASI; run by `node`'s WASI with the directory
+/// preopened.
+#[test]
+fn profile_guided_optimization_on_wasm32_wasi() {
+    let dir = scratch("pgo-wasm");
+    if setup().is_none() {
+        return;
+    }
+    let t = Path::new(ROKC)
+        .parent()
+        .unwrap()
+        .join("../lib/rok/targets/wasm32-wasi");
+    if !t.join("libclang_rt.profile.a").is_file() {
+        eprintln!("skipped: no wasm32-wasi profile runtime (targets/build.sh)");
+        return;
+    }
+    fs::write(dir.join("main.rok"), PGO_MAIN).unwrap();
+    let build = |args: &[&str]| {
+        let base = ["-q", "build", "--target", "wasm32-wasi", "-O2"];
+        let out = rokc(None, &dir, &[&base[..], args].concat());
+        assert_exit(&out, 0);
+    };
+    build(&["-C", "profile-generate=raw", "-o", "instr.wasm"]);
+    let script = "import { readFileSync } from 'node:fs'; import { WASI } from 'node:wasi'; \
+                  const w = new WASI({ version: 'preview1', args: ['m'], preopens: { '.': '.' } \
+                  }); const m = await WebAssembly.compile(readFileSync('instr.wasm')); \
+                  process.exitCode = w.start(await WebAssembly.instantiate(m, \
+                  w.getImportObject()));";
+    let Ok(run) = Command::new("node")
+        .args(["--no-warnings", "--input-type=module", "-e", script])
+        .current_dir(&dir)
+        .output()
+    else {
+        eprintln!("skipped: no node to run wasm32-wasi");
+        return;
+    };
+    assert_exit(&run, 0);
+    assert_eq!(text(&run.stdout), "157144\n");
+    let merge = ["-q", "profdata", "merge", "-o", "p.profdata", "raw"];
+    assert_exit(&rokc(None, &dir, &merge), 0);
+    build(&["-C", "profile-use=p.profdata", "-o", "pgo.wasm"]);
 }

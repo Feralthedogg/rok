@@ -1,0 +1,49 @@
+// expect-exit: 0
+// gc-stress: 7
+// expect-stdout:
+// 3 7 x0
+// 4 7 x0
+// 4 7 y1
+// 9 9 y1
+// 45 a b c
+
+// `b[i].f = v` on a `GcBuf` of structs stores only field `f` when
+// nothing writes memory between the element's load and the store; the
+// other fields keep their values, a reference field still takes the
+// write barrier (the collector moves objects every few allocations).
+struct Node {
+    n: usize;
+    m: usize;
+    s: str;
+}
+
+fn show(b: GcBuf<Node>, i: usize) {
+    unsafe {
+        println(f"{b[i].n} {b[i].m} {b[i].s}");
+    }
+}
+
+fn main() {
+    unsafe {
+        let b: GcBuf<Node> = buf_new(2);
+        b[0] = Node { n: 3, m: 7, s: f"x{0}" };
+        show(b, 0);
+        b[0].n = b[0].n + 1;
+        show(b, 0);
+        b[0].s = f"y{1}";
+        show(b, 0);
+        let i: usize = 0;
+        b[i].n = 9;
+        b[i].m = b[0].n;
+        show(b, 0);
+        let names: GcBuf<Node> = buf_new(3);
+        let k: usize = 0;
+        while k < 3 {
+            names[k] = Node { n: k, m: 0, s: "" };
+            names[k].s = f"{(97 + k) as u8 as char}";
+            names[k].m = names[k].n * 10 + 5;
+            k += 1;
+        }
+        println(f"{names[2].m + names[1].m + names[0].m} {names[0].s} {names[1].s} {names[2].s}");
+    }
+}

@@ -19,16 +19,15 @@ use rokc_lexer::Lexer;
 use rokc_mir::MirModule;
 use rokc_parser::{
     ExtOps, KeywordDef, KeywordTable, LitRule, LiteralDef, LiteralTable, MetaDef, MetaTable,
-    PatKind, PrecTable, apply_keywords, check_keyword, collect_keywords, collect_lang_table,
-    collect_literals, collect_meta_blocks, collect_prec_table, parse_pattern, parse_program,
-    parse_program_meta,
+    PatKind, PrecTable, apply_keywords, check_keyword, collect_keywords, collect_literals,
+    collect_meta_blocks, collect_prec_table, parse_pattern, parse_program, parse_program_meta,
 };
 
 pub use cfg::CfgEnv;
 pub use rokc_codegen_mlir::{Demangled, demangle};
 pub use rokc_codegen_mlir::{MlirOutput, ReplCell, ReplFn};
 pub use rokc_hir::instance;
-pub use rokc_llvm::profdata_merge;
+pub use rokc_llvm::{profdata_merge, profdata_show};
 pub use rokc_mir::Target;
 pub use windows::Subsystem;
 /// Whether the REPL's session host runs here: it loads Mach-O / ELF /
@@ -182,6 +181,7 @@ fn load_prebuilt(
             Ok(r) => {
                 diags.push(RokDiagnostic::error(
                     rokc_diagnostic::ErrorKind::Module,
+                    rokc_diagnostic::Span::DUMMY,
                     format!(
                         "`--extern {name}={}`: it was built as `{}`, and the name is in its \
                          symbols — rebuild it as `{name}`",
@@ -192,7 +192,11 @@ fn load_prebuilt(
                 continue;
             }
             Err(e) => {
-                diags.push(RokDiagnostic::error(rokc_diagnostic::ErrorKind::Module, e));
+                diags.push(RokDiagnostic::error(
+                    rokc_diagnostic::ErrorKind::Module,
+                    rokc_diagnostic::Span::DUMMY,
+                    e,
+                ));
                 continue;
             }
         };
@@ -202,6 +206,7 @@ fn load_prebuilt(
         {
             diags.push(RokDiagnostic::error(
                 rokc_diagnostic::ErrorKind::Module,
+                rokc_diagnostic::Span::DUMMY,
                 format!(
                     "prebuilt `{}` and `{}` use the same GC type ids — build each dependency \
                      with the ones before it as `--extern` (`rok build` does)",
@@ -319,25 +324,26 @@ pub struct SourceFile {
 /// names are top-level (902.3). Modules are seen through their items and
 /// `use`s (an empty one can't clash).
 fn check_dependency_names(
-    items: &[rokc_ast::Item],
+    items: &[ModItem],
     uses: &[(String, rokc_core::Visibility, rokc_ast::UseTree)],
     externs: &[(String, PathBuf)],
     diags: &mut Vec<RokDiagnostic>,
 ) {
     use rokc_ast::Item;
-    let item_modules = items.iter().filter_map(|item| {
-        let name = match item {
-            Item::Fn(f) => &f.name,
-            Item::Struct(s) => &s.name,
-            Item::Enum(e) => &e.name,
-            Item::Union(u) => &u.name,
-            Item::Trait(t) => &t.name,
-            Item::Const(c) => &c.name,
-            Item::Static(s) => &s.name,
-            Item::TypeAlias(a) => &a.name,
-            _ => return None,
-        };
-        name.rsplit_once("::").map(|(m, _)| m)
+    let item_modules = items.iter().filter_map(|(module, item)| match item {
+        Item::Fn(_)
+        | Item::Struct(_)
+        | Item::Enum(_)
+        | Item::Union(_)
+        | Item::Trait(_)
+        | Item::Const(_)
+        | Item::Static(_)
+        | Item::TypeAlias(_)
+            if !module.is_empty() =>
+        {
+            Some(module.as_str())
+        }
+        _ => None,
     });
     let modules: Vec<&str> = item_modules
         .chain(uses.iter().map(|(m, _, _)| m.as_str()))
@@ -347,6 +353,7 @@ fn check_dependency_names(
         if modules.iter().any(|m| m == dep || m.starts_with(&under)) {
             diags.push(RokDiagnostic::error(
                 rokc_diagnostic::ErrorKind::Module,
+                rokc_diagnostic::Span::DUMMY,
                 format!(
                     "module `{dep}` has the name of the dependency `{dep}` — dependency names \
                      are top-level paths (spec 902.3); rename the module"
@@ -390,6 +397,7 @@ pub fn compile_file(
     let source = std::fs::read_to_string(path).map_err(|e| {
         vec![RokDiagnostic::error(
             rokc_diagnostic::ErrorKind::Module,
+            rokc_diagnostic::Span::DUMMY,
             format!("cannot read {}: {e}", path.display()),
         )]
     })?;
@@ -479,6 +487,7 @@ fn compile_std(
     let no_dir = || {
         vec![RokDiagnostic::error(
             rokc_diagnostic::ErrorKind::Module,
+            rokc_diagnostic::Span::DUMMY,
             "the bootstrap tiers must be the folders of one directory".to_owned(),
         )]
     };
@@ -577,14 +586,13 @@ fn compile_unit(
     // gathered by the same pre-pass, so its extension tokens lex.
     metas.idents = Some(Vec::new());
     let mut user = Vec::new();
-    prepass_tree(
-        path,
-        Some(source),
-        path.parent(),
-        &[],
-        &mut metas,
-        &mut user,
-    );
+    let sub_dir = path.parent();
+    let mut files = prepass_parse(vec![(
+        path.to_path_buf(),
+        Some(source.to_owned()),
+        sub_dir.map(Path::to_path_buf),
+    )]);
+    prepass_tree(path, sub_dir, &[], &mut files, &mut metas, &mut user);
     for (sub, mut d) in user {
         diags.append(&mut d);
         diags.extend(sub.entries().cloned().filter_map(|e| prec.merge(e)));
@@ -627,7 +635,7 @@ fn compile_unit(
     let sub_dir = (!config.anonymous).then_some(root_dir.as_path());
     let mut sources = Vec::new();
 
-    let mut all_items: Vec<rokc_ast::Item> = Vec::new();
+    let mut all_items: Vec<ModItem> = Vec::new();
     let mut all_uses: Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)> = Vec::new();
     let top_stmts = rokc_diagnostic::time("parse package", || {
         collect_module_tree(
@@ -646,12 +654,15 @@ fn compile_unit(
     });
     let is_lib = !config.anonymous && path.file_name().is_some_and(|n| n == "lib.rok");
     let mut tests = Vec::new();
-    let mut implicit_main = false;
+    let mut root_main = rokc_hir::RootMain::Declared;
     if config.test || config.bench {
         // Top-level statements are the package's own entry: dropped.
         tests = harness::install(&mut all_items, &ext, &mut diags, config.bench);
+        root_main = rokc_hir::RootMain::Harness;
     } else if !is_lib {
-        implicit_main = entry::resolve_entry(top_stmts, &mut all_items, &mut diags);
+        if entry::resolve_entry(top_stmts, &mut all_items, &mut diags) {
+            root_main = rokc_hir::RootMain::Implicit;
+        }
     } else if !top_stmts.is_empty() {
         diags.push(entry::stmts_outside_entry(path));
     }
@@ -708,28 +719,24 @@ fn compile_unit(
     all_uses.append(&mut uses);
     diags.append(&mut d);
     coro::rewrite_items(&mut all_items, &mut diags);
+    let (item_modules, items): (Vec<String>, Vec<rokc_ast::Item>) = all_items.into_iter().unzip();
     let input = rokc_hir::HirInput {
         packages: config.externs.iter().map(|(n, _)| n.clone()).collect(),
         lib: lib.map(str::to_owned),
         prebuilt: prebuilt.iter().map(|p| p.rhir.name.clone()).collect(),
         check_library: config.check_library,
-        implicit_main,
+        root_main,
         inline_prebuilt: config.inline_prebuilt,
         pointer_width: config.target.pointer_width,
+        item_modules,
     };
     let program = rokc_ast::Program {
         attrs: Vec::new(),
-        items: all_items,
+        items,
         stmts: Vec::new(),
         expanded: Vec::new(),
         tops: Vec::new(),
     };
-
-    // Spec 6.4: `#[lang(...)]` slots over library + user items; a slot
-    // bound twice is an error (6.4.6).
-    // HIR reads the trait slots off the same attributes (`lang_trait`).
-    let (_lang, mut lang_diags) = collect_lang_table(&program);
-    diags.append(&mut lang_diags);
 
     // Name resolution and type / exhaustiveness checking happen during
     // HIR lowering (`rokc_hir::lower_full`), where every type is known.
@@ -746,18 +753,11 @@ fn compile_unit(
         rokc_hir::build_use_table(&all_uses, &input.packages)
     });
     diags.append(&mut use_diags);
-    diags.extend(rokc_hir::check_use_targets(
-        &all_uses,
-        &program.items,
-        &use_table,
-        &reexports,
-    ));
     let mut libs = Vec::new();
     native_libs(&program.items, &mut libs);
     let mut hir = rokc_diagnostic::time("hir", || {
-        rokc_hir::lower_full(program, &prec, &use_table, &reexports, &input)
+        rokc_hir::lower_full(program, &prec, &all_uses, &use_table, &reexports, &input)
     });
-    rokc_diagnostic::set_current_span(rokc_diagnostic::Span::DUMMY);
     diags.append(&mut hir.diagnostics);
     // Warnings go out with the errors (a failed build still shows them).
     if diags.iter().any(RokDiagnostic::is_error) {
@@ -878,10 +878,16 @@ fn build_prec_table(
     diags: &mut Vec<RokDiagnostic>,
     metas: &mut PrePass,
 ) -> PrecTable {
+    let mut files = prepass_parse(
+        roots
+            .iter()
+            .map(|(_, root)| (root.clone(), None, root.parent().map(Path::to_path_buf)))
+            .collect(),
+    );
     let mut table = PrecTable::new();
     for (pkg, root) in roots {
         let mut tables = Vec::new();
-        prepass_tree(root, None, root.parent(), pkg, metas, &mut tables);
+        prepass_tree(root, root.parent(), pkg, &mut files, metas, &mut tables);
         for (sub_table, mut collect_diags) in tables {
             diags.append(&mut collect_diags);
             diags.extend(sub_table.entries().cloned().filter_map(|e| table.merge(e)));
@@ -890,38 +896,103 @@ fn build_prec_table(
     table
 }
 
-/// The pre-pass over a package's module tree from `path` (its text
-/// `source`, else the file's), module `module`: each module parsed
+/// Pre-pass parses by path, with their file ids.
+type PreFiles = std::collections::HashMap<PathBuf, (u32, Prepassed)>;
+
+/// The pre-pass parses of the module trees from `roots` (path, text or
+/// the file's, directory of its submodules), by path. Breadth first:
+/// each level's files are read and registered in order (file ids stay
+/// deterministic), then lexed and parsed in parallel.
+fn prepass_parse(roots: Vec<(PathBuf, Option<String>, Option<PathBuf>)>) -> PreFiles {
+    let mut files = std::collections::HashMap::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut level = roots;
+    while !level.is_empty() {
+        let jobs: Vec<(PathBuf, Option<PathBuf>, String, u32)> = level
+            .into_iter()
+            .filter(|(path, ..)| seen.insert(path.clone()))
+            .filter_map(|(path, source, sub_dir)| {
+                let source = source.or_else(|| read_source(&path).ok())?;
+                let id = rokc_diagnostic::register_file(path.display().to_string(), source.clone());
+                Some((path, sub_dir, source, id))
+            })
+            .collect();
+        let parsed: Vec<Prepassed> = std::thread::scope(|s| {
+            let mut parses = Vec::new();
+            for (path, _, source, id) in &jobs {
+                parses.push(s.spawn(move || prepass_file(path, source, *id)));
+            }
+            parses
+                .into_iter()
+                .map(|p| p.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+                .collect()
+        });
+        level = Vec::new();
+        for ((path, sub_dir, _, id), file) in jobs.into_iter().zip(parsed) {
+            mod_files(&file.program.items, sub_dir.as_deref(), &mut level);
+            files.insert(path, (id, file));
+        }
+    }
+    files
+}
+
+/// One pre-pass file `id`: lexed without extension operators and parsed.
+fn prepass_file(path: &Path, source: &str, id: u32) -> Prepassed {
+    let file = path.display().to_string();
+    let (mut tokens, lex) = Lexer::new(source, file.clone()).lex_all();
+    for t in &mut tokens {
+        t.span.file = id;
+    }
+    let (program, parse) = parse_program(&tokens, file);
+    Prepassed {
+        source: source.to_owned(),
+        tokens,
+        program,
+        quiet: lex.is_empty() && parse.is_empty(),
+    }
+}
+
+/// The files of the `mod name;` among `items` (inline modules' too),
+/// their submodules in `sub_dir`.
+fn mod_files(
+    items: &[rokc_ast::Item],
+    sub_dir: Option<&Path>,
+    out: &mut Vec<(PathBuf, Option<String>, Option<PathBuf>)>,
+) {
+    for item in items {
+        if let rokc_ast::Item::Mod(m) = item {
+            match &m.items {
+                Some(inner) => mod_files(inner, sub_dir, out),
+                None => {
+                    if let Ok((body, next)) = mod_file(m, sub_dir) {
+                        out.push((body, None, next));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The pre-pass over a package's module tree from `path` (parsed by
+/// `prepass_parse` into `files`), module `module`: each module parsed
 /// without extension operators (they are what it finds), submodules
 /// first, gathering meta blocks, keywords and literals. Errors are left
 /// to the real parse.
 fn prepass_tree(
     path: &Path,
-    source: Option<&str>,
     sub_dir: Option<&Path>,
     module: &[String],
+    files: &mut PreFiles,
     metas: &mut PrePass,
     out: &mut Vec<(PrecTable, Vec<RokDiagnostic>)>,
 ) {
-    let Some(source) = source.map(str::to_owned).or_else(|| read_source(path).ok()) else {
+    let Some((id, f)) = files.remove(path) else {
         return;
     };
-    let file = path.display().to_string();
-    let (tokens, lex_quiet) = prepass_tokens(&source, &file, metas);
-    let (program, d) = parse_program(&tokens, file);
-    prepass_mods(&program.items, sub_dir, module, metas, out);
-    out.push(collect_prec_table(&program, module));
-    PREPASSED.with(|p| {
-        p.borrow_mut().insert(
-            path.to_path_buf(),
-            Prepassed {
-                source,
-                tokens,
-                program,
-                quiet: lex_quiet && d.is_empty(),
-            },
-        );
-    });
+    prepass_gather(&f.tokens, &f.source, &path.display().to_string(), id, metas);
+    prepass_mods(&f.program.items, sub_dir, module, files, metas, out);
+    out.push(collect_prec_table(&f.program, module));
+    PREPASSED.with(|p| p.borrow_mut().insert(path.to_path_buf(), f));
 }
 
 /// Whether the real parse of `p` (with the build's extension operators,
@@ -957,6 +1028,7 @@ fn prepass_mods(
     items: &[rokc_ast::Item],
     sub_dir: Option<&Path>,
     module: &[String],
+    files: &mut PreFiles,
     metas: &mut PrePass,
     out: &mut Vec<(PrecTable, Vec<RokDiagnostic>)>,
 ) {
@@ -968,10 +1040,10 @@ fn prepass_mods(
         let mut sub = module.to_vec();
         sub.push(m.name.clone());
         match &m.items {
-            Some(inner) => prepass_mods(inner, sub_dir, &sub, metas, out),
+            Some(inner) => prepass_mods(inner, sub_dir, &sub, files, metas, out),
             None => {
                 if let Ok((body, next)) = mod_file(m, sub_dir) {
-                    prepass_tree(&body, None, next.as_deref(), &sub, metas, out);
+                    prepass_tree(&body, next.as_deref(), &sub, files, metas, out);
                 }
             }
         }
@@ -993,7 +1065,13 @@ fn mod_file(
     dir: Option<&Path>,
 ) -> Result<(PathBuf, Option<PathBuf>), RokDiagnostic> {
     let name = &m.name;
-    let err = |msg: String| RokDiagnostic::error(rokc_diagnostic::ErrorKind::Module, msg);
+    let err = |msg: String| {
+        RokDiagnostic::error(
+            rokc_diagnostic::ErrorKind::Module,
+            rokc_diagnostic::Span::DUMMY,
+            msg,
+        )
+    };
     let custom = m.attrs.iter().find(|a| a.path == ["path"]).map(|a| {
         match &a.body {
             rokc_ast::AttrBody::Args(args) => match args.as_slice() {
@@ -1040,21 +1118,19 @@ pub(crate) fn defines_metas(tokens: &[rokc_lexer::Token], source: &str) -> bool 
         || source.contains("#[literal(")
 }
 
-/// Lex a file for the pre-pass and gather its meta blocks (their
-/// template tokens keep spans into the registered file).
-/// Also whether lexing was quiet (no diagnostic).
-fn prepass_tokens(source: &str, file: &str, metas: &mut PrePass) -> (Vec<rokc_lexer::Token>, bool) {
-    let (mut tokens, d) = Lexer::new(source, file.to_owned()).lex_all();
-    // Spans point into a registered copy of the file (diagnostics on
-    // pre-pass attributes and meta templates).
-    let id = rokc_diagnostic::register_file(file.to_owned(), source.to_owned());
-    for t in &mut tokens {
-        t.span.file = id;
-    }
+/// Gather the meta blocks of a pre-pass file `id` (their template tokens
+/// keep spans into the registered file).
+fn prepass_gather(
+    tokens: &[rokc_lexer::Token],
+    source: &str,
+    file: &str,
+    id: u32,
+    metas: &mut PrePass,
+) {
     if let Some(idents) = &mut metas.idents {
         // The user package's names, first use per file.
         let mut seen = std::collections::HashSet::new();
-        for t in &tokens {
+        for t in tokens {
             if let rokc_lexer::TokenKind::Ident(n) = &t.kind {
                 if seen.insert(n.as_str()) {
                     idents.push((n.clone(), t.span));
@@ -1062,18 +1138,17 @@ fn prepass_tokens(source: &str, file: &str, metas: &mut PrePass) -> (Vec<rokc_le
             }
         }
     }
-    if defines_metas(&tokens, source) {
-        let found = collect_meta_blocks(&tokens, file);
+    if defines_metas(tokens, source) {
+        let found = collect_meta_blocks(tokens, file);
         if !found.is_empty() {
             metas
                 .meta_files
                 .push((file.to_owned(), source.to_owned(), id));
         }
         metas.metas.extend(found);
-        metas.keywords.extend(collect_keywords(&tokens, file));
-        metas.literals.extend(collect_literals(&tokens, file));
+        metas.keywords.extend(collect_keywords(tokens, file));
+        metas.literals.extend(collect_literals(tokens, file));
     }
-    (tokens, d.is_empty())
 }
 
 /// Spec 1.4.2: distinct names of one package with the same confusable
@@ -1094,12 +1169,12 @@ fn cross_file_confusables(idents: Vec<(String, rokc_diagnostic::Span)>) -> Vec<R
                     out.push(
                         RokDiagnostic::warning(
                             rokc_diagnostic::ErrorKind::Lexical,
+                            id.1,
                             format!(
                                 "identifier `{}` looks like `{name}` (confusable spelling)",
                                 id.0
                             ),
                         )
-                        .with_span(id.1, "")
                         .with_secondary(*at, "the other spelling"),
                     );
                 }
@@ -1163,11 +1238,14 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
+/// An item and the module path (`a::b`, `""` at the root) it is in.
+type ModItem = (String, rokc_ast::Item);
+
 /// One cached parse (`cached`): its key, the files it registered, its
 /// result.
 type Cached<T> = std::sync::Mutex<Option<(String, Vec<(String, String)>, T)>>;
 type LibParse = (
-    Vec<rokc_ast::Item>,
+    Vec<ModItem>,
     Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)>,
     Vec<RokDiagnostic>,
 );
@@ -1236,9 +1314,9 @@ fn keyword_tables(
             diags.push(
                 RokDiagnostic::error(
                     rokc_diagnostic::ErrorKind::Meta,
+                    d.span,
                     format!("keyword `{}` is registered twice (spec 6.6.4)", d.name),
                 )
-                .with_span(d.span, "")
                 .with_secondary(old.span, "first registered here"),
             );
             continue;
@@ -1254,17 +1332,15 @@ fn keyword_tables(
                 t.push((d.name.clone(), path.clone(), true));
             }
         } else {
-            diags.push(
-                RokDiagnostic::error(
-                    rokc_diagnostic::ErrorKind::Meta,
-                    format!(
-                        "`#[keyword(\"{}\")]` must be on a function — its handler (spec 6.6.2); \
+            diags.push(RokDiagnostic::error(
+                rokc_diagnostic::ErrorKind::Meta,
+                d.span,
+                format!(
+                    "`#[keyword(\"{}\")]` must be on a function — its handler (spec 6.6.2); \
                          only the standard library names a type with it",
-                        d.name
-                    ),
-                )
-                .with_span(d.span, ""),
-            );
+                    d.name
+                ),
+            ));
         }
     }
     out
@@ -1337,13 +1413,11 @@ fn literal_tables(
     let (mut lib, mut user) = (LiteralTable::default(), LiteralTable::default());
     for d in defs {
         if d.handler.is_empty() {
-            diags.push(
-                RokDiagnostic::error(
-                    rokc_diagnostic::ErrorKind::Meta,
-                    "`#[literal(..)]` must be on a function — its handler (spec 6.5.2)",
-                )
-                .with_span(d.span, ""),
-            );
+            diags.push(RokDiagnostic::error(
+                rokc_diagnostic::ErrorKind::Meta,
+                d.span,
+                "`#[literal(..)]` must be on a function — its handler (spec 6.5.2)",
+            ));
             continue;
         }
         let Ok(pattern) = parse_pattern(&d.tokens, &ext.symbols()) else {
@@ -1368,13 +1442,12 @@ fn literal_tables(
     (std::sync::Arc::new(lib), std::sync::Arc::new(user))
 }
 
-/// Walk a package's module tree starting from `body_path`, qualifying
-/// each item's name with the module path it lives under. Inline
-/// `mod foo { ... }` extends the path; file-mapped `mod foo;` recurses
-/// into `foo.rok` with the same extension.
+/// Walk a package's module tree starting from `body_path`. Inline
+/// `mod foo { ... }` extends the module path; file-mapped `mod foo;`
+/// recurses into `foo.rok` with the same extension.
 ///
-/// Items are flattened into a single list with `name` rewritten as
-/// `parent::child::leaf`. Leaf names are unchanged in the root module.
+/// Items are flattened into one list of (module path, item), names as
+/// written (HIR qualifies them).
 #[allow(clippy::too_many_arguments)] // recursive walker threading accumulators; a context struct buys nothing
 fn collect_module_tree(
     body_path: &Path,
@@ -1385,7 +1458,7 @@ fn collect_module_tree(
     ext: &ExtOps,
     metas: &MetaCtx,
     diags: &mut Vec<RokDiagnostic>,
-    out: &mut Vec<rokc_ast::Item>,
+    out: &mut Vec<ModItem>,
     uses: &mut Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)>,
     mut keep: Option<&mut Vec<SourceFile>>,
 ) -> Vec<rokc_ast::Stmt> {
@@ -1398,6 +1471,7 @@ fn collect_module_tree(
             Err(e) => {
                 diags.push(RokDiagnostic::error(
                     rokc_diagnostic::ErrorKind::Module,
+                    rokc_diagnostic::Span::DUMMY,
                     format!("cannot read module file {}: {e}", body_path.display()),
                 ));
                 return Vec::new();
@@ -1478,7 +1552,7 @@ fn flatten_module_items(
     ext: &ExtOps,
     metas: &MetaCtx,
     diags: &mut Vec<RokDiagnostic>,
-    out: &mut Vec<rokc_ast::Item>,
+    out: &mut Vec<ModItem>,
     uses: &mut Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)>,
     mut keep: Option<&mut Vec<SourceFile>>,
 ) {
@@ -1491,15 +1565,18 @@ fn flatten_module_items(
             rokc_ast::Item::Mod(m) => {
                 let mut child_path = module_path.to_vec();
                 child_path.push(m.name.clone());
-                // An empty stub named by the full path keeps the module's
-                // visibility for HIR (spec 5.6.13).
-                out.push(rokc_ast::Item::Mod(rokc_ast::ModDef {
-                    vis: m.vis,
-                    attrs: Vec::new(),
-                    name: child_path.join("::"),
-                    items: Some(Vec::new()),
-                    span: m.span,
-                }));
+                // An empty stub keeps the module's visibility for HIR
+                // (spec 5.6.13).
+                out.push((
+                    module_key.clone(),
+                    rokc_ast::Item::Mod(rokc_ast::ModDef {
+                        vis: m.vis,
+                        attrs: Vec::new(),
+                        name: m.name.clone(),
+                        items: Some(Vec::new()),
+                        span: m.span,
+                    }),
+                ));
                 if let Some(inner) = m.items {
                     flatten_module_items(
                         inner,
@@ -1539,70 +1616,8 @@ fn flatten_module_items(
                     }
                 }
             }
-            other => {
-                out.push(rename_with_prefix(other, module_path));
-            }
+            other => out.push((module_key.clone(), other)),
         }
-    }
-}
-
-/// Prepend `module_path::` (joined with `::`) to the name of any item
-/// that has one. `module_path = []` returns the item untouched.
-fn rename_with_prefix(item: rokc_ast::Item, module_path: &[String]) -> rokc_ast::Item {
-    if module_path.is_empty() {
-        return item;
-    }
-    let prefix = module_path.join("::");
-    match item {
-        rokc_ast::Item::Fn(mut f) => {
-            f.name = format!("{prefix}::{}", f.name);
-            rokc_ast::Item::Fn(f)
-        }
-        rokc_ast::Item::Struct(mut s) => {
-            s.name = format!("{prefix}::{}", s.name);
-            rokc_ast::Item::Struct(s)
-        }
-        rokc_ast::Item::Enum(mut e) => {
-            e.name = format!("{prefix}::{}", e.name);
-            rokc_ast::Item::Enum(e)
-        }
-        rokc_ast::Item::Const(mut c) => {
-            c.name = format!("{prefix}::{}", c.name);
-            rokc_ast::Item::Const(c)
-        }
-        rokc_ast::Item::Static(mut s) => {
-            s.name = format!("{prefix}::{}", s.name);
-            rokc_ast::Item::Static(s)
-        }
-        rokc_ast::Item::TypeAlias(mut a) => {
-            a.name = format!("{prefix}::{}", a.name);
-            rokc_ast::Item::TypeAlias(a)
-        }
-        rokc_ast::Item::Trait(mut t) => {
-            t.name = format!("{prefix}::{}", t.name);
-            rokc_ast::Item::Trait(t)
-        }
-        rokc_ast::Item::Union(mut u) => {
-            u.name = format!("{prefix}::{}", u.name);
-            rokc_ast::Item::Union(u)
-        }
-        // Impl blocks have no name; their methods carry the module path
-        // (`a::get`) so HIR resolves the impl target and the method
-        // bodies in the right module (HIR strips it back to the leaf).
-        rokc_ast::Item::Impl(mut i) => {
-            for it in &mut i.items {
-                match it {
-                    rokc_ast::ImplItem::Method(m) => m.name = format!("{prefix}::{}", m.name),
-                    rokc_ast::ImplItem::Const(c) => c.name = format!("{prefix}::{}", c.name),
-                    rokc_ast::ImplItem::AssocType { .. } => {}
-                }
-            }
-            i.module = prefix;
-            rokc_ast::Item::Impl(i)
-        }
-        rokc_ast::Item::Use(_) // already extracted into `uses`
-        | rokc_ast::Item::Extern(_)
-        | rokc_ast::Item::Mod(_) => item,
     }
 }
 

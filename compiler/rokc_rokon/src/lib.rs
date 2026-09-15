@@ -1,4 +1,4 @@
-//! RokON (Rok Object Notation, spec std 3.9): data files written with
+//! ROKON (Rok Object Notation, spec std 3.9): data files written with
 //! rok's literal syntax, extension `.rokon` (`rok.rokon`, `rok.lock`).
 //!
 //! A file is one value, lexed and parsed by the rok lexer / parser
@@ -148,7 +148,7 @@ impl PartialEq for Value {
     }
 }
 
-/// A RokON syntax error: a message at a span.
+/// A ROKON syntax error: a message at a span.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
     pub span: Span,
@@ -208,7 +208,7 @@ pub(crate) fn lex(text: &str) -> Result<Vec<Token>, Error> {
     }
 }
 
-/// Parse a RokON file: exactly one value.
+/// Parse a ROKON file: exactly one value.
 pub fn parse(text: &str) -> Result<Value, Error> {
     let tokens = lex(text)?;
     parse_tokens(&tokens)
@@ -226,7 +226,7 @@ pub(crate) fn parse_tokens(tokens: &[Token]) -> Result<Value, Error> {
     if let Some(d) = diags.iter().find(|d| d.is_error()) {
         let span = d.primary.as_ref().map(|l| l.span).unwrap_or_default();
         let message = if d.message.starts_with("expected the end of the file") {
-            "expected the end of the file: a RokON file holds one value".to_owned()
+            "expected the end of the file: a ROKON file holds one value".to_owned()
         } else {
             d.message.clone()
         };
@@ -240,7 +240,7 @@ struct Conv<'t> {
     tokens: &'t [Token],
 }
 
-const NOT_DATA: &str = "is not allowed in RokON (only literals, lists, dicts, tuples, structs and \
+const NOT_DATA: &str = "is not allowed in ROKON (only literals, lists, dicts, tuples, structs and \
                         enum variants)";
 
 impl Conv<'_> {
@@ -289,7 +289,7 @@ impl Conv<'_> {
 
     fn path(&self, e: &Expr, p: &rokc_ast::Path) -> Result<String, Error> {
         if p.segments.iter().any(|s| !s.generics.is_empty()) {
-            return Err(self.err(e, "generic arguments are not allowed in RokON"));
+            return Err(self.err(e, "generic arguments are not allowed in ROKON"));
         }
         Ok(p.segments
             .iter()
@@ -305,7 +305,7 @@ impl Conv<'_> {
                 ExprKind::Literal(l @ (Literal::Int(_) | Literal::Float(_))) => {
                     self.literal(operand, l, true)?
                 }
-                _ => return Err(self.err(e, "`-` goes only before a number in RokON")),
+                _ => return Err(self.err(e, "`-` goes only before a number in ROKON")),
             },
             ExprKind::List(es) => Kind::List(self.values(es)?),
             ExprKind::Tuple(es) => Kind::Tuple(self.values(es)?),
@@ -356,7 +356,7 @@ impl Conv<'_> {
                         .token(s.span.start)
                         .and_then(|i| i.checked_sub(1))
                         .map_or(s.span, |i| self.tokens[i].span);
-                    return Err(Error::new(at, "`..` is not allowed in RokON"));
+                    return Err(Error::new(at, "`..` is not allowed in ROKON"));
                 }
                 let name = self.path(e, path)?;
                 let fields = fields
@@ -388,7 +388,7 @@ impl Conv<'_> {
                 return Err(self.err(
                     e,
                     format!(
-                        "bare identifier `{n}` is not a RokON value (a string is quoted: \
+                        "bare identifier `{n}` is not a ROKON value (a string is quoted: \
                          `\"{n}\"`; an enum variant is written with its type: `Type::{n}`)"
                     ),
                 ));
@@ -403,7 +403,7 @@ impl Conv<'_> {
                     _ => {
                         return Err(self.err(
                             e,
-                            "calls are not allowed in RokON (only enum variants: `Type::V(..)`)",
+                            "calls are not allowed in ROKON (only enum variants: `Type::V(..)`)",
                         ));
                     }
                 };
@@ -428,7 +428,7 @@ impl Conv<'_> {
                 }
             }
             ExprKind::MethodCall { .. } => {
-                return Err(self.err(e, "method calls are not allowed in RokON"));
+                return Err(self.err(e, "method calls are not allowed in ROKON"));
             }
             ExprKind::OpInfix { op, lhs, .. } => {
                 // The operator: the first token after `lhs`.
@@ -439,23 +439,23 @@ impl Conv<'_> {
                     .map_or(e.span, |t| t.span);
                 return Err(Error::new(
                     at,
-                    format!("operator `{op}` is not allowed in RokON"),
+                    format!("operator `{op}` is not allowed in ROKON"),
                 ));
             }
             ExprKind::OpPrefix { op, .. } | ExprKind::OpPostfix { op, .. } => {
-                return Err(self.err(e, format!("operator `{op}` is not allowed in RokON")));
+                return Err(self.err(e, format!("operator `{op}` is not allowed in ROKON")));
             }
             ExprKind::FString(_) => {
-                return Err(self.err(e, "f-strings are not allowed in RokON"));
+                return Err(self.err(e, "f-strings are not allowed in ROKON"));
             }
             ExprKind::Range { .. } => {
-                return Err(self.err(e, "ranges (`..`) are not allowed in RokON"));
+                return Err(self.err(e, "ranges (`..`) are not allowed in ROKON"));
             }
             ExprKind::Block(_) => {
-                return Err(self.err(e, "blocks are not allowed in RokON"));
+                return Err(self.err(e, "blocks are not allowed in ROKON"));
             }
             ExprKind::Set(_) => {
-                return Err(self.err(e, "sets are not RokON values (write a list: `[a, b]`)"));
+                return Err(self.err(e, "sets are not ROKON values (write a list: `[a, b]`)"));
             }
             _ => return Err(self.err(e, format!("this expression {NOT_DATA}"))),
         };
@@ -471,12 +471,12 @@ impl Conv<'_> {
             Literal::Float(t) => {
                 let digits = t.replace('_', "");
                 if digits.ends_with("f32") || digits.ends_with("f64") {
-                    return Err(self.err(e, "type suffixes are not allowed in RokON"));
+                    return Err(self.err(e, "type suffixes are not allowed in ROKON"));
                 }
                 let f: f64 = format!("{sign}{digits}")
                     .parse()
                     .map_err(|_| self.err(e, format!("invalid float `{t}`")))?;
-                // Infinity has no RokON form (spec 3.9.1).
+                // Infinity has no ROKON form (spec 3.9.1).
                 if !f.is_finite() {
                     return Err(self.err(e, format!("float `{t}` is out of range")));
                 }
@@ -494,9 +494,9 @@ impl Conv<'_> {
                     _ => return Err(self.err(e, "a char literal holds one character")),
                 }
             }
-            Literal::FStr(_) => return Err(self.err(e, "f-strings are not allowed in RokON")),
+            Literal::FStr(_) => return Err(self.err(e, "f-strings are not allowed in ROKON")),
             Literal::CChar(_) => {
-                return Err(self.err(e, "`c'..'` literals are not allowed in RokON (write `'a'`)"));
+                return Err(self.err(e, "`c'..'` literals are not allowed in ROKON (write `'a'`)"));
             }
         })
     }
@@ -513,7 +513,7 @@ fn int(text: &str, neg: bool) -> Result<i128, String> {
     };
     if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
         return Err(if digits.chars().any(|c| matches!(c, 'i' | 'u')) {
-            "type suffixes are not allowed in RokON".to_owned()
+            "type suffixes are not allowed in ROKON".to_owned()
         } else {
             format!("invalid integer `{text}`")
         });

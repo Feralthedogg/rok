@@ -233,7 +233,7 @@ pub(super) fn resolve_in_mono(
     self_ty: Option<HirTy>,
     ty: &Ty,
 ) -> HirTy {
-    let mut rcx = LowerCtx::new(ctx.env, subst, self_ty);
+    let mut rcx = LowerCtx::new(ctx.env, subst, self_ty, ctx.here());
     rcx.current_module = module_of(&fn_def.name);
     rcx.set_bounds(&fn_def.generics, &fn_def.where_clause);
     rcx.resolve_ast_ty(ty)
@@ -850,7 +850,7 @@ fn infer_ret_of(
     env.sink.inferred_ret.borrow_mut().insert(id, None);
     let hits = env.sink.recursive_ret.borrow().len();
     let tentatives = env.sink.tentative_ret.borrow().len();
-    let mut probe = LowerCtx::new(env, subst, None);
+    let mut probe = LowerCtx::new(env, subst, None, fn_def.span);
     let mark = probe.probe_mark();
     let mut tys = Vec::new();
     let mut f = lower_fn_with(
@@ -893,15 +893,14 @@ fn infer_ret_of(
     let unit = tys.contains(&HirTy::Unit);
     tys.retain(|t| *t != HirTy::Unit);
     let fail = |why: &str| {
-        let outer = rokc_diagnostic::set_current_span(fn_def.span);
-        probe.emit_error(
+        probe.emit_error_at(
             rokc_diagnostic::ErrorKind::Type,
+            fn_def.span,
             format!(
                 "cannot infer the return type of `{}`: {why} — write `-> T` (spec 4.1.3)",
                 leaf_name(&fn_def.name)
             ),
         );
-        rokc_diagnostic::set_current_span(outer);
         HirTy::Unknown
     };
     // No path reaches the end or a `return`: `!` (spec 4.3.7).
@@ -972,7 +971,6 @@ fn lower_fn_with(
     ret: Option<HirTy>,
     ret_tys: Option<&mut Vec<HirTy>>,
 ) -> HirFunction {
-    let outer = rokc_diagnostic::set_current_span(fn_def.span);
     // A `rethrows` instance with a non-throwing argument doesn't vote on
     // warnings (its `try`s cover nothing by construction).
     let nothrow = HirTy::NoThrow;
@@ -992,7 +990,7 @@ fn lower_fn_with(
         .fn_origin
         .borrow_mut()
         .insert(id, (is_const, is_std));
-    let mut ctx = LowerCtx::new(env, subst, self_ty);
+    let mut ctx = LowerCtx::new(env, subst, self_ty, fn_def.span);
     if fn_def.attrs.iter().any(|a| a.path == ["track_caller"]) {
         let fixed_abi = fn_def
             .attrs
@@ -1023,6 +1021,10 @@ fn lower_fn_with(
     ctx.unsafe_depth = u32::from(fn_def.is_unsafe);
     // The synthesized entry (spec 4.16.2).
     ctx.implicit_main = env.implicit_main && name == "main" && ctx.self_ty.is_none();
+    ctx.harness_main = env.harness_main
+        && name == "main"
+        && ctx.current_module.is_empty()
+        && ctx.self_ty.is_none();
 
     if let Some(b) = &fn_def.body {
         ctx.ref_captured = ref_captured_bindings(&fn_def.params, b);
@@ -1074,7 +1076,6 @@ fn lower_fn_with(
     if let Some(out) = ret_tys {
         *out = ctx.ret_tys.take().unwrap_or_default();
     }
-    rokc_diagnostic::set_current_span(outer);
     env.sink.instances.borrow_mut().pop();
     // `ref` parameters: the function hands their values back too.
     let ref_tys: Vec<HirTy> = ctx.ref_params.iter().map(|(_, t)| t.clone()).collect();
@@ -1293,8 +1294,7 @@ pub(super) fn sig_tys(
     module: String,
     subst: &HashMap<String, HirTy>,
 ) -> (Vec<HirTy>, HirTy) {
-    let outer = rokc_diagnostic::set_current_span(f.span);
-    let mut ctx = LowerCtx::new(env, subst, self_ty);
+    let mut ctx = LowerCtx::new(env, subst, self_ty, f.span);
     ctx.current_module = module;
     ctx.set_bounds(&f.generics, &f.where_clause);
     ctx.assoc_names = f
@@ -1313,7 +1313,6 @@ pub(super) fn sig_tys(
         })
         .collect();
     let ret_ty = ctx.resolve_ast_ty(&super::throws::sig_ret_ast(f));
-    rokc_diagnostic::set_current_span(outer);
     (param_tys, ret_ty)
 }
 

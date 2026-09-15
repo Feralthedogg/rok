@@ -77,16 +77,14 @@ pub(crate) fn derive_items(item: &Item, file: &str) -> (Vec<Item>, Vec<RokDiagno
             _ => &[],
         };
         if let Some(missing) = needs.iter().find(|n| !has(n)) {
-            diags.push(
-                RokDiagnostic::error(
-                    rokc_diagnostic::ErrorKind::Meta,
-                    format!(
-                        "`#[derive({tr})]` on `{name}` needs `{missing}` too — derive both \
+            diags.push(RokDiagnostic::error(
+                rokc_diagnostic::ErrorKind::Meta,
+                at,
+                format!(
+                    "`#[derive({tr})]` on `{name}` needs `{missing}` too — derive both \
                          (`#[derive({missing}, {tr})]`; spec 2.5.1)"
-                    ),
-                )
-                .with_span(at, ""),
-            );
+                ),
+            ));
             continue;
         }
         let Some(path) = derivable(&tr) else {
@@ -104,13 +102,11 @@ pub(crate) fn derive_items(item: &Item, file: &str) -> (Vec<Item>, Vec<RokDiagno
                         .join(", ")
                 )
             };
-            diags.push(
-                RokDiagnostic::error(
-                    rokc_diagnostic::ErrorKind::Meta,
-                    format!("cannot derive `{tr}` for `{name}`: {why} (spec 6.2.1)"),
-                )
-                .with_span(at, ""),
-            );
+            diags.push(RokDiagnostic::error(
+                rokc_diagnostic::ErrorKind::Meta,
+                at,
+                format!("cannot derive `{tr}` for `{name}`: {why} (spec 6.2.1)"),
+            ));
             continue;
         };
         let body = match item {
@@ -119,16 +115,14 @@ pub(crate) fn derive_items(item: &Item, file: &str) -> (Vec<Item>, Vec<RokDiagno
             _ => None,
         };
         let Some(body) = body else {
-            diags.push(
-                RokDiagnostic::error(
-                    rokc_diagnostic::ErrorKind::Meta,
-                    format!(
-                        "cannot derive `Default` for enum `{name}`: its first variant must \
+            diags.push(RokDiagnostic::error(
+                rokc_diagnostic::ErrorKind::Meta,
+                at,
+                format!(
+                    "cannot derive `Default` for enum `{name}`: its first variant must \
                          be a unit variant (the default)"
-                    ),
-                )
-                .with_span(at, ""),
-            );
+                ),
+            ));
             continue;
         };
         src.push_str(&format!(
