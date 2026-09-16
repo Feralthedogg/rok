@@ -1,0 +1,13 @@
+// expect-error: `Half` implements `PartialOrd` but not its supertrait `PartialEq`
+
+// Stdlib 2.5.4: `trait PartialOrd<Rhs = Self>: PartialEq<Rhs>`.
+struct Half { v: f64; }
+
+impl PartialOrd for Half {
+    fn lt(self, rhs: Half) -> bool { self.v < rhs.v }
+    fn gt(self, rhs: Half) -> bool { self.v > rhs.v }
+    fn le(self, rhs: Half) -> bool { self.v <= rhs.v }
+    fn ge(self, rhs: Half) -> bool { self.v >= rhs.v }
+}
+
+fn main() {}

@@ -1,0 +1,20 @@
+// expect-exit: 0
+// expect-stdout:
+// 6 3 [1] 2 a 98
+
+// Stdlib 2.9.2 / 2.9.3 / 2.15.1: the iterator types are named
+// `ListIntoIter`, `KeysIter` / `ValuesIter` / `EntriesIter`, `BytesIter`.
+fn main() {
+    let xs: List<i32> = [1, 2, 3];
+    let it: ListIntoIter<i32> = xs.into_iter();
+    let d: Dict<str, i32> = Dict::new();
+    d["a"] = 2;
+    let ks: KeysIter<str, i32> = d.keys();
+    let vs: ValuesIter<str, i32> = d.values();
+    let es: EntriesIter<str, i32> = d.entries();
+    let bs: BytesIter = "ab".bytes();
+    bs.next();
+    let one: List<i32> = [1];
+    let (k, v) = es.next() ?? ("", 0);
+    println(f"{it.sum()} {xs.len()} {one:?} {vs.sum()} {ks.next() ?? ""} {bs.next() ?? 0}");
+}

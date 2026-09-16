@@ -91,7 +91,7 @@ impl<T: Hash> Set<T> {
         self.d.keys().collect()
     }
 
-    pub fn iter(self) -> DictKeys<T, bool> {
+    pub fn iter(self) -> KeysIter<T, bool> {
         self.d.keys()
     }
 }
@@ -113,9 +113,9 @@ impl<T: Hash + Clone> Clone for Set<T> {
 
 /// `for x in s` (2.9.9).
 impl<T: Hash> IntoIterator for Set<T> {
-    type IntoIter = DictKeys<T, bool>;
+    type IntoIter = KeysIter<T, bool>;
     type Item = T;
-    fn into_iter(self) -> DictKeys<T, bool> {
+    fn into_iter(self) -> KeysIter<T, bool> {
         self.d.keys()
     }
 }

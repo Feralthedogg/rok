@@ -919,8 +919,9 @@ struct Env<'a> {
     /// `(generic base of the impl target, method name)`. Called through
     /// `monomorphize` when `method_table` has no concrete entry.
     generic_methods: HashMap<(String, String), Vec<GenericMethod>>,
-    /// `#[intrinsic("rok.OP.TYPE")]` methods: calls lower to the op.
-    intrinsics: HashMap<FunctionId, PrimOp>,
+    /// `#[intrinsic("rok.OP.TYPE")]` methods (`Prim` / `Convert`): calls
+    /// lower to the op.
+    intrinsics: HashMap<FunctionId, collect::Intrinsic>,
     /// Generic `#[intrinsic]` functions by name.
     generic_intrinsics: HashMap<String, collect::Intrinsic>,
     /// `extern "C"` functions: a `fn` argument must be a named fn (a C

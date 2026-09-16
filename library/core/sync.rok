@@ -762,18 +762,18 @@ impl<T> Cell<T> {
             Cell { value: v }
         }
     }
-    pub fn get(self) -> T {
+    pub fn get(self) -> T where T: Copy {
         unsafe {
             self.value[0]
         }
     }
-    // Spec takes `ref self`; the handle makes plain `self` share the cell.
-    pub fn set(self, value: T) {
+    // Copies share the one buffer, so a copy sees the update too.
+    pub fn set(ref self, value: T) {
         unsafe {
             self.value[0] = value;
         }
     }
-    pub fn replace(self, value: T) -> T {
+    pub fn replace(ref self, value: T) -> T {
         unsafe {
             let old = self.value[0];
             self.value[0] = value;
@@ -784,7 +784,7 @@ impl<T> Cell<T> {
 
 impl<T: Default> Cell<T> {
     /// The value, leaving `T::default()` in its place.
-    pub fn take(self) -> T {
+    pub fn take(ref self) -> T {
         self.replace(T::default())
     }
 }

@@ -213,18 +213,18 @@ impl<K: Hash, V> Dict<K, V> {
     }
 
     /// The keys, lazily (2.9.3; order unspecified).
-    pub fn keys(self) -> DictKeys<K, V> {
-        DictKeys { d: self, at: 0 }
+    pub fn keys(self) -> KeysIter<K, V> {
+        KeysIter { d: self, at: 0 }
     }
 
     /// The values, lazily.
-    pub fn values(self) -> DictValues<K, V> {
-        DictValues { d: self, at: 0 }
+    pub fn values(self) -> ValuesIter<K, V> {
+        ValuesIter { d: self, at: 0 }
     }
 
     /// `(key, value)` pairs, lazily.
-    pub fn entries(self) -> DictEntries<K, V> {
-        DictEntries { d: self, at: 0 }
+    pub fn entries(self) -> EntriesIter<K, V> {
+        EntriesIter { d: self, at: 0 }
     }
 
     /// `k`'s place in the dict, present or not (2.9.3).
@@ -283,12 +283,12 @@ impl<K: Hash, V: Default> Entry<K, V> {
 // The iterators walk the live table; a dict changed while iterated
 // gives unspecified (but memory-safe) results.
 
-pub struct DictKeys<K, V> {
+pub struct KeysIter<K, V> {
     d: Dict<K, V>;
     at: usize;
 }
 
-impl<K: Hash, V> Iterator for DictKeys<K, V> {
+impl<K: Hash, V> Iterator for KeysIter<K, V> {
     type Item = K;
     fn next(ref self) -> K | none {
         unsafe {
@@ -303,12 +303,12 @@ impl<K: Hash, V> Iterator for DictKeys<K, V> {
     }
 }
 
-pub struct DictValues<K, V> {
+pub struct ValuesIter<K, V> {
     d: Dict<K, V>;
     at: usize;
 }
 
-impl<K: Hash, V> Iterator for DictValues<K, V> {
+impl<K: Hash, V> Iterator for ValuesIter<K, V> {
     type Item = V;
     fn next(ref self) -> V | none {
         unsafe {
@@ -323,12 +323,12 @@ impl<K: Hash, V> Iterator for DictValues<K, V> {
     }
 }
 
-pub struct DictEntries<K, V> {
+pub struct EntriesIter<K, V> {
     d: Dict<K, V>;
     at: usize;
 }
 
-impl<K: Hash, V> Iterator for DictEntries<K, V> {
+impl<K: Hash, V> Iterator for EntriesIter<K, V> {
     type Item = (K, V);
     fn next(ref self) -> (K, V) | none {
         unsafe {
@@ -369,9 +369,9 @@ impl<K: Hash, V> AddAssign<Dict<K, V>> for Dict<K, V> {
 
 /// `for (k, v) in d` (2.9.9).
 impl<K: Hash, V> IntoIterator for Dict<K, V> {
-    type IntoIter = DictEntries<K, V>;
+    type IntoIter = EntriesIter<K, V>;
     type Item = (K, V);
-    fn into_iter(self) -> DictEntries<K, V> {
+    fn into_iter(self) -> EntriesIter<K, V> {
         self.entries()
     }
 }

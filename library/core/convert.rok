@@ -77,63 +77,78 @@ fn overflow(ty: str) -> OverflowError { OverflowError { op: "try_from", ty } }
 // From (lossless)
 
 impl From<i8> for i16 {
+    #[intrinsic("rok.cast.i8.i16")]
     fn from(value: i8) -> i16 { value as i16 }
 }
 
 impl From<i8> for i32 {
+    #[intrinsic("rok.cast.i8.i32")]
     fn from(value: i8) -> i32 { value as i32 }
 }
 
 impl From<i8> for i64 {
+    #[intrinsic("rok.cast.i8.i64")]
     fn from(value: i8) -> i64 { value as i64 }
 }
 
 impl From<i8> for isize {
+    #[intrinsic("rok.cast.i8.isize")]
     fn from(value: i8) -> isize { value as isize }
 }
 
 impl From<i8> for f32 {
+    #[intrinsic("rok.cast.i8.f32")]
     fn from(value: i8) -> f32 { value as f32 }
 }
 
 impl From<i8> for f64 {
+    #[intrinsic("rok.cast.i8.f64")]
     fn from(value: i8) -> f64 { value as f64 }
 }
 
 impl From<i16> for i32 {
+    #[intrinsic("rok.cast.i16.i32")]
     fn from(value: i16) -> i32 { value as i32 }
 }
 
 impl From<i16> for i64 {
+    #[intrinsic("rok.cast.i16.i64")]
     fn from(value: i16) -> i64 { value as i64 }
 }
 
 impl From<i16> for isize {
+    #[intrinsic("rok.cast.i16.isize")]
     fn from(value: i16) -> isize { value as isize }
 }
 
 impl From<i16> for f32 {
+    #[intrinsic("rok.cast.i16.f32")]
     fn from(value: i16) -> f32 { value as f32 }
 }
 
 impl From<i16> for f64 {
+    #[intrinsic("rok.cast.i16.f64")]
     fn from(value: i16) -> f64 { value as f64 }
 }
 
 impl From<i32> for i64 {
+    #[intrinsic("rok.cast.i32.i64")]
     fn from(value: i32) -> i64 { value as i64 }
 }
 
 impl From<i32> for isize {
+    #[intrinsic("rok.cast.i32.isize")]
     fn from(value: i32) -> isize { value as isize }
 }
 
 impl From<i32> for f64 {
+    #[intrinsic("rok.cast.i32.f64")]
     fn from(value: i32) -> f64 { value as f64 }
 }
 
 #[cfg(target_pointer_width = "64")]
 impl From<i64> for isize {
+    #[intrinsic("rok.cast.i64.isize")]
     fn from(value: i64) -> isize { value as isize }
 }
 
@@ -147,71 +162,88 @@ impl TryFrom<i64> for isize {
 }
 
 impl From<isize> for i64 {
+    #[intrinsic("rok.cast.isize.i64")]
     fn from(value: isize) -> i64 { value as i64 }
 }
 
 impl From<u8> for u16 {
+    #[intrinsic("rok.cast.u8.u16")]
     fn from(value: u8) -> u16 { value as u16 }
 }
 
 impl From<u8> for u32 {
+    #[intrinsic("rok.cast.u8.u32")]
     fn from(value: u8) -> u32 { value as u32 }
 }
 
 impl From<u8> for u64 {
+    #[intrinsic("rok.cast.u8.u64")]
     fn from(value: u8) -> u64 { value as u64 }
 }
 
 impl From<u8> for usize {
+    #[intrinsic("rok.cast.u8.usize")]
     fn from(value: u8) -> usize { value as usize }
 }
 
 impl From<u8> for i16 {
+    #[intrinsic("rok.cast.u8.i16")]
     fn from(value: u8) -> i16 { value as i16 }
 }
 
 impl From<u8> for i32 {
+    #[intrinsic("rok.cast.u8.i32")]
     fn from(value: u8) -> i32 { value as i32 }
 }
 
 impl From<u8> for i64 {
+    #[intrinsic("rok.cast.u8.i64")]
     fn from(value: u8) -> i64 { value as i64 }
 }
 
 impl From<u16> for u32 {
+    #[intrinsic("rok.cast.u16.u32")]
     fn from(value: u16) -> u32 { value as u32 }
 }
 
 impl From<u16> for u64 {
+    #[intrinsic("rok.cast.u16.u64")]
     fn from(value: u16) -> u64 { value as u64 }
 }
 
 impl From<u16> for usize {
+    #[intrinsic("rok.cast.u16.usize")]
     fn from(value: u16) -> usize { value as usize }
 }
 
 impl From<u16> for i32 {
+    #[intrinsic("rok.cast.u16.i32")]
     fn from(value: u16) -> i32 { value as i32 }
 }
 
 impl From<u16> for i64 {
+    #[intrinsic("rok.cast.u16.i64")]
     fn from(value: u16) -> i64 { value as i64 }
 }
 
 impl From<u32> for u64 {
+    #[intrinsic("rok.cast.u32.u64")]
     fn from(value: u32) -> u64 { value as u64 }
 }
 
 impl From<u32> for usize {
+    #[intrinsic("rok.cast.u32.usize")]
     fn from(value: u32) -> usize { value as usize }
 }
 
 impl From<u32> for i64 {
+    #[intrinsic("rok.cast.u32.i64")]
     fn from(value: u32) -> i64 { value as i64 }
 }
 
 #[cfg(target_pointer_width = "64")]
 impl From<u64> for usize {
+    #[intrinsic("rok.cast.u64.usize")]
     fn from(value: u64) -> usize { value as usize }
 }
 
@@ -225,10 +257,12 @@ impl TryFrom<u64> for usize {
 }
 
 impl From<usize> for u64 {
+    #[intrinsic("rok.cast.usize.u64")]
     fn from(value: usize) -> u64 { value as u64 }
 }
 
 impl From<f32> for f64 {
+    #[intrinsic("rok.cast.f32.f64")]
     fn from(value: f32) -> f64 { value as f64 }
 }
 

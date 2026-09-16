@@ -5,7 +5,7 @@
 // 3
 
 // `b[i]` / `b[i] = v` / `b[i] += v` on a `GcBuf<T>` lower to the
-// `rok.buf.get` / `rok.buf.set` primitives (unchecked, no call).
+// `rok.buf_get` / `rok.buf_set` primitives (unchecked, no call).
 struct Cell { meta: GcBuf<usize>; }
 
 fn main() {

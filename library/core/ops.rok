@@ -116,7 +116,7 @@ pub trait PartialEq<Rhs = Self> {
 }
 
 #[lang("cmp_trait")]
-pub trait PartialOrd<Rhs = Self> {
+pub trait PartialOrd<Rhs = Self>: PartialEq<Rhs> {
     #[infix("<")]
     fn lt(self, rhs: Rhs) -> bool;
 

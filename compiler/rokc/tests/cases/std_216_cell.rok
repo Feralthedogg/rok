@@ -1,0 +1,24 @@
+// expect-exit: 0
+// expect-stdout:
+// 42 42 0 9
+// [1, 2] 3
+
+// Stdlib 2.16.5: `Cell::get` (T: Copy), `set` / `replace` / `take`
+// (`ref self`); a captured copy shares the cell. Std 3.4.4: a
+// `thread::local` of a non-Copy type.
+use rok::std::thread;
+
+fn main() {
+    let c: Cell<i32> = Cell::new(0);
+    let bump = || { c.set(42); };
+    bump();
+    let old = c.replace(9);
+    let d: Cell<i32> = Cell::new(5);
+    d.take();
+    println(f"{old} {old} {d.get()} {c.get()}");
+    let l = thread::local(|| List::<i32>::new());
+    l.get().push(1);
+    l.get().push(2);
+    let n = thread::local(|| 3);
+    println(f"{l.get():?} {n.get()}");
+}

@@ -10,6 +10,10 @@
 // `Ordering | none`; `none` for incomparable values (NaN).
 struct Half { v: f64; }
 
+impl PartialEq for Half {
+    fn eq(self, rhs: Half) -> bool { self.v == rhs.v }
+}
+
 impl PartialOrd for Half {
     fn lt(self, rhs: Half) -> bool { self.v < rhs.v }
     fn gt(self, rhs: Half) -> bool { self.v > rhs.v }

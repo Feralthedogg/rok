@@ -393,10 +393,13 @@ impl<T> ExactSizeIterator for ListIter<T> {
     }
 }
 
+/// What `xs.into_iter()` returns (2.9.2): the same walk as `iter`.
+pub type ListIntoIter<T> = ListIter<T>;
+
 impl<T> IntoIterator for List<T> {
-    type IntoIter = ListIter<T>;
+    type IntoIter = ListIntoIter<T>;
     type Item = T;
-    fn into_iter(self) -> ListIter<T> {
+    fn into_iter(self) -> ListIntoIter<T> {
         self.iter()
     }
 }

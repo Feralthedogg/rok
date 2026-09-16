@@ -1437,7 +1437,7 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             if matches!(arr_h.ty, HirTy::Struct(_) | HirTy::Enum(_)) {
                 return index_call(ctx, arr_h, "index", idx, &[], span);
             }
-            // `GcBuf<T>`'s `Index` is the unchecked `rok.buf.get` primitive.
+            // `GcBuf<T>`'s `Index` is the unchecked `rok.buf_get` primitive.
             if let HirTy::GcBuf(elem) = arr_h.ty.clone() {
                 return buf_access(ctx, arr_h, *elem, idx, None, span);
             }
@@ -3636,7 +3636,7 @@ pub(super) fn call_sig(
             ctx.env.intrinsics.get(&sig.id),
             <[HirExpr; 2]>::try_from(lowered),
         ) {
-            (Some(&op), Ok([lhs, rhs])) => HirExprKind::PrimBinOp {
+            (Some(&Intrinsic::Prim(op)), Ok([lhs, rhs])) => HirExprKind::PrimBinOp {
                 op,
                 lhs: Box::new(lhs),
                 rhs: Box::new(rhs),
@@ -3682,12 +3682,23 @@ pub(super) fn call_sig(
         ctx.env.intrinsics.get(&sig.id),
         <[HirExpr; 2]>::try_from(lowered),
     ) {
-        (Some(&op), Ok([lhs, rhs])) => HirExprKind::PrimBinOp {
+        (Some(&Intrinsic::Prim(op)), Ok([lhs, rhs])) => HirExprKind::PrimBinOp {
             op,
             lhs: Box::new(lhs),
             rhs: Box::new(rhs),
         },
-        (Some(&op), Err(mut one)) if one.len() == 1 => {
+        (Some(&Intrinsic::Convert), Err(mut one)) if one.len() == 1 => {
+            let operand = one.remove(0);
+            if operand.ty == sig.ret_ty {
+                return with_lets(lets, operand);
+            }
+            HirExprKind::Cast {
+                from_ty: operand.ty.clone(),
+                to_ty: sig.ret_ty.clone(),
+                operand: Box::new(operand),
+            }
+        }
+        (Some(&Intrinsic::Prim(op)), Err(mut one)) if one.len() == 1 => {
             let operand = one.remove(0);
             let op = if op == PrimOp::Not && operand.ty == HirTy::Prim(PrimTy::Bool) {
                 PrimOp::LogicalNot
@@ -5463,6 +5474,8 @@ pub(super) fn generic_method_for<'e>(
             (d.name, d.generic_args)
         }
         HirTy::Prim(p) => (p.name().to_owned(), Vec::new()),
+        // `impl<T> GcBuf<T>` (stdlib 2.9.12).
+        HirTy::GcBuf(_) => (super::resolve::GC_BUF.to_owned(), Vec::new()),
         _ => return &[],
     };
     let base = if generic_args.is_empty() {
@@ -7699,9 +7712,9 @@ fn lower_intrinsic(
                 span,
             }
         }
-        // `collect::intrinsic_of` keeps primitive ops off generic
+        // `collect::intrinsic_of` keeps primitive ops and conversions off generic
         // functions; `addr_of` is lowered at the call (`lower_addr_of`).
-        Intrinsic::Prim(_) | Intrinsic::AddrOf => poison(span),
+        Intrinsic::Prim(_) | Intrinsic::Convert | Intrinsic::AddrOf => poison(span),
         Intrinsic::BufNew
         | Intrinsic::BufGet
         | Intrinsic::BufSet
@@ -8177,7 +8190,7 @@ fn buf_same(ctx: &mut LowerCtx<'_>, a: HirExpr, b: &Expr, span: rokc_diagnostic:
 }
 
 /// `buf[i]` (`value: None`) or `buf[i] = value` on a lowered `GcBuf<T>`:
-/// the `rok.buf.get` / `rok.buf.set` primitive, no call. Shared by the
+/// the `rok.buf_get` / `rok.buf_set` primitive, no call. Shared by the
 /// `buf_get` / `buf_set` intrinsics and `Index` / `IndexSet` syntax.
 fn buf_access(
     ctx: &mut LowerCtx<'_>,

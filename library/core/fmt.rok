@@ -36,6 +36,40 @@ pub enum Sign {
     Space,
 }
 
+// The packed spec's align / sign bytes (`'\0'`: absent).
+
+fn align_of_byte(a: char) -> Alignment | none {
+    if a == '<' { return Alignment::Left; }
+    if a == '>' { return Alignment::Right; }
+    if a == '^' { return Alignment::Center; }
+    if a == '=' { Alignment::Equal } else { none }
+}
+
+fn align_byte(a: Alignment | none) -> char {
+    let k: Alignment = a else { return '\0'; };
+    match k {
+        Alignment::Left => '<',
+        Alignment::Right => '>',
+        Alignment::Center => '^',
+        Alignment::Equal => '=',
+    }
+}
+
+fn sign_of_byte(s: char) -> Sign | none {
+    if s == '+' { return Sign::Plus; }
+    if s == '-' { return Sign::Minus; }
+    if s == ' ' { Sign::Space } else { none }
+}
+
+fn sign_byte(s: Sign | none) -> char {
+    let k: Sign = s else { return '\0'; };
+    match k {
+        Sign::Plus => '+',
+        Sign::Minus => '-',
+        Sign::Space => ' ',
+    }
+}
+
 /// What `f"{x}"` writes.
 #[lang("display_trait")]
 pub trait Display {
@@ -49,12 +83,12 @@ pub trait Debug {
 }
 
 /// An f-string spec, `[[fill]align][sign][#][0][width][.precision][type]`
-/// (refs-lang 1.7.3). An absent `align`, `sign` or `ty` is `'\0'`; the
-/// Display letters `s d g` read as absent.
+/// (refs-lang 1.7.3). An absent `ty` is `'\0'`; the Display letters
+/// `s d g` read as absent.
 pub struct FormatSpec {
     pub fill: char;
-    pub align: char;
-    pub sign: char;
+    pub align: Alignment | none;
+    pub sign: Sign | none;
     pub alt: bool;
     pub zero: bool;
     pub width: usize | none;
@@ -66,7 +100,7 @@ impl FormatSpec {
     /// The empty spec.
     pub fn new() -> FormatSpec {
         FormatSpec {
-            fill: ' ', align: '\0', sign: '\0', alt: false, zero: false,
+            fill: ' ', align: none, sign: none, alt: false, zero: false,
             width: none, precision: none, ty: '\0',
         }
     }
@@ -79,8 +113,8 @@ impl FormatSpec {
             rok_fmt_spec_parse(text, w);
             let s = FormatSpec::new();
             s.fill = char::from_u32(w[0] as u32) ?? ' ';
-            s.align = (w[1] as u8) as char;
-            s.sign = (w[2] as u8) as char;
+            s.align = align_of_byte((w[1] as u8) as char);
+            s.sign = sign_of_byte((w[2] as u8) as char);
             s.alt = w[3] != 0;
             s.zero = w[4] != 0;
             if w[5] >= 0 { s.width = w[5] as usize; }
@@ -128,7 +162,8 @@ impl Formatter {
         let ty = if spec.ty == 's' || spec.ty == 'd' || spec.ty == 'g' { '\0' } else { spec.ty };
         let alt = if spec.alt { 1u64 } else { 0u64 };
         let zero = if spec.zero { 1u64 } else { 0u64 };
-        f.flags = (spec.fill as u64) + ((spec.align as u64) << 32u64) + ((spec.sign as u64) << 40u64)
+        f.flags = (spec.fill as u64) + ((align_byte(spec.align) as u64) << 32u64)
+            + ((sign_byte(spec.sign) as u64) << 40u64)
             + ((ty as u64) << 48u64) + (alt << 56u64) + (zero << 57u64);
         let p: usize | none = none;
         if let n: usize = spec.precision { p = if n > 500 { 500 } else { n }; }
@@ -163,20 +198,9 @@ impl Formatter {
 
     /// `none` when the spec names no alignment: numbers then align
     /// right, other values left.
-    pub fn align(self) -> Alignment | none {
-        let a = self.byte(32u64);
-        if a == '<' { return Alignment::Left; }
-        if a == '>' { return Alignment::Right; }
-        if a == '^' { return Alignment::Center; }
-        if a == '=' { Alignment::Equal } else { none }
-    }
+    pub fn align(self) -> Alignment | none { align_of_byte(self.byte(32u64)) }
 
-    pub fn sign(self) -> Sign | none {
-        let s = self.byte(40u64);
-        if s == '+' { return Sign::Plus; }
-        if s == '-' { return Sign::Minus; }
-        if s == ' ' { Sign::Space } else { none }
-    }
+    pub fn sign(self) -> Sign | none { sign_of_byte(self.byte(40u64)) }
 
     pub fn alternate(self) -> bool { ((self.flags >> 56u64) & 1u64) != 0u64 }
     pub fn pad_zero(self) -> bool { ((self.flags >> 57u64) & 1u64) != 0u64 }

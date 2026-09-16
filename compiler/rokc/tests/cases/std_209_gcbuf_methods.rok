@@ -1,0 +1,24 @@
+// expect-exit: 0
+// expect-stdout:
+// 0 7 9 true
+// 65 70000 true 1.5 x
+
+// Stdlib 2.9.12: `GcBuf::new` / `get` / `set` (the method forms of
+// `buf_new` / `buf_get` / `buf_set`). Stdlib 2.11 / 2.13: primitive
+// `From` / `Clone` are the `rok.cast.FROM.TO` / `rok.clone.copy`
+// intrinsics.
+use rok::core::collections::raw::{GcBuf, buf_get};
+
+fn main() {
+    let b: GcBuf<i64> = unsafe { GcBuf::new(3) };
+    unsafe {
+        b.set(1, 7);
+        b.set(2, 9);
+        println(f"{b.get(0)} {b.get(1)} {buf_get(b, 2)} {b.get(1) == b[1]}");
+    }
+    let c: u32 = u32::from(65u8);
+    let w: i64 = i64::from(70000i32);
+    let f: f64 = f64::from(1.5f32);
+    let s = "x";
+    println(f"{c} {w} {u16::from(7u8) == 7} {f} {s.clone()}");
+}

@@ -42,22 +42,70 @@ pub trait Copy: Clone {}
 
 // Primitives (and the immutable `(ptr, len)` `str`, 2.13.6) clone by
 // copying.
-impl Clone for i8 { fn clone(self) -> i8 { self } }
-impl Clone for i16 { fn clone(self) -> i16 { self } }
-impl Clone for i32 { fn clone(self) -> i32 { self } }
-impl Clone for i64 { fn clone(self) -> i64 { self } }
-impl Clone for isize { fn clone(self) -> isize { self } }
-impl Clone for u8 { fn clone(self) -> u8 { self } }
-impl Clone for u16 { fn clone(self) -> u16 { self } }
-impl Clone for u32 { fn clone(self) -> u32 { self } }
-impl Clone for u64 { fn clone(self) -> u64 { self } }
-impl Clone for usize { fn clone(self) -> usize { self } }
-impl Clone for f32 { fn clone(self) -> f32 { self } }
-impl Clone for f64 { fn clone(self) -> f64 { self } }
-impl Clone for bool { fn clone(self) -> bool { self } }
-impl Clone for char { fn clone(self) -> char { self } }
-impl Clone for c_char { fn clone(self) -> c_char { self } }
-impl Clone for str { fn clone(self) -> str { self } }
+impl Clone for i8 {
+    #[intrinsic("rok.clone.copy")]
+    fn clone(self) -> i8 { self }
+}
+impl Clone for i16 {
+    #[intrinsic("rok.clone.copy")]
+    fn clone(self) -> i16 { self }
+}
+impl Clone for i32 {
+    #[intrinsic("rok.clone.copy")]
+    fn clone(self) -> i32 { self }
+}
+impl Clone for i64 {
+    #[intrinsic("rok.clone.copy")]
+    fn clone(self) -> i64 { self }
+}
+impl Clone for isize {
+    #[intrinsic("rok.clone.copy")]
+    fn clone(self) -> isize { self }
+}
+impl Clone for u8 {
+    #[intrinsic("rok.clone.copy")]
+    fn clone(self) -> u8 { self }
+}
+impl Clone for u16 {
+    #[intrinsic("rok.clone.copy")]
+    fn clone(self) -> u16 { self }
+}
+impl Clone for u32 {
+    #[intrinsic("rok.clone.copy")]
+    fn clone(self) -> u32 { self }
+}
+impl Clone for u64 {
+    #[intrinsic("rok.clone.copy")]
+    fn clone(self) -> u64 { self }
+}
+impl Clone for usize {
+    #[intrinsic("rok.clone.copy")]
+    fn clone(self) -> usize { self }
+}
+impl Clone for f32 {
+    #[intrinsic("rok.clone.copy")]
+    fn clone(self) -> f32 { self }
+}
+impl Clone for f64 {
+    #[intrinsic("rok.clone.copy")]
+    fn clone(self) -> f64 { self }
+}
+impl Clone for bool {
+    #[intrinsic("rok.clone.copy")]
+    fn clone(self) -> bool { self }
+}
+impl Clone for char {
+    #[intrinsic("rok.clone.copy")]
+    fn clone(self) -> char { self }
+}
+impl Clone for c_char {
+    #[intrinsic("rok.clone.copy")]
+    fn clone(self) -> c_char { self }
+}
+impl Clone for str {
+    #[intrinsic("rok.clone.copy")]
+    fn clone(self) -> str { self }
+}
 
 impl Copy for i8 {}
 impl Copy for i16 {}

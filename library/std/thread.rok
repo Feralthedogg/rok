@@ -40,7 +40,7 @@ struct Rec {
     name: str | none;
     /// 1 = an `unpark` is pending.
     park: Atomic<i32>;
-    /// `ThreadLocal` key → that local's `Cell<T>` on this thread.
+    /// `ThreadLocal` key → that local's one-slot `List<T>` on this thread.
     locals: Dict<u64, any>;
 }
 
@@ -249,16 +249,17 @@ unsafe impl<T> Send for ThreadLocal<T> {}
 unsafe impl<T> Sync for ThreadLocal<T> {}
 
 impl<T> ThreadLocal<T> {
-    /// This thread's cell; only this thread touches its `locals`.
-    fn cell(self) -> Cell<T> {
+    /// This thread's slot; only this thread touches its `locals`.
+    fn cell(self) -> List<T> {
         let locals = this_rec().locals;
         if let v: any = locals.get(self.key) {
-            if let c: Cell<T> = rok::core::reflect::cast::<Cell<T>>(v) {
+            if let c: List<T> = rok::core::reflect::cast::<List<T>>(v) {
                 return c;
             }
         }
         let init = self.init;
-        let c = Cell::new(init());
+        let c: List<T> = List::new();
+        c.push(init());
         locals.insert(self.key, c);
         c
     }
@@ -269,11 +270,11 @@ impl<T> ThreadLocal<T> {
     }
 
     pub fn get(self) -> T {
-        self.cell().get()
+        self.cell()[0]
     }
 
     pub fn set(self, value: T) {
-        self.cell().set(value);
+        self.cell()[0] = value;
     }
 }
 

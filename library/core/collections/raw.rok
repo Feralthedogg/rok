@@ -9,34 +9,41 @@
 
 pub struct GcBuf<T> {}
 
+/// The method forms of `buf_new` / `buf_get` / `buf_set` (2.9.12).
+impl<T> GcBuf<T> {
+    pub unsafe fn new(len: usize) -> GcBuf<T> { unsafe { buf_new(len) } }
+    pub unsafe fn get(self, i: usize) -> T { unsafe { buf_get(self, i) } }
+    pub unsafe fn set(self, i: usize, v: T) { unsafe { buf_set(self, i, v); } }
+}
+
 /// A zeroed buffer of `len` elements; `T` comes from the slot's type.
-#[intrinsic("rok.buf.new")]
+#[intrinsic("rok.buf_new")]
 pub unsafe fn buf_new<T>(len: usize) -> GcBuf<T> {
     buf_new(len)
 }
 
 /// Element `i` (no bounds check).
-#[intrinsic("rok.buf.get")]
+#[intrinsic("rok.buf_get")]
 pub unsafe fn buf_get<T>(buf: GcBuf<T>, i: usize) -> T {
     buf_get(buf, i)
 }
 
 /// Store element `i` (no bounds check).
-#[intrinsic("rok.buf.set")]
+#[intrinsic("rok.buf_set")]
 pub unsafe fn buf_set<T>(buf: GcBuf<T>, i: usize, v: T) {
     buf_set(buf, i, v);
 }
 
 /// Whether `a` and `b` are one buffer (identity, not contents). Pins
 /// nothing.
-#[intrinsic("rok.buf.same")]
+#[intrinsic("rok.buf_same")]
 pub fn buf_same<T>(a: GcBuf<T>, b: GcBuf<T>) -> bool {
     buf_same(a, b)
 }
 
 /// `buf` typed as `GcBuf<u8>`: a runtime parameter that takes any GC
 /// object.
-#[intrinsic("rok.buf.erase")]
+#[intrinsic("rok.buf_erase")]
 pub(pkg) fn buf_erase<T>(buf: GcBuf<T>) -> GcBuf<u8> {
     buf_erase(buf)
 }

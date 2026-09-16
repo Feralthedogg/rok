@@ -771,7 +771,7 @@ pub fn lower_full(
     // tag hashes the impl's module, trait and target, so it stays when
     // another impl comes or goes; a repeat gets a count.
     let mut templated: HashMap<String, usize> = HashMap::new();
-    let mut intrinsics: HashMap<FunctionId, PrimOp> = HashMap::new();
+    let mut intrinsics: HashMap<FunctionId, Intrinsic> = HashMap::new();
     let mut generic_intrinsics: HashMap<String, Intrinsic> = HashMap::new();
     let mut unsafe_fns: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
     let mut extern_fn_ids: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
@@ -817,8 +817,8 @@ pub fn lower_full(
                     continue;
                 }
                 let id = FunctionId(u32::try_from(decls.len()).expect("FunctionId overflow"));
-                if let Some(Intrinsic::Prim(op)) = intrinsic_of(fn_def, &module, &mut pre_diags) {
-                    intrinsics.insert(id, op);
+                if let Some(i) = intrinsic_of(fn_def, &module, &mut pre_diags) {
+                    intrinsics.insert(id, i);
                 }
                 let sc = Scope {
                     names: &names,
@@ -1360,8 +1360,8 @@ pub fn lower_full(
             let id = FunctionId(u32::try_from(decls.len()).expect("FunctionId overflow"));
             let sig = sig_of(m, id, sc);
             fn_table.insert(key.clone(), sig);
-            if let Some(Intrinsic::Prim(op)) = intrinsic_of(m, &module, &mut pre_diags) {
-                intrinsics.insert(id, op);
+            if let Some(i) = intrinsic_of(m, &module, &mut pre_diags) {
+                intrinsics.insert(id, i);
             }
             if let Some(t) = target.clone() {
                 method_table.entry((t, leaf.clone())).or_default().push(id);
@@ -5313,6 +5313,10 @@ fn export_name(f: &FnDef) -> Option<String> {
 pub(super) enum Intrinsic {
     /// `rok.OP.TYPE` on a primitive's method.
     Prim(PrimOp),
+    /// `rok.cast.FROM.TO` / `rok.clone.copy` on a primitive's method: the
+    /// call is its one operand as the return type (`as`; unchanged for
+    /// a copy).
+    Convert,
     BufNew,
     BufGet,
     BufSet,
@@ -5344,11 +5348,12 @@ impl Intrinsic {
     fn parse(name: &str) -> Option<Self> {
         let rest = name.strip_prefix("rok.")?;
         Some(match rest {
-            "buf.new" => Self::BufNew,
-            "buf.get" => Self::BufGet,
-            "buf.set" => Self::BufSet,
-            "buf.same" => Self::BufSame,
-            "buf.erase" => Self::BufErase,
+            "buf_new" => Self::BufNew,
+            "buf_get" => Self::BufGet,
+            "buf_set" => Self::BufSet,
+            "buf_same" => Self::BufSame,
+            "buf_erase" => Self::BufErase,
+            "clone.copy" => Self::Convert,
             "ptr.read" => Self::PtrRead { volatile: false },
             "ptr.write" => Self::PtrWrite { volatile: false },
             "ptr.read_volatile" => Self::PtrRead { volatile: true },
@@ -5362,6 +5367,9 @@ impl Intrinsic {
             "mlir.op" => Self::MlirOp,
             "mlir.attr" => Self::MlirAttr,
             _ => {
+                if let Some(tys) = rest.strip_prefix("cast.") {
+                    return (tys.split('.').count() == 2).then_some(Self::Convert);
+                }
                 if let Some(op) = rest.strip_prefix("atomic.") {
                     return ["load", "xchg", "add", "sub", "and", "or", "xor", "cas"]
                         .into_iter()
@@ -5448,6 +5456,15 @@ pub(super) fn intrinsic_of(
     };
     // A primitive op is a concrete method; the others take their types
     // from a generic function's arguments.
+    if intrinsic == Intrinsic::Convert {
+        if !m.generics.params.is_empty() || m.params.len() != 1 {
+            return err(format!(
+                "`#[intrinsic]` on `{}`: a conversion is a non-generic method of one operand",
+                m.name
+            ));
+        }
+        return Some(intrinsic);
+    }
     let Intrinsic::Prim(op) = intrinsic else {
         if m.generics.params.is_empty() {
             return err(format!(

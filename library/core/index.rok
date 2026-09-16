@@ -16,7 +16,7 @@ pub trait Index<I> {
 #[lang("index_set_trait")]
 pub trait IndexSet<I> {
     type Value;
-    fn index_set(ref self, idx: I, value: Value);
+    fn index_set(self, idx: I, value: Value);
 }
 
 /// `a[i:j]` (spec 2.3.4 names it `Slice`, which is also the view type
