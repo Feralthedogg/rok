@@ -15,3 +15,13 @@ pub mod ordered_dict;
 pub mod ordered_set;
 pub mod slice;
 pub mod broadcast;
+
+// `use rok::core::collections::List` (stdlib 2.9).
+pub use list::{List, ListIter, ListIntoIter};
+pub use deque::{Deque, DequeIter};
+pub use heap::BinaryHeap;
+pub use dict::{Dict, Entry, KeysIter, ValuesIter, EntriesIter};
+pub use set::Set;
+pub use ordered_dict::OrderedDict;
+pub use ordered_set::OrderedSet;
+pub use slice::{Slice, SliceIter};

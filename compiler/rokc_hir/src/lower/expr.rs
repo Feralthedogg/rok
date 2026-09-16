@@ -8033,6 +8033,18 @@ fn lower_atomic_intrinsic(
         order[k] = llvm;
     }
     let buf = lower_expected(ctx, pos[0], HirTy::Unknown);
+    if let HirTy::GcBuf(e) = &buf.ty {
+        if let Some((id, word)) = transparent_word(ctx, e) {
+            if !matches!(op, "load" | "xchg" | "cas") {
+                discard_args(ctx, &args[1..]);
+                return ctx.error_expr(
+                    span,
+                    format!("`atomic_{op}` needs an integer, found `{}`", ctx.ty_name(e)),
+                );
+            }
+            return atomic_on_word(ctx, (op, order), buf, id, word, &pos[1..2 + values], span);
+        }
+    }
     let elem = match &buf.ty {
         HirTy::GcBuf(e) if matches!(**e, HirTy::Prim(p) if p.is_int() || p == PrimTy::Bool) => {
             (**e).clone()
@@ -8159,6 +8171,84 @@ fn lower_buf_intrinsic(
             span,
         },
         _ => buf_access(ctx, buf, *elem, pos[1], pos.get(2).copied(), span),
+    }
+}
+
+/// A `#[repr(transparent)]` struct around one integer (`Ptr<T>`): its id
+/// and that integer type, which atomics operate on (stdlib 2.16.2).
+fn transparent_word(ctx: &LowerCtx<'_>, ty: &HirTy) -> Option<(StructId, HirTy)> {
+    let HirTy::Struct(id) = ty else { return None };
+    let def = ctx.struct_def(*id);
+    match def.fields.as_slice() {
+        [f] if def.repr.transparent && matches!(f.ty, HirTy::Prim(p) if p.is_int()) => {
+            Some((*id, f.ty.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// `atomic_OP(buf, i, ..)` on a `GcBuf` of a transparent word struct:
+/// the op on the buffer read as `GcBuf<word>`, operands unwrapped and
+/// the result wrapped again.
+fn atomic_on_word(
+    ctx: &mut LowerCtx<'_>,
+    (op, order): (&'static str, [&'static str; 2]),
+    buf: HirExpr,
+    id: StructId,
+    word: HirTy,
+    rest: &[&Expr],
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let elem = HirTy::Struct(id);
+    let word_buf = HirTy::GcBuf(Box::new(word.clone()));
+    let buf = HirExpr {
+        ty: word_buf.clone(),
+        kind: HirExprKind::Cast {
+            from_ty: buf.ty.clone(),
+            to_ty: word_buf,
+            operand: Box::new(buf),
+        },
+        span,
+    };
+    let usize_ty = HirTy::Prim(PrimTy::Usize);
+    let i = lower_expected(ctx, rest[0], usize_ty.clone());
+    let i = coerce(ctx, &usize_ty, i, &|| "the buffer index".to_owned());
+    let operands = rest[1..]
+        .iter()
+        .map(|e| {
+            let v = lower_expected(ctx, e, elem.clone());
+            let v = coerce(ctx, &elem, v, &|| "the atomic operand".to_owned());
+            HirExpr {
+                ty: word.clone(),
+                kind: HirExprKind::FieldRead {
+                    target: Box::new(v),
+                    struct_id: id,
+                    field_index: 0,
+                    field_ty: word.clone(),
+                },
+                span,
+            }
+        })
+        .collect();
+    let raw = HirExpr {
+        ty: word.clone(),
+        kind: HirExprKind::BufAtomic {
+            op,
+            buf: Box::new(buf),
+            index: Box::new(i),
+            args: operands,
+            elem: word,
+            order,
+        },
+        span,
+    };
+    HirExpr {
+        ty: elem,
+        kind: HirExprKind::StructInit {
+            struct_id: id,
+            fields: vec![raw],
+        },
+        span,
     }
 }
 

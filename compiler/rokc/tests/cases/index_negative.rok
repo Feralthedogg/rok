@@ -10,7 +10,8 @@
 // dict 5
 // once 30 [20, 30] 1
 fn make(n: Cell<i32>) -> List<i32> {
-    n.set(n.get() + 1);
+    let v = n.get() + 1;
+    n.set(v);
     [10, 20, 30]
 }
 

@@ -424,8 +424,11 @@ impl TypeNames<'_> {
             keys: &keys,
             visible: &visible,
         };
+        let item = |k: &String| self.reexports.get(k).unwrap_or(k).clone();
         let mut full = match resolve_name(segments, module, local_uses, self.uses, &set) {
             Ok(r) => r?,
+            // An item and its re-exports are one item (spec 5.8.4).
+            Err(hits) if hits.iter().all(|h| item(h) == item(&hits[0])) => item(&hits[0]),
             Err(hits) => {
                 self.error(
                     at,

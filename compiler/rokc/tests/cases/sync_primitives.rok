@@ -51,7 +51,8 @@ fn main() -> i32 {
     once.call_once(|| { n.fetch_add(1); });
     println(f"{n.load()}");
     let c = Cell::new(4);
-    c.set(c.get() + 1);
+    let v = c.get() + 1;
+    c.set(v);
     println(f"{c.replace(0)}");
     return 0;
 }

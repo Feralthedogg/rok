@@ -14,7 +14,8 @@
 // for 2 3 4
 // eq true
 fn make(n: Cell<i32>) -> List<i32> {
-    n.set(n.get() + 1);
+    let v = n.get() + 1;
+    n.set(v);
     [10, 20, 30]
 }
 

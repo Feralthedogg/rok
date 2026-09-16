@@ -530,3 +530,11 @@ impl<T> SendFuture<T> {
         }
     }
 }
+
+// The module paths of stdlib 2.17.6.
+pub mod sender {
+    pub use rok::core::channel::{Sender, SendFuture, SendError, TrySendError};
+}
+pub mod receiver {
+    pub use rok::core::channel::{Receiver, RecvFuture, ChannelIter};
+}

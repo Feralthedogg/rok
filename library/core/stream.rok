@@ -414,3 +414,17 @@ impl<T, E> TryAsyncStream<T, E> {
         try (self.resume)(ctx)
     }
 }
+
+// The module paths of stdlib 2.8.9.
+pub mod stream {
+    pub use rok::core::stream::Stream;
+}
+pub mod into_stream {
+    pub use rok::core::stream::IntoStream;
+}
+pub mod adapter {
+    pub use rok::core::stream::{Map, Filter, Take, Skip, Throttle, Buffered, BufferUnordered};
+}
+pub mod combinator {
+    pub use rok::core::stream::{merge, zip, select, Merge, Zip, Select};
+}

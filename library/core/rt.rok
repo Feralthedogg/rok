@@ -193,6 +193,7 @@ extern "rok" {
     fn rok_net_recv_fd(fd: i32, buf: GcBuf<u8>, off: usize, len: usize, out: GcBuf<i32>) -> isize;
     fn rok_net_sendfile(sock: i32, file: i32, offset: i64, count: usize) -> isize;
     fn rok_net_splice(sock: i32, file: i32, count: usize) -> isize;
+    fn rok_net_send_zerocopy(fd: i32, buf: GcBuf<u8>, off: usize, len: usize) -> isize;
 }
 
 // Neither allocates nor blocks: a call is no safepoint (804). The

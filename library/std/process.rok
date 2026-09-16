@@ -15,7 +15,7 @@
 // On Linux each child is also tracked by a pidfd (opened right after
 // the spawn, closed once reaped), and signals go through it, so a
 // recycled pid is never hit. `output()` drains stdout and stderr
-// together (`poll`; Windows polls the pipes). The pipe ends are `File`s.
+// together (`poll`; Windows polls the pipes). The pipe ends wrap `File`s.
 //
 // `signal(sig, f)`: the C handler writes the signal number to a pipe;
 // one dispatcher thread (`rok-signal`, started by the first `signal`)
@@ -23,7 +23,8 @@
 // anything. A burst that fills the pipe drops signals.
 
 use rok::std::fs::File;
-use rok::std::io::{IoError, RawFd, Reader, check, byte_buf, read_more};
+use rok::std::io::{IoError, RawFd, Reader, Writer, check, byte_buf, read_more};
+use rok::std::path::Path;
 use rok::std::path::AsPath;
 use rok::std::env;
 use rok::std::thread;
@@ -112,39 +113,79 @@ fn stdio_mode(s: Stdio) -> i32 {
     }
 }
 
-/// A child's stdin (write end of a pipe).
-pub type ChildStdin = File;
-/// A child's stdout / stderr (read end of a pipe).
-pub type ChildStdout = File;
-pub type ChildStderr = File;
+/// A child's stdin: the write end of its pipe (307.2).
+pub struct ChildStdin {
+    file: File;
+}
+
+impl ChildStdin {
+    pub fn fd(self) -> RawFd { self.file.fd() }
+    /// Close the pipe: the child reads end of input.
+    pub fn close(self) throws (IoError) { try self.file.close(); }
+}
+
+impl Writer for ChildStdin {
+    fn write(ref self, buf: List<u8>) throws (IoError) -> usize { try self.file.write(buf) }
+    fn flush(ref self) throws (IoError) {}
+}
+
+/// A child's stdout: the read end of its pipe.
+pub struct ChildStdout {
+    file: File;
+}
+
+impl ChildStdout {
+    pub fn fd(self) -> RawFd { self.file.fd() }
+    pub fn close(self) throws (IoError) { try self.file.close(); }
+}
+
+impl Reader for ChildStdout {
+    fn read(ref self, buf: List<u8>) throws (IoError) -> usize { try self.file.read(buf) }
+}
+
+/// A child's stderr: the read end of its pipe.
+pub struct ChildStderr {
+    file: File;
+}
+
+impl ChildStderr {
+    pub fn fd(self) -> RawFd { self.file.fd() }
+    pub fn close(self) throws (IoError) { try self.file.close(); }
+}
+
+impl Reader for ChildStderr {
+    fn read(ref self, buf: List<u8>) throws (IoError) -> usize { try self.file.read(buf) }
+}
 
 /// A process to run (307.1). Builder methods return the updated command.
+/// The streams start as `Inherit`; `output` pipes an inherited stdout /
+/// stderr and reads stdin from null.
 pub struct Command {
-    program: str;
+    program: Path;
     args: List<str>;
     envs: Dict<str, str>;
     env_clear: bool;
-    stdin: Stdio | none;
-    stdout: Stdio | none;
-    stderr: Stdio | none;
-    cwd: str | none;
+    stdin: Stdio;
+    stdout: Stdio;
+    stderr: Stdio;
+    cwd: Path | none;
     kill_on_drop: bool;
-    pgid: i32;
+    process_group: i32 | none;
 }
 
 impl Command {
     pub fn new<P: AsPath>(program: P) -> Command {
         Command {
-            program: program.as_path().as_str(),
+            program: program.as_path(),
             args: List::new(),
             envs: Dict::new(),
             env_clear: false,
-            stdin: none,
-            stdout: none,
-            stderr: none,
+            stdin: Stdio::Inherit,
+            stdout: Stdio::Inherit,
+            stderr: Stdio::Inherit,
             cwd: none,
             kill_on_drop: false,
-            pgid: -1,
+            process_group: none,
         }
     }
 
@@ -178,7 +219,7 @@ impl Command {
     }
 
     pub fn current_dir<P: AsPath>(self, dir: P) -> Command {
-        self.cwd = dir.as_path().as_str();
+        self.cwd = dir.as_path();
         self
     }
 
@@ -187,35 +228,38 @@ impl Command {
     pub fn stderr(self, cfg: Stdio) -> Command { self.stderr = cfg; self }
 
     /// Put the child in process group `pgid` (0: a new group it leads).
-    pub fn process_group(self, pgid: i32) -> Command { self.pgid = pgid; self }
+    pub fn process_group(self, pgid: i32) -> Command { self.process_group = pgid; self }
 
     /// Kill the child when its `Child` is dropped by `using`.
     pub fn kill_on_drop(self, on: bool) -> Command { self.kill_on_drop = on; self }
 
-    /// Start the child; unset streams are inherited.
+    /// Start the child.
     pub fn spawn(self) throws (IoError) -> Child {
-        try self.start(Stdio::Inherit, Stdio::Inherit)
+        try self.start()
     }
 
-    /// Run to completion, collecting stdout and stderr (stdin defaults
-    /// to null).
+    /// Run to completion, collecting stdout and stderr (an inherited
+    /// stdin reads null instead).
     pub fn output(self) throws (IoError) -> Output {
-        if self.stdin is none { self.stdin = Stdio::Null; }
-        let child = try self.start(Stdio::Piped, Stdio::Piped);
+        let c = self;
+        if c.stdin is Stdio::Inherit { c.stdin = Stdio::Null; }
+        if c.stdout is Stdio::Inherit { c.stdout = Stdio::Piped; }
+        if c.stderr is Stdio::Inherit { c.stderr = Stdio::Piped; }
+        let child = try c.start();
         // Both pipes drain together (poll), so neither can fill and stall.
         let so = child.stdout;
         let se = child.stderr;
         let out: List<u8> = List::new();
         let errs: List<u8> = List::new();
-        let fd_out = if so is File { so.fd() } else { -1 };
-        let fd_err = if se is File { se.fd() } else { -1 };
-        try drain(fd_out, out, fd_err, errs, self.program) catch e {
-            if so is File { try so.close() catch _ {}; }
-            if se is File { try se.close() catch _ {}; }
+        let fd_out = if so is ChildStdout { so.fd() } else { -1 };
+        let fd_err = if se is ChildStderr { se.fd() } else { -1 };
+        try drain(fd_out, out, fd_err, errs, self.program.as_str()) catch e {
+            if so is ChildStdout { try so.close() catch _ {}; }
+            if se is ChildStderr { try se.close() catch _ {}; }
             throw e;
         };
-        if so is File { try so.close(); }
-        if se is File { try se.close(); }
+        if so is ChildStdout { try so.close(); }
+        if se is ChildStderr { try se.close(); }
         let status = try child.wait();
         Output { status: status, stdout: out, stderr: errs }
     }
@@ -226,10 +270,10 @@ impl Command {
         try child.wait()
     }
 
-    fn start(self, out_default: Stdio, err_default: Stdio) throws (IoError) -> Child {
+    fn start(self) throws (IoError) -> Child {
         unsafe {
             let argv = StrBuf::new();
-            argv.push_str(self.program);
+            argv.push_str(self.program.as_str());
             argv.push_byte(0u8);
             for a in self.args {
                 argv.push_str(a);
@@ -257,22 +301,23 @@ impl Command {
             let fds: GcBuf<i32> = buf_new(3);
             let pid = unsafe {
                 rok_os_spawn(
-                    argv.to_str(), self.args.len() + 1, envs.to_str(), envc, self.cwd ?? "",
-                    stdio_mode(self.stdin ?? Stdio::Inherit),
-                    stdio_mode(self.stdout ?? out_default),
-                    stdio_mode(self.stderr ?? err_default),
-                    self.pgid,
+                    argv.to_str(), self.args.len() + 1, envs.to_str(), envc,
+                    if let d: Path = self.cwd { d.as_str() } else { "" },
+                    stdio_mode(self.stdin),
+                    stdio_mode(self.stdout),
+                    stdio_mode(self.stderr),
+                    self.process_group ?? -1,
                     fds,
                 )
             };
-            try check(pid as i64, self.program);
+            try check(pid as i64, self.program.as_str());
             let state: GcBuf<i32> = buf_new(3);
             state[2] = rok_os_pidfd_open(pid);
             Child {
                 pid: pid,
-                stdin: pipe_end(fds[0], "child stdin"),
-                stdout: pipe_end(fds[1], "child stdout"),
-                stderr: pipe_end(fds[2], "child stderr"),
+                stdin: if fds[0] < 0 { none } else { ChildStdin { file: File::from_fd(fds[0], "child stdin") } },
+                stdout: if fds[1] < 0 { none } else { ChildStdout { file: File::from_fd(fds[1], "child stdout") } },
+                stderr: if fds[2] < 0 { none } else { ChildStderr { file: File::from_fd(fds[2], "child stderr") } },
                 state: state,
                 kill_on_drop: self.kill_on_drop,
             }
@@ -293,11 +338,6 @@ fn drain(fd1: i32, out1: List<u8>, fd2: i32, out2: List<u8>, context: str) throw
 /// One read of `fd` onto the end of `out`; the count.
 fn fill(fd: i32, out: List<u8>, context: str) throws (IoError) -> usize {
     try read_more(out, 16384, |b: GcBuf<u8>, at: usize, n: usize| unsafe { rok_os_read(fd, b, at, n) }, context)
-}
-
-fn pipe_end(fd: i32, name: str) -> File | none {
-    if fd < 0 { return none; }
-    File::from_fd(fd, name)
 }
 
 const WINDOWS: bool = cfg!(target_os = "windows");
@@ -353,7 +393,7 @@ impl Child {
     pub fn wait(self) throws (IoError) -> ExitStatus {
         unsafe {
             let si = self.stdin;
-            if si is File { try si.close(); }
+            if si is ChildStdin { try si.close(); }
             if self.state[0] == 0 {
                 let out: GcBuf<i32> = buf_new(1);
                 try check(rok_os_waitpid(self.pid, 0, out) as i64, "waitpid");

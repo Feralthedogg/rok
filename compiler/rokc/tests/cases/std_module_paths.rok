@@ -1,0 +1,40 @@
+// expect-exit: 0
+// expect-stdout:
+// 3 1 true 5 2 ready
+
+// The module paths the stdlib spec names resolve to the same items:
+// collections (2.9), sync (2.16.6), channel (2.17.6), future (2.20.9),
+// stream (2.8.9), ops::broadcast (2.6). Glob imports seeing an item and
+// its re-export are not ambiguous.
+use rok::core::collections::{List, Dict};
+use rok::core::sync::atomic::Atomic;
+use rok::core::sync::mutex::Mutex;
+use rok::core::sync::rwlock::RwLock;
+use rok::core::sync::cell::Cell;
+use rok::core::channel::sender::Sender;
+use rok::core::channel::receiver::Receiver;
+use rok::core::future::poll::Poll;
+use rok::core::future::into_future::IntoFuture;
+use rok::core::stream::stream::Stream;
+use rok::core::stream::combinator::merge;
+use rok::core::ops::broadcast::DotAdd;
+
+fn send_one(tx: Sender<i32>) { try! tx.send(5); }
+
+fn main() {
+    let xs: List<i32> = [1, 2, 3];
+    let d: Dict<str, i32> = Dict::new();
+    d["a"] = 1;
+    let a: Atomic<i32> = Atomic::new(0);
+    let m: Mutex<i32> = Mutex::new(0);
+    let r: RwLock<i32> = RwLock::new(2);
+    let c: Cell<bool> = Cell::new(true);
+    let (tx, rx) = channel::<i32>();
+    send_one(tx);
+    let got: Receiver<i32> = rx;
+    let p: Poll<str> = Poll::Ready("ready");
+    let shown = match p { Poll::Ready(s) => s, Poll::Pending => "pending" };
+    let v = 0;
+    using g = r.read() { v = g.get(); }
+    println(f"{xs.len()} {d["a"]} {c.get()} {got.recv() ?? 0} {v} {shown}");
+}

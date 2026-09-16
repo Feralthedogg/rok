@@ -1330,6 +1330,20 @@ impl TcpStream {
         }
         done
     }
+
+    /// Some prefix of `buf` sent with `MSG_ZEROCOPY` (Linux 4.14+): the
+    /// kernel reads `buf` in place; returns once it no longer needs it.
+    pub fn write_zerocopy(self, buf: List<u8>) throws (IoError) -> usize {
+        let (b, at, n) = region(buf);
+        loop {
+            let r = unsafe { rok_net_send_zerocopy(try self.sock.live(), b, at, n) } as i64;
+            if would_block(r) {
+                try self.sock.block(1, "write_zerocopy");
+                continue;
+            }
+            return (try check(r, "write_zerocopy")) as usize;
+        }
+    }
 }
 
 // ---- conveniences (302.6) ----

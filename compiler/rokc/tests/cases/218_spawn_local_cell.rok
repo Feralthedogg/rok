@@ -10,9 +10,11 @@
 async fn main() {
     let c = Cell::new(0);
     let t = task::spawn_local(async {
-        c.set(c.get() + 1);
+        let v = c.get() + 1;
+        c.set(v);
         await task::yield_now();
-        c.set(c.get() + 2);
+        v = c.get() + 2;
+        c.set(v);
         c.get()
     });
     println(f"local {await t}");

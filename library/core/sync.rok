@@ -89,6 +89,13 @@ impl AtomicPrimitive for u32 {}
 impl AtomicPrimitive for u64 {}
 impl AtomicPrimitive for usize {}
 impl AtomicPrimitive for bool {}
+/// One address word: load / store / swap / compare_exchange.
+impl<T> AtomicPrimitive for rok::bare::ptr::Ptr<T> {}
+
+/// Pointers compare by address.
+impl<T> PartialEq for rok::bare::ptr::Ptr<T> {
+    fn eq(self, rhs: rok::bare::ptr::Ptr<T>) -> bool { self.addr() == rhs.addr() }
+}
 
 /// A lock-free cell (2.16.2). Send + Sync.
 pub struct Atomic<T> {
@@ -787,4 +794,18 @@ impl<T: Default> Cell<T> {
     pub fn take(ref self) -> T {
         self.replace(T::default())
     }
+}
+
+// The module paths of stdlib 2.16.6.
+pub mod atomic {
+    pub use rok::core::sync::{Atomic, AtomicOrdering, AtomicPrimitive};
+}
+pub mod mutex {
+    pub use rok::core::sync::{Mutex, MutexGuard, LockFuture};
+}
+pub mod rwlock {
+    pub use rok::core::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, ReadFuture, WriteFuture};
+}
+pub mod cell {
+    pub use rok::core::sync::Cell;
 }

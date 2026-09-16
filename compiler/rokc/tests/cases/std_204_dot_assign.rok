@@ -1,0 +1,25 @@
+// expect-exit: 0
+// expect-stdout:
+// [11, 22, 33] [10, 40, 90] [0, 2, 0]
+// [5, 2, 9] [2, 4]
+
+// Stdlib 2.4.10: broadcast in place through `dot_*_assign` methods
+// (there is no `.+=` token).
+fn main() {
+    let xs: List<i32> = [1, 2, 3];
+    let ys: List<i32> = [10, 20, 30];
+    xs.dot_add_assign(ys);
+    let m: List<i32> = [1, 2, 3];
+    m.dot_mul_assign(ys);
+    let r: List<i32> = [-3, 5, 9];
+    let three: List<i32> = [3, 3, 3];
+    r.dot_modulo_assign(three);
+    println(f"{xs:?} {m:?} {r:?}");
+    let w: List<i32> = [5, 32, 9];
+    let four: List<i32> = [0, 4, 0];
+    w.dot_shr_assign(four);
+    let b: List<u8> = [1, 2];
+    let one: List<u8> = [1, 1];
+    b.dot_shl_assign(one);
+    println(f"{w:?} {b:?}");
+}

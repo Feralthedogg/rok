@@ -1355,11 +1355,11 @@ pub async fn join<T>(tasks: List<Task<T>>) -> List<T> {
 }
 
 /// The result of whichever task finishes first (2.18.1).
-pub fn race<T>(tasks: List<Task<T>>) -> Race<T> {
-    Race { tasks: tasks }
+pub async fn race<T>(tasks: List<Task<T>>) -> T {
+    await Race { tasks: tasks }
 }
 
-pub struct Race<T> {
+struct Race<T> {
     tasks: List<Task<T>>;
 }
 
@@ -1507,17 +1507,17 @@ impl<T> Future for FirstDone<T> {
 
 // ---- time ----
 
-/// Completes once `dur` has passed (2.18.1).
-pub fn sleep(dur: Duration) -> Sleep {
-    Sleep { deadline: now_ns() + dur.as_ns() }
+/// Completes once `dur` has passed since its first poll (2.18.1).
+pub async fn sleep(dur: Duration) {
+    await Sleep { deadline: now_ns() + dur.as_ns() };
 }
 
 /// Completes at `when`.
-pub fn sleep_until(when: Instant) -> Sleep {
-    Sleep { deadline: when.ns }
+pub async fn sleep_until(when: Instant) {
+    await Sleep { deadline: when.ns };
 }
 
-pub struct Sleep {
+struct Sleep {
     deadline: i64;
 }
 
@@ -1533,11 +1533,11 @@ impl Future for Sleep {
 }
 
 /// Let the other ready tasks run once (2.18.1).
-pub fn yield_now() -> YieldNow {
-    YieldNow { yielded: false }
+pub async fn yield_now() {
+    await YieldNow { yielded: false };
 }
 
-pub struct YieldNow {
+struct YieldNow {
     yielded: bool;
 }
 
@@ -1553,13 +1553,13 @@ impl Future for YieldNow {
     }
 }
 
-/// `task`'s result, or `TimeoutError` once `dur` has passed (2.18.1):
-/// `try await task::timeout(d, t)`.
-pub fn timeout<T>(dur: Duration, task: Task<T>) -> Timeout<T> {
-    Timeout { task: task, deadline: now_ns() + dur.as_ns() }
+/// `task`'s result, or `TimeoutError` once `dur` has passed since the
+/// first poll (2.18.1): `try await task::timeout(d, t)`.
+pub async fn timeout<T>(dur: Duration, task: Task<T>) throws (TimeoutError) -> T {
+    try await Timeout { task: task, deadline: now_ns() + dur.as_ns() }
 }
 
-pub struct Timeout<T> {
+struct Timeout<T> {
     task: Task<T>;
     deadline: i64;
 }
