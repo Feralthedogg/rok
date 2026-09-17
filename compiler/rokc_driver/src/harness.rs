@@ -76,14 +76,11 @@ pub fn install(
 /// `main` running the test named by `argv[1]` once.
 fn test_main(tests: &[(String, bool)]) -> String {
     let throws = tests.iter().any(|(_, t)| *t);
-    let mut src = String::from(
-        "extern \"C\" { fn rok_os_arg(i: usize) -> str; }\n\
-         fn main() ",
-    );
+    let mut src = String::from("fn main() ");
     if throws {
         src.push_str("throws ");
     }
-    src.push_str("{\n    let name = unsafe { rok_os_arg(1usize) };\n");
+    src.push_str("{\n    let name = rok::std::env::args()[1];\n");
     for (name, throws) in tests {
         let call = if *throws { "try " } else { "" };
         src.push_str(&format!(
@@ -100,11 +97,12 @@ fn test_main(tests: &[(String, bool)]) -> String {
 /// ignores the bench's own output).
 fn bench_main(benches: &[(String, bool)]) -> String {
     let mut src = String::from(
-        "extern \"C\" { fn rok_os_arg(i: usize) -> str; fn rok_time_now_ns() -> i64; }\n\
+        "extern \"C\" { fn rok_time_now_ns() -> i64; }\n\
          fn main() {\n\
-         \x20   let name = unsafe { rok_os_arg(1usize) };\n\
-         \x20   let iters: i64 = try! unsafe { rok_os_arg(2usize) }.parse();\n\
-         \x20   let samples: i64 = try! unsafe { rok_os_arg(3usize) }.parse();\n\
+         \x20   let argv = rok::std::env::args();\n\
+         \x20   let name = argv[1];\n\
+         \x20   let iters: i64 = try! argv[2].parse();\n\
+         \x20   let samples: i64 = try! argv[3].parse();\n\
          \x20   let s = 0i64;\n\
          \x20   while s < samples {\n\
          \x20       let i = 0i64;\n\

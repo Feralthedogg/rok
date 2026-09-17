@@ -1,0 +1,14 @@
+// spec: §4.4.7
+// expect-exit: 0
+// expect-stdout: 1 2 x 5 y
+
+// A generic fn value is monomorphized by the receiving `fn(..)` type or
+// a turbofish.
+fn id<T>(x: T) -> T { x }
+fn pair<A, B>(a: A, b: B) -> (B, A) { (b, a) }
+fn apply(f: fn(str) -> str, s: str) -> str { f(s) }
+let f: fn(i32) -> i32 = id;
+let g = id::<i32>;
+let h: fn(i32, str) -> (str, i32) = pair;
+let (s, n) = h(5, "x");
+println(f"{f(1)} {g(2)} {s} {n} {apply(id, "y")}");

@@ -112,6 +112,10 @@ pub fn mlir_pipeline(optimize: bool, extra: &[String]) -> String {
         } else {
             "any(convert-scf-to-cf)"
         },
+        // `math` ops (bare 1.9.3): LLVM intrinsics where there is one,
+        // libm calls (declared as `func`s) for the rest.
+        "any(convert-math-to-llvm)",
+        "convert-math-to-libm",
         "convert-func-to-llvm",
         "any(convert-arith-to-llvm)",
         "convert-cf-to-llvm",

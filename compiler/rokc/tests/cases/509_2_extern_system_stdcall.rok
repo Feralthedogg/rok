@@ -1,0 +1,8 @@
+// spec: §5.9.2
+// only-target: i686-pc-windows-msvc
+// expect-error: 6:1: `extern "system"` is `stdcall` on 32-bit x86 Windows, which is not supported yet (spec 5.9.2)
+
+// 5.9.2: on 32-bit x86 Windows `"system"` is `stdcall`.
+extern "system" { fn GetTickCount() -> u32; }
+
+println(f"{unsafe { GetTickCount() }}");

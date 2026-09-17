@@ -1,0 +1,7 @@
+// rok::bare::volatile — accesses the optimizer keeps exactly as written
+// (stdlib spec 1.5): MMIO, signal flags, DMA buffers. Not atomic.
+
+use rok::bare::ptr::{ConstPtr, Ptr};
+
+pub unsafe fn read<T>(src: ConstPtr<T>) -> T { src.read_volatile() }
+pub unsafe fn write<T>(dst: Ptr<T>, value: T) { dst.write_volatile(value); }

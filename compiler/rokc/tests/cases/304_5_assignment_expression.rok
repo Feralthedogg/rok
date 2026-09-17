@@ -1,0 +1,16 @@
+// spec: §3.4.5
+// expect-exit: 0
+// expect-stdout:
+// 1
+// 20
+
+// An assignment is a unit-typed expression: in parentheses, as an arm.
+let y = 0;
+let x: () = (y = 1);
+println(f"{y}");
+let n = 2;
+match n {
+    2 => y = 20,
+    _ => {},
+}
+println(f"{y}");

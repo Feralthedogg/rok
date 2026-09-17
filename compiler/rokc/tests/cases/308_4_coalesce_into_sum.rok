@@ -1,0 +1,15 @@
+// spec: §3.8.4
+// expect-exit: 0
+// expect-stdout:
+// default 4
+// arg
+
+// `??` with a default of another type goes into the receiving sum slot.
+fn foo(b: bool) -> i32 | none { if b { 4 } else { none } }
+fn show(v: i32 | str) -> str {
+    match v { s: str => s, n: i32 => f"{n}" }
+}
+let r1: i32 | str = foo(false) ?? "default";
+let r2: i32 | str = foo(true) ?? "default";
+println(f"{show(r1)} {show(r2)}");
+println(show(foo(false) ?? "arg"));

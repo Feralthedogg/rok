@@ -1,0 +1,45 @@
+// spec: §3.6.1
+// expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/306_array_field_in_place.rok:36:33:
+// expect-stderr: index out of bounds
+// expect-stdout:
+// 106
+// 3 10 100 47 -1 5 1
+// 262
+// 99 3 8
+// 50
+
+// `s.buf[i]` reads and writes the array field where it lies (no copy of
+// the array or the struct per access), through `self`, nested structs
+// and tuples; bounds stay checked.
+struct Inner { tag: u8; data: [u16; 4]; }
+struct Rec { n: i32; buf: [u8; 8]; pair: (i64, [i32; 3]); inner: Inner; }
+impl Rec {
+    fn sum(self) -> i64 {
+        let s: i64 = 0;
+        for i in 0..8 { s = s + (self.buf[i] as i64); }
+        for i in 0..3 { s = s + (self.pair.1[i] as i64); }
+        for i in 0..4 { s = s + (self.inner.data[i] as i64); }
+        s
+    }
+    fn fill(ref self, k: u8) {
+        for i in 0..8 { self.buf[i] = k + (i as u8); }
+        self.pair.1[2] = 100;
+        self.inner.data[3] = self.inner.data[3] + 7;
+    }
+    // A by-value `self` is a copy: writing it leaves the caller's alone.
+    fn scratch(self) -> u8 {
+        self.buf[0] = 99;
+        self.buf[0]
+    }
+}
+fn at(r: Rec, i: usize) -> u8 { r.buf[i] }
+let r = Rec { n: -1, buf: [0u8; 8], pair: (5, [1, 2, 3]), inner: Inner { tag: 1, data: [10, 20, 30, 40] } };
+println(f"{r.sum()}");
+r.fill(3);
+println(f"{r.buf[0]} {r.buf[7]} {r.pair.1[2]} {r.inner.data[3]} {r.n} {r.pair.0} {r.inner.tag}");
+println(f"{r.sum()}");
+println(f"{r.scratch()} {r.buf[0]} {at(r, 5)}");
+r.buf[1] = 50;
+println(f"{r.buf[1]}");
+println(f"{at(r, 9)}");

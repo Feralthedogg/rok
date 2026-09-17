@@ -347,13 +347,11 @@ pub fn check_use_targets(
         }
     }
     known.extend(raw.iter().map(|(m, _, _)| m.clone()));
-    known.extend(reexports.iter().map(|r| {
-        if r.module_path.is_empty() {
-            r.short_name.clone()
-        } else {
-            format!("{}::{}", r.module_path, r.short_name)
-        }
-    }));
+    known.extend(
+        reexports
+            .iter()
+            .map(|r| qualified(&r.module_path, &r.short_name)),
+    );
     // Every ancestor of a known path is a module (or an enum).
     let modules: Vec<String> = known
         .iter()
@@ -376,6 +374,15 @@ pub fn check_use_targets(
             _ => None,
         })
         .collect();
+    let reexported: HashMap<String, &str> = reexports
+        .iter()
+        .map(|r| {
+            (
+                qualified(&r.module_path, &r.short_name),
+                r.full_path.as_str(),
+            )
+        })
+        .collect();
     let mut diags = Vec::new();
     for (module_path, use_vis, tree) in raw {
         let bare = tree.prefix.segments.first().is_some_and(|s| {
@@ -389,7 +396,35 @@ pub fn check_use_targets(
                 UseEntry::Single { full, .. } => full,
                 UseEntry::Glob { prefix } | UseEntry::GlobDeep { prefix } => prefix,
             };
-            if let UseEntry::Single { full, .. } = &entry {
+            if let UseEntry::Single { local, full } = &entry {
+                // Spec 5.8.10: re-exports that lead back to themselves.
+                let me = qualified(module_path, local);
+                if *use_vis != Visibility::Private {
+                    let mut at = full.as_str();
+                    let mut chain = vec![me.as_str()];
+                    while let Some(&next) = reexported
+                        .get(at)
+                        .filter(|_| chain.len() <= reexported.len())
+                    {
+                        chain.push(at);
+                        if at == me {
+                            break;
+                        }
+                        at = next;
+                    }
+                    if chain.len() > 1 && chain.last() == Some(&me.as_str()) {
+                        diags.push(RokDiagnostic::error(
+                            ErrorKind::Module,
+                            span,
+                            format!("circular re-export: {} (spec 5.8.10)", {
+                                let ring: Vec<String> =
+                                    chain.iter().map(|c| format!("`{c}`")).collect();
+                                ring.join(" -> ")
+                            }),
+                        ));
+                        continue;
+                    }
+                }
                 if let Some(m) = crate::lower::hidden_module(&mod_vis, module_path, full) {
                     diags.push(RokDiagnostic::error(
                         ErrorKind::Module,
@@ -451,6 +486,15 @@ pub fn check_use_targets(
         }
     }
     diags
+}
+
+/// `module::name` (`name` at the root).
+fn qualified(module: &str, name: &str) -> String {
+    if module.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{module}::{name}")
+    }
 }
 
 const fn vis_word(v: Visibility) -> &'static str {

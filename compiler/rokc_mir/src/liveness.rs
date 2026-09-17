@@ -114,11 +114,15 @@ fn successors(t: &Terminator) -> Vec<rokc_ir_common::BlockId> {
     }
 }
 
-/// Locals whose address is taken (`RValue::AddrOf`): a pointer may read
-/// or write them anywhere in their scope, so they live in their slot,
-/// rooted until `StorageDead`, and never die early.
+/// Locals accessed through their memory.
+///
+/// Their address is taken (`RValue::AddrOf`), or an array field of
+/// theirs is indexed in place (`s.buf[i]`): a pointer may read or write
+/// them anywhere in their scope, so they live in their slot, rooted
+/// until `StorageDead`, and never die early.
 #[must_use]
 pub fn addressed(f: &MirFunction) -> HashSet<LocalId> {
+    let not_array = |l: &LocalId| !matches!(f.locals[l.0 as usize].ty, crate::MirTy::Array(..));
     f.blocks
         .iter()
         .flat_map(|b| &b.stmts)
@@ -127,6 +131,11 @@ pub fn addressed(f: &MirFunction) -> HashSet<LocalId> {
                 rvalue: crate::RValue::AddrOf(l),
                 ..
             } => Some(*l),
+            Statement::Assign {
+                rvalue: crate::RValue::ArrayIndex { array: l, .. },
+                ..
+            }
+            | Statement::ArrayWrite { array: l, .. } => Some(*l).filter(not_array),
             _ => None,
         })
         .collect()

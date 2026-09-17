@@ -279,6 +279,29 @@ impl<'a> Parser<'a> {
 
     /// Does `f` fail here? Always rewinds: position, diagnostics and
     /// queued statements are as before.
+    /// Does an `else` sit at this statement's top level, before its `;`
+    /// (`let (a, b) = e else { .. };`, spec 3.16)? An `if .. else` in
+    /// the initializer also answers yes; the general `let` form parses
+    /// that too.
+    fn stmt_has_else(&self) -> bool {
+        let mut depth = 0usize;
+        for t in &self.tokens[self.pos..] {
+            match &t.kind {
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                }
+                TokenKind::Else if depth == 0 => return true,
+                TokenKind::Semi | TokenKind::Eof if depth == 0 => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
     fn backtracks<T>(&mut self, f: impl FnOnce(&mut Self) -> Option<T>) -> bool {
         let (pos, n_diags, n_pending, n_lifted) = (
             self.pos,
@@ -1225,6 +1248,18 @@ impl<'a> Parser<'a> {
                 format!("`{n}` cannot name a {what}: it is reserved as a path root / type keyword"),
             );
         }
+        // Spec 6.3.7: cfg runs before meta expansion. A cfg-false item
+        // expands nothing (the driver drops it); cfg-false members go
+        // before a derive sees them.
+        let mut item = item;
+        if let Some(env) = &self.cfg {
+            if !env.attrs_pass(meta::item_attrs(&item)) {
+                return Some(item);
+            }
+            let diags = crate::cfg::drop_cfg_members(env, &mut item);
+            self.diagnostics
+                .extend(diags.into_iter().map(|d| d.with_file(self.file.clone())));
+        }
         if !self.meta.is_empty() {
             // Spec 6.8.3: a user attribute replaces the item with its
             // expansion (which expands again — 6.8.8).
@@ -1249,8 +1284,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_item_inner(&mut self) -> Option<Item> {
-        let attrs = self.parse_outer_attrs();
-        let vis = self.parse_visibility();
+        let (attrs, vis) = self.parse_attrs_vis();
         if self.at_union_item() {
             return self.parse_union(vis, attrs).map(Item::Union);
         }
@@ -1469,8 +1503,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let mut fields = Vec::new();
                 while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
-                    let f_attrs = self.parse_outer_attrs();
-                    let f_vis = self.parse_visibility();
+                    let (f_attrs, f_vis) = self.parse_attrs_vis();
                     let span = self.peek_span();
                     let ty = self.parse_type()?;
                     fields.push(rokc_ast::TupleField {
@@ -1545,8 +1578,7 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::LBrace, "`{`")?;
         let mut fields = Vec::new();
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
-            let attrs = self.parse_outer_attrs();
-            let vis = self.parse_visibility();
+            let (attrs, vis) = self.parse_attrs_vis();
             let span = self.peek_span();
             let Some(name) = self.peek_name() else {
                 self.error(
@@ -1649,8 +1681,7 @@ impl<'a> Parser<'a> {
         let mut items = Vec::new();
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
             let attrs_from = self.pos;
-            let item_attrs = self.parse_outer_attrs();
-            let item_vis = self.parse_visibility();
+            let (item_attrs, item_vis) = self.parse_attrs_vis();
             match self.peek() {
                 TokenKind::Fn | TokenKind::Unsafe | TokenKind::Async | TokenKind::Yield => {
                     let from = self.pos;
@@ -1837,22 +1868,25 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // `extern "ABI" { fn name(args) -> ret; ... }`. ABI defaults to "C".
+    // `extern "ABI" { fn name(args) -> ret; ... }`; a missing ABI is
+    // reported and read as "C".
     fn parse_extern_block(&mut self, attrs: Vec<Attribute>) -> Option<ExternBlock> {
         let start = self.peek_span();
         self.bump(); // contextual `extern`
-        let abi = match self.peek().clone() {
-            TokenKind::StrLit(s) => {
-                self.bump();
-                s
-            }
-            _ => "C".to_owned(),
+        let abi = if let TokenKind::StrLit(s) = self.peek().clone() {
+            self.bump();
+            s
+        } else {
+            self.error(
+                start,
+                "an `extern` block names its ABI: `extern \"C\" { .. }` (spec 5.9.2)",
+            );
+            "C".to_owned()
         };
         self.expect(&TokenKind::LBrace, "`{`")?;
         let mut items = Vec::new();
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
-            let item_attrs = self.parse_outer_attrs();
-            let item_vis = self.parse_visibility();
+            let (item_attrs, item_vis) = self.parse_attrs_vis();
             match self.peek() {
                 TokenKind::Fn | TokenKind::Unsafe => {
                     let from = self.pos;
@@ -2182,8 +2216,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_trait_item(&mut self) -> Option<TraitItem> {
-        let attrs = self.parse_outer_attrs();
-        let vis = self.parse_visibility();
+        let (attrs, vis) = self.parse_attrs_vis();
         match self.peek() {
             TokenKind::Fn | TokenKind::Unsafe | TokenKind::Async | TokenKind::Yield => {
                 let f = self.parse_fn(vis, attrs)?;
@@ -2233,11 +2266,30 @@ impl<'a> Parser<'a> {
                     return None;
                 };
                 // Optional bounds (`: A + B`) and default (`= T`).
-                let bounds = if self.eat(&TokenKind::Colon) {
+                let mut bounds = if self.eat(&TokenKind::Colon) {
                     self.parse_bounds()
                 } else {
                     Vec::new()
                 };
+                // `type Item where Item: Clone;` (spec 2.8.6): the
+                // predicates bound the associated type itself.
+                for pred in self.parse_where_clause() {
+                    let own = matches!(&pred.ty.kind, TyKind::Path(p)
+                        if matches!(p.segments.as_slice(), [s] if s.name == name)
+                            || matches!(p.segments.as_slice(),
+                                [a, s] if a.name == "Self" && s.name == name));
+                    if own {
+                        bounds.extend(pred.bounds);
+                    } else {
+                        self.error(
+                            pred.ty.span,
+                            format!(
+                                "a `where` clause on associated type `{name}` can only \
+                                 bound `{name}` itself"
+                            ),
+                        );
+                    }
+                }
                 let default = if self.eat(&TokenKind::Eq) {
                     self.parse_type()
                 } else {
@@ -2436,6 +2488,17 @@ impl<'a> Parser<'a> {
         }
         self.expect(&TokenKind::RBrace, "`}`")?;
         Some((path, fields, rest))
+    }
+
+    /// Attributes and visibility in either order, or attributes on both
+    /// sides (`pub #[inline] fn`, spec 6.1.9).
+    fn parse_attrs_vis(&mut self) -> (Vec<Attribute>, Visibility) {
+        let mut attrs = self.parse_outer_attrs();
+        let vis = self.parse_visibility();
+        if vis != Visibility::Private {
+            attrs.extend(self.parse_outer_attrs());
+        }
+        (attrs, vis)
     }
 
     fn parse_visibility(&mut self) -> Visibility {
@@ -2965,7 +3028,7 @@ impl<'a> Parser<'a> {
                 self.parse_marked_fn_type(start)?
             }
             TokenKind::Ident(_) if self.at_c_fn_type(0) => self.parse_marked_fn_type(start)?,
-            TokenKind::Ident(_) => TyKind::Path(self.parse_type_path()?),
+            TokenKind::Ident(_) => tuple_or_path(self.parse_type_path()?),
             // `<T as Tr>::X` (spec 2.13.4).
             TokenKind::Lt | TokenKind::Shl => TyKind::QPath(Box::new(self.parse_qpath()?)),
             TokenKind::Fn => {
@@ -3284,8 +3347,29 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// `target = value` in expression position, from the `=`: a block
+    /// holding the assignment, of unit type (spec 3.4.5).
+    fn assign_tail(&mut self, target: Expr) -> Option<Expr> {
+        let span = target.span;
+        self.expect(&TokenKind::Eq, "`=`")?;
+        let value = self.parse_expr()?;
+        Some(Expr {
+            kind: ExprKind::Block(Block {
+                stmts: vec![Stmt {
+                    kind: StmtKind::Assign(target, value),
+                    span,
+                }],
+                trailing: None,
+                span,
+                label: None,
+            }),
+            span,
+        })
+    }
+
     /// Match arm body. `return` / `break` / `continue` / `throw` are
-    /// statements, so `none => return 0,` (spec 3.12) wraps one in a block.
+    /// statements, so `none => return 0,` (spec 3.12) wraps one in a block;
+    /// so does any other expression position.
     fn parse_arm_body(&mut self) -> Option<Expr> {
         let span = self.peek_span();
         let label = |p: &mut Self| {
@@ -3297,7 +3381,15 @@ impl<'a> Parser<'a> {
             }
         };
         let value = |p: &mut Self| {
-            if matches!(p.peek(), TokenKind::Comma | TokenKind::RBrace) {
+            if matches!(
+                p.peek(),
+                TokenKind::Comma
+                    | TokenKind::RBrace
+                    | TokenKind::RParen
+                    | TokenKind::RBracket
+                    | TokenKind::Semi
+            ) || (!p.struct_expr_allowed && matches!(p.peek(), TokenKind::LBrace))
+            {
                 Some(None)
             } else {
                 p.parse_expr().map(Some)
@@ -3324,7 +3416,14 @@ impl<'a> Parser<'a> {
                 self.bump();
                 StmtKind::Throw(self.parse_expr()?)
             }
-            _ => return self.parse_expr(),
+            _ => {
+                let e = self.parse_expr()?;
+                return if matches!(self.peek(), TokenKind::Eq) {
+                    self.assign_tail(e)
+                } else {
+                    Some(e)
+                };
+            }
         };
         Some(Expr {
             kind: ExprKind::Block(Block {
@@ -3645,7 +3744,10 @@ impl<'a> Parser<'a> {
                             Some(TokenKind::LParen | TokenKind::ColonColon)
                         ) && !self.peek_path_then_lbrace()
                     }
-                    TokenKind::LParen => self.backtracks(|p| p.parse_let_tuple_pattern(start)),
+                    TokenKind::LParen => {
+                        self.backtracks(|p| p.parse_let_tuple_pattern(start))
+                            || self.stmt_has_else()
+                    }
                     _ => false,
                 } || (self.peek_path_then_lbrace()
                     && self.backtracks(|p| {
@@ -4364,17 +4466,14 @@ impl<'a> Parser<'a> {
         };
         self.bump();
         self.bump();
-        let read = match lit {
-            Some(lit) => {
-                for _ in 0..3 {
-                    self.bump();
-                }
-                include_file(&self.file, &lit, bytes)
+        let read = if let Some(lit) = lit {
+            for _ in 0..3 {
+                self.bump();
             }
-            None => {
-                let _ = self.parse_attr_body();
-                Err("takes one string literal path".to_owned())
-            }
+            include_file(&self.file, &lit, bytes)
+        } else {
+            let _ = self.parse_attr_body();
+            Err("takes one string literal path".to_owned())
         };
         let lit = read.unwrap_or_else(|msg| {
             self.error(start, format!("`{name}!` {msg}"));
@@ -4583,6 +4682,12 @@ impl<'a> Parser<'a> {
                 // `()` unit, `(e)` grouping, `(e,)` / `(a, b)` tuple.
                 let (mut items, trailing_comma) =
                     self.with_struct_expr(true, |p| p.expr_list(&TokenKind::RParen))?;
+                if items.len() == 1 && !trailing_comma && matches!(self.peek(), TokenKind::Eq) {
+                    let target = items.pop()?;
+                    let assign = self.with_struct_expr(true, |p| p.assign_tail(target))?;
+                    self.expect(&TokenKind::RParen, "`)`")?;
+                    return Some(assign);
+                }
                 self.expect(&TokenKind::RParen, "`)`")?;
                 if items.len() == 1 && !trailing_comma {
                     items.pop()?.kind
@@ -4965,6 +5070,22 @@ impl<'a> Parser<'a> {
                 rest.span = start;
                 ExprKind::Path(rest)
             }
+            // `Self { x, y }` inside an impl (spec 4.9.4).
+            TokenKind::SelfUpper
+                if self.struct_expr_allowed
+                    && matches!(self.peek_next(), Some(TokenKind::LBrace))
+                    && self.struct_init_body_at(self.pos + 1) =>
+            {
+                self.bump();
+                let path = Path {
+                    segments: vec![PathSegment {
+                        name: "Self".to_owned(),
+                        generics: Vec::new(),
+                    }],
+                    span: start,
+                };
+                self.parse_struct_init_body(path)?
+            }
             TokenKind::SelfUpper => {
                 self.bump();
                 ExprKind::SelfUpper
@@ -5046,6 +5167,11 @@ impl<'a> Parser<'a> {
             {
                 self.bump();
                 self.coro_closure(false, true)?
+            }
+            // A divergent jump in expression position: `match return 0 {}`
+            // (spec 3.12.11), `f(return 1)` (spec 4.3).
+            TokenKind::Return | TokenKind::Break | TokenKind::Continue | TokenKind::Throw => {
+                return self.parse_arm_body();
             }
             TokenKind::Yield => {
                 self.bump();
@@ -5770,16 +5896,26 @@ impl<'a> Parser<'a> {
     ///   anything else      → trailing closure body
     fn peek_struct_init_body(&self) -> bool {
         // Caller has just confirmed `peek() == LBrace`.
-        let after_brace = self.tokens.get(self.pos + 1).map(|t| &t.kind);
+        self.struct_init_body_at(self.pos)
+    }
+
+    /// `peek_struct_init_body` for the `{` at token `brace`.
+    fn struct_init_body_at(&self, brace: usize) -> bool {
+        let after_brace = self.tokens.get(brace + 1).map(|t| &t.kind);
         match after_brace {
             Some(TokenKind::RBrace | TokenKind::DotDot) => true,
             Some(TokenKind::Ident(_)) => {
-                let third = self.tokens.get(self.pos + 2).map(|t| &t.kind);
+                let third = self.tokens.get(brace + 2).map(|t| &t.kind);
                 matches!(
                     third,
                     Some(TokenKind::Colon | TokenKind::Comma | TokenKind::RBrace)
                 )
             }
+            // Spec 1.5.5: a keyword field name, `Ev { match: 1 }`.
+            Some(k) if keyword_str(k).is_some_and(|w| w != "self") => matches!(
+                self.tokens.get(brace + 2).map(|t| &t.kind),
+                Some(TokenKind::Colon)
+            ),
             _ => false,
         }
     }
@@ -5980,6 +6116,7 @@ impl<'a> Parser<'a> {
         self.nested(Self::parse_pattern_atom_inner)
     }
 
+    #[allow(clippy::cognitive_complexity)] // one arm per pattern form
     fn parse_pattern_atom_inner(&mut self) -> Option<Pattern> {
         let span = self.peek_span();
         let num = match self.peek() {
@@ -6133,6 +6270,20 @@ impl<'a> Parser<'a> {
                     self.parse_binding_rest(name)?
                 }
             }
+            TokenKind::SelfUpper
+                if self.struct_expr_allowed
+                    && matches!(self.peek_next(), Some(TokenKind::LBrace)) =>
+            {
+                self.bump();
+                let path = Path {
+                    segments: vec![PathSegment {
+                        name: "Self".to_owned(),
+                        generics: Vec::new(),
+                    }],
+                    span,
+                };
+                self.parse_struct_pattern_body(path)?
+            }
             other => {
                 self.error(
                     span,
@@ -6269,6 +6420,16 @@ const fn is_block_like(e: &Expr) -> bool {
 /// `T?` = `Nest(T) | none`: like `Maybe<T>` (`type Maybe<T> = T |
 /// none`), `T` is a generic member, so `(i32 | none)?` keeps two layers
 /// while `i32?` is `i32 | none` (spec 2.6.4).
+/// `Tuple<A, B>` is `(A, B)` (stdlib 2.9.6); any other path stays one.
+fn tuple_or_path(mut p: Path) -> TyKind {
+    match p.segments.as_mut_slice() {
+        [s] if s.name == "Tuple" && !s.generics.is_empty() => {
+            TyKind::Tuple(std::mem::take(&mut s.generics))
+        }
+        _ => TyKind::Path(p),
+    }
+}
+
 fn optional_ty(t: Ty) -> Ty {
     let span = t.span;
     let nest = Ty {

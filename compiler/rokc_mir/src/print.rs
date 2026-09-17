@@ -91,11 +91,12 @@ fn print_stmt(out: &mut String, s: &Statement) {
         }
         Statement::ArrayWrite {
             array,
+            offset,
             index,
             value,
             ..
         } => {
-            let _ = write!(out, "_{}[", array.0);
+            let _ = write!(out, "_{}{}[", array.0, at_offset(*offset));
             print_operand(out, index);
             out.push_str("] = ");
             print_operand(out, value);
@@ -240,8 +241,13 @@ fn print_rvalue(out: &mut String, r: &RValue) {
             }
             out.push(']');
         }
-        RValue::ArrayIndex { array, index, .. } => {
-            let _ = write!(out, "_{}[", array.0);
+        RValue::ArrayIndex {
+            array,
+            offset,
+            index,
+            ..
+        } => {
+            let _ = write!(out, "_{}{}[", array.0, at_offset(*offset));
             print_operand(out, index);
             out.push(']');
         }
@@ -469,5 +475,14 @@ fn ty_str(t: &MirTy) -> String {
             let inner = args.iter().map(ty_str).collect::<Vec<_>>().join(", ");
             format!("fn({inner}) -> {}", ty_str(ret))
         }
+    }
+}
+
+/// `@+8` for an array 8 bytes into its local; nothing at 0.
+fn at_offset(offset: u32) -> String {
+    if offset == 0 {
+        String::new()
+    } else {
+        format!("@+{offset}")
     }
 }

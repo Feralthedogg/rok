@@ -144,7 +144,11 @@ pub(super) fn resolve_name(
         }
     }
     // Every module has an implicit `use rok::core::**;` (stdlib spec 0.1),
-    // consulted last so the module's own names and imports shadow it.
+    // consulted last so the module's own names and imports shadow it,
+    // unless its file opts out (0.2.5).
+    if NO_IMPLICIT.with(|n| n.borrow().iter().any(|m| m == module)) {
+        return Ok(None);
+    }
     let core = [crate::uses::UseEntry::GlobDeep {
         prefix: CORE_PREFIX.to_owned(),
     }];
@@ -267,6 +271,16 @@ thread_local! {
 
 pub fn set_packages(names: Vec<String>) {
     PACKAGES.with(|p| *p.borrow_mut() = names);
+}
+
+thread_local! {
+    /// The modules without the implicit `use rok::core::**;`
+    /// (`HirInput::no_implicit_rok`).
+    static NO_IMPLICIT: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub fn set_no_implicit(modules: Vec<String>) {
+    NO_IMPLICIT.with(|n| *n.borrow_mut() = modules);
 }
 
 pub fn is_dependency(name: &str) -> bool {

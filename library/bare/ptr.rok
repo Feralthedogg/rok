@@ -205,9 +205,13 @@ pub fn align_cast<T>(p: Ptr<u8>) -> Ptr<T> | none {
     q
 }
 
+/// `p` as a `Ptr<T>` with no alignment check, not even in debug builds
+/// (1.2.3).
+pub fn align_cast_unchecked<T>(p: Ptr<u8>) -> Ptr<T> { Ptr { address: p.address } }
+
 /// Drop the `const` (1.2.4): writing through the result is the caller's
 /// responsibility.
-pub unsafe fn const_cast<T>(p: ConstPtr<T>) -> Ptr<T> { Ptr { address: p.address } }
+pub fn const_cast<T>(p: ConstPtr<T>) -> Ptr<T> { Ptr { address: p.address } }
 
 /// The address of `p`, marked as escaping (1.1.2 strict provenance).
 pub fn expose_provenance<T>(p: Ptr<T>) -> usize { p.address }

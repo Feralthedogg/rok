@@ -698,12 +698,13 @@ impl Key<'_> {
             }
             Statement::ArrayWrite {
                 array,
+                offset,
                 index,
                 value,
                 elem_ty,
                 len,
             } => {
-                let _ = write!(self.b, "awrite {} {len} ", array.0);
+                let _ = write!(self.b, "awrite {} {offset} {len} ", array.0);
                 self.operand(index);
                 self.operand(value);
                 self.ty(elem_ty);
@@ -846,11 +847,12 @@ impl Key<'_> {
             }
             RValue::ArrayIndex {
                 array,
+                offset,
                 index,
                 elem_ty,
                 len,
             } => {
-                let _ = write!(self.b, "aindex {} {len} ", array.0);
+                let _ = write!(self.b, "aindex {} {offset} {len} ", array.0);
                 self.operand(index);
                 self.ty(elem_ty);
             }

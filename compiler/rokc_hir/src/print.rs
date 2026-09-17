@@ -80,11 +80,16 @@ fn print_stmt(out: &mut String, s: &HirStmt) {
         }
         HirStmt::ArrayAssign {
             array_local,
+            path,
             index,
             value,
             ..
         } => {
-            let _ = write!(out, "_{}[", array_local.0);
+            let _ = write!(out, "_{}", array_local.0);
+            for k in path {
+                let _ = write!(out, ".{k}");
+            }
+            out.push('[');
             print_expr(out, index);
             out.push_str("] = ");
             print_expr(out, value);

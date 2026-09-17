@@ -1,4 +1,154 @@
-// rok::bare::ffi — foreign interfaces. `wit`: what the WIT bindings of
+// rok::bare::ffi — foreign interfaces: NUL-terminated C strings
+// (stdlib spec 1.7.2). `wit`: what the WIT bindings of
 // `ffi::wit::import` / `ffi::wit::export` (stdlib spec 1.8) run on.
+//
+// `CStr` and `CString` keep their bytes, NUL included, in one `str`
+// object: its address stays put while the value is in a live variable
+// (as `str::as_ptr`), so `as_ptr` is valid for C as long as that.
+// `CStr::from_ptr` copies the C string in.
 
 pub mod wit;
+
+use rok::bare::ptr::ConstPtr;
+use rok::core::collections::raw::{GcBuf, buf_new};
+
+extern "rok" {
+    fn rok_str_from_buf(buf: GcBuf<u8>, off: usize, len: usize) -> str;
+}
+
+/// An interior NUL byte, at `position` (`CString::new`).
+pub struct NulError {
+    pub position: usize;
+}
+
+impl Display for NulError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str(f"nul byte found at position {self.position}")
+    }
+}
+
+impl Debug for NulError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"NulError({self.position})") }
+}
+
+impl Error for NulError {}
+
+/// Bytes that are not one C string: no final NUL, or one before it.
+pub struct FromBytesWithNulError {
+    pub reason: str;
+}
+
+impl Display for FromBytesWithNulError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(self.reason) }
+}
+
+impl Debug for FromBytesWithNulError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str(f"FromBytesWithNulError({self.reason})")
+    }
+}
+
+impl Error for FromBytesWithNulError {}
+
+/// `bytes` and a final NUL as one `str` object.
+fn with_nul(bytes: Slice<u8>) -> str {
+    let n = bytes.len();
+    unsafe {
+        let buf: GcBuf<u8> = buf_new(n + 1);
+        for i in 0..n {
+            buf[i] = bytes[i];
+        }
+        buf[n] = 0u8;
+        rok_str_from_buf(buf, 0, n + 1)
+    }
+}
+
+/// The index of the first NUL in `bytes`.
+fn nul_in(bytes: Slice<u8>) -> usize | none {
+    for i in 0..bytes.len() {
+        if bytes[i] == 0u8 {
+            return i;
+        }
+    }
+    none
+}
+
+/// A NUL-terminated string (1.7.2).
+pub struct CStr {
+    /// The bytes and the NUL.
+    s: str;
+}
+
+impl CStr {
+    /// The C string at `p` (copied in); `none` for a null pointer.
+    /// Without a NUL terminator the behavior is undefined.
+    pub fn from_ptr(p: ConstPtr<c_char>) -> CStr | none {
+        if p.addr() == 0 {
+            return none;
+        }
+        let at: ConstPtr<u8> = ConstPtr::<u8>::dangling().with_addr(p.addr());
+        let n = 0usize;
+        while unsafe { at.add(n).read() } != 0u8 {
+            n += 1;
+        }
+        let bytes: List<u8> = [];
+        for i in 0..n {
+            bytes.push(unsafe { at.add(i).read() });
+        }
+        CStr { s: with_nul(bytes[0:n]) }
+    }
+
+    /// `bytes` when the last one is the only NUL.
+    pub fn from_bytes_with_nul(bytes: Slice<u8>) throws (FromBytesWithNulError) -> CStr {
+        let n = bytes.len();
+        match nul_in(bytes) {
+            i: usize if i + 1 == n => CStr { s: with_nul(bytes[0:i]) },
+            i: usize => throw FromBytesWithNulError { reason: f"interior nul byte at {i}" },
+            none => throw FromBytesWithNulError { reason: "data provided is not nul terminated" },
+        }
+    }
+
+    /// `bytes`, whose last byte must be the only NUL (not checked).
+    pub fn from_bytes_with_nul_unchecked(bytes: Slice<u8>) -> CStr {
+        CStr { s: with_nul(bytes[0:bytes.len() - 1]) }
+    }
+
+    pub fn as_ptr(self) -> ConstPtr<c_char> {
+        ConstPtr::<c_char>::dangling().with_addr(self.s.as_ptr().addr())
+    }
+
+    /// The bytes without the NUL.
+    pub fn as_bytes(self) -> Slice<u8> { self.s.as_bytes()[0:self.len()] }
+
+    pub fn as_bytes_with_nul(self) -> Slice<u8> { self.s.as_bytes() }
+
+    pub fn to_str(self) throws (Utf8Error) -> str { try str::from_utf8(self.as_bytes()) }
+
+    /// Bytes before the NUL.
+    pub fn len(self) -> usize { self.s.len() - 1 }
+}
+
+/// An owned NUL-terminated string (1.7.2).
+pub struct CString {
+    c: CStr;
+}
+
+impl CString {
+    /// `bytes` and a NUL; throws if `bytes` has a NUL of its own.
+    pub fn new(bytes: Slice<u8>) throws (NulError) -> CString {
+        if let i: usize = nul_in(bytes) {
+            throw NulError { position: i };
+        }
+        CString { c: CStr { s: with_nul(bytes) } }
+    }
+
+    pub fn from_str(s: str) throws (NulError) -> CString { try CString::new(s.as_bytes()) }
+
+    pub fn as_c_str(self) -> CStr { self.c }
+    pub fn as_ptr(self) -> ConstPtr<c_char> { self.c.as_ptr() }
+
+    /// The bytes without the NUL.
+    pub fn into_bytes(self) -> List<u8> { self.c.as_bytes().to_list() }
+
+    pub fn into_bytes_with_nul(self) -> List<u8> { self.c.as_bytes_with_nul().to_list() }
+}

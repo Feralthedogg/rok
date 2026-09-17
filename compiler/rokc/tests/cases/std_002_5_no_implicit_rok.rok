@@ -1,0 +1,21 @@
+// spec: std 002-import §0.2.5
+// expect-exit: 0
+// expect-stdout:
+// 3
+
+// stdlib 0.2.5: `#![no_implicit_rok]` drops the implicit
+// `use rok::core::**;` from the file; what it uses is imported.
+#![no_implicit_rok]
+
+use rok::core::ops::Add;
+use rok::core::print::println;
+
+struct V { x: i32; }
+
+impl Add for V {
+    type Output = V;
+    fn add(self, r: V) -> V { V { x: self.x + r.x } }
+}
+
+let v = V { x: 1 } + V { x: 2 };
+println(f"{v.x}");

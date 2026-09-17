@@ -1,0 +1,18 @@
+// spec: std 209-collections §2.9.6
+// expect-exit: 0
+// expect-stdout:
+// 42 hello true
+// 42 hello true
+// 7
+
+// stdlib 2.9.6: `Tuple<A, B, ..>` is the tuple type `(A, B, ..)`.
+fn first(t: Tuple<i32, str>) -> i32 { t.0 }
+
+fn main() {
+    let t: Tuple<i32, str, bool> = (42, "hello", true);
+    println(f"{t.0} {t.1} {t.2}");
+    let (n, s, b) = t;
+    let u: (i32, str, bool) = t;
+    println(f"{n} {s} {b && u.2}");
+    println(f"{first((7, "x"))}");
+}

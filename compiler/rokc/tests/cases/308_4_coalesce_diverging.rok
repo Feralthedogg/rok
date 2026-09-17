@@ -1,0 +1,22 @@
+// spec: §3.8.4 §3.12.11
+// expect-exit: 0
+// expect-stdout:
+// 3
+// 3
+
+// A diverging `??` default: `return` without a value, `continue`.
+fn f(x: i32 | none) {
+    let v = x ?? return;
+    println(f"{v}");
+}
+fn g(xs: List<i32 | none>) -> i32 {
+    let s = 0;
+    for x in xs {
+        let v = x ?? continue;
+        s = s + v;
+    }
+    s
+}
+f(3);
+f(none);
+println(f"{g([1, none, 2])}");

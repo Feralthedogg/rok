@@ -694,6 +694,9 @@ struct MethodInfo {
     module: String,
     vis: Visibility,
     trait_name: Option<String>,
+    /// The trait's arguments of a concrete impl (`Convert<f64>`: `[f64]`),
+    /// defaults filled; empty for a template.
+    trait_args: Vec<HirTy>,
 }
 
 /// A method template monomorphized per call like a generic fn: `def`
@@ -912,8 +915,9 @@ struct Env<'a> {
     /// complete before any body is lowered).
     fn_leaves: std::cell::OnceCell<Leaves>,
     /// `extern` fns: one global C namespace, callable by bare name from
-    /// every module (they are not module items, spec 5.9).
-    extern_fns: std::collections::HashSet<String>,
+    /// every module (they are not module items, spec 5.9); by name, the
+    /// module that declares it (where its signature's names resolve).
+    extern_fns: HashMap<String, String>,
     /// Concrete methods by `(type, name)`: several when traits share a
     /// method name (`pick_method` chooses, spec 4.9.6).
     method_table: HashMap<(MethodTarget, String), Vec<FunctionId>>,
@@ -1043,6 +1047,15 @@ enum MethodOrFn<'a> {
         /// arguments (`trait Dim<const D: usize>` + `impl Dim<3>`).
         subst: HashMap<String, HirTy>,
     },
+}
+
+/// Where a free function's names resolve: its module, or for an
+/// `extern` declaration (not a module item) the module declaring it.
+fn fn_module(env: &Env<'_>, f: &FnDef) -> String {
+    env.extern_fns
+        .get(&f.name)
+        .cloned()
+        .unwrap_or_else(|| module_of(&f.name))
 }
 
 impl MethodOrFn<'_> {
@@ -1944,6 +1957,9 @@ struct LowerCtx<'a> {
     /// Type parameter → its trait bounds and their supertraits (trait
     /// keys): `T::Item` resolves through them (`set_bounds`).
     ty_bounds: HashMap<String, Vec<String>>,
+    /// Parameters typed by a bare type parameter of the function being
+    /// lowered (`x: T`): their operators need `T`'s bounds (spec 2.10.9).
+    ty_param_locals: HashMap<LocalId, String>,
     /// Type parameter → its direct bounds as written (`T: TryFrom<S>`):
     /// `T::Error` takes the impl of `TryFrom<S>`, not every `TryFrom`
     /// impl of `T`.
@@ -2103,6 +2119,7 @@ impl<'a> LowerCtx<'a> {
             unnarrowed: Vec::new(),
             guard_lets: Vec::new(),
             ty_bounds: HashMap::new(),
+            ty_param_locals: HashMap::new(),
             ty_bound_args: HashMap::new(),
             coro: None,
             assoc_names: Vec::new(),
@@ -3040,17 +3057,25 @@ impl<'a> LowerCtx<'a> {
         ) {
             Ok(r) => r,
             // An item and its re-exports are one item (spec 5.8.4).
-            Err(hits)
-                if hits.iter().all(|h| {
-                    let id = |k: &String| fns.get(k).map(|s| s.id);
-                    let def = |k: &String| gens.get(k).map(|d| std::ptr::from_ref::<FnDef>(d));
-                    id(h) == id(&hits[0]) && def(h) == def(&hits[0])
-                }) =>
-            {
-                hits.into_iter().next()
-            }
-            Err(hits) => {
-                self.report_ambiguous(&segments.join("::"), &hits);
+            Err(mut hits) => {
+                let item = |k: &String| {
+                    (
+                        fns.get(k).map(|s| s.id),
+                        gens.get(k).map(|d| std::ptr::from_ref::<FnDef>(d)),
+                    )
+                };
+                // Each item once, by its shortest path.
+                hits.sort_by_key(|h| (h.len(), h.clone()));
+                let mut seen = Vec::new();
+                hits.retain(|h| {
+                    let it = item(h);
+                    let new = !seen.contains(&it);
+                    seen.push(it);
+                    new
+                });
+                if hits.len() > 1 {
+                    self.report_ambiguous(&segments.join("::"), &hits);
+                }
                 hits.into_iter().next()
             }
         }
@@ -3062,7 +3087,7 @@ impl<'a> LowerCtx<'a> {
         match self.resolve_any_fn(segments) {
             Some(f) => self.env.fn_table.contains_key(&f).then_some(f),
             None => match segments {
-                [name] if self.env.extern_fns.contains(*name) => Some((*name).to_owned()),
+                [name] if self.env.extern_fns.contains_key(*name) => Some((*name).to_owned()),
                 _ => None,
             },
         }

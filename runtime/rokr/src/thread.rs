@@ -616,9 +616,14 @@ fn set_initializing_head(head: *mut Initializing) {
 /// 1: the caller runs the initializer, then calls
 /// [`rok_static_init_end`]. 0: it is ready (another thread may have
 /// just finished it while this one waited). An initializer that reads
-/// its own static panics (refs-lang 5.3).
+/// its own static panics (refs-lang 5.3) at `at` (`at_len` bytes), the
+/// location of the read.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_static_init_begin(state: *const AtomicU8) -> i32 {
+pub extern "C" fn rok_static_init_begin(
+    state: *const AtomicU8,
+    at: *const u8,
+    at_len: usize,
+) -> i32 {
     // SAFETY: compiled code passes its static's state byte.
     let s = unsafe { &*state };
     if s.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire)
@@ -651,8 +656,9 @@ pub extern "C" fn rok_static_init_begin(state: *const AtomicU8) -> i32 {
         }
         if mine {
             let msg = b"static initializer reads its own static (recursive initialization)";
-            // SAFETY: valid message.
-            unsafe { crate::rok_panic(msg.as_ptr(), msg.len()) };
+            // SAFETY: compiled code passes its location string.
+            let at = unsafe { core::slice::from_raw_parts(at, at_len) };
+            crate::panic_at(msg, Some(at));
         }
         while s.load(Ordering::Acquire) != 2 {
             wait_on(s, 1, -1);
@@ -698,16 +704,16 @@ mod tests {
     fn static_init_states_nest() {
         let outer = AtomicU8::new(0);
         let inner = AtomicU8::new(0);
-        assert_eq!(rok_static_init_begin(&raw const outer), 1);
+        assert_eq!(rok_static_init_begin(&raw const outer, ptr::null(), 0), 1);
         assert_eq!(outer.load(Ordering::Relaxed), 1);
         // An initializer touching another static initializes it first.
-        assert_eq!(rok_static_init_begin(&raw const inner), 1);
+        assert_eq!(rok_static_init_begin(&raw const inner, ptr::null(), 0), 1);
         rok_static_init_end(&raw const inner);
         assert_eq!(inner.load(Ordering::Relaxed), 2);
         rok_static_init_end(&raw const outer);
         assert_eq!(outer.load(Ordering::Relaxed), 2);
         // Ready statics are not re-run, and the per-thread list is empty.
-        assert_eq!(rok_static_init_begin(&raw const outer), 0);
+        assert_eq!(rok_static_init_begin(&raw const outer, ptr::null(), 0), 0);
         assert!(initializing_head().is_null());
     }
 

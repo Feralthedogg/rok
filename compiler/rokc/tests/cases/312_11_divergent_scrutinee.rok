@@ -1,0 +1,22 @@
+// spec: §3.12.11
+// expect-exit: 0
+// expect-stdout: 7 -1 8 3
+
+// A jump is an expression: a divergent scrutinee, a `??` default, a
+// branch value.
+fn f() -> i32 {
+    match return 7 { _ => 1 }
+}
+fn g(x: i32 | none) -> i32 {
+    let v = x ?? return -1;
+    v * 2
+}
+fn h(xs: List<i32>) -> i32 {
+    let s = 0;
+    for x in xs {
+        let y = if x > 2 { break; } else { x };
+        s = s + y;
+    }
+    s
+}
+println(f"{f()} {g(none)} {g(4)} {h([1, 2, 3, 4])}");

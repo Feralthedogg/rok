@@ -62,6 +62,9 @@ pub struct HirInput {
     /// program, by index; missing ones are at the root. HIR qualifies
     /// the item names with it.
     pub item_modules: Vec<String>,
+    /// The modules without the implicit `use rok::core::**;`
+    /// (`#![no_implicit_rok]`, stdlib 0.2.5).
+    pub no_implicit_rok: Vec<String>,
     /// What lowering depends on besides the program (the target and
     /// cfg, the compiler): part of every key of `bodies`.
     pub fingerprint: u64,
@@ -307,9 +310,11 @@ pub enum HirStmt {
         local: LocalId,
         value: HirExpr,
     },
-    // `arr[index] = value;` — array-element write.
+    // `arr[index] = value;` — array-element write; with a `path` of
+    // field indices, into the array field `array_local.f.g` in place.
     ArrayAssign {
         array_local: LocalId,
+        path: Vec<u32>,
         index: HirExpr,
         value: HirExpr,
         elem_ty: HirTy,

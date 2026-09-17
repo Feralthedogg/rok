@@ -1,0 +1,20 @@
+// spec: §3.15.2
+// expect-error: 315_destructure_error_location_must_fail.rok:15:5: tuple destructure of a non-tuple value of type `i32`
+// expect-error: 315_destructure_error_location_must_fail.rok:16:5: struct `P` has no field `z`
+// expect-error: 315_destructure_error_location_must_fail.rok:17:5: tuple destructure length mismatch
+
+// A destructuring `let`'s errors point at that `let`, not at the
+// enclosing `fn`.
+struct P { x: i32; y: i32; }
+fn f() -> i32 {
+    let q = P { x: 1, y: 2 };
+
+
+
+    // line 14
+    let (a, b) = 5;
+    let P { x, z } = q;
+    let (c, d, e) = (1, 2);
+    a
+}
+println(f"{f()}");

@@ -226,9 +226,11 @@ pub enum Statement {
         target: LocalId,
         rvalue: RValue,
     },
-    // `arr[index] = value` — store into a memref-stored array local.
+    // `arr[index] = value` — store into a memref-stored array local, or
+    // into the array `offset` bytes into one (`s.buf[i] = v` in place).
     ArrayWrite {
         array: LocalId,
+        offset: u32,
         index: Operand,
         value: Operand,
         elem_ty: MirTy,
@@ -339,9 +341,11 @@ pub enum RValue {
         elem_ty: MirTy,
         elements: Vec<Operand>,
     },
-    // Read `array[index]` from a memref-stored array local.
+    // Read `array[index]` from a memref-stored array local, or from the
+    // array `offset` bytes into one (`s.buf[i]` in place, no copy).
     ArrayIndex {
         array: LocalId,
+        offset: u32,
         index: Operand,
         elem_ty: MirTy,
         len: u32,

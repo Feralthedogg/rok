@@ -1,0 +1,19 @@
+// spec: §3.16.4
+// expect-exit: 0
+// expect-stdout:
+// a
+// 1 -1 3 4
+
+// `let (a, b) = e else { .. };`: a tuple pattern on a sum tests its
+// tuple member; a refutable element pattern works too.
+fn pair(b: bool) -> (i32, str) | none { if b { (1, "a") } else { none } }
+fn f(b: bool) -> i32 {
+    let (n, s) = pair(b) else { return -1; };
+    println(s);
+    n
+}
+fn g(t: (i32, i32)) -> i32 {
+    let (0, v) = t else { return 4; };
+    v
+}
+println(f"{f(true)} {f(false)} {g((0, 3))} {g((1, 3))}");

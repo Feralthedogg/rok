@@ -658,6 +658,7 @@ impl<'a> FnBuilder<'a> {
             }
             HirStmt::ArrayAssign {
                 array_local,
+                path,
                 index,
                 value,
                 elem_ty,
@@ -665,12 +666,22 @@ impl<'a> FnBuilder<'a> {
                 let idx = self.lower_expr_to_operand(index);
                 let val = self.lower_expr_to_operand(value);
                 let mir_elem_ty = self.ty(elem_ty);
-                let len = match &self.locals[array_local.0 as usize].ty {
-                    MirTy::Array(_, n) => *n,
+                let mut ty = self.locals[array_local.0 as usize].ty.clone();
+                let mut offset = 0;
+                for k in path {
+                    offset += self.target.field_offsets(&ty)[*k as usize];
+                    ty = match ty {
+                        MirTy::Struct(_, ps) | MirTy::Tuple(ps) => ps[*k as usize].clone(),
+                        other => other,
+                    };
+                }
+                let len = match ty {
+                    MirTy::Array(_, n) => n,
                     _ => 0,
                 };
                 self.push_stmt(Statement::ArrayWrite {
                     array: *array_local,
+                    offset,
                     index: idx,
                     value: val,
                     elem_ty: mir_elem_ty,
@@ -1505,15 +1516,19 @@ impl<'a> FnBuilder<'a> {
                 index,
                 elem_ty,
             } => {
-                let arr_op = self.lower_expr_to_operand(array);
-                let idx_op = self.lower_expr_to_operand(index);
-                let Operand::Copy(arr_local) = arr_op else {
-                    return Operand::Const(ConstVal::Unit);
+                // `s.buf[i]`: index the field where it lies, not a copy.
+                let (arr_local, offset) = match self.field_place(array) {
+                    Some(p) => p,
+                    None => match self.lower_expr_to_operand(array) {
+                        Operand::Copy(l) => (l, 0),
+                        Operand::Const(_) => return Operand::Const(ConstVal::Unit),
+                    },
                 };
+                let idx_op = self.lower_expr_to_operand(index);
                 self.push_loc(e.span);
                 let mir_elem_ty = self.ty(elem_ty);
-                let len = match &self.locals[arr_local.0 as usize].ty {
-                    MirTy::Array(_, n) => *n,
+                let len = match self.ty(&array.ty) {
+                    MirTy::Array(_, n) => n,
                     _ => 0,
                 };
                 let dst = self.fresh_local(mir_elem_ty.clone());
@@ -1521,6 +1536,7 @@ impl<'a> FnBuilder<'a> {
                     target: dst,
                     rvalue: RValue::ArrayIndex {
                         array: arr_local,
+                        offset,
                         index: idx_op,
                         elem_ty: mir_elem_ty,
                         len,
@@ -1639,6 +1655,35 @@ impl<'a> FnBuilder<'a> {
                 Operand::Copy(dst)
             }
         }
+    }
+
+    /// A field chain `l.f.g` of local `l` (`self.buf`): `l` and the byte
+    /// offset of the field in it. `None` for anything else.
+    fn field_place(&self, p: &HirExpr) -> Option<(LocalId, u32)> {
+        let mut path = Vec::new();
+        let mut cur = p;
+        let root = loop {
+            match &cur.kind {
+                HirExprKind::Local(l) if !path.is_empty() => break *l,
+                HirExprKind::FieldRead {
+                    target,
+                    field_index: i,
+                    ..
+                }
+                | HirExprKind::TupleField {
+                    target, index: i, ..
+                } => {
+                    path.push((self.ty(&target.ty), *i));
+                    cur = target;
+                }
+                _ => return None,
+            }
+        };
+        let offset = path
+            .iter()
+            .map(|(ty, i)| self.target.field_offsets(ty)[*i as usize])
+            .sum();
+        Some((root, offset))
     }
 
     /// The address of place `p`: a local or static, or a field / element
@@ -2607,6 +2652,7 @@ impl<'a> FnBuilder<'a> {
         self.current = body_bb;
         self.push_stmt(Statement::ArrayWrite {
             array,
+            offset: 0,
             index: Operand::Copy(i),
             value,
             elem_ty: elem_ty.clone(),

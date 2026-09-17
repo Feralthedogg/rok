@@ -1,0 +1,6 @@
+// spec: §3.8.4
+// expect-error: the `??` default expects `i32`, found `str`
+
+// Without a receiving type the branches must agree: no widening.
+fn foo() -> i32 | none { none }
+let r = foo() ?? "default";

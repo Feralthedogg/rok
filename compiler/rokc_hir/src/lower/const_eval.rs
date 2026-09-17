@@ -378,6 +378,7 @@ impl<'b> Interp<'b> {
             }
             HirStmt::ArrayAssign {
                 array_local,
+                path,
                 index,
                 value,
                 ..
@@ -385,7 +386,14 @@ impl<'b> Interp<'b> {
                 let i = self.expr(index, f)?;
                 let v = self.expr(value, f)?;
                 let span = index.span;
-                let Some(Value::Array(items)) = f.get_mut(array_local) else {
+                let mut at = f.get_mut(array_local);
+                for k in path {
+                    at = match at {
+                        Some(Value::Struct(_, fs) | Value::Tuple(fs)) => fs.get_mut(*k as usize),
+                        _ => None,
+                    };
+                }
+                let Some(Value::Array(items)) = at else {
                     return Err(Stop::Runtime(span, "writes a run-time array".to_owned()));
                 };
                 let len = items.len();
@@ -1371,7 +1379,7 @@ impl Bodies for CtxBodies<'_, '_> {
                 return Callee::Extern(def.name.clone());
             }
             let module = match decl {
-                MethodOrFn::Fn(f) => module_of(&f.name),
+                MethodOrFn::Fn(f) => super::fn_module(env, f),
                 MethodOrFn::Method { module, .. } => module.clone(),
             };
             let is_const = def

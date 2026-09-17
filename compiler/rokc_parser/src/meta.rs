@@ -1742,7 +1742,7 @@ fn render(tokens: &[Token]) -> String {
     out
 }
 
-const fn item_attrs(item: &Item) -> &Vec<Attribute> {
+pub(crate) const fn item_attrs(item: &Item) -> &Vec<Attribute> {
     match item {
         Item::Fn(x) => &x.attrs,
         Item::Struct(x) => &x.attrs,

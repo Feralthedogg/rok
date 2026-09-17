@@ -1,0 +1,27 @@
+// spec: §2.8.6
+// expect-exit: 0
+// expect-stdout:
+// 3
+// 1
+
+// `where` on an associated type bounds it; on a trait, the whole trait.
+trait Container {
+    type Item where Item: Clone;
+    fn first(self) -> Item;
+}
+struct B { v: i32; }
+impl Container for B {
+    type Item = i32;
+    fn first(self) -> i32 { self.v }
+}
+
+trait Smallest<T> where T: Ord {
+    fn smallest(self) -> T;
+}
+struct P { a: i32; b: i32; }
+impl Smallest<i32> for P {
+    fn smallest(self) -> i32 { if self.a < self.b { self.a } else { self.b } }
+}
+
+println(f"{B { v: 3 }.first()}");
+println(f"{P { a: 4, b: 1 }.smallest()}");

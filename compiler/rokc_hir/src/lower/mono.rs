@@ -777,7 +777,7 @@ fn decl_ret_ok(env: &Env<'_>, id: FunctionId) -> HirTy {
         }
         None => match &env.decls[id.0 as usize] {
             MethodOrFn::Fn(f) => {
-                let module = module_of(&f.name);
+                let module = fn_module(env, f);
                 let start = env.sink.next_id.get();
                 let keep = !env.sink.bodies_done.get();
                 let (t, done) =
@@ -1048,6 +1048,15 @@ fn lower_fn_with(
     for p in &fn_def.params {
         params.push(lower_param(&mut ctx, p));
     }
+    for (p, ap) in params.iter().zip(&fn_def.params) {
+        if let Some(t) = ap
+            .ty
+            .as_ref()
+            .and_then(|t| own_type_param(&fn_def.generics, t))
+        {
+            ctx.ty_param_locals.insert(p.local, t);
+        }
+    }
     // A `[ref]`-captured parameter moves into a cell (`let x = x;`).
     let mut prelude = Vec::new();
     for (p, ap) in params.iter().zip(&fn_def.params) {
@@ -1109,6 +1118,23 @@ fn lower_fn_with(
         span: fn_def.span,
         facts: rokc_ir_common::FnFacts::default(),
     }
+}
+
+/// `T` when `ty` is exactly one of `generics`' type parameters.
+fn own_type_param(generics: &rokc_ast::Generics, ty: &rokc_ast::Ty) -> Option<String> {
+    let rokc_ast::TyKind::Path(p) = &ty.kind else {
+        return None;
+    };
+    let [seg] = p.segments.as_slice() else {
+        return None;
+    };
+    // An implicit parameter (`fn f(x)`, `T#x`) is checked per instance
+    // (spec 4.2.2).
+    let own = generics
+        .params
+        .iter()
+        .any(|gp| matches!(gp, rokc_ast::GenericParam::Type { name, .. } if *name == seg.name));
+    (own && !seg.name.contains('#')).then(|| seg.name.clone())
 }
 
 /// `{T → arg}` for a generic item's type parameters.
@@ -1313,7 +1339,7 @@ pub(super) fn lower_fn(
 pub(super) fn decl_sig(env: &Env<'_>, i: usize, base: &FnSig) -> FnSig {
     let no_subst = HashMap::new();
     let (f, self_ty, module, subst) = match &env.decls[i] {
-        MethodOrFn::Fn(f) => (*f, None, module_of(&f.name), &no_subst),
+        MethodOrFn::Fn(f) => (*f, None, fn_module(env, f), &no_subst),
         MethodOrFn::Method {
             fn_def,
             self_ty,

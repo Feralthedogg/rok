@@ -224,6 +224,7 @@ pub fn lower_full(
 ) -> HirModule {
     let collect_started = rokc_diagnostic::time_passes().then(std::time::Instant::now);
     resolve::set_packages(input.packages.clone());
+    resolve::set_no_implicit(input.no_implicit_rok.clone());
     super::const_eval::set_pointer_width(input.pointer_width);
     crate::clear_type_names();
     // A prebuilt-library build: every body of that package is a root.
@@ -247,8 +248,28 @@ pub fn lower_full(
     }
     // Ahead of lowering's own diagnostics and not merged with them.
     let mut early = lang_diags;
-    let (reexports, glob_diags) =
+    let (mut reexports, glob_diags) =
         crate::uses::glob_reexports(raw_uses, &owned.items, uses, reexports);
+    // Spec 5.9: a `pub` function of an `extern` block in module `m` is
+    // also `m::f` (its symbol stays `f`).
+    for (item, module) in owned.items.iter().zip(&input.item_modules) {
+        let Item::Extern(b) = item else { continue };
+        for ei in &b.items {
+            match ei {
+                rokc_ast::ExternItem::Fn(f)
+                    if !module.is_empty() && f.vis != Visibility::Private =>
+                {
+                    reexports.push(crate::uses::ReExport {
+                        module_path: module.clone(),
+                        short_name: f.name.clone(),
+                        full_path: f.name.clone(),
+                        vis: f.vis,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
     let reexports = reexports.as_slice();
     early.extend(glob_diags);
     early.extend(crate::uses::check_use_targets(
@@ -783,7 +804,7 @@ pub fn lower_full(
     // first). Generic functions stay AST templates, monomorphized per
     // call, outside `decls` / `fn_table`.
     let mut fn_table: HashMap<String, FnSig> = HashMap::new();
-    let mut extern_fns = std::collections::HashSet::new();
+    let mut extern_fns = HashMap::new();
     // Later extern declarations of a name already declared: whether
     // `extern "rok"`, the first one's id.
     let mut extern_redecls: Vec<(&FnDef, bool, FunctionId)> = Vec::new();
@@ -829,7 +850,7 @@ pub fn lower_full(
         param_refs: fn_def.params.iter().map(|p| p.by_ref).collect(),
         variadic: fn_def.params.last().is_some_and(|p| p.variadic),
     };
-    for item in &program.items {
+    for (idx, item) in program.items.iter().enumerate() {
         let here = item.span();
         match item {
             Item::Fn(fn_def) => {
@@ -873,30 +894,57 @@ pub fn lower_full(
                         "`#[no_safepoint]` is for `extern \"rok\"` blocks".to_owned(),
                     );
                 }
-                if !rok_abi && blk.abi != "C" {
+                // `"system"` is `"C"` but on 32-bit x86 Windows (the
+                // driver rejects it there).
+                if !rok_abi && blk.abi != "C" && blk.abi != "system" {
                     err(
                         &mut pre_diags,
                         here,
                         format!(
-                            "unsupported ABI `\"{}\"` (`\"C\"`, or `\"rok\"` for the runtime)",
+                            "unsupported ABI `\"{}\"` (`\"C\"`, `\"system\"`, or `\"rok\"` for the runtime)",
                             blk.abi
                         ),
                     );
                 }
                 let import_module = wasm_import_module(&blk.attrs);
+                let module = input.item_modules.get(idx).cloned().unwrap_or_default();
                 for ei in &blk.items {
                     let rokc_ast::ExternItem::Fn(fn_def) = ei else {
                         continue;
                     };
+                    // `rok_*` is the runtime's prefix (8.5), whose `str`
+                    // is `(ptr, len)`; `extern "C"` makes it a `char*`
+                    // (5.9.4), which no runtime function takes.
+                    let is_str = |t: &rokc_ast::Ty| matches!(&t.kind, AstTyKind::Path(p) if p.segments.len() == 1 && p.segments[0].name == "str");
+                    if !rok_abi
+                        && fn_def.name.starts_with("rok_")
+                        && (fn_def
+                            .params
+                            .iter()
+                            .filter_map(|p| p.ty.as_ref())
+                            .any(is_str)
+                            || fn_def.ret_ty.as_ref().is_some_and(is_str))
+                    {
+                        err(
+                            &mut pre_diags,
+                            fn_def.span,
+                            format!(
+                                "`{}`: a `rok_*` symbol is the runtime's, whose `str` is \
+                                 `(ptr, len)`; an `extern \"C\"` `str` is a `char*` (spec 5.9.4, \
+                                 8.5) — give the C function another name",
+                                fn_def.name
+                            ),
+                        );
+                    }
                     // A repeated extern declaration names the same symbol:
                     // keep the first, check the signatures agree below.
                     if let Some(first) = fn_table.get(&fn_def.name) {
-                        if extern_fns.contains(&fn_def.name) {
+                        if extern_fns.contains_key(&fn_def.name) {
                             extern_redecls.push((fn_def, rok_abi, first.id));
                         }
                         continue;
                     }
-                    extern_fns.insert(fn_def.name.clone());
+                    extern_fns.insert(fn_def.name.clone(), module.clone());
                     let id = FunctionId(u32::try_from(decls.len()).expect("FunctionId overflow"));
                     // Spec 4.15.1: an extern function is `unsafe` to call.
                     unsafe_fns.insert(id);
@@ -1266,6 +1314,10 @@ pub fn lower_full(
                 .map(|a| "_".to_owned() + &ty_mangle(a))
                 .collect()
         });
+        let trait_args: Vec<HirTy> = provides
+            .as_ref()
+            .map(|r| r.args.clone())
+            .unwrap_or_default();
         let trait_def = trait_name
             .as_ref()
             .and_then(|tn| trait_defs.get(tn).copied());
@@ -1338,6 +1390,7 @@ pub fn lower_full(
                             m.vis
                         },
                         trait_name: trait_name.clone(),
+                        trait_args: trait_args.clone(),
                     },
                 });
                 continue;
@@ -1412,6 +1465,7 @@ pub fn lower_full(
                     module: module.clone(),
                     vis,
                     trait_name: trait_name.clone(),
+                    trait_args: trait_args.clone(),
                 },
             );
             // A dependency's method symbol must not depend on this
@@ -1517,6 +1571,7 @@ pub fn lower_full(
                                 module: trait_module.clone(),
                                 vis: Visibility::Pub,
                                 trait_name: trait_name.clone(),
+                                trait_args: Vec::new(),
                             },
                         });
                     }
@@ -1587,6 +1642,7 @@ pub fn lower_full(
                         module: trait_module.clone(),
                         vis: Visibility::Pub,
                         trait_name: trait_name.clone(),
+                        trait_args: trait_args.clone(),
                     },
                 );
                 decls.push(MethodOrFn::Method {
@@ -1635,7 +1691,7 @@ pub fn lower_full(
             );
         }
         let module = match d {
-            MethodOrFn::Fn(f) => module_of(&f.name),
+            MethodOrFn::Fn(f) => fn_module(&env, f),
             MethodOrFn::Method { module, .. } => module.clone(),
         };
         // The prebuilt standard library's interface keeps its bodies
@@ -1750,7 +1806,7 @@ pub fn lower_full(
     // reference: the error is at the other one.
     let no_subst = HashMap::new();
     for (f, rok_abi, first) in &extern_redecls {
-        let (params, ret) = mono::sig_tys(&env, f, None, module_of(&f.name), &no_subst);
+        let (params, ret) = mono::sig_tys(&env, f, None, fn_module(&env, f), &no_subst);
         let s = &sigs[first];
         let c_var = |f: &FnDef| {
             f.attrs
@@ -1843,7 +1899,7 @@ pub fn lower_full(
         .map(|(i, (d, &lib))| {
             let f = d.def();
             let module = match d {
-                MethodOrFn::Fn(f) => module_of(&f.name),
+                MethodOrFn::Fn(f) => fn_module(&env, f),
                 MethodOrFn::Method { module, .. } => module.clone(),
             };
             !lib || check_library
@@ -1878,7 +1934,7 @@ pub fn lower_full(
             Some(&(is_const, std)) => is_const && !std,
             None => env.decls.get(f.id.0 as usize).is_some_and(|d| {
                 let module = match d {
-                    MethodOrFn::Fn(f) => module_of(&f.name),
+                    MethodOrFn::Fn(f) => fn_module(&env, f),
                     MethodOrFn::Method { module, .. } => module.clone(),
                 };
                 d.def()
@@ -3420,6 +3476,7 @@ fn generic_trait_impl(
                 module: def_module.to_owned(),
                 vis: Visibility::Pub,
                 trait_name: (!trait_key.is_empty()).then(|| trait_key.clone()),
+                trait_args: Vec::new(),
             },
         }
     };
@@ -3790,7 +3847,7 @@ pub(super) fn lower_decl(env: &Env<'_>, i: usize, stub: bool) -> HirFunction {
         f
     };
     match &env.decls[i] {
-        MethodOrFn::Fn(_) => lower_fn(env, f, id, None, module_of(&f.name)),
+        MethodOrFn::Fn(_) => lower_fn(env, f, id, None, fn_module(env, f)),
         MethodOrFn::Method {
             self_ty,
             module,

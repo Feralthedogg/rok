@@ -1,0 +1,14 @@
+// spec: §2.8.6
+// expect-error: associated type `Item` = `NoClone` does not implement `Clone`
+
+trait Container {
+    type Item where Item: Clone;
+    fn first(self) -> Item;
+}
+struct NoClone { v: i32; }
+struct B { v: i32; }
+impl Container for B {
+    type Item = NoClone;
+    fn first(self) -> NoClone { NoClone { v: self.v } }
+}
+println(f"{B { v: 3 }.first().v}");

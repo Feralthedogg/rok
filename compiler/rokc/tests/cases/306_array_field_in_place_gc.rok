@@ -1,0 +1,29 @@
+// spec: §3.6.1
+// expect-exit: 0
+// gc-stress: 1
+// expect-stdout:
+// a0 b1 c2 | x
+// a0! b1! c2! | x
+// 3
+
+// GC references in an array field indexed in place stay rooted and
+// follow moving collections (every allocation collects here), in a
+// struct local, through `ref self`, and in a coroutine frame.
+struct Names { tag: str; xs: [str; 3]; }
+impl Names {
+    fn shout(ref self) {
+        for i in 0..3 { self.xs[i] = f"{self.xs[i]}!"; }
+    }
+    fn show(self) -> str { f"{self.xs[0]} {self.xs[1]} {self.xs[2]} | {self.tag}" }
+}
+yield fn each(n: Names) -> str {
+    let m = n;
+    for i in 0..3 { yield f"{m.xs[i]}"; }
+}
+let n = Names { tag: "x", xs: ["a0", "b1", "c2"] };
+println(n.show());
+n.shout();
+println(n.show());
+let c = 0;
+for s in each(n) { if s.len() == 3 { c = c + 1; } }
+println(f"{c}");

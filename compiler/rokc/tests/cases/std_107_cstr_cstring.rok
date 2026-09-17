@@ -1,0 +1,43 @@
+// spec: std 107-ffi §1.7.2
+// expect-exit: 0
+// expect-stdout:
+// strlen 5 len 5
+// from_ptr hello 6
+// null true
+// with_nul hi 2 xy 2 3
+// not nul terminated: data provided is not nul terminated
+// interior: interior nul byte at 1
+// nul at 1
+
+// stdlib 1.7.2: `CString` owns a NUL-terminated copy (an interior NUL
+// is an error), `CStr` is a C string with its NUL: from a C pointer
+// (`none` when null) or from bytes ending in the only NUL.
+use rok::bare::ffi::{CStr, CString, FromBytesWithNulError, NulError};
+use rok::bare::ptr::ConstPtr;
+
+extern "C" {
+    fn strlen(s: ConstPtr<c_char>) -> usize;
+}
+
+fn main() {
+    let cs = try! CString::from_str("hello");
+    println(f"strlen {unsafe { strlen(cs.as_ptr()) }} len {cs.as_c_str().len()}");
+    match CStr::from_ptr(cs.as_ptr()) {
+        c: CStr => println(f"from_ptr {try! c.to_str()} {c.as_bytes_with_nul().len()}"),
+        none => println("null"),
+    }
+    println(f"null {CStr::from_ptr(ConstPtr::<c_char>::dangling().with_addr(0)) is none}");
+
+    let ok = try! CStr::from_bytes_with_nul("hi\0".as_bytes());
+    let xy = try! CString::from_str("xy");
+    let n = xy.into_bytes().len();
+    let m = xy.into_bytes_with_nul().len();
+    println(f"with_nul {try! ok.to_str()} {ok.len()} {try! xy.as_c_str().to_str()} {n} {m}");
+    try CStr::from_bytes_with_nul("hi".as_bytes()) catch e: FromBytesWithNulError {
+        println(f"not nul terminated: {e.reason}");
+    };
+    try CStr::from_bytes_with_nul("h\0i\0".as_bytes()) catch e: FromBytesWithNulError {
+        println(f"interior: {e.reason}");
+    };
+    try CString::from_str("a\0b") catch e: NulError { println(f"nul at {e.position}"); };
+}

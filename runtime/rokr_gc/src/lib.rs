@@ -1075,7 +1075,7 @@ fn build_index() {
 /// A list, so a collection does not visit every header looking for the
 /// flag.
 // Spin lock and linear unpin: pins are few (deque setup, executor
-// workers).
+// workers, FFI buffers). An object pinned n times is listed n times.
 struct Pins {
     lock: core::sync::atomic::AtomicBool,
     list: UnsafeCell<(*mut *mut u8, usize, usize)>,
@@ -1104,17 +1104,12 @@ fn with_pins<R>(f: impl FnOnce(&mut (*mut *mut u8, usize, usize)) -> R) -> R {
     r
 }
 
-/// Keep `obj` (and what it references) alive until [`unpin`]. Not a
-/// safepoint.
+/// Keep `obj` (and what it references) alive and in place until as
+/// many [`unpin`]s. Not a safepoint.
 ///
 /// # Safety
 /// `obj` must be a live GC object.
 pub unsafe fn pin(obj: *mut u8) {
-    // SAFETY: caller contract.
-    let flags = unsafe { &(*header(obj)).gc_flags };
-    if flags.fetch_or(FLAG_PINNED, Ordering::Relaxed) & FLAG_PINNED != 0 {
-        return;
-    }
     with_pins(|(objs, len, cap)| {
         if *len == *cap {
             *cap = (*cap * 2).max(16);
@@ -1127,25 +1122,35 @@ pub unsafe fn pin(obj: *mut u8) {
         // SAFETY: `len < cap`.
         unsafe { *objs.add(*len) = obj };
         *len += 1;
+        // SAFETY: caller contract.
+        unsafe {
+            (*header(obj))
+                .gc_flags
+                .fetch_or(FLAG_PINNED, Ordering::Relaxed)
+        };
     });
 }
 
-/// Undo [`pin`].
+/// Undo one [`pin`]: the object may move again after the last.
 ///
 /// # Safety
 /// `obj` must be a live GC object.
 pub unsafe fn unpin(obj: *mut u8) {
-    // SAFETY: caller contract.
-    let flags = unsafe { &(*header(obj)).gc_flags };
-    if flags.fetch_and(!FLAG_PINNED, Ordering::Relaxed) & FLAG_PINNED == 0 {
-        return;
-    }
     with_pins(|(objs, len, _)| {
         // SAFETY: the first `len` entries are initialized.
         let list = unsafe { core::slice::from_raw_parts_mut(*objs, *len) };
-        if let Some(i) = list.iter().position(|&o| o == obj) {
-            list.swap(i, *len - 1);
-            *len -= 1;
+        let Some(i) = list.iter().position(|&o| o == obj) else {
+            return;
+        };
+        list.swap(i, *len - 1);
+        *len -= 1;
+        if !list[..*len].contains(&obj) {
+            // SAFETY: caller contract.
+            unsafe {
+                (*header(obj))
+                    .gc_flags
+                    .fetch_and(!FLAG_PINNED, Ordering::Relaxed)
+            };
         }
     });
 }

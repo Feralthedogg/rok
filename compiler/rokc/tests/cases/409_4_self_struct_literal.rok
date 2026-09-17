@@ -1,0 +1,22 @@
+// spec: §4.9.4
+// expect-exit: 0
+// expect-stdout:
+// 1 2 2 2 3
+// 3 4
+
+// `Self { .. }` builds and matches the impl's struct, generic or not.
+struct Point { x: f64; y: f64; }
+impl Point {
+    fn new(x: f64, y: f64) -> Self { Self { x, y } }
+    fn swap(self) -> Self { Self { x: self.y, ..self } }
+    fn sum(self) -> f64 { match self { Self { x, y } => x + y } }
+}
+struct Pair<T> { a: T; b: T; }
+impl<T> Pair<T> {
+    fn make(a: T, b: T) -> Self { Self { a, b } }
+}
+let p = Point::new(1.0, 2.0);
+let q = p.swap();
+println(f"{p.x} {p.y} {q.x} {q.y} {p.sum()}");
+let r = Pair::make(3, 4);
+println(f"{r.a} {r.b}");

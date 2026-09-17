@@ -696,7 +696,13 @@ fn compile_unit_in(
     let root_dir_kw = path
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    let keywords = keyword_tables(metas.keywords, path, &root_dir_kw, &roots, &mut diags);
+    // 6.6.13: a handler whose cfg is false registers nothing.
+    let kw_defs = metas
+        .keywords
+        .into_iter()
+        .filter(|d| cfg::attrs_pass(&d.cfg, &cfg_env))
+        .collect();
+    let keywords = keyword_tables(kw_defs, path, &root_dir_kw, &roots, &mut diags);
     let (lib_lits, user_lits) =
         literal_tables(metas.literals, path, &root_dir_kw, &roots, &ext, &mut diags);
     // Per package: the user's, then each library root's.
@@ -747,6 +753,7 @@ fn compile_unit_in(
 
     let mut all_items: Vec<ModItem> = Vec::new();
     let mut all_uses: Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)> = Vec::new();
+    NO_IMPLICIT.with(|n| n.borrow_mut().clear());
     let top_stmts = rokc_diagnostic::time("parse package", || {
         collect_module_tree(
             path,
@@ -867,6 +874,7 @@ fn compile_unit_in(
         inline_prebuilt: config.inline_prebuilt,
         pointer_width: config.target.pointer_width,
         item_modules,
+        no_implicit_rok: NO_IMPLICIT.with(std::cell::RefCell::take),
         fingerprint: incr::key(&[incr::target_key(&cfg_env, &config.target).as_bytes()]),
         bodies: incr::current().map(|i| incr::bodies(i, files)),
     };
@@ -1235,7 +1243,9 @@ fn reusable(p: &Prepassed, ext: &ExtOps, metas: &MetaCtx) -> bool {
         && !sum.cfg_bang
         && !ext.symbols().iter().any(|s| p.source.contains(s.as_str()))
         && !sum.idents.iter().any(|(n, _)| {
-            n == "cfg_attr" || metas.table.defines(n) || metas.keywords.iter().any(|(k, ..)| k == n)
+            matches!(n.as_str(), "cfg" | "cfg_attr")
+                || metas.table.defines(n)
+                || metas.keywords.iter().any(|(k, ..)| k == n)
         })
         && !sum.kinds.iter().any(|k| prefixes.contains(k))
 }
@@ -1543,7 +1553,7 @@ impl Summary {
         }
         if defines_metas(tokens, source) {
             sum.metas = collect_meta_blocks(tokens, file);
-            sum.keywords = collect_keywords(tokens, file);
+            sum.keywords = collect_keywords(&program.items, file);
             sum.literals = collect_literals(tokens, file);
         }
         sum
@@ -1604,6 +1614,9 @@ thread_local! {
     /// This compile's real parses by file path (`real_parse`).
     static PARSED: std::cell::RefCell<std::collections::HashMap<PathBuf, Parsed>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
+    /// The modules whose file opts out of `use rok::core::**;`
+    /// (`#![no_implicit_rok]`, stdlib 0.2.5).
+    static NO_IMPLICIT: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// A file's real parse, ready for the module tree walk: its items
@@ -1613,6 +1626,8 @@ thread_local! {
 struct Parsed {
     items: Vec<rokc_ast::Item>,
     stmts: Vec<rokc_ast::Stmt>,
+    /// `#![no_implicit_rok]`.
+    no_implicit: bool,
     kept: Option<SourceFile>,
     diags: Vec<RokDiagnostic>,
     /// The files its `include_str!` / `include_bytes!` read.
@@ -1761,6 +1776,8 @@ fn settle(
     attrs::check_cfg(&program.attrs, &program.items, &metas.table, &mut diags);
     let items = cfg::filter_items(program.items, &metas.cfg);
     attrs::check(&program.attrs, &items, &metas.table, &mut diags);
+    let no_implicit = program.attrs.iter().any(|a| a.path == ["no_implicit_rok"]);
+    stdcall_check(&items, &metas.cfg, &mut diags);
     let kept = keep.then(|| SourceFile {
         path: path.to_path_buf(),
         file_id,
@@ -1774,9 +1791,39 @@ fn settle(
     Parsed {
         items,
         stmts: program.stmts,
+        no_implicit,
         kept,
         diags,
         includes: Vec::new(),
+    }
+}
+
+/// `extern "system"` is `stdcall` on 32-bit x86 Windows (spec 5.9.2),
+/// which the backends do not emit: an error there. Elsewhere it is
+/// `"C"`.
+fn stdcall_check(items: &[rokc_ast::Item], cfg_env: &CfgEnv, diags: &mut Vec<RokDiagnostic>) {
+    let pair = |k: &str, v: &str| {
+        cfg_env.eval(&rokc_ast::AttrArg::KeyValue(
+            k.to_owned(),
+            rokc_ast::Literal::Str(v.to_owned()),
+        ))
+    };
+    if !(pair("target_os", "windows") && pair("target_arch", "x86")) {
+        return;
+    }
+    for item in items {
+        match item {
+            rokc_ast::Item::Extern(b) if b.abi == "system" => diags.push(RokDiagnostic::error(
+                rokc_diagnostic::ErrorKind::Type,
+                b.span,
+                "`extern \"system\"` is `stdcall` on 32-bit x86 Windows, which is not \
+                 supported yet (spec 5.9.2)",
+            )),
+            rokc_ast::Item::Mod(m) => {
+                stdcall_check(m.items.as_deref().unwrap_or_default(), cfg_env, diags);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -2095,10 +2142,14 @@ fn collect_module_tree(
     let Parsed {
         items,
         stmts,
+        no_implicit,
         kept,
         diags: mut file_diags,
         ..
     } = parsed;
+    if no_implicit {
+        NO_IMPLICIT.with(|n| n.borrow_mut().push(module_path.join("::")));
+    }
     diags.append(&mut file_diags);
     if let (Some(keep), Some(mut f)) = (keep.as_deref_mut(), kept) {
         f.module = module_path.to_vec();
@@ -2136,12 +2187,44 @@ fn flatten_module_items(
     files: &mut SourceMap,
 ) {
     let module_key = module_path.join("::");
+    let mut mods: Vec<String> = Vec::new();
     for item in items {
         match item {
             rokc_ast::Item::Use(u) => {
                 uses.push((module_key.clone(), u.vis, u.tree));
             }
             rokc_ast::Item::Mod(m) => {
+                let err = |msg: String| {
+                    RokDiagnostic::error(rokc_diagnostic::ErrorKind::Module, m.span, msg)
+                };
+                if mods.contains(&m.name) {
+                    diags.push(err(format!(
+                        "module `{}` is declared twice in the same module (spec 5.4.12)",
+                        m.name
+                    )));
+                    continue;
+                }
+                mods.push(m.name.clone());
+                // 5.4.5: an inline module has no file or folder of its name.
+                if let (Some(_), Some(dir)) = (&m.items, submodule_dir) {
+                    let file = dir.join(format!("{}.rok", m.name));
+                    let folder = dir.join(&m.name);
+                    if let Some(p) = [file, folder].into_iter().find(|p| {
+                        if p.extension().is_some() {
+                            source_exists(p)
+                        } else {
+                            source_dir_exists(p)
+                        }
+                    }) {
+                        diags.push(err(format!(
+                            "inline module `{}` conflicts with `{}`: a module is either \
+                             inline or a file (spec 5.4.5)",
+                            m.name,
+                            p.file_name().unwrap_or_default().to_string_lossy()
+                        )));
+                        continue;
+                    }
+                }
                 let mut child_path = module_path.to_vec();
                 child_path.push(m.name.clone());
                 // An empty stub keeps the module's visibility for HIR
@@ -2344,9 +2427,10 @@ mod tests {
     fn extern_c_is_the_c_abi_whatever_the_name() {
         // A user's `extern "C"` function gets the C ABI even when its name
         // starts with `rok_`; `extern "rok"` is the runtime's.
-        let src = "extern \"C\" { fn rok_probe_c(s: str) -> i32; }\n\
+        let src = "extern \"C\" { fn rok_probe_c(f: fn(i32) -> i32) -> i32; }\n\
                    extern \"rok\" { fn rok_probe_rok(s: str) -> i32; }\n\
-                   fn main() { unsafe { rok_probe_c(\"x\"); rok_probe_rok(\"y\"); } }\n";
+                   fn twice(x: i32) -> i32 { x * 2 }\n\
+                   fn main() { unsafe { rok_probe_c(twice); rok_probe_rok(\"y\"); } }\n";
         let m = compile(src, "x86_64-unknown-linux-gnu");
         let text = super::mlir_text(
             &m,

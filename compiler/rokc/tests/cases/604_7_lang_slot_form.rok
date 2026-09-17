@@ -1,0 +1,9 @@
+// spec: §6.4.7
+// expect-error: 6:1: `BadAdd` does not match the form of lang slot `add_trait`: it needs `fn add(self, _)` (spec 6.4.7)
+
+// 6.4.7: an item bound to a slot has the form the slot requires (here
+// `Add`'s `fn add(self, rhs)`).
+#[lang("add_trait")]
+trait BadAdd { fn run(); }
+
+println("unreached");

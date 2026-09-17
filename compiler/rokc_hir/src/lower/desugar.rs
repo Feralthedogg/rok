@@ -647,7 +647,7 @@ pub(super) fn desugar_try_q(
 }
 
 /// Desugar `lhs ?? rhs` to `match lhs { v: T => v, none => rhs }`; the
-/// default must have the payload type.
+/// default has the payload type, or both go into the receiving slot.
 pub(super) fn desugar_nullish_coalesce(
     ctx: &mut LowerCtx<'_>,
     lhs: HirExpr,
@@ -674,6 +674,15 @@ pub(super) fn desugar_nullish_coalesce(
     // Only the same-optional case; other sums still need `T`.
     if rhs_h.ty == lhs.ty {
         value_ty = lhs.ty.clone();
+    } else if rhs_h.ty != value_ty && rhs_h.ty != HirTy::Unknown {
+        // Branches of different types take the receiving slot's type,
+        // never a widened sum (spec 3.8.4: `let r: i32 | str = a ?? "d"`).
+        if let Some(slot) = ctx
+            .current_expected()
+            .filter(|t| matches!(t, HirTy::Sum(_)))
+        {
+            value_ty = slot.clone();
+        }
     }
     let rhs_h = coerce(ctx, &value_ty, rhs_h, &|| "the `??` default".to_owned());
     let vt = value_ty.clone();

@@ -1,0 +1,46 @@
+// spec: std 106-gc-pin §1.6.2 §1.6.4 §1.6.6 §1.6.7
+// gc-stress: 50
+// expect-exit: 0
+// expect-stdout:
+// kept true 10 20 30
+// nested kept true
+// str 5 h
+// written 99
+
+// stdlib 1.6: `rok::bare::gc::pin` keeps a list's buffer in place while
+// its `Pinned` guard lives (bound with `using`; pins count, so an inner
+// guard's end leaves the outer pin), and raw pointers into it stay
+// valid across collections (the gc-stress runs evacuate everything
+// movable).
+use rok::bare::gc;
+use rok::bare::ptr::Ptr;
+
+fn churn() {
+    for i in 0..2000 {
+        let _junk = f"junk{i}";
+    }
+    gc::collect();
+}
+
+fn main() {
+    let xs: List<i32> = [10, 20, 30];
+    using p = gc::pin(xs) {
+        let at = p.as_data_ptr().addr();
+        using q = gc::pin(xs) {
+            churn();
+        }
+        churn();
+        let d: Ptr<i32> = p.as_data_ptr();
+        println(f"kept {d.addr() == at} {unsafe { d.read() }} {unsafe { d.add(1).read() }} {unsafe { d.add(2).read() }}");
+        churn();
+        println(f"nested kept {p.as_data_many_ptr().addr() == at}");
+    }
+    let s = f"he{xs.len()}lo";
+    using ps = gc::pin(s) {
+        println(f"str {s.len()} {unsafe { ps.as_bytes_ptr().read() } as char}");
+    }
+    using pw = gc::pin(xs) {
+        unsafe { pw.as_data_ptr().add(1).write(99) };
+    }
+    println(f"written {xs[1]}");
+}

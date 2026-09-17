@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use rokc_ast::{AttrArg, AttrBody, Attribute, Item, Literal, Program};
+use rokc_ast::{AttrArg, AttrBody, Attribute, FnDef, Item, Literal, Program};
 use rokc_diagnostic::{ErrorKind, RokDiagnostic};
 
 /// Every slot name the compiler accepts (spec 6.4.8). Source of truth:
@@ -73,6 +73,81 @@ pub const KNOWN_SLOTS: &[&str] = &[
     // 0.4.5 method slots
     "drop_method",
 ];
+
+/// Spec 6.4.7: the method a trait slot's trait declares, as `(slot,
+/// method, parameters with `self`)`.
+const TRAIT_FORMS: &[(&str, &str, usize)] = &[
+    ("iterator_trait", "next", 1),
+    ("into_iterator_trait", "into_iter", 1),
+    ("index_trait", "index", 2),
+    ("index_set_trait", "index_set", 3),
+    ("slice_trait", "slice", 2),
+    ("display_trait", "fmt", 2),
+    ("debug_trait", "fmt", 2),
+    ("future_trait", "poll", 2),
+    ("add_trait", "add", 2),
+    ("sub_trait", "sub", 2),
+    ("mul_trait", "mul", 2),
+    ("div_trait", "div", 2),
+    ("rem_trait", "rem", 2),
+    ("neg_trait", "neg", 1),
+    ("not_trait", "not", 1),
+    ("bitnot_trait", "bitnot", 1),
+    ("bitand_trait", "bitand", 2),
+    ("bitor_trait", "bitor", 2),
+    ("bitxor_trait", "bitxor", 2),
+    ("shl_trait", "shl", 2),
+    ("shr_trait", "shr", 2),
+    ("logical_and_trait", "logical_and", 2),
+    ("logical_or_trait", "logical_or", 2),
+    ("eq_trait", "eq", 2),
+    ("cmp_trait", "lt", 2),
+    ("ord_trait", "cmp", 2),
+    ("hash_trait", "hash", 1),
+    ("clone_trait", "clone", 1),
+    ("drop_method", "drop", 1),
+];
+
+/// What is wrong with `item` in `slot` (spec 6.4.7; stdlib 0.4.8: the
+/// suffix names the item kind), if anything.
+fn form_mismatch(slot: &str, item: &Item, method: Option<&FnDef>) -> Option<String> {
+    let kind_ok = matches!(
+        (slot.rsplit('_').next().unwrap_or(""), item, method),
+        ("method", Item::Trait(_), Some(_))
+            | ("trait", Item::Trait(_), None)
+            | (
+                "type",
+                Item::Struct(_) | Item::Enum(_) | Item::TypeAlias(_),
+                None
+            )
+            | ("fn", Item::Fn(_), None)
+    );
+    if !kind_ok {
+        let want = match slot.rsplit('_').next() {
+            Some("method") => "a trait method",
+            Some("trait") => "a trait",
+            Some("type") => "a type declaration",
+            _ => "a function",
+        };
+        return Some(format!("goes on {want}"));
+    }
+    let &(_, name, arity) = TRAIT_FORMS.iter().find(|(s, ..)| *s == slot)?;
+    let fits = |f: &FnDef| {
+        f.name == name
+            && f.params.len() == arity
+            && f.params.first().is_some_and(|p| p.name == "self")
+    };
+    let declared = match (item, method) {
+        (_, Some(f)) => fits(f),
+        (Item::Trait(t), None) => t
+            .items
+            .iter()
+            .any(|i| matches!(i, rokc_ast::TraitItem::Method(f) if fits(f))),
+        _ => true,
+    };
+    let params = (1..arity).map(|_| ", _").collect::<String>();
+    (!declared).then(|| format!("needs `fn {name}(self{params})`"))
+}
 
 /// The item kind a `#[lang]` attribute sits on, for slots that demand a
 /// shape (`none_type` is a type, `add_trait` a trait).
@@ -139,7 +214,7 @@ pub fn collect_lang_table(program: &Program) -> (LangTable, Vec<RokDiagnostic>) 
             _ => continue,
         };
         for attr in attrs {
-            collect_attr(attr, name, kind, span, &mut table, &mut diags);
+            collect_attr(attr, name, kind, span, &mut table, &mut diags, (item, None));
         }
         // Method slots (`drop_method`) sit on trait methods.
         if let Item::Trait(t) = item {
@@ -154,6 +229,7 @@ pub fn collect_lang_table(program: &Program) -> (LangTable, Vec<RokDiagnostic>) 
                             f.span,
                             &mut table,
                             &mut diags,
+                            (item, Some(f)),
                         );
                     }
                 }
@@ -170,6 +246,7 @@ fn collect_attr(
     item_span: rokc_diagnostic::Span,
     table: &mut LangTable,
     diags: &mut Vec<RokDiagnostic>,
+    on: (&Item, Option<&FnDef>),
 ) {
     if attr.name() != "lang" {
         return;
@@ -203,6 +280,16 @@ fn collect_attr(
             ErrorKind::Meta,
             attr.span,
             format!("unknown lang slot `{slot}` on `{item_name}` (spec 6.4.8)"),
+        ));
+        return;
+    }
+    if let Some(why) = form_mismatch(&slot, on.0, on.1) {
+        diags.push(RokDiagnostic::error(
+            ErrorKind::Meta,
+            attr.span,
+            format!(
+                "`{item_name}` does not match the form of lang slot `{slot}`: it {why} (spec 6.4.7)"
+            ),
         ));
         return;
     }

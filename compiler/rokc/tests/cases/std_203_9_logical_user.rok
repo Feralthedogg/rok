@@ -1,0 +1,32 @@
+// spec: std 203-ops §2.3.9
+// expect-exit: 0
+// expect-stdout:
+// rhs
+// and
+// false
+// rhs
+// or
+// true
+// short false
+
+// stdlib 2.3.9: `&&` / `||` on a user type with `LogicalAnd` /
+// `LogicalOr` is a plain method call: both operands are evaluated. On
+// `bool` they still short-circuit.
+struct B { v: bool; }
+
+impl LogicalAnd for B {
+    fn logical_and(self, rhs: B) -> bool { println("and"); self.v && rhs.v }
+}
+
+impl LogicalOr for B {
+    fn logical_or(self, rhs: B) -> bool { println("or"); self.v || rhs.v }
+}
+
+fn side(v: bool) -> B { println("rhs"); B { v } }
+fn loud() -> bool { println("evaluated"); true }
+
+fn main() {
+    println(f"{B { v: false } && side(true)}");
+    println(f"{B { v: true } || side(false)}");
+    println(f"short {false && loud()}");
+}

@@ -245,6 +245,7 @@ impl Cx<'_> {
             // The runtime's own: its functions neither allocate nor block.
             "no_safepoint" => (&[P::Extern], empty(a)),
             "path" => (&[P::Mod], None),
+            "no_implicit_rok" => (&[P::File], empty(a)),
             // What a WIT export (stdlib 1.8) runs.
             "wit::export" => (&[P::Fn, P::Struct], empty(a)),
             "deprecated" => (anywhere, message(a)),

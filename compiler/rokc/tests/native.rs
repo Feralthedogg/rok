@@ -1535,7 +1535,7 @@ void *rok_gc_alloc_slow(usize size, usize align, unsigned t) {
 void rok_gc_register_type(unsigned id, const void *t) { (void)id; (void)t; }
 void rok_gc_wb_slow(void *o) { (void)o; }
 void rok_panic_at(RokStr m, RokStr at) { _write(2, m.p, (unsigned)m.n); (void)at; exit(101); }
-int rok_static_init_begin(unsigned char *s) { if (*s == 0) { *s = 1; return 1; } return 0; }
+int rok_static_init_begin(unsigned char *s, const char *at, usize n) { (void)at; (void)n; if (*s == 0) { *s = 1; return 1; } return 0; }
 void rok_static_init_end(unsigned char *s) { *s = 2; }
 usize rok_str_len(RokStr s) { return s.n; }
 int rok_str_cmp(RokStr a, RokStr b) {

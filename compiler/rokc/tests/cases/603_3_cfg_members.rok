@@ -1,0 +1,45 @@
+// spec: §6.3.3 §6.3.7
+// expect-exit: 0
+// expect-stdout:
+// 1 2
+// B
+// 3
+// ok
+
+// 6.3.3: a cfg-false field or variant does not exist; 6.3.7: cfg runs
+// before meta expansion, so a derive sees only the remaining members
+// and the derives of a cfg-false item are not expanded at all.
+#[derive(Clone, Debug)]
+struct Foo {
+    #[cfg(not(target_os = "nonexistent"))]
+    big: u64;
+    #[cfg(target_os = "nonexistent")]
+    small: u8;
+    a: i32;
+}
+
+#[derive(Clone)]
+enum E {
+    #[cfg(target_os = "nonexistent")]
+    A,
+    B,
+    C { #[cfg(target_os = "nonexistent")] x: i32; y: i32; },
+}
+
+#[cfg(target_os = "nonexistent")]
+#[derive(Clone)]
+#[derive(Clone)]
+struct Gone { a: i32; }
+
+let f = Foo { big: 1, a: 2 }.clone();
+println(f"{f.big} {f.a}");
+// No `A` arm: the variant does not exist.
+match E::B.clone() {
+    E::B => println("B"),
+    E::C { y } => println(f"{y}"),
+}
+match (E::C { y: 3 }) {
+    E::B => println("B"),
+    E::C { y } => println(f"{y}"),
+}
+println("ok");

@@ -1,0 +1,96 @@
+// rok::bare::gc — keeping GC objects in place for raw pointers (stdlib
+// spec 1.6). A `Pinned<T>` from `pin` keeps the object holding `T`'s
+// data where it is (`rok_gc_pin`, counted) until it is dropped, at the
+// end of its `using` block.
+
+use rok::bare::mem::transmute_unchecked;
+use rok::bare::ptr::{ConstPtr, ManyPtr, Ptr, size_of};
+use rok::core::collections::raw::GcBuf;
+
+extern "rok" {
+    fn rok_gc_collect();
+    fn rok_gc_pin(obj: GcBuf<u8>) -> GcBuf<u8>;
+    fn rok_gc_unpin(obj: GcBuf<u8>);
+}
+
+/// A full collection now (it may move every unpinned object).
+pub fn collect() { unsafe { rok_gc_collect() } }
+
+/// What `pin` keeps in place for a value: the GC object holding its
+/// data, `none` when nothing can move (an empty list, a `str`: a
+/// literal is static and a run-time string never moves while a live
+/// variable — the `Pinned` itself — refers to it).
+pub trait Pinnable {
+    fn gc_object(self) -> GcBuf<u8> | none;
+}
+
+impl<T> Pinnable for List<T> {
+    fn gc_object(self) -> GcBuf<u8> | none {
+        if self.is_empty() {
+            return none;
+        }
+        let (buf, _, _) = unsafe { self[0:self.len()].raw_parts() };
+        let erased: GcBuf<u8> = unsafe { transmute_unchecked(buf) };
+        erased
+    }
+}
+
+impl Pinnable for str {
+    fn gc_object(self) -> GcBuf<u8> | none { none }
+}
+
+/// `obj`'s data held in place (1.6.2).
+pub struct Pinned<T> {
+    obj: T;
+    held: GcBuf<u8> | none;
+}
+
+/// Pin `obj`'s data until the returned guard is dropped; bind it with
+/// `using` (a `Pinned` dropped by nothing stays pinned).
+pub fn pin<T: Pinnable>(obj: T) -> Pinned<T> {
+    let held = obj.gc_object();
+    if let b: GcBuf<u8> = held {
+        unsafe { rok_gc_pin(b) };
+    }
+    Pinned { obj, held }
+}
+
+impl<T> Pinned<T> {
+    pub fn obj(self) -> T { self.obj }
+}
+
+impl<T> Pinned<List<T>> {
+    /// The list's first element; dangling for an empty list.
+    pub fn as_data_ptr(self) -> Ptr<T> {
+        match self.held {
+            b: GcBuf<u8> => {
+                let (_, start, _) = unsafe { self.obj[0:self.obj.len()].raw_parts() };
+                let at: usize = unsafe { transmute_unchecked(b) };
+                // The payload follows the 16-byte object header (8.1).
+                Ptr::<T>::dangling().with_addr(at + 16 + start * size_of::<T>())
+            }
+            none => Ptr::<T>::dangling(),
+        }
+    }
+
+    pub fn as_data_many_ptr(self) -> ManyPtr<T> { self.as_data_ptr().as_many() }
+}
+
+impl Pinned<str> {
+    /// The UTF-8 bytes (no NUL promised).
+    pub fn as_bytes_ptr(self) -> ConstPtr<u8> { self.obj.as_ptr() }
+
+    /// The bytes as `c_char`s; NUL termination is not promised (use
+    /// `ffi::CString`).
+    pub fn as_c_str(self) -> ConstPtr<c_char> {
+        ConstPtr::<c_char>::dangling().with_addr(self.obj.as_ptr().addr())
+    }
+}
+
+impl<T> Drop for Pinned<T> {
+    fn drop(ref self) {
+        if let b: GcBuf<u8> = self.held {
+            unsafe { rok_gc_unpin(b) };
+        }
+    }
+}

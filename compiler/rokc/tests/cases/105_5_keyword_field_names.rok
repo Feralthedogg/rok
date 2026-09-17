@@ -1,0 +1,20 @@
+// spec: §1.5.5
+// expect-exit: 0
+// expect-stdout:
+// 3 t 4
+// 3
+// 5
+// 7
+
+// Keywords name fields in declarations, literals, patterns and after `.`;
+// a contextual keyword names a parameter / named argument.
+struct Ev { match: i32; type: str; for: i32; }
+enum E { V { match: i32 } }
+fn make(type: i32) -> i32 { type }
+
+let e = Ev { match: 3, type: "t", for: 4 };
+println(f"{e.match} {e.type} {e.for}");
+match e { Ev { match: m, .. } => println(f"{m}") }
+let v = E::V { match: 5 };
+match v { E::V { match: m } => println(f"{m}") }
+println(f"{make(type: 7)}");

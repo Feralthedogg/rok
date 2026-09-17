@@ -213,8 +213,9 @@ impl FnLower<'_, '_> {
         self.out
     }
 
-    /// `@sym.init`: runs the initializer once across threads (0 new, 1
-    /// running, 2 ready; `rok_static_init_begin` / `_end`).
+    /// `@sym.init(at)`: runs the initializer once across threads (0 new,
+    /// 1 running, 2 ready; `rok_static_init_begin` / `_end`); `at` is the
+    /// reading code's location, for the panic of a recursive one.
     pub fn lazy_init(
         mut self,
         state: SymId,
@@ -224,6 +225,16 @@ impl FnLower<'_, '_> {
         ty: &MirTy,
     ) -> Func {
         let w = MirTy::Prim(PrimTy::Usize);
+        let str_ty = MirTy::Prim(PrimTy::Str);
+        let shapes = [cc::shape(&str_ty, self.c.t)];
+        let locs = cc::assign(self.c.conv, &shapes, None, false, None);
+        let at = self.tmp_bytes(16, 16);
+        for (part, l) in locs.params[0].iter().zip(&shapes[0].leaves) {
+            self.push(Inst::Param {
+                part: *part,
+                dst: at.at(l.off),
+            });
+        }
         let p = self.tmp_k(K::I64);
         self.push(Inst::Sym {
             dst: p,
@@ -231,13 +242,15 @@ impl FnLower<'_, '_> {
             got,
         });
         let pv = self.val_of(p, &w);
+        let ap = self.val_of(at, &w);
+        let al = self.val_of(at.at(8), &w);
         let r = self.tmp_k(K::I32);
         let begin = self.c.sym("rok_static_init_begin");
         self.call_sym(
             begin,
-            std::slice::from_ref(&w),
+            &[w.clone(), w.clone(), w.clone()],
             &MirTy::Prim(PrimTy::I32),
-            &[pv],
+            &[pv, ap, al],
             Some(r),
         );
         let (run, done) = (self.label(), self.label());

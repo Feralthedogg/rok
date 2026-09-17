@@ -16,6 +16,7 @@
 //! library type keyword applies to every package (the driver's
 //! `keyword_tables`), like the built-in type names.
 
+use rokc_ast::{AttrArg, AttrBody, Attribute, FnDef, ImplItem, Item, Literal, TraitItem};
 use rokc_diagnostic::{ErrorKind, RokDiagnostic, Span};
 use rokc_lexer::token::{RESERVED, keyword_kind};
 use rokc_lexer::{Token, TokenKind};
@@ -31,6 +32,9 @@ pub struct KeywordDef {
     pub file: String,
     /// The `#[keyword(..)]` attribute.
     pub span: Span,
+    /// The item's and its enclosing modules' `#[cfg(..)]`s: the driver
+    /// registers it only when they hold (6.6.13).
+    pub cfg: Vec<Attribute>,
 }
 
 /// Identifiers the language already gives meaning to in fixed positions
@@ -40,49 +44,99 @@ const CONTEXTUAL: &[&str] = &[
     "extern", "mut", "union", "pkg", "sub", "sup", "rok",
 ];
 
-/// Every `#[keyword("..")] .. fn handler` in `tokens` (a whole file).
+/// Every `#[keyword("..")]` among the parsed `items` of a file (inline
+/// `mod`s included). One on anything but a free `fn` or a `struct` gets
+/// an empty handler (reported by `check_keyword`).
 #[must_use]
-pub fn collect_keywords(tokens: &[Token], file: &str) -> Vec<KeywordDef> {
+pub fn collect_keywords(items: &[Item], file: &str) -> Vec<KeywordDef> {
     let mut out = Vec::new();
-    for (k, w) in tokens.windows(6).enumerate() {
-        let [h, n, lp, s, rp, rb] = w else { continue };
-        let (
-            TokenKind::HashLBracket,
-            TokenKind::Ident(attr),
-            TokenKind::LParen,
-            TokenKind::StrLit(name),
-            TokenKind::RParen,
-            TokenKind::RBracket,
-        ) = (&h.kind, &n.kind, &lp.kind, &s.kind, &rp.kind, &rb.kind)
-        else {
+    collect_in(items, &mut Vec::new(), &[], file, &mut out);
+    out
+}
+
+fn collect_in(
+    items: &[Item],
+    path: &mut Vec<String>,
+    cfg: &[Attribute],
+    file: &str,
+    out: &mut Vec<KeywordDef>,
+) {
+    let named = |path: &[String], name: &str| {
+        path.iter()
+            .map(String::as_str)
+            .chain([name])
+            .collect::<Vec<_>>()
+            .join("::")
+    };
+    for item in items {
+        let attrs = crate::parser::meta::item_attrs(item);
+        let mut cfg = cfg.to_vec();
+        cfg.extend(attrs.iter().filter(|a| a.name() == "cfg").cloned());
+        let (handler, ty) = match item {
+            Item::Fn(f) => (named(path, &f.name), false),
+            Item::Struct(s) => (named(path, &s.name), true),
+            _ => (String::new(), false),
+        };
+        push_keywords(attrs, &handler, ty, &cfg, file, out);
+        // A method or trait item can't be a handler (6.6.2).
+        let methods: Vec<&FnDef> = match item {
+            Item::Impl(i) => i
+                .items
+                .iter()
+                .filter_map(|m| match m {
+                    ImplItem::Method(f) => Some(f),
+                    _ => None,
+                })
+                .collect(),
+            Item::Trait(t) => t
+                .items
+                .iter()
+                .filter_map(|m| match m {
+                    TraitItem::Method(f) => Some(f),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        for f in methods {
+            push_keywords(&f.attrs, "", false, &cfg, file, out);
+        }
+        if let Item::Mod(rokc_ast::ModDef {
+            name,
+            items: Some(inner),
+            ..
+        }) = item
+        {
+            path.push(name.clone());
+            collect_in(inner, path, &cfg, file, out);
+            path.pop();
+        }
+    }
+}
+fn push_keywords(
+    attrs: &[Attribute],
+    handler: &str,
+    ty: bool,
+    cfg: &[Attribute],
+    file: &str,
+    out: &mut Vec<KeywordDef>,
+) {
+    for a in attrs.iter().filter(|a| a.name() == "keyword") {
+        let AttrBody::Args(args) = &a.body else {
             continue;
         };
-        if attr != "keyword" {
+        let [AttrArg::Lit(Literal::Str(name))] = args.as_slice() else {
             continue;
-        }
-        // The fn (or struct) this attribute and any following ones sit on.
-        let item = tokens[k + 6..]
-            .windows(2)
-            .find(|p| matches!(p[0].kind, TokenKind::Fn | TokenKind::Struct));
-        let ty = item.is_some_and(|p| p[0].kind == TokenKind::Struct);
-        let handler = if ty {
-            item.and_then(|p| match &p[1].kind {
-                TokenKind::Ident(f) => Some(f.clone()),
-                _ => None,
-            })
-            .unwrap_or_default()
-        } else {
-            handler_at(tokens, k, k + 6)
         };
         out.push(KeywordDef {
             name: name.clone(),
-            handler,
+            handler: handler.to_owned(),
             ty,
             file: file.to_owned(),
-            span: h.span,
+            span: a.span,
+            cfg: cfg.to_vec(),
         });
     }
-    out
 }
 
 /// The function an attribute at `attr` sits on (the first `fn` from
@@ -150,7 +204,7 @@ pub fn check_keyword(def: &KeywordDef) -> Option<RokDiagnostic> {
     }
     if def.handler.is_empty() {
         return err(format!(
-            "`#[keyword(\"{n}\")]` must be on a function — its handler (spec 6.6.2)"
+            "`#[keyword(\"{n}\")]` must be on a free function — its handler (spec 6.6.2)"
         ));
     }
     None
@@ -220,5 +274,6 @@ rokc_core::codec_struct!(KeywordDef {
     handler,
     ty,
     file,
-    span
+    span,
+    cfg
 });

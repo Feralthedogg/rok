@@ -15,10 +15,10 @@ pub(super) fn lower_block(ctx: &mut LowerCtx<'_>, block: &Block) -> HirBlock {
                 rest: _,
                 ty,
                 init,
-            } => {
+            } => ctx.at_span(s.span, |ctx| {
                 lower_let_struct(ctx, path, fields, ty.as_ref(), init, s.span, &mut stmts);
-            }
-            StmtKind::LetPattern { pat, ty, init } => {
+            }),
+            StmtKind::LetPattern { pat, ty, init } => ctx.at_span(s.span, |ctx| {
                 let value = match ty.as_ref().map(|t| ctx.resolve_ast_ty(t)) {
                     Some(t) => {
                         let v = lower_expected(ctx, init, t.clone());
@@ -30,18 +30,20 @@ pub(super) fn lower_block(ctx: &mut LowerCtx<'_>, block: &Block) -> HirBlock {
                 // whole (drop glue): its guard parts need no `using` of
                 // their own.
                 let tracked = ctx.guard_lets.len();
-                super::desugar::bind_irrefutable(ctx, pat, value, &mut stmts);
+                ctx.at_span(pat.span, |ctx| {
+                    super::desugar::bind_irrefutable(ctx, pat, value, &mut stmts);
+                });
                 if matches!(&init.kind, ExprKind::Path(p) if p.segments[0].name.starts_with("#using"))
                 {
                     ctx.guard_lets.truncate(tracked);
                 }
-            }
+            }),
             StmtKind::LetTuple {
                 names,
                 rest,
                 ty,
                 init,
-            } => {
+            } => ctx.at_span(s.span, |ctx| {
                 lower_let_tuple(
                     ctx,
                     names,
@@ -51,7 +53,7 @@ pub(super) fn lower_block(ctx: &mut LowerCtx<'_>, block: &Block) -> HirBlock {
                     s.span,
                     &mut stmts,
                 );
-            }
+            }),
             StmtKind::Let {
                 name,
                 ty: None,
@@ -504,7 +506,10 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
                     rhs: Box::new(value.clone()),
                 },
             };
+            // The `*Assign` bound that let `T` here also covers the op.
+            let params = std::mem::take(&mut ctx.ty_param_locals);
             let a = lower_assign(ctx, target, &combined, stmt.span);
+            ctx.ty_param_locals = params;
             write_through(ctx, a, stmt.span)
         }
         StmtKind::LetTuple { .. } | StmtKind::LetStruct { .. } | StmtKind::LetPattern { .. } => {
@@ -701,6 +706,7 @@ fn lower_loop(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
 
 /// `target = value;` for a local / static, a struct-field chain rooted
 /// at a local, or an element of a local array.
+#[allow(clippy::cognitive_complexity)] // one arm per assignable place form
 pub(super) fn lower_assign(
     ctx: &mut LowerCtx<'_>,
     target: &Expr,
@@ -809,8 +815,23 @@ pub(super) fn lower_assign(
                 (_, HirTy::Unknown) => return None,
                 _ => None,
             };
-            // `s.arr[i] = v` / `xs[j][i] = v` on a value array that isn't
-            // a local: copy the array, store into the copy, write it back.
+            // `s.arr[i] = v` on a field chain of a local: in place.
+            if let (None, HirTy::Array(elem_ty, _)) = (&elem, &arr_h.ty) {
+                if let Some((array_local, path)) = local_field_path(ctx, &arr_h) {
+                    let elem_ty = (**elem_ty).clone();
+                    let v = lower_expected(ctx, value, elem_ty.clone());
+                    let value = coerce(ctx, &elem_ty, v, &|| "the array element".to_owned());
+                    return Some(HirStmt::ArrayAssign {
+                        array_local,
+                        path,
+                        index: idx_h,
+                        value,
+                        elem_ty,
+                    });
+                }
+            }
+            // `xs[j][i] = v` on a value array that isn't a local: copy the
+            // array, store into the copy, write it back.
             if elem.is_none()
                 && matches!(arr_h.ty, HirTy::Array(..))
                 && matches!(arr_expr.kind, ExprKind::Field(..) | ExprKind::Index(..))
@@ -847,6 +868,7 @@ pub(super) fn lower_assign(
             let value = coerce(ctx, &elem_ty, v, &|| "the array element".to_owned());
             Some(HirStmt::ArrayAssign {
                 array_local,
+                path: Vec::new(),
                 index: idx_h,
                 value,
                 elem_ty,
@@ -1148,6 +1170,33 @@ const fn assign_stmt(target: Expr, value: Expr) -> Stmt {
 /// element that has no local to write in place: `body` copies it into
 /// `#tmp`, updates the copy and writes it back. The index is evaluated
 /// once.
+/// `l.f.g` (struct fields, tuple elements) of a plain local `l`: `l` and
+/// the field indices from it outward.
+fn local_field_path(ctx: &LowerCtx<'_>, e: &HirExpr) -> Option<(LocalId, Vec<u32>)> {
+    let mut path = Vec::new();
+    let mut cur = e;
+    loop {
+        match &cur.kind {
+            HirExprKind::FieldRead {
+                target,
+                field_index: i,
+                ..
+            }
+            | HirExprKind::TupleField {
+                target, index: i, ..
+            } => {
+                path.push(*i);
+                cur = target;
+            }
+            HirExprKind::Local(l) if !path.is_empty() && !ctx.is_boxed(*l) => {
+                path.reverse();
+                return Some((*l, path));
+            }
+            _ => return None,
+        }
+    }
+}
+
 fn rewrite_index_store(
     ctx: &mut LowerCtx<'_>,
     idx: &Expr,
@@ -1987,6 +2036,14 @@ fn struct_decl_fields(def: &AstStructDef) -> Vec<(String, &Ty)> {
     }
 }
 
+/// `Self` of an impl of a struct, as a struct path (spec 4.9.4).
+pub(super) fn self_struct_id(ctx: &LowerCtx<'_>, segs: &[&str]) -> Option<StructId> {
+    match (segs, &ctx.self_ty) {
+        (["Self"], Some(HirTy::Struct(id))) => Some(*id),
+        _ => None,
+    }
+}
+
 /// Whether bare `segs` names a struct outside core while the implicit
 /// `rok::core::**` also brings in a core variant of that name (`struct
 /// Sha256` vs `HashAlgorithm::Sha256`): the program's struct wins.
@@ -2008,6 +2065,7 @@ fn init_variant(ctx: &LowerCtx<'_>, segs: &[&str], hint: Option<&HirTy>) -> Enum
 /// `S { a: v, .. }`; with `spread`, `S { a: v, ..base }` (spec 2.3.4):
 /// the fields not written are read from `base`, a value of the same
 /// struct type. The written values run first, then `base`.
+#[allow(clippy::cognitive_complexity)] // struct, enum variant, `Self` and generic forms
 pub(super) fn lower_struct_init(
     ctx: &mut LowerCtx<'_>,
     path: &AstPath,
@@ -2090,7 +2148,10 @@ pub(super) fn lower_struct_init(
     }
 
     let base_h = spread.map(|b| lower_update_base(ctx, b, &mut hint));
-    let Some(full) = ctx.canon_type(&segs) else {
+    let self_struct = self_struct_id(ctx, &segs);
+    let full =
+        self_struct.map_or_else(|| ctx.canon_type(&segs), |id| Some(ctx.struct_def(id).name));
+    let Some(full) = full else {
         for (_, e) in fields {
             lower_expected(ctx, e, HirTy::Unknown);
         }
@@ -2105,7 +2166,9 @@ pub(super) fn lower_struct_init(
     // reused below so each field expression is evaluated exactly once.
     let mut pre: Vec<Option<HirExpr>> = vec![None; fields.len()];
     let explicit_generics = path.segments.last().is_some_and(|s| !s.generics.is_empty());
-    let struct_id = if explicit_generics {
+    let struct_id = if let Some(id) = self_struct {
+        id
+    } else if explicit_generics {
         let synth = Ty {
             kind: AstTyKind::Path(path.clone()),
             span: path.span,
@@ -4150,6 +4213,34 @@ pub(super) fn bind_explicit(
         .zip(targs)
         .map(|(n, t)| (n.clone(), ctx.resolve_ast_ty(t)))
         .collect())
+}
+
+/// Every type argument of generic fn `def` inferred from the expected
+/// `fn(..) -> R` slot of its value, or `None`.
+fn generic_fn_args_from_slot(ctx: &LowerCtx<'_>, def: &FnDef) -> Option<HashMap<String, HirTy>> {
+    let Some(HirTy::Fn(ptys, ret, _)) = ctx.current_expected() else {
+        return None;
+    };
+    if ptys.len() != def.params.len() {
+        return None;
+    }
+    let names: std::collections::HashSet<String> = def
+        .generics
+        .params
+        .iter()
+        .map(|gp| match gp {
+            rokc_ast::GenericParam::Type { name, .. }
+            | rokc_ast::GenericParam::Const { name, .. } => name.clone(),
+        })
+        .collect();
+    let mut subst = HashMap::new();
+    for (p, t) in def.params.iter().zip(ptys) {
+        super::mono::unify_param_ty_with(p.ty.as_ref()?, t, &names, &mut subst, ctx);
+    }
+    if let Some(r) = &def.ret_ty {
+        super::mono::unify_param_ty_with(r, ret, &names, &mut subst, ctx);
+    }
+    (subst.len() == names.len()).then_some(subst)
 }
 
 /// Does AST type `ty` name `name` (a type parameter)?
@@ -7153,6 +7244,13 @@ fn qpath_call(
         }
         _ => (None, args),
     };
+    // `<P as Convert<f64>>::convert(p)`: the impl of those arguments.
+    if let Some(fid) = method_by_trait_args(ctx, &t, method, &key, q) {
+        ctx.explicit_recv = None;
+        check_method_visible(ctx, fid, method);
+        let sig = ctx.sig_by_id(fid);
+        return call_sig(ctx, &sig, &display, recv, rest, span);
+    }
     let call = call_impl_method(ctx, &t, method, Some(&key), recv, rest, &display, span);
     ctx.explicit_recv = None;
     call.unwrap_or_else(|| {
@@ -7164,6 +7262,32 @@ fn qpath_call(
             ),
         )
     })
+}
+
+/// The one concrete method `method` of `t` from the impl of trait `key`
+/// with the arguments `<.. as Tr<A, ..>>` writes (written ones lead;
+/// defaults fill the rest). `None` without written arguments.
+fn method_by_trait_args(
+    ctx: &LowerCtx<'_>,
+    t: &HirTy,
+    method: &str,
+    key: &str,
+    q: &rokc_ast::QPath,
+) -> Option<FunctionId> {
+    let written = &q.trait_path.segments.last()?.generics;
+    if written.is_empty() {
+        return None;
+    }
+    let args: Vec<HirTy> = written.iter().map(|a| ctx.resolve_ast_ty(a)).collect();
+    let ids =
+        method_target_for(t).and_then(|k| ctx.env.method_table.get(&(k, method.to_owned())))?;
+    let mut hits = ids.iter().filter(|id| {
+        ctx.env.method_info.get(id).is_some_and(|i| {
+            i.trait_name.as_deref() == Some(key) && i.trait_args.starts_with(&args)
+        })
+    });
+    let hit = *hits.next()?;
+    hits.next().is_none().then_some(hit)
 }
 
 /// `Tr::m(..)` (`Self` = the first argument's type, else the expected
@@ -8706,6 +8830,9 @@ pub(super) fn lower_infix(
     } else {
         HirTy::Unknown
     };
+    if let Some(e) = unbounded_param_op(ctx, op, Fixity::Infix, &[lhs, rhs], span) {
+        return e;
+    }
     let (lhs_h, rhs_h) = lower_sibling_pair(ctx, lhs, rhs, lhs_expected);
     if lhs_h.ty == HirTy::Unknown || rhs_h.ty == HirTy::Unknown {
         return poison(span);
@@ -9005,7 +9132,14 @@ pub(super) fn lower_short_circuit(
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
     let bool_ty = HirTy::Prim(PrimTy::Bool);
-    let lhs_h = lower_cond(ctx, lhs);
+    let lhs_h = lower_expected(ctx, lhs, bool_ty.clone());
+    // A user `LogicalAnd` / `LogicalOr` impl: a plain call, both operands
+    // evaluated (stdlib 2.3.9).
+    if matches!(lhs_h.ty, HirTy::Struct(_) | HirTy::Enum(_)) {
+        let rhs_h = lower_expr(ctx, rhs);
+        return dispatch_user_op(ctx, op, Fixity::Infix, lhs_h, Some(rhs_h), span);
+    }
+    let lhs_h = coerce(ctx, &bool_ty, lhs_h, &|| "the condition".to_owned());
     // `x is T && rhs`: `x` is `T` in `rhs` (spec 2.2.6).
     let rhs_h = if op == "&&" {
         ctx.push_scope();
@@ -9057,6 +9191,9 @@ pub(super) fn lower_prefix(
                 .unwrap_or_else(|| lower_literal(ctx, lit, true, span));
         }
     }
+    if let Some(e) = unbounded_param_op(ctx, op, Fixity::Prefix, &[operand], span) {
+        return e;
+    }
     let operand_h = lower_expr(ctx, operand);
     if operand_h.ty == HirTy::Unknown {
         return operand_h;
@@ -9086,6 +9223,36 @@ pub(super) fn lower_prefix(
             ctx.ty_name(&operand_h.ty)
         ),
     )
+}
+
+/// Spec 2.10.9: a generic body uses only what its bounds give. An
+/// operator on a parameter typed by a bare type parameter `T` needs the
+/// operator's trait among `T`'s bounds (or their supertraits), whatever
+/// `T` is in this instance.
+fn unbounded_param_op(
+    ctx: &LowerCtx<'_>,
+    op: &str,
+    fixity: Fixity,
+    operands: &[&Expr],
+    span: rokc_diagnostic::Span,
+) -> Option<HirExpr> {
+    let t = operands.iter().find_map(|e| match &e.kind {
+        ExprKind::Path(p) if p.segments.len() == 1 => ctx
+            .lookup(&p.segments[0].name)
+            .and_then(|l| ctx.ty_param_locals.get(&l).cloned()),
+        _ => None,
+    })?;
+    let tr = ctx.env.prec.lookup(op, fixity)?.trait_name.clone();
+    if ctx.ty_bounds.get(&t).is_some_and(|b| b.contains(&tr)) {
+        return None;
+    }
+    Some(ctx.error_expr(
+        span,
+        format!(
+            "operator `{op}` on a `{t}` value needs a `{}` bound on `{t}` (spec 2.10.9)",
+            leaf_name(&tr)
+        ),
+    ))
 }
 
 /// Dispatch an operator on a user type to its operator-trait method
@@ -9747,10 +9914,20 @@ pub(super) fn lower_path(
             .segments
             .last()
             .map_or(&[][..], |s| s.generics.as_slice());
-        if !targs.is_empty() {
-            let bound = match bind_explicit(ctx, def, None, targs, &full) {
-                Ok(b) => b,
-                Err(msg) => return ctx.error_expr(span, msg),
+        // `let f: fn(i32) -> i32 = id;`: the receiving fn type picks the
+        // instance (spec 4.4.7).
+        let from_slot = if targs.is_empty() {
+            generic_fn_args_from_slot(ctx, def)
+        } else {
+            None
+        };
+        if !targs.is_empty() || from_slot.is_some() {
+            let bound = match from_slot {
+                Some(b) => b,
+                None => match bind_explicit(ctx, def, None, targs, &full) {
+                    Ok(b) => b,
+                    Err(msg) => return ctx.error_expr(span, msg),
+                },
             };
             if bound.len() < def.generics.params.len() {
                 return ctx.error_expr(
@@ -9788,7 +9965,9 @@ pub(super) fn lower_path(
         return ctx.error_expr(
             span,
             format!(
-                "generic function `{}` can only be called, not used as a value",
+                "generic function `{}` as a value: its type arguments are not determined \
+                 — write `{}::<..>` or give the slot a `fn(..)` type (spec 4.4.7)",
+                segs.join("::"),
                 segs.join("::")
             ),
         );

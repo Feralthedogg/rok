@@ -1,0 +1,26 @@
+// spec: §3.11.1
+// expect-exit: 0
+// expect-stdout:
+// pi zero minus other other
+// two and a half none other
+
+// Float literal patterns compare with `==`: `0.0` matches `-0.0`, NaN
+// matches no literal.
+fn kind(x: f64) -> str {
+    match x {
+        3.14f64 => "pi",
+        0.0 => "zero",
+        -1.5 => "minus",
+        _ => "other",
+    }
+}
+fn small(x: f32 | none) -> str {
+    match x {
+        2.5f32 => "two and a half",
+        none => "none",
+        _ => "other",
+    }
+}
+let nan = 0.0 / 0.0;
+println(f"{kind(3.14)} {kind(-0.0)} {kind(-1.5)} {kind(nan)} {kind(2.0)}");
+println(f"{small(2.5f32)} {small(none)} {small(1.0f32)}");

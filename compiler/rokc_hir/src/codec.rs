@@ -114,6 +114,7 @@ codec_enum!(HirStmt {
     Assign { local, value },
     ArrayAssign {
         array_local,
+        path,
         index,
         value,
         elem_ty

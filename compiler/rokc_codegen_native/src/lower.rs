@@ -1440,8 +1440,14 @@ impl<'c, 'a> FnLower<'c, 'a> {
             f: init,
         });
         self.push(Inst::Label(init));
+        // The location of this read: a recursive initialization's panic.
+        let str_ty = MirTy::Prim(PrimTy::Str);
+        let at = self.tmp(&str_ty);
+        let loc = self.c.sources.location(self.at);
+        self.str_lit(&loc, at);
         let f = self.c.sym(&format!("{sym}.init"));
-        self.call_sym(f, &[], &MirTy::Unit, &[], None);
+        let at = self.val_of(at, &str_ty);
+        self.call_sym(f, &[str_ty], &MirTy::Unit, &[at], None);
         self.push(Inst::Jmp(r));
         self.push(Inst::Label(r));
     }
@@ -1789,6 +1795,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
             }
             Statement::ArrayWrite {
                 array,
+                offset,
                 index,
                 value,
                 elem_ty,
@@ -1797,6 +1804,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
                 let Some(base) = self.local_mem(*array) else {
                     return;
                 };
+                let base = base.at(*offset);
                 let p = self.elem_addr(base, index, elem_ty, *len);
                 let v = self.val(value, elem_ty);
                 self.store(v, elem_ty, Mem::Ind(p, 0));
@@ -2084,6 +2092,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
             }
             RValue::ArrayIndex {
                 array,
+                offset,
                 index,
                 elem_ty,
                 len,
@@ -2091,6 +2100,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
                 let Some(base) = self.local_mem(*array) else {
                     return;
                 };
+                let base = base.at(*offset);
                 let p = self.elem_addr(base, index, elem_ty, *len);
                 if let Some(d) = dst {
                     let size = t.size_align(elem_ty).0;

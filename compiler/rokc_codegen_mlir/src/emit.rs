@@ -192,7 +192,7 @@ fn runtime_decl(name: &str, target: &Target) -> Option<String> {
         "rok_gc_alloc_slow" => format!("(i{pw}, i{pw}, i32) -> !llvm.ptr"),
         "rok_gc_register_type" => "(i32, !llvm.ptr)".to_owned(),
         "rok_gc_wb_slow" | "rok_gc_add_root" | "rok_static_init_end" => "(!llvm.ptr)".to_owned(),
-        "rok_static_init_begin" => "(!llvm.ptr) -> i32".to_owned(),
+        "rok_static_init_begin" => format!("(!llvm.ptr, !llvm.ptr, i{pw}) -> i32"),
         "rok_runtime_yield"
         | "rok_init_once"
         | "rok_runtime_init"
@@ -836,7 +836,8 @@ impl Emitter {
                         "  llvm.mlir.global external @{sym}.state() {{addr_space = 0 : i32}} : i8"
                     );
                     if self.link().in_prebuilt(&s.name) || !self.glue {
-                        let _ = writeln!(self.out, "  func.func private @{sym}.init()");
+                        let s = mlir_prim(PrimTy::Str, self.target.pointer_width);
+                        let _ = writeln!(self.out, "  func.func private @{sym}.init({s})");
                     } else {
                         let by_addr = rok_by_ref(&s.ty, &self.target);
                         self.emit_lazy_init(&s.name, &sym, &ty_str, &init, false, by_addr);
@@ -919,10 +920,11 @@ impl Emitter {
         self.emit_lazy_init(name, sym, ty, init, export, by_addr);
     }
 
-    /// `@sym.init`: runs initializer `init` of static `name` once (see
-    /// `emit_lazy_static`); `export`ed by a prebuilt library that owns
-    /// the static. `by_addr`: `init` returns its value through a leading
-    /// pointer (spec 8.6.6), the static itself.
+    /// `@sym.init(at)`: runs initializer `init` of static `name` once
+    /// (see `emit_lazy_static`); `at` is the reading code's location, for
+    /// the panic of a recursive initialization. `export`ed by a prebuilt
+    /// library that owns the static. `by_addr`: `init` returns its value
+    /// through a leading pointer (spec 8.6.6), the static itself.
     fn emit_lazy_init(
         &mut self,
         name: &str,
@@ -934,11 +936,13 @@ impl Emitter {
     ) {
         self.needs.insert("rok_static_init_begin");
         self.needs.insert("rok_static_init_end");
+        let pw = self.target.pointer_width;
+        let s = mlir_prim(PrimTy::Str, pw);
         let head = if export {
-            format!("func.func @{sym}.init()")
+            format!("func.func @{sym}.init(%at: {s})")
         } else {
             format!(
-                "func.func private @{sym}.init() attributes {{llvm.linkage = #llvm.linkage<internal>}}"
+                "func.func private @{sym}.init(%at: {s}) attributes {{llvm.linkage = #llvm.linkage<internal>}}"
             )
         };
         let call = if by_addr {
@@ -956,7 +960,9 @@ impl Emitter {
         let text = format!(
             "  {head} {{
     %0 = llvm.mlir.addressof @{sym}.state : !llvm.ptr
-    %1 = func.call @rok_static_init_begin(%0) : (!llvm.ptr) -> i32
+    %ap = llvm.extractvalue %at[0] : {s}
+    %al = llvm.extractvalue %at[1] : {s}
+    %1 = func.call @rok_static_init_begin(%0, %ap, %al) : (!llvm.ptr, !llvm.ptr, i{pw}) -> i32
     %2 = arith.constant 0 : i32
     %3 = arith.cmpi ne, %1, %2 : i32
     cf.cond_br %3, ^bb1, ^bb2
@@ -2056,7 +2062,8 @@ impl<'a> FnEmit<'a> {
         let sym = self.pkgs.static_sym(name);
         let n = self.next_check;
         self.next_check += 1;
-        let [a, s, two, ready] = std::array::from_fn(|_| self.fresh_value());
+        let [a, s, two, ready, at] = std::array::from_fn(|_| self.fresh_value());
+        let str_ty = mlir_prim(PrimTy::Str, self.pw);
         let _ = write!(
             self.body,
             "    {a} = llvm.mlir.addressof @{sym}.state : !llvm.ptr
@@ -2065,7 +2072,12 @@ impl<'a> FnEmit<'a> {
     {ready} = arith.cmpi eq, {s}, {two} : i8
     cf.cond_br {ready}, ^rok_sready{n}, ^rok_sinit{n}
   ^rok_sinit{n}:
-    func.call @{sym}.init() : () -> ()
+"
+        );
+        self.str_literal_into(&at, &self.sources.location(self.at));
+        let _ = write!(
+            self.body,
+            "    func.call @{sym}.init({at}) : ({str_ty}) -> ()
     cf.br ^rok_sready{n}
   ^rok_sready{n}:
 "
@@ -2842,12 +2854,13 @@ impl<'a> FnEmit<'a> {
             }
             Statement::ArrayWrite {
                 array,
+                offset,
                 index,
                 value,
                 elem_ty,
                 len,
             } => {
-                self.emit_array_write(*array, index, value, elem_ty, *len);
+                self.emit_array_write(*array, *offset, index, value, elem_ty, *len);
             }
             Statement::Loc(sp, scope) => {
                 self.at = *sp;
@@ -2968,15 +2981,30 @@ impl<'a> FnEmit<'a> {
         }
     }
 
+    /// The address of the array `offset` bytes into `array`'s slot.
+    fn array_base(&mut self, array: LocalId, offset: u32) -> Option<String> {
+        let slot = self.slot_names[array.0 as usize].clone()?;
+        if offset == 0 {
+            return Some(slot);
+        }
+        let p = self.fresh_value();
+        let _ = writeln!(
+            self.body,
+            "    {p} = llvm.getelementptr {slot}[{offset}] : (!llvm.ptr) -> !llvm.ptr, i8"
+        );
+        Some(p)
+    }
+
     fn emit_array_write(
         &mut self,
         array: LocalId,
+        offset: u32,
         index: &Operand,
         value: &Operand,
         elem_ty: &MirTy,
         len: u32,
     ) {
-        let Some(slot) = self.slot_names[array.0 as usize].clone() else {
+        let Some(slot) = self.array_base(array, offset) else {
             return;
         };
         let val = self.materialize_operand(value, elem_ty);
@@ -3093,10 +3121,11 @@ impl<'a> FnEmit<'a> {
             }
             RValue::ArrayIndex {
                 array,
+                offset,
                 index,
                 elem_ty,
                 len,
-            } => self.emit_array_index(*array, index, elem_ty, *len),
+            } => self.emit_array_index(*array, *offset, index, elem_ty, *len),
             RValue::FnAddr { callee, fn_ty } => self.emit_fn_addr(*callee, fn_ty),
             RValue::CallIndirect {
                 callee,
@@ -3753,13 +3782,12 @@ impl<'a> FnEmit<'a> {
     fn emit_array_index(
         &mut self,
         array: LocalId,
+        offset: u32,
         index: &Operand,
         elem_ty: &MirTy,
         len: u32,
     ) -> String {
-        let slot = self.slot_names[array.0 as usize]
-            .clone()
-            .unwrap_or_default();
+        let slot = self.array_base(array, offset).unwrap_or_default();
         let elem_str = mlir_type(elem_ty, self.target);
         let (idx_int, from_str) = self.checked_index(index, len);
         let [ptr, dst] = std::array::from_fn(|_| self.fresh_value());

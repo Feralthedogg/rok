@@ -1,0 +1,5 @@
+// spec: §1.5.5
+// expect-error: expected field name, found keyword `self`
+
+// `self` is the one keyword that never names a field.
+struct S { self: i32; }

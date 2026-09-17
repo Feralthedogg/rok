@@ -24,7 +24,8 @@ pub(super) fn lower_match(
     for arm in arms {
         let mark = ctx.unnarrowed.len();
         ctx.push_scope();
-        let pat = lower_pattern(ctx, &arm.pat, &scrut_ty);
+        let pat = inner_layer_binding(ctx, &arm.pat, &scrut_ty, &arm_h)
+            .unwrap_or_else(|| lower_pattern(ctx, &arm.pat, &scrut_ty));
         let guard = arm.guard.as_ref().map(|g| lower_cond(ctx, g));
         let cells = ctx.take_cells(arm.body.span);
         let body = super::expr::with_lets(cells, lower_expr(ctx, &arm.body));
@@ -112,6 +113,44 @@ pub(super) fn lower_match(
         ty: result_ty,
         span,
     }
+}
+
+/// Spec 2.6.4 / 2.6.5: patterns act on the outer layer of a nested sum.
+/// A catch-all name after arms covering every outer term binds the
+/// inner layer (`none => .., v => ..` on `(i32 | none)?`: `v: i32 | none`).
+fn inner_layer_binding(
+    ctx: &mut LowerCtx<'_>,
+    pat: &AstPattern,
+    scrut_ty: &HirTy,
+    before: &[HirMatchArm],
+) -> Option<HirPattern> {
+    let (HirTy::Sum(vs), AstPatternKind::Binding { name, sub: None }) = (scrut_ty, &pat.kind)
+    else {
+        return None;
+    };
+    if name == "_" || ctx.enum_path(&[name.as_str()]).is_some() {
+        return None;
+    }
+    let mut covered = Vec::new();
+    for a in before.iter().filter(|a| a.guard.is_none()) {
+        covered_variants(&a.pat, &mut covered);
+    }
+    let mut rest =
+        (0..vs.len()).filter(|i| !covered.contains(&u32::try_from(*i).unwrap_or(u32::MAX)));
+    let (i, None) = (rest.next()?, rest.next()) else {
+        return None;
+    };
+    let inner = vs[i].clone();
+    if !matches!(inner, HirTy::Sum(_)) {
+        return None;
+    }
+    let local = ctx.declare_bound(name, inner.clone(), pat.span);
+    Some(HirPattern::SumVariant {
+        sum_ty: scrut_ty.clone(),
+        variant_index: u32::try_from(i).expect("variant overflow"),
+        binder: Some(local),
+        payload_ty: Some(inner),
+    })
 }
 
 /// Matches every value of its type (no refutable sub-pattern).
@@ -858,6 +897,29 @@ pub(super) fn lower_pattern_inner(
                 payload_ty: member,
             }
         }
+        // A tuple pattern on a sum tests its one tuple member of that
+        // arity (`let (a, b) = pair() else { .. }` on `(i32, str) | none`).
+        AstPatternKind::Tuple(ps) if matches!(scrut_ty, HirTy::Sum(_)) => {
+            let HirTy::Sum(vs) = scrut_ty else {
+                unreachable!()
+            };
+            let has_rest = ps.iter().any(|p| matches!(p.kind, AstPatternKind::Rest(_)));
+            let fits = |v: &HirTy| {
+                matches!(v, HirTy::Tuple(ts)
+                    if ts.len() == ps.len() || (has_rest && ts.len() + 1 >= ps.len()))
+            };
+            let mut hits = vs.iter().enumerate().filter(|(_, v)| fits(v));
+            let (Some((i, member)), None) = (hits.next(), hits.next()) else {
+                return mismatch(ctx, format!("a {}-tuple pattern", ps.len()));
+            };
+            let member = member.clone();
+            HirPattern::SumMember {
+                sum_ty: scrut_ty.clone(),
+                variant_index: u32::try_from(i).expect("variant overflow"),
+                sub: Box::new(lower_pattern_inner(ctx, pat, &member)),
+                payload_ty: member,
+            }
+        }
         AstPatternKind::Literal(lit) => match literal_to_const(ctx, lit, scrut_ty) {
             Some((value, prim)) => HirPattern::Literal { value, prim },
             None => mismatch(ctx, "this literal pattern".to_owned()),
@@ -1159,9 +1221,10 @@ pub(super) fn lower_pattern_inner(
                 }
                 EnumRes::NotEnum => {}
             }
-            let struct_id = ctx
-                .canon_type(&segs)
-                .and_then(|full| ctx.lookup_struct(&full));
+            let struct_id = super::expr::self_struct_id(ctx, &segs).or_else(|| {
+                ctx.canon_type(&segs)
+                    .and_then(|full| ctx.lookup_struct(&full))
+            });
             let Some(struct_id) = struct_id else {
                 let help = ctx.type_help(&segs);
                 ctx.unknown_name(
@@ -1345,7 +1408,18 @@ pub(super) fn literal_to_const(
             PrimTy::Str,
         )),
         AstLit::RawStr(s) if *sp == PrimTy::Str => Some((ConstVal::Str(s.clone()), PrimTy::Str)),
-        // Float literal patterns would need a decision on NaN / -0.0.
+        // Matching is `==` (spec 3.11.1): `0.0` matches `-0.0`, nothing
+        // matches NaN. Bare literals take the scrutinee's type.
+        AstLit::Float(text) if sp.is_float() => {
+            let suffixed = text.ends_with("f32") || text.ends_with("f64");
+            let text = if suffixed {
+                text.clone()
+            } else {
+                format!("{text}{}", sp.name())
+            };
+            let (bits, ty) = super::expr::parse_float_literal(&text)?;
+            (ty == *sp).then_some((ConstVal::Float { bits, ty }, ty))
+        }
         _ => None,
     }
 }

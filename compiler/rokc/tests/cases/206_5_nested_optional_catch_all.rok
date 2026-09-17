@@ -1,0 +1,22 @@
+// spec: §2.6.5 §2.6.4
+// expect-exit: 0
+// expect-stdout:
+// stored none
+// 1
+// out of range
+
+// On a nested optional, a name after the `none` arm binds the inner
+// layer: `v: i32 | none`, whose own `none` is a stored element.
+fn show(r: (i32 | none)?) {
+    match r {
+        none => println("out of range"),
+        v => match v {
+            none => println("stored none"),
+            n: i32 => println(f"{n}"),
+        },
+    }
+}
+let xs: List<i32 | none> = [1, none, 3];
+show(xs.get(1));
+show(xs.get(0));
+show(xs.get(7));
