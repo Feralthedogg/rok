@@ -1,0 +1,50 @@
+// spec: 003.12.6-unreachable-arms / 002.02.6-narrowing / 003.11.3-type-check-pattern
+// expect-exit: 0
+// expect-stdout:
+// HTTP Version Not Supported
+// Not Found
+// Status
+// 3 3 3 3 3
+// 4 2
+
+// Many literal arms are each reachable; an annotated `let` keeps its
+// declared sum type through plain assignments; a type alias works in
+// `is` and in typed `if let` / `match` patterns, also through a module path.
+pub fn reason(status: i32) -> str {
+    match status {
+        200 => "OK", 302 => "Found", 303 => "See Other", 400 => "Bad Request", 401 => "Unauthorized",
+        403 => "Forbidden", 404 => "Not Found", 405 => "Method Not Allowed", 408 => "Request Timeout",
+        409 => "Conflict", 413 => "Content Too Large", 415 => "Unsupported Media Type",
+        431 => "Request Header Fields Too Large", 500 => "Internal Server Error", 501 => "Not Implemented",
+        503 => "Service Unavailable", 505 => "HTTP Version Not Supported",
+        _ => "Status",
+    }
+}
+
+mod io {
+    pub struct Pipe { pub fd: i32; }
+    pub type In = Pipe;
+}
+use io::{In, Pipe};
+
+fn main() -> i32 {
+    println(reason(505));
+    println(reason(404));
+    println(reason(1));
+    let s: In | none = Pipe { fd: 3 };
+    let out = "";
+    if let w: Pipe = s { out = f"{w.fd}"; }
+    if let w: io::In = s { out = f"{out} {w.fd}"; }
+    if s is In { out = f"{out} {s.fd}"; }
+    if s is io::Pipe { out = f"{out} {s.fd}"; }
+    match s { p: In => { out = f"{out} {p.fd}"; }, none => {} }
+    println(out);
+    let end: usize | none = none;
+    end = 4;
+    let other: usize | none = none;
+    for i in 0usize..3 {
+        if i == 2 { other = i; }
+    }
+    println(f"{end ?? 0} {other ?? 0}");
+    return 0;
+}

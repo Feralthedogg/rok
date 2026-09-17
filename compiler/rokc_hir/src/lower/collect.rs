@@ -5845,7 +5845,7 @@ fn may_diverge(program: &Program) -> std::collections::HashSet<rokc_diagnostic::
             ExprKind::Loop { body, .. } => endless(body),
             ExprKind::Call { callee, .. } => match &callee.kind {
                 ExprKind::Path(p) => p.segments.last().is_some_and(|s| d.contains(&s.name)),
-                ExprKind::QPath(q) => d.contains(&q.item),
+                ExprKind::QPath(q) => d.contains(q.member.as_ref().unwrap_or(&q.item)),
                 _ => false,
             },
             ExprKind::MethodCall { method, .. } => d.contains(method),

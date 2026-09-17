@@ -2309,9 +2309,10 @@ impl<'a> FnEmit<'a> {
                     continue;
                 }
                 let slot = self.fresh_value();
+                let align = self.target.size_align(union_ty).1;
                 let _ = writeln!(
                     self.body,
-                    "    {slot} = llvm.alloca {one} x {ty} : (i32) -> !llvm.ptr"
+                    "    {slot} = llvm.alloca {one} x {ty} {{alignment = {align} : i64}} : (i32) -> !llvm.ptr"
                 );
                 self.union_scratch.insert(ty, slot);
             }
@@ -5200,6 +5201,9 @@ fn c_ext_attr(ty: &MirTy, target: &Target) -> &'static str {
         | CAbi::Other => true,
     };
     match ty {
+        // C's `char` is unsigned on 32-bit ARM Linux (rok's `c_char` is
+        // signed: the same bits).
+        MirTy::Prim(PrimTy::CChar) if target.c_abi == CAbi::ArmHf => " {llvm.zeroext}",
         MirTy::Prim(PrimTy::I8 | PrimTy::I16 | PrimTy::CChar) if narrow => " {llvm.signext}",
         MirTy::Prim(PrimTy::U8 | PrimTy::U16) if narrow => " {llvm.zeroext}",
         MirTy::Prim(PrimTy::Bool) if narrow || target.c_abi == CAbi::X86_64Win => " {llvm.zeroext}",

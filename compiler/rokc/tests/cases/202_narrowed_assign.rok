@@ -1,0 +1,16 @@
+// spec: 002.02.6-narrowing
+// expect-error: 13:36: assignment to `end` (narrowed from `usize | none` by an `is` test; spec 2.2.6) expects `none`, found `usize`
+
+// An annotated `let` keeps its declared type: assignments outside a
+// narrowing scope take any member. Inside `if end is none { .. }` the
+// binding is `none`, so storing a `usize` there is an error that names
+// the narrowing.
+fn main() -> i32 {
+    let end: usize | none = none;
+    end = 5;
+    end = none;
+    for i in 0usize..5 {
+        if end is none && i == 3 { end = i; }
+    }
+    return 0;
+}

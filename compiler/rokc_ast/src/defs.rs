@@ -260,6 +260,9 @@ pub struct QPath {
     pub self_ty: Ty,
     pub trait_path: Path,
     pub item: String,
+    /// Expressions only: `<T as Tr>::X::m` names the associated function
+    /// `m` of the associated type `X`.
+    pub member: Option<String>,
 }
 
 #[derive(Clone, Debug)]

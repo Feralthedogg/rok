@@ -2793,6 +2793,19 @@ impl<'a> FnBuilder<'a> {
         else_branch: Option<&HirExpr>,
         result_hir_ty: &HirTy,
     ) -> Operand {
+        // A constant condition (`if cfg!(..)`) lowers only the live arm,
+        // so the dead one's calls and externs are not emitted at -O0.
+        if let Some(c) = const_bool(cond) {
+            return match (c, else_branch) {
+                (true, Some(_)) => self.lower_block_value(then_block).0,
+                (true, None) => {
+                    self.lower_block_value(then_block);
+                    Operand::Const(ConstVal::Unit)
+                }
+                (false, Some(e)) => self.lower_expr_to_operand(e),
+                (false, None) => Operand::Const(ConstVal::Unit),
+            };
+        }
         let result_ty = self.ty(result_hir_ty);
         let has_else = else_branch.is_some();
         let value_producing = has_else && !matches!(result_ty, MirTy::Unit);
@@ -2869,6 +2882,31 @@ impl<'a> FnBuilder<'a> {
             Some(p) => Operand::Copy(p),
             None => Operand::Const(ConstVal::Unit),
         }
+    }
+}
+
+/// The value of a condition made of `bool` constants, `!` and `&&` /
+/// `||` (an `if` with constant arms).
+fn const_bool(e: &HirExpr) -> Option<bool> {
+    match &e.kind {
+        HirExprKind::Const(ConstVal::Bool(b)) => Some(*b),
+        HirExprKind::PrimUnaryOp {
+            op: PrimOp::LogicalNot,
+            operand,
+        } => const_bool(operand).map(|b| !b),
+        HirExprKind::Block(b) if b.stmts.is_empty() => const_bool(b.trailing.as_ref()?),
+        HirExprKind::If {
+            cond,
+            then_block,
+            else_branch: Some(else_e),
+        } if then_block.stmts.is_empty() => {
+            if const_bool(cond)? {
+                const_bool(then_block.trailing.as_ref()?)
+            } else {
+                const_bool(else_e)
+            }
+        }
+        _ => None,
     }
 }
 

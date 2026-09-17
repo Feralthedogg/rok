@@ -1018,7 +1018,31 @@ fn aggregate_suite(rng: &mut Rng) -> Suite {
                 c - 1
             )
         };
-        if rng.chance(50) {
+        if rng.chance(25) {
+            // An over-aligned variant beside a longer array (and, half
+            // the time, a GC reference): the payload takes both.
+            let align = *rng.pick(&[16, 32, 64]);
+            let gc = if rng.chance(50) { " S(str)," } else { "" };
+            let _ = writeln!(
+                s.head,
+                "#[repr(align({align}))] struct Al{i} {{ a: u64; b: {ty}; }}\n\
+                 enum Sm{i} {{ P(Al{i}), Q(u8), R({arr}),{gc} }}\n\
+                 fn sm{i}(e: Sm{i}, f: Sm{i}) -> (Sm{i}, Sm{i}) {{ return (f, e); }}\n\
+                 fn show{i}(e: Sm{i}) -> str {{ match e {{ Sm{i}::P(p) => f\"{{p.a}} {{p.b}}\", Sm{i}::R(a) => f\"{}\", _ => \"-\" }} }}",
+                get("a")
+            );
+            let b = val(rng);
+            s.line(
+                "sum",
+                &format!(
+                    "        let (x, y) = sm{i}(Sm{i}::R([{}]), Sm{i}::P(Al{i} {{ a: 77u64, b: {} }}));\n",
+                    rows.join(", "),
+                    lit(&b)
+                ),
+                &format!("f\"{{show{i}(x)}} {{show{i}(y)}}\""),
+                &pq(&format!("77 {b} {} {} {last}", a[y][x], a[0][0])),
+            );
+        } else if rng.chance(50) {
             let _ = writeln!(
                 s.head,
                 "fn agg{i}(a: {arr}, y: usize, x: usize) -> {arr} {{ let b = a; b[y][x] = a[{}][{}]; return b; }}",

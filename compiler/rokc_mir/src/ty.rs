@@ -236,7 +236,8 @@ pub fn sum_layout(payloads: &[(u32, MirTy)], target: &Target) -> MirTy {
 /// wide as the widest one; any other mix (aggregates, `str`) shares a
 /// byte-array union `[uN; k]` with the max size and max align (N bits
 /// = max align), or a [`MirTy::Union`] when a payload holds a GC
-/// reference. All are written / read through `RValue::Bitcast`.
+/// reference or needs more than 8-byte alignment. All are written /
+/// read through `RValue::Bitcast`.
 #[must_use]
 pub fn unify_payload(variants: &[(u32, MirTy)], target: &Target) -> Option<MirTy> {
     let payloads: Vec<&MirTy> = variants.iter().map(|(_, p)| p).collect();
@@ -267,9 +268,10 @@ pub fn unify_payload(variants: &[(u32, MirTy)], target: &Target) -> Option<MirTy
     // `GcRef` is word-aligned, so it always lands on one) that keep the
     // variants: the collector decodes the tag and scans only the active
     // variant's reference words.
-    if payloads.iter().any(|p| target.has_gc_ref(p)) {
+    if align > 8 || payloads.iter().any(|p| target.has_gc_ref(p)) {
         let w = target.pointer_width / 8;
-        return Some(MirTy::Union(variants.to_vec(), size.div_ceil(w)));
+        let words = size.next_multiple_of(align).div_ceil(w);
+        return Some(MirTy::Union(variants.to_vec(), words));
     }
     Some(MirTy::Array(Box::new(uint(align)), size.div_ceil(align)))
 }
@@ -287,7 +289,7 @@ fn union_storage(fields: &[(String, HirTy)], module: &HirModule, target: &Target
         .fold((1, 1), |(s, a), (ps, pa)| (s.max(ps), a.max(pa)));
     if tys.iter().any(|(_, t)| target.has_gc_ref(t)) {
         let w = target.pointer_width / 8;
-        return MirTy::Union(tys, size.div_ceil(w));
+        return MirTy::Union(tys, size.next_multiple_of(align).div_ceil(w));
     }
     // Words of the alignment, up to 8; a more aligned member raises
     // the union struct's own alignment (`union_align`).

@@ -74,10 +74,30 @@ pub fn workspace() -> PathBuf {
 
 /// A fresh, empty scratch directory for this test binary.
 pub fn scratch(name: &str) -> PathBuf {
+    static PRUNE: std::sync::Once = std::sync::Once::new();
+    PRUNE.call_once(prune_scratch);
     let dir = env::temp_dir().join(format!("rokc-test-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+/// Scratch directories of runs that ended (killed, failed, or never
+/// cleaned) are removed once they are a day old.
+fn prune_scratch() {
+    let Ok(entries) = std::fs::read_dir(env::temp_dir()) else {
+        return;
+    };
+    let day = std::time::Duration::from_secs(24 * 3600);
+    for e in entries.flatten() {
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t.elapsed().is_ok_and(|a| a > day));
+        if old && e.file_name().to_string_lossy().starts_with("rokc-test-") {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 pub fn text(b: &[u8]) -> String {

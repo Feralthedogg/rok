@@ -616,6 +616,8 @@ struct Cx<'a> {
     /// `(file, start)` of user-written casts (`x as T`; f-strings
     /// desugar to casts too).
     casts: HashSet<(u32, u32)>,
+    /// `(file, start)` of user-written `x.clone()` calls.
+    clones: HashSet<(u32, u32)>,
     must_use: HashMap<String, String>,
     deprecated: HashMap<String, String>,
     traits: HashSet<String>,
@@ -641,6 +643,7 @@ impl<'a> Cx<'a> {
             file_names: HashSet::new(),
             all_names: HashSet::new(),
             casts: HashSet::new(),
+            clones: HashSet::new(),
             must_use: marked_fns(all, "must_use"),
             deprecated: marked_fns(all, "deprecated"),
             traits,
@@ -932,12 +935,8 @@ impl<'a> Cx<'a> {
     /// redundant just because one instance has `T = i32`.
     fn hir(&mut self, hir: &rokc_hir::HirModule, user: &[&SourceFile]) {
         let files: HashSet<u32> = user.iter().map(|f| f.file_id).collect();
-        let names: HashMap<_, &str> = hir
-            .functions
-            .iter()
-            .map(|f| (f.id, f.name.as_str()))
-            .collect();
         let mut hits: Vec<(&'static str, Span, String)> = Vec::new();
+        let mut cloned: HashSet<(u32, u32)> = HashSet::new();
         for f in hir
             .functions
             .iter()
@@ -958,17 +957,19 @@ impl<'a> Cx<'a> {
                             format!("casting to the same type `{}`", hir_ty(to_ty)),
                         ));
                     }
-                    HirExprKind::Call { callee, args }
-                        if args.len() == 1
-                            && names.get(callee).is_some_and(|n| short_name(n) == "clone")
-                            && matches!(args[0].ty, HirTy::Prim(_)) =>
+                    // A primitive's `clone` is the `rok.clone.copy` intrinsic:
+                    // the call lowers to its receiver, which starts where
+                    // the call does.
+                    _ if matches!(e.ty, HirTy::Prim(_))
+                        && self.clones.contains(&key(e.span))
+                        && cloned.insert(key(e.span)) =>
                     {
                         hits.push((
                             "redundant_clone",
                             e.span,
                             format!(
                                 "redundant `.clone()` of a `{}`: the value is copied anyway",
-                                hir_ty(&args[0].ty)
+                                hir_ty(&e.ty)
                             ),
                         ));
                     }
@@ -1424,6 +1425,9 @@ impl AstVisitor for Cx<'_> {
                 }
             }
             ExprKind::MethodCall { method, args, .. } => {
+                if method == "clone" && args.is_empty() {
+                    self.clones.insert(key(e.span));
+                }
                 self.file_names.insert(method.clone());
                 let m = method.clone();
                 self.deprecated_use(&m, e.span);

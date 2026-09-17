@@ -752,10 +752,11 @@ mod tests {
     use rokr_common::object_header::ObjectHeader;
 
     #[test]
-    #[allow(clippy::cast_ptr_alignment)] // asserted 64-aligned below
+    #[allow(clippy::cast_ptr_alignment)] // the header is 8-aligned
     fn gc_alloc_initializes_header_and_alignment() {
         let p = rok_gc_alloc_slow(24, 64, 12345);
-        assert_eq!(p as usize % 64, 0);
+        // The payload, after the 16-byte header, is 64-aligned.
+        assert_eq!((p as usize + 16) % 64, 0);
         // SAFETY: fresh 24-byte allocation with an initialized header.
         let h = unsafe { &*p.cast::<ObjectHeader>() };
         assert_eq!(h.type_id, 12345);

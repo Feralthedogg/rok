@@ -3164,6 +3164,7 @@ impl<'a> Parser<'a> {
             self_ty,
             trait_path: tr,
             item: name,
+            member: None,
         })
     }
 
@@ -4287,7 +4288,21 @@ impl<'a> Parser<'a> {
         let kind = match self.peek().clone() {
             // Spec 2.13.4: `<Type as Trait>::method(...)`. At the start of
             // a primary, `<` cannot begin a comparison.
-            TokenKind::Lt => ExprKind::QPath(Box::new(self.parse_qpath()?)),
+            TokenKind::Lt => {
+                let mut q = self.parse_qpath()?;
+                // `<T as Tr>::X::m`: an associated function of the
+                // associated type `X`.
+                if self.peek() == &TokenKind::ColonColon
+                    && matches!(self.peek_next(), Some(TokenKind::Ident(_)))
+                {
+                    self.bump();
+                    if let TokenKind::Ident(m) = self.peek().clone() {
+                        self.bump();
+                        q.member = Some(m);
+                    }
+                }
+                ExprKind::QPath(Box::new(q))
+            }
             TokenKind::IntLit(s) => {
                 self.bump();
                 ExprKind::Literal(Literal::Int(s))

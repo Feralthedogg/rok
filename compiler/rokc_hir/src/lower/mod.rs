@@ -1070,6 +1070,18 @@ struct FnSig {
     variadic: bool,
 }
 
+/// The lock guard `ty` is, if any: a guard is released only by `using`
+/// (stdlib 2.16.3), so a plain `let` or a discarded one holds its lock
+/// forever.
+fn lock_guard(ctx: &LowerCtx<'_>, ty: &HirTy) -> Option<&'static str> {
+    let HirTy::Struct(id) = ty else { return None };
+    let def = ctx.struct_def(*id);
+    let name = def.name.split("__").next().unwrap_or(&def.name);
+    ["MutexGuard", "RwLockReadGuard", "RwLockWriteGuard"]
+        .into_iter()
+        .find(|g| name.strip_prefix("rok::core::sync::") == Some(g))
+}
+
 // If `slot_ty` is a Sum and `value.ty` matches one of its variants,
 // wrap the value into the sum's tagged-union representation.
 fn wrap_into_sum(slot_ty: &HirTy, value: HirExpr) -> HirExpr {
@@ -1873,6 +1885,10 @@ struct LowerCtx<'a> {
     /// Narrowed rebinding (spec 2.2.6) → (original local, its type);
     /// assignments to the rebinding also store into the original.
     narrowed: HashMap<LocalId, (LocalId, HirTy)>,
+    /// `let`-bound lock guards no `using` has released yet (local, scope
+    /// depth, `let` span, binder, guard type): an error when their scope
+    /// ends (stdlib 2.16.3).
+    guard_lets: Vec<(LocalId, usize, Span, String, &'static str)>,
     /// Type parameter → its trait bounds and their supertraits (trait
     /// keys): `T::Item` resolves through them (`set_bounds`).
     ty_bounds: HashMap<String, Vec<String>>,
@@ -1941,6 +1957,7 @@ impl<'a> LowerCtx<'a> {
         }
         self.value_captured.retain(kept);
         self.narrowed.retain(|l, _| kept(l));
+        self.guard_lets.retain(|g| kept(&g.0));
         let sink = &self.env.sink;
         let old = |id: &FunctionId| id.0 < mark.next_id;
         let dropped = sink.diagnostics.borrow_mut().split_off(mark.diagnostics);
@@ -2026,6 +2043,7 @@ impl<'a> LowerCtx<'a> {
             throwing_calls: 0,
             next_synth: 0,
             narrowed: HashMap::new(),
+            guard_lets: Vec::new(),
             ty_bounds: HashMap::new(),
             ty_bound_args: HashMap::new(),
             coro: None,
@@ -3781,6 +3799,22 @@ impl<'a> LowerCtx<'a> {
     }
 
     fn pop_scope(&mut self) {
+        let depth = self.scopes.len();
+        let (open, kept) = std::mem::take(&mut self.guard_lets)
+            .into_iter()
+            .partition(|g| g.1 >= depth);
+        self.guard_lets = kept;
+        for (_, _, at, binder, guard) in open {
+            self.emit_error_at(
+                rokc_diagnostic::ErrorKind::Type,
+                at,
+                format!(
+                    "`{binder}` holds a `{guard}` that is never released: only `using` \
+                     releases a lock guard, so bind it with `using {binder} = .. {{ .. }}` \
+                     (stdlib 2.16.3)"
+                ),
+            );
+        }
         self.scopes.pop();
         self.local_uses.pop();
         self.nested_fns.pop();

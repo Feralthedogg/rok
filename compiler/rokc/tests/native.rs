@@ -85,6 +85,7 @@ signed char neg8(signed char c) { return -c; }
 signed char rok_neg8(signed char c);
 unsigned short rok_dbl16(unsigned short u);
 int call_narrow(void) { return rok_neg8(-7) * 100000 + rok_dbl16(40000); }
+char cid(char c) { return c; }
 ";
 
 const ROK_SIDE: &str = r#"
@@ -122,6 +123,7 @@ extern "C" {
     fn cb_big2(f: extern "C" fn(Big) -> Big) -> i64;
     fn neg8(c: i8) -> i8;
     fn call_narrow() -> i32;
+    fn cid(c: c_char) -> c_char;
 }
 
 // C calls these (spec 5.9.10): aggregates the C way both ways.
@@ -178,6 +180,7 @@ fn main() {
     let ks = match k { none => Small { a: 0, b: 0 }, p: extern "C" fn(Small) -> Small => p(Small { a: 1, b: 2 }) };
     println(f"{w.x} {w.y} {w.z} {rb.a}{rb.b}{rb.c} {rh.a}{rh.b}{rh.c} {ks.a} {ks.b} {unsafe { cb_big2(h) }}");
     println(f"{unsafe { neg8(5) }} {unsafe { call_narrow() }}");
+    println(f"{unsafe { cid(c'A') } as i32}");
 }
 "#;
 
@@ -1168,7 +1171,7 @@ fn c_abi_matches_clang() {
     ok(&run);
     assert_eq!(
         text(&run.stdout),
-        "2 4 6\n10.5\n5 10 15 30\n-2 301\n42 2.5\n6\n45\n-434465\n82\n0.75\n21\n18 321 10 5 -4 -5\n987\n2 4 6 321 654 -1 -2 321\n-5 714464\n"
+        "2 4 6\n10.5\n5 10 15 30\n-2 301\n42 2.5\n6\n45\n-434465\n82\n0.75\n21\n18 321 10 5 -4 -5\n987\n2 4 6 321 654 -1 -2 321\n-5 714464\n65\n"
     );
 
     // The other targets' lowering, as LLVM IR declarations (what clang
@@ -1201,6 +1204,7 @@ fn c_abi_matches_clang() {
         "declare i32 @sx(i8 signext, i16 zeroext)",
         // Narrow results too, and C-callable definitions both ways.
         "declare signext i8 @neg8(i8 signext)",
+        "declare signext i8 @cid(i8 signext)",
         "signext i8 @rok_neg8(i8 signext",
         "zeroext i16 @rok_dbl16(i16 zeroext",
         "declare i64 @vsum(i32, ...)",
@@ -1238,6 +1242,15 @@ fn c_abi_matches_clang() {
         "zeroext i16 @rok_dbl16(i16 zeroext",
     ] {
         assert!(apple.contains(want), "Apple arm64 lacks `{want}`:\n{apple}");
+    }
+    // C's `char` is unsigned on 32-bit ARM Linux: a `c_char` crosses
+    // zero-extended (the bits are rok's signed `c_char`).
+    let arm = decls("armv7-unknown-linux-gnueabihf");
+    for want in [
+        "declare zeroext i8 @cid(i8 zeroext)",
+        "declare signext i8 @neg8(i8 signext)",
+    ] {
+        assert!(arm.contains(want), "armv7 lacks `{want}`:\n{arm}");
     }
 }
 

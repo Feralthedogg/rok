@@ -759,6 +759,10 @@ impl Printer {
         self.ty_path(&q.trait_path);
         self.s(">::");
         self.name(&q.item);
+        if let Some(m) = &q.member {
+            self.s("::");
+            self.name(m);
+        }
     }
 
     /// `a::b<T>` (types, struct literals) or `a::b::<T>` (`turbofish`,

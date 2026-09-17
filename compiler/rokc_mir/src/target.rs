@@ -109,6 +109,7 @@ impl Target {
             }
             MirTy::Tuple(ps) => ps.iter().any(|p| self.explicit_layout(p)),
             MirTy::Array(e, _) => self.explicit_layout(e),
+            MirTy::Union(..) => self.size_align(ty).1 > self.pointer_width / 8,
             _ => false,
         }
     }
@@ -131,7 +132,12 @@ impl Target {
             // An MLIR type's values stay SSA; only an aggregate holding
             // one asks, and gets a word.
             MirTy::Any | MirTy::GcRef | MirTy::Fn(_, _) | MirTy::Mlir(_) => word,
-            MirTy::Union(_, n) => (word.0 * n, word.1),
+            MirTy::Union(vs, n) => (
+                word.0 * n,
+                vs.iter()
+                    .map(|(_, t)| self.size_align(t).1)
+                    .fold(word.1, u32::max),
+            ),
             MirTy::Tuple(ps) => {
                 let (_, size, align) = self.fields_layout(None, ps);
                 (size, align)
@@ -173,8 +179,10 @@ impl Target {
                         self.gc_offsets(t, payload, &mut slots);
                         (!slots.is_empty()).then_some((*tag, slots))
                     })
-                    .collect();
-                out.push(GcSlot::Sum(at, variants));
+                    .collect::<Vec<_>>();
+                if !variants.is_empty() {
+                    out.push(GcSlot::Sum(at, variants));
+                }
             }
             // A union away from its tag (a payload temporary): any word
             // a variant keeps a reference in, kept alive and never moved.

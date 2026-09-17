@@ -883,10 +883,11 @@ const fn los_total(p: &Prefix) -> usize {
     p.offset + p.size + p.size.div_ceil(CARD_SIZE)
 }
 
-/// A large (or over-aligned) object: its own zeroed allocation.
+/// A large (or over-aligned) object: its own zeroed allocation. The
+/// payload (after the header) is `align`-aligned.
 fn alloc_large(size: usize, align: usize, type_id: u32) -> *mut u8 {
     let align = align.max(HEADER_ALIGN);
-    let offset = size_of::<Prefix>().next_multiple_of(align);
+    let offset = (size_of::<Prefix>() + HEADER_SIZE).next_multiple_of(align) - HEADER_SIZE;
     let Some(total) = size
         .checked_add(offset)
         .and_then(|t| t.checked_add(size.div_ceil(CARD_SIZE)))
@@ -911,8 +912,8 @@ fn alloc_large(size: usize, align: usize, type_id: u32) -> *mut u8 {
     // free it.
     before_alloc(size);
     let h = heap();
-    // SAFETY: `base..base+total` is ours; `obj` is `align`-aligned and the
-    // prefix fits in the `offset` bytes before it.
+    // SAFETY: `base..base+total` is ours; `obj`'s payload is
+    // `align`-aligned and the prefix fits in the `offset` bytes before it.
     let obj = unsafe {
         let obj = base.cast::<u8>().add(offset);
         prefix(obj).write(Prefix {
@@ -2844,6 +2845,13 @@ mod tests {
             assert_eq!(live_bytes(), base);
             *top = ptr::null_mut();
         }
+        // An over-aligned payload starts on its alignment.
+        for align in [16, 32, 64, 4096] {
+            let o = alloc(40, align, USER_TYPE_BASE + 1);
+            assert_eq!((o as usize + HEADER_SIZE) % align, 0);
+        }
+        collect();
+        assert_eq!(live_bytes(), base);
         // A big one has pages of its own, gone once it dies.
         let big = alloc(1 << 20, 8, USER_TYPE_BASE + 1);
         // SAFETY: the object and its prefix are live until the collection.

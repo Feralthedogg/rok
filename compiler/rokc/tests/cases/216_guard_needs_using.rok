@@ -1,0 +1,23 @@
+// spec: std 216-sync §2.16.3 / refs-lang 003.17 §3.17.7
+// expect-error: 16:5: `g` holds a `MutexGuard` that is never released
+// expect-error: 17:5: `w` holds a `RwLockWriteGuard` that is never released
+// expect-error: 19:9: `r` holds a `RwLockReadGuard` that is never released
+// expect-error: 21:5: this `MutexGuard` is discarded without being released
+
+// Stdlib 2.16.3: a guard is released only by `using`; one bound with a
+// plain `let` (or discarded) would hold its lock forever. Guards that do
+// pass through `using` (directly, or from a `try_lock` match arm) are fine.
+static M: Mutex<i32> = Mutex::new(0);
+static L: RwLock<i32> = RwLock::new(0);
+
+fn main() -> i32 {
+    using g = M.lock() { g.set(1); }
+    match M.try_lock() { v: MutexGuard<i32> => using g = v { g.set(2); }, none => {} }
+    let g = M.lock();
+    let w: RwLockWriteGuard<i32> = L.write();
+    if true {
+        let r = L.read();
+    }
+    M.lock();
+    return 0;
+}

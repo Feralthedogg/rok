@@ -351,7 +351,14 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
                 check_let_inferable(ctx, name, &init);
                 (init.ty.clone(), init)
             };
-            Some(ctx.declare_var(name, declared_ty, init, stmt.span))
+            let guard = lock_guard(ctx, &declared_ty);
+            let s = ctx.declare_var(name, declared_ty, init, stmt.span);
+            if let (Some(g), HirStmt::Let { local, .. }) = (guard, &s) {
+                let depth = ctx.scopes.len();
+                ctx.guard_lets
+                    .push((*local, depth, stmt.span, name.clone(), g));
+            }
+            Some(s)
         }
         StmtKind::Return(_) if ctx.implicit_main => {
             ctx.emit_error(
@@ -398,7 +405,20 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
         }
         // Statement position: the value is discarded (expected `()`), so
         // `if` / `match` arms needn't agree on a type.
-        StmtKind::Expr(expr) => Some(HirStmt::Expr(lower_expected(ctx, expr, HirTy::Unit))),
+        StmtKind::Expr(expr) => {
+            let h = lower_expected(ctx, expr, HirTy::Unit);
+            if let Some(g) = lock_guard(ctx, &h.ty) {
+                ctx.emit_error_at(
+                    rokc_diagnostic::ErrorKind::Type,
+                    stmt.span,
+                    format!(
+                        "this `{g}` is discarded without being released: only `using` \
+                         releases a lock guard (`using g = .. {{ .. }}`, stdlib 2.16.3)"
+                    ),
+                );
+            }
+            Some(HirStmt::Expr(h))
+        }
         // A block-like statement without `;` before more statements
         // (`if c { 1 } else { 2 }  next();`) must not produce a value.
         StmtKind::Trailing(expr) => {
@@ -584,7 +604,18 @@ pub(super) fn lower_assign(
                 }
                 let slot_ty = ctx.var_ty(local);
                 let v = lower_expected(ctx, value, slot_ty.clone());
-                let value = coerce(ctx, &slot_ty, v, &|| format!("assignment to `{name}`"));
+                // Spec 2.2.6: inside an `x is T` scope `x` is a `T`.
+                let what = ctx.narrowed.get(&local).map_or_else(
+                    || format!("assignment to `{name}`"),
+                    |(_, from)| {
+                        format!(
+                            "assignment to `{name}` (narrowed from `{}` by an `is` test; \
+                             spec 2.2.6)",
+                            ctx.ty_name(from)
+                        )
+                    },
+                );
+                let value = coerce(ctx, &slot_ty, v, &|| what.clone());
                 return Some(ctx.store_local(local, value));
             }
             let segs = [name.as_str()];
@@ -1282,6 +1313,9 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
                 Err(e) => return e,
             };
             if method == rokc_ast::USING_DROP_METHOD {
+                if let HirExprKind::Local(l) = recv_h.kind {
+                    ctx.guard_lets.retain(|g| g.0 != l);
+                }
                 let stmts = drop_glue(ctx, recv_h, span, 0);
                 return HirExpr {
                     kind: HirExprKind::Block(Box::new(HirBlock {
@@ -6781,12 +6815,48 @@ fn path_method_hits(
 
 /// `<T as Tr>::m(args)` (spec 2.13.4): `Tr`'s `m` of `T`; the first
 /// argument fills `self` like `Tr::m(x)`.
+/// `<T as Tr>::X::m(args)` (spec 2.13.4): `m` of the type the
+/// associated type `X` is, as `T::X::m(args)` under `T: Tr`.
+fn qpath_member_call(
+    ctx: &mut LowerCtx<'_>,
+    q: &rokc_ast::QPath,
+    method: &str,
+    args: &[CallArg],
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let assoc = rokc_ast::Ty {
+        kind: rokc_ast::TyKind::QPath(Box::new(rokc_ast::QPath {
+            member: None,
+            ..q.clone()
+        })),
+        span,
+    };
+    let t = ctx.resolve_ast_ty(&assoc);
+    if t == HirTy::Unknown {
+        discard_args(ctx, args);
+        return poison(span);
+    }
+    let display = format!("{}::{method}", ctx.ty_name(&t));
+    call_impl_method(ctx, &t, method, None, None, args, &display, span)
+        .or_else(|| super::reflect::static_call(ctx, &t, method, args, span))
+        .unwrap_or_else(|| {
+            discard_args(ctx, args);
+            ctx.error_expr(
+                span,
+                format!("no associated function `{method}` on `{}`", ctx.ty_name(&t)),
+            )
+        })
+}
+
 fn qpath_call(
     ctx: &mut LowerCtx<'_>,
     q: &rokc_ast::QPath,
     args: &[CallArg],
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
+    if let Some(m) = &q.member {
+        return qpath_member_call(ctx, q, m, args, span);
+    }
     let method = q.item.as_str();
     let t = ctx.resolve_ast_ty(&q.self_ty);
     let key = qpath_trait(ctx, q);
@@ -9148,6 +9218,15 @@ fn lower_qpath_value(
     q: &rokc_ast::QPath,
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
+    if let Some(m) = &q.member {
+        return ctx.error_expr(
+            span,
+            format!(
+                "`<.. as ..>::{}::{m}` without a call: write a closure `|..| <..>::{}::{m}(..)`",
+                q.item, q.item
+            ),
+        );
+    }
     let t = ctx.resolve_ast_ty(&q.self_ty);
     let Some(key) = qpath_trait(ctx, q) else {
         return ctx.error_expr(

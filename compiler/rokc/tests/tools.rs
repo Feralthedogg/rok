@@ -101,6 +101,33 @@ f64
     assert!(stderr.contains("cannot find value `x`"), "{stderr}");
 }
 
+/// Piped input that ends inside a cell (907.8 continuation) is an error,
+/// not a silently dropped cell.
+#[test]
+#[cfg_attr(
+    not(any(
+        all(
+            any(target_os = "macos", target_os = "linux"),
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        windows
+    )),
+    ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
+)]
+fn repl_reports_input_ending_inside_a_cell() {
+    let env = setup_runtime();
+    let rokr = env.rokr.display().to_string();
+    let out = piped(ROKC, &["repl", "--rokr", &rokr], "1 + 2\nlet x = 40");
+    let stderr = text(&out.stderr);
+    assert_eq!(text(&out.stdout), "i32: 3\n", "{stderr}");
+    assert!(
+        stderr.contains("error: input ended inside a cell; not run")
+            && stderr.contains("let x = 40"),
+        "{stderr}"
+    );
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+}
+
 /// `repl <lib>` (901.2): the library is loaded and its items
 /// are in scope from the first cell, also after `:reset`.
 #[test]

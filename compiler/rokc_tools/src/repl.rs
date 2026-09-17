@@ -345,8 +345,9 @@ impl Repl {
     }
 
     /// Read cells from `input` until `:quit` or its end. `interactive`
-    /// shows the `>` / `...` prompts.
-    pub fn run(&mut self, input: impl BufRead, interactive: bool) {
+    /// shows the `>` / `...` prompts. `false` when the input ends inside
+    /// a cell, which is reported and not run.
+    pub fn run(&mut self, input: impl BufRead, interactive: bool) -> bool {
         let prompt = |cont: bool| {
             if interactive {
                 print!("{}", if cont { "... " } else { "> " });
@@ -365,13 +366,22 @@ impl Repl {
             }
             let cell = std::mem::take(&mut buf);
             if !self.cell(cell.trim()) {
-                return;
+                return true;
             }
             prompt(false);
         }
         if interactive {
             println!();
         }
+        let rest = buf.trim();
+        if !rest.is_empty() {
+            eprintln!(
+                "error: input ended inside a cell; not run (missing `;`, a closing bracket or \
+                 a quote):\n{rest}"
+            );
+            return false;
+        }
+        true
     }
 
     /// Read cells from the terminal with line editing and history
@@ -1614,10 +1624,10 @@ pub fn main(
             }
             if interactive {
                 r.run_tty();
+                0
             } else {
-                r.run(std::io::stdin().lock(), false);
+                i32::from(!r.run(std::io::stdin().lock(), false))
             }
-            0
         }
         Err(e) => {
             eprintln!("error: {e}");

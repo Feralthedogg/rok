@@ -494,7 +494,9 @@ pub enum MirTy {
     /// references: `words` pointer-width words, laid out like
     /// `[GcRef; words]`. Keeps each data variant's `(stored tag,
     /// payload)` so the collector scans only the active one (802
-    /// `SUM_PAYLOAD`); the tag is the `i32` before it in the sum.
+    /// `SUM_PAYLOAD`); the tag is the `i32` before it in the sum. As
+    /// aligned as its most aligned variant (an explicit layout past a
+    /// word).
     Union(Vec<(u32, MirTy)>, u32),
     /// `__mlir_type<"text">` (stdlib bare 1.9): an opaque MLIR type;
     /// its values are SSA only (no slot, never in memory).

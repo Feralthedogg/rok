@@ -1,0 +1,49 @@
+// spec: 008.08-lowering-types §8.8.6
+// expect-exit: 0
+// expect-stdout:
+// 64 16
+// 48 16
+// 64 16
+// 1 2 3 4
+// 7
+// 1 2 3 4 5
+// 8 s
+
+// The payload of an enum holds every byte of its largest variant and
+// is as aligned as its most aligned one (`#[repr(align(16))]`), with or
+// without a GC reference among the variants.
+use rok::bare::ptr::{align_of, size_of};
+
+#[repr(align(16))]
+struct V { a: u64; b: u64; c: u64; d: u64; }
+
+enum E { A(V), B(u8), C(u64, u64, u64, u64, u64) }
+enum G { A(V), B(str) }
+
+struct Pair { pad: u8; g: G; }
+
+fn mk(i: i32) -> E {
+    if i == 0 { return E::A(V { a: 1u64, b: 2u64, c: 3u64, d: 4u64 }); }
+    if i == 1 { return E::B(7u8); }
+    return E::C(1u64, 2u64, 3u64, 4u64, 5u64);
+}
+
+fn main() -> i32 {
+    println(f"{size_of::<E>()} {align_of::<E>()}");
+    println(f"{size_of::<G>()} {align_of::<G>()}");
+    println(f"{size_of::<Pair>()} {align_of::<Pair>()}");
+    let xs = [mk(0), mk(1), mk(2)];
+    for e in xs {
+        match e {
+            E::A(v) => println(f"{v.a} {v.b} {v.c} {v.d}"),
+            E::B(b) => println(f"{b}"),
+            E::C(a, b, c, d, f) => println(f"{a} {b} {c} {d} {f}"),
+        }
+    }
+    let p = Pair { pad: 1u8, g: G::A(V { a: 5u64, b: 6u64, c: 7u64, d: 8u64 }) };
+    let q = Pair { pad: 2u8, g: G::B("s") };
+    let d = match p.g { G::A(v) => v.d, G::B(_) => 0u64 };
+    let s = match q.g { G::A(_) => "?", G::B(s) => s };
+    println(f"{d} {s}");
+    return 0;
+}

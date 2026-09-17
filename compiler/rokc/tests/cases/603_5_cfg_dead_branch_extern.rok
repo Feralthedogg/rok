@@ -1,0 +1,35 @@
+// spec: 006.03.5-cfg-macro
+// expect-exit: 0
+// expect-stdout:
+// not plan9
+// 3
+// ok
+
+// A `cfg!` branch that does not hold is removed at every optimization
+// level: the externs it calls (here, a symbol no library defines) and
+// the functions only it reaches are not linked.
+extern "C" {
+    fn rok_no_such_symbol_anywhere(x: i32) -> i32;
+}
+
+const PLAN9: bool = cfg!(target_os = "plan9");
+
+fn only_plan9() -> i32 { return unsafe { rok_no_such_symbol_anywhere(1) }; }
+
+fn main() -> i32 {
+    if cfg!(target_os = "plan9") {
+        println(f"{unsafe { rok_no_such_symbol_anywhere(2) }}");
+    } else {
+        println("not plan9");
+    }
+    let v = if cfg!(not(target_os = "plan9")) { 3 } else { only_plan9() };
+    println(f"{v}");
+    if !cfg!(not(target_os = "plan9")) {
+        println(f"{unsafe { rok_no_such_symbol_anywhere(3) }}");
+    }
+    if PLAN9 || (cfg!(unix) && cfg!(target_os = "plan9")) {
+        println(f"{unsafe { rok_no_such_symbol_anywhere(4) }}");
+    }
+    println("ok");
+    return 0;
+}

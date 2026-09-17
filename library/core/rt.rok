@@ -10,31 +10,21 @@ use rok::core::future::Waker;
 
 extern "rok" {
     // Threads and the wait queue.
-    fn rok_cpu_count() -> usize;
-    fn rok_thread_new_id() -> u64;
     fn rok_thread_spawn(f: fn() + Send, stack_size: usize, id: u64) -> usize;
     fn rok_thread_join(handle: usize) -> i32;
     fn rok_thread_detach(handle: usize) -> i32;
-    fn rok_thread_id() -> u64;
     fn rok_thread_sleep_ns(ns: i64);
     fn rok_thread_yield_now();
     fn rok_sync_wait(word: GcBuf<i32>, index: usize, expected: i32, timeout_ns: i64);
     fn rok_sync_wake(word: GcBuf<i32>, index: usize);
     fn rok_sync_wake_one(word: GcBuf<i32>, index: usize);
     fn rok_lane_new() -> usize;
-    fn rok_lane_attach(lane: usize);
-    fn rok_lane_arm(on: i32) -> i32;
-    fn rok_lane_blocked(lane: usize) -> i64;
     fn rok_lane_take(lane: usize, tick: i64, heir: GcBuf<rok::core::task::Worker>) -> i32;
     fn rok_lane_pause(deep: i32);
 
     // The task executor.
-    fn rok_time_now_ns() -> i64;
-    fn rok_task_worker_present() -> i32;
-    fn rok_task_worker_get() -> GcBuf<rok::core::task::Worker>;
     fn rok_task_worker_set(w: GcBuf<rok::core::task::Worker>);
     fn rok_task_worker_clear();
-    fn rok_task_key(obj: GcBuf<u8>) -> usize;
     fn rok_task_hooks_install(
         io: extern "C" fn(i32, u32, GcBuf<Waker>),
         timer: extern "C" fn(u64, GcBuf<Waker>),
@@ -42,13 +32,11 @@ extern "rok" {
         unpark: extern "C" fn(GcBuf<u8>),
         restart: extern "C" fn(),
     );
-    fn rok_thread_lost(id: u64) -> i32;
     fn rok_session_enter();
     fn rok_session_leave();
     fn rok_session_pass();
     fn rok_lock_note(word: GcBuf<i32>, kind: i32) -> i32;
     fn rok_lock_drop(word: GcBuf<i32>);
-    fn rok_lock_notes() -> i32;
     fn rok_deque_new() -> GcBuf<GcBuf<rok::core::task::TaskRef>>;
     fn rok_deque_push(d: GcBuf<GcBuf<rok::core::task::TaskRef>>, item: GcBuf<rok::core::task::TaskRef>);
     fn rok_deque_steal(
@@ -63,20 +51,15 @@ extern "rok" {
     fn rok_str_concat(a: str, b: str) -> str;
     #[track_caller]
     fn rok_str_slice(s: str, start: usize, end: usize) -> str;
-    fn rok_str_trim(s: str, which: i32) -> str;
     fn rok_str_case(s: str, upper: i32) -> str;
     fn rok_str_replace(s: str, from: str, to: str) -> str;
     fn rok_str_from_char(c: u32) -> str;
-    fn rok_str_parse_int(s: str, radix: u32, signed: i32, bits: u32, out: GcBuf<i64>) -> i32;
     fn rok_str_from_buf(buf: GcBuf<u8>, off: usize, len: usize) -> str;
-    fn rok_str_parse_float(s: str, out: GcBuf<f64>) -> i32;
-    fn rok_buf_utf8_error(buf: GcBuf<u8>, off: usize, len: usize) -> isize;
 
     // Formatting: a `Formatter`'s text; f-strings call these directly too. The
     // writing ones return it, moved when it outgrew its allocation; a
     // spec comes as two packed words (`flags`, `counts`).
     fn rok_fmt_new(cap: usize) -> str;
-    fn rok_fmt_finish(t: str) -> str;
     fn rok_fmt_str(t: str, s: str) -> str;
     fn rok_fmt_char(t: str, c: u32) -> str;
     fn rok_fmt_escaped(t: str, s: str, quote: u32) -> str;
@@ -89,9 +72,6 @@ extern "rok" {
     fn rok_fmt_spec_parse(spec: str, out: GcBuf<i64>);
 
     // `int` limb kernels.
-    fn rok_nat_mul(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize);
-    fn rok_nat_divmod_small(q: GcBuf<u32>, a: GcBuf<u32>, n: usize, v: u32) -> u32;
-    fn rok_nat_divmod(q: GcBuf<u32>, un: GcBuf<u32>, vn: GcBuf<u32>, m: usize, n: usize);
 
     // Panics. The runtime gets the caller's `path:line:col` as a last
     // `str` argument.
@@ -105,7 +85,6 @@ extern "rok" {
     fn rok_uncaught_error_at(what: str, at: str) -> !;
 
     // Errors and the standard streams.
-    fn rok_os_errno_kind(code: i32) -> i32;
     fn rok_os_strerror(code: i32) -> str;
     fn rok_stdio_write(fd: i32, s: str, newline: i32) -> i32;
     fn rok_stdio_write_buf(fd: i32, buf: GcBuf<u8>, off: usize, len: usize) -> i32;
@@ -140,15 +119,12 @@ extern "rok" {
 
     // Environment and process state.
     fn rok_exit(code: i32) -> !;
-    fn rok_os_argc() -> usize;
     fn rok_os_arg(i: usize) -> str;
     fn rok_os_env_at(i: usize) -> str;
     fn rok_os_getenv(name: str, buf: GcBuf<u8>, off: usize, len: usize) -> isize;
     fn rok_os_setenv(name: str, value: str, unset: i32) -> i32;
     fn rok_os_getcwd(buf: GcBuf<u8>, off: usize, len: usize) -> isize;
     fn rok_os_chdir(path: str) -> i32;
-    fn rok_os_getpid() -> u32;
-    fn rok_os_getppid() -> u32;
     fn rok_os_current_exe(buf: GcBuf<u8>, off: usize, len: usize) -> isize;
 
     // Processes and signals.
@@ -166,8 +142,6 @@ extern "rok" {
     fn rok_os_abort() -> !;
 
     // Clocks.
-    fn rok_time_realtime_ns() -> i64;
-    fn rok_time_boot_ns() -> i64;
 
     // Sockets.
     fn rok_net_socket(family: i32, kind: i32) -> i32;
@@ -200,6 +174,32 @@ extern "rok" {
 // compiler takes this block as the list.
 #[no_safepoint]
 extern "rok" {
+    fn rok_cpu_count() -> usize;
+    fn rok_thread_new_id() -> u64;
+    fn rok_thread_id() -> u64;
+    fn rok_task_worker_present() -> i32;
+    fn rok_task_worker_get() -> GcBuf<rok::core::task::Worker>;
+    fn rok_lane_attach(lane: usize);
+    fn rok_lane_arm(on: i32) -> i32;
+    fn rok_lane_blocked(lane: usize) -> i64;
+    fn rok_time_now_ns() -> i64;
+    fn rok_time_realtime_ns() -> i64;
+    fn rok_time_boot_ns() -> i64;
+    fn rok_task_key(obj: GcBuf<u8>) -> usize;
+    fn rok_thread_lost(id: u64) -> i32;
+    fn rok_lock_notes() -> i32;
+    fn rok_str_trim(s: str, which: i32) -> str;
+    fn rok_str_parse_int(s: str, radix: u32, signed: i32, bits: u32, out: GcBuf<i64>) -> i32;
+    fn rok_str_parse_float(s: str, out: GcBuf<f64>) -> i32;
+    fn rok_buf_utf8_error(buf: GcBuf<u8>, off: usize, len: usize) -> isize;
+    fn rok_fmt_finish(t: str) -> str;
+    fn rok_nat_mul(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize);
+    fn rok_nat_divmod_small(q: GcBuf<u32>, a: GcBuf<u32>, n: usize, v: u32) -> u32;
+    fn rok_nat_divmod(q: GcBuf<u32>, un: GcBuf<u32>, vn: GcBuf<u32>, m: usize, n: usize);
+    fn rok_os_errno_kind(code: i32) -> i32;
+    fn rok_os_getpid() -> u32;
+    fn rok_os_getppid() -> u32;
+    fn rok_os_argc() -> usize;
     fn rok_buf_put_str(buf: GcBuf<u8>, off: usize, s: str);
     fn rok_buf_put_char(buf: GcBuf<u8>, off: usize, c: u32) -> usize;
     fn rok_str_len(s: str) -> usize;

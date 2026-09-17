@@ -225,41 +225,53 @@ pub fn classify(target: &Target, params: &[MirTy], ret: &MirTy, variadic: bool) 
 /// A runtime (`extern "rok"`) declaration (spec 8.5): the C ABI, with
 /// `str` a by-value `(ptr, len)` C struct like `RokFn`.
 ///
-/// LLVM splits a
-/// first-class struct argument into independent scalars, which agrees
-/// with C while every integer word fits in argument registers; past
-/// that a pair could straddle the last register and the stack, where C
-/// passes it whole on the stack. `None`: a plain call does the same.
-/// Windows x64 and WebAssembly pass and return a two-word struct by
-/// reference, so a signature with a `str` (or another aggregate) is
-/// always classified.
-/// On the 32-bit targets the scalars land where C puts the struct's
-/// words (i386: consecutive stack slots; AAPCS: core registers then the
+/// LLVM splits a first-class two-word pair (`str`, a `fn` value) into
+/// its words, which agrees with C while every integer word fits in
+/// argument registers; past that a pair could straddle the last
+/// register and the stack, where C passes it whole on the stack.
+/// `None`: a plain call does the same. Any other aggregate (bigger,
+/// or holding floats) is always classified. Windows x64 and
+/// WebAssembly pass and return a pair by reference, so a signature with
+/// one is always classified.
+/// On the 32-bit targets a pair's words land where C puts the struct's
+/// (i386: consecutive stack slots; AAPCS: core registers then the
 /// stack, a struct may straddle them), but a by-value result comes back
 /// in memory (or, on Windows x86, in `edx:eax`): such a signature is
 /// classified. No runtime runs on the other targets.
 #[must_use]
 pub fn classify_rok(target: &Target, params: &[MirTy], ret: &MirTy) -> Option<FnAbi> {
     let by_value = |t: &MirTy| is_aggregate(t) || *t == MirTy::Prim(PrimTy::Str);
+    let word = target.pointer_width / 8;
+    let pair = |t: &MirTy| {
+        let mut ls = Vec::new();
+        leaves(t, 0, target, &mut ls);
+        ls == [(0, word, Leaf::Int), (word, word, Leaf::Int)] && target.size_align(t).0 == 2 * word
+    };
     let regs = match target.c_abi {
         CAbi::Aarch64 => 8,
         CAbi::X86_64SysV => 6,
         CAbi::X86_64Win | CAbi::Wasm32 => 0,
         CAbi::X86SysV | CAbi::X86Win | CAbi::ArmHf if by_value(ret) => 0,
-        CAbi::X86SysV | CAbi::X86Win | CAbi::ArmHf | CAbi::Other => return None,
+        CAbi::X86SysV | CAbi::X86Win | CAbi::ArmHf => u32::MAX,
+        CAbi::Other => return None,
     };
-    let word = target.pointer_width / 8;
     let words: u32 = params
         .iter()
         .filter(|t| !matches!(t, MirTy::Prim(PrimTy::F32 | PrimTy::F64)))
         .map(|t| target.size_align(t).0.div_ceil(word))
         .sum();
-    if regs == 0 {
-        if !params.iter().chain([ret]).any(by_value) {
+    let other = params
+        .iter()
+        .chain([ret])
+        .any(|t| is_aggregate(t) && !pair(t));
+    if !other {
+        if regs == 0 {
+            if !params.iter().chain([ret]).any(by_value) {
+                return None;
+            }
+        } else if words <= regs {
             return None;
         }
-    } else if words <= regs {
-        return None;
     }
     let pair = |t: &MirTy| {
         if *t == MirTy::Prim(PrimTy::Str) {
@@ -674,5 +686,25 @@ mod tests {
         assert!(classify_rok(&t, &[MirTy::Prim(I64)], &MirTy::Prim(I32)).is_none());
         let arm = on("aarch64-pc-windows-msvc");
         assert!(classify_rok(&arm, &[MirTy::Prim(I32), s.clone()], &s).is_none());
+    }
+
+    /// A runtime aggregate other than a two-word pair follows C wherever
+    /// the registers stand: 24 bytes go by reference on AAPCS64,
+    /// `byval` on System V; a `fn` value pair splits like a `str`.
+    #[test]
+    fn runtime_aggregates_follow_c() {
+        let big = MirTy::Tuple(vec![MirTy::Prim(I64); 3]);
+        let a = classify_rok(&on("aarch64-apple-darwin"), &[big.clone()], &big).unwrap();
+        assert_eq!(a.args[0], ArgAbi::Indirect { byval: false });
+        assert_eq!(a.ret, RetAbi::Sret);
+        let x = on("x86_64-unknown-linux-gnu");
+        let r = classify_rok(&x, &[big], &MirTy::Unit).unwrap();
+        assert_eq!(r.args[0], ArgAbi::Indirect { byval: true });
+        let mixed = MirTy::Tuple(vec![MirTy::Prim(I32), MirTy::Prim(PrimTy::F32)]);
+        let arm = on("armv7-unknown-linux-gnueabihf");
+        let r = classify_rok(&arm, &[mixed], &MirTy::Unit).unwrap();
+        assert_eq!(r.args[0], ArgAbi::Coerce("!llvm.array<2 x i32>".into()));
+        let f = MirTy::Tuple(vec![MirTy::GcRef, MirTy::GcRef]);
+        assert!(classify_rok(&x, &[f], &MirTy::Unit).is_none());
     }
 }

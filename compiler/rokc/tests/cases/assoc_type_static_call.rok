@@ -2,10 +2,13 @@
 // expect-stdout:
 // 0 0 0 0
 // 7
+// 7 7 0 9
 
 // An associated function called through an associated type (2.8.3,
 // 2.13): the bare name `Elem` and `Self::Elem` inside the trait and its
-// impls, and the projection `T::Elem` of a bound parameter.
+// impls, the projection `T::Elem` of a bound parameter, and the
+// qualified `<S as Bag>::Elem::m(..)` (2.13.4), a method taking `self`
+// as its first argument too.
 
 use rok::core::num::Zero;
 
@@ -27,6 +30,7 @@ struct Seven;
 
 impl Seven {
     fn make() -> i32 { 7 }
+    fn plus(self, n: i32) -> i32 { 7 + n }
 }
 
 struct S;
@@ -44,5 +48,7 @@ fn main() -> i32 {
     let b = B { v: 3 };
     println(f"{b.zero_elem()} {b.zero_elem2()} {z(b)} {b.first() - 3}");
     println(f"{made(S)}");
+    let m = <S as Bag>::Elem::make();
+    println(f"{m} {<S as Bag>::Elem::make()} {<B as Bag>::Elem::zero()} {<S as Bag>::Elem::plus(Seven, 2)}");
     return 0;
 }
